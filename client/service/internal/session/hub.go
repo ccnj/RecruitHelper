@@ -31,14 +31,18 @@ type Hub struct {
 	st         *store.Store
 	pm         *pairing.Manager
 	reg        *Registry
+	frames     *FrameBus
 	dispatcher *dispatch.Dispatcher
 	mu         sync.Mutex
 	active     map[string]*Conn // handId → 当前活连接(单活)
 }
 
 func NewHub(st *store.Store, pm *pairing.Manager, graceMs int64) *Hub {
-	return &Hub{st: st, pm: pm, reg: NewRegistry(graceMs), active: map[string]*Conn{}}
+	return &Hub{st: st, pm: pm, reg: NewRegistry(graceMs), frames: NewFrameBus(), active: map[string]*Conn{}}
 }
+
+// Frames:帧观测总线访问器(测试页协议观测台)。
+func (h *Hub) Frames() *FrameBus { return h.frames }
 
 // SetDispatcher:接线派发器(构造后回填,打破 hub↔dispatcher 循环)。
 func (h *Hub) SetDispatcher(d *dispatch.Dispatcher) { h.dispatcher = d }
@@ -201,6 +205,7 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 		c.sendBye(ctx, protocol.ByeCodeProtoIncompatible, "首帧必须是 hello")
 		return false
 	}
+	c.hub.frames.observe("in", "", env)
 	var hello protocol.HelloBody
 	if err := json.Unmarshal(env.Body, &hello); err != nil {
 		c.sendBye(ctx, protocol.ByeCodeProtoIncompatible, "hello body 非法")
@@ -311,6 +316,7 @@ func (c *Conn) handlePreSessionFrame(ctx context.Context, data []byte) {
 	if err != nil {
 		return
 	}
+	c.hub.frames.observe("in", c.handID, env)
 	if env.Kind == protocol.KindPing {
 		c.sendPong(ctx, env.Session)
 	}
@@ -322,6 +328,7 @@ func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 		slog.Warn("会话帧解码失败", "handId", c.handID, "err", err)
 		return
 	}
+	c.hub.frames.observe("in", c.handID, env)
 	switch env.Kind {
 	case protocol.KindPing:
 		c.hub.reg.Heartbeat(c.handID, c.bootID, time.Now())
@@ -371,6 +378,7 @@ func (c *Conn) writeEnvelope(env protocol.Envelope) error {
 	if err != nil {
 		return err
 	}
+	c.hub.frames.observe("out", c.handID, &env)
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -36,6 +36,46 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/ledger", a.ledger)
 	mux.HandleFunc("GET /admin/suspects", a.suspects)
 	mux.HandleFunc("POST /admin/suspects/verdict", a.verdict)
+	mux.HandleFunc("GET /admin/frames", a.frames)
+}
+
+// frames:SSE 协议帧观测流(测试页观测台)。先补发最近历史,再实时推。
+func (a *API) frames(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "不支持流式"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	id, ch, backlog := a.hub.Frames().Subscribe()
+	defer a.hub.Frames().Unsubscribe(id)
+
+	writeEvent := func(e session.FrameEvent) bool {
+		b, _ := json.Marshal(e)
+		if _, err := w.Write(append(append([]byte("data: "), b...), '\n', '\n')); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	for _, e := range backlog {
+		if !writeEvent(e) {
+			return
+		}
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case e, ok := <-ch:
+			if !ok || !writeEvent(e) {
+				return
+			}
+		}
+	}
 }
 
 func (a *API) suspects(w http.ResponseWriter, _ *http.Request) {
