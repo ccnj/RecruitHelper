@@ -50,4 +50,7 @@
 - 常用命令(仓库根目录执行):
   - `go run ./contract/codegen` — 从 contract.v1.json 重新生成两端协议代码到 `contract/gen/`;**改契约后必跑**,产物一并提交。
   - `go run ./contract/codegen -check` — 校验产物与契约一致(CI 门禁,漂移退出码 1)。
+  - `go run ./client/service` — 起脑服务(`-port` 默认 17872,`-data` 默认 `data/`,已 gitignore)。
+  - `go test ./...` — 全部 Go 测试。
+- Go 侧 SQLite 走 glebarez/sqlite(纯 Go);**禁止引入 cgo 依赖**,`CGO_ENABLED=0 GOOS=windows go build ./client/service` 必须常年通过(Windows 交叉编译是发布路径)。
 - 其余构建/测试命令随骨架搭建补充到本节。
