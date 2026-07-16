@@ -29,6 +29,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/pairing/pending", a.pairingPending)
 	mux.HandleFunc("POST /admin/pairing/confirm", a.pairingConfirm)
 	mux.HandleFunc("GET /admin/hands", a.hands)
+	mux.HandleFunc("GET /admin/hands/health", a.handHealth)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -45,6 +46,25 @@ func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 		"pairingOpen": a.pm.WindowOpen(),
 		"activeHands": a.hub.ActiveHandIDs(),
 	})
+}
+
+func (a *API) handHealth(w http.ResponseWriter, _ *http.Request) {
+	states := a.hub.Registry().Snapshot()
+	type view struct {
+		HandID   string   `json:"handId"`
+		Online   bool     `json:"online"`
+		Health   string   `json:"health"`
+		Caps     []string `json:"caps"`
+		LastHbMs int64    `json:"lastHbAgoMs"`
+	}
+	out := make([]view, 0, len(states))
+	for _, s := range states {
+		out = append(out, view{
+			HandID: s.HandID, Online: s.Online, Health: string(s.Health),
+			Caps: s.Caps, LastHbMs: time.Since(s.LastHbAt).Milliseconds(),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hands": out})
 }
 
 func (a *API) pairingOpen(w http.ResponseWriter, _ *http.Request) {

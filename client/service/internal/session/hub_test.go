@@ -23,10 +23,13 @@ type harness struct {
 	srv   *httptest.Server
 	pm    *pairing.Manager
 	st    *store.Store
+	hub   *Hub
 	wsURL string
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessGrace(t, protocol.DefaultHbGraceMs) }
+
+func newHarnessGrace(t *testing.T, graceMs int64) *harness {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -35,12 +38,12 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(func() { _ = st.Close() })
 	pm := pairing.New(st)
 	t.Cleanup(pm.CloseWindow)
-	hub := NewHub(st, pm)
+	hub := NewHub(st, pm, graceMs)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &harness{srv: srv, pm: pm, st: st, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
+	return &harness{srv: srv, pm: pm, st: st, hub: hub, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
 }
 
 func dial(t *testing.T, url, origin string) *websocket.Conn {

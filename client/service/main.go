@@ -48,8 +48,12 @@ func main() {
 		"contract", protocol.ContractHash,
 	)
 
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+
 	pm := pairing.New(st)
-	hub := session.NewHub(st, pm)
+	hub := session.NewHub(st, pm, protocol.DefaultHbGraceMs)
+	go hub.StartHealthLoop(appCtx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	adminhttp.New(st, pm, hub).Routes(mux)

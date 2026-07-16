@@ -21,17 +21,48 @@ import (
 	"recruithelper/internal/ids"
 )
 
-const helloTimeout = 10 * time.Second
+const (
+	helloTimeout        = 10 * time.Second
+	healthSweepInterval = 5 * time.Second
+)
 
 type Hub struct {
 	st     *store.Store
 	pm     *pairing.Manager
+	reg    *Registry
 	mu     sync.Mutex
 	active map[string]*Conn // handId → 当前活连接(单活)
 }
 
-func NewHub(st *store.Store, pm *pairing.Manager) *Hub {
-	return &Hub{st: st, pm: pm, active: map[string]*Conn{}}
+func NewHub(st *store.Store, pm *pairing.Manager, graceMs int64) *Hub {
+	return &Hub{st: st, pm: pm, reg: NewRegistry(graceMs), active: map[string]*Conn{}}
+}
+
+// Registry:注册表访问器(状态页/测试)。
+func (h *Hub) Registry() *Registry { return h.reg }
+
+// StartHealthLoop:周期扫描,把心跳静默的手翻为 stalled 并告警(仅翻转沿一次)。
+// 阻塞直到 ctx 取消;由 main 起一个 goroutine 驱动。
+func (h *Hub) StartHealthLoop(ctx context.Context) {
+	t := time.NewTicker(healthSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			h.runSweep(now)
+		}
+	}
+}
+
+// runSweep:一次健康扫描 + 告警。抽出供测试直接触发。
+func (h *Hub) runSweep(now time.Time) {
+	for _, handID := range h.reg.Sweep(now) {
+		// 连接开着却心跳静默——真异常,响亮告警(区别于连接干净关闭的静默暂停)。
+		slog.Warn("手心跳静默,判定假死", "handId", handID)
+		h.st.Audit("hand_stalled", handID, "", "连接在但心跳静默超 graceMs")
+	}
 }
 
 type Conn struct {
@@ -67,6 +98,8 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if c.handID != "" {
 			h.uninstall(c.handID, c)
+			// 连接结束 = 静默下线(设计内常态,不告警);bootID 匹配防误清被顶替后的新连接。
+			h.reg.Offline(c.handID, c.bootID)
 		}
 	}()
 
@@ -129,6 +162,7 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 		return false
 	}
 	c.bootID = hello.BootID
+	c.caps = hello.Caps
 
 	if hello.HandID == nil || hello.Auth == nil {
 		return c.handshakePairing(ctx, frames, readErr, hello)
@@ -185,6 +219,7 @@ func (c *Conn) handshakePairing(ctx context.Context, frames <-chan []byte, readE
 func (c *Conn) enterSession(ctx context.Context, issued *protocol.IssuedCreds) bool {
 	c.session = ids.NewSessionID()
 	c.hub.install(c.handID, c)
+	c.hub.reg.Online(c.handID, c.bootID, c.caps, time.Now())
 	c.hub.st.TouchHand(c.handID, time.Now())
 	welcome := protocol.WelcomeBody{
 		Session:       c.session,
@@ -235,6 +270,7 @@ func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 	}
 	switch env.Kind {
 	case protocol.KindPing:
+		c.hub.reg.Heartbeat(c.handID, c.bootID, time.Now())
 		c.sendPong(ctx, env.Session)
 	default:
 		// cmd 派发的回执(ack/result)等在 2.4 接入;此前记日志。
