@@ -47,16 +47,20 @@ func (s CmdStatus) Terminal() bool {
 
 // CmdRecord:在途命令账本(write-ahead:必先落库再进 socket,脑账本永远是手所见的超集)。
 type CmdRecord struct {
-	MsgID            string    `gorm:"primaryKey"`
-	Name             string    `gorm:"not null;index"` // 原语名
-	Class            string    `gorm:"not null"`       // readonly / intrusive / effectful
-	IdemKey          string    `gorm:"index"`          // 仅 effectful
-	HandID           string    `gorm:"not null;index"`
-	Session          string    // 派发时会话(重投时更新)
-	BootIDAtDispatch string    // 派发时手的 bootId(重连后同 msgId 重发的前提)
-	Status           CmdStatus `gorm:"not null;index"`
-	Attempt          int       // 同 msgId 第几次发送
-	DeadlineMs       int64     // 绝对毫秒(脑钟);suspect 判定 = deadline+宽限 无终局
+	MsgID            string     `gorm:"primaryKey"`
+	Name             string     `gorm:"not null;index"` // 原语名
+	Class            string     `gorm:"not null"`       // readonly / intrusive / effectful
+	IdemKey          string     `gorm:"index"`          // 仅 effectful
+	Domain           string     `gorm:"index"`          // 串行域键:业务=accountRef;debug=debug:{handId}
+	Args             string     // cmd.args 原文 JSON(重连收编重发用)
+	HandID           string     `gorm:"not null;index"`
+	Session          string     // 派发时会话(重投时更新)
+	BootIDAtDispatch string     // 派发时手的 bootId(重连后同 msgId 重发的前提)
+	Status           CmdStatus  `gorm:"not null;index"`
+	Attempt          int        // 同 msgId 第几次发送
+	RedispatchN      int        // 本意图已重派次数(readonly/intrusive void→重派链累计),void 时向新命令 +1 传递
+	SentAt           *time.Time // 最近一次进入 sent 的时刻(ackTimeout 判定锚点)
+	DeadlineMs       int64      // 绝对毫秒(脑钟);suspect 判定 = deadline+宽限 无终局
 	ExecBudgetMs     int64
 	ErrorCode        string // 终局为 failed 时
 	SideEffect       string // 终局 error 的副作用标注(none/possible/confirmed)

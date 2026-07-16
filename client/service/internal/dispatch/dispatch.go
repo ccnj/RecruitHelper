@@ -1,6 +1,7 @@
-// Package dispatch:命令派发器(协议规格 §8)。
-// 2.4 范围(happy path):先记账后发送、ack 三态、result 终局化 + msgId 去重 + 回 ack。
-// 超时/重发/suspect/脑重启扫描在 2.5 接入。
+// Package dispatch:命令派发器(协议规格 §7-§8)。
+// 派发 happy path(2.4):先记账后发送、ack 三态、result 终局化 + msgId 去重 + 回 ack。
+// 故障轨道(2.5):超时引擎(ackTimeout 关连接、deadline+宽限 void/suspect)、重连收编、
+// 脑重启扫描、suspect 六法条、人工裁决。手侧证词 journal/outbox 为 [X],v1 不做。
 package dispatch
 
 import (
@@ -15,12 +16,23 @@ import (
 	"recruithelper/internal/ids"
 )
 
-var ErrHandOffline = errors.New("手不在线")
+var (
+	ErrHandOffline  = errors.New("手不在线")
+	ErrDomainFrozen = errors.New("串行域存在 suspect,冻结中(法条4)")
+	ErrIdemFrozen   = errors.New("幂等键被 suspect 冻结(法条3)")
+)
 
-// Sender:把已构造的信封发给某手的当前连接,并查其会话。hub 实现。
+// Sender:把已构造的信封发给某手的当前连接,并查其会话/关连接。hub 实现。
 type Sender interface {
 	SendEnvelope(handID string, env protocol.Envelope) error
 	HandSession(handID string) (session, bootID string, ok bool)
+	CloseHand(handID, reason string) // ackTimeout 的唯一动作:关连接触发重连(离线手 no-op)
+}
+
+// domainOf:命令的串行域键。业务命令用 accountRef([S/X]);debug 用每手 debug 域。
+// name 形参为 [S/X] 业务路由预留(届时按 context.accountRef 分域)。
+func domainOf(handID, _ string) string {
+	return "debug:" + handID
 }
 
 type Dispatcher struct {
@@ -44,18 +56,31 @@ func (d *Dispatcher) Dispatch(handID, name string, args json.RawMessage) (string
 		return "", ErrHandOffline
 	}
 
+	// 冻结闸(法条3/4):该串行域或幂等键存在 suspect 时,拒绝新 effectful/intrusive。
+	// readonly 不进串行域,不受冻结约束(可自由探测)。
+	domain := domainOf(handID, name)
+	if meta.Class == protocol.ClassEffectful || meta.Class == protocol.ClassIntrusive {
+		if frozen, _ := d.st.HasSuspectInDomain(domain); frozen {
+			return "", ErrDomainFrozen
+		}
+	}
+
 	msgID := ids.NewMsgID()
 	now := time.Now()
 	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
 	idemKey := ""
 	if meta.Class == protocol.ClassEffectful {
-		// debug 形态幂等键(2.5 换成从 intents 表确定性派生)。
+		// debug 形态幂等键(intents 表确定性派生为 [X])。
 		idemKey = fmt.Sprintf("ik1:debug:%s:%s:-:%s", handID, name, ids.NewMsgID())
+		if frozen, _ := d.st.HasSuspectIdemKey(idemKey); frozen {
+			return "", ErrIdemFrozen
+		}
 	}
 
 	// 1) 先记账(write-ahead:账本永远是手所见命令的超集)。
 	rec := &store.CmdRecord{
 		MsgID: msgID, Name: name, Class: string(meta.Class), IdemKey: idemKey,
+		Domain: domain, Args: string(args),
 		HandID: handID, Session: session, BootIDAtDispatch: bootID,
 		Status: store.CmdQueued, DeadlineMs: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta),
 	}
@@ -75,11 +100,13 @@ func (d *Dispatcher) Dispatch(handID, name string, args json.RawMessage) (string
 		return msgID, err
 	}
 
-	// 3) 记账 sent。
+	// 3) 记账 sent(记 SentAt 作 ackTimeout 判定锚点)。
 	_ = d.st.MutateCmd(msgID, func(r *store.CmdRecord) error {
 		if r.Status == store.CmdQueued {
 			r.Status = store.CmdSent
 			r.Attempt++
+			t := time.Now()
+			r.SentAt = &t
 		}
 		return nil
 	})
@@ -103,6 +130,17 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 		if ack.Error != nil {
 			code = string(ack.Error.Code)
 		}
+		// 瞬态拒绝(QUEUE_FULL/STALE_SESSION)回 queued 待重投;协议性拒绝落 rejected 终局。
+		if isTransientReject(protocol.ErrorCode(code)) {
+			_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
+				if r.Status == store.CmdSent {
+					r.Status = store.CmdQueued
+				}
+				return nil
+			})
+			d.st.Audit("cmd_reject_transient", handID, ack.Ref, code)
+			return
+		}
 		_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
 			if !r.Status.Terminal() {
 				r.Status = store.CmdRejected
@@ -112,6 +150,10 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 		})
 		d.st.Audit("cmd_rejected", handID, ack.Ref, code)
 	}
+}
+
+func isTransientReject(code protocol.ErrorCode) bool {
+	return code == protocol.ErrCodeQueueFull || code == protocol.ErrCodeStaleSession
 }
 
 // OnResult:处理手的 result。msgId 去重 + 回 ac(即使重复也回 ack,静默去重是禁令)+
@@ -140,27 +182,56 @@ func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBod
 
 	// 账本终局化(ref → 对应命令)。
 	body, _ := json.Marshal(res)
+	var wasSuspect, effResultSuspect bool
 	err = d.st.MutateCmd(res.Ref, func(r *store.CmdRecord) error {
+		// 法条6:suspect 收到迟到 result → 按 result 终局化、自动销案(result 赢)。
+		if r.Status == store.CmdSuspect {
+			wasSuspect = true
+			r.Status = mapResultStatus(res.Status)
+			r.ResultBody = string(body)
+			applyResultError(r, res)
+			return nil
+		}
 		if r.Status.Terminal() {
-			// 终局态收到迟到 result:审计不静默(2.5 的 suspect 核销走此路,happy path 罕见)。
+			// 其余终局/void 态收到迟到 result:审计不静默,不改账(§8.1 迟到帧总则)。
 			return errAlreadyTerminal
+		}
+		// effectful 且 result 标 sideEffect=possible → 转 suspect(法条1),而非直接 failed。
+		if r.Class == string(protocol.ClassEffectful) && res.Status == protocol.ResultStatusFailed &&
+			res.Error != nil && res.Error.SideEffect == protocol.SideEffectPossible {
+			effResultSuspect = true
+			r.Status = store.CmdSuspect
+			r.SuspectReason = "result.sideEffect=possible"
+			r.ResultBody = string(body)
+			applyResultError(r, res)
+			return nil
 		}
 		r.Status = mapResultStatus(res.Status)
 		r.ResultBody = string(body)
-		if res.Error != nil {
-			r.ErrorCode = string(res.Error.Code)
-			r.SideEffect = string(res.Error.SideEffect)
-		}
+		applyResultError(r, res)
 		return nil
 	})
 	switch {
 	case errors.Is(err, errAlreadyTerminal):
-		d.st.Audit("late_result", handID, res.Ref, "终局后收到 result")
+		d.st.Audit("late_result", handID, res.Ref, "终局/void 后收到 result")
 	case err != nil:
-		// ref 找不到对应命令:账本缺口,响亮记审计。
-		d.st.Audit("orphan_result", handID, res.Ref, err.Error())
+		d.st.Audit("orphan_result", handID, res.Ref, err.Error()) // ref 无对应命令:账本缺口
+	case wasSuspect:
+		d.st.Audit("suspect_cleared", handID, res.Ref, "迟到 result 自动核销 suspect(法条6)")
+		slog.Info("suspect 自动核销", "handId", handID, "ref", res.Ref, "status", res.Status)
+	case effResultSuspect:
+		d.st.Audit("suspect", handID, res.Ref, "result.sideEffect=possible")
+		slog.Warn("effectful 结果不确定,转 suspect", "handId", handID, "ref", res.Ref)
 	default:
 		slog.Info("命令终局", "handId", handID, "ref", res.Ref, "status", res.Status)
+	}
+}
+
+// applyResultError:把 result.error 的错误码与副作用标注落账。
+func applyResultError(r *store.CmdRecord, res protocol.ResultBody) {
+	if res.Error != nil {
+		r.ErrorCode = string(res.Error.Code)
+		r.SideEffect = string(res.Error.SideEffect)
 	}
 }
 

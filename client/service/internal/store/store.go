@@ -142,6 +142,47 @@ func (s *Store) RecentCmds(limit int) ([]CmdRecord, error) {
 	return cs, err
 }
 
+// 非终局状态集(超时引擎与重连收编、脑重启扫描的扫描面)。
+var nonTerminalStatuses = []CmdStatus{CmdQueued, CmdSent, CmdAccepted}
+
+// NonTerminalCmds:全部非终局命令(超时引擎扫描 + 脑重启扫描)。
+func (s *Store) NonTerminalCmds() ([]CmdRecord, error) {
+	var cs []CmdRecord
+	err := s.db.Where("status IN ?", nonTerminalStatuses).Order("created_at").Find(&cs).Error
+	return cs, err
+}
+
+// NonTerminalCmdsForHand:某手的非终局命令(重连收编用)。
+func (s *Store) NonTerminalCmdsForHand(handID string) ([]CmdRecord, error) {
+	var cs []CmdRecord
+	err := s.db.Where("hand_id = ? AND status IN ?", handID, nonTerminalStatuses).Order("created_at").Find(&cs).Error
+	return cs, err
+}
+
+// SuspectCmds:全部 suspect 命令(人工队列展示)。
+func (s *Store) SuspectCmds() ([]CmdRecord, error) {
+	var cs []CmdRecord
+	err := s.db.Where("status = ?", CmdSuspect).Order("created_at").Find(&cs).Error
+	return cs, err
+}
+
+// HasSuspectInDomain:该串行域是否存在 suspect(法条4 串行域冻结)。
+func (s *Store) HasSuspectInDomain(domain string) (bool, error) {
+	var n int64
+	err := s.db.Model(&CmdRecord{}).Where("domain = ? AND status = ?", domain, CmdSuspect).Count(&n).Error
+	return n > 0, err
+}
+
+// HasSuspectIdemKey:该幂等键是否被 suspect 冻结(法条3 幂等键冻结)。
+func (s *Store) HasSuspectIdemKey(idemKey string) (bool, error) {
+	if idemKey == "" {
+		return false, nil
+	}
+	var n int64
+	err := s.db.Model(&CmdRecord{}).Where("idem_key = ? AND status = ?", idemKey, CmdSuspect).Count(&n).Error
+	return n > 0, err
+}
+
 // ---------- 上行去重 ----------
 
 // MarkProcessed:首见返回 already=false 并落库;重复返回 already=true。

@@ -68,6 +68,19 @@ func (h *Hub) HandSession(handID string) (string, string, bool) {
 	return c.session, c.bootID, true
 }
 
+// CloseHand 实现 dispatch.Sender:ackTimeout 的唯一动作——关连接触发手侧重连。
+// 离线手 no-op(连接已断);不发 bye(纯关闭,手据 WS close 重连,§7.2.1)。
+func (h *Hub) CloseHand(handID, reason string) {
+	h.mu.Lock()
+	c := h.active[handID]
+	h.mu.Unlock()
+	if c == nil {
+		return
+	}
+	h.st.Audit("hand_closed", handID, "", reason)
+	c.closeQuiet()
+}
+
 // StartHealthLoop:周期扫描,把心跳静默的手翻为 stalled 并告警(仅翻转沿一次)。
 // 阻塞直到 ctx 取消;由 main 起一个 goroutine 驱动。
 func (h *Hub) StartHealthLoop(ctx context.Context) {

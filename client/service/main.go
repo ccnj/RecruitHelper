@@ -57,6 +57,7 @@ func main() {
 	disp := dispatch.New(st, hub)
 	hub.SetDispatcher(disp)
 	go hub.StartHealthLoop(appCtx)
+	go disp.RunFaultLoop(appCtx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	adminhttp.New(st, pm, hub, disp).Routes(mux)
