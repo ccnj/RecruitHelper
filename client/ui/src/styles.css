@@ -1,0 +1,43 @@
+:root {
+  --bg: #14161a;
+  --card: #1c1f26;
+  --line: #2a2e37;
+  --fg: #e6e8ec;
+  --dim: #8b909a;
+  --ok: #4ecb71;
+  --bad: #e5615f;
+  --warn: #e0a34a;
+  --accent: #5b8def;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 1rem 1.2rem 3rem; }
+header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; padding: 0.4rem 0 1rem; border-bottom: 1px solid var(--line); }
+h1 { font-size: 1.15rem; margin: 0; }
+h2 { font-size: 0.85rem; margin: 0 0 0.6rem; color: var(--dim); font-weight: 600; text-transform: none; }
+.statusbar { display: flex; gap: 0.9rem; align-items: center; font-size: 0.85rem; flex-wrap: wrap; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin-top: 1rem; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1rem; }
+.card.wide { grid-column: 1 / -1; }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+.dim { color: var(--dim); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82em; }
+button { background: #262b34; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer; font-size: 0.85rem; }
+button:hover { border-color: var(--accent); }
+select { background: #262b34; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.5rem; }
+.row { display: flex; align-items: center; gap: 0.6rem; margin: 0.5rem 0; }
+.row label { color: var(--dim); min-width: 3.5rem; }
+.btns { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.4rem 0; }
+.hint { color: var(--dim); font-size: 0.8rem; margin-top: 0.5rem; min-height: 1rem; }
+.list { list-style: none; margin: 0.6rem 0 0; padding: 0; }
+.list li { display: flex; align-items: center; gap: 0.7rem; padding: 0.35rem 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: left; color: var(--dim); font-weight: 500; padding: 0.25rem 0.4rem; border-bottom: 1px solid var(--line); }
+td { padding: 0.28rem 0.4rem; border-bottom: 1px solid #23272f; }
+.frames { max-height: 260px; overflow-y: auto; background: #12141a; border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem; }
+.frameline { display: flex; gap: 0.7rem; padding: 0.05rem 0; }
+.frameline .out { color: var(--accent); min-width: 3.5rem; }
+.frameline .in { color: var(--ok); min-width: 3.5rem; }
+.frameline .kind { min-width: 4.5rem; }

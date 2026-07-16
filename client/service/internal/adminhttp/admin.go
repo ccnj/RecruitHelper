@@ -26,17 +26,30 @@ func New(st *store.Store, pm *pairing.Manager, hub *session.Hub, disp *dispatch.
 }
 
 func (a *API) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /admin/health", a.health)
-	mux.HandleFunc("POST /admin/pairing/open", a.pairingOpen)
-	mux.HandleFunc("GET /admin/pairing/pending", a.pairingPending)
-	mux.HandleFunc("POST /admin/pairing/confirm", a.pairingConfirm)
-	mux.HandleFunc("GET /admin/hands", a.hands)
-	mux.HandleFunc("GET /admin/hands/health", a.handHealth)
-	mux.HandleFunc("POST /admin/cmd", a.postCmd)
-	mux.HandleFunc("GET /admin/ledger", a.ledger)
-	mux.HandleFunc("GET /admin/suspects", a.suspects)
-	mux.HandleFunc("POST /admin/suspects/verdict", a.verdict)
-	mux.HandleFunc("GET /admin/frames", a.frames)
+	h := func(f http.HandlerFunc) http.HandlerFunc { return cors(f) }
+	mux.HandleFunc("GET /admin/health", h(a.health))
+	mux.HandleFunc("POST /admin/pairing/open", h(a.pairingOpen))
+	mux.HandleFunc("GET /admin/pairing/pending", h(a.pairingPending))
+	mux.HandleFunc("POST /admin/pairing/confirm", h(a.pairingConfirm))
+	mux.HandleFunc("GET /admin/hands", h(a.hands))
+	mux.HandleFunc("GET /admin/hands/health", h(a.handHealth))
+	mux.HandleFunc("POST /admin/cmd", h(a.postCmd))
+	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
+	mux.HandleFunc("GET /admin/suspects", h(a.suspects))
+	mux.HandleFunc("POST /admin/suspects/verdict", h(a.verdict))
+	mux.HandleFunc("GET /admin/frames", h(a.frames))
+	// 预检
+	mux.HandleFunc("OPTIONS /admin/", cors(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+}
+
+// cors:本机开发工具的宽松 CORS(UI 在 Vite dev / Electron 不同源下访问)。
+func cors(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		next(w, r)
+	}
 }
 
 // frames:SSE 协议帧观测流(测试页观测台)。先补发最近历史,再实时推。
