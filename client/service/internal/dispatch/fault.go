@@ -40,8 +40,10 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 		return
 	}
 	nowMs := now.UnixMilli()
+	closedThisSweep := map[string]bool{} // 每手每 sweep 至多关一次连接(红队 F2/F6/F11)
+	ackTimeoutMs := time.Duration(protocol.DefaultAckTimeoutMs) * time.Millisecond
 	for _, cmd := range cmds {
-		// deadline+宽限:优先于 ackTimeout(过期命令不必再等 ack)。
+		// deadline+宽限:优先于其余(过期命令不必再等)。
 		if nowMs > cmd.DeadlineMs+protocol.DefaultSuspectGraceMs {
 			if cmd.Class == string(protocol.ClassEffectful) {
 				d.markSuspect(cmd, "deadline+宽限 无终局")
@@ -50,10 +52,26 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 			}
 			continue
 		}
-		// ackTimeout:仅 sent 且手在线;关连接触发重连(§7.2.1)。离线手已断,跳过(去重)。
-		if cmd.Status == store.CmdSent && cmd.SentAt != nil &&
-			now.Sub(*cmd.SentAt) > time.Duration(protocol.DefaultAckTimeoutMs)*time.Millisecond {
+		// queued 且手在线 → 重投驱动(§7.2.4):发送失败或瞬态拒绝(QUEUE_FULL/STALE_SESSION)
+		// 回 queued 的命令,在存活连接上同 msgId 再投,不再滞留到 deadline 被误判 suspect(红队 F5/F8)。
+		if cmd.Status == store.CmdQueued {
+			if session, _, online := d.sender.HandSession(cmd.HandID); online {
+				d.resendCmd(cmd, session)
+			}
+			continue
+		}
+		// ackTimeout:sent 且手在线 且超时 → 关连接触发重连(§7.2.1)。
+		if cmd.Status == store.CmdSent && cmd.SentAt != nil && now.Sub(*cmd.SentAt) > ackTimeoutMs {
+			if closedThisSweep[cmd.HandID] {
+				continue
+			}
+			// 复读当前状态,避免快照过期(OnAck/resendCmd 已推进)误关健康连接(红队 F2)。
+			fresh, _ := d.st.CmdByMsgID(cmd.MsgID)
+			if fresh == nil || fresh.Status != store.CmdSent || fresh.SentAt == nil || now.Sub(*fresh.SentAt) <= ackTimeoutMs {
+				continue
+			}
 			if _, _, online := d.sender.HandSession(cmd.HandID); online {
+				closedThisSweep[cmd.HandID] = true
 				d.st.Audit("ack_timeout", cmd.HandID, cmd.MsgID, "sent 超 ackTimeout 无应答,关连接")
 				slog.Warn("ackTimeout,关连接", "handId", cmd.HandID, "msgId", cmd.MsgID)
 				d.sender.CloseHand(cmd.HandID, "ackTimeout")
@@ -103,6 +121,14 @@ func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string) {
 			fmt.Sprintf("class=%s 重派耗尽(%d/%d)", cmd.Class, cmd.RedispatchN, cap))
 		slog.Warn("重派耗尽,健康告警", "handId", cmd.HandID, "class", cmd.Class, "n", cmd.RedispatchN)
 		return
+	}
+	// 法条4:重派前复查串行域冻结。intrusive 在冻结域内不得重派(留 void 待解冻);红队 F4。
+	// readonly 不进串行域,不受此约束。
+	if cmd.Class == string(protocol.ClassIntrusive) {
+		if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
+			d.st.Audit("redispatch_frozen", cmd.HandID, cmd.MsgID, "冻结域内不重派 intrusive(法条4)")
+			return
+		}
 	}
 	d.redispatchFrom(cmd)
 }

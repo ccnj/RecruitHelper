@@ -35,6 +35,14 @@ func Open(dataDir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite: %w", err)
 	}
+	// SQLite 单写:把连接池锁到 1 条连接,所有读写在同一连接上由 database/sql 串行化。
+	// 否则多连接下并发写会撞 SQLITE_BUSY(FOR UPDATE 在 SQLite 是 no-op、busy_timeout 对
+	// 快照升级死锁无效),错误被静默吞掉可致丢结果→假 suspect→人工误判→双发(红队 F1)。
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("取底层 DB: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&PairedHand{}, &CmdRecord{}, &ProcessedMsg{}, &AuditEntry{}); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
@@ -111,11 +119,12 @@ func (s *Store) CmdByMsgID(msgID string) (*CmdRecord, error) {
 }
 
 // MutateCmd:事务内读改写一条账本记录;mutate 里改状态时负责维护 TerminalAt。
+// 串行化靠 SetMaxOpenConns(1)——单连接上事务天然互斥(SQLite 无行锁,FOR UPDATE 是 no-op,故不用)。
 // 推进到终局状态时自动盖 TerminalAt(若 mutate 未盖)。
 func (s *Store) MutateCmd(msgID string, mutate func(*CmdRecord) error) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		var c CmdRecord
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&c, "msg_id = ?", msgID).Error; err != nil {
+		if err := tx.First(&c, "msg_id = ?", msgID).Error; err != nil {
 			return err
 		}
 		if err := mutate(&c); err != nil {

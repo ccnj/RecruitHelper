@@ -1,9 +1,38 @@
 package store
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
+
+// 并发 MutateCmd 不丢更新、不撞 SQLITE_BUSY(红队 F1 回归:SetMaxOpenConns(1) 串行化)。
+func TestConcurrentMutateNoBusyNoLost(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateCmd(&CmdRecord{MsgID: "M1", Name: "debug.ping", Class: "readonly", HandID: "h", Status: CmdQueued}); err != nil {
+		t.Fatalf("CreateCmd: %v", err)
+	}
+	const N = 100
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.MutateCmd("M1", func(r *CmdRecord) error { r.Attempt++; return nil })
+		}(i)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("并发 MutateCmd[%d] 失败(疑似 SQLITE_BUSY): %v", i, e)
+		}
+	}
+	rec, _ := s.CmdByMsgID("M1")
+	if rec.Attempt != N {
+		t.Fatalf("100 次并发自增应无丢失得 %d,实得 %d(丢更新)", N, rec.Attempt)
+	}
+}
 
 func openTest(t *testing.T) *Store {
 	t.Helper()

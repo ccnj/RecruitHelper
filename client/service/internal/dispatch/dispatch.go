@@ -135,12 +135,19 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 	switch ack.Status {
 	case protocol.AckStatusAccepted, protocol.AckStatusDuplicate:
 		d.resetWedged(handID) // 正常应答打断 HAND_WEDGED 连续计数
+		var advanced bool
 		_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
-			if r.Status == store.CmdSent {
+			// accepted 是 queued/sent 的合法后继。放宽守卫收下"先发送后记 sent"竞态下
+			// 抢在 sent 记账前到达的快 ack(红队 F3)。
+			if r.Status == store.CmdQueued || r.Status == store.CmdSent {
 				r.Status = store.CmdAccepted
+				advanced = true
 			}
 			return nil
 		})
+		if !advanced { // 命中终局/void/suspect 的迟到 ack:审计不静默(§8.1 迟到帧总则,F9)
+			d.st.Audit("late_ack", handID, ack.Ref, "accepted/duplicate 命中非 queued/sent 状态")
+		}
 	case protocol.AckStatusRejected:
 		code := ""
 		if ack.Error != nil {
@@ -172,75 +179,103 @@ func isTransientReject(code protocol.ErrorCode) bool {
 	return code == protocol.ErrCodeQueueFull || code == protocol.ErrCodeStaleSession
 }
 
-// OnResult:处理手的 result。msgId 去重 + 回 ac(即使重复也回 ack,静默去重是禁令)+
-// 首见时账本终局化。resultMsgID 是 result 消息自身的 msgId(去重键)。
-func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBody) {
-	already, err := d.st.MarkProcessed(resultMsgID, "result", handID)
-	if err != nil {
-		slog.Error("去重记录失败", "err", err)
-		return
-	}
-	// 无论首见还是重复,都回 ack(accepted)——手据此删本地队列条目。
-	session, _, online := d.sender.HandSession(handID)
-	if online {
-		var sp *string
-		if session != "" {
-			sp = &session
-		}
-		ackEnv := d.envelope(protocol.KindAck, ids.NewMsgID(), sp, protocol.AckBody{
-			Ref: resultMsgID, Status: protocol.AckStatusAccepted,
-		})
-		_ = d.sender.SendEnvelope(handID, ackEnv)
-	}
-	if already {
-		return // 已终局化过,只补回 ack
-	}
+// resultOutcome:终局化结果分类(用于审计与日志)。
+type resultOutcome int
 
-	// 账本终局化(ref → 对应命令)。
-	body, _ := json.Marshal(res)
-	var wasSuspect, effResultSuspect bool
-	err = d.st.MutateCmd(res.Ref, func(r *store.CmdRecord) error {
-		// 法条6:suspect 收到迟到 result → 按 result 终局化、自动销案(result 赢)。
-		if r.Status == store.CmdSuspect {
-			wasSuspect = true
-			r.Status = mapResultStatus(res.Status)
-			r.ResultBody = string(body)
-			applyResultError(r, res)
-			return nil
+const (
+	ocDone           resultOutcome = iota // 正常终局
+	ocLate                                // 命中已终局/void:不改账,审计
+	ocOrphan                              // ref 无对应命令
+	ocSuspectCleared                      // 法条6:suspect 收迟到 result 自动核销
+	ocSuspectKept                         // suspect 收 possible/confirmed 迟到 result:落证据不销案(F7)
+	ocEffSuspect                          // effectful result possible → suspect(法条1)
+)
+
+// OnResult:处理手的 result。终局化 → 去重登记 → 回 ack(静默去重是禁令 §4.4)。
+// 顺序修订(红队 F10):终局化不 gate 于去重表——终局化幂等,重传会再次尝试并被 Terminal
+// 守卫吸收,故即便某次终局化失败,后续重传仍能补上;去重表仅作观测与审计分类,不吞结果。
+func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBody) {
+	oc := d.terminalizeResult(res)
+	already, _ := d.st.MarkProcessed(resultMsgID, "result", handID)
+	d.ackResult(handID, resultMsgID)
+
+	switch oc {
+	case ocOrphan:
+		d.st.Audit("orphan_result", handID, res.Ref, "ref 无对应命令")
+	case ocLate:
+		if !already { // 重传的迟到不重复刷审计
+			d.st.Audit("late_result", handID, res.Ref, "终局/void 后收到 result(§8.1 迟到帧总则)")
 		}
-		if r.Status.Terminal() {
-			// 其余终局/void 态收到迟到 result:审计不静默,不改账(§8.1 迟到帧总则)。
-			return errAlreadyTerminal
-		}
-		// effectful 且 result 标 sideEffect=possible → 转 suspect(法条1),而非直接 failed。
-		if r.Class == string(protocol.ClassEffectful) && res.Status == protocol.ResultStatusFailed &&
-			res.Error != nil && res.Error.SideEffect == protocol.SideEffectPossible {
-			effResultSuspect = true
-			r.Status = store.CmdSuspect
-			r.SuspectReason = "result.sideEffect=possible"
-			r.ResultBody = string(body)
-			applyResultError(r, res)
-			return nil
-		}
-		r.Status = mapResultStatus(res.Status)
-		r.ResultBody = string(body)
-		applyResultError(r, res)
-		return nil
-	})
-	switch {
-	case errors.Is(err, errAlreadyTerminal):
-		d.st.Audit("late_result", handID, res.Ref, "终局/void 后收到 result")
-	case err != nil:
-		d.st.Audit("orphan_result", handID, res.Ref, err.Error()) // ref 无对应命令:账本缺口
-	case wasSuspect:
+	case ocSuspectCleared:
 		d.st.Audit("suspect_cleared", handID, res.Ref, "迟到 result 自动核销 suspect(法条6)")
 		slog.Info("suspect 自动核销", "handId", handID, "ref", res.Ref, "status", res.Status)
-	case effResultSuspect:
+	case ocSuspectKept:
+		d.st.Audit("suspect_kept", handID, res.Ref, "suspect 迟到 result 仍 possible/confirmed,保持 suspect(F7)")
+	case ocEffSuspect:
 		d.st.Audit("suspect", handID, res.Ref, "result.sideEffect=possible")
 		slog.Warn("effectful 结果不确定,转 suspect", "handId", handID, "ref", res.Ref)
 	default:
 		slog.Info("命令终局", "handId", handID, "ref", res.Ref, "status", res.Status)
 	}
+}
+
+// terminalizeResult:账本终局化(ref → 对应命令),返回分类。
+func (d *Dispatcher) terminalizeResult(res protocol.ResultBody) resultOutcome {
+	body, _ := json.Marshal(res)
+	oc := ocDone
+	err := d.st.MutateCmd(res.Ref, func(r *store.CmdRecord) error {
+		switch {
+		case r.Status == store.CmdSuspect:
+			// 法条6:suspect 收迟到 result。但若 result 本身仍是 possible/confirmed 歧义 →
+			// 保持 suspect(只落证据,不销案),歧义只转人工不抹平(红队 F7)。
+			if res.Status == protocol.ResultStatusFailed && res.Error != nil &&
+				(res.Error.SideEffect == protocol.SideEffectPossible || res.Error.SideEffect == protocol.SideEffectConfirmed) {
+				r.ResultBody = string(body)
+				applyResultError(r, res)
+				oc = ocSuspectKept
+				return nil
+			}
+			r.Status = mapResultStatus(res.Status)
+			r.ResultBody = string(body)
+			applyResultError(r, res)
+			oc = ocSuspectCleared
+		case r.Status.Terminal():
+			oc = ocLate // 已终局/void:不改账(Save 无副作用),只标记
+		case r.Class == string(protocol.ClassEffectful) && res.Status == protocol.ResultStatusFailed &&
+			res.Error != nil && res.Error.SideEffect == protocol.SideEffectPossible:
+			r.Status = store.CmdSuspect
+			r.SuspectReason = "result.sideEffect=possible"
+			r.ResultBody = string(body)
+			applyResultError(r, res)
+			oc = ocEffSuspect
+		default:
+			r.Status = mapResultStatus(res.Status)
+			r.ResultBody = string(body)
+			applyResultError(r, res)
+			oc = ocDone
+		}
+		return nil
+	})
+	if err != nil {
+		return ocOrphan // ref 无对应命令(A 修复后不再有 BUSY 类失败)
+	}
+	return oc
+}
+
+// ackResult:对 result 回 ack(accepted)。手据此删本地队列条目。
+func (d *Dispatcher) ackResult(handID, resultMsgID string) {
+	session, _, online := d.sender.HandSession(handID)
+	if !online {
+		return
+	}
+	var sp *string
+	if session != "" {
+		sp = &session
+	}
+	ackEnv := d.envelope(protocol.KindAck, ids.NewMsgID(), sp, protocol.AckBody{
+		Ref: resultMsgID, Status: protocol.AckStatusAccepted,
+	})
+	_ = d.sender.SendEnvelope(handID, ackEnv)
 }
 
 // applyResultError:把 result.error 的错误码与副作用标注落账。

@@ -12,12 +12,13 @@ import (
 
 // mockSender:不经 WS 的假手,用于超时引擎单元测试(快、确定)。
 type mockSender struct {
-	mu        sync.Mutex
-	online    map[string]bool
-	boot      map[string]string
-	sent      []protocol.Envelope
-	closed    []string
-	offlineMs int64
+	mu                sync.Mutex
+	online            map[string]bool
+	boot              map[string]string
+	sent              []protocol.Envelope
+	closed            []string
+	offlineMs         int64
+	keepOnlineOnClose bool // true=CloseHand 不即时置离线(模拟真实 hub 异步关连接)
 }
 
 func newMock() *mockSender {
@@ -54,7 +55,9 @@ func (m *mockSender) CloseHand(handID, _ string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = append(m.closed, handID)
-	m.online[handID] = false // 关连接 = 离线
+	if !m.keepOnlineOnClose {
+		m.online[handID] = false // 关连接 = 离线
+	}
 }
 
 func (m *mockSender) HandOfflineMs(handID string) int64 {
