@@ -23,12 +23,20 @@ func (d *Dispatcher) OnReconnect(handID, newBootID string) {
 	if !online {
 		return
 	}
+	// 两阶段(修红队 F4 残漏):第一趟先把换代 effectful 全部 suspect 冻结相关域,
+	// 第二趟处理 intrusive void+重派时,冻结复查才能看到同趟 effectful,不会把新 intrusive
+	// 派进即将冻结的域。否则结果取决于 created_at 枚举顺序。
+	for _, cmd := range cmds {
+		if cmd.BootIDAtDispatch != newBootID && cmd.Class == string(protocol.ClassEffectful) {
+			d.markSuspect(cmd, "bootId 换代且无 result")
+		}
+	}
 	for _, cmd := range cmds {
 		switch {
 		case cmd.BootIDAtDispatch == newBootID:
 			d.resendCmd(cmd, session)
 		case cmd.Class == string(protocol.ClassEffectful):
-			d.markSuspect(cmd, "bootId 换代且无 result")
+			// 第一趟已处理
 		default:
 			d.voidAndRedispatch(cmd, "bootId 换代")
 		}

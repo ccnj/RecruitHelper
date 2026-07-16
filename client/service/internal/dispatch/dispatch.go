@@ -201,16 +201,20 @@ func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBod
 
 	switch oc {
 	case ocOrphan:
-		d.st.Audit("orphan_result", handID, res.Ref, "ref 无对应命令")
+		if !already { // 重传不重复刷审计(F10 残漏)
+			d.st.Audit("orphan_result", handID, res.Ref, "ref 无对应命令")
+		}
 	case ocLate:
-		if !already { // 重传的迟到不重复刷审计
+		if !already {
 			d.st.Audit("late_result", handID, res.Ref, "终局/void 后收到 result(§8.1 迟到帧总则)")
 		}
 	case ocSuspectCleared:
 		d.st.Audit("suspect_cleared", handID, res.Ref, "迟到 result 自动核销 suspect(法条6)")
 		slog.Info("suspect 自动核销", "handId", handID, "ref", res.Ref, "status", res.Status)
 	case ocSuspectKept:
-		d.st.Audit("suspect_kept", handID, res.Ref, "suspect 迟到 result 仍 possible/confirmed,保持 suspect(F7)")
+		if !already { // 重传的 possible result 不重复刷审计(F10 残漏)
+			d.st.Audit("suspect_kept", handID, res.Ref, "suspect 迟到 result 仍 possible/confirmed,保持 suspect(F7)")
+		}
 	case ocEffSuspect:
 		d.st.Audit("suspect", handID, res.Ref, "result.sideEffect=possible")
 		slog.Warn("effectful 结果不确定,转 suspect", "handId", handID, "ref", res.Ref)

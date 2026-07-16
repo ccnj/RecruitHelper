@@ -88,13 +88,19 @@ func newDisp(t *testing.T) (*Dispatcher, *store.Store, *mockSender) {
 
 func hasAudit(t *testing.T, st *store.Store, category, msgID string) bool {
 	t.Helper()
-	es, _ := st.AuditEntries(200)
+	return countAudit(t, st, category, msgID) > 0
+}
+
+func countAudit(t *testing.T, st *store.Store, category, msgID string) int {
+	t.Helper()
+	es, _ := st.AuditEntries(500)
+	n := 0
 	for _, e := range es {
 		if e.Category == category && (msgID == "" || e.RefMsgID == msgID) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 var future = func() time.Time { return time.Now().Add(1 * time.Hour) }

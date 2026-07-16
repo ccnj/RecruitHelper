@@ -40,21 +40,35 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 		return
 	}
 	nowMs := now.UnixMilli()
+	grace := int64(protocol.DefaultSuspectGraceMs)
+	// 第一趟(修红队 F4 残漏):过期 effectful 先全部 suspect 冻结相关域,使第二趟 intrusive
+	// void+重派与 queued 重投的冻结复查看到同趟 effectful,不依赖枚举顺序。
+	for _, cmd := range cmds {
+		if nowMs > cmd.DeadlineMs+grace && cmd.Class == string(protocol.ClassEffectful) {
+			d.markSuspect(cmd, "deadline+宽限 无终局")
+		}
+	}
+
 	closedThisSweep := map[string]bool{} // 每手每 sweep 至多关一次连接(红队 F2/F6/F11)
 	ackTimeoutMs := time.Duration(protocol.DefaultAckTimeoutMs) * time.Millisecond
 	for _, cmd := range cmds {
 		// deadline+宽限:优先于其余(过期命令不必再等)。
-		if nowMs > cmd.DeadlineMs+protocol.DefaultSuspectGraceMs {
+		if nowMs > cmd.DeadlineMs+grace {
 			if cmd.Class == string(protocol.ClassEffectful) {
-				d.markSuspect(cmd, "deadline+宽限 无终局")
-			} else {
-				d.voidAndRedispatch(cmd, "deadline+宽限 无终局")
+				continue // 第一趟已处理
 			}
+			d.voidAndRedispatch(cmd, "deadline+宽限 无终局")
 			continue
 		}
 		// queued 且手在线 → 重投驱动(§7.2.4):发送失败或瞬态拒绝(QUEUE_FULL/STALE_SESSION)
 		// 回 queued 的命令,在存活连接上同 msgId 再投,不再滞留到 deadline 被误判 suspect(红队 F5/F8)。
 		if cmd.Status == store.CmdQueued {
+			// 法条4:冻结域内不重投 effectful/intrusive(readonly 不进串行域,豁免);修 F4 残漏。
+			if cmd.Class != string(protocol.ClassReadonly) {
+				if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
+					continue
+				}
+			}
 			if session, _, online := d.sender.HandSession(cmd.HandID); online {
 				d.resendCmd(cmd, session)
 			}

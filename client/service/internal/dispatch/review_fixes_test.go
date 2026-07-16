@@ -187,6 +187,57 @@ func TestVerdictRaces(t *testing.T) {
 	}
 }
 
+// F4 残漏:OnReconnect 两阶段——intrusive 创建早于同域 effectful,换代收编时 intrusive
+// 不应被派进即将冻结的域(不依赖 created_at 枚举顺序)。
+func TestReconnectTwoPhaseFreeze(t *testing.T) {
+	d, st, m := newDisp(t)
+	m.up("hand-01", "b-1")
+	iID, _ := d.Dispatch("hand-01", protocol.PrimDebugSwitchWindow, json.RawMessage(`{}`)) // intrusive 先建
+	eID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
+	sentBefore := m.sentCount()
+
+	m.up("hand-01", "b-2") // 换代重连
+	d.OnReconnect("hand-01", "b-2")
+
+	if rec, _ := st.CmdByMsgID(eID); rec.Status != store.CmdSuspect {
+		t.Fatalf("换代 effectful 应 suspect,得到 %s", rec.Status)
+	}
+	if rec, _ := st.CmdByMsgID(iID); rec.Status != store.CmdVoid {
+		t.Fatalf("换代 intrusive 应 void,得到 %s", rec.Status)
+	}
+	if m.sentCount() != sentBefore {
+		t.Fatalf("冻结域内 intrusive 不应重派(不新增发送)")
+	}
+	if !hasAudit(t, st, "redispatch_frozen", iID) {
+		t.Fatalf("应有 redispatch_frozen 审计(两阶段生效)")
+	}
+}
+
+// F10 残漏:重传的迟到 result(possible / orphan)不重复刷审计。
+func TestRetransmitNoAuditSpam(t *testing.T) {
+	d, st, m := newDisp(t)
+	m.up("hand-01", "b-1")
+	msgID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
+	d.sweepFaults(future()) // → suspect
+	// 同一 possible result 重传 3 次(同 resultMsgID)
+	for range 3 {
+		d.OnResult("hand-01", "res-dup", protocol.ResultBody{
+			Ref: msgID, Status: protocol.ResultStatusFailed,
+			Error: &protocol.ErrorBody{Code: protocol.ErrCodeInternalHand, SideEffect: protocol.SideEffectPossible},
+		})
+	}
+	if n := countAudit(t, st, "suspect_kept", msgID); n != 1 {
+		t.Fatalf("possible result 重传 3 次应只 1 条 suspect_kept,得到 %d", n)
+	}
+	// orphan 同理
+	for range 3 {
+		d.OnResult("hand-01", "res-orph", protocol.ResultBody{Ref: "nope", Status: protocol.ResultStatusOk})
+	}
+	if n := countAudit(t, st, "orphan_result", "nope"); n != 1 {
+		t.Fatalf("orphan 重传 3 次应只 1 条 orphan_result,得到 %d", n)
+	}
+}
+
 // F11:单次 sweep 内同手多条 sent,即使 CloseHand 异步(手仍在线)也只关一次、wedged 仅 +1。
 func TestSweepSingleClosePerHand(t *testing.T) {
 	d, st, m := newDisp(t)
