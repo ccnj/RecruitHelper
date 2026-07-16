@@ -74,7 +74,7 @@
       "ref": "string(非可空)",
       "status": "accepted | rejected | duplicate",
       "error": "errorObject,仅 rejected(恒 sideEffect=none)",
-      "rejectPolicy": "瞬态拒绝(QUEUE_FULL/STALE_SESSION)脑侧回 queued 待重投,可同 msgId 再投(同连接亦可);协议性拒绝(PROTO_*)记终局。手侧仅 accepted 入去重表;收帧管线固定顺序:信封校验→msgId 去重→session 校验(仅受理时刻)→caps→deadline→入队"
+      "$rejectPolicy": "注释(非线上字段):瞬态拒绝(QUEUE_FULL/STALE_SESSION)脑侧回 queued 待重投,可同 msgId 再投(同连接亦可);协议性拒绝(PROTO_*)记终局。手侧仅 accepted 入去重表;收帧管线固定顺序:信封校验→msgId 去重→session 校验(仅受理时刻)→caps→deadline→入队"
     },
     "result": {
       "ref": "string(非可空)",
@@ -84,7 +84,7 @@
       "evidence": "[{type, text?, blob?}](effectful ok 必填,X 起强制;对脑不透明)",
       "replayed": "bool",
       "execMs": "int",
-      "queueDrop": "手收到 accepted 或 duplicate 皆删除本地队列条目(两者等价=脑已持有终局)"
+      "$queueDrop": "注释(非线上字段):手收到 accepted 或 duplicate 皆删除本地队列条目(两者等价=脑已持有终局)"
     },
     "ping": {
       "queueDepth": "int",
@@ -112,6 +112,12 @@
     "serialDomainKey": "intrusive/effectful 的串行域键=context.accountRef;debug.* 命令=debug:{handId}(每手一个 debug 域,规则与账号域同款,suspect 冻结域亦同)"
   },
   "enums": {
+    "batch": ["M1", "S", "X", "far"],
+    "ackStatus": ["accepted", "rejected", "duplicate"],
+    "resultStatus": ["ok", "failed", "canceled", "expired"],
+    "retryable": ["yes", "no", "afterRecovery", "manualOnly"],
+    "sideEffect": ["none", "possible", "confirmed"],
+    "reportState": ["unknown", "queued", "executing", "attempting", "done"],
     "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "unknown"]
   },
   "byeCodes": ["AUTH_FAILED", "PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN", "PAIRING_TIMEOUT", "PAIRING_REJECTED"],

@@ -47,4 +47,7 @@
 
 - 界面文案与交流全部中文;源码不使用 emoji。
 - TypeScript 开 strict;协议类型一律来自 contract codegen,禁止手写重复定义。
-- 构建/测试命令:骨架搭好后补充到本节。
+- 常用命令(仓库根目录执行):
+  - `go run ./contract/codegen` — 从 contract.v1.json 重新生成两端协议代码到 `contract/gen/`;**改契约后必跑**,产物一并提交。
+  - `go run ./contract/codegen -check` — 校验产物与契约一致(CI 门禁,漂移退出码 1)。
+- 其余构建/测试命令随骨架搭建补充到本节。
