@@ -1,0 +1,14 @@
+{
+  "name": "recruithelper-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "招聘助手客户端外壳(Electron):启停 Go 脑服务 + 加载 UI。",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test:node": "node test/service.test.mjs"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
