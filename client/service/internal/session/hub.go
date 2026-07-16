@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -27,19 +28,45 @@ const (
 )
 
 type Hub struct {
-	st     *store.Store
-	pm     *pairing.Manager
-	reg    *Registry
-	mu     sync.Mutex
-	active map[string]*Conn // handId → 当前活连接(单活)
+	st         *store.Store
+	pm         *pairing.Manager
+	reg        *Registry
+	dispatcher *dispatch.Dispatcher
+	mu         sync.Mutex
+	active     map[string]*Conn // handId → 当前活连接(单活)
 }
 
 func NewHub(st *store.Store, pm *pairing.Manager, graceMs int64) *Hub {
 	return &Hub{st: st, pm: pm, reg: NewRegistry(graceMs), active: map[string]*Conn{}}
 }
 
+// SetDispatcher:接线派发器(构造后回填,打破 hub↔dispatcher 循环)。
+func (h *Hub) SetDispatcher(d *dispatch.Dispatcher) { h.dispatcher = d }
+
 // Registry:注册表访问器(状态页/测试)。
 func (h *Hub) Registry() *Registry { return h.reg }
+
+// SendEnvelope 实现 dispatch.Sender:向某手当前连接发已构造的信封。
+func (h *Hub) SendEnvelope(handID string, env protocol.Envelope) error {
+	h.mu.Lock()
+	c := h.active[handID]
+	h.mu.Unlock()
+	if c == nil {
+		return dispatch.ErrHandOffline
+	}
+	return c.writeEnvelope(env)
+}
+
+// HandSession 实现 dispatch.Sender:取某手当前会话与 bootId。
+func (h *Hub) HandSession(handID string) (string, string, bool) {
+	h.mu.Lock()
+	c := h.active[handID]
+	h.mu.Unlock()
+	if c == nil {
+		return "", "", false
+	}
+	return c.session, c.bootID, true
+}
 
 // StartHealthLoop:周期扫描,把心跳静默的手翻为 stalled 并告警(仅翻转沿一次)。
 // 阻塞直到 ctx 取消;由 main 起一个 goroutine 驱动。
@@ -272,8 +299,17 @@ func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 	case protocol.KindPing:
 		c.hub.reg.Heartbeat(c.handID, c.bootID, time.Now())
 		c.sendPong(ctx, env.Session)
+	case protocol.KindAck:
+		var ab protocol.AckBody
+		if err := json.Unmarshal(env.Body, &ab); err == nil && c.hub.dispatcher != nil {
+			c.hub.dispatcher.OnAck(c.handID, ab)
+		}
+	case protocol.KindResult:
+		var rb protocol.ResultBody
+		if err := json.Unmarshal(env.Body, &rb); err == nil && c.hub.dispatcher != nil {
+			c.hub.dispatcher.OnResult(c.handID, env.MsgID, rb)
+		}
 	default:
-		// cmd 派发的回执(ack/result)等在 2.4 接入;此前记日志。
 		slog.Debug("暂不处理的会话帧", "handId", c.handID, "kind", env.Kind)
 	}
 }
@@ -289,27 +325,31 @@ func (c *Conn) sendBye(ctx context.Context, code protocol.ByeCode, msg string) {
 
 // ---------- 收发底层 ----------
 
-func (c *Conn) send(ctx context.Context, kind protocol.Kind, session *string, body any) error {
+// send:脑主动构造一条消息(生成 msgId)并发送。ctx 参数保留以标注调用上下文,
+// 实际写超时由 writeEnvelope 自带(连接关闭时 ws.Write 自会失败)。
+func (c *Conn) send(_ context.Context, kind protocol.Kind, session *string, body any) error {
 	raw, err := protocol.Encode(body)
 	if err != nil {
 		return err
 	}
-	env := protocol.Envelope{
+	return c.writeEnvelope(protocol.Envelope{
 		Proto: protocol.ProtoVersion, Kind: kind, MsgID: ids.NewMsgID(),
 		Session: session, Ts: time.Now().UnixMilli(), Attempt: 1, Body: raw,
-	}
+	})
+}
+
+// writeEnvelope:发送一条已构造的信封(供 send 与 dispatch.Sender 共用)。
+func (c *Conn) writeEnvelope(env protocol.Envelope) error {
 	buf, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := c.ws.Write(wctx, websocket.MessageText, buf); err != nil {
-		if ctx.Err() == nil {
-			slog.Debug("写帧失败", "handId", c.handID, "kind", kind, "err", err)
-		}
+	if err := c.ws.Write(ctx, websocket.MessageText, buf); err != nil {
+		slog.Debug("写帧失败", "handId", c.handID, "kind", env.Kind, "err", err)
 		return err
 	}
 	return nil

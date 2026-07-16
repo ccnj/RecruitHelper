@@ -15,6 +15,9 @@ func TestBodyFieldsSubsetOfContract(t *testing.T) {
 		KindBye:     ByeBody{},
 		KindPing:    PingBody{},
 		KindPong:    PongBody{},
+		KindCmd:     CmdBody{},
+		KindAck:     AckBody{},
+		KindResult:  ResultBody{},
 	}
 	for kind, sample := range samples {
 		allowed := map[string]bool{}

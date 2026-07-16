@@ -99,7 +99,7 @@ func main() {
 		if err := json.Unmarshal(data, &env); err != nil {
 			continue
 		}
-		if h.handle(&env) && *once {
+		if h.handle(ctx, &env) && *once {
 			return
 		}
 	}
@@ -114,8 +114,18 @@ type fakeHand struct {
 }
 
 // handle 处理一帧;返回 true 表示到达可退出的里程碑(welcome/bye)。
-func (h *fakeHand) handle(env *protocol.Envelope) bool {
+func (h *fakeHand) handle(ctx context.Context, env *protocol.Envelope) bool {
 	switch env.Kind {
+	case protocol.KindCmd:
+		var cb protocol.CmdBody
+		if err := json.Unmarshal(env.Body, &cb); err == nil {
+			go h.execCmd(ctx, env.MsgID, env.Session, cb) // 异步执行,不阻塞读循环
+		}
+		return false
+	case protocol.KindAck:
+		// 脑对我方 result 的 ack(可删本地队列条目);2.4 假手无持久队列,记日志即可。
+		slog.Debug("ack from brain")
+		return false
 	case protocol.KindWelcome:
 		var wb protocol.WelcomeBody
 		_ = json.Unmarshal(env.Body, &wb)
@@ -140,6 +150,54 @@ func (h *fakeHand) handle(env *protocol.Envelope) bool {
 	default:
 		slog.Info("收到帧", "kind", env.Kind)
 		return false
+	}
+}
+
+// execCmd:ack(accepted) → 执行原语 → result。effectful 的 silent 结局故意不回 result(供 2.5 演练超时/suspect)。
+func (h *fakeHand) execCmd(ctx context.Context, cmdMsgID string, session *string, cb protocol.CmdBody) {
+	_ = h.send(ctx, protocol.KindAck, session, protocol.AckBody{Ref: cmdMsgID, Status: protocol.AckStatusAccepted})
+	status, data, errBody := runPrimitive(cb)
+	if status == "" {
+		slog.Info("silent 结局:不回 result", "name", cb.Name, "cmd", cmdMsgID)
+		return
+	}
+	_ = h.send(ctx, protocol.KindResult, session, protocol.ResultBody{
+		Ref: cmdMsgID, Status: status, Data: data, Error: errBody,
+	})
+	fmt.Printf("EVENT result name=%s status=%s ref=%s\n", cb.Name, status, cmdMsgID)
+}
+
+// runPrimitive:假手对三条 debug 原语的执行。返回空 status 表示 silent(不回 result)。
+func runPrimitive(cb protocol.CmdBody) (protocol.ResultStatus, json.RawMessage, *protocol.ErrorBody) {
+	switch cb.Name {
+	case protocol.PrimDebugPing:
+		data, _ := json.Marshal(map[string]any{"echo": cb.Args, "swStartedAt": time.Now().UnixMilli()})
+		return protocol.ResultStatusOk, data, nil
+	case protocol.PrimDebugSwitchWindow:
+		data, _ := json.Marshal(map[string]any{"switched": true})
+		return protocol.ResultStatusOk, data, nil
+	case protocol.PrimDebugSlowEcho:
+		var a struct {
+			Ms      int64  `json:"ms"`
+			Outcome string `json:"outcome"`
+		}
+		_ = json.Unmarshal(cb.Args, &a)
+		if a.Ms > 0 {
+			time.Sleep(time.Duration(a.Ms) * time.Millisecond)
+		}
+		switch a.Outcome {
+		case "failed":
+			return protocol.ResultStatusFailed, nil, &protocol.ErrorBody{
+				Code: protocol.ErrCodeInternalHand, SideEffect: protocol.SideEffectPossible, Message: "演练失败",
+			}
+		case "silent":
+			return "", nil, nil
+		default:
+			data, _ := json.Marshal(map[string]any{"echoedAfterMs": a.Ms})
+			return protocol.ResultStatusOk, data, nil
+		}
+	default:
+		return protocol.ResultStatusFailed, nil, &protocol.ErrorBody{Code: protocol.ErrCodeProtoUnsupportedCmd}
 	}
 }
 

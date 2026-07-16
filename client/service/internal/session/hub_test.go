@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -24,6 +25,7 @@ type harness struct {
 	pm    *pairing.Manager
 	st    *store.Store
 	hub   *Hub
+	disp  *dispatch.Dispatcher
 	wsURL string
 }
 
@@ -39,11 +41,13 @@ func newHarnessGrace(t *testing.T, graceMs int64) *harness {
 	pm := pairing.New(st)
 	t.Cleanup(pm.CloseWindow)
 	hub := NewHub(st, pm, graceMs)
+	disp := dispatch.New(st, hub)
+	hub.SetDispatcher(disp)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &harness{srv: srv, pm: pm, st: st, hub: hub, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
+	return &harness{srv: srv, pm: pm, st: st, hub: hub, disp: disp, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
 }
 
 func dial(t *testing.T, url, origin string) *websocket.Conn {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
@@ -14,13 +15,14 @@ import (
 )
 
 type API struct {
-	st  *store.Store
-	pm  *pairing.Manager
-	hub *session.Hub
+	st   *store.Store
+	pm   *pairing.Manager
+	hub  *session.Hub
+	disp *dispatch.Dispatcher
 }
 
-func New(st *store.Store, pm *pairing.Manager, hub *session.Hub) *API {
-	return &API{st: st, pm: pm, hub: hub}
+func New(st *store.Store, pm *pairing.Manager, hub *session.Hub, disp *dispatch.Dispatcher) *API {
+	return &API{st: st, pm: pm, hub: hub, disp: disp}
 }
 
 func (a *API) Routes(mux *http.ServeMux) {
@@ -30,6 +32,50 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/pairing/confirm", a.pairingConfirm)
 	mux.HandleFunc("GET /admin/hands", a.hands)
 	mux.HandleFunc("GET /admin/hands/health", a.handHealth)
+	mux.HandleFunc("POST /admin/cmd", a.postCmd)
+	mux.HandleFunc("GET /admin/ledger", a.ledger)
+}
+
+func (a *API) postCmd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		HandID string          `json:"handId"`
+		Name   string          `json:"name"`
+		Args   json.RawMessage `json:"args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
+		return
+	}
+	if req.Args == nil {
+		req.Args = json.RawMessage("{}")
+	}
+	msgID, err := a.disp.Dispatch(req.HandID, req.Name, req.Args)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error(), "msgId": msgID})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"msgId": msgID})
+}
+
+func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
+	recs, err := a.st.RecentCmds(50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type view struct {
+		MsgID     string `json:"msgId"`
+		Name      string `json:"name"`
+		Class     string `json:"class"`
+		Status    string `json:"status"`
+		Attempt   int    `json:"attempt"`
+		ErrorCode string `json:"errorCode,omitempty"`
+	}
+	out := make([]view, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, view{MsgID: r.MsgID, Name: r.Name, Class: r.Class, Status: string(r.Status), Attempt: r.Attempt, ErrorCode: r.ErrorCode})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

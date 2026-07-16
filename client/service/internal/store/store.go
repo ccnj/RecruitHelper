@@ -135,6 +135,13 @@ func (s *Store) CmdsInStatus(statuses ...CmdStatus) ([]CmdRecord, error) {
 	return cs, err
 }
 
+// RecentCmds:最近 limit 条命令账本,按创建倒序(ledger 视图/测试)。
+func (s *Store) RecentCmds(limit int) ([]CmdRecord, error) {
+	var cs []CmdRecord
+	err := s.db.Order("created_at DESC").Limit(limit).Find(&cs).Error
+	return cs, err
+}
+
 // ---------- 上行去重 ----------
 
 // MarkProcessed:首见返回 already=false 并落库;重复返回 already=true。

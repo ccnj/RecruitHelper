@@ -83,6 +83,59 @@ type PongBody struct {
 	Now int64 `json:"now"`
 }
 
+// CmdContext:cmd.context 路由上下文。debug.* 可缺省(omitempty)。
+type CmdContext struct {
+	Platform   string `json:"platform"`
+	AccountRef string `json:"accountRef"`
+}
+
+// CmdBody(脑→手)。idemKey 仅 effectful 携带;guards [X]。
+type CmdBody struct {
+	Name         string          `json:"name"`
+	Ver          int             `json:"ver"`
+	Context      *CmdContext     `json:"context,omitempty"`
+	Args         json.RawMessage `json:"args"`
+	IdemKey      string          `json:"idemKey,omitempty"`
+	Deadline     int64           `json:"deadline"`
+	ExecBudgetMs int64           `json:"execBudgetMs"`
+	Guards       json.RawMessage `json:"guards,omitempty"`
+}
+
+// AckBody(手→脑)。Error 仅 rejected。
+type AckBody struct {
+	Ref    string     `json:"ref"`
+	Status AckStatus  `json:"status"`
+	Error  *ErrorBody `json:"error,omitempty"`
+}
+
+// ErrorBody:result.error 与 ack.error 共用(协议规格 §10)。
+type ErrorBody struct {
+	Code       ErrorCode       `json:"code"`
+	Message    string          `json:"message,omitempty"`
+	Retryable  Retryable       `json:"retryable,omitempty"`
+	SideEffect SideEffect      `json:"sideEffect,omitempty"`
+	Data       json.RawMessage `json:"data,omitempty"`
+	Evidence   []Evidence      `json:"evidence,omitempty"`
+}
+
+// Evidence:result/error 证据项。内容对脑不透明(只入日志与人工审核)。
+type Evidence struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	Blob string `json:"blob,omitempty"`
+}
+
+// ResultBody(手→脑):唯一携带 data/error/evidence 的终局信号。
+type ResultBody struct {
+	Ref      string          `json:"ref"`
+	Status   ResultStatus    `json:"status"`
+	Data     json.RawMessage `json:"data,omitempty"`
+	Error    *ErrorBody      `json:"error,omitempty"`
+	Evidence []Evidence      `json:"evidence,omitempty"`
+	Replayed bool            `json:"replayed"`
+	ExecMs   int64           `json:"execMs"`
+}
+
 // Encode:body → json.RawMessage,供装入信封。
 func Encode(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)

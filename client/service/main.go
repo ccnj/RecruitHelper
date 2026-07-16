@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/adminhttp"
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
@@ -53,10 +54,12 @@ func main() {
 
 	pm := pairing.New(st)
 	hub := session.NewHub(st, pm, protocol.DefaultHbGraceMs)
+	disp := dispatch.New(st, hub)
+	hub.SetDispatcher(disp)
 	go hub.StartHealthLoop(appCtx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
-	adminhttp.New(st, pm, hub).Routes(mux)
+	adminhttp.New(st, pm, hub, disp).Routes(mux)
 
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", *port), Handler: mux}
 	go func() {
