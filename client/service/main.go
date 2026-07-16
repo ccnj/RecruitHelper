@@ -56,6 +56,7 @@ func main() {
 	hub := session.NewHub(st, pm, protocol.DefaultHbGraceMs)
 	disp := dispatch.New(st, hub)
 	hub.SetDispatcher(disp)
+	disp.Recover() // 脑重启扫描:任何 WS 服务开始前,把在途命令收编(readonly/intrusive 作废,effectful suspect)
 	go hub.StartHealthLoop(appCtx)
 	go disp.RunFaultLoop(appCtx)
 	mux := http.NewServeMux()

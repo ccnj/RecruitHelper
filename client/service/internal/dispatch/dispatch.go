@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -17,16 +18,19 @@ import (
 )
 
 var (
-	ErrHandOffline  = errors.New("手不在线")
-	ErrDomainFrozen = errors.New("串行域存在 suspect,冻结中(法条4)")
-	ErrIdemFrozen   = errors.New("幂等键被 suspect 冻结(法条3)")
+	ErrHandOffline     = errors.New("手不在线")
+	ErrDomainFrozen    = errors.New("串行域存在 suspect,冻结中(法条4)")
+	ErrIdemFrozen      = errors.New("幂等键被 suspect 冻结(法条3)")
+	ErrNotSuspect      = errors.New("命令不在 suspect 状态")
+	ErrVerdictNotReady = errors.New("对账未完成,不许人裁(法条5前置):手在线同代或离线不足时长")
 )
 
-// Sender:把已构造的信封发给某手的当前连接,并查其会话/关连接。hub 实现。
+// Sender:把已构造的信封发给某手的当前连接,并查其会话/关连接/在线时长。hub 实现。
 type Sender interface {
 	SendEnvelope(handID string, env protocol.Envelope) error
 	HandSession(handID string) (session, bootID string, ok bool)
-	CloseHand(handID, reason string) // ackTimeout 的唯一动作:关连接触发重连(离线手 no-op)
+	CloseHand(handID, reason string)   // ackTimeout 的唯一动作:关连接触发重连(离线手 no-op)
+	HandOfflineMs(handID string) int64 // 离线时长(毫秒);在线返回 0
 }
 
 // domainOf:命令的串行域键。业务命令用 accountRef([S/X]);debug 用每手 debug 域。
@@ -36,13 +40,24 @@ func domainOf(handID, _ string) string {
 }
 
 type Dispatcher struct {
-	st     *store.Store
-	sender Sender
+	st            *store.Store
+	sender        Sender
+	manualDelayMs int64
+
+	wmu    sync.Mutex
+	wedged map[string]int // handId → 连续 ackTimeout 关连接次数(任一 ack 正常清零)
 }
 
 func New(st *store.Store, sender Sender) *Dispatcher {
-	return &Dispatcher{st: st, sender: sender}
+	return &Dispatcher{
+		st: st, sender: sender,
+		manualDelayMs: protocol.DefaultSuspectManualDelayMs,
+		wedged:        map[string]int{},
+	}
 }
+
+// SetManualDelayMs:覆盖人工裁决前置的离线时长门槛(测试用短值)。
+func (d *Dispatcher) SetManualDelayMs(ms int64) { d.manualDelayMs = ms }
 
 // Dispatch:向某手派发一条原语命令。先记账(queued)再发送(sent)。
 // 返回命令 msgId。手不在线返回 ErrHandOffline(不记账,巡检下轮再来)。
@@ -119,6 +134,7 @@ func (d *Dispatcher) Dispatch(handID, name string, args json.RawMessage) (string
 func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 	switch ack.Status {
 	case protocol.AckStatusAccepted, protocol.AckStatusDuplicate:
+		d.resetWedged(handID) // 正常应答打断 HAND_WEDGED 连续计数
 		_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
 			if r.Status == store.CmdSent {
 				r.Status = store.CmdAccepted

@@ -37,6 +37,7 @@ func main() {
 	token := flag.String("token", "", "令牌(日常握手)")
 	boot := flag.String("boot", "", "bootId(默认随机生成)")
 	once := flag.Bool("once", false, "收到 welcome/bye 即退出")
+	noack := flag.Bool("noack", false, "捣乱模式:收到 cmd 不 ack 不执行(演练 ackTimeout 关连接)")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -60,7 +61,7 @@ func main() {
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "")
 
-	h := &fakeHand{ws: ws, bootID: bootID}
+	h := &fakeHand{ws: ws, bootID: bootID, noack: *noack}
 
 	// 组 hello
 	var handID, auth *string
@@ -108,6 +109,7 @@ func main() {
 type fakeHand struct {
 	ws      *websocket.Conn
 	bootID  string
+	noack   bool
 	mu      sync.Mutex
 	session *string
 	writeMu sync.Mutex
@@ -117,6 +119,10 @@ type fakeHand struct {
 func (h *fakeHand) handle(ctx context.Context, env *protocol.Envelope) bool {
 	switch env.Kind {
 	case protocol.KindCmd:
+		if h.noack {
+			slog.Info("noack 捣乱:收到 cmd 不 ack 不执行", "cmd", env.MsgID)
+			return false
+		}
 		var cb protocol.CmdBody
 		if err := json.Unmarshal(env.Body, &cb); err == nil {
 			go h.execCmd(ctx, env.MsgID, env.Session, cb) // 异步执行,不阻塞读循环

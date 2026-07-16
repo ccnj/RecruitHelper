@@ -34,6 +34,54 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/hands/health", a.handHealth)
 	mux.HandleFunc("POST /admin/cmd", a.postCmd)
 	mux.HandleFunc("GET /admin/ledger", a.ledger)
+	mux.HandleFunc("GET /admin/suspects", a.suspects)
+	mux.HandleFunc("POST /admin/suspects/verdict", a.verdict)
+}
+
+func (a *API) suspects(w http.ResponseWriter, _ *http.Request) {
+	recs, err := a.st.SuspectCmds()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	type view struct {
+		MsgID   string `json:"msgId"`
+		Name    string `json:"name"`
+		HandID  string `json:"handId"`
+		Reason  string `json:"reason"`
+		IdemKey string `json:"idemKey"`
+	}
+	out := make([]view, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, view{MsgID: r.MsgID, Name: r.Name, HandID: r.HandID, Reason: r.SuspectReason, IdemKey: r.IdemKey})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"suspects": out})
+}
+
+func (a *API) verdict(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MsgID   string `json:"msgId"`
+		Verdict string `json:"verdict"` // resolvedOk / resolvedFailed
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
+		return
+	}
+	var v store.CmdStatus
+	switch req.Verdict {
+	case "resolvedOk":
+		v = store.CmdResolvedOk
+	case "resolvedFailed":
+		v = store.CmdResolvedFailed
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "verdict 只能 resolvedOk / resolvedFailed"})
+		return
+	}
+	if err := a.disp.Verdict(req.MsgID, v); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"msgId": req.MsgID, "verdict": req.Verdict})
 }
 
 func (a *API) postCmd(w http.ResponseWriter, r *http.Request) {

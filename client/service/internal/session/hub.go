@@ -81,6 +81,15 @@ func (h *Hub) CloseHand(handID, reason string) {
 	c.closeQuiet()
 }
 
+// HandOfflineMs 实现 dispatch.Sender:某手离线时长(毫秒);在线或无记录返回 0。
+func (h *Hub) HandOfflineMs(handID string) int64 {
+	s, ok := h.reg.Get(handID)
+	if !ok || s.Online {
+		return 0
+	}
+	return time.Since(s.LastHbAt).Milliseconds()
+}
+
 // StartHealthLoop:周期扫描,把心跳静默的手翻为 stalled 并告警(仅翻转沿一次)。
 // 阻塞直到 ctx 取消;由 main 起一个 goroutine 驱动。
 func (h *Hub) StartHealthLoop(ctx context.Context) {
@@ -274,6 +283,11 @@ func (c *Conn) enterSession(ctx context.Context, issued *protocol.IssuedCreds) b
 		return false
 	}
 	slog.Info("会话建立", "handId", c.handID, "session", c.session, "paired", issued != nil)
+	// 重连收编:welcome 之后(手已能处理 session),对该手在途命令按 bootId 收编(§7.2)。
+	// 首次配对无在途命令,天然 no-op。
+	if c.hub.dispatcher != nil {
+		c.hub.dispatcher.OnReconnect(c.handID, c.bootID)
+	}
 	return true
 }
 

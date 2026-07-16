@@ -57,6 +57,7 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 				d.st.Audit("ack_timeout", cmd.HandID, cmd.MsgID, "sent 超 ackTimeout 无应答,关连接")
 				slog.Warn("ackTimeout,关连接", "handId", cmd.HandID, "msgId", cmd.MsgID)
 				d.sender.CloseHand(cmd.HandID, "ackTimeout")
+				d.noteAckTimeout(cmd.HandID)
 			}
 		}
 	}
