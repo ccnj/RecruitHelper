@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+
+# Node / 前端
+node_modules/
+dist/
+dist-electron/
+out/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# 本地数据与密钥(SQLite 库、令牌等,永不入库)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+appdata/
+.env
+.env.*
+!.env.template
+
+# 构建与发布产物
+build/
+release/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

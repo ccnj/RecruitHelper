@@ -1,0 +1,222 @@
+{
+  "$comment": "脑手协议契约 v1 机器可读骨架。唯一规范源是同目录《协议规格-v1.md》,本文件是 codegen 输入。append-only:已发布字段与枚举值不得改名删除。batch: M1=里程碑1激活 / S=感知批次 / X=首个外部副作用原语批次 / far=远期占位。",
+  "proto": 1,
+  "transport": {
+    "scheme": "ws",
+    "host": "127.0.0.1",
+    "portDefault": 17872,
+    "path": "/v1/channel",
+    "originPrefix": "chrome-extension://",
+    "chromeMin": 116,
+    "frame": "一帧一条 JSON 消息,UTF-8 文本帧"
+  },
+  "envelope": {
+    "fields": {
+      "proto": { "type": "int", "note": "协议主版本;主版本内 must-ignore 未知字段" },
+      "kind": { "type": "string", "enumRef": "kinds" },
+      "msgId": { "type": "string", "note": "唯一不透明串(建议 ULID);重传不变;接收方不得解析内容" },
+      "session": { "type": "string|null", "note": "welcome 分配;hello/welcome/bye 为 null;cmd 仅受理时刻校验当前会话(已 accepted 的命令跨会话继续执行);重传跨会话时更新为手当前会话;pre-session ping/pong 为 null" },
+      "ts": { "type": "int64", "note": "毫秒;仅诊断;禁止用于去重/排序/裁决" },
+      "attempt": { "type": "int", "note": ">=1;仅诊断" },
+      "body": { "type": "object" }
+    },
+    "correlationField": { "name": "ref", "nullable": false, "note": "所有指向另一条消息的字段唯一合法名;codegen 生成为非可空" }
+  },
+  "kinds": {
+    "hello":    { "dir": "H2B", "ackBy": "welcome|bye", "batch": "M1" },
+    "welcome":  { "dir": "B2H", "ackBy": null, "batch": "M1" },
+    "bye":      { "dir": "B2H", "ackBy": null, "batch": "M1", "note": "手→脑方向远期预留(优雅下线);v1 手侧终止一律直接关连接" },
+    "cmd":      { "dir": "B2H", "ackBy": "ack", "batch": "M1" },
+    "ack":      { "dir": "both", "ackBy": null, "batch": "M1" },
+    "result":   { "dir": "H2B", "ackBy": "ack", "batch": "M1" },
+    "ping":     { "dir": "H2B", "ackBy": "pong", "batch": "M1", "note": "pre-session 允许 session=null(握手期保活,不带 contexts/sensors)" },
+    "pong":     { "dir": "B2H", "ackBy": null, "batch": "M1" },
+    "progress": { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S" },
+    "event":    { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S", "note": "QoS0 提示;唯一权力=调整巡检开跑时刻/静默窗/健康档" },
+    "query":    { "dir": "B2H", "ackBy": "report", "batch": "X" },
+    "report":   { "dir": "H2B", "ackBy": null, "batch": "X", "states": ["unknown", "queued", "executing", "attempting", "done"] },
+    "cancel":   { "dir": "B2H", "ackBy": "ack", "batch": "X", "note": "尽力而为;与 result 赛跑时 result 赢" }
+  },
+  "bodies": {
+    "hello": {
+      "handId": "string|null(首次配对)",
+      "auth": "string|null(首次配对)",
+      "bootId": "string(SW 每次出生新生成,内存值)",
+      "protoSupported": "int[]",
+      "contractHash": "string(sha256:...,仅漂移告警)",
+      "app": { "extVersion": "string", "browser": "string" },
+      "caps": "string[](原语名@版本;会话不可变,program 热更须重连重报)",
+      "features": "string[]"
+    },
+    "welcome": {
+      "session": "string",
+      "proto": "int",
+      "hb": { "intervalMs": "int", "graceMs": "int" },
+      "limits": { "maxMsgBytes": "int", "inlineBytes": "int" },
+      "issued": "{ handId, auth } | absent(仅配对签发时)",
+      "contractMatch": "bool",
+      "now": "int64",
+      "sensors": "[S] { badgeDebounceMs, badgeMinEmitIntervalMs, navSettleMs, manualQuietMs }",
+      "blob": "[X] { endpoint, token, maxBytes }"
+    },
+    "bye": { "code": "enumRef byeCodes", "message": "string?" },
+    "cmd": {
+      "name": "string(原语名)",
+      "ver": "int",
+      "context": "{ platform, accountRef } | absent(debug.* 可缺省)",
+      "args": "object(原语 argsSchema)",
+      "idemKey": "string,仅 effectful 必填。业务形态 ik1:{platform}:{accountRef}:{primitive}:{targetRef}:{intentId};debug 形态 ik1:debug:{handId}:{primitive}:{targetRef}:{intentId}(测试页命令同样经脑铸意图行)",
+      "deadline": "int64(绝对,脑钟;手出队与不可逆动作前双查)",
+      "execBudgetMs": "int(<=240000)",
+      "guards": "[X] object(语义化前置断言)"
+    },
+    "ack": {
+      "ref": "string(非可空)",
+      "status": "accepted | rejected | duplicate",
+      "error": "errorObject,仅 rejected(恒 sideEffect=none)",
+      "rejectPolicy": "瞬态拒绝(QUEUE_FULL/STALE_SESSION)脑侧回 queued 待重投,可同 msgId 再投(同连接亦可);协议性拒绝(PROTO_*)记终局。手侧仅 accepted 入去重表;收帧管线固定顺序:信封校验→msgId 去重→session 校验(仅受理时刻)→caps→deadline→入队"
+    },
+    "result": {
+      "ref": "string(非可空)",
+      "status": "ok | failed | canceled | expired",
+      "data": "object(原语 dataSchema,ok 时)",
+      "error": "errorObject(failed 时必填)",
+      "evidence": "[{type, text?, blob?}](effectful ok 必填,X 起强制;对脑不透明)",
+      "replayed": "bool",
+      "execMs": "int",
+      "queueDrop": "手收到 accepted 或 duplicate 皆删除本地队列条目(两者等价=脑已持有终局)"
+    },
+    "ping": {
+      "queueDepth": "int",
+      "inFlight": "string|null(正在执行的 cmd msgId)",
+      "contexts": "[S] [{ platform, accountRef, ready, reason: enumRef enums.notReadyReason }]",
+      "sensors": "[S] { unreadTotal: { value, observedAgoMs } } | null(只运缓存现货,禁止心跳触发采集)"
+    },
+    "pong": { "now": "int64" },
+    "progress": { "ref": "string", "stage": "string(自由文本,禁止程序分支)", "pct": "int?" },
+    "event": {
+      "name": "enumRef events",
+      "context": "{ platform, accountRef }",
+      "observedAt": "int64",
+      "data": "object(事件 schema)"
+    },
+    "query": { "ref": "string" },
+    "report": { "ref": "string", "state": "unknown|queued|executing|attempting|done", "result": "resultBody|null", "journal": "object|null" },
+    "cancel": { "ref": "string", "reason": "string" }
+  },
+  "classes": {
+    "readonly":  { "redispatch": "free(封顶 2)", "serialDomain": false, "idemKey": "forbidden", "evidence": "none" },
+    "intrusive": { "redispatch": "free(封顶 3)", "serialDomain": true, "idemKey": "forbidden", "evidence": "none", "declare": { "platformSideEffect": "none | idempotentReadReceipt" } },
+    "effectful": { "redispatch": "never(歧义=suspect 转人工)", "serialDomain": true, "idemKey": "required", "evidence": "required(X 起强制)" },
+    "litmus": "执行两次与一次对候选人可感知世界无额外差别且不发业务内容 -> 驱动页面=intrusive 否则=readonly;否则=effectful;拿不准=effectful",
+    "serialDomainKey": "intrusive/effectful 的串行域键=context.accountRef;debug.* 命令=debug:{handId}(每手一个 debug 域,规则与账号域同款,suspect 冻结域亦同)"
+  },
+  "enums": {
+    "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "unknown"]
+  },
+  "byeCodes": ["AUTH_FAILED", "PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN", "PAIRING_TIMEOUT", "PAIRING_REJECTED"],
+  "errorCodes": {
+    "PROTO_MALFORMED":          { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
+    "PROTO_UNSUPPORTED_KIND":   { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
+    "PROTO_UNSUPPORTED_CMD":    { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
+    "PROTO_BAD_ARGS":           { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
+    "PROTO_MSG_TOO_LARGE":      { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
+    "STALE_SESSION":            { "retryable": "yes", "sideEffect": ["none"], "batch": "M1" },
+    "QUEUE_FULL":               { "retryable": "yes", "sideEffect": ["none"], "batch": "M1" },
+    "GUARD_FAILED":             { "retryable": "manualOnly", "sideEffect": ["none"], "batch": "X" },
+    "CTX_NOT_READY":            { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "dataReason": "enumRef enums.notReadyReason" },
+    "CTX_LOST_DURING_EXEC":     { "retryable": "afterRecovery|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "S" },
+    "TARGET_NOT_FOUND":         { "retryable": "no", "sideEffect": ["none"], "batch": "S" },
+    "ELEMENT_UNRESOLVED":       { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "S" },
+    "PLATFORM_LIMIT":           { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "X" },
+    "POSTCONDITION_UNCONFIRMED":{ "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "X" },
+    "EXEC_TIMEOUT_HAND":        { "retryable": "yes|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "M1" },
+    "CANCELED_BY_BRAIN":        { "retryable": "no", "sideEffect": ["none"], "batch": "X" },
+    "INTERNAL_HAND":            { "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "M1" }
+  },
+  "errorObject": {
+    "code": "enumRef errorCodes",
+    "message": "string(仅人读)",
+    "retryable": "yes | no | afterRecovery | manualOnly(建议值;脑矩阵最终裁决;手只能向保守收窄)",
+    "sideEffect": "none | possible | confirmed(effectful 失败必填;拿不准=possible)",
+    "data": "object",
+    "evidence": "array"
+  },
+  "primitives": {
+    "debug.ping": {
+      "ver": 1, "class": "readonly", "batch": "M1",
+      "args": { "echo": "any?" },
+      "data": { "echo": "any", "swStartedAt": "int64" },
+      "execBudgetMs": 5000, "deadlineMs": 30000
+    },
+    "debug.switchWindow": {
+      "ver": 1, "class": "intrusive", "batch": "M1", "platformSideEffect": "none",
+      "args": {},
+      "data": { "switched": "bool" },
+      "execBudgetMs": 10000, "deadlineMs": 30000,
+      "note": "激活当前窗口的下一个标签页,肉眼可见;tab 细节只进 evidence/日志"
+    },
+    "debug.slowEcho": {
+      "ver": 1, "class": "effectful", "batch": "M1", "note": "无真实副作用,专用于演练 effectful 全轨道(超时/suspect/幂等键冻结)",
+      "args": { "ms": "int(<=200000)", "outcome": "ok | failed | silent" },
+      "data": { "echoedAfterMs": "int" },
+      "execBudgetMs": 240000, "deadlineMs": 300000
+    },
+    "probe.platform": {
+      "ver": 1, "class": "readonly", "batch": "S",
+      "args": {},
+      "data": { "pageKind": "im|recommend|other|none", "contentScriptOk": "bool", "loginState": "in|out|unknown", "surface": "{ imListVisible } | null" }
+    },
+    "nav.ensureSurface": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "args": { "surface": "im" },
+      "data": { "ready": "bool", "loginState": "in|out|unknown", "createdTab": "bool" },
+      "note": "不做登录(登录永远人工);连续 3 轮被用户关闭=判定驱赶,暂停该账号+通知"
+    },
+    "chat.readList": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "args": { "filter": "all|unread", "stopOlderThanDays": "int=8", "maxSessions": "int=1000" },
+      "data": { "sessions": "[{ conversationRef, peer{displayName, platformUserRef?}, unreadCount, lastMessage{direction, kind, textPreview}, lastActivityTs }]", "complete": "bool" },
+      "note": "变更检测不是账本;unreadCount 遵守可见才算+两次一致"
+    },
+    "chat.readThread": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
+      "args": { "conversationRef": "string", "window": { "maxMessages": "int=50,max 500", "anchorTail": "[{direction, contentHash}](<=5,可缺省,滚动止损提示)", "deep": "bool=false" } },
+      "data": { "messages": "[{ idx, direction:in|out|system, kind:text|image|voice|file|card|system, text|blobRef, contentHash(卡片=身份哈希), cardType?, cardState?:pending|accepted|rejected|expired|unknown, tsApprox? }]", "reachedTop": "bool", "anchorMatched": "bool", "peer": "object|null" },
+      "note": "手回有界快照,脑做最大重叠对齐产出本轮新增投影;兼任 X 批次的验证读"
+    },
+    "chat.sendMessage":   { "ver": 0, "class": "effectful", "batch": "X", "note": "占位;与验证读同批交付,含 guards/evidenceSchema" },
+    "chat.sendGreeting":  { "ver": 0, "class": "effectful", "batch": "X", "note": "占位" },
+    "chat.sendInviteCard":{ "ver": 0, "class": "effectful", "batch": "X", "note": "占位" }
+  },
+  "events": {
+    "unreadBadge":       { "batch": "S", "data": { "scope": "total", "value": "int", "prev": "int|null", "stable": "true(两次一致才发)" }, "brainMay": "仅拉前巡检;减小/清零仅记录" },
+    "pageNavigated":     { "batch": "S", "data": { "pageKind": "string", "at": "int64" } },
+    "loginStateChanged": { "batch": "S", "data": { "state": "in|out", "stable": "bool", "at": "int64" }, "brainMay": "out=暂停该账号+告警(登录永远人工)" },
+    "manualInteraction": { "batch": "S", "data": { "kind": "pointer|keyboard|navigation", "pageKind": "string", "at": "int64" }, "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" }
+  },
+  "defaults": {
+    "hbIntervalMs": 20000,
+    "hbGraceMs": 50000,
+    "ackTimeoutMs": 3000,
+    "suspectGraceMs": 5000,
+    "suspectManualDelayMs": 600000,
+    "helloTimeoutMs": 10000,
+    "preSessionPingMs": 20000,
+    "pairingWindowMs": 60000,
+    "execBudgetDefaultMs": { "readonly": 30000, "intrusive": 30000, "effectful": 60000, "capMs": 240000 },
+    "redispatchBackoffMs": [5000, 15000],
+    "handQueueDepth": 16,
+    "handResultQueue": 50,
+    "handDedupLru": 256,
+    "maxMsgBytes": 262144,
+    "inlineBytes": 32768,
+    "reconnect": { "baseMs": 1000, "factor": 2, "capMs": 30000, "jitter": 0.3, "alarmsWatchdogSec": 60 },
+    "redispatchCap": { "readonly": 2, "intrusive": 3, "effectful": 0 },
+    "processedRetentionDays": 30,
+    "journalTtlDays": 14,
+    "outboxTtlDays": 7,
+    "witnessCapacity": 512,
+    "sensors": { "badgeDebounceMs": 800, "badgeMinEmitIntervalMs": 5000, "navSettleMs": 500, "manualQuietMs": 45000, "patrolPullForwardMergeMs": 25000, "patrolPullForwardMinGapMs": 60000 }
+  }
+}
