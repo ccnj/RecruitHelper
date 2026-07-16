@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "招聘助手 · 手端",
+  "version": "0.1.0",
+  "description": "脑手协议手端骨架:连接本地脑服务,执行受控原语。全新扩展,可与旧插件并存。",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "alarms", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*", "https://127.0.0.1/*"],
+  "options_page": "options/options.html"
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>招聘助手 · 手端</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.1rem; }
+      .row { margin: 0.6rem 0; }
+      code { background: #f2f2f2; padding: 0 0.3rem; border-radius: 3px; }
+      input { width: 22rem; }
+      #phase { font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>招聘助手 · 手端(RecruitHelper Hand)</h1>
+    <div class="row">连接状态:<span id="phase">查询中…</span></div>
+    <div class="row">会话:<code id="session">-</code></div>
+    <div class="row">bootId:<code id="bootId">-</code></div>
+    <div class="row">
+      脑服务地址:
+      <input id="wsUrl" placeholder="ws://127.0.0.1:17872/v1/channel" />
+      <button id="save">保存</button>
+    </div>
+    <p style="color:#888;font-size:0.85rem">
+      首次使用:在客户端点"配对",本手端会自动连上并领取工牌。工牌只存本地基础设施区,不含任何业务数据。
+    </p>
+    <script src="options.js"></script>
+  </body>
+</html>
