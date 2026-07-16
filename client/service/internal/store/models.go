@@ -58,10 +58,10 @@ type CmdRecord struct {
 	Attempt          int       // 同 msgId 第几次发送
 	DeadlineMs       int64     // 绝对毫秒(脑钟);suspect 判定 = deadline+宽限 无终局
 	ExecBudgetMs     int64
-	ErrorCode        string     // 终局为 failed 时
-	SideEffect       string     // 终局 error 的副作用标注(none/possible/confirmed)
-	ResultBody       string     // 终局 result 的 body JSON(审计与重放)
-	SuspectReason    string     // 进 suspect 的原因(deadline/bootId 换代/脑重启扫描/sideEffect=possible)
+	ErrorCode        string // 终局为 failed 时
+	SideEffect       string // 终局 error 的副作用标注(none/possible/confirmed)
+	ResultBody       string // 终局 result 的 body JSON(审计与重放)
+	SuspectReason    string // 进 suspect 的原因(deadline/bootId 换代/脑重启扫描/sideEffect=possible)
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	TerminalAt       *time.Time // 进入终局的时刻

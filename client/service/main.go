@@ -3,12 +3,20 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"recruithelper/client/service/internal/adminhttp"
+	"recruithelper/client/service/internal/pairing"
+	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -39,10 +47,30 @@ func main() {
 		"proto", protocol.ProtoVersion,
 		"contract", protocol.ContractHash,
 	)
-	slog.Info("WS 会话层尚未接入(2.2 交付)")
+
+	pm := pairing.New(st)
+	hub := session.NewHub(st, pm)
+	mux := http.NewServeMux()
+	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
+	adminhttp.New(st, pm, hub).Routes(mux)
+
+	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", *port), Handler: mux}
+	go func() {
+		slog.Info("HTTP/WS 监听", "addr", srv.Addr, "ws", protocol.TransportPath)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("监听失败", "err", err)
+			os.Exit(1)
+		}
+	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	s := <-sig
 	slog.Info("收到信号,优雅退出", "signal", s.String())
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutCtx); err != nil {
+		slog.Warn("HTTP 关闭超时", "err", err)
+	}
 }
