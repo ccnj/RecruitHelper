@@ -33,12 +33,18 @@ export class Connection {
   private async connect(): Promise<void> {
     this.phase = 'connecting'
     const url = await getWsUrl()
+    // 关掉可能残留的旧连接,避免"孤儿 socket"的迟到事件污染共享状态(真机 supersede 风暴根因)。
+    if (this.ws) {
+      try { this.ws.close() } catch { /* ignore */ }
+      this.ws = null
+    }
     try {
       const ws = new WebSocket(url)
       this.ws = ws
-      ws.onopen = () => void this.onOpen()
-      ws.onmessage = (e) => this.onMessage(e)
-      ws.onclose = () => this.onClose()
+      // 陈旧处理器守卫:只有当前 ws 的事件才作数;被替换的旧 ws 迟到事件一律忽略。
+      ws.onopen = () => { if (this.ws === ws) void this.onOpen() }
+      ws.onmessage = (e) => { if (this.ws === ws) this.onMessage(e) }
+      ws.onclose = () => { if (this.ws === ws) this.onClose() }
       ws.onerror = () => {} // onclose 随后触发,统一在那里处理
     } catch {
       this.scheduleReconnect()
@@ -108,7 +114,11 @@ export class Connection {
       void clearCreds()
       this.reconnectDelay = RECONNECT.capMs
     }
-    // SUPERSEDED / PAIRING_TIMEOUT 等:onclose 随后触发,按退避重连。
+    if (body.code === ByeCode.Superseded) {
+      // 已被更新的连接顶替:别立刻重连(否则与顶替者 ping-pong),退避到上限慢试。
+      this.reconnectDelay = RECONNECT.capMs
+    }
+    // 其余(PAIRING_TIMEOUT 等):onclose 随后触发,按退避重连。
   }
 
   private onClose(): void {
