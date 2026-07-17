@@ -59,4 +59,4 @@
   - 人眼验收操作:见 `scripts/dev-run.md`;§16 验收对照见 `docs/里程碑1-验收报告.md`。
 - Go 侧 SQLite 走 glebarez/sqlite(纯 Go);**禁止引入 cgo 依赖**,`CGO_ENABLED=0 GOOS=windows go build ./client/service` 必须常年通过(Windows 交叉编译是发布路径)。
 - SQLite 写靠 `SetMaxOpenConns(1)` 串行化(SQLite 单写;红队复现过并发 BUSY 静默丢结果→双发的致命链)。
-- 协议实现:唯一规范源 `contract/协议规格-v1.md`;骨架进度与待拍板见 `docs/自主落地-进度与待拍板.md`。
+- 协议实现:唯一规范源 `contract/协议规格-v1.md`;里程碑 1 验收记录见 `docs/里程碑1-验收报告.md`。
