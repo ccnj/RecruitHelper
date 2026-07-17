@@ -15,9 +15,9 @@ test/run.mjs     Node 集成 harness(注入浏览器全局,跑真实 base 代码
 ## 构建
 
 ```bash
-npm install
-npm run build       # 打包到 dist/(即 unpacked 扩展目录)
-npm run typecheck   # tsc --noEmit(strict)
+pnpm install
+pnpm build       # 打包到 dist/(即 unpacked 扩展目录)
+pnpm typecheck   # tsc --noEmit(strict)
 ```
 
 ## 在真实 Chrome 加载(里程碑 1 最终验收 · 需人操作)
@@ -37,7 +37,7 @@ npm run typecheck   # tsc --noEmit(strict)
 
 ```bash
 # 先起脑:go run ./client/service -port 17872
-npm run test:node
+pnpm test:node
 ```
 
 覆盖:null hello→配对→welcome{issued}存工牌→在线+能力集→派发 ping/switchWindow/

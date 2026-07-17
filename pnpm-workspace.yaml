@@ -1,0 +1,9 @@
+packages:
+  - 'plugin'
+  - 'client/ui'
+  - 'client/electron'
+
+# 允许这些依赖运行安装脚本(下载原生二进制:esbuild 打包器、electron 运行时)
+onlyBuiltDependencies:
+  - esbuild
+  - electron

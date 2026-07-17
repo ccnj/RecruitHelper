@@ -52,9 +52,10 @@
   - `go run ./contract/codegen -check` — 校验产物与契约一致(CI 门禁,漂移退出码 1)。
   - `go run ./client/service` — 起脑服务(`-port` 默认 17872,`-data` 默认 `data/`,已 gitignore)。
   - `go test ./...` / `go test -race ./client/service/...` — 全部 Go 测试 / 竞态。
-  - `cd plugin && npm run build` — 打包手端插件到 `plugin/dist`(unpacked 加载目录);`npm run typecheck` strict;`npm run test:node` 连真脑端到端(需先起脑)。
-  - `cd client/ui && npm run dev` — 起 UI(Vite,5273);`npm run build` 构建;`npm run test:node` 数据层连真脑。
-  - `cd client/electron && npm start` — Electron 壳(启停脑 + 开窗);`npm run test:node` 服务生命周期。
+  - **JS 包管理用 pnpm workspace**(根 `pnpm-workspace.yaml` 统管 plugin / client/ui / client/electron)。仓库根 `pnpm install` 一次装全部;`pnpm approve-builds` 已固化到根 package.json 的 `onlyBuiltDependencies`(esbuild/electron 原生二进制)。禁止再引入 npm/yarn 锁文件。
+  - `cd plugin && pnpm build` — 打包手端插件到 `plugin/dist`(unpacked 加载目录);`pnpm typecheck` strict;`pnpm test:node` 连真脑端到端(需先起脑)。
+  - `cd client/ui && pnpm dev` — 起 UI(Vite,5273);`pnpm build` 构建;`pnpm test:node` 数据层连真脑。
+  - `cd client/electron && pnpm start` — Electron 壳(启停脑 + 开窗);`pnpm test:node` 服务生命周期。
   - 人眼验收操作:见 `scripts/dev-run.md`;§16 验收对照见 `docs/里程碑1-验收报告.md`。
 - Go 侧 SQLite 走 glebarez/sqlite(纯 Go);**禁止引入 cgo 依赖**,`CGO_ENABLED=0 GOOS=windows go build ./client/service` 必须常年通过(Windows 交叉编译是发布路径)。
 - SQLite 写靠 `SetMaxOpenConns(1)` 串行化(SQLite 单写;红队复现过并发 BUSY 静默丢结果→双发的致命链)。

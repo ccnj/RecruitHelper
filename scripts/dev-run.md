@@ -15,22 +15,22 @@ go run ./client/service -port 17872
 
 **A. 浏览器直开(最快):**
 ```bash
-cd client/ui && npm install && npm run dev
+cd client/ui && pnpm install && pnpm dev
 # 打开 http://localhost:5273
 ```
 
 **B. Electron 外壳(即"打开客户端"):**
 ```bash
-cd client/ui && npm install && npm run build   # 先出 UI 构建产物
-cd ../electron && npm install                  # 装 electron(约 200MB)
-npm start                                        # 壳自动起脑 + 开窗
-# 若想连已在跑的脑并用 vite dev:UI_URL=http://localhost:5273 npm start
+cd client/ui && pnpm install && pnpm build   # 先出 UI 构建产物
+cd ../electron && pnpm install                  # 装 electron(约 200MB)
+pnpm start                                        # 壳自动起脑 + 开窗
+# 若想连已在跑的脑并用 vite dev:UI_URL=http://localhost:5273 pnpm start
 ```
 
 ## 3. 装插件(手端)
 
 ```bash
-cd plugin && npm install && npm run build
+cd plugin && pnpm install && pnpm build
 ```
 Chrome → `chrome://extensions` → 右上"开发者模式" → "加载已解压的扩展程序" → 选 `plugin/dist`。
 
