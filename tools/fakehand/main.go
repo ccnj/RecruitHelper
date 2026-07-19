@@ -3,9 +3,9 @@
 //
 // 用法:
 //
-//	go run ./tools/fakehand -pair              首次配对:发无 token hello,等 welcome{issued},打印工牌
-//	go run ./tools/fakehand -hand hand-01 -token <tok>   日常握手,连上后持续心跳
-//	go run ./tools/fakehand -hand hand-01 -token <tok> -once   握手成功即退出(验收脚本用)
+//	go run ./tools/fakehand                         以稳定默认 handId 自动登记并持续心跳
+//	go run ./tools/fakehand -hand hand-my-fixture   指定 handId
+//	go run ./tools/fakehand -hand hand-my-fixture -once   握手成功即退出(验收脚本用)
 //
 // 关键结果以 EVENT 行输出到 stdout,便于脚本 grep;诊断走 stderr。
 package main
@@ -32,9 +32,7 @@ import (
 func main() {
 	url := flag.String("url", fmt.Sprintf("ws://%s:%d%s", protocol.TransportHost, protocol.DefaultPort, protocol.TransportPath), "脑 WS 地址")
 	origin := flag.String("origin", "chrome-extension://fakehandaaaaaaaaaaaaaaaaaaaaaaaa", "扩展 Origin")
-	pair := flag.Bool("pair", false, "配对模式(发无 token hello)")
-	hand := flag.String("hand", "", "handId(日常握手)")
-	token := flag.String("token", "", "令牌(日常握手)")
+	hand := flag.String("hand", "hand-fakehand", "手本地生成并持久化的稳定 handId")
 	boot := flag.String("boot", "", "bootId(默认随机生成)")
 	once := flag.Bool("once", false, "收到 welcome/bye 即退出")
 	noack := flag.Bool("noack", false, "捣乱模式:收到 cmd 不 ack 不执行(演练 ackTimeout 关连接)")
@@ -61,22 +59,17 @@ func main() {
 	}
 	defer ws.Close(websocket.StatusNormalClosure, "")
 
-	h := &fakeHand{ws: ws, bootID: bootID, noack: *noack}
+	h := &fakeHand{ws: ws, bootID: bootID, handID: *hand, noack: *noack}
 
-	// 组 hello
-	var handID, auth *string
-	if !*pair {
-		if *hand == "" || *token == "" {
-			fmt.Println("EVENT usage_error msg=需 -pair 或 -hand+-token")
-			os.Exit(2)
-		}
-		handID, auth = hand, token
+	if *hand == "" {
+		fmt.Println("EVENT usage_error msg=-hand 不能为空")
+		os.Exit(2)
 	}
-	if err := h.sendHello(ctx, handID, auth); err != nil {
+	if err := h.sendHello(ctx); err != nil {
 		fmt.Printf("EVENT hello_failed err=%v\n", err)
 		os.Exit(1)
 	}
-	slog.Info("已发 hello", "boot", bootID, "pair", *pair)
+	slog.Info("已发 hello", "boot", bootID, "handId", *hand)
 
 	// 心跳 ticker(pre-session 也发,保活;Go 手不受 SW 影响,纯为演示协议)
 	go h.heartbeat(ctx)
@@ -109,6 +102,7 @@ func main() {
 type fakeHand struct {
 	ws      *websocket.Conn
 	bootID  string
+	handID  string
 	noack   bool
 	mu      sync.Mutex
 	session *string
@@ -139,11 +133,7 @@ func (h *fakeHand) handle(ctx context.Context, env *protocol.Envelope) bool {
 		s := wb.Session
 		h.session = &s
 		h.mu.Unlock()
-		if wb.Issued != nil {
-			fmt.Printf("EVENT welcome paired=true session=%s handId=%s token=%s\n", wb.Session, wb.Issued.HandID, wb.Issued.Auth)
-		} else {
-			fmt.Printf("EVENT welcome paired=false session=%s\n", wb.Session)
-		}
+		fmt.Printf("EVENT welcome session=%s handId=%s\n", wb.Session, h.handID)
 		return true
 	case protocol.KindBye:
 		var bb protocol.ByeBody
@@ -223,7 +213,7 @@ func (h *fakeHand) heartbeat(ctx context.Context) {
 	}
 }
 
-func (h *fakeHand) sendHello(ctx context.Context, handID, auth *string) error {
+func (h *fakeHand) sendHello(ctx context.Context) error {
 	var caps []string
 	for name, m := range protocol.Primitives {
 		if m.Batch == protocol.BatchM1 && len(name) > 6 && name[:6] == "debug." {
@@ -231,7 +221,7 @@ func (h *fakeHand) sendHello(ctx context.Context, handID, auth *string) error {
 		}
 	}
 	return h.send(ctx, protocol.KindHello, nil, protocol.HelloBody{
-		HandID: handID, Auth: auth, BootID: h.bootID,
+		HandID: h.handID, BootID: h.bootID,
 		ProtoSupported: []int{protocol.ProtoVersion},
 		ContractHash:   protocol.ContractHash,
 		App:            protocol.AppInfo{ExtVersion: "0.1.0", Browser: "fakehand"},

@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -40,10 +39,14 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 		return
 	}
 	nowMs := now.UnixMilli()
+	leaseHandled := d.sweepLeases(now)
 	grace := int64(protocol.DefaultSuspectGraceMs)
 	// 第一趟(修红队 F4 残漏):过期 effectful 先全部 suspect 冻结相关域,使第二趟 intrusive
 	// void+重派与 queued 重投的冻结复查看到同趟 effectful,不依赖枚举顺序。
 	for _, cmd := range cmds {
+		if leaseHandled[cmd.MsgID] {
+			continue
+		}
 		if nowMs > cmd.DeadlineMs+grace && cmd.Class == string(protocol.ClassEffectful) {
 			d.markSuspect(cmd, "deadline+宽限 无终局")
 		}
@@ -52,17 +55,23 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 	closedThisSweep := map[string]bool{} // 每手每 sweep 至多关一次连接(红队 F2/F6/F11)
 	ackTimeoutMs := time.Duration(protocol.DefaultAckTimeoutMs) * time.Millisecond
 	for _, cmd := range cmds {
+		if leaseHandled[cmd.MsgID] {
+			continue
+		}
 		// deadline+宽限:优先于其余(过期命令不必再等)。
 		if nowMs > cmd.DeadlineMs+grace {
 			if cmd.Class == string(protocol.ClassEffectful) {
 				continue // 第一趟已处理
 			}
-			d.voidAndRedispatch(cmd, "deadline+宽限 无终局")
+			d.voidAndRedispatch(cmd, "deadline+宽限 无终局", redispatchBackoff(cmd.RedispatchN+1))
 			continue
 		}
 		// queued 且手在线 → 重投驱动(§7.2.4):发送失败或瞬态拒绝(QUEUE_FULL/STALE_SESSION)
 		// 回 queued 的命令,在存活连接上同 msgId 再投,不再滞留到 deadline 被误判 suspect(红队 F5/F8)。
 		if cmd.Status == store.CmdQueued {
+			if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
+				continue
+			}
 			// 法条4:冻结域内不重投 effectful/intrusive(readonly 不进串行域,豁免);修 F4 残漏。
 			if cmd.Class != string(protocol.ClassReadonly) {
 				if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
@@ -70,7 +79,7 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 				}
 			}
 			if session, _, online := d.sender.HandSession(cmd.HandID); online {
-				d.resendCmd(cmd, session)
+				d.resendCmdAt(cmd, session, now)
 			}
 			continue
 		}
@@ -84,13 +93,17 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 			if fresh == nil || fresh.Status != store.CmdSent || fresh.SentAt == nil || now.Sub(*fresh.SentAt) <= ackTimeoutMs {
 				continue
 			}
-			if _, _, online := d.sender.HandSession(cmd.HandID); online {
-				closedThisSweep[cmd.HandID] = true
-				d.st.Audit("ack_timeout", cmd.HandID, cmd.MsgID, "sent 超 ackTimeout 无应答,关连接")
-				slog.Warn("ackTimeout,关连接", "handId", cmd.HandID, "msgId", cmd.MsgID)
-				d.sender.CloseHand(cmd.HandID, "ackTimeout")
-				d.noteAckTimeout(cmd.HandID)
+			currentSession, _, online := d.sender.HandSession(cmd.HandID)
+			if !online || currentSession != fresh.Session {
+				continue
 			}
+			if !d.sender.CloseHand(cmd.HandID, fresh.Session, "ackTimeout") {
+				continue
+			}
+			closedThisSweep[cmd.HandID] = true
+			d.st.Audit("ack_timeout", cmd.HandID, cmd.MsgID, "sent 超 ackTimeout 无应答,关连接")
+			slog.Warn("ackTimeout,关连接", "handId", cmd.HandID, "msgId", cmd.MsgID, "session", fresh.Session)
+			d.noteAckTimeout(cmd.HandID)
 		}
 	}
 }
@@ -110,11 +123,87 @@ func (d *Dispatcher) markSuspect(cmd store.CmdRecord, reason string) {
 		return
 	}
 	d.st.Audit("suspect", cmd.HandID, cmd.MsgID, reason)
+	d.clearLease(cmd.MsgID)
+	d.notifyByMsgID(cmd.MsgID)
 	slog.Warn("命令转 suspect(永不自动重试,待人工裁决)", "handId", cmd.HandID, "msgId", cmd.MsgID, "reason", reason)
 }
 
-// voidAndRedispatch:readonly/intrusive 命令作废并重派(未超 cap 且手在线时)。
-func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string) {
+// voidAndRedispatch:readonly/intrusive 命令作废并重派。存在 child 时必须走 Store.ReplaceCmd，
+// 原子写入 parent void + replacement leaf，逻辑等待者看不到“中间 void、孩子未入账”。
+func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string, delay time.Duration) {
+	cap := redispatchCap(cmd.Class)
+	if cmd.RedispatchN >= cap {
+		d.terminalizeVoid(cmd, reason)
+		// 重派耗尽:readonly→标手 suspect 告警;intrusive→能力级告警。v1 都到告警为止(ensureSurface 自愈为 [S])。
+		d.st.Audit("redispatch_exhausted", cmd.HandID, cmd.MsgID,
+			fmt.Sprintf("class=%s 重派耗尽(%d/%d)", cmd.Class, cmd.RedispatchN, cap))
+		slog.Warn("重派耗尽,健康告警", "handId", cmd.HandID, "class", cmd.Class, "n", cmd.RedispatchN)
+		return
+	}
+	// 法条4:重派前复查串行域冻结。intrusive 在冻结域内不得重派(留 void 待解冻);红队 F4。
+	// readonly 不进串行域,不受此约束。
+	if cmd.Class == string(protocol.ClassIntrusive) {
+		if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
+			d.terminalizeVoid(cmd, reason)
+			d.st.Audit("redispatch_frozen", cmd.HandID, cmd.MsgID, "冻结域内不重派 intrusive(法条4)")
+			return
+		}
+	}
+	d.redispatchFrom(cmd, reason, delay)
+}
+
+// redispatchFrom:基于旧命令铸造新命令(新 msgId,RedispatchN+1,新 deadline)重派。
+// 手离线则不重派(命令是状态投影,不排队);上线/巡检自然重来。
+func (d *Dispatcher) redispatchFrom(old store.CmdRecord, reason string, delay time.Duration) {
+	meta, ok := protocol.Primitives[old.Name]
+	if !ok {
+		d.terminalizeVoid(old, reason)
+		return
+	}
+	session, bootID, online := d.sender.HandSession(old.HandID)
+	if !online {
+		d.terminalizeVoid(old, reason)
+		return
+	}
+	msgID := ids.NewMsgID()
+	notBefore := time.Now().Add(delay)
+	deadlineMs := notBefore.UnixMilli() + effectiveDeadlineMs(meta)
+	rec := &store.CmdRecord{
+		MsgID:  msgID,
+		HandID: old.HandID, Session: session, BootIDAtDispatch: bootID,
+		Status:     store.CmdQueued,
+		DeadlineMs: deadlineMs, ExecBudgetMs: old.ExecBudgetMs,
+	}
+	if delay > 0 {
+		rec.NotBeforeAt = &notBefore
+	}
+	if err := d.st.ReplaceCmd(old.MsgID, store.CmdVoid, reason, rec); err != nil {
+		slog.Error("重派记账失败", "err", err)
+		return
+	}
+	d.clearLease(old.MsgID)
+	d.st.Audit("cmd_void", old.HandID, old.MsgID, reason)
+	d.notifyLogical(rec.LogicalDispatchID)
+	if rec.NotBeforeAt != nil {
+		d.st.Audit("redispatch_scheduled", old.HandID, msgID,
+			fmt.Sprintf("from=%s n=%d notBefore=%s", old.MsgID, rec.RedispatchN, rec.NotBeforeAt.Format(time.RFC3339Nano)))
+		return
+	}
+	body, err := d.commandBody(*rec)
+	if err != nil {
+		d.st.Audit("redispatch_invalid", old.HandID, msgID, err.Error())
+		return
+	}
+	env := d.envelope(protocol.KindCmd, msgID, &session, body)
+	if err := d.sender.SendEnvelope(old.HandID, env); err != nil {
+		return // 留 queued,下轮再来
+	}
+	d.markSent(msgID, session, session)
+	d.st.Audit("redispatch", old.HandID, msgID, fmt.Sprintf("from=%s n=%d", old.MsgID, rec.RedispatchN))
+	slog.Info("重派", "handId", old.HandID, "from", old.MsgID, "to", msgID, "n", rec.RedispatchN)
+}
+
+func (d *Dispatcher) terminalizeVoid(cmd store.CmdRecord, reason string) {
 	err := d.st.MutateCmd(cmd.MsgID, func(r *store.CmdRecord) error {
 		if r.Status.Terminal() {
 			return errAlreadyTerminal
@@ -126,69 +215,9 @@ func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string) {
 	if err != nil {
 		return
 	}
+	d.clearLease(cmd.MsgID)
 	d.st.Audit("cmd_void", cmd.HandID, cmd.MsgID, reason)
-
-	cap := redispatchCap(cmd.Class)
-	if cmd.RedispatchN >= cap {
-		// 重派耗尽:readonly→标手 suspect 告警;intrusive→能力级告警。v1 都到告警为止(ensureSurface 自愈为 [S])。
-		d.st.Audit("redispatch_exhausted", cmd.HandID, cmd.MsgID,
-			fmt.Sprintf("class=%s 重派耗尽(%d/%d)", cmd.Class, cmd.RedispatchN, cap))
-		slog.Warn("重派耗尽,健康告警", "handId", cmd.HandID, "class", cmd.Class, "n", cmd.RedispatchN)
-		return
-	}
-	// 法条4:重派前复查串行域冻结。intrusive 在冻结域内不得重派(留 void 待解冻);红队 F4。
-	// readonly 不进串行域,不受此约束。
-	if cmd.Class == string(protocol.ClassIntrusive) {
-		if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
-			d.st.Audit("redispatch_frozen", cmd.HandID, cmd.MsgID, "冻结域内不重派 intrusive(法条4)")
-			return
-		}
-	}
-	d.redispatchFrom(cmd)
-}
-
-// redispatchFrom:基于旧命令铸造新命令(新 msgId,RedispatchN+1,新 deadline)重派。
-// 手离线则不重派(命令是状态投影,不排队);上线/巡检自然重来。
-func (d *Dispatcher) redispatchFrom(old store.CmdRecord) {
-	meta, ok := protocol.Primitives[old.Name]
-	if !ok {
-		return
-	}
-	session, bootID, online := d.sender.HandSession(old.HandID)
-	if !online {
-		return
-	}
-	msgID := ids.NewMsgID()
-	deadlineMs := time.Now().UnixMilli() + effectiveDeadlineMs(meta)
-	rec := &store.CmdRecord{
-		MsgID: msgID, Name: old.Name, Class: old.Class, Domain: old.Domain, Args: old.Args,
-		HandID: old.HandID, Session: session, BootIDAtDispatch: bootID,
-		Status: store.CmdQueued, RedispatchN: old.RedispatchN + 1,
-		DeadlineMs: deadlineMs, ExecBudgetMs: old.ExecBudgetMs,
-	}
-	if err := d.st.CreateCmd(rec); err != nil {
-		slog.Error("重派记账失败", "err", err)
-		return
-	}
-	body := protocol.CmdBody{
-		Name: old.Name, Ver: meta.Ver, Args: json.RawMessage(old.Args),
-		Deadline: deadlineMs, ExecBudgetMs: rec.ExecBudgetMs,
-	}
-	env := d.envelope(protocol.KindCmd, msgID, &session, body)
-	if err := d.sender.SendEnvelope(old.HandID, env); err != nil {
-		return // 留 queued,下轮再来
-	}
-	_ = d.st.MutateCmd(msgID, func(r *store.CmdRecord) error {
-		if r.Status == store.CmdQueued {
-			r.Status = store.CmdSent
-			r.Attempt++
-			t := time.Now()
-			r.SentAt = &t
-		}
-		return nil
-	})
-	d.st.Audit("redispatch", old.HandID, msgID, fmt.Sprintf("from=%s n=%d", old.MsgID, rec.RedispatchN))
-	slog.Info("重派", "handId", old.HandID, "from", old.MsgID, "to", msgID, "n", rec.RedispatchN)
+	d.notifyByMsgID(cmd.MsgID)
 }
 
 func redispatchCap(class string) int {

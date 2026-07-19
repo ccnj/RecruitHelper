@@ -1,9 +1,13 @@
 package store
 
 import (
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 // 并发 MutateCmd 不丢更新、不撞 SQLITE_BUSY(红队 F1 回归:SetMaxOpenConns(1) 串行化)。
@@ -70,25 +74,17 @@ func TestOpenMigrateAndWAL(t *testing.T) {
 
 func TestHands(t *testing.T) {
 	s := openTest(t)
-	h := &PairedHand{
-		HandID:    "hand-01",
-		TokenHash: HashToken("tok-abc"),
-		Origin:    "chrome-extension://abcdefg",
-		Label:     "测试手",
-		CreatedAt: time.Now(),
-	}
-	if err := s.UpsertHand(h); err != nil {
-		t.Fatalf("UpsertHand: %v", err)
+	registeredAt := time.Now()
+	h, created, previousOrigin, err := s.RegisterHand("hand-01", "chrome-extension://abcdefg", registeredAt)
+	if err != nil || !created || previousOrigin != "" {
+		t.Fatalf("RegisterHand 首次登记: h=%+v created=%v previous=%q err=%v", h, created, previousOrigin, err)
 	}
 	got, err := s.HandByID("hand-01")
 	if err != nil || got == nil {
 		t.Fatalf("HandByID: %v, got=%v", err, got)
 	}
-	if got.TokenHash != HashToken("tok-abc") {
-		t.Fatalf("TokenHash 不匹配")
-	}
-	if got.TokenHash == "tok-abc" {
-		t.Fatalf("token 明文不许落库")
+	if got.Origin != "chrome-extension://abcdefg" || !got.CreatedAt.Equal(registeredAt) {
+		t.Fatalf("手字段不匹配: %+v", got)
 	}
 	// 未知手 → (nil, nil)
 	none, err := s.HandByID("hand-99")
@@ -101,6 +97,130 @@ func TestHands(t *testing.T) {
 	hs, err := s.Hands()
 	if err != nil || len(hs) != 1 {
 		t.Fatalf("Hands: %v, n=%d", err, len(hs))
+	}
+}
+
+func TestRegisterHandConcurrentFirstHelloIsIdempotent(t *testing.T) {
+	s := openTest(t)
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	created := make([]bool, n)
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, created[i], _, errs[i] = s.RegisterHand(
+				"hand-concurrent", "chrome-extension://same", time.Now(),
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	createdN := 0
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("并发登记[%d]: %v", i, errs[i])
+		}
+		if created[i] {
+			createdN++
+		}
+	}
+	if createdN != 1 {
+		t.Fatalf("并发首次 hello 必须只创建一次，实际 %d", createdN)
+	}
+	hands, err := s.Hands()
+	if err != nil || len(hands) != 1 || hands[0].HandID != "hand-concurrent" {
+		t.Fatalf("并发登记后 hands 不幂等: %+v err=%v", hands, err)
+	}
+}
+
+func TestHandSchemaHasNoPairingCredentials(t *testing.T) {
+	s := openTest(t)
+	if !s.db.Migrator().HasTable("hands") {
+		t.Fatal("新模型必须使用 hands 表")
+	}
+	if s.db.Migrator().HasTable("paired_hands") {
+		t.Fatal("新安装不得创建 paired_hands 旧表")
+	}
+	columns, err := s.db.Migrator().ColumnTypes(&Hand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range columns {
+		if column.Name() == "token_hash" {
+			t.Fatal("hands 不得保留 token_hash")
+		}
+	}
+}
+
+func TestOpenDropsRetiredPairedHandsTable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		withRow bool
+	}{
+		{name: "空旧表"},
+		{name: "带测试行旧表", withRow: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacyDB, err := gorm.Open(sqlite.Open("file:"+filepath.Join(dir, "brain.db")), &gorm.Config{})
+			if err != nil {
+				t.Fatalf("打开旧库: %v", err)
+			}
+			if err := legacyDB.Exec(`CREATE TABLE paired_hands (
+				hand_id text PRIMARY KEY,
+				token_hash text NOT NULL,
+				origin text NOT NULL,
+				label text,
+				created_at datetime,
+				last_seen_at datetime
+			)`).Error; err != nil {
+				t.Fatalf("创建旧配对表: %v", err)
+			}
+			// 相似前缀表是破坏范围哨兵：迁移只能命中精确旧表名。
+			if err := legacyDB.Exec(`CREATE TABLE paired_hands_archive (
+				hand_id text PRIMARY KEY
+			)`).Error; err != nil {
+				t.Fatalf("创建相似名哨兵表: %v", err)
+			}
+			if err := legacyDB.Exec(`INSERT INTO paired_hands_archive (hand_id) VALUES ('must-survive')`).Error; err != nil {
+				t.Fatalf("写入相似名哨兵表: %v", err)
+			}
+			if tc.withRow {
+				if err := legacyDB.Exec(`INSERT INTO paired_hands
+					(hand_id, token_hash, origin, label)
+					VALUES ('legacy-hand', 'legacy-token-hash', 'chrome-extension://legacy', '测试旧手')`).Error; err != nil {
+					t.Fatalf("写入旧配对测试行: %v", err)
+				}
+			}
+			legacySQL, err := legacyDB.DB()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := legacySQL.Close(); err != nil {
+				t.Fatalf("关闭旧库: %v", err)
+			}
+
+			s, err := Open(dir)
+			if err != nil {
+				t.Fatalf("升级打开旧库: %v", err)
+			}
+			defer s.Close()
+			if s.db.Migrator().HasTable(retiredPairedHandsTable) {
+				t.Fatal("升级后仍存在 paired_hands 旧凭据表")
+			}
+			var sentinelRows int64
+			if !s.db.Migrator().HasTable("paired_hands_archive") ||
+				s.db.Table("paired_hands_archive").Count(&sentinelRows).Error != nil || sentinelRows != 1 {
+				t.Fatalf("精确删表迁移误伤相似名表: rows=%d", sentinelRows)
+			}
+			if !s.db.Migrator().HasTable(&Hand{}) {
+				t.Fatal("升级后缺少现行 hands 表")
+			}
+		})
 	}
 }
 

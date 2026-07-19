@@ -1,5 +1,5 @@
 {
-  "$comment": "脑手协议契约 v1 机器可读骨架。唯一规范源是同目录《协议规格-v1.md》,本文件是 codegen 输入。append-only:已发布字段与枚举值不得改名删除。batch: M1=里程碑1激活 / S=感知批次 / X=首个外部副作用原语批次 / far=远期占位。",
+  "$comment": "脑手协议契约 v1 机器可读源。唯一规范源是同目录《协议规格-v1.md》,本文件是 codegen 输入。2026-07-17 首个客户安装前按本地可信威胁模型删除配对/auth/issued,自此继续 additive-only。batch: M1=里程碑1激活 / S=感知批次 / X=首个外部副作用原语批次 / far=远期占位。",
   "proto": 1,
   "transport": {
     "scheme": "ws",
@@ -15,12 +15,24 @@
       "proto": { "type": "int", "note": "协议主版本;主版本内 must-ignore 未知字段" },
       "kind": { "type": "string", "enumRef": "kinds" },
       "msgId": { "type": "string", "note": "唯一不透明串(建议 ULID);重传不变;接收方不得解析内容" },
-      "session": { "type": "string|null", "note": "welcome 分配;hello/welcome/bye 为 null;cmd 仅受理时刻校验当前会话(已 accepted 的命令跨会话继续执行);重传跨会话时更新为手当前会话;pre-session ping/pong 为 null" },
+      "session": { "type": "string|null", "note": "welcome 分配;hello/welcome/bye 为 null;cmd 仅受理时刻校验当前会话(已 accepted 的命令跨会话继续执行);重传跨会话时更新为手当前会话" },
       "ts": { "type": "int64", "note": "毫秒;仅诊断;禁止用于去重/排序/裁决" },
       "attempt": { "type": "int", "note": ">=1;仅诊断" },
       "body": { "type": "object" }
     },
     "correlationField": { "name": "ref", "nullable": false, "note": "所有指向另一条消息的字段唯一合法名;codegen 生成为非可空" }
+  },
+  "compatibility": {
+    "unknownFields": "must-ignore",
+    "contractHash": "warn-only",
+    "schemaEvolution": "additive-only",
+    "jsonInteger": "safe-int53"
+  },
+  "features": {
+    "progress/1": { "batch": "S", "note": "长命令过程提示;stage 仅人读;合法 progress 刷新 lastSeen" },
+    "lease/1": { "batch": "S", "note": "ack(accepted) 到达脑时启动;合法 progress 按脑接收时刻续租;绝不越过绝对 deadline" },
+    "cancel/1": { "batch": "S", "note": "尽力取消;ack 只确认取消请求已收妥;目标 cmd 的 result 永远是终局真相" },
+    "blob/1": { "batch": "X", "note": "Claim Check 大载荷;未协商时超限必须响亮失败,禁止截断" }
   },
   "kinds": {
     "hello":    { "dir": "H2B", "ackBy": "welcome|bye", "batch": "M1" },
@@ -29,80 +41,453 @@
     "cmd":      { "dir": "B2H", "ackBy": "ack", "batch": "M1" },
     "ack":      { "dir": "both", "ackBy": null, "batch": "M1" },
     "result":   { "dir": "H2B", "ackBy": "ack", "batch": "M1" },
-    "ping":     { "dir": "H2B", "ackBy": "pong", "batch": "M1", "note": "pre-session 允许 session=null(握手期保活,不带 contexts/sensors)" },
+    "ping":     { "dir": "H2B", "ackBy": "pong", "batch": "M1" },
     "pong":     { "dir": "B2H", "ackBy": null, "batch": "M1" },
     "progress": { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S" },
     "event":    { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S", "note": "QoS0 提示;唯一权力=调整巡检开跑时刻/静默窗/健康档" },
     "query":    { "dir": "B2H", "ackBy": "report", "batch": "X" },
     "report":   { "dir": "H2B", "ackBy": null, "batch": "X", "states": ["unknown", "queued", "executing", "attempting", "done"] },
-    "cancel":   { "dir": "B2H", "ackBy": "ack", "batch": "X", "note": "尽力而为;与 result 赛跑时 result 赢" }
+    "cancel":   { "dir": "B2H", "ackBy": "ack", "batch": "S", "note": "尽力而为;ack.ref 指向 cancel 帧,body.ref 指向目标 cmd;与 result 赛跑时 result 赢" }
   },
   "bodies": {
-    "hello": {
-      "handId": "string|null(首次配对)",
-      "auth": "string|null(首次配对)",
-      "bootId": "string(SW 每次出生新生成,内存值)",
-      "protoSupported": "int[]",
-      "contractHash": "string(sha256:...,仅漂移告警)",
-      "app": { "extVersion": "string", "browser": "string" },
-      "caps": "string[](原语名@版本;会话不可变,program 热更须重连重报)",
-      "features": "string[]"
-    },
-    "welcome": {
-      "session": "string",
-      "proto": "int",
-      "hb": { "intervalMs": "int", "graceMs": "int" },
-      "limits": { "maxMsgBytes": "int", "inlineBytes": "int" },
-      "issued": "{ handId, auth } | absent(仅配对签发时)",
-      "contractMatch": "bool",
-      "now": "int64",
-      "sensors": "[S] { badgeDebounceMs, badgeMinEmitIntervalMs, navSettleMs, manualQuietMs }",
-      "blob": "[X] { endpoint, token, maxBytes }"
-    },
-    "bye": { "code": "enumRef byeCodes", "message": "string?" },
-    "cmd": {
-      "name": "string(原语名)",
-      "ver": "int",
-      "context": "{ platform, accountRef } | absent(debug.* 可缺省)",
-      "args": "object(原语 argsSchema)",
-      "idemKey": "string,仅 effectful 必填。业务形态 ik1:{platform}:{accountRef}:{primitive}:{targetRef}:{intentId};debug 形态 ik1:debug:{handId}:{primitive}:{targetRef}:{intentId}(测试页命令同样经脑铸意图行)",
-      "deadline": "int64(绝对,脑钟;手出队与不可逆动作前双查)",
-      "execBudgetMs": "int(<=240000)",
-      "guards": "[X] object(语义化前置断言)"
-    },
-    "ack": {
-      "ref": "string(非可空)",
-      "status": "accepted | rejected | duplicate",
-      "error": "errorObject,仅 rejected(恒 sideEffect=none)",
-      "$rejectPolicy": "注释(非线上字段):瞬态拒绝(QUEUE_FULL/STALE_SESSION)脑侧回 queued 待重投,可同 msgId 再投(同连接亦可);协议性拒绝(PROTO_*)记终局。手侧仅 accepted 入去重表;收帧管线固定顺序:信封校验→msgId 去重→session 校验(仅受理时刻)→caps→deadline→入队"
-    },
-    "result": {
-      "ref": "string(非可空)",
-      "status": "ok | failed | canceled | expired",
-      "data": "object(原语 dataSchema,ok 时)",
-      "error": "errorObject(failed 时必填)",
-      "evidence": "[{type, text?, blob?}](effectful ok 必填,X 起强制;对脑不透明)",
-      "replayed": "bool",
-      "execMs": "int",
-      "$queueDrop": "注释(非线上字段):手收到 accepted 或 duplicate 皆删除本地队列条目(两者等价=脑已持有终局)"
-    },
-    "ping": {
-      "queueDepth": "int",
-      "inFlight": "string|null(正在执行的 cmd msgId)",
-      "contexts": "[S] [{ platform, accountRef, ready, reason: enumRef enums.notReadyReason }]",
-      "sensors": "[S] { unreadTotal: { value, observedAgoMs } } | null(只运缓存现货,禁止心跳触发采集)"
-    },
-    "pong": { "now": "int64" },
-    "progress": { "ref": "string", "stage": "string(自由文本,禁止程序分支)", "pct": "int?" },
-    "event": {
-      "name": "enumRef events",
-      "context": "{ platform, accountRef }",
-      "observedAt": "int64",
-      "data": "object(事件 schema)"
-    },
-    "query": { "ref": "string" },
-    "report": { "ref": "string", "state": "unknown|queued|executing|attempting|done", "result": "resultBody|null", "journal": "object|null" },
-    "cancel": { "ref": "string", "reason": "string" }
+    "hello": { "schema": "HelloBody" },
+    "welcome": { "schema": "WelcomeBody" },
+    "bye": { "schema": "ByeBody" },
+    "cmd": { "schema": "CmdBody" },
+    "ack": { "schema": "AckBody" },
+    "result": { "schema": "ResultBody" },
+    "ping": { "schema": "PingBody" },
+    "pong": { "schema": "PongBody" },
+    "progress": { "schema": "ProgressBody" },
+    "event": { "schema": "EventBody" },
+    "query": { "schema": "QueryBody" },
+    "report": { "schema": "ReportBody" },
+    "cancel": { "schema": "CancelBody" }
+  },
+  "schemas": {
+    "types": {
+      "AppInfo": {
+        "type": "object",
+        "fields": {
+          "extVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "browser": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "HelloBody": {
+        "type": "object",
+        "fields": {
+          "handId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "bootId": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "protoSupported": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "int", "minimum": 1 } },
+          "contractHash": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "app": { "ref": "AppInfo" },
+          "caps": { "type": "array", "maxItems": 256, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "features": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+        }
+      },
+      "HbParams": {
+        "type": "object",
+        "fields": {
+          "intervalMs": { "type": "int64", "minimum": 1000, "maximum": 120000 },
+          "graceMs": { "type": "int64", "minimum": 1000, "maximum": 600000 }
+        }
+      },
+      "Limits": {
+        "type": "object",
+        "fields": {
+          "maxMsgBytes": { "type": "int64", "minimum": 1024, "maximum": 262144 },
+          "inlineBytes": { "type": "int64", "minimum": 1024, "maximum": 262144 }
+        }
+      },
+      "SensorParams": {
+        "type": "object",
+        "fields": {
+          "badgeDebounceMs": { "type": "int64", "minimum": 0, "maximum": 3000 },
+          "badgeMinEmitIntervalMs": { "type": "int64", "minimum": 1000, "maximum": 60000 },
+          "navSettleMs": { "type": "int64", "minimum": 0, "maximum": 3000 },
+          "manualQuietMs": { "type": "int64", "minimum": 0, "maximum": 600000 }
+        }
+      },
+      "BlobParams": {
+        "type": "object",
+        "fields": {
+          "endpoint": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "token": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "maxBytes": { "type": "int64", "minimum": 1, "maximum": 20971520 }
+        }
+      },
+      "WelcomeBody": {
+        "type": "object",
+        "fields": {
+          "session": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "proto": { "type": "int", "minimum": 1 },
+          "hb": { "ref": "HbParams" },
+          "limits": { "ref": "Limits" },
+          "contractMatch": { "type": "boolean" },
+          "now": { "type": "int64", "minimum": 0 },
+          "sensors": { "ref": "SensorParams", "optional": true },
+          "blob": { "ref": "BlobParams", "optional": true }
+        }
+      },
+      "ByeBody": {
+        "type": "object",
+        "fields": {
+          "code": { "type": "string", "enumRef": "byeCodes" },
+          "message": { "type": "string", "optional": true, "maxLength": 500, "maxBytes": 2000 }
+        }
+      },
+      "CmdContext": {
+        "type": "object",
+        "fields": {
+          "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "accountRef": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "expectedPrincipalFingerprint": { "type": "string", "optional": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+        }
+      },
+      "CmdBody": {
+        "type": "object",
+        "fields": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "ver": { "type": "int", "minimum": 1, "maximum": 65535 },
+          "context": { "ref": "CmdContext", "optional": true },
+          "args": { "type": "object", "raw": true },
+          "idemKey": { "type": "string", "optional": true, "minLength": 1, "maxLength": 1024, "maxBytes": 4096 },
+          "deadline": { "type": "int64", "minimum": 0 },
+          "execBudgetMs": { "type": "int64", "minimum": 1, "maximum": 240000 },
+          "leaseMs": { "type": "int64", "optional": true, "minimum": 5000, "maximum": 120000 },
+          "guards": { "type": "object", "raw": true, "optional": true }
+        }
+      },
+      "Evidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "text": { "type": "string", "optional": true, "maxBytes": 2048 },
+          "blob": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "fields": {
+          "code": { "type": "string", "enumRef": "errorCodes" },
+          "message": { "type": "string", "optional": true, "maxLength": 500, "maxBytes": 2000 },
+          "retryable": { "type": "string", "enumRef": "enums.retryable", "optional": true },
+          "sideEffect": { "type": "string", "enumRef": "enums.sideEffect", "optional": true },
+          "data": { "type": "object", "raw": true, "optional": true, "maxJsonBytes": 65536 },
+          "evidence": { "type": "array", "optional": true, "maxItems": 4, "items": { "ref": "Evidence" } }
+        }
+      },
+      "AckBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "type": "string", "enumRef": "enums.ackStatus" },
+          "error": { "ref": "ErrorBody", "optional": true, "nullable": true }
+        },
+        "rules": [
+          { "kind": "requiredWhen", "field": "error", "whenField": "status", "equals": ["rejected"] },
+          { "kind": "forbiddenWhen", "field": "error", "whenField": "status", "equals": ["accepted", "duplicate"] }
+        ]
+      },
+      "ResultBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "status": { "type": "string", "enumRef": "enums.resultStatus" },
+          "data": { "type": "any", "optional": true, "nullable": true, "maxJsonBytes": 65536 },
+          "dataBlobRef": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 128 },
+          "error": { "ref": "ErrorBody", "optional": true, "nullable": true },
+          "evidence": { "type": "array", "optional": true, "maxItems": 4, "items": { "ref": "Evidence" } },
+          "replayed": { "type": "boolean" },
+          "execMs": { "type": "int64", "minimum": 0, "maximum": 240000 }
+        },
+        "rules": [
+          { "kind": "exactlyOneWhen", "fields": ["data", "dataBlobRef"], "whenField": "status", "equals": ["ok"] },
+          { "kind": "requiredWhen", "field": "error", "whenField": "status", "equals": ["failed"] },
+          { "kind": "forbiddenWhen", "field": "error", "whenField": "status", "equals": ["ok", "canceled", "expired"] },
+          { "kind": "forbiddenWhen", "field": "data", "whenField": "status", "equals": ["failed", "canceled", "expired"] },
+          { "kind": "forbiddenWhen", "field": "dataBlobRef", "whenField": "status", "equals": ["failed", "canceled", "expired"] }
+        ]
+      },
+      "PingContext": {
+        "type": "object",
+        "fields": {
+          "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "accountRef": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "ready": { "type": "boolean" },
+          "reason": { "type": "string", "enumRef": "enums.notReadyReason", "optional": true }
+        },
+        "rules": [
+          { "kind": "requiredWhen", "field": "reason", "whenField": "ready", "equals": [false] },
+          { "kind": "forbiddenWhen", "field": "reason", "whenField": "ready", "equals": [true] }
+        ]
+      },
+      "SensorReading": {
+        "type": "object",
+        "fields": {
+          "value": { "type": "int", "minimum": 0, "maximum": 1000000 },
+          "observedAgoMs": { "type": "int64", "minimum": 0, "maximum": 86400000 }
+        }
+      },
+      "PingSensors": {
+        "type": "object",
+        "fields": {
+          "unreadTotal": { "ref": "SensorReading", "nullable": true }
+        }
+      },
+      "PingBody": {
+        "type": "object",
+        "fields": {
+          "queueDepth": { "type": "int", "minimum": 0, "maximum": 16 },
+          "inFlight": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 128 },
+          "contexts": { "type": "array", "optional": true, "maxItems": 64, "items": { "ref": "PingContext" } },
+          "sensors": { "ref": "PingSensors", "optional": true, "nullable": true }
+        }
+      },
+      "PongBody": {
+        "type": "object",
+        "fields": {
+          "now": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ProgressBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "stage": { "type": "string", "minLength": 1, "maxLength": 200, "maxBytes": 800 },
+          "pct": { "type": "int", "optional": true, "minimum": 0, "maximum": 100 }
+        }
+      },
+      "EventContext": {
+        "type": "object",
+        "fields": {
+          "platform": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "accountRef": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      },
+      "EventBody": {
+        "type": "object",
+        "fields": {
+          "name": { "type": "string", "enumRef": "events" },
+          "context": { "ref": "EventContext" },
+          "observedAt": { "type": "int64", "minimum": 0 },
+          "data": { "type": "object", "raw": true }
+        }
+      },
+      "QueryBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "JournalSnapshot": { "type": "object", "fields": {} },
+      "ReportBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "state": { "type": "string", "enumRef": "enums.reportState" },
+          "result": { "ref": "ResultBody", "nullable": true },
+          "journal": { "ref": "JournalSnapshot", "nullable": true }
+        }
+      },
+      "CancelBody": {
+        "type": "object",
+        "fields": {
+          "ref": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "reason": { "type": "string", "enumRef": "enums.cancelReason" }
+        }
+      },
+
+      "DebugPingArgs": {
+        "type": "object",
+        "fields": { "echo": { "type": "any", "optional": true } }
+      },
+      "DebugPingData": {
+        "type": "object",
+        "fields": {
+          "echo": { "type": "any" },
+          "swStartedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "DebugSwitchWindowArgs": { "type": "object", "fields": {} },
+      "DebugSwitchWindowData": {
+        "type": "object",
+        "fields": { "switched": { "type": "boolean" } }
+      },
+      "DebugSlowEchoArgs": {
+        "type": "object",
+        "fields": {
+          "ms": { "type": "int", "minimum": 0, "maximum": 200000 },
+          "outcome": { "type": "string", "enumRef": "enums.debugSlowOutcome" }
+        }
+      },
+      "DebugSlowEchoData": {
+        "type": "object",
+        "fields": { "echoedAfterMs": { "type": "int", "minimum": 0, "maximum": 200000 } }
+      },
+      "ProbePlatformArgs": { "type": "object", "fields": {} },
+      "PlatformSurface": {
+        "type": "object",
+        "fields": { "imListVisible": { "type": "boolean" } }
+      },
+      "ProbePlatformData": {
+        "type": "object",
+        "fields": {
+          "pageKind": { "type": "string", "enumRef": "enums.pageKind" },
+          "contentScriptOk": { "type": "boolean" },
+          "loginState": { "type": "string", "enumRef": "enums.loginState" },
+          "principalFingerprint": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "surface": { "ref": "PlatformSurface", "nullable": true }
+        }
+      },
+      "NavEnsureSurfaceArgs": {
+        "type": "object",
+        "fields": { "surface": { "type": "string", "enumRef": "enums.surfaceName" } }
+      },
+      "NavEnsureSurfaceData": {
+        "type": "object",
+        "fields": {
+          "ready": { "type": "boolean" },
+          "loginState": { "type": "string", "enumRef": "enums.loginState" },
+          "createdTab": { "type": "boolean" }
+        }
+      },
+      "PeerSummary": {
+        "type": "object",
+        "fields": {
+          "displayName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "platformUserRef": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "LastMessageSummary": {
+        "type": "object",
+        "fields": {
+          "direction": { "type": "string", "enumRef": "enums.messageDirection" },
+          "kind": { "type": "string", "enumRef": "enums.messageKind" },
+          "textPreview": { "type": "string", "maxLength": 200, "maxBytes": 800 }
+        }
+      },
+      "ConversationSummary": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "peer": { "ref": "PeerSummary" },
+          "unreadCount": { "type": "int", "minimum": 0, "maximum": 1000000 },
+          "lastMessage": { "ref": "LastMessageSummary" },
+          "lastActivityTs": { "type": "int64", "nullable": true, "minimum": 0 }
+        }
+      },
+      "ChatReadListArgs": {
+        "type": "object",
+        "fields": {
+          "filter": { "type": "string", "enumRef": "enums.listFilter" },
+          "stopOlderThanDays": { "type": "int", "optional": true, "default": 8, "minimum": 1, "maximum": 30 },
+          "maxSessions": { "type": "int", "optional": true, "default": 32, "minimum": 1, "maximum": 32 },
+          "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "ChatReadListData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "sessions": { "type": "array", "maxItems": 32, "items": { "ref": "ConversationSummary" } },
+          "complete": { "type": "boolean" },
+          "nextCursor": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        },
+        "rules": [
+          { "kind": "requiredWhen", "field": "nextCursor", "whenField": "complete", "equals": [false] },
+          { "kind": "forbiddenWhen", "field": "nextCursor", "whenField": "complete", "equals": [true] }
+        ]
+      },
+      "MessageAnchor": {
+        "type": "object",
+        "fields": {
+          "direction": { "type": "string", "enumRef": "enums.messageDirection" },
+          "contentHash": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      },
+      "ThreadWindow": {
+        "type": "object",
+        "fields": {
+          "maxMessages": { "type": "int", "optional": true, "default": 50, "minimum": 1, "maximum": 64 },
+          "anchorTail": { "type": "array", "optional": true, "maxItems": 5, "items": { "ref": "MessageAnchor" } },
+          "deep": { "type": "boolean", "optional": true, "default": false }
+        }
+      },
+      "ChatReadThreadArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "window": { "ref": "ThreadWindow" },
+          "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "ThreadMessage": {
+        "type": "object",
+        "fields": {
+          "idx": { "type": "int", "minimum": 0, "maximum": 63 },
+          "direction": { "type": "string", "enumRef": "enums.messageDirection" },
+          "kind": { "type": "string", "enumRef": "enums.messageKind" },
+          "text": { "type": "string", "nullable": true, "maxBytes": 2048 },
+          "blobRef": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 128 },
+          "contentHash": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "cardType": { "type": "string", "enumRef": "enums.cardType", "optional": true, "nullable": true },
+          "cardState": { "type": "string", "enumRef": "enums.cardState", "optional": true, "nullable": true },
+          "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
+        }
+      },
+      "ChatReadThreadData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "messages": { "type": "array", "maxItems": 64, "items": { "ref": "ThreadMessage" } },
+          "reachedTop": { "type": "boolean" },
+          "anchorMatched": { "type": "boolean" },
+          "peer": { "ref": "PeerSummary", "nullable": true },
+          "complete": { "type": "boolean" },
+          "nextCursor": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        },
+        "rules": [
+          { "kind": "requiredWhen", "field": "nextCursor", "whenField": "complete", "equals": [false] },
+          { "kind": "forbiddenWhen", "field": "nextCursor", "whenField": "complete", "equals": [true] },
+          { "kind": "atLeastOneTrueWhen", "fields": ["reachedTop", "anchorMatched"], "whenField": "complete", "equals": [true] },
+          { "kind": "allFalseWhen", "fields": ["reachedTop", "anchorMatched"], "whenField": "complete", "equals": [false] }
+        ]
+      },
+
+      "UnreadBadgeEventData": {
+        "type": "object",
+        "fields": {
+          "scope": { "type": "string", "enumRef": "enums.unreadScope" },
+          "value": { "type": "int", "minimum": 0, "maximum": 1000000 },
+          "prev": { "type": "int", "nullable": true, "minimum": 0, "maximum": 1000000 },
+          "stable": { "type": "boolean", "const": true }
+        }
+      },
+      "PageNavigatedEventData": {
+        "type": "object",
+        "fields": {
+          "pageKind": { "type": "string", "enumRef": "enums.pageKind" },
+          "at": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "LoginStateChangedEventData": {
+        "type": "object",
+        "fields": {
+          "state": { "type": "string", "enumRef": "enums.loginChangeState" },
+          "stable": { "type": "boolean", "const": true },
+          "at": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ManualInteractionEventData": {
+        "type": "object",
+        "fields": {
+          "kind": { "type": "string", "enumRef": "enums.manualInteractionKind" },
+          "pageKind": { "type": "string", "enumRef": "enums.pageKind" },
+          "at": { "type": "int64", "minimum": 0 }
+        }
+      }
+    }
   },
   "classes": {
     "readonly":  { "redispatch": "free(封顶 2)", "serialDomain": false, "idemKey": "forbidden", "evidence": "none" },
@@ -117,89 +502,113 @@
     "resultStatus": ["ok", "failed", "canceled", "expired"],
     "retryable": ["yes", "no", "afterRecovery", "manualOnly"],
     "sideEffect": ["none", "possible", "confirmed"],
+    "errorPhase": ["receipt", "execution"],
     "reportState": ["unknown", "queued", "executing", "attempting", "done"],
-    "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "unknown"]
+    "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "identityUnverified", "unknown"],
+    "cancelReason": ["leaseExpired", "deadlineImminent", "superseded", "operator", "shutdown"],
+    "debugSlowOutcome": ["ok", "failed", "silent"],
+    "pageKind": ["im", "recommend", "other", "none"],
+    "loginState": ["in", "out", "unknown"],
+    "loginChangeState": ["in", "out"],
+    "surfaceName": ["im"],
+    "listFilter": ["all", "unread"],
+    "messageDirection": ["in", "out", "system"],
+    "messageKind": ["text", "image", "voice", "file", "card", "system"],
+    "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
+    "cardState": ["pending", "accepted", "rejected", "expired", "unknown"],
+    "unreadScope": ["total"],
+    "manualInteractionKind": ["pointer", "keyboard", "navigation"]
   },
-  "byeCodes": ["AUTH_FAILED", "PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN", "PAIRING_TIMEOUT", "PAIRING_REJECTED"],
+  "byeCodes": ["PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN"],
   "errorCodes": {
-    "PROTO_MALFORMED":          { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
-    "PROTO_UNSUPPORTED_KIND":   { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
-    "PROTO_UNSUPPORTED_CMD":    { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
-    "PROTO_BAD_ARGS":           { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
-    "PROTO_MSG_TOO_LARGE":      { "retryable": "no", "sideEffect": ["none"], "batch": "M1" },
-    "STALE_SESSION":            { "retryable": "yes", "sideEffect": ["none"], "batch": "M1" },
-    "QUEUE_FULL":               { "retryable": "yes", "sideEffect": ["none"], "batch": "M1" },
-    "GUARD_FAILED":             { "retryable": "manualOnly", "sideEffect": ["none"], "batch": "X" },
-    "CTX_NOT_READY":            { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "dataReason": "enumRef enums.notReadyReason" },
-    "CTX_LOST_DURING_EXEC":     { "retryable": "afterRecovery|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "S" },
-    "TARGET_NOT_FOUND":         { "retryable": "no", "sideEffect": ["none"], "batch": "S" },
-    "ELEMENT_UNRESOLVED":       { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "S" },
-    "PLATFORM_LIMIT":           { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "X" },
-    "POSTCONDITION_UNCONFIRMED":{ "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "X" },
-    "EXEC_TIMEOUT_HAND":        { "retryable": "yes|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "M1" },
-    "CANCELED_BY_BRAIN":        { "retryable": "no", "sideEffect": ["none"], "batch": "X" },
-    "INTERNAL_HAND":            { "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "M1" }
+    "PROTO_MALFORMED":           { "retryable": "no", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "PROTO_UNSUPPORTED_KIND":    { "retryable": "no", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "PROTO_UNSUPPORTED_CMD":     { "retryable": "no", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "PROTO_BAD_ARGS":            { "retryable": "no", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "PROTO_MSG_TOO_LARGE":       { "retryable": "no", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "STALE_SESSION":             { "retryable": "yes", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "QUEUE_FULL":                { "retryable": "yes", "sideEffect": ["none"], "batch": "M1", "phase": "receipt" },
+    "GUARD_FAILED":              { "retryable": "manualOnly", "sideEffect": ["none"], "batch": "X", "phase": "execution" },
+    "CTX_NOT_READY":             { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "dataReason": "enumRef enums.notReadyReason" },
+    "CTX_LOST_DURING_EXEC":      { "retryable": "afterRecovery|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "S", "phase": "execution" },
+    "USER_ACTIVE":               { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
+    "ACCOUNT_MISMATCH":          { "retryable": "manualOnly", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
+    "CONVERSATION_NOT_FOUND":    { "retryable": "no", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
+    "CURSOR_INVALID":            { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "opaque cursor 过期、跨账号/会话/参数误用;脑丢弃本轮聚合并从无 cursor 重启" },
+    "TARGET_NOT_FOUND":          { "retryable": "no", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "仅供非会话类未来原语;chat.* 不得使用,避免与 CONVERSATION_NOT_FOUND 同义" },
+    "ELEMENT_UNRESOLVED":        { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "S", "phase": "execution" },
+    "PAYLOAD_LIMIT":             { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "完整结果无法在协商的 inline/blob 能力内表达;禁止裁剪" },
+    "PLATFORM_LIMIT":            { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "X", "phase": "execution" },
+    "POSTCONDITION_UNCONFIRMED": { "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "X", "phase": "execution" },
+    "EXEC_TIMEOUT_HAND":         { "retryable": "yes|manualOnly(SX)", "sideEffect": ["none", "possible"], "batch": "M1", "phase": "execution" },
+    "CANCELED_BY_BRAIN":         { "retryable": "no", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
+    "INTERNAL_HAND":             { "retryable": "manualOnly", "sideEffect": ["possible"], "batch": "M1", "phase": "execution" }
   },
-  "errorObject": {
-    "code": "enumRef errorCodes",
-    "message": "string(仅人读)",
-    "retryable": "yes | no | afterRecovery | manualOnly(建议值;脑矩阵最终裁决;手只能向保守收窄)",
-    "sideEffect": "none | possible | confirmed(effectful 失败必填;拿不准=possible)",
-    "data": "object",
-    "evidence": "array"
+  "commandAcceptance": {
+    "ackRejectedPhases": ["protocol", "session", "capability", "schema", "queue"],
+    "ackRejectedErrorCodes": ["PROTO_MALFORMED", "PROTO_UNSUPPORTED_KIND", "PROTO_UNSUPPORTED_CMD", "PROTO_BAD_ARGS", "PROTO_MSG_TOO_LARGE", "STALE_SESSION", "QUEUE_FULL"],
+    "expiredAtReceipt": { "ack": "accepted", "result": "expired", "invokeHandler": false, "bypassQueueCapacity": true },
+    "acceptedFailureChannel": "result(failed)"
   },
+  "errorObject": { "schema": "ErrorBody" },
   "primitives": {
     "debug.ping": {
       "ver": 1, "class": "readonly", "batch": "M1",
-      "args": { "echo": "any?" },
-      "data": { "echo": "any", "swStartedAt": "int64" },
+      "argsSchema": "DebugPingArgs", "dataSchema": "DebugPingData",
+      "preconditions": [],
       "execBudgetMs": 5000, "deadlineMs": 30000
     },
     "debug.switchWindow": {
       "ver": 1, "class": "intrusive", "batch": "M1", "platformSideEffect": "none",
-      "args": {},
-      "data": { "switched": "bool" },
+      "argsSchema": "DebugSwitchWindowArgs", "dataSchema": "DebugSwitchWindowData",
+      "preconditions": [],
       "execBudgetMs": 10000, "deadlineMs": 30000,
       "note": "激活当前窗口的下一个标签页,肉眼可见;tab 细节只进 evidence/日志"
     },
     "debug.slowEcho": {
       "ver": 1, "class": "effectful", "batch": "M1", "note": "无真实副作用,专用于演练 effectful 全轨道(超时/suspect/幂等键冻结)",
-      "args": { "ms": "int(<=200000)", "outcome": "ok | failed | silent" },
-      "data": { "echoedAfterMs": "int" },
+      "argsSchema": "DebugSlowEchoArgs", "dataSchema": "DebugSlowEchoData",
+      "preconditions": [],
       "execBudgetMs": 240000, "deadlineMs": 300000
     },
     "probe.platform": {
       "ver": 1, "class": "readonly", "batch": "S",
-      "args": {},
-      "data": { "pageKind": "im|recommend|other|none", "contentScriptOk": "bool", "loginState": "in|out|unknown", "surface": "{ imListVisible } | null" }
+      "argsSchema": "ProbePlatformArgs", "dataSchema": "ProbePlatformData",
+      "contextOptionalBeforeBinding": true,
+      "preconditions": [],
+      "execBudgetMs": 5000, "deadlineMs": 30000,
+      "note": "首次真人绑定前尚无 accountRef,仅该绑定探测允许省略 context;已绑定 actor 仍携带完整 context。principalFingerprint 是不透明相等比较值;脑不得解析或把平台 userId 当指纹"
     },
     "nav.ensureSurface": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
-      "args": { "surface": "im" },
-      "data": { "ready": "bool", "loginState": "in|out|unknown", "createdTab": "bool" },
-      "note": "不做登录(登录永远人工);连续 3 轮被用户关闭=判定驱赶,暂停该账号+通知"
+      "argsSchema": "NavEnsureSurfaceArgs", "dataSchema": "NavEnsureSurfaceData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint"],
+      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 30000,
+      "note": "不做登录(登录永远人工);是 pageAbsent 时唯一允许的恢复驱动例外;身份可观测后、返回数据前仍须复核 expectedPrincipalFingerprint;连续 3 轮被用户关闭=判定驱赶"
     },
     "chat.readList": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
-      "args": { "filter": "all|unread", "stopOlderThanDays": "int=8", "maxSessions": "int=1000" },
-      "data": { "sessions": "[{ conversationRef, peer{displayName, platformUserRef?}, unreadCount, lastMessage{direction, kind, textPreview}, lastActivityTs }]", "complete": "bool" },
-      "note": "变更检测不是账本;unreadCount 遵守可见才算+两次一致"
+      "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
+      "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
+      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true;unreadCount 遵守两次一致"
     },
     "chat.readThread": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
-      "args": { "conversationRef": "string", "window": { "maxMessages": "int=50,max 500", "anchorTail": "[{direction, contentHash}](<=5,可缺省,滚动止损提示)", "deep": "bool=false" } },
-      "data": { "messages": "[{ idx, direction:in|out|system, kind:text|image|voice|file|card|system, text|blobRef, contentHash(卡片=身份哈希), cardType?, cardState?:pending|accepted|rejected|expired|unknown, tsApprox? }]", "reachedTop": "bool", "anchorMatched": "bool", "peer": "object|null" },
-      "note": "手回有界快照,脑做最大重叠对齐产出本轮新增投影;兼任 X 批次的验证读"
+      "argsSchema": "ChatReadThreadArgs", "dataSchema": "ChatReadThreadData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
+      "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 30000,
+      "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐"
     },
     "chat.sendMessage":   { "ver": 0, "class": "effectful", "batch": "X", "note": "占位;与验证读同批交付,含 guards/evidenceSchema" },
     "chat.sendGreeting":  { "ver": 0, "class": "effectful", "batch": "X", "note": "占位" },
     "chat.sendInviteCard":{ "ver": 0, "class": "effectful", "batch": "X", "note": "占位" }
   },
   "events": {
-    "unreadBadge":       { "batch": "S", "data": { "scope": "total", "value": "int", "prev": "int|null", "stable": "true(两次一致才发)" }, "brainMay": "仅拉前巡检;减小/清零仅记录" },
-    "pageNavigated":     { "batch": "S", "data": { "pageKind": "string", "at": "int64" } },
-    "loginStateChanged": { "batch": "S", "data": { "state": "in|out", "stable": "bool", "at": "int64" }, "brainMay": "out=暂停该账号+告警(登录永远人工)" },
-    "manualInteraction": { "batch": "S", "data": { "kind": "pointer|keyboard|navigation", "pageKind": "string", "at": "int64" }, "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" }
+    "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "仅拉前巡检;减小/清零仅记录" },
+    "pageNavigated":     { "batch": "S", "dataSchema": "PageNavigatedEventData", "brainMay": "更新页面健康;不得直接触发业务命令" },
+    "loginStateChanged": { "batch": "S", "dataSchema": "LoginStateChangedEventData", "brainMay": "out=暂停该账号+告警;logout→login 使身份绑定失效,须真人重确认" },
+    "manualInteraction": { "batch": "S", "dataSchema": "ManualInteractionEventData", "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" }
   },
   "defaults": {
     "hbIntervalMs": 20000,
@@ -208,15 +617,17 @@
     "suspectGraceMs": 5000,
     "suspectManualDelayMs": 600000,
     "helloTimeoutMs": 10000,
-    "preSessionPingMs": 20000,
-    "pairingWindowMs": 60000,
     "execBudgetDefaultMs": { "readonly": 30000, "intrusive": 30000, "effectful": 60000, "capMs": 240000 },
+    "lease": { "minMs": 5000, "maxMs": 120000 },
+    "cancelSettleMs": 1000,
     "redispatchBackoffMs": [5000, 15000],
     "handQueueDepth": 16,
     "handResultQueue": 50,
     "handDedupLru": 256,
     "maxMsgBytes": 262144,
     "inlineBytes": 32768,
+    "payload": { "inlineMessageTextBytes": 2048, "inlineResultDataBytes": 65536, "maxEvidenceTextBytes": 2048, "blobMaxBytes": 20971520 },
+    "pagination": { "readListMaxItems": 32, "readThreadMaxItems": 64, "cursorMaxBytes": 2048 },
     "reconnect": { "baseMs": 1000, "factor": 2, "capMs": 30000, "jitter": 0.3, "alarmsWatchdogSec": 60 },
     "redispatchCap": { "readonly": 2, "intrusive": 3, "effectful": 0 },
     "processedRetentionDays": 30,

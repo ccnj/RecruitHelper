@@ -1,38 +1,79 @@
 // 客户端(脑)UI 的数据层:访问本地脑服务的 admin 端点。纯 fetch,可在 Node 下单测。
-// 测试页与未来调度器共用同一命令通道(admin/cmd → 脑派发器),无测试旁路(宪法 3)。
+// 测试页与调度器共用同一命令通道,这里不提供任何测试旁路。
 
-export const ADMIN_BASE =
-  (typeof localStorage !== 'undefined' && localStorage.getItem('adminBase')) || 'http://127.0.0.1:17872'
+declare global {
+  interface Window {
+    recruitHelper?: {
+      adminBase?: string
+      adminToken?: string
+    }
+  }
+}
+
+const preloadConfig = typeof window !== 'undefined' ? window.recruitHelper : undefined
+
+export const ADMIN_BASE = preloadConfig?.adminBase
+  || (typeof localStorage !== 'undefined' && localStorage.getItem('adminBase'))
+  || 'http://127.0.0.1:17872'
+
+// token 只从 Electron preload 的内存桥读取，不进入 localStorage、URL 或导出值。
+const adminToken = preloadConfig?.adminToken || ''
+
+function authorizationHeaders(): Record<string, string> {
+  return adminToken ? { Authorization: `Bearer ${adminToken}` } : {}
+}
+
+export type TimeValue = string | number | null
+
+async function readResponse<T>(response: Response, path: string): Promise<T> {
+  const text = await response.text()
+  let body: unknown
+  if (text) {
+    try {
+      body = JSON.parse(text)
+    } catch {
+      throw new Error(`${path}: 脑返回了无法识别的数据`)
+    }
+  }
+  if (!response.ok) {
+    const detail = body && typeof body === 'object' && 'error' in body
+      ? String((body as { error: unknown }).error)
+      : `HTTP ${response.status}`
+    throw new Error(detail)
+  }
+  return (body ?? {}) as T
+}
 
 async function get<T>(path: string): Promise<T> {
-  const r = await fetch(ADMIN_BASE + path)
-  if (!r.ok) throw new Error(`${path}: ${r.status}`)
-  return r.json() as Promise<T>
+  const response = await fetch(ADMIN_BASE + path, { headers: authorizationHeaders() })
+  return readResponse<T>(response, path)
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(ADMIN_BASE + path, {
+  const response = await fetch(ADMIN_BASE + path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
+    headers: { 'Content-Type': 'application/json', ...authorizationHeaders() },
+    body: body === undefined ? undefined : JSON.stringify(body),
   })
-  return r.json() as Promise<T>
+  return readResponse<T>(response, path)
+}
+
+function query(path: string, values: Record<string, string | undefined>): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(values)) {
+    if (value) params.set(key, value)
+  }
+  const encoded = params.toString()
+  return encoded ? `${path}?${encoded}` : path
 }
 
 export interface Health {
   ok: boolean
   proto: number
   contract: string
-  pairingOpen: boolean
   activeHands: string[]
 }
-export interface Pending {
-  origin: string
-  bootId: string
-  extVersion: string
-  caps: string[]
-  waitingMs: number
-}
+
 export interface HandHealth {
   handId: string
   online: boolean
@@ -40,6 +81,7 @@ export interface HandHealth {
   caps: string[]
   lastHbAgoMs: number
 }
+
 export interface LedgerRow {
   msgId: string
   name: string
@@ -48,6 +90,7 @@ export interface LedgerRow {
   attempt: number
   errorCode?: string
 }
+
 export interface Suspect {
   msgId: string
   name: string
@@ -55,6 +98,7 @@ export interface Suspect {
   reason: string
   idemKey: string
 }
+
 export interface FrameEvent {
   seq: number
   dir: string
@@ -65,15 +109,158 @@ export interface FrameEvent {
   ts: number
 }
 
+export interface PatrolRoundView {
+  roundId: string
+  trigger: string
+  status: string
+  stage: string
+  newMessageCount: number
+  errorCode?: string
+  startedAt: TimeValue
+  finishedAt: TimeValue
+}
+
+export interface AccountView {
+  platform: string
+  accountRef: string
+  handId: string
+  handOnline: boolean
+  identityState: string
+  enabledToday: boolean
+  enabledDate: string
+  pausedReason: string
+  nextPatrolAt: TimeValue
+  lastPatrolAt: TimeValue
+  manualQuietUntil: TimeValue
+  dirtyHint: boolean
+  pageHealth: string
+  sensorHealth: string
+  unreadTotal: number | null
+  latestRound: PatrolRoundView | null
+}
+
+export interface ConversationView {
+  conversationRef: string
+  peerDisplayName: string
+  unreadCount: number
+  lastMessageDirection: string
+  lastMessageKind: string
+  lastMessagePreview: string
+  lastActivityMs: number | null
+  trackingState: string
+  adoptedBoundarySeq: number
+  lastMessageSeq: number
+  lastSyncedAt: TimeValue
+}
+
+export interface MessageView {
+  seq: number
+  direction: string
+  kind: string
+  text: string | null
+  cardType: string
+  cardState: string
+  tsApproxMs: number | null
+  origin: string
+  firstSeenRoundId: string
+}
+
+export interface AuditView {
+  id: number | string
+  at: TimeValue
+  category: string
+  conversationRef: string
+  roundId: string
+  detail: unknown
+}
+
+export interface MutationResult {
+  ok?: boolean
+  error?: string
+  account?: AccountView
+  trackingState?: string
+}
+
+async function consumeFrameStream(signal: AbortSignal, onFrame: (frame: FrameEvent) => void): Promise<void> {
+  const response = await fetch(ADMIN_BASE + '/admin/frames', {
+    headers: { Accept: 'text/event-stream', ...authorizationHeaders() },
+    signal,
+  })
+  if (!response.ok) throw new Error(`/admin/frames: HTTP ${response.status}`)
+  if (!response.body) throw new Error('/admin/frames: 浏览器不支持流式读取')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (!signal.aborted) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value, { stream: !done })
+    let boundary = buffer.search(/\r?\n\r?\n/)
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary)
+      const separator = buffer.slice(boundary).match(/^\r?\n\r?\n/)?.[0].length ?? 2
+      buffer = buffer.slice(boundary + separator)
+      const data = block.split(/\r?\n/)
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (data) {
+        try { onFrame(JSON.parse(data) as FrameEvent) } catch { /* 畸形观测帧不污染界面 */ }
+      }
+      boundary = buffer.search(/\r?\n\r?\n/)
+    }
+    if (done) return
+  }
+}
+
+function subscribeFrames(onFrame: (frame: FrameEvent) => void, onError?: (message: string) => void): () => void {
+  const controller = new AbortController()
+  let stopped = false
+  let retryTimer: number | undefined
+  const connect = async () => {
+    try {
+      await consumeFrameStream(controller.signal, onFrame)
+    } catch (reason) {
+      if (!controller.signal.aborted) onError?.(errorMessage(reason))
+    }
+    if (!stopped) retryTimer = window.setTimeout(connect, 1500)
+  }
+  void connect()
+  return () => {
+    stopped = true
+    controller.abort()
+    if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+  }
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
+interface AccountTarget {
+  platform: string
+  accountRef: string
+}
+
 export const api = {
   health: () => get<Health>('/admin/health'),
-  openPairing: () => post<{ open: boolean }>('/admin/pairing/open'),
-  pending: () => get<{ open: boolean; pending: Pending[] }>('/admin/pairing/pending'),
-  confirm: (origin: string, bootId: string) => post<{ handId?: string; error?: string }>('/admin/pairing/confirm', { origin, bootId }),
   handsHealth: () => get<{ hands: HandHealth[] }>('/admin/hands/health'),
   dispatch: (handId: string, name: string, args: unknown) => post<{ msgId?: string; error?: string }>('/admin/cmd', { handId, name, args }),
   ledger: () => get<{ ledger: LedgerRow[] }>('/admin/ledger'),
   suspects: () => get<{ suspects: Suspect[] }>('/admin/suspects'),
   verdict: (msgId: string, verdict: 'resolvedOk' | 'resolvedFailed') => post<{ error?: string }>('/admin/suspects/verdict', { msgId, verdict }),
-  framesUrl: () => ADMIN_BASE + '/admin/frames',
+  subscribeFrames,
+
+  accounts: () => get<{ accounts: AccountView[] }>('/admin/accounts'),
+  bindAccount: (platform: string, handId: string, accountRef?: string) => post<MutationResult>('/admin/accounts/bind', {
+    platform, handId, ...(accountRef ? { accountRef } : {}),
+  }),
+  enableAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/enable', target),
+  stopAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/stop', target),
+  pauseAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/pause', target),
+  runAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/run', target),
+  conversations: (platform: string, accountRef: string) => get<{ conversations: ConversationView[] }>(query('/admin/conversations', { platform, accountRef })),
+  trackConversation: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/conversations/track', { platform, accountRef, conversationRef }),
+  messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),
+  audits: (platform: string, accountRef: string) => get<{ audits: AuditView[] }>(query('/admin/audits', { platform, accountRef })),
 }

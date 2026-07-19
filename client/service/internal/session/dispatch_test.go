@@ -32,7 +32,7 @@ func runEchoHand(t *testing.T, c *websocket.Conn) {
 			// ack accepted
 			writeMsg(c, protocol.KindAck, env.Session, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
 			// result ok
-			data, _ := json.Marshal(map[string]any{"echo": true})
+			data, _ := json.Marshal(map[string]any{"echo": true, "swStartedAt": 1})
 			writeMsg(c, protocol.KindResult, env.Session, protocol.ResultBody{Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: data})
 		}
 	}()
@@ -51,10 +51,14 @@ func readEnvBg(c *websocket.Conn) *protocol.Envelope {
 }
 
 func writeMsg(c *websocket.Conn, kind protocol.Kind, session *string, body any) {
+	_ = writeMsgWithID(c, ids.NewMsgID(), kind, session, body)
+}
+
+func writeMsgWithID(c *websocket.Conn, msgID string, kind protocol.Kind, session *string, body any) error {
 	raw, _ := protocol.Encode(body)
-	env := protocol.Envelope{Proto: protocol.ProtoVersion, Kind: kind, MsgID: ids.NewMsgID(), Session: session, Ts: time.Now().UnixMilli(), Attempt: 1, Body: raw}
+	env := protocol.Envelope{Proto: protocol.ProtoVersion, Kind: kind, MsgID: msgID, Session: session, Ts: time.Now().UnixMilli(), Attempt: 1, Body: raw}
 	buf, _ := json.Marshal(env)
-	_ = c.Write(bgCtx(), websocket.MessageText, buf)
+	return c.Write(bgCtx(), websocket.MessageText, buf)
 }
 
 // waitCmdStatus:轮询账本直到某命令到达期望状态。
@@ -78,7 +82,8 @@ func waitCmdStatus(t *testing.T, h *harness, msgID string, want store.CmdStatus)
 
 func TestDispatchPingHappyPath(t *testing.T) {
 	h := newHarness(t)
-	c, handID := pairAndConnect(t, h, "b-disp")
+	handID := "hand-dispatch"
+	c := connectHand(t, h, handID, "b-disp")
 	defer c.Close(websocket.StatusNormalClosure, "")
 	runEchoHand(t, c)
 
@@ -118,7 +123,8 @@ func TestDispatchOfflineHand(t *testing.T) {
 // result 重复投递:去重,账本只终局化一次,但每次都回 ack。
 func TestResultDedup(t *testing.T) {
 	h := newHarness(t)
-	c, handID := pairAndConnect(t, h, "b-dedup")
+	handID := "hand-dedup"
+	c := connectHand(t, h, handID, "b-dedup")
 	defer c.Close(websocket.StatusNormalClosure, "")
 
 	// 手动驱动:派发 → 手 ack → 手发两次同 msgId 的 result
@@ -142,7 +148,7 @@ func TestResultDedup(t *testing.T) {
 
 	// 同一 result msgId 发两次
 	resultMsgID := ids.NewMsgID()
-	data, _ := json.Marshal(map[string]any{"echo": true})
+	data, _ := json.Marshal(map[string]any{"echo": true, "swStartedAt": 1})
 	res := protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk, Data: data}
 	for range 2 {
 		raw, _ := protocol.Encode(res)

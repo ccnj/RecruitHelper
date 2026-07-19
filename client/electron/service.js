@@ -13,8 +13,8 @@ class BrainService {
 
   start() {
     if (this.proc) return
-    const { bin, args = [], cwd } = this.opts
-    this.proc = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+    const { bin, args = [], cwd, env } = this.opts
+    this.proc = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
     const pipe = (stream) => {
       stream.on('data', (b) => {
         const s = String(b).trimEnd()

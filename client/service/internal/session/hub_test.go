@@ -12,17 +12,19 @@ import (
 	"github.com/coder/websocket"
 
 	"recruithelper/client/service/internal/dispatch"
-	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
 )
 
-const testOrigin = "chrome-extension://testhandaaaaaaaaaaaaaaaaaaaaaaaa"
+const (
+	testOrigin    = "chrome-extension://testhandaaaaaaaaaaaaaaaaaaaaaaaa"
+	secondOrigin  = "chrome-extension://secondhandbbbbbbbbbbbbbbbbbbbbbb"
+	defaultHandID = "local-hand-test"
+)
 
 type harness struct {
 	srv   *httptest.Server
-	pm    *pairing.Manager
 	st    *store.Store
 	hub   *Hub
 	disp  *dispatch.Dispatcher
@@ -38,16 +40,14 @@ func newHarnessGrace(t *testing.T, graceMs int64) *harness {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	pm := pairing.New(st)
-	t.Cleanup(pm.CloseWindow)
-	hub := NewHub(st, pm, graceMs)
+	hub := NewHub(st, graceMs)
 	disp := dispatch.New(st, hub)
 	hub.SetDispatcher(disp)
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &harness{srv: srv, pm: pm, st: st, hub: hub, disp: disp, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
+	return &harness{srv: srv, st: st, hub: hub, disp: disp, wsURL: "ws" + strings.TrimPrefix(srv.URL, "http") + protocol.TransportPath}
 }
 
 func dial(t *testing.T, url, origin string) *websocket.Conn {
@@ -61,14 +61,24 @@ func dial(t *testing.T, url, origin string) *websocket.Conn {
 	return c
 }
 
-func sendHello(t *testing.T, c *websocket.Conn, handID, auth *string, bootID string) {
+func sendHello(t *testing.T, c *websocket.Conn, handID, bootID string) {
 	t.Helper()
-	raw, _ := protocol.Encode(protocol.HelloBody{
-		HandID: handID, Auth: auth, BootID: bootID,
+	raw, err := protocol.Encode(protocol.HelloBody{
+		HandID: handID, BootID: bootID,
 		ProtoSupported: []int{protocol.ProtoVersion},
 		App:            protocol.AppInfo{ExtVersion: "0.1.0", Browser: "test"},
 		Caps:           []string{"debug.ping@1"},
+		Features:       []string{},
+		ContractHash:   protocol.ContractHash,
 	})
+	if err != nil {
+		t.Fatalf("encode hello: %v", err)
+	}
+	sendHelloBody(t, c, raw)
+}
+
+func sendHelloBody(t *testing.T, c *websocket.Conn, raw json.RawMessage) {
+	t.Helper()
 	env := protocol.Envelope{Proto: protocol.ProtoVersion, Kind: protocol.KindHello, MsgID: ids.NewMsgID(), Ts: time.Now().UnixMilli(), Attempt: 1, Body: raw}
 	buf, _ := json.Marshal(env)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -93,147 +103,143 @@ func readEnv(t *testing.T, c *websocket.Conn) *protocol.Envelope {
 	return &env
 }
 
-// waitPending:轮询直到某 bootId 出现在待配对列表(Register 已完成)。
-func waitPending(t *testing.T, pm *pairing.Manager, bootID string) {
+func connectHand(t *testing.T, h *harness, handID, bootID string) *websocket.Conn {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, p := range pm.Pending() {
-			if p.BootID == bootID {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("待配对项 %s 未在期限内出现", bootID)
-}
-
-func TestPairingThenReturning(t *testing.T) {
-	h := newHarness(t)
-	h.pm.OpenWindow(30 * time.Second)
-
-	// 配对:无 token hello → 挂起 → Confirm → welcome{issued}
 	c := dial(t, h.wsURL, testOrigin)
-	boot := "b-pair01"
-	sendHello(t, c, nil, nil, boot)
-	waitPending(t, h.pm, boot)
-	creds, err := h.pm.Confirm(testOrigin, boot)
-	if err != nil {
-		t.Fatalf("Confirm: %v", err)
-	}
+	sendHello(t, c, handID, bootID)
 	env := readEnv(t, c)
 	if env.Kind != protocol.KindWelcome {
-		t.Fatalf("期望 welcome,得到 %s", env.Kind)
+		t.Fatalf("hello 应立即收到 welcome，实际 %s", env.Kind)
 	}
-	var wb protocol.WelcomeBody
-	_ = json.Unmarshal(env.Body, &wb)
-	if wb.Issued == nil || wb.Issued.HandID != creds.HandID {
-		t.Fatalf("welcome 应带 issued 且 handId 一致: %+v", wb.Issued)
-	}
-	if wb.Issued.Auth != creds.Auth {
-		t.Fatalf("welcome token 与签发不一致")
+	var welcome protocol.WelcomeBody
+	if err := json.Unmarshal(env.Body, &welcome); err != nil || welcome.Session == "" {
+		t.Fatalf("welcome 会话非法: %+v err=%v", welcome, err)
 	}
 	if env.Session != nil {
-		t.Fatalf("welcome 信封 session 必须为 null")
+		t.Fatal("welcome 信封 session 必须为 null")
 	}
-	_ = c.Close(websocket.StatusNormalClosure, "")
-
-	// 落库校验:token 只存哈希
-	stored, _ := h.st.HandByID(creds.HandID)
-	if stored == nil || stored.TokenHash == creds.Auth {
-		t.Fatalf("工牌未正确落库或 token 明文入库")
-	}
-
-	// 日常握手:凭工牌 → welcome 无 issued
-	c2 := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c2, &creds.HandID, &creds.Auth, "b-ret01")
-	env2 := readEnv(t, c2)
-	if env2.Kind != protocol.KindWelcome {
-		t.Fatalf("日常握手期望 welcome,得到 %s", env2.Kind)
-	}
-	var wb2 protocol.WelcomeBody
-	_ = json.Unmarshal(env2.Body, &wb2)
-	if wb2.Issued != nil {
-		t.Fatalf("日常握手 welcome 不应带 issued")
-	}
-	if wb2.Session == "" {
-		t.Fatalf("日常握手应分配 session")
-	}
-	_ = c2.Close(websocket.StatusNormalClosure, "")
+	return c
 }
 
-func TestReturningBadToken(t *testing.T) {
+func TestHelloAutoRegistersAndReconnectReusesHand(t *testing.T) {
 	h := newHarness(t)
-	h.pm.OpenWindow(30 * time.Second)
-	c := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c, nil, nil, "b-x")
-	waitPending(t, h.pm, "b-x")
-	creds, _ := h.pm.Confirm(testOrigin, "b-x")
-	_ = readEnv(t, c) // welcome
-	_ = c.Close(websocket.StatusNormalClosure, "")
-
-	// 错 token
-	c2 := dial(t, h.wsURL, testOrigin)
-	bad := "deadbeef"
-	sendHello(t, c2, &creds.HandID, &bad, "b-y")
-	env := readEnv(t, c2)
-	if env.Kind != protocol.KindBye {
-		t.Fatalf("错 token 期望 bye,得到 %s", env.Kind)
+	c := connectHand(t, h, defaultHandID, "boot-first")
+	first, err := h.st.HandByID(defaultHandID)
+	if err != nil || first == nil {
+		t.Fatalf("首次 hello 未自动登记手: %+v err=%v", first, err)
 	}
-	var bb protocol.ByeBody
-	_ = json.Unmarshal(env.Body, &bb)
-	if bb.Code != protocol.ByeCodeAuthFailed {
-		t.Fatalf("期望 AUTH_FAILED,得到 %s", bb.Code)
+	if first.Origin != testOrigin || first.CreatedAt.IsZero() || first.LastSeenAt.IsZero() {
+		t.Fatalf("手登记字段不完整: %+v", first)
+	}
+	_ = c.Close(websocket.StatusNormalClosure, "")
+	waitOffline(t, h, defaultHandID)
+
+	time.Sleep(time.Millisecond)
+	c2 := connectHand(t, h, defaultHandID, "boot-second")
+	defer c2.Close(websocket.StatusNormalClosure, "")
+	second, err := h.st.HandByID(defaultHandID)
+	if err != nil || second == nil {
+		t.Fatalf("重连后读手失败: %+v err=%v", second, err)
+	}
+	if !second.CreatedAt.Equal(first.CreatedAt) || !second.LastSeenAt.After(first.LastSeenAt) {
+		t.Fatalf("重连应复用同一手并只刷新 lastSeen: first=%+v second=%+v", first, second)
+	}
+	hands, err := h.st.Hands()
+	if err != nil || len(hands) != 1 {
+		t.Fatalf("同 handId 重连不得增生记录: n=%d err=%v", len(hands), err)
 	}
 }
 
-func TestPairingWindowClosed(t *testing.T) {
+func TestHelloMissingOrInvalidHandIDRejectedLoudly(t *testing.T) {
 	h := newHarness(t)
-	// 不开窗
-	c := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c, nil, nil, "b-nowin")
-	env := readEnv(t, c)
-	if env.Kind != protocol.KindBye {
-		t.Fatalf("窗未开期望 bye,得到 %s", env.Kind)
+	for _, tc := range []struct {
+		name   string
+		handID any
+		omit   bool
+	}{
+		{name: "missing", omit: true},
+		{name: "null", handID: nil},
+		{name: "empty", handID: ""},
+		{name: "too-long", handID: strings.Repeat("h", 129)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"bootId": "boot-invalid", "protoSupported": []int{protocol.ProtoVersion},
+				"contractHash": protocol.ContractHash,
+				"app":          map[string]any{"extVersion": "0.1.0", "browser": "test"},
+				"caps":         []string{}, "features": []string{},
+			}
+			if !tc.omit {
+				body["handId"] = tc.handID
+			}
+			raw, _ := json.Marshal(body)
+			c := dial(t, h.wsURL, testOrigin)
+			defer c.Close(websocket.StatusNormalClosure, "")
+			sendHelloBody(t, c, raw)
+			env := readEnv(t, c)
+			if env.Kind != protocol.KindBye {
+				t.Fatalf("非法 handId 应收到 bye，实际 %s", env.Kind)
+			}
+			var bye protocol.ByeBody
+			_ = json.Unmarshal(env.Body, &bye)
+			if bye.Code != protocol.ByeCodeProtoIncompatible {
+				t.Fatalf("非法 handId 应用 PROTO_INCOMPATIBLE 响亮拒绝，实际 %s", bye.Code)
+			}
+		})
 	}
-	var bb protocol.ByeBody
-	_ = json.Unmarshal(env.Body, &bb)
-	if bb.Code != protocol.ByeCodeAuthFailed {
-		t.Fatalf("期望 AUTH_FAILED,得到 %s", bb.Code)
+	hands, err := h.st.Hands()
+	if err != nil || len(hands) != 0 {
+		t.Fatalf("非法 hello 不得落 hands: n=%d err=%v", len(hands), err)
 	}
 }
 
 func TestSingleActiveSupersede(t *testing.T) {
 	h := newHarness(t)
-	h.pm.OpenWindow(30 * time.Second)
-	c := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c, nil, nil, "b-sup")
-	waitPending(t, h.pm, "b-sup")
-	creds, _ := h.pm.Confirm(testOrigin, "b-sup")
-	_ = readEnv(t, c)
-	_ = c.Close(websocket.StatusNormalClosure, "")
-
-	// conn1 日常握手
-	c1 := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c1, &creds.HandID, &creds.Auth, "b-c1")
-	if readEnv(t, c1).Kind != protocol.KindWelcome {
-		t.Fatalf("conn1 应 welcome")
-	}
-	// conn2 同 handId 握手 → 顶替
-	c2 := dial(t, h.wsURL, testOrigin)
-	sendHello(t, c2, &creds.HandID, &creds.Auth, "b-c2")
-	if readEnv(t, c2).Kind != protocol.KindWelcome {
-		t.Fatalf("conn2 应 welcome")
-	}
-	// conn1 应收到 bye(SUPERSEDED)
+	c1 := connectHand(t, h, "hand-single-active", "boot-one")
+	defer c1.Close(websocket.StatusNormalClosure, "")
+	c2 := connectHand(t, h, "hand-single-active", "boot-two")
+	defer c2.Close(websocket.StatusNormalClosure, "")
 	env := readEnv(t, c1)
 	if env.Kind != protocol.KindBye {
-		t.Fatalf("conn1 应被顶替收 bye,得到 %s", env.Kind)
+		t.Fatalf("旧连接应被顶替收 bye，实际 %s", env.Kind)
 	}
-	var bb protocol.ByeBody
-	_ = json.Unmarshal(env.Body, &bb)
-	if bb.Code != protocol.ByeCodeSuperseded {
-		t.Fatalf("期望 SUPERSEDED,得到 %s", bb.Code)
+	var bye protocol.ByeBody
+	_ = json.Unmarshal(env.Body, &bye)
+	if bye.Code != protocol.ByeCodeSuperseded {
+		t.Fatalf("顶替应返回 SUPERSEDED，实际 %s", bye.Code)
+	}
+	if ids := h.hub.ActiveHandIDs(); len(ids) != 1 || ids[0] != "hand-single-active" {
+		t.Fatalf("同 handId 必须单活: %v", ids)
+	}
+}
+
+func TestOriginChangeIsSoftAuditedAndAccepted(t *testing.T) {
+	h := newHarness(t)
+	c1 := connectHand(t, h, "hand-origin-change", "boot-one")
+	defer c1.Close(websocket.StatusNormalClosure, "")
+	c2 := dial(t, h.wsURL, secondOrigin)
+	defer c2.Close(websocket.StatusNormalClosure, "")
+	sendHello(t, c2, "hand-origin-change", "boot-two")
+	if env := readEnv(t, c2); env.Kind != protocol.KindWelcome {
+		t.Fatalf("Origin 变化只软审计，不得拒绝: %s", env.Kind)
+	}
+	hand, err := h.st.HandByID("hand-origin-change")
+	if err != nil || hand == nil || hand.Origin != secondOrigin {
+		t.Fatalf("应记录最近 Origin: %+v err=%v", hand, err)
+	}
+	audits, err := h.st.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, audit := range audits {
+		if audit.Category == "hand_origin_changed" && audit.HandID == "hand-origin-change" &&
+			strings.Contains(audit.Detail, testOrigin) && strings.Contains(audit.Detail, secondOrigin) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Origin 变化必须留下新旧值软审计")
 	}
 }
 
@@ -243,6 +249,6 @@ func TestOriginRejected(t *testing.T) {
 	defer cancel()
 	_, _, err := websocket.Dial(ctx, h.wsURL, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {"https://evil.example.com"}}})
 	if err == nil {
-		t.Fatalf("非扩展 Origin 应被拒绝升级")
+		t.Fatal("非扩展 Origin 应被拒绝升级")
 	}
 }

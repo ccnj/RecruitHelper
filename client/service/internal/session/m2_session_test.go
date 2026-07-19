@@ -1,0 +1,168 @@
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
+	"recruithelper/internal/ids"
+)
+
+func TestEventPersistentDedupBeforeSink(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	hub := NewHub(st, protocol.DefaultHbGraceMs)
+	called := 0
+	hub.SetEventSink(EventSinkFunc(func(got SensorEvent) {
+		called++
+		if got.HandID != "hand-01" || got.Body.Name != protocol.EventUnreadBadge {
+			t.Fatalf("回调事件错误: %+v", got)
+		}
+	}))
+	data, _ := protocol.Encode(protocol.UnreadBadgeEventData{Scope: protocol.UnreadScopeTotal, Stable: true, Value: 3})
+	body := protocol.EventBody{
+		Name: protocol.EventUnreadBadge, Context: protocol.EventContext{Platform: "zhilian", AccountRef: "acct-1"},
+		ObservedAt: time.Now().UnixMilli(), Data: data,
+	}
+	raw, _ := protocol.Encode(body)
+	env := &protocol.Envelope{Proto: protocol.ProtoVersion, Kind: protocol.KindEvent, MsgID: "event-1", Body: raw}
+	c := &Conn{hub: hub, handID: "hand-01"}
+	c.handleEvent(env)
+	c.handleEvent(env)
+	if called != 1 {
+		t.Fatalf("重复 event 只能回调一次,得到 %d", called)
+	}
+	if already, _ := st.MarkProcessed("event-1", string(protocol.KindEvent), "hand-01"); !already {
+		t.Fatal("sink 回调前必须已持久化 event msgId")
+	}
+}
+
+func TestRegistryCachesPingContextsSensorsAndFeatures(t *testing.T) {
+	r := NewRegistry(10_000)
+	now := time.Now()
+	r.Online("hand-01", "session-1", "boot-1", []string{"chat.readList@1"}, []string{"progress/1"}, now)
+	p := protocol.PingBody{
+		Contexts: []protocol.PingContext{{Platform: "zhilian", AccountRef: "acct-1", Ready: true}},
+		Sensors:  &protocol.PingSensors{UnreadTotal: &protocol.SensorReading{Value: 7, ObservedAgoMs: 10}},
+	}
+	if !r.HeartbeatReport("hand-01", "session-1", "boot-1", p, now.Add(time.Second)) {
+		t.Fatal("ping report 未缓存")
+	}
+	state, _ := r.Get("hand-01")
+	if state.PageHealth != CapabilityReady || state.SensorHealth != CapabilityReady || len(state.Contexts) != 1 {
+		t.Fatalf("页面/传感健康错误: %+v", state)
+	}
+	if len(state.Features) != 1 || state.Features[0] != "progress/1" || state.Sensors.UnreadTotal.Value != 7 {
+		t.Fatalf("features/sensors 未保存: %+v", state)
+	}
+	// Get 必须深拷贝，调用方不能污染注册表。
+	state.Contexts[0].AccountRef = "mutated"
+	state.Sensors.UnreadTotal.Value = 99
+	again, _ := r.Get("hand-01")
+	if again.Contexts[0].AccountRef != "acct-1" || again.Sensors.UnreadTotal.Value != 7 {
+		t.Fatal("Registry.Get 泄露内部切片/指针")
+	}
+	if !r.HeartbeatReport("hand-01", "session-1", "boot-1", protocol.PingBody{
+		Contexts: []protocol.PingContext{{Platform: "zhilian", AccountRef: "acct-1", Ready: true}},
+	}, now.Add(2*time.Second)) {
+		t.Fatal("sensors=null ping 未接受")
+	}
+	cleared, _ := r.Get("hand-01")
+	if cleared.Sensors != nil || cleared.SensorHealth != CapabilityDegraded {
+		t.Fatalf("sensors=null 保留了陈旧现货: %+v", cleared)
+	}
+}
+
+func TestStaleConnectionFrameCannotAdvanceLedger(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	hub := NewHub(st, protocol.DefaultHbGraceMs)
+	disp := dispatch.New(st, hub)
+	hub.SetDispatcher(disp)
+	old := &Conn{hub: hub, handID: "hand-01", session: "session-old", bootID: "boot-same"}
+	current := &Conn{hub: hub, handID: "hand-01", session: "session-new", bootID: "boot-same"}
+	hub.active["hand-01"] = current
+	if err := st.CreateCmd(&store.CmdRecord{
+		MsgID: "cmd-stale", Name: protocol.PrimDebugPing, Class: string(protocol.ClassReadonly),
+		HandID: "hand-01", Session: "session-new", BootIDAtDispatch: "boot-same",
+		Status: store.CmdAccepted, Args: `{}`, LogicalDispatchID: "cmd-stale",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := protocol.Encode(protocol.ResultBody{
+		Ref: "cmd-stale", Status: protocol.ResultStatusOk,
+		Data: json.RawMessage(`{"echo":null,"swStartedAt":1}`),
+	})
+	sessionID := old.session
+	env := protocol.Envelope{
+		Proto: protocol.ProtoVersion, Kind: protocol.KindResult, MsgID: "result-stale",
+		Session: &sessionID, Ts: time.Now().UnixMilli(), Attempt: 1, Body: body,
+	}
+	raw, _ := json.Marshal(env)
+	old.handleSessionFrame(context.Background(), raw)
+	record, err := st.CmdByMsgID("cmd-stale")
+	if err != nil || record.Status != store.CmdAccepted {
+		t.Fatalf("旧连接帧推进了账本: %+v err=%v", record, err)
+	}
+}
+
+func TestDecodeFrameLimitExactAndPlusOne(t *testing.T) {
+	prefix := []byte(`{"proto":1}`)
+	exact := append(prefix, []byte(strings.Repeat(" ", int(protocol.DefaultMaxMsgBytes)-len(prefix)))...)
+	if _, err := decode(exact); err != nil {
+		t.Fatalf("maxMsgBytes 精确边界应允许: %v", err)
+	}
+	plusOne := append(exact, ' ')
+	_, err := decode(plusOne)
+	var validation *protocol.ValidationError
+	if !errors.As(err, &validation) || validation.Rule != "maxBytes" {
+		t.Fatalf("maxMsgBytes+1 应在解码前硬拒绝: %T %v", err, err)
+	}
+}
+
+func TestHelloUnknownFieldsAndHashWarnOnly(t *testing.T) {
+	h := newHarness(t)
+	c := dial(t, h.wsURL, testOrigin)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	hello := map[string]any{
+		"handId": "hand-future", "bootId": "b-future", "protoSupported": []int{protocol.ProtoVersion},
+		"app":  map[string]any{"extVersion": "0.1.0", "browser": "test", "futureAppField": true},
+		"caps": []string{"chat.readList@1"}, "features": []string{"lease/1", "progress/1", "cancel/1"},
+		"contractHash": "sha256:older", "futureTopField": map[string]any{"x": 1},
+	}
+	raw, _ := json.Marshal(hello)
+	env := protocol.Envelope{Proto: protocol.ProtoVersion, Kind: protocol.KindHello, MsgID: ids.NewMsgID(), Ts: time.Now().UnixMilli(), Attempt: 1, Body: raw}
+	buf, _ := json.Marshal(env)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.Write(ctx, websocket.MessageText, buf); err != nil {
+		t.Fatal(err)
+	}
+	welcomeEnv := readEnv(t, c)
+	if welcomeEnv.Kind != protocol.KindWelcome {
+		t.Fatalf("hash mismatch/未知字段不得拒绝握手,得到 %s", welcomeEnv.Kind)
+	}
+	var welcome protocol.WelcomeBody
+	_ = json.Unmarshal(welcomeEnv.Body, &welcome)
+	if welcome.ContractMatch {
+		t.Fatal("contractHash mismatch 应在 welcome 标记 false")
+	}
+	state, ok := h.hub.Registry().Get("hand-future")
+	if !ok || len(state.Caps) != 1 || len(state.Features) != 3 {
+		t.Fatalf("hello caps/features 未保存: %+v", state)
+	}
+}

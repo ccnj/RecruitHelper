@@ -1,7 +1,6 @@
 package dispatch
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,38 +37,31 @@ func (d *Dispatcher) OnReconnect(handID, newBootID string) {
 		case cmd.Class == string(protocol.ClassEffectful):
 			// 第一趟已处理
 		default:
-			d.voidAndRedispatch(cmd, "bootId 换代")
+			d.voidAndRedispatch(cmd, "bootId 换代", 0)
 		}
 	}
 }
 
 // resendCmd:同 msgId 重发(§7.2 规则2)。更新会话/attempt/SentAt;queued→sent,其余不动状态。
 func (d *Dispatcher) resendCmd(cmd store.CmdRecord, session string) {
-	meta, ok := protocol.Primitives[cmd.Name]
-	if !ok {
+	d.resendCmdAt(cmd, session, time.Now())
+}
+
+func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.Time) {
+	if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
 		return
 	}
-	body := protocol.CmdBody{
-		Name: cmd.Name, Ver: meta.Ver, Args: json.RawMessage(cmd.Args), IdemKey: cmd.IdemKey,
-		Deadline: cmd.DeadlineMs, ExecBudgetMs: cmd.ExecBudgetMs,
+	body, err := d.commandBody(cmd)
+	if err != nil {
+		d.st.Audit("resend_invalid", cmd.HandID, cmd.MsgID, err.Error())
+		return
 	}
 	env := d.envelope(protocol.KindCmd, cmd.MsgID, &session, body) // 同 msgId
+	env.Attempt = cmd.Attempt + 1
 	if err := d.sender.SendEnvelope(cmd.HandID, env); err != nil {
 		return
 	}
-	now := time.Now()
-	_ = d.st.MutateCmd(cmd.MsgID, func(r *store.CmdRecord) error {
-		if r.Status.Terminal() {
-			return errAlreadyTerminal
-		}
-		r.Session = session
-		r.Attempt++
-		r.SentAt = &now
-		if r.Status == store.CmdQueued {
-			r.Status = store.CmdSent
-		}
-		return nil
-	})
+	d.markSent(cmd.MsgID, cmd.Session, session)
 	d.st.Audit("resend", cmd.HandID, cmd.MsgID, "bootId 未变,同 msgId 重发")
 }
 
@@ -86,15 +78,7 @@ func (d *Dispatcher) Recover() {
 			d.markSuspect(cmd, "脑重启扫描:在途 effectful")
 			continue
 		}
-		_ = d.st.MutateCmd(cmd.MsgID, func(r *store.CmdRecord) error {
-			if r.Status.Terminal() {
-				return errAlreadyTerminal
-			}
-			r.Status = store.CmdVoid
-			r.SuspectReason = "脑重启扫描"
-			return nil
-		})
-		d.st.Audit("cmd_void", cmd.HandID, cmd.MsgID, "脑重启扫描:在途 readonly/intrusive")
+		d.terminalizeVoid(cmd, "脑重启扫描:在途 readonly/intrusive")
 	}
 	if len(cmds) > 0 {
 		slog.Info("脑重启扫描完成", "在途命令数", len(cmds))
@@ -137,6 +121,8 @@ func (d *Dispatcher) Verdict(msgID string, verdict store.CmdStatus) error {
 		return err
 	}
 	d.st.Audit("suspect_verdict", cmd.HandID, msgID, string(verdict))
+	d.clearLease(msgID)
+	d.notifyByMsgID(msgID)
 	slog.Info("suspect 人工裁决", "handId", cmd.HandID, "msgId", msgID, "verdict", verdict)
 	return nil
 }

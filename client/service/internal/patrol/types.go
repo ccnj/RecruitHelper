@@ -1,0 +1,247 @@
+// Package patrol owns the brain-side account actors. It is the only place that
+// decides when perception primitives run; the hand remains a command executor.
+package patrol
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/contract/gen/go/protocol"
+)
+
+const (
+	TriggerTimer = "timer"
+	TriggerDirty = "dirty"
+
+	surfaceRecoverySuffix = "+surfaceRecovery"
+
+	PauseUserStopped       = "userStopped"
+	PauseUserRequested     = "userPaused"
+	PauseDailyExpired      = "dailyWindowExpired"
+	PauseLoginRequired     = "loginRequired"
+	PauseAccountMismatch   = "accountMismatch"
+	PauseIdentityInvalid   = "identityInvalid"
+	PauseSurfaceDrivenAway = "surfaceDrivenAway"
+	PauseHandManualReview  = "handManualReview"
+)
+
+var (
+	ErrNilStore               = errors.New("patrol store 不能为空")
+	ErrNilRunner              = errors.New("patrol runner 不能为空")
+	ErrNilHandAvailability    = errors.New("hand availability 不能为空")
+	ErrAccountNotBound        = errors.New("账号尚未绑定手和主体指纹")
+	ErrIdentityInvalid        = errors.New("账号身份绑定已失效，必须真人重新确认")
+	ErrIdentityUnobservable   = errors.New("当前页面无法确证账号主体")
+	ErrLoginRequired          = errors.New("招聘平台未登录")
+	ErrDailyWindowNotOpen     = errors.New("今日巡检需在本地时间 08:00 后由真人开启")
+	ErrDailyWindowExpired     = errors.New("巡检跨过本地日边界，已在 24:00 停止")
+	ErrActorPaused            = errors.New("账号 actor 已停止或暂停，不得派发新命令")
+	ErrActorGenerationChanged = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
+	ErrManualQuietActive      = errors.New("用户操作静默窗生效，不得派发新驱动命令")
+	ErrEventHandMismatch      = errors.New("传感事件来自非绑定手")
+	ErrEnsureNotReady         = errors.New("恢复 IM 页面后仍未就绪")
+	ErrPaginationLoop         = errors.New("分页 cursor 循环")
+	ErrPaginationLimit        = errors.New("分页超过脑侧安全上限")
+	ErrPeerChangedInPages     = errors.New("同一线程分页返回了冲突的候选人身份")
+)
+
+// RunRequest is the narrow seam between the actor and command delivery. The
+// dispatch adapter must preserve Args verbatim and put the account fields into
+// CmdBody.context. All four M2 primitives use this same Runner method.
+type RunRequest struct {
+	HandID                       string
+	ExpectedSession              string
+	ExpectedBootID               string
+	Platform                     string
+	AccountRef                   string
+	ExpectedPrincipalFingerprint string
+	Name                         string
+	Version                      int
+	Args                         json.RawMessage
+}
+
+// RunHandle 把短暂的“校验代际+落账+送入当前 socket”与可能持续几十秒的
+// 等待结果分开。Manager 只在 Start 周围持 actor 短锁，绝不跨网络等待。
+type RunHandle interface {
+	Wait(context.Context) (json.RawMessage, error)
+}
+
+type Runner interface {
+	Start(context.Context, RunRequest) (RunHandle, error)
+}
+
+// RunError is the machine-readable failure returned by a Runner adapter.
+// Reason is meaningful for CTX_NOT_READY and must come from error.data.reason.
+type RunError struct {
+	Code       protocol.ErrorCode
+	Reason     protocol.NotReadyReason
+	Retryable  protocol.Retryable
+	SideEffect protocol.SideEffect
+	Cause      error
+}
+
+func (e *RunError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	detail := string(e.Code)
+	if e.Reason != "" {
+		detail += "/" + string(e.Reason)
+	}
+	if e.Cause != nil {
+		return detail + ": " + e.Cause.Error()
+	}
+	return detail
+}
+
+func (e *RunError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+type HandState struct {
+	Online  bool
+	Session string
+	BootID  string
+}
+
+type HandAvailability interface {
+	State(context.Context, string) (HandState, error)
+}
+
+type Clock interface {
+	Now() time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+type Config struct {
+	Clock                    Clock
+	Location                 *time.Location
+	PatrolInterval           time.Duration
+	IdentityFreshFor         time.Duration
+	CoalesceWindow           time.Duration
+	MinimumRoundGap          time.Duration
+	ManualQuiet              time.Duration
+	TrackedReconcileInterval time.Duration
+	MaxPages                 int
+	DailyStartHour           int
+	NewRoundID               func() string
+}
+
+func (c Config) withDefaults() Config {
+	if c.Clock == nil {
+		c.Clock = realClock{}
+	}
+	if c.Location == nil {
+		c.Location = time.Local
+	}
+	if c.PatrolInterval <= 0 {
+		c.PatrolInterval = 5 * time.Minute
+	}
+	if c.IdentityFreshFor <= 0 {
+		c.IdentityFreshFor = 10 * time.Minute
+	}
+	if c.CoalesceWindow <= 0 {
+		c.CoalesceWindow = time.Duration(protocol.DefaultSensorsPatrolPullForwardMergeMs) * time.Millisecond
+	}
+	if c.MinimumRoundGap <= 0 {
+		c.MinimumRoundGap = time.Duration(protocol.DefaultSensorsPatrolPullForwardMinGapMs) * time.Millisecond
+	}
+	if c.ManualQuiet <= 0 {
+		c.ManualQuiet = time.Duration(protocol.DefaultSensorsManualQuietMs) * time.Millisecond
+	}
+	if c.TrackedReconcileInterval <= 0 {
+		c.TrackedReconcileInterval = 30 * time.Minute
+	}
+	if c.MaxPages <= 0 {
+		c.MaxPages = 256
+	}
+	if c.DailyStartHour == 0 {
+		c.DailyStartHour = 8
+	}
+	return c
+}
+
+type SkipReason string
+
+const (
+	SkipNotEnabled SkipReason = "notEnabled"
+	SkipNotDue     SkipReason = "notDue"
+	SkipQuiet      SkipReason = "manualQuiet"
+	SkipOffline    SkipReason = "handOffline"
+	SkipHandState  SkipReason = "handStateError"
+)
+
+type AccountSkip struct {
+	Key    store.AccountKey
+	Reason SkipReason
+	Err    error
+}
+
+type ConversationProjection struct {
+	Key             store.ConversationKey
+	Messages        []store.MessageDraft
+	CardTransitions []syncledger.CardTransition
+}
+
+type RoundOutcome struct {
+	Key         store.AccountKey
+	RoundID     string
+	Trigger     string
+	Status      string
+	EnsureUsed  bool
+	Projections []ConversationProjection
+	Err         error
+}
+
+type TickResult struct {
+	Rounds  []RoundOutcome
+	Skipped []AccountSkip
+}
+
+func (r TickResult) ProjectionCount() int {
+	n := 0
+	for _, round := range r.Rounds {
+		for _, projection := range round.Projections {
+			n += len(projection.Messages) + len(projection.CardTransitions)
+		}
+	}
+	return n
+}
+
+func runError(err error) *RunError {
+	var target *RunError
+	if errors.As(err, &target) {
+		return target
+	}
+	return nil
+}
+
+func errorCode(err error) string {
+	if typed := runError(err); typed != nil {
+		return string(typed.Code)
+	}
+	if err == nil {
+		return ""
+	}
+	return "BRAIN_INTERNAL"
+}
+
+func validateConfig(c Config) error {
+	if c.PatrolInterval <= 0 || c.IdentityFreshFor <= 0 || c.CoalesceWindow <= 0 ||
+		c.MinimumRoundGap <= 0 || c.ManualQuiet <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
+		c.DailyStartHour < 0 || c.DailyStartHour > 23 {
+		return fmt.Errorf("patrol config 含非正参数: %+v", c)
+	}
+	return nil
+}

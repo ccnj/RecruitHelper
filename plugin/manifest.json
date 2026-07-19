@@ -7,7 +7,18 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "alarms", "tabs"],
-  "host_permissions": ["http://127.0.0.1/*", "https://127.0.0.1/*"],
+  "permissions": ["storage", "alarms", "tabs", "scripting", "webNavigation"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://127.0.0.1/*",
+    "https://rd6.zhaopin.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://rd6.zhaopin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "options_page": "options/options.html"
 }

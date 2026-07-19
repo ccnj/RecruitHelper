@@ -6,8 +6,11 @@ import "encoding/json"
 
 // 协议主版本与契约指纹
 const (
-	ProtoVersion = 1
-	ContractHash = "sha256:fad6295d1a2b52848da258b6d276161a2be1bdefc5001acac723e2f7d896cae9"
+	ProtoVersion       = 1
+	ContractHash       = "sha256:bb933cca8abc90cb890b5fe3d33f71332b7b4c5e717b59b4cfc7008062ab304e"
+	UnknownFieldPolicy = "must-ignore"
+	ContractHashPolicy = "warn-only"
+	JSONIntegerPolicy  = "safe-int53"
 )
 
 // 传输常量
@@ -50,14 +53,179 @@ var BatchValues = []Batch{
 	BatchFar,
 }
 
+type CancelReason string
+
+const (
+	CancelReasonLeaseExpired     CancelReason = "leaseExpired"
+	CancelReasonDeadlineImminent CancelReason = "deadlineImminent"
+	CancelReasonSuperseded       CancelReason = "superseded"
+	CancelReasonOperator         CancelReason = "operator"
+	CancelReasonShutdown         CancelReason = "shutdown"
+)
+
+var CancelReasonValues = []CancelReason{
+	CancelReasonLeaseExpired,
+	CancelReasonDeadlineImminent,
+	CancelReasonSuperseded,
+	CancelReasonOperator,
+	CancelReasonShutdown,
+}
+
+type CardState string
+
+const (
+	CardStatePending  CardState = "pending"
+	CardStateAccepted CardState = "accepted"
+	CardStateRejected CardState = "rejected"
+	CardStateExpired  CardState = "expired"
+	CardStateUnknown  CardState = "unknown"
+)
+
+var CardStateValues = []CardState{
+	CardStatePending,
+	CardStateAccepted,
+	CardStateRejected,
+	CardStateExpired,
+	CardStateUnknown,
+}
+
+type CardType string
+
+const (
+	CardTypeInterviewInvite  CardType = "interviewInvite"
+	CardTypeWechatExchange   CardType = "wechatExchange"
+	CardTypeResumeAttachment CardType = "resumeAttachment"
+	CardTypeOther            CardType = "other"
+)
+
+var CardTypeValues = []CardType{
+	CardTypeInterviewInvite,
+	CardTypeWechatExchange,
+	CardTypeResumeAttachment,
+	CardTypeOther,
+}
+
+type DebugSlowOutcome string
+
+const (
+	DebugSlowOutcomeOk     DebugSlowOutcome = "ok"
+	DebugSlowOutcomeFailed DebugSlowOutcome = "failed"
+	DebugSlowOutcomeSilent DebugSlowOutcome = "silent"
+)
+
+var DebugSlowOutcomeValues = []DebugSlowOutcome{
+	DebugSlowOutcomeOk,
+	DebugSlowOutcomeFailed,
+	DebugSlowOutcomeSilent,
+}
+
+type ErrorPhase string
+
+const (
+	ErrorPhaseReceipt   ErrorPhase = "receipt"
+	ErrorPhaseExecution ErrorPhase = "execution"
+)
+
+var ErrorPhaseValues = []ErrorPhase{
+	ErrorPhaseReceipt,
+	ErrorPhaseExecution,
+}
+
+type ListFilter string
+
+const (
+	ListFilterAll    ListFilter = "all"
+	ListFilterUnread ListFilter = "unread"
+)
+
+var ListFilterValues = []ListFilter{
+	ListFilterAll,
+	ListFilterUnread,
+}
+
+type LoginChangeState string
+
+const (
+	LoginChangeStateIn  LoginChangeState = "in"
+	LoginChangeStateOut LoginChangeState = "out"
+)
+
+var LoginChangeStateValues = []LoginChangeState{
+	LoginChangeStateIn,
+	LoginChangeStateOut,
+}
+
+type LoginState string
+
+const (
+	LoginStateIn      LoginState = "in"
+	LoginStateOut     LoginState = "out"
+	LoginStateUnknown LoginState = "unknown"
+)
+
+var LoginStateValues = []LoginState{
+	LoginStateIn,
+	LoginStateOut,
+	LoginStateUnknown,
+}
+
+type ManualInteractionKind string
+
+const (
+	ManualInteractionKindPointer    ManualInteractionKind = "pointer"
+	ManualInteractionKindKeyboard   ManualInteractionKind = "keyboard"
+	ManualInteractionKindNavigation ManualInteractionKind = "navigation"
+)
+
+var ManualInteractionKindValues = []ManualInteractionKind{
+	ManualInteractionKindPointer,
+	ManualInteractionKindKeyboard,
+	ManualInteractionKindNavigation,
+}
+
+type MessageDirection string
+
+const (
+	MessageDirectionIn     MessageDirection = "in"
+	MessageDirectionOut    MessageDirection = "out"
+	MessageDirectionSystem MessageDirection = "system"
+)
+
+var MessageDirectionValues = []MessageDirection{
+	MessageDirectionIn,
+	MessageDirectionOut,
+	MessageDirectionSystem,
+}
+
+type MessageKind string
+
+const (
+	MessageKindText   MessageKind = "text"
+	MessageKindImage  MessageKind = "image"
+	MessageKindVoice  MessageKind = "voice"
+	MessageKindFile   MessageKind = "file"
+	MessageKindCard   MessageKind = "card"
+	MessageKindSystem MessageKind = "system"
+)
+
+var MessageKindValues = []MessageKind{
+	MessageKindText,
+	MessageKindImage,
+	MessageKindVoice,
+	MessageKindFile,
+	MessageKindCard,
+	MessageKindSystem,
+}
+
 type NotReadyReason string
 
 const (
-	NotReadyReasonPageAbsent        NotReadyReason = "pageAbsent"
-	NotReadyReasonLoginRequired     NotReadyReason = "loginRequired"
-	NotReadyReasonContentScriptDead NotReadyReason = "contentScriptDead"
-	NotReadyReasonPageBroken        NotReadyReason = "pageBroken"
-	NotReadyReasonUnknown           NotReadyReason = "unknown"
+	NotReadyReasonPageAbsent         NotReadyReason = "pageAbsent"
+	NotReadyReasonLoginRequired      NotReadyReason = "loginRequired"
+	NotReadyReasonContentScriptDead  NotReadyReason = "contentScriptDead"
+	NotReadyReasonPageBroken         NotReadyReason = "pageBroken"
+	NotReadyReasonIdentityUnverified NotReadyReason = "identityUnverified"
+	NotReadyReasonUnknown            NotReadyReason = "unknown"
 )
 
 var NotReadyReasonValues = []NotReadyReason{
@@ -65,7 +233,24 @@ var NotReadyReasonValues = []NotReadyReason{
 	NotReadyReasonLoginRequired,
 	NotReadyReasonContentScriptDead,
 	NotReadyReasonPageBroken,
+	NotReadyReasonIdentityUnverified,
 	NotReadyReasonUnknown,
+}
+
+type PageKind string
+
+const (
+	PageKindIm        PageKind = "im"
+	PageKindRecommend PageKind = "recommend"
+	PageKindOther     PageKind = "other"
+	PageKindNone      PageKind = "none"
+)
+
+var PageKindValues = []PageKind{
+	PageKindIm,
+	PageKindRecommend,
+	PageKindOther,
+	PageKindNone,
 }
 
 type ReportState string
@@ -132,6 +317,26 @@ var SideEffectValues = []SideEffect{
 	SideEffectConfirmed,
 }
 
+type SurfaceName string
+
+const (
+	SurfaceNameIm SurfaceName = "im"
+)
+
+var SurfaceNameValues = []SurfaceName{
+	SurfaceNameIm,
+}
+
+type UnreadScope string
+
+const (
+	UnreadScopeTotal UnreadScope = "total"
+)
+
+var UnreadScopeValues = []UnreadScope{
+	UnreadScopeTotal,
+}
+
 type Kind string
 
 const (
@@ -161,7 +366,7 @@ type KindMeta struct {
 var Kinds = map[Kind]KindMeta{
 	KindAck:      {Dir: "both", AckBy: "", Batch: BatchM1, Lossy: false},
 	KindBye:      {Dir: "B2H", AckBy: "", Batch: BatchM1, Lossy: false},
-	KindCancel:   {Dir: "B2H", AckBy: "ack", Batch: BatchX, Lossy: false},
+	KindCancel:   {Dir: "B2H", AckBy: "ack", Batch: BatchS, Lossy: false},
 	KindCmd:      {Dir: "B2H", AckBy: "ack", Batch: BatchM1, Lossy: false},
 	KindEvent:    {Dir: "H2B", AckBy: "", Batch: BatchS, Lossy: true},
 	KindHello:    {Dir: "H2B", AckBy: "welcome|bye", Batch: BatchM1, Lossy: false},
@@ -174,12 +379,28 @@ var Kinds = map[Kind]KindMeta{
 	KindWelcome:  {Dir: "B2H", AckBy: "", Batch: BatchM1, Lossy: false},
 }
 
+type Feature string
+
+const (
+	FeatureBlob1     Feature = "blob/1"
+	FeatureCancel1   Feature = "cancel/1"
+	FeatureLease1    Feature = "lease/1"
+	FeatureProgress1 Feature = "progress/1"
+)
+
+var Features = map[Feature]Batch{
+	FeatureBlob1:     BatchX,
+	FeatureCancel1:   BatchS,
+	FeatureLease1:    BatchS,
+	FeatureProgress1: BatchS,
+}
+
 // Envelope:所有消息的信封(7 字段,冻结;扩展只进 Body)。
 type Envelope struct {
 	Proto   int             `json:"proto"`
 	Kind    Kind            `json:"kind"`
 	MsgID   string          `json:"msgId"`
-	Session *string         `json:"session"` // hello/welcome/bye 与 pre-session ping/pong 为 null
+	Session *string         `json:"session"` // hello/welcome/bye 为 null
 	Ts      int64           `json:"ts"`
 	Attempt int             `json:"attempt"`
 	Body    json.RawMessage `json:"body"`
@@ -208,24 +429,25 @@ var Classes = map[CmdClass]ClassMeta{
 type ByeCode string
 
 const (
-	ByeCodeAuthFailed        ByeCode = "AUTH_FAILED"
 	ByeCodeProtoIncompatible ByeCode = "PROTO_INCOMPATIBLE"
 	ByeCodeSuperseded        ByeCode = "SUPERSEDED"
 	ByeCodeShuttingDown      ByeCode = "SHUTTING_DOWN"
-	ByeCodePairingTimeout    ByeCode = "PAIRING_TIMEOUT"
-	ByeCodePairingRejected   ByeCode = "PAIRING_REJECTED"
 )
 
 type ErrorCode string
 
 const (
+	ErrCodeAccountMismatch          ErrorCode = "ACCOUNT_MISMATCH"
 	ErrCodeCanceledByBrain          ErrorCode = "CANCELED_BY_BRAIN"
+	ErrCodeConversationNotFound     ErrorCode = "CONVERSATION_NOT_FOUND"
 	ErrCodeCtxLostDuringExec        ErrorCode = "CTX_LOST_DURING_EXEC"
 	ErrCodeCtxNotReady              ErrorCode = "CTX_NOT_READY"
+	ErrCodeCursorInvalid            ErrorCode = "CURSOR_INVALID"
 	ErrCodeElementUnresolved        ErrorCode = "ELEMENT_UNRESOLVED"
 	ErrCodeExecTimeoutHand          ErrorCode = "EXEC_TIMEOUT_HAND"
 	ErrCodeGuardFailed              ErrorCode = "GUARD_FAILED"
 	ErrCodeInternalHand             ErrorCode = "INTERNAL_HAND"
+	ErrCodePayloadLimit             ErrorCode = "PAYLOAD_LIMIT"
 	ErrCodePlatformLimit            ErrorCode = "PLATFORM_LIMIT"
 	ErrCodePostconditionUnconfirmed ErrorCode = "POSTCONDITION_UNCONFIRMED"
 	ErrCodeProtoBadArgs             ErrorCode = "PROTO_BAD_ARGS"
@@ -236,6 +458,7 @@ const (
 	ErrCodeQueueFull                ErrorCode = "QUEUE_FULL"
 	ErrCodeStaleSession             ErrorCode = "STALE_SESSION"
 	ErrCodeTargetNotFound           ErrorCode = "TARGET_NOT_FOUND"
+	ErrCodeUserActive               ErrorCode = "USER_ACTIVE"
 )
 
 // ErrorCodeMeta:契约默认值。RetryableDefault 可为条件式描述(如 "afterRecovery|manualOnly(SX)"),裁决权在脑的矩阵。
@@ -243,27 +466,50 @@ type ErrorCodeMeta struct {
 	RetryableDefault string
 	SideEffect       []SideEffect // 允许取值
 	Batch            Batch
+	Phase            ErrorPhase // receipt=仅 ack(rejected);execution=accepted 后 result(failed)
 }
 
 var ErrorCodes = map[ErrorCode]ErrorCodeMeta{
-	ErrCodeCanceledByBrain:          {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX},
-	ErrCodeCtxLostDuringExec:        {RetryableDefault: "afterRecovery|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS},
-	ErrCodeCtxNotReady:              {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS},
-	ErrCodeElementUnresolved:        {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS},
-	ErrCodeExecTimeoutHand:          {RetryableDefault: "yes|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchM1},
-	ErrCodeGuardFailed:              {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX},
-	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchM1},
-	ErrCodePlatformLimit:            {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchX},
-	ErrCodePostconditionUnconfirmed: {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchX},
-	ErrCodeProtoBadArgs:             {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeProtoMalformed:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeProtoMsgTooLarge:         {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeProtoUnsupportedCmd:      {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeProtoUnsupportedKind:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeQueueFull:                {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeStaleSession:             {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1},
-	ErrCodeTargetNotFound:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS},
+	ErrCodeAccountMismatch:          {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeCanceledByBrain:          {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeConversationNotFound:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeCtxLostDuringExec:        {RetryableDefault: "afterRecovery|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeCtxNotReady:              {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeCursorInvalid:            {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeElementUnresolved:        {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeExecTimeoutHand:          {RetryableDefault: "yes|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution},
+	ErrCodeGuardFailed:              {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution},
+	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution},
+	ErrCodePayloadLimit:             {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodePlatformLimit:            {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution},
+	ErrCodePostconditionUnconfirmed: {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution},
+	ErrCodeProtoBadArgs:             {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeProtoMalformed:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeProtoMsgTooLarge:         {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeProtoUnsupportedCmd:      {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeProtoUnsupportedKind:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeQueueFull:                {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeStaleSession:             {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
+	ErrCodeTargetNotFound:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeUserActive:               {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
 }
+
+var AckRejectableErrorCodes = map[ErrorCode]struct{}{
+	ErrCodeProtoMalformed:       {},
+	ErrCodeProtoUnsupportedKind: {},
+	ErrCodeProtoUnsupportedCmd:  {},
+	ErrCodeProtoBadArgs:         {},
+	ErrCodeProtoMsgTooLarge:     {},
+	ErrCodeStaleSession:         {},
+	ErrCodeQueueFull:            {},
+}
+
+const (
+	ExpiredAtReceiptAckStatus           AckStatus    = AckStatusAccepted
+	ExpiredAtReceiptResultStatus        ResultStatus = ResultStatusExpired
+	ExpiredAtReceiptInvokeHandler                    = false
+	ExpiredAtReceiptBypassQueueCapacity              = true
+)
 
 const (
 	PrimChatReadList       = "chat.readList"
@@ -279,35 +525,41 @@ const (
 )
 
 type PrimitiveMeta struct {
-	Ver                int // 0=占位,未定稿
-	Class              CmdClass
-	Batch              Batch
-	PlatformSideEffect string // intrusive 专用声明;空=未声明
-	ExecBudgetMs       int64  // 0=用类默认
-	DeadlineMs         int64  // 0=派发时计算
+	Ver                          int // 0=占位,未定稿
+	Class                        CmdClass
+	Batch                        Batch
+	PlatformSideEffect           string // intrusive 专用声明;空=未声明
+	ExecBudgetMs                 int64  // 0=用类默认
+	DeadlineMs                   int64  // 0=派发时计算
+	LeaseMs                      int64  // 0=不启用租约;非零须协商 lease/1
+	ArgsSchema                   string
+	DataSchema                   string
+	ContextOptionalBeforeBinding bool // 仅首次真人绑定探测可省略 context
 }
 
 var Primitives = map[string]PrimitiveMeta{
-	PrimChatReadList:       {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimChatReadThread:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimChatSendGreeting:   {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimChatSendInviteCard: {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimChatSendMessage:    {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimDebugPing:          {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000},
-	PrimDebugSlowEcho:      {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000},
-	PrimDebugSwitchWindow:  {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000},
-	PrimNavEnsureSurface:   {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 0, DeadlineMs: 0},
-	PrimProbePlatform:      {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0},
+	PrimChatReadList:       {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "ChatReadListArgs", DataSchema: "ChatReadListData", ContextOptionalBeforeBinding: false},
+	PrimChatReadThread:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadThreadArgs", DataSchema: "ChatReadThreadData", ContextOptionalBeforeBinding: false},
+	PrimChatSendGreeting:   {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
+	PrimChatSendInviteCard: {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
+	PrimChatSendMessage:    {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
+	PrimDebugPing:          {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugPingArgs", DataSchema: "DebugPingData", ContextOptionalBeforeBinding: false},
+	PrimDebugSlowEcho:      {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "DebugSlowEchoArgs", DataSchema: "DebugSlowEchoData", ContextOptionalBeforeBinding: false},
+	PrimDebugSwitchWindow:  {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugSwitchWindowArgs", DataSchema: "DebugSwitchWindowData", ContextOptionalBeforeBinding: false},
+	PrimNavEnsureSurface:   {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "NavEnsureSurfaceArgs", DataSchema: "NavEnsureSurfaceData", ContextOptionalBeforeBinding: false},
+	PrimProbePlatform:      {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ProbePlatformArgs", DataSchema: "ProbePlatformData", ContextOptionalBeforeBinding: true},
 }
 
+type EventName string
+
 const (
-	EventLoginStateChanged = "loginStateChanged"
-	EventManualInteraction = "manualInteraction"
-	EventPageNavigated     = "pageNavigated"
-	EventUnreadBadge       = "unreadBadge"
+	EventLoginStateChanged EventName = "loginStateChanged"
+	EventManualInteraction EventName = "manualInteraction"
+	EventPageNavigated     EventName = "pageNavigated"
+	EventUnreadBadge       EventName = "unreadBadge"
 )
 
-var Events = map[string]Batch{
+var Events = map[EventName]Batch{
 	EventLoginStateChanged: BatchS,
 	EventManualInteraction: BatchS,
 	EventPageNavigated:     BatchS,
@@ -317,6 +569,7 @@ var Events = map[string]Batch{
 // 默认参数(契约 defaults 展平;嵌套层级用驼峰连接)。welcome 可下发覆盖。
 const (
 	DefaultAckTimeoutMs                     = 3000
+	DefaultCancelSettleMs                   = 1000
 	DefaultExecBudgetDefaultMsCapMs         = 240000
 	DefaultExecBudgetDefaultMsEffectful     = 60000
 	DefaultExecBudgetDefaultMsIntrusive     = 30000
@@ -329,10 +582,17 @@ const (
 	DefaultHelloTimeoutMs                   = 10000
 	DefaultInlineBytes                      = 32768
 	DefaultJournalTtlDays                   = 14
+	DefaultLeaseMaxMs                       = 120000
+	DefaultLeaseMinMs                       = 5000
 	DefaultMaxMsgBytes                      = 262144
 	DefaultOutboxTtlDays                    = 7
-	DefaultPairingWindowMs                  = 60000
-	DefaultPreSessionPingMs                 = 20000
+	DefaultPaginationCursorMaxBytes         = 2048
+	DefaultPaginationReadListMaxItems       = 32
+	DefaultPaginationReadThreadMaxItems     = 64
+	DefaultPayloadBlobMaxBytes              = 20971520
+	DefaultPayloadInlineMessageTextBytes    = 2048
+	DefaultPayloadInlineResultDataBytes     = 65536
+	DefaultPayloadMaxEvidenceTextBytes      = 2048
 	DefaultProcessedRetentionDays           = 30
 	DefaultReconnectAlarmsWatchdogSec       = 60
 	DefaultReconnectBaseMs                  = 1000
@@ -356,19 +616,19 @@ const (
 var DefaultRedispatchBackoffMs = []int{5000, 15000}
 
 // KindBodyFields:各 kind 的线上字段名清单($ 注释键已剔除)。
-// 用途:两端对手写 body 结构做一致性测试(json tag 必须与此表一致)。
+// 字段直接由 schemas.types 生成,未知加法字段由运行时校验忽略。
 var KindBodyFields = map[Kind][]string{
 	KindAck:      {"error", "ref", "status"},
 	KindBye:      {"code", "message"},
 	KindCancel:   {"reason", "ref"},
-	KindCmd:      {"args", "context", "deadline", "execBudgetMs", "guards", "idemKey", "name", "ver"},
+	KindCmd:      {"args", "context", "deadline", "execBudgetMs", "guards", "idemKey", "leaseMs", "name", "ver"},
 	KindEvent:    {"context", "data", "name", "observedAt"},
-	KindHello:    {"app", "auth", "bootId", "caps", "contractHash", "features", "handId", "protoSupported"},
+	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "protoSupported"},
 	KindPing:     {"contexts", "inFlight", "queueDepth", "sensors"},
 	KindPong:     {"now"},
 	KindProgress: {"pct", "ref", "stage"},
 	KindQuery:    {"ref"},
 	KindReport:   {"journal", "ref", "result", "state"},
-	KindResult:   {"data", "error", "evidence", "execMs", "ref", "replayed", "status"},
-	KindWelcome:  {"blob", "contractMatch", "hb", "issued", "limits", "now", "proto", "sensors", "session"},
+	KindResult:   {"data", "dataBlobRef", "error", "evidence", "execMs", "ref", "replayed", "status"},
+	KindWelcome:  {"blob", "contractMatch", "hb", "limits", "now", "proto", "sensors", "session"},
 }

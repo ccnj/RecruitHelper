@@ -3,8 +3,6 @@
 package store
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,10 +41,61 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("取底层 DB: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&PairedHand{}, &CmdRecord{}, &ProcessedMsg{}, &AuditEntry{}); err != nil {
+	// 首个客户安装前已经退役整条配对/token 机制。AutoMigrate 不会删除旧表，
+	// 因此升级过 M1 开发库时必须精确移除这张凭据表，不能让死 schema 继续
+	// 冒充现行数据模型；其余旧表和业务数据一概不碰。
+	if err := dropRetiredPairingSchema(db); err != nil {
+		return nil, fmt.Errorf("删除已退役配对表: %w", err)
+	}
+	// SQLite 不允许给已有数据的表直接追加无默认值的 NOT NULL 列。
+	// M1→M2 因而先做两阶段迁移:加可回填列、把每条旧命令设成独立逻辑根,
+	// 再交给 AutoMigrate 补其余列/索引。重启发生在两步之间也可再入。
+	if err := prepareCmdLineageMigration(db); err != nil {
+		return nil, fmt.Errorf("预迁移命令逻辑派发: %w", err)
+	}
+	if err := db.AutoMigrate(
+		&Hand{},
+		&Account{},
+		&CmdRecord{},
+		&ProcessedMsg{},
+		&Conversation{},
+		&TrackedIntent{},
+		&Message{},
+		&CardTransitionFact{},
+		&PatrolRound{},
+		&AuditEntry{},
+	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
+	// M1 已有命令没有 logical_dispatch_id。M2 迁移把每条旧命令视为一条独立逻辑链的根,
+	// 保证升级后重启扫描与 ledger 查询不出现不可达记录。
+	if err := db.Model(&CmdRecord{}).
+		Where("logical_dispatch_id IS NULL OR logical_dispatch_id = ?", "").
+		UpdateColumn("logical_dispatch_id", gorm.Expr("msg_id")).Error; err != nil {
+		return nil, fmt.Errorf("回填命令逻辑派发 ID: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+const retiredPairedHandsTable = "paired_hands"
+
+func dropRetiredPairingSchema(db *gorm.DB) error {
+	if !db.Migrator().HasTable(retiredPairedHandsTable) {
+		return nil
+	}
+	return db.Migrator().DropTable(retiredPairedHandsTable)
+}
+
+func prepareCmdLineageMigration(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&CmdRecord{}) {
+		return nil
+	}
+	if !db.Migrator().HasColumn(&CmdRecord{}, "LogicalDispatchID") {
+		if err := db.Exec("ALTER TABLE cmd_records ADD COLUMN logical_dispatch_id text").Error; err != nil {
+			return err
+		}
+	}
+	return db.Exec("UPDATE cmd_records SET logical_dispatch_id = msg_id WHERE logical_dispatch_id IS NULL OR logical_dispatch_id = ''").Error
 }
 
 func (s *Store) Close() error {
@@ -64,21 +113,39 @@ func (s *Store) JournalMode() (string, error) {
 	return mode, err
 }
 
-// HashToken:token 明文 → 落库哈希。
-func HashToken(token string) string {
-	h := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(h[:])
-}
+// ---------- 手 ----------
 
-// ---------- 手(工牌) ----------
-
-func (s *Store) UpsertHand(h *PairedHand) error {
-	return s.db.Save(h).Error
+// RegisterHand 按 handId 幂等登记/复用本地手。SQLite 单连接使并发首次
+// hello 的查询与写入串行化；既有手保留 CreatedAt/Label，只刷新 Origin 与
+// LastSeenAt。previousOrigin 供会话层做软审计；首次登记时为空。
+func (s *Store) RegisterHand(handID, origin string, now time.Time) (hand Hand, created bool, previousOrigin string, err error) {
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		lookupErr := tx.First(&hand, "hand_id = ?", handID).Error
+		switch {
+		case errors.Is(lookupErr, gorm.ErrRecordNotFound):
+			hand = Hand{HandID: handID, Origin: origin, CreatedAt: now, LastSeenAt: now}
+			if createErr := tx.Create(&hand).Error; createErr != nil {
+				return createErr
+			}
+			created = true
+			return nil
+		case lookupErr != nil:
+			return lookupErr
+		default:
+			previousOrigin = hand.Origin
+			hand.Origin = origin
+			hand.LastSeenAt = now
+			return tx.Model(&Hand{}).Where("hand_id = ?", handID).Updates(map[string]any{
+				"origin": origin, "last_seen_at": now,
+			}).Error
+		}
+	})
+	return hand, created, previousOrigin, err
 }
 
 // HandByID:未找到返回 (nil, nil)。
-func (s *Store) HandByID(id string) (*PairedHand, error) {
-	var h PairedHand
+func (s *Store) HandByID(id string) (*Hand, error) {
+	var h Hand
 	err := s.db.First(&h, "hand_id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -90,11 +157,11 @@ func (s *Store) HandByID(id string) (*PairedHand, error) {
 }
 
 func (s *Store) TouchHand(id string, t time.Time) error {
-	return s.db.Model(&PairedHand{}).Where("hand_id = ?", id).Update("last_seen_at", t).Error
+	return s.db.Model(&Hand{}).Where("hand_id = ?", id).Update("last_seen_at", t).Error
 }
 
-func (s *Store) Hands() ([]PairedHand, error) {
-	var hs []PairedHand
+func (s *Store) Hands() ([]Hand, error) {
+	var hs []Hand
 	err := s.db.Order("hand_id").Find(&hs).Error
 	return hs, err
 }
@@ -102,7 +169,9 @@ func (s *Store) Hands() ([]PairedHand, error) {
 // ---------- 命令账本(write-ahead) ----------
 
 func (s *Store) CreateCmd(c *CmdRecord) error {
-	return s.db.Create(c).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return createRootCmd(tx, c)
+	})
 }
 
 // CmdByMsgID:未找到返回 (nil, nil)。

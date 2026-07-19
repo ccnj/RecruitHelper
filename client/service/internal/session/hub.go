@@ -1,5 +1,5 @@
 // Package session:WS 会话层(协议规格 §2、§3、§4 握手部分)。
-// 2.2 范围:Origin 校验、hello/welcome/bye 握手、配对挂起、单活顶替、ping/pong(含 pre-session)。
+// 2.2 范围:Origin 校验、hello/welcome/bye 握手、本地手自动登记、单活顶替、ping/pong。
 // cmd/result 派发在 2.4 接入。
 package session
 
@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"github.com/coder/websocket"
 
 	"recruithelper/client/service/internal/dispatch"
-	"recruithelper/client/service/internal/pairing"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
@@ -29,16 +29,26 @@ const (
 
 type Hub struct {
 	st         *store.Store
-	pm         *pairing.Manager
 	reg        *Registry
 	frames     *FrameBus
 	dispatcher *dispatch.Dispatcher
+	eventSink  EventSink
 	mu         sync.Mutex
 	active     map[string]*Conn // handId → 当前活连接(单活)
+	takeoverMu sync.Mutex
+	takeovers  map[string]*takeoverGate // 仅串行同 handId 的 welcome→接管→收编
 }
 
-func NewHub(st *store.Store, pm *pairing.Manager, graceMs int64) *Hub {
-	return &Hub{st: st, pm: pm, reg: NewRegistry(graceMs), frames: NewFrameBus(), active: map[string]*Conn{}}
+func NewHub(st *store.Store, graceMs int64) *Hub {
+	return &Hub{
+		st: st, reg: NewRegistry(graceMs), frames: NewFrameBus(),
+		active: map[string]*Conn{}, takeovers: map[string]*takeoverGate{},
+	}
+}
+
+type takeoverGate struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // Frames:帧观测总线访问器(测试页协议观测台)。
@@ -47,15 +57,27 @@ func (h *Hub) Frames() *FrameBus { return h.frames }
 // SetDispatcher:接线派发器(构造后回填,打破 hub↔dispatcher 循环)。
 func (h *Hub) SetDispatcher(d *dispatch.Dispatcher) { h.dispatcher = d }
 
+// SetEventSink 安装传感事件消费者。processed_msgs 的持久去重先于回调发生。
+func (h *Hub) SetEventSink(s EventSink) { h.eventSink = s }
+
 // Registry:注册表访问器(状态页/测试)。
 func (h *Hub) Registry() *Registry { return h.reg }
 
-// SendEnvelope 实现 dispatch.Sender:向某手当前连接发已构造的信封。
+// SendEnvelope 实现 dispatch.Sender:向某手当前会话发已构造的信封。
+// active 选择、session 复核与 socket 写入共用 h.mu 作一个线性化区间：
+// 新 hello 要么在本次写完成后接管，要么先接管并使旧 session 响亮失败；
+// 绝不允许先取出旧 Conn、接管/收编完成后再向旧 socket 落帧。
 func (h *Hub) SendEnvelope(handID string, env protocol.Envelope) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	c := h.active[handID]
-	h.mu.Unlock()
 	if c == nil {
+		return dispatch.ErrHandOffline
+	}
+	if env.Session == nil || *env.Session != c.session {
+		return dispatch.ErrStaleSession
+	}
+	if !h.readyLocked(c) {
 		return dispatch.ErrHandOffline
 	}
 	return c.writeEnvelope(env)
@@ -64,25 +86,62 @@ func (h *Hub) SendEnvelope(handID string, env protocol.Envelope) error {
 // HandSession 实现 dispatch.Sender:取某手当前会话与 bootId。
 func (h *Hub) HandSession(handID string) (string, string, bool) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	c := h.active[handID]
-	h.mu.Unlock()
-	if c == nil {
+	if c == nil || !h.readyLocked(c) {
 		return "", "", false
 	}
 	return c.session, c.bootID, true
 }
 
-// CloseHand 实现 dispatch.Sender:ackTimeout 的唯一动作——关连接触发手侧重连。
-// 离线手 no-op(连接已断);不发 bye(纯关闭,手据 WS close 重连,§7.2.1)。
-func (h *Hub) CloseHand(handID, reason string) {
+// WithCurrentHandSession 把“复核当前 session/boot”与一个短提交回调线性化。
+// 账号绑定用它封死 probe 结束到 SQLite 提交之间的最后一个顶替窗口。
+// fn 只应执行短本地事务，不得做网络 I/O。
+func (h *Hub) WithCurrentHandSession(handID, sessionID, bootID string, fn func() error) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || c.session != sessionID || c.bootID != bootID || !h.readyLocked(c) {
+		return false, nil
+	}
+	return true, fn()
+}
+
+// HandNegotiation 实现 dispatch.Sender：caps 与 features 分开返回，调用方不得互相推断。
+func (h *Hub) HandNegotiation(handID string) ([]string, []string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || !h.readyLocked(c) {
+		return nil, nil, false
+	}
+	return append([]string(nil), c.caps...), append([]string(nil), c.features...), true
+}
+
+// readyLocked 是所有业务派发入口共用的可用性判据。active 只表示物理链仍在，
+// 只有注册表中同一 session/boot 仍为 ready 才能承接命令。调用方必须持有 h.mu；
+// 锁序固定为 h.mu → Registry.mu，Registry 不反向调用 Hub。
+func (h *Hub) readyLocked(c *Conn) bool {
+	health, matched := h.reg.SessionHealth(c.handID, c.session, c.bootID)
+	return matched && health == HealthReady
+}
+
+// CloseHand 实现 dispatch.Sender:ackTimeout 的唯一动作——仅关闭产生超时证词的
+// expectedSession。若其间新 hello 已顶替则 no-op，绝不能用旧命令误关新链。
+// 不发 bye(纯关闭,手据 WS close 重连,§7.2.1)。
+func (h *Hub) CloseHand(handID, expectedSession, reason string) bool {
 	h.mu.Lock()
 	c := h.active[handID]
-	h.mu.Unlock()
-	if c == nil {
-		return
+	if c == nil || c.session != expectedSession {
+		h.mu.Unlock()
+		return false
 	}
+	delete(h.active, handID)
+	h.mu.Unlock()
+	h.reg.Offline(handID, c.session, c.bootID)
 	h.st.Audit("hand_closed", handID, "", reason)
 	c.closeQuiet()
+	return true
 }
 
 // HandOfflineMs 实现 dispatch.Sender:某手离线时长(毫秒);在线或无记录返回 0。
@@ -111,11 +170,39 @@ func (h *Hub) StartHealthLoop(ctx context.Context) {
 
 // runSweep:一次健康扫描 + 告警。抽出供测试直接触发。
 func (h *Hub) runSweep(now time.Time) {
-	for _, handID := range h.reg.Sweep(now) {
+	for _, stalled := range h.reg.Sweep(now) {
 		// 连接开着却心跳静默——真异常,响亮告警(区别于连接干净关闭的静默暂停)。
-		slog.Warn("手心跳静默,判定假死", "handId", handID)
-		h.st.Audit("hand_stalled", handID, "", "连接在但心跳静默超 graceMs")
+		if h.closeStalled(stalled) {
+			slog.Warn("手心跳静默,判定假死并关闭连接", "handId", stalled.HandID, "session", stalled.SessionID)
+			h.st.Audit("hand_stalled", stalled.HandID, "", "连接在但心跳静默超 graceMs，已关闭该假死会话")
+			continue
+		}
+		slog.Warn("手心跳静默,关链前会话已更替", "handId", stalled.HandID, "session", stalled.SessionID)
+		h.st.Audit("hand_stalled", stalled.HandID, "", "连接在但心跳静默超 graceMs，关链前该会话已被顶替")
 	}
+}
+
+// closeStalled 只摘除 Sweep 选中的那条会话。h.mu 把“复核当前 active → 摘除”
+// 线性化：若新 hello 已经顶替，session 不匹配便 no-op；若这里先摘除，新 hello
+// 随后可安全发布。Offline 也按 session+boot 加栅栏，绝不误清新注册表记录。
+func (h *Hub) closeStalled(stalled StalledSession) bool {
+	h.mu.Lock()
+	c := h.active[stalled.HandID]
+	if c == nil || c.session != stalled.SessionID || c.bootID != stalled.BootID {
+		h.mu.Unlock()
+		return false
+	}
+	health, matched := h.reg.SessionHealth(stalled.HandID, stalled.SessionID, stalled.BootID)
+	if !matched || health != HealthStalled {
+		h.mu.Unlock()
+		return false
+	}
+	delete(h.active, stalled.HandID)
+	h.mu.Unlock()
+
+	h.reg.Offline(stalled.HandID, stalled.SessionID, stalled.BootID)
+	c.closeQuiet()
+	return true
 }
 
 type Conn struct {
@@ -126,10 +213,12 @@ type Conn struct {
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 
-	handID  string
-	session string
-	bootID  string
-	caps    []string
+	handID        string
+	session       string
+	bootID        string
+	caps          []string
+	features      []string
+	contractMatch bool
 }
 
 // ServeWS:一条连接的完整生命周期。
@@ -145,14 +234,17 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	ws.SetReadLimit(protocol.DefaultMaxMsgBytes)
 	ctx, cancel := context.WithCancel(r.Context())
 	c := &Conn{ws: ws, hub: h, origin: origin, cancel: cancel}
 	defer cancel()
 	defer func() {
 		if c.handID != "" {
-			h.uninstall(c.handID, c)
-			// 连接结束 = 静默下线(设计内常态,不告警);bootID 匹配防误清被顶替后的新连接。
-			h.reg.Offline(c.handID, c.bootID)
+			if h.uninstall(c.handID, c) {
+				// 只有实际摘掉当前单活连接者才能把注册表置离线；同 boot 顶替的旧
+				// 连接结束不得误清新连接。
+				h.reg.Offline(c.handID, c.session, c.bootID)
+			}
 		}
 	}()
 
@@ -185,7 +277,7 @@ func (c *Conn) readLoop(ctx context.Context, frames chan<- []byte, readErr chan<
 	}
 }
 
-// handshake:读 hello,校验,回 welcome(或配对挂起),返回是否进入正常会话。
+// handshake:读 hello,校验，按手自带的 handId 幂等登记/复用后立即回 welcome。
 func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-chan error) bool {
 	var data []byte
 	select {
@@ -207,89 +299,80 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 	}
 	c.hub.frames.observe("in", "", env)
 	var hello protocol.HelloBody
-	if err := json.Unmarshal(env.Body, &hello); err != nil {
+	if err := protocol.ValidateKindBody(protocol.KindHello, env.Body); err != nil {
 		c.sendBye(ctx, protocol.ByeCodeProtoIncompatible, "hello body 非法")
 		return false
 	}
+	_ = json.Unmarshal(env.Body, &hello)
 	if !containsInt(hello.ProtoSupported, protocol.ProtoVersion) {
 		c.sendBye(ctx, protocol.ByeCodeProtoIncompatible, "无共同协议版本")
 		return false
 	}
 	c.bootID = hello.BootID
 	c.caps = hello.Caps
-
-	if hello.HandID == nil || hello.Auth == nil {
-		return c.handshakePairing(ctx, frames, readErr, hello)
+	c.features = hello.Features
+	c.contractMatch = hello.ContractHash == protocol.ContractHash
+	if !c.contractMatch {
+		slog.Warn("手契约指纹不一致,按 warn-only 继续", "origin", c.origin, "got", hello.ContractHash, "want", protocol.ContractHash)
+		c.hub.st.Audit("contract_hash_mismatch", hello.HandID, env.MsgID, hello.ContractHash)
 	}
-	return c.handshakeReturning(ctx, *hello.HandID, *hello.Auth)
-}
-
-// handshakeReturning:日常握手(已有工牌)。
-func (c *Conn) handshakeReturning(ctx context.Context, handID, auth string) bool {
-	h, err := c.hub.st.HandByID(handID)
+	c.handID = hello.HandID
+	_, created, previousOrigin, err := c.hub.st.RegisterHand(c.handID, c.origin, time.Now())
 	if err != nil {
-		slog.Error("查工牌失败", "handId", handID, "err", err)
-		c.sendBye(ctx, protocol.ByeCodeAuthFailed, "内部错误")
+		slog.Error("本地手登记失败", "handId", c.handID, "err", err)
+		c.hub.st.Audit("hand_registration_failed", c.handID, env.MsgID, err.Error())
+		c.closeWithStatus(websocket.StatusInternalError, "hand registration failed")
 		return false
 	}
-	if h == nil || h.TokenHash != store.HashToken(auth) {
-		c.hub.st.Audit("auth_failed", handID, "", c.origin)
-		c.sendBye(ctx, protocol.ByeCodeAuthFailed, "工牌或令牌无效")
-		return false
+	if created {
+		c.hub.st.Audit("hand_registered", c.handID, env.MsgID, c.origin)
+	} else if previousOrigin != c.origin {
+		// 本机信任模型下 Origin 不作第二重身份；Chrome 重装等变化只留软证词。
+		c.hub.st.Audit("hand_origin_changed", c.handID, env.MsgID,
+			fmt.Sprintf("%s -> %s", previousOrigin, c.origin))
+		slog.Warn("手 Origin 变化,按本地信任模型继续", "handId", c.handID,
+			"previous", previousOrigin, "current", c.origin)
 	}
-	c.handID = handID
-	return c.enterSession(ctx, nil)
+	return c.enterSession(ctx)
 }
 
-// handshakePairing:首次配对——注册待配对,挂起等用户确认或窗口超时;等待期间响应 pre-session ping。
-func (c *Conn) handshakePairing(ctx context.Context, frames <-chan []byte, readErr <-chan error, hello protocol.HelloBody) bool {
-	confirm, winCtx, err := c.hub.pm.Register(c.origin, c.bootID, pairing.HelloInfo{
-		ExtVersion: hello.App.ExtVersion, Caps: hello.Caps,
-	})
-	if err != nil {
-		c.sendBye(ctx, protocol.ByeCodeAuthFailed, "请先在客户端开启配对模式")
-		return false
-	}
-	slog.Info("待配对", "origin", c.origin, "bootId", c.bootID)
-	for {
-		select {
-		case creds := <-confirm:
-			c.handID = creds.HandID
-			return c.enterSession(ctx, &protocol.IssuedCreds{HandID: creds.HandID, Auth: creds.Auth})
-		case <-winCtx.Done():
-			c.sendBye(ctx, protocol.ByeCodePairingTimeout, "配对窗已关闭")
-			return false
-		case data := <-frames:
-			c.handlePreSessionFrame(ctx, data)
-		case <-readErr:
-			return false
-		case <-ctx.Done():
-			return false
-		}
-	}
-}
+// enterSession:签发会话、装入活连接表(顶替旧)、发 welcome。
+func (c *Conn) enterSession(ctx context.Context) bool {
+	// 同手的两个连续 hello 不得交叉执行 OnReconnect：否则较旧的
+	// 连接可在更新连接发布后，再用自己的 bootId 收编/终局化账本。
+	// 此门栓不包住日常 SendEnvelope；OnReconnect 可正常回调 Hub 而不自锁。
+	releaseTakeover := c.hub.lockTakeover(c.handID)
+	defer releaseTakeover()
 
-// enterSession:签发会话、装入活连接表(顶替旧)、发 welcome。issued 非 nil 表示配对签发。
-func (c *Conn) enterSession(ctx context.Context, issued *protocol.IssuedCreds) bool {
 	c.session = ids.NewSessionID()
-	c.hub.install(c.handID, c)
-	c.hub.reg.Online(c.handID, c.bootID, c.caps, time.Now())
-	c.hub.st.TouchHand(c.handID, time.Now())
 	welcome := protocol.WelcomeBody{
 		Session:       c.session,
 		Proto:         protocol.ProtoVersion,
 		Hb:            protocol.HbParams{IntervalMs: protocol.DefaultHbIntervalMs, GraceMs: protocol.DefaultHbGraceMs},
 		Limits:        protocol.Limits{MaxMsgBytes: protocol.DefaultMaxMsgBytes, InlineBytes: protocol.DefaultInlineBytes},
-		Issued:        issued,
-		ContractMatch: true,
+		ContractMatch: c.contractMatch,
 		Now:           time.Now().UnixMilli(),
+		Sensors: &protocol.SensorParams{
+			BadgeDebounceMs:        protocol.DefaultSensorsBadgeDebounceMs,
+			BadgeMinEmitIntervalMs: protocol.DefaultSensorsBadgeMinEmitIntervalMs,
+			ManualQuietMs:          protocol.DefaultSensorsManualQuietMs,
+			NavSettleMs:            protocol.DefaultSensorsNavSettleMs,
+		},
 	}
-	if err := c.send(ctx, protocol.KindWelcome, nil, welcome); err != nil {
+	old, err := c.hub.activate(c, func() error {
+		return c.send(ctx, protocol.KindWelcome, nil, welcome)
+	})
+	if err != nil {
 		return false
 	}
-	slog.Info("会话建立", "handId", c.handID, "session", c.session, "paired", issued != nil)
+	if old != nil && old != c {
+		c.hub.st.Audit("superseded", c.handID, "", "新连接顶替旧连接")
+		slog.Info("单活顶替", "handId", c.handID)
+		old.closeWith(protocol.ByeCodeSuperseded, "superseded by new connection")
+	}
+	slog.Info("会话建立", "handId", c.handID, "session", c.session)
 	// 重连收编:welcome 之后(手已能处理 session),对该手在途命令按 bootId 收编(§7.2)。
-	// 首次配对无在途命令,天然 no-op。
+	// 首次登记无在途命令,天然 no-op。
 	if c.hub.dispatcher != nil {
 		c.hub.dispatcher.OnReconnect(c.handID, c.bootID)
 	}
@@ -311,41 +394,80 @@ func (c *Conn) serve(ctx context.Context, frames <-chan []byte, readErr <-chan e
 	}
 }
 
-func (c *Conn) handlePreSessionFrame(ctx context.Context, data []byte) {
-	env, err := decode(data)
-	if err != nil {
-		return
-	}
-	c.hub.frames.observe("in", c.handID, env)
-	if env.Kind == protocol.KindPing {
-		c.sendPong(ctx, env.Session)
-	}
-}
-
 func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 	env, err := decode(data)
 	if err != nil {
 		slog.Warn("会话帧解码失败", "handId", c.handID, "err", err)
 		return
 	}
+	if !c.hub.isActive(c.handID, c) {
+		c.hub.st.Audit("stale_connection_frame", c.handID, env.MsgID, "非当前单活连接的入站帧被拒绝")
+		return
+	}
+	if !c.acceptsEnvelopeSession(env) {
+		return
+	}
 	c.hub.frames.observe("in", c.handID, env)
 	switch env.Kind {
 	case protocol.KindPing:
-		c.hub.reg.Heartbeat(c.handID, c.bootID, time.Now())
+		if err := protocol.ValidateKindBody(protocol.KindPing, env.Body); err != nil {
+			c.hub.st.Audit("invalid_ping", c.handID, env.MsgID, err.Error())
+			return
+		}
+		var ping protocol.PingBody
+		_ = json.Unmarshal(env.Body, &ping)
+		c.hub.reg.HeartbeatReport(c.handID, c.session, c.bootID, ping, time.Now())
 		c.sendPong(ctx, env.Session)
 	case protocol.KindAck:
 		var ab protocol.AckBody
-		if err := json.Unmarshal(env.Body, &ab); err == nil && c.hub.dispatcher != nil {
+		if err := protocol.ValidateKindBody(protocol.KindAck, env.Body); err == nil && json.Unmarshal(env.Body, &ab) == nil && c.hub.dispatcher != nil {
 			c.hub.dispatcher.OnAck(c.handID, ab)
 		}
 	case protocol.KindResult:
 		var rb protocol.ResultBody
-		if err := json.Unmarshal(env.Body, &rb); err == nil && c.hub.dispatcher != nil {
+		if err := protocol.ValidateKindBody(protocol.KindResult, env.Body); err == nil && json.Unmarshal(env.Body, &rb) == nil && c.hub.dispatcher != nil {
 			c.hub.dispatcher.OnResult(c.handID, env.MsgID, rb)
 		}
+	case protocol.KindProgress:
+		if !containsString(c.features, string(protocol.FeatureProgress1)) {
+			c.hub.st.Audit("progress_unnegotiated", c.handID, env.MsgID, string(protocol.FeatureProgress1))
+			return
+		}
+		if err := protocol.ValidateKindBody(protocol.KindProgress, env.Body); err != nil {
+			c.hub.st.Audit("progress_invalid", c.handID, env.MsgID, err.Error())
+			return
+		}
+		var progress protocol.ProgressBody
+		_ = json.Unmarshal(env.Body, &progress)
+		if c.hub.dispatcher != nil && c.hub.dispatcher.OnProgress(c.handID, progress) {
+			// 只有 ref/hand/accepted/活租约全部通过的 progress 才兼作链路活性证词。
+			c.hub.reg.Heartbeat(c.handID, c.session, c.bootID, time.Now())
+		}
+	case protocol.KindEvent:
+		c.handleEvent(env)
 	default:
 		slog.Debug("暂不处理的会话帧", "handId", c.handID, "kind", env.Kind)
 	}
+}
+
+// acceptsEnvelopeSession 把 session 围栏放在 kind 语义层：ping/event/ack 等
+// 会话控制帧只认当前 session；已经 accepted 的 QueueItem 跨同 boot 会话继续执行，
+// 它产生的 progress/result 按协议保留创建时 session，故只要求非空。两者仍先经过
+// isActive 硬栅栏，旧 socket 无法借历史 session 投递。
+func (c *Conn) acceptsEnvelopeSession(env *protocol.Envelope) bool {
+	if env.Session != nil {
+		switch env.Kind {
+		case protocol.KindProgress, protocol.KindResult:
+			return true
+		default:
+			if *env.Session == c.session {
+				return true
+			}
+		}
+	}
+	c.hub.st.Audit("stale_session_frame", c.handID, env.MsgID,
+		fmt.Sprintf("入站 %s 的 session 与当前连接不符", env.Kind))
+	return false
 }
 
 func (c *Conn) sendPong(ctx context.Context, session *string) {
@@ -376,6 +498,9 @@ func (c *Conn) send(_ context.Context, kind protocol.Kind, session *string, body
 func (c *Conn) writeEnvelope(env protocol.Envelope) error {
 	buf, err := json.Marshal(env)
 	if err != nil {
+		return err
+	}
+	if err := protocol.ValidateFrameSize(buf, protocol.DefaultMaxMsgBytes); err != nil {
 		return err
 	}
 	c.hub.frames.observe("out", c.handID, &env)
@@ -412,26 +537,71 @@ func (c *Conn) closeQuiet() {
 	})
 }
 
+func (c *Conn) closeWithStatus(status websocket.StatusCode, reason string) {
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		_ = c.ws.Close(status, reason)
+	})
+}
+
 // ---------- 活连接表(单活顶替) ----------
 
-func (h *Hub) install(handID string, c *Conn) {
+// activate 先把 welcome 成功写给新手，再在同一个 h.mu 临界区内登记 ready
+// 并发布新 active。因此调度器既不会在 welcome 之前向新 session 发 cmd，
+// 也看不到 active 已换而注册表尚未就绪的半态。publish 只允许做本连接的
+// 有界 socket 写，不得回调 Hub/派发器（锁序固定为 h.mu → Registry.mu / c.writeMu）。
+func (h *Hub) activate(c *Conn, publish func() error) (*Conn, error) {
 	h.mu.Lock()
-	old := h.active[handID]
-	h.active[handID] = c
-	h.mu.Unlock()
-	if old != nil && old != c {
-		h.st.Audit("superseded", handID, "", "新连接顶替旧连接")
-		slog.Info("单活顶替", "handId", handID)
-		old.closeWith(protocol.ByeCodeSuperseded, "superseded by new connection")
+	defer h.mu.Unlock()
+	if err := publish(); err != nil {
+		return nil, err
+	}
+	old := h.active[c.handID]
+	h.reg.Online(c.handID, c.session, c.bootID, c.caps, c.features, time.Now())
+	h.active[c.handID] = c
+	return old, nil
+}
+
+// lockTakeover 是按 handId 分片的短生命周期门栓。refs 在等待 gate.mu 前
+// 已增加，因此有等待者时绝不会删除 gate 并造出同 handId 的第二把锁。
+func (h *Hub) lockTakeover(handID string) func() {
+	h.takeoverMu.Lock()
+	gate := h.takeovers[handID]
+	if gate == nil {
+		gate = &takeoverGate{}
+		h.takeovers[handID] = gate
+	}
+	gate.refs++
+	h.takeoverMu.Unlock()
+
+	gate.mu.Lock()
+	return func() {
+		gate.mu.Unlock()
+		h.takeoverMu.Lock()
+		gate.refs--
+		if gate.refs == 0 {
+			delete(h.takeovers, handID)
+		}
+		h.takeoverMu.Unlock()
 	}
 }
 
-func (h *Hub) uninstall(handID string, c *Conn) {
+func (h *Hub) uninstall(handID string, c *Conn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.active[handID] == c {
 		delete(h.active, handID)
+		return true
 	}
+	return false
+}
+
+func (h *Hub) isActive(handID string, c *Conn) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.active[handID] == c
 }
 
 // ActiveHandIDs:当前在线手(状态页/测试用)。
@@ -448,6 +618,9 @@ func (h *Hub) ActiveHandIDs() []string {
 // ---------- 工具 ----------
 
 func decode(data []byte) (*protocol.Envelope, error) {
+	if err := protocol.ValidateFrameSize(data, protocol.DefaultMaxMsgBytes); err != nil {
+		return nil, err
+	}
 	var env protocol.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, err
@@ -456,6 +629,15 @@ func decode(data []byte) (*protocol.Envelope, error) {
 		return nil, errors.New("proto 版本不符")
 	}
 	return &env, nil
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 func containsInt(xs []int, v int) bool {

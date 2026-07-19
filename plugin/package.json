@@ -8,7 +8,8 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test:node": "node test/run.mjs"
+    "test:unit": "node test/unit.mjs",
+    "test:node": "node test/unit.mjs && node test/run.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",

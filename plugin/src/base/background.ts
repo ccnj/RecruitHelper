@@ -1,11 +1,16 @@
 // SW 入口(base):注册全部 chrome 监听(宪法禁令 5:监听只在 base),接线连接与原语。
 import { Connection } from './connection'
+import { handleInfrastructureMessage } from './optionsBridge'
+import { registerSensorBridge } from './sensorBridge'
 import { registerDebugPrimitives } from '../program/primitives/debug'
+import { registerM2Primitives } from '../program/primitives/m2'
 
 // program 原语注册(program 不注册任何 chrome 监听,只填这张表)。
 registerDebugPrimitives()
+registerM2Primitives()
 
 const conn = new Connection()
+registerSensorBridge(conn)
 conn.ensureConnected()
 
 // 看门狗:chrome.alarms 是基础设施用途(禁令 1 豁免)。SW 死透后 setTimeout 重连链断,
@@ -26,5 +31,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse(conn.status())
     return true
   }
+  if (handleInfrastructureMessage(msg, sendResponse)) return true
   return undefined
 })

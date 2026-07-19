@@ -31,7 +31,9 @@ func TestSuspectPossibleLateResultKept(t *testing.T) {
 		t.Fatalf("应有 suspect_kept 审计")
 	}
 	// 对照:ok 迟到 result 才核销
-	d.OnResult("hand-01", "res-ok", protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk})
+	d.OnResult("hand-01", "res-ok", protocol.ResultBody{
+		Ref: msgID, Status: protocol.ResultStatusOk, Data: json.RawMessage(`{"echoedAfterMs":0}`),
+	})
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdOk {
 		t.Fatalf("ok 迟到 result 应核销为 ok")
 	}
@@ -77,10 +79,22 @@ func TestTransientRejectRequeueRedriven(t *testing.T) {
 		t.Fatalf("瞬态拒绝应回 queued,得到 %s", rec.Status)
 	}
 	before := m.sentCount()
-	// 未到 deadline 的 sweep → 重投驱动(不进 suspect)
+	d.OnReconnect("hand-01", "b-1")
+	if m.sentCount() != before {
+		t.Fatal("同代重连不得绕过持久化退避门槛")
+	}
+	// 退避到期前不得立即重投。
 	d.sweepFaults(time.Now())
+	if m.sentCount() != before {
+		t.Fatalf("queued 命令跳过了退避")
+	}
+	requeued, _ := st.CmdByMsgID(msgID)
+	if requeued.NotBeforeAt == nil {
+		t.Fatal("瞬态拒绝的退避时刻未持久化")
+	}
+	d.sweepFaults(requeued.NotBeforeAt.Add(time.Millisecond))
 	if m.sentCount() != before+1 {
-		t.Fatalf("queued 命令应被 sweep 重投")
+		t.Fatalf("退避到期后 queued 命令应被 sweep 重投")
 	}
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdSent {
 		t.Fatalf("重投后应回 sent,得到 %s", rec.Status)
@@ -123,7 +137,10 @@ func TestLateAckAudited(t *testing.T) {
 	m.up("hand-01", "b-1")
 	msgID, _ := d.Dispatch("hand-01", protocol.PrimDebugPing, json.RawMessage(`{}`))
 	// 先终局化
-	d.OnResult("hand-01", "r1", protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk})
+	d.OnResult("hand-01", "r1", protocol.ResultBody{
+		Ref: msgID, Status: protocol.ResultStatusOk,
+		Data: json.RawMessage(`{"echo":null,"swStartedAt":1}`),
+	})
 	// 迟到 ack 到达
 	d.OnAck("hand-01", protocol.AckBody{Ref: msgID, Status: protocol.AckStatusAccepted})
 	if !hasAudit(t, st, "late_ack", msgID) {
@@ -141,7 +158,10 @@ func TestLateResultOnVoidAndOrphan(t *testing.T) {
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdVoid {
 		t.Fatalf("前置:应 void")
 	}
-	d.OnResult("hand-01", "rv", protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk})
+	d.OnResult("hand-01", "rv", protocol.ResultBody{
+		Ref: msgID, Status: protocol.ResultStatusOk,
+		Data: json.RawMessage(`{"echo":null,"swStartedAt":1}`),
+	})
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdVoid {
 		t.Fatalf("void 收迟到 result 应仍 void,得到 %s", rec.Status)
 	}
@@ -166,7 +186,9 @@ func TestVerdictRaces(t *testing.T) {
 	msgID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
 	d.sweepFaults(future())
 	// 迟到 result 先核销
-	d.OnResult("hand-01", "rc", protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk})
+	d.OnResult("hand-01", "rc", protocol.ResultBody{
+		Ref: msgID, Status: protocol.ResultStatusOk, Data: json.RawMessage(`{"echoedAfterMs":0}`),
+	})
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdOk {
 		t.Fatalf("应已核销为 ok")
 	}
@@ -259,4 +281,31 @@ func TestSweepSingleClosePerHand(t *testing.T) {
 		t.Fatalf("wedged 应只 +1,得到 %d", w)
 	}
 	_ = st
+}
+
+// 旧 socket 发送在 Hub 接管前成功，但它的 SQLite 记账可以迟于同 boot
+// 新 session 收编。迟到 markSent 不得把账本 session 改回旧值或重复累加 attempt。
+func TestLateMarkSentCannotOverwriteNewerSession(t *testing.T) {
+	d, st, _ := newDisp(t)
+	if err := st.CreateCmd(&store.CmdRecord{
+		MsgID: "cmd-session-fence", Name: protocol.PrimDebugPing,
+		Class: string(protocol.ClassReadonly), HandID: "hand-01",
+		Session: "session-old", BootIDAtDispatch: "boot-same",
+		Status: store.CmdQueued, Args: `{}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟重连收编先把同 msgId 重发到新 session 并记账。
+	d.markSent("cmd-session-fence", "session-old", "session-new")
+	// 原始旧 socket 的发送调用稍后才返回并尝试记账。
+	d.markSent("cmd-session-fence", "session-old", "session-old")
+
+	rec, err := st.CmdByMsgID("cmd-session-fence")
+	if err != nil || rec == nil {
+		t.Fatalf("读命令: rec=%+v err=%v", rec, err)
+	}
+	if rec.Session != "session-new" || rec.Attempt != 1 || rec.Status != store.CmdSent {
+		t.Fatalf("迟到旧记账覆盖了新 session: %+v", rec)
+	}
 }

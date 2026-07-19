@@ -1,27 +1,15 @@
 // 原语注册表(program 层)。program 不注册任何 chrome 监听、只经此表暴露能力(宪法禁令 5)。
 // 这是"交付机制悬置"得以成立的形态:base 只认这张表,不认具体业务。
 import { CmdClass, PRIMITIVE_META } from '../base/protocol'
+import type { ErrorBody, Evidence, ResultStatus } from '../base/protocol'
+import type { ExecutionHooks } from '../base/dispatcher'
 
-export interface PrimitiveContext {
-  cmdMsgId: string
-  deadlineMs: number
-}
-
-export interface ErrorBody {
-  code: string
-  message?: string
-  retryable?: string
-  sideEffect?: string
-}
-
-export interface Evidence {
-  type: string
-  text?: string
-  blob?: string
-}
+// 这是 base 与 program 之间唯一的执行控制接缝。长原语只在确定的分页/滚动边界
+// 调用这些合作式钩子；program 不自行维护超时、租约或取消状态。
+export interface PrimitiveContext extends ExecutionHooks {}
 
 export interface PrimitiveResult {
-  status: 'ok' | 'failed' | 'canceled' | 'expired'
+  status: ResultStatus
   data?: unknown
   error?: ErrorBody
   evidence?: Evidence[]
