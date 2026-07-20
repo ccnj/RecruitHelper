@@ -1917,1670 +1917,518 @@ test('智联会话 click-once 对冲突绑定、人工草稿与账号变化一�
   }
 })
 
-test('智联 MAIN 发送只信 route+sender 因果绑定，列表在线 is-active 不作为目标证据', async () => {
+// M3_SEND_GUARD_RESTRUCTURE_TESTS
+const m3Hash = (value) => createHash('sha256').update(value).digest('hex')
+
+function installM3SendFixture() {
   const original = {
     window: globalThis.window,
     document: globalThis.document,
     location: globalThis.location,
     getComputedStyle: globalThis.getComputedStyle,
     HTMLElement: globalThis.HTMLElement,
+    HTMLButtonElement: globalThis.HTMLButtonElement,
     HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
     InputEvent: globalThis.InputEvent,
     Event: globalThis.Event,
+    chrome: globalThis.chrome,
   }
-  const conversationRef = 'conversation-send-main'
-  const inboundText = '候选人尾消息'
-  const outboundText = ' 你好  '
-  const mixedTextFirst = '合成已发文本一'
-  const mixedSystemText = '合成系统提示'
-  const mixedCardRequest = 'synthetic-card-request'
-  const mixedTextFourth = '合成已发文本四'
-  const mixedTextFifth = '合成已发文本五'
-  const digest = (value) => createHash('sha256').update(normalizeZhilianMessageText(value)).digest('hex')
-  const sourceKey = (idServer) => createHash('sha256').update(`source-v1|${idServer}`).digest('hex')
-  const timelineRows = []
-  // 脱敏 real-shape：真实失败现场的尾部类别顺序为 out text / system /
-  // out card / out text / out text。DOM fixture 故意不尝试表达卡片语义。
-  const liveTimelineRows = [
-    {
-      idServer: 'server-mixed-text-1', time: 1, status: 'success', type: 'text',
-      from: 'staff-fixture', text: mixedTextFirst,
-    },
-    {
-      idServer: 'server-mixed-system-2', time: 2, status: '', type: 999,
-      from: '', content: JSON.stringify({ title: mixedSystemText }),
-    },
-    {
-      idServer: 'server-mixed-card-3', time: 3, status: 'success', type: 105,
-      from: 'staff-fixture',
-      content: JSON.stringify({ content: JSON.stringify({
-        staffContent: '合成交换卡片', requestId: mixedCardRequest,
-      }) }),
-    },
-    {
-      idServer: 'server-mixed-text-4', time: 4, status: 'success', type: 'text',
-      from: 'staff-fixture', text: mixedTextFourth,
-    },
-    {
-      idServer: 'server-mixed-text-5', time: 5, status: 'success', type: 'text',
-      from: 'staff-fixture', text: mixedTextFifth,
-    },
-  ]
-  let nextServerSequence = 6
-  const currentBaselineServerSourceKeys = () => {
-    const ordered = [...liveTimelineRows]
-      .map((row, sourceIndex) => ({ ...row, sourceIndex }))
-      .sort((left, right) => Number(left.time) - Number(right.time) || left.sourceIndex - right.sourceIndex)
-    const seen = new Set()
-    const deduped = ordered.filter((row) => {
-      if (seen.has(row.idServer)) return false
-      seen.add(row.idServer)
-      return true
-    })
-    return deduped.slice(-64).map((row) => sourceKey(row.idServer))
+  const conversationRef = 'conversation-m3-public-boundary'
+  const peerRef = 'candidate-m3-public-boundary'
+  const staffId = 'staff-m3-public-boundary'
+  const orgId = 'org-m3-public-boundary'
+  const loginPoint = 'login-m3-public-boundary'
+  const text = '你好'
+  const tailText = '候选人尾消息'
+  const rows = [{
+    idServer: 'server-m3-baseline-1',
+    time: 1,
+    status: 'success',
+    type: 'text',
+    from: peerRef,
+    text: tailText,
+  }]
+  const state = {
+    rows,
+    details: [],
+    composers: [],
+    buttons: [],
+    intrinsicClicks: 0,
+    instanceClicks: 0,
+    valueAtClick: null,
+    inputEvents: [],
+    rewriteInsertedText: false,
+    ariaDisabled: null,
+    throwOnReadAfterClick: false,
   }
-  let clicks = 0
-  let mutateBindingOnInput = false
-  let mutateHandlerOnInput = false
-  let mutateRouteOnInput = false
-  let normalizeDraftOnInput = false
-  let throwOnInput = false
-  let mutateScalarBindingOnInput = false
-  let replaceScalarContainerOnInput = false
-  let addScalarProjectionOnInput = false
-  let duplicateVisibleDetail = false
+
   class FixtureEvent {
     constructor(type, options = {}) { this.type = type; Object.assign(this, options) }
   }
+  let composer
+  class FixtureHTMLElement {
+    constructor() { this.isConnected = true }
+    getClientRects() { return [{}] }
+    click() {
+      state.valueAtClick = composer.value
+      state.intrinsicClicks += 1
+    }
+  }
   class FixtureTextArea {
-    constructor() { this._value = ''; this.isConnected = true }
-    get value() { return this._value }
+    constructor() {
+      this._value = ''
+      this.isConnected = true
+      this.parentElement = null
+    }
+    get value() {
+      if (state.throwOnReadAfterClick && state.intrinsicClicks > 0) {
+        throw new Error('click 后不得再读取 composer')
+      }
+      return this._value
+    }
     set value(value) { this._value = String(value) }
     getClientRects() { return [{}] }
-    contains(node) { return node === this }
     closest(selector) {
       if (selector === '.im-sender__input-wrapper') return wrapper
       if (selector === '.im-session-detail') return detail
       return null
     }
     dispatchEvent(event) {
-      if (event.type === 'input') {
-        button.disabled = false
-        if (mutateBindingOnInput) senderOwner.currentSession.sessionId = 'conversation-input-race'
-        if (mutateScalarBindingOnInput) senderOwner.$data.activeSessionId = 'conversation-input-race'
-        if (replaceScalarContainerOnInput) senderOwner.$data = { activeSessionId: conversationRef }
-        if (addScalarProjectionOnInput) senderOwner.$data.currentSessionId = conversationRef
-        if (mutateHandlerOnInput) {
-          buttonOwner._events.click = [alternateSenderHandler]
-          buttonOwner.$vnode.componentOptions.listeners.click = alternateSenderHandler
-        }
-        if (event.inputType === 'insertText' && mutateRouteOnInput) {
-          globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=conversation-input-route-race'
-        }
-        if (event.inputType === 'insertText' && normalizeDraftOnInput) this._value = normalizeZhilianMessageText(this._value)
-        if (event.inputType === 'insertText' && throwOnInput) throw new Error('fixture-input-throw')
+      state.inputEvents.push({ type: event.type, inputType: event.inputType ?? null, data: event.data ?? null })
+      if (state.rewriteInsertedText && event.type === 'input' && event.inputType === 'insertText') {
+        this._value = '页面改写后的正文'
       }
       return true
     }
   }
-  const composer = new FixtureTextArea()
-  const textNode = (textContent) => ({ textContent })
-  const messageRow = (direction, textContent) => ({
-    getClientRects() { return [{}] },
-    classList: {
-      contains(name) {
-        if (name === 'im-message__toast') return direction === 'system'
-        if (name === 'im-message__bubble') return direction !== 'system'
-        if (name === 'im-message__bubble--me') return direction === 'out'
-        return false
-      },
-    },
-    querySelector(selector) {
-      if (selector === '.im-message__text' && direction !== 'system') return textNode(textContent)
-      if (selector === '.im-message__toast-inner' && direction === 'system') return textNode(textContent)
-      return null
-    },
-  })
-  timelineRows.push(messageRow('out', mixedTextFifth))
-  const unwrapFixtureListener = (value) => {
-    let current = value
-    for (let depth = 0; depth < 12; depth += 1) {
-      if (Array.isArray(current)) {
-        if (current.length !== 1) throw new Error('fixture listener ambiguous')
-        current = current[0]
-        continue
-      }
-      if (typeof current !== 'function') throw new Error('fixture listener missing')
-      if (current.fns !== undefined) {
-        current = current.fns
-        continue
-      }
-      return current
-    }
-    throw new Error('fixture listener wrapper overflow')
-  }
-  class FixtureHTMLElement {
-    click() {
-      clicks += 1
-      const handler = unwrapFixtureListener(buttonOwner._vnode.data.on.click)
-      handler.call(buttonOwner)
-    }
-  }
-  let buttonTypeAttribute = null
-  const button = {
-    textContent: '发送', disabled: true,
-    isConnected: true, form: null,
-    parentElement: null,
-    getClientRects() { return [{}] },
-    getAttribute(name) { return name === 'type' ? buttonTypeAttribute : null },
-    closest(selector) {
-      if (selector === '.im-session-detail') return detail
-      if (selector === '.im-sender__input-wrapper') return wrapper
-      return null
-    },
-    click() {
-      clicks += 1
-      const handler = unwrapFixtureListener(buttonOwner._vnode.data.on.click)
-      handler.call(buttonOwner)
-    },
-  }
-  const wrapper = {
-    parentElement: null,
-    isConnected: true,
-    closest(selector) {
-      if (selector === '.im-session-detail') return detail
-      if (selector === '.im-sender') return senderRoot
-      return null
-    },
-    querySelectorAll(selector) { return selector === 'button' ? [button] : [] },
-    contains(node) { return node === wrapper || node === composer || node === button },
-  }
-  const senderRoot = {
-    parentElement: null,
-    isConnected: true,
-    contains(node) {
-      return node === senderRoot || node === wrapper || node === inputRoot || node === composer || node === button
-    },
-  }
-  const inputRoot = {
-    isConnected: true,
-    contains(node) { return node === inputRoot || node === composer },
-  }
-  const detail = {
-    parentElement: null,
-    isConnected: true,
-    getClientRects() { return [{}] },
-    contains(node) {
-      return node === detail || node === senderRoot || node === wrapper || node === inputRoot ||
-        node === composer || node === button
-    },
-    querySelectorAll(selector) {
-      if (selector.includes('.im-message__toast')) return timelineRows
-      return []
-    },
-  }
-  const duplicateDetail = { getClientRects() { return [{}] } }
-  const sessionItem = {
-    className: 'im-session-item km-list__item',
-    __vue__: { _props: { source: { sessionId: 'conversation-unrelated-online-row' } } },
-    getClientRects() { return [{}] },
-  }
-  const onlineStatus = {
-    className: 'im-session-item__status is-active',
-    parentElement: sessionItem,
-    getClientRects() { return [{}] },
-  }
-  composer.parentElement = wrapper
-  wrapper.parentElement = senderRoot
-  senderRoot.parentElement = detail
-  button.parentElement = wrapper
-  globalThis.HTMLTextAreaElement = FixtureTextArea
   globalThis.HTMLElement = FixtureHTMLElement
+  globalThis.HTMLButtonElement = FixtureHTMLElement
+  globalThis.HTMLTextAreaElement = FixtureTextArea
   globalThis.InputEvent = FixtureEvent
   globalThis.Event = FixtureEvent
-  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+
+  const detail = new FixtureHTMLElement()
+  const wrapper = new FixtureHTMLElement()
+  const timeline = new FixtureHTMLElement()
+  composer = new FixtureTextArea()
+  const button = new FixtureHTMLElement()
+  button.textContent = '发送'
+  button.form = null
+  button.type = 'submit'
+  button.disabled = false
+  button.getAttribute = (name) => name === 'aria-disabled' ? state.ariaDisabled : null
+  button.click = () => { state.instanceClicks += 1 }
+
+  detail.contains = (node) => [detail, wrapper, timeline, composer, button].includes(node)
+  detail.querySelectorAll = (selector) => {
+    if (selector.includes('textarea')) return state.composers
+    if (selector.includes('button')) return state.buttons
+    return []
+  }
+  wrapper.parentElement = detail
+  wrapper.contains = (node) => [wrapper, composer, button].includes(node)
+  wrapper.closest = (selector) => selector === '.im-session-detail' ? detail : null
+  timeline.parentElement = detail
+  timeline.closest = (selector) => selector === '.im-session-detail' ? detail : null
+  composer.parentElement = wrapper
+  button.parentElement = wrapper
+  button.closest = (selector) => {
+    if (selector === '.im-sender__input-wrapper') return wrapper
+    if (selector === '.im-session-detail') return detail
+    return null
+  }
+  state.details = [detail]
+  state.composers = [composer]
+  state.buttons = [button]
+
+  const root = {
+    $store: { state: { im: { timelineMap: { [conversationRef]: { timeline: rows } } } } },
+    $children: [],
+  }
+  root.$root = root
+  const session = {
+    sessionId: conversationRef,
+    peerPartnerId: peerRef,
+    sortTime: 1,
+    modifiedTime: 2,
+    lastSentence: tailText,
+  }
+  const runtimeSession = {
+    isLoggedIn: true,
+    staff: { staffId, defaultLoginPoint: loginPoint },
+    org: { orgId },
+  }
+  const principal = ['zhilian-principal-v2', staffId, orgId, loginPoint]
+    .map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+  const expectedTail = [{ direction: 'in', contentHash: m3Hash(tailText) }]
+
   globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
   globalThis.document = {
     scripts: [],
     querySelectorAll(selector) {
-      if (selector === '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender') {
-        return [detail, senderRoot]
+      if (state.throwOnReadAfterClick && state.intrinsicClicks > 0) {
+        throw new Error('click 后不得再查询页面')
       }
-      if (selector === '.im-session-item.km-list__item.is-active') return []
-      if (selector === '.im-session-item.km-list__item') return [sessionItem]
-      if (selector === '.im-session-item__status.is-active') return [onlineStatus]
-      if (selector === '.im-session-detail') return duplicateVisibleDetail ? [detail, duplicateDetail] : [detail]
-      if (selector.startsWith('textarea.')) return [composer]
-      if (selector === '.im-sender__input-wrapper button') return [button]
+      if (selector === '.im-session-detail') return state.details
+      if (selector === 'textarea.km-input__original.is-normal.is-textarea.is-autoresize') {
+        return state.composers
+      }
+      if (selector === '.im-sender__input-wrapper button') return state.buttons
+      if (selector === '.im-timeline__wrapper') return [timeline]
       return []
     },
   }
-  const staffId = 'staff-fixture'
-  const orgId = 'org-fixture'
-  const loginPoint = 'login-point-fixture'
-  const principalCanonical = ['zhilian-principal-v2', staffId, orgId, loginPoint]
-    .map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
-  const principalFingerprint = digest(principalCanonical)
-  const sessionFixture = {
-    sessionId: conversationRef,
-    peerPartnerId: 'candidate-fixture',
-    sortTime: 123,
-    modifiedTime: 456,
-    lastSentence: '{"text":"候选人尾消息"}',
+  globalThis.window = {
+    $nuxt: root,
+    $session: runtimeSession,
+    imEngine: { sessions: [session] },
   }
-  const sessionVersionToken = digest(JSON.stringify([
-    sessionFixture.sessionId, sessionFixture.peerPartnerId,
-    sessionFixture.sortTime, sessionFixture.modifiedTime, sessionFixture.lastSentence,
-  ]))
-  const targetBindingToken = digest(JSON.stringify([conversationRef, sessionFixture.peerPartnerId]))
-  const rawMainSendMessageOnce = zhilianTestHooks.mainSendMessageOnce
-  const invokeMainSendMessageOnce = (
-    targetConversationRef,
-    text,
-    textHash,
-    expectedTail,
-    expectedVersionToken,
-    expectedFingerprint,
-    irreversibleNotAfterMs,
-    phase = 'commit',
-  ) => rawMainSendMessageOnce(
-    targetConversationRef,
-    text,
-    textHash,
-    expectedTail,
-    expectedVersionToken,
-    expectedFingerprint,
-    irreversibleNotAfterMs,
-    currentBaselineServerSourceKeys(),
-    targetBindingToken,
-    phase,
-  )
-  const nuxtOwner = {
-    $children: [],
-    $store: { state: { im: { timelineMap: { [conversationRef]: { timeline: liveTimelineRows } } } } },
-  }
-  nuxtOwner.$root = nuxtOwner
-  const detailOwner = {
-    $el: detail,
-    currentSession: { sessionId: conversationRef, peerPartnerId: 'candidate-fixture' },
-    $parent: nuxtOwner,
-    $children: [],
-  }
-  const senderOwner = {
-    $el: senderRoot,
-    $root: nuxtOwner,
-    currentSession: { sessionId: conversationRef, peerPartnerId: 'candidate-fixture' },
-    $parent: detailOwner,
-    $children: [],
-  }
-  const deliverFixtureOutbound = () => {
-    timelineRows.push(messageRow('out', outboundText))
-    liveTimelineRows.push({
-      idServer: `server-outbound-${nextServerSequence}`,
-      time: nextServerSequence,
+
+  const capture = (tail = expectedTail) =>
+    zhilianTestHooks.mainCaptureSendBaseline(conversationRef, tail)
+  const invoke = (baseline, phase = 'preflight', overrides = {}) =>
+    zhilianTestHooks.mainSendMessageOnce(
+      overrides.conversationRef ?? conversationRef,
+      overrides.text ?? text,
+      overrides.expectedTail ?? expectedTail,
+      overrides.fingerprint ?? m3Hash(principal),
+      overrides.deadline ?? Date.now() + 10_000,
+      overrides.baselineKeys ?? baseline.serverSourceKeys,
+      overrides.targetToken ?? baseline.targetBindingToken,
+      phase,
+    )
+  const appendOutbound = (body = text, id = `server-m3-out-${rows.length + 1}`) => {
+    rows.push({
+      idServer: id,
+      time: rows.length + 1,
       status: 'success',
       type: 'text',
       from: staffId,
-      text: outboundText,
+      text: body,
     })
-    nextServerSequence += 1
-    composer._value = ''
   }
-  function sendMessage() {
-    deliverFixtureOutbound()
-    return this.currentSession
+  const restore = () => { Object.assign(globalThis, original) }
+  return {
+    appendOutbound,
+    button,
+    capture,
+    composer,
+    conversationRef,
+    detail,
+    expectedTail,
+    invoke,
+    peerRef,
+    principal,
+    restore,
+    root,
+    rows,
+    session,
+    state,
+    text,
+    timeline,
+    wrapper,
   }
-  function alternateSendMessage() { return this.currentSession }
-  senderOwner.sendMessage = sendMessage
-  senderOwner.$options = { methods: { sendMessage } }
-  const alternateSenderHandler = alternateSendMessage
-  function emitClick() { this.$emit('click') }
-  const buttonOwner = {
-    $el: button,
-    $parent: senderOwner,
-    $children: [],
-    emitClick,
-    $emit(name) {
-      if (name !== 'click') return
-      const handler = unwrapFixtureListener(this._events.click)
-      handler.call(senderOwner)
-    },
-    $options: { methods: { emitClick } },
-    _vnode: { elm: button, data: { on: { click: emitClick } } },
-    _events: { click: [sendMessage] },
-    $vnode: { componentOptions: { listeners: { click: sendMessage } } },
-  }
-  const inputOwner = {
-    $el: inputRoot,
-    $parent: senderOwner,
-    $children: [],
-  }
-  nuxtOwner.$children = [detailOwner]
-  detailOwner.$children = [senderOwner]
-  senderOwner.$children = [buttonOwner, inputOwner]
-  globalThis.window = {
-    $session: {
-      isLoggedIn: true,
-      staff: { staffId, defaultLoginPoint: loginPoint },
-      org: { orgId },
-    },
-    $nuxt: nuxtOwner,
-    imEngine: { sessions: [sessionFixture] },
+}
+
+test('M3 baseline 单次取样且只冻结 server source keys 与目标绑定 token', async () => {
+  const fixture = installM3SendFixture()
+  const originalSetTimeout = globalThis.setTimeout
+  let timerCalls = 0
+  globalThis.setTimeout = () => {
+    timerCalls += 1
+    throw new Error('baseline 不得建立固定等待窗')
   }
   try {
-    const expectedTail = [
-      { direction: 'out', contentHash: digest(mixedTextFirst) },
-      { direction: 'system', contentHash: digest(mixedSystemText) },
-      { direction: 'out', contentHash: digest(`card\x1fwechatExchange\x1f${mixedCardRequest}`) },
-      { direction: 'out', contentHash: digest(mixedTextFourth) },
-      { direction: 'out', contentHash: digest(mixedTextFifth) },
-    ]
-    const inspected = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(inspected.selected, true)
-    assert.equal(inspected.composerBindingResolved, true)
-    assert.equal(inspected.composerBindingMatched, true)
-    assert.equal(inspected.diagnosticStage, 'ok')
-    const mixedTailPreflight = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), expectedTail,
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-      'preflight',
-    )
-    assert.deepEqual(mixedTailPreflight, { status: 'ready' },
-      'text/system/card 混合 live Vuex 尾部必须通过字面同一 evaluator 的只读预检')
-    assert.equal(clicks, 0, '预检不得 click')
-    assert.equal(composer.value, '', '预检不得写入草稿')
-
-    button.form = {}
-    const unsafeFormInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(unsafeFormInspection.diagnosticStage, 'button_form_unsafe')
-    const unsafeFormFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), expectedTail,
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(unsafeFormFinal.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 0, '关联 form 且未显式 type=button 时最终路径绝不能 click')
-
-    buttonTypeAttribute = 'button'
-    const explicitButtonTypeInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(explicitButtonTypeInspection.diagnosticStage, 'ok')
-    const explicitButtonTypeFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'in', contentHash: digest('刻意错误的 form 安全尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(explicitButtonTypeFinal.reason, 'guard_changed',
-      '关联 form 但显式 type=button 时应通过结构绑定再由独立尾锚闭锁')
-    assert.equal(clicks, 0)
-    button.form = null
-    buttonTypeAttribute = null
-
-    const liveButtonVNode = buttonOwner._vnode
-    delete buttonOwner._vnode
-    const missingButtonVNodeInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(missingButtonVNodeInspection.diagnosticStage, 'button_vnode_missing')
-    buttonOwner._vnode = liveButtonVNode
-
-    buttonOwner._vnode.data.on.click = [emitClick, emitClick]
-    const ambiguousButtonListenerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(ambiguousButtonListenerInspection.diagnosticStage, 'button_dom_listener_ambiguous')
-
-    function unregisteredDomHandler() { return /source-is-not-an-authorization-input/u.test('x') }
-    buttonOwner._vnode.data.on.click = unregisteredDomHandler
-    const unregisteredDomInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(unregisteredDomInspection.diagnosticStage, 'ok',
-      '未登记到 $options.methods 的 live DOM handler 仍由结构链授权')
-
-    function unregisteredSenderHandler() { return 'trusted Sender runtime handler' }
-    const domWrapper = function domWrapper() {}
-    domWrapper.fns = unregisteredDomHandler
-    const eventWrapper = function eventWrapper() {}
-    eventWrapper.fns = unregisteredSenderHandler
-    const vnodeWrapper = function vnodeWrapper() {}
-    vnodeWrapper.fns = unregisteredSenderHandler
-    buttonOwner._vnode.data.on.click = domWrapper
-    buttonOwner._events.click = [eventWrapper]
-    buttonOwner.$vnode.componentOptions.listeners.click = vnodeWrapper
-    const wrappedHandlersInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(wrappedHandlersInspection.diagnosticStage, 'ok',
-      '两侧 wrapper 解开到同一 live handler 时无需解析或登记 method')
-    const wrappedHandlersFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'in', contentHash: digest('刻意错误的 wrapper 尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(wrappedHandlersFinal.reason, 'guard_changed',
-      '最终路径必须接受同一结构 handler 后继续由独立尾锚闭锁')
-    assert.equal(clicks, 0)
-
-    buttonOwner._events.click = [eventWrapper, eventWrapper]
-    const ambiguousComponentListenerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(ambiguousComponentListenerInspection.diagnosticStage, 'sender_listener_ambiguous')
-    buttonOwner._events.click = [eventWrapper]
-    const mismatchedComponentWrapper = function mismatchedComponentWrapper() {}
-    mismatchedComponentWrapper.fns = alternateSenderHandler
-    buttonOwner.$vnode.componentOptions.listeners.click = mismatchedComponentWrapper
-    const mismatchedComponentListenerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(mismatchedComponentListenerInspection.diagnosticStage, 'sender_listener_mismatch')
-
-    buttonOwner._vnode.data.on.click = emitClick
-    buttonOwner._events.click = [sendMessage]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-
-
-    globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=conversation-other-route'
-    const wrongRoute = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(wrongRoute.selected, false)
-    assert.equal(wrongRoute.composerBindingResolved, true, '阶段码不得改变原有只读事实字段')
-    assert.equal(wrongRoute.diagnosticStage, 'route_target_missing')
-    globalThis.location.href = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
-    duplicateVisibleDetail = true
-    const ambiguousDetail = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(ambiguousDetail.composerBindingResolved, false, '两个可见 detail 时 preflight 必须 fail-closed')
-    assert.equal(ambiguousDetail.diagnosticStage, 'detail_ambiguous')
-    duplicateVisibleDetail = false
-    const action = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), expectedTail,
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.deepEqual(action, { status: 'clicked' })
-    assert.equal(clicks, 1)
-
-    const stableInstanceClick = button.click
-    const domRowsBeforeIntrinsic = timelineRows.length
-    const liveRowsBeforeIntrinsic = liveTimelineRows.length
-    let replacedInstanceClickCalls = 0
-    button.click = () => { replacedInstanceClickCalls += 1; deliverFixtureOutbound(); deliverFixtureOutbound() }
-    const intrinsicClickAction = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.deepEqual(intrinsicClickAction, { status: 'clicked' })
-    assert.equal(replacedInstanceClickCalls, 0, '实例 click 被替换时不得采用页面覆写路径')
-    assert.equal(clicks, 2, '冻结的 HTMLElement 原型 click 只允许产生一次 dispatch')
-    button.click = stableInstanceClick
-    timelineRows.splice(domRowsBeforeIntrinsic)
-    liveTimelineRows.splice(liveRowsBeforeIntrinsic)
-    clicks = 1
-
-    const baselineBeforeBarrierRace = currentBaselineServerSourceKeys()
-    liveTimelineRows.push({
-      idServer: `server-concurrent-${nextServerSequence}`,
-      time: nextServerSequence,
-      status: 'success',
-      type: 'text',
-      from: staffId,
-      text: outboundText,
+    const baseline = await fixture.capture()
+    assert.deepEqual(baseline, {
+      status: 'ready',
+      stage: 'ready',
+      serverSourceKeys: [m3Hash('source-v1|server-m3-baseline-1')],
+      targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
     })
-    nextServerSequence += 1
-    const sourceChangedAfterBarrier = rawMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-      baselineBeforeBarrierRace, targetBindingToken, 'commit',
-    )
-    assert.deepEqual(sourceChangedAfterBarrier, { status: 'failed', reason: 'guard_changed' })
-    assert.equal(clicks, 1, 'barrier 后同文 server success 到达但 DOM tail 未变时必须零 click')
+    assert.equal(timerCalls, 0)
+    assert.deepEqual(Object.keys(baseline).sort(), [
+      'serverSourceKeys', 'stage', 'status', 'targetBindingToken',
+    ])
 
-    const mutableLiveTail = liveTimelineRows[liveTimelineRows.length - 1]
-    const stableLiveTail = { ...mutableLiveTail }
-    const stableLiveKeys = currentBaselineServerSourceKeys()
-    for (const [field, value] of [
-      ['text', 'barrier 后同 ID 正文被改写'],
-      ['from', 'candidate-fixture'],
-      ['status', 'failed'],
-    ]) {
-      Object.assign(mutableLiveTail, stableLiveTail, { [field]: value })
-      const rewrittenSameServerID = rawMainSendMessageOnce(
-        conversationRef, outboundText, digest(outboundText),
-        [{ direction: 'out', contentHash: digest(outboundText) }],
-        sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-        stableLiveKeys, targetBindingToken, 'commit',
-      )
-      assert.deepEqual(rewrittenSameServerID, { status: 'failed', reason: 'guard_changed' },
-        `barrier 后同 idServer 的 ${field} 被原地改写时必须由 live tail 闭锁`)
-      assert.equal(clicks, 1, `同 ID ${field} 改写且 DOM 未变时必须零 click`)
-    }
-    Object.assign(mutableLiveTail, stableLiveTail)
+    const wrongTail = await fixture.capture([{ direction: 'in', contentHash: 'f'.repeat(64) }])
+    assert.deepEqual(wrongTail, { status: 'failed', stage: 'guard_snapshot_uncovered' })
 
-    globalThis.location.href = `https://rd6.zhaopin.com/app/other?sessionId=${conversationRef}`
-    const wrongPathSameSession = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.deepEqual(wrongPathSameSession, { status: 'failed', reason: 'route_changed' })
-    assert.equal(clicks, 1, 'sessionId 相同但 pathname 不是 /app/im 时必须零 click')
-    globalThis.location.href = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
-
-    buttonOwner._events.click = [alternateSenderHandler]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-    const closureToOtherSender = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(closureToOtherSender.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '', 'component listener 两侧不一致时必须零输入')
-    assert.equal(clicks, 1, 'component listener 两侧不一致时必须零 click')
-    buttonOwner._events.click = [sendMessage]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-
-    senderOwner._isDestroyed = true
-    const deadOwnerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(deadOwnerInspection.composerBindingResolved, false)
-    assert.equal(deadOwnerInspection.diagnosticStage, 'sender_owner_inactive')
-    const deadOwner = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(deadOwner.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, 'destroyed Sender owner 绝不能 click')
-    senderOwner._isDestroyed = false
-
-    const overflowComponents = Array.from({ length: 4092 }, () => ({ $children: [] }))
-    nuxtOwner.$children = [detailOwner, ...overflowComponents]
-    const overflowInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(overflowInspection.composerBindingResolved, false, '组件树 >4096 必须 unresolved')
-    assert.equal(overflowInspection.diagnosticStage, 'component_tree_overflow')
-    const overflow = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(overflow.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, '组件树超上界时绝不能 click')
-    nuxtOwner.$children = [detailOwner]
-
-    const mountedNuxt = globalThis.window.$nuxt
-    delete globalThis.window.$nuxt
-    const missingTreeRootInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(missingTreeRootInspection.composerBindingResolved, false)
-    assert.equal(missingTreeRootInspection.diagnosticStage, 'component_tree_root_missing')
-
-    nuxtOwner.$root = nuxtOwner
-    senderOwner.$root = nuxtOwner
-    senderRoot.__vue__ = senderOwner
-    const domOwnedTreeInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(domOwnedTreeInspection.composerBindingResolved, true,
-      '无 window.$nuxt 时只允许从发送区 DOM owner 的唯一自反 $root 恢复完整树')
-    assert.equal(domOwnedTreeInspection.diagnosticStage, 'ok')
-    const domOwnedFinalCheck = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest('刻意不匹配的尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(domOwnedFinalCheck.reason, 'guard_changed',
-      '最终不可逆 MAIN 路径必须使用同一 DOM owner 根发现规则，再由尾锚独立 fail-closed')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, 'DOM owner 根兼容回归不得产生额外 click')
-    delete senderRoot.__vue__
-    senderOwner.$root = nuxtOwner
-    nuxtOwner.$root = nuxtOwner
-    globalThis.window.$nuxt = mountedNuxt
-
-    nuxtOwner.$children = [null]
-    const malformedTreeInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(malformedTreeInspection.composerBindingResolved, false)
-    assert.equal(malformedTreeInspection.diagnosticStage, 'component_tree_malformed')
-    nuxtOwner.$children = [detailOwner]
-
-    senderOwner.currentSession.sessionId = 'conversation-old-detail'
-    const staleDetailInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(staleDetailInspection.composerBindingResolved, false)
-    assert.equal(staleDetailInspection.diagnosticStage, 'model_target_mismatch')
-    const staleDetail = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(staleDetail.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, 'URL/左侧/engine 均为目标但右侧 detail 属于旧会话时必须零输入零 click')
-    senderOwner.currentSession.sessionId = conversationRef
-
-    const boundSession = senderOwner.currentSession
-    delete senderOwner.currentSession
-    const missingDirectBindingInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(missingDirectBindingInspection.composerBindingResolved, false)
-    assert.equal(missingDirectBindingInspection.diagnosticStage, 'model_scalar_absent')
-    const missingDirectBinding = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(missingDirectBinding.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, '仅有 URL/左侧/engine/DetailShell 证据不得代替 Sender 直绑')
-
-    senderOwner.$store = { state: { im: { activeSessionId: conversationRef } } }
-    const storeScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(storeScalarInspection.diagnosticStage, 'model_scalar_store',
-      'scalar-only 至少需要两个独立容器/路径，单一 store 标量不能授权')
-    senderOwner.$data = { activeSessionId: conversationRef }
-
-    function unregisteredScalarHandler() { return 'source is outside trust boundary' }
-    const scalarEventWrapper = function scalarEventWrapper() {}
-    scalarEventWrapper.fns = unregisteredScalarHandler
-    const scalarVNodeWrapper = function scalarVNodeWrapper() {}
-    scalarVNodeWrapper.fns = unregisteredScalarHandler
-    buttonOwner._events.click = [scalarEventWrapper]
-    buttonOwner.$vnode.componentOptions.listeners.click = scalarVNodeWrapper
-    const unregisteredScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(unregisteredScalarInspection.diagnosticStage, 'ok',
-      '标量投影完整且 wrapper 解开到同一运行时 handler 时，不要求 method 登记或源码证明')
-    const unregisteredScalarFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'in', contentHash: digest('刻意错误的未登记 handler 尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(unregisteredScalarFinal.reason, 'guard_changed')
-    assert.equal(clicks, 1, '未登记 handler 的结构授权不得绕过独立尾锚')
-
-    function sendMessageFromScalar() {
-      deliverFixtureOutbound()
-      return this.$data.activeSessionId
-    }
-    senderOwner.sendMessage = sendMessageFromScalar
-    senderOwner.$options.methods.sendMessage = sendMessageFromScalar
-    buttonOwner._events.click = [sendMessageFromScalar]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessageFromScalar
-    const multipleScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(multipleScalarInspection.composerBindingResolved, true,
-      '多个显式标量全部精确指向当前会话且结构 listener 链一致时可构成绑定')
-    assert.equal(multipleScalarInspection.diagnosticStage, 'ok')
-
-    senderOwner.$data.propsSessionId = { sessionId: 'conversation-hidden-conflict' }
-    const malformedScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(malformedScalarInspection.diagnosticStage, 'model_scalar_conflict',
-      '闭集字段存在但类型不可规范化时不能静默当作 absent')
-    const malformedScalarFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(malformedScalarFinal.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, '畸形标量槽绝不能 click')
-    delete senderOwner.$data.propsSessionId
-
-    senderOwner.currentSession = true
-    const malformedDirectInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(malformedDirectInspection.diagnosticStage, 'model_target_mismatch',
-      'direct 对象槽存在但不是对象时必须闭锁')
-    const malformedDirectFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(malformedDirectFinal.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, '畸形 direct 对象槽绝不能 click')
-    delete senderOwner.currentSession
-
-    const stableDataContainer = senderOwner.$data
-    senderOwner.$data = []
-    const malformedContainerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(malformedContainerInspection.diagnosticStage, 'model_candidate_conflict',
-      '闭集中间容器非空但不是普通对象时不得静默当作 absent')
-    const malformedContainerFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(malformedContainerFinal.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, '畸形中间容器绝不能 click')
-    senderOwner.$data = stableDataContainer
-
-    const multipleScalarFinalCheck = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest('标量绑定下刻意错误的尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(multipleScalarFinalCheck.reason, 'guard_changed',
-      '最终不可逆路径必须接受同一标量绑定后继续由独立尾锚闭锁')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, '标量绑定回归不得产生额外 click')
-
-    const scalarRowsBeforeSuccess = timelineRows.length
-    const scalarSuccess = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.deepEqual(scalarSuccess, { status: 'clicked' })
-    assert.equal(clicks, 2, '合法标量绑定必须恰好产生一次 click')
-    timelineRows.splice(scalarRowsBeforeSuccess)
-    clicks = 1
-
-    mutateScalarBindingOnInput = true
-    const scalarInputRace = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(scalarInputRace.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '', 'input 同步事件修改显式标量时必须清理自动草稿')
-    assert.equal(clicks, 1, '标量值在 click 前变化时绝不能 click')
-    mutateScalarBindingOnInput = false
-    senderOwner.$data.activeSessionId = conversationRef
-
-    replaceScalarContainerOnInput = true
-    const scalarContainerRace = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(scalarContainerRace.reason, 'composer_binding_changed')
-    assert.equal(composer.value, '', 'input 同步替换为同值容器也必须清理自动草稿')
-    assert.equal(clicks, 1, '同值标量容器身份变化时绝不能 click')
-    replaceScalarContainerOnInput = false
-
-    addScalarProjectionOnInput = true
-    const scalarProjectionRace = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(scalarProjectionRace.reason, 'composer_binding_changed')
-    assert.equal(composer.value, '', 'input 同步新增同值标量投影也必须清理自动草稿')
-    assert.equal(clicks, 1, '标量投影集合变化时绝不能 click')
-    addScalarProjectionOnInput = false
-    delete senderOwner.$data.currentSessionId
-
-    const stableScalarData = senderOwner.$data
-    let scalarDataGetterReads = 0
-    Object.defineProperty(senderOwner, '$data', {
-      configurable: true,
-      get() {
-        scalarDataGetterReads += 1
-        return scalarDataGetterReads === 1
-          ? stableScalarData
-          : { activeSessionId: 'conversation-getter-race' }
-      },
-    })
-    const getterScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(getterScalarInspection.diagnosticStage, 'ok')
-    assert.equal(scalarDataGetterReads, 1, '单轮绑定必须只取得一次标量容器')
-    scalarDataGetterReads = 0
-    const getterScalarFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(getterScalarFinal.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, '跨 surface 返回不同容器/值的 getter 必须在输入前闭锁')
-    Object.defineProperty(senderOwner, '$data', {
-      configurable: true,
-      writable: true,
-      value: stableScalarData,
-    })
-
-    senderOwner.currentSession = boundSession
-    senderOwner.$data.activeSessionId = 'conversation-conflict'
-    function sendMessageFromMixedModels() {
-      return this.currentSession && this.$data.activeSessionId
-    }
-    senderOwner.sendMessage = sendMessageFromMixedModels
-    senderOwner.$options.methods.sendMessage = sendMessageFromMixedModels
-    buttonOwner._events.click = [sendMessageFromMixedModels]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessageFromMixedModels
-    const conflictingScalarInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(conflictingScalarInspection.diagnosticStage, 'model_scalar_conflict')
-    const conflictingScalarFinalCheck = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(conflictingScalarFinalCheck.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, 'direct 对象正确也不能掩盖任一显式标量冲突')
-    delete senderOwner.currentSession
-    delete senderOwner.$store
-    delete senderOwner.$data
-    senderOwner.sendMessage = sendMessage
-    senderOwner.$options.methods.sendMessage = sendMessage
-    buttonOwner._events.click = [sendMessage]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-
-    senderOwner._props = { currentSession: { ...boundSession } }
-    const propsCandidateInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(propsCandidateInspection.diagnosticStage, 'model_candidate_props')
-    assert.equal(propsCandidateInspection.composerBindingResolved, false,
-      '候选位置诊断只观察，不得直接授权发送绑定')
-
-    senderOwner.$data = { currentSession: { ...boundSession } }
-    const multipleCandidateInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(multipleCandidateInspection.diagnosticStage, 'model_candidate_multiple')
-    senderOwner.$data.currentSession.peerPartnerId = 'candidate-conflict'
-    const conflictingCandidateInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(conflictingCandidateInspection.diagnosticStage, 'model_candidate_conflict')
-    delete senderOwner._props
-    delete senderOwner.$data
-
-    senderOwner.currentSession = boundSession
-    senderOwner.$data = {
-      currentSession: { sessionId: 'conversation-conflict', peerPartnerId: 'candidate-conflict' },
-    }
-    const directWithCandidateConflict = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(directWithCandidateConflict.diagnosticStage, 'model_candidate_conflict',
-      'direct 对象正确时也必须扫描并拒绝替代对象冲突')
-    const directWithCandidateConflictFinal = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(directWithCandidateConflictFinal.reason, 'composer_binding_unresolved')
-    assert.equal(clicks, 1, '替代对象冲突时最终路径绝不能 click')
-    delete senderOwner.currentSession
-    delete senderOwner.$data
-
-    senderOwner.$store = { state: { im: { currentSession: { ...boundSession } } } }
-    const storeCandidateInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(storeCandidateInspection.diagnosticStage, 'model_candidate_store')
-    delete senderOwner.$store
-    senderOwner.currentSession = boundSession
-
-    senderOwner.propsSession = { ...boundSession }
-    const clonedDirectBindingInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(clonedDirectBindingInspection.composerBindingResolved, true,
-      '两个直接槽可为同一目标投影的不同对象')
-    assert.equal(clonedDirectBindingInspection.diagnosticStage, 'ok')
-    const clonedDirectFinalCheck = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest('另一条刻意错误尾锚') }],
-      sessionVersionToken, principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(clonedDirectFinalCheck.reason, 'guard_changed')
-    assert.equal(composer.value, '')
-    assert.equal(clicks, 1, '同目标 clone 槽兼容不得绕过独立尾锚')
-
-    senderOwner.propsSession.peerPartnerId = 'candidate-conflict'
-    const conflictingDirectBindingInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(conflictingDirectBindingInspection.composerBindingResolved, false)
-    assert.equal(conflictingDirectBindingInspection.diagnosticStage, 'model_slot_ambiguous')
-    delete senderOwner.propsSession
-
-    buttonOwner.$vnode.componentOptions.listeners.click = alternateSenderHandler
-    const mismatchedListenerInspection = await zhilianTestHooks.mainInspectSendSurface(conversationRef)
-    assert.equal(mismatchedListenerInspection.composerBindingResolved, false)
-    assert.equal(mismatchedListenerInspection.diagnosticStage, 'sender_listener_mismatch')
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-
-    const diagnosticStages = [
-      inspected.diagnosticStage,
-      unsafeFormInspection.diagnosticStage,
-      explicitButtonTypeInspection.diagnosticStage,
-      missingButtonVNodeInspection.diagnosticStage,
-      ambiguousButtonListenerInspection.diagnosticStage,
-      unregisteredDomInspection.diagnosticStage,
-      wrappedHandlersInspection.diagnosticStage,
-      ambiguousComponentListenerInspection.diagnosticStage,
-      mismatchedComponentListenerInspection.diagnosticStage,
-      wrongRoute.diagnosticStage,
-      ambiguousDetail.diagnosticStage,
-      deadOwnerInspection.diagnosticStage,
-      overflowInspection.diagnosticStage,
-      missingTreeRootInspection.diagnosticStage,
-      domOwnedTreeInspection.diagnosticStage,
-      malformedTreeInspection.diagnosticStage,
-      staleDetailInspection.diagnosticStage,
-      missingDirectBindingInspection.diagnosticStage,
-      storeScalarInspection.diagnosticStage,
-      multipleScalarInspection.diagnosticStage,
-      conflictingScalarInspection.diagnosticStage,
-      propsCandidateInspection.diagnosticStage,
-      multipleCandidateInspection.diagnosticStage,
-      conflictingCandidateInspection.diagnosticStage,
-      storeCandidateInspection.diagnosticStage,
-      clonedDirectBindingInspection.diagnosticStage,
-      conflictingDirectBindingInspection.diagnosticStage,
-      mismatchedListenerInspection.diagnosticStage,
-    ]
-    for (const stage of diagnosticStages) {
-      assert.match(stage, /^[a-z]+(?:_[a-z]+)*$/u)
-      assert.equal(stage.includes(conversationRef), false, '阶段码不得携带会话标识')
-      assert.equal(stage.includes(inboundText), false, '阶段码不得携带消息正文')
-      assert.equal(stage.includes('.im-'), false, '阶段码不得携带 selector')
-    }
-
-    mutateBindingOnInput = true
-    const inputRace = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(inputRace.reason, 'composer_binding_unresolved')
-    assert.equal(composer.value, '', '绑定竞态失败时必须清理本次自动写入')
-    assert.equal(clicks, 1, 'input 同步事件切换 owner 后绝不能 click')
-    mutateBindingOnInput = false
-    senderOwner.currentSession.sessionId = conversationRef
-
-    mutateHandlerOnInput = true
-    const handlerRace = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(handlerRace.reason, 'composer_binding_changed')
-    assert.equal(composer.value, '', 'input 事件替换 sender handler 时必须清理草稿')
-    assert.equal(clicks, 1, 'input 前后 handler 不恒等时绝不能 click')
-    mutateHandlerOnInput = false
-    buttonOwner._events.click = [sendMessage]
-    buttonOwner.$vnode.componentOptions.listeners.click = sendMessage
-
-    mutateRouteOnInput = true
-    const routeRaceAfterInput = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(routeRaceAfterInput.reason, 'route_changed')
-    assert.equal(composer.value, '', 'input 同步事件切换 route 时必须清理本次自动草稿')
-    assert.equal(clicks, 1, 'input 后 route 改变绝不能 click')
-    mutateRouteOnInput = false
-    globalThis.location.href = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
-
-    normalizeDraftOnInput = true
-    const normalizedDraft = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'out', contentHash: digest(outboundText) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(normalizedDraft.reason, 'input_rejected')
-    assert.equal(composer.value, '', '页面同步规范化自动正文时也必须强制清空草稿')
-    assert.equal(clicks, 1)
-    normalizeDraftOnInput = false
-
-    throwOnInput = true
-    assert.throws(
-      () => invokeMainSendMessageOnce(
-        conversationRef, outboundText, digest(outboundText),
-        [{ direction: 'out', contentHash: digest(outboundText) }],
-        sessionVersionToken,
-        principalFingerprint, Date.now() + 10_000,
-      ),
-      /fixture-input-throw/u,
-    )
-    assert.equal(composer.value, '', 'input 事件抛错后也不得留下自动草稿')
-    assert.equal(clicks, 1)
-    throwOnInput = false
-
-    const changed = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText),
-      [{ direction: 'in', contentHash: 'f'.repeat(64) }],
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(changed.status, 'failed')
-    assert.equal(changed.reason, 'guard_changed')
-    assert.equal(clicks, 1, '尾锚失败后绝不能产生第二次 click')
-
-    const preBarrierTail = [{ direction: 'out', contentHash: digest(outboundText) }]
-    const racedInbound = 'attempting 后插入的新消息'
-    liveTimelineRows.push({
-      idServer: `server-raced-inbound-${nextServerSequence}`,
-      time: nextServerSequence,
-      status: 'success',
-      type: 'text',
-      from: 'candidate-fixture',
-      text: racedInbound,
-    })
-    nextServerSequence += 1
-    const racedTail = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), preBarrierTail,
-      sessionVersionToken,
-      principalFingerprint, Date.now() + 10_000,
-    )
-    assert.equal(racedTail.reason, 'guard_changed')
-    assert.equal(clicks, 1, 'attempting 后尾消息变化必须在同步 MAIN task 内拦截')
-
-    const currentTail = [{ direction: 'in', contentHash: digest(racedInbound) }]
-    const wrongIdentity = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), currentTail,
-      sessionVersionToken,
-      'f'.repeat(64), Date.now() + 10_000,
-    )
-    assert.equal(wrongIdentity.reason, 'identity_changed')
-    assert.equal(clicks, 1, '主体指纹不匹配绝不能 click')
-
-    const elapsed = invokeMainSendMessageOnce(
-      conversationRef, outboundText, digest(outboundText), currentTail,
-      sessionVersionToken,
-      principalFingerprint, Date.now() - 1,
-    )
-    assert.equal(elapsed.reason, 'action_window_elapsed')
-    assert.equal(clicks, 1, '不可逆动作窗口过期绝不能 click')
+    globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other'
+    assert.deepEqual(await fixture.capture(), { status: 'failed', stage: 'route_changed' })
+    globalThis.location.href = `https://rd6.zhaopin.com/app/im?sessionId=${fixture.conversationRef}`
+    globalThis.window.imEngine.sessions = []
+    assert.deepEqual(await fixture.capture(), { status: 'failed', stage: 'session_unavailable' })
   } finally {
-    Object.assign(globalThis, original)
+    globalThis.setTimeout = originalSetTimeout
+    fixture.restore()
   }
 })
 
-test('诊断、发送 baseline 与后置观察共用 live Vuex 双采样且始终零 history', async () => {
-  const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
-  const original = {
-    chrome: globalThis.chrome,
-    window: globalThis.window,
-    document: globalThis.document,
-    location: globalThis.location,
-    setTimeout: globalThis.setTimeout,
-  }
-  const conversationRef = 'conversation-live-send-lifecycle'
-  const staffId = 'staff-live-send-lifecycle'
-  const target = 'candidate-live-send-lifecycle'
-  const text = '你好'
-  const textHash = createHash('sha256').update(text).digest('hex')
-  const sourceKey = (id) => createHash('sha256').update(`source-v1|${id}`).digest('hex')
-  const old = {
-    idServer: 'server-old', time: 1, type: 'text', from: target, text: '旧消息',
-  }
-  const liveEntry = { timeline: [old] }
-  const root = { $store: { state: { im: { timelineMap: { [conversationRef]: liveEntry } } } } }
-  root.$root = root
-  const session = {
-    sessionId: conversationRef, peerPartnerId: target,
-    sortTime: 1, modifiedTime: 2, lastSentence: '{"text":"旧消息"}',
-  }
-  let historyCalls = 0
-  let timerCalls = 0
-  let mutateDuringDigest = null
-  globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
-  globalThis.document = { scripts: [], querySelectorAll() { return [] } }
-  globalThis.window = {
-    $nuxt: root,
-    $session: { staff: { staffId } },
-    imEngine: {
-      sessions: [session],
-      async getHistoryMsgs() {
-        historyCalls += 1
-        throw new Error('live-only 发送链不得调用 history')
-      },
-    },
-  }
-  globalThis.setTimeout = (callback, ms) => {
-    assert.equal(ms, 250, 'live baseline 两份同步样本之间只允许固定 250ms 窗口')
-    timerCalls += 1
-    queueMicrotask(callback)
-    return timerCalls
-  }
-  const realDigest = globalThis.crypto.subtle.digest.bind(globalThis.crypto.subtle)
-  Object.defineProperty(globalThis, 'crypto', { configurable: true, writable: true, value: {
-    subtle: {
-      async digest(...args) {
-        const result = await realDigest(...args)
-        const mutation = mutateDuringDigest
-        mutateDuringDigest = null
-        if (mutation) mutation()
-        return result
-      },
-    },
-  } })
+test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baseline = await fixture.capture()
+    assert.equal(baseline.status, 'ready')
 
-  const tab = {
-    id: 17,
-    active: true,
-    status: 'complete',
-    url: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+    // 旧实现依赖的 Vue owner/model/VNode/listener 任意冲突都不得再影响授权。
+    fixture.root.$children = null
+    fixture.detail.__vue__ = { $root: { privateRoot: true }, currentSession: { sessionId: 'wrong' } }
+    fixture.button.__vue__ = { _events: { click: [() => {}] }, $vnode: null }
+    fixture.button._events = { click: [() => {}, () => {}] }
+    fixture.button.$vnode = { componentOptions: { listeners: { click: () => {} } } }
+    fixture.session.sortTime = 99
+    fixture.session.modifiedTime = 100
+    fixture.session.lastSentence = '展示字段变化'
+    fixture.button.disabled = true
+    fixture.state.ariaDisabled = 'true'
+    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' },
+      '私有对象变化与 disabled/aria-disabled 不得阻断 evaluator')
+
+    fixture.button.form = {}
+    for (const type of ['', 'submit', 'reset']) {
+      fixture.button.type = type
+      const rejected = fixture.invoke(baseline)
+      assert.equal(rejected.status, 'failed', `关联 form 的 ${type || '缺省'} type 必须拒绝`)
+      assert.equal(fixture.state.intrinsicClicks, 0)
+    }
+    fixture.button.type = 'button'
+    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' })
+    fixture.button.form = null
+
+    const cases = [
+      ['route', () => { globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other' }, {}, 'route_changed'],
+      ['identity', () => {}, { fingerprint: 'f'.repeat(64) }, 'identity_changed'],
+      ['source keys', () => {}, { baselineKeys: ['e'.repeat(64)] }, 'baseline_changed'],
+      ['expected tail', () => {}, {
+        expectedTail: [{ direction: 'in', contentHash: 'd'.repeat(64) }],
+      }, 'baseline_changed'],
+      ['target token', () => {}, { targetToken: 'c'.repeat(64) }, 'target_changed'],
+      ['deadline', () => {}, { deadline: Date.now() - 1 }, 'action_window_elapsed'],
+    ]
+    for (const [name, mutate, overrides, reason] of cases) {
+      const currentHref = globalThis.location.href
+      mutate()
+      const result = fixture.invoke(baseline, 'preflight', overrides)
+      assert.deepEqual(result, { status: 'failed', reason }, `${name} 必须闭锁`)
+      globalThis.location.href = currentHref
+    }
+
+    const extraDetail = { getClientRects() { return [{}] } }
+    fixture.state.details = [fixture.detail, extraDetail]
+    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    fixture.state.details = [fixture.detail]
+
+    const extraComposer = Object.create(Object.getPrototypeOf(fixture.composer))
+    extraComposer._value = ''
+    extraComposer.isConnected = true
+    extraComposer.closest = fixture.composer.closest.bind(fixture.composer)
+    extraComposer.getClientRects = () => [{}]
+    fixture.state.composers = [fixture.composer, extraComposer]
+    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    fixture.state.composers = [fixture.composer]
+
+    const extraButton = Object.assign(Object.create(Object.getPrototypeOf(fixture.button)), {
+      textContent: '发送', form: null, type: 'button', isConnected: true,
+      getClientRects() { return [{}] },
+      closest: fixture.button.closest,
+    })
+    fixture.state.buttons = [fixture.button, extraButton]
+    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    fixture.state.buttons = [fixture.button]
+
+    const originalButtonClosest = fixture.button.closest
+    fixture.button.closest = (selector) => selector === '.im-session-detail' ? fixture.detail : null
+    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    fixture.button.closest = originalButtonClosest
+
+    fixture.composer.value = '人工草稿'
+    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
+    fixture.composer.value = ''
+    assert.equal(fixture.state.intrinsicClicks, 0)
+  } finally {
+    fixture.restore()
   }
-  let tabs = [tab]
-  let snapshots = []
-  let executeCalls = 0
-  let mutationCalls = 0
-  let mainCalls = []
-  let useActualBaseline = true
-  const privateSourceKey = 'a'.repeat(64)
-  const privateSessionToken = 'b'.repeat(64)
-  const privateTargetToken = 'c'.repeat(64)
-  let baselineResult = {
-    status: 'ready', stage: 'ready',
-    serverSourceKeys: [privateSourceKey], sessionVersionToken: privateSessionToken,
-    targetBindingToken: privateTargetToken,
+})
+
+test('M3 preflight 与 commit 复用 evaluator，最终绿色后只走一次 intrinsic click', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baseline = await fixture.capture()
+    assert.deepEqual(fixture.invoke(baseline, 'preflight'), { status: 'ready' })
+    assert.equal(fixture.composer.value, '')
+    assert.equal(fixture.state.intrinsicClicks, 0)
+
+    // 两轮之间私有实现换壳不构成世界变化；公开边界保持不变即可继续。
+    fixture.detail.__vue__ = { $root: { replaced: true } }
+    fixture.button._vnode = { data: { on: { click: [() => {}, () => {}] } } }
+    fixture.button._events = { click: null }
+    fixture.button.$vnode = null
+    fixture.button.disabled = true
+    fixture.state.ariaDisabled = 'true'
+    fixture.button.form = {}
+    fixture.button.type = 'button'
+    fixture.state.throwOnReadAfterClick = true
+
+    assert.deepEqual(fixture.invoke(baseline, 'commit'), { status: 'clicked' })
+    assert.equal(fixture.state.intrinsicClicks, 1)
+    assert.equal(fixture.state.instanceClicks, 0, '不得调用页面替换过的 instance click')
+    assert.equal(fixture.state.valueAtClick, fixture.text)
+    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), ['input', 'change'])
+  } finally {
+    fixture.restore()
   }
-  const snapshot = (overrides = {}) => ({
-    selected: true,
-    composerBindingResolved: true,
-    composerBindingMatched: true,
-    composerCount: 1,
-    composerValue: '',
-    sendButtonCount: 1,
-    diagnosticStage: 'ok',
-    ...overrides,
-  })
-  const forbiddenMutation = async () => { mutationCalls += 1; return {} }
+})
+
+test('M3 写后正文被页面改写时清空草稿且零 click', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baseline = await fixture.capture()
+    fixture.state.rewriteInsertedText = true
+    const result = fixture.invoke(baseline, 'commit')
+    assert.deepEqual(result, { status: 'failed', reason: 'input_rejected' })
+    assert.equal(fixture.composer.value, '')
+    assert.equal(fixture.state.intrinsicClicks, 0)
+    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), [
+      'input', 'change', 'input', 'change',
+    ])
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M3 post 只接受 baseline 后严格追加一条 server success，同文阴性不补 click', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baseline = await fixture.capture()
+    const observe = () => zhilianTestHooks.mainObserveStableOutbound(
+      fixture.conversationRef,
+      m3Hash(fixture.text),
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    )
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 })
+    fixture.appendOutbound()
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1 })
+    fixture.appendOutbound(fixture.text, 'server-m3-out-extra')
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 },
+      '严格 +2 即使同文也必须保持阴性')
+    assert.equal(fixture.state.intrinsicClicks, 0, 'observer 永远不 click')
+
+    fixture.rows.splice(1)
+    fixture.session.peerPartnerId = 'candidate-rebound'
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 },
+      'target token 失配不得认领后置条件')
+    fixture.session.peerPartnerId = fixture.peerRef
+    globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other'
+    assert.deepEqual(await observe(), { selected: false, matchingNewServerMessages: 0 })
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M3 post 的 64 行滑窗严格左移一格，新增行四类语义不符均阴性', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    fixture.rows.splice(0, fixture.rows.length, ...Array.from({ length: 64 }, (_, index) => ({
+      idServer: `server-m3-window-${index}`,
+      time: index + 1,
+      status: 'success',
+      type: 'text',
+      from: fixture.peerRef,
+      text: `窗口消息${index}`,
+    })))
+    const baselineRows = structuredClone(fixture.rows)
+    const baseline = await fixture.capture([])
+    assert.equal(baseline.status, 'ready')
+    assert.equal(baseline.serverSourceKeys.length, 64)
+    const observe = () => zhilianTestHooks.mainObserveStableOutbound(
+      fixture.conversationRef,
+      m3Hash(fixture.text),
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    )
+    const reset = () => fixture.rows.splice(0, fixture.rows.length, ...structuredClone(baselineRows))
+    const append = (overrides) => fixture.rows.push({
+      idServer: `server-m3-window-new-${overrides.id}`,
+      time: 65,
+      status: 'success',
+      type: 'text',
+      from: globalThis.window.$session.staff.staffId,
+      text: fixture.text,
+      ...overrides,
+    })
+
+    append({ id: 'ok' })
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1 },
+      'baseline=64 时只允许窗口左移一格并追加唯一成功文本')
+
+    for (const [name, overrides] of [
+      ['status failed', { id: 'failed', status: 'failed' }],
+      ['direction in', { id: 'inbound', from: fixture.peerRef }],
+      ['type 非 text', { id: 'system', type: 999 }],
+      ['正文 hash 错', { id: 'wrong-hash', text: '不是本次正文' }],
+    ]) {
+      reset()
+      append(overrides)
+      assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 },
+        `${name} 不得形成发送成功证词`)
+    }
+    assert.equal(fixture.state.intrinsicClicks, 0)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('debug.inspectSendSurface 只读单次公开 surface+timeline 且不发射私有阶段', async () => {
+  const fixture = installM3SendFixture()
+  const calls = []
   globalThis.chrome = {
     tabs: {
-      async query() { return tabs },
-      async sendMessage() { return { ok: true } },
-      create: forbiddenMutation,
-      update: forbiddenMutation,
-      reload: forbiddenMutation,
+      async query() {
+        return [{
+          id: 71,
+          active: true,
+          status: 'complete',
+          url: globalThis.location.href,
+        }]
+      },
     },
     scripting: {
       async executeScript({ func, args }) {
-        executeCalls += 1
-        mainCalls.push(func.name)
-        let next
-        if (func.name === 'mainInspectSendSurface') next = snapshots.shift()
-        else if (func.name === 'mainCaptureSendBaseline') {
-          assert.equal(args[0], conversationRef)
-          assert.deepEqual(args[1], [])
-          next = useActualBaseline ? await func(...args) : baselineResult
-        } else {
-          throw new Error(`readonly diagnostic called unexpected MAIN function ${func.name}`)
-        }
-        if (next instanceof Error) throw next
-        return [{ result: structuredClone(next) }]
-      },
-    },
-    storage: { local: { get: forbiddenMutation, set: forbiddenMutation, remove: forbiddenMutation } },
-  }
-  try {
-    tabs = []
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'page_absent',
-    })
-    assert.equal(executeCalls, 0)
-
-    tabs = [{ ...tab, url: 'https://rd6.zhaopin.com/app/im' }]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'route_missing',
-    })
-    assert.equal(executeCalls, 0)
-
-    tabs = [tab]
-    snapshots = [snapshot(), snapshot()]
-    mainCalls = []
-    const ready = await inspectZhilianSendSurfaceDiagnostic()
-    assert.deepEqual(ready, { ready: true, stage: 'ready' })
-    assert.deepEqual(mainCalls, [
-      'mainInspectSendSurface', 'mainInspectSendSurface',
-      'mainCaptureSendBaseline',
-    ], 'readonly debug 必须直接执行生产 live baseline')
-    assert.deepEqual(Object.keys(ready).sort(), ['ready', 'stage'])
-    assert.equal(historyCalls, 0, 'debug live baseline 不得调用 history')
-
-    snapshots = [snapshot(), snapshot()]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), { ready: true, stage: 'ready' },
-      '同一 live root 生命周期内重复诊断必须保持可执行')
-    assert.equal(historyCalls, 0)
-
-    const oldTail = [{ direction: 'in', contentHash: createHash('sha256').update(old.text).digest('hex') }]
-    const productionBaseline = await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail)
-    assert.equal(productionBaseline.status, 'ready')
-    assert.deepEqual(productionBaseline.serverSourceKeys, [sourceKey(old.idServer)])
-    assert.match(productionBaseline.targetBindingToken, /^[0-9a-f]{64}$/)
-    assert.equal(historyCalls, 0, '生产 capture 与 debug 必须共用零 history 路径')
-
-    const baseline = [sourceKey(old.idServer)]
-    liveEntry.timeline = [
-      old,
-      { sendMessageId: 'client-optimistic-only', time: 2, type: 'text', from: staffId, text },
-    ]
-    const optimistic = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(optimistic.matchingNewServerMessages, 0,
-      '仅 client sendMessageId 的乐观行不能完成 effectful 原语')
-
-    liveEntry.timeline = [
-      old,
-      { idServer: 'server-failed', time: 2, status: 'failed', type: 'text', from: staffId, text },
-      { idServer: 'server-confirmed', time: 3, status: 'success', type: 'text', from: staffId, text },
-    ]
-    const failedThenConfirmed = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(failedThenConfirmed.matchingNewServerMessages, 0,
-      'baseline 后 failed+success 共追加两行必须按严格连续性返回阴性')
-
-    liveEntry.timeline = [
-      old,
-      { idServer: 'server-confirmed', time: 3, status: 'success', type: 'text', from: staffId, text },
-    ]
-    const confirmed = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(confirmed.matchingNewServerMessages, 1,
-      'baseline 后恰好追加一个唯一 server success 才能观察到正匹配')
-
-    liveEntry.timeline.push({
-      idServer: 'server-confirmed-duplicate', time: 4,
-      status: 'success', type: 'text', from: staffId, text,
-    })
-    const ambiguous = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(ambiguous.matchingNewServerMessages, 0,
-      '两个同文新 server success 违反严格单追加连续性，必须保持阴性')
-
-    liveEntry.timeline = [
-      old,
-      { idServer: 'server-rebound-check', time: 3, status: 'success', type: 'text', from: staffId, text },
-    ]
-    mutateDuringDigest = () => { session.peerPartnerId = 'candidate-rebound-during-digest' }
-    const rebound = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(rebound.matchingNewServerMessages, 0,
-      'observer 多次 digest 期间 session peer 换绑必须在返回前复核为零匹配')
-    session.peerPartnerId = target
-
-    liveEntry.timeline = [
-      old,
-      { idServer: 'server-rebound-between-rounds', time: 3, status: 'success', type: 'text', from: staffId, text },
-    ]
-    session.peerPartnerId = 'candidate-rebound-before-observer'
-    const reboundBeforeObserver = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baseline, productionBaseline.targetBindingToken,
-    )
-    assert.equal(reboundBeforeObserver.matchingNewServerMessages, 0,
-      'observer 新一轮开始前 peer 已换绑时不得把当轮 peer 重新信任为基线')
-    session.peerPartnerId = target
-
-    const outsideWindowMatch = {
-      idServer: 'server-outside-last64', time: 1,
-      status: 'success', type: 'text', from: staffId, text,
-    }
-    const fillers = Array.from({ length: 64 }, (_, index) => ({
-      idServer: `server-window-filler-${index}`, time: index + 2,
-      type: 'text', from: target, text: `填充消息${index}`,
-    }))
-    const baselineWindow = fillers.map((row) => sourceKey(row.idServer))
-    liveEntry.timeline = [
-      outsideWindowMatch,
-      ...fillers,
-      {
-        idServer: 'server-window-appended', time: 66,
-        status: 'success', type: 'text', from: staffId, text: '本轮不同正文',
-      },
-    ]
-    const windowed = await zhilianTestHooks.mainObserveStableOutbound(
-      conversationRef, textHash, baselineWindow, productionBaseline.targetBindingToken,
-    )
-    assert.equal(windowed.matchingNewServerMessages, 0,
-      '严格连续窗成立时，last64 之外旧同文也不得计入 post 匹配')
-    assert.equal(historyCalls, 0, 'post observer 重复执行也必须始终零 history')
-
-    useActualBaseline = false
-    const baselineStageMappings = [
-      ['engine_unavailable', 'baseline_engine_unavailable'],
-      ['route_changed', 'baseline_route_changed'],
-      ['session_unavailable', 'baseline_session_unavailable'],
-      ['history_first_unavailable', 'baseline_history_unavailable'],
-      ['history_second_unavailable', 'baseline_history_unavailable'],
-      ['history_unstable', 'baseline_history_unstable'],
-      ['guard_snapshot_uncovered', 'baseline_guard_uncovered'],
-      ['session_changed', 'baseline_session_changed'],
-      ['hash_unavailable', 'baseline_hash_unavailable'],
-      ['unexpected', 'baseline_unexpected'],
-    ]
-    for (const [internalStage, publicStage] of baselineStageMappings) {
-      baselineResult = { status: 'failed', stage: internalStage }
-      snapshots = [snapshot(), snapshot()]
-      assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-        ready: false, stage: publicStage,
-      })
-    }
-    baselineResult = {
-      status: 'ready', stage: 'ready',
-      serverSourceKeys: ['raw-platform-id'], sessionVersionToken: privateSessionToken,
-      targetBindingToken: privateTargetToken,
-    }
-    snapshots = [snapshot(), snapshot()]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'baseline_unexpected',
-    }, 'malformed ready baseline 必须闭锁为公开 unexpected')
-    baselineResult = {
-      status: 'ready', stage: 'ready',
-      serverSourceKeys: [privateSourceKey], sessionVersionToken: privateSessionToken,
-      targetBindingToken: privateTargetToken,
-    }
-
-    snapshots = [snapshot({ diagnosticStage: 'model_target_mismatch' }),
-      snapshot({ diagnosticStage: 'model_target_mismatch' })]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'direct_model_target_mismatch',
-    })
-
-    const buttonStageMappings = [
-      ['button_form_unsafe', 'button_form_unsafe'],
-      ['button_vnode_missing', 'button_vnode_missing'],
-      ['button_dom_listener_ambiguous', 'button_dom_listener_ambiguous'],
-    ]
-    for (const [internalStage, publicStage] of buttonStageMappings) {
-      snapshots = [snapshot({ diagnosticStage: internalStage }), snapshot({ diagnosticStage: internalStage })]
-      assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-        ready: false,
-        stage: publicStage,
-      })
-    }
-
-    snapshots = [snapshot({ diagnosticStage: 'model_slot_ambiguous' }),
-      snapshot({ diagnosticStage: 'model_slot_ambiguous' })]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'direct_model_target_mismatch',
-    })
-
-    const privateDraft = '不得出现在诊断结果中的人工草稿'
-    snapshots = [snapshot({ composerValue: privateDraft }), snapshot({ composerValue: privateDraft })]
-    const draft = await inspectZhilianSendSurfaceDiagnostic()
-    assert.deepEqual(draft, { ready: false, stage: 'draft_present' })
-    assert.equal(JSON.stringify(draft).includes(privateDraft), false)
-    assert.equal(JSON.stringify(draft).includes(conversationRef), false)
-
-    snapshots = [snapshot(), snapshot({ sendButtonCount: 2, diagnosticStage: 'button_count' })]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'unstable',
-    })
-
-    snapshots = [snapshot({ diagnosticStage: 'not_allowlisted' }),
-      snapshot({ diagnosticStage: 'not_allowlisted' })]
-    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
-      ready: false, stage: 'diagnostic_unavailable',
-    })
-
-    snapshots = [new Error('原始页面异常不得出现在结果')]
-    const unavailable = await inspectZhilianSendSurfaceDiagnostic()
-    assert.deepEqual(unavailable, { ready: false, stage: 'diagnostic_unavailable' })
-    assert.equal(JSON.stringify(unavailable).includes('原始页面异常'), false)
-    assert.equal(mutationCalls, 0, '只读诊断不得导航、写 storage 或调用 tabs mutation')
-    assert.equal(historyCalls, 0, '整个 debug/capture/post 共享生命周期不得触碰 history')
-    assert.ok(timerCalls >= 3, '重复 debug 与生产 capture 必须真正经过 live 双采样窗口')
-  } finally {
-    Object.assign(globalThis, original)
-    if (originalCryptoDescriptor) Object.defineProperty(globalThis, 'crypto', originalCryptoDescriptor)
-    else delete globalThis.crypto
-  }
-})
-
-test('发送 baseline 只用 live Vuex 双采样并按 time 排序、首 ID 去重与 last64 建基线', async () => {
-  const original = {
-    window: globalThis.window,
-    document: globalThis.document,
-    location: globalThis.location,
-    setTimeout: globalThis.setTimeout,
-  }
-  const conversationRef = 'conversation-baseline-coverage'
-  const target = 'candidate-baseline-coverage'
-  const staffId = 'staff-baseline-coverage'
-  const sourceKey = (id) => createHash('sha256').update(`source-v1|${id}`).digest('hex')
-  const hashContent = (value) => createHash('sha256').update(value).digest('hex')
-  const old = {
-    idServer: 'server-old-same-text', time: 10, type: 'text',
-    from: target, text: '旧同文',
-  }
-  const other = {
-    idServer: 'server-other', time: 5, type: 'text',
-    from: target, text: '其他消息',
-  }
-  const oldTail = [{ direction: 'in', contentHash: hashContent(old.text) }]
-  const liveEntry = { timeline: [old] }
-  const timelineMap = { [conversationRef]: liveEntry }
-  const root = { $store: { state: { im: { timelineMap } } } }
-  root.$root = root
-  let historyCalls = 0
-  let timerCalls = 0
-  let betweenSamples = null
-  const session = {
-    sessionId: conversationRef, peerPartnerId: target,
-    sortTime: 1, modifiedTime: 2, lastSentence: '{"text":"旧同文"}',
-  }
-  const resetSamples = (mutation = null) => {
-    betweenSamples = mutation
-    timerCalls = 0
-  }
-  globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
-  globalThis.document = {
-    scripts: [{ textContent: `__INITIAL_STATE__=${JSON.stringify({
-      im: { timelineMap: { [conversationRef]: { timeline: [old] } } },
-    })};` }],
-    querySelectorAll() { return [] },
-  }
-  globalThis.window = {
-    $nuxt: root,
-    $session: { staff: { staffId } },
-    imEngine: {
-      sessions: [session],
-      async getHistoryMsgs() {
-        historyCalls += 1
-        throw new Error('live-only baseline 不得调用 history')
+        calls.push(func.name)
+        return [{ result: await func(...args) }]
       },
     },
   }
-  globalThis.setTimeout = (callback, ms) => {
-    assert.equal(ms, 250)
-    timerCalls += 1
-    const mutation = betweenSamples
-    betweenSamples = null
-    if (mutation) mutation()
-    queueMicrotask(callback)
-    return timerCalls
-  }
   try {
-    delete timelineMap[conversationRef]
-    resetSamples()
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_first_unavailable' },
-      'live exact slot 缺失时不得回退有效 startup',
-    )
-    assert.equal(timerCalls, 0)
+    fixture.detail.__vue__ = { $root: null }
+    fixture.button._events = { click: [() => {}, () => {}] }
+    fixture.button.$vnode = { componentOptions: { listeners: { click: null } } }
+    globalThis.window.imEngine = null
+    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), { ready: true, stage: 'ready' })
+    assert.deepEqual(calls, ['mainInspectSendSurface', 'mainInspectSendTimeline'],
+      'debug 只允许单次公开 surface snapshot 与单次纯 timeline 投影')
 
-    timelineMap[conversationRef] = liveEntry
-    liveEntry.timeline = { malformed: true }
-    resetSamples()
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_first_unavailable' },
-      '第一份 live shape 错误必须在等待前闭锁',
-    )
-    assert.equal(timerCalls, 0)
-
-    liveEntry.timeline = [{ sendMessageId: 'live-optimistic', time: 1, type: 'text', from: staffId, text: '乐观行' }]
-    resetSamples()
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_first_unavailable' },
-      '第一份 live 任一行缺 idServer 时必须闭锁',
-    )
-    assert.equal(timerCalls, 0)
-
-    liveEntry.timeline = [old]
-    resetSamples()
-    const stable = await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail)
-    assert.equal(stable.status, 'ready')
-    assert.deepEqual(stable.serverSourceKeys, [sourceKey(old.idServer)])
-    assert.match(stable.sessionVersionToken, /^[0-9a-f]{64}$/)
-    assert.match(stable.targetBindingToken, /^[0-9a-f]{64}$/)
-    assert.equal(timerCalls, 1, 'ready 必须恰好采两份相隔 250ms 的同步 live 样本')
-
-    liveEntry.timeline = [old]
-    resetSamples(() => { liveEntry.timeline = { malformed: true } })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_second_unavailable' },
-      '第二份 live shape 错误必须收束为 second unavailable',
-    )
-    assert.equal(timerCalls, 1)
-
-    liveEntry.timeline = [old]
-    resetSamples(() => {
-      liveEntry.timeline = [{ sendMessageId: 'second-optimistic', time: 11, type: 'text', from: staffId, text: '乐观行' }]
+    calls.length = 0
+    fixture.root.$store.state.im.timelineMap[fixture.conversationRef].timeline = null
+    assert.deepEqual(await inspectZhilianSendSurfaceDiagnostic(), {
+      ready: false,
+      stage: 'thread_unavailable',
     })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_second_unavailable' },
-      '第二份 live 任一行缺 idServer 时不得过滤',
-    )
+    assert.deepEqual(calls, ['mainInspectSendSurface', 'mainInspectSendTimeline'])
+    fixture.root.$store.state.im.timelineMap[fixture.conversationRef].timeline = fixture.rows
 
-    liveEntry.timeline = [other, old]
-    resetSamples(() => { liveEntry.timeline = [old] })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'guard_snapshot_uncovered' },
-      '第一集合多个 ID 被第二份缺失一个时必须判 guard uncovered',
-    )
-
-    liveEntry.timeline = [old]
-    resetSamples(() => { liveEntry.timeline = [other, old] })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'history_unstable' },
-      '第二份增加额外 ID 时必须判 history unstable',
-    )
-
-    const orderedFirst = { idServer: 'server-order-first', time: 1, type: 'text', from: target, text: '顺序一' }
-    const orderedSecond = { idServer: 'server-order-second', time: 2, type: 'text', from: target, text: '顺序二' }
-    liveEntry.timeline = [orderedFirst, orderedSecond]
-    resetSamples(() => {
-      orderedFirst.time = 3
-      orderedSecond.time = 1
-    })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, [{
-        direction: 'in', contentHash: hashContent(orderedSecond.text),
-      }]),
-      { status: 'failed', stage: 'history_unstable' },
-      '两份样本 ID 集相同但时间顺序变化时不得 ready',
-    )
-
-    liveEntry.timeline = [old]
-    resetSamples()
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, [{
-        direction: 'in', contentHash: hashContent('错误尾锚'),
-      }]),
-      { status: 'failed', stage: 'guard_snapshot_uncovered' },
-      '稳定双样本与 expectedTail 不匹配时仍须封闭',
-    )
-    assert.equal(timerCalls, 1)
-
-    liveEntry.timeline = [old]
-    resetSamples(() => {
-      globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=conversation-other'
-    })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'route_changed' },
-    )
-    globalThis.location.href = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
-
-    liveEntry.timeline = [old]
-    resetSamples(() => {
-      session.modifiedTime = 3
-      session.lastSentence = '{"text":"双采样期间到达的新消息"}'
-    })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, oldTail),
-      { status: 'failed', stage: 'session_changed' },
-    )
-    session.modifiedTime = 2
-    session.lastSentence = '{"text":"旧同文"}'
-
-    const duplicateLate = {
-      idServer: 'server-duplicate', time: 30, type: 'text', from: target, text: '晚到重复行',
-    }
-    const duplicateEarly = {
-      idServer: 'server-duplicate', time: 10, type: 'text', from: target, text: '排序后首行',
-    }
-    const finalRow = {
-      idServer: 'server-final', time: 20, type: 'text', from: target, text: '排序后尾行',
-    }
-    const sortedDedupTail = [
-      { direction: 'in', contentHash: hashContent(duplicateEarly.text) },
-      { direction: 'in', contentHash: hashContent(finalRow.text) },
-    ]
-    liveEntry.timeline = [duplicateLate, finalRow, duplicateEarly]
-    resetSamples()
-    const sortedDedup = await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, sortedDedupTail)
-    assert.equal(sortedDedup.status, 'ready',
-      '必须先按 Number(time) 升序，再对同 idServer 保留排序后首行，并支持多 anchor')
-    assert.deepEqual(sortedDedup.serverSourceKeys,
-      [sourceKey(duplicateEarly.idServer), sourceKey(finalRow.idServer)],
-      'baseline source keys 必须保持排序去重后的时间顺序')
-
-    const textRow = {
-      idServer: 'server-tail-text', time: 1, type: 'text', from: target,
-      text: '  你\u00a0好 \n 世界  ',
-    }
-    const cardRow = {
-      idServer: 'server-tail-card', time: 2, status: 'success', type: 105, from: staffId,
-      content: JSON.stringify({ content: JSON.stringify({
-        staffContent: ' 加微信 ', requestId: 'request-tail-card',
-      }) }),
-    }
-    const systemRow = {
-      idServer: 'server-tail-system', time: 3, type: 999, from: '',
-      content: JSON.stringify({ title: '  系统\u00a0通知  ' }),
-    }
-    const mixedTail = [
-      { direction: 'in', contentHash: hashContent('你 好 世界') },
-      { direction: 'out', contentHash: hashContent('card\x1fwechatExchange\x1frequest-tail-card') },
-      { direction: 'system', contentHash: hashContent('系统 通知') },
-    ]
-    liveEntry.timeline = [systemRow, textRow, cardRow]
-    resetSamples()
-    const normalizedTail = await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, mixedTail)
-    assert.equal(normalizedTail.status, 'ready', 'text/card/system 多尾锚必须按 time 排序并统一归一化')
-
-    const longRows = Array.from({ length: 66 }, (_, index) => ({
-      idServer: `server-long-${index}`, time: index + 1,
-      type: 'text', from: target, text: `长时间线消息${index}`,
-    }))
-    liveEntry.timeline = [...longRows].reverse()
-    resetSamples()
-    const longTail = longRows.slice(-2).map((row) => ({
-      direction: 'in', contentHash: hashContent(row.text),
-    }))
-    const windowed = await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, longTail)
-    assert.equal(windowed.status, 'ready')
-    assert.equal(windowed.serverSourceKeys.length, 64, '65+ 行只允许排序去重后的 last64 进入 baseline')
-    assert.deepEqual(new Set(windowed.serverSourceKeys),
-      new Set(longRows.slice(2).map((row) => sourceKey(row.idServer))))
-
-    liveEntry.timeline = [
-      { sendMessageId: 'invalid-outside-window', time: -1, type: 'text', from: staffId, text: '窗口外乐观行' },
-      ...longRows,
-    ]
-    resetSamples()
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, longTail),
-      { status: 'failed', stage: 'history_first_unavailable' },
-      '全源必须先验 ID，不能因坏行位于 last64 外而静默裁掉',
-    )
-    assert.equal(timerCalls, 0)
-
-    const mutableCardRow = {
-      idServer: 'server-live-before-wait', time: 1, status: 'success', type: 105, from: staffId,
-      content: { content: { staffContent: '原始交换微信卡', requestId: 'request-before-wait' } },
-    }
-    liveEntry.timeline = [mutableCardRow]
-    resetSamples(() => {
-      mutableCardRow.idServer = 'server-live-after-wait'
-      mutableCardRow.content.content.requestId = 'request-after-wait'
-    })
-    assert.deepEqual(
-      await zhilianTestHooks.mainCaptureSendBaseline(conversationRef, [{
-        direction: 'out',
-        contentHash: hashContent('card\x1fwechatExchange\x1frequest-before-wait'),
-      }]),
-      { status: 'failed', stage: 'guard_snapshot_uncovered' },
-      '250ms 内 SDK 原地改写 live row/content 不能回写第一份深值快照',
-    )
-
-    assert.equal(historyCalls, 0, '所有 baseline 分支都不得触碰 history API')
+    calls.length = 0
+    fixture.button.form = {}
+    fixture.button.type = 'submit'
+    const unsafe = await inspectZhilianSendSurfaceDiagnostic()
+    assert.deepEqual(unsafe, { ready: false, stage: 'button_form_unsafe' })
+    assert.deepEqual(calls, ['mainInspectSendSurface'])
+    assert.equal(/vue|vnode|listener|component|owner|engine/iu.test(JSON.stringify(unsafe)), false)
   } finally {
-    Object.assign(globalThis, original)
+    fixture.restore()
   }
 })
 
@@ -3593,15 +2441,17 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
   let mainSendCalls = 0
   let preflightCalls = 0
   let commitCalls = 0
+  let evaluatorFunction = null
   let baselineCalls = 0
   let mainReadThreadCalls = 0
   let selectCalls = 0
   let updateCalls = 0
+  const targetTabId = 91
   let currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
   let observePositive = true
   let sendBaselineResult = {
     status: 'ready', stage: 'ready',
-    serverSourceKeys: ['d'.repeat(64)], sessionVersionToken: 'c'.repeat(64),
+    serverSourceKeys: ['d'.repeat(64)],
     targetBindingToken: 'b'.repeat(64),
   }
   globalThis.setTimeout = (callback) => {
@@ -3611,24 +2461,34 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
   globalThis.chrome = {
     tabs: {
       async query() {
-        return [{
-          id: 91,
-          url: currentURL,
-          status: 'complete', active: true,
-        }]
+        return [
+          {
+            id: 90,
+            url: 'https://rd6.zhaopin.com/app/im?sessionId=other-conversation',
+            status: 'complete', active: true, lastAccessed: Date.now() + 1_000,
+          },
+          {
+            id: targetTabId,
+            url: currentURL,
+            status: 'complete', active: false, lastAccessed: Date.now(),
+          },
+        ]
       },
-      async get() {
+      async get(id) {
+        assert.equal(id, targetTabId, '发送必须精确选中人工打开目标 conversationRef 的 tab')
         return {
-          id: 91,
+          id: targetTabId,
           url: currentURL,
-          status: 'complete', active: true,
+          status: 'complete', active: false,
         }
       },
       async update() { updateCalls += 1; throw new Error('不得直接拼 URL 导航') },
       async sendMessage() { return { ok: true } },
     },
     scripting: {
-      async executeScript({ func, args }) {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, targetTabId,
+          '所有 baseline/evaluator/post 注入必须落到精确匹配 conversationRef 的 tab')
         if (func.name === 'mainProbeZhilian') return [{ result: {
           pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
         } }]
@@ -3651,8 +2511,12 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
         }
         if (func.name === 'mainSendMessageOnce') {
           mainSendCalls += 1
+          if (evaluatorFunction === null) evaluatorFunction = func
+          else assert.strictEqual(func, evaluatorFunction,
+            'preflight 与 commit 必须注入字面同一份 evaluator 函数')
           const phase = args.at(-1)
-          assert.deepEqual(args.slice(7), [
+          assert.equal(args.length, 8)
+          assert.deepEqual(args.slice(5), [
             sendBaselineResult.serverSourceKeys,
             sendBaselineResult.targetBindingToken,
             phase,
@@ -3706,7 +2570,7 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
     assert.equal(preflightCalls, 1)
     assert.equal(commitCalls, 1)
     assert.equal(baselineCalls - firstBaselineStart, 1,
-      '完整 send preflight 必须恰好调用一次自含双样本的 capture')
+      '完整 send preflight 必须恰好调用一次 baseline capture')
     assert.equal(selectCalls, 0, 'chat.sendMessage 只允许已打开的目标会话，不应内部导航')
     assert.equal(updateCalls, 0, '发送不得再依赖已知不可靠的 tabs.update 深链')
 
@@ -3734,7 +2598,6 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
       'engine_unavailable',
       'session_unavailable',
       'history_first_unavailable',
-      'history_second_unavailable',
       'hash_unavailable',
       'unexpected',
     ]) {
@@ -3758,9 +2621,7 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
 
     for (const stage of [
       'route_changed',
-      'history_unstable',
       'guard_snapshot_uncovered',
-      'session_changed',
     ]) {
       sendBaselineResult = { status: 'failed', stage }
       const failedBaseline = context()
@@ -3782,7 +2643,7 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
 
     sendBaselineResult = {
       status: 'ready', stage: 'ready',
-      serverSourceKeys: ['raw-platform-id'], sessionVersionToken: 'c'.repeat(64),
+      serverSourceKeys: ['raw-platform-id'],
       targetBindingToken: 'b'.repeat(64),
     }
     const malformedBaseline = context()
@@ -3956,7 +2817,7 @@ test('发送 baseline Promise 卡死跨过 timer，释放后也不能进入 atte
           baselineSettled = true
           return [{ result: {
             status: 'ready', stage: 'ready',
-            serverSourceKeys: ['d'.repeat(64)], sessionVersionToken: 'c'.repeat(64),
+            serverSourceKeys: ['d'.repeat(64)],
             targetBindingToken: 'b'.repeat(64),
           } }]
         }

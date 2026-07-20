@@ -178,7 +178,7 @@ check(sendCreated.intentId === 'intent-stable' && sendStatus.commandStatus === '
 check(requests.some((request) => request.url.includes('/admin/messages/send?intentId=intent-stable')), '发送状态查询对 intentId 做 URL 编码并且不携带正文')
 check(requests.some((request) => request.url.includes('/admin/messages/send?platform=zhilian') && request.url.includes('conversationRef=conversation-test')), '页面恢复按账号与会话查询脑侧 latest')
 check(conflictCurrent?.intentId === 'intent-current', 'CAS 409 保留脑返回的 current，UI 可立即收编并锁定')
-check(rejectedBeforeCreate, '无 current 的安全拒绝被标记为确定性未创建，UI 可清理匹配 proposal')
+check(rejectedBeforeCreate, '无 current 的安全拒绝被标记为确定性未创建，UI 可解除当前内存 pending')
 check(receivedFrames.length === 1 && receivedFrames[0].seq === 7, 'fetch SSE 解析协议帧且无需 EventSource')
 globalThis.fetch = realFetch
 delete globalThis.window

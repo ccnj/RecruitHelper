@@ -190,6 +190,75 @@ func TestSendMessageIntentConflictDoesNotRecomputeGuards(t *testing.T) {
 	}
 }
 
+func TestSendMessageAuthoritativeGatesRemainAfterPreflightPruning(t *testing.T) {
+	t.Run("manual quiet is enforced by store transaction", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-quiet", "conv-send-quiet")
+		until := time.Now().Add(time.Minute)
+		if err := st.MutateAccount(store.AccountKey{Platform: key.Platform, AccountRef: key.AccountRef}, func(account *store.Account) error {
+			account.ManualQuietUntil = &until
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		intentID := "intent-send-quiet"
+		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
+		if receipt != nil || !errors.Is(err, store.ErrManualQuietActive) || m.sentCount() != 0 {
+			t.Fatalf("事务 quiet 闸未拒绝: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
+		}
+		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
+			t.Fatalf("quiet 拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		}
+	})
+
+	t.Run("capability is enforced inside dispatch gate", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-cap", "conv-send-cap")
+		m.negotiate("hand-send", nil,
+			append(append([]string(nil), allM2Features...), string(protocol.FeatureWitness1)))
+		intentID := "intent-send-cap"
+		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
+		if receipt != nil || !errors.Is(err, ErrCapability) || m.sentCount() != 0 {
+			t.Fatalf("内层 capability 闸未拒绝: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
+		}
+		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
+			t.Fatalf("capability 拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		}
+	})
+
+	t.Run("witness feature is enforced inside dispatch gate", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-feature", "conv-send-feature")
+		m.negotiate("hand-send",
+			[]string{protocol.PrimChatSendMessage + "@1", protocol.PrimChatReadThread + "@1"},
+			append([]string(nil), allM2Features...))
+		intentID := "intent-send-feature"
+		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
+		if receipt != nil || !errors.Is(err, ErrFeature) || m.sentCount() != 0 {
+			t.Fatalf("内层 witness feature 闸未拒绝: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
+		}
+		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
+			t.Fatalf("feature 拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		}
+	})
+
+	t.Run("witness store is enforced inside dispatch gate", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-witness", "conv-send-witness")
+		m.mu.Lock()
+		delete(m.witness, "hand-send")
+		m.mu.Unlock()
+		intentID := "intent-send-witness"
+		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
+		if receipt != nil || !errors.Is(err, ErrWitnessUnavailable) || m.sentCount() != 0 {
+			t.Fatalf("内层 witness store 闸未拒绝: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
+		}
+		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
+			t.Fatalf("witness 拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		}
+	})
+}
+
 func TestRealEffectDefinitivePreSendAbortAndProtocolRejectTerminateIntent(t *testing.T) {
 	t.Run("generation fence proves no socket write", func(t *testing.T) {
 		d, st, m := newDisp(t)

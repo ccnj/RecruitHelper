@@ -1,6 +1,6 @@
 # E · 首个真实副作用安全轨道设计记录
 
-> 状态：2026-07-19 随里程碑 3（X 批）冻结；2026-07-20 按真机只读事实收口发送执行期数据源。本文记录设计理由与故障推演，便于实现审查；线上行为仍以 `AGENTS.md`、`contract/协议规格-v1.md`、`contract/contract.v1.json` 的优先级为准。
+> 状态：2026-07-19 随里程碑 3（X 批）冻结；2026-07-20 按真机只读事实收口发送执行期数据源，并按《防护成本预算》第 9 条重划动作信任边界。本文记录设计理由与故障推演，便于实现审查；线上行为仍以 `AGENTS.md`、`contract/协议规格-v1.md`、`contract/contract.v1.json` 的优先级为准。
 
 ## 0. 结论
 
@@ -25,7 +25,7 @@
 | X7 | result 可跨会话补投但不能伪造无会话信封 | outbox 保存完整信封，`ResultEnvelope.session` 必填非空；新连接补投前先持久更新 session/ts/attempt，msgId 与 body 不变 |
 | X8 | committed 不能是一张空收据 | `JournalEntry.result` 在 committed 时必填且非 null，并满足 `result.ref=journal.ref` |
 | X9 | 易失成功不能越过持久终局屏障 | committed/outbox 双写失败时不缓存或发送成功 result；保留 attempting、熔断 dispatcher 已 accepted 队列、断开连接并交给 query→验证，同 SW 重复 cmd 也不能重放成功 |
-| X10 | UI 重载不能把一次人工意图变成两次 | 产品入口在 POST 前只持久保存 intentId，脑以会话持久单调 head（不读 wall clock/rowid）做事务 CAS；重载、多标签、响应丢失和系统时钟回拨必须恢复权威 current，终局经用户显式确认后才允许下一意图 |
+| X10 | UI 重载不能把一次人工意图变成两次 | 脑以会话持久单调 head（不读 wall clock/rowid）和 `previousIntentId` 做事务 CAS，权威 current 只在脑侧；浏览器会话存储不构成安全证明。M3 有人值守 UI 的“我已确认”只负责串行化本轮人工验收，不外推为后续自动调度规范 |
 
 第 X5 条不是一般“同 id 跨重启重试”许可。它依赖先写 attempting 再做动作的严格顺序；任何写点不确定、storeId 不同或记录损坏都会失去该证明。
 
@@ -64,14 +64,14 @@ committed journal 与对应 outbox 必须在同一次 `chrome.storage.local.set`
 脑落 intent/cmd WAL
   -> cmd(chat.sendMessage, idemKey, expectedTail)
   -> base 校验 feature/schema/context/capacity
-  -> program 从同一可信 live Vue root 双采样 timeline，冻结有序 source keys、expectedTail、会话版本、目标绑定 token
-  -> program 用唯一同步 evaluator 只读预检身份、活动会话、composer.empty、发送控件因果绑定与硬截止
+  -> program 从唯一 live timeline 单次同步投影 baseline，冻结有序 source keys、expectedTail、targetBindingToken
+  -> program 用唯一同步 evaluator 预检身份、route/目标、composer.empty、唯一可见控件与硬截止；关联 form 只接受显式 type=button
   -> base 写 journal=attempting，并等待成功
-  -> program 以字面同一 evaluator 和同一组参数进入 commit；DOM 只定位控件，不提供消息语义
-  -> input 后由同一 evaluator 重投影 live timeline 并复核身份、活动会话、engine 版本、目标 token、因果绑定与硬截止
-  -> evaluator 绿色返回后不再读取页面，立即执行唯一 click；任一变化即清草稿且零点击
-  -> program 执行一次不可逆动作
-  -> program 只读同一实时 timeline，严格 +1 确认新 idServer + success + outbound text + contentHash
+  -> program 以字面同一 evaluator 和同一组参数进入 commit，在写入正文前再核对一次；DOM 只定位控件，不提供消息语义
+  -> input/change 后由同一 evaluator 重投影 live timeline 并复核身份、route/目标、正文、source keys、expectedTail、targetBindingToken 与硬截止
+  -> evaluator 不读取或互证 owner/model/engine/VNode/listener；disabled/aria-disabled 不作硬闸
+  -> evaluator 绿色返回后不再读取页面，立即调用一次标准 click；任一前置变化即清草稿且零点击，原语内部绝不补 click
+  -> program 只读同一目标的实时 timeline，严格 +1 确认新 idServer + success + outbound text + contentHash
   -> base 同次写 journal=committed(result) + outbox(result envelope)
   -> 发送 result
   -> 脑持久终局并 ack
@@ -79,6 +79,10 @@ committed journal 与对应 outbox 必须在同一次 `chrome.storage.local.set`
 ```
 
 任何 program 路径都不能直接写 journal/outbox，不能读取历史 journal 决定业务行为，也不能跳过 base 安全点执行动作。
+
+`targetBindingToken` 只回答各次读取是否仍指向同一 `conversationRef+peerPartnerId` 世界目标，不证明发送按钮、框架组件或页面 SDK 已正确接线。若按钮关联 form，显式 `type="button"` 是标准 DOM click 的公开语义硬闸，用于排除 click handler 与 default submit 两条动作路径；原生 `disabled` 只会让标准 click 无效，`aria-disabled` 没有标准阻断语义，二者都不能推出多发、错靶或覆盖输入，因此不作硬闸。
+
+系统构造性保证的是自己的逻辑对标准 click 至多调用一次。平台把一次标准 click 重复执行或送往界面所示对象之外，属于被信任动作契约的违约；即时后置观察、配对验证读与 suspect 可以发现并升级零新增、多新增、目标换绑或读不清，不能撤销已经发生的伤害，也绝不授权第二次 click。
 
 发送正文与线程文本使用同一内容哈希算法：Unicode NFC、首尾 trim、连续 Unicode 空白折叠为一个 ASCII 空格，再做 SHA-256 小写十六进制。证词只保存 hash 和协议结果，不回抄正文。
 
@@ -129,6 +133,7 @@ report 可重复，但脑只采信当前物理连接、当前 recovery generatio
 - `chat.sendGreeting`、邀面卡、换微信卡仍是 ver=0，占位但不可上报能力。
 - 不引入远程 program 下发、云端连接或跨机信任；这些变化会使“本地可信 + Origin 边界”的威胁模型到期，必须另行冻结协议版本。
 - 不承诺平台绝对真相。`chat.readThread` 只提供可审计的 L3 逼近；零匹配不是未发送证明。
+- 不证明平台私有组件、事件层或 SDK 的内部接线；Vue owner/component tree/model/engine/VNode/listener 及其互相一致性不再作为动作前守卫或降级观测项。
 - 不把候选人/职位采集、AI 决策或沟通状态机塞进投递层。
 
 ## 8. 生成与门禁

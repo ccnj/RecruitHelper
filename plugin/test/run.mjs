@@ -405,6 +405,11 @@ try {
             diagnosticStage: 'ok',
           } }]
         }
+        if (name === 'mainInspectSendTimeline') {
+          const [conversationRef] = args
+          assert.equal(conversationRef, fixtureConversationRef)
+          return [{ result: true }]
+        }
         if (name === 'mainCaptureSendBaseline') {
           const [conversationRef, expectedTail] = args
           assert.equal(conversationRef, fixtureConversationRef)
@@ -415,18 +420,15 @@ try {
             status: 'ready',
             stage: 'ready',
             serverSourceKeys: [...platform.sendBaselineSourceKeys],
-            sessionVersionToken: 'cd'.repeat(32),
             targetBindingToken: fixtureTargetBindingToken,
           } }]
         }
         if (name === 'mainSendMessageOnce') {
-          assert.equal(args.length, 10)
+          assert.equal(args.length, 8)
           const [
             conversationRef,
             text,
-            textHash,
             expectedTail,
-            expectedSessionVersionToken,
             expectedPrincipalFingerprint,
             irreversibleNotAfterMs,
             expectedBaselineServerSourceKeys,
@@ -435,9 +437,7 @@ try {
           ] = args
           assert.equal(conversationRef, fixtureConversationRef)
           assert.equal(text, fixtureSendText)
-          assert.equal(textHash, hashText(fixtureSendText))
           assert.deepEqual(expectedTail, fixtureMessages.map(({ direction, contentHash }) => ({ direction, contentHash })))
-          assert.equal(expectedSessionVersionToken, 'cd'.repeat(32))
           assert.equal(expectedPrincipalFingerprint, principalFingerprint)
           assert.ok(Number.isFinite(irreversibleNotAfterMs) && irreversibleNotAfterMs >= Date.now())
           assert.deepEqual(expectedBaselineServerSourceKeys, platform.sendBaselineSourceKeys)

@@ -210,7 +210,7 @@ export class SendIntentConflictError extends Error {
 }
 
 // 只有脑明确返回“请求在创建 intent/cmd 前被拒绝”时才使用此错误。
-// 网络中断、5xx 或已创建回执仍属于结果不确定，不能清除本地 proposal。
+// 网络中断、5xx 或已创建回执仍属于结果不确定，不得解除当前意图或重铸 intentId。
 export class SendIntentRejectedError extends Error {
   constructor(message: string) {
     super(message)

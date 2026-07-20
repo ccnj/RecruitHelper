@@ -4,9 +4,7 @@ import {
   AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
   LedgerRow, MessageView, MutationResult, SendIntentView, Suspect, TimeValue,
 } from './api'
-import {
-  acknowledgeSendIntent, discardRejectedSendProposal, readSendResume, rememberSendProposal,
-} from './send-resume'
+import { acknowledgeSendIntent, readSendResume } from './send-resume'
 
 interface PollState<T> {
   data: T | undefined
@@ -130,12 +128,12 @@ function directionLabel(direction: string): string {
 }
 
 function isTracked(state: string): boolean {
-  return state === 'tracked' || state === 'pending' || state === 'adopted'
+  return state === 'pending' || state === 'adopted'
 }
 
 function trackingLabel(state: string): string {
   if (state === 'pending') return '基线待建立'
-  if (state === 'adopted' || state === 'tracked') return '跟踪中'
+  if (state === 'adopted') return '跟踪中'
   return '未跟踪'
 }
 
@@ -744,7 +742,7 @@ function MessageComposer({ account, conversation, onChanged }: {
   const onChangedRef = useRef(onChanged)
   onChangedRef.current = onChanged
   const bytes = new TextEncoder().encode(text.trim()).length
-  const adopted = conversation.trackingState === 'adopted' || conversation.trackingState === 'tracked'
+  const adopted = conversation.trackingState === 'adopted'
   const identityReady = account.identityCurrent
   const quietUntil = toDate(account.manualQuietUntil)
   const quiet = Boolean(quietUntil && quietUntil.getTime() > Date.now())
@@ -755,8 +753,8 @@ function MessageComposer({ account, conversation, onChanged }: {
     let timer: number | undefined
     const recover = async () => {
       try {
-        // sessionStorage 只是 reload 提示；无论它是否可读，都先以脑账本
-        // 判定是否已有发送，不能让浏览器存储成为恢复真相源。
+        // 无条件先以脑账本判定是否已有发送；sessionStorage 只保存
+        // M3 有人值守 UI 的终局确认，不参与意图恢复。
         const latest = await api.latestSendIntent(account.platform, account.accountRef, conversation.conversationRef)
         if (!alive) return
         let acknowledgedIntentId = ''
@@ -774,11 +772,6 @@ function MessageComposer({ account, conversation, onChanged }: {
           setPending(null)
           setView(null)
         } else {
-          try {
-            rememberSendProposal(targetKey, latest.intentId)
-          } catch (reason) {
-            storageWarning = `本地发送凭证不可写；当前意图保持锁定：${errorText(reason)}`
-          }
           setPending({ intentId: latest.intentId })
           setView(latest)
         }
@@ -834,16 +827,7 @@ function MessageComposer({ account, conversation, onChanged }: {
     if (recovering || (pending && pending.text === undefined)) return
     const request = pending ?? { intentId: newIntentId(), text: normalized }
     if (!request.text) return
-    if (!pending) {
-      try {
-        // 必须先稳定保存 ID，再允许 POST 越过进程边界。
-        rememberSendProposal(targetKey, request.intentId)
-      } catch (reason) {
-        setError(`无法保存本次发送凭证，已禁止发送：${errorText(reason)}`)
-        return
-      }
-      setPending(request)
-    }
+    if (!pending) setPending(request)
     setPosting(true)
     setError('')
     try {
@@ -860,20 +844,14 @@ function MessageComposer({ account, conversation, onChanged }: {
       onChangedRef.current()
     } catch (reason) {
       if (reason instanceof SendIntentConflictError) {
-        try { rememberSendProposal(targetKey, reason.current.intentId) } catch { /* 保持 UI 锁定 */ }
         setPending({ intentId: reason.current.intentId })
         setView(reason.current)
         setLatestIntentId(reason.current.intentId)
         setError('发送账本已由另一窗口更新；已恢复当前意图，请先确认其结果。')
       } else if (reason instanceof SendIntentRejectedError) {
-        try {
-          discardRejectedSendProposal(targetKey, request.intentId)
-          setPending(null)
-          setView(null)
-          setError(`发送前安全检查未通过，脑未创建发送意图：${errorText(reason)}`)
-        } catch (storageReason) {
-          setError(`脑已明确拒绝发送，但本地凭证无法安全清除，编辑器继续锁定：${errorText(storageReason)}`)
-        }
+        setPending((current) => current?.intentId === request.intentId ? null : current)
+        setView((current) => current?.intentId === request.intentId ? null : current)
+        setError(`发送前安全检查未通过，脑未创建发送意图：${errorText(reason)}`)
       } else {
         setError(`提交结果不确定；再次操作仍会沿用同一意图，不会新发一条：${errorText(reason)}`)
       }

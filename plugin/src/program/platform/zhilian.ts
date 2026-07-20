@@ -93,38 +93,7 @@ const MAIN_SEND_SURFACE_STAGES = [
   'detail_ambiguous',
   'button_count',
   'wrapper_mismatch',
-  'sender_root_missing',
-  'surface_disconnected',
-  'component_tree_root_missing',
-  'component_tree_malformed',
-  'component_tree_overflow',
-  'sender_owner_count',
-  'sender_owner_inactive',
-  'button_owner_count',
-  'button_owner_outside_sender',
-  'composer_owner_missing',
-  'model_slot_missing',
-  'model_slot_ambiguous',
-  'model_target_mismatch',
-  'model_candidate_props',
-  'model_candidate_data',
-  'model_candidate_store',
-  'model_candidate_multiple',
-  'model_candidate_conflict',
-  'model_candidate_absent',
-  'model_scalar_owner',
-  'model_scalar_props',
-  'model_scalar_data',
-  'model_scalar_store',
-  'model_scalar_multiple',
-  'model_scalar_conflict',
-  'model_scalar_absent',
-  'engine_target_mismatch',
   'button_form_unsafe',
-  'button_vnode_missing',
-  'button_dom_listener_ambiguous',
-  'sender_listener_ambiguous',
-  'sender_listener_mismatch',
 ] as const
 
 type MainSendSurfaceStage = typeof MAIN_SEND_SURFACE_STAGES[number]
@@ -139,54 +108,7 @@ const SEND_SURFACE_STAGE_TO_DIAGNOSTIC: Readonly<Record<
   detail_ambiguous: 'detail_cardinality',
   button_count: 'button_cardinality',
   wrapper_mismatch: 'dom_containment',
-  sender_root_missing: 'dom_containment',
-  surface_disconnected: 'dom_containment',
-  component_tree_root_missing: 'component_tree_root_missing',
-  component_tree_malformed: 'component_tree_malformed',
-  component_tree_overflow: 'component_tree_overflow',
-  sender_owner_count: 'sender_owner_unresolved',
-  sender_owner_inactive: 'sender_owner_unresolved',
-  button_owner_count: 'control_ownership_unresolved',
-  button_owner_outside_sender: 'control_ownership_unresolved',
-  composer_owner_missing: 'control_ownership_unresolved',
-  model_slot_missing: 'direct_model_unresolved',
-  model_slot_ambiguous: 'direct_model_target_mismatch',
-  model_target_mismatch: 'direct_model_target_mismatch',
-  model_candidate_props: 'model_candidate_props',
-  model_candidate_data: 'model_candidate_data',
-  model_candidate_store: 'model_candidate_store',
-  model_candidate_multiple: 'model_candidate_multiple',
-  model_candidate_conflict: 'model_candidate_conflict',
-  model_candidate_absent: 'model_candidate_absent',
-  model_scalar_owner: 'model_scalar_owner',
-  model_scalar_props: 'model_scalar_props',
-  model_scalar_data: 'model_scalar_data',
-  model_scalar_store: 'model_scalar_store',
-  model_scalar_multiple: 'model_scalar_multiple',
-  model_scalar_conflict: 'model_scalar_conflict',
-  model_scalar_absent: 'model_scalar_absent',
-  engine_target_mismatch: 'engine_binding_unresolved',
   button_form_unsafe: 'button_form_unsafe',
-  button_vnode_missing: 'button_vnode_missing',
-  button_dom_listener_ambiguous: 'button_dom_listener_ambiguous',
-  sender_listener_ambiguous: 'component_click_wiring_unresolved',
-  sender_listener_mismatch: 'component_click_wiring_unresolved',
-})
-
-const SEND_BASELINE_STAGE_TO_DIAGNOSTIC: Readonly<Record<
-  MainSendBaselineFailureStage,
-  DebugInspectSendSurfaceData['stage']
->> = Object.freeze({
-  engine_unavailable: 'baseline_engine_unavailable',
-  route_changed: 'baseline_route_changed',
-  session_unavailable: 'baseline_session_unavailable',
-  history_first_unavailable: 'baseline_history_unavailable',
-  history_second_unavailable: 'baseline_history_unavailable',
-  history_unstable: 'baseline_history_unstable',
-  guard_snapshot_uncovered: 'baseline_guard_uncovered',
-  session_changed: 'baseline_session_changed',
-  hash_unavailable: 'baseline_hash_unavailable',
-  unexpected: 'baseline_unexpected',
 })
 
 interface MainSendSurfaceResult {
@@ -215,9 +137,8 @@ interface MainClickConversationResult {
 
 interface MainSendOnceResult {
   status: 'ready' | 'clicked' | 'failed'
-  reason?: 'route_changed' | 'guard_unresolved' | 'guard_changed' | 'composer_nonempty' |
-    'composer_missing' | 'send_button_missing' | 'send_button_disabled' | 'input_rejected' |
-    'identity_changed' | 'composer_binding_unresolved' | 'composer_binding_changed' |
+  reason?: 'route_changed' | 'guard_unresolved' | 'target_changed' | 'baseline_changed' |
+    'composer_nonempty' | 'composer_missing' | 'input_rejected' | 'identity_changed' |
     'action_window_elapsed'
 }
 
@@ -228,10 +149,7 @@ const MAIN_SEND_BASELINE_FAILURE_STAGES = [
   'route_changed',
   'session_unavailable',
   'history_first_unavailable',
-  'history_second_unavailable',
-  'history_unstable',
   'guard_snapshot_uncovered',
-  'session_changed',
   'hash_unavailable',
   'unexpected',
 ] as const
@@ -242,7 +160,6 @@ interface MainSendBaselineReady {
   status: 'ready'
   stage: 'ready'
   serverSourceKeys: string[]
-  sessionVersionToken: string
   targetBindingToken: string
 }
 
@@ -264,9 +181,9 @@ function validatedMainSendBaseline(value: unknown): MainSendBaselineResult | nul
   }
   if (record.status !== 'ready' || record.stage !== 'ready' ||
       !Array.isArray(record.serverSourceKeys) || record.serverSourceKeys.length > 64 ||
-      typeof record.sessionVersionToken !== 'string' || typeof record.targetBindingToken !== 'string') return null
+      typeof record.targetBindingToken !== 'string') return null
   const hashPattern = /^[0-9a-f]{64}$/u
-  if (!hashPattern.test(record.sessionVersionToken) || !hashPattern.test(record.targetBindingToken) ||
+  if (!hashPattern.test(record.targetBindingToken) ||
       record.serverSourceKeys.some((key) => typeof key !== 'string' || !hashPattern.test(key)) ||
       new Set(record.serverSourceKeys).size !== record.serverSourceKeys.length) return null
   return record as unknown as MainSendBaselineReady
@@ -988,6 +905,34 @@ async function verifiedIMTab(expected: string | undefined): Promise<chrome.tabs.
   return tab
 }
 
+async function sendZhilianTab(conversationRef: string): Promise<chrome.tabs.Tab> {
+  const candidates = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => {
+      if (tab.id === undefined || pageKindFromURL(tab.url) !== 'im') return false
+      try {
+        const url = new URL(tab.url ?? '')
+        return url.pathname === '/app/im' && url.searchParams.get('sessionId') === conversationRef
+      } catch {
+        return false
+      }
+    })
+    .sort((left, right) => {
+      if (left.active !== right.active) return left.active ? -1 : 1
+      const lastAccessed = (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0)
+      return lastAccessed !== 0 ? lastAccessed : (left.id ?? 0) - (right.id ?? 0)
+    })
+  const tab = candidates[0]
+  if (!tab) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '人工打开的目标智联会话页面不存在',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  return tab
+}
+
 async function readZhilianListFromDOM(
   args: ZhilianListArgs,
   ctx: PrimitiveContext,
@@ -1690,374 +1635,14 @@ async function mainReadThreadPage(
   }
 }
 
-// 发送正文前的第一轮只读检查。第二轮会在唯一 message click 的同一次 MAIN 注入内
-// 重新核验 route/tail/composer。M3 的 sendMessage 只允许人已打开的目标会话；
-// 自动切换属于另一个 intrusive 原语，不能与本发送共用 attempting 证词。
+// debug 的单次公开 surface 诊断：只检查当前 route、可见控件、
+// DOM containment、草稿与 form/type。它不参与生产 sendMessage 授权，
+// 也不向生产 preflight 传递任何读数。
 async function mainInspectSendSurface(conversationRef: string): Promise<MainSendSurfaceResult> {
-  type AnyRecord = Record<string, unknown>
-  const w = window as unknown as AnyRecord
-  const asRecord = (value: unknown): AnyRecord | null =>
-    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
-  const normalizedRef = (value: unknown): string | null => {
-    if (typeof value === 'string') {
-      const result = value.trim()
-      return result || null
-    }
-    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
-    return null
-  }
   const visible = (element: Element): boolean => {
     const node = element as HTMLElement
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
-  }
-  type AnyFunction = (...args: unknown[]) => unknown
-  interface BoundScalarModel {
-    container: AnyRecord
-    key: 'activeSessionId' | 'currentSessionId' | 'propsSessionId'
-    path: 'owner' | 'propsInternal' | 'propsPublic' | 'data' | 'store' | 'rootStore'
-    raw: string | number
-    ref: string
-  }
-  interface SenderBinding {
-    senderOwner: AnyRecord
-    currentSessionModel: AnyRecord | null
-    propsSessionModel: AnyRecord | null
-    scalarModels: BoundScalarModel[]
-    buttonOwner: AnyRecord
-    senderHandler: AnyFunction
-    domHandler: AnyFunction
-  }
-  interface SenderBindingInspection {
-    binding: SenderBinding | null
-    stage: MainSendSurfaceStage
-  }
-  const componentTree = (surfaceNodes: readonly HTMLElement[]): {
-    components: AnyRecord[] | null
-    stage: 'component_tree_root_missing' | 'component_tree_malformed' |
-      'component_tree_overflow' | null
-  } => {
-    let root = asRecord(w.$nuxt)
-    if (!root) {
-      // 真页不保证把 Nuxt 根挂到 window。只从已经由 DOM containment 确认的
-      // 发送区节点及其祖先读取 Vue 2 自有 __vue__ owner，再要求所有 owner
-      // 汇聚到同一个自反 $root；不扫描任意页面对象或无关 DOM 子树。
-      const roots = new Set<AnyRecord>()
-      const visitedNodes = new Set<HTMLElement>()
-      for (const surfaceNode of surfaceNodes) {
-        let current: HTMLElement | null = surfaceNode
-        for (let depth = 0; current && depth < 64; depth += 1) {
-          if (!visitedNodes.has(current)) {
-            visitedNodes.add(current)
-            const holder = current as HTMLElement & { __vue__?: unknown }
-            if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
-              const owner = asRecord(holder.__vue__)
-              const candidateRoot = asRecord(owner?.$root)
-              if (!owner || !candidateRoot || candidateRoot.$root !== candidateRoot) {
-                return { components: null, stage: 'component_tree_malformed' }
-              }
-              roots.add(candidateRoot)
-            }
-          }
-          current = current.parentElement
-        }
-      }
-      if (roots.size !== 1) return { components: null, stage: 'component_tree_root_missing' }
-      root = [...roots][0]
-    }
-    const queue: AnyRecord[] = [root]
-    const seen = new Set<AnyRecord>()
-    const components: AnyRecord[] = []
-    while (queue.length > 0) {
-      const component = queue.shift()
-      if (!component || seen.has(component)) continue
-      // 4096 是证据遍历上界，不是“找到就停”的搜索上界。超出时无法
-      // 证明后面没有第二个 owner/listener，因此必须整体 unresolved。
-      if (seen.size >= 4096) return { components: null, stage: 'component_tree_overflow' }
-      seen.add(component)
-      components.push(component)
-      const children = component.$children
-      if (!Array.isArray(children)) return { components: null, stage: 'component_tree_malformed' }
-      for (const child of children) {
-        const record = asRecord(child)
-        if (!record) return { components: null, stage: 'component_tree_malformed' }
-        queue.push(record)
-      }
-    }
-    return { components, stage: null }
-  }
-  const connected = (value: unknown): value is HTMLElement =>
-    value !== null && typeof value === 'object' &&
-    (value as { isConnected?: unknown }).isConnected === true
-  const liveComponent = (component: AnyRecord): boolean =>
-    component._isDestroyed !== true && component._isBeingDestroyed !== true &&
-    component._inactive !== true && component.$destroyed !== true && connected(component.$el)
-  const unwrapSingleListener = (value: unknown): AnyFunction | null => {
-    let current = value
-    const seen = new Set<unknown>()
-    for (let depth = 0; depth < 12; depth += 1) {
-      if (Array.isArray(current)) {
-        if (current.length !== 1) return null
-        current = current[0]
-        continue
-      }
-      if (typeof current !== 'function' || seen.has(current)) return null
-      seen.add(current)
-      const wrapped = (current as unknown as { fns?: unknown }).fns
-      if (wrapped !== undefined) {
-        current = wrapped
-        continue
-      }
-      return current as AnyFunction
-    }
-    return null
-  }
-  const componentEvidenceForSurface = (
-    composer: HTMLElement,
-    button: HTMLButtonElement,
-    wrapper: HTMLElement,
-    detail: HTMLElement,
-  ): SenderBindingInspection => {
-    const senderRoot = wrapper.closest<HTMLElement>('.im-sender')
-    if (!senderRoot || !detail.contains(senderRoot)) {
-      return { binding: null, stage: 'sender_root_missing' }
-    }
-    if (!wrapper.contains(composer) || !wrapper.contains(button) ||
-        !senderRoot.contains(composer) || !senderRoot.contains(button)) {
-      return { binding: null, stage: 'wrapper_mismatch' }
-    }
-    if (!connected(detail) || !connected(wrapper) || !connected(senderRoot) ||
-        !connected(composer) || !connected(button)) {
-      return { binding: null, stage: 'surface_disconnected' }
-    }
-    const tree = componentTree([detail, senderRoot, wrapper, composer, button])
-    if (!tree.components || tree.stage) {
-      return { binding: null, stage: tree.stage ?? 'component_tree_malformed' }
-    }
-    const components = tree.components
-    // `.im-sender` 的 Vue owner 必须在完整组件树中唯一，且当下仍是 live DOM owner。
-    // 死 owner 也会造成唯一性失败，不能被过滤后“变成唯一”。
-    const senderOwners = components.filter((component) => component.$el === senderRoot)
-    if (senderOwners.length !== 1) return { binding: null, stage: 'sender_owner_count' }
-    if (!liveComponent(senderOwners[0])) return { binding: null, stage: 'sender_owner_inactive' }
-    const senderOwner = senderOwners[0]
-    const belongsToSender = (component: AnyRecord): boolean => {
-      let current: AnyRecord | null = component
-      const parents = new Set<AnyRecord>()
-      while (current && parents.size < 64) {
-        if (!liveComponent(current)) return false
-        if (current === senderOwner) return true
-        if (parents.has(current)) return false
-        parents.add(current)
-        current = asRecord(current.$parent)
-      }
-      return false
-    }
-    const buttonOwners = components.filter((component) => component.$el === button)
-    if (buttonOwners.length !== 1) return { binding: null, stage: 'button_owner_count' }
-    if (!belongsToSender(buttonOwners[0])) {
-      return { binding: null, stage: 'button_owner_outside_sender' }
-    }
-    const buttonOwner = buttonOwners[0]
-    const composerOwned = components.some((component) => {
-      const element = component.$el as HTMLElement | undefined
-      return element !== undefined && element !== senderRoot &&
-        typeof element.contains === 'function' && senderRoot.contains(element) &&
-        element.contains(composer) && belongsToSender(component)
-    })
-    if (!composerOwned) return { binding: null, stage: 'composer_owner_missing' }
-
-    // 一次性读取完整闭集，后续不再通过 getter 重新取得容器。优先认 Sender
-    // owner 的两个明确对象模型槽；真实页面没有对象槽时，只接受至少两个
-    // 独立容器/路径中的显式会话 ID 标量。闭集中任何非空冲突都立即闭锁。
-    let containerMalformed = false
-    const optionalContainer = (value: unknown): AnyRecord | null => {
-      if (value === null || value === undefined) return null
-      const record = asRecord(value)
-      if (!record) containerMalformed = true
-      return record
-    }
-    const propsInternal = optionalContainer(senderOwner._props)
-    const propsPublic = optionalContainer(senderOwner.$props)
-    const data = optionalContainer(senderOwner.$data)
-    const ownerStore = optionalContainer(senderOwner.$store)
-    const ownerStoreStateRaw = ownerStore?.state
-    if (ownerStore && (ownerStoreStateRaw === null || ownerStoreStateRaw === undefined)) containerMalformed = true
-    const ownerStoreState = ownerStore ? optionalContainer(ownerStoreStateRaw) : null
-    const ownerStoreIM = optionalContainer(ownerStoreState?.im)
-    const senderRootModel = optionalContainer(senderOwner.$root)
-    const rootStore = optionalContainer(senderRootModel?.$store)
-    const rootStoreStateRaw = rootStore?.state
-    if (rootStore && (rootStoreStateRaw === null || rootStoreStateRaw === undefined)) containerMalformed = true
-    const rootStoreState = rootStore ? optionalContainer(rootStoreStateRaw) : null
-    const rootStoreIM = optionalContainer(rootStoreState?.im)
-    if (containerMalformed) return { binding: null, stage: 'model_candidate_conflict' }
-    const modelEntries: Array<{
-      key: 'currentSession' | 'propsSession'
-      model: AnyRecord
-    }> = []
-    let directModelMalformed = false
-    for (const key of ['currentSession', 'propsSession'] as const) {
-      const raw = senderOwner[key]
-      if (raw === null || raw === undefined) continue
-      const model = asRecord(raw)
-      if (!model) directModelMalformed = true
-      else modelEntries.push({ key, model })
-    }
-    if (directModelMalformed) return { binding: null, stage: 'model_target_mismatch' }
-    type CandidateGroup = 'props' | 'data' | 'store'
-    const candidates: Array<{ group: CandidateGroup; model: AnyRecord }> = []
-    let candidateModelMalformed = false
-    const seenByGroup: Record<CandidateGroup, Set<AnyRecord>> = {
-      props: new Set<AnyRecord>(),
-      data: new Set<AnyRecord>(),
-      store: new Set<AnyRecord>(),
-    }
-    const addContainer = (group: CandidateGroup, container: AnyRecord | null): void => {
-      if (!container) return
-      for (const key of ['currentSession', 'propsSession'] as const) {
-        const raw = container[key]
-        if (raw === null || raw === undefined) continue
-        const model = asRecord(raw)
-        if (!model) {
-          candidateModelMalformed = true
-          continue
-        }
-        if (seenByGroup[group].has(model)) continue
-        seenByGroup[group].add(model)
-        candidates.push({ group, model })
-      }
-    }
-    addContainer('props', propsInternal)
-    addContainer('props', propsPublic)
-    addContainer('data', data)
-    addContainer('store', ownerStoreIM)
-    addContainer('store', rootStoreIM)
-    if (candidateModelMalformed) return { binding: null, stage: 'model_candidate_conflict' }
-    // 非直接对象模型尚未经过真实发送验证；即便内容一致也只诊断、不授权。
-    // direct 模型存在时也不能忽略它们，否则 handler 可能按冲突对象选目标。
-    if (candidates.length > 0) {
-      const identities = candidates.map(({ model }) => ({
-        ref: normalizedRef(model.sessionId),
-        peer: normalizedRef(model.peerPartnerId),
-      }))
-      if (identities.some(({ ref, peer }) => ref !== conversationRef || !peer) ||
-          new Set(identities.map(({ peer }) => peer)).size !== 1) {
-        return { binding: null, stage: 'model_candidate_conflict' }
-      }
-      const groups = [...new Set(candidates.map(({ group }) => group))]
-      if (groups.length !== 1 || modelEntries.length > 0) {
-        return { binding: null, stage: 'model_candidate_multiple' }
-      }
-      const stage: MainSendSurfaceStage = groups[0] === 'props'
-        ? 'model_candidate_props'
-        : groups[0] === 'data' ? 'model_candidate_data' : 'model_candidate_store'
-      return { binding: null, stage }
-    }
-
-    const scalarModels: BoundScalarModel[] = []
-    let scalarMalformed = false
-    const addScalars = (
-      path: BoundScalarModel['path'],
-      container: AnyRecord | null,
-    ): void => {
-      if (!container) return
-      for (const key of ['activeSessionId', 'currentSessionId', 'propsSessionId'] as const) {
-        const raw = container[key]
-        if (raw === null || raw === undefined) continue
-        const ref = normalizedRef(raw)
-        if (ref && (typeof raw === 'string' || typeof raw === 'number')) {
-          scalarModels.push({ container, key, path, raw, ref })
-        } else scalarMalformed = true
-      }
-    }
-    addScalars('owner', senderOwner)
-    addScalars('propsInternal', propsInternal)
-    addScalars('propsPublic', propsPublic)
-    addScalars('data', data)
-    addScalars('store', ownerStoreIM)
-    addScalars('rootStore', rootStoreIM)
-    if (scalarMalformed || scalarModels.some(({ ref }) => ref !== conversationRef)) {
-      return { binding: null, stage: 'model_scalar_conflict' }
-    }
-    if (modelEntries.length === 0) {
-      if (scalarModels.length === 0) return { binding: null, stage: 'model_scalar_absent' }
-      const independentPaths = new Set(scalarModels.map(({ path }) => path))
-      const independentContainers = new Set(scalarModels.map(({ container }) => container))
-      if (independentPaths.size < 2 || independentContainers.size < 2) {
-        const groups = [...new Set(scalarModels.map(({ path }) =>
-          path === 'owner' ? 'owner'
-            : path === 'propsInternal' || path === 'propsPublic' ? 'props'
-              : path === 'data' ? 'data' : 'store'))]
-        const stage: MainSendSurfaceStage = groups.length !== 1
-          ? 'model_scalar_multiple'
-          : groups[0] === 'owner' ? 'model_scalar_owner'
-            : groups[0] === 'props' ? 'model_scalar_props'
-              : groups[0] === 'data' ? 'model_scalar_data' : 'model_scalar_store'
-        return { binding: null, stage }
-      }
-    }
-    let modelPeer: string | null = null
-    if (modelEntries.length > 0) {
-      const modelIdentities = modelEntries.map(({ model }) => ({
-        ref: normalizedRef(model.sessionId),
-        peer: normalizedRef(model.peerPartnerId),
-      }))
-      if (modelIdentities.some(({ ref, peer }) => ref !== conversationRef || !peer)) {
-        return { binding: null, stage: 'model_target_mismatch' }
-      }
-      const modelPeers = [...new Set(modelIdentities.map(({ peer }) => peer as string))]
-      if (modelPeers.length !== 1) return { binding: null, stage: 'model_slot_ambiguous' }
-      modelPeer = modelPeers[0]
-    }
-    const engine = asRecord(w.imEngine)
-    const engineTargets = (Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : [])
-      .filter((session) => normalizedRef(session.sessionId) === conversationRef)
-    const enginePeer = engineTargets.length === 1
-      ? normalizedRef(engineTargets[0].peerPartnerId)
-      : null
-    if (engineTargets.length !== 1 || !enginePeer || (modelPeer !== null && enginePeer !== modelPeer)) {
-      return { binding: null, stage: 'engine_target_mismatch' }
-    }
-
-    // 有关联 form 时只接受显式 type=button,避免原生默认 submit 成为第二副作用。
-    let buttonFormSafe = false
-    try {
-      buttonFormSafe = button.form === null ||
-        String(button.getAttribute('type') ?? '').trim().toLowerCase() === 'button'
-    } catch {
-      buttonFormSafe = false
-    }
-    if (!buttonFormSafe) return { binding: null, stage: 'button_form_unsafe' }
-
-    // root vnode 必须精确指向当前 DOM button,其 DOM click listener
-    // 经 wrapper 解开后必须唯一;不解析任意 JS 源码。
-    const rootVNode = asRecord(buttonOwner._vnode)
-    const rootOn = asRecord(asRecord(rootVNode?.data)?.on)
-    if (!rootVNode || rootVNode.elm !== button || !rootOn) {
-      return { binding: null, stage: 'button_vnode_missing' }
-    }
-    const domHandler = unwrapSingleListener(rootOn.click)
-    if (!domHandler) return { binding: null, stage: 'button_dom_listener_ambiguous' }
-    // 自定义 click 的运行时 `_events` 与 component placeholder `$vnode`
-    // 必须经 wrapper 解开后唯一地落到同一个 Sender handler。
-    const eventHandler = unwrapSingleListener(asRecord(buttonOwner._events)?.click)
-    const placeholderListeners = asRecord(asRecord(asRecord(buttonOwner.$vnode)?.componentOptions)?.listeners)
-    const vnodeHandler = unwrapSingleListener(placeholderListeners?.click)
-    if (!eventHandler || !vnodeHandler) return { binding: null, stage: 'sender_listener_ambiguous' }
-    if (eventHandler !== vnodeHandler) return { binding: null, stage: 'sender_listener_mismatch' }
-    return {
-      binding: {
-        senderOwner,
-        currentSessionModel: modelEntries.find(({ key }) => key === 'currentSession')?.model ?? null,
-        propsSessionModel: modelEntries.find(({ key }) => key === 'propsSession')?.model ?? null,
-        scalarModels,
-        buttonOwner,
-        senderHandler: eventHandler,
-        domHandler,
-      },
-      stage: 'ok',
-    }
   }
   const selected = new URL(location.href).searchParams.get('sessionId') === conversationRef
   const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
@@ -2070,17 +1655,14 @@ async function mainInspectSendSurface(conversationRef: string): Promise<MainSend
   const wrapper = composers.length === 1
     ? composers[0].closest<HTMLElement>('.im-sender__input-wrapper')
     : null
-  // 左侧列表的 `is-active` 是在线状态样式，不是选中会话证据。发送目标只由
-  // 当前 route 与唯一可见 detail 内的 sender 因果绑定共同证明。
+  // 左侧列表的 `is-active` 是在线状态样式，不是选中会话证据。此诊断只确认
+  // 当前 route 以及唯一可见 detail 内控件的 DOM containment，不证明平台内部接线。
   const sameWrapper = detail !== null && visibleDetails.length === 1 && visibleDetails[0] === detail &&
     wrapper !== null && buttons.length === 1 &&
     buttons[0].closest('.im-session-detail') === detail &&
     buttons[0].closest('.im-sender__input-wrapper') === wrapper
-  const bindingInspection = sameWrapper
-    ? componentEvidenceForSurface(composers[0], buttons[0], wrapper as HTMLElement, detail as HTMLElement)
-    : null
-  const binding = bindingInspection?.binding ?? null
-  const composerBindingResolved = binding !== null
+  const buttonFormSafe = buttons.length === 1 &&
+    (buttons[0].form === null || buttons[0].type === 'button')
   const diagnosticStage: MainSendSurfaceStage = !selected
     ? 'route_target_missing'
     : composers.length !== 1
@@ -2094,7 +1676,10 @@ async function mainInspectSendSurface(conversationRef: string): Promise<MainSend
           ? 'wrapper_mismatch'
           : buttons.length !== 1
             ? 'button_count'
-            : bindingInspection?.stage ?? 'wrapper_mismatch'
+            : !buttonFormSafe
+              ? 'button_form_unsafe'
+              : 'ok'
+  const composerBindingResolved = diagnosticStage === 'ok' && sameWrapper
   return {
     selected,
     composerBindingResolved,
@@ -2106,8 +1691,80 @@ async function mainInspectSendSurface(conversationRef: string): Promise<MainSend
   }
 }
 
+// debug 只确认当前 live timeline 能被单次同步投影，不读取
+// imEngine/session/peer，也不复用生产 baseline 的目标绑定守卫。
+function mainInspectSendTimeline(conversationRef: string): boolean {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const timelineSlot = (root: AnyRecord): unknown | null => {
+    const store = asRecord(root.$store)
+    const state = asRecord(store?.state)
+    const im = asRecord(state?.im)
+    const timelineMap = asRecord(im?.timelineMap)
+    if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+    const entry = asRecord(timelineMap[conversationRef])
+    if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline')) return null
+    return entry.timeline === null || entry.timeline === undefined ? null : entry.timeline
+  }
+  const resolveTimeline = (): unknown | null => {
+    const nuxt = asRecord(w.$nuxt)
+    const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+    if (nuxtRoot) {
+      const timeline = timelineSlot(nuxtRoot)
+      if (timeline !== null) return timeline
+    }
+    const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+    if (timelines.length !== 1) return null
+    let current: HTMLElement | null = timelines[0]
+    for (let depth = 0; current && depth < 64; depth += 1) {
+      const holder = current as HTMLElement & { __vue__?: unknown }
+      if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+        const owner = asRecord(holder.__vue__)
+        const root = asRecord(owner?.$root)
+        if (root) {
+          const timeline = timelineSlot(root)
+          if (timeline !== null) return timeline
+        }
+      }
+      current = current.parentElement
+    }
+    return null
+  }
+
+  try {
+    const source = resolveTimeline()
+    if (!Array.isArray(source) || source.length > 4096) return false
+    const rows: Array<{ idServer: string; time: number; sourceIndex: number }> = []
+    for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex += 1) {
+      const row = asRecord(source[sourceIndex])
+      if (!row) return false
+      const idServer = String(row.idServer ?? '').trim()
+      const time = Number(row.time)
+      if (!idServer || !Number.isFinite(time) || time <= 0) return false
+      rows.push({ idServer, time, sourceIndex })
+    }
+    rows.sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const projected = rows.filter((row) => {
+      if (seen.has(row.idServer)) return false
+      seen.add(row.idServer)
+      return true
+    }).slice(-64)
+    return projected.length <= 64
+  } catch {
+    return false
+  }
+}
+
 // 只读诊断包装器只输出协议收编的粗粒度阶段码。会话标识和草稿只在本函数
-// 内参与两次采样，任何页面值、异常或细粒度实现线索都不会越过返回边界。
+// 内参与当前单次读取，任何页面值、异常或细粒度实现线索都不会越过返回边界。
 export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspectSendSurfaceData> {
   const unavailable = (): DebugInspectSendSurfaceData => ({
     ready: false,
@@ -2121,15 +1778,6 @@ export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspec
     typeof value.composerValue === 'string' &&
     Number.isSafeInteger(value.sendButtonCount) && value.sendButtonCount >= 0 &&
     Object.prototype.hasOwnProperty.call(SEND_SURFACE_STAGE_TO_DIAGNOSTIC, value.diagnosticStage)
-  const sameSnapshot = (left: MainSendSurfaceResult, right: MainSendSurfaceResult): boolean =>
-    left.selected === right.selected &&
-    left.composerBindingResolved === right.composerBindingResolved &&
-    left.composerBindingMatched === right.composerBindingMatched &&
-    left.composerCount === right.composerCount &&
-    left.composerValue === right.composerValue &&
-    left.sendButtonCount === right.sendButtonCount &&
-    left.diagnosticStage === right.diagnosticStage
-
   try {
     const tab = await canonicalZhilianTab()
     if (!tab || tab.id === undefined || pageKindFromURL(tab.url) !== 'im') {
@@ -2138,29 +1786,15 @@ export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspec
     const conversationRef = new URL(tab.url as string).searchParams.get('sessionId')?.trim() ?? ''
     if (!conversationRef) return { ready: false, stage: 'route_missing' }
 
-    const first = await runMain(tab.id, mainInspectSendSurface, [conversationRef])
-    const second = await runMain(tab.id, mainInspectSendSurface, [conversationRef])
-    if (!validSnapshot(first) || !validSnapshot(second)) return unavailable()
-    if (!sameSnapshot(first, second)) return { ready: false, stage: 'unstable' }
-    if (first.composerValue !== '') return { ready: false, stage: 'draft_present' }
+    const snapshot = await runMain(tab.id, mainInspectSendSurface, [conversationRef])
+    if (!validSnapshot(snapshot)) return unavailable()
+    if (snapshot.composerValue !== '') return { ready: false, stage: 'draft_present' }
 
-    const surfaceStage = SEND_SURFACE_STAGE_TO_DIAGNOSTIC[first.diagnosticStage]
+    const surfaceStage = SEND_SURFACE_STAGE_TO_DIAGNOSTIC[snapshot.diagnosticStage]
     if (surfaceStage !== 'ready') return { ready: false, stage: surfaceStage }
 
-    let rawBaseline: MainSendBaselineResult
-    try {
-      rawBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
-        conversationRef,
-        [],
-      ])
-    } catch {
-      return { ready: false, stage: 'baseline_unexpected' }
-    }
-    const baseline = validatedMainSendBaseline(rawBaseline)
-    if (!baseline) return { ready: false, stage: 'baseline_unexpected' }
-    if (baseline.status === 'failed') {
-      return { ready: false, stage: SEND_BASELINE_STAGE_TO_DIAGNOSTIC[baseline.stage] }
-    }
+    const timelineAvailable = await runMain(tab.id, mainInspectSendTimeline, [conversationRef])
+    if (timelineAvailable !== true) return { ready: false, stage: 'thread_unavailable' }
     return { ready: true, stage: 'ready' }
   } catch {
     return unavailable()
@@ -2543,8 +2177,8 @@ function mainClickConversationOnce(
 }
 
 // 发送基线不调用 history API，也不复用 chat.readThread 的 API/DOM/SSR 混合回退。
-// 两份样本只来自当前唯一 Vue root 的实时 Vuex timelineMap；第一份必须在 250ms
-// 本地稳定窗前深值投影，避免页面在等待期间原地改写旧样本。
+// 每次只选择一个实时 Vuex timelineMap 通道：优先 $nuxt；该通道没有目标槽时，
+// 才从唯一可见时间线容器的祖先 Vue root 兜底，不取两根互证。
 async function mainCaptureSendBaseline(
   conversationRef: string,
   expectedTail: ZhilianMessageAnchor[],
@@ -2565,6 +2199,11 @@ async function mainCaptureSendBaseline(
     const w = window as unknown as AnyRecord
     const asRecord = (value: unknown): AnyRecord | null =>
       value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+    const visible = (element: Element): boolean => {
+      const node = element as HTMLElement
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+    }
     const engine = asRecord(w.imEngine)
     if (!engine) return failed('engine_unavailable')
     const clean = (value: unknown): string => String(value ?? '')
@@ -2592,18 +2231,6 @@ async function mainCaptureSendBaseline(
     const session = sessionMatches.length === 1 ? sessionMatches[0] : undefined
     const target = clean(session?.peerPartnerId)
     if (!session || !target) return failed('session_unavailable')
-    const sessionProjection = (value: AnyRecord | undefined): string | null => {
-      if (!value || clean(value.sessionId) !== conversationRef || clean(value.peerPartnerId) !== target) return null
-      return JSON.stringify([
-        clean(value.sessionId),
-        clean(value.peerPartnerId),
-        value.sortTime ?? null,
-        value.modifiedTime ?? null,
-        value.lastSentence ?? null,
-      ])
-    }
-    const initialSessionProjection = sessionProjection(session)
-    if (!initialSessionProjection) return failed('session_unavailable')
     let initialState: AnyRecord | null | undefined
     const readInitialState = (): AnyRecord | null => {
       if (initialState !== undefined) return initialState
@@ -2652,55 +2279,33 @@ async function mainCaptureSendBaseline(
       }
       return { present: true, value: entry.timeline }
     }
-    const resolveLiveTimeline = (): { root: AnyRecord; value: unknown } | null => {
-      const normalizeRoot = (value: unknown): AnyRecord | null => {
-        const candidate = asRecord(value)
-        if (!candidate) return null
-        const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
-        if (!root || root.$root !== root) return null
-        if (root._isDestroyed === true || root._isBeingDestroyed === true) return null
-        const rootElement = asRecord(root.$el)
-        if (rootElement && rootElement.isConnected === false) return null
-        return root
+    const resolveLiveTimeline = (): unknown | null => {
+      const nuxt = asRecord(w.$nuxt)
+      const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+      if (nuxtRoot) {
+        const store = asRecord(nuxtRoot.$store)
+        const state = asRecord(store?.state)
+        const slot = timelineSlot(asRecord(state?.im))
+        if (slot.present && slot.value !== null && slot.value !== undefined) return slot.value
       }
-      const nuxtValue = w.$nuxt
-      const nuxtRoot = normalizeRoot(nuxtValue)
-      if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
-
-      // $nuxt 可能是 root 本身，也可能是 {$root: root} wrapper。
-      // 无论哪种形态，当前发送 surface 的 DOM owner 只要可观测，
-      // 就必须与该候选收敛到同一个存活 self-root。
-      const ownerRoots = new Set<AnyRecord>()
-      if (typeof document.querySelectorAll === 'function') {
-        const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-          '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
-        ))
-        const visited = new Set<HTMLElement>()
-        for (const node of nodes) {
-          let current: HTMLElement | null = node
-          for (let depth = 0; current && depth < 64; depth += 1) {
-            if (!visited.has(current)) {
-              visited.add(current)
-              const holder = current as HTMLElement & { __vue__?: unknown }
-              if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
-                const ownerRoot = normalizeRoot(holder.__vue__)
-                if (!ownerRoot) return null
-                ownerRoots.add(ownerRoot)
-              }
-            }
-            current = current.parentElement
+      const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+      if (timelines.length !== 1) return null
+      let current: HTMLElement | null = timelines[0]
+      for (let depth = 0; current && depth < 64; depth += 1) {
+        const holder = current as HTMLElement & { __vue__?: unknown }
+        if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+          const owner = asRecord(holder.__vue__)
+          const root = asRecord(owner?.$root)
+          if (root) {
+            const store = asRecord(root.$store)
+            const state = asRecord(store?.state)
+            const slot = timelineSlot(asRecord(state?.im))
+            if (slot.present && slot.value !== null && slot.value !== undefined) return slot.value
           }
         }
+        current = current.parentElement
       }
-      if (ownerRoots.size > 1) return null
-      const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
-      if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
-      const root = nuxtRoot ?? ownerRoot
-      if (!root) return null
-      const store = asRecord(root.$store)
-      const state = asRecord(store?.state)
-      const slot = timelineSlot(asRecord(state?.im))
-      return slot.present ? { root, value: slot.value } : null
+      return null
     }
     const snapshotContent = (value: unknown): string => {
       if (typeof value === 'string') return value
@@ -2814,12 +2419,6 @@ async function mainCaptureSendBaseline(
       }
       return true
     }
-    const hashPattern = /^[0-9a-f]{64}$/u
-    if (!Array.isArray(expectedTail) || expectedTail.length > 5 || expectedTail.some((anchor) =>
-      !anchor || !['in', 'out', 'system'].includes(anchor.direction) ||
-      typeof anchor.contentHash !== 'string' || !hashPattern.test(anchor.contentHash))) {
-      return failed('unexpected')
-    }
     const runtimeSession = asRecord(w.$session)
     const runtimeStaff = asRecord(runtimeSession?.staff)
     let staffID = clean(runtimeStaff?.staffId)
@@ -2829,67 +2428,28 @@ async function mainCaptureSendBaseline(
     }
     if (expectedTail.length > 0 && !staffID) return failed('history_first_unavailable')
 
-    // 第一份在任何 await 之前完整投影。250ms 只是同一实时 store 的本地稳定窗，
-    // 不是 history API cooldown；发送生命周期不会调用 getHistoryMsgs。
-    const firstSource = resolveLiveTimeline()
-    if (!firstSource) return failed('history_first_unavailable')
-    const completeFirst = projectRows(firstSource.value)
-    if (!completeFirst) return failed('history_first_unavailable')
-    const first = stableWindow(completeFirst)
-
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    if (!routeMatches()) return failed('route_changed')
-    const midSessions = (Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
-    const midMatches = midSessions.filter((item) => clean(item.sessionId) === conversationRef)
-    const midSession = midMatches.length === 1 ? midMatches[0] : undefined
-    if (sessionProjection(midSession) !== initialSessionProjection) return failed('session_changed')
-
-    const secondSource = resolveLiveTimeline()
-    if (!secondSource) return failed('history_second_unavailable')
-    if (secondSource.root !== firstSource.root) return failed('history_unstable')
-    const completeSecond = projectRows(secondSource.value)
-    if (!completeSecond) return failed('history_second_unavailable')
-    const second = stableWindow(completeSecond)
-
-    const firstServerIDs = first.map((row) => row.idServer)
-    const secondServerIDs = second.map((row) => row.idServer)
-    const secondServerIDSet = new Set(secondServerIDs)
-    if (firstServerIDs.some((id) => !secondServerIDSet.has(id))) {
-      return failed('guard_snapshot_uncovered')
-    }
-    if (firstServerIDs.length !== secondServerIDs.length ||
-        firstServerIDs.some((id, index) => secondServerIDs[index] !== id)) return failed('history_unstable')
-    let firstTailMatches: boolean
-    let secondTailMatches: boolean
+    const source = resolveLiveTimeline()
+    if (!source) return failed('history_first_unavailable')
+    const complete = projectRows(source)
+    if (!complete) return failed('history_first_unavailable')
+    const snapshot = stableWindow(complete)
+    let snapshotTailMatches: boolean
     try {
-      firstTailMatches = await tailMatches(first, staffID)
-      secondTailMatches = await tailMatches(second, staffID)
+      snapshotTailMatches = await tailMatches(snapshot, staffID)
     } catch {
       return failed('hash_unavailable')
     }
-    if (!firstTailMatches || !secondTailMatches) return failed('guard_snapshot_uncovered')
+    if (!snapshotTailMatches) return failed('guard_snapshot_uncovered')
 
     const keys: string[] = []
     try {
-      for (const row of second) keys.push(await digest(`source-v1|${row.idServer}`))
+      for (const row of snapshot) keys.push(await digest(`source-v1|${row.idServer}`))
     } catch {
       return failed('hash_unavailable')
     }
 
-    if (!routeMatches()) return failed('route_changed')
-
-    const currentSessions = (Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
-    const currentMatches = currentSessions.filter((item) => clean(item.sessionId) === conversationRef)
-    const currentSession = currentMatches.length === 1 ? currentMatches[0] : undefined
-    const finalSessionProjection = sessionProjection(currentSession)
-    if (!finalSessionProjection || finalSessionProjection !== initialSessionProjection) {
-      return failed('session_changed')
-    }
-
-    let sessionVersionToken: string
     let targetBindingToken: string
     try {
-      sessionVersionToken = await digest(initialSessionProjection)
       targetBindingToken = await digest(JSON.stringify([conversationRef, target]))
     } catch {
       return failed('hash_unavailable')
@@ -2898,7 +2458,6 @@ async function mainCaptureSendBaseline(
       status: 'ready',
       stage: 'ready',
       serverSourceKeys: keys,
-      sessionVersionToken,
       targetBindingToken,
     }
   } catch {
@@ -2906,7 +2465,7 @@ async function mainCaptureSendBaseline(
   }
 }
 
-// 点击后的成功证词与发送基线同源：只读当前唯一 Vue root 的实时 Vuex timeline。
+// 点击后的成功证词与发送基线同源：每次只读同一选择规则得到的实时 Vuex timeline。
 // 全源任一行缺 server id 都闭锁；排序、首 ID 去重、last64 后才排除 baseline，
 // 防止窗口外旧同文被误认成这次发送。函数绝不调用 history API。
 async function mainObserveStableOutbound(
@@ -2919,6 +2478,11 @@ async function mainObserveStableOutbound(
   const w = window as unknown as AnyRecord
   const asRecord = (value: unknown): AnyRecord | null =>
     value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
   const clean = (value: unknown): string => String(value ?? '')
     .normalize('NFC')
     .replace(/\u00a0/gu, ' ')
@@ -2959,50 +2523,31 @@ async function mainObserveStableOutbound(
       if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
       const entry = asRecord(timelineMap[conversationRef])
       if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline')) return null
-      return entry.timeline
+      return entry.timeline === null || entry.timeline === undefined ? null : entry.timeline
     }
     const resolveLiveTimeline = (): unknown | null => {
-      const normalizeRoot = (value: unknown): AnyRecord | null => {
-        const candidate = asRecord(value)
-        if (!candidate) return null
-        const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
-        if (!root || root.$root !== root) return null
-        if (root._isDestroyed === true || root._isBeingDestroyed === true) return null
-        const rootElement = asRecord(root.$el)
-        if (rootElement && rootElement.isConnected === false) return null
-        return root
+      const nuxt = asRecord(w.$nuxt)
+      const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+      if (nuxtRoot) {
+        const timeline = timelineSlot(nuxtRoot)
+        if (timeline !== null) return timeline
       }
-      const nuxtValue = w.$nuxt
-      const nuxtRoot = normalizeRoot(nuxtValue)
-      if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
-      const ownerRoots = new Set<AnyRecord>()
-      if (typeof document.querySelectorAll === 'function') {
-        const nodes = Array.from(document.querySelectorAll<HTMLElement>(
-          '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
-        ))
-        const visited = new Set<HTMLElement>()
-        for (const node of nodes) {
-          let current: HTMLElement | null = node
-          for (let depth = 0; current && depth < 64; depth += 1) {
-            if (!visited.has(current)) {
-              visited.add(current)
-              const holder = current as HTMLElement & { __vue__?: unknown }
-              if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
-                const ownerRoot = normalizeRoot(holder.__vue__)
-                if (!ownerRoot) return null
-                ownerRoots.add(ownerRoot)
-              }
-            }
-            current = current.parentElement
+      const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+      if (timelines.length !== 1) return null
+      let current: HTMLElement | null = timelines[0]
+      for (let depth = 0; current && depth < 64; depth += 1) {
+        const holder = current as HTMLElement & { __vue__?: unknown }
+        if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+          const owner = asRecord(holder.__vue__)
+          const root = asRecord(owner?.$root)
+          if (root) {
+            const timeline = timelineSlot(root)
+            if (timeline !== null) return timeline
           }
         }
+        current = current.parentElement
       }
-      if (ownerRoots.size > 1) return null
-      const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
-      if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
-      const root = nuxtRoot ?? ownerRoot
-      if (!root) return null
-      return timelineSlot(root)
+      return null
     }
     const rawRows = resolveLiveTimeline()
     if (!Array.isArray(rawRows) || rawRows.length > 4096) return failed()
@@ -3125,9 +2670,7 @@ async function mainObserveStableOutbound(
 function mainSendMessageOnce(
   conversationRef: string,
   text: string,
-  textHash: string,
   expectedTail: ZhilianMessageAnchor[],
-  expectedSessionVersionToken: string,
   expectedPrincipalFingerprint: string,
   irreversibleNotAfterMs: number,
   expectedBaselineServerSourceKeys: string[],
@@ -3283,75 +2826,6 @@ function mainSendMessageOnce(
     const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
     return pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
   }
-  type AnyFunction = (...args: unknown[]) => unknown
-  interface BoundScalarModel {
-    container: AnyRecord
-    key: 'activeSessionId' | 'currentSessionId' | 'propsSessionId'
-    path: 'owner' | 'propsInternal' | 'propsPublic' | 'data' | 'store' | 'rootStore'
-    raw: string | number
-    ref: string
-  }
-  interface SenderBinding {
-    senderOwner: AnyRecord
-    currentSessionModel: AnyRecord | null
-    propsSessionModel: AnyRecord | null
-    scalarModels: BoundScalarModel[]
-    buttonOwner: AnyRecord
-    senderHandler: AnyFunction
-    domHandler: AnyFunction
-  }
-  const componentTree = (surfaceNodes: readonly HTMLElement[]): AnyRecord[] | null => {
-    let root = asRecord(w.$nuxt)
-    if (!root) {
-      const roots = new Set<AnyRecord>()
-      const visitedNodes = new Set<HTMLElement>()
-      for (const surfaceNode of surfaceNodes) {
-        let current: HTMLElement | null = surfaceNode
-        for (let depth = 0; current && depth < 64; depth += 1) {
-          if (!visitedNodes.has(current)) {
-            visitedNodes.add(current)
-            const holder = current as HTMLElement & { __vue__?: unknown }
-            if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
-              const owner = asRecord(holder.__vue__)
-              const candidateRoot = asRecord(owner?.$root)
-              if (!owner || !candidateRoot || candidateRoot.$root !== candidateRoot) return null
-              roots.add(candidateRoot)
-            }
-          }
-          current = current.parentElement
-        }
-      }
-      if (roots.size !== 1) return null
-      root = [...roots][0]
-    }
-    const queue: AnyRecord[] = [root]
-    const seen = new Set<AnyRecord>()
-    const components: AnyRecord[] = []
-    while (queue.length > 0) {
-      const component = queue.shift()
-      if (!component || seen.has(component)) continue
-      if (seen.size >= 4096) return null
-      seen.add(component)
-      components.push(component)
-      const children = component.$children
-      if (!Array.isArray(children)) return null
-      for (const child of children) {
-        const record = asRecord(child)
-        if (!record) return null
-        queue.push(record)
-      }
-    }
-    return components
-  }
-  const normalizeLiveRoot = (value: unknown): AnyRecord | null => {
-    const candidate = asRecord(value)
-    if (!candidate) return null
-    const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
-    if (!root || root.$root !== root || root._isDestroyed === true || root._isBeingDestroyed === true) return null
-    const rootElement = asRecord(root.$el)
-    if (rootElement && rootElement.isConnected === false) return null
-    return root
-  }
   interface ActionSnapshotRow {
     idServer: string
     status: string
@@ -3369,52 +2843,46 @@ function mainSendMessageOnce(
     return serialized === undefined ? String(value) : serialized
   }
   const liveTimelineProjection = (): {
-    root: AnyRecord
     sourceKeys: string[]
     windowRows: ActionSnapshotRow[]
   } | null => {
-    const nuxtValue = w.$nuxt
-    const nuxtRoot = normalizeLiveRoot(nuxtValue)
-    if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
-
-    const ownerRoots = new Set<AnyRecord>()
-    const surfaceNodes = Array.from(document.querySelectorAll<HTMLElement>(
-      '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
-    ))
-    const visitedNodes = new Set<HTMLElement>()
-    for (const surfaceNode of surfaceNodes) {
-      let current: HTMLElement | null = surfaceNode
+    const timelineSlot = (root: AnyRecord): unknown | null => {
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
+          entry.timeline === null || entry.timeline === undefined) return null
+      return entry.timeline
+    }
+    let timeline: unknown | null = null
+    const nuxt = asRecord(w.$nuxt)
+    const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+    if (nuxtRoot) timeline = timelineSlot(nuxtRoot)
+    if (timeline === null) {
+      const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+      if (timelines.length !== 1) return null
+      let current: HTMLElement | null = timelines[0]
       for (let depth = 0; current && depth < 64; depth += 1) {
-        if (!visitedNodes.has(current)) {
-          visitedNodes.add(current)
-          const holder = current as HTMLElement & { __vue__?: unknown }
-          if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
-            const ownerRoot = normalizeLiveRoot(holder.__vue__)
-            if (!ownerRoot) return null
-            ownerRoots.add(ownerRoot)
+        const holder = current as HTMLElement & { __vue__?: unknown }
+        if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+          const owner = asRecord(holder.__vue__)
+          const root = asRecord(owner?.$root)
+          if (root) {
+            timeline = timelineSlot(root)
+            if (timeline !== null) break
           }
         }
         current = current.parentElement
       }
     }
-    if (ownerRoots.size > 1) return null
-    const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
-    if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
-    const root = nuxtRoot ?? ownerRoot
-    if (!root) return null
-
-    const store = asRecord(root.$store)
-    const state = asRecord(store?.state)
-    const im = asRecord(state?.im)
-    const timelineMap = asRecord(im?.timelineMap)
-    if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
-    const entry = asRecord(timelineMap[conversationRef])
-    if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
-        !Array.isArray(entry.timeline) || entry.timeline.length > 4096) return null
+    if (!Array.isArray(timeline) || timeline.length > 4096) return null
 
     const rows: ActionSnapshotRow[] = []
-    for (let sourceIndex = 0; sourceIndex < entry.timeline.length; sourceIndex += 1) {
-      const row = asRecord(entry.timeline[sourceIndex])
+    for (let sourceIndex = 0; sourceIndex < timeline.length; sourceIndex += 1) {
+      const row = asRecord(timeline[sourceIndex])
       if (!row) return null
       const idServer = clean(row.idServer)
       const time = Number(row.time)
@@ -3442,7 +2910,6 @@ function mainSendMessageOnce(
     const windowStart = Math.max(0, orderedRows.length - 64)
     const windowRows = orderedRows.slice(windowStart)
     return {
-      root,
       sourceKeys: windowRows.map((row) => digest(`source-v1|${row.idServer}`)),
       windowRows,
     }
@@ -3522,236 +2989,13 @@ function mainSendMessageOnce(
       return actual !== null && actual.direction === expected.direction && actual.contentHash === expected.contentHash
     })
   }
-  const baselineState = (binding: SenderBinding): 'match' | 'unresolved' | 'changed' => {
-    const hashPattern = /^[0-9a-f]{64}$/u
-    if (!Array.isArray(expectedBaselineServerSourceKeys) || expectedBaselineServerSourceKeys.length > 64 ||
-        expectedBaselineServerSourceKeys.some((key) => typeof key !== 'string' || !hashPattern.test(key)) ||
-        new Set(expectedBaselineServerSourceKeys).size !== expectedBaselineServerSourceKeys.length ||
-        !Array.isArray(expectedTail) || expectedTail.length > 5 || expectedTail.some((anchor) =>
-          !anchor || !['in', 'out', 'system'].includes(anchor.direction) ||
-          typeof anchor.contentHash !== 'string' || !hashPattern.test(anchor.contentHash))) {
-      return 'unresolved'
-    }
-    const bindingRoot = normalizeLiveRoot(binding.senderOwner)
+  const baselineState = (): 'match' | 'unresolved' | 'changed' => {
     const actual = liveTimelineProjection()
-    if (!bindingRoot || !actual) return 'unresolved'
-    if (actual.root !== bindingRoot || actual.sourceKeys.length !== expectedBaselineServerSourceKeys.length ||
+    if (!actual) return 'unresolved'
+    if (actual.sourceKeys.length !== expectedBaselineServerSourceKeys.length ||
         actual.sourceKeys.some((key, index) => key !== expectedBaselineServerSourceKeys[index])) return 'changed'
     const tailMatches = liveTailMatches(actual.windowRows)
     return tailMatches === null ? 'unresolved' : tailMatches ? 'match' : 'changed'
-  }
-  const connected = (value: unknown): value is HTMLElement =>
-    value !== null && typeof value === 'object' &&
-    (value as { isConnected?: unknown }).isConnected === true
-  const liveComponent = (component: AnyRecord): boolean =>
-    component._isDestroyed !== true && component._isBeingDestroyed !== true &&
-    component._inactive !== true && component.$destroyed !== true && connected(component.$el)
-  const unwrapSingleListener = (value: unknown): AnyFunction | null => {
-    let current = value
-    const seen = new Set<unknown>()
-    for (let depth = 0; depth < 12; depth += 1) {
-      if (Array.isArray(current)) {
-        if (current.length !== 1) return null
-        current = current[0]
-        continue
-      }
-      if (typeof current !== 'function' || seen.has(current)) return null
-      seen.add(current)
-      const wrapped = (current as unknown as { fns?: unknown }).fns
-      if (wrapped !== undefined) {
-        current = wrapped
-        continue
-      }
-      return current as AnyFunction
-    }
-    return null
-  }
-  const componentEvidenceForSurface = (
-    composer: HTMLElement,
-    button: HTMLButtonElement,
-    wrapper: HTMLElement,
-    detail: HTMLElement,
-  ): SenderBinding | null => {
-    const senderRoot = wrapper.closest<HTMLElement>('.im-sender')
-    if (!senderRoot || !detail.contains(senderRoot) ||
-        !wrapper.contains(composer) || !wrapper.contains(button) ||
-        !senderRoot.contains(composer) || !senderRoot.contains(button) ||
-        !connected(detail) || !connected(wrapper) || !connected(senderRoot) ||
-        !connected(composer) || !connected(button)) return null
-    const components = componentTree([detail, senderRoot, wrapper, composer, button])
-    if (!components) return null
-    const senderOwners = components.filter((component) => component.$el === senderRoot)
-    if (senderOwners.length !== 1 || !liveComponent(senderOwners[0])) return null
-    const senderOwner = senderOwners[0]
-    const belongsToSender = (component: AnyRecord): boolean => {
-      let current: AnyRecord | null = component
-      const parents = new Set<AnyRecord>()
-      while (current && parents.size < 64) {
-        if (!liveComponent(current)) return false
-        if (current === senderOwner) return true
-        if (parents.has(current)) return false
-        parents.add(current)
-        current = asRecord(current.$parent)
-      }
-      return false
-    }
-    const buttonOwners = components.filter((component) => component.$el === button)
-    if (buttonOwners.length !== 1 || !belongsToSender(buttonOwners[0])) return null
-    const buttonOwner = buttonOwners[0]
-    const composerOwned = components.some((component) => {
-      const element = component.$el as HTMLElement | undefined
-      return element !== undefined && element !== senderRoot &&
-        typeof element.contains === 'function' && senderRoot.contains(element) &&
-        element.contains(composer) && belongsToSender(component)
-    })
-    if (!composerOwned) return null
-
-    let containerMalformed = false
-    const optionalContainer = (value: unknown): AnyRecord | null => {
-      if (value === null || value === undefined) return null
-      const record = asRecord(value)
-      if (!record) containerMalformed = true
-      return record
-    }
-    const propsInternal = optionalContainer(senderOwner._props)
-    const propsPublic = optionalContainer(senderOwner.$props)
-    const data = optionalContainer(senderOwner.$data)
-    const ownerStore = optionalContainer(senderOwner.$store)
-    const ownerStoreStateRaw = ownerStore?.state
-    if (ownerStore && (ownerStoreStateRaw === null || ownerStoreStateRaw === undefined)) containerMalformed = true
-    const ownerStoreState = ownerStore ? optionalContainer(ownerStoreStateRaw) : null
-    const ownerStoreIM = optionalContainer(ownerStoreState?.im)
-    const senderRootModel = optionalContainer(senderOwner.$root)
-    const rootStore = optionalContainer(senderRootModel?.$store)
-    const rootStoreStateRaw = rootStore?.state
-    if (rootStore && (rootStoreStateRaw === null || rootStoreStateRaw === undefined)) containerMalformed = true
-    const rootStoreState = rootStore ? optionalContainer(rootStoreStateRaw) : null
-    const rootStoreIM = optionalContainer(rootStoreState?.im)
-    if (containerMalformed) return null
-    const modelEntries: Array<{
-      key: 'currentSession' | 'propsSession'
-      model: AnyRecord
-    }> = []
-    let directModelMalformed = false
-    for (const key of ['currentSession', 'propsSession'] as const) {
-      const raw = senderOwner[key]
-      if (raw === null || raw === undefined) continue
-      const model = asRecord(raw)
-      if (!model) directModelMalformed = true
-      else modelEntries.push({ key, model })
-    }
-    if (directModelMalformed) return null
-    const alternativeObjectModels: AnyRecord[] = []
-    const seenAlternativeModels = new Set<AnyRecord>()
-    let alternativeObjectMalformed = false
-    const addAlternativeModels = (container: AnyRecord | null): void => {
-      if (!container) return
-      for (const key of ['currentSession', 'propsSession'] as const) {
-        const raw = container[key]
-        if (raw === null || raw === undefined) continue
-        const model = asRecord(raw)
-        if (!model) {
-          alternativeObjectMalformed = true
-          continue
-        }
-        if (seenAlternativeModels.has(model)) continue
-        seenAlternativeModels.add(model)
-        alternativeObjectModels.push(model)
-      }
-    }
-    addAlternativeModels(propsInternal)
-    addAlternativeModels(propsPublic)
-    addAlternativeModels(data)
-    addAlternativeModels(ownerStoreIM)
-    addAlternativeModels(rootStoreIM)
-    if (alternativeObjectMalformed || alternativeObjectModels.length > 0) return null
-
-    const scalarModels: BoundScalarModel[] = []
-    let scalarMalformed = false
-    const addScalars = (
-      path: BoundScalarModel['path'],
-      container: AnyRecord | null,
-    ): void => {
-      if (!container) return
-      for (const key of ['activeSessionId', 'currentSessionId', 'propsSessionId'] as const) {
-        const raw = container[key]
-        if (raw === null || raw === undefined) continue
-        const ref = normalizeIdentityPart(raw)
-        if (ref && (typeof raw === 'string' || typeof raw === 'number')) {
-          scalarModels.push({ container, key, path, raw, ref })
-        } else scalarMalformed = true
-      }
-    }
-    addScalars('owner', senderOwner)
-    addScalars('propsInternal', propsInternal)
-    addScalars('propsPublic', propsPublic)
-    addScalars('data', data)
-    addScalars('store', ownerStoreIM)
-    addScalars('rootStore', rootStoreIM)
-    if (scalarMalformed || scalarModels.some(({ ref }) => ref !== conversationRef)) return null
-    if (modelEntries.length === 0 && (scalarModels.length === 0 ||
-        new Set(scalarModels.map(({ path }) => path)).size < 2 ||
-        new Set(scalarModels.map(({ container }) => container)).size < 2)) return null
-    let modelPeer: string | null = null
-    if (modelEntries.length > 0) {
-      const modelIdentities = modelEntries.map(({ model }) => ({
-        ref: normalizeIdentityPart(model.sessionId),
-        peer: normalizeIdentityPart(model.peerPartnerId),
-      }))
-      if (modelIdentities.some(({ ref, peer }) => ref !== conversationRef || !peer)) return null
-      const modelPeers = [...new Set(modelIdentities.map(({ peer }) => peer as string))]
-      if (modelPeers.length !== 1) return null
-      modelPeer = modelPeers[0]
-    }
-    const engine = asRecord(w.imEngine)
-    const engineTargets = (Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : [])
-      .filter((session) => normalizeIdentityPart(session.sessionId) === conversationRef)
-    const enginePeer = engineTargets.length === 1
-      ? normalizeIdentityPart(engineTargets[0].peerPartnerId)
-      : null
-    if (engineTargets.length !== 1 || !enginePeer || (modelPeer !== null && enginePeer !== modelPeer)) return null
-
-    let buttonFormSafe = false
-    try {
-      buttonFormSafe = button.form === null ||
-        String(button.getAttribute('type') ?? '').trim().toLowerCase() === 'button'
-    } catch {
-      buttonFormSafe = false
-    }
-    if (!buttonFormSafe) return null
-
-    const rootVNode = asRecord(buttonOwner._vnode)
-    const rootOn = asRecord(asRecord(rootVNode?.data)?.on)
-    if (!rootVNode || rootVNode.elm !== button || !rootOn) return null
-    const domHandler = unwrapSingleListener(rootOn.click)
-    if (!domHandler) return null
-    const eventHandler = unwrapSingleListener(asRecord(buttonOwner._events)?.click)
-    const placeholderListeners = asRecord(asRecord(asRecord(buttonOwner.$vnode)?.componentOptions)?.listeners)
-    const vnodeHandler = unwrapSingleListener(placeholderListeners?.click)
-    if (!eventHandler || !vnodeHandler || eventHandler !== vnodeHandler) return null
-    return {
-      senderOwner,
-      currentSessionModel: modelEntries.find(({ key }) => key === 'currentSession')?.model ?? null,
-      propsSessionModel: modelEntries.find(({ key }) => key === 'propsSession')?.model ?? null,
-      scalarModels,
-      buttonOwner,
-      senderHandler: eventHandler,
-      domHandler,
-    }
-  }
-  const sessionVersionToken = (): string | null => {
-    const engine = asRecord(w.imEngine)
-    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
-    const matches = sessions.filter((item) => String(item.sessionId ?? '').trim() === conversationRef)
-    const session = matches.length === 1 ? matches[0] : undefined
-    if (!session || !String(session.peerPartnerId ?? '').trim()) return null
-    return digest(JSON.stringify([
-      String(session.sessionId ?? '').trim(),
-      String(session.peerPartnerId ?? '').trim(),
-      session.sortTime ?? null,
-      session.modifiedTime ?? null,
-      session.lastSentence ?? null,
-    ]))
   }
   const targetBindingToken = (): string | null => {
     const engine = asRecord(w.imEngine)
@@ -3765,7 +3009,6 @@ function mainSendMessageOnce(
     wrapper: HTMLElement
     composer: HTMLTextAreaElement
     button: HTMLButtonElement
-    binding: SenderBinding | null
   } | null => {
     const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
     const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
@@ -3782,37 +3025,20 @@ function mainSendMessageOnce(
       .filter((element) => visible(element) && clean(element.textContent) === '发送')
     if (buttons.length !== 1 || buttons[0].closest('.im-session-detail') !== detail ||
         buttons[0].closest('.im-sender__input-wrapper') !== wrapper) return null
-    const binding = componentEvidenceForSurface(composer, buttons[0], wrapper, detail)
+    if (buttons[0].form !== null && buttons[0].type !== 'button') return null
     return {
       detail,
       wrapper,
       composer,
       button: buttons[0],
-      binding,
     }
   }
-  const sameBinding = (left: SenderBinding | null, right: SenderBinding | null): boolean => {
-    if (left === null || right === null || left.senderOwner !== right.senderOwner ||
-        left.currentSessionModel !== right.currentSessionModel ||
-        left.propsSessionModel !== right.propsSessionModel || left.buttonOwner !== right.buttonOwner ||
-        left.senderHandler !== right.senderHandler || left.domHandler !== right.domHandler ||
-        left.scalarModels.length !== right.scalarModels.length) return false
-    return left.scalarModels.every((model, index) => {
-      const other = right.scalarModels[index]
-      return other !== undefined && model.container === other.container && model.key === other.key &&
-        model.path === other.path && Object.is(model.raw, other.raw) && model.ref === other.ref
-    })
-  }
   type SendSurface = NonNullable<ReturnType<typeof surface>>
-  type BoundSendSurface = Omit<SendSurface, 'binding'> & { binding: SenderBinding }
   type SendFailureReason = NonNullable<MainSendOnceResult['reason']>
   type TextareaValueSetter = (this: HTMLTextAreaElement, value: string) => void
   type IntrinsicClick = (this: HTMLElement) => void
   interface EvaluatedSendState {
-    surface: BoundSendSurface
-    principal: string
-    versionToken: string
-    bindingToken: string
+    surface: SendSurface
     setter: TextareaValueSetter
     intrinsicClick: IntrinsicClick
   }
@@ -3820,16 +3046,10 @@ function mainSendMessageOnce(
     | { status: 'ready'; state: EvaluatedSendState }
     | { status: 'failed'; reason: SendFailureReason }
   const failedEvaluation = (reason: SendFailureReason): SendEvaluation => ({ status: 'failed', reason })
-  const sameSurface = (left: SendSurface, right: SendSurface): boolean =>
-    left.detail === right.detail && left.wrapper === right.wrapper &&
-    left.composer === right.composer && left.button === right.button
 
-  // 预检和最终点击前只允许经过这一份 evaluator。它只把 DOM 用于唯一定位发送控件与
-  // 因果绑定；消息语义唯一来自 sender owner 对应的 live Vuex 时间线。
-  const evaluate = (
-    expectedComposerValue: string,
-    previous: EvaluatedSendState | null,
-  ): SendEvaluation => {
+  // preflight、commit 输入前、commit 输入后三个检查点字面复用这一份 evaluator。
+  // DOM 只证明可见控件唯一且互相包含；消息语义只来自所选 live timeline 通道。
+  const evaluate = (expectedComposerValue: string): SendEvaluation => {
     const surfaceFailure: SendFailureReason = expectedComposerValue === ''
       ? 'composer_missing'
       : 'input_rejected'
@@ -3840,86 +3060,37 @@ function mainSendMessageOnce(
       return failedEvaluation('action_window_elapsed')
     }
     if (!currentRoute()) return failedEvaluation('route_changed')
-    if (!textHash || clean(text) === '' || digest(clean(text)) !== textHash) {
-      return failedEvaluation('input_rejected')
-    }
+    if (clean(text) === '') return failedEvaluation('input_rejected')
     const principal = principalCanonical()
-    if (!principal || digest(principal) !== expectedPrincipalFingerprint ||
-        (previous !== null && principal !== previous.principal)) {
+    if (!principal || digest(principal) !== expectedPrincipalFingerprint) {
       return failedEvaluation('identity_changed')
     }
-    const versionToken = sessionVersionToken()
-    if (!versionToken) return failedEvaluation('guard_unresolved')
-    if (versionToken !== expectedSessionVersionToken ||
-        (previous !== null && versionToken !== previous.versionToken)) {
-      return failedEvaluation('guard_changed')
-    }
     const bindingToken = targetBindingToken()
-    if (!bindingToken || !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken)) {
-      return failedEvaluation('guard_unresolved')
-    }
-    if (bindingToken !== expectedTargetBindingToken ||
-        (previous !== null && bindingToken !== previous.bindingToken)) {
-      return failedEvaluation('guard_changed')
-    }
+    if (!bindingToken) return failedEvaluation('guard_unresolved')
+    if (bindingToken !== expectedTargetBindingToken) return failedEvaluation('target_changed')
 
-    const firstSurface = surface()
-    if (!firstSurface) return failedEvaluation(surfaceFailure)
-    if (!firstSurface.binding) return failedEvaluation('composer_binding_unresolved')
-    if (previous !== null && !sameSurface(previous.surface, firstSurface)) {
-      return failedEvaluation(surfaceFailure)
-    }
-    if (previous !== null && !sameBinding(previous.surface.binding, firstSurface.binding)) {
-      return failedEvaluation('composer_binding_changed')
-    }
-    if (firstSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
-
-    // 同一同步 MAIN task 内复取一次可变对象；两次结果必须仍指向同一控件和同一绑定。
-    if (Date.now() > irreversibleNotAfterMs) return failedEvaluation('action_window_elapsed')
-    if (!currentRoute()) return failedEvaluation('route_changed')
-    if (principalCanonical() !== principal) return failedEvaluation('identity_changed')
-    if (sessionVersionToken() !== versionToken || targetBindingToken() !== bindingToken) {
-      return failedEvaluation('guard_changed')
-    }
-    const finalSurface = surface()
-    if (!finalSurface || !sameSurface(firstSurface, finalSurface) ||
-        (previous !== null && !sameSurface(previous.surface, finalSurface))) {
-      return failedEvaluation(surfaceFailure)
-    }
-    if (!finalSurface.binding) return failedEvaluation('composer_binding_unresolved')
-    if (!sameBinding(firstSurface.binding, finalSurface.binding) ||
-        (previous !== null && !sameBinding(previous.surface.binding, finalSurface.binding))) {
-      return failedEvaluation('composer_binding_changed')
-    }
-    if (finalSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
-    const currentBaselineState = baselineState(finalSurface.binding)
+    const currentSurface = surface()
+    if (!currentSurface) return failedEvaluation(surfaceFailure)
+    if (currentSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
+    const currentBaselineState = baselineState()
     if (currentBaselineState !== 'match') {
-      return failedEvaluation(currentBaselineState === 'changed' ? 'guard_changed' : 'guard_unresolved')
+      return failedEvaluation(currentBaselineState === 'changed' ? 'baseline_changed' : 'guard_unresolved')
     }
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
-      TextareaValueSetter | undefined
-    if (!setter) return failedEvaluation('input_rejected')
-    const intrinsicClick = HTMLElement.prototype.click as IntrinsicClick | undefined
-    if (typeof intrinsicClick !== 'function') return failedEvaluation('send_button_missing')
-    if (expectedComposerValue !== '' &&
-        (finalSurface.button.disabled || finalSurface.button.getAttribute('aria-disabled') === 'true')) {
-      return failedEvaluation('send_button_disabled')
-    }
+      TextareaValueSetter
+    const intrinsicClick = HTMLElement.prototype.click as IntrinsicClick
     if (Date.now() > irreversibleNotAfterMs) return failedEvaluation('action_window_elapsed')
     return {
       status: 'ready',
       state: {
-        surface: { ...finalSurface, binding: finalSurface.binding },
-        principal,
-        versionToken,
-        bindingToken,
+        surface: currentSurface,
         setter,
         intrinsicClick,
       },
     }
   }
 
-  const prepared = evaluate('', null)
+  const prepared = evaluate('')
   if (prepared.status === 'failed') return prepared
   if (phase === 'preflight') return { status: 'ready' }
 
@@ -3947,7 +3118,7 @@ function mainSendMessageOnce(
       bubbles: true, inputType: 'insertText', data: text,
     }))
     prepared.state.surface.composer.dispatchEvent(new Event('change', { bubbles: true }))
-    const finalEvaluation = evaluate(text, prepared.state)
+    const finalEvaluation = evaluate(text)
     if (finalEvaluation.status === 'failed') return failAfterInput(finalEvaluation.reason)
     const invokeClick = Function.prototype.call.bind(
       finalEvaluation.state.intrinsicClick,
@@ -4157,22 +3328,9 @@ export async function sendZhilianMessage(
   if (!expectedPrincipalFingerprint) {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
-  const tab = await verifiedIMTab(expectedPrincipalFingerprint)
+  const tab = await sendZhilianTab(args.conversationRef)
   if (tab.id === undefined) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
-  }
-  try {
-    const selected = new URL(tab.url ?? '').searchParams.get('sessionId')
-    if (selected !== args.conversationRef) {
-      throw new ZhilianPlatformError(
-        'GUARD_FAILED',
-        '发送前请先由人打开目标会话；chat.sendMessage 不自动切换会话',
-        'manualOnly',
-      )
-    }
-  } catch (error) {
-    if (error instanceof ZhilianPlatformError) throw error
-    throw new ZhilianPlatformError('CTX_NOT_READY', '无法确认当前会话路由', 'manualOnly', 'pageBroken')
   }
   const normalizedText = normalizeZhilianMessageText(args.text)
   if (!normalizedText) {
@@ -4180,9 +3338,7 @@ export async function sendZhilianMessage(
   }
   const contentHash = await sha256Hex(normalizedText)
 
-  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
-
-  // live Vuex 基线是消息语义的唯一权威；DOM 只在同一 evaluator 内定位并绑定发送控件。
+  // live Vuex 基线是消息语义的唯一权威；DOM 只在同一 evaluator 内定位发送控件。
   const rawSendBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
     args.conversationRef,
     guards.expectedTail,
@@ -4197,8 +3353,7 @@ export async function sendZhilianMessage(
     )
   }
   if (sendBaseline.status === 'failed') {
-    if (sendBaseline.stage === 'route_changed' || sendBaseline.stage === 'history_unstable' ||
-        sendBaseline.stage === 'guard_snapshot_uncovered' || sendBaseline.stage === 'session_changed') {
+    if (sendBaseline.stage === 'route_changed' || sendBaseline.stage === 'guard_snapshot_uncovered') {
       throw new ZhilianPlatformError('GUARD_FAILED', '发送基线在复核期间发生变化，拒绝发送', 'manualOnly')
     }
     throw new ZhilianPlatformError(
@@ -4213,18 +3368,17 @@ export async function sendZhilianMessage(
     if (evaluation.reason === 'composer_nonempty') {
       throw new ZhilianPlatformError('USER_ACTIVE', '发送前输入框出现人工草稿，已取消点击', 'afterRecovery')
     }
-    if (evaluation.reason === 'guard_changed') {
-      throw new ZhilianPlatformError('GUARD_FAILED', '发送前会话尾锚发生变化，已取消点击', 'manualOnly')
+    if (evaluation.reason === 'target_changed') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '发送前会话与候选人的目标绑定发生变化，已取消点击', 'manualOnly')
+    }
+    if (evaluation.reason === 'baseline_changed') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '发送前会话消息基线或尾锚发生变化，已取消点击', 'manualOnly')
     }
     if (evaluation.reason === 'route_changed') {
       throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '发送前目标会话发生切换，已取消点击', 'manualOnly')
     }
     if (evaluation.reason === 'identity_changed') {
       throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '发送前登录身份发生变化，已取消点击', 'manualOnly')
-    }
-    if (evaluation.reason === 'composer_binding_unresolved' ||
-        evaluation.reason === 'composer_binding_changed') {
-      throw new ZhilianPlatformError('GUARD_FAILED', '发送前输入框的目标会话绑定无法确证，已取消点击', 'manualOnly')
     }
     if (evaluation.reason === 'action_window_elapsed') {
       throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过，已取消点击', 'manualOnly')
@@ -4238,9 +3392,7 @@ export async function sendZhilianMessage(
   const evaluatorArgs = [
     args.conversationRef,
     args.text,
-    contentHash,
     guards.expectedTail,
-    sendBaseline.sessionVersionToken,
     expectedPrincipalFingerprint,
     ctx.irreversibleNotAfterMs,
     sendBaseline.serverSourceKeys,

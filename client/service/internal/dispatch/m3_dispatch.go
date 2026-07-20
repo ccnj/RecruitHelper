@@ -120,16 +120,6 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 		preparation.Account.IdentitySession != session || preparation.Account.IdentityBootID != bootID {
 		return nil, store.ErrAccountIdentityNotCurrent
 	}
-	if preparation.Account.ManualQuietUntil != nil && time.Now().Before(*preparation.Account.ManualQuietUntil) {
-		return nil, store.ErrManualQuietActive
-	}
-	if err := d.requireNegotiation(preparation.Account.BoundHandID, protocol.PrimChatSendMessage, meta); err != nil {
-		return nil, err
-	}
-	witness, ok := d.handWitness(preparation.Account.BoundHandID)
-	if !ok || witness.StoreID == "" {
-		return nil, ErrWitnessUnavailable
-	}
 
 	anchors := make([]protocol.MessageAnchor, len(preparation.Tail))
 	for i := range preparation.Tail {
