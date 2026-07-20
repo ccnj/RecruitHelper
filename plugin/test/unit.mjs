@@ -1848,7 +1848,10 @@ test('candidate.readCurrent MAIN 只读唯一详情并以瞬时 resume join 返�
 
 test('candidate.readCurrent MAIN 对身份、绑定与职位歧义逐项失败关闭', () => {
   const cases = [
-    ['无唯一详情', (fixture) => { fixture.state.details = [] }, 'detail_cardinality'],
+    ['没有打开详情', (fixture) => { fixture.state.details = [] }, 'detail_absent'],
+    ['同时出现多个详情', (fixture) => {
+      fixture.state.details = [fixture.state.details[0], { ...fixture.state.details[0] }]
+    }, 'detail_cardinality'],
     ['来源私有通道缺失', (fixture) => { delete fixture.state.items[0].__vue__ }, 'list_source_unavailable'],
     ['resume 瞬时连接重复', (fixture) => {
       fixture.otherOwner._props.source.resumeNumber = fixture.refs.resume
@@ -1886,6 +1889,7 @@ test('candidate.readCurrent 只用跨窗口唯一 active 推荐页且账号前�
     status: 'complete',
     url: 'https://rd6.zhaopin.com/app/recommend?resumeNumber=private&jobNumber=private',
   }
+  const emptyBackgroundTab = { ...tab, id: 402 }
   const mainCalls = []
   const queryCalls = []
   const progress = []
@@ -1893,21 +1897,24 @@ test('candidate.readCurrent 只用跨窗口唯一 active 推荐页且账号前�
     tabs: {
       async query(query) {
         queryCalls.push(structuredClone(query))
-        return [{ ...tab }]
+        return [{ ...emptyBackgroundTab }, { ...tab }]
       },
       async sendMessage(id, message) {
-        assert.equal(id, tab.id)
+        assert.ok(id === tab.id || id === emptyBackgroundTab.id)
         assert.equal(message.type, 'recruithelper.content.probe')
         return { ok: true }
       },
     },
     scripting: {
       async executeScript({ target, func }) {
-        assert.equal(target.tabId, tab.id)
-        mainCalls.push(func.name)
+        assert.ok(target.tabId === tab.id || target.tabId === emptyBackgroundTab.id)
+        mainCalls.push([target.tabId, func.name])
         if (func.name === 'mainProbeZhilian') return [{ result: {
           pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
           imListVisible: false,
+        } }]
+        if (target.tabId === emptyBackgroundTab.id) return [{ result: {
+          status: 'failed', reason: 'detail_absent',
         } }]
         if (func.name === 'mainReadCurrentCandidate') return [{ result: {
           status: 'ready',
@@ -1937,7 +1944,16 @@ test('candidate.readCurrent 只用跨窗口唯一 active 推荐页且账号前�
       { active: true, url: 'https://rd6.zhaopin.com/*' },
       { active: true, url: 'https://rd6.zhaopin.com/*' },
     ])
-    assert.deepEqual(mainCalls, ['mainProbeZhilian', 'mainReadCurrentCandidate', 'mainProbeZhilian'])
+    assert.deepEqual(mainCalls, [
+      [emptyBackgroundTab.id, 'mainProbeZhilian'],
+      [emptyBackgroundTab.id, 'mainReadCurrentCandidate'],
+      [tab.id, 'mainProbeZhilian'],
+      [tab.id, 'mainReadCurrentCandidate'],
+      [emptyBackgroundTab.id, 'mainProbeZhilian'],
+      [emptyBackgroundTab.id, 'mainReadCurrentCandidate'],
+      [tab.id, 'mainProbeZhilian'],
+      [tab.id, 'mainReadCurrentCandidate'],
+    ])
     assert.equal(progress.at(-1)[1], 100)
   } finally {
     globalThis.chrome = originalChrome

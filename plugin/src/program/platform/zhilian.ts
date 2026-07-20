@@ -74,6 +74,7 @@ interface MainListPageResult {
 
 const MAIN_CURRENT_CANDIDATE_FAILURE_REASONS = [
   'route_missing',
+  'detail_absent',
   'detail_cardinality',
   'list_source_unavailable',
   'detail_binding_ambiguous',
@@ -540,6 +541,7 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
 
     const details = Array.from(document.querySelectorAll<HTMLElement>('.new-shortcut-resume__modal'))
       .filter(visible)
+    if (details.length === 0) return failed('detail_absent')
     if (details.length !== 1) return failed('detail_cardinality')
     const detail = details[0]
 
@@ -675,28 +677,68 @@ function assertExpectedPrincipal(probe: ZhilianProbe, expected: string | undefin
   }
 }
 
-async function activeRecommendTab(): Promise<chrome.tabs.Tab> {
-  const tabs = (await chrome.tabs.query({
+async function activeRecommendTabs(): Promise<chrome.tabs.Tab[]> {
+  return (await chrome.tabs.query({
     active: true,
     url: TAB_QUERY,
   })).filter((tab) => tab.id !== undefined && tab.active === true && pageKindFromURL(tab.url) === 'recommend')
-  if (tabs.length !== 1) {
+}
+
+interface CurrentCandidateSnapshot {
+  tab: chrome.tabs.Tab
+  result: MainCurrentCandidateReady
+}
+
+async function uniqueActiveCurrentCandidate(
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<CurrentCandidateSnapshot> {
+  const tabs = await activeRecommendTabs()
+  if (tabs.length === 0) {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '请在 Chrome 中打开唯一的当前激活智联推荐候选人详情',
+      '请在 Chrome 中打开当前激活的智联推荐候选人详情',
       'manualOnly',
       'pageAbsent',
     )
   }
-  if (tabs[0].status !== 'complete') {
+
+  const ready: CurrentCandidateSnapshot[] = []
+  for (const tab of tabs) {
+    if (tab.id === undefined || tab.status !== 'complete') {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY',
+        '当前智联推荐页尚未就绪',
+        'afterRecovery',
+        'pageBroken',
+      )
+    }
+    assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+    const result = await runMain(tab.id, mainReadCurrentCandidate, [])
+    if (!validCurrentCandidateResult(result)) {
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        '当前候选人或职位无法唯一确证',
+        'manualOnly',
+      )
+    }
+    if (result.status === 'ready') {
+      ready.push({ tab, result })
+    } else if (result.reason !== 'detail_absent') {
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        '当前候选人或职位无法唯一确证',
+        'manualOnly',
+      )
+    }
+  }
+  if (ready.length !== 1) {
     throw new ZhilianPlatformError(
-      'CTX_NOT_READY',
-      '当前智联推荐页尚未就绪',
-      'afterRecovery',
-      'pageBroken',
+      'ELEMENT_UNRESOLVED',
+      '当前候选人或职位无法唯一确证',
+      'manualOnly',
     )
   }
-  return tabs[0]
+  return ready[0]
 }
 
 function validCurrentCandidateResult(value: unknown): value is MainCurrentCandidateResult {
@@ -726,36 +768,23 @@ export async function readZhilianCurrentCandidate(
 ): Promise<ZhilianCurrentCandidate> {
   ctx.checkpoint()
   await ctx.progress('读取真人当前打开的智联候选人', 10)
-  const tab = await activeRecommendTab()
-  if (tab.id === undefined) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联推荐页缺少标签标识', 'afterRecovery', 'pageBroken')
-  }
-
-  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  const snapshot = await runMain(tab.id, mainReadCurrentCandidate, [])
+  const current = await uniqueActiveCurrentCandidate(expectedPrincipalFingerprint)
   ctx.checkpoint()
 
-  // 返回任何候选人数据前，必须仍是所有 Chrome 窗口中唯一的同一 active 推荐页，
-  // 并再次确证账号主体；切页/切号时丢弃刚才的私有读取结果。
-  const latest = await activeRecommendTab()
-  if (latest.id !== tab.id) {
+  // 返回任何候选人数据前，再次从 active 推荐页中解析唯一详情并确证账号；
+  // 其他窗口可以停留在没有详情的推荐页，但第二个详情或目标变化都失败。
+  const latest = await uniqueActiveCurrentCandidate(expectedPrincipalFingerprint)
+  if (latest.tab.id !== current.tab.id ||
+      latest.result.data.platformUserRef !== current.result.data.platformUserRef ||
+      latest.result.data.positionRef !== current.result.data.positionRef) {
     throw new ZhilianPlatformError(
       'CTX_LOST_DURING_EXEC',
       '读取期间当前智联推荐页发生变化',
       'manualOnly',
     )
   }
-  assertExpectedPrincipal(await probeTab(latest), expectedPrincipalFingerprint)
-
-  if (!validCurrentCandidateResult(snapshot) || snapshot.status !== 'ready') {
-    throw new ZhilianPlatformError(
-      'ELEMENT_UNRESOLVED',
-      '当前候选人或职位无法唯一确证',
-      'manualOnly',
-    )
-  }
   await ctx.progress('当前智联候选人读取完成', 100)
-  return snapshot.data
+  return latest.result.data
 }
 
 async function waitForIMReady(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<ZhilianProbe> {
