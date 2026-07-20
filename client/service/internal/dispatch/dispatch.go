@@ -601,7 +601,8 @@ func (d *Dispatcher) realGreetingResultPlan(
 		}
 	}
 
-	wasHumanResolved := r.Status == store.CmdResolvedOk || r.Status == store.CmdResolvedFailed
+	wasHumanResolved := r.Status == store.CmdResolvedOk || r.Status == store.CmdResolvedFailed ||
+		isGreetingManualVerdictVerification(*r)
 	wasSuspect := r.Status == store.CmdSuspect
 	if r.Status.Terminal() && !wasHumanResolved && r.Status != store.CmdSuspect {
 		*oc = ocLate

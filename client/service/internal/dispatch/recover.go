@@ -358,10 +358,6 @@ func (d *Dispatcher) Verdict(msgID string, verdict store.CmdStatus) error {
 	}
 	resolve := store.ResolveSuspectVerdictRequest{Ref: msgID, Verdict: verdict, At: time.Now()}
 	if cmd.IntentID != "" {
-		var args protocol.ChatSendMessageArgs
-		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
-			return err
-		}
 		intent, lookupErr := d.st.EffectIntentByID(cmd.IntentID)
 		if lookupErr != nil {
 			return lookupErr
@@ -369,11 +365,56 @@ func (d *Dispatcher) Verdict(msgID string, verdict store.CmdStatus) error {
 		if intent == nil {
 			return store.ErrEffectIntentNotFound
 		}
-		resolve.ConversationKey = store.ConversationKey{
-			Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+		switch intent.Primitive {
+		case protocol.PrimChatSendMessage:
+			var args protocol.ChatSendMessageArgs
+			if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+				return err
+			}
+			resolve.ConversationKey = store.ConversationKey{
+				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+			}
+			resolve.Text = args.Text
+			resolve.ContentHash = intent.SendFingerprint
+		case protocol.PrimChatSendGreeting:
+			if verdict == store.CmdResolvedOk {
+				// 招呼 intent.TargetRef 是 ProfileID，绝不能把真人的布尔
+				// 裁决当作 conversationRef 补写。resolvedOk 在这里仅授权
+				// 一次正式 readGreetingOutcome；正证仍由 ResolveGreetingVerified
+				// 原子收束，阴性恢复 suspect，且不增加自动验证预算。
+				if d.verifier == nil || !cmd.ReviewReady {
+					return ErrVerdictNotReady
+				}
+				err := d.st.BeginGreetingManualVerification(
+					msgID, manualGreetingVerdictVerificationReason, time.Now(),
+				)
+				if err != nil {
+					if errors.Is(err, store.ErrRecoveryStateConflict) {
+						return ErrNotSuspect
+					}
+					return err
+				}
+				d.st.Audit("suspect_verdict_verification", cmd.HandID, msgID,
+					"真人 resolvedOk 触发一次 chat.readGreetingOutcome 正证读取")
+				d.notifyByMsgID(msgID)
+				d.kickVerification(msgID)
+				return nil
+			}
+			err := d.st.ResolveGreetingSuspectFailed(msgID, time.Now())
+			if err != nil {
+				if errors.Is(err, store.ErrRecoveryStateConflict) {
+					return ErrNotSuspect
+				}
+				return err
+			}
+			d.st.Audit("suspect_verdict", cmd.HandID, msgID, string(verdict))
+			d.clearLease(msgID)
+			d.notifyByMsgID(msgID)
+			slog.Info("suspect 招呼人工裁决", "handId", cmd.HandID, "msgId", msgID, "verdict", verdict)
+			return nil
+		default:
+			return errors.New("真实副作用原语没有人工裁决实现")
 		}
-		resolve.Text = args.Text
-		resolve.ContentHash = intent.SendFingerprint
 	}
 	err = d.st.ResolveSuspectVerdict(resolve)
 	if err != nil {

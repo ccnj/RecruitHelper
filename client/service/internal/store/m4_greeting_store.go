@@ -482,6 +482,143 @@ type VerifiedGreetingSuccess struct {
 	At               time.Time
 }
 
+// ResolveGreetingSuspectFailed 收编真人对未知招呼的“未发生”裁决。
+// 招呼的 TargetRef 是 ProfileID，不是 conversationRef；因此这里只原子
+// 终结原 Cmd/Intent，绝不进入会话消息账本。CandidateProfile 保持
+// selected，真人之后可沿 greeting head 显式铸造新意图。
+func (s *Store) ResolveGreetingSuspectFailed(ref string, at time.Time) error {
+	if ref == "" {
+		return ErrRecoveryStateConflict
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
+			return err
+		}
+		if cmd.Name != primitiveChatSendGreeting || cmd.IntentID == "" || cmd.Status != CmdSuspect {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.Primitive != primitiveChatSendGreeting || intent.Status != EffectIntentSuspect ||
+			intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
+			return ErrEffectIntentConflict
+		}
+
+		cmd.Status = CmdResolvedFailed
+		cmd.RecoveryAuthorized = false
+		cmd.VerificationNextAt = nil
+		cmd.VerificationChildMsgID = ""
+		cmd.ReviewReady = false
+		cmd.ReviewAfterMs = 0
+		cmd.TerminalAt = &at
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		intent.Status = EffectIntentResolvedFailed
+		intent.SuspectReason = cmd.SuspectReason
+		intent.ResolvedAt = &at
+		return tx.Save(&intent).Error
+	})
+}
+
+// BeginGreetingManualVerification 把真人的 resolvedOk 操作解释为“一次
+// 正证读取授权”，而不是“凭布尔值补写成功”。只有已经完成自动验证预算
+// 的 review-ready suspect 才能进入；VerificationN 不重置，reason 作为
+// 脑重启后仍可辨认的一次性在途标记。
+func (s *Store) BeginGreetingManualVerification(ref, reason string, at time.Time) error {
+	if ref == "" || reason == "" {
+		return ErrRecoveryStateConflict
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
+			return err
+		}
+		if cmd.Name != primitiveChatSendGreeting || cmd.IntentID == "" || cmd.Status != CmdSuspect ||
+			!cmd.ReviewReady || cmd.VerificationChildMsgID != "" {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.Primitive != primitiveChatSendGreeting || intent.Status != EffectIntentSuspect ||
+			intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
+			return ErrEffectIntentConflict
+		}
+
+		cmd.Status = CmdVerifying
+		cmd.VerificationReason = reason
+		cmd.VerificationNextAt = &at
+		cmd.RecoveryAuthorized = false
+		cmd.ReviewReady = false
+		cmd.TerminalAt = nil
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		intent.Status = EffectIntentVerifying
+		intent.SuspectReason = reason
+		return tx.Save(&intent).Error
+	})
+}
+
+// RestoreGreetingManualVerificationSuspect 收束一次真人触发的阴性/失败
+// 正证读取。它不增加 VerificationN、不安排下一轮，因而不会把三轮自动
+// 验证预算偷偷扩成第四轮自动重试；再次读取只能由真人再次触发。
+func (s *Store) RestoreGreetingManualVerificationSuspect(
+	ref, expectedReason, reason string,
+	at time.Time,
+) error {
+	if ref == "" || expectedReason == "" || reason == "" {
+		return ErrRecoveryStateConflict
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
+			return err
+		}
+		if cmd.Name != primitiveChatSendGreeting || cmd.IntentID == "" || cmd.Status != CmdVerifying ||
+			cmd.VerificationReason != expectedReason {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.Primitive != primitiveChatSendGreeting || intent.Status != EffectIntentVerifying ||
+			intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
+			return ErrEffectIntentConflict
+		}
+
+		cmd.Status = CmdSuspect
+		cmd.SuspectReason = reason
+		cmd.VerificationReason = reason
+		cmd.VerificationNextAt = nil
+		cmd.VerificationChildMsgID = ""
+		cmd.RecoveryAuthorized = false
+		cmd.ReviewReady = true
+		cmd.TerminalAt = &at
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		intent.Status = EffectIntentSuspect
+		intent.SuspectReason = reason
+		return tx.Save(&intent).Error
+	})
+}
+
 // ResolveGreetingVerified 把配套验证读的唯一正证送入与直接 result
 // 相同的 applyGreetingResultTx；Cmd、Intent、Profile、Conversation、
 // TrackedIntent、Message 在同一个 SQLite 事务里收束。
