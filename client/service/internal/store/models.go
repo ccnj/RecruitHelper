@@ -2,8 +2,8 @@ package store
 
 import "time"
 
-// 骨架期临时表。宪法约定:表结构当前全部视为临时,骨架期用 AutoMigrate 快跑;
-// 首个对外发布前(与表结构正式设计同期)切换为 append-only migration。
+// 首个客户安装前仍用 AutoMigrate 快跑；Candidate/CandidateProfile 的正式身份语义
+// 已在 M4 冻结，首个对外发布前切换为显式 migration。
 
 // Hand:已与脑建立过会话的本地手。handId 由 Chrome profile 内的手
 // 自行生成并持久化；脑仅把它作为不透明路由键，不签发凭据。
@@ -230,6 +230,56 @@ type Account struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// Candidate 是人的平台身份根。PlatformUserRef 只作不透明等值比较；
+// resumeNumber、姓名、职位和招聘账号都不参与身份。
+type Candidate struct {
+	Platform        string `gorm:"primaryKey"`
+	PlatformUserRef string `gorm:"primaryKey"`
+	DisplayName     *string
+	FirstSeenAt     time.Time `gorm:"not null"`
+	LastSeenAt      time.Time `gorm:"not null"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+
+	Profiles []CandidateProfile `gorm:"foreignKey:Platform,PlatformUserRef;references:Platform,PlatformUserRef;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+}
+
+// CandidateProfileStatus 是人×职位档案的主线状态。M4 只生产
+// selected→greeted，或明确 GREETING_REJECTED 时 selected→ended；
+// eliminated 只为人级建档闸的既定语义保留。
+type CandidateProfileStatus string
+
+const (
+	CandidateProfileSelected   CandidateProfileStatus = "selected"
+	CandidateProfileGreeted    CandidateProfileStatus = "greeted"
+	CandidateProfileEnded      CandidateProfileStatus = "ended"
+	CandidateProfileEliminated CandidateProfileStatus = "eliminated"
+)
+
+type CandidateProfileEndReason string
+
+const CandidateProfileEndGreetingFailed CandidateProfileEndReason = "greetingFailed"
+
+// CandidateProfile 是沟通状态主体。人级建档闸的部分唯一索引刻意不含
+// AccountRef，并把 ended 也视为非 eliminated，防止换账号/职位重复追求。
+// ConversationRef 必须为 NULL 而不是空串，否则未建联档案会互相撞唯一键。
+type CandidateProfile struct {
+	ProfileID       string `gorm:"primaryKey"`
+	Platform        string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:1;index:ux_candidate_profile_active,unique,where:main_status <> 'eliminated',priority:1;uniqueIndex:ux_candidate_profile_conversation,priority:1"`
+	AccountRef      string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:2;uniqueIndex:ux_candidate_profile_conversation,priority:2"`
+	PlatformUserRef string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:3;index:ux_candidate_profile_active,unique,priority:2"`
+	PositionRef     string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:4"`
+	PositionTitle   *string
+	MainStatus      CandidateProfileStatus `gorm:"not null;index"`
+	EndReason       *CandidateProfileEndReason
+
+	SuccessfulGreetingIntentID *string
+	ConversationRef            *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
+	GreetedAt                  *time.Time
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 // TrackingState 表示列表索引是否已被脑正式选入对账范围。
