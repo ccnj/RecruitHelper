@@ -2629,6 +2629,34 @@ test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务�
       { confirmed: false },
       '职位不一致不得认领新会话',
     )
+
+    sessions[0].jobNumber = refs.job
+    rows.splice(0)
+    globalThis.document.scripts = [{
+      textContent: `__INITIAL_STATE__=${JSON.stringify({
+        session: { session: { staff: { staffId: refs.staff } } },
+        im: {
+          timelineMap: {
+            [refs.conversation]: { timeline: [onlyRow] },
+          },
+        },
+      })}`,
+    }]
+    const initialOnly = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
+    assert.equal(initialOnly.confirmed, true,
+      '新会话 history 尚未收敛时，当前初始化 timeline 的唯一服务端正证仍可确认')
+
+    rows.push(onlyRow)
+    const sameAcrossSources = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
+    assert.deepEqual(sameAcrossSources, initialOnly,
+      '同一 idServer 在 history 与 timeline 重复只算一条正证')
+
+    rows[0] = { ...onlyRow, idServer: 'fixture-server-greeting-conflict' }
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '不同只读视图出现两个同文服务端身份时不得任取一个认领',
+    )
   } finally {
     Object.assign(globalThis, original)
   }

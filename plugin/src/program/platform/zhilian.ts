@@ -1333,51 +1333,57 @@ async function mainReadGreetingProof(
     const peer = clean(session.peerPartnerId)
     if (!peer) return negative()
 
-    let rows: unknown = null
+    const proofSources: unknown[][] = []
     const getHistoryMsgs = engine.getHistoryMsgs
     if (typeof getHistoryMsgs === 'function') {
       const request: AnyRecord = { to: peer, limit: 64, asc: true }
       const scene = session.scene ?? session.sessionType
       if (scene !== null && scene !== undefined && clean(scene)) request.scene = scene
       try {
-        rows = await (getHistoryMsgs as (arg: AnyRecord) => Promise<unknown>).call(engine, request)
+        const rows = await (getHistoryMsgs as (arg: AnyRecord) => Promise<unknown>).call(engine, request)
+        if (Array.isArray(rows)) proofSources.push(rows)
       } catch {
-        rows = null
+        // 新建会话的 history API 可短暂落后；阴性/异常不证明未发送。
       }
     }
-    if (!Array.isArray(rows)) {
-      const nuxt = asRecord(w.$nuxt)
-      const root = asRecord(nuxt?.$root) ?? nuxt
-      const store = asRecord(root?.$store)
-      const state = asRecord(store?.state)
-      const im = asRecord(state?.im)
-      const timelineMap = asRecord(im?.timelineMap)
-      const entry = asRecord(timelineMap?.[conversationRef])
-      rows = Array.isArray(entry?.timeline) ? entry?.timeline : null
-    }
-    if (!Array.isArray(rows) || rows.length > 4096) return negative()
-
     const initial = initialState()
+    const nuxt = asRecord(w.$nuxt)
+    const root = asRecord(nuxt?.$root) ?? nuxt
+    const store = asRecord(root?.$store)
+    const state = asRecord(store?.state)
+    const liveIM = asRecord(state?.im)
+    const liveTimelineMap = asRecord(liveIM?.timelineMap)
+    const liveEntry = asRecord(liveTimelineMap?.[conversationRef])
+    if (Array.isArray(liveEntry?.timeline)) proofSources.push(liveEntry.timeline)
+    const initialIM = asRecord(initial.im)
+    const initialTimelineMap = asRecord(initialIM?.timelineMap)
+    const initialEntry = asRecord(initialTimelineMap?.[conversationRef])
+    if (Array.isArray(initialEntry?.timeline)) proofSources.push(initialEntry.timeline)
+    if (proofSources.length === 0) return negative()
+
     const runtimeSession = asRecord(w.$session)
     const runtimeStaff = asRecord(runtimeSession?.staff)
     const initialSession = asRecord(asRecord(initial.session)?.session)
     const staffID = clean(runtimeStaff?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
     if (!staffID) return negative()
     const matchedMessages = new Map<string, string>()
-    for (const raw of rows) {
-      const row = asRecord(raw)
-      if (!row) return negative()
-      if (clean(row.status).toLowerCase() !== 'success' || clean(row.from) !== staffID || row.type !== 'custom') {
-        continue
+    for (const rows of proofSources) {
+      if (rows.length > 4096) return negative()
+      for (const raw of rows) {
+        const row = asRecord(raw)
+        if (!row) return negative()
+        if (clean(row.status).toLowerCase() !== 'success' || clean(row.from) !== staffID || row.type !== 'custom') {
+          continue
+        }
+        const envelope = parseObject(row.content)
+        if (Number(envelope.type) !== 131) continue
+        const inner = parseObject(envelope.content)
+        const details = Object.keys(inner).length > 0 ? inner : envelope
+        const greetingText = clean(details.greetingText ?? envelope.greetingText)
+        const idServer = clean(row.idServer)
+        if (!greetingText || !idServer || await digest(greetingText) !== contentHash) continue
+        matchedMessages.set(idServer, idServer)
       }
-      const envelope = parseObject(row.content)
-      if (Number(envelope.type) !== 131) continue
-      const inner = parseObject(envelope.content)
-      const details = Object.keys(inner).length > 0 ? inner : envelope
-      const greetingText = clean(details.greetingText ?? envelope.greetingText)
-      const idServer = clean(row.idServer)
-      if (!greetingText || !idServer || await digest(greetingText) !== contentHash) continue
-      matchedMessages.set(idServer, idServer)
     }
     if (matchedMessages.size !== 1) return negative()
     const idServer = [...matchedMessages.keys()][0]
