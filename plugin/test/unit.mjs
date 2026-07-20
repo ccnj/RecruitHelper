@@ -2072,7 +2072,7 @@ function installM4GreetingFixture(options = {}) {
     modalVisible: options.existingModal === true,
     customSelected: options.existingModal === true || options.customInitiallySelected === true,
     textareaVisible: options.existingModal === true,
-    editIconVisible: options.editIconInitiallyHidden !== true,
+    editIconStyleHidden: options.editIconStyleHidden === true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
     detailCount: options.detailCount ?? 1,
@@ -2156,7 +2156,6 @@ function installM4GreetingFixture(options = {}) {
   customOption._onIntrinsicClick = () => {
     state.optionClicks += 1
     state.customSelected = true
-    state.editIconVisible = true
   }
   const textarea = new FixtureTextArea(options.existingDraft ?? '平台原始招呼')
   const editIcon = new FixtureHTMLElement()
@@ -2169,9 +2168,7 @@ function installM4GreetingFixture(options = {}) {
     if (selector === '.ai-greeting-modal__edit-area textarea') {
       return state.textareaVisible ? [textarea] : []
     }
-    if (selector === '.ai-greeting-modal__edit-icon') {
-      return state.textareaVisible || !state.editIconVisible ? [] : [editIcon]
-    }
+    if (selector === '.ai-greeting-modal__edit-icon') return state.textareaVisible ? [] : [editIcon]
     return []
   }
 
@@ -2217,7 +2214,10 @@ function installM4GreetingFixture(options = {}) {
   globalThis.location = {
     href: `https://rd6.zhaopin.com/app/recommend?resumeNumber=${refs.resume}&jobNumber=${refs.job}`,
   }
-  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.getComputedStyle = (element) => ({
+    display: 'block',
+    visibility: element === editIcon && state.editIconStyleHidden ? 'hidden' : 'visible',
+  })
   globalThis.document = {
     scripts: [],
     querySelectorAll(selector) {
@@ -2402,14 +2402,14 @@ test('M4 招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只�
   }
 })
 
-test('M4 招呼 prepare 可单次点开已选自定义项后显露编辑入口', async () => {
+test('M4 招呼 prepare 可点击 DOM 内样式隐藏的唯一编辑图标', async () => {
   const fixture = installM4GreetingFixture({
     customInitiallySelected: true,
-    editIconInitiallyHidden: true,
+    editIconStyleHidden: true,
   })
   try {
     assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
-    assert.equal(fixture.state.optionClicks, 1, '已选自定义项只允许一次显露入口 click')
+    assert.equal(fixture.state.optionClicks, 0, '已选自定义项不得再 click')
     assert.equal(fixture.state.editClicks, 1)
     assert.equal(fixture.textarea.value, fixture.text)
     assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'])

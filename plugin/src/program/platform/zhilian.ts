@@ -1079,8 +1079,7 @@ async function mainSendGreetingOnce(
     let modal = greetingModals()[0]
     let custom = customOptionOf(modal)
     if (!custom) return failed('custom_option_unavailable')
-    const customWasAlreadySelected = customSelected(custom)
-    if (!customWasAlreadySelected) {
+    if (!customSelected(custom)) {
       const invokeOption = Function.prototype.call.bind(
         HTMLElement.prototype.click as IntrinsicClick,
         custom,
@@ -1095,52 +1094,20 @@ async function mainSendGreetingOnce(
       '.ai-greeting-modal__edit-area textarea',
     )).filter(visible)
     if (textareas.length === 0) {
-      let editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
-        .filter(visible)
-      if (editIcons.length !== 1 && customWasAlreadySelected) {
-        const invokeOption = Function.prototype.call.bind(
-          HTMLElement.prototype.click as IntrinsicClick,
-          custom,
-        )
-        invokeOption()
-        await waitFor(() => {
-          const currentModal = greetingModals()[0]
-          const currentCustom = currentModal ? customOptionOf(currentModal) : null
-          if (!currentCustom || !customSelected(currentCustom)) return false
-          const currentTextareas = Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
-            '.ai-greeting-modal__edit-area textarea',
-          )).filter(visible)
-          const currentEditIcons = Array.from(currentCustom.querySelectorAll<HTMLElement>(
-            '.ai-greeting-modal__edit-icon',
-          )).filter(visible)
-          return currentTextareas.length === 1 || currentEditIcons.length === 1
-        })
-        modal = greetingModals()[0]
-        custom = modal ? customOptionOf(modal) : null
-        textareas = custom
-          ? Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
-              '.ai-greeting-modal__edit-area textarea',
-            )).filter(visible)
-          : []
-        editIcons = custom
-          ? Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon')).filter(visible)
-          : []
-      }
-      if (textareas.length === 0) {
-        if (editIcons.length !== 1) return failed('editor_unavailable')
-        const invokeEdit = Function.prototype.call.bind(
-          HTMLElement.prototype.click as IntrinsicClick,
-          editIcons[0],
-        )
-        invokeEdit()
-        await waitFor(() => {
-          const currentModal = greetingModals()[0]
-          const currentCustom = currentModal ? customOptionOf(currentModal) : null
-          return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
-            '.ai-greeting-modal__edit-area textarea',
-          )).filter(visible).length === 1
-        })
-      }
+      const editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
+      if (editIcons.length !== 1) return failed('editor_unavailable')
+      const invokeEdit = Function.prototype.call.bind(
+        HTMLElement.prototype.click as IntrinsicClick,
+        editIcons[0],
+      )
+      invokeEdit()
+      await waitFor(() => {
+        const currentModal = greetingModals()[0]
+        const currentCustom = currentModal ? customOptionOf(currentModal) : null
+        return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
+          '.ai-greeting-modal__edit-area textarea',
+        )).filter(visible).length === 1
+      })
     }
     modal = greetingModals()[0]
     custom = modal ? customOptionOf(modal) : null
