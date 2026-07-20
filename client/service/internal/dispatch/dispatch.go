@@ -419,6 +419,18 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("发送 result 的 conversationRef/contentHash 与原始意图不一致")
 		}
 	}
+	if validationErr == nil && cmd.Name == protocol.PrimChatSendGreeting && res.Status == protocol.ResultStatusOk {
+		var args protocol.ChatSendGreetingArgs
+		var data protocol.ChatSendGreetingData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = fmt.Errorf("解析招呼 args: %w", err)
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = fmt.Errorf("解析招呼 data: %w", err)
+		} else if data.PlatformUserRef != args.PlatformUserRef || data.PositionRef != args.PositionRef ||
+			data.ContentHash != syncledger.HashText(args.Text) {
+			validationErr = errors.New("招呼 result 的候选人/职位/contentHash 与原始意图不一致")
+		}
+	}
 	if validationErr == nil {
 		return res, ""
 	}
@@ -436,6 +448,26 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 }
 
 func (d *Dispatcher) realEffectResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	session, bootID string,
+	online bool,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	switch r.Name {
+	case protocol.PrimChatSendMessage:
+		return d.realSendMessageResultPlan(r, res, body, now, session, bootID, online, plan, oc)
+	case protocol.PrimChatSendGreeting:
+		return d.realGreetingResultPlan(r, res, body, now, plan, oc)
+	default:
+		return store.ResultCommandMutation{}, fmt.Errorf("未知真实副作用原语 %q", r.Name)
+	}
+}
+
+func (d *Dispatcher) realSendMessageResultPlan(
 	r *store.CmdRecord,
 	res protocol.ResultBody,
 	body []byte,
@@ -541,6 +573,107 @@ func (d *Dispatcher) realEffectResultPlan(
 		// 权威安全终局。若先前人工 resolvedOk 铸造了 self 消息，必须
 		// 与 Cmd+Intent 纠正同事务撤回，不能留下错误沉默锚。
 		plan.Effect.Retract = wasHumanResolved
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	default:
+		return store.ResultCommandMutation{}, errors.New("未知 result status")
+	}
+}
+
+func (d *Dispatcher) realGreetingResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	var args protocol.ChatSendGreetingArgs
+	if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+		return store.ResultCommandMutation{}, err
+	}
+	fingerprint := syncledger.HashText(args.Text)
+	resultEffect := func(status store.EffectIntentStatus, reason string) *store.EffectResultMutation {
+		return &store.EffectResultMutation{
+			IntentStatus: status, Text: args.Text, ContentHash: fingerprint, Reason: reason,
+		}
+	}
+
+	wasHumanResolved := r.Status == store.CmdResolvedOk || r.Status == store.CmdResolvedFailed
+	wasSuspect := r.Status == store.CmdSuspect
+	if r.Status.Terminal() && !wasHumanResolved && r.Status != store.CmdSuspect {
+		*oc = ocLate
+		plan.Save = false
+		return plan, nil
+	}
+
+	switch res.Status {
+	case protocol.ResultStatusOk:
+		var data protocol.ChatSendGreetingData
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		r.Status = store.CmdOk
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		r.SuspectReason = ""
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentOk, "")
+		plan.Effect.Greeting = &store.GreetingResultMutation{
+			PlatformUserRef: data.PlatformUserRef, PositionRef: data.PositionRef,
+			ConversationRef: data.ConversationRef, Text: args.Text,
+			ContentHash: data.ContentHash, ObservedAtMs: data.ObservedAt,
+		}
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	case protocol.ResultStatusFailed:
+		if res.Error == nil {
+			return store.ResultCommandMutation{}, errors.New("effectful failed 缺少 error")
+		}
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		switch res.Error.SideEffect {
+		case protocol.SideEffectPossible, protocol.SideEffectConfirmed:
+			if wasHumanResolved {
+				plan.Save = false
+				*oc = ocHumanVerdictKept
+				return plan, nil
+			}
+			r.Status = store.CmdVerifying
+			r.TerminalAt = nil
+			r.VerificationReason = "result.sideEffect=" + string(res.Error.SideEffect)
+			r.VerificationNextAt = &now
+			r.ReviewReady = false
+			r.ReviewAfterMs = 0
+			plan.KeepCommandOpen = true
+			plan.Effect = resultEffect(store.EffectIntentVerifying, r.VerificationReason)
+			*oc = ocEffSuspect
+			return plan, nil
+		case protocol.SideEffectNone:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = ""
+			plan.Effect = resultEffect(store.EffectIntentFailed, "")
+			if res.Error.Code == protocol.ErrCodeGreetingRejected {
+				plan.Effect.Greeting = &store.GreetingResultMutation{Rejected: true}
+			}
+			if wasHumanResolved || wasSuspect {
+				*oc = ocSuspectCleared
+			}
+			return plan, nil
+		default:
+			return store.ResultCommandMutation{}, errors.New("effectful result 缺少 sideEffect")
+		}
+	case protocol.ResultStatusCanceled, protocol.ResultStatusExpired:
+		r.Status = mapResultStatus(res.Status)
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentFailed, string(res.Status))
 		if wasHumanResolved || wasSuspect {
 			*oc = ocSuspectCleared
 		}

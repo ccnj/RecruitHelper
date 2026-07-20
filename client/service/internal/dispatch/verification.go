@@ -18,7 +18,8 @@ const (
 )
 
 // sweepEffectRecovery 同时保证 query/report 阶段与验证阶段有活性。
-// 它只会重发无副作用的 query 和 readThread，从不因超时重发 SX。
+// 它只会重发无副作用的 query 和 metadata 指定的配套验证读，
+// 从不因超时重发 SX。
 func (d *Dispatcher) sweepEffectRecovery(now time.Time) {
 	retry, verify, err := d.st.ExpireRecoveryQueries(now.Add(-recoveryQueryTimeout), now, recoveryQueryMax)
 	if err != nil {
@@ -104,19 +105,29 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		d.recordVerificationMiss(*cmd, "验证读缺少权威 intent")
 		return
 	}
-	var args protocol.ChatSendMessageArgs
-	var guards protocol.ChatSendMessageGuards
-	if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
-		d.recordVerificationMiss(*cmd, "验证读无法解析原始 args: "+err.Error())
+	request := VerificationRequest{Command: *cmd, Intent: *intent}
+	switch cmd.Name {
+	case protocol.PrimChatSendMessage:
+		if err := json.Unmarshal([]byte(cmd.Args), &request.Args); err != nil {
+			d.recordVerificationMiss(*cmd, "验证读无法解析原始 args: "+err.Error())
+			return
+		}
+		if err := json.Unmarshal([]byte(cmd.Guards), &request.Guards); err != nil {
+			d.recordVerificationMiss(*cmd, "验证读无法解析原始 guards: "+err.Error())
+			return
+		}
+	case protocol.PrimChatSendGreeting:
+		var greetingArgs protocol.ChatSendGreetingArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &greetingArgs); err != nil {
+			d.recordVerificationMiss(*cmd, "验证读无法解析招呼 args: "+err.Error())
+			return
+		}
+		request.GreetingArgs = &greetingArgs
+	default:
+		d.recordVerificationMiss(*cmd, "真实副作用原语没有验证实现")
 		return
 	}
-	if err := json.Unmarshal([]byte(cmd.Guards), &guards); err != nil {
-		d.recordVerificationMiss(*cmd, "验证读无法解析原始 guards: "+err.Error())
-		return
-	}
-	observation, verifyErr := d.verifier.Verify(ctx, VerificationRequest{
-		Command: *cmd, Intent: *intent, Args: args, Guards: guards,
-	})
+	observation, verifyErr := d.verifier.Verify(ctx, request)
 	if verifyErr != nil {
 		if errors.Is(verifyErr, context.Canceled) || errors.Is(verifyErr, context.DeadlineExceeded) ||
 			errors.Is(verifyErr, store.ErrVerificationAlreadyRunning) {
@@ -142,29 +153,62 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		d.recordVerificationMiss(*cmd, reason)
 		return
 	}
-	result := protocol.ResultBody{
-		Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
-		Data: mustEncode(protocol.ChatSendMessageData{
-			ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint, ObservedAt: observation.ObservedAt,
-		}),
-		Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
+	var commitErr error
+	switch cmd.Name {
+	case protocol.PrimChatSendMessage:
+		result := protocol.ResultBody{
+			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
+			Data: mustEncode(protocol.ChatSendMessageData{
+				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint, ObservedAt: observation.ObservedAt,
+			}),
+			Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
+		}
+		resultRaw, err := protocol.Encode(result)
+		if err != nil {
+			d.recordVerificationMiss(*cmd, "验证成功证词编码失败: "+err.Error())
+			return
+		}
+		_, commitErr = d.st.ResolveEffectVerified(store.VerifiedEffectSuccess{
+			Ref: ref,
+			ConversationKey: store.ConversationKey{
+				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+			},
+			Text: request.Args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
+			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
+		})
+	case protocol.PrimChatSendGreeting:
+		if request.GreetingArgs == nil || observation.ConversationRef == "" {
+			d.recordVerificationMiss(*cmd, "招呼验证正证缺少新会话")
+			return
+		}
+		result := protocol.ResultBody{
+			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
+			Data: mustEncode(protocol.ChatSendGreetingData{
+				PlatformUserRef: request.GreetingArgs.PlatformUserRef,
+				PositionRef:     request.GreetingArgs.PositionRef,
+				ConversationRef: observation.ConversationRef,
+				ContentHash:     intent.SendFingerprint, ObservedAt: observation.ObservedAt,
+			}),
+			Evidence: []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}},
+		}
+		resultRaw, err := protocol.Encode(result)
+		if err != nil {
+			d.recordVerificationMiss(*cmd, "招呼验证成功证词编码失败: "+err.Error())
+			return
+		}
+		_, commitErr = d.st.ResolveGreetingVerified(store.VerifiedGreetingSuccess{
+			Ref: ref, ProfileID: intent.TargetRef,
+			PlatformUserRef: request.GreetingArgs.PlatformUserRef,
+			PositionRef:     request.GreetingArgs.PositionRef,
+			ConversationRef: observation.ConversationRef,
+			Text:            request.GreetingArgs.Text, ContentHash: intent.SendFingerprint,
+			ObservedAtMs: observation.ObservedAt, ResultBody: string(resultRaw),
+			ResolutionReason: "verification greeting uniquely matched", At: time.Now(),
+		})
 	}
-	resultRaw, err := protocol.Encode(result)
-	if err != nil {
-		d.recordVerificationMiss(*cmd, "验证成功证词编码失败: "+err.Error())
-		return
-	}
-	_, err = d.st.ResolveEffectVerified(store.VerifiedEffectSuccess{
-		Ref: ref,
-		ConversationKey: store.ConversationKey{
-			Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
-		},
-		Text: args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
-		ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
-	})
-	if err != nil {
-		if !errors.Is(err, store.ErrRecoveryStateConflict) {
-			d.st.Audit("effect_verification_commit_failed", cmd.HandID, ref, err.Error())
+	if commitErr != nil {
+		if !errors.Is(commitErr, store.ErrRecoveryStateConflict) {
+			d.st.Audit("effect_verification_commit_failed", cmd.HandID, ref, commitErr.Error())
 		}
 		return
 	}

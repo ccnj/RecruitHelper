@@ -241,17 +241,19 @@ func (d *Dispatcher) handWitness(handID string) (HandWitness, bool) {
 }
 
 type VerificationRequest struct {
-	Command store.CmdRecord
-	Intent  store.EffectIntent
-	Args    protocol.ChatSendMessageArgs
-	Guards  protocol.ChatSendMessageGuards
+	Command      store.CmdRecord
+	Intent       store.EffectIntent
+	Args         protocol.ChatSendMessageArgs
+	Guards       protocol.ChatSendMessageGuards
+	GreetingArgs *protocol.ChatSendGreetingArgs
 }
 
 type VerificationObservation struct {
-	Confirmed   bool
-	ContentHash string
-	ObservedAt  int64
-	Reason      string
+	Confirmed       bool
+	ContentHash     string
+	ConversationRef string
+	ObservedAt      int64
+	Reason          string
 }
 
 type EffectVerifier interface {

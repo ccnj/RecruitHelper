@@ -198,10 +198,22 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 	created := true
 	if opts.effectIntent != nil {
 		rec.IntentID = opts.effectIntent.IntentID
-		createdResult, createErr := d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
-			Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
-			PreviousIntentID: opts.previousIntentID, Now: time.Now(),
-		})
+		var createdResult *store.CreateEffectIntentResult
+		var createErr error
+		switch opts.effectIntent.Primitive {
+		case protocol.PrimChatSendGreeting:
+			createdResult, createErr = d.st.CreateGreetingEffectIntentAndCmd(store.CreateGreetingEffectIntentRequest{
+				Intent: *opts.effectIntent, Command: *rec,
+				PreviousIntentID: opts.previousIntentID, Now: time.Now(),
+			})
+		case protocol.PrimChatSendMessage:
+			createdResult, createErr = d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
+				Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
+				PreviousIntentID: opts.previousIntentID, Now: time.Now(),
+			})
+		default:
+			createErr = fmt.Errorf("真实副作用原语没有账本入口 %q", opts.effectIntent.Primitive)
+		}
 		if createErr != nil {
 			err = createErr
 		} else {

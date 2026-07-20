@@ -41,6 +41,49 @@ type CreateGreetingEffectIntentRequest struct {
 	Now              time.Time
 }
 
+// GreetingPreparation 是真人确认招呼前的只读快照。它只负责让脑从
+// profile 账本派生线上 args/context；真正授权仍由
+// CreateGreetingEffectIntentAndCmd 的单写事务重查。
+type GreetingPreparation struct {
+	Account Account
+	Profile CandidateProfile
+}
+
+func (s *Store) PrepareGreeting(profileID string) (*GreetingPreparation, error) {
+	if profileID == "" {
+		return nil, ErrCandidateProfileNotFound
+	}
+	var out GreetingPreparation
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&out.Profile, "profile_id = ?", profileID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCandidateProfileNotFound
+			}
+			return err
+		}
+		if out.Profile.MainStatus != CandidateProfileSelected || out.Profile.EndReason != nil ||
+			out.Profile.SuccessfulGreetingIntentID != nil || out.Profile.ConversationRef != nil ||
+			out.Profile.GreetedAt != nil {
+			if out.Profile.MainStatus != CandidateProfileSelected {
+				return ErrCandidateProfileNotSelected
+			}
+			return ErrCandidateProfileState
+		}
+		if err := tx.First(&out.Account,
+			"platform = ? AND account_ref = ?", out.Profile.Platform, out.Profile.AccountRef).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateGreetingEffectIntentAndCmd 是真人确认招呼后的账本铸造事务。
 // 它只建立 EffectIntent/CmdRecord/CandidateGreetingHead，不发送 socket；
 // profile 成功推进与 conversation/message 绑定留给批次 4 的完整结果事务。
@@ -246,4 +289,263 @@ func (s *Store) LatestGreetingEffectIntent(profileID string) (*EffectIntent, err
 	}
 	_, intent, err := candidateGreetingHeadTx(s.db, profileID)
 	return intent, err
+}
+
+const greetingTrackedRequestedBy = "system:greeting"
+
+// GreetingResultMutation 是 chat.sendGreeting 的业务结果计划。Rejected
+// 只用于 GREETING_REJECTED/none；其余形态必须携带完整唯一正证。
+type GreetingResultMutation struct {
+	Rejected        bool
+	PlatformUserRef string
+	PositionRef     string
+	ConversationRef string
+	Text            string
+	ContentHash     string
+	ObservedAtMs    int64
+}
+
+// applyGreetingResultTx 与通用 result WAL 事务共用同一个 tx。它不终结
+// Cmd/EffectIntent；调用方在同一事务中完成那两项写入。
+func applyGreetingResultTx(
+	tx *gorm.DB,
+	intent *EffectIntent,
+	mutation GreetingResultMutation,
+	at time.Time,
+) (*Message, error) {
+	if intent == nil || intent.Primitive != primitiveChatSendGreeting || intent.TargetRef == "" {
+		return nil, ErrEffectIntentConflict
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", intent.TargetRef).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrCandidateProfileNotFound
+		}
+		return nil, err
+	}
+	if profile.Platform != intent.Platform || profile.AccountRef != intent.AccountRef {
+		return nil, ErrEffectIntentConflict
+	}
+
+	if mutation.Rejected {
+		if mutation.PlatformUserRef != "" || mutation.PositionRef != "" || mutation.ConversationRef != "" ||
+			mutation.Text != "" || mutation.ContentHash != "" || mutation.ObservedAtMs != 0 {
+			return nil, ErrEffectIntentConflict
+		}
+		if profile.MainStatus != CandidateProfileSelected || profile.EndReason != nil ||
+			profile.SuccessfulGreetingIntentID != nil || profile.ConversationRef != nil || profile.GreetedAt != nil {
+			return nil, ErrCandidateProfileState
+		}
+		reason := CandidateProfileEndGreetingFailed
+		updated := tx.Model(&CandidateProfile{}).
+			Where("profile_id = ? AND main_status = ? AND end_reason IS NULL AND successful_greeting_intent_id IS NULL AND conversation_ref IS NULL AND greeted_at IS NULL",
+				profile.ProfileID, CandidateProfileSelected).
+			Updates(map[string]any{"main_status": CandidateProfileEnded, "end_reason": reason})
+		if updated.Error != nil {
+			return nil, updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return nil, ErrCandidateProfileState
+		}
+		return nil, nil
+	}
+
+	if mutation.PlatformUserRef == "" || mutation.PositionRef == "" || mutation.ConversationRef == "" ||
+		mutation.Text == "" || mutation.ContentHash == "" || intent.SendFingerprint != mutation.ContentHash ||
+		profile.PlatformUserRef != mutation.PlatformUserRef || profile.PositionRef != mutation.PositionRef {
+		return nil, ErrEffectIntentConflict
+	}
+	if profile.MainStatus == CandidateProfileGreeted && profile.SuccessfulGreetingIntentID != nil &&
+		*profile.SuccessfulGreetingIntentID == intent.IntentID && profile.ConversationRef != nil &&
+		*profile.ConversationRef == mutation.ConversationRef {
+		var existing Message
+		if err := tx.First(&existing, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
+			return nil, err
+		}
+		return &existing, nil
+	}
+	if profile.MainStatus != CandidateProfileSelected || profile.EndReason != nil ||
+		profile.SuccessfulGreetingIntentID != nil || profile.ConversationRef != nil || profile.GreetedAt != nil {
+		return nil, ErrCandidateProfileState
+	}
+
+	var candidate Candidate
+	if err := tx.First(&candidate, "platform = ? AND platform_user_ref = ?",
+		profile.Platform, profile.PlatformUserRef).Error; err != nil {
+		return nil, err
+	}
+	key := ConversationKey{
+		Platform: profile.Platform, AccountRef: profile.AccountRef, ConversationRef: mutation.ConversationRef,
+	}
+	var conversation Conversation
+	err := tx.Where(conversationWhere(key), conversationArgs(key)...).First(&conversation).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		peerName := ""
+		if candidate.DisplayName != nil {
+			peerName = *candidate.DisplayName
+		}
+		conversation = Conversation{
+			Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
+			PlatformUserRef: profile.PlatformUserRef, PeerDisplayName: peerName,
+			TrackingState: TrackingAdopted, AdoptedBoundarySeq: 0, LastMessageSeq: 0,
+		}
+		if err := tx.Create(&conversation).Error; err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	} else {
+		if conversation.PlatformUserRef != profile.PlatformUserRef || conversation.LastMessageSeq != 0 ||
+			conversation.TrackingState != TrackingUntracked {
+			return nil, ErrCandidateProfileState
+		}
+	}
+
+	var tracked TrackedIntent
+	err = tx.Where(conversationWhere(key), conversationArgs(key)...).First(&tracked).Error
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrCandidateProfileState
+	}
+	adoptedAt := at
+	tracked = TrackedIntent{
+		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
+		Status: TrackingAdopted, RequestedBy: greetingTrackedRequestedBy,
+		RequestedAt: at, AdoptedAt: &adoptedAt,
+	}
+	if err := tx.Create(&tracked).Error; err != nil {
+		return nil, err
+	}
+
+	intentID := intent.IntentID
+	text := mutation.Text
+	var observedAt *int64
+	if mutation.ObservedAtMs > 0 {
+		value := mutation.ObservedAtMs
+		observedAt = &value
+	}
+	message := &Message{
+		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
+		Seq: 1, Direction: "out", Kind: "text", ContentHash: mutation.ContentHash,
+		Text: &text, TsApproxMs: observedAt, Origin: "self", OutboundIntentID: &intentID,
+	}
+	if err := tx.Create(message).Error; err != nil {
+		return nil, err
+	}
+	conversationUpdates := map[string]any{
+		"tracking_state": TrackingAdopted, "adopted_boundary_seq": int64(0),
+		"last_message_seq": int64(1), "last_message_direction": "out",
+		"last_message_kind": "text", "last_message_preview": mutation.Text,
+		"last_synced_at": at,
+	}
+	if err := tx.Model(&Conversation{}).Where(conversationWhere(key), conversationArgs(key)...).
+		Updates(conversationUpdates).Error; err != nil {
+		return nil, err
+	}
+
+	greetedAt := at
+	profileUpdated := tx.Model(&CandidateProfile{}).
+		Where("profile_id = ? AND main_status = ? AND end_reason IS NULL AND successful_greeting_intent_id IS NULL AND conversation_ref IS NULL AND greeted_at IS NULL",
+			profile.ProfileID, CandidateProfileSelected).
+		Updates(map[string]any{
+			"main_status":                   CandidateProfileGreeted,
+			"successful_greeting_intent_id": intent.IntentID,
+			"conversation_ref":              mutation.ConversationRef,
+			"greeted_at":                    greetedAt,
+		})
+	if profileUpdated.Error != nil {
+		return nil, profileUpdated.Error
+	}
+	if profileUpdated.RowsAffected != 1 {
+		return nil, ErrCandidateProfileState
+	}
+	conversationRef := mutation.ConversationRef
+	intent.ResultConversationRef = &conversationRef
+	intent.ResultMessageSeq = &message.Seq
+	intent.ResolvedAt = &at
+	return message, nil
+}
+
+type VerifiedGreetingSuccess struct {
+	Ref              string
+	ProfileID        string
+	PlatformUserRef  string
+	PositionRef      string
+	ConversationRef  string
+	Text             string
+	ContentHash      string
+	ObservedAtMs     int64
+	ResultBody       string
+	ResolutionReason string
+	At               time.Time
+}
+
+// ResolveGreetingVerified 把配套验证读的唯一正证送入与直接 result
+// 相同的 applyGreetingResultTx；Cmd、Intent、Profile、Conversation、
+// TrackedIntent、Message 在同一个 SQLite 事务里收束。
+func (s *Store) ResolveGreetingVerified(req VerifiedGreetingSuccess) (*Message, error) {
+	if req.At.IsZero() {
+		req.At = time.Now()
+	}
+	if req.Ref == "" || req.ProfileID == "" || req.PlatformUserRef == "" || req.PositionRef == "" ||
+		req.ConversationRef == "" || req.Text == "" || req.ContentHash == "" {
+		return nil, errors.New("招呼验证成功缺少关联字段")
+	}
+	var message *Message
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", req.Ref).Error; err != nil {
+			return err
+		}
+		if cmd.IntentID == "" {
+			return ErrRecoveryStateConflict
+		}
+		if cmd.Status == CmdOk || cmd.Status == CmdResolvedOk {
+			var existing Message
+			if err := tx.First(&existing, "outbound_intent_id = ?", cmd.IntentID).Error; err != nil {
+				return err
+			}
+			message = &existing
+			return nil
+		}
+		if cmd.Status != CmdVerifying && cmd.Status != CmdPendingReconcile && cmd.Status != CmdSuspect {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.TargetRef != req.ProfileID || intent.SendFingerprint != req.ContentHash ||
+			intent.Primitive != primitiveChatSendGreeting {
+			return ErrEffectIntentConflict
+		}
+		created, err := applyGreetingResultTx(tx, &intent, GreetingResultMutation{
+			PlatformUserRef: req.PlatformUserRef, PositionRef: req.PositionRef,
+			ConversationRef: req.ConversationRef, Text: req.Text,
+			ContentHash: req.ContentHash, ObservedAtMs: req.ObservedAtMs,
+		}, req.At)
+		if err != nil {
+			return err
+		}
+		message = created
+		cmd.Status = CmdOk
+		cmd.ResultBody = req.ResultBody
+		cmd.SuspectReason = req.ResolutionReason
+		cmd.SideEffect = "confirmed"
+		cmd.TerminalAt = &req.At
+		cmd.VerificationChildMsgID = ""
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		intent.Status = EffectIntentOk
+		intent.SuspectReason = req.ResolutionReason
+		intent.ResolvedAt = &req.At
+		return tx.Save(&intent).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return message, nil
 }

@@ -438,6 +438,7 @@ type EffectResultMutation struct {
 	IntentStatus EffectIntentStatus
 	Append       bool
 	Retract      bool
+	Greeting     *GreetingResultMutation
 	Text         string
 	ContentHash  string
 	ObservedAtMs int64
@@ -544,30 +545,41 @@ func (s *Store) ApplyResultMessage(
 			intent.Status = plan.Effect.IntentStatus
 			intent.SuspectReason = plan.Effect.Reason
 			intent.ResultMsgID = resultMsgID
+			effectAt := time.Now()
 			if plan.Effect.Append && plan.Effect.Retract {
+				return ErrEffectIntentConflict
+			}
+			if plan.Effect.Greeting != nil && (plan.Effect.Append || plan.Effect.Retract) {
 				return ErrEffectIntentConflict
 			}
 			if plan.Effect.Append {
 				message, err := appendOutboundMessageTx(tx, &intent, plan.Effect.Text,
-					plan.Effect.ContentHash, plan.Effect.ObservedAtMs, time.Now())
+					plan.Effect.ContentHash, plan.Effect.ObservedAtMs, effectAt)
 				if err != nil {
 					return err
 				}
 				intent.ResultMessageSeq = &message.Seq
 				intent.SendFingerprint = plan.Effect.ContentHash
-				now := time.Now()
-				intent.ResolvedAt = &now
+				intent.ResolvedAt = &effectAt
 			}
 			if plan.Effect.Retract {
-				if err := retractOutboundMessageTx(tx, &intent, time.Now()); err != nil {
+				if err := retractOutboundMessageTx(tx, &intent, effectAt); err != nil {
 					return err
 				}
 				intent.ResultMessageSeq = nil
 			}
+			if plan.Effect.Greeting != nil {
+				message, err := applyGreetingResultTx(tx, &intent, *plan.Effect.Greeting, effectAt)
+				if err != nil {
+					return err
+				}
+				if message != nil {
+					intent.ResultMessageSeq = &message.Seq
+				}
+			}
 			if plan.Effect.IntentStatus == EffectIntentFailed || plan.Effect.IntentStatus == EffectIntentSuspect ||
 				plan.Effect.IntentStatus == EffectIntentResolvedOk || plan.Effect.IntentStatus == EffectIntentResolvedFailed {
-				now := time.Now()
-				intent.ResolvedAt = &now
+				intent.ResolvedAt = &effectAt
 			}
 			if err := tx.Save(&intent).Error; err != nil {
 				return err

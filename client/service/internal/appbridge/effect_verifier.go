@@ -14,8 +14,8 @@ import (
 
 const verificationMaxPages = 32
 
-// EffectVerifier 通过正式 chat.readThread 原语消解 chat.sendMessage
-// 歧义。它只比较 generated 结构化消息字段，不解析 evidence/DOM。
+// EffectVerifier 通过每个真实 SX metadata 指定的正式读取原语消解歧义。
+// 它只比较 generated 结构化字段，不解析 evidence/DOM。
 type EffectVerifier struct {
 	Dispatcher *dispatch.Dispatcher
 }
@@ -24,6 +24,17 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 	if v.Dispatcher == nil {
 		return dispatch.VerificationObservation{}, errors.New("dispatcher 不能为空")
 	}
+	switch req.Command.Name {
+	case protocol.PrimChatSendMessage:
+		return v.verifySendMessage(ctx, req)
+	case protocol.PrimChatSendGreeting:
+		return v.verifyGreeting(ctx, req)
+	default:
+		return dispatch.VerificationObservation{}, errors.New("验证请求不是已支持的真实副作用意图")
+	}
+}
+
+func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {
 	if req.Command.Name != protocol.PrimChatSendMessage || req.Args.ConversationRef == "" ||
 		len(req.Guards.ExpectedTail) == 0 {
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendMessage 意图")
@@ -92,6 +103,47 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 		cursor = next
 	}
 	return dispatch.VerificationObservation{}, errors.New("验证分页超过上限")
+}
+
+func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {
+	if req.GreetingArgs == nil || req.Command.Name != protocol.PrimChatSendGreeting ||
+		req.GreetingArgs.PlatformUserRef == "" || req.GreetingArgs.PositionRef == "" ||
+		req.Intent.SendFingerprint == "" {
+		return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendGreeting 意图")
+	}
+	argsRaw, err := protocol.Encode(protocol.ChatReadGreetingOutcomeArgs{
+		PlatformUserRef: req.GreetingArgs.PlatformUserRef,
+		PositionRef:     req.GreetingArgs.PositionRef,
+		ContentHash:     req.Intent.SendFingerprint,
+	})
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	state, err := v.Dispatcher.RunVerificationRead(ctx, req.Command.MsgID, dispatch.DispatchRequest{
+		HandID: req.Command.HandID, Name: protocol.PrimChatReadGreetingOutcome, Args: argsRaw,
+		Context: &protocol.CmdContext{
+			Platform: req.Command.Platform, AccountRef: req.Command.AccountRef,
+			ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
+		},
+	})
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	dataRaw, err := resultData(state.Leaf)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	var data protocol.ChatReadGreetingOutcomeData
+	if err := json.Unmarshal(dataRaw, &data); err != nil {
+		return dispatch.VerificationObservation{}, fmt.Errorf("解析验证 readGreetingOutcome: %w", err)
+	}
+	if !data.Confirmed {
+		return dispatch.VerificationObservation{Reason: "本轮未取得唯一招呼正证"}, nil
+	}
+	return dispatch.VerificationObservation{
+		Confirmed: true, ContentHash: data.ContentHash, ConversationRef: data.ConversationRef,
+		ObservedAt: data.ObservedAt, Reason: "候选人、职位、新会话与服务端招呼唯一匹配",
+	}, nil
 }
 
 func matchingAnchorStarts(messages []protocol.ThreadMessage, anchors []protocol.MessageAnchor) []int {

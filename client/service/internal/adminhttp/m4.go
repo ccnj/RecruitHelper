@@ -237,3 +237,83 @@ func candidateProofMatchesAccount(
 		proof.Leaf.HandID == account.BoundHandID &&
 		proof.Leaf.Session == sessionID && proof.Leaf.BootIDAtDispatch == bootID
 }
+
+type sendGreetingBody struct {
+	IntentID         string `json:"intentId"`
+	PreviousIntentID string `json:"previousIntentId"`
+	ProfileID        string `json:"profileId"`
+	Text             string `json:"text"`
+}
+
+func (a *API) sendGreeting(w http.ResponseWriter, r *http.Request) {
+	var body sendGreetingBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
+		return
+	}
+	receipt, err := a.disp.SendGreeting(dispatch.SendGreetingRequest{
+		IntentID: body.IntentID, PreviousIntentID: body.PreviousIntentID,
+		ProfileID: body.ProfileID, Text: body.Text,
+	})
+	if err != nil && receipt != nil && errors.Is(err, store.ErrCandidateGreetingCASConflict) {
+		writeJSON(w, http.StatusConflict, sendMessageConflictView{
+			Error: err.Error(), Current: sendMessageReceiptView(receipt),
+		})
+		return
+	}
+	if err != nil && receipt == nil {
+		writeGreetingError(w, err)
+		return
+	}
+	if receipt == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "招呼回执不可用"})
+		return
+	}
+	code := http.StatusOK
+	if receipt.Created {
+		code = http.StatusAccepted
+	}
+	view := sendMessageReceiptView(receipt)
+	if err != nil {
+		writeJSON(w, http.StatusAccepted, view)
+		return
+	}
+	writeJSON(w, code, view)
+}
+
+func (a *API) sendGreetingStatus(w http.ResponseWriter, r *http.Request) {
+	intentID := strings.TrimSpace(r.URL.Query().Get("intentId"))
+	profileID := strings.TrimSpace(r.URL.Query().Get("profileId"))
+	var receipt *dispatch.SendMessageReceipt
+	var err error
+	switch {
+	case intentID != "" && profileID != "":
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "intentId 与 profileId 只能二选一"})
+		return
+	case intentID != "":
+		receipt, err = a.disp.SendGreetingStatus(intentID)
+	case profileID != "":
+		receipt, err = a.disp.LatestGreetingStatus(profileID)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请提供 intentId 或 profileId"})
+		return
+	}
+	if err != nil {
+		writeGreetingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sendMessageReceiptView(receipt))
+}
+
+func writeGreetingError(w http.ResponseWriter, err error) {
+	status := http.StatusConflict
+	switch {
+	case errors.Is(err, store.ErrEffectIntentNotFound), errors.Is(err, store.ErrCandidateProfileNotFound):
+		status = http.StatusNotFound
+	case strings.Contains(err.Error(), "缺少有效的 intentId/profileId"),
+		strings.Contains(err.Error(), "发送文本不能为空"),
+		strings.Contains(err.Error(), "schema"), strings.Contains(err.Error(), "校验"):
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
