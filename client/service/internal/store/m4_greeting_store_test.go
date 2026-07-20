@@ -353,3 +353,76 @@ func TestGreetingTargetDoesNotPolluteConversationEffectHeadNamespace(t *testing.
 		t.Fatalf("greeting ProfileID 不得冒充会话 orphan/head: latest=%+v err=%v", latest, err)
 	}
 }
+
+func TestGreetingSuccessWriteFailureRollsBackWholeResultWAL(t *testing.T) {
+	s := openTest(t)
+	fixture := seedGreetingLedger(t, s, "profile-result-rollback")
+	now := time.Date(2026, 7, 20, 20, 0, 0, 0, time.UTC)
+	req := greetingIntentRequest(fixture, "intent-result-rollback", "", now)
+	req.Intent.SendFingerprint = "fingerprint-result-rollback"
+	created, err := s.CreateGreetingEffectIntentAndCmd(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forced := errors.New("forced greeting message create failure")
+	callbackName := "test:fail_greeting_result_message_create"
+	if err := s.db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Message" {
+			tx.AddError(forced)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer s.db.Callback().Create().Remove(callbackName)
+
+	_, err = s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-result-rollback",
+		"result",
+		fixture.HandID,
+		func(command *CmdRecord) (ResultCommandMutation, error) {
+			terminalAt := now.Add(time.Minute)
+			command.Status = CmdOk
+			command.TerminalAt = &terminalAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					Text:         "测试招呼",
+					ContentHash:  req.Intent.SendFingerprint,
+					Greeting: &GreetingResultMutation{
+						PlatformUserRef: "person-" + fixture.ProfileID,
+						PositionRef:     "position-" + fixture.ProfileID,
+						ConversationRef: "conversation-result-rollback",
+						Text:            "测试招呼",
+						ContentHash:     req.Intent.SendFingerprint,
+						ObservedAtMs:    terminalAt.UnixMilli(),
+					},
+				},
+			}, nil
+		},
+	)
+	if !errors.Is(err, forced) {
+		t.Fatalf("应返回注入的消息写失败: %v", err)
+	}
+
+	cmd, _ := s.CmdByMsgID(created.Command.MsgID)
+	intent, _ := s.EffectIntentByID(req.Intent.IntentID)
+	profile, _ := s.CandidateProfileByID(fixture.ProfileID)
+	if cmd == nil || cmd.Status != CmdQueued || intent == nil || intent.Status != EffectIntentDispatching ||
+		intent.ResultConversationRef != nil || intent.ResultMessageSeq != nil ||
+		profile == nil || profile.MainStatus != CandidateProfileSelected ||
+		profile.SuccessfulGreetingIntentID != nil || profile.ConversationRef != nil || profile.GreetedAt != nil {
+		t.Fatalf("结果事务失败后 Cmd/Intent/Profile 未整体回滚: cmd=%+v intent=%+v profile=%+v", cmd, intent, profile)
+	}
+	var processed, conversations, tracked, messages int64
+	_ = s.db.Model(&ProcessedMsg{}).Where("msg_id = ?", "result-result-rollback").Count(&processed).Error
+	_ = s.db.Model(&Conversation{}).Where("account_ref = ?", fixture.AccountRef).Count(&conversations).Error
+	_ = s.db.Model(&TrackedIntent{}).Where("account_ref = ?", fixture.AccountRef).Count(&tracked).Error
+	_ = s.db.Model(&Message{}).Where("account_ref = ?", fixture.AccountRef).Count(&messages).Error
+	if processed != 0 || conversations != 0 || tracked != 0 || messages != 0 {
+		t.Fatalf("结果事务失败泄漏业务/WAL 行: processed=%d conversations=%d tracked=%d messages=%d",
+			processed, conversations, tracked, messages)
+	}
+}
