@@ -678,13 +678,12 @@ function assertExpectedPrincipal(probe: ZhilianProbe, expected: string | undefin
 async function activeRecommendTab(): Promise<chrome.tabs.Tab> {
   const tabs = (await chrome.tabs.query({
     active: true,
-    lastFocusedWindow: true,
     url: TAB_QUERY,
   })).filter((tab) => tab.id !== undefined && tab.active === true && pageKindFromURL(tab.url) === 'recommend')
   if (tabs.length !== 1) {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '请在当前窗口打开唯一的智联推荐候选人详情',
+      '请在 Chrome 中打开唯一的当前激活智联推荐候选人详情',
       'manualOnly',
       'pageAbsent',
     )
@@ -736,7 +735,7 @@ export async function readZhilianCurrentCandidate(
   const snapshot = await runMain(tab.id, mainReadCurrentCandidate, [])
   ctx.checkpoint()
 
-  // 返回任何候选人数据前，必须仍是 last-focused window 的同一 active 推荐页，
+  // 返回任何候选人数据前，必须仍是所有 Chrome 窗口中唯一的同一 active 推荐页，
   // 并再次确证账号主体；切页/切号时丢弃刚才的私有读取结果。
   const latest = await activeRecommendTab()
   if (latest.id !== tab.id) {

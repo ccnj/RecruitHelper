@@ -1877,7 +1877,7 @@ test('candidate.readCurrent MAIN 对身份、绑定与职位歧义逐项失败�
   }
 })
 
-test('candidate.readCurrent 只用 last-focused active 推荐页且账号前后复核', async () => {
+test('candidate.readCurrent 只用跨窗口唯一 active 推荐页且账号前后复核', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = 'a'.repeat(64)
   const tab = {
@@ -1934,8 +1934,8 @@ test('candidate.readCurrent 只用 last-focused active 推荐页且账号前后�
     }, fingerprint)
     assert.equal(data.platformUserRef, 'fixture-user')
     assert.deepEqual(queryCalls, [
-      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
-      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
+      { active: true, url: 'https://rd6.zhaopin.com/*' },
+      { active: true, url: 'https://rd6.zhaopin.com/*' },
     ])
     assert.deepEqual(mainCalls, ['mainProbeZhilian', 'mainReadCurrentCandidate', 'mainProbeZhilian'])
     assert.equal(progress.at(-1)[1], 100)
