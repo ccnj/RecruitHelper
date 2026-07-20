@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
+	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +12,38 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestStoreLoggerDoesNotInterpolateOpaqueIdentity(t *testing.T) {
+	var output bytes.Buffer
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{
+		Logger: newStoreLogger(&output),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	if err := db.AutoMigrate(&Candidate{}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	const sentinel = "RAW-USER-REF-MUST-NOT-LEAK-3f6bd4"
+	var candidate Candidate
+	queryErr := db.First(&candidate, "platform = ? AND platform_user_ref = ?", "zhilian", sentinel).Error
+	if !errors.Is(queryErr, gorm.ErrRecordNotFound) {
+		t.Fatalf("应制造一条可记录的查询失败: %v", queryErr)
+	}
+	logged := output.String()
+	if logged == "" {
+		t.Fatal("测试必须实际捕获一条 GORM warn 日志")
+	}
+	if strings.Contains(logged, sentinel) {
+		t.Fatalf("参数化查询日志泄漏不透明平台身份: %s", logged)
+	}
+}
 
 // 并发 MutateCmd 不丢更新、不撞 SQLITE_BUSY(红队 F1 回归:SetMaxOpenConns(1) 串行化)。
 func TestConcurrentMutateNoBusyNoLost(t *testing.T) {

@@ -5,6 +5,8 @@ package store
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -28,7 +30,7 @@ func Open(dataDir string) (*Store, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)",
 		filepath.Join(dataDir, "brain.db"))
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
+		Logger: newStoreLogger(os.Stderr),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("打开 SQLite: %w", err)
@@ -89,6 +91,18 @@ func Open(dataDir string) (*Store, error) {
 		}
 	}
 	return &Store{db: db}, nil
+}
+
+// newStoreLogger 保留错误/慢查询可见性，但永不把绑定参数插回 SQL。
+// Candidate 的不透明平台 userId 属于权威本机数据，不得因数据库错误进入日志。
+func newStoreLogger(writer io.Writer) gormlogger.Interface {
+	return gormlogger.New(log.New(writer, "\r\n", log.LstdFlags), gormlogger.Config{
+		SlowThreshold:             200 * time.Millisecond,
+		LogLevel:                  gormlogger.Warn,
+		IgnoreRecordNotFoundError: false,
+		ParameterizedQueries:      true,
+		Colorful:                  false,
+	})
 }
 
 // backfillConversationEffectHeads 只为尚无 head 的旧数据建立一次持久
