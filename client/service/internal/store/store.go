@@ -63,6 +63,7 @@ func Open(dataDir string) (*Store, error) {
 		&Candidate{},
 		&CandidateProfile{},
 		&EffectIntent{},
+		&CandidateGreetingHead{},
 		&ConversationEffectHead{},
 		&CmdRecord{},
 		&ProcessedMsg{},
@@ -103,7 +104,8 @@ func backfillConversationEffectHeads(db *gorm.DB) error {
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		var intents []EffectIntent
-		if err := tx.Order("platform, account_ref, target_ref, created_at, intent_id").Find(&intents).Error; err != nil {
+		if err := tx.Where("primitive = ?", primitiveChatSendMessage).
+			Order("platform, account_ref, target_ref, created_at, intent_id").Find(&intents).Error; err != nil {
 			return err
 		}
 		candidates := make(map[key]candidate)

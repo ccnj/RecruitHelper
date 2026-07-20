@@ -22,6 +22,11 @@ var (
 	ErrEffectIntentHeadCorrupt    = errors.New("会话副作用 head 缺失或损坏")
 )
 
+const (
+	primitiveChatSendMessage  = "chat.sendMessage"
+	primitiveChatSendGreeting = "chat.sendGreeting"
+)
+
 // SQLite INTEGER 是有符号 64 位。Generation 在 Go 中用 uint64
 // 表达非负值，但不允许跨过 SQLite 可持久化的上界。
 const maxSQLiteEffectHeadGeneration = uint64(1<<63 - 1)
@@ -283,7 +288,8 @@ func effectIntentHeadTx(
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		var orphaned int64
 		if countErr := tx.Model(&EffectIntent{}).
-			Where("platform = ? AND account_ref = ? AND target_ref = ?", platform, accountRef, targetRef).
+			Where("platform = ? AND account_ref = ? AND target_ref = ? AND primitive = ?",
+				platform, accountRef, targetRef, primitiveChatSendMessage).
 			Count(&orphaned).Error; countErr != nil {
 			return nil, nil, countErr
 		}

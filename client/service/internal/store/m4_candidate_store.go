@@ -8,6 +8,7 @@ import (
 )
 
 var (
+	ErrCandidateProfileNotFound   = errors.New("候选人档案不存在")
 	ErrCandidateAlreadyProfiled   = errors.New("候选人已有非淘汰档案")
 	ErrCandidateProfileState      = errors.New("候选人档案状态损坏")
 	ErrCandidateProfileIDConflict = errors.New("profileId 已被其他候选人档案占用")

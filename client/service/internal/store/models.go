@@ -150,13 +150,16 @@ type EffectIntent struct {
 
 	// SendFingerprint 是平台无关的目标消息指纹，只由契约 data
 	// 与验证读的结构化字段比较，禁止解析 evidence/DOM 作裁决。
-	SendFingerprint  string
-	ResultMsgID      string
-	ResultMessageSeq *int64
-	SuspectReason    string
-	ResolvedAt       *time.Time
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	SendFingerprint string
+	// ResultConversationRef 仅供建立新关系的 effectful 原语保存结果会话；
+	// chat.sendMessage 的 TargetRef 本身就是既有会话，因此保持 NULL。
+	ResultConversationRef *string
+	ResultMsgID           string
+	ResultMessageSeq      *int64
+	SuspectReason         string
+	ResolvedAt            *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // ConversationEffectHead 是会话副作用意图的持久单调 head。CAS 只比较
@@ -280,6 +283,18 @@ type CandidateProfile struct {
 	GreetedAt                  *time.Time
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
+
+	GreetingHead *CandidateGreetingHead `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+}
+
+// CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。
+// 它不是第二套 intent 账本；LatestIntentID 永远指向既有 EffectIntent。
+type CandidateGreetingHead struct {
+	ProfileID      string `gorm:"primaryKey"`
+	LatestIntentID string `gorm:"not null;uniqueIndex"`
+	Generation     uint64 `gorm:"not null"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // TrackingState 表示列表索引是否已被脑正式选入对账范围。
