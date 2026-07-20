@@ -27,3 +27,7 @@ func NewBootID() string { return "b-" + randHex(8) }
 // NewAccountRef:脑为本地平台账号签发的稳定不透明引用。它不编码平台 userId，
 // 同一引用必须与 platform 维度共同使用。
 func NewAccountRef() string { return "a-" + randHex(8) }
+
+// NewProfileID:脑为候选人×职位档案签发的稳定不透明引用。
+// 它不编码平台、账号、候选人或职位信息。
+func NewProfileID() string { return "p-" + randHex(12) }
