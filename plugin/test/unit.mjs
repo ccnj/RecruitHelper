@@ -146,6 +146,29 @@ function sendMessageCommand(ref, idemKey, overrides = {}) {
   }
 }
 
+function sendGreetingCommand(ref, idemKey, overrides = {}) {
+  return {
+    name: Primitive.ChatSendGreeting,
+    ver: 1,
+    context: {
+      platform: 'zhilian',
+      accountRef: 'account-fixture',
+      expectedPrincipalFingerprint: 'a'.repeat(64),
+    },
+    args: {
+      platformUserRef: 'fixture-user-greeting-orchestration',
+      positionRef: 'fixture-job-greeting-orchestration',
+      text: '你好',
+    },
+    guards: { expectUnestablished: true },
+    idemKey,
+    deadline: Date.now() + 10_000,
+    execBudgetMs: 8_000,
+    leaseMs: 30_000,
+    ...overrides,
+  }
+}
+
 function results(frames, ref) {
   return frames.filter((frame) => frame.kind === Kind.Result && frame.body.ref === ref)
 }
@@ -2051,6 +2074,9 @@ function installM4GreetingFixture(options = {}) {
     textareaVisible: options.existingModal === true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
+    detailCount: options.detailCount ?? 1,
+    listItemCount: options.listItemCount ?? 1,
+    greetingButtonCount: options.greetingButtonCount ?? 1,
     openClicks: 0,
     optionClicks: 0,
     editClicks: 0,
@@ -2115,8 +2141,12 @@ function installM4GreetingFixture(options = {}) {
     opener.form = {}
     opener.type = 'submit'
   }
+  const secondOpener = new FixtureHTMLElement('打招呼')
   const detail = new FixtureHTMLElement()
-  detail.querySelectorAll = (selector) => selector === 'button[type="button"]' ? [opener] : []
+  detail.querySelectorAll = (selector) => selector === 'button[type="button"]'
+    ? [opener, secondOpener].slice(0, state.greetingButtonCount)
+    : []
+  const secondDetail = new FixtureHTMLElement()
 
   const aiOption = new FixtureHTMLElement('AI 招呼')
   aiOption.querySelector = (selector) => selector === '.ai-greeting-modal__ai-icon' ? {} : null
@@ -2190,8 +2220,10 @@ function installM4GreetingFixture(options = {}) {
       if (state.throwOnReadAfterFinal && state.finalClicks > 0) {
         throw new Error('最终 click 后不得继续读页面')
       }
-      if (selector === '.new-shortcut-resume__modal') return [detail]
-      if (selector === '[role="listitem"]') return [listItem]
+      if (selector === '.new-shortcut-resume__modal') {
+        return [detail, secondDetail].slice(0, state.detailCount)
+      }
+      if (selector === '[role="listitem"]') return state.listItemCount === 0 ? [] : [listItem]
       if (selector === '.ai-greeting-modal') return state.modalVisible ? [modal] : []
       return []
     },
@@ -2208,12 +2240,139 @@ function installM4GreetingFixture(options = {}) {
       phase,
     )
   return {
+    detail,
     invoke,
+    listItem,
+    owner,
     refs,
     restore() { Object.assign(globalThis, original) },
+    sendButton,
     state,
     text,
     textarea,
+  }
+}
+
+function installM4GreetingOrchestrationFixture(options = {}) {
+  const original = {
+    chrome: globalThis.chrome,
+    setTimeout: globalThis.setTimeout,
+  }
+  const fingerprint = 'a'.repeat(64)
+  const refs = {
+    user: 'fixture-user-greeting-orchestration',
+    job: 'fixture-job-greeting-orchestration',
+    conversation: 'fixture-conversation-greeting-orchestration',
+  }
+  const text = '你好'
+  const contentHash = createHash('sha256').update(text).digest('hex')
+  const state = {
+    phases: [],
+    proofCalls: 0,
+    finalClicks: 0,
+    barriers: 0,
+  }
+  const tabCount = options.tabCount ?? 1
+  const tabs = Array.from({ length: tabCount }, (_, index) => ({
+    id: 701 + index,
+    active: index === 0,
+    status: 'complete',
+    url: `https://rd6.zhaopin.com/app/recommend?resumeNumber=private-${index}&jobNumber=private`,
+  }))
+  const currentData = (tabId) => ({
+    platformUserRef: options.currentUser ?? refs.user,
+    displayName: '合成候选人',
+    positionRef: options.currentJob ?? refs.job,
+    positionTitle: '合成职位',
+    contactState: options.contactState ?? 'unestablished',
+    ...(options.currentDataByTab?.(tabId) ?? {}),
+  })
+  const phaseResult = (phase) => {
+    const configured = options[`${phase}Result`]
+    if (configured === 'throw') throw new Error(`fixture-${phase}-death`)
+    if (configured !== undefined) return structuredClone(configured)
+    if (phase === 'prepare') return { status: 'prepared' }
+    if (phase === 'preflight') return { status: 'ready' }
+    return { status: 'clicked' }
+  }
+
+  // 压缩 production observer 的等待，不触碰 Dispatcher 的秒级 deadline/execBudget timer。
+  globalThis.setTimeout = (callback, delay, ...args) => original.setTimeout(
+    callback,
+    delay === 250 || delay === 120 ? 0 : delay,
+    ...args,
+  )
+  globalThis.chrome = {
+    tabs: {
+      async query() { return tabs.map((tab) => ({ ...tab })) },
+      async get(id) {
+        const tab = tabs.find((candidate) => candidate.id === id)
+        if (!tab) throw new Error('fixture-tab-absent')
+        return { ...tab }
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+          imListVisible: false,
+        } }]
+        if (func.name === 'mainReadCurrentCandidate') return [{ result: {
+          status: 'ready', data: currentData(target.tabId),
+        } }]
+        if (func.name === 'mainSendGreetingOnce') {
+          const phase = args.at(-1)
+          state.phases.push(phase)
+          const result = phaseResult(phase)
+          if (phase === 'commit' && result.status === 'clicked') state.finalClicks += 1
+          return [{ result }]
+        }
+        if (func.name === 'mainReadGreetingProof') {
+          state.proofCalls += 1
+          if (options.proofMode === 'throw') throw new Error('fixture-observer-death')
+          if (options.proofMode === 'negative') return [{ result: { confirmed: false } }]
+          if (options.proofMode === 'unstable') return [{ result: {
+            confirmed: true,
+            conversationRef: refs.conversation,
+            contentHash,
+            proofToken: (state.proofCalls % 2 === 0 ? 'b' : 'c').repeat(64),
+          } }]
+          return [{ result: {
+            confirmed: true,
+            conversationRef: refs.conversation,
+            contentHash,
+            proofToken: 'b'.repeat(64),
+          } }]
+        }
+        throw new Error(`unexpected MAIN ${func.name}`)
+      },
+    },
+  }
+
+  return {
+    contentHash,
+    fingerprint,
+    refs,
+    state,
+    text,
+    context() {
+      return {
+        signal: new AbortController().signal,
+        cmdMsgId: 'send-greeting-matrix',
+        deadlineMs: Date.now() + 60_000,
+        irreversibleNotAfterMs: Date.now() + 60_000,
+        commandContext: undefined,
+        guards: undefined,
+        checkpoint() {},
+        async beforeSideEffect() {
+          state.barriers += 1
+          if (options.barrierThrows) throw new Error('fixture-attempting-write-death')
+        },
+        async progress() {},
+      }
+    },
+    restore() { Object.assign(globalThis, original) },
   }
 }
 
@@ -2289,6 +2448,85 @@ test('M4 招呼 preflight 后世界变化时 commit 零最终动作', async () =
   }
 })
 
+test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部失败关闭', async () => {
+  const beforePrepare = [
+    {
+      label: '零详情目标',
+      options: { detailCount: 0 },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '多个详情目标',
+      options: { detailCount: 2 },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '已有关系或关系无法确证',
+      options: { greetingButtonCount: 0 },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '多个招呼入口',
+      options: { greetingButtonCount: 2 },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '候选人绑定变化',
+      mutate(fixture) { fixture.owner._props.source.userMasterId = 'fixture-other-user' },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '职位绑定变化',
+      mutate(fixture) { fixture.owner.$store.state.talent.activeJob.jobNumber = 'fixture-other-job' },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+  ]
+  for (const scenario of beforePrepare) {
+    const fixture = installM4GreetingFixture(scenario.options)
+    try {
+      scenario.mutate?.(fixture)
+      assert.deepEqual(await fixture.invoke('prepare'), {
+        status: 'failed', reason: scenario.expectedReason,
+      }, scenario.label)
+      assert.equal(fixture.state.openClicks, 0, `${scenario.label}: 不得打开编辑器`)
+      assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 不得调用最终发送`)
+      assert.ok(fixture.state.finalClicks + fixture.state.candidateVisibleActions <= 1,
+        `${scenario.label}: 候选人可见动作不得超过一次`)
+    } finally {
+      fixture.restore()
+    }
+  }
+
+  for (const scenario of [
+    {
+      label: 'prepare 后候选人变化',
+      mutate(fixture) { fixture.owner._props.source.userMasterId = 'fixture-other-user' },
+    },
+    {
+      label: 'prepare 后职位变化',
+      mutate(fixture) { fixture.owner.$root._route.query.jobNumber = 'fixture-other-job' },
+    },
+    {
+      label: 'prepare 后关系入口消失',
+      mutate(fixture) { fixture.state.greetingButtonCount = 0 },
+    },
+  ]) {
+    const fixture = installM4GreetingFixture()
+    try {
+      assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' }, scenario.label)
+      scenario.mutate(fixture)
+      assert.deepEqual(await fixture.invoke('preflight'), {
+        status: 'failed', reason: 'relationship_changed',
+      }, scenario.label)
+      assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: attempting 前必须零最终动作`)
+      assert.ok(fixture.state.finalClicks + fixture.state.candidateVisibleActions <= 1,
+        `${scenario.label}: 候选人可见动作不得超过一次`)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
 test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务端我方招呼', async () => {
   const original = { window: globalThis.window, document: globalThis.document }
   const refs = {
@@ -2334,6 +2572,29 @@ test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务�
     assert.deepEqual(second, first, '同一服务端 id 的两次正采样必须稳定')
     assert.equal(pageCalls, 2)
 
+    const onlySession = structuredClone(sessions[0])
+    sessions.splice(0)
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '零会话不得构成正证',
+    )
+    sessions.push(onlySession, { ...onlySession, sessionId: 'fixture-conversation-greeting-other' })
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '多个候选人职位会话不得任取一个认领',
+    )
+    sessions.splice(1)
+
+    const onlyRow = structuredClone(rows[0])
+    rows.splice(0)
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '唯一会话中零条同 hash 服务端招呼不得构成正证',
+    )
+    rows.push(onlyRow)
     rows.push({ ...rows[0], idServer: 'fixture-server-greeting-duplicate' })
     assert.deepEqual(
       await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
@@ -2349,6 +2610,206 @@ test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务�
     )
   } finally {
     Object.assign(globalThis, original)
+  }
+})
+
+test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系时停在 attempting 前', async () => {
+  const scenarios = [
+    { label: '零目标', options: { tabCount: 0 }, code: ErrorCode.CtxNotReady },
+    { label: '多个目标', options: { tabCount: 2 }, code: ErrorCode.ElementUnresolved },
+    {
+      label: '候选人变化',
+      options: { currentUser: 'fixture-other-user' },
+      code: ErrorCode.GuardFailed,
+    },
+    {
+      label: '职位变化',
+      options: { currentJob: 'fixture-other-job' },
+      code: ErrorCode.GuardFailed,
+    },
+    {
+      label: '已有关系',
+      options: { contactState: 'established' },
+      code: ErrorCode.GuardFailed,
+    },
+    {
+      label: '关系无法确证',
+      options: { contactState: 'unknown' },
+      code: ErrorCode.GuardFailed,
+    },
+  ]
+  for (const scenario of scenarios) {
+    const fixture = installM4GreetingOrchestrationFixture(scenario.options)
+    try {
+      await assert.rejects(
+        sendZhilianGreeting(
+          { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+          { expectUnestablished: true },
+          fixture.context(),
+          fixture.fingerprint,
+        ),
+        (error) => error instanceof ZhilianPlatformError && error.code === scenario.code,
+        scenario.label,
+      )
+      assert.equal(fixture.state.barriers, 0, `${scenario.label}: 不得进入 attempting`)
+      assert.deepEqual(fixture.state.phases, [], `${scenario.label}: 不得调用 greeting evaluator`)
+      assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 不得调用候选人可见发送`)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招呼动作', async () => {
+  for (const scenario of [
+    { label: '正证不足', proofMode: 'negative', confirmed: false, proofCalls: 1 },
+    { label: '稳定正证', proofMode: 'positive', confirmed: true, proofCalls: 2 },
+  ]) {
+    const fixture = installM4GreetingOrchestrationFixture({ proofMode: scenario.proofMode })
+    try {
+      const result = await readZhilianGreetingOutcome(
+        {
+          platformUserRef: fixture.refs.user,
+          positionRef: fixture.refs.job,
+          contentHash: fixture.contentHash,
+        },
+        fixture.context(),
+        fixture.fingerprint,
+      )
+      assert.equal(result.confirmed, scenario.confirmed, scenario.label)
+      assert.equal(fixture.state.proofCalls, scenario.proofCalls, scenario.label)
+      assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 验证读不得触发招呼动作`)
+      assert.deepEqual(fixture.state.phases, [], `${scenario.label}: 验证读不得调用动作 evaluator`)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('M4 招呼 attempting 前后与动作后故障均由原 witness 内核收束且不补动作', async () => {
+  const scenarios = [
+    {
+      key: 'pre-attempting',
+      label: 'attempting 前死亡',
+      options: { preflightResult: 'throw' },
+      expectedCode: ErrorCode.InternalHand,
+      expectedClicks: 0,
+      witnessed: false,
+    },
+    {
+      key: 'post-attempting-pre-action',
+      label: 'attempting 后动作前死亡',
+      options: { commitResult: 'throw' },
+      expectedCode: ErrorCode.InternalHand,
+      expectedClicks: 0,
+      witnessed: true,
+    },
+    {
+      key: 'post-action-pre-observer',
+      label: '动作后 observer 前死亡',
+      options: { proofMode: 'throw' },
+      expectedCode: ErrorCode.PostconditionUnconfirmed,
+      expectedClicks: 1,
+      witnessed: true,
+    },
+    {
+      key: 'negative-proof',
+      label: '动作后正证 false',
+      options: { proofMode: 'negative' },
+      expectedCode: ErrorCode.PostconditionUnconfirmed,
+      expectedClicks: 1,
+      witnessed: true,
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    const fixture = installM4GreetingOrchestrationFixture(scenario.options)
+    const ref = `sx-m4-${scenario.key}`
+    const idemKey = `ik1:zhilian:account-fixture:chat.sendGreeting:profile-fixture:${ref}`
+    const storage = memoryWitnessStorage()
+    const witness = new WitnessStore(storage, Date.now, () => `witness-${ref}`)
+    await witness.initialize()
+    const out = recorder()
+    const commitKeys = []
+    let resultID = 0
+    register({
+      name: Primitive.ChatSendGreeting,
+      class: 'effectful',
+      async handler(args, context) {
+        try {
+          const data = await sendZhilianGreeting(
+            args,
+            context.guards,
+            context,
+            context.commandContext?.expectedPrincipalFingerprint,
+          )
+          return {
+            status: 'ok', data,
+            evidence: [{ type: 'outboundGreetingObserved' }],
+          }
+        } catch (error) {
+          if (!(error instanceof ZhilianPlatformError)) throw error
+          return {
+            status: 'failed',
+            error: {
+              code: error.code,
+              message: error.message,
+              retryable: error.retryable,
+              sideEffect: error.sideEffect,
+              ...(error.reason ? { data: { reason: error.reason } } : {}),
+            },
+          }
+        }
+      },
+    })
+    const durable = async (session, body, commitIdemKey) => {
+      commitKeys.push(commitIdemKey)
+      const envelope = {
+        proto: 1,
+        kind: 'result',
+        msgId: `m4-matrix-result-${++resultID}`,
+        session,
+        ts: Date.now(),
+        attempt: 1,
+        body,
+      }
+      if (commitIdemKey) await witness.commitAndEnqueue(commitIdemKey, envelope)
+      else await witness.enqueueResult(envelope)
+      out.send(Kind.Result, session, body)
+      return 'sent'
+    }
+    try {
+      const dispatcher = new Dispatcher(out.send, undefined, witness, durable)
+      await dispatcher.handleCmd(ref, 's', 's', sendGreetingCommand(ref, idemKey))
+      await eventually(() => results(out.frames, ref).length === 1, `${scenario.label}: 未返回唯一终局`)
+      const terminal = results(out.frames, ref)[0].body
+      assert.equal(terminal.status, ResultStatus.Failed, scenario.label)
+      assert.equal(terminal.error.code, scenario.expectedCode, scenario.label)
+      assert.equal(fixture.state.finalClicks, scenario.expectedClicks, scenario.label)
+      assert.ok(fixture.state.finalClicks <= 1, `${scenario.label}: 候选人可见发送不得超过一次`)
+      assert.deepEqual(
+        fixture.state.phases,
+        scenario.key === 'pre-attempting'
+          ? ['prepare', 'preflight']
+          : ['prepare', 'preflight', 'commit'],
+        `${scenario.label}: 故障注入点未命中预期 evaluator phase`,
+      )
+      assert.deepEqual(commitKeys, [scenario.witnessed ? idemKey : undefined], scenario.label)
+      const journal = storage.state[`journal:${idemKey}`]
+      if (scenario.witnessed) {
+        assert.equal(journal.state, 'committed', `${scenario.label}: attempting 必须终局化`)
+        assert.deepEqual(journal.result, terminal, `${scenario.label}: journal 必须保存同一终局`)
+      } else {
+        assert.equal(journal, undefined, `${scenario.label}: barrier 前不得创建 journal`)
+      }
+      if (scenario.options.proofMode) {
+        assert.ok(fixture.state.proofCalls > 0, `${scenario.label}: 必须真的进入验证读`)
+        assert.equal(fixture.state.finalClicks, 1,
+          `${scenario.label}: 阴性验证不得补第二次候选人可见动作`)
+      }
+    } finally {
+      fixture.restore()
+    }
   }
 })
 
