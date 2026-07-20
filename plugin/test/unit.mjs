@@ -2070,8 +2070,9 @@ function installM4GreetingFixture(options = {}) {
   const text = '你好'
   const state = {
     modalVisible: options.existingModal === true,
-    customSelected: options.existingModal === true,
+    customSelected: options.existingModal === true || options.customInitiallySelected === true,
     textareaVisible: options.existingModal === true,
+    editIconVisible: options.editIconInitiallyHidden !== true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
     detailCount: options.detailCount ?? 1,
@@ -2155,6 +2156,7 @@ function installM4GreetingFixture(options = {}) {
   customOption._onIntrinsicClick = () => {
     state.optionClicks += 1
     state.customSelected = true
+    state.editIconVisible = true
   }
   const textarea = new FixtureTextArea(options.existingDraft ?? '平台原始招呼')
   const editIcon = new FixtureHTMLElement()
@@ -2167,7 +2169,9 @@ function installM4GreetingFixture(options = {}) {
     if (selector === '.ai-greeting-modal__edit-area textarea') {
       return state.textareaVisible ? [textarea] : []
     }
-    if (selector === '.ai-greeting-modal__edit-icon') return state.textareaVisible ? [] : [editIcon]
+    if (selector === '.ai-greeting-modal__edit-icon') {
+      return state.textareaVisible || !state.editIconVisible ? [] : [editIcon]
+    }
     return []
   }
 
@@ -2393,6 +2397,23 @@ test('M4 招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只�
     assert.equal(fixture.state.checkboxClicks, 0)
     assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'],
       'preflight/commit 不得再次写入或恢复 textarea')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼 prepare 可单次点开已选自定义项后显露编辑入口', async () => {
+  const fixture = installM4GreetingFixture({
+    customInitiallySelected: true,
+    editIconInitiallyHidden: true,
+  })
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.state.optionClicks, 1, '已选自定义项只允许一次显露入口 click')
+    assert.equal(fixture.state.editClicks, 1)
+    assert.equal(fixture.textarea.value, fixture.text)
+    assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'])
+    assert.equal(fixture.state.finalClicks, 0, 'prepare 不得触碰最终发送')
   } finally {
     fixture.restore()
   }
