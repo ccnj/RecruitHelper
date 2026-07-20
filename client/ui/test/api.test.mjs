@@ -96,6 +96,8 @@ if (acc.accounts.length > 0) {
 // Electron preload 配置与鉴权头不依赖真脑，单独用 fetch 替身验证。
 const realFetch = globalThis.fetch
 const requests = []
+let forceSendConflict = false
+let forceSendRejected = false
 globalThis.window = {
   recruitHelper: { adminBase: 'http://127.0.0.1:18888', adminToken: 'test-memory-token' },
   setTimeout: globalThis.setTimeout,
@@ -104,6 +106,24 @@ globalThis.window = {
 globalThis.localStorage = { getItem: () => 'http://127.0.0.1:19999' }
 globalThis.fetch = async (url, init = {}) => {
   requests.push({ url: String(url), headers: new Headers(init.headers), body: init.body })
+  if (String(url).includes('/admin/messages/send')) {
+    if (forceSendRejected && init.method === 'POST') {
+      return new Response(JSON.stringify({ error: '账号身份未在当前手会话验证' }), { status: 409 })
+    }
+    if (forceSendConflict && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        error: '发送账本已更新',
+        current: {
+          intentId: 'intent-current', logicalDispatchId: 'logical-current', msgId: 'msg-current',
+          status: 'ok', commandStatus: 'ok', verificationAttempts: 0,
+        },
+      }), { status: 409 })
+    }
+    return new Response(JSON.stringify({
+      intentId: 'intent-stable', logicalDispatchId: 'logical-stable', msgId: 'msg-stable',
+      status: 'queued', commandStatus: 'sent', verificationAttempts: 0,
+    }), { status: init.method === 'POST' ? 202 : 200 })
+  }
   if (String(url).includes('/admin/messages')) return new Response('{"messages":[]}', { status: 200 })
   if (String(url).includes('/admin/accounts/bind')) return new Response('{"ok":true}', { status: 200 })
   if (String(url).includes('/admin/frames')) {
@@ -115,10 +135,31 @@ globalThis.fetch = async (url, init = {}) => {
   return new Response('{"ok":true,"proto":1,"contract":"test","activeHands":[]}', { status: 200 })
 }
 const authModuleUrl = apiModuleUrl + `?auth=${Date.now()}`
-const { api: authApi, ADMIN_BASE: authBase } = await import(authModuleUrl)
+const {
+  api: authApi, ADMIN_BASE: authBase, SendIntentConflictError, SendIntentRejectedError,
+} = await import(authModuleUrl)
 await authApi.health()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
 await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
+const sendCreated = await authApi.sendMessage('intent-stable', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '你好')
+const sendStatus = await authApi.sendStatus('intent-stable')
+const sendLatest = await authApi.latestSendIntent('zhilian', 'account-test', 'conversation-test')
+forceSendConflict = true
+let conflictCurrent = null
+try {
+  await authApi.sendMessage('intent-racing', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '第二条')
+} catch (reason) {
+  if (reason instanceof SendIntentConflictError) conflictCurrent = reason.current
+}
+forceSendConflict = false
+forceSendRejected = true
+let rejectedBeforeCreate = false
+try {
+  await authApi.sendMessage('intent-rejected', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '你好')
+} catch (reason) {
+  rejectedBeforeCreate = reason instanceof SendIntentRejectedError
+}
+forceSendRejected = false
 const receivedFrames = []
 const stopFrames = authApi.subscribeFrames((frame) => receivedFrames.push(frame))
 await new Promise((resolve) => setTimeout(resolve, 20))
@@ -130,6 +171,14 @@ check(requests[1].url.includes('platform=zhi%26lian') && requests[1].url.include
 const bindRequest = requests.find((request) => request.url.includes('/admin/accounts/bind'))
 const bindBody = JSON.parse(String(bindRequest?.body || '{}'))
 check(bindBody.platform === 'platform-from-user' && bindBody.handId === 'hand-test' && bindBody.accountRef === 'account-test', '绑定平台由调用方传入且原样进入账号上下文')
+const sendRequest = requests.find((request) => request.url.endsWith('/admin/messages/send') && request.body)
+const sendBody = JSON.parse(String(sendRequest?.body || '{}'))
+check(sendBody.intentId === 'intent-stable' && sendBody.previousIntentId === 'intent-before' && sendBody.text === '你好' && sendBody.conversationRef === 'conversation-test', '发送请求携带稳定 intentId、前序 CAS 与明确会话，不由 API 层重铸意图')
+check(sendCreated.intentId === 'intent-stable' && sendStatus.commandStatus === 'sent' && sendLatest?.intentId === 'intent-stable', '发送创建、按 ID 查询与按会话恢复使用同一意图视图')
+check(requests.some((request) => request.url.includes('/admin/messages/send?intentId=intent-stable')), '发送状态查询对 intentId 做 URL 编码并且不携带正文')
+check(requests.some((request) => request.url.includes('/admin/messages/send?platform=zhilian') && request.url.includes('conversationRef=conversation-test')), '页面恢复按账号与会话查询脑侧 latest')
+check(conflictCurrent?.intentId === 'intent-current', 'CAS 409 保留脑返回的 current，UI 可立即收编并锁定')
+check(rejectedBeforeCreate, '无 current 的安全拒绝被标记为确定性未创建，UI 可清理匹配 proposal')
 check(receivedFrames.length === 1 && receivedFrames[0].seq === 7, 'fetch SSE 解析协议帧且无需 EventSource')
 globalThis.fetch = realFetch
 delete globalThis.window

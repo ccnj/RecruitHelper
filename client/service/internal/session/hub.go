@@ -118,6 +118,22 @@ func (h *Hub) HandNegotiation(handID string) ([]string, []string, bool) {
 	return append([]string(nil), c.caps...), append([]string(nil), c.features...), true
 }
 
+// HandWitness 只返回当前 ready 会话在 hello/最新 ping 中宣告的投递层
+// 证词状态。storeId 是判定 report=unknown/queued 能否证明零副作用的栅栏，
+// 不是身份凭据。
+func (h *Hub) HandWitness(handID string) (dispatch.HandWitness, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || !h.readyLocked(c) || !containsString(c.features, string(protocol.FeatureWitness1)) ||
+		c.witnessStoreID == "" {
+		return dispatch.HandWitness{}, false
+	}
+	return dispatch.HandWitness{
+		StoreID: c.witnessStoreID, OutboxPending: c.outboxPending, JournalOpen: c.journalOpen,
+	}, true
+}
+
 // readyLocked 是所有业务派发入口共用的可用性判据。active 只表示物理链仍在，
 // 只有注册表中同一 session/boot 仍为 ready 才能承接命令。调用方必须持有 h.mu；
 // 锁序固定为 h.mu → Registry.mu，Registry 不反向调用 Hub。
@@ -213,12 +229,15 @@ type Conn struct {
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 
-	handID        string
-	session       string
-	bootID        string
-	caps          []string
-	features      []string
-	contractMatch bool
+	handID         string
+	session        string
+	bootID         string
+	caps           []string
+	features       []string
+	contractMatch  bool
+	witnessStoreID string
+	outboxPending  int
+	journalOpen    int
 }
 
 // ServeWS:一条连接的完整生命周期。
@@ -312,6 +331,9 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 	c.caps = hello.Caps
 	c.features = hello.Features
 	c.contractMatch = hello.ContractHash == protocol.ContractHash
+	c.witnessStoreID = hello.WitnessStoreId
+	c.outboxPending = hello.OutboxPending
+	c.journalOpen = hello.JournalOpen
 	if !c.contractMatch {
 		slog.Warn("手契约指纹不一致,按 warn-only 继续", "origin", c.origin, "got", hello.ContractHash, "want", protocol.ContractHash)
 		c.hub.st.Audit("contract_hash_mismatch", hello.HandID, env.MsgID, hello.ContractHash)
@@ -343,6 +365,13 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 	// 此门栓不包住日常 SendEnvelope；OnReconnect 可正常回调 Hub 而不自锁。
 	releaseTakeover := c.hub.lockTakeover(c.handID)
 	defer releaseTakeover()
+	// 在 welcome 对手可见之前占住派发门。否则手读到 welcome 后
+	// 立即触发的新命令，可被紧随其后的重连扫描误当成旧在途命令再发。
+	releaseDispatchGate := func() {}
+	if c.hub.dispatcher != nil {
+		releaseDispatchGate = c.hub.dispatcher.BeginHandTakeover(c.handID)
+	}
+	defer releaseDispatchGate()
 
 	c.session = ids.NewSessionID()
 	welcome := protocol.WelcomeBody{
@@ -374,7 +403,7 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 	// 重连收编:welcome 之后(手已能处理 session),对该手在途命令按 bootId 收编(§7.2)。
 	// 首次登记无在途命令,天然 no-op。
 	if c.hub.dispatcher != nil {
-		c.hub.dispatcher.OnReconnect(c.handID, c.bootID)
+		c.hub.dispatcher.OnReconnectWitnessUnderGate(c.handID, c.bootID, c.witnessStoreID, c.outboxPending, c.journalOpen)
 	}
 	return true
 }
@@ -416,7 +445,12 @@ func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 		}
 		var ping protocol.PingBody
 		_ = json.Unmarshal(env.Body, &ping)
+		c.hub.updateWitness(c, ping)
 		c.hub.reg.HeartbeatReport(c.handID, c.session, c.bootID, ping, time.Now())
+		if c.hub.dispatcher != nil {
+			c.hub.dispatcher.OnWitnessHeartbeat(c.handID, c.session, c.bootID,
+				ping.WitnessStoreId, ping.OutboxPending, ping.JournalOpen)
+		}
 		c.sendPong(ctx, env.Session)
 	case protocol.KindAck:
 		var ab protocol.AckBody
@@ -445,9 +479,39 @@ func (c *Conn) handleSessionFrame(ctx context.Context, data []byte) {
 		}
 	case protocol.KindEvent:
 		c.handleEvent(env)
+	case protocol.KindReport:
+		if !containsString(c.features, string(protocol.FeatureWitness1)) {
+			c.hub.st.Audit("report_unnegotiated", c.handID, env.MsgID, string(protocol.FeatureWitness1))
+			return
+		}
+		if err := protocol.ValidateKindBody(protocol.KindReport, env.Body); err != nil {
+			c.hub.st.Audit("report_invalid", c.handID, env.MsgID, err.Error())
+			return
+		}
+		var report protocol.ReportBody
+		_ = json.Unmarshal(env.Body, &report)
+		if c.hub.dispatcher != nil {
+			c.hub.dispatcher.OnReport(c.handID, env.MsgID, c.session, c.bootID, report)
+		}
 	default:
 		slog.Debug("暂不处理的会话帧", "handId", c.handID, "kind", env.Kind)
 	}
+}
+
+func (h *Hub) updateWitness(c *Conn, ping protocol.PingBody) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.active[c.handID] != c || !containsString(c.features, string(protocol.FeatureWitness1)) {
+		return
+	}
+	// generated validator 已强制 witness 三字段全有或全无。宣告了
+	// witness/1 的手若 ping 故意省略，不用零值覆盖最后一份证词。
+	if ping.WitnessStoreId == "" {
+		return
+	}
+	c.witnessStoreID = ping.WitnessStoreId
+	c.outboxPending = ping.OutboxPending
+	c.journalOpen = ping.JournalOpen
 }
 
 // acceptsEnvelopeSession 把 session 围栏放在 kind 语义层：ping/event/ack 等

@@ -24,13 +24,22 @@ type mockSender struct {
 	keepOnlineOnClose bool // true=CloseHand 不即时置离线(模拟真实 hub 异步关连接)
 	onSend            func(string, protocol.Envelope)
 	beforeClose       func(handID, expectedSession string)
+	witness           map[string]HandWitness
 }
 
 func newMock() *mockSender {
 	return &mockSender{
 		online: map[string]bool{}, boot: map[string]string{}, session: map[string]string{},
 		caps: map[string][]string{}, features: map[string][]string{},
+		witness: map[string]HandWitness{},
 	}
+}
+
+func (m *mockSender) HandWitness(handID string) (HandWitness, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	witness, ok := m.witness[handID]
+	return witness, ok && m.online[handID]
 }
 
 func (m *mockSender) negotiate(handID string, caps, features []string) {

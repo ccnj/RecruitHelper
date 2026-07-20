@@ -22,6 +22,11 @@ const (
 	CmdQueued   CmdStatus = "queued"   // 已记账未发送(先记账后发送)
 	CmdSent     CmdStatus = "sent"     // 已进 socket,等 ack
 	CmdAccepted CmdStatus = "accepted" // 手已入队
+	// 首个真实副作用批次的恢复中间态。两者都不是业务终局，
+	// 且持续占用原账号串行域：pendingReconcile 等手的 outbox/report，
+	// verifying 只允许为消解该 SX 而执行的 chat.readThread 验证读。
+	CmdPendingReconcile CmdStatus = "pendingReconcile"
+	CmdVerifying        CmdStatus = "verifying"
 	// 终局(result 为准)
 	CmdOk       CmdStatus = "ok"
 	CmdFailed   CmdStatus = "failed"
@@ -59,6 +64,8 @@ type CmdRecord struct {
 	// ContextJSON 保存 cmd.context 的完整 JSON,防止未来合法加法字段在重连/重派时丢失。
 	ContextJSON      string
 	Args             string // cmd.args 原文 JSON(重连收编重发用)
+	Guards           string // cmd.guards 原文 JSON；SX 重连/重派必须字节级保持
+	IntentID         string `gorm:"index"` // 真实 SX 的脑侧业务意图；debug effectful 留空
 	HandID           string `gorm:"not null;index"`
 	Session          string // 派发时会话(重投时更新)
 	BootIDAtDispatch string // 派发时手的 bootId(重连后同 msgId 重发的前提)
@@ -81,9 +88,88 @@ type CmdRecord struct {
 	SideEffect    string // 终局 error 的副作用标注(none/possible/confirmed)
 	ResultBody    string // 终局 result 的 body JSON(审计与重放)
 	SuspectReason string // 进 suspect 的原因(deadline/bootId 换代/脑重启扫描/sideEffect=possible)
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	TerminalAt    *time.Time // 进入终局的时刻
+
+	// SX 四阶段恢复证词。它们只记录“脑看到了什么”，不把手侧
+	// journal 升格为权威账本。PreReconcileStatus 保留进入对账前的物理态；
+	// QueryMsgID/Report* 用于迟到、重复和乱序 report 的硬栅栏。
+	PreReconcileStatus       CmdStatus
+	ReconcileSession         string
+	ReconcileBootID          string
+	ReconcileNextAt          *time.Time `gorm:"index"` // queued/executing report 后的有界复询时钟
+	QueryMsgID               string     `gorm:"index"`
+	QuerySentAt              *time.Time `gorm:"index"`
+	QueryN                   int        // 对账 query 持久尝试数；只重发只读 query，绝不授权 SX
+	ReportState              string
+	ReportBody               string
+	ReportedAt               *time.Time
+	WitnessStoreIDAtDispatch string
+	RecoveryAuthorized       bool
+	RecoveryRedispatchN      int // report=unknown 证明安全后的同 msgId 恢复次数，上限 1
+	VerificationN            int
+	VerificationReason       string
+	VerificationNextAt       *time.Time `gorm:"index"`
+	VerificationForMsgID     string     `gorm:"index"` // 仅验证读物理命令填写
+	VerificationChildMsgID   string     `gorm:"index"` // 仅 parent SX：当前尚未消费的验证读 logical root
+	ReviewReady              bool       // 真实 SX 已完成 outbox/query/验证收束，在线也可人裁
+	ReviewAfterMs            int64      // 不可早于原命令 deadline+grace，防页面僵尸迟到 click
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	TerminalAt               *time.Time // 进入终局的时刻
+}
+
+// EffectIntentStatus 是脑侧权威的 SX 业务意图状态。物理命令只能在
+// 同 witness store 的 unknown 证明“未尝试”后，以原 msgId/body/idemKey/guards 恢复一次。
+type EffectIntentStatus string
+
+const (
+	EffectIntentDispatching    EffectIntentStatus = "dispatching"
+	EffectIntentReconciling    EffectIntentStatus = "reconciling"
+	EffectIntentVerifying      EffectIntentStatus = "verifying"
+	EffectIntentOk             EffectIntentStatus = "ok"
+	EffectIntentFailed         EffectIntentStatus = "failed"
+	EffectIntentSuspect        EffectIntentStatus = "suspect"
+	EffectIntentResolvedOk     EffectIntentStatus = "resolvedOk"
+	EffectIntentResolvedFailed EffectIntentStatus = "resolvedFailed"
+)
+
+// EffectIntent 实现 §7.5 的脑账本闸。IntentID 由管理客户端在一次
+// 真人确认里生成并在 HTTP 重试中复用；IdemKey 由脑依据该 ID 确定性派生。
+// PayloadHash/GuardsHash 防止同一 IntentID 被偷换文本或前置断言后重用。
+type EffectIntent struct {
+	IntentID    string             `gorm:"primaryKey"`
+	IdemKey     string             `gorm:"not null;uniqueIndex"`
+	Platform    string             `gorm:"not null;index:idx_effect_intent_account,priority:1;index:idx_effect_intent_conversation,priority:1"`
+	AccountRef  string             `gorm:"not null;index:idx_effect_intent_account,priority:2;index:idx_effect_intent_conversation,priority:2"`
+	Primitive   string             `gorm:"not null"`
+	TargetRef   string             `gorm:"not null;index:idx_effect_intent_conversation,priority:3"`
+	PayloadHash string             `gorm:"not null"`
+	GuardsHash  string             `gorm:"not null"`
+	RootMsgID   string             `gorm:"not null;uniqueIndex"`
+	Status      EffectIntentStatus `gorm:"not null;index"`
+	DeadlineMs  int64              `gorm:"not null;index"`
+
+	// SendFingerprint 是平台无关的目标消息指纹，只由契约 data
+	// 与验证读的结构化字段比较，禁止解析 evidence/DOM 作裁决。
+	SendFingerprint  string
+	ResultMsgID      string
+	ResultMessageSeq *int64
+	SuspectReason    string
+	ResolvedAt       *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// ConversationEffectHead 是会话副作用意图的持久单调 head。CAS 只比较
+// LatestIntentID，并在创建 EffectIntent+Cmd 的同一事务里递增 Generation；
+// 绝不从 created_at 或 SQLite rowid 反推“最新”。
+type ConversationEffectHead struct {
+	Platform        string `gorm:"primaryKey"`
+	AccountRef      string `gorm:"primaryKey"`
+	ConversationRef string `gorm:"primaryKey"`
+	LatestIntentID  string `gorm:"not null;index"`
+	Generation      uint64 `gorm:"not null"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // ProcessedMsg:上行消息(result/event)按 msgId 持久去重,保留 30 天(清理后续步骤做)。
@@ -212,6 +298,9 @@ type Message struct {
 	TsApproxMs       *int64
 	Origin           string
 	FirstSeenRoundID string `gorm:"index"`
+	// OutboundIntentID 只在 SX 成功终局与消息账本事实同一事务
+	// 追加时填写。用 nullable 唯一索引避免旧/外部消息的空值互相冲突。
+	OutboundIntentID *string `gorm:"uniqueIndex"`
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

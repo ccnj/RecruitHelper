@@ -1,6 +1,7 @@
 // Node 端到端验收：启动隔离的真 Go 脑，注入最小 chrome 边界后运行生产
-// Connection、Dispatcher 与 M2 program。M2 业务命令只能由绑定/账号 actor 产生；
-// /admin/cmd 仅保留里程碑 1 的 debug 回归，不能用于任何 M2 原语。
+// Connection、Dispatcher 与生产 program。M2 业务命令只由绑定/账号 actor 产生，
+// M3 真实 SX 只由正式 /admin/messages/send 产品入口产生；/admin/cmd 仅保留
+// 里程碑 1 的 debug 回归，不能用于任何 M2/M3 原语。
 //
 // 默认：node test/run.mjs（自建脑进程、临时 SQLite、随机端口）
 // 外部：node test/run.mjs <ws-url> <admin-base> [admin-token]
@@ -42,6 +43,21 @@ function appendBounded(current, chunk) {
   return next.length <= 24_000 ? next : next.slice(next.length - 24_000)
 }
 
+// 生产脑坚持“本地 08:00 后由真人开启”的日闸。E2E 只调整隔离子进程的
+// IANA 时区，使运行时落在稳定日间；不改生产时钟，也不增加测试分支。
+function daytimeTestZone(now = new Date()) {
+  const zones = ['Etc/GMT+12', 'Etc/GMT+8', 'Etc/GMT', 'Etc/GMT-8', 'Etc/GMT-12']
+  for (const zone of zones) {
+    const hour = Number(new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hour: '2-digit',
+      hourCycle: 'h23',
+    }).format(now))
+    if (hour >= 8 && hour <= 22) return zone
+  }
+  throw new Error('无法为隔离脑选择稳定日间时区')
+}
+
 async function startBrain() {
   if (externalWsURL || externalAdminBase) {
     assert.ok(externalWsURL && externalAdminBase, '外部模式必须同时给出 ws-url 与 admin-base')
@@ -77,7 +93,11 @@ async function startBrain() {
     '-port', String(port),
     '-data', dataDir,
     '-admin-token', token,
-  ], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] })
+  ], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, TZ: daytimeTestZone() },
+  })
   child.stdout.on('data', (chunk) => { output = appendBounded(output, chunk) })
   child.stderr.on('data', (chunk) => { output = appendBounded(output, chunk) })
   let exited = false
@@ -161,15 +181,19 @@ try {
   const principalFingerprint = 'ab'.repeat(32)
   const fixtureConversationRef = 'fixture-conversation-001'
   const fixturePeerRef = 'fixture-peer-001'
+  const fixtureSendText = '合成端到端问候'
   const hashText = (text) => createHash('sha256').update(text.normalize('NFC').trim().replace(/\s+/gu, ' ')).digest('hex')
+  const fixtureTargetBindingToken = createHash('sha256')
+    .update(JSON.stringify([fixtureConversationRef, fixturePeerRef]))
+    .digest('hex')
   const fixtureMessages = [
     {
-      sourceKey: 'fixture-source-001', direction: 'in', kind: 'text',
+      sourceKey: hashText('fixture-source-001'), direction: 'in', kind: 'text',
       text: '合成历史消息一', blobRef: null, contentHash: hashText('合成历史消息一'),
       cardType: null, cardState: null, tsApprox: Date.now() - 2_000,
     },
     {
-      sourceKey: 'fixture-source-002', direction: 'out', kind: 'text',
+      sourceKey: hashText('fixture-source-002'), direction: 'out', kind: 'text',
       text: '合成历史消息二', blobRef: null, contentHash: hashText('合成历史消息二'),
       cardType: null, cardState: null, tsApprox: Date.now() - 1_000,
     },
@@ -185,11 +209,68 @@ try {
       index: 0,
     },
     mainCalls: [],
+    sendClickCount: 0,
+    sendEvaluationPhases: [],
+    directThreadRouteUpdates: 0,
+    sendServerMessageCreated: false,
+    sendBaselineSourceKeys: [],
   }
 
+  const harnessSockets = []
+  const resultAckFault = {
+    armed: false,
+    dropped: false,
+    targetResultMsgId: null,
+    resultEnvelopes: [],
+    resultAcks: [],
+  }
+  const witnessTrace = { outboxWritten: false }
   class HarnessWebSocket extends WebSocket {
     constructor(url) {
       super(url, [], { origin: 'chrome-extension://harnesstestaaaaaaaaaaaaaaaaaaaa' })
+      harnessSockets.push(this)
+    }
+
+    send(data, ...args) {
+      if (resultAckFault.armed) {
+        try {
+          const envelope = JSON.parse(String(data))
+          const isTargetSuccess = envelope.kind === 'result' && envelope.body?.status === 'ok' &&
+            envelope.body?.data?.conversationRef === fixtureConversationRef &&
+            envelope.body?.data?.contentHash === hashText(fixtureSendText) &&
+            envelope.body?.evidence?.some((item) => item?.type === 'outboundMessageObserved')
+          if (isTargetSuccess) {
+            if (resultAckFault.targetResultMsgId === null) {
+              resultAckFault.targetResultMsgId = envelope.msgId
+            }
+            if (envelope.msgId === resultAckFault.targetResultMsgId) {
+              resultAckFault.resultEnvelopes.push(structuredClone(envelope))
+            }
+          }
+        } catch {
+          // 非协议帧仍由真实 ws 实现处理。
+        }
+      }
+      return super.send(data, ...args)
+    }
+
+    emit(event, ...args) {
+      if (event === 'message' && resultAckFault.armed && resultAckFault.targetResultMsgId !== null) {
+        try {
+          const envelope = JSON.parse(String(args[0]))
+          if (envelope.kind === 'ack' && envelope.body?.ref === resultAckFault.targetResultMsgId) {
+            resultAckFault.resultAcks.push(structuredClone(envelope))
+            if (!resultAckFault.dropped) {
+              resultAckFault.dropped = true
+              queueMicrotask(() => this.terminate())
+              return false
+            }
+          }
+        } catch {
+          // 非协议帧继续透传。
+        }
+      }
+      return super.emit(event, ...args)
     }
   }
   globalThis.WebSocket = HarnessWebSocket
@@ -202,7 +283,12 @@ try {
           if (typeof key === 'string') return key in storage ? { [key]: storage[key] } : {}
           return { ...storage }
         },
-        async set(value) { Object.assign(storage, value) },
+        async set(value) {
+          if (Object.keys(value).some((key) => key.startsWith('outbox:'))) {
+            witnessTrace.outboxWritten = true
+          }
+          Object.assign(storage, value)
+        },
         async remove(key) {
           for (const item of Array.isArray(key) ? key : [key]) delete storage[item]
         },
@@ -244,7 +330,10 @@ try {
       },
       async update(id, props) {
         if (id === platform.tab.id) {
-          if (props.url) platform.tab.url = props.url
+          if (props.url) {
+            if (String(props.url).includes('sessionId=')) platform.directThreadRouteUpdates += 1
+            platform.tab.url = props.url
+          }
           if (props.active !== undefined) {
             platform.tab.active = props.active
             if (props.active) switchedTabId = id
@@ -303,6 +392,88 @@ try {
             peer: { displayName: '合成候选人', platformUserRef: fixturePeerRef },
           } }]
         }
+        if (name === 'mainInspectSendSurface') {
+          const [conversationRef] = args
+          assert.equal(conversationRef, fixtureConversationRef)
+          return [{ result: {
+            selected: true,
+            composerBindingResolved: true,
+            composerBindingMatched: true,
+            composerCount: 1,
+            composerValue: '',
+            sendButtonCount: 1,
+            diagnosticStage: 'ok',
+          } }]
+        }
+        if (name === 'mainCaptureSendBaseline') {
+          const [conversationRef, expectedTail] = args
+          assert.equal(conversationRef, fixtureConversationRef)
+          assert.deepEqual(expectedTail,
+            fixtureMessages.map(({ direction, contentHash }) => ({ direction, contentHash })))
+          platform.sendBaselineSourceKeys = fixtureMessages.map((message) => message.sourceKey)
+          return [{ result: {
+            status: 'ready',
+            stage: 'ready',
+            serverSourceKeys: [...platform.sendBaselineSourceKeys],
+            sessionVersionToken: 'cd'.repeat(32),
+            targetBindingToken: fixtureTargetBindingToken,
+          } }]
+        }
+        if (name === 'mainSendMessageOnce') {
+          assert.equal(args.length, 10)
+          const [
+            conversationRef,
+            text,
+            textHash,
+            expectedTail,
+            expectedSessionVersionToken,
+            expectedPrincipalFingerprint,
+            irreversibleNotAfterMs,
+            expectedBaselineServerSourceKeys,
+            expectedTargetBindingToken,
+            phase,
+          ] = args
+          assert.equal(conversationRef, fixtureConversationRef)
+          assert.equal(text, fixtureSendText)
+          assert.equal(textHash, hashText(fixtureSendText))
+          assert.deepEqual(expectedTail, fixtureMessages.map(({ direction, contentHash }) => ({ direction, contentHash })))
+          assert.equal(expectedSessionVersionToken, 'cd'.repeat(32))
+          assert.equal(expectedPrincipalFingerprint, principalFingerprint)
+          assert.ok(Number.isFinite(irreversibleNotAfterMs) && irreversibleNotAfterMs >= Date.now())
+          assert.deepEqual(expectedBaselineServerSourceKeys, platform.sendBaselineSourceKeys)
+          assert.equal(expectedTargetBindingToken, fixtureTargetBindingToken)
+          platform.sendEvaluationPhases.push(phase)
+          if (phase === 'preflight') return [{ result: { status: 'ready' } }]
+          assert.equal(phase, 'commit')
+          platform.sendClickCount += 1
+          if (!platform.sendServerMessageCreated) {
+            platform.sendServerMessageCreated = true
+            fixtureMessages.push({
+              sourceKey: hashText('fixture-source-send-001'), direction: 'out', kind: 'text',
+              text: fixtureSendText, blobRef: null, contentHash: hashText(fixtureSendText),
+              cardType: null, cardState: null, tsApprox: Date.now(),
+            })
+          }
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (name === 'mainObserveStableOutbound') {
+          assert.equal(args.length, 4)
+          const [conversationRef, textHash, baselineServerSourceKeys, expectedTargetBindingToken] = args
+          assert.equal(conversationRef, fixtureConversationRef)
+          assert.deepEqual(baselineServerSourceKeys, platform.sendBaselineSourceKeys)
+          assert.equal(expectedTargetBindingToken, fixtureTargetBindingToken)
+          const currentSourceKeys = fixtureMessages.map((message) => message.sourceKey)
+          const strictlyAppended = currentSourceKeys.length === baselineServerSourceKeys.length + 1 &&
+            baselineServerSourceKeys.every((key, index) => currentSourceKeys[index] === key) &&
+            !baselineServerSourceKeys.includes(currentSourceKeys.at(-1))
+          const appendedMessage = strictlyAppended ? fixtureMessages.at(-1) : null
+          return [{ result: {
+            selected: true,
+            matchingNewServerMessages: platform.sendServerMessageCreated && strictlyAppended &&
+              appendedMessage?.direction === 'out' && appendedMessage?.kind === 'text' &&
+              appendedMessage?.contentHash === textHash && textHash === hashText(fixtureSendText) ? 1 : 0,
+          } }]
+        }
         throw new Error(`未实现的 MAIN fixture: ${name}`)
       },
     },
@@ -318,11 +489,17 @@ try {
     logLevel: 'error',
   })
   const bundleURL = pathToFileURL(join(pluginRoot, 'test/dist/bundle.mjs')).href
-  const { Connection, registerDebugPrimitives, registerM2Primitives } = await import(`${bundleURL}?t=${Date.now()}`)
+  const {
+    Connection,
+    registerDebugPrimitives,
+    registerM2Primitives,
+    registerM3Primitives,
+  } = await import(`${bundleURL}?t=${Date.now()}`)
 
   storage.infra = { wsUrl: brain.wsURL }
   registerDebugPrimitives()
   registerM2Primitives()
+  registerM3Primitives()
   conn = new Connection()
 
   console.log('本地稳定 handId 与生产 Connection 自动握手')
@@ -339,11 +516,13 @@ try {
   const health = await admin.get('/admin/hands/health')
   const online = health.hands.find((hand) => hand.handId === handId)
   for (const capability of [
+    'debug.inspectSendSurface@1',
     'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1', 'chat.readThread@1',
+    'chat.sendMessage@1',
   ]) {
     assert.ok(online.caps.includes(capability), `hello 能力集缺少 ${capability}`)
   }
-  console.log('  PASS 稳定 handId、自动登记、M2 能力冻结与在线会话')
+  console.log('  PASS 稳定 handId、自动登记、M2/M3 能力冻结与在线会话')
 
   console.log('正式绑定探测与 actor 页面恢复/列表索引')
   const bound = await admin.post('/admin/accounts/bind', {
@@ -432,6 +611,115 @@ try {
   }
   console.log('  PASS 四条 M2 原语均由 actor/绑定流经生产 dispatcher 与真 WS')
 
+  console.log('正式产品发送入口、持久 witness/outbox 与重连不双发')
+  const baselineLedgerMessages = messages.messages.length
+  const intentId = 'fixture-intent-send-001'
+  const sessionBeforeSend = conn.status().session
+  const socketsBeforeSend = harnessSockets.length
+  // 模拟真人已在 Chrome 中打开目标会话。生产发送不得自行切换会话。
+  platform.tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${encodeURIComponent(fixtureConversationRef)}`
+  resultAckFault.armed = true
+  const createdSend = await admin.post('/admin/messages/send', {
+    intentId,
+    previousIntentId: '',
+    platform: 'zhilian',
+    accountRef,
+    conversationRef: fixtureConversationRef,
+    text: fixtureSendText,
+  })
+  assert.equal(createdSend.intentId, intentId)
+  const completedSend = await eventually(
+    () => admin.get(`/admin/messages/send?intentId=${encodeURIComponent(intentId)}`),
+    (view) => view.status === 'ok' && view.commandStatus === 'ok',
+    '正式 M3 发送没有到达 ok',
+    15_000,
+  )
+  assert.equal(completedSend.intentId, intentId)
+  assert.equal(platform.sendClickCount, 1, '正式发送命令必须只越过一次不可逆点击')
+  assert.deepEqual(platform.sendEvaluationPhases, ['preflight', 'commit'],
+    '生产预检与 commit 必须使用字面同一 MAIN evaluator，且各执行一次')
+  assert.equal(platform.directThreadRouteUpdates, 0, '正式发送不得回退到已知不可靠的 tabs.update 深链')
+  await eventually(
+    () => ({
+      dropped: resultAckFault.dropped,
+      targetResultMsgId: resultAckFault.targetResultMsgId,
+      resultCount: resultAckFault.resultEnvelopes.length,
+    }),
+    ({ dropped, targetResultMsgId, resultCount }) => dropped && targetResultMsgId !== null && resultCount >= 1,
+    '测试传输层没有捕获目标 M3 成功 result 并丢弃首次 ack',
+  )
+  assert.equal(resultAckFault.dropped, true, '测试传输层没有丢弃首次 result ack')
+  assert.equal(witnessTrace.outboxWritten, true, '真实 SX result 未先写入持久 outbox')
+  const journalKeys = Object.keys(storage).filter((key) => key.startsWith('journal:'))
+  assert.equal(journalKeys.length, 1)
+  assert.equal(storage[journalKeys[0]].state, 'committed')
+  assert.equal(journalKeys.filter((key) => storage[key].state === 'attempting').length, 0)
+  assert.equal(storage['witness:meta'].journalCount, 1)
+
+  await eventually(
+    () => ({
+      status: conn.status(),
+      sockets: harnessSockets.length,
+      resultCount: resultAckFault.resultEnvelopes.length,
+      ackCount: resultAckFault.resultAcks.length,
+      keys: Object.keys(storage),
+    }),
+    ({ status, sockets, resultCount, ackCount, keys }) => status.phase === 'session' && status.session !== null &&
+      status.session !== sessionBeforeSend && sockets > socketsBeforeSend && resultCount >= 2 && ackCount >= 2 &&
+      status.pendingResults === 0 && !keys.some((key) => key.startsWith('outbox:')),
+    '首次 result ack 丢失后没有重连补投并清理 outbox',
+    15_000,
+  )
+  const [firstResult, replayedResult] = resultAckFault.resultEnvelopes
+  assert.equal(replayedResult.msgId, firstResult.msgId)
+  assert.deepEqual(replayedResult.body, firstResult.body)
+  assert.equal(replayedResult.attempt, firstResult.attempt + 1)
+  assert.notEqual(replayedResult.session, firstResult.session)
+  assert.equal(resultAckFault.resultAcks[0].body.status, 'accepted')
+  assert.equal(resultAckFault.resultAcks[1].body.status, 'duplicate')
+  assert.equal(storage['witness:meta'].outboxCount, 0)
+  assert.equal(storage[journalKeys[0]].state, 'committed')
+
+  const sentMessages = await admin.get(
+    `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
+    `&conversationRef=${encodeURIComponent(fixtureConversationRef)}`,
+  )
+  assert.equal(sentMessages.messages.length, baselineLedgerMessages + 1)
+  assert.equal(sentMessages.messages.filter((message) => message.origin === 'self').length, 1)
+  assert.equal(sentMessages.messages.at(-1).text, fixtureSendText)
+  const sentLedger = await admin.get('/admin/ledger')
+  assert.equal(sentLedger.ledger.filter((record) => record.name === 'chat.sendMessage').length, 1)
+  assert.ok(sentLedger.ledger.some((record) =>
+    record.name === 'chat.sendMessage' && record.status === 'ok' && record.attempt === 1))
+  for (const expectedCall of [
+    'mainCaptureSendBaseline', 'mainSendMessageOnce', 'mainObserveStableOutbound',
+  ]) {
+    assert.ok(platform.mainCalls.includes(expectedCall), `M3 生产平台接缝没有执行 ${expectedCall}`)
+  }
+  assert.equal(platform.mainCalls.includes('mainInspectSendSurface'), false,
+    '生产发送不得再由另一套 DOM preflight 逻辑授权')
+  assert.equal(platform.mainCalls.includes('mainFindConversation'), false,
+    'M3 发送不得搜索或切换会话')
+  assert.equal(platform.mainCalls.includes('mainClickConversationOnce'), false,
+    'M3 发送不得点击会话行')
+
+  await sleep(500)
+  const recoveredSend = await admin.get(`/admin/messages/send?intentId=${encodeURIComponent(intentId)}`)
+  const recoveredMessages = await admin.get(
+    `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
+    `&conversationRef=${encodeURIComponent(fixtureConversationRef)}`,
+  )
+  const recoveredLedger = await admin.get('/admin/ledger')
+  assert.equal(recoveredSend.status, 'ok')
+  assert.equal(platform.sendClickCount, 1, '终局发送在重连后不得再次点击')
+  assert.equal(recoveredMessages.messages.filter((message) => message.origin === 'self').length, 1)
+  assert.equal(recoveredLedger.ledger.filter((record) => record.name === 'chat.sendMessage').length, 1)
+  assert.equal(Object.keys(storage).some((key) => key.startsWith('outbox:')), false)
+  assert.equal(storage[journalKeys[0]].state, 'committed')
+  resultAckFault.armed = false
+  assert.equal(resultAckFault.armed, false)
+  console.log('  PASS /admin/messages/send 经真脑/真 WS/生产 M3 到达 ok，ack 清 outbox，重连零增生')
+
   // 保留原有里程碑 1 debug E2E。只有以下回归使用 /admin/cmd。
   async function dispatchDebugAndWait(name, args) {
     const { msgId } = await admin.post('/admin/cmd', { handId, name, args })
@@ -443,6 +731,7 @@ try {
     return state.ledger.find((record) => record.msgId === msgId)
   }
   await dispatchDebugAndWait('debug.ping', { echo: 'node-e2e' })
+  await dispatchDebugAndWait('debug.inspectSendSurface', {})
   await dispatchDebugAndWait('debug.switchWindow', {})
   assert.equal(switchedTabId, platform.tab.id)
   await dispatchDebugAndWait('debug.slowEcho', { ms: 25, outcome: 'ok' })

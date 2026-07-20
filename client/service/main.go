@@ -58,6 +58,7 @@ func main() {
 	hub := session.NewHub(st, protocol.DefaultHbGraceMs)
 	disp := dispatch.New(st, hub)
 	hub.SetDispatcher(disp)
+	disp.SetEffectVerifier(appbridge.EffectVerifier{Dispatcher: disp})
 	disp.Recover() // 脑重启扫描:任何 WS 服务开始前,把在途命令收编(readonly/intrusive 作废,effectful suspect)
 	if recovered, recoverErr := st.RecoverRunningPatrolRounds(time.Now()); recoverErr != nil {
 		slog.Error("收束上次中断巡检轮失败", "err", recoverErr)

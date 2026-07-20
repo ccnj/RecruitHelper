@@ -348,8 +348,13 @@ func inheritReplacement(parent, child *CmdRecord) {
 	child.ExpectedPrincipalFingerprint = parent.ExpectedPrincipalFingerprint
 	child.ContextJSON = parent.ContextJSON
 	child.Args = parent.Args
+	child.Guards = parent.Guards
+	child.IntentID = parent.IntentID
 	if child.HandID == "" {
 		child.HandID = parent.HandID
+	}
+	if child.WitnessStoreIDAtDispatch == "" {
+		child.WitnessStoreIDAtDispatch = parent.WitnessStoreIDAtDispatch
 	}
 	child.ExecBudgetMs = parent.ExecBudgetMs
 	child.RedispatchN = parent.RedispatchN + 1
@@ -360,6 +365,21 @@ func inheritReplacement(parent, child *CmdRecord) {
 	child.SideEffect = ""
 	child.ResultBody = ""
 	child.SuspectReason = ""
+	child.PreReconcileStatus = ""
+	child.ReconcileSession = ""
+	child.ReconcileBootID = ""
+	child.ReconcileNextAt = nil
+	child.QueryMsgID = ""
+	child.QuerySentAt = nil
+	child.ReportState = ""
+	child.ReportBody = ""
+	child.ReportedAt = nil
+	child.RecoveryAuthorized = false
+	child.VerificationN = parent.VerificationN
+	child.VerificationReason = ""
+	child.VerificationNextAt = nil
+	child.VerificationForMsgID = parent.VerificationForMsgID
+	child.VerificationChildMsgID = ""
 	child.TerminalAt = nil
 }
 
@@ -374,6 +394,10 @@ func validateReplacementIntent(parent, child *CmdRecord) error {
 		child.ExpectedPrincipalFingerprint != "" && child.ExpectedPrincipalFingerprint != parent.ExpectedPrincipalFingerprint,
 		child.ContextJSON != "" && child.ContextJSON != parent.ContextJSON,
 		child.Args != "" && child.Args != parent.Args,
+		child.Guards != "" && child.Guards != parent.Guards,
+		child.IntentID != "" && child.IntentID != parent.IntentID,
+		child.WitnessStoreIDAtDispatch != "" && child.WitnessStoreIDAtDispatch != parent.WitnessStoreIDAtDispatch,
+		child.VerificationForMsgID != "" && child.VerificationForMsgID != parent.VerificationForMsgID,
 		child.LogicalDispatchID != "" && child.LogicalDispatchID != parent.LogicalDispatchID,
 		child.ParentMsgID != nil,
 		child.ReplacementMsgID != nil,
@@ -403,6 +427,21 @@ type ResultCommandMutation struct {
 	Save              bool
 	Replacement       *CmdRecord
 	ReplacementReason string
+	// KeepCommandOpen 只供真实 SX 的 possible/confirmed 后续验证轨使用。
+	// 手的物理 result 已终局，但脑的权威意图仍处于 verifying；
+	// 普通命令不得设置。
+	KeepCommandOpen bool
+	Effect          *EffectResultMutation
+}
+
+type EffectResultMutation struct {
+	IntentStatus EffectIntentStatus
+	Append       bool
+	Retract      bool
+	Text         string
+	ContentHash  string
+	ObservedAtMs int64
+	Reason       string
 }
 
 type ApplyResultMessageResult struct {
@@ -454,10 +493,13 @@ func (s *Store) ApplyResultMessage(
 			}
 			return nil
 		}
-		if !command.Status.Terminal() {
+		if !command.Status.Terminal() && !plan.KeepCommandOpen {
 			return errors.New("result 必须把物理命令推进到终局")
 		}
-		if command.TerminalAt == nil {
+		if plan.KeepCommandOpen && (command.IntentID == "" || command.Status != CmdVerifying) {
+			return errors.New("仅真实 SX verifying 可在 result 后保持开放")
+		}
+		if command.Status.Terminal() && command.TerminalAt == nil {
 			now := time.Now()
 			command.TerminalAt = &now
 		}
@@ -487,6 +529,49 @@ func (s *Store) ApplyResultMessage(
 
 		if err := tx.Save(&command).Error; err != nil {
 			return err
+		}
+		if plan.Effect != nil {
+			if command.IntentID == "" {
+				return ErrEffectIntentConflict
+			}
+			var intent EffectIntent
+			if err := tx.First(&intent, "intent_id = ?", command.IntentID).Error; err != nil {
+				return err
+			}
+			if intent.IdemKey != command.IdemKey || intent.RootMsgID != command.LogicalDispatchID {
+				return ErrEffectIntentConflict
+			}
+			intent.Status = plan.Effect.IntentStatus
+			intent.SuspectReason = plan.Effect.Reason
+			intent.ResultMsgID = resultMsgID
+			if plan.Effect.Append && plan.Effect.Retract {
+				return ErrEffectIntentConflict
+			}
+			if plan.Effect.Append {
+				message, err := appendOutboundMessageTx(tx, &intent, plan.Effect.Text,
+					plan.Effect.ContentHash, plan.Effect.ObservedAtMs, time.Now())
+				if err != nil {
+					return err
+				}
+				intent.ResultMessageSeq = &message.Seq
+				intent.SendFingerprint = plan.Effect.ContentHash
+				now := time.Now()
+				intent.ResolvedAt = &now
+			}
+			if plan.Effect.Retract {
+				if err := retractOutboundMessageTx(tx, &intent, time.Now()); err != nil {
+					return err
+				}
+				intent.ResultMessageSeq = nil
+			}
+			if plan.Effect.IntentStatus == EffectIntentFailed || plan.Effect.IntentStatus == EffectIntentSuspect ||
+				plan.Effect.IntentStatus == EffectIntentResolvedOk || plan.Effect.IntentStatus == EffectIntentResolvedFailed {
+				now := time.Now()
+				intent.ResolvedAt = &now
+			}
+			if err := tx.Save(&intent).Error; err != nil {
+				return err
+			}
 		}
 		if out.Replacement != nil {
 			return tx.Create(out.Replacement).Error

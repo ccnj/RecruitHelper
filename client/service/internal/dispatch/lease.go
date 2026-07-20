@@ -169,7 +169,13 @@ func (d *Dispatcher) settleLeaseGap(msgID string, observedAt time.Time) {
 	}
 	d.clearLease(msgID)
 	if cmd.Class == string(protocol.ClassEffectful) {
-		d.markSuspect(*cmd, "lease gap 无目标 result")
+		if cmd.IntentID != "" {
+			if err := d.st.MoveEffectToVerification(cmd.MsgID, "lease gap 无目标 result", observedAt); err == nil {
+				d.kickVerification(cmd.MsgID)
+			}
+		} else {
+			d.markSuspect(*cmd, "lease gap 无目标 result")
+		}
 		return
 	}
 	d.voidAndRedispatch(*cmd, "lease gap 无目标 result", redispatchBackoff(cmd.RedispatchN+1))

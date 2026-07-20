@@ -33,6 +33,7 @@ func (d *Dispatcher) RunFaultLoop(ctx context.Context) {
 
 // sweepFaults:一次超时扫描。抽出供测试直接触发(传入 now)。
 func (d *Dispatcher) sweepFaults(now time.Time) {
+	d.sweepEffectRecovery(now)
 	cmds, err := d.st.NonTerminalCmds()
 	if err != nil {
 		slog.Error("扫描非终局命令失败", "err", err)
@@ -48,7 +49,14 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 			continue
 		}
 		if nowMs > cmd.DeadlineMs+grace && cmd.Class == string(protocol.ClassEffectful) {
-			d.markSuspect(cmd, "deadline+宽限 无终局")
+			if cmd.IntentID != "" {
+				if cmd.Status != store.CmdVerifying {
+					_ = d.st.MoveEffectToVerification(cmd.MsgID, "deadline+宽限 无终局", now)
+				}
+				d.kickVerification(cmd.MsgID)
+			} else {
+				d.markSuspect(cmd, "deadline+宽限 无终局")
+			}
 		}
 	}
 
@@ -56,6 +64,9 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 	ackTimeoutMs := time.Duration(protocol.DefaultAckTimeoutMs) * time.Millisecond
 	for _, cmd := range cmds {
 		if leaseHandled[cmd.MsgID] {
+			continue
+		}
+		if cmd.Status == store.CmdPendingReconcile || cmd.Status == store.CmdVerifying {
 			continue
 		}
 		// deadline+宽限:优先于其余(过期命令不必再等)。
@@ -218,6 +229,9 @@ func (d *Dispatcher) terminalizeVoid(cmd store.CmdRecord, reason string) {
 	d.clearLease(cmd.MsgID)
 	d.st.Audit("cmd_void", cmd.HandID, cmd.MsgID, reason)
 	d.notifyByMsgID(cmd.MsgID)
+	if cmd.VerificationForMsgID != "" {
+		d.kickVerification(cmd.VerificationForMsgID)
+	}
 }
 
 func redispatchCap(class string) int {

@@ -8,7 +8,11 @@ import type {
   ChatReadListData,
   ChatReadThreadArgs,
   ChatReadThreadData,
+  ChatSendMessageArgs,
+  ChatSendMessageData,
+  ChatSendMessageGuards,
   ConversationSummary,
+  DebugInspectSendSurfaceData,
   ErrorCode,
   MessageAnchor,
   NotReadyReason,
@@ -49,6 +53,9 @@ export type ZhilianMessageAnchor = MessageAnchor
 export type ZhilianThreadArgs = ChatReadThreadArgs
 export type ZhilianThreadMessage = ThreadMessage
 export type ZhilianThreadPage = ChatReadThreadData
+export type ZhilianSendArgs = ChatSendMessageArgs
+export type ZhilianSendGuards = ChatSendMessageGuards
+export type ZhilianSendData = ChatSendMessageData
 
 interface MainProbeResult {
   pageKind: 'im' | 'recommend' | 'other'
@@ -77,6 +84,197 @@ interface MainThreadPageResult {
   reachedTop: boolean
   cursor: { endTime: number; lastMsgId: string } | null
   peer: { displayName: string; platformUserRef?: string } | null
+}
+
+const MAIN_SEND_SURFACE_STAGES = [
+  'ok',
+  'route_target_missing',
+  'composer_count',
+  'detail_ambiguous',
+  'button_count',
+  'wrapper_mismatch',
+  'sender_root_missing',
+  'surface_disconnected',
+  'component_tree_root_missing',
+  'component_tree_malformed',
+  'component_tree_overflow',
+  'sender_owner_count',
+  'sender_owner_inactive',
+  'button_owner_count',
+  'button_owner_outside_sender',
+  'composer_owner_missing',
+  'model_slot_missing',
+  'model_slot_ambiguous',
+  'model_target_mismatch',
+  'model_candidate_props',
+  'model_candidate_data',
+  'model_candidate_store',
+  'model_candidate_multiple',
+  'model_candidate_conflict',
+  'model_candidate_absent',
+  'model_scalar_owner',
+  'model_scalar_props',
+  'model_scalar_data',
+  'model_scalar_store',
+  'model_scalar_multiple',
+  'model_scalar_conflict',
+  'model_scalar_absent',
+  'engine_target_mismatch',
+  'button_form_unsafe',
+  'button_vnode_missing',
+  'button_dom_listener_ambiguous',
+  'sender_listener_ambiguous',
+  'sender_listener_mismatch',
+] as const
+
+type MainSendSurfaceStage = typeof MAIN_SEND_SURFACE_STAGES[number]
+
+const SEND_SURFACE_STAGE_TO_DIAGNOSTIC: Readonly<Record<
+  MainSendSurfaceStage,
+  DebugInspectSendSurfaceData['stage']
+>> = Object.freeze({
+  ok: 'ready',
+  route_target_missing: 'route_missing',
+  composer_count: 'composer_cardinality',
+  detail_ambiguous: 'detail_cardinality',
+  button_count: 'button_cardinality',
+  wrapper_mismatch: 'dom_containment',
+  sender_root_missing: 'dom_containment',
+  surface_disconnected: 'dom_containment',
+  component_tree_root_missing: 'component_tree_root_missing',
+  component_tree_malformed: 'component_tree_malformed',
+  component_tree_overflow: 'component_tree_overflow',
+  sender_owner_count: 'sender_owner_unresolved',
+  sender_owner_inactive: 'sender_owner_unresolved',
+  button_owner_count: 'control_ownership_unresolved',
+  button_owner_outside_sender: 'control_ownership_unresolved',
+  composer_owner_missing: 'control_ownership_unresolved',
+  model_slot_missing: 'direct_model_unresolved',
+  model_slot_ambiguous: 'direct_model_target_mismatch',
+  model_target_mismatch: 'direct_model_target_mismatch',
+  model_candidate_props: 'model_candidate_props',
+  model_candidate_data: 'model_candidate_data',
+  model_candidate_store: 'model_candidate_store',
+  model_candidate_multiple: 'model_candidate_multiple',
+  model_candidate_conflict: 'model_candidate_conflict',
+  model_candidate_absent: 'model_candidate_absent',
+  model_scalar_owner: 'model_scalar_owner',
+  model_scalar_props: 'model_scalar_props',
+  model_scalar_data: 'model_scalar_data',
+  model_scalar_store: 'model_scalar_store',
+  model_scalar_multiple: 'model_scalar_multiple',
+  model_scalar_conflict: 'model_scalar_conflict',
+  model_scalar_absent: 'model_scalar_absent',
+  engine_target_mismatch: 'engine_binding_unresolved',
+  button_form_unsafe: 'button_form_unsafe',
+  button_vnode_missing: 'button_vnode_missing',
+  button_dom_listener_ambiguous: 'button_dom_listener_ambiguous',
+  sender_listener_ambiguous: 'component_click_wiring_unresolved',
+  sender_listener_mismatch: 'component_click_wiring_unresolved',
+})
+
+const SEND_BASELINE_STAGE_TO_DIAGNOSTIC: Readonly<Record<
+  MainSendBaselineFailureStage,
+  DebugInspectSendSurfaceData['stage']
+>> = Object.freeze({
+  engine_unavailable: 'baseline_engine_unavailable',
+  route_changed: 'baseline_route_changed',
+  session_unavailable: 'baseline_session_unavailable',
+  history_first_unavailable: 'baseline_history_unavailable',
+  history_second_unavailable: 'baseline_history_unavailable',
+  history_unstable: 'baseline_history_unstable',
+  guard_snapshot_uncovered: 'baseline_guard_uncovered',
+  session_changed: 'baseline_session_changed',
+  hash_unavailable: 'baseline_hash_unavailable',
+  unexpected: 'baseline_unexpected',
+})
+
+interface MainSendSurfaceResult {
+  selected: boolean
+  composerBindingResolved: boolean
+  composerBindingMatched: boolean
+  composerCount: number
+  composerValue: string
+  sendButtonCount: number
+  diagnosticStage: MainSendSurfaceStage
+}
+
+interface MainFindConversationResult {
+  status: 'found' | 'failed'
+  reason?: 'list_surface_missing' | 'list_items_missing' | 'list_binding_unresolved' |
+    'list_window_repeated' | 'target_binding_duplicated' | 'target_binding_changed' |
+    'target_not_found' | 'list_scroll_stalled'
+}
+
+interface MainClickConversationResult {
+  status: 'clicked' | 'already_selected' | 'failed'
+  reason?: 'action_window_elapsed' | 'identity_changed' | 'route_changed' | 'list_items_missing' |
+    'list_binding_unresolved' | 'target_binding_duplicated' | 'target_binding_changed' |
+    'click_target_missing' | 'composer_ambiguous' | 'composer_nonempty'
+}
+
+interface MainSendOnceResult {
+  status: 'ready' | 'clicked' | 'failed'
+  reason?: 'route_changed' | 'guard_unresolved' | 'guard_changed' | 'composer_nonempty' |
+    'composer_missing' | 'send_button_missing' | 'send_button_disabled' | 'input_rejected' |
+    'identity_changed' | 'composer_binding_unresolved' | 'composer_binding_changed' |
+    'action_window_elapsed'
+}
+
+type MainSendPhase = 'preflight' | 'commit'
+
+const MAIN_SEND_BASELINE_FAILURE_STAGES = [
+  'engine_unavailable',
+  'route_changed',
+  'session_unavailable',
+  'history_first_unavailable',
+  'history_second_unavailable',
+  'history_unstable',
+  'guard_snapshot_uncovered',
+  'session_changed',
+  'hash_unavailable',
+  'unexpected',
+] as const
+
+type MainSendBaselineFailureStage = typeof MAIN_SEND_BASELINE_FAILURE_STAGES[number]
+
+interface MainSendBaselineReady {
+  status: 'ready'
+  stage: 'ready'
+  serverSourceKeys: string[]
+  sessionVersionToken: string
+  targetBindingToken: string
+}
+
+interface MainSendBaselineFailed {
+  status: 'failed'
+  stage: MainSendBaselineFailureStage
+}
+
+type MainSendBaselineResult = MainSendBaselineReady | MainSendBaselineFailed
+
+function validatedMainSendBaseline(value: unknown): MainSendBaselineResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.stage === 'string' &&
+      (MAIN_SEND_BASELINE_FAILURE_STAGES as readonly string[]).includes(record.stage)
+      ? record as unknown as MainSendBaselineFailed
+      : null
+  }
+  if (record.status !== 'ready' || record.stage !== 'ready' ||
+      !Array.isArray(record.serverSourceKeys) || record.serverSourceKeys.length > 64 ||
+      typeof record.sessionVersionToken !== 'string' || typeof record.targetBindingToken !== 'string') return null
+  const hashPattern = /^[0-9a-f]{64}$/u
+  if (!hashPattern.test(record.sessionVersionToken) || !hashPattern.test(record.targetBindingToken) ||
+      record.serverSourceKeys.some((key) => typeof key !== 'string' || !hashPattern.test(key)) ||
+      new Set(record.serverSourceKeys).size !== record.serverSourceKeys.length) return null
+  return record as unknown as MainSendBaselineReady
+}
+
+interface MainObserveStableOutboundResult {
+  selected: boolean
+  matchingNewServerMessages: number
 }
 
 interface ListCursor {
@@ -123,6 +321,10 @@ async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+export function normalizeZhilianMessageText(value: string): string {
+  return value.normalize('NFC').replace(/\u00a0/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
 async function bindingHash(value: unknown): Promise<string> {
   return sha256Hex(JSON.stringify(value))
 }
@@ -155,7 +357,7 @@ function sameThreadPosition(
 
 async function runMain<A extends unknown[], R>(
   tabId: number,
-  func: (...args: A) => Promise<R>,
+  func: (...args: A) => R | Promise<R>,
   args: A,
 ): Promise<R> {
   const result = await chrome.scripting.executeScript({
@@ -190,6 +392,12 @@ async function runMain<A extends unknown[], R>(
   }
   if (first.result === undefined || first.result === null) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本未返回结果', 'afterRecovery', 'contentScriptDead')
+  }
+  const mainError = typeof first.result === 'object' && !Array.isArray(first.result)
+    ? (first.result as Record<string, unknown>).__recruitHelperMainError
+    : undefined
+  if (typeof mainError === 'string' && mainError.length > 0) {
+    throw new Error(mainError.slice(0, 300))
   }
   return first.result
 }
@@ -436,7 +644,7 @@ export async function ensureZhilianIM(
     createdTab = true
   } else if (pageKindFromURL(tab.url) !== 'im') {
     if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
-    const commandNavigation = beginCommandNavigation(tab.id)
+    const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
     try {
       tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL })
     } catch (error) {
@@ -450,7 +658,7 @@ export async function ensureZhilianIM(
       if (tab.id === undefined) {
         throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
       }
-      const commandNavigation = beginCommandNavigation(tab.id)
+      const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
       try {
         await chrome.tabs.reload(tab.id)
         tab = await chrome.tabs.get(tab.id)
@@ -1075,6 +1283,11 @@ async function mainReadThreadPage(
   limit: number,
   cursor: { endTime: number; lastMsgId: string } | null,
 ): Promise<MainThreadPageResult> {
+  // 当前 Chrome 版本在 MAIN-world Promise reject 时可能只给 InjectionResult.result=undefined，
+  // 不附带 error。把本函数内部异常转换为脱敏、可序列化的哨兵，使外层能响亮区分
+  // “执行上下文真的丢失”和“页面 API/数据结构不满足契约”；哨兵绝不携带平台原始值。
+  let diagnosticStage = 'start'
+  const execute = async (): Promise<MainThreadPageResult> => {
   type AnyRecord = Record<string, unknown>
   const w = window as unknown as AnyRecord
   const engine = w.imEngine as AnyRecord | undefined
@@ -1128,23 +1341,62 @@ async function mainReadThreadPage(
     const timeline = (timelineEntry as AnyRecord).timeline
     return Array.isArray(timeline) ? [...timeline] : []
   }
+  diagnosticStage = 'resolve_session_runtime'
   let sessions = (engine && Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
   let session = sessions.find((item) => String(item.sessionId ?? '') === conversationRef)
-  if (!session && engine && typeof engine.getSessionsByIds === 'function') {
-    const loaded = await (engine.getSessionsByIds as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, {
-      params: { sessionIds: [conversationRef] },
-    })
-    if (loaded && Array.isArray(loaded.sessions)) {
-      sessions = loaded.sessions as AnyRecord[]
-      session = sessions.find((item) => String(item.sessionId ?? '') === conversationRef)
+  if (!session && engine && typeof engine.getSessions === 'function') {
+    diagnosticStage = 'resolve_session_scan'
+    const getSessions = engine.getSessions as (arg: AnyRecord) => Promise<unknown>
+    const seenPages = new Set<string>()
+    const readPage = async (pageNo: number): Promise<{ rows: AnyRecord[]; hasMore: boolean }> => {
+      const loaded = await getSessions.call(engine, { pageNo, pageSize: 8, includeResume: true })
+      if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) ||
+          !Array.isArray((loaded as AnyRecord).curSessions)) {
+        throw new Error('session_lookup_response_invalid')
+      }
+      const rawHasMore = (loaded as AnyRecord).hasMoreSession ?? (loaded as AnyRecord).hasMore
+      if (typeof rawHasMore !== 'boolean') throw new Error('session_lookup_has_more_missing')
+      return { rows: (loaded as AnyRecord).curSessions as AnyRecord[], hasMore: rawHasMore }
+    }
+    for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
+      const firstPage = await readPage(pageNo)
+      const page = firstPage.rows
+      const pageKey = `${String(page[0]?.sessionId ?? '')}\u001f${String(page[page.length - 1]?.sessionId ?? '')}\u001f${page.length}`
+      if (seenPages.has(pageKey)) throw new Error('session_lookup_pagination_stalled')
+      seenPages.add(pageKey)
+      const firstMatches = page.filter((item) => String(item.sessionId ?? '') === conversationRef)
+      if (firstMatches.length > 1) throw new Error('session_lookup_duplicate_target')
+      if (firstMatches.length === 1) {
+        // 命中页再采一次，只要求目标身份投影稳定；列表中其他会话的实时变化不能
+        // 迫使我们猜目标，也不能把一次瞬态命中当成跨会话绑定证词。
+        const secondPage = await readPage(pageNo)
+        const secondMatches = secondPage.rows.filter((item) => String(item.sessionId ?? '') === conversationRef)
+        if (secondMatches.length !== 1) throw new Error('session_lookup_target_unstable')
+        const targetProjection = (item: AnyRecord): string => JSON.stringify([
+          String(item.sessionId ?? ''),
+          String(item.peerPartnerId ?? ''),
+          item.scene ?? item.sessionType ?? null,
+        ])
+        if (targetProjection(firstMatches[0]) !== targetProjection(secondMatches[0])) {
+          throw new Error('session_lookup_target_unstable')
+        }
+        session = secondMatches[0]
+        break
+      }
+      if (!firstPage.hasMore) break
+      if (pageNo === 128) throw new Error('session_lookup_page_limit')
     }
   }
+  diagnosticStage = 'resolve_session_initial_state'
   if (!session) session = readInitialSessions().find((item) => String(item.sessionId ?? '') === conversationRef)
   if (!session) throw new Error('conversation_not_found')
 
   const target = String(session.peerPartnerId ?? '')
+  if (!target) throw new Error('conversation_target_missing')
   let history: unknown = null
+  let historyFailure: 'unavailable' | 'rejected' | 'shape' | null = null
   if (engine && typeof engine.getHistoryMsgs === 'function' && target) {
+    diagnosticStage = 'read_history_api'
     const request: AnyRecord = { to: target, limit, asc: true }
     const scene = session.scene ?? session.sessionType
     if (scene != null && String(scene) !== '') request.scene = scene
@@ -1154,17 +1406,26 @@ async function mainReadThreadPage(
     }
     try {
       history = await (engine.getHistoryMsgs as (arg: AnyRecord) => Promise<unknown[]>).call(engine, request)
-      if (!Array.isArray(history)) history = null
+      if (!Array.isArray(history)) {
+        history = null
+        historyFailure = 'shape'
+      }
     } catch {
       history = null
+      historyFailure = 'rejected'
     }
+  } else {
+    historyFailure = 'unavailable'
   }
 
   let usedDOM = false
   let domReachedTop = false
   if (!Array.isArray(history)) {
+    diagnosticStage = 'read_history_dom_fallback'
     const selected = new URL(location.href).searchParams.get('sessionId')
-    if (selected !== conversationRef) throw new Error('dom_thread_route_not_selected')
+    if (selected !== conversationRef) {
+      throw new Error(`history_api_${historyFailure ?? 'unavailable'}_on_base_route`)
+    }
     const timeline = document.querySelector<HTMLElement>('.im-timeline__wrapper .km-list') ??
       document.querySelector<HTMLElement>('.im-timeline__wrapper .im-timeline')
     if (!timeline) throw new Error('dom_thread_timeline_missing')
@@ -1261,6 +1522,7 @@ async function mainReadThreadPage(
     return 'unknown'
   }
 
+  diagnosticStage = 'resolve_staff_identity'
   const runtimeSession = w.$session as AnyRecord | null | undefined
   const runtimeStaff = runtimeSession?.staff as AnyRecord | undefined
   // MAIN runtime 是首选证词；真机上 `$session` 可以暂时为 null，此时仅回退到同一份
@@ -1273,6 +1535,7 @@ async function mainReadThreadPage(
     staffID = clean(initialStaff?.staffId)
   }
   if (!staffID) throw new Error('staff_identity_missing')
+  diagnosticStage = 'normalize_messages'
   const output: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
   const sorted = [...rows].sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0))
   for (const row of sorted) {
@@ -1347,7 +1610,13 @@ async function mainReadThreadPage(
       ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
     }
 
-    const stableMessageID = clean(row.idServer ?? row.sendMessageId)
+    if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') {
+      throw new Error('outbound_delivery_unconfirmed')
+    }
+
+    // 脑侧 ambiguity verifier 复用 chat.readThread；client sendMessageId 可能只是
+    // 乐观本地行，不能被结构化成“已发送”正证词。稳定消息身份只认服务端 idServer。
+    const stableMessageID = clean(row.idServer)
     if (!stableMessageID) throw new Error('message_identity_missing')
     // contentHash 是脑手共享的规范内容哈希，不是平台消息主键：文本/系统只哈希
     // NFC+空白规范化文本，媒体使用固定占位符；卡片只哈希类型+稳定身份且排除状态。
@@ -1376,6 +1645,7 @@ async function mainReadThreadPage(
   const lastMsgId = oldest ? clean(oldest.idServer ?? oldest.sendMessageId) : ''
   const displayName = clean(session.name ?? session.realName) || '未命名候选人'
   const platformUserRef = clean(session.peerPartnerId ?? session.typeUserId ?? session.userId)
+  diagnosticStage = 'return_result'
   return {
     messages: output,
     reachedTop: usedDOM ? domReachedTop : rows.length < limit,
@@ -1383,6 +1653,2312 @@ async function mainReadThreadPage(
       ? { endTime, lastMsgId }
       : null,
     peer: platformUserRef ? { displayName, platformUserRef } : { displayName },
+  }
+  }
+
+  try {
+    return await execute()
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : ''
+    const known = [
+      'session_lookup_response_invalid',
+      'session_lookup_pagination_stalled',
+      'session_lookup_has_more_missing',
+      'session_lookup_duplicate_target',
+      'session_lookup_target_unstable',
+      'session_lookup_page_limit',
+      'conversation_not_found',
+      'conversation_target_missing',
+      'history_api_unavailable_on_base_route',
+      'history_api_rejected_on_base_route',
+      'history_api_shape_on_base_route',
+      'dom_thread_route_not_selected',
+      'dom_thread_timeline_missing',
+      'dom_thread_data_unavailable',
+      'dom_thread_unstable',
+      'dom_thread_cursor_anchor_missing',
+      'thread_history_unavailable',
+      'getHistoryMsgs row shape invalid',
+      'staff_identity_missing',
+      'message_direction_unresolved',
+      'outbound_delivery_unconfirmed',
+      'message_identity_missing',
+    ].find((code) => raw.includes(code)) ?? 'unexpected'
+    return {
+      __recruitHelperMainError: `read_thread_main_failed:${diagnosticStage}:${known}`,
+    } as unknown as MainThreadPageResult
+  }
+}
+
+// 发送正文前的第一轮只读检查。第二轮会在唯一 message click 的同一次 MAIN 注入内
+// 重新核验 route/tail/composer。M3 的 sendMessage 只允许人已打开的目标会话；
+// 自动切换属于另一个 intrusive 原语，不能与本发送共用 attempting 证词。
+async function mainInspectSendSurface(conversationRef: string): Promise<MainSendSurfaceResult> {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const normalizedRef = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const result = value.trim()
+      return result || null
+    }
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return null
+  }
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  type AnyFunction = (...args: unknown[]) => unknown
+  interface BoundScalarModel {
+    container: AnyRecord
+    key: 'activeSessionId' | 'currentSessionId' | 'propsSessionId'
+    path: 'owner' | 'propsInternal' | 'propsPublic' | 'data' | 'store' | 'rootStore'
+    raw: string | number
+    ref: string
+  }
+  interface SenderBinding {
+    senderOwner: AnyRecord
+    currentSessionModel: AnyRecord | null
+    propsSessionModel: AnyRecord | null
+    scalarModels: BoundScalarModel[]
+    buttonOwner: AnyRecord
+    senderHandler: AnyFunction
+    domHandler: AnyFunction
+  }
+  interface SenderBindingInspection {
+    binding: SenderBinding | null
+    stage: MainSendSurfaceStage
+  }
+  const componentTree = (surfaceNodes: readonly HTMLElement[]): {
+    components: AnyRecord[] | null
+    stage: 'component_tree_root_missing' | 'component_tree_malformed' |
+      'component_tree_overflow' | null
+  } => {
+    let root = asRecord(w.$nuxt)
+    if (!root) {
+      // 真页不保证把 Nuxt 根挂到 window。只从已经由 DOM containment 确认的
+      // 发送区节点及其祖先读取 Vue 2 自有 __vue__ owner，再要求所有 owner
+      // 汇聚到同一个自反 $root；不扫描任意页面对象或无关 DOM 子树。
+      const roots = new Set<AnyRecord>()
+      const visitedNodes = new Set<HTMLElement>()
+      for (const surfaceNode of surfaceNodes) {
+        let current: HTMLElement | null = surfaceNode
+        for (let depth = 0; current && depth < 64; depth += 1) {
+          if (!visitedNodes.has(current)) {
+            visitedNodes.add(current)
+            const holder = current as HTMLElement & { __vue__?: unknown }
+            if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+              const owner = asRecord(holder.__vue__)
+              const candidateRoot = asRecord(owner?.$root)
+              if (!owner || !candidateRoot || candidateRoot.$root !== candidateRoot) {
+                return { components: null, stage: 'component_tree_malformed' }
+              }
+              roots.add(candidateRoot)
+            }
+          }
+          current = current.parentElement
+        }
+      }
+      if (roots.size !== 1) return { components: null, stage: 'component_tree_root_missing' }
+      root = [...roots][0]
+    }
+    const queue: AnyRecord[] = [root]
+    const seen = new Set<AnyRecord>()
+    const components: AnyRecord[] = []
+    while (queue.length > 0) {
+      const component = queue.shift()
+      if (!component || seen.has(component)) continue
+      // 4096 是证据遍历上界，不是“找到就停”的搜索上界。超出时无法
+      // 证明后面没有第二个 owner/listener，因此必须整体 unresolved。
+      if (seen.size >= 4096) return { components: null, stage: 'component_tree_overflow' }
+      seen.add(component)
+      components.push(component)
+      const children = component.$children
+      if (!Array.isArray(children)) return { components: null, stage: 'component_tree_malformed' }
+      for (const child of children) {
+        const record = asRecord(child)
+        if (!record) return { components: null, stage: 'component_tree_malformed' }
+        queue.push(record)
+      }
+    }
+    return { components, stage: null }
+  }
+  const connected = (value: unknown): value is HTMLElement =>
+    value !== null && typeof value === 'object' &&
+    (value as { isConnected?: unknown }).isConnected === true
+  const liveComponent = (component: AnyRecord): boolean =>
+    component._isDestroyed !== true && component._isBeingDestroyed !== true &&
+    component._inactive !== true && component.$destroyed !== true && connected(component.$el)
+  const unwrapSingleListener = (value: unknown): AnyFunction | null => {
+    let current = value
+    const seen = new Set<unknown>()
+    for (let depth = 0; depth < 12; depth += 1) {
+      if (Array.isArray(current)) {
+        if (current.length !== 1) return null
+        current = current[0]
+        continue
+      }
+      if (typeof current !== 'function' || seen.has(current)) return null
+      seen.add(current)
+      const wrapped = (current as unknown as { fns?: unknown }).fns
+      if (wrapped !== undefined) {
+        current = wrapped
+        continue
+      }
+      return current as AnyFunction
+    }
+    return null
+  }
+  const componentEvidenceForSurface = (
+    composer: HTMLElement,
+    button: HTMLButtonElement,
+    wrapper: HTMLElement,
+    detail: HTMLElement,
+  ): SenderBindingInspection => {
+    const senderRoot = wrapper.closest<HTMLElement>('.im-sender')
+    if (!senderRoot || !detail.contains(senderRoot)) {
+      return { binding: null, stage: 'sender_root_missing' }
+    }
+    if (!wrapper.contains(composer) || !wrapper.contains(button) ||
+        !senderRoot.contains(composer) || !senderRoot.contains(button)) {
+      return { binding: null, stage: 'wrapper_mismatch' }
+    }
+    if (!connected(detail) || !connected(wrapper) || !connected(senderRoot) ||
+        !connected(composer) || !connected(button)) {
+      return { binding: null, stage: 'surface_disconnected' }
+    }
+    const tree = componentTree([detail, senderRoot, wrapper, composer, button])
+    if (!tree.components || tree.stage) {
+      return { binding: null, stage: tree.stage ?? 'component_tree_malformed' }
+    }
+    const components = tree.components
+    // `.im-sender` 的 Vue owner 必须在完整组件树中唯一，且当下仍是 live DOM owner。
+    // 死 owner 也会造成唯一性失败，不能被过滤后“变成唯一”。
+    const senderOwners = components.filter((component) => component.$el === senderRoot)
+    if (senderOwners.length !== 1) return { binding: null, stage: 'sender_owner_count' }
+    if (!liveComponent(senderOwners[0])) return { binding: null, stage: 'sender_owner_inactive' }
+    const senderOwner = senderOwners[0]
+    const belongsToSender = (component: AnyRecord): boolean => {
+      let current: AnyRecord | null = component
+      const parents = new Set<AnyRecord>()
+      while (current && parents.size < 64) {
+        if (!liveComponent(current)) return false
+        if (current === senderOwner) return true
+        if (parents.has(current)) return false
+        parents.add(current)
+        current = asRecord(current.$parent)
+      }
+      return false
+    }
+    const buttonOwners = components.filter((component) => component.$el === button)
+    if (buttonOwners.length !== 1) return { binding: null, stage: 'button_owner_count' }
+    if (!belongsToSender(buttonOwners[0])) {
+      return { binding: null, stage: 'button_owner_outside_sender' }
+    }
+    const buttonOwner = buttonOwners[0]
+    const composerOwned = components.some((component) => {
+      const element = component.$el as HTMLElement | undefined
+      return element !== undefined && element !== senderRoot &&
+        typeof element.contains === 'function' && senderRoot.contains(element) &&
+        element.contains(composer) && belongsToSender(component)
+    })
+    if (!composerOwned) return { binding: null, stage: 'composer_owner_missing' }
+
+    // 一次性读取完整闭集，后续不再通过 getter 重新取得容器。优先认 Sender
+    // owner 的两个明确对象模型槽；真实页面没有对象槽时，只接受至少两个
+    // 独立容器/路径中的显式会话 ID 标量。闭集中任何非空冲突都立即闭锁。
+    let containerMalformed = false
+    const optionalContainer = (value: unknown): AnyRecord | null => {
+      if (value === null || value === undefined) return null
+      const record = asRecord(value)
+      if (!record) containerMalformed = true
+      return record
+    }
+    const propsInternal = optionalContainer(senderOwner._props)
+    const propsPublic = optionalContainer(senderOwner.$props)
+    const data = optionalContainer(senderOwner.$data)
+    const ownerStore = optionalContainer(senderOwner.$store)
+    const ownerStoreStateRaw = ownerStore?.state
+    if (ownerStore && (ownerStoreStateRaw === null || ownerStoreStateRaw === undefined)) containerMalformed = true
+    const ownerStoreState = ownerStore ? optionalContainer(ownerStoreStateRaw) : null
+    const ownerStoreIM = optionalContainer(ownerStoreState?.im)
+    const senderRootModel = optionalContainer(senderOwner.$root)
+    const rootStore = optionalContainer(senderRootModel?.$store)
+    const rootStoreStateRaw = rootStore?.state
+    if (rootStore && (rootStoreStateRaw === null || rootStoreStateRaw === undefined)) containerMalformed = true
+    const rootStoreState = rootStore ? optionalContainer(rootStoreStateRaw) : null
+    const rootStoreIM = optionalContainer(rootStoreState?.im)
+    if (containerMalformed) return { binding: null, stage: 'model_candidate_conflict' }
+    const modelEntries: Array<{
+      key: 'currentSession' | 'propsSession'
+      model: AnyRecord
+    }> = []
+    let directModelMalformed = false
+    for (const key of ['currentSession', 'propsSession'] as const) {
+      const raw = senderOwner[key]
+      if (raw === null || raw === undefined) continue
+      const model = asRecord(raw)
+      if (!model) directModelMalformed = true
+      else modelEntries.push({ key, model })
+    }
+    if (directModelMalformed) return { binding: null, stage: 'model_target_mismatch' }
+    type CandidateGroup = 'props' | 'data' | 'store'
+    const candidates: Array<{ group: CandidateGroup; model: AnyRecord }> = []
+    let candidateModelMalformed = false
+    const seenByGroup: Record<CandidateGroup, Set<AnyRecord>> = {
+      props: new Set<AnyRecord>(),
+      data: new Set<AnyRecord>(),
+      store: new Set<AnyRecord>(),
+    }
+    const addContainer = (group: CandidateGroup, container: AnyRecord | null): void => {
+      if (!container) return
+      for (const key of ['currentSession', 'propsSession'] as const) {
+        const raw = container[key]
+        if (raw === null || raw === undefined) continue
+        const model = asRecord(raw)
+        if (!model) {
+          candidateModelMalformed = true
+          continue
+        }
+        if (seenByGroup[group].has(model)) continue
+        seenByGroup[group].add(model)
+        candidates.push({ group, model })
+      }
+    }
+    addContainer('props', propsInternal)
+    addContainer('props', propsPublic)
+    addContainer('data', data)
+    addContainer('store', ownerStoreIM)
+    addContainer('store', rootStoreIM)
+    if (candidateModelMalformed) return { binding: null, stage: 'model_candidate_conflict' }
+    // 非直接对象模型尚未经过真实发送验证；即便内容一致也只诊断、不授权。
+    // direct 模型存在时也不能忽略它们，否则 handler 可能按冲突对象选目标。
+    if (candidates.length > 0) {
+      const identities = candidates.map(({ model }) => ({
+        ref: normalizedRef(model.sessionId),
+        peer: normalizedRef(model.peerPartnerId),
+      }))
+      if (identities.some(({ ref, peer }) => ref !== conversationRef || !peer) ||
+          new Set(identities.map(({ peer }) => peer)).size !== 1) {
+        return { binding: null, stage: 'model_candidate_conflict' }
+      }
+      const groups = [...new Set(candidates.map(({ group }) => group))]
+      if (groups.length !== 1 || modelEntries.length > 0) {
+        return { binding: null, stage: 'model_candidate_multiple' }
+      }
+      const stage: MainSendSurfaceStage = groups[0] === 'props'
+        ? 'model_candidate_props'
+        : groups[0] === 'data' ? 'model_candidate_data' : 'model_candidate_store'
+      return { binding: null, stage }
+    }
+
+    const scalarModels: BoundScalarModel[] = []
+    let scalarMalformed = false
+    const addScalars = (
+      path: BoundScalarModel['path'],
+      container: AnyRecord | null,
+    ): void => {
+      if (!container) return
+      for (const key of ['activeSessionId', 'currentSessionId', 'propsSessionId'] as const) {
+        const raw = container[key]
+        if (raw === null || raw === undefined) continue
+        const ref = normalizedRef(raw)
+        if (ref && (typeof raw === 'string' || typeof raw === 'number')) {
+          scalarModels.push({ container, key, path, raw, ref })
+        } else scalarMalformed = true
+      }
+    }
+    addScalars('owner', senderOwner)
+    addScalars('propsInternal', propsInternal)
+    addScalars('propsPublic', propsPublic)
+    addScalars('data', data)
+    addScalars('store', ownerStoreIM)
+    addScalars('rootStore', rootStoreIM)
+    if (scalarMalformed || scalarModels.some(({ ref }) => ref !== conversationRef)) {
+      return { binding: null, stage: 'model_scalar_conflict' }
+    }
+    if (modelEntries.length === 0) {
+      if (scalarModels.length === 0) return { binding: null, stage: 'model_scalar_absent' }
+      const independentPaths = new Set(scalarModels.map(({ path }) => path))
+      const independentContainers = new Set(scalarModels.map(({ container }) => container))
+      if (independentPaths.size < 2 || independentContainers.size < 2) {
+        const groups = [...new Set(scalarModels.map(({ path }) =>
+          path === 'owner' ? 'owner'
+            : path === 'propsInternal' || path === 'propsPublic' ? 'props'
+              : path === 'data' ? 'data' : 'store'))]
+        const stage: MainSendSurfaceStage = groups.length !== 1
+          ? 'model_scalar_multiple'
+          : groups[0] === 'owner' ? 'model_scalar_owner'
+            : groups[0] === 'props' ? 'model_scalar_props'
+              : groups[0] === 'data' ? 'model_scalar_data' : 'model_scalar_store'
+        return { binding: null, stage }
+      }
+    }
+    let modelPeer: string | null = null
+    if (modelEntries.length > 0) {
+      const modelIdentities = modelEntries.map(({ model }) => ({
+        ref: normalizedRef(model.sessionId),
+        peer: normalizedRef(model.peerPartnerId),
+      }))
+      if (modelIdentities.some(({ ref, peer }) => ref !== conversationRef || !peer)) {
+        return { binding: null, stage: 'model_target_mismatch' }
+      }
+      const modelPeers = [...new Set(modelIdentities.map(({ peer }) => peer as string))]
+      if (modelPeers.length !== 1) return { binding: null, stage: 'model_slot_ambiguous' }
+      modelPeer = modelPeers[0]
+    }
+    const engine = asRecord(w.imEngine)
+    const engineTargets = (Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : [])
+      .filter((session) => normalizedRef(session.sessionId) === conversationRef)
+    const enginePeer = engineTargets.length === 1
+      ? normalizedRef(engineTargets[0].peerPartnerId)
+      : null
+    if (engineTargets.length !== 1 || !enginePeer || (modelPeer !== null && enginePeer !== modelPeer)) {
+      return { binding: null, stage: 'engine_target_mismatch' }
+    }
+
+    // 有关联 form 时只接受显式 type=button,避免原生默认 submit 成为第二副作用。
+    let buttonFormSafe = false
+    try {
+      buttonFormSafe = button.form === null ||
+        String(button.getAttribute('type') ?? '').trim().toLowerCase() === 'button'
+    } catch {
+      buttonFormSafe = false
+    }
+    if (!buttonFormSafe) return { binding: null, stage: 'button_form_unsafe' }
+
+    // root vnode 必须精确指向当前 DOM button,其 DOM click listener
+    // 经 wrapper 解开后必须唯一;不解析任意 JS 源码。
+    const rootVNode = asRecord(buttonOwner._vnode)
+    const rootOn = asRecord(asRecord(rootVNode?.data)?.on)
+    if (!rootVNode || rootVNode.elm !== button || !rootOn) {
+      return { binding: null, stage: 'button_vnode_missing' }
+    }
+    const domHandler = unwrapSingleListener(rootOn.click)
+    if (!domHandler) return { binding: null, stage: 'button_dom_listener_ambiguous' }
+    // 自定义 click 的运行时 `_events` 与 component placeholder `$vnode`
+    // 必须经 wrapper 解开后唯一地落到同一个 Sender handler。
+    const eventHandler = unwrapSingleListener(asRecord(buttonOwner._events)?.click)
+    const placeholderListeners = asRecord(asRecord(asRecord(buttonOwner.$vnode)?.componentOptions)?.listeners)
+    const vnodeHandler = unwrapSingleListener(placeholderListeners?.click)
+    if (!eventHandler || !vnodeHandler) return { binding: null, stage: 'sender_listener_ambiguous' }
+    if (eventHandler !== vnodeHandler) return { binding: null, stage: 'sender_listener_mismatch' }
+    return {
+      binding: {
+        senderOwner,
+        currentSessionModel: modelEntries.find(({ key }) => key === 'currentSession')?.model ?? null,
+        propsSessionModel: modelEntries.find(({ key }) => key === 'propsSession')?.model ?? null,
+        scalarModels,
+        buttonOwner,
+        senderHandler: eventHandler,
+        domHandler,
+      },
+      stage: 'ok',
+    }
+  }
+  const selected = new URL(location.href).searchParams.get('sessionId') === conversationRef
+  const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
+    'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
+  )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
+  const detail = composers.length === 1 ? composers[0].closest('.im-session-detail') : null
+  const visibleDetails = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+  const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.im-sender__input-wrapper button'))
+    .filter((element) => visible(element) && String(element.textContent ?? '').trim() === '发送')
+  const wrapper = composers.length === 1
+    ? composers[0].closest<HTMLElement>('.im-sender__input-wrapper')
+    : null
+  // 左侧列表的 `is-active` 是在线状态样式，不是选中会话证据。发送目标只由
+  // 当前 route 与唯一可见 detail 内的 sender 因果绑定共同证明。
+  const sameWrapper = detail !== null && visibleDetails.length === 1 && visibleDetails[0] === detail &&
+    wrapper !== null && buttons.length === 1 &&
+    buttons[0].closest('.im-session-detail') === detail &&
+    buttons[0].closest('.im-sender__input-wrapper') === wrapper
+  const bindingInspection = sameWrapper
+    ? componentEvidenceForSurface(composers[0], buttons[0], wrapper as HTMLElement, detail as HTMLElement)
+    : null
+  const binding = bindingInspection?.binding ?? null
+  const composerBindingResolved = binding !== null
+  const diagnosticStage: MainSendSurfaceStage = !selected
+    ? 'route_target_missing'
+    : composers.length !== 1
+      ? 'composer_count'
+      : detail === null || visibleDetails.length !== 1 || visibleDetails[0] !== detail
+        ? 'detail_ambiguous'
+        : wrapper === null || (buttons.length === 1 && (
+            buttons[0].closest('.im-session-detail') !== detail ||
+            buttons[0].closest('.im-sender__input-wrapper') !== wrapper
+          ))
+          ? 'wrapper_mismatch'
+          : buttons.length !== 1
+            ? 'button_count'
+            : bindingInspection?.stage ?? 'wrapper_mismatch'
+  return {
+    selected,
+    composerBindingResolved,
+    composerBindingMatched: composerBindingResolved,
+    composerCount: composers.length,
+    composerValue: composers.length === 1 ? composers[0].value : '',
+    sendButtonCount: buttons.length,
+    diagnosticStage,
+  }
+}
+
+// 只读诊断包装器只输出协议收编的粗粒度阶段码。会话标识和草稿只在本函数
+// 内参与两次采样，任何页面值、异常或细粒度实现线索都不会越过返回边界。
+export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspectSendSurfaceData> {
+  const unavailable = (): DebugInspectSendSurfaceData => ({
+    ready: false,
+    stage: 'diagnostic_unavailable',
+  })
+  const validSnapshot = (value: MainSendSurfaceResult): boolean =>
+    typeof value.selected === 'boolean' &&
+    typeof value.composerBindingResolved === 'boolean' &&
+    typeof value.composerBindingMatched === 'boolean' &&
+    Number.isSafeInteger(value.composerCount) && value.composerCount >= 0 &&
+    typeof value.composerValue === 'string' &&
+    Number.isSafeInteger(value.sendButtonCount) && value.sendButtonCount >= 0 &&
+    Object.prototype.hasOwnProperty.call(SEND_SURFACE_STAGE_TO_DIAGNOSTIC, value.diagnosticStage)
+  const sameSnapshot = (left: MainSendSurfaceResult, right: MainSendSurfaceResult): boolean =>
+    left.selected === right.selected &&
+    left.composerBindingResolved === right.composerBindingResolved &&
+    left.composerBindingMatched === right.composerBindingMatched &&
+    left.composerCount === right.composerCount &&
+    left.composerValue === right.composerValue &&
+    left.sendButtonCount === right.sendButtonCount &&
+    left.diagnosticStage === right.diagnosticStage
+
+  try {
+    const tab = await canonicalZhilianTab()
+    if (!tab || tab.id === undefined || pageKindFromURL(tab.url) !== 'im') {
+      return { ready: false, stage: 'page_absent' }
+    }
+    const conversationRef = new URL(tab.url as string).searchParams.get('sessionId')?.trim() ?? ''
+    if (!conversationRef) return { ready: false, stage: 'route_missing' }
+
+    const first = await runMain(tab.id, mainInspectSendSurface, [conversationRef])
+    const second = await runMain(tab.id, mainInspectSendSurface, [conversationRef])
+    if (!validSnapshot(first) || !validSnapshot(second)) return unavailable()
+    if (!sameSnapshot(first, second)) return { ready: false, stage: 'unstable' }
+    if (first.composerValue !== '') return { ready: false, stage: 'draft_present' }
+
+    const surfaceStage = SEND_SURFACE_STAGE_TO_DIAGNOSTIC[first.diagnosticStage]
+    if (surfaceStage !== 'ready') return { ready: false, stage: surfaceStage }
+
+    let rawBaseline: MainSendBaselineResult
+    try {
+      rawBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
+        conversationRef,
+        [],
+      ])
+    } catch {
+      return { ready: false, stage: 'baseline_unexpected' }
+    }
+    const baseline = validatedMainSendBaseline(rawBaseline)
+    if (!baseline) return { ready: false, stage: 'baseline_unexpected' }
+    if (baseline.status === 'failed') {
+      return { ready: false, stage: SEND_BASELINE_STAGE_TO_DIAGNOSTIC[baseline.stage] }
+    }
+    return { ready: true, stage: 'ready' }
+  } catch {
+    return unavailable()
+  }
+}
+
+// 直接拼接 ?sessionId=... 在目标尚未进入智联当前虚拟列表时会被平台剥回 /app/im。
+// finder 只滚动并把完整 sessionId 唯一命中的行留在视口，绝不 click。即使注入在
+// dispatcher 取消/超时后才返回，最多改变滚动位置，不可能产生迟到导航。
+async function mainFindConversation(conversationRef: string): Promise<MainFindConversationResult> {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const current = (): string => {
+    try { return new URL(location.href).searchParams.get('sessionId') ?? '' } catch { return '' }
+  }
+  if (current() === conversationRef) return { status: 'found' }
+
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const virtual = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
+  if (!virtual) return { status: 'failed', reason: 'list_surface_missing' }
+  const scrollCandidates = [
+    virtual,
+    ...Array.from(virtual.querySelectorAll<HTMLElement>('.km-scrollbar__wrap, .km-scrollbar__view')),
+    virtual.parentElement,
+  ].filter((item): item is HTMLElement => item !== null)
+  const scrollElement = scrollCandidates.sort((left, right) =>
+    (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0]
+  if (!scrollElement || scrollElement.clientHeight <= 0) {
+    return { status: 'failed', reason: 'list_surface_missing' }
+  }
+  const itemSelector =
+    '.im-session-list .im-session-list__virtual .im-session-list__virtual--box div[role="listitem"]'
+  const refsOf = (node: HTMLElement): Set<string> => {
+    const refs = new Set<string>()
+    const addSource = (component: AnyRecord | null): void => {
+      if (!component) return
+      for (const container of [component, asRecord(component._props), asRecord(component.$props), asRecord(component.$data)]) {
+        if (!container) continue
+        const direct = String(container.sessionId ?? '').trim()
+        const source = String(asRecord(container.source)?.sessionId ?? '').trim()
+        if (direct) refs.add(direct)
+        if (source) refs.add(source)
+      }
+    }
+    for (const candidate of [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]) {
+      addSource(asRecord((candidate as HTMLElement & { __vue__?: unknown }).__vue__))
+    }
+    const root = asRecord(w.$nuxt)
+    if (!root) return refs
+    const queue: AnyRecord[] = [root]
+    const seen = new Set<AnyRecord>()
+    while (queue.length > 0 && seen.size < 4096) {
+      const component = queue.shift()
+      if (!component || seen.has(component)) continue
+      seen.add(component)
+      const element = component.$el as HTMLElement | undefined
+      if (element && typeof element.contains === 'function' &&
+          (element === node || node.contains(element))) addSource(component)
+      const children = component.$children
+      if (Array.isArray(children)) {
+        for (const child of children) {
+          const record = asRecord(child)
+          if (record) queue.push(record)
+        }
+      }
+    }
+    return refs
+  }
+  const readWindow = (): Array<{ node: HTMLElement; ref: string }> | null => {
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(itemSelector))
+      .filter((node) => visible(node) && node.querySelector('.im-session-item__box, .im-session-item') !== null)
+    if (nodes.length === 0) return []
+    const pairs = nodes.map((node) => ({ node, refs: refsOf(node) }))
+    if (pairs.some((pair) => pair.refs.size !== 1)) return null
+    return pairs.map(({ node, refs }) => ({ node, ref: [...refs][0] }))
+  }
+
+  scrollElement.scrollTop = 0
+  scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const seenWindows = new Set<string>()
+  for (let windowNo = 0; windowNo < 128; windowNo += 1) {
+    let rows = readWindow()
+    if (rows !== null && rows.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      rows = readWindow()
+    }
+    if (rows === null) return { status: 'failed', reason: 'list_binding_unresolved' }
+    if (rows.length === 0) return { status: 'failed', reason: 'list_items_missing' }
+    const refs = rows.map(({ ref }) => ref)
+    // 虚拟列表带 overscan：相邻两个合法 scrollTop 可能暂时呈现同一首尾行。
+    // 把实际位置纳入停滞键，真正不前进由下方 scrollTop 断言单独拦截。
+    const windowKey = `${Math.round(scrollElement.scrollTop)}\u001f${refs[0]}\u001f${refs[refs.length - 1]}\u001f${refs.length}`
+    if (seenWindows.has(windowKey)) return { status: 'failed', reason: 'list_window_repeated' }
+    seenWindows.add(windowKey)
+    const matches = rows.filter(({ ref }) => ref === conversationRef)
+    if (matches.length > 1) return { status: 'failed', reason: 'target_binding_duplicated' }
+    if (matches.length === 1) {
+      matches[0].node.scrollIntoView({ block: 'center', inline: 'nearest' })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const rebound = readWindow()
+      if (rebound === null) return { status: 'failed', reason: 'list_binding_unresolved' }
+      const reboundMatches = rebound.filter(({ ref }) => ref === conversationRef)
+      if (reboundMatches.length !== 1) return { status: 'failed', reason: 'target_binding_changed' }
+      return { status: 'found' }
+    }
+    const maxTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight)
+    if (scrollElement.scrollTop >= maxTop - 2) return { status: 'failed', reason: 'target_not_found' }
+    const beforeTop = scrollElement.scrollTop
+    const step = Math.max(200, Math.floor(scrollElement.clientHeight * 0.8))
+    scrollElement.scrollTop = Math.min(maxTop, beforeTop + step)
+    scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    if (scrollElement.scrollTop <= beforeTop) return { status: 'failed', reason: 'list_scroll_stalled' }
+  }
+  return { status: 'failed', reason: 'target_not_found' }
+}
+
+// finder 返回后由 extension 先 checkpoint 并重新核验账号；只有这个无 await 的短 task
+// 可以 click。它从当前虚拟窗口重新按完整 sessionId 解析目标，复核空草稿、账号与
+// 绝对期限，并只点击一次。迟到 task、虚拟行复用或人工输入都会在页面内变成零 click。
+function mainClickConversationOnce(
+  conversationRef: string,
+  expectedCurrentConversationRef: string,
+  expectedPrincipalFingerprint: string,
+  notAfterMs: number,
+): MainClickConversationResult {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '').trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const rotateRight = (value: number, count: number): number =>
+    (value >>> count) | (value << (32 - count))
+  const digest = (value: string): string => {
+    const input = new TextEncoder().encode(value)
+    const totalLength = Math.ceil((input.length + 9) / 64) * 64
+    const padded = new Uint8Array(totalLength)
+    padded.set(input)
+    padded[input.length] = 0x80
+    const bitLength = input.length * 8
+    const view = new DataView(padded.buffer)
+    view.setUint32(totalLength - 8, Math.floor(bitLength / 0x100000000), false)
+    view.setUint32(totalLength - 4, bitLength >>> 0, false)
+    const constants = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ])
+    const state = new Uint32Array([
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ])
+    const words = new Uint32Array(64)
+    for (let offset = 0; offset < totalLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4, false)
+      for (let index = 16; index < 64; index += 1) {
+        const left = words[index - 15]
+        const right = words[index - 2]
+        const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3)
+        const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10)
+        words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0
+      }
+      let a = state[0]
+      let b = state[1]
+      let c = state[2]
+      let d = state[3]
+      let e = state[4]
+      let f = state[5]
+      let g = state[6]
+      let h = state[7]
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+        const choose = (e & f) ^ (~e & g)
+        const temp1 = (h + sum1 + choose + constants[index] + words[index]) >>> 0
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+        const majority = (a & b) ^ (a & c) ^ (b & c)
+        const temp2 = (sum0 + majority) >>> 0
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) >>> 0
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) >>> 0
+      }
+      state[0] = (state[0] + a) >>> 0
+      state[1] = (state[1] + b) >>> 0
+      state[2] = (state[2] + c) >>> 0
+      state[3] = (state[3] + d) >>> 0
+      state[4] = (state[4] + e) >>> 0
+      state[5] = (state[5] + f) >>> 0
+      state[6] = (state[6] + g) >>> 0
+      state[7] = (state[7] + h) >>> 0
+    }
+    return Array.from(state, (word) => word.toString(16).padStart(8, '0')).join('')
+  }
+  const initialState = (): AnyRecord => {
+    const source = Array.from(document.scripts)
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return {}
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}') {
+        depth -= 1
+        if (depth === 0) {
+          try { return JSON.parse(candidate.slice(start, index + 1)) as AnyRecord } catch { return {} }
+        }
+      }
+    }
+    return {}
+  }
+  const normalizeIdentityPart = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const normalized = value.trim()
+      return normalized.length > 0 ? normalized : null
+    }
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return null
+  }
+  const initial = initialState()
+  const principalCanonical = (): string | null => {
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    const runtimeSession = asRecord(w.$session)
+    const session: AnyRecord = { ...(initialSession ?? {}), ...(runtimeSession ?? {}) }
+    const staff: AnyRecord = {
+      ...(asRecord(initialSession?.staff) ?? {}),
+      ...(asRecord(runtimeSession?.staff) ?? {}),
+    }
+    const staffID = normalizeIdentityPart(staff.staffId)
+    const organizationID = normalizeIdentityPart(asRecord(session.org)?.orgId) ??
+      normalizeIdentityPart(asRecord(asRecord(initial.personal)?.imUserInfo)?.rootCompanyId)
+    const loginPoint = normalizeIdentityPart(staff.defaultLoginPoint)
+    if (session.isLoggedIn !== true || !staffID || !organizationID || !loginPoint) return null
+    const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
+    return pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+  }
+  const refsOf = (node: HTMLElement): Set<string> => {
+    const refs = new Set<string>()
+    const addSource = (component: AnyRecord | null): void => {
+      if (!component) return
+      for (const container of [component, asRecord(component._props), asRecord(component.$props), asRecord(component.$data)]) {
+        if (!container) continue
+        const direct = clean(container.sessionId)
+        const source = clean(asRecord(container.source)?.sessionId)
+        if (direct) refs.add(direct)
+        if (source) refs.add(source)
+      }
+    }
+    for (const candidate of [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]) {
+      addSource(asRecord((candidate as HTMLElement & { __vue__?: unknown }).__vue__))
+    }
+    const root = asRecord(w.$nuxt)
+    if (!root) return refs
+    const queue: AnyRecord[] = [root]
+    const seen = new Set<AnyRecord>()
+    while (queue.length > 0 && seen.size < 4096) {
+      const component = queue.shift()
+      if (!component || seen.has(component)) continue
+      seen.add(component)
+      const element = component.$el as HTMLElement | undefined
+      if (element && typeof element.contains === 'function' &&
+          (element === node || node.contains(element))) addSource(component)
+      const children = component.$children
+      if (Array.isArray(children)) {
+        for (const child of children) {
+          const record = asRecord(child)
+          if (record) queue.push(record)
+        }
+      }
+    }
+    return refs
+  }
+  const itemSelector =
+    '.im-session-list .im-session-list__virtual .im-session-list__virtual--box div[role="listitem"]'
+  const readRows = (): Array<{ node: HTMLElement; ref: string }> | null => {
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(itemSelector))
+      .filter((node) => visible(node) && node.querySelector('.im-session-item__box, .im-session-item') !== null)
+    if (nodes.length === 0) return []
+    const rows = nodes.map((node) => ({ node, refs: refsOf(node) }))
+    if (rows.some(({ refs }) => refs.size !== 1)) return null
+    return rows.map(({ node, refs }) => ({ node, ref: [...refs][0] }))
+  }
+  const composerDraftSafe = (): 'ok' | 'ambiguous' | 'nonempty' => {
+    const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
+      'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
+    )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
+    if (composers.length > 1) return 'ambiguous'
+    return composers.length === 1 && composers[0].value !== '' ? 'nonempty' : 'ok'
+  }
+
+  if (!Number.isFinite(notAfterMs) || Date.now() > notAfterMs) {
+    return { status: 'failed', reason: 'action_window_elapsed' }
+  }
+  const principal = principalCanonical()
+  if (!principal || digest(principal) !== expectedPrincipalFingerprint) {
+    return { status: 'failed', reason: 'identity_changed' }
+  }
+  const draft = composerDraftSafe()
+  if (draft === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
+  if (draft === 'nonempty') return { status: 'failed', reason: 'composer_nonempty' }
+  const route = new URL(location.href)
+  if (route.pathname !== '/app/im') return { status: 'failed', reason: 'route_changed' }
+  const currentConversationRef = route.searchParams.get('sessionId') ?? ''
+  if (currentConversationRef === conversationRef) {
+    return expectedCurrentConversationRef === conversationRef
+      ? { status: 'already_selected' }
+      : { status: 'failed', reason: 'route_changed' }
+  }
+  if (currentConversationRef !== expectedCurrentConversationRef) {
+    return { status: 'failed', reason: 'route_changed' }
+  }
+  const firstRows = readRows()
+  if (firstRows === null) return { status: 'failed', reason: 'list_binding_unresolved' }
+  if (firstRows.length === 0) return { status: 'failed', reason: 'list_items_missing' }
+  const firstMatches = firstRows.filter(({ ref }) => ref === conversationRef)
+  if (firstMatches.length > 1) return { status: 'failed', reason: 'target_binding_duplicated' }
+  if (firstMatches.length !== 1) return { status: 'failed', reason: 'target_binding_changed' }
+  const firstRow = firstMatches[0].node
+  const clickTarget = firstRow.querySelector<HTMLElement>('.im-session-item') ?? firstRow
+  if (!firstRow.isConnected || !clickTarget.isConnected ||
+      (clickTarget !== firstRow && !firstRow.contains(clickTarget)) || !visible(clickTarget)) {
+    return { status: 'failed', reason: 'click_target_missing' }
+  }
+  const finalRows = readRows()
+  if (finalRows === null) return { status: 'failed', reason: 'list_binding_unresolved' }
+  const finalMatches = finalRows.filter(({ ref }) => ref === conversationRef)
+  const finalRowRefs = refsOf(firstRow)
+  if (finalMatches.length !== 1 || finalMatches[0].node !== firstRow ||
+      finalRowRefs.size !== 1 || [...finalRowRefs][0] !== conversationRef) {
+    return { status: 'failed', reason: 'target_binding_changed' }
+  }
+  if (Date.now() > notAfterMs) return { status: 'failed', reason: 'action_window_elapsed' }
+  if (principalCanonical() !== principal) return { status: 'failed', reason: 'identity_changed' }
+  const finalRoute = new URL(location.href)
+  if (finalRoute.pathname !== '/app/im' ||
+      (finalRoute.searchParams.get('sessionId') ?? '') !== expectedCurrentConversationRef) {
+    return { status: 'failed', reason: 'route_changed' }
+  }
+  const finalDraft = composerDraftSafe()
+  if (finalDraft === 'ambiguous') return { status: 'failed', reason: 'composer_ambiguous' }
+  if (finalDraft === 'nonempty') return { status: 'failed', reason: 'composer_nonempty' }
+  if (!firstRow.isConnected || !clickTarget.isConnected ||
+      (clickTarget !== firstRow && !firstRow.contains(clickTarget))) {
+    return { status: 'failed', reason: 'click_target_missing' }
+  }
+  clickTarget.click()
+  return { status: 'clicked' }
+}
+
+// 发送基线不调用 history API，也不复用 chat.readThread 的 API/DOM/SSR 混合回退。
+// 两份样本只来自当前唯一 Vue root 的实时 Vuex timelineMap；第一份必须在 250ms
+// 本地稳定窗前深值投影，避免页面在等待期间原地改写旧样本。
+async function mainCaptureSendBaseline(
+  conversationRef: string,
+  expectedTail: ZhilianMessageAnchor[],
+): Promise<MainSendBaselineResult> {
+  type AnyRecord = Record<string, unknown>
+  interface SnapshotRow {
+    idServer: string
+    status: string
+    type: string | number
+    from: string
+    text: string
+    content: string
+    time: number
+    sourceIndex: number
+  }
+  const failed = (stage: MainSendBaselineFailureStage): MainSendBaselineFailed => ({ status: 'failed', stage })
+  try {
+    const w = window as unknown as AnyRecord
+    const asRecord = (value: unknown): AnyRecord | null =>
+      value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+    const engine = asRecord(w.imEngine)
+    if (!engine) return failed('engine_unavailable')
+    const clean = (value: unknown): string => String(value ?? '')
+      .normalize('NFC')
+      .replace(/\u00a0/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+    const digest = async (value: string): Promise<string> => {
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+      return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    }
+    const routeMatches = (): boolean => {
+      try {
+        const route = new URL(location.href)
+        return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+      } catch {
+        return false
+      }
+    }
+
+    if (!routeMatches()) return failed('route_changed')
+
+    const sessions = (Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
+    const sessionMatches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const session = sessionMatches.length === 1 ? sessionMatches[0] : undefined
+    const target = clean(session?.peerPartnerId)
+    if (!session || !target) return failed('session_unavailable')
+    const sessionProjection = (value: AnyRecord | undefined): string | null => {
+      if (!value || clean(value.sessionId) !== conversationRef || clean(value.peerPartnerId) !== target) return null
+      return JSON.stringify([
+        clean(value.sessionId),
+        clean(value.peerPartnerId),
+        value.sortTime ?? null,
+        value.modifiedTime ?? null,
+        value.lastSentence ?? null,
+      ])
+    }
+    const initialSessionProjection = sessionProjection(session)
+    if (!initialSessionProjection) return failed('session_unavailable')
+    let initialState: AnyRecord | null | undefined
+    const readInitialState = (): AnyRecord | null => {
+      if (initialState !== undefined) return initialState
+      initialState = null
+      const source = Array.from(document.scripts ?? [])
+        .map((script) => script.textContent ?? '')
+        .find((text) => text.includes('__INITIAL_STATE__='))
+      if (!source) return initialState
+      const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+      const objectStart = candidate.indexOf('{')
+      let depth = 0
+      let quoted = false
+      let escaped = false
+      let objectEnd = -1
+      for (let index = objectStart; index >= 0 && index < candidate.length; index += 1) {
+        const char = candidate[index]
+        if (quoted) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === '"') quoted = false
+          continue
+        }
+        if (char === '"') quoted = true
+        else if (char === '{') depth += 1
+        else if (char === '}') {
+          depth -= 1
+          if (depth === 0) {
+            objectEnd = index + 1
+            break
+          }
+        }
+      }
+      if (objectStart < 0 || objectEnd < 0) return initialState
+      const parsed = JSON.parse(candidate.slice(objectStart, objectEnd)) as unknown
+      initialState = asRecord(parsed)
+      return initialState
+    }
+    const timelineSlot = (im: AnyRecord | null): { present: boolean; value: unknown } => {
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) {
+        return { present: false, value: null }
+      }
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline')) {
+        return { present: false, value: null }
+      }
+      return { present: true, value: entry.timeline }
+    }
+    const resolveLiveTimeline = (): { root: AnyRecord; value: unknown } | null => {
+      const normalizeRoot = (value: unknown): AnyRecord | null => {
+        const candidate = asRecord(value)
+        if (!candidate) return null
+        const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
+        if (!root || root.$root !== root) return null
+        if (root._isDestroyed === true || root._isBeingDestroyed === true) return null
+        const rootElement = asRecord(root.$el)
+        if (rootElement && rootElement.isConnected === false) return null
+        return root
+      }
+      const nuxtValue = w.$nuxt
+      const nuxtRoot = normalizeRoot(nuxtValue)
+      if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
+
+      // $nuxt 可能是 root 本身，也可能是 {$root: root} wrapper。
+      // 无论哪种形态，当前发送 surface 的 DOM owner 只要可观测，
+      // 就必须与该候选收敛到同一个存活 self-root。
+      const ownerRoots = new Set<AnyRecord>()
+      if (typeof document.querySelectorAll === 'function') {
+        const nodes = Array.from(document.querySelectorAll<HTMLElement>(
+          '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
+        ))
+        const visited = new Set<HTMLElement>()
+        for (const node of nodes) {
+          let current: HTMLElement | null = node
+          for (let depth = 0; current && depth < 64; depth += 1) {
+            if (!visited.has(current)) {
+              visited.add(current)
+              const holder = current as HTMLElement & { __vue__?: unknown }
+              if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+                const ownerRoot = normalizeRoot(holder.__vue__)
+                if (!ownerRoot) return null
+                ownerRoots.add(ownerRoot)
+              }
+            }
+            current = current.parentElement
+          }
+        }
+      }
+      if (ownerRoots.size > 1) return null
+      const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
+      if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
+      const root = nuxtRoot ?? ownerRoot
+      if (!root) return null
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const slot = timelineSlot(asRecord(state?.im))
+      return slot.present ? { root, value: slot.value } : null
+    }
+    const snapshotContent = (value: unknown): string => {
+      if (typeof value === 'string') return value
+      if (value === null || value === undefined) return ''
+      const serialized = JSON.stringify(value)
+      return serialized === undefined ? String(value) : serialized
+    }
+    const projectRows = (value: unknown): SnapshotRow[] | null => {
+      if (!Array.isArray(value) || value.length > 4096) return null
+      const projected: SnapshotRow[] = []
+      for (let sourceIndex = 0; sourceIndex < value.length; sourceIndex += 1) {
+        const raw = value[sourceIndex]
+        const row = asRecord(raw)
+        if (!row) return null
+        const idServer = clean(row.idServer)
+        if (!idServer) return null
+        const rawType = row.type
+        const time = Number(row.time)
+        if (!Number.isFinite(time) || time <= 0) return null
+        projected.push({
+          idServer,
+          status: clean(row.status),
+          type: typeof rawType === 'number' || typeof rawType === 'string' ? rawType : String(rawType ?? ''),
+          from: clean(row.from),
+          text: String(row.text ?? ''),
+          content: snapshotContent(row.content),
+          time,
+          sourceIndex,
+        })
+      }
+      return projected
+    }
+    const stableWindow = (rows: SnapshotRow[]): SnapshotRow[] => {
+      const sorted = [...rows].sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+      const seen = new Set<string>()
+      const deduped = sorted.filter((row) => {
+        if (seen.has(row.idServer)) return false
+        seen.add(row.idServer)
+        return true
+      })
+      return deduped.slice(Math.max(0, deduped.length - 64))
+    }
+    const parseObject = (value: unknown): AnyRecord => {
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+      if (typeof value !== 'string' || value.length === 0) return {}
+      try {
+        const parsed = JSON.parse(value) as unknown
+        return asRecord(parsed) ?? {}
+      } catch {
+        return {}
+      }
+    }
+    const anchorFor = async (row: SnapshotRow, staffID: string): Promise<ZhilianMessageAnchor | null> => {
+      const envelope = parseObject(row.content)
+      const inner = parseObject(envelope.content)
+      const details = Object.keys(inner).length > 0 ? inner : envelope
+      const rawType = row.type
+      const customType = Number(
+        typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
+      )
+      const from = clean(row.from)
+      let direction: ZhilianMessageAnchor['direction'] = from
+        ? from === staffID ? 'out' : 'in'
+        : 'system'
+      let kind: 'text' | 'card' | 'system' = 'system'
+      let text: string | null = null
+      let cardType: 'wechatExchange' | null = null
+      let identity = ''
+      if (rawType === 'text') {
+        if (!from) return null
+        kind = 'text'
+        text = clean(row.text)
+      } else if (customType === 105) {
+        if (!from) return null
+        kind = 'card'
+        cardType = 'wechatExchange'
+        text = clean(
+          direction === 'out'
+            ? details.staffContent ?? details.senderText ?? details.detail
+            : details.userContent ?? details.receiverText ?? details.detail,
+        ) || '[交换微信请求]'
+        identity = clean(details.requestId ?? details.id ?? details.cardId)
+      } else if (customType === 131) {
+        if (!from) return null
+        kind = 'text'
+        text = clean(details.greetingText ?? envelope.greetingText)
+      } else {
+        direction = 'system'
+        text = clean(
+          details.staffText ?? details.userText ?? details.title ?? details.content ??
+          envelope.msgb ?? envelope.msgc ?? envelope.text ?? row.text,
+        ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
+      }
+      if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
+      const canonicalContent = clean(text)
+      const contentHash = kind === 'card'
+        ? await digest(`card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`)
+        : await digest(canonicalContent)
+      return { direction, contentHash }
+    }
+    const tailMatches = async (rows: SnapshotRow[], staffID: string): Promise<boolean> => {
+      if (expectedTail.length === 0) return true
+      if (rows.length < expectedTail.length) return false
+      const tail = rows.slice(-expectedTail.length)
+      for (let index = 0; index < tail.length; index += 1) {
+        const actual = await anchorFor(tail[index], staffID)
+        const expected = expectedTail[index]
+        if (!actual || actual.direction !== expected.direction || actual.contentHash !== expected.contentHash) {
+          return false
+        }
+      }
+      return true
+    }
+    const hashPattern = /^[0-9a-f]{64}$/u
+    if (!Array.isArray(expectedTail) || expectedTail.length > 5 || expectedTail.some((anchor) =>
+      !anchor || !['in', 'out', 'system'].includes(anchor.direction) ||
+      typeof anchor.contentHash !== 'string' || !hashPattern.test(anchor.contentHash))) {
+      return failed('unexpected')
+    }
+    const runtimeSession = asRecord(w.$session)
+    const runtimeStaff = asRecord(runtimeSession?.staff)
+    let staffID = clean(runtimeStaff?.staffId)
+    if (expectedTail.length > 0 && !staffID) {
+      const initialSession = asRecord(asRecord(readInitialState()?.session)?.session)
+      staffID = clean(asRecord(initialSession?.staff)?.staffId)
+    }
+    if (expectedTail.length > 0 && !staffID) return failed('history_first_unavailable')
+
+    // 第一份在任何 await 之前完整投影。250ms 只是同一实时 store 的本地稳定窗，
+    // 不是 history API cooldown；发送生命周期不会调用 getHistoryMsgs。
+    const firstSource = resolveLiveTimeline()
+    if (!firstSource) return failed('history_first_unavailable')
+    const completeFirst = projectRows(firstSource.value)
+    if (!completeFirst) return failed('history_first_unavailable')
+    const first = stableWindow(completeFirst)
+
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    if (!routeMatches()) return failed('route_changed')
+    const midSessions = (Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
+    const midMatches = midSessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const midSession = midMatches.length === 1 ? midMatches[0] : undefined
+    if (sessionProjection(midSession) !== initialSessionProjection) return failed('session_changed')
+
+    const secondSource = resolveLiveTimeline()
+    if (!secondSource) return failed('history_second_unavailable')
+    if (secondSource.root !== firstSource.root) return failed('history_unstable')
+    const completeSecond = projectRows(secondSource.value)
+    if (!completeSecond) return failed('history_second_unavailable')
+    const second = stableWindow(completeSecond)
+
+    const firstServerIDs = first.map((row) => row.idServer)
+    const secondServerIDs = second.map((row) => row.idServer)
+    const secondServerIDSet = new Set(secondServerIDs)
+    if (firstServerIDs.some((id) => !secondServerIDSet.has(id))) {
+      return failed('guard_snapshot_uncovered')
+    }
+    if (firstServerIDs.length !== secondServerIDs.length ||
+        firstServerIDs.some((id, index) => secondServerIDs[index] !== id)) return failed('history_unstable')
+    let firstTailMatches: boolean
+    let secondTailMatches: boolean
+    try {
+      firstTailMatches = await tailMatches(first, staffID)
+      secondTailMatches = await tailMatches(second, staffID)
+    } catch {
+      return failed('hash_unavailable')
+    }
+    if (!firstTailMatches || !secondTailMatches) return failed('guard_snapshot_uncovered')
+
+    const keys: string[] = []
+    try {
+      for (const row of second) keys.push(await digest(`source-v1|${row.idServer}`))
+    } catch {
+      return failed('hash_unavailable')
+    }
+
+    if (!routeMatches()) return failed('route_changed')
+
+    const currentSessions = (Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
+    const currentMatches = currentSessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const currentSession = currentMatches.length === 1 ? currentMatches[0] : undefined
+    const finalSessionProjection = sessionProjection(currentSession)
+    if (!finalSessionProjection || finalSessionProjection !== initialSessionProjection) {
+      return failed('session_changed')
+    }
+
+    let sessionVersionToken: string
+    let targetBindingToken: string
+    try {
+      sessionVersionToken = await digest(initialSessionProjection)
+      targetBindingToken = await digest(JSON.stringify([conversationRef, target]))
+    } catch {
+      return failed('hash_unavailable')
+    }
+    return {
+      status: 'ready',
+      stage: 'ready',
+      serverSourceKeys: keys,
+      sessionVersionToken,
+      targetBindingToken,
+    }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
+// 点击后的成功证词与发送基线同源：只读当前唯一 Vue root 的实时 Vuex timeline。
+// 全源任一行缺 server id 都闭锁；排序、首 ID 去重、last64 后才排除 baseline，
+// 防止窗口外旧同文被误认成这次发送。函数绝不调用 history API。
+async function mainObserveStableOutbound(
+  conversationRef: string,
+  textHash: string,
+  baselineServerSourceKeys: string[],
+  expectedTargetBindingToken: string,
+): Promise<MainObserveStableOutboundResult> {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  }
+  const routeMatches = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const failed = (): MainObserveStableOutboundResult => ({
+    selected: routeMatches(),
+    matchingNewServerMessages: 0,
+  })
+  try {
+    if (!routeMatches()) return failed()
+    const engine = asRecord(w.imEngine)
+    const sessions = (Array.isArray(engine?.sessions) ? engine.sessions : []) as AnyRecord[]
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const session = matches.length === 1 ? matches[0] : undefined
+    const target = clean(session?.peerPartnerId)
+    if (!session || !target) return failed()
+    if (!/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken) ||
+        await digest(JSON.stringify([conversationRef, target])) !== expectedTargetBindingToken) return failed()
+
+    const timelineSlot = (root: AnyRecord): unknown | null => {
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline')) return null
+      return entry.timeline
+    }
+    const resolveLiveTimeline = (): unknown | null => {
+      const normalizeRoot = (value: unknown): AnyRecord | null => {
+        const candidate = asRecord(value)
+        if (!candidate) return null
+        const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
+        if (!root || root.$root !== root) return null
+        if (root._isDestroyed === true || root._isBeingDestroyed === true) return null
+        const rootElement = asRecord(root.$el)
+        if (rootElement && rootElement.isConnected === false) return null
+        return root
+      }
+      const nuxtValue = w.$nuxt
+      const nuxtRoot = normalizeRoot(nuxtValue)
+      if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
+      const ownerRoots = new Set<AnyRecord>()
+      if (typeof document.querySelectorAll === 'function') {
+        const nodes = Array.from(document.querySelectorAll<HTMLElement>(
+          '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
+        ))
+        const visited = new Set<HTMLElement>()
+        for (const node of nodes) {
+          let current: HTMLElement | null = node
+          for (let depth = 0; current && depth < 64; depth += 1) {
+            if (!visited.has(current)) {
+              visited.add(current)
+              const holder = current as HTMLElement & { __vue__?: unknown }
+              if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+                const ownerRoot = normalizeRoot(holder.__vue__)
+                if (!ownerRoot) return null
+                ownerRoots.add(ownerRoot)
+              }
+            }
+            current = current.parentElement
+          }
+        }
+      }
+      if (ownerRoots.size > 1) return null
+      const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
+      if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
+      const root = nuxtRoot ?? ownerRoot
+      if (!root) return null
+      return timelineSlot(root)
+    }
+    const rawRows = resolveLiveTimeline()
+    if (!Array.isArray(rawRows) || rawRows.length > 4096) return failed()
+    const projected: Array<{
+      idServer: string
+      status: string
+      type: string | number
+      from: string
+      text: string
+      time: number
+      sourceIndex: number
+    }> = []
+    for (let sourceIndex = 0; sourceIndex < rawRows.length; sourceIndex += 1) {
+      const raw = rawRows[sourceIndex]
+      const row = asRecord(raw)
+      if (!row) return failed()
+      const idServer = clean(row.idServer)
+      if (!idServer) return failed()
+      const rawType = row.type
+      const time = Number(row.time)
+      if (!Number.isFinite(time) || time <= 0) return failed()
+      projected.push({
+        idServer,
+        status: clean(row.status),
+        type: typeof rawType === 'string' || typeof rawType === 'number' ? rawType : String(rawType ?? ''),
+        from: clean(row.from),
+        text: String(row.text ?? ''),
+        time,
+        sourceIndex,
+      })
+    }
+    const sorted = [...projected].sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const windowRows = sorted.filter((row) => {
+      if (seen.has(row.idServer)) return false
+      seen.add(row.idServer)
+      return true
+    }).slice(-64)
+
+    const runtimeSession = asRecord(w.$session)
+    let staffID = clean(asRecord(runtimeSession?.staff)?.staffId)
+    if (!staffID) {
+      const source = Array.from(document.scripts ?? [])
+        .map((script) => script.textContent ?? '')
+        .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+      if (source) {
+        const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+        const start = candidate.indexOf('{')
+        let depth = 0
+        let quoted = false
+        let escaped = false
+        for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+          const char = candidate[index]
+          if (quoted) {
+            if (escaped) escaped = false
+            else if (char === '\\') escaped = true
+            else if (char === '"') quoted = false
+            continue
+          }
+          if (char === '"') quoted = true
+          else if (char === '{') depth += 1
+          else if (char === '}' && --depth === 0) {
+            try {
+              const initial = asRecord(JSON.parse(candidate.slice(start, index + 1)))
+              const initialSession = asRecord(asRecord(initial?.session)?.session)
+              staffID = clean(asRecord(initialSession?.staff)?.staffId)
+            } catch {
+              // identity 保持 unresolved；本轮只返回阴性观察。
+            }
+            break
+          }
+        }
+      }
+    }
+    if (!staffID) return failed()
+
+    const sourceKeyPattern = /^[0-9a-f]{64}$/u
+    if (baselineServerSourceKeys.length > 64 ||
+        baselineServerSourceKeys.some((key) => !sourceKeyPattern.test(key)) ||
+        new Set(baselineServerSourceKeys).size !== baselineServerSourceKeys.length) return failed()
+    const currentSourceKeys: string[] = []
+    for (const row of windowRows) currentSourceKeys.push(await digest(`source-v1|${row.idServer}`))
+
+    // 只接受“基线之后严格追加一条”。这比无序集合差更保守，但能阻止
+    // time 改写、整窗替换或并发新消息把窗口外旧同文误认为本次发送。
+    let continuous = false
+    if (baselineServerSourceKeys.length < 64) {
+      continuous = currentSourceKeys.length === baselineServerSourceKeys.length + 1 &&
+        baselineServerSourceKeys.every((key, index) => currentSourceKeys[index] === key)
+    } else {
+      continuous = currentSourceKeys.length === 64 &&
+        baselineServerSourceKeys.slice(1).every((key, index) => currentSourceKeys[index] === key)
+    }
+    if (!continuous || currentSourceKeys.length === 0) return failed()
+    const newSourceKey = currentSourceKeys[currentSourceKeys.length - 1]
+    if (baselineServerSourceKeys.includes(newSourceKey)) return failed()
+    const newRow = windowRows[windowRows.length - 1]
+    const matched = clean(newRow.status).toLowerCase() === 'success' &&
+      newRow.type === 'text' && clean(newRow.from) === staffID &&
+      await digest(clean(newRow.text)) === textHash
+    // digest 会让出事件循环；返回阳性证词前必须重新确认同一 route
+    // 仍唯一绑定到开始时的对话目标。消息自身会改变 session 展示字段，
+    // 所以这里只冻结 sessionId + peerPartnerId，不比 modifiedTime/lastSentence。
+    if (!routeMatches()) return failed()
+    const finalSessions = (Array.isArray(engine?.sessions) ? engine.sessions : []) as AnyRecord[]
+    const finalMatches = finalSessions.filter((item) => clean(item.sessionId) === conversationRef)
+    if (finalMatches.length !== 1 || clean(finalMatches[0].peerPartnerId) !== target) return failed()
+    return {
+      selected: true,
+      matchingNewServerMessages: matched ? 1 : 0,
+    }
+  } catch {
+    return failed()
+  }
+}
+
+// 最终消息副作用只在这一段同步 MAIN task 中发生。函数内没有 Promise/await、网络读取、
+// 定时器或第二次 click；即使 SW 在注入排队期间失联，过期 action window 也会在页面内
+// 阻止迟到点击。
+function mainSendMessageOnce(
+  conversationRef: string,
+  text: string,
+  textHash: string,
+  expectedTail: ZhilianMessageAnchor[],
+  expectedSessionVersionToken: string,
+  expectedPrincipalFingerprint: string,
+  irreversibleNotAfterMs: number,
+  expectedBaselineServerSourceKeys: string[],
+  expectedTargetBindingToken: string,
+  phase: MainSendPhase,
+): MainSendOnceResult {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const rotateRight = (value: number, count: number): number =>
+    (value >>> count) | (value << (32 - count))
+  const digest = (value: string): string => {
+    const input = new TextEncoder().encode(value)
+    const totalLength = Math.ceil((input.length + 9) / 64) * 64
+    const padded = new Uint8Array(totalLength)
+    padded.set(input)
+    padded[input.length] = 0x80
+    const bitLength = input.length * 8
+    const view = new DataView(padded.buffer)
+    view.setUint32(totalLength - 8, Math.floor(bitLength / 0x100000000), false)
+    view.setUint32(totalLength - 4, bitLength >>> 0, false)
+    const constants = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ])
+    const state = new Uint32Array([
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ])
+    const words = new Uint32Array(64)
+    for (let offset = 0; offset < totalLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) {
+        words[index] = view.getUint32(offset + index * 4, false)
+      }
+      for (let index = 16; index < 64; index += 1) {
+        const left = words[index - 15]
+        const right = words[index - 2]
+        const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3)
+        const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10)
+        words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0
+      }
+      let a = state[0]
+      let b = state[1]
+      let c = state[2]
+      let d = state[3]
+      let e = state[4]
+      let f = state[5]
+      let g = state[6]
+      let h = state[7]
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+        const choose = (e & f) ^ (~e & g)
+        const temp1 = (h + sum1 + choose + constants[index] + words[index]) >>> 0
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+        const majority = (a & b) ^ (a & c) ^ (b & c)
+        const temp2 = (sum0 + majority) >>> 0
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) >>> 0
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) >>> 0
+      }
+      state[0] = (state[0] + a) >>> 0
+      state[1] = (state[1] + b) >>> 0
+      state[2] = (state[2] + c) >>> 0
+      state[3] = (state[3] + d) >>> 0
+      state[4] = (state[4] + e) >>> 0
+      state[5] = (state[5] + f) >>> 0
+      state[6] = (state[6] + g) >>> 0
+      state[7] = (state[7] + h) >>> 0
+    }
+    return Array.from(state, (word) => word.toString(16).padStart(8, '0')).join('')
+  }
+  const initialState = (): AnyRecord => {
+    const source = Array.from(document.scripts)
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return {}
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}') {
+        depth -= 1
+        if (depth === 0) {
+          try { return JSON.parse(candidate.slice(start, index + 1)) as AnyRecord } catch { return {} }
+        }
+      }
+    }
+    return {}
+  }
+  const initial = initialState()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const currentRoute = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const normalizeIdentityPart = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const normalized = value.trim()
+      return normalized.length > 0 ? normalized : null
+    }
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return null
+  }
+  const principalCanonical = (): string | null => {
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    const runtimeSession = asRecord(w.$session)
+    const session: AnyRecord = { ...(initialSession ?? {}), ...(runtimeSession ?? {}) }
+    const staff: AnyRecord = {
+      ...(asRecord(initialSession?.staff) ?? {}),
+      ...(asRecord(runtimeSession?.staff) ?? {}),
+    }
+    const staffID = normalizeIdentityPart(staff.staffId)
+    const organizationID = normalizeIdentityPart(asRecord(session.org)?.orgId) ??
+      normalizeIdentityPart(asRecord(asRecord(initial.personal)?.imUserInfo)?.rootCompanyId)
+    const loginPoint = normalizeIdentityPart(staff.defaultLoginPoint)
+    if (session.isLoggedIn !== true || !staffID || !organizationID || !loginPoint) return null
+    const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
+    return pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+  }
+  type AnyFunction = (...args: unknown[]) => unknown
+  interface BoundScalarModel {
+    container: AnyRecord
+    key: 'activeSessionId' | 'currentSessionId' | 'propsSessionId'
+    path: 'owner' | 'propsInternal' | 'propsPublic' | 'data' | 'store' | 'rootStore'
+    raw: string | number
+    ref: string
+  }
+  interface SenderBinding {
+    senderOwner: AnyRecord
+    currentSessionModel: AnyRecord | null
+    propsSessionModel: AnyRecord | null
+    scalarModels: BoundScalarModel[]
+    buttonOwner: AnyRecord
+    senderHandler: AnyFunction
+    domHandler: AnyFunction
+  }
+  const componentTree = (surfaceNodes: readonly HTMLElement[]): AnyRecord[] | null => {
+    let root = asRecord(w.$nuxt)
+    if (!root) {
+      const roots = new Set<AnyRecord>()
+      const visitedNodes = new Set<HTMLElement>()
+      for (const surfaceNode of surfaceNodes) {
+        let current: HTMLElement | null = surfaceNode
+        for (let depth = 0; current && depth < 64; depth += 1) {
+          if (!visitedNodes.has(current)) {
+            visitedNodes.add(current)
+            const holder = current as HTMLElement & { __vue__?: unknown }
+            if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+              const owner = asRecord(holder.__vue__)
+              const candidateRoot = asRecord(owner?.$root)
+              if (!owner || !candidateRoot || candidateRoot.$root !== candidateRoot) return null
+              roots.add(candidateRoot)
+            }
+          }
+          current = current.parentElement
+        }
+      }
+      if (roots.size !== 1) return null
+      root = [...roots][0]
+    }
+    const queue: AnyRecord[] = [root]
+    const seen = new Set<AnyRecord>()
+    const components: AnyRecord[] = []
+    while (queue.length > 0) {
+      const component = queue.shift()
+      if (!component || seen.has(component)) continue
+      if (seen.size >= 4096) return null
+      seen.add(component)
+      components.push(component)
+      const children = component.$children
+      if (!Array.isArray(children)) return null
+      for (const child of children) {
+        const record = asRecord(child)
+        if (!record) return null
+        queue.push(record)
+      }
+    }
+    return components
+  }
+  const normalizeLiveRoot = (value: unknown): AnyRecord | null => {
+    const candidate = asRecord(value)
+    if (!candidate) return null
+    const root = candidate.$root === candidate ? candidate : asRecord(candidate.$root)
+    if (!root || root.$root !== root || root._isDestroyed === true || root._isBeingDestroyed === true) return null
+    const rootElement = asRecord(root.$el)
+    if (rootElement && rootElement.isConnected === false) return null
+    return root
+  }
+  interface ActionSnapshotRow {
+    idServer: string
+    status: string
+    type: string | number
+    from: string
+    text: string
+    content: string
+    time: number
+    sourceIndex: number
+  }
+  const snapshotContent = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    if (value === null || value === undefined) return ''
+    const serialized = JSON.stringify(value)
+    return serialized === undefined ? String(value) : serialized
+  }
+  const liveTimelineProjection = (): {
+    root: AnyRecord
+    sourceKeys: string[]
+    windowRows: ActionSnapshotRow[]
+  } | null => {
+    const nuxtValue = w.$nuxt
+    const nuxtRoot = normalizeLiveRoot(nuxtValue)
+    if (nuxtValue !== null && nuxtValue !== undefined && !nuxtRoot) return null
+
+    const ownerRoots = new Set<AnyRecord>()
+    const surfaceNodes = Array.from(document.querySelectorAll<HTMLElement>(
+      '.im-session-detail, .im-timeline__wrapper, .im-timeline, .im-sender',
+    ))
+    const visitedNodes = new Set<HTMLElement>()
+    for (const surfaceNode of surfaceNodes) {
+      let current: HTMLElement | null = surfaceNode
+      for (let depth = 0; current && depth < 64; depth += 1) {
+        if (!visitedNodes.has(current)) {
+          visitedNodes.add(current)
+          const holder = current as HTMLElement & { __vue__?: unknown }
+          if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+            const ownerRoot = normalizeLiveRoot(holder.__vue__)
+            if (!ownerRoot) return null
+            ownerRoots.add(ownerRoot)
+          }
+        }
+        current = current.parentElement
+      }
+    }
+    if (ownerRoots.size > 1) return null
+    const ownerRoot = ownerRoots.size === 1 ? [...ownerRoots][0] : null
+    if (nuxtRoot && ownerRoot && nuxtRoot !== ownerRoot) return null
+    const root = nuxtRoot ?? ownerRoot
+    if (!root) return null
+
+    const store = asRecord(root.$store)
+    const state = asRecord(store?.state)
+    const im = asRecord(state?.im)
+    const timelineMap = asRecord(im?.timelineMap)
+    if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+    const entry = asRecord(timelineMap[conversationRef])
+    if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
+        !Array.isArray(entry.timeline) || entry.timeline.length > 4096) return null
+
+    const rows: ActionSnapshotRow[] = []
+    for (let sourceIndex = 0; sourceIndex < entry.timeline.length; sourceIndex += 1) {
+      const row = asRecord(entry.timeline[sourceIndex])
+      if (!row) return null
+      const idServer = clean(row.idServer)
+      const time = Number(row.time)
+      if (!idServer || !Number.isFinite(time) || time <= 0) return null
+      const rawType = row.type
+      rows.push({
+        idServer,
+        status: clean(row.status),
+        type: typeof rawType === 'number' || typeof rawType === 'string' ? rawType : String(rawType ?? ''),
+        from: clean(row.from),
+        text: String(row.text ?? ''),
+        content: snapshotContent(row.content),
+        time,
+        sourceIndex,
+      })
+    }
+    rows.sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const orderedRows: ActionSnapshotRow[] = []
+    for (const row of rows) {
+      if (seen.has(row.idServer)) continue
+      seen.add(row.idServer)
+      orderedRows.push(row)
+    }
+    const windowStart = Math.max(0, orderedRows.length - 64)
+    const windowRows = orderedRows.slice(windowStart)
+    return {
+      root,
+      sourceKeys: windowRows.map((row) => digest(`source-v1|${row.idServer}`)),
+      windowRows,
+    }
+  }
+  const parseObject = (value: unknown): AnyRecord => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+    if (typeof value !== 'string' || value.length === 0) return {}
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return asRecord(parsed) ?? {}
+    } catch {
+      return {}
+    }
+  }
+  const runtimeStaffID = (): string => {
+    const runtimeSession = asRecord(w.$session)
+    const runtimeStaff = asRecord(runtimeSession?.staff)
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    return clean(runtimeStaff?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
+  }
+  const actionAnchorFor = (row: ActionSnapshotRow, staffID: string): ZhilianMessageAnchor | null => {
+    const envelope = parseObject(row.content)
+    const inner = parseObject(envelope.content)
+    const details = Object.keys(inner).length > 0 ? inner : envelope
+    const rawType = row.type
+    const customType = Number(
+      typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
+    )
+    const from = clean(row.from)
+    let direction: ZhilianMessageAnchor['direction'] = from
+      ? from === staffID ? 'out' : 'in'
+      : 'system'
+    let kind: 'text' | 'card' | 'system' = 'system'
+    let normalizedText = ''
+    let cardType: 'wechatExchange' | null = null
+    let identity = ''
+    if (rawType === 'text') {
+      if (!from) return null
+      kind = 'text'
+      normalizedText = clean(row.text)
+    } else if (customType === 105) {
+      if (!from) return null
+      kind = 'card'
+      cardType = 'wechatExchange'
+      normalizedText = clean(
+        direction === 'out'
+          ? details.staffContent ?? details.senderText ?? details.detail
+          : details.userContent ?? details.receiverText ?? details.detail,
+      ) || '[交换微信请求]'
+      identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (customType === 131) {
+      if (!from) return null
+      kind = 'text'
+      normalizedText = clean(details.greetingText ?? envelope.greetingText)
+    } else {
+      direction = 'system'
+      normalizedText = clean(
+        details.staffText ?? details.userText ?? details.title ?? details.content ??
+        envelope.msgb ?? envelope.msgc ?? envelope.text ?? row.text,
+      ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
+    }
+    if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
+    const contentHash = kind === 'card'
+      ? digest(`card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || normalizedText)}`)
+      : digest(clean(normalizedText))
+    return { direction, contentHash }
+  }
+  const liveTailMatches = (rows: ActionSnapshotRow[]): boolean | null => {
+    if (expectedTail.length === 0) return true
+    if (rows.length < expectedTail.length) return false
+    const staffID = runtimeStaffID()
+    if (!staffID) return null
+    const tail = rows.slice(-expectedTail.length)
+    return tail.every((row, index) => {
+      const actual = actionAnchorFor(row, staffID)
+      const expected = expectedTail[index]
+      return actual !== null && actual.direction === expected.direction && actual.contentHash === expected.contentHash
+    })
+  }
+  const baselineState = (binding: SenderBinding): 'match' | 'unresolved' | 'changed' => {
+    const hashPattern = /^[0-9a-f]{64}$/u
+    if (!Array.isArray(expectedBaselineServerSourceKeys) || expectedBaselineServerSourceKeys.length > 64 ||
+        expectedBaselineServerSourceKeys.some((key) => typeof key !== 'string' || !hashPattern.test(key)) ||
+        new Set(expectedBaselineServerSourceKeys).size !== expectedBaselineServerSourceKeys.length ||
+        !Array.isArray(expectedTail) || expectedTail.length > 5 || expectedTail.some((anchor) =>
+          !anchor || !['in', 'out', 'system'].includes(anchor.direction) ||
+          typeof anchor.contentHash !== 'string' || !hashPattern.test(anchor.contentHash))) {
+      return 'unresolved'
+    }
+    const bindingRoot = normalizeLiveRoot(binding.senderOwner)
+    const actual = liveTimelineProjection()
+    if (!bindingRoot || !actual) return 'unresolved'
+    if (actual.root !== bindingRoot || actual.sourceKeys.length !== expectedBaselineServerSourceKeys.length ||
+        actual.sourceKeys.some((key, index) => key !== expectedBaselineServerSourceKeys[index])) return 'changed'
+    const tailMatches = liveTailMatches(actual.windowRows)
+    return tailMatches === null ? 'unresolved' : tailMatches ? 'match' : 'changed'
+  }
+  const connected = (value: unknown): value is HTMLElement =>
+    value !== null && typeof value === 'object' &&
+    (value as { isConnected?: unknown }).isConnected === true
+  const liveComponent = (component: AnyRecord): boolean =>
+    component._isDestroyed !== true && component._isBeingDestroyed !== true &&
+    component._inactive !== true && component.$destroyed !== true && connected(component.$el)
+  const unwrapSingleListener = (value: unknown): AnyFunction | null => {
+    let current = value
+    const seen = new Set<unknown>()
+    for (let depth = 0; depth < 12; depth += 1) {
+      if (Array.isArray(current)) {
+        if (current.length !== 1) return null
+        current = current[0]
+        continue
+      }
+      if (typeof current !== 'function' || seen.has(current)) return null
+      seen.add(current)
+      const wrapped = (current as unknown as { fns?: unknown }).fns
+      if (wrapped !== undefined) {
+        current = wrapped
+        continue
+      }
+      return current as AnyFunction
+    }
+    return null
+  }
+  const componentEvidenceForSurface = (
+    composer: HTMLElement,
+    button: HTMLButtonElement,
+    wrapper: HTMLElement,
+    detail: HTMLElement,
+  ): SenderBinding | null => {
+    const senderRoot = wrapper.closest<HTMLElement>('.im-sender')
+    if (!senderRoot || !detail.contains(senderRoot) ||
+        !wrapper.contains(composer) || !wrapper.contains(button) ||
+        !senderRoot.contains(composer) || !senderRoot.contains(button) ||
+        !connected(detail) || !connected(wrapper) || !connected(senderRoot) ||
+        !connected(composer) || !connected(button)) return null
+    const components = componentTree([detail, senderRoot, wrapper, composer, button])
+    if (!components) return null
+    const senderOwners = components.filter((component) => component.$el === senderRoot)
+    if (senderOwners.length !== 1 || !liveComponent(senderOwners[0])) return null
+    const senderOwner = senderOwners[0]
+    const belongsToSender = (component: AnyRecord): boolean => {
+      let current: AnyRecord | null = component
+      const parents = new Set<AnyRecord>()
+      while (current && parents.size < 64) {
+        if (!liveComponent(current)) return false
+        if (current === senderOwner) return true
+        if (parents.has(current)) return false
+        parents.add(current)
+        current = asRecord(current.$parent)
+      }
+      return false
+    }
+    const buttonOwners = components.filter((component) => component.$el === button)
+    if (buttonOwners.length !== 1 || !belongsToSender(buttonOwners[0])) return null
+    const buttonOwner = buttonOwners[0]
+    const composerOwned = components.some((component) => {
+      const element = component.$el as HTMLElement | undefined
+      return element !== undefined && element !== senderRoot &&
+        typeof element.contains === 'function' && senderRoot.contains(element) &&
+        element.contains(composer) && belongsToSender(component)
+    })
+    if (!composerOwned) return null
+
+    let containerMalformed = false
+    const optionalContainer = (value: unknown): AnyRecord | null => {
+      if (value === null || value === undefined) return null
+      const record = asRecord(value)
+      if (!record) containerMalformed = true
+      return record
+    }
+    const propsInternal = optionalContainer(senderOwner._props)
+    const propsPublic = optionalContainer(senderOwner.$props)
+    const data = optionalContainer(senderOwner.$data)
+    const ownerStore = optionalContainer(senderOwner.$store)
+    const ownerStoreStateRaw = ownerStore?.state
+    if (ownerStore && (ownerStoreStateRaw === null || ownerStoreStateRaw === undefined)) containerMalformed = true
+    const ownerStoreState = ownerStore ? optionalContainer(ownerStoreStateRaw) : null
+    const ownerStoreIM = optionalContainer(ownerStoreState?.im)
+    const senderRootModel = optionalContainer(senderOwner.$root)
+    const rootStore = optionalContainer(senderRootModel?.$store)
+    const rootStoreStateRaw = rootStore?.state
+    if (rootStore && (rootStoreStateRaw === null || rootStoreStateRaw === undefined)) containerMalformed = true
+    const rootStoreState = rootStore ? optionalContainer(rootStoreStateRaw) : null
+    const rootStoreIM = optionalContainer(rootStoreState?.im)
+    if (containerMalformed) return null
+    const modelEntries: Array<{
+      key: 'currentSession' | 'propsSession'
+      model: AnyRecord
+    }> = []
+    let directModelMalformed = false
+    for (const key of ['currentSession', 'propsSession'] as const) {
+      const raw = senderOwner[key]
+      if (raw === null || raw === undefined) continue
+      const model = asRecord(raw)
+      if (!model) directModelMalformed = true
+      else modelEntries.push({ key, model })
+    }
+    if (directModelMalformed) return null
+    const alternativeObjectModels: AnyRecord[] = []
+    const seenAlternativeModels = new Set<AnyRecord>()
+    let alternativeObjectMalformed = false
+    const addAlternativeModels = (container: AnyRecord | null): void => {
+      if (!container) return
+      for (const key of ['currentSession', 'propsSession'] as const) {
+        const raw = container[key]
+        if (raw === null || raw === undefined) continue
+        const model = asRecord(raw)
+        if (!model) {
+          alternativeObjectMalformed = true
+          continue
+        }
+        if (seenAlternativeModels.has(model)) continue
+        seenAlternativeModels.add(model)
+        alternativeObjectModels.push(model)
+      }
+    }
+    addAlternativeModels(propsInternal)
+    addAlternativeModels(propsPublic)
+    addAlternativeModels(data)
+    addAlternativeModels(ownerStoreIM)
+    addAlternativeModels(rootStoreIM)
+    if (alternativeObjectMalformed || alternativeObjectModels.length > 0) return null
+
+    const scalarModels: BoundScalarModel[] = []
+    let scalarMalformed = false
+    const addScalars = (
+      path: BoundScalarModel['path'],
+      container: AnyRecord | null,
+    ): void => {
+      if (!container) return
+      for (const key of ['activeSessionId', 'currentSessionId', 'propsSessionId'] as const) {
+        const raw = container[key]
+        if (raw === null || raw === undefined) continue
+        const ref = normalizeIdentityPart(raw)
+        if (ref && (typeof raw === 'string' || typeof raw === 'number')) {
+          scalarModels.push({ container, key, path, raw, ref })
+        } else scalarMalformed = true
+      }
+    }
+    addScalars('owner', senderOwner)
+    addScalars('propsInternal', propsInternal)
+    addScalars('propsPublic', propsPublic)
+    addScalars('data', data)
+    addScalars('store', ownerStoreIM)
+    addScalars('rootStore', rootStoreIM)
+    if (scalarMalformed || scalarModels.some(({ ref }) => ref !== conversationRef)) return null
+    if (modelEntries.length === 0 && (scalarModels.length === 0 ||
+        new Set(scalarModels.map(({ path }) => path)).size < 2 ||
+        new Set(scalarModels.map(({ container }) => container)).size < 2)) return null
+    let modelPeer: string | null = null
+    if (modelEntries.length > 0) {
+      const modelIdentities = modelEntries.map(({ model }) => ({
+        ref: normalizeIdentityPart(model.sessionId),
+        peer: normalizeIdentityPart(model.peerPartnerId),
+      }))
+      if (modelIdentities.some(({ ref, peer }) => ref !== conversationRef || !peer)) return null
+      const modelPeers = [...new Set(modelIdentities.map(({ peer }) => peer as string))]
+      if (modelPeers.length !== 1) return null
+      modelPeer = modelPeers[0]
+    }
+    const engine = asRecord(w.imEngine)
+    const engineTargets = (Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : [])
+      .filter((session) => normalizeIdentityPart(session.sessionId) === conversationRef)
+    const enginePeer = engineTargets.length === 1
+      ? normalizeIdentityPart(engineTargets[0].peerPartnerId)
+      : null
+    if (engineTargets.length !== 1 || !enginePeer || (modelPeer !== null && enginePeer !== modelPeer)) return null
+
+    let buttonFormSafe = false
+    try {
+      buttonFormSafe = button.form === null ||
+        String(button.getAttribute('type') ?? '').trim().toLowerCase() === 'button'
+    } catch {
+      buttonFormSafe = false
+    }
+    if (!buttonFormSafe) return null
+
+    const rootVNode = asRecord(buttonOwner._vnode)
+    const rootOn = asRecord(asRecord(rootVNode?.data)?.on)
+    if (!rootVNode || rootVNode.elm !== button || !rootOn) return null
+    const domHandler = unwrapSingleListener(rootOn.click)
+    if (!domHandler) return null
+    const eventHandler = unwrapSingleListener(asRecord(buttonOwner._events)?.click)
+    const placeholderListeners = asRecord(asRecord(asRecord(buttonOwner.$vnode)?.componentOptions)?.listeners)
+    const vnodeHandler = unwrapSingleListener(placeholderListeners?.click)
+    if (!eventHandler || !vnodeHandler || eventHandler !== vnodeHandler) return null
+    return {
+      senderOwner,
+      currentSessionModel: modelEntries.find(({ key }) => key === 'currentSession')?.model ?? null,
+      propsSessionModel: modelEntries.find(({ key }) => key === 'propsSession')?.model ?? null,
+      scalarModels,
+      buttonOwner,
+      senderHandler: eventHandler,
+      domHandler,
+    }
+  }
+  const sessionVersionToken = (): string | null => {
+    const engine = asRecord(w.imEngine)
+    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+    const matches = sessions.filter((item) => String(item.sessionId ?? '').trim() === conversationRef)
+    const session = matches.length === 1 ? matches[0] : undefined
+    if (!session || !String(session.peerPartnerId ?? '').trim()) return null
+    return digest(JSON.stringify([
+      String(session.sessionId ?? '').trim(),
+      String(session.peerPartnerId ?? '').trim(),
+      session.sortTime ?? null,
+      session.modifiedTime ?? null,
+      session.lastSentence ?? null,
+    ]))
+  }
+  const targetBindingToken = (): string | null => {
+    const engine = asRecord(w.imEngine)
+    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const target = matches.length === 1 ? clean(matches[0].peerPartnerId) : ''
+    return target ? digest(JSON.stringify([conversationRef, target])) : null
+  }
+  const surface = (): {
+    detail: HTMLElement
+    wrapper: HTMLElement
+    composer: HTMLTextAreaElement
+    button: HTMLButtonElement
+    binding: SenderBinding | null
+  } | null => {
+    const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+    const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
+      'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
+    )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
+    if (details.length !== 1 || composers.length !== 1) return null
+    const detail = details[0]
+    const composer = composers[0]
+    const wrapper = composer.closest<HTMLElement>('.im-sender__input-wrapper')
+    if (!wrapper || composer.closest('.im-session-detail') !== detail || wrapper.closest('.im-session-detail') !== detail) {
+      return null
+    }
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.im-sender__input-wrapper button'))
+      .filter((element) => visible(element) && clean(element.textContent) === '发送')
+    if (buttons.length !== 1 || buttons[0].closest('.im-session-detail') !== detail ||
+        buttons[0].closest('.im-sender__input-wrapper') !== wrapper) return null
+    const binding = componentEvidenceForSurface(composer, buttons[0], wrapper, detail)
+    return {
+      detail,
+      wrapper,
+      composer,
+      button: buttons[0],
+      binding,
+    }
+  }
+  const sameBinding = (left: SenderBinding | null, right: SenderBinding | null): boolean => {
+    if (left === null || right === null || left.senderOwner !== right.senderOwner ||
+        left.currentSessionModel !== right.currentSessionModel ||
+        left.propsSessionModel !== right.propsSessionModel || left.buttonOwner !== right.buttonOwner ||
+        left.senderHandler !== right.senderHandler || left.domHandler !== right.domHandler ||
+        left.scalarModels.length !== right.scalarModels.length) return false
+    return left.scalarModels.every((model, index) => {
+      const other = right.scalarModels[index]
+      return other !== undefined && model.container === other.container && model.key === other.key &&
+        model.path === other.path && Object.is(model.raw, other.raw) && model.ref === other.ref
+    })
+  }
+  type SendSurface = NonNullable<ReturnType<typeof surface>>
+  type BoundSendSurface = Omit<SendSurface, 'binding'> & { binding: SenderBinding }
+  type SendFailureReason = NonNullable<MainSendOnceResult['reason']>
+  type TextareaValueSetter = (this: HTMLTextAreaElement, value: string) => void
+  type IntrinsicClick = (this: HTMLElement) => void
+  interface EvaluatedSendState {
+    surface: BoundSendSurface
+    principal: string
+    versionToken: string
+    bindingToken: string
+    setter: TextareaValueSetter
+    intrinsicClick: IntrinsicClick
+  }
+  type SendEvaluation =
+    | { status: 'ready'; state: EvaluatedSendState }
+    | { status: 'failed'; reason: SendFailureReason }
+  const failedEvaluation = (reason: SendFailureReason): SendEvaluation => ({ status: 'failed', reason })
+  const sameSurface = (left: SendSurface, right: SendSurface): boolean =>
+    left.detail === right.detail && left.wrapper === right.wrapper &&
+    left.composer === right.composer && left.button === right.button
+
+  // 预检和最终点击前只允许经过这一份 evaluator。它只把 DOM 用于唯一定位发送控件与
+  // 因果绑定；消息语义唯一来自 sender owner 对应的 live Vuex 时间线。
+  const evaluate = (
+    expectedComposerValue: string,
+    previous: EvaluatedSendState | null,
+  ): SendEvaluation => {
+    const surfaceFailure: SendFailureReason = expectedComposerValue === ''
+      ? 'composer_missing'
+      : 'input_rejected'
+    const valueFailure: SendFailureReason = expectedComposerValue === ''
+      ? 'composer_nonempty'
+      : 'input_rejected'
+    if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
+      return failedEvaluation('action_window_elapsed')
+    }
+    if (!currentRoute()) return failedEvaluation('route_changed')
+    if (!textHash || clean(text) === '' || digest(clean(text)) !== textHash) {
+      return failedEvaluation('input_rejected')
+    }
+    const principal = principalCanonical()
+    if (!principal || digest(principal) !== expectedPrincipalFingerprint ||
+        (previous !== null && principal !== previous.principal)) {
+      return failedEvaluation('identity_changed')
+    }
+    const versionToken = sessionVersionToken()
+    if (!versionToken) return failedEvaluation('guard_unresolved')
+    if (versionToken !== expectedSessionVersionToken ||
+        (previous !== null && versionToken !== previous.versionToken)) {
+      return failedEvaluation('guard_changed')
+    }
+    const bindingToken = targetBindingToken()
+    if (!bindingToken || !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken)) {
+      return failedEvaluation('guard_unresolved')
+    }
+    if (bindingToken !== expectedTargetBindingToken ||
+        (previous !== null && bindingToken !== previous.bindingToken)) {
+      return failedEvaluation('guard_changed')
+    }
+
+    const firstSurface = surface()
+    if (!firstSurface) return failedEvaluation(surfaceFailure)
+    if (!firstSurface.binding) return failedEvaluation('composer_binding_unresolved')
+    if (previous !== null && !sameSurface(previous.surface, firstSurface)) {
+      return failedEvaluation(surfaceFailure)
+    }
+    if (previous !== null && !sameBinding(previous.surface.binding, firstSurface.binding)) {
+      return failedEvaluation('composer_binding_changed')
+    }
+    if (firstSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
+
+    // 同一同步 MAIN task 内复取一次可变对象；两次结果必须仍指向同一控件和同一绑定。
+    if (Date.now() > irreversibleNotAfterMs) return failedEvaluation('action_window_elapsed')
+    if (!currentRoute()) return failedEvaluation('route_changed')
+    if (principalCanonical() !== principal) return failedEvaluation('identity_changed')
+    if (sessionVersionToken() !== versionToken || targetBindingToken() !== bindingToken) {
+      return failedEvaluation('guard_changed')
+    }
+    const finalSurface = surface()
+    if (!finalSurface || !sameSurface(firstSurface, finalSurface) ||
+        (previous !== null && !sameSurface(previous.surface, finalSurface))) {
+      return failedEvaluation(surfaceFailure)
+    }
+    if (!finalSurface.binding) return failedEvaluation('composer_binding_unresolved')
+    if (!sameBinding(firstSurface.binding, finalSurface.binding) ||
+        (previous !== null && !sameBinding(previous.surface.binding, finalSurface.binding))) {
+      return failedEvaluation('composer_binding_changed')
+    }
+    if (finalSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
+    const currentBaselineState = baselineState(finalSurface.binding)
+    if (currentBaselineState !== 'match') {
+      return failedEvaluation(currentBaselineState === 'changed' ? 'guard_changed' : 'guard_unresolved')
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
+      TextareaValueSetter | undefined
+    if (!setter) return failedEvaluation('input_rejected')
+    const intrinsicClick = HTMLElement.prototype.click as IntrinsicClick | undefined
+    if (typeof intrinsicClick !== 'function') return failedEvaluation('send_button_missing')
+    if (expectedComposerValue !== '' &&
+        (finalSurface.button.disabled || finalSurface.button.getAttribute('aria-disabled') === 'true')) {
+      return failedEvaluation('send_button_disabled')
+    }
+    if (Date.now() > irreversibleNotAfterMs) return failedEvaluation('action_window_elapsed')
+    return {
+      status: 'ready',
+      state: {
+        surface: { ...finalSurface, binding: finalSurface.binding },
+        principal,
+        versionToken,
+        bindingToken,
+        setter,
+        intrinsicClick,
+      },
+    }
+  }
+
+  const prepared = evaluate('', null)
+  if (prepared.status === 'failed') return prepared
+  if (phase === 'preflight') return { status: 'ready' }
+
+  // 从写入正文到物理 click 之间任何 getter/event/surface 异常都必须
+  // 强制把本次自动草稿还原为空。不能以 value===text 为前提：页面可能
+  // 同步规范化正文或在 input 期间重绘，这些分支也不得留下自动草稿。
+  const restoreDraft = (): void => {
+    try { prepared.state.setter.call(prepared.state.surface.composer, '') } catch { /* 继续尝试用事件清理模型 */ }
+    try {
+      prepared.state.surface.composer.dispatchEvent(new InputEvent('input', {
+        bubbles: true, inputType: 'deleteContentBackward', data: null,
+      }))
+    } catch { /* change 仍可能清理页面模型 */ }
+    try {
+      prepared.state.surface.composer.dispatchEvent(new Event('change', { bubbles: true }))
+    } catch { /* best effort */ }
+  }
+  const failAfterInput = (reason: SendFailureReason): MainSendOnceResult => {
+    restoreDraft()
+    return { status: 'failed', reason }
+  }
+  try {
+    prepared.state.setter.call(prepared.state.surface.composer, text)
+    prepared.state.surface.composer.dispatchEvent(new InputEvent('input', {
+      bubbles: true, inputType: 'insertText', data: text,
+    }))
+    prepared.state.surface.composer.dispatchEvent(new Event('change', { bubbles: true }))
+    const finalEvaluation = evaluate(text, prepared.state)
+    if (finalEvaluation.status === 'failed') return failAfterInput(finalEvaluation.reason)
+    const invokeClick = Function.prototype.call.bind(
+      finalEvaluation.state.intrinsicClick,
+      finalEvaluation.state.surface.button,
+    )
+    // evaluator 返回后不再读取任何可变页面状态；立即执行唯一一次已冻结 click。
+    invokeClick()
+    return { status: 'clicked' }
+  } catch (error) {
+    restoreDraft()
+    throw error
   }
 }
 
@@ -1477,8 +4053,9 @@ function nextAnchorPrefixMask(
 async function ensureThreadRoute(
   tab: chrome.tabs.Tab,
   conversationRef: string,
+  expectedPrincipalFingerprint: string,
   ctx: PrimitiveContext,
-): Promise<void> {
+): Promise<boolean> {
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
   let selected = ''
   try {
@@ -1486,35 +4063,248 @@ async function ensureThreadRoute(
   } catch {
     // verifiedIMTab 已确认 IM route；URL 解析失败仍按需要导航处理。
   }
-  if (selected === conversationRef) return
-  const commandNavigation = beginCommandNavigation(tab.id)
-  try {
-    await chrome.tabs.update(tab.id, {
-      url: `${ZHILIAN_IM_URL}?sessionId=${encodeURIComponent(conversationRef)}`,
-    })
-  } catch (error) {
-    commandNavigation.end()
-    throw error
+  if (selected === conversationRef) return false
+  const finder = await runMain(tab.id, mainFindConversation, [conversationRef])
+  if (finder.status !== 'found') {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      `无法按完整会话标识唯一定位目标会话：${finder.reason ?? 'unknown'}`,
+      'manualOnly',
+    )
   }
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    ctx.checkpoint()
-    const latest = await chrome.tabs.get(tab.id)
-    try {
-      const url = new URL(latest.url ?? '')
-      if (latest.status === 'complete' && url.pathname === '/app/im' &&
-          url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)) {
-        return
-      }
-    } catch {
-      // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
+  // 长 finder 之后必须重新穿过 dispatcher 取消闸和账号闸；此前不建立命令导航窗口。
+  ctx.checkpoint()
+  const beforeClick = await chrome.tabs.get(tab.id)
+  assertExpectedPrincipal(await probeTab(beforeClick), expectedPrincipalFingerprint)
+  let beforeClickSelected = ''
+  try {
+    const beforeClickURL = new URL(beforeClick.url ?? '')
+    if (beforeClickURL.pathname !== '/app/im') {
+      throw new Error('not im')
     }
-    if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
+    beforeClickSelected = beforeClickURL.searchParams.get('sessionId') ?? ''
+  } catch {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定位会话期间页面离开智联沟通页', 'manualOnly')
+  }
+  if (beforeClickSelected === conversationRef) return false
+  if (beforeClickSelected !== selected) {
+    throw new ZhilianPlatformError('USER_ACTIVE', '定位会话期间当前会话被人工切换，已取消自动点击', 'afterRecovery')
+  }
+  ctx.checkpoint()
+  // 打开会话可能触发已读等外部效果，因此它与最终发送共用本命令唯一的
+  // attempting/cancellation barrier。barrier 后 cancel 不再产生“终局已取消但迟到点击”。
+  await ctx.beforeSideEffect()
+  const clickNotAfterMs = Math.min(ctx.irreversibleNotAfterMs, Date.now() + 1_500)
+  const commandNavigation = beginCommandNavigation(tab.id, clickNotAfterMs)
+  try {
+    const click = await runMain(tab.id, mainClickConversationOnce, [
+      conversationRef,
+      selected,
+      expectedPrincipalFingerprint,
+      clickNotAfterMs,
+    ])
+    if (click.status === 'failed') {
+      if (click.reason === 'composer_nonempty') {
+        throw new ZhilianPlatformError('USER_ACTIVE', '当前会话存在人工草稿，拒绝自动切换', 'afterRecovery')
+      }
+      if (click.reason === 'identity_changed') {
+        throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '切换会话前登录身份发生变化', 'manualOnly')
+      }
+      if (click.reason === 'action_window_elapsed') {
+        throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '会话切换动作窗口已过，未点击', 'manualOnly')
+      }
+      if (click.reason === 'route_changed') {
+        throw new ZhilianPlatformError('USER_ACTIVE', '点击前当前会话被切换，已取消自动点击', 'afterRecovery')
+      }
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        `会话行在点击前无法再次确证：${click.reason ?? 'unknown'}`,
+        'manualOnly',
+      )
+    }
+    ctx.checkpoint()
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      ctx.checkpoint()
+      const latest = await chrome.tabs.get(tab.id)
+      try {
+        const url = new URL(latest.url ?? '')
+        if (latest.status === 'complete' && url.pathname === '/app/im' &&
+            url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)) {
+          return true
+        }
+      } catch {
+        // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
+      }
+      if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC',
+      '目标智联会话在期限内未就绪',
+      'afterRecovery',
+    )
+  } finally {
+    commandNavigation.end()
+  }
+}
+
+export async function sendZhilianMessage(
+  args: ZhilianSendArgs,
+  guards: ZhilianSendGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSendData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  const tab = await verifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  try {
+    const selected = new URL(tab.url ?? '').searchParams.get('sessionId')
+    if (selected !== args.conversationRef) {
+      throw new ZhilianPlatformError(
+        'GUARD_FAILED',
+        '发送前请先由人打开目标会话；chat.sendMessage 不自动切换会话',
+        'manualOnly',
+      )
+    }
+  } catch (error) {
+    if (error instanceof ZhilianPlatformError) throw error
+    throw new ZhilianPlatformError('CTX_NOT_READY', '无法确认当前会话路由', 'manualOnly', 'pageBroken')
+  }
+  const normalizedText = normalizeZhilianMessageText(args.text)
+  if (!normalizedText) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '规范化后的消息为空，拒绝发送', 'manualOnly')
+  }
+  const contentHash = await sha256Hex(normalizedText)
+
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+
+  // live Vuex 基线是消息语义的唯一权威；DOM 只在同一 evaluator 内定位并绑定发送控件。
+  const rawSendBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
+    args.conversationRef,
+    guards.expectedTail,
+  ])
+  const sendBaseline = validatedMainSendBaseline(rawSendBaseline)
+  if (!sendBaseline) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '发送基线返回结构无效，拒绝进入不可逆动作',
+      'afterRecovery',
+      'pageBroken',
+    )
+  }
+  if (sendBaseline.status === 'failed') {
+    if (sendBaseline.stage === 'route_changed' || sendBaseline.stage === 'history_unstable' ||
+        sendBaseline.stage === 'guard_snapshot_uncovered' || sendBaseline.stage === 'session_changed') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '发送基线在复核期间发生变化，拒绝发送', 'manualOnly')
+    }
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '当前无法建立可信发送基线，拒绝进入不可逆动作',
+      'afterRecovery',
+      'pageBroken',
+    )
+  }
+
+  const throwEvaluationFailure = (evaluation: MainSendOnceResult): never => {
+    if (evaluation.reason === 'composer_nonempty') {
+      throw new ZhilianPlatformError('USER_ACTIVE', '发送前输入框出现人工草稿，已取消点击', 'afterRecovery')
+    }
+    if (evaluation.reason === 'guard_changed') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '发送前会话尾锚发生变化，已取消点击', 'manualOnly')
+    }
+    if (evaluation.reason === 'route_changed') {
+      throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '发送前目标会话发生切换，已取消点击', 'manualOnly')
+    }
+    if (evaluation.reason === 'identity_changed') {
+      throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '发送前登录身份发生变化，已取消点击', 'manualOnly')
+    }
+    if (evaluation.reason === 'composer_binding_unresolved' ||
+        evaluation.reason === 'composer_binding_changed') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '发送前输入框的目标会话绑定无法确证，已取消点击', 'manualOnly')
+    }
+    if (evaluation.reason === 'action_window_elapsed') {
+      throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '不可逆动作窗口已过，已取消点击', 'manualOnly')
+    }
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      `发送前页面控件无法确证：${evaluation.reason ?? 'unknown'}`,
+      'manualOnly',
+    )
+  }
+  const evaluatorArgs = [
+    args.conversationRef,
+    args.text,
+    contentHash,
+    guards.expectedTail,
+    sendBaseline.sessionVersionToken,
+    expectedPrincipalFingerprint,
+    ctx.irreversibleNotAfterMs,
+    sendBaseline.serverSourceKeys,
+    sendBaseline.targetBindingToken,
+  ] as const
+
+  // attempting 前的真实预检与最终点击使用字面同一份 MAIN evaluator 和同一组参数。
+  ctx.checkpoint()
+  const preflight = await runMain(tab.id, mainSendMessageOnce, [...evaluatorArgs, 'preflight'])
+  if (preflight.status !== 'ready') throwEvaluationFailure(preflight)
+  ctx.checkpoint()
+  await ctx.beforeSideEffect()
+
+  // commit 会重新执行同一 evaluator；最后一次绿色返回后不再读取页面，立即唯一 click。
+  const action = await runMain(tab.id, mainSendMessageOnce, [
+    ...evaluatorArgs,
+    'commit',
+  ])
+  if (action.status !== 'clicked') throwEvaluationFailure(action)
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    ctx.checkpoint()
+    try {
+      const observed = await runMain(tab.id, mainObserveStableOutbound, [
+        args.conversationRef,
+        contentHash,
+        sendBaseline.serverSourceKeys,
+        sendBaseline.targetBindingToken,
+      ])
+      if (!observed.selected) {
+        throw new ZhilianPlatformError(
+          'CTX_LOST_DURING_EXEC',
+          '点击后目标会话发生切换，无法确认发送后置条件',
+          'manualOnly',
+          undefined,
+          'possible',
+        )
+      }
+      if (observed.matchingNewServerMessages === 1) {
+        try {
+          assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+        } catch (error) {
+          throw new ZhilianPlatformError(
+            'CTX_LOST_DURING_EXEC',
+            `点击后账号身份无法复核：${asError(error).message}`,
+            'manualOnly',
+            undefined,
+            'possible',
+          )
+        }
+        const observedAt = Date.now()
+        await ctx.progress('已从当前实时消息时间线确认唯一新已发文本', 100)
+        return { conversationRef: args.conversationRef, contentHash, observedAt }
+      }
+    } catch (error) {
+      if (error instanceof ZhilianPlatformError && error.sideEffect === 'possible') throw error
+      // 页面短暂重绘或脚本读取失败只影响观察；绝不能据此触发第二次 click。
+    }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   throw new ZhilianPlatformError(
-    'CTX_LOST_DURING_EXEC',
-    '目标智联会话在期限内未就绪',
-    'afterRecovery',
+    'POSTCONDITION_UNCONFIRMED',
+    '只点击了一次发送，但未在当前实时消息时间线确认唯一新 idServer 文本',
+    'manualOnly',
     undefined,
     'possible',
   )
@@ -1578,20 +4368,14 @@ export async function readZhilianThread(
     if (!platformReadStarted) {
       // readThread 按最坏实现定为 idempotentReadReceipt；紧贴第一次平台读取设置取消安全点。
       // 该钩子抛出的 StopExecution 必须原样回到 Dispatcher，不能在平台错误映射中吞掉。
-      ctx.beforeSideEffect()
+      await ctx.beforeSideEffect()
       platformReadStarted = true
-      try {
-        await ensureThreadRoute(tab, args.conversationRef, ctx)
-      } catch (error) {
-        if (error instanceof ZhilianPlatformError) throw error
-        throw new ZhilianPlatformError(
-          'CTX_LOST_DURING_EXEC',
-          `打开目标智联会话失败：${asError(error).message}`,
-          'afterRecovery',
-          undefined,
-          'possible',
-        )
-      }
+      // 已验证的 engine.getSessions 分页与 getHistoryMsgs 能在稳定 IM 列表页按
+      // sessionId 读取，
+      // 不要求把真人页面切到目标会话。直接 tabs.update 一个尚未在当前虚拟列表加载的
+      // sessionId 会触发整页导航，平台随后把它规范回 /app/im，并可能在 MAIN await
+      // 期间销毁执行上下文。DOM 回退仍在 mainReadThreadPage 内严格要求目标 route；
+      // API 不可用时响亮失败，不在同一原语里偷偷导航后重跑完整读取。
     }
     try {
       page = await runMain(tab.id, mainReadThreadPage, [
@@ -1739,7 +4523,14 @@ export const zhilianTestHooks = Object.freeze({
   decodeCursor,
   encodeCursor,
   mainProbeZhilian,
+  mainCaptureSendBaseline,
+  mainInspectSendSurface,
+  mainFindConversation,
+  mainClickConversationOnce,
+  mainObserveStableOutbound,
   mainReadListPage,
   mainReadThreadPage,
+  mainSendMessageOnce,
+  ensureThreadRoute,
   runMain,
 })

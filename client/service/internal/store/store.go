@@ -53,9 +53,15 @@ func Open(dataDir string) (*Store, error) {
 	if err := prepareCmdLineageMigration(db); err != nil {
 		return nil, fmt.Errorf("预迁移命令逻辑派发: %w", err)
 	}
+	// 只有旧库首次引入 head 表时允许从历史意图做一次
+	// 确定性迁移。表已存在但某会话 head 丢失属于损坏，
+	// 重启不得重算并掩盖，后续读/写必须 fail-closed。
+	effectHeadTableExisted := db.Migrator().HasTable(&ConversationEffectHead{})
 	if err := db.AutoMigrate(
 		&Hand{},
 		&Account{},
+		&EffectIntent{},
+		&ConversationEffectHead{},
 		&CmdRecord{},
 		&ProcessedMsg{},
 		&Conversation{},
@@ -74,7 +80,53 @@ func Open(dataDir string) (*Store, error) {
 		UpdateColumn("logical_dispatch_id", gorm.Expr("msg_id")).Error; err != nil {
 		return nil, fmt.Errorf("回填命令逻辑派发 ID: %w", err)
 	}
+	if !effectHeadTableExisted {
+		if err := backfillConversationEffectHeads(db); err != nil {
+			return nil, fmt.Errorf("回填会话副作用 head: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
+}
+
+// backfillConversationEffectHeads 只为尚无 head 的旧数据建立一次持久
+// 锚点。旧库无法恢复真实插入顺序，故用 created_at+intent_id 作确定性
+// 迁移裁决；一旦 head 存在，后续 Open/VACUUM 永不重新排序或覆盖。
+func backfillConversationEffectHeads(db *gorm.DB) error {
+	type key struct {
+		platform, accountRef, conversationRef string
+	}
+	type candidate struct {
+		latest     EffectIntent
+		generation uint64
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var intents []EffectIntent
+		if err := tx.Order("platform, account_ref, target_ref, created_at, intent_id").Find(&intents).Error; err != nil {
+			return err
+		}
+		candidates := make(map[key]candidate)
+		for i := range intents {
+			intent := intents[i]
+			k := key{intent.Platform, intent.AccountRef, intent.TargetRef}
+			current := candidates[k]
+			if current.generation >= maxSQLiteEffectHeadGeneration {
+				return fmt.Errorf("旧库会话副作用 generation 溢出: %s/%s/%s", k.platform, k.accountRef, k.conversationRef)
+			}
+			current.latest = intent
+			current.generation++
+			candidates[k] = current
+		}
+		for k, current := range candidates {
+			head := ConversationEffectHead{
+				Platform: k.platform, AccountRef: k.accountRef, ConversationRef: k.conversationRef,
+				LatestIntentID: current.latest.IntentID, Generation: current.generation,
+			}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&head).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 const retiredPairedHandsTable = "paired_hands"
@@ -221,7 +273,9 @@ func (s *Store) RecentCmds(limit int) ([]CmdRecord, error) {
 }
 
 // 非终局状态集(超时引擎与重连收编、脑重启扫描的扫描面)。
-var nonTerminalStatuses = []CmdStatus{CmdQueued, CmdSent, CmdAccepted}
+var nonTerminalStatuses = []CmdStatus{
+	CmdQueued, CmdSent, CmdAccepted, CmdPendingReconcile, CmdVerifying,
+}
 
 // NonTerminalCmds:全部非终局命令(超时引擎扫描 + 脑重启扫描)。
 func (s *Store) NonTerminalCmds() ([]CmdRecord, error) {

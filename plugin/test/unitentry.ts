@@ -4,24 +4,29 @@ import '../../contract/gen/ts/validation.test'
 
 export const GENERATED_CONTRACT_VALIDATION_EXECUTED = true
 export { Dispatcher } from '../src/base/dispatcher'
+export { WitnessStore, WitnessStoreError } from '../src/base/witness'
 export { Connection, heartbeatDelayMs, utf8ByteLength } from '../src/base/connection'
 export { getHandId, getWsUrl, normalizeLocalWsUrl, RECONNECT_STABLE_MS, setWsUrl } from '../src/base/config'
 export { handleInfrastructureMessage } from '../src/base/optionsBridge'
 export { ContentSensor } from '../src/base/contentSensor'
 export { readZhilianUnreadTotal, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../src/base/contentDom'
 export { SensorBridge } from '../src/base/sensorBridge'
-export { NavigationTracker } from '../src/base/navigation'
+export { NavigationTracker, navigationTracker } from '../src/base/navigation'
 export { CONTENT_MESSAGE, MANUAL_EMIT_MIN_MS } from '../src/base/contentMessages'
 export { register } from '../src/program/registry'
 export {
   readZhilianList,
   readZhilianThread,
+  inspectZhilianSendSurfaceDiagnostic,
+  sendZhilianMessage,
+  normalizeZhilianMessageText,
   zhilianTestHooks,
   ZhilianPlatformError,
 } from '../src/program/platform/zhilian'
 export {
   AckStatus,
   ErrorCode,
+  ERROR_CODE_META,
   Kind,
   ResultStatus,
   CmdClass,
@@ -34,4 +39,8 @@ export {
   PageKind,
   Primitive,
   PROTO_VERSION,
+  Retryable,
+  SideEffect,
+  WitnessUnavailableReason,
+  validatePrimitiveResult,
 } from '../src/base/protocol'

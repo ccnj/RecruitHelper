@@ -68,6 +68,25 @@ type ChatReadThreadData struct {
 	ReachedTop    bool            `json:"reachedTop"`
 }
 
+type ChatSendMessageArgs struct {
+	ConversationRef string `json:"conversationRef"`
+	Text            string `json:"text"`
+}
+
+type ChatSendMessageData struct {
+	ContentHash     string `json:"contentHash"`
+	ConversationRef string `json:"conversationRef"`
+	ObservedAt      int64  `json:"observedAt"`
+}
+
+type ChatSendMessageEvidence struct {
+	Type SendMessageEvidenceType `json:"type"`
+}
+
+type ChatSendMessageGuards struct {
+	ExpectedTail []MessageAnchor `json:"expectedTail"`
+}
+
 type CmdBody struct {
 	Args         json.RawMessage `json:"args"`
 	Context      *CmdContext     `json:"context,omitempty"`
@@ -92,6 +111,14 @@ type ConversationSummary struct {
 	LastMessage     LastMessageSummary `json:"lastMessage"`
 	Peer            PeerSummary        `json:"peer"`
 	UnreadCount     int                `json:"unreadCount"`
+}
+
+type DebugInspectSendSurfaceArgs struct {
+}
+
+type DebugInspectSendSurfaceData struct {
+	Ready bool                       `json:"ready"`
+	Stage SendSurfaceDiagnosticStage `json:"stage"`
 }
 
 type DebugPingArgs struct {
@@ -158,10 +185,28 @@ type HelloBody struct {
 	ContractHash   string   `json:"contractHash"`
 	Features       []string `json:"features"`
 	HandID         string   `json:"handId"`
+	JournalOpen    int      `json:"journalOpen,omitempty"`
+	OutboxPending  int      `json:"outboxPending,omitempty"`
 	ProtoSupported []int    `json:"protoSupported"`
+	WitnessStoreId string   `json:"witnessStoreId,omitempty"`
+}
+
+type JournalEntry struct {
+	CommittedAt int64        `json:"committedAt,omitempty"`
+	ExpiresAt   int64        `json:"expiresAt"`
+	IdemKey     string       `json:"idemKey"`
+	Ref         string       `json:"ref"`
+	Result      *ResultBody  `json:"result,omitempty"`
+	StartedAt   int64        `json:"startedAt"`
+	State       JournalState `json:"state"`
 }
 
 type JournalSnapshot struct {
+	CommittedAt int64        `json:"committedAt,omitempty"`
+	IdemKey     string       `json:"idemKey"`
+	Ref         string       `json:"ref"`
+	StartedAt   int64        `json:"startedAt"`
+	State       JournalState `json:"state"`
 }
 
 type LastMessageSummary struct {
@@ -202,6 +247,12 @@ type NavEnsureSurfaceData struct {
 	Ready      bool       `json:"ready"`
 }
 
+type OutboxEntry struct {
+	CreatedAt int64          `json:"createdAt"`
+	ExpiresAt int64          `json:"expiresAt"`
+	Message   ResultEnvelope `json:"message"`
+}
+
 type PageNavigatedEventData struct {
 	At       int64    `json:"at"`
 	PageKind PageKind `json:"pageKind"`
@@ -213,10 +264,13 @@ type PeerSummary struct {
 }
 
 type PingBody struct {
-	Contexts   []PingContext `json:"contexts,omitempty"`
-	InFlight   *string       `json:"inFlight"`
-	QueueDepth int           `json:"queueDepth"`
-	Sensors    *PingSensors  `json:"sensors,omitempty"`
+	Contexts       []PingContext `json:"contexts,omitempty"`
+	InFlight       *string       `json:"inFlight"`
+	JournalOpen    int           `json:"journalOpen,omitempty"`
+	OutboxPending  int           `json:"outboxPending,omitempty"`
+	QueueDepth     int           `json:"queueDepth"`
+	Sensors        *PingSensors  `json:"sensors,omitempty"`
+	WitnessStoreId string        `json:"witnessStoreId,omitempty"`
 }
 
 type PingContext struct {
@@ -260,10 +314,11 @@ type QueryBody struct {
 }
 
 type ReportBody struct {
-	Journal *JournalSnapshot `json:"journal"`
-	Ref     string           `json:"ref"`
-	Result  *ResultBody      `json:"result"`
-	State   ReportState      `json:"state"`
+	Journal        *JournalSnapshot `json:"journal"`
+	Ref            string           `json:"ref"`
+	Result         *ResultBody      `json:"result"`
+	State          ReportState      `json:"state"`
+	WitnessStoreId string           `json:"witnessStoreId"`
 }
 
 type ResultBody struct {
@@ -275,6 +330,16 @@ type ResultBody struct {
 	Ref         string          `json:"ref"`
 	Replayed    bool            `json:"replayed"`
 	Status      ResultStatus    `json:"status"`
+}
+
+type ResultEnvelope struct {
+	Attempt int        `json:"attempt"`
+	Body    ResultBody `json:"body"`
+	Kind    OutboxKind `json:"kind"`
+	MsgID   string     `json:"msgId"`
+	Proto   int        `json:"proto"`
+	Session string     `json:"session"`
+	Ts      int64      `json:"ts"`
 }
 
 type SensorParams struct {
@@ -325,6 +390,18 @@ type WelcomeBody struct {
 	Session       string        `json:"session"`
 }
 
+type WitnessStoreMeta struct {
+	CreatedAt     int64  `json:"createdAt"`
+	JournalCount  int    `json:"journalCount"`
+	OutboxCount   int    `json:"outboxCount"`
+	SchemaVersion int    `json:"schemaVersion"`
+	StoreId       string `json:"storeId"`
+}
+
+type WitnessUnavailableData struct {
+	Reason WitnessUnavailableReason `json:"reason"`
+}
+
 // Encode 把生成 body/args/data/event 类型编码成信封可用的 RawMessage。
 func Encode(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
@@ -361,16 +438,20 @@ type schemaSpec struct {
 }
 
 type primitiveSchema struct {
-	Ver  int    `json:"ver"`
-	Args string `json:"args"`
-	Data string `json:"data"`
+	Ver      int    `json:"ver"`
+	Class    string `json:"class"`
+	Args     string `json:"args"`
+	Data     string `json:"data"`
+	Guards   string `json:"guards"`
+	Evidence string `json:"evidence"`
 }
 
-var schemaTypes = mustDecodeSchemaMap("{\"AckBody\":{\"fields\":{\"error\":{\"nullable\":true,\"optional\":true,\"ref\":\"ErrorBody\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"status\":{\"enumRef\":\"enums.ackStatus\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"rejected\"],\"field\":\"error\",\"kind\":\"requiredWhen\",\"whenField\":\"status\"},{\"equals\":[\"accepted\",\"duplicate\"],\"field\":\"error\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"}],\"type\":\"object\"},\"AppInfo\":{\"fields\":{\"browser\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"extVersion\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"BlobParams\":{\"fields\":{\"endpoint\":{\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"maxBytes\":{\"maximum\":20971520,\"minimum\":1,\"type\":\"int64\"},\"token\":{\"maxLength\":512,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ByeBody\":{\"fields\":{\"code\":{\"enumRef\":\"byeCodes\",\"type\":\"string\"},\"message\":{\"maxBytes\":2000,\"maxLength\":500,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"CancelBody\":{\"fields\":{\"reason\":{\"enumRef\":\"enums.cancelReason\",\"type\":\"string\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ChatReadListArgs\":{\"fields\":{\"cursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"filter\":{\"enumRef\":\"enums.listFilter\",\"type\":\"string\"},\"maxSessions\":{\"default\":32,\"maximum\":32,\"minimum\":1,\"optional\":true,\"type\":\"int\"},\"stopOlderThanDays\":{\"default\":8,\"maximum\":30,\"minimum\":1,\"optional\":true,\"type\":\"int\"}},\"type\":\"object\"},\"ChatReadListData\":{\"fields\":{\"complete\":{\"type\":\"boolean\"},\"nextCursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"sessions\":{\"items\":{\"ref\":\"ConversationSummary\"},\"maxItems\":32,\"type\":\"array\"}},\"maxJsonBytes\":65536,\"rules\":[{\"equals\":[false],\"field\":\"nextCursor\",\"kind\":\"requiredWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"field\":\"nextCursor\",\"kind\":\"forbiddenWhen\",\"whenField\":\"complete\"}],\"type\":\"object\"},\"ChatReadThreadArgs\":{\"fields\":{\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"cursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"window\":{\"ref\":\"ThreadWindow\"}},\"type\":\"object\"},\"ChatReadThreadData\":{\"fields\":{\"anchorMatched\":{\"type\":\"boolean\"},\"complete\":{\"type\":\"boolean\"},\"messages\":{\"items\":{\"ref\":\"ThreadMessage\"},\"maxItems\":64,\"type\":\"array\"},\"nextCursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"peer\":{\"nullable\":true,\"ref\":\"PeerSummary\"},\"reachedTop\":{\"type\":\"boolean\"}},\"maxJsonBytes\":65536,\"rules\":[{\"equals\":[false],\"field\":\"nextCursor\",\"kind\":\"requiredWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"field\":\"nextCursor\",\"kind\":\"forbiddenWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"fields\":[\"reachedTop\",\"anchorMatched\"],\"kind\":\"atLeastOneTrueWhen\",\"whenField\":\"complete\"},{\"equals\":[false],\"fields\":[\"reachedTop\",\"anchorMatched\"],\"kind\":\"allFalseWhen\",\"whenField\":\"complete\"}],\"type\":\"object\"},\"CmdBody\":{\"fields\":{\"args\":{\"raw\":true,\"type\":\"object\"},\"context\":{\"optional\":true,\"ref\":\"CmdContext\"},\"deadline\":{\"minimum\":0,\"type\":\"int64\"},\"execBudgetMs\":{\"maximum\":240000,\"minimum\":1,\"type\":\"int64\"},\"guards\":{\"optional\":true,\"raw\":true,\"type\":\"object\"},\"idemKey\":{\"maxBytes\":4096,\"maxLength\":1024,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"leaseMs\":{\"maximum\":120000,\"minimum\":5000,\"optional\":true,\"type\":\"int64\"},\"name\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"ver\":{\"maximum\":65535,\"minimum\":1,\"type\":\"int\"}},\"type\":\"object\"},\"CmdContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"expectedPrincipalFingerprint\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ConversationSummary\":{\"fields\":{\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"lastActivityTs\":{\"minimum\":0,\"nullable\":true,\"type\":\"int64\"},\"lastMessage\":{\"ref\":\"LastMessageSummary\"},\"peer\":{\"ref\":\"PeerSummary\"},\"unreadCount\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"DebugPingArgs\":{\"fields\":{\"echo\":{\"optional\":true,\"type\":\"any\"}},\"type\":\"object\"},\"DebugPingData\":{\"fields\":{\"echo\":{\"type\":\"any\"},\"swStartedAt\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"DebugSlowEchoArgs\":{\"fields\":{\"ms\":{\"maximum\":200000,\"minimum\":0,\"type\":\"int\"},\"outcome\":{\"enumRef\":\"enums.debugSlowOutcome\",\"type\":\"string\"}},\"type\":\"object\"},\"DebugSlowEchoData\":{\"fields\":{\"echoedAfterMs\":{\"maximum\":200000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"DebugSwitchWindowArgs\":{\"fields\":{},\"type\":\"object\"},\"DebugSwitchWindowData\":{\"fields\":{\"switched\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"ErrorBody\":{\"fields\":{\"code\":{\"enumRef\":\"errorCodes\",\"type\":\"string\"},\"data\":{\"maxJsonBytes\":65536,\"optional\":true,\"raw\":true,\"type\":\"object\"},\"evidence\":{\"items\":{\"ref\":\"Evidence\"},\"maxItems\":4,\"optional\":true,\"type\":\"array\"},\"message\":{\"maxBytes\":2000,\"maxLength\":500,\"optional\":true,\"type\":\"string\"},\"retryable\":{\"enumRef\":\"enums.retryable\",\"optional\":true,\"type\":\"string\"},\"sideEffect\":{\"enumRef\":\"enums.sideEffect\",\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"EventBody\":{\"fields\":{\"context\":{\"ref\":\"EventContext\"},\"data\":{\"raw\":true,\"type\":\"object\"},\"name\":{\"enumRef\":\"events\",\"type\":\"string\"},\"observedAt\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"EventContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"Evidence\":{\"fields\":{\"blob\":{\"maxLength\":128,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"text\":{\"maxBytes\":2048,\"optional\":true,\"type\":\"string\"},\"type\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"HbParams\":{\"fields\":{\"graceMs\":{\"maximum\":600000,\"minimum\":1000,\"type\":\"int64\"},\"intervalMs\":{\"maximum\":120000,\"minimum\":1000,\"type\":\"int64\"}},\"type\":\"object\"},\"HelloBody\":{\"fields\":{\"app\":{\"ref\":\"AppInfo\"},\"bootId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"caps\":{\"items\":{\"maxLength\":160,\"minLength\":1,\"type\":\"string\"},\"maxItems\":256,\"type\":\"array\"},\"contractHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"features\":{\"items\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"},\"maxItems\":64,\"type\":\"array\"},\"handId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"protoSupported\":{\"items\":{\"minimum\":1,\"type\":\"int\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"}},\"type\":\"object\"},\"JournalSnapshot\":{\"fields\":{},\"type\":\"object\"},\"LastMessageSummary\":{\"fields\":{\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"},\"kind\":{\"enumRef\":\"enums.messageKind\",\"type\":\"string\"},\"textPreview\":{\"maxBytes\":800,\"maxLength\":200,\"type\":\"string\"}},\"type\":\"object\"},\"Limits\":{\"fields\":{\"inlineBytes\":{\"maximum\":262144,\"minimum\":1024,\"type\":\"int64\"},\"maxMsgBytes\":{\"maximum\":262144,\"minimum\":1024,\"type\":\"int64\"}},\"type\":\"object\"},\"LoginStateChangedEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"stable\":{\"const\":true,\"type\":\"boolean\"},\"state\":{\"enumRef\":\"enums.loginChangeState\",\"type\":\"string\"}},\"type\":\"object\"},\"ManualInteractionEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"kind\":{\"enumRef\":\"enums.manualInteractionKind\",\"type\":\"string\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"}},\"type\":\"object\"},\"MessageAnchor\":{\"fields\":{\"contentHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"}},\"type\":\"object\"},\"NavEnsureSurfaceArgs\":{\"fields\":{\"surface\":{\"enumRef\":\"enums.surfaceName\",\"type\":\"string\"}},\"type\":\"object\"},\"NavEnsureSurfaceData\":{\"fields\":{\"createdTab\":{\"type\":\"boolean\"},\"loginState\":{\"enumRef\":\"enums.loginState\",\"type\":\"string\"},\"ready\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"PageNavigatedEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"}},\"type\":\"object\"},\"PeerSummary\":{\"fields\":{\"displayName\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platformUserRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"PingBody\":{\"fields\":{\"contexts\":{\"items\":{\"ref\":\"PingContext\"},\"maxItems\":64,\"optional\":true,\"type\":\"array\"},\"inFlight\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"queueDepth\":{\"maximum\":16,\"minimum\":0,\"type\":\"int\"},\"sensors\":{\"nullable\":true,\"optional\":true,\"ref\":\"PingSensors\"}},\"type\":\"object\"},\"PingContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"},\"ready\":{\"type\":\"boolean\"},\"reason\":{\"enumRef\":\"enums.notReadyReason\",\"optional\":true,\"type\":\"string\"}},\"rules\":[{\"equals\":[false],\"field\":\"reason\",\"kind\":\"requiredWhen\",\"whenField\":\"ready\"},{\"equals\":[true],\"field\":\"reason\",\"kind\":\"forbiddenWhen\",\"whenField\":\"ready\"}],\"type\":\"object\"},\"PingSensors\":{\"fields\":{\"unreadTotal\":{\"nullable\":true,\"ref\":\"SensorReading\"}},\"type\":\"object\"},\"PlatformSurface\":{\"fields\":{\"imListVisible\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"PongBody\":{\"fields\":{\"now\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"ProbePlatformArgs\":{\"fields\":{},\"type\":\"object\"},\"ProbePlatformData\":{\"fields\":{\"contentScriptOk\":{\"type\":\"boolean\"},\"loginState\":{\"enumRef\":\"enums.loginState\",\"type\":\"string\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"},\"principalFingerprint\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"surface\":{\"nullable\":true,\"ref\":\"PlatformSurface\"}},\"type\":\"object\"},\"ProgressBody\":{\"fields\":{\"pct\":{\"maximum\":100,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"stage\":{\"maxBytes\":800,\"maxLength\":200,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"QueryBody\":{\"fields\":{\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ReportBody\":{\"fields\":{\"journal\":{\"nullable\":true,\"ref\":\"JournalSnapshot\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"result\":{\"nullable\":true,\"ref\":\"ResultBody\"},\"state\":{\"enumRef\":\"enums.reportState\",\"type\":\"string\"}},\"type\":\"object\"},\"ResultBody\":{\"fields\":{\"data\":{\"maxJsonBytes\":65536,\"nullable\":true,\"optional\":true,\"type\":\"any\"},\"dataBlobRef\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"error\":{\"nullable\":true,\"optional\":true,\"ref\":\"ErrorBody\"},\"evidence\":{\"items\":{\"ref\":\"Evidence\"},\"maxItems\":4,\"optional\":true,\"type\":\"array\"},\"execMs\":{\"maximum\":240000,\"minimum\":0,\"type\":\"int64\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"replayed\":{\"type\":\"boolean\"},\"status\":{\"enumRef\":\"enums.resultStatus\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"ok\"],\"fields\":[\"data\",\"dataBlobRef\"],\"kind\":\"exactlyOneWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\"],\"field\":\"error\",\"kind\":\"requiredWhen\",\"whenField\":\"status\"},{\"equals\":[\"ok\",\"canceled\",\"expired\"],\"field\":\"error\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\",\"canceled\",\"expired\"],\"field\":\"data\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\",\"canceled\",\"expired\"],\"field\":\"dataBlobRef\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"}],\"type\":\"object\"},\"SensorParams\":{\"fields\":{\"badgeDebounceMs\":{\"maximum\":3000,\"minimum\":0,\"type\":\"int64\"},\"badgeMinEmitIntervalMs\":{\"maximum\":60000,\"minimum\":1000,\"type\":\"int64\"},\"manualQuietMs\":{\"maximum\":600000,\"minimum\":0,\"type\":\"int64\"},\"navSettleMs\":{\"maximum\":3000,\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"SensorReading\":{\"fields\":{\"observedAgoMs\":{\"maximum\":86400000,\"minimum\":0,\"type\":\"int64\"},\"value\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"ThreadMessage\":{\"fields\":{\"blobRef\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"cardState\":{\"enumRef\":\"enums.cardState\",\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"cardType\":{\"enumRef\":\"enums.cardType\",\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"contentHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"},\"idx\":{\"maximum\":63,\"minimum\":0,\"type\":\"int\"},\"kind\":{\"enumRef\":\"enums.messageKind\",\"type\":\"string\"},\"text\":{\"maxBytes\":2048,\"nullable\":true,\"type\":\"string\"},\"tsApprox\":{\"minimum\":0,\"nullable\":true,\"optional\":true,\"type\":\"int64\"}},\"type\":\"object\"},\"ThreadWindow\":{\"fields\":{\"anchorTail\":{\"items\":{\"ref\":\"MessageAnchor\"},\"maxItems\":5,\"optional\":true,\"type\":\"array\"},\"deep\":{\"default\":false,\"optional\":true,\"type\":\"boolean\"},\"maxMessages\":{\"default\":50,\"maximum\":64,\"minimum\":1,\"optional\":true,\"type\":\"int\"}},\"type\":\"object\"},\"UnreadBadgeEventData\":{\"fields\":{\"prev\":{\"maximum\":1000000,\"minimum\":0,\"nullable\":true,\"type\":\"int\"},\"scope\":{\"enumRef\":\"enums.unreadScope\",\"type\":\"string\"},\"stable\":{\"const\":true,\"type\":\"boolean\"},\"value\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"WelcomeBody\":{\"fields\":{\"blob\":{\"optional\":true,\"ref\":\"BlobParams\"},\"contractMatch\":{\"type\":\"boolean\"},\"hb\":{\"ref\":\"HbParams\"},\"limits\":{\"ref\":\"Limits\"},\"now\":{\"minimum\":0,\"type\":\"int64\"},\"proto\":{\"minimum\":1,\"type\":\"int\"},\"sensors\":{\"optional\":true,\"ref\":\"SensorParams\"},\"session\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"}}")
-var schemaEnums = mustDecodeStringSlices("{\"byeCodes\":[\"PROTO_INCOMPATIBLE\",\"SUPERSEDED\",\"SHUTTING_DOWN\"],\"enums.ackStatus\":[\"accepted\",\"rejected\",\"duplicate\"],\"enums.batch\":[\"M1\",\"S\",\"X\",\"far\"],\"enums.cancelReason\":[\"leaseExpired\",\"deadlineImminent\",\"superseded\",\"operator\",\"shutdown\"],\"enums.cardState\":[\"pending\",\"accepted\",\"rejected\",\"expired\",\"unknown\"],\"enums.cardType\":[\"interviewInvite\",\"wechatExchange\",\"resumeAttachment\",\"other\"],\"enums.debugSlowOutcome\":[\"ok\",\"failed\",\"silent\"],\"enums.errorPhase\":[\"receipt\",\"execution\"],\"enums.listFilter\":[\"all\",\"unread\"],\"enums.loginChangeState\":[\"in\",\"out\"],\"enums.loginState\":[\"in\",\"out\",\"unknown\"],\"enums.manualInteractionKind\":[\"pointer\",\"keyboard\",\"navigation\"],\"enums.messageDirection\":[\"in\",\"out\",\"system\"],\"enums.messageKind\":[\"text\",\"image\",\"voice\",\"file\",\"card\",\"system\"],\"enums.notReadyReason\":[\"pageAbsent\",\"loginRequired\",\"contentScriptDead\",\"pageBroken\",\"identityUnverified\",\"unknown\"],\"enums.pageKind\":[\"im\",\"recommend\",\"other\",\"none\"],\"enums.reportState\":[\"unknown\",\"queued\",\"executing\",\"attempting\",\"done\"],\"enums.resultStatus\":[\"ok\",\"failed\",\"canceled\",\"expired\"],\"enums.retryable\":[\"yes\",\"no\",\"afterRecovery\",\"manualOnly\"],\"enums.sideEffect\":[\"none\",\"possible\",\"confirmed\"],\"enums.surfaceName\":[\"im\"],\"enums.unreadScope\":[\"total\"],\"errorCodes\":[\"ACCOUNT_MISMATCH\",\"CANCELED_BY_BRAIN\",\"CONVERSATION_NOT_FOUND\",\"CTX_LOST_DURING_EXEC\",\"CTX_NOT_READY\",\"CURSOR_INVALID\",\"ELEMENT_UNRESOLVED\",\"EXEC_TIMEOUT_HAND\",\"GUARD_FAILED\",\"INTERNAL_HAND\",\"PAYLOAD_LIMIT\",\"PLATFORM_LIMIT\",\"POSTCONDITION_UNCONFIRMED\",\"PROTO_BAD_ARGS\",\"PROTO_MALFORMED\",\"PROTO_MSG_TOO_LARGE\",\"PROTO_UNSUPPORTED_CMD\",\"PROTO_UNSUPPORTED_KIND\",\"QUEUE_FULL\",\"STALE_SESSION\",\"TARGET_NOT_FOUND\",\"USER_ACTIVE\"],\"events\":[\"loginStateChanged\",\"manualInteraction\",\"pageNavigated\",\"unreadBadge\"]}")
+var schemaTypes = mustDecodeSchemaMap("{\"AckBody\":{\"fields\":{\"error\":{\"nullable\":true,\"optional\":true,\"ref\":\"ErrorBody\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"status\":{\"enumRef\":\"enums.ackStatus\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"rejected\"],\"field\":\"error\",\"kind\":\"requiredWhen\",\"whenField\":\"status\"},{\"equals\":[\"accepted\",\"duplicate\"],\"field\":\"error\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"}],\"type\":\"object\"},\"AppInfo\":{\"fields\":{\"browser\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"extVersion\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"BlobParams\":{\"fields\":{\"endpoint\":{\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"maxBytes\":{\"maximum\":20971520,\"minimum\":1,\"type\":\"int64\"},\"token\":{\"maxLength\":512,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ByeBody\":{\"fields\":{\"code\":{\"enumRef\":\"byeCodes\",\"type\":\"string\"},\"message\":{\"maxBytes\":2000,\"maxLength\":500,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"CancelBody\":{\"fields\":{\"reason\":{\"enumRef\":\"enums.cancelReason\",\"type\":\"string\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ChatReadListArgs\":{\"fields\":{\"cursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"filter\":{\"enumRef\":\"enums.listFilter\",\"type\":\"string\"},\"maxSessions\":{\"default\":32,\"maximum\":32,\"minimum\":1,\"optional\":true,\"type\":\"int\"},\"stopOlderThanDays\":{\"default\":8,\"maximum\":30,\"minimum\":1,\"optional\":true,\"type\":\"int\"}},\"type\":\"object\"},\"ChatReadListData\":{\"fields\":{\"complete\":{\"type\":\"boolean\"},\"nextCursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"sessions\":{\"items\":{\"ref\":\"ConversationSummary\"},\"maxItems\":32,\"type\":\"array\"}},\"maxJsonBytes\":65536,\"rules\":[{\"equals\":[false],\"field\":\"nextCursor\",\"kind\":\"requiredWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"field\":\"nextCursor\",\"kind\":\"forbiddenWhen\",\"whenField\":\"complete\"}],\"type\":\"object\"},\"ChatReadThreadArgs\":{\"fields\":{\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"cursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"window\":{\"ref\":\"ThreadWindow\"}},\"type\":\"object\"},\"ChatReadThreadData\":{\"fields\":{\"anchorMatched\":{\"type\":\"boolean\"},\"complete\":{\"type\":\"boolean\"},\"messages\":{\"items\":{\"ref\":\"ThreadMessage\"},\"maxItems\":64,\"type\":\"array\"},\"nextCursor\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"peer\":{\"nullable\":true,\"ref\":\"PeerSummary\"},\"reachedTop\":{\"type\":\"boolean\"}},\"maxJsonBytes\":65536,\"rules\":[{\"equals\":[false],\"field\":\"nextCursor\",\"kind\":\"requiredWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"field\":\"nextCursor\",\"kind\":\"forbiddenWhen\",\"whenField\":\"complete\"},{\"equals\":[true],\"fields\":[\"reachedTop\",\"anchorMatched\"],\"kind\":\"atLeastOneTrueWhen\",\"whenField\":\"complete\"},{\"equals\":[false],\"fields\":[\"reachedTop\",\"anchorMatched\"],\"kind\":\"allFalseWhen\",\"whenField\":\"complete\"}],\"type\":\"object\"},\"ChatSendMessageArgs\":{\"fields\":{\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"text\":{\"maxBytes\":2048,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ChatSendMessageData\":{\"fields\":{\"contentHash\":{\"maxLength\":64,\"minLength\":64,\"type\":\"string\"},\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"observedAt\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"ChatSendMessageEvidence\":{\"fields\":{\"type\":{\"enumRef\":\"enums.sendMessageEvidenceType\",\"type\":\"string\"}},\"type\":\"object\"},\"ChatSendMessageGuards\":{\"fields\":{\"expectedTail\":{\"items\":{\"ref\":\"MessageAnchor\"},\"maxItems\":5,\"minItems\":1,\"type\":\"array\"}},\"type\":\"object\"},\"CmdBody\":{\"fields\":{\"args\":{\"raw\":true,\"type\":\"object\"},\"context\":{\"optional\":true,\"ref\":\"CmdContext\"},\"deadline\":{\"minimum\":0,\"type\":\"int64\"},\"execBudgetMs\":{\"maximum\":240000,\"minimum\":1,\"type\":\"int64\"},\"guards\":{\"optional\":true,\"raw\":true,\"type\":\"object\"},\"idemKey\":{\"maxBytes\":4096,\"maxLength\":1024,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"leaseMs\":{\"maximum\":120000,\"minimum\":5000,\"optional\":true,\"type\":\"int64\"},\"name\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"ver\":{\"maximum\":65535,\"minimum\":1,\"type\":\"int\"}},\"type\":\"object\"},\"CmdContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"expectedPrincipalFingerprint\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ConversationSummary\":{\"fields\":{\"conversationRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"type\":\"string\"},\"lastActivityTs\":{\"minimum\":0,\"nullable\":true,\"type\":\"int64\"},\"lastMessage\":{\"ref\":\"LastMessageSummary\"},\"peer\":{\"ref\":\"PeerSummary\"},\"unreadCount\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"DebugInspectSendSurfaceArgs\":{\"fields\":{},\"type\":\"object\"},\"DebugInspectSendSurfaceData\":{\"fields\":{\"ready\":{\"type\":\"boolean\"},\"stage\":{\"enumRef\":\"enums.sendSurfaceDiagnosticStage\",\"type\":\"string\"}},\"type\":\"object\"},\"DebugPingArgs\":{\"fields\":{\"echo\":{\"optional\":true,\"type\":\"any\"}},\"type\":\"object\"},\"DebugPingData\":{\"fields\":{\"echo\":{\"type\":\"any\"},\"swStartedAt\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"DebugSlowEchoArgs\":{\"fields\":{\"ms\":{\"maximum\":200000,\"minimum\":0,\"type\":\"int\"},\"outcome\":{\"enumRef\":\"enums.debugSlowOutcome\",\"type\":\"string\"}},\"type\":\"object\"},\"DebugSlowEchoData\":{\"fields\":{\"echoedAfterMs\":{\"maximum\":200000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"DebugSwitchWindowArgs\":{\"fields\":{},\"type\":\"object\"},\"DebugSwitchWindowData\":{\"fields\":{\"switched\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"ErrorBody\":{\"fields\":{\"code\":{\"enumRef\":\"errorCodes\",\"type\":\"string\"},\"data\":{\"maxJsonBytes\":65536,\"optional\":true,\"raw\":true,\"type\":\"object\"},\"evidence\":{\"items\":{\"ref\":\"Evidence\"},\"maxItems\":4,\"optional\":true,\"type\":\"array\"},\"message\":{\"maxBytes\":2000,\"maxLength\":500,\"optional\":true,\"type\":\"string\"},\"retryable\":{\"enumRef\":\"enums.retryable\",\"note\":\"手侧建议值,脑按命令 class 的超时矩阵最终裁决;真实 SX 的 failed/sideEffect=none 即使标 yes/afterRecovery 也终局化意图,不授权自动恢复\",\"optional\":true,\"type\":\"string\"},\"sideEffect\":{\"enumRef\":\"enums.sideEffect\",\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"EventBody\":{\"fields\":{\"context\":{\"ref\":\"EventContext\"},\"data\":{\"raw\":true,\"type\":\"object\"},\"name\":{\"enumRef\":\"events\",\"type\":\"string\"},\"observedAt\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"EventContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"Evidence\":{\"fields\":{\"blob\":{\"maxLength\":128,\"minLength\":1,\"optional\":true,\"type\":\"string\"},\"text\":{\"maxBytes\":2048,\"optional\":true,\"type\":\"string\"},\"type\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"HbParams\":{\"fields\":{\"graceMs\":{\"maximum\":600000,\"minimum\":1000,\"type\":\"int64\"},\"intervalMs\":{\"maximum\":120000,\"minimum\":1000,\"type\":\"int64\"}},\"type\":\"object\"},\"HelloBody\":{\"fields\":{\"app\":{\"ref\":\"AppInfo\"},\"bootId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"caps\":{\"items\":{\"maxLength\":160,\"minLength\":1,\"type\":\"string\"},\"maxItems\":256,\"type\":\"array\"},\"contractHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"features\":{\"items\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"},\"maxItems\":64,\"type\":\"array\"},\"handId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"journalOpen\":{\"maximum\":512,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"outboxPending\":{\"maximum\":512,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"protoSupported\":{\"items\":{\"minimum\":1,\"type\":\"int\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"witnessStoreId\":{\"maxLength\":128,\"minLength\":1,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"JournalEntry\":{\"fields\":{\"committedAt\":{\"minimum\":0,\"optional\":true,\"type\":\"int64\"},\"expiresAt\":{\"minimum\":0,\"type\":\"int64\"},\"idemKey\":{\"maxBytes\":4096,\"maxLength\":1024,\"minLength\":1,\"type\":\"string\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"result\":{\"optional\":true,\"ref\":\"ResultBody\"},\"startedAt\":{\"minimum\":0,\"type\":\"int64\"},\"state\":{\"enumRef\":\"enums.journalState\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"attempting\"],\"field\":\"committedAt\",\"kind\":\"forbiddenWhen\",\"whenField\":\"state\"},{\"equals\":[\"attempting\"],\"field\":\"result\",\"kind\":\"forbiddenWhen\",\"whenField\":\"state\"},{\"equals\":[\"committed\"],\"field\":\"committedAt\",\"kind\":\"requiredWhen\",\"whenField\":\"state\"},{\"equals\":[\"committed\"],\"field\":\"result\",\"kind\":\"requiredWhen\",\"whenField\":\"state\"}],\"type\":\"object\"},\"JournalSnapshot\":{\"fields\":{\"committedAt\":{\"minimum\":0,\"optional\":true,\"type\":\"int64\"},\"idemKey\":{\"maxBytes\":4096,\"maxLength\":1024,\"minLength\":1,\"type\":\"string\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"startedAt\":{\"minimum\":0,\"type\":\"int64\"},\"state\":{\"enumRef\":\"enums.journalState\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"attempting\"],\"field\":\"committedAt\",\"kind\":\"forbiddenWhen\",\"whenField\":\"state\"},{\"equals\":[\"committed\"],\"field\":\"committedAt\",\"kind\":\"requiredWhen\",\"whenField\":\"state\"}],\"type\":\"object\"},\"LastMessageSummary\":{\"fields\":{\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"},\"kind\":{\"enumRef\":\"enums.messageKind\",\"type\":\"string\"},\"textPreview\":{\"maxBytes\":800,\"maxLength\":200,\"type\":\"string\"}},\"type\":\"object\"},\"Limits\":{\"fields\":{\"inlineBytes\":{\"maximum\":262144,\"minimum\":1024,\"type\":\"int64\"},\"maxMsgBytes\":{\"maximum\":262144,\"minimum\":1024,\"type\":\"int64\"}},\"type\":\"object\"},\"LoginStateChangedEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"stable\":{\"const\":true,\"type\":\"boolean\"},\"state\":{\"enumRef\":\"enums.loginChangeState\",\"type\":\"string\"}},\"type\":\"object\"},\"ManualInteractionEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"kind\":{\"enumRef\":\"enums.manualInteractionKind\",\"type\":\"string\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"}},\"type\":\"object\"},\"MessageAnchor\":{\"fields\":{\"contentHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"}},\"type\":\"object\"},\"NavEnsureSurfaceArgs\":{\"fields\":{\"surface\":{\"enumRef\":\"enums.surfaceName\",\"type\":\"string\"}},\"type\":\"object\"},\"NavEnsureSurfaceData\":{\"fields\":{\"createdTab\":{\"type\":\"boolean\"},\"loginState\":{\"enumRef\":\"enums.loginState\",\"type\":\"string\"},\"ready\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"OutboxEntry\":{\"fields\":{\"createdAt\":{\"minimum\":0,\"type\":\"int64\"},\"expiresAt\":{\"minimum\":0,\"type\":\"int64\"},\"message\":{\"ref\":\"ResultEnvelope\"}},\"type\":\"object\"},\"PageNavigatedEventData\":{\"fields\":{\"at\":{\"minimum\":0,\"type\":\"int64\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"}},\"type\":\"object\"},\"PeerSummary\":{\"fields\":{\"displayName\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platformUserRef\":{\"maxBytes\":2048,\"maxLength\":512,\"minLength\":1,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"PingBody\":{\"fields\":{\"contexts\":{\"items\":{\"ref\":\"PingContext\"},\"maxItems\":64,\"optional\":true,\"type\":\"array\"},\"inFlight\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"journalOpen\":{\"maximum\":512,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"outboxPending\":{\"maximum\":512,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"queueDepth\":{\"maximum\":16,\"minimum\":0,\"type\":\"int\"},\"sensors\":{\"nullable\":true,\"optional\":true,\"ref\":\"PingSensors\"},\"witnessStoreId\":{\"maxLength\":128,\"minLength\":1,\"optional\":true,\"type\":\"string\"}},\"type\":\"object\"},\"PingContext\":{\"fields\":{\"accountRef\":{\"maxLength\":256,\"minLength\":1,\"type\":\"string\"},\"platform\":{\"maxLength\":64,\"minLength\":1,\"type\":\"string\"},\"ready\":{\"type\":\"boolean\"},\"reason\":{\"enumRef\":\"enums.notReadyReason\",\"optional\":true,\"type\":\"string\"}},\"rules\":[{\"equals\":[false],\"field\":\"reason\",\"kind\":\"requiredWhen\",\"whenField\":\"ready\"},{\"equals\":[true],\"field\":\"reason\",\"kind\":\"forbiddenWhen\",\"whenField\":\"ready\"}],\"type\":\"object\"},\"PingSensors\":{\"fields\":{\"unreadTotal\":{\"nullable\":true,\"ref\":\"SensorReading\"}},\"type\":\"object\"},\"PlatformSurface\":{\"fields\":{\"imListVisible\":{\"type\":\"boolean\"}},\"type\":\"object\"},\"PongBody\":{\"fields\":{\"now\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"ProbePlatformArgs\":{\"fields\":{},\"type\":\"object\"},\"ProbePlatformData\":{\"fields\":{\"contentScriptOk\":{\"type\":\"boolean\"},\"loginState\":{\"enumRef\":\"enums.loginState\",\"type\":\"string\"},\"pageKind\":{\"enumRef\":\"enums.pageKind\",\"type\":\"string\"},\"principalFingerprint\":{\"maxBytes\":1024,\"maxLength\":256,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"surface\":{\"nullable\":true,\"ref\":\"PlatformSurface\"}},\"type\":\"object\"},\"ProgressBody\":{\"fields\":{\"pct\":{\"maximum\":100,\"minimum\":0,\"optional\":true,\"type\":\"int\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"stage\":{\"maxBytes\":800,\"maxLength\":200,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"QueryBody\":{\"fields\":{\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"ReportBody\":{\"fields\":{\"journal\":{\"nullable\":true,\"ref\":\"JournalSnapshot\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"result\":{\"nullable\":true,\"ref\":\"ResultBody\"},\"state\":{\"enumRef\":\"enums.reportState\",\"type\":\"string\"},\"witnessStoreId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"rules\":[{\"equals\":[\"done\"],\"field\":\"result\",\"kind\":\"requiredWhen\",\"whenField\":\"state\"},{\"equals\":[\"unknown\",\"queued\",\"executing\",\"attempting\"],\"field\":\"result\",\"kind\":\"forbiddenWhen\",\"whenField\":\"state\"},{\"equals\":[\"attempting\",\"done\"],\"field\":\"journal\",\"kind\":\"requiredWhen\",\"whenField\":\"state\"},{\"equals\":[\"unknown\",\"queued\",\"executing\"],\"field\":\"journal\",\"kind\":\"forbiddenWhen\",\"whenField\":\"state\"}],\"type\":\"object\"},\"ResultBody\":{\"fields\":{\"data\":{\"maxJsonBytes\":65536,\"nullable\":true,\"optional\":true,\"type\":\"any\"},\"dataBlobRef\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"error\":{\"nullable\":true,\"optional\":true,\"ref\":\"ErrorBody\"},\"evidence\":{\"items\":{\"ref\":\"Evidence\"},\"maxItems\":4,\"optional\":true,\"type\":\"array\"},\"execMs\":{\"maximum\":240000,\"minimum\":0,\"type\":\"int64\"},\"ref\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"replayed\":{\"type\":\"boolean\"},\"status\":{\"enumRef\":\"enums.resultStatus\",\"type\":\"string\"}},\"rules\":[{\"equals\":[\"ok\"],\"fields\":[\"data\",\"dataBlobRef\"],\"kind\":\"exactlyOneWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\"],\"field\":\"error\",\"kind\":\"requiredWhen\",\"whenField\":\"status\"},{\"equals\":[\"ok\",\"canceled\",\"expired\"],\"field\":\"error\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\",\"canceled\",\"expired\"],\"field\":\"data\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"},{\"equals\":[\"failed\",\"canceled\",\"expired\"],\"field\":\"dataBlobRef\",\"kind\":\"forbiddenWhen\",\"whenField\":\"status\"}],\"type\":\"object\"},\"ResultEnvelope\":{\"fields\":{\"attempt\":{\"minimum\":1,\"type\":\"int\"},\"body\":{\"ref\":\"ResultBody\"},\"kind\":{\"enumRef\":\"enums.outboxKind\",\"type\":\"string\"},\"msgId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"proto\":{\"maximum\":1,\"minimum\":1,\"type\":\"int\"},\"session\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"ts\":{\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"SensorParams\":{\"fields\":{\"badgeDebounceMs\":{\"maximum\":3000,\"minimum\":0,\"type\":\"int64\"},\"badgeMinEmitIntervalMs\":{\"maximum\":60000,\"minimum\":1000,\"type\":\"int64\"},\"manualQuietMs\":{\"maximum\":600000,\"minimum\":0,\"type\":\"int64\"},\"navSettleMs\":{\"maximum\":3000,\"minimum\":0,\"type\":\"int64\"}},\"type\":\"object\"},\"SensorReading\":{\"fields\":{\"observedAgoMs\":{\"maximum\":86400000,\"minimum\":0,\"type\":\"int64\"},\"value\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"ThreadMessage\":{\"fields\":{\"blobRef\":{\"maxLength\":128,\"minLength\":1,\"nullable\":true,\"type\":\"string\"},\"cardState\":{\"enumRef\":\"enums.cardState\",\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"cardType\":{\"enumRef\":\"enums.cardType\",\"nullable\":true,\"optional\":true,\"type\":\"string\"},\"contentHash\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"},\"direction\":{\"enumRef\":\"enums.messageDirection\",\"type\":\"string\"},\"idx\":{\"maximum\":63,\"minimum\":0,\"type\":\"int\"},\"kind\":{\"enumRef\":\"enums.messageKind\",\"type\":\"string\"},\"text\":{\"maxBytes\":2048,\"nullable\":true,\"type\":\"string\"},\"tsApprox\":{\"minimum\":0,\"nullable\":true,\"optional\":true,\"type\":\"int64\"}},\"type\":\"object\"},\"ThreadWindow\":{\"fields\":{\"anchorTail\":{\"items\":{\"ref\":\"MessageAnchor\"},\"maxItems\":5,\"optional\":true,\"type\":\"array\"},\"deep\":{\"default\":false,\"optional\":true,\"type\":\"boolean\"},\"maxMessages\":{\"default\":50,\"maximum\":64,\"minimum\":1,\"optional\":true,\"type\":\"int\"}},\"type\":\"object\"},\"UnreadBadgeEventData\":{\"fields\":{\"prev\":{\"maximum\":1000000,\"minimum\":0,\"nullable\":true,\"type\":\"int\"},\"scope\":{\"enumRef\":\"enums.unreadScope\",\"type\":\"string\"},\"stable\":{\"const\":true,\"type\":\"boolean\"},\"value\":{\"maximum\":1000000,\"minimum\":0,\"type\":\"int\"}},\"type\":\"object\"},\"WelcomeBody\":{\"fields\":{\"blob\":{\"optional\":true,\"ref\":\"BlobParams\"},\"contractMatch\":{\"type\":\"boolean\"},\"hb\":{\"ref\":\"HbParams\"},\"limits\":{\"ref\":\"Limits\"},\"now\":{\"minimum\":0,\"type\":\"int64\"},\"proto\":{\"minimum\":1,\"type\":\"int\"},\"sensors\":{\"optional\":true,\"ref\":\"SensorParams\"},\"session\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"WitnessStoreMeta\":{\"fields\":{\"createdAt\":{\"minimum\":0,\"type\":\"int64\"},\"journalCount\":{\"maximum\":512,\"minimum\":0,\"type\":\"int\"},\"outboxCount\":{\"maximum\":512,\"minimum\":0,\"type\":\"int\"},\"schemaVersion\":{\"maximum\":1,\"minimum\":1,\"type\":\"int\"},\"storeId\":{\"maxLength\":128,\"minLength\":1,\"type\":\"string\"}},\"type\":\"object\"},\"WitnessUnavailableData\":{\"fields\":{\"reason\":{\"enumRef\":\"enums.witnessUnavailableReason\",\"type\":\"string\"}},\"type\":\"object\"}}")
+var schemaEnums = mustDecodeStringSlices("{\"byeCodes\":[\"PROTO_INCOMPATIBLE\",\"SUPERSEDED\",\"SHUTTING_DOWN\"],\"enums.ackStatus\":[\"accepted\",\"rejected\",\"duplicate\"],\"enums.batch\":[\"M1\",\"S\",\"X\",\"far\"],\"enums.cancelReason\":[\"leaseExpired\",\"deadlineImminent\",\"superseded\",\"operator\",\"shutdown\"],\"enums.cardState\":[\"pending\",\"accepted\",\"rejected\",\"expired\",\"unknown\"],\"enums.cardType\":[\"interviewInvite\",\"wechatExchange\",\"resumeAttachment\",\"other\"],\"enums.debugSlowOutcome\":[\"ok\",\"failed\",\"silent\"],\"enums.errorPhase\":[\"receipt\",\"execution\"],\"enums.journalState\":[\"attempting\",\"committed\"],\"enums.listFilter\":[\"all\",\"unread\"],\"enums.loginChangeState\":[\"in\",\"out\"],\"enums.loginState\":[\"in\",\"out\",\"unknown\"],\"enums.manualInteractionKind\":[\"pointer\",\"keyboard\",\"navigation\"],\"enums.messageDirection\":[\"in\",\"out\",\"system\"],\"enums.messageKind\":[\"text\",\"image\",\"voice\",\"file\",\"card\",\"system\"],\"enums.notReadyReason\":[\"pageAbsent\",\"loginRequired\",\"contentScriptDead\",\"pageBroken\",\"identityUnverified\",\"unknown\"],\"enums.outboxKind\":[\"result\"],\"enums.pageKind\":[\"im\",\"recommend\",\"other\",\"none\"],\"enums.reportState\":[\"unknown\",\"queued\",\"executing\",\"attempting\",\"done\"],\"enums.resultStatus\":[\"ok\",\"failed\",\"canceled\",\"expired\"],\"enums.retryable\":[\"yes\",\"no\",\"afterRecovery\",\"manualOnly\"],\"enums.sendMessageEvidenceType\":[\"outboundMessageObserved\"],\"enums.sendSurfaceDiagnosticStage\":[\"page_absent\",\"route_missing\",\"composer_cardinality\",\"detail_cardinality\",\"button_cardinality\",\"dom_containment\",\"component_tree_unavailable\",\"component_tree_root_missing\",\"component_tree_malformed\",\"component_tree_overflow\",\"sender_owner_unresolved\",\"control_ownership_unresolved\",\"direct_model_unresolved\",\"direct_model_target_mismatch\",\"model_candidate_props\",\"model_candidate_data\",\"model_candidate_store\",\"model_candidate_multiple\",\"model_candidate_conflict\",\"model_candidate_absent\",\"model_scalar_owner\",\"model_scalar_props\",\"model_scalar_data\",\"model_scalar_store\",\"model_scalar_multiple\",\"model_scalar_conflict\",\"model_scalar_absent\",\"engine_binding_unresolved\",\"button_form_unsafe\",\"button_vnode_missing\",\"button_dom_listener_ambiguous\",\"component_click_wiring_unresolved\",\"draft_present\",\"unstable\",\"thread_unavailable\",\"baseline_engine_unavailable\",\"baseline_route_changed\",\"baseline_session_unavailable\",\"baseline_history_unavailable\",\"baseline_history_unstable\",\"baseline_guard_uncovered\",\"baseline_session_changed\",\"baseline_hash_unavailable\",\"baseline_unexpected\",\"diagnostic_unavailable\",\"ready\"],\"enums.sideEffect\":[\"none\",\"possible\",\"confirmed\"],\"enums.surfaceName\":[\"im\"],\"enums.unreadScope\":[\"total\"],\"enums.witnessUnavailableReason\":[\"writeFailed\",\"capacityExceeded\",\"storeCorrupt\"],\"errorCodes\":[\"ACCOUNT_MISMATCH\",\"CANCELED_BY_BRAIN\",\"CONVERSATION_NOT_FOUND\",\"CTX_LOST_DURING_EXEC\",\"CTX_NOT_READY\",\"CURSOR_INVALID\",\"ELEMENT_UNRESOLVED\",\"EXEC_TIMEOUT_HAND\",\"GUARD_FAILED\",\"INTERNAL_HAND\",\"PAYLOAD_LIMIT\",\"PLATFORM_LIMIT\",\"POSTCONDITION_UNCONFIRMED\",\"PROTO_BAD_ARGS\",\"PROTO_MALFORMED\",\"PROTO_MSG_TOO_LARGE\",\"PROTO_UNSUPPORTED_CMD\",\"PROTO_UNSUPPORTED_KIND\",\"QUEUE_FULL\",\"STALE_SESSION\",\"TARGET_NOT_FOUND\",\"USER_ACTIVE\",\"WITNESS_UNAVAILABLE\"],\"events\":[\"loginStateChanged\",\"manualInteraction\",\"pageNavigated\",\"unreadBadge\"]}")
 var bodySchemas = mustDecodeKindSchemas("{\"ack\":\"AckBody\",\"bye\":\"ByeBody\",\"cancel\":\"CancelBody\",\"cmd\":\"CmdBody\",\"event\":\"EventBody\",\"hello\":\"HelloBody\",\"ping\":\"PingBody\",\"pong\":\"PongBody\",\"progress\":\"ProgressBody\",\"query\":\"QueryBody\",\"report\":\"ReportBody\",\"result\":\"ResultBody\",\"welcome\":\"WelcomeBody\"}")
-var primitiveSchemas = mustDecodePrimitiveSchemas("{\"chat.readList\":{\"args\":\"ChatReadListArgs\",\"data\":\"ChatReadListData\",\"ver\":1},\"chat.readThread\":{\"args\":\"ChatReadThreadArgs\",\"data\":\"ChatReadThreadData\",\"ver\":1},\"debug.ping\":{\"args\":\"DebugPingArgs\",\"data\":\"DebugPingData\",\"ver\":1},\"debug.slowEcho\":{\"args\":\"DebugSlowEchoArgs\",\"data\":\"DebugSlowEchoData\",\"ver\":1},\"debug.switchWindow\":{\"args\":\"DebugSwitchWindowArgs\",\"data\":\"DebugSwitchWindowData\",\"ver\":1},\"nav.ensureSurface\":{\"args\":\"NavEnsureSurfaceArgs\",\"data\":\"NavEnsureSurfaceData\",\"ver\":1},\"probe.platform\":{\"args\":\"ProbePlatformArgs\",\"data\":\"ProbePlatformData\",\"ver\":1}}")
+var primitiveSchemas = mustDecodePrimitiveSchemas("{\"chat.readList\":{\"args\":\"ChatReadListArgs\",\"class\":\"intrusive\",\"data\":\"ChatReadListData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"chat.readThread\":{\"args\":\"ChatReadThreadArgs\",\"class\":\"intrusive\",\"data\":\"ChatReadThreadData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"chat.sendMessage\":{\"args\":\"ChatSendMessageArgs\",\"class\":\"effectful\",\"data\":\"ChatSendMessageData\",\"evidence\":\"ChatSendMessageEvidence\",\"guards\":\"ChatSendMessageGuards\",\"ver\":1},\"debug.inspectSendSurface\":{\"args\":\"DebugInspectSendSurfaceArgs\",\"class\":\"readonly\",\"data\":\"DebugInspectSendSurfaceData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"debug.ping\":{\"args\":\"DebugPingArgs\",\"class\":\"readonly\",\"data\":\"DebugPingData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"debug.slowEcho\":{\"args\":\"DebugSlowEchoArgs\",\"class\":\"effectful\",\"data\":\"DebugSlowEchoData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"debug.switchWindow\":{\"args\":\"DebugSwitchWindowArgs\",\"class\":\"intrusive\",\"data\":\"DebugSwitchWindowData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"nav.ensureSurface\":{\"args\":\"NavEnsureSurfaceArgs\",\"class\":\"intrusive\",\"data\":\"NavEnsureSurfaceData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1},\"probe.platform\":{\"args\":\"ProbePlatformArgs\",\"class\":\"readonly\",\"data\":\"ProbePlatformData\",\"evidence\":\"\",\"guards\":\"\",\"ver\":1}}")
 var eventSchemas = mustDecodeStringMap("{\"loginStateChanged\":\"LoginStateChangedEventData\",\"manualInteraction\":\"ManualInteractionEventData\",\"pageNavigated\":\"PageNavigatedEventData\",\"unreadBadge\":\"UnreadBadgeEventData\"}")
+var errorDataSchemas = mustDecodeStringMap("{\"WITNESS_UNAVAILABLE\":\"WitnessUnavailableData\"}")
 
 func mustDecodeSchemaMap(raw string) map[string]schemaSpec {
 	var out map[string]schemaSpec
@@ -438,7 +519,7 @@ func ValidateFrameSize(frame []byte, maxBytes int64) error {
 	return nil
 }
 
-// ValidateKindBody 校验已知字段并忽略未知加法字段;cmd/event 还会下钻 args/data schema。
+// ValidateKindBody 校验已知字段并忽略未知加法字段;cmd/event/error/report 还会下钻语义 schema。
 func ValidateKindBody(kind Kind, raw json.RawMessage) error {
 	name, ok := bodySchemas[kind]
 	if !ok {
@@ -448,6 +529,10 @@ func ValidateKindBody(kind Kind, raw json.RawMessage) error {
 		return err
 	}
 	switch kind {
+	case KindHello:
+		return validateWitnessAdvertisement(raw, true)
+	case KindPing:
+		return validateWitnessAdvertisement(raw, false)
 	case KindCmd:
 		var body CmdBody
 		if err := json.Unmarshal(raw, &body); err != nil {
@@ -463,9 +548,56 @@ func ValidateKindBody(kind Kind, raw json.RawMessage) error {
 			return validationError("$", "json", "%v", err)
 		}
 		return rebaseValidationError(ValidateEventData(string(body.Name), body.Data), "$.data")
+	case KindAck:
+		var body AckBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		return validateErrorData(body.Error)
+	case KindResult:
+		var body ResultBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		return validateErrorData(body.Error)
+	case KindReport:
+		var body ReportBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		return validateReportSemantics(body)
 	default:
 		return nil
 	}
+}
+
+// ValidateSchema 校验 contract.schemas.types 中任一具名 DTO；供 witness 持久记录读回时使用。
+func ValidateSchema(name string, raw json.RawMessage) error {
+	if err := validateRaw(name, raw); err != nil {
+		return err
+	}
+	switch name {
+	case "JournalEntry":
+		var entry JournalEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		if entry.Result != nil && entry.Result.Ref != entry.Ref {
+			return validationError("$.result.ref", "correlation", "journal result.ref 必须等于 journal.ref")
+		}
+		if entry.ExpiresAt <= entry.StartedAt {
+			return validationError("$.expiresAt", "ordering", "journal expiresAt 必须晚于 startedAt")
+		}
+	case "OutboxEntry":
+		var entry OutboxEntry
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		if entry.ExpiresAt <= entry.CreatedAt {
+			return validationError("$.expiresAt", "ordering", "outbox expiresAt 必须晚于 createdAt")
+		}
+	}
+	return nil
 }
 
 func ValidatePrimitiveArgs(name string, ver int, raw json.RawMessage) error {
@@ -488,6 +620,85 @@ func ValidatePrimitiveData(name string, ver int, raw json.RawMessage) error {
 		return validationError("$", "version", "原语 %q 需要版本 %d,收到 %d", name, s.Ver, ver)
 	}
 	return validateRaw(s.Data, raw)
+}
+
+func ValidatePrimitiveGuards(name string, ver int, raw json.RawMessage) error {
+	s, ok := primitiveSchemas[name]
+	if !ok {
+		return validationError("$", "primitive", "原语 %q 无激活 schema", name)
+	}
+	if ver != s.Ver {
+		return validationError("$", "version", "原语 %q 需要版本 %d,收到 %d", name, s.Ver, ver)
+	}
+	if s.Guards == "" {
+		if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil
+		}
+		return validationError("$", "forbidden", "原语 %q 未声明 guardsSchema", name)
+	}
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return validationError("$", "required", "原语 %q 必须携带 guards", name)
+	}
+	return validateRaw(s.Guards, raw)
+}
+
+// ValidatePrimitiveEvidence 把 evidenceSchema 解释为每个 evidence item 的 schema；真实 SX 至少一项。
+func ValidatePrimitiveEvidence(name string, ver int, raw json.RawMessage) error {
+	s, ok := primitiveSchemas[name]
+	if !ok {
+		return validationError("$", "primitive", "原语 %q 无激活 schema", name)
+	}
+	if ver != s.Ver {
+		return validationError("$", "version", "原语 %q 需要版本 %d,收到 %d", name, s.Ver, ver)
+	}
+	if s.Evidence == "" {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return validationError("$", "type", "evidence 需要 array:%v", err)
+	}
+	if len(items) == 0 {
+		return validationError("$", "minItems", "真实 effectful ok 至少一项 evidence")
+	}
+	for i, item := range items {
+		if err := validateRaw(s.Evidence, item); err != nil {
+			return rebaseValidationError(err, fmt.Sprintf("$[%d]", i))
+		}
+	}
+	return nil
+}
+
+// ValidatePrimitiveResult 同时强制 result 基础形态、ok data、真实 SX evidence 与 failed.sideEffect。
+func ValidatePrimitiveResult(name string, ver int, raw json.RawMessage) error {
+	if err := ValidateKindBody(KindResult, raw); err != nil {
+		return err
+	}
+	s, ok := primitiveSchemas[name]
+	if !ok {
+		return validationError("$", "primitive", "原语 %q 无激活 schema", name)
+	}
+	if ver != s.Ver {
+		return validationError("$", "version", "原语 %q 需要版本 %d,收到 %d", name, s.Ver, ver)
+	}
+	var body ResultBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return validationError("$", "json", "%v", err)
+	}
+	if body.Status == ResultStatusOk {
+		if err := rebaseValidationError(ValidatePrimitiveData(name, ver, body.Data), "$.data"); err != nil {
+			return err
+		}
+		evidenceRaw, err := json.Marshal(body.Evidence)
+		if err != nil {
+			return validationError("$.evidence", "json", "%v", err)
+		}
+		return rebaseValidationError(ValidatePrimitiveEvidence(name, ver, evidenceRaw), "$.evidence")
+	}
+	if body.Status == ResultStatusFailed && s.Class == "effectful" && (body.Error == nil || body.Error.SideEffect == "") {
+		return validationError("$.error.sideEffect", "required", "effectful failed 必须显式标注 sideEffect")
+	}
+	return nil
 }
 
 func ValidateEventData(name string, raw json.RawMessage) error {
@@ -526,6 +737,76 @@ func validateCommandSemantics(body CmdBody) error {
 	if !isDebug && meta.Class != ClassReadonly {
 		if body.Context == nil || body.Context.ExpectedPrincipalFingerprint == "" {
 			return validationError("$.context.expectedPrincipalFingerprint", "required", "intrusive/effectful 原语必须携带期望账号指纹")
+		}
+	}
+	if err := rebaseValidationError(ValidatePrimitiveGuards(body.Name, body.Ver, body.Guards), "$.guards"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateWitnessAdvertisement(raw json.RawMessage, hello bool) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return validationError("$", "json", "%v", err)
+	}
+	names := []string{"witnessStoreId", "outboxPending", "journalOpen"}
+	present := 0
+	for _, name := range names {
+		if _, ok := fields[name]; ok {
+			present++
+		}
+	}
+	required := false
+	if hello {
+		var body HelloBody
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return validationError("$", "json", "%v", err)
+		}
+		for _, feature := range body.Features {
+			if feature == string(FeatureWitness1) {
+				required = true
+			}
+		}
+	}
+	if required && present != len(names) {
+		return validationError("$", "witnessAdvertisement", "声明 witness/1 时三个证词字段必须齐备")
+	}
+	if present != 0 && present != len(names) {
+		return validationError("$", "witnessAdvertisement", "证词诊断字段必须全有或全无")
+	}
+	return nil
+}
+
+func validateErrorData(body *ErrorBody) error {
+	if body == nil {
+		return nil
+	}
+	meta, ok := ErrorCodes[body.Code]
+	if !ok || meta.DataSchema == "" {
+		return nil
+	}
+	if len(body.Data) == 0 || bytes.Equal(bytes.TrimSpace(body.Data), []byte("null")) {
+		return validationError("$.error.data", "required", "错误 %s 必须携带专用 data", body.Code)
+	}
+	return rebaseValidationError(ValidateSchema(meta.DataSchema, body.Data), "$.error.data")
+}
+
+func validateReportSemantics(body ReportBody) error {
+	if body.Result != nil && body.Result.Ref != body.Ref {
+		return validationError("$.result.ref", "correlation", "done result.ref 必须等于 report.ref")
+	}
+	if body.Journal != nil && body.Journal.Ref != body.Ref {
+		return validationError("$.journal.ref", "correlation", "journal.ref 必须等于 report.ref")
+	}
+	switch body.State {
+	case ReportStateAttempting:
+		if body.Journal == nil || body.Journal.State != JournalStateAttempting {
+			return validationError("$.journal.state", "state", "attempting report 必须携带 attempting journal")
+		}
+	case ReportStateDone:
+		if body.Result == nil || body.Journal == nil || body.Journal.State != JournalStateCommitted {
+			return validationError("$.journal.state", "state", "done report 必须携带 committed journal 与完整 result")
 		}
 	}
 	return nil

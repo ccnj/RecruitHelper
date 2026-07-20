@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  api, ADMIN_BASE,
+  api, ADMIN_BASE, SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
-  LedgerRow, MessageView, MutationResult, Suspect, TimeValue,
+  LedgerRow, MessageView, MutationResult, SendIntentView, Suspect, TimeValue,
 } from './api'
+import {
+  acknowledgeSendIntent, discardRejectedSendProposal, readSendResume, rememberSendProposal,
+} from './send-resume'
 
 interface PollState<T> {
   data: T | undefined
@@ -105,6 +108,13 @@ function identityLabel(state: string): string {
     unobservable: '当前页面不可核验', stale: '核验已过期', unknown: '等待核验',
   }
   return labels[state] ?? (state || '等待核验')
+}
+
+function effectiveIdentityState(account: Pick<AccountView, 'identityState' | 'identityCurrent'>): string {
+  if (!account.identityCurrent && (account.identityState === 'verified' || account.identityState === 'bound')) {
+    return 'stale'
+  }
+  return account.identityState
 }
 
 function roundStatus(status: string): string {
@@ -299,6 +309,11 @@ export function App() {
                     '该会话已纳入跟踪；现有消息只建立基线，不算作新消息',
                     () => api.trackConversation(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
                   )}
+                  onSendChanged={() => {
+                    conversations.refresh()
+                    messages.refresh()
+                    audits.refresh()
+                  }}
                 />
               </div>
             </>
@@ -464,6 +479,7 @@ function AccountOverview({
 }) {
   const latest = account.latestRound
   const isBusy = busy !== ''
+  const shownIdentityState = effectiveIdentityState(account)
   return (
     <section className="shift-sheet" aria-labelledby="shift-title">
       <div className="sheet-heading">
@@ -472,8 +488,8 @@ function AccountOverview({
           <h2 id="shift-title">{account.platform} 账号 <span className="mono">{shortRef(account.accountRef, 11)}</span></h2>
         </div>
         <div className="identity-mark">
-          <span className={account.identityState === 'verified' || account.identityState === 'bound' ? 'verified' : 'attention'} />
-          {identityLabel(account.identityState)}
+          <span className={account.identityCurrent ? 'verified' : 'attention'} />
+          {identityLabel(shownIdentityState)}
         </div>
       </div>
 
@@ -584,7 +600,7 @@ function ConversationLedger({ rows, loading, error, selectedRef, onSelect }: {
 }
 
 function ActivityLedger({
-  account, conversation, messages, audits, messagesError, auditsError, tab, busy, onTab, onTrack,
+  account, conversation, messages, audits, messagesError, auditsError, tab, busy, onTab, onTrack, onSendChanged,
 }: {
   account: AccountView
   conversation: ConversationView | null
@@ -596,6 +612,7 @@ function ActivityLedger({
   busy: string
   onTab: (tab: 'messages' | 'audits') => void
   onTrack: () => void
+  onSendChanged: () => void
 }) {
   return (
     <section className="ledger-sheet activity" aria-labelledby="activity-title">
@@ -635,6 +652,14 @@ function ActivityLedger({
             <LedgerEmpty title="该会话还没有消息投影" detail="首次纳入跟踪只建立边界，不把旧消息误计为新消息。" />
           )}
           {messagesError && <InlineError text={messagesError} />}
+          {conversation && (
+            <MessageComposer
+              key={`${account.platform}\u001f${account.accountRef}\u001f${conversation.conversationRef}`}
+              account={account}
+              conversation={conversation}
+              onChanged={onSendChanged}
+            />
+          )}
         </div>
       ) : (
         <div className="audit-ledger" role="tabpanel">
@@ -656,6 +681,266 @@ function ActivityLedger({
         </div>
       )}
     </section>
+  )
+}
+
+interface PendingSend {
+  intentId: string
+  text?: string
+}
+
+function newIntentId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const random = Math.random().toString(36).slice(2)
+  return `intent-${Date.now().toString(36)}-${random}`
+}
+
+function sendStateLabel(view: SendIntentView | null): string {
+  if (!view) return ''
+  const intentTerminal = ['ok', 'failed', 'suspect', 'expired', 'canceled', 'resolvedOk', 'resolvedFailed']
+  const state = intentTerminal.includes(view.status) ? view.status : view.commandStatus || view.status
+  const labels: Record<string, string> = {
+    dispatching: '发送意图已入账，正在交给手', reconciling: '连接已变化，正在安全对账',
+    verifying: '发送结果未知，正在回读平台记录',
+    queued: '已安全入账，等待手执行', sent: '已交给手，等待接收', accepted: '手已接收，正在执行',
+    executing: '正在发送并观察页面结果', pendingReconcile: '连接已变化，正在安全对账',
+    pendingVerification: '结果未知，正在回读验证', ok: '页面与本地账本均已确认',
+    resolvedOk: '已确认发生', failed: '未完成', resolvedFailed: '已确认未发生',
+    suspect: '结果仍有歧义，已停止并转人工', expired: '意图已过期，未继续发送',
+  }
+  const attempts = view.verificationAttempts ? ` · 已验证 ${view.verificationAttempts} 轮` : ''
+  return `${labels[state] || state || '状态未知'}${attempts}`
+}
+
+function sendTerminal(view: SendIntentView | null): boolean {
+  if (!view) return false
+  const states = [view.status, view.commandStatus]
+  return states.some((state) => state && [
+    'ok', 'failed', 'suspect', 'expired', 'canceled', 'resolvedOk', 'resolvedFailed',
+  ].includes(state))
+}
+
+function sendSucceeded(view: SendIntentView | null): boolean {
+  return Boolean(view && [view.status, view.commandStatus].some((state) => state === 'ok' || state === 'resolvedOk'))
+}
+
+function sendSuspect(view: SendIntentView | null): boolean {
+  return Boolean(view && (view.status === 'suspect' || view.commandStatus === 'suspect'))
+}
+
+function MessageComposer({ account, conversation, onChanged }: {
+  account: AccountView
+  conversation: ConversationView
+  onChanged: () => void
+}) {
+  const targetKey = `${account.platform}\u001f${account.accountRef}\u001f${conversation.conversationRef}`
+  const [text, setText] = useState('')
+  const [pending, setPending] = useState<PendingSend | null>(null)
+  const [view, setView] = useState<SendIntentView | null>(null)
+  const [error, setError] = useState('')
+  const [posting, setPosting] = useState(false)
+  const [recovering, setRecovering] = useState(true)
+  const [latestIntentId, setLatestIntentId] = useState('')
+  const onChangedRef = useRef(onChanged)
+  onChangedRef.current = onChanged
+  const bytes = new TextEncoder().encode(text.trim()).length
+  const adopted = conversation.trackingState === 'adopted' || conversation.trackingState === 'tracked'
+  const identityReady = account.identityCurrent
+  const quietUntil = toDate(account.manualQuietUntil)
+  const quiet = Boolean(quietUntil && quietUntil.getTime() > Date.now())
+  const canCreate = adopted && identityReady && account.handOnline && !quiet && bytes > 0 && bytes <= 2048
+
+  useEffect(() => {
+    let alive = true
+    let timer: number | undefined
+    const recover = async () => {
+      try {
+        // sessionStorage 只是 reload 提示；无论它是否可读，都先以脑账本
+        // 判定是否已有发送，不能让浏览器存储成为恢复真相源。
+        const latest = await api.latestSendIntent(account.platform, account.accountRef, conversation.conversationRef)
+        if (!alive) return
+        let acknowledgedIntentId = ''
+        let storageWarning = ''
+        try {
+          acknowledgedIntentId = readSendResume(targetKey).acknowledgedIntentId
+        } catch (reason) {
+          storageWarning = `本地发送确认凭证不可读：${errorText(reason)}`
+        }
+        setLatestIntentId(latest?.intentId ?? '')
+        if (!latest) {
+          setPending(null)
+          setView(null)
+        } else if (sendTerminal(latest) && acknowledgedIntentId === latest.intentId) {
+          setPending(null)
+          setView(null)
+        } else {
+          try {
+            rememberSendProposal(targetKey, latest.intentId)
+          } catch (reason) {
+            storageWarning = `本地发送凭证不可写；当前意图保持锁定：${errorText(reason)}`
+          }
+          setPending({ intentId: latest.intentId })
+          setView(latest)
+        }
+        setError(storageWarning)
+        setRecovering(false)
+      } catch (reason) {
+        if (!alive) return
+        setRecovering(true)
+        setError(`无法核对最近一次发送，编辑器已锁定：${errorText(reason)}`)
+        timer = window.setTimeout(recover, 2000)
+      }
+    }
+    void recover()
+    return () => {
+      alive = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [targetKey, account.platform, account.accountRef, conversation.conversationRef])
+
+  useEffect(() => {
+    if (!pending || (sendTerminal(view) && !sendSuspect(view))) return
+    let alive = true
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const next = await api.sendStatus(pending.intentId)
+        if (!alive) return
+        setView(next)
+        setError('')
+        onChangedRef.current()
+        if (!sendTerminal(next) || sendSuspect(next)) timer = window.setTimeout(poll, 1200)
+      } catch (reason) {
+        if (!alive) return
+        setError(`状态查询暂时失败：${errorText(reason)}`)
+        timer = window.setTimeout(poll, 2000)
+      }
+    }
+    timer = window.setTimeout(poll, 500)
+    return () => {
+      alive = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [pending, view?.status, view?.commandStatus])
+
+  useEffect(() => {
+    if (!sendSucceeded(view)) return
+    setText('')
+    onChangedRef.current()
+  }, [view?.status, view?.commandStatus])
+
+  const submit = async () => {
+    const normalized = text.trim()
+    if (recovering || (pending && pending.text === undefined)) return
+    const request = pending ?? { intentId: newIntentId(), text: normalized }
+    if (!request.text) return
+    if (!pending) {
+      try {
+        // 必须先稳定保存 ID，再允许 POST 越过进程边界。
+        rememberSendProposal(targetKey, request.intentId)
+      } catch (reason) {
+        setError(`无法保存本次发送凭证，已禁止发送：${errorText(reason)}`)
+        return
+      }
+      setPending(request)
+    }
+    setPosting(true)
+    setError('')
+    try {
+      const next = await api.sendMessage(
+        request.intentId,
+        latestIntentId,
+        account.platform,
+        account.accountRef,
+        conversation.conversationRef,
+        request.text,
+      )
+      setView(next)
+      setLatestIntentId(next.intentId)
+      onChangedRef.current()
+    } catch (reason) {
+      if (reason instanceof SendIntentConflictError) {
+        try { rememberSendProposal(targetKey, reason.current.intentId) } catch { /* 保持 UI 锁定 */ }
+        setPending({ intentId: reason.current.intentId })
+        setView(reason.current)
+        setLatestIntentId(reason.current.intentId)
+        setError('发送账本已由另一窗口更新；已恢复当前意图，请先确认其结果。')
+      } else if (reason instanceof SendIntentRejectedError) {
+        try {
+          discardRejectedSendProposal(targetKey, request.intentId)
+          setPending(null)
+          setView(null)
+          setError(`发送前安全检查未通过，脑未创建发送意图：${errorText(reason)}`)
+        } catch (storageReason) {
+          setError(`脑已明确拒绝发送，但本地凭证无法安全清除，编辑器继续锁定：${errorText(storageReason)}`)
+        }
+      } else {
+        setError(`提交结果不确定；再次操作仍会沿用同一意图，不会新发一条：${errorText(reason)}`)
+      }
+    } finally {
+      setPosting(false)
+    }
+  }
+
+  const acknowledgeTerminal = () => {
+    if (!view || !sendTerminal(view) || sendSuspect(view)) return
+    try {
+      acknowledgeSendIntent(targetKey, view.intentId)
+    } catch (reason) {
+      setError(`无法保存人工确认，编辑器继续锁定：${errorText(reason)}`)
+      return
+    }
+    setPending(null)
+    setView(null)
+    setText('')
+    setError('')
+  }
+
+  const disabledReason = !adopted
+    ? '会话完成首次收编后才能发送'
+    : recovering
+      ? '正在核对最近一次发送'
+    : !identityReady
+      ? '账号身份尚未核验'
+      : !account.handOnline
+        ? '手当前离线'
+        : quiet
+          ? `检测到真人操作，静默至 ${clock(account.manualQuietUntil)}`
+          : bytes > 2048
+            ? '消息超过 2048 字节'
+            : ''
+
+  return (
+    <form className="message-composer" onSubmit={(event) => { event.preventDefault(); void submit() }}>
+      <div className="composer-heading">
+        <div><strong>发送消息</strong><small>只允许已收编会话；未知结果不会自动再发</small></div>
+        <span className={bytes > 2048 ? 'bad' : ''}>{bytes}/2048 字节</span>
+      </div>
+      <textarea
+        value={text}
+        rows={3}
+        disabled={recovering || Boolean(pending)}
+        placeholder={adopted ? '输入自然、明确的一条消息' : '该会话尚未完成收编'}
+        onChange={(event) => setText(event.target.value)}
+      />
+      <div className="composer-actions">
+        <button className="primary-button" type="submit" disabled={recovering || posting || Boolean(pending && (!error || pending.text === undefined)) || (!pending && !canCreate)}>
+          {recovering ? '正在核对发送账本…' : posting ? '正在安全入账…' : pending?.text !== undefined && error ? '沿用同一意图重试' : pending ? '等待发送结果…' : '发送这一条'}
+        </button>
+        {sendTerminal(view) && !sendSuspect(view) && (
+          <button type="button" onClick={acknowledgeTerminal}>我已确认，开始下一条</button>
+        )}
+        {sendSuspect(view) && <small>请先在 suspect 队列完成人工裁决</small>}
+        {!pending && disabledReason && <small>{disabledReason}</small>}
+      </div>
+      {view && (
+        <div className={`send-state ${sendSucceeded(view) ? 'is-ok' : view.status === 'suspect' || view.commandStatus === 'suspect' ? 'is-bad' : ''}`}>
+          <strong>{sendStateLabel(view)}</strong>
+          <span>意图 {shortRef(view.intentId, 10)}{view.suspectReason ? ` · ${view.suspectReason}` : ''}</span>
+        </div>
+      )}
+      {error && <div className="composer-error" role="alert">{error}</div>}
+    </form>
   )
 }
 
@@ -776,8 +1061,12 @@ function Suspects() {
           {rows.map((item: Suspect) => (
             <li key={item.msgId}>
               <span>{item.name}</span><span className="dim">{item.reason}</span>
-              <button onClick={() => verdict(item.msgId, 'resolvedOk')}>确认已发生</button>
-              <button onClick={() => verdict(item.msgId, 'resolvedFailed')}>确认未发生</button>
+              <span className="dim">
+                已验证 {item.verificationAttempts} 轮
+                {!item.reviewReady && item.reviewAfter ? ` · 最早 ${dateTime(item.reviewAfter)} 可裁决` : ''}
+              </span>
+              <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedOk')}>确认已发生</button>
+              <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedFailed')}>确认未发生</button>
             </li>
           ))}
         </ul>

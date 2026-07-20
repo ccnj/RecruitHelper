@@ -35,7 +35,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 
 button {
   border: 1px solid var(--line-strong);
@@ -54,13 +54,15 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 summary:focus-visible {
   outline: 3px solid rgba(35, 87, 198, 0.25);
   outline-offset: 2px;
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--line-strong);
@@ -71,6 +73,7 @@ select {
 }
 
 input { padding-right: 0.65rem; }
+textarea { padding: 0.55rem 0.65rem; resize: vertical; }
 
 h1, h2, h3, p { margin-top: 0; }
 
@@ -366,6 +369,31 @@ h2 {
 .message-copy span { color: var(--faint); font-size: 0.65rem; }
 .message-copy p { margin: 0.35rem 0 0.3rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.82rem; }
 .message-copy small { color: var(--faint); font-size: 0.63rem; }
+
+.message-composer {
+  position: sticky;
+  bottom: 0;
+  padding: 0.85rem 0.9rem;
+  border-top: 1px solid var(--line-strong);
+  background: rgba(251, 253, 254, 0.97);
+  box-shadow: 0 -10px 24px rgba(31, 52, 66, 0.06);
+}
+.composer-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.composer-heading strong, .composer-heading small { display: block; }
+.composer-heading strong { font-family: var(--display); font-size: 0.92rem; }
+.composer-heading small { margin-top: 0.12rem; color: var(--muted); font-size: 0.66rem; }
+.composer-heading > span { color: var(--faint); font-family: var(--utility); font-size: 0.64rem; white-space: nowrap; }
+.composer-heading > span.bad { color: var(--red); }
+.message-composer textarea { width: 100%; min-height: 72px; margin-top: 0.65rem; border: 1px solid var(--line-strong); background: var(--paper); color: var(--ink); }
+.message-composer textarea:disabled { background: #f1f4f5; color: var(--muted); }
+.composer-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.55rem; margin-top: 0.55rem; }
+.composer-actions small { color: var(--amber); font-size: 0.68rem; }
+.send-state { display: grid; gap: 0.1rem; margin-top: 0.65rem; padding: 0.55rem 0.65rem; border-left: 3px solid var(--cobalt); background: #eef3ff; }
+.send-state.is-ok { border-left-color: var(--teal); background: #edf8f6; }
+.send-state.is-bad { border-left-color: var(--red); background: #fff1f2; }
+.send-state strong { font-size: 0.72rem; }
+.send-state span { color: var(--muted); font-family: var(--utility); font-size: 0.62rem; overflow-wrap: anywhere; }
+.composer-error { margin-top: 0.55rem; color: var(--red); font-size: 0.68rem; line-height: 1.55; }
 
 .audit-entry { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 0.55rem; padding: 0.8rem 0.9rem; border-bottom: 1px solid var(--line); }
 .audit-mark { width: 8px; height: 8px; border: 1px solid var(--amber); transform: rotate(45deg); margin-top: 0.35rem; }

@@ -38,6 +38,7 @@ type accountView struct {
 	HandID           string           `json:"handId"`
 	HandOnline       bool             `json:"handOnline"`
 	IdentityState    string           `json:"identityState"`
+	IdentityCurrent  bool             `json:"identityCurrent"`
 	EnabledToday     bool             `json:"enabledToday"`
 	EnabledDate      string           `json:"enabledDate"`
 	PausedReason     string           `json:"pausedReason,omitempty"`
@@ -80,6 +81,9 @@ func (a *API) accountView(account store.Account) (accountView, error) {
 	}
 	view.EnabledToday = account.EnabledDate == time.Now().In(time.Local).Format("2006-01-02") &&
 		account.EnabledAt != nil && account.StoppedAt == nil && account.PausedReason == ""
+	currentSession, currentBootID, currentOnline := a.hub.HandSession(account.BoundHandID)
+	view.IdentityCurrent = currentOnline && account.IdentityState == store.IdentityVerified &&
+		account.IdentitySession == currentSession && account.IdentityBootID == currentBootID
 	if state, ok := a.hub.Registry().Get(account.BoundHandID); ok {
 		view.HandOnline = state.Online
 		view.PageHealth = string(state.PageHealth)

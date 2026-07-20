@@ -6,6 +6,7 @@ import { MANUAL_EMIT_MIN_MS } from './contentMessages'
 export type NavigationOrigin = 'command' | 'manual' | 'unknown'
 
 interface WindowEntry {
+  startedAt: number
   expiresAt: number
   token: number
 }
@@ -28,11 +29,15 @@ export class NavigationTracker {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  beginCommandNavigation(tabId: number): CommandNavigationWindow {
+  beginCommandNavigation(tabId: number, actionNotAfterMs: number): CommandNavigationWindow {
     const token = this.nextToken++
+    const startedAt = this.now()
     this.commandWindows.set(tabId, {
       token,
-      expiresAt: this.now() + DEFAULTS.execBudgetDefaultMs.intrusive,
+      startedAt,
+      // 归因窗口不得比真实动作资格活得更久。无效截止时间自然形成空窗口，
+      // 后续导航只会得到 unknown，保持 fail closed。
+      expiresAt: Number.isFinite(actionNotAfterMs) ? actionNotAfterMs : Number.NEGATIVE_INFINITY,
     })
     return {
       end: () => {
@@ -70,17 +75,29 @@ export class NavigationTracker {
 
   private classify(tabId: number, at: number): NavigationOrigin {
     const command = this.commandWindows.get(tabId)
+    // 事件时间早于窗口创建时间，说明它属于更早的导航。它既不得消费窗口，
+    // 也不得借一份窗口前的可信输入间接撤销窗口。
+    if (command && at < command.startedAt) return 'unknown'
+
+    // 真人可信输入优先于宽泛的命令窗口。用户若在自动切换等待期间主动导航，
+    // 必须立即打断命令，而不能被窗口吞成 command。
+    const trustedAt = this.trustedIntents.get(tabId)
+    if (trustedAt !== undefined) {
+      // webNavigation 可能乱序送达；早于可信输入的旧事件不得消费这份输入。
+      if (at >= trustedAt) {
+        this.trustedIntents.delete(tabId)
+        if (at - trustedAt <= MANUAL_EMIT_MIN_MS &&
+            (!command || trustedAt >= command.startedAt)) {
+          this.commandWindows.delete(tabId)
+          return 'manual'
+        }
+      }
+    }
     if (command) {
       this.commandWindows.delete(tabId)
       if (at <= command.expiresAt) {
-        this.trustedIntents.delete(tabId)
         return 'command'
       }
-    }
-    const trustedAt = this.trustedIntents.get(tabId)
-    if (trustedAt !== undefined) {
-      this.trustedIntents.delete(tabId)
-      if (at >= trustedAt && at - trustedAt <= MANUAL_EMIT_MIN_MS) return 'manual'
     }
     return 'unknown'
   }
@@ -88,6 +105,6 @@ export class NavigationTracker {
 
 export const navigationTracker = new NavigationTracker()
 
-export function beginCommandNavigation(tabId: number): CommandNavigationWindow {
-  return navigationTracker.beginCommandNavigation(tabId)
+export function beginCommandNavigation(tabId: number, actionNotAfterMs: number): CommandNavigationWindow {
+  return navigationTracker.beginCommandNavigation(tabId, actionNotAfterMs)
 }

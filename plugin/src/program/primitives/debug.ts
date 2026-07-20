@@ -1,14 +1,25 @@
-// 三条 debug 原语(里程碑 1)。归 debug.* 命名空间,不占平台无关词汇表。
+// debug 原语归 debug.* 命名空间,不占平台无关业务词汇表。
 // 平台无关纪律:tabId 之类只进 evidence/日志,不进 result 的语义字段。
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import { CmdClass, Primitive as PrimName } from '../../base/protocol'
 import { SW_STARTED_AT } from '../../base/config'
+import { inspectZhilianSendSurfaceDiagnostic } from '../platform/zhilian'
 
 const pingPrim: Primitive = {
   name: PrimName.DebugPing,
   class: CmdClass.Readonly,
   async handler(args): Promise<PrimitiveOutcome> {
     return { status: 'ok', data: { echo: args, swStartedAt: SW_STARTED_AT } }
+  },
+}
+
+// 发送面诊断仍经唯一 Dispatcher 入口执行。它只返回契约 allowlist 阶段码，
+// 不驱动页面、不读取出站结果之外的业务数据，也不把页面异常透传给脑。
+const inspectSendSurfacePrim: Primitive = {
+  name: PrimName.DebugInspectSendSurface,
+  class: CmdClass.Readonly,
+  async handler(): Promise<PrimitiveOutcome> {
+    return { status: 'ok', data: await inspectZhilianSendSurfaceDiagnostic() }
   },
 }
 
@@ -54,6 +65,7 @@ const slowEchoPrim: Primitive = {
 
 export function registerDebugPrimitives(): void {
   register(pingPrim)
+  register(inspectSendSurfacePrim)
   register(switchWindowPrim)
   register(slowEchoPrim)
 }

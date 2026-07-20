@@ -24,10 +24,20 @@ type DispatchRequest struct {
 	Args            json.RawMessage
 	Context         *protocol.CmdContext
 	IdemKey         string
+	Guards          json.RawMessage
 }
 
 type dispatchOptions struct {
-	legacyDebug bool
+	legacyDebug      bool
+	effectIntent     *store.EffectIntent
+	expectedTailSeq  int64
+	previousIntentID string
+	verificationFor  string
+}
+
+type dispatchResult struct {
+	MsgID   string
+	Created bool
 }
 
 // DispatchStructured 先持久化完整命令上下文，再发送同一份 generated CmdBody。
@@ -68,32 +78,51 @@ func (d *Dispatcher) WaitLogical(ctx context.Context, logicalID string) (*store.
 }
 
 func (d *Dispatcher) dispatch(req DispatchRequest, opts dispatchOptions) (string, error) {
+	result, err := d.dispatchDetailed(req, opts)
+	return result.MsgID, err
+}
+
+func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions) (dispatchResult, error) {
 	meta, ok := protocol.Primitives[req.Name]
 	if !ok || meta.Ver == 0 {
-		return "", fmt.Errorf("未知或未激活原语 %q", req.Name)
+		return dispatchResult{}, fmt.Errorf("未知或未激活原语 %q", req.Name)
 	}
 	if req.HandID == "" {
-		return "", errors.New("handId 不能为空")
+		return dispatchResult{}, errors.New("handId 不能为空")
 	}
+	releaseHandGate := d.lockHandGate(req.HandID)
+	defer releaseHandGate()
 	if opts.legacyDebug && !strings.HasPrefix(req.Name, "debug.") {
-		return "", errors.New("旧 Dispatch 仅供 debug.*；业务命令请使用 DispatchStructured")
+		return dispatchResult{}, errors.New("旧 Dispatch 仅供 debug.*；业务命令请使用 DispatchStructured")
+	}
+	if meta.Batch == protocol.BatchX && meta.Class == protocol.ClassEffectful && opts.effectIntent == nil {
+		return dispatchResult{}, errors.New("真实 effectful 只允许经发送意图入口派发")
 	}
 	session, bootID, online := d.sender.HandSession(req.HandID)
 	if !online {
-		return "", ErrHandOffline
+		return dispatchResult{}, ErrHandOffline
 	}
 	generationBound := req.ExpectedSession != "" || req.ExpectedBootID != ""
 	if generationBound {
 		if req.ExpectedSession == "" || req.ExpectedBootID == "" {
-			return "", errors.New("expected session/boot 必须成对提供")
+			return dispatchResult{}, errors.New("expected session/boot 必须成对提供")
 		}
 		if session != req.ExpectedSession || bootID != req.ExpectedBootID {
-			return "", ErrStaleSession
+			return dispatchResult{}, ErrStaleSession
 		}
 	}
 	if !opts.legacyDebug {
 		if err := d.requireNegotiation(req.HandID, req.Name, meta); err != nil {
-			return "", err
+			return dispatchResult{}, err
+		}
+	}
+	if opts.effectIntent != nil {
+		blocked, err := d.st.HasEffectRecoveryForHand(req.HandID)
+		if err != nil {
+			return dispatchResult{}, err
+		}
+		if blocked {
+			return dispatchResult{}, ErrRecoveryBarrier
 		}
 	}
 
@@ -102,6 +131,10 @@ func (d *Dispatcher) dispatch(req DispatchRequest, opts dispatchOptions) (string
 	idemKey := req.IdemKey
 	if opts.legacyDebug && meta.Class == protocol.ClassEffectful && idemKey == "" {
 		idemKey = fmt.Sprintf("ik1:debug:%s:%s:-:%s", req.HandID, req.Name, ids.NewMsgID())
+	}
+	if opts.effectIntent != nil {
+		idemKey = opts.effectIntent.IdemKey
+		deadlineMs = opts.effectIntent.DeadlineMs
 	}
 	domain := domainOf(req.HandID, req.Name)
 	contextJSON := ""
@@ -115,7 +148,7 @@ func (d *Dispatcher) dispatch(req DispatchRequest, opts dispatchOptions) (string
 		domain = platform + ":" + accountRef
 		raw, err := protocol.Encode(req.Context)
 		if err != nil {
-			return "", fmt.Errorf("编码 context: %w", err)
+			return dispatchResult{}, fmt.Errorf("编码 context: %w", err)
 		}
 		contextJSON = string(raw)
 	}
@@ -123,59 +156,98 @@ func (d *Dispatcher) dispatch(req DispatchRequest, opts dispatchOptions) (string
 	body := protocol.CmdBody{
 		Name: req.Name, Ver: meta.Ver, Args: req.Args, Context: req.Context, IdemKey: idemKey,
 		Deadline: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta), LeaseMs: meta.LeaseMs,
+		Guards: req.Guards,
 	}
 	bodyRaw, err := protocol.Encode(body)
 	if err != nil {
-		return "", err
+		return dispatchResult{}, err
 	}
 	if err := protocol.ValidateKindBody(protocol.KindCmd, bodyRaw); err != nil {
-		return "", fmt.Errorf("命令契约校验: %w", err)
+		return dispatchResult{}, fmt.Errorf("命令契约校验: %w", err)
 	}
 
 	// 旧 debug wrapper 保留 M1 的 suspect 冻结语义；业务入口由 Store 在单写事务里
 	// 原子完成“检查 domain + 创建 queued”，避免跨手同账号的 TOCTOU。
 	if opts.legacyDebug && meta.Class != protocol.ClassReadonly {
 		if frozen, _ := d.st.HasSuspectInDomain(domain); frozen {
-			return "", ErrDomainFrozen
+			return dispatchResult{}, ErrDomainFrozen
 		}
 	}
 	if meta.Class == protocol.ClassEffectful {
 		if frozen, _ := d.st.HasSuspectIdemKey(idemKey); frozen {
-			return "", ErrIdemFrozen
+			return dispatchResult{}, ErrIdemFrozen
 		}
+	}
+	witnessStoreID := ""
+	if meta.Batch == protocol.BatchX {
+		witness, ok := d.handWitness(req.HandID)
+		if !ok || witness.StoreID == "" {
+			return dispatchResult{}, ErrWitnessUnavailable
+		}
+		witnessStoreID = witness.StoreID
 	}
 
 	rec := &store.CmdRecord{
 		MsgID: msgID, Name: req.Name, Class: string(meta.Class), IdemKey: idemKey,
 		Domain: domain, Platform: platform, AccountRef: accountRef,
-		ExpectedPrincipalFingerprint: fingerprint, ContextJSON: contextJSON, Args: string(req.Args),
+		ExpectedPrincipalFingerprint: fingerprint, ContextJSON: contextJSON, Args: string(req.Args), Guards: string(req.Guards),
 		HandID: req.HandID, Session: session, BootIDAtDispatch: bootID,
 		Status: store.CmdQueued, DeadlineMs: deadlineMs, ExecBudgetMs: body.ExecBudgetMs,
+		WitnessStoreIDAtDispatch: witnessStoreID, VerificationForMsgID: opts.verificationFor,
 	}
-	if !opts.legacyDebug && meta.Class != protocol.ClassReadonly {
+	created := true
+	if opts.effectIntent != nil {
+		rec.IntentID = opts.effectIntent.IntentID
+		createdResult, createErr := d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
+			Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
+			PreviousIntentID: opts.previousIntentID, Now: time.Now(),
+		})
+		if createErr != nil {
+			err = createErr
+		} else {
+			created = createdResult.Created
+			rec = &createdResult.Command
+			msgID = rec.MsgID
+		}
+	} else if opts.verificationFor != "" {
+		err = d.st.CreateVerificationCmd(opts.verificationFor, rec)
+	} else if !opts.legacyDebug && meta.Class != protocol.ClassReadonly {
 		err = d.st.CreateCmdIfDomainAvailable(rec)
 	} else {
 		err = d.st.CreateCmd(rec)
 	}
 	if err != nil {
-		return "", fmt.Errorf("记账: %w", err)
+		return dispatchResult{}, fmt.Errorf("记账: %w", err)
+	}
+	if !created {
+		return dispatchResult{MsgID: msgID, Created: false}, nil
 	}
 
 	env := d.envelope(protocol.KindCmd, msgID, &session, body)
 	if err := d.sender.SendEnvelope(req.HandID, env); err != nil {
 		if generationBound && (errors.Is(err, ErrStaleSession) || errors.Is(err, ErrHandOffline)) {
-			if voidErr := d.voidGenerationBoundBeforeSend(req.HandID, msgID, err); voidErr != nil {
-				return msgID, errors.Join(err, voidErr)
+			var voidErr error
+			if opts.effectIntent != nil {
+				voidErr = d.st.AbortEffectBeforeSend(msgID, "actor generation changed before socket write", time.Now())
+				d.notifyByMsgID(msgID)
+			} else {
+				voidErr = d.voidGenerationBoundBeforeSend(req.HandID, msgID, err)
+			}
+			if voidErr != nil {
+				return dispatchResult{MsgID: msgID, Created: true}, errors.Join(err, voidErr)
 			}
 			slog.Warn("actor 命令在 socket 写入前代际失效,已 void", "handId", req.HandID, "msgId", msgID, "err", err)
-			return msgID, err
+			return dispatchResult{MsgID: msgID, Created: true}, err
+		}
+		if opts.effectIntent != nil {
+			_ = d.st.MoveEffectToVerification(msgID, "socket write outcome unknown", time.Now())
 		}
 		slog.Warn("cmd 发送失败,留 queued", "handId", req.HandID, "msgId", msgID, "err", err)
-		return msgID, err
+		return dispatchResult{MsgID: msgID, Created: true}, err
 	}
 	d.markSent(msgID, session, session)
 	slog.Info("已派发", "handId", req.HandID, "name", req.Name, "msgId", msgID, "class", meta.Class)
-	return msgID, nil
+	return dispatchResult{MsgID: msgID, Created: true}, nil
 }
 
 // generation-bound actor 命令若在 Hub 的线性化写门禁前发现 session 已更替/离线，
@@ -200,19 +272,21 @@ func (d *Dispatcher) voidGenerationBoundBeforeSend(handID, msgID string, sendErr
 }
 
 func (d *Dispatcher) requireNegotiation(handID, name string, meta protocol.PrimitiveMeta) error {
-	if meta.Batch != protocol.BatchS {
+	if meta.Batch != protocol.BatchS && meta.Batch != protocol.BatchX {
 		return nil
 	}
 	caps, features, ok := d.sender.HandNegotiation(handID)
 	if !ok || !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
 		return fmt.Errorf("%w: %s@%d", ErrCapability, name, meta.Ver)
 	}
-	if meta.LeaseMs == 0 {
-		return nil
+	if meta.Batch == protocol.BatchX && !contains(features, string(protocol.FeatureWitness1)) {
+		return fmt.Errorf("%w: %s", ErrFeature, protocol.FeatureWitness1)
 	}
-	for _, feature := range []protocol.Feature{protocol.FeatureLease1, protocol.FeatureProgress1, protocol.FeatureCancel1} {
-		if !contains(features, string(feature)) {
-			return fmt.Errorf("%w: %s", ErrFeature, feature)
+	if meta.LeaseMs != 0 {
+		for _, feature := range []protocol.Feature{protocol.FeatureLease1, protocol.FeatureProgress1, protocol.FeatureCancel1} {
+			if !contains(features, string(feature)) {
+				return fmt.Errorf("%w: %s", ErrFeature, feature)
+			}
 		}
 	}
 	return nil
@@ -243,7 +317,7 @@ func (d *Dispatcher) commandBody(rec store.CmdRecord) (protocol.CmdBody, error) 
 	body := protocol.CmdBody{
 		Name: rec.Name, Ver: meta.Ver, Args: json.RawMessage(rec.Args), Context: cmdContext,
 		IdemKey: rec.IdemKey, Deadline: rec.DeadlineMs, ExecBudgetMs: rec.ExecBudgetMs,
-		LeaseMs: meta.LeaseMs,
+		LeaseMs: meta.LeaseMs, Guards: json.RawMessage(rec.Guards),
 	}
 	raw, err := protocol.Encode(body)
 	if err != nil {

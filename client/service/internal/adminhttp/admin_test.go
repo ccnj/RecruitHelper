@@ -9,19 +9,23 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
 
 type fakeAdminHub struct {
-	mu      sync.Mutex
-	session string
-	boot    string
-	online  bool
-	frames  *session.FrameBus
-	reg     *session.Registry
+	mu           sync.Mutex
+	session      string
+	boot         string
+	online       bool
+	frames       *session.FrameBus
+	reg          *session.Registry
+	witness      dispatch.HandWitness
+	witnessReady bool
 }
 
 func newFakeAdminHub() *fakeAdminHub {
@@ -37,6 +41,12 @@ func (h *fakeAdminHub) HandSession(string) (string, string, bool) {
 	return h.session, h.boot, h.online
 }
 
+func (h *fakeAdminHub) HandWitness(string) (dispatch.HandWitness, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.witness, h.witnessReady
+}
+
 func (h *fakeAdminHub) WithCurrentHandSession(_ string, sessionID, bootID string, fn func() error) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -49,6 +59,12 @@ func (h *fakeAdminHub) WithCurrentHandSession(_ string, sessionID, bootID string
 func (h *fakeAdminHub) set(sessionID, bootID string, online bool) {
 	h.mu.Lock()
 	h.session, h.boot, h.online = sessionID, bootID, online
+	h.mu.Unlock()
+}
+
+func (h *fakeAdminHub) setWitness(witness dispatch.HandWitness, ready bool) {
+	h.mu.Lock()
+	h.witness, h.witnessReady = witness, ready
 	h.mu.Unlock()
 }
 
@@ -164,6 +180,46 @@ func TestHealthAndRoutesExposeNoPairingControlPlane(t *testing.T) {
 	}
 }
 
+func TestHandHealthExposesWitnessCountsWithoutStoreID(t *testing.T) {
+	hub := newFakeAdminHub()
+	hub.Registry().Online(
+		"hand-witness", "session-witness", "boot-witness",
+		[]string{protocol.PrimChatSendMessage + "@1"}, []string{string(protocol.FeatureWitness1)}, time.Now(),
+	)
+	hub.setWitness(dispatch.HandWitness{
+		StoreID: "must-not-be-exposed", OutboxPending: 2, JournalOpen: 1,
+	}, true)
+	api := New(nil, hub, nil, nil, nil, "")
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/hands/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("hand health code=%d body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Hands []map[string]any `json:"hands"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Hands) != 1 {
+		t.Fatalf("hand health rows=%d", len(body.Hands))
+	}
+	row := body.Hands[0]
+	if row["witnessReady"] != true || row["outboxPending"] != float64(2) || row["journalOpen"] != float64(1) {
+		t.Fatalf("witness counters missing or wrong: %+v", row)
+	}
+	if _, exists := row["storeId"]; exists {
+		t.Fatal("hand health must not expose witness storeId")
+	}
+	if _, exists := row["witnessStoreId"]; exists {
+		t.Fatal("hand health must not expose witnessStoreId")
+	}
+}
+
 func TestBindAccountRejectsSessionBootTOCTOU(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -240,6 +296,38 @@ func TestBindAccountSucceedsAfterPreBindProbe(t *testing.T) {
 	if got.Platform != "platform-under-test" || got.AccountRef == "" || got.BoundHandID != "hand-bind" ||
 		got.PrincipalFingerprint == nil || *got.PrincipalFingerprint != fingerprint {
 		t.Fatalf("绑定观测未完整持久化: %+v", got)
+	}
+}
+
+func TestAccountViewMarksVerifiedIdentityStaleAcrossHandGeneration(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	key := store.AccountKey{Platform: "platform-under-test", AccountRef: "account-currentness"}
+	if err := st.CreateAccount(&store.Account{Platform: key.Platform, AccountRef: key.AccountRef}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindAccountPrincipal(key, "hand-currentness", "opaque-fingerprint",
+		"session-bound", "boot-bound", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.Accounts()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("读取账号失败: rows=%d err=%v", len(rows), err)
+	}
+	hub := newFakeAdminHub()
+	hub.set("session-bound", "boot-bound", true)
+	api := New(st, hub, nil, nil, nil, "")
+	current, err := api.accountView(rows[0])
+	if err != nil || !current.IdentityCurrent {
+		t.Fatalf("同一在线 session/boot 应为 current: view=%+v err=%v", current, err)
+	}
+	hub.set("session-reloaded", "boot-reloaded", true)
+	stale, err := api.accountView(rows[0])
+	if err != nil || stale.IdentityCurrent || stale.IdentityState != string(store.IdentityVerified) {
+		t.Fatalf("插件重载后持久 verified 只能展示为非 current: view=%+v err=%v", stale, err)
 	}
 }
 

@@ -3,3 +3,4 @@
 export { Connection } from '../src/base/connection'
 export { registerDebugPrimitives } from '../src/program/primitives/debug'
 export { registerM2Primitives } from '../src/program/primitives/m2'
+export { registerM3Primitives } from '../src/program/primitives/m3'

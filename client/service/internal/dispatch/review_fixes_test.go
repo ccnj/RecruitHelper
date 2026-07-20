@@ -248,6 +248,23 @@ func TestRetransmitNoAuditSpam(t *testing.T) {
 			Error: &protocol.ErrorBody{Code: protocol.ErrCodeInternalHand, SideEffect: protocol.SideEffectPossible},
 		})
 	}
+	m.mu.Lock()
+	sent := append([]protocol.Envelope(nil), m.sent...)
+	m.mu.Unlock()
+	var statuses []protocol.AckStatus
+	for _, env := range sent {
+		if env.Kind != protocol.KindAck {
+			continue
+		}
+		var ack protocol.AckBody
+		if json.Unmarshal(env.Body, &ack) == nil && ack.Ref == "res-dup" {
+			statuses = append(statuses, ack.Status)
+		}
+	}
+	if len(statuses) != 3 || statuses[0] != protocol.AckStatusAccepted ||
+		statuses[1] != protocol.AckStatusDuplicate || statuses[2] != protocol.AckStatusDuplicate {
+		t.Fatalf("同 resultMsgId 首次/重传 ack 应为 accepted/duplicate/duplicate,得到 %v", statuses)
+	}
 	if n := countAudit(t, st, "suspect_kept", msgID); n != 1 {
 		t.Fatalf("possible result 重传 3 次应只 1 条 suspect_kept,得到 %d", n)
 	}

@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:bb933cca8abc90cb890b5fe3d33f71332b7b4c5e717b59b4cfc7008062ab304e"
+	ContractHash       = "sha256:444d061d9526e38d4af05e7a5854fd6872c78416301b3fb365e8787bf37bdf80"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -131,6 +131,18 @@ var ErrorPhaseValues = []ErrorPhase{
 	ErrorPhaseExecution,
 }
 
+type JournalState string
+
+const (
+	JournalStateAttempting JournalState = "attempting"
+	JournalStateCommitted  JournalState = "committed"
+)
+
+var JournalStateValues = []JournalState{
+	JournalStateAttempting,
+	JournalStateCommitted,
+}
+
 type ListFilter string
 
 const (
@@ -237,6 +249,16 @@ var NotReadyReasonValues = []NotReadyReason{
 	NotReadyReasonUnknown,
 }
 
+type OutboxKind string
+
+const (
+	OutboxKindResult OutboxKind = "result"
+)
+
+var OutboxKindValues = []OutboxKind{
+	OutboxKindResult,
+}
+
 type PageKind string
 
 const (
@@ -303,6 +325,116 @@ var RetryableValues = []Retryable{
 	RetryableManualOnly,
 }
 
+type SendMessageEvidenceType string
+
+const (
+	SendMessageEvidenceTypeOutboundMessageObserved SendMessageEvidenceType = "outboundMessageObserved"
+)
+
+var SendMessageEvidenceTypeValues = []SendMessageEvidenceType{
+	SendMessageEvidenceTypeOutboundMessageObserved,
+}
+
+type SendSurfaceDiagnosticStage string
+
+const (
+	SendSurfaceDiagnosticStagePageAbsent                     SendSurfaceDiagnosticStage = "page_absent"
+	SendSurfaceDiagnosticStageRouteMissing                   SendSurfaceDiagnosticStage = "route_missing"
+	SendSurfaceDiagnosticStageComposerCardinality            SendSurfaceDiagnosticStage = "composer_cardinality"
+	SendSurfaceDiagnosticStageDetailCardinality              SendSurfaceDiagnosticStage = "detail_cardinality"
+	SendSurfaceDiagnosticStageButtonCardinality              SendSurfaceDiagnosticStage = "button_cardinality"
+	SendSurfaceDiagnosticStageDomContainment                 SendSurfaceDiagnosticStage = "dom_containment"
+	SendSurfaceDiagnosticStageComponentTreeUnavailable       SendSurfaceDiagnosticStage = "component_tree_unavailable"
+	SendSurfaceDiagnosticStageComponentTreeRootMissing       SendSurfaceDiagnosticStage = "component_tree_root_missing"
+	SendSurfaceDiagnosticStageComponentTreeMalformed         SendSurfaceDiagnosticStage = "component_tree_malformed"
+	SendSurfaceDiagnosticStageComponentTreeOverflow          SendSurfaceDiagnosticStage = "component_tree_overflow"
+	SendSurfaceDiagnosticStageSenderOwnerUnresolved          SendSurfaceDiagnosticStage = "sender_owner_unresolved"
+	SendSurfaceDiagnosticStageControlOwnershipUnresolved     SendSurfaceDiagnosticStage = "control_ownership_unresolved"
+	SendSurfaceDiagnosticStageDirectModelUnresolved          SendSurfaceDiagnosticStage = "direct_model_unresolved"
+	SendSurfaceDiagnosticStageDirectModelTargetMismatch      SendSurfaceDiagnosticStage = "direct_model_target_mismatch"
+	SendSurfaceDiagnosticStageModelCandidateProps            SendSurfaceDiagnosticStage = "model_candidate_props"
+	SendSurfaceDiagnosticStageModelCandidateData             SendSurfaceDiagnosticStage = "model_candidate_data"
+	SendSurfaceDiagnosticStageModelCandidateStore            SendSurfaceDiagnosticStage = "model_candidate_store"
+	SendSurfaceDiagnosticStageModelCandidateMultiple         SendSurfaceDiagnosticStage = "model_candidate_multiple"
+	SendSurfaceDiagnosticStageModelCandidateConflict         SendSurfaceDiagnosticStage = "model_candidate_conflict"
+	SendSurfaceDiagnosticStageModelCandidateAbsent           SendSurfaceDiagnosticStage = "model_candidate_absent"
+	SendSurfaceDiagnosticStageModelScalarOwner               SendSurfaceDiagnosticStage = "model_scalar_owner"
+	SendSurfaceDiagnosticStageModelScalarProps               SendSurfaceDiagnosticStage = "model_scalar_props"
+	SendSurfaceDiagnosticStageModelScalarData                SendSurfaceDiagnosticStage = "model_scalar_data"
+	SendSurfaceDiagnosticStageModelScalarStore               SendSurfaceDiagnosticStage = "model_scalar_store"
+	SendSurfaceDiagnosticStageModelScalarMultiple            SendSurfaceDiagnosticStage = "model_scalar_multiple"
+	SendSurfaceDiagnosticStageModelScalarConflict            SendSurfaceDiagnosticStage = "model_scalar_conflict"
+	SendSurfaceDiagnosticStageModelScalarAbsent              SendSurfaceDiagnosticStage = "model_scalar_absent"
+	SendSurfaceDiagnosticStageEngineBindingUnresolved        SendSurfaceDiagnosticStage = "engine_binding_unresolved"
+	SendSurfaceDiagnosticStageButtonFormUnsafe               SendSurfaceDiagnosticStage = "button_form_unsafe"
+	SendSurfaceDiagnosticStageButtonVnodeMissing             SendSurfaceDiagnosticStage = "button_vnode_missing"
+	SendSurfaceDiagnosticStageButtonDomListenerAmbiguous     SendSurfaceDiagnosticStage = "button_dom_listener_ambiguous"
+	SendSurfaceDiagnosticStageComponentClickWiringUnresolved SendSurfaceDiagnosticStage = "component_click_wiring_unresolved"
+	SendSurfaceDiagnosticStageDraftPresent                   SendSurfaceDiagnosticStage = "draft_present"
+	SendSurfaceDiagnosticStageUnstable                       SendSurfaceDiagnosticStage = "unstable"
+	SendSurfaceDiagnosticStageThreadUnavailable              SendSurfaceDiagnosticStage = "thread_unavailable"
+	SendSurfaceDiagnosticStageBaselineEngineUnavailable      SendSurfaceDiagnosticStage = "baseline_engine_unavailable"
+	SendSurfaceDiagnosticStageBaselineRouteChanged           SendSurfaceDiagnosticStage = "baseline_route_changed"
+	SendSurfaceDiagnosticStageBaselineSessionUnavailable     SendSurfaceDiagnosticStage = "baseline_session_unavailable"
+	SendSurfaceDiagnosticStageBaselineHistoryUnavailable     SendSurfaceDiagnosticStage = "baseline_history_unavailable"
+	SendSurfaceDiagnosticStageBaselineHistoryUnstable        SendSurfaceDiagnosticStage = "baseline_history_unstable"
+	SendSurfaceDiagnosticStageBaselineGuardUncovered         SendSurfaceDiagnosticStage = "baseline_guard_uncovered"
+	SendSurfaceDiagnosticStageBaselineSessionChanged         SendSurfaceDiagnosticStage = "baseline_session_changed"
+	SendSurfaceDiagnosticStageBaselineHashUnavailable        SendSurfaceDiagnosticStage = "baseline_hash_unavailable"
+	SendSurfaceDiagnosticStageBaselineUnexpected             SendSurfaceDiagnosticStage = "baseline_unexpected"
+	SendSurfaceDiagnosticStageDiagnosticUnavailable          SendSurfaceDiagnosticStage = "diagnostic_unavailable"
+	SendSurfaceDiagnosticStageReady                          SendSurfaceDiagnosticStage = "ready"
+)
+
+var SendSurfaceDiagnosticStageValues = []SendSurfaceDiagnosticStage{
+	SendSurfaceDiagnosticStagePageAbsent,
+	SendSurfaceDiagnosticStageRouteMissing,
+	SendSurfaceDiagnosticStageComposerCardinality,
+	SendSurfaceDiagnosticStageDetailCardinality,
+	SendSurfaceDiagnosticStageButtonCardinality,
+	SendSurfaceDiagnosticStageDomContainment,
+	SendSurfaceDiagnosticStageComponentTreeUnavailable,
+	SendSurfaceDiagnosticStageComponentTreeRootMissing,
+	SendSurfaceDiagnosticStageComponentTreeMalformed,
+	SendSurfaceDiagnosticStageComponentTreeOverflow,
+	SendSurfaceDiagnosticStageSenderOwnerUnresolved,
+	SendSurfaceDiagnosticStageControlOwnershipUnresolved,
+	SendSurfaceDiagnosticStageDirectModelUnresolved,
+	SendSurfaceDiagnosticStageDirectModelTargetMismatch,
+	SendSurfaceDiagnosticStageModelCandidateProps,
+	SendSurfaceDiagnosticStageModelCandidateData,
+	SendSurfaceDiagnosticStageModelCandidateStore,
+	SendSurfaceDiagnosticStageModelCandidateMultiple,
+	SendSurfaceDiagnosticStageModelCandidateConflict,
+	SendSurfaceDiagnosticStageModelCandidateAbsent,
+	SendSurfaceDiagnosticStageModelScalarOwner,
+	SendSurfaceDiagnosticStageModelScalarProps,
+	SendSurfaceDiagnosticStageModelScalarData,
+	SendSurfaceDiagnosticStageModelScalarStore,
+	SendSurfaceDiagnosticStageModelScalarMultiple,
+	SendSurfaceDiagnosticStageModelScalarConflict,
+	SendSurfaceDiagnosticStageModelScalarAbsent,
+	SendSurfaceDiagnosticStageEngineBindingUnresolved,
+	SendSurfaceDiagnosticStageButtonFormUnsafe,
+	SendSurfaceDiagnosticStageButtonVnodeMissing,
+	SendSurfaceDiagnosticStageButtonDomListenerAmbiguous,
+	SendSurfaceDiagnosticStageComponentClickWiringUnresolved,
+	SendSurfaceDiagnosticStageDraftPresent,
+	SendSurfaceDiagnosticStageUnstable,
+	SendSurfaceDiagnosticStageThreadUnavailable,
+	SendSurfaceDiagnosticStageBaselineEngineUnavailable,
+	SendSurfaceDiagnosticStageBaselineRouteChanged,
+	SendSurfaceDiagnosticStageBaselineSessionUnavailable,
+	SendSurfaceDiagnosticStageBaselineHistoryUnavailable,
+	SendSurfaceDiagnosticStageBaselineHistoryUnstable,
+	SendSurfaceDiagnosticStageBaselineGuardUncovered,
+	SendSurfaceDiagnosticStageBaselineSessionChanged,
+	SendSurfaceDiagnosticStageBaselineHashUnavailable,
+	SendSurfaceDiagnosticStageBaselineUnexpected,
+	SendSurfaceDiagnosticStageDiagnosticUnavailable,
+	SendSurfaceDiagnosticStageReady,
+}
+
 type SideEffect string
 
 const (
@@ -335,6 +467,20 @@ const (
 
 var UnreadScopeValues = []UnreadScope{
 	UnreadScopeTotal,
+}
+
+type WitnessUnavailableReason string
+
+const (
+	WitnessUnavailableReasonWriteFailed      WitnessUnavailableReason = "writeFailed"
+	WitnessUnavailableReasonCapacityExceeded WitnessUnavailableReason = "capacityExceeded"
+	WitnessUnavailableReasonStoreCorrupt     WitnessUnavailableReason = "storeCorrupt"
+)
+
+var WitnessUnavailableReasonValues = []WitnessUnavailableReason{
+	WitnessUnavailableReasonWriteFailed,
+	WitnessUnavailableReasonCapacityExceeded,
+	WitnessUnavailableReasonStoreCorrupt,
 }
 
 type Kind string
@@ -386,6 +532,7 @@ const (
 	FeatureCancel1   Feature = "cancel/1"
 	FeatureLease1    Feature = "lease/1"
 	FeatureProgress1 Feature = "progress/1"
+	FeatureWitness1  Feature = "witness/1"
 )
 
 var Features = map[Feature]Batch{
@@ -393,6 +540,7 @@ var Features = map[Feature]Batch{
 	FeatureCancel1:   BatchS,
 	FeatureLease1:    BatchS,
 	FeatureProgress1: BatchS,
+	FeatureWitness1:  BatchX,
 }
 
 // Envelope:所有消息的信封(7 字段,冻结;扩展只进 Body)。
@@ -459,6 +607,7 @@ const (
 	ErrCodeStaleSession             ErrorCode = "STALE_SESSION"
 	ErrCodeTargetNotFound           ErrorCode = "TARGET_NOT_FOUND"
 	ErrCodeUserActive               ErrorCode = "USER_ACTIVE"
+	ErrCodeWitnessUnavailable       ErrorCode = "WITNESS_UNAVAILABLE"
 )
 
 // ErrorCodeMeta:契约默认值。RetryableDefault 可为条件式描述(如 "afterRecovery|manualOnly(SX)"),裁决权在脑的矩阵。
@@ -467,31 +616,33 @@ type ErrorCodeMeta struct {
 	SideEffect       []SideEffect // 允许取值
 	Batch            Batch
 	Phase            ErrorPhase // receipt=仅 ack(rejected);execution=accepted 后 result(failed)
+	DataSchema       string     // 空=无专用 error.data schema
 }
 
 var ErrorCodes = map[ErrorCode]ErrorCodeMeta{
-	ErrCodeAccountMismatch:          {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeCanceledByBrain:          {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeConversationNotFound:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeCtxLostDuringExec:        {RetryableDefault: "afterRecovery|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeCtxNotReady:              {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeCursorInvalid:            {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeElementUnresolved:        {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeExecTimeoutHand:          {RetryableDefault: "yes|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution},
-	ErrCodeGuardFailed:              {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution},
-	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution},
-	ErrCodePayloadLimit:             {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodePlatformLimit:            {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution},
-	ErrCodePostconditionUnconfirmed: {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution},
-	ErrCodeProtoBadArgs:             {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeProtoMalformed:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeProtoMsgTooLarge:         {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeProtoUnsupportedCmd:      {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeProtoUnsupportedKind:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeQueueFull:                {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeStaleSession:             {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt},
-	ErrCodeTargetNotFound:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
-	ErrCodeUserActive:               {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution},
+	ErrCodeAccountMismatch:          {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeCanceledByBrain:          {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeConversationNotFound:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeCtxLostDuringExec:        {RetryableDefault: "afterRecovery|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeCtxNotReady:              {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeCursorInvalid:            {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeElementUnresolved:        {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeExecTimeoutHand:          {RetryableDefault: "yes|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeGuardFailed:              {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible, SideEffectConfirmed}, Batch: BatchM1, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodePayloadLimit:             {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodePlatformLimit:            {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodePostconditionUnconfirmed: {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeProtoBadArgs:             {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeProtoMalformed:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeProtoMsgTooLarge:         {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeProtoUnsupportedCmd:      {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeProtoUnsupportedKind:     {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeQueueFull:                {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeStaleSession:             {RetryableDefault: "yes", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchM1, Phase: ErrorPhaseReceipt, DataSchema: ""},
+	ErrCodeTargetNotFound:           {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeUserActive:               {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeWitnessUnavailable:       {RetryableDefault: "afterRecovery|manualOnly(capacity/corrupt)", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: "WitnessUnavailableData"},
 }
 
 var AckRejectableErrorCodes = map[ErrorCode]struct{}{
@@ -512,16 +663,17 @@ const (
 )
 
 const (
-	PrimChatReadList       = "chat.readList"
-	PrimChatReadThread     = "chat.readThread"
-	PrimChatSendGreeting   = "chat.sendGreeting"
-	PrimChatSendInviteCard = "chat.sendInviteCard"
-	PrimChatSendMessage    = "chat.sendMessage"
-	PrimDebugPing          = "debug.ping"
-	PrimDebugSlowEcho      = "debug.slowEcho"
-	PrimDebugSwitchWindow  = "debug.switchWindow"
-	PrimNavEnsureSurface   = "nav.ensureSurface"
-	PrimProbePlatform      = "probe.platform"
+	PrimChatReadList            = "chat.readList"
+	PrimChatReadThread          = "chat.readThread"
+	PrimChatSendGreeting        = "chat.sendGreeting"
+	PrimChatSendInviteCard      = "chat.sendInviteCard"
+	PrimChatSendMessage         = "chat.sendMessage"
+	PrimDebugInspectSendSurface = "debug.inspectSendSurface"
+	PrimDebugPing               = "debug.ping"
+	PrimDebugSlowEcho           = "debug.slowEcho"
+	PrimDebugSwitchWindow       = "debug.switchWindow"
+	PrimNavEnsureSurface        = "nav.ensureSurface"
+	PrimProbePlatform           = "probe.platform"
 )
 
 type PrimitiveMeta struct {
@@ -534,20 +686,27 @@ type PrimitiveMeta struct {
 	LeaseMs                      int64  // 0=不启用租约;非零须协商 lease/1
 	ArgsSchema                   string
 	DataSchema                   string
+	GuardsSchema                 string // 空=该原语不接受 guards
+	EvidenceSchema               string // effectful ok 的每个 evidence item schema
+	Preconditions                []string
+	VerificationPrimitive        string // effectful 歧义消解读;空=无
+	VerificationVer              int
+	VerificationMaxRounds        int
 	ContextOptionalBeforeBinding bool // 仅首次真人绑定探测可省略 context
 }
 
 var Primitives = map[string]PrimitiveMeta{
-	PrimChatReadList:       {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "ChatReadListArgs", DataSchema: "ChatReadListData", ContextOptionalBeforeBinding: false},
-	PrimChatReadThread:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadThreadArgs", DataSchema: "ChatReadThreadData", ContextOptionalBeforeBinding: false},
-	PrimChatSendGreeting:   {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
-	PrimChatSendInviteCard: {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
-	PrimChatSendMessage:    {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", ContextOptionalBeforeBinding: false},
-	PrimDebugPing:          {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugPingArgs", DataSchema: "DebugPingData", ContextOptionalBeforeBinding: false},
-	PrimDebugSlowEcho:      {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "DebugSlowEchoArgs", DataSchema: "DebugSlowEchoData", ContextOptionalBeforeBinding: false},
-	PrimDebugSwitchWindow:  {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugSwitchWindowArgs", DataSchema: "DebugSwitchWindowData", ContextOptionalBeforeBinding: false},
-	PrimNavEnsureSurface:   {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "NavEnsureSurfaceArgs", DataSchema: "NavEnsureSurfaceData", ContextOptionalBeforeBinding: false},
-	PrimProbePlatform:      {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ProbePlatformArgs", DataSchema: "ProbePlatformData", ContextOptionalBeforeBinding: true},
+	PrimChatReadList:            {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "ChatReadListArgs", DataSchema: "ChatReadListData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatReadThread:          {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadThreadArgs", DataSchema: "ChatReadThreadData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatSendGreeting:        {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatSendInviteCard:      {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatSendMessage:         {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 60000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendMessageArgs", DataSchema: "ChatSendMessageData", GuardsSchema: "ChatSendMessageGuards", EvidenceSchema: "ChatSendMessageEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"}, VerificationPrimitive: "chat.readThread", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
+	PrimDebugInspectSendSurface: {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugInspectSendSurfaceArgs", DataSchema: "DebugInspectSendSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugPing:               {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugPingArgs", DataSchema: "DebugPingData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugSlowEcho:           {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "DebugSlowEchoArgs", DataSchema: "DebugSlowEchoData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugSwitchWindow:       {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugSwitchWindowArgs", DataSchema: "DebugSwitchWindowData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimNavEnsureSurface:        {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "NavEnsureSurfaceArgs", DataSchema: "NavEnsureSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimProbePlatform:           {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ProbePlatformArgs", DataSchema: "ProbePlatformData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: true},
 }
 
 type EventName string
@@ -610,7 +769,9 @@ const (
 	DefaultSensorsPatrolPullForwardMinGapMs = 60000
 	DefaultSuspectGraceMs                   = 5000
 	DefaultSuspectManualDelayMs             = 600000
+	DefaultVerificationMaxRounds            = 3
 	DefaultWitnessCapacity                  = 512
+	DefaultWitnessSchemaVersion             = 1
 )
 
 var DefaultRedispatchBackoffMs = []int{5000, 15000}
@@ -623,12 +784,12 @@ var KindBodyFields = map[Kind][]string{
 	KindCancel:   {"reason", "ref"},
 	KindCmd:      {"args", "context", "deadline", "execBudgetMs", "guards", "idemKey", "leaseMs", "name", "ver"},
 	KindEvent:    {"context", "data", "name", "observedAt"},
-	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "protoSupported"},
-	KindPing:     {"contexts", "inFlight", "queueDepth", "sensors"},
+	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "journalOpen", "outboxPending", "protoSupported", "witnessStoreId"},
+	KindPing:     {"contexts", "inFlight", "journalOpen", "outboxPending", "queueDepth", "sensors", "witnessStoreId"},
 	KindPong:     {"now"},
 	KindProgress: {"pct", "ref", "stage"},
 	KindQuery:    {"ref"},
-	KindReport:   {"journal", "ref", "result", "state"},
+	KindReport:   {"journal", "ref", "result", "state", "witnessStoreId"},
 	KindResult:   {"data", "dataBlobRef", "error", "evidence", "execMs", "ref", "replayed", "status"},
 	KindWelcome:  {"blob", "contractMatch", "hb", "limits", "now", "proto", "sensors", "session"},
 }

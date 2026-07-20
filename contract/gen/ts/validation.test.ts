@@ -2,6 +2,8 @@ import {
   Kind,
   validateKindBody,
   validatePrimitiveData,
+  validatePrimitiveResult,
+  validateSchema,
   type ValidationIssue,
 } from "./protocol.gen";
 
@@ -130,3 +132,155 @@ expectIssue(
   "const",
 );
 expectIssue("safe integer", validateKindBody(Kind.Pong, { now: 9_007_199_254_740_992 }), "$.now", "safeInteger");
+
+const witnessHello = {
+  ...validLocalHello,
+  caps: ["chat.sendMessage@1"],
+  features: ["witness/1"],
+  witnessStoreId: "w-1",
+  outboxPending: 0,
+  journalOpen: 0,
+};
+expectValid("witness hello", validateKindBody(Kind.Hello, witnessHello));
+expectIssue(
+  "witness hello fields required",
+  validateKindBody(Kind.Hello, { ...validLocalHello, features: ["witness/1"] }),
+  "$",
+  "witnessAdvertisement",
+);
+
+const sendCommand = {
+  name: "chat.sendMessage",
+  ver: 1,
+  context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+  args: { conversationRef: "conv-1", text: "你好" },
+  idemKey: "ik1:zhilian:acc-1:chat.sendMessage:conv-1:int-1",
+  deadline: 1_999_999_999_999,
+  execBudgetMs: 60_000,
+  leaseMs: 30_000,
+  guards: { expectedTail: [{ direction: "in", contentHash: "abc" }] },
+};
+expectValid("send command", validateKindBody(Kind.Cmd, sendCommand));
+const sendWithoutGuards: Record<string, unknown> = { ...sendCommand };
+delete sendWithoutGuards.guards;
+expectIssue("send guards", validateKindBody(Kind.Cmd, sendWithoutGuards), "$.guards", "required");
+
+const committedJournal = {
+  ref: "cmd-1",
+  idemKey: "ik-1",
+  state: "committed",
+  startedAt: 10,
+  committedAt: 20,
+  result: {
+    ref: "cmd-1",
+    status: "ok",
+    data: { conversationRef: "conv-1", contentHash: "a".repeat(64), observedAt: 20 },
+    evidence: [{ type: "outboundMessageObserved" }],
+    replayed: false,
+    execMs: 10,
+  },
+  expiresAt: 100,
+};
+expectValid("committed journal", validateSchema("JournalEntry", committedJournal));
+expectIssue(
+  "committed journal null result",
+  validateSchema("JournalEntry", { ...committedJournal, result: null }),
+  "$.result",
+  "nullable",
+);
+expectIssue(
+  "attempting journal forbids result",
+  validateSchema("JournalEntry", { ...committedJournal, state: "attempting", committedAt: undefined }),
+  "$.result",
+  "forbiddenWhen",
+);
+
+const outboxEntry = {
+  message: {
+    proto: 1,
+    kind: "result",
+    msgId: "result-1",
+    session: "session-created",
+    ts: 20,
+    attempt: 1,
+    body: { ref: "cmd-1", status: "expired", replayed: false, execMs: 0 },
+  },
+  createdAt: 20,
+  expiresAt: 100,
+};
+expectValid("outbox", validateSchema("OutboxEntry", outboxEntry));
+expectIssue(
+  "outbox session non-null",
+  validateSchema("OutboxEntry", { ...outboxEntry, message: { ...outboxEntry.message, session: null } }),
+  "$.message.session",
+  "nullable",
+);
+
+const doneReport = {
+  ref: "cmd-1",
+  witnessStoreId: "w-1",
+  state: "done",
+  result: committedJournal.result,
+  journal: {
+    ref: "cmd-1",
+    idemKey: "ik-1",
+    state: "committed",
+    startedAt: 10,
+    committedAt: 20,
+  },
+};
+expectValid("done report", validateKindBody(Kind.Report, doneReport));
+expectIssue(
+  "done report null",
+  validateKindBody(Kind.Report, { ...doneReport, result: null, journal: null }),
+  "$.result",
+  "requiredWhen",
+);
+expectIssue(
+  "attempting report state",
+  validateKindBody(Kind.Report, { ...doneReport, state: "attempting", result: null }),
+  "$.journal.state",
+  "state",
+);
+
+const sendResult = committedJournal.result;
+expectValid("send result", validatePrimitiveResult("chat.sendMessage", 1, sendResult));
+expectIssue(
+  "send result evidence required",
+  validatePrimitiveResult("chat.sendMessage", 1, { ...sendResult, evidence: [] }),
+  "$.evidence",
+  "minItems",
+);
+expectIssue(
+  "send result evidence enum",
+  validatePrimitiveResult("chat.sendMessage", 1, { ...sendResult, evidence: [{ type: "clicked" }] }),
+  "$.evidence[0].type",
+  "enum",
+);
+expectValid(
+  "witness unavailable before action",
+  validatePrimitiveResult("chat.sendMessage", 1, {
+    ref: "cmd-1",
+    status: "failed",
+    error: {
+      code: "WITNESS_UNAVAILABLE",
+      retryable: "afterRecovery",
+      sideEffect: "none",
+      data: { reason: "writeFailed" },
+    },
+    replayed: false,
+    execMs: 1,
+  }),
+);
+expectIssue(
+  "witness unavailable data required",
+  validatePrimitiveResult("chat.sendMessage", 1, {
+    ref: "cmd-1",
+    status: "failed",
+    error: { code: "WITNESS_UNAVAILABLE", retryable: "afterRecovery", sideEffect: "none" },
+    replayed: false,
+    execMs: 1,
+  }),
+  "$.error.data",
+  "required",
+);

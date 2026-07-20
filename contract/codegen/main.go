@@ -141,6 +141,22 @@ func assertContract(c map[string]any) {
 	for _, name := range sortedKeys(types) {
 		assertSchemaNode(c, types, "schemas.types."+name, obj(types, name))
 	}
+	// X 的持久证词会跨连接补投，信封必须保留创建时的非空 session；
+	// committed journal 必须携带完整且非 null 的 ResultBody，不能靠实现约定补洞。
+	resultEnvelopeSession := obj(obj(obj(types, "ResultEnvelope"), "fields"), "session")
+	if str(resultEnvelopeSession["type"]) != "string" || boolval(resultEnvelopeSession["optional"]) || boolval(resultEnvelopeSession["nullable"]) {
+		die("schemas.types.ResultEnvelope.fields.session 必须是必填、非 nullable 字符串")
+	}
+	journalResult := obj(obj(obj(types, "JournalEntry"), "fields"), "result")
+	if str(journalResult["ref"]) != "ResultBody" || !boolval(journalResult["optional"]) || boolval(journalResult["nullable"]) {
+		die("schemas.types.JournalEntry.fields.result 必须是 optional 但非 nullable 的 ResultBody")
+	}
+	if !hasConditionalRule(types, "JournalEntry", "requiredWhen", "result", "state", "committed") {
+		die("schemas.types.JournalEntry 必须规定 committed 时 result 必填且非 null")
+	}
+	if !hasConditionalRule(types, "JournalEntry", "forbiddenWhen", "result", "state", "attempting") {
+		die("schemas.types.JournalEntry 必须规定 attempting 时 result 禁止")
+	}
 	assertSchemaRef(types, "errorObject.schema", str(obj(c, "errorObject")["schema"]))
 
 	bodies := obj(c, "bodies")
@@ -169,6 +185,34 @@ func assertContract(c map[string]any) {
 		}
 		assertSchemaRef(types, "primitives."+name+".argsSchema", str(p["argsSchema"]))
 		assertSchemaRef(types, "primitives."+name+".dataSchema", str(p["dataSchema"]))
+		if guards := str(p["guardsSchema"]); guards != "" {
+			assertSchemaRef(types, "primitives."+name+".guardsSchema", guards)
+		}
+		if evidence := str(p["evidenceSchema"]); evidence != "" {
+			assertSchemaRef(types, "primitives."+name+".evidenceSchema", evidence)
+		}
+		if str(p["class"]) == "effectful" && str(p["batch"]) == "X" {
+			if str(p["guardsSchema"]) == "" || str(p["evidenceSchema"]) == "" {
+				die("primitives.%s 是已激活真实 SX,guardsSchema/evidenceSchema 必须同时存在", name)
+			}
+			verification := obj(p, "verification")
+			verifyName := str(verification["primitive"])
+			verify, ok := obj(c, "primitives")[verifyName].(map[string]any)
+			if !ok || intval(verify["ver"]) == 0 || intval(verify["ver"]) != intval(verification["ver"]) {
+				die("primitives.%s.verification 必须引用已激活且版本一致的验证读", name)
+			}
+			if class := str(verify["class"]); class != "readonly" && class != "intrusive" {
+				die("primitives.%s.verification 只能引用 readonly/intrusive 原语", name)
+			}
+			if rounds := intval(verification["maxRounds"]); rounds < 1 || rounds > 3 {
+				die("primitives.%s.verification.maxRounds 必须在 1..3", name)
+			}
+		}
+	}
+	for _, code := range sortedKeys(obj(c, "errorCodes")) {
+		if schema := str(obj(obj(c, "errorCodes"), code)["dataSchema"]); schema != "" {
+			assertSchemaRef(types, "errorCodes."+code+".dataSchema", schema)
+		}
 	}
 	for _, name := range sortedKeys(obj(c, "events")) {
 		e := obj(obj(c, "events"), name)
@@ -212,6 +256,12 @@ func assertContract(c map[string]any) {
 	assertIntEqual("readList data byte budget", intval(payload["inlineResultDataBytes"]), schemaTypeInt(types, "ChatReadListData", "maxJsonBytes"))
 	assertIntEqual("readThread data byte budget", intval(payload["inlineResultDataBytes"]), schemaTypeInt(types, "ChatReadThreadData", "maxJsonBytes"))
 	assertIntEqual("error data byte budget", intval(payload["inlineResultDataBytes"]), schemaFieldInt(types, "ErrorBody", "data", "maxJsonBytes"))
+	assertIntEqual("hello outboxPending capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "HelloBody", "outboxPending", "maximum"))
+	assertIntEqual("hello journalOpen capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "HelloBody", "journalOpen", "maximum"))
+	assertIntEqual("ping outboxPending capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "PingBody", "outboxPending", "maximum"))
+	assertIntEqual("ping journalOpen capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "PingBody", "journalOpen", "maximum"))
+	assertIntEqual("witness schema version", intval(defs["witnessSchemaVersion"]), schemaFieldInt(types, "WitnessStoreMeta", "schemaVersion", "maximum"))
+	assertIntEqual("verification rounds", intval(defs["verificationMaxRounds"]), intval(obj(obj(obj(c, "primitives"), "chat.sendMessage"), "verification")["maxRounds"]))
 
 	// 保守按所有字符串每输入字节/码点最多转成 6 字节 JSON escape 计算。
 	// failed result 可同时带 error.evidence 与 result.evidence,但只会有一份 data。
@@ -340,6 +390,25 @@ func schemaFieldInt(types map[string]any, typeName, fieldName, key string) int64
 
 func schemaTypeInt(types map[string]any, typeName, key string) int64 {
 	return intval(obj(types, typeName)[key])
+}
+
+func hasConditionalRule(types map[string]any, typeName, kind, field, whenField, equals string) bool {
+	rules, ok := obj(types, typeName)["rules"].([]any)
+	if !ok {
+		return false
+	}
+	for _, raw := range rules {
+		rule, ok := raw.(map[string]any)
+		if !ok || str(rule["kind"]) != kind || str(rule["field"]) != field || str(rule["whenField"]) != whenField {
+			continue
+		}
+		for _, value := range strSlice(rule["equals"]) {
+			if value == equals {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func assertIntEqual(name string, a, b int64) {
@@ -512,6 +581,7 @@ func genGo(c map[string]any, hash string) []byte {
 	w("\tSideEffect       []SideEffect // 允许取值")
 	w("\tBatch            Batch")
 	w("\tPhase            ErrorPhase // receipt=仅 ack(rejected);execution=accepted 后 result(failed)")
+	w("\tDataSchema       string // 空=无专用 error.data schema")
 	w("}")
 	w("")
 	w("var ErrorCodes = map[ErrorCode]ErrorCodeMeta{")
@@ -522,8 +592,8 @@ func genGo(c map[string]any, hash string) []byte {
 		for i, se := range ses {
 			parts[i] = "SideEffect" + pascal(se)
 		}
-		w("\tErrCode%s: {RetryableDefault: %q, SideEffect: []SideEffect{%s}, Batch: Batch%s, Phase: ErrorPhase%s},",
-			pascal(k), str(m["retryable"]), strings.Join(parts, ", "), pascal(str(m["batch"])), pascal(str(m["phase"])))
+		w("\tErrCode%s: {RetryableDefault: %q, SideEffect: []SideEffect{%s}, Batch: Batch%s, Phase: ErrorPhase%s, DataSchema: %q},",
+			pascal(k), str(m["retryable"]), strings.Join(parts, ", "), pascal(str(m["batch"])), pascal(str(m["phase"])), str(m["dataSchema"]))
 	}
 	w("}")
 	w("")
@@ -560,15 +630,30 @@ func genGo(c map[string]any, hash string) []byte {
 	w("\tLeaseMs            int64  // 0=不启用租约;非零须协商 lease/1")
 	w("\tArgsSchema         string")
 	w("\tDataSchema         string")
+	w("\tGuardsSchema       string // 空=该原语不接受 guards")
+	w("\tEvidenceSchema     string // effectful ok 的每个 evidence item schema")
+	w("\tPreconditions      []string")
+	w("\tVerificationPrimitive string // effectful 歧义消解读;空=无")
+	w("\tVerificationVer       int")
+	w("\tVerificationMaxRounds int")
 	w("\tContextOptionalBeforeBinding bool // 仅首次真人绑定探测可省略 context")
 	w("}")
 	w("")
 	w("var Primitives = map[string]PrimitiveMeta{")
 	for _, k := range sortedKeys(prims) {
 		m := obj(prims, k)
-		w("\tPrim%s: {Ver: %d, Class: Class%s, Batch: Batch%s, PlatformSideEffect: %q, ExecBudgetMs: %d, DeadlineMs: %d, LeaseMs: %d, ArgsSchema: %q, DataSchema: %q, ContextOptionalBeforeBinding: %t},",
+		var preconditions []string
+		if _, ok := m["preconditions"]; ok {
+			preconditions = strSlice(m["preconditions"])
+		}
+		quotedPreconditions := make([]string, len(preconditions))
+		for i, precondition := range preconditions {
+			quotedPreconditions[i] = strconv.Quote(precondition)
+		}
+		verification, _ := m["verification"].(map[string]any)
+		w("\tPrim%s: {Ver: %d, Class: Class%s, Batch: Batch%s, PlatformSideEffect: %q, ExecBudgetMs: %d, DeadlineMs: %d, LeaseMs: %d, ArgsSchema: %q, DataSchema: %q, GuardsSchema: %q, EvidenceSchema: %q, Preconditions: []string{%s}, VerificationPrimitive: %q, VerificationVer: %d, VerificationMaxRounds: %d, ContextOptionalBeforeBinding: %t},",
 			pascal(k), intval(m["ver"]), pascal(str(m["class"])), pascal(str(m["batch"])),
-			str(m["platformSideEffect"]), intval(m["execBudgetMs"]), intval(m["deadlineMs"]), intval(m["leaseMs"]), str(m["argsSchema"]), str(m["dataSchema"]), boolval(m["contextOptionalBeforeBinding"]))
+			str(m["platformSideEffect"]), intval(m["execBudgetMs"]), intval(m["deadlineMs"]), intval(m["leaseMs"]), str(m["argsSchema"]), str(m["dataSchema"]), str(m["guardsSchema"]), str(m["evidenceSchema"]), strings.Join(quotedPreconditions, ", "), str(verification["primitive"]), intval(verification["ver"]), intval(verification["maxRounds"]), boolval(m["contextOptionalBeforeBinding"]))
 	}
 	w("}")
 	w("")
@@ -689,6 +774,8 @@ func genGoTypes(c map[string]any) []byte {
 	must(err, "序列化 primitive schemas")
 	eventSchemasJSON, err := json.Marshal(eventSchemaMap(c))
 	must(err, "序列化 event schemas")
+	errorDataSchemasJSON, err := json.Marshal(errorDataSchemaMap(c))
+	must(err, "序列化 error data schemas")
 
 	w("type schemaRule struct {")
 	w("\tKind string `json:\"kind\"`")
@@ -721,8 +808,11 @@ func genGoTypes(c map[string]any) []byte {
 	w("")
 	w("type primitiveSchema struct {")
 	w("\tVer int `json:\"ver\"`")
+	w("\tClass string `json:\"class\"`")
 	w("\tArgs string `json:\"args\"`")
 	w("\tData string `json:\"data\"`")
+	w("\tGuards string `json:\"guards\"`")
+	w("\tEvidence string `json:\"evidence\"`")
 	w("}")
 	w("")
 	w("var schemaTypes = mustDecodeSchemaMap(%q)", string(typesJSON))
@@ -730,6 +820,7 @@ func genGoTypes(c map[string]any) []byte {
 	w("var bodySchemas = mustDecodeKindSchemas(%q)", string(bodySchemasJSON))
 	w("var primitiveSchemas = mustDecodePrimitiveSchemas(%q)", string(primitiveSchemasJSON))
 	w("var eventSchemas = mustDecodeStringMap(%q)", string(eventSchemasJSON))
+	w("var errorDataSchemas = mustDecodeStringMap(%q)", string(errorDataSchemasJSON))
 	w("")
 	w("func mustDecodeSchemaMap(raw string) map[string]schemaSpec {")
 	w("\tvar out map[string]schemaSpec")
@@ -786,12 +877,16 @@ func genGoTypes(c map[string]any) []byte {
 	w("\treturn nil")
 	w("}")
 	w("")
-	w("// ValidateKindBody 校验已知字段并忽略未知加法字段;cmd/event 还会下钻 args/data schema。")
+	w("// ValidateKindBody 校验已知字段并忽略未知加法字段;cmd/event/error/report 还会下钻语义 schema。")
 	w("func ValidateKindBody(kind Kind, raw json.RawMessage) error {")
 	w("\tname, ok := bodySchemas[kind]")
 	w("\tif !ok { return validationError(\"$\", \"kind\", \"未知 kind %q\", kind) }")
 	w("\tif err := validateRaw(name, raw); err != nil { return err }")
 	w("\tswitch kind {")
+	w("\tcase KindHello:")
+	w("\t\treturn validateWitnessAdvertisement(raw, true)")
+	w("\tcase KindPing:")
+	w("\t\treturn validateWitnessAdvertisement(raw, false)")
 	w("\tcase KindCmd:")
 	w("\t\tvar body CmdBody")
 	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
@@ -801,9 +896,38 @@ func genGoTypes(c map[string]any) []byte {
 	w("\t\tvar body EventBody")
 	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
 	w("\t\treturn rebaseValidationError(ValidateEventData(string(body.Name), body.Data), \"$.data\")")
+	w("\tcase KindAck:")
+	w("\t\tvar body AckBody")
+	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\treturn validateErrorData(body.Error)")
+	w("\tcase KindResult:")
+	w("\t\tvar body ResultBody")
+	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\treturn validateErrorData(body.Error)")
+	w("\tcase KindReport:")
+	w("\t\tvar body ReportBody")
+	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\treturn validateReportSemantics(body)")
 	w("\tdefault:")
 	w("\t\treturn nil")
 	w("\t}")
+	w("}")
+	w("")
+	w("// ValidateSchema 校验 contract.schemas.types 中任一具名 DTO；供 witness 持久记录读回时使用。")
+	w("func ValidateSchema(name string, raw json.RawMessage) error {")
+	w("\tif err := validateRaw(name, raw); err != nil { return err }")
+	w("\tswitch name {")
+	w("\tcase \"JournalEntry\":")
+	w("\t\tvar entry JournalEntry")
+	w("\t\tif err := json.Unmarshal(raw, &entry); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\tif entry.Result != nil && entry.Result.Ref != entry.Ref { return validationError(\"$.result.ref\", \"correlation\", \"journal result.ref 必须等于 journal.ref\") }")
+	w("\t\tif entry.ExpiresAt <= entry.StartedAt { return validationError(\"$.expiresAt\", \"ordering\", \"journal expiresAt 必须晚于 startedAt\") }")
+	w("\tcase \"OutboxEntry\":")
+	w("\t\tvar entry OutboxEntry")
+	w("\t\tif err := json.Unmarshal(raw, &entry); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\tif entry.ExpiresAt <= entry.CreatedAt { return validationError(\"$.expiresAt\", \"ordering\", \"outbox expiresAt 必须晚于 createdAt\") }")
+	w("\t}")
+	w("\treturn nil")
 	w("}")
 	w("")
 	w("func ValidatePrimitiveArgs(name string, ver int, raw json.RawMessage) error {")
@@ -818,6 +942,53 @@ func genGoTypes(c map[string]any) []byte {
 	w("\tif !ok { return validationError(\"$\", \"primitive\", \"原语 %q 无激活 schema\", name) }")
 	w("\tif ver != s.Ver { return validationError(\"$\", \"version\", \"原语 %q 需要版本 %d,收到 %d\", name, s.Ver, ver) }")
 	w("\treturn validateRaw(s.Data, raw)")
+	w("}")
+	w("")
+	w("func ValidatePrimitiveGuards(name string, ver int, raw json.RawMessage) error {")
+	w("\ts, ok := primitiveSchemas[name]")
+	w("\tif !ok { return validationError(\"$\", \"primitive\", \"原语 %q 无激活 schema\", name) }")
+	w("\tif ver != s.Ver { return validationError(\"$\", \"version\", \"原语 %q 需要版本 %d,收到 %d\", name, s.Ver, ver) }")
+	w("\tif s.Guards == \"\" {")
+	w("\t\tif len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte(\"null\")) { return nil }")
+	w("\t\treturn validationError(\"$\", \"forbidden\", \"原语 %q 未声明 guardsSchema\", name)")
+	w("\t}")
+	w("\tif len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte(\"null\")) { return validationError(\"$\", \"required\", \"原语 %q 必须携带 guards\", name) }")
+	w("\treturn validateRaw(s.Guards, raw)")
+	w("}")
+	w("")
+	w("// ValidatePrimitiveEvidence 把 evidenceSchema 解释为每个 evidence item 的 schema；真实 SX 至少一项。")
+	w("func ValidatePrimitiveEvidence(name string, ver int, raw json.RawMessage) error {")
+	w("\ts, ok := primitiveSchemas[name]")
+	w("\tif !ok { return validationError(\"$\", \"primitive\", \"原语 %q 无激活 schema\", name) }")
+	w("\tif ver != s.Ver { return validationError(\"$\", \"version\", \"原语 %q 需要版本 %d,收到 %d\", name, s.Ver, ver) }")
+	w("\tif s.Evidence == \"\" { return nil }")
+	w("\tvar items []json.RawMessage")
+	w("\tif err := json.Unmarshal(raw, &items); err != nil { return validationError(\"$\", \"type\", \"evidence 需要 array:%v\", err) }")
+	w("\tif len(items) == 0 { return validationError(\"$\", \"minItems\", \"真实 effectful ok 至少一项 evidence\") }")
+	w("\tfor i, item := range items {")
+	w("\t\tif err := validateRaw(s.Evidence, item); err != nil { return rebaseValidationError(err, fmt.Sprintf(\"$[%d]\", i)) }")
+	w("\t}")
+	w("\treturn nil")
+	w("}")
+	w("")
+	w("// ValidatePrimitiveResult 同时强制 result 基础形态、ok data、真实 SX evidence 与 failed.sideEffect。")
+	w("func ValidatePrimitiveResult(name string, ver int, raw json.RawMessage) error {")
+	w("\tif err := ValidateKindBody(KindResult, raw); err != nil { return err }")
+	w("\ts, ok := primitiveSchemas[name]")
+	w("\tif !ok { return validationError(\"$\", \"primitive\", \"原语 %q 无激活 schema\", name) }")
+	w("\tif ver != s.Ver { return validationError(\"$\", \"version\", \"原语 %q 需要版本 %d,收到 %d\", name, s.Ver, ver) }")
+	w("\tvar body ResultBody")
+	w("\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\tif body.Status == ResultStatusOk {")
+	w("\t\tif err := rebaseValidationError(ValidatePrimitiveData(name, ver, body.Data), \"$.data\"); err != nil { return err }")
+	w("\t\tevidenceRaw, err := json.Marshal(body.Evidence)")
+	w("\t\tif err != nil { return validationError(\"$.evidence\", \"json\", \"%v\", err) }")
+	w("\t\treturn rebaseValidationError(ValidatePrimitiveEvidence(name, ver, evidenceRaw), \"$.evidence\")")
+	w("\t}")
+	w("\tif body.Status == ResultStatusFailed && s.Class == \"effectful\" && (body.Error == nil || body.Error.SideEffect == \"\") {")
+	w("\t\treturn validationError(\"$.error.sideEffect\", \"required\", \"effectful failed 必须显式标注 sideEffect\")")
+	w("\t}")
+	w("\treturn nil")
 	w("}")
 	w("")
 	w("func ValidateEventData(name string, raw json.RawMessage) error {")
@@ -843,6 +1014,44 @@ func genGoTypes(c map[string]any) []byte {
 	w("\t\tif body.Context == nil || body.Context.ExpectedPrincipalFingerprint == \"\" {")
 	w("\t\t\treturn validationError(\"$.context.expectedPrincipalFingerprint\", \"required\", \"intrusive/effectful 原语必须携带期望账号指纹\")")
 	w("\t\t}")
+	w("\t}")
+	w("\tif err := rebaseValidationError(ValidatePrimitiveGuards(body.Name, body.Ver, body.Guards), \"$.guards\"); err != nil { return err }")
+	w("\treturn nil")
+	w("}")
+	w("")
+	w("func validateWitnessAdvertisement(raw json.RawMessage, hello bool) error {")
+	w("\tvar fields map[string]json.RawMessage")
+	w("\tif err := json.Unmarshal(raw, &fields); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\tnames := []string{\"witnessStoreId\", \"outboxPending\", \"journalOpen\"}")
+	w("\tpresent := 0")
+	w("\tfor _, name := range names { if _, ok := fields[name]; ok { present++ } }")
+	w("\trequired := false")
+	w("\tif hello {")
+	w("\t\tvar body HelloBody")
+	w("\t\tif err := json.Unmarshal(raw, &body); err != nil { return validationError(\"$\", \"json\", \"%v\", err) }")
+	w("\t\tfor _, feature := range body.Features { if feature == string(FeatureWitness1) { required = true } }")
+	w("\t}")
+	w("\tif required && present != len(names) { return validationError(\"$\", \"witnessAdvertisement\", \"声明 witness/1 时三个证词字段必须齐备\") }")
+	w("\tif present != 0 && present != len(names) { return validationError(\"$\", \"witnessAdvertisement\", \"证词诊断字段必须全有或全无\") }")
+	w("\treturn nil")
+	w("}")
+	w("")
+	w("func validateErrorData(body *ErrorBody) error {")
+	w("\tif body == nil { return nil }")
+	w("\tmeta, ok := ErrorCodes[body.Code]")
+	w("\tif !ok || meta.DataSchema == \"\" { return nil }")
+	w("\tif len(body.Data) == 0 || bytes.Equal(bytes.TrimSpace(body.Data), []byte(\"null\")) { return validationError(\"$.error.data\", \"required\", \"错误 %s 必须携带专用 data\", body.Code) }")
+	w("\treturn rebaseValidationError(ValidateSchema(meta.DataSchema, body.Data), \"$.error.data\")")
+	w("}")
+	w("")
+	w("func validateReportSemantics(body ReportBody) error {")
+	w("\tif body.Result != nil && body.Result.Ref != body.Ref { return validationError(\"$.result.ref\", \"correlation\", \"done result.ref 必须等于 report.ref\") }")
+	w("\tif body.Journal != nil && body.Journal.Ref != body.Ref { return validationError(\"$.journal.ref\", \"correlation\", \"journal.ref 必须等于 report.ref\") }")
+	w("\tswitch body.State {")
+	w("\tcase ReportStateAttempting:")
+	w("\t\tif body.Journal == nil || body.Journal.State != JournalStateAttempting { return validationError(\"$.journal.state\", \"state\", \"attempting report 必须携带 attempting journal\") }")
+	w("\tcase ReportStateDone:")
+	w("\t\tif body.Result == nil || body.Journal == nil || body.Journal.State != JournalStateCommitted { return validationError(\"$.journal.state\", \"state\", \"done report 必须携带 committed journal 与完整 result\") }")
 	w("\t}")
 	w("\treturn nil")
 	w("}")
@@ -1090,6 +1299,7 @@ func genTS(c map[string]any, hash string) []byte {
 	w("  sideEffect: readonly SideEffect[];")
 	w("  batch: Batch;")
 	w("  phase: ErrorPhase;")
+	w("  dataSchema: string | null;")
 	w("}")
 	w("export const ERROR_CODE_META: Record<ErrorCode, ErrorCodeMetaEntry> = {")
 	for _, k := range sortedKeys(errCodes) {
@@ -1099,7 +1309,7 @@ func genTS(c map[string]any, hash string) []byte {
 		for i, se := range ses {
 			quoted[i] = strconv.Quote(se)
 		}
-		w("  %s: { retryableDefault: %q, sideEffect: [%s], batch: %q, phase: %q },", k, str(m["retryable"]), strings.Join(quoted, ", "), str(m["batch"]), str(m["phase"]))
+		w("  %s: { retryableDefault: %q, sideEffect: [%s], batch: %q, phase: %q, dataSchema: %s },", k, str(m["retryable"]), strings.Join(quoted, ", "), str(m["batch"]), str(m["phase"]), tsNullableStr(m["dataSchema"]))
 	}
 	w("};")
 	w("")
@@ -1131,15 +1341,30 @@ func genTS(c map[string]any, hash string) []byte {
 	w("  leaseMs: number | null;")
 	w("  argsSchema: string | null;")
 	w("  dataSchema: string | null;")
+	w("  guardsSchema: string | null;")
+	w("  evidenceSchema: string | null;")
+	w("  preconditions: readonly string[];")
+	w("  verificationPrimitive: Primitive | null;")
+	w("  verificationVer: number | null;")
+	w("  verificationMaxRounds: number | null;")
 	w("  /** 仅首次真人绑定探测可省略 context */")
 	w("  contextOptionalBeforeBinding: boolean;")
 	w("}")
 	w("export const PRIMITIVE_META: Record<Primitive, PrimitiveMetaEntry> = {")
 	for _, k := range sortedKeys(prims) {
 		m := obj(prims, k)
-		w("  %q: { ver: %d, class: %q, batch: %q, platformSideEffect: %s, execBudgetMs: %s, deadlineMs: %s, leaseMs: %s, argsSchema: %s, dataSchema: %s, contextOptionalBeforeBinding: %t },",
+		var preconditions []string
+		if _, ok := m["preconditions"]; ok {
+			preconditions = strSlice(m["preconditions"])
+		}
+		quotedPreconditions := make([]string, len(preconditions))
+		for i, precondition := range preconditions {
+			quotedPreconditions[i] = strconv.Quote(precondition)
+		}
+		verification, _ := m["verification"].(map[string]any)
+		w("  %q: { ver: %d, class: %q, batch: %q, platformSideEffect: %s, execBudgetMs: %s, deadlineMs: %s, leaseMs: %s, argsSchema: %s, dataSchema: %s, guardsSchema: %s, evidenceSchema: %s, preconditions: [%s], verificationPrimitive: %s, verificationVer: %s, verificationMaxRounds: %s, contextOptionalBeforeBinding: %t },",
 			k, intval(m["ver"]), str(m["class"]), str(m["batch"]),
-			tsNullableStr(m["platformSideEffect"]), tsNullableInt(m["execBudgetMs"]), tsNullableInt(m["deadlineMs"]), tsNullableInt(m["leaseMs"]), tsNullableStr(m["argsSchema"]), tsNullableStr(m["dataSchema"]), boolval(m["contextOptionalBeforeBinding"]))
+			tsNullableStr(m["platformSideEffect"]), tsNullableInt(m["execBudgetMs"]), tsNullableInt(m["deadlineMs"]), tsNullableInt(m["leaseMs"]), tsNullableStr(m["argsSchema"]), tsNullableStr(m["dataSchema"]), tsNullableStr(m["guardsSchema"]), tsNullableStr(m["evidenceSchema"]), strings.Join(quotedPreconditions, ", "), tsNullableStr(verification["primitive"]), tsNullableInt(verification["ver"]), tsNullableInt(verification["maxRounds"]), boolval(m["contextOptionalBeforeBinding"]))
 	}
 	w("};")
 	w("")
@@ -1223,6 +1448,22 @@ func genTSSchemas(c map[string]any) []byte {
 		}
 	}
 	w("}")
+	w("export interface PrimitiveGuardsByName {")
+	for _, name := range sortedKeys(obj(c, "primitives")) {
+		p := obj(obj(c, "primitives"), name)
+		if intval(p["ver"]) > 0 && str(p["guardsSchema"]) != "" {
+			w("  %q: %s;", name, str(p["guardsSchema"]))
+		}
+	}
+	w("}")
+	w("export interface PrimitiveEvidenceByName {")
+	for _, name := range sortedKeys(obj(c, "primitives")) {
+		p := obj(obj(c, "primitives"), name)
+		if intval(p["ver"]) > 0 && str(p["evidenceSchema"]) != "" {
+			w("  %q: %s;", name, str(p["evidenceSchema"]))
+		}
+	}
+	w("}")
 	w("export type TypedCmdBody<N extends keyof PrimitiveArgsByName = keyof PrimitiveArgsByName> =")
 	w("  Omit<CmdBody, \"name\" | \"args\"> & { name: N; args: PrimitiveArgsByName[N] };")
 	w("")
@@ -1246,6 +1487,8 @@ func genTSSchemas(c map[string]any) []byte {
 	must(err, "序列化 TS primitive schemas")
 	eventJSON, err := json.MarshalIndent(eventSchemaMap(c), "", "  ")
 	must(err, "序列化 TS event schemas")
+	errorDataJSON, err := json.MarshalIndent(errorDataSchemaMap(c), "", "  ")
+	must(err, "序列化 TS error data schemas")
 
 	w("interface SchemaRule {")
 	w("  kind: \"requiredWhen\" | \"forbiddenWhen\" | \"exactlyOneWhen\" | \"atLeastOneTrueWhen\" | \"allFalseWhen\";")
@@ -1261,6 +1504,7 @@ func genTSSchemas(c map[string]any) []byte {
 	w("  optional?: boolean;")
 	w("  nullable?: boolean;")
 	w("  raw?: boolean;")
+	w("  note?: string;")
 	w("  fields?: Record<string, SchemaSpec>;")
 	w("  items?: SchemaSpec;")
 	w("  minimum?: number;")
@@ -1275,13 +1519,14 @@ func genTSSchemas(c map[string]any) []byte {
 	w("  default?: unknown;")
 	w("  rules?: readonly SchemaRule[];")
 	w("}")
-	w("interface PrimitiveSchemaSpec { ver: number; args: string; data: string }")
+	w("interface PrimitiveSchemaSpec { ver: number; class: CmdClass; args: string; data: string; guards: string; evidence: string }")
 	w("")
 	w("const SCHEMA_TYPES: Record<string, SchemaSpec> = %s;", string(typesJSON))
 	w("const SCHEMA_ENUMS: Record<string, readonly string[]> = %s;", string(enumsJSON))
 	w("const BODY_SCHEMAS: Record<Kind, string> = %s;", string(bodyJSON))
 	w("const PRIMITIVE_SCHEMAS: Record<string, PrimitiveSchemaSpec> = %s;", string(primitiveJSON))
 	w("const EVENT_SCHEMAS: Record<EventName, string> = %s;", string(eventJSON))
+	w("const ERROR_DATA_SCHEMAS: Partial<Record<ErrorCode, string>> = %s;", string(errorDataJSON))
 	w("")
 
 	b.WriteString(`export interface ValidationIssue {
@@ -1321,6 +1566,24 @@ function validateByName(schemaName: string, value: unknown): ValidationIssue[] {
     return issues;
   }
   validateSpec(schema, value, "$", issues);
+  return issues;
+}
+
+/** 校验 contract.schemas.types 中任一具名 DTO；供 witness 持久记录读回时使用。 */
+export function validateSchema(schemaName: string, value: unknown): ValidationIssue[] {
+  const issues = validateByName(schemaName, value);
+  if (issues.length > 0 || !isRecord(value)) return issues;
+  if (schemaName === "JournalEntry") {
+    const result = isRecord(value.result) ? value.result : undefined;
+    if (result !== undefined && result.ref !== value.ref) pushIssue(issues, "$.result.ref", "correlation", "journal result.ref 必须等于 journal.ref");
+    if (typeof value.expiresAt === "number" && typeof value.startedAt === "number" && value.expiresAt <= value.startedAt) {
+      pushIssue(issues, "$.expiresAt", "ordering", "journal expiresAt 必须晚于 startedAt");
+    }
+  } else if (schemaName === "OutboxEntry") {
+    if (typeof value.expiresAt === "number" && typeof value.createdAt === "number" && value.expiresAt <= value.createdAt) {
+      pushIssue(issues, "$.expiresAt", "ordering", "outbox expiresAt 必须晚于 createdAt");
+    }
+  }
   return issues;
 }
 
@@ -1468,6 +1731,45 @@ function validateCommandSemantics(body: Record<string, unknown>): ValidationIssu
       pushIssue(issues, "$.context.expectedPrincipalFingerprint", "required", "intrusive/effectful 原语必须携带期望账号指纹");
     }
   }
+  issues.push(...rebaseIssues(validatePrimitiveGuards(name, meta.ver, body.guards), "$.guards"));
+  return issues;
+}
+
+function validateWitnessAdvertisement(body: Record<string, unknown>, hello: boolean): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const names = ["witnessStoreId", "outboxPending", "journalOpen"] as const;
+  const present = names.filter((name) => name in body).length;
+  const required = hello && Array.isArray(body.features) && body.features.includes(Feature.Witness1);
+  if (required && present !== names.length) {
+    pushIssue(issues, "$", "witnessAdvertisement", "声明 witness/1 时三个证词字段必须齐备");
+  } else if (present !== 0 && present !== names.length) {
+    pushIssue(issues, "$", "witnessAdvertisement", "证词诊断字段必须全有或全无");
+  }
+  return issues;
+}
+
+function validateErrorData(error: unknown): ValidationIssue[] {
+  if (!isRecord(error) || typeof error.code !== "string") return [];
+  const schema = ERROR_DATA_SCHEMAS[error.code as ErrorCode];
+  if (schema === undefined) return [];
+  if (!("data" in error) || error.data === null) {
+    return [{ path: "$.error.data", rule: "required", message: "错误 " + error.code + " 必须携带专用 data" }];
+  }
+  return rebaseIssues(validateSchema(schema, error.data), "$.error.data");
+}
+
+function validateReportSemantics(body: Record<string, unknown>): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const result = isRecord(body.result) ? body.result : undefined;
+  const journal = isRecord(body.journal) ? body.journal : undefined;
+  if (result !== undefined && result.ref !== body.ref) pushIssue(issues, "$.result.ref", "correlation", "done result.ref 必须等于 report.ref");
+  if (journal !== undefined && journal.ref !== body.ref) pushIssue(issues, "$.journal.ref", "correlation", "journal.ref 必须等于 report.ref");
+  if (body.state === ReportState.Attempting && (journal === undefined || journal.state !== JournalState.Attempting)) {
+    pushIssue(issues, "$.journal.state", "state", "attempting report 必须携带 attempting journal");
+  }
+  if (body.state === ReportState.Done && (result === undefined || journal === undefined || journal.state !== JournalState.Committed)) {
+    pushIssue(issues, "$.journal.state", "state", "done report 必须携带 committed journal 与完整 result");
+  }
   return issues;
 }
 
@@ -1479,11 +1781,19 @@ export function validateFrameSize(frame: string | Uint8Array, maxBytes: number =
 export function validateKindBody<K extends Kind>(kind: K, value: unknown): ValidationIssue[] {
   const issues = validateByName(BODY_SCHEMAS[kind], value);
   if (issues.length > 0 || !isRecord(value)) return issues;
-  if (kind === "cmd") {
+  if (kind === "hello") {
+    issues.push(...validateWitnessAdvertisement(value, true));
+  } else if (kind === "ping") {
+    issues.push(...validateWitnessAdvertisement(value, false));
+  } else if (kind === "cmd") {
     issues.push(...validateCommandSemantics(value));
     if (typeof value.name === "string" && typeof value.ver === "number") issues.push(...rebaseIssues(validatePrimitiveArgs(value.name, value.ver, value.args), "$.args"));
   } else if (kind === "event" && typeof value.name === "string") {
     issues.push(...rebaseIssues(validateEventData(value.name, value.data), "$.data"));
+  } else if (kind === "ack" || kind === "result") {
+    issues.push(...validateErrorData(value.error));
+  } else if (kind === "report") {
+    issues.push(...validateReportSemantics(value));
   }
   return issues;
 }
@@ -1500,6 +1810,46 @@ export function validatePrimitiveData(name: string, ver: number, value: unknown)
   if (schema === undefined) return [{ path: "$", rule: "primitive", message: "原语无激活 schema: " + name }];
   if (ver !== schema.ver) return [{ path: "$", rule: "version", message: "原语 " + name + " 需要版本 " + schema.ver + ",收到 " + ver }];
   return validateByName(schema.data, value);
+}
+
+export function validatePrimitiveGuards(name: string, ver: number, value: unknown): ValidationIssue[] {
+  const schema = PRIMITIVE_SCHEMAS[name];
+  if (schema === undefined) return [{ path: "$", rule: "primitive", message: "原语无激活 schema: " + name }];
+  if (ver !== schema.ver) return [{ path: "$", rule: "version", message: "原语 " + name + " 需要版本 " + schema.ver + ",收到 " + ver }];
+  if (schema.guards === "") return value === undefined || value === null
+    ? []
+    : [{ path: "$", rule: "forbidden", message: "原语 " + name + " 未声明 guardsSchema" }];
+  if (value === undefined || value === null) return [{ path: "$", rule: "required", message: "原语 " + name + " 必须携带 guards" }];
+  return validateSchema(schema.guards, value);
+}
+
+/** evidenceSchema 是每个 evidence item 的 schema；真实 SX ok 至少一项。 */
+export function validatePrimitiveEvidence(name: string, ver: number, value: unknown): ValidationIssue[] {
+  const schema = PRIMITIVE_SCHEMAS[name];
+  if (schema === undefined) return [{ path: "$", rule: "primitive", message: "原语无激活 schema: " + name }];
+  if (ver !== schema.ver) return [{ path: "$", rule: "version", message: "原语 " + name + " 需要版本 " + schema.ver + ",收到 " + ver }];
+  if (schema.evidence === "") return [];
+  if (!Array.isArray(value)) return [{ path: "$", rule: "type", message: "evidence 需要 array" }];
+  if (value.length === 0) return [{ path: "$", rule: "minItems", message: "真实 effectful ok 至少一项 evidence" }];
+  return value.flatMap((item, index) => rebaseIssues(validateSchema(schema.evidence, item), "$[" + index + "]"));
+}
+
+/** 同时强制 result 基础形态、ok data、真实 SX evidence 与 failed.sideEffect。 */
+export function validatePrimitiveResult(name: string, ver: number, value: unknown): ValidationIssue[] {
+  const issues = validateKindBody(Kind.Result, value);
+  if (issues.length > 0 || !isRecord(value)) return issues;
+  const schema = PRIMITIVE_SCHEMAS[name];
+  if (schema === undefined) return [{ path: "$", rule: "primitive", message: "原语无激活 schema: " + name }];
+  if (ver !== schema.ver) return [{ path: "$", rule: "version", message: "原语 " + name + " 需要版本 " + schema.ver + ",收到 " + ver }];
+  if (value.status === ResultStatus.Ok) {
+    issues.push(...rebaseIssues(validatePrimitiveData(name, ver, value.data), "$.data"));
+    issues.push(...rebaseIssues(validatePrimitiveEvidence(name, ver, value.evidence), "$.evidence"));
+  } else if (value.status === ResultStatus.Failed && schema.class === CmdClass.Effectful) {
+    if (!isRecord(value.error) || typeof value.error.sideEffect !== "string" || value.error.sideEffect.length === 0) {
+      pushIssue(issues, "$.error.sideEffect", "required", "effectful failed 必须显式标注 sideEffect");
+    }
+  }
+  return issues;
 }
 
 export function validateEventData(name: string, value: unknown): ValidationIssue[] {
@@ -1519,6 +1869,21 @@ export function assertPrimitiveArgs(name: string, ver: number, value: unknown): 
 
 export function assertPrimitiveData(name: string, ver: number, value: unknown): void {
   const issues = validatePrimitiveData(name, ver, value);
+  if (issues.length > 0) throw new SchemaValidationError(issues);
+}
+
+export function assertPrimitiveGuards(name: string, ver: number, value: unknown): void {
+  const issues = validatePrimitiveGuards(name, ver, value);
+  if (issues.length > 0) throw new SchemaValidationError(issues);
+}
+
+export function assertPrimitiveEvidence(name: string, ver: number, value: unknown): void {
+  const issues = validatePrimitiveEvidence(name, ver, value);
+  if (issues.length > 0) throw new SchemaValidationError(issues);
+}
+
+export function assertPrimitiveResult(name: string, ver: number, value: unknown): void {
+  const issues = validatePrimitiveResult(name, ver, value);
   if (issues.length > 0) throw new SchemaValidationError(issues);
 }
 
@@ -1558,9 +1923,22 @@ func primitiveSchemaMap(c map[string]any) map[string]any {
 			continue
 		}
 		out[name] = map[string]any{
-			"ver":  intval(p["ver"]),
-			"args": str(p["argsSchema"]),
-			"data": str(p["dataSchema"]),
+			"ver":      intval(p["ver"]),
+			"class":    str(p["class"]),
+			"args":     str(p["argsSchema"]),
+			"data":     str(p["dataSchema"]),
+			"guards":   str(p["guardsSchema"]),
+			"evidence": str(p["evidenceSchema"]),
+		}
+	}
+	return out
+}
+
+func errorDataSchemaMap(c map[string]any) map[string]string {
+	out := map[string]string{}
+	for _, code := range sortedKeys(obj(c, "errorCodes")) {
+		if schema := str(obj(obj(c, "errorCodes"), code)["dataSchema"]); schema != "" {
+			out[code] = schema
 		}
 	}
 	return out

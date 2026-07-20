@@ -1,7 +1,8 @@
 // Package dispatch:命令派发器(协议规格 §7-§8)。
 // 派发 happy path(2.4):先记账后发送、ack 三态、result 终局化 + msgId 去重 + 回 ack。
 // 故障轨道(2.5):超时引擎(ackTimeout 关连接、deadline+宽限 void/suspect)、重连收编、
-// 脑重启扫描、suspect 六法条、人工裁决。手侧证词 journal/outbox 为 [X],v1 不做。
+// 脑重启扫描、suspect 六法条、人工裁决。真实 SX 额外使用 witness/1
+// journal/outbox 四阶段对账与结构化验证读，永不在歧义下盲重投。
 package dispatch
 
 import (
@@ -9,25 +10,35 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
 )
 
 var (
-	ErrHandOffline     = errors.New("手不在线")
-	ErrStaleSession    = errors.New("手会话已更替")
-	ErrDomainFrozen    = errors.New("串行域存在 suspect,冻结中(法条4)")
-	ErrIdemFrozen      = errors.New("幂等键被 suspect 冻结(法条3)")
-	ErrNotSuspect      = errors.New("命令不在 suspect 状态")
-	ErrVerdictNotReady = errors.New("对账未完成,不许人裁(法条5前置):手在线同代或离线不足时长")
-	ErrCapability      = errors.New("手未声明原语能力")
-	ErrFeature         = errors.New("手未协商协议特性")
-	errResultSource    = errors.New("result 来源手与命令不一致")
+	ErrHandOffline        = errors.New("手不在线")
+	ErrStaleSession       = errors.New("手会话已更替")
+	ErrDomainFrozen       = errors.New("串行域存在 suspect,冻结中(法条4)")
+	ErrIdemFrozen         = errors.New("幂等键被 suspect 冻结(法条3)")
+	ErrNotSuspect         = errors.New("命令不在 suspect 状态")
+	ErrVerdictNotReady    = errors.New("对账未完成,不许人裁(法条5前置):手在线同代或离线不足时长")
+	ErrCapability         = errors.New("手未声明原语能力")
+	ErrFeature            = errors.New("手未协商协议特性")
+	ErrRecoveryBarrier    = errors.New("手的副作用恢复屏障尚未收束")
+	ErrWitnessUnavailable = errors.New("手未提供可用的持久证词库")
+	errResultSource       = errors.New("result 来源手与命令不一致")
 )
+
+type HandWitness struct {
+	StoreID       string
+	OutboxPending int
+	JournalOpen   int
+}
 
 // Sender:把已构造的信封发给某手的当前连接,并查其会话/关连接/在线时长。hub 实现。
 type Sender interface {
@@ -36,6 +47,10 @@ type Sender interface {
 	HandNegotiation(handID string) (caps, features []string, ok bool)
 	CloseHand(handID, expectedSession, reason string) bool // 仅关闭超时命令所属 session；已顶替则 no-op
 	HandOfflineMs(handID string) int64                     // 离线时长(毫秒);在线返回 0
+}
+
+type witnessSender interface {
+	HandWitness(handID string) (HandWitness, bool)
 }
 
 // domainOf:无业务 context 命令的串行域键。首次绑定前 probe.platform 尚无
@@ -62,6 +77,13 @@ type Dispatcher struct {
 	leaseMu   sync.Mutex
 	leases    map[string]*leaseState // cmd msgId → 运行期租约(重启由 Recover 收编)
 	cancelRef map[string]string      // cancel msgId → target cmd msgId
+
+	verifyMu      sync.Mutex
+	verifyRunning map[string]bool // SX cmd msgId → 验证读 goroutine
+	verifier      EffectVerifier
+
+	handGateMu sync.Mutex
+	handGates  map[string]*sync.Mutex // welcome→收编 与新派发的每手线性化门
 }
 
 type logicalWait struct {
@@ -77,7 +99,27 @@ func New(st *store.Store, sender Sender) *Dispatcher {
 		waits:         map[string]*logicalWait{},
 		leases:        map[string]*leaseState{},
 		cancelRef:     map[string]string{},
+		verifyRunning: map[string]bool{},
+		handGates:     map[string]*sync.Mutex{},
 	}
+}
+
+func (d *Dispatcher) lockHandGate(handID string) func() {
+	d.handGateMu.Lock()
+	gate := d.handGates[handID]
+	if gate == nil {
+		gate = &sync.Mutex{}
+		d.handGates[handID] = gate
+	}
+	d.handGateMu.Unlock()
+	gate.Lock()
+	return gate.Unlock
+}
+
+// BeginHandTakeover 供 Hub 在 welcome 可见之前占住收编门。调用方
+// 必须在 OnReconnectWitnessUnderGate 返回后调用 release。
+func (d *Dispatcher) BeginHandTakeover(handID string) (release func()) {
+	return d.lockHandGate(handID)
 }
 
 // SetManualDelayMs:覆盖人工裁决前置的离线时长门槛(测试用短值)。
@@ -86,6 +128,9 @@ func (d *Dispatcher) SetManualDelayMs(ms int64) { d.manualDelayMs = ms }
 // Dispatch 保留里程碑1 debug 调试入口。业务调度必须使用 DispatchStructured，显式携带
 // generated CmdContext；此 wrapper 不改变既有 debug 测试域和自动幂等键行为。
 func (d *Dispatcher) Dispatch(handID, name string, args json.RawMessage) (string, error) {
+	if !strings.HasPrefix(name, "debug.") {
+		return "", errors.New("通用调试入口只允许 debug.* 原语")
+	}
 	return d.dispatch(DispatchRequest{HandID: handID, Name: name, Args: args}, dispatchOptions{legacyDebug: true})
 }
 
@@ -127,6 +172,24 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 		if ack.Error != nil {
 			code = string(ack.Error.Code)
 		}
+		if cmd.Status != store.CmdQueued && cmd.Status != store.CmdSent {
+			d.st.Audit("late_ack", handID, ack.Ref, "rejected 命中非 queued/sent 状态")
+			return
+		}
+		// 真实 SX 的自动再投授权只有“同 witness store 的
+		// report=unknown”这一条。即使拒绝码通常属于瞬态，也不能让
+		// 通用 queued 轨绕开证词闸自动重发；本 intent 明确失败后由
+		// 产品层决定是否产生新的真人意图。
+		if cmd.IntentID != "" {
+			if err := d.st.RejectEffectCommand(ack.Ref, code, "effect command ack rejected", time.Now()); err != nil {
+				slog.Error("真实 SX ack rejected 入账失败", "handId", handID, "ref", ack.Ref, "err", err)
+				return
+			}
+			d.st.Audit("cmd_rejected", handID, ack.Ref, code)
+			d.clearLease(ack.Ref)
+			d.notifyByMsgID(ack.Ref)
+			return
+		}
 		// 瞬态拒绝(QUEUE_FULL/STALE_SESSION)回 queued 待重投;协议性拒绝落 rejected 终局。
 		if isTransientReject(protocol.ErrorCode(code)) {
 			notBefore := time.Now().Add(redispatchBackoff(cmd.Attempt))
@@ -150,6 +213,9 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 		d.st.Audit("cmd_rejected", handID, ack.Ref, code)
 		d.clearLease(ack.Ref)
 		d.notifyByMsgID(ack.Ref)
+		if cmd.VerificationForMsgID != "" {
+			d.kickVerification(cmd.VerificationForMsgID)
+		}
 	}
 }
 
@@ -171,12 +237,13 @@ const (
 	ocRetryDeferred                         // afterRecovery 由上层 actor 恢复资源后重新生产命令
 	ocRetryExhausted                        // 安全重派达到类别封顶
 	ocAlreadyProcessed                      // 同一上行 msgId 重传
+	ocHumanVerdictKept                      // 人裁后迟到 possible 不得重开已解锁旧意图
 )
 
 // OnResult 只在 result 终局、processed_msgs 证词和可选 replacement 已同事务
 // 持久化后回 ack。因此脑在任一崩溃点要么全部看见，要么让手保留 result 重传。
 func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBody) {
-	oc, replacement, persistErr := d.applyResultMessage(handID, resultMsgID, res)
+	oc, replacement, persistErr := d.applyResultMessageKind(handID, resultMsgID, string(protocol.KindResult), res)
 	if persistErr != nil {
 		slog.Error("result 持久化失败，保留手侧重传", "handId", handID, "ref", res.Ref, "err", persistErr)
 		return
@@ -187,7 +254,22 @@ func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBod
 	} else {
 		d.notifyByMsgID(res.Ref)
 	}
-	d.ackResult(handID, resultMsgID)
+	ackStatus := protocol.AckStatusAccepted
+	if oc == ocAlreadyProcessed {
+		ackStatus = protocol.AckStatusDuplicate
+	}
+	d.ackResult(handID, resultMsgID, ackStatus)
+	if oc == ocEffSuspect {
+		d.kickVerification(res.Ref)
+	}
+	// 任一真实 SX 终结/转验证都可能让同手其他账号已获
+	// unknown 证明的命令解除全手屏障；重跑是幂等的。
+	d.releaseSafeRecoveries(handID)
+	if child, _ := d.st.CmdByMsgID(res.Ref); child != nil && child.VerificationForMsgID != "" {
+		// 首轮 waiter 可能已 ctx 超时；child 的持久终局主动唤醒 parent，
+		// 新 verifier 会复用该 logical child 结果并继续本轮分页。
+		d.kickVerification(child.VerificationForMsgID)
+	}
 
 	switch oc {
 	case ocOrphan:
@@ -209,17 +291,28 @@ func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBod
 		d.st.Audit("result_retry_exhausted", handID, res.Ref, "result 安全重派已达封顶或手已离线")
 	case ocAlreadyProcessed:
 		// 原子去重已证明首次处理与命令终局同事务成功，只重回 ack。
+	case ocHumanVerdictKept:
+		d.st.Audit("late_possible_after_verdict", handID, res.Ref,
+			"人工终局后迟到 possible，保留裁决且不重开已解锁旧意图")
 	default:
 		slog.Info("命令终局", "handId", handID, "ref", res.Ref, "status", res.Status)
 	}
 }
 
 func (d *Dispatcher) applyResultMessage(handID, resultMsgID string, res protocol.ResultBody) (resultOutcome, *store.CmdRecord, error) {
+	return d.applyResultMessageKind(handID, resultMsgID, string(protocol.KindResult), res)
+}
+
+// applyResultMessageKind 是 result 与 report=done 共用的唯一落账路径。
+// generated validator 在事务回调内复核完整 result（含 evidence）；
+// 真实 SX 的畸形“成功”一律降为 sideEffect=possible 后验证，绝不会
+// 伪造 sideEffect=none 授权重投。
+func (d *Dispatcher) applyResultMessageKind(handID, resultMsgID, kind string, res protocol.ResultBody) (resultOutcome, *store.CmdRecord, error) {
 	oc := ocDone
 	now := time.Now()
 	session, bootID, online := d.sender.HandSession(handID)
 	primitiveValidationDetail := ""
-	result, err := d.st.ApplyResultMessage(res.Ref, resultMsgID, string(protocol.KindResult), handID,
+	result, err := d.st.ApplyResultMessage(res.Ref, resultMsgID, kind, handID,
 		func(r *store.CmdRecord) (store.ResultCommandMutation, error) {
 			if r.HandID != handID {
 				return store.ResultCommandMutation{}, errResultSource
@@ -233,6 +326,10 @@ func (d *Dispatcher) applyResultMessage(handID, resultMsgID string, res protocol
 			}
 			body, _ := json.Marshal(res)
 			plan := store.ResultCommandMutation{Save: true}
+			isRealEffect := r.IntentID != "" && r.Class == string(protocol.ClassEffectful)
+			if isRealEffect {
+				return d.realEffectResultPlan(r, res, body, now, session, bootID, online, plan, &oc)
+			}
 			switch {
 			case r.Status == store.CmdSuspect:
 				if res.Status == protocol.ResultStatusFailed && res.Error != nil &&
@@ -283,29 +380,161 @@ func (d *Dispatcher) applyResultMessage(handID, resultMsgID string, res protocol
 }
 
 func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (protocol.ResultBody, string) {
-	if res.Status != protocol.ResultStatusOk {
-		return res, ""
-	}
 	meta, ok := protocol.Primitives[cmd.Name]
 	var validationErr error
 	switch {
 	case !ok || meta.Ver == 0:
 		validationErr = fmt.Errorf("未知原语 %s", cmd.Name)
-	case res.DataBlobRef != nil:
-		validationErr = errors.New("当前原语不接受 blob result")
 	default:
-		validationErr = protocol.ValidatePrimitiveData(cmd.Name, meta.Ver, res.Data)
+		raw, err := protocol.Encode(res)
+		if err != nil {
+			validationErr = err
+		} else {
+			validationErr = protocol.ValidatePrimitiveResult(cmd.Name, meta.Ver, raw)
+		}
+	}
+	// generated schema 不表达跨字段等式；真实发送还要确认 data
+	// 指向本命令的会话和正文指纹。
+	if validationErr == nil && cmd.Name == protocol.PrimChatSendMessage && res.Status == protocol.ResultStatusOk {
+		var args protocol.ChatSendMessageArgs
+		var data protocol.ChatSendMessageData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = fmt.Errorf("解析发送 args: %w", err)
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = fmt.Errorf("解析发送 data: %w", err)
+		} else if data.ConversationRef != args.ConversationRef || data.ContentHash != syncledger.HashText(args.Text) {
+			validationErr = errors.New("发送 result 的 conversationRef/contentHash 与原始意图不一致")
+		}
 	}
 	if validationErr == nil {
 		return res, ""
+	}
+	sideEffect := protocol.SideEffectNone
+	if cmd.IntentID != "" && cmd.Class == string(protocol.ClassEffectful) {
+		sideEffect = protocol.SideEffectPossible
 	}
 	return protocol.ResultBody{
 		Ref: res.Ref, Status: protocol.ResultStatusFailed, ExecMs: res.ExecMs, Replayed: res.Replayed,
 		Error: &protocol.ErrorBody{
 			Code: protocol.ErrCodeInternalHand, Message: "原语结果不符合生成契约",
-			Retryable: protocol.RetryableNo, SideEffect: protocol.SideEffectNone,
+			Retryable: protocol.RetryableNo, SideEffect: sideEffect,
 		},
 	}, validationErr.Error()
+}
+
+func (d *Dispatcher) realEffectResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	session, bootID string,
+	online bool,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	var args protocol.ChatSendMessageArgs
+	if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+		return store.ResultCommandMutation{}, err
+	}
+	fingerprint := syncledger.HashText(args.Text)
+	resultEffect := func(status store.EffectIntentStatus, appendMessage bool, observedAt int64, reason string) *store.EffectResultMutation {
+		return &store.EffectResultMutation{
+			IntentStatus: status, Append: appendMessage, Text: args.Text,
+			ContentHash: fingerprint, ObservedAtMs: observedAt, Reason: reason,
+		}
+	}
+
+	// durable 平台 result 是比人工裁决更强的事实。resolved* 后迟到
+	// ok/confirmed 会纠正账本；明确 failed+none 也会纠正为失败。
+	wasHumanResolved := r.Status == store.CmdResolvedOk || r.Status == store.CmdResolvedFailed
+	wasSuspect := r.Status == store.CmdSuspect
+	if r.Status.Terminal() && !wasHumanResolved && r.Status != store.CmdSuspect {
+		*oc = ocLate
+		plan.Save = false
+		return plan, nil
+	}
+
+	switch res.Status {
+	case protocol.ResultStatusOk:
+		var data protocol.ChatSendMessageData
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		r.Status = store.CmdOk
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		r.SuspectReason = ""
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentOk, true, data.ObservedAt, "")
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	case protocol.ResultStatusFailed:
+		if res.Error == nil {
+			return store.ResultCommandMutation{}, errors.New("effectful failed 缺少 error")
+		}
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		switch res.Error.SideEffect {
+		case protocol.SideEffectConfirmed:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = "result 失败但已确认发生副作用"
+			plan.Effect = resultEffect(store.EffectIntentOk, true, now.UnixMilli(), r.SuspectReason)
+			*oc = ocSuspectCleared
+			return plan, nil
+		case protocol.SideEffectPossible:
+			if wasHumanResolved {
+				// 人裁后串行域可能已签发后继同文 intent。用迟到 possible
+				// 重开旧命令，验证器就可能把后继消息错认为旧命令。
+				plan.Save = false
+				*oc = ocHumanVerdictKept
+				return plan, nil
+			}
+			// 未经人裁的 possible 必须进结构化验证。
+			r.Status = store.CmdVerifying
+			r.TerminalAt = nil
+			r.VerificationReason = "result.sideEffect=possible"
+			r.VerificationNextAt = &now
+			r.ReviewReady = false
+			r.ReviewAfterMs = 0
+			plan.KeepCommandOpen = true
+			plan.Effect = resultEffect(store.EffectIntentVerifying, false, 0, r.VerificationReason)
+			*oc = ocEffSuspect
+			return plan, nil
+		case protocol.SideEffectNone:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = ""
+			plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, "")
+			plan.Effect.Retract = wasHumanResolved
+			// 真实 SX 不接受手侧 retryable 授权，也绝不铸造 replacement
+			// msgId。唯一自动恢复是 witness 同库 unknown 后重投原 msgId。
+			if wasHumanResolved || wasSuspect {
+				*oc = ocSuspectCleared
+			}
+			return plan, nil
+		default:
+			return store.ResultCommandMutation{}, errors.New("effectful result 缺少 sideEffect")
+		}
+	case protocol.ResultStatusCanceled, protocol.ResultStatusExpired:
+		r.Status = mapResultStatus(res.Status)
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, string(res.Status))
+		// canceled/expired 与 failed+none 一样是推翻“已经发出”的
+		// 权威安全终局。若先前人工 resolvedOk 铸造了 self 消息，必须
+		// 与 Cmd+Intent 纠正同事务撤回，不能留下错误沉默锚。
+		plan.Effect.Retract = wasHumanResolved
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	default:
+		return store.ResultCommandMutation{}, errors.New("未知 result status")
+	}
 }
 
 func (d *Dispatcher) resultRetryPlan(
@@ -354,7 +583,7 @@ func resultRedispatchCap(class string) int {
 	case string(protocol.ClassIntrusive):
 		return protocol.DefaultRedispatchCapIntrusive
 	case string(protocol.ClassEffectful):
-		return 1 // 明确 failed+none 的安全结果才允许同 idemKey 重发一次。
+		return protocol.DefaultRedispatchCapEffectful
 	default:
 		return 0
 	}
@@ -374,8 +603,9 @@ func redispatchBackoff(nextRedispatch int) time.Duration {
 	return time.Duration(protocol.DefaultRedispatchBackoffMs[index]) * time.Millisecond
 }
 
-// ackResult:对 result 回 ack(accepted)。手据此删本地队列条目。
-func (d *Dispatcher) ackResult(handID, resultMsgID string) {
+// ackResult:首次持久化回 accepted，processed_msgs 已存在的补投回 duplicate；
+// 手对二者等价地删除本地 result 队列/outbox。
+func (d *Dispatcher) ackResult(handID, resultMsgID string, status protocol.AckStatus) {
 	session, _, online := d.sender.HandSession(handID)
 	if !online {
 		return
@@ -385,7 +615,7 @@ func (d *Dispatcher) ackResult(handID, resultMsgID string) {
 		sp = &session
 	}
 	ackEnv := d.envelope(protocol.KindAck, ids.NewMsgID(), sp, protocol.AckBody{
-		Ref: resultMsgID, Status: protocol.AckStatusAccepted,
+		Ref: resultMsgID, Status: status,
 	})
 	_ = d.sender.SendEnvelope(handID, ackEnv)
 }

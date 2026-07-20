@@ -80,6 +80,9 @@ export interface HandHealth {
   health: string
   caps: string[]
   lastHbAgoMs: number
+  witnessReady: boolean
+  outboxPending: number
+  journalOpen: number
 }
 
 export interface LedgerRow {
@@ -97,6 +100,9 @@ export interface Suspect {
   handId: string
   reason: string
   idemKey: string
+  reviewReady: boolean
+  reviewAfter?: number
+  verificationAttempts: number
 }
 
 export interface FrameEvent {
@@ -126,6 +132,7 @@ export interface AccountView {
   handId: string
   handOnline: boolean
   identityState: string
+  identityCurrent: boolean
   enabledToday: boolean
   enabledDate: string
   pausedReason: string
@@ -179,6 +186,77 @@ export interface MutationResult {
   error?: string
   account?: AccountView
   trackingState?: string
+}
+
+export interface SendIntentView {
+  intentId: string
+  logicalDispatchId: string
+  msgId: string
+  status: string
+  created?: boolean
+  commandStatus?: string
+  verificationAttempts?: number
+  suspectReason?: string
+}
+
+export class SendIntentConflictError extends Error {
+  readonly current: SendIntentView
+
+  constructor(message: string, current: SendIntentView) {
+    super(message)
+    this.name = 'SendIntentConflictError'
+    this.current = current
+  }
+}
+
+// 只有脑明确返回“请求在创建 intent/cmd 前被拒绝”时才使用此错误。
+// 网络中断、5xx 或已创建回执仍属于结果不确定，不能清除本地 proposal。
+export class SendIntentRejectedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SendIntentRejectedError'
+  }
+}
+
+async function postSendMessage(body: {
+  intentId: string
+  previousIntentId: string
+  platform: string
+  accountRef: string
+  conversationRef: string
+  text: string
+}): Promise<SendIntentView> {
+  const path = '/admin/messages/send'
+  const response = await fetch(ADMIN_BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authorizationHeaders() },
+    body: JSON.stringify(body),
+  })
+  if (response.status === 409) {
+    const conflict = await readResponse<{ error?: string; current?: SendIntentView }>(
+      new Response(await response.text(), { status: 200 }),
+      path,
+    )
+    if (conflict.current?.intentId) {
+      throw new SendIntentConflictError(conflict.error || '发送账本已出现更新', conflict.current)
+    }
+    throw new SendIntentRejectedError(conflict.error || '发送前安全检查未通过')
+  }
+  if (response.status === 400 || response.status === 404) {
+    const rejected = await readResponse<{ error?: string }>(
+      new Response(await response.text(), { status: 200 }),
+      path,
+    )
+    throw new SendIntentRejectedError(rejected.error || '发送请求在创建意图前被拒绝')
+  }
+  return readResponse<SendIntentView>(response, path)
+}
+
+async function latestSendIntent(platform: string, accountRef: string, conversationRef: string): Promise<SendIntentView | null> {
+  const path = query('/admin/messages/send', { platform, accountRef, conversationRef })
+  const response = await fetch(ADMIN_BASE + path, { headers: authorizationHeaders() })
+  if (response.status === 404) return null
+  return readResponse<SendIntentView>(response, path)
 }
 
 async function consumeFrameStream(signal: AbortSignal, onFrame: (frame: FrameEvent) => void): Promise<void> {
@@ -262,5 +340,11 @@ export const api = {
   conversations: (platform: string, accountRef: string) => get<{ conversations: ConversationView[] }>(query('/admin/conversations', { platform, accountRef })),
   trackConversation: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/conversations/track', { platform, accountRef, conversationRef }),
   messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),
+  sendMessage: (
+    intentId: string, previousIntentId: string, platform: string,
+    accountRef: string, conversationRef: string, text: string,
+  ) => postSendMessage({ intentId, previousIntentId, platform, accountRef, conversationRef, text }),
+  sendStatus: (intentId: string) => get<SendIntentView>(query('/admin/messages/send', { intentId })),
+  latestSendIntent,
   audits: (platform: string, accountRef: string) => get<{ audits: AuditView[] }>(query('/admin/audits', { platform, accountRef })),
 }

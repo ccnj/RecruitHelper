@@ -195,6 +195,141 @@ func TestErrorPhaseAndCancelBatch(t *testing.T) {
 	}
 }
 
+func TestM3WitnessAdvertisementAndSendGuards(t *testing.T) {
+	hello := json.RawMessage(`{
+		"handId":"h-1","bootId":"b-1","protoSupported":[1],"contractHash":"sha256:x",
+		"app":{"extVersion":"0.1.0","browser":"chrome"},"caps":["chat.sendMessage@1"],
+		"features":["witness/1"],"witnessStoreId":"w-1","outboxPending":0,"journalOpen":0
+	}`)
+	if err := ValidateKindBody(KindHello, hello); err != nil {
+		t.Fatalf("完整 witness/1 hello 应通过:%v", err)
+	}
+	missingStats := json.RawMessage(`{
+		"handId":"h-1","bootId":"b-1","protoSupported":[1],"contractHash":"sha256:x",
+		"app":{"extVersion":"0.1.0","browser":"chrome"},"caps":[],"features":["witness/1"]
+	}`)
+	assertValidationError(t, ValidateKindBody(KindHello, missingStats), "$", "witnessAdvertisement")
+
+	valid := json.RawMessage(`{
+		"name":"chat.sendMessage","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","text":"你好"},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendMessage:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"abc"}]}
+	}`)
+	if err := ValidateKindBody(KindCmd, valid); err != nil {
+		t.Fatalf("合法 chat.sendMessage 命令应通过:%v", err)
+	}
+	missingGuards := json.RawMessage(`{
+		"name":"chat.sendMessage","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","text":"你好"},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendMessage:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000
+	}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, missingGuards), "$.guards", "required")
+}
+
+func TestM3JournalOutboxAndReportInvariants(t *testing.T) {
+	committed := json.RawMessage(`{
+		"ref":"cmd-1","idemKey":"ik-1","state":"committed","startedAt":10,"committedAt":20,
+		"result":{"ref":"cmd-1","status":"ok","data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundMessageObserved"}],"replayed":false,"execMs":10},
+		"expiresAt":100
+	}`)
+	if err := ValidateSchema("JournalEntry", committed); err != nil {
+		t.Fatalf("合法 committed journal 应通过:%v", err)
+	}
+	committedNullResult := json.RawMessage(`{
+		"ref":"cmd-1","idemKey":"ik-1","state":"committed","startedAt":10,"committedAt":20,
+		"result":null,"expiresAt":100
+	}`)
+	assertValidationError(t, ValidateSchema("JournalEntry", committedNullResult), "$.result", "nullable")
+	attemptingWithResult := json.RawMessage(`{
+		"ref":"cmd-1","idemKey":"ik-1","state":"attempting","startedAt":10,
+		"result":{"ref":"cmd-1","status":"expired","replayed":false,"execMs":0},"expiresAt":100
+	}`)
+	assertValidationError(t, ValidateSchema("JournalEntry", attemptingWithResult), "$.result", "forbiddenWhen")
+
+	outbox := json.RawMessage(`{
+		"message":{"proto":1,"kind":"result","msgId":"result-1","session":"session-created",
+		"ts":20,"attempt":1,"body":{"ref":"cmd-1","status":"expired","replayed":false,"execMs":0}},
+		"createdAt":20,"expiresAt":100
+	}`)
+	if err := ValidateSchema("OutboxEntry", outbox); err != nil {
+		t.Fatalf("合法 outbox 应通过:%v", err)
+	}
+	outboxNullSession := json.RawMessage(`{
+		"message":{"proto":1,"kind":"result","msgId":"result-1","session":null,
+		"ts":20,"attempt":1,"body":{"ref":"cmd-1","status":"expired","replayed":false,"execMs":0}},
+		"createdAt":20,"expiresAt":100
+	}`)
+	assertValidationError(t, ValidateSchema("OutboxEntry", outboxNullSession), "$.message.session", "nullable")
+
+	done := json.RawMessage(`{
+		"ref":"cmd-1","witnessStoreId":"w-1","state":"done",
+		"result":{"ref":"cmd-1","status":"ok","data":{},"evidence":[{"type":"outboundMessageObserved"}],"replayed":true,"execMs":10},
+		"journal":{"ref":"cmd-1","idemKey":"ik-1","state":"committed","startedAt":10,"committedAt":20}
+	}`)
+	if err := ValidateKindBody(KindReport, done); err != nil {
+		t.Fatalf("合法 done report 应通过:%v", err)
+	}
+	doneNull := json.RawMessage(`{"ref":"cmd-1","witnessStoreId":"w-1","state":"done","result":null,"journal":null}`)
+	assertValidationError(t, ValidateKindBody(KindReport, doneNull), "$.result", "requiredWhen")
+	wrongAttempt := json.RawMessage(`{
+		"ref":"cmd-1","witnessStoreId":"w-1","state":"attempting","result":null,
+		"journal":{"ref":"cmd-1","idemKey":"ik-1","state":"committed","startedAt":10,"committedAt":20}
+	}`)
+	assertValidationError(t, ValidateKindBody(KindReport, wrongAttempt), "$.journal.state", "state")
+}
+
+func TestM3EffectfulResultEvidenceAndWitnessError(t *testing.T) {
+	valid := json.RawMessage(`{
+		"ref":"cmd-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},
+		"evidence":[{"type":"outboundMessageObserved"}],"replayed":false,"execMs":10
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatSendMessage, 1, valid); err != nil {
+		t.Fatalf("合法 effectful result 应通过:%v", err)
+	}
+	missingEvidence := json.RawMessage(`{
+		"ref":"cmd-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},
+		"replayed":false,"execMs":10
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendMessage, 1, missingEvidence), "$.evidence", "minItems")
+	wrongEvidence := json.RawMessage(`{
+		"ref":"cmd-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},
+		"evidence":[{"type":"clicked"}],"replayed":false,"execMs":10
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendMessage, 1, wrongEvidence), "$.evidence[0].type", "enum")
+	failedWithoutSideEffect := json.RawMessage(`{
+		"ref":"cmd-1","status":"failed","error":{"code":"GUARD_FAILED","retryable":"manualOnly"},
+		"replayed":false,"execMs":1
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendMessage, 1, failedWithoutSideEffect), "$.error.sideEffect", "required")
+	witnessFailure := json.RawMessage(`{
+		"ref":"cmd-1","status":"failed",
+		"error":{"code":"WITNESS_UNAVAILABLE","retryable":"afterRecovery","sideEffect":"none","data":{"reason":"writeFailed"}},
+		"replayed":false,"execMs":1
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatSendMessage, 1, witnessFailure); err != nil {
+		t.Fatalf("动作前 witness 写失败应可诚实表达:%v", err)
+	}
+	witnessWithoutData := json.RawMessage(`{
+		"ref":"cmd-1","status":"failed",
+		"error":{"code":"WITNESS_UNAVAILABLE","retryable":"afterRecovery","sideEffect":"none"},
+		"replayed":false,"execMs":1
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendMessage, 1, witnessWithoutData), "$.error.data", "required")
+
+	meta := Primitives[PrimChatSendMessage]
+	if meta.GuardsSchema == "" || meta.EvidenceSchema == "" || meta.VerificationPrimitive != PrimChatReadThread || meta.VerificationMaxRounds != 3 {
+		t.Fatalf("真实 SX 契约元数据不完整:%+v", meta)
+	}
+}
+
 func assertValidationError(t *testing.T, err error, path, rule string) {
 	t.Helper()
 	if err == nil {

@@ -36,6 +36,7 @@ type AdminHub interface {
 	Registry() *session.Registry
 	ActiveHandIDs() []string
 	HandSession(string) (sessionID, bootID string, online bool)
+	HandWitness(string) (dispatch.HandWitness, bool)
 	WithCurrentHandSession(handID, sessionID, bootID string, fn func() error) (current bool, err error)
 }
 
@@ -59,6 +60,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/hands", h(a.hands))
 	mux.HandleFunc("GET /admin/hands/health", h(a.handHealth))
 	mux.HandleFunc("POST /admin/cmd", h(a.postCmd))
+	mux.HandleFunc("POST /admin/messages/send", h(a.sendMessage))
+	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
 	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
 	mux.HandleFunc("GET /admin/suspects", h(a.suspects))
 	mux.HandleFunc("POST /admin/suspects/verdict", h(a.verdict))
@@ -174,15 +177,22 @@ func (a *API) suspects(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	type view struct {
-		MsgID   string `json:"msgId"`
-		Name    string `json:"name"`
-		HandID  string `json:"handId"`
-		Reason  string `json:"reason"`
-		IdemKey string `json:"idemKey"`
+		MsgID                string `json:"msgId"`
+		Name                 string `json:"name"`
+		HandID               string `json:"handId"`
+		Reason               string `json:"reason"`
+		IdemKey              string `json:"idemKey"`
+		ReviewReady          bool   `json:"reviewReady"`
+		ReviewAfter          *int64 `json:"reviewAfter,omitempty"`
+		VerificationAttempts int    `json:"verificationAttempts"`
 	}
 	out := make([]view, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, view{MsgID: r.MsgID, Name: r.Name, HandID: r.HandID, Reason: r.SuspectReason, IdemKey: r.IdemKey})
+		ready, after := a.disp.SuspectReviewState(r)
+		out = append(out, view{
+			MsgID: r.MsgID, Name: r.Name, HandID: r.HandID, Reason: r.SuspectReason, IdemKey: r.IdemKey,
+			ReviewReady: ready, ReviewAfter: after, VerificationAttempts: r.VerificationN,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"suspects": out})
 }
@@ -273,18 +283,27 @@ func (a *API) health(w http.ResponseWriter, _ *http.Request) {
 func (a *API) handHealth(w http.ResponseWriter, _ *http.Request) {
 	states := a.hub.Registry().Snapshot()
 	type view struct {
-		HandID   string   `json:"handId"`
-		Online   bool     `json:"online"`
-		Health   string   `json:"health"`
-		Caps     []string `json:"caps"`
-		LastHbMs int64    `json:"lastHbAgoMs"`
+		HandID        string   `json:"handId"`
+		Online        bool     `json:"online"`
+		Health        string   `json:"health"`
+		Caps          []string `json:"caps"`
+		LastHbMs      int64    `json:"lastHbAgoMs"`
+		WitnessReady  bool     `json:"witnessReady"`
+		OutboxPending int      `json:"outboxPending"`
+		JournalOpen   int      `json:"journalOpen"`
 	}
 	out := make([]view, 0, len(states))
 	for _, s := range states {
-		out = append(out, view{
+		row := view{
 			HandID: s.HandID, Online: s.Online, Health: string(s.Health),
 			Caps: s.Caps, LastHbMs: time.Since(s.LastHbAt).Milliseconds(),
-		})
+		}
+		if witness, ok := a.hub.HandWitness(s.HandID); ok {
+			row.WitnessReady = true
+			row.OutboxPending = witness.OutboxPending
+			row.JournalOpen = witness.JournalOpen
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"hands": out})
 }

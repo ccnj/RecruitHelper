@@ -3,10 +3,12 @@
 import {
   AckBody,
   AckStatus,
+  Batch,
   ByeBody,
   ByeCode,
   CONTRACT_HASH,
   CmdContext,
+  CmdClass,
   DEFAULTS,
   Envelope,
   ErrorCode,
@@ -19,7 +21,11 @@ import {
   PingBody,
   PingContext,
   PingSensors,
+  PRIMITIVE_META,
   PROTO_VERSION,
+  QueryBody,
+  ResultBody,
+  ResultEnvelope,
   Retryable,
   SensorParams,
   SideEffect,
@@ -41,6 +47,7 @@ import {
 } from './config'
 import { capabilities } from '../program/registry'
 import { Dispatcher, SendOutcome } from './dispatcher'
+import { WitnessAdvertisement, WitnessStore, WitnessStorage } from './witness'
 
 type Phase = 'connecting' | 'preSession' | 'session' | 'closed'
 
@@ -65,7 +72,7 @@ interface CachedSensorSnapshot {
 
 export type ContextHealth = PingContext
 
-const FEATURES = [Feature.Progress1, Feature.Lease1, Feature.Cancel1] as const
+const BASE_FEATURES = [Feature.Progress1, Feature.Lease1, Feature.Cancel1] as const
 const RESULT_QUEUE_CAP = DEFAULTS.handResultQueue
 const KNOWN_KINDS = new Set<string>(Object.values(Kind))
 const KNOWN_EVENTS = new Set<string>(Object.values(EventName))
@@ -94,12 +101,16 @@ export class Connection {
   private commandContexts = new Map<string, Readonly<CmdContext>>()
   private commandContextListeners = new Set<(context: Readonly<CmdContext>) => void>()
   private sensorConfigListeners = new Set<(config: Readonly<Partial<SensorParams>>) => void>()
+  private readonly witness = new WitnessStore(chrome.storage.local as unknown as WitnessStorage)
+  private witnessEnabledForSession = false
   private dispatcher: Dispatcher
 
   constructor() {
     this.dispatcher = new Dispatcher(
       (kind, session, body) => this.rawSend(kind, session, body),
       (context) => this.rememberCommandContext(context),
+      this.witness,
+      (session, body, commitIdemKey) => this.sendDurableResult(session, body, commitIdemKey),
     )
   }
 
@@ -120,7 +131,7 @@ export class Connection {
       bootId: BOOT_ID,
       queueDepth: execution.queueDepth,
       inFlight: execution.inFlight,
-      pendingResults: this.pendingResults.size,
+      pendingResults: this.pendingResults.size + (this.witness.advertisement()?.outboxPending ?? 0),
       heartbeatIntervalMs: this.heartbeatIntervalMs,
       missedPongs: this.missedPongs,
     }
@@ -251,17 +262,32 @@ export class Connection {
   private async onOpen(source: WebSocket): Promise<void> {
     const handId = await getHandId()
     if (this.ws !== source || source.readyState !== WebSocket.OPEN) return
-    const sessionCaps = capabilities()
+    let witnessAdvertisement: WitnessAdvertisement | null = null
+    try {
+      await this.witness.initialize()
+      witnessAdvertisement = this.witness.advertisement()
+    } catch (error) {
+      // 仍允许只读/无外部副作用能力上线；未声明 witness/1 时真实 SX cap 一并剔除。
+      console.error('[hand] 证词库不可用，真实外部副作用能力停用', error)
+    }
+    const sessionCaps = capabilities().filter((capability) =>
+      witnessAdvertisement !== null || !isWitnessedCapability(capability),
+    )
+    this.witnessEnabledForSession = witnessAdvertisement !== null
     this.dispatcher.setSessionCapabilities(sessionCaps)
-    this.rawSend(Kind.Hello, null, {
+    const hello = {
       handId,
       bootId: BOOT_ID,
       protoSupported: [PROTO_VERSION],
       contractHash: CONTRACT_HASH,
       app: { extVersion: chrome.runtime.getManifest().version, browser: 'chrome' },
       caps: sessionCaps,
-      features: [...FEATURES],
-    })
+      features: witnessAdvertisement
+        ? [...BASE_FEATURES, Feature.Witness1]
+        : [...BASE_FEATURES],
+      ...(witnessAdvertisement ?? {}),
+    }
+    this.rawSend(Kind.Hello, null, hello)
     this.phase = 'preSession'
     // 本地 handId 不需要人工确认；脑必须在日常 hello 硬上限内自动建立会话。
     this.helloTimer = setTimeout(() => {
@@ -333,13 +359,18 @@ export class Connection {
         this.onPong(env.session)
         break
       case Kind.Cmd:
-        this.dispatcher.handleCmd(env.msgId, env.session, this.session, env.body)
+        await this.dispatcher.handleCmd(env.msgId, env.session, this.session, env.body)
         break
       case Kind.Cancel:
         this.dispatcher.handleCancel(env.msgId, env.session, this.session, env.body)
         break
       case Kind.Ack:
-        this.onAck(env.body)
+        await this.onAck(env.body)
+        break
+      case Kind.Query:
+        if (this.witnessEnabledForSession && env.session === this.session) {
+          await this.dispatcher.handleQuery((env.body as QueryBody).ref, this.session)
+        }
         break
       default:
         // 已知但本批未在脑→手方向启用的 kind，响亮拒绝，禁止默认成功。
@@ -347,7 +378,7 @@ export class Connection {
     }
   }
 
-  private onWelcome(rawBody: unknown, source: WebSocket): void {
+  private async onWelcome(rawBody: unknown, source: WebSocket): Promise<void> {
     if (this.ws !== source) return
     const body = rawBody as WelcomeBody
     if (this.helloTimer) {
@@ -361,8 +392,11 @@ export class Connection {
     this.session = body.session
     this.phase = 'session'
     this.startReconnectStableWindow(source, body.session)
-    this.startHeartbeat()
+    // 四阶段恢复的第一阶段必须先于 receiveChain 中后续 query:先补投持久 outbox。
+    if (this.witnessEnabledForSession) await this.flushDurableResults()
+    if (this.ws !== source || source.readyState !== WebSocket.OPEN) return
     this.flushPendingResults()
+    this.startHeartbeat()
     console.log('[hand] 会话建立', body.session)
   }
 
@@ -378,11 +412,19 @@ export class Connection {
     // 其余关链均由 onclose 按基础设施退避自动重连。
   }
 
-  private onAck(rawBody: unknown): void {
+  private async onAck(rawBody: unknown): Promise<void> {
     const body = rawBody as AckBody
     if (body.status !== AckStatus.Accepted && body.status !== AckStatus.Duplicate) return
     // 对 result 的 accepted/duplicate 等价：脑已持久化，可删手侧内存待投。
     this.pendingResults.delete(body.ref)
+    if ((this.witness.advertisement()?.outboxPending ?? 0) > 0) {
+      try {
+        await this.witness.acknowledgeResult(body.ref)
+      } catch (error) {
+        // 删除失败就保留并在下次重连补投；绝不能因 ack 丢掉唯一终局证词。
+        console.warn('[hand] result ack 后清理 outbox 失败，将继续保留', error)
+      }
+    }
   }
 
   private onClose(): void {
@@ -392,6 +434,7 @@ export class Connection {
     if (this.helloTimer) clearTimeout(this.helloTimer)
     this.helloTimer = null
     this.session = null
+    this.witnessEnabledForSession = false
     this.phase = 'closed'
     this.ws = null
     this.scheduleReconnect()
@@ -471,6 +514,8 @@ export class Connection {
     }
     body.contexts = this.contexts
     body.sensors = this.currentPingSensors()
+    const witness = this.witnessEnabledForSession ? this.witness.advertisement() : null
+    if (witness) Object.assign(body, witness)
     if (this.rawSend(Kind.Ping, this.session, body) === 'sent') this.awaitingPong = true
     this.scheduleHeartbeatTick()
   }
@@ -525,6 +570,45 @@ export class Connection {
     return this.sendEncoded(encoded.text) ? 'sent' : 'dropped'
   }
 
+  private async sendDurableResult(
+    session: string | null,
+    body: ResultBody,
+    commitIdemKey?: string,
+  ): Promise<SendOutcome> {
+    if (!session) {
+      console.error('[hand] 真实 SX result 缺少命令会话，拒绝持久与发送')
+      return 'dropped'
+    }
+    const bodyIssues = validateKindBody(Kind.Result, body)
+    if (bodyIssues.length > 0) {
+      console.error('[hand] 拒发违反生成契约的持久 result', formatIssues(bodyIssues))
+      return 'dropped'
+    }
+    const envelope: ResultEnvelope = {
+      proto: PROTO_VERSION,
+      kind: Kind.Result,
+      msgId: newMsgId(),
+      session,
+      ts: Date.now(),
+      attempt: 1,
+      body,
+    }
+    const encoded = this.encodeEnvelope(envelope)
+    if (!encoded) return 'dropped'
+    if (validateFrameSize(encoded.text, this.maxMsgBytes).length > 0) return 'tooLarge'
+    try {
+      // 先持久 outbox，再进行第一次 WS write；顺序不可交换。commitIdemKey
+      // 表示 handler 已成功越过 attempting 写点，与 ResultBody 是 ok 或 failed 无关。
+      if (commitIdemKey) await this.witness.commitAndEnqueue(commitIdemKey, envelope)
+      else await this.witness.enqueueResult(envelope)
+    } catch (error) {
+      console.error('[hand] result 无法先入持久 outbox，拒绝发送', error)
+      try { this.ws?.close() } catch { /* onclose 统一重连 */ }
+      return 'dropped'
+    }
+    return this.sendEncoded(encoded.text) ? 'sent' : 'queued'
+  }
+
   private encodeEnvelope(envelope: Envelope): { text: string; bytes: number } | null {
     try {
       const bodyText = JSON.stringify(envelope.body)
@@ -570,6 +654,28 @@ export class Connection {
       }
       pending.envelope = envelope
       pending.sent = this.sendEncoded(encoded.text)
+    }
+  }
+
+  private async flushDurableResults(): Promise<void> {
+    try {
+      const pending = await this.witness.listOutbox()
+      for (const entry of pending) {
+        if (!this.session) return
+        const envelope = await this.witness.nextOutboxAttempt(entry.message.msgId, this.session)
+        if (!envelope) continue
+        const encoded = this.encodeEnvelope(envelope)
+        if (!encoded || validateFrameSize(encoded.text, this.maxMsgBytes).length > 0) {
+          console.error('[hand] 持久 outbox result 在当前限制下超限', envelope.msgId)
+          continue
+        }
+        // 跨会话补投更新 session/attempt/ts；msgId 与终局 body 保持不变。
+        this.sendEncoded(encoded.text)
+      }
+    } catch (error) {
+      // 补投失败时不进入 query 的伪完成路径；断链后由退避重连再次尝试阶段 1。
+      console.error('[hand] 持久 outbox 补投失败', error)
+      try { this.ws?.close() } catch { /* onclose 统一重连 */ }
     }
   }
 
@@ -628,6 +734,14 @@ export function utf8ByteLength(value: string): number {
 export function heartbeatDelayMs(intervalMs: number, random: () => number = Math.random): number {
   const sample = Math.min(1, Math.max(0, random()))
   return Math.max(1, Math.round(intervalMs * (0.8 + sample * 0.4)))
+}
+
+function isWitnessedCapability(capability: string): boolean {
+  const separator = capability.lastIndexOf('@')
+  if (separator <= 0) return false
+  const name = capability.slice(0, separator) as keyof typeof PRIMITIVE_META
+  const meta = PRIMITIVE_META[name]
+  return meta?.batch === Batch.X && meta.class === CmdClass.Effectful
 }
 
 interface DecodedFrame {

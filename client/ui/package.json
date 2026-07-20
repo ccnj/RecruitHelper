@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:node": "node test/api.test.mjs"
+    "test:node": "node test/send-resume.test.mjs && node test/api.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

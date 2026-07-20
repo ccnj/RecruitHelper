@@ -297,7 +297,7 @@ func TestSameBootTakeoverAcceptsHistoricalProgressAndResultOnlyFromActiveSocket(
 	ack := readUntilKind(t, newClient, protocol.KindAck)
 	var ackBody protocol.AckBody
 	if err := json.Unmarshal(ack.Body, &ackBody); err != nil || ackBody.Ref != resultMsgID ||
-		ack.Session == nil || *ack.Session != newSession {
+		ackBody.Status != protocol.AckStatusAccepted || ack.Session == nil || *ack.Session != newSession {
 		t.Fatalf("历史 session result 未以当前 session 正确回 ack: env=%+v body=%+v err=%v", ack, ackBody, err)
 	}
 
@@ -308,7 +308,7 @@ func TestSameBootTakeoverAcceptsHistoricalProgressAndResultOnlyFromActiveSocket(
 	dupAck := readUntilKind(t, newClient, protocol.KindAck)
 	var dupAckBody protocol.AckBody
 	_ = json.Unmarshal(dupAck.Body, &dupAckBody)
-	if dupAckBody.Ref != resultMsgID {
+	if dupAckBody.Ref != resultMsgID || dupAckBody.Status != protocol.AckStatusDuplicate {
 		t.Fatalf("重复 result 未重新 ack: %+v", dupAckBody)
 	}
 	if already, _ := h.st.MarkProcessed(resultMsgID, string(protocol.KindResult), handID); !already {
