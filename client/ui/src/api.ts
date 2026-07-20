@@ -213,6 +213,26 @@ export interface SendIntentView {
   suspectReason?: string
 }
 
+export type CandidateContactState = 'unestablished' | 'established' | 'unknown'
+
+// M4 人工建档只向 UI 暴露确认所需的最小视图。平台用户 ID、职位 ID 等
+// 原始引用留在脑侧命令账本，不能穿过这个数据层进入组件状态。
+export interface CandidateCurrentPreview {
+  selectionRef: string
+  displayName: string | null
+  positionTitle: string | null
+  contactState: CandidateContactState
+}
+
+export interface CandidateProfileSelectionView {
+  profileId: string
+  status: string
+  created: boolean
+}
+
+export const CANDIDATE_READ_ERROR = '未能读取当前候选人，请确认页面只打开了一份候选人详情后重试。'
+export const CANDIDATE_SELECT_ERROR = '未能确认候选人，请重新读取页面后再试。'
+
 export class SendIntentConflictError extends Error {
   readonly current: SendIntentView
 
@@ -334,6 +354,56 @@ interface AccountTarget {
   accountRef: string
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function decodeCandidatePreview(value: unknown): CandidateCurrentPreview | null {
+  const candidate = objectValue(value)
+  if (!candidate || typeof candidate.selectionRef !== 'string' || !candidate.selectionRef) return null
+  if (candidate.displayName !== null && typeof candidate.displayName !== 'string') return null
+  if (candidate.positionTitle !== null && typeof candidate.positionTitle !== 'string') return null
+  if (!['unestablished', 'established', 'unknown'].includes(String(candidate.contactState))) return null
+  return {
+    selectionRef: candidate.selectionRef,
+    displayName: candidate.displayName,
+    positionTitle: candidate.positionTitle,
+    contactState: candidate.contactState as CandidateContactState,
+  }
+}
+
+function decodeCandidateSelection(value: unknown): CandidateProfileSelectionView | null {
+  const profile = objectValue(value)
+  if (!profile || typeof profile.profileId !== 'string' || !profile.profileId) return null
+  if (typeof profile.status !== 'string' || !profile.status || typeof profile.created !== 'boolean') return null
+  return { profileId: profile.profileId, status: profile.status, created: profile.created }
+}
+
+async function readCurrentCandidate(target: AccountTarget): Promise<CandidateCurrentPreview> {
+  try {
+    const value = await post<unknown>('/admin/candidates/current/read', target)
+    const preview = decodeCandidatePreview(value)
+    if (!preview) throw new Error('invalid candidate preview')
+    return preview
+  } catch {
+    // 平台原始引用或内部失败细节可能出现在服务端诊断中；UI 边界只给固定提示。
+    throw new Error(CANDIDATE_READ_ERROR)
+  }
+}
+
+async function selectCurrentCandidate(selectionRef: string): Promise<CandidateProfileSelectionView> {
+  try {
+    const value = await post<unknown>('/admin/candidates/current/select', { selectionRef })
+    const profile = decodeCandidateSelection(value)
+    if (!profile) throw new Error('invalid candidate selection')
+    return profile
+  } catch {
+    throw new Error(CANDIDATE_SELECT_ERROR)
+  }
+}
+
 export const api = {
   health: () => get<Health>('/admin/health'),
   handsHealth: () => get<{ hands: HandHealth[] }>('/admin/hands/health'),
@@ -352,6 +422,8 @@ export const api = {
   stopAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/stop', target),
   pauseAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/pause', target),
   runAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/run', target),
+  readCurrentCandidate,
+  selectCurrentCandidate,
   conversations: (platform: string, accountRef: string) => get<{ conversations: ConversationView[] }>(query('/admin/conversations', { platform, accountRef })),
   trackConversation: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/conversations/track', { platform, accountRef, conversationRef }),
   messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),

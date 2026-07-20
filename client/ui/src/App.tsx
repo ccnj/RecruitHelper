@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import {
-  api, ADMIN_BASE, SendIntentConflictError, SendIntentRejectedError,
+  api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
+  SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
   LedgerRow, MessageView, MutationResult, SendIntentView, Suspect, TimeValue,
 } from './api'
+import {
+  candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
+} from './candidate-workflow'
 import { acknowledgeSendIntent, readSendResume } from './send-resume'
 
 interface PollState<T> {
@@ -273,6 +277,7 @@ export function App() {
           {selectedAccount ? (
             <>
               <AccountOverview
+                key={accountKey}
                 account={selectedAccount}
                 busy={busy}
                 onEnable={() => target && runMutation('enable', '已开启今天的自动巡检', () => api.enableAccount(target))}
@@ -508,6 +513,8 @@ function AccountOverview({
         </button>
       </div>
 
+      <CandidateIntake account={account} />
+
       <div className="status-ledger">
         <div>
           <span>手与页面</span>
@@ -525,6 +532,109 @@ function AccountOverview({
           <small>{latest ? `${latest.stage || '收尾'} · 新消息 ${latest.newMessageCount ?? 0}${latest.errorCode ? ` · ${latest.errorCode}` : ''}` : '开启今天巡检后由脑安排'}</small>
         </div>
       </div>
+    </section>
+  )
+}
+
+function candidateContactLabel(state: string): string {
+  if (state === 'unestablished') return '尚未建联，可以确认建档'
+  if (state === 'established') return '页面显示已经建联，不能作为新建联对象确认'
+  return '关系状态无法确认，不能继续建档'
+}
+
+function CandidateIntake({ account }: { account: AccountView }) {
+  const [state, dispatch] = useReducer(candidateWorkflowReducer, initialCandidateWorkflow)
+  const running = state.phase === 'reading' || state.phase === 'selecting'
+  const readable = account.handOnline && account.identityCurrent && !running
+
+  // AccountOverview 以账号 identity 为 key 挂载；这里再显式重置一次，避免将来
+  // 组件层级调整时旧 selectionRef 跨账号存活。状态从不写入任何浏览器存储。
+  useEffect(() => {
+    dispatch({ type: 'accountChanged' })
+  }, [account.platform, account.accountRef])
+
+  const read = async () => {
+    dispatch({ type: 'readStarted' })
+    try {
+      const preview = await api.readCurrentCandidate({
+        platform: account.platform,
+        accountRef: account.accountRef,
+      })
+      dispatch({ type: 'readSucceeded', preview })
+    } catch {
+      dispatch({ type: 'readFailed', error: CANDIDATE_READ_ERROR })
+    }
+  }
+
+  const confirm = async () => {
+    if (state.phase !== 'preview' || state.preview.contactState !== 'unestablished') return
+    const selectionRef = state.preview.selectionRef
+    dispatch({ type: 'selectStarted' })
+    try {
+      const profile = await api.selectCurrentCandidate(selectionRef)
+      dispatch({ type: 'selectSucceeded', profile })
+    } catch {
+      dispatch({ type: 'selectFailed', error: CANDIDATE_SELECT_ERROR })
+    }
+  }
+
+  return (
+    <section className="candidate-intake" aria-labelledby="candidate-intake-title">
+      <div className="candidate-intake-heading">
+        <div>
+          <span className="section-index">主动建联</span>
+          <h3 id="candidate-intake-title">人工指定页面中的候选人</h3>
+        </div>
+        <button
+          type="button"
+          disabled={!readable}
+          onClick={() => void read()}
+        >
+          {state.phase === 'reading' ? '正在读取页面…' : state.preview ? '重新读取当前候选人' : '读取当前候选人'}
+        </button>
+      </div>
+
+      {!account.handOnline && <p className="candidate-intake-hint">手当前离线，接通后才能读取页面。</p>}
+      {account.handOnline && !account.identityCurrent && <p className="candidate-intake-hint">账号身份尚未核验，暂不读取候选人。</p>}
+      {state.phase === 'idle' && account.handOnline && account.identityCurrent && (
+        <p className="candidate-intake-hint">先在招聘页面打开一位候选人的详情；读取不会发消息，也不会直接建档。</p>
+      )}
+
+      {(state.phase === 'preview' || state.phase === 'selecting') && (
+        <div className="candidate-preview">
+          <div>
+            <span>候选人</span>
+            <strong>{state.preview.displayName || '姓名未提供'}</strong>
+          </div>
+          <div>
+            <span>当前职位</span>
+            <strong>{state.preview.positionTitle || '职位名称未提供'}</strong>
+          </div>
+          <div className={`candidate-contact ${state.preview.contactState === 'unestablished' ? 'is-ready' : 'is-blocked'}`}>
+            <span>建联状态</span>
+            <strong>{candidateContactLabel(state.preview.contactState)}</strong>
+          </div>
+          <div className="candidate-confirm">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={!canConfirmCandidate(state) || running}
+              onClick={() => void confirm()}
+            >
+              {state.phase === 'selecting' ? '正在确认建档…' : '确认是这位候选人并建档'}
+            </button>
+            <small>只有明确显示尚未建联时才能确认；页面变化后请重新读取。</small>
+          </div>
+        </div>
+      )}
+
+      {state.phase === 'selected' && (
+        <div className="candidate-intake-result" role="status">
+          <strong>{state.profile.created ? '候选人档案已建立' : '已找到同一候选人档案'}</strong>
+          <span>当前状态：{state.profile.status || 'selected'} · 档案 {shortRef(state.profile.profileId, 10)}</span>
+        </div>
+      )}
+      {state.error && <div className="candidate-intake-error" role="alert">{state.error}</div>}
     </section>
   )
 }

@@ -98,6 +98,8 @@ const realFetch = globalThis.fetch
 const requests = []
 let forceSendConflict = false
 let forceSendRejected = false
+let forceCandidateReadError = false
+let forceCandidateSelectError = false
 globalThis.window = {
   recruitHelper: { adminBase: 'http://127.0.0.1:18888', adminToken: 'test-memory-token' },
   setTimeout: globalThis.setTimeout,
@@ -124,6 +126,23 @@ globalThis.fetch = async (url, init = {}) => {
       status: 'queued', commandStatus: 'sent', verificationAttempts: 0,
     }), { status: init.method === 'POST' ? 202 : 200 })
   }
+  if (String(url).includes('/admin/candidates/current/read')) {
+    if (forceCandidateReadError) {
+      return new Response(JSON.stringify({ error: 'raw-user-secret-from-brain' }), { status: 500 })
+    }
+    return new Response(JSON.stringify({
+      selectionRef: 'selection-safe', displayName: '候选人甲', positionTitle: '前端工程师',
+      contactState: 'unestablished', platformUserRef: 'raw-user-must-not-escape', positionRef: 'raw-job-must-not-escape',
+    }), { status: 200 })
+  }
+  if (String(url).includes('/admin/candidates/current/select')) {
+    if (forceCandidateSelectError) {
+      return new Response(JSON.stringify({ error: 'raw-selection-diagnostic' }), { status: 409 })
+    }
+    return new Response(JSON.stringify({
+      profileId: 'profile-safe', status: 'selected', created: true, platformUserRef: 'raw-user-must-not-escape',
+    }), { status: 200 })
+  }
   if (String(url).includes('/admin/messages')) return new Response('{"messages":[]}', { status: 200 })
   if (String(url).includes('/admin/hands/reload')) return new Response(JSON.stringify({
     ready: true, handId: 'hand-test', msgId: 'reload-msg', previousBootId: 'boot-old',
@@ -140,12 +159,15 @@ globalThis.fetch = async (url, init = {}) => {
 }
 const authModuleUrl = apiModuleUrl + `?auth=${Date.now()}`
 const {
-  api: authApi, ADMIN_BASE: authBase, SendIntentConflictError, SendIntentRejectedError,
+  api: authApi, ADMIN_BASE: authBase, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
+  SendIntentConflictError, SendIntentRejectedError,
 } = await import(authModuleUrl)
 await authApi.health()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
 await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
 const reloadReady = await authApi.reloadHand('hand-test')
+const candidatePreview = await authApi.readCurrentCandidate({ platform: 'zhilian', accountRef: 'account-test' })
+const candidateProfile = await authApi.selectCurrentCandidate(candidatePreview.selectionRef)
 const sendCreated = await authApi.sendMessage('intent-stable', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '你好')
 const sendStatus = await authApi.sendStatus('intent-stable')
 const sendLatest = await authApi.latestSendIntent('zhilian', 'account-test', 'conversation-test')
@@ -165,6 +187,18 @@ try {
   rejectedBeforeCreate = reason instanceof SendIntentRejectedError
 }
 forceSendRejected = false
+forceCandidateReadError = true
+let candidateReadError = ''
+try { await authApi.readCurrentCandidate({ platform: 'zhilian', accountRef: 'account-test' }) } catch (reason) {
+  candidateReadError = reason instanceof Error ? reason.message : String(reason)
+}
+forceCandidateReadError = false
+forceCandidateSelectError = true
+let candidateSelectError = ''
+try { await authApi.selectCurrentCandidate('selection-safe') } catch (reason) {
+  candidateSelectError = reason instanceof Error ? reason.message : String(reason)
+}
+forceCandidateSelectError = false
 const receivedFrames = []
 const stopFrames = authApi.subscribeFrames((frame) => receivedFrames.push(frame))
 await new Promise((resolve) => setTimeout(resolve, 20))
@@ -178,6 +212,16 @@ const bindBody = JSON.parse(String(bindRequest?.body || '{}'))
 check(bindBody.platform === 'platform-from-user' && bindBody.handId === 'hand-test' && bindBody.accountRef === 'account-test', '绑定平台由调用方传入且原样进入账号上下文')
 const reloadRequest = requests.find((request) => request.url.includes('/admin/hands/reload'))
 check(JSON.parse(String(reloadRequest?.body || '{}')).handId === 'hand-test' && reloadReady.bootId === 'boot-new', '一键重载携带目标手并返回新 boot 就绪证词')
+const candidateReadRequest = requests.find((request) => request.url.includes('/admin/candidates/current/read'))
+const candidateReadBody = JSON.parse(String(candidateReadRequest?.body || '{}'))
+check(Object.keys(candidateReadBody).sort().join(',') === 'accountRef,platform' && candidateReadBody.accountRef === 'account-test', '候选人读取只发送账号上下文')
+check(Object.keys(candidatePreview).sort().join(',') === 'contactState,displayName,positionTitle,selectionRef' && !JSON.stringify(candidatePreview).includes('raw-user'), '候选人预览归一化为安全最小 DTO，原始平台引用不进入 UI')
+const candidateSelectRequest = requests.find((request) => request.url.includes('/admin/candidates/current/select'))
+const candidateSelectBody = JSON.parse(String(candidateSelectRequest?.body || '{}'))
+check(Object.keys(candidateSelectBody).join(',') === 'selectionRef' && candidateSelectBody.selectionRef === 'selection-safe', '人工确认只回传本次 selectionRef')
+check(Object.keys(candidateProfile).sort().join(',') === 'created,profileId,status' && !JSON.stringify(candidateProfile).includes('raw-user'), '建档响应归一化为安全档案视图')
+check(candidateReadError === CANDIDATE_READ_ERROR && !candidateReadError.includes('raw-user-secret'), '候选人读取失败使用固定安全文案')
+check(candidateSelectError === CANDIDATE_SELECT_ERROR && !candidateSelectError.includes('raw-selection'), '候选人确认失败使用固定安全文案')
 const sendRequest = requests.find((request) => request.url.endsWith('/admin/messages/send') && request.body)
 const sendBody = JSON.parse(String(sendRequest?.body || '{}'))
 check(sendBody.intentId === 'intent-stable' && sendBody.previousIntentId === 'intent-before' && sendBody.text === '你好' && sendBody.conversationRef === 'conversation-test', '发送请求携带稳定 intentId、前序 CAS 与明确会话，不由 API 层重铸意图')
