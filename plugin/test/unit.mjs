@@ -52,6 +52,7 @@ const {
   readZhilianUnreadTotal,
   readZhilianList,
   readZhilianThread,
+  readZhilianCurrentCandidate,
   refreshPagesAfterRuntimeReload,
   sendZhilianMessage,
   normalizeZhilianMessageText,
@@ -1741,6 +1742,271 @@ test('智联生产身份探针优先 session orgId、旧公司字段仅兜底且
   assert.equal(missingOrganization.loginState, 'in')
   assert.equal(missingOrganization.principalFingerprint, null,
     '无法确证组织身份时必须返回 null，让脑暂停绑定')
+})
+
+function installM4CurrentCandidateFixture() {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+  }
+  const refs = {
+    resume: 'fixture-resume-private-current',
+    otherResume: 'fixture-resume-private-other',
+    user: 'fixture-user-stable-current',
+    otherUser: 'fixture-user-stable-other',
+    job: 'fixture-job-stable-current',
+  }
+  const element = (textContent = '') => ({
+    textContent,
+    disabled: false,
+    getClientRects() { return [{}] },
+    click() { state.clicks += 1 },
+  })
+  const name = element(' 合成 候选人 ')
+  const title = element(' 合成 职位 ')
+  const button = element('打招呼')
+  const detail = element()
+  const root = { _route: { query: { jobNumber: refs.job } } }
+  const store = { state: { talent: { activeJob: { jobNumber: refs.job, jobTitle: '合成 职位' } } } }
+  const matchedOwner = {
+    _props: { source: { resumeNumber: refs.resume, userMasterId: refs.user } },
+    $root: root,
+    $store: store,
+  }
+  const otherOwner = {
+    _props: { source: { resumeNumber: refs.otherResume, userMasterId: refs.otherUser } },
+    $root: root,
+    $store: store,
+  }
+  const items = [{ __vue__: matchedOwner }, { __vue__: otherOwner }]
+  const state = {
+    details: [detail],
+    items,
+    names: [name],
+    titles: [title],
+    buttons: [button],
+    clicks: 0,
+  }
+  detail.querySelectorAll = (selector) => {
+    if (selector === '.resume-basic-new__name') return state.names
+    if (selector === 'button[type="button"]') return state.buttons
+    return []
+  }
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/recommend?resumeNumber=${encodeURIComponent(refs.resume)}` +
+      `&jobNumber=${encodeURIComponent(refs.job)}`,
+  }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector === '.new-shortcut-resume__modal') return state.details
+      if (selector === '[role="listitem"]') return state.items
+      if (selector === '.job-pane__item--active .job-pane__item-job-title') return state.titles
+      return []
+    },
+  }
+  return {
+    refs,
+    state,
+    matchedOwner,
+    otherOwner,
+    restore() {
+      globalThis.document = original.document
+      globalThis.location = original.location
+      globalThis.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('candidate.readCurrent MAIN 只读唯一详情并以瞬时 resume join 返回稳定身份', () => {
+  const fixture = installM4CurrentCandidateFixture()
+  try {
+    const result = zhilianTestHooks.mainReadCurrentCandidate()
+    assert.deepEqual(result, {
+      status: 'ready',
+      data: {
+        platformUserRef: fixture.refs.user,
+        displayName: '合成 候选人',
+        positionRef: fixture.refs.job,
+        positionTitle: '合成 职位',
+        contactState: 'unestablished',
+      },
+    })
+    assert.equal(JSON.stringify(result).includes(fixture.refs.resume), false,
+      'resumeNumber 只能留在同次 MAIN 的瞬时 join 中')
+    assert.equal(fixture.state.clicks, 0, 'readonly evaluator 不得调用页面动作')
+
+    fixture.state.buttons = []
+    const unknown = zhilianTestHooks.mainReadCurrentCandidate()
+    assert.equal(unknown.status, 'ready')
+    assert.equal(unknown.data.contactState, 'unknown', '关系正证不足时不得猜 established')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readCurrent MAIN 对身份、绑定与职位歧义逐项失败关闭', () => {
+  const cases = [
+    ['无唯一详情', (fixture) => { fixture.state.details = [] }, 'detail_cardinality'],
+    ['来源私有通道缺失', (fixture) => { delete fixture.state.items[0].__vue__ }, 'list_source_unavailable'],
+    ['resume 瞬时连接重复', (fixture) => {
+      fixture.otherOwner._props.source.resumeNumber = fixture.refs.resume
+    }, 'detail_binding_ambiguous'],
+    ['userMasterId 同窗重复', (fixture) => {
+      fixture.otherOwner._props.source.userMasterId = fixture.refs.user
+    }, 'candidate_identity_duplicated'],
+    ['职位三值不等', (fixture) => {
+      fixture.matchedOwner.$root._route.query.jobNumber = 'fixture-job-route-drift'
+    }, 'position_identity_mismatch'],
+    ['职位标题冲突', (fixture) => {
+      fixture.matchedOwner.$store.state.talent.activeJob.jobTitle = '另一职位'
+    }, 'position_title_mismatch'],
+  ]
+  for (const [name, mutate, expectedReason] of cases) {
+    const fixture = installM4CurrentCandidateFixture()
+    try {
+      mutate(fixture)
+      assert.deepEqual(zhilianTestHooks.mainReadCurrentCandidate(), {
+        status: 'failed',
+        reason: expectedReason,
+      }, name)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.readCurrent 只用 last-focused active 推荐页且账号前后复核', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'a'.repeat(64)
+  const tab = {
+    id: 401,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?resumeNumber=private&jobNumber=private',
+  }
+  const mainCalls = []
+  const queryCalls = []
+  const progress = []
+  globalThis.chrome = {
+    tabs: {
+      async query(query) {
+        queryCalls.push(structuredClone(query))
+        return [{ ...tab }]
+      },
+      async sendMessage(id, message) {
+        assert.equal(id, tab.id)
+        assert.equal(message.type, 'recruithelper.content.probe')
+        return { ok: true }
+      },
+    },
+    scripting: {
+      async executeScript({ target, func }) {
+        assert.equal(target.tabId, tab.id)
+        mainCalls.push(func.name)
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+          imListVisible: false,
+        } }]
+        if (func.name === 'mainReadCurrentCandidate') return [{ result: {
+          status: 'ready',
+          data: {
+            platformUserRef: 'fixture-user', displayName: '合成候选人',
+            positionRef: 'fixture-job', positionTitle: '合成职位', contactState: 'unestablished',
+          },
+        } }]
+        throw new Error(`unexpected MAIN ${func.name}`)
+      },
+    },
+  }
+  try {
+    const data = await readZhilianCurrentCandidate({
+      signal: new AbortController().signal,
+      cmdMsgId: 'read-current-fixture',
+      deadlineMs: Date.now() + 10_000,
+      irreversibleNotAfterMs: Date.now() + 10_000,
+      commandContext: undefined,
+      guards: undefined,
+      checkpoint() {},
+      async beforeSideEffect() { throw new Error('readonly 不得进入动作栅栏') },
+      async progress(label, percent) { progress.push([label, percent]) },
+    }, fingerprint)
+    assert.equal(data.platformUserRef, 'fixture-user')
+    assert.deepEqual(queryCalls, [
+      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
+      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
+    ])
+    assert.deepEqual(mainCalls, ['mainProbeZhilian', 'mainReadCurrentCandidate', 'mainProbeZhilian'])
+    assert.equal(progress.at(-1)[1], 100)
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('candidate.readCurrent 切页或 MAIN 阴性只返回固定脱敏失败', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'b'.repeat(64)
+  const privateResume = 'private-resume-must-not-leak'
+  let queryCount = 0
+  let snapshot = { status: 'failed', reason: 'detail_binding_ambiguous', privateResume }
+  const firstTab = {
+    id: 501, active: true, status: 'complete',
+    url: `https://rd6.zhaopin.com/app/recommend?resumeNumber=${privateResume}&jobNumber=private`,
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() { queryCount += 1; return [{ ...firstTab }] },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+          imListVisible: false,
+        } }]
+        return [{ result: snapshot }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'read-current-negative',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {}, async beforeSideEffect() {}, async progress() {},
+  }
+  try {
+    await assert.rejects(readZhilianCurrentCandidate(context, fingerprint), (error) => {
+      assert.ok(error instanceof ZhilianPlatformError)
+      assert.equal(error.code, 'ELEMENT_UNRESOLVED')
+      assert.equal(error.message.includes(privateResume), false)
+      return true
+    })
+
+    queryCount = 0
+    snapshot = {
+      status: 'ready',
+      data: {
+        platformUserRef: 'fixture-user', displayName: null,
+        positionRef: 'fixture-job', positionTitle: null, contactState: 'unknown',
+      },
+    }
+    globalThis.chrome.tabs.query = async () => {
+      queryCount += 1
+      return [{ ...firstTab, id: queryCount === 1 ? firstTab.id : firstTab.id + 1 }]
+    }
+    await assert.rejects(readZhilianCurrentCandidate(context, fingerprint), (error) => {
+      assert.ok(error instanceof ZhilianPlatformError)
+      assert.equal(error.code, 'CTX_LOST_DURING_EXEC')
+      assert.equal(error.message.includes(privateResume), false)
+      return true
+    })
+  } finally {
+    globalThis.chrome = originalChrome
+  }
 })
 
 test('智联 MAIN 线程解析：方向不猜、未知类型归 system、数字卡片状态保持 unknown', async () => {

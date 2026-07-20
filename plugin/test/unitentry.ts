@@ -18,6 +18,7 @@ export { register } from '../src/program/registry'
 export {
   readZhilianList,
   readZhilianThread,
+  readZhilianCurrentCandidate,
   inspectZhilianSendSurfaceDiagnostic,
   sendZhilianMessage,
   normalizeZhilianMessageText,

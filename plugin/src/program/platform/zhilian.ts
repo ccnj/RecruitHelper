@@ -4,6 +4,7 @@
 import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
 import type {
+  CandidateReadCurrentData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
@@ -46,6 +47,7 @@ export class ZhilianPlatformError extends Error {
 
 // 平台实现只给生成类型起本地别名，不再手写一份协议 DTO。
 export type ZhilianProbe = ProbePlatformData
+export type ZhilianCurrentCandidate = CandidateReadCurrentData
 export type ZhilianListArgs = ChatReadListArgs
 export type ZhilianConversationSummary = ConversationSummary
 export type ZhilianListPage = ChatReadListData
@@ -69,6 +71,34 @@ interface MainListPageResult {
   hasMore: boolean
   unstable: boolean
 }
+
+const MAIN_CURRENT_CANDIDATE_FAILURE_REASONS = [
+  'route_missing',
+  'detail_cardinality',
+  'list_source_unavailable',
+  'detail_binding_ambiguous',
+  'candidate_identity_unavailable',
+  'candidate_identity_duplicated',
+  'position_identity_unavailable',
+  'position_identity_mismatch',
+  'position_title_ambiguous',
+  'position_title_mismatch',
+  'unexpected',
+] as const
+
+type MainCurrentCandidateFailureReason = typeof MAIN_CURRENT_CANDIDATE_FAILURE_REASONS[number]
+
+interface MainCurrentCandidateReady {
+  status: 'ready'
+  data: ZhilianCurrentCandidate
+}
+
+interface MainCurrentCandidateFailed {
+  status: 'failed'
+  reason: MainCurrentCandidateFailureReason
+}
+
+type MainCurrentCandidateResult = MainCurrentCandidateReady | MainCurrentCandidateFailed
 
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
@@ -477,6 +507,119 @@ async function mainProbeZhilian(): Promise<MainProbeResult> {
   }
 }
 
+// M4 当前候选人读取必须是单次、自包含的 MAIN-world 投影。resumeNumber 只在
+// 本函数局部把 body 下的唯一详情瞬时连接到唯一来源卡；它永不进入返回值，
+// 也不作为 userMasterId 读取失败后的身份降级。
+function mainReadCurrentCandidate(): MainCurrentCandidateResult {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const text = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const failed = (reason: MainCurrentCandidateFailureReason): MainCurrentCandidateFailed => ({
+    status: 'failed',
+    reason,
+  })
+
+  try {
+    const route = new URL(location.href)
+    if (!route.pathname.startsWith('/app/recommend')) return failed('route_missing')
+
+    const details = Array.from(document.querySelectorAll<HTMLElement>('.new-shortcut-resume__modal'))
+      .filter(visible)
+    if (details.length !== 1) return failed('detail_cardinality')
+    const detail = details[0]
+
+    const routeResumeNumber = opaque(route.searchParams.get('resumeNumber'))
+    const routeJobNumber = opaque(route.searchParams.get('jobNumber'))
+    if (!routeResumeNumber) return failed('detail_binding_ambiguous')
+    if (!routeJobNumber) return failed('position_identity_unavailable')
+
+    const listItems = Array.from(document.querySelectorAll<HTMLElement>('[role="listitem"]'))
+    if (listItems.length === 0) return failed('list_source_unavailable')
+    const sources: Array<{ owner: AnyRecord; source: AnyRecord }> = []
+    for (const item of listItems) {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const props = asRecord(owner?._props)
+      const source = asRecord(props?.source)
+      if (!owner || !source) return failed('list_source_unavailable')
+      sources.push({ owner, source })
+    }
+
+    const matches = sources.filter(({ source }) => opaque(source.resumeNumber) === routeResumeNumber)
+    if (matches.length !== 1) return failed('detail_binding_ambiguous')
+    const matched = matches[0]
+    const platformUserRef = opaque(matched.source.userMasterId)
+    if (!platformUserRef) return failed('candidate_identity_unavailable')
+    const sameUserCount = sources.filter(({ source }) =>
+      opaque(source.userMasterId) === platformUserRef).length
+    if (sameUserCount !== 1) return failed('candidate_identity_duplicated')
+
+    // 只读已由批次 0 真机确认的三个固定字面来源；candidate.searchCondition
+    // 中的 activeJob 是已证实的陈旧值，不能参与 positionRef。
+    const root = asRecord(matched.owner.$root)
+    const ownerRoute = asRecord(root?._route)
+    const ownerQuery = asRecord(ownerRoute?.query)
+    const store = asRecord(matched.owner.$store)
+    const state = asRecord(store?.state)
+    const talent = asRecord(state?.talent)
+    const activeJob = asRecord(talent?.activeJob)
+    const routedJobNumber = opaque(ownerQuery?.jobNumber)
+    const activeJobNumber = opaque(activeJob?.jobNumber)
+    if (!routedJobNumber || !activeJobNumber) return failed('position_identity_unavailable')
+    if (routeJobNumber !== routedJobNumber || routeJobNumber !== activeJobNumber) {
+      return failed('position_identity_mismatch')
+    }
+
+    const visibleJobTitles = Array.from(document.querySelectorAll<HTMLElement>(
+      '.job-pane__item--active .job-pane__item-job-title',
+    )).filter(visible).map((element) => text(element.textContent)).filter(Boolean)
+    if (visibleJobTitles.length > 1) return failed('position_title_ambiguous')
+    const visibleJobTitle = visibleJobTitles[0] ?? ''
+    const activeJobTitle = text(activeJob?.jobTitle)
+    if (visibleJobTitle && activeJobTitle && visibleJobTitle !== activeJobTitle) {
+      return failed('position_title_mismatch')
+    }
+
+    const visibleNames = Array.from(detail.querySelectorAll<HTMLElement>('.resume-basic-new__name'))
+      .filter(visible).map((element) => text(element.textContent)).filter(Boolean)
+    const displayName = visibleNames.length === 1 && visibleNames[0].length <= 256
+      ? visibleNames[0]
+      : null
+    const title = visibleJobTitle || activeJobTitle
+    const positionTitle = title && title.length <= 256 ? title : null
+
+    const greetingButtons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter((button) => visible(button) && !button.disabled && text(button.textContent) === '打招呼')
+
+    return {
+      status: 'ready',
+      data: {
+        platformUserRef,
+        displayName,
+        positionRef: routeJobNumber,
+        positionTitle,
+        contactState: greetingButtons.length === 1 ? 'unestablished' : 'unknown',
+      },
+    }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
 async function probeTab(tab: chrome.tabs.Tab): Promise<ZhilianProbe> {
   if (tab.id === undefined) {
     throw new ZhilianPlatformError('CTX_NOT_READY', 'canonical 标签页缺少 id', 'afterRecovery', 'pageBroken')
@@ -530,6 +673,90 @@ function assertExpectedPrincipal(probe: ZhilianProbe, expected: string | undefin
   if (probe.principalFingerprint !== expected) {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '当前智联登录账号与脑侧绑定不一致', 'manualOnly')
   }
+}
+
+async function activeRecommendTab(): Promise<chrome.tabs.Tab> {
+  const tabs = (await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+    url: TAB_QUERY,
+  })).filter((tab) => tab.id !== undefined && tab.active === true && pageKindFromURL(tab.url) === 'recommend')
+  if (tabs.length !== 1) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请在当前窗口打开唯一的智联推荐候选人详情',
+      'manualOnly',
+      'pageAbsent',
+    )
+  }
+  if (tabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '当前智联推荐页尚未就绪',
+      'afterRecovery',
+      'pageBroken',
+    )
+  }
+  return tabs[0]
+}
+
+function validCurrentCandidateResult(value: unknown): value is MainCurrentCandidateResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_CURRENT_CANDIDATE_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  if (record.status !== 'ready' || !record.data ||
+      typeof record.data !== 'object' || Array.isArray(record.data)) return false
+  const data = record.data as Record<string, unknown>
+  const nullableText = (candidate: unknown): boolean => candidate === null ||
+    (typeof candidate === 'string' && candidate.length >= 1 && candidate.length <= 256 &&
+      new TextEncoder().encode(candidate).length <= 1024)
+  const opaqueRef = (candidate: unknown): boolean => typeof candidate === 'string' &&
+    candidate.length >= 1 && candidate.length <= 512 && new TextEncoder().encode(candidate).length <= 2048
+  return opaqueRef(data.platformUserRef) && opaqueRef(data.positionRef) &&
+    nullableText(data.displayName) && nullableText(data.positionTitle) &&
+    (data.contactState === 'unestablished' || data.contactState === 'established' ||
+      data.contactState === 'unknown')
+}
+
+export async function readZhilianCurrentCandidate(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianCurrentCandidate> {
+  ctx.checkpoint()
+  await ctx.progress('读取真人当前打开的智联候选人', 10)
+  const tab = await activeRecommendTab()
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联推荐页缺少标签标识', 'afterRecovery', 'pageBroken')
+  }
+
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  const snapshot = await runMain(tab.id, mainReadCurrentCandidate, [])
+  ctx.checkpoint()
+
+  // 返回任何候选人数据前，必须仍是 last-focused window 的同一 active 推荐页，
+  // 并再次确证账号主体；切页/切号时丢弃刚才的私有读取结果。
+  const latest = await activeRecommendTab()
+  if (latest.id !== tab.id) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC',
+      '读取期间当前智联推荐页发生变化',
+      'manualOnly',
+    )
+  }
+  assertExpectedPrincipal(await probeTab(latest), expectedPrincipalFingerprint)
+
+  if (!validCurrentCandidateResult(snapshot) || snapshot.status !== 'ready') {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '当前候选人或职位无法唯一确证',
+      'manualOnly',
+    )
+  }
+  await ctx.progress('当前智联候选人读取完成', 100)
+  return snapshot.data
 }
 
 async function waitForIMReady(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<ZhilianProbe> {
@@ -3675,6 +3902,7 @@ export const zhilianTestHooks = Object.freeze({
   decodeCursor,
   encodeCursor,
   mainProbeZhilian,
+  mainReadCurrentCandidate,
   mainCaptureSendBaseline,
   mainInspectSendSurface,
   mainFindConversation,
