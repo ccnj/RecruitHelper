@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:3460188047c6610180ecabdd8fba633f626da7544e953a620b9d4bc55df82a88"
+	ContractHash       = "sha256:a920aad7e08cb9870e3d17aa31c7cbc83b331b2f3ad6903c42db3bd6c9809f76"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -69,6 +69,20 @@ var CancelReasonValues = []CancelReason{
 	CancelReasonSuperseded,
 	CancelReasonOperator,
 	CancelReasonShutdown,
+}
+
+type CandidateContactState string
+
+const (
+	CandidateContactStateUnestablished CandidateContactState = "unestablished"
+	CandidateContactStateEstablished   CandidateContactState = "established"
+	CandidateContactStateUnknown       CandidateContactState = "unknown"
+)
+
+var CandidateContactStateValues = []CandidateContactState{
+	CandidateContactStateUnestablished,
+	CandidateContactStateEstablished,
+	CandidateContactStateUnknown,
 }
 
 type CardState string
@@ -325,6 +339,16 @@ var RetryableValues = []Retryable{
 	RetryableManualOnly,
 }
 
+type SendGreetingEvidenceType string
+
+const (
+	SendGreetingEvidenceTypeOutboundGreetingObserved SendGreetingEvidenceType = "outboundGreetingObserved"
+)
+
+var SendGreetingEvidenceTypeValues = []SendGreetingEvidenceType{
+	SendGreetingEvidenceTypeOutboundGreetingObserved,
+}
+
 type SendMessageEvidenceType string
 
 const (
@@ -523,6 +547,7 @@ const (
 	ErrCodeCursorInvalid            ErrorCode = "CURSOR_INVALID"
 	ErrCodeElementUnresolved        ErrorCode = "ELEMENT_UNRESOLVED"
 	ErrCodeExecTimeoutHand          ErrorCode = "EXEC_TIMEOUT_HAND"
+	ErrCodeGreetingRejected         ErrorCode = "GREETING_REJECTED"
 	ErrCodeGuardFailed              ErrorCode = "GUARD_FAILED"
 	ErrCodeInternalHand             ErrorCode = "INTERNAL_HAND"
 	ErrCodePayloadLimit             ErrorCode = "PAYLOAD_LIMIT"
@@ -558,8 +583,9 @@ var ErrorCodes = map[ErrorCode]ErrorCodeMeta{
 	ErrCodeCursorInvalid:            {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodeElementUnresolved:        {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodeExecTimeoutHand:          {RetryableDefault: "yes|manualOnly(SX)", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchM1, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeGreetingRejected:         {RetryableDefault: "no", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodeGuardFailed:              {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
-	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible, SideEffectConfirmed}, Batch: BatchM1, Phase: ErrorPhaseExecution, DataSchema: ""},
+	ErrCodeInternalHand:             {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible, SideEffectConfirmed}, Batch: BatchM1, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodePayloadLimit:             {RetryableDefault: "afterRecovery", SideEffect: []SideEffect{SideEffectNone}, Batch: BatchS, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodePlatformLimit:            {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectNone, SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
 	ErrCodePostconditionUnconfirmed: {RetryableDefault: "manualOnly", SideEffect: []SideEffect{SideEffectPossible}, Batch: BatchX, Phase: ErrorPhaseExecution, DataSchema: ""},
@@ -593,6 +619,8 @@ const (
 )
 
 const (
+	PrimCandidateReadCurrent    = "candidate.readCurrent"
+	PrimChatReadGreetingOutcome = "chat.readGreetingOutcome"
 	PrimChatReadList            = "chat.readList"
 	PrimChatReadThread          = "chat.readThread"
 	PrimChatSendGreeting        = "chat.sendGreeting"
@@ -627,9 +655,11 @@ type PrimitiveMeta struct {
 }
 
 var Primitives = map[string]PrimitiveMeta{
+	PrimCandidateReadCurrent:    {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "CandidateReadCurrentArgs", DataSchema: "CandidateReadCurrentData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatReadGreetingOutcome: {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadGreetingOutcomeArgs", DataSchema: "ChatReadGreetingOutcomeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatReadList:            {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "ChatReadListArgs", DataSchema: "ChatReadListData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatReadThread:          {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadThreadArgs", DataSchema: "ChatReadThreadData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
-	PrimChatSendGreeting:        {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatSendGreeting:        {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 60000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendGreetingArgs", DataSchema: "ChatSendGreetingData", GuardsSchema: "ChatSendGreetingGuards", EvidenceSchema: "ChatSendGreetingEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "candidate.selected", "relationship.unestablished", "witness/1"}, VerificationPrimitive: "chat.readGreetingOutcome", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
 	PrimChatSendInviteCard:      {Ver: 0, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 0, DeadlineMs: 0, LeaseMs: 0, ArgsSchema: "", DataSchema: "", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatSendMessage:         {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 60000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendMessageArgs", DataSchema: "ChatSendMessageData", GuardsSchema: "ChatSendMessageGuards", EvidenceSchema: "ChatSendMessageEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"}, VerificationPrimitive: "chat.readThread", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
 	PrimDebugInspectSendSurface: {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugInspectSendSurfaceArgs", DataSchema: "DebugInspectSendSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},

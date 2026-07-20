@@ -648,7 +648,7 @@ export class Dispatcher {
         code: ErrorCode.InternalHand,
         message: humanMessage(error),
         retryable: Retryable.ManualOnly,
-        // INTERNAL_HAND 本身表示手无法证明发生了什么；契约只允许 possible。
+        // 此处捕获的是未分类异常，不能取得动作前零副作用证明，必须 possible。
         sideEffect: SideEffect.Possible,
       },
     }

@@ -146,3 +146,19 @@ report 可重复，但脑只采信当前物理连接、当前 recovery generatio
 - `WITNESS_UNAVAILABLE` 的结构化 data schema 与 sideEffect 限制。
 
 最低门禁：codegen `-check` 零漂移；Go/TS 同构用例覆盖 witness 三字段、attempting/committed 条件、outbox session 非空、report 状态/ref 关联、effectful evidence 与结构化错误；确定性自动化 harness 覆盖 §5 全表，真实账号只执行一条最小自然消息和恢复复读，不做故障注入。
+
+## 9. M4 主动建联增量
+
+§0–§8 是 M3 首次真实副作用安全轨道的历史快照；其中 §7 的 `chat.sendGreeting@0` 推迟项已在 M4 到期。M4 不改 witness schema/version，不泛化新的投递框架，而是原样复用 witness v1、attempting→committed/outbox、query/report、suspect，以及“同 witness store 且 report=unknown 才允许重投原 msgId”的唯一安全恢复通道。
+
+主动建联与既有会话发送只替换动作基线和配套验证读：
+
+- `chat.sendMessage` 的基线是既有会话尾，验证读是 `chat.readThread`；
+- `chat.sendGreeting` 的基线是同一候选人×职位关系未建立，验证读是 `chat.readGreetingOutcome`；
+- greeting 的 attempting/possible/store 换代或终局丢失，只能按原命令的 `{platformUserRef,positionRef,contentHash}` 最多验证 3 轮。只有唯一稳定新会话中的唯一服务端招呼正证可以补记成功；false、零/多匹配、身份职位不清或读取失败都只能少发、suspect、人工，绝不授权第二次招呼。
+
+当前智联已由 M4 批次 0 证明两步 UI：第一击只打开本命令拥有的招呼编辑器，最终发送按钮才是候选人可见的不可逆动作。因此 attempting 必须在最终发送前持久化，program 对候选人可见动作至多调用一次；打开编辑器、选择非 AI 模板、写入并复读正文都只是该命令的可逆准备步骤，任何异常均不得补点最终发送。
+
+`candidate.readCurrent` 的 MAIN-world 来源是高脆候选人身份感知通道，不是动作守卫或平台私有实现互证。它读不到、为空、重复或无法绑定唯一当前详情时，唯一失效方向是“不确认候选人→不建档→转人工”；不得降级为姓名、`resumeNumber` 或 DOM 位置。生产成功后不透明 `platformUserRef` 作为脑侧 Candidate 主键持久化，但原始页面对象、路径和探针材料不进入协议或证词。
+
+`GREETING_REJECTED/sideEffect=none` 只收束平台明确业务拒绝；其他技术失败保持档案 selected 并终局化原意图。`failed/sideEffect=confirmed` 也不等于招呼正证：它只禁止归档失败与另发，仍须验证或人工裁决。合法 ok、重复 result、迟到 result和验证正证最终都进入同一个脑侧成功事务，原子绑定 Candidate/Profile/Intent/Conversation/TrackedIntent/Message。

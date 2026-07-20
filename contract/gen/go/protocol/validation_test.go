@@ -347,6 +347,93 @@ func TestM3EffectfulResultEvidenceAndWitnessError(t *testing.T) {
 	}
 }
 
+func TestM4CandidateAndGreetingSchemas(t *testing.T) {
+	candidateCommand := json.RawMessage(`{"name":"candidate.readCurrent","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{},"deadline":1999999999999,"execBudgetMs":5000}`)
+	if err := ValidateKindBody(KindCmd, candidateCommand); err != nil {
+		t.Fatalf("合法 candidate.readCurrent 命令应通过:%v", err)
+	}
+	for _, state := range []string{"unestablished", "established", "unknown"} {
+		data := json.RawMessage(`{"platformUserRef":"user-1","displayName":null,"positionRef":"job-1","positionTitle":null,"contactState":"` + state + `"}`)
+		if err := ValidatePrimitiveData(PrimCandidateReadCurrent, 1, data); err != nil {
+			t.Fatalf("合法 current candidate 状态 %s 应通过:%v", state, err)
+		}
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadCurrent, 1, json.RawMessage(`{"displayName":null,"positionRef":"job-1","positionTitle":null,"contactState":"unknown"}`)), "$.platformUserRef", "required")
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadCurrent, 1, json.RawMessage(`{"platformUserRef":"user-1","positionRef":"job-1","positionTitle":null,"contactState":"unknown"}`)), "$.displayName", "required")
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadCurrent, 1, json.RawMessage(`{"platformUserRef":"user-1","displayName":null,"positionRef":"job-1","positionTitle":null,"contactState":"bad"}`)), "$.contactState", "enum")
+
+	validArgs := json.RawMessage(`{"platformUserRef":"user-1","positionRef":"job-1","text":"你好"}`)
+	if err := ValidatePrimitiveArgs(PrimChatSendGreeting, 1, validArgs); err != nil {
+		t.Fatalf("合法 greeting args 应通过:%v", err)
+	}
+	assertValidationError(t, ValidatePrimitiveArgs(PrimChatSendGreeting, 1, json.RawMessage(`{"platformUserRef":"user-1","positionRef":"job-1","text":""}`)), "$.text", "minLength")
+	tooManyBytes := `{"platformUserRef":"user-1","positionRef":"job-1","text":"` + strings.Repeat("界", 683) + `"}`
+	assertValidationError(t, ValidatePrimitiveArgs(PrimChatSendGreeting, 1, json.RawMessage(tooManyBytes)), "$.text", "maxBytes")
+
+	if err := ValidatePrimitiveGuards(PrimChatSendGreeting, 1, json.RawMessage(`{"expectUnestablished":true}`)); err != nil {
+		t.Fatalf("合法 greeting guards 应通过:%v", err)
+	}
+	assertValidationError(t, ValidatePrimitiveGuards(PrimChatSendGreeting, 1, json.RawMessage(`{"expectUnestablished":false}`)), "$.expectUnestablished", "const")
+	missingGreetingGuards := json.RawMessage(`{"name":"chat.sendGreeting","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"platformUserRef":"user-1","positionRef":"job-1","text":"你好"},"idemKey":"ik1:zhilian:acc-1:chat.sendGreeting:profile-1:int-1","deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, missingGreetingGuards), "$.guards", "required")
+
+	validResult := json.RawMessage(`{
+		"ref":"greet-1","status":"ok",
+		"data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},
+		"evidence":[{"type":"outboundGreetingObserved"}],"replayed":false,"execMs":10
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatSendGreeting, 1, validResult); err != nil {
+		t.Fatalf("合法 greeting result 应通过:%v", err)
+	}
+	missingEvidence := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"replayed":false,"execMs":10}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, missingEvidence), "$.evidence", "minItems")
+	wrongEvidence := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundMessageObserved"}],"replayed":false,"execMs":10}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, wrongEvidence), "$.evidence[0].type", "enum")
+	shortHash := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundGreetingObserved"}],"replayed":false,"execMs":10}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, shortHash), "$.data.contentHash", "minLength")
+	longHash := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundGreetingObserved"}],"replayed":false,"execMs":10}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, longHash), "$.data.contentHash", "maxLength")
+
+	outcomeCommand := json.RawMessage(`{"name":"chat.readGreetingOutcome","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"platformUserRef":"user-1","positionRef":"job-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"deadline":1999999999999,"execBudgetMs":240000,"leaseMs":30000}`)
+	if err := ValidateKindBody(KindCmd, outcomeCommand); err != nil {
+		t.Fatalf("合法 chat.readGreetingOutcome 命令应通过:%v", err)
+	}
+	confirmed := json.RawMessage(`{"confirmed":true,"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20}`)
+	if err := ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, confirmed); err != nil {
+		t.Fatalf("合法 confirmed greeting outcome 应通过:%v", err)
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":true,"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20}`)), "$.conversationRef", "requiredWhen")
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":true,"conversationRef":"conv-1","observedAt":20}`)), "$.contentHash", "requiredWhen")
+	unconfirmed := json.RawMessage(`{"confirmed":false,"observedAt":20}`)
+	if err := ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, unconfirmed); err != nil {
+		t.Fatalf("合法 unconfirmed greeting outcome 应通过:%v", err)
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":false,"conversationRef":"conv-1","observedAt":20}`)), "$.conversationRef", "forbiddenWhen")
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":false,"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20}`)), "$.contentHash", "forbiddenWhen")
+
+	rejected := json.RawMessage(`{"ref":"greet-1","status":"failed","error":{"code":"GREETING_REJECTED","retryable":"no","sideEffect":"none"},"replayed":false,"execMs":1}`)
+	if err := ValidatePrimitiveResult(PrimChatSendGreeting, 1, rejected); err != nil {
+		t.Fatalf("GREETING_REJECTED/none 应通过:%v", err)
+	}
+	rejectedWithoutSideEffect := json.RawMessage(`{"ref":"greet-1","status":"failed","error":{"code":"GREETING_REJECTED","retryable":"no"},"replayed":false,"execMs":1}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, rejectedWithoutSideEffect), "$.error.sideEffect", "required")
+	rejectedPossible := json.RawMessage(`{"ref":"greet-1","status":"failed","error":{"code":"GREETING_REJECTED","retryable":"no","sideEffect":"possible"},"replayed":false,"execMs":1}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, rejectedPossible), "$.error.sideEffect", "errorCodeSideEffect")
+	rejectedConfirmed := json.RawMessage(`{"ref":"greet-1","status":"failed","error":{"code":"GREETING_REJECTED","retryable":"no","sideEffect":"confirmed"},"replayed":false,"execMs":1}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, rejectedConfirmed), "$.error.sideEffect", "errorCodeSideEffect")
+
+	meta := Primitives[PrimChatSendGreeting]
+	if meta.Ver != 1 || meta.GuardsSchema == "" || meta.EvidenceSchema == "" || meta.VerificationPrimitive != PrimChatReadGreetingOutcome || meta.VerificationVer != 1 || meta.VerificationMaxRounds != DefaultVerificationMaxRounds {
+		t.Fatalf("greeting verifier metadata 漂移:%+v", meta)
+	}
+	invite := Primitives[PrimChatSendInviteCard]
+	if invite.Ver != 0 || invite.ArgsSchema != "" || invite.DataSchema != "" || invite.GuardsSchema != "" || invite.EvidenceSchema != "" {
+		t.Fatalf("sendInviteCard 仍应为 ver=0 占位")
+	}
+	inviteCommand := json.RawMessage(`{"name":"chat.sendInviteCard","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{},"idemKey":"ik-1","deadline":1999999999999,"execBudgetMs":60000}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, inviteCommand), "$.name", "primitive")
+}
+
 func TestSendSurfaceDiagnosticStagesMatchCurrentProducer(t *testing.T) {
 	retained := []string{
 		"page_absent",

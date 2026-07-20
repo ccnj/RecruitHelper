@@ -1,8 +1,10 @@
 import {
   Kind,
+  PRIMITIVE_META,
   SendSurfaceDiagnosticStage,
   validateKindBody,
   validatePrimitiveData,
+  validatePrimitiveGuards,
   validatePrimitiveResult,
   validateSchema,
   type ValidationIssue,
@@ -277,6 +279,283 @@ expectIssue(
   validatePrimitiveResult("chat.sendMessage", 1, { ...sendResult, evidence: [{ type: "clicked" }] }),
   "$.evidence[0].type",
   "enum",
+);
+
+for (const contactState of ["unestablished", "established", "unknown"] as const) {
+  expectValid(
+    `candidate current state ${contactState}`,
+    validatePrimitiveData("candidate.readCurrent", 1, {
+      platformUserRef: "user-1",
+      displayName: null,
+      positionRef: "job-1",
+      positionTitle: null,
+      contactState,
+    }),
+  );
+}
+expectValid(
+  "candidate current command",
+  validateKindBody(Kind.Cmd, {
+    name: "candidate.readCurrent",
+    ver: 1,
+    context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+    args: {},
+    deadline: 1_999_999_999_999,
+    execBudgetMs: 5_000,
+  }),
+);
+expectIssue(
+  "candidate current identity required",
+  validatePrimitiveData("candidate.readCurrent", 1, {
+    displayName: null,
+    positionRef: "job-1",
+    positionTitle: null,
+    contactState: "unknown",
+  }),
+  "$.platformUserRef",
+  "required",
+);
+expectIssue(
+  "candidate display name nullable but required",
+  validatePrimitiveData("candidate.readCurrent", 1, {
+    platformUserRef: "user-1",
+    positionRef: "job-1",
+    positionTitle: null,
+    contactState: "unknown",
+  }),
+  "$.displayName",
+  "required",
+);
+expectIssue(
+  "candidate current state enum",
+  validatePrimitiveData("candidate.readCurrent", 1, {
+    platformUserRef: "user-1",
+    displayName: null,
+    positionRef: "job-1",
+    positionTitle: null,
+    contactState: "bad",
+  }),
+  "$.contactState",
+  "enum",
+);
+
+const greetingCommand = {
+  name: "chat.sendGreeting",
+  ver: 1,
+  context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+  args: { platformUserRef: "user-1", positionRef: "job-1", text: "你好" },
+  idemKey: "ik1:zhilian:acc-1:chat.sendGreeting:profile-1:int-1",
+  deadline: 1_999_999_999_999,
+  execBudgetMs: 60_000,
+  leaseMs: 30_000,
+  guards: { expectUnestablished: true },
+};
+expectValid("greeting command", validateKindBody(Kind.Cmd, greetingCommand));
+const greetingWithoutGuards: Record<string, unknown> = { ...greetingCommand };
+delete greetingWithoutGuards.guards;
+expectIssue("greeting guards required", validateKindBody(Kind.Cmd, greetingWithoutGuards), "$.guards", "required");
+expectIssue(
+  "greeting text non-empty",
+  validateKindBody(Kind.Cmd, { ...greetingCommand, args: { ...greetingCommand.args, text: "" } }),
+  "$.args.text",
+  "minLength",
+);
+expectIssue(
+  "greeting text UTF-8 byte limit",
+  validateKindBody(Kind.Cmd, { ...greetingCommand, args: { ...greetingCommand.args, text: "界".repeat(683) } }),
+  "$.args.text",
+  "maxBytes",
+);
+expectValid("greeting guard", validatePrimitiveGuards("chat.sendGreeting", 1, { expectUnestablished: true }));
+expectIssue(
+  "greeting guard const",
+  validatePrimitiveGuards("chat.sendGreeting", 1, { expectUnestablished: false }),
+  "$.expectUnestablished",
+  "const",
+);
+
+const greetingResult = {
+  ref: "greet-1",
+  status: "ok",
+  data: {
+    platformUserRef: "user-1",
+    positionRef: "job-1",
+    conversationRef: "conv-1",
+    contentHash: "a".repeat(64),
+    observedAt: 20,
+  },
+  evidence: [{ type: "outboundGreetingObserved" }],
+  replayed: false,
+  execMs: 10,
+};
+expectValid("greeting result", validatePrimitiveResult("chat.sendGreeting", 1, greetingResult));
+expectIssue(
+  "greeting evidence required",
+  validatePrimitiveResult("chat.sendGreeting", 1, { ...greetingResult, evidence: [] }),
+  "$.evidence",
+  "minItems",
+);
+expectIssue(
+  "greeting evidence enum",
+  validatePrimitiveResult("chat.sendGreeting", 1, { ...greetingResult, evidence: [{ type: "outboundMessageObserved" }] }),
+  "$.evidence[0].type",
+  "enum",
+);
+expectIssue(
+  "greeting hash length",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingResult,
+    data: { ...greetingResult.data, contentHash: "a".repeat(63) },
+  }),
+  "$.data.contentHash",
+  "minLength",
+);
+expectIssue(
+  "greeting hash maximum length",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingResult,
+    data: { ...greetingResult.data, contentHash: "a".repeat(65) },
+  }),
+  "$.data.contentHash",
+  "maxLength",
+);
+
+expectValid(
+  "greeting outcome command",
+  validateKindBody(Kind.Cmd, {
+    name: "chat.readGreetingOutcome",
+    ver: 1,
+    context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+    args: { platformUserRef: "user-1", positionRef: "job-1", contentHash: "a".repeat(64) },
+    deadline: 1_999_999_999_999,
+    execBudgetMs: 240_000,
+    leaseMs: 30_000,
+  }),
+);
+expectValid(
+  "confirmed greeting outcome",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, {
+    confirmed: true,
+    conversationRef: "conv-1",
+    contentHash: "a".repeat(64),
+    observedAt: 20,
+  }),
+);
+expectIssue(
+  "confirmed greeting outcome needs conversation",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, {
+    confirmed: true,
+    contentHash: "a".repeat(64),
+    observedAt: 20,
+  }),
+  "$.conversationRef",
+  "requiredWhen",
+);
+expectIssue(
+  "confirmed greeting outcome needs hash",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, {
+    confirmed: true,
+    conversationRef: "conv-1",
+    observedAt: 20,
+  }),
+  "$.contentHash",
+  "requiredWhen",
+);
+expectValid(
+  "unconfirmed greeting outcome",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, { confirmed: false, observedAt: 20 }),
+);
+expectIssue(
+  "unconfirmed greeting outcome forbids conversation",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, {
+    confirmed: false,
+    conversationRef: "conv-1",
+    observedAt: 20,
+  }),
+  "$.conversationRef",
+  "forbiddenWhen",
+);
+expectIssue(
+  "unconfirmed greeting outcome forbids hash",
+  validatePrimitiveData("chat.readGreetingOutcome", 1, {
+    confirmed: false,
+    contentHash: "a".repeat(64),
+    observedAt: 20,
+  }),
+  "$.contentHash",
+  "forbiddenWhen",
+);
+
+const greetingRejected = {
+  ref: "greet-1",
+  status: "failed",
+  error: { code: "GREETING_REJECTED", retryable: "no", sideEffect: "none" },
+  replayed: false,
+  execMs: 1,
+};
+expectValid("greeting rejected none", validatePrimitiveResult("chat.sendGreeting", 1, greetingRejected));
+expectIssue(
+  "greeting rejected requires side effect",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingRejected,
+    error: { code: "GREETING_REJECTED", retryable: "no" },
+  }),
+  "$.error.sideEffect",
+  "required",
+);
+expectIssue(
+  "greeting rejected forbids possible",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingRejected,
+    error: { ...greetingRejected.error, sideEffect: "possible" },
+  }),
+  "$.error.sideEffect",
+  "errorCodeSideEffect",
+);
+expectIssue(
+  "greeting rejected forbids confirmed",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingRejected,
+    error: { ...greetingRejected.error, sideEffect: "confirmed" },
+  }),
+  "$.error.sideEffect",
+  "errorCodeSideEffect",
+);
+
+if (
+  PRIMITIVE_META["chat.sendGreeting"].verificationPrimitive !== "chat.readGreetingOutcome" ||
+  PRIMITIVE_META["chat.sendGreeting"].verificationVer !== 1 ||
+  PRIMITIVE_META["chat.sendGreeting"].verificationMaxRounds !== 3
+) {
+  throw new Error(`greeting verifier metadata drift: ${JSON.stringify(PRIMITIVE_META["chat.sendGreeting"])}`);
+}
+const greetingMeta = PRIMITIVE_META["chat.sendGreeting"];
+if (greetingMeta.ver !== 1 || greetingMeta.guardsSchema === null || greetingMeta.evidenceSchema === null) {
+  throw new Error(`greeting schema metadata drift: ${JSON.stringify(greetingMeta)}`);
+}
+const inviteMeta = PRIMITIVE_META["chat.sendInviteCard"];
+if (
+  inviteMeta.ver !== 0 ||
+  inviteMeta.argsSchema !== null ||
+  inviteMeta.dataSchema !== null ||
+  inviteMeta.guardsSchema !== null ||
+  inviteMeta.evidenceSchema !== null
+) {
+  throw new Error(`sendInviteCard placeholder drift: ${JSON.stringify(inviteMeta)}`);
+}
+expectIssue(
+  "sendInviteCard placeholder has no schema",
+  validateKindBody(Kind.Cmd, {
+    name: "chat.sendInviteCard",
+    ver: 1,
+    context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+    args: {},
+    idemKey: "ik-1",
+    deadline: 1_999_999_999_999,
+    execBudgetMs: 60_000,
+  }),
+  "$.name",
+  "primitive",
 );
 
 const retainedSendSurfaceStages = [

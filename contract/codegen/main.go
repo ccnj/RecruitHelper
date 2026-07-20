@@ -261,7 +261,13 @@ func assertContract(c map[string]any) {
 	assertIntEqual("ping outboxPending capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "PingBody", "outboxPending", "maximum"))
 	assertIntEqual("ping journalOpen capacity", intval(defs["witnessCapacity"]), schemaFieldInt(types, "PingBody", "journalOpen", "maximum"))
 	assertIntEqual("witness schema version", intval(defs["witnessSchemaVersion"]), schemaFieldInt(types, "WitnessStoreMeta", "schemaVersion", "maximum"))
-	assertIntEqual("verification rounds", intval(defs["verificationMaxRounds"]), intval(obj(obj(obj(c, "primitives"), "chat.sendMessage"), "verification")["maxRounds"]))
+	for _, name := range sortedKeys(obj(c, "primitives")) {
+		primitive := obj(obj(c, "primitives"), name)
+		if intval(primitive["ver"]) == 0 || str(primitive["class"]) != "effectful" || str(primitive["batch"]) != "X" {
+			continue
+		}
+		assertIntEqual("primitives."+name+".verification.maxRounds", intval(defs["verificationMaxRounds"]), intval(obj(primitive, "verification")["maxRounds"]))
+	}
 
 	// 保守按所有字符串每输入字节/码点最多转成 6 字节 JSON escape 计算。
 	// failed result 可同时带 error.evidence 与 result.evidence,但只会有一份 data。
@@ -971,7 +977,7 @@ func genGoTypes(c map[string]any) []byte {
 	w("\treturn nil")
 	w("}")
 	w("")
-	w("// ValidatePrimitiveResult 同时强制 result 基础形态、ok data、真实 SX evidence 与 failed.sideEffect。")
+	w("// ValidatePrimitiveResult 同时强制 result 基础形态、ok data、真实 SX evidence、failed.sideEffect 及错误码允许集合。")
 	w("func ValidatePrimitiveResult(name string, ver int, raw json.RawMessage) error {")
 	w("\tif err := ValidateKindBody(KindResult, raw); err != nil { return err }")
 	w("\ts, ok := primitiveSchemas[name]")
@@ -987,6 +993,13 @@ func genGoTypes(c map[string]any) []byte {
 	w("\t}")
 	w("\tif body.Status == ResultStatusFailed && s.Class == \"effectful\" && (body.Error == nil || body.Error.SideEffect == \"\") {")
 	w("\t\treturn validationError(\"$.error.sideEffect\", \"required\", \"effectful failed 必须显式标注 sideEffect\")")
+	w("\t}")
+	w("\tif body.Status == ResultStatusFailed && body.Error != nil && body.Error.SideEffect != \"\" {")
+	w("\t\tmeta, ok := ErrorCodes[body.Error.Code]")
+	w("\t\tif !ok { return validationError(\"$.error.code\", \"enum\", \"未知错误码 %q\", body.Error.Code) }")
+	w("\t\tallowed := false")
+	w("\t\tfor _, sideEffect := range meta.SideEffect { if sideEffect == body.Error.SideEffect { allowed = true; break } }")
+	w("\t\tif !allowed { return validationError(\"$.error.sideEffect\", \"errorCodeSideEffect\", \"错误码 %s 不允许 sideEffect=%s\", body.Error.Code, body.Error.SideEffect) }")
 	w("\t}")
 	w("\treturn nil")
 	w("}")
@@ -1834,7 +1847,7 @@ export function validatePrimitiveEvidence(name: string, ver: number, value: unkn
   return value.flatMap((item, index) => rebaseIssues(validateSchema(schema.evidence, item), "$[" + index + "]"));
 }
 
-/** 同时强制 result 基础形态、ok data、真实 SX evidence 与 failed.sideEffect。 */
+/** 同时强制 result 基础形态、ok data、真实 SX evidence、failed.sideEffect 及错误码允许集合。 */
 export function validatePrimitiveResult(name: string, ver: number, value: unknown): ValidationIssue[] {
   const issues = validateKindBody(Kind.Result, value);
   if (issues.length > 0 || !isRecord(value)) return issues;
@@ -1844,9 +1857,15 @@ export function validatePrimitiveResult(name: string, ver: number, value: unknow
   if (value.status === ResultStatus.Ok) {
     issues.push(...rebaseIssues(validatePrimitiveData(name, ver, value.data), "$.data"));
     issues.push(...rebaseIssues(validatePrimitiveEvidence(name, ver, value.evidence), "$.evidence"));
-  } else if (value.status === ResultStatus.Failed && schema.class === CmdClass.Effectful) {
-    if (!isRecord(value.error) || typeof value.error.sideEffect !== "string" || value.error.sideEffect.length === 0) {
+  } else if (value.status === ResultStatus.Failed) {
+    if (schema.class === CmdClass.Effectful && (!isRecord(value.error) || typeof value.error.sideEffect !== "string" || value.error.sideEffect.length === 0)) {
       pushIssue(issues, "$.error.sideEffect", "required", "effectful failed 必须显式标注 sideEffect");
+    }
+    if (isRecord(value.error) && typeof value.error.code === "string" && typeof value.error.sideEffect === "string" && value.error.sideEffect.length > 0) {
+      const meta = ERROR_CODE_META[value.error.code as ErrorCode];
+      if (meta !== undefined && !meta.sideEffect.includes(value.error.sideEffect as SideEffect)) {
+        pushIssue(issues, "$.error.sideEffect", "errorCodeSideEffect", "错误码 " + value.error.code + " 不允许 sideEffect=" + value.error.sideEffect);
+      }
     }
   }
   return issues;
