@@ -161,7 +161,16 @@ func TestHelloUnknownFieldsAndHashWarnOnly(t *testing.T) {
 	if welcome.ContractMatch {
 		t.Fatal("contractHash mismatch 应在 welcome 标记 false")
 	}
-	state, ok := h.hub.Registry().Get("hand-future")
+	var state HandState
+	var ok bool
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state, ok = h.hub.Registry().Get("hand-future")
+		if ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if !ok || len(state.Caps) != 1 || len(state.Features) != 3 {
 		t.Fatalf("hello caps/features 未保存: %+v", state)
 	}
