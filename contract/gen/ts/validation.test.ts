@@ -1,5 +1,6 @@
 import {
   Kind,
+  SendSurfaceDiagnosticStage,
   validateKindBody,
   validatePrimitiveData,
   validatePrimitiveResult,
@@ -257,6 +258,49 @@ expectIssue(
   "$.evidence[0].type",
   "enum",
 );
+
+const retainedSendSurfaceStages = [
+  "page_absent",
+  "route_missing",
+  "composer_cardinality",
+  "detail_cardinality",
+  "button_cardinality",
+  "dom_containment",
+  "button_form_unsafe",
+  "draft_present",
+  "thread_unavailable",
+  "diagnostic_unavailable",
+  "ready",
+] as const;
+const generatedSendSurfaceStages = Object.values(SendSurfaceDiagnosticStage);
+if (JSON.stringify(generatedSendSurfaceStages) !== JSON.stringify(retainedSendSurfaceStages)) {
+  throw new Error(`send-surface stages drift: ${JSON.stringify(generatedSendSurfaceStages)}`);
+}
+for (const stage of retainedSendSurfaceStages) {
+  expectValid(
+    `current send-surface stage ${stage}`,
+    validatePrimitiveResult("debug.inspectSendSurface", 1, {
+      ref: "debug-surface-1",
+      status: "ok",
+      data: { ready: stage === "ready", stage },
+      replayed: false,
+      execMs: 1,
+    }),
+  );
+}
+expectIssue(
+  "removed private send-surface stage",
+  validatePrimitiveResult("debug.inspectSendSurface", 1, {
+    ref: "debug-surface-1",
+    status: "ok",
+    data: { ready: false, stage: "component_tree_unavailable" },
+    replayed: false,
+    execMs: 1,
+  }),
+  "$.data.stage",
+  "enum",
+);
+
 expectValid(
   "witness unavailable before action",
   validatePrimitiveResult("chat.sendMessage", 1, {

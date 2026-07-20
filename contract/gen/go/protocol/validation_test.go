@@ -330,6 +330,52 @@ func TestM3EffectfulResultEvidenceAndWitnessError(t *testing.T) {
 	}
 }
 
+func TestSendSurfaceDiagnosticStagesMatchCurrentProducer(t *testing.T) {
+	retained := []string{
+		"page_absent",
+		"route_missing",
+		"composer_cardinality",
+		"detail_cardinality",
+		"button_cardinality",
+		"dom_containment",
+		"button_form_unsafe",
+		"draft_present",
+		"thread_unavailable",
+		"diagnostic_unavailable",
+		"ready",
+	}
+	if len(SendSurfaceDiagnosticStageValues) != len(retained) {
+		t.Fatalf("诊断阶段枚举数量漂移:得到 %d,期望 %d", len(SendSurfaceDiagnosticStageValues), len(retained))
+	}
+	for i, stage := range retained {
+		if string(SendSurfaceDiagnosticStageValues[i]) != stage {
+			t.Fatalf("诊断阶段枚举[%d]漂移:得到 %q,期望 %q", i, SendSurfaceDiagnosticStageValues[i], stage)
+		}
+	}
+	validate := func(stage string) error {
+		data, err := Encode(DebugInspectSendSurfaceData{
+			Ready: stage == "ready",
+			Stage: SendSurfaceDiagnosticStage(stage),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := Encode(ResultBody{
+			Ref: "debug-surface-1", Status: ResultStatusOk, Data: data, Replayed: false, ExecMs: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ValidatePrimitiveResult(PrimDebugInspectSendSurface, 1, result)
+	}
+	for _, stage := range retained {
+		if err := validate(stage); err != nil {
+			t.Errorf("当前生产阶段 %q 应通过:%v", stage, err)
+		}
+	}
+	assertValidationError(t, validate("component_tree_unavailable"), "$.data.stage", "enum")
+}
+
 func assertValidationError(t *testing.T, err error, path, rule string) {
 	t.Helper()
 	if err == nil {

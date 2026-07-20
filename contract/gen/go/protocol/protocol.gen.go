@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:99157dc009e54199417443192a43af1e8bdf1321b8ea70897f4c64262e37c087"
+	ContractHash       = "sha256:f83b6318fb1184c4afe54bce84fe0c0d865694d269726579df73890e3927c129"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -338,52 +338,17 @@ var SendMessageEvidenceTypeValues = []SendMessageEvidenceType{
 type SendSurfaceDiagnosticStage string
 
 const (
-	SendSurfaceDiagnosticStagePageAbsent                     SendSurfaceDiagnosticStage = "page_absent"
-	SendSurfaceDiagnosticStageRouteMissing                   SendSurfaceDiagnosticStage = "route_missing"
-	SendSurfaceDiagnosticStageComposerCardinality            SendSurfaceDiagnosticStage = "composer_cardinality"
-	SendSurfaceDiagnosticStageDetailCardinality              SendSurfaceDiagnosticStage = "detail_cardinality"
-	SendSurfaceDiagnosticStageButtonCardinality              SendSurfaceDiagnosticStage = "button_cardinality"
-	SendSurfaceDiagnosticStageDomContainment                 SendSurfaceDiagnosticStage = "dom_containment"
-	SendSurfaceDiagnosticStageComponentTreeUnavailable       SendSurfaceDiagnosticStage = "component_tree_unavailable"
-	SendSurfaceDiagnosticStageComponentTreeRootMissing       SendSurfaceDiagnosticStage = "component_tree_root_missing"
-	SendSurfaceDiagnosticStageComponentTreeMalformed         SendSurfaceDiagnosticStage = "component_tree_malformed"
-	SendSurfaceDiagnosticStageComponentTreeOverflow          SendSurfaceDiagnosticStage = "component_tree_overflow"
-	SendSurfaceDiagnosticStageSenderOwnerUnresolved          SendSurfaceDiagnosticStage = "sender_owner_unresolved"
-	SendSurfaceDiagnosticStageControlOwnershipUnresolved     SendSurfaceDiagnosticStage = "control_ownership_unresolved"
-	SendSurfaceDiagnosticStageDirectModelUnresolved          SendSurfaceDiagnosticStage = "direct_model_unresolved"
-	SendSurfaceDiagnosticStageDirectModelTargetMismatch      SendSurfaceDiagnosticStage = "direct_model_target_mismatch"
-	SendSurfaceDiagnosticStageModelCandidateProps            SendSurfaceDiagnosticStage = "model_candidate_props"
-	SendSurfaceDiagnosticStageModelCandidateData             SendSurfaceDiagnosticStage = "model_candidate_data"
-	SendSurfaceDiagnosticStageModelCandidateStore            SendSurfaceDiagnosticStage = "model_candidate_store"
-	SendSurfaceDiagnosticStageModelCandidateMultiple         SendSurfaceDiagnosticStage = "model_candidate_multiple"
-	SendSurfaceDiagnosticStageModelCandidateConflict         SendSurfaceDiagnosticStage = "model_candidate_conflict"
-	SendSurfaceDiagnosticStageModelCandidateAbsent           SendSurfaceDiagnosticStage = "model_candidate_absent"
-	SendSurfaceDiagnosticStageModelScalarOwner               SendSurfaceDiagnosticStage = "model_scalar_owner"
-	SendSurfaceDiagnosticStageModelScalarProps               SendSurfaceDiagnosticStage = "model_scalar_props"
-	SendSurfaceDiagnosticStageModelScalarData                SendSurfaceDiagnosticStage = "model_scalar_data"
-	SendSurfaceDiagnosticStageModelScalarStore               SendSurfaceDiagnosticStage = "model_scalar_store"
-	SendSurfaceDiagnosticStageModelScalarMultiple            SendSurfaceDiagnosticStage = "model_scalar_multiple"
-	SendSurfaceDiagnosticStageModelScalarConflict            SendSurfaceDiagnosticStage = "model_scalar_conflict"
-	SendSurfaceDiagnosticStageModelScalarAbsent              SendSurfaceDiagnosticStage = "model_scalar_absent"
-	SendSurfaceDiagnosticStageEngineBindingUnresolved        SendSurfaceDiagnosticStage = "engine_binding_unresolved"
-	SendSurfaceDiagnosticStageButtonFormUnsafe               SendSurfaceDiagnosticStage = "button_form_unsafe"
-	SendSurfaceDiagnosticStageButtonVnodeMissing             SendSurfaceDiagnosticStage = "button_vnode_missing"
-	SendSurfaceDiagnosticStageButtonDomListenerAmbiguous     SendSurfaceDiagnosticStage = "button_dom_listener_ambiguous"
-	SendSurfaceDiagnosticStageComponentClickWiringUnresolved SendSurfaceDiagnosticStage = "component_click_wiring_unresolved"
-	SendSurfaceDiagnosticStageDraftPresent                   SendSurfaceDiagnosticStage = "draft_present"
-	SendSurfaceDiagnosticStageUnstable                       SendSurfaceDiagnosticStage = "unstable"
-	SendSurfaceDiagnosticStageThreadUnavailable              SendSurfaceDiagnosticStage = "thread_unavailable"
-	SendSurfaceDiagnosticStageBaselineEngineUnavailable      SendSurfaceDiagnosticStage = "baseline_engine_unavailable"
-	SendSurfaceDiagnosticStageBaselineRouteChanged           SendSurfaceDiagnosticStage = "baseline_route_changed"
-	SendSurfaceDiagnosticStageBaselineSessionUnavailable     SendSurfaceDiagnosticStage = "baseline_session_unavailable"
-	SendSurfaceDiagnosticStageBaselineHistoryUnavailable     SendSurfaceDiagnosticStage = "baseline_history_unavailable"
-	SendSurfaceDiagnosticStageBaselineHistoryUnstable        SendSurfaceDiagnosticStage = "baseline_history_unstable"
-	SendSurfaceDiagnosticStageBaselineGuardUncovered         SendSurfaceDiagnosticStage = "baseline_guard_uncovered"
-	SendSurfaceDiagnosticStageBaselineSessionChanged         SendSurfaceDiagnosticStage = "baseline_session_changed"
-	SendSurfaceDiagnosticStageBaselineHashUnavailable        SendSurfaceDiagnosticStage = "baseline_hash_unavailable"
-	SendSurfaceDiagnosticStageBaselineUnexpected             SendSurfaceDiagnosticStage = "baseline_unexpected"
-	SendSurfaceDiagnosticStageDiagnosticUnavailable          SendSurfaceDiagnosticStage = "diagnostic_unavailable"
-	SendSurfaceDiagnosticStageReady                          SendSurfaceDiagnosticStage = "ready"
+	SendSurfaceDiagnosticStagePageAbsent            SendSurfaceDiagnosticStage = "page_absent"
+	SendSurfaceDiagnosticStageRouteMissing          SendSurfaceDiagnosticStage = "route_missing"
+	SendSurfaceDiagnosticStageComposerCardinality   SendSurfaceDiagnosticStage = "composer_cardinality"
+	SendSurfaceDiagnosticStageDetailCardinality     SendSurfaceDiagnosticStage = "detail_cardinality"
+	SendSurfaceDiagnosticStageButtonCardinality     SendSurfaceDiagnosticStage = "button_cardinality"
+	SendSurfaceDiagnosticStageDomContainment        SendSurfaceDiagnosticStage = "dom_containment"
+	SendSurfaceDiagnosticStageButtonFormUnsafe      SendSurfaceDiagnosticStage = "button_form_unsafe"
+	SendSurfaceDiagnosticStageDraftPresent          SendSurfaceDiagnosticStage = "draft_present"
+	SendSurfaceDiagnosticStageThreadUnavailable     SendSurfaceDiagnosticStage = "thread_unavailable"
+	SendSurfaceDiagnosticStageDiagnosticUnavailable SendSurfaceDiagnosticStage = "diagnostic_unavailable"
+	SendSurfaceDiagnosticStageReady                 SendSurfaceDiagnosticStage = "ready"
 )
 
 var SendSurfaceDiagnosticStageValues = []SendSurfaceDiagnosticStage{
@@ -393,44 +358,9 @@ var SendSurfaceDiagnosticStageValues = []SendSurfaceDiagnosticStage{
 	SendSurfaceDiagnosticStageDetailCardinality,
 	SendSurfaceDiagnosticStageButtonCardinality,
 	SendSurfaceDiagnosticStageDomContainment,
-	SendSurfaceDiagnosticStageComponentTreeUnavailable,
-	SendSurfaceDiagnosticStageComponentTreeRootMissing,
-	SendSurfaceDiagnosticStageComponentTreeMalformed,
-	SendSurfaceDiagnosticStageComponentTreeOverflow,
-	SendSurfaceDiagnosticStageSenderOwnerUnresolved,
-	SendSurfaceDiagnosticStageControlOwnershipUnresolved,
-	SendSurfaceDiagnosticStageDirectModelUnresolved,
-	SendSurfaceDiagnosticStageDirectModelTargetMismatch,
-	SendSurfaceDiagnosticStageModelCandidateProps,
-	SendSurfaceDiagnosticStageModelCandidateData,
-	SendSurfaceDiagnosticStageModelCandidateStore,
-	SendSurfaceDiagnosticStageModelCandidateMultiple,
-	SendSurfaceDiagnosticStageModelCandidateConflict,
-	SendSurfaceDiagnosticStageModelCandidateAbsent,
-	SendSurfaceDiagnosticStageModelScalarOwner,
-	SendSurfaceDiagnosticStageModelScalarProps,
-	SendSurfaceDiagnosticStageModelScalarData,
-	SendSurfaceDiagnosticStageModelScalarStore,
-	SendSurfaceDiagnosticStageModelScalarMultiple,
-	SendSurfaceDiagnosticStageModelScalarConflict,
-	SendSurfaceDiagnosticStageModelScalarAbsent,
-	SendSurfaceDiagnosticStageEngineBindingUnresolved,
 	SendSurfaceDiagnosticStageButtonFormUnsafe,
-	SendSurfaceDiagnosticStageButtonVnodeMissing,
-	SendSurfaceDiagnosticStageButtonDomListenerAmbiguous,
-	SendSurfaceDiagnosticStageComponentClickWiringUnresolved,
 	SendSurfaceDiagnosticStageDraftPresent,
-	SendSurfaceDiagnosticStageUnstable,
 	SendSurfaceDiagnosticStageThreadUnavailable,
-	SendSurfaceDiagnosticStageBaselineEngineUnavailable,
-	SendSurfaceDiagnosticStageBaselineRouteChanged,
-	SendSurfaceDiagnosticStageBaselineSessionUnavailable,
-	SendSurfaceDiagnosticStageBaselineHistoryUnavailable,
-	SendSurfaceDiagnosticStageBaselineHistoryUnstable,
-	SendSurfaceDiagnosticStageBaselineGuardUncovered,
-	SendSurfaceDiagnosticStageBaselineSessionChanged,
-	SendSurfaceDiagnosticStageBaselineHashUnavailable,
-	SendSurfaceDiagnosticStageBaselineUnexpected,
 	SendSurfaceDiagnosticStageDiagnosticUnavailable,
 	SendSurfaceDiagnosticStageReady,
 }
