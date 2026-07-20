@@ -1,7 +1,7 @@
 // Node 端到端验收：启动隔离的真 Go 脑，注入最小 chrome 边界后运行生产
 // Connection、Dispatcher 与生产 program。M2 业务命令只由绑定/账号 actor 产生，
-// M3 真实 SX 只由正式 /admin/messages/send 产品入口产生；/admin/cmd 仅保留
-// 里程碑 1 的 debug 回归，不能用于任何 M2/M3 原语。
+// M3/M4 真实 SX 只由正式产品入口产生；/admin/cmd 仅保留里程碑 1 的
+// debug 回归，不能用于任何 M2/M3/M4 原语。
 //
 // 默认：node test/run.mjs（自建脑进程、临时 SQLite、随机端口）
 // 外部：node test/run.mjs <ws-url> <admin-base> [admin-token]
@@ -182,6 +182,10 @@ try {
   const fixtureConversationRef = 'fixture-conversation-001'
   const fixturePeerRef = 'fixture-peer-001'
   const fixtureSendText = '合成端到端问候'
+  const fixtureCandidateRef = 'fixture-candidate-m4-001'
+  const fixturePositionRef = 'fixture-position-m4-001'
+  const fixtureGreetingConversationRef = 'fixture-greeting-conversation-001'
+  const fixtureGreetingText = '合成主动建联正文'
   const hashText = (text) => createHash('sha256').update(text.normalize('NFC').trim().replace(/\s+/gu, ' ')).digest('hex')
   const fixtureTargetBindingToken = createHash('sha256')
     .update(JSON.stringify([fixtureConversationRef, fixturePeerRef]))
@@ -214,6 +218,10 @@ try {
     directThreadRouteUpdates: 0,
     sendServerMessageCreated: false,
     sendBaselineSourceKeys: [],
+    greetingActionPhases: [],
+    greetingClickCount: 0,
+    greetingServerMessageCreated: false,
+    greetingProofReads: 0,
   }
 
   const harnessSockets = []
@@ -361,9 +369,66 @@ try {
         const name = func.name
         platform.mainCalls.push(name)
         if (name === 'mainProbeZhilian') {
+          const pageKind = platform.tab.url.includes('/app/recommend') ? 'recommend' : 'im'
           return [{ result: {
-            pageKind: 'im', loginState: 'in', principalFingerprint,
-            imListVisible: true,
+            pageKind, loginState: 'in', principalFingerprint,
+            imListVisible: pageKind === 'im',
+          } }]
+        }
+        if (name === 'mainReadCurrentCandidate') {
+          return [{ result: {
+            status: 'ready',
+            data: {
+              platformUserRef: fixtureCandidateRef,
+              displayName: '合成建联候选人',
+              positionRef: fixturePositionRef,
+              positionTitle: '合成建联职位',
+              contactState: 'unestablished',
+            },
+          } }]
+        }
+        if (name === 'mainSendGreetingOnce') {
+          assert.equal(args.length, 7)
+          const [
+            platformUserRef,
+            positionRef,
+            text,
+            expectedPrincipalFingerprint,
+            irreversibleNotAfterMs,
+            expectedOwnedDraft,
+            phase,
+          ] = args
+          assert.equal(platformUserRef, fixtureCandidateRef)
+          assert.equal(positionRef, fixturePositionRef)
+          assert.equal(text, fixtureGreetingText)
+          assert.equal(expectedPrincipalFingerprint, principalFingerprint)
+          assert.ok(Number.isFinite(irreversibleNotAfterMs) && irreversibleNotAfterMs >= Date.now())
+          platform.greetingActionPhases.push(phase)
+          if (phase === 'prepare') {
+            assert.equal(expectedOwnedDraft, '')
+            return [{ result: { status: 'prepared' } }]
+          }
+          assert.equal(expectedOwnedDraft, fixtureGreetingText)
+          if (phase === 'preflight') return [{ result: { status: 'ready' } }]
+          assert.equal(phase, 'commit')
+          platform.greetingClickCount += 1
+          platform.greetingServerMessageCreated = true
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (name === 'mainReadGreetingProof') {
+          const [platformUserRef, positionRef, contentHash] = args
+          assert.equal(platformUserRef, fixtureCandidateRef)
+          assert.equal(positionRef, fixturePositionRef)
+          assert.equal(contentHash, hashText(fixtureGreetingText))
+          platform.greetingProofReads += 1
+          if (!platform.greetingServerMessageCreated) {
+            return [{ result: { confirmed: false } }]
+          }
+          return [{ result: {
+            confirmed: true,
+            conversationRef: fixtureGreetingConversationRef,
+            contentHash,
+            proofToken: hashText('fixture-greeting-proof-001'),
           } }]
         }
         if (name === 'mainReadListPage') {
@@ -724,6 +789,115 @@ try {
   resultAckFault.armed = false
   assert.equal(resultAckFault.armed, false)
   console.log('  PASS /admin/messages/send 经真脑/真 WS/生产 M3 到达 ok，ack 清 outbox，重连零增生')
+
+  console.log('M4 当前候选人建档、主动招呼与重连后重复请求零增生')
+  // M3 故障注入已经建立了新 WS session；正式候选人入口必须基于当前
+  // session/boot 的 fresh 账号绑定，而不能沿用旧 session 的身份事实。
+  const rebound = await admin.post('/admin/accounts/bind', {
+    platform: 'zhilian',
+    handId,
+    accountRef,
+  })
+  assert.equal(rebound.account.accountRef, accountRef)
+  assert.equal(rebound.account.identityState, 'verified')
+
+  // 模拟真人把同一已登录标签页切到唯一推荐详情。此后的 read/select/send
+  // 都经正式管理入口、真 Dispatcher 和真 WS，不使用 /admin/cmd。
+  platform.tab.url = 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-position'
+  const preview = await admin.post('/admin/candidates/current/read', {
+    platform: 'zhilian', accountRef,
+  })
+  assert.match(preview.selectionRef, /^m-/)
+  assert.equal(preview.contactState, 'unestablished')
+  const selected = await admin.post('/admin/candidates/current/select', {
+    selectionRef: preview.selectionRef,
+  })
+  assert.match(selected.profileId, /^p-/)
+  assert.equal(selected.status, 'selected')
+  assert.equal(selected.created, true)
+
+  const greetingIntentId = 'fixture-intent-greeting-001'
+  const greetingBody = {
+    intentId: greetingIntentId,
+    previousIntentId: '',
+    profileId: selected.profileId,
+    text: fixtureGreetingText,
+  }
+  const createdGreeting = await admin.post('/admin/candidates/greeting/send', greetingBody)
+  assert.equal(createdGreeting.intentId, greetingIntentId)
+  const completedGreeting = await eventually(
+    () => admin.get(`/admin/candidates/greeting/send?intentId=${encodeURIComponent(greetingIntentId)}`),
+    (view) => view.status === 'ok' && view.commandStatus === 'ok',
+    '正式 M4 主动招呼没有到达 ok',
+    15_000,
+  )
+  assert.equal(completedGreeting.intentId, greetingIntentId)
+  assert.equal(platform.greetingClickCount, 1, '主动招呼必须只越过一次候选人可见最终动作')
+  assert.deepEqual(platform.greetingActionPhases, ['prepare', 'preflight', 'commit'])
+  assert.ok(platform.greetingProofReads >= 2, '主动招呼必须取得两次稳定服务端正证')
+
+  const greetingConversations = await admin.get(
+    `/admin/conversations?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}`,
+  )
+  const greetingConversation = greetingConversations.conversations.find(
+    (item) => item.conversationRef === fixtureGreetingConversationRef,
+  )
+  assert.ok(greetingConversation, '主动招呼成功事务没有建立会话事实')
+  assert.equal(greetingConversation.trackingState, 'adopted')
+  assert.equal(greetingConversation.adoptedBoundarySeq, 0)
+  assert.equal(greetingConversation.lastMessageSeq, 1)
+  const greetingMessages = await admin.get(
+    `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
+    `&conversationRef=${encodeURIComponent(fixtureGreetingConversationRef)}`,
+  )
+  assert.equal(greetingMessages.messages.length, 1)
+  assert.equal(greetingMessages.messages[0].seq, 1)
+  assert.equal(greetingMessages.messages[0].direction, 'out')
+  assert.equal(greetingMessages.messages[0].kind, 'text')
+  assert.equal(greetingMessages.messages[0].origin, 'self')
+  assert.equal(greetingMessages.messages[0].text, fixtureGreetingText)
+  const greetingLedger = await admin.get('/admin/ledger')
+  assert.equal(greetingLedger.ledger.filter((record) => record.name === 'candidate.readCurrent').length, 1)
+  assert.equal(greetingLedger.ledger.filter((record) => record.name === 'chat.sendGreeting').length, 1)
+  assert.ok(greetingLedger.ledger.some((record) =>
+    record.name === 'chat.sendGreeting' && record.status === 'ok' && record.attempt === 1))
+
+  await eventually(
+    () => ({ status: conn.status(), keys: Object.keys(storage) }),
+    ({ status, keys }) => status.phase === 'session' && status.pendingResults === 0 &&
+      !keys.some((key) => key.startsWith('outbox:')),
+    '主动招呼 result 没有完成 ack/outbox 收束',
+  )
+  const greetingSessionBeforeReconnect = conn.status().session
+  const socketsBeforeGreetingReconnect = harnessSockets.length
+  harnessSockets.at(-1).terminate()
+  await eventually(
+    () => ({ status: conn.status(), sockets: harnessSockets.length }),
+    ({ status, sockets }) => status.phase === 'session' && status.session !== null &&
+      status.session !== greetingSessionBeforeReconnect && sockets > socketsBeforeGreetingReconnect,
+    '主动招呼终局后手没有完成真实 WS 重连',
+    15_000,
+  )
+
+  const repeatedGreeting = await admin.post('/admin/candidates/greeting/send', greetingBody)
+  assert.equal(repeatedGreeting.intentId, greetingIntentId)
+  assert.equal(repeatedGreeting.status, 'ok')
+  assert.equal(repeatedGreeting.commandStatus, 'ok')
+  const recoveredGreeting = await admin.get(
+    `/admin/candidates/greeting/send?profileId=${encodeURIComponent(selected.profileId)}`,
+  )
+  assert.equal(recoveredGreeting.intentId, greetingIntentId)
+  assert.equal(recoveredGreeting.status, 'ok')
+  const recoveredGreetingMessages = await admin.get(
+    `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
+    `&conversationRef=${encodeURIComponent(fixtureGreetingConversationRef)}`,
+  )
+  const recoveredGreetingLedger = await admin.get('/admin/ledger')
+  assert.equal(platform.greetingClickCount, 1, '重复 POST/重连后不得再次执行候选人可见动作')
+  assert.equal(recoveredGreetingMessages.messages.length, 1, '重复 POST/重连后招呼消息事实不得增生')
+  assert.equal(recoveredGreetingLedger.ledger.filter((record) => record.name === 'chat.sendGreeting').length, 1,
+    '重复 POST/重连后招呼命令账本不得增生')
+  console.log('  PASS candidate.readCurrent→建档→sendGreeting 经真脑/真 WS 原子收束，重复 POST/重连零增生')
 
   // 保留原有里程碑 1 debug E2E。只有以下回归使用 /admin/cmd。
   async function dispatchDebugAndWait(name, args) {
