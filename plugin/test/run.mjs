@@ -521,15 +521,13 @@ try {
     'debug.inspectSendSurface@1',
     'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1', 'chat.readThread@1',
     'candidate.readCurrent@1',
+    'chat.readGreetingOutcome@1',
     'chat.sendMessage@1',
+    'chat.sendGreeting@1',
   ]) {
     assert.ok(online.caps.includes(capability), `hello 能力集缺少 ${capability}`)
   }
-  assert.equal(online.caps.includes('chat.sendGreeting@1'), false,
-    '批次 3 不得提前上报未闭环的 sendGreeting capability')
-  assert.equal(online.caps.includes('chat.readGreetingOutcome@1'), false,
-    '批次 3 不得提前上报未闭环的 readGreetingOutcome capability')
-  console.log('  PASS 稳定 handId、自动登记、M2/M3 与 M4 只读能力冻结及在线会话')
+  console.log('  PASS 稳定 handId、自动登记、M2/M3/M4 能力集及在线会话')
 
   console.log('正式绑定探测与 actor 页面恢复/列表索引')
   const bound = await admin.post('/admin/accounts/bind', {

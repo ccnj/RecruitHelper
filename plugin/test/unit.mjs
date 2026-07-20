@@ -53,7 +53,9 @@ const {
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,
+  readZhilianGreetingOutcome,
   refreshPagesAfterRuntimeReload,
+  sendZhilianGreeting,
   sendZhilianMessage,
   normalizeZhilianMessageText,
   register,
@@ -2022,6 +2024,432 @@ test('candidate.readCurrent 切页或 MAIN 阴性只返回固定脱敏失败', a
     })
   } finally {
     globalThis.chrome = originalChrome
+  }
+})
+
+function installM4GreetingFixture(options = {}) {
+  const original = {
+    window: globalThis.window,
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+    HTMLButtonElement: globalThis.HTMLButtonElement,
+    HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
+    InputEvent: globalThis.InputEvent,
+    Event: globalThis.Event,
+  }
+  const refs = {
+    resume: 'fixture-resume-greeting',
+    user: 'fixture-user-greeting',
+    job: 'fixture-job-greeting',
+  }
+  const text = '你好'
+  const state = {
+    modalVisible: options.existingModal === true,
+    customSelected: options.existingModal === true,
+    textareaVisible: options.existingModal === true,
+    defaultChecked: options.defaultChecked === true,
+    directUnsafe: options.directUnsafe === true,
+    openClicks: 0,
+    optionClicks: 0,
+    editClicks: 0,
+    finalClicks: 0,
+    instanceClicks: 0,
+    candidateVisibleActions: 0,
+    checkboxClicks: 0,
+    textareaEvents: [],
+    throwOnReadAfterFinal: false,
+  }
+
+  class FixtureEvent {
+    constructor(type, init = {}) { this.type = type; Object.assign(this, init) }
+  }
+  class FixtureHTMLElement {
+    constructor(textContent = '') {
+      this.textContent = textContent
+      this.isConnected = true
+      this.form = null
+      this.type = 'button'
+      this._classes = new Set()
+      this.classList = { contains: (name) => this._classes.has(name) }
+      this._onIntrinsicClick = null
+    }
+    getClientRects() { return [{}] }
+    getAttribute() { return null }
+    querySelector() { return null }
+    querySelectorAll() { return [] }
+    click() {
+      if (typeof this._onIntrinsicClick === 'function') this._onIntrinsicClick()
+    }
+  }
+  class FixtureTextArea extends FixtureHTMLElement {
+    constructor(value) {
+      super()
+      this._value = value
+    }
+    get value() { return this._value }
+    set value(value) { this._value = String(value) }
+    dispatchEvent(event) {
+      state.textareaEvents.push(event.type)
+      return true
+    }
+  }
+  globalThis.HTMLElement = FixtureHTMLElement
+  globalThis.HTMLButtonElement = FixtureHTMLElement
+  globalThis.HTMLTextAreaElement = FixtureTextArea
+  globalThis.InputEvent = FixtureEvent
+  globalThis.Event = FixtureEvent
+
+  const opener = new FixtureHTMLElement('打招呼')
+  opener._onIntrinsicClick = () => {
+    state.openClicks += 1
+    if (state.directUnsafe) {
+      state.candidateVisibleActions += 1
+      return
+    }
+    state.modalVisible = true
+  }
+  if (state.directUnsafe) {
+    // 代表当前公开动作表面不再是批次 0 已证实的纯两步按钮；若误点就会产生外部动作。
+    opener.form = {}
+    opener.type = 'submit'
+  }
+  const detail = new FixtureHTMLElement()
+  detail.querySelectorAll = (selector) => selector === 'button[type="button"]' ? [opener] : []
+
+  const aiOption = new FixtureHTMLElement('AI 招呼')
+  aiOption.querySelector = (selector) => selector === '.ai-greeting-modal__ai-icon' ? {} : null
+  const customOption = new FixtureHTMLElement('统一招呼')
+  customOption.classList = { contains: (name) => name === 'is-selected' && state.customSelected }
+  customOption._onIntrinsicClick = () => {
+    state.optionClicks += 1
+    state.customSelected = true
+  }
+  const textarea = new FixtureTextArea(options.existingDraft ?? '平台原始招呼')
+  const editIcon = new FixtureHTMLElement()
+  editIcon._onIntrinsicClick = () => {
+    state.editClicks += 1
+    state.textareaVisible = true
+  }
+  customOption.querySelector = () => null
+  customOption.querySelectorAll = (selector) => {
+    if (selector === '.ai-greeting-modal__edit-area textarea') {
+      return state.textareaVisible ? [textarea] : []
+    }
+    if (selector === '.ai-greeting-modal__edit-icon') return state.textareaVisible ? [] : [editIcon]
+    return []
+  }
+
+  const checkboxInput = new FixtureHTMLElement()
+  Object.defineProperty(checkboxInput, 'checked', { get: () => state.defaultChecked })
+  checkboxInput._onIntrinsicClick = () => { state.checkboxClicks += 1 }
+  const defaultControl = new FixtureHTMLElement('设置为默认')
+  defaultControl.querySelectorAll = (selector) => selector === 'input[type="checkbox"]' ? [checkboxInput] : []
+  defaultControl.querySelector = () => null
+
+  const sendButton = new FixtureHTMLElement('发送')
+  sendButton._onIntrinsicClick = () => { state.finalClicks += 1 }
+  sendButton.click = () => { state.instanceClicks += 1 }
+  const footer = new FixtureHTMLElement()
+  footer.querySelectorAll = (selector) => selector === 'button[type="button"]' ? [sendButton] : []
+  const modal = new FixtureHTMLElement()
+  modal.querySelectorAll = (selector) => {
+    if (selector === '.ai-greeting-modal__option') return [aiOption, customOption]
+    if (selector === '.km-checkbox') return [defaultControl]
+    if (selector === '.ai-greeting-modal__footer') return [footer]
+    return []
+  }
+
+  const owner = {
+    _props: { source: { resumeNumber: refs.resume, userMasterId: refs.user } },
+    $root: { _route: { query: { jobNumber: refs.job } } },
+    $store: { state: { talent: { activeJob: { jobNumber: refs.job } } } },
+  }
+  const listItem = new FixtureHTMLElement()
+  listItem.__vue__ = owner
+  const staffId = 'staff-m4-greeting'
+  const orgId = 'org-m4-greeting'
+  const loginPoint = 'login-m4-greeting'
+  const principal = ['zhilian-principal-v2', staffId, orgId, loginPoint]
+    .map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+  globalThis.window = {
+    $session: {
+      isLoggedIn: true,
+      staff: { staffId, defaultLoginPoint: loginPoint },
+      org: { orgId },
+    },
+  }
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/recommend?resumeNumber=${refs.resume}&jobNumber=${refs.job}`,
+  }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    scripts: [],
+    querySelectorAll(selector) {
+      if (state.throwOnReadAfterFinal && state.finalClicks > 0) {
+        throw new Error('最终 click 后不得继续读页面')
+      }
+      if (selector === '.new-shortcut-resume__modal') return [detail]
+      if (selector === '[role="listitem"]') return [listItem]
+      if (selector === '.ai-greeting-modal') return state.modalVisible ? [modal] : []
+      return []
+    },
+  }
+  const fingerprint = createHash('sha256').update(principal).digest('hex')
+  const invoke = (phase, expectedOwnedDraft = phase === 'prepare' ? '' : text) =>
+    zhilianTestHooks.mainSendGreetingOnce(
+      refs.user,
+      refs.job,
+      text,
+      fingerprint,
+      Date.now() + 10_000,
+      expectedOwnedDraft,
+      phase,
+    )
+  return {
+    invoke,
+    refs,
+    restore() { Object.assign(globalThis, original) },
+    state,
+    text,
+    textarea,
+  }
+}
+
+test('M4 招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只做最终 intrinsic click', async () => {
+  const fixture = installM4GreetingFixture()
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.textarea.value, fixture.text)
+    assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'])
+    assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
+    fixture.state.throwOnReadAfterFinal = true
+    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked' })
+    assert.equal(fixture.state.openClicks, 1)
+    assert.equal(fixture.state.optionClicks, 1)
+    assert.equal(fixture.state.editClicks, 1)
+    assert.equal(fixture.state.finalClicks, 1)
+    assert.equal(fixture.state.instanceClicks, 0, '最终动作必须绕过页面替换过的 instance click')
+    assert.equal(fixture.state.checkboxClicks, 0)
+    assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'],
+      'preflight/commit 不得再次写入或恢复 textarea')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼不接管既有编辑器，不改默认项，公开两步拓扑不成立时零动作', async () => {
+  const existing = installM4GreetingFixture({ existingModal: true, existingDraft: '人工草稿' })
+  try {
+    assert.deepEqual(await existing.invoke('prepare'), { status: 'failed', reason: 'existing_editor' })
+    assert.equal(existing.textarea.value, '人工草稿')
+    assert.equal(existing.state.openClicks, 0)
+    assert.deepEqual(existing.state.textareaEvents, [])
+  } finally {
+    existing.restore()
+  }
+
+  const checked = installM4GreetingFixture({ defaultChecked: true })
+  try {
+    assert.deepEqual(await checked.invoke('prepare'), {
+      status: 'failed', reason: 'default_setting_selected',
+    })
+    assert.equal(checked.state.finalClicks, 0)
+    assert.equal(checked.state.checkboxClicks, 0, '不得替真人取消平台默认招呼设置')
+    assert.equal(checked.textarea.value, '平台原始招呼', '默认项被选中时不得写正文')
+  } finally {
+    checked.restore()
+  }
+
+  const direct = installM4GreetingFixture({ directUnsafe: true })
+  try {
+    assert.deepEqual(await direct.invoke('prepare'), {
+      status: 'failed', reason: 'two_step_surface_unavailable',
+    })
+    assert.equal(direct.state.openClicks, 0)
+    assert.equal(direct.state.candidateVisibleActions, 0,
+      '第一击可能直接发送的公开拓扑不得试点动作')
+  } finally {
+    direct.restore()
+  }
+})
+
+test('M4 招呼 preflight 后世界变化时 commit 零最终动作', async () => {
+  const fixture = installM4GreetingFixture()
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
+    fixture.textarea.value = '真人改写'
+    assert.deepEqual(await fixture.invoke('commit'), { status: 'failed', reason: 'editor_changed' })
+    assert.equal(fixture.state.finalClicks, 0)
+    assert.equal(fixture.textarea.value, '真人改写', 'commit 不得覆盖或恢复真人的新输入')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务端我方招呼', async () => {
+  const original = { window: globalThis.window, document: globalThis.document }
+  const refs = {
+    user: 'fixture-user-greeting-proof', job: 'fixture-job-greeting-proof',
+    conversation: 'fixture-conversation-greeting-proof', staff: 'fixture-staff-greeting-proof',
+  }
+  const contentHash = createHash('sha256').update('你好').digest('hex')
+  const rows = [{
+    idServer: 'fixture-server-greeting-proof', status: 'success', type: 'custom', from: refs.staff,
+    content: JSON.stringify({ type: 131, content: JSON.stringify({ greetingText: '你好' }) }),
+  }]
+  const sessions = [{
+    sessionId: refs.conversation,
+    jobNumber: refs.job,
+    userId: refs.user,
+    typeUserId: refs.user,
+    peerPartnerId: refs.user,
+  }]
+  let pageCalls = 0
+  globalThis.document = { scripts: [] }
+  globalThis.window = {
+    $session: { staff: { staffId: refs.staff } },
+    imEngine: {
+      async getSessions({ pageNo, pageSize }) {
+        pageCalls += 1
+        assert.equal(pageNo, 1)
+        assert.equal(pageSize, 8)
+        return { curSessions: sessions, hasMoreSession: false }
+      },
+      async getHistoryMsgs({ to }) {
+        assert.equal(to, refs.user)
+        return rows
+      },
+    },
+  }
+  try {
+    const first = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
+    const second = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
+    assert.equal(first.confirmed, true)
+    assert.equal(first.conversationRef, refs.conversation)
+    assert.equal(first.contentHash, contentHash)
+    assert.match(first.proofToken, /^[0-9a-f]{64}$/)
+    assert.deepEqual(second, first, '同一服务端 id 的两次正采样必须稳定')
+    assert.equal(pageCalls, 2)
+
+    rows.push({ ...rows[0], idServer: 'fixture-server-greeting-duplicate' })
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '两条同文服务端招呼不得被认作唯一正证',
+    )
+    rows.splice(1)
+    sessions[0].jobNumber = 'fixture-job-other'
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
+      { confirmed: false },
+      '职位不一致不得认领新会话',
+    )
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 barrier 后且阴性不补动作', async () => {
+  const original = { chrome: globalThis.chrome, setTimeout: globalThis.setTimeout }
+  const fingerprint = 'a'.repeat(64)
+  const refs = {
+    user: 'fixture-user-greeting-orchestration', job: 'fixture-job-greeting-orchestration',
+    conversation: 'fixture-conversation-greeting-orchestration',
+  }
+  const text = '你好'
+  const contentHash = createHash('sha256').update(text).digest('hex')
+  const targetTab = {
+    id: 601, active: true, status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?resumeNumber=private&jobNumber=private',
+  }
+  const phases = []
+  const functions = []
+  let barriers = 0
+  let proofCalls = 0
+  globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1 }
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...targetTab }] },
+      async get(id) { assert.equal(id, targetTab.id); return { ...targetTab } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, targetTab.id)
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+          imListVisible: false,
+        } }]
+        if (func.name === 'mainReadCurrentCandidate') return [{ result: {
+          status: 'ready',
+          data: {
+            platformUserRef: refs.user, displayName: '合成候选人',
+            positionRef: refs.job, positionTitle: '合成职位', contactState: 'unestablished',
+          },
+        } }]
+        if (func.name === 'mainSendGreetingOnce') {
+          functions.push(func)
+          const phase = args.at(-1)
+          phases.push(phase)
+          if (phase === 'prepare') {
+            assert.equal(barriers, 0)
+            assert.equal(args[5], '')
+            return [{ result: { status: 'prepared' } }]
+          }
+          if (phase === 'preflight') {
+            assert.equal(barriers, 0)
+            assert.equal(args[5], text)
+            return [{ result: { status: 'ready' } }]
+          }
+          assert.equal(phase, 'commit')
+          assert.equal(barriers, 1)
+          assert.equal(args[5], text)
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainReadGreetingProof') {
+          proofCalls += 1
+          assert.equal(barriers, 1)
+          return [{ result: {
+            confirmed: true,
+            conversationRef: refs.conversation,
+            contentHash,
+            proofToken: 'b'.repeat(64),
+          } }]
+        }
+        throw new Error(`unexpected MAIN ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'send-greeting-orchestration',
+    deadlineMs: Date.now() + 60_000,
+    irreversibleNotAfterMs: Date.now() + 60_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barriers += 1 },
+    async progress() {},
+  }
+  try {
+    const result = await sendZhilianGreeting(
+      { platformUserRef: refs.user, positionRef: refs.job, text },
+      { expectUnestablished: true },
+      context,
+      fingerprint,
+    )
+    assert.equal(result.conversationRef, refs.conversation)
+    assert.equal(result.contentHash, contentHash)
+    assert.deepEqual(phases, ['prepare', 'preflight', 'commit'])
+    assert.equal(new Set(functions).size, 1,
+      'prepare/preflight/commit 必须注入字面同一份 evaluator 函数')
+    assert.equal(barriers, 1)
+    assert.equal(proofCalls, 2, '成功必须是两次稳定正采样，验证读不得触发第二个动作')
+  } finally {
+    Object.assign(globalThis, original)
   }
 })
 

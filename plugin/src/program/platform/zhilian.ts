@@ -5,10 +5,15 @@ import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
 import type {
   CandidateReadCurrentData,
+  ChatReadGreetingOutcomeArgs,
+  ChatReadGreetingOutcomeData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
   ChatReadThreadData,
+  ChatSendGreetingArgs,
+  ChatSendGreetingData,
+  ChatSendGreetingGuards,
   ChatSendMessageArgs,
   ChatSendMessageData,
   ChatSendMessageGuards,
@@ -48,6 +53,11 @@ export class ZhilianPlatformError extends Error {
 // 平台实现只给生成类型起本地别名，不再手写一份协议 DTO。
 export type ZhilianProbe = ProbePlatformData
 export type ZhilianCurrentCandidate = CandidateReadCurrentData
+export type ZhilianGreetingArgs = ChatSendGreetingArgs
+export type ZhilianGreetingGuards = ChatSendGreetingGuards
+export type ZhilianGreetingData = ChatSendGreetingData
+export type ZhilianGreetingOutcomeArgs = ChatReadGreetingOutcomeArgs
+export type ZhilianGreetingOutcomeData = ChatReadGreetingOutcomeData
 export type ZhilianListArgs = ChatReadListArgs
 export type ZhilianConversationSummary = ConversationSummary
 export type ZhilianListPage = ChatReadListData
@@ -100,6 +110,39 @@ interface MainCurrentCandidateFailed {
 }
 
 type MainCurrentCandidateResult = MainCurrentCandidateReady | MainCurrentCandidateFailed
+
+const MAIN_GREETING_FAILURE_REASONS = [
+  'action_window_elapsed',
+  'identity_changed',
+  'target_changed',
+  'relationship_changed',
+  'existing_editor',
+  'two_step_surface_unavailable',
+  'editor_not_opened',
+  'custom_option_unavailable',
+  'editor_unavailable',
+  'editor_changed',
+  'default_setting_unresolved',
+  'default_setting_selected',
+  'send_surface_unavailable',
+  'input_rejected',
+] as const
+
+type MainGreetingFailureReason = typeof MAIN_GREETING_FAILURE_REASONS[number]
+type MainGreetingPhase = 'prepare' | 'preflight' | 'commit'
+
+type MainGreetingActionResult =
+  | { status: 'prepared' }
+  | { status: 'ready' }
+  | { status: 'clicked' }
+  | { status: 'failed'; reason: MainGreetingFailureReason }
+
+interface MainGreetingProof {
+  confirmed: boolean
+  conversationRef?: string
+  contentHash?: string
+  proofToken?: string
+}
 
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
@@ -784,6 +827,776 @@ export async function readZhilianCurrentCandidate(
   }
   await ctx.progress('当前智联候选人读取完成', 100)
   return latest.result.data
+}
+
+// 三个 phase 由同一份 MAIN-world evaluator 承担。prepare 只执行批次 0 已证明
+// 可逆的“打开弹层→选择统一招呼→展开编辑区”；preflight 与 commit 字面复用
+// evaluateFinal。commit 的最后一份绿色结果之后立即调用一次标准 click，不再读页面。
+async function mainSendGreetingOnce(
+  platformUserRef: string,
+  positionRef: string,
+  text: string,
+  expectedPrincipalFingerprint: string,
+  irreversibleNotAfterMs: number,
+  expectedOwnedDraft: string,
+  phase: MainGreetingPhase,
+): Promise<MainGreetingActionResult> {
+  type AnyRecord = Record<string, unknown>
+  type IntrinsicClick = (this: HTMLElement) => void
+  type TextareaValueSetter = (this: HTMLTextAreaElement, value: string) => void
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const failed = (reason: MainGreetingFailureReason): MainGreetingActionResult => ({ status: 'failed', reason })
+  const rotateRight = (value: number, count: number): number =>
+    (value >>> count) | (value << (32 - count))
+  const digest = (value: string): string => {
+    const input = new TextEncoder().encode(value)
+    const totalLength = Math.ceil((input.length + 9) / 64) * 64
+    const padded = new Uint8Array(totalLength)
+    padded.set(input)
+    padded[input.length] = 0x80
+    const bitLength = input.length * 8
+    const view = new DataView(padded.buffer)
+    view.setUint32(totalLength - 8, Math.floor(bitLength / 0x100000000), false)
+    view.setUint32(totalLength - 4, bitLength >>> 0, false)
+    const constants = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ])
+    const state = new Uint32Array([
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ])
+    const words = new Uint32Array(64)
+    for (let offset = 0; offset < totalLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4, false)
+      for (let index = 16; index < 64; index += 1) {
+        const left = words[index - 15]
+        const right = words[index - 2]
+        const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3)
+        const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10)
+        words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0
+      }
+      let a = state[0]
+      let b = state[1]
+      let c = state[2]
+      let d = state[3]
+      let e = state[4]
+      let f = state[5]
+      let g = state[6]
+      let h = state[7]
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+        const choose = (e & f) ^ (~e & g)
+        const temp1 = (h + sum1 + choose + constants[index] + words[index]) >>> 0
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+        const majority = (a & b) ^ (a & c) ^ (b & c)
+        const temp2 = (sum0 + majority) >>> 0
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) >>> 0
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) >>> 0
+      }
+      state[0] = (state[0] + a) >>> 0
+      state[1] = (state[1] + b) >>> 0
+      state[2] = (state[2] + c) >>> 0
+      state[3] = (state[3] + d) >>> 0
+      state[4] = (state[4] + e) >>> 0
+      state[5] = (state[5] + f) >>> 0
+      state[6] = (state[6] + g) >>> 0
+      state[7] = (state[7] + h) >>> 0
+    }
+    return Array.from(state, (word) => word.toString(16).padStart(8, '0')).join('')
+  }
+  const readInitialState = (): AnyRecord => {
+    const source = Array.from(document.scripts ?? [])
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return {}
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try { return asRecord(JSON.parse(candidate.slice(start, index + 1))) ?? {} } catch { return {} }
+      }
+    }
+    return {}
+  }
+  const initial = readInitialState()
+  const normalizeIdentityPart = (value: unknown): string | null => {
+    if (typeof value === 'string') return value.trim() || null
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return null
+  }
+  const principalMatches = (): boolean => {
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    const runtimeSession = asRecord(w.$session)
+    const session: AnyRecord = { ...(initialSession ?? {}), ...(runtimeSession ?? {}) }
+    const staff: AnyRecord = {
+      ...(asRecord(initialSession?.staff) ?? {}),
+      ...(asRecord(runtimeSession?.staff) ?? {}),
+    }
+    const staffID = normalizeIdentityPart(staff.staffId)
+    const organizationID = normalizeIdentityPart(asRecord(session.org)?.orgId) ??
+      normalizeIdentityPart(asRecord(asRecord(initial.personal)?.imUserInfo)?.rootCompanyId)
+    const loginPoint = normalizeIdentityPart(staff.defaultLoginPoint)
+    if (session.isLoggedIn !== true || !staffID || !organizationID || !loginPoint) return false
+    const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
+    const canonical = pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+    return digest(canonical) === expectedPrincipalFingerprint
+  }
+  interface TargetSurface {
+    detail: HTMLElement
+    openButton: HTMLButtonElement
+  }
+  const targetSurface = (): TargetSurface | null => {
+    let route: URL
+    try { route = new URL(location.href) } catch { return null }
+    if (!route.pathname.startsWith('/app/recommend')) return null
+    const routeResumeNumber = opaque(route.searchParams.get('resumeNumber'))
+    const routeJobNumber = opaque(route.searchParams.get('jobNumber'))
+    if (!routeResumeNumber || routeJobNumber !== positionRef) return null
+    const details = Array.from(document.querySelectorAll<HTMLElement>('.new-shortcut-resume__modal')).filter(visible)
+    if (details.length !== 1) return null
+    const detail = details[0]
+    const listItems = Array.from(document.querySelectorAll<HTMLElement>('[role="listitem"]'))
+    if (listItems.length === 0) return null
+    const sources: Array<{ owner: AnyRecord; source: AnyRecord }> = []
+    for (const item of listItems) {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const source = asRecord(asRecord(owner?._props)?.source)
+      if (!owner || !source) return null
+      sources.push({ owner, source })
+    }
+    const matches = sources.filter(({ source }) => opaque(source.resumeNumber) === routeResumeNumber)
+    if (matches.length !== 1 || opaque(matches[0].source.userMasterId) !== platformUserRef) return null
+    if (sources.filter(({ source }) => opaque(source.userMasterId) === platformUserRef).length !== 1) return null
+    const root = asRecord(matches[0].owner.$root)
+    const routedJobNumber = opaque(asRecord(asRecord(root?._route)?.query)?.jobNumber)
+    const activeJob = asRecord(asRecord(asRecord(matches[0].owner.$store)?.state)?.talent)
+    const activeJobNumber = opaque(asRecord(activeJob?.activeJob)?.jobNumber)
+    if (routedJobNumber !== positionRef || activeJobNumber !== positionRef) return null
+    const buttons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter((button) => visible(button) && clean(button.textContent) === '打招呼')
+    if (buttons.length !== 1) return null
+    const openButton = buttons[0]
+    if (openButton.form !== null && openButton.type !== 'button') return null
+    return { detail, openButton }
+  }
+  const greetingModals = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+  const customOptionOf = (modal: HTMLElement): HTMLElement | null => {
+    const options = Array.from(modal.querySelectorAll<HTMLElement>('.ai-greeting-modal__option')).filter(visible)
+    if (options.length !== 2) return null
+    const custom = options.filter((option) => option.querySelector('.ai-greeting-modal__ai-icon') === null)
+    return custom.length === 1 ? custom[0] : null
+  }
+  const customSelected = (option: HTMLElement): boolean =>
+    option.classList.contains('is-selected') ||
+    option.querySelector('.ai-greeting-modal__radio.is-checked') !== null
+  const defaultSettingState = (modal: HTMLElement): 'unchecked' | 'checked' | 'unresolved' => {
+    const controls = Array.from(modal.querySelectorAll<HTMLElement>('.km-checkbox')).filter((control) => {
+      const label = clean(control.textContent)
+      return label.includes('设置为默认') || label.includes('默认使用该统一招呼语')
+    })
+    if (controls.length !== 1) return 'unresolved'
+    const control = controls[0]
+    const inputs = Array.from(control.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+    if (inputs.length > 1) return 'unresolved'
+    const checked = inputs[0]?.checked === true || control.getAttribute('aria-checked') === 'true' ||
+      control.classList.contains('km-checkbox--checked') ||
+      control.querySelector('.km-checkbox__icon--checked') !== null
+    return checked ? 'checked' : 'unchecked'
+  }
+  const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const waitFor = async (predicate: () => boolean): Promise<boolean> => {
+    for (let round = 0; round < 20; round += 1) {
+      if (predicate()) return true
+      await sleep(50)
+    }
+    return false
+  }
+
+  if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
+    return failed('action_window_elapsed')
+  }
+  if (!principalMatches()) return failed('identity_changed')
+  if (!clean(text)) return failed('input_rejected')
+
+  if (phase === 'prepare') {
+    if (greetingModals().length !== 0) return failed('existing_editor')
+    const target = targetSurface()
+    if (!target) return failed('two_step_surface_unavailable')
+    if (Date.now() > irreversibleNotAfterMs || !principalMatches()) {
+      return failed(Date.now() > irreversibleNotAfterMs ? 'action_window_elapsed' : 'identity_changed')
+    }
+    const invokeOpen = Function.prototype.call.bind(
+      HTMLElement.prototype.click as IntrinsicClick,
+      target.openButton,
+    )
+    // 这里之后才允许观察弹层；本轮不再调用“打招呼”入口。
+    invokeOpen()
+    if (!await waitFor(() => greetingModals().length === 1)) return failed('editor_not_opened')
+    if (!principalMatches() || !targetSurface()) return failed('target_changed')
+    let modal = greetingModals()[0]
+    let custom = customOptionOf(modal)
+    if (!custom) return failed('custom_option_unavailable')
+    if (!customSelected(custom)) {
+      const invokeOption = Function.prototype.call.bind(
+        HTMLElement.prototype.click as IntrinsicClick,
+        custom,
+      )
+      invokeOption()
+      await sleep(50)
+    }
+    modal = greetingModals()[0]
+    custom = modal ? customOptionOf(modal) : null
+    if (!modal || !custom || !customSelected(custom)) return failed('custom_option_unavailable')
+    let textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
+      '.ai-greeting-modal__edit-area textarea',
+    )).filter(visible)
+    if (textareas.length === 0) {
+      const editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
+        .filter(visible)
+      if (editIcons.length !== 1) return failed('editor_unavailable')
+      const invokeEdit = Function.prototype.call.bind(
+        HTMLElement.prototype.click as IntrinsicClick,
+        editIcons[0],
+      )
+      invokeEdit()
+      await waitFor(() => {
+        const currentModal = greetingModals()[0]
+        const currentCustom = currentModal ? customOptionOf(currentModal) : null
+        return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
+          '.ai-greeting-modal__edit-area textarea',
+        )).filter(visible).length === 1
+      })
+    }
+    modal = greetingModals()[0]
+    custom = modal ? customOptionOf(modal) : null
+    textareas = custom
+      ? Array.from(custom.querySelectorAll<HTMLTextAreaElement>('.ai-greeting-modal__edit-area textarea')).filter(visible)
+      : []
+    if (!modal || !custom || !customSelected(custom) || textareas.length !== 1) {
+      return failed('editor_unavailable')
+    }
+    const defaultState = defaultSettingState(modal)
+    if (defaultState === 'unresolved') return failed('default_setting_unresolved')
+    if (defaultState === 'checked') return failed('default_setting_selected')
+    if (!principalMatches() || !targetSurface()) return failed('target_changed')
+    const ownedDraft = textareas[0].value
+    if (new TextEncoder().encode(ownedDraft).length > 2048) return failed('editor_unavailable')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
+      TextareaValueSetter | undefined
+    if (typeof setter !== 'function') return failed('editor_unavailable')
+    const restoreOwnedDraft = (): void => {
+      try { setter.call(textareas[0], ownedDraft) } catch { return }
+      try {
+        textareas[0].dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: ownedDraft,
+        }))
+        textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
+      } catch {
+        // prepare 仍在 attempting 前；恢复 DOM 值后由人工处理页面事件异常。
+      }
+    }
+    try {
+      setter.call(textareas[0], text)
+      textareas[0].dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: text,
+      }))
+      textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
+      const latestModal = greetingModals()[0]
+      const latestCustom = latestModal ? customOptionOf(latestModal) : null
+      const latestTextareas = latestCustom
+        ? Array.from(latestCustom.querySelectorAll<HTMLTextAreaElement>(
+            '.ai-greeting-modal__edit-area textarea',
+          )).filter(visible)
+        : []
+      if (!latestModal || !latestCustom || !customSelected(latestCustom) || latestTextareas.length !== 1 ||
+          latestTextareas[0].value !== text || defaultSettingState(latestModal) !== 'unchecked' ||
+          !principalMatches() || !targetSurface()) {
+        restoreOwnedDraft()
+        return failed('input_rejected')
+      }
+      return { status: 'prepared' }
+    } catch {
+      restoreOwnedDraft()
+      return failed('input_rejected')
+    }
+  }
+
+  interface FinalSurface {
+    textarea: HTMLTextAreaElement
+    sendButton: HTMLButtonElement
+    setter: TextareaValueSetter
+    intrinsicClick: IntrinsicClick
+  }
+  type FinalEvaluation = { status: 'ready'; surface: FinalSurface } |
+    { status: 'failed'; reason: MainGreetingFailureReason }
+  const evaluateFinal = (expectedValue: string): FinalEvaluation => {
+    if (Date.now() > irreversibleNotAfterMs) return { status: 'failed', reason: 'action_window_elapsed' }
+    if (!principalMatches()) return { status: 'failed', reason: 'identity_changed' }
+    if (!targetSurface()) return { status: 'failed', reason: 'relationship_changed' }
+    const modals = greetingModals()
+    if (modals.length !== 1) return { status: 'failed', reason: 'editor_changed' }
+    const modal = modals[0]
+    const custom = customOptionOf(modal)
+    if (!custom || !customSelected(custom)) return { status: 'failed', reason: 'editor_changed' }
+    const textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
+      '.ai-greeting-modal__edit-area textarea',
+    )).filter(visible)
+    if (textareas.length !== 1 || textareas[0].value !== expectedValue) {
+      return { status: 'failed', reason: 'editor_changed' }
+    }
+    const defaultState = defaultSettingState(modal)
+    if (defaultState === 'unresolved') return { status: 'failed', reason: 'default_setting_unresolved' }
+    if (defaultState === 'checked') return { status: 'failed', reason: 'default_setting_selected' }
+    const footers = Array.from(modal.querySelectorAll<HTMLElement>('.ai-greeting-modal__footer')).filter(visible)
+    if (footers.length !== 1) return { status: 'failed', reason: 'send_surface_unavailable' }
+    const sendButtons = Array.from(footers[0].querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter((button) => visible(button) && clean(button.textContent) === '发送')
+    if (sendButtons.length !== 1) return { status: 'failed', reason: 'send_surface_unavailable' }
+    const sendButton = sendButtons[0]
+    if (sendButton.form !== null && sendButton.type !== 'button') {
+      return { status: 'failed', reason: 'send_surface_unavailable' }
+    }
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
+      TextareaValueSetter | undefined
+    const intrinsicClick = HTMLElement.prototype.click as IntrinsicClick | undefined
+    if (typeof setter !== 'function' || typeof intrinsicClick !== 'function') {
+      return { status: 'failed', reason: 'send_surface_unavailable' }
+    }
+    return { status: 'ready', surface: { textarea: textareas[0], sendButton, setter, intrinsicClick } }
+  }
+
+  const prepared = evaluateFinal(expectedOwnedDraft)
+  if (prepared.status === 'failed') return prepared
+  if (phase === 'preflight') return { status: 'ready' }
+  const invokeSend = Function.prototype.call.bind(
+    prepared.surface.intrinsicClick,
+    prepared.surface.sendButton,
+  )
+  // attempting 后不再写/恢复输入；最终绿色后立即唯一 click，且不再读取页面。
+  invokeSend()
+  return { status: 'clicked' }
+}
+
+// 配套验证读只接受候选人、职位、唯一 session 和唯一服务端招呼四项同时成立。
+// 原始 user/job/session/message id 只在 MAIN world 内参与比较；proofToken 是稳定
+// idServer 的脱敏摘要，仅供同一命令内两次正采样比较，不进入协议或持久证词。
+async function mainReadGreetingProof(
+  platformUserRef: string,
+  positionRef: string,
+  contentHash: string,
+): Promise<MainGreetingProof> {
+  type AnyRecord = Record<string, unknown>
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const negative = (): MainGreetingProof => ({ confirmed: false })
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  }
+  const parseObject = (value: unknown): AnyRecord => {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+    if (typeof value !== 'string' || value.length === 0) return {}
+    try { return asRecord(JSON.parse(value)) ?? {} } catch { return {} }
+  }
+  const initialState = (): AnyRecord => {
+    const source = Array.from(document.scripts ?? [])
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return {}
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try { return asRecord(JSON.parse(candidate.slice(start, index + 1))) ?? {} } catch { return {} }
+      }
+    }
+    return {}
+  }
+  try {
+    if (!/^[0-9a-f]{64}$/u.test(contentHash)) return negative()
+    const engine = asRecord(w.imEngine)
+    const getSessions = engine?.getSessions
+    if (!engine || typeof getSessions !== 'function') return negative()
+    const sessions: AnyRecord[] = []
+    const seenPages = new Set<string>()
+    let completed = false
+    for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
+      const response = await (getSessions as (arg: AnyRecord) => Promise<unknown>).call(engine, {
+        pageNo,
+        pageSize: 8,
+        includeResume: true,
+      })
+      const body = asRecord(response)
+      if (!body || !Array.isArray(body.curSessions)) return negative()
+      const hasMore = typeof body.hasMoreSession === 'boolean'
+        ? body.hasMoreSession
+        : typeof body.hasMore === 'boolean'
+          ? body.hasMore
+          : null
+      if (hasMore === null) return negative()
+      const rows = body.curSessions as unknown[]
+      if (rows.some((row) => asRecord(row) === null)) return negative()
+      const records = rows as AnyRecord[]
+      const pageKey = JSON.stringify([
+        clean(records[0]?.sessionId),
+        clean(records[records.length - 1]?.sessionId),
+        records.length,
+      ])
+      if (seenPages.has(pageKey)) return negative()
+      seenPages.add(pageKey)
+      sessions.push(...records)
+      if (!hasMore) {
+        completed = true
+        break
+      }
+    }
+    if (!completed) return negative()
+    const matches = sessions.filter((session) => {
+      if (clean(session.jobNumber) !== positionRef) return false
+      const identities = [session.userId, session.typeUserId, session.peerPartnerId]
+        .map(clean)
+        .filter(Boolean)
+      return identities.length > 0 && identities.every((identity) => identity === platformUserRef)
+    })
+    const byConversation = new Map<string, AnyRecord>()
+    for (const session of matches) {
+      const conversationRef = clean(session.sessionId)
+      if (!conversationRef) return negative()
+      if (!byConversation.has(conversationRef)) byConversation.set(conversationRef, session)
+    }
+    if (byConversation.size !== 1) return negative()
+    const [conversationRef, session] = [...byConversation.entries()][0]
+    const peer = clean(session.peerPartnerId)
+    if (!peer) return negative()
+
+    let rows: unknown = null
+    const getHistoryMsgs = engine.getHistoryMsgs
+    if (typeof getHistoryMsgs === 'function') {
+      const request: AnyRecord = { to: peer, limit: 64, asc: true }
+      const scene = session.scene ?? session.sessionType
+      if (scene !== null && scene !== undefined && clean(scene)) request.scene = scene
+      try {
+        rows = await (getHistoryMsgs as (arg: AnyRecord) => Promise<unknown>).call(engine, request)
+      } catch {
+        rows = null
+      }
+    }
+    if (!Array.isArray(rows)) {
+      const nuxt = asRecord(w.$nuxt)
+      const root = asRecord(nuxt?.$root) ?? nuxt
+      const store = asRecord(root?.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      const entry = asRecord(timelineMap?.[conversationRef])
+      rows = Array.isArray(entry?.timeline) ? entry?.timeline : null
+    }
+    if (!Array.isArray(rows) || rows.length > 4096) return negative()
+
+    const initial = initialState()
+    const runtimeSession = asRecord(w.$session)
+    const runtimeStaff = asRecord(runtimeSession?.staff)
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    const staffID = clean(runtimeStaff?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
+    if (!staffID) return negative()
+    const matchedMessages = new Map<string, string>()
+    for (const raw of rows) {
+      const row = asRecord(raw)
+      if (!row) return negative()
+      if (clean(row.status).toLowerCase() !== 'success' || clean(row.from) !== staffID || row.type !== 'custom') {
+        continue
+      }
+      const envelope = parseObject(row.content)
+      if (Number(envelope.type) !== 131) continue
+      const inner = parseObject(envelope.content)
+      const details = Object.keys(inner).length > 0 ? inner : envelope
+      const greetingText = clean(details.greetingText ?? envelope.greetingText)
+      const idServer = clean(row.idServer)
+      if (!greetingText || !idServer || await digest(greetingText) !== contentHash) continue
+      matchedMessages.set(idServer, idServer)
+    }
+    if (matchedMessages.size !== 1) return negative()
+    const idServer = [...matchedMessages.keys()][0]
+    return {
+      confirmed: true,
+      conversationRef,
+      contentHash,
+      proofToken: await digest(`greeting-proof-v1|${conversationRef}|${idServer}`),
+    }
+  } catch {
+    return negative()
+  }
+}
+
+function validMainGreetingActionResult(value: unknown): value is MainGreetingActionResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'prepared') return true
+  if (record.status === 'ready' || record.status === 'clicked') return true
+  return record.status === 'failed' && typeof record.reason === 'string' &&
+    (MAIN_GREETING_FAILURE_REASONS as readonly string[]).includes(record.reason)
+}
+
+function validMainGreetingProof(value: unknown): value is MainGreetingProof {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.confirmed === false) return record.conversationRef === undefined &&
+    record.contentHash === undefined && record.proofToken === undefined
+  return record.confirmed === true && typeof record.conversationRef === 'string' &&
+    record.conversationRef.length > 0 && record.conversationRef.length <= 512 &&
+    typeof record.contentHash === 'string' && /^[0-9a-f]{64}$/u.test(record.contentHash) &&
+    typeof record.proofToken === 'string' && /^[0-9a-f]{64}$/u.test(record.proofToken)
+}
+
+function throwGreetingActionFailure(result: MainGreetingActionResult): never {
+  if (result.status !== 'failed') {
+    throw new ZhilianPlatformError('INTERNAL_HAND', '招呼动作返回了不可能的阶段', 'manualOnly')
+  }
+  if (result.reason === 'existing_editor' || result.reason === 'editor_changed' ||
+      result.reason === 'default_setting_selected') {
+    throw new ZhilianPlatformError('USER_ACTIVE', '检测到已有招呼弹窗、输入或默认设置，拒绝接管', 'manualOnly')
+  }
+  if (result.reason === 'identity_changed') {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '招呼前登录身份发生变化', 'manualOnly')
+  }
+  if (result.reason === 'action_window_elapsed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '招呼动作窗口已过，未执行最终发送', 'manualOnly')
+  }
+  if (result.reason === 'target_changed' || result.reason === 'relationship_changed') {
+    throw new ZhilianPlatformError('GUARD_FAILED', '当前候选人、职位或关系状态发生变化', 'manualOnly')
+  }
+  if (result.reason === 'editor_not_opened') {
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED',
+      '第一步后未确认进入已验证的两步招呼编辑器',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+  if (result.reason === 'two_step_surface_unavailable') {
+    throw new ZhilianPlatformError('GUARD_FAILED', '当前页面不满足已验证的两步招呼动作表面', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼编辑器或发送表面无法唯一确认', 'manualOnly')
+}
+
+function sameGreetingProof(left: MainGreetingProof, right: MainGreetingProof): boolean {
+  return left.confirmed && right.confirmed &&
+    left.conversationRef === right.conversationRef &&
+    left.contentHash === right.contentHash && left.proofToken === right.proofToken
+}
+
+export async function sendZhilianGreeting(
+  args: ZhilianGreetingArgs,
+  guards: ZhilianGreetingGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianGreetingData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  if (guards.expectUnestablished !== true) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '招呼命令缺少未建联条件写闸', 'manualOnly')
+  }
+  const normalizedText = normalizeZhilianMessageText(args.text)
+  if (!normalizedText) throw new ZhilianPlatformError('GUARD_FAILED', '规范化后的招呼为空', 'manualOnly')
+  const contentHash = await sha256Hex(normalizedText)
+  const current = await uniqueCurrentCandidate(expectedPrincipalFingerprint)
+  const tabId = current.tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  if (current.result.data.platformUserRef !== args.platformUserRef ||
+      current.result.data.positionRef !== args.positionRef ||
+      current.result.data.contactState !== 'unestablished') {
+    throw new ZhilianPlatformError('GUARD_FAILED', '当前候选人、职位或关系状态与招呼意图不一致', 'manualOnly')
+  }
+  const evaluatorBase = [
+    args.platformUserRef,
+    args.positionRef,
+    args.text,
+    expectedPrincipalFingerprint,
+    ctx.irreversibleNotAfterMs,
+  ] as const
+  ctx.checkpoint()
+  const preparedRaw = await runMain(tabId, mainSendGreetingOnce, [
+    ...evaluatorBase,
+    '',
+    'prepare',
+  ])
+  if (!validMainGreetingActionResult(preparedRaw)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼准备阶段返回结构无效', 'manualOnly')
+  }
+  if (preparedRaw.status !== 'prepared') throwGreetingActionFailure(preparedRaw)
+  const evaluatorArgs = [...evaluatorBase, args.text] as const
+
+  ctx.checkpoint()
+  const preflight = await runMain(tabId, mainSendGreetingOnce, [...evaluatorArgs, 'preflight'])
+  if (!validMainGreetingActionResult(preflight)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼预检返回结构无效', 'manualOnly')
+  }
+  if (preflight.status !== 'ready') throwGreetingActionFailure(preflight)
+  ctx.checkpoint()
+  await ctx.beforeSideEffect()
+
+  const action = await runMain(tabId, mainSendGreetingOnce, [...evaluatorArgs, 'commit'])
+  if (!validMainGreetingActionResult(action)) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC',
+      '最终招呼动作返回结构无效',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+  if (action.status !== 'clicked') throwGreetingActionFailure(action)
+
+  let lastPositive: MainGreetingProof | null = null
+  for (let round = 0; round < 20; round += 1) {
+    ctx.checkpoint()
+    try {
+      const proof = await runMain(tabId, mainReadGreetingProof, [
+        args.platformUserRef,
+        args.positionRef,
+        contentHash,
+      ])
+      if (validMainGreetingProof(proof) && proof.confirmed) {
+        if (lastPositive && sameGreetingProof(lastPositive, proof)) {
+          assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+          await ctx.progress('已确认唯一新会话和唯一服务端招呼', 100)
+          return {
+            platformUserRef: args.platformUserRef,
+            positionRef: args.positionRef,
+            conversationRef: proof.conversationRef as string,
+            contentHash,
+            observedAt: Date.now(),
+          }
+        }
+        lastPositive = proof
+      } else {
+        lastPositive = null
+      }
+    } catch {
+      lastPositive = null
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'POSTCONDITION_UNCONFIRMED',
+    '最终发送只调用一次，但未确认唯一新会话和唯一服务端招呼',
+    'manualOnly',
+    undefined,
+    'possible',
+  )
+}
+
+export async function readZhilianGreetingOutcome(
+  args: ZhilianGreetingOutcomeArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianGreetingOutcomeData> {
+  const tab = await canonicalZhilianTab()
+  if (!tab || tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '没有可读取招呼结果的智联页面', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  ctx.checkpoint()
+  // intrusive/idempotentReadReceipt 紧贴第一次平台读取设置取消安全点；不写 witness。
+  await ctx.beforeSideEffect()
+  const first = await runMain(tab.id, mainReadGreetingProof, [
+    args.platformUserRef,
+    args.positionRef,
+    args.contentHash,
+  ])
+  if (!validMainGreetingProof(first)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼结果读取返回结构无效', 'manualOnly')
+  }
+  if (!first.confirmed) {
+    assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+    return { confirmed: false, observedAt: Date.now() }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 120))
+  ctx.checkpoint()
+  const second = await runMain(tab.id, mainReadGreetingProof, [
+    args.platformUserRef,
+    args.positionRef,
+    args.contentHash,
+  ])
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+  if (!validMainGreetingProof(second) || !sameGreetingProof(first, second)) {
+    return { confirmed: false, observedAt: Date.now() }
+  }
+  return {
+    confirmed: true,
+    conversationRef: second.conversationRef,
+    contentHash: second.contentHash,
+    observedAt: Date.now(),
+  }
 }
 
 async function waitForIMReady(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<ZhilianProbe> {
@@ -3930,6 +4743,8 @@ export const zhilianTestHooks = Object.freeze({
   encodeCursor,
   mainProbeZhilian,
   mainReadCurrentCandidate,
+  mainReadGreetingProof,
+  mainSendGreetingOnce,
   mainCaptureSendBaseline,
   mainInspectSendSurface,
   mainFindConversation,
