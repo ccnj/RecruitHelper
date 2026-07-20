@@ -961,22 +961,48 @@ function DiagnosticCard({ title, children, wide }: { title: string; children: Re
 
 function Hands() {
   const health = usePolling(api.handsHealth, 1500, 'diagnostic-hands')
+  const [reloading, setReloading] = useState('')
+  const [message, setMessage] = useState('')
+  const reload = async (handId: string) => {
+    setReloading(handId)
+    setMessage('已请求手自重载，等待新版本重新报到…')
+    try {
+      const result = await api.reloadHand(handId)
+      setMessage(`新版本已就绪 · boot ${shortRef(result.bootId, 10)} · 扩展 ${result.extensionVersion || '版本未知'}`)
+      health.refresh()
+    } catch (reason) {
+      setMessage(errorText(reason))
+    } finally {
+      setReloading('')
+    }
+  }
   return (
     <DiagnosticCard title="手（在线状态）">
       <table>
-        <thead><tr><th>handId</th><th>状态</th><th>健康</th><th>心跳</th></tr></thead>
+        <thead><tr><th>handId</th><th>状态</th><th>构建</th><th>心跳</th><th>维护</th></tr></thead>
         <tbody>
           {(health.data?.hands ?? []).map((hand: HandHealth) => (
             <tr key={hand.handId}>
               <td>{hand.handId}</td>
               <td className={hand.online ? 'ok' : 'dim'}>{hand.online ? '在线' : '离线'}</td>
-              <td className={hand.health === 'stalled' ? 'bad' : ''}>{hand.health}</td>
+              <td className={!hand.contractMatch ? 'warn' : hand.health === 'stalled' ? 'bad' : ''}>
+                {hand.contractMatch ? hand.extensionVersion || '已匹配' : '契约不匹配'}
+              </td>
               <td className="dim">{hand.online ? `${Math.round(hand.lastHbAgoMs / 1000)} 秒前` : '—'}</td>
+              <td>
+                <button
+                  disabled={!hand.online || reloading !== '' || !hand.caps.includes('debug.reload@1')}
+                  onClick={() => void reload(hand.handId)}
+                >
+                  {reloading === hand.handId ? '重载中…' : '重载并确认'}
+                </button>
+              </td>
             </tr>
           ))}
-          {health.data && health.data.hands.length === 0 && <tr><td colSpan={4} className="dim">暂无手</td></tr>}
+          {health.data && health.data.hands.length === 0 && <tr><td colSpan={5} className="dim">暂无手</td></tr>}
         </tbody>
       </table>
+      <div className="hint">{message || '硬切换前先暂停派发并等待命令收束；首次启用本能力仍需人工重载一次。'}</div>
     </DiagnosticCard>
   )
 }

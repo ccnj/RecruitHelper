@@ -64,6 +64,26 @@ expectValid(
     execBudgetMs: 5_000,
   }),
 );
+expectValid(
+  "debug.reload empty args through command channel",
+  validateKindBody(Kind.Cmd, {
+    name: "debug.reload",
+    ver: 1,
+    args: {},
+    deadline: 1_999_999_999_999,
+    execBudgetMs: 5_000,
+  }),
+);
+expectValid(
+  "debug.reload empty result data",
+  validatePrimitiveResult("debug.reload", 1, {
+    ref: "reload-1",
+    status: "ok",
+    data: {},
+    replayed: false,
+    execMs: 1,
+  }),
+);
 const commandWithoutContext: Record<string, unknown> = { ...validCommand };
 delete commandWithoutContext.context;
 expectIssue(

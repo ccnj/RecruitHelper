@@ -344,6 +344,8 @@
           "stage": { "type": "string", "enumRef": "enums.sendSurfaceDiagnosticStage" }
         }
       },
+      "DebugReloadArgs": { "type": "object", "fields": {} },
+      "DebugReloadData": { "type": "object", "fields": {} },
       "DebugSwitchWindowArgs": { "type": "object", "fields": {} },
       "DebugSwitchWindowData": {
         "type": "object",
@@ -692,6 +694,13 @@
       "argsSchema": "DebugPingArgs", "dataSchema": "DebugPingData",
       "preconditions": [],
       "execBudgetMs": 5000, "deadlineMs": 30000
+    },
+    "debug.reload": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "DebugReloadArgs", "dataSchema": "DebugReloadData",
+      "preconditions": [],
+      "execBudgetMs": 5000, "deadlineMs": 30000,
+      "note": "部署硬切换专用维护原语。ok result 只表示旧手已准备;旧手仅在该 result 收到脑的 accepted/duplicate ACK 后调用 chrome.runtime.reload。新 SW 须刷新已打开平台页,再以同 handId、新 bootId、匹配 contractHash 完成 hello;脑侧既有 ready 判定通过才算新版本就绪。禁止进入 readonly/intrusive 普通自动重派,失败只可由维护编排层显式重试。当前有人值守阶段显式接受重载与刷新页面可能丢失未发送聊天草稿,不检测、不保存、不恢复;首个真实客户安装前重新裁决"
     },
     "debug.inspectSendSurface": {
       "ver": 1, "class": "readonly", "batch": "X",

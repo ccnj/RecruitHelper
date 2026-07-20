@@ -179,7 +179,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		}
 	}
 	witnessStoreID := ""
-	if meta.Batch == protocol.BatchX {
+	if meta.Batch == protocol.BatchX && meta.Class == protocol.ClassEffectful {
 		witness, ok := d.handWitness(req.HandID)
 		if !ok || witness.StoreID == "" {
 			return dispatchResult{}, ErrWitnessUnavailable
@@ -279,7 +279,7 @@ func (d *Dispatcher) requireNegotiation(handID, name string, meta protocol.Primi
 	if !ok || !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
 		return fmt.Errorf("%w: %s@%d", ErrCapability, name, meta.Ver)
 	}
-	if meta.Batch == protocol.BatchX && !contains(features, string(protocol.FeatureWitness1)) {
+	if meta.Batch == protocol.BatchX && meta.Class == protocol.ClassEffectful && !contains(features, string(protocol.FeatureWitness1)) {
 		return fmt.Errorf("%w: %s", ErrFeature, protocol.FeatureWitness1)
 	}
 	if meta.LeaseMs != 0 {

@@ -3,6 +3,7 @@ package dispatch
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -49,6 +50,46 @@ func TestReconnectBootChangedCollects(t *testing.T) {
 	}
 	if rec, _ := st.CmdByMsgID(roID); rec.Status != store.CmdVoid {
 		t.Fatalf("readonly bootId 换代应 void,得到 %s", rec.Status)
+	}
+}
+
+func TestReloadPrimitiveNeverEntersAutomaticRedispatch(t *testing.T) {
+	d, st, m := newDisp(t)
+	m.up("hand-reload", "boot-old")
+	msgID, err := d.Dispatch("hand-reload", protocol.PrimDebugReload, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Dispatch reload: %v", err)
+	}
+	before := m.sentCount()
+
+	// 同 boot 重连通常会重发原 msgId；reload 必须直接收束，不能再次杀 SW。
+	d.OnReconnect("hand-reload", "boot-old")
+	if m.sentCount() != before {
+		t.Fatalf("reload 同 boot 重连不得自动重发: before=%d after=%d", before, m.sentCount())
+	}
+	if record, _ := st.CmdByMsgID(msgID); record.Status != store.CmdVoid {
+		t.Fatalf("reload 未终局时同 boot 重连应 void，得到 %s", record.Status)
+	}
+
+	// queued 故障轨也不能在存活连接上偷偷补投。
+	queuedID, err := d.Dispatch("hand-reload", protocol.PrimDebugReload, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Dispatch second reload: %v", err)
+	}
+	if err := st.MutateCmd(queuedID, func(record *store.CmdRecord) error {
+		record.Status = store.CmdQueued
+		record.SentAt = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before = m.sentCount()
+	d.sweepFaults(time.Now())
+	if m.sentCount() != before {
+		t.Fatal("reload queued 故障轨不得自动补投")
+	}
+	if record, _ := st.CmdByMsgID(queuedID); record.Status != store.CmdVoid {
+		t.Fatalf("reload queued 应转 void 等人工重试，得到 %s", record.Status)
 	}
 }
 

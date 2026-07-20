@@ -35,11 +35,15 @@ type HandState struct {
 	Online    bool
 	SessionID string
 	BootID    string
-	Caps      []string
-	Features  []string
-	LastHbAt  time.Time // 最近一次 ping 到达
-	SessionAt time.Time // 本会话建立时刻
-	Health    Health
+	// 构建信息来自当前 hello，只用于部署就绪确认与诊断，不参与身份认证。
+	ContractHash  string
+	ContractMatch bool
+	ExtVersion    string
+	Caps          []string
+	Features      []string
+	LastHbAt      time.Time // 最近一次 ping 到达
+	SessionAt     time.Time // 本会话建立时刻
+	Health        Health
 
 	Contexts     []protocol.PingContext
 	Sensors      *protocol.PingSensors
@@ -61,10 +65,24 @@ func NewRegistry(graceMs int64) *Registry {
 
 // Online:会话建立时登记(或顶替后刷新)。
 func (r *Registry) Online(handID, sessionID, bootID string, caps, features []string, now time.Time) {
+	r.OnlineWithBuild(handID, sessionID, bootID, caps, features, "", false, "", now)
+}
+
+// OnlineWithBuild 额外保留 hello 的构建证词，供 §14 管理端确认新 SW 已按
+// 当前脑契约上线。旧测试/调用可继续使用 Online，不伪造匹配结论。
+func (r *Registry) OnlineWithBuild(
+	handID, sessionID, bootID string,
+	caps, features []string,
+	contractHash string,
+	contractMatch bool,
+	extVersion string,
+	now time.Time,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.states[handID] = &HandState{
 		HandID: handID, Online: true, SessionID: sessionID, BootID: bootID,
+		ContractHash: contractHash, ContractMatch: contractMatch, ExtVersion: extVersion,
 		Caps: append([]string(nil), caps...), Features: append([]string(nil), features...),
 		LastHbAt: now, SessionAt: now, Health: HealthReady,
 		PageHealth: CapabilityUnknown, SensorHealth: CapabilityUnknown,

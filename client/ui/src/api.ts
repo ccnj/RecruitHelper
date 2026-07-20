@@ -79,10 +79,24 @@ export interface HandHealth {
   online: boolean
   health: string
   caps: string[]
+  bootId: string
+  contractHash: string
+  contractMatch: boolean
+  extensionVersion: string
   lastHbAgoMs: number
   witnessReady: boolean
   outboxPending: number
   journalOpen: number
+}
+
+export interface ReloadHandView {
+  ready: boolean
+  handId: string
+  msgId: string
+  previousBootId: string
+  bootId: string
+  contractHash: string
+  extensionVersion: string
 }
 
 export interface LedgerRow {
@@ -323,6 +337,7 @@ interface AccountTarget {
 export const api = {
   health: () => get<Health>('/admin/health'),
   handsHealth: () => get<{ hands: HandHealth[] }>('/admin/hands/health'),
+  reloadHand: (handId: string) => post<ReloadHandView>('/admin/hands/reload', { handId }),
   dispatch: (handId: string, name: string, args: unknown) => post<{ msgId?: string; error?: string }>('/admin/cmd', { handId, name, args }),
   ledger: () => get<{ ledger: LedgerRow[] }>('/admin/ledger'),
   suspects: () => get<{ suspects: Suspect[] }>('/admin/suspects'),

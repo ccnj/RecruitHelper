@@ -26,6 +26,7 @@ import {
   QueryBody,
   ResultBody,
   ResultEnvelope,
+  ResultStatus,
   Retryable,
   SensorParams,
   SideEffect,
@@ -47,6 +48,7 @@ import {
 } from './config'
 import { capabilities } from '../program/registry'
 import { Dispatcher, SendOutcome } from './dispatcher'
+import { acknowledgeRuntimeReloadResult } from './reload'
 import { WitnessAdvertisement, WitnessStore, WitnessStorage } from './witness'
 
 type Phase = 'connecting' | 'preSession' | 'session' | 'closed'
@@ -416,6 +418,7 @@ export class Connection {
     const body = rawBody as AckBody
     if (body.status !== AckStatus.Accepted && body.status !== AckStatus.Duplicate) return
     // 对 result 的 accepted/duplicate 等价：脑已持久化，可删手侧内存待投。
+    const pending = this.pendingResults.get(body.ref)
     this.pendingResults.delete(body.ref)
     if ((this.witness.advertisement()?.outboxPending ?? 0) > 0) {
       try {
@@ -425,6 +428,8 @@ export class Connection {
         console.warn('[hand] result ack 后清理 outbox 失败，将继续保留', error)
       }
     }
+    const result = pending?.envelope.body as ResultBody | undefined
+    if (result?.status === ResultStatus.Ok) acknowledgeRuntimeReloadResult(result.ref)
   }
 
   private onClose(): void {

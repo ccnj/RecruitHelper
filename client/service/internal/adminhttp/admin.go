@@ -59,6 +59,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/health", h(a.health))
 	mux.HandleFunc("GET /admin/hands", h(a.hands))
 	mux.HandleFunc("GET /admin/hands/health", h(a.handHealth))
+	mux.HandleFunc("POST /admin/hands/reload", h(a.reloadHand))
 	mux.HandleFunc("POST /admin/cmd", h(a.postCmd))
 	mux.HandleFunc("POST /admin/messages/send", h(a.sendMessage))
 	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
@@ -287,6 +288,10 @@ func (a *API) handHealth(w http.ResponseWriter, _ *http.Request) {
 		Online        bool     `json:"online"`
 		Health        string   `json:"health"`
 		Caps          []string `json:"caps"`
+		BootID        string   `json:"bootId"`
+		ContractHash  string   `json:"contractHash"`
+		ContractMatch bool     `json:"contractMatch"`
+		ExtVersion    string   `json:"extensionVersion"`
 		LastHbMs      int64    `json:"lastHbAgoMs"`
 		WitnessReady  bool     `json:"witnessReady"`
 		OutboxPending int      `json:"outboxPending"`
@@ -296,7 +301,9 @@ func (a *API) handHealth(w http.ResponseWriter, _ *http.Request) {
 	for _, s := range states {
 		row := view{
 			HandID: s.HandID, Online: s.Online, Health: string(s.Health),
-			Caps: s.Caps, LastHbMs: time.Since(s.LastHbAt).Milliseconds(),
+			Caps: s.Caps, BootID: s.BootID, ContractHash: s.ContractHash,
+			ContractMatch: s.ContractMatch, ExtVersion: s.ExtVersion,
+			LastHbMs: time.Since(s.LastHbAt).Milliseconds(),
 		}
 		if witness, ok := a.hub.HandWitness(s.HandID); ok {
 			row.WitnessReady = true

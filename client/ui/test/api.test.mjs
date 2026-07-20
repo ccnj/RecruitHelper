@@ -125,6 +125,10 @@ globalThis.fetch = async (url, init = {}) => {
     }), { status: init.method === 'POST' ? 202 : 200 })
   }
   if (String(url).includes('/admin/messages')) return new Response('{"messages":[]}', { status: 200 })
+  if (String(url).includes('/admin/hands/reload')) return new Response(JSON.stringify({
+    ready: true, handId: 'hand-test', msgId: 'reload-msg', previousBootId: 'boot-old',
+    bootId: 'boot-new', contractHash: 'sha256:new', extensionVersion: '0.1.0',
+  }), { status: 200 })
   if (String(url).includes('/admin/accounts/bind')) return new Response('{"ok":true}', { status: 200 })
   if (String(url).includes('/admin/frames')) {
     return new Response('data: {"seq":7,"dir":"in","kind":"result","handId":"hand-test","msgId":"msg-test","ts":1}\n\n', {
@@ -141,6 +145,7 @@ const {
 await authApi.health()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
 await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
+const reloadReady = await authApi.reloadHand('hand-test')
 const sendCreated = await authApi.sendMessage('intent-stable', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '你好')
 const sendStatus = await authApi.sendStatus('intent-stable')
 const sendLatest = await authApi.latestSendIntent('zhilian', 'account-test', 'conversation-test')
@@ -171,6 +176,8 @@ check(requests[1].url.includes('platform=zhi%26lian') && requests[1].url.include
 const bindRequest = requests.find((request) => request.url.includes('/admin/accounts/bind'))
 const bindBody = JSON.parse(String(bindRequest?.body || '{}'))
 check(bindBody.platform === 'platform-from-user' && bindBody.handId === 'hand-test' && bindBody.accountRef === 'account-test', '绑定平台由调用方传入且原样进入账号上下文')
+const reloadRequest = requests.find((request) => request.url.includes('/admin/hands/reload'))
+check(JSON.parse(String(reloadRequest?.body || '{}')).handId === 'hand-test' && reloadReady.bootId === 'boot-new', '一键重载携带目标手并返回新 boot 就绪证词')
 const sendRequest = requests.find((request) => request.url.endsWith('/admin/messages/send') && request.body)
 const sendBody = JSON.parse(String(sendRequest?.body || '{}'))
 check(sendBody.intentId === 'intent-stable' && sendBody.previousIntentId === 'intent-before' && sendBody.text === '你好' && sendBody.conversationRef === 'conversation-test', '发送请求携带稳定 intentId、前序 CAS 与明确会话，不由 API 层重铸意图')

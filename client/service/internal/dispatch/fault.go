@@ -80,6 +80,10 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 		// queued 且手在线 → 重投驱动(§7.2.4):发送失败或瞬态拒绝(QUEUE_FULL/STALE_SESSION)
 		// 回 queued 的命令,在存活连接上同 msgId 再投,不再滞留到 deadline 被误判 suspect(红队 F5/F8)。
 		if cmd.Status == store.CmdQueued {
+			if !allowsAutomaticRedispatch(cmd.Name) {
+				d.terminalizeVoid(cmd, "该维护原语禁止普通自动重派")
+				continue
+			}
 			if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
 				continue
 			}
@@ -142,6 +146,11 @@ func (d *Dispatcher) markSuspect(cmd store.CmdRecord, reason string) {
 // voidAndRedispatch:readonly/intrusive 命令作废并重派。存在 child 时必须走 Store.ReplaceCmd，
 // 原子写入 parent void + replacement leaf，逻辑等待者看不到“中间 void、孩子未入账”。
 func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string, delay time.Duration) {
+	if !allowsAutomaticRedispatch(cmd.Name) {
+		d.terminalizeVoid(cmd, reason)
+		d.st.Audit("redispatch_disabled", cmd.HandID, cmd.MsgID, "该维护原语只允许管理编排层显式重试")
+		return
+	}
 	cap := redispatchCap(cmd.Class)
 	if cmd.RedispatchN >= cap {
 		d.terminalizeVoid(cmd, reason)
@@ -161,6 +170,12 @@ func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string, delay
 		}
 	}
 	d.redispatchFrom(cmd, reason, delay)
+}
+
+// debug.reload 成功路径会主动杀死当前 SW；把它放进普通同 msgId/新 msgId
+// 恢复轨会形成重载循环。当前只有这一条已立案的窄例外，不扩成通用框架。
+func allowsAutomaticRedispatch(name string) bool {
+	return name != protocol.PrimDebugReload
 }
 
 // redispatchFrom:基于旧命令铸造新命令(新 msgId,RedispatchN+1,新 deadline)重派。

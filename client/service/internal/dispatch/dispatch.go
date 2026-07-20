@@ -192,6 +192,19 @@ func (d *Dispatcher) OnAck(handID string, ack protocol.AckBody) {
 		}
 		// 瞬态拒绝(QUEUE_FULL/STALE_SESSION)回 queued 待重投;协议性拒绝落 rejected 终局。
 		if isTransientReject(protocol.ErrorCode(code)) {
+			if !allowsAutomaticRedispatch(cmd.Name) {
+				_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
+					if !r.Status.Terminal() {
+						r.Status = store.CmdRejected
+						r.ErrorCode = code
+					}
+					return nil
+				})
+				d.st.Audit("cmd_reject_no_redispatch", handID, ack.Ref, code)
+				d.clearLease(ack.Ref)
+				d.notifyByMsgID(ack.Ref)
+				return
+			}
 			notBefore := time.Now().Add(redispatchBackoff(cmd.Attempt))
 			_ = d.st.MutateCmd(ack.Ref, func(r *store.CmdRecord) error {
 				if r.Status == store.CmdSent {
@@ -547,6 +560,9 @@ func (d *Dispatcher) resultRetryPlan(
 ) (store.ResultCommandMutation, resultOutcome) {
 	if res.Status != protocol.ResultStatusFailed || res.Error == nil || res.Error.SideEffect != protocol.SideEffectNone {
 		return plan, ocDone
+	}
+	if !allowsAutomaticRedispatch(cmd.Name) {
+		return plan, ocRetryExhausted
 	}
 	if res.Error.Retryable == protocol.RetryableAfterRecovery {
 		// 通用派发器不能猜“恢复”的业务含义。例如 CTX_NOT_READY 必须由

@@ -87,6 +87,23 @@ func TestValidateCommandSemanticGates(t *testing.T) {
 	}
 }
 
+func TestValidateDebugReloadPrimitive(t *testing.T) {
+	command := json.RawMessage(`{
+		"name":"debug.reload","ver":1,"args":{},
+		"deadline":1999999999999,"execBudgetMs":5000
+	}`)
+	if err := ValidateKindBody(KindCmd, command); err != nil {
+		t.Fatalf("debug.reload 空参数命令应通过正式命令校验: %v", err)
+	}
+	result := json.RawMessage(`{
+		"ref":"reload-1","status":"ok","data":{},
+		"replayed":false,"execMs":1
+	}`)
+	if err := ValidatePrimitiveResult(PrimDebugReload, 1, result); err != nil {
+		t.Fatalf("debug.reload 空数据结果应通过原语结果校验: %v", err)
+	}
+}
+
 func TestValidateEventDataAndConst(t *testing.T) {
 	valid := json.RawMessage(`{"name":"unreadBadge","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"scope":"total","value":3,"prev":2,"stable":true,"future":1}}`)
 	if err := ValidateKindBody(KindEvent, valid); err != nil {

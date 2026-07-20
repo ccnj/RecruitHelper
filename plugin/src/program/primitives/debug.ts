@@ -3,6 +3,7 @@
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import { CmdClass, Primitive as PrimName } from '../../base/protocol'
 import { SW_STARTED_AT } from '../../base/config'
+import { armRuntimeReload } from '../../base/reload'
 import { inspectZhilianSendSurfaceDiagnostic } from '../platform/zhilian'
 
 const pingPrim: Primitive = {
@@ -44,6 +45,17 @@ const switchWindowPrim: Primitive = {
   },
 }
 
+// debug.reload:只准备一次基础设施重载。真正的 chrome.runtime.reload 由
+// connection 在收到脑对本 result 的 ACK 后触发，避免旧 SW 先死、终局未落脑。
+const reloadPrim: Primitive = {
+  name: PrimName.DebugReload,
+  class: CmdClass.Intrusive,
+  async handler(_args, ctx): Promise<PrimitiveOutcome> {
+    await armRuntimeReload(ctx.cmdMsgId)
+    return { status: 'ok', data: {} }
+  },
+}
+
 // debug.slowEcho:声明 effectful(无真实副作用),按 outcome 演练 ok/failed/silent 全轨道。
 const slowEchoPrim: Primitive = {
   name: PrimName.DebugSlowEcho,
@@ -66,6 +78,7 @@ const slowEchoPrim: Primitive = {
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
+  register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)
 }

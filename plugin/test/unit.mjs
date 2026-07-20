@@ -18,6 +18,8 @@ await esbuild.build({
 const unitBundleURL = pathToFileURL(process.cwd() + '/test/dist/unit-bundle.mjs').href
 const {
   AckStatus,
+  acknowledgeRuntimeReloadResult,
+  armRuntimeReload,
   CONTENT_MESSAGE,
   Connection,
   ContentSensor,
@@ -50,6 +52,7 @@ const {
   readZhilianUnreadTotal,
   readZhilianList,
   readZhilianThread,
+  refreshPagesAfterRuntimeReload,
   sendZhilianMessage,
   normalizeZhilianMessageText,
   register,
@@ -235,6 +238,45 @@ function chromeEvent() {
 
 const tests = []
 function test(name, fn) { tests.push({ name, fn }) }
+
+test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW 一次性刷新平台页', async () => {
+  const originalChrome = globalThis.chrome
+  const storage = {}
+  const runtimeReloads = []
+  const pageReloads = []
+  try {
+    globalThis.chrome = {
+      storage: {
+        local: {
+          async get(key) { return Object.hasOwn(storage, key) ? { [key]: structuredClone(storage[key]) } : {} },
+          async set(values) { Object.assign(storage, structuredClone(values)) },
+          async remove(key) { delete storage[key] },
+        },
+      },
+      runtime: { reload() { runtimeReloads.push('reload') } },
+      tabs: {
+        async query(query) {
+          assert.equal(query.url, 'https://rd6.zhaopin.com/*')
+          return [{ id: 11 }, { id: 12 }, {}]
+        },
+        async reload(tabId) { pageReloads.push(tabId) },
+      },
+    }
+
+    await armRuntimeReload('cmd-reload-1')
+    assert.equal(acknowledgeRuntimeReloadResult('another-command'), false)
+    assert.equal(runtimeReloads.length, 0)
+    assert.equal(acknowledgeRuntimeReloadResult('cmd-reload-1'), true)
+    assert.equal(acknowledgeRuntimeReloadResult('cmd-reload-1'), false)
+    assert.equal(runtimeReloads.length, 1, 'accepted/duplicate ACK 只能触发一次 runtime.reload')
+
+    assert.equal(await refreshPagesAfterRuntimeReload(), 2)
+    assert.deepEqual(pageReloads, [11, 12])
+    assert.equal(await refreshPagesAfterRuntimeReload(), 0, 'marker 被消费后不得重复刷新页面')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
 
 test('本地 handId 并发只生成一次且模块重载后稳定', async () => {
   const storage = { infra: { wsUrl: 'ws://unit.invalid/v1/channel', obsolete: true } }

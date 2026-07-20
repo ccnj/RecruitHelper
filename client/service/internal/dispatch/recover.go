@@ -112,7 +112,11 @@ func (d *Dispatcher) reconnectLegacy(handID, newBootID string) {
 		}
 		switch {
 		case cmd.BootIDAtDispatch == newBootID:
-			d.resendCmd(cmd, session)
+			if allowsAutomaticRedispatch(cmd.Name) {
+				d.resendCmd(cmd, session)
+			} else {
+				d.terminalizeVoid(cmd, "重连时该维护原语禁止普通自动重派")
+			}
 		case cmd.Class == string(protocol.ClassEffectful):
 			// 第一趟已冻结
 		default:

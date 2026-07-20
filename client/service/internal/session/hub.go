@@ -234,7 +234,9 @@ type Conn struct {
 	bootID         string
 	caps           []string
 	features       []string
+	contractHash   string
 	contractMatch  bool
+	extVersion     string
 	witnessStoreID string
 	outboxPending  int
 	journalOpen    int
@@ -330,7 +332,9 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 	c.bootID = hello.BootID
 	c.caps = hello.Caps
 	c.features = hello.Features
+	c.contractHash = hello.ContractHash
 	c.contractMatch = hello.ContractHash == protocol.ContractHash
+	c.extVersion = hello.App.ExtVersion
 	c.witnessStoreID = hello.WitnessStoreId
 	c.outboxPending = hello.OutboxPending
 	c.journalOpen = hello.JournalOpen
@@ -623,7 +627,10 @@ func (h *Hub) activate(c *Conn, publish func() error) (*Conn, error) {
 		return nil, err
 	}
 	old := h.active[c.handID]
-	h.reg.Online(c.handID, c.session, c.bootID, c.caps, c.features, time.Now())
+	h.reg.OnlineWithBuild(
+		c.handID, c.session, c.bootID, c.caps, c.features,
+		c.contractHash, c.contractMatch, c.extVersion, time.Now(),
+	)
 	h.active[c.handID] = c
 	return old, nil
 }

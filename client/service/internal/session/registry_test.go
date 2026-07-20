@@ -71,6 +71,21 @@ func TestRegistryHeartbeatUnknownHand(t *testing.T) {
 	}
 }
 
+func TestRegistryKeepsCurrentHelloBuildEvidence(t *testing.T) {
+	r := NewRegistry(1000)
+	now := time.Now()
+	r.OnlineWithBuild(
+		"hand-build", "session-build", "boot-build",
+		[]string{"debug.reload@1"}, nil,
+		"sha256:current", true, "0.1.0", now,
+	)
+	state, ok := r.Get("hand-build")
+	if !ok || state.BootID != "boot-build" || state.ContractHash != "sha256:current" ||
+		!state.ContractMatch || state.ExtVersion != "0.1.0" {
+		t.Fatalf("当前 hello 构建证词未完整保留: %+v", state)
+	}
+}
+
 func TestRegistrySweepStallsAtExactGraceBoundary(t *testing.T) {
 	r := NewRegistry(1000)
 	t0 := time.Now()
