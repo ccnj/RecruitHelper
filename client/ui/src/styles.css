@@ -327,6 +327,9 @@ h2 {
 .candidate-intake-result strong { color: var(--teal); font-size: 0.78rem; }
 .candidate-intake-result span { color: var(--muted); font-size: 0.68rem; }
 .candidate-intake-error { margin-top: 0.65rem; padding: 0.55rem 0.65rem; border-left: 3px solid var(--red); background: #fff3f4; color: var(--red); font-size: 0.7rem; }
+.greeting-composer { margin-top: 0.75rem; padding: 0.8rem; border: 1px solid var(--line); background: var(--paper); }
+.greeting-composer textarea { min-height: 62px; margin-top: 0.65rem; }
+.greeting-composer textarea:disabled { background: #f1f4f5; color: var(--muted); }
 .status-ledger { display: grid; grid-template-columns: 1.1fr 0.7fr 1.25fr; }
 .status-ledger > div { min-width: 0; padding: 0.8rem 1rem; border-right: 1px solid var(--line); }
 .status-ledger > div:last-child { border-right: 0; }

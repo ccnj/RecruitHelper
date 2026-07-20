@@ -8,6 +8,7 @@ import {
 import {
   candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
 } from './candidate-workflow'
+import { sendStateLabel, sendSucceeded, sendSuspect, sendTerminal } from './send-intent-state'
 import { acknowledgeSendIntent, readSendResume } from './send-resume'
 
 interface PollState<T> {
@@ -629,13 +630,202 @@ function CandidateIntake({ account }: { account: AccountView }) {
       )}
 
       {state.phase === 'selected' && (
-        <div className="candidate-intake-result" role="status">
-          <strong>{state.profile.created ? '候选人档案已建立' : '已找到同一候选人档案'}</strong>
-          <span>当前状态：{state.profile.status || 'selected'} · 档案 {shortRef(state.profile.profileId, 10)}</span>
-        </div>
+        <>
+          <div className="candidate-intake-result" role="status">
+            <strong>{state.profile.created ? '候选人档案已建立' : '已找到同一候选人档案'}</strong>
+            <span>当前状态：{state.profile.status || 'selected'} · 档案 {shortRef(state.profile.profileId, 10)}</span>
+          </div>
+          {state.profile.status === 'selected' && (
+            <GreetingComposer
+              key={state.profile.profileId}
+              account={account}
+              profileId={state.profile.profileId}
+            />
+          )}
+        </>
       )}
       {state.error && <div className="candidate-intake-error" role="alert">{state.error}</div>}
     </section>
+  )
+}
+
+function GreetingComposer({ account, profileId }: { account: AccountView; profileId: string }) {
+  const [text, setText] = useState('你好')
+  const [pending, setPending] = useState<PendingSend | null>(null)
+  const [view, setView] = useState<SendIntentView | null>(null)
+  const [error, setError] = useState('')
+  const [posting, setPosting] = useState(false)
+  const [recovering, setRecovering] = useState(true)
+  const [latestIntentId, setLatestIntentId] = useState('')
+  const bytes = new TextEncoder().encode(text.trim()).length
+  const quietUntil = toDate(account.manualQuietUntil)
+  const quiet = Boolean(quietUntil && quietUntil.getTime() > Date.now())
+  const canCreate = account.identityCurrent && account.handOnline && !quiet && bytes > 0 && bytes <= 2048
+
+  useEffect(() => {
+    let alive = true
+    let timer: number | undefined
+    const recover = async () => {
+      try {
+        const latest = await api.latestGreetingIntent(profileId)
+        if (!alive) return
+        setLatestIntentId(latest?.intentId ?? '')
+        setPending(latest ? { intentId: latest.intentId } : null)
+        setView(latest)
+        setError('')
+        setRecovering(false)
+      } catch (reason) {
+        if (!alive) return
+        setRecovering(true)
+        setError(`无法核对最近一次招呼，编辑器已锁定：${errorText(reason)}`)
+        timer = window.setTimeout(recover, 2000)
+      }
+    }
+    void recover()
+    return () => {
+      alive = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [profileId])
+
+  useEffect(() => {
+    if (!pending || (sendTerminal(view) && !sendSuspect(view))) return
+    let alive = true
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const next = await api.greetingStatus(pending.intentId)
+        if (!alive) return
+        setView(next)
+        setLatestIntentId(next.intentId)
+        setError('')
+        if (!sendTerminal(next) || sendSuspect(next)) timer = window.setTimeout(poll, 1200)
+      } catch (reason) {
+        if (!alive) return
+        setError(`招呼状态查询暂时失败：${errorText(reason)}`)
+        timer = window.setTimeout(poll, 2000)
+      }
+    }
+    timer = window.setTimeout(poll, 500)
+    return () => {
+      alive = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [pending, view?.status, view?.commandStatus])
+
+  useEffect(() => {
+    if (sendSucceeded(view)) setText('')
+  }, [view?.status, view?.commandStatus])
+
+  const submit = async () => {
+    const normalized = text.trim()
+    if (recovering || posting || (pending && pending.text === undefined)) return
+    const request = pending ?? { intentId: newIntentId(), text: normalized }
+    if (!request.text) return
+    if (!pending) setPending(request)
+    setPosting(true)
+    setError('')
+    let postStarted = false
+    try {
+      // 每次发送前都先收编 profile 当前 head。响应丢失时只恢复同一
+      // intentId；另一窗口抢先更新时不再创建本窗口的新意图。
+      const current = await api.latestGreetingIntent(profileId)
+      if (current?.intentId === request.intentId) {
+        setPending(request)
+        setView(current)
+        setLatestIntentId(current.intentId)
+        return
+      }
+      if (current && current.intentId !== latestIntentId) {
+        setPending({ intentId: current.intentId })
+        setView(current)
+        setLatestIntentId(current.intentId)
+        setError('招呼账本已由另一窗口更新；已恢复当前意图，请先确认其结果。')
+        return
+      }
+      if (!current && latestIntentId) {
+        setError('招呼账本当前无法确认，本次未发送；请沿用当前意图重试核对。')
+        return
+      }
+      postStarted = true
+      const next = await api.sendGreeting(request.intentId, latestIntentId, profileId, request.text)
+      setView(next)
+      setLatestIntentId(next.intentId)
+    } catch (reason) {
+      if (reason instanceof SendIntentConflictError) {
+        setPending({ intentId: reason.current.intentId })
+        setView(reason.current)
+        setLatestIntentId(reason.current.intentId)
+        setError('招呼账本已由另一窗口更新；已恢复当前意图，请先确认其结果。')
+      } else if (reason instanceof SendIntentRejectedError) {
+        setPending((current) => current?.intentId === request.intentId ? null : current)
+        setView((current) => current?.intentId === request.intentId ? null : current)
+        setError(`招呼前安全检查未通过，脑未创建招呼意图：${errorText(reason)}`)
+      } else if (postStarted) {
+        setError(`提交结果不确定；再次操作仍会沿用同一意图，不会再发一条：${errorText(reason)}`)
+      } else {
+        setError(`无法核对当前招呼账本，本次未发送：${errorText(reason)}`)
+      }
+    } finally {
+      setPosting(false)
+    }
+  }
+
+  const acknowledgeTerminal = () => {
+    if (!view || !sendTerminal(view) || sendSucceeded(view) || sendSuspect(view)) return
+    setPending(null)
+    setView(null)
+    setError('')
+    if (!text.trim()) setText('你好')
+  }
+
+  const disabledReason = recovering
+    ? '正在核对最近一次招呼'
+    : !account.identityCurrent
+      ? '账号身份尚未核验'
+      : !account.handOnline
+        ? '手当前离线'
+        : quiet
+          ? `检测到真人操作，静默至 ${clock(account.manualQuietUntil)}`
+          : bytes > 2048
+            ? '招呼超过 2048 字节'
+            : ''
+
+  return (
+    <form className="greeting-composer" onSubmit={(event) => { event.preventDefault(); void submit() }}>
+      <div className="composer-heading">
+        <div><strong>发送第一条招呼</strong><small>正文可以修改；只有点击下方确认按钮才会发送</small></div>
+        <span className={bytes > 2048 ? 'bad' : ''}>{bytes}/2048 字节</span>
+      </div>
+      <textarea
+        value={text}
+        rows={2}
+        disabled={recovering || Boolean(pending)}
+        aria-label="招呼正文"
+        onChange={(event) => setText(event.target.value)}
+      />
+      <div className="composer-actions">
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={recovering || posting || Boolean(pending && (!error || pending.text === undefined)) || (!pending && !canCreate)}
+        >
+          {recovering ? '正在核对招呼账本…' : posting ? '正在安全入账…' : pending?.text !== undefined && error ? '沿用同一意图重试' : pending ? '等待招呼结果…' : '确认并发送这条招呼'}
+        </button>
+        {sendTerminal(view) && !sendSucceeded(view) && !sendSuspect(view) && (
+          <button type="button" onClick={acknowledgeTerminal}>我已确认，重新编辑</button>
+        )}
+        {sendSuspect(view) && <small>请先在 suspect 队列完成人工裁决</small>}
+        {!pending && disabledReason && <small>{disabledReason}</small>}
+      </div>
+      {view && (
+        <div className={`send-state ${sendSucceeded(view) ? 'is-ok' : sendSuspect(view) ? 'is-bad' : ''}`}>
+          <strong>{sendStateLabel(view)}</strong>
+          <span>招呼意图 {shortRef(view.intentId, 10)}{view.suspectReason ? ` · ${view.suspectReason}` : ''}</span>
+        </div>
+      )}
+      {error && <div className="composer-error" role="alert">{error}</div>}
+    </form>
   )
 }
 
@@ -801,39 +991,6 @@ function newIntentId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   const random = Math.random().toString(36).slice(2)
   return `intent-${Date.now().toString(36)}-${random}`
-}
-
-function sendStateLabel(view: SendIntentView | null): string {
-  if (!view) return ''
-  const intentTerminal = ['ok', 'failed', 'suspect', 'expired', 'canceled', 'resolvedOk', 'resolvedFailed']
-  const state = intentTerminal.includes(view.status) ? view.status : view.commandStatus || view.status
-  const labels: Record<string, string> = {
-    dispatching: '发送意图已入账，正在交给手', reconciling: '连接已变化，正在安全对账',
-    verifying: '发送结果未知，正在回读平台记录',
-    queued: '已安全入账，等待手执行', sent: '已交给手，等待接收', accepted: '手已接收，正在执行',
-    executing: '正在发送并观察页面结果', pendingReconcile: '连接已变化，正在安全对账',
-    pendingVerification: '结果未知，正在回读验证', ok: '页面与本地账本均已确认',
-    resolvedOk: '已确认发生', failed: '未完成', resolvedFailed: '已确认未发生',
-    suspect: '结果仍有歧义，已停止并转人工', expired: '意图已过期，未继续发送',
-  }
-  const attempts = view.verificationAttempts ? ` · 已验证 ${view.verificationAttempts} 轮` : ''
-  return `${labels[state] || state || '状态未知'}${attempts}`
-}
-
-function sendTerminal(view: SendIntentView | null): boolean {
-  if (!view) return false
-  const states = [view.status, view.commandStatus]
-  return states.some((state) => state && [
-    'ok', 'failed', 'suspect', 'expired', 'canceled', 'resolvedOk', 'resolvedFailed',
-  ].includes(state))
-}
-
-function sendSucceeded(view: SendIntentView | null): boolean {
-  return Boolean(view && [view.status, view.commandStatus].some((state) => state === 'ok' || state === 'resolvedOk'))
-}
-
-function sendSuspect(view: SendIntentView | null): boolean {
-  return Boolean(view && (view.status === 'suspect' || view.commandStatus === 'suspect'))
 }
 
 function MessageComposer({ account, conversation, onChanged }: {

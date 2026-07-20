@@ -293,6 +293,45 @@ async function latestSendIntent(platform: string, accountRef: string, conversati
   return readResponse<SendIntentView>(response, path)
 }
 
+async function postCandidateGreeting(body: {
+  intentId: string
+  previousIntentId: string
+  profileId: string
+  text: string
+}): Promise<SendIntentView> {
+  const path = '/admin/candidates/greeting/send'
+  const response = await fetch(ADMIN_BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authorizationHeaders() },
+    body: JSON.stringify(body),
+  })
+  if (response.status === 409) {
+    const conflict = await readResponse<{ error?: string; current?: SendIntentView }>(
+      new Response(await response.text(), { status: 200 }),
+      path,
+    )
+    if (conflict.current?.intentId) {
+      throw new SendIntentConflictError(conflict.error || '招呼账本已出现更新', conflict.current)
+    }
+    throw new SendIntentRejectedError(conflict.error || '招呼前安全检查未通过')
+  }
+  if (response.status === 400 || response.status === 404) {
+    const rejected = await readResponse<{ error?: string }>(
+      new Response(await response.text(), { status: 200 }),
+      path,
+    )
+    throw new SendIntentRejectedError(rejected.error || '招呼请求在创建意图前被拒绝')
+  }
+  return readResponse<SendIntentView>(response, path)
+}
+
+async function latestGreetingIntent(profileId: string): Promise<SendIntentView | null> {
+  const path = query('/admin/candidates/greeting/send', { profileId })
+  const response = await fetch(ADMIN_BASE + path, { headers: authorizationHeaders() })
+  if (response.status === 404) return null
+  return readResponse<SendIntentView>(response, path)
+}
+
 async function consumeFrameStream(signal: AbortSignal, onFrame: (frame: FrameEvent) => void): Promise<void> {
   const response = await fetch(ADMIN_BASE + '/admin/frames', {
     headers: { Accept: 'text/event-stream', ...authorizationHeaders() },
@@ -424,6 +463,11 @@ export const api = {
   runAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/run', target),
   readCurrentCandidate,
   selectCurrentCandidate,
+  sendGreeting: (intentId: string, previousIntentId: string, profileId: string, text: string) => (
+    postCandidateGreeting({ intentId, previousIntentId, profileId, text })
+  ),
+  greetingStatus: (intentId: string) => get<SendIntentView>(query('/admin/candidates/greeting/send', { intentId })),
+  latestGreetingIntent,
   conversations: (platform: string, accountRef: string) => get<{ conversations: ConversationView[] }>(query('/admin/conversations', { platform, accountRef })),
   trackConversation: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/conversations/track', { platform, accountRef, conversationRef }),
   messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),

@@ -98,6 +98,8 @@ const realFetch = globalThis.fetch
 const requests = []
 let forceSendConflict = false
 let forceSendRejected = false
+let forceGreetingConflict = false
+let forceGreetingRejected = false
 let forceCandidateReadError = false
 let forceCandidateSelectError = false
 globalThis.window = {
@@ -123,6 +125,24 @@ globalThis.fetch = async (url, init = {}) => {
     }
     return new Response(JSON.stringify({
       intentId: 'intent-stable', logicalDispatchId: 'logical-stable', msgId: 'msg-stable',
+      status: 'queued', commandStatus: 'sent', verificationAttempts: 0,
+    }), { status: init.method === 'POST' ? 202 : 200 })
+  }
+  if (String(url).includes('/admin/candidates/greeting/send')) {
+    if (forceGreetingRejected && init.method === 'POST') {
+      return new Response(JSON.stringify({ error: '候选人档案当前不能发送招呼' }), { status: 409 })
+    }
+    if (forceGreetingConflict && init.method === 'POST') {
+      return new Response(JSON.stringify({
+        error: '招呼账本已更新',
+        current: {
+          intentId: 'greeting-current', logicalDispatchId: 'logical-greeting-current', msgId: 'msg-greeting-current',
+          status: 'queued', commandStatus: 'sent', verificationAttempts: 0,
+        },
+      }), { status: 409 })
+    }
+    return new Response(JSON.stringify({
+      intentId: 'greeting-stable', logicalDispatchId: 'logical-greeting-stable', msgId: 'msg-greeting-stable',
       status: 'queued', commandStatus: 'sent', verificationAttempts: 0,
     }), { status: init.method === 'POST' ? 202 : 200 })
   }
@@ -168,6 +188,25 @@ await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
 const reloadReady = await authApi.reloadHand('hand-test')
 const candidatePreview = await authApi.readCurrentCandidate({ platform: 'zhilian', accountRef: 'account-test' })
 const candidateProfile = await authApi.selectCurrentCandidate(candidatePreview.selectionRef)
+const greetingCreated = await authApi.sendGreeting('greeting-stable', 'greeting-before', 'profile-safe', '你好')
+const greetingStatus = await authApi.greetingStatus('greeting-stable')
+const greetingLatest = await authApi.latestGreetingIntent('profile-safe')
+forceGreetingConflict = true
+let greetingConflictCurrent = null
+try {
+  await authApi.sendGreeting('greeting-racing', 'greeting-before', 'profile-safe', '你好')
+} catch (reason) {
+  if (reason instanceof SendIntentConflictError) greetingConflictCurrent = reason.current
+}
+forceGreetingConflict = false
+forceGreetingRejected = true
+let greetingRejectedBeforeCreate = false
+try {
+  await authApi.sendGreeting('greeting-rejected', 'greeting-before', 'profile-safe', '你好')
+} catch (reason) {
+  greetingRejectedBeforeCreate = reason instanceof SendIntentRejectedError
+}
+forceGreetingRejected = false
 const sendCreated = await authApi.sendMessage('intent-stable', 'intent-before', 'zhilian', 'account-test', 'conversation-test', '你好')
 const sendStatus = await authApi.sendStatus('intent-stable')
 const sendLatest = await authApi.latestSendIntent('zhilian', 'account-test', 'conversation-test')
@@ -222,6 +261,21 @@ check(Object.keys(candidateSelectBody).join(',') === 'selectionRef' && candidate
 check(Object.keys(candidateProfile).sort().join(',') === 'created,profileId,status' && !JSON.stringify(candidateProfile).includes('raw-user'), '建档响应归一化为安全档案视图')
 check(candidateReadError === CANDIDATE_READ_ERROR && !candidateReadError.includes('raw-user-secret'), '候选人读取失败使用固定安全文案')
 check(candidateSelectError === CANDIDATE_SELECT_ERROR && !candidateSelectError.includes('raw-selection'), '候选人确认失败使用固定安全文案')
+const greetingRequest = requests.find((request) => request.url.endsWith('/admin/candidates/greeting/send') && request.body)
+const greetingBody = JSON.parse(String(greetingRequest?.body || '{}'))
+check(
+  Object.keys(greetingBody).sort().join(',') === 'intentId,previousIntentId,profileId,text'
+    && greetingBody.intentId === 'greeting-stable'
+    && greetingBody.previousIntentId === 'greeting-before'
+    && greetingBody.profileId === 'profile-safe'
+    && greetingBody.text === '你好',
+  '招呼请求只携带稳定意图、前序 CAS、脑内 profileId 与明确正文，不接触平台原始引用',
+)
+check(greetingCreated.intentId === 'greeting-stable' && greetingStatus.commandStatus === 'sent' && greetingLatest?.intentId === 'greeting-stable', '招呼创建、按 ID 查询与按档案 current 恢复沿用同一意图视图')
+check(requests.some((request) => request.url.includes('/admin/candidates/greeting/send?intentId=greeting-stable')), '招呼状态按 intentId 查询且不携带正文')
+check(requests.some((request) => request.url.includes('/admin/candidates/greeting/send?profileId=profile-safe')), '招呼前可按 profileId 收编 current')
+check(greetingConflictCurrent?.intentId === 'greeting-current', '招呼 CAS 冲突保留脑返回的 current 供 UI 收编')
+check(greetingRejectedBeforeCreate, '招呼无 current 的安全拒绝被标记为确定性未创建')
 const sendRequest = requests.find((request) => request.url.endsWith('/admin/messages/send') && request.body)
 const sendBody = JSON.parse(String(sendRequest?.body || '{}'))
 check(sendBody.intentId === 'intent-stable' && sendBody.previousIntentId === 'intent-before' && sendBody.text === '你好' && sendBody.conversationRef === 'conversation-test', '发送请求携带稳定 intentId、前序 CAS 与明确会话，不由 API 层重铸意图')
