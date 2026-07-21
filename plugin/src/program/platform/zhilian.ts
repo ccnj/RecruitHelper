@@ -2814,6 +2814,10 @@ async function mainReadThreadPage(
     .replace(/\u00a0/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
   const parseObject = (value: unknown): AnyRecord => {
     if (value && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
     if (typeof value !== 'string' || value.length === 0) return {}
@@ -2921,6 +2925,12 @@ async function mainReadThreadPage(
       if (!from) throw new Error('message_direction_unresolved')
       kind = 'text'
       text = clean(details.greetingText ?? envelope.greetingText)
+    } else if (rawType === 'custom' && customType === 148 && Boolean(from) && direction === 'in' &&
+      clean(row.status).toLowerCase() === 'success' && clean(details.staffText)) {
+      // 智联 148 是候选人侧“暂不考虑”反馈。只接受已解析为候选人入站、
+      // 平台成功且带 staffText 的形状；其余 148 继续走保守 system 分支。
+      kind = 'text'
+      text = clean(details.staffText)
     } else {
       direction = 'system'
       kind = 'system'
@@ -2936,7 +2946,7 @@ async function mainReadThreadPage(
 
     // 脑侧 ambiguity verifier 复用 chat.readThread；client sendMessageId 可能只是
     // 乐观本地行，不能被结构化成“已发送”正证词。稳定消息身份只认服务端 idServer。
-    const stableMessageID = clean(row.idServer)
+    const stableMessageID = stableMessageIdentity(row.idServer)
     if (!stableMessageID) throw new Error('message_identity_missing')
     // contentHash 是脑手共享的规范内容哈希，不是平台消息主键：文本/系统只哈希
     // NFC+空白规范化文本，媒体使用固定占位符；卡片只哈希类型+稳定身份且排除状态。
@@ -2962,7 +2972,7 @@ async function mainReadThreadPage(
   // 页面自身以 oldest.time + oldest.idServer 作排他游标；不能减 1ms，
   // 否则同一毫秒内的更早消息会被跳过。
   const endTime = oldest ? (toMillis(oldest.time) ?? 0) : 0
-  const lastMsgId = oldest ? clean(oldest.idServer ?? oldest.sendMessageId) : ''
+  const lastMsgId = oldest ? stableMessageIdentity(oldest.idServer) : ''
   const displayName = clean(session.name ?? session.realName) || '未命名候选人'
   const platformUserRef = clean(session.peerPartnerId ?? session.typeUserId ?? session.userId)
   diagnosticStage = 'return_result'
@@ -3586,6 +3596,10 @@ async function mainCaptureSendBaseline(
       .replace(/\u00a0/gu, ' ')
       .replace(/\s+/gu, ' ')
       .trim()
+    const stableMessageIdentity = (value: unknown): string => {
+      if (typeof value === 'string') return value
+      return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+    }
     const digest = async (value: string): Promise<string> => {
       const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
       return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -3695,7 +3709,7 @@ async function mainCaptureSendBaseline(
         const raw = value[sourceIndex]
         const row = asRecord(raw)
         if (!row) return null
-        const idServer = clean(row.idServer)
+        const idServer = stableMessageIdentity(row.idServer)
         if (!idServer) return null
         const rawType = row.type
         const time = Number(row.time)
@@ -3767,6 +3781,10 @@ async function mainCaptureSendBaseline(
         if (!from) return null
         kind = 'text'
         text = clean(details.greetingText ?? envelope.greetingText)
+      } else if (rawType === 'custom' && customType === 148 && Boolean(from) && direction === 'in' &&
+        clean(row.status).toLowerCase() === 'success' && clean(details.staffText)) {
+        kind = 'text'
+        text = clean(details.staffText)
       } else {
         direction = 'system'
         text = clean(
@@ -3863,6 +3881,10 @@ async function mainObserveStableOutbound(
     .replace(/\u00a0/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
   const digest = async (value: string): Promise<string> => {
     const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
     return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -3939,7 +3961,7 @@ async function mainObserveStableOutbound(
       const raw = rawRows[sourceIndex]
       const row = asRecord(raw)
       if (!row) return failed()
-      const idServer = clean(row.idServer)
+      const idServer = stableMessageIdentity(row.idServer)
       if (!idServer) return failed()
       const rawType = row.type
       const time = Number(row.time)
@@ -4059,6 +4081,10 @@ function mainSendMessageOnce(
     .replace(/\u00a0/gu, ' ')
     .replace(/\s+/gu, ' ')
     .trim()
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
   const asRecord = (value: unknown): AnyRecord | null =>
     value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
   const rotateRight = (value: number, count: number): number =>
@@ -4259,7 +4285,7 @@ function mainSendMessageOnce(
     for (let sourceIndex = 0; sourceIndex < timeline.length; sourceIndex += 1) {
       const row = asRecord(timeline[sourceIndex])
       if (!row) return null
-      const idServer = clean(row.idServer)
+      const idServer = stableMessageIdentity(row.idServer)
       const time = Number(row.time)
       if (!idServer || !Number.isFinite(time) || time <= 0) return null
       const rawType = row.type
@@ -4339,6 +4365,10 @@ function mainSendMessageOnce(
       if (!from) return null
       kind = 'text'
       normalizedText = clean(details.greetingText ?? envelope.greetingText)
+    } else if (rawType === 'custom' && customType === 148 && Boolean(from) && direction === 'in' &&
+      clean(row.status).toLowerCase() === 'success' && clean(details.staffText)) {
+      kind = 'text'
+      normalizedText = clean(details.staffText)
     } else {
       direction = 'system'
       normalizedText = clean(
@@ -4884,7 +4914,7 @@ export async function readZhilianThread(
   let reachedTop = false
   let peer: MainThreadPageResult['peer'] = null
   const collected: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
-  const dedup = new Set<string>()
+  const sourceSemantics = new Map<string, { direction: ZhilianThreadMessage['direction']; contentHash: string }>()
   let platformReadStarted = false
 
   while (collected.length < maxMessages && !reachedTop) {
@@ -4936,10 +4966,25 @@ export async function readZhilianThread(
       throw new ZhilianPlatformError('CURSOR_INVALID', '会话历史平台游标没有向前推进')
     }
     peer = page.peer ?? peer
-    const pageSeen = new Set(dedup)
+    const pageSeen = new Map(sourceSemantics)
     const unseen = page.messages.filter((message) => {
-      if (pageSeen.has(message.sourceKey)) return false
-      pageSeen.add(message.sourceKey)
+      const seen = pageSeen.get(message.sourceKey)
+      if (seen) {
+        if (seen.direction !== message.direction || seen.contentHash !== message.contentHash) {
+          throw new ZhilianPlatformError(
+            'ELEMENT_UNRESOLVED',
+            '同一稳定消息等值键的方向或正文哈希冲突',
+            'manualOnly',
+            undefined,
+            'possible',
+          )
+        }
+        return false
+      }
+      pageSeen.set(message.sourceKey, {
+        direction: message.direction,
+        contentHash: message.contentHash,
+      })
       return true
     })
     // 平台游标每次返回更旧的一页；页内已经是正序，所以只能整页前插。
@@ -4952,7 +4997,6 @@ export async function readZhilianThread(
       ? candidate.slice(anchorResolution.outputStart as number)
       : candidate
     const candidateMessages = returnCandidate
-      .map(({ sourceKey: _sourceKey, ...message }) => message)
     for (const message of candidateMessages) {
       if (message.text !== null && new TextEncoder().encode(message.text).length > 2048) {
         throw new ZhilianPlatformError('PAYLOAD_LIMIT', '消息正文超过当前内联上限')
@@ -4974,7 +5018,10 @@ export async function readZhilianThread(
     }
     const beforeCount = collected.length
     for (const message of unseen) {
-      dedup.add(message.sourceKey)
+      sourceSemantics.set(message.sourceKey, {
+        direction: message.direction,
+        contentHash: message.contentHash,
+      })
     }
     collected.splice(0, collected.length, ...candidate)
     reachedTop = page.reachedTop
@@ -4998,7 +5045,7 @@ export async function readZhilianThread(
     ? collected.slice(anchorResolution.outputStart as number)
     : collected
   const messages = selected
-    .map(({ sourceKey: _sourceKey, ...message }, idx) => ({ ...message, idx }))
+    .map((message, idx) => ({ ...message, idx }))
   for (const message of messages) {
     if (message.text !== null && new TextEncoder().encode(message.text).length > 2048) {
       throw new ZhilianPlatformError('PAYLOAD_LIMIT', '消息正文超过当前内联上限')

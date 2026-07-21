@@ -486,7 +486,7 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 	}
 	plan, err := syncledger.Reconcile(input)
 	if err != nil {
-		return ConversationProjection{Key: key}, err
+		return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
 	}
 	if plan.NeedsDeep() {
 		snapshot, err = a.readThread(ctx, key.ConversationRef, protocolAnchors, true)
@@ -503,7 +503,7 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		input.AnchorMatched = snapshot.anchorMatched
 		plan, err = syncledger.Reconcile(input)
 		if err != nil {
-			return ConversationProjection{Key: key}, err
+			return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
 		}
 	}
 
@@ -526,6 +526,23 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		}
 	}
 	return projection, nil
+}
+
+func (a *roundActor) convergeReconcileFailure(key store.ConversationKey, reconcileErr error) error {
+	if !errors.Is(reconcileErr, syncledger.ErrSourceKeySemanticConflict) {
+		return reconcileErr
+	}
+	// A stable identity that changes direction or body is not a retryable page
+	// read failure. Stop the account actor before recording the diagnostic so a
+	// later audit write failure still cannot produce unbounded automatic reads.
+	pauseErr := a.manager.pauseAccount(a.key(), PauseHandManualReview, a.manager.now())
+	auditErr := a.manager.store.AppendAudit(&store.AuditEntry{
+		At: a.manager.now(), Category: "conversation_source_identity_conflict",
+		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
+		RoundID: a.roundID,
+		Detail:  "稳定消息等值键的方向或正文哈希冲突，已暂停账号等待人工处理",
+	})
+	return errors.Join(reconcileErr, pauseErr, auditErr)
 }
 
 func (a *roundActor) readThread(ctx context.Context, conversationRef string, anchors []protocol.MessageAnchor, deep bool) (threadSnapshot, error) {
@@ -628,6 +645,7 @@ func snapshotMessages(messages []protocol.ThreadMessage) []syncledger.SnapshotMe
 			Direction: string(message.Direction), Kind: string(message.Kind), Text: message.Text,
 			BlobRef: blobRef, ContentHash: message.ContentHash, CardType: cardType,
 			CardState: cardState, TsApproxMs: message.TsApprox, Origin: "external",
+			SourceKey: message.SourceKey,
 		}
 	}
 	return out

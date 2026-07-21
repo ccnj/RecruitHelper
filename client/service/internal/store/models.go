@@ -564,9 +564,9 @@ type TrackedIntent struct {
 
 // Message 是脑内有序消息账本。Seq 是脑分配的会话内序号,不是平台消息 ID。
 type Message struct {
-	Platform        string `gorm:"primaryKey;index:idx_messages_conversation,priority:1"`
-	AccountRef      string `gorm:"primaryKey;index:idx_messages_conversation,priority:2"`
-	ConversationRef string `gorm:"primaryKey;index:idx_messages_conversation,priority:3"`
+	Platform        string `gorm:"primaryKey;index:idx_messages_conversation,priority:1;uniqueIndex:idx_messages_source_key,priority:1"`
+	AccountRef      string `gorm:"primaryKey;index:idx_messages_conversation,priority:2;uniqueIndex:idx_messages_source_key,priority:2"`
+	ConversationRef string `gorm:"primaryKey;index:idx_messages_conversation,priority:3;uniqueIndex:idx_messages_source_key,priority:3"`
 	Seq             int64  `gorm:"primaryKey;autoIncrement:false"`
 
 	Direction        string `gorm:"not null"`
@@ -579,6 +579,10 @@ type Message struct {
 	TsApproxMs       *int64
 	Origin           string
 	FirstSeenRoundID string `gorm:"index"`
+	// SourceKey 只是会话内等值键，不是平台消息 ID。指针保证旧消息
+	// 与无稳定身份的消息真正落为 SQL NULL；json:"-" 防止它被模型
+	// 直接序列化到管理端或 UI。
+	SourceKey *string `json:"-" gorm:"uniqueIndex:idx_messages_source_key,priority:4"`
 	// OutboundIntentID 只在 SX 成功终局与消息账本事实同一事务
 	// 追加时填写。用 nullable 唯一索引避免旧/外部消息的空值互相冲突。
 	OutboundIntentID *string `gorm:"uniqueIndex"`

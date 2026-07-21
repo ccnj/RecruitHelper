@@ -3182,6 +3182,89 @@ test('智联 MAIN 线程解析：方向不猜、未知类型归 system、数字�
     '带 idServer 但非 success 的 out 行也不得成为 verifier 正证据')
 })
 
+test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严格同义', async () => {
+  const fixture = installM3SendFixture()
+  const rejectionText = '很抱歉，我暂时不考虑这个机会，感谢您的认可~'
+  const staffID = globalThis.window.$session.staff.staffId
+  const variants = [
+    {
+      name: '候选人 staffText', customType: 148, from: fixture.peerRef,
+      idServer: '  server-type-148-raw-identity  ',
+      details: { staffText: `  ${rejectionText}  ` },
+      expected: { direction: 'in', kind: 'text', text: rejectionText },
+    },
+    {
+      name: '招聘方发送者', customType: 148, from: staffID,
+      details: { staffText: rejectionText },
+      expected: { direction: 'system', kind: 'system', text: rejectionText },
+    },
+    {
+      name: '发送者缺失', customType: 148, from: '',
+      details: { staffText: rejectionText },
+      expected: { direction: 'system', kind: 'system', text: rejectionText },
+    },
+    {
+      name: 'staffText 缺失', customType: 148, from: fixture.peerRef,
+      details: { staffText: '   ', userText: '保守系统正文' },
+      expected: { direction: 'system', kind: 'system', text: '[系统消息:148]' },
+    },
+    {
+      name: '非 success 状态', customType: 148, from: fixture.peerRef, status: 'failed',
+      details: { staffText: rejectionText },
+      expected: { direction: 'system', kind: 'system', text: rejectionText },
+    },
+    {
+      name: '未验证的相邻类型', customType: 149, from: fixture.peerRef,
+      details: { staffText: rejectionText },
+      expected: { direction: 'system', kind: 'system', text: rejectionText },
+    },
+    {
+      name: '未见的数字外层类型', customType: 148, rawType: 148, from: fixture.peerRef,
+      details: { staffText: rejectionText },
+      expected: { direction: 'system', kind: 'system', text: rejectionText },
+    },
+  ]
+  try {
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = variant.idServer ?? `server-type-148-${index}`
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: variant.status ?? 'success',
+        type: variant.rawType ?? 'custom',
+        from: variant.from,
+        content: JSON.stringify({ type: variant.customType, content: JSON.stringify(variant.details) }),
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.deepEqual(
+        { direction: message.direction, kind: message.kind, text: message.text },
+        variant.expected,
+        `${variant.name}: readThread 映射错误`,
+      )
+      assert.equal(message.contentHash, m3Hash(variant.expected.text),
+        `${variant.name}: readThread contentHash 应按映射后的正文计算`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`),
+        `${variant.name}: sourceKey 必须使用冻结的 source-v1 全量 SHA-256 配方`)
+      assert.match(message.sourceKey, /^[0-9a-f]{64}$/u)
+
+      const expectedTail = [{
+        direction: variant.expected.direction,
+        contentHash: message.contentHash,
+      }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 投影必须与 readThread 一致`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 投影必须与 readThread/baseline 一致`)
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('智联会话选择拆成只滚动 finder 与同步 click-once', async () => {
   const original = {
     window: globalThis.window,
@@ -4599,7 +4682,7 @@ test('智联线程 DOM 回退：无 Vue 且 runtime session 为空时复用 init
 
 function threadFixtureMessage(key, hash, text = key, tsApprox = 100) {
   return {
-    sourceKey: `source-${key}`,
+    sourceKey: m3Hash(`source-v1|${key}`),
     direction: 'in',
     kind: 'text',
     text,
@@ -4737,6 +4820,57 @@ test('readThread 平台分页按整页前插且同毫秒锚尾跨页仍保持真
   assert.deepEqual(result.messages.map((message) => message.text), ['A', 'B', 'NEW'])
   assert.deepEqual(result.messages.map((message) => message.idx), [0, 1, 2])
   assert.equal(result.anchorMatched, true)
+})
+
+test('readThread 只去重 sourceKey 完全同义行，跨页语义冲突立即转人工', async () => {
+  const hash = 'a'.repeat(64)
+  const duplicateRef = 'conversation-source-key-duplicate'
+  const duplicateHarness = installThreadReadHarness(duplicateRef, async () => ({
+    messages: [
+      threadFixtureMessage('same-platform-identity', hash, 'SAME'),
+      threadFixtureMessage('same-platform-identity', hash, 'SAME'),
+    ],
+    reachedTop: true,
+    cursor: null,
+    peer: { displayName: '脱敏候选人' },
+  }))
+  const duplicate = await readZhilianThread({
+    conversationRef: duplicateRef,
+    window: { maxMessages: 2, anchorTail: [], deep: false },
+  }, duplicateHarness.context().value, duplicateHarness.fingerprint)
+  assert.equal(duplicate.messages.length, 1, '同 key+方向+hash 的重复观察只保留一行')
+
+  const conflictRef = 'conversation-source-key-conflict'
+  const cursor = { endTime: 100, lastMsgId: 'older-conflicting-observation' }
+  const conflictKey = 'conflicting-platform-identity'
+  const conflictHarness = installThreadReadHarness(conflictRef, async (_conversation, _limit, pageCursor) => {
+    const message = threadFixtureMessage(conflictKey, hash, 'SAME')
+    if (pageCursor === null) {
+      return {
+        messages: [message], reachedTop: false, cursor,
+        peer: { displayName: '脱敏候选人' },
+      }
+    }
+    return {
+      messages: [{ ...message, direction: 'out' }], reachedTop: true, cursor: null,
+      peer: { displayName: '脱敏候选人' },
+    }
+  })
+  const opaqueKey = m3Hash(`source-v1|${conflictKey}`)
+  await assert.rejects(
+    readZhilianThread({
+      conversationRef: conflictRef,
+      window: { maxMessages: 2, anchorTail: [], deep: true },
+    }, conflictHarness.context().value, conflictHarness.fingerprint),
+    (error) => {
+      assert.ok(error instanceof ZhilianPlatformError)
+      assert.equal(error.code, 'ELEMENT_UNRESOLVED')
+      assert.equal(error.retryable, 'manualOnly')
+      assert.equal(error.sideEffect, 'possible', '冲突在 intrusive 读已发生后发现，不伪称零读回执')
+      assert.equal(error.message.includes(opaqueKey), false, '错误不得泄露 sourceKey 值')
+      return true
+    },
+  )
 })
 
 test('readThread opaque 游标携带跨 protocol 页锚点边界并严格校验位图', async () => {
@@ -4920,6 +5054,10 @@ test('readThread 首次收编没有 anchorTail 时保持完整正序快照', asy
 
   assert.deepEqual(result.messages.map((message) => message.text), ['OLDER', 'NEW'])
   assert.deepEqual(result.messages.map((message) => message.idx), [0, 1])
+  assert.deepEqual(result.messages.map((message) => message.sourceKey), [
+    m3Hash('source-v1|adoption-older'),
+    m3Hash('source-v1|adoption-newer'),
+  ], 'chat.readThread 不得再剥掉手内已计算的 sourceKey')
   assert.equal(result.anchorMatched, false)
   assert.equal(result.reachedTop, true)
   assert.equal(result.complete, true)

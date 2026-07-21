@@ -46,6 +46,38 @@ func TestNormalizeMessagePlaceholdersAndHashMismatch(t *testing.T) {
 	}
 }
 
+func TestNormalizeMessageValidatesAndPreservesSourceKey(t *testing.T) {
+	text := "拒绝模板"
+	valid := strings.Repeat("a", 64)
+	normalized, err := NormalizeMessage(SnapshotMessage{
+		Direction: "in", Kind: "text", Text: &text, SourceKey: valid,
+	})
+	if err != nil {
+		t.Fatalf("有效 sourceKey 不应被拒绝: %v", err)
+	}
+	if normalized.SourceKey != valid {
+		t.Fatalf("sourceKey 未穿透规范化层: %q", normalized.SourceKey)
+	}
+	draft := normalized.draft()
+	if draft.SourceKey == nil || *draft.SourceKey != valid {
+		t.Fatalf("sourceKey 未穿透到落库草案: %+v", draft.SourceKey)
+	}
+
+	invalid := []string{
+		strings.Repeat("a", 63),
+		strings.Repeat("A", 64),
+		strings.Repeat("g", 64),
+	}
+	for _, sourceKey := range invalid {
+		_, err := NormalizeMessage(SnapshotMessage{
+			Direction: "in", Kind: "text", Text: &text, SourceKey: sourceKey,
+		})
+		if !errors.Is(err, ErrInvalidSourceKey) {
+			t.Fatalf("非法 sourceKey 必须响亮失败: len=%d err=%v", len(sourceKey), err)
+		}
+	}
+}
+
 func TestCardIdentityExcludesState(t *testing.T) {
 	base := SnapshotMessage{
 		Direction: "out", Kind: "card", CardType: "interviewInvite",

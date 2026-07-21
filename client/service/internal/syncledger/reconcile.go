@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	ErrInvalidConversationKey = errors.New("会话正式键不完整")
-	ErrInvalidLedger          = errors.New("持久化会话账本无效")
-	ErrAdoptionHasLedger      = errors.New("首次收编时账本必须为空")
-	ErrAdoptionSnapshotEmpty  = errors.New("首次收编快照不能为空")
-	ErrAnchorContractMismatch = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
+	ErrInvalidConversationKey    = errors.New("会话正式键不完整")
+	ErrInvalidLedger             = errors.New("持久化会话账本无效")
+	ErrAdoptionHasLedger         = errors.New("首次收编时账本必须为空")
+	ErrAdoptionSnapshotEmpty     = errors.New("首次收编快照不能为空")
+	ErrAnchorContractMismatch    = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
+	ErrSourceKeySemanticConflict = errors.New("相同 sourceKey 的消息方向或正文哈希冲突")
 )
 
 type Decision string
@@ -101,6 +102,9 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 
 	ledgerKeys := keysFromLedger(in.Ledger)
 	snapshotKeys := keysFromNormalized(normalized)
+	if err := validateSourceKeySemantics(ledgerKeys, snapshotKeys); err != nil {
+		return nil, err
+	}
 	if in.AnchorMatched {
 		anchorStart := len(ledgerKeys) - 5
 		if anchorStart < 0 {
@@ -266,12 +270,19 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 type messageKey struct {
 	direction string
 	hash      string
+	sourceKey string
 }
 
 func keysFromLedger(messages []store.Message) []messageKey {
 	out := make([]messageKey, len(messages))
 	for i := range messages {
-		out[i] = messageKey{direction: messages[i].Direction, hash: messages[i].ContentHash}
+		sourceKey := ""
+		if messages[i].SourceKey != nil {
+			sourceKey = *messages[i].SourceKey
+		}
+		out[i] = messageKey{
+			direction: messages[i].Direction, hash: messages[i].ContentHash, sourceKey: sourceKey,
+		}
 	}
 	return out
 }
@@ -279,9 +290,35 @@ func keysFromLedger(messages []store.Message) []messageKey {
 func keysFromNormalized(messages []NormalizedMessage) []messageKey {
 	out := make([]messageKey, len(messages))
 	for i := range messages {
-		out[i] = messageKey{direction: messages[i].Direction, hash: messages[i].ContentHash}
+		out[i] = messageKey{
+			direction: messages[i].Direction, hash: messages[i].ContentHash, sourceKey: messages[i].SourceKey,
+		}
 	}
 	return out
+}
+
+// validateSourceKeySemantics enforces the scope-local stable identity claim
+// before any overlap, append, or rebaseline decision. The opaque key itself is
+// deliberately absent from errors and audits.
+func validateSourceKeySemantics(groups ...[]messageKey) error {
+	type semantic struct {
+		direction string
+		hash      string
+	}
+	seen := make(map[string]semantic)
+	for _, keys := range groups {
+		for _, key := range keys {
+			if key.sourceKey == "" {
+				continue
+			}
+			current := semantic{direction: key.direction, hash: key.hash}
+			if previous, ok := seen[key.sourceKey]; ok && previous != current {
+				return ErrSourceKeySemanticConflict
+			}
+			seen[key.sourceKey] = current
+		}
+	}
+	return nil
 }
 
 type overlapMatch struct {
@@ -326,9 +363,21 @@ func equalKeys(a, b []messageKey) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if !equalMessageKey(a[i], b[i]) {
 			return false
 		}
+	}
+	return true
+}
+
+func equalMessageKey(a, b messageKey) bool {
+	if a.direction != b.direction || a.hash != b.hash {
+		return false
+	}
+	// A stable key is authoritative only when both observations have one.
+	// Legacy/null observations remain compatible through direction+contentHash.
+	if a.sourceKey != "" && b.sourceKey != "" {
+		return a.sourceKey == b.sourceKey
 	}
 	return true
 }
@@ -425,6 +474,9 @@ func validateLedger(key store.ConversationKey, messages []store.Message) error {
 		}
 		if message.Seq <= 0 || message.ContentHash == "" || !validDirection(message.Direction) || !validKind(message.Kind) {
 			return fmt.Errorf("%w: seq=%d 消息字段非法", ErrInvalidLedger, message.Seq)
+		}
+		if message.SourceKey != nil && !validSourceKey(*message.SourceKey) {
+			return fmt.Errorf("%w: seq=%d sourceKey 非法", ErrInvalidLedger, message.Seq)
 		}
 		// 被更强证据推翻的消息事实仍保留物理 seq，但不进入活动
 		// 账本，因而活动视图允许有洞。序号仍必须严格递增，防止乱序或重号。

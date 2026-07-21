@@ -137,6 +137,93 @@ func TestReconcileAcceptsSparseStrictlyIncreasingActiveSequence(t *testing.T) {
 	}
 }
 
+func TestReconcileSourceKeyIdentityAndLegacyCompatibility(t *testing.T) {
+	keyA := strings.Repeat("a", 64)
+	keyB := strings.Repeat("b", 64)
+	old := textSnapshot("same")[0]
+	old.SourceKey = keyA
+	ledger := snapshotLedger(t, old)
+
+	t.Run("双方有键时不得把同文不同消息误当重叠", func(t *testing.T) {
+		newSameText := textSnapshot("same")[0]
+		newSameText.SourceKey = keyB
+		plan, err := Reconcile(ReconcileInput{
+			Key: testConversationKey, Ledger: ledger,
+			Snapshot: []SnapshotMessage{old, newSameText},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.Decision != DecisionAppend || plan.Overlap != 1 || len(plan.EventProjection) != 1 ||
+			plan.EventProjection[0].SourceKey == nil || *plan.EventProjection[0].SourceKey != keyB {
+			t.Fatalf("同文不同 key 必须作为新消息追加: %+v", plan)
+		}
+	})
+
+	t.Run("任一侧无键时保持旧账本兼容", func(t *testing.T) {
+		legacySnapshot := textSnapshot("same")
+		plan, err := Reconcile(ReconcileInput{
+			Key: testConversationKey, Ledger: ledger, Snapshot: legacySnapshot,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.Decision != DecisionNoChange || plan.Overlap != 1 {
+			t.Fatalf("无键快照应以 direction+hash 兼容旧账本: %+v", plan)
+		}
+		legacyLedger := textLedger(t, "same")
+		plan, err = Reconcile(ReconcileInput{
+			Key: testConversationKey, Ledger: legacyLedger, Snapshot: []SnapshotMessage{old},
+		})
+		if err != nil || plan.Decision != DecisionNoChange || plan.Overlap != 1 {
+			t.Fatalf("无键账本应兼容有键快照: plan=%+v err=%v", plan, err)
+		}
+	})
+}
+
+func TestReconcileRejectsSourceKeySemanticConflict(t *testing.T) {
+	sourceKey := strings.Repeat("c", 64)
+	base := textSnapshot("first")[0]
+	base.SourceKey = sourceKey
+	ledger := snapshotLedger(t, base)
+
+	for _, test := range []struct {
+		name      string
+		direction string
+		text      string
+	}{
+		{name: "direction", direction: "out", text: "first"},
+		{name: "contentHash", direction: "in", text: "changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conflicting := textSnapshot(test.text)[0]
+			conflicting.Direction = test.direction
+			conflicting.SourceKey = sourceKey
+			_, err := Reconcile(ReconcileInput{
+				Key: testConversationKey, Ledger: ledger, Snapshot: []SnapshotMessage{conflicting},
+			})
+			if !errors.Is(err, ErrSourceKeySemanticConflict) {
+				t.Fatalf("同 key 语义冲突必须在对齐前响亮失败: %v", err)
+			}
+			if strings.Contains(err.Error(), sourceKey) {
+				t.Fatal("错误不得泄露 sourceKey")
+			}
+		})
+	}
+}
+
+func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
+	ledger := textLedger(t, "old")
+	invalid := strings.Repeat("A", 64)
+	ledger[0].SourceKey = &invalid
+	_, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, Ledger: ledger, Snapshot: textSnapshot("old"),
+	})
+	if !errors.Is(err, ErrInvalidLedger) {
+		t.Fatalf("非法持久化 sourceKey 必须按账本损坏拒绝: %v", err)
+	}
+}
+
 func TestReconcileStillRejectsDuplicateOrDescendingSequence(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -778,6 +865,7 @@ func appendSoakDrafts(ledger []store.Message, drafts []store.MessageDraft) []sto
 			Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
 			Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType,
 			CardState: draft.CardState, TsApproxMs: draft.TsApproxMs, Origin: draft.Origin,
+			SourceKey: draft.SourceKey,
 		})
 	}
 	return out
@@ -836,6 +924,10 @@ func snapshotLedger(t *testing.T, snapshot ...SnapshotMessage) []store.Message {
 			Direction: normalized.Direction, Kind: normalized.Kind, ContentHash: normalized.ContentHash,
 			Text: normalized.Text, BlobRef: normalized.BlobRef, CardType: normalized.CardType,
 			CardState: normalized.CardState, TsApproxMs: normalized.TsApproxMs, Origin: normalized.Origin,
+		}
+		if normalized.SourceKey != "" {
+			sourceKey := normalized.SourceKey
+			out[i].SourceKey = &sourceKey
 		}
 	}
 	return out

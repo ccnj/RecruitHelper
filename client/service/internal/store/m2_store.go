@@ -26,6 +26,7 @@ var (
 	ErrPatrolRoundNotFound         = errors.New("巡检轮不存在")
 	ErrCardTransitionRoundRequired = errors.New("卡片状态跃迁必须归属巡检轮")
 	ErrCardTransitionNotFound      = errors.New("卡片状态跃迁事实不存在")
+	ErrInvalidMessageSourceKey     = errors.New("消息 sourceKey 必须是 64 位小写 hex")
 	ErrDomainBusy                  = errors.New("串行域已有在途或 suspect 命令")
 	ErrLogicalDispatchNotFound     = errors.New("逻辑派发不存在")
 	ErrLineageConflict             = errors.New("逻辑派发链冲突")
@@ -1010,6 +1011,7 @@ type MessageDraft struct {
 	CardState   string
 	TsApproxMs  *int64
 	Origin      string
+	SourceKey   *string
 }
 
 type CardStateChange struct {
@@ -1041,8 +1043,24 @@ func validateMessageDrafts(messages []MessageDraft) error {
 		if m.Direction == "" || m.Kind == "" || m.ContentHash == "" || m.Origin == "" {
 			return errors.New("新消息 direction/kind/contentHash/origin 不能为空")
 		}
+		if m.SourceKey != nil && !validMessageSourceKey(*m.SourceKey) {
+			return ErrInvalidMessageSourceKey
+		}
 	}
 	return nil
+}
+
+func validMessageSourceKey(sourceKey string) bool {
+	if len(sourceKey) != 64 {
+		return false
+	}
+	for i := 0; i < len(sourceKey); i++ {
+		ch := sourceKey[i]
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // ApplyConversationChanges 原子应用对齐算法的输出。对齐本身在上层纯函数完成;
@@ -1131,6 +1149,7 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 				Seq: seq, Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
 				Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType, CardState: draft.CardState,
 				TsApproxMs: draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
+				SourceKey: draft.SourceKey,
 			}
 			if err := tx.Create(&m).Error; err != nil {
 				return err
@@ -1411,6 +1430,7 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 				Seq: seq, Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
 				Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType, CardState: draft.CardState,
 				TsApproxMs: draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
+				SourceKey: draft.SourceKey,
 			}
 			if err := tx.Create(&m).Error; err != nil {
 				return err

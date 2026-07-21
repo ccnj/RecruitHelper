@@ -27,6 +27,7 @@ var (
 	ErrContentHashMismatch  = errors.New("快照 contentHash 与脑侧规范化结果不一致")
 	ErrCardIdentityRequired = errors.New("卡片缺少身份哈希或身份材料")
 	ErrInvalidCardState     = errors.New("非法卡片状态")
+	ErrInvalidSourceKey     = errors.New("非法消息 sourceKey")
 )
 
 // SnapshotMessage is the neutral seam consumed by the ledger algorithm.
@@ -45,6 +46,7 @@ type SnapshotMessage struct {
 	CardState    string
 	TsApproxMs   *int64
 	Origin       string
+	SourceKey    string
 }
 
 // NormalizedMessage is deterministic input for matching and store writes.
@@ -58,6 +60,7 @@ type NormalizedMessage struct {
 	CardState   string
 	TsApproxMs  *int64
 	Origin      string
+	SourceKey   string
 }
 
 // NormalizeText is the single text rule shared by hashes and list previews:
@@ -92,6 +95,9 @@ func NormalizeMessage(in SnapshotMessage) (NormalizedMessage, error) {
 	}
 	if origin != "external" && origin != "self" {
 		return NormalizedMessage{}, fmt.Errorf("%w: %q", ErrInvalidOrigin, origin)
+	}
+	if in.SourceKey != "" && !validSourceKey(in.SourceKey) {
+		return NormalizedMessage{}, ErrInvalidSourceKey
 	}
 
 	var normalizedText *string
@@ -129,7 +135,7 @@ func NormalizeMessage(in SnapshotMessage) (NormalizedMessage, error) {
 	return NormalizedMessage{
 		Direction: in.Direction, Kind: in.Kind, Text: normalizedText, BlobRef: in.BlobRef,
 		ContentHash: hash, CardType: in.CardType, CardState: cardState,
-		TsApproxMs: in.TsApproxMs, Origin: origin,
+		TsApproxMs: in.TsApproxMs, Origin: origin, SourceKey: in.SourceKey,
 	}, nil
 }
 
@@ -196,6 +202,19 @@ func validCardState(state string) bool {
 	}
 }
 
+func validSourceKey(sourceKey string) bool {
+	if len(sourceKey) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(sourceKey); i++ {
+		ch := sourceKey[i]
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // CanonicalListPreview applies the same normalization/placeholders as message
 // identity, then truncates by Unicode code points rather than UTF-8 bytes.
 func CanonicalListPreview(kind, raw string) string {
@@ -241,9 +260,14 @@ func truncateRunes(value string, limit int) string {
 }
 
 func (m NormalizedMessage) draft() store.MessageDraft {
+	var sourceKey *string
+	if m.SourceKey != "" {
+		value := m.SourceKey
+		sourceKey = &value
+	}
 	return store.MessageDraft{
 		Direction: m.Direction, Kind: m.Kind, ContentHash: m.ContentHash, Text: m.Text,
 		BlobRef: m.BlobRef, CardType: m.CardType, CardState: m.CardState,
-		TsApproxMs: m.TsApproxMs, Origin: m.Origin,
+		TsApproxMs: m.TsApproxMs, Origin: m.Origin, SourceKey: sourceKey,
 	}
 }
