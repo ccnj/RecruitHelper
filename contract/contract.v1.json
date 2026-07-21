@@ -468,6 +468,7 @@
           "text": { "type": "string", "nullable": true, "maxBytes": 2048 },
           "blobRef": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 128 },
           "contentHash": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "sourceKey": { "type": "string", "optional": true, "minLength": 64, "maxLength": 64, "maxBytes": 64 },
           "cardType": { "type": "string", "enumRef": "enums.cardType", "optional": true, "nullable": true },
           "cardState": { "type": "string", "enumRef": "enums.cardState", "optional": true, "nullable": true },
           "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
@@ -844,7 +845,7 @@
       "argsSchema": "ChatReadThreadArgs", "dataSchema": "ChatReadThreadData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 30000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐"
+      "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐。稳定服务端消息可带 sourceKey=sha256(\"source-v1|\"+平台稳定消息身份) 的 64 字符小写 hex;原始平台身份不得出手"
     },
     "candidate.readCurrent": {
       "ver": 1, "class": "readonly", "batch": "X",

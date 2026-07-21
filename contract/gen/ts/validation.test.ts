@@ -128,6 +128,44 @@ expectValid(
     nextCursor: "opaque-next",
   }),
 );
+expectValid(
+  "thread sourceKey",
+  validatePrimitiveData("chat.readThread", 1, {
+    messages: [{
+      idx: 0,
+      direction: "in",
+      kind: "text",
+      text: "拒绝模板",
+      blobRef: null,
+      contentHash: "hash",
+      sourceKey: "a".repeat(64),
+    }],
+    reachedTop: false,
+    anchorMatched: true,
+    peer: null,
+    complete: true,
+  }),
+);
+expectIssue(
+  "thread sourceKey exact length",
+  validatePrimitiveData("chat.readThread", 1, {
+    messages: [{
+      idx: 0,
+      direction: "in",
+      kind: "text",
+      text: "拒绝模板",
+      blobRef: null,
+      contentHash: "hash",
+      sourceKey: "a".repeat(63),
+    }],
+    reachedTop: false,
+    anchorMatched: true,
+    peer: null,
+    complete: true,
+  }),
+  "$.messages[0].sourceKey",
+  "minLength",
+);
 expectIssue(
   "thread completion invariant",
   validatePrimitiveData("chat.readThread", 1, {

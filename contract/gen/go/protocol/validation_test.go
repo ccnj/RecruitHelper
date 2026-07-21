@@ -132,6 +132,12 @@ func TestValidateThreadPayloadLimitsAndNullable(t *testing.T) {
 	}
 	tooLong := json.RawMessage(strings.Replace(base, "%s", `"`+strings.Repeat("a", DefaultPayloadInlineMessageTextBytes+1)+`"`, 1))
 	assertValidationError(t, ValidatePrimitiveData(PrimChatReadThread, 1, tooLong), "$.messages[0].text", "maxBytes")
+	withSourceKey := json.RawMessage(`{"messages":[{"idx":0,"direction":"in","kind":"text","text":"拒绝模板","blobRef":null,"contentHash":"hash","sourceKey":"` + strings.Repeat("a", 64) + `"}],"reachedTop":false,"anchorMatched":true,"peer":null,"complete":true}`)
+	if err := ValidatePrimitiveData(PrimChatReadThread, 1, withSourceKey); err != nil {
+		t.Fatalf("合法 sourceKey 应通过:%v", err)
+	}
+	shortSourceKey := json.RawMessage(`{"messages":[{"idx":0,"direction":"in","kind":"text","text":"拒绝模板","blobRef":null,"contentHash":"hash","sourceKey":"` + strings.Repeat("a", 63) + `"}],"reachedTop":false,"anchorMatched":true,"peer":null,"complete":true}`)
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadThread, 1, shortSourceKey), "$.messages[0].sourceKey", "minLength")
 }
 
 func TestPaginationCursorConsistency(t *testing.T) {
