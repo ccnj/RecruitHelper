@@ -276,29 +276,73 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 }
 
 // classificationCorrectionPlan 只承认一个已被真机证明的狭窄形态：
-// 旧活动账本尾是被误归类的 system/system，完整页面快照在相同位置
-// 给出带稳定等值键的 in/text。一旦尾部方向/类型呈现该形态，
-// 其他证据不全就必须响亮停住，不得降格进入 deep/rebaseline。
+// 旧活动账本尾是被误归类的 system/system，完整页面快照可在账本之前
+// 携带若干历史上下文，但只能在快照唯一尾行给出带稳定等值键的
+// in/text。内部候选只用于发现歧义并停住，绝不授权修正中间历史行。
+// 一旦候选呈现该形态，其他证据不全就必须响亮停住，不得降格进入
+// deep/rebaseline。
 func classificationCorrectionPlan(
 	in ReconcileInput,
 	normalized []NormalizedMessage,
 	ledgerKeys, snapshotKeys []messageKey,
 ) (*Plan, bool, error) {
-	if len(in.Ledger) == 0 || len(in.Ledger) != len(normalized) {
+	if len(in.Ledger) == 0 {
 		return nil, false, nil
 	}
 	old := in.Ledger[len(in.Ledger)-1]
-	observed := normalized[len(normalized)-1]
 	last := len(in.Ledger) - 1
-	if !equalKeys(ledgerKeys[:last], snapshotKeys[:last]) ||
-		old.Direction != "system" || old.Kind != "system" || old.Origin != "external" || old.SourceKey != nil ||
-		observed.Direction != "in" || observed.Kind != "text" || observed.Origin != "external" ||
-		old.ContentHash != observed.ContentHash {
+	if old.Direction != "system" || old.Kind != "system" || old.Origin != "external" || old.SourceKey != nil {
 		return nil, false, nil
 	}
 	unsafe := func() (*Plan, bool, error) {
 		return nil, true, ErrUnsafeMessageClassificationCorrection
 	}
+
+	// 账本只有误分类尾行时没有可用于定位的前缀；此时只扫描实际呈现的
+	// correction skeleton，不从空前缀推导任意位置的“缺尾”。
+	prefix := ledgerKeys[:last]
+	candidates := make([]int, 0, 1)
+	missingExpectedTail := false
+	if len(prefix) == 0 {
+		for index := range normalized {
+			if classificationCorrectionSkeleton(old, normalized[index]) {
+				candidates = append(candidates, index)
+			}
+		}
+	} else {
+		for start := 0; start+len(prefix) <= len(snapshotKeys); start++ {
+			if !equalKeys(prefix, snapshotKeys[start:start+len(prefix)]) {
+				continue
+			}
+			observedIndex := start + len(prefix)
+			if observedIndex == len(normalized) {
+				missingExpectedTail = true
+				continue
+			}
+			if classificationCorrectionSkeleton(old, normalized[observedIndex]) {
+				candidates = append(candidates, observedIndex)
+				continue
+			}
+			// 前缀之后只剩唯一快照尾，但它既不是旧 system 尾，也不是
+			// correction skeleton：这是真机故障形态的“预期尾被替换”，不得重建基线。
+			if observedIndex == len(normalized)-1 &&
+				!equalMessageKey(ledgerKeys[last], snapshotKeys[observedIndex]) {
+				missingExpectedTail = true
+			}
+		}
+	}
+
+	if missingExpectedTail || len(candidates) > 1 {
+		return unsafe()
+	}
+	if len(candidates) == 0 {
+		return nil, false, nil
+	}
+	observedIndex := candidates[0]
+	if observedIndex != len(normalized)-1 {
+		return unsafe()
+	}
+	observed := normalized[observedIndex]
 	if in.Adopt || in.RoundID == "" || !in.ReachedTop || observed.SourceKey == "" ||
 		old.TsApproxMs == nil || observed.TsApproxMs == nil || *old.TsApproxMs != *observed.TsApproxMs ||
 		old.Text == nil || observed.Text == nil ||
@@ -314,6 +358,11 @@ func classificationCorrectionPlan(
 			Corrected: observed.draft(), SyncedAt: in.SyncedAt,
 		},
 	}, true, nil
+}
+
+func classificationCorrectionSkeleton(old store.Message, observed NormalizedMessage) bool {
+	return observed.Direction == "in" && observed.Kind == "text" && observed.Origin == "external" &&
+		old.ContentHash == observed.ContentHash
 }
 
 type messageKey struct {

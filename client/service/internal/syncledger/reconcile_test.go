@@ -225,7 +225,7 @@ func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
 }
 
 func TestReconcilePlansUniqueTailClassificationCorrection(t *testing.T) {
-	ledger, snapshot := classificationCorrectionFixture(t)
+	ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
 	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-correction", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
@@ -244,6 +244,73 @@ func TestReconcilePlansUniqueTailClassificationCorrection(t *testing.T) {
 		request.Corrected.Kind != "text" || request.Corrected.SourceKey == nil ||
 		*request.Corrected.SourceKey != snapshot[len(snapshot)-1].SourceKey {
 		t.Fatalf("分类修正事务参数错误: %+v", request)
+	}
+}
+
+func TestReconcileRejectsAmbiguousClassificationCorrectionCandidates(t *testing.T) {
+	ledger, aligned := classificationCorrectionFixture(t)
+	secondPrefix := aligned[0]
+	secondPrefix.SourceKey = strings.Repeat("c", 64)
+	secondCorrected := aligned[1]
+	secondCorrected.SourceKey = strings.Repeat("d", 64)
+	snapshot := append(append([]SnapshotMessage(nil), aligned...), secondPrefix, secondCorrected)
+
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-correction-ambiguous", Ledger: ledger,
+		Snapshot: snapshot, ReachedTop: true,
+	})
+	if !errors.Is(err, ErrUnsafeMessageClassificationCorrection) || plan != nil {
+		t.Fatalf("多个严格候选必须停止且不得选择尾部一个: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestReconcileRejectsMissingClassificationCorrectionTail(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]SnapshotMessage) []SnapshotMessage
+	}{
+		{
+			name: "预期尾缺失",
+			mutate: func(snapshot []SnapshotMessage) []SnapshotMessage {
+				return snapshot[:len(snapshot)-1]
+			},
+		},
+		{
+			name: "预期尾被无关消息替换",
+			mutate: func(snapshot []SnapshotMessage) []SnapshotMessage {
+				replacement := textSnapshot("这是另一条入站消息")[0]
+				replacement.SourceKey = strings.Repeat("e", 64)
+				snapshot[len(snapshot)-1] = replacement
+				return snapshot
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
+			plan, err := Reconcile(ReconcileInput{
+				Key: testConversationKey, RoundID: "round-correction-missing-tail", Ledger: ledger,
+				Snapshot: test.mutate(snapshot), ReachedTop: true,
+			})
+			if !errors.Is(err, ErrUnsafeMessageClassificationCorrection) || plan != nil {
+				t.Fatalf("前缀已定位但预期尾缺失/替换必须停止: plan=%+v err=%v", plan, err)
+			}
+		})
+	}
+}
+
+func TestReconcileRejectsUniqueClassificationCorrectionCandidateBeforeSnapshotTail(t *testing.T) {
+	ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
+	newMessage := textSnapshot("修正候选之后的另一条消息")[0]
+	newMessage.SourceKey = strings.Repeat("f", 64)
+	snapshot = append(snapshot, newMessage)
+
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-correction-not-tail", Ledger: ledger,
+		Snapshot: snapshot, ReachedTop: true,
+	})
+	if !errors.Is(err, ErrUnsafeMessageClassificationCorrection) || plan != nil {
+		t.Fatalf("唯一候选不在快照尾部时不得修正中间历史行: plan=%+v err=%v", plan, err)
 	}
 }
 
@@ -295,17 +362,18 @@ func TestReconcileClassificationCorrectionCandidateFailsClosed(t *testing.T) {
 }
 
 func TestReconcileDoesNotMisclassifyNormalMessageAfterSystemTail(t *testing.T) {
-	_, corrected := classificationCorrectionFixture(t)
-	legacy := corrected[len(corrected)-1]
+	ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
+	legacy := snapshot[len(snapshot)-1]
 	legacy.Direction = "system"
 	legacy.Kind = "system"
 	legacy.SourceKey = ""
-	ledger := snapshotLedger(t, legacy)
 	newMessage := textSnapshot("这是一条正常的新入站消息")[0]
 	newMessage.SourceKey = strings.Repeat("e", 64)
+	snapshot[len(snapshot)-1] = legacy
+	snapshot = append(snapshot, newMessage)
 	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-normal-append", Ledger: ledger,
-		Snapshot: []SnapshotMessage{legacy, newMessage}, ReachedTop: true,
+		Snapshot: snapshot, ReachedTop: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1017,7 +1085,9 @@ func classificationCorrectionFixture(t *testing.T) ([]store.Message, []SnapshotM
 	t.Helper()
 	prefixKey := strings.Repeat("a", 64)
 	correctedKey := strings.Repeat("b", 64)
-	prefix := textSnapshot("历史消息")[0]
+	prefix := textSnapshot("你好")[0]
+	prefix.Direction = "out"
+	prefix.Origin = "self"
 	prefix.SourceKey = prefixKey
 	timestamp := int64(1_753_146_000_000)
 	text := "我暂时不考虑，祝你早日找到合适的人"
@@ -1028,7 +1098,29 @@ func classificationCorrectionFixture(t *testing.T) ([]store.Message, []SnapshotM
 	corrected.Direction = "in"
 	corrected.Kind = "text"
 	corrected.SourceKey = correctedKey
-	return snapshotLedger(t, prefix, legacy), []SnapshotMessage{prefix, corrected}
+	ledger := snapshotLedger(t, prefix, legacy)
+	// 旧招呼行没有 sourceKey，页面快照可以带后来可见的稳定身份；
+	// 这沿用既有 equalMessageKey 对单边缺键的对齐语义。
+	ledger[0].SourceKey = nil
+	return ledger, []SnapshotMessage{prefix, corrected}
+}
+
+func classificationCorrectionWithLeadingHistoryFixture(t *testing.T) ([]store.Message, []SnapshotMessage) {
+	t.Helper()
+	ledger, aligned := classificationCorrectionFixture(t)
+	firstText := "平台历史系统消息一"
+	secondText := "平台历史系统消息二"
+	leading := []SnapshotMessage{
+		{
+			Direction: "system", Kind: "system", Text: &firstText, Origin: "external",
+			SourceKey: strings.Repeat("c", 64),
+		},
+		{
+			Direction: "system", Kind: "system", Text: &secondText, Origin: "external",
+			SourceKey: strings.Repeat("d", 64),
+		},
+	}
+	return ledger, append(leading, aligned...)
 }
 
 func textLedger(t *testing.T, values ...string) []store.Message {
