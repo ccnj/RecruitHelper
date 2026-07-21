@@ -17,6 +17,7 @@ var (
 type PlanRepository interface {
 	ApplyConversationChanges(store.ApplyConversationChangesRequest) (*store.ApplyConversationChangesResult, error)
 	RebuildConversationBaseline(store.RebuildConversationBaselineRequest) (*store.RebuildConversationBaselineResult, error)
+	CorrectMessageClassification(store.CorrectMessageClassificationRequest) (*store.CorrectMessageClassificationResult, error)
 }
 
 type AppliedPlan struct {
@@ -35,8 +36,26 @@ func ApplyPlan(repo PlanRepository, plan *Plan) (*AppliedPlan, error) {
 	if plan.Decision == DecisionNeedDeep {
 		return nil, ErrPlanNotExecutable
 	}
+	if plan.Decision == DecisionClassificationCorrection {
+		if plan.Apply != nil || plan.Rebaseline != nil || plan.Correction == nil ||
+			len(plan.EventProjection) != 0 || len(plan.CardTransitions) != 0 || len(plan.Audits) != 0 {
+			return nil, ErrInvalidPlan
+		}
+		result, err := repo.CorrectMessageClassification(*plan.Correction)
+		if err != nil {
+			return nil, err
+		}
+		inserted := []store.Message(nil)
+		if !result.AlreadyApplied {
+			inserted = []store.Message{result.Corrected}
+		}
+		return &AppliedPlan{
+			Decision: plan.Decision, Inserted: inserted, TailSeq: result.TailSeq,
+			AdoptedBoundarySeq: result.AdoptedBoundarySeq,
+		}, nil
+	}
 	if plan.Decision == DecisionAuditedRebaseline {
-		if plan.Apply != nil || plan.Rebaseline == nil || len(plan.EventProjection) != 0 {
+		if plan.Apply != nil || plan.Rebaseline == nil || plan.Correction != nil || len(plan.EventProjection) != 0 {
 			return nil, ErrInvalidPlan
 		}
 		result, err := repo.RebuildConversationBaseline(*plan.Rebaseline)
@@ -49,7 +68,7 @@ func ApplyPlan(repo PlanRepository, plan *Plan) (*AppliedPlan, error) {
 			HistoricalThroughSeq: result.HistoricalThroughSeq,
 		}, nil
 	}
-	if plan.Apply == nil || plan.Rebaseline != nil {
+	if plan.Apply == nil || plan.Rebaseline != nil || plan.Correction != nil {
 		return nil, ErrInvalidPlan
 	}
 	result, err := repo.ApplyConversationChanges(*plan.Apply)

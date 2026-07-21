@@ -224,6 +224,114 @@ func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
 	}
 }
 
+func TestReconcilePlansUniqueTailClassificationCorrection(t *testing.T) {
+	ledger, snapshot := classificationCorrectionFixture(t)
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-correction", Ledger: ledger,
+		Snapshot: snapshot, ReachedTop: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Decision != DecisionClassificationCorrection || plan.Correction == nil ||
+		plan.Apply != nil || plan.Rebaseline != nil || len(plan.EventProjection) != 0 ||
+		len(plan.CardTransitions) != 0 || len(plan.Audits) != 0 {
+		t.Fatalf("唯一尾分类修正必须生成专用零投影计划: %+v", plan)
+	}
+	request := plan.Correction
+	if request.ExpectedTailSeq != ledger[len(ledger)-1].Seq || request.OldSeq != ledger[len(ledger)-1].Seq ||
+		request.RoundID != "round-correction" || request.Corrected.Direction != "in" ||
+		request.Corrected.Kind != "text" || request.Corrected.SourceKey == nil ||
+		*request.Corrected.SourceKey != snapshot[len(snapshot)-1].SourceKey {
+		t.Fatalf("分类修正事务参数错误: %+v", request)
+	}
+}
+
+func TestReconcileClassificationCorrectionCandidateFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ReconcileInput)
+	}{
+		{name: "未读到顶部", mutate: func(in *ReconcileInput) { in.ReachedTop = false }},
+		{name: "缺少巡检轮", mutate: func(in *ReconcileInput) { in.RoundID = "" }},
+		{name: "修正行缺等值键", mutate: func(in *ReconcileInput) {
+			in.Snapshot[len(in.Snapshot)-1].SourceKey = ""
+		}},
+		{name: "旧时间缺失", mutate: func(in *ReconcileInput) {
+			in.Ledger[len(in.Ledger)-1].TsApproxMs = nil
+		}},
+		{name: "修正时间缺失", mutate: func(in *ReconcileInput) {
+			in.Snapshot[len(in.Snapshot)-1].TsApproxMs = nil
+		}},
+		{name: "时间不同", mutate: func(in *ReconcileInput) {
+			value := *in.Snapshot[len(in.Snapshot)-1].TsApproxMs + 1
+			in.Snapshot[len(in.Snapshot)-1].TsApproxMs = &value
+		}},
+		{name: "旧正文与哈希自相矛盾", mutate: func(in *ReconcileInput) {
+			value := "另一条旧正文"
+			in.Ledger[len(in.Ledger)-1].Text = &value
+		}},
+		{name: "旧行残留卡片元数据", mutate: func(in *ReconcileInput) {
+			in.Ledger[len(in.Ledger)-1].CardType = "unknownCard"
+		}},
+		{name: "修正行残留 blob", mutate: func(in *ReconcileInput) {
+			in.Snapshot[len(in.Snapshot)-1].BlobRef = "blob-should-not-exist"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ledger, snapshot := classificationCorrectionFixture(t)
+			input := ReconcileInput{
+				Key: testConversationKey, RoundID: "round-correction", Ledger: ledger,
+				Snapshot: snapshot, ReachedTop: true,
+			}
+			test.mutate(&input)
+			plan, err := Reconcile(input)
+			if !errors.Is(err, ErrUnsafeMessageClassificationCorrection) || plan != nil {
+				t.Fatalf("候选修正证据不全必须专用失败且不得进入 deep: plan=%+v err=%v", plan, err)
+			}
+		})
+	}
+}
+
+func TestReconcileDoesNotMisclassifyNormalMessageAfterSystemTail(t *testing.T) {
+	_, corrected := classificationCorrectionFixture(t)
+	legacy := corrected[len(corrected)-1]
+	legacy.Direction = "system"
+	legacy.Kind = "system"
+	legacy.SourceKey = ""
+	ledger := snapshotLedger(t, legacy)
+	newMessage := textSnapshot("这是一条正常的新入站消息")[0]
+	newMessage.SourceKey = strings.Repeat("e", 64)
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-normal-append", Ledger: ledger,
+		Snapshot: []SnapshotMessage{legacy, newMessage}, ReachedTop: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Decision != DecisionAppend || plan.Apply == nil || len(plan.Apply.NewMessages) != 1 ||
+		plan.Correction != nil || len(plan.EventProjection) != 1 {
+		t.Fatalf("system 尾后普通 in/text 必须仍走正常追加: %+v", plan)
+	}
+}
+
+func TestReconcileTreatsNonmatchingCorrectionSkeletonAsOrdinaryAlignment(t *testing.T) {
+	ledger, snapshot := classificationCorrectionFixture(t)
+	prefix := "不同的前缀"
+	snapshot[0] = textSnapshot(prefix)[0]
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-not-correction", Ledger: ledger,
+		Snapshot: snapshot, ReachedTop: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Decision != DecisionNeedDeep || plan.Correction != nil {
+		t.Fatalf("前缀不一致不是候选修正，应走普通对账: %+v", plan)
+	}
+}
+
 func TestReconcileStillRejectsDuplicateOrDescendingSequence(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -903,6 +1011,24 @@ func cardSnapshot(state string) SnapshotMessage {
 		Direction: "out", Kind: "card", CardType: "interviewInvite",
 		CardIdentity: "2026-07-20 15:00", CardState: state, Origin: "external",
 	}
+}
+
+func classificationCorrectionFixture(t *testing.T) ([]store.Message, []SnapshotMessage) {
+	t.Helper()
+	prefixKey := strings.Repeat("a", 64)
+	correctedKey := strings.Repeat("b", 64)
+	prefix := textSnapshot("历史消息")[0]
+	prefix.SourceKey = prefixKey
+	timestamp := int64(1_753_146_000_000)
+	text := "我暂时不考虑，祝你早日找到合适的人"
+	legacy := SnapshotMessage{
+		Direction: "system", Kind: "system", Text: &text, TsApproxMs: &timestamp, Origin: "external",
+	}
+	corrected := legacy
+	corrected.Direction = "in"
+	corrected.Kind = "text"
+	corrected.SourceKey = correctedKey
+	return snapshotLedger(t, prefix, legacy), []SnapshotMessage{prefix, corrected}
 }
 
 func textLedger(t *testing.T, values ...string) []store.Message {

@@ -9,23 +9,25 @@ import (
 )
 
 var (
-	ErrInvalidConversationKey    = errors.New("会话正式键不完整")
-	ErrInvalidLedger             = errors.New("持久化会话账本无效")
-	ErrAdoptionHasLedger         = errors.New("首次收编时账本必须为空")
-	ErrAdoptionSnapshotEmpty     = errors.New("首次收编快照不能为空")
-	ErrAnchorContractMismatch    = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
-	ErrSourceKeySemanticConflict = errors.New("相同 sourceKey 的消息方向或正文哈希冲突")
+	ErrInvalidConversationKey                = errors.New("会话正式键不完整")
+	ErrInvalidLedger                         = errors.New("持久化会话账本无效")
+	ErrAdoptionHasLedger                     = errors.New("首次收编时账本必须为空")
+	ErrAdoptionSnapshotEmpty                 = errors.New("首次收编快照不能为空")
+	ErrAnchorContractMismatch                = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
+	ErrSourceKeySemanticConflict             = errors.New("相同 sourceKey 的消息方向或正文哈希冲突")
+	ErrUnsafeMessageClassificationCorrection = errors.New("发现可能的消息分类修正，但缺少完整唯一证据")
 )
 
 type Decision string
 
 const (
-	DecisionFirstAdoption     Decision = "firstAdoption"
-	DecisionAppend            Decision = "append"
-	DecisionNoChange          Decision = "noChange"
-	DecisionStaleSnapshot     Decision = "staleSnapshot"
-	DecisionNeedDeep          Decision = "needDeep"
-	DecisionAuditedRebaseline Decision = "auditedRebaseline"
+	DecisionFirstAdoption            Decision = "firstAdoption"
+	DecisionAppend                   Decision = "append"
+	DecisionNoChange                 Decision = "noChange"
+	DecisionStaleSnapshot            Decision = "staleSnapshot"
+	DecisionNeedDeep                 Decision = "needDeep"
+	DecisionAuditedRebaseline        Decision = "auditedRebaseline"
+	DecisionClassificationCorrection Decision = "classificationCorrection"
 )
 
 // ReconcileInput contains only brain state and a bounded, chronological hand
@@ -61,6 +63,7 @@ type Plan struct {
 	Decision             Decision
 	Apply                *store.ApplyConversationChangesRequest
 	Rebaseline           *store.RebuildConversationBaselineRequest
+	Correction           *store.CorrectMessageClassificationRequest
 	EventProjection      []store.MessageDraft
 	CardTransitions      []CardTransition
 	Audits               []store.AuditEntry
@@ -104,6 +107,11 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 	snapshotKeys := keysFromNormalized(normalized)
 	if err := validateSourceKeySemantics(ledgerKeys, snapshotKeys); err != nil {
 		return nil, err
+	}
+	if correction, detected, err := classificationCorrectionPlan(in, normalized, ledgerKeys, snapshotKeys); err != nil {
+		return nil, err
+	} else if detected {
+		return correction, nil
 	}
 	if in.AnchorMatched {
 		anchorStart := len(ledgerKeys) - 5
@@ -265,6 +273,47 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 				tail, len(drafts), historicalThrough, in.ReachedTop, in.AnchorMatched))},
 		HistoricalThroughSeq: historicalThrough,
 	}, nil
+}
+
+// classificationCorrectionPlan 只承认一个已被真机证明的狭窄形态：
+// 旧活动账本尾是被误归类的 system/system，完整页面快照在相同位置
+// 给出带稳定等值键的 in/text。一旦尾部方向/类型呈现该形态，
+// 其他证据不全就必须响亮停住，不得降格进入 deep/rebaseline。
+func classificationCorrectionPlan(
+	in ReconcileInput,
+	normalized []NormalizedMessage,
+	ledgerKeys, snapshotKeys []messageKey,
+) (*Plan, bool, error) {
+	if len(in.Ledger) == 0 || len(in.Ledger) != len(normalized) {
+		return nil, false, nil
+	}
+	old := in.Ledger[len(in.Ledger)-1]
+	observed := normalized[len(normalized)-1]
+	last := len(in.Ledger) - 1
+	if !equalKeys(ledgerKeys[:last], snapshotKeys[:last]) ||
+		old.Direction != "system" || old.Kind != "system" || old.Origin != "external" || old.SourceKey != nil ||
+		observed.Direction != "in" || observed.Kind != "text" || observed.Origin != "external" ||
+		old.ContentHash != observed.ContentHash {
+		return nil, false, nil
+	}
+	unsafe := func() (*Plan, bool, error) {
+		return nil, true, ErrUnsafeMessageClassificationCorrection
+	}
+	if in.Adopt || in.RoundID == "" || !in.ReachedTop || observed.SourceKey == "" ||
+		old.TsApproxMs == nil || observed.TsApproxMs == nil || *old.TsApproxMs != *observed.TsApproxMs ||
+		old.Text == nil || observed.Text == nil ||
+		NormalizeText(*old.Text) == "" || NormalizeText(*old.Text) != NormalizeText(*observed.Text) ||
+		old.BlobRef != "" || old.CardType != "" || old.CardState != "" ||
+		observed.BlobRef != "" || observed.CardType != "" || observed.CardState != "" {
+		return unsafe()
+	}
+	return &Plan{
+		Decision: DecisionClassificationCorrection,
+		Correction: &store.CorrectMessageClassificationRequest{
+			Key: in.Key, RoundID: in.RoundID, ExpectedTailSeq: old.Seq, OldSeq: old.Seq,
+			Corrected: observed.draft(), SyncedAt: in.SyncedAt,
+		},
+	}, true, nil
 }
 
 type messageKey struct {

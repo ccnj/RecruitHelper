@@ -15,14 +15,15 @@ import (
 )
 
 type roundActor struct {
-	manager    *Manager
-	account    *store.Account
-	hand       HandState
-	roundID    string
-	trigger    string
-	now        time.Time
-	ensureUsed bool
-	projection []ConversationProjection
+	manager                 *Manager
+	account                 *store.Account
+	hand                    HandState
+	roundID                 string
+	trigger                 string
+	now                     time.Time
+	ensureUsed              bool
+	classificationCorrected bool
+	projection              []ConversationProjection
 }
 
 type threadSnapshot struct {
@@ -166,6 +167,9 @@ func (a *roundActor) execute(ctx context.Context) error {
 		if err != nil {
 			a.handleCommandFailure(err)
 			return err
+		}
+		if a.classificationCorrected {
+			return nil
 		}
 	}
 	return a.processM5Trial(ctx)
@@ -511,8 +515,11 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		Key: key, Messages: append([]store.MessageDraft(nil), plan.EventProjection...),
 		CardTransitions: append([]syncledger.CardTransition(nil), plan.CardTransitions...),
 	}
+	if plan.Decision == syncledger.DecisionClassificationCorrection && plan.Correction != nil {
+		plan.Correction.PauseReason = PauseUserRequested
+	}
 	if _, err := syncledger.ApplyPlan(a.manager.store, plan); err != nil {
-		return ConversationProjection{Key: key}, err
+		return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
 	}
 	if plan.Decision != syncledger.DecisionAuditedRebaseline {
 		for i := range plan.Audits {
@@ -525,22 +532,35 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 			}
 		}
 	}
+	if plan.Decision == syncledger.DecisionClassificationCorrection {
+		a.classificationCorrected = true
+	}
 	return projection, nil
 }
 
 func (a *roundActor) convergeReconcileFailure(key store.ConversationKey, reconcileErr error) error {
-	if !errors.Is(reconcileErr, syncledger.ErrSourceKeySemanticConflict) {
+	unsafeCorrection := errors.Is(reconcileErr, syncledger.ErrUnsafeMessageClassificationCorrection) ||
+		errors.Is(reconcileErr, store.ErrMessageClassificationCorrectionUnsafe)
+	sourceIdentityConflict := errors.Is(reconcileErr, syncledger.ErrSourceKeySemanticConflict) ||
+		errors.Is(reconcileErr, store.ErrMessageSourceKeyConflict)
+	if !unsafeCorrection && !sourceIdentityConflict {
 		return reconcileErr
 	}
-	// A stable identity that changes direction or body is not a retryable page
-	// read failure. Stop the account actor before recording the diagnostic so a
-	// later audit write failure still cannot produce unbounded automatic reads.
+	// Stable-identity conflicts and incomplete correction evidence are not
+	// retryable page-read failures. Stop the account actor before recording the
+	// diagnostic so a later audit failure still cannot cause automatic rereads.
 	pauseErr := a.manager.pauseAccount(a.key(), PauseHandManualReview, a.manager.now())
+	category := "conversation_source_identity_conflict"
+	detail := "稳定消息等值键的方向或正文哈希冲突，已暂停账号等待人工处理"
+	if unsafeCorrection {
+		category = "conversation_classification_correction_unsafe"
+		detail = "候选修正缺少完整唯一证据，已暂停账号等待人工处理"
+	}
 	auditErr := a.manager.store.AppendAudit(&store.AuditEntry{
-		At: a.manager.now(), Category: "conversation_source_identity_conflict",
+		At: a.manager.now(), Category: category,
 		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
 		RoundID: a.roundID,
-		Detail:  "稳定消息等值键的方向或正文哈希冲突，已暂停账号等待人工处理",
+		Detail:  detail,
 	})
 	return errors.Join(reconcileErr, pauseErr, auditErr)
 }
