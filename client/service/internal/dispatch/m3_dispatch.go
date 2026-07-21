@@ -21,12 +21,15 @@ const (
 )
 
 type SendMessageRequest struct {
-	IntentID         string
-	PreviousIntentID string
-	Platform         string
-	AccountRef       string
-	ConversationRef  string
-	Text             string
+	IntentID          string
+	PreviousIntentID  string
+	AutomaticActionID string
+	ExpectedSession   string
+	ExpectedBootID    string
+	Platform          string
+	AccountRef        string
+	ConversationRef   string
+	Text              string
 }
 
 type SendMessageReceipt struct {
@@ -41,17 +44,30 @@ type SendMessageReceipt struct {
 }
 
 // SendMessage 是 chat.sendMessage 唯一产品入口。通用 /admin/cmd 和
-// DispatchStructured 都无法铸造 Batch X effectful。IntentID 由调用方在一次
-// 真人确认里产生，HTTP 重试必须复用；脑用它确定性派生 idemKey。
+// DispatchStructured 都无法铸造 Batch X effectful。调用方必须提供
+// 已持久化的业务源：M3 真人意图或 M5 CommunicationAction 的确定性 ID。
+// 重试只复用该 ID，脑从它确定性派生 idemKey。
 func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, error) {
 	req.IntentID = strings.TrimSpace(req.IntentID)
 	req.PreviousIntentID = strings.TrimSpace(req.PreviousIntentID)
+	req.AutomaticActionID = strings.TrimSpace(req.AutomaticActionID)
+	req.ExpectedSession = strings.TrimSpace(req.ExpectedSession)
+	req.ExpectedBootID = strings.TrimSpace(req.ExpectedBootID)
 	req.Platform = strings.TrimSpace(req.Platform)
 	req.AccountRef = strings.TrimSpace(req.AccountRef)
 	req.ConversationRef = strings.TrimSpace(req.ConversationRef)
 	if req.IntentID == "" || utf8.RuneCountInString(req.IntentID) > maxIntentIDRunes ||
 		req.Platform == "" || req.AccountRef == "" || req.ConversationRef == "" {
 		return nil, errors.New("缺少有效的 intentId/账号/会话标识")
+	}
+	if (req.ExpectedSession == "") != (req.ExpectedBootID == "") {
+		return nil, errors.New("expected session/boot 必须成对提供")
+	}
+	if req.AutomaticActionID != "" {
+		expectedIntentID, deriveErr := store.M5AutomaticIntentID(req.AutomaticActionID)
+		if deriveErr != nil || req.IntentID != expectedIntentID {
+			return nil, store.ErrCommunicationActionInvalid
+		}
 	}
 	actualText := req.Text
 	if strings.TrimSpace(actualText) == "" {
@@ -77,6 +93,11 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 			existing.Primitive != protocol.PrimChatSendMessage || existing.TargetRef != req.ConversationRef ||
 			existing.PayloadHash != payloadHash {
 			return nil, store.ErrEffectIntentConflict
+		}
+		if req.AutomaticActionID != "" {
+			if err := d.st.ValidateM5AutomaticIntentLink(req.AutomaticActionID, req.IntentID); err != nil {
+				return nil, err
+			}
 		}
 		return d.sendReceipt(existing, false)
 	}
@@ -115,6 +136,9 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 	session, bootID, online := d.sender.HandSession(preparation.Account.BoundHandID)
 	if !online {
 		return nil, ErrHandOffline
+	}
+	if req.ExpectedSession != "" && (session != req.ExpectedSession || bootID != req.ExpectedBootID) {
+		return nil, ErrStaleSession
 	}
 	if preparation.Account.IdentityState != store.IdentityVerified ||
 		preparation.Account.IdentitySession != session || preparation.Account.IdentityBootID != bootID {
@@ -156,7 +180,7 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 		},
 	}, dispatchOptions{
 		effectIntent: &intent, expectedTailSeq: preparation.Conversation.LastMessageSeq,
-		previousIntentID: req.PreviousIntentID,
+		previousIntentID: req.PreviousIntentID, automaticActionID: req.AutomaticActionID,
 	})
 	if dispatchErr != nil {
 		var conflict *store.EffectIntentCASConflictError

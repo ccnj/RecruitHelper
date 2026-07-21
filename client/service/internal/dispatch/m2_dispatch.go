@@ -32,6 +32,7 @@ type dispatchOptions struct {
 	effectIntent           *store.EffectIntent
 	expectedTailSeq        int64
 	previousIntentID       string
+	automaticActionID      string
 	verificationFor        string
 	resumeCaptureProfileID string
 }
@@ -225,7 +226,8 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		case protocol.PrimChatSendMessage:
 			createdResult, createErr = d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
 				Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
-				PreviousIntentID: opts.previousIntentID, Now: time.Now(),
+				PreviousIntentID: opts.previousIntentID, AutomaticActionID: opts.automaticActionID,
+				Now: time.Now(),
 			})
 		default:
 			createErr = fmt.Errorf("真实副作用原语没有账本入口 %q", opts.effectIntent.Primitive)

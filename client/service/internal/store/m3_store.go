@@ -110,11 +110,12 @@ func (s *Store) PrepareSend(key ConversationKey, tailLimit int) (*SendPreparatio
 }
 
 type CreateEffectIntentRequest struct {
-	Intent           EffectIntent
-	Command          CmdRecord
-	ExpectedTailSeq  int64
-	PreviousIntentID string
-	Now              time.Time
+	Intent            EffectIntent
+	Command           CmdRecord
+	ExpectedTailSeq   int64
+	PreviousIntentID  string
+	AutomaticActionID string
+	Now               time.Time
 }
 
 type CreateEffectIntentResult struct {
@@ -161,6 +162,11 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 		if err == nil {
 			if !sameEffectIntentMaterial(existing, i) {
 				return ErrEffectIntentConflict
+			}
+			if req.AutomaticActionID != "" {
+				if err := validateM5AutomaticIntentLinkTx(tx, req.AutomaticActionID, existing); err != nil {
+					return err
+				}
 			}
 			var existingCmd CmdRecord
 			if err := tx.First(&existingCmd, "msg_id = ?", existing.RootMsgID).Error; err != nil {
@@ -237,6 +243,11 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 		}
 		if busy != 0 {
 			return ErrDomainBusy
+		}
+		if req.AutomaticActionID != "" {
+			if err := bindM5AutomaticActionTx(tx, req.AutomaticActionID, &i, &c, req.Now); err != nil {
+				return err
+			}
 		}
 
 		if err := tx.Create(&i).Error; err != nil {
@@ -859,7 +870,7 @@ func (s *Store) AbortEffectBeforeSend(ref, errorCode, reason string, at time.Tim
 		if res.RowsAffected != 1 {
 			return ErrEffectIntentNotFound
 		}
-		return nil
+		return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, at)
 	})
 }
 
@@ -896,7 +907,7 @@ func (s *Store) RejectEffectCommand(ref, errorCode, reason string, at time.Time)
 		if res.RowsAffected != 1 {
 			return ErrEffectIntentNotFound
 		}
-		return nil
+		return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, at)
 	})
 }
 
@@ -1046,7 +1057,7 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 			if appended.RetractedAt != nil {
 				return fmt.Errorf("%w: 已撤回的出站事实不得当作验证成功", ErrRecoveryStateConflict)
 			}
-			return nil
+			return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, req.At)
 		}
 		if cmd.Status != CmdVerifying && cmd.Status != CmdPendingReconcile && cmd.Status != CmdSuspect {
 			return ErrRecoveryStateConflict
@@ -1077,7 +1088,10 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 		intent.ResultMessageSeq = &appended.Seq
 		intent.SuspectReason = req.ResolutionReason
 		intent.ResolvedAt = &req.At
-		return tx.Save(&intent).Error
+		if err := tx.Save(&intent).Error; err != nil {
+			return err
+		}
+		return applyM5AutomaticEffectStatusTx(tx, &intent, req.At)
 	})
 	if err != nil {
 		return nil, err
@@ -1130,7 +1144,13 @@ func (s *Store) RecordVerificationMiss(ref, reason string, nextAt, reviewAfter, 
 		if suspect {
 			updates["status"] = EffectIntentSuspect
 		}
-		return tx.Model(&EffectIntent{}).Where("intent_id = ?", cmd.IntentID).Updates(updates).Error
+		if err := tx.Model(&EffectIntent{}).Where("intent_id = ?", cmd.IntentID).Updates(updates).Error; err != nil {
+			return err
+		}
+		if suspect {
+			return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, at)
+		}
+		return nil
 	})
 	return suspect, err
 }
@@ -1167,7 +1187,7 @@ func (s *Store) MarkEffectSuspect(ref, reason string, at time.Time) error {
 		if res.RowsAffected != 1 {
 			return ErrEffectIntentNotFound
 		}
-		return nil
+		return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, at)
 	})
 }
 
@@ -1236,6 +1256,9 @@ func (s *Store) ResolveSuspectVerdict(req ResolveSuspectVerdictRequest) error {
 		intent.SuspectReason = cmd.SuspectReason
 		intent.ResolvedAt = &req.At
 		if err := tx.Save(&intent).Error; err != nil {
+			return err
+		}
+		if err := applyM5AutomaticEffectStatusTx(tx, &intent, req.At); err != nil {
 			return err
 		}
 		return tx.Save(&cmd).Error

@@ -34,8 +34,8 @@ type m5TurnMaterial struct {
 }
 
 // processM5Trial runs only after the account's M2 reconciliation has committed.
-// It may read or call an injected advice executor, but batch 3 never creates an
-// EffectIntent, CmdRecord, or hand command.
+// Provider calls and hand waits release the manager's short actor lock; every
+// authorization boundary is rechecked by the Store transaction that follows.
 func (a *roundActor) processM5Trial(ctx context.Context) error {
 	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
 	if err != nil || target == nil {
@@ -300,8 +300,15 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			if err := a.runM5ReplyAdvice(ctx, turn, material, facts, intent); err != nil {
 				return err
 			}
-		case store.DialogueTurnAdviceReady, store.DialogueTurnManualRequired,
-			store.DialogueTurnSuperseded, store.DialogueTurnDispatching, store.DialogueTurnCompleted:
+		case store.DialogueTurnAdviceReady:
+			if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {
+				// Batch 5 has not wired a real provider yet. Pure reducer tests may
+				// intentionally stop at the persisted action seam.
+				return nil
+			}
+			return a.dispatchM5Reply(ctx, turn)
+		case store.DialogueTurnManualRequired, store.DialogueTurnSuperseded,
+			store.DialogueTurnDispatching, store.DialogueTurnCompleted:
 			return nil
 		default:
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "turnStateUnknown", a.manager.now())
@@ -311,6 +318,84 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			return err
 		}
 		turn = *reloaded
+	}
+	return nil
+}
+
+func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTurn) error {
+	action, err := a.manager.store.CommunicationActionByTurn(turn.TurnID)
+	if err != nil {
+		return err
+	}
+	if action == nil || action.Kind != store.CommunicationActionReplyText ||
+		action.Status != store.CommunicationActionPlanned || action.EffectIntentID != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(
+			turn.TurnID, "automaticActionUnavailable", a.manager.now(),
+		)
+	}
+	profile, err := a.manager.store.CandidateProfileByID(turn.ProfileID)
+	if err != nil || profile == nil || profile.ConversationRef == nil ||
+		*profile.ConversationRef != turn.ConversationRef {
+		return a.manager.store.MarkM5AutomaticActionManualRequired(
+			action.ActionID, "automaticBindingUnavailable", a.manager.now(),
+		)
+	}
+	intentID, err := store.M5AutomaticIntentID(action.ActionID)
+	if err != nil {
+		return a.manager.store.MarkM5AutomaticActionManualRequired(
+			action.ActionID, "automaticIntentInvalid", a.manager.now(),
+		)
+	}
+	latest, err := a.manager.store.LatestEffectIntent(
+		profile.Platform, profile.AccountRef, turn.ConversationRef,
+	)
+	if err != nil {
+		return err
+	}
+	previousIntentID := ""
+	if latest != nil {
+		previousIntentID = latest.IntentID
+	}
+	if err := a.ensureDispatchAllowed(ctx); err != nil {
+		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
+			action.ActionID, "automaticDispatchNotAllowed", a.manager.now(),
+		); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return nil
+	}
+	runner := a.manager.runner.(AutomaticReplyRunner)
+	handle, err := runner.StartAutomaticReply(ctx, AutomaticReplyRequest{
+		ActionID: action.ActionID, IntentID: intentID, PreviousIntentID: previousIntentID,
+		ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+		Platform: profile.Platform, AccountRef: profile.AccountRef,
+		ConversationRef: turn.ConversationRef, Text: action.Text,
+	})
+	if err != nil || handle == nil {
+		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
+			action.ActionID, "automaticDispatchNotConstructed", a.manager.now(),
+		); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return nil
+	}
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		err = handle.Wait(ctx)
+	}()
+	if err != nil {
+		// A constructed effect is exclusively owned by the persistent recovery
+		// rail. Never turn a wait interruption into a second business intent.
+		return err
+	}
+	settled, err := a.manager.store.CommunicationActionByTurn(turn.TurnID)
+	if err != nil {
+		return err
+	}
+	if settled == nil || (settled.Status != store.CommunicationActionSent &&
+		settled.Status != store.CommunicationActionManualRequired) {
+		return store.ErrCommunicationActionConflict
 	}
 	return nil
 }

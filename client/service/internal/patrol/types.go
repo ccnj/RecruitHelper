@@ -95,7 +95,30 @@ type ResumeCaptureRunner interface {
 	StartResumeCapture(context.Context, ResumeCaptureRequest) (ResumeCaptureHandle, error)
 }
 
-// AdviceExecutor is the batch-3 seam for deterministic communication tests.
+// AutomaticReplyRequest is the only M5 bridge into the existing
+// chat.sendMessage safety rail. IntentID is deterministically derived from
+// ActionID; PreviousIntentID preserves the conversation-head CAS.
+type AutomaticReplyRequest struct {
+	ActionID         string
+	IntentID         string
+	PreviousIntentID string
+	ExpectedSession  string
+	ExpectedBootID   string
+	Platform         string
+	AccountRef       string
+	ConversationRef  string
+	Text             string
+}
+
+type AutomaticReplyHandle interface {
+	Wait(context.Context) error
+}
+
+type AutomaticReplyRunner interface {
+	StartAutomaticReply(context.Context, AutomaticReplyRequest) (AutomaticReplyHandle, error)
+}
+
+// AdviceExecutor is the provider seam for deterministic communication tests.
 // Production deliberately does not wire a real HTTP executor until batch 5;
 // when wired, each call still goes through the persisted AIInvocation gate.
 type AdviceExecutor interface {

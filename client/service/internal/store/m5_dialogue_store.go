@@ -1,11 +1,13 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/contract/gen/go/protocol"
 
 	"gorm.io/gorm"
 )
@@ -1165,4 +1167,340 @@ func (s *Store) CommunicationActionByTurn(turnID string) (*CommunicationAction, 
 		return nil, err
 	}
 	return &action, nil
+}
+
+// bindM5AutomaticActionTx is the M5 intent-construction authorization point.
+// It runs inside CreateEffectIntentAndCmd's WAL/head transaction, so an action
+// can never become effectPending without the matching EffectIntent and Cmd.
+func bindM5AutomaticActionTx(
+	tx *gorm.DB,
+	actionID string,
+	intent *EffectIntent,
+	command *CmdRecord,
+	at time.Time,
+) error {
+	if tx == nil || intent == nil || command == nil || strings.TrimSpace(actionID) == "" {
+		return ErrCommunicationActionInvalid
+	}
+	expectedIntentID, err := M5AutomaticIntentID(actionID)
+	if err != nil || intent.IntentID != expectedIntentID || intent.Primitive != primitiveChatSendMessage ||
+		command.IntentID != intent.IntentID || command.Name != primitiveChatSendMessage {
+		return ErrCommunicationActionInvalid
+	}
+	var action CommunicationAction
+	if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCommunicationActionInvalid
+		}
+		return err
+	}
+	if action.Kind != CommunicationActionReplyText || action.Status != CommunicationActionPlanned ||
+		action.EffectIntentID != nil || strings.TrimSpace(action.Text) == "" ||
+		strings.TrimSpace(action.ContentHash) == "" || action.ContentHash != intent.SendFingerprint {
+		return ErrCommunicationActionConflict
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
+		return err
+	}
+	if turn.Status != DialogueTurnAdviceReady || turn.ConversationRef != intent.TargetRef {
+		return ErrDialogueTurnState
+	}
+	if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+		return err
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
+		return err
+	}
+	if profile.Platform != intent.Platform || profile.AccountRef != intent.AccountRef ||
+		profile.ConversationRef == nil || *profile.ConversationRef != intent.TargetRef {
+		return ErrDialogueTurnBinding
+	}
+	var args protocol.ChatSendMessageArgs
+	if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+		args.ConversationRef != turn.ConversationRef || args.Text != action.Text {
+		return ErrCommunicationActionConflict
+	}
+	intentID := intent.IntentID
+	updated := tx.Model(&CommunicationAction{}).
+		Where("action_id = ? AND status = ? AND effect_intent_id IS NULL", action.ActionID, CommunicationActionPlanned).
+		Updates(map[string]any{
+			"status": CommunicationActionEffectPending, "effect_intent_id": intentID,
+			"effect_started_at": at, "updated_at": at,
+		})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrCommunicationActionConflict
+	}
+	updated = tx.Model(&DialogueTurn{}).
+		Where("turn_id = ? AND status = ?", turn.TurnID, DialogueTurnAdviceReady).
+		Updates(map[string]any{"status": DialogueTurnDispatching, "updated_at": at})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrDialogueTurnConflict
+	}
+	return nil
+}
+
+func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent EffectIntent) error {
+	expectedIntentID, err := M5AutomaticIntentID(actionID)
+	if err != nil || expectedIntentID != intent.IntentID || intent.Primitive != primitiveChatSendMessage {
+		return ErrCommunicationActionInvalid
+	}
+	var action CommunicationAction
+	if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCommunicationActionInvalid
+		}
+		return err
+	}
+	if action.EffectIntentID == nil || *action.EffectIntentID != intent.IntentID ||
+		action.EffectStartedAt == nil || action.Kind != CommunicationActionReplyText ||
+		action.ContentHash != intent.SendFingerprint {
+		return ErrCommunicationActionConflict
+	}
+	switch action.Status {
+	case CommunicationActionEffectPending, CommunicationActionSent, CommunicationActionManualRequired:
+	default:
+		return ErrCommunicationActionConflict
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
+		return err
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
+		return err
+	}
+	if turn.ConversationRef != intent.TargetRef || profile.Platform != intent.Platform ||
+		profile.AccountRef != intent.AccountRef {
+		return ErrCommunicationActionConflict
+	}
+	return nil
+}
+
+func (s *Store) ValidateM5AutomaticIntentLink(actionID, intentID string) error {
+	if strings.TrimSpace(actionID) == "" || strings.TrimSpace(intentID) == "" {
+		return ErrCommunicationActionInvalid
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", intentID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrEffectIntentNotFound
+			}
+			return err
+		}
+		return validateM5AutomaticIntentLinkTx(tx, actionID, intent)
+	})
+}
+
+// MarkM5AutomaticActionManualRequired closes only a pre-WAL action. Once the
+// action is linked to an EffectIntent, the existing effect safety rail alone
+// owns its terminal outcome and this method deliberately becomes a no-op.
+func (s *Store) MarkM5AutomaticActionManualRequired(actionID, reason string, at time.Time) error {
+	if strings.TrimSpace(actionID) == "" || strings.TrimSpace(reason) == "" {
+		return ErrCommunicationActionInvalid
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var action CommunicationAction
+		if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCommunicationActionInvalid
+			}
+			return err
+		}
+		if action.EffectIntentID != nil || action.Status == CommunicationActionEffectPending ||
+			action.Status == CommunicationActionSent {
+			return nil
+		}
+		if action.Status == CommunicationActionManualRequired {
+			return nil
+		}
+		if action.Status != CommunicationActionPlanned {
+			return ErrCommunicationActionConflict
+		}
+		var turn DialogueTurn
+		if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
+			return err
+		}
+		return markDialogueTurnManualTx(tx, &turn, reason, at)
+	})
+}
+
+// applyM5AutomaticEffectStatusTx mirrors the authoritative EffectIntent
+// terminal into its optional M5 action. Callers already own the transaction
+// that writes Cmd, EffectIntent and (for success) the unique self Message.
+func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.Time) error {
+	if tx == nil || intent == nil || intent.IntentID == "" {
+		return ErrEffectIntentNotFound
+	}
+	var action CommunicationAction
+	err := tx.First(&action, "effect_intent_id = ?", intent.IntentID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateM5AutomaticIntentLinkTx(tx, action.ActionID, *intent); err != nil {
+		return err
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
+		return err
+	}
+	var selection M5TrialSelection
+	if err := tx.Where("profile_id = ?", turn.ProfileID).
+		Order("selected_at DESC, selection_id DESC").First(&selection).Error; err != nil {
+		return err
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	switch intent.Status {
+	case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
+		return nil
+	case EffectIntentOk, EffectIntentResolvedOk:
+		if intent.ResultMessageSeq == nil {
+			return ErrCommunicationActionConflict
+		}
+		var message Message
+		if err := tx.First(&message, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
+			return err
+		}
+		if message.RetractedAt != nil || message.Seq != *intent.ResultMessageSeq || message.Direction != "out" ||
+			message.ContentHash != action.ContentHash {
+			return ErrCommunicationActionConflict
+		}
+		switch turn.Status {
+		case DialogueTurnDispatching, DialogueTurnManualRequired, DialogueTurnCompleted:
+		default:
+			return ErrDialogueTurnState
+		}
+		switch selection.Status {
+		case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
+		default:
+			return ErrDialogueTurnState
+		}
+		sentAt := action.SentAt
+		if sentAt == nil {
+			sentAt = &at
+		}
+		updated := tx.Model(&CommunicationAction{}).
+			Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+			Updates(map[string]any{
+				"status": CommunicationActionSent, "failure_reason": "", "sent_at": sentAt,
+				"updated_at": at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationActionConflict
+		}
+		updated = tx.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+			Updates(map[string]any{
+				"status": DialogueTurnCompleted, "failure_reason": "", "updated_at": at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
+		}
+		endedAt := selection.EndedAt
+		if endedAt == nil || selection.Status != M5TrialSelectionCompleted {
+			endedAt = &at
+		}
+		updated = tx.Model(&M5TrialSelection{}).
+			Where("selection_id = ? AND status = ?", selection.SelectionID, selection.Status).
+			Updates(map[string]any{
+				"status": M5TrialSelectionCompleted, "active_slot": nil,
+				"reason": "automaticReplySentResidualManual", "ended_at": endedAt,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
+		}
+		return nil
+	case EffectIntentFailed, EffectIntentSuspect, EffectIntentResolvedFailed:
+		switch turn.Status {
+		case DialogueTurnDispatching, DialogueTurnManualRequired, DialogueTurnCompleted:
+		default:
+			return ErrDialogueTurnState
+		}
+		switch selection.Status {
+		case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
+		default:
+			return ErrDialogueTurnState
+		}
+		reason := "effectFailed"
+		if intent.Status == EffectIntentSuspect {
+			reason = "effectSuspect"
+		} else if intent.Status == EffectIntentResolvedFailed {
+			reason = "effectResolvedFailed"
+		}
+		updated := tx.Model(&CommunicationAction{}).
+			Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+			Updates(map[string]any{
+				"status": CommunicationActionManualRequired, "failure_reason": reason,
+				"updated_at": at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationActionConflict
+		}
+		updated = tx.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+			Updates(map[string]any{
+				"status": DialogueTurnManualRequired, "failure_reason": reason, "updated_at": at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
+		}
+		endedAt := selection.EndedAt
+		if endedAt == nil || selection.Status != M5TrialSelectionManualRequired {
+			endedAt = &at
+		}
+		updated = tx.Model(&M5TrialSelection{}).
+			Where("selection_id = ? AND status = ?", selection.SelectionID, selection.Status).
+			Updates(map[string]any{
+				"status": M5TrialSelectionManualRequired, "active_slot": nil,
+				"reason": reason, "ended_at": endedAt,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
+		}
+		return nil
+	default:
+		return ErrCommunicationActionConflict
+	}
+}
+
+func applyM5AutomaticEffectStatusByIDTx(tx *gorm.DB, intentID string, at time.Time) error {
+	var intent EffectIntent
+	if err := tx.First(&intent, "intent_id = ?", intentID).Error; err != nil {
+		return err
+	}
+	return applyM5AutomaticEffectStatusTx(tx, &intent, at)
 }

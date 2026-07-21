@@ -588,6 +588,9 @@ func (s *Store) ApplyResultMessage(
 			if err := tx.Save(&intent).Error; err != nil {
 				return err
 			}
+			if err := applyM5AutomaticEffectStatusTx(tx, &intent, effectAt); err != nil {
+				return err
+			}
 		}
 		if out.Replacement != nil {
 			return tx.Create(out.Replacement).Error

@@ -136,8 +136,8 @@ const (
 	EffectIntentResolvedFailed EffectIntentStatus = "resolvedFailed"
 )
 
-// EffectIntent 实现 §7.5 的脑账本闸。IntentID 由管理客户端在一次
-// 真人确认里生成并在 HTTP 重试中复用；IdemKey 由脑依据该 ID 确定性派生。
+// EffectIntent 实现 §7.5 的脑账本闸。IntentID 来自已持久化的业务源：
+// M3 真人确认或 M5 CommunicationAction；重试复用原 ID，IdemKey 由脑确定性派生。
 // PayloadHash/GuardsHash 防止同一 IntentID 被偷换文本或前置断言后重用。
 type EffectIntent struct {
 	IntentID    string             `gorm:"primaryKey"`

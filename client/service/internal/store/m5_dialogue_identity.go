@@ -51,3 +51,14 @@ func DialogueTurnIdentity(profileID string, lastOutbound Message, inbound []Mess
 	hexDigest := hex.EncodeToString(digest[:])
 	return hexDigest, "turn-" + hexDigest, nil
 }
+
+// M5AutomaticIntentID binds one persisted communication action to exactly one
+// chat.sendMessage intent across repeated patrols and brain restarts.
+func M5AutomaticIntentID(actionID string) (string, error) {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" {
+		return "", ErrCommunicationActionInvalid
+	}
+	digest := sha256.Sum256([]byte(actionID))
+	return "intent-" + hex.EncodeToString(digest[:]), nil
+}

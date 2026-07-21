@@ -99,6 +99,48 @@ func (h *resumeCaptureRunHandle) Wait(ctx context.Context) (json.RawMessage, err
 	return resumeCaptureResultData(logical.Leaf)
 }
 
+type automaticReplyRunHandle struct {
+	dispatcher *dispatch.Dispatcher
+	logicalID  string
+}
+
+func (r PatrolRunner) StartAutomaticReply(
+	ctx context.Context,
+	req patrol.AutomaticReplyRequest,
+) (patrol.AutomaticReplyHandle, error) {
+	if r.Dispatcher == nil {
+		return nil, errors.New("dispatcher 不能为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	receipt, dispatchErr := r.Dispatcher.SendMessage(dispatch.SendMessageRequest{
+		IntentID: req.IntentID, PreviousIntentID: req.PreviousIntentID,
+		AutomaticActionID: req.ActionID,
+		ExpectedSession:   req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
+		Platform: req.Platform, AccountRef: req.AccountRef,
+		ConversationRef: req.ConversationRef, Text: req.Text,
+	})
+	if receipt == nil || receipt.IntentID != req.IntentID || receipt.LogicalDispatchID == "" {
+		if dispatchErr == nil {
+			dispatchErr = store.ErrEffectIntentConflict
+		}
+		return nil, dispatchErr
+	}
+	// Once the WAL transaction exists, its persistent recovery rail owns the
+	// outcome. A socket error may already have moved it to verification; the
+	// actor waits on the same logical command instead of forging another intent.
+	return &automaticReplyRunHandle{dispatcher: r.Dispatcher, logicalID: receipt.LogicalDispatchID}, nil
+}
+
+func (h *automaticReplyRunHandle) Wait(ctx context.Context) error {
+	if h == nil || h.dispatcher == nil || h.logicalID == "" {
+		return errors.New("自动回复等待句柄无效")
+	}
+	_, err := h.dispatcher.WaitLogical(ctx, h.logicalID)
+	return err
+}
+
 func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	if leaf.ResultBody == "" {
 		code := protocol.ErrCodeCtxLostDuringExec
