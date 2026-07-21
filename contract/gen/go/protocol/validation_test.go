@@ -434,6 +434,84 @@ func TestM4CandidateAndGreetingSchemas(t *testing.T) {
 	assertValidationError(t, ValidateKindBody(KindCmd, inviteCommand), "$.name", "primitive")
 }
 
+func TestM5CandidateReadResumeSchemas(t *testing.T) {
+	command := json.RawMessage(`{"name":"candidate.readResume","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"conversationRef":"conv-1","platformUserRef":"user-1"},"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000}`)
+	if err := ValidateKindBody(KindCmd, command); err != nil {
+		t.Fatalf("合法 candidate.readResume 命令应通过:%v", err)
+	}
+	missingLease := json.RawMessage(`{"name":"candidate.readResume","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"conversationRef":"conv-1","platformUserRef":"user-1"},"deadline":1999999999999,"execBudgetMs":60000}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, missingLease), "$.leaseMs", "required")
+	withIdemKey := json.RawMessage(`{"name":"candidate.readResume","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"conversationRef":"conv-1","platformUserRef":"user-1"},"idemKey":"forbidden","deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, withIdemKey), "$.idemKey", "forbidden")
+	withGuards := json.RawMessage(`{"name":"candidate.readResume","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{"conversationRef":"conv-1","platformUserRef":"user-1"},"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000,"guards":{}}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, withGuards), "$.guards", "forbidden")
+
+	meta := Primitives[PrimCandidateReadResume]
+	wantPreconditions := []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"}
+	if meta.Ver != 1 || meta.Class != ClassIntrusive || meta.Batch != BatchX || meta.PlatformSideEffect != "none" ||
+		meta.ExecBudgetMs != 60000 || meta.DeadlineMs != 120000 || meta.LeaseMs != 30000 ||
+		meta.GuardsSchema != "" || meta.EvidenceSchema != "" || meta.VerificationPrimitive != "" ||
+		strings.Join(meta.Preconditions, "\x00") != strings.Join(wantPreconditions, "\x00") {
+		t.Fatalf("candidate.readResume metadata 漂移:%+v", meta)
+	}
+
+	valid := map[string]any{
+		"conversationRef": "conv-1", "platformUserRef": "user-1", "observedAt": int64(20),
+		"basic": []any{map[string]any{"label": "姓名", "value": ""}},
+		"expectations": []any{}, "selfEvaluation": "", "education": "本科", "workExperiences": "",
+	}
+	validRaw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePrimitiveData(PrimCandidateReadResume, 1, validRaw); err != nil {
+		t.Fatalf("合法五分区简历应通过:%v", err)
+	}
+	for _, field := range []string{"conversationRef", "platformUserRef", "observedAt", "basic", "expectations", "selfEvaluation", "education", "workExperiences"} {
+		missing := make(map[string]any, len(valid)-1)
+		for key, value := range valid {
+			if key != field {
+				missing[key] = value
+			}
+		}
+		raw, marshalErr := json.Marshal(missing)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, raw), "$."+field, "required")
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, json.RawMessage(`{"conversationRef":"conv-1","platformUserRef":"user-1","observedAt":-1,"basic":[],"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`)), "$.observedAt", "minimum")
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, json.RawMessage(`{"conversationRef":"conv-1","platformUserRef":"user-1","observedAt":"2026-07-21T00:00:00Z","basic":[],"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`)), "$.observedAt", "type")
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, json.RawMessage(`{"conversationRef":"conv-1","platformUserRef":"user-1","observedAt":20,"basic":[{"label":"","value":""}],"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`)), "$.basic[0].label", "minLength")
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, json.RawMessage(`{"conversationRef":"conv-1","platformUserRef":"user-1","observedAt":20,"basic":null,"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`)), "$.basic", "nullable")
+
+	boundary := map[string]any{
+		"conversationRef": "conv-1", "platformUserRef": "user-1", "observedAt": int64(20),
+		"basic": []any{}, "expectations": []any{}, "selfEvaluation": "", "education": "", "workExperiences": "",
+	}
+	baseRaw, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary["selfEvaluation"] = strings.Repeat("a", 65536-len(baseRaw))
+	limitRaw, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limitRaw) != 65536 {
+		t.Fatalf("边界 fixture 长度=%d, want 65536", len(limitRaw))
+	}
+	if err := ValidatePrimitiveData(PrimCandidateReadResume, 1, limitRaw); err != nil {
+		t.Fatalf("65536-byte data 应通过:%v", err)
+	}
+	boundary["selfEvaluation"] = boundary["selfEvaluation"].(string) + "a"
+	overLimitRaw, err := json.Marshal(boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, overLimitRaw), "$", "maxJsonBytes")
+}
+
 func TestSendSurfaceDiagnosticStagesMatchCurrentProducer(t *testing.T) {
 	retained := []string{
 		"page_absent",

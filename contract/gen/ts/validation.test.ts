@@ -339,6 +339,124 @@ expectIssue(
   "enum",
 );
 
+const resumeCommand = {
+  name: "candidate.readResume",
+  ver: 1,
+  context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+  args: { conversationRef: "conv-1", platformUserRef: "user-1" },
+  deadline: 1_999_999_999_999,
+  execBudgetMs: 60_000,
+  leaseMs: 30_000,
+};
+expectValid("candidate resume command", validateKindBody(Kind.Cmd, resumeCommand));
+const resumeWithoutLease: Record<string, unknown> = { ...resumeCommand };
+delete resumeWithoutLease.leaseMs;
+expectIssue("candidate resume lease required", validateKindBody(Kind.Cmd, resumeWithoutLease), "$.leaseMs", "required");
+expectIssue(
+  "candidate resume idem forbidden",
+  validateKindBody(Kind.Cmd, { ...resumeCommand, idemKey: "forbidden" }),
+  "$.idemKey",
+  "forbidden",
+);
+expectIssue(
+  "candidate resume guards forbidden",
+  validateKindBody(Kind.Cmd, { ...resumeCommand, guards: {} }),
+  "$.guards",
+  "forbidden",
+);
+
+const resumeMeta = PRIMITIVE_META["candidate.readResume"];
+const expectedResumePreconditions = [
+  "context.platform",
+  "context.accountRef",
+  "context.expectedPrincipalFingerprint",
+  "surface.im",
+  "login.in",
+  "conversation.tracked",
+  "manualQuiet",
+];
+if (
+  resumeMeta.ver !== 1 || resumeMeta.class !== "intrusive" || resumeMeta.batch !== "X" ||
+  resumeMeta.platformSideEffect !== "none" || resumeMeta.execBudgetMs !== 60_000 ||
+  resumeMeta.deadlineMs !== 120_000 || resumeMeta.leaseMs !== 30_000 ||
+  resumeMeta.guardsSchema !== null || resumeMeta.evidenceSchema !== null ||
+  resumeMeta.verificationPrimitive !== null ||
+  JSON.stringify(resumeMeta.preconditions) !== JSON.stringify(expectedResumePreconditions)
+) {
+  throw new Error(`candidate.readResume metadata drift: ${JSON.stringify(resumeMeta)}`);
+}
+
+const validResumeData: Record<string, unknown> = {
+  conversationRef: "conv-1",
+  platformUserRef: "user-1",
+  observedAt: 20,
+  basic: [{ label: "姓名", value: "" }],
+  expectations: [],
+  selfEvaluation: "",
+  education: "本科",
+  workExperiences: "",
+};
+expectValid("candidate resume data", validatePrimitiveData("candidate.readResume", 1, validResumeData));
+for (const field of [
+  "conversationRef", "platformUserRef", "observedAt", "basic", "expectations",
+  "selfEvaluation", "education", "workExperiences",
+]) {
+  const missing = { ...validResumeData };
+  delete missing[field];
+  expectIssue(
+    `candidate resume ${field} required`,
+    validatePrimitiveData("candidate.readResume", 1, missing),
+    `$.${field}`,
+    "required",
+  );
+}
+expectIssue(
+  "candidate resume observedAt minimum",
+  validatePrimitiveData("candidate.readResume", 1, { ...validResumeData, observedAt: -1 }),
+  "$.observedAt",
+  "minimum",
+);
+expectIssue(
+  "candidate resume observedAt int64",
+  validatePrimitiveData("candidate.readResume", 1, { ...validResumeData, observedAt: "2026-07-21T00:00:00Z" }),
+  "$.observedAt",
+  "type",
+);
+expectIssue(
+  "candidate resume label non-empty",
+  validatePrimitiveData("candidate.readResume", 1, { ...validResumeData, basic: [{ label: "", value: "" }] }),
+  "$.basic[0].label",
+  "minLength",
+);
+expectIssue(
+  "candidate resume section non-null",
+  validatePrimitiveData("candidate.readResume", 1, { ...validResumeData, basic: null }),
+  "$.basic",
+  "nullable",
+);
+
+const resumeBoundary: Record<string, unknown> = {
+  conversationRef: "conv-1",
+  platformUserRef: "user-1",
+  observedAt: 20,
+  basic: [],
+  expectations: [],
+  selfEvaluation: "",
+  education: "",
+  workExperiences: "",
+};
+const resumeBaseBytes = new TextEncoder().encode(JSON.stringify(resumeBoundary)).length;
+resumeBoundary.selfEvaluation = "a".repeat(65_536 - resumeBaseBytes);
+const resumeLimitBytes = new TextEncoder().encode(JSON.stringify(resumeBoundary)).length;
+if (resumeLimitBytes !== 65_536) throw new Error(`resume boundary fixture bytes=${resumeLimitBytes}`);
+expectValid("candidate resume 65536 bytes", validatePrimitiveData("candidate.readResume", 1, resumeBoundary));
+expectIssue(
+  "candidate resume 65537 bytes",
+  validatePrimitiveData("candidate.readResume", 1, { ...resumeBoundary, selfEvaluation: `${resumeBoundary.selfEvaluation}a` }),
+  "$",
+  "maxJsonBytes",
+);
+
 const greetingCommand = {
   name: "chat.sendGreeting",
   ver: 1,

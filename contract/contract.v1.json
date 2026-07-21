@@ -584,6 +584,34 @@
           "contactState": { "type": "string", "enumRef": "enums.candidateContactState" }
         }
       },
+      "CandidateResumeLabelValue": {
+        "type": "object",
+        "fields": {
+          "label": { "type": "string", "minLength": 1 },
+          "value": { "type": "string" }
+        }
+      },
+      "CandidateReadResumeArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "platformUserRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "CandidateReadResumeData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "platformUserRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "observedAt": { "type": "int64", "minimum": 0 },
+          "basic": { "type": "array", "items": { "ref": "CandidateResumeLabelValue" } },
+          "expectations": { "type": "array", "items": { "ref": "CandidateResumeLabelValue" } },
+          "selfEvaluation": { "type": "string" },
+          "education": { "type": "string" },
+          "workExperiences": { "type": "string" }
+        }
+      },
       "ChatSendGreetingArgs": {
         "type": "object",
         "fields": {
@@ -824,6 +852,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "只读真人当前已经打开且界面唯一的候选人和职位;不搜索、不滚动、不自动选择或打开目标。平台 program 可使用经真机事实验证的高脆私有运行时身份源,但它只产出不透明身份,不授权动作;读不到、空值、重复、绑定不清或结构漂移时不确认并转人工,不得降级到 resumeNumber、姓名、头像、列表索引或 DOM 位置"
+    },
+    "candidate.readResume": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "CandidateReadResumeArgs", "dataSchema": "CandidateReadResumeData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"],
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "note": "只读取脑已绑定 tracked IM 会话中同一 platformUserRef 的完整五分区简历;不搜索、不滚动、不按姓名、职位、resumeNumber 或 DOM 位置兜底;读不到、换绑、结构不完整或超限均失败且不返回部分 data"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",

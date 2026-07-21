@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是"招聘自动化助手"(RecruitHelper):对旧产品"智联招聘自动化"(工作区 `../AutoZhilian`,五仓库)的全新重构,**不是延续开发**。定位是全新产品、全新安装:不背旧系统的任何二进制与协议契约——machine_id 出生逻辑、端口 17321、`%APPDATA%\ai-assistant-console` 数据目录、electron-updater 更新链、Native Messaging host、旧扩展 ID,一概不保留。旧工作区的一切文档默认过时、仅作考古线索(见"文档信任边界与知识继承")。旧后台(xq-resume-backend)暂不改动,本仓库现阶段完全不连云端。
+本仓库是"招聘自动化助手"(RecruitHelper):对旧产品"智联招聘自动化"(工作区 `../AutoZhilian`,五仓库)的全新重构,**不是延续开发**。定位是全新产品、全新安装:不背旧系统的任何二进制与协议契约——machine_id 出生逻辑、端口 17321、`%APPDATA%\ai-assistant-console` 数据目录、electron-updater 更新链、Native Messaging host、旧扩展 ID,一概不保留。旧工作区的一切文档默认过时、仅作考古线索(见"文档信任边界与知识继承")。旧后台（xq-resume-backend）在客户交付前仍不改动，本仓库运行时仍不接 bind/heartbeat/job-config 等旧业务接口。M5 起唯一获准的云端出站是：Go client 按客户端本地显式配置直连一个 LLM provider；model/base_url/key 不由插件或旧后台下发，插件永远不接触 key。职位 AI 上下文使用本仓库自有类型，须能由旧 job-config 整包无损填充，但兼容证明不等于运行时接入授权。除此之外仍视为不连云端。
 
 ## 大方向(一切设计决策的根)
 
@@ -84,6 +84,7 @@
 
 - 界面文案与交流全部中文;源码不使用 emoji。
 - TypeScript 开 strict;协议类型一律来自 contract codegen,禁止手写重复定义。
+- **AI provider 数据边界（2026-07-21 甲方裁决）。** AI provider 请求只携带完成当前建议所需的职位上下文、简历正文、消息角色/正文与状态事实，不携带 platformUserRef、accountRef、conversationRef、profileId、resumeNumber 或候选人 displayName。简历与候选人自由文本可能自含姓名、电话等身份，甲方知情授权其作为当前模型输入，系统不承诺内容级脱敏。普通日志、审计 detail、管理 API、验收报告和未来上报只允许 capture/snapshot/invocation/turn/action 随机引用、用途、provider/model、配置 hash、输入输出 hash、字节/token 数、延迟、状态、错误分类与估算费用；禁止记录 API key、base request/response、聊天正文、简历正文、完整 prompt 或候选人明文身份。业务数据库为完成重放而持久化的消息、简历快照与建议正文不属于“日志/上报”，仍受本地数据边界与业务事实禁止物理删除约束。
 - **业务事实行禁止物理 `DELETE`(2026-07-20 甲方裁决)。** 已持久化的领域事实与审计事实不得通过物理删除抹去;业务上的“删除/移除”必须表达为带原因的显式状态或标记列,查询方按业务语义显式决定是否包含这些行;确需物理删除的例外必须按本文第 12 条单独立案获批。本条不要求全表增加 GORM `DeletedAt`,且禁止通过显式字段或嵌入 `gorm.Model` 引入默认 `deleted_at IS NULL` 作用域来替代业务语义;人级建档闸、对账与审计等需要看见终态/已移除事实的查询不得因此失明。临时测试数据、可完全重建的缓存/投影,以及协议已明确生命周期与清理语义的基础设施记录不属于业务事实行;不得通过改名或换表逃避分类。
 - 常用命令(仓库根目录执行):
   - `go run ./contract/codegen` — 从 contract.v1.json 重新生成两端协议代码到 `contract/gen/`;**改契约后必跑**,产物一并提交。

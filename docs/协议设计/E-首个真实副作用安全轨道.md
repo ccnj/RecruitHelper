@@ -1,6 +1,6 @@
 # E · 首个真实副作用安全轨道设计记录
 
-> 状态：2026-07-19 随里程碑 3（X 批）冻结；2026-07-20 按真机只读事实收口发送执行期数据源，并按《防护成本预算》第 9 条重划动作信任边界。本文记录设计理由与故障推演，便于实现审查；线上行为仍以 `AGENTS.md`、`contract/协议规格-v1.md`、`contract/contract.v1.json` 的优先级为准。
+> 状态：2026-07-19 随里程碑 3（X 批）冻结；2026-07-20 按真机只读事实收口发送执行期数据源，并按《防护成本预算》第 9 条重划动作信任边界；2026-07-21 增补 M5 自动命令生产者的上游意图来源，安全轨道本身不变。本文记录设计理由与故障推演，便于实现审查；线上行为仍以 `AGENTS.md`、`contract/协议规格-v1.md`、`contract/contract.v1.json` 的优先级为准。
 
 ## 0. 结论
 
@@ -26,6 +26,8 @@
 | X8 | committed 不能是一张空收据 | `JournalEntry.result` 在 committed 时必填且非 null，并满足 `result.ref=journal.ref` |
 | X9 | 易失成功不能越过持久终局屏障 | committed/outbox 双写失败时不缓存或发送成功 result；保留 attempting、熔断 dispatcher 已 accepted 队列、断开连接并交给 query→验证，同 SW 重复 cmd 也不能重放成功 |
 | X10 | UI 重载不能把一次人工意图变成两次 | 脑以会话持久单调 head（不读 wall clock/rowid）和 `previousIntentId` 做事务 CAS，权威 current 只在脑侧；浏览器会话存储不构成安全证明。M3 有人值守 UI 的“我已确认”只负责串行化本轮人工验收，不外推为后续自动调度规范 |
+
+M5 自动生产者以持久 `CommunicationAction` 主键替代 M3 有人值守 UI 的一次确认作为上游稳定意图源；这只改变“谁创建意图”，不改变意图之后的任何安全轨道。一次 action 至多绑定一个 effect intent；动作失败后的自动另铸仍被禁止。
 
 第 X5 条不是一般“同 id 跨重启重试”许可。它依赖先写 attempting 再做动作的严格顺序；任何写点不确定、storeId 不同或记录损坏都会失去该证明。
 
