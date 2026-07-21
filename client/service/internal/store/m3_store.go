@@ -1337,6 +1337,29 @@ func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time, r
 	if err != nil {
 		return err
 	}
+	key := ConversationKey{Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef}
+	return retractMessageTx(tx, &message, key, at, reason)
+}
+
+// retractMessageTx 是业务消息事实的共享撤回写路径。调用方必须先在自己的
+// 事务内证明目标行与撤回理由；本函数只负责保留首次撤回事实，并把活动会话尾
+// 刷新到仍有效的最高物理序号。它不提交事务，也不生成新的业务事实。
+func retractMessageTx(
+	tx *gorm.DB,
+	message *Message,
+	key ConversationKey,
+	at time.Time,
+	reason string,
+) error {
+	if message == nil {
+		return ErrRecoveryStateConflict
+	}
+	if reason == "" {
+		return errors.New("撤回消息缺少原因")
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
 	// 重复撤回是幂等读：首次原因与时间是不可变审计事实，
 	// 后续帧不得用另一个理由覆盖。
 	if message.RetractedAt != nil {
@@ -1352,9 +1375,12 @@ func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time, r
 	if marked.RowsAffected != 1 {
 		return ErrRecoveryStateConflict
 	}
-	key := ConversationKey{Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef}
+	return refreshConversationActiveTailTx(tx, key, at)
+}
+
+func refreshConversationActiveTailTx(tx *gorm.DB, key ConversationKey, at time.Time) error {
 	var latest Message
-	err = tx.Where(conversationWhere(key), conversationArgs(key)...).
+	err := tx.Where(conversationWhere(key), conversationArgs(key)...).
 		Where(activeMessageCondition).Order("seq DESC").First(&latest).Error
 	updates := map[string]any{"last_synced_at": at}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
