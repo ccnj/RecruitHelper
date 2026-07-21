@@ -90,14 +90,14 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 	if err != nil {
 		return ReplySuggestion{}, err
 	}
+	phrasesRaw, exists := object["话术_序列"]
+	if !exists {
+		return ReplySuggestion{}, errors.New("missingPhraseSequence")
+	}
 	for key := range object {
 		if key != "话术_序列" && key != "动作" {
 			return ReplySuggestion{}, errors.New("unknownOutputKey")
 		}
-	}
-	phrasesRaw, exists := object["话术_序列"]
-	if !exists {
-		return ReplySuggestion{}, errors.New("missingPhraseSequence")
 	}
 	var phrases []string
 	if err := json.Unmarshal(phrasesRaw, &phrases); err != nil || phrases == nil {
