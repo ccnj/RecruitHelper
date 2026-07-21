@@ -202,6 +202,11 @@ try {
       cardType: null, cardState: null, tsApprox: Date.now() - 1_000,
     },
   ]
+  const fixtureGreetingMessages = [{
+    sourceKey: hashText('fixture-source-greeting-001'), direction: 'out', kind: 'text',
+    text: fixtureGreetingText, blobRef: null, contentHash: hashText(fixtureGreetingText),
+    cardType: null, cardState: null, tsApprox: Date.now(),
+  }]
   const platform = {
     tab: {
       exists: true,
@@ -453,27 +458,61 @@ try {
         if (name === 'mainReadListPage') {
           const [pageNo] = args
           assert.equal(pageNo, 1)
+          const sessions = [{
+            conversationRef: fixtureConversationRef,
+            peer: { displayName: '合成候选人', platformUserRef: fixturePeerRef },
+            unreadCount: 1,
+            lastMessage: { direction: 'in', kind: 'text', textPreview: '合成列表摘要' },
+            lastActivityTs: Date.now() - 500,
+          }]
+          if (platform.greetingServerMessageCreated) {
+            sessions.push({
+              conversationRef: fixtureGreetingConversationRef,
+              peer: { displayName: '合成建联候选人', platformUserRef: fixtureCandidateRef },
+              unreadCount: 0,
+              lastMessage: { direction: 'out', kind: 'text', textPreview: fixtureGreetingText },
+              lastActivityTs: Date.now(),
+            })
+          }
           return [{ result: {
-            sessions: [{
-              conversationRef: fixtureConversationRef,
-              peer: { displayName: '合成候选人', platformUserRef: fixturePeerRef },
-              unreadCount: 1,
-              lastMessage: { direction: 'in', kind: 'text', textPreview: '合成列表摘要' },
-              lastActivityTs: Date.now() - 500,
-            }],
+            sessions,
             hasMore: false,
             unstable: false,
           } }]
         }
+        if (name === 'mainFindConversation') {
+          assert.equal(args.length, 1)
+          assert.ok([fixtureConversationRef, fixtureGreetingConversationRef].includes(args[0]))
+          return [{ result: { status: 'found' } }]
+        }
+        if (name === 'mainClickConversationOnce') {
+          const [
+            conversationRef,
+            expectedCurrentConversationRef,
+            expectedPrincipalFingerprint,
+            notAfterMs,
+          ] = args
+          assert.ok([fixtureConversationRef, fixtureGreetingConversationRef].includes(conversationRef))
+          const currentConversationRef = new URL(platform.tab.url).searchParams.get('sessionId') ?? ''
+          assert.equal(expectedCurrentConversationRef, currentConversationRef)
+          assert.equal(expectedPrincipalFingerprint, principalFingerprint)
+          assert.ok(Number.isFinite(notAfterMs) && notAfterMs >= Date.now())
+          platform.tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${encodeURIComponent(conversationRef)}`
+          platform.tab.status = 'complete'
+          return [{ result: { status: 'clicked' } }]
+        }
         if (name === 'mainReadThreadPage') {
           const [conversationRef, , cursor] = args
-          assert.equal(conversationRef, fixtureConversationRef)
+          assert.ok([fixtureConversationRef, fixtureGreetingConversationRef].includes(conversationRef))
           assert.equal(cursor, null)
+          const greetingConversation = conversationRef === fixtureGreetingConversationRef
           return [{ result: {
-            messages: fixtureMessages,
+            messages: greetingConversation ? fixtureGreetingMessages : fixtureMessages,
             reachedTop: true,
             cursor: null,
-            peer: { displayName: '合成候选人', platformUserRef: fixturePeerRef },
+            peer: greetingConversation
+              ? { displayName: '合成建联候选人', platformUserRef: fixtureCandidateRef }
+              : { displayName: '合成候选人', platformUserRef: fixturePeerRef },
           } }]
         }
         if (name === 'mainInspectSendSurface') {
@@ -698,7 +737,10 @@ try {
   '页面缺失没有留下响亮失败账本')
   assert.equal(postPaths.filter((path) => path === '/admin/cmd').length, 0,
     'M2 链路不得使用 /admin/cmd 旁路')
-  for (const expectedCall of ['mainProbeZhilian', 'mainReadListPage', 'mainReadThreadPage']) {
+  for (const expectedCall of [
+    'mainProbeZhilian', 'mainReadListPage', 'mainFindConversation',
+    'mainClickConversationOnce', 'mainReadThreadPage',
+  ]) {
     assert.ok(platform.mainCalls.includes(expectedCall), `生产平台接缝没有执行 ${expectedCall}`)
   }
   console.log('  PASS 四条 M2 原语均由 actor/绑定流经生产 dispatcher 与真 WS')
@@ -708,6 +750,12 @@ try {
   const intentId = 'fixture-intent-send-001'
   const sessionBeforeSend = conn.status().session
   const socketsBeforeSend = harnessSockets.length
+  const routeFindCallsBeforeSend = platform.mainCalls.filter(
+    (name) => name === 'mainFindConversation',
+  ).length
+  const routeClickCallsBeforeSend = platform.mainCalls.filter(
+    (name) => name === 'mainClickConversationOnce',
+  ).length
   // 模拟真人已在 Chrome 中打开目标会话。生产发送不得自行切换会话。
   platform.tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${encodeURIComponent(fixtureConversationRef)}`
   resultAckFault.armed = true
@@ -790,10 +838,10 @@ try {
   }
   assert.equal(platform.mainCalls.includes('mainInspectSendSurface'), false,
     '生产发送不得再由另一套 DOM preflight 逻辑授权')
-  assert.equal(platform.mainCalls.includes('mainFindConversation'), false,
-    'M3 发送不得搜索或切换会话')
-  assert.equal(platform.mainCalls.includes('mainClickConversationOnce'), false,
-    'M3 发送不得点击会话行')
+  assert.equal(platform.mainCalls.filter((name) => name === 'mainFindConversation').length,
+    routeFindCallsBeforeSend, 'M3 发送不得搜索或切换会话')
+  assert.equal(platform.mainCalls.filter((name) => name === 'mainClickConversationOnce').length,
+    routeClickCallsBeforeSend, 'M3 发送不得点击会话行')
 
   await sleep(500)
   const recoveredSend = await admin.get(`/admin/messages/send?intentId=${encodeURIComponent(intentId)}`)

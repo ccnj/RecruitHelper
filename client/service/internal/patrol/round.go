@@ -156,6 +156,10 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	dirty, err = a.placeActiveM5TargetLast(dirty)
+	if err != nil {
+		return err
+	}
 	for i := range dirty {
 		if err := a.setStage("readingThread"); err != nil {
 			return err
@@ -460,6 +464,58 @@ func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dir
 		}
 	}
 	return out, nil
+}
+
+// M5 的简历读取与自动回复都只作用于已绑定的当前 IM 会话，原语本身按契约
+// 不得搜索会话列表。chat.readThread 会把浏览器切到目标会话，因此在确有补采
+// 或回复工作时把试运行目标放到本轮最后：既冻结最新账本，也明确完成 M2→M5
+// 的页面所有权交接。已采集且没有待处理入站时不得为维持路由而反复抢页面。
+func (a *roundActor) placeActiveM5TargetLast(dirty []dirtyConversation) ([]dirtyConversation, error) {
+	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
+	if err != nil || target == nil {
+		return dirty, err
+	}
+	key := store.ConversationKey{
+		Platform: target.Conversation.Platform, AccountRef: target.Conversation.AccountRef,
+		ConversationRef: target.Conversation.ConversationRef,
+	}
+	ledger, err := a.manager.store.MessagesForConversation(key)
+	if err != nil {
+		return nil, err
+	}
+	targetIndex := -1
+	for i := range dirty {
+		if dirty[i].conversation.ConversationRef == target.Conversation.ConversationRef {
+			targetIndex = i
+			break
+		}
+	}
+	needsHandoff := m5TargetNeedsRouteHandoff(
+		targetIndex >= 0,
+		target.Profile.ResumeCaptureState,
+		ledger,
+	)
+	if !needsHandoff {
+		return dirty, nil
+	}
+	out := make([]dirtyConversation, 0, len(dirty)+1)
+	for i := range dirty {
+		if dirty[i].conversation.ConversationRef != target.Conversation.ConversationRef {
+			out = append(out, dirty[i])
+		}
+	}
+	return append(out, dirtyConversation{conversation: target.Conversation, ledger: ledger}), nil
+}
+
+func m5TargetNeedsRouteHandoff(
+	alreadyDirty bool,
+	captureState store.ResumeCaptureState,
+	ledger []store.Message,
+) bool {
+	if alreadyDirty || captureState == store.ResumeCaptureUnattempted || captureState == store.ResumeCaptureInFlight {
+		return true
+	}
+	return len(inspectM5Pending(ledger).inbound) > 0
 }
 
 func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConversation) (ConversationProjection, error) {
