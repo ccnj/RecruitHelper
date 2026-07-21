@@ -5082,6 +5082,179 @@ test('readThread 不把 MAIN 注入 null 结果降级为 INTERNAL_HAND', async (
   )
 })
 
+function installThreadRouteHarness(conversationRef, {
+  selected = false,
+  readBehavior,
+  routeReadyAfterClick = true,
+} = {}) {
+  const fingerprint = '7'.repeat(64)
+  let currentURL = `https://rd6.zhaopin.com/app/im${selected ? `?sessionId=${conversationRef}` : ''}`
+  const state = { barriers: 0, clicks: 0, finds: 0, reads: 0, events: [] }
+  const page = {
+    messages: [threadFixtureMessage('route-message', 'a'.repeat(64), '合成消息')],
+    reachedTop: true,
+    cursor: null,
+    peer: { displayName: '脱敏候选人' },
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 71, url: currentURL, status: 'complete' }] },
+      async get() { return { id: 71, url: currentURL, status: 'complete' } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func, args }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainFindConversation') {
+          state.finds += 1
+          state.events.push('find')
+          return [{ result: { status: 'found' } }]
+        }
+        if (func.name === 'mainClickConversationOnce') {
+          state.clicks += 1
+          state.events.push('click')
+          if (routeReadyAfterClick) {
+            currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+          }
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainReadThreadPage') {
+          state.reads += 1
+          state.events.push('read')
+          return [{ result: readBehavior ? await readBehavior(...args) : page }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  return {
+    fingerprint,
+    state,
+    context: {
+      cmdMsgId: 'thread-route',
+      deadlineMs: Date.now() + 10_000,
+      irreversibleNotAfterMs: Date.now() + 10_000,
+      commandContext: undefined,
+      signal: new AbortController().signal,
+      async progress() {},
+      checkpoint() {},
+      async beforeSideEffect() {
+        state.barriers += 1
+        state.events.push('barrier')
+      },
+    },
+  }
+}
+
+test('readThread 从基础路由唯一切到目标后只消费一次 barrier 再读取一次', async () => {
+  const conversationRef = 'conversation-route-open'
+  const harness = installThreadRouteHarness(conversationRef)
+  const result = await readZhilianThread({
+    conversationRef,
+    window: { maxMessages: 1, anchorTail: [], deep: false },
+  }, harness.context, harness.fingerprint)
+
+  assert.equal(result.messages.length, 1)
+  assert.equal(harness.state.barriers, 1)
+  assert.equal(harness.state.finds, 1)
+  assert.equal(harness.state.clicks, 1)
+  assert.equal(harness.state.reads, 1)
+  assert.deepEqual(harness.state.events, ['find', 'barrier', 'click', 'read'])
+})
+
+test('readThread 已在目标路由时不定位不点击并在 history 前消费唯一 barrier', async () => {
+  const conversationRef = 'conversation-route-ready'
+  const harness = installThreadRouteHarness(conversationRef, { selected: true })
+  await readZhilianThread({
+    conversationRef,
+    window: { maxMessages: 1, anchorTail: [], deep: false },
+  }, harness.context, harness.fingerprint)
+
+  assert.equal(harness.state.barriers, 1)
+  assert.equal(harness.state.finds, 0)
+  assert.equal(harness.state.clicks, 0)
+  assert.equal(harness.state.reads, 1)
+  assert.deepEqual(harness.state.events, ['barrier', 'read'])
+})
+
+test('readThread 非法 opaque cursor 在定位、barrier、点击与读取前拒绝', async () => {
+  const conversationRef = 'conversation-route-invalid-cursor'
+  const harness = installThreadRouteHarness(conversationRef)
+  const cursor = zhilianTestHooks.encodeCursor({
+    v: 1,
+    kind: 'thread',
+    mode: 'api',
+    binding: 'b'.repeat(64),
+    endTime: 100,
+    lastMsgId: 'message-1',
+  })
+  await assert.rejects(
+    readZhilianThread({
+      conversationRef,
+      cursor,
+      window: { maxMessages: 1, anchorTail: [], deep: false },
+    }, harness.context, harness.fingerprint),
+    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.CursorInvalid,
+  )
+
+  assert.deepEqual(harness.state, { barriers: 0, clicks: 0, finds: 0, reads: 0, events: [] })
+})
+
+test('readThread 切到目标后 history 失败不二次 barrier、不重切也不重读', async () => {
+  const conversationRef = 'conversation-route-read-failed'
+  const harness = installThreadRouteHarness(conversationRef, {
+    async readBehavior() { throw new Error('page execution lost') },
+  })
+  await assert.rejects(
+    readZhilianThread({
+      conversationRef,
+      window: { maxMessages: 1, anchorTail: [], deep: false },
+    }, harness.context, harness.fingerprint),
+    (error) => error instanceof ZhilianPlatformError &&
+      error.code === ErrorCode.CtxLostDuringExec && error.sideEffect === 'possible',
+  )
+
+  assert.equal(harness.state.barriers, 1)
+  assert.equal(harness.state.finds, 1)
+  assert.equal(harness.state.clicks, 1)
+  assert.equal(harness.state.reads, 1)
+  assert.deepEqual(harness.state.events, ['find', 'barrier', 'click', 'read'])
+})
+
+test('readThread 已点击但目标 route 未就绪时如实返回 possible 并禁止自动重派', async () => {
+  const originalSetTimeout = globalThis.setTimeout
+  globalThis.setTimeout = (callback) => {
+    callback()
+    return 0
+  }
+  const conversationRef = 'conversation-route-timeout'
+  const harness = installThreadRouteHarness(conversationRef, { routeReadyAfterClick: false })
+  try {
+    await assert.rejects(
+      readZhilianThread({
+        conversationRef,
+        window: { maxMessages: 1, anchorTail: [], deep: false },
+      }, harness.context, harness.fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.CtxLostDuringExec &&
+        error.retryable === Retryable.ManualOnly &&
+        error.sideEffect === 'possible',
+    )
+  } finally {
+    globalThis.setTimeout = originalSetTimeout
+  }
+
+  assert.equal(harness.state.barriers, 1)
+  assert.equal(harness.state.finds, 1)
+  assert.equal(harness.state.clicks, 1)
+  assert.equal(harness.state.reads, 0)
+  assert.deepEqual(harness.state.events, ['find', 'barrier', 'click'])
+})
+
 test('readThread 游标绑定参数、设置读取安全点并拒绝原地游标', async () => {
   const fingerprint = 'f'.repeat(64)
   let updateCalls = 0
@@ -5102,7 +5275,7 @@ test('readThread 游标绑定参数、设置读取安全点并拒绝原地游标
     cursor: { endTime: 100, lastMsgId: 'message-1' },
     peer: { displayName: '脱敏候选人', platformUserRef: 'peer-1' },
   })
-  let currentThreadURL = 'https://rd6.zhaopin.com/app/im'
+  let currentThreadURL = 'https://rd6.zhaopin.com/app/im?sessionId=conversation-1'
   globalThis.chrome = {
     tabs: {
       async query() { return [{ id: 7, url: currentThreadURL, status: 'complete' }] },
@@ -5151,7 +5324,7 @@ test('readThread 游标绑定参数、设置读取安全点并拒绝原地游标
   assert.equal(first.complete, false)
   assert.ok(first.nextCursor)
   assert.equal(firstContext.state.beforeCalls, 1)
-  assert.equal(updateCalls, 0, 'API 线程读取不得为不可见会话主动切换真人页面')
+  assert.equal(updateCalls, 0, '已在目标会话时不得导航或切换真人页面')
   assert.equal(mainReadCalls, 1, '首个 API 窗口只允许执行一次完整 MAIN 读取')
 
   const mismatchContext = context()

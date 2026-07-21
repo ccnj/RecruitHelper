@@ -4667,8 +4667,8 @@ async function ensureThreadRoute(
     throw new ZhilianPlatformError('USER_ACTIVE', '定位会话期间当前会话被人工切换，已取消自动点击', 'afterRecovery')
   }
   ctx.checkpoint()
-  // 打开会话可能触发已读等外部效果，因此它与最终发送共用本命令唯一的
-  // attempting/cancellation barrier。barrier 后 cancel 不再产生“终局已取消但迟到点击”。
+  // 打开会话可能触发已读等外部效果，因此必须消费本 intrusive 命令唯一的
+  // cancellation barrier。barrier 后 cancel 不再产生“终局已取消但迟到点击”。
   await ctx.beforeSideEffect()
   const clickNotAfterMs = Math.min(ctx.irreversibleNotAfterMs, Date.now() + 1_500)
   const commandNavigation = beginCommandNavigation(tab.id, clickNotAfterMs)
@@ -4717,7 +4717,9 @@ async function ensureThreadRoute(
     throw new ZhilianPlatformError(
       'CTX_LOST_DURING_EXEC',
       '目标智联会话在期限内未就绪',
-      'afterRecovery',
+      'manualOnly',
+      undefined,
+      'possible',
     )
   } finally {
     commandNavigation.end()
@@ -4872,6 +4874,9 @@ export async function readZhilianThread(
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
 ): Promise<ZhilianThreadPage> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
   const tab = await verifiedIMTab(expectedPrincipalFingerprint)
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
   const maxMessages = Math.min(64, Math.max(1, args.window.maxMessages ?? 50))
@@ -4907,6 +4912,15 @@ export async function readZhilianThread(
   )) {
     throw new ZhilianPlatformError('CURSOR_INVALID', '会话分页游标无效')
   }
+  // 真机已证实 getHistoryMsgs 在基础路由会拒绝：所有参数与 opaque cursor 先完成
+  // 无副作用校验，再按完整 conversationRef 打开目标。切换本身可能产生已读，因此
+  // ensureThreadRoute 返回 true 时已经消费了本命令唯一的 cancellation barrier。
+  const routeConsumedBarrier = await ensureThreadRoute(
+    tab,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    ctx,
+  )
   const newerPrefixMask = Number(rawAnchorPrefixMask)
   let cursor: { endTime: number; lastMsgId: string } | null = threadCursor
     ? { endTime: threadCursor.endTime, lastMsgId: threadCursor.lastMsgId }
@@ -4915,7 +4929,7 @@ export async function readZhilianThread(
   let peer: MainThreadPageResult['peer'] = null
   const collected: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
   const sourceSemantics = new Map<string, { direction: ZhilianThreadMessage['direction']; contentHash: string }>()
-  let platformReadStarted = false
+  let platformReadStarted = routeConsumedBarrier
 
   while (collected.length < maxMessages && !reachedTop) {
     ctx.checkpoint()
@@ -4927,12 +4941,6 @@ export async function readZhilianThread(
       // 该钩子抛出的 StopExecution 必须原样回到 Dispatcher，不能在平台错误映射中吞掉。
       await ctx.beforeSideEffect()
       platformReadStarted = true
-      // 已验证的 engine.getSessions 分页与 getHistoryMsgs 能在稳定 IM 列表页按
-      // sessionId 读取，
-      // 不要求把真人页面切到目标会话。直接 tabs.update 一个尚未在当前虚拟列表加载的
-      // sessionId 会触发整页导航，平台随后把它规范回 /app/im，并可能在 MAIN await
-      // 期间销毁执行上下文。DOM 回退仍在 mainReadThreadPage 内严格要求目标 route；
-      // API 不可用时响亮失败，不在同一原语里偷偷导航后重跑完整读取。
     }
     try {
       page = await runMain(tab.id, mainReadThreadPage, [
