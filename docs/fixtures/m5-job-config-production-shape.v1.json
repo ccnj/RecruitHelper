@@ -1,0 +1,215 @@
+{
+  "fixtureVersion": 1,
+  "capturedAt": "2026-07-21",
+  "kind": "sanitized-production-shape",
+  "containsRawPromptOrDocumentContent": false,
+  "containsCredentialOrIdentity": false,
+  "singleResponse": {
+    "httpStatus": 200,
+    "topLevelKeys": [
+      "candidateSelection",
+      "communication",
+      "documents",
+      "facts",
+      "filters",
+      "fixedPhrases",
+      "fixedRules",
+      "greeting",
+      "intent",
+      "job",
+      "scoring",
+      "silenceFollowup"
+    ],
+    "jobKeys": [
+      "environment",
+      "id",
+      "name"
+    ],
+    "promptBlockKeys": [
+      "apiKey",
+      "baseUrl",
+      "model",
+      "prompt"
+    ],
+    "greetingExtraKeys": [
+      "usePlatformDefault"
+    ]
+  },
+  "pluralResponse": {
+    "httpStatus": 200,
+    "topLevelKeys": [
+      "currentJobId",
+      "jobs"
+    ],
+    "jobCount": 3,
+    "jobExtraKeys": [
+      "missingDocs"
+    ],
+    "includeDocumentsFalseEmptiesOnlyDocuments": true,
+    "includeDocumentsTrueContainsRawDocuments": true
+  },
+  "targetCurrentBundle": {
+    "documentCount": 10,
+    "documents": [
+      {
+        "docType": "候选人筛选",
+        "empty": false
+      },
+      {
+        "docType": "固定规则",
+        "empty": true
+      },
+      {
+        "docType": "固定话术",
+        "empty": false
+      },
+      {
+        "docType": "多轮沟通",
+        "empty": false
+      },
+      {
+        "docType": "客户事实库",
+        "empty": false
+      },
+      {
+        "docType": "意向判断",
+        "empty": false
+      },
+      {
+        "docType": "打分",
+        "empty": false
+      },
+      {
+        "docType": "招呼语",
+        "empty": false
+      },
+      {
+        "docType": "沉默追问",
+        "empty": false
+      },
+      {
+        "docType": "职位筛选",
+        "empty": false
+      }
+    ],
+    "promptPlaceholders": {
+      "scoring": [
+        "resume_json"
+      ],
+      "greeting": [
+        "career_state",
+        "resume_summary_json"
+      ],
+      "communication": [
+        "对话历史",
+        "推荐时段",
+        "简历",
+        "话术_序列"
+      ],
+      "intent": [
+        "回复",
+        "招呼语"
+      ],
+      "silenceFollowup": [
+        "姓名",
+        "年龄",
+        "性别",
+        "简历"
+      ]
+    },
+    "fixedPhraseScenes": [
+      {
+        "key": "candidateAskWechat",
+        "enabled": true,
+        "messageCount": 1,
+        "hasOldClientConsumer": true
+      },
+      {
+        "key": "meetingAccepted",
+        "enabled": true,
+        "messageCount": 2,
+        "hasOldClientConsumer": true
+      },
+      {
+        "key": "meetingInvitePending",
+        "enabled": true,
+        "messageCount": 1,
+        "hasOldClientConsumer": false
+      },
+      {
+        "key": "rejectWechat",
+        "enabled": true,
+        "messageCount": 3,
+        "hasOldClientConsumer": true
+      },
+      {
+        "key": "silence48Wechat",
+        "enabled": true,
+        "messageCount": 1,
+        "hasOldClientConsumer": true
+      },
+      {
+        "key": "wechatAccepted",
+        "enabled": true,
+        "messageCount": 1,
+        "hasOldClientConsumer": true
+      }
+    ],
+    "fixedRulesEmpty": true,
+    "missingDocs": []
+  },
+  "crossChecks": {
+    "currentJobOccursExactlyOnce": true,
+    "singleJobMatchesCurrentJob": true,
+    "singleAndPluralCurrentDocumentsEqualByEphemeralDigest": true,
+    "singleAndDatabaseActiveVersionDocumentsEqualByEphemeralDigest": true,
+    "allDatabaseDocumentsBelongToCurrentJob": true,
+    "allDatabaseDocumentsBelongToActiveVersion": true,
+    "legacyFixedPhraseSlotsAcrossAllTargetCustomerVersions": []
+  },
+  "syntheticRoundTrip": {
+    "documents": [
+      {
+        "docType": "候选人筛选",
+        "content": "fixture://候选人筛选"
+      },
+      {
+        "docType": "固定规则",
+        "content": "fixture://固定规则"
+      },
+      {
+        "docType": "固定话术",
+        "content": "fixture://固定话术"
+      },
+      {
+        "docType": "多轮沟通",
+        "content": "fixture://多轮沟通"
+      },
+      {
+        "docType": "客户事实库",
+        "content": "fixture://客户事实库"
+      },
+      {
+        "docType": "意向判断",
+        "content": "fixture://意向判断"
+      },
+      {
+        "docType": "打分",
+        "content": "fixture://打分"
+      },
+      {
+        "docType": "招呼语",
+        "content": "fixture://招呼语"
+      },
+      {
+        "docType": "沉默追问",
+        "content": "fixture://沉默追问"
+      },
+      {
+        "docType": "职位筛选",
+        "content": "fixture://职位筛选"
+      }
+    ],
+    "invariant": "import 后 docType/content 字节集合必须与 import 前完全相等；所有派生视图只能读这份集合，不能反向覆盖"
+  }
+}
