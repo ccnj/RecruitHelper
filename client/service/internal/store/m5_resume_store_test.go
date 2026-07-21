@@ -213,3 +213,30 @@ func TestM5TrialSelectionIsPersistentAndGloballyUnique(t *testing.T) {
 		t.Fatalf("active 试运行选择不唯一: count=%d err=%v", active, err)
 	}
 }
+
+func TestM5TrialSelectionCannotReactivateManualRequiredProfile(t *testing.T) {
+	s := openTest(t)
+	fixture := seedResumeStoreFixture(t, s, "profile-trial-manual")
+	root := "resume-root-trial-manual"
+	if _, err := s.CreateResumeCaptureCmd(CreateResumeCaptureCmdRequest{
+		ProfileID: fixture.ProfileID, Command: resumeCaptureCommand(t, fixture, root),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailResumeCapture(FailResumeCaptureRequest{
+		ProfileID: fixture.ProfileID, LogicalDispatchID: root, Reason: "fixtureFailure",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SelectM5TrialProfile(
+		fixture.ProfileID, "selection-manual-repeat", "user", time.Now(),
+	); !errors.Is(err, ErrResumeCaptureNotAllowed) {
+		t.Fatalf("manualRequired 档案不得重新占用试运行槽: %v", err)
+	}
+	var active int64
+	if err := s.db.Model(&M5TrialSelection{}).
+		Where("status = ? AND active_slot = ?", M5TrialSelectionActive, m5TrialActiveSlot).
+		Count(&active).Error; err != nil || active != 0 {
+		t.Fatalf("失败档案重选后 active slot 必须保持释放: count=%d err=%v", active, err)
+	}
+}

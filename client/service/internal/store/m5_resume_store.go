@@ -45,11 +45,12 @@ func (s *Store) SelectM5TrialProfile(profileID, selectionID, selectedBy string, 
 	}
 	var out M5TrialSelection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := eligibleResumeTargetTx(tx, profileID, false); err != nil {
+		target, err := eligibleResumeTargetTx(tx, profileID, false)
+		if err != nil {
 			return err
 		}
 		var active M5TrialSelection
-		err := tx.First(&active, "status = ? AND active_slot = ?", M5TrialSelectionActive, m5TrialActiveSlot).Error
+		err = tx.First(&active, "status = ? AND active_slot = ?", M5TrialSelectionActive, m5TrialActiveSlot).Error
 		if err == nil {
 			if active.ProfileID != profileID {
 				return ErrM5TrialAlreadyActive
@@ -59,6 +60,12 @@ func (s *Store) SelectM5TrialProfile(profileID, selectionID, selectedBy string, 
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
+		}
+		// 自动补采失败是本里程碑的终局事实，当前没有 reset/cancel 入口。
+		// 只有从未尝试过的档案可以新占 active slot；既有同档案 active
+		// 选择仍由上方幂等返回，供捕获成功后的 2B 继续复用。
+		if target.Profile.ResumeCaptureState != ResumeCaptureUnattempted {
+			return ErrResumeCaptureNotAllowed
 		}
 		slot := m5TrialActiveSlot
 		out = M5TrialSelection{
