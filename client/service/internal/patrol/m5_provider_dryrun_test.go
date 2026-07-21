@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -81,7 +82,28 @@ func TestM5RealProviderDryRun(t *testing.T) {
 	}
 	if len(executor.purposes) != 2 || len(invocations) != 2 ||
 		executor.purposes[0] != m5ai.PurposeIntent || executor.purposes[1] != m5ai.PurposeReply {
-		t.Fatal("真实 provider 未形成 intent→reply 两次独立调用，停止事实门")
+		for _, invocation := range invocations {
+			reasoning := "absent"
+			if invocation.ReasoningTokens != nil {
+				reasoning = fmt.Sprintf("%d", *invocation.ReasoningTokens)
+			}
+			t.Logf(
+				"incomplete purpose=%s status=%s errorClass=%s usageShape=%s reasoningTokens=%s inputTokens=%d cachedInputTokens=%d outputTokens=%d latencyMs=%d estimatedCostMicros=%d inputHash=%s outputHash=%s",
+				invocation.Purpose, invocation.Status, invocation.ErrorClass, invocation.UsageShape,
+				reasoning, invocation.InputTokens, invocation.CachedInputTokens, invocation.OutputTokens,
+				invocation.LatencyMs, invocation.EstimatedCostMicros, invocation.InputHash, invocation.OutputHash,
+			)
+		}
+		if stoppedTurn, readErr := h.db.DialogueTurnByID(fixture.turn.TurnID); readErr == nil && stoppedTurn != nil {
+			t.Logf(
+				"incomplete turnStatus=%s failureReason=%s intentLabel=%s intentSource=%s",
+				stoppedTurn.Status, stoppedTurn.FailureReason, stoppedTurn.IntentLabel, stoppedTurn.IntentSource,
+			)
+		}
+		t.Fatalf(
+			"真实 provider 未形成 intent→reply 两次独立调用，停止事实门: calls=%v invocations=%d",
+			executor.purposes, len(invocations),
+		)
 	}
 	expectedPurposes := []m5ai.CompletionPurpose{m5ai.PurposeIntent, m5ai.PurposeReply}
 	for index, invocation := range invocations {
