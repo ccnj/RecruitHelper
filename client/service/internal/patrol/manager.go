@@ -19,13 +19,14 @@ type Manager struct {
 	store  *store.Store
 	runner Runner
 	hands  HandAvailability
+	advice AdviceExecutor
 	config Config
 
 	mu     sync.Mutex // 短临界区：UI/事件对 actor 状态的修改
 	tickMu sync.Mutex // 只串行 Tick，不得阻塞传感事件和用户暂停
 }
 
-func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config) (*Manager, error) {
+func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
 	if db == nil {
 		return nil, ErrNilStore
 	}
@@ -42,7 +43,11 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	return &Manager{store: db, runner: runner, hands: hands, config: config}, nil
+	manager := &Manager{store: db, runner: runner, hands: hands, config: config}
+	if len(advice) > 0 {
+		manager.advice = advice[0]
+	}
+	return manager, nil
 }
 
 // BindAccountObservationIfCurrent 是生产管理面绑定账号的唯一写入口。锁序固定

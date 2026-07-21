@@ -188,7 +188,8 @@ func upsertCandidateSnapshotTx(tx *gorm.DB, req SelectCandidateProfileRequest) (
 
 func validCandidateProfileStatus(status CandidateProfileStatus) bool {
 	switch status {
-	case CandidateProfileSelected, CandidateProfileGreeted, CandidateProfileEnded, CandidateProfileEliminated:
+	case CandidateProfileSelected, CandidateProfileGreeted, CandidateProfileCommunicating,
+		CandidateProfileEnded, CandidateProfileEliminated:
 		return true
 	default:
 		return false

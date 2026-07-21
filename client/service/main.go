@@ -72,6 +72,12 @@ func main() {
 	} else if recovered > 0 {
 		slog.Warn("已收束上次中断的巡检轮", "count", recovered)
 	}
+	if recovered, recoverErr := st.RecoverInterruptedAIInvocations(time.Now()); recoverErr != nil {
+		slog.Error("收束上次中断的 AI 调用失败", "err", recoverErr)
+		os.Exit(1)
+	} else if recovered > 0 {
+		slog.Warn("已收束上次中断的 AI 调用", "count", recovered)
+	}
 	runner := &appbridge.PatrolRunner{Dispatcher: disp}
 	actor, err := patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{})
 	if err != nil {

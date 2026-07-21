@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -92,6 +93,15 @@ type ResumeCaptureHandle interface {
 
 type ResumeCaptureRunner interface {
 	StartResumeCapture(context.Context, ResumeCaptureRequest) (ResumeCaptureHandle, error)
+}
+
+// AdviceExecutor is the batch-3 seam for deterministic communication tests.
+// Production deliberately does not wire a real HTTP executor until batch 5;
+// when wired, each call still goes through the persisted AIInvocation gate.
+type AdviceExecutor interface {
+	ProviderName() string
+	ModelName() string
+	CompleteJSON(context.Context, m5ai.CompletionRequest) (m5ai.CompletionResponse, error)
 }
 
 // RunError is the machine-readable failure returned by a Runner adapter.

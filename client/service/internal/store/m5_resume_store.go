@@ -127,7 +127,13 @@ func eligibleResumeTargetTx(tx *gorm.DB, profileID string, requireActive bool) (
 		}
 		return nil, err
 	}
-	if profile.MainStatus != CandidateProfileGreeted || profile.EndReason != nil ||
+	statusAllowed := profile.MainStatus == CandidateProfileGreeted
+	if requireActive {
+		// 首次选择仍只接受 greeted；既有 active 试运行观察到真实候选人
+		// 消息后会进入 communicating，后续补采与结果收编必须继续认得它。
+		statusAllowed = statusAllowed || profile.MainStatus == CandidateProfileCommunicating
+	}
+	if !statusAllowed || profile.EndReason != nil ||
 		profile.ConversationRef == nil || *profile.ConversationRef == "" ||
 		profile.SuccessfulGreetingIntentID == nil || *profile.SuccessfulGreetingIntentID == "" {
 		return nil, ErrResumeCaptureNotAllowed

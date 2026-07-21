@@ -1,9 +1,11 @@
 package m5ai
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -327,7 +329,42 @@ func slotsBlock(frozenNow time.Time, slots []string) (string, error) {
 		slotFormatGuard + "\n" + overview, nil
 }
 
-func renderReplyTemplate(prompt, resumeJSON, history string, frozenNow time.Time, slots []string) (string, error) {
+type frozenRecommendedTimeText struct {
+	Inline string `json:"inline"`
+	Block  string `json:"block"`
+}
+
+// FreezeRecommendedTimeText freezes both approved schedule placements because
+// the imported prompt may already contain its own 【可约面时间】 block. The
+// canonical JSON is an internal representation of the exact text fragments;
+// DialogueTurn persists it once and later rendering never consults wall clock.
+func FreezeRecommendedTimeText(frozenNow time.Time, slots []string) (string, error) {
+	inline, err := slotsInlinePayload(frozenNow, slots)
+	if err != nil {
+		return "", err
+	}
+	block, err := slotsBlock(frozenNow, slots)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(frozenRecommendedTimeText{Inline: inline, Block: block})
+	return string(raw), err
+}
+
+func decodeFrozenRecommendedTimeText(raw string) (frozenRecommendedTimeText, error) {
+	var frozen frozenRecommendedTimeText
+	decoder := json.NewDecoder(bytes.NewBufferString(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&frozen); err != nil || frozen.Inline == "" || frozen.Block == "" {
+		return frozenRecommendedTimeText{}, errors.New("invalidFrozenRecommendedTimeText")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return frozenRecommendedTimeText{}, errors.New("invalidFrozenRecommendedTimeText")
+	}
+	return frozen, nil
+}
+
+func renderReplyTemplateFrozen(prompt, resumeJSON, history string, frozen frozenRecommendedTimeText) (string, error) {
 	hasOwnBlock := strings.Contains(prompt, slotHeading)
 	matches := activeTokenPattern.FindAllStringSubmatchIndex(prompt, -1)
 	anchor := -1
@@ -342,10 +379,6 @@ func renderReplyTemplate(prompt, resumeJSON, history string, frozenNow time.Time
 				break
 			}
 		}
-	}
-	inline, err := slotsInlinePayload(frozenNow, slots)
-	if err != nil {
-		return "", err
 	}
 	var builder strings.Builder
 	cursor := 0
@@ -362,7 +395,7 @@ func renderReplyTemplate(prompt, resumeJSON, history string, frozenNow time.Time
 		case "推荐时段":
 			replacement = slotPointerText
 			if start == dataStart {
-				replacement = inline
+				replacement = frozen.Inline
 			}
 		case "话术_序列":
 			// This is the frozen output-example key, not an input token.
@@ -380,26 +413,37 @@ func renderReplyTemplate(prompt, resumeJSON, history string, frozenNow time.Time
 	rendered := builder.String()
 	if anchor >= 0 && dataStart < 0 {
 		insertAt := anchor + preAnchorDelta + len(slotHeading)
-		rendered = rendered[:insertAt] + "\n" + inline + rendered[insertAt:]
+		rendered = rendered[:insertAt] + "\n" + frozen.Inline + rendered[insertAt:]
 	}
 	if !hasOwnBlock {
-		block, err := slotsBlock(frozenNow, slots)
-		if err != nil {
-			return "", err
-		}
-		rendered = strings.TrimRight(rendered, " \t\r\n") + "\n\n" + block
+		rendered = strings.TrimRight(rendered, " \t\r\n") + "\n\n" + frozen.Block
 	}
 	return rendered, nil
 }
 
 func RenderReplyPrompt(prompt, resumeJSON, history string, frozenNow time.Time, slots []string, customerFacts string) (string, error) {
+	frozen, err := FreezeRecommendedTimeText(frozenNow, slots)
+	if err != nil {
+		return "", err
+	}
+	return RenderReplyPromptFrozen(prompt, resumeJSON, history, frozen, customerFacts)
+}
+
+// RenderReplyPromptFrozen assembles a reply from a DialogueTurn's persisted
+// schedule text. It intentionally accepts no time.Time, so restart or delay
+// cannot silently move the recommendation window.
+func RenderReplyPromptFrozen(prompt, resumeJSON, history, recommendedTimeText, customerFacts string) (string, error) {
 	if err := requireInputTokens("多轮沟通", prompt, "简历", "推荐时段", "对话历史"); err != nil {
 		return "", err
 	}
 	if resumeJSON == "" {
 		return "", errors.New("missingTemplateValue: 简历")
 	}
-	rendered, err := renderReplyTemplate(prompt, resumeJSON, history, frozenNow, slots)
+	frozen, err := decodeFrozenRecommendedTimeText(recommendedTimeText)
+	if err != nil {
+		return "", err
+	}
+	rendered, err := renderReplyTemplateFrozen(prompt, resumeJSON, history, frozen)
 	if err != nil {
 		return "", err
 	}

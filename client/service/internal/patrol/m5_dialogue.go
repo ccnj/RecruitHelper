@@ -1,0 +1,656 @@
+package patrol
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"time"
+
+	"recruithelper/client/service/internal/communication"
+	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
+)
+
+const m5InvocationAttempt = 1
+
+type m5PendingTurn struct {
+	lastOutbound *store.Message
+	inbound      []store.Message
+	firstReal    *store.Message
+	manualReason string
+}
+
+type m5TurnMaterial struct {
+	profile      store.CandidateProfile
+	revision     store.JobAIContextRevision
+	snapshot     store.CandidateResumeSnapshot
+	history      []m5ai.AdviceMessage
+	current      []m5ai.AdviceMessage
+	throughTurn  []m5ai.AdviceMessage
+	sentGreeting string
+}
+
+// processM5Trial runs only after the account's M2 reconciliation has committed.
+// It may read or call an injected advice executor, but batch 3 never creates an
+// EffectIntent, CmdRecord, or hand command.
+func (a *roundActor) processM5Trial(ctx context.Context) error {
+	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
+	if err != nil || target == nil {
+		return err
+	}
+	key := store.ConversationKey{
+		Platform: target.Profile.Platform, AccountRef: target.Profile.AccountRef,
+		ConversationRef: target.Conversation.ConversationRef,
+	}
+	messages, err := a.manager.store.MessagesForConversation(key)
+	if err != nil {
+		return err
+	}
+	pending := inspectM5Pending(messages)
+	if pending.firstReal != nil {
+		changed, markErr := a.manager.store.MarkProfileCommunicating(store.MarkProfileCommunicatingRequest{
+			ProfileID: target.Profile.ProfileID, ConversationRef: key.ConversationRef,
+			MessageSeq: pending.firstReal.Seq, ObservedAt: a.manager.now(),
+		})
+		if markErr != nil {
+			return markErr
+		}
+		target.Profile = changed.Profile
+	}
+	if pending.manualReason == "" {
+		cardPending, cardErr := a.manager.store.HasPendingCardTransitionAfter(key, pending.lastOutbound.Seq)
+		if cardErr != nil {
+			return cardErr
+		}
+		if cardPending {
+			pending.manualReason = "unsupportedCardTransition"
+		}
+	}
+
+	latest, err := a.manager.store.LatestDialogueTurnForProfile(target.Profile.ProfileID)
+	if err != nil {
+		return err
+	}
+	if latest != nil && (latest.Status == store.DialogueTurnDispatching || latest.Status == store.DialogueTurnCompleted) {
+		return nil
+	}
+	if latest != nil && dialogueTurnCanBecomeStale(latest.Status) {
+		current, currentErr := a.manager.store.RecheckDialogueTurnCurrent(latest.TurnID, a.manager.now())
+		if currentErr != nil {
+			return currentErr
+		}
+		if !current {
+			return nil
+		}
+	}
+	if pending.manualReason != "" {
+		if latest != nil && dialogueTurnCanBecomeStale(latest.Status) {
+			return a.manager.store.MarkDialogueTurnManualRequired(latest.TurnID, pending.manualReason, a.manager.now())
+		}
+		return a.manager.store.MarkActiveM5TrialManualRequired(
+			target.Profile.ProfileID, pending.manualReason, a.manager.now(),
+		)
+	}
+
+	// Preserve batch 2A's pre-capture behavior even before a candidate replies.
+	// When a capture succeeds, force a fresh patrol instead of freezing a turn
+	// from the message snapshot read before the intrusive command.
+	if target.Profile.ResumeCaptureState != store.ResumeCaptureCaptured {
+		if err := a.captureTrialResume(ctx); err != nil {
+			return err
+		}
+		after, reloadErr := a.manager.store.ActiveM5TrialForAccount(a.key())
+		if reloadErr != nil {
+			return reloadErr
+		}
+		if after != nil && after.Profile.ResumeCaptureState == store.ResumeCaptureCaptured {
+			return a.scheduleM5Continuation()
+		}
+		return nil
+	}
+	if len(pending.inbound) == 0 {
+		return nil
+	}
+	// Production intentionally leaves this seam nil until batch 5. The branch
+	// is dependency availability, not a test-mode behavior; no turn is frozen
+	// while a real provider has not yet been approved and wired.
+	if a.manager.advice == nil {
+		return nil
+	}
+
+	activeContext, err := a.manager.store.ActiveProfileAIContext(target.Profile.ProfileID)
+	if err != nil {
+		return err
+	}
+	if activeContext == nil {
+		return a.manager.store.MarkActiveM5TrialManualRequired(
+			target.Profile.ProfileID, "contextNotBound", a.manager.now(),
+		)
+	}
+	if target.Profile.ActiveResumeSnapshotID == nil {
+		return a.manager.store.MarkActiveM5TrialManualRequired(
+			target.Profile.ProfileID, "resumeSnapshotMissing", a.manager.now(),
+		)
+	}
+	snapshot, err := a.manager.store.CandidateResumeSnapshotByID(target.Profile.ProfileID, *target.Profile.ActiveResumeSnapshotID)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return a.manager.store.MarkActiveM5TrialManualRequired(
+			target.Profile.ProfileID, "resumeSnapshotMissing", a.manager.now(),
+		)
+	}
+
+	digest, turnID, err := m5TurnIdentity(target.Profile.ProfileID, pending)
+	if err != nil {
+		return err
+	}
+	turn, err := a.manager.store.DialogueTurnByID(turnID)
+	if err != nil {
+		return err
+	}
+	if turn == nil {
+		recommended, freezeErr := m5ai.FreezeRecommendedTimeText(
+			a.now, m5ai.GenerateDefaultSlots(a.now),
+		)
+		if freezeErr != nil {
+			return a.manager.store.MarkActiveM5TrialManualRequired(
+				target.Profile.ProfileID, "scheduleRenderFailed", a.manager.now(),
+			)
+		}
+		frozen, freezeErr := a.manager.store.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
+			TurnID: turnID, ProfileID: target.Profile.ProfileID, ConversationRef: key.ConversationRef,
+			InputDigest: digest, HistoryThroughSeq: pending.lastOutbound.Seq,
+			InboundFromSeq:      pending.inbound[0].Seq,
+			InboundThroughSeq:   pending.inbound[len(pending.inbound)-1].Seq,
+			ContextRevisionHash: activeContext.Revision.RevisionHash,
+			ResumeSnapshotID:    snapshot.SnapshotID, RecommendedTimeText: recommended,
+			RenderFormatVersion: m5ai.DialogueRenderFormatVersion, FrozenAt: a.now,
+		})
+		if freezeErr != nil {
+			if errors.Is(freezeErr, store.ErrDialogueTurnBinding) {
+				return a.manager.store.MarkActiveM5TrialManualRequired(
+					target.Profile.ProfileID, "turnBoundaryChanged", a.manager.now(),
+				)
+			}
+			return freezeErr
+		}
+		turn = &frozen.Turn
+	}
+	if err := a.setStage("advising"); err != nil {
+		return err
+	}
+	return a.advanceM5Turn(ctx, *turn)
+}
+
+func inspectM5Pending(messages []store.Message) m5PendingTurn {
+	result := m5PendingTurn{}
+	for index := range messages {
+		message := &messages[index]
+		if message.Direction == "out" {
+			result.lastOutbound = message
+		}
+		if message.Direction == "in" && isM5RealCandidateKind(message.Kind) && result.firstReal == nil {
+			copy := *message
+			result.firstReal = &copy
+		}
+	}
+	if result.lastOutbound == nil {
+		result.manualReason = "sentGreetingMissing"
+		return result
+	}
+	for index := range messages {
+		message := messages[index]
+		if message.Seq <= result.lastOutbound.Seq {
+			continue
+		}
+		if message.Direction != "in" || message.Kind != "text" || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
+			result.manualReason = m5UnsupportedReason(message.Kind)
+			continue
+		}
+		result.inbound = append(result.inbound, message)
+	}
+	if result.manualReason != "" {
+		result.inbound = nil
+	}
+	return result
+}
+
+func isM5RealCandidateKind(kind string) bool {
+	return kind == "text" || kind == "image" || kind == "voice" || kind == "file"
+}
+
+func m5UnsupportedReason(kind string) string {
+	if kind == "image" || kind == "voice" || kind == "file" {
+		return "unsupportedMedia"
+	}
+	return "unsupportedSemantic"
+}
+
+func dialogueTurnCanBecomeStale(status store.DialogueTurnStatus) bool {
+	return status == store.DialogueTurnCollected || status == store.DialogueTurnClassified ||
+		status == store.DialogueTurnAdviceReady
+}
+
+func (a *roundActor) scheduleM5Continuation() error {
+	now := a.manager.now()
+	return a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
+		account.DirtyHint = true
+		if account.NextPatrolAt == nil || account.NextPatrolAt.After(now) {
+			account.NextPatrolAt = timePointer(now)
+		}
+		return nil
+	})
+}
+
+func m5TurnIdentity(profileID string, pending m5PendingTurn) (string, string, error) {
+	if strings.TrimSpace(profileID) == "" || pending.lastOutbound == nil || len(pending.inbound) == 0 {
+		return "", "", store.ErrDialogueTurnInvalid
+	}
+	return store.DialogueTurnIdentity(profileID, *pending.lastOutbound, pending.inbound)
+}
+
+func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTurn) error {
+	turn := initial
+	for step := 0; step < 3; step++ {
+		material, err := a.loadM5TurnMaterial(turn)
+		if err != nil {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "renderInputUnavailable", a.manager.now())
+		}
+		facts := communication.FrozenTurnFacts{TurnID: turn.TurnID}
+		for _, message := range material.current {
+			facts.Messages = append(facts.Messages, communication.FrozenInboundMessage{
+				Seq: message.Seq, Kind: communication.FrozenMessageKind(message.Kind), Text: message.Text,
+			})
+		}
+
+		switch turn.Status {
+		case store.DialogueTurnCollected:
+			decision, reduceErr := communication.Reduce(communication.ReduceInput{
+				Turn: facts, Intent: communication.IntentAdvice{State: communication.AdviceAbsent},
+				Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
+			})
+			if reduceErr != nil {
+				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
+			}
+			if decision.NextAdvice == m5ai.PurposeIntent {
+				if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
+					return err
+				}
+			} else {
+				if _, err := a.manager.store.ApplyCodeClassification(store.CodeClassificationRequest{
+					TurnID: turn.TurnID, Label: decision.IntentLabel, ClassifiedAt: a.manager.now(),
+				}); err != nil {
+					return err
+				}
+			}
+		case store.DialogueTurnClassified:
+			intent := intentAdviceFromTurn(turn)
+			decision, reduceErr := communication.Reduce(communication.ReduceInput{
+				Turn: facts, Intent: intent,
+				Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
+			})
+			if reduceErr != nil || decision.NextAdvice != m5ai.PurposeReply {
+				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+			}
+			if err := a.runM5ReplyAdvice(ctx, turn, material, facts, intent); err != nil {
+				return err
+			}
+		case store.DialogueTurnAdviceReady, store.DialogueTurnManualRequired,
+			store.DialogueTurnSuperseded, store.DialogueTurnDispatching, store.DialogueTurnCompleted:
+			return nil
+		default:
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "turnStateUnknown", a.manager.now())
+		}
+		reloaded, err := a.manager.store.DialogueTurnByID(turn.TurnID)
+		if err != nil || reloaded == nil {
+			return err
+		}
+		turn = *reloaded
+	}
+	return nil
+}
+
+func intentAdviceFromTurn(turn store.DialogueTurn) communication.IntentAdvice {
+	switch turn.IntentSource {
+	case store.DialogueIntentLLM:
+		return communication.IntentAdvice{
+			State: communication.AdviceOK, Suggestion: m5ai.IntentSuggestion{Label: turn.IntentLabel},
+		}
+	case store.DialogueIntentLLMFailure:
+		return communication.IntentAdvice{State: communication.AdviceFailed}
+	case store.DialogueIntentCodeShortCircuit:
+		return communication.IntentAdvice{State: communication.AdviceAbsent}
+	default:
+		return communication.IntentAdvice{State: communication.AdviceState("invalid")}
+	}
+}
+
+func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial, error) {
+	profile, err := a.manager.store.CandidateProfileByID(turn.ProfileID)
+	if err != nil || profile == nil || profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
+		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	active, err := a.manager.store.ActiveProfileAIContext(turn.ProfileID)
+	if err != nil || active == nil || active.Binding.RevisionHash != turn.ContextRevisionHash {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	revision, err := a.manager.store.JobAIContextRevisionByHash(turn.ContextRevisionHash)
+	if err != nil || revision == nil {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	snapshot, err := a.manager.store.CandidateResumeSnapshotByID(turn.ProfileID, turn.ResumeSnapshotID)
+	if err != nil || snapshot == nil {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	key := store.ConversationKey{Platform: profile.Platform, AccountRef: profile.AccountRef, ConversationRef: turn.ConversationRef}
+	messages, err := a.manager.store.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 || messages[len(messages)-1].Seq != turn.InboundThroughSeq {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	material := m5TurnMaterial{profile: *profile, revision: *revision, snapshot: *snapshot}
+	for _, message := range messages {
+		if message.Seq > turn.InboundThroughSeq || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
+			continue
+		}
+		direction := "inbound"
+		if message.Direction == "out" {
+			direction = "outbound"
+		}
+		kind := message.Kind
+		if direction == "outbound" && message.OutboundIntentID != nil &&
+			profile.SuccessfulGreetingIntentID != nil && *message.OutboundIntentID == *profile.SuccessfulGreetingIntentID {
+			kind = "greeting"
+			material.sentGreeting = *message.Text
+		}
+		advice := m5ai.AdviceMessage{Seq: message.Seq, Direction: direction, Kind: kind, Text: *message.Text}
+		material.throughTurn = append(material.throughTurn, advice)
+		if message.Seq <= turn.HistoryThroughSeq {
+			material.history = append(material.history, advice)
+		}
+		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
+			material.current = append(material.current, advice)
+		}
+	}
+	if material.sentGreeting == "" || len(material.current) == 0 {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	return material, nil
+}
+
+func (a *roundActor) runM5IntentAdvice(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+) error {
+	content, _, err := m5ai.RenderIntentPrompt(
+		material.revision.Communication.IntentPrompt, material.sentGreeting,
+		material.history, material.current,
+	)
+	if err != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "intentRenderFailed", a.manager.now())
+	}
+	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeIntent, content, communication.IntentAdvice{})
+}
+
+func (a *roundActor) runM5ReplyAdvice(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	intent communication.IntentAdvice,
+) error {
+	resumeJSON, err := m5ai.RenderResumeJSON(material.snapshot.ResumeJSON)
+	if err != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "resumeRenderFailed", a.manager.now())
+	}
+	history, err := m5ai.RenderHistory(material.throughTurn)
+	if err != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "historyRenderFailed", a.manager.now())
+	}
+	content, err := m5ai.RenderReplyPromptFrozen(
+		material.revision.Communication.ReplyPrompt, resumeJSON, history,
+		turn.RecommendedTimeText, material.revision.Communication.CustomerFacts,
+	)
+	if err != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyRenderFailed", a.manager.now())
+	}
+	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, content, intent)
+}
+
+func (a *roundActor) executeM5Advice(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	purpose m5ai.CompletionPurpose,
+	content string,
+	intent communication.IntentAdvice,
+) error {
+	inputHash := sha256Hex(content)
+	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), "1")
+	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
+		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: m5InvocationAttempt,
+		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
+		InputHash: inputHash, CreatedAt: a.manager.now(),
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrDialogueTurnBinding) {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+		}
+		return err
+	}
+	if !reserved.Created {
+		if reserved.Invocation.FinishedAt != nil {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "invocationStateConflict", a.manager.now())
+		}
+		return a.finishInterruptedM5Advice(turn, facts, purpose, intent, reserved.Invocation)
+	}
+
+	request := m5ai.CompletionRequest{Purpose: purpose, UserContent: content}
+	if purpose == m5ai.PurposeIntent {
+		request.MaxOutputTokens = m5ai.IntentOutputTokenLimit
+	} else {
+		request.MaxOutputTokens = m5ai.ReplyOutputTokenLimit
+	}
+	started := time.Now()
+	var response m5ai.CompletionResponse
+	var callErr error
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		response, callErr = a.manager.advice.CompleteJSON(ctx, request)
+	}()
+	completion := m5CompletionFromProvider(reserved.Invocation.InvocationID, response, callErr, time.Since(started), a.manager.now())
+
+	if purpose == m5ai.PurposeIntent {
+		advice := communication.IntentAdvice{State: communication.AdviceFailed}
+		manualReason := ""
+		if callErr == nil {
+			suggestion, parseErr := m5ai.ParseIntentSuggestion(response.JSONText)
+			if parseErr == nil {
+				advice = communication.IntentAdvice{State: communication.AdviceOK, Suggestion: suggestion}
+			} else {
+				completion.Status = store.AIInvocationInvalidOutput
+				completion.ErrorClass = "invalidOutput"
+			}
+		}
+		if callErr == nil && !reasoningUsageSafe(completion) {
+			manualReason = "reasoningUsageUnsafe"
+		}
+		decision, reduceErr := communication.Reduce(communication.ReduceInput{
+			Turn: facts, Intent: advice, Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
+		})
+		if reduceErr != nil {
+			manualReason = "reducerRejected"
+		}
+		return a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
+	}
+
+	reply := communication.ReplyAdvice{State: communication.AdviceFailed}
+	if callErr == nil {
+		suggestion, parseErr := m5ai.ParseReplySuggestion(response.JSONText)
+		if parseErr == nil {
+			reply = communication.ReplyAdvice{State: communication.AdviceOK, Suggestion: suggestion}
+		} else {
+			completion.Status = store.AIInvocationInvalidOutput
+			completion.ErrorClass = "invalidOutput"
+		}
+	}
+	decision, reduceErr := communication.Reduce(communication.ReduceInput{Turn: facts, Intent: intent, Reply: reply})
+	if reduceErr != nil {
+		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
+	} else if callErr == nil && !reasoningUsageSafe(completion) {
+		decision = communication.Decision{
+			TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired,
+			ManualReason: "reasoningUsageUnsafe",
+		}
+	}
+	return a.completeM5Reply(turn.TurnID, completion, decision)
+}
+
+func (a *roundActor) finishInterruptedM5Advice(
+	turn store.DialogueTurn,
+	facts communication.FrozenTurnFacts,
+	purpose m5ai.CompletionPurpose,
+	intent communication.IntentAdvice,
+	invocation store.AIInvocation,
+) error {
+	completion := store.AIInvocationCompletion{
+		InvocationID: invocation.InvocationID, Status: store.AIInvocationTransportFailed,
+		ErrorClass: "processInterrupted", FinishedAt: a.manager.now(),
+	}
+	if purpose == m5ai.PurposeIntent {
+		decision, err := communication.Reduce(communication.ReduceInput{
+			Turn: facts, Intent: communication.IntentAdvice{State: communication.AdviceFailed},
+			Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
+		})
+		if err != nil {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
+		}
+		return a.completeM5Intent(turn.TurnID, completion, decision, "")
+	}
+	decision, err := communication.Reduce(communication.ReduceInput{
+		Turn: facts, Intent: intent, Reply: communication.ReplyAdvice{State: communication.AdviceFailed},
+	})
+	if err != nil {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
+	}
+	return a.completeM5Reply(turn.TurnID, completion, decision)
+}
+
+func (a *roundActor) completeM5Intent(
+	turnID string,
+	completion store.AIInvocationCompletion,
+	decision communication.Decision,
+	manualReason string,
+) error {
+	if manualReason == "" && decision.TurnStatus == communication.TurnManualRequired {
+		manualReason = string(decision.ManualReason)
+	}
+	source := store.DialogueIntentSource(decision.IntentSource)
+	label := decision.IntentLabel
+	if manualReason != "" && manualReason != "intentRejected" {
+		label = ""
+		source = ""
+	}
+	_, err := a.manager.store.CompleteIntentInvocation(store.CompleteIntentInvocationRequest{
+		Completion: completion, Label: label, Source: source, ManualReason: manualReason,
+	})
+	if errors.Is(err, store.ErrDialogueTurnBinding) {
+		return a.manager.store.MarkDialogueTurnManualRequired(turnID, "inputBoundaryChanged", a.manager.now())
+	}
+	return err
+}
+
+func (a *roundActor) completeM5Reply(
+	turnID string,
+	completion store.AIInvocationCompletion,
+	decision communication.Decision,
+) error {
+	request := store.CompleteReplyInvocationRequest{Completion: completion, PlannedAt: a.manager.now()}
+	if decision.Action != nil {
+		request.ActionID = stableM5ID("action", turnID, string(decision.Action.Kind))
+		request.Text = decision.Action.Text
+		request.ContentHash = syncledger.HashText(decision.Action.Text)
+	} else {
+		request.ManualReason = string(decision.ManualReason)
+		if request.ManualReason == "" {
+			request.ManualReason = "replyFailed"
+		}
+	}
+	_, err := a.manager.store.CompleteReplyInvocation(request)
+	if errors.Is(err, store.ErrDialogueTurnBinding) {
+		return a.manager.store.MarkDialogueTurnManualRequired(turnID, "inputBoundaryChanged", a.manager.now())
+	}
+	return err
+}
+
+func m5CompletionFromProvider(
+	invocationID string,
+	response m5ai.CompletionResponse,
+	callErr error,
+	latency time.Duration,
+	finishedAt time.Time,
+) store.AIInvocationCompletion {
+	completion := store.AIInvocationCompletion{
+		InvocationID: invocationID, Status: store.AIInvocationOK,
+		OutputHash: sha256Hex(response.JSONText), InputTokens: response.Usage.InputTokens,
+		CachedInputTokens: response.Usage.CachedInputTokens, OutputTokens: response.Usage.OutputTokens,
+		ReasoningTokens: response.Usage.ReasoningTokens, LatencyMs: latency.Milliseconds(), FinishedAt: finishedAt,
+	}
+	if response.Usage.ReasoningTokens == nil {
+		completion.UsageShape = store.AIInvocationReasoningFieldAbsent
+	} else {
+		completion.UsageShape = store.AIInvocationUsageComplete
+	}
+	if callErr != nil {
+		completion.Status, completion.ErrorClass = m5ProviderFailure(callErr)
+		completion.OutputHash = ""
+		completion.UsageShape = ""
+		completion.ReasoningTokens = nil
+		completion.InputTokens = 0
+		completion.CachedInputTokens = 0
+		completion.OutputTokens = 0
+	}
+	return completion
+}
+
+func m5ProviderFailure(err error) (store.AIInvocationStatus, string) {
+	var providerErr *m5ai.ProviderError
+	if !errors.As(err, &providerErr) {
+		return store.AIInvocationTransportFailed, "transport"
+	}
+	switch providerErr.Class {
+	case "budgetBlocked":
+		return store.AIInvocationBudgetBlocked, "budgetBlocked"
+	case "authentication", "rateLimited", "providerRejected":
+		return store.AIInvocationProviderRejected, providerErr.Class
+	case "responseInvalid":
+		return store.AIInvocationInvalidOutput, "responseInvalid"
+	case "timeout", "transport", "providerUnavailable", "requestInvalid":
+		return store.AIInvocationTransportFailed, providerErr.Class
+	default:
+		return store.AIInvocationTransportFailed, "providerFailure"
+	}
+}
+
+func reasoningUsageSafe(completion store.AIInvocationCompletion) bool {
+	return completion.UsageShape == store.AIInvocationUsageComplete && completion.ReasoningTokens != nil &&
+		*completion.ReasoningTokens == 0
+}
+
+func sha256Hex(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func stableM5ID(kind string, parts ...string) string {
+	return kind + "-" + sha256Hex(strings.Join(parts, "\x00"))
+}

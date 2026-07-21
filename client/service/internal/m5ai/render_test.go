@@ -55,6 +55,28 @@ func TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden(t *testing.T) {
 	}
 }
 
+func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
+	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
+	frozen, err := FreezeRecommendedTimeText(now, []string{"2026-07-13 09:00:00"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := RenderReplyPromptFrozen(
+		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
+		`{"基本":[]}`, "候选人(消息):你好", frozen, "事实",
+	)
+	if err != nil || !strings.Contains(rendered, "现在是2026年7月10日(周五)14:23。") ||
+		strings.Contains(rendered, "2026年7月11日") {
+		t.Fatalf("冻结推荐时段发生漂移: rendered=%q err=%v", rendered, err)
+	}
+	if _, err := RenderReplyPromptFrozen(
+		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
+		`{"基本":[]}`, "", frozen+`{"候选人正文":"不得回显"}`, "事实",
+	); err == nil || strings.Contains(err.Error(), "候选人正文") {
+		t.Fatalf("损坏的冻结文本必须固定分类拒绝且不回显内容: %v", err)
+	}
+}
+
 func TestIntentEnvelopeAndPromptAreCanonicalAndDisjoint(t *testing.T) {
 	history := []AdviceMessage{{Seq: 1, Direction: "outbound", Kind: "greeting", Text: "你好"}}
 	turn := []AdviceMessage{

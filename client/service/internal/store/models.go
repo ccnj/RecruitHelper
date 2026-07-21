@@ -253,16 +253,16 @@ type Candidate struct {
 	Profiles []CandidateProfile `gorm:"foreignKey:Platform,PlatformUserRef;references:Platform,PlatformUserRef;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 }
 
-// CandidateProfileStatus 是人×职位档案的主线状态。M4 只生产
-// selected→greeted，或明确 GREETING_REJECTED 时 selected→ended；
-// eliminated 只为人级建档闸的既定语义保留。
+// CandidateProfileStatus 是人×职位档案的主线状态。M5 在正式账本首次
+// 观察到候选人真实文字时生产 greeted→communicating；AI 成败不回滚该事实。
 type CandidateProfileStatus string
 
 const (
-	CandidateProfileSelected   CandidateProfileStatus = "selected"
-	CandidateProfileGreeted    CandidateProfileStatus = "greeted"
-	CandidateProfileEnded      CandidateProfileStatus = "ended"
-	CandidateProfileEliminated CandidateProfileStatus = "eliminated"
+	CandidateProfileSelected      CandidateProfileStatus = "selected"
+	CandidateProfileGreeted       CandidateProfileStatus = "greeted"
+	CandidateProfileCommunicating CandidateProfileStatus = "communicating"
+	CandidateProfileEnded         CandidateProfileStatus = "ended"
+	CandidateProfileEliminated    CandidateProfileStatus = "eliminated"
 )
 
 type CandidateProfileEndReason string
@@ -294,6 +294,8 @@ type CandidateProfile struct {
 	SuccessfulGreetingIntentID     *string
 	ConversationRef                *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
 	GreetedAt                      *time.Time
+	CommunicatingAt                *time.Time
+	FirstRealMessageSeq            *int64
 	ResumeCaptureState             ResumeCaptureState `gorm:"not null;default:unattempted;index"`
 	ResumeCaptureLogicalDispatchID *string            `gorm:"uniqueIndex"`
 	ActiveResumeSnapshotID         *string            `gorm:"uniqueIndex"`
@@ -380,6 +382,125 @@ type ProfileAIContextBinding struct {
 	BoundBy      string    `gorm:"not null"`
 	BoundAt      time.Time `gorm:"not null"`
 	SupersededAt *time.Time
+}
+
+type DialogueTurnStatus string
+
+const (
+	DialogueTurnCollected      DialogueTurnStatus = "collected"
+	DialogueTurnClassified     DialogueTurnStatus = "classified"
+	DialogueTurnAdviceReady    DialogueTurnStatus = "adviceReady"
+	DialogueTurnDispatching    DialogueTurnStatus = "dispatching"
+	DialogueTurnCompleted      DialogueTurnStatus = "completed"
+	DialogueTurnManualRequired DialogueTurnStatus = "manualRequired"
+	DialogueTurnSuperseded     DialogueTurnStatus = "superseded"
+)
+
+type DialogueIntentSource string
+
+const (
+	DialogueIntentCodeShortCircuit DialogueIntentSource = "codeShortCircuit"
+	DialogueIntentLLM              DialogueIntentSource = "llm"
+	DialogueIntentLLMFailure       DialogueIntentSource = "llmFailureFallback"
+)
+
+// DialogueTurn 是一次不可变输入边界及其确定性处理状态。正文仍来自消息账本、
+// 简历快照和职位 revision；此表只冻结稳定引用、边界和分类结果。
+type DialogueTurn struct {
+	TurnID              string             `gorm:"primaryKey"`
+	ProfileID           string             `gorm:"not null;index;uniqueIndex:ux_dialogue_turn_input,priority:1"`
+	ConversationRef     string             `gorm:"not null;index"`
+	InputDigest         string             `gorm:"not null;uniqueIndex:ux_dialogue_turn_input,priority:2"`
+	HistoryThroughSeq   int64              `gorm:"not null"`
+	InboundFromSeq      int64              `gorm:"not null"`
+	InboundThroughSeq   int64              `gorm:"not null"`
+	ContextRevisionHash string             `gorm:"not null;index"`
+	ResumeSnapshotID    string             `gorm:"not null;index"`
+	RecommendedTimeText string             `gorm:"not null"`
+	RenderFormatVersion string             `gorm:"not null"`
+	Status              DialogueTurnStatus `gorm:"not null;index"`
+	IntentLabel         m5ai.IntentLabel
+	IntentSource        DialogueIntentSource
+	ClassifiedAt        *time.Time
+	FailureReason       string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type CommunicationActionKind string
+
+const CommunicationActionReplyText CommunicationActionKind = "replyText"
+
+type CommunicationActionStatus string
+
+const (
+	CommunicationActionPlanned        CommunicationActionStatus = "planned"
+	CommunicationActionEffectPending  CommunicationActionStatus = "effectPending"
+	CommunicationActionSent           CommunicationActionStatus = "sent"
+	CommunicationActionManualRequired CommunicationActionStatus = "manualRequired"
+	CommunicationActionSuperseded     CommunicationActionStatus = "superseded"
+)
+
+// CommunicationAction 是 AI 建议经确定性代码批准后的唯一业务动作事实。
+// 本表本身不派发；后续批次只能从 ActionID 稳定派生一个 effect intent。
+type CommunicationAction struct {
+	ActionID        string                    `gorm:"primaryKey"`
+	TurnID          string                    `gorm:"not null;index;uniqueIndex:ux_communication_action_turn_kind,priority:1"`
+	Kind            CommunicationActionKind   `gorm:"not null;uniqueIndex:ux_communication_action_turn_kind,priority:2"`
+	Text            string                    `gorm:"not null"`
+	ContentHash     string                    `gorm:"not null"`
+	Status          CommunicationActionStatus `gorm:"not null;index"`
+	EffectIntentID  *string                   `gorm:"uniqueIndex"`
+	FailureReason   string
+	PlannedAt       time.Time `gorm:"not null"`
+	EffectStartedAt *time.Time
+	SentAt          *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type AIInvocationStatus string
+
+const (
+	AIInvocationOK               AIInvocationStatus = "ok"
+	AIInvocationTransportFailed  AIInvocationStatus = "transportFailed"
+	AIInvocationProviderRejected AIInvocationStatus = "providerRejected"
+	AIInvocationInvalidOutput    AIInvocationStatus = "invalidOutput"
+	AIInvocationBudgetBlocked    AIInvocationStatus = "budgetBlocked"
+)
+
+type AIInvocationUsageShape string
+
+const (
+	AIInvocationUsageComplete        AIInvocationUsageShape = "complete"
+	AIInvocationReasoningFieldAbsent AIInvocationUsageShape = "reasoningFieldAbsent"
+)
+
+// AIInvocation 只保存计量与内容 hash，不保存 prompt、正文、原始响应、key、
+// base URL 或候选人身份。turn+purpose+attempt 唯一，M5-A attempt 固定为 1。
+// 调用前预留沿用 transportFailed 且 FinishedAt=NULL；只有首次插入者可调用，
+// 调用后以 FinishedAt IS NULL 作 CAS。重启遗留预留事实不授权自动重调。
+type AIInvocation struct {
+	InvocationID        string                 `gorm:"primaryKey"`
+	TurnID              string                 `gorm:"not null;index;uniqueIndex:ux_ai_invocation_turn_purpose_attempt,priority:1"`
+	Purpose             m5ai.CompletionPurpose `gorm:"not null;uniqueIndex:ux_ai_invocation_turn_purpose_attempt,priority:2"`
+	Attempt             int                    `gorm:"not null;uniqueIndex:ux_ai_invocation_turn_purpose_attempt,priority:3"`
+	Provider            string                 `gorm:"not null"`
+	Model               string                 `gorm:"not null"`
+	ContextRevisionHash string                 `gorm:"not null;index"`
+	InputHash           string                 `gorm:"not null"`
+	OutputHash          string
+	InputTokens         int
+	CachedInputTokens   int
+	OutputTokens        int
+	ReasoningTokens     *int
+	UsageShape          AIInvocationUsageShape
+	LatencyMs           int64
+	Status              AIInvocationStatus `gorm:"not null;index"`
+	ErrorClass          string
+	EstimatedCostMicros int64
+	CreatedAt           time.Time `gorm:"not null"`
+	FinishedAt          *time.Time
 }
 
 // CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。

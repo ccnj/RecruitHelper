@@ -1246,6 +1246,21 @@ func (s *Store) PendingCardTransitions(limit int) ([]CardTransitionFact, error) 
 	return facts, err
 }
 
+// HasPendingCardTransitionAfter is the narrow M5 pre-classification read. A
+// later human outbound slides the reply boundary, so an older unacknowledged
+// card fact cannot keep poisoning future ordinary-text turns.
+func (s *Store) HasPendingCardTransitionAfter(key ConversationKey, afterSeq int64) (bool, error) {
+	if key.Platform == "" || key.AccountRef == "" || key.ConversationRef == "" || afterSeq < 0 {
+		return false, errors.New("会话键不完整")
+	}
+	var count int64
+	err := s.db.Model(&CardTransitionFact{}).
+		Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND message_seq > ? AND acknowledged_at IS NULL",
+			key.Platform, key.AccountRef, key.ConversationRef, afterSeq).
+		Limit(1).Count(&count).Error
+	return count > 0, err
+}
+
 // CardTransitionByKey 返回追加事实（包括已确认事实）；未找到返回 (nil, nil)。
 func (s *Store) CardTransitionByKey(key CardTransitionKey) (*CardTransitionFact, error) {
 	if err := validateCardTransitionKey(key); err != nil {

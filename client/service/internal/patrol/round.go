@@ -168,7 +168,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	return a.captureTrialResume(ctx)
+	return a.processM5Trial(ctx)
 }
 
 func (a *roundActor) captureTrialResume(ctx context.Context) error {

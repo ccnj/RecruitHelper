@@ -168,6 +168,7 @@ func TestCandidateProfileUpsertNeverResetsExistingState(t *testing.T) {
 		status CandidateProfileStatus
 	}{
 		{name: "greeted", status: CandidateProfileGreeted},
+		{name: "communicating", status: CandidateProfileCommunicating},
 		{name: "ended", status: CandidateProfileEnded},
 		{name: "eliminated", status: CandidateProfileEliminated},
 	} {
@@ -213,7 +214,7 @@ func TestCandidateProfileUpsertNeverResetsExistingState(t *testing.T) {
 
 func TestPersonLevelProfileGateSeesEndedAcrossAccounts(t *testing.T) {
 	for _, status := range []CandidateProfileStatus{
-		CandidateProfileSelected, CandidateProfileGreeted, CandidateProfileEnded,
+		CandidateProfileSelected, CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileEnded,
 	} {
 		t.Run(string(status), func(t *testing.T) {
 			s := openTest(t)

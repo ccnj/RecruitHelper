@@ -9,16 +9,17 @@ import (
 )
 
 const (
-	MappingVersion          = "m5-communication-v1"
-	HistoryFormatVersion    = 1
-	ScheduleFormatVersion   = 1
-	ProviderAssemblyVersion = 1
-	SendTextMaxUTF8Bytes    = 2048
-	HistoryLimit            = 20
-	IntentInputTokenLimit   = 8000
-	ReplyInputTokenLimit    = 16000
-	IntentOutputTokenLimit  = 64
-	ReplyOutputTokenLimit   = 512
+	MappingVersion              = "m5-communication-v1"
+	HistoryFormatVersion        = 1
+	ScheduleFormatVersion       = 1
+	ProviderAssemblyVersion     = 1
+	DialogueRenderFormatVersion = "m5-history1-schedule1-assembly1"
+	SendTextMaxUTF8Bytes        = 2048
+	HistoryLimit                = 20
+	IntentInputTokenLimit       = 8000
+	ReplyInputTokenLimit        = 16000
+	IntentOutputTokenLimit      = 64
+	ReplyOutputTokenLimit       = 512
 )
 
 type JobConfigDocument struct {
