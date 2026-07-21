@@ -48,6 +48,18 @@ func main() {
 		slog.Error("本地模型配置初始化失败", "err", err)
 		os.Exit(1)
 	}
+	var advice patrol.AdviceExecutor
+	if configured, loadErr := providerConfig.Load(); loadErr != nil {
+		slog.Warn("本地模型配置不可用，M5 建议层保持停用", "err", loadErr)
+	} else if configured != nil {
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil)
+		if providerErr != nil {
+			slog.Warn("本地模型配置未能激活，M5 建议层保持停用", "err", providerErr)
+		} else {
+			advice = provider
+			slog.Info("M5 建议层已就绪", "provider", provider.ProviderName(), "model", provider.ModelName())
+		}
+	}
 
 	mode, _ := st.JournalMode()
 	slog.Info("脑服务存储就绪",
@@ -79,7 +91,12 @@ func main() {
 		slog.Warn("已收束上次中断的 AI 调用", "count", recovered)
 	}
 	runner := &appbridge.PatrolRunner{Dispatcher: disp}
-	actor, err := patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{})
+	var actor *patrol.Manager
+	if advice == nil {
+		actor, err = patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{})
+	} else {
+		actor, err = patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{}, advice)
+	}
 	if err != nil {
 		slog.Error("账号 actor 初始化失败", "err", err)
 		os.Exit(1)

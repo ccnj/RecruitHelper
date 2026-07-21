@@ -40,18 +40,164 @@ func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *test
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
-			Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"信号\":\"中性\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_cache_hit_tokens":4,"completion_tokens_details":{"reasoning_tokens":0}}}`)),
+			Body: io.NopCloser(strings.NewReader(`{"choices":[{"finish_reason":"stop","message":{"content":"{\"信号\":\"中性\"}"}}],"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_cache_hit_tokens":4,"completion_tokens_details":{"reasoning_tokens":0}}}`)),
 		}, nil
 	})}
 	provider, err := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if provider.ProviderName() != "deepseek" || provider.ModelName() != "deepseek-v4-pro" {
+		t.Fatalf("provider 身份错误: provider=%s model=%s", provider.ProviderName(), provider.ModelName())
+	}
 	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
 		Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: IntentOutputTokenLimit,
 	})
 	if err != nil || calls != 1 || response.Usage.ReasoningTokens == nil || *response.Usage.ReasoningTokens != 0 {
 		t.Fatalf("provider 调用不符合单次/usage 约束: calls=%d response=%+v err=%v", calls, response, err)
+	}
+}
+
+func TestValidateBaseURLRequiresHTTPSWithoutAuthorityDecorations(t *testing.T) {
+	for _, accepted := range []string{
+		"https://provider.invalid",
+		"https://provider.invalid/v1",
+	} {
+		if err := validateBaseURL(accepted); err != nil {
+			t.Fatalf("合法 HTTPS base URL 被拒绝: value=%s err=%v", accepted, err)
+		}
+	}
+	for _, rejected := range []string{
+		"http://provider.invalid",
+		"https://user:secret@provider.invalid/v1",
+		"https://provider.invalid/v1?tenant=private",
+		"https://provider.invalid/v1?",
+		"https://provider.invalid/v1#fragment",
+	} {
+		if err := validateBaseURL(rejected); err == nil {
+			t.Fatalf("不安全 base URL 未拒绝: %s", rejected)
+		}
+	}
+}
+
+func TestOpenAICompatibleProviderRejectsInvalidChoiceAndUsageShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		max  int
+	}{
+		{
+			name: "missing finish reason",
+			raw:  `{"choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "non stop finish reason",
+			raw:  `{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "multiple choices",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}},{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "negative input",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":-1,"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "input exceeds approved budget",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":8001,"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "negative cached input",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":-1}}`,
+			max:  1,
+		},
+		{
+			name: "cached input exceeds input",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":2}}`,
+			max:  1,
+		},
+		{
+			name: "negative output",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":-1}}`,
+			max:  1,
+		},
+		{
+			name: "output exceeds request",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+			max:  1,
+		},
+		{
+			name: "negative reasoning",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":-1}}}`,
+			max:  1,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(testCase.raw)),
+				}, nil
+			})}
+			provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+			_, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+				Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: testCase.max,
+			})
+			var providerErr *ProviderError
+			if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != "responseInvalid" ||
+				strings.Contains(err.Error(), testCase.raw) {
+				t.Fatalf("非法响应未固定收敛: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatibleProviderAcceptsMissingReasoningUsageField(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"prompt_cache_hit_tokens":2}}`,
+			)),
+		}, nil
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: 1,
+	})
+	if err != nil || response.Usage.ReasoningTokens != nil {
+		t.Fatalf("reasoning 字段缺失应保留缺失形态: response=%+v err=%v", response, err)
+	}
+}
+
+func TestEstimatedCostMicrosUsesFrozenDeepSeekV4ProPrices(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage CompletionUsage
+		want  int64
+	}{
+		{name: "cache miss", usage: CompletionUsage{InputTokens: 1_000_000}, want: 435_000},
+		{name: "cache hit", usage: CompletionUsage{InputTokens: 1_000_000, CachedInputTokens: 1_000_000}, want: 3_625},
+		{name: "output", usage: CompletionUsage{OutputTokens: 1_000_000}, want: 870_000},
+		{name: "approved baseline", usage: CompletionUsage{InputTokens: 14_000, OutputTokens: 400}, want: 6_438},
+		{name: "mixed exact integer arithmetic", usage: CompletionUsage{InputTokens: 12, CachedInputTokens: 4, OutputTokens: 3}, want: 6},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := EstimatedCostMicros(testCase.usage); got != testCase.want {
+				t.Fatalf("费用估算错误: got=%d want=%d usage=%+v", got, testCase.want, testCase.usage)
+			}
+		})
 	}
 }
 

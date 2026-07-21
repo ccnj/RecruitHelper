@@ -661,7 +661,7 @@ function M5AIConfiguration() {
       setProviderConfig(result.config)
       setBaseURL('')
       setAPIKey('')
-      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。' })
+      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。本次不会热生效，请等待 M5 验收提示后再重启客户端。' })
     } catch (reason) {
       setProviderNotice({ kind: 'bad', text: errorText(reason) })
     } finally {

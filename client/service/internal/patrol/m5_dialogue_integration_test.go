@@ -127,8 +127,12 @@ func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
 		t.Fatal(err)
 	}
 
-	replyPrompt := "简历={简历}\n时段={推荐时段}\n历史={对话历史}"
-	intentPrompt := "回复={回复}\n招呼={招呼语}"
+	replyPrompt := "这是完全合成的接口验收。请只返回 JSON 对象，不要返回 Markdown 或解释。" +
+		"输出格式必须是 {\"话术_序列\":[\"一条简短自然的招聘沟通回复\"],\"动作\":\"无\"}。\n" +
+		"简历={简历}\n时段={推荐时段}\n历史={对话历史}"
+	intentPrompt := "这是完全合成的接口验收。请只返回 JSON 对象，不要返回 Markdown 或解释。" +
+		"候选人表示想了解职位时，输出 {\"信号\":\"有意向\",\"理由\":\"合成验收\"}。\n" +
+		"回复={回复}\n招呼={招呼语}"
 	documents := []m5ai.JobConfigDocument{
 		{DocType: "多轮沟通", Content: replyPrompt},
 		{DocType: "意向判断", Content: intentPrompt},

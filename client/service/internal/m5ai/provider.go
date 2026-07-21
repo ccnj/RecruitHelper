@@ -13,7 +13,27 @@ import (
 	"time"
 )
 
-const maxProviderResponseBytes = 1 << 20
+const (
+	maxProviderResponseBytes = 1 << 20
+
+	// DeepSeek V4 Pro USD prices frozen on 2026-07-21, expressed as
+	// micro-dollars per one million tokens so cost accounting never uses a
+	// floating-point conversion.
+	deepSeekV4ProCacheHitMicrosPerMillion  int64 = 3_625
+	deepSeekV4ProCacheMissMicrosPerMillion int64 = 435_000
+	deepSeekV4ProOutputMicrosPerMillion    int64 = 870_000
+	costTokenDenominator                         = 1_000_000
+)
+
+// EstimatedCostMicros returns the nearest whole micro-dollar for one validated
+// DeepSeek V4 Pro usage record. InputTokens includes CachedInputTokens.
+func EstimatedCostMicros(usage CompletionUsage) int64 {
+	cacheMissTokens := int64(usage.InputTokens - usage.CachedInputTokens)
+	numerator := cacheMissTokens*deepSeekV4ProCacheMissMicrosPerMillion +
+		int64(usage.CachedInputTokens)*deepSeekV4ProCacheHitMicrosPerMillion +
+		int64(usage.OutputTokens)*deepSeekV4ProOutputMicrosPerMillion
+	return (numerator + costTokenDenominator/2) / costTokenDenominator
+}
 
 type ProviderError struct {
 	Class string
@@ -35,6 +55,10 @@ func NewOpenAICompatibleProvider(config ProviderConfig, client *http.Client) (*O
 	}
 	return &OpenAICompatibleProvider{config: config, client: client}, nil
 }
+
+func (p *OpenAICompatibleProvider) ProviderName() string { return p.config.Provider }
+
+func (p *OpenAICompatibleProvider) ModelName() string { return p.config.Model }
 
 func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply {
@@ -124,7 +148,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	}
 	var decoded struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -137,12 +162,19 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(raw, &decoded) != nil || len(decoded.Choices) != 1 || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" {
+	if json.Unmarshal(raw, &decoded) != nil || len(decoded.Choices) != 1 ||
+		decoded.Choices[0].FinishReason != "stop" || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" ||
+		decoded.Usage.PromptTokens < 0 || decoded.Usage.PromptTokens > inputLimit || decoded.Usage.CompletionTokens < 0 ||
+		decoded.Usage.PromptCacheHitTokens < 0 || decoded.Usage.PromptCacheHitTokens > decoded.Usage.PromptTokens ||
+		decoded.Usage.CompletionTokens > request.MaxOutputTokens {
 		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
 	}
 	var reasoning *int
 	if decoded.Usage.CompletionDetails != nil {
 		reasoning = decoded.Usage.CompletionDetails.ReasoningTokens
+		if reasoning != nil && *reasoning < 0 {
+			return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+		}
 	}
 	return CompletionResponse{
 		JSONText: decoded.Choices[0].Message.Content,
@@ -157,7 +189,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 
 func validateBaseURL(value string) error {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return fmt.Errorf("base_url 无效")
 	}
 	return nil

@@ -114,9 +114,9 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 	if len(pending.inbound) == 0 {
 		return nil
 	}
-	// Production intentionally leaves this seam nil until batch 5. The branch
-	// is dependency availability, not a test-mode behavior; no turn is frozen
-	// while a real provider has not yet been approved and wired.
+	// A missing local provider configuration is dependency unavailability, not
+	// a test mode. Do not freeze a turn until the next client restart loads a
+	// complete M5-A configuration.
 	if a.manager.advice == nil {
 		return nil
 	}
@@ -175,6 +175,11 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 			if errors.Is(freezeErr, store.ErrDialogueTurnBinding) {
 				return a.manager.store.MarkActiveM5TrialManualRequired(
 					target.Profile.ProfileID, "turnBoundaryChanged", a.manager.now(),
+				)
+			}
+			if errors.Is(freezeErr, store.ErrDialogueTurnBudget) {
+				return a.manager.store.MarkActiveM5TrialManualRequired(
+					target.Profile.ProfileID, "monthlyTurnBudgetBlocked", a.manager.now(),
 				)
 			}
 			return freezeErr
@@ -529,6 +534,9 @@ func (a *roundActor) executeM5Advice(
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 		}
+		if errors.Is(err, store.ErrAIInvocationBudget) {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now())
+		}
 		return err
 	}
 	if !reserved.Created {
@@ -568,6 +576,8 @@ func (a *roundActor) executeM5Advice(
 		}
 		if callErr == nil && !reasoningUsageSafe(completion) {
 			manualReason = "reasoningUsageUnsafe"
+		} else if completion.Status == store.AIInvocationBudgetBlocked {
+			manualReason = "inputBudgetBlocked"
 		}
 		decision, reduceErr := communication.Reduce(communication.ReduceInput{
 			Turn: facts, Intent: advice, Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
@@ -688,7 +698,8 @@ func m5CompletionFromProvider(
 		InvocationID: invocationID, Status: store.AIInvocationOK,
 		OutputHash: sha256Hex(response.JSONText), InputTokens: response.Usage.InputTokens,
 		CachedInputTokens: response.Usage.CachedInputTokens, OutputTokens: response.Usage.OutputTokens,
-		ReasoningTokens: response.Usage.ReasoningTokens, LatencyMs: latency.Milliseconds(), FinishedAt: finishedAt,
+		ReasoningTokens: response.Usage.ReasoningTokens, LatencyMs: latency.Milliseconds(),
+		EstimatedCostMicros: m5ai.EstimatedCostMicros(response.Usage), FinishedAt: finishedAt,
 	}
 	if response.Usage.ReasoningTokens == nil {
 		completion.UsageShape = store.AIInvocationReasoningFieldAbsent
@@ -703,6 +714,7 @@ func m5CompletionFromProvider(
 		completion.InputTokens = 0
 		completion.CachedInputTokens = 0
 		completion.OutputTokens = 0
+		completion.EstimatedCostMicros = 0
 	}
 	return completion
 }
