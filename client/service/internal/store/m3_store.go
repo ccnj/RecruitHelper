@@ -25,6 +25,9 @@ var (
 const (
 	primitiveChatSendMessage  = "chat.sendMessage"
 	primitiveChatSendGreeting = "chat.sendGreeting"
+
+	messageRetractionReasonAuthoritativeSafeTerminal = "authoritative_safe_terminal"
+	messageRetractionReasonManualResolvedFailed      = "manual_resolved_failed"
 )
 
 // SQLite INTEGER 是有符号 64 位。Generation 在 Go 中用 uint64
@@ -94,7 +97,7 @@ func (s *Store) PrepareSend(key ConversationKey, tailLimit int) (*SendPreparatio
 			return errors.New("已收编会话没有可作 guard 的账本尾")
 		}
 		return tx.Where(conversationWhere(key), conversationArgs(key)...).
-			Order("seq DESC").Limit(tailLimit).Find(&out.Tail).Error
+			Where(activeMessageCondition).Order("seq DESC").Limit(tailLimit).Find(&out.Tail).Error
 	})
 	if err != nil {
 		return nil, err
@@ -1037,7 +1040,13 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 		}
 		if cmd.Status == CmdOk || cmd.Status == CmdResolvedOk {
 			// 迟到重复验证幂等返回已有事实。
-			return tx.First(&appended, "outbound_intent_id = ?", cmd.IntentID).Error
+			if err := tx.First(&appended, "outbound_intent_id = ?", cmd.IntentID).Error; err != nil {
+				return err
+			}
+			if appended.RetractedAt != nil {
+				return fmt.Errorf("%w: 已撤回的出站事实不得当作验证成功", ErrRecoveryStateConflict)
+			}
+			return nil
 		}
 		if cmd.Status != CmdVerifying && cmd.Status != CmdPendingReconcile && cmd.Status != CmdSuspect {
 			return ErrRecoveryStateConflict
@@ -1218,7 +1227,7 @@ func (s *Store) ResolveSuspectVerdict(req ResolveSuspectVerdictRequest) error {
 			intent.Status = EffectIntentResolvedOk
 			intent.ResultMessageSeq = &message.Seq
 		} else {
-			if err := retractOutboundMessageTx(tx, &intent, req.At); err != nil {
+			if err := retractOutboundMessageTx(tx, &intent, req.At, messageRetractionReasonManualResolvedFailed); err != nil {
 				return err
 			}
 			intent.Status = EffectIntentResolvedFailed
@@ -1246,6 +1255,9 @@ func appendOutboundMessageTx(
 	var existing Message
 	err := tx.First(&existing, "outbound_intent_id = ?", intent.IntentID).Error
 	if err == nil {
+		if existing.RetractedAt != nil {
+			return nil, fmt.Errorf("%w: intent 已有被撤回的出站事实", ErrRecoveryStateConflict)
+		}
 		return &existing, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1256,7 +1268,10 @@ func appendOutboundMessageTx(
 	if err := tx.Where(conversationWhere(key), conversationArgs(key)...).First(&conversation).Error; err != nil {
 		return nil, err
 	}
-	seq := conversation.LastMessageSeq + 1
+	seq, err := nextPhysicalMessageSeqTx(tx, key)
+	if err != nil {
+		return nil, err
+	}
 	textCopy := text
 	intentID := intent.IntentID
 	var observed *int64
@@ -1282,9 +1297,15 @@ func appendOutboundMessageTx(
 	return message, nil
 }
 
-func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time) error {
+func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time, reason string) error {
 	if intent == nil {
 		return ErrEffectIntentNotFound
+	}
+	if reason == "" {
+		return errors.New("撤回出站消息缺少原因")
+	}
+	if at.IsZero() {
+		at = time.Now()
 	}
 	var message Message
 	err := tx.First(&message, "outbound_intent_id = ?", intent.IntentID).Error
@@ -1294,12 +1315,25 @@ func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time) e
 	if err != nil {
 		return err
 	}
-	if err := tx.Delete(&message).Error; err != nil {
-		return err
+	// 重复撤回是幂等读：首次原因与时间是不可变审计事实，
+	// 后续帧不得用另一个理由覆盖。
+	if message.RetractedAt != nil {
+		return nil
+	}
+	marked := tx.Model(&Message{}).
+		Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
+			message.Platform, message.AccountRef, message.ConversationRef, message.Seq).
+		Updates(map[string]any{"retracted_at": at, "retraction_reason": reason})
+	if marked.Error != nil {
+		return marked.Error
+	}
+	if marked.RowsAffected != 1 {
+		return ErrRecoveryStateConflict
 	}
 	key := ConversationKey{Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef}
 	var latest Message
-	err = tx.Where(conversationWhere(key), conversationArgs(key)...).Order("seq DESC").First(&latest).Error
+	err = tx.Where(conversationWhere(key), conversationArgs(key)...).
+		Where(activeMessageCondition).Order("seq DESC").First(&latest).Error
 	updates := map[string]any{"last_synced_at": at}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		updates["last_message_seq"] = int64(0)

@@ -366,6 +366,11 @@ type Message struct {
 	// OutboundIntentID 只在 SX 成功终局与消息账本事实同一事务
 	// 追加时填写。用 nullable 唯一索引避免旧/外部消息的空值互相冲突。
 	OutboundIntentID *string `gorm:"uniqueIndex"`
+	// RetractedAt 表示这条脑侧消息事实已被更强证据推翻，不是
+	// 平台真的撤回了消息。它是普通显式字段，不得换成会隐式过滤的
+	// gorm.DeletedAt；活动账本与审计/去重查询必须各自明示选择语义。
+	RetractedAt      *time.Time
+	RetractionReason string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

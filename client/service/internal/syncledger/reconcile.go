@@ -426,8 +426,10 @@ func validateLedger(key store.ConversationKey, messages []store.Message) error {
 		if message.Seq <= 0 || message.ContentHash == "" || !validDirection(message.Direction) || !validKind(message.Kind) {
 			return fmt.Errorf("%w: seq=%d 消息字段非法", ErrInvalidLedger, message.Seq)
 		}
-		if i > 0 && message.Seq != previous+1 {
-			return fmt.Errorf("%w: seq=%d 不连续", ErrInvalidLedger, message.Seq)
+		// 被更强证据推翻的消息事实仍保留物理 seq，但不进入活动
+		// 账本，因而活动视图允许有洞。序号仍必须严格递增，防止乱序或重号。
+		if i > 0 && message.Seq <= previous {
+			return fmt.Errorf("%w: seq=%d 未严格递增", ErrInvalidLedger, message.Seq)
 		}
 		previous = message.Seq
 	}

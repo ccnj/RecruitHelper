@@ -563,7 +563,7 @@ func (s *Store) ApplyResultMessage(
 				intent.ResolvedAt = &effectAt
 			}
 			if plan.Effect.Retract {
-				if err := retractOutboundMessageTx(tx, &intent, effectAt); err != nil {
+				if err := retractOutboundMessageTx(tx, &intent, effectAt, messageRetractionReasonAuthoritativeSafeTerminal); err != nil {
 					return err
 				}
 				intent.ResultMessageSeq = nil
@@ -978,6 +978,21 @@ func (s *Store) TrackedConversations(key AccountKey) ([]Conversation, error) {
 
 // ---------- 消息账本与收编事务 ----------
 
+const activeMessageCondition = "retracted_at IS NULL"
+
+// nextPhysicalMessageSeqTx 从全部不可变消息事实（包括已撤回事实）
+// 分配下一个序号。Conversation.LastMessageSeq 只是活动账本尾，撤回
+// 后可以回到更早的活动行，因而绝不能再用它推导物理主键。
+func nextPhysicalMessageSeqTx(tx *gorm.DB, key ConversationKey) (int64, error) {
+	var maxSeq int64
+	if err := tx.Model(&Message{}).
+		Where(conversationWhere(key), conversationArgs(key)...).
+		Select("COALESCE(MAX(seq), 0)").Scan(&maxSeq).Error; err != nil {
+		return 0, err
+	}
+	return maxSeq + 1, nil
+}
+
 type MessageDraft struct {
 	Direction   string
 	Kind        string
@@ -1094,6 +1109,13 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 		}
 
 		seq := c.LastMessageSeq
+		if len(req.NewMessages) > 0 {
+			nextSeq, err := nextPhysicalMessageSeqTx(tx, req.Key)
+			if err != nil {
+				return err
+			}
+			seq = nextSeq - 1
+		}
 		inserted := make([]Message, 0, len(req.NewMessages))
 		for _, draft := range req.NewMessages {
 			seq++
@@ -1112,7 +1134,7 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 		for _, change := range req.CardChanges {
 			var m Message
 			if err := tx.First(&m,
-				"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+				"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
 				req.Key.Platform, req.Key.AccountRef, req.Key.ConversationRef, change.Seq).Error; err != nil {
 				return err
 			}
@@ -1133,7 +1155,7 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 					ErrConversationVersionConflict, change.Seq, fromState, change.FromState)
 			}
 			if err := tx.Model(&Message{}).
-				Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+				Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
 					req.Key.Platform, req.Key.AccountRef, req.Key.ConversationRef, change.Seq).
 				Update("card_state", change.CardState).Error; err != nil {
 				return err
@@ -1354,7 +1376,11 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 		}
 
 		oldTail := c.LastMessageSeq
-		seq := oldTail
+		firstSeq, err := nextPhysicalMessageSeqTx(tx, req.Key)
+		if err != nil {
+			return err
+		}
+		seq := firstSeq - 1
 		inserted := make([]Message, 0, len(req.Historical))
 		for _, draft := range req.Historical {
 			seq++
@@ -1385,7 +1411,7 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 		}
 
 		detail := fmt.Sprintf("oldTail=%d historicalFrom=%d historicalThrough=%d imported=%d",
-			oldTail, oldTail+1, seq, len(inserted))
+			oldTail, firstSeq, seq, len(inserted))
 		if req.AuditDetail != "" {
 			detail += " " + req.AuditDetail
 		}
@@ -1401,7 +1427,7 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 		result.Inserted = inserted
 		result.TailSeq = seq
 		result.AdoptedBoundarySeq = c.AdoptedBoundarySeq
-		result.HistoricalFromSeq = oldTail + 1
+		result.HistoricalFromSeq = firstSeq
 		result.HistoricalThroughSeq = seq
 		return nil
 	})
@@ -1413,7 +1439,8 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 
 func (s *Store) MessagesForConversation(key ConversationKey) ([]Message, error) {
 	var out []Message
-	err := s.db.Where(conversationWhere(key), conversationArgs(key)...).Order("seq").Find(&out).Error
+	err := s.db.Where(conversationWhere(key), conversationArgs(key)...).
+		Where(activeMessageCondition).Order("seq").Find(&out).Error
 	return out, err
 }
 
@@ -1424,7 +1451,7 @@ func (s *Store) RecentMessagesForConversation(key ConversationKey, limit int) ([
 	}
 	var descending []Message
 	if err := s.db.Where(conversationWhere(key), conversationArgs(key)...).
-		Order("seq DESC").Limit(limit).Find(&descending).Error; err != nil {
+		Where(activeMessageCondition).Order("seq DESC").Limit(limit).Find(&descending).Error; err != nil {
 		return nil, err
 	}
 	for left, right := 0, len(descending)-1; left < right; left, right = left+1, right-1 {
@@ -1436,7 +1463,7 @@ func (s *Store) RecentMessagesForConversation(key ConversationKey, limit int) ([
 func (s *Store) MessageBySeq(key ConversationKey, seq int64) (*Message, error) {
 	var m Message
 	err := s.db.First(&m,
-		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
 		key.Platform, key.AccountRef, key.ConversationRef, seq).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil

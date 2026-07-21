@@ -121,6 +121,43 @@ func TestReconcileCoreCases(t *testing.T) {
 	}
 }
 
+func TestReconcileAcceptsSparseStrictlyIncreasingActiveSequence(t *testing.T) {
+	ledger := textLedger(t, "old", "tail")
+	ledger[1].Seq = 3 // seq=2 是已保留但不进入活动视图的撤回事实。
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, PlatformUserRef: "user-1", Ledger: ledger,
+		Snapshot: textSnapshot("tail", "new"),
+	})
+	if err != nil {
+		t.Fatalf("稀疏活动 seq 不应被判为账本损坏: %v", err)
+	}
+	if plan.Decision != DecisionAppend || plan.Overlap != 1 || plan.Apply == nil ||
+		plan.Apply.ExpectedTailSeq != 3 || len(plan.Apply.NewMessages) != 1 {
+		t.Fatalf("稀疏账本对齐错误: %+v", plan)
+	}
+}
+
+func TestReconcileStillRejectsDuplicateOrDescendingSequence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		seqs []int64
+	}{
+		{name: "duplicate", seqs: []int64{2, 2}},
+		{name: "descending", seqs: []int64{3, 2}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ledger := textLedger(t, "a", "b")
+			ledger[0].Seq, ledger[1].Seq = test.seqs[0], test.seqs[1]
+			_, err := Reconcile(ReconcileInput{
+				Key: testConversationKey, Ledger: ledger, Snapshot: textSnapshot("b"),
+			})
+			if !errors.Is(err, ErrInvalidLedger) {
+				t.Fatalf("非严格递增 seq 必须拒绝: %v", err)
+			}
+		})
+	}
+}
+
 func TestAuditedRebaselineBecomesIdempotent(t *testing.T) {
 	ledger := textLedger(t, "a", "b", "x", "y")
 	plan, err := Reconcile(ReconcileInput{
