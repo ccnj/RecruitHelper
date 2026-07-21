@@ -31,3 +31,7 @@ func NewAccountRef() string { return "a-" + randHex(8) }
 // NewProfileID:脑为候选人×职位档案签发的稳定不透明引用。
 // 它不编码平台、账号、候选人或职位信息。
 func NewProfileID() string { return "p-" + randHex(12) }
+
+func NewResumeSnapshotID() string { return "rs-" + randHex(12) }
+
+func NewTrialSelectionID() string { return "ts-" + randHex(12) }

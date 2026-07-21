@@ -77,7 +77,7 @@ func (*greetingAPISender) HandSession(string) (string, string, bool) {
 }
 
 func (*greetingAPISender) HandNegotiation(string) ([]string, []string, bool) {
-	return []string{protocol.PrimChatSendGreeting + "@1"}, []string{
+	return []string{protocol.PrimChatSendGreeting + "@1", protocol.PrimCandidateReadResume + "@1"}, []string{
 		string(protocol.FeatureWitness1), string(protocol.FeatureLease1),
 		string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
 	}, true

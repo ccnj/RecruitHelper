@@ -11,6 +11,7 @@ import (
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
+	"recruithelper/internal/ids"
 )
 
 type roundActor struct {
@@ -167,7 +168,111 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
+	return a.captureTrialResume(ctx)
+}
+
+func (a *roundActor) captureTrialResume(ctx context.Context) error {
+	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
+	if err != nil || target == nil {
+		return err
+	}
+	switch target.Profile.ResumeCaptureState {
+	case store.ResumeCaptureCaptured:
+		return nil
+	case store.ResumeCaptureUnattempted, store.ResumeCaptureInFlight:
+		// 继续。
+	case store.ResumeCaptureManualRequired:
+		return nil
+	default:
+		return store.ErrCandidateProfileState
+	}
+	if err := a.setStage("readingResume"); err != nil {
+		return err
+	}
+	if err := a.ensureDispatchAllowed(ctx); err != nil {
+		return err
+	}
+	runner, ok := a.manager.runner.(ResumeCaptureRunner)
+	if !ok {
+		return errors.New("巡检 runner 未实现简历补采接缝")
+	}
+	expected := ""
+	if a.account.PrincipalFingerprint != nil {
+		expected = *a.account.PrincipalFingerprint
+	}
+	handle, err := runner.StartResumeCapture(ctx, ResumeCaptureRequest{
+		ProfileID: target.Profile.ProfileID,
+		HandID:    a.account.BoundHandID, ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		ExpectedPrincipalFingerprint: expected,
+	})
+	if err != nil {
+		return err
+	}
+	logicalID := handle.LogicalDispatchID()
+	var raw json.RawMessage
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		raw, err = handle.Wait(ctx)
+	}()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		var runErr *RunError
+		if !errors.As(err, &runErr) {
+			return err
+		}
+		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, resumeFailureReason(runErr))
+	}
+	meta := protocol.Primitives[protocol.PrimCandidateReadResume]
+	if err := protocol.ValidatePrimitiveData(protocol.PrimCandidateReadResume, meta.Ver, raw); err != nil {
+		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, "invalidResult")
+	}
+	var data protocol.CandidateReadResumeData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, "invalidResult")
+	}
+	_, err = a.manager.store.CompleteResumeCapture(store.CompleteResumeCaptureRequest{
+		ProfileID: target.Profile.ProfileID, LogicalDispatchID: logicalID,
+		SnapshotID: ids.NewResumeSnapshotID(), Data: data,
+	})
+	if errors.Is(err, store.ErrResumeCaptureBinding) || errors.Is(err, store.ErrResumeCaptureConflict) {
+		return nil
+	}
+	return err
+}
+
+func (a *roundActor) finishResumeCaptureFailure(profileID, logicalID, reason string) error {
+	if err := a.manager.store.FailResumeCapture(store.FailResumeCaptureRequest{
+		ProfileID: profileID, LogicalDispatchID: logicalID, Reason: reason, At: a.manager.now(),
+	}); err != nil {
+		return err
+	}
 	return nil
+}
+
+func resumeFailureReason(err *RunError) string {
+	if err == nil {
+		return "commandFailed"
+	}
+	switch err.Code {
+	case protocol.ErrCodePayloadLimit:
+		return "payloadLimit"
+	case protocol.ErrCodeAccountMismatch:
+		return "accountMismatch"
+	case protocol.ErrCodeTargetNotFound, protocol.ErrCodeConversationNotFound:
+		return "targetMissing"
+	case protocol.ErrCodeElementUnresolved:
+		return "pageStructure"
+	case protocol.ErrCodeInternalHand:
+		return "invalidResult"
+	case protocol.ErrCodeCtxLostDuringExec:
+		return "bindingLost"
+	default:
+		return "commandFailed"
+	}
 }
 
 func (a *roundActor) needsProbe() bool {

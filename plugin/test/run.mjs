@@ -222,6 +222,7 @@ try {
     greetingClickCount: 0,
     greetingServerMessageCreated: false,
     greetingProofReads: 0,
+    resumeReadCount: 0,
   }
 
   const harnessSockets = []
@@ -363,8 +364,9 @@ try {
       },
     },
     scripting: {
-      async executeScript({ target, func, args }) {
+      async executeScript({ target, world, func, args }) {
         assert.equal(target.tabId, platform.tab.id)
+        assert.equal(world, 'MAIN')
         if (!platform.tab.exists) throw new Error('tab not found')
         const name = func.name
         platform.mainCalls.push(name)
@@ -384,6 +386,23 @@ try {
               positionRef: fixturePositionRef,
               positionTitle: '合成建联职位',
               contactState: 'unestablished',
+            },
+          } }]
+        }
+        if (name === 'mainReadCurrentResume') {
+          assert.deepEqual(args, [fixtureGreetingConversationRef, fixtureCandidateRef])
+          platform.resumeReadCount += 1
+          return [{ result: {
+            status: 'ready',
+            data: {
+              conversationRef: fixtureGreetingConversationRef,
+              platformUserRef: fixtureCandidateRef,
+              observedAt: Date.now(),
+              basic: [{ label: '合成基本项', value: '合成基本值' }],
+              expectations: [{ label: '合成期望项', value: '合成期望值' }],
+              selfEvaluation: '',
+              education: '合成教育经历',
+              workExperiences: '合成工作经历',
             },
           } }]
         }
@@ -560,6 +579,7 @@ try {
     registerM2Primitives,
     registerM3Primitives,
     registerM4Primitives,
+    registerM5Primitives,
   } = await import(`${bundleURL}?t=${Date.now()}`)
 
   storage.infra = { wsUrl: brain.wsURL }
@@ -567,6 +587,7 @@ try {
   registerM2Primitives()
   registerM3Primitives()
   registerM4Primitives()
+  registerM5Primitives()
   conn = new Connection()
 
   console.log('本地稳定 handId 与生产 Connection 自动握手')
@@ -586,13 +607,14 @@ try {
     'debug.inspectSendSurface@1',
     'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1', 'chat.readThread@1',
     'candidate.readCurrent@1',
+    'candidate.readResume@1',
     'chat.readGreetingOutcome@1',
     'chat.sendMessage@1',
     'chat.sendGreeting@1',
   ]) {
     assert.ok(online.caps.includes(capability), `hello 能力集缺少 ${capability}`)
   }
-  console.log('  PASS 稳定 handId、自动登记、M2/M3/M4 能力集及在线会话')
+  console.log('  PASS 稳定 handId、自动登记、M2/M3/M4/M5 能力集及在线会话')
 
   console.log('正式绑定探测与 actor 页面恢复/列表索引')
   const bound = await admin.post('/admin/accounts/bind', {
@@ -898,6 +920,35 @@ try {
   assert.equal(recoveredGreetingLedger.ledger.filter((record) => record.name === 'chat.sendGreeting').length, 1,
     '重复 POST/重连后招呼命令账本不得增生')
   console.log('  PASS candidate.readCurrent→建档→sendGreeting 经真脑/真 WS 原子收束，重复 POST/重连零增生')
+
+  console.log('M5 显式单档案选择经正式巡检补采一次并落不可变快照')
+  platform.tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${encodeURIComponent(fixtureGreetingConversationRef)}`
+  const trialSelected = await admin.post('/admin/m5/trial/select', {
+    platform: 'zhilian', accountRef, conversationRef: fixtureGreetingConversationRef,
+  })
+  assert.equal(trialSelected.trial.profileId, selected.profileId)
+  assert.ok(['unattempted', 'inFlight', 'captured'].includes(trialSelected.trial.captureState))
+  const capturedTrial = await eventually(
+    () => admin.get('/admin/m5/trial'),
+    (view) => view.trial?.captureState === 'captured' && view.trial?.snapshot?.sectionsComplete === true,
+    '正式 M5 巡检没有完成简历补采快照',
+    75_000,
+    250,
+  )
+  assert.equal(platform.resumeReadCount, 1, '单 profile 补采必须只执行一次 MAIN 读取')
+  assert.equal(capturedTrial.trial.snapshot.basicItems, 1)
+  assert.equal(capturedTrial.trial.snapshot.expectationItems, 1)
+  assert.ok(capturedTrial.trial.snapshot.bytes > 0)
+  const capturedSnapshotId = capturedTrial.trial.snapshot.snapshotId
+  const resumeLedger = await admin.get('/admin/ledger')
+  assert.equal(resumeLedger.ledger.filter((record) => record.name === 'candidate.readResume').length, 1)
+  assert.ok(platform.mainCalls.includes('mainReadCurrentResume'))
+  await admin.post('/admin/accounts/run', { platform: 'zhilian', accountRef })
+  await sleep(500)
+  const repeatedTrial = await admin.get('/admin/m5/trial')
+  assert.equal(repeatedTrial.trial.snapshot.snapshotId, capturedSnapshotId)
+  assert.equal(platform.resumeReadCount, 1, '重复巡检不得增生第二次简历读取')
+  console.log('  PASS 显式选择→patrol→candidate.readResume→单快照，重复巡检零增生')
 
   // 保留原有里程碑 1 debug E2E。只有以下回归使用 /admin/cmd。
   async function dispatchDebugAndWait(name, args) {

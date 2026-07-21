@@ -268,22 +268,26 @@ func (s *Store) CreateCmdIfDomainAvailable(c *CmdRecord) error {
 	}
 	prepareRootCmd(c)
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if c.Class != "readonly" && c.Domain == "" {
-			return errors.New("驱动命令 domain 不能为空")
-		}
-		if c.Class != "readonly" && c.Domain != "" {
-			var n int64
-			if err := tx.Model(&CmdRecord{}).
-				Where("domain = ? AND status IN ?", c.Domain, append(append([]CmdStatus(nil), nonTerminalStatuses...), CmdSuspect)).
-				Count(&n).Error; err != nil {
-				return err
-			}
-			if n > 0 {
-				return ErrDomainBusy
-			}
-		}
-		return createRootCmd(tx, c)
+		return createCmdIfDomainAvailableTx(tx, c)
 	})
+}
+
+func createCmdIfDomainAvailableTx(tx *gorm.DB, c *CmdRecord) error {
+	if c.Class != "readonly" && c.Domain == "" {
+		return errors.New("驱动命令 domain 不能为空")
+	}
+	if c.Class != "readonly" && c.Domain != "" {
+		var n int64
+		if err := tx.Model(&CmdRecord{}).
+			Where("domain = ? AND status IN ?", c.Domain, append(append([]CmdStatus(nil), nonTerminalStatuses...), CmdSuspect)).
+			Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrDomainBusy
+		}
+	}
+	return createRootCmd(tx, c)
 }
 
 // ReplaceCmd 原子完成“旧物理命令终局化 + 建立替代命令 + 推进 logical leaf”。

@@ -5,6 +5,9 @@ import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
 import type {
   CandidateReadCurrentData,
+  CandidateReadResumeArgs,
+  CandidateReadResumeData,
+  CandidateResumeLabelValue,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
   ChatReadListArgs,
@@ -27,6 +30,7 @@ import type {
   SideEffect,
   ThreadMessage,
 } from '../../base/protocol'
+import { Primitive as PrimitiveName, validatePrimitiveData } from '../../base/protocol'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -53,6 +57,8 @@ export class ZhilianPlatformError extends Error {
 // 平台实现只给生成类型起本地别名，不再手写一份协议 DTO。
 export type ZhilianProbe = ProbePlatformData
 export type ZhilianCurrentCandidate = CandidateReadCurrentData
+export type ZhilianResumeArgs = CandidateReadResumeArgs
+export type ZhilianResumeData = CandidateReadResumeData
 export type ZhilianGreetingArgs = ChatSendGreetingArgs
 export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
@@ -110,6 +116,37 @@ interface MainCurrentCandidateFailed {
 }
 
 type MainCurrentCandidateResult = MainCurrentCandidateReady | MainCurrentCandidateFailed
+
+const MAIN_RESUME_FAILURE_REASONS = [
+  'route_changed',
+  'session_unavailable',
+  'target_changed',
+  'detail_cardinality',
+  'stale_modal',
+  'entry_cardinality',
+  'modal_cardinality',
+  'basic_unresolved',
+  'expectations_unresolved',
+  'work_unresolved',
+  'education_unresolved',
+  'self_evaluation_unresolved',
+  'payload_limit',
+  'unexpected',
+] as const
+
+type MainResumeFailureReason = typeof MAIN_RESUME_FAILURE_REASONS[number]
+
+interface MainResumeReady {
+  status: 'ready'
+  data: ZhilianResumeData
+}
+
+interface MainResumeFailed {
+  status: 'failed'
+  reason: MainResumeFailureReason
+}
+
+type MainResumeResult = MainResumeReady | MainResumeFailed
 
 const MAIN_GREETING_FAILURE_REASONS = [
   'action_window_elapsed',
@@ -660,6 +697,210 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
         contactState: greetingButtons.length === 1 ? 'unestablished' : 'unknown',
       },
     }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
+// IM 简历补采只接受当前 route 与 imEngine 唯一会话的直接绑定。单次 evaluator
+// 在同一 MAIN task 内复核、只点一次当前详情标准入口、完整读取并再次复核。
+async function mainReadCurrentResume(
+  conversationRef: string,
+  platformUserRef: string,
+): Promise<MainResumeResult> {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const blockText = (element: HTMLElement): string => {
+    const raw = typeof element.innerText === 'string' ? element.innerText : element.textContent ?? ''
+    return raw.normalize('NFC').replace(/\u00a0/gu, ' ').split(/\n+/u)
+      .map((line) => line.replace(/[\t ]+/gu, ' ').trim()).filter(Boolean).join('\n')
+  }
+  const failed = (reason: MainResumeFailureReason): MainResumeFailed => ({ status: 'failed', reason })
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const routeMatches = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const initialSessions = (): AnyRecord[] | null => {
+    const source = Array.from(document.scripts ?? [])
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return null
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try {
+          const initial = asRecord(JSON.parse(candidate.slice(start, index + 1)))
+          const im = asRecord(initial?.im)
+          return Array.isArray(im?.sessions) ? im.sessions as AnyRecord[] : null
+        } catch {
+          return null
+        }
+      }
+    }
+    return null
+  }
+  const bindingSessions = (): AnyRecord[] | null => {
+    const engine = asRecord((window as unknown as AnyRecord).imEngine)
+    if (engine && Array.isArray(engine.sessions)) return engine.sessions as AnyRecord[]
+    return initialSessions()
+  }
+  const targetMatches = (): boolean => {
+    const sessions = bindingSessions()
+    if (sessions === null) return false
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    return matches.length === 1 && clean(matches[0].peerPartnerId) === platformUserRef
+  }
+
+  try {
+    if (!routeMatches()) return failed('route_changed')
+    if (bindingSessions() === null) return failed('session_unavailable')
+    if (!targetMatches()) return failed('target_changed')
+
+    const details = visibleAll(document, '.im-session-detail')
+    if (details.length !== 1) return failed('detail_cardinality')
+    const detail = details[0]
+    if (visibleAll(document, '.new-shortcut-resume__modal').length !== 0) return failed('stale_modal')
+    const entries = visibleAll(detail, '.hover-resume-footer__button, button, a, [role="button"]')
+      .filter((element) => clean(element.textContent) === '查看详情' &&
+        element.closest('.im-session-detail') === detail)
+    if (entries.length !== 1) return failed('entry_cardinality')
+
+    entries[0].click()
+    let modals: HTMLElement[] = []
+    const waitUntil = Date.now() + 6_000
+    while (Date.now() < waitUntil) {
+      modals = visibleAll(document, '.new-shortcut-resume__modal')
+      if (modals.length !== 0) break
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    }
+    if (modals.length !== 1) return failed('modal_cardinality')
+    const modal = modals[0]
+    const roots = visibleAll(modal, '.resume-detail')
+    if (roots.length !== 1) return failed('modal_cardinality')
+    const root = roots[0]
+
+    const names = visibleAll(root, '.resume-basic-new__name').map((element) => clean(element.textContent))
+      .filter(Boolean)
+    const meta = visibleAll(root, '.resume-basic-new__meta-item').map((element) => clean(element.textContent))
+      .filter(Boolean)
+    const semanticCounts = {
+      age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
+      work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
+      education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
+    }
+    if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
+        semanticCounts.work !== 1 || semanticCounts.education !== 1) {
+      return failed('basic_unresolved')
+    }
+    let otherIndex = 0
+    const basicLabel = (value: string): string => {
+      if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
+      if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
+      if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
+      if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
+      if (/户口/u.test(value)) return '户口地'
+      if (/(?:现居|居住)/u.test(value)) return '现居地'
+      otherIndex += 1
+      return `其他信息${otherIndex}`
+    }
+    const basic: CandidateResumeLabelValue[] = [
+      { label: '姓名', value: names[0] },
+      ...meta.map((value) => ({ label: basicLabel(value), value })),
+    ]
+
+    const purposes = visibleAll(root, '.new-resume-purposes__item')
+    if (purposes.length === 0) return failed('expectations_unresolved')
+    const expectations: CandidateResumeLabelValue[] = []
+    for (const purpose of purposes) {
+      const fields = [
+        ['期望地点', '.new-resume-purposes__item-city'],
+        ['期望职位', '.new-resume-purposes__item-type'],
+        ['期望薪资', '.new-resume-purposes__item-salary'],
+      ] as const
+      for (const [label, selector] of fields) {
+        const values = visibleAll(purpose, selector).map((element) => clean(element.textContent)).filter(Boolean)
+        if (values.length !== 1) return failed('expectations_unresolved')
+        expectations.push({ label, value: values[0] })
+      }
+    }
+
+    const sectionText = (selector: string): string | null => {
+      const sections = visibleAll(root, selector)
+      if (sections.length !== 1) return null
+      const items = visibleAll(sections[0], `${selector}__item`)
+      if (items.length > 0) {
+        const values = items.map(blockText).filter(Boolean)
+        return values.length === items.length ? values.join('\n\n') : null
+      }
+      return null
+    }
+    const workExperiences = sectionText('.new-work-experiences')
+    if (workExperiences === null) return failed('work_unresolved')
+    const education = sectionText('.new-education-experiences')
+    if (education === null) return failed('education_unresolved')
+
+    const selfStructures = visibleAll(root,
+      '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
+    const selfHeadings = visibleAll(root, 'h1, h2, h3, h4, h5, b, .resume-section-new__title')
+      .filter((element) => ['自我评价', '自我描述'].includes(clean(element.textContent)))
+    let selfEvaluation = ''
+    if (selfStructures.length > 1 || selfHeadings.length > 1 ||
+        (selfStructures.length === 0 && selfHeadings.length !== 0)) {
+      return failed('self_evaluation_unresolved')
+    }
+    if (selfStructures.length === 1) {
+      const lines = blockText(selfStructures[0]).split('\n')
+        .filter((line) => line !== '自我评价' && line !== '自我描述')
+      if (lines.length === 0) return failed('self_evaluation_unresolved')
+      selfEvaluation = lines.join('\n')
+    }
+
+    if (!routeMatches() || !targetMatches() || visibleAll(document, '.im-session-detail').length !== 1 ||
+        visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
+      return failed('target_changed')
+    }
+    const data: ZhilianResumeData = {
+      conversationRef,
+      platformUserRef,
+      observedAt: Date.now(),
+      basic,
+      expectations,
+      selfEvaluation,
+      education,
+      workExperiences,
+    }
+    if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) return failed('payload_limit')
+    return { status: 'ready', data }
   } catch {
     return failed('unexpected')
   }
@@ -2009,6 +2250,62 @@ async function sendZhilianTab(conversationRef: string): Promise<chrome.tabs.Tab>
     )
   }
   return tab
+}
+
+function throwResumeFailure(result: MainResumeFailed): never {
+  if (result.reason === 'payload_limit') {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '完整简历超过当前内联载荷上限', 'manualOnly')
+  }
+  if (result.reason === 'route_changed' || result.reason === 'target_changed' ||
+      result.reason === 'session_unavailable') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '简历读取期间目标会话绑定无法确证', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前简历详情无法完整且唯一读取', 'manualOnly')
+}
+
+export async function readZhilianResume(
+  args: ZhilianResumeArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianResumeData> {
+  if (!args || typeof args.conversationRef !== 'string' || !args.conversationRef ||
+      typeof args.platformUserRef !== 'string' || !args.platformUserRef) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '简历读取缺少目标会话或候选人引用', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标智联会话页面尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (!initialProbe.contentScriptOk || initialProbe.pageKind !== 'im' || !initialProbe.surface?.imListVisible) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面感知通道尚未就绪', 'afterRecovery', 'contentScriptDead')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对简历详情入口', 10)
+
+  ctx.checkpoint()
+  const beforeClickTab = await chrome.tabs.get(tab.id)
+  assertExpectedPrincipal(await probeTab(beforeClickTab), expectedPrincipalFingerprint)
+  const result = await runMain(tab.id, mainReadCurrentResume, [
+    args.conversationRef,
+    args.platformUserRef,
+  ])
+  if (result.status === 'failed') throwResumeFailure(result)
+  if (!result.data || result.data.conversationRef !== args.conversationRef ||
+      result.data.platformUserRef !== args.platformUserRef) {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '简历读取结果的目标绑定无法确证', 'manualOnly')
+  }
+  if (jsonBytes(result.data) > 65_536) {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '完整简历超过当前内联载荷上限', 'manualOnly')
+  }
+  if (validatePrimitiveData(PrimitiveName.CandidateReadResume, 1, result.data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '完整简历结构不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+  ctx.progress('简历读取完成', 100)
+  return result.data
 }
 
 async function readZhilianListFromDOM(
@@ -4754,6 +5051,7 @@ export const zhilianTestHooks = Object.freeze({
   encodeCursor,
   mainProbeZhilian,
   mainReadCurrentCandidate,
+  mainReadCurrentResume,
   mainReadGreetingProof,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,

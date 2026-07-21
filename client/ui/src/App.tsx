@@ -313,6 +313,11 @@ export function App() {
                     '该会话已纳入跟踪；现有消息只建立基线，不算作新消息',
                     () => api.trackConversation(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
                   )}
+                  onSelectM5Trial={() => selectedConversation && runMutation(
+                    'm5-trial',
+                    '该档案已被明确选为 M5 简历补采试运行；巡检会沿正式路径执行一次',
+                    () => api.selectM5Trial(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
+                  )}
                   onSendChanged={() => {
                     conversations.refresh()
                     messages.refresh()
@@ -898,7 +903,7 @@ function ConversationLedger({ rows, loading, error, selectedRef, onSelect }: {
 }
 
 function ActivityLedger({
-  account, conversation, messages, audits, messagesError, auditsError, tab, busy, onTab, onTrack, onSendChanged,
+  account, conversation, messages, audits, messagesError, auditsError, tab, busy, onTab, onTrack, onSelectM5Trial, onSendChanged,
 }: {
   account: AccountView
   conversation: ConversationView | null
@@ -910,6 +915,7 @@ function ActivityLedger({
   busy: string
   onTab: (tab: 'messages' | 'audits') => void
   onTrack: () => void
+  onSelectM5Trial: () => void
   onSendChanged: () => void
 }) {
   return (
@@ -922,6 +928,11 @@ function ActivityLedger({
         {conversation && !isTracked(conversation.trackingState) && (
           <button className="compact-button" disabled={busy !== ''} onClick={onTrack}>
             {busy === 'track' ? '正在纳入…' : '纳入跟踪'}
+          </button>
+        )}
+        {conversation?.trackingState === 'adopted' && (
+          <button className="compact-button" disabled={busy !== ''} onClick={onSelectM5Trial}>
+            {busy === 'm5-trial' ? '正在记入…' : '选作简历补采试运行'}
           </button>
         )}
       </div>

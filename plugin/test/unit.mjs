@@ -1824,6 +1824,7 @@ function installM4CurrentCandidateFixture() {
   }
   globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
   globalThis.document = {
+    scripts: [],
     querySelectorAll(selector) {
       if (selector === '.new-shortcut-resume__modal') return state.details
       if (selector === '[role="listitem"]') return state.items
@@ -1899,6 +1900,149 @@ test('candidate.readCurrent MAIN 对身份、绑定与职位歧义逐项失败�
         status: 'failed',
         reason: expectedReason,
       }, name)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+function installM5ResumeFixture() {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    window: globalThis.window,
+    getComputedStyle: globalThis.getComputedStyle,
+  }
+  const conversationRef = 'fixture-conversation-m5'
+  const platformUserRef = 'fixture-user-m5'
+  const node = (text = '') => ({
+    textContent: text,
+    innerText: text,
+    getClientRects: () => [{}],
+    query: new Map(),
+    querySelectorAll(selector) { return this.query.get(selector) ?? [] },
+    closest(selector) { return selector === '.im-session-detail' ? this.detail ?? null : null },
+    click() {},
+  })
+  const detail = node()
+  detail.detail = detail
+  const entry = node('查看详情')
+  entry.detail = detail
+  const modal = node()
+  const root = node()
+  const state = { modals: [], clicks: 0 }
+  entry.click = () => {
+    state.clicks += 1
+    state.modals = [modal]
+  }
+  detail.query.set('.hover-resume-footer__button, button, a, [role="button"]', [entry])
+  modal.query.set('.resume-detail', [root])
+  root.query.set('.resume-basic-new__name', [node('合成候选人')])
+  root.query.set('.resume-basic-new__meta-item', [
+    node('30岁（1996年）'), node('8年工作经验'), node('本科'), node('在职-看看机会'), node('现居：合成城市'),
+  ])
+  const purpose = node()
+  purpose.query.set('.new-resume-purposes__item-city', [node('合成城市')])
+  purpose.query.set('.new-resume-purposes__item-type', [node('合成职位')])
+  purpose.query.set('.new-resume-purposes__item-salary', [node('合成薪资')])
+  root.query.set('.new-resume-purposes__item', [purpose])
+  const work = node()
+  work.query.set('.new-work-experiences__item', [node('合成公司\n合成职责')])
+  root.query.set('.new-work-experiences', [work])
+  const education = node()
+  education.query.set('.new-education-experiences__item', [node('合成学校\n本科')])
+  root.query.set('.new-education-experiences', [education])
+  root.query.set('.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation', [])
+  root.query.set('h1, h2, h3, h4, h5, b, .resume-section-new__title', [])
+  globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
+  globalThis.window = { imEngine: { sessions: [{ sessionId: conversationRef, peerPartnerId: platformUserRef }] } }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector === '.im-session-detail') return [detail]
+      if (selector === '.new-shortcut-resume__modal') return state.modals
+      return []
+    },
+  }
+  return {
+    conversationRef,
+    platformUserRef,
+    root,
+    state,
+    modal,
+    useInitialBinding() {
+      globalThis.window = {}
+      globalThis.document.scripts = [{
+        textContent: `__INITIAL_STATE__=${JSON.stringify({
+          im: { sessions: [{ sessionId: conversationRef, peerPartnerId: platformUserRef }] },
+        })};`,
+      }]
+    },
+    useExpandedBasicAndSelf() {
+      root.query.set('.resume-basic-new__meta-item', [
+        node('30岁（1996年）'), node('8年'), node('本科'), node('离职-正在找工作'),
+        node('现居：合成城市'), node('户口：合成城市'), node('合成附加信息'),
+      ])
+      root.query.set('.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation', [
+        node('合成自评第一行\n合成自评第二行'),
+      ])
+    },
+    restore() {
+      globalThis.document = original.document
+      globalThis.location = original.location
+      globalThis.window = original.window
+      globalThis.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('candidate.readResume MAIN 单次复核只点击一次并返回完整五分区', async () => {
+  for (const source of ['runtime', 'initial']) {
+    const fixture = installM5ResumeFixture()
+    try {
+      if (source === 'initial') {
+        fixture.useInitialBinding()
+        fixture.useExpandedBasicAndSelf()
+      }
+      const args = [fixture.conversationRef, fixture.platformUserRef]
+      const result = await zhilianTestHooks.mainReadCurrentResume(...args)
+      assert.equal(result.status, 'ready', source)
+      assert.equal(fixture.state.clicks, 1, source)
+      assert.equal(result.data.conversationRef, fixture.conversationRef)
+      assert.equal(result.data.platformUserRef, fixture.platformUserRef)
+      assert.deepEqual(result.data.expectations.map(({ label }) => label),
+        ['期望地点', '期望职位', '期望薪资'])
+      if (source === 'initial') {
+        assert.deepEqual(result.data.basic.map(({ label }) => label), [
+          '姓名', '年龄', '工作经验', '最高学历', '求职状态', '现居地', '户口地', '其他信息1',
+        ])
+        assert.equal(result.data.selfEvaluation, '合成自评第一行\n合成自评第二行')
+      } else {
+        assert.deepEqual(result.data.basic.map(({ label }) => label),
+          ['姓名', '年龄', '工作经验', '最高学历', '求职状态', '现居地'])
+        assert.equal(result.data.selfEvaluation, '', '结构和标题同时不存在才表示明确空自评')
+      }
+      assert.ok(result.data.education && result.data.workExperiences)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.readResume MAIN 对旧弹窗、换绑与缺区整体失败且不点击', async () => {
+  for (const [name, mutate, reason] of [
+    ['旧弹窗', (fixture) => { fixture.state.modals = [fixture.modal] }, 'stale_modal'],
+    ['目标换绑', (fixture) => { globalThis.window.imEngine.sessions[0].peerPartnerId = 'other-user' }, 'target_changed'],
+    ['教育缺区', (fixture) => { fixture.root.query.set('.new-education-experiences', []) }, 'education_unresolved'],
+  ]) {
+    const fixture = installM5ResumeFixture()
+    try {
+      mutate(fixture)
+      const result = await zhilianTestHooks.mainReadCurrentResume(
+        fixture.conversationRef, fixture.platformUserRef)
+      assert.deepEqual(result, { status: 'failed', reason }, name)
+      assert.equal(fixture.state.clicks, name === '教育缺区' ? 1 : 0)
+      assert.equal(result.data, undefined)
     } finally {
       fixture.restore()
     }

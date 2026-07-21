@@ -64,6 +64,8 @@ func Open(dataDir string) (*Store, error) {
 		&Account{},
 		&Candidate{},
 		&CandidateProfile{},
+		&CandidateResumeSnapshot{},
+		&M5TrialSelection{},
 		&EffectIntent{},
 		&CandidateGreetingHead{},
 		&ConversationEffectHead{},
@@ -77,6 +79,11 @@ func Open(dataDir string) (*Store, error) {
 		&AuditEntry{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
+	}
+	if err := db.Model(&CandidateProfile{}).
+		Where("resume_capture_state IS NULL OR resume_capture_state = ?", "").
+		UpdateColumn("resume_capture_state", ResumeCaptureUnattempted).Error; err != nil {
+		return nil, fmt.Errorf("回填候选人简历补采状态: %w", err)
 	}
 	// M1 已有命令没有 logical_dispatch_id。M2 迁移把每条旧命令视为一条独立逻辑链的根,
 	// 保证升级后重启扫描与 ledger 查询不出现不可达记录。

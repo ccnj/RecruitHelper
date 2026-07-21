@@ -435,6 +435,17 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("招呼 result 的候选人/职位/contentHash 与原始意图不一致")
 		}
 	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadResume && res.Status == protocol.ResultStatusOk {
+		var args protocol.CandidateReadResumeArgs
+		var data protocol.CandidateReadResumeData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = errors.New("简历读取 args 无法解析")
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("简历读取 data 无法解析")
+		} else if data.ConversationRef != args.ConversationRef || data.PlatformUserRef != args.PlatformUserRef {
+			validationErr = errors.New("简历读取 result 的目标引用与原命令不一致")
+		}
+	}
 	if validationErr == nil {
 		return res, ""
 	}

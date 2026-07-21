@@ -75,6 +75,25 @@ type Runner interface {
 	Start(context.Context, RunRequest) (RunHandle, error)
 }
 
+type ResumeCaptureRequest struct {
+	ProfileID                    string
+	HandID                       string
+	ExpectedSession              string
+	ExpectedBootID               string
+	Platform                     string
+	AccountRef                   string
+	ExpectedPrincipalFingerprint string
+}
+
+type ResumeCaptureHandle interface {
+	LogicalDispatchID() string
+	Wait(context.Context) (json.RawMessage, error)
+}
+
+type ResumeCaptureRunner interface {
+	StartResumeCapture(context.Context, ResumeCaptureRequest) (ResumeCaptureHandle, error)
+}
+
 // RunError is the machine-readable failure returned by a Runner adapter.
 // Reason is meaningful for CTX_NOT_READY and must come from error.data.reason.
 type RunError struct {

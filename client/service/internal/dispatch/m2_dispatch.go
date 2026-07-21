@@ -28,11 +28,12 @@ type DispatchRequest struct {
 }
 
 type dispatchOptions struct {
-	legacyDebug      bool
-	effectIntent     *store.EffectIntent
-	expectedTailSeq  int64
-	previousIntentID string
-	verificationFor  string
+	legacyDebug            bool
+	effectIntent           *store.EffectIntent
+	expectedTailSeq        int64
+	previousIntentID       string
+	verificationFor        string
+	resumeCaptureProfileID string
 }
 
 type dispatchResult struct {
@@ -111,13 +112,17 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			return dispatchResult{}, ErrStaleSession
 		}
 	}
-	if meta.Class == protocol.ClassEffectful {
+	if meta.Class == protocol.ClassEffectful || req.Name == protocol.PrimCandidateReadResume {
 		matched, current := d.sender.HandContractMatch(req.HandID)
 		if !current {
 			return dispatchResult{}, ErrHandOffline
 		}
 		if !matched {
-			d.st.Audit("effect_contract_mismatch_blocked", req.HandID, "",
+			category := "effect_contract_mismatch_blocked"
+			if req.Name == protocol.PrimCandidateReadResume {
+				category = "resume_contract_mismatch_blocked"
+			}
+			d.st.Audit(category, req.HandID, "",
 				fmt.Sprintf("stage=construct primitive=%s", req.Name))
 			return dispatchResult{}, ErrContractMismatch
 		}
@@ -231,6 +236,16 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			created = createdResult.Created
 			rec = &createdResult.Command
 			msgID = rec.MsgID
+		}
+	} else if opts.resumeCaptureProfileID != "" {
+		var createdResult *store.CreateResumeCaptureCmdResult
+		createdResult, err = d.st.CreateResumeCaptureCmd(store.CreateResumeCaptureCmdRequest{
+			ProfileID: opts.resumeCaptureProfileID, Command: *rec, Now: time.Now(),
+		})
+		if err == nil {
+			created = createdResult.Created
+			rec = &createdResult.Command
+			msgID = rec.LogicalDispatchID
 		}
 	} else if opts.verificationFor != "" {
 		err = d.st.CreateVerificationCmd(opts.verificationFor, rec)

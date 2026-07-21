@@ -60,6 +60,89 @@ func (h *patrolRunHandle) Wait(ctx context.Context) (json.RawMessage, error) {
 	return resultData(logical.Leaf)
 }
 
+func (h *patrolRunHandle) LogicalDispatchID() string { return h.logicalID }
+
+func (r PatrolRunner) StartResumeCapture(
+	ctx context.Context,
+	req patrol.ResumeCaptureRequest,
+) (patrol.ResumeCaptureHandle, error) {
+	if r.Dispatcher == nil {
+		return nil, errors.New("dispatcher 不能为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	receipt, err := r.Dispatcher.DispatchResumeCapture(dispatch.ResumeCaptureDispatchRequest{
+		ProfileID: req.ProfileID, HandID: req.HandID,
+		ExpectedSession: req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
+		Platform: req.Platform, AccountRef: req.AccountRef,
+		ExpectedPrincipalFingerprint: req.ExpectedPrincipalFingerprint,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &resumeCaptureRunHandle{dispatcher: r.Dispatcher, logicalID: receipt.LogicalDispatchID}, nil
+}
+
+type resumeCaptureRunHandle struct {
+	dispatcher *dispatch.Dispatcher
+	logicalID  string
+}
+
+func (h *resumeCaptureRunHandle) LogicalDispatchID() string { return h.logicalID }
+
+func (h *resumeCaptureRunHandle) Wait(ctx context.Context) (json.RawMessage, error) {
+	logical, err := h.dispatcher.WaitLogical(ctx, h.logicalID)
+	if err != nil {
+		return nil, err
+	}
+	return resumeCaptureResultData(logical.Leaf)
+}
+
+func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
+	if leaf.ResultBody == "" {
+		code := protocol.ErrCodeCtxLostDuringExec
+		if leaf.ErrorCode != "" {
+			code = protocol.ErrorCode(leaf.ErrorCode)
+		}
+		return nil, &patrol.RunError{Code: code}
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal([]byte(leaf.ResultBody), &result); err != nil {
+		return nil, errors.New("简历补采持久结果无法解析")
+	}
+	if result.Status == protocol.ResultStatusOk {
+		if len(result.Data) == 0 || string(result.Data) == "null" {
+			return nil, errors.New("简历补采成功结果缺少 data")
+		}
+		return append(json.RawMessage(nil), result.Data...), nil
+	}
+	code := protocol.ErrCodeCtxLostDuringExec
+	var reason protocol.NotReadyReason
+	var retryable protocol.Retryable
+	var sideEffect protocol.SideEffect
+	if result.Error != nil {
+		if result.Error.Code != "" {
+			code = result.Error.Code
+		}
+		retryable = result.Error.Retryable
+		sideEffect = result.Error.SideEffect
+		if len(result.Error.Data) > 0 {
+			var detail struct {
+				Reason protocol.NotReadyReason `json:"reason"`
+			}
+			if json.Unmarshal(result.Error.Data, &detail) == nil {
+				reason = detail.Reason
+			}
+		}
+	} else if result.Status == protocol.ResultStatusCanceled {
+		code = protocol.ErrCodeCanceledByBrain
+	} else if result.Status == protocol.ResultStatusExpired {
+		code = protocol.ErrCodeExecTimeoutHand
+	}
+	return nil, &patrol.RunError{Code: code, Reason: reason, Retryable: retryable, SideEffect: sideEffect}
+}
+
 // Run 保留给 appbridge 的窄集成测试和非 actor 调用；生产巡检只走 Start/Wait。
 func (r PatrolRunner) Run(ctx context.Context, req patrol.RunRequest) (json.RawMessage, error) {
 	handle, err := r.Start(ctx, req)

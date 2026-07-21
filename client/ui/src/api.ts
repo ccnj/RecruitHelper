@@ -470,6 +470,9 @@ export const api = {
   latestGreetingIntent,
   conversations: (platform: string, accountRef: string) => get<{ conversations: ConversationView[] }>(query('/admin/conversations', { platform, accountRef })),
   trackConversation: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/conversations/track', { platform, accountRef, conversationRef }),
+  selectM5Trial: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/m5/trial/select', {
+    platform, accountRef, conversationRef,
+  }),
   messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),
   sendMessage: (
     intentId: string, previousIntentId: string, platform: string,

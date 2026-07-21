@@ -120,6 +120,7 @@ func (s *Store) SelectCandidateProfile(req SelectCandidateProfileRequest) (*Sele
 			ProfileID: req.ProfileID, Platform: req.Scope.Platform, AccountRef: req.Scope.AccountRef,
 			PlatformUserRef: req.Scope.PlatformUserRef, PositionRef: req.Scope.PositionRef,
 			PositionTitle: req.PositionTitle, MainStatus: CandidateProfileSelected,
+			ResumeCaptureState: ResumeCaptureUnattempted,
 		}
 		if err := tx.Create(&profile).Error; err != nil {
 			return err

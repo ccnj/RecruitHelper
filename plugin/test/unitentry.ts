@@ -19,6 +19,7 @@ export {
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,
+  readZhilianResume,
   readZhilianGreetingOutcome,
   inspectZhilianSendSurfaceDiagnostic,
   sendZhilianGreeting,

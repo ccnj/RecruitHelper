@@ -265,6 +265,15 @@ type CandidateProfileEndReason string
 
 const CandidateProfileEndGreetingFailed CandidateProfileEndReason = "greetingFailed"
 
+type ResumeCaptureState string
+
+const (
+	ResumeCaptureUnattempted    ResumeCaptureState = "unattempted"
+	ResumeCaptureInFlight       ResumeCaptureState = "inFlight"
+	ResumeCaptureCaptured       ResumeCaptureState = "captured"
+	ResumeCaptureManualRequired ResumeCaptureState = "manualRequired"
+)
+
 // CandidateProfile 是沟通状态主体。人级建档闸的部分唯一索引刻意不含
 // AccountRef，并把 ended 也视为非 eliminated，防止换账号/职位重复追求。
 // ConversationRef 必须为 NULL 而不是空串，否则未建联档案会互相撞唯一键。
@@ -278,13 +287,57 @@ type CandidateProfile struct {
 	MainStatus      CandidateProfileStatus `gorm:"not null;index"`
 	EndReason       *CandidateProfileEndReason
 
-	SuccessfulGreetingIntentID *string
-	ConversationRef            *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
-	GreetedAt                  *time.Time
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
+	SuccessfulGreetingIntentID     *string
+	ConversationRef                *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
+	GreetedAt                      *time.Time
+	ResumeCaptureState             ResumeCaptureState `gorm:"not null;default:unattempted;index"`
+	ResumeCaptureLogicalDispatchID *string            `gorm:"uniqueIndex"`
+	ActiveResumeSnapshotID         *string            `gorm:"uniqueIndex"`
+	ResumeCaptureAttemptedAt       *time.Time
+	ResumeCaptureFailureReason     string
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
 
 	GreetingHead *CandidateGreetingHead `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+}
+
+// CandidateResumeSnapshot 是一次完整简历读取的不可变业务事实。正文只在本机
+// 业务库保存；普通管理 API、审计和日志只暴露 hash/大小/覆盖信息。
+type CandidateResumeSnapshot struct {
+	SnapshotID              string    `gorm:"primaryKey"`
+	ProfileID               string    `gorm:"not null;index"`
+	SourceKind              string    `gorm:"not null"`
+	SourceConversationRef   string    `gorm:"not null"`
+	SourceLogicalDispatchID string    `gorm:"not null;uniqueIndex"`
+	ObservedAt              int64     `gorm:"not null"`
+	CapturedAt              time.Time `gorm:"not null"`
+	SchemaVersion           int       `gorm:"not null"`
+	ContentHash             string    `gorm:"not null"`
+	ResumeJSON              string    `gorm:"not null"`
+	CreatedAt               time.Time
+}
+
+type M5TrialSelectionStatus string
+
+const (
+	M5TrialSelectionActive         M5TrialSelectionStatus = "active"
+	M5TrialSelectionManualRequired M5TrialSelectionStatus = "manualRequired"
+	M5TrialSelectionCompleted      M5TrialSelectionStatus = "completed"
+)
+
+// M5TrialSelection 是真人对单 profile 试运行范围的持久授权。ActiveSlot 只在
+// active 时为固定非空值，SQLite 唯一索引从数据库层保证全库最多一项有效授权。
+type M5TrialSelection struct {
+	SelectionID string                 `gorm:"primaryKey"`
+	ProfileID   string                 `gorm:"not null;index"`
+	Status      M5TrialSelectionStatus `gorm:"not null;index"`
+	ActiveSlot  *string                `gorm:"uniqueIndex"`
+	SelectedBy  string                 `gorm:"not null"`
+	Reason      string
+	SelectedAt  time.Time `gorm:"not null"`
+	EndedAt     *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。
