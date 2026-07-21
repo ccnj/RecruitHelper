@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
@@ -17,12 +18,13 @@ import (
 )
 
 type API struct {
-	st         *store.Store
-	hub        AdminHub
-	disp       *dispatch.Dispatcher
-	actor      *patrol.Manager
-	probe      AccountProber
-	adminToken string
+	st             *store.Store
+	hub            AdminHub
+	disp           *dispatch.Dispatcher
+	actor          *patrol.Manager
+	probe          AccountProber
+	adminToken     string
+	providerConfig *m5ai.ProviderConfigStore
 }
 
 type AccountProber interface {
@@ -47,11 +49,16 @@ func New(
 	actor *patrol.Manager,
 	probe AccountProber,
 	adminToken string,
+	providerConfig ...*m5ai.ProviderConfigStore,
 ) *API {
-	return &API{
+	api := &API{
 		st: st, hub: hub, disp: disp, actor: actor, probe: probe,
 		adminToken: adminToken,
 	}
+	if len(providerConfig) > 0 {
+		api.providerConfig = providerConfig[0]
+	}
+	return api
 }
 
 func (a *API) Routes(mux *http.ServeMux) {
@@ -79,6 +86,12 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/candidates/greeting/send", h(a.sendGreetingStatus))
 	mux.HandleFunc("POST /admin/m5/trial/select", h(a.selectM5Trial))
 	mux.HandleFunc("GET /admin/m5/trial", h(a.m5TrialStatus))
+	mux.HandleFunc("GET /admin/m5/provider-config", h(a.m5ProviderConfig))
+	mux.HandleFunc("POST /admin/m5/provider-config", h(a.saveM5ProviderConfig))
+	mux.HandleFunc("GET /admin/m5/contexts", h(a.m5Contexts))
+	mux.HandleFunc("POST /admin/m5/contexts/import", h(a.importM5Contexts))
+	mux.HandleFunc("GET /admin/m5/context-binding", h(a.m5ContextBinding))
+	mux.HandleFunc("POST /admin/m5/context-binding", h(a.bindM5Context))
 	mux.HandleFunc("GET /admin/conversations", h(a.conversations))
 	mux.HandleFunc("POST /admin/conversations/track", h(a.trackConversation))
 	mux.HandleFunc("GET /admin/messages", h(a.messages))

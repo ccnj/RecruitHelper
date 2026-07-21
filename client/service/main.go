@@ -18,6 +18,7 @@ import (
 	"recruithelper/client/service/internal/adminhttp"
 	"recruithelper/client/service/internal/appbridge"
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
@@ -42,6 +43,11 @@ func main() {
 			slog.Error("关闭存储失败", "err", err)
 		}
 	}()
+	providerConfig, err := m5ai.NewProviderConfigStore(*dataDir)
+	if err != nil {
+		slog.Error("本地模型配置初始化失败", "err", err)
+		os.Exit(1)
+	}
 
 	mode, _ := st.JournalMode()
 	slog.Info("脑服务存储就绪",
@@ -93,7 +99,7 @@ func main() {
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
-	adminhttp.New(st, hub, disp, actor, runner, *adminToken).Routes(mux)
+	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).Routes(mux)
 
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", *port), Handler: mux}
 	go func() {

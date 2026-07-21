@@ -1,6 +1,10 @@
 package store
 
-import "time"
+import (
+	"time"
+
+	"recruithelper/client/service/internal/m5ai"
+)
 
 // 首个客户安装前仍用 AutoMigrate 快跑；Candidate/CandidateProfile 的正式身份语义
 // 已在 M4 冻结，首个对外发布前切换为显式 migration。
@@ -338,6 +342,44 @@ type M5TrialSelection struct {
 	EndedAt     *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+// JobAIContextRevision 是一次不可变的职位 AI 上下文导入。SourcePackage
+// 完整保留旧 job_version_docs 原包，Communication 只保存经事实门冻结的
+// 三文档可执行视图；两者都属于本地业务配置，不进入普通日志。
+type JobAIContextRevision struct {
+	RevisionHash string `gorm:"primaryKey;uniqueIndex:ux_job_ai_context_revision,priority:2"`
+	ContextID    string `gorm:"not null;index;uniqueIndex:ux_job_ai_context_revision,priority:1"`
+	SourceKind   string `gorm:"not null"`
+	SourceJobRef string
+	DisplayName  string `gorm:"not null"`
+	Environment  string
+
+	SourcePackage m5ai.JobConfigDocumentPackage `gorm:"serializer:json;not null"`
+	Communication m5ai.CommunicationView        `gorm:"serializer:json;not null"`
+	CreatedAt     time.Time                     `gorm:"not null"`
+}
+
+type ProfileAIContextBindingStatus string
+
+const (
+	ProfileAIContextBindingActive     ProfileAIContextBindingStatus = "active"
+	ProfileAIContextBindingSuperseded ProfileAIContextBindingStatus = "superseded"
+)
+
+// ProfileAIContextBinding 是真人把一个试运行 profile 显式绑定到一个职位
+// 上下文 revision 的业务事实。部分唯一索引从数据库层保证每个 profile
+// 最多一个 active；改绑只推进旧行状态，永不物理删除。
+type ProfileAIContextBinding struct {
+	BindingID    string                        `gorm:"primaryKey"`
+	ProfileID    string                        `gorm:"not null;index;index:ux_profile_ai_context_active,unique,where:status = 'active'"`
+	ContextID    string                        `gorm:"not null;index:idx_profile_ai_context_revision,priority:1"`
+	RevisionHash string                        `gorm:"not null;index:idx_profile_ai_context_revision,priority:2"`
+	Status       ProfileAIContextBindingStatus `gorm:"not null;index"`
+	Reason       string
+	BoundBy      string    `gorm:"not null"`
+	BoundAt      time.Time `gorm:"not null"`
+	SupersededAt *time.Time
 }
 
 // CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。

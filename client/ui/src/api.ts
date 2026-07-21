@@ -202,6 +202,36 @@ export interface MutationResult {
   trackingState?: string
 }
 
+export interface M5AIContextView {
+  contextId: string
+  revisionHash: string
+  displayName: string
+  environment: string
+  documentCount: number
+}
+
+export interface M5ProviderConfigView {
+  provider: string
+  model: string
+  baseUrlConfigured: boolean
+  keyConfigured: boolean
+  request_timeout_ms: number
+  max_input_tokens: number
+  max_intent_output_tokens: number
+  max_reply_output_tokens: number
+}
+
+export interface M5ProviderConfigInput {
+  provider: 'deepseek'
+  model: 'deepseek-v4-pro'
+  base_url: string
+  api_key: string
+  request_timeout_ms: 30000
+  max_input_tokens: 16000
+  max_intent_output_tokens: 64
+  max_reply_output_tokens: 512
+}
+
 export interface SendIntentView {
   intentId: string
   logicalDispatchId: string
@@ -473,6 +503,13 @@ export const api = {
   selectM5Trial: (platform: string, accountRef: string, conversationRef: string) => post<MutationResult>('/admin/m5/trial/select', {
     platform, accountRef, conversationRef,
   }),
+  importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
+  m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
+  bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {
+    contextId, revisionHash,
+  }),
+  m5ProviderConfig: () => get<{ config: M5ProviderConfigView }>('/admin/m5/provider-config'),
+  saveM5ProviderConfig: (config: M5ProviderConfigInput) => post<{ config: M5ProviderConfigView }>('/admin/m5/provider-config', config),
   messages: (platform: string, accountRef: string, conversationRef: string) => get<{ messages: MessageView[] }>(query('/admin/messages', { platform, accountRef, conversationRef })),
   sendMessage: (
     intentId: string, previousIntentId: string, platform: string,

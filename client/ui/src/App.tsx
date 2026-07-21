@@ -3,7 +3,8 @@ import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
-  LedgerRow, MessageView, MutationResult, SendIntentView, Suspect, TimeValue,
+  LedgerRow, M5AIContextView, M5ProviderConfigView, MessageView, MutationResult,
+  SendIntentView, Suspect, TimeValue,
 } from './api'
 import {
   candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
@@ -287,6 +288,8 @@ export function App() {
                 onRun={() => target && runMutation('run', '已请求立即巡检一轮', () => api.runAccount(target))}
               />
 
+              <M5AIConfiguration />
+
               <div className="ledger-grid">
                 <ConversationLedger
                   rows={conversations.data?.conversations ?? []}
@@ -546,6 +549,243 @@ function candidateContactLabel(state: string): string {
   if (state === 'unestablished') return '尚未建联，可以确认建档'
   if (state === 'established') return '页面显示已经建联，不能作为新建联对象确认'
   return '关系状态无法确认，不能继续建档'
+}
+
+const M5_PROVIDER_BUDGET = {
+  provider: 'deepseek' as const,
+  model: 'deepseek-v4-pro' as const,
+  request_timeout_ms: 30000 as const,
+  max_input_tokens: 16000 as const,
+  max_intent_output_tokens: 64 as const,
+  max_reply_output_tokens: 512 as const,
+}
+
+function M5AIConfiguration() {
+  const [contexts, setContexts] = useState<M5AIContextView[]>([])
+  const [contextsLoading, setContextsLoading] = useState(true)
+  const [contextsError, setContextsError] = useState('')
+  const [bundleText, setBundleText] = useState('')
+  const [selectedRevision, setSelectedRevision] = useState('')
+  const [contextBusy, setContextBusy] = useState<'import' | 'bind' | ''>('')
+  const [contextNotice, setContextNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
+  const [providerConfig, setProviderConfig] = useState<M5ProviderConfigView | null>(null)
+  const [providerLoading, setProviderLoading] = useState(true)
+  const [providerError, setProviderError] = useState('')
+  const [baseURL, setBaseURL] = useState('')
+  const [apiKey, setAPIKey] = useState('')
+  const [providerSaving, setProviderSaving] = useState(false)
+  const [providerNotice, setProviderNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
+
+  const loadContexts = useCallback(async () => {
+    setContextsLoading(true)
+    try {
+      const result = await api.m5Contexts()
+      setContexts(Array.isArray(result.contexts) ? result.contexts : [])
+      setContextsError('')
+    } catch (reason) {
+      setContextsError(errorText(reason))
+    } finally {
+      setContextsLoading(false)
+    }
+  }, [])
+
+  const loadProvider = useCallback(async () => {
+    setProviderLoading(true)
+    try {
+      const result = await api.m5ProviderConfig()
+      setProviderConfig(result.config)
+      setProviderError('')
+    } catch (reason) {
+      setProviderError(errorText(reason))
+    } finally {
+      setProviderLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadContexts()
+    void loadProvider()
+  }, [loadContexts, loadProvider])
+
+  const importBundle = async () => {
+    setContextNotice(null)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(bundleText)
+    } catch {
+      setContextNotice({ kind: 'bad', text: 'JSON 无法解析，请检查是否粘贴了完整响应。' })
+      return
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      setContextNotice({ kind: 'bad', text: '职位资料必须是一个完整的 JSON 对象。' })
+      return
+    }
+    const bundle = parsed as Record<string, unknown>
+    setContextBusy('import')
+    try {
+      await api.importM5Contexts(bundle)
+      setBundleText('')
+      setContextNotice({ kind: 'ok', text: '职位资料已导入；请在右侧明确选择要绑定的版本。' })
+      await loadContexts()
+    } catch (reason) {
+      setContextNotice({ kind: 'bad', text: errorText(reason) })
+    } finally {
+      setContextBusy('')
+    }
+  }
+
+  const bindContext = async () => {
+    const selected = contexts.find((context) => context.revisionHash === selectedRevision)
+    if (!selected) return
+    setContextBusy('bind')
+    setContextNotice(null)
+    try {
+      await api.bindM5Context(selected.contextId, selected.revisionHash)
+      setContextNotice({ kind: 'ok', text: `“${selected.displayName}”已绑定到当前试运行档案。` })
+    } catch (reason) {
+      setContextNotice({ kind: 'bad', text: errorText(reason) })
+    } finally {
+      setContextBusy('')
+    }
+  }
+
+  const saveProvider = async () => {
+    setProviderSaving(true)
+    setProviderNotice(null)
+    try {
+      const result = await api.saveM5ProviderConfig({
+        ...M5_PROVIDER_BUDGET,
+        base_url: baseURL.trim(),
+        api_key: apiKey.trim(),
+      })
+      setProviderConfig(result.config)
+      setBaseURL('')
+      setAPIKey('')
+      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。' })
+    } catch (reason) {
+      setProviderNotice({ kind: 'bad', text: errorText(reason) })
+    } finally {
+      setProviderSaving(false)
+    }
+  }
+
+  const providerReady = providerConfig?.baseUrlConfigured === true && providerConfig.keyConfigured === true
+
+  return (
+    <section className="m5-ai-panel" aria-labelledby="m5-ai-title">
+      <div className="m5-ai-heading">
+        <div>
+          <span className="section-index">M5 建议层</span>
+          <h2 id="m5-ai-title">M5 AI 配置</h2>
+        </div>
+        <div className={`m5-ai-readiness ${providerReady ? 'is-ready' : ''}`}>
+          <span />
+          {providerLoading ? '正在核对模型配置' : providerReady ? '模型连接材料已齐' : '模型连接尚未配齐'}
+        </div>
+      </div>
+
+      <div className="m5-ai-wire" aria-label="AI 配置步骤">
+        <section className="m5-ai-step" aria-labelledby="m5-import-title">
+          <header><span>01</span><div><strong id="m5-import-title">导入职位资料</strong><small>旧 job-config 单数或复数响应</small></div></header>
+          <textarea
+            value={bundleText}
+            onChange={(event) => setBundleText(event.target.value)}
+            rows={7}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="在此粘贴完整 JSON；内容不会写入浏览器存储"
+            aria-label="旧 job-config JSON"
+          />
+          <button
+            type="button"
+            disabled={contextBusy !== '' || bundleText.trim() === ''}
+            onClick={() => void importBundle()}
+          >
+            {contextBusy === 'import' ? '正在导入…' : '导入职位资料'}
+          </button>
+        </section>
+
+        <section className="m5-ai-step" aria-labelledby="m5-bind-title">
+          <header><span>02</span><div><strong id="m5-bind-title">明确绑定版本</strong><small>只绑定到当前 active 试运行档案</small></div></header>
+          <div className="m5-context-list" role="radiogroup" aria-label="可用职位资料版本">
+            {contextsLoading && <p className="m5-ai-empty">正在读取已导入资料…</p>}
+            {!contextsLoading && contexts.length === 0 && !contextsError && (
+              <p className="m5-ai-empty">还没有可用资料。先完成左侧导入。</p>
+            )}
+            {contexts.map((context) => (
+              <label key={context.revisionHash} className={`m5-context-option ${selectedRevision === context.revisionHash ? 'is-selected' : ''}`}>
+                <input
+                  type="radio"
+                  name="m5-context"
+                  value={context.revisionHash}
+                  checked={selectedRevision === context.revisionHash}
+                  onChange={() => setSelectedRevision(context.revisionHash)}
+                />
+                <span>
+                  <strong>{context.displayName}</strong>
+                  <small>{context.environment || '环境未标注'} · {context.documentCount} 份文档</small>
+                  <code>context {context.contextId}</code>
+                  <code>revision {context.revisionHash}</code>
+                </span>
+              </label>
+            ))}
+          </div>
+          {contextsError && <p className="m5-ai-message bad" role="alert">{contextsError}</p>}
+          <button
+            type="button"
+            disabled={contextBusy !== '' || selectedRevision === ''}
+            onClick={() => void bindContext()}
+          >
+            {contextBusy === 'bind' ? '正在绑定…' : '绑定所选版本'}
+          </button>
+        </section>
+
+        <section className="m5-ai-step" aria-labelledby="m5-provider-title">
+          <header><span>03</span><div><strong id="m5-provider-title">配置模型连接</strong><small>DeepSeek V4 Pro · P 档</small></div></header>
+          <div className="m5-provider-state">
+            <span>服务地址 <strong>{providerConfig?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
+            <span>API Key <strong>{providerConfig?.keyConfigured ? '已配置' : '未配置'}</strong></span>
+          </div>
+          <label htmlFor="m5-base-url">新的服务地址</label>
+          <input
+            id="m5-base-url"
+            type="url"
+            value={baseURL}
+            onChange={(event) => setBaseURL(event.target.value)}
+            autoComplete="off"
+            placeholder={providerConfig?.baseUrlConfigured ? '留空则保留现有地址' : 'https://…'}
+          />
+          <label htmlFor="m5-api-key">新的 API Key</label>
+          <input
+            id="m5-api-key"
+            type="password"
+            value={apiKey}
+            onChange={(event) => setAPIKey(event.target.value)}
+            autoComplete="new-password"
+            placeholder={providerConfig?.keyConfigured ? '留空则保留现有密钥' : '输入密钥'}
+          />
+          <div className="m5-budget-line">
+            <span>30 秒超时</span><span>输入 16K</span><span>意向 64</span><span>回复 512</span>
+          </div>
+          {providerError && <p className="m5-ai-message bad" role="alert">{providerError}</p>}
+          <button
+            type="button"
+            disabled={providerSaving || (!providerConfig?.baseUrlConfigured && baseURL.trim() === '') || (!providerConfig?.keyConfigured && apiKey.trim() === '')}
+            onClick={() => void saveProvider()}
+          >
+            {providerSaving ? '正在保存…' : '保存模型连接'}
+          </button>
+        </section>
+      </div>
+
+      {(contextNotice || providerNotice) && (
+        <div className="m5-ai-notices" aria-live="polite">
+          {contextNotice && <p className={`m5-ai-message ${contextNotice.kind}`}>{contextNotice.text}</p>}
+          {providerNotice && <p className={`m5-ai-message ${providerNotice.kind}`}>{providerNotice.text}</p>}
+        </div>
+      )}
+    </section>
+  )
 }
 
 function CandidateIntake({ account }: { account: AccountView }) {
