@@ -2651,6 +2651,28 @@ test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务�
     assert.deepEqual(sameAcrossSources, initialOnly,
       '同一 idServer 在 history 与 timeline 重复只算一条正证')
 
+    delete globalThis.window.imEngine
+    globalThis.document.scripts = [{
+      textContent: `__INITIAL_STATE__=${JSON.stringify({
+        session: { session: { staff: { staffId: refs.staff } } },
+        im: {
+          sessions,
+          timelineMap: {
+            [refs.conversation]: { timeline: [onlyRow] },
+          },
+        },
+      })}`,
+    }]
+    assert.equal(
+      (await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)).confirmed,
+      true,
+      '页面不再暴露 imEngine 时，初始化会话与 timeline 仍应构成同一份只读正证',
+    )
+    globalThis.window.imEngine = {
+      async getSessions() { return { curSessions: sessions, hasMoreSession: false } },
+      async getHistoryMsgs() { return rows },
+    }
+
     rows[0] = { ...onlyRow, idServer: 'fixture-server-greeting-conflict' }
     assert.deepEqual(
       await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),

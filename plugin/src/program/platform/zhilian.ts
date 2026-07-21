@@ -1278,43 +1278,50 @@ async function mainReadGreetingProof(
   }
   try {
     if (!/^[0-9a-f]{64}$/u.test(contentHash)) return negative()
+    const initial = initialState()
     const engine = asRecord(w.imEngine)
     const getSessions = engine?.getSessions
-    if (!engine || typeof getSessions !== 'function') return negative()
     const sessions: AnyRecord[] = []
-    const seenPages = new Set<string>()
-    let completed = false
-    for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
-      const response = await (getSessions as (arg: AnyRecord) => Promise<unknown>).call(engine, {
-        pageNo,
-        pageSize: 8,
-        includeResume: true,
-      })
-      const body = asRecord(response)
-      if (!body || !Array.isArray(body.curSessions)) return negative()
-      const hasMore = typeof body.hasMoreSession === 'boolean'
-        ? body.hasMoreSession
-        : typeof body.hasMore === 'boolean'
-          ? body.hasMore
-          : null
-      if (hasMore === null) return negative()
-      const rows = body.curSessions as unknown[]
-      if (rows.some((row) => asRecord(row) === null)) return negative()
-      const records = rows as AnyRecord[]
-      const pageKey = JSON.stringify([
-        clean(records[0]?.sessionId),
-        clean(records[records.length - 1]?.sessionId),
-        records.length,
-      ])
-      if (seenPages.has(pageKey)) return negative()
-      seenPages.add(pageKey)
-      sessions.push(...records)
-      if (!hasMore) {
-        completed = true
-        break
+    if (engine && typeof getSessions === 'function') {
+      const seenPages = new Set<string>()
+      let completed = false
+      for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
+        const response = await (getSessions as (arg: AnyRecord) => Promise<unknown>).call(engine, {
+          pageNo,
+          pageSize: 8,
+          includeResume: true,
+        })
+        const body = asRecord(response)
+        if (!body || !Array.isArray(body.curSessions)) return negative()
+        const hasMore = typeof body.hasMoreSession === 'boolean'
+          ? body.hasMoreSession
+          : typeof body.hasMore === 'boolean'
+            ? body.hasMore
+            : null
+        if (hasMore === null) return negative()
+        const rows = body.curSessions as unknown[]
+        if (rows.some((row) => asRecord(row) === null)) return negative()
+        const records = rows as AnyRecord[]
+        const pageKey = JSON.stringify([
+          clean(records[0]?.sessionId),
+          clean(records[records.length - 1]?.sessionId),
+          records.length,
+        ])
+        if (seenPages.has(pageKey)) return negative()
+        seenPages.add(pageKey)
+        sessions.push(...records)
+        if (!hasMore) {
+          completed = true
+          break
+        }
       }
+      if (!completed) return negative()
+    } else {
+      const initialIM = asRecord(initial.im)
+      if (!Array.isArray(initialIM?.sessions) ||
+          initialIM.sessions.some((row) => asRecord(row) === null)) return negative()
+      sessions.push(...initialIM.sessions as AnyRecord[])
     }
-    if (!completed) return negative()
     const matches = sessions.filter((session) => {
       if (clean(session.jobNumber) !== positionRef) return false
       const identities = [session.userId, session.typeUserId, session.peerPartnerId]
@@ -1334,8 +1341,8 @@ async function mainReadGreetingProof(
     if (!peer) return negative()
 
     const proofSources: unknown[][] = []
-    const getHistoryMsgs = engine.getHistoryMsgs
-    if (typeof getHistoryMsgs === 'function') {
+    const getHistoryMsgs = engine?.getHistoryMsgs
+    if (engine && typeof getHistoryMsgs === 'function') {
       const request: AnyRecord = { to: peer, limit: 64, asc: true }
       const scene = session.scene ?? session.sessionType
       if (scene !== null && scene !== undefined && clean(scene)) request.scene = scene
@@ -1346,7 +1353,6 @@ async function mainReadGreetingProof(
         // 新建会话的 history API 可短暂落后；阴性/异常不证明未发送。
       }
     }
-    const initial = initialState()
     const nuxt = asRecord(w.$nuxt)
     const root = asRecord(nuxt?.$root) ?? nuxt
     const store = asRecord(root?.$store)
