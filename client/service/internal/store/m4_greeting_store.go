@@ -421,15 +421,12 @@ func applyGreetingResultTx(
 
 	intentID := intent.IntentID
 	text := mutation.Text
-	var observedAt *int64
-	if mutation.ObservedAtMs > 0 {
-		value := mutation.ObservedAtMs
-		observedAt = &value
-	}
+	// ObservedAtMs 是招呼后置条件被观察到的时刻，不是平台消息的
+	// 发送时刻；缺少平台时间证据时 self 消息时间保持未知。
 	message := &Message{
 		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
 		Seq: 1, Direction: "out", Kind: "text", ContentHash: mutation.ContentHash,
-		Text: &text, TsApproxMs: observedAt, Origin: "self", OutboundIntentID: &intentID,
+		Text: &text, TsApproxMs: nil, Origin: "self", OutboundIntentID: &intentID,
 	}
 	if err := tx.Create(message).Error; err != nil {
 		return nil, err

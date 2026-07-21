@@ -1297,15 +1297,14 @@ func appendOutboundMessageTx(
 	}
 	textCopy := text
 	intentID := intent.IntentID
-	var observed *int64
-	if observedAtMs > 0 {
-		value := observedAtMs
-		observed = &value
-	}
+	// observedAtMs 是脑确认副作用已发生的观察时刻，不是平台消息的
+	// 发送时刻。self 事实没有平台时间证据时必须保持未知，不能把
+	// result/验证读完成时间投影成消息时间。
+	_ = observedAtMs
 	message := &Message{
 		Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 		Seq: seq, Direction: "out", Kind: "text", ContentHash: contentHash, Text: &textCopy,
-		TsApproxMs: observed, Origin: "self", OutboundIntentID: &intentID,
+		TsApproxMs: nil, Origin: "self", OutboundIntentID: &intentID,
 	}
 	if err := tx.Create(message).Error; err != nil {
 		return nil, err
