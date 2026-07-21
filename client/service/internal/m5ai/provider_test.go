@@ -53,7 +53,8 @@ func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *test
 	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
 		Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: IntentOutputTokenLimit,
 	})
-	if err != nil || calls != 1 || response.Usage.ReasoningTokens == nil || *response.Usage.ReasoningTokens != 0 {
+	if err != nil || calls != 1 || !response.ReasoningContentEmpty ||
+		response.Usage.ReasoningTokens == nil || *response.Usage.ReasoningTokens != 0 {
 		t.Fatalf("provider 调用不符合单次/usage 约束: calls=%d response=%+v err=%v", calls, response, err)
 	}
 }
@@ -175,8 +176,27 @@ func TestOpenAICompatibleProviderAcceptsMissingReasoningUsageField(t *testing.T)
 	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
 		Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: 1,
 	})
-	if err != nil || response.Usage.ReasoningTokens != nil {
+	if err != nil || response.Usage.ReasoningTokens != nil || !response.ReasoningContentEmpty {
 		t.Fatalf("reasoning 字段缺失应保留缺失形态: response=%+v err=%v", response, err)
+	}
+}
+
+func TestOpenAICompatibleProviderMarksNonemptyReasoningContentUnsafeWithoutExposingIt(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"content":"{}","reasoning_content":"private-chain"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`,
+			)),
+		}, nil
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: 1,
+	})
+	if err != nil || response.ReasoningContentEmpty || response.JSONText != "{}" || response.Usage.OutputTokens != 1 {
+		t.Fatalf("reasoning_content 非空应只留安全布尔事实: response=%+v err=%v", response, err)
 	}
 }
 

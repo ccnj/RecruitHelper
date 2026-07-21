@@ -698,7 +698,8 @@ func m5CompletionFromProvider(
 		InvocationID: invocationID, Status: store.AIInvocationOK,
 		OutputHash: sha256Hex(response.JSONText), InputTokens: response.Usage.InputTokens,
 		CachedInputTokens: response.Usage.CachedInputTokens, OutputTokens: response.Usage.OutputTokens,
-		ReasoningTokens: response.Usage.ReasoningTokens, LatencyMs: latency.Milliseconds(),
+		ReasoningTokens: response.Usage.ReasoningTokens, ReasoningContentEmpty: response.ReasoningContentEmpty,
+		LatencyMs:           latency.Milliseconds(),
 		EstimatedCostMicros: m5ai.EstimatedCostMicros(response.Usage), FinishedAt: finishedAt,
 	}
 	if response.Usage.ReasoningTokens == nil {
@@ -715,6 +716,7 @@ func m5CompletionFromProvider(
 		completion.CachedInputTokens = 0
 		completion.OutputTokens = 0
 		completion.EstimatedCostMicros = 0
+		completion.ReasoningContentEmpty = false
 	}
 	return completion
 }
@@ -739,8 +741,13 @@ func m5ProviderFailure(err error) (store.AIInvocationStatus, string) {
 }
 
 func reasoningUsageSafe(completion store.AIInvocationCompletion) bool {
-	return completion.UsageShape == store.AIInvocationUsageComplete && completion.ReasoningTokens != nil &&
-		*completion.ReasoningTokens == 0
+	if !completion.ReasoningContentEmpty {
+		return false
+	}
+	if completion.UsageShape == store.AIInvocationUsageComplete {
+		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
+	}
+	return completion.UsageShape == store.AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
 }
 
 func sha256Hex(value string) string {

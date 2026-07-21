@@ -38,12 +38,16 @@ func (a *recordingAdviceExecutor) CompleteJSON(
 		if request.Purpose != m5ai.PurposeIntent {
 			return m5ai.CompletionResponse{}, fmt.Errorf("首次调用用途错误: %s", request.Purpose)
 		}
-		return m5ai.CompletionResponse{JSONText: `{"信号":"有意向","理由":"fixture"}`, Usage: usage}, nil
+		return m5ai.CompletionResponse{
+			JSONText: `{"信号":"有意向","理由":"fixture"}`, Usage: usage, ReasoningContentEmpty: true,
+		}, nil
 	case 2:
 		if request.Purpose != m5ai.PurposeReply {
 			return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
 		}
-		return m5ai.CompletionResponse{JSONText: `{"话术_序列":["合成回复"],"动作":"忽略"}`, Usage: usage}, nil
+		return m5ai.CompletionResponse{
+			JSONText: `{"话术_序列":["合成回复"],"动作":"忽略"}`, Usage: usage, ReasoningContentEmpty: true,
+		}, nil
 	default:
 		return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", len(a.requests))
 	}
@@ -52,7 +56,7 @@ func (a *recordingAdviceExecutor) CompleteJSON(
 func safeFakeResponse(raw string) m5ai.CompletionResponse {
 	zero := 0
 	return m5ai.CompletionResponse{
-		JSONText: raw,
+		JSONText: raw, ReasoningContentEmpty: true,
 		Usage: m5ai.CompletionUsage{
 			InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &zero,
 		},
@@ -382,30 +386,55 @@ func TestAdvanceM5TurnLLMRejectedStopsBeforeReplyAndKeepsClassification(t *testi
 	}
 }
 
-func TestAdvanceM5TurnInvalidIntentWithMissingReasoningUsageStopsImmediately(t *testing.T) {
+func TestAdvanceM5TurnMissingReasoningUsageWithEmptyContentCanPlan(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-		if call != 1 || request.Purpose != m5ai.PurposeIntent {
-			return m5ai.CompletionResponse{}, fmt.Errorf("不安全 usage 后发生额外调用: call=%d purpose=%s", call, request.Purpose)
+		switch call {
+		case 1:
+			if request.Purpose != m5ai.PurposeIntent {
+				return m5ai.CompletionResponse{}, fmt.Errorf("首次调用用途错误: %s", request.Purpose)
+			}
+			return m5ai.CompletionResponse{
+				JSONText:              `{"信号":"有意向","理由":"fixture"}`,
+				Usage:                 m5ai.CompletionUsage{InputTokens: 3, OutputTokens: 2},
+				ReasoningContentEmpty: true,
+			}, nil
+		case 2:
+			if request.Purpose != m5ai.PurposeReply {
+				return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
+			}
+			return m5ai.CompletionResponse{
+				JSONText:              `{"话术_序列":["缺失 usage 字段的合成回复"],"动作":"忽略"}`,
+				Usage:                 m5ai.CompletionUsage{InputTokens: 4, OutputTokens: 3},
+				ReasoningContentEmpty: true,
+			}, nil
+		default:
+			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
-		return m5ai.CompletionResponse{
-			JSONText: `{"非法":"输出"}`,
-			Usage:    m5ai.CompletionUsage{InputTokens: 3, OutputTokens: 2, ReasoningTokens: nil},
-		}, nil
 	}}
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
 	h.manager.mu.Unlock()
-	if err != nil || len(advice.requests) != 1 {
-		t.Fatalf("reasoning usage 缺失必须在 intent 后阻断: calls=%d err=%v", len(advice.requests), err)
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("reasoning usage 缺失且 content 空应完成两次建议: calls=%d err=%v", len(advice.requests), err)
 	}
-	turn, _ := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || len(invocations) != 2 {
+		t.Fatalf("缺失 usage 的 invocation 事实不完整: invocations=%+v err=%v", invocations, err)
+	}
+	for _, invocation := range invocations {
+		if invocation.Status != store.AIInvocationOK || invocation.UsageShape != store.AIInvocationReasoningFieldAbsent ||
+			invocation.ReasoningTokens != nil || invocation.InputTokens <= 0 || invocation.OutputTokens <= 0 {
+			t.Fatalf("缺失 usage 事实被伪造或丢失计量: invocation=%+v", invocation)
+		}
+	}
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
 	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
-	if turn == nil || turn.Status != store.DialogueTurnManualRequired ||
-		turn.FailureReason != "reasoningUsageUnsafe" || actionErr != nil || action != nil {
-		t.Fatalf("不安全 reasoning usage 未保守收敛: turn=%+v action=%+v actionErr=%v", turn, action, actionErr)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned {
+		t.Fatalf("缺失 usage 的安全响应未形成 planned action: turn=%+v action=%+v err=%v actionErr=%v", turn, action, err, actionErr)
 	}
 }

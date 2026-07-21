@@ -82,6 +82,7 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 				Usage: m5ai.CompletionUsage{
 					InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &one,
 				},
+				ReasoningContentEmpty: true,
 			}, nil
 		default:
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
@@ -102,6 +103,40 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 		invocations[1].UsageShape != store.AIInvocationUsageComplete ||
 		invocations[1].ReasoningTokens == nil || *invocations[1].ReasoningTokens != 1 {
 		t.Fatalf("reasoning 非零 invocation 事实错误: invocations=%+v err=%v", invocations, err)
+	}
+	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "reasoningUsageUnsafe", false)
+}
+
+func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	zero := 0
+	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+		if call != 1 || request.Purpose != m5ai.PurposeIntent {
+			return m5ai.CompletionResponse{}, fmt.Errorf("reasoning_content 非空后发生额外调用: call=%d purpose=%s", call, request.Purpose)
+		}
+		return m5ai.CompletionResponse{
+			JSONText: `{"信号":"有意向","理由":"fixture"}`,
+			Usage: m5ai.CompletionUsage{
+				InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &zero,
+			},
+			ReasoningContentEmpty: false,
+		}, nil
+	}}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+
+	h.manager.mu.Lock()
+	err := actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 1 {
+		t.Fatalf("reasoning_content 非空必须在 intent 后阻断: calls=%d err=%v", len(advice.requests), err)
+	}
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || len(invocations) != 1 || invocations[0].Status != store.AIInvocationOK ||
+		invocations[0].UsageShape != store.AIInvocationUsageComplete || invocations[0].ReasoningTokens == nil ||
+		*invocations[0].ReasoningTokens != 0 || invocations[0].OutputTokens != 4 || invocations[0].EstimatedCostMicros <= 0 {
+		t.Fatalf("reasoning_content 非空仍须如实记录 usage: invocations=%+v err=%v", invocations, err)
 	}
 	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "reasoningUsageUnsafe", false)
 }

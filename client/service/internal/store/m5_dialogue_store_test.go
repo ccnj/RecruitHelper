@@ -413,7 +413,8 @@ func successfulInvocationCompletion(invocationID string, at time.Time) AIInvocat
 	return AIInvocationCompletion{
 		InvocationID: invocationID, Status: AIInvocationOK, OutputHash: "output-" + invocationID,
 		InputTokens: 10, CachedInputTokens: 2, OutputTokens: 3, ReasoningTokens: &zero,
-		UsageShape: AIInvocationUsageComplete, LatencyMs: 25, EstimatedCostMicros: 7, FinishedAt: at,
+		UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
+		LatencyMs: 25, EstimatedCostMicros: 7, FinishedAt: at,
 	}
 }
 
@@ -591,7 +592,7 @@ func TestIntentCompletionRechecksBoundaryAndPreservesInvocation(t *testing.T) {
 	assertTrialManualRequired(t, s, "inputBoundaryChanged")
 }
 
-func TestIntentReasoningUsageUnsafeTurnsManual(t *testing.T) {
+func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {
 	s := openTest(t)
 	_, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-reasoning")
 	if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
@@ -603,11 +604,12 @@ func TestIntentReasoningUsageUnsafeTurnsManual(t *testing.T) {
 	completion := successfulInvocationCompletion("invocation-reasoning", time.Now().UTC().Truncate(time.Millisecond))
 	completion.UsageShape = AIInvocationReasoningFieldAbsent
 	completion.ReasoningTokens = nil
+	completion.ReasoningContentEmpty = false
 	result, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
 		Completion: completion, Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
 	})
 	if err != nil || result.Status != DialogueTurnManualRequired || result.FailureReason != "reasoningUsageUnsafe" {
-		t.Fatalf("意向 reasoning usage 不安全必须阻断: turn=%+v err=%v", result, err)
+		t.Fatalf("reasoning_content 非空必须阻断: turn=%+v err=%v", result, err)
 	}
 	assertTrialManualRequired(t, s, "reasoningUsageUnsafe")
 }

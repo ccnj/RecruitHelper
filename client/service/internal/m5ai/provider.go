@@ -150,7 +150,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		Choices []struct {
 			FinishReason string `json:"finish_reason"`
 			Message      struct {
-				Content string `json:"content"`
+				Content          string  `json:"content"`
+				ReasoningContent *string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
@@ -184,6 +185,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			OutputTokens:      decoded.Usage.CompletionTokens,
 			ReasoningTokens:   reasoning,
 		},
+		ReasoningContentEmpty: decoded.Choices[0].Message.ReasoningContent == nil ||
+			*decoded.Choices[0].Message.ReasoningContent == "",
 	}, nil
 }
 

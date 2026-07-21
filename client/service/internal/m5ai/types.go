@@ -98,8 +98,9 @@ type CompletionUsage struct {
 }
 
 type CompletionResponse struct {
-	JSONText string
-	Usage    CompletionUsage
+	JSONText              string
+	Usage                 CompletionUsage
+	ReasoningContentEmpty bool
 }
 
 type LLMProvider interface {

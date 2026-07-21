@@ -708,18 +708,19 @@ func sameInvocationReservation(existing, wanted AIInvocation) bool {
 }
 
 type AIInvocationCompletion struct {
-	InvocationID        string
-	Status              AIInvocationStatus
-	OutputHash          string
-	InputTokens         int
-	CachedInputTokens   int
-	OutputTokens        int
-	ReasoningTokens     *int
-	UsageShape          AIInvocationUsageShape
-	LatencyMs           int64
-	ErrorClass          string
-	EstimatedCostMicros int64
-	FinishedAt          time.Time
+	InvocationID          string
+	Status                AIInvocationStatus
+	OutputHash            string
+	InputTokens           int
+	CachedInputTokens     int
+	OutputTokens          int
+	ReasoningTokens       *int
+	UsageShape            AIInvocationUsageShape
+	ReasoningContentEmpty bool
+	LatencyMs             int64
+	ErrorClass            string
+	EstimatedCostMicros   int64
+	FinishedAt            time.Time
 }
 
 type CompleteIntentInvocationRequest struct {
@@ -773,9 +774,7 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 			if !preserveRejectedClassification {
 				label, source = "", ""
 			}
-		} else if req.Completion.Status == AIInvocationOK &&
-			(req.Completion.UsageShape != AIInvocationUsageComplete || req.Completion.ReasoningTokens == nil ||
-				*req.Completion.ReasoningTokens != 0) {
+		} else if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
 			wantedStatus, label, source, reason = DialogueTurnManualRequired, "", "", "reasoningUsageUnsafe"
 		}
 		if out.Status != DialogueTurnCollected {
@@ -833,14 +832,13 @@ type CompleteReplyInvocationRequest struct {
 }
 
 // CompleteReplyInvocation 在一个事务内终结 reply invocation，并且只在
-// reasoning usage 完整且为零时创建唯一 planned action；否则显式转人工。
+// reasoning 用量通过非思考闸时创建唯一 planned action；否则显式转人工。
 func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*CommunicationAction, error) {
 	if err := validateInvocationCompletion(req.Completion); err != nil {
 		return nil, err
 	}
 	canPlan := req.Completion.Status == AIInvocationOK && req.ManualReason == "" &&
-		req.Completion.UsageShape == AIInvocationUsageComplete && req.Completion.ReasoningTokens != nil &&
-		*req.Completion.ReasoningTokens == 0
+		reasoningCompletionSafe(req.Completion)
 	if canPlan && (strings.TrimSpace(req.ActionID) == "" || strings.TrimSpace(req.Text) == "" ||
 		strings.TrimSpace(req.ContentHash) == "") {
 		return nil, ErrCommunicationActionInvalid
@@ -920,6 +918,16 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 		return nil
 	})
 	return out, err
+}
+
+func reasoningCompletionSafe(completion AIInvocationCompletion) bool {
+	if !completion.ReasoningContentEmpty {
+		return false
+	}
+	if completion.UsageShape == AIInvocationUsageComplete {
+		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
+	}
+	return completion.UsageShape == AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
 }
 
 func sameCommunicationAction(existing CommunicationAction, req CompleteReplyInvocationRequest) bool {

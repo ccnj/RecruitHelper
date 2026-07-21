@@ -22,6 +22,7 @@ type realProviderDryRunExecutor struct {
 	providerName string
 	modelName    string
 	purposes     []m5ai.CompletionPurpose
+	responses    []m5ai.CompletionResponse
 }
 
 func (e *realProviderDryRunExecutor) ProviderName() string { return e.providerName }
@@ -32,7 +33,11 @@ func (e *realProviderDryRunExecutor) CompleteJSON(
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
 	e.purposes = append(e.purposes, request.Purpose)
-	return e.provider.CompleteJSON(ctx, request)
+	response, err := e.provider.CompleteJSON(ctx, request)
+	if err == nil {
+		e.responses = append(e.responses, response)
+	}
+	return response, err
 }
 
 func TestM5RealProviderDryRun(t *testing.T) {
@@ -82,6 +87,9 @@ func TestM5RealProviderDryRun(t *testing.T) {
 	}
 	if len(executor.purposes) != 2 || len(invocations) != 2 ||
 		executor.purposes[0] != m5ai.PurposeIntent || executor.purposes[1] != m5ai.PurposeReply {
+		for index, response := range executor.responses {
+			t.Logf("incomplete responseIndex=%d reasoningContentEmpty=%t", index, response.ReasoningContentEmpty)
+		}
 		for _, invocation := range invocations {
 			reasoning := "absent"
 			if invocation.ReasoningTokens != nil {
@@ -107,21 +115,28 @@ func TestM5RealProviderDryRun(t *testing.T) {
 	}
 	expectedPurposes := []m5ai.CompletionPurpose{m5ai.PurposeIntent, m5ai.PurposeReply}
 	for index, invocation := range invocations {
+		reasoning := "absent"
+		usageSafe := invocation.UsageShape == store.AIInvocationReasoningFieldAbsent && invocation.ReasoningTokens == nil
+		if invocation.ReasoningTokens != nil {
+			reasoning = fmt.Sprintf("%d", *invocation.ReasoningTokens)
+			usageSafe = invocation.UsageShape == store.AIInvocationUsageComplete && *invocation.ReasoningTokens == 0
+		}
 		if invocation.Purpose != expectedPurposes[index] || invocation.Attempt != 1 ||
 			invocation.Provider != config.Provider || invocation.Model != config.Model ||
 			invocation.Status != store.AIInvocationOK || invocation.FinishedAt == nil ||
-			invocation.UsageShape != store.AIInvocationUsageComplete || invocation.ReasoningTokens == nil ||
-			*invocation.ReasoningTokens != 0 || invocation.InputTokens <= 0 || invocation.OutputTokens <= 0 ||
+			!usageSafe || len(executor.responses) != 2 || !executor.responses[index].ReasoningContentEmpty ||
+			invocation.InputTokens <= 0 || invocation.OutputTokens <= 0 ||
 			invocation.CachedInputTokens < 0 || invocation.CachedInputTokens > invocation.InputTokens ||
 			invocation.EstimatedCostMicros <= 0 ||
 			strings.TrimSpace(invocation.InputHash) == "" || strings.TrimSpace(invocation.OutputHash) == "" {
 			t.Fatal("真实 provider invocation 字段缺失、非法或 reasoning 非零，停止事实门")
 		}
 		t.Logf(
-			"purpose=%s provider=%s model=%s inputTokens=%d cachedInputTokens=%d outputTokens=%d reasoningTokens=%d latencyMs=%d estimatedCostMicros=%d inputHash=%s outputHash=%s",
+			"purpose=%s provider=%s model=%s inputTokens=%d cachedInputTokens=%d outputTokens=%d usageShape=%s reasoningTokens=%s reasoningContentEmpty=%t latencyMs=%d estimatedCostMicros=%d inputHash=%s outputHash=%s",
 			invocation.Purpose, invocation.Provider, invocation.Model,
 			invocation.InputTokens, invocation.CachedInputTokens, invocation.OutputTokens,
-			*invocation.ReasoningTokens, invocation.LatencyMs, invocation.EstimatedCostMicros,
+			invocation.UsageShape, reasoning, executor.responses[index].ReasoningContentEmpty,
+			invocation.LatencyMs, invocation.EstimatedCostMicros,
 			invocation.InputHash, invocation.OutputHash,
 		)
 	}
