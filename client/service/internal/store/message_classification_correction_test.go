@@ -175,6 +175,38 @@ func TestCorrectMessageClassificationAtomicallyReplacesActiveTailAndIsIdempotent
 	}
 }
 
+func TestCorrectMessageClassificationAppendsAfterRetractedPhysicalTail(t *testing.T) {
+	fixture := seedClassificationCorrectionStoreFixture(t)
+	retractedAt := fixture.request.SyncedAt.Add(-time.Second)
+	retractedText := "已撤回的更高物理序号"
+	if err := fixture.store.db.Create(&Message{
+		Platform: fixture.key.Platform, AccountRef: fixture.key.AccountRef,
+		ConversationRef: fixture.key.ConversationRef, Seq: 3,
+		Direction: "in", Kind: "text", ContentHash: "retracted-physical-tail-hash",
+		Text: &retractedText, Origin: "external", FirstSeenRoundID: fixture.originalRoundID,
+		RetractedAt: &retractedAt, RetractionReason: "test_retracted_physical_tail",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.store.CorrectMessageClassification(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Corrected.Seq != 4 || result.TailSeq != 4 {
+		t.Fatalf("修正行必须追加在物理最大序号之后: %+v", result)
+	}
+	active, err := fixture.store.MessagesForConversation(fixture.key)
+	if err != nil || len(active) != 2 || active[0].Seq != 1 || active[1].Seq != 4 {
+		t.Fatalf("更高的已撤回行不得被复用或重新激活: messages=%+v err=%v", active, err)
+	}
+	facts := physicalMessageFacts(t, fixture.store, fixture.key)
+	if len(facts) != 4 || facts[1].RetractedAt == nil || facts[2].RetractedAt == nil ||
+		facts[3].RetractedAt != nil {
+		t.Fatalf("物理历史与新修正行错误: %+v", facts)
+	}
+}
+
 func TestCorrectMessageClassificationLateAuditFailureRollsBackEverything(t *testing.T) {
 	fixture := seedClassificationCorrectionStoreFixture(t)
 	forced := errors.New("forced classification correction audit failure")
