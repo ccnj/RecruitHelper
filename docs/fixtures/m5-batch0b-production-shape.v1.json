@@ -1,0 +1,192 @@
+{
+  "fixtureVersion": 1,
+  "capturedAt": "2026-07-21",
+  "kind": "sanitized-production-shape",
+  "containsRawPromptOrDocumentContent": false,
+  "containsCredentialOrIdentity": false,
+  "containsReversibleContentDigest": false,
+  "resumeSurface": {
+    "bindingStable": true,
+    "bindingDimensions": [
+      "conversationRef",
+      "platformUserRef"
+    ],
+    "bindingProof": [
+      "exactlyOneSelectedConversation",
+      "selectedPeerMatchesCommand",
+      "exactlyOneCurrentDetail",
+      "standardClickWithinCurrentDetail",
+      "routeSessionPeerUnchangedAfterOpen"
+    ],
+    "privateLayerAttestationRequired": false,
+    "observedActions": [
+      "openDetail",
+      "inspectFullyLoadedDetail",
+      "closeIsolatedProbeTab"
+    ],
+    "routeChanged": false,
+    "existingPriorReadRecordObserved": true,
+    "newReadRecordAtProbeTimeObserved": false,
+    "supersedesProvisionalPlatformSideEffect": "idempotentReadReceipt",
+    "candidateVisibleSideEffectObserved": false,
+    "primitiveClass": "intrusive",
+    "platformSideEffect": "none",
+    "accountSerializationRequired": true,
+    "execBudgetMs": 60000,
+    "deadlineMs": 120000,
+    "leaseMs": 30000,
+    "manualQuietRequired": true,
+    "sections": [
+      {
+        "name": "basic",
+        "representation": "orderedLabelValueArray",
+        "observedState": "populated",
+        "itemCountBucket": "1-16"
+      },
+      {
+        "name": "expectations",
+        "representation": "orderedLabelValueArray",
+        "observedState": "populated",
+        "itemCountBucket": "1-8"
+      },
+      {
+        "name": "selfEvaluation",
+        "representation": "text",
+        "observedState": "explicitlyEmpty",
+        "itemCountBucket": "0"
+      },
+      {
+        "name": "education",
+        "representation": "text",
+        "observedState": "populated",
+        "itemCountBucket": "1"
+      },
+      {
+        "name": "workExperiences",
+        "representation": "text",
+        "observedState": "populated",
+        "itemCountBucket": "2"
+      }
+    ],
+    "explicitEmptyRequires": [
+      "exactlyOneFullyLoadedResumeRoot",
+      "basicExpectationsEducationWorkAnchorsReadable",
+      "sectionStructureAndVisibleHeadingBothAbsent"
+    ],
+    "explicitEmptyResidualRisk": "single optional section structure and heading may drift together; accepted while attended, any observed drift disables capture and routes manual",
+    "payloadUtf8SizeBucket": "lt4KiB",
+    "belowInline64KiB": true,
+    "expectationSemanticChecks": {
+      "expectedRoleAndConversationRoleDistinct": true,
+      "recentApplyPresentInSample": false,
+      "missingRecentApplyWasNotSynthesized": true
+    }
+  },
+  "promptContracts": [
+    {
+      "docType": "多轮沟通",
+      "activeInputTokens": [
+        "简历",
+        "推荐时段",
+        "对话历史"
+      ],
+      "braceOccurrences": [
+        {
+          "name": "简历",
+          "classification": "activeInput"
+        },
+        {
+          "name": "推荐时段",
+          "classification": "activeInput"
+        },
+        {
+          "name": "对话历史",
+          "classification": "activeInput"
+        },
+        {
+          "name": "话术_序列",
+          "classification": "outputExample"
+        }
+      ],
+      "declaredOutputKeys": [
+        "话术_序列",
+        "动作"
+      ]
+    },
+    {
+      "docType": "意向判断",
+      "activeInputTokens": [
+        "回复",
+        "招呼语"
+      ],
+      "braceOccurrences": [
+        {
+          "name": "回复",
+          "classification": "activeInput"
+        },
+        {
+          "name": "招呼语",
+          "classification": "activeInput"
+        }
+      ],
+      "declaredOutputKeys": [
+        "信号",
+        "理由"
+      ],
+      "acceptedCompatibilityAliases": [
+        "signal",
+        "reason"
+      ]
+    }
+  ],
+  "intentRuleScan": {
+    "loadedConversationCount": 21,
+    "parseFailureCount": 0,
+    "determinableInboundLastMessageCount": 2,
+    "searched": false,
+    "scrolled": false,
+    "extraHistoryRead": false,
+    "enabledRuleIds": []
+  },
+  "intentRuleObservations": [
+    { "ruleId": "M5I-RSM-01", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-02", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-03", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-04", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-05", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-06", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-07", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-08", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-09", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-10", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-11", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-12", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RSM-13", "family": "resumeMarker", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "interested" },
+    { "ruleId": "M5I-RT-N-CONSIDER", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-N-MISMATCH", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-N-NOT_INTERESTED", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-N-UNSUITABLE", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-THINK-CONSIDER", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-THINK-MISMATCH", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-THINK-NOT_INTERESTED", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-RT-THINK-UNSUITABLE", "family": "rejectionRegex", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-01", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-02", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-03", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-04", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-05", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-06", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-07", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-08", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-09", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-10", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" },
+    { "ruleId": "M5I-SR-11", "family": "shortRejection", "status": "unseen", "observedCount": 0, "sourceShape": "unseen", "targetLabel": "rejected" }
+  ],
+  "futureProfileContextSelection": {
+    "explicitlySelectable": true,
+    "profileRandomLabel": "profile-A",
+    "contextRandomLabel": "context-A",
+    "titleHeuristicUsed": false,
+    "persistedBindingCreated": false
+  }
+}

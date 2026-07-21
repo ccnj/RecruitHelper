@@ -1,0 +1,953 @@
+{
+  "fixtureVersion": 1,
+  "kind": "synthetic-format-goldens",
+  "containsProductionContent": false,
+  "containsCredentialOrIdentity": false,
+  "formatVersions": {
+    "tokenScanner": 1,
+    "resumeDTO": 1,
+    "history": 1,
+    "schedule": 1,
+    "providerAssembly": 1,
+    "replyParser": 1,
+    "intentParser": 1,
+    "intentEnvelope": 1,
+    "intentShortCircuit": 1
+  },
+  "constants": {
+    "timezone": "Asia/Shanghai",
+    "historyLimit": 20,
+    "historyInboundCodePointLimit": 1000,
+    "historyOutboundCodePointLimit": 300,
+    "historyTruncationSuffix": "…(超长消息已截断)",
+    "sendTextMaxUtf8Bytes": 2048,
+    "resumeDataMaxUtf8BytesInclusive": 65536,
+    "slotPointerText": "可约面时间(见【可约面时间】)",
+    "slotFormatGuard": "话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。",
+    "customerFactsHeading": "【客户事实库】",
+    "intentEnvelopeHeading": "【对话数据信封/v1】",
+    "providerRoles": [
+      "user"
+    ]
+  },
+  "sections": {
+    "promptTokens": {
+      "placeholderCandidateGrammar": "exact braces around one-or-more Unicode letters/digits/underscore, with first code point letter/underscore; JSON braces containing quotes/colon are not candidates",
+      "communicationActiveInputs": [
+        "简历",
+        "推荐时段",
+        "对话历史"
+      ],
+      "intentActiveInputs": [
+        "回复",
+        "招呼语"
+      ],
+      "communicationOutputExampleNames": [
+        "话术_序列"
+      ],
+      "cases": [
+        {
+          "id": "multiround_allowed_tokens",
+          "input": {
+            "docType": "多轮沟通",
+            "text": "简历={简历}\n时段={推荐时段}\n历史={对话历史}"
+          },
+          "expected": {
+            "status": "ok",
+            "activeInputTokens": [
+              "简历",
+              "推荐时段",
+              "对话历史"
+            ]
+          }
+        },
+        {
+          "id": "intent_allowed_tokens",
+          "input": {
+            "docType": "意向判断",
+            "text": "招呼={招呼语}\n回复={回复}"
+          },
+          "expected": {
+            "status": "ok",
+            "activeInputTokens": [
+              "招呼语",
+              "回复"
+            ]
+          }
+        },
+        {
+          "id": "output_example_not_input_token",
+          "input": {
+            "docType": "多轮沟通",
+            "text": "输入:{简历}\n输出示例字段:{话术_序列}"
+          },
+          "expected": {
+            "status": "ok",
+            "activeInputTokens": [
+              "简历"
+            ],
+            "classifiedOccurrences": [
+              {
+                "name": "话术_序列",
+                "classification": "outputExample"
+              }
+            ]
+          }
+        },
+        {
+          "id": "literal_json_braces_not_token",
+          "input": {
+            "docType": "多轮沟通",
+            "text": "返回 {\"话术_序列\":[\"示例\"],\"动作\":\"无\"}"
+          },
+          "expected": {
+            "status": "ok",
+            "activeInputTokens": []
+          }
+        },
+        {
+          "id": "unknown_live_token_fails",
+          "input": {
+            "docType": "多轮沟通",
+            "text": "未知={未知字段}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "unknownTemplateToken"
+          }
+        }
+      ]
+    },
+    "resumeDTO": {
+      "canonicalKeyOrder": [
+        "conversationRef",
+        "platformUserRef",
+        "observedAt",
+        "basic",
+        "expectations",
+        "selfEvaluation",
+        "education",
+        "workExperiences"
+      ],
+      "requiredKeys": [
+        "conversationRef",
+        "platformUserRef",
+        "observedAt",
+        "basic",
+        "expectations",
+        "selfEvaluation",
+        "education",
+        "workExperiences"
+      ],
+      "fieldRules": {
+        "basic": "ordered array of required non-empty label and string value",
+        "expectations": "ordered array of required non-empty label and string value",
+        "selfEvaluation": "string; empty only after fully-loaded explicit-empty test",
+        "education": "string; empty only after fully-loaded explicit-empty test",
+        "workExperiences": "string; empty only after fully-loaded explicit-empty test",
+        "aggregate": "canonical data UTF-8 bytes must be at most 65536; no partial data or truncation"
+      },
+      "cases": [
+        {
+          "id": "all_five_sections_populated",
+          "input": {
+            "conversationRef": "conv-fixture",
+            "platformUserRef": "peer-fixture",
+            "observedAt": 1783664580000,
+            "basic": [
+              {
+                "label": "学历",
+                "value": "本科"
+              }
+            ],
+            "expectations": [
+              {
+                "label": "期望职位",
+                "value": "顾问"
+              }
+            ],
+            "selfEvaluation": "认真负责",
+            "education": "示例大学｜本科",
+            "workExperiences": "示例公司｜顾问"
+          },
+          "expected": {
+            "status": "ok",
+            "canonicalJSON": "{\"conversationRef\":\"conv-fixture\",\"platformUserRef\":\"peer-fixture\",\"observedAt\":1783664580000,\"basic\":[{\"label\":\"学历\",\"value\":\"本科\"}],\"expectations\":[{\"label\":\"期望职位\",\"value\":\"顾问\"}],\"selfEvaluation\":\"认真负责\",\"education\":\"示例大学｜本科\",\"workExperiences\":\"示例公司｜顾问\"}"
+          }
+        },
+        {
+          "id": "explicit_empty_sections_valid",
+          "input": {
+            "conversationRef": "conv-empty",
+            "platformUserRef": "peer-empty",
+            "observedAt": 1783664580000,
+            "basic": [],
+            "expectations": [],
+            "selfEvaluation": "",
+            "education": "",
+            "workExperiences": "",
+            "fullyLoadedExplicitEmpty": true
+          },
+          "expected": {
+            "status": "ok",
+            "canonicalJSON": "{\"conversationRef\":\"conv-empty\",\"platformUserRef\":\"peer-empty\",\"observedAt\":1783664580000,\"basic\":[],\"expectations\":[],\"selfEvaluation\":\"\",\"education\":\"\",\"workExperiences\":\"\"}"
+          }
+        },
+        {
+          "id": "missing_section_invalid",
+          "input": {
+            "missingKey": "selfEvaluation"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "missingRequiredSection"
+          }
+        },
+        {
+          "id": "unreadable_not_empty",
+          "input": {
+            "selfEvaluation": "",
+            "fullyLoadedExplicitEmpty": false
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "sectionUnreadable",
+            "partialDataReturned": false
+          }
+        },
+        {
+          "id": "aggregate_payload_boundary",
+          "input": {
+            "canonicalUtf8ByteCases": [
+              65536,
+              65537
+            ]
+          },
+          "expected": {
+            "firstStatus": "ok",
+            "secondStatus": "rejected",
+            "secondErrorClass": "payloadLimit",
+            "partialDataReturned": false
+          }
+        }
+      ]
+    },
+    "history": {
+      "sortKey": "seq ascending after selecting the latest 20 active messages",
+      "countUnit": "Unicode code points",
+      "cases": [
+        {
+          "id": "roles_order_blank_retracted",
+          "input": {
+            "messages": [
+              { "seq": 3, "direction": "outbound", "kind": "greeting", "text": " 你好 ", "retracted": false },
+              { "seq": 5, "direction": "inbound", "kind": "text", "text": "已撤回", "retracted": true },
+              { "seq": 1, "direction": "inbound", "kind": "text", "text": "收到", "retracted": false },
+              { "seq": 4, "direction": "inbound", "kind": "text", "text": "   ", "retracted": false },
+              { "seq": 2, "direction": "outbound", "kind": "text", "text": "请问方便聊聊吗", "retracted": false }
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "rendered": "候选人(消息):收到\n我(消息):请问方便聊聊吗\n我(招呼语):你好"
+          }
+        },
+        {
+          "id": "last_20_of_21",
+          "input": {
+            "messageSeqRangeInclusive": [
+              1,
+              21
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "selectedSeqRangeInclusive": [
+              2,
+              21
+            ],
+            "selectedCount": 20
+          }
+        },
+        {
+          "id": "inbound_1000_and_1001",
+          "input": {
+            "cases": [
+              { "repeat": "入", "codePoints": 1000 },
+              { "repeat": "入", "codePoints": 1001 }
+            ]
+          },
+          "expected": {
+            "firstTruncated": false,
+            "secondPrefixCodePoints": 1000,
+            "secondSuffix": "…(超长消息已截断)"
+          }
+        },
+        {
+          "id": "outbound_300_and_301",
+          "input": {
+            "cases": [
+              { "repeat": "出", "codePoints": 300 },
+              { "repeat": "出", "codePoints": 301 }
+            ]
+          },
+          "expected": {
+            "firstTruncated": false,
+            "secondPrefixCodePoints": 300,
+            "secondSuffix": "…(超长消息已截断)"
+          }
+        },
+        {
+          "id": "empty_history",
+          "input": {
+            "messages": []
+          },
+          "expected": {
+            "status": "ok",
+            "rendered": ""
+          }
+        },
+        {
+          "id": "restart_same_bytes",
+          "input": {
+            "fixtureRef": "roles_order_blank_retracted",
+            "runs": 2
+          },
+          "expected": {
+            "byteIdentical": true
+          }
+        }
+      ]
+    },
+    "schedule": {
+      "defaultWindow": {
+        "weekdays": [
+          "周一",
+          "周二",
+          "周三",
+          "周四",
+          "周五"
+        ],
+        "startInclusive": "09:00",
+        "endExclusive": "18:00",
+        "intervalMinutes": 60,
+        "dayOffsetsInclusive": [
+          0,
+          13
+        ]
+      },
+      "cases": [
+        {
+          "id": "default_generation_friday_and_fourteen_day_boundary",
+          "input": {
+            "timezone": "Asia/Shanghai",
+            "frozenNow": "2026-07-10T14:23:00+08:00"
+          },
+          "expected": {
+            "status": "ok",
+            "slotCount": 84,
+            "firstSlot": "2026-07-10 15:00:00",
+            "lastSlot": "2026-07-23 17:00:00",
+            "weekendSlotCount": 0,
+            "dayOffset14Included": false
+          }
+        },
+        {
+          "id": "weekday_exact_hour_boundary",
+          "input": {
+            "timezone": "Asia/Shanghai",
+            "frozenNow": "2026-07-13T10:00:00+08:00"
+          },
+          "expected": {
+            "status": "ok",
+            "firstSlot": "2026-07-13 10:00:00",
+            "nineOClockIncluded": false,
+            "tenOClockIncluded": true
+          }
+        },
+        {
+          "id": "no_time_block_multiple_tokens",
+          "input": {
+            "timezone": "Asia/Shanghai",
+            "frozenNow": "2026-07-10T14:23:00+08:00",
+            "sourcePrompt": "上下文\n{推荐时段}\n再次:{推荐时段}",
+            "selectedSlots": [
+              "2026-07-13 09:00:00",
+              "2026-07-13 10:00:00"
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "renderedPrompt": "上下文\n可约面时间(见【可约面时间】)\n再次:可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点",
+            "fullBlockCount": 1
+          }
+        },
+        {
+          "id": "existing_block_tokens_inside_and_outside",
+          "input": {
+            "timezone": "Asia/Shanghai",
+            "frozenNow": "2026-07-10T14:23:00+08:00",
+            "sourcePrompt": "外部:{推荐时段}\n【可约面时间】\n内部:{推荐时段}\n再次:{推荐时段}",
+            "selectedSlots": [
+              "2026-07-13 09:00:00",
+              "2026-07-13 10:00:00"
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "renderedPrompt": "外部:可约面时间(见【可约面时间】)\n【可约面时间】\n内部:现在是2026年7月10日(周五)14:23。话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n再次:可约面时间(见【可约面时间】)",
+            "inlinePayloadCount": 1
+          }
+        },
+        {
+          "id": "empty_slots_block",
+          "input": {
+            "timezone": "Asia/Shanghai",
+            "frozenNow": "2026-07-10T14:23:00+08:00",
+            "sourcePrompt": "时段:{推荐时段}",
+            "selectedSlots": []
+          },
+          "expected": {
+            "status": "ok",
+            "renderedPrompt": "时段:可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。当前未配置可面试时间，不要主动承诺具体面试时间。",
+            "fullBlockCount": 1
+          }
+        },
+        {
+          "id": "frozen_clock_restart",
+          "input": {
+            "fixtureRef": "no_time_block_multiple_tokens",
+            "runtimeNowAfterRestart": "2026-07-11T09:00:00+08:00"
+          },
+          "expected": {
+            "usesFrozenNow": "2026-07-10T14:23:00+08:00",
+            "byteIdentical": true
+          }
+        }
+      ]
+    },
+    "providerAssembly": {
+      "requestShape": {
+        "messages": "exactly one role=user message",
+        "response_format": {
+          "type": "json_object"
+        },
+        "localRetryCount": 0
+      },
+      "cases": [
+        {
+          "id": "reply_all_values_and_customer_facts_once",
+          "input": {
+            "purpose": "reply",
+            "frozenNow": "2026-07-10T14:23:00+08:00",
+            "sourcePrompt": "简历={简历}\n历史={对话历史}\n时段={推荐时段}",
+            "templateValues": {
+              "简历": "{\"basic\":[]}",
+              "对话历史": "候选人(消息):你好"
+            },
+            "selectedSlots": [
+              "2026-07-13 09:00:00",
+              "2026-07-13 10:00:00"
+            ],
+            "customerFacts": "仅供测试的客户事实"
+          },
+          "expected": {
+            "status": "ok",
+            "providerMessages": [
+              {
+                "role": "user",
+                "content": "简历={\"basic\":[]}\n历史=候选人(消息):你好\n时段=可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n\n【客户事实库】\n仅供测试的客户事实"
+              }
+            ],
+            "customerFactsBlockCount": 1,
+            "extraLocalInstructionCount": 0
+          }
+        },
+        {
+          "id": "intent_prompt_and_envelope",
+          "input": {
+            "purpose": "intent",
+            "sourcePrompt": "请判断。招呼={招呼语}；回复={回复}",
+            "sentGreeting": "你好",
+            "currentTurn": [
+              { "seq": 2, "direction": "inbound", "kind": "text", "text": "可以聊聊" },
+              { "seq": 3, "direction": "inbound", "kind": "text", "text": "明天下午方便" }
+            ],
+            "historyBeforeTurn": [
+              { "seq": 1, "direction": "outbound", "kind": "greeting", "text": "你好" }
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "renderedPrompt": "请判断。招呼=你好；回复=明天下午方便",
+            "envelopeJSON": "{\"historyBeforeTurn\":[{\"seq\":1,\"direction\":\"outbound\",\"kind\":\"greeting\",\"text\":\"你好\"}],\"currentTurn\":[{\"seq\":2,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"可以聊聊\"},{\"seq\":3,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"明天下午方便\"}]}",
+            "providerMessages": [
+              {
+                "role": "user",
+                "content": "请判断。招呼=你好；回复=明天下午方便\n\n【对话数据信封/v1】\n{\"historyBeforeTurn\":[{\"seq\":1,\"direction\":\"outbound\",\"kind\":\"greeting\",\"text\":\"你好\"}],\"currentTurn\":[{\"seq\":2,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"可以聊聊\"},{\"seq\":3,\"direction\":\"inbound\",\"kind\":\"text\",\"text\":\"明天下午方便\"}]}"
+              }
+            ],
+            "extraLocalInstructionCount": 0
+          }
+        },
+        {
+          "id": "assembly_missing_required_value_fails",
+          "input": {
+            "purpose": "reply",
+            "missingValue": "简历"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "missingTemplateValue",
+            "providerRequestCreated": false
+          }
+        },
+        {
+          "id": "assembly_unknown_token_fails",
+          "input": {
+            "purpose": "reply",
+            "sourcePrompt": "未知={未知字段}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "unknownTemplateToken",
+            "providerRequestCreated": false
+          }
+        },
+        {
+          "id": "canonical_assembly_bytes",
+          "input": {
+            "fixtureRef": "intent_prompt_and_envelope",
+            "runs": 2
+          },
+          "expected": {
+            "byteIdentical": true
+          }
+        }
+      ]
+    },
+    "replyParser": {
+      "requiredKeys": [
+        "话术_序列"
+      ],
+      "allowedIgnoredKeys": [
+        "动作"
+      ],
+      "cases": [
+        {
+          "id": "one_phrase_valid_action_ignored",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\" 你好 \"],\"动作\":\"任意值\"}"
+          },
+          "expected": {
+            "status": "ok",
+            "text": "你好",
+            "ignoredKeys": [
+              "动作"
+            ],
+            "businessActionCount": 0
+          }
+        },
+        {
+          "id": "multiple_phrases_trim_drop_empty_join_newline",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\" 第一段 \",\"  \",\"第二段\"]}"
+          },
+          "expected": {
+            "status": "ok",
+            "text": "第一段\n第二段",
+            "businessActionCount": 0
+          }
+        },
+        {
+          "id": "all_phrases_empty_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\" \",\"\"]}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "emptyReplyText"
+          }
+        },
+        {
+          "id": "missing_phrase_array_invalid",
+          "input": {
+            "rawJSON": "{\"动作\":\"无\"}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "missingPhraseSequence"
+          }
+        },
+        {
+          "id": "phrase_array_wrong_type_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":\"你好\"}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidPhraseSequenceType"
+          }
+        },
+        {
+          "id": "unknown_top_level_key_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\"你好\"],\"策略\":\"跟进\"}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "unknownOutputKey"
+          }
+        },
+        {
+          "id": "legacy_fallback_rejected",
+          "input": {
+            "rawJSON": "{\"reply\":\"你好\",\"content\":\"你好\",\"text\":\"你好\",\"话术\":\"你好\"}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "missingPhraseSequence"
+          }
+        },
+        {
+          "id": "invalid_json",
+          "input": {
+            "rawJSON": "{invalid"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidJSON"
+          }
+        },
+        {
+          "id": "exact_send_limit_valid",
+          "input": {
+            "phraseSequence": [
+              { "repeat": "a", "utf8Bytes": 2048 }
+            ]
+          },
+          "expected": {
+            "status": "ok",
+            "mergedUtf8Bytes": 2048
+          }
+        },
+        {
+          "id": "merged_text_over_send_limit_invalid",
+          "input": {
+            "phraseSequence": [
+              { "repeat": "a", "utf8Bytes": 2048 },
+              "b"
+            ]
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "sendTextLimit",
+            "businessActionCount": 0
+          }
+        }
+      ]
+    },
+    "intentParser": {
+      "acceptedSignalKeys": [
+        "信号",
+        "signal"
+      ],
+      "acceptedReasonKeys": [
+        "理由",
+        "reason"
+      ],
+      "signalMap": {
+        "有意向": "interested",
+        "拒绝": "rejected",
+        "中性": "neutral"
+      },
+      "reasonPersistence": "never",
+      "cases": [
+        {
+          "id": "chinese_signal",
+          "input": {
+            "rawJSON": "{\"信号\":\"有意向\",\"理由\":\"仅供本次判错\"}"
+          },
+          "expected": {
+            "status": "ok",
+            "label": "interested",
+            "persistedReason": false
+          }
+        },
+        {
+          "id": "english_compat_signal",
+          "input": {
+            "rawJSON": "{\"signal\":\"拒绝\",\"reason\":\"fixture\"}"
+          },
+          "expected": {
+            "status": "ok",
+            "label": "rejected",
+            "persistedReason": false
+          }
+        },
+        {
+          "id": "invalid_signal",
+          "input": {
+            "rawJSON": "{\"信号\":\"可能\"}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidIntentSignal"
+          }
+        },
+        {
+          "id": "unknown_intent_output_key",
+          "input": {
+            "rawJSON": "{\"信号\":\"中性\",\"置信度\":0.8}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "unknownOutputKey"
+          }
+        }
+      ]
+    },
+    "intentEnvelope": {
+      "canonicalKeyOrder": [
+        "historyBeforeTurn",
+        "currentTurn"
+      ],
+      "messageKeyOrder": [
+        "seq",
+        "direction",
+        "kind",
+        "text"
+      ],
+      "identityFieldsForbidden": [
+        "platformUserRef",
+        "conversationRef",
+        "displayName",
+        "profileId"
+      ],
+      "cases": [
+        {
+          "id": "multi_message_current_turn_and_last_reply_token",
+          "input": {
+            "currentTurn": [
+              { "seq": 11, "direction": "inbound", "kind": "text", "text": "第一条" },
+              { "seq": 12, "direction": "inbound", "kind": "text", "text": "第二条" }
+            ]
+          },
+          "expected": {
+            "envelopeCurrentTurnSeq": [
+              11,
+              12
+            ],
+            "replyTokenValue": "第二条"
+          }
+        },
+        {
+          "id": "prior_history_20_of_21",
+          "input": {
+            "priorSeqRangeInclusive": [
+              1,
+              21
+            ],
+            "currentTurnSeq": [
+              22
+            ]
+          },
+          "expected": {
+            "historySeqRangeInclusive": [
+              2,
+              21
+            ],
+            "historyCount": 20,
+            "currentTurnDuplicatedInHistory": false
+          }
+        },
+        {
+          "id": "retracted_blank_excluded",
+          "input": {
+            "messages": [
+              { "seq": 1, "text": "有效", "retracted": false },
+              { "seq": 2, "text": "撤回", "retracted": true },
+              { "seq": 3, "text": "   ", "retracted": false }
+            ]
+          },
+          "expected": {
+            "includedSeq": [
+              1
+            ]
+          }
+        },
+        {
+          "id": "greeting_uses_sent_message_only",
+          "input": {
+            "sentGreeting": { "seq": 1, "status": "observed", "text": "你好" },
+            "draftGreeting": "草稿",
+            "failedGreeting": "失败文本"
+          },
+          "expected": {
+            "greetingTokenValue": "你好"
+          }
+        },
+        {
+          "id": "draft_or_failed_greeting_missing_input",
+          "input": {
+            "sentGreeting": null,
+            "draftGreeting": "草稿",
+            "failedGreeting": "失败文本"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "missingSentGreeting",
+            "providerRequestCreated": false
+          }
+        },
+        {
+          "id": "duplicate_seq_invalid",
+          "input": {
+            "historySeq": [
+              7
+            ],
+            "currentTurnSeq": [
+              7
+            ]
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "overlappingTurnBoundary"
+          }
+        }
+      ]
+    },
+    "intentShortCircuit": {
+      "productionEnabledRuleIds": [],
+      "normalization": {
+        "unicodeNormalization": "NFC",
+        "whitespace": "delete every Unicode whitespace code point",
+        "lengthUnit": "Unicode code points after normalization",
+        "shortLimitInclusive": 25,
+        "questionMarkers": [
+          "?",
+          "？"
+        ],
+        "messageCombination": "never concatenate messages before matching",
+        "scanOrder": "current-turn inbound text messages in ascending seq",
+        "familyPriority": [
+          "resumeMarker",
+          "rejectionRegex",
+          "shortRejection"
+        ]
+      },
+      "candidateRules": {
+        "resumeMarkers": [
+          { "ruleId": "M5I-RSM-01", "literal": "发送了在线简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-02", "literal": "附件简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-03", "literal": "简历请查收", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-04", "literal": "简历,请查收", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-05", "literal": "简历已发送", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-06", "literal": "已发送简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-07", "literal": "投递简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-08", "literal": "已投递简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-09", "literal": "简历发您", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-10", "literal": "简历发你", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-11", "literal": "发您简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-12", "literal": "发你简历", "productionEnabled": false },
+          { "ruleId": "M5I-RSM-13", "requiresAllLiterals": ["简历", "查收"], "productionEnabled": false }
+        ],
+        "rejectionRegex": {
+          "pattern": "(很抱歉|抱歉)[，,]?\\s*我(暂时)?\\s*(不|觉得这个).{0,20}(考虑|不匹配|不感兴趣|不合适)",
+          "branchRuleIds": [
+            "M5I-RT-N-CONSIDER",
+            "M5I-RT-N-MISMATCH",
+            "M5I-RT-N-NOT_INTERESTED",
+            "M5I-RT-N-UNSUITABLE",
+            "M5I-RT-THINK-CONSIDER",
+            "M5I-RT-THINK-MISMATCH",
+            "M5I-RT-THINK-NOT_INTERESTED",
+            "M5I-RT-THINK-UNSUITABLE"
+          ],
+          "productionEnabled": false
+        },
+        "shortRejections": [
+          { "ruleId": "M5I-SR-01", "literal": "不考虑", "productionEnabled": false },
+          { "ruleId": "M5I-SR-02", "literal": "不感兴趣", "productionEnabled": false },
+          { "ruleId": "M5I-SR-03", "literal": "不需要", "productionEnabled": false },
+          { "ruleId": "M5I-SR-04", "literal": "不合适", "productionEnabled": false },
+          { "ruleId": "M5I-SR-05", "literal": "勿扰", "productionEnabled": false },
+          { "ruleId": "M5I-SR-06", "literal": "别发", "productionEnabled": false },
+          { "ruleId": "M5I-SR-07", "literal": "不找工作", "productionEnabled": false },
+          { "ruleId": "M5I-SR-08", "literal": "已入职", "productionEnabled": false },
+          { "ruleId": "M5I-SR-09", "literal": "已经入职", "productionEnabled": false },
+          { "ruleId": "M5I-SR-10", "literal": "找到工作了", "productionEnabled": false },
+          { "ruleId": "M5I-SR-11", "literal": "不找了", "productionEnabled": false }
+        ]
+      },
+      "cases": [
+        {
+          "id": "unseen_resume_marker_does_not_classify",
+          "input": {
+            "orderedMessages": [
+              "发送了在线简历"
+            ]
+          },
+          "expected": {
+            "matchedRuleId": null,
+            "label": null,
+            "source": "none"
+          }
+        },
+        {
+          "id": "unseen_short_rejection_does_not_classify",
+          "input": {
+            "orderedMessages": [
+              "不考虑"
+            ]
+          },
+          "expected": {
+            "matchedRuleId": null,
+            "label": null,
+            "source": "none"
+          }
+        },
+        {
+          "id": "twenty_five_and_twenty_six_boundaries_with_empty_rule_set",
+          "input": {
+            "messageCodePointLengths": [
+              25,
+              26
+            ]
+          },
+          "expected": {
+            "bothUseProvider": true,
+            "matchedRuleIds": [
+              null,
+              null
+            ]
+          }
+        },
+        {
+          "id": "question_mark_boundaries_with_empty_rule_set",
+          "input": {
+            "orderedMessages": [
+              "不考虑?",
+              "不考虑？"
+            ]
+          },
+          "expected": {
+            "matchedRuleId": null,
+            "source": "none"
+          }
+        },
+        {
+          "id": "empty_turn_is_neutral_not_short_rejection",
+          "input": {
+            "orderedMessages": []
+          },
+          "expected": {
+            "matchedRuleId": null,
+            "label": "neutral",
+            "source": "emptyTurn"
+          }
+        }
+      ]
+    }
+  }
+}
