@@ -191,6 +191,26 @@ func TestSendMessageIntentConflictDoesNotRecomputeGuards(t *testing.T) {
 }
 
 func TestSendMessageAuthoritativeGatesRemainAfterPreflightPruning(t *testing.T) {
+	t.Run("contract mismatch is rejected before WAL", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-contract", "conv-send-contract")
+		m.setContractMatch("hand-send", false)
+		intentID := "intent-send-contract"
+		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
+		if receipt != nil || !errors.Is(err, ErrContractMismatch) || m.sentCount() != 0 {
+			t.Fatalf("契约不一致必须在 WAL 前拒绝 effectful: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
+		}
+		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
+			t.Fatalf("WAL 前拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		}
+		if rows, lookupErr := st.RecentCmds(10); lookupErr != nil || len(rows) != 0 {
+			t.Fatalf("WAL 前拒绝不得留下 cmd: rows=%+v err=%v", rows, lookupErr)
+		}
+		if !hasAudit(t, st, "effect_contract_mismatch_blocked", "") {
+			t.Fatal("WAL 前契约闸触发必须审计")
+		}
+	})
+
 	t.Run("manual quiet is enforced by store transaction", func(t *testing.T) {
 		d, st, m := newDisp(t)
 		key := seedSendTarget(t, st, m, "acct-send-quiet", "conv-send-quiet")
@@ -273,6 +293,25 @@ func TestRealEffectDefinitivePreSendAbortAndProtocolRejectTerminateIntent(t *tes
 		if cmd.Status != store.CmdFailed || cmd.SideEffect != string(protocol.SideEffectNone) ||
 			intent.Status != store.EffectIntentFailed {
 			t.Fatalf("可证明未写 socket 必须原子终结 Cmd+Intent: cmd=%+v intent=%+v", cmd, intent)
+		}
+	})
+
+	t.Run("contract socket fence proves no write", func(t *testing.T) {
+		d, st, m := newDisp(t)
+		key := seedSendTarget(t, st, m, "acct-send-contract-final", "conv-send-contract-final")
+		d.sender = &contractMismatchAtSendSender{mockSender: m}
+		receipt, err := d.SendMessage(sendRequest("intent-send-contract-final", key, "你好"))
+		if !errors.Is(err, ErrContractMismatch) || receipt == nil {
+			t.Fatalf("socket 契约写栅栏失败应返回可查 intent: receipt=%+v err=%v", receipt, err)
+		}
+		cmd, _ := st.CmdByMsgID(receipt.MsgID)
+		intent, _ := st.EffectIntentByID(receipt.IntentID)
+		if cmd.Status != store.CmdFailed || cmd.ErrorCode != contractMismatchBeforeSendCode ||
+			cmd.SideEffect != string(protocol.SideEffectNone) || intent.Status != store.EffectIntentFailed {
+			t.Fatalf("可证明未写 socket 的契约阻断必须原子终结 Cmd+Intent: cmd=%+v intent=%+v", cmd, intent)
+		}
+		if m.sentCount() != 0 {
+			t.Fatalf("socket 契约闸不得产生 effectful 写: %d", m.sentCount())
 		}
 	})
 

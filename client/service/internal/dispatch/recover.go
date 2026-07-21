@@ -264,9 +264,10 @@ func (d *Dispatcher) releaseSafeRecoveries(handID string) {
 		return
 	}
 	for i := range commands {
-		d.resendCmdAt(commands[i], session, time.Now())
-		d.st.Audit("effect_safe_redispatch", handID, commands[i].MsgID,
-			"report=unknown 且 witness store 连续，同 msgId 唯一安全恢复")
+		if d.resendCmdAt(commands[i], session, time.Now()) {
+			d.st.Audit("effect_safe_redispatch", handID, commands[i].MsgID,
+				"report=unknown 且 witness store 连续，同 msgId 唯一安全恢复")
+		}
 	}
 	for i := range verify {
 		d.st.Audit("effect_safe_redispatch_blocked", handID, verify[i].MsgID,
@@ -280,22 +281,23 @@ func (d *Dispatcher) resendCmd(cmd store.CmdRecord, session string) {
 	d.resendCmdAt(cmd, session, time.Now())
 }
 
-func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.Time) {
+func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.Time) bool {
 	if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
-		return
+		return false
 	}
 	body, err := d.commandBody(cmd)
 	if err != nil {
 		d.st.Audit("resend_invalid", cmd.HandID, cmd.MsgID, err.Error())
-		return
+		return false
 	}
 	env := d.envelope(protocol.KindCmd, cmd.MsgID, &session, body)
 	env.Attempt = cmd.Attempt + 1
 	if err := d.sender.SendEnvelope(cmd.HandID, env); err != nil {
-		return
+		return false
 	}
 	d.markSent(cmd.MsgID, cmd.Session, session)
 	d.st.Audit("resend", cmd.HandID, cmd.MsgID, "同 msgId 重发")
+	return true
 }
 
 // Recover 在任何 WS 监听前运行。真实 SX 进 pendingReconcile/verifying，

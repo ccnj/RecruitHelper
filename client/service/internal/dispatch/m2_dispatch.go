@@ -111,6 +111,17 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			return dispatchResult{}, ErrStaleSession
 		}
 	}
+	if meta.Class == protocol.ClassEffectful {
+		matched, current := d.sender.HandContractMatch(req.HandID)
+		if !current {
+			return dispatchResult{}, ErrHandOffline
+		}
+		if !matched {
+			d.st.Audit("effect_contract_mismatch_blocked", req.HandID, "",
+				fmt.Sprintf("stage=construct primitive=%s", req.Name))
+			return dispatchResult{}, ErrContractMismatch
+		}
+	}
 	if !opts.legacyDebug {
 		if err := d.requireNegotiation(req.HandID, req.Name, meta); err != nil {
 			return dispatchResult{}, err
@@ -237,10 +248,20 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 
 	env := d.envelope(protocol.KindCmd, msgID, &session, body)
 	if err := d.sender.SendEnvelope(req.HandID, env); err != nil {
+		if errors.Is(err, ErrContractMismatch) && opts.effectIntent != nil {
+			abortErr := d.st.AbortEffectBeforeSend(msgID, contractMismatchBeforeSendCode,
+				"contract mismatch before socket write", time.Now())
+			d.notifyByMsgID(msgID)
+			if abortErr != nil {
+				return dispatchResult{MsgID: msgID, Created: true}, errors.Join(err, abortErr)
+			}
+			return dispatchResult{MsgID: msgID, Created: true}, err
+		}
 		if generationBound && (errors.Is(err, ErrStaleSession) || errors.Is(err, ErrHandOffline)) {
 			var voidErr error
 			if opts.effectIntent != nil {
-				voidErr = d.st.AbortEffectBeforeSend(msgID, "actor generation changed before socket write", time.Now())
+				voidErr = d.st.AbortEffectBeforeSend(msgID, string(protocol.ErrCodeStaleSession),
+					"actor generation changed before socket write", time.Now())
 				d.notifyByMsgID(msgID)
 			} else {
 				voidErr = d.voidGenerationBoundBeforeSend(req.HandID, msgID, err)

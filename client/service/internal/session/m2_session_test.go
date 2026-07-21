@@ -174,4 +174,64 @@ func TestHelloUnknownFieldsAndHashWarnOnly(t *testing.T) {
 	if !ok || len(state.Caps) != 1 || len(state.Features) != 3 {
 		t.Fatalf("hello caps/features 未保存: %+v", state)
 	}
+	if matched, current := h.hub.HandContractMatch("hand-future"); !current || matched {
+		t.Fatalf("当前活连接应保留 mismatch 结论: current=%v matched=%v", current, matched)
+	}
+
+	subID, frameCh, _ := h.hub.Frames().Subscribe()
+	defer h.hub.Frames().Unsubscribe(subID)
+	meta := protocol.Primitives[protocol.PrimDebugSlowEcho]
+	argsRaw, _ := protocol.Encode(protocol.DebugSlowEchoArgs{Ms: 0, Outcome: protocol.DebugSlowOutcomeOk})
+	bodyRaw, _ := protocol.Encode(protocol.CmdBody{
+		Name: protocol.PrimDebugSlowEcho, Ver: meta.Ver, Args: argsRaw,
+		IdemKey: "ik1:test:contract-mismatch", Deadline: time.Now().Add(time.Minute).UnixMilli(),
+		ExecBudgetMs: meta.ExecBudgetMs,
+	})
+	blockedID := ids.NewMsgID()
+	blocked := protocol.Envelope{
+		Proto: protocol.ProtoVersion, Kind: protocol.KindCmd, MsgID: blockedID,
+		Session: &state.SessionID, Ts: time.Now().UnixMilli(), Attempt: 1, Body: bodyRaw,
+	}
+	if err := h.hub.SendEnvelope("hand-future", blocked); !errors.Is(err, dispatch.ErrContractMismatch) {
+		t.Fatalf("mismatch 活连接的 effectful 必须在 socket 前拒绝: %v", err)
+	}
+	select {
+	case frame := <-frameCh:
+		if frame.MsgID == blockedID {
+			t.Fatalf("被契约闸阻断的 effectful 不得进入出站观测或 socket: %+v", frame)
+		}
+	default:
+	}
+	audits, auditErr := h.st.AuditEntries(20)
+	if auditErr != nil {
+		t.Fatal(auditErr)
+	}
+	foundBlockedAudit := false
+	for _, audit := range audits {
+		if audit.Category == "effect_contract_mismatch_blocked" && audit.RefMsgID == blockedID {
+			foundBlockedAudit = true
+			break
+		}
+	}
+	if !foundBlockedAudit {
+		t.Fatal("Hub 最终契约闸触发必须审计")
+	}
+
+	pingMeta := protocol.Primitives[protocol.PrimDebugPing]
+	pingArgs, _ := protocol.Encode(protocol.DebugPingArgs{})
+	pingBody, _ := protocol.Encode(protocol.CmdBody{
+		Name: protocol.PrimDebugPing, Ver: pingMeta.Ver, Args: pingArgs,
+		Deadline: time.Now().Add(time.Minute).UnixMilli(), ExecBudgetMs: pingMeta.ExecBudgetMs,
+	})
+	readonlyID := ids.NewMsgID()
+	readonly := protocol.Envelope{
+		Proto: protocol.ProtoVersion, Kind: protocol.KindCmd, MsgID: readonlyID,
+		Session: &state.SessionID, Ts: time.Now().UnixMilli(), Attempt: 1, Body: pingBody,
+	}
+	if err := h.hub.SendEnvelope("hand-future", readonly); err != nil {
+		t.Fatalf("hash mismatch 不得阻断 readonly: %v", err)
+	}
+	if got := readEnv(t, c); got.MsgID != readonlyID {
+		t.Fatalf("readonly 应实际进入当前 socket: got=%s want=%s", got.MsgID, readonlyID)
+	}
 }

@@ -41,6 +41,8 @@ func (s *reloadSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{protocol.PrimDebugReload + "@1"}, nil, true
 }
 
+func (*reloadSender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (s *reloadSender) CloseHand(string, string, string) bool { return true }
 func (s *reloadSender) HandOfflineMs(string) int64            { return 0 }
 

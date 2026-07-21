@@ -83,6 +83,8 @@ func (*greetingAPISender) HandNegotiation(string) ([]string, []string, bool) {
 	}, true
 }
 
+func (*greetingAPISender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (*greetingAPISender) HandWitness(string) (dispatch.HandWitness, bool) {
 	return dispatch.HandWitness{StoreID: "witness-greeting-api"}, true
 }

@@ -64,6 +64,8 @@ func (*greetingVerificationSender) HandNegotiation(string) ([]string, []string, 
 		}, true
 }
 
+func (*greetingVerificationSender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (*greetingVerificationSender) HandWitness(string) (dispatch.HandWitness, bool) {
 	return dispatch.HandWitness{StoreID: "witness-greeting-verifier"}, true
 }

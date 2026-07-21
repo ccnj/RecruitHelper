@@ -29,10 +29,13 @@ var (
 	ErrVerdictNotReady    = errors.New("对账未完成,不许人裁(法条5前置):手在线同代或离线不足时长")
 	ErrCapability         = errors.New("手未声明原语能力")
 	ErrFeature            = errors.New("手未协商协议特性")
+	ErrContractMismatch   = errors.New("手与脑的协议契约不一致")
 	ErrRecoveryBarrier    = errors.New("手的副作用恢复屏障尚未收束")
 	ErrWitnessUnavailable = errors.New("手未提供可用的持久证词库")
 	errResultSource       = errors.New("result 来源手与命令不一致")
 )
+
+const contractMismatchBeforeSendCode = "BRAIN_CONTRACT_MISMATCH"
 
 type HandWitness struct {
 	StoreID       string
@@ -44,6 +47,7 @@ type HandWitness struct {
 type Sender interface {
 	SendEnvelope(handID string, env protocol.Envelope) error
 	HandSession(handID string) (session, bootID string, ok bool)
+	HandContractMatch(handID string) (matched, ok bool)
 	HandNegotiation(handID string) (caps, features []string, ok bool)
 	CloseHand(handID, expectedSession, reason string) bool // 仅关闭超时命令所属 session；已顶替则 no-op
 	HandOfflineMs(handID string) int64                     // 离线时长(毫秒);在线返回 0

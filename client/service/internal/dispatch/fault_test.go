@@ -17,6 +17,7 @@ type mockSender struct {
 	boot              map[string]string
 	caps              map[string][]string
 	features          map[string][]string
+	contractMatch     map[string]bool
 	session           map[string]string
 	sent              []protocol.Envelope
 	closed            []string
@@ -30,7 +31,7 @@ type mockSender struct {
 func newMock() *mockSender {
 	return &mockSender{
 		online: map[string]bool{}, boot: map[string]string{}, session: map[string]string{},
-		caps: map[string][]string{}, features: map[string][]string{},
+		caps: map[string][]string{}, features: map[string][]string{}, contractMatch: map[string]bool{},
 		witness: map[string]HandWitness{},
 	}
 }
@@ -54,9 +55,25 @@ func (m *mockSender) up(handID, boot string) {
 	defer m.mu.Unlock()
 	m.online[handID] = true
 	m.boot[handID] = boot
+	m.contractMatch[handID] = true
 	if m.session[handID] == "" {
 		m.session[handID] = "s-test"
 	}
+}
+
+func (m *mockSender) HandContractMatch(handID string) (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.online[handID] {
+		return false, false
+	}
+	return m.contractMatch[handID], true
+}
+
+func (m *mockSender) setContractMatch(handID string, matched bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.contractMatch[handID] = matched
 }
 
 func (m *mockSender) setSession(handID, session string) {

@@ -58,6 +58,8 @@ func (*candidateReadSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{protocol.PrimCandidateReadCurrent + "@1"}, nil, true
 }
 
+func (*candidateReadSender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (*candidateReadSender) CloseHand(string, string, string) bool { return true }
 func (*candidateReadSender) HandOfflineMs(string) int64            { return 0 }
 

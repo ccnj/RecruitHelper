@@ -81,6 +81,8 @@ func (s *verificationSender) HandNegotiation(string) ([]string, []string, bool) 
 		}, true
 }
 
+func (*verificationSender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (s *verificationSender) HandWitness(string) (dispatch.HandWitness, bool) {
 	return dispatch.HandWitness{StoreID: "witness-verifier"}, true
 }

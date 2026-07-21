@@ -31,6 +31,8 @@ func (*sendAPISender) HandNegotiation(string) ([]string, []string, bool) {
 		string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
 	}, true
 }
+
+func (*sendAPISender) HandContractMatch(string) (bool, bool) { return true, true }
 func (*sendAPISender) HandWitness(string) (dispatch.HandWitness, bool) {
 	return dispatch.HandWitness{StoreID: "witness-api"}, true
 }

@@ -42,6 +42,12 @@ func (s *staleAtSendSender) SendEnvelope(string, protocol.Envelope) error {
 	return ErrStaleSession
 }
 
+type contractMismatchAtSendSender struct{ *mockSender }
+
+func (s *contractMismatchAtSendSender) SendEnvelope(string, protocol.Envelope) error {
+	return ErrContractMismatch
+}
+
 func TestGenerationBoundDispatchRejectsMismatchAndVoidsDefinitiveStaleSend(t *testing.T) {
 	d, st, m := newDisp(t)
 	prepareNavHand(m, "hand-generation", "boot-generation")

@@ -69,7 +69,13 @@ func (h *Hub) Registry() *Registry { return h.reg }
 // 绝不允许先取出旧 Conn、接管/收编完成后再向旧 socket 落帧。
 func (h *Hub) SendEnvelope(handID string, env protocol.Envelope) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	blockedByContract := false
+	defer func() {
+		h.mu.Unlock()
+		if blockedByContract {
+			h.st.Audit("effect_contract_mismatch_blocked", handID, env.MsgID, "stage=socket")
+		}
+	}()
 	c := h.active[handID]
 	if c == nil {
 		return dispatch.ErrHandOffline
@@ -79,6 +85,14 @@ func (h *Hub) SendEnvelope(handID string, env protocol.Envelope) error {
 	}
 	if !h.readyLocked(c) {
 		return dispatch.ErrHandOffline
+	}
+	effectful, err := effectfulCmdEnvelope(env)
+	if err != nil {
+		return err
+	}
+	if effectful && !c.contractMatch {
+		blockedByContract = true
+		return dispatch.ErrContractMismatch
 	}
 	return c.writeEnvelope(env)
 }
@@ -92,6 +106,18 @@ func (h *Hub) HandSession(handID string) (string, string, bool) {
 		return "", "", false
 	}
 	return c.session, c.bootID, true
+}
+
+// HandContractMatch 返回当前 ready 活连接在 hello 时冻结的契约一致性结论。
+// contractHash 仍不参与身份认证或握手拒绝；该读数只供 effectful 构造闸使用。
+func (h *Hub) HandContractMatch(handID string) (bool, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || !h.readyLocked(c) {
+		return false, false
+	}
+	return c.contractMatch, true
 }
 
 // WithCurrentHandSession 把“复核当前 session/boot”与一个短提交回调线性化。
@@ -718,4 +744,21 @@ func containsInt(xs []int, v int) bool {
 		}
 	}
 	return false
+}
+
+// effectfulCmdEnvelope 从信封自己的 generated CmdBody/原语元数据判类，避免
+// 最终 socket 闸信任某个可漏传或误传的调用方布尔值。
+func effectfulCmdEnvelope(env protocol.Envelope) (bool, error) {
+	if env.Kind != protocol.KindCmd {
+		return false, nil
+	}
+	var body protocol.CmdBody
+	if err := json.Unmarshal(env.Body, &body); err != nil {
+		return false, fmt.Errorf("解析待发送 cmd 以复核契约一致性: %w", err)
+	}
+	meta, ok := protocol.Primitives[body.Name]
+	if !ok || meta.Ver == 0 || body.Ver != meta.Ver {
+		return false, fmt.Errorf("待发送 cmd 原语未知或版本不符: %s@%d", body.Name, body.Ver)
+	}
+	return meta.Class == protocol.ClassEffectful, nil
 }

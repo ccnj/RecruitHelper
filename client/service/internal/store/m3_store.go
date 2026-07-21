@@ -821,10 +821,13 @@ func (s *Store) MoveEffectToVerification(ref, reason string, at time.Time) error
 	})
 }
 
-// AbortEffectBeforeSend 只用于 Hub 的代际写栅栏明确证明“一个字节都未
-// 进入 socket”的情形。它终结 intent 而不进验证，但也不会将这条命令
-// 放回自动重投队列。
-func (s *Store) AbortEffectBeforeSend(ref, reason string, at time.Time) error {
+// AbortEffectBeforeSend 只用于 Hub 的代际或契约一致性写栅栏明确证明
+// “一个字节都未进入 socket”的情形。它终结 intent 而不进验证，但也
+// 不会将这条命令放回自动重投队列。
+func (s *Store) AbortEffectBeforeSend(ref, errorCode, reason string, at time.Time) error {
+	if errorCode == "" {
+		return errors.New("发送前终结缺少错误码")
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -837,7 +840,7 @@ func (s *Store) AbortEffectBeforeSend(ref, reason string, at time.Time) error {
 			return ErrRecoveryStateConflict
 		}
 		cmd.Status = CmdFailed
-		cmd.ErrorCode = "STALE_SESSION"
+		cmd.ErrorCode = errorCode
 		cmd.SideEffect = "none"
 		cmd.SuspectReason = reason
 		cmd.TerminalAt = &at

@@ -70,6 +70,42 @@ func TestEffectRecoveryUnknownSameWitnessResendsOriginalMsgIDOnce(t *testing.T) 
 	}
 }
 
+func TestEffectRecoveryQueuedResendRemainsBlockedOnContractMismatch(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-recover-contract", "conv-recover-contract")
+	receipt, err := d.SendMessage(sendRequest("intent-recover-contract", key, "你好"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconnectEffect(t, d, m, "session-contract", "boot-contract", "witness-store-1")
+	if queryCount(m) != 1 {
+		t.Fatalf("重连必须先 query: %d", queryCount(m))
+	}
+
+	// 模拟 Hub 在安全恢复已获 unknown 授权、但真正写 socket 前观察到
+	// 当前 active 代 contract mismatch。该阻断有零字节证明，命令保留
+	// queued 等人工完成部署切换，不能伪记“已安全重投”。
+	d.sender = &contractMismatchAtSendSender{mockSender: m}
+	d.OnReport("hand-send", "report-contract", "session-contract", "boot-contract", protocol.ReportBody{
+		Ref: receipt.MsgID, State: protocol.ReportStateUnknown, WitnessStoreId: "witness-store-1",
+	})
+	after, _ := st.CmdByMsgID(receipt.MsgID)
+	if after.Status != store.CmdQueued || after.RecoveryRedispatchN != 1 || cmdCountFor(m, receipt.MsgID) != 1 {
+		t.Fatalf("mismatch 必须阻断 queued 安全重投且保留原 msgId: cmd=%+v count=%d",
+			after, cmdCountFor(m, receipt.MsgID))
+	}
+	if hasAudit(t, st, "effect_safe_redispatch", receipt.MsgID) {
+		t.Fatal("socket 未写成功不得伪记 effect_safe_redispatch")
+	}
+
+	d.sweepFaults(time.Now())
+	afterSweep, _ := st.CmdByMsgID(receipt.MsgID)
+	if afterSweep.Status != store.CmdQueued || cmdCountFor(m, receipt.MsgID) != 1 {
+		t.Fatalf("queued 故障轨也必须被最终闸挡住: cmd=%+v count=%d",
+			afterSweep, cmdCountFor(m, receipt.MsgID))
+	}
+}
+
 func TestEffectRecoveryQueuedWaitsOriginalAndChangedWitnessVerifies(t *testing.T) {
 	t.Run("queued", func(t *testing.T) {
 		d, st, m := newDisp(t)

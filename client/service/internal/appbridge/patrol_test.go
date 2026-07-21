@@ -53,6 +53,8 @@ func (*completingSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{protocol.PrimProbePlatform + "@1"}, nil, true
 }
 
+func (*completingSender) HandContractMatch(string) (bool, bool) { return true, true }
+
 func (*completingSender) CloseHand(string, string, string) bool { return true }
 func (*completingSender) HandOfflineMs(string) int64            { return 0 }
 
