@@ -125,11 +125,15 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	// 采集阶段只产生简历采集事实。评分、选人和招呼分别由后续显式阶段
-	// 消费完整批次，不能退化成逐候选人的内联流水线。
-	if _, err := a.captureSourcingResume(ctx); err != nil {
-		a.handleCommandFailure(err)
-		return err
+	// 采集阶段只产生简历采集事实，并在本轮立即收尾。评分、选人和招呼
+	// 分别由后续显式阶段消费完整批次；既有 IM 对账也不能在采集轮里把
+	// 当前推荐页导航走。
+	if a.account.SourcingEnabled {
+		if _, err := a.captureSourcingResume(ctx); err != nil {
+			a.handleCommandFailure(err)
+			return err
+		}
+		return nil
 	}
 
 	if err := a.setStage("readingList"); err != nil {

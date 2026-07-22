@@ -246,16 +246,18 @@ func TestSourcingActorCapturesOnlyAcrossConsecutiveRounds(t *testing.T) {
 	if len(sender.greetings) != 0 {
 		t.Fatalf("capture-only 阶段不得调用 chat.sendGreeting: greetings=%v", sender.greetings)
 	}
-	readCount, greetingCount := 0, 0
+	readCount, listCount, greetingCount := 0, 0, 0
 	for _, name := range sender.order {
 		switch name {
 		case protocol.PrimCandidateReadSourcingResume:
 			readCount++
+		case protocol.PrimChatReadList:
+			listCount++
 		case protocol.PrimChatSendGreeting:
 			greetingCount++
 		}
 	}
-	if readCount != len(candidates) || greetingCount != 0 {
+	if readCount != len(candidates) || listCount != 0 || greetingCount != 0 {
 		t.Fatalf("连续采集轮命令面错误: order=%v", sender.order)
 	}
 	if len(sender.sourcingExclusions) != len(candidates) {
