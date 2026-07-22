@@ -462,6 +462,32 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			}
 		}
 	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadSourcingTargetResume && res.Status == protocol.ResultStatusOk {
+		var args protocol.CandidateReadSourcingTargetResumeArgs
+		var data protocol.CandidateReadSourcingResumeData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = errors.New("定点采集简历 args 无法解析")
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("定点采集简历 data 无法解析")
+		} else if data.PlatformUserRef != args.PlatformUserRef || data.PositionRef != args.PositionRef {
+			validationErr = errors.New("定点采集简历 result 的候选人或职位与原命令不一致")
+		}
+	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadSourcingWindow && res.Status == protocol.ResultStatusOk {
+		var data protocol.CandidateReadSourcingWindowData
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("采集窗口 data 无法解析")
+		} else {
+			seen := make(map[string]struct{}, len(data.PlatformUserRefs))
+			for _, platformUserRef := range data.PlatformUserRefs {
+				if _, duplicated := seen[platformUserRef]; duplicated {
+					validationErr = errors.New("采集窗口 result 含重复候选人身份")
+					break
+				}
+				seen[platformUserRef] = struct{}{}
+			}
+		}
+	}
 	if validationErr == nil {
 		return res, ""
 	}

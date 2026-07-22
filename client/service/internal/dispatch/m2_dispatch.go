@@ -114,7 +114,9 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		}
 	}
 	identityRead := req.Name == protocol.PrimCandidateReadResume ||
-		req.Name == protocol.PrimCandidateReadSourcingResume
+		req.Name == protocol.PrimCandidateReadSourcingResume ||
+		req.Name == protocol.PrimCandidateReadSourcingWindow ||
+		req.Name == protocol.PrimCandidateReadSourcingTargetResume
 	if meta.Class == protocol.ClassEffectful || identityRead {
 		matched, current := d.sender.HandContractMatch(req.HandID)
 		if !current {
