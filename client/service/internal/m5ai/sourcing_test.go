@@ -32,12 +32,40 @@ func TestDeriveSourcingViewUsesImmutableDocuments(t *testing.T) {
 	}
 	if view.MappingVersion != SourcingMappingVersion || view.ScoringPrompt != "请评分 {resume_json}" ||
 		view.GreetingPrompt != "状态={career_state};简历={resume_summary_json}" ||
+		view.UsePlatformDefaultGreeting ||
 		view.CandidateSelection != (CandidateSelectionView{MinScore: 7, TargetMin: 10, TargetMax: 20, MaleRatioLimit: 30}) {
 		t.Fatalf("采集视图派生错误: %+v", view)
 	}
 	var filters []map[string]any
 	if json.Unmarshal(view.JobFilters, &filters) != nil || len(filters) != 1 || filters[0]["field"] != "age" {
 		t.Fatalf("职位筛选未原样派生: %s", view.JobFilters)
+	}
+}
+
+func TestDeriveSourcingViewParsesPlainAndWrappedGreetingDocuments(t *testing.T) {
+	tests := []struct {
+		name                string
+		document            string
+		wantPrompt          string
+		wantPlatformDefault bool
+	}{
+		{
+			name: "plain", document: "状态={career_state};简历={resume_summary_json}",
+			wantPrompt: "状态={career_state};简历={resume_summary_json}",
+		},
+		{
+			name: "wrapped", document: `{"prompt":"状态={career_state};简历={resume_summary_json}","usePlatformDefault":true}`,
+			wantPrompt: "状态={career_state};简历={resume_summary_json}", wantPlatformDefault: true,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			view, err := DeriveSourcingView(sourcingPackage(map[string]string{"招呼语": testCase.document}))
+			if err != nil || view.GreetingPrompt != testCase.wantPrompt ||
+				view.UsePlatformDefaultGreeting != testCase.wantPlatformDefault {
+				t.Fatalf("招呼文档解析错误: view=%+v err=%v", view, err)
+			}
+		})
 	}
 }
 
@@ -59,10 +87,11 @@ func TestDeriveSourcingViewMatchesLegacyDefaultsAndClamps(t *testing.T) {
 
 func TestDeriveSourcingViewRejectsUnboundPromptsAndInvalidFilters(t *testing.T) {
 	for name, overrides := range map[string]map[string]string{
-		"scoring placeholder missing":  {"打分": "请评分"},
-		"scoring placeholder repeated": {"打分": "{resume_json}{resume_json}"},
-		"greeting placeholder missing": {"招呼语": `{"prompt":"{resume_summary_json}"}`},
-		"filters invalid":              {"职位筛选": `{}`},
+		"scoring placeholder missing":   {"打分": "请评分"},
+		"scoring placeholder repeated":  {"打分": "{resume_json}{resume_json}"},
+		"greeting placeholder missing":  {"招呼语": `{"prompt":"{resume_summary_json}"}`},
+		"greeting wrapper flag invalid": {"招呼语": `{"prompt":"{career_state}{resume_summary_json}","usePlatformDefault":"false"}`},
+		"filters invalid":               {"职位筛选": `{}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := DeriveSourcingView(sourcingPackage(overrides))

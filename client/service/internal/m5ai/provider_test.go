@@ -113,6 +113,53 @@ func TestOpenAICompatibleProviderBlocksScoringOutsideReplyBudgetBeforeTransport(
 	}
 }
 
+func TestOpenAICompatibleProviderAcceptsGreetingWithinPDossier(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body["max_tokens"] != float64(GreetingOutputTokenLimit) {
+			t.Fatalf("招呼 provider 请求预算错误: %#v", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"content":"{\"招呼语\":\"你好\"}"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"prompt_cache_hit_tokens":0,"completion_tokens_details":{"reasoning_tokens":0}}}`,
+			)),
+		}, nil
+	})}
+	provider, err := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeGreeting, UserContent: "fixture", MaxOutputTokens: GreetingOutputTokenLimit,
+	})
+	if err != nil || calls != 1 || response.JSONText != `{"招呼语":"你好"}` {
+		t.Fatalf("招呼 provider 未完成单次 P 档请求: calls=%d response=%+v err=%v", calls, response, err)
+	}
+}
+
+func TestOpenAICompatibleProviderBlocksGreetingOutsidePDossierBeforeTransport(t *testing.T) {
+	requests := []CompletionRequest{
+		{Purpose: PurposeGreeting, UserContent: "fixture", MaxOutputTokens: GreetingOutputTokenLimit + 1},
+		{Purpose: PurposeGreeting, UserContent: strings.Repeat("a", GreetingInputTokenLimit+1), MaxOutputTokens: GreetingOutputTokenLimit},
+	}
+	for _, request := range requests {
+		calls := 0
+		client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("不应发起招呼请求")
+		})}
+		provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+		_, err := provider.CompleteJSON(context.Background(), request)
+		var providerErr *ProviderError
+		if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
+			t.Fatalf("招呼 P 档预算未在网络前阻断: calls=%d request=%+v err=%v", calls, request, err)
+		}
+	}
+}
+
 func TestValidateBaseURLRequiresHTTPSWithoutAuthorityDecorations(t *testing.T) {
 	for _, accepted := range []string{
 		"https://provider.invalid",

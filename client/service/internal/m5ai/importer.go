@@ -272,13 +272,29 @@ func validateDirectViews(bundle legacyJobBundle) error {
 }
 
 func derivedGreetingPrompt(raw string) string {
-	var parsed map[string]any
-	if json.Unmarshal([]byte(raw), &parsed) != nil {
-		return raw
-	}
-	prompt, ok := parsed["prompt"].(string)
-	if !ok {
+	prompt, _, err := deriveGreetingConfig(raw)
+	if err != nil {
 		return ""
 	}
 	return prompt
+}
+
+func deriveGreetingConfig(raw string) (string, bool, error) {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return raw, false, nil
+	}
+	prompt, ok := parsed["prompt"].(string)
+	if !ok {
+		return "", false, errors.New("招呼语 JSON wrapper 缺少 prompt")
+	}
+	usePlatformDefault := false
+	if value, exists := parsed["usePlatformDefault"]; exists {
+		var valid bool
+		usePlatformDefault, valid = value.(bool)
+		if !valid {
+			return "", false, errors.New("招呼语 JSON wrapper 的 usePlatformDefault 无效")
+		}
+	}
+	return prompt, usePlatformDefault, nil
 }

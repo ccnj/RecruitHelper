@@ -18,9 +18,11 @@ const (
 	HistoryLimit                = 20
 	IntentInputTokenLimit       = 8000
 	ReplyInputTokenLimit        = 16000
+	GreetingInputTokenLimit     = ReplyInputTokenLimit
 	IntentOutputTokenLimit      = 64
 	ReplyOutputTokenLimit       = 512
 	ScoringOutputTokenLimit     = 512
+	GreetingOutputTokenLimit    = ReplyOutputTokenLimit
 )
 
 type JobConfigDocument struct {
@@ -82,12 +84,17 @@ type ScoringSuggestion struct {
 	Score int
 }
 
+type GreetingSuggestion struct {
+	Text string
+}
+
 type CompletionPurpose string
 
 const (
-	PurposeIntent  CompletionPurpose = "intent"
-	PurposeReply   CompletionPurpose = "reply"
-	PurposeScoring CompletionPurpose = "scoring"
+	PurposeIntent   CompletionPurpose = "intent"
+	PurposeReply    CompletionPurpose = "reply"
+	PurposeScoring  CompletionPurpose = "scoring"
+	PurposeGreeting CompletionPurpose = "greeting"
 )
 
 type CompletionRequest struct {

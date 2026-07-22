@@ -25,11 +25,12 @@ type CandidateSelectionView struct {
 // SourcingView is an in-memory executable projection. Prompts and raw filters
 // stay inside the local brain and must never be returned by management APIs.
 type SourcingView struct {
-	ScoringPrompt      string
-	GreetingPrompt     string
-	JobFilters         json.RawMessage
-	CandidateSelection CandidateSelectionView
-	MappingVersion     string
+	ScoringPrompt              string
+	GreetingPrompt             string
+	UsePlatformDefaultGreeting bool
+	JobFilters                 json.RawMessage
+	CandidateSelection         CandidateSelectionView
+	MappingVersion             string
 }
 
 // DeriveSourcingView reads only the immutable repository-owned document
@@ -50,7 +51,10 @@ func DeriveSourcingView(source JobConfigDocumentPackage) (SourcingView, error) {
 	if strings.TrimSpace(scoring) == "" || strings.Count(scoring, "{resume_json}") != 1 {
 		return SourcingView{}, ErrInvalidSourcingView
 	}
-	greeting := derivedGreetingPrompt(documents["招呼语"])
+	greeting, usePlatformDefaultGreeting, err := deriveGreetingConfig(documents["招呼语"])
+	if err != nil {
+		return SourcingView{}, ErrInvalidSourcingView
+	}
 	if strings.TrimSpace(greeting) == "" || strings.Count(greeting, "{resume_summary_json}") != 1 ||
 		strings.Count(greeting, "{career_state}") != 1 {
 		return SourcingView{}, ErrInvalidSourcingView
@@ -67,9 +71,10 @@ func DeriveSourcingView(source JobConfigDocumentPackage) (SourcingView, error) {
 
 	return SourcingView{
 		ScoringPrompt: scoring, GreetingPrompt: greeting,
-		JobFilters:         append(json.RawMessage(nil), filters...),
-		CandidateSelection: deriveCandidateSelection(documents["候选人筛选"]),
-		MappingVersion:     SourcingMappingVersion,
+		UsePlatformDefaultGreeting: usePlatformDefaultGreeting,
+		JobFilters:                 append(json.RawMessage(nil), filters...),
+		CandidateSelection:         deriveCandidateSelection(documents["候选人筛选"]),
+		MappingVersion:             SourcingMappingVersion,
 	}, nil
 }
 
