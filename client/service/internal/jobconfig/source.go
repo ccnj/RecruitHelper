@@ -57,6 +57,8 @@ type ConfigView struct {
 	BaseURLConfigured      bool   `json:"baseUrlConfigured"`
 	MachineIDConfigured    bool   `json:"machineIdConfigured"`
 	LicenseTokenConfigured bool   `json:"licenseTokenConfigured"`
+	MachineIdentityReady   bool   `json:"machineIdentityReady"`
+	MachineMatch           bool   `json:"machineMatch"`
 	CustomerName           string `json:"customerName,omitempty"`
 	CustomerStatus         string `json:"customerStatus,omitempty"`
 }
@@ -204,6 +206,24 @@ func (s *Source) SaveConfig(config Config) error {
 	return s.config.Save(config)
 }
 
+func (s *Source) Status(ctx context.Context) (ConfigView, error) {
+	config, err := s.LoadConfig()
+	if err != nil {
+		return ConfigView{}, err
+	}
+	view := Config{}.View()
+	if config != nil {
+		view = config.View()
+	}
+	machineID, machineErr := s.currentMachineID(ctx)
+	if machineErr != nil {
+		return view, nil
+	}
+	view.MachineIdentityReady = true
+	view.MachineMatch = config != nil && config.MachineID == machineID
+	return view, nil
+}
+
 type BindResult struct {
 	Status   string   `json:"status"`
 	Customer Customer `json:"customer"`
@@ -222,6 +242,13 @@ func (e *BindRejectedError) Unwrap() error { return ErrBindRejected }
 // Bind uses an attended, one-shot activation code to obtain the old backend's
 // compatibility credential. It never retries and never persists the code.
 func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindResult, error) {
+	if strings.TrimSpace(rawBaseURL) == "" {
+		if existing, loadErr := s.LoadConfig(); loadErr != nil {
+			return BindResult{}, loadErr
+		} else if existing != nil {
+			rawBaseURL = existing.BaseURL
+		}
+	}
 	baseURL, err := normalizeBaseURL(rawBaseURL)
 	if err != nil || strings.TrimSpace(inviteCode) == "" {
 		return BindResult{}, ErrConfigInvalid

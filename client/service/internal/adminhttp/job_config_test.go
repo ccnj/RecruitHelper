@@ -125,6 +125,123 @@ func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
 	}
 }
 
+func TestLegacyActivationBindsThenSynchronizesCurrentJob(t *testing.T) {
+	const inviteCode = "invite-private"
+	const token = "token-new-private"
+	var calls []string
+	backendPayload := syntheticCurrentJobConfig(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		var body map[string]string
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Fatalf("旧后台请求无法解析")
+		}
+		switch r.URL.Path {
+		case "/api/v1/client/bind":
+			if len(body) != 2 || body["inviteCode"] != inviteCode || body["machineId"] != adminTestMachineID {
+				t.Fatalf("bind 请求体错误: %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"` + token + `","customer":{"customerId":9,"customerName":"合成客户","status":"active"}}`))
+		case "/api/v1/client/job-config":
+			if len(body) != 2 || body["machineId"] != adminTestMachineID || body["licenseToken"] != token {
+				t.Fatalf("job-config 请求体错误: %+v", body)
+			}
+			_, _ = w.Write(backendPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer backend.Close()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	configStore, _ := jobconfig.NewConfigStore(dataDir)
+	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+		return adminTestMachineID, nil
+	})
+	api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetJobConfigSource(source)
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	body := `{"base_url":` + mustJSONString(t, backend.URL) + `,"invite_code":` + mustJSONString(t, inviteCode) + `}`
+	request := httptest.NewRequest(http.MethodPost, "/admin/job-config/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"activated":true`) ||
+		!strings.Contains(response.Body.String(), `"synced":true`) ||
+		!strings.Contains(response.Body.String(), `"documentCount":10`) {
+		t.Fatalf("激活并同步失败: code=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, secret := range []string{inviteCode, token, adminTestMachineID, backend.URL} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("激活响应泄漏秘密 %q", secret)
+		}
+	}
+	if strings.Join(calls, ",") != "/api/v1/client/bind,/api/v1/client/job-config" {
+		t.Fatalf("请求顺序错误: %v", calls)
+	}
+	loaded, err := configStore.Load()
+	if err != nil || loaded == nil || loaded.LicenseToken != token || loaded.Customer.Name != "合成客户" {
+		t.Fatalf("正式授权未落盘: loaded=%+v err=%v", loaded, err)
+	}
+	summaries, err := st.JobAIContextRevisionSummaries()
+	if err != nil || len(summaries) != 1 || summaries[0].SourceKind != "legacyJobConfig" {
+		t.Fatalf("正式职位配置未导入: summaries=%+v err=%v", summaries, err)
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/admin/job-config/source", nil)
+	statusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK ||
+		!strings.Contains(statusResponse.Body.String(), `"machineIdentityReady":true`) ||
+		!strings.Contains(statusResponse.Body.String(), `"machineMatch":true`) {
+		t.Fatalf("激活状态错误: code=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+	}
+}
+
+func TestLegacyActivationKeepsCredentialWhenAutomaticSyncFails(t *testing.T) {
+	const token = "token-new-private"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/client/bind" {
+			_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"` + token + `","customer":{"customerId":9,"customerName":"合成客户","status":"active"}}`))
+			return
+		}
+		http.Error(w, "upstream fixture", http.StatusServiceUnavailable)
+	}))
+	defer backend.Close()
+
+	dataDir := t.TempDir()
+	st, _ := store.Open(dataDir)
+	defer st.Close()
+	configStore, _ := jobconfig.NewConfigStore(dataDir)
+	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+		return adminTestMachineID, nil
+	})
+	api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetJobConfigSource(source)
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	body := `{"base_url":` + mustJSONString(t, backend.URL) + `,"invite_code":"invite-private"}`
+	request := httptest.NewRequest(http.MethodPost, "/admin/job-config/activate", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"activated":true`) ||
+		!strings.Contains(response.Body.String(), `"synced":false`) ||
+		!strings.Contains(response.Body.String(), `"syncError"`) {
+		t.Fatalf("同步失败未保留激活成功语义: code=%d body=%s", response.Code, response.Body.String())
+	}
+	loaded, err := configStore.Load()
+	if err != nil || loaded == nil || loaded.LicenseToken != token {
+		t.Fatalf("同步失败丢失正式授权: loaded=%+v err=%v", loaded, err)
+	}
+}
+
 func mustJSONString(t *testing.T, value string) string {
 	t.Helper()
 	raw, err := json.Marshal(value)
