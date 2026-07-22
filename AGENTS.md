@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本仓库是"招聘自动化助手"(RecruitHelper):对旧产品"智联招聘自动化"(工作区 `../AutoZhilian`,五仓库)的全新重构,**不是延续开发**。定位是全新产品、全新安装:不背旧系统的任何二进制与协议契约——machine_id 出生逻辑、端口 17321、`%APPDATA%\ai-assistant-console` 数据目录、electron-updater 更新链、Native Messaging host、旧扩展 ID,一概不保留。旧工作区的一切文档默认过时、仅作考古线索(见"文档信任边界与知识继承")。旧后台（xq-resume-backend）在客户交付前仍不改动；2026-07-22 起唯一获准的旧业务接口例外是：Go client 可用本地显式配置的旧授权凭据调用 `/api/v1/client/job-config` 与 `/api/v1/client/job-configs`，把旧后台严格当配置面，将响应导入本仓库自有的不可变职位配置版本。旧 `machineId` 只作该接口认证参数，不成为新产品机器身份；已知每次调用会更新旧 binding 的 `last_seen_at` 并产生 `client.verified` 审计。不得因此接入 bind/heartbeat/session/task/metrics 等控制面或上报接口，Chrome 插件永远不连接旧后台。M5 起另一项获准云端出站是：Go client 按客户端本地显式配置直连一个 LLM provider；model/base_url/key 不由插件或旧后台下发，旧 job-config 中的 provider 凭据必须丢弃，插件永远不接触 key。除此之外仍视为不连云端。
+本仓库是"招聘自动化助手"(RecruitHelper):对旧产品"智联招聘自动化"(工作区 `../AutoZhilian`,五仓库)的全新重构,**不是延续开发**。定位是全新产品、全新安装:不背旧系统的任何二进制与协议契约——旧 machine_id 出生逻辑、端口 17321、`%APPDATA%\ai-assistant-console` 数据目录、electron-updater 更新链、Native Messaging host、旧扩展 ID,一概不保留。旧工作区的一切文档默认过时、仅作考古线索(见"文档信任边界与知识继承")。旧后台（xq-resume-backend）在客户交付前仍不改动；2026-07-22 起获准的旧业务接口范围是：Go client 可先用后台激活码调用 `/api/v1/client/bind` 取得正式 `licenseToken`，再调用 `/api/v1/client/job-config` 与 `/api/v1/client/job-configs`，把旧后台严格当授权入口与职位配置面，将响应导入本仓库自有的不可变职位配置版本。兼容 `machineId` 按 [`docs/端到端业务主线计划-2026-07-22.md`](docs/端到端业务主线计划-2026-07-22.md) 从当前系统机器 UUID 派生，每次启动重新核对；它只作旧后台授权/配置面身份，不进入脑手协议或替代本仓库领域身份。激活码不得持久化，原始系统机器 UUID 不持久化、不上传、不进日志。`bind` 会创建或复用旧 binding 并产生旧后台审计，`job-config(s)` 会更新 `last_seen_at` 并产生 `client.verified` 审计，均为本裁决知情接受的服务端副作用。不得因此接入 verify/heartbeat/session/task/metrics/alert 等其他控制面或上报接口，Chrome 插件永远不连接旧后台。M5 起另一项获准云端出站是：Go client 按客户端本地显式配置直连一个 LLM provider；model/base_url/key 不由插件或旧后台下发，旧 job-config 中的 provider 凭据必须丢弃，插件永远不接触 key。除此之外仍视为不连云端。
 
 ## 大方向(一切设计决策的根)
 
@@ -81,7 +81,7 @@
 - **契约 append-only 冻结点**(2026-07-20 甲方裁决,同日经执行方修正):首个真实客户安装前,contract 不受 append-only 约束,允许破坏性修订(删值、更名、收窄)。本许可只针对**对外兼容形态**;安全内核语义(证词、幂等、验证、suspect 结构)不因此获得削弱许可。条件:每项删除须证明无生产者、无消费者、无持久化/恢复路径引用、非明确未来占位,存疑项列保留清单,不凭源码搜不到引用即删;同一 commit 内重生成两端产物并通过全量门禁,规格文本与机器契约同步修订(must-ignore 接收纪律不随本条豁免);已持久化的历史记录按**派发时契约**解释、视为不可变审计快照,只有仍需参与运行且不兼容的才清理并在 commit 记录;破坏性修订按硬切换生效:暂停派发→重启脑→重载插件→确认 contractHash 一致后才恢复命令,mismatch 状态禁发 effectful。**截止点 = 第一次给真实客户装插件之时**,发生时以 commit/tag/日期记录冻结事件;此后恢复 append-only 纪律,未清理化石在当前 proto 主版本内保留,再清理只能经新原语版本或主版本迁移。
 - **program 交付机制**:l7eval5 远程下发(秒级热更、ES5 链)vs 编译进插件 + 自托管 CRX 策略强装(现代链、分钟至小时级更新)。骨架期保持机制无关、unpacked 加载;**截止点 = 第一次给真实客户装插件之前**。
 - **表结构**:当前只建骨架所需最少表,全部视为临时;正式设计时候选人主键必须带 platform 维度、锚平台 userId(不锚 resumeNumber——旧系统教训)。
-- **授权/云端对接**:`job-config(s)` 配置面读取已由 2026-07-22 裁决提前；产品授权、bind、heartbeat、session 与其他控制/上报接口仍后置。届时后台不改，另按现有 `/api/v1/client/*` 冻结契约立案对接。
+- **授权/云端对接**:激活码 `bind` 与 `job-config(s)` 配置面读取已由 2026-07-22 裁决提前；verify、heartbeat、session 与其他控制/上报接口仍后置。届时后台不改，另按现有 `/api/v1/client/*` 冻结契约立案对接。
 
 ## 文档信任边界与知识继承
 
