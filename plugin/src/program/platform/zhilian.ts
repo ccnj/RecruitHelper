@@ -1366,12 +1366,30 @@ async function mainReadSourcingResume(
       .filter((button) => clean(button.textContent) === '打招呼') as HTMLButtonElement[]
     return buttons.length === 1 && !buttons[0].disabled ? 'unestablished' : 'unknown'
   }
+  const interactionGapMs = 1_000
+  const resumeDwellMs = 2_000
+  const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  let lastInteractionAt = 0
+  let targetOpenedAt = 0
+  const waitBeforeInteraction = async (notBeforeMs = 0): Promise<void> => {
+    const waitUntil = Math.max(notBeforeMs, lastInteractionAt > 0 ? lastInteractionAt + interactionGapMs : 0)
+    const delayMs = waitUntil - Date.now()
+    if (delayMs > 0) await sleep(delayMs)
+  }
+  const clickInteraction = async (element: HTMLElement, notBeforeMs = 0): Promise<void> => {
+    await waitBeforeInteraction(notBeforeMs)
+    element.click()
+    lastInteractionAt = Date.now()
+  }
   const closeOpenedDetail = async (): Promise<MainSourcingResumeFailed | null> => {
     let opened = visibleAll(document, '.new-shortcut-resume__modal')
     if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
+    await waitBeforeInteraction(targetOpenedAt + resumeDwellMs)
+    opened = visibleAll(document, '.new-shortcut-resume__modal')
+    if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
     const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
     if (closeButtons.length !== 1) return failed('close_unavailable')
-    closeButtons[0].click()
+    await clickInteraction(closeButtons[0])
     const closeUntil = Date.now() + 6_000
     while (Date.now() < closeUntil) {
       opened = visibleAll(document, '.new-shortcut-resume__modal')
@@ -1413,6 +1431,7 @@ async function mainReadSourcingResume(
     if (!currentRoute) return failed('route_changed')
     const openedResumeNumber = opaque(currentRoute.searchParams.get('resumeNumber'))
     let targetAlreadyOpen = false
+    const initiallyOpenedAt = modals.length === 1 ? Date.now() : 0
     if (modals.length === 1) {
       const openedMatches = sources.filter((source) => source.resumeNumber === openedResumeNumber)
       if (!openedResumeNumber || openedMatches.length !== 1) return failed('stale_detail_ambiguous')
@@ -1420,7 +1439,7 @@ async function mainReadSourcingResume(
       if (!targetAlreadyOpen) {
         const closeButtons = visibleAll(modals[0], '.new-shortcut-resume__close')
         if (closeButtons.length !== 1) return failed('close_unavailable')
-        closeButtons[0].click()
+        await clickInteraction(closeButtons[0], initiallyOpenedAt + resumeDwellMs)
         const closeUntil = Date.now() + 6_000
         while (Date.now() < closeUntil) {
           modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -1440,6 +1459,8 @@ async function mainReadSourcingResume(
           return failed('target_changed')
         }
         target = rebound[0]
+      } else {
+        targetOpenedAt = initiallyOpenedAt
       }
     } else if (openedResumeNumber) {
       return failed('stale_detail_ambiguous')
@@ -1448,7 +1469,8 @@ async function mainReadSourcingResume(
     if (!targetAlreadyOpen) {
       const entries = visibleAll(target.item, '.resume-item__content')
       if (entries.length !== 1) return failed('entry_cardinality')
-      entries[0].click()
+      await clickInteraction(entries[0])
+      targetOpenedAt = lastInteractionAt
       const openUntil = Date.now() + 6_000
       while (Date.now() < openUntil) {
         modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -2116,6 +2138,26 @@ async function mainSendGreetingOnce(
     return checked ? 'checked' : 'unchecked'
   }
   const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const interactionGapMs = 1_000
+  let lastInteractionAt = 0
+  const waitInteractionGap = async (): Promise<void> => {
+    if (lastInteractionAt === 0) return
+    const delayMs = lastInteractionAt + interactionGapMs - Date.now()
+    if (delayMs > 0) await sleep(delayMs)
+  }
+  const performInteraction = async (
+    interaction: () => void,
+    allowed: () => boolean = () => true,
+  ): Promise<boolean> => {
+    await waitInteractionGap()
+    if (!allowed()) return false
+    try {
+      interaction()
+    } finally {
+      lastInteractionAt = Date.now()
+    }
+    return true
+  }
   const waitFor = async (predicate: () => boolean): Promise<boolean> => {
     for (let round = 0; round < 20; round += 1) {
       if (predicate()) return true
@@ -2142,7 +2184,7 @@ async function mainSendGreetingOnce(
       target.openButton,
     )
     // 这里之后才允许观察弹层；本轮不再调用“打招呼”入口。
-    invokeOpen()
+    await performInteraction(invokeOpen)
     let humanTouched = false
     const observeTrustedInput = (event: Event): void => {
       if (event.isTrusted) humanTouched = true
@@ -2162,7 +2204,7 @@ async function mainSendGreetingOnce(
           HTMLElement.prototype.click as IntrinsicClick,
           custom,
         )
-        invokeOption()
+        if (!await performInteraction(invokeOption, () => !humanTouched)) return failed('existing_editor')
         await sleep(50)
         if (humanTouched) return failed('existing_editor')
       }
@@ -2179,7 +2221,7 @@ async function mainSendGreetingOnce(
           HTMLElement.prototype.click as IntrinsicClick,
           editIcons[0],
         )
-        invokeEdit()
+        if (!await performInteraction(invokeEdit, () => !humanTouched)) return failed('existing_editor')
         await waitFor(() => {
           const currentModal = greetingModals()[0]
           const currentCustom = currentModal ? customOptionOf(currentModal) : null
@@ -2207,27 +2249,30 @@ async function mainSendGreetingOnce(
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
         TextareaValueSetter | undefined
       if (typeof setter !== 'function') return failed('editor_unavailable')
-      const restoreOwnedDraft = (): void => {
-        try { setter.call(textareas[0], ownedDraft) } catch { return }
-        try {
+      const restoreOwnedDraft = async (): Promise<boolean> =>
+        performInteraction(() => {
+          try { setter.call(textareas[0], ownedDraft) } catch { return }
+          try {
+            textareas[0].dispatchEvent(new InputEvent('input', {
+              bubbles: true,
+              inputType: 'insertText',
+              data: ownedDraft,
+            }))
+            textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
+          } catch {
+            // prepare 仍在 attempting 前；恢复 DOM 值后由人工处理页面事件异常。
+          }
+        }, () => !humanTouched)
+      try {
+        if (!await performInteraction(() => {
+          setter.call(textareas[0], text)
           textareas[0].dispatchEvent(new InputEvent('input', {
             bubbles: true,
             inputType: 'insertText',
-            data: ownedDraft,
+            data: text,
           }))
           textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
-        } catch {
-          // prepare 仍在 attempting 前；恢复 DOM 值后由人工处理页面事件异常。
-        }
-      }
-      try {
-        setter.call(textareas[0], text)
-        textareas[0].dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          inputType: 'insertText',
-          data: text,
-        }))
-        textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
+        }, () => !humanTouched)) return failed('existing_editor')
         const latestModal = greetingModals()[0]
         const latestCustom = latestModal ? customOptionOf(latestModal) : null
         const latestTextareas = latestCustom
@@ -2238,12 +2283,12 @@ async function mainSendGreetingOnce(
         if (!latestModal || !latestCustom || !customSelected(latestCustom) || latestTextareas.length !== 1 ||
             latestTextareas[0].value !== text || defaultSettingState(latestModal) !== 'unchecked' ||
             !principalMatches() || !targetSurface()) {
-          restoreOwnedDraft()
+          if (!await restoreOwnedDraft()) return failed('existing_editor')
           return failed('input_rejected')
         }
         return { status: 'prepared' }
       } catch {
-        restoreOwnedDraft()
+        if (!await restoreOwnedDraft()) return failed('existing_editor')
         return failed('input_rejected')
       }
     } finally {
@@ -2396,6 +2441,7 @@ export async function sendZhilianGreeting(
   if (preparedRaw.status !== 'prepared') throwGreetingActionFailure(preparedRaw)
   const evaluatorArgs = [...evaluatorBase, args.text] as const
 
+  await new Promise<void>((resolve) => setTimeout(resolve, 1_000))
   ctx.checkpoint()
   const preflight = await runMain(tabId, mainSendGreetingOnce, [...evaluatorArgs, 'preflight'])
   if (!validMainGreetingActionResult(preflight)) {

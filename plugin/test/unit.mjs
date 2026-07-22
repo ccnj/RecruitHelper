@@ -2068,6 +2068,13 @@ function installM6SourcingFixture(options = {}) {
     document: globalThis.document,
     location: globalThis.location,
     getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+  }
+  if (options.realTimers !== true) {
+    globalThis.setTimeout = (callback, _delay, ...args) => {
+      queueMicrotask(() => callback(...args))
+      return 1
+    }
   }
   const refs = {
     job: 'fixture-job-sourcing',
@@ -2100,6 +2107,7 @@ function installM6SourcingFixture(options = {}) {
   }
   const close = node('关闭')
   close.click = () => {
+    state.closedAt = Date.now()
     state.modals = []
     globalThis.location.href = `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`
   }
@@ -2118,6 +2126,7 @@ function installM6SourcingFixture(options = {}) {
   )
   const state = {
     modals: [], clicks: [], routeResumeOverride: options.routeResumeOverride ?? null,
+    openedAt: 0, closedAt: 0,
     get detailEvaluations() { return detailEvaluations },
   }
   const makeCandidate = (platformUserRef, resumeNumber, displayName, established = false) => {
@@ -2132,6 +2141,7 @@ function installM6SourcingFixture(options = {}) {
     const entry = node(displayName)
     entry.click = () => {
       state.clicks.push(platformUserRef)
+      state.openedAt = Date.now()
       name.textContent = displayName
       name.innerText = displayName
       state.modals = [modal]
@@ -2173,6 +2183,7 @@ function installM6SourcingFixture(options = {}) {
       globalThis.document = original.document
       globalThis.location = original.location
       globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.setTimeout = original.setTimeout
     },
   }
 }
@@ -2532,6 +2543,19 @@ test('candidate.readSourcingResume MAIN 打开首个未排除候选人并完整�
     } finally {
       fixture.restore()
     }
+  }
+})
+
+test('candidate.readSourcingResume MAIN 打开详情后至少停留两秒再关闭', async () => {
+  const fixture = installM6SourcingFixture({ realTimers: true })
+  try {
+    const result = await zhilianTestHooks.mainReadSourcingResume([])
+    assert.equal(result.status, 'ready')
+    assert.ok(fixture.state.openedAt > 0 && fixture.state.closedAt > 0)
+    assert.ok(fixture.state.closedAt - fixture.state.openedAt >= 2_000,
+      `详情停留不足两秒: ${fixture.state.closedAt - fixture.state.openedAt}ms`)
+  } finally {
+    fixture.restore()
   }
 })
 
@@ -3058,6 +3082,13 @@ function installM4GreetingFixture(options = {}) {
     HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
     InputEvent: globalThis.InputEvent,
     Event: globalThis.Event,
+    setTimeout: globalThis.setTimeout,
+  }
+  if (options.realTimers !== true) {
+    globalThis.setTimeout = (callback, _delay, ...args) => {
+      queueMicrotask(() => callback(...args))
+      return 1
+    }
   }
   const refs = {
     user: 'fixture-user-greeting',
@@ -3084,6 +3115,7 @@ function installM4GreetingFixture(options = {}) {
     checkboxClicks: 0,
     textareaSets: 0,
     textareaEvents: [],
+    interactions: [],
     throwOnReadAfterFinal: false,
   }
 
@@ -3123,6 +3155,7 @@ function installM4GreetingFixture(options = {}) {
     get value() { return this._value }
     set value(value) {
       state.textareaSets += 1
+      state.interactions.push({ kind: 'input', at: Date.now() })
       this._value = String(value)
     }
     dispatchEvent(event) {
@@ -3140,6 +3173,7 @@ function installM4GreetingFixture(options = {}) {
   const opener = new FixtureHTMLElement('打招呼')
   opener._onIntrinsicClick = () => {
     state.openClicks += 1
+    state.interactions.push({ kind: 'open', at: Date.now() })
     if (state.directUnsafe) {
       state.candidateVisibleActions += 1
       return
@@ -3163,6 +3197,7 @@ function installM4GreetingFixture(options = {}) {
   customOption.classList = { contains: (name) => name === 'is-selected' && state.customSelected }
   customOption._onIntrinsicClick = () => {
     state.optionClicks += 1
+    state.interactions.push({ kind: 'option', at: Date.now() })
     state.customSelected = true
     if (options.trustedInputDuringOptionWait === true) {
       setTimeout(() => {
@@ -3176,6 +3211,7 @@ function installM4GreetingFixture(options = {}) {
   const editIcon = new FixtureHTMLElement()
   editIcon._onIntrinsicClick = () => {
     state.editClicks += 1
+    state.interactions.push({ kind: 'edit', at: Date.now() })
     if (options.trustedInputDuringEditWait === true) {
       setTimeout(() => {
         state.textareaVisible = true
@@ -3203,7 +3239,10 @@ function installM4GreetingFixture(options = {}) {
   defaultControl.querySelector = () => null
 
   const sendButton = new FixtureHTMLElement('发送')
-  sendButton._onIntrinsicClick = () => { state.finalClicks += 1 }
+  sendButton._onIntrinsicClick = () => {
+    state.finalClicks += 1
+    state.interactions.push({ kind: 'send', at: Date.now() })
+  }
   sendButton.click = () => { state.instanceClicks += 1 }
   const footer = new FixtureHTMLElement()
   footer.querySelectorAll = (selector) => selector === 'button[type="button"]' ? [sendButton] : []
@@ -3326,6 +3365,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     createdIMTabs: 0,
     removedIMTabs: 0,
     listTargetReads: 0,
+    interactionPaceWaits: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -3349,11 +3389,14 @@ function installM4GreetingOrchestrationFixture(options = {}) {
   }
 
   // 压缩 production observer 的等待，不触碰 Dispatcher 的秒级 deadline/execBudget timer。
-  globalThis.setTimeout = (callback, delay, ...args) => original.setTimeout(
-    callback,
-    delay === 250 || delay === 120 ? 0 : delay,
-    ...args,
-  )
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay === 1_000) state.interactionPaceWaits += 1
+    return original.setTimeout(
+      callback,
+      delay === 250 || delay === 120 || delay === 1_000 ? 0 : delay,
+      ...args,
+    )
+  }
   globalThis.chrome = {
     tabs: {
       async query() { return tabs.map((tab) => ({ ...tab })) },
@@ -3460,6 +3503,24 @@ test('M6 列表招呼 prepare 完成全部编辑，attempting 后同一 evaluato
     assert.equal(fixture.state.checkboxClicks, 0)
     assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'],
       'preflight/commit 不得再次写入或恢复 textarea')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M6 列表招呼 prepare 的相邻点击与输入至少间隔一秒', async () => {
+  const fixture = installM4GreetingFixture({ realTimers: true })
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.deepEqual(fixture.state.interactions.map(({ kind }) => kind), [
+      'open', 'option', 'edit', 'input',
+    ])
+    for (let index = 1; index < fixture.state.interactions.length; index += 1) {
+      const previous = fixture.state.interactions[index - 1]
+      const current = fixture.state.interactions[index]
+      assert.ok(current.at - previous.at >= 1_000,
+        `${previous.kind} → ${current.kind} 仅间隔 ${current.at - previous.at}ms`)
+    }
   } finally {
     fixture.restore()
   }
@@ -3963,9 +4024,11 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   let barriers = 0
   let proofCalls = 0
   let postProofSettleWaits = 0
+  let interactionPaceWaits = 0
   let finalClicked = false
   globalThis.setTimeout = (callback, delay) => {
     if (delay === 250 && finalClicked && proofCalls > 0) postProofSettleWaits += 1
+    if (delay === 1_000) interactionPaceWaits += 1
     queueMicrotask(callback)
     return 1
   }
@@ -4038,6 +4101,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
     assert.equal(new Set(functions).size, 1,
       'prepare/preflight/commit 必须注入字面同一份 evaluator 函数')
     assert.equal(barriers, 1)
+    assert.equal(interactionPaceWaits, 1, '填入招呼正文后必须等待一秒再进入最终发送链')
     assert.equal(proofCalls, 1, '同一目标“继续沟通”一次明确读取即构成正证')
     assert.equal(postProofSettleWaits, 1, '正证后只等待一次页面重渲染，不增加读取或动作')
   } finally {
