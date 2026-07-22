@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var ErrInvalidBusinessEventInput = errors.New("沟通业务事件输入无效")
@@ -24,6 +25,7 @@ const (
 	EventInterviewRejected           BusinessEventKind = "interviewRejected"
 	EventHumanOutboundObserved       BusinessEventKind = "humanOutboundObserved"
 	EventAutomaticOutboundObserved   BusinessEventKind = "automaticOutboundObserved"
+	EventCandidateBlacklisted        BusinessEventKind = "candidateBlacklisted"
 	EventSystemNotice                BusinessEventKind = "systemNotice"
 	EventUnknownPlatform             BusinessEventKind = "unknownPlatformEvent"
 )
@@ -33,6 +35,7 @@ type BusinessEventSource string
 const (
 	EventSourceMessage        BusinessEventSource = "message"
 	EventSourceCardTransition BusinessEventSource = "cardTransition"
+	EventSourcePlatformStatus BusinessEventSource = "platformStatus"
 )
 
 type ExpressionKind string
@@ -49,8 +52,10 @@ type BusinessEvent struct {
 	Kind             BusinessEventKind
 	Source           BusinessEventSource
 	MessageSeq       int64
+	OccurredAt       *time.Time
 	ExpressionKind   ExpressionKind
 	Text             string
+	IsBody           bool
 	ConservativeCode string
 }
 
@@ -58,13 +63,14 @@ type BusinessEvent struct {
 // ledger. Text is local business data; callers must not put it in logs or
 // reports. CardType is the public contract enum, never a platform contentType.
 type LedgerMessageFact struct {
-	Seq       int64
-	Direction string
-	Kind      string
-	Text      *string
-	CardType  string
-	CardState string
-	Origin    string
+	Seq        int64
+	Direction  string
+	Kind       string
+	Text       *string
+	CardType   string
+	CardState  string
+	Origin     string
+	TsApproxMs *int64
 }
 
 type LedgerCardTransitionFact struct {
@@ -72,6 +78,7 @@ type LedgerCardTransitionFact struct {
 	CardType   string
 	FromState  string
 	ToState    string
+	OccurredAt *time.Time
 }
 
 // NormalizeLedgerMessage performs strict promotion from a persisted neutral
@@ -84,7 +91,7 @@ func NormalizeLedgerMessage(fact LedgerMessageFact) (BusinessEvent, error) {
 	}
 	event := BusinessEvent{
 		Key: fmt.Sprintf("message:%d", fact.Seq), Source: EventSourceMessage,
-		MessageSeq: fact.Seq,
+		MessageSeq: fact.Seq, OccurredAt: timeFromUnixMilli(fact.TsApproxMs),
 	}
 
 	switch fact.Direction {
@@ -166,6 +173,7 @@ func normalizeOutboundMessage(event BusinessEvent, fact LedgerMessageFact) Busin
 	} else {
 		event.Kind = EventHumanOutboundObserved
 	}
+	event.IsBody = fact.Kind != "card" && fact.Kind != "system"
 	return event
 }
 
@@ -180,6 +188,7 @@ func NormalizeCardTransition(fact LedgerCardTransitionFact) (BusinessEvent, erro
 	event := BusinessEvent{
 		Key:    fmt.Sprintf("card:%d:%s:%s", fact.MessageSeq, fact.FromState, fact.ToState),
 		Source: EventSourceCardTransition, MessageSeq: fact.MessageSeq,
+		OccurredAt: copyTime(fact.OccurredAt),
 	}
 	switch fact.CardType {
 	case "interviewInvite":
@@ -214,6 +223,9 @@ func validateLedgerMessageFact(fact LedgerMessageFact) error {
 		!validNeutralMessageKind(fact.Kind) || (fact.Origin != "external" && fact.Origin != "self") {
 		return ErrInvalidBusinessEventInput
 	}
+	if fact.TsApproxMs != nil && *fact.TsApproxMs <= 0 {
+		return ErrInvalidBusinessEventInput
+	}
 	if fact.Kind == "card" {
 		if !validNeutralCardType(fact.CardType) || !validNeutralCardState(fact.CardState) {
 			return ErrInvalidBusinessEventInput
@@ -222,6 +234,22 @@ func validateLedgerMessageFact(fact LedgerMessageFact) error {
 		return ErrInvalidBusinessEventInput
 	}
 	return nil
+}
+
+func timeFromUnixMilli(value *int64) *time.Time {
+	if value == nil {
+		return nil
+	}
+	at := time.UnixMilli(*value).UTC()
+	return &at
+}
+
+func copyTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	at := value.UTC()
+	return &at
 }
 
 func validNeutralDirection(value string) bool {

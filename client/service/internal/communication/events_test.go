@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func textPointer(value string) *string { return &value }
@@ -37,12 +38,12 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 		{
 			name: "human outbound",
 			fact: LedgerMessageFact{Seq: 5, Direction: "out", Kind: "text", Text: textPointer("人工文本"), Origin: "external"},
-			want: BusinessEvent{Key: "message:5", Kind: EventHumanOutboundObserved, Source: EventSourceMessage, MessageSeq: 5},
+			want: BusinessEvent{Key: "message:5", Kind: EventHumanOutboundObserved, Source: EventSourceMessage, MessageSeq: 5, IsBody: true},
 		},
 		{
 			name: "automatic outbound",
 			fact: LedgerMessageFact{Seq: 6, Direction: "out", Kind: "text", Text: textPointer("自动文本"), Origin: "self"},
-			want: BusinessEvent{Key: "message:6", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 6},
+			want: BusinessEvent{Key: "message:6", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 6, IsBody: true},
 		},
 		{
 			name: "outbound interview card",
@@ -57,6 +58,32 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 				t.Fatalf("事件转换错误: got=%+v want=%+v err=%v", got, tc.want, err)
 			}
 		})
+	}
+}
+
+func TestNormalizeBusinessEventsCarriesOptionalClockWithoutInventingIt(t *testing.T) {
+	millis := int64(1_721_600_123_456)
+	message, err := NormalizeLedgerMessage(LedgerMessageFact{
+		Seq: 1, Direction: "out", Kind: "text", Text: textPointer("正文"), Origin: "self", TsApproxMs: &millis,
+	})
+	if err != nil || message.OccurredAt == nil || message.OccurredAt.UnixMilli() != millis || !message.IsBody {
+		t.Fatalf("消息时钟没有按事实透传: event=%+v err=%v", message, err)
+	}
+
+	transitionAt := time.Date(2026, 7, 23, 1, 2, 3, 0, time.FixedZone("fixture", 8*60*60))
+	transition, err := NormalizeCardTransition(LedgerCardTransitionFact{
+		MessageSeq: 2, CardType: "interviewInvite", FromState: "pending", ToState: "accepted", OccurredAt: &transitionAt,
+	})
+	if err != nil || transition.OccurredAt == nil || transition.OccurredAt.Location() != time.UTC ||
+		!transition.OccurredAt.Equal(transitionAt) {
+		t.Fatalf("卡片时钟没有规范为 UTC: event=%+v err=%v", transition, err)
+	}
+
+	withoutClock, err := NormalizeLedgerMessage(LedgerMessageFact{
+		Seq: 3, Direction: "in", Kind: "text", Text: textPointer("候选人文本"), Origin: "external",
+	})
+	if err != nil || withoutClock.OccurredAt != nil {
+		t.Fatalf("缺失时钟不应被猜测: event=%+v err=%v", withoutClock, err)
 	}
 }
 
@@ -128,6 +155,7 @@ func TestNormalizeBusinessEventRejectsBrokenNeutralFacts(t *testing.T) {
 		{Seq: 1, Direction: "in", Kind: "card", CardType: "future", CardState: "unknown", Origin: "external"},
 		{Seq: 1, Direction: "in", Kind: "card", CardType: "other", CardState: "future", Origin: "external"},
 		{Seq: 1, Direction: "in", Kind: "text", Text: textPointer("x"), Origin: "future"},
+		{Seq: 1, Direction: "in", Kind: "text", Text: textPointer("x"), Origin: "external", TsApproxMs: func() *int64 { value := int64(0); return &value }()},
 	}
 	for index, fact := range invalidMessages {
 		if _, err := NormalizeLedgerMessage(fact); !errors.Is(err, ErrInvalidBusinessEventInput) {
