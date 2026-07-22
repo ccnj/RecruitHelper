@@ -20,6 +20,7 @@ export {
   readZhilianThread,
   readZhilianCurrentCandidate,
   readZhilianResume,
+  readZhilianSourcingResume,
   readZhilianGreetingOutcome,
   inspectZhilianSendSurfaceDiagnostic,
   sendZhilianGreeting,

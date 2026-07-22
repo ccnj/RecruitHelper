@@ -619,6 +619,7 @@ try {
     registerM3Primitives,
     registerM4Primitives,
     registerM5Primitives,
+    registerM6Primitives,
   } = await import(`${bundleURL}?t=${Date.now()}`)
 
   storage.infra = { wsUrl: brain.wsURL }
@@ -627,6 +628,7 @@ try {
   registerM3Primitives()
   registerM4Primitives()
   registerM5Primitives()
+  registerM6Primitives()
   conn = new Connection()
 
   console.log('本地稳定 handId 与生产 Connection 自动握手')
@@ -647,6 +649,7 @@ try {
     'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1', 'chat.readThread@1',
     'candidate.readCurrent@1',
     'candidate.readResume@1',
+    'candidate.readSourcingResume@1',
     'chat.readGreetingOutcome@1',
     'chat.sendMessage@1',
     'chat.sendGreeting@1',

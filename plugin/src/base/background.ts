@@ -7,6 +7,7 @@ import { registerM2Primitives } from '../program/primitives/m2'
 import { registerM3Primitives } from '../program/primitives/m3'
 import { registerM4Primitives } from '../program/primitives/m4'
 import { registerM5Primitives } from '../program/primitives/m5'
+import { registerM6Primitives } from '../program/primitives/m6'
 import { refreshPagesAfterRuntimeReload } from './reload'
 
 // program 原语注册(program 不注册任何 chrome 监听,只填这张表)。
@@ -15,6 +16,7 @@ registerM2Primitives()
 registerM3Primitives()
 registerM4Primitives()
 registerM5Primitives()
+registerM6Primitives()
 
 const conn = new Connection()
 registerSensorBridge(conn)

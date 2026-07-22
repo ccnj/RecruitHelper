@@ -7,6 +7,8 @@ import type {
   CandidateReadCurrentData,
   CandidateReadResumeArgs,
   CandidateReadResumeData,
+  CandidateReadSourcingResumeArgs,
+  CandidateReadSourcingResumeData,
   CandidateResumeLabelValue,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
@@ -59,6 +61,8 @@ export type ZhilianProbe = ProbePlatformData
 export type ZhilianCurrentCandidate = CandidateReadCurrentData
 export type ZhilianResumeArgs = CandidateReadResumeArgs
 export type ZhilianResumeData = CandidateReadResumeData
+export type ZhilianSourcingResumeArgs = CandidateReadSourcingResumeArgs
+export type ZhilianSourcingResumeData = CandidateReadSourcingResumeData
 export type ZhilianGreetingArgs = ChatSendGreetingArgs
 export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
@@ -147,6 +151,45 @@ interface MainResumeFailed {
 }
 
 type MainResumeResult = MainResumeReady | MainResumeFailed
+
+const MAIN_SOURCING_RESUME_FAILURE_REASONS = [
+  'route_changed',
+  'list_source_unavailable',
+  'candidate_identity_unavailable',
+  'candidate_identity_duplicated',
+  'no_candidate',
+  'position_identity_unavailable',
+  'position_identity_mismatch',
+  'position_title_ambiguous',
+  'position_title_mismatch',
+  'stale_detail_ambiguous',
+  'close_unavailable',
+  'entry_cardinality',
+  'modal_cardinality',
+  'detail_binding_ambiguous',
+  'target_changed',
+  'basic_unresolved',
+  'expectations_unresolved',
+  'work_unresolved',
+  'education_unresolved',
+  'self_evaluation_unresolved',
+  'payload_limit',
+  'unexpected',
+] as const
+
+type MainSourcingResumeFailureReason = typeof MAIN_SOURCING_RESUME_FAILURE_REASONS[number]
+
+interface MainSourcingResumeReady {
+  status: 'ready'
+  data: ZhilianSourcingResumeData
+}
+
+interface MainSourcingResumeFailed {
+  status: 'failed'
+  reason: MainSourcingResumeFailureReason
+}
+
+type MainSourcingResumeResult = MainSourcingResumeReady | MainSourcingResumeFailed
 
 const MAIN_GREETING_FAILURE_REASONS = [
   'action_window_elapsed',
@@ -900,6 +943,286 @@ async function mainReadCurrentResume(
       workExperiences,
     }
     if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) return failed('payload_limit')
+    return { status: 'ready', data }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
+// 冒烟冲刺的推荐页采集 evaluator。它在同一个 MAIN task 内完成“稳定来源卡
+// -> 打开详情 -> resumeNumber 瞬时连接 -> 五分区 -> 再次绑定复核”，返回值中
+// 永不包含 resumeNumber；列表顺序只决定本轮先读谁，不承担任何身份语义。
+async function mainReadSourcingResume(
+  excludePlatformUserRefs: string[],
+): Promise<MainSourcingResumeResult> {
+  type AnyRecord = Record<string, unknown>
+  interface SourceSnapshot {
+    item: HTMLElement
+    owner: AnyRecord
+    source: AnyRecord
+    platformUserRef: string
+    resumeNumber: string
+  }
+  type PositionSnapshot =
+    | { status: 'ready'; positionRef: string; positionTitle: string | null }
+    | { status: 'failed'; reason: MainSourcingResumeFailureReason }
+
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const blockText = (element: HTMLElement): string => {
+    const raw = typeof element.innerText === 'string' ? element.innerText : element.textContent ?? ''
+    return raw.normalize('NFC').replace(/\u00a0/gu, ' ').split(/\n+/u)
+      .map((line) => line.replace(/[\t ]+/gu, ' ').trim()).filter(Boolean).join('\n')
+  }
+  const failed = (reason: MainSourcingResumeFailureReason): MainSourcingResumeFailed => ({
+    status: 'failed',
+    reason,
+  })
+  const route = (): URL | null => {
+    try {
+      const current = new URL(location.href)
+      return current.pathname.startsWith('/app/recommend') ? current : null
+    } catch {
+      return null
+    }
+  }
+  const collectSources = (): SourceSnapshot[] | MainSourcingResumeFailed => {
+    const items = visibleAll(document, '.recommend-list__left div[role="listitem"]')
+    if (items.length === 0) return failed('list_source_unavailable')
+    const sources: SourceSnapshot[] = []
+    for (const item of items) {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const props = asRecord(owner?._props)
+      const source = asRecord(props?.source)
+      if (!owner || !source) return failed('list_source_unavailable')
+      const platformUserRef = opaque(source.userMasterId)
+      if (!platformUserRef) return failed('candidate_identity_unavailable')
+      const resumeNumber = opaque(source.resumeNumber)
+      if (!resumeNumber) return failed('detail_binding_ambiguous')
+      sources.push({ item, owner, source, platformUserRef, resumeNumber })
+    }
+    const identities = new Set<string>()
+    for (const source of sources) {
+      if (identities.has(source.platformUserRef)) return failed('candidate_identity_duplicated')
+      identities.add(source.platformUserRef)
+    }
+    return sources
+  }
+  const readPosition = (source: SourceSnapshot): PositionSnapshot => {
+    const currentRoute = route()
+    if (!currentRoute) return failed('route_changed')
+    const routeJobNumber = opaque(currentRoute.searchParams.get('jobNumber'))
+    const root = asRecord(source.owner.$root)
+    const ownerRoute = asRecord(root?._route)
+    const ownerQuery = asRecord(ownerRoute?.query)
+    const store = asRecord(source.owner.$store)
+    const state = asRecord(store?.state)
+    const talent = asRecord(state?.talent)
+    const activeJob = asRecord(talent?.activeJob)
+    const routedJobNumber = opaque(ownerQuery?.jobNumber)
+    const activeJobNumber = opaque(activeJob?.jobNumber)
+    if (!routeJobNumber || !routedJobNumber || !activeJobNumber) {
+      return failed('position_identity_unavailable')
+    }
+    if (routeJobNumber !== routedJobNumber || routeJobNumber !== activeJobNumber) {
+      return failed('position_identity_mismatch')
+    }
+    const visibleJobTitles = visibleAll(document,
+      '.job-pane__item--active .job-pane__item-job-title')
+      .map((element) => clean(element.textContent)).filter(Boolean)
+    if (visibleJobTitles.length > 1) return failed('position_title_ambiguous')
+    const visibleJobTitle = visibleJobTitles[0] ?? ''
+    const activeJobTitle = clean(activeJob?.jobTitle)
+    if (visibleJobTitle && activeJobTitle && visibleJobTitle !== activeJobTitle) {
+      return failed('position_title_mismatch')
+    }
+    const title = visibleJobTitle || activeJobTitle
+    return {
+      status: 'ready',
+      positionRef: routeJobNumber,
+      positionTitle: title && title.length <= 256 ? title : null,
+    }
+  }
+  const contactState = (item: HTMLElement): ZhilianSourcingResumeData['contactState'] => {
+    if (blockText(item).includes('同事聊过')) return 'established'
+    const buttons = visibleAll(item, 'button[type="button"]')
+      .filter((button) => clean(button.textContent) === '打招呼') as HTMLButtonElement[]
+    return buttons.length === 1 && !buttons[0].disabled ? 'unestablished' : 'unknown'
+  }
+
+  try {
+    if (!route()) return failed('route_changed')
+    const excluded = new Set(excludePlatformUserRefs)
+    let sources = collectSources()
+    if (!Array.isArray(sources)) return sources
+    let target = sources.find((source) => !excluded.has(source.platformUserRef))
+    if (!target) return failed('no_candidate')
+    const initialPosition = readPosition(target)
+    if (initialPosition.status === 'failed') return initialPosition
+    const initialContactState = contactState(target.item)
+
+    let modals = visibleAll(document, '.new-shortcut-resume__modal')
+    if (modals.length > 1) return failed('modal_cardinality')
+    const currentRoute = route()
+    if (!currentRoute) return failed('route_changed')
+    const openedResumeNumber = opaque(currentRoute.searchParams.get('resumeNumber'))
+    let targetAlreadyOpen = false
+    if (modals.length === 1) {
+      const openedMatches = sources.filter((source) => source.resumeNumber === openedResumeNumber)
+      if (!openedResumeNumber || openedMatches.length !== 1) return failed('stale_detail_ambiguous')
+      targetAlreadyOpen = openedMatches[0].platformUserRef === target.platformUserRef
+      if (!targetAlreadyOpen) {
+        const closeButtons = visibleAll(modals[0], '.new-shortcut-resume__close')
+        if (closeButtons.length !== 1) return failed('close_unavailable')
+        closeButtons[0].click()
+        const closeUntil = Date.now() + 6_000
+        while (Date.now() < closeUntil) {
+          modals = visibleAll(document, '.new-shortcut-resume__modal')
+          const latestRoute = route()
+          if (modals.length === 0 && latestRoute && !latestRoute.searchParams.get('resumeNumber')) break
+          await new Promise((resolve) => setTimeout(resolve, 120))
+        }
+        if (modals.length !== 0) return failed('modal_cardinality')
+        const afterCloseRoute = route()
+        if (!afterCloseRoute || afterCloseRoute.searchParams.get('resumeNumber')) {
+          return failed('stale_detail_ambiguous')
+        }
+        sources = collectSources()
+        if (!Array.isArray(sources)) return sources
+        const rebound = sources.filter((source) => source.platformUserRef === target?.platformUserRef)
+        if (rebound.length !== 1 || rebound[0].resumeNumber !== target.resumeNumber) {
+          return failed('target_changed')
+        }
+        target = rebound[0]
+      }
+    } else if (openedResumeNumber) {
+      return failed('stale_detail_ambiguous')
+    }
+
+    if (!targetAlreadyOpen) {
+      const entries = visibleAll(target.item, '.resume-item__content')
+      if (entries.length !== 1) return failed('entry_cardinality')
+      entries[0].click()
+      const openUntil = Date.now() + 6_000
+      while (Date.now() < openUntil) {
+        modals = visibleAll(document, '.new-shortcut-resume__modal')
+        if (modals.length !== 0) break
+        await new Promise((resolve) => setTimeout(resolve, 120))
+      }
+    }
+    if (modals.length !== 1) return failed('modal_cardinality')
+    const modal = modals[0]
+
+    const boundRoute = route()
+    if (!boundRoute) return failed('route_changed')
+    const boundResumeNumber = opaque(boundRoute.searchParams.get('resumeNumber'))
+    if (boundResumeNumber !== target.resumeNumber) return failed('detail_binding_ambiguous')
+    sources = collectSources()
+    if (!Array.isArray(sources)) return sources
+    const rebound = sources.filter((source) => source.resumeNumber === boundResumeNumber)
+    if (rebound.length !== 1 || rebound[0].platformUserRef !== target.platformUserRef) {
+      return failed('target_changed')
+    }
+    target = rebound[0]
+    const finalPosition = readPosition(target)
+    if (finalPosition.status === 'failed') return finalPosition
+    if (finalPosition.positionRef !== initialPosition.positionRef ||
+        finalPosition.positionTitle !== initialPosition.positionTitle ||
+        contactState(target.item) !== initialContactState) {
+      return failed('target_changed')
+    }
+
+    const names = visibleAll(modal, '.resume-basic-new__name')
+      .map((element) => clean(element.textContent)).filter(Boolean)
+    const meta = visibleAll(modal, '.resume-basic-new__meta-item')
+      .map((element) => clean(element.textContent)).filter(Boolean)
+    const semanticCounts = {
+      age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
+      work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
+      education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
+    }
+    if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
+        semanticCounts.work !== 1 || semanticCounts.education !== 1) {
+      return failed('basic_unresolved')
+    }
+    let otherIndex = 0
+    const basicLabel = (value: string): string => {
+      if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
+      if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
+      if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
+      if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
+      if (/户口/u.test(value)) return '户口地'
+      if (/(?:现居|居住)/u.test(value)) return '现居地'
+      otherIndex += 1
+      return `其他信息${otherIndex}`
+    }
+    const basic: CandidateResumeLabelValue[] = [
+      { label: '姓名', value: names[0] },
+      ...meta.map((value) => ({ label: basicLabel(value), value })),
+    ]
+
+    const purposeSections = visibleAll(modal, '.resume-section-purposes')
+    if (purposeSections.length !== 1) return failed('expectations_unresolved')
+    const purposeText = blockText(purposeSections[0])
+    if (!purposeText) return failed('expectations_unresolved')
+    const expectations: CandidateResumeLabelValue[] = [{ label: '求职期望', value: purposeText }]
+
+    const workSections = visibleAll(modal, '.new-work-experiences')
+    if (workSections.length !== 1) return failed('work_unresolved')
+    const workExperiences = blockText(workSections[0])
+    if (!workExperiences) return failed('work_unresolved')
+    const educationSections = visibleAll(modal, '.new-education-experiences')
+    if (educationSections.length !== 1) return failed('education_unresolved')
+    const education = blockText(educationSections[0])
+    if (!education) return failed('education_unresolved')
+
+    const selfSections = visibleAll(modal,
+      '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
+    if (selfSections.length > 1) return failed('self_evaluation_unresolved')
+    let selfEvaluation = ''
+    if (selfSections.length === 1) {
+      const lines = blockText(selfSections[0]).split('\n')
+        .filter((line) => line !== '自我评价' && line !== '自我描述')
+      if (lines.length === 0) return failed('self_evaluation_unresolved')
+      selfEvaluation = lines.join('\n')
+    }
+
+    if (visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
+      return failed('target_changed')
+    }
+    const data: ZhilianSourcingResumeData = {
+      platformUserRef: target.platformUserRef,
+      displayName: names[0].length <= 256 ? names[0] : null,
+      positionRef: finalPosition.positionRef,
+      positionTitle: finalPosition.positionTitle,
+      contactState: initialContactState,
+      observedAt: Date.now(),
+      basic,
+      expectations,
+      selfEvaluation,
+      education,
+      workExperiences,
+    }
+    if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) {
+      return failed('payload_limit')
+    }
     return { status: 'ready', data }
   } catch {
     return failed('unexpected')
@@ -2305,6 +2628,105 @@ export async function readZhilianResume(
   ctx.checkpoint()
   assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
   ctx.progress('简历读取完成', 100)
+  return result.data
+}
+
+function validSourcingResumeResult(value: unknown): value is MainSourcingResumeResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_SOURCING_RESUME_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  return record.status === 'ready' && record.data !== null && typeof record.data === 'object' &&
+    !Array.isArray(record.data) &&
+    validatePrimitiveData(PrimitiveName.CandidateReadSourcingResume, 1, record.data).length === 0
+}
+
+async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
+  return (await chrome.tabs.query({
+    active: true,
+    lastFocusedWindow: true,
+    url: TAB_QUERY,
+  })).filter((tab) => tab.id !== undefined && pageKindFromURL(tab.url) === 'recommend')
+}
+
+function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
+  if (result.reason === 'payload_limit') {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '完整采集简历超过当前内联载荷上限', 'manualOnly')
+  }
+  if (result.reason === 'no_candidate') {
+    throw new ZhilianPlatformError('TARGET_NOT_FOUND', '当前推荐页没有未采集候选人', 'afterRecovery')
+  }
+  if (result.reason === 'route_changed' || result.reason === 'target_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集期间当前推荐页或候选人发生变化', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐候选人无法完整且唯一读取', 'manualOnly')
+}
+
+export async function readZhilianSourcingResume(
+  args: ZhilianSourcingResumeArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSourcingResumeData> {
+  if (!args || !Array.isArray(args.excludePlatformUserRefs) ||
+      args.excludePlatformUserRefs.length > 32 ||
+      args.excludePlatformUserRefs.some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '采集读取缺少合法的候选人排除列表', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const initialTabs = await activeSourcingTabs()
+  if (initialTabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请把最近聚焦 Chrome 窗口的当前标签停在智联推荐页',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (initialTabs.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前活动智联推荐页无法唯一确定', 'manualOnly')
+  }
+  const tab = initialTabs[0]
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (initialProbe.pageKind !== 'recommend') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前活动智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对当前推荐页与登录身份', 10)
+
+  ctx.checkpoint()
+  const beforeActionTabs = await activeSourcingTabs()
+  if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
+      beforeActionTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集动作前活动推荐页发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
+  // 打开/切换详情最坏会产生幂等已查看记录；intrusive 命令在第一次页面动作前
+  // 越过唯一 cancellation barrier，但不写 effectful witness。
+  await ctx.beforeSideEffect()
+  const result = await runMain(tab.id, mainReadSourcingResume, [
+    [...args.excludePlatformUserRefs],
+  ])
+  if (!validSourcingResumeResult(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐页采集结果结构不符合当前契约', 'manualOnly')
+  }
+  if (result.status === 'failed') throwSourcingResumeFailure(result)
+
+  ctx.checkpoint()
+  const latestTabs = await activeSourcingTabs()
+  if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集期间活动推荐页发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latestTabs[0]), expectedPrincipalFingerprint)
+  if (validatePrimitiveData(PrimitiveName.CandidateReadSourcingResume, 1, result.data).length !== 0 ||
+      jsonBytes(result.data) > 65_536) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '完整采集简历结构不符合当前契约', 'manualOnly')
+  }
+  ctx.progress('推荐候选人采集完成', 100)
   return result.data
 }
 
@@ -5107,6 +5529,7 @@ export const zhilianTestHooks = Object.freeze({
   mainProbeZhilian,
   mainReadCurrentCandidate,
   mainReadCurrentResume,
+  mainReadSourcingResume,
   mainReadGreetingProof,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,
