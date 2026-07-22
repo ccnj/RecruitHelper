@@ -2952,9 +2952,17 @@ function installM4GreetingFixture(options = {}) {
     instanceClicks: 0,
     candidateVisibleActions: 0,
     checkboxClicks: 0,
+    textareaSets: 0,
     textareaEvents: [],
     throwOnReadAfterFinal: false,
   }
+
+  const documentListeners = new Map()
+  const emitDocumentEvent = (event) => {
+    for (const listener of documentListeners.get(event.type) ?? []) listener(event)
+  }
+  const documentListenerCount = () => Array.from(documentListeners.values())
+    .reduce((total, listeners) => total + listeners.size, 0)
 
   class FixtureEvent {
     constructor(type, init = {}) { this.type = type; Object.assign(this, init) }
@@ -2983,9 +2991,13 @@ function installM4GreetingFixture(options = {}) {
       this._value = value
     }
     get value() { return this._value }
-    set value(value) { this._value = String(value) }
+    set value(value) {
+      state.textareaSets += 1
+      this._value = String(value)
+    }
     dispatchEvent(event) {
       state.textareaEvents.push(event.type)
+      emitDocumentEvent(event)
       return true
     }
   }
@@ -3022,11 +3034,26 @@ function installM4GreetingFixture(options = {}) {
   customOption._onIntrinsicClick = () => {
     state.optionClicks += 1
     state.customSelected = true
+    if (options.trustedInputDuringOptionWait === true) {
+      setTimeout(() => {
+        state.textareaVisible = true
+        textarea._value = options.trustedDraft ?? '真人草稿'
+        emitDocumentEvent({ type: 'input', isTrusted: true, target: textarea })
+      }, 0)
+    }
   }
   const textarea = new FixtureTextArea(options.existingDraft ?? '平台原始招呼')
   const editIcon = new FixtureHTMLElement()
   editIcon._onIntrinsicClick = () => {
     state.editClicks += 1
+    if (options.trustedInputDuringEditWait === true) {
+      setTimeout(() => {
+        state.textareaVisible = true
+        textarea._value = options.trustedDraft ?? '真人草稿'
+        emitDocumentEvent({ type: 'input', isTrusted: true, target: textarea })
+      }, 0)
+      return
+    }
     state.textareaVisible = true
   }
   customOption.querySelector = () => null
@@ -3094,6 +3121,16 @@ function installM4GreetingFixture(options = {}) {
   })
   globalThis.document = {
     scripts: [],
+    addEventListener(type, listener) {
+      const listeners = documentListeners.get(type) ?? new Set()
+      listeners.add(listener)
+      documentListeners.set(type, listeners)
+    },
+    removeEventListener(type, listener) {
+      const listeners = documentListeners.get(type)
+      listeners?.delete(listener)
+      if (listeners?.size === 0) documentListeners.delete(type)
+    },
     querySelectorAll(selector) {
       if (state.throwOnReadAfterFinal && state.finalClicks > 0) {
         throw new Error('最终 click 后不得继续读页面')
@@ -3121,6 +3158,7 @@ function installM4GreetingFixture(options = {}) {
     )
   return {
     detail,
+    documentListenerCount,
     invoke,
     listItem,
     invokeRead() {
@@ -3347,6 +3385,40 @@ test('M6 列表招呼不接管既有编辑器，不改默认项，公开两步�
       '第一击可能直接发送的公开拓扑不得试点动作')
   } finally {
     direct.restore()
+  }
+})
+
+test('M6 列表招呼 prepare 异步窗口出现真人输入时不覆盖且移除临时监听', async () => {
+  for (const scenario of [
+    {
+      label: '选择自定义项等待期间',
+      options: { trustedInputDuringOptionWait: true, trustedDraft: '选项等待期间真人草稿' },
+    },
+    {
+      label: '展开编辑区等待期间',
+      options: {
+        customInitiallySelected: true,
+        trustedInputDuringEditWait: true,
+        trustedDraft: '编辑区等待期间真人草稿',
+      },
+    },
+  ]) {
+    const fixture = installM4GreetingFixture(scenario.options)
+    try {
+      assert.deepEqual(await fixture.invoke('prepare'), {
+        status: 'failed', reason: 'existing_editor',
+      }, scenario.label)
+      assert.equal(fixture.textarea.value, scenario.options.trustedDraft,
+        `${scenario.label}: 不得覆盖或恢复真人草稿`)
+      assert.equal(fixture.state.textareaSets, 0,
+        `${scenario.label}: 不得调用 textarea setter`)
+      assert.equal(fixture.state.finalClicks, 0,
+        `${scenario.label}: 不得触发最终发送`)
+      assert.equal(fixture.documentListenerCount(), 0,
+        `${scenario.label}: prepare 终局后必须移除临时监听`)
+    } finally {
+      fixture.restore()
+    }
   }
 })
 
