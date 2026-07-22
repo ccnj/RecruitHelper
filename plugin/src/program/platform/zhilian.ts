@@ -1064,10 +1064,13 @@ async function mainReadSourcingWindow(
       return null
     }
   }
-  const collect = (): WindowSnapshot | MainSourcingWindowFailed => {
+  const collect = (scroller: HTMLElement | null): WindowSnapshot | MainSourcingWindowFailed => {
     const currentRoute = route()
     if (!currentRoute) return failed('route_changed')
-    const items = visibleAll(document, '.recommend-list__left div[role="listitem"]').slice(0, 32)
+    const items = viewportItems(
+      visibleAll(document, '.recommend-list__left div[role="listitem"]'),
+      scroller,
+    )
     if (items.length === 0) return failed('list_source_unavailable')
     const sources: WindowSource[] = []
     for (const item of items) {
@@ -1130,8 +1133,8 @@ async function mainReadSourcingWindow(
     return /(auto|scroll)/u.test(`${style.overflowY ?? ''} ${style.overflow ?? ''}`) &&
       Number(element.scrollHeight) > Number(element.clientHeight) + 1
   }
-  const scrollContainer = (source: WindowSource): HTMLElement | null => {
-    let current = source.item.parentElement
+  const scrollContainer = (item: HTMLElement): HTMLElement | null => {
+    let current = item.parentElement
     while (current && current !== document.body) {
       if (scrollable(current)) return current
       current = current.parentElement
@@ -1153,29 +1156,27 @@ async function mainReadSourcingWindow(
     }
     element.dispatchEvent?.(new Event('scroll', { bubbles: true }))
   }
-  const viewportSnapshot = (
-    snapshot: WindowSnapshot,
+  const viewportItems = (
+    items: HTMLElement[],
     scroller: HTMLElement | null,
-  ): WindowSnapshot | MainSourcingWindowFailed => {
-    if (!scroller) return snapshot
+  ): HTMLElement[] => {
+    if (!scroller) return items.slice(0, 32)
     const rootScroller = scroller === document.scrollingElement
     const containerRect = rootScroller
       ? { top: 0, bottom: Math.max(Number(globalThis.innerHeight) || Number(scroller.clientHeight) || 0, 1) }
       : scroller.getBoundingClientRect()
-    const sources = snapshot.sources.filter(({ item }) => {
+    return items.filter((item) => {
       const rect = item.getBoundingClientRect()
       return rect.bottom > containerRect.top + 1 && rect.top < containerRect.bottom - 1
-    })
-    if (sources.length === 0) return failed('list_source_unavailable')
-    return { ...snapshot, sources }
+    }).slice(0, 32)
   }
 
   try {
     if (!['current', 'reset', 'next'].includes(move)) return failed('unexpected')
-    const initialAll = collect()
-    if ('status' in initialAll) return initialAll
-    const scroller = scrollContainer(initialAll.sources[0])
-    const initial = viewportSnapshot(initialAll, scroller)
+    const initialItems = visibleAll(document, '.recommend-list__left div[role="listitem"]')
+    if (initialItems.length === 0) return failed('list_source_unavailable')
+    const scroller = scrollContainer(initialItems[0])
+    const initial = collect(scroller)
     if ('status' in initial) return initial
     const initialSignature = signature(initial)
     if (move === 'current') {
@@ -1201,9 +1202,7 @@ async function mainReadSourcingWindow(
       scrollTo(scroller, Math.min(beforeTop + viewport, maxTop))
     }
 
-    const firstCollected = collect()
-    if ('status' in firstCollected) return firstCollected
-    let latest = viewportSnapshot(firstCollected, scroller)
+    let latest = collect(scroller)
     if ('status' in latest) return latest
     let latestSignature = signature(latest)
     let stableRounds = 0
@@ -1211,9 +1210,7 @@ async function mainReadSourcingWindow(
     while (Date.now() < settleUntil) {
       if ((latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop) && stableRounds >= 2) break
       await new Promise((resolve) => setTimeout(resolve, 120))
-      const nextCollected = collect()
-      if ('status' in nextCollected) return nextCollected
-      const next = viewportSnapshot(nextCollected, scroller)
+      const next = collect(scroller)
       if ('status' in next) return next
       const nextSignature = signature(next)
       stableRounds = nextSignature === latestSignature ? stableRounds + 1 : 0

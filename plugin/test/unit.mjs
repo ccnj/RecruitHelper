@@ -2170,10 +2170,18 @@ function installM6SourcingWindowFixture(options = {}) {
     location: globalThis.location,
     getComputedStyle: globalThis.getComputedStyle,
   }
+  const staticDomCount = Number.isInteger(options.staticDomCount) && options.staticDomCount > 0
+    ? options.staticDomCount
+    : 4
+  const staticRefs = Array.from(
+    { length: staticDomCount },
+    (_, index) => `fixture-window-user-${index + 1}`,
+  )
   const refs = {
     job: 'fixture-job-window',
-    firstWindow: ['fixture-window-user-1', 'fixture-window-user-2'],
-    secondWindow: ['fixture-window-user-3', 'fixture-window-user-4'],
+    firstWindow: staticRefs.slice(0, 2),
+    secondWindow: staticRefs.slice(2, 4),
+    all: staticRefs,
   }
   const node = (text = '') => ({
     textContent: text,
@@ -2197,10 +2205,10 @@ function installM6SourcingWindowFixture(options = {}) {
     parentElement: body,
     scrollTop: state.index * 100,
     clientHeight: 100,
-    scrollHeight: 200,
+    scrollHeight: options.staticDom === true ? Math.max(staticDomCount * 50, 100) : 200,
     scrollTo({ top }) {
       this.scrollTop = Number(top)
-      state.index = this.scrollTop <= 0 ? 0 : 1
+      state.index = Math.max(Math.floor(this.scrollTop / 100), 0)
     },
     dispatchEvent() {},
   }
@@ -2226,10 +2234,12 @@ function installM6SourcingWindowFixture(options = {}) {
     }
     return item
   }
-  const windows = [
-    refs.firstWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 1)),
-    refs.secondWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 3)),
-  ]
+  const windows = options.staticDom === true
+    ? [staticRefs.map((platformUserRef, index) => makeItem(platformUserRef, index + 1))]
+    : [
+        refs.firstWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 1)),
+        refs.secondWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 3)),
+      ]
   scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 })
   globalThis.location = {
     href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
@@ -2329,6 +2339,44 @@ test('candidate.readSourcingWindow MAIN 从常驻 DOM 中只返回当前视口�
     assert.equal(next.status, 'ready')
     assert.deepEqual(next.data.platformUserRefs, fixture.refs.secondWindow)
     assert.equal(next.data.moved, true)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN 可遍历 document root 上超过 32 张常驻卡片并在尾部停止', async () => {
+  const fixture = installM6SourcingWindowFixture({
+    startAt: 'first', staticDom: true, staticDomCount: 34, documentRoot: true,
+  })
+  try {
+    delete fixture.windows[0][33].__vue__._props.source.userMasterId
+    const seen = new Set()
+    let window = await zhilianTestHooks.mainReadSourcingWindow('reset')
+    assert.equal(window.status, 'ready')
+    for (const ref of window.data.platformUserRefs) seen.add(ref)
+    assert.ok(window.data.platformUserRefs.length <= 32)
+
+    for (let index = 0; index < 20; index += 1) {
+      window = await zhilianTestHooks.mainReadSourcingWindow('next')
+      if (window.status === 'failed') {
+        assert.equal(seen.size, 32, '仅含坏身份的当前尾窗整体失败，前 32 张均应已遍历')
+        assert.equal(window.reason, 'candidate_identity_unavailable')
+        break
+      }
+      assert.ok(window.data.platformUserRefs.length <= 32)
+      for (const ref of window.data.platformUserRefs) seen.add(ref)
+    }
+    assert.equal(seen.size, 32)
+
+    fixture.windows[0][33].__vue__._props.source.userMasterId = fixture.refs.all[33]
+    window = await zhilianTestHooks.mainReadSourcingWindow('current')
+    assert.equal(window.status, 'ready')
+    for (const ref of window.data.platformUserRefs) seen.add(ref)
+    assert.equal(seen.size, 34)
+
+    const tail = await zhilianTestHooks.mainReadSourcingWindow('next')
+    assert.equal(tail.status, 'ready')
+    assert.equal(tail.data.moved, false)
   } finally {
     fixture.restore()
   }
