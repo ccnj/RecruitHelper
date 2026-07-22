@@ -6682,7 +6682,7 @@ test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome se
     'welcome 更新后未动态推送 content')
 })
 
-test('SensorBridge 推荐页整页 loading 立即上报换代并压住随后重复 manual', async () => {
+test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随后重复 manual', async () => {
   const originalChrome = globalThis.chrome
   const runtimeMessage = chromeEvent()
   const tabActivated = chromeEvent()
@@ -6716,8 +6716,10 @@ test('SensorBridge 推荐页整页 loading 立即上报换代并压住随后重�
     const listener = tabUpdated.listeners[0]
     const recommendURL = 'https://rd6.zhaopin.com/app/recommend'
 
-    listener(7, { status: 'loading' }, { url: recommendURL })
-    assert.equal(connection.events.length, 0, '无 CmdContext 时推荐页 loading 不得上报')
+    committed.listeners[0]({
+      tabId: 7, frameId: 0, url: recommendURL, timeStamp: now, transitionType: 'reload',
+    })
+    assert.equal(connection.events.length, 0, '无 CmdContext 时推荐页 reload 不得上报')
 
     connection.setContext({ platform: 'zhilian', accountRef: 'account-1', expectedPrincipalFingerprint: 'fp' })
     bridge.acceptContentMessage({
@@ -6730,7 +6732,11 @@ test('SensorBridge 推荐页整页 loading 立即上报换代并压住随后重�
 
     now += 1_000
     listener(7, { status: 'loading' }, { url: recommendURL })
-    assert.equal(connection.events.length, 2, '整页 loading 不得被普通 5s manual 节流吞掉')
+    assert.equal(connection.events.length, 1, '简历详情也会令 tab loading，不能据此判定推荐流换代')
+    committed.listeners[0]({
+      tabId: 7, frameId: 0, url: recommendURL, timeStamp: now, transitionType: 'reload',
+    })
+    assert.equal(connection.events.length, 2, '公开确认的整页 reload 不得被普通 5s manual 节流吞掉')
     assert.deepEqual(connection.events.at(-1), {
       name: EventName.ManualInteraction,
       platform: 'zhilian',
@@ -6750,13 +6756,23 @@ test('SensorBridge 推荐页整页 loading 立即上报换代并压住随后重�
       kind: ManualInteractionKind.Pointer,
       pageKind: PageKind.Recommend,
     }, { tabId: 7, active: true, url: recommendURL, windowId: 1 })
-    assert.equal(connection.events.length, 2, 'loading 必须更新 manual 节流时刻，压住紧随其后的重复上报')
+    assert.equal(connection.events.length, 2, 'reload 必须更新 manual 节流时刻，压住紧随其后的重复上报')
 
     now += MANUAL_EMIT_MIN_MS
     listener(7, { status: 'complete' }, { url: recommendURL })
     listener(7, { status: 'loading' }, { url: 'https://rd6.zhaopin.com/app/im' })
     listener(7, { status: 'loading' }, { url: 'https://example.com/app/recommend' })
-    assert.equal(connection.events.length, 2, '非 loading、非推荐页或非智联页面均不得上报换代')
+    committed.listeners[0]({
+      tabId: 7, frameId: 0, url: recommendURL, timeStamp: now, transitionType: 'link',
+    })
+    committed.listeners[0]({
+      tabId: 7, frameId: 0, url: 'https://rd6.zhaopin.com/app/im', timeStamp: now,
+      transitionType: 'reload',
+    })
+    committed.listeners[0]({
+      tabId: 7, frameId: 1, url: recommendURL, timeStamp: now, transitionType: 'reload',
+    })
+    assert.equal(connection.events.length, 2, '非 reload、非推荐页或非主框架均不得上报换代')
   } finally {
     globalThis.chrome = originalChrome
   }

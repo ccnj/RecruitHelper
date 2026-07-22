@@ -106,9 +106,6 @@ export class SensorBridge {
       }
       this.platformTabs.add(tabId)
       if (changeInfo.status === 'loading') {
-        if (url && pageKindFromURL(url) === PageKind.Recommend) {
-          this.emitRecommendationFeedLoading(this.now())
-        }
         this.tabStates.delete(tabId)
         this.refreshCachedState()
       }
@@ -128,7 +125,13 @@ export class SensorBridge {
       this.navigation.noteChromeNavigation(details.tabId, details.url, Math.trunc(details.timeStamp))
       void chrome.tabs.sendMessage(details.tabId, { type: CONTENT_MESSAGE.NavigationObserved }).catch(() => undefined)
     }
-    chrome.webNavigation.onCommitted.addListener(onNavigation)
+    chrome.webNavigation.onCommitted.addListener((details) => {
+      onNavigation(details)
+      if (details.frameId === 0 && details.transitionType === 'reload' &&
+          pageKindFromURL(details.url) === PageKind.Recommend) {
+        this.emitRecommendationFeedReload(Math.trunc(details.timeStamp))
+      }
+    })
     chrome.webNavigation.onHistoryStateUpdated.addListener(onNavigation)
     chrome.webNavigation.onReferenceFragmentUpdated.addListener(onNavigation)
 
@@ -295,10 +298,10 @@ export class SensorBridge {
     this.emitIfContext(EventName.ManualInteraction, { at, kind, pageKind }, at)
   }
 
-  private emitRecommendationFeedLoading(at: number): void {
+  private emitRecommendationFeedReload(at: number): void {
     if (!this.connection.currentCommandContext(PLATFORM)) return
-    // 整页 loading 是推荐流换代边界，不是可被普通 5s manual 节流吞掉的噪声；
-    // 同时更新节流时刻，避免新 content 紧随其后的 navigation 再上报一次。
+    // 只把 Chrome 公开确认的主框架 reload 当作整页换代；智联打开/关闭
+    // 简历详情同样可能令 tab 短暂 loading，不能据此终止批次。
     this.lastManualEmitAt = at
     this.emitIfContext(EventName.ManualInteraction, {
       at,
