@@ -2,12 +2,16 @@ package appbridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
+	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 type sourcingGreetingScoringAdvice struct {
@@ -153,5 +157,188 @@ func TestSelectedSourcingBatchWithoutProviderCreatesNoGreetingReservation(t *tes
 	}
 	if len(h.sender.order) != beforeHandCalls {
 		t.Fatalf("缺少 provider 时触碰了 hand: before=%d after=%d order=%v", beforeHandCalls, len(h.sender.order), h.sender.order)
+	}
+}
+
+func prepareGeneratedSourcingGreeting(
+	t *testing.T,
+	h *sourcingActorHarness,
+) (*patrol.Manager, string, *store.SourcingGreetingSendTarget) {
+	t.Helper()
+	batchID := prepareSelectedSourcingBatch(t, h, 1)
+	advice := &sourcingBatchGreetingAdvice{}
+	manager, err := patrol.NewManager(
+		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
+		patrol.Config{Clock: h.clock, Location: time.UTC, MaxPages: 4}, advice,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := manager.GenerateSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || !progress.Completed || progress.OKCount != 1 {
+		t.Fatalf("单人正式招呼语未完成: progress=%+v err=%v", progress, err)
+	}
+	target, err := h.store.NextSourcingGreetingSendTarget(batchID)
+	if err != nil || target == nil || target.EffectIntentID != nil {
+		t.Fatalf("缺少未绑定发送目标: target=%+v err=%v", target, err)
+	}
+	return manager, batchID, target
+}
+
+func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+
+	h.sender.windows = [][]string{{"other-visible-candidate"}, {target.PlatformUserRef}}
+	h.sender.window = 1
+	h.sender.moves = nil
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || !progress.Completed || progress.SentCount != 1 || progress.PendingCount != 0 ||
+		progress.InFlightCount != 0 || progress.SuspectCount != 0 {
+		t.Fatalf("列表直接招呼未成功收敛: progress=%+v err=%v", progress, err)
+	}
+	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveReset, protocol.SourcingWindowMoveNext,
+	}); got != want {
+		t.Fatalf("定位必须固定 reset→next: got=%s want=%s", got, want)
+	}
+	if h.sender.greetingCount() != 1 {
+		t.Fatalf("应只调用一次 chat.sendGreeting: %d", h.sender.greetingCount())
+	}
+
+	beforeMoves, beforeGreetings := len(h.sender.moves), h.sender.greetingCount()
+	replayed, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || !replayed.Completed || replayed.SentCount != 1 {
+		t.Fatalf("完成态重放失败: progress=%+v err=%v", replayed, err)
+	}
+	if len(h.sender.moves) != beforeMoves || h.sender.greetingCount() != beforeGreetings {
+		t.Fatalf("完成态重复调用仍读列表或发送: moves=%d/%d greetings=%d/%d",
+			len(h.sender.moves), beforeMoves, h.sender.greetingCount(), beforeGreetings)
+	}
+}
+
+func TestSelectedSourcingGreetingMissingTargetCreatesNoEffect(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+	h.sender.windows = [][]string{{"other-visible-candidate"}}
+	h.sender.window = 0
+	h.sender.moves = nil
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if !errors.Is(err, patrol.ErrSourcingGreetingWindowStopped) || progress == nil ||
+		progress.PendingCount != 1 || progress.InFlightCount != 0 || progress.SentCount != 0 {
+		t.Fatalf("未定位目标没有保守停止: progress=%+v err=%v", progress, err)
+	}
+	if h.sender.greetingCount() != 0 {
+		t.Fatalf("未定位目标仍调用了 effect runner: %d", h.sender.greetingCount())
+	}
+	intentID, err := store.SourcingGreetingEffectIntentID(target.InvocationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := h.store.EffectIntentByID(intentID)
+	if err != nil || intent != nil {
+		t.Fatalf("未定位目标仍形成 effect intent: intent=%+v err=%v", intent, err)
+	}
+}
+
+type greetingStartSignalRunner struct {
+	PatrolRunner
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *greetingStartSignalRunner) StartAutomaticGreeting(
+	ctx context.Context,
+	req patrol.AutomaticGreetingRequest,
+) (patrol.AutomaticGreetingHandle, error) {
+	handle, err := r.PatrolRunner.StartAutomaticGreeting(ctx, req)
+	r.once.Do(func() { close(r.started) })
+	return handle, err
+}
+
+type sourcingOfflineHands struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (h *sourcingOfflineHands) State(context.Context, string) (patrol.HandState, error) {
+	h.mu.Lock()
+	h.calls++
+	h.mu.Unlock()
+	return patrol.HandState{}, nil
+}
+
+func (h *sourcingOfflineHands) callCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
+}
+
+func TestBoundSourcingGreetingSkipsRelocationAndConvergesAfterContextLoss(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+	h.sender.windows = [][]string{{target.PlatformUserRef}}
+	h.sender.window = 0
+	h.sender.moves = nil
+	h.sender.mu.Lock()
+	h.sender.holdGreeting = true
+	h.sender.mu.Unlock()
+
+	firstCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	first, firstErr := manager.SendSelectedSourcingGreetings(firstCtx, batchID)
+	cancel()
+	if !errors.Is(firstErr, context.DeadlineExceeded) || first == nil || first.InFlightCount != 1 {
+		t.Fatalf("首次在途招呼未留下唯一可收编 WAL: progress=%+v err=%v", first, firstErr)
+	}
+	if h.sender.greetingCount() != 1 {
+		t.Fatalf("首次在途招呼发送次数错误: %d", h.sender.greetingCount())
+	}
+	movesAfterBinding := len(h.sender.moves)
+
+	h.sender.setOnline(false)
+	offlineHands := &sourcingOfflineHands{}
+	signalRunner := &greetingStartSignalRunner{
+		PatrolRunner: PatrolRunner{Dispatcher: h.sender.dispatcher},
+		started:      make(chan struct{}),
+	}
+	restarted, err := patrol.NewManager(
+		h.store, signalRunner, offlineHands,
+		patrol.Config{Clock: h.clock, Location: time.UTC, MaxPages: 4},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type sendResult struct {
+		progress *store.SourcingBatchGreetingSendProgress
+		err      error
+	}
+	done := make(chan sendResult, 1)
+	go func() {
+		progress, err := restarted.SendSelectedSourcingGreetings(context.Background(), batchID)
+		done <- sendResult{progress: progress, err: err}
+	}()
+	select {
+	case <-signalRunner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("绑定来源没有进入同一 WAL 收编")
+	}
+	if err := h.sender.completeHeldGreeting(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || result.progress == nil || !result.progress.Completed || result.progress.SentCount != 1 {
+			t.Fatalf("context 丢失后未收编同一 WAL: progress=%+v err=%v", result.progress, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("context 丢失后的 WAL 收编未结束")
+	}
+	if len(h.sender.moves) != movesAfterBinding || h.sender.greetingCount() != 1 {
+		t.Fatalf("绑定来源重跑发生重新定位或二次发送: moves=%d/%d greetings=%d",
+			len(h.sender.moves), movesAfterBinding, h.sender.greetingCount())
+	}
+	if offlineHands.callCount() != 0 {
+		t.Fatalf("绑定来源仍要求已丢失的页面代际: handStateCalls=%d", offlineHands.callCount())
 	}
 }

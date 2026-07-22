@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -70,6 +72,7 @@ func (a *sourcingBatchScoringAdvice) CompleteJSON(
 }
 
 type sourcingActorSender struct {
+	mu         sync.Mutex
 	dispatcher *dispatch.Dispatcher
 	order      []string
 	moves      []protocol.SourcingWindowMove
@@ -80,6 +83,15 @@ type sourcingActorSender struct {
 	candidates map[string]protocol.CandidateReadSourcingResumeData
 
 	targetPositionOverride string
+	online                 bool
+	holdGreeting           bool
+	greetings              []sourcingGreetingCommand
+}
+
+type sourcingGreetingCommand struct {
+	handID string
+	msgID  string
+	args   protocol.ChatSendGreetingArgs
 }
 
 func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope) error {
@@ -109,6 +121,9 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 		switch args.Move {
 		case protocol.SourcingWindowMoveCurrent:
 			// current 不发生导航，moved=false 是合法返回。
+		case protocol.SourcingWindowMoveReset:
+			moved = s.window != 0
+			s.window = 0
 		case protocol.SourcingWindowMoveNext:
 			if s.window+1 < len(s.windows) {
 				s.window++
@@ -138,7 +153,23 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 			candidate.PositionRef = s.targetPositionOverride
 		}
 		data = candidate
-	case protocol.PrimChatReadList, protocol.PrimChatSendGreeting:
+	case protocol.PrimChatSendGreeting:
+		var args protocol.ChatSendGreetingArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.greetings = append(s.greetings, sourcingGreetingCommand{
+			handID: handID, msgID: env.MsgID, args: args,
+		})
+		hold := s.holdGreeting
+		s.mu.Unlock()
+		s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
+		if hold {
+			return nil
+		}
+		return s.completeGreeting(sourcingGreetingCommand{handID: handID, msgID: env.MsgID, args: args})
+	case protocol.PrimChatReadList:
 		return fmt.Errorf("正式纯采集越界调用 %s", body.Name)
 	default:
 		return fmt.Errorf("unexpected primitive %s", body.Name)
@@ -154,24 +185,69 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 	return nil
 }
 
-func (*sourcingActorSender) HandSession(string) (string, string, bool) {
-	return "session-sourcing-actor", "boot-sourcing-actor", true
+func (s *sourcingActorSender) HandSession(string) (string, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return "session-sourcing-actor", "boot-sourcing-actor", s.online
 }
 func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
 			protocol.PrimCandidateReadSourcingTargetResume + "@1",
+			protocol.PrimChatSendGreeting + "@1",
 		}, []string{
 			string(protocol.FeatureLease1), string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
+			string(protocol.FeatureWitness1),
 		}, true
 }
 func (*sourcingActorSender) HandContractMatch(string) (bool, bool) { return true, true }
 func (*sourcingActorSender) HandWitness(string) (dispatch.HandWitness, bool) {
-	return dispatch.HandWitness{}, false
+	return dispatch.HandWitness{StoreID: "witness-sourcing-actor"}, true
 }
 func (*sourcingActorSender) CloseHand(string, string, string) bool { return true }
 func (*sourcingActorSender) HandOfflineMs(string) int64            { return 0 }
+
+func (s *sourcingActorSender) completeGreeting(command sourcingGreetingCommand) error {
+	data, err := protocol.Encode(protocol.ChatSendGreetingData{
+		PlatformUserRef: command.args.PlatformUserRef,
+		PositionRef:     command.args.PositionRef,
+		ContentHash:     syncledger.HashText(command.args.Text),
+		ObservedAt:      time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return err
+	}
+	s.dispatcher.OnResult(command.handID, "result-"+command.msgID, protocol.ResultBody{
+		Ref: command.msgID, Status: protocol.ResultStatusOk, Data: data, ExecMs: 1,
+		Evidence: []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}},
+	})
+	return nil
+}
+
+func (s *sourcingActorSender) completeHeldGreeting() error {
+	s.mu.Lock()
+	if len(s.greetings) == 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("fixture 没有待完成的招呼命令")
+	}
+	command := s.greetings[len(s.greetings)-1]
+	s.holdGreeting = false
+	s.mu.Unlock()
+	return s.completeGreeting(command)
+}
+
+func (s *sourcingActorSender) greetingCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.greetings)
+}
+
+func (s *sourcingActorSender) setOnline(online bool) {
+	s.mu.Lock()
+	s.online = online
+	s.mu.Unlock()
+}
 
 func sourcingActorRevision(at time.Time) m5ai.ContextRevision {
 	documents := []m5ai.JobConfigDocument{
@@ -253,7 +329,7 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 		}
 	}
 	sender := &sourcingActorSender{
-		windows: windows, window: 0, position: position, candidates: byRef,
+		windows: windows, window: 0, position: position, candidates: byRef, online: true,
 	}
 	dispatcher := dispatch.New(st, sender)
 	sender.dispatcher = dispatcher

@@ -149,12 +149,16 @@ func (r PatrolRunner) StartAutomaticGreeting(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	receipt, dispatchErr := r.Dispatcher.SendGreeting(dispatch.SendGreetingRequest{
-		IntentID: req.IntentID, ProfileID: req.ProfileID, Text: req.Text,
+	expectedIntentID, err := store.SourcingGreetingEffectIntentID(req.InvocationID)
+	if err != nil {
+		return nil, err
+	}
+	receipt, dispatchErr := r.Dispatcher.SendSourcingGreeting(dispatch.SendSourcingGreetingRequest{
+		BatchID: req.BatchID, InvocationID: req.InvocationID,
 	})
-	if receipt == nil || receipt.IntentID != req.IntentID || receipt.LogicalDispatchID == "" {
+	if receipt == nil || receipt.IntentID != expectedIntentID || receipt.LogicalDispatchID == "" {
 		if dispatchErr == nil {
-			dispatchErr = store.ErrEffectIntentConflict
+			dispatchErr = store.ErrSourcingGreetingEffectConflict
 		}
 		return nil, dispatchErr
 	}

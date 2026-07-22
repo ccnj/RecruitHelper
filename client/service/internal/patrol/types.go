@@ -118,12 +118,11 @@ type SourcingResumeRunner interface {
 }
 
 // AutomaticGreetingRequest is the only sourcing bridge into the existing
-// chat.sendGreeting WAL. ProfileID comes from the selection ledger and
-// IntentID is deterministic, so a repeated actor round cannot mint a new send.
+// chat.sendGreeting WAL. The dispatcher re-derives the target, text and stable
+// intent from these two immutable source references.
 type AutomaticGreetingRequest struct {
-	ProfileID string
-	IntentID  string
-	Text      string
+	BatchID      string
+	InvocationID string
 }
 
 type AutomaticGreetingHandle interface {
