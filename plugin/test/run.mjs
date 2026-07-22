@@ -868,9 +868,10 @@ try {
   assert.equal(rebound.account.accountRef, accountRef)
   assert.equal(rebound.account.identityState, 'verified')
 
-  // 模拟真人把同一已登录标签页切到唯一推荐详情。此后的 read/select/send
-  // 都经正式管理入口、真 Dispatcher 和真 WS，不使用 /admin/cmd。
-  platform.tab.url = 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-position'
+  // 模拟真人先在同一已登录推荐页读取并收编候选人，随后候选人仍在当前
+  // 推荐列表可见。read/select/send 都经正式管理入口、真 Dispatcher 和
+  // 真 WS，不使用 /admin/cmd。
+  platform.tab.url = `https://rd6.zhaopin.com/app/recommend?jobNumber=${fixturePositionRef}`
   const preview = await admin.post('/admin/candidates/current/read', {
     platform: 'zhilian', accountRef,
   })
