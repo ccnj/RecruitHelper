@@ -1,55 +1,58 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/contract/gen/go/protocol"
+	"recruithelper/internal/ids"
 
 	"gorm.io/gorm"
 )
 
+const SourcingSelectionAlgorithmVersion = "selection-target-v1"
+
 var (
-	ErrSourcingSelectionNotReady = errors.New("采集候选人尚未形成可裁决评分")
-	ErrSourcingSelectionConflict = errors.New("采集选人决策材料冲突")
+	ErrSourcingSelectionNotReady = errors.New("正式采集批次尚未形成完整评分")
+	ErrSourcingSelectionConflict = errors.New("正式采集批次筛选材料冲突")
 )
 
-type DecideSourcingCandidateRequest struct {
-	RunID     string
-	ProfileID string
-	DecidedAt time.Time
+type sourcingSelectionGender uint8
+
+const (
+	sourcingGenderUnknown sourcingSelectionGender = iota
+	sourcingGenderFemale
+	sourcingGenderMale
+)
+
+type sourcingSelectionRow struct {
+	Run        SourcingCandidateRun
+	Invocation SourcingScoreInvocation
+	Gender     sourcingSelectionGender
 }
 
-type DecideSourcingCandidateResult struct {
-	Decision SourcingSelectionDecision
-	Profile  *CandidateProfile
-	Created  bool
-}
-
-// NextSourcingRunWithoutSelection 返回最早一条已经终局评分、但尚无选人决策的
-// 采集事实。评分失败也会返回，以便写下显式终局后继续处理下一位候选人。
-func (s *Store) NextSourcingRunWithoutSelection(key AccountKey, revisionHash string) (*SourcingCandidateRun, error) {
-	if key.Platform == "" || key.AccountRef == "" || strings.TrimSpace(revisionHash) == "" {
-		return nil, ErrSourcingSelectionNotReady
+// SourcingBatchSelectionByBatchID 返回不含候选人身份、逐人分数或 profileId
+// 的完整批次摘要。尚未筛选时返回 (nil, nil)。
+func (s *Store) SourcingBatchSelectionByBatchID(batchID string) (*SourcingBatchSelection, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingBatchInvalid
 	}
-	var run SourcingCandidateRun
-	err := s.db.Table("sourcing_candidate_runs AS run").
-		Select("run.*").
-		Joins("JOIN sourcing_score_invocations AS score ON score.run_id = run.run_id AND score.finished_at IS NOT NULL").
-		Joins("LEFT JOIN sourcing_selection_decisions AS decision ON decision.run_id = run.run_id").
-		Where("run.platform = ? AND run.account_ref = ? AND run.context_revision_hash = ? AND decision.run_id IS NULL",
-			key.Platform, key.AccountRef, revisionHash).
-		Order("run.captured_at ASC, run.run_id ASC").
-		First(&run).Error
+	var selection SourcingBatchSelection
+	err := s.db.First(&selection, "batch_id = ?", batchID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &run, nil
+	return &selection, nil
 }
 
 func (s *Store) SourcingSelectionByRunID(runID string) (*SourcingSelectionDecision, error) {
@@ -67,51 +70,54 @@ func (s *Store) SourcingSelectionByRunID(runID string) (*SourcingSelectionDecisi
 	return &decision, nil
 }
 
-// DecideSourcingCandidate 在一个 SQLite 单写事务内重读 run、评分和不可变职位
-// revision，再落一次性决策。只有高于阈值、尚未建联且无人级档案占用的候选人
-// 会同时创建 selected 档案；任何其他终局都只留下无明文的决策事实。
-func (s *Store) DecideSourcingCandidate(req DecideSourcingCandidateRequest) (*DecideSourcingCandidateResult, error) {
-	req.RunID = strings.TrimSpace(req.RunID)
-	req.ProfileID = strings.TrimSpace(req.ProfileID)
-	if req.RunID == "" || req.ProfileID == "" {
-		return nil, ErrSourcingSelectionNotReady
+// SelectCompletedSourcingBatch 只消费一个已经结束并完成统一评分的正式批次。
+// 全员决策、selected 档案和脱敏摘要在同一个 SQLite 事务中提交；已有摘要
+// 只能作为一份结构完整的既有结果重放，不会重新计算目标人数或名单。
+func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time) (*SourcingBatchSelection, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingBatchInvalid
 	}
-	if req.DecidedAt.IsZero() {
-		req.DecidedAt = time.Now()
+	if decidedAt.IsZero() {
+		decidedAt = time.Now()
 	}
-	out := &DecideSourcingCandidateResult{}
+	var out SourcingBatchSelection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		var existingDecision SourcingSelectionDecision
-		if err := tx.First(&existingDecision, "run_id = ?", req.RunID).Error; err == nil {
-			out.Decision = existingDecision
-			if existingDecision.ProfileID != nil {
-				var profile CandidateProfile
-				if err := tx.First(&profile, "profile_id = ?", *existingDecision.ProfileID).Error; err != nil {
-					return ErrSourcingSelectionConflict
-				}
-				out.Profile = &profile
-			}
-			return nil
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		batch, err := validateCompletedSourcingBatchForScoringTx(tx, batchID)
+		if err != nil {
 			return err
 		}
 
-		var run SourcingCandidateRun
-		if err := tx.First(&run, "run_id = ?", req.RunID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrSourcingSelectionNotReady
+		var existing SourcingBatchSelection
+		err = tx.First(&existing, "batch_id = ?", batch.BatchID).Error
+		if err == nil {
+			if err := validatePersistedSourcingBatchSelectionTx(tx, batch, existing); err != nil {
+				return err
 			}
+			out = existing
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		var score SourcingScoreInvocation
-		if err := tx.First(&score, "run_id = ?", run.RunID).Error; err != nil || score.FinishedAt == nil {
-			return ErrSourcingSelectionNotReady
+
+		var preexistingDecisions int64
+		if err := tx.Table("sourcing_selection_decisions AS decision").
+			Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
+			Where("run.batch_id = ?", batch.BatchID).
+			Count(&preexistingDecisions).Error; err != nil {
+			return err
 		}
-		if score.ContextRevisionHash != run.ContextRevisionHash || score.RunContentHash != run.ContentHash {
+		if preexistingDecisions != 0 {
 			return ErrSourcingSelectionConflict
 		}
+
+		rows, err := loadCompleteSourcingSelectionRowsTx(tx, batch)
+		if err != nil {
+			return err
+		}
 		var revision JobAIContextRevision
-		if err := tx.First(&revision, "revision_hash = ?", run.ContextRevisionHash).Error; err != nil {
+		if err := tx.First(&revision, "revision_hash = ?", batch.ContextRevisionHash).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrJobAIContextRevisionNotFound
 			}
@@ -121,42 +127,310 @@ func (s *Store) DecideSourcingCandidate(req DecideSourcingCandidateRequest) (*De
 		if err != nil {
 			return err
 		}
-
-		decision := SourcingSelectionDecision{
-			RunID: run.RunID, ContextRevisionHash: run.ContextRevisionHash,
-			Score: score.Score, MinScore: view.CandidateSelection.MinScore,
-			DecidedAt: req.DecidedAt, CreatedAt: req.DecidedAt,
+		selectionView := view.CandidateSelection
+		targetCount := stableSourcingSelectionTarget(
+			batch.BatchID, batch.ContextRevisionHash, selectionView.TargetMin, selectionView.TargetMax,
+		)
+		maleLimit := targetCount * selectionView.MaleRatioLimit / 100
+		summary := SourcingBatchSelection{
+			BatchID: batch.BatchID, ContextRevisionHash: batch.ContextRevisionHash,
+			AlgorithmVersion: SourcingSelectionAlgorithmVersion,
+			MinScore:         selectionView.MinScore, TargetMin: selectionView.TargetMin,
+			TargetMax: selectionView.TargetMax, TargetCount: targetCount,
+			MaleRatioLimit: selectionView.MaleRatioLimit, MaleLimit: maleLimit,
+			PoolCount: len(rows), CompletedAt: decidedAt, CreatedAt: decidedAt,
 		}
-		switch {
-		case score.Status != AIInvocationOK || score.Score == nil:
-			decision.Outcome = SourcingSelectionScoringFailed
-		case run.ContactState != string(protocol.CandidateContactStateUnestablished):
-			decision.Outcome = SourcingSelectionContactStateRejected
-		case *score.Score < view.CandidateSelection.MinScore:
-			decision.Outcome = SourcingSelectionScoreBelowThreshold
-		default:
-			profile, createErr := createSourcingSelectedProfileTx(tx, run, req.ProfileID, req.DecidedAt)
-			if errors.Is(createErr, ErrCandidateAlreadyProfiled) {
-				decision.Outcome = SourcingSelectionExistingProfile
-			} else if createErr != nil {
-				return createErr
-			} else {
+
+		for i := range rows {
+			row := rows[i]
+			if row.Gender == sourcingGenderUnknown {
+				summary.UnknownGenderCount++
+			}
+			decision := SourcingSelectionDecision{
+				RunID: row.Run.RunID, ContextRevisionHash: batch.ContextRevisionHash,
+				Score: row.Invocation.Score, MinScore: selectionView.MinScore,
+				DecidedAt: decidedAt, CreatedAt: decidedAt,
+			}
+			switch {
+			case row.Invocation.Status != AIInvocationOK || row.Invocation.Score == nil:
+				decision.Outcome = SourcingSelectionScoringFailed
+			case row.Run.ContactState != string(protocol.CandidateContactStateUnestablished):
+				decision.Outcome = SourcingSelectionContactStateRejected
+			case *row.Invocation.Score < selectionView.MinScore:
+				decision.Outcome = SourcingSelectionScoreBelowThreshold
+			default:
+				occupied, err := sourcingCandidateAlreadyProfiledTx(tx, row.Run)
+				if err != nil {
+					return err
+				}
+				if occupied {
+					decision.Outcome = SourcingSelectionExistingProfile
+					break
+				}
+				summary.EligibleCount++
+				if summary.SelectedCount >= targetCount {
+					decision.Outcome = SourcingSelectionQuotaFull
+					break
+				}
+				if row.Gender == sourcingGenderMale && summary.MaleSelectedCount >= maleLimit {
+					decision.Outcome = SourcingSelectionMaleRatioLimited
+					break
+				}
+				profile, err := createSourcingSelectedProfileTx(tx, row.Run, ids.NewProfileID(), decidedAt)
+				if err != nil {
+					return err
+				}
 				decision.Outcome = SourcingSelectionSelected
 				decision.ProfileID = &profile.ProfileID
-				out.Profile = profile
+				summary.SelectedCount++
+				if row.Gender == sourcingGenderMale {
+					summary.MaleSelectedCount++
+				}
+			}
+			if err := tx.Create(&decision).Error; err != nil {
+				return err
 			}
 		}
-		if err := tx.Create(&decision).Error; err != nil {
-			return ErrSourcingSelectionConflict
+		if err := tx.Create(&summary).Error; err != nil {
+			return err
 		}
-		out.Decision = decision
-		out.Created = true
+		out = summary
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return &out, nil
+}
+
+func stableSourcingSelectionTarget(batchID, revisionHash string, targetMin, targetMax int) int {
+	if targetMin == targetMax {
+		return targetMin
+	}
+	digest := sha256.Sum256([]byte(
+		SourcingSelectionAlgorithmVersion + "|" + batchID + "|" + revisionHash,
+	))
+	span := uint64(targetMax - targetMin + 1)
+	return targetMin + int(binary.BigEndian.Uint64(digest[:8])%span)
+}
+
+func loadCompleteSourcingSelectionRowsTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+) ([]sourcingSelectionRow, error) {
+	var runs []SourcingCandidateRun
+	if err := tx.Where("batch_id = ?", batch.BatchID).
+		Order("captured_at ASC, run_id ASC").Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	if len(runs) != batch.TargetCount {
+		return nil, ErrSourcingBatchConflict
+	}
+	var invocations []SourcingScoreInvocation
+	if err := tx.Table("sourcing_score_invocations AS invocation").
+		Select("invocation.*").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = invocation.run_id").
+		Where("run.batch_id = ?", batch.BatchID).
+		Find(&invocations).Error; err != nil {
+		return nil, err
+	}
+	if len(invocations) != len(runs) {
+		return nil, ErrSourcingSelectionNotReady
+	}
+	byRun := make(map[string]SourcingScoreInvocation, len(invocations))
+	provider, model := "", ""
+	for _, invocation := range invocations {
+		if _, exists := byRun[invocation.RunID]; exists {
+			return nil, ErrSourcingSelectionConflict
+		}
+		if strings.TrimSpace(invocation.Provider) == "" || strings.TrimSpace(invocation.Model) == "" {
+			return nil, ErrSourcingSelectionConflict
+		}
+		if provider == "" {
+			provider, model = invocation.Provider, invocation.Model
+		} else if provider != invocation.Provider || model != invocation.Model {
+			return nil, ErrSourcingSelectionConflict
+		}
+		if invocation.FinishedAt == nil {
+			if invocation.Status != AIInvocationTransportFailed || invocation.Score != nil {
+				return nil, ErrSourcingSelectionConflict
+			}
+			return nil, ErrSourcingSelectionNotReady
+		}
+		if invocation.Status == AIInvocationOK {
+			if invocation.Score == nil || *invocation.Score < 1 || *invocation.Score > 10 {
+				return nil, ErrSourcingSelectionConflict
+			}
+		} else if invocation.Score != nil {
+			return nil, ErrSourcingSelectionConflict
+		}
+		byRun[invocation.RunID] = invocation
+	}
+
+	rows := make([]sourcingSelectionRow, 0, len(runs))
+	for _, run := range runs {
+		invocation, ok := byRun[run.RunID]
+		if !ok {
+			return nil, ErrSourcingSelectionNotReady
+		}
+		if run.BatchID == nil || *run.BatchID != batch.BatchID ||
+			run.Platform != batch.Platform || run.AccountRef != batch.AccountRef ||
+			run.ContextRevisionHash != batch.ContextRevisionHash ||
+			invocation.ContextRevisionHash != run.ContextRevisionHash ||
+			invocation.RunContentHash != run.ContentHash {
+			return nil, ErrSourcingSelectionConflict
+		}
+		gender, err := sourcingSelectionGenderOf(run)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, sourcingSelectionRow{Run: run, Invocation: invocation, Gender: gender})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		left, right := rows[i], rows[j]
+		leftOK := left.Invocation.Status == AIInvocationOK && left.Invocation.Score != nil
+		rightOK := right.Invocation.Status == AIInvocationOK && right.Invocation.Score != nil
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && *left.Invocation.Score != *right.Invocation.Score {
+			return *left.Invocation.Score > *right.Invocation.Score
+		}
+		if !left.Run.CapturedAt.Equal(right.Run.CapturedAt) {
+			return left.Run.CapturedAt.Before(right.Run.CapturedAt)
+		}
+		return left.Run.RunID < right.Run.RunID
+	})
+	return rows, nil
+}
+
+func sourcingSelectionGenderOf(run SourcingCandidateRun) (sourcingSelectionGender, error) {
+	var resume struct {
+		Basic []protocol.CandidateResumeLabelValue `json:"basic"`
+	}
+	if err := json.Unmarshal([]byte(run.ResumeJSON), &resume); err != nil {
+		return sourcingGenderUnknown, ErrSourcingSelectionConflict
+	}
+	explicit := false
+	gender := sourcingGenderUnknown
+	for _, item := range resume.Basic {
+		if strings.TrimSpace(item.Label) != "性别" {
+			continue
+		}
+		explicit = true
+		var observed sourcingSelectionGender
+		switch strings.TrimSpace(item.Value) {
+		case "男":
+			observed = sourcingGenderMale
+		case "女":
+			observed = sourcingGenderFemale
+		default:
+			continue
+		}
+		if gender != sourcingGenderUnknown && gender != observed {
+			return sourcingGenderUnknown, nil
+		}
+		gender = observed
+	}
+	if explicit {
+		return gender, nil
+	}
+	if run.DisplayName == nil {
+		return sourcingGenderUnknown, nil
+	}
+	displayName := strings.TrimSpace(*run.DisplayName)
+	switch {
+	case strings.HasSuffix(displayName, "先生"):
+		return sourcingGenderMale, nil
+	case strings.HasSuffix(displayName, "女士"):
+		return sourcingGenderFemale, nil
+	default:
+		return sourcingGenderUnknown, nil
+	}
+}
+
+func sourcingCandidateAlreadyProfiledTx(tx *gorm.DB, run SourcingCandidateRun) (bool, error) {
+	scope := CandidateProfileScope{
+		Platform: run.Platform, AccountRef: run.AccountRef,
+		PlatformUserRef: run.PlatformUserRef, PositionRef: run.PositionRef,
+	}
+	existing, err := candidateProfileByScopeTx(tx, scope)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		return true, nil
+	}
+	var occupied int64
+	if err := tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND platform_user_ref = ? AND main_status <> ?",
+			run.Platform, run.PlatformUserRef, CandidateProfileEliminated).
+		Count(&occupied).Error; err != nil {
+		return false, err
+	}
+	return occupied != 0, nil
+}
+
+func validatePersistedSourcingBatchSelectionTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+	selection SourcingBatchSelection,
+) error {
+	if selection.BatchID != batch.BatchID || selection.ContextRevisionHash != batch.ContextRevisionHash ||
+		selection.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
+		selection.PoolCount != batch.TargetCount || selection.TargetMin < 0 ||
+		selection.TargetMax < selection.TargetMin || selection.TargetCount < selection.TargetMin ||
+		selection.TargetCount > selection.TargetMax || selection.MinScore < 1 || selection.MinScore > 10 ||
+		selection.MaleRatioLimit < 0 || selection.MaleRatioLimit > 100 ||
+		selection.MaleLimit != selection.TargetCount*selection.MaleRatioLimit/100 ||
+		selection.EligibleCount < selection.SelectedCount || selection.SelectedCount < 0 ||
+		selection.MaleSelectedCount < 0 || selection.MaleSelectedCount > selection.SelectedCount ||
+		selection.UnknownGenderCount < 0 || selection.UnknownGenderCount > selection.PoolCount ||
+		selection.CompletedAt.IsZero() {
+		return ErrSourcingSelectionConflict
+	}
+	type persistedDecision struct {
+		RunID     string
+		Outcome   SourcingSelectionOutcome
+		ProfileID *string
+	}
+	var decisions []persistedDecision
+	if err := tx.Table("sourcing_selection_decisions AS decision").
+		Select("decision.run_id, decision.outcome, decision.profile_id").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
+		Where("run.batch_id = ?", batch.BatchID).
+		Find(&decisions).Error; err != nil {
+		return err
+	}
+	if len(decisions) != batch.TargetCount {
+		return ErrSourcingSelectionConflict
+	}
+	selected := 0
+	for _, decision := range decisions {
+		switch decision.Outcome {
+		case SourcingSelectionSelected:
+			if decision.ProfileID == nil || strings.TrimSpace(*decision.ProfileID) == "" {
+				return ErrSourcingSelectionConflict
+			}
+			var profile CandidateProfile
+			if err := tx.First(&profile, "profile_id = ?", *decision.ProfileID).Error; err != nil {
+				return ErrSourcingSelectionConflict
+			}
+			selected++
+		case SourcingSelectionScoreBelowThreshold, SourcingSelectionContactStateRejected,
+			SourcingSelectionScoringFailed, SourcingSelectionExistingProfile,
+			SourcingSelectionQuotaFull, SourcingSelectionMaleRatioLimited:
+			if decision.ProfileID != nil {
+				return ErrSourcingSelectionConflict
+			}
+		default:
+			return ErrSourcingSelectionConflict
+		}
+	}
+	if selected != selection.SelectedCount {
+		return ErrSourcingSelectionConflict
+	}
+	return nil
 }
 
 func createSourcingSelectedProfileTx(
@@ -172,23 +446,9 @@ func createSourcingSelectedProfileTx(
 		}
 		return nil, err
 	}
-	scope := CandidateProfileScope{
-		Platform: run.Platform, AccountRef: run.AccountRef,
-		PlatformUserRef: run.PlatformUserRef, PositionRef: run.PositionRef,
-	}
-	if existing, err := candidateProfileByScopeTx(tx, scope); err != nil {
+	if occupied, err := sourcingCandidateAlreadyProfiledTx(tx, run); err != nil {
 		return nil, err
-	} else if existing != nil {
-		return nil, ErrCandidateAlreadyProfiled
-	}
-	var occupied int64
-	if err := tx.Model(&CandidateProfile{}).
-		Where("platform = ? AND platform_user_ref = ? AND main_status <> ?",
-			run.Platform, run.PlatformUserRef, CandidateProfileEliminated).
-		Count(&occupied).Error; err != nil {
-		return nil, err
-	}
-	if occupied != 0 {
+	} else if occupied {
 		return nil, ErrCandidateAlreadyProfiled
 	}
 	var profileIDCount int64
@@ -203,8 +463,11 @@ func createSourcingSelectedProfileTx(
 		observedAt = run.CapturedAt
 	}
 	_, _, err := upsertCandidateSnapshotTx(tx, SelectCandidateProfileRequest{
-		ProfileID: profileID, Scope: scope, DisplayName: run.DisplayName,
-		PositionTitle: run.PositionTitle, ObservedAt: observedAt,
+		ProfileID: profileID, Scope: CandidateProfileScope{
+			Platform: run.Platform, AccountRef: run.AccountRef,
+			PlatformUserRef: run.PlatformUserRef, PositionRef: run.PositionRef,
+		},
+		DisplayName: run.DisplayName, PositionTitle: run.PositionTitle, ObservedAt: observedAt,
 	})
 	if err != nil {
 		return nil, err

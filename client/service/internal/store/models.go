@@ -608,7 +608,34 @@ const (
 	SourcingSelectionContactStateRejected SourcingSelectionOutcome = "contactStateRejected"
 	SourcingSelectionScoringFailed        SourcingSelectionOutcome = "scoringFailed"
 	SourcingSelectionExistingProfile      SourcingSelectionOutcome = "existingProfile"
+	SourcingSelectionQuotaFull            SourcingSelectionOutcome = "quotaFull"
+	SourcingSelectionMaleRatioLimited     SourcingSelectionOutcome = "maleRatioLimited"
 )
+
+// SourcingBatchSelection 是一次正式采集批次的完整筛选摘要。BatchID 主键既
+// 保证一个批次只能形成一份名单，也让重放只能读取首次原子提交的结果；所有
+// 候选人身份与逐人分数仍只存在于 run/decision 业务事实中。
+type SourcingBatchSelection struct {
+	BatchID             string `gorm:"primaryKey"`
+	ContextRevisionHash string `gorm:"not null;index"`
+	AlgorithmVersion    string `gorm:"not null"`
+
+	MinScore       int `gorm:"not null"`
+	TargetMin      int `gorm:"not null"`
+	TargetMax      int `gorm:"not null"`
+	TargetCount    int `gorm:"not null"`
+	MaleRatioLimit int `gorm:"not null"`
+	MaleLimit      int `gorm:"not null"`
+
+	PoolCount          int `gorm:"not null"`
+	EligibleCount      int `gorm:"not null"`
+	SelectedCount      int `gorm:"not null"`
+	MaleSelectedCount  int `gorm:"not null"`
+	UnknownGenderCount int `gorm:"not null"`
+
+	CompletedAt time.Time `gorm:"not null"`
+	CreatedAt   time.Time
+}
 
 // SourcingSelectionDecision 是评分事实到候选人档案之间的一次性确定性裁决。
 // 它只保存随机引用、配置 hash 与数值结果，不复制平台身份或简历正文。
