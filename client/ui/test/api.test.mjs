@@ -77,6 +77,9 @@ check(Array.isArray(sus.suspects), 'suspects 返回数组')
 const acc = await api.accounts()
 check(Array.isArray(acc.accounts), 'accounts 返回账号数组')
 
+const jobSource = await api.jobConfigSource()
+check(jobSource.config?.configured === false, '未配置时职位配置源只返回 masked 状态')
+
 if (acc.accounts.length > 0) {
   const account = acc.accounts[0]
   const conv = await api.conversations(account.platform, account.accountRef)
@@ -110,6 +113,22 @@ globalThis.window = {
 globalThis.localStorage = { getItem: () => 'http://127.0.0.1:19999' }
 globalThis.fetch = async (url, init = {}) => {
   requests.push({ url: String(url), headers: new Headers(init.headers), body: init.body })
+  if (String(url).endsWith('/admin/job-config/source')) {
+    return new Response(JSON.stringify({
+      config: {
+        configured: init.method === 'POST', baseUrlConfigured: init.method === 'POST',
+        machineIdConfigured: init.method === 'POST', licenseTokenConfigured: init.method === 'POST',
+      },
+    }), { status: 200 })
+  }
+  if (String(url).endsWith('/admin/job-config/sync-current')) {
+    return new Response(JSON.stringify({
+      contexts: [{
+        contextId: 'ctx-safe', revisionHash: 'revision-safe', displayName: '合成职位',
+        environment: 'online', documentCount: 10,
+      }],
+    }), { status: 200 })
+  }
   if (String(url).includes('/admin/messages/send')) {
     if (forceSendRejected && init.method === 'POST') {
       return new Response(JSON.stringify({ error: '账号身份未在当前手会话验证' }), { status: 409 })
@@ -183,6 +202,11 @@ const {
   SendIntentConflictError, SendIntentRejectedError,
 } = await import(authModuleUrl)
 await authApi.health()
+const maskedJobSource = await authApi.jobConfigSource()
+const savedJobSource = await authApi.saveJobConfigSource({
+  base_url: 'http://legacy.fixture', machine_id: 'machine-private', license_token: 'token-private',
+})
+const syncedJobSource = await authApi.syncCurrentJobConfig()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
 await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
 const reloadReady = await authApi.reloadHand('hand-test')
@@ -245,7 +269,21 @@ stopFrames()
 check(authBase === 'http://127.0.0.1:18888', 'preload adminBase 优先于 localStorage')
 check(requests.every((request) => request.headers.get('Authorization') === 'Bearer test-memory-token'), '所有 fetch 携带 preload Bearer token')
 check(requests.every((request) => !request.url.includes('test-memory-token')), 'token 不进入 URL')
-check(requests[1].url.includes('platform=zhi%26lian') && requests[1].url.includes('accountRef=account+ref'), 'M2 查询参数经过 URL 编码')
+const encodedMessageRequest = requests.find((request) => request.url.includes('/admin/messages?'))
+check(encodedMessageRequest?.url.includes('platform=zhi%26lian') && encodedMessageRequest.url.includes('accountRef=account+ref'), 'M2 查询参数经过 URL 编码')
+const jobSourceSaveRequest = requests.find((request) => request.url.endsWith('/admin/job-config/source') && request.body)
+const jobSourceSaveBody = JSON.parse(String(jobSourceSaveRequest?.body || '{}'))
+check(
+  maskedJobSource.config.configured === false && savedJobSource.config.configured === true
+    && syncedJobSource.contexts[0]?.revisionHash === 'revision-safe',
+  '职位配置源读取、保存、同步使用 masked 状态与 revision 元数据',
+)
+check(
+  Object.keys(jobSourceSaveBody).sort().join(',') === 'base_url,license_token,machine_id'
+    && jobSourceSaveBody.machine_id === 'machine-private' && jobSourceSaveBody.license_token === 'token-private'
+    && !String(jobSourceSaveRequest?.url).includes('machine-private') && !String(jobSourceSaveRequest?.url).includes('token-private'),
+  '旧后台凭据只进入本地管理 POST 正文，不进入 URL',
+)
 const bindRequest = requests.find((request) => request.url.includes('/admin/accounts/bind'))
 const bindBody = JSON.parse(String(bindRequest?.body || '{}'))
 check(bindBody.platform === 'platform-from-user' && bindBody.handId === 'hand-test' && bindBody.accountRef === 'account-test', '绑定平台由调用方传入且原样进入账号上下文')

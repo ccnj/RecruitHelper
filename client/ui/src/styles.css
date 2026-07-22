@@ -294,8 +294,13 @@ h2 {
 .m5-context-option code { color: var(--faint); font: 0.59rem/1.45 var(--utility); }
 .m5-ai-empty { margin: 0; padding: 1rem; color: var(--muted); font-size: 0.7rem; }
 .m5-provider-state { display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; margin-bottom: 0.65rem; }
+.m5-source-state { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .m5-provider-state span { padding: 0.48rem 0.55rem; border: 1px solid var(--line); background: var(--paper); color: var(--muted); font-size: 0.65rem; }
 .m5-provider-state strong { display: block; margin-top: 0.08rem; color: var(--ink); font-size: 0.72rem; }
+.m5-manual-import { margin-top: 0.75rem; border-top: 1px solid var(--line); padding-top: 0.6rem; }
+.m5-manual-import summary { cursor: pointer; color: var(--muted); font-size: 0.66rem; }
+.m5-manual-import textarea { margin-top: 0.55rem; min-height: 104px; }
+.m5-manual-import button { width: 100%; margin-top: 0.5rem; }
 .m5-budget-line { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.6rem; }
 .m5-budget-line span { padding: 0.2rem 0.34rem; border: 1px solid var(--line); color: var(--muted); font: 0.59rem/1.2 var(--utility); }
 .m5-ai-notices { display: grid; gap: 0.4rem; padding: 0.65rem 1rem; border-top: 1px solid var(--line); background: var(--paper); }

@@ -3,7 +3,7 @@ import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
-  LedgerRow, M5AIContextView, M5ProviderConfigView, MessageView, MutationResult,
+  JobConfigSourceView, LedgerRow, M5AIContextView, M5ProviderConfigView, MessageView, MutationResult,
   SendIntentView, Suspect, TimeValue,
 } from './api'
 import {
@@ -566,8 +566,14 @@ function M5AIConfiguration() {
   const [contextsError, setContextsError] = useState('')
   const [bundleText, setBundleText] = useState('')
   const [selectedRevision, setSelectedRevision] = useState('')
-  const [contextBusy, setContextBusy] = useState<'import' | 'bind' | ''>('')
+  const [contextBusy, setContextBusy] = useState<'sync' | 'import' | 'bind' | ''>('')
   const [contextNotice, setContextNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
+  const [jobSource, setJobSource] = useState<JobConfigSourceView | null>(null)
+  const [jobSourceLoading, setJobSourceLoading] = useState(true)
+  const [jobSourceError, setJobSourceError] = useState('')
+  const [jobSourceBaseURL, setJobSourceBaseURL] = useState('')
+  const [jobSourceMachineID, setJobSourceMachineID] = useState('')
+  const [jobSourceToken, setJobSourceToken] = useState('')
   const [providerConfig, setProviderConfig] = useState<M5ProviderConfigView | null>(null)
   const [providerLoading, setProviderLoading] = useState(true)
   const [providerError, setProviderError] = useState('')
@@ -602,10 +608,54 @@ function M5AIConfiguration() {
     }
   }, [])
 
+  const loadJobSource = useCallback(async () => {
+    setJobSourceLoading(true)
+    try {
+      const result = await api.jobConfigSource()
+      setJobSource(result.config)
+      setJobSourceError('')
+    } catch (reason) {
+      setJobSourceError(errorText(reason))
+    } finally {
+      setJobSourceLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     void loadContexts()
     void loadProvider()
-  }, [loadContexts, loadProvider])
+    void loadJobSource()
+  }, [loadContexts, loadJobSource, loadProvider])
+
+  const syncCurrentJob = async () => {
+    setContextBusy('sync')
+    setContextNotice(null)
+    try {
+      let source = jobSource
+      if (!source?.configured || jobSourceBaseURL.trim() || jobSourceMachineID.trim() || jobSourceToken.trim()) {
+        const saved = await api.saveJobConfigSource({
+          base_url: jobSourceBaseURL.trim(),
+          machine_id: jobSourceMachineID.trim(),
+          license_token: jobSourceToken.trim(),
+        })
+        source = saved.config
+        setJobSource(source)
+      }
+      const result = await api.syncCurrentJobConfig()
+      const synced = Array.isArray(result.contexts) ? result.contexts : []
+      if (synced[0]) setSelectedRevision(synced[0].revisionHash)
+      setJobSourceBaseURL('')
+      setJobSourceMachineID('')
+      setJobSourceToken('')
+      setJobSourceError('')
+      setContextNotice({ kind: 'ok', text: '旧后台当前职位已同步为本地不可变版本。' })
+      await loadContexts()
+    } catch (reason) {
+      setContextNotice({ kind: 'bad', text: errorText(reason) })
+    } finally {
+      setContextBusy('')
+    }
+  }
 
   const importBundle = async () => {
     setContextNotice(null)
@@ -670,6 +720,10 @@ function M5AIConfiguration() {
   }
 
   const providerReady = providerConfig?.baseUrlConfigured === true && providerConfig.keyConfigured === true
+  const sourceReady = jobSource?.configured === true
+  const sourceInputsReady = (jobSource?.baseUrlConfigured || jobSourceBaseURL.trim() !== '')
+    && (jobSource?.machineIdConfigured || jobSourceMachineID.trim() !== '')
+    && (jobSource?.licenseTokenConfigured || jobSourceToken.trim() !== '')
 
   return (
     <section className="m5-ai-panel" aria-labelledby="m5-ai-title">
@@ -686,23 +740,66 @@ function M5AIConfiguration() {
 
       <div className="m5-ai-wire" aria-label="AI 配置步骤">
         <section className="m5-ai-step" aria-labelledby="m5-import-title">
-          <header><span>01</span><div><strong id="m5-import-title">导入职位资料</strong><small>旧 job-config 单数或复数响应</small></div></header>
-          <textarea
-            value={bundleText}
-            onChange={(event) => setBundleText(event.target.value)}
-            rows={7}
-            spellCheck={false}
+          <header><span>01</span><div><strong id="m5-import-title">同步职位资料</strong><small>旧后台当前职位 · 不继承旧模型密钥</small></div></header>
+          <div className="m5-provider-state m5-source-state">
+            <span>后台地址 <strong>{jobSource?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
+            <span>旧机器凭据 <strong>{jobSource?.machineIdConfigured ? '已配置' : '未配置'}</strong></span>
+            <span>旧授权凭据 <strong>{jobSource?.licenseTokenConfigured ? '已配置' : '未配置'}</strong></span>
+          </div>
+          <label htmlFor="job-source-base-url">旧后台地址</label>
+          <input
+            id="job-source-base-url"
+            type="url"
+            value={jobSourceBaseURL}
+            onChange={(event) => setJobSourceBaseURL(event.target.value)}
             autoComplete="off"
-            placeholder="在此粘贴完整 JSON；内容不会写入浏览器存储"
-            aria-label="旧 job-config JSON"
+            placeholder={jobSource?.baseUrlConfigured ? '留空则保留现有地址' : 'http://…'}
           />
+          <label htmlFor="job-source-machine-id">旧 machineId（仅用于认证）</label>
+          <input
+            id="job-source-machine-id"
+            type="password"
+            value={jobSourceMachineID}
+            onChange={(event) => setJobSourceMachineID(event.target.value)}
+            autoComplete="new-password"
+            placeholder={jobSource?.machineIdConfigured ? '留空则保留现有值' : '输入旧 machineId'}
+          />
+          <label htmlFor="job-source-token">旧 licenseToken</label>
+          <input
+            id="job-source-token"
+            type="password"
+            value={jobSourceToken}
+            onChange={(event) => setJobSourceToken(event.target.value)}
+            autoComplete="new-password"
+            placeholder={jobSource?.licenseTokenConfigured ? '留空则保留现有值' : '输入旧 licenseToken'}
+          />
+          {jobSourceError && <p className="m5-ai-message bad" role="alert">{jobSourceError}</p>}
           <button
             type="button"
-            disabled={contextBusy !== '' || bundleText.trim() === ''}
-            onClick={() => void importBundle()}
+            disabled={contextBusy !== '' || jobSourceLoading || !sourceInputsReady}
+            onClick={() => void syncCurrentJob()}
           >
-            {contextBusy === 'import' ? '正在导入…' : '导入职位资料'}
+            {contextBusy === 'sync' ? '正在同步…' : sourceReady ? '同步当前职位' : '保存并同步当前职位'}
           </button>
+          <details className="m5-manual-import">
+            <summary>开发期手工导入 JSON</summary>
+            <textarea
+              value={bundleText}
+              onChange={(event) => setBundleText(event.target.value)}
+              rows={5}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="粘贴完整 job-config JSON"
+              aria-label="旧 job-config JSON"
+            />
+            <button
+              type="button"
+              disabled={contextBusy !== '' || bundleText.trim() === ''}
+              onClick={() => void importBundle()}
+            >
+              {contextBusy === 'import' ? '正在导入…' : '手工导入'}
+            </button>
+          </details>
         </section>
 
         <section className="m5-ai-step" aria-labelledby="m5-bind-title">

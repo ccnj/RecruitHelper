@@ -232,6 +232,19 @@ export interface M5ProviderConfigInput {
   max_reply_output_tokens: 512
 }
 
+export interface JobConfigSourceView {
+  configured: boolean
+  baseUrlConfigured: boolean
+  machineIdConfigured: boolean
+  licenseTokenConfigured: boolean
+}
+
+export interface JobConfigSourceInput {
+  base_url: string
+  machine_id: string
+  license_token: string
+}
+
 export interface SendIntentView {
   intentId: string
   logicalDispatchId: string
@@ -505,6 +518,9 @@ export const api = {
   }),
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
+  jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
+  saveJobConfigSource: (config: JobConfigSourceInput) => post<{ config: JobConfigSourceView }>('/admin/job-config/source', config),
+  syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
   bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {
     contextId, revisionHash,
   }),
