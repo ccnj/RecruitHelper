@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 )
@@ -102,6 +103,53 @@ func TestV4InboundTurnRejectedShortCircuitNeverRequestsReplyAI(t *testing.T) {
 		decision.Dialogue.NextAdvice != V4AdviceNone || decision.Dialogue.IntentLabel != m5ai.IntentRejected ||
 		len(decision.Dialogue.Actions) != 2 || decision.State.ColdPromptRemaining != 0 || decision.State.ColdWechatRemaining != 0 {
 		t.Fatalf("拒绝短路没有直接进入固定分支: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4InboundTurnRejectedReplayCannotAdvanceTheSameTurnToClosing(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	phrases := availableV4FixedPhrases()
+	phrases.Phrases[V4PhraseRejectionClosing] = V4FixedPhrase{
+		Kind: V4PhraseRejectionClosing, State: V4PhraseAvailable, Text: "好的，后续有机会再联系。",
+	}
+	firstInput := V4InboundTurnInput{
+		State: state, TurnID: "turn-rejected-replay", Messages: []LedgerMessageFact{v4InboundText(2, "暂时不考虑，谢谢")},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent}, FixedPhrases: phrases,
+	}
+	first, err := ReduceV4InboundTurn(firstInput)
+	if err != nil || len(first.Dialogue.Actions) == 0 || first.Dialogue.Actions[0].Kind != V4ActionRejectionRetention {
+		t.Fatalf("首次拒绝没有冻结为挽留阶段: decision=%+v err=%v", first, err)
+	}
+	retentionKey := first.Dialogue.Actions[0].ActionKey
+	confirmedAt := *state.LastOutboundAt
+	confirmedAt = confirmedAt.Add(time.Hour)
+	confirmed, err := ApplyV4ConfirmedAction(first.State, V4ConfirmedAction{
+		ActionKey: retentionKey, Kind: V4ActionRejectionRetention, MessageSeq: 3, SentAt: &confirmedAt,
+	})
+	if err != nil || !confirmed.RetentionSent {
+		t.Fatalf("挽留正证没有落入冻结状态: state=%+v err=%v", confirmed, err)
+	}
+
+	firstInput.State = confirmed
+	replayed, err := ReduceV4InboundTurn(firstInput)
+	if err != nil || replayed.State.RejectionStage != V4RejectionStageRetention || len(replayed.Dialogue.Actions) == 0 ||
+		replayed.Dialogue.Actions[0].Kind != V4ActionRejectionRetention || replayed.Dialogue.Actions[0].ActionKey != retentionKey {
+		t.Fatalf("同一拒绝轮重放只能恢复原挽留键: decision=%+v err=%v", replayed, err)
+	}
+	for _, action := range replayed.Dialogue.Actions {
+		if action.Kind == V4ActionRejectionClosing {
+			t.Fatalf("同一拒绝轮在挽留正证后错误升级为收场: %+v", replayed.Dialogue.Actions)
+		}
+	}
+
+	secondInput := firstInput
+	secondInput.State = confirmed
+	secondInput.TurnID = "turn-rejected-new"
+	secondInput.Messages = []LedgerMessageFact{v4InboundText(4, "还是不考虑")}
+	second, err := ReduceV4InboundTurn(secondInput)
+	if err != nil || second.State.RejectionTurnMessageSeq != 4 || second.State.RejectionStage != V4RejectionStageClosing ||
+		len(second.Dialogue.Actions) != 1 || second.Dialogue.Actions[0].Kind != V4ActionRejectionClosing {
+		t.Fatalf("只有更高消息序号的新拒绝轮才能升级收场: decision=%+v err=%v", second, err)
 	}
 }
 

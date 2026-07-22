@@ -95,7 +95,9 @@ func TestV4DialogueRejectedFirstTurnUsesFixedPhraseWithoutReplyAI(t *testing.T) 
 		decision.IntentLabel != m5ai.IntentRejected || decision.IntentSource != IntentSourceCodeShortCircuit ||
 		decision.State.ColdPromptRemaining != 0 || decision.State.ColdWechatRemaining != 0 ||
 		decision.State.RetentionSent || decision.State.WechatState != V4WechatNotInvited || len(decision.Actions) != 2 ||
-		decision.Actions[0].Kind != V4ActionRejectionRetention || decision.Actions[1].Kind != V4ActionInviteWechat {
+		decision.Actions[0].Kind != V4ActionRejectionRetention || decision.Actions[1].Kind != V4ActionInviteWechat ||
+		decision.State.RejectionTurnMessageSeq != 4 || decision.State.RejectionTurnID != "turn-rejected-1" ||
+		decision.State.RejectionStage != V4RejectionStageRetention {
 		t.Fatalf("首次拒绝没有走固定话术+微信邀请，或计划阶段提前推进: decision=%+v err=%v", decision, err)
 	}
 	for _, action := range decision.Actions {

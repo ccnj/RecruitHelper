@@ -82,6 +82,14 @@ const (
 	V4ManualInterviewCardMissing V4ManualReason = "interviewCardMissing"
 )
 
+type V4RejectionStage string
+
+const (
+	V4RejectionStageRetention V4RejectionStage = "retention"
+	V4RejectionStageClosing   V4RejectionStage = "closing"
+	V4RejectionStageArchive   V4RejectionStage = "archive"
+)
+
 type V4InterviewFollowupGroup struct {
 	MessageSeq           int64
 	NextStage            uint8
@@ -112,6 +120,9 @@ type V4State struct {
 	ColdWechatTextSent           bool
 	WechatReceiptSent            bool
 	InterviewAcceptedReceiptSent bool
+	RejectionTurnMessageSeq      int64
+	RejectionTurnID              string
+	RejectionStage               V4RejectionStage
 
 	LastOutboundAt     *time.Time
 	LastBodyAt         *time.Time
@@ -611,6 +622,13 @@ func validateV4State(state V4State) error {
 		(state.EndReason != "" && !validV4EndReason(state.EndReason)) || (state.ClosingSent && !state.RetentionSent) {
 		return ErrInvalidV4StateTransition
 	}
+	if (state.RejectionTurnMessageSeq == 0) != (state.RejectionStage == "") ||
+		(state.RejectionTurnMessageSeq == 0) != (state.RejectionTurnID == "") ||
+		state.RejectionTurnMessageSeq < 0 || !validV4RejectionStage(state.RejectionStage) ||
+		(state.RejectionStage == V4RejectionStageClosing && !state.RetentionSent) ||
+		(state.RejectionStage == V4RejectionStageArchive && (!state.RetentionSent || !state.ClosingSent)) {
+		return ErrInvalidV4StateTransition
+	}
 	previousSeq := int64(0)
 	for _, group := range state.InterviewGroups {
 		if group.MessageSeq <= previousSeq || group.NextStage < 1 || group.NextStage > 4 ||
@@ -620,6 +638,15 @@ func validateV4State(state V4State) error {
 		previousSeq = group.MessageSeq
 	}
 	return nil
+}
+
+func validV4RejectionStage(stage V4RejectionStage) bool {
+	switch stage {
+	case "", V4RejectionStageRetention, V4RejectionStageClosing, V4RejectionStageArchive:
+		return true
+	default:
+		return false
+	}
 }
 
 func validV4EndReason(reason V4EndReason) bool {
