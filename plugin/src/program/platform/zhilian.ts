@@ -1203,20 +1203,30 @@ async function mainReadSourcingWindow(
     }
 
     let latest = collect(scroller)
-    if ('status' in latest) return latest
-    let latestSignature = signature(latest)
+    let latestSignature = 'status' in latest ? '' : signature(latest)
     let stableRounds = 0
     const settleUntil = Date.now() + 3_000
     while (Date.now() < settleUntil) {
-      if ((latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop) && stableRounds >= 2) break
+      if (!('status' in latest)) {
+        const movementObserved = latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop
+        if (stableRounds >= 2 && (move === 'reset' || movementObserved)) break
+      } else if (latest.reason === 'route_changed') {
+        return latest
+      }
       await new Promise((resolve) => setTimeout(resolve, 120))
       const next = collect(scroller)
-      if ('status' in next) return next
+      if ('status' in next) {
+        latest = next
+        latestSignature = ''
+        stableRounds = 0
+        continue
+      }
       const nextSignature = signature(next)
       stableRounds = nextSignature === latestSignature ? stableRounds + 1 : 0
       latest = next
       latestSignature = nextSignature
     }
+    if ('status' in latest) return latest
     if (latest.positionRef !== initial.positionRef) return failed('position_identity_mismatch')
     if (latest.positionTitle !== initial.positionTitle) return failed('position_title_mismatch')
     return {

@@ -2212,6 +2212,7 @@ function installM6SourcingWindowFixture(options = {}) {
   const state = {
     index: options.startAt === 'first' ? 0 : 1,
     visibleTitles: ['合成窗口职位'],
+    transientReadsRemaining: 0,
   }
   const scroller = {
     ...node(),
@@ -2222,6 +2223,9 @@ function installM6SourcingWindowFixture(options = {}) {
     scrollTo({ top }) {
       this.scrollTop = Number(top)
       state.index = Math.max(Math.floor(this.scrollTop / 100), 0)
+      state.transientReadsRemaining = Number.isInteger(options.transientAfterScrollReads)
+        ? Math.max(options.transientAfterScrollReads, 0)
+        : 0
     },
     dispatchEvent() {},
   }
@@ -2268,6 +2272,10 @@ function installM6SourcingWindowFixture(options = {}) {
     scrollingElement: options.documentRoot === true ? scroller : null,
     querySelectorAll(selector) {
       if (selector === '.recommend-list__left div[role="listitem"]') {
+        if (state.transientReadsRemaining > 0) {
+          state.transientReadsRemaining -= 1
+          return []
+        }
         return options.staticDom === true ? windows.flat() : windows[state.index]
       }
       if (selector === '.job-pane__item--active .job-pane__item-job-title') {
@@ -2319,6 +2327,19 @@ test('candidate.readSourcingWindow MAIN current/reset/next 只返回稳定身份
     const serialized = JSON.stringify([current, reset, next])
     assert.equal(serialized.includes('绝不返回姓名'), false)
     assert.equal(serialized.includes('resumeNumber'), false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN 滚动后暂时空窗会等待稳定而非立即失败', async () => {
+  const fixture = installM6SourcingWindowFixture({ transientAfterScrollReads: 2 })
+  try {
+    const reset = await zhilianTestHooks.mainReadSourcingWindow('reset')
+    assert.equal(reset.status, 'ready')
+    assert.deepEqual(reset.data.platformUserRefs, fixture.refs.firstWindow)
+    assert.equal(reset.data.moved, true)
+    assert.equal(fixture.state.transientReadsRemaining, 0)
   } finally {
     fixture.restore()
   }
