@@ -73,6 +73,21 @@ type sourcingGreetingGenerationStatusView struct {
 	Completed           bool   `json:"completed"`
 }
 
+// sourcingGreetingSendStatusView 是列表直接发送管理面的完整且唯一投影。
+// 成员身份、来源 invocation、effect intent 与正文只能留在业务库内。
+type sourcingGreetingSendStatusView struct {
+	BatchID             string `json:"batchId"`
+	ContextRevisionHash string `json:"contextRevisionHash"`
+	SelectedCount       int    `json:"selectedCount"`
+	ReadyCount          int64  `json:"readyCount"`
+	PendingCount        int64  `json:"pendingCount"`
+	InFlightCount       int64  `json:"inFlightCount"`
+	SentCount           int64  `json:"sentCount"`
+	FailedCount         int64  `json:"failedCount"`
+	SuspectCount        int64  `json:"suspectCount"`
+	Completed           bool   `json:"completed"`
+}
+
 func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
 	if !a.requireActor(w) {
 		return
@@ -341,5 +356,84 @@ func sourcingGreetingGenerationView(
 		InputTokens: progress.InputTokens, CachedInputTokens: progress.CachedInputTokens,
 		OutputTokens: progress.OutputTokens, EstimatedCostMicros: progress.EstimatedCostMicros,
 		Completed: progress.Completed,
+	}
+}
+
+func (a *API) runSourcingGreetingSend(w http.ResponseWriter, r *http.Request) {
+	if !a.requireActor(w) {
+		return
+	}
+	batchID, ok := sourcingBatchIDFromBody(w, r)
+	if !ok {
+		return
+	}
+	progress, err := a.actor.SendSelectedSourcingGreetings(r.Context(), batchID)
+	if err != nil {
+		status, message := sourcingGreetingSendHTTPError(err)
+		body := map[string]any{"error": message}
+		if progress != nil {
+			body["sourcingGreetingSend"] = sourcingGreetingSendView(*progress)
+		}
+		writeJSON(w, status, body)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sourcingGreetingSend": sourcingGreetingSendView(*progress),
+	})
+}
+
+func (a *API) sourcingGreetingSendStatus(w http.ResponseWriter, r *http.Request) {
+	batchID := strings.TrimSpace(r.URL.Query().Get("batchId"))
+	if batchID == "" || len(batchID) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的正式采集 batchId"})
+		return
+	}
+	progress, err := a.st.SourcingBatchGreetingSendProgress(batchID)
+	if err != nil {
+		status, message := sourcingGreetingSendStatusHTTPError(err)
+		writeJSON(w, status, map[string]string{"error": message})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sourcingGreetingSend": sourcingGreetingSendView(*progress),
+	})
+}
+
+func sourcingGreetingSendView(
+	progress store.SourcingBatchGreetingSendProgress,
+) sourcingGreetingSendStatusView {
+	return sourcingGreetingSendStatusView{
+		BatchID: progress.BatchID, ContextRevisionHash: progress.ContextRevisionHash,
+		SelectedCount: progress.SelectedCount, ReadyCount: progress.ReadyCount,
+		PendingCount: progress.PendingCount, InFlightCount: progress.InFlightCount,
+		SentCount: progress.SentCount, FailedCount: progress.FailedCount,
+		SuspectCount: progress.SuspectCount, Completed: progress.Completed,
+	}
+}
+
+// 新发送管理面不直接返回底层 error。底层错误可能携带来源、命令或页面
+// 绑定引用；管理端只需要稳定分类和同一份脱敏聚合。
+func sourcingGreetingSendHTTPError(err error) (int, string) {
+	switch {
+	case errors.Is(err, store.ErrSourcingBatchNotFound):
+		return http.StatusNotFound, "正式采集批次不存在"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return http.StatusRequestTimeout, "批次招呼发送请求已取消"
+	default:
+		return http.StatusConflict, "批次招呼发送未完成"
+	}
+}
+
+func sourcingGreetingSendStatusHTTPError(err error) (int, string) {
+	switch {
+	case errors.Is(err, store.ErrSourcingBatchNotFound):
+		return http.StatusNotFound, "正式采集批次不存在"
+	case errors.Is(err, store.ErrSourcingGreetingEffectInvalid),
+		errors.Is(err, store.ErrSourcingGreetingEffectConflict),
+		errors.Is(err, store.ErrSourcingSelectionNotReady),
+		errors.Is(err, store.ErrSourcingSelectionConflict):
+		return http.StatusConflict, "批次招呼发送状态尚未就绪"
+	default:
+		return http.StatusInternalServerError, "批次招呼发送状态读取失败"
 	}
 }

@@ -3,6 +3,7 @@ package adminhttp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -10,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/appbridge"
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 type sourcingAdminClock struct{ now time.Time }
@@ -83,10 +87,167 @@ func TestSourcingGreetingGenerationViewContainsOnlySafeAggregate(t *testing.T) {
 	}
 }
 
+func TestSourcingGreetingSendViewContainsOnlySafeAggregate(t *testing.T) {
+	view := sourcingGreetingSendView(store.SourcingBatchGreetingSendProgress{
+		BatchID: "batch-send-view", ContextRevisionHash: "revision-send-view",
+		SelectedCount: 4, ReadyCount: 3, PendingCount: 1, InFlightCount: 0,
+		SentCount: 1, FailedCount: 1, SuspectCount: 1, Completed: true,
+	})
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]struct{}{
+		"batchId": {}, "contextRevisionHash": {}, "selectedCount": {}, "readyCount": {},
+		"pendingCount": {}, "inFlightCount": {}, "sentCount": {}, "failedCount": {},
+		"suspectCount": {}, "completed": {},
+	}
+	if len(fields) != len(allowed) {
+		t.Fatalf("列表发送投影字段数越界: %s", raw)
+	}
+	for key := range fields {
+		if _, ok := allowed[key]; !ok {
+			t.Fatalf("列表发送投影泄漏字段 %q: %s", key, raw)
+		}
+	}
+	for _, forbidden := range []string{
+		"profileId", "runId", "invocationId", "intentId", "platformUserRef",
+		"greetingText", "text", "accountRef",
+	} {
+		if _, exists := fields[forbidden]; exists {
+			t.Fatalf("列表发送投影泄漏 %q: %s", forbidden, raw)
+		}
+	}
+}
+
 type sourcingAdminHands struct{}
 
 func (sourcingAdminHands) State(context.Context, string) (patrol.HandState, error) {
 	return patrol.HandState{Online: true}, nil
+}
+
+type sourcingGreetingSendAdminHands struct{}
+
+func (sourcingGreetingSendAdminHands) State(context.Context, string) (patrol.HandState, error) {
+	return patrol.HandState{
+		Online: true, Session: "session-admin-send", BootID: "boot-admin-send",
+	}, nil
+}
+
+type sourcingGreetingSendAdminSender struct {
+	dispatcher      *dispatch.Dispatcher
+	positionRef     string
+	platformUserRef string
+}
+
+func (s *sourcingGreetingSendAdminSender) SendEnvelope(handID string, env protocol.Envelope) error {
+	if env.Kind != protocol.KindCmd {
+		return nil
+	}
+	var body protocol.CmdBody
+	if err := json.Unmarshal(env.Body, &body); err != nil {
+		return err
+	}
+	var data any
+	switch body.Name {
+	case protocol.PrimProbePlatform:
+		fingerprint := "principal-admin-send"
+		data = protocol.ProbePlatformData{
+			ContentScriptOk: true, LoginState: protocol.LoginStateIn,
+			PageKind: protocol.PageKindRecommend, PrincipalFingerprint: &fingerprint,
+		}
+	case protocol.PrimCandidateReadSourcingWindow:
+		var args protocol.CandidateReadSourcingWindowArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		if args.Move != protocol.SourcingWindowMoveCurrent {
+			return fmt.Errorf("管理状态 fixture 不支持窗口动作 %s", args.Move)
+		}
+		data = protocol.CandidateReadSourcingWindowData{
+			PositionRef: s.positionRef, PlatformUserRefs: []string{s.platformUserRef},
+			Moved: false, ObservedAt: time.Now().UnixMilli(),
+		}
+	case protocol.PrimCandidateReadSourcingTargetResume:
+		var args protocol.CandidateReadSourcingTargetResumeArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		if args.PlatformUserRef != s.platformUserRef || args.PositionRef != s.positionRef {
+			return fmt.Errorf("管理状态 fixture 收到错误定点材料")
+		}
+		data = protocol.CandidateReadSourcingResumeData{
+			PlatformUserRef: s.platformUserRef, PositionRef: s.positionRef,
+			ContactState:   protocol.CandidateContactStateUnestablished,
+			ObservedAt:     time.Now().UnixMilli(),
+			Basic:          []protocol.CandidateResumeLabelValue{},
+			Expectations:   []protocol.CandidateResumeLabelValue{},
+			SelfEvaluation: "", Education: "", WorkExperiences: "",
+		}
+	default:
+		return fmt.Errorf("管理状态 fixture 收到越界原语 %s", body.Name)
+	}
+	raw, err := protocol.Encode(data)
+	if err != nil {
+		return err
+	}
+	s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
+	s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
+		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: raw, ExecMs: 1,
+	})
+	return nil
+}
+
+func (*sourcingGreetingSendAdminSender) HandSession(string) (string, string, bool) {
+	return "session-admin-send", "boot-admin-send", true
+}
+
+func (*sourcingGreetingSendAdminSender) HandContractMatch(string) (bool, bool) {
+	return true, true
+}
+
+func (*sourcingGreetingSendAdminSender) HandNegotiation(string) ([]string, []string, bool) {
+	return []string{
+			protocol.PrimProbePlatform + "@1",
+			protocol.PrimCandidateReadSourcingWindow + "@1",
+			protocol.PrimCandidateReadSourcingTargetResume + "@1",
+		}, []string{
+			string(protocol.FeatureLease1), string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
+		}, true
+}
+
+func (*sourcingGreetingSendAdminSender) CloseHand(string, string, string) bool { return true }
+func (*sourcingGreetingSendAdminSender) HandOfflineMs(string) int64            { return 0 }
+
+type sourcingGreetingSendAdminAdvice struct{}
+
+func (sourcingGreetingSendAdminAdvice) ProviderName() string { return "provider-admin-send" }
+func (sourcingGreetingSendAdminAdvice) ModelName() string    { return "model-admin-send" }
+
+func (sourcingGreetingSendAdminAdvice) CompleteJSON(
+	_ context.Context,
+	request m5ai.CompletionRequest,
+) (m5ai.CompletionResponse, error) {
+	zero := 0
+	response := m5ai.CompletionResponse{
+		ReasoningContentEmpty: true,
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 10, CachedInputTokens: 0, OutputTokens: 4, ReasoningTokens: &zero,
+		},
+	}
+	switch request.Purpose {
+	case m5ai.PurposeScoring:
+		response.JSONText = `{"score":8}`
+	case m5ai.PurposeGreeting:
+		response.JSONText = `{"招呼语":"admin-send-greeting-secret"}`
+	default:
+		return m5ai.CompletionResponse{}, fmt.Errorf("管理状态 fixture 收到越界 AI 用途 %s", request.Purpose)
+	}
+	return response, nil
 }
 
 func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
@@ -110,6 +271,102 @@ func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
 			CustomerFacts: facts, MappingVersion: m5ai.MappingVersion,
 		},
 		CreatedAt: at,
+	}
+}
+
+func TestSourcingGreetingSendStatusReturnsNormalSafeAggregate(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	revision := sourcingAdminRevision(now.Add(-time.Hour))
+	if _, _, err := st.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	key := store.AccountKey{Platform: "zhilian", AccountRef: "account-admin-send-secret"}
+	if err := st.CreateAccount(&store.Account{Platform: key.Platform, AccountRef: key.AccountRef}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindAccountPrincipal(
+		key, "hand-admin-send", "principal-admin-send",
+		"session-admin-send", "boot-admin-send", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sender := &sourcingGreetingSendAdminSender{
+		positionRef: "position-admin-send-secret", platformUserRef: "person-admin-send-secret",
+	}
+	dispatcher := dispatch.New(st, sender)
+	sender.dispatcher = dispatcher
+	manager, err := patrol.NewManager(
+		st, appbridge.PatrolRunner{Dispatcher: dispatcher}, sourcingGreetingSendAdminHands{},
+		patrol.Config{Clock: sourcingAdminClock{now: now}, Location: time.UTC, IdentityFreshFor: time.Hour},
+		sourcingGreetingSendAdminAdvice{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.StartSourcing(key, revision.RevisionHash, 1); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := st.ActiveSourcingBatch(key)
+	if err != nil || batch == nil {
+		t.Fatalf("缺少正式采集批次: batch=%+v err=%v", batch, err)
+	}
+	if result, err := manager.Tick(context.Background()); err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("单人采集失败: result=%+v err=%v", result, err)
+	}
+	if progress, err := manager.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID); err != nil || !progress.Completed {
+		t.Fatalf("单人评分失败: progress=%+v err=%v", progress, err)
+	}
+	selection, err := st.SelectCompletedSourcingBatch(batch.BatchID, now)
+	if err != nil || selection == nil || selection.SelectedCount != 1 {
+		t.Fatalf("单人筛选失败: selection=%+v err=%v", selection, err)
+	}
+	if progress, err := manager.GenerateSelectedSourcingGreetings(context.Background(), batch.BatchID); err != nil ||
+		!progress.Completed || progress.OKCount != 1 {
+		t.Fatalf("单人招呼语生成失败: progress=%+v err=%v", progress, err)
+	}
+
+	api := New(st, newFakeAdminHub(), dispatcher, manager, nil, "")
+	mux := http.NewServeMux()
+	api.Routes(mux)
+	request := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/greeting-send/status?batchId="+batch.BatchID, nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("列表发送正常状态读取失败: code=%d body=%s", response.Code, response.Body.String())
+	}
+	var decoded struct {
+		Status map[string]any `json:"sourcingGreetingSend"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Status) != 10 || decoded.Status["batchId"] != batch.BatchID ||
+		decoded.Status["contextRevisionHash"] != revision.RevisionHash ||
+		decoded.Status["selectedCount"] != float64(1) || decoded.Status["readyCount"] != float64(1) ||
+		decoded.Status["pendingCount"] != float64(1) || decoded.Status["completed"] != false {
+		t.Fatalf("列表发送正常聚合错误: %s", response.Body.String())
+	}
+	for _, forbiddenKey := range []string{
+		"profileId", "runId", "invocationId", "intentId", "platformUserRef",
+		"greetingText", "text", "accountRef",
+	} {
+		if _, exists := decoded.Status[forbiddenKey]; exists {
+			t.Fatalf("列表发送状态泄漏字段 %q: %s", forbiddenKey, response.Body.String())
+		}
+	}
+	for _, forbiddenValue := range []string{
+		"account-admin-send-secret", "position-admin-send-secret", "person-admin-send-secret",
+		"admin-send-greeting-secret", "principal-admin-send",
+	} {
+		if strings.Contains(response.Body.String(), forbiddenValue) {
+			t.Fatalf("列表发送状态泄漏业务值 %q: %s", forbiddenValue, response.Body.String())
+		}
 	}
 }
 
@@ -291,5 +548,45 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	if invalidGreetingRunResponse.Code != http.StatusBadRequest {
 		t.Fatalf("招呼语生成缺少 batchId 未拒绝: code=%d body=%s",
 			invalidGreetingRunResponse.Code, invalidGreetingRunResponse.Body.String())
+	}
+
+	missingSendStatus := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/greeting-send/status?batchId=missing-send-batch", nil)
+	missingSendStatusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingSendStatusResponse, missingSendStatus)
+	if missingSendStatusResponse.Code != http.StatusNotFound ||
+		missingSendStatusResponse.Body.String() != "{\"error\":\"正式采集批次不存在\"}\n" {
+		t.Fatalf("列表发送状态未知批次未固定返回 404: code=%d body=%s",
+			missingSendStatusResponse.Code, missingSendStatusResponse.Body.String())
+	}
+
+	invalidSendStatus := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/greeting-send/status", nil)
+	invalidSendStatusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidSendStatusResponse, invalidSendStatus)
+	if invalidSendStatusResponse.Code != http.StatusBadRequest {
+		t.Fatalf("列表发送状态缺少 batchId 未拒绝: code=%d body=%s",
+			invalidSendStatusResponse.Code, invalidSendStatusResponse.Body.String())
+	}
+
+	invalidSendRun := httptest.NewRequest(http.MethodPost,
+		"/admin/sourcing/greeting-send/run", strings.NewReader(`{"batchId":""}`))
+	invalidSendRun.Header.Set("Content-Type", "application/json")
+	invalidSendRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidSendRunResponse, invalidSendRun)
+	if invalidSendRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf("列表发送缺少 batchId 未拒绝: code=%d body=%s",
+			invalidSendRunResponse.Code, invalidSendRunResponse.Body.String())
+	}
+
+	missingSendRun := httptest.NewRequest(http.MethodPost,
+		"/admin/sourcing/greeting-send/run", strings.NewReader(`{"batchId":"missing-send-batch"}`))
+	missingSendRun.Header.Set("Content-Type", "application/json")
+	missingSendRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingSendRunResponse, missingSendRun)
+	if missingSendRunResponse.Code != http.StatusNotFound ||
+		missingSendRunResponse.Body.String() != "{\"error\":\"正式采集批次不存在\"}\n" {
+		t.Fatalf("列表发送未知批次未固定返回 404: code=%d body=%s",
+			missingSendRunResponse.Code, missingSendRunResponse.Body.String())
 	}
 }
