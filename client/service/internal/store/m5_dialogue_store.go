@@ -1034,7 +1034,8 @@ func sameOptionalInt(left, right *int) bool {
 
 // RecoverInterruptedAIInvocations 收敛崩溃前已预留但未完成的调用。它只写
 // processInterrupted 终局，绝不再次触碰 provider：intent 落一次 neutral
-// fallback，reply 转人工并释放试运行 active slot。
+// fallback，reply 转人工并释放试运行 active slot；采集评分只形成明确失败，
+// 之后统一评分继续尚无预留的批次成员。
 func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 	if at.IsZero() {
 		at = time.Now()
@@ -1110,6 +1111,26 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 			if updated.RowsAffected != 1 {
 				return ErrDialogueTurnConflict
 			}
+		}
+		var pendingScores []SourcingScoreInvocation
+		if err := tx.Where("finished_at IS NULL").Order("started_at, invocation_id").Find(&pendingScores).Error; err != nil {
+			return err
+		}
+		for i := range pendingScores {
+			invocation := pendingScores[i]
+			updated := tx.Model(&SourcingScoreInvocation{}).
+				Where("invocation_id = ? AND finished_at IS NULL", invocation.InvocationID).
+				Updates(map[string]any{
+					"status": AIInvocationTransportFailed, "score": nil,
+					"error_class": "processInterrupted", "finished_at": at,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected == 0 {
+				continue
+			}
+			recovered++
 		}
 		return nil
 	})

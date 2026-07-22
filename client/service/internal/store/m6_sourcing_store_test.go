@@ -111,32 +111,9 @@ func TestCompleteSourcingCandidateRunPersistsProofBoundFactAndSafeStatus(t *test
 	if err != nil || len(refs) != 1 || refs[0] != data.PlatformUserRef {
 		t.Fatalf("脑内排除列表错误: refs=%+v err=%v", refs, err)
 	}
-	startedAt := time.Now()
-	reservation, err := s.ReserveSourcingScore(ReserveSourcingScoreRequest{
-		InvocationID: "score-safe-status", RunID: run.RunID,
-		ContextRevisionHash: run.ContextRevisionHash, RunContentHash: run.ContentHash,
-		Provider: "fixture-provider", Model: "fixture-model", InputHash: "fixture-input-hash",
-		StartedAt: startedAt,
-	})
-	if err != nil || reservation == nil || !reservation.Created {
-		t.Fatalf("评分预留失败: reservation=%+v err=%v", reservation, err)
-	}
-	zero := 0
-	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
-		Completion: AIInvocationCompletion{
-			InvocationID: reservation.Invocation.InvocationID, Status: AIInvocationOK,
-			OutputHash: "fixture-output-hash", InputTokens: 4, OutputTokens: 2,
-			ReasoningTokens: &zero, UsageShape: AIInvocationUsageComplete,
-			ReasoningContentEmpty: true, EstimatedCostMicros: 1, FinishedAt: startedAt.Add(time.Second),
-		},
-		Score: scorePointer(8),
-	}); err != nil {
-		t.Fatal(err)
-	}
 	status, err := s.AccountSourcingStatus(key)
 	if err != nil || status == nil || status.CaptureCount != 1 || status.Latest == nil ||
-		status.Latest.ContentHash != run.ContentHash || status.Latest.Score == nil ||
-		status.Latest.Score.Score == nil || *status.Latest.Score.Score != 8 {
+		status.Latest.ContentHash != run.ContentHash || status.Latest.Score != nil {
 		t.Fatalf("安全状态投影错误: status=%+v err=%v", status, err)
 	}
 	statusRaw, _ := json.Marshal(status)

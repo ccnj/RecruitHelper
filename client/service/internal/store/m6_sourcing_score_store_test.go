@@ -6,25 +6,74 @@ import (
 	"time"
 )
 
-func seedSourcingScoreRun(t *testing.T, s *Store, runID string, key AccountKey, revisionHash string, capturedAt time.Time) SourcingCandidateRun {
+func ensureSourcingScoreRevision(t *testing.T, s *Store, revisionHash string, at time.Time) {
 	t.Helper()
-	run := SourcingCandidateRun{
-		RunID: runID, Platform: key.Platform, AccountRef: key.AccountRef,
-		ContextRevisionHash: revisionHash, PlatformUserRef: "user-" + runID,
-		PositionRef: "position-" + runID, ContactState: "unestablished",
-		SourceLogicalDispatchID: "logical-" + runID, ObservedAt: capturedAt.UnixMilli(),
-		CapturedAt: capturedAt, SchemaVersion: 1, ContentHash: "content-" + runID,
-		ResumeJSON: `{"basic":[],"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`,
-	}
-	if err := s.db.Create(&run).Error; err != nil {
+	existing, err := s.JobAIContextRevisionByHash(revisionHash)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return run
+	if existing != nil {
+		return
+	}
+	if _, _, err := s.SaveJobAIContextRevision(contextRevisionFixture(
+		"context-"+revisionHash, revisionHash, at.Add(-time.Hour),
+	)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedCompletedSourcingScoreBatch(
+	t *testing.T,
+	s *Store,
+	batchID string,
+	key AccountKey,
+	revisionHash string,
+	runIDs []string,
+	capturedAt time.Time,
+) []SourcingCandidateRun {
+	t.Helper()
+	ensureSourcingScoreRevision(t, s, revisionHash, capturedAt)
+	endedAt := capturedAt.Add(time.Duration(len(runIDs)+1) * time.Minute)
+	if err := s.db.Create(&SourcingBatch{
+		BatchID: batchID, Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: len(runIDs),
+		Status: SourcingBatchCompleted, StartedAt: capturedAt.Add(-time.Minute), EndedAt: &endedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	runs := make([]SourcingCandidateRun, len(runIDs))
+	for index, runID := range runIDs {
+		memberBatchID := batchID
+		runAt := capturedAt.Add(time.Duration(index) * time.Minute)
+		runs[index] = SourcingCandidateRun{
+			RunID: runID, BatchID: &memberBatchID, Platform: key.Platform, AccountRef: key.AccountRef,
+			ContextRevisionHash: revisionHash, PlatformUserRef: "user-" + runID,
+			PositionRef: "position-" + batchID, ContactState: "unestablished",
+			SourceLogicalDispatchID: "logical-" + runID, ObservedAt: runAt.UnixMilli(),
+			CapturedAt: runAt, SchemaVersion: 1, ContentHash: "content-" + runID,
+			ResumeJSON: `{"basic":[],"expectations":[],"selfEvaluation":"","education":"","workExperiences":""}`,
+		}
+		if err := s.db.Create(&runs[index]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	return runs
+}
+
+func seedSourcingScoreRun(t *testing.T, s *Store, runID string, key AccountKey, revisionHash string, capturedAt time.Time) SourcingCandidateRun {
+	t.Helper()
+	return seedCompletedSourcingScoreBatch(
+		t, s, "batch-"+runID, key, revisionHash, []string{runID}, capturedAt,
+	)[0]
 }
 
 func sourcingScoreReservation(run SourcingCandidateRun, invocationID string, startedAt time.Time) ReserveSourcingScoreRequest {
+	batchID := ""
+	if run.BatchID != nil {
+		batchID = *run.BatchID
+	}
 	return ReserveSourcingScoreRequest{
-		InvocationID: invocationID, RunID: run.RunID,
+		InvocationID: invocationID, BatchID: batchID, RunID: run.RunID,
 		ContextRevisionHash: run.ContextRevisionHash, RunContentHash: run.ContentHash,
 		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-" + run.RunID,
 		StartedAt: startedAt,
@@ -33,23 +82,54 @@ func sourcingScoreReservation(run SourcingCandidateRun, invocationID string, sta
 
 func scorePointer(value int) *int { return &value }
 
-func TestNextSourcingRunWithoutScoreAndReservationAreAtMostOnce(t *testing.T) {
+func TestNextSourcingBatchRunWithoutScoreUsesOnlyCompletedTargetBatch(t *testing.T) {
 	s := openTest(t)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-next"}
 	revisionHash := "revision-score-next"
 	base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	first := seedSourcingScoreRun(t, s, "run-score-first", key, revisionHash, base)
-	second := seedSourcingScoreRun(t, s, "run-score-second", key, revisionHash, base.Add(time.Minute))
-	seedSourcingScoreRun(t, s, "run-other-revision", key, "revision-other", base.Add(-time.Hour))
-
-	next, err := s.NextSourcingRunWithoutScore(key, revisionHash)
-	if err != nil || next == nil || next.RunID != first.RunID {
-		t.Fatalf("LEFT JOIN 未返回最早无 invocation run: next=%+v err=%v", next, err)
+	target := seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-target", key, revisionHash,
+		[]string{"run-score-first", "run-score-second"}, base,
+	)
+	seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-other", key, revisionHash, []string{"run-score-other-batch"}, base.Add(-time.Hour),
+	)
+	legacy := SourcingCandidateRun{
+		RunID: "run-score-legacy", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, PlatformUserRef: "user-score-legacy",
+		PositionRef: "position-score-legacy", ContactState: "unestablished",
+		SourceLogicalDispatchID: "logical-score-legacy", ObservedAt: base.Add(-2 * time.Hour).UnixMilli(),
+		CapturedAt: base.Add(-2 * time.Hour), SchemaVersion: 1, ContentHash: "content-score-legacy", ResumeJSON: "{}",
 	}
-	request := sourcingScoreReservation(first, "score-invocation-first", base.Add(2*time.Minute))
+	if err := s.db.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	openBatchID := "batch-score-open"
+	if err := s.db.Create(&SourcingBatch{
+		BatchID: openBatchID, Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: 1,
+		Status: SourcingBatchCollecting, StartedAt: base,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	openRun := SourcingCandidateRun{
+		RunID: "run-score-open", BatchID: &openBatchID, Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, PlatformUserRef: "user-score-open",
+		PositionRef: "position-score-open", ContactState: "unestablished",
+		SourceLogicalDispatchID: "logical-score-open", ObservedAt: base.UnixMilli(), CapturedAt: base,
+		SchemaVersion: 1, ContentHash: "content-score-open", ResumeJSON: "{}",
+	}
+	if err := s.db.Create(&openRun).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := s.NextSourcingBatchRunWithoutScore("batch-score-target")
+	if err != nil || next == nil || next.RunID != target[0].RunID {
+		t.Fatalf("未返回目标批次最早成员: next=%+v err=%v", next, err)
+	}
+	request := sourcingScoreReservation(target[0], "score-invocation-first", base.Add(2*time.Minute))
 	reserved, err := s.ReserveSourcingScore(request)
-	if err != nil || reserved == nil || !reserved.Created || reserved.Invocation.FinishedAt != nil ||
-		reserved.Invocation.Status != AIInvocationTransportFailed {
+	if err != nil || reserved == nil || !reserved.Created || reserved.Invocation.FinishedAt != nil {
 		t.Fatalf("首次评分预留失败: result=%+v err=%v", reserved, err)
 	}
 	replay := request
@@ -58,25 +138,69 @@ func TestNextSourcingRunWithoutScoreAndReservationAreAtMostOnce(t *testing.T) {
 	if err != nil || replayed == nil || replayed.Created || replayed.Invocation.InvocationID != request.InvocationID {
 		t.Fatalf("同 RunID 重复预留未复用原事实: result=%+v err=%v", replayed, err)
 	}
-	var count int64
-	if err := s.db.Model(&SourcingScoreInvocation{}).Count(&count).Error; err != nil || count != 1 {
-		t.Fatalf("重复预留增生 invocation: count=%d err=%v", count, err)
+	next, err = s.NextSourcingBatchRunWithoutScore("batch-score-target")
+	if err != nil || next == nil || next.RunID != target[1].RunID {
+		t.Fatalf("目标批次第二成员读取错误: next=%+v err=%v", next, err)
 	}
-	next, err = s.NextSourcingRunWithoutScore(key, revisionHash)
-	if err != nil || next == nil || next.RunID != second.RunID {
-		t.Fatalf("已有任意 invocation 的 run 必须被 LEFT JOIN 排除: next=%+v err=%v", next, err)
+	if next, err := s.NextSourcingBatchRunWithoutScore(openBatchID); next != nil || !errors.Is(err, ErrSourcingBatchStateConflict) {
+		t.Fatalf("未完成批次不得评分: next=%+v err=%v", next, err)
 	}
 }
 
-func TestReserveSourcingScoreRechecksFrozenRunMaterial(t *testing.T) {
+func TestSourcingBatchScoreScopeRequiresExactTargetMembers(t *testing.T) {
 	s := openTest(t)
+	base := time.Date(2026, 7, 22, 10, 30, 0, 0, time.UTC)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-count"}
+	ensureSourcingScoreRevision(t, s, "revision-score-count", base)
+	endedAt := base.Add(time.Minute)
+	if err := s.db.Create(&SourcingBatch{
+		BatchID: "batch-score-count", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: "revision-score-count", TargetCount: 2,
+		Status: SourcingBatchCompleted, StartedAt: base.Add(-time.Minute), EndedAt: &endedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	batchID := "batch-score-count"
+	run := SourcingCandidateRun{
+		RunID: "run-score-count", BatchID: &batchID, Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: "revision-score-count", PlatformUserRef: "user-score-count",
+		PositionRef: "position-score-count", ContactState: "unestablished",
+		SourceLogicalDispatchID: "logical-score-count", ObservedAt: base.UnixMilli(), CapturedAt: base,
+		SchemaVersion: 1, ContentHash: "content-score-count", ResumeJSON: "{}",
+	}
+	if err := s.db.Create(&run).Error; err != nil {
+		t.Fatal(err)
+	}
+	if next, err := s.NextSourcingBatchRunWithoutScore(batchID); next != nil || !errors.Is(err, ErrSourcingBatchConflict) {
+		t.Fatalf("成员数不足不得进入评分: next=%+v err=%v", next, err)
+	}
+	if progress, err := s.SourcingBatchScoringProgress(batchID); progress != nil || !errors.Is(err, ErrSourcingBatchConflict) {
+		t.Fatalf("成员数不足不得伪造进度: progress=%+v err=%v", progress, err)
+	}
+}
+
+func TestReserveSourcingScoreRechecksBatchRevisionAndRunMaterial(t *testing.T) {
+	s := openTest(t)
+	base := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-binding"}
-	run := seedSourcingScoreRun(t, s, "run-score-binding", key, "revision-score-binding", time.Now())
-	request := sourcingScoreReservation(run, "score-invocation-binding", time.Now())
+	run := seedSourcingScoreRun(t, s, "run-score-binding", key, "revision-score-binding", base)
+	other := seedSourcingScoreRun(t, s, "run-score-binding-other", key, "revision-score-binding", base.Add(time.Minute))
+	request := sourcingScoreReservation(run, "score-invocation-binding", base.Add(2*time.Minute))
+
+	wrongBatch := request
+	wrongBatch.BatchID = *other.BatchID
+	if result, err := s.ReserveSourcingScore(wrongBatch); result != nil || !errors.Is(err, ErrSourcingBinding) {
+		t.Fatalf("跨批次 run 未拒绝: result=%+v err=%v", result, err)
+	}
+	wrongRevision := request
+	wrongRevision.ContextRevisionHash = "different-revision"
+	if result, err := s.ReserveSourcingScore(wrongRevision); result != nil || !errors.Is(err, ErrSourcingBinding) {
+		t.Fatalf("调用方覆盖批次 revision 未拒绝: result=%+v err=%v", result, err)
+	}
 	wrongContent := request
 	wrongContent.RunContentHash = "different-content"
 	if result, err := s.ReserveSourcingScore(wrongContent); result != nil || !errors.Is(err, ErrSourcingBinding) {
-		t.Fatalf("content hash 变化未在事务内拒绝: result=%+v err=%v", result, err)
+		t.Fatalf("content hash 变化未拒绝: result=%+v err=%v", result, err)
 	}
 	if _, err := s.ReserveSourcingScore(request); err != nil {
 		t.Fatal(err)
@@ -88,10 +212,118 @@ func TestReserveSourcingScoreRechecksFrozenRunMaterial(t *testing.T) {
 	}
 }
 
+func TestSourcingBatchScoringProgressAndProviderModelFreeze(t *testing.T) {
+	s := openTest(t)
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-progress"}
+	runs := seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-progress", key, "revision-score-progress",
+		[]string{"run-score-progress-a", "run-score-progress-b", "run-score-progress-c"}, base,
+	)
+	progress, err := s.SourcingBatchScoringProgress("batch-score-progress")
+	if err != nil || progress.PendingCount != 3 || progress.Completed || progress.Provider != "" || progress.Model != "" {
+		t.Fatalf("初始进度错误: progress=%+v err=%v", progress, err)
+	}
+
+	first := sourcingScoreReservation(runs[0], "invocation-progress-a", base.Add(3*time.Minute))
+	if _, err := s.ReserveSourcingScore(first); err != nil {
+		t.Fatal(err)
+	}
+	progress, err = s.SourcingBatchScoringProgress("batch-score-progress")
+	if err != nil || progress.InFlightCount != 1 || progress.PendingCount != 2 ||
+		progress.Provider != first.Provider || progress.Model != first.Model || progress.Completed {
+		t.Fatalf("预留后的进度错误: progress=%+v err=%v", progress, err)
+	}
+
+	mixed := sourcingScoreReservation(runs[1], "invocation-progress-b", base.Add(4*time.Minute))
+	mixed.Model = "other-model"
+	if result, err := s.ReserveSourcingScore(mixed); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("批内 provider/model 混用未拒绝: result=%+v err=%v", result, err)
+	}
+	zero := 0
+	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
+		Completion: AIInvocationCompletion{
+			InvocationID: first.InvocationID, Status: AIInvocationOK, OutputHash: "output-progress-a",
+			InputTokens: 2, OutputTokens: 1, ReasoningTokens: &zero,
+			UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
+			FinishedAt: base.Add(5 * time.Minute),
+		},
+		Score: scorePointer(8),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := sourcingScoreReservation(runs[1], "invocation-progress-b", base.Add(6*time.Minute))
+	if _, err := s.ReserveSourcingScore(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{Completion: AIInvocationCompletion{
+		InvocationID: second.InvocationID, Status: AIInvocationProviderRejected,
+		ErrorClass: "providerRejected", FinishedAt: base.Add(7 * time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	third := sourcingScoreReservation(runs[2], "invocation-progress-c", base.Add(8*time.Minute))
+	if _, err := s.ReserveSourcingScore(third); err != nil {
+		t.Fatal(err)
+	}
+	progress, err = s.SourcingBatchScoringProgress("batch-score-progress")
+	if err != nil || progress.TargetCount != 3 || progress.OKCount != 1 || progress.FailedCount != 1 ||
+		progress.InFlightCount != 1 || progress.PendingCount != 0 || progress.Completed {
+		t.Fatalf("混合终局进度错误: progress=%+v err=%v", progress, err)
+	}
+
+	recovered, err := s.RecoverInterruptedAIInvocations(base.Add(9 * time.Minute))
+	if err != nil || recovered != 1 {
+		t.Fatalf("评分中断收敛失败: recovered=%d err=%v", recovered, err)
+	}
+	progress, err = s.SourcingBatchScoringProgress("batch-score-progress")
+	if err != nil || progress.OKCount != 1 || progress.FailedCount != 2 || progress.InFlightCount != 0 ||
+		progress.PendingCount != 0 || !progress.Completed {
+		t.Fatalf("中断终局后的完成进度错误: progress=%+v err=%v", progress, err)
+	}
+	stored, err := s.SourcingScoreByRunID(runs[2].RunID)
+	if err != nil || stored == nil || stored.FinishedAt == nil ||
+		stored.Status != AIInvocationTransportFailed || stored.ErrorClass != "processInterrupted" || stored.Score != nil {
+		t.Fatalf("中断评分未形成明确失败: invocation=%+v err=%v", stored, err)
+	}
+	if next, err := s.NextSourcingBatchRunWithoutScore("batch-score-progress"); err != nil || next != nil {
+		t.Fatalf("中断评分被错误重新授权: next=%+v err=%v", next, err)
+	}
+}
+
+func TestSourcingBatchScoringProgressRejectsPersistedProviderMix(t *testing.T) {
+	s := openTest(t)
+	base := time.Date(2026, 7, 22, 13, 0, 0, 0, time.UTC)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-mixed"}
+	runs := seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-mixed", key, "revision-score-mixed",
+		[]string{"run-score-mixed-a", "run-score-mixed-b", "run-score-mixed-c"}, base,
+	)
+	first := sourcingScoreReservation(runs[0], "invocation-mixed-a", base.Add(2*time.Minute))
+	if _, err := s.ReserveSourcingScore(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&SourcingScoreInvocation{
+		InvocationID: "invocation-mixed-b", RunID: runs[1].RunID,
+		ContextRevisionHash: runs[1].ContextRevisionHash, RunContentHash: runs[1].ContentHash,
+		Provider: "other-provider", Model: "other-model", InputHash: "input-mixed-b",
+		Status: AIInvocationTransportFailed, StartedAt: base.Add(3 * time.Minute),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	third := sourcingScoreReservation(runs[2], "invocation-mixed-c", base.Add(4*time.Minute))
+	if result, err := s.ReserveSourcingScore(third); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("已有混用事实时不得继续授权 provider: result=%+v err=%v", result, err)
+	}
+	if progress, err := s.SourcingBatchScoringProgress("batch-score-mixed"); progress != nil || !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("持久 provider/model 混用未响亮冲突: progress=%+v err=%v", progress, err)
+	}
+}
+
 func TestCompleteSourcingScoreCASValidationAndIdempotency(t *testing.T) {
 	s := openTest(t)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-complete"}
-	base := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	base := time.Date(2026, 7, 22, 14, 0, 0, 0, time.UTC)
 	run := seedSourcingScoreRun(t, s, "run-score-complete", key, "revision-score-complete", base)
 	reservation := sourcingScoreReservation(run, "score-invocation-complete", base.Add(time.Minute))
 	if _, err := s.ReserveSourcingScore(reservation); err != nil {
