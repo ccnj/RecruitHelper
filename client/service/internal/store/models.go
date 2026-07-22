@@ -600,6 +600,37 @@ type SourcingScoreInvocation struct {
 	FinishedAt          *time.Time
 }
 
+// SourcingGreetingInvocation 是正式筛选批次中一位 selected 成员的一次且
+// 仅一次招呼语生成调用事实。BatchID/RunID/ProfileID 三重绑定防止跨批
+// 复用；调用前预留沿用 transportFailed+FinishedAt=NULL 表示 inFlight，
+// 且只有 ok 终局允许保存 GreetingText/ContentHash 业务正文事实。
+type SourcingGreetingInvocation struct {
+	InvocationID        string `gorm:"primaryKey"`
+	BatchID             string `gorm:"not null;index"`
+	RunID               string `gorm:"not null;uniqueIndex"`
+	ProfileID           string `gorm:"not null;uniqueIndex"`
+	ContextRevisionHash string `gorm:"not null;index"`
+	RunContentHash      string `gorm:"not null"`
+	Provider            string `gorm:"not null"`
+	Model               string `gorm:"not null"`
+	InputHash           string `gorm:"not null"`
+
+	Status              AIInvocationStatus `gorm:"not null;index"`
+	GreetingText        string
+	ContentHash         string
+	OutputHash          string
+	InputTokens         int
+	CachedInputTokens   int
+	OutputTokens        int
+	ReasoningTokens     *int
+	UsageShape          AIInvocationUsageShape
+	LatencyMs           int64
+	ErrorClass          string
+	EstimatedCostMicros int64
+	StartedAt           time.Time `gorm:"not null"`
+	FinishedAt          *time.Time
+}
+
 type SourcingSelectionOutcome string
 
 const (

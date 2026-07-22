@@ -1034,8 +1034,8 @@ func sameOptionalInt(left, right *int) bool {
 
 // RecoverInterruptedAIInvocations 收敛崩溃前已预留但未完成的调用。它只写
 // processInterrupted 终局，绝不再次触碰 provider：intent 落一次 neutral
-// fallback，reply 转人工并释放试运行 active slot；采集评分只形成明确失败，
-// 之后统一评分继续尚无预留的批次成员。
+// fallback，reply 转人工并释放试运行 active slot；采集评分与批量招呼语
+// 生成只形成明确失败，之后只继续尚无预留的成员。
 func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 	if at.IsZero() {
 		at = time.Now()
@@ -1122,6 +1122,30 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 				Where("invocation_id = ? AND finished_at IS NULL", invocation.InvocationID).
 				Updates(map[string]any{
 					"status": AIInvocationTransportFailed, "score": nil,
+					"error_class": "processInterrupted", "finished_at": at,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected == 0 {
+				continue
+			}
+			recovered++
+		}
+		var pendingGreetings []SourcingGreetingInvocation
+		if err := tx.Where("finished_at IS NULL").Order("started_at, invocation_id").Find(&pendingGreetings).Error; err != nil {
+			return err
+		}
+		for i := range pendingGreetings {
+			invocation := pendingGreetings[i]
+			if invocation.Status != AIInvocationTransportFailed || invocation.GreetingText != "" || invocation.ContentHash != "" {
+				return ErrAIInvocationConflict
+			}
+			updated := tx.Model(&SourcingGreetingInvocation{}).
+				Where("invocation_id = ? AND finished_at IS NULL AND status = ?",
+					invocation.InvocationID, AIInvocationTransportFailed).
+				Updates(map[string]any{
+					"status": AIInvocationTransportFailed, "greeting_text": "", "content_hash": "",
 					"error_class": "processInterrupted", "finished_at": at,
 				})
 			if updated.Error != nil {

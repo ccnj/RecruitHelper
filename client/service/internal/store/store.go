@@ -73,6 +73,7 @@ func Open(dataDir string) (*Store, error) {
 		&DialogueTurn{},
 		&AIInvocation{},
 		&SourcingScoreInvocation{},
+		&SourcingGreetingInvocation{},
 		&SourcingBatchSelection{},
 		&SourcingSelectionDecision{},
 		&CommunicationAction{},
