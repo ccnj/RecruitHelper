@@ -2231,7 +2231,7 @@ test('candidate.readSourcingResume MAIN 对身份、详情绑定与必需分区�
   }
 })
 
-test('candidate.readSourcingResume outer 只使用最近聚焦窗口活动页并前后复核账号', async () => {
+test('candidate.readSourcingResume outer 只使用全浏览器唯一推荐页并前后复核账号', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = 'c'.repeat(64)
   const tab = {
@@ -2295,9 +2295,9 @@ test('candidate.readSourcingResume outer 只使用最近聚焦窗口活动页并
     assert.equal(barrierCalls, 1)
     assert.equal(probeCalls, 3)
     assert.deepEqual(queryCalls, [
-      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
-      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
-      { active: true, lastFocusedWindow: true, url: 'https://rd6.zhaopin.com/*' },
+      { url: 'https://rd6.zhaopin.com/*' },
+      { url: 'https://rd6.zhaopin.com/*' },
+      { url: 'https://rd6.zhaopin.com/*' },
     ])
     assert.deepEqual(mainCalls, [
       'mainProbeZhilian', 'mainProbeZhilian', 'mainReadSourcingResume', 'mainProbeZhilian',

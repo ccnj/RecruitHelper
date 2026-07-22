@@ -2478,8 +2478,6 @@ function validSourcingResumeResult(value: unknown): value is MainSourcingResumeR
 
 async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
   return (await chrome.tabs.query({
-    active: true,
-    lastFocusedWindow: true,
     url: TAB_QUERY,
   })).filter((tab) => tab.id !== undefined && pageKindFromURL(tab.url) === 'recommend')
 }
@@ -2512,13 +2510,13 @@ export async function readZhilianSourcingResume(
   if (initialTabs.length === 0) {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '请把最近聚焦 Chrome 窗口的当前标签停在智联推荐页',
+      '请保留一个已就绪的智联推荐页标签',
       'afterRecovery',
       'pageAbsent',
     )
   }
   if (initialTabs.length !== 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前活动智联推荐页无法唯一确定', 'manualOnly')
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
   }
   const tab = initialTabs[0]
   if (tab.id === undefined || tab.status !== 'complete') {
@@ -2526,7 +2524,7 @@ export async function readZhilianSourcingResume(
   }
   const initialProbe = await probeTab(tab)
   if (initialProbe.pageKind !== 'recommend') {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '当前活动智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
   }
   assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
   ctx.progress('核对当前推荐页与登录身份', 10)
@@ -2535,7 +2533,7 @@ export async function readZhilianSourcingResume(
   const beforeActionTabs = await activeSourcingTabs()
   if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
       beforeActionTabs[0].status !== 'complete') {
-    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集动作前活动推荐页发生切换', 'manualOnly')
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集动作前推荐页标签发生切换', 'manualOnly')
   }
   assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
   // 打开/切换详情最坏会产生幂等已查看记录；intrusive 命令在第一次页面动作前
