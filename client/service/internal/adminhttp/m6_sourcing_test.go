@@ -54,7 +54,7 @@ func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
 	}
 }
 
-func TestSourcingStartAndStatusExposeOnlyOperationalMetadata(t *testing.T) {
+func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -85,15 +85,27 @@ func TestSourcingStartAndStatusExposeOnlyOperationalMetadata(t *testing.T) {
 	mux := http.NewServeMux()
 	api.Routes(mux)
 
-	start := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
+	missingTarget := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
 		`{"platform":"zhilian","accountRef":"account-sourcing-admin","contextRevisionHash":"revision-sourcing-admin"}`,
+	))
+	missingTarget.Header.Set("Content-Type", "application/json")
+	missingTargetResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingTargetResponse, missingTarget)
+	if missingTargetResponse.Code != http.StatusBadRequest {
+		t.Fatalf("缺少显式 targetCount 未拒绝: code=%d body=%s", missingTargetResponse.Code, missingTargetResponse.Body.String())
+	}
+
+	start := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
+		`{"platform":"zhilian","accountRef":"account-sourcing-admin","contextRevisionHash":"revision-sourcing-admin","targetCount":150}`,
 	))
 	start.Header.Set("Content-Type", "application/json")
 	startResponse := httptest.NewRecorder()
 	mux.ServeHTTP(startResponse, start)
-	if startResponse.Code != http.StatusOK || !strings.Contains(startResponse.Body.String(), `"enabled":true`) ||
-		!strings.Contains(startResponse.Body.String(), `"captureCount":0`) {
-		t.Fatalf("启动采集失败: code=%d body=%s", startResponse.Code, startResponse.Body.String())
+	startBody := startResponse.Body.String()
+	if startResponse.Code != http.StatusOK || !strings.Contains(startBody, `"status":"preparing"`) ||
+		!strings.Contains(startBody, `"targetCount":150`) || !strings.Contains(startBody, `"capturedCount":0`) ||
+		!strings.Contains(startBody, `"remainingCount":150`) || !strings.Contains(startBody, `"batchId":"sb-`) {
+		t.Fatalf("启动正式采集失败: code=%d body=%s", startResponse.Code, startBody)
 	}
 
 	status := httptest.NewRequest(http.MethodGet,
@@ -101,19 +113,36 @@ func TestSourcingStartAndStatusExposeOnlyOperationalMetadata(t *testing.T) {
 	statusResponse := httptest.NewRecorder()
 	mux.ServeHTTP(statusResponse, status)
 	if statusResponse.Code != http.StatusOK || !strings.Contains(statusResponse.Body.String(), revision.RevisionHash) {
-		t.Fatalf("读取采集状态失败: code=%d body=%s", statusResponse.Code, statusResponse.Body.String())
+		t.Fatalf("读取正式采集状态失败: code=%d body=%s", statusResponse.Code, statusResponse.Body.String())
 	}
 	for _, forbidden := range []string{
-		"admin-score-secret", "admin-greeting-secret", "admin-reply-secret",
-		"admin-intent-secret", "admin-facts-secret", "admin-position-secret",
+		"account-sourcing-admin", "principal-sourcing-admin", "admin-score-secret", "admin-greeting-secret",
+		"admin-reply-secret", "admin-intent-secret", "admin-facts-secret", "admin-position-secret",
+		`"enabled"`, `"latest"`, `"sourceLogicalDispatchId"`,
 	} {
-		if strings.Contains(startResponse.Body.String(), forbidden) || strings.Contains(statusResponse.Body.String(), forbidden) {
-			t.Fatalf("采集管理响应泄漏配置正文或职位明文 %q", forbidden)
+		if strings.Contains(startBody, forbidden) || strings.Contains(statusResponse.Body.String(), forbidden) {
+			t.Fatalf("采集管理响应泄漏旧状态、配置正文或身份 %q", forbidden)
 		}
 	}
 	account, err := st.AccountByKey(key)
-	if err != nil || account == nil || !account.SourcingEnabled ||
-		account.SourcingContextRevisionHash != revision.RevisionHash || account.EnabledAt == nil {
-		t.Fatalf("start 未持久化采集配置并开启 actor: account=%+v err=%v", account, err)
+	if err != nil || account == nil || account.EnabledAt == nil || account.SourcingEnabled ||
+		account.SourcingContextRevisionHash != "" || account.SourcingStartedAt != nil {
+		t.Fatalf("start 未开启 actor 或写入 legacy sourcing 双真相: account=%+v err=%v", account, err)
+	}
+
+	stop := httptest.NewRequest(http.MethodPost, "/admin/sourcing/stop", strings.NewReader(
+		`{"platform":"zhilian","accountRef":"account-sourcing-admin"}`,
+	))
+	stop.Header.Set("Content-Type", "application/json")
+	stopResponse := httptest.NewRecorder()
+	mux.ServeHTTP(stopResponse, stop)
+	stopBody := stopResponse.Body.String()
+	if stopResponse.Code != http.StatusOK || !strings.Contains(stopBody, `"status":"stopped"`) ||
+		!strings.Contains(stopBody, `"reason":"userStopped"`) || !strings.Contains(stopBody, `"endedAt"`) {
+		t.Fatalf("停止正式采集失败: code=%d body=%s", stopResponse.Code, stopBody)
+	}
+	account, err = st.AccountByKey(key)
+	if err != nil || account == nil || account.StoppedAt == nil || account.PausedReason != patrol.PauseUserStopped {
+		t.Fatalf("stop 未暂停账号 actor: account=%+v err=%v", account, err)
 	}
 }

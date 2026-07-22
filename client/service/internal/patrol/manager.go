@@ -146,6 +146,27 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targe
 	})
 }
 
+// StopSourcing 把当前正式批次写成显式终态，再停止账号调度。它不删除
+// 批次或成员；之后再次采集必须创建一个新批次。
+func (m *Manager) StopSourcing(key store.AccountKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	batch, err := m.store.ActiveSourcingBatch(key)
+	if err != nil {
+		return err
+	}
+	if batch == nil {
+		return store.ErrSourcingBatchNotFound
+	}
+	now := m.now()
+	if _, err := m.store.StopSourcingBatch(store.StopSourcingBatchRequest{
+		BatchID: batch.BatchID, Reason: PauseUserStopped, StoppedAt: now,
+	}); err != nil {
+		return err
+	}
+	return m.pauseAccount(key, PauseUserStopped, now)
+}
+
 func (m *Manager) enableAccountToday(account *store.Account, now time.Time) error {
 	if account.BoundHandID == "" || account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
 		return ErrAccountNotBound

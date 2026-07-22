@@ -101,6 +101,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/job-config/activate", h(a.activateJobConfigSource))
 	mux.HandleFunc("POST /admin/job-config/sync-current", h(a.syncCurrentJobConfig))
 	mux.HandleFunc("POST /admin/sourcing/start", h(a.startSourcing))
+	mux.HandleFunc("POST /admin/sourcing/stop", h(a.stopSourcing))
 	mux.HandleFunc("GET /admin/sourcing/status", h(a.sourcingStatus))
 	mux.HandleFunc("GET /admin/m5/context-binding", h(a.m5ContextBinding))
 	mux.HandleFunc("POST /admin/m5/context-binding", h(a.bindM5Context))
