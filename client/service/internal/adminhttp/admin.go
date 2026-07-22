@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/session"
@@ -18,13 +19,19 @@ import (
 )
 
 type API struct {
-	st             *store.Store
-	hub            AdminHub
-	disp           *dispatch.Dispatcher
-	actor          *patrol.Manager
-	probe          AccountProber
-	adminToken     string
-	providerConfig *m5ai.ProviderConfigStore
+	st              *store.Store
+	hub             AdminHub
+	disp            *dispatch.Dispatcher
+	actor           *patrol.Manager
+	probe           AccountProber
+	adminToken      string
+	providerConfig  *m5ai.ProviderConfigStore
+	jobConfigSource *jobconfig.Source
+}
+
+func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
+	a.jobConfigSource = source
+	return a
 }
 
 type AccountProber interface {
@@ -90,6 +97,9 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/m5/provider-config", h(a.saveM5ProviderConfig))
 	mux.HandleFunc("GET /admin/m5/contexts", h(a.m5Contexts))
 	mux.HandleFunc("POST /admin/m5/contexts/import", h(a.importM5Contexts))
+	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
+	mux.HandleFunc("POST /admin/job-config/source", h(a.saveJobConfigSourceConfig))
+	mux.HandleFunc("POST /admin/job-config/sync-current", h(a.syncCurrentJobConfig))
 	mux.HandleFunc("GET /admin/m5/context-binding", h(a.m5ContextBinding))
 	mux.HandleFunc("POST /admin/m5/context-binding", h(a.bindM5Context))
 	mux.HandleFunc("GET /admin/conversations", h(a.conversations))

@@ -87,6 +87,28 @@ func TestImportLegacyPluralImportsAllWithoutChoosingByTitle(t *testing.T) {
 	}
 }
 
+func TestBackendImportRecordsDistinctStableSourceKind(t *testing.T) {
+	bundle := syntheticLegacyBundle(t, 17, "合成职位")
+	raw, _ := json.Marshal(bundle)
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	local, err := ImportLegacyJobConfig(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := ImportLegacyJobConfigFromBackend(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat, err := ImportLegacyJobConfigFromBackend(raw, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote[0].SourceKind != "legacyJobConfig" || remote[0].ContextID == local[0].ContextID ||
+		remote[0].ContextID != repeat[0].ContextID || remote[0].RevisionHash != repeat[0].RevisionHash {
+		t.Fatalf("旧后台来源身份不稳定: local=%+v remote=%+v repeat=%+v", local[0], remote[0], repeat[0])
+	}
+}
+
 func TestImportLegacyJobConfigFailsClosedOnConflictsAndIncompleteDocuments(t *testing.T) {
 	t.Run("duplicate doc type", func(t *testing.T) {
 		raw := []byte(`{"job":{"id":1,"name":"职位","environment":"online"},"documents":{"多轮沟通":"一","多轮沟通":"二"}}`)

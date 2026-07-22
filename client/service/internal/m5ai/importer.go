@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-const sourceKindLocalImport = "localImport"
+const (
+	sourceKindLocalImport     = "localImport"
+	sourceKindLegacyJobConfig = "legacyJobConfig"
+)
 
 var ErrInvalidJobConfig = errors.New("职位 AI 配置整包无效")
 
@@ -98,6 +101,17 @@ type legacyPlural struct {
 // in a plural response; choosing which one applies to a profile remains a
 // separate explicit binding fact.
 func ImportLegacyJobConfig(raw []byte, now time.Time) ([]ContextRevision, error) {
+	return importLegacyJobConfig(raw, now, sourceKindLocalImport)
+}
+
+// ImportLegacyJobConfigFromBackend uses the same compatibility boundary as a
+// local import while preserving that the immutable material came directly
+// from the approved old-backend configuration plane.
+func ImportLegacyJobConfigFromBackend(raw []byte, now time.Time) ([]ContextRevision, error) {
+	return importLegacyJobConfig(raw, now, sourceKindLegacyJobConfig)
+}
+
+func importLegacyJobConfig(raw []byte, now time.Time, sourceKind string) ([]ContextRevision, error) {
 	if now.IsZero() {
 		return nil, fmt.Errorf("%w: 缺少导入时刻", ErrInvalidJobConfig)
 	}
@@ -116,7 +130,7 @@ func ImportLegacyJobConfig(raw []byte, now time.Time) ([]ContextRevision, error)
 		out := make([]ContextRevision, 0, len(payload.Jobs))
 		seen := make(map[string]struct{}, len(payload.Jobs))
 		for i := range payload.Jobs {
-			revision, err := importBundle(payload.Jobs[i], now)
+			revision, err := importBundle(payload.Jobs[i], now, sourceKind)
 			if err != nil {
 				return nil, fmt.Errorf("%w: jobs[%d]: %v", ErrInvalidJobConfig, i, err)
 			}
@@ -132,7 +146,7 @@ func ImportLegacyJobConfig(raw []byte, now time.Time) ([]ContextRevision, error)
 	if err := decodeUseNumber(raw, &payload); err != nil {
 		return nil, fmt.Errorf("%w: 单职位整包无效: %v", ErrInvalidJobConfig, err)
 	}
-	revision, err := importBundle(payload, now)
+	revision, err := importBundle(payload, now, sourceKind)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidJobConfig, err)
 	}
@@ -151,7 +165,7 @@ func decodeUseNumber(raw []byte, target any) error {
 	return nil
 }
 
-func importBundle(bundle legacyJobBundle, now time.Time) (ContextRevision, error) {
+func importBundle(bundle legacyJobBundle, now time.Time, sourceKind string) (ContextRevision, error) {
 	if bundle.Job == nil || bundle.Job.ID.String() == "" || strings.TrimSpace(bundle.Job.Name) == "" {
 		return ContextRevision{}, errors.New("缺少 job id/name")
 	}
@@ -189,7 +203,7 @@ func importBundle(bundle legacyJobBundle, now time.Time) (ContextRevision, error
 	}
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	sourceJobRef := bundle.Job.ID.String()
-	contextSeed := sha256.Sum256([]byte(sourceKindLocalImport + "\x00" + sourceJobRef))
+	contextSeed := sha256.Sum256([]byte(sourceKind + "\x00" + sourceJobRef))
 	contextID := "ctx-" + hex.EncodeToString(contextSeed[:12])
 	canonical := struct {
 		ContextID      string                   `json:"contextId"`
@@ -200,7 +214,7 @@ func importBundle(bundle legacyJobBundle, now time.Time) (ContextRevision, error
 		MappingVersion string                   `json:"mappingVersion"`
 		SourcePackage  JobConfigDocumentPackage `json:"sourcePackage"`
 	}{
-		ContextID: contextID, SourceKind: sourceKindLocalImport, SourceJobRef: sourceJobRef,
+		ContextID: contextID, SourceKind: sourceKind, SourceJobRef: sourceJobRef,
 		DisplayName: bundle.Job.Name, Environment: bundle.Job.Environment, MappingVersion: MappingVersion,
 		SourcePackage: JobConfigDocumentPackage{Documents: documents},
 	}
@@ -211,7 +225,7 @@ func importBundle(bundle legacyJobBundle, now time.Time) (ContextRevision, error
 	revisionDigest := sha256.Sum256(canonicalRaw)
 	return ContextRevision{
 		ContextID: contextID, RevisionHash: hex.EncodeToString(revisionDigest[:]),
-		SourceKind: sourceKindLocalImport, SourceJobRef: sourceJobRef,
+		SourceKind: sourceKind, SourceJobRef: sourceJobRef,
 		DisplayName: bundle.Job.Name, Environment: bundle.Job.Environment,
 		SourcePackage: canonical.SourcePackage,
 		Communication: CommunicationView{

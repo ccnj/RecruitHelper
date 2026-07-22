@@ -18,6 +18,7 @@ import (
 	"recruithelper/client/service/internal/adminhttp"
 	"recruithelper/client/service/internal/appbridge"
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/session"
@@ -48,6 +49,12 @@ func main() {
 		slog.Error("本地模型配置初始化失败", "err", err)
 		os.Exit(1)
 	}
+	jobConfigStore, err := jobconfig.NewConfigStore(*dataDir)
+	if err != nil {
+		slog.Error("旧后台职位配置源初始化失败", "err", err)
+		os.Exit(1)
+	}
+	jobConfigSource := jobconfig.NewSource(jobConfigStore, nil)
 	var advice patrol.AdviceExecutor
 	if configured, loadErr := providerConfig.Load(); loadErr != nil {
 		slog.Warn("本地模型配置不可用，M5 建议层保持停用", "err", loadErr)
@@ -122,7 +129,8 @@ func main() {
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
-	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).Routes(mux)
+	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
+		SetJobConfigSource(jobConfigSource).Routes(mux)
 
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", *port), Handler: mux}
 	go func() {
