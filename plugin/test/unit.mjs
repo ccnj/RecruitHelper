@@ -2729,6 +2729,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     finalClicks: 0,
     barriers: 0,
     createdIMTabs: 0,
+    removedIMTabs: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -2737,6 +2738,9 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     status: 'complete',
     url: `https://rd6.zhaopin.com/app/recommend?resumeNumber=private-${index}&jobNumber=private`,
   }))
+  if (options.existingIM) tabs.push({
+    id: 780, active: false, status: 'complete', url: 'https://rd6.zhaopin.com/app/im',
+  })
   const currentData = (tabId) => ({
     platformUserRef: options.currentUser ?? refs.user,
     displayName: '合成候选人',
@@ -2769,13 +2773,16 @@ function installM4GreetingOrchestrationFixture(options = {}) {
         return { ...tab }
       },
       async create({ url, active }) {
-        const tab = { id: 799, active, status: 'complete', url }
+        const tab = { id: 799 + state.createdIMTabs, active, status: 'complete', url }
         tabs.push(tab)
         state.createdIMTabs += 1
         return { ...tab }
       },
-      async reload(id) {
-        if (!tabs.some((candidate) => candidate.id === id)) throw new Error('fixture-tab-absent')
+      async remove(id) {
+        const index = tabs.findIndex((candidate) => candidate.id === id)
+        if (index < 0) throw new Error('fixture-tab-absent')
+        tabs.splice(index, 1)
+        state.removedIMTabs += 1
       },
       async sendMessage() { return { ok: true } },
     },
@@ -3203,9 +3210,12 @@ test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系�
 test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招呼动作', async () => {
   for (const scenario of [
     { label: '正证不足', proofMode: 'negative', confirmed: false, proofCalls: 1 },
-    { label: '稳定正证', proofMode: 'positive', confirmed: true, proofCalls: 2 },
+    { label: '稳定正证', proofMode: 'positive', confirmed: true, proofCalls: 2, existingIM: true },
   ]) {
-    const fixture = installM4GreetingOrchestrationFixture({ proofMode: scenario.proofMode })
+    const fixture = installM4GreetingOrchestrationFixture({
+      proofMode: scenario.proofMode,
+      existingIM: scenario.existingIM,
+    })
     try {
       const result = await readZhilianGreetingOutcome(
         {
@@ -3218,7 +3228,8 @@ test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招
       )
       assert.equal(result.confirmed, scenario.confirmed, scenario.label)
       assert.equal(fixture.state.proofCalls, scenario.proofCalls, scenario.label)
-      assert.equal(fixture.state.createdIMTabs, 1, `${scenario.label}: 无 IM 时只新建一个后台感知页`)
+      assert.equal(fixture.state.createdIMTabs, 1, `${scenario.label}: 每轮只新建一个后台感知页`)
+      assert.equal(fixture.state.removedIMTabs, 1, `${scenario.label}: 验证后关闭自己的后台感知页`)
       assert.deepEqual(fixture.state.proofTabKinds, Array(scenario.proofCalls).fill('im'),
         `${scenario.label}: 正证只在 IM 感知面读取`)
       assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 验证读不得触发招呼动作`)
