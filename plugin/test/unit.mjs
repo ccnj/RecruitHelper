@@ -54,6 +54,8 @@ const {
   readZhilianThread,
   readZhilianCurrentCandidate,
   readZhilianSourcingResume,
+  readZhilianSourcingTargetResume,
+  readZhilianSourcingWindow,
   readZhilianGreetingOutcome,
   refreshPagesAfterRuntimeReload,
   sendZhilianGreeting,
@@ -2162,6 +2164,224 @@ function installM6SourcingFixture(options = {}) {
   }
 }
 
+function installM6SourcingWindowFixture(options = {}) {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+  }
+  const refs = {
+    job: 'fixture-job-window',
+    firstWindow: ['fixture-window-user-1', 'fixture-window-user-2'],
+    secondWindow: ['fixture-window-user-3', 'fixture-window-user-4'],
+  }
+  const node = (text = '') => ({
+    textContent: text,
+    innerText: text,
+    parentElement: null,
+    getClientRects: () => [{}],
+    querySelectorAll() { return [] },
+  })
+  const body = node()
+  const root = { _route: { query: { jobNumber: refs.job } } }
+  const store = {
+    state: { talent: { activeJob: { jobNumber: refs.job, jobTitle: '合成窗口职位' } } },
+  }
+  const state = {
+    index: options.startAt === 'first' ? 0 : 1,
+    visibleTitles: ['合成窗口职位'],
+  }
+  const scroller = {
+    ...node(),
+    parentElement: body,
+    scrollTop: state.index * 100,
+    clientHeight: 100,
+    scrollHeight: 200,
+    scrollTo({ top }) {
+      this.scrollTop = Number(top)
+      state.index = this.scrollTop <= 0 ? 0 : 1
+    },
+    dispatchEvent() {},
+  }
+  const makeItem = (platformUserRef, index) => {
+    const item = node(`绝不返回姓名${index}`)
+    item.parentElement = options.documentRoot === true ? body : scroller
+    item.__vue__ = {
+      _props: {
+        source: {
+          userMasterId: platformUserRef,
+          resumeNumber: `绝不返回-resumeNumber-${index}`,
+        },
+      },
+      $root: root,
+      $store: store,
+    }
+    return item
+  }
+  const windows = [
+    refs.firstWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 1)),
+    refs.secondWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 3)),
+  ]
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
+  }
+  globalThis.getComputedStyle = (element) => ({
+    display: 'block',
+    visibility: 'visible',
+    overflow: element === scroller && options.documentRoot !== true ? 'auto' : 'visible',
+    overflowY: element === scroller && options.documentRoot !== true ? 'auto' : 'visible',
+  })
+  globalThis.document = {
+    body,
+    scrollingElement: options.documentRoot === true ? scroller : null,
+    querySelectorAll(selector) {
+      if (selector === '.recommend-list__left div[role="listitem"]') return windows[state.index]
+      if (selector === '.job-pane__item--active .job-pane__item-job-title') {
+        return state.visibleTitles.map((title) => node(title))
+      }
+      return []
+    },
+  }
+  return {
+    refs,
+    state,
+    scroller,
+    windows,
+    store,
+    root,
+    removeFirstIdentity() { delete windows[state.index][0].__vue__._props.source.userMasterId },
+    duplicateIdentity() {
+      windows[state.index][1].__vue__._props.source.userMasterId =
+        windows[state.index][0].__vue__._props.source.userMasterId
+    },
+    restore() {
+      globalThis.document = original.document
+      globalThis.location = original.location
+      globalThis.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('candidate.readSourcingWindow MAIN current/reset/next 只返回稳定身份并推进至多一窗', async () => {
+  const fixture = installM6SourcingWindowFixture()
+  try {
+    const current = await zhilianTestHooks.mainReadSourcingWindow('current')
+    assert.equal(current.status, 'ready')
+    assert.equal(current.data.positionRef, fixture.refs.job)
+    assert.equal(current.data.positionTitle, '合成窗口职位')
+    assert.deepEqual(current.data.platformUserRefs, fixture.refs.secondWindow)
+    assert.equal(current.data.moved, false)
+
+    const reset = await zhilianTestHooks.mainReadSourcingWindow('reset')
+    assert.equal(reset.status, 'ready')
+    assert.deepEqual(reset.data.platformUserRefs, fixture.refs.firstWindow)
+    assert.equal(reset.data.moved, true)
+
+    const next = await zhilianTestHooks.mainReadSourcingWindow('next')
+    assert.equal(next.status, 'ready')
+    assert.deepEqual(next.data.platformUserRefs, fixture.refs.secondWindow)
+    assert.equal(next.data.moved, true)
+    assert.equal(Object.hasOwn(next.data, 'exhausted'), false, 'moved 不承载耗尽语义')
+    const serialized = JSON.stringify([current, reset, next])
+    assert.equal(serialized.includes('绝不返回姓名'), false)
+    assert.equal(serialized.includes('resumeNumber'), false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN 接受无 overflow 标记但可滚动的 document root', async () => {
+  const fixture = installM6SourcingWindowFixture({ startAt: 'first', documentRoot: true })
+  try {
+    const next = await zhilianTestHooks.mainReadSourcingWindow('next')
+    assert.equal(next.status, 'ready')
+    assert.deepEqual(next.data.platformUserRefs, fixture.refs.secondWindow)
+    assert.equal(next.data.moved, true)
+    assert.equal(fixture.scroller.scrollTop, fixture.scroller.clientHeight,
+      'next 只推进一个 document viewport')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN 对候选人身份与职位不唯一响亮失败', async () => {
+  for (const [name, mutate, reason] of [
+    ['身份缺失', (fixture) => fixture.removeFirstIdentity(), 'candidate_identity_unavailable'],
+    ['身份重复', (fixture) => fixture.duplicateIdentity(), 'candidate_identity_duplicated'],
+    ['职位错绑', (fixture) => { fixture.store.state.talent.activeJob.jobNumber = 'other-job' },
+      'position_identity_mismatch'],
+    ['职位标题多解', (fixture) => { fixture.state.visibleTitles = ['职位一', '职位二'] },
+      'position_title_ambiguous'],
+  ]) {
+    const fixture = installM6SourcingWindowFixture({ startAt: 'first' })
+    try {
+      mutate(fixture)
+      assert.deepEqual(await zhilianTestHooks.mainReadSourcingWindow('current'), {
+        status: 'failed', reason,
+      }, name)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.readSourcingTargetResume MAIN 只打开当前窗唯一目标并复核职位后关闭', async () => {
+  const fixture = installM6SourcingFixture()
+  try {
+    const result = await zhilianTestHooks.mainReadSourcingResume([], {
+      platformUserRef: fixture.refs.secondUser,
+      positionRef: fixture.refs.job,
+    })
+    assert.equal(result.status, 'ready')
+    assert.equal(result.data.platformUserRef, fixture.refs.secondUser)
+    assert.equal(result.data.positionRef, fixture.refs.job)
+    assert.deepEqual(fixture.state.clicks, [fixture.refs.secondUser])
+    assert.equal(fixture.state.modals.length, 0, '定点读取成功也必须关闭详情')
+    assert.equal(globalThis.location.href.includes('resumeNumber='), false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingTargetResume MAIN 对目标零匹配、多匹配与职位错绑均不点击', async () => {
+  for (const [name, target, mutate, reason] of [
+    ['零匹配', (fixture) => ({ platformUserRef: 'missing-user', positionRef: fixture.refs.job }),
+      () => {}, 'no_candidate'],
+    ['多匹配', (fixture) => ({ platformUserRef: fixture.refs.firstUser, positionRef: fixture.refs.job }),
+      (fixture) => { fixture.second.owner._props.source.userMasterId = fixture.refs.firstUser },
+      'candidate_identity_duplicated'],
+    ['职位错绑', (fixture) => ({ platformUserRef: fixture.refs.secondUser, positionRef: 'other-job' }),
+      () => {}, 'position_identity_mismatch'],
+  ]) {
+    const fixture = installM6SourcingFixture()
+    try {
+      mutate(fixture)
+      assert.deepEqual(await zhilianTestHooks.mainReadSourcingResume([], target(fixture)), {
+        status: 'failed', reason,
+      }, name)
+      assert.deepEqual(fixture.state.clicks, [], `${name} 不得打开详情`)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.readSourcingTargetResume MAIN 关闭无法确认时整体失败且保留现场', async () => {
+  const fixture = installM6SourcingFixture({ closeUnavailable: true })
+  try {
+    const result = await zhilianTestHooks.mainReadSourcingResume([], {
+      platformUserRef: fixture.refs.secondUser,
+      positionRef: fixture.refs.job,
+    })
+    assert.deepEqual(result, { status: 'failed', reason: 'close_unavailable' })
+    assert.equal(result.data, undefined)
+    assert.deepEqual(fixture.state.clicks, [fixture.refs.secondUser])
+    assert.equal(fixture.state.modals.length, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('candidate.readSourcingResume MAIN 打开首个未排除候选人并完整绑定五分区', async () => {
   for (const excludedFirst of [false, true]) {
     const fixture = installM6SourcingFixture()
@@ -2303,6 +2523,171 @@ test('candidate.readSourcingResume outer 只使用全浏览器唯一推荐页并
       'mainProbeZhilian', 'mainProbeZhilian', 'mainReadSourcingResume', 'mainProbeZhilian',
     ])
     assert.equal(progress.at(-1)[1], 100)
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('candidate.readSourcingWindow/TargetResume outer 共用唯一推荐页、账号三次复核与取消屏障', async () => {
+  const fingerprint = 'e'.repeat(64)
+  const tab = {
+    id: 603,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-job',
+  }
+  const resumeData = {
+    platformUserRef: 'fixture-user', displayName: '合成候选人',
+    positionRef: 'fixture-job', positionTitle: '合成职位', contactState: 'unestablished',
+    observedAt: Date.now(), basic: [{ label: '姓名', value: '合成候选人' }],
+    expectations: [{ label: '求职期望', value: '合成职位' }], selfEvaluation: '',
+    education: '合成教育', workExperiences: '合成经历',
+  }
+  for (const scenario of [
+    {
+      name: 'window',
+      mainName: 'mainReadSourcingWindow',
+      args: { move: 'current' },
+      invoke: (context) => readZhilianSourcingWindow({ move: 'current' }, context, fingerprint),
+      mainResult: {
+        status: 'ready',
+        data: {
+          positionRef: 'fixture-job', positionTitle: '合成职位',
+          platformUserRefs: ['fixture-user'], moved: false, observedAt: Date.now(),
+        },
+      },
+    },
+    {
+      name: 'target',
+      mainName: 'mainReadSourcingResume',
+      args: [[], { platformUserRef: 'fixture-user', positionRef: 'fixture-job' }],
+      invoke: (context) => readZhilianSourcingTargetResume({
+        platformUserRef: 'fixture-user', positionRef: 'fixture-job',
+      }, context, fingerprint),
+      mainResult: { status: 'ready', data: resumeData },
+    },
+  ]) {
+    const originalChrome = globalThis.chrome
+    const queryCalls = []
+    const mainCalls = []
+    const actionArgs = []
+    let probeCalls = 0
+    let barrierCalls = 0
+    globalThis.chrome = {
+      tabs: {
+        async query(query) {
+          queryCalls.push(structuredClone(query))
+          return [{ ...tab }]
+        },
+        async sendMessage() { return { ok: true } },
+      },
+      scripting: {
+        async executeScript({ target, func, args }) {
+          assert.equal(target.tabId, tab.id)
+          mainCalls.push(func.name)
+          if (func.name === 'mainProbeZhilian') {
+            probeCalls += 1
+            return [{ result: {
+              pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+              imListVisible: false,
+            } }]
+          }
+          assert.equal(func.name, scenario.mainName)
+          actionArgs.push(structuredClone(args))
+          return [{ result: structuredClone(scenario.mainResult) }]
+        },
+      },
+    }
+    const context = {
+      signal: new AbortController().signal,
+      cmdMsgId: `read-sourcing-${scenario.name}-fixture`,
+      deadlineMs: Date.now() + 10_000,
+      irreversibleNotAfterMs: Date.now() + 10_000,
+      commandContext: undefined,
+      guards: undefined,
+      checkpoint() {},
+      async beforeSideEffect() { barrierCalls += 1 },
+      async progress() {},
+    }
+    try {
+      const data = await scenario.invoke(context)
+      assert.equal(data.positionRef, 'fixture-job')
+      assert.equal(barrierCalls, 1)
+      assert.equal(probeCalls, 3)
+      assert.equal(queryCalls.length, 3)
+      assert.deepEqual(mainCalls, [
+        'mainProbeZhilian', 'mainProbeZhilian', scenario.mainName, 'mainProbeZhilian',
+      ])
+      assert.deepEqual(actionArgs, [scenario.name === 'window' ? ['current'] : scenario.args])
+    } finally {
+      globalThis.chrome = originalChrome
+    }
+  }
+})
+
+test('candidate.readSourcingWindow outer 拒绝多推荐页与动作后账号换绑', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'f'.repeat(64)
+  const tab = {
+    id: 604,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-job',
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'read-sourcing-window-guards-fixture',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() {},
+    async progress() {},
+  }
+  try {
+    globalThis.chrome = {
+      tabs: {
+        async query() { return [{ ...tab }, { ...tab, id: 605 }] },
+        async sendMessage() { return { ok: true } },
+      },
+      scripting: { async executeScript() { throw new Error('多推荐页不得执行 MAIN') } },
+    }
+    await assert.rejects(
+      () => readZhilianSourcingWindow({ move: 'current' }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError && error.code === 'ELEMENT_UNRESOLVED',
+    )
+
+    let probeCalls = 0
+    globalThis.chrome = {
+      tabs: {
+        async query() { return [{ ...tab }] },
+        async sendMessage() { return { ok: true } },
+      },
+      scripting: {
+        async executeScript({ func }) {
+          if (func.name === 'mainProbeZhilian') {
+            probeCalls += 1
+            return [{ result: {
+              pageKind: 'recommend', loginState: 'in',
+              principalFingerprint: probeCalls === 3 ? '0'.repeat(64) : fingerprint,
+              imListVisible: false,
+            } }]
+          }
+          if (func.name === 'mainReadSourcingWindow') return [{ result: {
+            status: 'ready', data: {
+              positionRef: 'fixture-job', positionTitle: null,
+              platformUserRefs: ['fixture-user'], moved: false, observedAt: Date.now(),
+            },
+          } }]
+          throw new Error(`unexpected MAIN ${func.name}`)
+        },
+      },
+    }
+    await assert.rejects(
+      () => readZhilianSourcingWindow({ move: 'current' }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError && error.code === 'ACCOUNT_MISMATCH',
+    )
   } finally {
     globalThis.chrome = originalChrome
   }

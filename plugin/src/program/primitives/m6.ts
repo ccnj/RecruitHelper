@@ -2,12 +2,16 @@
 // 智联 program；本模块仅把生成契约接入唯一 dispatcher 注册表。
 import {
   CandidateReadSourcingResumeArgs,
+  CandidateReadSourcingTargetResumeArgs,
+  CandidateReadSourcingWindowArgs,
   CmdClass,
   Primitive as PrimitiveName,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
   readZhilianSourcingResume,
+  readZhilianSourcingTargetResume,
+  readZhilianSourcingWindow,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
 } from '../platform/zhilian'
@@ -47,6 +51,48 @@ const readSourcingResume: Primitive = {
   },
 }
 
+const readSourcingWindow: Primitive = {
+  name: PrimitiveName.CandidateReadSourcingWindow,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await readZhilianSourcingWindow(
+        rawArgs as CandidateReadSourcingWindowArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
+const readSourcingTargetResume: Primitive = {
+  name: PrimitiveName.CandidateReadSourcingTargetResume,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await readZhilianSourcingTargetResume(
+        rawArgs as CandidateReadSourcingTargetResumeArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 export function registerM6Primitives(): void {
   register(readSourcingResume)
+  register(readSourcingWindow)
+  register(readSourcingTargetResume)
 }

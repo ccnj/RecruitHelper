@@ -9,6 +9,9 @@ import type {
   CandidateReadResumeData,
   CandidateReadSourcingResumeArgs,
   CandidateReadSourcingResumeData,
+  CandidateReadSourcingTargetResumeArgs,
+  CandidateReadSourcingWindowArgs,
+  CandidateReadSourcingWindowData,
   CandidateResumeLabelValue,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
@@ -63,6 +66,9 @@ export type ZhilianResumeArgs = CandidateReadResumeArgs
 export type ZhilianResumeData = CandidateReadResumeData
 export type ZhilianSourcingResumeArgs = CandidateReadSourcingResumeArgs
 export type ZhilianSourcingResumeData = CandidateReadSourcingResumeData
+export type ZhilianSourcingTargetResumeArgs = CandidateReadSourcingTargetResumeArgs
+export type ZhilianSourcingWindowArgs = CandidateReadSourcingWindowArgs
+export type ZhilianSourcingWindowData = CandidateReadSourcingWindowData
 export type ZhilianGreetingArgs = ChatSendGreetingArgs
 export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
@@ -202,6 +208,33 @@ interface MainSourcingResumeFailed {
 }
 
 type MainSourcingResumeResult = MainSourcingResumeReady | MainSourcingResumeFailed
+
+const MAIN_SOURCING_WINDOW_FAILURE_REASONS = [
+  'route_changed',
+  'list_source_unavailable',
+  'candidate_identity_unavailable',
+  'candidate_identity_duplicated',
+  'position_identity_unavailable',
+  'position_identity_mismatch',
+  'position_title_ambiguous',
+  'position_title_mismatch',
+  'scroll_unavailable',
+  'unexpected',
+] as const
+
+type MainSourcingWindowFailureReason = typeof MAIN_SOURCING_WINDOW_FAILURE_REASONS[number]
+
+interface MainSourcingWindowReady {
+  status: 'ready'
+  data: ZhilianSourcingWindowData
+}
+
+interface MainSourcingWindowFailed {
+  status: 'failed'
+  reason: MainSourcingWindowFailureReason
+}
+
+type MainSourcingWindowResult = MainSourcingWindowReady | MainSourcingWindowFailed
 
 const MAIN_GREETING_FAILURE_REASONS = [
   'action_window_elapsed',
@@ -964,11 +997,212 @@ async function mainReadCurrentResume(
   }
 }
 
+// 正式采集批次的推荐窗口 evaluator。只读取当前虚拟列表窗口中的稳定身份；
+// reset/next 最多各执行一次滚动动作，moved 只陈述本次是否观察到窗口或滚动位置推进。
+// 它没有“耗尽”语义，也不读取姓名与 resumeNumber。
+async function mainReadSourcingWindow(
+  move: ZhilianSourcingWindowArgs['move'],
+): Promise<MainSourcingWindowResult> {
+  type AnyRecord = Record<string, unknown>
+  interface WindowSource {
+    item: HTMLElement
+    owner: AnyRecord
+    platformUserRef: string
+  }
+  type WindowSnapshot = {
+    sources: WindowSource[]
+    positionRef: string
+    positionTitle: string | null
+  }
+
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const failed = (reason: MainSourcingWindowFailureReason): MainSourcingWindowFailed => ({
+    status: 'failed',
+    reason,
+  })
+  const route = (): URL | null => {
+    try {
+      const current = new URL(location.href)
+      return current.pathname.startsWith('/app/recommend') ? current : null
+    } catch {
+      return null
+    }
+  }
+  const collect = (): WindowSnapshot | MainSourcingWindowFailed => {
+    const currentRoute = route()
+    if (!currentRoute) return failed('route_changed')
+    const items = visibleAll(document, '.recommend-list__left div[role="listitem"]').slice(0, 32)
+    if (items.length === 0) return failed('list_source_unavailable')
+    const sources: WindowSource[] = []
+    for (const item of items) {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const props = asRecord(owner?._props)
+      const source = asRecord(props?.source)
+      if (!owner || !source) return failed('list_source_unavailable')
+      const platformUserRef = opaque(source.userMasterId)
+      if (!platformUserRef) return failed('candidate_identity_unavailable')
+      sources.push({ item, owner, platformUserRef })
+    }
+    const identities = new Set<string>()
+    for (const source of sources) {
+      if (identities.has(source.platformUserRef)) return failed('candidate_identity_duplicated')
+      identities.add(source.platformUserRef)
+    }
+
+    const routeJobNumber = opaque(currentRoute.searchParams.get('jobNumber'))
+    if (!routeJobNumber) return failed('position_identity_unavailable')
+    let activeJobTitle = ''
+    for (const source of sources) {
+      const root = asRecord(source.owner.$root)
+      const ownerRoute = asRecord(root?._route)
+      const ownerQuery = asRecord(ownerRoute?.query)
+      const store = asRecord(source.owner.$store)
+      const state = asRecord(store?.state)
+      const talent = asRecord(state?.talent)
+      const activeJob = asRecord(talent?.activeJob)
+      const routedJobNumber = opaque(ownerQuery?.jobNumber)
+      const activeJobNumber = opaque(activeJob?.jobNumber)
+      if (!routedJobNumber || !activeJobNumber) return failed('position_identity_unavailable')
+      if (routeJobNumber !== routedJobNumber || routeJobNumber !== activeJobNumber) {
+        return failed('position_identity_mismatch')
+      }
+      const sourceTitle = clean(activeJob?.jobTitle)
+      if (activeJobTitle && sourceTitle && activeJobTitle !== sourceTitle) {
+        return failed('position_title_mismatch')
+      }
+      activeJobTitle ||= sourceTitle
+    }
+    const visibleJobTitles = visibleAll(document,
+      '.job-pane__item--active .job-pane__item-job-title')
+      .map((element) => clean(element.textContent)).filter(Boolean)
+    if (visibleJobTitles.length > 1) return failed('position_title_ambiguous')
+    const visibleJobTitle = visibleJobTitles[0] ?? ''
+    if (visibleJobTitle && activeJobTitle && visibleJobTitle !== activeJobTitle) {
+      return failed('position_title_mismatch')
+    }
+    const title = visibleJobTitle || activeJobTitle
+    return {
+      sources,
+      positionRef: routeJobNumber,
+      positionTitle: title && title.length <= 256 ? title : null,
+    }
+  }
+  const signature = (snapshot: WindowSnapshot): string =>
+    `${snapshot.positionRef}|${snapshot.sources.map((source) => source.platformUserRef).join('|')}`
+  const scrollable = (element: HTMLElement): boolean => {
+    const style = getComputedStyle(element)
+    return /(auto|scroll)/u.test(`${style.overflowY ?? ''} ${style.overflow ?? ''}`) &&
+      Number(element.scrollHeight) > Number(element.clientHeight) + 1
+  }
+  const scrollContainer = (source: WindowSource): HTMLElement | null => {
+    let current = source.item.parentElement
+    while (current && current !== document.body) {
+      if (scrollable(current)) return current
+      current = current.parentElement
+    }
+    const documentScroller = document.scrollingElement as HTMLElement | null
+    // Chromium 的 document root 即便可滚动，computed overflow 也常是 visible；
+    // root 以可滚动尺寸为公开判据，普通祖先仍要求 auto/scroll。
+    return documentScroller &&
+      Number(documentScroller.scrollHeight) > Number(documentScroller.clientHeight) + 1
+      ? documentScroller
+      : null
+  }
+  const scrollTop = (element: HTMLElement): number => Number(element.scrollTop) || 0
+  const scrollTo = (element: HTMLElement, top: number): void => {
+    if (typeof element.scrollTo === 'function') {
+      element.scrollTo({ top, behavior: 'auto' })
+    } else {
+      element.scrollTop = top
+    }
+    element.dispatchEvent?.(new Event('scroll', { bubbles: true }))
+  }
+
+  try {
+    if (!['current', 'reset', 'next'].includes(move)) return failed('unexpected')
+    const initial = collect()
+    if ('status' in initial) return initial
+    const initialSignature = signature(initial)
+    if (move === 'current') {
+      return {
+        status: 'ready',
+        data: {
+          positionRef: initial.positionRef,
+          positionTitle: initial.positionTitle,
+          platformUserRefs: initial.sources.map((source) => source.platformUserRef),
+          moved: false,
+          observedAt: Date.now(),
+        },
+      }
+    }
+
+    const scroller = scrollContainer(initial.sources[0])
+    if (!scroller) return failed('scroll_unavailable')
+    const beforeTop = scrollTop(scroller)
+    if (move === 'reset') {
+      scrollTo(scroller, 0)
+    } else {
+      const viewport = Math.max(Number(scroller.clientHeight) || 0, 1)
+      const maxTop = Math.max((Number(scroller.scrollHeight) || 0) - viewport, 0)
+      scrollTo(scroller, Math.min(beforeTop + viewport, maxTop))
+    }
+
+    let latest = collect()
+    if ('status' in latest) return latest
+    let latestSignature = signature(latest)
+    let stableRounds = 0
+    const settleUntil = Date.now() + 3_000
+    while (Date.now() < settleUntil) {
+      if ((latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop) && stableRounds >= 2) break
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      const next = collect()
+      if ('status' in next) return next
+      const nextSignature = signature(next)
+      stableRounds = nextSignature === latestSignature ? stableRounds + 1 : 0
+      latest = next
+      latestSignature = nextSignature
+    }
+    if (latest.positionRef !== initial.positionRef) return failed('position_identity_mismatch')
+    if (latest.positionTitle !== initial.positionTitle) return failed('position_title_mismatch')
+    return {
+      status: 'ready',
+      data: {
+        positionRef: latest.positionRef,
+        positionTitle: latest.positionTitle,
+        platformUserRefs: latest.sources.map((source) => source.platformUserRef),
+        moved: latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop,
+        observedAt: Date.now(),
+      },
+    }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
 // 冒烟冲刺的推荐页采集 evaluator。它在同一个 MAIN task 内完成“稳定来源卡
 // -> 打开详情 -> resumeNumber 瞬时连接 -> 五分区 -> 再次绑定复核”，返回值中
 // 永不包含 resumeNumber；列表顺序只决定本轮先读谁，不承担任何身份语义。
 async function mainReadSourcingResume(
   excludePlatformUserRefs: string[],
+  requestedTarget?: { platformUserRef: string; positionRef: string },
 ): Promise<MainSourcingResumeResult> {
   type AnyRecord = Record<string, unknown>
   interface SourceSnapshot {
@@ -1106,10 +1340,24 @@ async function mainReadSourcingResume(
     const excluded = new Set(excludePlatformUserRefs)
     let sources = collectSources()
     if (!Array.isArray(sources)) return sources
-    let target = sources.find((source) => !excluded.has(source.platformUserRef))
+    let target: SourceSnapshot | undefined
+    if (requestedTarget) {
+      const requestedPlatformUserRef = opaque(requestedTarget.platformUserRef)
+      const requestedPositionRef = opaque(requestedTarget.positionRef)
+      if (!requestedPlatformUserRef) return failed('candidate_identity_unavailable')
+      if (!requestedPositionRef) return failed('position_identity_unavailable')
+      const matches = sources.filter((source) => source.platformUserRef === requestedPlatformUserRef)
+      if (matches.length > 1) return failed('candidate_identity_duplicated')
+      target = matches[0]
+    } else {
+      target = sources.find((source) => !excluded.has(source.platformUserRef))
+    }
     if (!target) return failed('no_candidate')
     const initialPosition = readPosition(target)
     if (initialPosition.status === 'failed') return initialPosition
+    if (requestedTarget && initialPosition.positionRef !== opaque(requestedTarget.positionRef)) {
+      return failed('position_identity_mismatch')
+    }
     const initialContactState = contactState(target.item)
 
     let modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -2476,6 +2724,18 @@ function validSourcingResumeResult(value: unknown): value is MainSourcingResumeR
     validatePrimitiveData(PrimitiveName.CandidateReadSourcingResume, 1, record.data).length === 0
 }
 
+function validSourcingWindowResult(value: unknown): value is MainSourcingWindowResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_SOURCING_WINDOW_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  return record.status === 'ready' && record.data !== null && typeof record.data === 'object' &&
+    !Array.isArray(record.data) &&
+    validatePrimitiveData(PrimitiveName.CandidateReadSourcingWindow, 1, record.data).length === 0
+}
+
 async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
   return (await chrome.tabs.query({
     url: TAB_QUERY,
@@ -2493,6 +2753,143 @@ function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集期间当前推荐页或候选人发生变化', 'manualOnly')
   }
   throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐候选人无法完整且唯一读取', 'manualOnly')
+}
+
+function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
+  if (result.reason === 'route_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '窗口读取期间当前推荐页发生变化', 'manualOnly')
+  }
+  if (result.reason === 'scroll_unavailable') {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐列表滚动窗口无法唯一确定', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐窗口身份或职位无法完整且唯一读取', 'manualOnly')
+}
+
+export async function readZhilianSourcingWindow(
+  args: ZhilianSourcingWindowArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSourcingWindowData> {
+  if (!args || !['current', 'reset', 'next'].includes(args.move)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '窗口读取缺少合法的移动指令', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const initialTabs = await activeSourcingTabs()
+  if (initialTabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请保留一个已就绪的智联推荐页标签',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (initialTabs.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  const tab = initialTabs[0]
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (initialProbe.pageKind !== 'recommend') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对当前推荐页与登录身份', 10)
+
+  ctx.checkpoint()
+  const beforeActionTabs = await activeSourcingTabs()
+  if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
+      beforeActionTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '窗口动作前推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+  const result = await runMain(tab.id, mainReadSourcingWindow, [args.move])
+  if (!validSourcingWindowResult(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐窗口读取结果结构不符合当前契约', 'manualOnly')
+  }
+  if (result.status === 'failed') throwSourcingWindowFailure(result)
+
+  ctx.checkpoint()
+  const latestTabs = await activeSourcingTabs()
+  if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '窗口读取期间推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latestTabs[0]), expectedPrincipalFingerprint)
+  if (validatePrimitiveData(PrimitiveName.CandidateReadSourcingWindow, 1, result.data).length !== 0 ||
+      jsonBytes(result.data) > 32_768) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐窗口结构不符合当前契约', 'manualOnly')
+  }
+  ctx.progress('推荐候选人窗口读取完成', 100)
+  return result.data
+}
+
+export async function readZhilianSourcingTargetResume(
+  args: ZhilianSourcingTargetResumeArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSourcingResumeData> {
+  if (!args || typeof args.platformUserRef !== 'string' || !args.platformUserRef ||
+      typeof args.positionRef !== 'string' || !args.positionRef) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '定点简历读取缺少候选人或职位引用', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const initialTabs = await activeSourcingTabs()
+  if (initialTabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请保留一个已就绪的智联推荐页标签',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (initialTabs.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  const tab = initialTabs[0]
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (initialProbe.pageKind !== 'recommend') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对当前推荐页与登录身份', 10)
+
+  ctx.checkpoint()
+  const beforeActionTabs = await activeSourcingTabs()
+  if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
+      beforeActionTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定点读取前推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+  const result = await runMain(tab.id, mainReadSourcingResume, [[], {
+    platformUserRef: args.platformUserRef,
+    positionRef: args.positionRef,
+  }])
+  if (!validSourcingResumeResult(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '定点简历读取结果结构不符合当前契约', 'manualOnly')
+  }
+  if (result.status === 'failed') throwSourcingResumeFailure(result)
+  if (result.data.platformUserRef !== args.platformUserRef || result.data.positionRef !== args.positionRef) {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定点简历读取结果与目标绑定不一致', 'manualOnly')
+  }
+
+  ctx.checkpoint()
+  const latestTabs = await activeSourcingTabs()
+  if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定点读取期间推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latestTabs[0]), expectedPrincipalFingerprint)
+  if (validatePrimitiveData(PrimitiveName.CandidateReadSourcingTargetResume, 1, result.data).length !== 0 ||
+      jsonBytes(result.data) > 65_536) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '定点完整简历结构不符合当前契约', 'manualOnly')
+  }
+  ctx.progress('推荐候选人定点简历读取完成', 100)
+  return result.data
 }
 
 export async function readZhilianSourcingResume(
@@ -5370,6 +5767,7 @@ export const zhilianTestHooks = Object.freeze({
   mainProbeZhilian,
   mainReadCurrentCandidate,
   mainReadCurrentResume,
+  mainReadSourcingWindow,
   mainReadSourcingResume,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,

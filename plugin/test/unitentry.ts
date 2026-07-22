@@ -21,6 +21,8 @@ export {
   readZhilianCurrentCandidate,
   readZhilianResume,
   readZhilianSourcingResume,
+  readZhilianSourcingTargetResume,
+  readZhilianSourcingWindow,
   readZhilianGreetingOutcome,
   inspectZhilianSendSurfaceDiagnostic,
   sendZhilianGreeting,
