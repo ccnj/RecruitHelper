@@ -30,6 +30,7 @@ type DispatchRequest struct {
 type dispatchOptions struct {
 	legacyDebug            bool
 	effectIntent           *store.EffectIntent
+	sourcingGreetingSource *store.SourcingGreetingEffectSource
 	expectedTailSeq        int64
 	previousIntentID       string
 	automaticActionID      string
@@ -225,7 +226,8 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		case protocol.PrimChatSendGreeting:
 			createdResult, createErr = d.st.CreateGreetingEffectIntentAndCmd(store.CreateGreetingEffectIntentRequest{
 				Intent: *opts.effectIntent, Command: *rec,
-				PreviousIntentID: opts.previousIntentID, Now: time.Now(),
+				PreviousIntentID: opts.previousIntentID, SourcingSource: opts.sourcingGreetingSource,
+				Now: time.Now(),
 			})
 		case protocol.PrimChatSendMessage:
 			createdResult, createErr = d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{

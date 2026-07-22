@@ -629,6 +629,11 @@ type SourcingGreetingInvocation struct {
 	EstimatedCostMicros int64
 	StartedAt           time.Time `gorm:"not null"`
 	FinishedAt          *time.Time
+
+	// EffectIntentID 把一次成功生成事实单调绑定到唯一招呼意图。NULL 表示尚未
+	// 进入副作用轨道；一旦绑定，只能由该 EffectIntent 的既有恢复轨收敛。
+	EffectIntentID  *string `gorm:"uniqueIndex"`
+	EffectStartedAt *time.Time
 }
 
 type SourcingSelectionOutcome string

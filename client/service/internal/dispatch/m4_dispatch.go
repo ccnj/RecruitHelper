@@ -18,6 +18,13 @@ type SendGreetingRequest struct {
 	Text             string
 }
 
+// SendSourcingGreetingRequest 只接受不可变正式批次与生成调用引用。调用方
+// 不能传 profile、平台目标、正文或 intentId。
+type SendSourcingGreetingRequest struct {
+	BatchID      string
+	InvocationID string
+}
+
 // SendGreeting 是 chat.sendGreeting 唯一产品入口。平台、账号、候选人与
 // 职位引用全部从 profile 账本派生；调用方只能提交内部 profileId 和正文。
 func (d *Dispatcher) SendGreeting(req SendGreetingRequest) (*SendMessageReceipt, error) {
@@ -143,6 +150,124 @@ func (d *Dispatcher) SendGreeting(req SendGreetingRequest) (*SendMessageReceipt,
 		return nil, dispatchErr
 	}
 	persisted, lookupErr := d.st.EffectIntentByID(req.IntentID)
+	if lookupErr != nil {
+		return nil, errors.Join(dispatchErr, lookupErr)
+	}
+	if persisted == nil {
+		return nil, errors.Join(dispatchErr, store.ErrEffectIntentNotFound)
+	}
+	receipt, receiptErr := d.sendReceipt(persisted, detailed.Created)
+	return receipt, errors.Join(dispatchErr, receiptErr)
+}
+
+// SendSourcingGreeting 是 M6 推荐列表自动招呼的专用入口。所有发送材料
+// 都从 SourcingGreetingInvocation 重新派生；最终来源授权与 invocation→
+// intent CAS 仍在 CreateGreetingEffectIntentAndCmd 的 WAL 事务内完成。
+func (d *Dispatcher) SendSourcingGreeting(
+	req SendSourcingGreetingRequest,
+) (*SendMessageReceipt, error) {
+	req.BatchID = strings.TrimSpace(req.BatchID)
+	req.InvocationID = strings.TrimSpace(req.InvocationID)
+	if req.BatchID == "" || req.InvocationID == "" {
+		return nil, store.ErrSourcingGreetingEffectInvalid
+	}
+	preparation, err := d.st.PrepareSourcingGreetingSend(req.BatchID, req.InvocationID)
+	if err != nil {
+		return nil, err
+	}
+	profile, account := preparation.Profile, preparation.Account
+	args := protocol.ChatSendGreetingArgs{
+		PlatformUserRef: profile.PlatformUserRef,
+		PositionRef:     profile.PositionRef,
+		Text:            preparation.GreetingText,
+	}
+	argsRaw, err := protocol.Encode(args)
+	if err != nil {
+		return nil, err
+	}
+	meta := protocol.Primitives[protocol.PrimChatSendGreeting]
+	if err := protocol.ValidatePrimitiveArgs(protocol.PrimChatSendGreeting, meta.Ver, argsRaw); err != nil {
+		return nil, err
+	}
+	payloadHash := hashBytes(argsRaw)
+
+	if existing, lookupErr := d.st.EffectIntentByID(preparation.IntentID); lookupErr != nil {
+		return nil, lookupErr
+	} else if existing != nil {
+		if !preparation.EffectLinked || existing.Platform != profile.Platform ||
+			existing.AccountRef != profile.AccountRef || existing.Primitive != protocol.PrimChatSendGreeting ||
+			existing.TargetRef != profile.ProfileID || existing.PayloadHash != payloadHash {
+			return nil, store.ErrSourcingGreetingEffectConflict
+		}
+		return d.sendReceipt(existing, false)
+	}
+	if preparation.EffectLinked {
+		return nil, store.ErrSourcingGreetingEffectConflict
+	}
+
+	latest, err := d.st.LatestGreetingEffectIntent(profile.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	if latest != nil {
+		conflict := &store.CandidateGreetingCASConflictError{Current: latest}
+		receipt, receiptErr := d.sendReceipt(latest, false)
+		return receipt, errors.Join(conflict, receiptErr)
+	}
+	if account.BoundHandID == "" || account.PrincipalFingerprint == nil {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+	session, bootID, online := d.sender.HandSession(account.BoundHandID)
+	if !online {
+		return nil, ErrHandOffline
+	}
+	if account.IdentityState != store.IdentityVerified || account.IdentitySession != session ||
+		account.IdentityBootID != bootID {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+	guards := protocol.ChatSendGreetingGuards{ExpectUnestablished: true}
+	guardsRaw, err := protocol.Encode(guards)
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.ValidatePrimitiveGuards(protocol.PrimChatSendGreeting, meta.Ver, guardsRaw); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	intent := store.EffectIntent{
+		IntentID: preparation.IntentID,
+		IdemKey: BuildEffectIdemKey(profile.Platform, profile.AccountRef,
+			protocol.PrimChatSendGreeting, profile.ProfileID, preparation.IntentID),
+		Platform: profile.Platform, AccountRef: profile.AccountRef,
+		Primitive: protocol.PrimChatSendGreeting, TargetRef: profile.ProfileID,
+		PayloadHash: payloadHash, GuardsHash: hashBytes(guardsRaw),
+		Status: store.EffectIntentDispatching, DeadlineMs: deadlineMs,
+		SendFingerprint: syncledger.HashText(preparation.GreetingText),
+	}
+	source := preparation.Source
+	detailed, dispatchErr := d.dispatchDetailed(DispatchRequest{
+		HandID: account.BoundHandID, ExpectedSession: session, ExpectedBootID: bootID,
+		Name: protocol.PrimChatSendGreeting, Args: argsRaw, Guards: guardsRaw,
+		Context: &protocol.CmdContext{
+			Platform: profile.Platform, AccountRef: profile.AccountRef,
+			ExpectedPrincipalFingerprint: *account.PrincipalFingerprint,
+		},
+	}, dispatchOptions{
+		effectIntent: &intent, sourcingGreetingSource: &source,
+	})
+	if dispatchErr != nil {
+		var conflict *store.CandidateGreetingCASConflictError
+		if errors.As(dispatchErr, &conflict) && conflict.Current != nil {
+			receipt, receiptErr := d.sendReceipt(conflict.Current, false)
+			return receipt, errors.Join(dispatchErr, receiptErr)
+		}
+	}
+	if detailed.MsgID == "" {
+		return nil, dispatchErr
+	}
+	persisted, lookupErr := d.st.EffectIntentByID(preparation.IntentID)
 	if lookupErr != nil {
 		return nil, errors.Join(dispatchErr, lookupErr)
 	}

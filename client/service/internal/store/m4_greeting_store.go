@@ -38,6 +38,7 @@ type CreateGreetingEffectIntentRequest struct {
 	Intent           EffectIntent
 	Command          CmdRecord
 	PreviousIntentID string
+	SourcingSource   *SourcingGreetingEffectSource
 	Now              time.Time
 }
 
@@ -114,6 +115,13 @@ func (s *Store) CreateGreetingEffectIntentAndCmd(
 			if err := tx.First(&existingCmd, "msg_id = ?", existing.RootMsgID).Error; err != nil {
 				return fmt.Errorf("%w: 招呼意图根命令丢失", ErrEffectIntentConflict)
 			}
+			if req.SourcingSource != nil {
+				if err := validateSourcingGreetingEffectReplayTx(
+					tx, *req.SourcingSource, existing, existingCmd,
+				); err != nil {
+					return err
+				}
+			}
 			out.Intent, out.Command, out.Created = existing, existingCmd, false
 			return nil
 		}
@@ -143,7 +151,15 @@ func (s *Store) CreateGreetingEffectIntentAndCmd(
 		}
 
 		var profile CandidateProfile
-		if err := tx.First(&profile, "profile_id = ?", i.TargetRef).Error; err != nil {
+		if req.SourcingSource != nil {
+			material, err := validateSourcingGreetingEffectCreationTx(
+				tx, *req.SourcingSource, i, c,
+			)
+			if err != nil {
+				return err
+			}
+			profile = material.Profile
+		} else if err := tx.First(&profile, "profile_id = ?", i.TargetRef).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrCandidateProfileNotFound
 			}
@@ -209,6 +225,13 @@ func (s *Store) CreateGreetingEffectIntentAndCmd(
 			}
 			if updated.RowsAffected != 1 {
 				return ErrCandidateGreetingCASConflict
+			}
+		}
+		if req.SourcingSource != nil {
+			if err := bindSourcingGreetingEffectTx(
+				tx, *req.SourcingSource, i.IntentID, req.Now,
+			); err != nil {
+				return err
 			}
 		}
 		out.Intent, out.Command, out.Created = i, c, true
