@@ -285,10 +285,28 @@ func TestBoundSourcingGreetingSkipsRelocationAndConvergesAfterContextLoss(t *tes
 	h.sender.holdGreeting = true
 	h.sender.mu.Unlock()
 
-	firstCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	first, firstErr := manager.SendSelectedSourcingGreetings(firstCtx, batchID)
+	type sendResult struct {
+		progress *store.SourcingBatchGreetingSendProgress
+		err      error
+	}
+	firstCtx, cancel := context.WithCancel(context.Background())
+	firstDone := make(chan sendResult, 1)
+	go func() {
+		progress, err := manager.SendSelectedSourcingGreetings(firstCtx, batchID)
+		firstDone <- sendResult{progress: progress, err: err}
+	}()
+	deadline := time.After(2 * time.Second)
+	for h.sender.greetingCount() != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("首次招呼未进入已持久化 WAL")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	cancel()
-	if !errors.Is(firstErr, context.DeadlineExceeded) || first == nil || first.InFlightCount != 1 {
+	firstResult := <-firstDone
+	first, firstErr := firstResult.progress, firstResult.err
+	if !errors.Is(firstErr, context.Canceled) || first == nil || first.InFlightCount != 1 {
 		t.Fatalf("首次在途招呼未留下唯一可收编 WAL: progress=%+v err=%v", first, firstErr)
 	}
 	if h.sender.greetingCount() != 1 {
@@ -308,10 +326,6 @@ func TestBoundSourcingGreetingSkipsRelocationAndConvergesAfterContextLoss(t *tes
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	type sendResult struct {
-		progress *store.SourcingBatchGreetingSendProgress
-		err      error
 	}
 	done := make(chan sendResult, 1)
 	go func() {
