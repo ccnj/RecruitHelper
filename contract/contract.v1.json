@@ -658,7 +658,7 @@
         "fields": {
           "platformUserRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "positionRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
-          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "conversationRef": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
           "observedAt": { "type": "int64", "minimum": 0 }
         }
@@ -686,7 +686,6 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         },
         "rules": [
-          { "kind": "requiredWhen", "field": "conversationRef", "whenField": "confirmed", "equals": [true] },
           { "kind": "requiredWhen", "field": "contentHash", "whenField": "confirmed", "equals": [true] },
           { "kind": "forbiddenWhen", "field": "conversationRef", "whenField": "confirmed", "equals": [false] },
           { "kind": "forbiddenWhen", "field": "contentHash", "whenField": "confirmed", "equals": [false] }
@@ -899,7 +898,7 @@
       "argsSchema": "ChatReadGreetingOutcomeArgs", "dataSchema": "ChatReadGreetingOutcomeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 30000,
-      "note": "chat.sendGreeting 的唯一配套验证读;confirmed=true 只接受同候选人职位、唯一稳定新会话和唯一服务端招呼正证,false 仅表示本轮正证不足,绝不证明未发送或授权第二次招呼"
+      "note": "chat.sendGreeting 的唯一配套验证读;confirmed=true 接受同一候选人职位从关系未建立变为已建立的可见业务状态,conversationRef 仅在同次观察可稳定取得时返回;false 仅表示本轮正证不足,绝不证明未发送或授权第二次招呼"
     },
     "chat.sendMessage": {
       "ver": 1, "class": "effectful", "batch": "X",
@@ -917,7 +916,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "candidate.selected", "relationship.unestablished", "witness/1"],
       "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readGreetingOutcome", "ver": 1, "maxRounds": 3 },
-      "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有输入或弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。成功必须同时取得同候选人职位、唯一稳定新会话和唯一服务端招呼正证;阴性只验证或 suspect,不得第二次动作"
+      "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有输入或弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。成功接受同一目标从关系未建立变为已建立的可见业务状态;conversationRef 只作可选丰富正证。无变化、目标消失或读失败只算未确认并进入验证或 suspect,不得推断失败或第二次动作"
     },
     "chat.sendInviteCard":{ "ver": 0, "class": "effectful", "batch": "X", "note": "阶段四未来能力占位:向会话发送邀面或联系卡片;ver=0 不得上报 caps 或派发" }
   },

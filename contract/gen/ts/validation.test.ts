@@ -545,6 +545,18 @@ const greetingResult = {
   execMs: 10,
 };
 expectValid("greeting result", validatePrimitiveResult("chat.sendGreeting", 1, greetingResult));
+expectValid(
+  "greeting result from visible relationship",
+  validatePrimitiveResult("chat.sendGreeting", 1, {
+    ...greetingResult,
+    data: {
+      platformUserRef: "user-1",
+      positionRef: "job-1",
+      contentHash: "a".repeat(64),
+      observedAt: 20,
+    },
+  }),
+);
 expectIssue(
   "greeting evidence required",
   validatePrimitiveResult("chat.sendGreeting", 1, { ...greetingResult, evidence: [] }),
@@ -597,15 +609,13 @@ expectValid(
     observedAt: 20,
   }),
 );
-expectIssue(
-  "confirmed greeting outcome needs conversation",
+expectValid(
+  "confirmed greeting outcome without conversation",
   validatePrimitiveData("chat.readGreetingOutcome", 1, {
     confirmed: true,
     contentHash: "a".repeat(64),
     observedAt: 20,
   }),
-  "$.conversationRef",
-  "requiredWhen",
 );
 expectIssue(
   "confirmed greeting outcome needs hash",

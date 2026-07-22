@@ -391,6 +391,10 @@ func TestM4CandidateAndGreetingSchemas(t *testing.T) {
 	if err := ValidatePrimitiveResult(PrimChatSendGreeting, 1, validResult); err != nil {
 		t.Fatalf("合法 greeting result 应通过:%v", err)
 	}
+	visibleRelationshipResult := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundGreetingObserved"}],"replayed":false,"execMs":10}`)
+	if err := ValidatePrimitiveResult(PrimChatSendGreeting, 1, visibleRelationshipResult); err != nil {
+		t.Fatalf("不带 conversationRef 的可见关系正证应通过:%v", err)
+	}
 	missingEvidence := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"replayed":false,"execMs":10}`)
 	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendGreeting, 1, missingEvidence), "$.evidence", "minItems")
 	wrongEvidence := json.RawMessage(`{"ref":"greet-1","status":"ok","data":{"platformUserRef":"user-1","positionRef":"job-1","conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},"evidence":[{"type":"outboundMessageObserved"}],"replayed":false,"execMs":10}`)
@@ -408,7 +412,10 @@ func TestM4CandidateAndGreetingSchemas(t *testing.T) {
 	if err := ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, confirmed); err != nil {
 		t.Fatalf("合法 confirmed greeting outcome 应通过:%v", err)
 	}
-	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":true,"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20}`)), "$.conversationRef", "requiredWhen")
+	confirmedWithoutConversation := json.RawMessage(`{"confirmed":true,"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20}`)
+	if err := ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, confirmedWithoutConversation); err != nil {
+		t.Fatalf("不带 conversationRef 的可见关系验证正证应通过:%v", err)
+	}
 	assertValidationError(t, ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, json.RawMessage(`{"confirmed":true,"conversationRef":"conv-1","observedAt":20}`)), "$.contentHash", "requiredWhen")
 	unconfirmed := json.RawMessage(`{"confirmed":false,"observedAt":20}`)
 	if err := ValidatePrimitiveData(PrimChatReadGreetingOutcome, 1, unconfirmed); err != nil {
