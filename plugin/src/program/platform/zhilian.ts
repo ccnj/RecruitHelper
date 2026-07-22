@@ -1447,10 +1447,13 @@ async function mainReadSourcingResume(
       }
     }
     if (modals.length !== 1) return failed('modal_cardinality')
-    const modal = modals[0]
+    let modal = modals[0]
     const expectedTarget = target
 
     const evaluateOpenedDetail = (): MainSourcingResumeResult => {
+      const currentModals = visibleAll(document, '.new-shortcut-resume__modal')
+      if (currentModals.length !== 1) return failed('target_changed')
+      modal = currentModals[0]
       const boundRoute = route()
       if (!boundRoute) return failed('route_changed')
       const boundResumeNumber = opaque(boundRoute.searchParams.get('resumeNumber'))
@@ -1525,9 +1528,6 @@ async function mainReadSourcingResume(
         selfEvaluation = lines.join('\n')
       }
 
-      if (visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
-        return failed('target_changed')
-      }
       const data: ZhilianSourcingResumeData = {
         platformUserRef: target.platformUserRef,
         displayName: names[0].length <= 256 ? names[0] : null,
@@ -1546,11 +1546,40 @@ async function mainReadSourcingResume(
       }
       return { status: 'ready', data }
     }
-    let evaluated: MainSourcingResumeResult
-    try {
-      evaluated = evaluateOpenedDetail()
-    } catch {
-      evaluated = failed('unexpected')
+    const readinessFailures = new Set<MainSourcingResumeFailureReason>([
+      'detail_binding_ambiguous',
+      'basic_unresolved',
+      'expectations_unresolved',
+      'work_unresolved',
+      'education_unresolved',
+      'self_evaluation_unresolved',
+    ])
+    const stableProjection = (data: ZhilianSourcingResumeData): string => JSON.stringify({
+      ...data,
+      observedAt: 0,
+    })
+    const settleUntil = Date.now() + 3_000
+    let evaluated: MainSourcingResumeResult = failed('unexpected')
+    let readyProjection = ''
+    while (true) {
+      try {
+        evaluated = evaluateOpenedDetail()
+      } catch {
+        evaluated = failed('unexpected')
+      }
+      if (evaluated.status === 'ready') {
+        const nextProjection = stableProjection(evaluated.data)
+        if (nextProjection === readyProjection) break
+        if (Date.now() >= settleUntil) {
+          evaluated = failed('target_changed')
+          break
+        }
+        readyProjection = nextProjection
+      } else {
+        readyProjection = ''
+        if (!readinessFailures.has(evaluated.reason) || Date.now() >= settleUntil) break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120))
     }
     const closeFailure = await closeOpenedDetail()
     return closeFailure ?? evaluated

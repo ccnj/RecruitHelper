@@ -2088,6 +2088,16 @@ function installM6SourcingFixture(options = {}) {
   const root = { _route: { query: { jobNumber: refs.job } } }
   const store = { state: { talent: { activeJob: { jobNumber: refs.job, jobTitle: '合成采集职位' } } } }
   const modal = node()
+  const detailReadyAfterEvaluations = Number.isInteger(options.detailReadyAfterEvaluations) &&
+    options.detailReadyAfterEvaluations > 0 ? options.detailReadyAfterEvaluations : 1
+  let detailEvaluations = 0
+  const modalQuerySelectorAll = modal.querySelectorAll.bind(modal)
+  modal.querySelectorAll = (selector) => {
+    if (selector === '.new-shortcut-resume__close') return modalQuerySelectorAll(selector)
+    if (selector === '.resume-basic-new__name') detailEvaluations += 1
+    if (detailEvaluations < detailReadyAfterEvaluations) return []
+    return modalQuerySelectorAll(selector)
+  }
   const close = node('关闭')
   close.click = () => {
     state.modals = []
@@ -2106,7 +2116,10 @@ function installM6SourcingFixture(options = {}) {
     '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation',
     [],
   )
-  const state = { modals: [], clicks: [], routeResumeOverride: options.routeResumeOverride ?? null }
+  const state = {
+    modals: [], clicks: [], routeResumeOverride: options.routeResumeOverride ?? null,
+    get detailEvaluations() { return detailEvaluations },
+  }
   const makeCandidate = (platformUserRef, resumeNumber, displayName, established = false) => {
     const item = node(established ? `${displayName}\n同事聊过` : `${displayName}\n打招呼`)
     const owner = {
@@ -2416,6 +2429,24 @@ test('candidate.readSourcingTargetResume MAIN 只打开当前窗唯一目标并�
     assert.deepEqual(fixture.state.clicks, [fixture.refs.secondUser])
     assert.equal(fixture.state.modals.length, 0, '定点读取成功也必须关闭详情')
     assert.equal(globalThis.location.href.includes('resumeNumber='), false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingTargetResume MAIN 等待异步详情连续稳定后再收编', async () => {
+  const fixture = installM6SourcingFixture({ detailReadyAfterEvaluations: 2 })
+  try {
+    const result = await zhilianTestHooks.mainReadSourcingResume([], {
+      platformUserRef: fixture.refs.secondUser,
+      positionRef: fixture.refs.job,
+    })
+    assert.equal(result.status, 'ready')
+    assert.equal(result.data.platformUserRef, fixture.refs.secondUser)
+    assert.ok(fixture.state.detailEvaluations >= 3,
+      '一次未就绪读后必须取得连续两次完整一致投影')
+    assert.deepEqual(fixture.state.clicks, [fixture.refs.secondUser], '等待期间不得重复打开详情')
+    assert.equal(fixture.state.modals.length, 0)
   } finally {
     fixture.restore()
   }
