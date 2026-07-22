@@ -116,9 +116,19 @@ globalThis.fetch = async (url, init = {}) => {
   if (String(url).endsWith('/admin/job-config/source')) {
     return new Response(JSON.stringify({
       config: {
-        configured: init.method === 'POST', baseUrlConfigured: init.method === 'POST',
-        machineIdConfigured: init.method === 'POST', licenseTokenConfigured: init.method === 'POST',
+        configured: false, baseUrlConfigured: false,
+        machineIdConfigured: false, licenseTokenConfigured: false,
+        machineIdentityReady: true, machineMatch: false,
       },
+    }), { status: 200 })
+  }
+  if (String(url).endsWith('/admin/job-config/activate')) {
+    return new Response(JSON.stringify({
+      activated: true, synced: true, status: 'bound', customer: { name: '合成客户', status: 'active' },
+      contexts: [{
+        contextId: 'ctx-safe', revisionHash: 'revision-activated', displayName: '合成职位',
+        environment: 'online', documentCount: 10,
+      }],
     }), { status: 200 })
   }
   if (String(url).endsWith('/admin/job-config/sync-current')) {
@@ -203,8 +213,8 @@ const {
 } = await import(authModuleUrl)
 await authApi.health()
 const maskedJobSource = await authApi.jobConfigSource()
-const savedJobSource = await authApi.saveJobConfigSource({
-  base_url: 'http://legacy.fixture', machine_id: 'machine-private', license_token: 'token-private',
+const activatedJobSource = await authApi.activateJobConfigSource({
+  base_url: 'http://legacy.fixture', invite_code: 'invite-private',
 })
 const syncedJobSource = await authApi.syncCurrentJobConfig()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
@@ -271,18 +281,20 @@ check(requests.every((request) => request.headers.get('Authorization') === 'Bear
 check(requests.every((request) => !request.url.includes('test-memory-token')), 'token 不进入 URL')
 const encodedMessageRequest = requests.find((request) => request.url.includes('/admin/messages?'))
 check(encodedMessageRequest?.url.includes('platform=zhi%26lian') && encodedMessageRequest.url.includes('accountRef=account+ref'), 'M2 查询参数经过 URL 编码')
-const jobSourceSaveRequest = requests.find((request) => request.url.endsWith('/admin/job-config/source') && request.body)
-const jobSourceSaveBody = JSON.parse(String(jobSourceSaveRequest?.body || '{}'))
+const jobSourceActivationRequest = requests.find((request) => request.url.endsWith('/admin/job-config/activate') && request.body)
+const jobSourceActivationBody = JSON.parse(String(jobSourceActivationRequest?.body || '{}'))
 check(
-  maskedJobSource.config.configured === false && savedJobSource.config.configured === true
+  maskedJobSource.config.configured === false && activatedJobSource.activated === true
+    && activatedJobSource.synced === true && activatedJobSource.contexts[0]?.revisionHash === 'revision-activated'
     && syncedJobSource.contexts[0]?.revisionHash === 'revision-safe',
-  '职位配置源读取、保存、同步使用 masked 状态与 revision 元数据',
+  '职位配置源读取、激活、自动同步与手工重试只返回 masked 状态及 revision 元数据',
 )
 check(
-  Object.keys(jobSourceSaveBody).sort().join(',') === 'base_url,license_token,machine_id'
-    && jobSourceSaveBody.machine_id === 'machine-private' && jobSourceSaveBody.license_token === 'token-private'
-    && !String(jobSourceSaveRequest?.url).includes('machine-private') && !String(jobSourceSaveRequest?.url).includes('token-private'),
-  '旧后台凭据只进入本地管理 POST 正文，不进入 URL',
+  Object.keys(jobSourceActivationBody).sort().join(',') === 'base_url,invite_code'
+    && jobSourceActivationBody.invite_code === 'invite-private'
+    && !String(jobSourceActivationRequest?.url).includes('invite-private')
+    && !Object.hasOwn(jobSourceActivationBody, 'machine_id') && !Object.hasOwn(jobSourceActivationBody, 'license_token'),
+  '界面只提交后台地址和一次性激活码，不接受 machineId/licenseToken 注入',
 )
 const bindRequest = requests.find((request) => request.url.includes('/admin/accounts/bind'))
 const bindBody = JSON.parse(String(bindRequest?.body || '{}'))

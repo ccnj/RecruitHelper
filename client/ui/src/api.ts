@@ -237,12 +237,29 @@ export interface JobConfigSourceView {
   baseUrlConfigured: boolean
   machineIdConfigured: boolean
   licenseTokenConfigured: boolean
+  machineIdentityReady: boolean
+  machineMatch: boolean
+  customerName?: string
+  customerStatus?: string
 }
 
-export interface JobConfigSourceInput {
+export interface JobConfigActivationInput {
   base_url: string
-  machine_id: string
-  license_token: string
+  invite_code: string
+}
+
+export interface JobConfigActivationResult {
+  activated: boolean
+  synced: boolean
+  status: string
+  customer: {
+    id?: number
+    name?: string
+    status?: string
+    subscription_ends_at?: string
+  }
+  contexts: M5AIContextView[]
+  syncError?: string
 }
 
 export interface SendIntentView {
@@ -519,7 +536,7 @@ export const api = {
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
-  saveJobConfigSource: (config: JobConfigSourceInput) => post<{ config: JobConfigSourceView }>('/admin/job-config/source', config),
+  activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
   bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {
     contextId, revisionHash,

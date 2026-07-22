@@ -566,14 +566,13 @@ function M5AIConfiguration() {
   const [contextsError, setContextsError] = useState('')
   const [bundleText, setBundleText] = useState('')
   const [selectedRevision, setSelectedRevision] = useState('')
-  const [contextBusy, setContextBusy] = useState<'sync' | 'import' | 'bind' | ''>('')
+  const [contextBusy, setContextBusy] = useState<'activate' | 'sync' | 'import' | 'bind' | ''>('')
   const [contextNotice, setContextNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
   const [jobSource, setJobSource] = useState<JobConfigSourceView | null>(null)
   const [jobSourceLoading, setJobSourceLoading] = useState(true)
   const [jobSourceError, setJobSourceError] = useState('')
   const [jobSourceBaseURL, setJobSourceBaseURL] = useState('')
-  const [jobSourceMachineID, setJobSourceMachineID] = useState('')
-  const [jobSourceToken, setJobSourceToken] = useState('')
+  const [jobSourceInviteCode, setJobSourceInviteCode] = useState('')
   const [providerConfig, setProviderConfig] = useState<M5ProviderConfigView | null>(null)
   const [providerLoading, setProviderLoading] = useState(true)
   const [providerError, setProviderError] = useState('')
@@ -627,27 +626,37 @@ function M5AIConfiguration() {
     void loadJobSource()
   }, [loadContexts, loadJobSource, loadProvider])
 
+  const activateJobSource = async () => {
+    setContextBusy('activate')
+    setContextNotice(null)
+    try {
+      const result = await api.activateJobConfigSource({
+        base_url: jobSourceBaseURL.trim(), invite_code: jobSourceInviteCode.trim(),
+      })
+      const synced = Array.isArray(result.contexts) ? result.contexts : []
+      if (synced[0]) setSelectedRevision(synced[0].revisionHash)
+      setJobSourceBaseURL('')
+      setJobSourceInviteCode('')
+      setJobSourceError('')
+      setContextNotice(result.synced
+        ? { kind: 'ok', text: '旧后台已正式激活，当前职位已同步为本地不可变版本。' }
+        : { kind: 'bad', text: result.syncError || '激活已成功，但当前职位同步失败；可直接重试同步。' })
+      await loadJobSource()
+      await loadContexts()
+    } catch (reason) {
+      setContextNotice({ kind: 'bad', text: errorText(reason) })
+    } finally {
+      setContextBusy('')
+    }
+  }
+
   const syncCurrentJob = async () => {
     setContextBusy('sync')
     setContextNotice(null)
     try {
-      let source = jobSource
-      if (!source?.configured || jobSourceBaseURL.trim() || jobSourceMachineID.trim() || jobSourceToken.trim()) {
-        const saved = await api.saveJobConfigSource({
-          base_url: jobSourceBaseURL.trim(),
-          machine_id: jobSourceMachineID.trim(),
-          license_token: jobSourceToken.trim(),
-        })
-        source = saved.config
-        setJobSource(source)
-      }
       const result = await api.syncCurrentJobConfig()
       const synced = Array.isArray(result.contexts) ? result.contexts : []
       if (synced[0]) setSelectedRevision(synced[0].revisionHash)
-      setJobSourceBaseURL('')
-      setJobSourceMachineID('')
-      setJobSourceToken('')
-      setJobSourceError('')
       setContextNotice({ kind: 'ok', text: '旧后台当前职位已同步为本地不可变版本。' })
       await loadContexts()
     } catch (reason) {
@@ -721,9 +730,9 @@ function M5AIConfiguration() {
 
   const providerReady = providerConfig?.baseUrlConfigured === true && providerConfig.keyConfigured === true
   const sourceReady = jobSource?.configured === true
-  const sourceInputsReady = (jobSource?.baseUrlConfigured || jobSourceBaseURL.trim() !== '')
-    && (jobSource?.machineIdConfigured || jobSourceMachineID.trim() !== '')
-    && (jobSource?.licenseTokenConfigured || jobSourceToken.trim() !== '')
+    && jobSource.machineIdentityReady === true && jobSource.machineMatch === true
+  const activationInputsReady = (jobSource?.baseUrlConfigured || jobSourceBaseURL.trim() !== '')
+    && jobSourceInviteCode.trim() !== ''
 
   return (
     <section className="m5-ai-panel" aria-labelledby="m5-ai-title">
@@ -743,8 +752,8 @@ function M5AIConfiguration() {
           <header><span>01</span><div><strong id="m5-import-title">同步职位资料</strong><small>旧后台当前职位 · 不继承旧模型密钥</small></div></header>
           <div className="m5-provider-state m5-source-state">
             <span>后台地址 <strong>{jobSource?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
-            <span>旧机器凭据 <strong>{jobSource?.machineIdConfigured ? '已配置' : '未配置'}</strong></span>
-            <span>旧授权凭据 <strong>{jobSource?.licenseTokenConfigured ? '已配置' : '未配置'}</strong></span>
+            <span>本机身份 <strong>{jobSource?.machineIdentityReady ? '可用' : '不可用'}</strong></span>
+            <span>正式授权 <strong>{sourceReady ? jobSource?.customerName || '已激活' : '未激活或不匹配'}</strong></span>
           </div>
           <label htmlFor="job-source-base-url">旧后台地址</label>
           <input
@@ -755,32 +764,32 @@ function M5AIConfiguration() {
             autoComplete="off"
             placeholder={jobSource?.baseUrlConfigured ? '留空则保留现有地址' : 'http://…'}
           />
-          <label htmlFor="job-source-machine-id">旧 machineId（仅用于认证）</label>
+          <label htmlFor="job-source-invite-code">后台激活码</label>
           <input
-            id="job-source-machine-id"
+            id="job-source-invite-code"
             type="password"
-            value={jobSourceMachineID}
-            onChange={(event) => setJobSourceMachineID(event.target.value)}
+            value={jobSourceInviteCode}
+            onChange={(event) => setJobSourceInviteCode(event.target.value)}
             autoComplete="new-password"
-            placeholder={jobSource?.machineIdConfigured ? '留空则保留现有值' : '输入旧 machineId'}
-          />
-          <label htmlFor="job-source-token">旧 licenseToken</label>
-          <input
-            id="job-source-token"
-            type="password"
-            value={jobSourceToken}
-            onChange={(event) => setJobSourceToken(event.target.value)}
-            autoComplete="new-password"
-            placeholder={jobSource?.licenseTokenConfigured ? '留空则保留现有值' : '输入旧 licenseToken'}
+            placeholder="输入一次性激活码"
           />
           {jobSourceError && <p className="m5-ai-message bad" role="alert">{jobSourceError}</p>}
           <button
             type="button"
-            disabled={contextBusy !== '' || jobSourceLoading || !sourceInputsReady}
-            onClick={() => void syncCurrentJob()}
+            disabled={contextBusy !== '' || jobSourceLoading || !activationInputsReady}
+            onClick={() => void activateJobSource()}
           >
-            {contextBusy === 'sync' ? '正在同步…' : sourceReady ? '同步当前职位' : '保存并同步当前职位'}
+            {contextBusy === 'activate' ? '正在激活并同步…' : sourceReady ? '重新激活并同步' : '激活并同步当前职位'}
           </button>
+          {sourceReady && (
+            <button
+              type="button"
+              disabled={contextBusy !== '' || jobSourceLoading}
+              onClick={() => void syncCurrentJob()}
+            >
+              {contextBusy === 'sync' ? '正在同步…' : '仅重新同步当前职位'}
+            </button>
+          )}
           <details className="m5-manual-import">
             <summary>开发期手工导入 JSON</summary>
             <textarea
