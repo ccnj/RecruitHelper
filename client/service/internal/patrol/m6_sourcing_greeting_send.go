@@ -153,6 +153,11 @@ func (m *Manager) locateSourcingGreetingTarget(
 	seenWindows := make(map[string]struct{}, m.config.MaxPages)
 	move := protocol.SourcingWindowMoveReset
 	for page := 0; page < m.config.MaxPages; page++ {
+		if page > 0 {
+			if err := m.config.InteractionPaceWait(ctx); err != nil {
+				return err
+			}
+		}
 		window, err := m.readSourcingGreetingWindow(ctx, generation, move)
 		if err != nil {
 			return err
@@ -175,7 +180,7 @@ func (m *Manager) locateSourcingGreetingTarget(
 			}
 		}
 		if matches == 1 {
-			return nil
+			return m.config.InteractionPaceWait(ctx)
 		}
 		if matches > 1 {
 			return ErrSourcingGreetingWindowRepeated

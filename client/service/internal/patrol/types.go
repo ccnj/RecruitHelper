@@ -216,8 +216,9 @@ type realClock struct{}
 func (realClock) Now() time.Time { return time.Now() }
 
 const (
-	sourcingPaceMin = 800 * time.Millisecond
-	sourcingPaceMax = 2200 * time.Millisecond
+	interactionPaceMin = time.Second
+	sourcingPaceMin    = 2 * time.Second
+	sourcingPaceMax    = 4 * time.Second
 )
 
 func randomSourcingPaceDelay() time.Duration {
@@ -226,6 +227,17 @@ func randomSourcingPaceDelay() time.Duration {
 
 func defaultSourcingPaceWait(ctx context.Context) error {
 	timer := time.NewTimer(randomSourcingPaceDelay())
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func defaultInteractionPaceWait(ctx context.Context) error {
+	timer := time.NewTimer(interactionPaceMin)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -248,9 +260,10 @@ type Config struct {
 	DailyStartHour           int
 	NewRoundID               func() string
 	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
-	// 生产默认使用 0.8～2.2 秒随机等待；测试可注入无等待实现，手端
+	// 生产默认使用 2～4 秒随机等待；测试可注入无等待实现，手端
 	// 仍无业务定时器。
-	SourcingPaceWait func(context.Context) error
+	SourcingPaceWait    func(context.Context) error
+	InteractionPaceWait func(context.Context) error
 }
 
 func (c Config) withDefaults() Config {
@@ -286,6 +299,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SourcingPaceWait == nil {
 		c.SourcingPaceWait = defaultSourcingPaceWait
+	}
+	if c.InteractionPaceWait == nil {
+		c.InteractionPaceWait = defaultInteractionPaceWait
 	}
 	return c
 }
@@ -358,7 +374,8 @@ func errorCode(err error) string {
 func validateConfig(c Config) error {
 	if c.PatrolInterval <= 0 || c.IdentityFreshFor <= 0 || c.CoalesceWindow <= 0 ||
 		c.MinimumRoundGap <= 0 || c.ManualQuiet <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
-		c.DailyStartHour < 0 || c.DailyStartHour > 23 || c.SourcingPaceWait == nil {
+		c.DailyStartHour < 0 || c.DailyStartHour > 23 || c.SourcingPaceWait == nil ||
+		c.InteractionPaceWait == nil {
 		return fmt.Errorf("patrol config 含非正参数: %+v", c)
 	}
 	return nil

@@ -30,6 +30,18 @@ func TestDefaultSourcingPaceWaitHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestDefaultInteractionPaceWaitHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := defaultInteractionPaceWait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消未中断平台交互等待: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("取消后仍阻塞: %s", elapsed)
+	}
+}
+
 func TestSkipsUnreadableSourcingTargetRequiresExactMachineTuple(t *testing.T) {
 	tests := []struct {
 		name string

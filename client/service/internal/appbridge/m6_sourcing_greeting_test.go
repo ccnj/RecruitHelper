@@ -172,6 +172,9 @@ func prepareGeneratedSourcingGreeting(
 		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
 		patrol.Config{
 			Clock: h.clock, Location: time.UTC, MaxPages: 4,
+			InteractionPaceWait: func(ctx context.Context) error {
+				return ctx.Err()
+			},
 			SourcingPaceWait: func(ctx context.Context) error {
 				if err := ctx.Err(); err != nil {
 					return err

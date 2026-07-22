@@ -352,6 +352,9 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 	paceWaits := 0
 	manager, err := patrol.NewManager(st, PatrolRunner{Dispatcher: dispatcher}, sourcingActorHands{}, patrol.Config{
 		Clock: clock, Location: time.UTC, IdentityFreshFor: time.Hour,
+		InteractionPaceWait: func(ctx context.Context) error {
+			return ctx.Err()
+		},
 		SourcingPaceWait: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err

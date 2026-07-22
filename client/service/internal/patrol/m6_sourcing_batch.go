@@ -142,6 +142,9 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if err := a.setStage("advancingSourcingWindow"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockWindowReadFailed, err)
 		}
+		if err := a.waitSourcingInteractionPace(ctx); err != nil {
+			return err
+		}
 		next, err := a.readSourcingWindow(ctx, protocol.SourcingWindowMoveNext)
 		if err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockWindowReadFailed, err)
@@ -176,11 +179,19 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 // 释放 Manager 短锁，使真人暂停、账号改绑与传感事件仍可生效；醒来后必须
 // 重新通过同一派发门禁，不能把等待前的授权带到等待后。
 func (a *roundActor) waitSourcingPace(ctx context.Context) error {
+	return a.waitSourcingDelay(ctx, a.manager.config.SourcingPaceWait)
+}
+
+func (a *roundActor) waitSourcingInteractionPace(ctx context.Context) error {
+	return a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait)
+}
+
+func (a *roundActor) waitSourcingDelay(ctx context.Context, wait func(context.Context) error) error {
 	var waitErr error
 	func() {
 		a.manager.mu.Unlock()
 		defer a.manager.mu.Lock()
-		waitErr = a.manager.config.SourcingPaceWait(ctx)
+		waitErr = wait(ctx)
 	}()
 	if waitErr != nil {
 		return waitErr
