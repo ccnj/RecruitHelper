@@ -1,6 +1,7 @@
 package adminhttp
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/store"
 )
+
+const adminTestMachineID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func syntheticCurrentJobConfig(t *testing.T) []byte {
 	t.Helper()
@@ -61,7 +64,7 @@ func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
 		}
 		var body map[string]string
 		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body) != 2 ||
-			body["machineId"] != "machine-private" || body["licenseToken"] != "token-private" {
+			body["machineId"] != adminTestMachineID || body["licenseToken"] != "token-private" {
 			t.Errorf("旧后台请求体错误: %+v", body)
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -81,12 +84,14 @@ func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := jobconfig.NewSource(configStore, backend.Client())
+	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+		return adminTestMachineID, nil
+	})
 	api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetJobConfigSource(source)
 	mux := http.NewServeMux()
 	api.Routes(mux)
 
-	configBody := `{"base_url":` + mustJSONString(t, backend.URL) + `,"machine_id":"machine-private","license_token":"token-private"}`
+	configBody := `{"base_url":` + mustJSONString(t, backend.URL) + `,"machine_id":"` + adminTestMachineID + `","license_token":"token-private"}`
 	configRequest := httptest.NewRequest(http.MethodPost, "/admin/job-config/source", strings.NewReader(configBody))
 	configRequest.Header.Set("Content-Type", "application/json")
 	configResponse := httptest.NewRecorder()
@@ -94,7 +99,7 @@ func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
 	if configResponse.Code != http.StatusOK || !strings.Contains(configResponse.Body.String(), `"configured":true`) {
 		t.Fatalf("保存旧后台配置失败: code=%d body=%s", configResponse.Code, configResponse.Body.String())
 	}
-	for _, forbidden := range []string{backend.URL, "machine-private", "token-private"} {
+	for _, forbidden := range []string{backend.URL, adminTestMachineID, "token-private"} {
 		if strings.Contains(configResponse.Body.String(), forbidden) {
 			t.Fatalf("配置响应泄漏 %q", forbidden)
 		}
