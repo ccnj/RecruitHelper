@@ -2190,7 +2190,10 @@ test('candidate.readSourcingResume MAIN 对身份、详情绑定与必需分区�
     try {
       mutate(fixture)
       const result = await zhilianTestHooks.mainReadSourcingResume([])
-      assert.deepEqual(result, { status: 'failed', reason: expectedReason }, name)
+      const expected = (expectedReason === 'work_unresolved' || expectedReason === 'education_unresolved')
+        ? { status: 'failed', reason: expectedReason, failedPlatformUserRef: fixture.refs.firstUser }
+        : { status: 'failed', reason: expectedReason }
+      assert.deepEqual(result, expected, name)
       assert.equal(result.data, undefined, `${name} 不得返回部分 data`)
     } finally {
       fixture.restore()
@@ -2270,6 +2273,85 @@ test('candidate.readSourcingResume outer 只使用最近聚焦窗口活动页并
       'mainProbeZhilian', 'mainProbeZhilian', 'mainReadSourcingResume', 'mainProbeZhilian',
     ])
     assert.equal(progress.at(-1)[1], 100)
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('candidate.readSourcingResume outer 同命令最多跳过五个内容不完整候选人并读取第六位', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'd'.repeat(64)
+  const tab = {
+    id: 602,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=private',
+  }
+  const mainExclusions = []
+  let sourcingCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func, args }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+          imListVisible: false,
+        } }]
+        if (func.name === 'mainReadSourcingResume') {
+          sourcingCalls += 1
+          mainExclusions.push(structuredClone(args[0]))
+          if (sourcingCalls <= 5) return [{ result: {
+            status: 'failed', reason: 'work_unresolved',
+            failedPlatformUserRef: `fixture-bad-user-${sourcingCalls}`,
+          } }]
+          return [{ result: {
+            status: 'ready',
+            data: {
+              platformUserRef: 'fixture-good-user', displayName: '合成候选人',
+              positionRef: 'fixture-job', positionTitle: '合成职位', contactState: 'unestablished',
+              observedAt: Date.now(), basic: [{ label: '姓名', value: '合成候选人' }],
+              expectations: [{ label: '求职期望', value: '合成职位' }], selfEvaluation: '',
+              education: '合成教育', workExperiences: '合成经历',
+            },
+          } }]
+        }
+        throw new Error(`unexpected MAIN ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'read-sourcing-skip-fixture',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() {},
+    async progress() {},
+  }
+  try {
+    const data = await readZhilianSourcingResume(
+      { excludePlatformUserRefs: ['fixture-existing-user'] }, context, fingerprint)
+    assert.equal(data.platformUserRef, 'fixture-good-user')
+    assert.equal(sourcingCalls, 6)
+    assert.deepEqual(mainExclusions, [
+      ['fixture-existing-user'],
+      ['fixture-existing-user', 'fixture-bad-user-1'],
+      ['fixture-existing-user', 'fixture-bad-user-1', 'fixture-bad-user-2'],
+      ['fixture-existing-user', 'fixture-bad-user-1', 'fixture-bad-user-2', 'fixture-bad-user-3'],
+      [
+        'fixture-existing-user', 'fixture-bad-user-1', 'fixture-bad-user-2',
+        'fixture-bad-user-3', 'fixture-bad-user-4',
+      ],
+      [
+        'fixture-existing-user', 'fixture-bad-user-1', 'fixture-bad-user-2',
+        'fixture-bad-user-3', 'fixture-bad-user-4', 'fixture-bad-user-5',
+      ],
+    ])
   } finally {
     globalThis.chrome = originalChrome
   }

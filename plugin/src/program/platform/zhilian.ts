@@ -177,6 +177,15 @@ const MAIN_SOURCING_RESUME_FAILURE_REASONS = [
   'unexpected',
 ] as const
 
+const MAIN_SOURCING_RESUME_SKIPPABLE_FAILURE_REASONS = [
+  'basic_unresolved',
+  'expectations_unresolved',
+  'work_unresolved',
+  'education_unresolved',
+  'self_evaluation_unresolved',
+  'payload_limit',
+] as const
+
 type MainSourcingResumeFailureReason = typeof MAIN_SOURCING_RESUME_FAILURE_REASONS[number]
 
 interface MainSourcingResumeReady {
@@ -187,6 +196,9 @@ interface MainSourcingResumeReady {
 interface MainSourcingResumeFailed {
   status: 'failed'
   reason: MainSourcingResumeFailureReason
+  // 只在稳定身份已确定、失败又仅属于该候选人简历内容时携带。它只在
+  // 同一条手侧命令内扩充临时排除集，不进入协议 result、日志或脑账本。
+  failedPlatformUserRef?: string
 }
 
 type MainSourcingResumeResult = MainSourcingResumeReady | MainSourcingResumeFailed
@@ -991,9 +1003,13 @@ async function mainReadSourcingResume(
     return raw.normalize('NFC').replace(/\u00a0/gu, ' ').split(/\n+/u)
       .map((line) => line.replace(/[\t ]+/gu, ' ').trim()).filter(Boolean).join('\n')
   }
-  const failed = (reason: MainSourcingResumeFailureReason): MainSourcingResumeFailed => ({
+  const failed = (
+    reason: MainSourcingResumeFailureReason,
+    failedPlatformUserRef?: string,
+  ): MainSourcingResumeFailed => ({
     status: 'failed',
     reason,
+    ...(failedPlatformUserRef ? { failedPlatformUserRef } : {}),
   })
   const route = (): URL | null => {
     try {
@@ -1160,7 +1176,7 @@ async function mainReadSourcingResume(
     }
     if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
         semanticCounts.work !== 1 || semanticCounts.education !== 1) {
-      return failed('basic_unresolved')
+      return failed('basic_unresolved', target.platformUserRef)
     }
     let otherIndex = 0
     const basicLabel = (value: string): string => {
@@ -1179,28 +1195,28 @@ async function mainReadSourcingResume(
     ]
 
     const purposeSections = visibleAll(modal, '.resume-section-purposes')
-    if (purposeSections.length !== 1) return failed('expectations_unresolved')
+    if (purposeSections.length !== 1) return failed('expectations_unresolved', target.platformUserRef)
     const purposeText = blockText(purposeSections[0])
-    if (!purposeText) return failed('expectations_unresolved')
+    if (!purposeText) return failed('expectations_unresolved', target.platformUserRef)
     const expectations: CandidateResumeLabelValue[] = [{ label: '求职期望', value: purposeText }]
 
     const workSections = visibleAll(modal, '.new-work-experiences')
-    if (workSections.length !== 1) return failed('work_unresolved')
+    if (workSections.length !== 1) return failed('work_unresolved', target.platformUserRef)
     const workExperiences = blockText(workSections[0])
-    if (!workExperiences) return failed('work_unresolved')
+    if (!workExperiences) return failed('work_unresolved', target.platformUserRef)
     const educationSections = visibleAll(modal, '.new-education-experiences')
-    if (educationSections.length !== 1) return failed('education_unresolved')
+    if (educationSections.length !== 1) return failed('education_unresolved', target.platformUserRef)
     const education = blockText(educationSections[0])
-    if (!education) return failed('education_unresolved')
+    if (!education) return failed('education_unresolved', target.platformUserRef)
 
     const selfSections = visibleAll(modal,
       '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
-    if (selfSections.length > 1) return failed('self_evaluation_unresolved')
+    if (selfSections.length > 1) return failed('self_evaluation_unresolved', target.platformUserRef)
     let selfEvaluation = ''
     if (selfSections.length === 1) {
       const lines = blockText(selfSections[0]).split('\n')
         .filter((line) => line !== '自我评价' && line !== '自我描述')
-      if (lines.length === 0) return failed('self_evaluation_unresolved')
+      if (lines.length === 0) return failed('self_evaluation_unresolved', target.platformUserRef)
       selfEvaluation = lines.join('\n')
     }
 
@@ -1221,7 +1237,7 @@ async function mainReadSourcingResume(
       workExperiences,
     }
     if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) {
-      return failed('payload_limit')
+      return failed('payload_limit', target.platformUserRef)
     }
     return { status: 'ready', data }
   } catch {
@@ -2635,7 +2651,13 @@ function validSourcingResumeResult(value: unknown): value is MainSourcingResumeR
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   if (record.status === 'failed') {
-    return typeof record.reason === 'string' &&
+    const failedRefValid = record.failedPlatformUserRef === undefined ||
+      (typeof record.failedPlatformUserRef === 'string' && record.failedPlatformUserRef.length >= 1 &&
+        record.failedPlatformUserRef.length <= 512 &&
+        new TextEncoder().encode(record.failedPlatformUserRef).length <= 2_048 &&
+        typeof record.reason === 'string' &&
+        (MAIN_SOURCING_RESUME_SKIPPABLE_FAILURE_REASONS as readonly string[]).includes(record.reason))
+    return failedRefValid && typeof record.reason === 'string' &&
       (MAIN_SOURCING_RESUME_FAILURE_REASONS as readonly string[]).includes(record.reason)
   }
   return record.status === 'ready' && record.data !== null && typeof record.data === 'object' &&
@@ -2708,14 +2730,24 @@ export async function readZhilianSourcingResume(
   // 打开/切换详情最坏会产生幂等已查看记录；intrusive 命令在第一次页面动作前
   // 越过唯一 cancellation barrier，但不写 effectful witness。
   await ctx.beforeSideEffect()
-  const result = await runMain(tab.id, mainReadSourcingResume, [
-    [...args.excludePlatformUserRefs],
-  ])
-  if (!validSourcingResumeResult(result)) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐页采集结果结构不符合当前契约', 'manualOnly')
+  const commandExclusions = [...args.excludePlatformUserRefs]
+  let result: MainSourcingResumeResult = { status: 'failed', reason: 'no_candidate' }
+  let skippedCandidates = 0
+  for (;;) {
+    result = await runMain(tab.id, mainReadSourcingResume, [[...commandExclusions]])
+    if (!validSourcingResumeResult(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐页采集结果结构不符合当前契约', 'manualOnly')
+    }
+    if (result.status === 'ready') break
+    if (!result.failedPlatformUserRef) throwSourcingResumeFailure(result)
+    if (skippedCandidates >= 5) throwSourcingResumeFailure(result)
+    if (commandExclusions.includes(result.failedPlatformUserRef)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐页采集候选人跳过集合未推进', 'manualOnly')
+    }
+    commandExclusions.push(result.failedPlatformUserRef)
+    skippedCandidates += 1
+    ctx.checkpoint()
   }
-  if (result.status === 'failed') throwSourcingResumeFailure(result)
-
   ctx.checkpoint()
   const latestTabs = await activeSourcingTabs()
   if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
