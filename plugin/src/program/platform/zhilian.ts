@@ -1153,10 +1153,29 @@ async function mainReadSourcingWindow(
     }
     element.dispatchEvent?.(new Event('scroll', { bubbles: true }))
   }
+  const viewportSnapshot = (
+    snapshot: WindowSnapshot,
+    scroller: HTMLElement | null,
+  ): WindowSnapshot | MainSourcingWindowFailed => {
+    if (!scroller) return snapshot
+    const rootScroller = scroller === document.scrollingElement
+    const containerRect = rootScroller
+      ? { top: 0, bottom: Math.max(Number(globalThis.innerHeight) || Number(scroller.clientHeight) || 0, 1) }
+      : scroller.getBoundingClientRect()
+    const sources = snapshot.sources.filter(({ item }) => {
+      const rect = item.getBoundingClientRect()
+      return rect.bottom > containerRect.top + 1 && rect.top < containerRect.bottom - 1
+    })
+    if (sources.length === 0) return failed('list_source_unavailable')
+    return { ...snapshot, sources }
+  }
 
   try {
     if (!['current', 'reset', 'next'].includes(move)) return failed('unexpected')
-    const initial = collect()
+    const initialAll = collect()
+    if ('status' in initialAll) return initialAll
+    const scroller = scrollContainer(initialAll.sources[0])
+    const initial = viewportSnapshot(initialAll, scroller)
     if ('status' in initial) return initial
     const initialSignature = signature(initial)
     if (move === 'current') {
@@ -1172,7 +1191,6 @@ async function mainReadSourcingWindow(
       }
     }
 
-    const scroller = scrollContainer(initial.sources[0])
     if (!scroller) return failed('scroll_unavailable')
     const beforeTop = scrollTop(scroller)
     if (move === 'reset') {
@@ -1183,7 +1201,9 @@ async function mainReadSourcingWindow(
       scrollTo(scroller, Math.min(beforeTop + viewport, maxTop))
     }
 
-    let latest = collect()
+    const firstCollected = collect()
+    if ('status' in firstCollected) return firstCollected
+    let latest = viewportSnapshot(firstCollected, scroller)
     if ('status' in latest) return latest
     let latestSignature = signature(latest)
     let stableRounds = 0
@@ -1191,7 +1211,9 @@ async function mainReadSourcingWindow(
     while (Date.now() < settleUntil) {
       if ((latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop) && stableRounds >= 2) break
       await new Promise((resolve) => setTimeout(resolve, 120))
-      const next = collect()
+      const nextCollected = collect()
+      if ('status' in nextCollected) return nextCollected
+      const next = viewportSnapshot(nextCollected, scroller)
       if ('status' in next) return next
       const nextSignature = signature(next)
       stableRounds = nextSignature === latestSignature ? stableRounds + 1 : 0

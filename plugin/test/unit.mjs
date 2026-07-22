@@ -2179,6 +2179,7 @@ function installM6SourcingWindowFixture(options = {}) {
     textContent: text,
     innerText: text,
     parentElement: null,
+    getBoundingClientRect: () => ({ top: 10, bottom: 90, height: 80 }),
     getClientRects: () => [{}],
     querySelectorAll() { return [] },
   })
@@ -2206,6 +2207,13 @@ function installM6SourcingWindowFixture(options = {}) {
   const makeItem = (platformUserRef, index) => {
     const item = node(`绝不返回姓名${index}`)
     item.parentElement = options.documentRoot === true ? body : scroller
+    if (options.staticDom === true) {
+      item.getBoundingClientRect = () => {
+        const top = (index - 1) * 50 - scroller.scrollTop
+        return { top, bottom: top + 50, height: 50 }
+      }
+      item.getClientRects = () => [item.getBoundingClientRect()]
+    }
     item.__vue__ = {
       _props: {
         source: {
@@ -2222,6 +2230,7 @@ function installM6SourcingWindowFixture(options = {}) {
     refs.firstWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 1)),
     refs.secondWindow.map((platformUserRef, index) => makeItem(platformUserRef, index + 3)),
   ]
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 })
   globalThis.location = {
     href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
   }
@@ -2235,7 +2244,9 @@ function installM6SourcingWindowFixture(options = {}) {
     body,
     scrollingElement: options.documentRoot === true ? scroller : null,
     querySelectorAll(selector) {
-      if (selector === '.recommend-list__left div[role="listitem"]') return windows[state.index]
+      if (selector === '.recommend-list__left div[role="listitem"]') {
+        return options.staticDom === true ? windows.flat() : windows[state.index]
+      }
       if (selector === '.job-pane__item--active .job-pane__item-job-title') {
         return state.visibleTitles.map((title) => node(title))
       }
@@ -2299,6 +2310,25 @@ test('candidate.readSourcingWindow MAIN 接受无 overflow 标记但可滚动的
     assert.equal(next.data.moved, true)
     assert.equal(fixture.scroller.scrollTop, fixture.scroller.clientHeight,
       'next 只推进一个 document viewport')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN 从常驻 DOM 中只返回当前视口候选人', async () => {
+  const fixture = installM6SourcingWindowFixture({ startAt: 'first', staticDom: true })
+  try {
+    assert.equal(globalThis.document.querySelectorAll(
+      '.recommend-list__left div[role="listitem"]',
+    ).length, 4, '四张卡始终常驻 DOM')
+    const current = await zhilianTestHooks.mainReadSourcingWindow('current')
+    assert.equal(current.status, 'ready')
+    assert.deepEqual(current.data.platformUserRefs, fixture.refs.firstWindow)
+
+    const next = await zhilianTestHooks.mainReadSourcingWindow('next')
+    assert.equal(next.status, 'ready')
+    assert.deepEqual(next.data.platformUserRefs, fixture.refs.secondWindow)
+    assert.equal(next.data.moved, true)
   } finally {
     fixture.restore()
   }
