@@ -61,6 +61,11 @@ func (m *Manager) SendSelectedSourcingGreetings(
 
 		var generation *sourcingGreetingGeneration
 		if target.EffectIntentID == nil {
+			// 每个全新候选人的 effect intent 形成前由脑侧加入随机节奏；
+			// 已绑定 WAL 的恢复路径不得再次等待或重新定位。
+			if err := m.config.SourcingPaceWait(ctx); err != nil {
+				return progress, err
+			}
 			generation, err = m.currentSourcingGreetingGeneration(ctx, *target)
 			if err != nil {
 				return progress, err

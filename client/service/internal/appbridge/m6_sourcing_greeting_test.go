@@ -163,13 +163,23 @@ func TestSelectedSourcingBatchWithoutProviderCreatesNoGreetingReservation(t *tes
 func prepareGeneratedSourcingGreeting(
 	t *testing.T,
 	h *sourcingActorHarness,
-) (*patrol.Manager, string, *store.SourcingGreetingSendTarget) {
+) (*patrol.Manager, string, *store.SourcingGreetingSendTarget, *int) {
 	t.Helper()
 	batchID := prepareSelectedSourcingBatch(t, h, 1)
 	advice := &sourcingBatchGreetingAdvice{}
+	paceWaits := 0
 	manager, err := patrol.NewManager(
 		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
-		patrol.Config{Clock: h.clock, Location: time.UTC, MaxPages: 4}, advice,
+		patrol.Config{
+			Clock: h.clock, Location: time.UTC, MaxPages: 4,
+			SourcingPaceWait: func(ctx context.Context) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				paceWaits++
+				return nil
+			},
+		}, advice,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -182,12 +192,12 @@ func prepareGeneratedSourcingGreeting(
 	if err != nil || target == nil || target.EffectIntentID != nil {
 		t.Fatalf("缺少未绑定发送目标: target=%+v err=%v", target, err)
 	}
-	return manager, batchID, target
+	return manager, batchID, target, &paceWaits
 }
 
 func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
-	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+	manager, batchID, target, paceWaits := prepareGeneratedSourcingGreeting(t, h)
 
 	h.sender.windows = [][]string{{"other-visible-candidate"}, {target.PlatformUserRef}}
 	h.sender.window = 1
@@ -205,6 +215,9 @@ func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(
 	if h.sender.greetingCount() != 1 {
 		t.Fatalf("应只调用一次 chat.sendGreeting: %d", h.sender.greetingCount())
 	}
+	if *paceWaits != 1 {
+		t.Fatalf("全新自动招呼必须恰好等待一次: %d", *paceWaits)
+	}
 
 	beforeMoves, beforeGreetings := len(h.sender.moves), h.sender.greetingCount()
 	replayed, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
@@ -215,11 +228,14 @@ func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(
 		t.Fatalf("完成态重复调用仍读列表或发送: moves=%d/%d greetings=%d/%d",
 			len(h.sender.moves), beforeMoves, h.sender.greetingCount(), beforeGreetings)
 	}
+	if *paceWaits != 1 {
+		t.Fatalf("完成态重放不得再次等待: %d", *paceWaits)
+	}
 }
 
 func TestSelectedSourcingGreetingMissingTargetCreatesNoEffect(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
-	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+	manager, batchID, target, _ := prepareGeneratedSourcingGreeting(t, h)
 	h.sender.windows = [][]string{{"other-visible-candidate"}}
 	h.sender.window = 0
 	h.sender.moves = nil
@@ -277,7 +293,7 @@ func (h *sourcingOfflineHands) callCount() int {
 
 func TestBoundSourcingGreetingSkipsRelocationAndConvergesAfterContextLoss(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
-	manager, batchID, target := prepareGeneratedSourcingGreeting(t, h)
+	manager, batchID, target, _ := prepareGeneratedSourcingGreeting(t, h)
 	h.sender.windows = [][]string{{target.PlatformUserRef}}
 	h.sender.window = 0
 	h.sender.moves = nil

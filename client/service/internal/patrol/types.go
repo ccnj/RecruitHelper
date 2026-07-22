@@ -247,8 +247,9 @@ type Config struct {
 	MaxPages                 int
 	DailyStartHour           int
 	NewRoundID               func() string
-	// SourcingPaceWait 只控制脑侧相邻候选人动作的节奏。生产默认使用
-	// 0.8～2.2 秒随机等待；测试可注入无等待实现，手端仍无业务定时器。
+	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
+	// 生产默认使用 0.8～2.2 秒随机等待；测试可注入无等待实现，手端
+	// 仍无业务定时器。
 	SourcingPaceWait func(context.Context) error
 }
 
