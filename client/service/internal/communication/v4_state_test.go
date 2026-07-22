@@ -20,7 +20,7 @@ func TestNewV4GreetedStateFreezesInitialBudgetsAndClocks(t *testing.T) {
 	at := v4Time(8)
 	state := NewV4GreetedState(at)
 	if state.MainStatus != V4StatusGreeted || state.WechatState != V4WechatNotInvited ||
-		state.ColdPromptRemaining != 2 || state.ColdWechatRemaining != 1 || state.ClockUncertain ||
+		state.ColdPromptRemaining != 2 || state.ColdWechatRemaining != 1 || state.RealMessageRound != 1 || state.ClockUncertain ||
 		state.LastOutboundAt == nil || state.LastBodyAt == nil || !state.LastOutboundAt.Equal(*at) || !state.LastBodyAt.Equal(*at) {
 		t.Fatalf("招呼后初态错误: %+v", state)
 	}
@@ -30,7 +30,7 @@ func TestNewV4GreetedStateFreezesInitialBudgetsAndClocks(t *testing.T) {
 	}
 
 	unknown := NewV4GreetedState(nil)
-	if !unknown.ClockUncertain || unknown.LastOutboundAt != nil || unknown.LastBodyAt != nil {
+	if !unknown.ClockUncertain || !unknown.BodyClockUncertain || unknown.LastOutboundAt != nil || unknown.LastBodyAt != nil {
 		t.Fatalf("缺时钟必须禁用推算而不是猜时间: %+v", unknown)
 	}
 }
@@ -45,7 +45,7 @@ func TestV4RealExpressionAdvancesMainlineOpensRoundAndCancelsCards(t *testing.T)
 	event := v4MessageEvent("message:30", 30, EventCandidateExpressionReceived)
 
 	decision, err := ApplyV4BusinessEvent(state, event)
-	if err != nil || decision.State.MainStatus != V4StatusInvited || decision.State.RealMessageRound != 1 ||
+	if err != nil || decision.State.MainStatus != V4StatusInvited || decision.State.RealMessageRound != 2 ||
 		decision.State.LastRealMessageSeq != 30 || decision.Dialogue != V4DialogueClassifyAndReply ||
 		decision.ManualReason != "" {
 		t.Fatalf("真实表达未交回普通对话: decision=%+v err=%v", decision, err)
@@ -60,7 +60,7 @@ func TestV4RealExpressionAdvancesMainlineOpensRoundAndCancelsCards(t *testing.T)
 	}
 
 	replayed, err := ApplyV4BusinessEvent(decision.State, event)
-	if err != nil || replayed.State.RealMessageRound != 1 || replayed.Dialogue != V4DialogueClassifyAndReply {
+	if err != nil || replayed.State.RealMessageRound != 2 || replayed.Dialogue != V4DialogueClassifyAndReply {
 		t.Fatalf("同一消息重放应复用同一轮，而不是新开轮: decision=%+v err=%v", replayed, err)
 	}
 }
@@ -81,7 +81,7 @@ func TestV4RealExpressionWakesEndedButNeverWakesEliminated(t *testing.T) {
 	eliminated.ColdWechatRemaining = 0
 	decision, err = ApplyV4BusinessEvent(eliminated, v4MessageEvent("message:3", 3, EventCandidateExpressionReceived))
 	if err != nil || decision.State.MainStatus != V4StatusEliminated || decision.Dialogue != V4DialogueNone ||
-		decision.State.RealMessageRound != 0 {
+		decision.State.RealMessageRound != 1 {
 		t.Fatalf("已淘汰档案不应被唤醒: decision=%+v err=%v", decision, err)
 	}
 }

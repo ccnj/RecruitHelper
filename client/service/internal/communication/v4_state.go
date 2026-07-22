@@ -68,6 +68,7 @@ const (
 	V4ActionInterviewRejectionReply  V4ActionKind = "interviewRejectionReply"
 	V4ActionColdPrompt               V4ActionKind = "coldPrompt"
 	V4ActionColdWechatText           V4ActionKind = "coldWechatText"
+	V4ActionColdWechatInvite         V4ActionKind = "coldWechatInvite"
 	V4ActionInterviewFollowup        V4ActionKind = "interviewFollowup"
 	V4ActionInterviewInvite          V4ActionKind = "interviewInvite"
 	V4ActionArchive                  V4ActionKind = "archive"
@@ -100,6 +101,7 @@ type V4State struct {
 
 	ColdPromptRemaining    uint8
 	ColdWechatRemaining    uint8
+	ColdPromptSentCount    uint8
 	RealMessageRound       uint64
 	LastColdPromptRound    uint64
 	LastRealMessageSeq     int64
@@ -107,12 +109,14 @@ type V4State struct {
 
 	RetentionSent                bool
 	ClosingSent                  bool
+	ColdWechatTextSent           bool
 	WechatReceiptSent            bool
 	InterviewAcceptedReceiptSent bool
 
-	LastOutboundAt *time.Time
-	LastBodyAt     *time.Time
-	ClockUncertain bool
+	LastOutboundAt     *time.Time
+	LastBodyAt         *time.Time
+	ClockUncertain     bool
+	BodyClockUncertain bool
 
 	InterviewGroups []V4InterviewFollowupGroup
 }
@@ -137,6 +141,8 @@ type V4ConfirmedAction struct {
 	MessageSeq     int64
 	CardMessageSeq int64
 	SentAt         *time.Time
+	Round          uint64
+	Stage          uint8
 }
 
 type v4ExpressionDisposition uint8
@@ -150,10 +156,11 @@ const (
 func NewV4GreetedState(greetedAt *time.Time) V4State {
 	state := V4State{
 		MainStatus: V4StatusGreeted, WechatState: V4WechatNotInvited,
-		ColdPromptRemaining: 2, ColdWechatRemaining: 1,
+		ColdPromptRemaining: 2, ColdWechatRemaining: 1, RealMessageRound: 1,
 	}
 	if greetedAt == nil {
 		state.ClockUncertain = true
+		state.BodyClockUncertain = true
 		return state
 	}
 	state.LastOutboundAt = copyTime(greetedAt)
@@ -299,6 +306,59 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		state.MainStatus = V4StatusInvited
 		addV4InterviewGroup(&state, action.MessageSeq)
 		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, false)
+	case V4ActionColdPrompt:
+		if action.MessageSeq <= 0 || action.Round == 0 || action.Round > state.RealMessageRound || action.Stage < 1 || action.Stage > 2 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		if action.Stage <= state.ColdPromptSentCount {
+			return state, nil
+		}
+		if action.Stage != state.ColdPromptSentCount+1 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		state.ColdPromptSentCount++
+		if state.ColdPromptRemaining > 0 {
+			state.ColdPromptRemaining--
+		}
+		if action.Round == state.RealMessageRound {
+			state.LastColdPromptRound = action.Round
+		}
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+	case V4ActionColdWechatText:
+		if action.MessageSeq <= 0 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		state.ColdWechatTextSent = true
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+	case V4ActionColdWechatInvite:
+		if action.MessageSeq <= 0 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		if state.ColdWechatRemaining > 0 {
+			state.ColdWechatRemaining--
+		}
+		advanceV4Wechat(&state, V4WechatInvited)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, false)
+	case V4ActionInterviewFollowup:
+		if action.MessageSeq <= 0 || action.CardMessageSeq <= 0 || action.Stage < 1 || action.Stage > 3 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		index := exactV4InterviewGroup(state.InterviewGroups, action.CardMessageSeq)
+		if index < 0 {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		group := &state.InterviewGroups[index]
+		if group.NextStage > action.Stage {
+			return state, nil
+		}
+		if group.NextStage != action.Stage {
+			return V4State{}, ErrInvalidV4StateTransition
+		}
+		group.NextStage++
+		if group.NextStage > 3 {
+			group.Active = false
+		}
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
 	case V4ActionNotifyWechat, V4ActionNotifyInterviewAccepted:
 		// Notifications are externally deduplicated by ActionKey and do not
 		// change the profile communication aggregate.
@@ -478,19 +538,25 @@ func advanceV4OutboundClock(state *V4State, messageSeq int64, occurredAt *time.T
 	}
 	if occurredAt == nil {
 		state.ClockUncertain = true
+		if isBody {
+			state.BodyClockUncertain = true
+		}
 		return
 	}
 	at := occurredAt.UTC()
 	if state.LastOutboundAt != nil && at.Before(*state.LastOutboundAt) {
 		state.ClockUncertain = true
+		if isBody {
+			state.BodyClockUncertain = true
+		}
 		return
 	}
 	state.LastOutboundAt = &at
+	state.ClockUncertain = false
 	if isBody {
 		bodyAt := at
 		state.LastBodyAt = &bodyAt
-		// A later known body is a fresh anchor for both relative clocks.
-		state.ClockUncertain = false
+		state.BodyClockUncertain = false
 	}
 }
 
@@ -512,10 +578,12 @@ func validateV4State(state V4State) error {
 		return ErrInvalidV4StateTransition
 	}
 	if v4WechatRank(state.WechatState) < 0 || state.ColdPromptRemaining > 2 || state.ColdWechatRemaining > 1 ||
+		state.ColdPromptSentCount > 2 || state.ColdPromptRemaining+state.ColdPromptSentCount > 2 ||
 		state.LastColdPromptRound > state.RealMessageRound || state.LastRealMessageSeq < 0 || state.LastOutboundMessageSeq < 0 {
 		return ErrInvalidV4StateTransition
 	}
-	if (state.MainStatus == V4StatusEnded) != (state.EndReason != "") || (state.ClosingSent && !state.RetentionSent) {
+	if (state.MainStatus == V4StatusEnded) != (state.EndReason != "") ||
+		(state.EndReason != "" && !validV4EndReason(state.EndReason)) || (state.ClosingSent && !state.RetentionSent) {
 		return ErrInvalidV4StateTransition
 	}
 	previousSeq := int64(0)
@@ -527,4 +595,14 @@ func validateV4State(state V4State) error {
 		previousSeq = group.MessageSeq
 	}
 	return nil
+}
+
+func validV4EndReason(reason V4EndReason) bool {
+	switch reason {
+	case V4EndRejected, V4EndBlacklisted, V4EndFallback, V4EndSilentInterview,
+		V4EndSilentWechatInvited, V4EndSilentWechatExchanged, V4EndSilent:
+		return true
+	default:
+		return false
+	}
 }

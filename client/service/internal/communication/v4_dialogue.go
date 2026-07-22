@@ -42,6 +42,9 @@ type V4PlannedAction struct {
 	Kind           V4ActionKind
 	Text           string
 	CardMessageSeq int64
+	Round          uint64
+	Stage          uint8
+	EndReason      V4EndReason
 }
 
 type V4DialogueInput struct {

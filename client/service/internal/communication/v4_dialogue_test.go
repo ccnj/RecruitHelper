@@ -19,13 +19,17 @@ func availableV4FixedPhrases() V4FixedPhraseView {
 			Kind: V4PhraseWechatReceipt, SourceScene: "wechatAccepted",
 			State: V4PhraseAvailable, Text: "好的，晚点加你。",
 		},
+		V4PhraseColdWechat: {
+			Kind: V4PhraseColdWechat, SourceScene: "silence48Wechat",
+			State: V4PhraseAvailable, Text: "如果方便，也可以先加微信了解。",
+		},
 	}}
 }
 
 func activeV4DialogueState() V4State {
 	state := NewV4GreetedState(v4Time(8))
 	state.MainStatus = V4StatusCommunicating
-	state.RealMessageRound = 1
+	state.RealMessageRound = 2
 	state.LastRealMessageSeq = 3
 	return state
 }
