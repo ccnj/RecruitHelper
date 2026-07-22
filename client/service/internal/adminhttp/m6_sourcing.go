@@ -1,11 +1,13 @@
 package adminhttp
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
 )
 
@@ -21,6 +23,19 @@ type sourcingStatusView struct {
 	LastAttemptAt       *time.Time                `json:"lastAttemptAt,omitempty"`
 	PositionBoundAt     *time.Time                `json:"positionBoundAt,omitempty"`
 	EndedAt             *time.Time                `json:"endedAt,omitempty"`
+}
+
+type sourcingScoringStatusView struct {
+	BatchID             string `json:"batchId"`
+	ContextRevisionHash string `json:"contextRevisionHash"`
+	TargetCount         int    `json:"targetCount"`
+	OKCount             int64  `json:"okCount"`
+	FailedCount         int64  `json:"failedCount"`
+	InFlightCount       int64  `json:"inFlightCount"`
+	PendingCount        int64  `json:"pendingCount"`
+	Provider            string `json:"provider,omitempty"`
+	Model               string `json:"model,omitempty"`
+	Completed           bool   `json:"completed"`
 }
 
 func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
@@ -105,4 +120,76 @@ func (a *API) writeSourcingStatus(w http.ResponseWriter, key store.AccountKey) {
 		PositionBoundAt: progress.PositionBoundAt, EndedAt: progress.EndedAt,
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sourcing": view})
+}
+
+func (a *API) runSourcingScoring(w http.ResponseWriter, r *http.Request) {
+	if !a.requireActor(w) {
+		return
+	}
+	batchID, ok := scoringBatchIDFromBody(w, r)
+	if !ok {
+		return
+	}
+	progress, err := a.actor.ScoreCompletedSourcingBatch(r.Context(), batchID)
+	if err != nil {
+		status := http.StatusConflict
+		switch {
+		case errors.Is(err, store.ErrSourcingBatchNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, patrol.ErrSourcingScoringProviderUnavailable):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			status = http.StatusRequestTimeout
+		}
+		body := map[string]any{"error": err.Error()}
+		if progress != nil {
+			body["sourcingScoring"] = sourcingScoringView(*progress)
+		}
+		writeJSON(w, status, body)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sourcingScoring": sourcingScoringView(*progress)})
+}
+
+func (a *API) sourcingScoringStatus(w http.ResponseWriter, r *http.Request) {
+	batchID := strings.TrimSpace(r.URL.Query().Get("batchId"))
+	if batchID == "" || len(batchID) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的正式采集 batchId"})
+		return
+	}
+	progress, err := a.st.SourcingBatchScoringProgress(batchID)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, store.ErrSourcingBatchNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sourcingScoring": sourcingScoringView(*progress)})
+}
+
+func scoringBatchIDFromBody(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req struct {
+		BatchID string `json:"batchId"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return "", false
+	}
+	batchID := strings.TrimSpace(req.BatchID)
+	if batchID == "" || len(batchID) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的正式采集 batchId"})
+		return "", false
+	}
+	return batchID, true
+}
+
+func sourcingScoringView(progress store.SourcingBatchScoringProgress) sourcingScoringStatusView {
+	return sourcingScoringStatusView{
+		BatchID: progress.BatchID, ContextRevisionHash: progress.ContextRevisionHash,
+		TargetCount: progress.TargetCount, OKCount: progress.OKCount, FailedCount: progress.FailedCount,
+		InFlightCount: progress.InFlightCount, PendingCount: progress.PendingCount,
+		Provider: progress.Provider, Model: progress.Model, Completed: progress.Completed,
+	}
 }

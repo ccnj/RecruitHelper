@@ -145,4 +145,33 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	if err != nil || account == nil || account.StoppedAt == nil || account.PausedReason != patrol.PauseUserStopped {
 		t.Fatalf("stop 未暂停账号 actor: account=%+v err=%v", account, err)
 	}
+
+	missingScoringBatch := httptest.NewRequest(http.MethodPost, "/admin/sourcing/scoring/run",
+		strings.NewReader(`{"batchId":"missing-scoring-batch"}`))
+	missingScoringBatch.Header.Set("Content-Type", "application/json")
+	missingScoringBatchResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingScoringBatchResponse, missingScoringBatch)
+	if missingScoringBatchResponse.Code != http.StatusNotFound {
+		t.Fatalf("统一评分未知批次未返回 404: code=%d body=%s",
+			missingScoringBatchResponse.Code, missingScoringBatchResponse.Body.String())
+	}
+
+	missingScoringStatus := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/scoring/status?batchId=missing-scoring-batch", nil)
+	missingScoringStatusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingScoringStatusResponse, missingScoringStatus)
+	if missingScoringStatusResponse.Code != http.StatusNotFound {
+		t.Fatalf("统一评分状态未知批次未返回 404: code=%d body=%s",
+			missingScoringStatusResponse.Code, missingScoringStatusResponse.Body.String())
+	}
+
+	invalidScoringRun := httptest.NewRequest(http.MethodPost, "/admin/sourcing/scoring/run",
+		strings.NewReader(`{"batchId":""}`))
+	invalidScoringRun.Header.Set("Content-Type", "application/json")
+	invalidScoringRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidScoringRunResponse, invalidScoringRun)
+	if invalidScoringRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf("统一评分缺少 batchId 未拒绝: code=%d body=%s",
+			invalidScoringRunResponse.Code, invalidScoringRunResponse.Body.String())
+	}
 }
