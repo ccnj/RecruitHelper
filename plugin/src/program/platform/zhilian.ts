@@ -1366,25 +1366,25 @@ async function mainReadSourcingResume(
       .filter((button) => clean(button.textContent) === '打招呼') as HTMLButtonElement[]
     return buttons.length === 1 && !buttons[0].disabled ? 'unestablished' : 'unknown'
   }
-  const interactionGapMs = 1_000
-  const resumeDwellMs = 2_000
+  const randomDelayMs = (minimumMs: number, maximumMs: number): number =>
+    minimumMs + Math.floor(Math.random() * (maximumMs - minimumMs + 1))
   const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
-  let lastInteractionAt = 0
-  let targetOpenedAt = 0
+  let nextInteractionNotBefore = 0
+  let targetCloseNotBefore = 0
   const waitBeforeInteraction = async (notBeforeMs = 0): Promise<void> => {
-    const waitUntil = Math.max(notBeforeMs, lastInteractionAt > 0 ? lastInteractionAt + interactionGapMs : 0)
+    const waitUntil = Math.max(notBeforeMs, nextInteractionNotBefore)
     const delayMs = waitUntil - Date.now()
     if (delayMs > 0) await sleep(delayMs)
   }
   const clickInteraction = async (element: HTMLElement, notBeforeMs = 0): Promise<void> => {
     await waitBeforeInteraction(notBeforeMs)
     element.click()
-    lastInteractionAt = Date.now()
+    nextInteractionNotBefore = Date.now() + randomDelayMs(1_000, 1_500)
   }
   const closeOpenedDetail = async (): Promise<MainSourcingResumeFailed | null> => {
     let opened = visibleAll(document, '.new-shortcut-resume__modal')
     if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
-    await waitBeforeInteraction(targetOpenedAt + resumeDwellMs)
+    await waitBeforeInteraction(targetCloseNotBefore)
     opened = visibleAll(document, '.new-shortcut-resume__modal')
     if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
     const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
@@ -1432,6 +1432,9 @@ async function mainReadSourcingResume(
     const openedResumeNumber = opaque(currentRoute.searchParams.get('resumeNumber'))
     let targetAlreadyOpen = false
     const initiallyOpenedAt = modals.length === 1 ? Date.now() : 0
+    const initiallyCloseNotBefore = initiallyOpenedAt > 0
+      ? initiallyOpenedAt + randomDelayMs(2_000, 2_500)
+      : 0
     if (modals.length === 1) {
       const openedMatches = sources.filter((source) => source.resumeNumber === openedResumeNumber)
       if (!openedResumeNumber || openedMatches.length !== 1) return failed('stale_detail_ambiguous')
@@ -1439,7 +1442,7 @@ async function mainReadSourcingResume(
       if (!targetAlreadyOpen) {
         const closeButtons = visibleAll(modals[0], '.new-shortcut-resume__close')
         if (closeButtons.length !== 1) return failed('close_unavailable')
-        await clickInteraction(closeButtons[0], initiallyOpenedAt + resumeDwellMs)
+        await clickInteraction(closeButtons[0], initiallyCloseNotBefore)
         const closeUntil = Date.now() + 10_000
         while (Date.now() < closeUntil) {
           modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -1460,7 +1463,7 @@ async function mainReadSourcingResume(
         }
         target = rebound[0]
       } else {
-        targetOpenedAt = initiallyOpenedAt
+        targetCloseNotBefore = initiallyCloseNotBefore
       }
     } else if (openedResumeNumber) {
       return failed('stale_detail_ambiguous')
@@ -1470,11 +1473,13 @@ async function mainReadSourcingResume(
       const entries = visibleAll(target.item, '.resume-item__content')
       if (entries.length !== 1) return failed('entry_cardinality')
       await clickInteraction(entries[0])
-      targetOpenedAt = lastInteractionAt
       const openUntil = Date.now() + 10_000
       while (Date.now() < openUntil) {
         modals = visibleAll(document, '.new-shortcut-resume__modal')
-        if (modals.length !== 0) break
+        if (modals.length !== 0) {
+          targetCloseNotBefore = Date.now() + randomDelayMs(2_000, 2_500)
+          break
+        }
         await new Promise((resolve) => setTimeout(resolve, 120))
       }
     }
@@ -2138,11 +2143,10 @@ async function mainSendGreetingOnce(
     return checked ? 'checked' : 'unchecked'
   }
   const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
-  const interactionGapMs = 1_000
-  let lastInteractionAt = 0
+  const randomInteractionGapMs = (): number => 1_000 + Math.floor(Math.random() * 501)
+  let nextInteractionNotBefore = 0
   const waitInteractionGap = async (): Promise<void> => {
-    if (lastInteractionAt === 0) return
-    const delayMs = lastInteractionAt + interactionGapMs - Date.now()
+    const delayMs = nextInteractionNotBefore - Date.now()
     if (delayMs > 0) await sleep(delayMs)
   }
   const performInteraction = async (
@@ -2154,7 +2158,7 @@ async function mainSendGreetingOnce(
     try {
       interaction()
     } finally {
-      lastInteractionAt = Date.now()
+      nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
     }
     return true
   }
@@ -2447,7 +2451,7 @@ export async function sendZhilianGreeting(
   if (preparedRaw.status !== 'prepared') throwGreetingActionFailure(preparedRaw)
   const evaluatorArgs = [...evaluatorBase, args.text] as const
 
-  await new Promise<void>((resolve) => setTimeout(resolve, 1_000))
+  await new Promise<void>((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
   ctx.checkpoint()
   const preflight = await runMain(tabId, mainSendGreetingOnce, [...evaluatorArgs, 'preflight'])
   if (!validMainGreetingActionResult(preflight)) {

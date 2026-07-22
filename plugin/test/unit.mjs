@@ -3408,10 +3408,11 @@ function installM4GreetingOrchestrationFixture(options = {}) {
 
   // 压缩 production observer 的等待，不触碰 Dispatcher 的秒级 deadline/execBudget timer。
   globalThis.setTimeout = (callback, delay, ...args) => {
-    if (delay === 1_000) state.interactionPaceWaits += 1
+    const isInteractionPaceWait = delay >= 1_000 && delay <= 1_500
+    if (isInteractionPaceWait) state.interactionPaceWaits += 1
     return original.setTimeout(
       callback,
-      delay === 250 || delay === 120 || delay === 1_000 ? 0 : delay,
+      delay === 250 || delay === 120 || isInteractionPaceWait ? 0 : delay,
       ...args,
     )
   }
@@ -4068,7 +4069,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   let finalClicked = false
   globalThis.setTimeout = (callback, delay) => {
     if (delay === 250 && finalClicked && proofCalls > 0) postProofSettleWaits += 1
-    if (delay === 1_000) interactionPaceWaits += 1
+    if (delay >= 1_000 && delay <= 1_500) interactionPaceWaits += 1
     queueMicrotask(callback)
     return 1
   }
@@ -4141,7 +4142,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
     assert.equal(new Set(functions).size, 1,
       'prepare/preflight/commit 必须注入字面同一份 evaluator 函数')
     assert.equal(barriers, 1)
-    assert.equal(interactionPaceWaits, 1, '填入招呼正文后必须等待一秒再进入最终发送链')
+    assert.equal(interactionPaceWaits, 1, '填入招呼正文后必须等待 1～1.5 秒再进入最终发送链')
     assert.equal(proofCalls, 1, '同一目标“继续沟通”一次明确读取即构成正证')
     assert.equal(postProofSettleWaits, 1, '正证后只等待一次页面重渲染，不增加读取或动作')
   } finally {

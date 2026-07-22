@@ -217,9 +217,14 @@ func (realClock) Now() time.Time { return time.Now() }
 
 const (
 	interactionPaceMin = time.Second
+	interactionPaceMax = 1500 * time.Millisecond
 	sourcingPaceMin    = 2 * time.Second
 	sourcingPaceMax    = 4 * time.Second
 )
+
+func randomInteractionPaceDelay() time.Duration {
+	return interactionPaceMin + time.Duration(rand.Int64N(int64(interactionPaceMax-interactionPaceMin)+1))
+}
 
 func randomSourcingPaceDelay() time.Duration {
 	return sourcingPaceMin + time.Duration(rand.Int64N(int64(sourcingPaceMax-sourcingPaceMin)+1))
@@ -237,7 +242,7 @@ func defaultSourcingPaceWait(ctx context.Context) error {
 }
 
 func defaultInteractionPaceWait(ctx context.Context) error {
-	timer := time.NewTimer(interactionPaceMin)
+	timer := time.NewTimer(randomInteractionPaceDelay())
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

@@ -18,6 +18,15 @@ func TestRandomSourcingPaceDelayStaysWithinHumanizedBounds(t *testing.T) {
 	}
 }
 
+func TestRandomInteractionPaceDelayStaysWithinHumanizedBounds(t *testing.T) {
+	for range 1_000 {
+		delay := randomInteractionPaceDelay()
+		if delay < interactionPaceMin || delay > interactionPaceMax {
+			t.Fatalf("平台交互节奏越界: delay=%s want=[%s,%s]", delay, interactionPaceMin, interactionPaceMax)
+		}
+	}
+}
+
 func TestDefaultSourcingPaceWaitHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
