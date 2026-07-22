@@ -52,7 +52,7 @@ func syntheticCurrentJobConfig(t *testing.T) []byte {
 	return raw
 }
 
-func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
+func TestJobConfigCurrentSyncIsIdempotent(t *testing.T) {
 	var calls int
 	backendPayload := syntheticCurrentJobConfig(t)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,26 +84,17 @@ func TestJobConfigSourceSaveAndCurrentSyncSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := configStore.Save(jobconfig.Config{
+		BaseURL: backend.URL, MachineID: adminTestMachineID, LicenseToken: "token-private",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
 		return adminTestMachineID, nil
 	})
 	api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetJobConfigSource(source)
 	mux := http.NewServeMux()
 	api.Routes(mux)
-
-	configBody := `{"base_url":` + mustJSONString(t, backend.URL) + `,"machine_id":"` + adminTestMachineID + `","license_token":"token-private"}`
-	configRequest := httptest.NewRequest(http.MethodPost, "/admin/job-config/source", strings.NewReader(configBody))
-	configRequest.Header.Set("Content-Type", "application/json")
-	configResponse := httptest.NewRecorder()
-	mux.ServeHTTP(configResponse, configRequest)
-	if configResponse.Code != http.StatusOK || !strings.Contains(configResponse.Body.String(), `"configured":true`) {
-		t.Fatalf("保存旧后台配置失败: code=%d body=%s", configResponse.Code, configResponse.Body.String())
-	}
-	for _, forbidden := range []string{backend.URL, adminTestMachineID, "token-private"} {
-		if strings.Contains(configResponse.Body.String(), forbidden) {
-			t.Fatalf("配置响应泄漏 %q", forbidden)
-		}
-	}
 
 	for attempt := 0; attempt < 2; attempt++ {
 		syncRequest := httptest.NewRequest(http.MethodPost, "/admin/job-config/sync-current", strings.NewReader(`{}`))

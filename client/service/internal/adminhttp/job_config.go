@@ -67,45 +67,6 @@ func (a *API) activateJobConfigSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (a *API) saveJobConfigSourceConfig(w http.ResponseWriter, r *http.Request) {
-	if a.jobConfigSource == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "旧后台职位配置源尚未就绪"})
-		return
-	}
-	var request struct {
-		BaseURL      string `json:"base_url"`
-		MachineID    string `json:"machine_id"`
-		LicenseToken string `json:"license_token"`
-	}
-	if decodeJSON(r, &request) != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "旧后台职位配置源请求无效"})
-		return
-	}
-	config := jobconfig.Config{
-		BaseURL: strings.TrimSpace(request.BaseURL), MachineID: strings.TrimSpace(request.MachineID),
-		LicenseToken: strings.TrimSpace(request.LicenseToken),
-	}
-	if existing, err := a.jobConfigSource.LoadConfig(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "旧后台职位配置源读取失败"})
-		return
-	} else if existing != nil {
-		if config.BaseURL == "" {
-			config.BaseURL = existing.BaseURL
-		}
-		if config.MachineID == "" {
-			config.MachineID = existing.MachineID
-		}
-		if config.LicenseToken == "" {
-			config.LicenseToken = existing.LicenseToken
-		}
-	}
-	if err := a.jobConfigSource.SaveConfig(config); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "旧后台职位配置源缺少必填项或地址无效"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"config": config.View()})
-}
-
 func (a *API) syncCurrentJobConfig(w http.ResponseWriter, r *http.Request) {
 	if a.jobConfigSource == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "旧后台职位配置源尚未就绪"})

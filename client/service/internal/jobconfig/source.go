@@ -199,13 +199,6 @@ func (s *Source) LoadConfig() (*Config, error) {
 	return s.config.Load()
 }
 
-func (s *Source) SaveConfig(config Config) error {
-	if s == nil || s.config == nil {
-		return ErrConfigMissing
-	}
-	return s.config.Save(config)
-}
-
 func (s *Source) Status(ctx context.Context) (ConfigView, error) {
 	config, err := s.LoadConfig()
 	if err != nil {
@@ -299,7 +292,10 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 		Status:             strings.TrimSpace(response.Customer.Status),
 		SubscriptionEndsAt: strings.TrimSpace(response.Customer.SubscriptionEndsAt),
 	}
-	if err := s.SaveConfig(Config{
+	if s == nil || s.config == nil {
+		return BindResult{}, ErrConfigMissing
+	}
+	if err := s.config.Save(Config{
 		BaseURL: baseURL, MachineID: machineID, LicenseToken: response.LicenseToken, Customer: customer,
 	}); err != nil {
 		return BindResult{}, err
