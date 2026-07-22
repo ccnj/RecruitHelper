@@ -125,49 +125,11 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	// First settle one completed historical score without assuming its old
-	// recommendation detail is still open. A candidate captured and scored in
-	// this same round may continue into the single automatic greeting below.
-	if _, err := a.decidePendingSourcingCandidate(); err != nil {
+	// 采集阶段只产生简历采集事实。评分、选人和招呼分别由后续显式阶段
+	// 消费完整批次，不能退化成逐候选人的内联流水线。
+	if _, err := a.captureSourcingResume(ctx); err != nil {
+		a.handleCommandFailure(err)
 		return err
-	}
-	processedSourcing, scoredRun, err := a.scorePendingSourcingRun(ctx)
-	if err != nil {
-		return err
-	}
-	if scoredRun != nil {
-		if _, err := a.decideSourcingCandidate(scoredRun.RunID); err != nil {
-			return err
-		}
-	}
-	if !processedSourcing {
-		captured, err := a.captureSourcingResume(ctx)
-		if err != nil {
-			a.handleCommandFailure(err)
-			return err
-		}
-		if captured != nil {
-			_, freshScore, err := a.scorePendingSourcingRun(ctx)
-			if err != nil {
-				return err
-			}
-			if freshScore != nil && freshScore.RunID == captured.RunID {
-				selection, err := a.decideSourcingCandidate(freshScore.RunID)
-				if err != nil {
-					return err
-				}
-				attempted, err := a.sendSelectedSourcingGreeting(ctx, selection)
-				if err != nil {
-					a.handleCommandFailure(err)
-					return err
-				}
-				if attempted {
-					// 一轮至多一条候选人可见消息。招呼正证完成后立即收尾，
-					// 列表对账留给下一轮。
-					return nil
-				}
-			}
-		}
 	}
 
 	if err := a.setStage("readingList"); err != nil {
