@@ -91,14 +91,18 @@ func (m *Manager) EnableToday(key store.AccountKey) error {
 	})
 }
 
-// StartSourcing 原子更新账号的职位 revision 与每日 actor 门。职位文档在此
-// 只做可执行视图校验；本批次不调用模型，也不产生候选人档案或副作用。
-func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string) error {
+// StartSourcing 创建或复用唯一 preparing 正式批次，并开启账号 actor。
+// SourcingBatch 是采集运行的唯一事实；Account 上的旧 sourcing_enabled
+// 不再授权正式采集，只保留 schema 兼容。
+func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targetCount int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	revisionHash = strings.TrimSpace(revisionHash)
 	if revisionHash == "" || len(revisionHash) > 128 {
 		return store.ErrJobAIContextRevisionInvalid
+	}
+	if targetCount <= 0 {
+		return store.ErrSourcingBatchInvalid
 	}
 	now := m.now()
 	if now.In(m.config.Location).Hour() < m.config.DailyStartHour {
@@ -114,16 +118,31 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string) error
 	if _, err := m5ai.DeriveSourcingView(revision.SourcePackage); err != nil {
 		return err
 	}
+	account, err := m.store.AccountByKey(key)
+	if err != nil {
+		return err
+	}
+	if account == nil {
+		return store.ErrAccountNotFound
+	}
+	// 先在副本上完成所有每日门禁校验，避免校验失败后留下空跑批次。
+	accountCheck := *account
+	if err := m.enableAccountToday(&accountCheck, now); err != nil {
+		return err
+	}
+	started, err := m.store.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: targetCount, StartedAt: now,
+	})
+	if err != nil {
+		return err
+	}
+	if started == nil || started.Batch.EndedAt != nil ||
+		(started.Batch.Status != store.SourcingBatchPreparing && started.Batch.Status != store.SourcingBatchCollecting) {
+		return store.ErrSourcingBatchStateConflict
+	}
 	return m.store.MutateAccount(key, func(account *store.Account) error {
-		if err := m.enableAccountToday(account, now); err != nil {
-			return err
-		}
-		account.SourcingEnabled = true
-		account.SourcingContextRevisionHash = revisionHash
-		account.SourcingStartedAt = timePointer(now)
-		account.SourcingLastAttemptAt = nil
-		account.SourcingLastErrorCode = ""
-		return nil
+		return m.enableAccountToday(account, now)
 	})
 }
 

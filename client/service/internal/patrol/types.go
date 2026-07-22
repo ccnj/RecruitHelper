@@ -21,14 +21,16 @@ const (
 
 	surfaceRecoverySuffix = "+surfaceRecovery"
 
-	PauseUserStopped       = "userStopped"
-	PauseUserRequested     = "userPaused"
-	PauseDailyExpired      = "dailyWindowExpired"
-	PauseLoginRequired     = "loginRequired"
-	PauseAccountMismatch   = "accountMismatch"
-	PauseIdentityInvalid   = "identityInvalid"
-	PauseSurfaceDrivenAway = "surfaceDrivenAway"
-	PauseHandManualReview  = "handManualReview"
+	PauseUserStopped           = "userStopped"
+	PauseUserRequested         = "userPaused"
+	PauseDailyExpired          = "dailyWindowExpired"
+	PauseLoginRequired         = "loginRequired"
+	PauseAccountMismatch       = "accountMismatch"
+	PauseIdentityInvalid       = "identityInvalid"
+	PauseSurfaceDrivenAway     = "surfaceDrivenAway"
+	PauseHandManualReview      = "handManualReview"
+	PauseSourcingBlocked       = "sourcingBlocked"
+	PauseSourcingTargetReached = "sourcingTargetReached"
 )
 
 var (
@@ -69,6 +71,7 @@ type RunRequest struct {
 // RunHandle 把短暂的“校验代际+落账+送入当前 socket”与可能持续几十秒的
 // 等待结果分开。Manager 只在 Start 周围持 actor 短锁，绝不跨网络等待。
 type RunHandle interface {
+	LogicalDispatchID() string
 	Wait(context.Context) (json.RawMessage, error)
 }
 

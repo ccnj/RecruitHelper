@@ -12,16 +12,12 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
-	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
 type sourcingActorClock struct{ now time.Time }
 
 func (c *sourcingActorClock) Now() time.Time { return c.now }
-func (c *sourcingActorClock) Add(delta time.Duration) {
-	c.now = c.now.Add(delta)
-}
 
 type sourcingActorHands struct{}
 
@@ -29,34 +25,29 @@ func (sourcingActorHands) State(context.Context, string) (patrol.HandState, erro
 	return patrol.HandState{Online: true, Session: "session-sourcing-actor", BootID: "boot-sourcing-actor"}, nil
 }
 
-type sourcingActorAdvice struct {
-	requests []m5ai.CompletionRequest
-}
+type sourcingActorAdvice struct{ requests []m5ai.CompletionRequest }
 
 func (*sourcingActorAdvice) ProviderName() string { return "fixture-provider" }
 func (*sourcingActorAdvice) ModelName() string    { return "fixture-model" }
-
 func (a *sourcingActorAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
 	a.requests = append(a.requests, request)
-	zero := 0
-	return m5ai.CompletionResponse{
-		JSONText: `{"评分":7,"说明":"discard"}`,
-		Usage: m5ai.CompletionUsage{
-			InputTokens: 4, OutputTokens: 2, ReasoningTokens: &zero,
-		},
-		ReasoningContentEmpty: true,
-	}, nil
+	return m5ai.CompletionResponse{}, fmt.Errorf("正式纯采集不得调用 provider")
 }
 
 type sourcingActorSender struct {
-	dispatcher         *dispatch.Dispatcher
-	order              []string
-	candidates         []protocol.CandidateReadSourcingResumeData
-	sourcingExclusions [][]string
-	greetings          []string
+	dispatcher *dispatch.Dispatcher
+	order      []string
+	moves      []protocol.SourcingWindowMove
+	targets    []string
+	windows    [][]string
+	window     int
+	position   string
+	candidates map[string]protocol.CandidateReadSourcingResumeData
+
+	targetPositionOverride string
 }
 
 func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope) error {
@@ -69,57 +60,64 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 	}
 	s.order = append(s.order, body.Name)
 	var data any
-	var evidence []protocol.Evidence
 	switch body.Name {
 	case protocol.PrimProbePlatform:
 		fingerprint := "principal-sourcing-actor"
 		data = protocol.ProbePlatformData{
-			ContentScriptOk: true, LoginState: protocol.LoginStateIn, PageKind: protocol.PageKindIm,
-			PrincipalFingerprint: &fingerprint, Surface: &protocol.PlatformSurface{ImListVisible: true},
+			ContentScriptOk: true, LoginState: protocol.LoginStateIn, PageKind: protocol.PageKindRecommend,
+			PrincipalFingerprint: &fingerprint,
 		}
-	case protocol.PrimCandidateReadSourcingResume:
-		var args protocol.CandidateReadSourcingResumeArgs
+	case protocol.PrimCandidateReadSourcingWindow:
+		var args protocol.CandidateReadSourcingWindowArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
 			return err
 		}
-		s.sourcingExclusions = append(s.sourcingExclusions, append([]string(nil), args.ExcludePlatformUserRefs...))
-		excluded := make(map[string]struct{}, len(args.ExcludePlatformUserRefs))
-		for _, ref := range args.ExcludePlatformUserRefs {
-			excluded[ref] = struct{}{}
-		}
-		for _, candidate := range s.candidates {
-			if _, found := excluded[candidate.PlatformUserRef]; !found {
-				data = candidate
-				break
+		s.moves = append(s.moves, args.Move)
+		moved := false
+		switch args.Move {
+		case protocol.SourcingWindowMoveCurrent:
+			// current 不发生导航，moved=false 是合法返回。
+		case protocol.SourcingWindowMoveNext:
+			if s.window+1 < len(s.windows) {
+				s.window++
+				moved = true
 			}
+		default:
+			return fmt.Errorf("测试未实现窗口动作 %s", args.Move)
 		}
-		if data == nil {
-			return fmt.Errorf("fixture 没有未排除候选人")
+		if s.window < 0 || s.window >= len(s.windows) {
+			return fmt.Errorf("fixture 没有窗口 %d", s.window)
 		}
-	case protocol.PrimChatSendGreeting:
-		var args protocol.ChatSendGreetingArgs
+		data = protocol.CandidateReadSourcingWindowData{
+			PositionRef: s.position, PlatformUserRefs: append([]string(nil), s.windows[s.window]...),
+			Moved: moved, ObservedAt: time.Now().UnixMilli(),
+		}
+	case protocol.PrimCandidateReadSourcingTargetResume:
+		var args protocol.CandidateReadSourcingTargetResumeArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
 			return err
 		}
-		s.greetings = append(s.greetings, args.Text)
-		data = protocol.ChatSendGreetingData{
-			PlatformUserRef: args.PlatformUserRef, PositionRef: args.PositionRef,
-			ConversationRef: "conversation-sourcing-actor",
-			ContentHash:     syncledger.HashText(args.Text), ObservedAt: time.Now().UnixMilli(),
+		s.targets = append(s.targets, args.PlatformUserRef)
+		candidate, ok := s.candidates[args.PlatformUserRef]
+		if !ok {
+			return fmt.Errorf("fixture 缺少定点候选人")
 		}
-		evidence = []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}}
-	case protocol.PrimChatReadList:
-		data = protocol.ChatReadListData{Sessions: []protocol.ConversationSummary{}, Complete: true}
+		if s.targetPositionOverride != "" {
+			candidate.PositionRef = s.targetPositionOverride
+		}
+		data = candidate
+	case protocol.PrimChatReadList, protocol.PrimChatSendGreeting:
+		return fmt.Errorf("正式纯采集越界调用 %s", body.Name)
 	default:
 		return fmt.Errorf("unexpected primitive %s", body.Name)
 	}
-	dataRaw, err := protocol.Encode(data)
+	raw, err := protocol.Encode(data)
 	if err != nil {
 		return err
 	}
 	s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
 	s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
-		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: dataRaw, ExecMs: 1, Evidence: evidence,
+		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: raw, ExecMs: 1,
 	})
 	return nil
 }
@@ -127,33 +125,28 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 func (*sourcingActorSender) HandSession(string) (string, string, bool) {
 	return "session-sourcing-actor", "boot-sourcing-actor", true
 }
-
 func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
-			protocol.PrimCandidateReadSourcingResume + "@1",
-			protocol.PrimChatSendGreeting + "@1",
-			protocol.PrimChatReadList + "@1",
+			protocol.PrimCandidateReadSourcingWindow + "@1",
+			protocol.PrimCandidateReadSourcingTargetResume + "@1",
 		}, []string{
 			string(protocol.FeatureLease1), string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
-			string(protocol.FeatureWitness1),
 		}, true
 }
-
 func (*sourcingActorSender) HandContractMatch(string) (bool, bool) { return true, true }
 func (*sourcingActorSender) HandWitness(string) (dispatch.HandWitness, bool) {
-	return dispatch.HandWitness{StoreID: "witness-sourcing-actor"}, true
+	return dispatch.HandWitness{}, false
 }
 func (*sourcingActorSender) CloseHand(string, string, string) bool { return true }
 func (*sourcingActorSender) HandOfflineMs(string) int64            { return 0 }
 
 func sourcingActorRevision(at time.Time) m5ai.ContextRevision {
-	replyPrompt, intentPrompt, facts := "reply", "intent", "facts"
 	documents := []m5ai.JobConfigDocument{
 		{DocType: "候选人筛选", Content: `{"minScore":5}`},
-		{DocType: "多轮沟通", Content: replyPrompt},
-		{DocType: "客户事实库", Content: facts},
-		{DocType: "意向判断", Content: intentPrompt},
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "意向判断", Content: "intent"},
 		{DocType: "打分", Content: "请评分 {resume_json}"},
 		{DocType: "招呼语", Content: `{"prompt":"状态={career_state};简历={resume_summary_json}"}`},
 		{DocType: "职位筛选", Content: `[]`},
@@ -164,21 +157,42 @@ func sourcingActorRevision(at time.Time) m5ai.ContextRevision {
 		SourceKind: "localImport", SourceJobRef: "61", DisplayName: "合成职位",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
-			ReplyPrompt: replyPrompt, IntentPrompt: intentPrompt,
-			CustomerFacts: facts, MappingVersion: m5ai.MappingVersion,
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts", MappingVersion: m5ai.MappingVersion,
 		},
 		CreatedAt: at,
 	}
 }
 
-func TestSourcingActorCapturesOnlyAcrossConsecutiveRounds(t *testing.T) {
+func sourcingCandidate(ref, position string, observedAt time.Time) protocol.CandidateReadSourcingResumeData {
+	return protocol.CandidateReadSourcingResumeData{
+		PlatformUserRef: ref, PositionRef: position,
+		ContactState: protocol.CandidateContactStateUnestablished, ObservedAt: observedAt.UnixMilli(),
+		Basic: []protocol.CandidateResumeLabelValue{}, Expectations: []protocol.CandidateResumeLabelValue{},
+		SelfEvaluation: "", Education: "", WorkExperiences: "",
+	}
+}
+
+type sourcingActorHarness struct {
+	t          *testing.T
+	store      *store.Store
+	manager    *patrol.Manager
+	sender     *sourcingActorSender
+	advice     *sourcingActorAdvice
+	clock      *sourcingActorClock
+	key        store.AccountKey
+	revision   m5ai.ContextRevision
+	position   string
+	candidates []protocol.CandidateReadSourcingResumeData
+}
+
+func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHarness {
+	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	clock := &sourcingActorClock{now: now}
 	revision := sourcingActorRevision(now.Add(-time.Hour))
 	if _, _, err := st.SaveJobAIContextRevision(revision); err != nil {
 		t.Fatal(err)
@@ -189,106 +203,116 @@ func TestSourcingActorCapturesOnlyAcrossConsecutiveRounds(t *testing.T) {
 	}
 	if err := st.BindAccountPrincipal(
 		key, "hand-sourcing-actor", "principal-sourcing-actor",
-		"session-sourcing-actor", "boot-sourcing-actor", now.Add(-time.Hour),
+		"session-sourcing-actor", "boot-sourcing-actor", now.Add(-2*time.Hour),
 	); err != nil {
 		t.Fatal(err)
 	}
-	positionTitle := "actor-sensitive-position"
-	candidates := make([]protocol.CandidateReadSourcingResumeData, 3)
-	for i := range candidates {
-		displayName := fmt.Sprintf("actor-sensitive-name-%d", i+1)
-		candidates[i] = protocol.CandidateReadSourcingResumeData{
-			PlatformUserRef: fmt.Sprintf("actor-sensitive-user-ref-%d", i+1), DisplayName: &displayName,
-			PositionRef: "actor-position-ref", PositionTitle: &positionTitle,
-			ContactState: protocol.CandidateContactStateUnestablished, ObservedAt: now.Add(time.Duration(i) * time.Minute).UnixMilli(),
-			Basic: []protocol.CandidateResumeLabelValue{}, Expectations: []protocol.CandidateResumeLabelValue{},
-			SelfEvaluation: "", Education: "", WorkExperiences: "",
+	position := "actor-position-ref"
+	byRef := make(map[string]protocol.CandidateReadSourcingResumeData)
+	var candidates []protocol.CandidateReadSourcingResumeData
+	for _, window := range windows {
+		for _, ref := range window {
+			if _, exists := byRef[ref]; exists {
+				continue
+			}
+			candidate := sourcingCandidate(ref, position, now)
+			byRef[ref] = candidate
+			candidates = append(candidates, candidate)
 		}
 	}
-	sender := &sourcingActorSender{candidates: candidates}
-	d := dispatch.New(st, sender)
-	sender.dispatcher = d
+	sender := &sourcingActorSender{
+		windows: windows, window: 0, position: position, candidates: byRef,
+	}
+	dispatcher := dispatch.New(st, sender)
+	sender.dispatcher = dispatcher
+	clock := &sourcingActorClock{now: now}
 	advice := &sourcingActorAdvice{}
-	roundNumber := 0
-	manager, err := patrol.NewManager(st, PatrolRunner{Dispatcher: d}, sourcingActorHands{}, patrol.Config{
-		Clock: clock, Location: time.UTC,
-		IdentityFreshFor: time.Hour, PatrolInterval: 5 * time.Minute,
+	round := 0
+	manager, err := patrol.NewManager(st, PatrolRunner{Dispatcher: dispatcher}, sourcingActorHands{}, patrol.Config{
+		Clock: clock, Location: time.UTC, IdentityFreshFor: time.Hour,
 		MinimumRoundGap: time.Millisecond, NewRoundID: func() string {
-			roundNumber++
-			return fmt.Sprintf("round-sourcing-actor-%d", roundNumber)
+			round++
+			return fmt.Sprintf("round-sourcing-actor-%d", round)
 		},
 	}, advice)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.StartSourcing(key, revision.RevisionHash); err != nil {
+	return &sourcingActorHarness{
+		t: t, store: st, manager: manager, sender: sender, advice: advice,
+		clock: clock, key: key, revision: revision, position: position, candidates: candidates,
+	}
+}
+
+func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}, {"candidate-b", "candidate-c"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
 		t.Fatal(err)
 	}
-	runIDs := make([]string, 0, len(candidates))
-	for index := range candidates {
-		if index > 0 {
-			clock.Add(5*time.Minute + time.Second)
-		}
-		result, tickErr := manager.Tick(context.Background())
-		if tickErr != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
-			t.Fatalf("第 %d 个采集轮次失败: result=%+v err=%v", index+1, result, tickErr)
-		}
-		status, statusErr := st.AccountSourcingStatus(key)
-		if statusErr != nil || status == nil || status.CaptureCount != int64(index+1) || status.Latest == nil {
-			t.Fatalf("第 %d 轮未新增唯一采集事实: status=%+v err=%v", index+1, status, statusErr)
-		}
-		runIDs = append(runIDs, status.Latest.RunID)
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
 	}
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("正式批采单轮失败: result=%+v err=%v", result, err)
+	}
+	if got, want := h.sender.moves, []protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveCurrent, protocol.SourcingWindowMoveNext,
+	}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("窗口命令序列错误: got=%v want=%v order=%v", got, want, h.sender.order)
+	}
+	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b", "candidate-c"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("定点读取顺序或去重错误: got=%v want=%v", got, want)
+	}
+	progresses, err := h.store.SourcingBatchProgressByID(started.BatchID)
+	if err != nil || progresses.Status != store.SourcingBatchCompleted || progresses.CapturedCount != 3 || progresses.RemainingCount != 0 {
+		t.Fatalf("批次没有原子达标: progress=%+v err=%v", progresses, err)
+	}
+	account, err := h.store.AccountByKey(h.key)
+	if err != nil || account == nil || account.StoppedAt == nil || account.PausedReason != patrol.PauseSourcingTargetReached {
+		t.Fatalf("达标后账号未自动暂停: account=%+v err=%v", account, err)
+	}
+	if account.SourcingEnabled || account.SourcingContextRevisionHash != "" || account.SourcingStartedAt != nil {
+		t.Fatalf("正式批次不应写 legacy sourcing 双真相: %+v", account)
+	}
+	if len(h.advice.requests) != 0 {
+		t.Fatalf("纯采集调用了 provider: %+v", h.advice.requests)
+	}
+	for _, name := range h.sender.order {
+		if name == protocol.PrimChatReadList || name == protocol.PrimChatSendGreeting || name == protocol.PrimCandidateReadSourcingResume {
+			t.Fatalf("正式批采越界进入旧采集/IM/发送: order=%v", h.sender.order)
+		}
+	}
+	before := len(h.sender.order)
+	if second, err := h.manager.Tick(context.Background()); err != nil || len(second.Rounds) != 0 || len(h.sender.order) != before {
+		t.Fatalf("达标后仍继续读取: result=%+v err=%v order=%v", second, err, h.sender.order)
+	}
+}
 
-	if len(advice.requests) != 0 {
-		t.Fatalf("capture-only 阶段不得调用 provider: requests=%+v", advice.requests)
+func TestFormalSourcingActorBlocksOnTargetPositionMismatch(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	h.sender.targetPositionOverride = "other-position"
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+		t.Fatal(err)
 	}
-	if len(sender.greetings) != 0 {
-		t.Fatalf("capture-only 阶段不得调用 chat.sendGreeting: greetings=%v", sender.greetings)
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
 	}
-	readCount, listCount, greetingCount := 0, 0, 0
-	for _, name := range sender.order {
-		switch name {
-		case protocol.PrimCandidateReadSourcingResume:
-			readCount++
-		case protocol.PrimChatReadList:
-			listCount++
-		case protocol.PrimChatSendGreeting:
-			greetingCount++
-		}
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
+		t.Fatalf("职位错绑应响亮失败并阻塞: result=%+v err=%v", result, err)
 	}
-	if readCount != len(candidates) || listCount != 0 || greetingCount != 0 {
-		t.Fatalf("连续采集轮命令面错误: order=%v", sender.order)
+	batch, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked || batch.Reason != "targetReadFailed" {
+		t.Fatalf("职位错绑未进入固定 blocked: batch=%+v err=%v", batch, err)
 	}
-	if len(sender.sourcingExclusions) != len(candidates) {
-		t.Fatalf("每轮必须携带已采身份排除集: exclusions=%v", sender.sourcingExclusions)
+	account, _ := h.store.AccountByKey(h.key)
+	if account == nil || account.PausedReason != patrol.PauseSourcingBlocked {
+		t.Fatalf("职位错绑未暂停 actor: %+v", account)
 	}
-	for index, exclusions := range sender.sourcingExclusions {
-		seen := make(map[string]bool, len(exclusions))
-		for _, ref := range exclusions {
-			seen[ref] = true
-		}
-		for previous := 0; previous < index; previous++ {
-			if !seen[candidates[previous].PlatformUserRef] {
-				t.Fatalf("第 %d 轮缺少已采身份 %q: exclusions=%v", index+1, candidates[previous].PlatformUserRef, exclusions)
-			}
-		}
-	}
-	for index, runID := range runIDs {
-		score, scoreErr := st.SourcingScoreByRunID(runID)
-		if scoreErr != nil || score != nil {
-			t.Fatalf("第 %d 条采集事实不得形成 score: score=%+v err=%v", index+1, score, scoreErr)
-		}
-		selection, selectionErr := st.SourcingSelectionByRunID(runID)
-		if selectionErr != nil || selection != nil {
-			t.Fatalf("第 %d 条采集事实不得形成 selection: selection=%+v err=%v", index+1, selection, selectionErr)
-		}
-		profile, profileErr := st.CandidateProfileByScope(store.CandidateProfileScope{
-			Platform: key.Platform, AccountRef: key.AccountRef,
-			PlatformUserRef: candidates[index].PlatformUserRef, PositionRef: candidates[index].PositionRef,
-		})
-		if profileErr != nil || profile != nil {
-			t.Fatalf("第 %d 条采集事实不得形成 profile/effect intent: profile=%+v err=%v", index+1, profile, profileErr)
-		}
+	if len(h.sender.targets) != 1 || len(h.sender.moves) != 1 {
+		t.Fatalf("职位错绑后仍继续读取: moves=%v targets=%v", h.sender.moves, h.sender.targets)
 	}
 }

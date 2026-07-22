@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -60,6 +62,8 @@ type fakeRunHandle struct {
 	handler func(RunRequest) (any, error)
 	request RunRequest
 }
+
+func (h *fakeRunHandle) LogicalDispatchID() string { return "fake-" + h.request.Name }
 
 func (r *fakeRunner) Start(_ context.Context, request RunRequest) (RunHandle, error) {
 	r.mu.Lock()
@@ -150,6 +154,67 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("EnableToday: %v", err)
 	}
 	return &harness{db: db, clock: clock, hands: hands, runner: runner, manager: manager, key: key, config: config}
+}
+
+func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
+	h := newHarness(t)
+	documents := []m5ai.JobConfigDocument{
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "意向判断", Content: "intent"},
+		{DocType: "客户事实库", Content: "facts"},
+	}
+	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
+	revision := m5ai.ContextRevision{
+		ContextID: "context-pause-sourcing", RevisionHash: "revision-pause-sourcing",
+		SourceKind: "localImport", DisplayName: "synthetic-position",
+		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+		Communication: m5ai.CommunicationView{
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts", MappingVersion: m5ai.MappingVersion,
+		},
+		CreatedAt: h.clock.Now(),
+	}
+	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revision.RevisionHash, TargetCount: 2, StartedAt: h.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waiting := make(chan struct{})
+	release := make(chan struct{})
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name != protocol.PrimCandidateReadSourcingWindow {
+			return defaultHandler(request)
+		}
+		close(waiting)
+		<-release
+		return protocol.CandidateReadSourcingWindowData{
+			PositionRef: "position-pause", PlatformUserRefs: []string{"candidate-pause"},
+			Moved: false, ObservedAt: h.clock.Now().UnixMilli(),
+		}, nil
+	}
+	tickDone := make(chan TickResult, 1)
+	go func() {
+		result, _ := h.manager.Tick(context.Background())
+		tickDone <- result
+	}()
+	<-waiting
+	if err := h.manager.PauseNow(h.key); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	result := <-tickDone
+	if len(result.Rounds) != 1 || !errors.Is(result.Rounds[0].Err, ErrActorPaused) {
+		t.Fatalf("在途暂停未以 actor paused 收束: %+v", result)
+	}
+	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing || batch.Reason != "" || batch.EndedAt != nil {
+		t.Fatalf("普通暂停改写了正式批次: batch=%+v err=%v", batch, err)
+	}
 }
 
 func defaultHandler(request RunRequest) (any, error) {

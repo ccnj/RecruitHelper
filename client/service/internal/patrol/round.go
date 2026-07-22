@@ -125,11 +125,15 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	// 采集阶段只产生简历采集事实，并在本轮立即收尾。评分、选人和招呼
-	// 分别由后续显式阶段消费完整批次；既有 IM 对账也不能在采集轮里把
-	// 当前推荐页导航走。
-	if a.account.SourcingEnabled {
-		if _, err := a.captureSourcingResume(ctx); err != nil {
+	// 正式采集只由唯一非终态 SourcingBatch 授权，Account 上的旧
+	// SourcingEnabled 不再是第二份业务真相。一个采集 round 持续消费
+	// 推荐窗口直到达标、明确阻塞或命令失败，且绝不进入评分/招呼/IM。
+	batch, err := a.manager.store.ActiveSourcingBatch(a.key())
+	if err != nil {
+		return err
+	}
+	if batch != nil {
+		if err := a.runSourcingBatch(ctx, batch); err != nil {
 			a.handleCommandFailure(err)
 			return err
 		}
@@ -861,20 +865,33 @@ func invokePrimitive[T any](ctx context.Context, actor *roundActor, name string,
 }
 
 func invokePrimitiveDirect[T any](ctx context.Context, actor *roundActor, name string, args any) (T, error) {
+	result, _, err := invokePrimitiveDirectWithLogicalID[T](ctx, actor, name, args)
+	return result, err
+}
+
+// invokePrimitiveDirectWithLogicalID 与普通 actor 原语走字面同一条 generic
+// Runner/Dispatcher 路径，只额外把持久逻辑派发引用交给需要重验命令谱系的
+// 领域事务。它不创建、恢复或缓存任何 in-flight 状态。
+func invokePrimitiveDirectWithLogicalID[T any](
+	ctx context.Context,
+	actor *roundActor,
+	name string,
+	args any,
+) (T, string, error) {
 	var zero T
 	if err := actor.ensureDispatchAllowed(ctx); err != nil {
-		return zero, err
+		return zero, "", err
 	}
 	meta, ok := protocol.Primitives[name]
 	if !ok || meta.Ver == 0 {
-		return zero, fmt.Errorf("未激活原语 %q", name)
+		return zero, "", fmt.Errorf("未激活原语 %q", name)
 	}
 	rawArgs, err := protocol.Encode(args)
 	if err != nil {
-		return zero, err
+		return zero, "", err
 	}
 	if err := protocol.ValidatePrimitiveArgs(name, meta.Ver, rawArgs); err != nil {
-		return zero, err
+		return zero, "", err
 	}
 	expected := ""
 	if actor.account.PrincipalFingerprint != nil {
@@ -886,8 +903,12 @@ func invokePrimitiveDirect[T any](ctx context.Context, actor *roundActor, name s
 		ExpectedPrincipalFingerprint: expected, Name: name, Version: meta.Ver, Args: rawArgs,
 	})
 	if err != nil {
-		return zero, err
+		return zero, "", err
 	}
+	if handle == nil || handle.LogicalDispatchID() == "" {
+		return zero, "", errors.New("原语未返回持久逻辑派发引用")
+	}
+	logicalID := handle.LogicalDispatchID()
 	var rawData json.RawMessage
 	// 调度 Start 已在 actor 锁内完成；长时间只等持久逻辑命令，不阻塞
 	// QoS0 事件、用户暂停或账号绑定。无论正常返回还是测试 Goexit，defer
@@ -901,18 +922,18 @@ func invokePrimitiveDirect[T any](ctx context.Context, actor *roundActor, name s
 	// 返回数据入账前复用同一门禁；任何代际变化都丢弃本轮观察，留给下一轮
 	// fresh probe，不能把旧手/旧主体的数据写进当前账号根。
 	if gateErr := actor.ensureDispatchAllowed(ctx); gateErr != nil {
-		return zero, gateErr
+		return zero, logicalID, gateErr
 	}
 	if err != nil {
-		return zero, err
+		return zero, logicalID, err
 	}
 	if err := protocol.ValidatePrimitiveData(name, meta.Ver, rawData); err != nil {
-		return zero, err
+		return zero, logicalID, err
 	}
 	if err := json.Unmarshal(rawData, &zero); err != nil {
-		return zero, err
+		return zero, logicalID, err
 	}
-	return zero, nil
+	return zero, logicalID, nil
 }
 
 func (a *roundActor) ensureSurface(ctx context.Context, reason protocol.NotReadyReason) error {
