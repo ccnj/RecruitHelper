@@ -86,6 +86,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 	}
 
 	noProgressMoves := 0
+	attemptedTarget := false
 	for {
 		if batch.PositionRef == nil || window.PositionRef != *batch.PositionRef {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionChanged, store.ErrSourcingBinding)
@@ -95,9 +96,15 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 			if handledInRound(platformUserRef) {
 				continue
 			}
+			if attemptedTarget {
+				if err := a.waitSourcingPace(ctx); err != nil {
+					return err
+				}
+			}
 			if err := a.setStage("readingSourcingTargetResume"); err != nil {
 				return a.failSourcingBatch(batch.BatchID, sourcingBlockTargetReadFailed, err)
 			}
+			attemptedTarget = true
 			data, logicalID, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateReadSourcingResumeData](
 				ctx, a, protocol.PrimCandidateReadSourcingTargetResume,
 				protocol.CandidateReadSourcingTargetResumeArgs{
@@ -163,6 +170,22 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		}
 		window = next
 	}
+}
+
+// waitSourcingPace 在脑侧 actor 决定两次候选人动作之间的节奏。等待期间
+// 释放 Manager 短锁，使真人暂停、账号改绑与传感事件仍可生效；醒来后必须
+// 重新通过同一派发门禁，不能把等待前的授权带到等待后。
+func (a *roundActor) waitSourcingPace(ctx context.Context) error {
+	var waitErr error
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		waitErr = a.manager.config.SourcingPaceWait(ctx)
+	}()
+	if waitErr != nil {
+		return waitErr
+	}
+	return a.ensureDispatchAllowed(ctx)
 }
 
 func skipsUnreadableSourcingTarget(err error) bool {

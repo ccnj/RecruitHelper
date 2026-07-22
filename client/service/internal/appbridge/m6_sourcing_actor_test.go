@@ -303,6 +303,7 @@ type sourcingActorHarness struct {
 	revision   m5ai.ContextRevision
 	position   string
 	candidates []protocol.CandidateReadSourcingResumeData
+	paceWaits  *int
 }
 
 func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHarness {
@@ -348,8 +349,16 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 	clock := &sourcingActorClock{now: now}
 	advice := &sourcingActorAdvice{}
 	round := 0
+	paceWaits := 0
 	manager, err := patrol.NewManager(st, PatrolRunner{Dispatcher: dispatcher}, sourcingActorHands{}, patrol.Config{
 		Clock: clock, Location: time.UTC, IdentityFreshFor: time.Hour,
+		SourcingPaceWait: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			paceWaits++
+			return nil
+		},
 		MinimumRoundGap: time.Millisecond, NewRoundID: func() string {
 			round++
 			return fmt.Sprintf("round-sourcing-actor-%d", round)
@@ -361,6 +370,7 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 	return &sourcingActorHarness{
 		t: t, store: st, manager: manager, sender: sender, advice: advice,
 		clock: clock, key: key, revision: revision, position: position, candidates: candidates,
+		paceWaits: &paceWaits,
 	}
 }
 
@@ -384,6 +394,9 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	}
 	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b", "candidate-c"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("定点读取顺序或去重错误: got=%v want=%v", got, want)
+	}
+	if got, want := *h.paceWaits, 2; got != want {
+		t.Fatalf("相邻三个候选人应只等待两次: got=%d want=%d", got, want)
 	}
 	progresses, err := h.store.SourcingBatchProgressByID(started.BatchID)
 	if err != nil || progresses.Status != store.SourcingBatchCompleted || progresses.CapturedCount != 3 || progresses.RemainingCount != 0 {
@@ -429,6 +442,9 @@ func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T
 	}
 	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b", "candidate-c"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("不可读候选人在后续窗口被重复读取: got=%v want=%v", got, want)
+	}
+	if got, want := *h.paceWaits, 2; got != want {
+		t.Fatalf("跳过不可读目标后仍须维持相邻动作节奏: got=%d want=%d", got, want)
 	}
 	if got, want := h.sender.moves, []protocol.SourcingWindowMove{
 		protocol.SourcingWindowMoveCurrent, protocol.SourcingWindowMoveNext,

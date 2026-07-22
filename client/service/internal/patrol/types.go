@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
@@ -214,6 +215,26 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
+const (
+	sourcingPaceMin = 800 * time.Millisecond
+	sourcingPaceMax = 2200 * time.Millisecond
+)
+
+func randomSourcingPaceDelay() time.Duration {
+	return sourcingPaceMin + time.Duration(rand.Int64N(int64(sourcingPaceMax-sourcingPaceMin)+1))
+}
+
+func defaultSourcingPaceWait(ctx context.Context) error {
+	timer := time.NewTimer(randomSourcingPaceDelay())
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 type Config struct {
 	Clock                    Clock
 	Location                 *time.Location
@@ -226,6 +247,9 @@ type Config struct {
 	MaxPages                 int
 	DailyStartHour           int
 	NewRoundID               func() string
+	// SourcingPaceWait 只控制脑侧相邻候选人动作的节奏。生产默认使用
+	// 0.8～2.2 秒随机等待；测试可注入无等待实现，手端仍无业务定时器。
+	SourcingPaceWait func(context.Context) error
 }
 
 func (c Config) withDefaults() Config {
@@ -258,6 +282,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.DailyStartHour == 0 {
 		c.DailyStartHour = 8
+	}
+	if c.SourcingPaceWait == nil {
+		c.SourcingPaceWait = defaultSourcingPaceWait
 	}
 	return c
 }
@@ -330,7 +357,7 @@ func errorCode(err error) string {
 func validateConfig(c Config) error {
 	if c.PatrolInterval <= 0 || c.IdentityFreshFor <= 0 || c.CoalesceWindow <= 0 ||
 		c.MinimumRoundGap <= 0 || c.ManualQuiet <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
-		c.DailyStartHour < 0 || c.DailyStartHour > 23 {
+		c.DailyStartHour < 0 || c.DailyStartHour > 23 || c.SourcingPaceWait == nil {
 		return fmt.Errorf("patrol config 含非正参数: %+v", c)
 	}
 	return nil

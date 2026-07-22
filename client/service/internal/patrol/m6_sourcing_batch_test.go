@@ -1,11 +1,34 @@
 package patrol
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"recruithelper/contract/gen/go/protocol"
 )
+
+func TestRandomSourcingPaceDelayStaysWithinHumanizedBounds(t *testing.T) {
+	for range 1_000 {
+		delay := randomSourcingPaceDelay()
+		if delay < sourcingPaceMin || delay > sourcingPaceMax {
+			t.Fatalf("采集节奏越界: delay=%s want=[%s,%s]", delay, sourcingPaceMin, sourcingPaceMax)
+		}
+	}
+}
+
+func TestDefaultSourcingPaceWaitHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if err := defaultSourcingPaceWait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消未中断随机等待: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("取消后仍阻塞: %s", elapsed)
+	}
+}
 
 func TestSkipsUnreadableSourcingTargetRequiresExactMachineTuple(t *testing.T) {
 	tests := []struct {
