@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -18,6 +19,20 @@ var (
 	ErrSourcingBatchConflict      = errors.New("采集批次材料冲突")
 	ErrSourcingBatchStateConflict = errors.New("采集批次状态不允许当前操作")
 )
+
+const SourcingFeedChangedReason = "recommendationFeedChanged"
+
+type InvalidateSourcingFeedRequest struct {
+	Platform   string
+	AccountRef string
+	Trigger    string
+	At         time.Time
+}
+
+type InvalidateSourcingFeedResult struct {
+	MarkerAdvanced bool
+	BatchStopped   bool
+}
 
 type StartSourcingBatchRequest struct {
 	BatchID             string
@@ -66,6 +81,90 @@ type SourcingBatchProgress struct {
 	LastAttemptAt       *time.Time
 	PositionBoundAt     *time.Time
 	EndedAt             *time.Time
+}
+
+// InvalidateSourcingFeed 原子记录推荐流换代边界，并终止仍属于旧页面的
+// 非终态采集批次。已经完成的批次不改写；其尚未进入 WAL 的招呼由读取投影
+// 根据该边界派生为 abandoned，已经进入 WAL 的招呼仍继续收敛。
+func (s *Store) InvalidateSourcingFeed(
+	req InvalidateSourcingFeedRequest,
+) (*InvalidateSourcingFeedResult, error) {
+	req.Platform = strings.TrimSpace(req.Platform)
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	req.Trigger = strings.TrimSpace(req.Trigger)
+	if req.Platform == "" || req.AccountRef == "" || req.Trigger == "" || len(req.Trigger) > 64 {
+		return nil, ErrSourcingBatchInvalid
+	}
+	if req.At.IsZero() {
+		req.At = time.Now()
+	}
+
+	result := InvalidateSourcingFeedResult{}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var account Account
+		if err := tx.First(&account,
+			"platform = ? AND account_ref = ?", req.Platform, req.AccountRef,
+		).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
+		}
+
+		effectiveAt := req.At
+		if account.SourcingFeedInvalidatedAt == nil || account.SourcingFeedInvalidatedAt.Before(req.At) {
+			invalidatedAt := req.At
+			account.SourcingFeedInvalidatedAt = &invalidatedAt
+			result.MarkerAdvanced = true
+		} else {
+			effectiveAt = *account.SourcingFeedInvalidatedAt
+		}
+
+		var batch SourcingBatch
+		batchErr := tx.First(&batch,
+			"platform = ? AND account_ref = ? AND ended_at IS NULL", req.Platform, req.AccountRef,
+		).Error
+		if batchErr != nil && !errors.Is(batchErr, gorm.ErrRecordNotFound) {
+			return batchErr
+		}
+		if batchErr == nil && !batch.StartedAt.After(effectiveAt) {
+			updated := tx.Model(&SourcingBatch{}).
+				Where("batch_id = ? AND ended_at IS NULL", batch.BatchID).
+				Updates(map[string]any{
+					"status": SourcingBatchStopped, "reason": SourcingFeedChangedReason,
+					"ended_at": effectiveAt,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrSourcingBatchStateConflict
+			}
+			stoppedAt := effectiveAt
+			account.StoppedAt = &stoppedAt
+			account.PausedReason = SourcingFeedChangedReason
+			account.DirtyHint = true
+			result.BatchStopped = true
+		}
+
+		if result.MarkerAdvanced || result.BatchStopped {
+			if err := tx.Save(&account).Error; err != nil {
+				return err
+			}
+		}
+		if !result.MarkerAdvanced {
+			return nil
+		}
+		return tx.Create(&AuditEntry{
+			At: req.At, Category: "sourcing_feed_invalidated", HandID: account.BoundHandID,
+			Platform: req.Platform, AccountRef: req.AccountRef,
+			Detail: fmt.Sprintf("trigger=%s;batchStopped=%t", req.Trigger, result.BatchStopped),
+		}).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // StartSourcingBatch 创建一次显式目标数的正式采集批次。同一账号已经存在

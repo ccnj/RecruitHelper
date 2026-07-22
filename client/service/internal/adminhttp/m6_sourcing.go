@@ -85,6 +85,7 @@ type sourcingGreetingSendStatusView struct {
 	SentCount           int64  `json:"sentCount"`
 	FailedCount         int64  `json:"failedCount"`
 	SuspectCount        int64  `json:"suspectCount"`
+	AbandonedCount      int64  `json:"abandonedCount"`
 	Completed           bool   `json:"completed"`
 }
 
@@ -407,7 +408,8 @@ func sourcingGreetingSendView(
 		SelectedCount: progress.SelectedCount, ReadyCount: progress.ReadyCount,
 		PendingCount: progress.PendingCount, InFlightCount: progress.InFlightCount,
 		SentCount: progress.SentCount, FailedCount: progress.FailedCount,
-		SuspectCount: progress.SuspectCount, Completed: progress.Completed,
+		SuspectCount: progress.SuspectCount, AbandonedCount: progress.AbandonedCount,
+		Completed: progress.Completed,
 	}
 }
 

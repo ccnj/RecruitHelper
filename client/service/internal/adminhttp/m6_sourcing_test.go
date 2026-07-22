@@ -91,7 +91,7 @@ func TestSourcingGreetingSendViewContainsOnlySafeAggregate(t *testing.T) {
 	view := sourcingGreetingSendView(store.SourcingBatchGreetingSendProgress{
 		BatchID: "batch-send-view", ContextRevisionHash: "revision-send-view",
 		SelectedCount: 4, ReadyCount: 3, PendingCount: 1, InFlightCount: 0,
-		SentCount: 1, FailedCount: 1, SuspectCount: 1, Completed: true,
+		SentCount: 1, FailedCount: 1, SuspectCount: 1, AbandonedCount: 2, Completed: true,
 	})
 	raw, err := json.Marshal(view)
 	if err != nil {
@@ -104,7 +104,7 @@ func TestSourcingGreetingSendViewContainsOnlySafeAggregate(t *testing.T) {
 	allowed := map[string]struct{}{
 		"batchId": {}, "contextRevisionHash": {}, "selectedCount": {}, "readyCount": {},
 		"pendingCount": {}, "inFlightCount": {}, "sentCount": {}, "failedCount": {},
-		"suspectCount": {}, "completed": {},
+		"suspectCount": {}, "abandonedCount": {}, "completed": {},
 	}
 	if len(fields) != len(allowed) {
 		t.Fatalf("列表发送投影字段数越界: %s", raw)
@@ -113,6 +113,9 @@ func TestSourcingGreetingSendViewContainsOnlySafeAggregate(t *testing.T) {
 		if _, ok := allowed[key]; !ok {
 			t.Fatalf("列表发送投影泄漏字段 %q: %s", key, raw)
 		}
+	}
+	if fields["abandonedCount"] != float64(2) {
+		t.Fatalf("列表发送投影未映射 abandonedCount: %s", raw)
 	}
 	for _, forbidden := range []string{
 		"profileId", "runId", "invocationId", "intentId", "platformUserRef",
@@ -346,10 +349,11 @@ func TestSourcingGreetingSendStatusReturnsNormalSafeAggregate(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Status) != 10 || decoded.Status["batchId"] != batch.BatchID ||
+	if len(decoded.Status) != 11 || decoded.Status["batchId"] != batch.BatchID ||
 		decoded.Status["contextRevisionHash"] != revision.RevisionHash ||
 		decoded.Status["selectedCount"] != float64(1) || decoded.Status["readyCount"] != float64(1) ||
-		decoded.Status["pendingCount"] != float64(1) || decoded.Status["completed"] != false {
+		decoded.Status["pendingCount"] != float64(1) || decoded.Status["abandonedCount"] != float64(0) ||
+		decoded.Status["completed"] != false {
 		t.Fatalf("列表发送正常聚合错误: %s", response.Body.String())
 	}
 	for _, forbiddenKey := range []string{

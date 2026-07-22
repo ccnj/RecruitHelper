@@ -187,6 +187,86 @@ func TestStartSourcingBatchIsIdempotentAndProtectsOpenScope(t *testing.T) {
 	}
 }
 
+func TestInvalidateSourcingFeedAtomicallyStopsActiveBatchAndIsMonotonic(t *testing.T) {
+	s := openTest(t)
+	key, revisionHash := seedSourcingBatchDependencies(t, s, "feed-invalidation")
+	startedAt := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+	started, err := s.StartSourcingBatch(StartSourcingBatchRequest{
+		BatchID: "batch-feed-invalidation", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: 30, StartedAt: startedAt,
+	})
+	if err != nil || started == nil || !started.Created {
+		t.Fatalf("建立 active 批次失败: result=%+v err=%v", started, err)
+	}
+	invalidatedAt := startedAt.Add(5 * time.Minute)
+	first, err := s.InvalidateSourcingFeed(InvalidateSourcingFeedRequest{
+		Platform: key.Platform, AccountRef: key.AccountRef,
+		Trigger: "pluginReload", At: invalidatedAt,
+	})
+	if err != nil || first == nil || !first.MarkerAdvanced || !first.BatchStopped {
+		t.Fatalf("推荐流换代未原子终止 active 批次: result=%+v err=%v", first, err)
+	}
+	batch, err := s.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || batch == nil || batch.Status != SourcingBatchStopped ||
+		batch.Reason != SourcingFeedChangedReason || batch.EndedAt == nil || !batch.EndedAt.Equal(invalidatedAt) {
+		t.Fatalf("换代后的批次终态错误: batch=%+v err=%v", batch, err)
+	}
+	account, err := s.AccountByKey(key)
+	if err != nil || account == nil || account.SourcingFeedInvalidatedAt == nil ||
+		!account.SourcingFeedInvalidatedAt.Equal(invalidatedAt) || account.StoppedAt == nil ||
+		!account.StoppedAt.Equal(invalidatedAt) || account.PausedReason != SourcingFeedChangedReason ||
+		!account.DirtyHint {
+		t.Fatalf("换代 marker 与账号暂停状态未同事务收敛: account=%+v err=%v", account, err)
+	}
+	audits, err := s.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingAudits := 0
+	for _, audit := range audits {
+		if audit.Category != "sourcing_feed_invalidated" || audit.Platform != key.Platform ||
+			audit.AccountRef != key.AccountRef {
+			continue
+		}
+		matchingAudits++
+		if !audit.At.Equal(invalidatedAt) || audit.Detail != "trigger=pluginReload;batchStopped=true" {
+			t.Fatalf("换代审计内容错误: audit=%+v", audit)
+		}
+	}
+	if matchingAudits != 1 {
+		t.Fatalf("首次换代审计数量错误: count=%d audits=%+v", matchingAudits, audits)
+	}
+
+	for _, replayAt := range []time.Time{invalidatedAt, invalidatedAt.Add(-time.Minute)} {
+		replayed, err := s.InvalidateSourcingFeed(InvalidateSourcingFeedRequest{
+			Platform: key.Platform, AccountRef: key.AccountRef,
+			Trigger: "olderReplay", At: replayAt,
+		})
+		if err != nil || replayed == nil || replayed.MarkerAdvanced || replayed.BatchStopped {
+			t.Fatalf("重复或更老换代事件未幂等: at=%v result=%+v err=%v", replayAt, replayed, err)
+		}
+	}
+	account, err = s.AccountByKey(key)
+	if err != nil || account == nil || account.SourcingFeedInvalidatedAt == nil ||
+		!account.SourcingFeedInvalidatedAt.Equal(invalidatedAt) || account.PausedReason != SourcingFeedChangedReason {
+		t.Fatalf("重复事件回退了 marker 或暂停原因: account=%+v err=%v", account, err)
+	}
+	audits, err = s.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingAudits = 0
+	for _, audit := range audits {
+		if audit.Category == "sourcing_feed_invalidated" && audit.Platform == key.Platform &&
+			audit.AccountRef == key.AccountRef {
+			matchingAudits++
+		}
+	}
+	if matchingAudits != 1 {
+		t.Fatalf("幂等重放产生重复审计: count=%d audits=%+v", matchingAudits, audits)
+	}
+}
+
 func TestSourcingBatchPositionBlockResumeAndStopTransitions(t *testing.T) {
 	s := openTest(t)
 	key, revisionHash := seedSourcingBatchDependencies(t, s, "transitions")

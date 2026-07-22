@@ -139,6 +139,22 @@ func sourcingGreetingEffectRequest(
 	}
 }
 
+func invalidateSourcingGreetingFixture(
+	t *testing.T,
+	fixture sourcingGreetingEffectFixture,
+	at time.Time,
+) *InvalidateSourcingFeedResult {
+	t.Helper()
+	result, err := fixture.Store.InvalidateSourcingFeed(InvalidateSourcingFeedRequest{
+		Platform: fixture.AccountKey.Platform, AccountRef: fixture.AccountKey.AccountRef,
+		Trigger: "testGreetingFeedChanged", At: at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func TestSourcingGreetingEffectSourceAtomicallyBindsWALAndPreciselyReplays(t *testing.T) {
 	fixture := seedSourcingGreetingEffectFixture(t, "atomic", 1)
 	s := fixture.Store
@@ -274,5 +290,97 @@ func TestSourcingGreetingEffectAuthorizationIsTargetScopedAcrossGreetedProfiles(
 		progress.SelectedCount != 2 || progress.ReadyCount != 2 ||
 		progress.SentCount != 1 || progress.InFlightCount != 1 || progress.Completed {
 		t.Fatalf("发送聚合错误: progress=%+v err=%v", progress, err)
+	}
+}
+
+func TestSourcingGreetingFeedInvalidationAbandonsAllUnboundCompletedBatchMembers(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "feed-all-unbound", 3)
+	batch, err := fixture.Store.SourcingBatchByID(fixture.BatchID)
+	if err != nil || batch == nil {
+		t.Fatalf("读取批次失败: batch=%+v err=%v", batch, err)
+	}
+	invalidated := invalidateSourcingGreetingFixture(t, fixture, batch.StartedAt.Add(time.Minute))
+	if invalidated == nil || !invalidated.MarkerAdvanced || invalidated.BatchStopped {
+		t.Fatalf("completed 批次换代只应推进 marker: result=%+v", invalidated)
+	}
+
+	next, err := fixture.Store.NextSourcingGreetingSendTarget(fixture.BatchID)
+	if err != nil || next != nil {
+		t.Fatalf("换代后仍返回未绑定目标: next=%+v err=%v", next, err)
+	}
+	progress, err := fixture.Store.SourcingBatchGreetingSendProgress(fixture.BatchID)
+	if err != nil || progress == nil || progress.ReadyCount != 3 || progress.PendingCount != 0 ||
+		progress.InFlightCount != 0 || progress.AbandonedCount != 3 || !progress.Completed {
+		t.Fatalf("换代后的 abandoned 聚合错误: progress=%+v err=%v", progress, err)
+	}
+}
+
+func TestSourcingGreetingFeedInvalidationKeepsBoundInflightAndAbandonsOnlyUnbound(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "feed-inflight", 2)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	req := sourcingGreetingEffectRequest(t, fixture, fixture.Invocations[0], now)
+	created, err := fixture.Store.CreateGreetingEffectIntentAndCmd(req)
+	if err != nil || created == nil || !created.Created {
+		t.Fatalf("建立在途 WAL 失败: result=%+v err=%v", created, err)
+	}
+	invalidateSourcingGreetingFixture(t, fixture, now.Add(time.Second))
+
+	next, err := fixture.Store.NextSourcingGreetingSendTarget(fixture.BatchID)
+	if err != nil || next == nil || next.InvocationID != fixture.Invocations[0].InvocationID ||
+		next.EffectIntentID == nil || *next.EffectIntentID != created.Intent.IntentID {
+		t.Fatalf("换代错误丢弃已绑定在途目标: next=%+v err=%v", next, err)
+	}
+	progress, err := fixture.Store.SourcingBatchGreetingSendProgress(fixture.BatchID)
+	if err != nil || progress == nil || progress.PendingCount != 0 || progress.InFlightCount != 1 ||
+		progress.AbandonedCount != 1 || progress.Completed {
+		t.Fatalf("在途与 abandoned 未正确分桶: progress=%+v err=%v", progress, err)
+	}
+}
+
+func TestSourcingGreetingFeedInvalidationBetweenPrepareAndWALCreationRejectsAtomically(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "feed-create-race", 1)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	req := sourcingGreetingEffectRequest(t, fixture, fixture.Invocations[0], now)
+	invalidateSourcingGreetingFixture(t, fixture, now.Add(time.Second))
+
+	result, err := fixture.Store.CreateGreetingEffectIntentAndCmd(req)
+	if result != nil || !errors.Is(err, ErrSourcingGreetingFeedChanged) {
+		t.Fatalf("Prepare 后换代未阻断 WAL 创建: result=%+v err=%v", result, err)
+	}
+	invocation, err := fixture.Store.SourcingGreetingByProfileID(req.Intent.TargetRef)
+	if err != nil || invocation == nil || invocation.EffectIntentID != nil || invocation.EffectStartedAt != nil {
+		t.Fatalf("拒绝后 invocation 被绑定: invocation=%+v err=%v", invocation, err)
+	}
+	intent, err := fixture.Store.EffectIntentByID(req.Intent.IntentID)
+	if err != nil || intent != nil {
+		t.Fatalf("拒绝后创建了 intent: intent=%+v err=%v", intent, err)
+	}
+	cmd, err := fixture.Store.CmdByMsgID(req.Command.MsgID)
+	if err != nil || cmd != nil {
+		t.Fatalf("拒绝后创建了 command: command=%+v err=%v", cmd, err)
+	}
+	var heads int64
+	if err := fixture.Store.db.Model(&CandidateGreetingHead{}).Count(&heads).Error; err != nil || heads != 0 {
+		t.Fatalf("拒绝后创建了 greeting head: count=%d err=%v", heads, err)
+	}
+}
+
+func TestSourcingGreetingFeedMarkerBeforeBatchStartDoesNotAbandonBatch(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "feed-older-marker", 2)
+	batch, err := fixture.Store.SourcingBatchByID(fixture.BatchID)
+	if err != nil || batch == nil {
+		t.Fatalf("读取批次失败: batch=%+v err=%v", batch, err)
+	}
+	invalidateSourcingGreetingFixture(t, fixture, batch.StartedAt.Add(-time.Second))
+
+	next, err := fixture.Store.NextSourcingGreetingSendTarget(fixture.BatchID)
+	if err != nil || next == nil || next.InvocationID != fixture.Invocations[0].InvocationID ||
+		next.EffectIntentID != nil {
+		t.Fatalf("早于批次的 marker 错误废弃新批次: next=%+v err=%v", next, err)
+	}
+	progress, err := fixture.Store.SourcingBatchGreetingSendProgress(fixture.BatchID)
+	if err != nil || progress == nil || progress.PendingCount != 2 || progress.AbandonedCount != 0 ||
+		progress.Completed {
+		t.Fatalf("早期 marker 污染新批次聚合: progress=%+v err=%v", progress, err)
 	}
 }

@@ -24,6 +24,7 @@ const (
 var (
 	ErrSourcingGreetingEffectInvalid  = errors.New("正式批次招呼发送来源无效")
 	ErrSourcingGreetingEffectConflict = errors.New("正式批次招呼发送来源冲突")
+	ErrSourcingGreetingFeedChanged    = errors.New("正式批次所属推荐流已换代")
 )
 
 // SourcingGreetingEffectSource 是自动列表招呼进入 WAL 时唯一允许携带的
@@ -71,6 +72,7 @@ type SourcingBatchGreetingSendProgress struct {
 	SentCount           int64
 	FailedCount         int64
 	SuspectCount        int64
+	AbandonedCount      int64
 	Completed           bool
 }
 
@@ -204,6 +206,8 @@ func (s *Store) PrepareSourcingGreetingSend(
 			); err != nil {
 				return err
 			}
+		} else if sourcingGreetingFeedChanged(material) {
+			return ErrSourcingGreetingFeedChanged
 		} else if !sourcingGreetingProfileAllowsNewEffect(material.Profile) {
 			return ErrSourcingGreetingEffectConflict
 		}
@@ -238,6 +242,9 @@ func (s *Store) NextSourcingGreetingSendTarget(batchID string) (*SourcingGreetin
 			material := materials[i]
 			invocation := material.Invocation
 			if invocation.InvocationID == "" || invocation.FinishedAt == nil || invocation.Status != AIInvocationOK {
+				continue
+			}
+			if invocation.EffectIntentID == nil && sourcingGreetingFeedChanged(material) {
 				continue
 			}
 			if invocation.EffectIntentID != nil {
@@ -314,7 +321,11 @@ func (s *Store) SourcingBatchGreetingSendProgress(
 			}
 			out.ReadyCount++
 			if invocation.EffectIntentID == nil {
-				out.PendingCount++
+				if sourcingGreetingFeedChanged(materials[i]) {
+					out.AbandonedCount++
+				} else {
+					out.PendingCount++
+				}
 				continue
 			}
 			var intent EffectIntent
@@ -345,7 +356,7 @@ func (s *Store) SourcingBatchGreetingSendProgress(
 			}
 		}
 		out.Completed = unresolvedGeneration == 0 && out.PendingCount == 0 && out.InFlightCount == 0 &&
-			out.SentCount+out.FailedCount+out.SuspectCount == int64(out.SelectedCount)
+			out.SentCount+out.FailedCount+out.SuspectCount+out.AbandonedCount == int64(out.SelectedCount)
 		return nil
 	})
 	if err != nil {
@@ -939,6 +950,11 @@ func sourcingGreetingProfileAllowsNewEffect(profile CandidateProfile) bool {
 		profile.GreetedAt == nil
 }
 
+func sourcingGreetingFeedChanged(material sourcingGreetingEffectMaterial) bool {
+	invalidatedAt := material.Account.SourcingFeedInvalidatedAt
+	return invalidatedAt != nil && !invalidatedAt.Before(material.Batch.StartedAt)
+}
+
 func validateSourcingGreetingEffectCreationTx(
 	tx *gorm.DB,
 	source SourcingGreetingEffectSource,
@@ -949,7 +965,13 @@ func validateSourcingGreetingEffectCreationTx(
 	if err != nil {
 		return sourcingGreetingEffectMaterial{}, err
 	}
-	if material.Invocation.EffectIntentID != nil || !sourcingGreetingProfileAllowsNewEffect(material.Profile) {
+	if sourcingGreetingFeedChanged(material) {
+		return sourcingGreetingEffectMaterial{}, ErrSourcingGreetingFeedChanged
+	}
+	if material.Invocation.EffectIntentID != nil {
+		return sourcingGreetingEffectMaterial{}, ErrSourcingGreetingEffectConflict
+	}
+	if !sourcingGreetingProfileAllowsNewEffect(material.Profile) {
 		return sourcingGreetingEffectMaterial{}, ErrSourcingGreetingEffectConflict
 	}
 	if err := validateSourcingGreetingIntentCommand(material, intent, command); err != nil {

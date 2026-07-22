@@ -242,6 +242,9 @@ type Account struct {
 	SourcingStartedAt           *time.Time
 	SourcingLastAttemptAt       *time.Time
 	SourcingLastErrorCode       string
+	// SourcingFeedInvalidatedAt 是推荐流最近一次已知换代边界。早于或等于
+	// 该时刻启动的批次不得继续采集，也不得为尚未进入 WAL 的招呼新建意图。
+	SourcingFeedInvalidatedAt *time.Time
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
