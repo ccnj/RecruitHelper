@@ -1085,6 +1085,21 @@ async function mainReadSourcingResume(
       .filter((button) => clean(button.textContent) === '打招呼') as HTMLButtonElement[]
     return buttons.length === 1 && !buttons[0].disabled ? 'unestablished' : 'unknown'
   }
+  const closeOpenedDetail = async (): Promise<MainSourcingResumeFailed | null> => {
+    let opened = visibleAll(document, '.new-shortcut-resume__modal')
+    if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
+    const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
+    if (closeButtons.length !== 1) return failed('close_unavailable')
+    closeButtons[0].click()
+    const closeUntil = Date.now() + 6_000
+    while (Date.now() < closeUntil) {
+      opened = visibleAll(document, '.new-shortcut-resume__modal')
+      const latestRoute = route()
+      if (opened.length === 0 && latestRoute && !latestRoute.searchParams.get('resumeNumber')) return null
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    }
+    return failed('close_unavailable')
+  }
 
   try {
     if (!route()) return failed('route_changed')
@@ -1148,101 +1163,112 @@ async function mainReadSourcingResume(
     }
     if (modals.length !== 1) return failed('modal_cardinality')
     const modal = modals[0]
+    const expectedTarget = target
 
-    const boundRoute = route()
-    if (!boundRoute) return failed('route_changed')
-    const boundResumeNumber = opaque(boundRoute.searchParams.get('resumeNumber'))
-    if (boundResumeNumber !== target.resumeNumber) return failed('detail_binding_ambiguous')
-    sources = collectSources()
-    if (!Array.isArray(sources)) return sources
-    const rebound = sources.filter((source) => source.resumeNumber === boundResumeNumber)
-    if (rebound.length !== 1 || rebound[0].platformUserRef !== target.platformUserRef) {
-      return failed('target_changed')
-    }
-    target = rebound[0]
-    const finalPosition = readPosition(target)
-    if (finalPosition.status === 'failed') return finalPosition
-    if (finalPosition.positionRef !== initialPosition.positionRef ||
-        finalPosition.positionTitle !== initialPosition.positionTitle ||
-        contactState(target.item) !== initialContactState) {
-      return failed('target_changed')
-    }
+    const evaluateOpenedDetail = (): MainSourcingResumeResult => {
+      const boundRoute = route()
+      if (!boundRoute) return failed('route_changed')
+      const boundResumeNumber = opaque(boundRoute.searchParams.get('resumeNumber'))
+      if (boundResumeNumber !== expectedTarget.resumeNumber) return failed('detail_binding_ambiguous')
+      sources = collectSources()
+      if (!Array.isArray(sources)) return sources
+      const rebound = sources.filter((source) => source.resumeNumber === boundResumeNumber)
+      if (rebound.length !== 1 || rebound[0].platformUserRef !== expectedTarget.platformUserRef) {
+        return failed('target_changed')
+      }
+      target = rebound[0]
+      const finalPosition = readPosition(target)
+      if (finalPosition.status === 'failed') return finalPosition
+      if (finalPosition.positionRef !== initialPosition.positionRef ||
+          finalPosition.positionTitle !== initialPosition.positionTitle ||
+          contactState(target.item) !== initialContactState) {
+        return failed('target_changed')
+      }
 
-    const names = visibleAll(modal, '.resume-basic-new__name')
-      .map((element) => clean(element.textContent)).filter(Boolean)
-    const meta = visibleAll(modal, '.resume-basic-new__meta-item')
-      .map((element) => clean(element.textContent)).filter(Boolean)
-    const semanticCounts = {
-      age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
-      work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
-      education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
-    }
-    if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
-        semanticCounts.work !== 1 || semanticCounts.education !== 1) {
-      return failed('basic_unresolved', target.platformUserRef)
-    }
-    let otherIndex = 0
-    const basicLabel = (value: string): string => {
-      if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
-      if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
-      if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
-      if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
-      if (/户口/u.test(value)) return '户口地'
-      if (/(?:现居|居住)/u.test(value)) return '现居地'
-      otherIndex += 1
-      return `其他信息${otherIndex}`
-    }
-    const basic: CandidateResumeLabelValue[] = [
-      { label: '姓名', value: names[0] },
-      ...meta.map((value) => ({ label: basicLabel(value), value })),
-    ]
+      const names = visibleAll(modal, '.resume-basic-new__name')
+        .map((element) => clean(element.textContent)).filter(Boolean)
+      const meta = visibleAll(modal, '.resume-basic-new__meta-item')
+        .map((element) => clean(element.textContent)).filter(Boolean)
+      const semanticCounts = {
+        age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
+        work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
+        education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
+      }
+      if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
+          semanticCounts.work !== 1 || semanticCounts.education !== 1) {
+        return failed('basic_unresolved', target.platformUserRef)
+      }
+      let otherIndex = 0
+      const basicLabel = (value: string): string => {
+        if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
+        if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
+        if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
+        if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
+        if (/户口/u.test(value)) return '户口地'
+        if (/(?:现居|居住)/u.test(value)) return '现居地'
+        otherIndex += 1
+        return `其他信息${otherIndex}`
+      }
+      const basic: CandidateResumeLabelValue[] = [
+        { label: '姓名', value: names[0] },
+        ...meta.map((value) => ({ label: basicLabel(value), value })),
+      ]
 
-    const purposeSections = visibleAll(modal, '.resume-section-purposes')
-    if (purposeSections.length !== 1) return failed('expectations_unresolved', target.platformUserRef)
-    const purposeText = blockText(purposeSections[0])
-    if (!purposeText) return failed('expectations_unresolved', target.platformUserRef)
-    const expectations: CandidateResumeLabelValue[] = [{ label: '求职期望', value: purposeText }]
+      const purposeSections = visibleAll(modal, '.resume-section-purposes')
+      if (purposeSections.length !== 1) return failed('expectations_unresolved', target.platformUserRef)
+      const purposeText = blockText(purposeSections[0])
+      if (!purposeText) return failed('expectations_unresolved', target.platformUserRef)
+      const expectations: CandidateResumeLabelValue[] = [{ label: '求职期望', value: purposeText }]
 
-    const workSections = visibleAll(modal, '.new-work-experiences')
-    if (workSections.length !== 1) return failed('work_unresolved', target.platformUserRef)
-    const workExperiences = blockText(workSections[0])
-    if (!workExperiences) return failed('work_unresolved', target.platformUserRef)
-    const educationSections = visibleAll(modal, '.new-education-experiences')
-    if (educationSections.length !== 1) return failed('education_unresolved', target.platformUserRef)
-    const education = blockText(educationSections[0])
-    if (!education) return failed('education_unresolved', target.platformUserRef)
+      const workSections = visibleAll(modal, '.new-work-experiences')
+      if (workSections.length !== 1) return failed('work_unresolved', target.platformUserRef)
+      const workExperiences = blockText(workSections[0])
+      if (!workExperiences) return failed('work_unresolved', target.platformUserRef)
+      const educationSections = visibleAll(modal, '.new-education-experiences')
+      if (educationSections.length !== 1) return failed('education_unresolved', target.platformUserRef)
+      const education = blockText(educationSections[0])
+      if (!education) return failed('education_unresolved', target.platformUserRef)
 
-    const selfSections = visibleAll(modal,
-      '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
-    if (selfSections.length > 1) return failed('self_evaluation_unresolved', target.platformUserRef)
-    let selfEvaluation = ''
-    if (selfSections.length === 1) {
-      const lines = blockText(selfSections[0]).split('\n')
-        .filter((line) => line !== '自我评价' && line !== '自我描述')
-      if (lines.length === 0) return failed('self_evaluation_unresolved', target.platformUserRef)
-      selfEvaluation = lines.join('\n')
-    }
+      const selfSections = visibleAll(modal,
+        '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
+      if (selfSections.length > 1) return failed('self_evaluation_unresolved', target.platformUserRef)
+      let selfEvaluation = ''
+      if (selfSections.length === 1) {
+        const lines = blockText(selfSections[0]).split('\n')
+          .filter((line) => line !== '自我评价' && line !== '自我描述')
+        if (lines.length === 0) return failed('self_evaluation_unresolved', target.platformUserRef)
+        selfEvaluation = lines.join('\n')
+      }
 
-    if (visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
-      return failed('target_changed')
+      if (visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
+        return failed('target_changed')
+      }
+      const data: ZhilianSourcingResumeData = {
+        platformUserRef: target.platformUserRef,
+        displayName: names[0].length <= 256 ? names[0] : null,
+        positionRef: finalPosition.positionRef,
+        positionTitle: finalPosition.positionTitle,
+        contactState: initialContactState,
+        observedAt: Date.now(),
+        basic,
+        expectations,
+        selfEvaluation,
+        education,
+        workExperiences,
+      }
+      if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) {
+        return failed('payload_limit', target.platformUserRef)
+      }
+      return { status: 'ready', data }
     }
-    const data: ZhilianSourcingResumeData = {
-      platformUserRef: target.platformUserRef,
-      displayName: names[0].length <= 256 ? names[0] : null,
-      positionRef: finalPosition.positionRef,
-      positionTitle: finalPosition.positionTitle,
-      contactState: initialContactState,
-      observedAt: Date.now(),
-      basic,
-      expectations,
-      selfEvaluation,
-      education,
-      workExperiences,
+    let evaluated: MainSourcingResumeResult
+    try {
+      evaluated = evaluateOpenedDetail()
+    } catch {
+      evaluated = failed('unexpected')
     }
-    if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) {
-      return failed('payload_limit', target.platformUserRef)
-    }
-    return { status: 'ready', data }
+    const closeFailure = await closeOpenedDetail()
+    return closeFailure ?? evaluated
   } catch {
     return failed('unexpected')
   }

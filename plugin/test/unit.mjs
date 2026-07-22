@@ -2086,6 +2086,12 @@ function installM6SourcingFixture(options = {}) {
   const root = { _route: { query: { jobNumber: refs.job } } }
   const store = { state: { talent: { activeJob: { jobNumber: refs.job, jobTitle: '合成采集职位' } } } }
   const modal = node()
+  const close = node('关闭')
+  close.click = () => {
+    state.modals = []
+    globalThis.location.href = `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`
+  }
+  modal.query.set('.new-shortcut-resume__close', options.closeUnavailable === true ? [] : [close])
   const name = node('合成采集候选人一')
   modal.query.set('.resume-basic-new__name', [name])
   modal.query.set('.resume-basic-new__meta-item', [
@@ -2169,7 +2175,7 @@ test('candidate.readSourcingResume MAIN 打开首个未排除候选人并完整�
       assert.equal(result.data.contactState, 'unestablished')
       assert.deepEqual(result.data.expectations.map(({ label }) => label), ['求职期望'])
       assert.ok(result.data.workExperiences && result.data.education)
-      assert.equal(fixture.state.modals.length, 1, '成功后保持详情打开')
+      assert.equal(fixture.state.modals.length, 0, '成功采集后立即关闭详情')
       assert.deepEqual(fixture.state.clicks, [expectedUser])
       assert.equal(JSON.stringify(result).includes('fixture-resume-sourcing'), false,
         'resumeNumber 只能留在同次 MAIN 的瞬时 join 中')
@@ -2185,6 +2191,18 @@ test('candidate.readSourcingResume MAIN 将同事聊过判为 established', asyn
     const result = await zhilianTestHooks.mainReadSourcingResume([])
     assert.equal(result.status, 'ready')
     assert.equal(result.data.contactState, 'established')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingResume MAIN 无法关闭详情时不返回部分简历', async () => {
+  const fixture = installM6SourcingFixture({ closeUnavailable: true })
+  try {
+    const result = await zhilianTestHooks.mainReadSourcingResume([])
+    assert.deepEqual(result, { status: 'failed', reason: 'close_unavailable' })
+    assert.equal(result.data, undefined)
+    assert.equal(fixture.state.modals.length, 1, '关闭失败必须如实保留现场')
   } finally {
     fixture.restore()
   }
@@ -2206,6 +2224,7 @@ test('candidate.readSourcingResume MAIN 对身份、详情绑定与必需分区�
         : { status: 'failed', reason: expectedReason }
       assert.deepEqual(result, expected, name)
       assert.equal(result.data, undefined, `${name} 不得返回部分 data`)
+      assert.equal(fixture.state.modals.length, 0, `${name} 不得遗留已打开详情`)
     } finally {
       fixture.restore()
     }
