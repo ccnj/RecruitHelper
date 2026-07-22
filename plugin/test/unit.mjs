@@ -4150,16 +4150,20 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   }
 })
 
-test('智联 MAIN 线程解析：方向不猜、未知类型归 system、数字卡片状态保持 unknown', async () => {
+test('智联 MAIN 线程解析：方向不猜、仅候选人 originType=2 的 105 提升为待处理换微信请求', async () => {
   const rows = [
     { idServer: 'm-text-out', status: 'success', time: 1, type: 'text', from: 'staff', text: '  招聘方  消息 ' },
     { idServer: 'm-text-in', time: 2, type: 'text', from: 'candidate', text: '候选人消息' },
     {
-      idServer: 'm-card', status: 'success', time: 3, type: 105, from: 'staff',
+      idServer: 'm-card', status: 'success', time: 3, type: 105, from: 'candidate',
+      content: JSON.stringify({ content: JSON.stringify({ originType: '2', requestId: 'request-1', userContent: '交换微信' }) }),
+    },
+    {
+      idServer: 'm-staff-105', status: 'success', time: 4, type: 105, from: 'staff',
       content: JSON.stringify({ content: JSON.stringify({ requestId: 'request-1', staffContent: '交换微信' }) }),
     },
     {
-      idServer: 'm-unknown', time: 4, type: 99, from: 'candidate',
+      idServer: 'm-unknown', time: 5, type: 99, from: 'candidate',
       content: JSON.stringify({ type: 2, msgb: '已拒绝' }),
     },
   ]
@@ -4169,18 +4173,17 @@ test('智联 MAIN 线程解析：方向不猜、未知类型归 system、数字�
       sessions: [{ sessionId: 'conversation-1', peerPartnerId: 'candidate', name: '候选人' }],
       async getHistoryMsgs() { return rows },
     },
-    async fetch() {
-      return { ok: true, status: 200, async json() { return { data: 2 } } }
-    },
   }
   const page = await zhilianTestHooks.mainReadThreadPage('conversation-1', 8, null)
   assert.equal(page.messages[0].direction, 'out')
   assert.equal(page.messages[0].text, '招聘方 消息')
   assert.equal(page.messages[1].direction, 'in')
   assert.equal(page.messages[2].kind, 'card')
-  assert.equal(page.messages[2].cardState, 'unknown')
+  assert.equal(page.messages[2].cardState, 'pending')
   assert.equal(page.messages[3].direction, 'system')
   assert.equal(page.messages[3].kind, 'system')
+  assert.equal(page.messages[4].direction, 'system')
+  assert.equal(page.messages[4].kind, 'system')
 
   window.imEngine.getHistoryMsgs = async () => [
     { idServer: 'missing-from', time: 1, type: 'text', text: '不能猜方向' },
@@ -4283,6 +4286,102 @@ test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严�
     }
   } finally {
     fixture.restore()
+  }
+})
+
+test('智联 105 只在候选人身份与 originType=2 同时成立时三路提升为请求卡', async () => {
+  const fixture = installM3SendFixture()
+  const staffID = globalThis.window.$session.staff.staffId
+  let stateEndpointCalls = 0
+  const variants = [
+    { name: '数字 originType=2', type: 105, from: fixture.peerRef, originType: 2, card: true },
+    { name: '字符串 originType=2', type: 105, from: fixture.peerRef, originType: ' 2 ', card: true },
+    { name: '招聘方发起', type: 105, from: staffID, originType: 2, card: false },
+    { name: '第三方发送者', type: 105, from: 'third-party', originType: 2, card: false },
+    { name: '缺 originType', type: 105, from: fixture.peerRef, card: false },
+    { name: '招聘方 originType=1', type: 105, from: fixture.peerRef, originType: 1, card: false },
+    { name: '非法 originType', type: 105, from: fixture.peerRef, originType: 'candidate', card: false },
+    { name: '相邻类型', type: 106, from: fixture.peerRef, originType: 2, card: false },
+  ]
+  try {
+    globalThis.window.fetch = async () => {
+      stateEndpointCalls += 1
+      return { ok: true, async json() { return { data: 'ACCEPTED' } } }
+    }
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = `server-type-105-${index}`
+      const details = {
+        requestId: `request-${index}`,
+        userContent: '候选人请求换微信',
+        staffContent: '招聘方请求换微信',
+      }
+      if (Object.prototype.hasOwnProperty.call(variant, 'originType')) details.originType = variant.originType
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: 'success',
+        type: variant.type,
+        from: variant.from,
+        content: JSON.stringify({ content: JSON.stringify(details) }),
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.equal(message.direction, variant.card ? 'in' : 'system', `${variant.name}: direction`)
+      assert.equal(message.kind, variant.card ? 'card' : 'system', `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.card ? 'wechatExchange' : null, `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.card ? 'pending' : null, `${variant.name}: cardState`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+
+      const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
+    }
+    assert.equal(stateEndpointCalls, 0, '未验证的状态接口不得覆盖候选人请求的 pending 语义')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('智联未知消息类型日志只含去重后的类型码且不改变消息身份', async () => {
+  const originalInfo = console.info
+  const original = { window: globalThis.window, document: globalThis.document, location: globalThis.location }
+  const logs = []
+  const sentinelText = 'PII-SENTINEL-NEVER-IN-LOG'
+  try {
+    console.info = (...args) => { logs.push(args) }
+    globalThis.document = { scripts: [] }
+    globalThis.window = {
+      $session: { staff: { staffId: 'staff-log-fixture' } },
+      imEngine: {
+        sessions: [{ sessionId: 'conversation-log-fixture', peerPartnerId: 'candidate-log-fixture', name: '脱敏候选人' }],
+        async getHistoryMsgs() {
+          return [
+            { idServer: 'unknown-343-a', time: 1, type: 343, from: 'candidate-log-fixture', text: sentinelText },
+            { idServer: 'unknown-343-b', time: 2, type: 343, from: 'candidate-log-fixture', text: sentinelText },
+            { idServer: 'unknown-shape', time: 3, type: 'future-shape', from: 'candidate-log-fixture', text: sentinelText },
+          ]
+        },
+      },
+    }
+    const page = await zhilianTestHooks.mainReadThreadPage('conversation-log-fixture', 8, null)
+    assert.equal(page.messages.length, 3)
+    assert.equal(page.messages[0].sourceKey, m3Hash('source-v1|unknown-343-a'))
+    assert.equal(page.messages[0].contentHash, m3Hash(sentinelText))
+    assert.deepEqual(logs, [
+      ['[RecruitHelper] zhilian_unrecognized_message_type', '343'],
+      ['[RecruitHelper] zhilian_unrecognized_message_type', 'unknown'],
+    ])
+    assert.equal(JSON.stringify(logs).includes(sentinelText), false)
+    assert.equal(JSON.stringify(logs).includes('candidate-log-fixture'), false)
+    assert.equal(JSON.stringify(logs).includes('unknown-343-a'), false)
+  } finally {
+    console.info = originalInfo
+    Object.assign(globalThis, original)
   }
 })
 

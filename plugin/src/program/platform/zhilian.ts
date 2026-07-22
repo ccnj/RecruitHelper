@@ -3791,15 +3791,6 @@ async function mainReadThreadPage(
     if (!Number.isFinite(number) || number <= 0) return null
     return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
   }
-  const cardState = (value: unknown): ZhilianThreadMessage['cardState'] => {
-    const state = clean(value).toUpperCase()
-    if (['ACCEPT', 'ACCEPTED', 'DONE', 'PASSED'].includes(state)) return 'accepted'
-    if (['REFUSE', 'REFUSED', 'REJECTED'].includes(state)) return 'rejected'
-    if (['EXPIRED', 'TIMEOUT', 'LOSE_EFFICACY'].includes(state)) return 'expired'
-    if (['PENDING', 'EXCHANGING', 'SUBMITTED'].includes(state)) return 'pending'
-    return 'unknown'
-  }
-
   diagnosticStage = 'resolve_staff_identity'
   const runtimeSession = w.$session as AnyRecord | null | undefined
   const runtimeStaff = runtimeSession?.staff as AnyRecord | undefined
@@ -3815,6 +3806,7 @@ async function mainReadThreadPage(
   if (!staffID) throw new Error('staff_identity_missing')
   diagnosticStage = 'normalize_messages'
   const output: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
+  const unrecognizedTypeCodes = new Set<string>()
   const sorted = [...rows].sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0))
   for (const row of sorted) {
     const envelope = parseObject(row.content)
@@ -3825,6 +3817,9 @@ async function mainReadThreadPage(
       typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
     )
     const from = clean(row.from)
+    const originTypeIsCandidate = details.originType === 2 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '2')
+    const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
     let direction: ZhilianThreadMessage['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -3838,43 +3833,14 @@ async function mainReadThreadPage(
       if (!from) throw new Error('message_direction_unresolved')
       kind = 'text'
       text = clean(row.text)
-    } else if (customType === 105) {
-      if (!from) throw new Error('message_direction_unresolved')
+    } else if (isCandidateWechatRequest) {
       kind = 'card'
       cardType = 'wechatExchange'
       text = clean(
-        direction === 'out'
-          ? details.staffContent ?? details.senderText ?? details.detail
-          : details.userContent ?? details.receiverText ?? details.detail,
+        details.userContent ?? details.receiverText ?? details.detail,
       ) || '[交换微信请求]'
-      state = 'unknown'
+      state = 'pending'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
-      const messageID = clean(row.sendMessageId ?? row.idServer)
-      if (customType === 105 && messageID && typeof w.fetch === 'function') {
-        try {
-          const response = await (w.fetch as typeof fetch)('/api/im/getWxCard/state', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: conversationRef, messageId: messageID }),
-          })
-          if (!response.ok) throw new Error(`wx card state http ${response.status}`)
-          const rawBody = await response.json() as unknown
-          if (!rawBody || typeof rawBody !== 'object' || Array.isArray(rawBody)) {
-            throw new Error('wx card state response shape invalid')
-          }
-          const body = rawBody as AnyRecord
-          const data = body.data
-          if (typeof data === 'string') state = cardState(data)
-          else if (data && typeof data === 'object' && !Array.isArray(data)) {
-            const namedState = (data as AnyRecord).state
-            if (typeof namedState === 'string') state = cardState(namedState)
-          }
-          // 真机只确认过数字状态的存在，尚未确认数字→语义的稳定映射；数字必须保留 unknown。
-        } catch {
-          // 状态接口不可用时保留 unknown；消息本身仍完整进入账本，不伪造确定状态。
-        }
-      }
     } else if (customType === 131) {
       if (!from) throw new Error('message_direction_unresolved')
       kind = 'text'
@@ -3888,6 +3854,7 @@ async function mainReadThreadPage(
     } else {
       direction = 'system'
       kind = 'system'
+      unrecognizedTypeCodes.add(Number.isFinite(customType) ? String(customType) : 'unknown')
       text = clean(
         details.staffText ?? details.userText ?? details.title ?? details.content ??
         envelope.msgb ?? envelope.msgc ?? envelope.text ?? row.text,
@@ -3920,6 +3887,10 @@ async function mainReadThreadPage(
       cardState: state,
       tsApprox: toMillis(row.time),
     })
+  }
+
+  for (const typeCode of [...unrecognizedTypeCodes].sort()) {
+    console.info('[RecruitHelper] zhilian_unrecognized_message_type', typeCode)
   }
 
   const oldest = sorted[0]
@@ -4710,6 +4681,9 @@ async function mainCaptureSendBaseline(
         typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
       )
       const from = clean(row.from)
+      const originTypeIsCandidate = details.originType === 2 ||
+        (typeof details.originType === 'string' && details.originType.trim() === '2')
+      const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
       let direction: ZhilianMessageAnchor['direction'] = from
         ? from === staffID ? 'out' : 'in'
         : 'system'
@@ -4721,14 +4695,11 @@ async function mainCaptureSendBaseline(
         if (!from) return null
         kind = 'text'
         text = clean(row.text)
-      } else if (customType === 105) {
-        if (!from) return null
+      } else if (isCandidateWechatRequest) {
         kind = 'card'
         cardType = 'wechatExchange'
         text = clean(
-          direction === 'out'
-            ? details.staffContent ?? details.senderText ?? details.detail
-            : details.userContent ?? details.receiverText ?? details.detail,
+          details.userContent ?? details.receiverText ?? details.detail,
         ) || '[交换微信请求]'
         identity = clean(details.requestId ?? details.id ?? details.cardId)
       } else if (customType === 131) {
@@ -5285,7 +5256,11 @@ function mainSendMessageOnce(
     const initialSession = asRecord(asRecord(initial.session)?.session)
     return clean(runtimeStaff?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
   }
-  const actionAnchorFor = (row: ActionSnapshotRow, staffID: string): ZhilianMessageAnchor | null => {
+  const actionAnchorFor = (
+    row: ActionSnapshotRow,
+    staffID: string,
+    target: string,
+  ): ZhilianMessageAnchor | null => {
     const envelope = parseObject(row.content)
     const inner = parseObject(envelope.content)
     const details = Object.keys(inner).length > 0 ? inner : envelope
@@ -5294,6 +5269,9 @@ function mainSendMessageOnce(
       typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
     )
     const from = clean(row.from)
+    const originTypeIsCandidate = details.originType === 2 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '2')
+    const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
     let direction: ZhilianMessageAnchor['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -5305,14 +5283,11 @@ function mainSendMessageOnce(
       if (!from) return null
       kind = 'text'
       normalizedText = clean(row.text)
-    } else if (customType === 105) {
-      if (!from) return null
+    } else if (isCandidateWechatRequest) {
       kind = 'card'
       cardType = 'wechatExchange'
       normalizedText = clean(
-        direction === 'out'
-          ? details.staffContent ?? details.senderText ?? details.detail
-          : details.userContent ?? details.receiverText ?? details.detail,
+        details.userContent ?? details.receiverText ?? details.detail,
       ) || '[交换微信请求]'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
     } else if (customType === 131) {
@@ -5336,32 +5311,32 @@ function mainSendMessageOnce(
       : digest(clean(normalizedText))
     return { direction, contentHash }
   }
-  const liveTailMatches = (rows: ActionSnapshotRow[]): boolean | null => {
+  const liveTailMatches = (rows: ActionSnapshotRow[], target: string): boolean | null => {
     if (expectedTail.length === 0) return true
     if (rows.length < expectedTail.length) return false
     const staffID = runtimeStaffID()
     if (!staffID) return null
     const tail = rows.slice(-expectedTail.length)
     return tail.every((row, index) => {
-      const actual = actionAnchorFor(row, staffID)
+      const actual = actionAnchorFor(row, staffID, target)
       const expected = expectedTail[index]
       return actual !== null && actual.direction === expected.direction && actual.contentHash === expected.contentHash
     })
   }
-  const baselineState = (): 'match' | 'unresolved' | 'changed' => {
+  const baselineState = (target: string): 'match' | 'unresolved' | 'changed' => {
     const actual = liveTimelineProjection()
     if (!actual) return 'unresolved'
     if (actual.sourceKeys.length !== expectedBaselineServerSourceKeys.length ||
         actual.sourceKeys.some((key, index) => key !== expectedBaselineServerSourceKeys[index])) return 'changed'
-    const tailMatches = liveTailMatches(actual.windowRows)
+    const tailMatches = liveTailMatches(actual.windowRows, target)
     return tailMatches === null ? 'unresolved' : tailMatches ? 'match' : 'changed'
   }
-  const targetBindingToken = (): string | null => {
+  const currentTargetBinding = (): { target: string; token: string } | null => {
     const engine = asRecord(w.imEngine)
     const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
     const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
     const target = matches.length === 1 ? clean(matches[0].peerPartnerId) : ''
-    return target ? digest(JSON.stringify([conversationRef, target])) : null
+    return target ? { target, token: digest(JSON.stringify([conversationRef, target])) } : null
   }
   const surface = (): {
     detail: HTMLElement
@@ -5424,14 +5399,14 @@ function mainSendMessageOnce(
     if (!principal || digest(principal) !== expectedPrincipalFingerprint) {
       return failedEvaluation('identity_changed')
     }
-    const bindingToken = targetBindingToken()
-    if (!bindingToken) return failedEvaluation('guard_unresolved')
-    if (bindingToken !== expectedTargetBindingToken) return failedEvaluation('target_changed')
+    const binding = currentTargetBinding()
+    if (!binding) return failedEvaluation('guard_unresolved')
+    if (binding.token !== expectedTargetBindingToken) return failedEvaluation('target_changed')
 
     const currentSurface = surface()
     if (!currentSurface) return failedEvaluation(surfaceFailure)
     if (currentSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
-    const currentBaselineState = baselineState()
+    const currentBaselineState = baselineState(binding.target)
     if (currentBaselineState !== 'match') {
       return failedEvaluation(currentBaselineState === 'changed' ? 'baseline_changed' : 'guard_unresolved')
     }
