@@ -16,6 +16,7 @@ type V4FixedPhraseKind string
 
 const (
 	V4PhraseRejectionRetention V4FixedPhraseKind = "rejectionRetention"
+	V4PhraseRejectionClosing   V4FixedPhraseKind = "rejectionClosing"
 	V4PhraseColdWechat         V4FixedPhraseKind = "coldWechat"
 	V4PhraseWechatReceipt      V4FixedPhraseKind = "wechatReceipt"
 	V4PhraseInterviewAccepted  V4FixedPhraseKind = "interviewAccepted"
