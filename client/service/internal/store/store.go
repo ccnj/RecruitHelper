@@ -62,6 +62,7 @@ func Open(dataDir string) (*Store, error) {
 	if err := db.AutoMigrate(
 		&Hand{},
 		&Account{},
+		&SourcingBatch{},
 		&SourcingCandidateRun{},
 		&Candidate{},
 		&CandidateProfile{},

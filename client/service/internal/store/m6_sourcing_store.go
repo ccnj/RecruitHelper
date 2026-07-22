@@ -29,6 +29,23 @@ type CompleteSourcingCandidateRunRequest struct {
 	Data                protocol.CandidateReadSourcingResumeData
 }
 
+// CompleteSourcingBatchCandidateRunRequest 是正式批次的成员收编入口。平台、
+// 账号、配置 revision 与职位都从 BatchID 指向的不可变批次事实重新核对，
+// 不能由调用方另行指定。
+type CompleteSourcingBatchCandidateRunRequest struct {
+	BatchID           string
+	RunID             string
+	LogicalDispatchID string
+	Data              protocol.CandidateReadSourcingResumeData
+}
+
+type CompleteSourcingBatchCandidateRunResult struct {
+	Run            SourcingCandidateRun
+	Created        bool
+	CapturedCount  int64
+	BatchCompleted bool
+}
+
 type SourcingCandidateRunSummary struct {
 	RunID                   string
 	SourceLogicalDispatchID string
@@ -221,6 +238,255 @@ func (s *Store) CompleteSourcingCandidateRun(req CompleteSourcingCandidateRunReq
 		return nil, err
 	}
 	return &out, nil
+}
+
+// CompleteSourcingBatchCandidateRun 从 candidate.readSourcingTargetResume 的
+// 持久命令谱系收编一个正式批次成员。成员插入、计数达标、批次 completed
+// 以及账号采集暂停在同一 SQLite 事务中完成；同 logical 或同批次同候选人
+// 的再次到达只复用首次成员，不重复计数。
+func (s *Store) CompleteSourcingBatchCandidateRun(
+	req CompleteSourcingBatchCandidateRunRequest,
+) (*CompleteSourcingBatchCandidateRunResult, error) {
+	if req.BatchID == "" || req.RunID == "" || req.LogicalDispatchID == "" ||
+		req.Data.PlatformUserRef == "" || req.Data.PositionRef == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	resumeRaw, err := json.Marshal(canonicalResumeV1{
+		Basic: req.Data.Basic, Expectations: req.Data.Expectations,
+		SelfEvaluation: req.Data.SelfEvaluation, Education: req.Data.Education,
+		WorkExperiences: req.Data.WorkExperiences,
+	})
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(resumeRaw)
+	contentHash := hex.EncodeToString(digest[:])
+
+	out := CompleteSourcingBatchCandidateRunResult{}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := sourcingBatchByIDTx(tx, req.BatchID)
+		if err != nil {
+			return err
+		}
+		if batch.PositionRef == nil || *batch.PositionRef != req.Data.PositionRef {
+			return ErrSourcingBinding
+		}
+
+		var account Account
+		if err := tx.First(&account,
+			"platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef,
+		).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
+		}
+		if account.PrincipalFingerprint == nil {
+			return ErrSourcingBinding
+		}
+		var revision JobAIContextRevision
+		if err := tx.First(&revision, "revision_hash = ?", batch.ContextRevisionHash).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrJobAIContextRevisionNotFound
+			}
+			return err
+		}
+
+		var records []CmdRecord
+		if err := tx.Where("logical_dispatch_id = ?", req.LogicalDispatchID).
+			Order("lineage_depth, created_at, msg_id").Find(&records).Error; err != nil {
+			return err
+		}
+		leaf, err := validateFormalSourcingTargetLineage(records, batch, account, req.Data)
+		if err != nil {
+			return err
+		}
+		if records[0].CreatedAt.Before(batch.StartedAt) || leaf.TerminalAt == nil || leaf.TerminalAt.Before(batch.StartedAt) {
+			return ErrSourcingBinding
+		}
+
+		resultRaw := json.RawMessage(leaf.ResultBody)
+		meta := protocol.Primitives[protocol.PrimCandidateReadSourcingTargetResume]
+		var result protocol.ResultBody
+		var persistedData protocol.CandidateReadSourcingResumeData
+		if len(resultRaw) == 0 ||
+			protocol.ValidatePrimitiveResult(protocol.PrimCandidateReadSourcingTargetResume, meta.Ver, resultRaw) != nil ||
+			json.Unmarshal(resultRaw, &result) != nil || result.Ref != leaf.MsgID ||
+			result.Status != protocol.ResultStatusOk || json.Unmarshal(result.Data, &persistedData) != nil {
+			return ErrSourcingBinding
+		}
+		persistedRaw, _ := json.Marshal(persistedData)
+		requestedRaw, _ := json.Marshal(req.Data)
+		if string(persistedRaw) != string(requestedRaw) {
+			return ErrSourcingConflict
+		}
+
+		var existingLogical SourcingCandidateRun
+		existingErr := tx.First(&existingLogical,
+			"source_logical_dispatch_id = ?", req.LogicalDispatchID,
+		).Error
+		if existingErr == nil {
+			if !sameFormalSourcingMember(existingLogical, batch, req.Data) ||
+				existingLogical.ContentHash != contentHash || existingLogical.ResumeJSON != string(resumeRaw) {
+				return ErrSourcingBatchConflict
+			}
+			return fillCompletedSourcingBatchReplayTx(tx, batch, existingLogical, &out)
+		}
+		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+			return existingErr
+		}
+
+		var existingMember SourcingCandidateRun
+		existingErr = tx.First(&existingMember,
+			"batch_id = ? AND platform_user_ref = ?", batch.BatchID, req.Data.PlatformUserRef,
+		).Error
+		if existingErr == nil {
+			if !sameFormalSourcingMember(existingMember, batch, req.Data) {
+				return ErrSourcingBatchConflict
+			}
+			return fillCompletedSourcingBatchReplayTx(tx, batch, existingMember, &out)
+		}
+		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+			return existingErr
+		}
+
+		if batch.Status != SourcingBatchCollecting || batch.EndedAt != nil {
+			return ErrSourcingBatchStateConflict
+		}
+		captured, err := sourcingBatchCapturedCountTx(tx, batch.BatchID)
+		if err != nil {
+			return err
+		}
+		if captured >= int64(batch.TargetCount) {
+			return ErrSourcingBatchStateConflict
+		}
+		if err := upsertSourcingCandidateTx(tx, batch.Platform, req.Data, *leaf.TerminalAt); err != nil {
+			return err
+		}
+		batchID := batch.BatchID
+		run := SourcingCandidateRun{
+			RunID: req.RunID, BatchID: &batchID,
+			Platform: batch.Platform, AccountRef: batch.AccountRef,
+			ContextRevisionHash: batch.ContextRevisionHash,
+			PlatformUserRef:     req.Data.PlatformUserRef, DisplayName: req.Data.DisplayName,
+			PositionRef: req.Data.PositionRef, PositionTitle: req.Data.PositionTitle,
+			ContactState: string(req.Data.ContactState), SourceLogicalDispatchID: req.LogicalDispatchID,
+			ObservedAt: req.Data.ObservedAt, CapturedAt: *leaf.TerminalAt,
+			SchemaVersion: sourcingResumeSchemaV1, ContentHash: contentHash, ResumeJSON: string(resumeRaw),
+		}
+		if err := tx.Create(&run).Error; err != nil {
+			return err
+		}
+		captured++
+		if captured > int64(batch.TargetCount) {
+			return ErrSourcingBatchStateConflict
+		}
+		completed := captured == int64(batch.TargetCount)
+		batchUpdates := map[string]any{"last_attempt_at": leaf.TerminalAt}
+		if completed {
+			batchUpdates["status"] = SourcingBatchCompleted
+			batchUpdates["reason"] = ""
+			batchUpdates["ended_at"] = leaf.TerminalAt
+		}
+		updatedBatch := tx.Model(&SourcingBatch{}).
+			Where("batch_id = ? AND status = ? AND ended_at IS NULL", batch.BatchID, SourcingBatchCollecting).
+			Updates(batchUpdates)
+		if updatedBatch.Error != nil {
+			return updatedBatch.Error
+		}
+		if updatedBatch.RowsAffected != 1 {
+			return ErrSourcingBatchStateConflict
+		}
+		if completed {
+			updatedAccount := tx.Model(&Account{}).
+				Where("platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef).
+				Updates(map[string]any{
+					"stopped_at": leaf.TerminalAt, "paused_reason": "sourcingTargetReached", "dirty_hint": true,
+				})
+			if updatedAccount.Error != nil {
+				return updatedAccount.Error
+			}
+			if updatedAccount.RowsAffected != 1 {
+				return ErrSourcingBinding
+			}
+		}
+
+		out.Run = run
+		out.Created = true
+		out.CapturedCount = captured
+		out.BatchCompleted = completed
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func validateFormalSourcingTargetLineage(
+	records []CmdRecord,
+	batch SourcingBatch,
+	account Account,
+	data protocol.CandidateReadSourcingResumeData,
+) (*CmdRecord, error) {
+	leaf, err := validateLineage(records)
+	if err != nil {
+		return nil, err
+	}
+	if leaf.Status != CmdOk || leaf.Name != protocol.PrimCandidateReadSourcingTargetResume || leaf.TerminalAt == nil {
+		return nil, ErrSourcingBinding
+	}
+	for _, command := range records {
+		if command.Name != protocol.PrimCandidateReadSourcingTargetResume ||
+			command.Class != string(protocol.ClassIntrusive) || command.Platform != batch.Platform ||
+			command.AccountRef != batch.AccountRef || command.Domain != batch.Platform+":"+batch.AccountRef {
+			return nil, ErrSourcingBinding
+		}
+		var args protocol.CandidateReadSourcingTargetResumeArgs
+		if json.Unmarshal([]byte(command.Args), &args) != nil ||
+			args.PlatformUserRef != data.PlatformUserRef || args.PositionRef != data.PositionRef ||
+			batch.PositionRef == nil || args.PositionRef != *batch.PositionRef {
+			return nil, ErrSourcingBinding
+		}
+		if !sourcingBatchCommandMatchesAccount(command, batch, account) {
+			return nil, ErrSourcingBinding
+		}
+	}
+	return leaf, nil
+}
+
+func sameFormalSourcingMember(
+	run SourcingCandidateRun,
+	batch SourcingBatch,
+	data protocol.CandidateReadSourcingResumeData,
+) bool {
+	return run.BatchID != nil && *run.BatchID == batch.BatchID &&
+		run.Platform == batch.Platform && run.AccountRef == batch.AccountRef &&
+		run.ContextRevisionHash == batch.ContextRevisionHash &&
+		run.PlatformUserRef == data.PlatformUserRef && run.PositionRef == data.PositionRef
+}
+
+func sourcingBatchCapturedCountTx(tx *gorm.DB, batchID string) (int64, error) {
+	var captured int64
+	err := tx.Model(&SourcingCandidateRun{}).Where("batch_id = ?", batchID).Count(&captured).Error
+	return captured, err
+}
+
+func fillCompletedSourcingBatchReplayTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+	run SourcingCandidateRun,
+	out *CompleteSourcingBatchCandidateRunResult,
+) error {
+	captured, err := sourcingBatchCapturedCountTx(tx, batch.BatchID)
+	if err != nil {
+		return err
+	}
+	out.Run = run
+	out.Created = false
+	out.CapturedCount = captured
+	out.BatchCompleted = batch.Status == SourcingBatchCompleted && batch.EndedAt != nil
+	return nil
 }
 
 // upsertSourcingCandidateTx 只建立 platform+platformUserRef 人根并刷新展示

@@ -247,16 +247,53 @@ type Account struct {
 	UpdatedAt time.Time
 }
 
+type SourcingBatchStatus string
+
+const (
+	SourcingBatchPreparing  SourcingBatchStatus = "preparing"
+	SourcingBatchCollecting SourcingBatchStatus = "collecting"
+	SourcingBatchBlocked    SourcingBatchStatus = "blocked"
+	SourcingBatchCompleted  SourcingBatchStatus = "completed"
+	SourcingBatchStopped    SourcingBatchStatus = "stopped"
+)
+
+// SourcingBatch 是一次正式采集的不可变范围与可恢复状态。PositionRef 在
+// preparing 阶段为空，首个窗口正结果绑定后不可再改；EndedAt 非空表示终态。
+type SourcingBatch struct {
+	BatchID string `gorm:"primaryKey"`
+
+	Platform   string `gorm:"not null;index:ux_sourcing_batch_open,unique,where:ended_at IS NULL,priority:1"`
+	AccountRef string `gorm:"not null;index:ux_sourcing_batch_open,unique,where:ended_at IS NULL,priority:2"`
+
+	ContextRevisionHash string `gorm:"not null;index"`
+	TargetCount         int    `gorm:"not null;check:ck_sourcing_batch_target_count,target_count > 0"`
+	PositionRef         *string
+	PositionTitle       *string
+	PositionBoundAt     *time.Time
+
+	Status SourcingBatchStatus `gorm:"not null;index;check:ck_sourcing_batch_status,status IN ('preparing','collecting','blocked','completed','stopped')"`
+	Reason string
+
+	StartedAt     time.Time `gorm:"not null"`
+	LastAttemptAt *time.Time
+	EndedAt       *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+
+	Members []SourcingCandidateRun `json:"-" gorm:"foreignKey:BatchID;references:BatchID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+}
+
 // SourcingCandidateRun 是推荐页一次单候选人简历采集的不可变业务事实。
 // 候选人身份与简历正文只允许在业务库内使用；管理 API 只能投影随机引用、
 // hash、字节数、状态与时刻。
 type SourcingCandidateRun struct {
-	RunID               string `gorm:"primaryKey"`
-	Platform            string `gorm:"not null;index:idx_sourcing_account_revision,priority:1"`
-	AccountRef          string `gorm:"not null;index:idx_sourcing_account_revision,priority:2"`
-	ContextRevisionHash string `gorm:"not null;index:idx_sourcing_account_revision,priority:3"`
+	RunID               string  `gorm:"primaryKey"`
+	BatchID             *string `gorm:"index;uniqueIndex:ux_sourcing_batch_candidate,priority:1"`
+	Platform            string  `gorm:"not null;index:idx_sourcing_account_revision,priority:1"`
+	AccountRef          string  `gorm:"not null;index:idx_sourcing_account_revision,priority:2"`
+	ContextRevisionHash string  `gorm:"not null;index:idx_sourcing_account_revision,priority:3"`
 
-	PlatformUserRef string `gorm:"not null"`
+	PlatformUserRef string `gorm:"not null;uniqueIndex:ux_sourcing_batch_candidate,priority:2"`
 	DisplayName     *string
 	PositionRef     string `gorm:"not null"`
 	PositionTitle   *string

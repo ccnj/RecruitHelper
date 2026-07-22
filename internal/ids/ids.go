@@ -36,6 +36,8 @@ func NewResumeSnapshotID() string { return "rs-" + randHex(12) }
 
 func NewSourcingRunID() string { return "sr-" + randHex(12) }
 
+func NewSourcingBatchID() string { return "sb-" + randHex(12) }
+
 func NewTrialSelectionID() string { return "ts-" + randHex(12) }
 
 func NewAIContextBindingID() string { return "cb-" + randHex(12) }
