@@ -477,6 +477,45 @@ func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T
 	}
 }
 
+func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
+	}
+	if result, err := h.manager.Tick(context.Background()); err != nil || len(result.Rounds) != 1 {
+		t.Fatalf("首轮采集失败: result=%+v err=%v", result, err)
+	}
+	blocked, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || blocked == nil || blocked.Status != store.SourcingBatchBlocked {
+		t.Fatalf("单窗耗尽后未进入可恢复 blocked: batch=%+v err=%v", blocked, err)
+	}
+
+	h.sender.windows = [][]string{{"candidate-a"}, {"candidate-b"}}
+	h.sender.window = 0
+	h.sender.candidates["candidate-b"] = sourcingCandidate("candidate-b", h.position, h.clock.Now())
+	if _, err := h.store.ResumeSourcingBatch(store.ResumeSourcingBatchRequest{BatchID: started.BatchID}); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.now = h.clock.now.Add(time.Millisecond)
+	if err := h.manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	beforeWaits := *h.paceWaits
+	if result, err := h.manager.Tick(context.Background()); err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("恢复后采集失败: result=%+v err=%v", result, err)
+	}
+	if got := *h.paceWaits - beforeWaits; got != 1 {
+		t.Fatalf("滚动后首个新候选人必须等待一次候选人节奏: got=%d want=1", got)
+	}
+	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("恢复后目标顺序错误: got=%v want=%v", got, want)
+	}
+}
+
 func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b", "candidate-c"}})
 	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
