@@ -10,14 +10,15 @@ import (
 )
 
 type sourcingLatestView struct {
-	RunID                   string             `json:"runId"`
-	SourceLogicalDispatchID string             `json:"sourceLogicalDispatchId"`
-	ObservedAt              int64              `json:"observedAt"`
-	CapturedAt              string             `json:"capturedAt"`
-	SchemaVersion           int                `json:"schemaVersion"`
-	ContentHash             string             `json:"contentHash"`
-	ResumeBytes             int                `json:"resumeBytes"`
-	Score                   *sourcingScoreView `json:"score,omitempty"`
+	RunID                   string                 `json:"runId"`
+	SourceLogicalDispatchID string                 `json:"sourceLogicalDispatchId"`
+	ObservedAt              int64                  `json:"observedAt"`
+	CapturedAt              string                 `json:"capturedAt"`
+	SchemaVersion           int                    `json:"schemaVersion"`
+	ContentHash             string                 `json:"contentHash"`
+	ResumeBytes             int                    `json:"resumeBytes"`
+	Score                   *sourcingScoreView     `json:"score,omitempty"`
+	Selection               *sourcingSelectionView `json:"selection,omitempty"`
 }
 
 type sourcingScoreView struct {
@@ -33,6 +34,14 @@ type sourcingScoreView struct {
 	EstimatedCostMicros int64  `json:"estimatedCostMicros"`
 	StartedAt           string `json:"startedAt"`
 	FinishedAt          string `json:"finishedAt,omitempty"`
+}
+
+type sourcingSelectionView struct {
+	Outcome   string  `json:"outcome"`
+	Score     *int    `json:"score,omitempty"`
+	MinScore  int     `json:"minScore"`
+	ProfileID *string `json:"profileId,omitempty"`
+	DecidedAt string  `json:"decidedAt"`
 }
 
 type sourcingStatusView struct {
@@ -121,6 +130,14 @@ func (a *API) writeSourcingStatus(w http.ResponseWriter, key store.AccountKey) {
 				OutputTokens: score.OutputTokens, ErrorClass: score.ErrorClass,
 				EstimatedCostMicros: score.EstimatedCostMicros,
 				StartedAt:           score.StartedAt.Format("2006-01-02T15:04:05.000Z07:00"), FinishedAt: finishedAt,
+			}
+		}
+		if status.Latest.Selection != nil {
+			selection := status.Latest.Selection
+			view.Latest.Selection = &sourcingSelectionView{
+				Outcome: string(selection.Outcome), Score: selection.Score,
+				MinScore: selection.MinScore, ProfileID: selection.ProfileID,
+				DecidedAt: selection.DecidedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 			}
 		}
 	}

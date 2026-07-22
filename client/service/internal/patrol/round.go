@@ -125,20 +125,48 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	// Finish one already-captured candidate before collecting another. A fresh
-	// capture is scored in the same round, so a provider outage cannot build an
-	// unbounded queue of unscored resumes.
-	processedSourcing, err := a.scorePendingSourcingRun(ctx)
+	// First settle one completed historical score without assuming its old
+	// recommendation detail is still open. A candidate captured and scored in
+	// this same round may continue into the single automatic greeting below.
+	if _, err := a.decidePendingSourcingCandidate(); err != nil {
+		return err
+	}
+	processedSourcing, scoredRun, err := a.scorePendingSourcingRun(ctx)
 	if err != nil {
 		return err
 	}
+	if scoredRun != nil {
+		if _, err := a.decideSourcingCandidate(scoredRun.RunID); err != nil {
+			return err
+		}
+	}
 	if !processedSourcing {
-		if err := a.captureSourcingResume(ctx); err != nil {
+		captured, err := a.captureSourcingResume(ctx)
+		if err != nil {
 			a.handleCommandFailure(err)
 			return err
 		}
-		if _, err := a.scorePendingSourcingRun(ctx); err != nil {
-			return err
+		if captured != nil {
+			_, freshScore, err := a.scorePendingSourcingRun(ctx)
+			if err != nil {
+				return err
+			}
+			if freshScore != nil && freshScore.RunID == captured.RunID {
+				selection, err := a.decideSourcingCandidate(freshScore.RunID)
+				if err != nil {
+					return err
+				}
+				attempted, err := a.sendSelectedSourcingGreeting(ctx, selection)
+				if err != nil {
+					a.handleCommandFailure(err)
+					return err
+				}
+				if attempted {
+					// 一轮至多一条候选人可见消息。招呼正证完成后立即收尾，
+					// 列表对账留给下一轮。
+					return nil
+				}
+			}
 		}
 	}
 
@@ -195,31 +223,31 @@ func (a *roundActor) execute(ctx context.Context) error {
 	return a.processM5Trial(ctx)
 }
 
-func (a *roundActor) captureSourcingResume(ctx context.Context) error {
+func (a *roundActor) captureSourcingResume(ctx context.Context) (*store.SourcingCandidateRun, error) {
 	if !a.account.SourcingEnabled {
-		return nil
+		return nil, nil
 	}
 	revisionHash := a.account.SourcingContextRevisionHash
 	if revisionHash == "" {
-		return store.ErrSourcingBinding
+		return nil, store.ErrSourcingBinding
 	}
 	if err := a.setStage("readingSourcingResume"); err != nil {
-		return err
+		return nil, err
 	}
 	if err := a.ensureDispatchAllowed(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	runner, ok := a.manager.runner.(SourcingResumeRunner)
 	if !ok {
-		return errors.New("巡检 runner 未实现推荐页简历采集接缝")
+		return nil, errors.New("巡检 runner 未实现推荐页简历采集接缝")
 	}
 	excluded, err := a.manager.store.SourcingExcludedPlatformUserRefs(a.key(), revisionHash, 32)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	attemptedAt := a.manager.now()
 	if err := a.manager.store.MarkSourcingAttempt(a.key(), revisionHash, attemptedAt, ""); err != nil {
-		return err
+		return nil, err
 	}
 	expected := ""
 	if a.account.PrincipalFingerprint != nil {
@@ -231,7 +259,7 @@ func (a *roundActor) captureSourcingResume(ctx context.Context) error {
 		ExpectedPrincipalFingerprint: expected, ExcludePlatformUserRefs: excluded,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logicalID := handle.LogicalDispatchID()
 	var raw json.RawMessage
@@ -242,42 +270,42 @@ func (a *roundActor) captureSourcingResume(ctx context.Context) error {
 	}()
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+			return nil, err
 		}
 		var runErr *RunError
 		if !errors.As(err, &runErr) {
-			return err
+			return nil, err
 		}
 		if markErr := a.manager.store.MarkSourcingAttempt(a.key(), revisionHash, attemptedAt, sourcingFailureCode(runErr)); markErr != nil {
-			return markErr
+			return nil, markErr
 		}
 		if runErr.Code == protocol.ErrCodeAccountMismatch ||
 			(runErr.Code == protocol.ErrCodeCtxNotReady && runErr.Reason == protocol.NotReadyReasonLoginRequired) ||
 			runErr.Code == protocol.ErrCodeUserActive {
-			return err
+			return nil, err
 		}
 		// 推荐页无候选人、页面局部变化等只结束本次采集，不阻断同轮 IM 对账。
-		return nil
+		return nil, nil
 	}
 	if err := a.ensureDispatchAllowed(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	meta := protocol.Primitives[protocol.PrimCandidateReadSourcingResume]
 	if err := protocol.ValidatePrimitiveData(protocol.PrimCandidateReadSourcingResume, meta.Ver, raw); err != nil {
-		return err
+		return nil, err
 	}
 	var data protocol.CandidateReadSourcingResumeData
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = a.manager.store.CompleteSourcingCandidateRun(store.CompleteSourcingCandidateRunRequest{
+	run, err := a.manager.store.CompleteSourcingCandidateRun(store.CompleteSourcingCandidateRunRequest{
 		RunID: ids.NewSourcingRunID(), Platform: a.account.Platform, AccountRef: a.account.AccountRef,
 		ContextRevisionHash: revisionHash, LogicalDispatchID: logicalID, Data: data,
 	})
 	if errors.Is(err, store.ErrSourcingBinding) || errors.Is(err, store.ErrSourcingNotEnabled) {
-		return nil
+		return nil, nil
 	}
-	return err
+	return run, err
 }
 
 func sourcingFailureCode(err *RunError) string {

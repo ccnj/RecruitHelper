@@ -114,6 +114,23 @@ type SourcingResumeRunner interface {
 	StartSourcingResume(context.Context, SourcingResumeRequest) (SourcingResumeHandle, error)
 }
 
+// AutomaticGreetingRequest is the only sourcing bridge into the existing
+// chat.sendGreeting WAL. ProfileID comes from the selection ledger and
+// IntentID is deterministic, so a repeated actor round cannot mint a new send.
+type AutomaticGreetingRequest struct {
+	ProfileID string
+	IntentID  string
+	Text      string
+}
+
+type AutomaticGreetingHandle interface {
+	Wait(context.Context) error
+}
+
+type AutomaticGreetingRunner interface {
+	StartAutomaticGreeting(context.Context, AutomaticGreetingRequest) (AutomaticGreetingHandle, error)
+}
+
 // AutomaticReplyRequest is the only M5 bridge into the existing
 // chat.sendMessage safety rail. IntentID is deterministically derived from
 // ActionID; PreviousIntentID preserves the conversation-head CAS.

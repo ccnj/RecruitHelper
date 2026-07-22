@@ -134,6 +134,43 @@ type automaticReplyRunHandle struct {
 	logicalID  string
 }
 
+type automaticGreetingRunHandle struct {
+	dispatcher *dispatch.Dispatcher
+	logicalID  string
+}
+
+func (r PatrolRunner) StartAutomaticGreeting(
+	ctx context.Context,
+	req patrol.AutomaticGreetingRequest,
+) (patrol.AutomaticGreetingHandle, error) {
+	if r.Dispatcher == nil {
+		return nil, errors.New("dispatcher 不能为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	receipt, dispatchErr := r.Dispatcher.SendGreeting(dispatch.SendGreetingRequest{
+		IntentID: req.IntentID, ProfileID: req.ProfileID, Text: req.Text,
+	})
+	if receipt == nil || receipt.IntentID != req.IntentID || receipt.LogicalDispatchID == "" {
+		if dispatchErr == nil {
+			dispatchErr = store.ErrEffectIntentConflict
+		}
+		return nil, dispatchErr
+	}
+	// WAL 一旦存在便由既有恢复轨独占结果；即使 socket 同步返回错误，也只
+	// 等待同一个 logical dispatch，绝不另铸招呼意图。
+	return &automaticGreetingRunHandle{dispatcher: r.Dispatcher, logicalID: receipt.LogicalDispatchID}, nil
+}
+
+func (h *automaticGreetingRunHandle) Wait(ctx context.Context) error {
+	if h == nil || h.dispatcher == nil || h.logicalID == "" {
+		return errors.New("自动招呼等待句柄无效")
+	}
+	_, err := h.dispatcher.WaitLogical(ctx, h.logicalID)
+	return err
+}
+
 func (r PatrolRunner) StartAutomaticReply(
 	ctx context.Context,
 	req patrol.AutomaticReplyRequest,

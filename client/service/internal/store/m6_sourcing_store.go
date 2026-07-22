@@ -38,6 +38,7 @@ type SourcingCandidateRunSummary struct {
 	ContentHash             string
 	ResumeBytes             int
 	Score                   *SourcingScoreSummary
+	Selection               *SourcingSelectionSummary
 }
 
 type SourcingScoreSummary struct {
@@ -53,6 +54,14 @@ type SourcingScoreSummary struct {
 	EstimatedCostMicros int64
 	StartedAt           time.Time
 	FinishedAt          *time.Time
+}
+
+type SourcingSelectionSummary struct {
+	Outcome   SourcingSelectionOutcome
+	Score     *int
+	MinScore  int
+	ProfileID *string
+	DecidedAt time.Time
 }
 
 type AccountSourcingStatus struct {
@@ -277,6 +286,16 @@ func (s *Store) AccountSourcingStatus(key AccountKey) (*AccountSourcingStatus, e
 			OutputTokens: score.OutputTokens, ErrorClass: score.ErrorClass,
 			EstimatedCostMicros: score.EstimatedCostMicros,
 			StartedAt:           score.StartedAt, FinishedAt: score.FinishedAt,
+		}
+	}
+	selection, err := s.SourcingSelectionByRunID(latest.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if selection != nil {
+		status.Latest.Selection = &SourcingSelectionSummary{
+			Outcome: selection.Outcome, Score: selection.Score, MinScore: selection.MinScore,
+			ProfileID: selection.ProfileID, DecidedAt: selection.DecidedAt,
 		}
 	}
 	return status, nil

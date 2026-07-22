@@ -12,6 +12,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -51,6 +52,7 @@ type sourcingActorSender struct {
 	dispatcher *dispatch.Dispatcher
 	order      []string
 	data       protocol.CandidateReadSourcingResumeData
+	greetings  []string
 }
 
 func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope) error {
@@ -63,6 +65,7 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 	}
 	s.order = append(s.order, body.Name)
 	var data any
+	var evidence []protocol.Evidence
 	switch body.Name {
 	case protocol.PrimProbePlatform:
 		fingerprint := "principal-sourcing-actor"
@@ -72,6 +75,18 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 		}
 	case protocol.PrimCandidateReadSourcingResume:
 		data = s.data
+	case protocol.PrimChatSendGreeting:
+		var args protocol.ChatSendGreetingArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		s.greetings = append(s.greetings, args.Text)
+		data = protocol.ChatSendGreetingData{
+			PlatformUserRef: args.PlatformUserRef, PositionRef: args.PositionRef,
+			ConversationRef: "conversation-sourcing-actor",
+			ContentHash:     syncledger.HashText(args.Text), ObservedAt: time.Now().UnixMilli(),
+		}
+		evidence = []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}}
 	case protocol.PrimChatReadList:
 		data = protocol.ChatReadListData{Sessions: []protocol.ConversationSummary{}, Complete: true}
 	default:
@@ -83,7 +98,7 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 	}
 	s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
 	s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
-		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: dataRaw, ExecMs: 1,
+		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: dataRaw, ExecMs: 1, Evidence: evidence,
 	})
 	return nil
 }
@@ -96,13 +111,18 @@ func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
 			protocol.PrimCandidateReadSourcingResume + "@1",
+			protocol.PrimChatSendGreeting + "@1",
 			protocol.PrimChatReadList + "@1",
 		}, []string{
 			string(protocol.FeatureLease1), string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
+			string(protocol.FeatureWitness1),
 		}, true
 }
 
 func (*sourcingActorSender) HandContractMatch(string) (bool, bool) { return true, true }
+func (*sourcingActorSender) HandWitness(string) (dispatch.HandWitness, bool) {
+	return dispatch.HandWitness{StoreID: "witness-sourcing-actor"}, true
+}
 func (*sourcingActorSender) CloseHand(string, string, string) bool { return true }
 func (*sourcingActorSender) HandOfflineMs(string) int64            { return 0 }
 
@@ -130,7 +150,7 @@ func sourcingActorRevision(at time.Time) m5ai.ContextRevision {
 	}
 }
 
-func TestSourcingActorCapturesOneThenContinuesNormalRound(t *testing.T) {
+func TestSourcingActorCapturesScoresSelectsAndGreetsOnceThroughRealDispatcher(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +200,7 @@ func TestSourcingActorCapturesOneThenContinuesNormalRound(t *testing.T) {
 	wantOrder := []string{
 		protocol.PrimProbePlatform,
 		protocol.PrimCandidateReadSourcingResume,
-		protocol.PrimChatReadList,
+		protocol.PrimChatSendGreeting,
 	}
 	if fmt.Sprint(sender.order) != fmt.Sprint(wantOrder) {
 		t.Fatalf("采集必须位于 probe 后、readList 前且每轮一次: got=%v want=%v", sender.order, wantOrder)
@@ -196,5 +216,21 @@ func TestSourcingActorCapturesOneThenContinuesNormalRound(t *testing.T) {
 	score, err := st.SourcingScoreByRunID(status.Latest.RunID)
 	if err != nil || score == nil || score.Status != store.AIInvocationOK || score.Score == nil || *score.Score != 7 {
 		t.Fatalf("评分未与采集 run 唯一绑定: score=%+v err=%v", score, err)
+	}
+	selection, err := st.SourcingSelectionByRunID(status.Latest.RunID)
+	if err != nil || selection == nil || selection.Outcome != store.SourcingSelectionSelected || selection.ProfileID == nil {
+		t.Fatalf("评分合格后未形成 selected 决策: selection=%+v err=%v", selection, err)
+	}
+	profile, err := st.CandidateProfileByID(*selection.ProfileID)
+	if err != nil || profile == nil || profile.MainStatus != store.CandidateProfileGreeted ||
+		profile.ConversationRef == nil || *profile.ConversationRef != "conversation-sourcing-actor" {
+		t.Fatalf("真实 dispatcher 未以正证推进 greeted: profile=%+v err=%v", profile, err)
+	}
+	if len(sender.greetings) != 1 || sender.greetings[0] != "你好" {
+		t.Fatalf("自动招呼必须且只能发送一次固定正文: greetings=%v", sender.greetings)
+	}
+	intent, err := st.LatestGreetingEffectIntent(profile.ProfileID)
+	if err != nil || intent == nil || intent.Status != store.EffectIntentOk {
+		t.Fatalf("既有 WAL 未形成成功招呼意图: intent=%+v err=%v", intent, err)
 	}
 }

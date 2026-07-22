@@ -562,6 +562,30 @@ type SourcingScoreInvocation struct {
 	FinishedAt          *time.Time
 }
 
+type SourcingSelectionOutcome string
+
+const (
+	SourcingSelectionSelected             SourcingSelectionOutcome = "selected"
+	SourcingSelectionScoreBelowThreshold  SourcingSelectionOutcome = "scoreBelowThreshold"
+	SourcingSelectionContactStateRejected SourcingSelectionOutcome = "contactStateRejected"
+	SourcingSelectionScoringFailed        SourcingSelectionOutcome = "scoringFailed"
+	SourcingSelectionExistingProfile      SourcingSelectionOutcome = "existingProfile"
+)
+
+// SourcingSelectionDecision 是评分事实到候选人档案之间的一次性确定性裁决。
+// 它只保存随机引用、配置 hash 与数值结果，不复制平台身份或简历正文。
+// RunID 作为主键保证低分/失败/已有档案也只裁决一次，不会堵住后续采集。
+type SourcingSelectionDecision struct {
+	RunID               string `gorm:"primaryKey"`
+	ContextRevisionHash string `gorm:"not null;index"`
+	Score               *int
+	MinScore            int                      `gorm:"not null"`
+	Outcome             SourcingSelectionOutcome `gorm:"not null;index"`
+	ProfileID           *string                  `gorm:"index"`
+	DecidedAt           time.Time                `gorm:"not null"`
+	CreatedAt           time.Time
+}
+
 // CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。
 // 它不是第二套 intent 账本；LatestIntentID 永远指向既有 EffectIntent。
 type CandidateGreetingHead struct {

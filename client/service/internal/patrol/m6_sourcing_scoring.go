@@ -12,33 +12,33 @@ import (
 // store reservation is the only authorization to call the provider; every
 // existing reservation, including an interrupted one, permanently suppresses
 // another call for the same run.
-func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, error) {
+func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, *store.SourcingCandidateRun, error) {
 	if !a.account.SourcingEnabled || a.account.SourcingContextRevisionHash == "" {
-		return false, nil
+		return false, nil, nil
 	}
 	run, err := a.manager.store.NextSourcingRunWithoutScore(a.key(), a.account.SourcingContextRevisionHash)
 	if err != nil || run == nil {
-		return false, err
+		return false, nil, err
 	}
 	// A missing local provider is recoverable configuration state. Keep this
 	// run pending and stop collecting more candidates until configuration is
 	// available instead of creating an unbounded unscored backlog.
 	if a.manager.advice == nil {
-		return true, nil
+		return true, nil, nil
 	}
 	if err := a.setStage("scoringSourcingResume"); err != nil {
-		return true, err
+		return true, nil, err
 	}
 	revision, err := a.manager.store.JobAIContextRevisionByHash(run.ContextRevisionHash)
 	if err != nil {
-		return true, err
+		return true, nil, err
 	}
 	if revision == nil {
-		return true, store.ErrJobAIContextRevisionNotFound
+		return true, nil, store.ErrJobAIContextRevisionNotFound
 	}
 	view, err := m5ai.DeriveSourcingView(revision.SourcePackage)
 	if err != nil {
-		return true, err
+		return true, nil, err
 	}
 
 	content, renderErr := m5ai.RenderScoringPrompt(view.ScoringPrompt, run.ResumeJSON)
@@ -56,10 +56,10 @@ func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, error) 
 		InputHash: inputHash, StartedAt: a.manager.now(),
 	})
 	if err != nil {
-		return true, err
+		return true, nil, err
 	}
 	if !reserved.Created {
-		return true, nil
+		return true, nil, nil
 	}
 	if renderErr != nil {
 		_, err = a.manager.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
@@ -68,7 +68,10 @@ func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, error) 
 				ErrorClass: "scoringInputBudgetBlocked", FinishedAt: a.manager.now(),
 			},
 		})
-		return true, err
+		if err != nil {
+			return true, nil, err
+		}
+		return true, run, nil
 	}
 
 	started := time.Now()
@@ -103,5 +106,8 @@ func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, error) 
 	_, err = a.manager.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 		Completion: completion, Score: score,
 	})
-	return true, err
+	if err != nil {
+		return true, nil, err
+	}
+	return true, run, nil
 }
