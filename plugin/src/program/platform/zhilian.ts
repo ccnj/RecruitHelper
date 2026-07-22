@@ -2391,6 +2391,10 @@ export async function sendZhilianGreeting(
         if (validGreetingListTargetResult(observed) && observed.status === 'ready' &&
             observed.data.contactState === 'established') {
           await ctx.progress('已确认同一候选人关系状态变为已建立', 100)
+          // 正证已经成立；这里只给列表卡片的关系态重渲染一个短收敛窗口，
+          // 避免批次编排在下一候选人 reset 时撞上临时缺少 Vue owner 的 DOM。
+          // 不追加成功判据，也不在此期间重读或重试任何平台动作。
+          await new Promise((resolve) => setTimeout(resolve, 250))
           return {
             platformUserRef: args.platformUserRef,
             positionRef: args.positionRef,

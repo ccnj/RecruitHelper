@@ -3910,8 +3910,13 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   const functions = []
   let barriers = 0
   let proofCalls = 0
+  let postProofSettleWaits = 0
   let finalClicked = false
-  globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1 }
+  globalThis.setTimeout = (callback, delay) => {
+    if (delay === 250 && finalClicked && proofCalls > 0) postProofSettleWaits += 1
+    queueMicrotask(callback)
+    return 1
+  }
   globalThis.chrome = {
     tabs: {
       async query() { return [{ ...targetTab }] },
@@ -3982,6 +3987,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
       'prepare/preflight/commit 必须注入字面同一份 evaluator 函数')
     assert.equal(barriers, 1)
     assert.equal(proofCalls, 1, '同一目标“继续沟通”一次明确读取即构成正证')
+    assert.equal(postProofSettleWaits, 1, '正证后只等待一次页面重渲染，不增加读取或动作')
   } finally {
     Object.assign(globalThis, original)
   }
