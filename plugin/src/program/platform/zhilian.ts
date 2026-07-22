@@ -2151,14 +2151,15 @@ export async function readZhilianGreetingOutcome(
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
 ): Promise<ZhilianGreetingOutcomeData> {
-  const tab = await canonicalZhilianTab()
-  if (!tab || tab.id === undefined) {
+  const initialTab = await canonicalZhilianTab()
+  if (!initialTab || initialTab.id === undefined) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '没有可读取招呼结果的智联页面', 'afterRecovery', 'pageAbsent')
   }
-  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  assertExpectedPrincipal(await probeTab(initialTab), expectedPrincipalFingerprint)
   ctx.checkpoint()
   // intrusive/idempotentReadReceipt 紧贴第一次平台读取设置取消安全点；不写 witness。
   await ctx.beforeSideEffect()
+  const tab = await greetingProofIMTab(ctx, expectedPrincipalFingerprint)
   const first = await runMain(tab.id, mainReadGreetingProof, [
     args.platformUserRef,
     args.positionRef,
@@ -2188,6 +2189,51 @@ export async function readZhilianGreetingOutcome(
     contentHash: second.contentHash,
     observedAt: Date.now(),
   }
+}
+
+async function greetingProofIMTab(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<chrome.tabs.Tab & { id: number }> {
+  const candidates = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab): tab is chrome.tabs.Tab & { id: number } =>
+      tab.id !== undefined && pageKindFromURL(tab.url) === 'im')
+  candidates.sort((left, right) => {
+    const active = Number(right.active === true) - Number(left.active === true)
+    if (active !== 0) return active
+    const accessed = (right.lastAccessed ?? 0) - (left.lastAccessed ?? 0)
+    if (accessed !== 0) return accessed
+    return left.id - right.id
+  })
+
+  let tab: chrome.tabs.Tab = candidates[0] ?? await chrome.tabs.create({
+    url: ZHILIAN_IM_URL,
+    active: false,
+  })
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const tabID = tab.id
+  if (candidates.length !== 0 && !await contentScriptHealthy(tabID)) {
+    const commandNavigation = beginCommandNavigation(tabID, ctx.irreversibleNotAfterMs)
+    try {
+      await chrome.tabs.reload(tabID)
+      tab = await chrome.tabs.get(tabID)
+    } catch (error) {
+      commandNavigation.end()
+      throw error
+    }
+  }
+  const probe = await waitForIMReady(tab, ctx)
+  if (probe.loginState === 'out') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面需要重新登录', 'afterRecovery', 'loginRequired')
+  }
+  assertExpectedPrincipal(probe, expectedPrincipalFingerprint)
+  const latest = await chrome.tabs.get(tabID)
+  if (latest.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 标签页换代后缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  return latest as chrome.tabs.Tab & { id: number }
 }
 
 async function waitForIMReady(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<ZhilianProbe> {

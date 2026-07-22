@@ -2725,8 +2725,10 @@ function installM4GreetingOrchestrationFixture(options = {}) {
   const state = {
     phases: [],
     proofCalls: 0,
+    proofTabKinds: [],
     finalClicks: 0,
     barriers: 0,
+    createdIMTabs: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -2766,14 +2768,27 @@ function installM4GreetingOrchestrationFixture(options = {}) {
         if (!tab) throw new Error('fixture-tab-absent')
         return { ...tab }
       },
+      async create({ url, active }) {
+        const tab = { id: 799, active, status: 'complete', url }
+        tabs.push(tab)
+        state.createdIMTabs += 1
+        return { ...tab }
+      },
+      async reload(id) {
+        if (!tabs.some((candidate) => candidate.id === id)) throw new Error('fixture-tab-absent')
+      },
       async sendMessage() { return { ok: true } },
     },
     scripting: {
       async executeScript({ target, func, args }) {
-        if (func.name === 'mainProbeZhilian') return [{ result: {
-          pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
-          imListVisible: false,
-        } }]
+        if (func.name === 'mainProbeZhilian') {
+          const tab = tabs.find((candidate) => candidate.id === target.tabId)
+          const im = tab?.url.includes('/app/im') === true
+          return [{ result: {
+            pageKind: im ? 'im' : 'recommend', loginState: 'in', principalFingerprint: fingerprint,
+            imListVisible: im,
+          } }]
+        }
         if (func.name === 'mainReadCurrentCandidate') return [{ result: {
           status: 'ready', data: currentData(target.tabId),
         } }]
@@ -2786,6 +2801,8 @@ function installM4GreetingOrchestrationFixture(options = {}) {
         }
         if (func.name === 'mainReadGreetingProof') {
           state.proofCalls += 1
+          const tab = tabs.find((candidate) => candidate.id === target.tabId)
+          state.proofTabKinds.push(tab?.url.includes('/app/im') ? 'im' : 'other')
           if (options.proofMode === 'throw') throw new Error('fixture-observer-death')
           if (options.proofMode === 'negative') return [{ result: { confirmed: false } }]
           if (options.proofMode === 'unstable') return [{ result: {
@@ -3201,6 +3218,9 @@ test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招
       )
       assert.equal(result.confirmed, scenario.confirmed, scenario.label)
       assert.equal(fixture.state.proofCalls, scenario.proofCalls, scenario.label)
+      assert.equal(fixture.state.createdIMTabs, 1, `${scenario.label}: 无 IM 时只新建一个后台感知页`)
+      assert.deepEqual(fixture.state.proofTabKinds, Array(scenario.proofCalls).fill('im'),
+        `${scenario.label}: 正证只在 IM 感知面读取`)
       assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 验证读不得触发招呼动作`)
       assert.deepEqual(fixture.state.phases, [], `${scenario.label}: 验证读不得调用动作 evaluator`)
     } finally {
