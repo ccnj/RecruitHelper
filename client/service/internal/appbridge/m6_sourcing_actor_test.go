@@ -423,6 +423,18 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	}
 }
 
+func TestFormalSourcingManualStartDoesNotInheritCommunicationStartHour(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	h.clock.now = time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+		t.Fatalf("真人显式采集不应被 08:00 沟通巡检门拦截: %v", err)
+	}
+	batch, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing {
+		t.Fatalf("夜间手工采集未建立唯一正式批次: batch=%+v err=%v", batch, err)
+	}
+}
+
 func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{
 		{"candidate-a", "candidate-b"},

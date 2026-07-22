@@ -107,9 +107,9 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targe
 		return store.ErrSourcingBatchInvalid
 	}
 	now := m.now()
-	if now.In(m.config.Location).Hour() < m.config.DailyStartHour {
-		return ErrDailyWindowNotOpen
-	}
+	// 正式采集 start 本身就是一次真人显式动作，不继承自动沟通巡检的
+	// 08:00 开启门。非终态批次会独占 round，达标/停止/阻塞又都会暂停
+	// 账号，因此这里不会顺带授权夜间 IM 巡检。
 	revision, err := m.store.JobAIContextRevisionByHash(revisionHash)
 	if err != nil {
 		return err
