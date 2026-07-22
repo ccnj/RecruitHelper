@@ -3085,6 +3085,7 @@ function installM4GreetingFixture(options = {}) {
     setTimeout: globalThis.setTimeout,
   }
   let delayedModalPending = false
+  let delayedCustomSelectionPending = false
   let timerCallbacks = 0
   if (options.realTimers !== true) {
     globalThis.setTimeout = (callback, _delay, ...args) => {
@@ -3092,6 +3093,11 @@ function installM4GreetingFixture(options = {}) {
       if (delayedModalPending && timerCallbacks >= (options.modalOpenAfterTimerCalls ?? Infinity)) {
         state.modalVisible = true
         delayedModalPending = false
+      }
+      if (delayedCustomSelectionPending &&
+          timerCallbacks >= (options.customSelectedAfterTimerCalls ?? Infinity)) {
+        state.customSelected = true
+        delayedCustomSelectionPending = false
       }
       queueMicrotask(() => callback(...args))
       return 1
@@ -3206,7 +3212,11 @@ function installM4GreetingFixture(options = {}) {
   customOption._onIntrinsicClick = () => {
     state.optionClicks += 1
     state.interactions.push({ kind: 'option', at: Date.now() })
-    state.customSelected = true
+    if (Number.isInteger(options.customSelectedAfterTimerCalls)) {
+      delayedCustomSelectionPending = true
+    } else {
+      state.customSelected = true
+    }
     if (options.trustedInputDuringOptionWait === true) {
       setTimeout(() => {
         state.textareaVisible = true
@@ -3521,6 +3531,17 @@ test('M6 列表招呼允许编辑弹窗在十秒窗口内延迟就绪', async ()
   try {
     assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
     assert.equal(fixture.state.openClicks, 1)
+    assert.equal(fixture.state.finalClicks, 0)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M6 列表招呼等待统一招呼选项在十秒窗口内真正选中', async () => {
+  const fixture = installM4GreetingFixture({ customSelectedAfterTimerCalls: 199 })
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.state.optionClicks, 1)
     assert.equal(fixture.state.finalClicks, 0)
   } finally {
     fixture.restore()

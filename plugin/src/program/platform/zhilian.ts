@@ -1205,7 +1205,7 @@ async function mainReadSourcingWindow(
     let latest = collect(scroller)
     let latestSignature = 'status' in latest ? '' : signature(latest)
     let stableRounds = 0
-    const settleUntil = Date.now() + 3_000
+    const settleUntil = Date.now() + 10_000
     while (Date.now() < settleUntil) {
       if (!('status' in latest)) {
         const movementObserved = latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop
@@ -1390,7 +1390,7 @@ async function mainReadSourcingResume(
     const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
     if (closeButtons.length !== 1) return failed('close_unavailable')
     await clickInteraction(closeButtons[0])
-    const closeUntil = Date.now() + 6_000
+    const closeUntil = Date.now() + 10_000
     while (Date.now() < closeUntil) {
       opened = visibleAll(document, '.new-shortcut-resume__modal')
       const latestRoute = route()
@@ -1440,7 +1440,7 @@ async function mainReadSourcingResume(
         const closeButtons = visibleAll(modals[0], '.new-shortcut-resume__close')
         if (closeButtons.length !== 1) return failed('close_unavailable')
         await clickInteraction(closeButtons[0], initiallyOpenedAt + resumeDwellMs)
-        const closeUntil = Date.now() + 6_000
+        const closeUntil = Date.now() + 10_000
         while (Date.now() < closeUntil) {
           modals = visibleAll(document, '.new-shortcut-resume__modal')
           const latestRoute = route()
@@ -1471,7 +1471,7 @@ async function mainReadSourcingResume(
       if (entries.length !== 1) return failed('entry_cardinality')
       await clickInteraction(entries[0])
       targetOpenedAt = lastInteractionAt
-      const openUntil = Date.now() + 6_000
+      const openUntil = Date.now() + 10_000
       while (Date.now() < openUntil) {
         modals = visibleAll(document, '.new-shortcut-resume__modal')
         if (modals.length !== 0) break
@@ -1590,7 +1590,7 @@ async function mainReadSourcingResume(
       ...data,
       observedAt: 0,
     })
-    const settleUntil = Date.now() + 3_000
+    const settleUntil = Date.now() + 10_000
     let evaluated: MainSourcingResumeResult = failed('unexpected')
     let readyProjection = ''
     while (true) {
@@ -2205,8 +2205,14 @@ async function mainSendGreetingOnce(
           custom,
         )
         if (!await performInteraction(invokeOption, () => !humanTouched)) return failed('existing_editor')
-        await sleep(50)
+        const selected = await waitFor(() => {
+          if (humanTouched) return true
+          const currentModal = greetingModals()[0]
+          const currentCustom = currentModal ? customOptionOf(currentModal) : null
+          return currentCustom !== null && customSelected(currentCustom)
+        })
         if (humanTouched) return failed('existing_editor')
+        if (!selected) return failed('custom_option_unavailable')
       }
       modal = greetingModals()[0]
       custom = modal ? customOptionOf(modal) : null
