@@ -3084,8 +3084,15 @@ function installM4GreetingFixture(options = {}) {
     Event: globalThis.Event,
     setTimeout: globalThis.setTimeout,
   }
+  let delayedModalPending = false
+  let timerCallbacks = 0
   if (options.realTimers !== true) {
     globalThis.setTimeout = (callback, _delay, ...args) => {
+      timerCallbacks += 1
+      if (delayedModalPending && timerCallbacks >= (options.modalOpenAfterTimerCalls ?? Infinity)) {
+        state.modalVisible = true
+        delayedModalPending = false
+      }
       queueMicrotask(() => callback(...args))
       return 1
     }
@@ -3178,7 +3185,8 @@ function installM4GreetingFixture(options = {}) {
       state.candidateVisibleActions += 1
       return
     }
-    state.modalVisible = true
+    if (Number.isInteger(options.modalOpenAfterTimerCalls)) delayedModalPending = true
+    else state.modalVisible = true
   }
   if (state.directUnsafe) {
     // 代表当前公开动作表面不再是批次 0 已证实的纯两步按钮；若误点就会产生外部动作。
@@ -3503,6 +3511,17 @@ test('M6 列表招呼 prepare 完成全部编辑，attempting 后同一 evaluato
     assert.equal(fixture.state.checkboxClicks, 0)
     assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'],
       'preflight/commit 不得再次写入或恢复 textarea')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M6 列表招呼允许编辑弹窗在一秒后就绪', async () => {
+  const fixture = installM4GreetingFixture({ modalOpenAfterTimerCalls: 21 })
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.state.openClicks, 1)
+    assert.equal(fixture.state.finalClicks, 0)
   } finally {
     fixture.restore()
   }

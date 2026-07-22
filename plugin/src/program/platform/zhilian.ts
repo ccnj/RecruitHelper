@@ -2159,7 +2159,7 @@ async function mainSendGreetingOnce(
     return true
   }
   const waitFor = async (predicate: () => boolean): Promise<boolean> => {
-    for (let round = 0; round < 20; round += 1) {
+    for (let round = 0; round < 60; round += 1) {
       if (predicate()) return true
       await sleep(50)
     }
