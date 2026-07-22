@@ -56,6 +56,23 @@ type sourcingSelectionStatusView struct {
 	CompletedAt         time.Time `json:"completedAt"`
 }
 
+type sourcingGreetingGenerationStatusView struct {
+	BatchID             string `json:"batchId"`
+	ContextRevisionHash string `json:"contextRevisionHash"`
+	SelectedCount       int    `json:"selectedCount"`
+	OKCount             int64  `json:"okCount"`
+	FailedCount         int64  `json:"failedCount"`
+	InFlightCount       int64  `json:"inFlightCount"`
+	PendingCount        int64  `json:"pendingCount"`
+	Provider            string `json:"provider,omitempty"`
+	Model               string `json:"model,omitempty"`
+	InputTokens         int64  `json:"inputTokens"`
+	CachedInputTokens   int64  `json:"cachedInputTokens"`
+	OutputTokens        int64  `json:"outputTokens"`
+	EstimatedCostMicros int64  `json:"estimatedCostMicros"`
+	Completed           bool   `json:"completed"`
+}
+
 func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
 	if !a.requireActor(w) {
 		return
@@ -259,5 +276,70 @@ func sourcingSelectionView(selection store.SourcingBatchSelection) sourcingSelec
 		PoolCount: selection.PoolCount, EligibleCount: selection.EligibleCount,
 		SelectedCount: selection.SelectedCount, MaleSelectedCount: selection.MaleSelectedCount,
 		UnknownGenderCount: selection.UnknownGenderCount, CompletedAt: selection.CompletedAt,
+	}
+}
+
+func (a *API) runSourcingGreetingGeneration(w http.ResponseWriter, r *http.Request) {
+	if !a.requireActor(w) {
+		return
+	}
+	batchID, ok := sourcingBatchIDFromBody(w, r)
+	if !ok {
+		return
+	}
+	progress, err := a.actor.GenerateSelectedSourcingGreetings(r.Context(), batchID)
+	if err != nil {
+		status := http.StatusConflict
+		switch {
+		case errors.Is(err, store.ErrSourcingBatchNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, patrol.ErrSourcingGreetingProviderUnavailable):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			status = http.StatusRequestTimeout
+		}
+		body := map[string]any{"error": err.Error()}
+		if progress != nil {
+			body["sourcingGreetingGeneration"] = sourcingGreetingGenerationView(*progress)
+		}
+		writeJSON(w, status, body)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sourcingGreetingGeneration": sourcingGreetingGenerationView(*progress),
+	})
+}
+
+func (a *API) sourcingGreetingGenerationStatus(w http.ResponseWriter, r *http.Request) {
+	batchID := strings.TrimSpace(r.URL.Query().Get("batchId"))
+	if batchID == "" || len(batchID) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的正式采集 batchId"})
+		return
+	}
+	progress, err := a.st.SourcingBatchGreetingProgress(batchID)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, store.ErrSourcingBatchNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sourcingGreetingGeneration": sourcingGreetingGenerationView(*progress),
+	})
+}
+
+func sourcingGreetingGenerationView(
+	progress store.SourcingBatchGreetingProgress,
+) sourcingGreetingGenerationStatusView {
+	return sourcingGreetingGenerationStatusView{
+		BatchID: progress.BatchID, ContextRevisionHash: progress.ContextRevisionHash,
+		SelectedCount: progress.SelectedCount, OKCount: progress.OKCount,
+		FailedCount: progress.FailedCount, InFlightCount: progress.InFlightCount,
+		PendingCount: progress.PendingCount, Provider: progress.Provider, Model: progress.Model,
+		InputTokens: progress.InputTokens, CachedInputTokens: progress.CachedInputTokens,
+		OutputTokens: progress.OutputTokens, EstimatedCostMicros: progress.EstimatedCostMicros,
+		Completed: progress.Completed,
 	}
 }

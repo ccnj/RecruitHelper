@@ -53,6 +53,36 @@ func TestSourcingSelectionViewContainsOnlySafeAggregate(t *testing.T) {
 	}
 }
 
+func TestSourcingGreetingGenerationViewContainsOnlySafeAggregate(t *testing.T) {
+	view := sourcingGreetingGenerationView(store.SourcingBatchGreetingProgress{
+		BatchID: "batch-greeting-view", ContextRevisionHash: "revision-greeting-view",
+		SelectedCount: 2, OKCount: 1, FailedCount: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		InputTokens: 100, CachedInputTokens: 20, OutputTokens: 30,
+		EstimatedCostMicros: 40, Completed: true,
+	})
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, forbidden := range []string{
+		"platformUserRef", "displayName", "profileId", "runId", "invocationId",
+		"resume", "prompt", "greetingText", "contentHash",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("招呼语生成管理投影泄漏 %q: %s", forbidden, text)
+		}
+	}
+	for _, required := range []string{
+		`"batchId"`, `"selectedCount"`, `"okCount"`, `"failedCount"`, `"estimatedCostMicros"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("招呼语生成管理投影缺少 %s: %s", required, text)
+		}
+	}
+}
+
 type sourcingAdminHands struct{}
 
 func (sourcingAdminHands) State(context.Context, string) (patrol.HandState, error) {
@@ -231,5 +261,35 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	if invalidSelectionRunResponse.Code != http.StatusBadRequest {
 		t.Fatalf("配置化筛选缺少 batchId 未拒绝: code=%d body=%s",
 			invalidSelectionRunResponse.Code, invalidSelectionRunResponse.Body.String())
+	}
+
+	missingGreetingBatch := httptest.NewRequest(http.MethodPost,
+		"/admin/sourcing/greeting-generation/run",
+		strings.NewReader(`{"batchId":"missing-greeting-batch"}`))
+	missingGreetingBatch.Header.Set("Content-Type", "application/json")
+	missingGreetingBatchResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingGreetingBatchResponse, missingGreetingBatch)
+	if missingGreetingBatchResponse.Code != http.StatusNotFound {
+		t.Fatalf("招呼语生成未知批次未返回 404: code=%d body=%s",
+			missingGreetingBatchResponse.Code, missingGreetingBatchResponse.Body.String())
+	}
+
+	missingGreetingStatus := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/greeting-generation/status?batchId=missing-greeting-batch", nil)
+	missingGreetingStatusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingGreetingStatusResponse, missingGreetingStatus)
+	if missingGreetingStatusResponse.Code != http.StatusNotFound {
+		t.Fatalf("招呼语生成状态未知批次未返回 404: code=%d body=%s",
+			missingGreetingStatusResponse.Code, missingGreetingStatusResponse.Body.String())
+	}
+
+	invalidGreetingRun := httptest.NewRequest(http.MethodPost,
+		"/admin/sourcing/greeting-generation/run", strings.NewReader(`{"batchId":""}`))
+	invalidGreetingRun.Header.Set("Content-Type", "application/json")
+	invalidGreetingRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidGreetingRunResponse, invalidGreetingRun)
+	if invalidGreetingRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf("招呼语生成缺少 batchId 未拒绝: code=%d body=%s",
+			invalidGreetingRunResponse.Code, invalidGreetingRunResponse.Body.String())
 	}
 }
