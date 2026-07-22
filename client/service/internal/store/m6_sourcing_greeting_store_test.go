@@ -99,7 +99,7 @@ func TestSourcingGreetingRequiresCompleteSelectionAndExactSelectedBindings(t *te
 	})
 
 	t.Run("档案不再selected", func(t *testing.T) {
-		s, _, decisions := prepareSourcingGreetingBatch(t, "batch-profile-state", "greeting-profile-state", 1, base,
+		s, runs, decisions := prepareSourcingGreetingBatch(t, "batch-profile-state", "greeting-profile-state", 1, base,
 			[]selectionRunFixture{{RunID: "run-profile-state", Score: intPointer(9)}})
 		profileID := *decisions["run-profile-state"].ProfileID
 		if err := s.db.Model(&CandidateProfile{}).Where("profile_id = ?", profileID).
@@ -109,6 +109,18 @@ func TestSourcingGreetingRequiresCompleteSelectionAndExactSelectedBindings(t *te
 		if next, err := s.NextSelectedSourcingGreetingMaterial("batch-profile-state"); next != nil ||
 			!errors.Is(err, ErrSourcingBinding) {
 			t.Fatalf("非 selected 档案未阻断: next=%+v err=%v", next, err)
+		}
+		reservation := greetingReservation(
+			"batch-profile-state", runs[0], decisions[runs[0].RunID],
+			"greeting-profile-state", base.Add(time.Hour),
+		)
+		if result, err := s.ReserveSourcingGreeting(reservation); result != nil ||
+			!errors.Is(err, ErrSourcingBinding) {
+			t.Fatalf("非 selected 档案获得最终调用预留: result=%+v err=%v", result, err)
+		}
+		var invocations int64
+		if err := s.db.Model(&SourcingGreetingInvocation{}).Count(&invocations).Error; err != nil || invocations != 0 {
+			t.Fatalf("拒绝预留后产生调用事实: count=%d err=%v", invocations, err)
 		}
 	})
 }

@@ -188,6 +188,11 @@ func TestSourcingGreetingEffectSourceAtomicallyBindsWALAndPreciselyReplays(t *te
 	if err != nil || prepared == nil || !prepared.EffectLinked || prepared.IntentID != req.Intent.IntentID {
 		t.Fatalf("profile 已 greeted 后精确重放失效: preparation=%+v err=%v", prepared, err)
 	}
+	generation, err := s.SourcingBatchGreetingProgress(fixture.BatchID)
+	if err != nil || generation == nil || generation.SelectedCount != 1 ||
+		generation.OKCount != 1 || !generation.Completed {
+		t.Fatalf("profile 已 greeted 后历史生成聚合失效: progress=%+v err=%v", generation, err)
+	}
 
 	var intents, commands, heads int64
 	_ = s.db.Model(&EffectIntent{}).Count(&intents).Error

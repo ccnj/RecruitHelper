@@ -364,7 +364,7 @@ func (s *Store) NextSelectedSourcingGreetingMaterial(batchID string) (*SourcingG
 	}
 	var next *SourcingGreetingMaterial
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID)
+		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID, true)
 		if err != nil {
 			return err
 		}
@@ -400,7 +400,7 @@ func (s *Store) ReserveSourcingGreeting(req ReserveSourcingGreetingRequest) (*Re
 	}
 	out := &ReserveSourcingGreetingResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, req.BatchID)
+		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, req.BatchID, true)
 		if err != nil {
 			return err
 		}
@@ -521,7 +521,7 @@ func (s *Store) SourcingBatchGreetingProgress(batchID string) (*SourcingBatchGre
 	}
 	var progress SourcingBatchGreetingProgress
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		selection, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID)
+		selection, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID, false)
 		if err != nil {
 			return err
 		}
@@ -580,11 +580,13 @@ func (s *Store) SourcingBatchGreetingProgress(batchID string) (*SourcingBatchGre
 	return &progress, nil
 }
 
-// loadSourcingGreetingScopeTx 先重建并验证完整 selected 范围，再读取与该
-// 范围相交的 invocation。它是 next/reserve/progress 字面同一份事实门。
+// loadSourcingGreetingScopeTx 先重建并验证冻结的 selected 范围，再读取
+// 与该范围相交的 invocation。只有 next/reserve 需要档案仍可生成；历史
+// progress 允许档案在生成完成后继续推进业务状态。
 func loadSourcingGreetingScopeTx(
 	tx *gorm.DB,
 	batchID string,
+	requireCurrentSelected bool,
 ) (SourcingBatchSelection, []SourcingGreetingMaterial, []SourcingGreetingInvocation, error) {
 	batch, err := validateCompletedSourcingBatchForScoringTx(tx, strings.TrimSpace(batchID))
 	if err != nil {
@@ -644,8 +646,11 @@ func loadSourcingGreetingScopeTx(
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingSelectionConflict
 		}
 		if profile.Platform != run.Platform || profile.AccountRef != run.AccountRef ||
-			profile.PlatformUserRef != run.PlatformUserRef || profile.PositionRef != run.PositionRef ||
-			profile.MainStatus != CandidateProfileSelected || profile.EndReason != nil {
+			profile.PlatformUserRef != run.PlatformUserRef || profile.PositionRef != run.PositionRef {
+			return SourcingBatchSelection{}, nil, nil, ErrSourcingBinding
+		}
+		if requireCurrentSelected &&
+			(profile.MainStatus != CandidateProfileSelected || profile.EndReason != nil) {
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingBinding
 		}
 		seenProfiles[profile.ProfileID] = struct{}{}
