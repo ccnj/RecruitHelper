@@ -3516,8 +3516,8 @@ test('M6 列表招呼 prepare 完成全部编辑，attempting 后同一 evaluato
   }
 })
 
-test('M6 列表招呼允许编辑弹窗在一秒后就绪', async () => {
-  const fixture = installM4GreetingFixture({ modalOpenAfterTimerCalls: 21 })
+test('M6 列表招呼允许编辑弹窗在十秒窗口内延迟就绪', async () => {
+  const fixture = installM4GreetingFixture({ modalOpenAfterTimerCalls: 199 })
   try {
     assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
     assert.equal(fixture.state.openClicks, 1)
