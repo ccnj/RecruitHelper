@@ -2,6 +2,7 @@ package adminhttp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -22,6 +23,34 @@ type sourcingAdminRunner struct{}
 
 func (sourcingAdminRunner) Start(context.Context, patrol.RunRequest) (patrol.RunHandle, error) {
 	return nil, nil
+}
+
+func TestSourcingSelectionViewContainsOnlySafeAggregate(t *testing.T) {
+	view := sourcingSelectionView(store.SourcingBatchSelection{
+		BatchID: "batch-selection-view", ContextRevisionHash: "revision-selection-view",
+		AlgorithmVersion: "selection-target-v1", MinScore: 5,
+		TargetMin: 80, TargetMax: 90, TargetCount: 84,
+		MaleRatioLimit: 50, MaleLimit: 42, PoolCount: 3, EligibleCount: 2,
+		SelectedCount: 2, MaleSelectedCount: 2, UnknownGenderCount: 0,
+		CompletedAt: time.Date(2026, 7, 22, 21, 0, 0, 0, time.UTC),
+	})
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, forbidden := range []string{
+		"platformUserRef", "displayName", "profileId", "runId", "invocationId", "resume", "prompt",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("配置化筛选管理投影泄漏 %q: %s", forbidden, text)
+		}
+	}
+	for _, required := range []string{`"batchId"`, `"targetCount"`, `"selectedCount"`, `"unknownGenderCount"`} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("配置化筛选管理投影缺少 %s: %s", required, text)
+		}
+	}
 }
 
 type sourcingAdminHands struct{}
@@ -173,5 +202,34 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	if invalidScoringRunResponse.Code != http.StatusBadRequest {
 		t.Fatalf("统一评分缺少 batchId 未拒绝: code=%d body=%s",
 			invalidScoringRunResponse.Code, invalidScoringRunResponse.Body.String())
+	}
+
+	missingSelectionBatch := httptest.NewRequest(http.MethodPost, "/admin/sourcing/selection/run",
+		strings.NewReader(`{"batchId":"missing-selection-batch"}`))
+	missingSelectionBatch.Header.Set("Content-Type", "application/json")
+	missingSelectionBatchResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingSelectionBatchResponse, missingSelectionBatch)
+	if missingSelectionBatchResponse.Code != http.StatusNotFound {
+		t.Fatalf("配置化筛选未知批次未返回 404: code=%d body=%s",
+			missingSelectionBatchResponse.Code, missingSelectionBatchResponse.Body.String())
+	}
+
+	missingSelectionStatus := httptest.NewRequest(http.MethodGet,
+		"/admin/sourcing/selection/status?batchId=missing-selection-batch", nil)
+	missingSelectionStatusResponse := httptest.NewRecorder()
+	mux.ServeHTTP(missingSelectionStatusResponse, missingSelectionStatus)
+	if missingSelectionStatusResponse.Code != http.StatusNotFound {
+		t.Fatalf("配置化筛选状态未知批次未返回 404: code=%d body=%s",
+			missingSelectionStatusResponse.Code, missingSelectionStatusResponse.Body.String())
+	}
+
+	invalidSelectionRun := httptest.NewRequest(http.MethodPost, "/admin/sourcing/selection/run",
+		strings.NewReader(`{"batchId":""}`))
+	invalidSelectionRun.Header.Set("Content-Type", "application/json")
+	invalidSelectionRunResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidSelectionRunResponse, invalidSelectionRun)
+	if invalidSelectionRunResponse.Code != http.StatusBadRequest {
+		t.Fatalf("配置化筛选缺少 batchId 未拒绝: code=%d body=%s",
+			invalidSelectionRunResponse.Code, invalidSelectionRunResponse.Body.String())
 	}
 }

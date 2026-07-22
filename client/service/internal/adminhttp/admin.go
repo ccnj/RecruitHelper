@@ -105,6 +105,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/sourcing/status", h(a.sourcingStatus))
 	mux.HandleFunc("POST /admin/sourcing/scoring/run", h(a.runSourcingScoring))
 	mux.HandleFunc("GET /admin/sourcing/scoring/status", h(a.sourcingScoringStatus))
+	mux.HandleFunc("POST /admin/sourcing/selection/run", h(a.runSourcingSelection))
+	mux.HandleFunc("GET /admin/sourcing/selection/status", h(a.sourcingSelectionStatus))
 	mux.HandleFunc("GET /admin/m5/context-binding", h(a.m5ContextBinding))
 	mux.HandleFunc("POST /admin/m5/context-binding", h(a.bindM5Context))
 	mux.HandleFunc("GET /admin/conversations", h(a.conversations))

@@ -38,6 +38,24 @@ type sourcingScoringStatusView struct {
 	Completed           bool   `json:"completed"`
 }
 
+type sourcingSelectionStatusView struct {
+	BatchID             string    `json:"batchId"`
+	ContextRevisionHash string    `json:"contextRevisionHash"`
+	AlgorithmVersion    string    `json:"algorithmVersion"`
+	MinScore            int       `json:"minScore"`
+	TargetMin           int       `json:"targetMin"`
+	TargetMax           int       `json:"targetMax"`
+	TargetCount         int       `json:"targetCount"`
+	MaleRatioLimit      int       `json:"maleRatioLimit"`
+	MaleLimit           int       `json:"maleLimit"`
+	PoolCount           int       `json:"poolCount"`
+	EligibleCount       int       `json:"eligibleCount"`
+	SelectedCount       int       `json:"selectedCount"`
+	MaleSelectedCount   int       `json:"maleSelectedCount"`
+	UnknownGenderCount  int       `json:"unknownGenderCount"`
+	CompletedAt         time.Time `json:"completedAt"`
+}
+
 func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
 	if !a.requireActor(w) {
 		return
@@ -126,7 +144,7 @@ func (a *API) runSourcingScoring(w http.ResponseWriter, r *http.Request) {
 	if !a.requireActor(w) {
 		return
 	}
-	batchID, ok := scoringBatchIDFromBody(w, r)
+	batchID, ok := sourcingBatchIDFromBody(w, r)
 	if !ok {
 		return
 	}
@@ -169,7 +187,7 @@ func (a *API) sourcingScoringStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sourcingScoring": sourcingScoringView(*progress)})
 }
 
-func scoringBatchIDFromBody(w http.ResponseWriter, r *http.Request) (string, bool) {
+func sourcingBatchIDFromBody(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var req struct {
 		BatchID string `json:"batchId"`
 	}
@@ -191,5 +209,55 @@ func sourcingScoringView(progress store.SourcingBatchScoringProgress) sourcingSc
 		TargetCount: progress.TargetCount, OKCount: progress.OKCount, FailedCount: progress.FailedCount,
 		InFlightCount: progress.InFlightCount, PendingCount: progress.PendingCount,
 		Provider: progress.Provider, Model: progress.Model, Completed: progress.Completed,
+	}
+}
+
+func (a *API) runSourcingSelection(w http.ResponseWriter, r *http.Request) {
+	if !a.requireActor(w) {
+		return
+	}
+	batchID, ok := sourcingBatchIDFromBody(w, r)
+	if !ok {
+		return
+	}
+	selection, err := a.st.SelectCompletedSourcingBatch(batchID, time.Now())
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, store.ErrSourcingBatchNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sourcingSelection": sourcingSelectionView(*selection)})
+}
+
+func (a *API) sourcingSelectionStatus(w http.ResponseWriter, r *http.Request) {
+	batchID := strings.TrimSpace(r.URL.Query().Get("batchId"))
+	if batchID == "" || len(batchID) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的正式采集 batchId"})
+		return
+	}
+	selection, err := a.st.SourcingBatchSelectionByBatchID(batchID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "筛选状态读取失败"})
+		return
+	}
+	if selection == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "该批次尚无筛选结果"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sourcingSelection": sourcingSelectionView(*selection)})
+}
+
+func sourcingSelectionView(selection store.SourcingBatchSelection) sourcingSelectionStatusView {
+	return sourcingSelectionStatusView{
+		BatchID: selection.BatchID, ContextRevisionHash: selection.ContextRevisionHash,
+		AlgorithmVersion: selection.AlgorithmVersion, MinScore: selection.MinScore,
+		TargetMin: selection.TargetMin, TargetMax: selection.TargetMax, TargetCount: selection.TargetCount,
+		MaleRatioLimit: selection.MaleRatioLimit, MaleLimit: selection.MaleLimit,
+		PoolCount: selection.PoolCount, EligibleCount: selection.EligibleCount,
+		SelectedCount: selection.SelectedCount, MaleSelectedCount: selection.MaleSelectedCount,
+		UnknownGenderCount: selection.UnknownGenderCount, CompletedAt: selection.CompletedAt,
 	}
 }
