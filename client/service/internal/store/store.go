@@ -71,6 +71,7 @@ func Open(dataDir string) (*Store, error) {
 		&ProfileAIContextBinding{},
 		&DialogueTurn{},
 		&AIInvocation{},
+		&SourcingScoreInvocation{},
 		&CommunicationAction{},
 		&EffectIntent{},
 		&CandidateGreetingHead{},

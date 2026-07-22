@@ -25,6 +25,28 @@ func (sourcingActorHands) State(context.Context, string) (patrol.HandState, erro
 	return patrol.HandState{Online: true, Session: "session-sourcing-actor", BootID: "boot-sourcing-actor"}, nil
 }
 
+type sourcingActorAdvice struct {
+	requests []m5ai.CompletionRequest
+}
+
+func (*sourcingActorAdvice) ProviderName() string { return "fixture-provider" }
+func (*sourcingActorAdvice) ModelName() string    { return "fixture-model" }
+
+func (a *sourcingActorAdvice) CompleteJSON(
+	_ context.Context,
+	request m5ai.CompletionRequest,
+) (m5ai.CompletionResponse, error) {
+	a.requests = append(a.requests, request)
+	zero := 0
+	return m5ai.CompletionResponse{
+		JSONText: `{"评分":7,"说明":"discard"}`,
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 4, OutputTokens: 2, ReasoningTokens: &zero,
+		},
+		ReasoningContentEmpty: true,
+	}, nil
+}
+
 type sourcingActorSender struct {
 	dispatcher *dispatch.Dispatcher
 	order      []string
@@ -139,11 +161,12 @@ func TestSourcingActorCapturesOneThenContinuesNormalRound(t *testing.T) {
 	}}
 	d := dispatch.New(st, sender)
 	sender.dispatcher = d
+	advice := &sourcingActorAdvice{}
 	manager, err := patrol.NewManager(st, PatrolRunner{Dispatcher: d}, sourcingActorHands{}, patrol.Config{
 		Clock: sourcingActorClock{now: now}, Location: time.UTC,
 		IdentityFreshFor: time.Minute, PatrolInterval: 5 * time.Minute,
 		MinimumRoundGap: time.Millisecond, NewRoundID: func() string { return "round-sourcing-actor" },
-	})
+	}, advice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,5 +188,13 @@ func TestSourcingActorCapturesOneThenContinuesNormalRound(t *testing.T) {
 	status, err := st.AccountSourcingStatus(key)
 	if err != nil || status == nil || status.CaptureCount != 1 || status.Latest == nil {
 		t.Fatalf("actor 未落唯一采集事实: status=%+v err=%v", status, err)
+	}
+	if len(advice.requests) != 1 || advice.requests[0].Purpose != m5ai.PurposeScoring ||
+		advice.requests[0].MaxOutputTokens != m5ai.ScoringOutputTokenLimit {
+		t.Fatalf("每条新采集事实必须恰好一次评分调用: requests=%+v", advice.requests)
+	}
+	score, err := st.SourcingScoreByRunID(status.Latest.RunID)
+	if err != nil || score == nil || score.Status != store.AIInvocationOK || score.Score == nil || *score.Score != 7 {
+		t.Fatalf("评分未与采集 run 唯一绑定: score=%+v err=%v", score, err)
 	}
 }

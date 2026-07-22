@@ -59,6 +59,60 @@ func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *test
 	}
 }
 
+func TestOpenAICompatibleProviderAcceptsScoringWithReplyBudget(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			t.Fatal("评分 provider 请求 JSON 无效")
+		}
+		messages, _ := body["messages"].([]any)
+		thinking, _ := body["thinking"].(map[string]any)
+		format, _ := body["response_format"].(map[string]any)
+		if len(messages) != 1 || body["max_tokens"] != float64(ScoringOutputTokenLimit) ||
+			thinking["type"] != "disabled" || format["type"] != "json_object" {
+			t.Fatalf("评分 provider 请求形状错误: %#v", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"content":"{\"score\":7}"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"prompt_cache_hit_tokens":0,"completion_tokens_details":{"reasoning_tokens":0}}}`,
+			)),
+		}, nil
+	})}
+	provider, err := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeScoring, UserContent: "fixture", MaxOutputTokens: ScoringOutputTokenLimit,
+	})
+	if err != nil || calls != 1 || response.JSONText != `{"score":7}` {
+		t.Fatalf("评分 provider 未完成单次请求: calls=%d response=%+v err=%v", calls, response, err)
+	}
+}
+
+func TestOpenAICompatibleProviderBlocksScoringOutsideReplyBudgetBeforeTransport(t *testing.T) {
+	tests := []CompletionRequest{
+		{Purpose: PurposeScoring, UserContent: "fixture", MaxOutputTokens: ScoringOutputTokenLimit + 1},
+		{Purpose: PurposeScoring, UserContent: strings.Repeat("a", ReplyInputTokenLimit+1), MaxOutputTokens: ScoringOutputTokenLimit},
+	}
+	for _, request := range tests {
+		calls := 0
+		client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("不应发起评分请求")
+		})}
+		provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+		_, err := provider.CompleteJSON(context.Background(), request)
+		var providerErr *ProviderError
+		if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
+			t.Fatalf("评分预算未在网络前阻断: calls=%d request=%+v err=%v", calls, request, err)
+		}
+	}
+}
+
 func TestValidateBaseURLRequiresHTTPSWithoutAuthorityDecorations(t *testing.T) {
 	for _, accepted := range []string{
 		"https://provider.invalid",

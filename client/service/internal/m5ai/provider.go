@@ -61,14 +61,15 @@ func (p *OpenAICompatibleProvider) ProviderName() string { return p.config.Provi
 func (p *OpenAICompatibleProvider) ModelName() string { return p.config.Model }
 
 func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
-	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply {
+	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply && request.Purpose != PurposeScoring {
 		return CompletionResponse{}, errors.New("未知 provider 用途")
 	}
 	if strings.TrimSpace(request.UserContent) == "" || request.MaxOutputTokens <= 0 {
 		return CompletionResponse{}, errors.New("provider 请求缺少正文或输出上限")
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
-		(request.Purpose == PurposeReply && request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
+		((request.Purpose == PurposeReply || request.Purpose == PurposeScoring) &&
+			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
 		return CompletionResponse{}, &ProviderError{Class: "budgetBlocked"}
 	}
 	inputLimit := p.config.MaxInputTokens

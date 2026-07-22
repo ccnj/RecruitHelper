@@ -535,6 +535,33 @@ type AIInvocation struct {
 	FinishedAt          *time.Time
 }
 
+// SourcingScoreInvocation 是采集 run 的一次且仅一次评分调用事实。它与
+// DialogueTurn/AIInvocation 分表，避免把 RunID 偷塞进 TurnID；调用前预留仍
+// 沿用 transportFailed+FinishedAt=NULL 表示 inFlight，且不授权启动恢复重调。
+type SourcingScoreInvocation struct {
+	InvocationID        string `gorm:"primaryKey"`
+	RunID               string `gorm:"not null;uniqueIndex"`
+	ContextRevisionHash string `gorm:"not null;index"`
+	RunContentHash      string `gorm:"not null"`
+	Provider            string `gorm:"not null"`
+	Model               string `gorm:"not null"`
+	InputHash           string `gorm:"not null"`
+
+	Status              AIInvocationStatus `gorm:"not null;index"`
+	Score               *int
+	OutputHash          string
+	InputTokens         int
+	CachedInputTokens   int
+	OutputTokens        int
+	ReasoningTokens     *int
+	UsageShape          AIInvocationUsageShape
+	LatencyMs           int64
+	ErrorClass          string
+	EstimatedCostMicros int64
+	StartedAt           time.Time `gorm:"not null"`
+	FinishedAt          *time.Time
+}
+
 // CandidateGreetingHead 是招呼前无 conversationRef 时的持久单调 CAS 锚。
 // 它不是第二套 intent 账本；LatestIntentID 永远指向既有 EffectIntent。
 type CandidateGreetingHead struct {

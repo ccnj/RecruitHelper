@@ -125,9 +125,21 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := a.captureSourcingResume(ctx); err != nil {
-		a.handleCommandFailure(err)
+	// Finish one already-captured candidate before collecting another. A fresh
+	// capture is scored in the same round, so a provider outage cannot build an
+	// unbounded queue of unscored resumes.
+	processedSourcing, err := a.scorePendingSourcingRun(ctx)
+	if err != nil {
 		return err
+	}
+	if !processedSourcing {
+		if err := a.captureSourcingResume(ctx); err != nil {
+			a.handleCommandFailure(err)
+			return err
+		}
+		if _, err := a.scorePendingSourcingRun(ctx); err != nil {
+			return err
+		}
 	}
 
 	if err := a.setStage("readingList"); err != nil {

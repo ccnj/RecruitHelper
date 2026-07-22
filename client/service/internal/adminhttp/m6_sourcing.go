@@ -10,13 +10,29 @@ import (
 )
 
 type sourcingLatestView struct {
-	RunID                   string `json:"runId"`
-	SourceLogicalDispatchID string `json:"sourceLogicalDispatchId"`
-	ObservedAt              int64  `json:"observedAt"`
-	CapturedAt              string `json:"capturedAt"`
-	SchemaVersion           int    `json:"schemaVersion"`
-	ContentHash             string `json:"contentHash"`
-	ResumeBytes             int    `json:"resumeBytes"`
+	RunID                   string             `json:"runId"`
+	SourceLogicalDispatchID string             `json:"sourceLogicalDispatchId"`
+	ObservedAt              int64              `json:"observedAt"`
+	CapturedAt              string             `json:"capturedAt"`
+	SchemaVersion           int                `json:"schemaVersion"`
+	ContentHash             string             `json:"contentHash"`
+	ResumeBytes             int                `json:"resumeBytes"`
+	Score                   *sourcingScoreView `json:"score,omitempty"`
+}
+
+type sourcingScoreView struct {
+	InvocationID        string `json:"invocationId"`
+	Status              string `json:"status"`
+	Score               *int   `json:"score,omitempty"`
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	InputTokens         int    `json:"inputTokens"`
+	CachedInputTokens   int    `json:"cachedInputTokens"`
+	OutputTokens        int    `json:"outputTokens"`
+	ErrorClass          string `json:"errorClass,omitempty"`
+	EstimatedCostMicros int64  `json:"estimatedCostMicros"`
+	StartedAt           string `json:"startedAt"`
+	FinishedAt          string `json:"finishedAt,omitempty"`
 }
 
 type sourcingStatusView struct {
@@ -91,6 +107,21 @@ func (a *API) writeSourcingStatus(w http.ResponseWriter, key store.AccountKey) {
 			ObservedAt: status.Latest.ObservedAt, CapturedAt: status.Latest.CapturedAt.Format("2006-01-02T15:04:05.000Z07:00"),
 			SchemaVersion: status.Latest.SchemaVersion, ContentHash: status.Latest.ContentHash,
 			ResumeBytes: status.Latest.ResumeBytes,
+		}
+		if status.Latest.Score != nil {
+			score := status.Latest.Score
+			finishedAt := ""
+			if score.FinishedAt != nil {
+				finishedAt = score.FinishedAt.Format("2006-01-02T15:04:05.000Z07:00")
+			}
+			view.Latest.Score = &sourcingScoreView{
+				InvocationID: score.InvocationID, Status: string(score.Status), Score: score.Score,
+				Provider: score.Provider, Model: score.Model,
+				InputTokens: score.InputTokens, CachedInputTokens: score.CachedInputTokens,
+				OutputTokens: score.OutputTokens, ErrorClass: score.ErrorClass,
+				EstimatedCostMicros: score.EstimatedCostMicros,
+				StartedAt:           score.StartedAt.Format("2006-01-02T15:04:05.000Z07:00"), FinishedAt: finishedAt,
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sourcing": view})

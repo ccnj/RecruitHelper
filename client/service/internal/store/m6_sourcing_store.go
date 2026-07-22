@@ -37,6 +37,22 @@ type SourcingCandidateRunSummary struct {
 	SchemaVersion           int
 	ContentHash             string
 	ResumeBytes             int
+	Score                   *SourcingScoreSummary
+}
+
+type SourcingScoreSummary struct {
+	InvocationID        string
+	Status              AIInvocationStatus
+	Score               *int
+	Provider            string
+	Model               string
+	InputTokens         int
+	CachedInputTokens   int
+	OutputTokens        int
+	ErrorClass          string
+	EstimatedCostMicros int64
+	StartedAt           time.Time
+	FinishedAt          *time.Time
 }
 
 type AccountSourcingStatus struct {
@@ -248,6 +264,20 @@ func (s *Store) AccountSourcingStatus(key AccountKey) (*AccountSourcingStatus, e
 		RunID: latest.RunID, SourceLogicalDispatchID: latest.SourceLogicalDispatchID,
 		ObservedAt: latest.ObservedAt, CapturedAt: latest.CapturedAt,
 		SchemaVersion: latest.SchemaVersion, ContentHash: latest.ContentHash, ResumeBytes: len(latest.ResumeJSON),
+	}
+	score, err := s.SourcingScoreByRunID(latest.RunID)
+	if err != nil {
+		return nil, err
+	}
+	if score != nil {
+		status.Latest.Score = &SourcingScoreSummary{
+			InvocationID: score.InvocationID, Status: score.Status, Score: score.Score,
+			Provider: score.Provider, Model: score.Model,
+			InputTokens: score.InputTokens, CachedInputTokens: score.CachedInputTokens,
+			OutputTokens: score.OutputTokens, ErrorClass: score.ErrorClass,
+			EstimatedCostMicros: score.EstimatedCostMicros,
+			StartedAt:           score.StartedAt, FinishedAt: score.FinishedAt,
+		}
 	}
 	return status, nil
 }
