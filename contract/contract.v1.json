@@ -891,7 +891,7 @@
       "argsSchema": "CandidateReadSourcingResumeArgs", "dataSchema": "CandidateReadSourcingResumeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
-      "note": "从当前明确的候选人采集页面打开并读取一位未列入 excludePlatformUserRefs 的候选人完整五分区简历,成功后保持该详情为当前唯一目标,供后续同一身份建档或招呼;打开详情可能产生幂等已查看记录。稳定身份与职位读不到、详情换绑、结构不完整或超限均失败且不返回部分 data;不得降级到姓名、resumeNumber、DOM 位置或列表序号作为身份"
+      "note": "从当前明确的候选人采集页面打开并读取一位未列入 excludePlatformUserRefs 的候选人完整五分区简历;读取并再次核对目标绑定后,必须关闭本命令使用的详情,确认弹框消失且 URL 不再携带 resumeNumber 才可返回 ok;关闭无法确认时整体失败且不返回部分 data。打开详情可能产生幂等已查看记录。稳定身份与职位读不到、详情换绑、结构不完整或超限均失败且不返回部分 data;不得降级到姓名、resumeNumber、DOM 位置或列表序号作为身份"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",
