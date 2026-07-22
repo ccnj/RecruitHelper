@@ -185,11 +185,17 @@ func (s *Store) CompleteSourcingCandidateRun(req CompleteSourcingCandidateRunReq
 				existing.PositionRef != req.Data.PositionRef {
 				return ErrSourcingConflict
 			}
+			if err := upsertSourcingCandidateTx(tx, req.Platform, req.Data, existing.CapturedAt); err != nil {
+				return err
+			}
 			out = existing
 			return nil
 		}
 		if !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 			return existingErr
+		}
+		if err := upsertSourcingCandidateTx(tx, req.Platform, req.Data, *leaf.TerminalAt); err != nil {
+			return err
 		}
 		out = SourcingCandidateRun{
 			RunID: req.RunID, Platform: req.Platform, AccountRef: req.AccountRef,
@@ -215,6 +221,28 @@ func (s *Store) CompleteSourcingCandidateRun(req CompleteSourcingCandidateRunReq
 		return nil, err
 	}
 	return &out, nil
+}
+
+// upsertSourcingCandidateTx 只建立 platform+platformUserRef 人根并刷新展示
+// 快照，不创建人×职位档案，也不代表已经评分或入选。
+func upsertSourcingCandidateTx(
+	tx *gorm.DB,
+	platform string,
+	data protocol.CandidateReadSourcingResumeData,
+	capturedAt time.Time,
+) error {
+	observedAt := time.UnixMilli(data.ObservedAt)
+	if data.ObservedAt <= 0 {
+		observedAt = capturedAt
+	}
+	_, _, err := upsertCandidateSnapshotTx(tx, SelectCandidateProfileRequest{
+		Scope: CandidateProfileScope{
+			Platform: platform, PlatformUserRef: data.PlatformUserRef,
+		},
+		DisplayName: data.DisplayName,
+		ObservedAt:  observedAt,
+	})
+	return err
 }
 
 func validateSourcingRoot(command CmdRecord, account Account, data protocol.CandidateReadSourcingResumeData) error {

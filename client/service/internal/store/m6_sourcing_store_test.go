@@ -90,6 +90,22 @@ func TestCompleteSourcingCandidateRunPersistsProofBoundFactAndSafeStatus(t *test
 	if err != nil || replayed.RunID != run.RunID {
 		t.Fatalf("同 logical 重放未幂等复用: replayed=%+v err=%v", replayed, err)
 	}
+	candidate, err := s.CandidateByKey(CandidateKey{
+		Platform: key.Platform, PlatformUserRef: data.PlatformUserRef,
+	})
+	if err != nil || candidate == nil || candidate.DisplayName == nil || *candidate.DisplayName != displayName {
+		t.Fatalf("采集事实未同步建立稳定候选人人根: candidate=%+v err=%v", candidate, err)
+	}
+	var candidateN, profileN int64
+	if err := s.db.Model(&Candidate{}).Count(&candidateN).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).Count(&profileN).Error; err != nil {
+		t.Fatal(err)
+	}
+	if candidateN != 1 || profileN != 0 {
+		t.Fatalf("纯采集只能建立一个人根，不能提前建立职位档案: candidates=%d profiles=%d", candidateN, profileN)
+	}
 
 	refs, err := s.SourcingExcludedPlatformUserRefs(key, revisionHash, 32)
 	if err != nil || len(refs) != 1 || refs[0] != data.PlatformUserRef {
@@ -150,5 +166,11 @@ func TestCompleteSourcingCandidateRunRejectsCallerDataDifferentFromPersistedResu
 	})
 	if err != ErrSourcingConflict {
 		t.Fatalf("调用方 data 与持久 result 不同必须拒绝: %v", err)
+	}
+	candidate, candidateErr := s.CandidateByKey(CandidateKey{
+		Platform: key.Platform, PlatformUserRef: data.PlatformUserRef,
+	})
+	if candidateErr != nil || candidate != nil {
+		t.Fatalf("冲突收编不得留下候选人人根: candidate=%+v err=%v", candidate, candidateErr)
 	}
 }
