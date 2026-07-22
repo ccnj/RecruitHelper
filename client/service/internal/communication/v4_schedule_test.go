@@ -59,6 +59,25 @@ func TestV4ScheduleSevenDayFallbackWinsEvenWithPendingDialogueAndRecentCard(t *t
 	}
 }
 
+func TestV4ScheduleSevenDayFallbackIsNotPostponedByDaySixColdPrompt(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	daySix := state.LastBodyAt.Add(6 * 24 * time.Hour)
+	withCold, err := ApplyV4ConfirmedAction(state, V4ConfirmedAction{
+		ActionKey: "profile|cold|1", Kind: V4ActionColdPrompt, MessageSeq: 2,
+		SentAt: &daySix, Round: 1, Stage: 1,
+	})
+	if err != nil || !withCold.LastBodyAt.Equal(*state.LastBodyAt) || !withCold.LastOutboundAt.Equal(daySix) {
+		t.Fatalf("催1 只能滑动普通锚，不能滑动七天正文锚: state=%+v err=%v", withCold, err)
+	}
+
+	daySeven := state.LastBodyAt.Add(7 * 24 * time.Hour)
+	decision, err := EvaluateV4Schedule(v4ScheduleInput(withCold, daySeven))
+	if err != nil || decision.Status != V4ScheduleActionsPlanned || len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != V4ActionArchive || decision.Actions[0].EndReason != V4EndFallback {
+		t.Fatalf("第六天催问后，第七天仍须按原正文优先兜底: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestV4SchedulePendingDialogueSuppressesAllNonFallbackTiers(t *testing.T) {
 	state := NewV4GreetedState(v4Time(8))
 	input := v4ScheduleInput(state, scheduleAt(state, 3*24*time.Hour))

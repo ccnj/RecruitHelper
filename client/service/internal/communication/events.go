@@ -56,6 +56,7 @@ type BusinessEvent struct {
 	ExpressionKind   ExpressionKind
 	Text             string
 	IsBody           bool
+	BodyKindKnown    bool
 	ConservativeCode string
 }
 
@@ -70,6 +71,7 @@ type LedgerMessageFact struct {
 	CardType   string
 	CardState  string
 	Origin     string
+	ActionKind V4ActionKind
 	TsApproxMs *int64
 }
 
@@ -170,10 +172,14 @@ func normalizeOutboundMessage(event BusinessEvent, fact LedgerMessageFact) Busin
 	}
 	if fact.Origin == "self" {
 		event.Kind = EventAutomaticOutboundObserved
+		if fact.ActionKind != "" {
+			event.IsBody, event.BodyKindKnown = classifyV4OutboundActionBody(fact.ActionKind)
+		}
 	} else {
 		event.Kind = EventHumanOutboundObserved
+		event.IsBody = fact.Kind != "card" && fact.Kind != "system"
+		event.BodyKindKnown = true
 	}
-	event.IsBody = fact.Kind != "card" && fact.Kind != "system"
 	return event
 }
 
@@ -232,6 +238,12 @@ func validateLedgerMessageFact(fact LedgerMessageFact) error {
 		}
 	} else if fact.CardType != "" || fact.CardState != "" {
 		return ErrInvalidBusinessEventInput
+	}
+	if fact.ActionKind != "" {
+		_, known := classifyV4OutboundActionBody(fact.ActionKind)
+		if fact.Direction != "out" || fact.Origin != "self" || !known {
+			return ErrInvalidBusinessEventInput
+		}
 	}
 	return nil
 }

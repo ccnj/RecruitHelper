@@ -38,12 +38,22 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 		{
 			name: "human outbound",
 			fact: LedgerMessageFact{Seq: 5, Direction: "out", Kind: "text", Text: textPointer("人工文本"), Origin: "external"},
-			want: BusinessEvent{Key: "message:5", Kind: EventHumanOutboundObserved, Source: EventSourceMessage, MessageSeq: 5, IsBody: true},
+			want: BusinessEvent{Key: "message:5", Kind: EventHumanOutboundObserved, Source: EventSourceMessage, MessageSeq: 5, IsBody: true, BodyKindKnown: true},
 		},
 		{
-			name: "automatic outbound",
-			fact: LedgerMessageFact{Seq: 6, Direction: "out", Kind: "text", Text: textPointer("自动文本"), Origin: "self"},
-			want: BusinessEvent{Key: "message:6", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 6, IsBody: true},
+			name: "automatic reply body",
+			fact: LedgerMessageFact{Seq: 6, Direction: "out", Kind: "text", Text: textPointer("自动文本"), Origin: "self", ActionKind: V4ActionReplyText},
+			want: BusinessEvent{Key: "message:6", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 6, IsBody: true, BodyKindKnown: true},
+		},
+		{
+			name: "automatic cold text is not body",
+			fact: LedgerMessageFact{Seq: 8, Direction: "out", Kind: "text", Text: textPointer("自动催问"), Origin: "self", ActionKind: V4ActionColdPrompt},
+			want: BusinessEvent{Key: "message:8", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 8, BodyKindKnown: true},
+		},
+		{
+			name: "automatic text without action semantic is unknown",
+			fact: LedgerMessageFact{Seq: 9, Direction: "out", Kind: "text", Text: textPointer("自动文本"), Origin: "self"},
+			want: BusinessEvent{Key: "message:9", Kind: EventAutomaticOutboundObserved, Source: EventSourceMessage, MessageSeq: 9},
 		},
 		{
 			name: "outbound interview card",
@@ -64,9 +74,10 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 func TestNormalizeBusinessEventsCarriesOptionalClockWithoutInventingIt(t *testing.T) {
 	millis := int64(1_721_600_123_456)
 	message, err := NormalizeLedgerMessage(LedgerMessageFact{
-		Seq: 1, Direction: "out", Kind: "text", Text: textPointer("正文"), Origin: "self", TsApproxMs: &millis,
+		Seq: 1, Direction: "out", Kind: "text", Text: textPointer("正文"), Origin: "self",
+		ActionKind: V4ActionReplyText, TsApproxMs: &millis,
 	})
-	if err != nil || message.OccurredAt == nil || message.OccurredAt.UnixMilli() != millis || !message.IsBody {
+	if err != nil || message.OccurredAt == nil || message.OccurredAt.UnixMilli() != millis || !message.IsBody || !message.BodyKindKnown {
 		t.Fatalf("消息时钟没有按事实透传: event=%+v err=%v", message, err)
 	}
 
@@ -155,6 +166,8 @@ func TestNormalizeBusinessEventRejectsBrokenNeutralFacts(t *testing.T) {
 		{Seq: 1, Direction: "in", Kind: "card", CardType: "future", CardState: "unknown", Origin: "external"},
 		{Seq: 1, Direction: "in", Kind: "card", CardType: "other", CardState: "future", Origin: "external"},
 		{Seq: 1, Direction: "in", Kind: "text", Text: textPointer("x"), Origin: "future"},
+		{Seq: 1, Direction: "in", Kind: "text", Text: textPointer("x"), Origin: "external", ActionKind: V4ActionReplyText},
+		{Seq: 1, Direction: "out", Kind: "text", Text: textPointer("x"), Origin: "self", ActionKind: V4ActionArchive},
 		{Seq: 1, Direction: "in", Kind: "text", Text: textPointer("x"), Origin: "external", TsApproxMs: func() *int64 { value := int64(0); return &value }()},
 	}
 	for index, fact := range invalidMessages {

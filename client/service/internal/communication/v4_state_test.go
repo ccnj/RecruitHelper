@@ -208,8 +208,9 @@ func TestV4SentFlagsAndStateAdvanceOnlyFromPositiveConfirmation(t *testing.T) {
 		MessageSeq: 10, SentAt: v4Time(9),
 	})
 	if err != nil || !confirmed.WechatReceiptSent || confirmed.LastOutboundMessageSeq != 10 ||
-		confirmed.LastBodyAt == nil || confirmed.LastBodyAt.Hour() != 9 {
-		t.Fatalf("唯一正证没有推进固定回执与锚点: state=%+v err=%v", confirmed, err)
+		confirmed.LastOutboundAt == nil || confirmed.LastOutboundAt.Hour() != 9 ||
+		confirmed.LastBodyAt == nil || confirmed.LastBodyAt.Hour() != 8 {
+		t.Fatalf("唯一正证没有推进固定回执与普通锚，或错误滑动正文锚: state=%+v err=%v", confirmed, err)
 	}
 
 	replayed, err := ApplyV4ConfirmedAction(confirmed, V4ConfirmedAction{
@@ -317,7 +318,7 @@ func TestV4OutboundFactsSlideOnlyProvenClocks(t *testing.T) {
 	state := NewV4GreetedState(v4Time(8))
 	body := BusinessEvent{
 		Key: "message:2", Kind: EventHumanOutboundObserved, Source: EventSourceMessage,
-		MessageSeq: 2, OccurredAt: v4Time(10), IsBody: true,
+		MessageSeq: 2, OccurredAt: v4Time(10), IsBody: true, BodyKindKnown: true,
 	}
 	decision, err := ApplyV4BusinessEvent(state, body)
 	if err != nil || decision.State.LastOutboundAt == nil || decision.State.LastBodyAt == nil ||
@@ -344,6 +345,22 @@ func TestV4OutboundFactsSlideOnlyProvenClocks(t *testing.T) {
 	if err != nil || !decision.State.ClockUncertain || decision.State.LastOutboundAt.Hour() != 11 ||
 		decision.State.LastBodyAt.Hour() != 10 {
 		t.Fatalf("缺时刻只能禁用调度，不能伪造锚点: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4AutomaticOutboundWithoutActionSemanticMakesOnlyBodyClockUncertain(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	event, err := NormalizeLedgerMessage(LedgerMessageFact{
+		Seq: 2, Direction: "out", Kind: "text", Text: textPointer("无法分类的自动文本"),
+		Origin: "self", TsApproxMs: func() *int64 { value := v4Time(9).UnixMilli(); return &value }(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := ApplyV4BusinessEvent(state, event)
+	if err != nil || decision.State.ClockUncertain || !decision.State.BodyClockUncertain ||
+		decision.State.LastOutboundAt.Hour() != 9 || decision.State.LastBodyAt.Hour() != 8 {
+		t.Fatalf("缺脑侧动作语义时不得把普通文本外形猜成正文: state=%+v err=%v", decision.State, err)
 	}
 }
 

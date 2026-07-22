@@ -226,6 +226,9 @@ func ApplyV4BusinessEvent(input V4State, event BusinessEvent) (V4EventDecision, 
 		return applyV4InterviewRejected(input, decision, event)
 	case EventHumanOutboundObserved, EventAutomaticOutboundObserved:
 		advanceV4OutboundClock(&decision.State, event.MessageSeq, event.OccurredAt, event.IsBody)
+		if !event.BodyKindKnown {
+			decision.State.BodyClockUncertain = true
+		}
 		return decision, nil
 	case EventCandidateBlacklisted:
 		if isV4ProgressStatus(decision.State.MainStatus) {
@@ -255,32 +258,32 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionRejectionRetention:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.RetentionSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionRejectionClosing:
 		if action.MessageSeq <= 0 || !state.RetentionSent {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.ClosingSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 		archiveV4State(&state, V4EndRejected)
 	case V4ActionWechatReceipt:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.WechatReceiptSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionInterviewAcceptedReceipt:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.InterviewAcceptedReceiptSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionInterviewRejectionReply:
 		if action.MessageSeq <= 0 || action.CardMessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
@@ -290,7 +293,7 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.InterviewGroups[index].RejectionReceiptSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionInviteWechat:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
@@ -323,13 +326,13 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		if action.Round == state.RealMessageRound {
 			state.LastColdPromptRound = action.Round
 		}
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionColdWechatText:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.ColdWechatTextSent = true
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionColdWechatInvite:
 		if action.MessageSeq <= 0 {
 			return V4State{}, ErrInvalidV4StateTransition
@@ -358,7 +361,7 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		if group.NextStage > 3 {
 			group.Active = false
 		}
-		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, true)
+		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionNotifyWechat, V4ActionNotifyInterviewAccepted:
 		// Notifications are externally deduplicated by ActionKey and do not
 		// change the profile communication aggregate.
@@ -558,6 +561,28 @@ func advanceV4OutboundClock(state *V4State, messageSeq int64, occurredAt *time.T
 		state.LastBodyAt = &bodyAt
 		state.BodyClockUncertain = false
 	}
+}
+
+// classifyV4OutboundActionBody is the single v4 definition of a body message.
+// The specification exhaustively limits bodies to replies, retention and
+// closing. Cards, cold prompts, follow-ups and receipts still slide the normal
+// outbound clock, but never the seven-day fallback clock.
+func classifyV4OutboundActionBody(kind V4ActionKind) (isBody bool, known bool) {
+	switch kind {
+	case V4ActionReplyText, V4ActionServiceReply, V4ActionRejectionRetention, V4ActionRejectionClosing:
+		return true, true
+	case V4ActionWechatReceipt, V4ActionInterviewAcceptedReceipt, V4ActionInterviewRejectionReply,
+		V4ActionInviteWechat, V4ActionAcceptWechat, V4ActionColdPrompt, V4ActionColdWechatText,
+		V4ActionColdWechatInvite, V4ActionInterviewFollowup, V4ActionInterviewInvite:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func isV4BodyAction(kind V4ActionKind) bool {
+	isBody, _ := classifyV4OutboundActionBody(kind)
+	return isBody
 }
 
 func cloneV4State(state V4State) V4State {
