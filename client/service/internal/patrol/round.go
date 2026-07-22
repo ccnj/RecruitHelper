@@ -125,6 +125,10 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := a.captureSourcingResume(ctx); err != nil {
+		a.handleCommandFailure(err)
+		return err
+	}
 
 	if err := a.setStage("readingList"); err != nil {
 		return err
@@ -177,6 +181,101 @@ func (a *roundActor) execute(ctx context.Context) error {
 		}
 	}
 	return a.processM5Trial(ctx)
+}
+
+func (a *roundActor) captureSourcingResume(ctx context.Context) error {
+	if !a.account.SourcingEnabled {
+		return nil
+	}
+	revisionHash := a.account.SourcingContextRevisionHash
+	if revisionHash == "" {
+		return store.ErrSourcingBinding
+	}
+	if err := a.setStage("readingSourcingResume"); err != nil {
+		return err
+	}
+	if err := a.ensureDispatchAllowed(ctx); err != nil {
+		return err
+	}
+	runner, ok := a.manager.runner.(SourcingResumeRunner)
+	if !ok {
+		return errors.New("巡检 runner 未实现推荐页简历采集接缝")
+	}
+	excluded, err := a.manager.store.SourcingExcludedPlatformUserRefs(a.key(), revisionHash, 32)
+	if err != nil {
+		return err
+	}
+	attemptedAt := a.manager.now()
+	if err := a.manager.store.MarkSourcingAttempt(a.key(), revisionHash, attemptedAt, ""); err != nil {
+		return err
+	}
+	expected := ""
+	if a.account.PrincipalFingerprint != nil {
+		expected = *a.account.PrincipalFingerprint
+	}
+	handle, err := runner.StartSourcingResume(ctx, SourcingResumeRequest{
+		HandID: a.account.BoundHandID, ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		ExpectedPrincipalFingerprint: expected, ExcludePlatformUserRefs: excluded,
+	})
+	if err != nil {
+		return err
+	}
+	logicalID := handle.LogicalDispatchID()
+	var raw json.RawMessage
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		raw, err = handle.Wait(ctx)
+	}()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		var runErr *RunError
+		if !errors.As(err, &runErr) {
+			return err
+		}
+		if markErr := a.manager.store.MarkSourcingAttempt(a.key(), revisionHash, attemptedAt, sourcingFailureCode(runErr)); markErr != nil {
+			return markErr
+		}
+		if runErr.Code == protocol.ErrCodeAccountMismatch ||
+			(runErr.Code == protocol.ErrCodeCtxNotReady && runErr.Reason == protocol.NotReadyReasonLoginRequired) ||
+			runErr.Code == protocol.ErrCodeUserActive {
+			return err
+		}
+		// 推荐页无候选人、页面局部变化等只结束本次采集，不阻断同轮 IM 对账。
+		return nil
+	}
+	if err := a.ensureDispatchAllowed(ctx); err != nil {
+		return err
+	}
+	meta := protocol.Primitives[protocol.PrimCandidateReadSourcingResume]
+	if err := protocol.ValidatePrimitiveData(protocol.PrimCandidateReadSourcingResume, meta.Ver, raw); err != nil {
+		return err
+	}
+	var data protocol.CandidateReadSourcingResumeData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return err
+	}
+	_, err = a.manager.store.CompleteSourcingCandidateRun(store.CompleteSourcingCandidateRunRequest{
+		RunID: ids.NewSourcingRunID(), Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		ContextRevisionHash: revisionHash, LogicalDispatchID: logicalID, Data: data,
+	})
+	if errors.Is(err, store.ErrSourcingBinding) || errors.Is(err, store.ErrSourcingNotEnabled) {
+		return nil
+	}
+	return err
+}
+
+func sourcingFailureCode(err *RunError) string {
+	if err == nil || err.Code == "" {
+		return "commandFailed"
+	}
+	if err.Code == protocol.ErrCodeCtxNotReady && err.Reason != "" {
+		return string(err.Code) + "/" + string(err.Reason)
+	}
+	return string(err.Code)
 }
 
 func (a *roundActor) captureTrialResume(ctx context.Context) error {

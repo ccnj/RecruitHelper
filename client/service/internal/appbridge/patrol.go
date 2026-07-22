@@ -62,6 +62,36 @@ func (h *patrolRunHandle) Wait(ctx context.Context) (json.RawMessage, error) {
 
 func (h *patrolRunHandle) LogicalDispatchID() string { return h.logicalID }
 
+func (r PatrolRunner) StartSourcingResume(
+	ctx context.Context,
+	req patrol.SourcingResumeRequest,
+) (patrol.SourcingResumeHandle, error) {
+	if r.Dispatcher == nil {
+		return nil, errors.New("dispatcher 不能为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	args, err := protocol.Encode(protocol.CandidateReadSourcingResumeArgs{
+		ExcludePlatformUserRefs: req.ExcludePlatformUserRefs,
+	})
+	if err != nil {
+		return nil, err
+	}
+	logicalID, err := r.Dispatcher.DispatchStructured(dispatch.DispatchRequest{
+		HandID: req.HandID, ExpectedSession: req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
+		Name: protocol.PrimCandidateReadSourcingResume, Args: args,
+		Context: &protocol.CmdContext{
+			Platform: req.Platform, AccountRef: req.AccountRef,
+			ExpectedPrincipalFingerprint: req.ExpectedPrincipalFingerprint,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &patrolRunHandle{dispatcher: r.Dispatcher, logicalID: logicalID}, nil
+}
+
 func (r PatrolRunner) StartResumeCapture(
 	ctx context.Context,
 	req patrol.ResumeCaptureRequest,

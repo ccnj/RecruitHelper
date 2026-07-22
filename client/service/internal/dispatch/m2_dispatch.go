@@ -113,14 +113,16 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			return dispatchResult{}, ErrStaleSession
 		}
 	}
-	if meta.Class == protocol.ClassEffectful || req.Name == protocol.PrimCandidateReadResume {
+	identityRead := req.Name == protocol.PrimCandidateReadResume ||
+		req.Name == protocol.PrimCandidateReadSourcingResume
+	if meta.Class == protocol.ClassEffectful || identityRead {
 		matched, current := d.sender.HandContractMatch(req.HandID)
 		if !current {
 			return dispatchResult{}, ErrHandOffline
 		}
 		if !matched {
 			category := "effect_contract_mismatch_blocked"
-			if req.Name == protocol.PrimCandidateReadResume {
+			if identityRead {
 				category = "resume_contract_mismatch_blocked"
 			}
 			d.st.Audit(category, req.HandID, "",

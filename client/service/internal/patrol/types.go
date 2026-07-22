@@ -95,6 +95,25 @@ type ResumeCaptureRunner interface {
 	StartResumeCapture(context.Context, ResumeCaptureRequest) (ResumeCaptureHandle, error)
 }
 
+type SourcingResumeRequest struct {
+	HandID                       string
+	ExpectedSession              string
+	ExpectedBootID               string
+	Platform                     string
+	AccountRef                   string
+	ExpectedPrincipalFingerprint string
+	ExcludePlatformUserRefs      []string
+}
+
+type SourcingResumeHandle interface {
+	LogicalDispatchID() string
+	Wait(context.Context) (json.RawMessage, error)
+}
+
+type SourcingResumeRunner interface {
+	StartSourcingResume(context.Context, SourcingResumeRequest) (SourcingResumeHandle, error)
+}
+
 // AutomaticReplyRequest is the only M5 bridge into the existing
 // chat.sendMessage safety rail. IntentID is deterministically derived from
 // ActionID; PreviousIntentID preserves the conversation-head CAS.

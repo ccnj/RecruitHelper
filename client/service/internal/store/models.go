@@ -235,8 +235,40 @@ type Account struct {
 	ManualQuietUntil *time.Time
 	DirtyHint        bool
 
+	// 采集开关绑定到仓库自有的不可变职位配置 revision。关闭每日 actor
+	// 不会抹掉该配置；重新 start 可显式切换到另一 revision。
+	SourcingEnabled             bool   `gorm:"not null;default:false;index"`
+	SourcingContextRevisionHash string `gorm:"index"`
+	SourcingStartedAt           *time.Time
+	SourcingLastAttemptAt       *time.Time
+	SourcingLastErrorCode       string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// SourcingCandidateRun 是推荐页一次单候选人简历采集的不可变业务事实。
+// 候选人身份与简历正文只允许在业务库内使用；管理 API 只能投影随机引用、
+// hash、字节数、状态与时刻。
+type SourcingCandidateRun struct {
+	RunID               string `gorm:"primaryKey"`
+	Platform            string `gorm:"not null;index:idx_sourcing_account_revision,priority:1"`
+	AccountRef          string `gorm:"not null;index:idx_sourcing_account_revision,priority:2"`
+	ContextRevisionHash string `gorm:"not null;index:idx_sourcing_account_revision,priority:3"`
+
+	PlatformUserRef string `gorm:"not null"`
+	DisplayName     *string
+	PositionRef     string `gorm:"not null"`
+	PositionTitle   *string
+	ContactState    string `gorm:"not null"`
+
+	SourceLogicalDispatchID string    `gorm:"not null;uniqueIndex"`
+	ObservedAt              int64     `gorm:"not null"`
+	CapturedAt              time.Time `gorm:"not null;index"`
+	SchemaVersion           int       `gorm:"not null"`
+	ContentHash             string    `gorm:"not null"`
+	ResumeJSON              string    `gorm:"not null"`
+	CreatedAt               time.Time
 }
 
 // Candidate 是人的平台身份根。PlatformUserRef 只作不透明等值比较；

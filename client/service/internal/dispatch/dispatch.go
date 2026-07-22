@@ -446,6 +446,22 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("简历读取 result 的目标引用与原命令不一致")
 		}
 	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadSourcingResume && res.Status == protocol.ResultStatusOk {
+		var args protocol.CandidateReadSourcingResumeArgs
+		var data protocol.CandidateReadSourcingResumeData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = errors.New("采集简历 args 无法解析")
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("采集简历 data 无法解析")
+		} else {
+			for _, excluded := range args.ExcludePlatformUserRefs {
+				if data.PlatformUserRef == excluded {
+					validationErr = errors.New("采集结果返回了脑已排除的候选人")
+					break
+				}
+			}
+		}
+	}
 	if validationErr == nil {
 		return res, ""
 	}

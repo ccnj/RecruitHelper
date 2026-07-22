@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
@@ -85,20 +87,60 @@ func (m *Manager) EnableToday(key store.AccountKey) error {
 		return ErrDailyWindowNotOpen
 	}
 	return m.store.MutateAccount(key, func(account *store.Account) error {
-		if account.BoundHandID == "" || account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
-			return ErrAccountNotBound
+		return m.enableAccountToday(account, now)
+	})
+}
+
+// StartSourcing 原子更新账号的职位 revision 与每日 actor 门。职位文档在此
+// 只做可执行视图校验；本批次不调用模型，也不产生候选人档案或副作用。
+func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	revisionHash = strings.TrimSpace(revisionHash)
+	if revisionHash == "" || len(revisionHash) > 128 {
+		return store.ErrJobAIContextRevisionInvalid
+	}
+	now := m.now()
+	if now.In(m.config.Location).Hour() < m.config.DailyStartHour {
+		return ErrDailyWindowNotOpen
+	}
+	revision, err := m.store.JobAIContextRevisionByHash(revisionHash)
+	if err != nil {
+		return err
+	}
+	if revision == nil {
+		return store.ErrJobAIContextRevisionNotFound
+	}
+	if _, err := m5ai.DeriveSourcingView(revision.SourcePackage); err != nil {
+		return err
+	}
+	return m.store.MutateAccount(key, func(account *store.Account) error {
+		if err := m.enableAccountToday(account, now); err != nil {
+			return err
 		}
-		if account.IdentityState == store.IdentityInvalid || account.IdentityState == store.IdentityUnbound {
-			return ErrIdentityInvalid
-		}
-		account.EnabledDate = m.localDate(now)
-		account.EnabledAt = timePointer(now)
-		account.StoppedAt = nil
-		account.PausedReason = ""
-		account.NextPatrolAt = timePointer(now)
-		account.DirtyHint = true
+		account.SourcingEnabled = true
+		account.SourcingContextRevisionHash = revisionHash
+		account.SourcingStartedAt = timePointer(now)
+		account.SourcingLastAttemptAt = nil
+		account.SourcingLastErrorCode = ""
 		return nil
 	})
+}
+
+func (m *Manager) enableAccountToday(account *store.Account, now time.Time) error {
+	if account.BoundHandID == "" || account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
+		return ErrAccountNotBound
+	}
+	if account.IdentityState == store.IdentityInvalid || account.IdentityState == store.IdentityUnbound {
+		return ErrIdentityInvalid
+	}
+	account.EnabledDate = m.localDate(now)
+	account.EnabledAt = timePointer(now)
+	account.StoppedAt = nil
+	account.PausedReason = ""
+	account.NextPatrolAt = timePointer(now)
+	account.DirtyHint = true
+	return nil
 }
 
 func (m *Manager) StopToday(key store.AccountKey) error {
