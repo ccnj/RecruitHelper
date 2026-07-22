@@ -130,7 +130,7 @@ func Reduce(input ReduceInput) (Decision, error) {
 		return Decision{}, ErrInvalidReducerInput
 	}
 
-	shortCircuit := m5ai.ClassifyIntentShortCircuit(texts)
+	shortCircuit := m5ai.ClassifyIntentShortCircuitV4(texts)
 	label := m5ai.IntentLabel("")
 	source := IntentSource("")
 	if shortCircuit.Matched {

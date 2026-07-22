@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 func decodeUniqueObject(raw string) (map[string]json.RawMessage, error) {
@@ -132,4 +137,93 @@ func ClassifyIntentShortCircuit(orderedInboundTexts []string) ShortCircuitResult
 		return ShortCircuitResult{Matched: true, Label: IntentNeutral, Source: "emptyTurn"}
 	}
 	return ShortCircuitResult{}
+}
+
+var v4RejectionTemplate = regexp.MustCompile(
+	`(很抱歉|抱歉)[，,]?我(暂时)?(不|觉得这个).{0,20}(考虑|不匹配|不感兴趣|不合适)`,
+)
+
+var v4ResumeMarkers = []struct {
+	ID      string
+	Literal string
+}{
+	{ID: "M5I-RSM-01", Literal: "发送了在线简历"},
+	{ID: "M5I-RSM-02", Literal: "附件简历"},
+}
+
+var v4ShortRejections = []struct {
+	ID      string
+	Literal string
+}{
+	{ID: "M5I-SR-01", Literal: "不考虑"},
+	{ID: "M5I-SR-02", Literal: "不感兴趣"},
+	{ID: "M5I-SR-04", Literal: "不合适"},
+}
+
+// ClassifyIntentShortCircuitV4 is the currently approved deterministic rule
+// set. The M5-A function above remains frozen for its historical fixture; new
+// production communication uses this versioned classifier. Messages are never
+// concatenated, while family priority applies across the complete turn.
+func ClassifyIntentShortCircuitV4(orderedInboundTexts []string) ShortCircuitResult {
+	if len(orderedInboundTexts) == 0 {
+		return ShortCircuitResult{Matched: true, Label: IntentNeutral, Source: "emptyTurn"}
+	}
+	texts := make([]string, len(orderedInboundTexts))
+	for index, text := range orderedInboundTexts {
+		texts[index] = normalizeIntentRuleText(text)
+	}
+
+	for _, text := range texts {
+		for _, rule := range v4ResumeMarkers {
+			if strings.Contains(text, rule.Literal) {
+				return ShortCircuitResult{
+					Matched: true, Label: IntentInterested, Source: "resumeMarker", RuleID: rule.ID,
+				}
+			}
+		}
+	}
+	for _, text := range texts {
+		match := v4RejectionTemplate.FindStringSubmatch(text)
+		if len(match) != 5 {
+			continue
+		}
+		return ShortCircuitResult{
+			Matched: true, Label: IntentRejected, Source: "rejectionRegex",
+			RuleID: rejectionTemplateRuleID(match[3], match[4]),
+		}
+	}
+	for _, text := range texts {
+		if utf8.RuneCountInString(text) > 25 || strings.ContainsAny(text, "?？") {
+			continue
+		}
+		for _, rule := range v4ShortRejections {
+			if strings.Contains(text, rule.Literal) {
+				return ShortCircuitResult{
+					Matched: true, Label: IntentRejected, Source: "shortRejection", RuleID: rule.ID,
+				}
+			}
+		}
+	}
+	return ShortCircuitResult{}
+}
+
+func normalizeIntentRuleText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, norm.NFC.String(value))
+}
+
+func rejectionTemplateRuleID(mode, outcome string) string {
+	prefix := "N"
+	if mode == "觉得这个" {
+		prefix = "THINK"
+	}
+	suffix := map[string]string{
+		"考虑": "CONSIDER", "不匹配": "MISMATCH",
+		"不感兴趣": "NOT_INTERESTED", "不合适": "UNSUITABLE",
+	}[outcome]
+	return "M5I-RT-" + prefix + "-" + suffix
 }
