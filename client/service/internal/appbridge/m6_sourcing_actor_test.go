@@ -83,6 +83,7 @@ type sourcingActorSender struct {
 	candidates map[string]protocol.CandidateReadSourcingResumeData
 
 	targetPositionOverride string
+	unreadableTargets      map[string]bool
 	online                 bool
 	holdGreeting           bool
 	greetings              []sourcingGreetingCommand
@@ -145,6 +146,17 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 			return err
 		}
 		s.targets = append(s.targets, args.PlatformUserRef)
+		if s.unreadableTargets[args.PlatformUserRef] {
+			s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
+			s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
+				Ref: env.MsgID, Status: protocol.ResultStatusFailed, ExecMs: 1,
+				Error: &protocol.ErrorBody{
+					Code: protocol.ErrCodeElementUnresolved, Message: "候选人简历结构不完整",
+					Retryable: protocol.RetryableManualOnly, SideEffect: protocol.SideEffectNone,
+				},
+			})
+			return nil
+		}
 		candidate, ok := s.candidates[args.PlatformUserRef]
 		if !ok {
 			return fmt.Errorf("fixture 缺少定点候选人")
@@ -395,6 +407,42 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	before := len(h.sender.order)
 	if second, err := h.manager.Tick(context.Background()); err != nil || len(second.Rounds) != 0 || len(h.sender.order) != before {
 		t.Fatalf("达标后仍继续读取: result=%+v err=%v order=%v", second, err, h.sender.order)
+	}
+}
+
+func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{
+		{"candidate-a", "candidate-b"},
+		{"candidate-a", "candidate-c"},
+	})
+	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
+	}
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("单个不可读候选人拖死整批: result=%+v err=%v", result, err)
+	}
+	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b", "candidate-c"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("不可读候选人在后续窗口被重复读取: got=%v want=%v", got, want)
+	}
+	if got, want := h.sender.moves, []protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveCurrent, protocol.SourcingWindowMoveNext,
+	}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("跳过后未继续推进窗口: got=%v want=%v", got, want)
+	}
+	progress, err := h.store.SourcingBatchProgressByID(started.BatchID)
+	if err != nil || progress.Status != store.SourcingBatchCompleted ||
+		progress.CapturedCount != 2 || progress.RemainingCount != 0 {
+		t.Fatalf("跳过后批次未按成功成员达标: progress=%+v err=%v", progress, err)
+	}
+	members, err := h.store.SourcingBatchExcludedPlatformUserRefs(started.BatchID)
+	if err != nil || fmt.Sprint(members) != fmt.Sprint([]string{"candidate-b", "candidate-c"}) {
+		t.Fatalf("不可读候选人被误记为批次成员: members=%v err=%v", members, err)
 	}
 }
 

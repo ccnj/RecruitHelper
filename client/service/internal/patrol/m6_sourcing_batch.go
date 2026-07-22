@@ -45,6 +45,16 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 	for _, ref := range members {
 		completed[ref] = struct{}{}
 	}
+	// 个别候选人的定点读取以明确机器三元组终局时不应拖死整批。只在
+	// 本轮内记住该身份；重启后最多多读一次，不新增第二份业务事实。
+	unreadable := make(map[string]struct{})
+	handledInRound := func(ref string) bool {
+		if _, found := completed[ref]; found {
+			return true
+		}
+		_, found := unreadable[ref]
+		return found
+	}
 
 	var window protocol.CandidateReadSourcingWindowData
 	if batch.Status == store.SourcingBatchPreparing {
@@ -82,7 +92,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		}
 
 		for _, platformUserRef := range window.PlatformUserRefs {
-			if _, found := completed[platformUserRef]; found {
+			if handledInRound(platformUserRef) {
 				continue
 			}
 			if err := a.setStage("readingSourcingTargetResume"); err != nil {
@@ -96,6 +106,10 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 				},
 			)
 			if err != nil {
+				if skipsUnreadableSourcingTarget(err) {
+					unreadable[platformUserRef] = struct{}{}
+					continue
+				}
 				return a.failSourcingBatch(batch.BatchID, sourcingBlockTargetReadFailed, err)
 			}
 			if data.PlatformUserRef != platformUserRef || data.PositionRef != *batch.PositionRef {
@@ -134,7 +148,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 
 		hasNewIdentity := false
 		for _, ref := range next.PlatformUserRefs {
-			if _, found := completed[ref]; !found {
+			if !handledInRound(ref) {
 				hasNewIdentity = true
 				break
 			}
@@ -149,6 +163,12 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		}
 		window = next
 	}
+}
+
+func skipsUnreadableSourcingTarget(err error) bool {
+	var runErr *RunError
+	return errors.As(err, &runErr) && runErr.Code == protocol.ErrCodeElementUnresolved &&
+		runErr.Retryable == protocol.RetryableManualOnly && runErr.SideEffect == protocol.SideEffectNone
 }
 
 func (a *roundActor) readSourcingWindow(
