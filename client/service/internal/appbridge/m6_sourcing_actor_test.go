@@ -37,6 +37,38 @@ func (a *sourcingActorAdvice) CompleteJSON(
 	return m5ai.CompletionResponse{}, fmt.Errorf("正式纯采集不得调用 provider")
 }
 
+type sourcingBatchScoringAdvice struct {
+	requests []m5ai.CompletionRequest
+}
+
+func (*sourcingBatchScoringAdvice) ProviderName() string { return "fixture-score-provider" }
+func (*sourcingBatchScoringAdvice) ModelName() string    { return "fixture-score-model" }
+func (a *sourcingBatchScoringAdvice) CompleteJSON(
+	_ context.Context,
+	request m5ai.CompletionRequest,
+) (m5ai.CompletionResponse, error) {
+	a.requests = append(a.requests, request)
+	zero := 0
+	response := m5ai.CompletionResponse{
+		ReasoningContentEmpty: true,
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &zero,
+		},
+	}
+	switch len(a.requests) {
+	case 1:
+		response.JSONText = `{"score":8}`
+		return response, nil
+	case 2:
+		return m5ai.CompletionResponse{}, fmt.Errorf("fixture transport failed")
+	case 3:
+		response.JSONText = `{"score":"bad"}`
+		return response, nil
+	default:
+		return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次评分调用", len(a.requests))
+	}
+}
+
 type sourcingActorSender struct {
 	dispatcher *dispatch.Dispatcher
 	order      []string
@@ -287,6 +319,84 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	before := len(h.sender.order)
 	if second, err := h.manager.Tick(context.Background()); err != nil || len(second.Rounds) != 0 || len(h.sender.order) != before {
 		t.Fatalf("达标后仍继续读取: result=%+v err=%v order=%v", second, err, h.sender.order)
+	}
+}
+
+func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b", "candidate-c"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || batch == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", batch, err)
+	}
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeHandCalls := len(h.sender.order)
+	advice := &sourcingBatchScoringAdvice{}
+	scorer, err := patrol.NewManager(
+		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
+		patrol.Config{Clock: h.clock, Location: time.UTC}, advice,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !progress.Completed || progress.TargetCount != 3 || progress.OKCount != 1 ||
+		progress.FailedCount != 2 || progress.InFlightCount != 0 || progress.PendingCount != 0 ||
+		progress.Provider != advice.ProviderName() || progress.Model != advice.ModelName() {
+		t.Fatalf("统一评分没有完整终局: %+v", progress)
+	}
+	if len(advice.requests) != 3 {
+		t.Fatalf("provider 调用次数错误: %d", len(advice.requests))
+	}
+	for _, request := range advice.requests {
+		if request.Purpose != m5ai.PurposeScoring || request.MaxOutputTokens != m5ai.ScoringOutputTokenLimit {
+			t.Fatalf("评分请求越界: %+v", request)
+		}
+	}
+	if len(h.sender.order) != beforeHandCalls {
+		t.Fatalf("统一评分触碰了 hand: before=%d after=%d order=%v", beforeHandCalls, len(h.sender.order), h.sender.order)
+	}
+
+	replayed, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
+	if err != nil || !replayed.Completed || len(advice.requests) != 3 {
+		t.Fatalf("重复统一评分产生了新调用: progress=%+v requests=%d err=%v", replayed, len(advice.requests), err)
+	}
+}
+
+func TestCompletedSourcingBatchWithoutProviderCreatesNoReservation(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || batch == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", batch, err)
+	}
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	scorer, err := patrol.NewManager(
+		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
+		patrol.Config{Clock: h.clock, Location: time.UTC},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID); progress == nil ||
+		progress.PendingCount != 1 || err != patrol.ErrSourcingScoringProviderUnavailable {
+		t.Fatalf("缺少 provider 未响亮拒绝: progress=%+v err=%v", progress, err)
+	}
+	progress, err := h.store.SourcingBatchScoringProgress(batch.BatchID)
+	if err != nil || progress.PendingCount != 1 || progress.InFlightCount != 0 || progress.Completed {
+		t.Fatalf("缺少 provider 仍创建了预留: progress=%+v err=%v", progress, err)
 	}
 }
 

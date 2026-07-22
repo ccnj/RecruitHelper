@@ -24,8 +24,9 @@ type Manager struct {
 	advice AdviceExecutor
 	config Config
 
-	mu     sync.Mutex // 短临界区：UI/事件对 actor 状态的修改
-	tickMu sync.Mutex // 只串行 Tick，不得阻塞传感事件和用户暂停
+	mu      sync.Mutex // 短临界区：UI/事件对 actor 状态的修改
+	tickMu  sync.Mutex // 只串行 Tick，不得阻塞传感事件和用户暂停
+	scoreMu sync.Mutex // 串行统一评分；不占用 hand/巡检锁
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {

@@ -2,91 +2,142 @@ package patrol
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 )
 
-// scorePendingSourcingRun consumes at most one captured resume per round. The
-// store reservation is the only authorization to call the provider; every
-// existing reservation, including an interrupted one, permanently suppresses
-// another call for the same run.
-func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, *store.SourcingCandidateRun, error) {
-	if !a.account.SourcingEnabled || a.account.SourcingContextRevisionHash == "" {
-		return false, nil, nil
+var (
+	ErrSourcingScoringProviderUnavailable = errors.New("统一评分 provider 尚未配置")
+	ErrSourcingScoringIncomplete          = errors.New("统一评分仍有未终局成员")
+)
+
+// ScoreCompletedSourcingBatch is the sole production orchestrator for batch
+// scoring. It is deliberately independent from the account patrol actor and
+// never reaches a hand, an IM surface, selection, or effect dispatch.
+func (m *Manager) ScoreCompletedSourcingBatch(
+	ctx context.Context,
+	batchID string,
+) (*store.SourcingBatchScoringProgress, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, store.ErrSourcingBatchInvalid
 	}
-	run, err := a.manager.store.NextSourcingRunWithoutScore(a.key(), a.account.SourcingContextRevisionHash)
-	if err != nil || run == nil {
-		return false, nil, err
-	}
-	// A missing local provider is recoverable configuration state. Keep this
-	// run pending and stop collecting more candidates until configuration is
-	// available instead of creating an unbounded unscored backlog.
-	if a.manager.advice == nil {
-		return true, nil, nil
-	}
-	if err := a.setStage("scoringSourcingResume"); err != nil {
-		return true, nil, err
-	}
-	revision, err := a.manager.store.JobAIContextRevisionByHash(run.ContextRevisionHash)
+
+	m.scoreMu.Lock()
+	defer m.scoreMu.Unlock()
+
+	progress, err := m.store.SourcingBatchScoringProgress(batchID)
 	if err != nil {
-		return true, nil, err
+		return nil, err
+	}
+	if progress.Completed {
+		return progress, nil
+	}
+	if m.advice == nil {
+		return progress, ErrSourcingScoringProviderUnavailable
+	}
+	provider, model := m.advice.ProviderName(), m.advice.ModelName()
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		return progress, ErrSourcingScoringProviderUnavailable
+	}
+	if (progress.Provider != "" && progress.Provider != provider) ||
+		(progress.Model != "" && progress.Model != model) {
+		return progress, store.ErrAIInvocationConflict
+	}
+
+	revision, err := m.store.JobAIContextRevisionByHash(progress.ContextRevisionHash)
+	if err != nil {
+		return progress, err
 	}
 	if revision == nil {
-		return true, nil, store.ErrJobAIContextRevisionNotFound
+		return progress, store.ErrJobAIContextRevisionNotFound
 	}
 	view, err := m5ai.DeriveSourcingView(revision.SourcePackage)
 	if err != nil {
-		return true, nil, err
+		return progress, err
 	}
 
-	content, renderErr := m5ai.RenderScoringPrompt(view.ScoringPrompt, run.ResumeJSON)
-	inputHash := sha256Hex(content)
-	if renderErr != nil {
-		// Render failures contain no provider response, but still need a stable
-		// one-shot reservation so later patrols cannot spin on the same run.
-		inputHash = sha256Hex(view.ScoringPrompt + "\x00" + run.ResumeJSON)
+	for {
+		if err := ctx.Err(); err != nil {
+			progress, _ = m.store.SourcingBatchScoringProgress(batchID)
+			return progress, err
+		}
+		run, err := m.store.NextSourcingBatchRunWithoutScore(batchID)
+		if err != nil {
+			return progress, err
+		}
+		if run == nil {
+			progress, err = m.store.SourcingBatchScoringProgress(batchID)
+			if err != nil {
+				return nil, err
+			}
+			if !progress.Completed {
+				return progress, ErrSourcingScoringIncomplete
+			}
+			return progress, nil
+		}
+
+		if err := m.scoreSourcingBatchMember(ctx, batchID, view.ScoringPrompt, *run, provider, model); err != nil {
+			progress, _ = m.store.SourcingBatchScoringProgress(batchID)
+			return progress, err
+		}
 	}
+}
+
+func (m *Manager) scoreSourcingBatchMember(
+	ctx context.Context,
+	batchID, prompt string,
+	run store.SourcingCandidateRun,
+	provider, model string,
+) error {
+	scoringInput, inputErr := m5ai.RenderScoringInputV1(run.ResumeJSON)
+	content := ""
+	renderErr := inputErr
+	if renderErr == nil {
+		content, renderErr = m5ai.RenderScoringPrompt(prompt, scoringInput)
+	}
+	inputHash := sha256Hex(prompt + "\x00scoring-input-v1\x00" + run.ContentHash)
+	if renderErr == nil {
+		inputHash = sha256Hex(content)
+	}
+
 	invocationID := stableM5ID("score-invocation", run.RunID, run.ContextRevisionHash, run.ContentHash)
-	reserved, err := a.manager.store.ReserveSourcingScore(store.ReserveSourcingScoreRequest{
-		InvocationID: invocationID, RunID: run.RunID,
+	reserved, err := m.store.ReserveSourcingScore(store.ReserveSourcingScoreRequest{
+		InvocationID: invocationID, BatchID: batchID, RunID: run.RunID,
 		ContextRevisionHash: run.ContextRevisionHash, RunContentHash: run.ContentHash,
-		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
-		InputHash: inputHash, StartedAt: a.manager.now(),
+		Provider: provider, Model: model, InputHash: inputHash, StartedAt: m.now(),
 	})
 	if err != nil {
-		return true, nil, err
+		return err
 	}
 	if !reserved.Created {
-		return true, nil, nil
+		return nil
 	}
 	if renderErr != nil {
-		_, err = a.manager.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
+		errorClass := "scoringInputBudgetBlocked"
+		if inputErr != nil {
+			errorClass = "scoringInputInvalid"
+		}
+		_, err = m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 			Completion: store.AIInvocationCompletion{
 				InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
-				ErrorClass: "scoringInputBudgetBlocked", FinishedAt: a.manager.now(),
+				ErrorClass: errorClass, FinishedAt: m.now(),
 			},
 		})
-		if err != nil {
-			return true, nil, err
-		}
-		return true, run, nil
+		return err
 	}
 
 	started := time.Now()
-	var response m5ai.CompletionResponse
-	var callErr error
-	func() {
-		a.manager.mu.Unlock()
-		defer a.manager.mu.Lock()
-		response, callErr = a.manager.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-			Purpose: m5ai.PurposeScoring, UserContent: content,
-			MaxOutputTokens: m5ai.ScoringOutputTokenLimit,
-		})
-	}()
+	response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+		Purpose: m5ai.PurposeScoring, UserContent: content,
+		MaxOutputTokens: m5ai.ScoringOutputTokenLimit,
+	})
 	completion := m5CompletionFromProvider(
-		invocationID, response, callErr, time.Since(started), a.manager.now(),
+		invocationID, response, callErr, time.Since(started), m.now(),
 	)
 	var score *int
 	if callErr == nil {
@@ -103,11 +154,8 @@ func (a *roundActor) scorePendingSourcingRun(ctx context.Context) (bool, *store.
 			score = &value
 		}
 	}
-	_, err = a.manager.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
+	_, err = m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 		Completion: completion, Score: score,
 	})
-	if err != nil {
-		return true, nil, err
-	}
-	return true, run, nil
+	return err
 }
