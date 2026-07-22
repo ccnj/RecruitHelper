@@ -169,6 +169,17 @@ func (m *Manager) StopSourcing(key store.AccountKey) error {
 	return m.pauseAccount(key, PauseUserStopped, now)
 }
 
+// InvalidateSourcingFeedsForHand 与账号 actor 的命令启动共用 Manager.mu。
+// 管理端重载因此不会在 actor 已拿到旧推荐流授权、尚未开始命令的缝隙中生效。
+func (m *Manager) InvalidateSourcingFeedsForHand(handID, trigger string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at.IsZero() {
+		at = m.now()
+	}
+	return m.store.InvalidateSourcingFeedsForHand(handID, trigger, at)
+}
+
 func (m *Manager) enableAccountToday(account *store.Account, now time.Time) error {
 	if account.BoundHandID == "" || account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
 		return ErrAccountNotBound
@@ -265,6 +276,14 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 		var data protocol.ManualInteractionEventData
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err
+		}
+		if data.Kind == protocol.ManualInteractionKindNavigation && data.PageKind == protocol.PageKindRecommend {
+			if _, err := m.store.InvalidateSourcingFeed(store.InvalidateSourcingFeedRequest{
+				Platform: key.Platform, AccountRef: key.AccountRef,
+				Trigger: "recommendPageNavigation", At: now,
+			}); err != nil {
+				return err
+			}
 		}
 		return m.store.MutateAccount(key, func(account *store.Account) error {
 			account.DirtyHint = true

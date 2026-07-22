@@ -402,6 +402,11 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 		releaseDispatchGate = c.hub.dispatcher.BeginHandTakeover(c.handID)
 	}
 	defer releaseDispatchGate()
+	if err := c.invalidateSourcingFeedsForBootChange(time.Now()); err != nil {
+		slog.Error("手换代前终止旧推荐流失败", "handId", c.handID, "err", err)
+		c.closeWithStatus(websocket.StatusInternalError, "sourcing feed invalidation failed")
+		return false
+	}
 
 	c.session = ids.NewSessionID()
 	welcome := protocol.WelcomeBody{
@@ -436,6 +441,26 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 		c.hub.dispatcher.OnReconnectWitnessUnderGate(c.handID, c.bootID, c.witnessStoreID, c.outboxPending, c.journalOpen)
 	}
 	return true
+}
+
+func (c *Conn) invalidateSourcingFeedsForBootChange(at time.Time) error {
+	accounts, err := c.hub.st.AccountsBoundToHand(c.handID)
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		account := accounts[i]
+		if account.IdentityBootID == "" || account.IdentityBootID == c.bootID {
+			continue
+		}
+		if _, err := c.hub.st.InvalidateSourcingFeed(store.InvalidateSourcingFeedRequest{
+			Platform: account.Platform, AccountRef: account.AccountRef,
+			Trigger: "handBootChanged", At: at,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // serve:正常会话循环。2.2 只处理 ping;cmd/result 在 2.4 接入。

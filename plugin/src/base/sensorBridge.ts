@@ -106,6 +106,9 @@ export class SensorBridge {
       }
       this.platformTabs.add(tabId)
       if (changeInfo.status === 'loading') {
+        if (url && pageKindFromURL(url) === PageKind.Recommend) {
+          this.emitRecommendationFeedLoading(this.now())
+        }
         this.tabStates.delete(tabId)
         this.refreshCachedState()
       }
@@ -290,6 +293,18 @@ export class SensorBridge {
     if (at - this.lastManualEmitAt < MANUAL_EMIT_MIN_MS) return
     this.lastManualEmitAt = at
     this.emitIfContext(EventName.ManualInteraction, { at, kind, pageKind }, at)
+  }
+
+  private emitRecommendationFeedLoading(at: number): void {
+    if (!this.connection.currentCommandContext(PLATFORM)) return
+    // 整页 loading 是推荐流换代边界，不是可被普通 5s manual 节流吞掉的噪声；
+    // 同时更新节流时刻，避免新 content 紧随其后的 navigation 再上报一次。
+    this.lastManualEmitAt = at
+    this.emitIfContext(EventName.ManualInteraction, {
+      at,
+      kind: ManualInteractionKind.Navigation,
+      pageKind: PageKind.Recommend,
+    }, at)
   }
 
   private emitIfContext<N extends keyof EventDataByName>(

@@ -329,6 +329,42 @@ func eventBody(t *testing.T, h *harness, name protocol.EventName, data any) prot
 	}
 }
 
+func seedActiveSourcingBatchForFeedInvalidation(
+	t *testing.T,
+	h *harness,
+	batchID string,
+) *store.SourcingBatch {
+	t.Helper()
+	documents := []m5ai.JobConfigDocument{
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "意向判断", Content: "intent"},
+	}
+	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
+	revision := m5ai.ContextRevision{
+		ContextID: "context-" + batchID, RevisionHash: "revision-" + batchID,
+		SourceKind: "localImport", DisplayName: "synthetic-position",
+		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+		Communication: m5ai.CommunicationView{
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
+			MappingVersion: m5ai.MappingVersion,
+		},
+		CreatedAt: h.clock.Now().Add(-time.Hour),
+	}
+	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		BatchID: batchID, Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revision.RevisionHash, TargetCount: 30,
+		StartedAt: h.clock.Now().Add(-time.Minute),
+	})
+	if err != nil || started == nil || !started.Created {
+		t.Fatalf("建立 active 采集批次失败: result=%+v err=%v", started, err)
+	}
+	return &started.Batch
+}
+
 func countAudit(entries []store.AuditEntry, category string) int {
 	count := 0
 	for _, entry := range entries {
@@ -737,6 +773,32 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	wantPulled := h.clock.Now().Add(h.config.CoalesceWindow)
 	if account.NextPatrolAt == nil || !account.NextPatrolAt.Equal(wantPulled) {
 		t.Fatalf("事件拉前时刻被 finish 覆盖: got=%v want=%v", account.NextPatrolAt, wantPulled)
+	}
+}
+
+func TestRecommendNavigationEventInvalidatesActiveSourcingFeed(t *testing.T) {
+	h := newHarness(t)
+	started := seedActiveSourcingBatchForFeedInvalidation(t, h, "batch-feed-navigation")
+	now := h.clock.Now()
+
+	err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction,
+		protocol.ManualInteractionEventData{
+			At: now.UnixMilli(), Kind: protocol.ManualInteractionKindNavigation,
+			PageKind: protocol.PageKindRecommend,
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := h.db.SourcingBatchByID(started.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchStopped ||
+		batch.Reason != store.SourcingFeedChangedReason || batch.EndedAt == nil || !batch.EndedAt.Equal(now) {
+		t.Fatalf("推荐页 navigation 未终止旧 active 批次: batch=%+v err=%v", batch, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.SourcingFeedInvalidatedAt == nil ||
+		!account.SourcingFeedInvalidatedAt.Equal(now) || account.StoppedAt == nil ||
+		account.PausedReason != store.SourcingFeedChangedReason || account.ManualQuietUntil == nil {
+		t.Fatalf("推荐页 navigation 未写 marker、暂停账号或保留手动静默: account=%+v err=%v", account, err)
 	}
 }
 

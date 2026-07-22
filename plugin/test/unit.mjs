@@ -6682,6 +6682,86 @@ test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome se
     'welcome 更新后未动态推送 content')
 })
 
+test('SensorBridge 推荐页整页 loading 立即上报换代并压住随后重复 manual', async () => {
+  const originalChrome = globalThis.chrome
+  const runtimeMessage = chromeEvent()
+  const tabActivated = chromeEvent()
+  const tabUpdated = chromeEvent()
+  const tabRemoved = chromeEvent()
+  const windowFocused = chromeEvent()
+  const committed = chromeEvent()
+  const historyUpdated = chromeEvent()
+  const fragmentUpdated = chromeEvent()
+  let now = 10_000
+  try {
+    globalThis.chrome = {
+      runtime: { onMessage: runtimeMessage },
+      tabs: {
+        onActivated: tabActivated,
+        onUpdated: tabUpdated,
+        onRemoved: tabRemoved,
+        async query() { return [] },
+        async sendMessage() { return { ok: true } },
+      },
+      windows: { WINDOW_ID_NONE: -1, onFocusChanged: windowFocused },
+      webNavigation: {
+        onCommitted: committed,
+        onHistoryStateUpdated: historyUpdated,
+        onReferenceFragmentUpdated: fragmentUpdated,
+      },
+    }
+    const connection = new FakeSensorConnection()
+    const bridge = new SensorBridge(connection, new NavigationTracker(() => now), () => now)
+    bridge.start()
+    const listener = tabUpdated.listeners[0]
+    const recommendURL = 'https://rd6.zhaopin.com/app/recommend'
+
+    listener(7, { status: 'loading' }, { url: recommendURL })
+    assert.equal(connection.events.length, 0, '无 CmdContext 时推荐页 loading 不得上报')
+
+    connection.setContext({ platform: 'zhilian', accountRef: 'account-1', expectedPrincipalFingerprint: 'fp' })
+    bridge.acceptContentMessage({
+      type: CONTENT_MESSAGE.ManualInteraction,
+      at: now,
+      kind: ManualInteractionKind.Pointer,
+      pageKind: PageKind.Recommend,
+    }, { tabId: 7, active: true, url: recommendURL, windowId: 1 })
+    assert.equal(connection.events.length, 1)
+
+    now += 1_000
+    listener(7, { status: 'loading' }, { url: recommendURL })
+    assert.equal(connection.events.length, 2, '整页 loading 不得被普通 5s manual 节流吞掉')
+    assert.deepEqual(connection.events.at(-1), {
+      name: EventName.ManualInteraction,
+      platform: 'zhilian',
+      accountRef: 'account-1',
+      observedAt: now,
+      data: {
+        at: now,
+        kind: ManualInteractionKind.Navigation,
+        pageKind: PageKind.Recommend,
+      },
+    })
+
+    now += 1
+    bridge.acceptContentMessage({
+      type: CONTENT_MESSAGE.ManualInteraction,
+      at: now,
+      kind: ManualInteractionKind.Pointer,
+      pageKind: PageKind.Recommend,
+    }, { tabId: 7, active: true, url: recommendURL, windowId: 1 })
+    assert.equal(connection.events.length, 2, 'loading 必须更新 manual 节流时刻，压住紧随其后的重复上报')
+
+    now += MANUAL_EMIT_MIN_MS
+    listener(7, { status: 'complete' }, { url: recommendURL })
+    listener(7, { status: 'loading' }, { url: 'https://rd6.zhaopin.com/app/im' })
+    listener(7, { status: 'loading' }, { url: 'https://example.com/app/recommend' })
+    assert.equal(connection.events.length, 2, '非 loading、非推荐页或非智联页面均不得上报换代')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('连接退避只在同一 session 稳定 60s 后归零，陈旧 timer 不能污染新连接', async () => {
   const originalSetTimeout = globalThis.setTimeout
   const originalClearTimeout = globalThis.clearTimeout

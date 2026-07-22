@@ -61,6 +61,16 @@ func (a *API) reloadHand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "该手仍有未收束命令，请先暂停派发并等待命令完成"})
 		return
 	}
+	now := time.Now()
+	if a.actor != nil {
+		err = a.actor.InvalidateSourcingFeedsForHand(req.HandID, "adminPluginReload", now)
+	} else {
+		err = a.st.InvalidateSourcingFeedsForHand(req.HandID, "adminPluginReload", now)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "重载前终止旧推荐流失败"})
+		return
+	}
 
 	msgID, err := a.disp.Dispatch(req.HandID, protocol.PrimDebugReload, []byte(`{}`))
 	if err != nil {

@@ -167,6 +167,44 @@ func (s *Store) InvalidateSourcingFeed(
 	return &result, nil
 }
 
+// AccountsBoundToHand 返回当前由同一手服务的账号根，供插件换代时逐账号
+// 失效推荐流。返回完整 Account 只在脑内使用，不进入管理投影或日志。
+func (s *Store) AccountsBoundToHand(handID string) ([]Account, error) {
+	handID = strings.TrimSpace(handID)
+	if handID == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	var accounts []Account
+	err := s.db.Where("bound_hand_id = ?", handID).
+		Order("platform, account_ref").Find(&accounts).Error
+	return accounts, err
+}
+
+// InvalidateSourcingFeedsForHand 用同一脑时刻失效该手当前绑定账号的推荐流。
+// 单账号事务已经完整闭合；多账号中途失败时调用方停止重载，重试会幂等补齐。
+func (s *Store) InvalidateSourcingFeedsForHand(handID, trigger string, at time.Time) error {
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" || len(trigger) > 64 {
+		return ErrSourcingBatchInvalid
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	accounts, err := s.AccountsBoundToHand(handID)
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		if _, err := s.InvalidateSourcingFeed(InvalidateSourcingFeedRequest{
+			Platform: accounts[i].Platform, AccountRef: accounts[i].AccountRef,
+			Trigger: trigger, At: at,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // StartSourcingBatch 创建一次显式目标数的正式采集批次。同一账号已经存在
 // 材料完全相同的非终态批次时复用它；材料不同则拒绝覆盖。BatchID 为空时
 // 由脑生成随机引用，调用方无需从平台身份派生它。
