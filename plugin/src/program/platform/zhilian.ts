@@ -262,6 +262,24 @@ type MainGreetingActionResult =
   | { status: 'clicked' }
   | { status: 'failed'; reason: MainGreetingFailureReason }
 
+const MAIN_GREETING_LIST_TARGET_FAILURE_REASONS = [
+  'route_mismatch',
+  'detail_present',
+  'list_source_unavailable',
+  'candidate_identity_unavailable',
+  'candidate_identity_duplicated',
+  'target_absent',
+  'unexpected',
+] as const
+
+type MainGreetingListTargetFailureReason = typeof MAIN_GREETING_LIST_TARGET_FAILURE_REASONS[number]
+type MainGreetingListTargetResult =
+  | {
+    status: 'ready'
+    data: { contactState: ZhilianCurrentCandidate['contactState'] }
+  }
+  | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
+
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
   atBottom: boolean
@@ -1686,6 +1704,145 @@ export async function readZhilianCurrentCandidate(
   return latest.result.data
 }
 
+// M6 列表招呼的只读目标投影。职位只认公开 URL，候选人只认当前可见卡片的
+// 稳定 userMasterId；详情、resumeNumber、姓名和列表位置都不参与匹配。
+function mainReadGreetingListTarget(
+  platformUserRef: string,
+  positionRef: string,
+): MainGreetingListTargetResult {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const failed = (reason: MainGreetingListTargetFailureReason): MainGreetingListTargetResult => ({
+    status: 'failed',
+    reason,
+  })
+
+  try {
+    const route = new URL(location.href)
+    if (!route.pathname.startsWith('/app/recommend') ||
+        opaque(route.searchParams.get('jobNumber')) !== positionRef) {
+      return failed('route_mismatch')
+    }
+    if (Array.from(document.querySelectorAll<HTMLElement>('.new-shortcut-resume__modal'))
+      .filter(visible).length !== 0) {
+      return failed('detail_present')
+    }
+    const items = Array.from(document.querySelectorAll<HTMLElement>(
+      '.recommend-list__left div[role="listitem"]',
+    )).filter(visible)
+    if (items.length === 0) return failed('list_source_unavailable')
+    const sources: Array<{ item: HTMLElement; platformUserRef: string }> = []
+    for (const item of items) {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const source = asRecord(asRecord(owner?._props)?.source)
+      if (!owner || !source) return failed('list_source_unavailable')
+      const observedRef = opaque(source.userMasterId)
+      if (!observedRef) return failed('candidate_identity_unavailable')
+      sources.push({ item, platformUserRef: observedRef })
+    }
+    const matches = sources.filter((source) => source.platformUserRef === platformUserRef)
+    if (matches.length === 0) return failed('target_absent')
+    if (matches.length !== 1) return failed('candidate_identity_duplicated')
+
+    const buttons = Array.from(matches[0].item.querySelectorAll<HTMLButtonElement>(
+      'button[type="button"]',
+    )).filter(visible)
+    const greetingButtons = buttons.filter((button) => clean(button.textContent) === '打招呼')
+    const continueButtons = buttons.filter((button) => clean(button.textContent) === '继续沟通')
+    const contactState: ZhilianCurrentCandidate['contactState'] =
+      greetingButtons.length === 1 && continueButtons.length === 0
+        ? 'unestablished'
+        : greetingButtons.length === 0 && continueButtons.length === 1
+          ? 'established'
+          : 'unknown'
+    return { status: 'ready', data: { contactState } }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
+function validGreetingListTargetResult(value: unknown): value is MainGreetingListTargetResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_GREETING_LIST_TARGET_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  if (record.status !== 'ready' || !record.data ||
+      typeof record.data !== 'object' || Array.isArray(record.data)) return false
+  const contactState = (record.data as Record<string, unknown>).contactState
+  return contactState === 'unestablished' || contactState === 'established' || contactState === 'unknown'
+}
+
+interface GreetingListTargetSnapshot {
+  tab: chrome.tabs.Tab
+  result: Extract<MainGreetingListTargetResult, { status: 'ready' }>
+}
+
+async function uniqueGreetingListTarget(
+  platformUserRef: string,
+  positionRef: string,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<GreetingListTargetSnapshot> {
+  const tabs = await recommendTabs()
+  if (tabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请在 Chrome 中打开智联推荐列表',
+      'manualOnly',
+      'pageAbsent',
+    )
+  }
+  const matchingTabs = tabs.filter((tab) => {
+    try {
+      const route = new URL(tab.url ?? '')
+      return route.searchParams.get('jobNumber') === positionRef
+    } catch {
+      return false
+    }
+  })
+  const ready: GreetingListTargetSnapshot[] = []
+  for (const tab of matchingTabs) {
+    if (tab.id === undefined || tab.status !== 'complete') {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY',
+        '当前智联推荐列表尚未就绪',
+        'afterRecovery',
+        'pageBroken',
+      )
+    }
+    assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+    const result = await runMain(tab.id, mainReadGreetingListTarget, [platformUserRef, positionRef])
+    if (!validGreetingListTargetResult(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐列表目标读取结果无效', 'manualOnly')
+    }
+    if (result.status === 'ready') ready.push({ tab, result })
+    else if (result.reason !== 'target_absent') {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐列表目标无法唯一确证', 'manualOnly')
+    }
+  }
+  if (ready.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐列表目标无法唯一确证', 'manualOnly')
+  }
+  return ready[0]
+}
+
 // 三个 phase 由同一份 MAIN-world evaluator 承担。prepare 只执行批次 0 已证明
 // 可逆的“打开弹层→选择统一招呼→展开编辑区”；preflight 与 commit 字面复用
 // evaluateFinal。commit 的最后一份绿色结果之后立即调用一次标准 click，不再读页面。
@@ -1841,42 +1998,39 @@ async function mainSendGreetingOnce(
     return digest(canonical) === expectedPrincipalFingerprint
   }
   interface TargetSurface {
-    detail: HTMLElement
+    card: HTMLElement
     openButton: HTMLButtonElement
   }
   const targetSurface = (): TargetSurface | null => {
     let route: URL
     try { route = new URL(location.href) } catch { return null }
     if (!route.pathname.startsWith('/app/recommend')) return null
-    const routeResumeNumber = opaque(route.searchParams.get('resumeNumber'))
     const routeJobNumber = opaque(route.searchParams.get('jobNumber'))
-    if (!routeResumeNumber || routeJobNumber !== positionRef) return null
+    if (routeJobNumber !== positionRef) return null
     const details = Array.from(document.querySelectorAll<HTMLElement>('.new-shortcut-resume__modal')).filter(visible)
-    if (details.length !== 1) return null
-    const detail = details[0]
-    const listItems = Array.from(document.querySelectorAll<HTMLElement>('[role="listitem"]'))
+    if (details.length !== 0) return null
+    const listItems = Array.from(document.querySelectorAll<HTMLElement>(
+      '.recommend-list__left div[role="listitem"]',
+    )).filter(visible)
     if (listItems.length === 0) return null
-    const sources: Array<{ owner: AnyRecord; source: AnyRecord }> = []
+    const sources: Array<{ item: HTMLElement; source: AnyRecord }> = []
     for (const item of listItems) {
       const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
       const source = asRecord(asRecord(owner?._props)?.source)
       if (!owner || !source) return null
-      sources.push({ owner, source })
+      if (!opaque(source.userMasterId)) return null
+      sources.push({ item, source })
     }
-    const matches = sources.filter(({ source }) => opaque(source.resumeNumber) === routeResumeNumber)
-    if (matches.length !== 1 || opaque(matches[0].source.userMasterId) !== platformUserRef) return null
-    if (sources.filter(({ source }) => opaque(source.userMasterId) === platformUserRef).length !== 1) return null
-    const root = asRecord(matches[0].owner.$root)
-    const routedJobNumber = opaque(asRecord(asRecord(root?._route)?.query)?.jobNumber)
-    const activeJob = asRecord(asRecord(asRecord(matches[0].owner.$store)?.state)?.talent)
-    const activeJobNumber = opaque(asRecord(activeJob?.activeJob)?.jobNumber)
-    if (routedJobNumber !== positionRef || activeJobNumber !== positionRef) return null
-    const buttons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
-      .filter((button) => visible(button) && clean(button.textContent) === '打招呼')
-    if (buttons.length !== 1) return null
-    const openButton = buttons[0]
+    const matches = sources.filter(({ source }) => opaque(source.userMasterId) === platformUserRef)
+    if (matches.length !== 1) return null
+    const buttons = Array.from(matches[0].item.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter(visible)
+    const greetingButtons = buttons.filter((button) => clean(button.textContent) === '打招呼')
+    const continueButtons = buttons.filter((button) => clean(button.textContent) === '继续沟通')
+    if (greetingButtons.length !== 1 || continueButtons.length !== 0) return null
+    const openButton = greetingButtons[0]
     if (openButton.form !== null && openButton.type !== 'button') return null
-    return { detail, openButton }
+    return { card: matches[0].item, openButton }
   }
   const greetingModals = (): HTMLElement[] =>
     Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
@@ -2136,14 +2290,16 @@ export async function sendZhilianGreeting(
   const normalizedText = normalizeZhilianMessageText(args.text)
   if (!normalizedText) throw new ZhilianPlatformError('GUARD_FAILED', '规范化后的招呼为空', 'manualOnly')
   const contentHash = await sha256Hex(normalizedText)
-  const current = await uniqueCurrentCandidate(expectedPrincipalFingerprint)
+  const current = await uniqueGreetingListTarget(
+    args.platformUserRef,
+    args.positionRef,
+    expectedPrincipalFingerprint,
+  )
   const tabId = current.tab.id
   if (tabId === undefined) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页缺少 id', 'afterRecovery', 'pageBroken')
   }
-  if (current.result.data.platformUserRef !== args.platformUserRef ||
-      current.result.data.positionRef !== args.positionRef ||
-      current.result.data.contactState !== 'unestablished') {
+  if (current.result.data.contactState !== 'unestablished') {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前候选人、职位或关系状态与招呼意图不一致', 'manualOnly')
   }
   const evaluatorBase = [
@@ -2192,10 +2348,11 @@ export async function sendZhilianGreeting(
       const latestTab = await chrome.tabs.get(tabId)
       if (pageKindFromURL(latestTab.url) === 'recommend') {
         assertExpectedPrincipal(await probeTab(latestTab), expectedPrincipalFingerprint)
-        const observed = await runMain(tabId, mainReadCurrentCandidate, [])
-        if (validCurrentCandidateResult(observed) && observed.status === 'ready' &&
-            observed.data.platformUserRef === args.platformUserRef &&
-            observed.data.positionRef === args.positionRef &&
+        const observed = await runMain(tabId, mainReadGreetingListTarget, [
+          args.platformUserRef,
+          args.positionRef,
+        ])
+        if (validGreetingListTargetResult(observed) && observed.status === 'ready' &&
             observed.data.contactState === 'established') {
           await ctx.progress('已确认同一候选人关系状态变为已建立', 100)
           return {
@@ -2232,11 +2389,13 @@ export async function readZhilianGreetingOutcome(
   // intrusive/idempotentReadReceipt 紧贴第一次平台读取设置取消安全点；不写 witness。
   await ctx.beforeSideEffect()
   try {
-    const current = await uniqueCurrentCandidate(expectedPrincipalFingerprint)
+    const current = await uniqueGreetingListTarget(
+      args.platformUserRef,
+      args.positionRef,
+      expectedPrincipalFingerprint,
+    )
     const data = current.result.data
-    if (data.platformUserRef === args.platformUserRef &&
-        data.positionRef === args.positionRef &&
-        data.contactState === 'established') {
+    if (data.contactState === 'established') {
       return {
         confirmed: true,
         contentHash: args.contentHash,
@@ -5766,6 +5925,7 @@ export const zhilianTestHooks = Object.freeze({
   encodeCursor,
   mainProbeZhilian,
   mainReadCurrentCandidate,
+  mainReadGreetingListTarget,
   mainReadCurrentResume,
   mainReadSourcingWindow,
   mainReadSourcingResume,

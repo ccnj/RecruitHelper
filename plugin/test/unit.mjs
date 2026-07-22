@@ -2930,7 +2930,6 @@ function installM4GreetingFixture(options = {}) {
     Event: globalThis.Event,
   }
   const refs = {
-    resume: 'fixture-resume-greeting',
     user: 'fixture-user-greeting',
     job: 'fixture-job-greeting',
   }
@@ -2942,9 +2941,10 @@ function installM4GreetingFixture(options = {}) {
     editIconStyleHidden: options.editIconStyleHidden === true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
-    detailCount: options.detailCount ?? 1,
+    detailCount: options.detailCount ?? 0,
     listItemCount: options.listItemCount ?? 1,
     greetingButtonCount: options.greetingButtonCount ?? 1,
+    continueButtonCount: options.continueButtonCount ?? 0,
     openClicks: 0,
     optionClicks: 0,
     editClicks: 0,
@@ -3010,10 +3010,9 @@ function installM4GreetingFixture(options = {}) {
     opener.type = 'submit'
   }
   const secondOpener = new FixtureHTMLElement('打招呼')
+  const continueButton = new FixtureHTMLElement('继续沟通')
+  const secondContinueButton = new FixtureHTMLElement('继续沟通')
   const detail = new FixtureHTMLElement()
-  detail.querySelectorAll = (selector) => selector === 'button[type="button"]'
-    ? [opener, secondOpener].slice(0, state.greetingButtonCount)
-    : []
   const secondDetail = new FixtureHTMLElement()
 
   const aiOption = new FixtureHTMLElement('AI 招呼')
@@ -3060,12 +3059,20 @@ function installM4GreetingFixture(options = {}) {
   }
 
   const owner = {
-    _props: { source: { resumeNumber: refs.resume, userMasterId: refs.user } },
-    $root: { _route: { query: { jobNumber: refs.job } } },
-    $store: { state: { talent: { activeJob: { jobNumber: refs.job } } } },
+    _props: { source: { userMasterId: refs.user } },
   }
   const listItem = new FixtureHTMLElement()
   listItem.__vue__ = owner
+  listItem.querySelectorAll = (selector) => selector === 'button[type="button"]'
+    ? [
+      ...[opener, secondOpener].slice(0, state.greetingButtonCount),
+      ...[continueButton, secondContinueButton].slice(0, state.continueButtonCount),
+    ]
+    : []
+  const secondOwner = { _props: { source: { userMasterId: refs.user } } }
+  const secondListItem = new FixtureHTMLElement()
+  secondListItem.__vue__ = secondOwner
+  secondListItem.querySelectorAll = (selector) => selector === 'button[type="button"]' ? [secondOpener] : []
   const staffId = 'staff-m4-greeting'
   const orgId = 'org-m4-greeting'
   const loginPoint = 'login-m4-greeting'
@@ -3079,7 +3086,7 @@ function installM4GreetingFixture(options = {}) {
     },
   }
   globalThis.location = {
-    href: `https://rd6.zhaopin.com/app/recommend?resumeNumber=${refs.resume}&jobNumber=${refs.job}`,
+    href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
   }
   globalThis.getComputedStyle = (element) => ({
     display: 'block',
@@ -3094,7 +3101,9 @@ function installM4GreetingFixture(options = {}) {
       if (selector === '.new-shortcut-resume__modal') {
         return [detail, secondDetail].slice(0, state.detailCount)
       }
-      if (selector === '[role="listitem"]') return state.listItemCount === 0 ? [] : [listItem]
+      if (selector === '.recommend-list__left div[role="listitem"]') {
+        return [listItem, secondListItem].slice(0, state.listItemCount)
+      }
       if (selector === '.ai-greeting-modal') return state.modalVisible ? [modal] : []
       return []
     },
@@ -3114,6 +3123,9 @@ function installM4GreetingFixture(options = {}) {
     detail,
     invoke,
     listItem,
+    invokeRead() {
+      return zhilianTestHooks.mainReadGreetingListTarget(refs.user, refs.job)
+    },
     owner,
     refs,
     restore() { Object.assign(globalThis, original) },
@@ -3145,26 +3157,20 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     barriers: 0,
     createdIMTabs: 0,
     removedIMTabs: 0,
-    currentCandidateReads: 0,
+    listTargetReads: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
     id: 701 + index,
     active: index === 0,
     status: 'complete',
-    url: `https://rd6.zhaopin.com/app/recommend?resumeNumber=private-${index}&jobNumber=private`,
+    url: `https://rd6.zhaopin.com/app/recommend?jobNumber=${options.currentJob ?? refs.job}`,
   }))
   if (options.existingIM) tabs.push({
     id: 780, active: false, status: 'complete', url: 'https://rd6.zhaopin.com/app/im',
   })
-  const currentData = (tabId) => ({
-    platformUserRef: options.currentUser ?? refs.user,
-    displayName: '合成候选人',
-    positionRef: options.currentJob ?? refs.job,
-    positionTitle: '合成职位',
-    contactState: options.contactState ?? 'unestablished',
-    ...(options.currentDataByTab?.(tabId) ?? {}),
-  })
+  const currentContactState = (tabId) =>
+    options.currentDataByTab?.(tabId)?.contactState ?? options.contactState ?? 'unestablished'
   const phaseResult = (phase) => {
     const configured = options[`${phase}Result`]
     if (configured === 'throw') throw new Error(`fixture-${phase}-death`)
@@ -3212,21 +3218,23 @@ function installM4GreetingOrchestrationFixture(options = {}) {
             imListVisible: im,
           } }]
         }
-        if (func.name === 'mainReadCurrentCandidate') {
-          state.currentCandidateReads += 1
+        if (func.name === 'mainReadGreetingListTarget') {
+          assert.deepEqual(args, [refs.user, refs.job])
+          state.listTargetReads += 1
           const tab = tabs.find((candidate) => candidate.id === target.tabId)
           if (options.currentReadThrows) throw new Error('fixture-current-read-death')
+          if ((options.currentUser ?? refs.user) !== refs.user) {
+            return [{ result: { status: 'failed', reason: 'target_absent' } }]
+          }
           if (state.finalClicks > 0) {
             state.proofCalls += 1
             state.proofTabKinds.push(tab?.url.includes('/app/recommend') ? 'recommend' : 'other')
             if (options.proofMode === 'throw') throw new Error('fixture-observer-death')
             const contactState = options.proofMode === 'negative' ? 'unestablished' : 'established'
-            return [{ result: {
-              status: 'ready', data: { ...currentData(target.tabId), contactState },
-            } }]
+            return [{ result: { status: 'ready', data: { contactState } } }]
           }
           return [{ result: {
-            status: 'ready', data: currentData(target.tabId),
+            status: 'ready', data: { contactState: currentContactState(target.tabId) },
           } }]
         }
         if (func.name === 'mainSendGreetingOnce') {
@@ -3267,7 +3275,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
   }
 }
 
-test('M4 招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只做最终 intrinsic click', async () => {
+test('M6 列表招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只做最终 intrinsic click', async () => {
   const fixture = installM4GreetingFixture()
   try {
     assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
@@ -3289,7 +3297,7 @@ test('M4 招呼 prepare 完成全部编辑，attempting 后同一 evaluator 只�
   }
 })
 
-test('M4 招呼 prepare 可点击 DOM 内样式隐藏的唯一编辑图标', async () => {
+test('M6 列表招呼 prepare 可点击 DOM 内样式隐藏的唯一编辑图标', async () => {
   const fixture = installM4GreetingFixture({
     customInitiallySelected: true,
     editIconStyleHidden: true,
@@ -3306,7 +3314,7 @@ test('M4 招呼 prepare 可点击 DOM 内样式隐藏的唯一编辑图标', asy
   }
 })
 
-test('M4 招呼不接管既有编辑器，不改默认项，公开两步拓扑不成立时零动作', async () => {
+test('M6 列表招呼不接管既有编辑器，不改默认项，公开两步拓扑不成立时零动作', async () => {
   const existing = installM4GreetingFixture({ existingModal: true, existingDraft: '人工草稿' })
   try {
     assert.deepEqual(await existing.invoke('prepare'), { status: 'failed', reason: 'existing_editor' })
@@ -3342,7 +3350,7 @@ test('M4 招呼不接管既有编辑器，不改默认项，公开两步拓扑�
   }
 })
 
-test('M4 招呼 preflight 后世界变化时 commit 零最终动作', async () => {
+test('M6 列表招呼 preflight 后世界变化时 commit 零最终动作', async () => {
   const fixture = installM4GreetingFixture()
   try {
     assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
@@ -3356,16 +3364,21 @@ test('M4 招呼 preflight 后世界变化时 commit 零最终动作', async () =
   }
 })
 
-test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部失败关闭', async () => {
+test('M6 列表招呼动作前对目标、职位、关系和零/多表面变化全部失败关闭', async () => {
   const beforePrepare = [
     {
-      label: '零详情目标',
-      options: { detailCount: 0 },
+      label: '目标卡缺失',
+      options: { listItemCount: 0 },
       expectedReason: 'two_step_surface_unavailable',
     },
     {
-      label: '多个详情目标',
-      options: { detailCount: 2 },
+      label: '目标卡重复',
+      options: { listItemCount: 2 },
+      expectedReason: 'two_step_surface_unavailable',
+    },
+    {
+      label: '详情仍打开',
+      options: { detailCount: 1 },
       expectedReason: 'two_step_surface_unavailable',
     },
     {
@@ -3385,7 +3398,9 @@ test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部�
     },
     {
       label: '职位绑定变化',
-      mutate(fixture) { fixture.owner.$store.state.talent.activeJob.jobNumber = 'fixture-other-job' },
+      mutate() {
+        globalThis.location.href = 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-other-job'
+      },
       expectedReason: 'two_step_surface_unavailable',
     },
   ]
@@ -3412,7 +3427,9 @@ test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部�
     },
     {
       label: 'prepare 后职位变化',
-      mutate(fixture) { fixture.owner.$root._route.query.jobNumber = 'fixture-other-job' },
+      mutate() {
+        globalThis.location.href = 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-other-job'
+      },
     },
     {
       label: 'prepare 后关系入口消失',
@@ -3435,6 +3452,59 @@ test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部�
   }
 })
 
+test('M6 列表关系投影只按公开职位和稳定身份读取同一卡片', () => {
+  const unestablished = installM4GreetingFixture()
+  try {
+    assert.deepEqual(unestablished.invokeRead(), {
+      status: 'ready', data: { contactState: 'unestablished' },
+    })
+  } finally {
+    unestablished.restore()
+  }
+
+  const established = installM4GreetingFixture({ greetingButtonCount: 0, continueButtonCount: 1 })
+  try {
+    assert.deepEqual(established.invokeRead(), {
+      status: 'ready', data: { contactState: 'established' },
+    })
+  } finally {
+    established.restore()
+  }
+
+  for (const scenario of [
+    {
+      label: '错职位',
+      mutate() {
+        globalThis.location.href = 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-other-job'
+      },
+      reason: 'route_mismatch',
+    },
+    {
+      label: '目标缺失',
+      mutate(fixture) { fixture.owner._props.source.userMasterId = 'fixture-other-user' },
+      reason: 'target_absent',
+    },
+    {
+      label: '目标重复',
+      options: { listItemCount: 2 },
+      reason: 'candidate_identity_duplicated',
+    },
+    {
+      label: '详情打开',
+      options: { detailCount: 1 },
+      reason: 'detail_present',
+    },
+  ]) {
+    const fixture = installM4GreetingFixture(scenario.options)
+    try {
+      scenario.mutate?.(fixture)
+      assert.deepEqual(fixture.invokeRead(), { status: 'failed', reason: scenario.reason }, scenario.label)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
 test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系时停在 attempting 前', async () => {
   const scenarios = [
     { label: '零目标', options: { tabCount: 0 }, code: ErrorCode.CtxNotReady },
@@ -3442,12 +3512,12 @@ test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系�
     {
       label: '候选人变化',
       options: { currentUser: 'fixture-other-user' },
-      code: ErrorCode.GuardFailed,
+      code: ErrorCode.ElementUnresolved,
     },
     {
       label: '职位变化',
       options: { currentJob: 'fixture-other-job' },
-      code: ErrorCode.GuardFailed,
+      code: ErrorCode.ElementUnresolved,
     },
     {
       label: '已有关系',
@@ -3484,15 +3554,36 @@ test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系�
 
 test('chat.readGreetingOutcome 只读同一推荐页目标的可见关系状态', async () => {
   for (const scenario of [
-    { label: '关系仍未建立', contactState: 'unestablished', confirmed: false },
-    { label: '关系已建立', contactState: 'established', confirmed: true, existingIM: true },
-    { label: '关系无法确证', contactState: 'unknown', confirmed: false },
-    { label: '读取异常', contactState: 'established', currentReadThrows: true, confirmed: false },
+    { label: '关系仍未建立', contactState: 'unestablished', confirmed: false, expectedReads: 1 },
+    {
+      label: '关系已建立', contactState: 'established', confirmed: true,
+      existingIM: true, expectedReads: 1,
+    },
+    { label: '关系无法确证', contactState: 'unknown', confirmed: false, expectedReads: 1 },
+    {
+      label: '候选人不匹配', contactState: 'established', currentUser: 'fixture-other-user',
+      confirmed: false, expectedReads: 1,
+    },
+    {
+      label: '职位不匹配', contactState: 'established', currentJob: 'fixture-other-job',
+      confirmed: false, expectedReads: 0,
+    },
+    {
+      label: '跨页目标重复', contactState: 'established', tabCount: 2,
+      confirmed: false, expectedReads: 2,
+    },
+    {
+      label: '读取异常', contactState: 'established', currentReadThrows: true,
+      confirmed: false, expectedReads: 1,
+    },
   ]) {
     const fixture = installM4GreetingOrchestrationFixture({
       contactState: scenario.contactState,
       existingIM: scenario.existingIM,
       currentReadThrows: scenario.currentReadThrows,
+      currentUser: scenario.currentUser,
+      currentJob: scenario.currentJob,
+      tabCount: scenario.tabCount,
     })
     try {
       const result = await readZhilianGreetingOutcome(
@@ -3509,7 +3600,8 @@ test('chat.readGreetingOutcome 只读同一推荐页目标的可见关系状态'
         `${scenario.label}: 只有正证回显原命令正文 hash`)
       assert.equal(result.conversationRef, undefined,
         `${scenario.label}: 推荐页正证不猜会话引用`)
-      assert.equal(fixture.state.currentCandidateReads, 1, `${scenario.label}: 同一目标只读一次`)
+      assert.equal(fixture.state.listTargetReads, scenario.expectedReads,
+        `${scenario.label}: 只能读取与精确目标有关的推荐页`)
       assert.equal(fixture.state.createdIMTabs, 0, `${scenario.label}: 不得新建 IM 页`)
       assert.equal(fixture.state.removedIMTabs, 0, `${scenario.label}: 不得关闭任何 IM 页`)
       assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 验证读不得触发招呼动作`)
@@ -3662,7 +3754,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   const contentHash = createHash('sha256').update(text).digest('hex')
   const targetTab = {
     id: 601, active: true, status: 'complete',
-    url: 'https://rd6.zhaopin.com/app/recommend?resumeNumber=private&jobNumber=private',
+    url: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
   }
   const phases = []
   const functions = []
@@ -3683,15 +3775,12 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
           pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
           imListVisible: false,
         } }]
-        if (func.name === 'mainReadCurrentCandidate') {
+        if (func.name === 'mainReadGreetingListTarget') {
+          assert.deepEqual(args, [refs.user, refs.job])
           if (finalClicked) proofCalls += 1
           return [{ result: {
             status: 'ready',
-            data: {
-              platformUserRef: refs.user, displayName: '合成候选人',
-              positionRef: refs.job, positionTitle: '合成职位',
-              contactState: finalClicked ? 'established' : 'unestablished',
-            },
+            data: { contactState: finalClicked ? 'established' : 'unestablished' },
           } }]
         }
         if (func.name === 'mainSendGreetingOnce') {

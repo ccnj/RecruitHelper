@@ -383,7 +383,6 @@ try {
           } }]
         }
         if (name === 'mainReadCurrentCandidate') {
-          if (platform.greetingServerMessageCreated) platform.greetingRelationshipReads += 1
           return [{ result: {
             status: 'ready',
             data: {
@@ -391,6 +390,16 @@ try {
               displayName: '合成建联候选人',
               positionRef: fixturePositionRef,
               positionTitle: '合成建联职位',
+              contactState: platform.greetingServerMessageCreated ? 'established' : 'unestablished',
+            },
+          } }]
+        }
+        if (name === 'mainReadGreetingListTarget') {
+          assert.deepEqual(args, [fixtureCandidateRef, fixturePositionRef])
+          if (platform.greetingServerMessageCreated) platform.greetingRelationshipReads += 1
+          return [{ result: {
+            status: 'ready',
+            data: {
               contactState: platform.greetingServerMessageCreated ? 'established' : 'unestablished',
             },
           } }]
