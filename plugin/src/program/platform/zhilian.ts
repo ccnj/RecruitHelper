@@ -229,13 +229,6 @@ type MainGreetingActionResult =
   | { status: 'clicked' }
   | { status: 'failed'; reason: MainGreetingFailureReason }
 
-interface MainGreetingProof {
-  confirmed: boolean
-  conversationRef?: string
-  contentHash?: string
-  proofToken?: string
-}
-
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
   atBottom: boolean
@@ -739,8 +732,18 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
     const title = visibleJobTitle || activeJobTitle
     const positionTitle = title && title.length <= 256 ? title : null
 
-    const greetingButtons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
-      .filter((button) => visible(button) && !button.disabled && text(button.textContent) === '打招呼')
+    const actionButtons = Array.from(detail.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter(visible)
+    const greetingButtons = actionButtons
+      .filter((button) => !button.disabled && text(button.textContent) === '打招呼')
+    const continueButtons = actionButtons
+      .filter((button) => text(button.textContent) === '继续沟通')
+    const contactState: ZhilianCurrentCandidate['contactState'] =
+      greetingButtons.length === 1 && continueButtons.length === 0
+        ? 'unestablished'
+        : greetingButtons.length === 0 && continueButtons.length === 1
+          ? 'established'
+          : 'unknown'
 
     return {
       status: 'ready',
@@ -749,7 +752,7 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
         displayName,
         positionRef: routeJobNumber,
         positionTitle,
-        contactState: greetingButtons.length === 1 ? 'unestablished' : 'unknown',
+        contactState,
       },
     }
   } catch {
@@ -1803,189 +1806,6 @@ async function mainSendGreetingOnce(
   return { status: 'clicked' }
 }
 
-// 配套验证读只接受候选人、职位、唯一 session 和唯一服务端招呼四项同时成立。
-// 原始 user/job/session/message id 只在 MAIN world 内参与比较；proofToken 是稳定
-// idServer 的脱敏摘要，仅供同一命令内两次正采样比较，不进入协议或持久证词。
-async function mainReadGreetingProof(
-  platformUserRef: string,
-  positionRef: string,
-  contentHash: string,
-): Promise<MainGreetingProof> {
-  type AnyRecord = Record<string, unknown>
-  const w = window as unknown as AnyRecord
-  const asRecord = (value: unknown): AnyRecord | null =>
-    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
-  const clean = (value: unknown): string => String(value ?? '')
-    .normalize('NFC')
-    .replace(/\u00a0/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim()
-  const negative = (): MainGreetingProof => ({ confirmed: false })
-  const digest = async (value: string): Promise<string> => {
-    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
-    return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
-  }
-  const parseObject = (value: unknown): AnyRecord => {
-    if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
-    if (typeof value !== 'string' || value.length === 0) return {}
-    try { return asRecord(JSON.parse(value)) ?? {} } catch { return {} }
-  }
-  const initialState = (): AnyRecord => {
-    const source = Array.from(document.scripts ?? [])
-      .map((script) => script.textContent ?? '')
-      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
-    if (!source) return {}
-    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
-    const start = candidate.indexOf('{')
-    let depth = 0
-    let quoted = false
-    let escaped = false
-    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
-      const char = candidate[index]
-      if (quoted) {
-        if (escaped) escaped = false
-        else if (char === '\\') escaped = true
-        else if (char === '"') quoted = false
-        continue
-      }
-      if (char === '"') quoted = true
-      else if (char === '{') depth += 1
-      else if (char === '}' && --depth === 0) {
-        try { return asRecord(JSON.parse(candidate.slice(start, index + 1))) ?? {} } catch { return {} }
-      }
-    }
-    return {}
-  }
-  try {
-    if (!/^[0-9a-f]{64}$/u.test(contentHash)) return negative()
-    const initial = initialState()
-    const engine = asRecord(w.imEngine)
-    const getSessions = engine?.getSessions
-    const sessions: AnyRecord[] = []
-    if (engine && typeof getSessions === 'function') {
-      const seenPages = new Set<string>()
-      let completed = false
-      for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
-        const response = await (getSessions as (arg: AnyRecord) => Promise<unknown>).call(engine, {
-          pageNo,
-          // 正证扫描只在 MAIN world 内比较身份，不把整页返回协议层；32 条页避免
-          // 数百会话账号因 8 条分页超过 30s lease。注入函数必须保留字面常量。
-          pageSize: 32,
-          includeResume: true,
-        })
-        const body = asRecord(response)
-        if (!body || !Array.isArray(body.curSessions)) return negative()
-        const hasMore = typeof body.hasMoreSession === 'boolean'
-          ? body.hasMoreSession
-          : typeof body.hasMore === 'boolean'
-            ? body.hasMore
-            : null
-        if (hasMore === null) return negative()
-        const rows = body.curSessions as unknown[]
-        if (rows.some((row) => asRecord(row) === null)) return negative()
-        const records = rows as AnyRecord[]
-        const pageKey = JSON.stringify([
-          clean(records[0]?.sessionId),
-          clean(records[records.length - 1]?.sessionId),
-          records.length,
-        ])
-        if (seenPages.has(pageKey)) return negative()
-        seenPages.add(pageKey)
-        sessions.push(...records)
-        if (!hasMore) {
-          completed = true
-          break
-        }
-      }
-      if (!completed) return negative()
-    } else {
-      const initialIM = asRecord(initial.im)
-      if (!Array.isArray(initialIM?.sessions) ||
-          initialIM.sessions.some((row) => asRecord(row) === null)) return negative()
-      sessions.push(...initialIM.sessions as AnyRecord[])
-    }
-    const matches = sessions.filter((session) => {
-      if (clean(session.jobNumber) !== positionRef) return false
-      const identities = [session.userId, session.typeUserId, session.peerPartnerId]
-        .map(clean)
-        .filter(Boolean)
-      return identities.length > 0 && identities.every((identity) => identity === platformUserRef)
-    })
-    const byConversation = new Map<string, AnyRecord>()
-    for (const session of matches) {
-      const conversationRef = clean(session.sessionId)
-      if (!conversationRef) return negative()
-      if (!byConversation.has(conversationRef)) byConversation.set(conversationRef, session)
-    }
-    if (byConversation.size !== 1) return negative()
-    const [conversationRef, session] = [...byConversation.entries()][0]
-    const peer = clean(session.peerPartnerId)
-    if (!peer) return negative()
-
-    const proofSources: unknown[][] = []
-    const getHistoryMsgs = engine?.getHistoryMsgs
-    if (engine && typeof getHistoryMsgs === 'function') {
-      const request: AnyRecord = { to: peer, limit: 64, asc: true }
-      const scene = session.scene ?? session.sessionType
-      if (scene !== null && scene !== undefined && clean(scene)) request.scene = scene
-      try {
-        const rows = await (getHistoryMsgs as (arg: AnyRecord) => Promise<unknown>).call(engine, request)
-        if (Array.isArray(rows)) proofSources.push(rows)
-      } catch {
-        // 新建会话的 history API 可短暂落后；阴性/异常不证明未发送。
-      }
-    }
-    const nuxt = asRecord(w.$nuxt)
-    const root = asRecord(nuxt?.$root) ?? nuxt
-    const store = asRecord(root?.$store)
-    const state = asRecord(store?.state)
-    const liveIM = asRecord(state?.im)
-    const liveTimelineMap = asRecord(liveIM?.timelineMap)
-    const liveEntry = asRecord(liveTimelineMap?.[conversationRef])
-    if (Array.isArray(liveEntry?.timeline)) proofSources.push(liveEntry.timeline)
-    const initialIM = asRecord(initial.im)
-    const initialTimelineMap = asRecord(initialIM?.timelineMap)
-    const initialEntry = asRecord(initialTimelineMap?.[conversationRef])
-    if (Array.isArray(initialEntry?.timeline)) proofSources.push(initialEntry.timeline)
-    if (proofSources.length === 0) return negative()
-
-    const runtimeSession = asRecord(w.$session)
-    const runtimeStaff = asRecord(runtimeSession?.staff)
-    const initialSession = asRecord(asRecord(initial.session)?.session)
-    const staffID = clean(runtimeStaff?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
-    if (!staffID) return negative()
-    const matchedMessages = new Map<string, string>()
-    for (const rows of proofSources) {
-      if (rows.length > 4096) return negative()
-      for (const raw of rows) {
-        const row = asRecord(raw)
-        if (!row) return negative()
-        if (clean(row.status).toLowerCase() !== 'success' || clean(row.from) !== staffID || row.type !== 'custom') {
-          continue
-        }
-        const envelope = parseObject(row.content)
-        if (Number(envelope.type) !== 131) continue
-        const inner = parseObject(envelope.content)
-        const details = Object.keys(inner).length > 0 ? inner : envelope
-        const greetingText = clean(details.greetingText ?? envelope.greetingText)
-        const idServer = clean(row.idServer)
-        if (!greetingText || !idServer || await digest(greetingText) !== contentHash) continue
-        matchedMessages.set(idServer, idServer)
-      }
-    }
-    if (matchedMessages.size !== 1) return negative()
-    const idServer = [...matchedMessages.keys()][0]
-    return {
-      confirmed: true,
-      conversationRef,
-      contentHash,
-      proofToken: await digest(`greeting-proof-v1|${conversationRef}|${idServer}`),
-    }
-  } catch {
-    return negative()
-  }
-}
-
 function validMainGreetingActionResult(value: unknown): value is MainGreetingActionResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
@@ -1993,17 +1813,6 @@ function validMainGreetingActionResult(value: unknown): value is MainGreetingAct
   if (record.status === 'ready' || record.status === 'clicked') return true
   return record.status === 'failed' && typeof record.reason === 'string' &&
     (MAIN_GREETING_FAILURE_REASONS as readonly string[]).includes(record.reason)
-}
-
-function validMainGreetingProof(value: unknown): value is MainGreetingProof {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const record = value as Record<string, unknown>
-  if (record.confirmed === false) return record.conversationRef === undefined &&
-    record.contentHash === undefined && record.proofToken === undefined
-  return record.confirmed === true && typeof record.conversationRef === 'string' &&
-    record.conversationRef.length > 0 && record.conversationRef.length <= 512 &&
-    typeof record.contentHash === 'string' && /^[0-9a-f]{64}$/u.test(record.contentHash) &&
-    typeof record.proofToken === 'string' && /^[0-9a-f]{64}$/u.test(record.proofToken)
 }
 
 function throwGreetingActionFailure(result: MainGreetingActionResult): never {
@@ -2036,12 +1845,6 @@ function throwGreetingActionFailure(result: MainGreetingActionResult): never {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前页面不满足已验证的两步招呼动作表面', 'manualOnly')
   }
   throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼编辑器或发送表面无法唯一确认', 'manualOnly')
-}
-
-function sameGreetingProof(left: MainGreetingProof, right: MainGreetingProof): boolean {
-  return left.confirmed && right.confirmed &&
-    left.conversationRef === right.conversationRef &&
-    left.contentHash === right.contentHash && left.proofToken === right.proofToken
 }
 
 export async function sendZhilianGreeting(
@@ -2109,39 +1912,34 @@ export async function sendZhilianGreeting(
   }
   if (action.status !== 'clicked') throwGreetingActionFailure(action)
 
-  let lastPositive: MainGreetingProof | null = null
   for (let round = 0; round < 20; round += 1) {
     ctx.checkpoint()
     try {
-      const proof = await runMain(tabId, mainReadGreetingProof, [
-        args.platformUserRef,
-        args.positionRef,
-        contentHash,
-      ])
-      if (validMainGreetingProof(proof) && proof.confirmed) {
-        if (lastPositive && sameGreetingProof(lastPositive, proof)) {
-          assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
-          await ctx.progress('已确认唯一新会话和唯一服务端招呼', 100)
+      const latestTab = await chrome.tabs.get(tabId)
+      if (pageKindFromURL(latestTab.url) === 'recommend') {
+        assertExpectedPrincipal(await probeTab(latestTab), expectedPrincipalFingerprint)
+        const observed = await runMain(tabId, mainReadCurrentCandidate, [])
+        if (validCurrentCandidateResult(observed) && observed.status === 'ready' &&
+            observed.data.platformUserRef === args.platformUserRef &&
+            observed.data.positionRef === args.positionRef &&
+            observed.data.contactState === 'established') {
+          await ctx.progress('已确认同一候选人关系状态变为已建立', 100)
           return {
             platformUserRef: args.platformUserRef,
             positionRef: args.positionRef,
-            conversationRef: proof.conversationRef as string,
             contentHash,
             observedAt: Date.now(),
           }
         }
-        lastPositive = proof
-      } else {
-        lastPositive = null
       }
     } catch {
-      lastPositive = null
+      // 目标消失、读取异常或身份无法复核都只是未确认，不证明未发送。
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   throw new ZhilianPlatformError(
     'POSTCONDITION_UNCONFIRMED',
-    '最终发送只调用一次，但未确认唯一新会话和唯一服务端招呼',
+    '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立',
     'manualOnly',
     undefined,
     'possible',
@@ -2153,81 +1951,28 @@ export async function readZhilianGreetingOutcome(
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
 ): Promise<ZhilianGreetingOutcomeData> {
-  const initialTab = await canonicalZhilianTab()
-  if (!initialTab || initialTab.id === undefined) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '没有可读取招呼结果的智联页面', 'afterRecovery', 'pageAbsent')
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
-  assertExpectedPrincipal(await probeTab(initialTab), expectedPrincipalFingerprint)
   ctx.checkpoint()
   // intrusive/idempotentReadReceipt 紧贴第一次平台读取设置取消安全点；不写 witness。
   await ctx.beforeSideEffect()
-  const tab = await createGreetingProofIMTab(ctx, expectedPrincipalFingerprint)
   try {
-    const first = await runMain(tab.id, mainReadGreetingProof, [
-      args.platformUserRef,
-      args.positionRef,
-      args.contentHash,
-    ])
-    if (!validMainGreetingProof(first)) {
-      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼结果读取返回结构无效', 'manualOnly')
+    const current = await uniqueCurrentCandidate(expectedPrincipalFingerprint)
+    const data = current.result.data
+    if (data.platformUserRef === args.platformUserRef &&
+        data.positionRef === args.positionRef &&
+        data.contactState === 'established') {
+      return {
+        confirmed: true,
+        contentHash: args.contentHash,
+        observedAt: Date.now(),
+      }
     }
-    if (!first.confirmed) {
-      assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
-      return { confirmed: false, observedAt: Date.now() }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 120))
-    ctx.checkpoint()
-    const second = await runMain(tab.id, mainReadGreetingProof, [
-      args.platformUserRef,
-      args.positionRef,
-      args.contentHash,
-    ])
-    assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
-    if (!validMainGreetingProof(second) || !sameGreetingProof(first, second)) {
-      return { confirmed: false, observedAt: Date.now() }
-    }
-    return {
-      confirmed: true,
-      conversationRef: second.conversationRef,
-      contentHash: second.contentHash,
-      observedAt: Date.now(),
-    }
-  } finally {
-    try { await chrome.tabs.remove(tab.id) } catch {
-      // 新建后台感知页清理失败只留下可见标签，不改变已经取得的正证。
-    }
+  } catch {
+    // 页面不在、目标消失、账号无法复核或读取异常都不证明招呼失败。
   }
-}
-
-async function createGreetingProofIMTab(
-  ctx: PrimitiveContext,
-  expectedPrincipalFingerprint: string | undefined,
-): Promise<chrome.tabs.Tab & { id: number }> {
-  const tab = await chrome.tabs.create({
-    url: ZHILIAN_IM_URL,
-    active: false,
-  })
-  if (tab.id === undefined) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 标签页缺少 id', 'afterRecovery', 'pageBroken')
-  }
-  const tabID = tab.id
-  try {
-    const probe = await waitForIMReady(tab, ctx)
-    if (probe.loginState === 'out') {
-      throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面需要重新登录', 'afterRecovery', 'loginRequired')
-    }
-    assertExpectedPrincipal(probe, expectedPrincipalFingerprint)
-    const latest = await chrome.tabs.get(tabID)
-    if (latest.id === undefined) {
-      throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 标签页换代后缺少 id', 'afterRecovery', 'pageBroken')
-    }
-    return latest as chrome.tabs.Tab & { id: number }
-  } catch (error) {
-    try { await chrome.tabs.remove(tabID) } catch {
-      // 保留原始准备失败；临时标签清理失败不覆盖根因。
-    }
-    throw error
-  }
+  return { confirmed: false, observedAt: Date.now() }
 }
 
 async function waitForIMReady(tab: chrome.tabs.Tab, ctx: PrimitiveContext): Promise<ZhilianProbe> {
@@ -5602,7 +5347,6 @@ export const zhilianTestHooks = Object.freeze({
   mainReadCurrentCandidate,
   mainReadCurrentResume,
   mainReadSourcingResume,
-  mainReadGreetingProof,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,
   mainInspectSendSurface,

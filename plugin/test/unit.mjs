@@ -1868,6 +1868,17 @@ test('candidate.readCurrent MAIN 只读唯一详情并以瞬时 resume join 返�
     const unknown = zhilianTestHooks.mainReadCurrentCandidate()
     assert.equal(unknown.status, 'ready')
     assert.equal(unknown.data.contactState, 'unknown', '关系正证不足时不得猜 established')
+
+    fixture.state.buttons = [{
+      textContent: '继续沟通',
+      disabled: false,
+      getClientRects() { return [{}] },
+    }]
+    const established = zhilianTestHooks.mainReadCurrentCandidate()
+    assert.equal(established.status, 'ready')
+    assert.equal(established.data.contactState, 'established',
+      '同一详情的唯一“继续沟通”是可见关系已建立正证')
+    assert.equal(fixture.state.clicks, 0, '关系正证读取不得调用页面动作')
   } finally {
     fixture.restore()
   }
@@ -2730,6 +2741,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     barriers: 0,
     createdIMTabs: 0,
     removedIMTabs: 0,
+    currentCandidateReads: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -2796,34 +2808,29 @@ function installM4GreetingOrchestrationFixture(options = {}) {
             imListVisible: im,
           } }]
         }
-        if (func.name === 'mainReadCurrentCandidate') return [{ result: {
-          status: 'ready', data: currentData(target.tabId),
-        } }]
+        if (func.name === 'mainReadCurrentCandidate') {
+          state.currentCandidateReads += 1
+          const tab = tabs.find((candidate) => candidate.id === target.tabId)
+          if (options.currentReadThrows) throw new Error('fixture-current-read-death')
+          if (state.finalClicks > 0) {
+            state.proofCalls += 1
+            state.proofTabKinds.push(tab?.url.includes('/app/recommend') ? 'recommend' : 'other')
+            if (options.proofMode === 'throw') throw new Error('fixture-observer-death')
+            const contactState = options.proofMode === 'negative' ? 'unestablished' : 'established'
+            return [{ result: {
+              status: 'ready', data: { ...currentData(target.tabId), contactState },
+            } }]
+          }
+          return [{ result: {
+            status: 'ready', data: currentData(target.tabId),
+          } }]
+        }
         if (func.name === 'mainSendGreetingOnce') {
           const phase = args.at(-1)
           state.phases.push(phase)
           const result = phaseResult(phase)
           if (phase === 'commit' && result.status === 'clicked') state.finalClicks += 1
           return [{ result }]
-        }
-        if (func.name === 'mainReadGreetingProof') {
-          state.proofCalls += 1
-          const tab = tabs.find((candidate) => candidate.id === target.tabId)
-          state.proofTabKinds.push(tab?.url.includes('/app/im') ? 'im' : 'other')
-          if (options.proofMode === 'throw') throw new Error('fixture-observer-death')
-          if (options.proofMode === 'negative') return [{ result: { confirmed: false } }]
-          if (options.proofMode === 'unstable') return [{ result: {
-            confirmed: true,
-            conversationRef: refs.conversation,
-            contentHash,
-            proofToken: (state.proofCalls % 2 === 0 ? 'b' : 'c').repeat(64),
-          } }]
-          return [{ result: {
-            confirmed: true,
-            conversationRef: refs.conversation,
-            contentHash,
-            proofToken: 'b'.repeat(64),
-          } }]
         }
         throw new Error(`unexpected MAIN ${func.name}`)
       },
@@ -3024,142 +3031,6 @@ test('M4 招呼动作前对目标、职位、关系和零/多表面变化全部�
   }
 })
 
-test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务端我方招呼', async () => {
-  const original = { window: globalThis.window, document: globalThis.document }
-  const refs = {
-    user: 'fixture-user-greeting-proof', job: 'fixture-job-greeting-proof',
-    conversation: 'fixture-conversation-greeting-proof', staff: 'fixture-staff-greeting-proof',
-  }
-  const contentHash = createHash('sha256').update('你好').digest('hex')
-  const rows = [{
-    idServer: 'fixture-server-greeting-proof', status: 'success', type: 'custom', from: refs.staff,
-    content: JSON.stringify({ type: 131, content: JSON.stringify({ greetingText: '你好' }) }),
-  }]
-  const sessions = [{
-    sessionId: refs.conversation,
-    jobNumber: refs.job,
-    userId: refs.user,
-    typeUserId: refs.user,
-    peerPartnerId: refs.user,
-  }]
-  let pageCalls = 0
-  globalThis.document = { scripts: [] }
-  globalThis.window = {
-    $session: { staff: { staffId: refs.staff } },
-    imEngine: {
-      async getSessions({ pageNo, pageSize }) {
-        pageCalls += 1
-        assert.equal(pageNo, 1)
-        assert.equal(pageSize, 32)
-        return { curSessions: sessions, hasMoreSession: false }
-      },
-      async getHistoryMsgs({ to }) {
-        assert.equal(to, refs.user)
-        return rows
-      },
-    },
-  }
-  try {
-    const first = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
-    const second = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
-    assert.equal(first.confirmed, true)
-    assert.equal(first.conversationRef, refs.conversation)
-    assert.equal(first.contentHash, contentHash)
-    assert.match(first.proofToken, /^[0-9a-f]{64}$/)
-    assert.deepEqual(second, first, '同一服务端 id 的两次正采样必须稳定')
-    assert.equal(pageCalls, 2)
-
-    const onlySession = structuredClone(sessions[0])
-    sessions.splice(0)
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '零会话不得构成正证',
-    )
-    sessions.push(onlySession, { ...onlySession, sessionId: 'fixture-conversation-greeting-other' })
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '多个候选人职位会话不得任取一个认领',
-    )
-    sessions.splice(1)
-
-    const onlyRow = structuredClone(rows[0])
-    rows.splice(0)
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '唯一会话中零条同 hash 服务端招呼不得构成正证',
-    )
-    rows.push(onlyRow)
-    rows.push({ ...rows[0], idServer: 'fixture-server-greeting-duplicate' })
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '两条同文服务端招呼不得被认作唯一正证',
-    )
-    rows.splice(1)
-    sessions[0].jobNumber = 'fixture-job-other'
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '职位不一致不得认领新会话',
-    )
-
-    sessions[0].jobNumber = refs.job
-    rows.splice(0)
-    globalThis.document.scripts = [{
-      textContent: `__INITIAL_STATE__=${JSON.stringify({
-        session: { session: { staff: { staffId: refs.staff } } },
-        im: {
-          timelineMap: {
-            [refs.conversation]: { timeline: [onlyRow] },
-          },
-        },
-      })}`,
-    }]
-    const initialOnly = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
-    assert.equal(initialOnly.confirmed, true,
-      '新会话 history 尚未收敛时，当前初始化 timeline 的唯一服务端正证仍可确认')
-
-    rows.push(onlyRow)
-    const sameAcrossSources = await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)
-    assert.deepEqual(sameAcrossSources, initialOnly,
-      '同一 idServer 在 history 与 timeline 重复只算一条正证')
-
-    delete globalThis.window.imEngine
-    globalThis.document.scripts = [{
-      textContent: `__INITIAL_STATE__=${JSON.stringify({
-        session: { session: { staff: { staffId: refs.staff } } },
-        im: {
-          sessions,
-          timelineMap: {
-            [refs.conversation]: { timeline: [onlyRow] },
-          },
-        },
-      })}`,
-    }]
-    assert.equal(
-      (await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash)).confirmed,
-      true,
-      '页面不再暴露 imEngine 时，初始化会话与 timeline 仍应构成同一份只读正证',
-    )
-    globalThis.window.imEngine = {
-      async getSessions() { return { curSessions: sessions, hasMoreSession: false } },
-      async getHistoryMsgs() { return rows },
-    }
-
-    rows[0] = { ...onlyRow, idServer: 'fixture-server-greeting-conflict' }
-    assert.deepEqual(
-      await zhilianTestHooks.mainReadGreetingProof(refs.user, refs.job, contentHash),
-      { confirmed: false },
-      '不同只读视图出现两个同文服务端身份时不得任取一个认领',
-    )
-  } finally {
-    Object.assign(globalThis, original)
-  }
-})
-
 test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系时停在 attempting 前', async () => {
   const scenarios = [
     { label: '零目标', options: { tabCount: 0 }, code: ErrorCode.CtxNotReady },
@@ -3207,14 +3078,17 @@ test('sendZhilianGreeting 在零/多目标、意图目标变化和已有关系�
   }
 })
 
-test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招呼动作', async () => {
+test('chat.readGreetingOutcome 只读同一推荐页目标的可见关系状态', async () => {
   for (const scenario of [
-    { label: '正证不足', proofMode: 'negative', confirmed: false, proofCalls: 1 },
-    { label: '稳定正证', proofMode: 'positive', confirmed: true, proofCalls: 2, existingIM: true },
+    { label: '关系仍未建立', contactState: 'unestablished', confirmed: false },
+    { label: '关系已建立', contactState: 'established', confirmed: true, existingIM: true },
+    { label: '关系无法确证', contactState: 'unknown', confirmed: false },
+    { label: '读取异常', contactState: 'established', currentReadThrows: true, confirmed: false },
   ]) {
     const fixture = installM4GreetingOrchestrationFixture({
-      proofMode: scenario.proofMode,
+      contactState: scenario.contactState,
       existingIM: scenario.existingIM,
+      currentReadThrows: scenario.currentReadThrows,
     })
     try {
       const result = await readZhilianGreetingOutcome(
@@ -3227,11 +3101,13 @@ test('chat.readGreetingOutcome 的 false 与稳定正证都只读且绝不补招
         fixture.fingerprint,
       )
       assert.equal(result.confirmed, scenario.confirmed, scenario.label)
-      assert.equal(fixture.state.proofCalls, scenario.proofCalls, scenario.label)
-      assert.equal(fixture.state.createdIMTabs, 1, `${scenario.label}: 每轮只新建一个后台感知页`)
-      assert.equal(fixture.state.removedIMTabs, 1, `${scenario.label}: 验证后关闭自己的后台感知页`)
-      assert.deepEqual(fixture.state.proofTabKinds, Array(scenario.proofCalls).fill('im'),
-        `${scenario.label}: 正证只在 IM 感知面读取`)
+      assert.equal(result.contentHash, scenario.confirmed ? fixture.contentHash : undefined,
+        `${scenario.label}: 只有正证回显原命令正文 hash`)
+      assert.equal(result.conversationRef, undefined,
+        `${scenario.label}: 推荐页正证不猜会话引用`)
+      assert.equal(fixture.state.currentCandidateReads, 1, `${scenario.label}: 同一目标只读一次`)
+      assert.equal(fixture.state.createdIMTabs, 0, `${scenario.label}: 不得新建 IM 页`)
+      assert.equal(fixture.state.removedIMTabs, 0, `${scenario.label}: 不得关闭任何 IM 页`)
       assert.equal(fixture.state.finalClicks, 0, `${scenario.label}: 验证读不得触发招呼动作`)
       assert.deepEqual(fixture.state.phases, [], `${scenario.label}: 验证读不得调用动作 evaluator`)
     } finally {
@@ -3358,6 +3234,10 @@ test('M4 招呼 attempting 前后与动作后故障均由原 witness 内核收�
       }
       if (scenario.options.proofMode) {
         assert.ok(fixture.state.proofCalls > 0, `${scenario.label}: 必须真的进入验证读`)
+        assert.ok(fixture.state.proofTabKinds.every((kind) => kind === 'recommend'),
+          `${scenario.label}: 验证只能读原推荐页`)
+        assert.equal(fixture.state.createdIMTabs, 0, `${scenario.label}: 不得新建 IM 页`)
+        assert.equal(fixture.state.removedIMTabs, 0, `${scenario.label}: 不得关闭 IM 页`)
         assert.equal(fixture.state.finalClicks, 1,
           `${scenario.label}: 阴性验证不得补第二次候选人可见动作`)
       }
@@ -3384,6 +3264,7 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   const functions = []
   let barriers = 0
   let proofCalls = 0
+  let finalClicked = false
   globalThis.setTimeout = (callback) => { queueMicrotask(callback); return 1 }
   globalThis.chrome = {
     tabs: {
@@ -3398,13 +3279,17 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
           pageKind: 'recommend', loginState: 'in', principalFingerprint: fingerprint,
           imListVisible: false,
         } }]
-        if (func.name === 'mainReadCurrentCandidate') return [{ result: {
-          status: 'ready',
-          data: {
-            platformUserRef: refs.user, displayName: '合成候选人',
-            positionRef: refs.job, positionTitle: '合成职位', contactState: 'unestablished',
-          },
-        } }]
+        if (func.name === 'mainReadCurrentCandidate') {
+          if (finalClicked) proofCalls += 1
+          return [{ result: {
+            status: 'ready',
+            data: {
+              platformUserRef: refs.user, displayName: '合成候选人',
+              positionRef: refs.job, positionTitle: '合成职位',
+              contactState: finalClicked ? 'established' : 'unestablished',
+            },
+          } }]
+        }
         if (func.name === 'mainSendGreetingOnce') {
           functions.push(func)
           const phase = args.at(-1)
@@ -3422,17 +3307,8 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
           assert.equal(phase, 'commit')
           assert.equal(barriers, 1)
           assert.equal(args[5], text)
+          finalClicked = true
           return [{ result: { status: 'clicked' } }]
-        }
-        if (func.name === 'mainReadGreetingProof') {
-          proofCalls += 1
-          assert.equal(barriers, 1)
-          return [{ result: {
-            confirmed: true,
-            conversationRef: refs.conversation,
-            contentHash,
-            proofToken: 'b'.repeat(64),
-          } }]
         }
         throw new Error(`unexpected MAIN ${func.name}`)
       },
@@ -3456,13 +3332,13 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
       context,
       fingerprint,
     )
-    assert.equal(result.conversationRef, refs.conversation)
+    assert.equal(result.conversationRef, undefined)
     assert.equal(result.contentHash, contentHash)
     assert.deepEqual(phases, ['prepare', 'preflight', 'commit'])
     assert.equal(new Set(functions).size, 1,
       'prepare/preflight/commit 必须注入字面同一份 evaluator 函数')
     assert.equal(barriers, 1)
-    assert.equal(proofCalls, 2, '成功必须是两次稳定正采样，验证读不得触发第二个动作')
+    assert.equal(proofCalls, 1, '同一目标“继续沟通”一次明确读取即构成正证')
   } finally {
     Object.assign(globalThis, original)
   }

@@ -37,8 +37,7 @@ func (s *greetingVerificationSender) SendEnvelope(handID string, env protocol.En
 	s.reads = append(s.reads, args)
 	s.mu.Unlock()
 	data, err := protocol.Encode(protocol.ChatReadGreetingOutcomeData{
-		Confirmed: true, ConversationRef: "conversation-greeting-verified",
-		ContentHash: args.ContentHash, ObservedAt: time.Now().UnixMilli(),
+		Confirmed: true, ContentHash: args.ContentHash, ObservedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return err
@@ -140,21 +139,14 @@ func TestGreetingVerificationConfirmedUsesSameAtomicSuccessTransaction(t *testin
 	}
 	profile, _ := st.CandidateProfileByID(profileID)
 	if profile == nil || profile.MainStatus != store.CandidateProfileGreeted ||
-		profile.ConversationRef == nil || *profile.ConversationRef != "conversation-greeting-verified" {
+		profile.ConversationRef != nil || profile.SuccessfulGreetingIntentID == nil ||
+		*profile.SuccessfulGreetingIntentID != receipt.IntentID {
 		t.Fatalf("验证正证未推进同一 Profile: %+v", profile)
 	}
-	key := store.ConversationKey{
-		Platform: platform, AccountRef: accountRef, ConversationRef: "conversation-greeting-verified",
-	}
-	conversation, _ := st.ConversationByKey(key)
-	messages, _ := st.MessagesForConversation(key)
-	tracked, _ := st.TrackedIntentByConversation(key)
+	conversations, _ := st.ConversationsForAccount(store.AccountKey{Platform: platform, AccountRef: accountRef})
 	intent, _ := st.EffectIntentByID(receipt.IntentID)
-	if conversation == nil || conversation.TrackingState != store.TrackingAdopted ||
-		tracked == nil || tracked.Status != store.TrackingAdopted || len(messages) != 1 ||
-		messages[0].Origin != "self" || intent == nil || intent.Status != store.EffectIntentOk ||
-		intent.ResultConversationRef == nil || *intent.ResultConversationRef != key.ConversationRef {
-		t.Fatalf("验证成功事务不完整: conversation=%+v tracked=%+v messages=%+v intent=%+v",
-			conversation, tracked, messages, intent)
+	if len(conversations) != 0 || intent == nil || intent.Status != store.EffectIntentOk ||
+		intent.ResultConversationRef != nil || intent.ResultMessageSeq != nil {
+		t.Fatalf("可见关系验证不得伪造会话事实: conversations=%+v intent=%+v", conversations, intent)
 	}
 }

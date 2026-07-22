@@ -312,7 +312,8 @@ const (
 
 // CandidateProfile 是沟通状态主体。人级建档闸的部分唯一索引刻意不含
 // AccountRef，并把 ended 也视为非 eliminated，防止换账号/职位重复追求。
-// ConversationRef 必须为 NULL 而不是空串，否则未建联档案会互相撞唯一键。
+// ConversationRef 必须为 NULL 而不是空串；关系正证已成立但会话尚待巡检
+// 绑定的 greeted 档案同样保持 NULL，禁止伪造平台会话引用。
 type CandidateProfile struct {
 	ProfileID       string `gorm:"primaryKey"`
 	Platform        string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:1;index:ux_candidate_profile_active,unique,where:main_status <> 'eliminated',priority:1;uniqueIndex:ux_candidate_profile_conversation,priority:1"`

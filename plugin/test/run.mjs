@@ -226,7 +226,7 @@ try {
     greetingActionPhases: [],
     greetingClickCount: 0,
     greetingServerMessageCreated: false,
-    greetingProofReads: 0,
+    greetingRelationshipReads: 0,
     resumeReadCount: 0,
   }
 
@@ -383,6 +383,7 @@ try {
           } }]
         }
         if (name === 'mainReadCurrentCandidate') {
+          if (platform.greetingServerMessageCreated) platform.greetingRelationshipReads += 1
           return [{ result: {
             status: 'ready',
             data: {
@@ -390,7 +391,7 @@ try {
               displayName: '合成建联候选人',
               positionRef: fixturePositionRef,
               positionTitle: '合成建联职位',
-              contactState: 'unestablished',
+              contactState: platform.greetingServerMessageCreated ? 'established' : 'unestablished',
             },
           } }]
         }
@@ -438,22 +439,6 @@ try {
           platform.greetingClickCount += 1
           platform.greetingServerMessageCreated = true
           return [{ result: { status: 'clicked' } }]
-        }
-        if (name === 'mainReadGreetingProof') {
-          const [platformUserRef, positionRef, contentHash] = args
-          assert.equal(platformUserRef, fixtureCandidateRef)
-          assert.equal(positionRef, fixturePositionRef)
-          assert.equal(contentHash, hashText(fixtureGreetingText))
-          platform.greetingProofReads += 1
-          if (!platform.greetingServerMessageCreated) {
-            return [{ result: { confirmed: false } }]
-          }
-          return [{ result: {
-            confirmed: true,
-            conversationRef: fixtureGreetingConversationRef,
-            contentHash,
-            proofToken: hashText('fixture-greeting-proof-001'),
-          } }]
         }
         if (name === 'mainReadListPage') {
           const [pageNo] = args
@@ -907,7 +892,8 @@ try {
   assert.equal(completedGreeting.intentId, greetingIntentId)
   assert.equal(platform.greetingClickCount, 1, '主动招呼必须只越过一次候选人可见最终动作')
   assert.deepEqual(platform.greetingActionPhases, ['prepare', 'preflight', 'commit'])
-  assert.ok(platform.greetingProofReads >= 2, '主动招呼必须取得两次稳定服务端正证')
+  assert.ok(platform.greetingRelationshipReads >= 1,
+    '主动招呼必须在原推荐页确认同一目标关系已建立')
 
   const greetingConversations = await admin.get(
     `/admin/conversations?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}`,
@@ -915,20 +901,14 @@ try {
   const greetingConversation = greetingConversations.conversations.find(
     (item) => item.conversationRef === fixtureGreetingConversationRef,
   )
-  assert.ok(greetingConversation, '主动招呼成功事务没有建立会话事实')
-  assert.equal(greetingConversation.trackingState, 'adopted')
-  assert.equal(greetingConversation.adoptedBoundarySeq, 0)
-  assert.equal(greetingConversation.lastMessageSeq, 1)
+  assert.equal(greetingConversation, undefined,
+    '推荐页关系正证不得伪造尚未感知的会话引用')
   const greetingMessages = await admin.get(
     `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
     `&conversationRef=${encodeURIComponent(fixtureGreetingConversationRef)}`,
   )
-  assert.equal(greetingMessages.messages.length, 1)
-  assert.equal(greetingMessages.messages[0].seq, 1)
-  assert.equal(greetingMessages.messages[0].direction, 'out')
-  assert.equal(greetingMessages.messages[0].kind, 'text')
-  assert.equal(greetingMessages.messages[0].origin, 'self')
-  assert.equal(greetingMessages.messages[0].text, fixtureGreetingText)
+  assert.equal(greetingMessages.messages.length, 0,
+    '推荐页关系正证不得伪造首条消息')
   const greetingLedger = await admin.get('/admin/ledger')
   assert.equal(greetingLedger.ledger.filter((record) => record.name === 'candidate.readCurrent').length, 1)
   assert.equal(greetingLedger.ledger.filter((record) => record.name === 'chat.sendGreeting').length, 1)
@@ -961,45 +941,26 @@ try {
   )
   assert.equal(recoveredGreeting.intentId, greetingIntentId)
   assert.equal(recoveredGreeting.status, 'ok')
+  const recoveredGreetingConversations = await admin.get(
+    `/admin/conversations?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}`,
+  )
   const recoveredGreetingMessages = await admin.get(
     `/admin/messages?platform=zhilian&accountRef=${encodeURIComponent(accountRef)}` +
     `&conversationRef=${encodeURIComponent(fixtureGreetingConversationRef)}`,
   )
   const recoveredGreetingLedger = await admin.get('/admin/ledger')
   assert.equal(platform.greetingClickCount, 1, '重复 POST/重连后不得再次执行候选人可见动作')
-  assert.equal(recoveredGreetingMessages.messages.length, 1, '重复 POST/重连后招呼消息事实不得增生')
+  assert.equal(recoveredGreetingConversations.conversations.some(
+    (item) => item.conversationRef === fixtureGreetingConversationRef,
+  ), false, '重复 POST/重连后不得补造会话事实')
+  assert.equal(recoveredGreetingMessages.messages.length, 0,
+    '重复 POST/重连后不得补造招呼消息事实')
   assert.equal(recoveredGreetingLedger.ledger.filter((record) => record.name === 'chat.sendGreeting').length, 1,
     '重复 POST/重连后招呼命令账本不得增生')
-  console.log('  PASS candidate.readCurrent→建档→sendGreeting 经真脑/真 WS 原子收束，重复 POST/重连零增生')
+  console.log('  PASS candidate.readCurrent→建档→sendGreeting 经真脑/真 WS 收束，重复 POST/重连零增生且零伪造会话')
 
-  console.log('M5 显式单档案选择经正式巡检补采一次并落不可变快照')
-  platform.tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${encodeURIComponent(fixtureGreetingConversationRef)}`
-  const trialSelected = await admin.post('/admin/m5/trial/select', {
-    platform: 'zhilian', accountRef, conversationRef: fixtureGreetingConversationRef,
-  })
-  assert.equal(trialSelected.trial.profileId, selected.profileId)
-  assert.ok(['unattempted', 'inFlight', 'captured'].includes(trialSelected.trial.captureState))
-  const capturedTrial = await eventually(
-    () => admin.get('/admin/m5/trial'),
-    (view) => view.trial?.captureState === 'captured' && view.trial?.snapshot?.sectionsComplete === true,
-    '正式 M5 巡检没有完成简历补采快照',
-    75_000,
-    250,
-  )
-  assert.equal(platform.resumeReadCount, 1, '单 profile 补采必须只执行一次 MAIN 读取')
-  assert.equal(capturedTrial.trial.snapshot.basicItems, 1)
-  assert.equal(capturedTrial.trial.snapshot.expectationItems, 1)
-  assert.ok(capturedTrial.trial.snapshot.bytes > 0)
-  const capturedSnapshotId = capturedTrial.trial.snapshot.snapshotId
-  const resumeLedger = await admin.get('/admin/ledger')
-  assert.equal(resumeLedger.ledger.filter((record) => record.name === 'candidate.readResume').length, 1)
-  assert.ok(platform.mainCalls.includes('mainReadCurrentResume'))
-  await admin.post('/admin/accounts/run', { platform: 'zhilian', accountRef })
-  await sleep(500)
-  const repeatedTrial = await admin.get('/admin/m5/trial')
-  assert.equal(repeatedTrial.trial.snapshot.snapshotId, capturedSnapshotId)
-  assert.equal(platform.resumeReadCount, 1, '重复巡检不得增生第二次简历读取')
-  console.log('  PASS 显式选择→patrol→candidate.readResume→单快照，重复巡检零增生')
+  // 新建会话必须等后续真实 IM 巡检按平台身份绑定到该档案；
+  // 绑定能力落地前，不得在 E2E 夹具中伪造 conversationRef 接回 M5。
 
   // 保留原有里程碑 1 debug E2E。只有以下回归使用 /admin/cmd。
   async function dispatchDebugAndWait(name, args) {

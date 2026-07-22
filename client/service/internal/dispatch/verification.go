@@ -197,8 +197,8 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
 		})
 	case protocol.PrimChatSendGreeting:
-		if request.GreetingArgs == nil || observation.ConversationRef == "" {
-			recordMiss("招呼验证正证缺少新会话")
+		if request.GreetingArgs == nil {
+			recordMiss("招呼验证正证缺少原始目标")
 			return
 		}
 		result := protocol.ResultBody{
@@ -223,7 +223,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			ConversationRef: observation.ConversationRef,
 			Text:            request.GreetingArgs.Text, ContentHash: intent.SendFingerprint,
 			ObservedAtMs: observation.ObservedAt, ResultBody: string(resultRaw),
-			ResolutionReason: "verification greeting uniquely matched", At: time.Now(),
+			ResolutionReason: "verification greeting relationship matched", At: time.Now(),
 		})
 	}
 	if commitErr != nil {

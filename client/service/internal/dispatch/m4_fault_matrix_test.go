@@ -97,6 +97,19 @@ func validGreetingResult(ref string, fixture greetingDispatchFixture) protocol.R
 	}
 }
 
+func visibleRelationshipGreetingResult(ref string, fixture greetingDispatchFixture) protocol.ResultBody {
+	data, _ := protocol.Encode(protocol.ChatSendGreetingData{
+		PlatformUserRef: fixture.PlatformUserRef,
+		PositionRef:     fixture.PositionRef,
+		ContentHash:     syncledger.HashText(fixture.GreetingText),
+		ObservedAt:      time.Now().UnixMilli(),
+	})
+	return protocol.ResultBody{
+		Ref: ref, Status: protocol.ResultStatusOk, Data: data,
+		Evidence: []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}},
+	}
+}
+
 func failedGreetingResult(ref string, code protocol.ErrorCode, sideEffect protocol.SideEffect) protocol.ResultBody {
 	return protocol.ResultBody{
 		Ref: ref, Status: protocol.ResultStatusFailed,
@@ -170,6 +183,32 @@ func assertGreetingSuccess(
 	}
 }
 
+func assertGreetingRelationshipSuccess(
+	t *testing.T,
+	st *store.Store,
+	fixture greetingDispatchFixture,
+	intentID string,
+) {
+	t.Helper()
+	profile, err := st.CandidateProfileByID(fixture.ProfileID)
+	if err != nil || profile == nil || profile.MainStatus != store.CandidateProfileGreeted ||
+		profile.SuccessfulGreetingIntentID == nil || *profile.SuccessfulGreetingIntentID != intentID ||
+		profile.ConversationRef != nil || profile.GreetedAt == nil {
+		t.Fatalf("可见关系正证未推进待绑定档案: profile=%+v err=%v", profile, err)
+	}
+	intent, err := st.EffectIntentByID(intentID)
+	if err != nil || intent == nil || intent.Status != store.EffectIntentOk ||
+		intent.ResultConversationRef != nil || intent.ResultMessageSeq != nil {
+		t.Fatalf("可见关系正证未收束 intent 或伪造结果引用: intent=%+v err=%v", intent, err)
+	}
+	conversations, err := st.ConversationsForAccount(store.AccountKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+	})
+	if err != nil || len(conversations) != 0 {
+		t.Fatalf("待巡检绑定前不得伪造会话: conversations=%+v err=%v", conversations, err)
+	}
+}
+
 type fixedGreetingVerifier struct {
 	observation VerificationObservation
 	err         error
@@ -229,6 +268,31 @@ func TestGreetingRejectedIsTheOnlyFailureThatEndsProfile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGreetingVisibleRelationshipResultLeavesConversationForPatrol(t *testing.T) {
+	d, st, m := newDisp(t)
+	fixture := seedGreetingTarget(t, st, m, "visible-relationship")
+	receipt, err := d.SendGreeting(sendGreetingRequest(fixture, "intent-visible-relationship", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.applyResultMessage(fixture.HandID, "result-visible-relationship",
+		visibleRelationshipGreetingResult(receipt.MsgID, fixture)); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := st.CmdByMsgID(receipt.MsgID)
+	if cmd == nil || cmd.Status != store.CmdOk {
+		t.Fatalf("可见关系正证未终结物理命令: %+v", cmd)
+	}
+	assertGreetingRelationshipSuccess(t, st, fixture, receipt.IntentID)
+
+	// 迟到重复 result 不得补造会话或首条消息。
+	if _, _, err := d.applyResultMessage(fixture.HandID, "result-visible-relationship-late",
+		visibleRelationshipGreetingResult(receipt.MsgID, fixture)); err != nil {
+		t.Fatal(err)
+	}
+	assertGreetingRelationshipSuccess(t, st, fixture, receipt.IntentID)
 }
 
 func TestGreetingPossibleAndConfirmedBothEnterVerification(t *testing.T) {
@@ -303,7 +367,7 @@ func TestGreetingVerificationMatrix(t *testing.T) {
 		assertNoGreetingConversation(t, st, fixture)
 	})
 
-	t.Run("confirmed without conversation is still a miss", func(t *testing.T) {
+	t.Run("visible relationship positive can precede conversation binding", func(t *testing.T) {
 		d, st, m := newDisp(t)
 		fixture := seedGreetingTarget(t, st, m, "verify-missing-conversation")
 		receipt, err := d.SendGreeting(sendGreetingRequest(fixture, "intent-verify-missing-conversation", ""))
@@ -318,10 +382,10 @@ func TestGreetingVerificationMatrix(t *testing.T) {
 		}})
 		d.verifyEffect(context.Background(), receipt.MsgID)
 		cmd, _ := st.CmdByMsgID(receipt.MsgID)
-		if cmd == nil || cmd.Status != store.CmdVerifying || cmd.VerificationN != 1 {
-			t.Fatalf("缺新会话的命中不得伪装唯一正证: %+v", cmd)
+		if cmd == nil || cmd.Status != store.CmdOk || cmd.VerificationN != 0 {
+			t.Fatalf("可见关系正证应直接收束且不计 miss: %+v", cmd)
 		}
-		assertNoGreetingConversation(t, st, fixture)
+		assertGreetingRelationshipSuccess(t, st, fixture, receipt.IntentID)
 	})
 
 	t.Run("unique positive evidence commits full business facts", func(t *testing.T) {

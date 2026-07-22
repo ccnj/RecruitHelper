@@ -138,11 +138,11 @@ func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.Verific
 		return dispatch.VerificationObservation{}, fmt.Errorf("解析验证 readGreetingOutcome: %w", err)
 	}
 	if !data.Confirmed {
-		return dispatch.VerificationObservation{Reason: "本轮未取得唯一招呼正证"}, nil
+		return dispatch.VerificationObservation{Reason: "本轮未取得同一目标的关系已建立正证"}, nil
 	}
 	return dispatch.VerificationObservation{
 		Confirmed: true, ContentHash: data.ContentHash, ConversationRef: data.ConversationRef,
-		ObservedAt: data.ObservedAt, Reason: "候选人、职位、新会话与服务端招呼唯一匹配",
+		ObservedAt: data.ObservedAt, Reason: "同一候选人和职位的可见关系状态已建立",
 	}, nil
 }
 

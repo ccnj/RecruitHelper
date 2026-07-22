@@ -294,7 +294,8 @@ func (s *Store) LatestGreetingEffectIntent(profileID string) (*EffectIntent, err
 const greetingTrackedRequestedBy = "system:greeting"
 
 // GreetingResultMutation 是 chat.sendGreeting 的业务结果计划。Rejected
-// 只用于 GREETING_REJECTED/none；其余形态必须携带完整唯一正证。
+// 只用于 GREETING_REJECTED/none；成功允许先由可见关系正证推进 greeted，
+// ConversationRef 仅在同次已取得稳定会话引用时携带。
 type GreetingResultMutation struct {
 	Rejected        bool
 	PlatformUserRef string
@@ -350,14 +351,19 @@ func applyGreetingResultTx(
 		return nil, nil
 	}
 
-	if mutation.PlatformUserRef == "" || mutation.PositionRef == "" || mutation.ConversationRef == "" ||
-		mutation.Text == "" || mutation.ContentHash == "" || intent.SendFingerprint != mutation.ContentHash ||
+	if mutation.PlatformUserRef == "" || mutation.PositionRef == "" || mutation.Text == "" ||
+		mutation.ContentHash == "" || intent.SendFingerprint != mutation.ContentHash ||
 		profile.PlatformUserRef != mutation.PlatformUserRef || profile.PositionRef != mutation.PositionRef {
 		return nil, ErrEffectIntentConflict
 	}
 	if profile.MainStatus == CandidateProfileGreeted && profile.SuccessfulGreetingIntentID != nil &&
-		*profile.SuccessfulGreetingIntentID == intent.IntentID && profile.ConversationRef != nil &&
-		*profile.ConversationRef == mutation.ConversationRef {
+		*profile.SuccessfulGreetingIntentID == intent.IntentID && mutation.ConversationRef == "" &&
+		profile.ConversationRef == nil {
+		return nil, nil
+	}
+	if profile.MainStatus == CandidateProfileGreeted && profile.SuccessfulGreetingIntentID != nil &&
+		*profile.SuccessfulGreetingIntentID == intent.IntentID && mutation.ConversationRef != "" &&
+		profile.ConversationRef != nil && *profile.ConversationRef == mutation.ConversationRef {
 		var existing Message
 		if err := tx.First(&existing, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
 			return nil, err
@@ -367,6 +373,28 @@ func applyGreetingResultTx(
 	if profile.MainStatus != CandidateProfileSelected || profile.EndReason != nil ||
 		profile.SuccessfulGreetingIntentID != nil || profile.ConversationRef != nil || profile.GreetedAt != nil {
 		return nil, ErrCandidateProfileState
+	}
+
+	if mutation.ConversationRef == "" {
+		greetedAt := at
+		profileUpdated := tx.Model(&CandidateProfile{}).
+			Where("profile_id = ? AND main_status = ? AND end_reason IS NULL AND successful_greeting_intent_id IS NULL AND conversation_ref IS NULL AND greeted_at IS NULL",
+				profile.ProfileID, CandidateProfileSelected).
+			Updates(map[string]any{
+				"main_status":                   CandidateProfileGreeted,
+				"successful_greeting_intent_id": intent.IntentID,
+				"greeted_at":                    greetedAt,
+			})
+		if profileUpdated.Error != nil {
+			return nil, profileUpdated.Error
+		}
+		if profileUpdated.RowsAffected != 1 {
+			return nil, ErrCandidateProfileState
+		}
+		intent.ResultConversationRef = nil
+		intent.ResultMessageSeq = nil
+		intent.ResolvedAt = &at
+		return nil, nil
 	}
 
 	var candidate Candidate
@@ -624,7 +652,7 @@ func (s *Store) ResolveGreetingVerified(req VerifiedGreetingSuccess) (*Message, 
 		req.At = time.Now()
 	}
 	if req.Ref == "" || req.ProfileID == "" || req.PlatformUserRef == "" || req.PositionRef == "" ||
-		req.ConversationRef == "" || req.Text == "" || req.ContentHash == "" {
+		req.Text == "" || req.ContentHash == "" {
 		return nil, errors.New("招呼验证成功缺少关联字段")
 	}
 	var message *Message
