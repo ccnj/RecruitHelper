@@ -3043,7 +3043,7 @@ test('M4 招呼验证读只接受候选人职位唯一会话中的唯一服务�
       async getSessions({ pageNo, pageSize }) {
         pageCalls += 1
         assert.equal(pageNo, 1)
-        assert.equal(pageSize, 8)
+        assert.equal(pageSize, 32)
         return { curSessions: sessions, hasMoreSession: false }
       },
       async getHistoryMsgs({ to }) {

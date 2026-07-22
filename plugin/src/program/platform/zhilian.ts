@@ -1868,7 +1868,9 @@ async function mainReadGreetingProof(
       for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
         const response = await (getSessions as (arg: AnyRecord) => Promise<unknown>).call(engine, {
           pageNo,
-          pageSize: 8,
+          // 正证扫描只在 MAIN world 内比较身份，不把整页返回协议层；32 条页避免
+          // 数百会话账号因 8 条分页超过 30s lease。注入函数必须保留字面常量。
+          pageSize: 32,
           includeResume: true,
         })
         const body = asRecord(response)
