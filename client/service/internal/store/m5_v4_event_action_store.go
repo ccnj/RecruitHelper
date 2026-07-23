@@ -527,39 +527,102 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 	switch row.V4Kind {
 	case communication.V4ActionWechatReceipt, communication.V4ActionInterviewAcceptedReceipt:
 		switch row.Status {
-		case CommunicationV4EventActionPlanned,
-			CommunicationV4EventActionEffectPending,
+		case CommunicationV4EventActionPlanned:
+			return row.Text != "" &&
+				row.ContentHash == textcanon.Hash(row.Text) &&
+				row.ContextRevisionHash != "" &&
+				row.FailureReason == "" &&
+				validCommunicationV4EventActionEffectFields(row)
+		case CommunicationV4EventActionEffectPending,
 			CommunicationV4EventActionSent:
 			return row.Text != "" &&
 				row.ContentHash == textcanon.Hash(row.Text) &&
 				row.ContextRevisionHash != "" &&
-				row.FailureReason == ""
+				row.FailureReason == "" &&
+				validCommunicationV4EventActionEffectFields(row)
 		case CommunicationV4EventActionManualRequired:
-			return row.Text == "" &&
-				row.ContentHash == "" &&
-				row.FailureReason == CommunicationV4EventActionFailureFixedPhraseUnavailable
+			if row.FailureReason == CommunicationV4EventActionFailureFixedPhraseUnavailable {
+				return row.Text == "" &&
+					row.ContentHash == "" &&
+					row.EffectIntentID == nil &&
+					row.EffectStartedAt == nil &&
+					row.SentAt == nil
+			}
+			return row.Text != "" &&
+				row.ContentHash == textcanon.Hash(row.Text) &&
+				row.ContextRevisionHash != "" &&
+				validCommunicationV4EventActionFailureReason(row.FailureReason) &&
+				validCommunicationV4EventActionEffectFields(row)
 		case CommunicationV4EventActionDeferred:
 			return row.Text == "" &&
 				row.ContentHash == "" &&
 				row.ContextRevisionHash == "" &&
-				row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned
+				row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned &&
+				validCommunicationV4EventActionEffectFields(row)
 		default:
 			return false
 		}
 	case communication.V4ActionInviteWechat:
-		return (row.Status == CommunicationV4EventActionPlanned ||
-			row.Status == CommunicationV4EventActionEffectPending ||
-			row.Status == CommunicationV4EventActionSent) &&
+		if row.Status != CommunicationV4EventActionPlanned &&
+			row.Status != CommunicationV4EventActionEffectPending &&
+			row.Status != CommunicationV4EventActionSent &&
+			row.Status != CommunicationV4EventActionManualRequired {
+			return false
+		}
+		return (row.Status != CommunicationV4EventActionManualRequired ||
+			validCommunicationV4EventActionFailureReason(row.FailureReason)) &&
 			row.Text == "" &&
 			row.ContentHash == communicationWechatInviteContentHash() &&
 			row.ContextRevisionHash == "" &&
-			row.FailureReason == ""
+			(row.Status == CommunicationV4EventActionManualRequired ||
+				row.FailureReason == "") &&
+			validCommunicationV4EventActionEffectFields(row)
 	case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
 		return row.Status == CommunicationV4EventActionDeferred &&
-			row.FailureReason == CommunicationV4EventActionFailureNotificationChannelDeferred
+			row.FailureReason == CommunicationV4EventActionFailureNotificationChannelDeferred &&
+			validCommunicationV4EventActionEffectFields(row)
 	case communication.V4ActionAcceptWechat:
 		return row.Status == CommunicationV4EventActionDeferred &&
-			row.FailureReason == CommunicationV4EventActionFailurePrimitiveUnavailable
+			row.FailureReason == CommunicationV4EventActionFailurePrimitiveUnavailable &&
+			validCommunicationV4EventActionEffectFields(row)
+	default:
+		return false
+	}
+}
+
+func validCommunicationV4EventActionEffectFields(
+	row CommunicationV4EventAction,
+) bool {
+	switch row.Status {
+	case CommunicationV4EventActionPlanned,
+		CommunicationV4EventActionDeferred:
+		return row.EffectIntentID == nil &&
+			row.EffectStartedAt == nil &&
+			row.SentAt == nil
+	case CommunicationV4EventActionEffectPending:
+		return row.EffectIntentID != nil &&
+			strings.TrimSpace(*row.EffectIntentID) != "" &&
+			row.EffectStartedAt != nil &&
+			row.SentAt == nil
+	case CommunicationV4EventActionSent:
+		return row.EffectIntentID != nil &&
+			strings.TrimSpace(*row.EffectIntentID) != "" &&
+			row.EffectStartedAt != nil &&
+			row.SentAt != nil
+	case CommunicationV4EventActionManualRequired:
+		return row.EffectIntentID != nil &&
+			strings.TrimSpace(*row.EffectIntentID) != "" &&
+			row.EffectStartedAt != nil &&
+			row.SentAt == nil
+	default:
+		return false
+	}
+}
+
+func validCommunicationV4EventActionFailureReason(reason string) bool {
+	switch reason {
+	case "effectFailed", "effectSuspect", "effectResolvedFailed":
+		return true
 	default:
 		return false
 	}

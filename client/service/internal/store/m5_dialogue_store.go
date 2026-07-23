@@ -1882,11 +1882,32 @@ func bindM5AutomaticActionTx(
 		return ErrCommunicationActionInvalid
 	}
 	var action CommunicationAction
-	if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrCommunicationActionInvalid
-		}
-		return err
+	legacyErr := tx.First(&action, "action_id = ?", actionID).Error
+	var eventAction CommunicationV4EventAction
+	eventErr := tx.First(&eventAction, "action_id = ?", actionID).Error
+	if legacyErr != nil && !errors.Is(legacyErr, gorm.ErrRecordNotFound) {
+		return legacyErr
+	}
+	if eventErr != nil && !errors.Is(eventErr, gorm.ErrRecordNotFound) {
+		return eventErr
+	}
+	legacyFound := legacyErr == nil
+	eventFound := eventErr == nil
+	if legacyFound && eventFound {
+		return ErrCommunicationActionConflict
+	}
+	if eventFound {
+		return bindCommunicationV4EventActionTx(
+			tx,
+			eventAction,
+			previousIntentID,
+			intent,
+			command,
+			at,
+		)
+	}
+	if !legacyFound {
+		return ErrCommunicationActionInvalid
 	}
 	if action.Status != CommunicationActionPlanned ||
 		action.EffectIntentID != nil ||
@@ -1960,11 +1981,29 @@ func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent Effect
 		return ErrCommunicationActionInvalid
 	}
 	var action CommunicationAction
-	if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrCommunicationActionInvalid
-		}
-		return err
+	legacyErr := tx.First(&action, "action_id = ?", actionID).Error
+	var eventAction CommunicationV4EventAction
+	eventErr := tx.First(&eventAction, "action_id = ?", actionID).Error
+	if legacyErr != nil && !errors.Is(legacyErr, gorm.ErrRecordNotFound) {
+		return legacyErr
+	}
+	if eventErr != nil && !errors.Is(eventErr, gorm.ErrRecordNotFound) {
+		return eventErr
+	}
+	legacyFound := legacyErr == nil
+	eventFound := eventErr == nil
+	if legacyFound && eventFound {
+		return ErrCommunicationActionConflict
+	}
+	if eventFound {
+		return validateCommunicationV4EventActionIntentLinkTx(
+			tx,
+			eventAction,
+			intent,
+		)
+	}
+	if !legacyFound {
+		return ErrCommunicationActionInvalid
 	}
 	if action.EffectIntentID == nil || *action.EffectIntentID != intent.IntentID ||
 		action.EffectStartedAt == nil ||
@@ -1990,6 +2029,495 @@ func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent Effect
 		return ErrCommunicationActionConflict
 	}
 	return nil
+}
+
+func bindCommunicationV4EventActionTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	previousIntentID string,
+	intent *EffectIntent,
+	command *CmdRecord,
+	at time.Time,
+) error {
+	if action.Status != CommunicationV4EventActionPlanned ||
+		action.EffectIntentID != nil ||
+		action.EffectStartedAt != nil ||
+		action.SentAt != nil ||
+		action.FailureReason != "" ||
+		strings.TrimSpace(action.ContentHash) == "" ||
+		action.ContentHash != intent.SendFingerprint ||
+		communicationV4EventActionPrimitive(action) != intent.Primitive {
+		return ErrCommunicationActionConflict
+	}
+	application, source, err := communicationV4EventActionSourceTx(tx, action)
+	if err != nil {
+		return err
+	}
+	if source.ActionKey != action.SemanticActionKey ||
+		source.Kind != action.V4Kind ||
+		source.CardMessageSeq != action.CardMessageSeq {
+		return ErrCommunicationActionConflict
+	}
+	var confirmed CommunicationV4ProjectionApplication
+	confirmedErr := tx.First(
+		&confirmed,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		action.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		action.SemanticActionKey,
+	).Error
+	if confirmedErr == nil {
+		return ErrCommunicationActionConflict
+	}
+	if !errors.Is(confirmedErr, gorm.ErrRecordNotFound) {
+		return confirmedErr
+	}
+	profile, aggregate, conversation, err :=
+		communicationV4EventActionCurrentProfileTx(tx, action, *intent)
+	if err != nil {
+		return err
+	}
+	if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ProjectedThroughSeq != conversation.LastMessageSeq {
+		return ErrDialogueTurnBinding
+	}
+	if action.DependsOnActionID == nil {
+		if action.EffectKind != CommunicationV4EventEffectReplyText ||
+			aggregate.Revision != application.ToRevision {
+			return ErrCommunicationActionConflict
+		}
+	} else if err := validateCommunicationV4EventActionDependencyTx(
+		tx,
+		action,
+		application,
+		previousIntentID,
+		intent,
+		profile,
+		aggregate,
+		conversation,
+	); err != nil {
+		return err
+	}
+	if err := validateCommunicationV4EventActionCommand(
+		action,
+		conversation.ConversationRef,
+		*command,
+	); err != nil {
+		return err
+	}
+	intentID := intent.IntentID
+	updated := tx.Model(&CommunicationV4EventAction{}).
+		Where(
+			"action_id = ? AND status = ? AND effect_intent_id IS NULL",
+			action.ActionID,
+			CommunicationV4EventActionPlanned,
+		).
+		Updates(map[string]any{
+			"status":            CommunicationV4EventActionEffectPending,
+			"effect_intent_id":  intentID,
+			"effect_started_at": at,
+			"updated_at":        at,
+		})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrCommunicationActionConflict
+	}
+	return nil
+}
+
+func validateCommunicationV4EventActionIntentLinkTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	intent EffectIntent,
+) error {
+	expectedIntentID, err := M5AutomaticIntentID(action.ActionID)
+	if err != nil ||
+		expectedIntentID != intent.IntentID ||
+		action.EffectIntentID == nil ||
+		*action.EffectIntentID != intent.IntentID ||
+		action.EffectStartedAt == nil ||
+		action.ContentHash != intent.SendFingerprint ||
+		communicationV4EventActionPrimitive(action) != intent.Primitive {
+		return ErrCommunicationActionConflict
+	}
+	switch action.Status {
+	case CommunicationV4EventActionEffectPending,
+		CommunicationV4EventActionSent,
+		CommunicationV4EventActionManualRequired:
+	default:
+		return ErrCommunicationActionConflict
+	}
+	if _, _, err := communicationV4EventActionSourceTx(tx, action); err != nil {
+		return err
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", action.ProfileID).Error; err != nil {
+		return err
+	}
+	if profile.Platform != intent.Platform ||
+		profile.AccountRef != intent.AccountRef ||
+		profile.ConversationRef == nil ||
+		*profile.ConversationRef != intent.TargetRef {
+		return ErrCommunicationActionConflict
+	}
+	return nil
+}
+
+func communicationV4EventActionSourceTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+) (
+	CommunicationV4ProjectionApplication,
+	communication.V4EventAction,
+	error,
+) {
+	if tx == nil ||
+		strings.TrimSpace(action.ActionID) == "" ||
+		strings.TrimSpace(action.ProfileID) == "" ||
+		strings.TrimSpace(action.SourceInputKey) == "" ||
+		action.SourceOrdinal < 0 ||
+		!validCommunicationV4EventActionDisposition(action) {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			ErrCommunicationActionConflict
+	}
+	expectedActionID, err := CommunicationV4EventActionID(
+		action.ProfileID,
+		action.SemanticActionKey,
+	)
+	if err != nil || expectedActionID != action.ActionID {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			ErrCommunicationActionConflict
+	}
+	if action.SourceInputKind != CommunicationV4InputBusinessEvent &&
+		action.SourceInputKind != CommunicationV4InputDialogueTurn {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			ErrCommunicationActionConflict
+	}
+	application, found, err := communicationV4ApplicationTx(
+		tx,
+		action.ProfileID,
+		action.SourceInputKind,
+		action.SourceInputKey,
+	)
+	if err != nil {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			err
+	}
+	if !found ||
+		action.SourceOrdinal >= len(application.Outcome.Actions) {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			ErrCommunicationActionConflict
+	}
+	source := application.Outcome.Actions[action.SourceOrdinal]
+	if source.ActionKey != action.SemanticActionKey ||
+		source.Kind != action.V4Kind ||
+		source.CardMessageSeq != action.CardMessageSeq {
+		return CommunicationV4ProjectionApplication{},
+			communication.V4EventAction{},
+			ErrCommunicationActionConflict
+	}
+	return application, source, nil
+}
+
+func communicationV4EventActionPrimitive(
+	action CommunicationV4EventAction,
+) string {
+	switch action.EffectKind {
+	case CommunicationV4EventEffectReplyText:
+		switch action.V4Kind {
+		case communication.V4ActionWechatReceipt,
+			communication.V4ActionInterviewAcceptedReceipt:
+			return primitiveChatSendMessage
+		}
+	case CommunicationV4EventEffectInviteWechat:
+		if action.V4Kind == communication.V4ActionInviteWechat {
+			return primitiveChatSendWechatInvite
+		}
+	}
+	return ""
+}
+
+func communicationV4EventActionCurrentProfileTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	intent EffectIntent,
+) (
+	CandidateProfile,
+	CommunicationV4Aggregate,
+	Conversation,
+	error,
+) {
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", action.ProfileID).Error; err != nil {
+		return CandidateProfile{}, CommunicationV4Aggregate{}, Conversation{}, err
+	}
+	if profile.Platform != intent.Platform ||
+		profile.AccountRef != intent.AccountRef ||
+		profile.ConversationRef == nil ||
+		*profile.ConversationRef != intent.TargetRef {
+		return CandidateProfile{},
+			CommunicationV4Aggregate{},
+			Conversation{},
+			ErrDialogueTurnBinding
+	}
+	aggregate, err := communicationV4AggregateTx(tx, action.ProfileID)
+	if err != nil {
+		return CandidateProfile{}, CommunicationV4Aggregate{}, Conversation{}, err
+	}
+	var conversation Conversation
+	key := ConversationKey{
+		Platform:        profile.Platform,
+		AccountRef:      profile.AccountRef,
+		ConversationRef: *profile.ConversationRef,
+	}
+	if err := tx.Where(
+		conversationWhere(key),
+		conversationArgs(key)...,
+	).First(&conversation).Error; err != nil {
+		return CandidateProfile{}, CommunicationV4Aggregate{}, Conversation{}, err
+	}
+	return profile, aggregate, conversation, nil
+}
+
+func validateCommunicationV4EventActionCommand(
+	action CommunicationV4EventAction,
+	conversationRef string,
+	command CmdRecord,
+) error {
+	switch action.EffectKind {
+	case CommunicationV4EventEffectReplyText:
+		var args protocol.ChatSendMessageArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef ||
+			args.Text != action.Text {
+			return ErrCommunicationActionConflict
+		}
+	case CommunicationV4EventEffectInviteWechat:
+		var args protocol.ChatSendWechatInviteArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef {
+			return ErrCommunicationActionConflict
+		}
+	default:
+		return ErrCommunicationActionInvalid
+	}
+	return nil
+}
+
+type communicationV4PositiveActionParent struct {
+	actionID          string
+	semanticActionKey string
+	profileID         string
+	v4Kind            communication.V4ActionKind
+	cardMessageSeq    int64
+	contentHash       string
+	effectIntentID    string
+	sentAt            time.Time
+}
+
+func validateCommunicationV4EventActionDependencyTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	application CommunicationV4ProjectionApplication,
+	previousIntentID string,
+	childIntent *EffectIntent,
+	profile CandidateProfile,
+	aggregate CommunicationV4Aggregate,
+	conversation Conversation,
+) error {
+	if action.V4Kind != communication.V4ActionInviteWechat ||
+		action.EffectKind != CommunicationV4EventEffectInviteWechat ||
+		action.DependsOnActionID == nil ||
+		strings.TrimSpace(*action.DependsOnActionID) == "" ||
+		childIntent == nil {
+		return ErrCommunicationActionConflict
+	}
+	var expectedParent *communication.V4EventAction
+	for index := range application.Outcome.Actions {
+		candidate := application.Outcome.Actions[index]
+		if candidate.Kind != communication.V4ActionInterviewAcceptedReceipt {
+			continue
+		}
+		if expectedParent != nil {
+			return ErrCommunicationActionConflict
+		}
+		copy := candidate
+		expectedParent = &copy
+	}
+	if expectedParent == nil ||
+		expectedParent.CardMessageSeq != action.CardMessageSeq {
+		return ErrCommunicationActionConflict
+	}
+	parent, err := communicationV4PositiveActionParentTx(
+		tx,
+		*action.DependsOnActionID,
+		action,
+		*expectedParent,
+	)
+	if err != nil {
+		return err
+	}
+	if parent.profileID != action.ProfileID ||
+		parent.semanticActionKey != expectedParent.ActionKey ||
+		parent.v4Kind != expectedParent.Kind ||
+		parent.cardMessageSeq != expectedParent.CardMessageSeq ||
+		previousIntentID != parent.effectIntentID {
+		return ErrCommunicationActionConflict
+	}
+	var parentIntent EffectIntent
+	if err := tx.First(
+		&parentIntent,
+		"intent_id = ?",
+		parent.effectIntentID,
+	).Error; err != nil {
+		return err
+	}
+	if (parentIntent.Status != EffectIntentOk &&
+		parentIntent.Status != EffectIntentResolvedOk) ||
+		parentIntent.Platform != profile.Platform ||
+		parentIntent.AccountRef != profile.AccountRef ||
+		parentIntent.TargetRef != conversation.ConversationRef ||
+		parentIntent.SendFingerprint != parent.contentHash ||
+		parentIntent.ResultMessageSeq == nil {
+		return ErrCommunicationActionConflict
+	}
+	var message Message
+	if err := tx.First(
+		&message,
+		"outbound_intent_id = ?",
+		parentIntent.IntentID,
+	).Error; err != nil {
+		return err
+	}
+	if message.RetractedAt != nil ||
+		message.Seq != *parentIntent.ResultMessageSeq ||
+		message.Direction != "out" ||
+		message.Kind != "text" ||
+		message.ContentHash != parent.contentHash ||
+		conversation.LastMessageSeq != message.Seq ||
+		aggregate.ProjectedThroughSeq != message.Seq ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		return ErrDialogueTurnBinding
+	}
+	confirmed, found, err := communicationV4ApplicationTx(
+		tx,
+		action.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		parent.semanticActionKey,
+	)
+	if err != nil {
+		return err
+	}
+	if !found ||
+		confirmed.SemanticKind != string(parent.v4Kind) ||
+		confirmed.MessageSeq != message.Seq ||
+		aggregate.Revision != confirmed.ToRevision {
+		return ErrCommunicationActionConflict
+	}
+	head, latest, err := effectIntentHeadTx(
+		tx,
+		childIntent.Platform,
+		childIntent.AccountRef,
+		childIntent.TargetRef,
+	)
+	if err != nil {
+		return err
+	}
+	if head == nil ||
+		latest == nil ||
+		head.LatestIntentID != parentIntent.IntentID ||
+		latest.IntentID != parentIntent.IntentID {
+		return ErrDialogueTurnBinding
+	}
+	return nil
+}
+
+func communicationV4PositiveActionParentTx(
+	tx *gorm.DB,
+	parentActionID string,
+	child CommunicationV4EventAction,
+	expected communication.V4EventAction,
+) (communicationV4PositiveActionParent, error) {
+	var legacy CommunicationAction
+	legacyErr := tx.First(&legacy, "action_id = ?", parentActionID).Error
+	var event CommunicationV4EventAction
+	eventErr := tx.First(&event, "action_id = ?", parentActionID).Error
+	if legacyErr != nil && !errors.Is(legacyErr, gorm.ErrRecordNotFound) {
+		return communicationV4PositiveActionParent{}, legacyErr
+	}
+	if eventErr != nil && !errors.Is(eventErr, gorm.ErrRecordNotFound) {
+		return communicationV4PositiveActionParent{}, eventErr
+	}
+	legacyFound := legacyErr == nil
+	eventFound := eventErr == nil
+	if legacyFound == eventFound {
+		return communicationV4PositiveActionParent{}, ErrCommunicationActionConflict
+	}
+	if eventFound {
+		if event.ProfileID != child.ProfileID ||
+			event.SourceInputKind != child.SourceInputKind ||
+			event.SourceInputKey != child.SourceInputKey ||
+			event.SemanticActionKey != expected.ActionKey ||
+			event.V4Kind != expected.Kind ||
+			event.CardMessageSeq != expected.CardMessageSeq ||
+			event.EffectKind != CommunicationV4EventEffectReplyText ||
+			event.Status != CommunicationV4EventActionSent ||
+			event.EffectIntentID == nil ||
+			event.EffectStartedAt == nil ||
+			event.SentAt == nil ||
+			event.FailureReason != "" {
+			return communicationV4PositiveActionParent{}, ErrCommunicationActionConflict
+		}
+		if _, _, err := communicationV4EventActionSourceTx(tx, event); err != nil {
+			return communicationV4PositiveActionParent{}, err
+		}
+		return communicationV4PositiveActionParent{
+			actionID: event.ActionID, semanticActionKey: event.SemanticActionKey,
+			profileID: event.ProfileID, v4Kind: event.V4Kind,
+			cardMessageSeq: event.CardMessageSeq,
+			contentHash:    event.ContentHash,
+			effectIntentID: *event.EffectIntentID,
+			sentAt:         *event.SentAt,
+		}, nil
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", legacy.TurnID).Error; err != nil {
+		return communicationV4PositiveActionParent{}, err
+	}
+	plan, v4Turn, err := communicationV4PlannedActionTx(tx, turn, legacy)
+	if err != nil {
+		return communicationV4PositiveActionParent{}, err
+	}
+	if !v4Turn ||
+		child.SourceInputKind != CommunicationV4InputDialogueTurn ||
+		child.SourceInputKey != turn.TurnID ||
+		turn.ProfileID != child.ProfileID ||
+		plan.ActionKey != expected.ActionKey ||
+		plan.Kind != expected.Kind ||
+		plan.CardMessageSeq != expected.CardMessageSeq ||
+		legacy.Kind != CommunicationActionReplyText ||
+		legacy.Status != CommunicationActionSent ||
+		legacy.EffectIntentID == nil ||
+		legacy.EffectStartedAt == nil ||
+		legacy.SentAt == nil ||
+		legacy.FailureReason != "" {
+		return communicationV4PositiveActionParent{}, ErrCommunicationActionConflict
+	}
+	return communicationV4PositiveActionParent{
+		actionID: legacy.ActionID, semanticActionKey: plan.ActionKey,
+		profileID: turn.ProfileID, v4Kind: plan.Kind,
+		cardMessageSeq: plan.CardMessageSeq,
+		contentHash:    legacy.ContentHash,
+		effectIntentID: *legacy.EffectIntentID,
+		sentAt:         *legacy.SentAt,
+	}, nil
 }
 
 func communicationActionPrimitive(kind CommunicationActionKind) string {
@@ -2244,6 +2772,168 @@ func (s *Store) MarkM5AutomaticActionManualRequired(actionID, reason string, at 
 	})
 }
 
+func applyCommunicationV4EventActionEffectStatusTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	intent *EffectIntent,
+	at time.Time,
+) error {
+	if err := validateCommunicationV4EventActionIntentLinkTx(
+		tx,
+		action,
+		*intent,
+	); err != nil {
+		return err
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	switch intent.Status {
+	case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
+		return nil
+	case EffectIntentOk, EffectIntentResolvedOk:
+		if intent.ResultMessageSeq == nil {
+			return ErrCommunicationActionConflict
+		}
+		var message Message
+		if err := tx.First(
+			&message,
+			"outbound_intent_id = ?",
+			intent.IntentID,
+		).Error; err != nil {
+			return err
+		}
+		if message.RetractedAt != nil ||
+			message.Seq != *intent.ResultMessageSeq ||
+			!communicationV4EventActionMatchesMessage(action, message) {
+			return ErrCommunicationActionConflict
+		}
+		sentAt := action.SentAt
+		if sentAt == nil {
+			sentAt = &at
+		}
+		updated := tx.Model(&CommunicationV4EventAction{}).
+			Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+			Updates(map[string]any{
+				"status":         CommunicationV4EventActionSent,
+				"failure_reason": "",
+				"sent_at":        sentAt,
+				"updated_at":     at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationActionConflict
+		}
+		confirmedAt := sentAt
+		if message.TsApproxMs != nil {
+			value := time.UnixMilli(*message.TsApproxMs).UTC()
+			confirmedAt = &value
+		}
+		_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+			tx,
+			action.ProfileID,
+			communication.V4ConfirmedAction{
+				ActionKey:      action.SemanticActionKey,
+				Kind:           action.V4Kind,
+				MessageSeq:     message.Seq,
+				CardMessageSeq: action.CardMessageSeq,
+				SentAt:         confirmedAt,
+			},
+			at,
+		)
+		return err
+	case EffectIntentFailed, EffectIntentSuspect, EffectIntentResolvedFailed:
+		reason := "effectFailed"
+		if intent.Status == EffectIntentSuspect {
+			reason = "effectSuspect"
+		} else if intent.Status == EffectIntentResolvedFailed {
+			reason = "effectResolvedFailed"
+		}
+		if action.Status == CommunicationV4EventActionSent {
+			var retracted Message
+			if err := tx.First(
+				&retracted,
+				"outbound_intent_id = ?",
+				intent.IntentID,
+			).Error; err != nil {
+				return err
+			}
+			if retracted.RetractedAt == nil ||
+				!communicationV4EventActionMatchesMessage(action, retracted) {
+				return ErrCommunicationActionConflict
+			}
+			if _, _, _, err := retractCommunicationV4ConfirmedActionTx(
+				tx,
+				action.ProfileID,
+				communication.V4ConfirmedAction{
+					ActionKey:      action.SemanticActionKey,
+					Kind:           action.V4Kind,
+					MessageSeq:     retracted.Seq,
+					CardMessageSeq: action.CardMessageSeq,
+				},
+				reason,
+				at,
+			); err != nil {
+				return err
+			}
+		}
+		updated := tx.Model(&CommunicationV4EventAction{}).
+			Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+			Updates(map[string]any{
+				"status":         CommunicationV4EventActionManualRequired,
+				"failure_reason": reason,
+				"sent_at":        nil,
+				"updated_at":     at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationActionConflict
+		}
+		aggregate, err := communicationV4AggregateTx(tx, action.ProfileID)
+		if err != nil {
+			return err
+		}
+		if aggregate.AutomationStatus == ProfileCommunicationAutomationManualRequired {
+			return nil
+		}
+		return markCommunicationV4AutomationManualTx(
+			tx,
+			action.ProfileID,
+			reason,
+			at,
+		)
+	default:
+		return ErrCommunicationActionConflict
+	}
+}
+
+func communicationV4EventActionMatchesMessage(
+	action CommunicationV4EventAction,
+	message Message,
+) bool {
+	if message.Direction != "out" ||
+		message.ContentHash != action.ContentHash {
+		return false
+	}
+	switch action.EffectKind {
+	case CommunicationV4EventEffectReplyText:
+		return message.Kind == "text"
+	case CommunicationV4EventEffectInviteWechat:
+		return message.Kind == "card" &&
+			message.CardType == "wechatExchange" &&
+			message.CardState == "pending" &&
+			message.InterviewStartsAtMs == nil &&
+			message.InterviewEndsAtMs == nil &&
+			message.InterviewMethod == nil
+	default:
+		return false
+	}
+}
+
 // applyM5AutomaticEffectStatusTx mirrors the authoritative EffectIntent
 // terminal into its optional M5 action. Callers already own the transaction
 // that writes Cmd, EffectIntent and (for success) the unique self Message.
@@ -2252,12 +2942,34 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		return ErrEffectIntentNotFound
 	}
 	var action CommunicationAction
-	err := tx.First(&action, "effect_intent_id = ?", intent.IntentID).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
+	legacyErr := tx.First(&action, "effect_intent_id = ?", intent.IntentID).Error
+	var eventAction CommunicationV4EventAction
+	eventErr := tx.First(
+		&eventAction,
+		"effect_intent_id = ?",
+		intent.IntentID,
+	).Error
+	if legacyErr != nil && !errors.Is(legacyErr, gorm.ErrRecordNotFound) {
+		return legacyErr
 	}
-	if err != nil {
-		return err
+	if eventErr != nil && !errors.Is(eventErr, gorm.ErrRecordNotFound) {
+		return eventErr
+	}
+	legacyFound := legacyErr == nil
+	eventFound := eventErr == nil
+	if legacyFound && eventFound {
+		return ErrCommunicationActionConflict
+	}
+	if eventFound {
+		return applyCommunicationV4EventActionEffectStatusTx(
+			tx,
+			eventAction,
+			intent,
+			at,
+		)
+	}
+	if !legacyFound {
+		return nil
 	}
 	if err := validateM5AutomaticIntentLinkTx(tx, action.ActionID, *intent); err != nil {
 		return err
