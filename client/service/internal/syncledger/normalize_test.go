@@ -1,6 +1,8 @@
 package syncledger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -108,6 +110,92 @@ func TestCardIdentityExcludesState(t *testing.T) {
 	invalid.CardState = "changed"
 	if _, err := NormalizeMessage(invalid); !errors.Is(err, ErrInvalidCardState) {
 		t.Fatalf("未知卡片状态不得落账,得到 %v", err)
+	}
+}
+
+func TestKnownCardHashesAndInterviewProjection(t *testing.T) {
+	expectedWechat := sha256.Sum256([]byte("card\x1fwechatExchange"))
+	if got, want := WechatExchangeContentHash(), hex.EncodeToString(expectedWechat[:]); got != want {
+		t.Fatalf("换微信卡 hash=%s, want %s", got, want)
+	}
+	startsAt, endsAt, method := int64(1_722_000_000_000), int64(1_722_001_800_000), "wechatVideo"
+	expectedInvite := sha256.Sum256([]byte(
+		"card\x1finterviewInvite\x1f1722000000000\x1f1722001800000\x1fwechatVideo",
+	))
+	if got, want := InterviewInviteContentHash(startsAt, endsAt, method), hex.EncodeToString(expectedInvite[:]); got != want {
+		t.Fatalf("邀面卡 hash=%s, want %s", got, want)
+	}
+
+	normalized, err := NormalizeMessage(SnapshotMessage{
+		Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "unknown",
+		InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+		Origin: "external",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.ContentHash != InterviewInviteContentHash(startsAt, endsAt, method) ||
+		normalized.InterviewStartsAtMs == nil || *normalized.InterviewStartsAtMs != startsAt ||
+		normalized.InterviewEndsAtMs == nil || *normalized.InterviewEndsAtMs != endsAt ||
+		normalized.InterviewMethod == nil || *normalized.InterviewMethod != method {
+		t.Fatalf("邀面卡参数未穿透归一化: %+v", normalized)
+	}
+	draft := normalized.draft()
+	if draft.InterviewStartsAtMs == nil || *draft.InterviewStartsAtMs != startsAt ||
+		draft.InterviewEndsAtMs == nil || *draft.InterviewEndsAtMs != endsAt ||
+		draft.InterviewMethod == nil || *draft.InterviewMethod != method {
+		t.Fatalf("邀面卡参数未穿透落库草案: %+v", draft)
+	}
+
+	wechat, err := NormalizeMessage(SnapshotMessage{
+		Direction: "out", Kind: "card", CardType: "wechatExchange", CardState: "pending",
+	})
+	if err != nil || wechat.ContentHash != WechatExchangeContentHash() {
+		t.Fatalf("换微信卡应使用冻结 hash: message=%+v err=%v", wechat, err)
+	}
+}
+
+func TestNormalizeMessageRejectsInvalidInterviewProjection(t *testing.T) {
+	validStart, validEnd, validMethod := int64(1000), int64(2000), "wechatVideo"
+	wrongMethod := "offline"
+	for _, test := range []struct {
+		name    string
+		message SnapshotMessage
+	}{
+		{
+			name: "partial",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewStartsAtMs: &validStart,
+			},
+		},
+		{
+			name: "non increasing",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewStartsAtMs: &validEnd, InterviewEndsAtMs: &validStart, InterviewMethod: &validMethod,
+			},
+		},
+		{
+			name: "wrong method",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewStartsAtMs: &validStart, InterviewEndsAtMs: &validEnd, InterviewMethod: &wrongMethod,
+			},
+		},
+		{
+			name: "wrong card type",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "wechatExchange",
+				InterviewStartsAtMs: &validStart, InterviewEndsAtMs: &validEnd, InterviewMethod: &validMethod,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NormalizeMessage(test.message); !errors.Is(err, ErrInvalidInterview) {
+				t.Fatalf("非法邀面参数必须响亮失败: %v", err)
+			}
+		})
 	}
 }
 

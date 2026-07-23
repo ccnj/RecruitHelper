@@ -444,10 +444,22 @@ type EffectResultMutation struct {
 	Append       bool
 	Retract      bool
 	Greeting     *GreetingResultMutation
+	Card         *CardResultMutation
 	Text         string
 	ContentHash  string
 	ObservedAtMs int64
 	Reason       string
+}
+
+type CardResultMutation struct {
+	ConversationRef     string
+	CardType            string
+	CardState           string
+	ContentHash         string
+	SourceKey           string
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
 }
 
 type ApplyResultMessageResult struct {
@@ -554,7 +566,10 @@ func (s *Store) ApplyResultMessage(
 			if plan.Effect.Append && plan.Effect.Retract {
 				return ErrEffectIntentConflict
 			}
-			if plan.Effect.Greeting != nil && (plan.Effect.Append || plan.Effect.Retract) {
+			if plan.Effect.Greeting != nil && (plan.Effect.Append || plan.Effect.Retract || plan.Effect.Card != nil) {
+				return ErrEffectIntentConflict
+			}
+			if plan.Effect.Card != nil && (plan.Effect.Append || plan.Effect.Retract) {
 				return ErrEffectIntentConflict
 			}
 			if plan.Effect.Append {
@@ -581,6 +596,14 @@ func (s *Store) ApplyResultMessage(
 				if message != nil {
 					intent.ResultMessageSeq = &message.Seq
 				}
+			}
+			if plan.Effect.Card != nil {
+				message, err := applyCardResultTx(tx, &intent, *plan.Effect.Card, effectAt)
+				if err != nil {
+					return err
+				}
+				intent.ResultMessageSeq = &message.Seq
+				intent.ResolvedAt = &effectAt
 			}
 			if plan.Effect.IntentStatus == EffectIntentFailed || plan.Effect.IntentStatus == EffectIntentSuspect ||
 				plan.Effect.IntentStatus == EffectIntentResolvedOk || plan.Effect.IntentStatus == EffectIntentResolvedFailed {
@@ -1002,16 +1025,19 @@ func nextPhysicalMessageSeqTx(tx *gorm.DB, key ConversationKey) (int64, error) {
 }
 
 type MessageDraft struct {
-	Direction   string
-	Kind        string
-	ContentHash string
-	Text        *string
-	BlobRef     string
-	CardType    string
-	CardState   string
-	TsApproxMs  *int64
-	Origin      string
-	SourceKey   *string
+	Direction           string
+	Kind                string
+	ContentHash         string
+	Text                *string
+	BlobRef             string
+	CardType            string
+	CardState           string
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	TsApproxMs          *int64
+	Origin              string
+	SourceKey           *string
 }
 
 type CardStateChange struct {
@@ -1046,6 +1072,30 @@ func validateMessageDrafts(messages []MessageDraft) error {
 		if m.SourceKey != nil && !validMessageSourceKey(*m.SourceKey) {
 			return ErrInvalidMessageSourceKey
 		}
+		if err := validateMessageInterview(
+			m.Kind, m.CardType, m.InterviewStartsAtMs, m.InterviewEndsAtMs, m.InterviewMethod,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMessageInterview(
+	kind, cardType string,
+	startsAtMs, endsAtMs *int64,
+	method *string,
+) error {
+	hasStarts := startsAtMs != nil
+	hasEnds := endsAtMs != nil
+	hasMethod := method != nil
+	if !hasStarts && !hasEnds && !hasMethod {
+		return nil
+	}
+	if kind != "card" || cardType != "interviewInvite" ||
+		!hasStarts || !hasEnds || !hasMethod ||
+		*startsAtMs <= 0 || *endsAtMs <= *startsAtMs || *method != "wechatVideo" {
+		return errors.New("邀面卡参数必须完整且满足 endsAt>startsAt、method=wechatVideo")
 	}
 	return nil
 }
@@ -1148,7 +1198,9 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 				Platform: req.Key.Platform, AccountRef: req.Key.AccountRef, ConversationRef: req.Key.ConversationRef,
 				Seq: seq, Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
 				Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType, CardState: draft.CardState,
-				TsApproxMs: draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
+				InterviewStartsAtMs: draft.InterviewStartsAtMs, InterviewEndsAtMs: draft.InterviewEndsAtMs,
+				InterviewMethod: draft.InterviewMethod,
+				TsApproxMs:      draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
 				SourceKey: draft.SourceKey,
 			}
 			if err := tx.Create(&m).Error; err != nil {
@@ -1429,7 +1481,9 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 				Platform: req.Key.Platform, AccountRef: req.Key.AccountRef, ConversationRef: req.Key.ConversationRef,
 				Seq: seq, Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
 				Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType, CardState: draft.CardState,
-				TsApproxMs: draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
+				InterviewStartsAtMs: draft.InterviewStartsAtMs, InterviewEndsAtMs: draft.InterviewEndsAtMs,
+				InterviewMethod: draft.InterviewMethod,
+				TsApproxMs:      draft.TsApproxMs, Origin: draft.Origin, FirstSeenRoundID: req.RoundID,
 				SourceKey: draft.SourceKey,
 			}
 			if err := tx.Create(&m).Error; err != nil {

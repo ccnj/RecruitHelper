@@ -23,8 +23,10 @@ var (
 )
 
 const (
-	primitiveChatSendMessage  = "chat.sendMessage"
-	primitiveChatSendGreeting = "chat.sendGreeting"
+	primitiveChatSendMessage      = "chat.sendMessage"
+	primitiveChatSendGreeting     = "chat.sendGreeting"
+	primitiveChatSendWechatInvite = "chat.sendWechatInvite"
+	primitiveChatSendInviteCard   = "chat.sendInviteCard"
 
 	messageRetractionReasonAuthoritativeSafeTerminal = "authoritative_safe_terminal"
 	messageRetractionReasonManualResolvedFailed      = "manual_resolved_failed"
@@ -1317,6 +1319,164 @@ func appendOutboundMessageTx(
 		return nil, err
 	}
 	return message, nil
+}
+
+func applyCardResultTx(
+	tx *gorm.DB,
+	intent *EffectIntent,
+	card CardResultMutation,
+	at time.Time,
+) (*Message, error) {
+	if tx == nil || intent == nil {
+		return nil, ErrEffectIntentNotFound
+	}
+	if !validMessageSourceKey(card.ContentHash) || !validMessageSourceKey(card.SourceKey) ||
+		intent.TargetRef == "" || card.ConversationRef != intent.TargetRef ||
+		intent.SendFingerprint != card.ContentHash {
+		return nil, ErrEffectIntentConflict
+	}
+	switch intent.Primitive {
+	case primitiveChatSendWechatInvite:
+		if card.CardType != "wechatExchange" || card.CardState != "pending" ||
+			card.InterviewStartsAtMs != nil || card.InterviewEndsAtMs != nil || card.InterviewMethod != nil {
+			return nil, ErrEffectIntentConflict
+		}
+	case primitiveChatSendInviteCard:
+		if card.CardType != "interviewInvite" || card.CardState != "unknown" ||
+			validateMessageInterview(
+				"card", card.CardType,
+				card.InterviewStartsAtMs, card.InterviewEndsAtMs, card.InterviewMethod,
+			) != nil {
+			return nil, ErrEffectIntentConflict
+		}
+	default:
+		return nil, ErrEffectIntentConflict
+	}
+
+	sameSemantic := func(message Message) bool {
+		return message.RetractedAt == nil &&
+			message.Platform == intent.Platform &&
+			message.AccountRef == intent.AccountRef &&
+			message.ConversationRef == intent.TargetRef &&
+			message.Direction == "out" &&
+			message.Kind == "card" &&
+			message.ContentHash == card.ContentHash &&
+			message.CardType == card.CardType &&
+			sameOptionalInt64(message.InterviewStartsAtMs, card.InterviewStartsAtMs) &&
+			sameOptionalInt64(message.InterviewEndsAtMs, card.InterviewEndsAtMs) &&
+			sameOptionalString(message.InterviewMethod, card.InterviewMethod)
+	}
+
+	var byIntent Message
+	err := tx.First(&byIntent, "outbound_intent_id = ?", intent.IntentID).Error
+	if err == nil {
+		if !sameSemantic(byIntent) || byIntent.SourceKey == nil || *byIntent.SourceKey != card.SourceKey {
+			return nil, ErrEffectIntentConflict
+		}
+		return &byIntent, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	key := ConversationKey{
+		Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+	}
+	var bySource Message
+	err = tx.Where(
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND source_key = ?",
+		key.Platform, key.AccountRef, key.ConversationRef, card.SourceKey,
+	).First(&bySource).Error
+	if err == nil {
+		if !sameSemantic(bySource) ||
+			(bySource.OutboundIntentID != nil && *bySource.OutboundIntentID != intent.IntentID) {
+			return nil, ErrMessageSourceKeyConflict
+		}
+		if bySource.OutboundIntentID == nil || bySource.Origin != "self" {
+			intentID := intent.IntentID
+			updated := tx.Model(&Message{}).
+				Where(
+					"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
+					key.Platform, key.AccountRef, key.ConversationRef, bySource.Seq,
+				).
+				Updates(map[string]any{"outbound_intent_id": intentID, "origin": "self"})
+			if updated.Error != nil {
+				return nil, updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return nil, ErrRecoveryStateConflict
+			}
+			bySource.OutboundIntentID = &intentID
+			bySource.Origin = "self"
+		}
+		return &bySource, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	var conversation Conversation
+	if err := tx.Where(conversationWhere(key), conversationArgs(key)...).First(&conversation).Error; err != nil {
+		return nil, err
+	}
+	seq, err := nextPhysicalMessageSeqTx(tx, key)
+	if err != nil {
+		return nil, err
+	}
+	sourceKey := card.SourceKey
+	intentID := intent.IntentID
+	message := &Message{
+		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
+		Seq: seq, Direction: "out", Kind: "card", ContentHash: card.ContentHash,
+		CardType: card.CardType, CardState: card.CardState,
+		InterviewStartsAtMs: cloneOptionalInt64(card.InterviewStartsAtMs),
+		InterviewEndsAtMs:   cloneOptionalInt64(card.InterviewEndsAtMs),
+		InterviewMethod:     cloneOptionalString(card.InterviewMethod),
+		Origin:              "self", SourceKey: &sourceKey, OutboundIntentID: &intentID,
+	}
+	if err := tx.Create(message).Error; err != nil {
+		return nil, err
+	}
+	updates := map[string]any{
+		"last_message_seq": seq, "last_message_direction": "out", "last_message_kind": "card",
+		"last_message_preview": "", "last_synced_at": at,
+	}
+	if err := tx.Model(&Conversation{}).
+		Where(conversationWhere(key), conversationArgs(key)...).
+		Updates(updates).Error; err != nil {
+		return nil, err
+	}
+	return message, nil
+}
+
+func sameOptionalInt64(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func sameOptionalString(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func cloneOptionalInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func cloneOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 func retractOutboundMessageTx(tx *gorm.DB, intent *EffectIntent, at time.Time, reason string) error {

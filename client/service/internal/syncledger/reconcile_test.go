@@ -212,6 +212,35 @@ func TestReconcileRejectsSourceKeySemanticConflict(t *testing.T) {
 	}
 }
 
+func TestSourceKeySemanticConflictIncludesKindCardTypeAndInterview(t *testing.T) {
+	sourceKey := strings.Repeat("d", 64)
+	base := messageKey{
+		direction: "out", kind: "card", hash: strings.Repeat("a", 64),
+		cardType: "interviewInvite", interview: "1000\x1f2000\x1fwechatVideo",
+		sourceKey: sourceKey,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*messageKey)
+	}{
+		{name: "kind", mutate: func(key *messageKey) { key.kind = "text" }},
+		{name: "cardType", mutate: func(key *messageKey) { key.cardType = "wechatExchange" }},
+		{name: "interview", mutate: func(key *messageKey) { key.interview = "1000\x1f3000\x1fwechatVideo" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conflicting := base
+			test.mutate(&conflicting)
+			err := validateSourceKeySemantics([]messageKey{base}, []messageKey{conflicting})
+			if !errors.Is(err, ErrSourceKeySemanticConflict) {
+				t.Fatalf("同 sourceKey 的 %s 冲突必须被拒绝: %v", test.name, err)
+			}
+			if strings.Contains(err.Error(), sourceKey) {
+				t.Fatal("错误不得泄露 sourceKey")
+			}
+		})
+	}
+}
+
 func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
 	ledger := textLedger(t, "old")
 	invalid := strings.Repeat("A", 64)

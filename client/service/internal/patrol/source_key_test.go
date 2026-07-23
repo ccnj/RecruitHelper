@@ -148,6 +148,27 @@ func TestSnapshotMessagesCarriesMissingSourceKeyAsMissing(t *testing.T) {
 	}
 }
 
+func TestSnapshotMessagesCarriesInterviewProjection(t *testing.T) {
+	startsAt, endsAt := int64(1_722_000_000_000), int64(1_722_001_800_000)
+	cardType := protocol.CardTypeInterviewInvite
+	cardState := protocol.CardStateUnknown
+	message := protocol.ThreadMessage{
+		Idx: 0, Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
+		ContentHash: syncledger.InterviewInviteContentHash(startsAt, endsAt, "wechatVideo"),
+		CardType:    &cardType, CardState: &cardState,
+		Interview: &protocol.InterviewDetails{
+			StartsAt: startsAt, EndsAt: endsAt, Method: protocol.InterviewMethodWechatVideo,
+		},
+	}
+	snapshot := snapshotMessages([]protocol.ThreadMessage{message})
+	if len(snapshot) != 1 ||
+		snapshot[0].InterviewStartsAtMs == nil || *snapshot[0].InterviewStartsAtMs != startsAt ||
+		snapshot[0].InterviewEndsAtMs == nil || *snapshot[0].InterviewEndsAtMs != endsAt ||
+		snapshot[0].InterviewMethod == nil || *snapshot[0].InterviewMethod != "wechatVideo" {
+		t.Fatalf("巡检适配层丢失邀面参数: %+v", snapshot)
+	}
+}
+
 func TestPatrolClassificationCorrectionPausesSuccessfullyBeforeM5(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)

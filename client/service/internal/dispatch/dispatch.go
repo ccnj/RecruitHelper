@@ -435,6 +435,56 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("招呼 result 的候选人/职位/contentHash 与原始意图不一致")
 		}
 	}
+	if validationErr == nil && cmd.Name == protocol.PrimChatSendWechatInvite && res.Status == protocol.ResultStatusOk {
+		var args protocol.ChatSendWechatInviteArgs
+		var data protocol.ChatSendWechatInviteData
+		switch {
+		case json.Unmarshal([]byte(cmd.Args), &args) != nil:
+			validationErr = errors.New("换微信邀请 args 无法解析")
+		case json.Unmarshal(res.Data, &data) != nil:
+			validationErr = errors.New("换微信邀请 data 无法解析")
+		case data.ConversationRef != args.ConversationRef:
+			validationErr = errors.New("换微信邀请 result 的 conversationRef 与命令不一致")
+		case !validLowerHex64(data.ContentHash) ||
+			data.ContentHash != syncledger.WechatExchangeContentHash():
+			validationErr = errors.New("换微信邀请 result 的 contentHash 非法")
+		case !validLowerHex64(data.SourceKey):
+			validationErr = errors.New("换微信邀请 result 的 sourceKey 非法")
+		default:
+			validationErr = validateSingleEvidence(
+				res.Evidence,
+				string(protocol.SendWechatInviteEvidenceTypeOutboundWechatInviteObserved),
+			)
+		}
+	}
+	if validationErr == nil && cmd.Name == protocol.PrimChatSendInviteCard && res.Status == protocol.ResultStatusOk {
+		var args protocol.ChatSendInviteCardArgs
+		var data protocol.ChatSendInviteCardData
+		switch {
+		case json.Unmarshal([]byte(cmd.Args), &args) != nil:
+			validationErr = errors.New("邀面卡 args 无法解析")
+		case json.Unmarshal(res.Data, &data) != nil:
+			validationErr = errors.New("邀面卡 data 无法解析")
+		case data.ConversationRef != args.ConversationRef:
+			validationErr = errors.New("邀面卡 result 的 conversationRef 与命令不一致")
+		case !validInterviewDetails(args.Interview) || data.Interview != args.Interview:
+			validationErr = errors.New("邀面卡 result 的参数与命令不一致")
+		case !validLowerHex64(data.ContentHash) ||
+			data.ContentHash != syncledger.InterviewInviteContentHash(
+				args.Interview.StartsAt,
+				args.Interview.EndsAt,
+				string(args.Interview.Method),
+			):
+			validationErr = errors.New("邀面卡 result 的 contentHash 非法")
+		case !validLowerHex64(data.SourceKey):
+			validationErr = errors.New("邀面卡 result 的 sourceKey 非法")
+		default:
+			validationErr = validateSingleEvidence(
+				res.Evidence,
+				string(protocol.SendInviteCardEvidenceTypeOutboundInterviewInviteObserved),
+			)
+		}
+	}
 	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadResume && res.Status == protocol.ResultStatusOk {
 		var args protocol.CandidateReadResumeArgs
 		var data protocol.CandidateReadResumeData
@@ -504,6 +554,35 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 	}, validationErr.Error()
 }
 
+func validLowerHex64(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validInterviewDetails(details protocol.InterviewDetails) bool {
+	return details.StartsAt > 0 &&
+		details.EndsAt > details.StartsAt &&
+		details.Method == protocol.InterviewMethodWechatVideo
+}
+
+func validateSingleEvidence(evidence []protocol.Evidence, expectedType string) error {
+	if len(evidence) != 1 ||
+		evidence[0].Type != expectedType ||
+		evidence[0].Blob != "" ||
+		evidence[0].Text != "" {
+		return errors.New("卡片 result 必须且只能携带唯一正确 evidence")
+	}
+	return nil
+}
+
 func (d *Dispatcher) realEffectResultPlan(
 	r *store.CmdRecord,
 	res protocol.ResultBody,
@@ -519,8 +598,136 @@ func (d *Dispatcher) realEffectResultPlan(
 		return d.realSendMessageResultPlan(r, res, body, now, session, bootID, online, plan, oc)
 	case protocol.PrimChatSendGreeting:
 		return d.realGreetingResultPlan(r, res, body, now, plan, oc)
+	case protocol.PrimChatSendWechatInvite, protocol.PrimChatSendInviteCard:
+		return d.realCardResultPlan(r, res, body, now, plan, oc)
 	default:
 		return store.ResultCommandMutation{}, fmt.Errorf("未知真实副作用原语 %q", r.Name)
+	}
+}
+
+func (d *Dispatcher) realCardResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	var card store.CardResultMutation
+	switch r.Name {
+	case protocol.PrimChatSendWechatInvite:
+		var args protocol.ChatSendWechatInviteArgs
+		if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		card = store.CardResultMutation{
+			ConversationRef: args.ConversationRef,
+			CardType:        "wechatExchange", CardState: "pending",
+			ContentHash: syncledger.WechatExchangeContentHash(),
+		}
+	case protocol.PrimChatSendInviteCard:
+		var args protocol.ChatSendInviteCardArgs
+		if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		startsAt, endsAt, method := args.Interview.StartsAt, args.Interview.EndsAt, string(args.Interview.Method)
+		card = store.CardResultMutation{
+			ConversationRef: args.ConversationRef,
+			CardType:        "interviewInvite", CardState: "unknown",
+			ContentHash:         syncledger.InterviewInviteContentHash(startsAt, endsAt, method),
+			InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+		}
+	default:
+		return store.ResultCommandMutation{}, fmt.Errorf("未知卡片原语 %q", r.Name)
+	}
+	resultEffect := func(status store.EffectIntentStatus, reason string) *store.EffectResultMutation {
+		return &store.EffectResultMutation{
+			IntentStatus: status, ContentHash: card.ContentHash, Reason: reason,
+		}
+	}
+
+	wasHumanResolved := r.Status == store.CmdResolvedOk || r.Status == store.CmdResolvedFailed
+	wasSuspect := r.Status == store.CmdSuspect
+	if r.Status.Terminal() && !wasHumanResolved && r.Status != store.CmdSuspect {
+		*oc = ocLate
+		plan.Save = false
+		return plan, nil
+	}
+
+	switch res.Status {
+	case protocol.ResultStatusOk:
+		switch r.Name {
+		case protocol.PrimChatSendWechatInvite:
+			var data protocol.ChatSendWechatInviteData
+			if err := json.Unmarshal(res.Data, &data); err != nil {
+				return store.ResultCommandMutation{}, err
+			}
+			card.SourceKey = data.SourceKey
+		case protocol.PrimChatSendInviteCard:
+			var data protocol.ChatSendInviteCardData
+			if err := json.Unmarshal(res.Data, &data); err != nil {
+				return store.ResultCommandMutation{}, err
+			}
+			card.SourceKey = data.SourceKey
+		}
+		r.Status = store.CmdOk
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		r.SuspectReason = ""
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentOk, "")
+		plan.Effect.Card = &card
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	case protocol.ResultStatusFailed:
+		if res.Error == nil {
+			return store.ResultCommandMutation{}, errors.New("effectful failed 缺少 error")
+		}
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		switch res.Error.SideEffect {
+		case protocol.SideEffectPossible, protocol.SideEffectConfirmed:
+			if wasHumanResolved {
+				plan.Save = false
+				*oc = ocHumanVerdictKept
+				return plan, nil
+			}
+			r.Status = store.CmdVerifying
+			r.TerminalAt = nil
+			r.VerificationReason = "result.sideEffect=" + string(res.Error.SideEffect)
+			r.VerificationNextAt = &now
+			r.ReviewReady = false
+			r.ReviewAfterMs = 0
+			plan.KeepCommandOpen = true
+			plan.Effect = resultEffect(store.EffectIntentVerifying, r.VerificationReason)
+			*oc = ocEffSuspect
+			return plan, nil
+		case protocol.SideEffectNone:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = ""
+			plan.Effect = resultEffect(store.EffectIntentFailed, "")
+			if wasHumanResolved || wasSuspect {
+				*oc = ocSuspectCleared
+			}
+			return plan, nil
+		default:
+			return store.ResultCommandMutation{}, errors.New("effectful result 缺少 sideEffect")
+		}
+	case protocol.ResultStatusCanceled, protocol.ResultStatusExpired:
+		r.Status = mapResultStatus(res.Status)
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentFailed, string(res.Status))
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	default:
+		return store.ResultCommandMutation{}, errors.New("未知 result status")
 	}
 }
 

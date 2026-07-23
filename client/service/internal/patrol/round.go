@@ -921,10 +921,22 @@ func snapshotMessages(messages []protocol.ThreadMessage) []syncledger.SnapshotMe
 		if message.CardState != nil {
 			cardState = string(*message.CardState)
 		}
+		var interviewStartsAtMs, interviewEndsAtMs *int64
+		var interviewMethod *string
+		if message.Interview != nil {
+			startsAt := message.Interview.StartsAt
+			endsAt := message.Interview.EndsAt
+			method := string(message.Interview.Method)
+			interviewStartsAtMs = &startsAt
+			interviewEndsAtMs = &endsAt
+			interviewMethod = &method
+		}
 		out[i] = syncledger.SnapshotMessage{
 			Direction: string(message.Direction), Kind: string(message.Kind), Text: message.Text,
 			BlobRef: blobRef, ContentHash: message.ContentHash, CardType: cardType,
-			CardState: cardState, TsApproxMs: message.TsApprox, Origin: "external",
+			CardState: cardState, InterviewStartsAtMs: interviewStartsAtMs,
+			InterviewEndsAtMs: interviewEndsAtMs, InterviewMethod: interviewMethod,
+			TsApproxMs: message.TsApprox, Origin: "external",
 			SourceKey: message.SourceKey,
 		}
 	}

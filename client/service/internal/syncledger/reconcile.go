@@ -3,6 +3,7 @@ package syncledger
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -14,7 +15,7 @@ var (
 	ErrAdoptionHasLedger                     = errors.New("首次收编时账本必须为空")
 	ErrAdoptionSnapshotEmpty                 = errors.New("首次收编快照不能为空")
 	ErrAnchorContractMismatch                = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
-	ErrSourceKeySemanticConflict             = errors.New("相同 sourceKey 的消息方向或正文哈希冲突")
+	ErrSourceKeySemanticConflict             = errors.New("相同 sourceKey 的消息语义冲突")
 	ErrUnsafeMessageClassificationCorrection = errors.New("发现可能的消息分类修正，但缺少完整唯一证据")
 )
 
@@ -367,7 +368,10 @@ func classificationCorrectionSkeleton(old store.Message, observed NormalizedMess
 
 type messageKey struct {
 	direction string
+	kind      string
 	hash      string
+	cardType  string
+	interview string
 	sourceKey string
 }
 
@@ -379,7 +383,14 @@ func keysFromLedger(messages []store.Message) []messageKey {
 			sourceKey = *messages[i].SourceKey
 		}
 		out[i] = messageKey{
-			direction: messages[i].Direction, hash: messages[i].ContentHash, sourceKey: sourceKey,
+			direction: messages[i].Direction, kind: messages[i].Kind, hash: messages[i].ContentHash,
+			cardType: messages[i].CardType,
+			interview: interviewSignature(
+				messages[i].InterviewStartsAtMs,
+				messages[i].InterviewEndsAtMs,
+				messages[i].InterviewMethod,
+			),
+			sourceKey: sourceKey,
 		}
 	}
 	return out
@@ -389,10 +400,34 @@ func keysFromNormalized(messages []NormalizedMessage) []messageKey {
 	out := make([]messageKey, len(messages))
 	for i := range messages {
 		out[i] = messageKey{
-			direction: messages[i].Direction, hash: messages[i].ContentHash, sourceKey: messages[i].SourceKey,
+			direction: messages[i].Direction, kind: messages[i].Kind, hash: messages[i].ContentHash,
+			cardType: messages[i].CardType,
+			interview: interviewSignature(
+				messages[i].InterviewStartsAtMs,
+				messages[i].InterviewEndsAtMs,
+				messages[i].InterviewMethod,
+			),
+			sourceKey: messages[i].SourceKey,
 		}
 	}
 	return out
+}
+
+func interviewSignature(startsAtMs, endsAtMs *int64, method *string) string {
+	if startsAtMs == nil && endsAtMs == nil && method == nil {
+		return ""
+	}
+	starts, ends, methodValue := "<nil>", "<nil>", "<nil>"
+	if startsAtMs != nil {
+		starts = strconv.FormatInt(*startsAtMs, 10)
+	}
+	if endsAtMs != nil {
+		ends = strconv.FormatInt(*endsAtMs, 10)
+	}
+	if method != nil {
+		methodValue = *method
+	}
+	return starts + "\x1f" + ends + "\x1f" + methodValue
 }
 
 // validateSourceKeySemantics enforces the scope-local stable identity claim
@@ -401,7 +436,10 @@ func keysFromNormalized(messages []NormalizedMessage) []messageKey {
 func validateSourceKeySemantics(groups ...[]messageKey) error {
 	type semantic struct {
 		direction string
+		kind      string
 		hash      string
+		cardType  string
+		interview string
 	}
 	seen := make(map[string]semantic)
 	for _, keys := range groups {
@@ -409,7 +447,10 @@ func validateSourceKeySemantics(groups ...[]messageKey) error {
 			if key.sourceKey == "" {
 				continue
 			}
-			current := semantic{direction: key.direction, hash: key.hash}
+			current := semantic{
+				direction: key.direction, kind: key.kind, hash: key.hash,
+				cardType: key.cardType, interview: key.interview,
+			}
 			if previous, ok := seen[key.sourceKey]; ok && previous != current {
 				return ErrSourceKeySemanticConflict
 			}
@@ -469,7 +510,8 @@ func equalKeys(a, b []messageKey) bool {
 }
 
 func equalMessageKey(a, b messageKey) bool {
-	if a.direction != b.direction || a.hash != b.hash {
+	if a.direction != b.direction || a.kind != b.kind || a.hash != b.hash ||
+		a.cardType != b.cardType || a.interview != b.interview {
 		return false
 	}
 	// A stable key is authoritative only when both observations have one.
@@ -575,6 +617,14 @@ func validateLedger(key store.ConversationKey, messages []store.Message) error {
 		}
 		if message.SourceKey != nil && !validSourceKey(*message.SourceKey) {
 			return fmt.Errorf("%w: seq=%d sourceKey 非法", ErrInvalidLedger, message.Seq)
+		}
+		if err := validateInterviewProjection(SnapshotMessage{
+			Kind: message.Kind, CardType: message.CardType,
+			InterviewStartsAtMs: message.InterviewStartsAtMs,
+			InterviewEndsAtMs:   message.InterviewEndsAtMs,
+			InterviewMethod:     message.InterviewMethod,
+		}); err != nil {
+			return fmt.Errorf("%w: seq=%d 邀面参数非法", ErrInvalidLedger, message.Seq)
 		}
 		// 被更强证据推翻的消息事实仍保留物理 seq，但不进入活动
 		// 账本，因而活动视图允许有洞。序号仍必须严格递增，防止乱序或重号。

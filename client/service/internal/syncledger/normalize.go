@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"unicode/utf8"
 
 	"recruithelper/client/service/internal/store"
@@ -26,6 +27,7 @@ var (
 	ErrCardIdentityRequired = errors.New("卡片缺少身份哈希或身份材料")
 	ErrInvalidCardState     = errors.New("非法卡片状态")
 	ErrInvalidSourceKey     = errors.New("非法消息 sourceKey")
+	ErrInvalidInterview     = errors.New("非法邀面卡参数")
 )
 
 // SnapshotMessage is the neutral seam consumed by the ledger algorithm.
@@ -34,31 +36,37 @@ var (
 // CardIdentity intentionally retain the opaque hash supplied by the adapter.
 // CardIdentity contains stable key parameters only and must never include state.
 type SnapshotMessage struct {
-	Direction    string
-	Kind         string
-	Text         *string
-	BlobRef      string
-	ContentHash  string
-	CardType     string
-	CardIdentity string
-	CardState    string
-	TsApproxMs   *int64
-	Origin       string
-	SourceKey    string
+	Direction           string
+	Kind                string
+	Text                *string
+	BlobRef             string
+	ContentHash         string
+	CardType            string
+	CardIdentity        string
+	CardState           string
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	TsApproxMs          *int64
+	Origin              string
+	SourceKey           string
 }
 
 // NormalizedMessage is deterministic input for matching and store writes.
 type NormalizedMessage struct {
-	Direction   string
-	Kind        string
-	Text        *string
-	BlobRef     string
-	ContentHash string
-	CardType    string
-	CardState   string
-	TsApproxMs  *int64
-	Origin      string
-	SourceKey   string
+	Direction           string
+	Kind                string
+	Text                *string
+	BlobRef             string
+	ContentHash         string
+	CardType            string
+	CardState           string
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	TsApproxMs          *int64
+	Origin              string
+	SourceKey           string
 }
 
 // NormalizeText is the single text rule shared by hashes and list previews:
@@ -77,6 +85,21 @@ func HashText(raw string) string {
 // deliberately absent, so pending -> accepted remains the same message.
 func CardIdentityHash(cardType, identity string) string {
 	return hashCanonical("card\x1f" + cardType + "\x1f" + NormalizeText(identity))
+}
+
+// WechatExchangeContentHash is the frozen identity projection for a reliably
+// normalized WeChat exchange card. Card state and platform message identity
+// are intentionally absent.
+func WechatExchangeContentHash() string {
+	return hashCanonical("card\x1fwechatExchange")
+}
+
+// InterviewInviteContentHash is the frozen identity projection for a reliably
+// normalized interview invitation card.
+func InterviewInviteContentHash(startsAtMs, endsAtMs int64, method string) string {
+	return hashCanonical("card\x1finterviewInvite\x1f" +
+		strconv.FormatInt(startsAtMs, 10) + "\x1f" +
+		strconv.FormatInt(endsAtMs, 10) + "\x1f" + method)
 }
 
 // NormalizeMessage verifies/derives identity and produces a store-safe message.
@@ -133,11 +156,17 @@ func NormalizeMessage(in SnapshotMessage) (NormalizedMessage, error) {
 	return NormalizedMessage{
 		Direction: in.Direction, Kind: in.Kind, Text: normalizedText, BlobRef: in.BlobRef,
 		ContentHash: hash, CardType: in.CardType, CardState: cardState,
-		TsApproxMs: in.TsApproxMs, Origin: origin, SourceKey: in.SourceKey,
+		InterviewStartsAtMs: cloneInt64(in.InterviewStartsAtMs),
+		InterviewEndsAtMs:   cloneInt64(in.InterviewEndsAtMs),
+		InterviewMethod:     cloneString(in.InterviewMethod),
+		TsApproxMs:          in.TsApproxMs, Origin: origin, SourceKey: in.SourceKey,
 	}, nil
 }
 
 func canonicalIdentity(in SnapshotMessage, normalizedText *string) (string, bool, error) {
+	if err := validateInterviewProjection(in); err != nil {
+		return "", false, err
+	}
 	switch in.Kind {
 	case "image":
 		return "[image]", true, nil
@@ -148,6 +177,19 @@ func canonicalIdentity(in SnapshotMessage, normalizedText *string) (string, bool
 	case "card":
 		if in.CardType == "" {
 			return "", false, ErrCardIdentityRequired
+		}
+		switch in.CardType {
+		case "wechatExchange":
+			if in.CardIdentity == "" {
+				return "card\x1fwechatExchange", true, nil
+			}
+		case "interviewInvite":
+			if in.InterviewStartsAtMs != nil {
+				return "card\x1finterviewInvite\x1f" +
+					strconv.FormatInt(*in.InterviewStartsAtMs, 10) + "\x1f" +
+					strconv.FormatInt(*in.InterviewEndsAtMs, 10) + "\x1f" +
+					*in.InterviewMethod, true, nil
+			}
 		}
 		if in.CardIdentity == "" {
 			return "", false, nil
@@ -166,6 +208,38 @@ func canonicalIdentity(in SnapshotMessage, normalizedText *string) (string, bool
 	default:
 		return "", false, fmt.Errorf("%w: %q", ErrInvalidMessageKind, in.Kind)
 	}
+}
+
+func validateInterviewProjection(in SnapshotMessage) error {
+	hasStarts := in.InterviewStartsAtMs != nil
+	hasEnds := in.InterviewEndsAtMs != nil
+	hasMethod := in.InterviewMethod != nil
+	if !hasStarts && !hasEnds && !hasMethod {
+		return nil
+	}
+	if in.Kind != "card" || in.CardType != "interviewInvite" ||
+		!hasStarts || !hasEnds || !hasMethod ||
+		*in.InterviewStartsAtMs <= 0 || *in.InterviewEndsAtMs <= *in.InterviewStartsAtMs ||
+		*in.InterviewMethod != "wechatVideo" {
+		return ErrInvalidInterview
+	}
+	return nil
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
 }
 
 func hashCanonical(value string) string {
@@ -266,6 +340,9 @@ func (m NormalizedMessage) draft() store.MessageDraft {
 	return store.MessageDraft{
 		Direction: m.Direction, Kind: m.Kind, ContentHash: m.ContentHash, Text: m.Text,
 		BlobRef: m.BlobRef, CardType: m.CardType, CardState: m.CardState,
-		TsApproxMs: m.TsApproxMs, Origin: m.Origin, SourceKey: sourceKey,
+		InterviewStartsAtMs: cloneInt64(m.InterviewStartsAtMs),
+		InterviewEndsAtMs:   cloneInt64(m.InterviewEndsAtMs),
+		InterviewMethod:     cloneString(m.InterviewMethod),
+		TsApproxMs:          m.TsApproxMs, Origin: m.Origin, SourceKey: sourceKey,
 	}
 }

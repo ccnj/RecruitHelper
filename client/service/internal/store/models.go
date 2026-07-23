@@ -863,16 +863,22 @@ type Message struct {
 	ConversationRef string `gorm:"primaryKey;index:idx_messages_conversation,priority:3;uniqueIndex:idx_messages_source_key,priority:3"`
 	Seq             int64  `gorm:"primaryKey;autoIncrement:false"`
 
-	Direction        string `gorm:"not null"`
-	Kind             string `gorm:"not null"`
-	ContentHash      string `gorm:"not null;index"`
-	Text             *string
-	BlobRef          string
-	CardType         string
-	CardState        string
-	TsApproxMs       *int64
-	Origin           string
-	FirstSeenRoundID string `gorm:"index"`
+	Direction   string `gorm:"not null"`
+	Kind        string `gorm:"not null"`
+	ContentHash string `gorm:"not null;index"`
+	Text        *string
+	BlobRef     string
+	CardType    string
+	CardState   string
+	// Interview* is the stable, platform-neutral identity projection for an
+	// interviewInvite card. All three columns are NULL for legacy/unmapped
+	// cards and for every other message kind.
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	TsApproxMs          *int64
+	Origin              string
+	FirstSeenRoundID    string `gorm:"index"`
 	// SourceKey 只是会话内等值键，不是平台消息 ID。指针保证旧消息
 	// 与无稳定身份的消息真正落为 SQL NULL；json:"-" 防止它被模型
 	// 直接序列化到管理端或 UI。
