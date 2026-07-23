@@ -212,7 +212,7 @@ func TestReconcileRejectsSourceKeySemanticConflict(t *testing.T) {
 	}
 }
 
-func TestSourceKeySemanticConflictIncludesKindCardTypeAndInterview(t *testing.T) {
+func TestSourceKeySemanticConflictIncludesKindAndCardType(t *testing.T) {
 	sourceKey := strings.Repeat("d", 64)
 	base := messageKey{
 		direction: "out", kind: "card", hash: strings.Repeat("a", 64),
@@ -225,7 +225,6 @@ func TestSourceKeySemanticConflictIncludesKindCardTypeAndInterview(t *testing.T)
 	}{
 		{name: "kind", mutate: func(key *messageKey) { key.kind = "text" }},
 		{name: "cardType", mutate: func(key *messageKey) { key.cardType = "wechatExchange" }},
-		{name: "interview", mutate: func(key *messageKey) { key.interview = "1000\x1f3000\x1fwechatVideo" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conflicting := base
@@ -238,6 +237,26 @@ func TestSourceKeySemanticConflictIncludesKindCardTypeAndInterview(t *testing.T)
 				t.Fatal("错误不得泄露 sourceKey")
 			}
 		})
+	}
+}
+
+func TestSourceKeySemanticConflictAllowsLaterOptionalInterviewDetail(t *testing.T) {
+	sourceKey := strings.Repeat("e", 64)
+	legacy := messageKey{
+		direction: "out", kind: "card", hash: strings.Repeat("a", 64),
+		cardType: "interviewInvite", sourceKey: sourceKey,
+	}
+	enriched := legacy
+	enriched.interview = "1000\x1f2000\x1fwechatVideo"
+
+	if err := validateSourceKeySemantics(
+		[]messageKey{legacy},
+		[]messageKey{enriched},
+	); err != nil {
+		t.Fatalf("optional interview 后补不得制造 sourceKey 语义冲突: %v", err)
+	}
+	if equalMessageKey(legacy, enriched) {
+		t.Fatal("后补 interview 仍应参与精确消息对齐，不得被静默视为同一快照形态")
 	}
 }
 

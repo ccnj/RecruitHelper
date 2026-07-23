@@ -439,7 +439,6 @@ func validateSourceKeySemantics(groups ...[]messageKey) error {
 		kind      string
 		hash      string
 		cardType  string
-		interview string
 	}
 	seen := make(map[string]semantic)
 	for _, keys := range groups {
@@ -449,7 +448,7 @@ func validateSourceKeySemantics(groups ...[]messageKey) error {
 			}
 			current := semantic{
 				direction: key.direction, kind: key.kind, hash: key.hash,
-				cardType: key.cardType, interview: key.interview,
+				cardType: key.cardType,
 			}
 			if previous, ok := seen[key.sourceKey]; ok && previous != current {
 				return ErrSourceKeySemanticConflict
