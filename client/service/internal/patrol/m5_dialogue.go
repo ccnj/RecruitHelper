@@ -613,110 +613,66 @@ func (a *roundActor) executeM5Advice(
 	intent communication.IntentAdvice,
 ) error {
 	inputHash := sha256Hex(content)
-	var reserved *store.ReserveAIInvocationResult
-	if purpose == m5ai.PurposeReply && store.IsM5ReplyTraceRearmTarget(turn.TurnID) {
-		var err error
-		reserved, err = a.manager.store.ReserveAuthorizedM5ReplyTraceRearm(
-			store.ReserveM5ReplyTraceRearmRequest{
-				InvocationID: stableM5ID(
-					"invocation", turn.TurnID, string(m5ai.PurposeReply), "3",
-				),
-				TurnID: turn.TurnID, Provider: a.manager.advice.ProviderName(),
-				Model: a.manager.advice.ModelName(), InputHash: inputHash,
-				CreatedAt: a.manager.now(),
-			},
-		)
-		if err != nil {
-			switch {
-			case errors.Is(err, store.ErrDialogueTurnBinding):
-				return a.manager.store.MarkDialogueTurnManualRequired(
-					turn.TurnID, "inputBoundaryChanged", a.manager.now(),
-				)
-			case errors.Is(err, store.ErrAIInvocationBudget):
-				return a.manager.store.MarkDialogueTurnManualRequired(
-					turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now(),
-				)
-			case errors.Is(err, store.ErrM5ReplyTraceRearmUnsafe):
-				return a.manager.store.MarkDialogueTurnManualRequired(
-					turn.TurnID, "replyTraceRearmUnsafe", a.manager.now(),
-				)
-			default:
-				return err
-			}
+	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), "1")
+	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
+		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: m5InvocationAttempt,
+		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
+		InputHash: inputHash, CreatedAt: a.manager.now(),
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrDialogueTurnBinding) {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 		}
+		if errors.Is(err, store.ErrAIInvocationBudget) {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now())
+		}
+		return err
+	}
+	if !reserved.Created {
 		if reserved.Invocation.FinishedAt != nil {
-			return a.manager.store.MarkDialogueTurnManualRequired(
-				turn.TurnID, "replyTraceRearmAlreadyFinished", a.manager.now(),
-			)
-		}
-		if !reserved.Created {
-			return a.finishInterruptedM5Advice(
-				turn, material, facts, purpose, intent, reserved.Invocation,
-			)
-		}
-	} else {
-		invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), "1")
-		var err error
-		reserved, err = a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
-			InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: m5InvocationAttempt,
-			Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
-			InputHash: inputHash, CreatedAt: a.manager.now(),
-		})
-		if err != nil {
-			if errors.Is(err, store.ErrDialogueTurnBinding) {
-				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
-			}
-			if errors.Is(err, store.ErrAIInvocationBudget) {
-				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now())
-			}
-			return err
-		}
-		if !reserved.Created {
-			if reserved.Invocation.FinishedAt != nil {
-				if purpose != m5ai.PurposeReply ||
-					!isLegacyM5ReplyBudgetFalsePositive(reserved.Invocation) {
-					return a.manager.store.MarkDialogueTurnManualRequired(
-						turn.TurnID, "invocationStateConflict", a.manager.now(),
-					)
-				}
-				recovery, recoveryErr := a.manager.store.ReserveAuthorizedM5ReplyBudgetRecovery(
-					store.ReserveM5ReplyBudgetRecoveryRequest{
-						InvocationID: stableM5ID(
-							"invocation", turn.TurnID, string(m5ai.PurposeReply), "2",
-						),
-						TurnID: turn.TurnID, Provider: a.manager.advice.ProviderName(),
-						Model: a.manager.advice.ModelName(), InputHash: inputHash,
-						CreatedAt: a.manager.now(),
-					},
+			if purpose != m5ai.PurposeReply ||
+				!isLegacyM5ReplyBudgetFalsePositive(reserved.Invocation) {
+				return a.manager.store.MarkDialogueTurnManualRequired(
+					turn.TurnID, "invocationStateConflict", a.manager.now(),
 				)
-				if recoveryErr != nil {
-					switch {
-					case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
-						return a.manager.store.MarkDialogueTurnManualRequired(
-							turn.TurnID, "inputBoundaryChanged", a.manager.now(),
-						)
-					case errors.Is(recoveryErr, store.ErrAIInvocationBudget):
-						return a.manager.store.MarkDialogueTurnManualRequired(
-							turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now(),
-						)
-					case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
-						return a.manager.store.MarkDialogueTurnManualRequired(
-							turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
-						)
-					default:
-						return recoveryErr
-					}
-				}
-				reserved = recovery
-				if reserved.Invocation.FinishedAt != nil {
+			}
+			recovery, recoveryErr := a.manager.store.ReserveAuthorizedM5ReplyBudgetRecovery(
+				store.ReserveM5ReplyBudgetRecoveryRequest{
+					InvocationID: stableM5ID(
+						"invocation", turn.TurnID, string(m5ai.PurposeReply), "2",
+					),
+					TurnID: turn.TurnID, Provider: a.manager.advice.ProviderName(),
+					Model: a.manager.advice.ModelName(), InputHash: inputHash,
+					CreatedAt: a.manager.now(),
+				},
+			)
+			if recoveryErr != nil {
+				switch {
+				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
 					return a.manager.store.MarkDialogueTurnManualRequired(
-						turn.TurnID, "replyBudgetRecoveryAlreadyFinished", a.manager.now(),
+						turn.TurnID, "inputBoundaryChanged", a.manager.now(),
 					)
+				case errors.Is(recoveryErr, store.ErrAIInvocationBudget):
+					return a.manager.store.MarkDialogueTurnManualRequired(
+						turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now(),
+					)
+				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
+					return a.manager.store.MarkDialogueTurnManualRequired(
+						turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
+					)
+				default:
+					return recoveryErr
 				}
 			}
-			if !reserved.Created {
-				return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
+			reserved = recovery
+			if reserved.Invocation.FinishedAt != nil {
+				return a.manager.store.MarkDialogueTurnManualRequired(
+					turn.TurnID, "replyBudgetRecoveryAlreadyFinished", a.manager.now(),
+				)
 			}
+		}
+		if !reserved.Created {
+			return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
 		}
 	}
 
@@ -799,7 +755,7 @@ func (a *roundActor) executeM5Advice(
 	logAIInvocationOutcome(
 		a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
 	)
-	err := a.completeM5Reply(turn.TurnID, completion, decision)
+	err = a.completeM5Reply(turn.TurnID, completion, decision)
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 	}
