@@ -1,12 +1,14 @@
 package patrol
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 
+	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 )
@@ -54,7 +56,12 @@ func TestM5RealProviderDryRun(t *testing.T) {
 	if err != nil || config == nil {
 		t.Fatal("M5 真实 provider 配置尚未就绪")
 	}
-	provider, err := m5ai.NewOpenAICompatibleProvider(*config, nil)
+	traceStore, err := aitrace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal("M5 真实 provider trace 存储未就绪")
+	}
+	defer traceStore.Close()
+	provider, err := m5ai.NewOpenAICompatibleProvider(*config, nil, traceStore)
 	if err != nil {
 		t.Fatal("M5 真实 provider 配置未通过生产校验")
 	}
@@ -128,8 +135,23 @@ func TestM5RealProviderDryRun(t *testing.T) {
 			invocation.InputTokens <= 0 || invocation.OutputTokens <= 0 ||
 			invocation.CachedInputTokens < 0 || invocation.CachedInputTokens > invocation.InputTokens ||
 			invocation.EstimatedCostMicros <= 0 ||
+			invocation.RequestBytes <= 0 || invocation.ResponseBytes <= 0 ||
+			invocation.TraceStatus != m5ai.TraceStatusComplete ||
 			strings.TrimSpace(invocation.InputHash) == "" || strings.TrimSpace(invocation.OutputHash) == "" {
 			t.Fatal("真实 provider invocation 字段缺失、非法或 reasoning 非零，停止事实门")
+		}
+		trace, traceErr := traceStore.Get(context.Background(), invocation.InvocationID)
+		if traceErr != nil || trace.InvocationID != invocation.InvocationID ||
+			trace.Purpose != string(invocation.Purpose) ||
+			trace.Provider != invocation.Provider || trace.Model != invocation.Model ||
+			trace.ContextRevisionHash != invocation.ContextRevisionHash ||
+			trace.PromptRevision != fixture.turn.RenderFormatVersion ||
+			trace.TraceState != aitrace.TraceStateCompleted ||
+			trace.HTTPStatus == nil || *trace.HTTPStatus != 200 ||
+			!trace.ResponsePresent || trace.RequestBytes != int64(invocation.RequestBytes) ||
+			trace.ResponseBytes != int64(invocation.ResponseBytes) ||
+			len(trace.ConfigHash) != 64 || bytes.Contains(trace.RequestJSON, []byte(config.APIKey)) {
+			t.Fatal("真实 provider 的 brain invocation 与原文 trace 未以同一 invocationId 收敛")
 		}
 		t.Logf(
 			"purpose=%s provider=%s model=%s inputTokens=%d cachedInputTokens=%d outputTokens=%d usageShape=%s reasoningTokens=%s reasoningContentEmpty=%t latencyMs=%d estimatedCostMicros=%d inputHash=%s outputHash=%s",
