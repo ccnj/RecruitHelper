@@ -566,7 +566,7 @@
           },
           "expected": {
             "status": "rejected",
-            "errorClass": "emptyReplyText"
+            "errorClass": "emptyPhraseSequence"
           }
         },
         {

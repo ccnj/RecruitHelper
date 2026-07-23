@@ -114,6 +114,9 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 			trimmed = append(trimmed, value)
 		}
 	}
+	if len(trimmed) == 0 {
+		return ReplySuggestion{}, errors.New("emptyPhraseSequence")
+	}
 	text := strings.Join(trimmed, "\n")
 	if err := ValidateSendText(text); err != nil {
 		return ReplySuggestion{}, err
