@@ -72,12 +72,17 @@ func communicationV4TurnRequest(
 	if err != nil || len(targets) != 1 {
 		t.Fatalf("构造 V4 turn 前目标未就绪: targets=%+v err=%v", targets, err)
 	}
+	material, materialReady, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+	if err != nil || !materialReady {
+		t.Fatalf("构造 V4 turn 前 AI 材料未就绪: material=%+v ready=%v err=%v",
+			material, materialReady, err)
+	}
 	return FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: fixture.ProfileID, ConversationRef: fixture.ConversationRef,
 		InputDigest: digest, HistoryThroughSeq: greeting.Seq,
 		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[len(inbound)-1].Seq,
-		ContextRevisionHash: targets[0].ContextRevision.RevisionHash,
-		ResumeSnapshotID:    targets[0].ResumeSnapshot.SnapshotID,
+		ContextRevisionHash: material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
 		RecommendedTimeText: "合成推荐时段",
 		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt:            time.Now().UTC().Truncate(time.Millisecond),
@@ -172,6 +177,40 @@ func TestFreezeCommunicationV4TurnPersistsAggregateAndTurnWithoutTrial(t *testin
 		Where("profile_id = ?", fixture.ProfileID).Count(&applications).Error
 	if turns != 1 || applications != 1 {
 		t.Fatalf("V4 turn 重放增生: turns=%d applications=%d", turns, applications)
+	}
+}
+
+func TestFreezeCommunicationV4TurnReusesOnDemandAIMaterialValidation(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-material-recheck")
+	text := "合成材料重验消息"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-turn-material-recheck-2", Text: &text,
+	})
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	if err := s.db.Model(&ProfileAIContextBinding{}).
+		Where("profile_id = ? AND status = ?", fixture.ProfileID, ProfileAIContextBindingActive).
+		Update("context_id", "fixture-mismatched-context").Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.FreezeCommunicationV4Turn(req)
+	if result != nil || !errors.Is(err, ErrCommunicationTargetConflict) {
+		t.Fatalf("Freeze 必须复用按需材料冲突判定: result=%+v err=%v", result, err)
+	}
+	var turns, applications int64
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&turns).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CommunicationV4ProjectionApplication{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&applications).Error; err != nil {
+		t.Fatal(err)
+	}
+	if turns != 0 || applications != 0 {
+		t.Fatalf("材料冲突不得留下半成品: turns=%d applications=%d", turns, applications)
 	}
 }
 

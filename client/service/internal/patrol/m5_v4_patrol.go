@@ -167,6 +167,15 @@ func (a *roundActor) processCommunicationV4Target(
 		// durable turn until this process can continue it.
 		return nil
 	}
+	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
+		target.Profile.ProfileID,
+	)
+	if err != nil {
+		return err
+	}
+	if !materialReady {
+		return nil
+	}
 	inbound, validBoundary := store.DialogueTurnCandidateMessages(boundary)
 	if !validBoundary {
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
@@ -204,8 +213,8 @@ func (a *roundActor) processCommunicationV4Target(
 		ConversationRef: target.Conversation.ConversationRef,
 		InputDigest:     digest, HistoryThroughSeq: messages[cursorIndex].Seq,
 		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: boundary[len(boundary)-1].Seq,
-		ContextRevisionHash: target.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    target.ResumeSnapshot.SnapshotID,
+		ContextRevisionHash: material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
 		RecommendedTimeText: recommended,
 		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt:            a.manager.now(),

@@ -74,10 +74,15 @@ func TestCommunicationTargetsRequireCompleteFactsAndUseStableOrder(t *testing.T)
 	if target.Profile.ProfileID != first.ProfileID ||
 		target.Account.Platform != key.Platform ||
 		target.Conversation.ConversationRef != first.ConversationRef ||
-		target.Aggregate.RootGreetingIntentID != first.GreetingIntent ||
-		target.ContextBinding.RevisionHash != target.ContextRevision.RevisionHash ||
-		target.ResumeSnapshot.ProfileID != first.ProfileID {
-		t.Fatalf("完整沟通目标事实不一致: target=%+v", target)
+		target.Aggregate.RootGreetingIntentID != first.GreetingIntent {
+		t.Fatalf("基础沟通目标事实不一致: target=%+v", target)
+	}
+	material, ready, err := s.CommunicationAIMaterialForProfile(first.ProfileID)
+	if err != nil || !ready ||
+		material.ContextBinding.RevisionHash != material.ContextRevision.RevisionHash ||
+		material.ResumeSnapshot.ProfileID != first.ProfileID {
+		t.Fatalf("按需 AI 材料不一致: material=%+v ready=%v err=%v",
+			material, ready, err)
 	}
 
 	if err := s.db.Model(&CommunicationV4Aggregate{}).
@@ -95,7 +100,7 @@ func TestCommunicationTargetsRequireCompleteFactsAndUseStableOrder(t *testing.T)
 	}
 }
 
-func TestCommunicationTargetRejectsDanglingContextOrResume(t *testing.T) {
+func TestCommunicationAIMaterialRejectsClaimedDanglingContextOrResume(t *testing.T) {
 	t.Run("context revision mismatch", func(t *testing.T) {
 		s := openTest(t)
 		fixture := seedReadyCommunicationTarget(t, s, "profile-target-context-conflict")
@@ -107,8 +112,13 @@ func TestCommunicationTargetRejectsDanglingContextOrResume(t *testing.T) {
 		targets, err := s.CommunicationTargetsForAccount(AccountKey{
 			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
 		})
-		if targets != nil || !errors.Is(err, ErrCommunicationTargetConflict) {
-			t.Fatalf("悬空职位上下文必须阻断: targets=%+v err=%v", targets, err)
+		if err != nil || len(targets) != 1 || targets[0].Profile.ProfileID != fixture.ProfileID {
+			t.Fatalf("AI 上下文损坏不得隐藏基础目标: targets=%+v err=%v", targets, err)
+		}
+		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+		if ready || !errors.Is(err, ErrCommunicationTargetConflict) {
+			t.Fatalf("悬空职位上下文必须在按需加载时报错: material=%+v ready=%v err=%v",
+				material, ready, err)
 		}
 	})
 
@@ -123,13 +133,18 @@ func TestCommunicationTargetRejectsDanglingContextOrResume(t *testing.T) {
 		targets, err := s.CommunicationTargetsForAccount(AccountKey{
 			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
 		})
-		if targets != nil || !errors.Is(err, ErrCommunicationTargetConflict) {
-			t.Fatalf("错会话简历必须阻断: targets=%+v err=%v", targets, err)
+		if err != nil || len(targets) != 1 || targets[0].Profile.ProfileID != fixture.ProfileID {
+			t.Fatalf("简历损坏不得隐藏基础目标: targets=%+v err=%v", targets, err)
+		}
+		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+		if ready || !errors.Is(err, ErrCommunicationTargetConflict) {
+			t.Fatalf("错会话简历必须在按需加载时报错: material=%+v ready=%v err=%v",
+				material, ready, err)
 		}
 	})
 }
 
-func TestCommunicationTargetsSkipNormalPreparationGapsAndIgnoreTrials(t *testing.T) {
+func TestCommunicationTargetsIncludeNormalAIPreparationGapsAndIgnoreTrials(t *testing.T) {
 	s := openTest(t)
 	ready := seedReadyCommunicationTarget(t, s, "profile-target-ready")
 	waiting := seedReadyCommunicationTarget(t, s, "profile-target-waiting")
@@ -153,7 +168,39 @@ func TestCommunicationTargetsSkipNormalPreparationGapsAndIgnoreTrials(t *testing
 	targets, err := s.CommunicationTargetsForAccount(AccountKey{
 		Platform: ready.Platform, AccountRef: ready.AccountRef,
 	})
-	if err != nil || len(targets) != 1 || targets[0].Profile.ProfileID != ready.ProfileID {
-		t.Fatalf("未就绪档案或历史 trial 干扰生产目标: targets=%+v err=%v", targets, err)
+	if err != nil || len(targets) != 2 ||
+		targets[0].Profile.ProfileID != ready.ProfileID ||
+		targets[1].Profile.ProfileID != waiting.ProfileID {
+		t.Fatalf("AI 未就绪档案仍须进入基础目标且历史 trial 不得干扰: targets=%+v err=%v",
+			targets, err)
+	}
+	material, materialReady, err := s.CommunicationAIMaterialForProfile(waiting.ProfileID)
+	if err != nil || materialReady {
+		t.Fatalf("简历正常准备缺口应返回未就绪: material=%+v ready=%v err=%v",
+			material, materialReady, err)
+	}
+}
+
+func TestCommunicationAIMaterialMissingActiveContextIsNormalPreparationGap(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-target-context-waiting")
+	if err := s.db.Model(&ProfileAIContextBinding{}).
+		Where("profile_id = ? AND status = ?", fixture.ProfileID, ProfileAIContextBindingActive).
+		Updates(map[string]any{
+			"status": ProfileAIContextBindingSuperseded,
+			"reason": "fixtureWaiting",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	targets, err := s.CommunicationTargetsForAccount(AccountKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+	})
+	if err != nil || len(targets) != 1 || targets[0].Profile.ProfileID != fixture.ProfileID {
+		t.Fatalf("职位上下文准备缺口不得隐藏基础目标: targets=%+v err=%v", targets, err)
+	}
+	material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+	if err != nil || ready {
+		t.Fatalf("无活动职位上下文应返回未就绪: material=%+v ready=%v err=%v",
+			material, ready, err)
 	}
 }

@@ -126,10 +126,16 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err != nil {
 			return err
 		}
-		if !ready ||
-			target.Conversation.ConversationRef != req.ConversationRef ||
-			target.ContextBinding.RevisionHash != req.ContextRevisionHash ||
-			target.ResumeSnapshot.SnapshotID != req.ResumeSnapshotID {
+		if !ready || target.Conversation.ConversationRef != req.ConversationRef {
+			return ErrDialogueTurnBinding
+		}
+		material, materialReady, err := communicationAIMaterialTx(tx, target)
+		if err != nil {
+			return err
+		}
+		if !materialReady ||
+			material.ContextBinding.RevisionHash != req.ContextRevisionHash ||
+			material.ResumeSnapshot.SnapshotID != req.ResumeSnapshotID {
 			return ErrDialogueTurnBinding
 		}
 		var unfinished int64
@@ -159,7 +165,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 			return ErrDialogueTurnBinding
 		}
 		fixedPhrases, err := communication.BuildV4FixedPhraseView(
-			target.ContextRevision.SourcePackage,
+			material.ContextRevision.SourcePackage,
 		)
 		if err != nil {
 			return ErrDialogueTurnBinding

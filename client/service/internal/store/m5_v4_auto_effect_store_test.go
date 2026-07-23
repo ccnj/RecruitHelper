@@ -330,12 +330,17 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 	if err != nil || len(targets) != 1 {
 		t.Fatalf("正证后目标不可继续: targets=%+v err=%v", targets, err)
 	}
+	material, materialReady, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+	if err != nil || !materialReady {
+		t.Fatalf("正证后 AI 材料不可继续: material=%+v ready=%v err=%v",
+			material, materialReady, err)
+	}
 	next, err := s.FreezeCommunicationV4Turn(FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: fixture.ProfileID,
 		ConversationRef: fixture.ConversationRef, InputDigest: digest,
 		HistoryThroughSeq: 3, InboundFromSeq: 4, InboundThroughSeq: 4,
-		ContextRevisionHash: targets[0].ContextRevision.RevisionHash,
-		ResumeSnapshotID:    targets[0].ResumeSnapshot.SnapshotID,
+		ContextRevisionHash: material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
 		RecommendedTimeText: "合成推荐时段",
 		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt:            resultAt.Add(time.Minute),
