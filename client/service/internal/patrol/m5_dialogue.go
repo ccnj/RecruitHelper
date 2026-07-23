@@ -630,9 +630,50 @@ func (a *roundActor) executeM5Advice(
 	}
 	if !reserved.Created {
 		if reserved.Invocation.FinishedAt != nil {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "invocationStateConflict", a.manager.now())
+			if purpose != m5ai.PurposeReply ||
+				!isLegacyM5ReplyBudgetFalsePositive(reserved.Invocation) {
+				return a.manager.store.MarkDialogueTurnManualRequired(
+					turn.TurnID, "invocationStateConflict", a.manager.now(),
+				)
+			}
+			recovery, recoveryErr := a.manager.store.ReserveAuthorizedM5ReplyBudgetRecovery(
+				store.ReserveM5ReplyBudgetRecoveryRequest{
+					InvocationID: stableM5ID(
+						"invocation", turn.TurnID, string(m5ai.PurposeReply), "2",
+					),
+					TurnID: turn.TurnID, Provider: a.manager.advice.ProviderName(),
+					Model: a.manager.advice.ModelName(), InputHash: inputHash,
+					CreatedAt: a.manager.now(),
+				},
+			)
+			if recoveryErr != nil {
+				switch {
+				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
+					return a.manager.store.MarkDialogueTurnManualRequired(
+						turn.TurnID, "inputBoundaryChanged", a.manager.now(),
+					)
+				case errors.Is(recoveryErr, store.ErrAIInvocationBudget):
+					return a.manager.store.MarkDialogueTurnManualRequired(
+						turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now(),
+					)
+				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
+					return a.manager.store.MarkDialogueTurnManualRequired(
+						turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
+					)
+				default:
+					return recoveryErr
+				}
+			}
+			reserved = recovery
+			if reserved.Invocation.FinishedAt != nil {
+				return a.manager.store.MarkDialogueTurnManualRequired(
+					turn.TurnID, "replyBudgetRecoveryAlreadyFinished", a.manager.now(),
+				)
+			}
 		}
-		return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
+		if !reserved.Created {
+			return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
+		}
 	}
 
 	request := m5ai.CompletionRequest{Purpose: purpose, UserContent: content}
@@ -697,6 +738,22 @@ func (a *roundActor) executeM5Advice(
 		}
 	}
 	return a.completeM5Reply(turn.TurnID, completion, decision)
+}
+
+func isLegacyM5ReplyBudgetFalsePositive(invocation store.AIInvocation) bool {
+	return invocation.Purpose == m5ai.PurposeReply &&
+		invocation.Attempt == 1 &&
+		invocation.Status == store.AIInvocationBudgetBlocked &&
+		invocation.ErrorClass == "budgetBlocked" &&
+		invocation.FinishedAt != nil &&
+		invocation.OutputHash == "" &&
+		invocation.InputTokens == 0 &&
+		invocation.CachedInputTokens == 0 &&
+		invocation.OutputTokens == 0 &&
+		invocation.ReasoningTokens == nil &&
+		invocation.UsageShape == "" &&
+		invocation.LatencyMs == 0 &&
+		invocation.EstimatedCostMicros == 0
 }
 
 func (a *roundActor) finishInterruptedM5Advice(

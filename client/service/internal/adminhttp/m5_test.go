@@ -113,3 +113,25 @@ func TestM5TrialSelectionAndStatusNeverExposeResumeOrPlatformRefs(t *testing.T) 
 		t.Fatalf("M5 安全状态元数据不完整: %+v", decoded)
 	}
 }
+
+func TestM5ReplyBudgetRecoveryEndpointUsesNarrowGenericFailure(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	api := New(st, newFakeAdminHub(), nil, nil, nil, "")
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	const unknownSelection = "selection-not-authorized-for-recovery"
+	response := candidatePOST(t, mux, "/admin/m5/trial/recover-reply-budget", map[string]string{
+		"selectionId": unknownSelection,
+	})
+	if response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "当前失败轮次不允许预算恢复") ||
+		strings.Contains(response.Body.String(), unknownSelection) {
+		t.Fatalf("恢复入口错误或泄漏内部引用: code=%d body=%s",
+			response.Code, response.Body.String())
+	}
+}
