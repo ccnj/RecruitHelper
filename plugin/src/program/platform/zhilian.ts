@@ -3820,6 +3820,11 @@ async function mainReadThreadPage(
     const originTypeIsCandidate = details.originType === 2 ||
       (typeof details.originType === 'string' && details.originType.trim() === '2')
     const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+    const isCandidateOnlineResume = rawType === 'custom' && typeof row.content === 'string' &&
+      typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
+      Object.keys(inner).length > 0 && from === target &&
+      clean(row.status).toLowerCase() === 'success' &&
+      clean(inner.staffText) === '对方向您发送了在线简历'
     let direction: ZhilianThreadMessage['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -3841,6 +3846,12 @@ async function mainReadThreadPage(
       ) || '[交换微信请求]'
       state = 'pending'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (isCandidateOnlineResume) {
+      kind = 'card'
+      cardType = 'resumeAttachment'
+      text = clean(inner.staffText)
+      state = 'unknown'
+      identity = stableMessageIdentity(row.idServer)
     } else if (customType === 131) {
       if (!from) throw new Error('message_direction_unresolved')
       kind = 'text'
@@ -4501,6 +4512,7 @@ async function mainCaptureSendBaseline(
     from: string
     text: string
     content: string
+    contentWasString: boolean
     time: number
     sourceIndex: number
   }
@@ -4646,6 +4658,7 @@ async function mainCaptureSendBaseline(
           from: clean(row.from),
           text: String(row.text ?? ''),
           content: snapshotContent(row.content),
+          contentWasString: typeof row.content === 'string',
           time,
           sourceIndex,
         })
@@ -4684,12 +4697,17 @@ async function mainCaptureSendBaseline(
       const originTypeIsCandidate = details.originType === 2 ||
         (typeof details.originType === 'string' && details.originType.trim() === '2')
       const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+      const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
+        typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
+        Object.keys(inner).length > 0 && from === target &&
+        clean(row.status).toLowerCase() === 'success' &&
+        clean(inner.staffText) === '对方向您发送了在线简历'
       let direction: ZhilianMessageAnchor['direction'] = from
         ? from === staffID ? 'out' : 'in'
         : 'system'
       let kind: 'text' | 'card' | 'system' = 'system'
       let text: string | null = null
-      let cardType: 'wechatExchange' | null = null
+      let cardType: 'wechatExchange' | 'resumeAttachment' | null = null
       let identity = ''
       if (rawType === 'text') {
         if (!from) return null
@@ -4702,6 +4720,11 @@ async function mainCaptureSendBaseline(
           details.userContent ?? details.receiverText ?? details.detail,
         ) || '[交换微信请求]'
         identity = clean(details.requestId ?? details.id ?? details.cardId)
+      } else if (isCandidateOnlineResume) {
+        kind = 'card'
+        cardType = 'resumeAttachment'
+        text = clean(inner.staffText)
+        identity = row.idServer
       } else if (customType === 131) {
         if (!from) return null
         kind = 'text'
@@ -5159,6 +5182,7 @@ function mainSendMessageOnce(
     from: string
     text: string
     content: string
+    contentWasString: boolean
     time: number
     sourceIndex: number
   }
@@ -5221,6 +5245,7 @@ function mainSendMessageOnce(
         from: clean(row.from),
         text: String(row.text ?? ''),
         content: snapshotContent(row.content),
+        contentWasString: typeof row.content === 'string',
         time,
         sourceIndex,
       })
@@ -5272,12 +5297,17 @@ function mainSendMessageOnce(
     const originTypeIsCandidate = details.originType === 2 ||
       (typeof details.originType === 'string' && details.originType.trim() === '2')
     const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+    const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
+      typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
+      Object.keys(inner).length > 0 && from === target &&
+      clean(row.status).toLowerCase() === 'success' &&
+      clean(inner.staffText) === '对方向您发送了在线简历'
     let direction: ZhilianMessageAnchor['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
     let kind: 'text' | 'card' | 'system' = 'system'
     let normalizedText = ''
-    let cardType: 'wechatExchange' | null = null
+    let cardType: 'wechatExchange' | 'resumeAttachment' | null = null
     let identity = ''
     if (rawType === 'text') {
       if (!from) return null
@@ -5290,6 +5320,11 @@ function mainSendMessageOnce(
         details.userContent ?? details.receiverText ?? details.detail,
       ) || '[交换微信请求]'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (isCandidateOnlineResume) {
+      kind = 'card'
+      cardType = 'resumeAttachment'
+      normalizedText = clean(inner.staffText)
+      identity = row.idServer
     } else if (customType === 131) {
       if (!from) return null
       kind = 'text'

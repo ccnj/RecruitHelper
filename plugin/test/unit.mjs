@@ -4289,6 +4289,125 @@ test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严�
   }
 })
 
+test('智联 313 在线简历只在真机严格形状成立时三路提升为简历卡', async () => {
+  const fixture = installM3SendFixture()
+  const template = '对方向您发送了在线简历'
+  const staffID = globalThis.window.$session.staff.staffId
+  const variants = [
+    {
+      name: '真机严格形状', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: `  ${template}  `, card: true,
+      idServer: '  server-type-313-raw-identity  ',
+    },
+    {
+      name: '招聘方发送者', rawType: 'custom', envelopeType: '313', from: staffID,
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '第三方发送者', rawType: 'custom', envelopeType: '313', from: 'third-party',
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '发送者缺失', rawType: 'custom', envelopeType: '313', from: '',
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '非 success', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'failed', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '固定模板不匹配', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: '在线简历提示发生变化', card: false,
+    },
+    {
+      name: '只有展示 fallback 文本', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: '', rowText: template, card: false,
+    },
+    {
+      name: '缺少内层 content 对象', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: false, staffText: template, card: false,
+    },
+    {
+      name: '外层 content 不是序列化字符串', rawType: 'custom', envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: template, contentObject: true, card: false,
+    },
+    {
+      name: '内层 type 是数字', rawType: 'custom', envelopeType: 313, from: fixture.peerRef,
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '相邻类型', rawType: 'custom', envelopeType: '314', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+    {
+      name: '数字顶层类型', rawType: 313, envelopeType: '313', from: fixture.peerRef,
+      status: 'success', nested: true, staffText: template, card: false,
+    },
+  ]
+  try {
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = variant.idServer ?? `server-type-313-${index}`
+      const details = { staffText: variant.staffText }
+      const envelope = variant.nested
+        ? { type: variant.envelopeType, content: JSON.stringify(details) }
+        : { type: variant.envelopeType, ...details }
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: variant.status,
+        type: variant.rawType,
+        from: variant.from,
+        text: variant.rowText ?? '',
+        content: variant.contentObject ? envelope : JSON.stringify(envelope),
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.equal(message.direction, variant.card ? 'in' : 'system', `${variant.name}: direction`)
+      assert.equal(message.kind, variant.card ? 'card' : 'system', `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.card ? 'resumeAttachment' : null, `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.card ? 'unknown' : null, `${variant.name}: cardState`)
+      const expectedText = variant.staffText.trim() || '[系统消息:313]'
+      assert.equal(message.text, variant.card ? template : expectedText, `${variant.name}: text`)
+      const expectedHash = variant.card
+        ? m3Hash(`card\x1fresumeAttachment\x1f${idServer.trim()}`)
+        : m3Hash(expectedText)
+      assert.equal(message.contentHash, expectedHash, `${variant.name}: contentHash`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+
+      const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
+    }
+
+    fixture.rows.splice(0, fixture.rows.length, {
+      time: 99,
+      status: 'success',
+      type: 'custom',
+      from: fixture.peerRef,
+      content: JSON.stringify({ type: '313', content: JSON.stringify({ staffText: template }) }),
+    })
+    const missingIdentity = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+    assert.match(missingIdentity.__recruitHelperMainError, /message_identity_missing/u,
+      '313 缺少 idServer 时 readThread 必须响亮失败')
+    const missingBaseline = await fixture.capture([])
+    assert.equal(missingBaseline.status, 'failed', '313 缺少 idServer 时不得建立发送基线')
+    assert.equal(fixture.invoke({
+      status: 'ready',
+      stage: 'ready',
+      serverSourceKeys: [],
+      targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
+    }, 'preflight', { expectedTail: [] }).status, 'failed',
+    '313 缺少 idServer 时最终 evaluator 必须停止')
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('智联 105 只在候选人身份与 originType=2 同时成立时三路提升为请求卡', async () => {
   const fixture = installM3SendFixture()
   const staffID = globalThis.window.$session.staff.staffId
