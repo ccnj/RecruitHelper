@@ -55,6 +55,28 @@ func seedCommunicationV4PatrolTargetWithBoundary(
 	boundary []store.MessageDraft,
 ) communicationV4PatrolFixture {
 	t.Helper()
+	return seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
+		t,
+		h,
+		suffix,
+		boundary,
+		`{
+			"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
+			"silence48Wechat":{"enabled":true,"messages":["合成冷催"]},
+			"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
+			"meetingAccepted":{"enabled":true,"messages":["好的，面试安排已确认"]}
+		}`,
+	)
+}
+
+func seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
+	t *testing.T,
+	h *harness,
+	suffix string,
+	boundary []store.MessageDraft,
+	fixedPhrases string,
+) communicationV4PatrolFixture {
+	t.Helper()
 	now := h.clock.Now()
 	profileID := "profile-v4-patrol-" + suffix
 	platformUserRef := "person-v4-patrol-" + suffix
@@ -127,12 +149,7 @@ func seedCommunicationV4PatrolTargetWithBoundary(
 		{DocType: "多轮沟通", Content: replyPrompt},
 		{DocType: "意向判断", Content: intentPrompt},
 		{DocType: "客户事实库", Content: ""},
-		{DocType: "固定话术", Content: `{
-			"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
-			"silence48Wechat":{"enabled":true,"messages":["合成冷催"]},
-			"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
-			"meetingAccepted":{"enabled":true,"messages":["好的，面试安排已确认"]}
-		}`},
+		{DocType: "固定话术", Content: fixedPhrases},
 	}
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
@@ -1624,6 +1641,13 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 	if err != nil || accepted.Aggregate.State.MainStatus != communication.V4StatusInterviewed {
 		t.Fatalf("服务态前置事实失败: result=%+v err=%v", accepted, err)
 	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 || hand.commandCount() != 3 {
+		t.Fatalf("服务态前置接受事实必须先收敛固定回执与换微信卡: err=%v advice=%+v sends=%d",
+			err, advice.requests, hand.commandCount())
+	}
 	messages, err = h.db.MessagesForConversation(key)
 	if err != nil || len(messages) == 0 {
 		t.Fatalf("服务态前置账本不可用: messages=%+v err=%v", messages, err)
@@ -1649,7 +1673,7 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 		t.Fatal(err)
 	}
 	if len(advice.requests) != 3 || advice.requests[2].Purpose != m5ai.PurposeReply ||
-		hand.commandCount() != 2 {
+		hand.commandCount() != 4 {
 		t.Fatalf("服务态必须新增一次 reply、零 intent、一次发送: advice=%+v sends=%d",
 			advice.requests, hand.commandCount())
 	}

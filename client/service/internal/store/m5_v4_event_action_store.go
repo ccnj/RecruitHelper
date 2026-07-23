@@ -20,6 +20,11 @@ const (
 	CommunicationV4EventActionFailureNotificationChannelDeferred = "notificationChannelDeferred"
 	CommunicationV4EventActionFailurePrimitiveUnavailable        = "primitiveUnavailable"
 	CommunicationV4EventActionFailureDialogueActionOwned         = "dialogueActionOwned"
+	CommunicationV4EventActionFailureRunnerUnavailable           = "automaticRunnerUnavailable"
+	CommunicationV4EventActionFailureBindingUnavailable          = "automaticBindingUnavailable"
+	CommunicationV4EventActionFailureDependencyUnavailable       = "automaticDependencyUnavailable"
+	CommunicationV4EventActionFailureDispatchNotConstructed      = "automaticDispatchNotConstructed"
+	CommunicationV4EventActionFailureActionInvalid               = "automaticActionInvalid"
 )
 
 var (
@@ -224,6 +229,155 @@ func (s *Store) CommunicationV4EventActionsByProfile(
 		Order("planned_at, source_input_kind, source_input_key, source_ordinal").
 		Find(&actions).Error
 	return actions, err
+}
+
+// PlannedCommunicationV4EventActionsForAccount returns only effect work that
+// is still eligible for automatic dispatch. Ordering is stable across rounds
+// and keeps actions from one immutable source in reducer order.
+func (s *Store) PlannedCommunicationV4EventActionsForAccount(
+	key AccountKey,
+) ([]CommunicationV4EventAction, error) {
+	key.Platform = strings.TrimSpace(key.Platform)
+	key.AccountRef = strings.TrimSpace(key.AccountRef)
+	if key.Platform == "" || key.AccountRef == "" {
+		return nil, ErrCommunicationV4EventActionInvalid
+	}
+	var actions []CommunicationV4EventAction
+	err := s.db.
+		Table("communication_v4_event_actions AS action").
+		Select("action.*").
+		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = action.profile_id").
+		Joins("JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = action.profile_id").
+		Where(
+			"profile.platform = ? AND profile.account_ref = ? AND action.status = ? AND aggregate.automation_status = ?",
+			key.Platform,
+			key.AccountRef,
+			CommunicationV4EventActionPlanned,
+			ProfileCommunicationAutomationActive,
+		).
+		Order("action.planned_at, action.profile_id, action.source_input_kind, action.source_input_key, action.source_ordinal, action.action_id").
+		Scan(&actions).Error
+	return actions, err
+}
+
+// CommunicationV4EventActionsNeedingProfileManualForAccount exposes the one
+// materialization-level manual outcome that intentionally does not mutate the
+// aggregate. Patrol consumes it by isolating that profile; deferred and
+// effect-linked terminal rows are not part of this seam.
+func (s *Store) CommunicationV4EventActionsNeedingProfileManualForAccount(
+	key AccountKey,
+) ([]CommunicationV4EventAction, error) {
+	key.Platform = strings.TrimSpace(key.Platform)
+	key.AccountRef = strings.TrimSpace(key.AccountRef)
+	if key.Platform == "" || key.AccountRef == "" {
+		return nil, ErrCommunicationV4EventActionInvalid
+	}
+	var actions []CommunicationV4EventAction
+	err := s.db.
+		Table("communication_v4_event_actions AS action").
+		Select("action.*").
+		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = action.profile_id").
+		Joins("JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = action.profile_id").
+		Where(
+			"profile.platform = ? AND profile.account_ref = ? AND action.status = ? AND action.failure_reason = ? AND aggregate.automation_status = ?",
+			key.Platform,
+			key.AccountRef,
+			CommunicationV4EventActionManualRequired,
+			CommunicationV4EventActionFailureFixedPhraseUnavailable,
+			ProfileCommunicationAutomationActive,
+		).
+		Order("action.profile_id, action.planned_at, action.source_input_kind, action.source_input_key, action.source_ordinal, action.action_id").
+		Scan(&actions).Error
+	return actions, err
+}
+
+func (s *Store) CommunicationV4EventActionByID(
+	actionID string,
+) (*CommunicationV4EventAction, error) {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" {
+		return nil, ErrCommunicationV4EventActionInvalid
+	}
+	var action CommunicationV4EventAction
+	err := s.db.First(&action, "action_id = ?", actionID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+// MarkCommunicationV4EventActionManualRequired closes only work for which no
+// WAL exists. Effect-linked rows remain exclusively owned by the persistent
+// recovery rail.
+func (s *Store) MarkCommunicationV4EventActionManualRequired(
+	actionID string,
+	reason string,
+	at time.Time,
+) error {
+	actionID = strings.TrimSpace(actionID)
+	reason = strings.TrimSpace(reason)
+	if actionID == "" || !communicationV4EventActionPreWALFailureReason(reason) {
+		return ErrCommunicationV4EventActionInvalid
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	at = at.UTC()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var action CommunicationV4EventAction
+		if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCommunicationV4EventActionMissing
+			}
+			return err
+		}
+		if action.Status == CommunicationV4EventActionEffectPending ||
+			action.Status == CommunicationV4EventActionSent ||
+			action.Status == CommunicationV4EventActionManualRequired ||
+			action.Status == CommunicationV4EventActionDeferred ||
+			action.EffectIntentID != nil {
+			return nil
+		}
+		if action.Status != CommunicationV4EventActionPlanned ||
+			action.EffectStartedAt != nil ||
+			action.SentAt != nil ||
+			action.FailureReason != "" {
+			return ErrCommunicationV4EventActionConflict
+		}
+		updated := tx.Model(&CommunicationV4EventAction{}).
+			Where(
+				"action_id = ? AND status = ? AND effect_intent_id IS NULL",
+				action.ActionID,
+				CommunicationV4EventActionPlanned,
+			).
+			Updates(map[string]any{
+				"status":         CommunicationV4EventActionManualRequired,
+				"failure_reason": reason,
+				"updated_at":     at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationV4EventActionConflict
+		}
+		aggregate, err := communicationV4AggregateTx(tx, action.ProfileID)
+		if err != nil {
+			return err
+		}
+		if aggregate.AutomationStatus == ProfileCommunicationAutomationManualRequired {
+			return nil
+		}
+		return markCommunicationV4AutomationManualTx(
+			tx,
+			action.ProfileID,
+			reason,
+			at,
+		)
+	})
 }
 
 func (s *Store) CommunicationV4EventActionsBySource(
@@ -548,6 +702,14 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 					row.EffectStartedAt == nil &&
 					row.SentAt == nil
 			}
+			if communicationV4EventActionPreWALFailureReason(row.FailureReason) {
+				return row.Text != "" &&
+					row.ContentHash == textcanon.Hash(row.Text) &&
+					row.ContextRevisionHash != "" &&
+					row.EffectIntentID == nil &&
+					row.EffectStartedAt == nil &&
+					row.SentAt == nil
+			}
 			return row.Text != "" &&
 				row.ContentHash == textcanon.Hash(row.Text) &&
 				row.ContextRevisionHash != "" &&
@@ -568,6 +730,15 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			row.Status != CommunicationV4EventActionSent &&
 			row.Status != CommunicationV4EventActionManualRequired {
 			return false
+		}
+		if row.Status == CommunicationV4EventActionManualRequired &&
+			communicationV4EventActionPreWALFailureReason(row.FailureReason) {
+			return row.Text == "" &&
+				row.ContentHash == communicationWechatInviteContentHash() &&
+				row.ContextRevisionHash == "" &&
+				row.EffectIntentID == nil &&
+				row.EffectStartedAt == nil &&
+				row.SentAt == nil
 		}
 		return (row.Status != CommunicationV4EventActionManualRequired ||
 			validCommunicationV4EventActionFailureReason(row.FailureReason)) &&
@@ -622,6 +793,19 @@ func validCommunicationV4EventActionEffectFields(
 func validCommunicationV4EventActionFailureReason(reason string) bool {
 	switch reason {
 	case "effectFailed", "effectSuspect", "effectResolvedFailed":
+		return true
+	default:
+		return false
+	}
+}
+
+func communicationV4EventActionPreWALFailureReason(reason string) bool {
+	switch reason {
+	case CommunicationV4EventActionFailureRunnerUnavailable,
+		CommunicationV4EventActionFailureBindingUnavailable,
+		CommunicationV4EventActionFailureDependencyUnavailable,
+		CommunicationV4EventActionFailureDispatchNotConstructed,
+		CommunicationV4EventActionFailureActionInvalid:
 		return true
 	default:
 		return false

@@ -22,6 +22,12 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 	if err := a.processCommunicationV4CardTransitions(ctx); err != nil {
 		return err
 	}
+	// Card-transition projection may have just materialized fixed receipts and
+	// dependent cards. Drain them before taking profile snapshots, so no target
+	// is processed against state made stale by a newly confirmed effect.
+	if err := a.drainCommunicationV4EventActions(ctx); err != nil {
+		return err
+	}
 	targets, err := a.manager.store.CommunicationTargetsForAccount(a.key())
 	if err != nil {
 		return err
@@ -34,7 +40,10 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	// Dialogue and non-candidate-tail projection can materialize event actions
+	// during the profile loop. They are dispatched only after all snapshots
+	// have been consumed; no profile flow follows this drain in the same round.
+	return a.drainCommunicationV4EventActions(ctx)
 }
 
 func (a *roundActor) processCommunicationV4Target(
