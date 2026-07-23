@@ -26,6 +26,8 @@ type communicationV4AdviceDigestInput struct {
 	IntentLabel  m5ai.IntentLabel       `json:"intentLabel,omitempty"`
 	IntentSource DialogueIntentSource   `json:"intentSource,omitempty"`
 	TextHash     string                 `json:"textHash,omitempty"`
+	ReplyAction  m5ai.ReplyAction       `json:"replyAction,omitempty"`
+	MeetingTime  string                 `json:"meetingTime,omitempty"`
 	ManualReason string                 `json:"manualReason,omitempty"`
 }
 
@@ -34,14 +36,14 @@ func communicationV4AdviceDigest(
 	invocation AIInvocation,
 	label m5ai.IntentLabel,
 	source DialogueIntentSource,
-	text string,
+	reply m5ai.ReplySuggestion,
 	manualReason string,
 ) (string, error) {
 	return communicationV4InputDigest(communicationV4AdviceDigestInput{
 		TurnID: turn.TurnID, InvocationID: invocation.InvocationID,
 		Purpose: invocation.Purpose, Status: invocation.Status, OutputHash: invocation.OutputHash,
-		IntentLabel: label, IntentSource: source, TextHash: textcanon.Hash(text),
-		ManualReason: manualReason,
+		IntentLabel: label, IntentSource: source, TextHash: textcanon.Hash(reply.Text),
+		ReplyAction: reply.Action, MeetingTime: reply.MeetingTime, ManualReason: manualReason,
 	})
 }
 
@@ -89,6 +91,7 @@ func communicationV4TurnReducerInputTx(
 	if err != nil {
 		return communication.V4InboundTurnDecision{}, err
 	}
+	recommendedSlots, _ := m5ai.FrozenRecommendedSlots(turn.RecommendedTimeText)
 	var revision JobAIContextRevision
 	if err := tx.First(&revision, "revision_hash = ?", turn.ContextRevisionHash).Error; err != nil {
 		return communication.V4InboundTurnDecision{}, ErrDialogueTurnBinding
@@ -99,7 +102,8 @@ func communicationV4TurnReducerInputTx(
 	}
 	decision, err := communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
 		State: aggregate.State, TurnID: turn.TurnID, Messages: facts,
-		Intent: intent, Reply: reply, FixedPhrases: fixedPhrases,
+		RecommendedSlots: recommendedSlots,
+		Intent:           intent, Reply: reply, FixedPhrases: fixedPhrases,
 	})
 	if err != nil {
 		return communication.V4InboundTurnDecision{}, err
@@ -439,7 +443,7 @@ func completeCommunicationV4IntentTx(
 	at time.Time,
 ) error {
 	digest, err := communicationV4AdviceDigest(
-		*turn, invocation, label, source, "", manualReason,
+		*turn, invocation, label, source, m5ai.ReplySuggestion{}, manualReason,
 	)
 	if err != nil {
 		return err
@@ -491,17 +495,17 @@ func completeCommunicationV4ReplyTx(
 	tx *gorm.DB,
 	turn *DialogueTurn,
 	invocation AIInvocation,
-	text string,
+	reply m5ai.ReplySuggestion,
 	contentHash string,
 	manualReason string,
 	at time.Time,
 ) (*CommunicationAction, error) {
 	if manualReason == "" && invocation.Status == AIInvocationOK &&
-		(strings.TrimSpace(text) == "" || contentHash != textcanon.Hash(text)) {
+		(strings.TrimSpace(reply.Text) == "" || contentHash != textcanon.Hash(reply.Text)) {
 		return nil, ErrCommunicationActionInvalid
 	}
 	digest, err := communicationV4AdviceDigest(
-		*turn, invocation, turn.IntentLabel, turn.IntentSource, text, manualReason,
+		*turn, invocation, turn.IntentLabel, turn.IntentSource, reply, manualReason,
 	)
 	if err != nil {
 		return nil, err
@@ -554,14 +558,20 @@ func completeCommunicationV4ReplyTx(
 				return nil, err
 			}
 		}
-		reply := communication.ReplyAdvice{State: communication.AdviceFailed}
+		replyAdvice := communication.ReplyAdvice{State: communication.AdviceFailed}
 		if invocation.Status == AIInvocationOK {
-			reply = communication.ReplyAdvice{
+			replyAdvice = communication.ReplyAdvice{
 				State:      communication.AdviceOK,
-				Suggestion: m5ai.ReplySuggestion{Text: text},
+				Suggestion: reply,
 			}
 		}
-		decision, err = communicationV4TurnReducerInputTx(tx, *turn, aggregate, intent, reply)
+		decision, err = communicationV4TurnReducerInputTx(
+			tx,
+			*turn,
+			aggregate,
+			intent,
+			replyAdvice,
+		)
 		if err != nil {
 			return nil, err
 		}

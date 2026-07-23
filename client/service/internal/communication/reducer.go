@@ -75,8 +75,9 @@ type FrozenInboundMessage struct {
 // facts needed by the reducer. Snapshot/context/rendering validity is proved by
 // the freezing transaction and provider adapter before advice reaches here.
 type FrozenTurnFacts struct {
-	TurnID   string
-	Messages []FrozenInboundMessage
+	TurnID           string
+	Messages         []FrozenInboundMessage
+	RecommendedSlots []string
 }
 
 type IntentAdvice struct {

@@ -70,6 +70,193 @@ func TestV4DialogueOrdinaryTurnAuthorizesIntentThenReplyInOrder(t *testing.T) {
 	}
 }
 
+func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
+	baseTurn := ordinaryTurn()
+	baseTurn.RecommendedSlots = []string{
+		"2026-07-14 09:00:00",
+		"2026-07-14 14:00:00",
+	}
+	base := V4DialogueInput{
+		State: activeV4DialogueState(), Requirement: V4DialogueClassifyAndReply,
+		Turn: baseTurn,
+		Intent: IntentAdvice{
+			State:      AdviceOK,
+			Suggestion: m5ai.IntentSuggestion{Label: m5ai.IntentInterested},
+		},
+	}
+
+	t.Run("no action remains one text", func(t *testing.T) {
+		input := base
+		input.Reply = ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Text: "我们继续聊聊岗位。",
+			},
+		}
+		decision, err := ReduceV4Dialogue(input)
+		if err != nil || decision.Status != V4DialogueActionsPlanned ||
+			len(decision.Actions) != 1 ||
+			decision.Actions[0].Kind != V4ActionReplyText {
+			t.Fatalf("无动作建议不应改变正文路径: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("wechat action requires unused balance", func(t *testing.T) {
+		input := base
+		input.Reply = ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Text:   "方便的话，我发个换微信邀请。",
+				Action: m5ai.ReplyActionInviteWechat,
+			},
+		}
+		decision, err := ReduceV4Dialogue(input)
+		if err != nil || decision.Status != V4DialogueActionsPlanned ||
+			len(decision.Actions) != 2 ||
+			decision.Actions[0].Kind != V4ActionReplyText ||
+			decision.Actions[1].Kind != V4ActionInviteWechat {
+			t.Fatalf("合法换微信建议未形成固定两动作: decision=%+v err=%v", decision, err)
+		}
+
+		input.State.WechatState = V4WechatInvited
+		blocked, err := ReduceV4Dialogue(input)
+		if err != nil || blocked.Status != V4DialogueManualRequired ||
+			blocked.ManualReason != V4ManualReplyInvalid ||
+			len(blocked.Actions) != 0 {
+			t.Fatalf("已消耗微信余额仍形成动作: decision=%+v err=%v", blocked, err)
+		}
+
+		input.State = base.State
+		input.Turn.Messages = []FrozenInboundMessage{{
+			Seq:  4,
+			Kind: FrozenMessageSystem,
+		}}
+		withoutCandidateMessage, err := ReduceV4Dialogue(input)
+		if err != nil ||
+			withoutCandidateMessage.Status != V4DialogueManualRequired ||
+			len(withoutCandidateMessage.Actions) != 0 {
+			t.Fatalf(
+				"没有本轮真实候选消息仍形成动作: decision=%+v err=%v",
+				withoutCandidateMessage,
+				err,
+			)
+		}
+	})
+
+	t.Run("meeting action uniquely binds frozen slot", func(t *testing.T) {
+		input := base
+		input.Reply = ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Text:        "那我们约在这个时间视频面试。",
+				Action:      m5ai.ReplyActionStartOnlineMeeting,
+				MeetingTime: " \n7月14日14:00\t",
+			},
+		}
+		decision, err := ReduceV4Dialogue(input)
+		wantStart, _ := m5ai.MatchFrozenRecommendedMeetingTime(
+			baseTurn.RecommendedSlots,
+			"7月14日14:00",
+		)
+		if err != nil || decision.Status != V4DialogueActionsPlanned ||
+			len(decision.Actions) != 2 ||
+			decision.Actions[1].Kind != V4ActionInterviewInvite ||
+			decision.Actions[1].InterviewStartsAtMs == nil ||
+			*decision.Actions[1].InterviewStartsAtMs != wantStart ||
+			decision.Actions[1].InterviewEndsAtMs == nil ||
+			*decision.Actions[1].InterviewEndsAtMs != wantStart+V4InterviewDurationMs ||
+			decision.Actions[1].InterviewMethod == nil ||
+			*decision.Actions[1].InterviewMethod != "wechatVideo" {
+			t.Fatalf("合法邀面建议没有派生固定卡片参数: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("meeting mismatch makes the whole turn manual", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			slots       []string
+			meetingTime string
+		}{
+			{name: "zero match", slots: baseTurn.RecommendedSlots, meetingTime: "7月15日14:00"},
+			{name: "multiple matches", slots: []string{"2026-07-14 14:00:00", "2026-07-14 14:00:00"}, meetingTime: "7月14日14:00"},
+			{name: "legacy turn without slots", slots: nil, meetingTime: "7月14日14:00"},
+			{name: "invalid format", slots: baseTurn.RecommendedSlots, meetingTime: "07月14日14:00"},
+		}
+		for _, testCase := range cases {
+			t.Run(testCase.name, func(t *testing.T) {
+				input := base
+				input.Turn.RecommendedSlots = testCase.slots
+				input.Reply = ReplyAdvice{
+					State: AdviceOK,
+					Suggestion: m5ai.ReplySuggestion{
+						Text:        "这条正文也不得单独发送。",
+						Action:      m5ai.ReplyActionStartOnlineMeeting,
+						MeetingTime: testCase.meetingTime,
+					},
+				}
+				decision, err := ReduceV4Dialogue(input)
+				if err != nil || decision.Status != V4DialogueManualRequired ||
+					decision.ManualReason != V4ManualReplyInvalid ||
+					len(decision.Actions) != 0 {
+					t.Fatalf("非法邀面建议未整轮转人工: decision=%+v err=%v", decision, err)
+				}
+			})
+		}
+	})
+
+	t.Run("non ordinary reply purpose rejects AI action", func(t *testing.T) {
+		input := base
+		input.State.MainStatus = V4StatusInterviewed
+		input.Requirement = V4DialogueServiceReply
+		input.Intent = IntentAdvice{State: AdviceAbsent}
+		input.Reply = ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Text:   "服务态不能执行模型动作。",
+				Action: m5ai.ReplyActionInviteWechat,
+			},
+		}
+		decision, err := ReduceV4Dialogue(input)
+		if err != nil || decision.Status != V4DialogueManualRequired ||
+			decision.ManualReason != V4ManualReplyInvalid ||
+			len(decision.Actions) != 0 {
+			t.Fatalf("非普通 reply purpose 执行了模型动作: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("reducer rejects action shapes even if parser was bypassed", func(t *testing.T) {
+		for _, suggestion := range []m5ai.ReplySuggestion{
+			{
+				Text:   "未知动作不得执行。",
+				Action: m5ai.ReplyAction("futureAction"),
+			},
+			{
+				Text:        "换微信动作不得携带会议时间。",
+				Action:      m5ai.ReplyActionInviteWechat,
+				MeetingTime: "7月14日14:00",
+			},
+			{
+				Text:        "无动作也不得携带空白会议字段。",
+				Action:      m5ai.ReplyActionNone,
+				MeetingTime: " ",
+			},
+		} {
+			input := base
+			input.Reply = ReplyAdvice{State: AdviceOK, Suggestion: suggestion}
+			decision, err := ReduceV4Dialogue(input)
+			if err != nil || decision.Status != V4DialogueManualRequired ||
+				len(decision.Actions) != 0 {
+				t.Fatalf(
+					"绕过 parser 的非法动作形态未被 reducer 重判: suggestion=%+v decision=%+v err=%v",
+					suggestion,
+					decision,
+					err,
+				)
+			}
+		}
+	})
+}
+
 func TestV4DialogueShortCircuitCanSkipIntentAI(t *testing.T) {
 	input := V4DialogueInput{
 		State: activeV4DialogueState(), Requirement: V4DialogueClassifyAndReply,

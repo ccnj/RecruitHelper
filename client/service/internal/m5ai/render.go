@@ -330,8 +330,9 @@ func slotsBlock(frozenNow time.Time, slots []string) (string, error) {
 }
 
 type frozenRecommendedTimeText struct {
-	Inline string `json:"inline"`
-	Block  string `json:"block"`
+	Inline string   `json:"inline"`
+	Block  string   `json:"block"`
+	Slots  []string `json:"slots,omitempty"`
 }
 
 // FreezeRecommendedTimeText freezes both approved schedule placements because
@@ -347,7 +348,11 @@ func FreezeRecommendedTimeText(frozenNow time.Time, slots []string) (string, err
 	if err != nil {
 		return "", err
 	}
-	raw, err := json.Marshal(frozenRecommendedTimeText{Inline: inline, Block: block})
+	raw, err := json.Marshal(frozenRecommendedTimeText{
+		Inline: inline,
+		Block:  block,
+		Slots:  append([]string(nil), slots...),
+	})
 	return string(raw), err
 }
 
@@ -361,7 +366,62 @@ func decodeFrozenRecommendedTimeText(raw string) (frozenRecommendedTimeText, err
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return frozenRecommendedTimeText{}, errors.New("invalidFrozenRecommendedTimeText")
 	}
+	for _, rawSlot := range frozen.Slots {
+		slot, err := time.ParseInLocation("2006-01-02 15:04:05", rawSlot, shanghai)
+		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot ||
+			slot.Minute() != 0 || slot.Second() != 0 {
+			return frozenRecommendedTimeText{}, errors.New("invalidFrozenRecommendedTimeText")
+		}
+	}
 	return frozen, nil
+}
+
+// FrozenRecommendedSlots returns the canonical slots carried by a newly
+// frozen turn. Legacy payloads that only contain rendered text remain valid
+// for prompt replay but deliberately report no action-authorizing slot list.
+func FrozenRecommendedSlots(raw string) ([]string, bool) {
+	frozen, err := decodeFrozenRecommendedTimeText(raw)
+	if err != nil || len(frozen.Slots) == 0 {
+		return nil, false
+	}
+	return append([]string(nil), frozen.Slots...), true
+}
+
+var meetingTimePattern = regexp.MustCompile(
+	`^(?:[1-9]|1[0-2])月(?:[1-9]|[12][0-9]|3[01])日(?:[01][0-9]|2[0-3]):[0-5][0-9]$`,
+)
+
+// MatchFrozenRecommendedMeetingTime applies the deliberately narrow reply
+// contract: trim the model value, require M月D日HH:mm, and accept it only when
+// exactly one canonical Shanghai slot renders to the same value.
+func MatchFrozenRecommendedMeetingTime(slots []string, raw string) (int64, bool) {
+	meetingTime := strings.TrimSpace(raw)
+	if len(slots) == 0 || !meetingTimePattern.MatchString(meetingTime) {
+		return 0, false
+	}
+	matchedAt := int64(0)
+	matches := 0
+	for _, rawSlot := range slots {
+		slot, err := time.ParseInLocation("2006-01-02 15:04:05", rawSlot, shanghai)
+		if err != nil || slot.Format("2006-01-02 15:04:05") != rawSlot ||
+			slot.Minute() != 0 || slot.Second() != 0 {
+			return 0, false
+		}
+		rendered := fmt.Sprintf(
+			"%d月%d日%s",
+			slot.Month(),
+			slot.Day(),
+			slot.Format("15:04"),
+		)
+		if rendered == meetingTime {
+			matches++
+			matchedAt = slot.UnixMilli()
+		}
+	}
+	if matches != 1 {
+		return 0, false
+	}
+	return matchedAt, true
 }
 
 func renderReplyTemplateFrozen(prompt, resumeJSON, history string, frozen frozenRecommendedTimeText) (string, error) {

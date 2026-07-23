@@ -920,7 +920,12 @@ func (a *roundActor) executeM5Advice(
 	logAIInvocationOutcome(
 		a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
 	)
-	err = a.completeM5Reply(turn.TurnID, completion, decision)
+	err = a.completeM5Reply(
+		turn.TurnID,
+		completion,
+		decision,
+		reply.Suggestion,
+	)
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 	}
@@ -971,7 +976,12 @@ func (a *roundActor) finishInterruptedM5Advice(
 	if err != nil {
 		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 	}
-	return a.completeM5Reply(turn.TurnID, completion, decision)
+	return a.completeM5Reply(
+		turn.TurnID,
+		completion,
+		decision,
+		m5ai.ReplySuggestion{},
+	)
 }
 
 func (a *roundActor) reduceM5ReplyDecision(
@@ -1081,11 +1091,14 @@ func (a *roundActor) completeM5Reply(
 	turnID string,
 	completion store.AIInvocationCompletion,
 	decision communication.Decision,
+	suggestion m5ai.ReplySuggestion,
 ) error {
 	request := store.CompleteReplyInvocationRequest{Completion: completion, PlannedAt: a.manager.now()}
 	if decision.Action != nil {
 		request.ActionID = stableM5ID("action", turnID, string(decision.Action.Kind))
 		request.Text = decision.Action.Text
+		request.Action = suggestion.Action
+		request.MeetingTime = suggestion.MeetingTime
 		request.ContentHash = syncledger.HashText(decision.Action.Text)
 	} else {
 		request.ManualReason = string(decision.ManualReason)

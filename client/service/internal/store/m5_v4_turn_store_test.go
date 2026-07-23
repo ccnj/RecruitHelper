@@ -351,6 +351,203 @@ func TestCommunicationV4TurnAIAdviceDoesNotNeedTrialSlot(t *testing.T) {
 	}
 }
 
+func TestCommunicationV4ReplyActionPersistsMeetingPlanAndReplaysWithoutGrowth(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-meeting-advice")
+	text := "合成普通回复"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-meeting-advice-2", Text: &text,
+	})
+	request := communicationV4TurnRequest(t, s, fixture, inbound)
+	var err error
+	request.RecommendedTimeText, err = m5ai.FreezeRecommendedTimeText(
+		time.Date(2026, 7, 10, 14, 23, 0, 0, time.FixedZone("CST", 8*60*60)),
+		[]string{"2026-07-14 09:00:00", "2026-07-14 14:00:00"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := s.FreezeCommunicationV4Turn(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intentID := "invocation-v4-meeting-intent"
+	if reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: intentID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeIntent, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		InputHash: "input-v4-meeting-intent",
+	}); err != nil || !reserved.Created {
+		t.Fatalf("邀面意向调用未预留: result=%+v err=%v", reserved, err)
+	}
+	if _, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
+		Completion: successfulInvocationCompletion(
+			intentID,
+			time.Now().UTC().Truncate(time.Millisecond),
+		),
+		Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	replyID := "invocation-v4-meeting-reply"
+	if reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: replyID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		InputHash: "input-v4-meeting-reply",
+	}); err != nil || !reserved.Created {
+		t.Fatalf("邀面回复调用未预留: result=%+v err=%v", reserved, err)
+	}
+	replyText := "那我们约在这个时间视频面试。"
+	completion := successfulInvocationCompletion(
+		replyID,
+		time.Now().UTC().Truncate(time.Millisecond),
+	)
+	complete := CompleteReplyInvocationRequest{
+		Completion:  completion,
+		ActionID:    "caller-action-id-is-not-authoritative",
+		Text:        replyText,
+		Action:      m5ai.ReplyActionStartOnlineMeeting,
+		MeetingTime: " \n7月14日14:00\t",
+		ContentHash: textcanon.Hash(replyText),
+		PlannedAt:   completion.FinishedAt,
+	}
+	action, err := s.CompleteReplyInvocation(complete)
+	if err != nil || action == nil ||
+		action.ActionID != frozen.Turn.TurnID+"|replyText" ||
+		action.Status != CommunicationActionPlanned {
+		t.Fatalf("邀面建议没有先实体化唯一正文动作: action=%+v err=%v", action, err)
+	}
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Kind != CommunicationActionReplyText {
+		t.Fatalf("正文正证前不得实体化邀面卡: actions=%+v err=%v", actions, err)
+	}
+	var advice CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&advice,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputDialogueAdvice,
+		communicationV4DialogueAdviceKey(frozen.Turn.TurnID, m5ai.PurposeReply),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	wantStart := time.Date(
+		2026,
+		7,
+		14,
+		14,
+		0,
+		0,
+		0,
+		time.FixedZone("CST", 8*60*60),
+	).UnixMilli()
+	if len(advice.Outcome.PlannedActions) != 2 ||
+		advice.Outcome.PlannedActions[0].Text != "" ||
+		advice.Outcome.PlannedActions[1].Kind != communication.V4ActionInterviewInvite ||
+		advice.Outcome.PlannedActions[1].InterviewStartsAtMs == nil ||
+		*advice.Outcome.PlannedActions[1].InterviewStartsAtMs != wantStart ||
+		advice.Outcome.PlannedActions[1].InterviewEndsAtMs == nil ||
+		*advice.Outcome.PlannedActions[1].InterviewEndsAtMs !=
+			wantStart+communication.V4InterviewDurationMs ||
+		advice.Outcome.PlannedActions[1].InterviewMethod == nil ||
+		*advice.Outcome.PlannedActions[1].InterviewMethod != "wechatVideo" {
+		t.Fatalf("邀面 continuation 没有保留脱敏两动作计划: %+v", advice.Outcome)
+	}
+
+	replayed, err := s.CompleteReplyInvocation(complete)
+	if err != nil || replayed == nil || replayed.ActionID != action.ActionID {
+		t.Fatalf("同一邀面 completion 重放失败: action=%+v err=%v", replayed, err)
+	}
+	actions, err = s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 {
+		t.Fatalf("重复完成发生动作增生: actions=%+v err=%v", actions, err)
+	}
+	var applications int64
+	if err := s.db.Model(&CommunicationV4ProjectionApplication{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&applications).Error; err != nil || applications != 3 {
+		t.Fatalf("重复完成发生 projection 增生: count=%d err=%v", applications, err)
+	}
+
+	changed := complete
+	changed.Action = m5ai.ReplyActionInviteWechat
+	changed.MeetingTime = ""
+	if _, err := s.CompleteReplyInvocation(changed); !errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf("同一 invocation 的闭合动作建议变化未被 digest 拒绝: %v", err)
+	}
+}
+
+func TestCommunicationV4MeetingActionOnLegacyTurnGoesManualWithZeroAction(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-legacy-meeting")
+	text := "合成普通回复"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-legacy-meeting-2", Text: &text,
+	})
+	request := communicationV4TurnRequest(t, s, fixture, inbound)
+	request.RecommendedTimeText = `{"inline":"旧内联时段","block":"旧时段块"}`
+	frozen, err := s.FreezeCommunicationV4Turn(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentID := "invocation-v4-legacy-meeting-intent"
+	if reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: intentID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeIntent, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		InputHash: "input-v4-legacy-meeting-intent",
+	}); err != nil || !reserved.Created {
+		t.Fatalf("旧轮 intent 未预留: result=%+v err=%v", reserved, err)
+	}
+	if _, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
+		Completion: successfulInvocationCompletion(
+			intentID,
+			time.Now().UTC().Truncate(time.Millisecond),
+		),
+		Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replyID := "invocation-v4-legacy-meeting-reply"
+	if reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: replyID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro",
+		InputHash: "input-v4-legacy-meeting-reply",
+	}); err != nil || !reserved.Created {
+		t.Fatalf("旧轮 reply 未预留: result=%+v err=%v", reserved, err)
+	}
+	replyText := "这条承诺正文也不能单独发送。"
+	action, err := s.CompleteReplyInvocation(CompleteReplyInvocationRequest{
+		Completion: successfulInvocationCompletion(
+			replyID,
+			time.Now().UTC().Truncate(time.Millisecond),
+		),
+		ActionID: "must-not-be-used",
+		Text:     replyText, Action: m5ai.ReplyActionStartOnlineMeeting,
+		MeetingTime: "7月14日14:00", ContentHash: textcanon.Hash(replyText),
+	})
+	if err != nil || action != nil {
+		t.Fatalf("旧 turn 邀面建议必须零动作收敛: action=%+v err=%v", action, err)
+	}
+	turn, err := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if err != nil || turn == nil ||
+		turn.Status != DialogueTurnManualRequired ||
+		turn.FailureReason != string(communication.V4ManualReplyInvalid) {
+		t.Fatalf("旧 turn 邀面建议未转人工: turn=%+v err=%v", turn, err)
+	}
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 0 {
+		t.Fatalf("旧 turn 邀面建议产生了动作: actions=%+v err=%v", actions, err)
+	}
+}
+
 func TestCommunicationV4ArchiveSupersedesAdviceReadyBeforeEffect(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-archive-advice")

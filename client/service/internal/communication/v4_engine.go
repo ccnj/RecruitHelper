@@ -13,6 +13,7 @@ type V4InboundTurnInput struct {
 	State                  V4State
 	TurnID                 string
 	Messages               []LedgerMessageFact
+	RecommendedSlots       []string
 	Intent                 IntentAdvice
 	Reply                  ReplyAdvice
 	FixedPhrases           V4FixedPhraseView
@@ -39,7 +40,10 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		return V4InboundTurnDecision{}, ErrInvalidV4StateTransition
 	}
 
-	frozen := FrozenTurnFacts{TurnID: input.TurnID}
+	frozen := FrozenTurnFacts{
+		TurnID:           input.TurnID,
+		RecommendedSlots: append([]string(nil), input.RecommendedSlots...),
+	}
 	var ordinaryEvents []BusinessEvent
 	var specialEvents []BusinessEvent
 	hasUnknown := false

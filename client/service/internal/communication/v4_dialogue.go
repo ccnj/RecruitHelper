@@ -148,13 +148,25 @@ func reduceV4ClassifiedDialogue(input V4DialogueInput, state V4State) (V4Dialogu
 			IntentSource: base.IntentSource, NextAdvice: V4AdviceReply,
 		}, nil
 	case TurnAdviceReady:
+		actions, valid := planV4ReplyActions(
+			state,
+			input.Turn,
+			base.Action.Text,
+			input.Reply.Suggestion,
+			true,
+		)
+		if !valid {
+			return manualV4Dialogue(
+				state,
+				V4ManualReplyInvalid,
+				base.IntentLabel,
+				base.IntentSource,
+			), nil
+		}
 		return V4DialogueDecision{
 			State: state, Status: V4DialogueActionsPlanned, IntentLabel: base.IntentLabel,
 			IntentSource: base.IntentSource, NextAdvice: V4AdviceNone,
-			Actions: []V4PlannedAction{{
-				ActionKey: stableV4TurnActionKey(input.Turn.TurnID, V4ActionReplyText, 0),
-				Kind:      V4ActionReplyText, Text: base.Action.Text,
-			}},
+			Actions: actions,
 		}, nil
 	case TurnManualRequired:
 		if base.ManualReason == ManualIntentRejected {
@@ -257,17 +269,108 @@ func reduceV4ReplyOnly(
 		if err := m5ai.ValidateSendText(input.Reply.Suggestion.Text); err != nil {
 			return manualV4Dialogue(state, V4ManualReplyInvalid, label, source), nil
 		}
+		actions, valid := planV4ReplyActions(
+			state,
+			input.Turn,
+			input.Reply.Suggestion.Text,
+			input.Reply.Suggestion,
+			purpose == V4AdviceReply,
+		)
+		if !valid {
+			return manualV4Dialogue(state, V4ManualReplyInvalid, label, source), nil
+		}
+		if len(actions) == 0 || actions[0].Kind != V4ActionReplyText {
+			return V4DialogueDecision{}, ErrInvalidV4StateTransition
+		}
+		actions[0].Kind = actionKind
+		actions[0].ActionKey = stableV4TurnActionKey(
+			input.Turn.TurnID,
+			actionKind,
+			input.CardMessageSeq,
+		)
+		actions[0].CardMessageSeq = input.CardMessageSeq
 		return V4DialogueDecision{
 			State: state, Status: V4DialogueActionsPlanned, IntentLabel: label,
 			IntentSource: source, NextAdvice: V4AdviceNone,
-			Actions: []V4PlannedAction{{
-				ActionKey: stableV4TurnActionKey(input.Turn.TurnID, actionKind, input.CardMessageSeq),
-				Kind:      actionKind, Text: input.Reply.Suggestion.Text, CardMessageSeq: input.CardMessageSeq,
-			}},
+			Actions: actions,
 		}, nil
 	default:
 		return V4DialogueDecision{}, ErrInvalidV4StateTransition
 	}
+}
+
+func planV4ReplyActions(
+	state V4State,
+	turn FrozenTurnFacts,
+	text string,
+	suggestion m5ai.ReplySuggestion,
+	allowSuggestedAction bool,
+) ([]V4PlannedAction, bool) {
+	textPlan := V4PlannedAction{
+		ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionReplyText, 0),
+		Kind:      V4ActionReplyText,
+		Text:      text,
+	}
+	switch suggestion.Action {
+	case m5ai.ReplyActionNone:
+		if suggestion.MeetingTime != "" {
+			return nil, false
+		}
+		return []V4PlannedAction{textPlan}, true
+	case m5ai.ReplyActionInviteWechat:
+		if !allowSuggestedAction || suggestion.MeetingTime != "" ||
+			!v4ReplyActionEligible(state, turn) ||
+			state.WechatState != V4WechatNotInvited {
+			return nil, false
+		}
+		return []V4PlannedAction{
+			textPlan,
+			{
+				ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionInviteWechat, 0),
+				Kind:      V4ActionInviteWechat,
+			},
+		}, true
+	case m5ai.ReplyActionStartOnlineMeeting:
+		if !allowSuggestedAction || !v4ReplyActionEligible(state, turn) {
+			return nil, false
+		}
+		startsAt, matched := m5ai.MatchFrozenRecommendedMeetingTime(
+			turn.RecommendedSlots,
+			suggestion.MeetingTime,
+		)
+		if !matched {
+			return nil, false
+		}
+		endsAt := startsAt + V4InterviewDurationMs
+		method := "wechatVideo"
+		return []V4PlannedAction{
+			textPlan,
+			{
+				ActionKey:           stableV4TurnActionKey(turn.TurnID, V4ActionInterviewInvite, 0),
+				Kind:                V4ActionInterviewInvite,
+				InterviewStartsAtMs: &startsAt,
+				InterviewEndsAtMs:   &endsAt,
+				InterviewMethod:     &method,
+			},
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+func v4ReplyActionEligible(state V4State, turn FrozenTurnFacts) bool {
+	if state.MainStatus != V4StatusCommunicating &&
+		state.MainStatus != V4StatusInvited {
+		return false
+	}
+	for _, message := range turn.Messages {
+		switch message.Kind {
+		case FrozenMessageText, FrozenMessageImage, FrozenMessageVoice,
+			FrozenMessageFile, FrozenMessageCard:
+			return true
+		}
+	}
+	return false
 }
 
 func stableV4TurnActionKey(turnID string, kind V4ActionKind, cardMessageSeq int64) string {

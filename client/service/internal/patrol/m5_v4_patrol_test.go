@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -1030,6 +1031,166 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 		cardIntent.Primitive != protocol.PrimChatSendWechatInvite ||
 		cardIntent.Status != store.EffectIntentOk {
 		t.Fatalf("dispatcher 未建立并完成换微信卡 WAL: intent=%+v err=%v", cardIntent, err)
+	}
+
+}
+
+func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"ai-reply-interview-card",
+		"明天下午方便面试",
+	)
+	slots := m5ai.GenerateDefaultSlots(h.clock.Now())
+	if len(slots) == 0 {
+		t.Fatal("测试时钟没有生成可约面时段")
+	}
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := time.ParseInLocation(
+		"2006-01-02 15:04:05",
+		slots[0],
+		shanghai,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meetingTime := fmt.Sprintf(
+		"%d月%d日%s",
+		selected.Month(),
+		selected.Day(),
+		selected.Format("15:04"),
+	)
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			switch request.Purpose {
+			case m5ai.PurposeIntent:
+				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+			case m5ai.PurposeReply:
+				return safeFakeResponse(fmt.Sprintf(
+					`{"话术_序列":["那我们约在这个时间视频面试。"],"动作":"发起线上会议","会议时间":%q}`,
+					meetingTime,
+				)), nil
+			default:
+				return m5ai.CompletionResponse{}, fmt.Errorf(
+					"未知建议用途 %q",
+					request.Purpose,
+				)
+			}
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取邀面组合账号失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-ai-reply-interview-card"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager,
+		account: account,
+		hand: HandState{
+			Online: true, Session: "session-1", BootID: "boot-1",
+		},
+		roundID: roundID,
+		now:     h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 1 || len(advice.requests) != 2 {
+		t.Fatalf(
+			"邀面组合首步必须只发送 AI 正文: err=%v commands=%d advice=%+v",
+			err,
+			hand.commandCount(),
+			advice.requests,
+		)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
+		t.Fatalf("正文正证后应等待唯一邀面卡: turn=%+v err=%v", turn, err)
+	}
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInterviewInvite ||
+		actions[1].Status != store.CommunicationActionPlanned ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID ||
+		actions[1].InterviewStartsAtMs == nil ||
+		*actions[1].InterviewStartsAtMs != selected.UnixMilli() ||
+		actions[1].InterviewEndsAtMs == nil ||
+		*actions[1].InterviewEndsAtMs !=
+			selected.UnixMilli()+communication.V4InterviewDurationMs ||
+		actions[1].InterviewMethod == nil ||
+		*actions[1].InterviewMethod != "wechatVideo" {
+		t.Fatalf("正文正证没有实体化固定参数邀面卡: actions=%+v err=%v", actions, err)
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 2 || len(advice.requests) != 2 {
+		t.Fatalf(
+			"邀面组合第二步必须经 dispatcher 发送唯一卡片: err=%v commands=%d advice=%d",
+			err,
+			hand.commandCount(),
+			len(advice.requests),
+		)
+	}
+	hand.mu.Lock()
+	commands := append([]protocol.CmdBody(nil), hand.commands...)
+	hand.mu.Unlock()
+	if commands[0].Name != protocol.PrimChatSendMessage ||
+		commands[1].Name != protocol.PrimChatSendInviteCard {
+		t.Fatalf("邀面组合命令顺序错误: %+v", commands)
+	}
+	var cardArgs protocol.ChatSendInviteCardArgs
+	if err := json.Unmarshal(commands[1].Args, &cardArgs); err != nil {
+		t.Fatal(err)
+	}
+	if cardArgs.Interview.StartsAt != selected.UnixMilli() ||
+		cardArgs.Interview.EndsAt !=
+			selected.UnixMilli()+communication.V4InterviewDurationMs ||
+		cardArgs.Interview.Method != protocol.InterviewMethodWechatVideo {
+		t.Fatalf("dispatcher WAL 参数偏离冻结时段: %+v", cardArgs)
+	}
+	turn, err = h.db.DialogueTurnByID(turn.TurnID)
+	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(
+		fixture.profileID,
+	)
+	if err != nil || turn == nil ||
+		turn.Status != store.DialogueTurnCompleted ||
+		aggregateErr != nil ||
+		aggregate.State.MainStatus != communication.V4StatusInvited {
+		t.Fatalf(
+			"邀面组合未在卡片正证后完成: turn=%+v aggregate=%+v err=%v aggregateErr=%v",
+			turn,
+			aggregate,
+			err,
+			aggregateErr,
+		)
+	}
+	actions, err = h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[1].Status != store.CommunicationActionSent ||
+		actions[0].EffectIntentID == nil ||
+		actions[1].EffectIntentID == nil ||
+		*actions[0].EffectIntentID == *actions[1].EffectIntentID {
+		t.Fatalf("邀面组合没有形成两条独立 WAL: actions=%+v err=%v", actions, err)
 	}
 }
 

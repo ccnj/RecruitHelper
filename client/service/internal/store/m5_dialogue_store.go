@@ -973,6 +973,8 @@ type CompleteReplyInvocationRequest struct {
 	Completion   AIInvocationCompletion
 	ActionID     string
 	Text         string
+	Action       m5ai.ReplyAction
+	MeetingTime  string
 	ContentHash  string
 	ManualReason string
 	PlannedAt    time.Time
@@ -1014,7 +1016,11 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 				tx,
 				&turn,
 				invocation,
-				req.Text,
+				m5ai.ReplySuggestion{
+					Text:        req.Text,
+					Action:      req.Action,
+					MeetingTime: req.MeetingTime,
+				},
 				req.ContentHash,
 				manualReason,
 				req.PlannedAt.UTC(),
@@ -1334,7 +1340,7 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 						tx,
 						&turn,
 						invocation,
-						"",
+						m5ai.ReplySuggestion{},
 						"",
 						"replyProcessInterrupted",
 						at.UTC(),

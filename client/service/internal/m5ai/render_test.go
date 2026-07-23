@@ -77,6 +77,77 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 }
 
+func TestFrozenRecommendedTimeCarriesCanonicalSlotsWithoutBreakingLegacyRender(t *testing.T) {
+	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
+	frozen, err := FreezeRecommendedTimeText(
+		now,
+		[]string{"2026-07-13 09:00:00", "2026-07-13 10:00:00"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slots, ok := FrozenRecommendedSlots(frozen)
+	if !ok || len(slots) != 2 ||
+		slots[0] != "2026-07-13 09:00:00" ||
+		slots[1] != "2026-07-13 10:00:00" {
+		t.Fatalf("新冻结载荷没有保留 canonical slots: slots=%+v ok=%v", slots, ok)
+	}
+	slots[0] = "被调用方篡改"
+	reloaded, ok := FrozenRecommendedSlots(frozen)
+	if !ok || reloaded[0] != "2026-07-13 09:00:00" {
+		t.Fatalf("冻结 slots 被外部切片改写: %+v", reloaded)
+	}
+
+	legacy := `{"inline":"旧内联时段","block":"旧时段块"}`
+	if _, ok := FrozenRecommendedSlots(legacy); ok {
+		t.Fatal("仅带旧渲染文本的 turn 不得取得动作授权 slots")
+	}
+	rendered, err := RenderReplyPromptFrozen(
+		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
+		`{"基本":[]}`,
+		"候选人(消息):你好",
+		legacy,
+		"事实",
+	)
+	if err != nil || !strings.Contains(rendered, "旧时段块") {
+		t.Fatalf("旧 turn 必须仍可按原冻结文本渲染: rendered=%q err=%v", rendered, err)
+	}
+}
+
+func TestMatchFrozenRecommendedMeetingTimeIsStrictAndUnique(t *testing.T) {
+	slots := []string{
+		"2026-07-14 09:00:00",
+		"2026-07-14 14:00:00",
+	}
+	want := frozenShanghai(t, "2026-07-14T14:00:00+08:00").UnixMilli()
+	if got, ok := MatchFrozenRecommendedMeetingTime(slots, " \n7月14日14:00\t"); !ok || got != want {
+		t.Fatalf("合法时间未唯一命中: got=%d want=%d ok=%v", got, want, ok)
+	}
+	for _, invalid := range []string{
+		"07月14日14:00",
+		"7月14日 14:00",
+		"7月14日2:00",
+		"2026年7月14日14:00",
+		"明天下午两点",
+	} {
+		if got, ok := MatchFrozenRecommendedMeetingTime(slots, invalid); ok || got != 0 {
+			t.Fatalf("非法格式被接受: value=%q got=%d ok=%v", invalid, got, ok)
+		}
+	}
+	if got, ok := MatchFrozenRecommendedMeetingTime(
+		[]string{"2026-07-14 14:00:00", "2026-07-14 14:00:00"},
+		"7月14日14:00",
+	); ok || got != 0 {
+		t.Fatalf("多候选命中不得被任取一项: got=%d ok=%v", got, ok)
+	}
+	if got, ok := MatchFrozenRecommendedMeetingTime(
+		slots,
+		"7月15日14:00",
+	); ok || got != 0 {
+		t.Fatalf("零命中不得获得动作授权: got=%d ok=%v", got, ok)
+	}
+}
+
 func TestServiceReplyPolicyAppendsDeterministicBoundaries(t *testing.T) {
 	service, err := AppendServiceReplyPolicy("原职位话术")
 	if err != nil ||
