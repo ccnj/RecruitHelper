@@ -653,8 +653,10 @@ type ReserveAIInvocationResult struct {
 // ReserveAIInvocation 是 provider 调用的唯一授权点。Created=false 只表示
 // 既有事实可收编，绝不授权重放网络调用。
 func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAIInvocationResult, error) {
+	traceRearm := isM5ReplyTraceRearmRequest(req)
 	if strings.TrimSpace(req.InvocationID) == "" || strings.TrimSpace(req.TurnID) == "" ||
-		(req.Purpose != m5ai.PurposeIntent && req.Purpose != m5ai.PurposeReply) || req.Attempt != 1 ||
+		(req.Purpose != m5ai.PurposeIntent && req.Purpose != m5ai.PurposeReply) ||
+		(req.Attempt != 1 && !traceRearm) ||
 		strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.Model) == "" || strings.TrimSpace(req.InputHash) == "" {
 		return nil, ErrAIInvocationInvalid
 	}
@@ -670,6 +672,11 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 				return ErrDialogueTurnNotFound
 			}
 			return err
+		}
+		if traceRearm {
+			if err := validateM5ReplyTraceRearmTx(tx, turn, req); err != nil {
+				return err
+			}
 		}
 		wanted := AIInvocation{
 			InvocationID: req.InvocationID, TurnID: req.TurnID, Purpose: req.Purpose, Attempt: req.Attempt,
