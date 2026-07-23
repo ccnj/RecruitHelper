@@ -135,6 +135,7 @@ const MAIN_RESUME_FAILURE_REASONS = [
   'stale_modal',
   'entry_cardinality',
   'modal_cardinality',
+  'close_unavailable',
   'basic_unresolved',
   'expectations_unresolved',
   'work_unresolved',
@@ -889,6 +890,47 @@ async function mainReadCurrentResume(
     const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
     return matches.length === 1 && clean(matches[0].peerPartnerId) === platformUserRef
   }
+  const randomDelayMs = (minimumMs: number, maximumMs: number): number =>
+    minimumMs + Math.floor(Math.random() * (maximumMs - minimumMs + 1))
+  const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const closeOpenedModal = async (
+    ownedModal: HTMLElement,
+    closeNotBefore: number,
+  ): Promise<MainResumeFailed | null> => {
+    try {
+      while (Date.now() < closeNotBefore) {
+        await sleep(closeNotBefore - Date.now())
+      }
+      let opened = visibleAll(document, '.new-shortcut-resume__modal')
+      if (opened.length !== 1) {
+        return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
+      }
+      if (opened[0] !== ownedModal) return failed('stale_modal')
+      const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
+      if (closeButtons.length !== 1) return failed('close_unavailable')
+      closeButtons[0].click()
+
+      const closeUntil = Date.now() + 10_000
+      while (true) {
+        opened = visibleAll(document, '.new-shortcut-resume__modal')
+        if (opened.length === 0) return null
+        if (opened.length !== 1) return failed('modal_cardinality')
+        const remainingMs = closeUntil - Date.now()
+        if (remainingMs <= 0) return failed('close_unavailable')
+        await sleep(Math.min(120, remainingMs))
+      }
+    } catch {
+      return failed('close_unavailable')
+    }
+  }
+  let ownedModal: HTMLElement | null = null
+  let closeNotBefore = 0
+  let cleanupAttempted = false
+  const cleanupOpenedModal = async (): Promise<MainResumeFailed | null> => {
+    if (!ownedModal || cleanupAttempted) return null
+    cleanupAttempted = true
+    return closeOpenedModal(ownedModal, closeNotBefore)
+  }
 
   try {
     if (!routeMatches()) return failed('route_changed')
@@ -904,114 +946,133 @@ async function mainReadCurrentResume(
         element.closest('.im-session-detail') === detail)
     if (entries.length !== 1) return failed('entry_cardinality')
 
-    entries[0].click()
+    const openNotBefore = Date.now() + randomDelayMs(1_000, 1_500)
+    while (Date.now() < openNotBefore) {
+      await sleep(openNotBefore - Date.now())
+    }
+    if (!routeMatches() || !targetMatches()) return failed('target_changed')
+    if (visibleAll(document, '.new-shortcut-resume__modal').length !== 0) return failed('stale_modal')
+    const currentDetails = visibleAll(document, '.im-session-detail')
+    if (currentDetails.length !== 1 || currentDetails[0] !== detail) return failed('target_changed')
+    const currentEntries = visibleAll(detail, '.hover-resume-footer__button, button, a, [role="button"]')
+      .filter((element) => clean(element.textContent) === '查看详情' &&
+        element.closest('.im-session-detail') === detail)
+    if (currentEntries.length !== 1 || currentEntries[0] !== entries[0]) return failed('target_changed')
+    currentEntries[0].click()
     let modals: HTMLElement[] = []
     const waitUntil = Date.now() + 6_000
     while (Date.now() < waitUntil) {
       modals = visibleAll(document, '.new-shortcut-resume__modal')
       if (modals.length !== 0) break
-      await new Promise((resolve) => setTimeout(resolve, 120))
+      await sleep(120)
     }
     if (modals.length !== 1) return failed('modal_cardinality')
-    const modal = modals[0]
-    const roots = visibleAll(modal, '.resume-detail')
-    if (roots.length !== 1) return failed('modal_cardinality')
-    const root = roots[0]
+    ownedModal = modals[0]
+    closeNotBefore = Date.now() + randomDelayMs(2_000, 2_500)
+    const modal = ownedModal
+    const readResult = (() : MainResumeResult => {
+      const roots = visibleAll(modal, '.resume-detail')
+      if (roots.length !== 1) return failed('modal_cardinality')
+      const root = roots[0]
 
-    const names = visibleAll(root, '.resume-basic-new__name').map((element) => clean(element.textContent))
-      .filter(Boolean)
-    const meta = visibleAll(root, '.resume-basic-new__meta-item').map((element) => clean(element.textContent))
-      .filter(Boolean)
-    const semanticCounts = {
-      age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
-      work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
-      education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
-    }
-    if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
-        semanticCounts.work !== 1 || semanticCounts.education !== 1) {
-      return failed('basic_unresolved')
-    }
-    let otherIndex = 0
-    const basicLabel = (value: string): string => {
-      if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
-      if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
-      if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
-      if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
-      if (/户口/u.test(value)) return '户口地'
-      if (/(?:现居|居住)/u.test(value)) return '现居地'
-      otherIndex += 1
-      return `其他信息${otherIndex}`
-    }
-    const basic: CandidateResumeLabelValue[] = [
-      { label: '姓名', value: names[0] },
-      ...meta.map((value) => ({ label: basicLabel(value), value })),
-    ]
-
-    const purposes = visibleAll(root, '.new-resume-purposes__item')
-    if (purposes.length === 0) return failed('expectations_unresolved')
-    const expectations: CandidateResumeLabelValue[] = []
-    for (const purpose of purposes) {
-      const fields = [
-        ['期望地点', '.new-resume-purposes__item-city'],
-        ['期望职位', '.new-resume-purposes__item-type'],
-        ['期望薪资', '.new-resume-purposes__item-salary'],
-      ] as const
-      for (const [label, selector] of fields) {
-        const values = visibleAll(purpose, selector).map((element) => clean(element.textContent)).filter(Boolean)
-        if (values.length !== 1) return failed('expectations_unresolved')
-        expectations.push({ label, value: values[0] })
+      const names = visibleAll(root, '.resume-basic-new__name').map((element) => clean(element.textContent))
+        .filter(Boolean)
+      const meta = visibleAll(root, '.resume-basic-new__meta-item').map((element) => clean(element.textContent))
+        .filter(Boolean)
+      const semanticCounts = {
+        age: meta.filter((value) => /\d{1,3}\s*岁/u.test(value)).length,
+        work: meta.filter((value) => !/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)).length,
+        education: meta.filter((value) => /(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)).length,
       }
-    }
-
-    const sectionText = (selector: string): string | null => {
-      const sections = visibleAll(root, selector)
-      if (sections.length !== 1) return null
-      const items = visibleAll(sections[0], `${selector}__item`)
-      if (items.length > 0) {
-        const values = items.map(blockText).filter(Boolean)
-        return values.length === items.length ? values.join('\n\n') : null
+      if (names.length !== 1 || meta.length < 3 || semanticCounts.age !== 1 ||
+          semanticCounts.work !== 1 || semanticCounts.education !== 1) {
+        return failed('basic_unresolved')
       }
-      return null
-    }
-    const workExperiences = sectionText('.new-work-experiences')
-    if (workExperiences === null) return failed('work_unresolved')
-    const education = sectionText('.new-education-experiences')
-    if (education === null) return failed('education_unresolved')
+      let otherIndex = 0
+      const basicLabel = (value: string): string => {
+        if (/\d{1,3}\s*岁/u.test(value)) return '年龄'
+        if (!/岁/u.test(value) && /(?:\d+\s*年|应届|无经验)/u.test(value)) return '工作经验'
+        if (/(?:博士|硕士|本科|大专|高中|中专|技校|学历)/u.test(value)) return '最高学历'
+        if (/(?:在校|离校|在职|离职|求职|看看机会|暂无工作|正在找工作)/u.test(value)) return '求职状态'
+        if (/户口/u.test(value)) return '户口地'
+        if (/(?:现居|居住)/u.test(value)) return '现居地'
+        otherIndex += 1
+        return `其他信息${otherIndex}`
+      }
+      const basic: CandidateResumeLabelValue[] = [
+        { label: '姓名', value: names[0] },
+        ...meta.map((value) => ({ label: basicLabel(value), value })),
+      ]
 
-    const selfStructures = visibleAll(root,
-      '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
-    const selfHeadings = visibleAll(root, 'h1, h2, h3, h4, h5, b, .resume-section-new__title')
-      .filter((element) => ['自我评价', '自我描述'].includes(clean(element.textContent)))
-    let selfEvaluation = ''
-    if (selfStructures.length > 1 || selfHeadings.length > 1 ||
-        (selfStructures.length === 0 && selfHeadings.length !== 0)) {
-      return failed('self_evaluation_unresolved')
-    }
-    if (selfStructures.length === 1) {
-      const lines = blockText(selfStructures[0]).split('\n')
-        .filter((line) => line !== '自我评价' && line !== '自我描述')
-      if (lines.length === 0) return failed('self_evaluation_unresolved')
-      selfEvaluation = lines.join('\n')
-    }
+      const purposes = visibleAll(root, '.new-resume-purposes__item')
+      if (purposes.length === 0) return failed('expectations_unresolved')
+      const expectations: CandidateResumeLabelValue[] = []
+      for (const purpose of purposes) {
+        const fields = [
+          ['期望地点', '.new-resume-purposes__item-city'],
+          ['期望职位', '.new-resume-purposes__item-type'],
+          ['期望薪资', '.new-resume-purposes__item-salary'],
+        ] as const
+        for (const [label, selector] of fields) {
+          const values = visibleAll(purpose, selector).map((element) => clean(element.textContent)).filter(Boolean)
+          if (values.length !== 1) return failed('expectations_unresolved')
+          expectations.push({ label, value: values[0] })
+        }
+      }
 
-    if (!routeMatches() || !targetMatches() || visibleAll(document, '.im-session-detail').length !== 1 ||
-        visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
-      return failed('target_changed')
-    }
-    const data: ZhilianResumeData = {
-      conversationRef,
-      platformUserRef,
-      observedAt: Date.now(),
-      basic,
-      expectations,
-      selfEvaluation,
-      education,
-      workExperiences,
-    }
-    if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) return failed('payload_limit')
-    return { status: 'ready', data }
+      const sectionText = (selector: string): string | null => {
+        const sections = visibleAll(root, selector)
+        if (sections.length !== 1) return null
+        const items = visibleAll(sections[0], `${selector}__item`)
+        if (items.length > 0) {
+          const values = items.map(blockText).filter(Boolean)
+          return values.length === items.length ? values.join('\n\n') : null
+        }
+        return null
+      }
+      const workExperiences = sectionText('.new-work-experiences')
+      if (workExperiences === null) return failed('work_unresolved')
+      const education = sectionText('.new-education-experiences')
+      if (education === null) return failed('education_unresolved')
+
+      const selfStructures = visibleAll(root,
+        '.resume-section-self-evaluation, .new-self-evaluation, .new-resume-self-evaluation')
+      const selfHeadings = visibleAll(root, 'h1, h2, h3, h4, h5, b, .resume-section-new__title')
+        .filter((element) => ['自我评价', '自我描述'].includes(clean(element.textContent)))
+      let selfEvaluation = ''
+      if (selfStructures.length > 1 || selfHeadings.length > 1 ||
+          (selfStructures.length === 0 && selfHeadings.length !== 0)) {
+        return failed('self_evaluation_unresolved')
+      }
+      if (selfStructures.length === 1) {
+        const lines = blockText(selfStructures[0]).split('\n')
+          .filter((line) => line !== '自我评价' && line !== '自我描述')
+        if (lines.length === 0) return failed('self_evaluation_unresolved')
+        selfEvaluation = lines.join('\n')
+      }
+
+      if (!routeMatches() || !targetMatches() || visibleAll(document, '.im-session-detail').length !== 1 ||
+          visibleAll(document, '.new-shortcut-resume__modal').length !== 1) {
+        return failed('target_changed')
+      }
+      const data: ZhilianResumeData = {
+        conversationRef,
+        platformUserRef,
+        observedAt: Date.now(),
+        basic,
+        expectations,
+        selfEvaluation,
+        education,
+        workExperiences,
+      }
+      if (new TextEncoder().encode(JSON.stringify(data)).length > 65_536) return failed('payload_limit')
+      return { status: 'ready', data }
+    })()
+    const cleanupFailure = await cleanupOpenedModal()
+    return cleanupFailure ?? readResult
   } catch {
-    return failed('unexpected')
+    const cleanupFailure = await cleanupOpenedModal()
+    return cleanupFailure ?? failed('unexpected')
   }
 }
 

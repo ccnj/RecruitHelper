@@ -1920,13 +1920,29 @@ test('candidate.readCurrent MAIN 对身份、绑定与职位歧义逐项失败�
   }
 })
 
-function installM5ResumeFixture() {
+function installM5ResumeFixture(options = {}) {
   const original = {
     document: globalThis.document,
     location: globalThis.location,
     window: globalThis.window,
     getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+    random: Math.random,
   }
+  let now = 1_700_000_000_000
+  const timerDelays = []
+  let timerHook = () => {}
+  globalThis.setTimeout = (callback, delay = 0, ...args) => {
+    const delayMs = Math.max(0, Number(delay) || 0)
+    timerDelays.push(delayMs)
+    now += delayMs
+    timerHook(delayMs)
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  Date.now = () => now
+  Math.random = () => 0.5
   const conversationRef = 'fixture-conversation-m5'
   const platformUserRef = 'fixture-user-m5'
   const node = (text = '') => ({
@@ -1944,12 +1960,52 @@ function installM5ResumeFixture() {
   entry.detail = detail
   const modal = node()
   const root = node()
-  const state = { modals: [], clicks: 0 }
+  const state = {
+    modals: [],
+    clicks: 0,
+    closeClicks: 0,
+    staleCloseClicks: 0,
+    commandStartedAt: now,
+    openedAt: 0,
+    closedAt: 0,
+    timerDelays,
+    get now() { return now },
+  }
   entry.click = () => {
     state.clicks += 1
+    state.openedAt = Date.now()
     state.modals = [modal]
   }
   detail.query.set('.hover-resume-footer__button, button, a, [role="button"]', [entry])
+  const close = node('关闭')
+  close.click = () => {
+    state.closeClicks += 1
+    state.closedAt = Date.now()
+    if (options.closeStuck !== true) state.modals = []
+  }
+  modal.query.set('.new-shortcut-resume__close', options.closeUnavailable === true ? [] : [close])
+  const staleModal = node()
+  const staleClose = node('关闭其他弹窗')
+  staleClose.click = () => {
+    state.staleCloseClicks += 1
+    state.modals = []
+  }
+  staleModal.query.set('.new-shortcut-resume__close', [staleClose])
+  if (options.staleModalBeforeOpen === true) {
+    timerHook = (delayMs) => {
+      if (delayMs >= 1_000 && state.modals.length === 0) {
+        state.modals = [staleModal]
+        timerHook = () => {}
+      }
+    }
+  } else if (options.replaceModalDuringHold === true) {
+    timerHook = (delayMs) => {
+      if (delayMs >= 2_000 && state.modals.length === 1 && state.modals[0] === modal) {
+        state.modals = [staleModal]
+        timerHook = () => {}
+      }
+    }
+  }
   modal.query.set('.resume-detail', [root])
   root.query.set('.resume-basic-new__name', [node('合成候选人')])
   root.query.set('.resume-basic-new__meta-item', [
@@ -2006,11 +2062,14 @@ function installM5ResumeFixture() {
       globalThis.location = original.location
       globalThis.window = original.window
       globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.setTimeout = original.setTimeout
+      Date.now = original.dateNow
+      Math.random = original.random
     },
   }
 }
 
-test('candidate.readResume MAIN 单次复核只点击一次并返回完整五分区', async () => {
+test('candidate.readResume MAIN 单次打开、停留后关闭并返回完整五分区', async () => {
   for (const source of ['runtime', 'initial']) {
     const fixture = installM5ResumeFixture()
     try {
@@ -2022,6 +2081,14 @@ test('candidate.readResume MAIN 单次复核只点击一次并返回完整五分
       const result = await zhilianTestHooks.mainReadCurrentResume(...args)
       assert.equal(result.status, 'ready', source)
       assert.equal(fixture.state.clicks, 1, source)
+      assert.equal(fixture.state.closeClicks, 1, source)
+      assert.equal(fixture.state.modals.length, 0, source)
+      const openDelayMs = fixture.state.openedAt - fixture.state.commandStartedAt
+      assert.ok(openDelayMs >= 1_000 && openDelayMs <= 1_500,
+        `${source}: 打开前等待必须在 1000-1500ms`)
+      const closeDelayMs = fixture.state.closedAt - fixture.state.openedAt
+      assert.ok(closeDelayMs >= 2_000 && closeDelayMs <= 2_500,
+        `${source}: 打开后关闭等待必须在 2000-2500ms`)
       assert.equal(result.data.conversationRef, fixture.conversationRef)
       assert.equal(result.data.platformUserRef, fixture.platformUserRef)
       assert.deepEqual(result.data.expectations.map(({ label }) => label),
@@ -2043,7 +2110,53 @@ test('candidate.readResume MAIN 单次复核只点击一次并返回完整五分
   }
 })
 
-test('candidate.readResume MAIN 对旧弹窗、换绑与缺区整体失败且不点击', async () => {
+test('candidate.readResume MAIN 关闭后仍可见时响亮失败', async () => {
+  const fixture = installM5ResumeFixture({ closeStuck: true })
+  try {
+    const result = await zhilianTestHooks.mainReadCurrentResume(
+      fixture.conversationRef, fixture.platformUserRef)
+    assert.deepEqual(result, { status: 'failed', reason: 'close_unavailable' })
+    assert.equal(fixture.state.clicks, 1)
+    assert.equal(fixture.state.closeClicks, 1)
+    assert.equal(fixture.state.modals.length, 1)
+    assert.equal(fixture.state.now - fixture.state.closedAt, 10_000,
+      '关闭后最多条件等待 10 秒确认消失')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readResume MAIN 不接管停留期间替换进来的弹窗', async () => {
+  const fixture = installM5ResumeFixture({ replaceModalDuringHold: true })
+  try {
+    const result = await zhilianTestHooks.mainReadCurrentResume(
+      fixture.conversationRef, fixture.platformUserRef)
+    assert.deepEqual(result, { status: 'failed', reason: 'stale_modal' })
+    assert.equal(fixture.state.clicks, 1)
+    assert.equal(fixture.state.closeClicks, 0)
+    assert.equal(fixture.state.staleCloseClicks, 0)
+    assert.equal(fixture.state.modals.length, 1, '替换进来的弹窗必须保留给真人处理')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readResume MAIN 不接管打开前等待期间出现的旧弹窗', async () => {
+  const fixture = installM5ResumeFixture({ staleModalBeforeOpen: true })
+  try {
+    const result = await zhilianTestHooks.mainReadCurrentResume(
+      fixture.conversationRef, fixture.platformUserRef)
+    assert.deepEqual(result, { status: 'failed', reason: 'stale_modal' })
+    assert.equal(fixture.state.clicks, 0)
+    assert.equal(fixture.state.closeClicks, 0)
+    assert.equal(fixture.state.staleCloseClicks, 0)
+    assert.equal(fixture.state.modals.length, 1, '等待期间出现的旧弹窗必须保留给真人处理')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readResume MAIN 对旧弹窗、换绑与缺区整体失败并安全清理', async () => {
   for (const [name, mutate, reason] of [
     ['旧弹窗', (fixture) => { fixture.state.modals = [fixture.modal] }, 'stale_modal'],
     ['目标换绑', (fixture) => { globalThis.window.imEngine.sessions[0].peerPartnerId = 'other-user' }, 'target_changed'],
@@ -2056,6 +2169,9 @@ test('candidate.readResume MAIN 对旧弹窗、换绑与缺区整体失败且不
         fixture.conversationRef, fixture.platformUserRef)
       assert.deepEqual(result, { status: 'failed', reason }, name)
       assert.equal(fixture.state.clicks, name === '教育缺区' ? 1 : 0)
+      assert.equal(fixture.state.closeClicks, name === '教育缺区' ? 1 : 0)
+      assert.equal(fixture.state.modals.length, name === '旧弹窗' ? 1 : 0,
+        name === '旧弹窗' ? '不得接管调用前已经存在的弹窗' : '自有弹窗必须尽力关闭')
       assert.equal(result.data, undefined)
     } finally {
       fixture.restore()
