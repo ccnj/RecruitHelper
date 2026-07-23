@@ -19,7 +19,7 @@ func TestM5TargetNeedsRouteHandoff(t *testing.T) {
 		ledger       []store.Message
 		want         bool
 	}{
-		{name: "dirty target is ordered last", alreadyDirty: true, captureState: store.ResumeCaptureCaptured, want: true},
+		{name: "dirty target needs exclusive handoff", alreadyDirty: true, captureState: store.ResumeCaptureCaptured, want: true},
 		{name: "unattempted capture needs target route", captureState: store.ResumeCaptureUnattempted, want: true},
 		{name: "inflight capture needs target route", captureState: store.ResumeCaptureInFlight, want: true},
 		{
@@ -42,5 +42,38 @@ func TestM5TargetNeedsRouteHandoff(t *testing.T) {
 				t.Fatalf("m5TargetNeedsRouteHandoff() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestIsolateActiveM5TargetDefersUnrelatedDirtyConversations(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5ResumeAdviceFixture(t, h)
+	target, err := h.db.ActiveM5TrialForAccount(h.key)
+	if err != nil || target == nil {
+		t.Fatalf("读取 active M5 目标失败: target=%+v err=%v", target, err)
+	}
+	targetKey := store.ConversationKey{
+		Platform: target.Conversation.Platform, AccountRef: target.Conversation.AccountRef,
+		ConversationRef: target.Conversation.ConversationRef,
+	}
+	targetLedger, err := h.db.MessagesForConversation(targetKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := dirtyConversation{conversation: store.Conversation{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: "conversation-unrelated-stale", TrackingState: store.TrackingAdopted,
+	}}
+	targetDirty := dirtyConversation{conversation: target.Conversation, ledger: targetLedger}
+
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取测试账号失败: account=%+v err=%v", account, err)
+	}
+	actor := &roundActor{manager: h.manager, account: account}
+	isolated, err := actor.isolateActiveM5Target([]dirtyConversation{unrelated, targetDirty})
+	if err != nil || len(isolated) != 1 ||
+		isolated[0].conversation.ConversationRef != fixture.conversationRef {
+		t.Fatalf("active 试运行仍会被无关 dirty 会话阻断: isolated=%+v err=%v", isolated, err)
 	}
 }

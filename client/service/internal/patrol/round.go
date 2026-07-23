@@ -186,7 +186,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dirty, err = a.placeActiveM5TargetLast(dirty)
+	dirty, err = a.isolateActiveM5Target(dirty)
 	if err != nil {
 		return err
 	}
@@ -592,10 +592,11 @@ func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dir
 }
 
 // M5 的简历读取与自动回复都只作用于已绑定的当前 IM 会话，原语本身按契约
-// 不得搜索会话列表。chat.readThread 会把浏览器切到目标会话，因此在确有补采
-// 或回复工作时把试运行目标放到本轮最后：既冻结最新账本，也明确完成 M2→M5
-// 的页面所有权交接。已采集且没有待处理入站时不得为维持路由而反复抢页面。
-func (a *roundActor) placeActiveM5TargetLast(dirty []dirtyConversation) ([]dirtyConversation, error) {
+// 不得搜索会话列表。试运行目标确实需要补采或处理入站时，本轮只对账该目标：
+// 这既完成 M2→M5 的页面所有权交接，也避免无关旧会话的可恢复定位失败阻断
+// 一次性试运行。其他 dirty 会话只延后到试运行释放 active slot 后的下一轮。
+// 已采集且没有待处理入站时不得为维持路由而反复抢页面。
+func (a *roundActor) isolateActiveM5Target(dirty []dirtyConversation) ([]dirtyConversation, error) {
 	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
 	if err != nil || target == nil {
 		return dirty, err
@@ -623,13 +624,7 @@ func (a *roundActor) placeActiveM5TargetLast(dirty []dirtyConversation) ([]dirty
 	if !needsHandoff {
 		return dirty, nil
 	}
-	out := make([]dirtyConversation, 0, len(dirty)+1)
-	for i := range dirty {
-		if dirty[i].conversation.ConversationRef != target.Conversation.ConversationRef {
-			out = append(out, dirty[i])
-		}
-	}
-	return append(out, dirtyConversation{conversation: target.Conversation, ledger: ledger}), nil
+	return []dirtyConversation{{conversation: target.Conversation, ledger: ledger}}, nil
 }
 
 func m5TargetNeedsRouteHandoff(
