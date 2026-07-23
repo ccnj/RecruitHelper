@@ -302,6 +302,13 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 				existing.MessageSeq != req.Event.MessageSeq {
 				return ErrCommunicationV4Conflict
 			}
+			if _, _, err := materializeCommunicationV4EventActionsTx(
+				tx,
+				existing,
+				existing.AppliedAt,
+			); err != nil {
+				return err
+			}
 			out.Aggregate = aggregate
 			out.Application = existing
 			return nil
@@ -343,6 +350,13 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 			Outcome: outcome, AppliedAt: req.AppliedAt,
 		}
 		if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
+			return err
+		}
+		if _, _, err := materializeCommunicationV4EventActionsTx(
+			tx,
+			application,
+			application.AppliedAt,
+		); err != nil {
 			return err
 		}
 		out.Aggregate = next

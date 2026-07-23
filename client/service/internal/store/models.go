@@ -467,6 +467,53 @@ type CommunicationV4ProjectionApplication struct {
 	AppliedAt    time.Time                         `gorm:"not null"`
 }
 
+type CommunicationV4EventActionStatus string
+
+const (
+	CommunicationV4EventActionPlanned        CommunicationV4EventActionStatus = "planned"
+	CommunicationV4EventActionDeferred       CommunicationV4EventActionStatus = "deferred"
+	CommunicationV4EventActionEffectPending  CommunicationV4EventActionStatus = "effectPending"
+	CommunicationV4EventActionSent           CommunicationV4EventActionStatus = "sent"
+	CommunicationV4EventActionManualRequired CommunicationV4EventActionStatus = "manualRequired"
+)
+
+type CommunicationV4EventEffectKind string
+
+const (
+	CommunicationV4EventEffectReplyText    CommunicationV4EventEffectKind = "replyText"
+	CommunicationV4EventEffectInviteWechat CommunicationV4EventEffectKind = "inviteWechat"
+	CommunicationV4EventEffectNotification CommunicationV4EventEffectKind = "notification"
+	CommunicationV4EventEffectAcceptWechat CommunicationV4EventEffectKind = "acceptWechat"
+)
+
+// CommunicationV4EventAction is the immutable local plan derived from one
+// business-event projection receipt. SemanticActionKey remains scoped to a
+// profile; ActionID is its deterministic SHA-256 identity. Deferred rows are
+// explicit business facts, not placeholders that may be deleted later.
+type CommunicationV4EventAction struct {
+	ActionID            string                         `gorm:"primaryKey"`
+	ProfileID           string                         `gorm:"not null;index;uniqueIndex:ux_communication_v4_event_action_semantic,priority:1;uniqueIndex:ux_communication_v4_event_action_source_ordinal,priority:1"`
+	SourceInputKind     CommunicationV4InputKind       `gorm:"not null;index:idx_communication_v4_event_action_source,priority:1;uniqueIndex:ux_communication_v4_event_action_source_ordinal,priority:2"`
+	SourceInputKey      string                         `gorm:"not null;index:idx_communication_v4_event_action_source,priority:2;uniqueIndex:ux_communication_v4_event_action_source_ordinal,priority:3"`
+	SourceOrdinal       int                            `gorm:"not null;uniqueIndex:ux_communication_v4_event_action_source_ordinal,priority:4"`
+	SemanticActionKey   string                         `gorm:"not null;uniqueIndex:ux_communication_v4_event_action_semantic,priority:2"`
+	V4Kind              communication.V4ActionKind     `gorm:"not null"`
+	CardMessageSeq      int64                          `gorm:"not null"`
+	EffectKind          CommunicationV4EventEffectKind `gorm:"not null"`
+	Text                string
+	ContentHash         string
+	ContextRevisionHash string
+	DependsOnActionID   *string                          `gorm:"index"`
+	Status              CommunicationV4EventActionStatus `gorm:"not null;index"`
+	FailureReason       string
+	EffectIntentID      *string   `gorm:"uniqueIndex"`
+	PlannedAt           time.Time `gorm:"not null"`
+	EffectStartedAt     *time.Time
+	SentAt              *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 // CandidateResumeSnapshot 是一次完整简历读取的不可变业务事实。正文只在本机
 // 业务库保存；普通管理 API、审计和日志只暴露 hash/大小/覆盖信息。
 type CandidateResumeSnapshot struct {
