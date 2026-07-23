@@ -208,7 +208,6 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 	if err != nil || before.State.LastBodyAt == nil {
 		t.Fatalf("缺少招呼正文时钟基线: aggregate=%+v err=%v", before, err)
 	}
-	initialBodyAt := *before.State.LastBodyAt
 	resultAt := fixture.Now.Add(time.Minute)
 	result, err := s.ApplyResultMessage(
 		created.Command.MsgID,
@@ -235,6 +234,7 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 		*action.EffectIntentID != req.Intent.IntentID {
 		t.Fatalf("V4 action 未收敛 sent: action=%+v err=%v", action, err)
 	}
+	confirmedAt := *action.SentAt
 	turn, err := s.DialogueTurnByID(fixture.Turn.TurnID)
 	if err != nil || turn == nil || turn.Status != DialogueTurnCompleted {
 		t.Fatalf("V4 turn 未收敛 completed: turn=%+v err=%v", turn, err)
@@ -242,11 +242,23 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	if err != nil || aggregate.Revision != 4 || aggregate.ProjectedThroughSeq != 3 ||
 		aggregate.State.LastOutboundMessageSeq != 3 ||
+		aggregate.State.LastOutboundAt == nil ||
+		!aggregate.State.LastOutboundAt.Equal(confirmedAt) ||
+		aggregate.State.ClockUncertain ||
 		aggregate.State.LastBodyAt == nil ||
-		!aggregate.State.LastBodyAt.Equal(initialBodyAt) ||
-		!aggregate.State.BodyClockUncertain ||
+		!aggregate.State.LastBodyAt.Equal(confirmedAt) ||
+		aggregate.State.BodyClockUncertain ||
 		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
-		t.Fatalf("V4 正证未推进状态/游标或伪造发送时间: aggregate=%+v err=%v", aggregate, err)
+		t.Fatalf("V4 正证未以脑侧确认时刻推进状态/游标: aggregate=%+v err=%v", aggregate, err)
+	}
+	var confirmedMessage Message
+	if err := s.db.First(
+		&confirmedMessage,
+		"outbound_intent_id = ?",
+		req.Intent.IntentID,
+	).Error; err != nil || confirmedMessage.TsApproxMs != nil {
+		t.Fatalf("保守 V4 时钟不得伪造平台消息时间: message=%+v err=%v",
+			confirmedMessage, err)
 	}
 	var messages, confirmations int64
 	if err := s.db.Model(&Message{}).
@@ -262,6 +274,33 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 	}
 	if messages != 1 || confirmations != 1 {
 		t.Fatalf("V4 正证发生事实增生: messages=%d confirmations=%d", messages, confirmations)
+	}
+	laterReplayAt := confirmedAt.Add(time.Hour)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		return applyM5AutomaticEffectStatusByIDTx(
+			tx,
+			req.Intent.IntentID,
+			laterReplayAt,
+		)
+	}); err != nil {
+		t.Fatalf("V4 正证状态重放失败: %v", err)
+	}
+	replayedAction, err := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+	replayedAggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || replayedAction == nil || replayedAction.SentAt == nil ||
+		!replayedAction.SentAt.Equal(confirmedAt) ||
+		aggregateErr != nil || replayedAggregate.Revision != aggregate.Revision ||
+		replayedAggregate.State.LastOutboundAt == nil ||
+		!replayedAggregate.State.LastOutboundAt.Equal(confirmedAt) ||
+		replayedAggregate.State.LastBodyAt == nil ||
+		!replayedAggregate.State.LastBodyAt.Equal(confirmedAt) {
+		t.Fatalf(
+			"较晚重放不得漂移首次确认锚: action=%+v aggregate=%+v err=%v aggregateErr=%v",
+			replayedAction,
+			replayedAggregate,
+			err,
+			aggregateErr,
+		)
 	}
 
 	nextText := "合成第二轮候选人回复"

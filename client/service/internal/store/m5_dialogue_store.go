@@ -1852,18 +1852,23 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 			return ErrDialogueTurnConflict
 		}
 		if v4Turn {
-			var sentAt *time.Time
+			confirmedAt := sentAt
 			if message.TsApproxMs != nil {
 				value := time.UnixMilli(*message.TsApproxMs).UTC()
-				sentAt = &value
+				confirmedAt = &value
 			}
+			// A platform timestamp is preferable when available. Otherwise the
+			// brain-side positive-evidence confirmation time is a conservative
+			// silence anchor: it can only delay a due action, never make one
+			// fire early. The Message timestamp remains nil because this does
+			// not claim to be the platform's send time.
 			_, _, _, err := applyCommunicationV4ConfirmedActionTx(
 				tx,
 				turn.ProfileID,
 				communication.V4ConfirmedAction{
 					ActionKey: v4Plan.ActionKey, Kind: v4Plan.Kind,
 					MessageSeq: message.Seq, CardMessageSeq: v4Plan.CardMessageSeq,
-					SentAt: sentAt, Round: v4Plan.Round, Stage: v4Plan.Stage,
+					SentAt: confirmedAt, Round: v4Plan.Round, Stage: v4Plan.Stage,
 				},
 				at,
 			)
