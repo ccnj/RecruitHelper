@@ -265,16 +265,20 @@ func (d *Dispatcher) handWitness(handID string) (HandWitness, bool) {
 }
 
 type VerificationRequest struct {
-	Command      store.CmdRecord
-	Intent       store.EffectIntent
-	Args         protocol.ChatSendMessageArgs
-	Guards       protocol.ChatSendMessageGuards
-	GreetingArgs *protocol.ChatSendGreetingArgs
+	Command          store.CmdRecord
+	Intent           store.EffectIntent
+	Args             protocol.ChatSendMessageArgs
+	Guards           protocol.ChatSendMessageGuards
+	GreetingArgs     *protocol.ChatSendGreetingArgs
+	WechatInviteArgs *protocol.ChatSendWechatInviteArgs
+	InviteCardArgs   *protocol.ChatSendInviteCardArgs
 }
 
 type VerificationObservation struct {
 	Confirmed       bool
 	ContentHash     string
+	SourceKey       string
+	Interview       *protocol.InterviewDetails
 	ConversationRef string
 	ObservedAt      int64
 	Reason          string

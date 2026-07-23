@@ -1101,6 +1101,86 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 	return &appended, nil
 }
 
+type VerifiedCardSuccess struct {
+	Ref              string
+	ConversationKey  ConversationKey
+	Card             CardResultMutation
+	ResultBody       string
+	ResolutionReason string
+	At               time.Time
+}
+
+// ResolveCardVerified 把 chat.readThread 唯一命中的卡片正证送入与直接
+// result 相同的 applyCardResultTx。sourceKey 与 OutboundIntentID 两层唯一
+// 约束保证验证读、迟到 result 和巡检收编竞态最多留下一个业务事实。
+func (s *Store) ResolveCardVerified(req VerifiedCardSuccess) (*Message, error) {
+	if req.At.IsZero() {
+		req.At = time.Now()
+	}
+	if req.Ref == "" || req.ConversationKey.Platform == "" ||
+		req.ConversationKey.AccountRef == "" || req.ConversationKey.ConversationRef == "" {
+		return nil, errors.New("卡片验证成功缺少关联字段")
+	}
+	var resolved Message
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", req.Ref).Error; err != nil {
+			return err
+		}
+		if cmd.IntentID == "" {
+			return ErrRecoveryStateConflict
+		}
+		if cmd.Status == CmdOk || cmd.Status == CmdResolvedOk {
+			if err := tx.First(&resolved, "outbound_intent_id = ?", cmd.IntentID).Error; err != nil {
+				return err
+			}
+			if resolved.RetractedAt != nil {
+				return fmt.Errorf("%w: 已撤回的卡片事实不得当作验证成功", ErrRecoveryStateConflict)
+			}
+			return applyM5AutomaticEffectStatusByIDTx(tx, cmd.IntentID, req.At)
+		}
+		if cmd.Status != CmdVerifying && cmd.Status != CmdPendingReconcile && cmd.Status != CmdSuspect {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.Platform != req.ConversationKey.Platform ||
+			intent.AccountRef != req.ConversationKey.AccountRef ||
+			intent.TargetRef != req.ConversationKey.ConversationRef ||
+			intent.SendFingerprint != req.Card.ContentHash {
+			return ErrEffectIntentConflict
+		}
+		message, err := applyCardResultTx(tx, &intent, req.Card, req.At)
+		if err != nil {
+			return err
+		}
+		resolved = *message
+		cmd.Status = CmdOk
+		cmd.ResultBody = req.ResultBody
+		cmd.SuspectReason = req.ResolutionReason
+		cmd.SideEffect = "confirmed"
+		cmd.TerminalAt = &req.At
+		cmd.VerificationChildMsgID = ""
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		intent.Status = EffectIntentOk
+		intent.ResultMessageSeq = &resolved.Seq
+		intent.SuspectReason = req.ResolutionReason
+		intent.ResolvedAt = &req.At
+		if err := tx.Save(&intent).Error; err != nil {
+			return err
+		}
+		return applyM5AutomaticEffectStatusTx(tx, &intent, req.At)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &resolved, nil
+}
+
 // RecordVerificationMiss 记录一轮结构化验证读未能确认目标消息。
 // “完整窗未看到”仍只是负观测，不授权重投；第 3 轮与错误/歧义
 // 一样收敛为 suspect。

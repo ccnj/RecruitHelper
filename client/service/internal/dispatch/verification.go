@@ -133,6 +133,28 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			recordMiss("验证读无法解析原始 guards: " + err.Error())
 			return
 		}
+	case protocol.PrimChatSendWechatInvite:
+		var args protocol.ChatSendWechatInviteArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			recordMiss("验证读无法解析换微信邀请 args: " + err.Error())
+			return
+		}
+		if err := json.Unmarshal([]byte(cmd.Guards), &request.Guards); err != nil {
+			recordMiss("验证读无法解析换微信邀请 guards: " + err.Error())
+			return
+		}
+		request.WechatInviteArgs = &args
+	case protocol.PrimChatSendInviteCard:
+		var args protocol.ChatSendInviteCardArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			recordMiss("验证读无法解析邀面卡 args: " + err.Error())
+			return
+		}
+		if err := json.Unmarshal([]byte(cmd.Guards), &request.Guards); err != nil {
+			recordMiss("验证读无法解析邀面卡 guards: " + err.Error())
+			return
+		}
+		request.InviteCardArgs = &args
 	case protocol.PrimChatSendGreeting:
 		var greetingArgs protocol.ChatSendGreetingArgs
 		if err := json.Unmarshal([]byte(cmd.Args), &greetingArgs); err != nil {
@@ -224,6 +246,84 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			Text:            request.GreetingArgs.Text, ContentHash: intent.SendFingerprint,
 			ObservedAtMs: observation.ObservedAt, ResultBody: string(resultRaw),
 			ResolutionReason: "verification greeting relationship matched", At: time.Now(),
+		})
+	case protocol.PrimChatSendWechatInvite:
+		if request.WechatInviteArgs == nil || !validLowerHex64(observation.SourceKey) ||
+			observation.Interview != nil {
+			recordMiss("换微信邀请验证正证缺少稳定卡片身份或携带了非法邀面参数")
+			return
+		}
+		data := protocol.ChatSendWechatInviteData{
+			ConversationRef: request.WechatInviteArgs.ConversationRef,
+			ContentHash:     observation.ContentHash,
+			SourceKey:       observation.SourceKey,
+			ObservedAt:      observation.ObservedAt,
+		}
+		result := protocol.ResultBody{
+			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
+			Data: mustEncode(data),
+			Evidence: []protocol.Evidence{{
+				Type: string(protocol.SendWechatInviteEvidenceTypeOutboundWechatInviteObserved),
+			}},
+		}
+		resultRaw, err := protocol.Encode(result)
+		if err != nil {
+			recordMiss("换微信邀请验证成功证词编码失败: " + err.Error())
+			return
+		}
+		_, commitErr = d.st.ResolveCardVerified(store.VerifiedCardSuccess{
+			Ref: ref,
+			ConversationKey: store.ConversationKey{
+				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+			},
+			Card: store.CardResultMutation{
+				ConversationRef: request.WechatInviteArgs.ConversationRef,
+				CardType:        "wechatExchange", CardState: "pending",
+				ContentHash: observation.ContentHash, SourceKey: observation.SourceKey,
+			},
+			ResultBody: string(resultRaw), ResolutionReason: "verification wechat card uniquely matched",
+			At: time.Now(),
+		})
+	case protocol.PrimChatSendInviteCard:
+		if request.InviteCardArgs == nil || !validLowerHex64(observation.SourceKey) ||
+			observation.Interview == nil || *observation.Interview != request.InviteCardArgs.Interview {
+			recordMiss("邀面卡验证正证缺少稳定卡片身份或参数不一致")
+			return
+		}
+		interview := request.InviteCardArgs.Interview
+		data := protocol.ChatSendInviteCardData{
+			ConversationRef: request.InviteCardArgs.ConversationRef,
+			ContentHash:     observation.ContentHash,
+			SourceKey:       observation.SourceKey,
+			Interview:       interview,
+			ObservedAt:      observation.ObservedAt,
+		}
+		result := protocol.ResultBody{
+			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
+			Data: mustEncode(data),
+			Evidence: []protocol.Evidence{{
+				Type: string(protocol.SendInviteCardEvidenceTypeOutboundInterviewInviteObserved),
+			}},
+		}
+		resultRaw, err := protocol.Encode(result)
+		if err != nil {
+			recordMiss("邀面卡验证成功证词编码失败: " + err.Error())
+			return
+		}
+		startsAt, endsAt, method := interview.StartsAt, interview.EndsAt, string(interview.Method)
+		_, commitErr = d.st.ResolveCardVerified(store.VerifiedCardSuccess{
+			Ref: ref,
+			ConversationKey: store.ConversationKey{
+				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+			},
+			Card: store.CardResultMutation{
+				ConversationRef: request.InviteCardArgs.ConversationRef,
+				CardType:        "interviewInvite", CardState: "unknown",
+				ContentHash: observation.ContentHash, SourceKey: observation.SourceKey,
+				InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+			},
+			ResultBody: string(resultRaw), ResolutionReason: "verification interview card uniquely matched",
+			At: time.Now(),
 		})
 	}
 	if commitErr != nil {

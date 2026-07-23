@@ -25,6 +25,7 @@ type verificationSender struct {
 	autoPages  bool
 	anchorHash string
 	targetHash string
+	targetCard *protocol.ThreadMessage
 	reads      []verificationReadCall
 }
 
@@ -42,7 +43,8 @@ func (s *verificationSender) SendEnvelope(handID string, env protocol.Envelope) 
 	}
 	s.mu.Lock()
 	s.reads = append(s.reads, verificationReadCall{msgID: env.MsgID, args: args})
-	autoPages, anchorHash, targetHash, d := s.autoPages, s.anchorHash, s.targetHash, s.dispatcher
+	autoPages, anchorHash, targetHash, targetCard, d :=
+		s.autoPages, s.anchorHash, s.targetHash, s.targetCard, s.dispatcher
 	s.mu.Unlock()
 	if !autoPages {
 		return nil
@@ -50,8 +52,12 @@ func (s *verificationSender) SendEnvelope(handID string, env protocol.Envelope) 
 	var data protocol.ChatReadThreadData
 	if args.Cursor == "" {
 		next := "older-page"
+		target := verificationThreadMessage(0, protocol.MessageDirectionOut, targetHash)
+		if targetCard != nil {
+			target = *targetCard
+		}
 		data = protocol.ChatReadThreadData{
-			Messages:   []protocol.ThreadMessage{verificationThreadMessage(0, protocol.MessageDirectionOut, targetHash)},
+			Messages:   []protocol.ThreadMessage{target},
 			NextCursor: &next,
 		}
 	} else {
@@ -72,6 +78,8 @@ func (s *verificationSender) HandSession(string) (string, string, bool) {
 func (s *verificationSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimChatSendMessage + "@1",
+			protocol.PrimChatSendWechatInvite + "@1",
+			protocol.PrimChatSendInviteCard + "@1",
 			protocol.PrimChatReadThread + "@1",
 		}, []string{
 			string(protocol.FeatureLease1),

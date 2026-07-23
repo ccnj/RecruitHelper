@@ -9,6 +9,7 @@ import (
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/patrol"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -27,6 +28,8 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 	switch req.Command.Name {
 	case protocol.PrimChatSendMessage:
 		return v.verifySendMessage(ctx, req)
+	case protocol.PrimChatSendWechatInvite, protocol.PrimChatSendInviteCard:
+		return v.verifyCard(ctx, req)
 	case protocol.PrimChatSendGreeting:
 		return v.verifyGreeting(ctx, req)
 	default:
@@ -39,14 +42,27 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 		len(req.Guards.ExpectedTail) == 0 {
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendMessage 意图")
 	}
+	aggregate, anchorStarts, err := v.readThreadWindow(ctx, req, req.Args.ConversationRef)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	return classifyVerifiedSend(
+		aggregate, anchorStarts, len(req.Guards.ExpectedTail), req.Intent.SendFingerprint,
+	)
+}
 
+func (v EffectVerifier) readThreadWindow(
+	ctx context.Context,
+	req dispatch.VerificationRequest,
+	conversationRef string,
+) ([]protocol.ThreadMessage, []int, error) {
 	var aggregate []protocol.ThreadMessage
 	cursor := ""
 	restarts := 0
 	seen := map[string]struct{}{}
 	for page := 0; page < verificationMaxPages; page++ {
 		args := protocol.ChatReadThreadArgs{
-			ConversationRef: req.Args.ConversationRef, Cursor: cursor,
+			ConversationRef: conversationRef, Cursor: cursor,
 			Window: protocol.ThreadWindow{
 				AnchorTail: req.Guards.ExpectedTail, Deep: true,
 				MaxMessages: protocol.DefaultPaginationReadThreadMaxItems,
@@ -54,7 +70,7 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 		}
 		argsRaw, err := protocol.Encode(args)
 		if err != nil {
-			return dispatch.VerificationObservation{}, err
+			return nil, nil, err
 		}
 		state, err := v.Dispatcher.RunVerificationRead(ctx, req.Command.MsgID, dispatch.DispatchRequest{
 			HandID: req.Command.HandID, Name: protocol.PrimChatReadThread, Args: argsRaw,
@@ -64,7 +80,7 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 			},
 		})
 		if err != nil {
-			return dispatch.VerificationObservation{}, err
+			return nil, nil, err
 		}
 		dataRaw, err := resultData(state.Leaf)
 		if err != nil {
@@ -76,11 +92,11 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 				page = -1
 				continue
 			}
-			return dispatch.VerificationObservation{}, err
+			return nil, nil, err
 		}
 		var data protocol.ChatReadThreadData
 		if err := json.Unmarshal(dataRaw, &data); err != nil {
-			return dispatch.VerificationObservation{}, fmt.Errorf("解析验证 readThread: %w", err)
+			return nil, nil, fmt.Errorf("解析验证 readThread: %w", err)
 		}
 		if cursor == "" {
 			aggregate = append([]protocol.ThreadMessage(nil), data.Messages...)
@@ -90,19 +106,64 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 		}
 		anchorStarts := matchingAnchorStarts(aggregate, req.Guards.ExpectedTail)
 		if data.Complete || data.ReachedTop || len(anchorStarts) != 0 {
-			return classifyVerifiedSend(aggregate, anchorStarts, len(req.Guards.ExpectedTail), req.Intent.SendFingerprint)
+			return aggregate, anchorStarts, nil
 		}
 		if data.NextCursor == nil || *data.NextCursor == "" {
-			return dispatch.VerificationObservation{}, errors.New("验证分页未完成但缺少 nextCursor")
+			return nil, nil, errors.New("验证分页未完成但缺少 nextCursor")
 		}
 		next := *data.NextCursor
 		if _, duplicate := seen[next]; duplicate || next == cursor {
-			return dispatch.VerificationObservation{}, errors.New("验证分页 cursor 循环")
+			return nil, nil, errors.New("验证分页 cursor 循环")
 		}
 		seen[next] = struct{}{}
 		cursor = next
 	}
-	return dispatch.VerificationObservation{}, errors.New("验证分页超过上限")
+	return nil, nil, errors.New("验证分页超过上限")
+}
+
+func (v EffectVerifier) verifyCard(
+	ctx context.Context,
+	req dispatch.VerificationRequest,
+) (dispatch.VerificationObservation, error) {
+	if len(req.Guards.ExpectedTail) == 0 {
+		return dispatch.VerificationObservation{}, errors.New("卡片验证请求缺少 expectedTail")
+	}
+	var (
+		conversationRef string
+		targetHash      string
+		interview       *protocol.InterviewDetails
+	)
+	switch req.Command.Name {
+	case protocol.PrimChatSendWechatInvite:
+		if req.WechatInviteArgs == nil || req.WechatInviteArgs.ConversationRef == "" {
+			return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendWechatInvite 意图")
+		}
+		conversationRef = req.WechatInviteArgs.ConversationRef
+		targetHash = syncledger.WechatExchangeContentHash()
+	case protocol.PrimChatSendInviteCard:
+		if req.InviteCardArgs == nil || req.InviteCardArgs.ConversationRef == "" ||
+			req.InviteCardArgs.Interview.StartsAt <= 0 ||
+			req.InviteCardArgs.Interview.EndsAt <= req.InviteCardArgs.Interview.StartsAt ||
+			req.InviteCardArgs.Interview.Method != protocol.InterviewMethodWechatVideo {
+			return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendInviteCard 意图")
+		}
+		conversationRef = req.InviteCardArgs.ConversationRef
+		value := req.InviteCardArgs.Interview
+		interview = &value
+		targetHash = syncledger.InterviewInviteContentHash(
+			value.StartsAt, value.EndsAt, string(value.Method),
+		)
+	default:
+		return dispatch.VerificationObservation{}, errors.New("验证请求不是卡片意图")
+	}
+	aggregate, anchorStarts, err := v.readThreadWindow(ctx, req, conversationRef)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	return classifyVerifiedCard(
+		aggregate, anchorStarts, len(req.Guards.ExpectedTail),
+		req.Command.Name, targetHash, interview,
+	)
 }
 
 func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {
@@ -203,6 +264,87 @@ func classifyVerifiedSend(
 		Confirmed: true, ContentHash: matched[0].ContentHash, ObservedAt: observedAt(matched[0]),
 		Reason: "expectedTail 之后唯一命中目标 out/text 指纹",
 	}, nil
+}
+
+func classifyVerifiedCard(
+	messages []protocol.ThreadMessage,
+	anchorStarts []int,
+	tailLength int,
+	primitive string,
+	targetHash string,
+	expectedInterview *protocol.InterviewDetails,
+) (dispatch.VerificationObservation, error) {
+	if len(anchorStarts) != 1 {
+		reason := "未找到 expectedTail"
+		if len(anchorStarts) > 1 {
+			reason = "expectedTail 在当前窗口出现多次，无法唯一定位"
+		}
+		return dispatch.VerificationObservation{Reason: reason}, nil
+	}
+	start := anchorStarts[0] + tailLength
+	if tailLength <= 0 || start > len(messages) {
+		return dispatch.VerificationObservation{}, errors.New("卡片验证分类的 expectedTail 长度非法")
+	}
+	var matched []protocol.ThreadMessage
+	for i := start; i < len(messages); i++ {
+		message := messages[i]
+		if message.Direction != protocol.MessageDirectionOut ||
+			message.Kind != protocol.MessageKindCard ||
+			message.ContentHash != targetHash ||
+			!validOpaqueSourceKey(message.SourceKey) ||
+			message.CardType == nil || message.CardState == nil {
+			continue
+		}
+		switch primitive {
+		case protocol.PrimChatSendWechatInvite:
+			if *message.CardType == protocol.CardTypeWechatExchange &&
+				*message.CardState == protocol.CardStatePending &&
+				message.Interview == nil {
+				matched = append(matched, message)
+			}
+		case protocol.PrimChatSendInviteCard:
+			if expectedInterview != nil &&
+				*message.CardType == protocol.CardTypeInterviewInvite &&
+				*message.CardState == protocol.CardStateUnknown &&
+				message.Interview != nil &&
+				*message.Interview == *expectedInterview {
+				matched = append(matched, message)
+			}
+		default:
+			return dispatch.VerificationObservation{}, errors.New("卡片验证原语非法")
+		}
+	}
+	if len(matched) != 1 {
+		reason := "expectedTail 之后未找到严格匹配的 out/card 正证"
+		if len(matched) > 1 {
+			reason = "expectedTail 之后出现多条严格匹配的 out/card，结果歧义"
+		}
+		return dispatch.VerificationObservation{Reason: reason}, nil
+	}
+	confirmed := matched[0]
+	var interview *protocol.InterviewDetails
+	if confirmed.Interview != nil {
+		value := *confirmed.Interview
+		interview = &value
+	}
+	return dispatch.VerificationObservation{
+		Confirmed: true, ContentHash: confirmed.ContentHash, SourceKey: confirmed.SourceKey,
+		Interview: interview, ObservedAt: observedAt(confirmed),
+		Reason: "expectedTail 之后唯一命中严格卡片正证",
+	}, nil
+}
+
+func validOpaqueSourceKey(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func isCursorInvalid(err error) bool {
