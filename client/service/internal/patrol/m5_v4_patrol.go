@@ -162,11 +162,6 @@ func (a *roundActor) processCommunicationV4Target(
 		_, err := a.processCommunicationV4ScheduleArchive(target, false)
 		return err
 	}
-	if a.manager.advice == nil {
-		// Provider configuration is a process dependency. Do not freeze a
-		// durable turn until this process can continue it.
-		return nil
-	}
 	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
 		target.Profile.ProfileID,
 	)

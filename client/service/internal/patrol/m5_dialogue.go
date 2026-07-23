@@ -294,6 +294,13 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			}
 			return a.dispatchM5Reply(ctx, turn)
 		}
+		if turn.Status == store.DialogueTurnCollected &&
+			v4Owned && nextV4Advice == communication.V4AdviceNone {
+			// An event-driven branch is durably waiting for a prerequisite
+			// action. Neither AI material nor provider configuration is part
+			// of that deterministic continuation.
+			return nil
+		}
 		material, err := a.loadM5TurnMaterial(turn)
 		if err != nil {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "renderInputUnavailable", a.manager.now())
@@ -307,11 +314,6 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 
 		switch turn.Status {
 		case store.DialogueTurnCollected:
-			if v4Owned && nextV4Advice == communication.V4AdviceNone {
-				// An event-driven branch is durably waiting for a prerequisite
-				// action. The event-action pump owns its continuation.
-				return nil
-			}
 			if material.inputKind == store.DialogueTurnInputResumeAttachment {
 				decision, reduceErr := reduceM5ResumeTurn(turn, material, communication.ReplyAdvice{State: communication.AdviceAbsent})
 				if reduceErr != nil || !m5ResumeReplyAdviceAuthorized(decision) {
@@ -330,6 +332,9 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 			}
 			if decision.NextAdvice == m5ai.PurposeIntent {
+				if a.manager.advice == nil {
+					return nil
+				}
 				if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
 					return err
 				}
@@ -342,6 +347,9 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			}
 		case store.DialogueTurnClassified:
 			if v4Owned && nextV4Advice == communication.V4AdviceServiceReply {
+				if a.manager.advice == nil {
+					return nil
+				}
 				if err := a.runM5ReplyAdvice(
 					ctx,
 					turn,
@@ -362,6 +370,9 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 				if reduceErr != nil || !m5ResumeReplyAdviceAuthorized(decision) {
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 				}
+				if a.manager.advice == nil {
+					return nil
+				}
 				if err := a.runM5ReplyAdvice(
 					ctx,
 					turn,
@@ -381,6 +392,9 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			})
 			if reduceErr != nil || decision.NextAdvice != m5ai.PurposeReply {
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+			}
+			if a.manager.advice == nil {
+				return nil
 			}
 			if err := a.runM5ReplyAdvice(
 				ctx,

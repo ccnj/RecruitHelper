@@ -664,16 +664,11 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 		Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted",
 		ContentHash: syncledger.HashText("wechat-exchanged-fixture"), Origin: "external",
 	}})
-	advice := &recordingAdviceExecutor{
-		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-			return m5ai.CompletionResponse{}, fmt.Errorf("换微信成功事实不得调用 AI: %s", request.Purpose)
-		},
-	}
 	hand := &m5PositiveHand{}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
-	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	manager, err := NewManager(h.db, runner, h.hands, h.config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,9 +695,9 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 	if turn != nil {
 		action, _ = h.db.CommunicationActionByTurn(turn.TurnID)
 	}
-	if len(advice.requests) != 0 || hand.commandCount() != 1 {
-		t.Fatalf("换微信成功应零 AI 且只发一条固定回执: advice=%+v sends=%d turn=%+v action=%+v turnErr=%v",
-			advice.requests, hand.commandCount(), turn, action, turnErr)
+	if hand.commandCount() != 1 {
+		t.Fatalf("换微信成功在 provider 未配置时也应只发一条固定回执: sends=%d turn=%+v action=%+v turnErr=%v",
+			hand.commandCount(), turn, action, turnErr)
 	}
 	turn, err = h.db.LatestDialogueTurnForProfile(fixture.profileID)
 	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
@@ -725,10 +720,90 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 		}
 	}
 	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
-	if err != nil || replayed.Revision != revision || len(advice.requests) != 0 ||
-		hand.commandCount() != 1 {
-		t.Fatalf("重复巡检发生状态、AI 或发送增生: aggregate=%+v advice=%+v sends=%d err=%v",
-			replayed, advice.requests, hand.commandCount(), err)
+	if err != nil || replayed.Revision != revision || hand.commandCount() != 1 {
+		t.Fatalf("重复巡检发生状态或发送增生: aggregate=%+v sends=%d err=%v",
+			replayed, hand.commandCount(), err)
+	}
+}
+
+func TestCommunicationV4PatrolFreezesDialogueUntilProviderBecomesAvailable(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"provider-unavailable",
+		"这个岗位现在还在招吗",
+	)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	waitingManager, err := NewManager(h.db, h.runner, h.hands, h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitingRoundID := "round-v4-provider-unavailable"
+	beginCommunicationV4PatrolRound(t, h, waitingRoundID)
+	waitingActor := &roundActor{
+		manager: waitingManager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: waitingRoundID, now: h.clock.Now(),
+	}
+	waitingManager.mu.Lock()
+	err = waitingActor.processCommunicationV4Targets(context.Background())
+	waitingManager.mu.Unlock()
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || turnErr != nil || turn == nil || turn.Status != store.DialogueTurnCollected ||
+		aggregateErr != nil || aggregate.State.MainStatus != communication.V4StatusCommunicating ||
+		aggregate.ProjectedThroughSeq != fixture.inboundSeq ||
+		len(h.runner.names()) != 0 {
+		t.Fatalf("provider 缺失时没有只冻结业务轮: err=%v turn=%+v turnErr=%v aggregate=%+v aggregateErr=%v calls=%+v",
+			err, turn, turnErr, aggregate, aggregateErr, h.runner.names())
+	}
+
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			switch request.Purpose {
+			case m5ai.PurposeIntent:
+				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+			case m5ai.PurposeReply:
+				return safeFakeResponse(`{"话术_序列":["合成恢复回复"],"动作":"忽略"}`), nil
+			default:
+				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
+			}
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	resumedManager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumedRoundID := "round-v4-provider-resumed"
+	beginCommunicationV4PatrolRound(t, h, resumedRoundID)
+	resumedActor := &roundActor{
+		manager: resumedManager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: resumedRoundID, now: h.clock.Now(),
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resumedManager.mu.Lock()
+		err = resumedActor.processCommunicationV4Targets(context.Background())
+		resumedManager.mu.Unlock()
+		if err != nil {
+			t.Fatalf("provider 恢复后的巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	turn, turnErr = h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	aggregate, aggregateErr = h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if turnErr != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
+		aggregateErr != nil || aggregate.ProjectedThroughSeq != fixture.inboundSeq+1 ||
+		len(advice.requests) != 2 || hand.commandCount() != 1 {
+		t.Fatalf("provider 恢复后没有续跑原轮或发生增生: turn=%+v turnErr=%v aggregate=%+v aggregateErr=%v advice=%d sends=%d",
+			turn, turnErr, aggregate, aggregateErr, len(advice.requests), hand.commandCount())
 	}
 }
 
