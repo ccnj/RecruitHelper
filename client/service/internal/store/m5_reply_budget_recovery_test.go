@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/m5ai"
-
-	"gorm.io/gorm"
 )
 
 type m5ReplyBudgetRecoveryFixture struct {
@@ -303,107 +301,6 @@ func TestReserveM5ReplyBudgetRecoveryRejectsInputDriftBeforeAttemptTwo(t *testin
 	if err := fixture.store.db.Model(&AIInvocation{}).
 		Where("turn_id = ?", fixture.turn.TurnID).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("漂移后不得新增 invocation: count=%d err=%v", count, err)
-	}
-}
-
-func TestApprovedM5ReplyTraceRearmReservesAttemptThreeOnly(t *testing.T) {
-	fixture := seedM5ReplyBudgetRecoveryFixture(t, "trace-rearm-once")
-	oldTurnID := fixture.turn.TurnID
-	if err := fixture.store.db.Model(&DialogueTurn{}).
-		Where("turn_id = ?", oldTurnID).
-		Update("turn_id", m5ReplyTraceRearmTurnID).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.store.db.Model(&AIInvocation{}).
-		Where("turn_id = ?", oldTurnID).
-		Update("turn_id", m5ReplyTraceRearmTurnID).Error; err != nil {
-		t.Fatal(err)
-	}
-	fixture.turn.TurnID = m5ReplyTraceRearmTurnID
-	fixture.invocation.TurnID = m5ReplyTraceRearmTurnID
-
-	authorized, err := fixture.store.AuthorizeM5ReplyBudgetRecovery(
-		AuthorizeM5ReplyBudgetRecoveryRequest{
-			FailedSelectionID: fixture.failed.SelectionID,
-			NewSelectionID:    "selection-trace-rearm-attempt-2",
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt2, err := fixture.store.ReserveAuthorizedM5ReplyBudgetRecovery(
-		ReserveM5ReplyBudgetRecoveryRequest{
-			InvocationID: m5ReplyTraceRearmAttempt2InvocationID,
-			TurnID:       fixture.turn.TurnID,
-			Provider:     fixture.invocation.Provider,
-			Model:        fixture.invocation.Model,
-			InputHash:    fixture.invocation.InputHash,
-		},
-	)
-	if err != nil || !attempt2.Created {
-		t.Fatalf("建立 attempt=2 失败事实: result=%+v err=%v", attempt2, err)
-	}
-	finishedAt := time.Now().UTC().Truncate(time.Millisecond)
-	if _, err := fixture.store.CompleteReplyInvocation(CompleteReplyInvocationRequest{
-		Completion: AIInvocationCompletion{
-			InvocationID: attempt2.Invocation.InvocationID,
-			Status:       AIInvocationInvalidOutput,
-			OutputHash:   "trace-rearm-invalid-output",
-			ErrorClass:   "invalidOutput",
-			FinishedAt:   finishedAt,
-		},
-		ManualReason: "replyFailed",
-		PlannedAt:    finishedAt,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	slot := m5TrialActiveSlot
-	if err := fixture.store.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&M5TrialSelection{
-			SelectionID: "selection-trace-rearm-attempt-3",
-			ProfileID:   authorized.Selection.ProfileID,
-			Status:      M5TrialSelectionActive,
-			ActiveSlot:  &slot,
-			SelectedBy:  "user",
-			Reason:      m5ReplyTraceRearmSelectionReason,
-			SelectedAt:  finishedAt.Add(time.Second),
-		}).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&DialogueTurn{}).
-			Where("turn_id = ? AND status = ? AND failure_reason = ?",
-				fixture.turn.TurnID, DialogueTurnManualRequired, "replyFailed").
-			Updates(map[string]any{
-				"status": DialogueTurnClassified, "failure_reason": "",
-			}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&AuditEntry{
-			At: finishedAt.Add(time.Second), Category: m5ReplyTraceRearmAuditCategory,
-			RoundID: fixture.turn.TurnID, Detail: m5ReplyTraceRearmAuditDetail,
-		}).Error
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	request := ReserveAIInvocationRequest{
-		InvocationID: "invocation-trace-rearm-attempt-3",
-		TurnID:       fixture.turn.TurnID,
-		Purpose:      m5ai.PurposeReply,
-		Attempt:      M5ReplyInvocationAttempt(fixture.turn.TurnID),
-		Provider:     fixture.invocation.Provider,
-		Model:        fixture.invocation.Model,
-		InputHash:    fixture.invocation.InputHash,
-	}
-	reserved, err := fixture.store.ReserveAIInvocation(request)
-	if err != nil || !reserved.Created || reserved.Invocation.Attempt != 3 {
-		t.Fatalf("获批 attempt=3 未被唯一预留: result=%+v err=%v", reserved, err)
-	}
-	request.Attempt = 4
-	request.InvocationID = "invocation-forbidden-attempt-4"
-	if _, err := fixture.store.ReserveAIInvocation(request); !errors.Is(err, ErrAIInvocationInvalid) {
-		t.Fatalf("attempt=4 必须被通用预留入口拒绝: %v", err)
 	}
 }
 

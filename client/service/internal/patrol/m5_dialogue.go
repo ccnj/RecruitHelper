@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
@@ -614,13 +613,9 @@ func (a *roundActor) executeM5Advice(
 	intent communication.IntentAdvice,
 ) error {
 	inputHash := sha256Hex(content)
-	attempt := m5InvocationAttempt
-	if purpose == m5ai.PurposeReply {
-		attempt = store.M5ReplyInvocationAttempt(turn.TurnID)
-	}
-	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), strconv.Itoa(attempt))
+	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), "1")
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
-		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: attempt,
+		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: m5InvocationAttempt,
 		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})
@@ -630,9 +625,6 @@ func (a *roundActor) executeM5Advice(
 		}
 		if errors.Is(err, store.ErrAIInvocationBudget) {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now())
-		}
-		if errors.Is(err, store.ErrM5ReplyBudgetRecoveryUnsafe) {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyTraceRearmUnsafe", a.manager.now())
 		}
 		return err
 	}
