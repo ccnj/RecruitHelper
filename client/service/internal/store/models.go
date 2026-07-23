@@ -425,6 +425,7 @@ const (
 	CommunicationV4InputDialogueTurn    CommunicationV4InputKind = "dialogueTurn"
 	CommunicationV4InputDialogueAdvice  CommunicationV4InputKind = "dialogueAdvice"
 	CommunicationV4InputConfirmedAction CommunicationV4InputKind = "confirmedAction"
+	CommunicationV4InputRetractedAction CommunicationV4InputKind = "retractedAction"
 	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
 )
 
@@ -441,6 +442,12 @@ type CommunicationV4ApplicationOutcome struct {
 	IntentLabel    m5ai.IntentLabel                       `json:"intentLabel,omitempty"`
 	IntentSource   communication.IntentSource             `json:"intentSource,omitempty"`
 	PlannedActions []communication.V4PlannedAction        `json:"plannedActions,omitempty"`
+
+	// Confirmed actions retain only their pre-action aggregate snapshot. It has
+	// no candidate text and exists solely so a later authoritative safe
+	// terminal can append a compensating receipt instead of rewriting history.
+	StateBeforeAction         *communication.V4State `json:"stateBeforeAction,omitempty"`
+	ProjectedThroughSeqBefore *int64                 `json:"projectedThroughSeqBefore,omitempty"`
 }
 
 // CommunicationV4ProjectionApplication is an immutable receipt for one input.

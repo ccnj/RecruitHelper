@@ -400,10 +400,8 @@ func TestCommunicationV4AIAdviceRejectsAdvancedRevisionAtSameMessageBoundary(t *
 			tx,
 			fixture.ProfileID,
 			communication.V4ConfirmedAction{
-				ActionKey:  "fixture-concurrent-invite-wechat",
-				Kind:       communication.V4ActionInviteWechat,
-				MessageSeq: 3,
-				SentAt:     &advancedAt,
+				ActionKey: "fixture-concurrent-notification",
+				Kind:      communication.V4ActionNotifyWechat,
 			},
 			advancedAt,
 		)

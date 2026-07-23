@@ -395,6 +395,9 @@ func applyCommunicationV4ConfirmedActionTx(
 	if aggregate.Revision == ^uint64(0) {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 	}
+	if action.MessageSeq > 0 && action.MessageSeq != aggregate.ProjectedThroughSeq+1 {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
 	state, err := communication.ApplyV4ConfirmedAction(aggregate.State, action)
 	if err != nil {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
@@ -402,12 +405,121 @@ func applyCommunicationV4ConfirmedActionTx(
 	next := aggregate
 	next.State = state
 	next.Revision++
+	if action.MessageSeq > 0 {
+		next.ProjectedThroughSeq = action.MessageSeq
+	}
 	next.UpdatedAt = appliedAt
+	stateBeforeAction := aggregate.State
+	projectedThroughSeqBefore := aggregate.ProjectedThroughSeq
 	application := CommunicationV4ProjectionApplication{
 		ProfileID: profileID, InputKind: CommunicationV4InputConfirmedAction, InputKey: action.ActionKey,
 		InputDigest: digest, SemanticKind: string(action.Kind), MessageSeq: action.MessageSeq,
 		FromRevision: aggregate.Revision, ToRevision: next.Revision,
-		Outcome:   CommunicationV4ApplicationOutcome{Dialogue: communication.V4DialogueNone},
+		Outcome: CommunicationV4ApplicationOutcome{
+			Dialogue:                  communication.V4DialogueNone,
+			StateBeforeAction:         &stateBeforeAction,
+			ProjectedThroughSeqBefore: &projectedThroughSeqBefore,
+		},
+		AppliedAt: appliedAt,
+	}
+	if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	return next, application, true, nil
+}
+
+type communicationV4RetractedActionInput struct {
+	ActionKey  string                     `json:"actionKey"`
+	Kind       communication.V4ActionKind `json:"kind"`
+	MessageSeq int64                      `json:"messageSeq"`
+}
+
+// retractCommunicationV4ConfirmedActionTx appends the sole compensation
+// allowed for a visible action: a durable safe terminal has retracted the
+// exact self Message that previously backed a positive confirmation. The
+// original receipt remains immutable; its pre-action snapshot restores the
+// aggregate without inventing an inverse for every V4 action kind.
+func retractCommunicationV4ConfirmedActionTx(
+	tx *gorm.DB,
+	profileID string,
+	action communication.V4ConfirmedAction,
+	reason string,
+	appliedAt time.Time,
+) (CommunicationV4Aggregate, CommunicationV4ProjectionApplication, bool, error) {
+	if tx == nil || strings.TrimSpace(profileID) == "" ||
+		strings.TrimSpace(action.ActionKey) == "" ||
+		action.MessageSeq <= 0 || strings.TrimSpace(reason) == "" ||
+		appliedAt.IsZero() {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+	}
+	appliedAt = appliedAt.UTC()
+	confirmed, found, err := communicationV4ApplicationTx(
+		tx,
+		profileID,
+		CommunicationV4InputConfirmedAction,
+		action.ActionKey,
+	)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	if !found ||
+		confirmed.SemanticKind != string(action.Kind) ||
+		confirmed.MessageSeq != action.MessageSeq ||
+		confirmed.Outcome.StateBeforeAction == nil ||
+		confirmed.Outcome.ProjectedThroughSeqBefore == nil ||
+		*confirmed.Outcome.ProjectedThroughSeqBefore < 0 ||
+		communication.ValidateV4State(*confirmed.Outcome.StateBeforeAction) != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+	}
+	input := communicationV4RetractedActionInput{
+		ActionKey:  action.ActionKey,
+		Kind:       action.Kind,
+		MessageSeq: action.MessageSeq,
+	}
+	digest, err := communicationV4InputDigest(input)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	aggregate, err := communicationV4AggregateTx(tx, profileID)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	existing, retracted, err := communicationV4ApplicationTx(
+		tx,
+		profileID,
+		CommunicationV4InputRetractedAction,
+		action.ActionKey,
+	)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	if retracted {
+		if existing.InputDigest != digest ||
+			existing.SemanticKind != string(action.Kind) ||
+			existing.MessageSeq != action.MessageSeq {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
+		return aggregate, existing, false, nil
+	}
+	if aggregate.Revision != confirmed.ToRevision ||
+		aggregate.ProjectedThroughSeq != action.MessageSeq ||
+		aggregate.Revision == ^uint64(0) {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
+	next := aggregate
+	next.State = *confirmed.Outcome.StateBeforeAction
+	next.Revision++
+	next.ProjectedThroughSeq = *confirmed.Outcome.ProjectedThroughSeqBefore
+	next.UpdatedAt = appliedAt
+	application := CommunicationV4ProjectionApplication{
+		ProfileID: profileID, InputKind: CommunicationV4InputRetractedAction,
+		InputKey: action.ActionKey, InputDigest: digest,
+		SemanticKind: string(action.Kind), MessageSeq: action.MessageSeq,
+		FromRevision: aggregate.Revision, ToRevision: next.Revision,
+		Outcome: CommunicationV4ApplicationOutcome{
+			Dialogue:     communication.V4DialogueNone,
+			ManualReason: communication.V4ManualReason(reason),
+		},
 		AppliedAt: appliedAt,
 	}
 	if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {

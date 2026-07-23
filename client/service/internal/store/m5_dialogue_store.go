@@ -8,6 +8,7 @@ import (
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/textcanon"
 	"recruithelper/contract/gen/go/protocol"
 
 	"gorm.io/gorm"
@@ -1549,6 +1550,32 @@ func (s *Store) CommunicationActionByTurn(turnID string) (*CommunicationAction, 
 	return &action, nil
 }
 
+func communicationV4PlannedTextActionTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	action CommunicationAction,
+) (communication.V4PlannedAction, bool, error) {
+	head, v4Turn, err := communicationV4TurnHeadApplicationTx(tx, turn)
+	if err != nil || !v4Turn {
+		return communication.V4PlannedAction{}, v4Turn, err
+	}
+	if head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
+		head.Outcome.NextAdvice != communication.V4AdviceNone ||
+		head.Outcome.ManualReason != "" ||
+		len(head.Outcome.PlannedActions) != 1 {
+		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
+	}
+	plan := head.Outcome.PlannedActions[0]
+	if plan.ActionKey != action.ActionID ||
+		!supportedCommunicationV4TextKind(plan.Kind) ||
+		action.Kind != CommunicationActionReplyText ||
+		strings.TrimSpace(action.Text) == "" ||
+		action.ContentHash != textcanon.Hash(action.Text) {
+		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
+	}
+	return plan, true, nil
+}
+
 // bindM5AutomaticActionTx is the M5 intent-construction authorization point.
 // It runs inside CreateEffectIntentAndCmd's WAL/head transaction, so an action
 // can never become effectPending without the matching EffectIntent and Cmd.
@@ -1581,6 +1608,9 @@ func bindM5AutomaticActionTx(
 	}
 	var turn DialogueTurn
 	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
+		return err
+	}
+	if _, _, err := communicationV4PlannedTextActionTx(tx, turn, action); err != nil {
 		return err
 	}
 	if turn.Status != DialogueTurnAdviceReady || turn.ConversationRef != intent.TargetRef {
@@ -1738,10 +1768,16 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
 		return err
 	}
-	var selection M5TrialSelection
-	if err := tx.Where("profile_id = ?", turn.ProfileID).
-		Order("selected_at DESC, selection_id DESC").First(&selection).Error; err != nil {
+	v4Plan, v4Turn, err := communicationV4PlannedTextActionTx(tx, turn, action)
+	if err != nil {
 		return err
+	}
+	var selection M5TrialSelection
+	if !v4Turn {
+		if err := tx.Where("profile_id = ?", turn.ProfileID).
+			Order("selected_at DESC, selection_id DESC").First(&selection).Error; err != nil {
+			return err
+		}
 	}
 	if at.IsZero() {
 		at = time.Now()
@@ -1766,10 +1802,12 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		default:
 			return ErrDialogueTurnState
 		}
-		switch selection.Status {
-		case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
-		default:
-			return ErrDialogueTurnState
+		if !v4Turn {
+			switch selection.Status {
+			case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
+			default:
+				return ErrDialogueTurnState
+			}
 		}
 		sentAt := action.SentAt
 		if sentAt == nil {
@@ -1798,6 +1836,24 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		if updated.RowsAffected != 1 {
 			return ErrDialogueTurnConflict
 		}
+		if v4Turn {
+			var sentAt *time.Time
+			if message.TsApproxMs != nil {
+				value := time.UnixMilli(*message.TsApproxMs).UTC()
+				sentAt = &value
+			}
+			_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+				tx,
+				turn.ProfileID,
+				communication.V4ConfirmedAction{
+					ActionKey: v4Plan.ActionKey, Kind: v4Plan.Kind,
+					MessageSeq: message.Seq, CardMessageSeq: v4Plan.CardMessageSeq,
+					SentAt: sentAt, Round: v4Plan.Round, Stage: v4Plan.Stage,
+				},
+				at,
+			)
+			return err
+		}
 		endedAt := selection.EndedAt
 		if endedAt == nil || selection.Status != M5TrialSelectionCompleted {
 			endedAt = &at
@@ -1821,10 +1877,12 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		default:
 			return ErrDialogueTurnState
 		}
-		switch selection.Status {
-		case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
-		default:
-			return ErrDialogueTurnState
+		if !v4Turn {
+			switch selection.Status {
+			case M5TrialSelectionActive, M5TrialSelectionManualRequired, M5TrialSelectionCompleted:
+			default:
+				return ErrDialogueTurnState
+			}
 		}
 		reason := "effectFailed"
 		if intent.Status == EffectIntentSuspect {
@@ -1832,11 +1890,39 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		} else if intent.Status == EffectIntentResolvedFailed {
 			reason = "effectResolvedFailed"
 		}
+		if v4Turn && action.Status == CommunicationActionSent {
+			var retracted Message
+			if err := tx.First(
+				&retracted,
+				"outbound_intent_id = ?",
+				intent.IntentID,
+			).Error; err != nil {
+				return err
+			}
+			if retracted.RetractedAt == nil ||
+				retracted.Direction != "out" ||
+				retracted.ContentHash != action.ContentHash {
+				return ErrCommunicationActionConflict
+			}
+			if _, _, _, err := retractCommunicationV4ConfirmedActionTx(
+				tx,
+				turn.ProfileID,
+				communication.V4ConfirmedAction{
+					ActionKey: v4Plan.ActionKey, Kind: v4Plan.Kind,
+					MessageSeq: retracted.Seq, CardMessageSeq: v4Plan.CardMessageSeq,
+					Round: v4Plan.Round, Stage: v4Plan.Stage,
+				},
+				reason,
+				at,
+			); err != nil {
+				return err
+			}
+		}
 		updated := tx.Model(&CommunicationAction{}).
 			Where("action_id = ? AND status = ?", action.ActionID, action.Status).
 			Updates(map[string]any{
 				"status": CommunicationActionManualRequired, "failure_reason": reason,
-				"updated_at": at,
+				"sent_at": nil, "updated_at": at,
 			})
 		if updated.Error != nil {
 			return updated.Error
@@ -1854,6 +1940,16 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		}
 		if updated.RowsAffected != 1 {
 			return ErrDialogueTurnConflict
+		}
+		if v4Turn {
+			aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
+			if err != nil {
+				return err
+			}
+			if aggregate.AutomationStatus == ProfileCommunicationAutomationManualRequired {
+				return nil
+			}
+			return markCommunicationV4AutomationManualTx(tx, turn.ProfileID, reason, at)
 		}
 		endedAt := selection.EndedAt
 		if endedAt == nil || selection.Status != M5TrialSelectionManualRequired {

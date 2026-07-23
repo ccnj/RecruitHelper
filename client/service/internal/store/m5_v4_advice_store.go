@@ -194,7 +194,11 @@ func supportedCommunicationV4TextPlan(plan communication.V4PlannedAction) bool {
 	if strings.TrimSpace(plan.ActionKey) == "" || strings.TrimSpace(plan.Text) == "" {
 		return false
 	}
-	switch plan.Kind {
+	return supportedCommunicationV4TextKind(plan.Kind)
+}
+
+func supportedCommunicationV4TextKind(kind communication.V4ActionKind) bool {
+	switch kind {
 	case communication.V4ActionReplyText,
 		communication.V4ActionServiceReply,
 		communication.V4ActionRejectionRetention,
