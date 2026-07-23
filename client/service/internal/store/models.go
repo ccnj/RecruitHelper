@@ -422,6 +422,7 @@ type CommunicationV4InputKind string
 
 const (
 	CommunicationV4InputBusinessEvent   CommunicationV4InputKind = "businessEvent"
+	CommunicationV4InputDialogueTurn    CommunicationV4InputKind = "dialogueTurn"
 	CommunicationV4InputConfirmedAction CommunicationV4InputKind = "confirmedAction"
 	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
 )
@@ -433,6 +434,12 @@ type CommunicationV4ApplicationOutcome struct {
 	DialogueAfterActions bool                                `json:"dialogueAfterActions"`
 	Actions              []communication.V4EventAction       `json:"actions"`
 	ManualReason         communication.V4ManualReason        `json:"manualReason,omitempty"`
+
+	DialogueStatus communication.V4DialogueDecisionStatus `json:"dialogueStatus,omitempty"`
+	NextAdvice     communication.V4AdvicePurpose          `json:"nextAdvice,omitempty"`
+	IntentLabel    m5ai.IntentLabel                       `json:"intentLabel,omitempty"`
+	IntentSource   communication.IntentSource             `json:"intentSource,omitempty"`
+	PlannedActions []communication.V4PlannedAction        `json:"plannedActions,omitempty"`
 }
 
 // CommunicationV4ProjectionApplication is an immutable receipt for one input.

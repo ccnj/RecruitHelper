@@ -1,0 +1,354 @@
+package store
+
+import (
+	"strings"
+	"time"
+
+	"recruithelper/client/service/internal/communication"
+
+	"gorm.io/gorm"
+)
+
+const communicationV4DialogueTurnSemanticKind = "inboundTurn"
+
+type FreezeCommunicationV4TurnResult struct {
+	Turn        DialogueTurn
+	Aggregate   CommunicationV4Aggregate
+	Application CommunicationV4ProjectionApplication
+	Created     bool
+}
+
+// FreezeCommunicationV4Turn is the V4 production admission transaction for
+// one contiguous inbound turn. It revalidates the complete target and message
+// boundary, runs the deterministic reducer with no invented advice, then
+// atomically persists the aggregate transition, immutable application receipt
+// and dialogue turn. M5TrialSelection is deliberately outside this path.
+func (s *Store) FreezeCommunicationV4Turn(
+	req FreezeDialogueTurnRequest,
+) (*FreezeCommunicationV4TurnResult, error) {
+	if err := validateFreezeDialogueTurnRequest(req); err != nil {
+		return nil, err
+	}
+	if req.FrozenAt.IsZero() {
+		req.FrozenAt = time.Now()
+	}
+	req.FrozenAt = req.FrozenAt.UTC()
+	out := &FreezeCommunicationV4TurnResult{}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		aggregate, err := communicationV4AggregateTx(tx, req.ProfileID)
+		if err != nil {
+			return err
+		}
+		existing, found, err := dialogueTurnByIdentityTx(
+			tx, req.TurnID, req.ProfileID, req.InputDigest,
+		)
+		if err != nil {
+			return err
+		}
+		application, applied, err := communicationV4ApplicationTx(
+			tx, req.ProfileID, CommunicationV4InputDialogueTurn, req.TurnID,
+		)
+		if err != nil {
+			return err
+		}
+		if found || applied {
+			if !found || !applied ||
+				!sameFrozenDialogueTurn(existing, dialogueTurnFromFreezeRequest(req)) ||
+				application.InputDigest != req.InputDigest ||
+				application.SemanticKind != communicationV4DialogueTurnSemanticKind ||
+				application.MessageSeq != req.InboundThroughSeq {
+				return ErrCommunicationV4Conflict
+			}
+			out.Turn = existing
+			out.Aggregate = aggregate
+			out.Application = application
+			return nil
+		}
+		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.ProjectedThroughSeq != req.HistoryThroughSeq {
+			return ErrDialogueTurnBinding
+		}
+		target, ready, err := communicationTargetTx(tx, req.ProfileID)
+		if err != nil {
+			return err
+		}
+		if !ready ||
+			target.Conversation.ConversationRef != req.ConversationRef ||
+			target.ContextBinding.RevisionHash != req.ContextRevisionHash ||
+			target.ResumeSnapshot.SnapshotID != req.ResumeSnapshotID {
+			return ErrDialogueTurnBinding
+		}
+		var unfinished int64
+		if err := tx.Model(&DialogueTurn{}).
+			Where("profile_id = ? AND status IN ?", req.ProfileID, []DialogueTurnStatus{
+				DialogueTurnCollected,
+				DialogueTurnClassified,
+				DialogueTurnAdviceReady,
+				DialogueTurnDispatching,
+				DialogueTurnManualRequired,
+			}).
+			Count(&unfinished).Error; err != nil {
+			return err
+		}
+		if unfinished != 0 {
+			return ErrDialogueTurnState
+		}
+
+		lastOutbound, inbound, facts, firstReal, err := loadCommunicationV4TurnBoundaryTx(
+			tx, target.Profile, req,
+		)
+		if err != nil {
+			return err
+		}
+		digest, turnID, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound)
+		if err != nil || digest != req.InputDigest || turnID != req.TurnID {
+			return ErrDialogueTurnBinding
+		}
+		fixedPhrases, err := communication.BuildV4FixedPhraseView(
+			target.ContextRevision.SourcePackage,
+		)
+		if err != nil {
+			return ErrDialogueTurnBinding
+		}
+		decision, err := communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
+			State: aggregate.State, TurnID: req.TurnID, Messages: facts,
+			Intent:       communication.IntentAdvice{State: communication.AdviceAbsent},
+			Reply:        communication.ReplyAdvice{State: communication.AdviceAbsent},
+			FixedPhrases: fixedPhrases,
+		})
+		if err != nil {
+			return err
+		}
+		turn, err := dialogueTurnFromV4Decision(req, decision)
+		if err != nil {
+			return err
+		}
+		monthStart, nextMonth := localMonthBounds(req.FrozenAt)
+		var monthlyTurns int64
+		if err := tx.Model(&DialogueTurn{}).
+			Where("created_at >= ? AND created_at < ?", monthStart, nextMonth).
+			Count(&monthlyTurns).Error; err != nil {
+			return err
+		}
+		if monthlyTurns >= m5MonthlyTurnLimit {
+			return ErrDialogueTurnBudget
+		}
+
+		next := aggregate
+		next.State = decision.State
+		next.Revision++
+		next.ProjectedThroughSeq = req.InboundThroughSeq
+		next.UpdatedAt = req.FrozenAt
+		if decision.ManualReason != "" {
+			manualAt := req.FrozenAt
+			next.AutomationStatus = ProfileCommunicationAutomationManualRequired
+			next.ManualReason = string(decision.ManualReason)
+			next.ManualRequiredAt = &manualAt
+		}
+		application = CommunicationV4ProjectionApplication{
+			ProfileID:   req.ProfileID,
+			InputKind:   CommunicationV4InputDialogueTurn,
+			InputKey:    req.TurnID,
+			InputDigest: req.InputDigest, SemanticKind: communicationV4DialogueTurnSemanticKind,
+			MessageSeq: req.InboundThroughSeq, FromRevision: aggregate.Revision, ToRevision: next.Revision,
+			Outcome: CommunicationV4ApplicationOutcome{
+				Actions:        append([]communication.V4EventAction(nil), decision.EventActions...),
+				ManualReason:   decision.ManualReason,
+				DialogueStatus: decision.Dialogue.Status,
+				NextAdvice:     decision.Dialogue.NextAdvice,
+				IntentLabel:    decision.Dialogue.IntentLabel,
+				IntentSource:   decision.Dialogue.IntentSource,
+				PlannedActions: append([]communication.V4PlannedAction(nil), decision.Dialogue.Actions...),
+			},
+			AppliedAt: req.FrozenAt,
+		}
+		if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
+			return err
+		}
+		if firstReal != nil && target.Profile.FirstRealMessageSeq == nil {
+			communicatingAt := firstReal.CreatedAt
+			if communicatingAt.IsZero() {
+				communicatingAt = req.FrozenAt
+			}
+			updated := tx.Model(&CandidateProfile{}).
+				Where(
+					"profile_id = ? AND first_real_message_seq = ?",
+					req.ProfileID,
+					decision.State.LastRealMessageSeq,
+				).
+				Updates(map[string]any{
+					"first_real_message_seq": firstReal.Seq,
+					"communicating_at":       communicatingAt,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrCommunicationV4Conflict
+			}
+		}
+		if err := tx.Create(&turn).Error; err != nil {
+			return err
+		}
+		out.Turn = turn
+		out.Aggregate = next
+		out.Application = application
+		out.Created = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func validateFreezeDialogueTurnRequest(req FreezeDialogueTurnRequest) error {
+	if strings.TrimSpace(req.TurnID) == "" || strings.TrimSpace(req.ProfileID) == "" ||
+		strings.TrimSpace(req.ConversationRef) == "" || !validCommunicationV4Digest(req.InputDigest) ||
+		strings.TrimSpace(req.ContextRevisionHash) == "" || strings.TrimSpace(req.ResumeSnapshotID) == "" ||
+		strings.TrimSpace(req.RecommendedTimeText) == "" || strings.TrimSpace(req.RenderFormatVersion) == "" ||
+		req.HistoryThroughSeq <= 0 || req.InboundFromSeq <= req.HistoryThroughSeq ||
+		req.InboundThroughSeq < req.InboundFromSeq {
+		return ErrDialogueTurnInvalid
+	}
+	return nil
+}
+
+func dialogueTurnFromFreezeRequest(req FreezeDialogueTurnRequest) DialogueTurn {
+	return DialogueTurn{
+		TurnID: req.TurnID, ProfileID: req.ProfileID, ConversationRef: req.ConversationRef,
+		InputDigest: req.InputDigest, HistoryThroughSeq: req.HistoryThroughSeq,
+		InboundFromSeq: req.InboundFromSeq, InboundThroughSeq: req.InboundThroughSeq,
+		ContextRevisionHash: req.ContextRevisionHash, ResumeSnapshotID: req.ResumeSnapshotID,
+		RecommendedTimeText: req.RecommendedTimeText, RenderFormatVersion: req.RenderFormatVersion,
+		Status: DialogueTurnCollected, CreatedAt: req.FrozenAt, UpdatedAt: req.FrozenAt,
+	}
+}
+
+func dialogueTurnFromV4Decision(
+	req FreezeDialogueTurnRequest,
+	decision communication.V4InboundTurnDecision,
+) (DialogueTurn, error) {
+	turn := dialogueTurnFromFreezeRequest(req)
+	turn.IntentLabel = decision.Dialogue.IntentLabel
+	turn.IntentSource = dialogueIntentSourceFromV4(decision.Dialogue.IntentSource)
+	switch decision.Dialogue.Status {
+	case communication.V4DialogueWaitingAdvice:
+		switch decision.Dialogue.NextAdvice {
+		case communication.V4AdviceIntent:
+			turn.Status = DialogueTurnCollected
+		case communication.V4AdviceReply, communication.V4AdviceServiceReply,
+			communication.V4AdviceInterviewRejectionReply:
+			turn.Status = DialogueTurnClassified
+			classifiedAt := req.FrozenAt
+			turn.ClassifiedAt = &classifiedAt
+		default:
+			return DialogueTurn{}, ErrDialogueTurnState
+		}
+	case communication.V4DialogueWaitingPrerequisite:
+		turn.Status = DialogueTurnCollected
+	case communication.V4DialogueActionsPlanned:
+		turn.Status = DialogueTurnAdviceReady
+		classifiedAt := req.FrozenAt
+		turn.ClassifiedAt = &classifiedAt
+	case communication.V4DialogueNoAction:
+		turn.Status = DialogueTurnCompleted
+	case communication.V4DialogueManualRequired:
+		turn.Status = DialogueTurnManualRequired
+		turn.FailureReason = string(decision.ManualReason)
+	default:
+		return DialogueTurn{}, ErrDialogueTurnState
+	}
+	return turn, nil
+}
+
+func dialogueIntentSourceFromV4(source communication.IntentSource) DialogueIntentSource {
+	switch source {
+	case communication.IntentSourceCodeShortCircuit:
+		return DialogueIntentCodeShortCircuit
+	case communication.IntentSourceLLM:
+		return DialogueIntentLLM
+	case communication.IntentSourceLLMFailureFallback:
+		return DialogueIntentLLMFailure
+	case communication.IntentSourceBusinessEvent:
+		return DialogueIntentBusinessEvent
+	default:
+		return ""
+	}
+}
+
+func loadCommunicationV4TurnBoundaryTx(
+	tx *gorm.DB,
+	profile CandidateProfile,
+	req FreezeDialogueTurnRequest,
+) (Message, []Message, []communication.LedgerMessageFact, *Message, error) {
+	var tail int64
+	if err := tx.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL",
+			profile.Platform,
+			profile.AccountRef,
+			req.ConversationRef,
+		).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&tail).Error; err != nil || tail != req.InboundThroughSeq {
+		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	}
+	var outboundTail int64
+	if err := tx.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ?",
+			profile.Platform,
+			profile.AccountRef,
+			req.ConversationRef,
+			"out",
+		).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&outboundTail).Error; err != nil || outboundTail != req.HistoryThroughSeq {
+		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	}
+	var lastOutbound Message
+	if err := tx.First(
+		&lastOutbound,
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
+		profile.Platform,
+		profile.AccountRef,
+		req.ConversationRef,
+		req.HistoryThroughSeq,
+	).Error; err != nil || lastOutbound.Direction != "out" {
+		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	}
+	var inbound []Message
+	if err := tx.Where(
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq > ? AND seq <= ? "+
+			"AND retracted_at IS NULL AND direction = ?",
+		profile.Platform,
+		profile.AccountRef,
+		req.ConversationRef,
+		req.HistoryThroughSeq,
+		req.InboundThroughSeq,
+		"in",
+	).Order("seq").Find(&inbound).Error; err != nil {
+		return Message{}, nil, nil, nil, err
+	}
+	if len(inbound) == 0 ||
+		inbound[0].Seq != req.InboundFromSeq ||
+		inbound[len(inbound)-1].Seq != req.InboundThroughSeq {
+		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	}
+	facts := make([]communication.LedgerMessageFact, 0, len(inbound))
+	var firstReal *Message
+	for index := range inbound {
+		message := inbound[index]
+		facts = append(facts, communication.LedgerMessageFact{
+			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
+			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
+			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+		})
+		if firstReal == nil && IsM5RealCandidateMessage(message) {
+			copy := message
+			firstReal = &copy
+		}
+	}
+	return lastOutbound, inbound, facts, firstReal, nil
+}
