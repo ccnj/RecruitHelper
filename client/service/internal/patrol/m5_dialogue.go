@@ -103,6 +103,20 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 	// When a capture succeeds, force a fresh patrol instead of freezing a turn
 	// from the message snapshot read before the intrusive command.
 	if target.Profile.ResumeCaptureState != store.ResumeCaptureCaptured {
+		reused, reuseErr := a.manager.store.ReuseSourcingResumeForActiveM5Trial(
+			target.Profile.ProfileID, a.manager.now(),
+		)
+		if reuseErr != nil {
+			if errors.Is(reuseErr, store.ErrResumeCaptureBinding) {
+				return a.manager.store.MarkActiveM5TrialManualRequired(
+					target.Profile.ProfileID, "sourcingResumeBindingMismatch", a.manager.now(),
+				)
+			}
+			return reuseErr
+		}
+		if reused.Status == store.SourcingResumeReuseAdopted {
+			return a.scheduleM5Continuation()
+		}
 		if err := a.captureTrialResume(ctx); err != nil {
 			return err
 		}
