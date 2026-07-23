@@ -454,6 +454,104 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 	}
 }
 
+func TestCommunicationV4PatrolSendsRejectionRetentionAfterWechatExchanged(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "rejection-retention", []store.MessageDraft{{
+		Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted",
+		ContentHash: syncledger.HashText("wechat-exchanged-before-rejection"), Origin: "external",
+	}})
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf("拒绝短路与换微信回执都不得调用 AI: %s", request.Purpose)
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-rejection-retention"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 0 || hand.commandCount() != 1 {
+		t.Fatalf("换微信成功前置没有收敛: err=%v advice=%+v sends=%d",
+			err, advice.requests, hand.commandCount())
+	}
+
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("读取换微信后账本失败: messages=%+v err=%v", messages, err)
+	}
+	rejection := "不感兴趣"
+	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: messages[len(messages)-1].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(rejection),
+			Text: &rejection, Origin: "external",
+		}},
+		SyncedAt: h.clock.Now().Add(time.Minute),
+	})
+	if err != nil || len(changes.Inserted) != 1 {
+		t.Fatalf("追加拒绝消息失败: changes=%+v err=%v", changes, err)
+	}
+	rejectionSeq := changes.Inserted[0].Seq
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || turnErr != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
+		aggregateErr != nil || !aggregate.State.RetentionSent ||
+		aggregate.State.RejectionStage != communication.V4RejectionStageRetention ||
+		aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.ProjectedThroughSeq != rejectionSeq+1 ||
+		len(advice.requests) != 0 || hand.commandCount() != 2 {
+		t.Fatalf("拒绝挽留没有经既有安全轨道收敛: err=%v turn=%+v turnErr=%v aggregate=%+v aggregateErr=%v advice=%+v sends=%d",
+			err, turn, turnErr, aggregate, aggregateErr, advice.requests, hand.commandCount())
+	}
+	messages, err = h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 || messages[len(messages)-1].Direction != "out" ||
+		messages[len(messages)-1].Text == nil || *messages[len(messages)-1].Text != "合成挽留" {
+		t.Fatalf("挽留正证没有形成唯一出站消息: messages=%+v err=%v", messages, err)
+	}
+	revision := aggregate.Revision
+
+	for attempt := 0; attempt < 2; attempt++ {
+		manager.mu.Lock()
+		err = actor.processCommunicationV4Targets(context.Background())
+		manager.mu.Unlock()
+		if err != nil {
+			t.Fatalf("重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision || len(advice.requests) != 0 ||
+		hand.commandCount() != 2 {
+		t.Fatalf("拒绝挽留重复巡检发生增生: aggregate=%+v advice=%+v sends=%d err=%v",
+			replayed, advice.requests, hand.commandCount(), err)
+	}
+}
+
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
 	h := newHarness(t)
 	before, after := "合成系统前置", "合成系统尾部"
