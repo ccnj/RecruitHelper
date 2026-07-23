@@ -70,6 +70,60 @@ func seedM5SourcingResume(
 	return run, invocation
 }
 
+func seedCommunicationSourcingResume(
+	t *testing.T,
+	s *Store,
+	profileID string,
+) (resumeStoreFixture, SourcingCandidateRun) {
+	t.Helper()
+	fixture := seedResumeStoreFixture(t, s, profileID)
+	run, _ := seedM5SourcingResume(t, s, fixture)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	greetingText := "你好"
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef, Seq: 1,
+		Direction: "out", Kind: "text", ContentHash: sourcingGreetingContentHash(greetingText),
+		Text: &greetingText, OutboundIntentID: &fixture.GreetingIntent,
+		Origin: "effectResult",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		fixture.ProfileID, now,
+	); err != nil || !created {
+		t.Fatalf("构造 V4 根失败: created=%v err=%v", created, err)
+	}
+	revision := contextRevisionFixture(
+		"context-"+fixture.ProfileID,
+		run.ContextRevisionHash,
+		now,
+	)
+	if _, _, err := s.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&ProfileAIContextBinding{
+		BindingID: "binding-" + fixture.ProfileID,
+		ProfileID: fixture.ProfileID,
+		ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
+		Status: ProfileAIContextBindingActive, Reason: sourcingProfileAIContextBindingReason,
+		BoundBy: sourcingProfileAIContextBoundBy, BoundAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	endedAt := now
+	if err := s.db.Model(&M5TrialSelection{}).
+		Where("profile_id = ? AND status = ?", fixture.ProfileID, M5TrialSelectionActive).
+		Updates(map[string]any{
+			"status":      M5TrialSelectionCompleted,
+			"active_slot": nil,
+			"ended_at":    endedAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return fixture, run
+}
+
 func TestReuseSourcingResumeForActiveM5TrialAdoptsExactGreetingRun(t *testing.T) {
 	s := openTest(t)
 	fixture := seedResumeStoreFixture(t, s, "profile-reuse-sourcing")
@@ -108,6 +162,53 @@ func TestReuseSourcingResumeForActiveM5TrialAdoptsExactGreetingRun(t *testing.T)
 		Where("profile_id = ?", fixture.ProfileID).
 		Count(&snapshotCount).Error; err != nil || snapshotCount != 1 {
 		t.Fatalf("重放增生快照: count=%d err=%v", snapshotCount, err)
+	}
+}
+
+func TestReuseSourcingResumeForCommunicationProfileDoesNotNeedTrialSlot(t *testing.T) {
+	s := openTest(t)
+	fixture, run := seedCommunicationSourcingResume(t, s, "profile-reuse-communication")
+	key := AccountKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef}
+
+	profileIDs, err := s.SourcingProfileIDsNeedingResumeForAccount(key)
+	if err != nil || len(profileIDs) != 1 || profileIDs[0] != fixture.ProfileID {
+		t.Fatalf("未枚举到精确 M6 简历复用目标: ids=%v err=%v", profileIDs, err)
+	}
+	if result, err := s.ReuseSourcingResumeForActiveM5Trial(
+		fixture.ProfileID, time.Now(),
+	); result != nil || !errors.Is(err, ErrM5TrialNotActive) {
+		t.Fatalf("旧试运行入口不应被隐式放宽: result=%+v err=%v", result, err)
+	}
+
+	result, err := s.ReuseSourcingResumeForCommunicationProfile(fixture.ProfileID, time.Now())
+	if err != nil || result.Status != SourcingResumeReuseAdopted || result.Snapshot == nil ||
+		result.Snapshot.SourceLogicalDispatchID != run.SourceLogicalDispatchID {
+		t.Fatalf("V4 档案未复用 M6 简历: result=%+v err=%v", result, err)
+	}
+	profileIDs, err = s.SourcingProfileIDsNeedingResumeForAccount(key)
+	if err != nil || len(profileIDs) != 0 {
+		t.Fatalf("已复用档案仍被重复枚举: ids=%v err=%v", profileIDs, err)
+	}
+}
+
+func TestReuseSourcingResumeForCommunicationProfileRejectsRevisionMismatch(t *testing.T) {
+	s := openTest(t)
+	fixture, _ := seedCommunicationSourcingResume(t, s, "profile-reuse-context-mismatch")
+	if err := s.db.Model(&ProfileAIContextBinding{}).
+		Where("profile_id = ? AND status = ?", fixture.ProfileID, ProfileAIContextBindingActive).
+		Update("revision_hash", "other-revision").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.ReuseSourcingResumeForCommunicationProfile(fixture.ProfileID, time.Now())
+	if result != nil || !errors.Is(err, ErrResumeCaptureBinding) {
+		t.Fatalf("职位 revision 错绑必须阻断: result=%+v err=%v", result, err)
+	}
+	var snapshots int64
+	if err := s.db.Model(&CandidateResumeSnapshot{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&snapshots).Error; err != nil || snapshots != 0 {
+		t.Fatalf("错绑不得留下简历投影: count=%d err=%v", snapshots, err)
 	}
 }
 

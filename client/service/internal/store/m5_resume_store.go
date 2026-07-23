@@ -138,6 +138,31 @@ func eligibleResumeTargetTx(tx *gorm.DB, profileID string, requireActive bool) (
 		profile.SuccessfulGreetingIntentID == nil || *profile.SuccessfulGreetingIntentID == "" {
 		return nil, ErrResumeCaptureNotAllowed
 	}
+	out, err := boundResumeTargetTx(tx, profile)
+	if err != nil {
+		return nil, err
+	}
+	if requireActive {
+		var selection M5TrialSelection
+		if err := tx.First(&selection,
+			"profile_id = ? AND status = ? AND active_slot = ?",
+			profileID, M5TrialSelectionActive, m5TrialActiveSlot).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, ErrM5TrialNotActive
+			}
+			return nil, err
+		}
+		out.Selection = selection
+	}
+	return out, nil
+}
+
+func boundResumeTargetTx(tx *gorm.DB, profile CandidateProfile) (*ResumeCaptureTarget, error) {
+	if profile.EndReason != nil ||
+		profile.ConversationRef == nil || *profile.ConversationRef == "" ||
+		profile.SuccessfulGreetingIntentID == nil || *profile.SuccessfulGreetingIntentID == "" {
+		return nil, ErrResumeCaptureNotAllowed
+	}
 	var account Account
 	if err := tx.First(&account, "platform = ? AND account_ref = ?", profile.Platform, profile.AccountRef).Error; err != nil {
 		return nil, err
@@ -165,20 +190,7 @@ func eligibleResumeTargetTx(tx *gorm.DB, profileID string, requireActive bool) (
 		greeting.ResultConversationRef == nil || *greeting.ResultConversationRef != *profile.ConversationRef {
 		return nil, ErrResumeCaptureBinding
 	}
-	out := &ResumeCaptureTarget{Profile: profile, Account: account, Conversation: conversation}
-	if requireActive {
-		var selection M5TrialSelection
-		if err := tx.First(&selection,
-			"profile_id = ? AND status = ? AND active_slot = ?",
-			profileID, M5TrialSelectionActive, m5TrialActiveSlot).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, ErrM5TrialNotActive
-			}
-			return nil, err
-		}
-		out.Selection = selection
-	}
-	return out, nil
+	return &ResumeCaptureTarget{Profile: profile, Account: account, Conversation: conversation}, nil
 }
 
 type CreateResumeCaptureCmdRequest struct {

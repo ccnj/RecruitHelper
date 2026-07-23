@@ -180,6 +180,9 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err := a.ensureSourcingCommunicationContexts(); err != nil {
 		return err
 	}
+	if err := a.ensureSourcingCommunicationResumes(); err != nil {
+		return err
+	}
 	listComplete := true
 	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
 		round.ListComplete = &listComplete
@@ -217,6 +220,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
 const communicationV4ContextBindingAuditCategory = "communication_v4_context_binding"
+const communicationV4ResumeReuseAuditCategory = "communication_v4_resume_reuse"
 
 func (a *roundActor) ensureCommunicationV4Roots() error {
 	profileIDs, err := a.manager.store.UnrootedGreetedProfileIDsForAccount(a.key())
@@ -258,6 +262,32 @@ func (a *roundActor) ensureSourcingCommunicationContexts() error {
 				a.manager.store.Audit(
 					communicationV4ContextBindingAuditCategory, "", profileID,
 					"status=manualRequired reason=sourcingContextBindingConflict",
+				)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *roundActor) ensureSourcingCommunicationResumes() error {
+	profileIDs, err := a.manager.store.SourcingProfileIDsNeedingResumeForAccount(a.key())
+	if err != nil {
+		return err
+	}
+	for _, profileID := range profileIDs {
+		if _, err := a.manager.store.ReuseSourcingResumeForCommunicationProfile(
+			profileID, a.manager.now(),
+		); err != nil {
+			if errors.Is(err, store.ErrResumeCaptureBinding) ||
+				errors.Is(err, store.ErrResumeCaptureNotAllowed) ||
+				errors.Is(err, store.ErrCandidateProfileState) ||
+				errors.Is(err, store.ErrCommunicationV4Conflict) ||
+				errors.Is(err, store.ErrCommunicationV4Corrupt) {
+				a.manager.store.Audit(
+					communicationV4ResumeReuseAuditCategory, "", profileID,
+					"status=manualRequired reason=sourcingResumeReuseConflict",
 				)
 				continue
 			}

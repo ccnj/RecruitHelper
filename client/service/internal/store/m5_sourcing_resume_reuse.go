@@ -42,6 +42,24 @@ func (s *Store) ReuseSourcingResumeForActiveM5Trial(
 	profileID string,
 	at time.Time,
 ) (*SourcingResumeReuseResult, error) {
+	return s.reuseSourcingResume(profileID, at, true)
+}
+
+// ReuseSourcingResumeForCommunicationProfile 把已经进入 V4 沟通聚合的档案
+// 与产生其成功招呼的精确 M6 简历重新关联。它不需要旧的一次性试运行槽，
+// 但要求当前自动态、会话收编、招呼根与职位 revision 全部仍指向同一事实链。
+func (s *Store) ReuseSourcingResumeForCommunicationProfile(
+	profileID string,
+	at time.Time,
+) (*SourcingResumeReuseResult, error) {
+	return s.reuseSourcingResume(profileID, at, false)
+}
+
+func (s *Store) reuseSourcingResume(
+	profileID string,
+	at time.Time,
+	requireActiveTrial bool,
+) (*SourcingResumeReuseResult, error) {
 	profileID = strings.TrimSpace(profileID)
 	if profileID == "" {
 		return nil, ErrResumeCaptureBinding
@@ -51,11 +69,64 @@ func (s *Store) ReuseSourcingResumeForActiveM5Trial(
 	}
 	out := &SourcingResumeReuseResult{Status: SourcingResumeReuseUnavailable}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		target, err := eligibleResumeTargetTx(tx, profileID, true)
+		var target *ResumeCaptureTarget
+		var err error
+		if requireActiveTrial {
+			target, err = eligibleResumeTargetTx(tx, profileID, true)
+		} else {
+			target, err = communicationResumeTargetTx(tx, profileID)
+		}
 		if err != nil {
 			return err
 		}
 		profile := target.Profile
+		if requireActiveTrial && profile.ResumeCaptureState == ResumeCaptureCaptured {
+			if profile.ActiveResumeSnapshotID == nil {
+				return ErrResumeCaptureBinding
+			}
+			var snapshot CandidateResumeSnapshot
+			if err := tx.First(&snapshot, "snapshot_id = ? AND profile_id = ?",
+				*profile.ActiveResumeSnapshotID, profile.ProfileID).Error; err != nil {
+				return ErrResumeCaptureBinding
+			}
+			out.Status = SourcingResumeReuseAdopted
+			out.Snapshot = &snapshot
+			return nil
+		}
+
+		var invocation SourcingGreetingInvocation
+		err = tx.First(&invocation, "profile_id = ?", profile.ProfileID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if invocation.ProfileID != profile.ProfileID || invocation.EffectIntentID == nil ||
+			profile.SuccessfulGreetingIntentID == nil ||
+			*invocation.EffectIntentID != *profile.SuccessfulGreetingIntentID ||
+			invocation.Status != AIInvocationOK || invocation.FinishedAt == nil {
+			return ErrResumeCaptureBinding
+		}
+		if !requireActiveTrial {
+			var binding ProfileAIContextBinding
+			if err := tx.First(
+				&binding,
+				"profile_id = ? AND status = ?",
+				profile.ProfileID,
+				ProfileAIContextBindingActive,
+			).Error; err != nil {
+				return ErrResumeCaptureBinding
+			}
+			var revision JobAIContextRevision
+			if err := tx.First(&revision, "revision_hash = ?", binding.RevisionHash).Error; err != nil {
+				return ErrResumeCaptureBinding
+			}
+			if binding.RevisionHash != invocation.ContextRevisionHash ||
+				binding.ContextID != revision.ContextID {
+				return ErrResumeCaptureBinding
+			}
+		}
 		switch profile.ResumeCaptureState {
 		case ResumeCaptureCaptured:
 			if profile.ActiveResumeSnapshotID == nil {
@@ -74,21 +145,6 @@ func (s *Store) ReuseSourcingResumeForActiveM5Trial(
 			return ErrResumeCaptureNotAllowed
 		default:
 			return ErrCandidateProfileState
-		}
-
-		var invocation SourcingGreetingInvocation
-		err = tx.First(&invocation, "profile_id = ?", profile.ProfileID).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if invocation.ProfileID != profile.ProfileID || invocation.EffectIntentID == nil ||
-			profile.SuccessfulGreetingIntentID == nil ||
-			*invocation.EffectIntentID != *profile.SuccessfulGreetingIntentID ||
-			invocation.Status != AIInvocationOK || invocation.FinishedAt == nil {
-			return ErrResumeCaptureBinding
 		}
 
 		var run SourcingCandidateRun
@@ -183,6 +239,80 @@ func (s *Store) ReuseSourcingResumeForActiveM5Trial(
 		return nil, err
 	}
 	return out, nil
+}
+
+func communicationResumeTargetTx(tx *gorm.DB, profileID string) (*ResumeCaptureTarget, error) {
+	aggregate, err := communicationV4AggregateTx(tx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		return nil, ErrResumeCaptureNotAllowed
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrCandidateProfileNotFound
+		}
+		return nil, err
+	}
+	switch profile.MainStatus {
+	case CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileInvited, CandidateProfileInterviewed:
+	default:
+		return nil, ErrResumeCaptureNotAllowed
+	}
+	return boundResumeTargetTx(tx, profile)
+}
+
+// SourcingProfileIDsNeedingResumeForAccount 只枚举已经形成完整、精确 M6
+// 招呼因果链且尚未绑定简历快照的 V4 档案。排序稳定，供巡检逐档案收敛；
+// 查询不把缺失或冲突材料伪装成可复用目标。
+func (s *Store) SourcingProfileIDsNeedingResumeForAccount(key AccountKey) ([]string, error) {
+	if strings.TrimSpace(key.Platform) == "" || strings.TrimSpace(key.AccountRef) == "" {
+		return nil, ErrResumeCaptureBinding
+	}
+	var profileIDs []string
+	err := s.db.Table("candidate_profiles AS p").
+		Select("p.profile_id").
+		Joins(
+			"JOIN communication_v4_aggregates AS v4 ON v4.profile_id = p.profile_id "+
+				"AND v4.root_greeting_intent_id = p.successful_greeting_intent_id",
+		).
+		Joins(
+			"JOIN sourcing_greeting_invocations AS gi ON gi.profile_id = p.profile_id "+
+				"AND gi.effect_intent_id = p.successful_greeting_intent_id",
+		).
+		Joins(
+			"JOIN profile_ai_context_bindings AS b ON b.profile_id = p.profile_id "+
+				"AND b.status = ? AND b.revision_hash = gi.context_revision_hash",
+			ProfileAIContextBindingActive,
+		).
+		Joins(
+			"JOIN job_ai_context_revisions AS r ON r.revision_hash = b.revision_hash "+
+				"AND r.context_id = b.context_id",
+		).
+		Where(
+			"p.platform = ? AND p.account_ref = ? AND p.main_status IN ? AND p.end_reason IS NULL "+
+				"AND p.conversation_ref IS NOT NULL AND p.resume_capture_state = ? "+
+				"AND v4.automation_status = ? AND gi.status = ? AND gi.finished_at IS NOT NULL",
+			key.Platform,
+			key.AccountRef,
+			[]CandidateProfileStatus{
+				CandidateProfileGreeted,
+				CandidateProfileCommunicating,
+				CandidateProfileInvited,
+				CandidateProfileInterviewed,
+			},
+			ResumeCaptureUnattempted,
+			ProfileCommunicationAutomationActive,
+			AIInvocationOK,
+		).
+		Order("p.profile_id").
+		Scan(&profileIDs).Error
+	if err != nil {
+		return nil, err
+	}
+	return profileIDs, nil
 }
 
 func validSourcingResumeForReuse(
