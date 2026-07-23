@@ -29,7 +29,7 @@
 | 字段 | 类型/约束 | 含义 |
 |---|---|---|
 | `invocation_id` | TEXT PRIMARY KEY | 与 `brain.db` 调用事实关联的随机 ID |
-| `purpose` | TEXT NOT NULL | `intent`、`reply`、`scoring` 或 `greeting` |
+| `purpose` | TEXT NOT NULL | `intent`、`reply`、`silenceFollowup`、`scoring` 或 `greeting` |
 | `provider` | TEXT NOT NULL | provider 类型，不含 base URL 与凭据 |
 | `model` | TEXT NOT NULL | 实际请求模型 |
 | `config_hash` | TEXT NOT NULL | 本次本地模型配置的无密钥摘要 |
@@ -140,6 +140,6 @@ provider 通用路径至少区分：
 
 1. **规范 commit**：修改 `AGENTS.md` 并加入本文，只冻结授权、数据边界、schema 与失败语义，不改运行代码。
 2. **追踪库竖切 commit**：实现独立 `ai-traces.db`、请求前留存和响应后补齐；覆盖成功、非 2xx HTTP 与运输失败三类 adapter 冒烟。追踪写失败不阻断业务，也不新增管理读取面。
-3. **诊断接线 commit**：增强 `brain.db` AI invocation 摘要和 stdout，接通 M5 意向/M5 回复/M6 评分/M6 招呼语四种用途，补齐业务解析细分错误码及 traceStatus。
+3. **诊断接线 commit**：增强 `brain.db` AI invocation 摘要和 stdout，接通 M5 意向/M5 回复/M5-B 沉默追问/M6 评分/M6 招呼语五种用途，补齐业务解析细分错误码及 traceStatus。
 
 第三个 commit 后只做一次独立审查和全量门禁，再以不含候选人身份的 fixture 发起一次真实 provider 验证，确认两库能以同一 `invocationId` 对上。滚动日志、支持包、清理策略和查看 UI 保持后置，不顺手扩题。
