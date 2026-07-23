@@ -26,6 +26,7 @@ var (
 	ErrPatrolRoundNotFound         = errors.New("巡检轮不存在")
 	ErrCardTransitionRoundRequired = errors.New("卡片状态跃迁必须归属巡检轮")
 	ErrCardTransitionNotFound      = errors.New("卡片状态跃迁事实不存在")
+	ErrCardTransitionCorrupt       = errors.New("卡片状态跃迁事实与活动消息账本不一致")
 	ErrInvalidMessageSourceKey     = errors.New("消息 sourceKey 必须是 64 位小写 hex")
 	ErrDomainBusy                  = errors.New("串行域已有在途或 suspect 命令")
 	ErrLogicalDispatchNotFound     = errors.New("逻辑派发不存在")
@@ -55,6 +56,14 @@ type CardTransitionKey struct {
 	MessageSeq      int64
 	FromState       string
 	ToState         string
+}
+
+// PendingCardTransition 保留未确认跃迁及其对应的活动卡片消息原始事实。
+// 调度层只能从这两个事实做平台中立归一化，不能用 JOIN 投影出的零散字段
+// 重建或猜测卡片身份。
+type PendingCardTransition struct {
+	Transition CardTransitionFact
+	Message    Message
 }
 
 func (f CardTransitionFact) Key() CardTransitionKey {
@@ -1318,6 +1327,80 @@ func (s *Store) PendingCardTransitions(limit int) ([]CardTransitionFact, error) 
 		Order("created_at, platform, account_ref, conversation_ref, message_seq, from_state, to_state").
 		Limit(limit).Find(&facts).Error
 	return facts, err
+}
+
+// PendingCardTransitionsForAccount 按账号和事实创建顺序列出仍属于活动消息账本
+// 的未确认卡片跃迁。读取不确认事实；调用方只有在下游投影收敛后才可显式 ack。
+func (s *Store) PendingCardTransitionsForAccount(
+	key AccountKey,
+	limit int,
+) ([]PendingCardTransition, error) {
+	if key.Platform == "" || key.AccountRef == "" {
+		return nil, errors.New("账号键不完整")
+	}
+	if limit <= 0 || limit > 500 {
+		return nil, errors.New("卡片跃迁 limit 必须在 1..500")
+	}
+	var out []PendingCardTransition
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var facts []CardTransitionFact
+		if err := tx.Table("card_transition_facts AS transition").
+			Select("transition.*").
+			Joins(
+				"JOIN messages AS message ON "+
+					"message.platform = transition.platform AND "+
+					"message.account_ref = transition.account_ref AND "+
+					"message.conversation_ref = transition.conversation_ref AND "+
+					"message.seq = transition.message_seq AND "+
+					"message.retracted_at IS NULL",
+			).
+			Where(
+				"transition.platform = ? AND transition.account_ref = ? AND transition.acknowledged_at IS NULL",
+				key.Platform,
+				key.AccountRef,
+			).
+			Order(
+				"transition.created_at, transition.conversation_ref, transition.message_seq, " +
+					"transition.from_state, transition.to_state",
+			).
+			Limit(limit).
+			Find(&facts).Error; err != nil {
+			return err
+		}
+		out = make([]PendingCardTransition, 0, len(facts))
+		for index := range facts {
+			fact := facts[index]
+			var message Message
+			if err := tx.First(
+				&message,
+				"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
+				fact.Platform,
+				fact.AccountRef,
+				fact.ConversationRef,
+				fact.MessageSeq,
+			).Error; err != nil {
+				return err
+			}
+			if message.Kind != "card" ||
+				message.ContentHash != fact.ContentHash ||
+				message.CardType != fact.CardType {
+				return fmt.Errorf(
+					"%w: messageSeq=%d",
+					ErrCardTransitionCorrupt,
+					fact.MessageSeq,
+				)
+			}
+			out = append(out, PendingCardTransition{
+				Transition: fact,
+				Message:    message,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // HasPendingCardTransitionAfter is the narrow M5 pre-classification read. A

@@ -1575,12 +1575,48 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 			advice.requests, hand.commandCount())
 	}
 
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("服务态前置账本不可用: messages=%+v err=%v", messages, err)
+	}
 	acceptedAt := h.clock.Now().Add(time.Minute)
+	cardText := "合成邀面卡"
+	cardHash := syncledger.HashText("service-interview-card")
+	cardChanges, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: messages[len(messages)-1].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "out", Kind: "card", ContentHash: cardHash,
+			Text: &cardText, CardType: "interviewInvite", CardState: "pending",
+			Origin: "external",
+		}},
+		SyncedAt: acceptedAt.Add(-time.Second),
+	})
+	if err != nil || len(cardChanges.Inserted) != 1 {
+		t.Fatalf("服务态前置邀面卡入账失败: changes=%+v err=%v", cardChanges, err)
+	}
+	cardSeq := cardChanges.Inserted[0].Seq
+	if _, err := h.db.ApplyCommunicationV4BusinessEvent(
+		store.ApplyCommunicationV4BusinessEventRequest{
+			ProfileID: fixture.profileID,
+			Event: communication.BusinessEvent{
+				Key:  fmt.Sprintf("message:%d", cardSeq),
+				Kind: communication.EventInterviewInvited, Source: communication.EventSourceMessage,
+				MessageSeq: cardSeq,
+			},
+			AppliedAt: acceptedAt.Add(-time.Second),
+		},
+	); err != nil {
+		t.Fatalf("服务态前置邀面投影失败: %v", err)
+	}
 	accepted, err := h.db.ApplyCommunicationV4BusinessEvent(store.ApplyCommunicationV4BusinessEventRequest{
 		ProfileID: fixture.profileID,
 		Event: communication.BusinessEvent{
-			Key: "card:99:pending:accepted", Kind: communication.EventInterviewAccepted,
-			Source: communication.EventSourceCardTransition, MessageSeq: 99,
+			Key: fmt.Sprintf("card:%d:pending:accepted", cardSeq), Kind: communication.EventInterviewAccepted,
+			Source: communication.EventSourceCardTransition, MessageSeq: cardSeq,
 			OccurredAt: &acceptedAt,
 		},
 		AppliedAt: acceptedAt,
@@ -1588,11 +1624,7 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 	if err != nil || accepted.Aggregate.State.MainStatus != communication.V4StatusInterviewed {
 		t.Fatalf("服务态前置事实失败: result=%+v err=%v", accepted, err)
 	}
-	key := store.ConversationKey{
-		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
-		ConversationRef: fixture.conversationRef,
-	}
-	messages, err := h.db.MessagesForConversation(key)
+	messages, err = h.db.MessagesForConversation(key)
 	if err != nil || len(messages) == 0 {
 		t.Fatalf("服务态前置账本不可用: messages=%+v err=%v", messages, err)
 	}

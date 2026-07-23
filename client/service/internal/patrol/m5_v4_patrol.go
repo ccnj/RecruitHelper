@@ -19,6 +19,9 @@ const (
 // round can advance every ready profile independently and a restart simply
 // re-enumerates the same set.
 func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
+	if err := a.processCommunicationV4CardTransitions(ctx); err != nil {
+		return err
+	}
 	targets, err := a.manager.store.CommunicationTargetsForAccount(a.key())
 	if err != nil {
 		return err

@@ -835,6 +835,9 @@ func validateNewCommunicationV4EventBoundary(
 		if event.MessageSeq <= 0 {
 			return ErrCommunicationV4Invalid
 		}
+		if event.MessageSeq > aggregate.ProjectedThroughSeq {
+			return ErrCommunicationV4Conflict
+		}
 	case communication.EventSourcePlatformStatus:
 		if event.MessageSeq != 0 {
 			return ErrCommunicationV4Invalid

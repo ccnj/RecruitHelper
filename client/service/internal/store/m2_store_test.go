@@ -593,6 +593,134 @@ func TestCardTransitionFactSurvivesRestartAndAcknowledgesOnce(t *testing.T) {
 	}
 }
 
+func TestPendingCardTransitionsForAccountIsolatedStableAndKeepsMessageFacts(t *testing.T) {
+	s := openTest(t)
+	firstKey := ConversationKey{
+		Platform: "zhilian", AccountRef: "acc-card-v4-a", ConversationRef: "conv-card-v4-a",
+	}
+	secondKey := ConversationKey{
+		Platform: "zhilian", AccountRef: "acc-card-v4-b", ConversationRef: "conv-card-v4-b",
+	}
+	seedAdoptedPendingCard(t, s, firstKey, "round-card-v4-a", "hash-card-v4-a")
+	seedAdoptedPendingCard(t, s, secondKey, "round-card-v4-b", "hash-card-v4-b")
+	firstAt := time.Date(2026, 7, 24, 1, 0, 0, 0, time.UTC)
+	secondAt := firstAt.Add(time.Minute)
+	for _, change := range []struct {
+		from string
+		to   string
+		at   time.Time
+	}{
+		{from: "pending", to: "accepted", at: firstAt},
+		{from: "accepted", to: "rejected", at: secondAt},
+	} {
+		if _, err := s.ApplyConversationChanges(ApplyConversationChangesRequest{
+			Key: firstKey, RoundID: "round-card-v4-a", ExpectedTailSeq: 1, SyncedAt: change.at,
+			CardChanges: []CardStateChange{{
+				Seq: 1, ContentHash: "hash-card-v4-a",
+				FromState: change.from, CardState: change.to,
+			}},
+		}); err != nil {
+			t.Fatalf("追加账号 A 卡片跃迁 %s→%s: %v", change.from, change.to, err)
+		}
+	}
+	if _, err := s.ApplyConversationChanges(ApplyConversationChangesRequest{
+		Key: secondKey, RoundID: "round-card-v4-b", ExpectedTailSeq: 1, SyncedAt: firstAt,
+		CardChanges: []CardStateChange{{
+			Seq: 1, ContentHash: "hash-card-v4-b",
+			FromState: "pending", CardState: "accepted",
+		}},
+	}); err != nil {
+		t.Fatalf("追加账号 B 卡片跃迁: %v", err)
+	}
+
+	pending, err := s.PendingCardTransitionsForAccount(AccountKey{
+		Platform: firstKey.Platform, AccountRef: firstKey.AccountRef,
+	}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 ||
+		pending[0].Transition.FromState != "pending" ||
+		pending[0].Transition.ToState != "accepted" ||
+		pending[1].Transition.FromState != "accepted" ||
+		pending[1].Transition.ToState != "rejected" {
+		t.Fatalf("账号范围与事实顺序错误: %+v", pending)
+	}
+	for index := range pending {
+		item := pending[index]
+		if item.Transition.AccountRef != firstKey.AccountRef ||
+			item.Message.Platform != firstKey.Platform ||
+			item.Message.AccountRef != firstKey.AccountRef ||
+			item.Message.ConversationRef != firstKey.ConversationRef ||
+			item.Message.Seq != item.Transition.MessageSeq ||
+			item.Message.Kind != "card" ||
+			item.Message.CardType != item.Transition.CardType ||
+			item.Message.ContentHash != item.Transition.ContentHash {
+			t.Fatalf("未保留完整 transition/message 事实: %+v", item)
+		}
+	}
+
+	retractedAt := secondAt.Add(time.Minute)
+	if err := s.db.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+			firstKey.Platform,
+			firstKey.AccountRef,
+			firstKey.ConversationRef,
+			1,
+		).
+		Updates(map[string]any{
+			"retracted_at": retractedAt, "retraction_reason": "fixtureRetracted",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.PendingCardTransitionsForAccount(AccountKey{
+		Platform: firstKey.Platform, AccountRef: firstKey.AccountRef,
+	}, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("已撤回消息不属于活动账本: pending=%+v err=%v", pending, err)
+	}
+}
+
+func TestPendingCardTransitionsForAccountRejectsFactMessageCorruption(t *testing.T) {
+	s := openTest(t)
+	key := ConversationKey{
+		Platform: "zhilian", AccountRef: "acc-card-v4-corrupt",
+		ConversationRef: "conv-card-v4-corrupt",
+	}
+	seedAdoptedPendingCard(t, s, key, "round-card-v4-corrupt", "hash-card-v4-corrupt")
+	if _, err := s.ApplyConversationChanges(ApplyConversationChangesRequest{
+		Key: key, RoundID: "round-card-v4-corrupt", ExpectedTailSeq: 1,
+		SyncedAt: time.Date(2026, 7, 24, 1, 0, 0, 0, time.UTC),
+		CardChanges: []CardStateChange{{
+			Seq: 1, ContentHash: "hash-card-v4-corrupt",
+			FromState: "pending", CardState: "accepted",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+			key.Platform,
+			key.AccountRef,
+			key.ConversationRef,
+			1,
+		).
+		UpdateColumn("content_hash", "different-active-card-hash").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PendingCardTransitionsForAccount(AccountKey{
+		Platform: key.Platform, AccountRef: key.AccountRef,
+	}, 10); !errors.Is(err, ErrCardTransitionCorrupt) {
+		t.Fatalf("事实与活动消息冲突必须响亮失败: %v", err)
+	}
+	pending, err := s.PendingCardTransitions(10)
+	if err != nil || len(pending) != 1 || pending[0].AcknowledgedAt != nil {
+		t.Fatalf("读取损坏不得确认跃迁: pending=%+v err=%v", pending, err)
+	}
+}
+
 func TestCardTransitionFactAutoMigrateSchema(t *testing.T) {
 	s := openTest(t)
 	type tableColumn struct {
