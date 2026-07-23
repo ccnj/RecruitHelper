@@ -98,9 +98,12 @@ const (
 )
 
 type CompletionRequest struct {
-	Purpose         CompletionPurpose
-	UserContent     string
-	MaxOutputTokens int
+	InvocationID        string
+	Purpose             CompletionPurpose
+	ContextRevisionHash string
+	PromptRevision      string
+	UserContent         string
+	MaxOutputTokens     int
 }
 
 type CompletionUsage struct {
@@ -114,6 +117,26 @@ type CompletionResponse struct {
 	JSONText              string
 	Usage                 CompletionUsage
 	ReasoningContentEmpty bool
+	Diagnostics           CompletionDiagnostics
+}
+
+type TraceStatus string
+
+const (
+	TraceStatusComplete            TraceStatus = "complete"
+	TraceStatusUnavailable         TraceStatus = "unavailable"
+	TraceStatusResponseUnavailable TraceStatus = "responseUnavailable"
+)
+
+// CompletionDiagnostics is the PII-free bridge from the provider adapter to
+// brain.db and stdout. Raw request/response bodies remain exclusively in the
+// standalone ai-traces.db.
+type CompletionDiagnostics struct {
+	ProviderHTTPStatus *int
+	RequestBytes       int
+	ResponseBytes      int
+	TraceStatus        TraceStatus
+	TraceErrorCode     string
 }
 
 type LLMProvider interface {

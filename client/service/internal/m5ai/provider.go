@@ -3,6 +3,8 @@ package m5ai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +13,14 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"recruithelper/client/service/internal/aitrace"
 )
 
 const (
 	maxProviderRequestBytes  = 256 << 10
 	maxProviderResponseBytes = 1 << 20
+	traceWriteTimeout        = 5 * time.Second
 
 	// DeepSeek V4 Pro USD prices frozen on 2026-07-21, expressed as
 	// micro-dollars per one million tokens so cost accounting never uses a
@@ -43,18 +48,51 @@ type ProviderError struct {
 func (e *ProviderError) Error() string { return "provider 调用失败: " + e.Class }
 
 type OpenAICompatibleProvider struct {
-	config ProviderConfig
-	client *http.Client
+	config        ProviderConfig
+	client        *http.Client
+	trace         TraceRecorder
+	traceExpected bool
+	configHash    string
 }
 
-func NewOpenAICompatibleProvider(config ProviderConfig, client *http.Client) (*OpenAICompatibleProvider, error) {
+// TraceRecorder is deliberately narrower than the trace store. The provider
+// can append one request/response pair, but cannot enumerate or export the raw
+// local corpus.
+type TraceRecorder interface {
+	Begin(context.Context, aitrace.BeginRecord) error
+	Finish(context.Context, aitrace.FinishRecord) error
+}
+
+// NewOpenAICompatibleProvider keeps the optional recorder variadic so focused
+// adapter tests and helpers can omit tracing. Production always passes exactly
+// one recorder argument; a nil value means tracing was expected but its
+// standalone database could not be opened.
+func NewOpenAICompatibleProvider(
+	config ProviderConfig,
+	client *http.Client,
+	traceRecorder ...TraceRecorder,
+) (*OpenAICompatibleProvider, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
+	}
+	if len(traceRecorder) > 1 {
+		return nil, errors.New("LLM provider trace recorder 数量无效")
 	}
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &OpenAICompatibleProvider{config: config, client: client}, nil
+	configHash, err := providerConfigHash(config)
+	if err != nil {
+		return nil, err
+	}
+	provider := &OpenAICompatibleProvider{
+		config: config, client: client, configHash: configHash,
+		traceExpected: len(traceRecorder) == 1,
+	}
+	if len(traceRecorder) == 1 {
+		provider.trace = traceRecorder[0]
+	}
+	return provider, nil
 }
 
 func (p *OpenAICompatibleProvider) ProviderName() string { return p.config.Provider }
@@ -62,17 +100,25 @@ func (p *OpenAICompatibleProvider) ProviderName() string { return p.config.Provi
 func (p *OpenAICompatibleProvider) ModelName() string { return p.config.Model }
 
 func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
+	preflight := CompletionDiagnostics{}
+	if p.traceExpected {
+		preflight.TraceStatus = TraceStatusUnavailable
+	}
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply &&
 		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting {
-		return CompletionResponse{}, errors.New("未知 provider 用途")
+		return CompletionResponse{Diagnostics: preflight}, errors.New("未知 provider 用途")
 	}
 	if strings.TrimSpace(request.UserContent) == "" || request.MaxOutputTokens <= 0 {
-		return CompletionResponse{}, errors.New("provider 请求缺少正文或输出上限")
+		return CompletionResponse{Diagnostics: preflight}, errors.New("provider 请求缺少正文或输出上限")
+	}
+	if p.traceExpected && (strings.TrimSpace(request.InvocationID) == "" ||
+		strings.TrimSpace(request.ContextRevisionHash) == "") {
+		return CompletionResponse{Diagnostics: preflight}, &ProviderError{Class: "requestInvalid"}
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
 		((request.Purpose == PurposeReply || request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting) &&
 			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
-		return CompletionResponse{}, &ProviderError{Class: "budgetBlocked"}
+		return CompletionResponse{Diagnostics: preflight}, &ProviderError{Class: "budgetBlocked"}
 	}
 	inputLimit := p.config.MaxInputTokens
 	if request.Purpose == PurposeIntent && inputLimit > IntentInputTokenLimit {
@@ -100,10 +146,21 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	payload.Thinking.Type = "disabled"
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return CompletionResponse{}, err
+		return CompletionResponse{Diagnostics: preflight}, err
 	}
+	startedAt := time.Now()
+	diagnostics := p.beginTrace(request, body, startedAt)
+	result := CompletionResponse{Diagnostics: diagnostics}
 	if len(body) > maxProviderRequestBytes {
-		return CompletionResponse{}, &ProviderError{Class: "requestPayloadTooLarge"}
+		p.finishTrace(
+			&result.Diagnostics,
+			aitrace.FinishRecord{
+				InvocationID:  request.InvocationID,
+				TransportCode: aitrace.TransportRequestInvalid,
+				FinishedAt:    time.Now(),
+			},
+		)
+		return result, &ProviderError{Class: "requestPayloadTooLarge"}
 	}
 	endpoint := strings.TrimRight(p.config.BaseURL, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
@@ -113,23 +170,66 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(timeoutCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return CompletionResponse{}, &ProviderError{Class: "requestInvalid"}
+		p.finishTrace(
+			&result.Diagnostics,
+			aitrace.FinishRecord{
+				InvocationID:  request.InvocationID,
+				TransportCode: aitrace.TransportRequestInvalid,
+				FinishedAt:    time.Now(),
+			},
+		)
+		return result, &ProviderError{Class: "requestInvalid"}
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+p.config.APIKey)
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
+		transportCode := aitrace.TransportNetwork
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
-			return CompletionResponse{}, &ProviderError{Class: "timeout"}
+			transportCode = aitrace.TransportTimeout
+		} else if errors.Is(err, context.Canceled) || errors.Is(timeoutCtx.Err(), context.Canceled) {
+			transportCode = aitrace.TransportCanceled
 		}
-		return CompletionResponse{}, &ProviderError{Class: "transport"}
+		p.finishTrace(
+			&result.Diagnostics,
+			aitrace.FinishRecord{
+				InvocationID:  request.InvocationID,
+				TransportCode: transportCode,
+				FinishedAt:    time.Now(),
+			},
+		)
+		if transportCode == aitrace.TransportTimeout {
+			return result, &ProviderError{Class: "timeout"}
+		}
+		return result, &ProviderError{Class: "transport"}
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, maxProviderResponseBytes+1)
 	raw, readErr := io.ReadAll(limited)
+	result.Diagnostics.ProviderHTTPStatus = intPointer(response.StatusCode)
+	result.Diagnostics.ResponseBytes = len(raw)
 	if readErr != nil || len(raw) > maxProviderResponseBytes {
-		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+		p.finishTrace(
+			&result.Diagnostics,
+			aitrace.FinishRecord{
+				InvocationID:  request.InvocationID,
+				HTTPStatus:    &response.StatusCode,
+				RawResponse:   raw,
+				TransportCode: aitrace.TransportResponseRead,
+				FinishedAt:    time.Now(),
+			},
+		)
+		return result, &ProviderError{Class: "responseInvalid"}
 	}
+	p.finishTrace(
+		&result.Diagnostics,
+		aitrace.FinishRecord{
+			InvocationID: request.InvocationID,
+			HTTPStatus:   &response.StatusCode,
+			RawResponse:  raw,
+			FinishedAt:   time.Now(),
+		},
+	)
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		class := "providerRejected"
 		switch response.StatusCode {
@@ -142,7 +242,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 				class = "providerUnavailable"
 			}
 		}
-		return CompletionResponse{}, &ProviderError{Class: class}
+		return result, &ProviderError{Class: class}
 	}
 	var decoded struct {
 		Choices []struct {
@@ -164,37 +264,119 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	if json.Unmarshal(raw, &decoded) != nil || len(decoded.Choices) != 1 ||
 		decoded.Choices[0].FinishReason != "stop" || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" ||
 		decoded.Usage.PromptTokens == nil || decoded.Usage.CompletionTokens == nil {
-		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+		return result, &ProviderError{Class: "responseInvalid"}
 	}
 	promptTokens := *decoded.Usage.PromptTokens
 	completionTokens := *decoded.Usage.CompletionTokens
 	if promptTokens < 0 || completionTokens < 0 ||
 		decoded.Usage.PromptCacheHitTokens < 0 || decoded.Usage.PromptCacheHitTokens > promptTokens ||
 		completionTokens > request.MaxOutputTokens {
-		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+		return result, &ProviderError{Class: "responseInvalid"}
 	}
 	var reasoning *int
 	if decoded.Usage.CompletionDetails != nil {
 		reasoning = decoded.Usage.CompletionDetails.ReasoningTokens
 		if reasoning != nil && *reasoning < 0 {
-			return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+			return result, &ProviderError{Class: "responseInvalid"}
 		}
 	}
-	result := CompletionResponse{
-		JSONText: decoded.Choices[0].Message.Content,
-		Usage: CompletionUsage{
-			InputTokens:       promptTokens,
-			CachedInputTokens: decoded.Usage.PromptCacheHitTokens,
-			OutputTokens:      completionTokens,
-			ReasoningTokens:   reasoning,
-		},
-		ReasoningContentEmpty: decoded.Choices[0].Message.ReasoningContent == nil ||
-			*decoded.Choices[0].Message.ReasoningContent == "",
+	result.JSONText = decoded.Choices[0].Message.Content
+	result.Usage = CompletionUsage{
+		InputTokens:       promptTokens,
+		CachedInputTokens: decoded.Usage.PromptCacheHitTokens,
+		OutputTokens:      completionTokens,
+		ReasoningTokens:   reasoning,
 	}
+	result.ReasoningContentEmpty = decoded.Choices[0].Message.ReasoningContent == nil ||
+		*decoded.Choices[0].Message.ReasoningContent == ""
 	if promptTokens > inputLimit {
 		return result, &ProviderError{Class: "inputTokenBudgetExceeded"}
 	}
 	return result, nil
+}
+
+func (p *OpenAICompatibleProvider) beginTrace(
+	request CompletionRequest,
+	body []byte,
+	startedAt time.Time,
+) CompletionDiagnostics {
+	if !p.traceExpected {
+		return CompletionDiagnostics{}
+	}
+	diagnostics := CompletionDiagnostics{
+		RequestBytes: len(body), TraceStatus: TraceStatusUnavailable,
+	}
+	if p.trace == nil {
+		diagnostics.TraceErrorCode = "traceStoreUnavailable"
+		return diagnostics
+	}
+	traceCtx, cancel := context.WithTimeout(context.Background(), traceWriteTimeout)
+	defer cancel()
+	err := p.trace.Begin(traceCtx, aitrace.BeginRecord{
+		InvocationID:        request.InvocationID,
+		Purpose:             string(request.Purpose),
+		Provider:            p.config.Provider,
+		Model:               p.config.Model,
+		ConfigHash:          p.configHash,
+		ContextRevisionHash: request.ContextRevisionHash,
+		PromptRevision:      request.PromptRevision,
+		RequestJSON:         body,
+		StartedAt:           startedAt,
+	})
+	if err != nil {
+		diagnostics.TraceErrorCode = "traceBeginFailed"
+		return diagnostics
+	}
+	diagnostics.TraceStatus = TraceStatusResponseUnavailable
+	return diagnostics
+}
+
+func (p *OpenAICompatibleProvider) finishTrace(
+	diagnostics *CompletionDiagnostics,
+	record aitrace.FinishRecord,
+) {
+	if !p.traceExpected || p.trace == nil ||
+		diagnostics.TraceStatus != TraceStatusResponseUnavailable {
+		return
+	}
+	traceCtx, cancel := context.WithTimeout(context.Background(), traceWriteTimeout)
+	defer cancel()
+	if err := p.trace.Finish(traceCtx, record); err != nil {
+		diagnostics.TraceErrorCode = "traceFinishFailed"
+		return
+	}
+	diagnostics.TraceStatus = TraceStatusComplete
+	diagnostics.TraceErrorCode = ""
+}
+
+func providerConfigHash(config ProviderConfig) (string, error) {
+	// APIKey is intentionally absent. The digest tracks the effective request
+	// configuration without making a credential or header serializable.
+	value := struct {
+		Provider              string `json:"provider"`
+		Model                 string `json:"model"`
+		BaseURL               string `json:"base_url"`
+		RequestTimeoutMs      int64  `json:"request_timeout_ms"`
+		MaxInputTokens        int    `json:"max_input_tokens"`
+		MaxIntentOutputTokens int    `json:"max_intent_output_tokens"`
+		MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
+	}{
+		Provider: config.Provider, Model: config.Model, BaseURL: config.BaseURL,
+		RequestTimeoutMs: config.RequestTimeoutMs, MaxInputTokens: config.MaxInputTokens,
+		MaxIntentOutputTokens: config.MaxIntentOutputTokens,
+		MaxReplyOutputTokens:  config.MaxReplyOutputTokens,
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", errors.New("LLM provider 配置摘要失败")
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func intPointer(value int) *int {
+	copy := value
+	return &copy
 }
 
 func validateBaseURL(value string) error {

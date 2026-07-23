@@ -143,8 +143,11 @@ func (m *Manager) generateSourcingGreetingMember(
 
 	started := time.Now()
 	response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-		Purpose: m5ai.PurposeGreeting, UserContent: content,
-		MaxOutputTokens: m5ai.GreetingOutputTokenLimit,
+		InvocationID: invocationID, Purpose: m5ai.PurposeGreeting,
+		ContextRevisionHash: material.ContextRevisionHash,
+		PromptRevision:      m5ai.GreetingInputFormatVersion,
+		UserContent:         content,
+		MaxOutputTokens:     m5ai.GreetingOutputTokenLimit,
 	})
 	completion := m5CompletionFromProvider(
 		invocationID, response, callErr, time.Since(started), m.now(),

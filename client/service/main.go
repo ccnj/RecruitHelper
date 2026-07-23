@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/adminhttp"
+	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/appbridge"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
@@ -44,6 +45,18 @@ func main() {
 			slog.Error("关闭存储失败", "err", err)
 		}
 	}()
+	var traceRecorder m5ai.TraceRecorder
+	traceStore, traceErr := aitrace.Open(*dataDir)
+	if traceErr != nil {
+		slog.Warn("AI 原文追踪库不可用，业务调用将继续", "errorCode", "traceStoreUnavailable")
+	} else {
+		traceRecorder = traceStore
+		defer func() {
+			if err := traceStore.Close(); err != nil {
+				slog.Warn("关闭 AI 原文追踪库失败", "errorCode", "traceStoreCloseFailed")
+			}
+		}()
+	}
 	providerConfig, err := m5ai.NewProviderConfigStore(*dataDir)
 	if err != nil {
 		slog.Error("本地模型配置初始化失败", "err", err)
@@ -59,7 +72,7 @@ func main() {
 	if configured, loadErr := providerConfig.Load(); loadErr != nil {
 		slog.Warn("本地模型配置不可用，M5 建议层保持停用", "err", loadErr)
 	} else if configured != nil {
-		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil)
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
 		if providerErr != nil {
 			slog.Warn("本地模型配置未能激活，M5 建议层保持停用", "err", providerErr)
 		} else {

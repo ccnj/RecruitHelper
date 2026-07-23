@@ -133,8 +133,11 @@ func (m *Manager) scoreSourcingBatchMember(
 
 	started := time.Now()
 	response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-		Purpose: m5ai.PurposeScoring, UserContent: content,
-		MaxOutputTokens: m5ai.ScoringOutputTokenLimit,
+		InvocationID: invocationID, Purpose: m5ai.PurposeScoring,
+		ContextRevisionHash: run.ContextRevisionHash,
+		PromptRevision:      m5ai.ScoringInputFormatVersion,
+		UserContent:         content,
+		MaxOutputTokens:     m5ai.ScoringOutputTokenLimit,
 	})
 	completion := m5CompletionFromProvider(
 		invocationID, response, callErr, time.Since(started), m.now(),

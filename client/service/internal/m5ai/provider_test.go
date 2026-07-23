@@ -1,6 +1,7 @@
 package m5ai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"recruithelper/client/service/internal/aitrace"
 )
 
 func configuredProvider(baseURL string) ProviderConfig {
@@ -57,6 +60,188 @@ func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *test
 	if err != nil || calls != 1 || !response.ReasoningContentEmpty ||
 		response.Usage.ReasoningTokens == nil || *response.Usage.ReasoningTokens != 0 {
 		t.Fatalf("provider 调用不符合单次/usage 约束: calls=%d response=%+v err=%v", calls, response, err)
+	}
+}
+
+func TestOpenAICompatibleProviderPersistsExactWireRequestAndSuccessResponse(t *testing.T) {
+	traceStore, err := aitrace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traceStore.Close()
+
+	var sentBody []byte
+	rawResponse := []byte(
+		`{"choices":[{"finish_reason":"stop","message":{"content":"{\"信号\":\"中性\"}"}}],` +
+			`"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_cache_hit_tokens":4,` +
+			`"completion_tokens_details":{"reasoning_tokens":0}}}`,
+	)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var readErr error
+		sentBody, readErr = io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Fatalf("读取发送 body: %v", readErr)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(bytes.NewReader(rawResponse)),
+		}, nil
+	})}
+	provider, err := NewOpenAICompatibleProvider(
+		configuredProvider("https://provider.invalid"), client, traceStore,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		InvocationID: "inv-trace-success", Purpose: PurposeIntent,
+		ContextRevisionHash: "context-revision", PromptRevision: "prompt-revision",
+		UserContent: "完整 fixture 输入", MaxOutputTokens: IntentOutputTokenLimit,
+	})
+	if err != nil || response.Diagnostics.TraceStatus != TraceStatusComplete ||
+		response.Diagnostics.TraceErrorCode != "" ||
+		response.Diagnostics.RequestBytes != len(sentBody) ||
+		response.Diagnostics.ResponseBytes != len(rawResponse) {
+		t.Fatalf("完整追踪调用失败: response=%+v err=%v", response, err)
+	}
+	trace, err := traceStore.Get(context.Background(), "inv-trace-success")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(trace.RequestJSON, sentBody) ||
+		!bytes.Equal(trace.RawResponse, rawResponse) ||
+		trace.Purpose != string(PurposeIntent) ||
+		trace.ContextRevisionHash != "context-revision" ||
+		trace.PromptRevision != "prompt-revision" ||
+		trace.HTTPStatus == nil || *trace.HTTPStatus != http.StatusOK {
+		t.Fatalf("ai trace 未保存 exact wire 数据: %#v", trace)
+	}
+	if bytes.Contains(trace.RequestJSON, []byte("sk-fixture")) ||
+		len(trace.ConfigHash) != 64 {
+		t.Fatalf("trace 泄露 key 或配置摘要无效: configHash=%q request=%s",
+			trace.ConfigHash, trace.RequestJSON)
+	}
+}
+
+func TestOpenAICompatibleProviderPersistsHTTPAndTransportFailures(t *testing.T) {
+	traceStore, err := aitrace.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traceStore.Close()
+	rawFailure := []byte(`{"error":{"message":"保留的 provider 原始错误"}}`)
+	httpClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests, Header: make(http.Header),
+			Body: io.NopCloser(bytes.NewReader(rawFailure)),
+		}, nil
+	})}
+	httpProvider, err := NewOpenAICompatibleProvider(
+		configuredProvider("https://provider.invalid"), httpClient, traceStore,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpResponse, err := httpProvider.CompleteJSON(context.Background(), CompletionRequest{
+		InvocationID: "inv-trace-http", Purpose: PurposeReply,
+		ContextRevisionHash: "context-http", UserContent: "fixture",
+		MaxOutputTokens: ReplyOutputTokenLimit,
+	})
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Class != "rateLimited" ||
+		httpResponse.Diagnostics.TraceStatus != TraceStatusComplete ||
+		httpResponse.Diagnostics.ProviderHTTPStatus == nil ||
+		*httpResponse.Diagnostics.ProviderHTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("HTTP 失败追踪分类错误: response=%+v err=%v", httpResponse, err)
+	}
+	httpTrace, err := traceStore.Get(context.Background(), "inv-trace-http")
+	if err != nil || !bytes.Equal(httpTrace.RawResponse, rawFailure) {
+		t.Fatalf("HTTP 原始失败响应未保存: trace=%#v err=%v", httpTrace, err)
+	}
+
+	transportClient := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded
+	})}
+	transportProvider, err := NewOpenAICompatibleProvider(
+		configuredProvider("https://provider.invalid"), transportClient, traceStore,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transportResponse, err := transportProvider.CompleteJSON(context.Background(), CompletionRequest{
+		InvocationID: "inv-trace-transport", Purpose: PurposeGreeting,
+		ContextRevisionHash: "context-transport", UserContent: "fixture",
+		MaxOutputTokens: GreetingOutputTokenLimit,
+	})
+	if !errors.As(err, &providerErr) || providerErr.Class != "timeout" ||
+		transportResponse.Diagnostics.TraceStatus != TraceStatusComplete {
+		t.Fatalf("运输失败追踪分类错误: response=%+v err=%v", transportResponse, err)
+	}
+	transportTrace, err := traceStore.Get(context.Background(), "inv-trace-transport")
+	if err != nil || transportTrace.HTTPStatus != nil ||
+		transportTrace.TransportCode != aitrace.TransportTimeout ||
+		transportTrace.ResponsePresent {
+		t.Fatalf("运输失败 trace 不符: trace=%#v err=%v", transportTrace, err)
+	}
+}
+
+type failingTraceRecorder struct {
+	beginErr  error
+	finishErr error
+}
+
+func (r failingTraceRecorder) Begin(context.Context, aitrace.BeginRecord) error {
+	return r.beginErr
+}
+
+func (r failingTraceRecorder) Finish(context.Context, aitrace.FinishRecord) error {
+	return r.finishErr
+}
+
+func TestOpenAICompatibleProviderTraceFailureDoesNotChangeProviderResult(t *testing.T) {
+	successBody := `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],` +
+		`"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":0}}`
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(successBody)),
+		}, nil
+	})}
+	for _, testCase := range []struct {
+		name       string
+		recorder   TraceRecorder
+		wantStatus TraceStatus
+		wantCode   string
+	}{
+		{
+			name:       "begin failure",
+			recorder:   failingTraceRecorder{beginErr: errors.New("fixture begin failure")},
+			wantStatus: TraceStatusUnavailable, wantCode: "traceBeginFailed",
+		},
+		{
+			name:       "finish failure",
+			recorder:   failingTraceRecorder{finishErr: errors.New("fixture finish failure")},
+			wantStatus: TraceStatusResponseUnavailable, wantCode: "traceFinishFailed",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			provider, err := NewOpenAICompatibleProvider(
+				configuredProvider("https://provider.invalid"), client, testCase.recorder,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+				InvocationID: "inv-" + testCase.name, Purpose: PurposeIntent,
+				ContextRevisionHash: "context", UserContent: "fixture",
+				MaxOutputTokens: IntentOutputTokenLimit,
+			})
+			if err != nil || response.JSONText != "{}" ||
+				response.Diagnostics.TraceStatus != testCase.wantStatus ||
+				response.Diagnostics.TraceErrorCode != testCase.wantCode {
+				t.Fatalf("trace 旁路失败改变了 provider 结果: response=%+v err=%v", response, err)
+			}
+		})
 	}
 }
 

@@ -676,7 +676,13 @@ func (a *roundActor) executeM5Advice(
 		}
 	}
 
-	request := m5ai.CompletionRequest{Purpose: purpose, UserContent: content}
+	request := m5ai.CompletionRequest{
+		InvocationID:        reserved.Invocation.InvocationID,
+		Purpose:             purpose,
+		ContextRevisionHash: turn.ContextRevisionHash,
+		PromptRevision:      turn.RenderFormatVersion,
+		UserContent:         content,
+	}
 	if purpose == m5ai.PurposeIntent {
 		request.MaxOutputTokens = m5ai.IntentOutputTokenLimit
 	} else {

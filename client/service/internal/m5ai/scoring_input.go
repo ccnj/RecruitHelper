@@ -7,6 +7,8 @@ import (
 )
 
 const (
+	ScoringInputFormatVersion = "scoring-input-v1"
+
 	scoringSelfEvaluationLimit = 1500
 	scoringWorkLimit           = 1500
 	scoringEducationLimit      = 500
