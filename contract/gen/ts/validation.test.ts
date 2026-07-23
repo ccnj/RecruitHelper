@@ -699,29 +699,99 @@ const greetingMeta = PRIMITIVE_META["chat.sendGreeting"];
 if (greetingMeta.ver !== 1 || greetingMeta.guardsSchema === null || greetingMeta.evidenceSchema === null) {
   throw new Error(`greeting schema metadata drift: ${JSON.stringify(greetingMeta)}`);
 }
-const inviteMeta = PRIMITIVE_META["chat.sendInviteCard"];
-if (
-  inviteMeta.ver !== 0 ||
-  inviteMeta.argsSchema !== null ||
-  inviteMeta.dataSchema !== null ||
-  inviteMeta.guardsSchema !== null ||
-  inviteMeta.evidenceSchema !== null
-) {
-  throw new Error(`sendInviteCard placeholder drift: ${JSON.stringify(inviteMeta)}`);
+const cardPrimitiveMetadata = [
+  {
+    name: "chat.sendWechatInvite" as const,
+    argsSchema: "ChatSendWechatInviteArgs",
+    dataSchema: "ChatSendWechatInviteData",
+    evidenceSchema: "ChatSendWechatInviteEvidence",
+  },
+  {
+    name: "chat.sendInviteCard" as const,
+    argsSchema: "ChatSendInviteCardArgs",
+    dataSchema: "ChatSendInviteCardData",
+    evidenceSchema: "ChatSendInviteCardEvidence",
+  },
+];
+for (const expected of cardPrimitiveMetadata) {
+  const meta = PRIMITIVE_META[expected.name];
+  if (
+    meta.ver !== 1 ||
+    meta.argsSchema !== expected.argsSchema ||
+    meta.dataSchema !== expected.dataSchema ||
+    meta.guardsSchema !== "ChatSendMessageGuards" ||
+    meta.evidenceSchema !== expected.evidenceSchema ||
+    meta.verificationPrimitive !== "chat.readThread" ||
+    meta.verificationVer !== 1 ||
+    meta.verificationMaxRounds !== 3
+  ) {
+    throw new Error(`${expected.name} metadata drift: ${JSON.stringify(meta)}`);
+  }
 }
-expectIssue(
-  "sendInviteCard placeholder has no schema",
+
+const cardCommandBase = {
+  context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
+  idemKey: "ik-1",
+  deadline: 1_999_999_999_999,
+  execBudgetMs: 60_000,
+  leaseMs: 30_000,
+  guards: { expectedTail: [{ direction: "in", contentHash: "a".repeat(64) }] },
+};
+expectValid(
+  "wechat invite command",
   validateKindBody(Kind.Cmd, {
+    ...cardCommandBase,
+    name: "chat.sendWechatInvite",
+    ver: 1,
+    args: { conversationRef: "conv-1" },
+  }),
+);
+expectValid(
+  "interview invite command",
+  validateKindBody(Kind.Cmd, {
+    ...cardCommandBase,
     name: "chat.sendInviteCard",
     ver: 1,
-    context: { platform: "zhilian", accountRef: "acc-1", expectedPrincipalFingerprint: "opaque" },
-    args: {},
-    idemKey: "ik-1",
-    deadline: 1_999_999_999_999,
-    execBudgetMs: 60_000,
+    args: {
+      conversationRef: "conv-1",
+      interview: { startsAt: 1_800_000_000_000, endsAt: 1_800_001_800_000, method: "wechatVideo" },
+    },
+    execBudgetMs: 120_000,
   }),
-  "$.name",
-  "primitive",
+);
+
+const cardResultBase = {
+  ref: "card-1",
+  status: "ok",
+  replayed: false,
+  execMs: 10,
+};
+expectValid(
+  "wechat invite result",
+  validatePrimitiveResult("chat.sendWechatInvite", 1, {
+    ...cardResultBase,
+    data: {
+      conversationRef: "conv-1",
+      contentHash: "a".repeat(64),
+      sourceKey: "b".repeat(64),
+      observedAt: 20,
+    },
+    evidence: [{ type: "outboundWechatInviteObserved" }],
+  }),
+);
+expectValid(
+  "interview invite result",
+  validatePrimitiveResult("chat.sendInviteCard", 1, {
+    ...cardResultBase,
+    data: {
+      conversationRef: "conv-1",
+      contentHash: "a".repeat(64),
+      sourceKey: "b".repeat(64),
+      interview: { startsAt: 1_800_000_000_000, endsAt: 1_800_001_800_000, method: "wechatVideo" },
+      observedAt: 20,
+    },
+    evidence: [{ type: "outboundInterviewInviteObserved" }],
+  }),
 );
 
 const retainedSendSurfaceStages = [
