@@ -128,6 +128,16 @@ const (
 	TraceStatusResponseUnavailable TraceStatus = "responseUnavailable"
 )
 
+const (
+	FailureStageRequestBuild   = "requestBuild"
+	FailureStageTransport      = "transport"
+	FailureStageProviderHTTP   = "providerHTTP"
+	FailureStageResponseDecode = "responseDecode"
+	FailureStageBusinessParse  = "businessParse"
+	FailureStageReducer        = "reducer"
+	FailureStagePersistence    = "persistence"
+)
+
 // CompletionDiagnostics is the PII-free bridge from the provider adapter to
 // brain.db and stdout. Raw request/response bodies remain exclusively in the
 // standalone ai-traces.db.

@@ -771,6 +771,12 @@ type AIInvocationCompletion struct {
 	ReasoningContentEmpty bool
 	LatencyMs             int64
 	ErrorClass            string
+	FailureStage          string
+	ErrorDetailCode       string
+	ProviderHTTPStatus    *int
+	RequestBytes          int
+	ResponseBytes         int
+	TraceStatus           m5ai.TraceStatus
 	EstimatedCostMicros   int64
 	FinishedAt            time.Time
 }
@@ -990,7 +996,11 @@ func sameCommunicationAction(existing CommunicationAction, req CompleteReplyInvo
 func validateInvocationCompletion(completion AIInvocationCompletion) error {
 	if strings.TrimSpace(completion.InvocationID) == "" || completion.FinishedAt.IsZero() || completion.LatencyMs < 0 ||
 		completion.InputTokens < 0 || completion.CachedInputTokens < 0 || completion.OutputTokens < 0 ||
-		completion.EstimatedCostMicros < 0 ||
+		completion.EstimatedCostMicros < 0 || completion.RequestBytes < 0 || completion.ResponseBytes < 0 ||
+		!validProviderHTTPStatus(completion.ProviderHTTPStatus) ||
+		!validAIInvocationFailureStage(completion.FailureStage) ||
+		!validAIInvocationErrorDetailCode(completion.ErrorDetailCode) ||
+		!validAIInvocationTraceStatus(completion.TraceStatus) ||
 		(completion.ReasoningTokens != nil && *completion.ReasoningTokens < 0) {
 		return ErrAIInvocationInvalid
 	}
@@ -1031,6 +1041,60 @@ func validateInvocationCompletion(completion AIInvocationCompletion) error {
 	return nil
 }
 
+const (
+	AIInvocationFailureStageRequestBuild   = "requestBuild"
+	AIInvocationFailureStageTransport      = "transport"
+	AIInvocationFailureStageProviderHTTP   = "providerHTTP"
+	AIInvocationFailureStageResponseDecode = "responseDecode"
+	AIInvocationFailureStageBusinessParse  = "businessParse"
+	AIInvocationFailureStageReducer        = "reducer"
+	AIInvocationFailureStagePersistence    = "persistence"
+	maxAIInvocationErrorDetailCodeBytes    = 128
+)
+
+func validProviderHTTPStatus(status *int) bool {
+	return status == nil || (*status >= 100 && *status <= 599)
+}
+
+func validAIInvocationFailureStage(stage string) bool {
+	switch stage {
+	case "", AIInvocationFailureStageRequestBuild, AIInvocationFailureStageTransport,
+		AIInvocationFailureStageProviderHTTP, AIInvocationFailureStageResponseDecode,
+		AIInvocationFailureStageBusinessParse, AIInvocationFailureStageReducer,
+		AIInvocationFailureStagePersistence:
+		return true
+	default:
+		return false
+	}
+}
+
+func validAIInvocationErrorDetailCode(code string) bool {
+	if code == "" {
+		return true
+	}
+	if len(code) > maxAIInvocationErrorDetailCodeBytes {
+		return false
+	}
+	for _, char := range code {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '_' || char == '-' || char == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validAIInvocationTraceStatus(status m5ai.TraceStatus) bool {
+	switch status {
+	case "", m5ai.TraceStatusComplete, m5ai.TraceStatusUnavailable,
+		m5ai.TraceStatusResponseUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 func finishAIInvocationTx(tx *gorm.DB, completion AIInvocationCompletion, purpose m5ai.CompletionPurpose) (AIInvocation, error) {
 	var invocation AIInvocation
 	if err := tx.First(&invocation, "invocation_id = ?", completion.InvocationID).Error; err != nil {
@@ -1053,8 +1117,13 @@ func finishAIInvocationTx(tx *gorm.DB, completion AIInvocationCompletion, purpos
 		"input_tokens": completion.InputTokens, "cached_input_tokens": completion.CachedInputTokens,
 		"output_tokens": completion.OutputTokens, "reasoning_tokens": completion.ReasoningTokens,
 		"usage_shape": completion.UsageShape, "latency_ms": completion.LatencyMs,
-		"error_class": completion.ErrorClass, "estimated_cost_micros": completion.EstimatedCostMicros,
-		"finished_at": completion.FinishedAt,
+		"error_class": completion.ErrorClass, "failure_stage": completion.FailureStage,
+		"error_detail_code":    completion.ErrorDetailCode,
+		"provider_http_status": completion.ProviderHTTPStatus,
+		"request_bytes":        completion.RequestBytes, "response_bytes": completion.ResponseBytes,
+		"trace_status":          completion.TraceStatus,
+		"estimated_cost_micros": completion.EstimatedCostMicros,
+		"finished_at":           completion.FinishedAt,
 	}
 	updated := tx.Model(&AIInvocation{}).
 		Where("invocation_id = ? AND finished_at IS NULL", completion.InvocationID).
@@ -1076,7 +1145,12 @@ func sameInvocationCompletion(existing AIInvocation, completion AIInvocationComp
 		existing.InputTokens == completion.InputTokens && existing.CachedInputTokens == completion.CachedInputTokens &&
 		existing.OutputTokens == completion.OutputTokens && sameOptionalInt(existing.ReasoningTokens, completion.ReasoningTokens) &&
 		existing.UsageShape == completion.UsageShape && existing.LatencyMs == completion.LatencyMs &&
-		existing.ErrorClass == completion.ErrorClass && existing.EstimatedCostMicros == completion.EstimatedCostMicros &&
+		existing.ErrorClass == completion.ErrorClass && existing.FailureStage == completion.FailureStage &&
+		existing.ErrorDetailCode == completion.ErrorDetailCode &&
+		sameOptionalInt(existing.ProviderHTTPStatus, completion.ProviderHTTPStatus) &&
+		existing.RequestBytes == completion.RequestBytes && existing.ResponseBytes == completion.ResponseBytes &&
+		existing.TraceStatus == completion.TraceStatus &&
+		existing.EstimatedCostMicros == completion.EstimatedCostMicros &&
 		existing.FinishedAt != nil && existing.FinishedAt.Equal(completion.FinishedAt)
 }
 

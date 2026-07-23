@@ -437,64 +437,76 @@ func TestValidateBaseURLRequiresHTTPSWithoutAuthorityDecorations(t *testing.T) {
 
 func TestOpenAICompatibleProviderRejectsInvalidChoiceAndUsageShapes(t *testing.T) {
 	tests := []struct {
-		name string
-		raw  string
-		max  int
+		name   string
+		raw    string
+		max    int
+		detail string
 	}{
 		{
-			name: "missing finish reason",
-			raw:  `{"choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-			max:  1,
+			name:   "missing finish reason",
+			raw:    `{"choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:    1,
+			detail: "responseFinishReasonInvalid",
 		},
 		{
-			name: "non stop finish reason",
-			raw:  `{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-			max:  1,
+			name:   "non stop finish reason",
+			raw:    `{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:    1,
+			detail: "responseFinishReasonInvalid",
 		},
 		{
-			name: "multiple choices",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}},{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
-			max:  1,
+			name:   "multiple choices",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}},{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			max:    1,
+			detail: "responseChoiceInvalid",
 		},
 		{
-			name: "negative input",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":-1,"completion_tokens":1}}`,
-			max:  1,
+			name:   "negative input",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":-1,"completion_tokens":1}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 		{
-			name: "missing input usage",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"completion_tokens":1}}`,
-			max:  1,
+			name:   "missing input usage",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"completion_tokens":1}}`,
+			max:    1,
+			detail: "usageMissing",
 		},
 		{
-			name: "missing output usage",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1}}`,
-			max:  1,
+			name:   "missing output usage",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1}}`,
+			max:    1,
+			detail: "usageMissing",
 		},
 		{
-			name: "negative cached input",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":-1}}`,
-			max:  1,
+			name:   "negative cached input",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":-1}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 		{
-			name: "cached input exceeds input",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":2}}`,
-			max:  1,
+			name:   "cached input exceeds input",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_cache_hit_tokens":2}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 		{
-			name: "negative output",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":-1}}`,
-			max:  1,
+			name:   "negative output",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":-1}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 		{
-			name: "output exceeds request",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
-			max:  1,
+			name:   "output exceeds request",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 		{
-			name: "negative reasoning",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":-1}}}`,
-			max:  1,
+			name:   "negative reasoning",
+			raw:    `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"completion_tokens_details":{"reasoning_tokens":-1}}}`,
+			max:    1,
+			detail: "usageInvalid",
 		},
 	}
 	for _, testCase := range tests {
@@ -514,6 +526,8 @@ func TestOpenAICompatibleProviderRejectsInvalidChoiceAndUsageShapes(t *testing.T
 			})
 			var providerErr *ProviderError
 			if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != "responseInvalid" ||
+				providerErr.FailureStage != FailureStageResponseDecode ||
+				providerErr.DetailCode != testCase.detail ||
 				strings.Contains(err.Error(), testCase.raw) {
 				t.Fatalf("非法响应未固定收敛: calls=%d err=%v", calls, err)
 			}
@@ -624,7 +638,10 @@ func TestOpenAICompatibleProviderFailureClassesAreBoundedAndNeverRetried(t *test
 				Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: IntentOutputTokenLimit,
 			})
 			var providerErr *ProviderError
-			if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != testCase.class || strings.Contains(err.Error(), "private body") {
+			if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != testCase.class ||
+				providerErr.FailureStage != FailureStageProviderHTTP ||
+				providerErr.DetailCode != testCase.class ||
+				strings.Contains(err.Error(), "private body") {
 				t.Fatalf("失败分类或重试错误: calls=%d err=%v", calls, err)
 			}
 		})
@@ -643,7 +660,9 @@ func TestOpenAICompatibleProviderBoundsTransportOutputAndInputFailures(t *testin
 			Purpose: PurposeIntent, UserContent: "fixture", MaxOutputTokens: IntentOutputTokenLimit,
 		})
 		var providerErr *ProviderError
-		if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != "timeout" {
+		if calls != 1 || !errors.As(err, &providerErr) || providerErr.Class != "timeout" ||
+			providerErr.FailureStage != FailureStageTransport ||
+			providerErr.DetailCode != "transportTimeout" {
 			t.Fatalf("timeout 未收敛: calls=%d err=%v", calls, err)
 		}
 	})
@@ -657,7 +676,9 @@ func TestOpenAICompatibleProviderBoundsTransportOutputAndInputFailures(t *testin
 			Purpose: PurposeReply, UserContent: "fixture", MaxOutputTokens: ReplyOutputTokenLimit,
 		})
 		var providerErr *ProviderError
-		if !errors.As(err, &providerErr) || providerErr.Class != "responseInvalid" {
+		if !errors.As(err, &providerErr) || providerErr.Class != "responseInvalid" ||
+			providerErr.FailureStage != FailureStageResponseDecode ||
+			providerErr.DetailCode != "responseChoiceInvalid" {
 			t.Fatalf("非法输出未收敛: %v", err)
 		}
 	})

@@ -706,11 +706,11 @@ func (a *roundActor) executeM5Advice(
 			if parseErr == nil {
 				advice = communication.IntentAdvice{State: communication.AdviceOK, Suggestion: suggestion}
 			} else {
-				completion.Status = store.AIInvocationInvalidOutput
-				completion.ErrorClass = "invalidOutput"
+				markBusinessParseFailure(&completion, parseErr)
 			}
 		}
 		if callErr == nil && !reasoningUsageSafe(completion) {
+			markReasoningUsageUnsafe(&completion)
 			manualReason = "reasoningUsageUnsafe"
 		} else if completion.Status == store.AIInvocationBudgetBlocked {
 			manualReason = "inputBudgetBlocked"
@@ -719,9 +719,17 @@ func (a *roundActor) executeM5Advice(
 			Turn: facts, Intent: advice, Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
 		})
 		if reduceErr != nil {
+			markReducerRejected(&completion)
 			manualReason = "reducerRejected"
 		}
-		return a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
+		logAIInvocationOutcome(
+			a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
+		)
+		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
+		if err != nil {
+			logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
+		}
+		return err
 	}
 
 	reply := communication.ReplyAdvice{State: communication.AdviceFailed}
@@ -730,20 +738,28 @@ func (a *roundActor) executeM5Advice(
 		if parseErr == nil {
 			reply = communication.ReplyAdvice{State: communication.AdviceOK, Suggestion: suggestion}
 		} else {
-			completion.Status = store.AIInvocationInvalidOutput
-			completion.ErrorClass = "invalidOutput"
+			markBusinessParseFailure(&completion, parseErr)
 		}
 	}
 	decision, reduceErr := reduceM5ReplyDecision(turn, material, facts, intent, reply)
 	if reduceErr != nil {
+		markReducerRejected(&completion)
 		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
 	} else if callErr == nil && !reasoningUsageSafe(completion) {
+		markReasoningUsageUnsafe(&completion)
 		decision = communication.Decision{
 			TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired,
 			ManualReason: "reasoningUsageUnsafe",
 		}
 	}
-	return a.completeM5Reply(turn.TurnID, completion, decision)
+	logAIInvocationOutcome(
+		a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
+	)
+	err = a.completeM5Reply(turn.TurnID, completion, decision)
+	if err != nil {
+		logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
+	}
+	return err
 }
 
 func isLegacyM5ReplyBudgetFalsePositive(invocation store.AIInvocation) bool {
@@ -905,6 +921,10 @@ func m5CompletionFromProvider(
 		CachedInputTokens: response.Usage.CachedInputTokens, OutputTokens: response.Usage.OutputTokens,
 		ReasoningTokens: response.Usage.ReasoningTokens, ReasoningContentEmpty: response.ReasoningContentEmpty,
 		LatencyMs:           latency.Milliseconds(),
+		ProviderHTTPStatus:  response.Diagnostics.ProviderHTTPStatus,
+		RequestBytes:        response.Diagnostics.RequestBytes,
+		ResponseBytes:       response.Diagnostics.ResponseBytes,
+		TraceStatus:         response.Diagnostics.TraceStatus,
 		EstimatedCostMicros: m5ai.EstimatedCostMicros(response.Usage), FinishedAt: finishedAt,
 	}
 	if response.Usage.ReasoningTokens == nil {
@@ -914,6 +934,7 @@ func m5CompletionFromProvider(
 	}
 	if callErr != nil {
 		completion.Status, completion.ErrorClass = m5ProviderFailure(callErr)
+		completion.FailureStage, completion.ErrorDetailCode = m5ProviderFailureDiagnostics(callErr)
 		var providerErr *m5ai.ProviderError
 		if errors.As(callErr, &providerErr) && providerErr.Class == "inputTokenBudgetExceeded" {
 			return completion
@@ -926,6 +947,9 @@ func m5CompletionFromProvider(
 		completion.OutputTokens = 0
 		completion.EstimatedCostMicros = 0
 		completion.ReasoningContentEmpty = false
+	} else if completion.TraceStatus != "" && completion.TraceStatus != m5ai.TraceStatusComplete {
+		completion.FailureStage = m5ai.FailureStagePersistence
+		completion.ErrorDetailCode = safeTraceErrorCode(response.Diagnostics.TraceErrorCode)
 	}
 	return completion
 }

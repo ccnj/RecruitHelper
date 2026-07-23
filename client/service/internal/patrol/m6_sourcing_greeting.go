@@ -132,12 +132,18 @@ func (m *Manager) generateSourcingGreetingMember(
 		if inputErr != nil {
 			errorClass = "greetingInputInvalid"
 		}
+		completion := store.AIInvocationCompletion{
+			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
+			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
+			ErrorDetailCode: errorClass, FinishedAt: m.now(),
+		}
+		logAIInvocationOutcome(m.advice, m5ai.PurposeGreeting, completion, "")
 		_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
-			Completion: store.AIInvocationCompletion{
-				InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
-				ErrorClass: errorClass, FinishedAt: m.now(),
-			},
+			Completion: completion,
 		})
+		if err != nil {
+			logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+		}
 		return err
 	}
 
@@ -158,18 +164,22 @@ func (m *Manager) generateSourcingGreetingMember(
 		suggestion, parseErr := m5ai.ParseGreetingSuggestion(response.JSONText)
 		switch {
 		case parseErr != nil:
-			completion.Status = store.AIInvocationInvalidOutput
-			completion.ErrorClass = "invalidOutput"
+			markBusinessParseFailure(&completion, parseErr)
 		case !reasoningUsageSafe(completion):
-			completion.Status = store.AIInvocationInvalidOutput
-			completion.ErrorClass = "reasoningUsageUnsafe"
+			markReasoningUsageInvalidOutput(&completion)
 		default:
 			greetingText = suggestion.Text
 			contentHash = sha256Hex(greetingText)
 		}
 	}
+	logAIInvocationOutcome(
+		m.advice, m5ai.PurposeGreeting, completion, response.Diagnostics.TraceErrorCode,
+	)
 	_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
 		Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
 	})
+	if err != nil {
+		logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+	}
 	return err
 }

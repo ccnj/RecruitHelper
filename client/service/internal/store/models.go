@@ -550,8 +550,9 @@ const (
 	AIInvocationReasoningFieldAbsent AIInvocationUsageShape = "reasoningFieldAbsent"
 )
 
-// AIInvocation 只保存计量与内容 hash，不保存 prompt、正文、原始响应、key、
-// base URL 或候选人身份。turn+purpose+attempt 唯一，M5-A attempt 固定为 1。
+// AIInvocation 只保存计量、内容 hash 与无正文诊断摘要，不保存 prompt、正文、
+// 原始响应、key、base URL 或候选人身份。完整原文只允许进入独立 ai-traces.db。
+// turn+purpose+attempt 唯一，M5-A attempt 固定为 1。
 // 调用前预留沿用 transportFailed 且 FinishedAt=NULL；只有首次插入者可调用，
 // 调用后以 FinishedAt IS NULL 作 CAS。重启遗留预留事实不授权自动重调。
 type AIInvocation struct {
@@ -572,6 +573,12 @@ type AIInvocation struct {
 	LatencyMs           int64
 	Status              AIInvocationStatus `gorm:"not null;index"`
 	ErrorClass          string
+	FailureStage        string
+	ErrorDetailCode     string
+	ProviderHTTPStatus  *int
+	RequestBytes        int
+	ResponseBytes       int
+	TraceStatus         m5ai.TraceStatus
 	EstimatedCostMicros int64
 	CreatedAt           time.Time `gorm:"not null"`
 	FinishedAt          *time.Time
@@ -599,6 +606,12 @@ type SourcingScoreInvocation struct {
 	UsageShape          AIInvocationUsageShape
 	LatencyMs           int64
 	ErrorClass          string
+	FailureStage        string
+	ErrorDetailCode     string
+	ProviderHTTPStatus  *int
+	RequestBytes        int
+	ResponseBytes       int
+	TraceStatus         m5ai.TraceStatus
 	EstimatedCostMicros int64
 	StartedAt           time.Time `gorm:"not null"`
 	FinishedAt          *time.Time
@@ -630,6 +643,12 @@ type SourcingGreetingInvocation struct {
 	UsageShape          AIInvocationUsageShape
 	LatencyMs           int64
 	ErrorClass          string
+	FailureStage        string
+	ErrorDetailCode     string
+	ProviderHTTPStatus  *int
+	RequestBytes        int
+	ResponseBytes       int
+	TraceStatus         m5ai.TraceStatus
 	EstimatedCostMicros int64
 	StartedAt           time.Time `gorm:"not null"`
 	FinishedAt          *time.Time

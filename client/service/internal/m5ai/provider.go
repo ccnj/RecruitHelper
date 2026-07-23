@@ -42,10 +42,16 @@ func EstimatedCostMicros(usage CompletionUsage) int64 {
 }
 
 type ProviderError struct {
-	Class string
+	Class        string
+	FailureStage string
+	DetailCode   string
 }
 
 func (e *ProviderError) Error() string { return "provider 调用失败: " + e.Class }
+
+func newProviderError(class, failureStage, detailCode string) *ProviderError {
+	return &ProviderError{Class: class, FailureStage: failureStage, DetailCode: detailCode}
+}
 
 type OpenAICompatibleProvider struct {
 	config        ProviderConfig
@@ -106,19 +112,23 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	}
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply &&
 		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting {
-		return CompletionResponse{Diagnostics: preflight}, errors.New("未知 provider 用途")
+		return CompletionResponse{Diagnostics: preflight},
+			newProviderError("requestInvalid", FailureStageRequestBuild, "unknownPurpose")
 	}
 	if strings.TrimSpace(request.UserContent) == "" || request.MaxOutputTokens <= 0 {
-		return CompletionResponse{Diagnostics: preflight}, errors.New("provider 请求缺少正文或输出上限")
+		return CompletionResponse{Diagnostics: preflight},
+			newProviderError("requestInvalid", FailureStageRequestBuild, "requestMissingFields")
 	}
 	if p.traceExpected && (strings.TrimSpace(request.InvocationID) == "" ||
 		strings.TrimSpace(request.ContextRevisionHash) == "") {
-		return CompletionResponse{Diagnostics: preflight}, &ProviderError{Class: "requestInvalid"}
+		return CompletionResponse{Diagnostics: preflight},
+			newProviderError("requestInvalid", FailureStageRequestBuild, "traceMetadataMissing")
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
 		((request.Purpose == PurposeReply || request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting) &&
 			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
-		return CompletionResponse{Diagnostics: preflight}, &ProviderError{Class: "budgetBlocked"}
+		return CompletionResponse{Diagnostics: preflight},
+			newProviderError("budgetBlocked", FailureStageRequestBuild, "outputTokenBudgetExceeded")
 	}
 	inputLimit := p.config.MaxInputTokens
 	if request.Purpose == PurposeIntent && inputLimit > IntentInputTokenLimit {
@@ -146,7 +156,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	payload.Thinking.Type = "disabled"
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return CompletionResponse{Diagnostics: preflight}, err
+		return CompletionResponse{Diagnostics: preflight},
+			newProviderError("requestInvalid", FailureStageRequestBuild, "requestMarshalFailed")
 	}
 	startedAt := time.Now()
 	diagnostics := p.beginTrace(request, body, startedAt)
@@ -160,7 +171,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 				FinishedAt:    time.Now(),
 			},
 		)
-		return result, &ProviderError{Class: "requestPayloadTooLarge"}
+		return result,
+			newProviderError("requestPayloadTooLarge", FailureStageRequestBuild, "requestPayloadTooLarge")
 	}
 	endpoint := strings.TrimRight(p.config.BaseURL, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
@@ -178,7 +190,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 				FinishedAt:    time.Now(),
 			},
 		)
-		return result, &ProviderError{Class: "requestInvalid"}
+		return result, newProviderError("requestInvalid", FailureStageRequestBuild, "requestInvalid")
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", "Bearer "+p.config.APIKey)
@@ -199,9 +211,12 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			},
 		)
 		if transportCode == aitrace.TransportTimeout {
-			return result, &ProviderError{Class: "timeout"}
+			return result, newProviderError("timeout", FailureStageTransport, "transportTimeout")
 		}
-		return result, &ProviderError{Class: "transport"}
+		if transportCode == aitrace.TransportCanceled {
+			return result, newProviderError("transport", FailureStageTransport, "transportCanceled")
+		}
+		return result, newProviderError("transport", FailureStageTransport, "transportUnavailable")
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, maxProviderResponseBytes+1)
@@ -219,7 +234,11 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 				FinishedAt:    time.Now(),
 			},
 		)
-		return result, &ProviderError{Class: "responseInvalid"}
+		detailCode := "responseReadFailed"
+		if readErr == nil {
+			detailCode = "responseTooLarge"
+		}
+		return result, newProviderError("responseInvalid", FailureStageResponseDecode, detailCode)
 	}
 	p.finishTrace(
 		&result.Diagnostics,
@@ -242,7 +261,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 				class = "providerUnavailable"
 			}
 		}
-		return result, &ProviderError{Class: class}
+		return result, newProviderError(class, FailureStageProviderHTTP, class)
 	}
 	var decoded struct {
 		Choices []struct {
@@ -261,23 +280,47 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal(raw, &decoded) != nil || len(decoded.Choices) != 1 ||
-		decoded.Choices[0].FinishReason != "stop" || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" ||
-		decoded.Usage.PromptTokens == nil || decoded.Usage.CompletionTokens == nil {
-		return result, &ProviderError{Class: "responseInvalid"}
+	if json.Unmarshal(raw, &decoded) != nil {
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "responseMalformed",
+		)
+	}
+	if len(decoded.Choices) != 1 {
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "responseChoiceInvalid",
+		)
+	}
+	if decoded.Choices[0].FinishReason != "stop" {
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "responseFinishReasonInvalid",
+		)
+	}
+	if strings.TrimSpace(decoded.Choices[0].Message.Content) == "" {
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "responseContentMissing",
+		)
+	}
+	if decoded.Usage.PromptTokens == nil || decoded.Usage.CompletionTokens == nil {
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "usageMissing",
+		)
 	}
 	promptTokens := *decoded.Usage.PromptTokens
 	completionTokens := *decoded.Usage.CompletionTokens
 	if promptTokens < 0 || completionTokens < 0 ||
 		decoded.Usage.PromptCacheHitTokens < 0 || decoded.Usage.PromptCacheHitTokens > promptTokens ||
 		completionTokens > request.MaxOutputTokens {
-		return result, &ProviderError{Class: "responseInvalid"}
+		return result, newProviderError(
+			"responseInvalid", FailureStageResponseDecode, "usageInvalid",
+		)
 	}
 	var reasoning *int
 	if decoded.Usage.CompletionDetails != nil {
 		reasoning = decoded.Usage.CompletionDetails.ReasoningTokens
 		if reasoning != nil && *reasoning < 0 {
-			return result, &ProviderError{Class: "responseInvalid"}
+			return result, newProviderError(
+				"responseInvalid", FailureStageResponseDecode, "usageInvalid",
+			)
 		}
 	}
 	result.JSONText = decoded.Choices[0].Message.Content
@@ -290,7 +333,9 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	result.ReasoningContentEmpty = decoded.Choices[0].Message.ReasoningContent == nil ||
 		*decoded.Choices[0].Message.ReasoningContent == ""
 	if promptTokens > inputLimit {
-		return result, &ProviderError{Class: "inputTokenBudgetExceeded"}
+		return result, newProviderError(
+			"inputTokenBudgetExceeded", FailureStageResponseDecode, "inputTokenBudgetExceeded",
+		)
 	}
 	return result, nil
 }

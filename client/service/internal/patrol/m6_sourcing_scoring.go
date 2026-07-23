@@ -122,12 +122,18 @@ func (m *Manager) scoreSourcingBatchMember(
 		if inputErr != nil {
 			errorClass = "scoringInputInvalid"
 		}
+		completion := store.AIInvocationCompletion{
+			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
+			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
+			ErrorDetailCode: errorClass, FinishedAt: m.now(),
+		}
+		logAIInvocationOutcome(m.advice, m5ai.PurposeScoring, completion, "")
 		_, err = m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
-			Completion: store.AIInvocationCompletion{
-				InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
-				ErrorClass: errorClass, FinishedAt: m.now(),
-			},
+			Completion: completion,
 		})
+		if err != nil {
+			logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeScoring, completion)
+		}
 		return err
 	}
 
@@ -147,18 +153,22 @@ func (m *Manager) scoreSourcingBatchMember(
 		suggestion, parseErr := m5ai.ParseScoringSuggestion(response.JSONText)
 		switch {
 		case parseErr != nil:
-			completion.Status = store.AIInvocationInvalidOutput
-			completion.ErrorClass = "invalidOutput"
+			markBusinessParseFailure(&completion, parseErr)
 		case !reasoningUsageSafe(completion):
-			completion.Status = store.AIInvocationInvalidOutput
-			completion.ErrorClass = "reasoningUsageUnsafe"
+			markReasoningUsageInvalidOutput(&completion)
 		default:
 			value := suggestion.Score
 			score = &value
 		}
 	}
+	logAIInvocationOutcome(
+		m.advice, m5ai.PurposeScoring, completion, response.Diagnostics.TraceErrorCode,
+	)
 	_, err = m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 		Completion: completion, Score: score,
 	})
+	if err != nil {
+		logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeScoring, completion)
+	}
 	return err
 }

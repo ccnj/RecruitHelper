@@ -504,8 +504,13 @@ func (s *Store) CompleteSourcingGreeting(req CompleteSourcingGreetingRequest) (*
 			"input_tokens": req.Completion.InputTokens, "cached_input_tokens": req.Completion.CachedInputTokens,
 			"output_tokens": req.Completion.OutputTokens, "reasoning_tokens": req.Completion.ReasoningTokens,
 			"usage_shape": req.Completion.UsageShape, "latency_ms": req.Completion.LatencyMs,
-			"error_class": req.Completion.ErrorClass, "estimated_cost_micros": req.Completion.EstimatedCostMicros,
-			"finished_at": req.Completion.FinishedAt,
+			"error_class": req.Completion.ErrorClass, "failure_stage": req.Completion.FailureStage,
+			"error_detail_code":    req.Completion.ErrorDetailCode,
+			"provider_http_status": req.Completion.ProviderHTTPStatus,
+			"request_bytes":        req.Completion.RequestBytes, "response_bytes": req.Completion.ResponseBytes,
+			"trace_status":          req.Completion.TraceStatus,
+			"estimated_cost_micros": req.Completion.EstimatedCostMicros,
+			"finished_at":           req.Completion.FinishedAt,
 		}
 		updated := tx.Model(&SourcingGreetingInvocation{}).
 			Where("invocation_id = ? AND finished_at IS NULL AND status = ?",
@@ -1098,7 +1103,11 @@ func sameSourcingGreetingCompletion(existing SourcingGreetingInvocation, req Com
 		existing.OutputTokens == completion.OutputTokens &&
 		sameOptionalInt(existing.ReasoningTokens, completion.ReasoningTokens) &&
 		existing.UsageShape == completion.UsageShape && existing.LatencyMs == completion.LatencyMs &&
-		existing.ErrorClass == completion.ErrorClass &&
+		existing.ErrorClass == completion.ErrorClass && existing.FailureStage == completion.FailureStage &&
+		existing.ErrorDetailCode == completion.ErrorDetailCode &&
+		sameOptionalInt(existing.ProviderHTTPStatus, completion.ProviderHTTPStatus) &&
+		existing.RequestBytes == completion.RequestBytes && existing.ResponseBytes == completion.ResponseBytes &&
+		existing.TraceStatus == completion.TraceStatus &&
 		existing.EstimatedCostMicros == completion.EstimatedCostMicros && existing.FinishedAt != nil &&
 		existing.FinishedAt.Equal(completion.FinishedAt)
 }
