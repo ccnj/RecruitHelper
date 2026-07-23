@@ -158,6 +158,14 @@ func TestM5AutomaticReplyCrossesRealDispatcherOnceAndSurvivesRestart(t *testing.
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{}
 	hand := &m5PositiveHand{}
+	paceCalls := 0
+	h.config.InteractionPaceWait = func(ctx context.Context) error {
+		if hand.commandCount() != 0 {
+			t.Fatal("自动回复必须先完成交互节奏等待再构造 WAL")
+		}
+		paceCalls++
+		return ctx.Err()
+	}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -186,6 +194,9 @@ func TestM5AutomaticReplyCrossesRealDispatcherOnceAndSurvivesRestart(t *testing.
 	}
 	if hand.commandCount() != 1 {
 		t.Fatalf("fake hand 必须只收到一条 chat.sendMessage: %d", hand.commandCount())
+	}
+	if paceCalls != 1 {
+		t.Fatalf("自动回复必须恰好等待一次交互节奏: %d", paceCalls)
 	}
 
 	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)

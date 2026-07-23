@@ -145,6 +145,9 @@ func newHarness(t *testing.T) *harness {
 			sequence++
 			return fmt.Sprintf("round-%03d", sequence)
 		},
+		InteractionPaceWait: func(ctx context.Context) error {
+			return ctx.Err()
+		},
 	}
 	manager, err := NewManager(db, runner, hands, config)
 	if err != nil {

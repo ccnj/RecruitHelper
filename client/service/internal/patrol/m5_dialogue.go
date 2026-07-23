@@ -425,7 +425,10 @@ func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTur
 	if latest != nil {
 		previousIntentID = latest.IntentID
 	}
-	if err := a.ensureDispatchAllowed(ctx); err != nil {
+	// The visible send interaction shares the same brain-owned pacing and
+	// post-wait authorization recheck as the sourcing workflow. The hand still
+	// receives one command and owns no business timer.
+	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
 		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
 			action.ActionID, "automaticDispatchNotAllowed", a.manager.now(),
 		); closeErr != nil {
