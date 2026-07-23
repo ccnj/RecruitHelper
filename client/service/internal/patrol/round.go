@@ -195,10 +195,6 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	dirty, err = a.isolateActiveM5Target(dirty)
-	if err != nil {
-		return err
-	}
 	for i := range dirty {
 		if err := a.setStage("readingThread"); err != nil {
 			return err
@@ -215,7 +211,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 			return nil
 		}
 	}
-	return a.processM5Trial(ctx)
+	return a.processCommunicationV4Targets(ctx)
 }
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
@@ -1176,6 +1172,9 @@ func (a *roundActor) ensureWithinDailyWindow() error {
 // 这使长 readList 执行期间到达的用户事件/停止指令能阻止后续
 // readThread；已在途命令仍自然完成，不另造取消旁路。
 func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := a.ensureWithinDailyWindow(); err != nil {
 		return err
 	}

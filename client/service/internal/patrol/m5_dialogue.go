@@ -431,7 +431,7 @@ func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTur
 		); closeErr != nil {
 			return errors.Join(err, closeErr)
 		}
-		return nil
+		return err
 	}
 	runner := a.manager.runner.(AutomaticReplyRunner)
 	handle, err := runner.StartAutomaticReply(ctx, AutomaticReplyRequest{
@@ -510,18 +510,16 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	material := m5TurnMaterial{profile: *profile, revision: *revision, snapshot: *snapshot}
-	var currentMessages []store.Message
+	var currentBoundary []store.Message
 	for _, message := range messages {
 		if message.Seq > turn.InboundThroughSeq {
 			continue
 		}
 		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
-			currentMessages = append(currentMessages, message)
-			material.currentFacts = append(material.currentFacts, communication.LedgerMessageFact{
-				Seq: message.Seq, Direction: message.Direction, Kind: message.Kind, Text: message.Text,
-				CardType: message.CardType, CardState: message.CardState, Origin: message.Origin,
-				TsApproxMs: message.TsApproxMs,
-			})
+			currentBoundary = append(currentBoundary, message)
+		}
+		if message.Direction == "system" || (message.Direction == "in" && message.Kind == "system") {
+			continue
 		}
 		text := ""
 		if message.Direction == "in" && message.Kind == "card" && message.CardType == "resumeAttachment" {
@@ -550,6 +548,18 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
 			material.current = append(material.current, advice)
 		}
+	}
+	currentMessages, validBoundary := store.DialogueTurnCandidateMessages(currentBoundary)
+	if !validBoundary {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	for index := range currentMessages {
+		message := currentMessages[index]
+		material.currentFacts = append(material.currentFacts, communication.LedgerMessageFact{
+			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind, Text: message.Text,
+			CardType: message.CardType, CardState: message.CardState, Origin: message.Origin,
+			TsApproxMs: message.TsApproxMs,
+		})
 	}
 	inputKind, ok := store.DialogueTurnInputKindOf(currentMessages)
 	if !ok {

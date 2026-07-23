@@ -416,14 +416,26 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		lastOutbound.Direction != "out" {
 		return ErrDialogueTurnBinding
 	}
-	var inbound []Message
+	var boundary []Message
 	if err := tx.Where(
 		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq > ? AND seq <= ? AND retracted_at IS NULL",
 		profile.Platform, profile.AccountRef, turn.ConversationRef, turn.HistoryThroughSeq, turn.InboundThroughSeq,
-	).Order("seq").Find(&inbound).Error; err != nil {
+	).Order("seq").Find(&boundary).Error; err != nil {
 		return err
 	}
-	if len(inbound) == 0 || inbound[0].Seq != turn.InboundFromSeq || inbound[len(inbound)-1].Seq != turn.InboundThroughSeq {
+	if len(boundary) == 0 || boundary[len(boundary)-1].Seq != turn.InboundThroughSeq {
+		return ErrDialogueTurnBinding
+	}
+	inbound := boundary
+	if v4Turn {
+		var valid bool
+		inbound, valid = DialogueTurnCandidateMessages(boundary)
+		if !valid {
+			return ErrDialogueTurnBinding
+		}
+	}
+	if len(inbound) == 0 || inbound[0].Seq != turn.InboundFromSeq ||
+		(!v4Turn && inbound[len(inbound)-1].Seq != turn.InboundThroughSeq) {
 		return ErrDialogueTurnBinding
 	}
 	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
@@ -659,6 +671,9 @@ func (s *Store) ApplyResumeBusinessClassification(turnID string, classifiedAt ti
 			profile.Platform, profile.AccountRef, out.ConversationRef, out.InboundFromSeq, out.InboundThroughSeq,
 		).Order("seq").Find(&inbound).Error; err != nil {
 			return err
+		}
+		if candidate, ok := DialogueTurnCandidateMessages(inbound); ok {
+			inbound = candidate
 		}
 		kind, ok := DialogueTurnInputKindOf(inbound)
 		if !ok || kind != DialogueTurnInputResumeAttachment {

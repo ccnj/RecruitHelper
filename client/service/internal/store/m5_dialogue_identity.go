@@ -46,6 +46,36 @@ func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 	return "", false
 }
 
+// DialogueTurnCandidateMessages removes neutral system notices from one
+// physical post-outbound boundary. System rows stay in the ledger and the
+// boundary tail, but they are not candidate input and therefore do not enter
+// the immutable turn digest or AI prompt.
+func DialogueTurnCandidateMessages(boundary []Message) ([]Message, bool) {
+	if len(boundary) == 0 {
+		return nil, false
+	}
+	candidate := make([]Message, 0, len(boundary))
+	var previous int64
+	for index := range boundary {
+		message := boundary[index]
+		if message.Seq <= previous {
+			return nil, false
+		}
+		previous = message.Seq
+		switch {
+		case message.Direction == "system":
+			continue
+		case message.Direction == "in" && message.Kind == "system":
+			continue
+		case message.Direction == "in":
+			candidate = append(candidate, message)
+		default:
+			return nil, false
+		}
+	}
+	return candidate, len(candidate) > 0
+}
+
 // IsM5RealCandidateMessage controls only the greeted -> communicating fact.
 // A resume attachment is a real candidate action, but does not authorize an AI
 // call unless the complete turn also passes DialogueTurnInputKindOf.

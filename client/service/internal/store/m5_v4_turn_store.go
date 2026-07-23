@@ -21,6 +21,29 @@ type FreezeCommunicationV4TurnResult struct {
 	Created     bool
 }
 
+// CommunicationV4OwnsTurn distinguishes the V4 aggregate continuation from a
+// historical M5-A trial turn. The production patrol must never advance an
+// unfinished legacy turn through the V4 owner.
+func (s *Store) CommunicationV4OwnsTurn(turnID string) (bool, error) {
+	if strings.TrimSpace(turnID) == "" {
+		return false, ErrDialogueTurnInvalid
+	}
+	var owned bool
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var turn DialogueTurn
+		if err := tx.First(&turn, "turn_id = ?", turnID).Error; err != nil {
+			return err
+		}
+		_, found, err := communicationV4TurnApplicationTx(tx, turn)
+		if err != nil {
+			return err
+		}
+		owned = found
+		return nil
+	})
+	return owned, err
+}
+
 // FreezeCommunicationV4Turn is the V4 production admission transaction for
 // one contiguous inbound turn. It revalidates the complete target and message
 // boundary, runs the deterministic reducer with no invented advice, then
@@ -460,34 +483,35 @@ func loadCommunicationV4TurnBoundaryTx(
 	).Error; err != nil || lastOutbound.Direction != "out" {
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
-	var inbound []Message
+	var boundary []Message
 	if err := tx.Where(
 		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq > ? AND seq <= ? "+
-			"AND retracted_at IS NULL AND direction = ?",
+			"AND retracted_at IS NULL",
 		profile.Platform,
 		profile.AccountRef,
 		req.ConversationRef,
 		req.HistoryThroughSeq,
 		req.InboundThroughSeq,
-		"in",
-	).Order("seq").Find(&inbound).Error; err != nil {
+	).Order("seq").Find(&boundary).Error; err != nil {
 		return Message{}, nil, nil, nil, err
 	}
-	if len(inbound) == 0 ||
-		inbound[0].Seq != req.InboundFromSeq ||
-		inbound[len(inbound)-1].Seq != req.InboundThroughSeq {
+	inbound, validBoundary := DialogueTurnCandidateMessages(boundary)
+	if !validBoundary || len(boundary) == 0 ||
+		boundary[len(boundary)-1].Seq != req.InboundThroughSeq ||
+		inbound[0].Seq != req.InboundFromSeq {
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
-	facts := make([]communication.LedgerMessageFact, 0, len(inbound))
+	facts := make([]communication.LedgerMessageFact, 0, len(boundary))
 	var firstReal *Message
-	for index := range inbound {
-		message := inbound[index]
+	for index := range boundary {
+		message := boundary[index]
 		facts = append(facts, communication.LedgerMessageFact{
 			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
 			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
 			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
 		})
-		if firstReal == nil && IsM5RealCandidateMessage(message) {
+		if firstReal == nil && message.Direction == "in" && message.Kind != "system" &&
+			IsM5RealCandidateMessage(message) {
 			copy := message
 			firstReal = &copy
 		}

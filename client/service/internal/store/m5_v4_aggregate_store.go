@@ -355,6 +355,30 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 	return out, nil
 }
 
+// MarkCommunicationV4AutomationManualRequired isolates one profile without
+// stopping the account worker. It exposes the existing aggregate gate to the
+// production orchestrator; it does not create a second manual-state mechanism.
+func (s *Store) MarkCommunicationV4AutomationManualRequired(
+	profileID string,
+	reason string,
+	at time.Time,
+) error {
+	if strings.TrimSpace(profileID) == "" || strings.TrimSpace(reason) == "" {
+		return ErrCommunicationV4Invalid
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return markCommunicationV4AutomationManualTx(
+			tx,
+			profileID,
+			reason,
+			at.UTC(),
+		)
+	})
+}
+
 // applyCommunicationV4ConfirmedActionTx is intentionally package-private. It
 // may only be called from a transaction that has already proved the matching
 // CommunicationAction, EffectIntent positive terminal and unique outbound
