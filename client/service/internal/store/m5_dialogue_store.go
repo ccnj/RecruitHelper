@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/contract/gen/go/protocol"
 
@@ -339,16 +340,40 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
 		return err
 	}
-	if profile.MainStatus != CandidateProfileCommunicating || profile.EndReason != nil ||
+	application, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
+	if err != nil {
+		return err
+	}
+	statusAllowed := profile.MainStatus == CandidateProfileCommunicating
+	if v4Turn {
+		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
+		if err != nil {
+			return err
+		}
+		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.Revision != application.ToRevision ||
+			aggregate.ProjectedThroughSeq != turn.InboundThroughSeq {
+			return ErrDialogueTurnBinding
+		}
+		switch aggregate.State.MainStatus {
+		case communication.V4StatusCommunicating, communication.V4StatusInvited, communication.V4StatusInterviewed:
+			statusAllowed = true
+		default:
+			statusAllowed = false
+		}
+	}
+	if !statusAllowed || profile.EndReason != nil ||
 		profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID ||
 		profile.CommunicatingAt == nil || profile.FirstRealMessageSeq == nil {
 		return ErrDialogueTurnBinding
 	}
-	var selection M5TrialSelection
-	if err := tx.First(&selection, "profile_id = ? AND status = ? AND active_slot = ?",
-		turn.ProfileID, M5TrialSelectionActive, m5TrialActiveSlot).Error; err != nil {
-		return ErrDialogueTurnBinding
+	if !v4Turn {
+		var selection M5TrialSelection
+		if err := tx.First(&selection, "profile_id = ? AND status = ? AND active_slot = ?",
+			turn.ProfileID, M5TrialSelectionActive, m5TrialActiveSlot).Error; err != nil {
+			return ErrDialogueTurnBinding
+		}
 	}
 	var binding ProfileAIContextBinding
 	if err := tx.First(&binding, "profile_id = ? AND status = ?",
@@ -410,6 +435,53 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	return nil
 }
 
+func validateDialogueTurnAIAdviceTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	purpose m5ai.CompletionPurpose,
+) error {
+	application, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
+	if err != nil {
+		return err
+	}
+	if v4Turn {
+		if application.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice {
+			return ErrDialogueTurnState
+		}
+		switch purpose {
+		case m5ai.PurposeIntent:
+			if application.Outcome.NextAdvice != communication.V4AdviceIntent {
+				return ErrDialogueTurnState
+			}
+		case m5ai.PurposeReply:
+			switch application.Outcome.NextAdvice {
+			case communication.V4AdviceReply, communication.V4AdviceServiceReply,
+				communication.V4AdviceInterviewRejectionReply:
+			case communication.V4AdviceIntent:
+				if turn.IntentLabel == "" || turn.IntentLabel == m5ai.IntentRejected {
+					return ErrDialogueTurnState
+				}
+			default:
+				return ErrDialogueTurnState
+			}
+		default:
+			return ErrDialogueTurnState
+		}
+	}
+	return validateDialogueTurnCurrentTx(tx, turn)
+}
+
+func markDialogueOwnerManualTx(tx *gorm.DB, turn DialogueTurn, reason string, at time.Time) error {
+	_, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
+	if err != nil {
+		return err
+	}
+	if v4Turn {
+		return markCommunicationV4AutomationManualTx(tx, turn.ProfileID, reason, at)
+	}
+	return markM5TrialManualRequiredTx(tx, turn.ProfileID, reason, at)
+}
+
 func markM5TrialManualRequiredTx(tx *gorm.DB, profileID, reason string, at time.Time) error {
 	updated := tx.Model(&M5TrialSelection{}).
 		Where("profile_id = ? AND status = ? AND active_slot = ?", profileID, M5TrialSelectionActive, m5TrialActiveSlot).
@@ -440,7 +512,7 @@ func markDialogueTurnManualTx(tx *gorm.DB, turn *DialogueTurn, reason string, at
 		if turn.FailureReason != reason {
 			return ErrDialogueTurnConflict
 		}
-		return markM5TrialManualRequiredTx(tx, turn.ProfileID, reason, at)
+		return markDialogueOwnerManualTx(tx, *turn, reason, at)
 	}
 	switch turn.Status {
 	case DialogueTurnCollected, DialogueTurnClassified, DialogueTurnAdviceReady:
@@ -463,7 +535,7 @@ func markDialogueTurnManualTx(tx *gorm.DB, turn *DialogueTurn, reason string, at
 	if updated.RowsAffected != 1 {
 		return ErrDialogueTurnConflict
 	}
-	if err := markM5TrialManualRequiredTx(tx, turn.ProfileID, reason, at); err != nil {
+	if err := markDialogueOwnerManualTx(tx, *turn, reason, at); err != nil {
 		return err
 	}
 	return tx.First(turn, "turn_id = ?", turn.TurnID).Error
@@ -560,7 +632,7 @@ func (s *Store) ApplyCodeClassification(req CodeClassificationRequest) (*Dialogu
 			return ErrDialogueTurnConflict
 		}
 		if wantedStatus == DialogueTurnManualRequired {
-			if err := markM5TrialManualRequiredTx(tx, out.ProfileID, failureReason, req.ClassifiedAt); err != nil {
+			if err := markDialogueOwnerManualTx(tx, out, failureReason, req.ClassifiedAt); err != nil {
 				return err
 			}
 		}
@@ -685,7 +757,7 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 			if !sameInvocationReservation(existing, wanted) {
 				return ErrAIInvocationConflict
 			}
-			if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+			if err := validateDialogueTurnAIAdviceTx(tx, turn, req.Purpose); err != nil {
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}
@@ -704,7 +776,7 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 			(req.Purpose == m5ai.PurposeReply && (turn.Status != DialogueTurnClassified || turn.IntentLabel == m5ai.IntentRejected)) {
 			return ErrDialogueTurnState
 		}
-		if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+		if err := validateDialogueTurnAIAdviceTx(tx, turn, req.Purpose); err != nil {
 			if !errors.Is(err, ErrDialogueTurnBinding) {
 				return err
 			}
@@ -818,7 +890,7 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 			return err
 		}
 		if out.Status != DialogueTurnManualRequired {
-			if err := validateDialogueTurnCurrentTx(tx, out); err != nil {
+			if err := validateDialogueTurnAIAdviceTx(tx, out, m5ai.PurposeIntent); err != nil {
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}
@@ -855,7 +927,7 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 			if updated.RowsAffected != 1 {
 				return ErrDialogueTurnConflict
 			}
-			if err := markM5TrialManualRequiredTx(tx, out.ProfileID, req.ManualReason, req.Completion.FinishedAt); err != nil {
+			if err := markDialogueOwnerManualTx(tx, out, req.ManualReason, req.Completion.FinishedAt); err != nil {
 				return err
 			}
 			return tx.First(&out, "turn_id = ?", out.TurnID).Error
@@ -915,7 +987,7 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 			return err
 		}
 		if turn.Status != DialogueTurnManualRequired {
-			if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+			if err := validateDialogueTurnAIAdviceTx(tx, turn, m5ai.PurposeReply); err != nil {
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}

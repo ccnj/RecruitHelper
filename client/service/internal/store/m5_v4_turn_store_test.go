@@ -1,11 +1,14 @@
 package store
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+
+	"gorm.io/gorm"
 )
 
 func appendCommunicationV4Inbound(
@@ -172,5 +175,171 @@ func TestFreezeCommunicationV4UnsupportedMediaStopsOnlyProfile(t *testing.T) {
 	})
 	if err != nil || len(targets) != 0 {
 		t.Fatalf("转人工档案仍进入自动目标: targets=%+v err=%v", targets, err)
+	}
+}
+
+func TestCommunicationV4TurnAIAdviceDoesNotNeedTrialSlot(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-ai")
+	text := "合成普通回复"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-turn-ai-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentInvocationID := "invocation-v4-intent"
+	reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: intentInvocationID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeIntent, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-v4-intent",
+		CreatedAt: time.Now(),
+	})
+	if err != nil || !reserved.Created {
+		t.Fatalf("V4 意向调用未获 trialless 授权: result=%+v err=%v", reserved, err)
+	}
+	completion := successfulInvocationCompletion(
+		intentInvocationID,
+		time.Now().UTC().Truncate(time.Millisecond),
+	)
+	classified, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
+		Completion: completion, Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
+	})
+	if err != nil || classified.Status != DialogueTurnClassified {
+		t.Fatalf("V4 意向结果未收编: turn=%+v err=%v", classified, err)
+	}
+	reply, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: "invocation-v4-reply", TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-v4-reply",
+		CreatedAt: time.Now(),
+	})
+	if err != nil || !reply.Created {
+		t.Fatalf("V4 回复调用未获 trialless 授权: result=%+v err=%v", reply, err)
+	}
+}
+
+func TestCommunicationV4TurnManualClosesOnlyAggregate(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-manual")
+	text := "合成待人工消息"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-turn-manual-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.MarkDialogueTurnManualRequired(
+		frozen.Turn.TurnID, "fixtureManual", at,
+	); err != nil {
+		t.Fatal(err)
+	}
+	turn, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if turn == nil || turn.Status != DialogueTurnManualRequired ||
+		turn.FailureReason != "fixtureManual" ||
+		aggregateErr != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != "fixtureManual" {
+		t.Fatalf("V4 人工收敛没有局部闭合: turn=%+v aggregate=%+v err=%v",
+			turn, aggregate, aggregateErr)
+	}
+	var activeTrials int64
+	if err := s.db.Model(&M5TrialSelection{}).
+		Where("status = ? AND active_slot = ?", M5TrialSelectionActive, m5TrialActiveSlot).
+		Count(&activeTrials).Error; err != nil || activeTrials != 0 {
+		t.Fatalf("V4 人工收敛不应铸造 trial: count=%d err=%v", activeTrials, err)
+	}
+}
+
+func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-prerequisite")
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+		CardState: "pending", ContentHash: "v4-turn-prerequisite-2",
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone {
+		t.Fatalf("主动换微信没有冻结为前置动作等待: frozen=%+v err=%v", frozen, err)
+	}
+	result, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: "invocation-v4-prerequisite", TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeIntent, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-v4-prerequisite",
+		CreatedAt: time.Now(),
+	})
+	if result != nil || !errors.Is(err, ErrDialogueTurnState) {
+		t.Fatalf("前置动作等待轮不得获得 AI 权限: result=%+v err=%v", result, err)
+	}
+	var invocations int64
+	if err := s.db.Model(&AIInvocation{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Count(&invocations).Error; err != nil || invocations != 0 {
+		t.Fatalf("错误授权不得留下 invocation: count=%d err=%v", invocations, err)
+	}
+}
+
+func TestCommunicationV4AIAdviceRejectsAdvancedRevisionAtSameMessageBoundary(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-stale")
+	text := "合成普通回复"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-turn-stale-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advancedAt := time.Now().UTC().Truncate(time.Millisecond)
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+			tx,
+			fixture.ProfileID,
+			communication.V4ConfirmedAction{
+				ActionKey:  "fixture-concurrent-invite-wechat",
+				Kind:       communication.V4ActionInviteWechat,
+				MessageSeq: 3,
+				SentAt:     &advancedAt,
+			},
+			advancedAt,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || before.Revision != frozen.Application.ToRevision+1 ||
+		before.ProjectedThroughSeq != frozen.Turn.InboundThroughSeq {
+		t.Fatalf("没有构造出同消息边界的 revision 前进: aggregate=%+v err=%v", before, err)
+	}
+	result, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: "invocation-v4-stale", TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeIntent, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-v4-stale",
+		CreatedAt: advancedAt.Add(time.Second),
+	})
+	if result != nil || !errors.Is(err, ErrDialogueTurnBinding) {
+		t.Fatalf("旧 revision 建议边界必须失效: result=%+v err=%v", result, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != "inputBoundaryChanged" {
+		t.Fatalf("旧 revision 没有局部转人工: aggregate=%+v err=%v", aggregate, err)
 	}
 }

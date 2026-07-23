@@ -277,6 +277,68 @@ func dialogueIntentSourceFromV4(source communication.IntentSource) DialogueInten
 	}
 }
 
+func communicationV4TurnApplicationTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+) (CommunicationV4ProjectionApplication, bool, error) {
+	application, found, err := communicationV4ApplicationTx(
+		tx,
+		turn.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		turn.TurnID,
+	)
+	if err != nil || !found {
+		return application, found, err
+	}
+	if application.InputDigest != turn.InputDigest ||
+		application.SemanticKind != communicationV4DialogueTurnSemanticKind ||
+		application.MessageSeq != turn.InboundThroughSeq {
+		return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
+	return application, true, nil
+}
+
+func markCommunicationV4AutomationManualTx(
+	tx *gorm.DB,
+	profileID string,
+	reason string,
+	at time.Time,
+) error {
+	aggregate, err := communicationV4AggregateTx(tx, profileID)
+	if err != nil {
+		return err
+	}
+	switch aggregate.AutomationStatus {
+	case ProfileCommunicationAutomationManualRequired:
+		if aggregate.ManualReason != reason || aggregate.ManualRequiredAt == nil {
+			return ErrCommunicationV4Conflict
+		}
+		return nil
+	case ProfileCommunicationAutomationActive:
+	default:
+		return ErrCommunicationV4Conflict
+	}
+	updated := tx.Model(&CommunicationV4Aggregate{}).
+		Where(
+			"profile_id = ? AND automation_status = ?",
+			profileID,
+			ProfileCommunicationAutomationActive,
+		).
+		Updates(map[string]any{
+			"automation_status":  ProfileCommunicationAutomationManualRequired,
+			"manual_reason":      reason,
+			"manual_required_at": at.UTC(),
+			"updated_at":         at.UTC(),
+		})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrCommunicationV4Conflict
+	}
+	return nil
+}
+
 func loadCommunicationV4TurnBoundaryTx(
 	tx *gorm.DB,
 	profile CandidateProfile,
