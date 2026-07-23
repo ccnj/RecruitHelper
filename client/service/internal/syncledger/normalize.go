@@ -9,12 +9,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/text/unicode/norm"
-
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/textcanon"
 )
 
 const MaxListPreviewRunes = 200
@@ -67,12 +65,12 @@ type NormalizedMessage struct {
 // Unicode NFC, trim, then collapse every run of Unicode whitespace to one ASCII
 // space.
 func NormalizeText(raw string) string {
-	return strings.Join(strings.Fields(norm.NFC.String(raw)), " ")
+	return textcanon.Normalize(raw)
 }
 
 // HashText returns sha256 of normalized text.
 func HashText(raw string) string {
-	return hashCanonical(NormalizeText(raw))
+	return textcanon.Hash(raw)
 }
 
 // CardIdentityHash hashes card type plus stable key parameters. CardState is
