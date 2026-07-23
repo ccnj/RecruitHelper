@@ -109,6 +109,18 @@ func setCommunicationV4FixedPhrasePackage(
 					"messages":["合成挽留"],
 					"actions":[],
 					"enabled":true
+				},
+				"wechatAccepted":{
+					"message":"合成微信回执",
+					"messages":["合成微信回执"],
+					"actions":[],
+					"enabled":true
+				},
+				"meetingAccepted":{
+					"message":"合成面试回执",
+					"messages":["合成面试回执"],
+					"actions":[],
+					"enabled":true
 				}
 			}`,
 		},
@@ -686,6 +698,33 @@ func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone {
 		t.Fatalf("主动换微信没有冻结为前置动作等待: frozen=%+v err=%v", frozen, err)
 	}
+	eventActions, err := s.CommunicationV4EventActionsBySource(
+		fixture.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil || len(eventActions) != 2 {
+		t.Fatalf("主动换微信前置动作未物化: actions=%+v err=%v", eventActions, err)
+	}
+	for _, action := range eventActions {
+		if action.Status != CommunicationV4EventActionDeferred {
+			t.Fatalf("未获准前置动作不得进入派发态: %+v", action)
+		}
+		switch action.V4Kind {
+		case communication.V4ActionAcceptWechat:
+			if action.FailureReason !=
+				CommunicationV4EventActionFailurePrimitiveUnavailable {
+				t.Fatalf("接受换微信缺少不可用原因: %+v", action)
+			}
+		case communication.V4ActionNotifyWechat:
+			if action.FailureReason !=
+				CommunicationV4EventActionFailureNotificationChannelDeferred {
+				t.Fatalf("换微信通知缺少后置原因: %+v", action)
+			}
+		default:
+			t.Fatalf("主动换微信出现未知事件动作: %+v", action)
+		}
+	}
 	result, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
 		InvocationID: "invocation-v4-prerequisite", TurnID: frozen.Turn.TurnID,
 		Purpose: m5ai.PurposeIntent, Attempt: 1,
@@ -700,6 +739,246 @@ func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 		Where("turn_id = ?", frozen.Turn.TurnID).
 		Count(&invocations).Error; err != nil || invocations != 0 {
 		t.Fatalf("错误授权不得留下 invocation: count=%d err=%v", invocations, err)
+	}
+}
+
+func TestFreezeCommunicationV4WechatReceiptUsesProfileScopedEventAction(t *testing.T) {
+	s := openTest(t)
+	profileIDs := []string{
+		"profile-v4-dialogue-receipt-a",
+		"profile-v4-dialogue-receipt-b",
+	}
+	type observedReceipt struct {
+		actionID    string
+		semanticKey string
+		turnID      string
+	}
+	observed := make([]observedReceipt, 0, len(profileIDs))
+	for _, profileID := range profileIDs {
+		fixture := seedReadyCommunicationTarget(t, s, profileID)
+		setCommunicationV4FixedPhrasePackage(
+			t,
+			s,
+			"revision-"+profileID,
+		)
+		inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "accepted", ContentHash: "v4-wechat-receipt-accepted",
+		})
+		var greeting Message
+		if err := s.db.First(
+			&greeting,
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+			fixture.Platform,
+			fixture.AccountRef,
+			fixture.ConversationRef,
+			1,
+		).Error; err != nil {
+			t.Fatal(err)
+		}
+		digest, turnID, err := DialogueTurnIdentity(profileID, greeting, inbound)
+		if err != nil {
+			t.Fatal(err)
+		}
+		material, ready, err := s.CommunicationAIMaterialForProfile(profileID)
+		if err != nil || !ready {
+			t.Fatalf("换微信回执材料未就绪: ready=%v err=%v", ready, err)
+		}
+		req := FreezeDialogueTurnRequest{
+			TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
+			InputDigest: digest, HistoryThroughSeq: greeting.Seq,
+			InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[0].Seq,
+			ContextRevisionHash: material.ContextRevision.RevisionHash,
+			ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
+			RecommendedTimeText: "合成推荐时段",
+			RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
+			FrozenAt:            time.Now().UTC().Truncate(time.Millisecond),
+		}
+		frozen, err := s.FreezeCommunicationV4Turn(req)
+		if err != nil || !frozen.Created ||
+			frozen.Turn.Status != DialogueTurnCompleted ||
+			frozen.Application.Outcome.DialogueStatus != communication.V4DialogueNoAction ||
+			len(frozen.Application.Outcome.PlannedActions) != 0 ||
+			len(frozen.Application.Outcome.Actions) != 2 {
+			t.Fatalf("换微信回执未由事件动作独占: frozen=%+v err=%v", frozen, err)
+		}
+		dialogueActions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+		if err != nil || len(dialogueActions) != 0 {
+			t.Fatalf("新回执轮不得创建 CommunicationAction: actions=%+v err=%v",
+				dialogueActions, err)
+		}
+		eventActions, err := s.CommunicationV4EventActionsBySource(
+			profileID,
+			CommunicationV4InputDialogueTurn,
+			frozen.Turn.TurnID,
+		)
+		if err != nil || len(eventActions) != 2 {
+			t.Fatalf("换微信事件动作未原子物化: actions=%+v err=%v", eventActions, err)
+		}
+		var receipt *CommunicationV4EventAction
+		var notification *CommunicationV4EventAction
+		for actionIndex := range eventActions {
+			action := &eventActions[actionIndex]
+			switch action.V4Kind {
+			case communication.V4ActionWechatReceipt:
+				receipt = action
+			case communication.V4ActionNotifyWechat:
+				notification = action
+			}
+		}
+		if receipt == nil ||
+			receipt.Status != CommunicationV4EventActionPlanned ||
+			receipt.Text != "合成微信回执" ||
+			receipt.ContentHash != textcanon.Hash("合成微信回执") ||
+			receipt.ContextRevisionHash != "revision-"+profileID ||
+			receipt.FailureReason != "" ||
+			receipt.DependsOnActionID != nil ||
+			notification == nil ||
+			notification.Status != CommunicationV4EventActionDeferred ||
+			notification.FailureReason !=
+				CommunicationV4EventActionFailureNotificationChannelDeferred {
+			t.Fatalf("换微信事件动作处置错误: actions=%+v", eventActions)
+		}
+		observed = append(observed, observedReceipt{
+			actionID: receipt.ActionID, semanticKey: receipt.SemanticActionKey,
+			turnID: frozen.Turn.TurnID,
+		})
+
+		replayed, err := s.FreezeCommunicationV4Turn(req)
+		if err != nil || replayed.Created {
+			t.Fatalf("换微信回执轮重放失败: replayed=%+v err=%v", replayed, err)
+		}
+		replayedActions, err := s.CommunicationV4EventActionsBySource(
+			profileID,
+			CommunicationV4InputDialogueTurn,
+			frozen.Turn.TurnID,
+		)
+		if err != nil || len(replayedActions) != 2 {
+			t.Fatalf("换微信回执重放发生增生: actions=%+v err=%v",
+				replayedActions, err)
+		}
+	}
+	if observed[0].semanticKey != observed[1].semanticKey ||
+		observed[0].actionID == observed[1].actionID {
+		t.Fatalf("同 seq 回执未按 profile 隔离: observed=%+v", observed)
+	}
+	crossSource, err := s.CommunicationV4EventActionsBySource(
+		profileIDs[0],
+		CommunicationV4InputDialogueTurn,
+		observed[1].turnID,
+	)
+	if err != nil || len(crossSource) != 0 {
+		t.Fatalf("DialogueTurn 事件动作来源查询串 profile: actions=%+v err=%v",
+			crossSource, err)
+	}
+}
+
+func TestFreezeCommunicationV4InterviewReceiptChainsEventInvite(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-dialogue-interview-receipt"
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	candidateText := "合成前置候选人消息"
+	appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		Text: &candidateText, ContentHash: "v4-interview-before-invite",
+	})
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	if _, err := s.ApplyCommunicationV4BusinessEvent(
+		ApplyCommunicationV4BusinessEventRequest{
+			ProfileID: profileID,
+			Event: communication.BusinessEvent{
+				Key: "message:2", Kind: communication.EventCandidateExpressionReceived,
+				Source: communication.EventSourceMessage, MessageSeq: 2,
+				ExpressionKind: communication.ExpressionText, Text: candidateText,
+			},
+			AppliedAt: at,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	inviteMessage := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "out", Kind: "card", CardType: "interviewInvite",
+		CardState: "pending", ContentHash: "v4-interview-invite-card", Origin: "self",
+		CreatedAt: at.Add(time.Second),
+	})[0]
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+			tx,
+			profileID,
+			communication.V4ConfirmedAction{
+				ActionKey:  "fixture-interview-invite",
+				Kind:       communication.V4ActionInterviewInvite,
+				MessageSeq: inviteMessage.Seq,
+				SentAt:     &inviteMessage.CreatedAt,
+			},
+			inviteMessage.CreatedAt,
+		)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 4, Direction: "in", Kind: "card", CardType: "interviewInvite",
+		CardState: "accepted", ContentHash: "v4-interview-accepted",
+		CreatedAt: at.Add(2 * time.Second),
+	})
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, ready, err := s.CommunicationAIMaterialForProfile(profileID)
+	if err != nil || !ready {
+		t.Fatalf("邀面接受轮材料未就绪: ready=%v err=%v", ready, err)
+	}
+	frozen, err := s.FreezeCommunicationV4Turn(FreezeDialogueTurnRequest{
+		TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
+		InputDigest: digest, HistoryThroughSeq: inviteMessage.Seq,
+		InboundFromSeq: accepted[0].Seq, InboundThroughSeq: accepted[0].Seq,
+		ContextRevisionHash: material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText: "合成推荐时段",
+		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
+		FrozenAt:            at.Add(3 * time.Second),
+	})
+	if err != nil || frozen.Turn.Status != DialogueTurnCompleted ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueNoAction ||
+		len(frozen.Application.Outcome.PlannedActions) != 0 {
+		t.Fatalf("邀面接受轮没有交给事件动作: frozen=%+v err=%v", frozen, err)
+	}
+	dialogueActions, err := s.CommunicationActionsByTurn(turnID)
+	if err != nil || len(dialogueActions) != 0 {
+		t.Fatalf("邀面接受轮不得创建 CommunicationAction: actions=%+v err=%v",
+			dialogueActions, err)
+	}
+	eventActions, err := s.CommunicationV4EventActionsBySource(
+		profileID,
+		CommunicationV4InputDialogueTurn,
+		turnID,
+	)
+	if err != nil || len(eventActions) != 3 {
+		t.Fatalf("邀面接受事件动作未物化: actions=%+v err=%v", eventActions, err)
+	}
+	var receipt *CommunicationV4EventAction
+	var invite *CommunicationV4EventAction
+	for index := range eventActions {
+		action := &eventActions[index]
+		switch action.V4Kind {
+		case communication.V4ActionInterviewAcceptedReceipt:
+			receipt = action
+		case communication.V4ActionInviteWechat:
+			invite = action
+		}
+	}
+	if receipt == nil ||
+		receipt.Status != CommunicationV4EventActionPlanned ||
+		receipt.Text != "合成面试回执" ||
+		invite == nil ||
+		invite.Status != CommunicationV4EventActionPlanned ||
+		invite.DependsOnActionID == nil ||
+		*invite.DependsOnActionID != receipt.ActionID ||
+		*invite.DependsOnActionID == receipt.SemanticActionKey {
+		t.Fatalf("邀面回执→换微信卡依赖未留在 EventAction: actions=%+v", eventActions)
 	}
 }
 

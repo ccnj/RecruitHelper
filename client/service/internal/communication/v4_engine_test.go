@@ -107,9 +107,8 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.State.WechatState != V4WechatExchanged ||
-			decision.Dialogue.Status != V4DialogueActionsPlanned || decision.Dialogue.NextAdvice != V4AdviceNone ||
-			len(decision.Dialogue.Actions) != 1 ||
-			decision.Dialogue.Actions[0].Kind != V4ActionWechatReceipt ||
+			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.Dialogue.Actions) != 0 ||
 			len(decision.EventActions) != 2 ||
 			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
 			decision.EventActions[1].Kind != V4ActionWechatReceipt {
@@ -144,9 +143,8 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.State.MainStatus != V4StatusInterviewed ||
-			decision.Dialogue.Status != V4DialogueActionsPlanned || decision.Dialogue.NextAdvice != V4AdviceNone ||
-			len(decision.Dialogue.Actions) != 1 ||
-			decision.Dialogue.Actions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.Dialogue.Actions) != 0 ||
 			len(decision.EventActions) != 3 ||
 			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
 			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||

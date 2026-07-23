@@ -487,7 +487,7 @@ const (
 )
 
 // CommunicationV4EventAction is the immutable local plan derived from one
-// business-event projection receipt. SemanticActionKey remains scoped to a
+// projection receipt. SemanticActionKey remains scoped to a
 // profile; ActionID is its deterministic SHA-256 identity. Deferred rows are
 // explicit business facts, not placeholders that may be deleted later.
 type CommunicationV4EventAction struct {

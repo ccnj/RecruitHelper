@@ -19,6 +19,7 @@ const (
 	CommunicationV4EventActionFailureFixedPhraseUnavailable      = "fixedPhraseUnavailable"
 	CommunicationV4EventActionFailureNotificationChannelDeferred = "notificationChannelDeferred"
 	CommunicationV4EventActionFailurePrimitiveUnavailable        = "primitiveUnavailable"
+	CommunicationV4EventActionFailureDialogueActionOwned         = "dialogueActionOwned"
 )
 
 var (
@@ -46,6 +47,8 @@ type communicationV4EventActionSkeleton struct {
 	cardMessageSeq    int64
 	effectKind        CommunicationV4EventEffectKind
 	dependsOnActionID *string
+	dialogueOwned     bool
+	dialogueOwnerID   string
 }
 
 // CommunicationV4EventActionID scopes the reducer's semantic action key to one
@@ -63,7 +66,7 @@ func CommunicationV4EventActionID(profileID, semanticActionKey string) (string, 
 }
 
 // MaterializeCommunicationV4EventActions turns the immutable outcome of one
-// business-event projection receipt into local action facts. A replay returns
+// projection receipt into local action facts. A replay returns
 // the original frozen rows without consulting the current job configuration.
 func (s *Store) MaterializeCommunicationV4EventActions(
 	req MaterializeCommunicationV4EventActionsRequest,
@@ -116,17 +119,15 @@ func materializeCommunicationV4EventActionsTx(
 	materializedAt time.Time,
 ) ([]CommunicationV4EventAction, bool, error) {
 	if tx == nil ||
-		application.InputKind != CommunicationV4InputBusinessEvent ||
+		(application.InputKind != CommunicationV4InputBusinessEvent &&
+			application.InputKind != CommunicationV4InputDialogueTurn) ||
 		strings.TrimSpace(application.ProfileID) == "" ||
 		strings.TrimSpace(application.InputKey) == "" ||
 		materializedAt.IsZero() {
 		return nil, false, ErrCommunicationV4EventActionInvalid
 	}
 	materializedAt = materializedAt.UTC()
-	skeletons, err := communicationV4EventActionSkeletons(
-		application.ProfileID,
-		application.Outcome.Actions,
-	)
+	skeletons, err := communicationV4EventActionSkeletonsTx(tx, application)
 	if err != nil {
 		return nil, false, err
 	}
@@ -144,6 +145,7 @@ func materializeCommunicationV4EventActionsTx(
 			existing,
 			skeletons,
 			application.ProfileID,
+			application.InputKind,
 			application.InputKey,
 		) {
 			return nil, false, ErrCommunicationV4EventActionConflict
@@ -190,12 +192,17 @@ func materializeCommunicationV4EventActionsTx(
 			CreatedAt:         materializedAt,
 			UpdatedAt:         materializedAt,
 		}
-		materializeCommunicationV4EventActionDisposition(
-			&row,
-			fixedPhrases,
-			contextRevisionHash,
-			fixedPhrasesReady,
-		)
+		if skeleton.dialogueOwned {
+			row.Status = CommunicationV4EventActionDeferred
+			row.FailureReason = CommunicationV4EventActionFailureDialogueActionOwned
+		} else {
+			materializeCommunicationV4EventActionDisposition(
+				&row,
+				fixedPhrases,
+				contextRevisionHash,
+				fixedPhrasesReady,
+			)
+		}
 		rows = append(rows, row)
 	}
 	if err := tx.Create(&rows).Error; err != nil {
@@ -251,13 +258,19 @@ func communicationV4EventActionsBySourceTx(
 	return actions, err
 }
 
-func communicationV4EventActionSkeletons(
-	profileID string,
-	actions []communication.V4EventAction,
+func communicationV4EventActionSkeletonsTx(
+	tx *gorm.DB,
+	application CommunicationV4ProjectionApplication,
 ) ([]communicationV4EventActionSkeleton, error) {
+	if tx == nil {
+		return nil, ErrCommunicationV4EventActionInvalid
+	}
+	profileID := application.ProfileID
+	actions := application.Outcome.Actions
 	skeletons := make([]communicationV4EventActionSkeleton, len(actions))
 	seenKeys := make(map[string]struct{}, len(actions))
 	receiptIDs := make([]string, 0, 1)
+	receiptIndexes := make([]int, 0, 1)
 	for index, action := range actions {
 		action.ActionKey = strings.TrimSpace(action.ActionKey)
 		if action.ActionKey == "" || action.CardMessageSeq <= 0 {
@@ -283,15 +296,30 @@ func communicationV4EventActionSkeletons(
 		if action.Kind == communication.V4ActionWechatReceipt ||
 			action.Kind == communication.V4ActionInterviewAcceptedReceipt {
 			receiptIDs = append(receiptIDs, actionID)
+			receiptIndexes = append(receiptIndexes, index)
 		}
 	}
 	if len(receiptIDs) > 1 {
 		return nil, ErrCommunicationV4EventActionConflict
 	}
+	if application.InputKind == CommunicationV4InputDialogueTurn &&
+		len(skeletons) > 0 {
+		if err := bindLegacyCommunicationV4DialogueReceiptTx(
+			tx,
+			application,
+			skeletons,
+			receiptIndexes,
+		); err != nil {
+			return nil, err
+		}
+	}
 	if len(receiptIDs) == 1 {
+		dependency := receiptIDs[0]
+		if skeletons[receiptIndexes[0]].dialogueOwned {
+			dependency = skeletons[receiptIndexes[0]].dialogueOwnerID
+		}
 		for index := range skeletons {
 			if skeletons[index].v4Kind == communication.V4ActionInviteWechat {
-				dependency := receiptIDs[0]
 				skeletons[index].dependsOnActionID = &dependency
 			}
 		}
@@ -299,10 +327,77 @@ func communicationV4EventActionSkeletons(
 	return skeletons, nil
 }
 
+func bindLegacyCommunicationV4DialogueReceiptTx(
+	tx *gorm.DB,
+	application CommunicationV4ProjectionApplication,
+	skeletons []communicationV4EventActionSkeleton,
+	receiptIndexes []int,
+) error {
+	plans := application.Outcome.PlannedActions
+	if len(plans) == 0 {
+		return nil
+	}
+	if len(receiptIndexes) != 1 || len(plans) != 1 {
+		return ErrCommunicationV4EventActionConflict
+	}
+	skeleton := &skeletons[receiptIndexes[0]]
+	plan := plans[0]
+	if strings.TrimSpace(plan.ActionKey) != skeleton.semanticActionKey ||
+		plan.Kind != skeleton.v4Kind ||
+		plan.CardMessageSeq != skeleton.cardMessageSeq ||
+		plan.Text != "" ||
+		plan.InterviewStartsAtMs != nil ||
+		plan.InterviewEndsAtMs != nil ||
+		plan.InterviewMethod != nil ||
+		plan.Round != 0 ||
+		plan.Stage != 0 ||
+		plan.EndReason != "" {
+		return ErrCommunicationV4EventActionConflict
+	}
+	var action CommunicationAction
+	if err := tx.First(
+		&action,
+		"action_id = ? AND turn_id = ?",
+		plan.ActionKey,
+		application.InputKey,
+	).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCommunicationV4EventActionConflict
+		}
+		return err
+	}
+	if action.Kind != CommunicationActionReplyText ||
+		!communicationActionMatchesV4Plan(action, plan) ||
+		!validLegacyCommunicationV4DialogueReceiptStatus(action.Status) {
+		return ErrCommunicationV4EventActionConflict
+	}
+	skeleton.dialogueOwned = true
+	skeleton.dialogueOwnerID = action.ActionID
+	return nil
+}
+
+func validLegacyCommunicationV4DialogueReceiptStatus(
+	status CommunicationActionStatus,
+) bool {
+	switch status {
+	case CommunicationActionPlanned,
+		CommunicationActionEffectPending,
+		CommunicationActionSent,
+		CommunicationActionManualRequired,
+		CommunicationActionSuperseded:
+		return true
+	default:
+		return false
+	}
+}
+
 func communicationV4EventActionsNeedFixedPhrases(
 	skeletons []communicationV4EventActionSkeleton,
 ) bool {
 	for _, skeleton := range skeletons {
+		if skeleton.dialogueOwned {
+			continue
+		}
 		if skeleton.v4Kind == communication.V4ActionWechatReceipt ||
 			skeleton.v4Kind == communication.V4ActionInterviewAcceptedReceipt {
 			return true
@@ -402,6 +497,7 @@ func communicationV4EventActionReplayMatches(
 	rows []CommunicationV4EventAction,
 	skeletons []communicationV4EventActionSkeleton,
 	profileID string,
+	sourceInputKind CommunicationV4InputKind,
 	sourceInputKey string,
 ) bool {
 	if len(rows) != len(skeletons) {
@@ -411,7 +507,7 @@ func communicationV4EventActionReplayMatches(
 		skeleton := skeletons[index]
 		if row.ActionID != skeleton.actionID ||
 			row.ProfileID != profileID ||
-			row.SourceInputKind != CommunicationV4InputBusinessEvent ||
+			row.SourceInputKind != sourceInputKind ||
 			row.SourceInputKey != sourceInputKey ||
 			row.SourceOrdinal != skeleton.sourceOrdinal ||
 			row.SemanticActionKey != skeleton.semanticActionKey ||
@@ -419,7 +515,8 @@ func communicationV4EventActionReplayMatches(
 			row.CardMessageSeq != skeleton.cardMessageSeq ||
 			row.EffectKind != skeleton.effectKind ||
 			!sameOptionalString(row.DependsOnActionID, skeleton.dependsOnActionID) ||
-			!validCommunicationV4EventActionDisposition(row) {
+			!validCommunicationV4EventActionDisposition(row) ||
+			communicationV4EventActionDialogueOwned(row) != skeleton.dialogueOwned {
 			return false
 		}
 	}
@@ -441,6 +538,11 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			return row.Text == "" &&
 				row.ContentHash == "" &&
 				row.FailureReason == CommunicationV4EventActionFailureFixedPhraseUnavailable
+		case CommunicationV4EventActionDeferred:
+			return row.Text == "" &&
+				row.ContentHash == "" &&
+				row.ContextRevisionHash == "" &&
+				row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned
 		default:
 			return false
 		}
@@ -461,6 +563,11 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 	default:
 		return false
 	}
+}
+
+func communicationV4EventActionDialogueOwned(row CommunicationV4EventAction) bool {
+	return row.Status == CommunicationV4EventActionDeferred &&
+		row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned
 }
 
 func cloneStringPointer(value *string) *string {

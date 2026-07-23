@@ -113,6 +113,13 @@ func (s *Store) FreezeCommunicationV4Turn(
 				application.MessageSeq != req.InboundThroughSeq {
 				return ErrCommunicationV4Conflict
 			}
+			if _, _, err := materializeCommunicationV4EventActionsTx(
+				tx,
+				application,
+				application.AppliedAt,
+			); err != nil {
+				return err
+			}
 			out.Turn = existing
 			out.Aggregate = aggregate
 			out.Application = application
@@ -269,6 +276,13 @@ func (s *Store) FreezeCommunicationV4Turn(
 			if err := tx.Create(&action).Error; err != nil {
 				return err
 			}
+		}
+		if _, _, err := materializeCommunicationV4EventActionsTx(
+			tx,
+			application,
+			application.AppliedAt,
+		); err != nil {
+			return err
 		}
 		out.Turn = turn
 		out.Aggregate = next

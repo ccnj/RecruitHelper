@@ -10,6 +10,8 @@ import (
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/textcanon"
+
+	"gorm.io/gorm"
 )
 
 func communicationV4EventActionContextFixture(
@@ -225,6 +227,158 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 		replayed.Actions[0].ContextRevisionHash != firstRevision.RevisionHash ||
 		!replayed.Actions[0].PlannedAt.Equal(at.Add(3*time.Minute)) {
 		t.Fatalf("配置改版后的重放改写了冻结事实: result=%+v err=%v", replayed, err)
+	}
+}
+
+func TestCommunicationV4EventActionLegacyDialogueReceiptKeepsSingleOwner(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-event-action-legacy-dialogue"
+	seedResumeStoreFixture(t, s, profileID)
+	at := time.Date(2026, 7, 24, 10, 30, 0, 0, time.UTC)
+	turnID := "turn-v4-event-action-legacy-dialogue"
+	receiptKey := "message:8|interviewAcceptedReceipt"
+	application := CommunicationV4ProjectionApplication{
+		ProfileID: profileID, InputKind: CommunicationV4InputDialogueTurn,
+		InputKey: turnID, InputDigest: strings.Repeat("b", 64),
+		SemanticKind: communicationV4DialogueTurnSemanticKind,
+		MessageSeq:   8, FromRevision: 0, ToRevision: 1,
+		Outcome: CommunicationV4ApplicationOutcome{
+			Dialogue:       communication.V4DialogueNone,
+			DialogueStatus: communication.V4DialogueActionsPlanned,
+			Actions: []communication.V4EventAction{
+				{
+					ActionKey:      receiptKey,
+					Kind:           communication.V4ActionInterviewAcceptedReceipt,
+					CardMessageSeq: 8,
+				},
+				{
+					ActionKey:      "message:8|notifyInterviewAccepted",
+					Kind:           communication.V4ActionNotifyInterviewAccepted,
+					CardMessageSeq: 8,
+				},
+				{
+					ActionKey:      "message:8|inviteWechat",
+					Kind:           communication.V4ActionInviteWechat,
+					CardMessageSeq: 8,
+				},
+			},
+			PlannedActions: []communication.V4PlannedAction{{
+				ActionKey:      receiptKey,
+				Kind:           communication.V4ActionInterviewAcceptedReceipt,
+				CardMessageSeq: 8,
+			}},
+		},
+		AppliedAt: at,
+	}
+	receiptText := "历史面试接受回执"
+	legacyAction := CommunicationAction{
+		ActionID: receiptKey, TurnID: turnID, Kind: CommunicationActionReplyText,
+		Text: receiptText, ContentHash: textcanon.Hash(receiptText),
+		Status:    CommunicationActionPlanned,
+		PlannedAt: at, CreatedAt: at, UpdatedAt: at,
+	}
+	if err := s.db.Create(&legacyAction).Error; err != nil {
+		t.Fatal(err)
+	}
+	var first []CommunicationV4EventAction
+	var created bool
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		first, created, err = materializeCommunicationV4EventActionsTx(
+			tx,
+			application,
+			at,
+		)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !created || len(first) != 3 {
+		t.Fatalf("历史 DialogueTurn 事件动作未物化: created=%v actions=%+v",
+			created, first)
+	}
+	var receipt *CommunicationV4EventAction
+	var invite *CommunicationV4EventAction
+	for index := range first {
+		action := &first[index]
+		switch action.V4Kind {
+		case communication.V4ActionInterviewAcceptedReceipt:
+			receipt = action
+		case communication.V4ActionInviteWechat:
+			invite = action
+		}
+	}
+	if receipt == nil ||
+		receipt.Status != CommunicationV4EventActionDeferred ||
+		receipt.FailureReason != CommunicationV4EventActionFailureDialogueActionOwned ||
+		receipt.Text != "" ||
+		receipt.ContentHash != "" ||
+		receipt.ActionID == legacyAction.ActionID ||
+		invite == nil ||
+		invite.DependsOnActionID == nil ||
+		*invite.DependsOnActionID != legacyAction.ActionID {
+		t.Fatalf("历史回执没有保持 CommunicationAction 唯一归属: actions=%+v", first)
+	}
+	var repeated []CommunicationV4EventAction
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		repeated, created, err = materializeCommunicationV4EventActionsTx(
+			tx,
+			application,
+			at.Add(time.Hour),
+		)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if created || len(repeated) != 3 {
+		t.Fatalf("历史回执重放发生增生: created=%v actions=%+v", created, repeated)
+	}
+	var communicationActions int64
+	if err := s.db.Model(&CommunicationAction{}).
+		Where("turn_id = ?", turnID).
+		Count(&communicationActions).Error; err != nil || communicationActions != 1 {
+		t.Fatalf("历史回执出现第二个候选人可见 owner: count=%d err=%v",
+			communicationActions, err)
+	}
+}
+
+func TestCommunicationV4EventActionLegacyDialogueReceiptMissingOwnerConflicts(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-event-action-legacy-missing-owner"
+	seedResumeStoreFixture(t, s, profileID)
+	application := CommunicationV4ProjectionApplication{
+		ProfileID: profileID, InputKind: CommunicationV4InputDialogueTurn,
+		InputKey: "turn-v4-event-action-legacy-missing-owner",
+		Outcome: CommunicationV4ApplicationOutcome{
+			Actions: []communication.V4EventAction{{
+				ActionKey:      "message:9|wechatReceipt",
+				Kind:           communication.V4ActionWechatReceipt,
+				CardMessageSeq: 9,
+			}},
+			PlannedActions: []communication.V4PlannedAction{{
+				ActionKey:      "message:9|wechatReceipt",
+				Kind:           communication.V4ActionWechatReceipt,
+				CardMessageSeq: 9,
+			}},
+		},
+	}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		_, _, err := materializeCommunicationV4EventActionsTx(
+			tx,
+			application,
+			time.Now(),
+		)
+		return err
+	})
+	if !errors.Is(err, ErrCommunicationV4EventActionConflict) {
+		t.Fatalf("历史回执缺 owner 必须响亮冲突: %v", err)
+	}
+	var rows int64
+	if err := s.db.Model(&CommunicationV4EventAction{}).
+		Where("profile_id = ?", profileID).
+		Count(&rows).Error; err != nil || rows != 0 {
+		t.Fatalf("历史回执冲突不得留下半成品: rows=%d err=%v", rows, err)
 	}
 }
 

@@ -191,11 +191,7 @@ func v4ReceiptDialogue(
 		return manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, "", ""), true
 	}
 	return V4DialogueDecision{
-		State: state, Status: V4DialogueActionsPlanned, NextAdvice: V4AdviceNone,
-		Actions: []V4PlannedAction{{
-			ActionKey: selected.ActionKey, Kind: selected.Kind, Text: phrase.Text,
-			CardMessageSeq: selected.CardMessageSeq,
-		}},
+		State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
 	}, true
 }
 
