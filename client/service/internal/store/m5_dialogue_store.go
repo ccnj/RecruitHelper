@@ -340,7 +340,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
 		return err
 	}
-	application, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
+	application, v4Turn, err := communicationV4TurnHeadApplicationTx(tx, turn)
 	if err != nil {
 		return err
 	}
@@ -440,31 +440,12 @@ func validateDialogueTurnAIAdviceTx(
 	turn DialogueTurn,
 	purpose m5ai.CompletionPurpose,
 ) error {
-	application, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
+	application, v4Turn, err := communicationV4TurnHeadApplicationTx(tx, turn)
 	if err != nil {
 		return err
 	}
 	if v4Turn {
-		if application.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice {
-			return ErrDialogueTurnState
-		}
-		switch purpose {
-		case m5ai.PurposeIntent:
-			if application.Outcome.NextAdvice != communication.V4AdviceIntent {
-				return ErrDialogueTurnState
-			}
-		case m5ai.PurposeReply:
-			switch application.Outcome.NextAdvice {
-			case communication.V4AdviceReply, communication.V4AdviceServiceReply,
-				communication.V4AdviceInterviewRejectionReply:
-			case communication.V4AdviceIntent:
-				if turn.IntentLabel == "" || turn.IntentLabel == m5ai.IntentRejected {
-					return ErrDialogueTurnState
-				}
-			default:
-				return ErrDialogueTurnState
-			}
-		default:
+		if !communicationV4OutcomeAuthorizesAdvice(application.Outcome, purpose) {
 			return ErrDialogueTurnState
 		}
 	}
@@ -889,6 +870,29 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 		if err := tx.First(&out, "turn_id = ?", invocation.TurnID).Error; err != nil {
 			return err
 		}
+		if _, v4Turn, err := communicationV4TurnApplicationTx(tx, out); err != nil {
+			return err
+		} else if v4Turn {
+			label, source, manualReason := req.Label, req.Source, req.ManualReason
+			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
+				label, source, manualReason = "", "", "reasoningUsageUnsafe"
+			}
+			err := completeCommunicationV4IntentTx(
+				tx,
+				&out,
+				invocation,
+				label,
+				source,
+				manualReason,
+				req.Completion.FinishedAt.UTC(),
+			)
+			return settleCommunicationV4AdviceErrorTx(
+				tx,
+				&out,
+				err,
+				req.Completion.FinishedAt.UTC(),
+			)
+		}
 		if out.Status != DialogueTurnManualRequired {
 			if err := validateDialogueTurnAIAdviceTx(tx, out, m5ai.PurposeIntent); err != nil {
 				if !errors.Is(err, ErrDialogueTurnBinding) {
@@ -986,6 +990,29 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 		if err := tx.First(&turn, "turn_id = ?", invocation.TurnID).Error; err != nil {
 			return err
 		}
+		if _, v4Turn, err := communicationV4TurnApplicationTx(tx, turn); err != nil {
+			return err
+		} else if v4Turn {
+			manualReason := req.ManualReason
+			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
+				manualReason = "reasoningUsageUnsafe"
+			}
+			out, err = completeCommunicationV4ReplyTx(
+				tx,
+				&turn,
+				invocation,
+				req.Text,
+				req.ContentHash,
+				manualReason,
+				req.PlannedAt.UTC(),
+			)
+			return settleCommunicationV4AdviceErrorTx(
+				tx,
+				&turn,
+				err,
+				req.Completion.FinishedAt.UTC(),
+			)
+		}
 		if turn.Status != DialogueTurnManualRequired {
 			if err := validateDialogueTurnAIAdviceTx(tx, turn, m5ai.PurposeReply); err != nil {
 				if !errors.Is(err, ErrDialogueTurnBinding) {
@@ -1058,6 +1085,24 @@ func reasoningCompletionSafe(completion AIInvocationCompletion) bool {
 		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
 	}
 	return completion.UsageShape == AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
+}
+
+func settleCommunicationV4AdviceErrorTx(
+	tx *gorm.DB,
+	turn *DialogueTurn,
+	adviceErr error,
+	at time.Time,
+) error {
+	if adviceErr == nil {
+		return nil
+	}
+	if !errors.Is(adviceErr, ErrDialogueTurnBinding) {
+		return adviceErr
+	}
+	if turn.Status == DialogueTurnManualRequired {
+		return nil
+	}
+	return markDialogueTurnManualTx(tx, turn, "inputBoundaryChanged", at)
 }
 
 func sameCommunicationAction(existing CommunicationAction, req CompleteReplyInvocationRequest) bool {
@@ -1264,6 +1309,51 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 			var turn DialogueTurn
 			if err := tx.First(&turn, "turn_id = ?", invocation.TurnID).Error; err != nil {
 				return err
+			}
+			if err := tx.First(&invocation, "invocation_id = ?", invocation.InvocationID).Error; err != nil {
+				return err
+			}
+			if _, v4Turn, err := communicationV4TurnApplicationTx(tx, turn); err != nil {
+				return err
+			} else if v4Turn {
+				if invocation.Purpose == m5ai.PurposeReply {
+					_, err := completeCommunicationV4ReplyTx(
+						tx,
+						&turn,
+						invocation,
+						"",
+						"",
+						"replyProcessInterrupted",
+						at.UTC(),
+					)
+					if err := settleCommunicationV4AdviceErrorTx(
+						tx,
+						&turn,
+						err,
+						at.UTC(),
+					); err != nil {
+						return err
+					}
+				} else {
+					err := completeCommunicationV4IntentTx(
+						tx,
+						&turn,
+						invocation,
+						m5ai.IntentNeutral,
+						DialogueIntentLLMFailure,
+						"",
+						at.UTC(),
+					)
+					if err := settleCommunicationV4AdviceErrorTx(
+						tx,
+						&turn,
+						err,
+						at.UTC(),
+					); err != nil {
+						return err
+					}
+				}
+				continue
 			}
 			if invocation.Purpose == m5ai.PurposeReply {
 				if err := markDialogueTurnManualTx(tx, &turn, "replyProcessInterrupted", at); err != nil {

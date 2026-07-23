@@ -423,6 +423,7 @@ type CommunicationV4InputKind string
 const (
 	CommunicationV4InputBusinessEvent   CommunicationV4InputKind = "businessEvent"
 	CommunicationV4InputDialogueTurn    CommunicationV4InputKind = "dialogueTurn"
+	CommunicationV4InputDialogueAdvice  CommunicationV4InputKind = "dialogueAdvice"
 	CommunicationV4InputConfirmedAction CommunicationV4InputKind = "confirmedAction"
 	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
 )

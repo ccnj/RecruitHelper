@@ -5,11 +5,13 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/communication"
+	"recruithelper/client/service/internal/m5ai"
 
 	"gorm.io/gorm"
 )
 
 const communicationV4DialogueTurnSemanticKind = "inboundTurn"
+const communicationV4DialogueAdviceKeySeparator = "|advice|"
 
 type FreezeCommunicationV4TurnResult struct {
 	Turn        DialogueTurn
@@ -297,6 +299,64 @@ func communicationV4TurnApplicationTx(
 		return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 	}
 	return application, true, nil
+}
+
+func communicationV4DialogueAdviceKey(turnID string, purpose m5ai.CompletionPurpose) string {
+	return turnID + communicationV4DialogueAdviceKeySeparator + string(purpose)
+}
+
+func communicationV4OutcomeAuthorizesAdvice(
+	outcome CommunicationV4ApplicationOutcome,
+	purpose m5ai.CompletionPurpose,
+) bool {
+	if outcome.DialogueStatus != communication.V4DialogueWaitingAdvice {
+		return false
+	}
+	switch purpose {
+	case m5ai.PurposeIntent:
+		return outcome.NextAdvice == communication.V4AdviceIntent
+	case m5ai.PurposeReply:
+		switch outcome.NextAdvice {
+		case communication.V4AdviceReply, communication.V4AdviceServiceReply,
+			communication.V4AdviceInterviewRejectionReply:
+			return true
+		}
+	}
+	return false
+}
+
+func communicationV4TurnHeadApplicationTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+) (CommunicationV4ProjectionApplication, bool, error) {
+	head, found, err := communicationV4TurnApplicationTx(tx, turn)
+	if err != nil || !found {
+		return head, found, err
+	}
+	for _, purpose := range []m5ai.CompletionPurpose{m5ai.PurposeIntent, m5ai.PurposeReply} {
+		key := communicationV4DialogueAdviceKey(turn.TurnID, purpose)
+		continuation, exists, err := communicationV4ApplicationTx(
+			tx,
+			turn.ProfileID,
+			CommunicationV4InputDialogueAdvice,
+			key,
+		)
+		if err != nil {
+			return CommunicationV4ProjectionApplication{}, false, err
+		}
+		if !exists {
+			continue
+		}
+		if !communicationV4OutcomeAuthorizesAdvice(head.Outcome, purpose) ||
+			continuation.SemanticKind != string(purpose) ||
+			continuation.MessageSeq != turn.InboundThroughSeq ||
+			continuation.FromRevision != head.ToRevision ||
+			continuation.Outcome.Dialogue != head.Outcome.Dialogue {
+			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+		}
+		head = continuation
+	}
+	return head, true, nil
 }
 
 func markCommunicationV4AutomationManualTx(
