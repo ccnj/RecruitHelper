@@ -38,7 +38,7 @@ func (a *roundActor) processCommunicationV4Target(
 	ctx context.Context,
 	target store.CommunicationTarget,
 ) error {
-	archived, err := a.processCommunicationV4Fallback(target)
+	archived, err := a.processCommunicationV4ScheduleArchive(target, true)
 	if err != nil || archived {
 		return err
 	}
@@ -96,11 +96,6 @@ func (a *roundActor) processCommunicationV4Target(
 		}
 	}
 
-	if a.manager.advice == nil {
-		// Provider configuration is a process dependency. Do not freeze a
-		// durable turn until this process can continue it.
-		return nil
-	}
 	key := store.ConversationKey{
 		Platform: target.Profile.Platform, AccountRef: target.Profile.AccountRef,
 		ConversationRef: target.Conversation.ConversationRef,
@@ -111,7 +106,8 @@ func (a *roundActor) processCommunicationV4Target(
 	}
 	if len(messages) == 0 ||
 		messages[len(messages)-1].Seq <= target.Aggregate.ProjectedThroughSeq {
-		return nil
+		_, err := a.processCommunicationV4ScheduleArchive(target, false)
+		return err
 	}
 
 	cursorIndex := -1
@@ -150,7 +146,13 @@ func (a *roundActor) processCommunicationV4Target(
 	}
 	if !hasCandidateInput {
 		// A system-only tail is not a candidate turn. Keep it in the
-		// ledger and wait for a real inbound message.
+		// ledger; it does not suppress the silence schedule.
+		_, err := a.processCommunicationV4ScheduleArchive(target, false)
+		return err
+	}
+	if a.manager.advice == nil {
+		// Provider configuration is a process dependency. Do not freeze a
+		// durable turn until this process can continue it.
 		return nil
 	}
 	inbound, validBoundary := store.DialogueTurnCandidateMessages(boundary)
@@ -219,14 +221,15 @@ func (a *roundActor) processCommunicationV4Target(
 	return a.advanceM5Turn(ctx, frozen.Turn)
 }
 
-func (a *roundActor) processCommunicationV4Fallback(
+func (a *roundActor) processCommunicationV4ScheduleArchive(
 	target store.CommunicationTarget,
+	hasPendingDialogue bool,
 ) (bool, error) {
 	decision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
 		ProfileKey:         target.Profile.ProfileID,
 		State:              target.Aggregate.State,
 		Now:                a.manager.now(),
-		HasPendingDialogue: true,
+		HasPendingDialogue: hasPendingDialogue,
 		Reply:              communication.ReplyAdvice{State: communication.AdviceAbsent},
 	})
 	if err != nil {
@@ -235,10 +238,8 @@ func (a *roundActor) processCommunicationV4Fallback(
 	if decision.Status != communication.V4ScheduleActionsPlanned {
 		return false, nil
 	}
-	if len(decision.Actions) != 1 ||
-		decision.Actions[0].Kind != communication.V4ActionArchive ||
-		decision.Actions[0].EndReason != communication.V4EndFallback {
-		return false, store.ErrCommunicationV4Conflict
+	if len(decision.Actions) != 1 || decision.Actions[0].Kind != communication.V4ActionArchive {
+		return false, nil
 	}
 	_, _, err = a.manager.store.ApplyCommunicationV4ArchiveAction(
 		target.Profile.ProfileID,

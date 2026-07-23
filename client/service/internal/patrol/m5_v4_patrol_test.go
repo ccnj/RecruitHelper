@@ -623,6 +623,134 @@ func TestCommunicationV4PatrolSendsRejectionRetentionAfterWechatExchanged(t *tes
 	}
 }
 
+func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableColdAction(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "thirty-six-hour-archive", []store.MessageDraft{{
+		Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted",
+		ContentHash: syncledger.HashText("wechat-exchanged-before-silence"), Origin: "external",
+	}})
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf("固定事件与拒绝短路不得调用 AI: %s", request.Purpose)
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-thirty-six-hour-prepare"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 1 {
+		t.Fatalf("换微信成功前置没有收敛: err=%v sends=%d", err, hand.commandCount())
+	}
+
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("读取换微信后账本失败: messages=%+v err=%v", messages, err)
+	}
+	rejection := "不感兴趣"
+	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: messages[len(messages)-1].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(rejection),
+			Text: &rejection, Origin: "external",
+		}},
+		SyncedAt: h.clock.Now().Add(time.Minute),
+	})
+	if err != nil || len(changes.Inserted) != 1 {
+		t.Fatalf("追加拒绝消息失败: changes=%+v err=%v", changes, err)
+	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	prepared, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || aggregateErr != nil || !prepared.State.RetentionSent ||
+		prepared.State.ColdPromptRemaining != 0 || prepared.State.ColdWechatRemaining != 0 ||
+		prepared.State.WechatState != communication.V4WechatExchanged ||
+		prepared.State.LastOutboundAt == nil ||
+		hand.commandCount() != 2 {
+		t.Fatalf("36 小时归档前置状态不成立: err=%v aggregate=%+v aggregateErr=%v sends=%d",
+			err, prepared, aggregateErr, hand.commandCount())
+	}
+
+	archiveAt := prepared.State.LastOutboundAt.Add(44 * time.Hour)
+	h.clock.Add(archiveAt.Sub(h.clock.Now()))
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.BindAccountPrincipal(
+		h.key,
+		"hand-1",
+		"principal-1",
+		"session-1",
+		"boot-1",
+		h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("归档轮账号读取失败: account=%+v err=%v", account, err)
+	}
+	archiveRoundID := "round-v4-thirty-six-hour-archive"
+	beginCommunicationV4PatrolRound(t, h, archiveRoundID)
+	archiveActor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: archiveRoundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = archiveActor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	archived, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	profile, profileErr := h.db.CandidateProfileByID(fixture.profileID)
+	if err != nil || aggregateErr != nil ||
+		archived.State.MainStatus != communication.V4StatusEnded ||
+		archived.State.EndReason != communication.V4EndSilentWechatExchanged ||
+		archived.Revision != prepared.Revision+1 ||
+		profileErr != nil || profile == nil || profile.MainStatus != store.CandidateProfileEnded ||
+		profile.EndReason == nil || *profile.EndReason != store.CandidateProfileEndSilentWechatExchanged ||
+		hand.commandCount() != 2 {
+		t.Fatalf("36 小时沉默归档没有收敛: err=%v aggregate=%+v aggregateErr=%v profile=%+v profileErr=%v sends=%d",
+			err, archived, aggregateErr, profile, profileErr, hand.commandCount())
+	}
+	revision := archived.Revision
+
+	for attempt := 0; attempt < 2; attempt++ {
+		manager.mu.Lock()
+		err = archiveActor.processCommunicationV4Targets(context.Background())
+		manager.mu.Unlock()
+		if err != nil {
+			t.Fatalf("重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision || hand.commandCount() != 2 {
+		t.Fatalf("36 小时归档重复巡检发生增生: aggregate=%+v sends=%d err=%v",
+			replayed, hand.commandCount(), err)
+	}
+}
+
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
 	h := newHarness(t)
 	before, after := "合成系统前置", "合成系统尾部"
