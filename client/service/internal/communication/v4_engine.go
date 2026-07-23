@@ -2,6 +2,8 @@ package communication
 
 import (
 	"strings"
+
+	"recruithelper/client/service/internal/m5ai"
 )
 
 // V4InboundTurnInput is the narrow replay boundary for one contiguous inbound
@@ -122,6 +124,18 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 			ManualReason: V4ManualUnknownPlatformEvent,
 		}, nil
 	}
+	if receipt, handled := v4ReceiptDialogue(
+		eventDecision.State,
+		event.Kind,
+		eventDecision.Actions,
+		input.FixedPhrases,
+	); handled {
+		return V4InboundTurnDecision{
+			State: eventDecision.State, Requirement: eventDecision.Dialogue,
+			EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
+			Dialogue:     receipt, ManualReason: receipt.ManualReason,
+		}, nil
+	}
 
 	dialogue, err := ReduceV4Dialogue(V4DialogueInput{
 		State: eventDecision.State, Requirement: eventDecision.Dialogue, Turn: frozen,
@@ -136,6 +150,49 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
 		Dialogue:     dialogue, ManualReason: dialogue.ManualReason,
 	}, nil
+}
+
+func v4ReceiptDialogue(
+	state V4State,
+	eventKind BusinessEventKind,
+	actions []V4EventAction,
+	phrases V4FixedPhraseView,
+) (V4DialogueDecision, bool) {
+	var actionKind V4ActionKind
+	var phraseKind V4FixedPhraseKind
+	switch eventKind {
+	case EventWechatExchanged:
+		actionKind = V4ActionWechatReceipt
+		phraseKind = V4PhraseWechatReceipt
+	case EventInterviewAccepted:
+		actionKind = V4ActionInterviewAcceptedReceipt
+		phraseKind = V4PhraseInterviewAccepted
+	default:
+		return V4DialogueDecision{}, false
+	}
+	var selected *V4EventAction
+	for index := range actions {
+		if actions[index].Kind != actionKind {
+			continue
+		}
+		copy := actions[index]
+		selected = &copy
+		break
+	}
+	if selected == nil {
+		return V4DialogueDecision{}, false
+	}
+	phrase := phrases.Phrase(phraseKind)
+	if phrase.State != V4PhraseAvailable || m5ai.ValidateSendText(phrase.Text) != nil {
+		return manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, "", ""), true
+	}
+	return V4DialogueDecision{
+		State: state, Status: V4DialogueActionsPlanned, NextAdvice: V4AdviceNone,
+		Actions: []V4PlannedAction{{
+			ActionKey: selected.ActionKey, Kind: selected.Kind, Text: phrase.Text,
+			CardMessageSeq: selected.CardMessageSeq,
+		}},
+	}, true
 }
 
 func applyV4AggregateOrdinaryTurn(state V4State, turnID string, lastMessageSeq int64) (V4State, error) {

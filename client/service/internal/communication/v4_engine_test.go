@@ -104,9 +104,12 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 				CardState: "accepted", Origin: "external",
 			}},
 			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.State.WechatState != V4WechatExchanged ||
-			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			decision.Dialogue.Status != V4DialogueActionsPlanned || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.Dialogue.Actions) != 1 ||
+			decision.Dialogue.Actions[0].Kind != V4ActionWechatReceipt ||
 			len(decision.EventActions) != 2 ||
 			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
 			decision.EventActions[1].Kind != V4ActionWechatReceipt {
@@ -138,9 +141,12 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 				CardState: "accepted", Origin: "external",
 			}},
 			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.State.MainStatus != V4StatusInterviewed ||
-			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			decision.Dialogue.Status != V4DialogueActionsPlanned || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.Dialogue.Actions) != 1 ||
+			decision.Dialogue.Actions[0].Kind != V4ActionInterviewAcceptedReceipt ||
 			len(decision.EventActions) != 3 ||
 			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
 			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||
@@ -148,6 +154,23 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 			t.Fatalf("面试接受事实没有确定性推进且保持零 AI: decision=%+v err=%v", decision, err)
 		}
 	})
+}
+
+func TestV4InboundTurnAcceptedCardWithoutFixedReceiptStopsAfterStateFact(t *testing.T) {
+	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+		State: NewV4GreetedState(v4Time(8)), TurnID: "turn-wechat-receipt-missing",
+		Messages: []LedgerMessageFact{{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "accepted", Origin: "external",
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+	})
+	if err != nil || decision.State.WechatState != V4WechatExchanged ||
+		decision.Dialogue.Status != V4DialogueManualRequired ||
+		decision.ManualReason != V4ManualFixedPhraseUnavailable ||
+		len(decision.Dialogue.Actions) != 0 {
+		t.Fatalf("缺固定回执时应保留换号事实并禁止发送: decision=%+v err=%v", decision, err)
+	}
 }
 
 func TestV4InboundTurnRejectedShortCircuitNeverRequestsReplyAI(t *testing.T) {

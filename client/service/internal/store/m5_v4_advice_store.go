@@ -203,6 +203,8 @@ func supportedCommunicationV4TextKind(kind communication.V4ActionKind) bool {
 		communication.V4ActionServiceReply,
 		communication.V4ActionRejectionRetention,
 		communication.V4ActionRejectionClosing,
+		communication.V4ActionWechatReceipt,
+		communication.V4ActionInterviewAcceptedReceipt,
 		communication.V4ActionInterviewRejectionReply:
 		return true
 	default:

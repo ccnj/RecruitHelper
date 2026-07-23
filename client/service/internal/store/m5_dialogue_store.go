@@ -345,7 +345,6 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err != nil {
 		return err
 	}
-	statusAllowed := profile.MainStatus == CandidateProfileCommunicating
 	if v4Turn {
 		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
 		if err != nil {
@@ -356,17 +355,12 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 			aggregate.ProjectedThroughSeq != turn.InboundThroughSeq {
 			return ErrDialogueTurnBinding
 		}
-		switch aggregate.State.MainStatus {
-		case communication.V4StatusCommunicating, communication.V4StatusInvited, communication.V4StatusInterviewed:
-			statusAllowed = true
-		default:
-			statusAllowed = false
-		}
 	}
-	if !statusAllowed || profile.EndReason != nil ||
-		profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
+	if profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID ||
-		profile.CommunicatingAt == nil || profile.FirstRealMessageSeq == nil {
+		(!v4Turn && (profile.MainStatus != CandidateProfileCommunicating ||
+			profile.EndReason != nil || profile.CommunicatingAt == nil ||
+			profile.FirstRealMessageSeq == nil)) {
 		return ErrDialogueTurnBinding
 	}
 	if !v4Turn {
@@ -438,8 +432,10 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		(!v4Turn && inbound[len(inbound)-1].Seq != turn.InboundThroughSeq) {
 		return ErrDialogueTurnBinding
 	}
-	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
-		return ErrDialogueTurnBinding
+	if !v4Turn {
+		if _, ok := DialogueTurnInputKindOf(inbound); !ok {
+			return ErrDialogueTurnBinding
+		}
 	}
 	if digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound); err != nil ||
 		digest != turn.InputDigest {

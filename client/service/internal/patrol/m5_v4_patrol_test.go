@@ -126,6 +126,12 @@ func seedCommunicationV4PatrolTargetWithBoundary(
 		{DocType: "多轮沟通", Content: replyPrompt},
 		{DocType: "意向判断", Content: intentPrompt},
 		{DocType: "客户事实库", Content: ""},
+		{DocType: "固定话术", Content: `{
+			"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
+			"silence48Wechat":{"enabled":true,"messages":["合成冷催"]},
+			"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
+			"meetingAccepted":{"enabled":true,"messages":["好的，面试安排已确认"]}
+		}`},
 	}
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
@@ -385,7 +391,11 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 			return m5ai.CompletionResponse{}, fmt.Errorf("换微信成功事实不得调用 AI: %s", request.Purpose)
 		},
 	}
-	manager, err := NewManager(h.db, h.runner, h.hands, h.config, advice)
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,14 +417,22 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(advice.requests) != 0 {
-		t.Fatalf("换微信成功事实触发了 AI: %+v", advice.requests)
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	var action *store.CommunicationAction
+	if turn != nil {
+		action, _ = h.db.CommunicationActionByTurn(turn.TurnID)
 	}
-	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if len(advice.requests) != 0 || hand.commandCount() != 1 {
+		t.Fatalf("换微信成功应零 AI 且只发一条固定回执: advice=%+v sends=%d turn=%+v action=%+v turnErr=%v",
+			advice.requests, hand.commandCount(), turn, action, turnErr)
+	}
+	turn, err = h.db.LatestDialogueTurnForProfile(fixture.profileID)
 	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 	if err != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
 		aggregateErr != nil || aggregate.State.WechatState != communication.V4WechatExchanged ||
-		aggregate.ProjectedThroughSeq != fixture.inboundSeq {
+		!aggregate.State.WechatReceiptSent ||
+		aggregate.State.RealMessageRound != 1 || aggregate.State.LastRealMessageSeq != 0 ||
+		aggregate.ProjectedThroughSeq != fixture.inboundSeq+1 {
 		t.Fatalf("换微信成功消息未收敛: turn=%+v aggregate=%+v err=%v aggregateErr=%v",
 			turn, aggregate, err, aggregateErr)
 	}
@@ -429,9 +447,10 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 		}
 	}
 	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
-	if err != nil || replayed.Revision != revision || len(advice.requests) != 0 {
-		t.Fatalf("重复巡检发生状态或 AI 增生: aggregate=%+v advice=%+v err=%v",
-			replayed, advice.requests, err)
+	if err != nil || replayed.Revision != revision || len(advice.requests) != 0 ||
+		hand.commandCount() != 1 {
+		t.Fatalf("重复巡检发生状态、AI 或发送增生: aggregate=%+v advice=%+v sends=%d err=%v",
+			replayed, advice.requests, hand.commandCount(), err)
 	}
 }
 

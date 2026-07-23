@@ -286,6 +286,14 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 		if err != nil {
 			return err
 		}
+		if turn.Status == store.DialogueTurnAdviceReady {
+			if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {
+				// Pure reducer/store tests may intentionally stop at the
+				// persisted action seam.
+				return nil
+			}
+			return a.dispatchM5Reply(ctx, turn)
+		}
 		material, err := a.loadM5TurnMaterial(turn)
 		if err != nil {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "renderInputUnavailable", a.manager.now())
@@ -384,13 +392,6 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			); err != nil {
 				return err
 			}
-		case store.DialogueTurnAdviceReady:
-			if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {
-				// Batch 5 has not wired a real provider yet. Pure reducer tests may
-				// intentionally stop at the persisted action seam.
-				return nil
-			}
-			return a.dispatchM5Reply(ctx, turn)
 		default:
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "turnStateUnknown", a.manager.now())
 		}
