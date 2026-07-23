@@ -5628,14 +5628,8 @@ function installM5BCardActionSurface(fixture) {
   durationInput.matches = (selector) => selector === 'input'
   const method = node({ text: '微信视频', active: true }).element
   const online = node({ text: '线上面试' }).element
-  const onlineMarker = node({ active: true }).element
   const title = node({ text: '参加 线上面试' }).element
   const send = node({ text: '发送' }).element
-  online.querySelectorAll = (selector) =>
-    selector === 'input, [aria-checked], [class*="icon"], .is-checked, .is-active' &&
-      state.onlineSelected
-      ? [onlineMarker]
-      : []
   const modal = node().element
   modal.querySelector = (selector) => selector === '.interview-form' ? {} : null
   modal.querySelectorAll = (selector) => {
@@ -5676,14 +5670,7 @@ function installM5BCardActionSurface(fixture) {
     }
     method.getAttribute = (name) =>
       name === 'aria-checked' && state.methodSelected ? 'true' : null
-    onlineMarker.querySelector('input').checked = state.onlineSelected
-    onlineMarker.classList = {
-      contains(name) {
-        return state.onlineSelected && (name === 'is-active' || name === 'is-checked')
-      },
-    }
-    onlineMarker.getAttribute = (name) =>
-      name === 'aria-checked' && state.onlineSelected ? 'true' : null
+    title.textContent = state.onlineSelected ? '参加 线上面试' : '参加 现场面试'
   }
   syncInputs()
   return {

@@ -5931,12 +5931,6 @@ async function mainPrepareInterviewEditor(
       }
       return null
     }
-    const selected = (node: Element): boolean => {
-      const input = node.matches('input') ? node as HTMLInputElement : node.querySelector<HTMLInputElement>('input')
-      return input?.checked === true || node.classList.contains('is-checked') ||
-        node.classList.contains('is-active') || node.getAttribute('aria-checked') === 'true'
-    }
-
     if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
         interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
         interview.method !== 'wechatVideo' || interview.startsAt % 60_000 !== 0 ||
@@ -6005,10 +5999,7 @@ async function mainPrepareInterviewEditor(
         .filter((node) => !Array.from(node.children).some(
           (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
         ))
-      const selectedMarkers = Array.from(online.querySelectorAll<HTMLElement>(
-        'input, [aria-checked], [class*="icon"], .is-checked, .is-active',
-      )).filter(visible).filter(selected)
-      return exactTitleNodes.length === 1 && selectedMarkers.length === 1
+      return exactTitleNodes.length === 1
     }
     if (!onlineSelected()) {
       if (!await interact(online)) return await abort('editor_unavailable')
@@ -6598,11 +6589,6 @@ function mainSendCardOnce(
     }
     return 'match'
   }
-  const selected = (node: Element): boolean => {
-    const input = node.matches('input') ? node as HTMLInputElement : node.querySelector<HTMLInputElement>('input')
-    return input?.checked === true || node.classList.contains('is-checked') ||
-      node.classList.contains('is-active') || node.getAttribute('aria-checked') === 'true'
-  }
   const validInterviewSurface = (modal: HTMLElement, value: InterviewDetails): boolean => {
     if (!Number.isSafeInteger(value.startsAt) || !Number.isSafeInteger(value.endsAt) ||
         value.startsAt <= 0 || value.endsAt <= value.startsAt || value.method !== 'wechatVideo' ||
@@ -6636,12 +6622,9 @@ function mainSendCardOnce(
       .filter((node) => !Array.from(node.children).some(
         (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
       ))
-    const selectedMarkers = Array.from(onlineItems[0].querySelectorAll<HTMLElement>(
-      'input, [aria-checked], [class*="icon"], .is-checked, .is-active',
-    )).filter(visible).filter(selected)
     return dateMatches.length === 1 && timeMatches.length === 1 &&
       durationMatches.length === 1 && methodMatches.length === 1 &&
-      titleMatches.length === 1 && selectedMarkers.length === 1
+      titleMatches.length === 1
   }
 
   if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
