@@ -1,9 +1,12 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
+
+	"recruithelper/client/service/internal/communication"
 )
 
 func seedReadyCommunicationTarget(
@@ -203,4 +206,73 @@ func TestCommunicationAIMaterialMissingActiveContextIsNormalPreparationGap(t *te
 		t.Fatalf("无活动职位上下文应返回未就绪: material=%+v ready=%v err=%v",
 			material, ready, err)
 	}
+}
+
+func TestCommunicationTargetsIncludeEndedForWakeupButExcludeEliminated(t *testing.T) {
+	t.Run("ended remains an event target", func(t *testing.T) {
+		s := openTest(t)
+		fixture := seedReadyCommunicationTarget(t, s, "profile-target-ended")
+		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
+			fixture.ProfileID,
+			aggregate.Revision,
+			communication.V4PlannedAction{
+				ActionKey: fixture.ProfileID + "|fixture|archive",
+				Kind:      communication.V4ActionArchive,
+				EndReason: communication.V4EndFallback,
+			},
+			time.Now(),
+		)
+		if err != nil || !applied || archived.State.MainStatus != communication.V4StatusEnded {
+			t.Fatalf("构造已结束档案失败: aggregate=%+v applied=%v err=%v",
+				archived, applied, err)
+		}
+
+		targets, err := s.CommunicationTargetsForAccount(AccountKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		})
+		if err != nil || len(targets) != 1 ||
+			targets[0].Profile.ProfileID != fixture.ProfileID ||
+			targets[0].Aggregate.State.MainStatus != communication.V4StatusEnded {
+			t.Fatalf("已结束档案没有保留为事件层目标: targets=%+v err=%v", targets, err)
+		}
+	})
+
+	t.Run("eliminated stays terminal", func(t *testing.T) {
+		s := openTest(t)
+		fixture := seedReadyCommunicationTarget(t, s, "profile-target-eliminated")
+		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aggregate.State.MainStatus = communication.V4StatusEliminated
+		aggregate.State.EndReason = ""
+		stateJSON, err := json.Marshal(aggregate.State)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Model(&CommunicationV4Aggregate{}).
+			Where("profile_id = ?", fixture.ProfileID).
+			Update("state", string(stateJSON)).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Model(&CandidateProfile{}).
+			Where("profile_id = ?", fixture.ProfileID).
+			Updates(map[string]any{
+				"main_status": CandidateProfileEliminated,
+				"end_reason":  nil,
+			}).Error; err != nil {
+			t.Fatal(err)
+		}
+
+		targets, err := s.CommunicationTargetsForAccount(AccountKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		})
+		if err != nil || len(targets) != 0 {
+			t.Fatalf("已淘汰档案不得进入自动事件层: targets=%+v err=%v", targets, err)
+		}
+	})
 }

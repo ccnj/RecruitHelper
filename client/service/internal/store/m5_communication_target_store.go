@@ -34,8 +34,8 @@ type CommunicationAIMaterial struct {
 }
 
 // CommunicationTargetsForAccount 先枚举账号下全部 V4 根，再逐档案区分：
-// 人工/终态或尚未绑定会话的档案正常跳过；AI 材料准备度不参与本查询。
-// ended 的事件层唤醒会在独立批次连同生产回归一起开放。
+// 人工、已淘汰或尚未绑定会话的档案正常跳过；已结束档案仍须进入事件层，
+// 以便真实文字或旧邀面卡事实唤醒。AI 材料准备度不参与本查询。
 //
 // 本查询与 unread、dirty、当前消息轮以及旧 M5TrialSelection 均无关，
 // 因而既能承载沉默时刻表，也能在重启后恢复已有 turn/action。
@@ -82,8 +82,9 @@ func communicationTargetTx(tx *gorm.DB, profileID string) (CommunicationTarget, 
 	}
 	switch aggregate.State.MainStatus {
 	case communication.V4StatusGreeted, communication.V4StatusCommunicating,
-		communication.V4StatusInvited, communication.V4StatusInterviewed:
-	case communication.V4StatusEnded, communication.V4StatusEliminated:
+		communication.V4StatusInvited, communication.V4StatusInterviewed,
+		communication.V4StatusEnded:
+	case communication.V4StatusEliminated:
 		return CommunicationTarget{}, false, nil
 	default:
 		return CommunicationTarget{}, false, ErrCommunicationTargetConflict

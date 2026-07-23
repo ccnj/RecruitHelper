@@ -473,6 +473,191 @@ func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *t
 	}
 }
 
+func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"ended-wakeup",
+		"归档前的正常一轮",
+	)
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			switch request.Purpose {
+			case m5ai.PurposeIntent:
+				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+			case m5ai.PurposeReply:
+				return safeFakeResponse(`{"话术_序列":["合成唤醒回复"],"动作":"忽略"}`), nil
+			default:
+				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
+			}
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	firstRoundID := "round-v4-ended-wakeup-first"
+	beginCommunicationV4PatrolRound(t, h, firstRoundID)
+	firstActor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: firstRoundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = firstActor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 || hand.commandCount() != 1 {
+		t.Fatalf("归档前对话没有收敛: err=%v advice=%d sends=%d",
+			err, len(advice.requests), hand.commandCount())
+	}
+
+	beforeArchive, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || beforeArchive.State.LastBodyAt == nil {
+		t.Fatalf("归档前聚合缺少正文锚: aggregate=%+v err=%v", beforeArchive, err)
+	}
+	archiveAt := beforeArchive.State.LastBodyAt.Add(8 * 24 * time.Hour)
+	h.clock.Add(archiveAt.Sub(h.clock.Now()))
+	archiveDecision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
+		ProfileKey: fixture.profileID, State: beforeArchive.State, Now: h.clock.Now(),
+		Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
+	})
+	if err != nil || archiveDecision.Status != communication.V4ScheduleActionsPlanned ||
+		len(archiveDecision.Actions) != 1 ||
+		archiveDecision.Actions[0].Kind != communication.V4ActionArchive {
+		t.Fatalf("没有得到七天归档动作: decision=%+v err=%v", archiveDecision, err)
+	}
+	archived, applied, err := h.db.ApplyCommunicationV4ArchiveAction(
+		fixture.profileID,
+		beforeArchive.Revision,
+		archiveDecision.Actions[0],
+		h.clock.Now(),
+	)
+	if err != nil || !applied || archived.State.MainStatus != communication.V4StatusEnded ||
+		archived.State.ColdPromptRemaining != 0 || archived.State.ColdWechatRemaining != 0 {
+		t.Fatalf("归档前置没有收敛: aggregate=%+v applied=%v err=%v",
+			archived, applied, err)
+	}
+	archivedRevision := archived.Revision
+
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.BindAccountPrincipal(
+		h.key,
+		"hand-1",
+		"principal-1",
+		"session-1",
+		"boot-1",
+		h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("归档后账号读取失败: account=%+v err=%v", account, err)
+	}
+	idleRoundID := "round-v4-ended-wakeup-idle"
+	beginCommunicationV4PatrolRound(t, h, idleRoundID)
+	idleActor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: idleRoundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = idleActor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	idle, idleErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || idleErr != nil || idle.Revision != archivedRevision ||
+		len(advice.requests) != 2 || hand.commandCount() != 1 {
+		t.Fatalf("已结束档案无新消息时不得发生动作: err=%v aggregate=%+v aggregateErr=%v advice=%d sends=%d",
+			err, idle, idleErr, len(advice.requests), hand.commandCount())
+	}
+
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("读取唤醒前账本失败: messages=%+v err=%v", messages, err)
+	}
+	wakeupText := "这个职位现在还在吗"
+	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: messages[len(messages)-1].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(wakeupText),
+			Text: &wakeupText, Origin: "external",
+		}},
+		SyncedAt: h.clock.Now().Add(time.Minute),
+	})
+	if err != nil || len(changes.Inserted) != 1 {
+		t.Fatalf("追加唤醒消息失败: changes=%+v err=%v", changes, err)
+	}
+	wakeupSeq := changes.Inserted[0].Seq
+
+	wakeupRoundID := "round-v4-ended-wakeup-reply"
+	beginCommunicationV4PatrolRound(t, h, wakeupRoundID)
+	wakeupActor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: wakeupRoundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = wakeupActor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	awake, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	profile, profileErr := h.db.CandidateProfileByID(fixture.profileID)
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || aggregateErr != nil ||
+		awake.State.MainStatus != communication.V4StatusCommunicating ||
+		awake.State.EndReason != "" ||
+		awake.State.ColdPromptRemaining != 0 || awake.State.ColdWechatRemaining != 0 ||
+		awake.State.LastRealMessageSeq != wakeupSeq ||
+		awake.ProjectedThroughSeq != wakeupSeq+1 ||
+		profileErr != nil || profile == nil ||
+		profile.MainStatus != store.CandidateProfileCommunicating || profile.EndReason != nil ||
+		turnErr != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
+		len(advice.requests) != 4 || hand.commandCount() != 2 {
+		t.Fatalf("已结束档案没有经既有轨道唤醒并唯一回复: err=%v aggregate=%+v aggregateErr=%v profile=%+v profileErr=%v turn=%+v turnErr=%v advice=%d sends=%d",
+			err, awake, aggregateErr, profile, profileErr, turn, turnErr,
+			len(advice.requests), hand.commandCount())
+	}
+	revision := awake.Revision
+
+	restarted, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedActor := &roundActor{
+		manager: restarted, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: wakeupRoundID, now: h.clock.Now(),
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		restarted.mu.Lock()
+		err = restartedActor.processCommunicationV4Targets(context.Background())
+		restarted.mu.Unlock()
+		if err != nil {
+			t.Fatalf("重启后重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision ||
+		len(advice.requests) != 4 || hand.commandCount() != 2 {
+		t.Fatalf("唤醒后重启/重复巡检发生增生: aggregate=%+v advice=%d sends=%d err=%v",
+			replayed, len(advice.requests), hand.commandCount(), err)
+	}
+}
+
 func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrowth(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "wechat-accepted", []store.MessageDraft{{
