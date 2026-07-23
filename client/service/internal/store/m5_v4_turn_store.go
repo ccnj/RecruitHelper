@@ -44,6 +44,34 @@ func (s *Store) CommunicationV4OwnsTurn(turnID string) (bool, error) {
 	return owned, err
 }
 
+// CommunicationV4NextAdvice returns the authoritative continuation encoded by
+// the latest immutable V4 application receipt. Patrol uses it to distinguish
+// ordinary intent/reply, service reply and card-rejection reply without
+// inferring a branch from nullable legacy DialogueTurn fields.
+func (s *Store) CommunicationV4NextAdvice(
+	turnID string,
+) (communication.V4AdvicePurpose, bool, error) {
+	if strings.TrimSpace(turnID) == "" {
+		return "", false, ErrDialogueTurnInvalid
+	}
+	var next communication.V4AdvicePurpose
+	owned := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var turn DialogueTurn
+		if err := tx.First(&turn, "turn_id = ?", turnID).Error; err != nil {
+			return err
+		}
+		head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+		if err != nil || !found {
+			return err
+		}
+		next = head.Outcome.NextAdvice
+		owned = true
+		return nil
+	})
+	return next, owned, err
+}
+
 // FreezeCommunicationV4Turn is the V4 production admission transaction for
 // one contiguous inbound turn. It revalidates the complete target and message
 // boundary, runs the deterministic reducer with no invented advice, then

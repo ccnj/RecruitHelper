@@ -451,6 +451,24 @@ func RenderReplyPromptFrozen(prompt, resumeJSON, history, recommendedTimeText, c
 	return rendered, nil
 }
 
+const serviceReplyPolicy = `【当前服务阶段规则】
+候选人已经接受面试，本轮目标是服务，不再推销职位或重新邀约。能直接回答的问题简短回答；涉及改期、取消、薪资细节或任何拿不准的信息，只引导候选人改到微信继续沟通。不得声称“已加上”“已通过”，也不得承诺“帮您反馈”“我去问下”或任何系统不会执行的后续动作。`
+
+// AppendServiceReplyPolicy adds only deterministic business constraints
+// already frozen in the v4 specification. It does not add candidate facts or
+// grant the model any action authority.
+func AppendServiceReplyPolicy(rendered string) (string, error) {
+	return appendV4ReplyPolicy(rendered, serviceReplyPolicy)
+}
+
+func appendV4ReplyPolicy(rendered, policy string) (string, error) {
+	rendered = strings.TrimSpace(rendered)
+	if rendered == "" {
+		return "", errors.New("missingRenderedReplyPrompt")
+	}
+	return rendered + "\n\n" + policy, nil
+}
+
 func RenderIntentPrompt(prompt, sentGreeting string, history, current []AdviceMessage) (string, string, error) {
 	if err := requireInputTokens("意向判断", prompt, "回复", "招呼语"); err != nil {
 		return "", "", err

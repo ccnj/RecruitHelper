@@ -490,9 +490,17 @@ func completeCommunicationV4ReplyTx(
 			aggregate.State, requirement, manualReason, turn.IntentLabel, turn.IntentSource,
 		)
 	} else {
-		intent, err := communicationV4IntentAdviceFromTurn(*turn)
-		if err != nil {
-			return nil, err
+		var intent communication.IntentAdvice
+		switch requirement {
+		case communication.V4DialogueServiceReply:
+			// This branch is selected by deterministic business state and
+			// deliberately skips intent classification.
+			intent = communication.IntentAdvice{State: communication.AdviceAbsent}
+		default:
+			intent, err = communicationV4IntentAdviceFromTurn(*turn)
+			if err != nil {
+				return nil, err
+			}
 		}
 		reply := communication.ReplyAdvice{State: communication.AdviceFailed}
 		if invocation.Status == AIInvocationOK {

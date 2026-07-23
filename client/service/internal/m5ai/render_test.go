@@ -77,6 +77,18 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 }
 
+func TestServiceReplyPolicyAppendsDeterministicBoundaries(t *testing.T) {
+	service, err := AppendServiceReplyPolicy("原职位话术")
+	if err != nil ||
+		!strings.Contains(service, "候选人已经接受面试") ||
+		!strings.Contains(service, "不得承诺“帮您反馈”“我去问下”") {
+		t.Fatalf("服务态约束未完整附加: rendered=%q err=%v", service, err)
+	}
+	if _, err := AppendServiceReplyPolicy(" \n\t "); err == nil {
+		t.Fatal("空基础 prompt 不得被策略文本伪装成合法请求")
+	}
+}
+
 func TestIntentEnvelopeAndPromptAreCanonicalAndDisjoint(t *testing.T) {
 	history := []AdviceMessage{{Seq: 1, Direction: "outbound", Kind: "greeting", Text: "你好"}}
 	turn := []AdviceMessage{

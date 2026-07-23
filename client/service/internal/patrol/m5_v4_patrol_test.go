@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
@@ -463,6 +465,124 @@ func TestCommunicationV4PatrolGlobalStopStopsLaterProfiles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			testCommunicationV4PatrolGlobalStop(t, tc.cancelContext)
 		})
+	}
+}
+
+func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(t, h, "service", "我想先了解一下岗位")
+
+	advice := &recordingAdviceExecutor{
+		complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			switch call {
+			case 1:
+				if request.Purpose != m5ai.PurposeIntent {
+					return m5ai.CompletionResponse{}, fmt.Errorf("首轮意向用途错误: %q", request.Purpose)
+				}
+				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+			case 2:
+				if request.Purpose != m5ai.PurposeReply {
+					return m5ai.CompletionResponse{}, fmt.Errorf("首轮回复用途错误: %q", request.Purpose)
+				}
+				return safeFakeResponse(`{"话术_序列":["可以的，我们继续聊聊岗位细节"],"动作":"忽略"}`), nil
+			case 3:
+				if request.Purpose != m5ai.PurposeReply {
+					return m5ai.CompletionResponse{}, fmt.Errorf("服务态不得调用 %q", request.Purpose)
+				}
+				if !strings.Contains(request.UserContent, "候选人已经接受面试") ||
+					!strings.Contains(request.UserContent, "不得承诺“帮您反馈”“我去问下”") {
+					return m5ai.CompletionResponse{}, errors.New("服务态规则未进入 provider 请求")
+				}
+				return safeFakeResponse(`{"话术_序列":["面试地址以邀约信息为准，有其他细节我们微信上聊哈"],"动作":"忽略"}`), nil
+			default:
+				return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次建议调用", call)
+			}
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-service"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 2 || hand.commandCount() != 1 {
+		t.Fatalf("进入服务态前的普通轮次未完成: advice=%+v sends=%d",
+			advice.requests, hand.commandCount())
+	}
+
+	acceptedAt := h.clock.Now().Add(time.Minute)
+	accepted, err := h.db.ApplyCommunicationV4BusinessEvent(store.ApplyCommunicationV4BusinessEventRequest{
+		ProfileID: fixture.profileID,
+		Event: communication.BusinessEvent{
+			Key: "card:99:pending:accepted", Kind: communication.EventInterviewAccepted,
+			Source: communication.EventSourceCardTransition, MessageSeq: 99,
+			OccurredAt: &acceptedAt,
+		},
+		AppliedAt: acceptedAt,
+	})
+	if err != nil || accepted.Aggregate.State.MainStatus != communication.V4StatusInterviewed {
+		t.Fatalf("服务态前置事实失败: result=%+v err=%v", accepted, err)
+	}
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil || len(messages) == 0 {
+		t.Fatalf("服务态前置账本不可用: messages=%+v err=%v", messages, err)
+	}
+	serviceText := "面试地址在哪里"
+	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: messages[len(messages)-1].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(serviceText),
+			Text: &serviceText, Origin: "external",
+		}},
+		SyncedAt: acceptedAt.Add(time.Minute),
+	})
+	if err != nil || len(changes.Inserted) != 1 {
+		t.Fatalf("追加服务态入站失败: changes=%+v err=%v", changes, err)
+	}
+	serviceInboundSeq := changes.Inserted[0].Seq
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 3 || advice.requests[2].Purpose != m5ai.PurposeReply ||
+		hand.commandCount() != 2 {
+		t.Fatalf("服务态必须新增一次 reply、零 intent、一次发送: advice=%+v sends=%d",
+			advice.requests, hand.commandCount())
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnCompleted {
+		t.Fatalf("服务态轮次未完成: turn=%+v err=%v", turn, err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || aggregate.State.MainStatus != communication.V4StatusInterviewed ||
+		aggregate.ProjectedThroughSeq != serviceInboundSeq+1 {
+		t.Fatalf("服务态发送错误推进主状态或游标: aggregate=%+v err=%v", aggregate, err)
 	}
 }
 
