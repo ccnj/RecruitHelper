@@ -516,18 +516,22 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 	s := openTest(t)
 	at := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 	_, root := seedSuccessfulV4Greeting(t, s, "v4-actions", "conversation-v4-actions", at)
+	if root.State.LastOutboundAt == nil {
+		t.Fatal("测试招呼根缺少出站时钟")
+	}
+	eventAt := root.State.LastOutboundAt.Add(time.Minute)
 	event := communication.BusinessEvent{
 		Key: "message:2", Kind: communication.EventCandidateExpressionReceived,
 		Source: communication.EventSourceMessage, MessageSeq: 2,
-		OccurredAt: &at, ExpressionKind: communication.ExpressionText, Text: "在吗",
+		OccurredAt: &eventAt, ExpressionKind: communication.ExpressionText, Text: "在吗",
 	}
 	if _, err := s.ApplyCommunicationV4BusinessEvent(ApplyCommunicationV4BusinessEventRequest{
-		ProfileID: root.ProfileID, Event: event, AppliedAt: at.Add(time.Minute),
+		ProfileID: root.ProfileID, Event: event, AppliedAt: eventAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	sentAt := at.Add(2 * time.Minute)
+	sentAt := eventAt.Add(time.Minute)
 	action := communication.V4ConfirmedAction{
 		ActionKey: "turn:v4-actions|replyText", Kind: communication.V4ActionReplyText,
 		MessageSeq: 3, SentAt: &sentAt,
