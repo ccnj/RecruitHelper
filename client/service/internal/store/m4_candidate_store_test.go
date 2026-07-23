@@ -169,6 +169,8 @@ func TestCandidateProfileUpsertNeverResetsExistingState(t *testing.T) {
 	}{
 		{name: "greeted", status: CandidateProfileGreeted},
 		{name: "communicating", status: CandidateProfileCommunicating},
+		{name: "invited", status: CandidateProfileInvited},
+		{name: "interviewed", status: CandidateProfileInterviewed},
 		{name: "ended", status: CandidateProfileEnded},
 		{name: "eliminated", status: CandidateProfileEliminated},
 	} {

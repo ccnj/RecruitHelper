@@ -89,6 +89,18 @@ func seedCommunicationSourcingResume(
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := s.db.Model(&Conversation{}).
+		Where("platform = ? AND account_ref = ? AND conversation_ref = ?",
+			fixture.Platform, fixture.AccountRef, fixture.ConversationRef).
+		Update("last_message_seq", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	messageSeq := int64(1)
+	if err := s.db.Model(&EffectIntent{}).
+		Where("intent_id = ?", fixture.GreetingIntent).
+		Update("result_message_seq", messageSeq).Error; err != nil {
+		t.Fatal(err)
+	}
 	if _, created, err := s.EnsureCommunicationV4RootForGreetedProfile(
 		fixture.ProfileID, now,
 	); err != nil || !created {
