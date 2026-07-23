@@ -2,6 +2,8 @@ package store
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -22,6 +24,12 @@ var (
 )
 
 const profileAIContextReboundReason = "contextRebound"
+
+const (
+	sourcingProfileAIContextBindingDomain = "profile-ai-context-sourcing-v1|"
+	sourcingProfileAIContextBindingReason = "sourcingGreeting"
+	sourcingProfileAIContextBoundBy       = "system:sourcing"
+)
 
 // JobAIContextRevisionSummary 是管理列表可用的元数据投影。它不返回 prompt、
 // 客户事实或完整来源包，更不联结 Candidate/Profile 的平台身份字段。
@@ -313,6 +321,139 @@ func (s *Store) BindActiveM5TrialProfileAIContext(req BindProfileAIContextReques
 		return nil, err
 	}
 	return &out, nil
+}
+
+// BindSourcingProfileAIContext binds the exact context revision that produced
+// this profile's successful M6 greeting. It cannot guess by job title, current
+// account config or a newer revision, and it never supersedes a conflicting
+// human/legacy binding.
+func (s *Store) BindSourcingProfileAIContext(
+	profileID string,
+	boundAt time.Time,
+) (*ProfileAIContextBinding, bool, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return nil, false, ErrProfileAIContextBindingInvalid
+	}
+	if boundAt.IsZero() {
+		boundAt = time.Now()
+	}
+	boundAt = boundAt.UTC()
+	var out ProfileAIContextBinding
+	created := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		aggregate, err := communicationV4AggregateTx(tx, profileID)
+		if err != nil {
+			return err
+		}
+		var invocation SourcingGreetingInvocation
+		if err := tx.First(&invocation, "profile_id = ?", profileID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrProfileAIContextBindingInvalid
+			}
+			return err
+		}
+		source := SourcingGreetingEffectSource{
+			BatchID: invocation.BatchID, InvocationID: invocation.InvocationID,
+		}
+		material, err := loadSourcingGreetingEffectMaterialTx(tx, source)
+		if err != nil {
+			return err
+		}
+		if err := validateSourcingGreetingGenerationMaterial(material, source); err != nil ||
+			invocation.EffectIntentID == nil ||
+			*invocation.EffectIntentID != aggregate.RootGreetingIntentID ||
+			material.Profile.SuccessfulGreetingIntentID == nil ||
+			*material.Profile.SuccessfulGreetingIntentID != aggregate.RootGreetingIntentID {
+			return ErrProfileAIContextBindingConflict
+		}
+		var revision JobAIContextRevision
+		if err := tx.First(&revision, "revision_hash = ?", invocation.ContextRevisionHash).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrJobAIContextRevisionNotFound
+			}
+			return err
+		}
+		bindingID := sourcingProfileAIContextBindingID(profileID, revision.RevisionHash)
+
+		var current ProfileAIContextBinding
+		currentErr := tx.First(
+			&current, "profile_id = ? AND status = ?", profileID, ProfileAIContextBindingActive,
+		).Error
+		if currentErr == nil {
+			if current.ContextID != revision.ContextID || current.RevisionHash != revision.RevisionHash {
+				return ErrProfileAIContextBindingConflict
+			}
+			out = current
+			return nil
+		}
+		if !errors.Is(currentErr, gorm.ErrRecordNotFound) {
+			return currentErr
+		}
+
+		var sameID ProfileAIContextBinding
+		sameIDErr := tx.First(&sameID, "binding_id = ?", bindingID).Error
+		if sameIDErr == nil {
+			if sameID.ProfileID != profileID || sameID.ContextID != revision.ContextID ||
+				sameID.RevisionHash != revision.RevisionHash ||
+				sameID.Status != ProfileAIContextBindingActive {
+				return ErrProfileAIContextBindingConflict
+			}
+			out = sameID
+			return nil
+		}
+		if !errors.Is(sameIDErr, gorm.ErrRecordNotFound) {
+			return sameIDErr
+		}
+
+		out = ProfileAIContextBinding{
+			BindingID: bindingID, ProfileID: profileID,
+			ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
+			Status: ProfileAIContextBindingActive,
+			Reason: sourcingProfileAIContextBindingReason, BoundBy: sourcingProfileAIContextBoundBy,
+			BoundAt: boundAt,
+		}
+		if err := tx.Create(&out).Error; err != nil {
+			return ErrProfileAIContextBindingConflict
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return &out, created, nil
+}
+
+func (s *Store) SourcingProfileIDsNeedingAIContextForAccount(key AccountKey) ([]string, error) {
+	if strings.TrimSpace(key.Platform) == "" || strings.TrimSpace(key.AccountRef) == "" {
+		return nil, ErrProfileAIContextBindingInvalid
+	}
+	var profileIDs []string
+	err := s.db.Table("candidate_profiles AS p").
+		Select("p.profile_id").
+		Joins("JOIN communication_v4_aggregates AS v4 ON v4.profile_id = p.profile_id").
+		Joins("JOIN sourcing_greeting_invocations AS gi ON gi.profile_id = p.profile_id AND gi.effect_intent_id = p.successful_greeting_intent_id").
+		Joins("LEFT JOIN profile_ai_context_bindings AS b ON b.profile_id = p.profile_id AND b.status = ?", ProfileAIContextBindingActive).
+		Where(
+			"p.platform = ? AND p.account_ref = ? AND p.main_status IN ? AND p.end_reason IS NULL "+
+				"AND gi.status = ? AND gi.finished_at IS NOT NULL AND (b.binding_id IS NULL OR b.revision_hash <> gi.context_revision_hash)",
+			key.Platform, key.AccountRef,
+			[]CandidateProfileStatus{CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileInvited, CandidateProfileInterviewed},
+			AIInvocationOK,
+		).
+		Order("p.profile_id").
+		Scan(&profileIDs).Error
+	if err != nil {
+		return nil, err
+	}
+	return profileIDs, nil
+}
+
+func sourcingProfileAIContextBindingID(profileID, revisionHash string) string {
+	digest := sha256.Sum256([]byte(
+		sourcingProfileAIContextBindingDomain + profileID + "|" + revisionHash,
+	))
+	return "binding-sr1-" + hex.EncodeToString(digest[:])
 }
 
 func (s *Store) ActiveProfileAIContext(profileID string) (*ActiveProfileAIContext, error) {

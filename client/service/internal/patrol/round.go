@@ -177,6 +177,9 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err := a.ensureCommunicationV4Roots(); err != nil {
 		return err
 	}
+	if err := a.ensureSourcingCommunicationContexts(); err != nil {
+		return err
+	}
 	listComplete := true
 	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
 		round.ListComplete = &listComplete
@@ -213,6 +216,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 }
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
+const communicationV4ContextBindingAuditCategory = "communication_v4_context_binding"
 
 func (a *roundActor) ensureCommunicationV4Roots() error {
 	profileIDs, err := a.manager.store.UnrootedGreetedProfileIDsForAccount(a.key())
@@ -228,6 +232,32 @@ func (a *roundActor) ensureCommunicationV4Roots() error {
 				a.manager.store.Audit(
 					communicationV4RootActivationAuditCategory, "", profileID,
 					"status=manualRequired reason=legacyRootBindingConflict",
+				)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *roundActor) ensureSourcingCommunicationContexts() error {
+	profileIDs, err := a.manager.store.SourcingProfileIDsNeedingAIContextForAccount(a.key())
+	if err != nil {
+		return err
+	}
+	for _, profileID := range profileIDs {
+		if _, _, err := a.manager.store.BindSourcingProfileAIContext(
+			profileID, a.manager.now(),
+		); err != nil {
+			if errors.Is(err, store.ErrProfileAIContextBindingInvalid) ||
+				errors.Is(err, store.ErrProfileAIContextBindingConflict) ||
+				errors.Is(err, store.ErrJobAIContextRevisionNotFound) ||
+				errors.Is(err, store.ErrCommunicationV4Conflict) ||
+				errors.Is(err, store.ErrCommunicationV4Corrupt) {
+				a.manager.store.Audit(
+					communicationV4ContextBindingAuditCategory, "", profileID,
+					"status=manualRequired reason=sourcingContextBindingConflict",
 				)
 				continue
 			}

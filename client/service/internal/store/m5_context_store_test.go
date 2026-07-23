@@ -276,3 +276,56 @@ func TestProfileAIContextBindingRequiresCurrentActiveTrialAndExactRevision(t *te
 		t.Fatalf("context/revision 不一致仍可绑定: %v", err)
 	}
 }
+
+func TestSourcingProfileAIContextBindsExactGreetingRevisionWithoutTrial(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "context-binding", 1)
+	s := fixture.Store
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	invocation := fixture.Invocations[0]
+	req := sourcingGreetingEffectRequest(t, fixture, invocation, now)
+	_, err := s.CreateGreetingEffectIntentAndCmd(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	greetedAt := now.Add(time.Minute)
+	if err := s.db.Model(&CmdRecord{}).Where("intent_id = ?", req.Intent.IntentID).
+		Updates(map[string]any{"status": CmdOk, "terminal_at": greetedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&EffectIntent{}).Where("intent_id = ?", req.Intent.IntentID).
+		Updates(map[string]any{"status": EffectIntentOk, "resolved_at": greetedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).Where("profile_id = ?", req.Intent.TargetRef).
+		Updates(map[string]any{
+			"main_status": CandidateProfileGreeted, "successful_greeting_intent_id": req.Intent.IntentID,
+			"greeted_at": greetedAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, wasCreated, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		req.Intent.TargetRef, greetedAt,
+	); err != nil || !wasCreated {
+		t.Fatalf("构造 sourcing V4 根失败: created=%v err=%v", wasCreated, err)
+	}
+
+	profileIDs, err := s.SourcingProfileIDsNeedingAIContextForAccount(fixture.AccountKey)
+	if err != nil || len(profileIDs) != 1 || profileIDs[0] != req.Intent.TargetRef {
+		t.Fatalf("未找到待绑定 sourcing 档案: ids=%v err=%v", profileIDs, err)
+	}
+	binding, wasCreated, err := s.BindSourcingProfileAIContext(req.Intent.TargetRef, greetedAt.Add(time.Minute))
+	if err != nil || !wasCreated || binding.RevisionHash != invocation.ContextRevisionHash ||
+		binding.Reason != sourcingProfileAIContextBindingReason ||
+		binding.BoundBy != sourcingProfileAIContextBoundBy {
+		t.Fatalf("sourcing 上下文绑定错误: binding=%+v created=%v err=%v", binding, wasCreated, err)
+	}
+	replayed, wasCreated, err := s.BindSourcingProfileAIContext(req.Intent.TargetRef, greetedAt.Add(2*time.Minute))
+	if err != nil || wasCreated || replayed.BindingID != binding.BindingID ||
+		!replayed.BoundAt.Equal(binding.BoundAt) {
+		t.Fatalf("sourcing 上下文重放不幂等: binding=%+v created=%v err=%v", replayed, wasCreated, err)
+	}
+	profileIDs, err = s.SourcingProfileIDsNeedingAIContextForAccount(fixture.AccountKey)
+	if err != nil || len(profileIDs) != 0 {
+		t.Fatalf("已绑定档案仍被重复扫描: ids=%v err=%v", profileIDs, err)
+	}
+}
