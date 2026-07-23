@@ -174,6 +174,9 @@ func (a *roundActor) execute(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := a.ensureCommunicationV4Roots(); err != nil {
+		return err
+	}
 	listComplete := true
 	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
 		round.ListComplete = &listComplete
@@ -207,6 +210,31 @@ func (a *roundActor) execute(ctx context.Context) error {
 		}
 	}
 	return a.processM5Trial(ctx)
+}
+
+const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
+
+func (a *roundActor) ensureCommunicationV4Roots() error {
+	profileIDs, err := a.manager.store.UnrootedGreetedProfileIDsForAccount(a.key())
+	if err != nil {
+		return err
+	}
+	for _, profileID := range profileIDs {
+		if _, _, err := a.manager.store.EnsureCommunicationV4RootForGreetedProfile(
+			profileID, a.manager.now(),
+		); err != nil {
+			if errors.Is(err, store.ErrCommunicationV4Conflict) ||
+				errors.Is(err, store.ErrCommunicationV4Missing) {
+				a.manager.store.Audit(
+					communicationV4RootActivationAuditCategory, "", profileID,
+					"status=manualRequired reason=legacyRootBindingConflict",
+				)
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *roundActor) captureSourcingResume(ctx context.Context) (*store.SourcingCandidateRun, error) {

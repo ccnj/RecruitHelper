@@ -156,11 +156,14 @@ func TestPatrolLateBindsGreetedConversationThenImportsHistoryAsBusinessEvent(t *
 		Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: conversationRef,
 	}
 	profile, _ := h.db.CandidateProfileByID(fixture.profileID)
+	v4Root, v4RootErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 	intent, _ := h.db.EffectIntentByID(fixture.intentID)
 	conversation, _ := h.db.ConversationByKey(key)
 	tracked, _ := h.db.TrackedIntentByConversation(key)
 	messages, messagesErr := h.db.MessagesForConversation(key)
-	if messagesErr != nil || profile == nil || profile.ConversationRef == nil ||
+	if messagesErr != nil || v4RootErr != nil || v4Root == nil ||
+		v4Root.RootGreetingIntentID != fixture.intentID || v4Root.ProjectedThroughSeq != 1 ||
+		profile == nil || profile.ConversationRef == nil ||
 		*profile.ConversationRef != conversationRef || intent == nil || intent.ResultConversationRef == nil ||
 		*intent.ResultConversationRef != conversationRef || intent.ResultMessageSeq == nil ||
 		*intent.ResultMessageSeq != 1 || conversation == nil ||
@@ -172,8 +175,8 @@ func TestPatrolLateBindsGreetedConversationThenImportsHistoryAsBusinessEvent(t *
 		messages[1].CardType != string(protocol.CardTypeResumeAttachment) ||
 		messages[1].SourceKey == nil || *messages[1].SourceKey != cardSourceKey ||
 		messages[1].Origin != "external" {
-		t.Fatalf("晚到回绑与历史导入未闭合: profile=%+v intent=%+v conversation=%+v tracked=%+v messages=%+v err=%v",
-			profile, intent, conversation, tracked, messages, messagesErr)
+		t.Fatalf("晚到回绑与历史导入未闭合: root=%+v rootErr=%v profile=%+v intent=%+v conversation=%+v tracked=%+v messages=%+v err=%v",
+			v4Root, v4RootErr, profile, intent, conversation, tracked, messages, messagesErr)
 	}
 	pending := inspectM5Pending(messages)
 	if pending.manualReason != "" || pending.lastOutbound == nil || pending.lastOutbound.Seq != 1 ||

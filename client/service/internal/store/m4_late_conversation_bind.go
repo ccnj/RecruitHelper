@@ -209,6 +209,11 @@ func (s *Store) LateBindGreetedConversations(req LateBindGreetedConversationsReq
 			}).Error; err != nil {
 				return err
 			}
+			if err := bindCommunicationV4RootConversationTx(
+				tx, profile.ProfileID, greeting.IntentID, 1, req.ObservedAt,
+			); err != nil {
+				return err
+			}
 
 			adoptedAt := req.ObservedAt
 			if err := tx.Create(&TrackedIntent{

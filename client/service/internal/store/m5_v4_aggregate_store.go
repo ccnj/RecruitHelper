@@ -47,6 +47,80 @@ func (s *Store) CommunicationV4AggregateByProfile(
 	return &out, nil
 }
 
+// EnsureCommunicationV4RootForGreetedProfile activates a pre-M5-B greeted
+// profile without guessing any later dialogue state. A bound conversation must
+// still contain the unique successful greeting as its first active message;
+// unbound profiles receive only the root and wait for normal late binding.
+func (s *Store) EnsureCommunicationV4RootForGreetedProfile(
+	profileID string,
+	now time.Time,
+) (*CommunicationV4Aggregate, bool, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return nil, false, ErrCommunicationV4Invalid
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+	var out CommunicationV4Aggregate
+	created := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var profile CandidateProfile
+		if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCommunicationV4Missing
+			}
+			return err
+		}
+		if profile.MainStatus != CandidateProfileGreeted || profile.EndReason != nil ||
+			profile.SuccessfulGreetingIntentID == nil || profile.GreetedAt == nil {
+			return ErrCommunicationV4Conflict
+		}
+		var greetingIntent EffectIntent
+		if err := tx.First(
+			&greetingIntent, "intent_id = ?", *profile.SuccessfulGreetingIntentID,
+		).Error; err != nil {
+			return ErrCommunicationV4Conflict
+		}
+		if greetingIntent.Primitive != primitiveChatSendGreeting ||
+			greetingIntent.TargetRef != profile.ProfileID ||
+			greetingIntent.Platform != profile.Platform || greetingIntent.AccountRef != profile.AccountRef ||
+			(greetingIntent.Status != EffectIntentOk && greetingIntent.Status != EffectIntentResolvedOk) {
+			return ErrCommunicationV4Conflict
+		}
+		projectedThroughSeq := int64(0)
+		if profile.ConversationRef != nil {
+			var greeting Message
+			if err := tx.First(
+				&greeting,
+				"outbound_intent_id = ? AND retracted_at IS NULL",
+				*profile.SuccessfulGreetingIntentID,
+			).Error; err != nil {
+				return ErrCommunicationV4Conflict
+			}
+			if greeting.Platform != profile.Platform || greeting.AccountRef != profile.AccountRef ||
+				greeting.ConversationRef != *profile.ConversationRef || greeting.Seq != 1 ||
+				greeting.Direction != "out" || greeting.Kind != "text" {
+				return ErrCommunicationV4Conflict
+			}
+			projectedThroughSeq = greeting.Seq
+		}
+		aggregate, wasCreated, err := applyCommunicationV4RootTx(
+			tx, profile.ProfileID, *profile.SuccessfulGreetingIntentID, projectedThroughSeq, now,
+		)
+		if err != nil {
+			return err
+		}
+		out = *aggregate
+		created = wasCreated
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return &out, created, nil
+}
+
 // applyCommunicationV4RootTx creates the aggregate only after the successful
 // greeting fact is durable in the same transaction. Existing roots are
 // idempotent only for the exact greeting intent; an alternate root is a ledger
@@ -108,6 +182,56 @@ func applyCommunicationV4RootTx(
 	return &aggregate, true, nil
 }
 
+// bindCommunicationV4RootConversationTx advances only the ledger projection
+// boundary when a previously unbound successful greeting is materialized as
+// message 1 during late conversation adoption. The greeting is already part
+// of the root state, so this is not a new reducer input and does not increment
+// Revision.
+func bindCommunicationV4RootConversationTx(
+	tx *gorm.DB,
+	profileID string,
+	greetingIntentID string,
+	messageSeq int64,
+	now time.Time,
+) error {
+	if tx == nil || strings.TrimSpace(profileID) == "" || strings.TrimSpace(greetingIntentID) == "" ||
+		messageSeq != 1 || now.IsZero() {
+		return ErrCommunicationV4Invalid
+	}
+	var aggregate CommunicationV4Aggregate
+	if err := tx.First(&aggregate, "profile_id = ?", profileID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Pre-M5-B greeted rows are rooted by the account activation pass
+			// immediately after late binding.
+			return nil
+		}
+		return err
+	}
+	if _, err := communicationV4AggregateTx(tx, profileID); err != nil {
+		return err
+	}
+	if aggregate.RootGreetingIntentID != greetingIntentID {
+		return ErrCommunicationV4Conflict
+	}
+	if aggregate.ProjectedThroughSeq == messageSeq {
+		return nil
+	}
+	if aggregate.Revision != 0 || aggregate.ProjectedThroughSeq != 0 ||
+		aggregate.State.MainStatus != communication.V4StatusGreeted {
+		return ErrCommunicationV4Conflict
+	}
+	updated := tx.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ? AND revision = 0 AND projected_through_seq = 0", profileID).
+		Updates(map[string]any{"projected_through_seq": messageSeq, "updated_at": now.UTC()})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrCommunicationV4Conflict
+	}
+	return nil
+}
+
 type ApplyCommunicationV4BusinessEventRequest struct {
 	ProfileID string
 	Event     communication.BusinessEvent
@@ -118,6 +242,27 @@ type ApplyCommunicationV4BusinessEventResult struct {
 	Aggregate   CommunicationV4Aggregate
 	Application CommunicationV4ProjectionApplication
 	Applied     bool
+}
+
+func (s *Store) UnrootedGreetedProfileIDsForAccount(key AccountKey) ([]string, error) {
+	if strings.TrimSpace(key.Platform) == "" || strings.TrimSpace(key.AccountRef) == "" {
+		return nil, ErrCommunicationV4Invalid
+	}
+	var profileIDs []string
+	err := s.db.Table("candidate_profiles AS p").
+		Select("p.profile_id").
+		Joins("LEFT JOIN communication_v4_aggregates AS v4 ON v4.profile_id = p.profile_id").
+		Where(
+			"p.platform = ? AND p.account_ref = ? AND p.main_status = ? AND p.end_reason IS NULL "+
+				"AND p.successful_greeting_intent_id IS NOT NULL AND p.greeted_at IS NOT NULL AND v4.profile_id IS NULL",
+			key.Platform, key.AccountRef, CandidateProfileGreeted,
+		).
+		Order("p.profile_id").
+		Scan(&profileIDs).Error
+	if err != nil {
+		return nil, err
+	}
+	return profileIDs, nil
 }
 
 // ApplyCommunicationV4BusinessEvent persists the reducer result and its

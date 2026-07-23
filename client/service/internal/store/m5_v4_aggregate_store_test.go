@@ -63,6 +63,72 @@ func seedSuccessfulV4Greeting(
 	return fixture, *aggregate
 }
 
+func seedLegacyGreetedProfile(
+	t *testing.T,
+	s *Store,
+	profileID string,
+	conversationRef string,
+	greetingSeq int64,
+	at time.Time,
+) greetingLedgerFixture {
+	t.Helper()
+	fixture := seedGreetingLedger(t, s, profileID)
+	req := greetingIntentRequest(fixture, "intent-"+profileID, "", at.Add(-time.Minute))
+	req.Intent.SendFingerprint = "content-" + profileID
+	created, err := s.CreateGreetingEffectIntentAndCmd(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedAt := at
+	intentUpdates := map[string]any{"status": EffectIntentOk, "resolved_at": resolvedAt}
+	profileUpdates := map[string]any{
+		"main_status": CandidateProfileGreeted, "successful_greeting_intent_id": created.Intent.IntentID,
+		"greeted_at": at,
+	}
+	if conversationRef != "" {
+		intentUpdates["result_conversation_ref"] = conversationRef
+		intentUpdates["result_message_seq"] = greetingSeq
+		profileUpdates["conversation_ref"] = conversationRef
+	}
+	if err := s.db.Model(&EffectIntent{}).Where("intent_id = ?", created.Intent.IntentID).
+		Updates(intentUpdates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).Where("profile_id = ?", profileID).
+		Updates(profileUpdates).Error; err != nil {
+		t.Fatal(err)
+	}
+	if conversationRef == "" {
+		return fixture
+	}
+	conversation := Conversation{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: conversationRef,
+		PlatformUserRef: "person-" + profileID, TrackingState: TrackingAdopted,
+		AdoptedBoundarySeq: 0, LastMessageSeq: greetingSeq,
+	}
+	if err := s.db.Create(&conversation).Error; err != nil {
+		t.Fatal(err)
+	}
+	adoptedAt := at
+	if err := s.db.Create(&TrackedIntent{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: conversationRef,
+		Status: TrackingAdopted, RequestedBy: greetingTrackedRequestedBy,
+		RequestedAt: at, AdoptedAt: &adoptedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	text := "历史招呼"
+	intentID := created.Intent.IntentID
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: conversationRef,
+		Seq: greetingSeq, Direction: "out", Kind: "text", ContentHash: req.Intent.SendFingerprint,
+		Text: &text, Origin: "self", OutboundIntentID: &intentID,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
 func TestCommunicationV4SchemaHasRestrictedProfileRootAndNoDelete(t *testing.T) {
 	s := openTest(t)
 	type tableColumn struct {
@@ -160,6 +226,57 @@ func TestSuccessfulGreetingCreatesV4RootAndReplayDoesNotResetIt(t *testing.T) {
 	var count int64
 	if err := s.db.Model(&CommunicationV4Aggregate{}).Where("profile_id = ?", aggregate.ProfileID).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("根重放发生增生: count=%d err=%v", count, err)
+	}
+}
+
+func TestLegacyGreetedProfileRootActivationUsesExactGreetingFact(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 23, 9, 15, 0, 0, time.UTC)
+	fixture := seedLegacyGreetedProfile(t, s, "legacy-bound", "conversation-legacy-bound", 1, at)
+	unrooted, err := s.UnrootedGreetedProfileIDsForAccount(AccountKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+	})
+	if err != nil || len(unrooted) != 1 || unrooted[0] != "legacy-bound" {
+		t.Fatalf("账号激活扫描未找到精确档案: ids=%v err=%v", unrooted, err)
+	}
+	bound, created, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		"legacy-bound", at.Add(time.Minute),
+	)
+	if err != nil || !created || bound.ProjectedThroughSeq != 1 ||
+		bound.RootGreetingIntentID != "intent-legacy-bound" {
+		t.Fatalf("已绑定历史档案根激活失败: aggregate=%+v created=%v err=%v", bound, created, err)
+	}
+	replayed, created, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		"legacy-bound", at.Add(2*time.Minute),
+	)
+	if err != nil || created || replayed.Revision != 0 {
+		t.Fatalf("历史根重放不幂等: aggregate=%+v created=%v err=%v", replayed, created, err)
+	}
+	unrooted, err = s.UnrootedGreetedProfileIDsForAccount(AccountKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+	})
+	if err != nil || len(unrooted) != 0 {
+		t.Fatalf("已激活档案仍被重复扫描: ids=%v err=%v", unrooted, err)
+	}
+
+	seedLegacyGreetedProfile(t, s, "legacy-unbound", "", 0, at)
+	unbound, created, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		"legacy-unbound", at.Add(time.Minute),
+	)
+	if err != nil || !created || unbound.ProjectedThroughSeq != 0 {
+		t.Fatalf("未绑定历史档案不得猜会话: aggregate=%+v created=%v err=%v", unbound, created, err)
+	}
+
+	seedLegacyGreetedProfile(t, s, "legacy-wrong-seq", "conversation-legacy-wrong-seq", 2, at)
+	if _, _, err := s.EnsureCommunicationV4RootForGreetedProfile(
+		"legacy-wrong-seq", at.Add(time.Minute),
+	); !errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf("非首条招呼事实必须阻断激活: %v", err)
+	}
+	var leaked int64
+	if err := s.db.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ?", "legacy-wrong-seq").Count(&leaked).Error; err != nil || leaked != 0 {
+		t.Fatalf("冲突激活泄漏聚合根: count=%d err=%v", leaked, err)
 	}
 }
 
