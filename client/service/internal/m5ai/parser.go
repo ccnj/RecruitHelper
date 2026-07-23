@@ -100,8 +100,14 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 		return ReplySuggestion{}, errors.New("missingPhraseSequence")
 	}
 	for key := range object {
-		if key != "话术_序列" && key != "动作" {
+		if key != "话术_序列" && key != "动作" && key != "会议时间" {
 			return ReplySuggestion{}, errors.New("unknownOutputKey")
+		}
+	}
+	if meetingTimeRaw, exists := object["会议时间"]; exists {
+		var meetingTime string
+		if json.Unmarshal(meetingTimeRaw, &meetingTime) != nil {
+			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
 		}
 	}
 	var phrases []string

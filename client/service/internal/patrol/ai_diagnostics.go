@@ -101,7 +101,8 @@ func safeBusinessParseCode(err error) string {
 	switch err.Error() {
 	case "invalidJSON", "duplicateOutputKey", "unknownOutputKey",
 		"duplicateIntentSignal", "missingIntentSignal", "invalidIntentSignal",
-		"missingPhraseSequence", "invalidPhraseSequenceType", "emptyPhraseSequence",
+		"missingPhraseSequence", "invalidPhraseSequenceType", "invalidMeetingTimeType",
+		"emptyPhraseSequence",
 		"emptyReplyText",
 		"sendTextLimit", "missingScore", "duplicateScore", "invalidScore",
 		"missingGreetingText", "invalidGreetingText":

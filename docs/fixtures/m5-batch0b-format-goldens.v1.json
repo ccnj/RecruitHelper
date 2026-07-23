@@ -9,7 +9,7 @@
     "history": 1,
     "schedule": 1,
     "providerAssembly": 1,
-    "replyParser": 1,
+    "replyParser": 2,
     "intentParser": 1,
     "intentEnvelope": 1,
     "intentShortCircuit": 1
@@ -531,21 +531,57 @@
         "话术_序列"
       ],
       "allowedIgnoredKeys": [
-        "动作"
+        "动作",
+        "会议时间"
       ],
       "cases": [
         {
           "id": "one_phrase_valid_action_ignored",
           "input": {
-            "rawJSON": "{\"话术_序列\":[\" 你好 \"],\"动作\":\"任意值\"}"
+            "rawJSON": "{\"话术_序列\":[\" 你好 \"],\"动作\":\"任意值\",\"会议时间\":\"\"}"
           },
           "expected": {
             "status": "ok",
             "text": "你好",
             "ignoredKeys": [
-              "动作"
+              "动作",
+              "会议时间"
             ],
             "businessActionCount": 0
+          }
+        },
+        {
+          "id": "nonempty_meeting_time_ignored",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\"你好\"],\"会议时间\":\"明天下午\"}"
+          },
+          "expected": {
+            "status": "ok",
+            "text": "你好",
+            "ignoredKeys": [
+              "会议时间"
+            ],
+            "businessActionCount": 0
+          }
+        },
+        {
+          "id": "numeric_meeting_time_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\"你好\"],\"会议时间\":123}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidMeetingTimeType"
+          }
+        },
+        {
+          "id": "object_meeting_time_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\"你好\"],\"会议时间\":{\"开始\":\"明天\"}}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidMeetingTimeType"
           }
         },
         {

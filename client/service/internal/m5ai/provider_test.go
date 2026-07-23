@@ -719,7 +719,7 @@ func (p *scriptedProvider) CompleteJSON(_ context.Context, request CompletionReq
 
 func TestAIAdvisorKeepsIntentAndReplyAsTwoCallsAndFallsBackOnce(t *testing.T) {
 	provider := &scriptedProvider{
-		responses: []CompletionResponse{{}, {JSONText: `{"话术_序列":[" 第一段 ","", "第二段"],"动作":"忽略"}`}},
+		responses: []CompletionResponse{{}, {JSONText: `{"话术_序列":[" 第一段 ","", "第二段"],"动作":"忽略","会议时间":""}`}},
 		errors:    []error{errors.New("intent failed"), nil},
 	}
 	advisor, _ := NewAIAdvisor(provider)

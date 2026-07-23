@@ -25,12 +25,14 @@ func (diagnosticAdviceStub) CompleteJSON(
 }
 
 func TestAIDiagnosticsKeepKnownParserCodeAndBoundUnknownText(t *testing.T) {
-	known := store.AIInvocationCompletion{Status: store.AIInvocationOK}
-	markBusinessParseFailure(&known, errors.New("missingPhraseSequence"))
-	if known.Status != store.AIInvocationInvalidOutput ||
-		known.FailureStage != m5ai.FailureStageBusinessParse ||
-		known.ErrorDetailCode != "missingPhraseSequence" {
-		t.Fatalf("已知解析码未保留: %+v", known)
+	for _, code := range []string{"missingPhraseSequence", "invalidMeetingTimeType"} {
+		known := store.AIInvocationCompletion{Status: store.AIInvocationOK}
+		markBusinessParseFailure(&known, errors.New(code))
+		if known.Status != store.AIInvocationInvalidOutput ||
+			known.FailureStage != m5ai.FailureStageBusinessParse ||
+			known.ErrorDetailCode != code {
+			t.Fatalf("已知解析码未保留: %+v", known)
+		}
 	}
 
 	unknown := store.AIInvocationCompletion{Status: store.AIInvocationOK}
