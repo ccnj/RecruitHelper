@@ -459,6 +459,14 @@
           "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
         }
       },
+      "InterviewDetails": {
+        "type": "object",
+        "fields": {
+          "startsAt": { "type": "int64", "minimum": 1 },
+          "endsAt": { "type": "int64", "minimum": 1 },
+          "method": { "type": "string", "enumRef": "enums.interviewMethod" }
+        }
+      },
       "ThreadMessage": {
         "type": "object",
         "fields": {
@@ -471,6 +479,7 @@
           "sourceKey": { "type": "string", "optional": true, "minLength": 64, "maxLength": 64, "maxBytes": 64 },
           "cardType": { "type": "string", "enumRef": "enums.cardType", "optional": true, "nullable": true },
           "cardState": { "type": "string", "enumRef": "enums.cardState", "optional": true, "nullable": true },
+          "interview": { "ref": "InterviewDetails", "optional": true },
           "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
         }
       },
@@ -572,6 +581,50 @@
         "type": "object",
         "fields": {
           "type": { "type": "string", "enumRef": "enums.sendMessageEvidenceType" }
+        }
+      },
+      "ChatSendWechatInviteArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "ChatSendWechatInviteData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "sourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ChatSendWechatInviteEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.sendWechatInviteEvidenceType" }
+        }
+      },
+      "ChatSendInviteCardArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "interview": { "ref": "InterviewDetails" }
+        }
+      },
+      "ChatSendInviteCardData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
+          "sourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
+          "interview": { "ref": "InterviewDetails" },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ChatSendInviteCardEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.sendInviteCardEvidenceType" }
         }
       },
       "CandidateReadCurrentArgs": { "type": "object", "fields": {} },
@@ -773,6 +826,9 @@
     "witnessUnavailableReason": ["writeFailed", "capacityExceeded", "storeCorrupt"],
     "sendMessageEvidenceType": ["outboundMessageObserved"],
     "sendGreetingEvidenceType": ["outboundGreetingObserved"],
+    "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
+    "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
+    "interviewMethod": ["wechatVideo"],
     "candidateContactState": ["unestablished", "established", "unknown"],
     "sourcingWindowMove": ["current", "reset", "next"],
     "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "identityUnverified", "unknown"],
@@ -960,7 +1016,32 @@
       "verification": { "primitive": "chat.readGreetingOutcome", "ver": 1, "maxRounds": 3 },
       "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有输入或弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。成功接受同一目标从关系未建立变为已建立的可见业务状态;conversationRef 只作可选丰富正证。无变化、目标消失或读失败只算未确认并进入验证或 suspect,不得推断失败或第二次动作"
     },
-    "chat.sendInviteCard":{ "ver": 0, "class": "effectful", "batch": "X", "note": "阶段四未来能力占位:向会话发送邀面或联系卡片;ver=0 不得上报 caps 或派发" }
+    "chat.sendWechatInvite": {
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "ChatSendWechatInviteArgs", "dataSchema": "ChatSendWechatInviteData",
+      "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatSendWechatInviteEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"],
+      "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
+      "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
+      "note": "只向既有 tracked 会话发起一次换微信邀请。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;原语内不重试。成功只接受相对基线恰好新增一条服务端确认的我方 card/wechatExchange/pending,且具有稳定 sourceKey;零新增、多新增、并发入站、目标换绑或读取失败均为未确认,进入 chat.readThread 验证或 suspect,禁止第二次动作"
+    },
+    "chat.sendInviteCard": {
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "ChatSendInviteCardArgs", "dataSchema": "ChatSendInviteCardData",
+      "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatSendInviteCardEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"],
+      "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
+      "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
+      "note": "只向既有 tracked 会话发送一次线上邀面卡,当前 method 仅支持 wechatVideo,且 endsAt 必须大于 startsAt。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与 startsAt/endsAt/method 全部精确相等;平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
+    },
+    "chat.acceptWechat": {
+      "ver": 0, "class": "effectful", "batch": "X",
+      "note": "候选人主动换微信请求的接受能力占位;点击接受的公开动作与后置状态真机事实门未完成,ver=0 不得上报 caps、派发或注册生产 handler"
+    },
+    "chat.readWechatExchangeOutcome": {
+      "ver": 0, "class": "intrusive", "batch": "X",
+      "note": "换微信交换结果专门回读占位;当前 259 只经 chat.readThread 感知,独立读面事实门未完成,ver=0 不得上报 caps、派发或注册生产 handler"
+    }
   },
   "events": {
     "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "仅拉前巡检;减小/清零仅记录" },

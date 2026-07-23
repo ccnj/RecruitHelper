@@ -439,12 +439,127 @@ func TestM4CandidateAndGreetingSchemas(t *testing.T) {
 	if meta.Ver != 1 || meta.GuardsSchema == "" || meta.EvidenceSchema == "" || meta.VerificationPrimitive != PrimChatReadGreetingOutcome || meta.VerificationVer != 1 || meta.VerificationMaxRounds != DefaultVerificationMaxRounds {
 		t.Fatalf("greeting verifier metadata 漂移:%+v", meta)
 	}
-	invite := Primitives[PrimChatSendInviteCard]
-	if invite.Ver != 0 || invite.ArgsSchema != "" || invite.DataSchema != "" || invite.GuardsSchema != "" || invite.EvidenceSchema != "" {
-		t.Fatalf("sendInviteCard 仍应为 ver=0 占位")
+}
+
+func TestM5BCardPrimitiveSchemas(t *testing.T) {
+	wechatCommand := json.RawMessage(`{
+		"name":"chat.sendWechatInvite","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1"},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendWechatInvite:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"tail-hash"}]}
+	}`)
+	if err := ValidateKindBody(KindCmd, wechatCommand); err != nil {
+		t.Fatalf("合法 chat.sendWechatInvite 命令应通过:%v", err)
 	}
-	inviteCommand := json.RawMessage(`{"name":"chat.sendInviteCard","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{},"idemKey":"ik-1","deadline":1999999999999,"execBudgetMs":60000}`)
-	assertValidationError(t, ValidateKindBody(KindCmd, inviteCommand), "$.name", "primitive")
+	wechatMissingGuards := json.RawMessage(`{
+		"name":"chat.sendWechatInvite","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1"},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendWechatInvite:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000
+	}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, wechatMissingGuards), "$.guards", "required")
+
+	inviteCommand := json.RawMessage(`{
+		"name":"chat.sendInviteCard","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","interview":{"startsAt":1000,"endsAt":2000,"method":"wechatVideo"}},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendInviteCard:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":120000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"tail-hash"}]}
+	}`)
+	if err := ValidateKindBody(KindCmd, inviteCommand); err != nil {
+		t.Fatalf("合法 chat.sendInviteCard 命令应通过:%v", err)
+	}
+	invalidMethod := json.RawMessage(`{
+		"name":"chat.sendInviteCard","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","interview":{"startsAt":1000,"endsAt":2000,"method":"phone"}},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendInviteCard:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":120000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"tail-hash"}]}
+	}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, invalidMethod), "$.args.interview.method", "enum")
+	invalidStart := json.RawMessage(`{
+		"name":"chat.sendInviteCard","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","interview":{"startsAt":0,"endsAt":2000,"method":"wechatVideo"}},
+		"idemKey":"ik1:zhilian:acc-1:chat.sendInviteCard:conv-1:int-1",
+		"deadline":1999999999999,"execBudgetMs":120000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"tail-hash"}]}
+	}`)
+	assertValidationError(t, ValidateKindBody(KindCmd, invalidStart), "$.args.interview.startsAt", "minimum")
+
+	wechatResult := json.RawMessage(`{
+		"ref":"wechat-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","observedAt":20},
+		"evidence":[{"type":"outboundWechatInviteObserved"}],"replayed":false,"execMs":10
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatSendWechatInvite, 1, wechatResult); err != nil {
+		t.Fatalf("合法换微信邀请 result 应通过:%v", err)
+	}
+	wechatMissingSourceKey := json.RawMessage(`{
+		"ref":"wechat-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","observedAt":20},
+		"evidence":[{"type":"outboundWechatInviteObserved"}],"replayed":false,"execMs":10
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendWechatInvite, 1, wechatMissingSourceKey), "$.data.sourceKey", "required")
+
+	inviteResult := json.RawMessage(`{
+		"ref":"invite-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","interview":{"startsAt":1000,"endsAt":2000,"method":"wechatVideo"},"observedAt":20},
+		"evidence":[{"type":"outboundInterviewInviteObserved"}],"replayed":false,"execMs":10
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatSendInviteCard, 1, inviteResult); err != nil {
+		t.Fatalf("合法邀面卡 result 应通过:%v", err)
+	}
+	inviteWrongEvidence := json.RawMessage(`{
+		"ref":"invite-1","status":"ok",
+		"data":{"conversationRef":"conv-1","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","interview":{"startsAt":1000,"endsAt":2000,"method":"wechatVideo"},"observedAt":20},
+		"evidence":[{"type":"outboundWechatInviteObserved"}],"replayed":false,"execMs":10
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatSendInviteCard, 1, inviteWrongEvidence), "$.evidence[0].type", "enum")
+
+	threadWithInterview := json.RawMessage(`{
+		"messages":[{"idx":0,"direction":"out","kind":"card","text":null,"blobRef":null,
+			"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"sourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"cardType":"interviewInvite","cardState":"unknown",
+			"interview":{"startsAt":1000,"endsAt":2000,"method":"wechatVideo"}}],
+		"reachedTop":true,"anchorMatched":false,"peer":null,"complete":true
+	}`)
+	if err := ValidatePrimitiveData(PrimChatReadThread, 1, threadWithInterview); err != nil {
+		t.Fatalf("合法邀面卡线程消息应通过:%v", err)
+	}
+	threadWithInvalidMethod := json.RawMessage(`{
+		"messages":[{"idx":0,"direction":"out","kind":"card","text":null,"blobRef":null,
+			"contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"cardType":"interviewInvite","cardState":"unknown",
+			"interview":{"startsAt":1000,"endsAt":2000,"method":"phone"}}],
+		"reachedTop":true,"anchorMatched":false,"peer":null,"complete":true
+	}`)
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadThread, 1, threadWithInvalidMethod), "$.messages[0].interview.method", "enum")
+
+	for _, primitive := range []string{PrimChatAcceptWechat, PrimChatReadWechatExchangeOutcome} {
+		meta := Primitives[primitive]
+		if meta.Ver != 0 || meta.ArgsSchema != "" || meta.DataSchema != "" || meta.GuardsSchema != "" || meta.EvidenceSchema != "" {
+			t.Fatalf("%s 应保持 ver=0 无 schema 占位:%+v", primitive, meta)
+		}
+		command := json.RawMessage(`{"name":"` + primitive + `","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{},"idemKey":"ik-1","deadline":1999999999999,"execBudgetMs":60000}`)
+		assertValidationError(t, ValidateKindBody(KindCmd, command), "$.name", "primitive")
+	}
+
+	for _, primitive := range []string{PrimChatSendWechatInvite, PrimChatSendInviteCard} {
+		meta := Primitives[primitive]
+		if meta.Ver != 1 || meta.Class != ClassEffectful || meta.Batch != BatchX ||
+			meta.GuardsSchema != "ChatSendMessageGuards" || meta.EvidenceSchema == "" ||
+			meta.VerificationPrimitive != PrimChatReadThread || meta.VerificationVer != 1 ||
+			meta.VerificationMaxRounds != DefaultVerificationMaxRounds {
+			t.Fatalf("%s 卡片发送元数据漂移:%+v", primitive, meta)
+		}
+	}
 }
 
 func TestM5CandidateReadResumeSchemas(t *testing.T) {
