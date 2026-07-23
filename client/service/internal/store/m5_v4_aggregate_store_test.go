@@ -394,3 +394,108 @@ func TestCommunicationV4UnknownEventPersistsManualBlockAndConcurrentReplayDoesNo
 		t.Fatalf("并发重放 application 增生: %d", applications)
 	}
 }
+
+func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	_, root := seedSuccessfulV4Greeting(t, s, "v4-actions", "conversation-v4-actions", at)
+	event := communication.BusinessEvent{
+		Key: "message:2", Kind: communication.EventCandidateExpressionReceived,
+		Source: communication.EventSourceMessage, MessageSeq: 2,
+		OccurredAt: &at, ExpressionKind: communication.ExpressionText, Text: "在吗",
+	}
+	if _, err := s.ApplyCommunicationV4BusinessEvent(ApplyCommunicationV4BusinessEventRequest{
+		ProfileID: root.ProfileID, Event: event, AppliedAt: at.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sentAt := at.Add(2 * time.Minute)
+	action := communication.V4ConfirmedAction{
+		ActionKey: "turn:v4-actions|replyText", Kind: communication.V4ActionReplyText,
+		MessageSeq: 3, SentAt: &sentAt,
+	}
+	var confirmed CommunicationV4Aggregate
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		next, _, applied, err := applyCommunicationV4ConfirmedActionTx(
+			tx, root.ProfileID, action, sentAt,
+		)
+		if err == nil && !applied {
+			t.Fatal("首次正证必须推进")
+		}
+		confirmed = next
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.Revision != 2 || confirmed.State.LastOutboundMessageSeq != 3 ||
+		confirmed.State.LastBodyAt == nil || !confirmed.State.LastBodyAt.Equal(sentAt) {
+		t.Fatalf("正证未推进预算/正文时钟: %+v", confirmed)
+	}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		next, _, applied, err := applyCommunicationV4ConfirmedActionTx(
+			tx, root.ProfileID, action, sentAt.Add(time.Minute),
+		)
+		if err == nil && (applied || next.Revision != 2) {
+			t.Fatalf("正证重放发生增生: applied=%v aggregate=%+v", applied, next)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := action
+	swapped.MessageSeq = 4
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+			tx, root.ProfileID, swapped, sentAt.Add(2*time.Minute),
+		)
+		return err
+	})
+	if !errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf("同 actionKey 偷换正证必须冲突: %v", err)
+	}
+
+	archiveAt := at.Add(8 * 24 * time.Hour)
+	archive := communication.V4PlannedAction{
+		ActionKey: root.ProfileID + "|schedule|archive",
+		Kind:      communication.V4ActionArchive,
+		EndReason: communication.V4EndFallback,
+	}
+	var archived CommunicationV4Aggregate
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		next, _, applied, err := applyCommunicationV4ArchiveActionTx(
+			tx, root.ProfileID, archive, archiveAt,
+		)
+		if err == nil && !applied {
+			t.Fatal("首次归档必须推进")
+		}
+		archived = next
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Revision != 3 || archived.State.MainStatus != communication.V4StatusEnded ||
+		archived.State.EndReason != communication.V4EndFallback {
+		t.Fatalf("归档未推进聚合: %+v", archived)
+	}
+	profile, _ := s.CandidateProfileByID(root.ProfileID)
+	if profile == nil || profile.MainStatus != CandidateProfileEnded || profile.EndReason == nil ||
+		*profile.EndReason != CandidateProfileEndFallbackArchive {
+		t.Fatalf("归档未同步 CandidateProfile: %+v", profile)
+	}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		next, _, applied, err := applyCommunicationV4ArchiveActionTx(
+			tx, root.ProfileID, archive, archiveAt.Add(time.Minute),
+		)
+		if err == nil && (applied || next.Revision != 3) {
+			t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", applied, next)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

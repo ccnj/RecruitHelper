@@ -210,6 +210,125 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 	return out, nil
 }
 
+// applyCommunicationV4ConfirmedActionTx is intentionally package-private. It
+// may only be called from a transaction that has already proved the matching
+// CommunicationAction, EffectIntent positive terminal and unique outbound
+// Message. No controller may advance "sent" facts by calling a public boolean
+// endpoint.
+func applyCommunicationV4ConfirmedActionTx(
+	tx *gorm.DB,
+	profileID string,
+	action communication.V4ConfirmedAction,
+	appliedAt time.Time,
+) (CommunicationV4Aggregate, CommunicationV4ProjectionApplication, bool, error) {
+	if tx == nil || strings.TrimSpace(profileID) == "" || strings.TrimSpace(action.ActionKey) == "" ||
+		appliedAt.IsZero() {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+	}
+	appliedAt = appliedAt.UTC()
+	digest, err := communicationV4InputDigest(action)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	aggregate, err := communicationV4AggregateTx(tx, profileID)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	existing, found, err := communicationV4ApplicationTx(
+		tx, profileID, CommunicationV4InputConfirmedAction, action.ActionKey,
+	)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	if found {
+		if existing.InputDigest != digest || existing.SemanticKind != string(action.Kind) ||
+			existing.MessageSeq != action.MessageSeq {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
+		return aggregate, existing, false, nil
+	}
+	if aggregate.Revision == ^uint64(0) {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
+	state, err := communication.ApplyV4ConfirmedAction(aggregate.State, action)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	next := aggregate
+	next.State = state
+	next.Revision++
+	next.UpdatedAt = appliedAt
+	application := CommunicationV4ProjectionApplication{
+		ProfileID: profileID, InputKind: CommunicationV4InputConfirmedAction, InputKey: action.ActionKey,
+		InputDigest: digest, SemanticKind: string(action.Kind), MessageSeq: action.MessageSeq,
+		FromRevision: aggregate.Revision, ToRevision: next.Revision,
+		Outcome:   CommunicationV4ApplicationOutcome{Dialogue: communication.V4DialogueNone},
+		AppliedAt: appliedAt,
+	}
+	if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	return next, application, true, nil
+}
+
+// applyCommunicationV4ArchiveActionTx persists a previously planned local
+// archive. It is also package-private so a controller cannot invent terminal
+// state without the schedule/action transaction that owns ActionKey.
+func applyCommunicationV4ArchiveActionTx(
+	tx *gorm.DB,
+	profileID string,
+	action communication.V4PlannedAction,
+	appliedAt time.Time,
+) (CommunicationV4Aggregate, CommunicationV4ProjectionApplication, bool, error) {
+	if tx == nil || strings.TrimSpace(profileID) == "" || strings.TrimSpace(action.ActionKey) == "" ||
+		action.Kind != communication.V4ActionArchive || appliedAt.IsZero() {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+	}
+	appliedAt = appliedAt.UTC()
+	digest, err := communicationV4InputDigest(action)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	aggregate, err := communicationV4AggregateTx(tx, profileID)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	existing, found, err := communicationV4ApplicationTx(
+		tx, profileID, CommunicationV4InputArchiveAction, action.ActionKey,
+	)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	if found {
+		if existing.InputDigest != digest || existing.SemanticKind != string(action.Kind) {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
+		return aggregate, existing, false, nil
+	}
+	if aggregate.Revision == ^uint64(0) {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
+	state, err := communication.ApplyV4ArchiveAction(aggregate.State, action)
+	if err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	next := aggregate
+	next.State = state
+	next.Revision++
+	next.UpdatedAt = appliedAt
+	application := CommunicationV4ProjectionApplication{
+		ProfileID: profileID, InputKind: CommunicationV4InputArchiveAction, InputKey: action.ActionKey,
+		InputDigest: digest, SemanticKind: string(action.Kind),
+		FromRevision: aggregate.Revision, ToRevision: next.Revision,
+		Outcome:   CommunicationV4ApplicationOutcome{Dialogue: communication.V4DialogueNone},
+		AppliedAt: appliedAt,
+	}
+	if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	return next, application, true, nil
+}
+
 func communicationV4AggregateTx(
 	tx *gorm.DB,
 	profileID string,
