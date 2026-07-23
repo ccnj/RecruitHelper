@@ -55,7 +55,8 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		case EventCandidateExpressionReceived:
 			ordinaryEvents = append(ordinaryEvents, event)
 			frozen.Messages = append(frozen.Messages, frozenInboundFromEvent(event))
-		case EventResumeSubmitted, EventWechatRequested:
+		case EventResumeSubmitted, EventWechatRequested, EventWechatExchanged,
+			EventInterviewAccepted:
 			specialEvents = append(specialEvents, event)
 			frozen.Messages = append(frozen.Messages, FrozenInboundMessage{Seq: event.MessageSeq, Kind: FrozenMessageCard})
 		case EventSystemNotice:

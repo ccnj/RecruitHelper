@@ -374,6 +374,67 @@ func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 	}
 }
 
+func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrowth(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "wechat-accepted", []store.MessageDraft{{
+		Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted",
+		ContentHash: syncledger.HashText("wechat-exchanged-fixture"), Origin: "external",
+	}})
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf("换微信成功事实不得调用 AI: %s", request.Purpose)
+		},
+	}
+	manager, err := NewManager(h.db, h.runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-wechat-accepted"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 0 {
+		t.Fatalf("换微信成功事实触发了 AI: %+v", advice.requests)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
+		aggregateErr != nil || aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.ProjectedThroughSeq != fixture.inboundSeq {
+		t.Fatalf("换微信成功消息未收敛: turn=%+v aggregate=%+v err=%v aggregateErr=%v",
+			turn, aggregate, err, aggregateErr)
+	}
+	revision := aggregate.Revision
+
+	for attempt := 0; attempt < 2; attempt++ {
+		manager.mu.Lock()
+		err = actor.processCommunicationV4Targets(context.Background())
+		manager.mu.Unlock()
+		if err != nil {
+			t.Fatalf("重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision || len(advice.requests) != 0 {
+		t.Fatalf("重复巡检发生状态或 AI 增生: aggregate=%+v advice=%+v err=%v",
+			replayed, advice.requests, err)
+	}
+}
+
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
 	h := newHarness(t)
 	before, after := "合成系统前置", "合成系统尾部"

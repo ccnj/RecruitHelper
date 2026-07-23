@@ -95,6 +95,61 @@ func TestV4InboundTurnWechatRequestPlansDeterministicActionsBeforeAI(t *testing.
 	}
 }
 
+func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
+	t.Run("wechat exchanged", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: NewV4GreetedState(v4Time(8)), TurnID: "turn-wechat-accepted",
+			Messages: []LedgerMessageFact{{
+				Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+				CardState: "accepted", Origin: "external",
+			}},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.State.WechatState != V4WechatExchanged ||
+			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.EventActions) != 2 ||
+			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
+			decision.EventActions[1].Kind != V4ActionWechatReceipt {
+			t.Fatalf("换微信成功事实没有确定性推进且保持零 AI: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("interview accepted", func(t *testing.T) {
+		state := NewV4GreetedState(v4Time(8))
+		expression, err := ApplyV4BusinessEvent(state, BusinessEvent{
+			Key: "message:2", Kind: EventCandidateExpressionReceived,
+			Source: EventSourceMessage, MessageSeq: 2,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invited, err := ApplyV4BusinessEvent(expression.State, BusinessEvent{
+			Key: "message:3", Kind: EventInterviewInvited,
+			Source: EventSourceMessage, MessageSeq: 3, OccurredAt: v4Time(9),
+		})
+		if err != nil || invited.State.MainStatus != V4StatusInvited {
+			t.Fatalf("邀面前置状态失败: decision=%+v err=%v", invited, err)
+		}
+
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: invited.State, TurnID: "turn-interview-accepted",
+			Messages: []LedgerMessageFact{{
+				Seq: 4, Direction: "in", Kind: "card", CardType: "interviewInvite",
+				CardState: "accepted", Origin: "external",
+			}},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.State.MainStatus != V4StatusInterviewed ||
+			decision.Dialogue.Status != V4DialogueNoAction || decision.Dialogue.NextAdvice != V4AdviceNone ||
+			len(decision.EventActions) != 3 ||
+			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.EventActions[2].Kind != V4ActionInviteWechat {
+			t.Fatalf("面试接受事实没有确定性推进且保持零 AI: decision=%+v err=%v", decision, err)
+		}
+	})
+}
+
 func TestV4InboundTurnRejectedShortCircuitNeverRequestsReplyAI(t *testing.T) {
 	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 		State: NewV4GreetedState(v4Time(8)), TurnID: "turn-ledger-rejected",

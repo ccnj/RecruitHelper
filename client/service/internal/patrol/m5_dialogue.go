@@ -277,6 +277,11 @@ func m5TurnIdentity(profileID string, pending m5PendingTurn) (string, string, er
 func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTurn) error {
 	turn := initial
 	for step := 0; step < 3; step++ {
+		switch turn.Status {
+		case store.DialogueTurnManualRequired, store.DialogueTurnSuperseded,
+			store.DialogueTurnDispatching, store.DialogueTurnCompleted:
+			return nil
+		}
 		nextV4Advice, v4Owned, err := a.manager.store.CommunicationV4NextAdvice(turn.TurnID)
 		if err != nil {
 			return err
@@ -386,9 +391,6 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 				return nil
 			}
 			return a.dispatchM5Reply(ctx, turn)
-		case store.DialogueTurnManualRequired, store.DialogueTurnSuperseded,
-			store.DialogueTurnDispatching, store.DialogueTurnCompleted:
-			return nil
 		default:
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "turnStateUnknown", a.manager.now())
 		}

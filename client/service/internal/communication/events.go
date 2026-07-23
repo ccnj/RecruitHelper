@@ -138,14 +138,23 @@ func normalizeInboundMessage(event BusinessEvent, fact LedgerMessageFact) Busine
 			return event
 		case "wechatExchange":
 			// The platform adapter may emit pending only after proving the
-			// request shape. Unknown deliberately has no authority: the generic
-			// card type alone cannot distinguish a request from an exchange
-			// result or an unverified platform variant.
-			if fact.CardState == "pending" {
+			// request shape and accepted only after proving the exchange-result
+			// shape. Other states deliberately have no authority.
+			switch fact.CardState {
+			case "pending":
 				event.Kind = EventWechatRequested
+				return event
+			case "accepted":
+				event.Kind = EventWechatExchanged
 				return event
 			}
 			return unknownEvent(event, "inboundWechatCardState")
+		case "interviewInvite":
+			if fact.CardState == "accepted" {
+				event.Kind = EventInterviewAccepted
+				return event
+			}
+			return unknownEvent(event, "inboundInterviewCardState")
 		default:
 			return unknownEvent(event, "unsupportedInboundCard")
 		}
