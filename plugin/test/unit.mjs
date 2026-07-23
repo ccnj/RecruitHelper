@@ -4266,17 +4266,23 @@ test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 
   }
 })
 
-test('智联 MAIN 线程解析：方向不猜、仅候选人 originType=2 的 105 提升为待处理换微信请求', async () => {
+test('智联 MAIN 线程解析：方向不猜、105 按已证实发起方形状映射换微信请求', async () => {
   const rows = [
     { idServer: 'm-text-out', status: 'success', time: 1, type: 'text', from: 'staff', text: '  招聘方  消息 ' },
     { idServer: 'm-text-in', time: 2, type: 'text', from: 'candidate', text: '候选人消息' },
     {
-      idServer: 'm-card', status: 'success', time: 3, type: 105, from: 'candidate',
-      content: JSON.stringify({ content: JSON.stringify({ originType: '2', requestId: 'request-1', userContent: '交换微信' }) }),
+      idServer: 'm-card', status: 'success', time: 3, type: 'custom', from: 'candidate',
+      content: JSON.stringify({
+        type: '105',
+        content: JSON.stringify({ originType: '2', requestId: 'request-1', userContent: '交换微信' }),
+      }),
     },
     {
-      idServer: 'm-staff-105', status: 'success', time: 4, type: 105, from: 'staff',
-      content: JSON.stringify({ content: JSON.stringify({ requestId: 'request-1', staffContent: '交换微信' }) }),
+      idServer: 'm-staff-105', status: 'success', time: 4, type: 'custom', from: 'staff',
+      content: JSON.stringify({
+        type: '105',
+        content: JSON.stringify({ originType: '1', staffContent: '交换微信' }),
+      }),
     },
     {
       idServer: 'm-unknown', time: 5, type: 99, from: 'candidate',
@@ -4296,8 +4302,10 @@ test('智联 MAIN 线程解析：方向不猜、仅候选人 originType=2 的 10
   assert.equal(page.messages[1].direction, 'in')
   assert.equal(page.messages[2].kind, 'card')
   assert.equal(page.messages[2].cardState, 'pending')
-  assert.equal(page.messages[3].direction, 'system')
-  assert.equal(page.messages[3].kind, 'system')
+  assert.equal(page.messages[3].direction, 'out')
+  assert.equal(page.messages[3].kind, 'card')
+  assert.equal(page.messages[3].cardType, 'wechatExchange')
+  assert.equal(page.messages[3].cardState, 'pending')
   assert.equal(page.messages[4].direction, 'system')
   assert.equal(page.messages[4].kind, 'system')
 
@@ -4524,19 +4532,66 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
   }
 })
 
-test('智联 105 只在候选人身份与 originType=2 同时成立时三路提升为请求卡', async () => {
+test('智联 105 只在当前真机发起方形状成立时三路提升为请求卡', async () => {
   const fixture = installM3SendFixture()
   const staffID = globalThis.window.$session.staff.staffId
   let stateEndpointCalls = 0
   const variants = [
-    { name: '数字 originType=2', type: 105, from: fixture.peerRef, originType: 2, card: true },
-    { name: '字符串 originType=2', type: 105, from: fixture.peerRef, originType: ' 2 ', card: true },
-    { name: '招聘方发起', type: 105, from: staffID, originType: 2, card: false },
-    { name: '第三方发送者', type: 105, from: 'third-party', originType: 2, card: false },
-    { name: '缺 originType', type: 105, from: fixture.peerRef, card: false },
-    { name: '招聘方 originType=1', type: 105, from: fixture.peerRef, originType: 1, card: false },
-    { name: '非法 originType', type: 105, from: fixture.peerRef, originType: 'candidate', card: false },
-    { name: '相邻类型', type: 106, from: fixture.peerRef, originType: 2, card: false },
+    {
+      name: '候选人数字 originType=2', rawType: 'custom', envelopeType: '105',
+      from: fixture.peerRef, originType: 2, status: 'success',
+      expected: { direction: 'in', kind: 'card', state: 'pending' },
+    },
+    {
+      name: '候选人字符串 originType=2', rawType: 'custom', envelopeType: 105,
+      from: fixture.peerRef, originType: ' 2 ', status: 'success',
+      expected: { direction: 'in', kind: 'card', state: 'pending' },
+    },
+    {
+      name: '招聘方 originType=1', rawType: 'custom', envelopeType: '105',
+      from: staffID, originType: 1, status: 'success',
+      expected: { direction: 'out', kind: 'card', state: 'pending' },
+    },
+    {
+      name: '招聘方 originType=2', rawType: 'custom', envelopeType: '105',
+      from: staffID, originType: 2, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '候选人 originType=1', rawType: 'custom', envelopeType: '105',
+      from: fixture.peerRef, originType: 1, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '第三方发送者', rawType: 'custom', envelopeType: '105',
+      from: 'third-party', originType: 2, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '缺 originType', rawType: 'custom', envelopeType: '105',
+      from: fixture.peerRef, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '非法 originType', rawType: 'custom', envelopeType: '105',
+      from: fixture.peerRef, originType: 'candidate', status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '非 success', rawType: 'custom', envelopeType: '105',
+      from: fixture.peerRef, originType: 2, status: 'failed',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '未证实的数字顶层类型', rawType: 105, envelopeType: '105',
+      from: fixture.peerRef, originType: 2, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
+    {
+      name: '相邻类型', rawType: 'custom', envelopeType: '106',
+      from: fixture.peerRef, originType: 2, status: 'success',
+      expected: { direction: 'system', kind: 'system', state: null },
+    },
   ]
   try {
     globalThis.window.fetch = async () => {
@@ -4555,19 +4610,20 @@ test('智联 105 只在候选人身份与 originType=2 同时成立时三路提�
       fixture.rows.splice(0, fixture.rows.length, {
         idServer,
         time: index + 1,
-        status: 'success',
-        type: variant.type,
+        status: variant.status,
+        type: variant.rawType,
         from: variant.from,
-        content: JSON.stringify({ content: JSON.stringify(details) }),
+        content: JSON.stringify({ type: variant.envelopeType, content: JSON.stringify(details) }),
       })
 
       const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
       assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
       const [message] = page.messages
-      assert.equal(message.direction, variant.card ? 'in' : 'system', `${variant.name}: direction`)
-      assert.equal(message.kind, variant.card ? 'card' : 'system', `${variant.name}: kind`)
-      assert.equal(message.cardType, variant.card ? 'wechatExchange' : null, `${variant.name}: cardType`)
-      assert.equal(message.cardState, variant.card ? 'pending' : null, `${variant.name}: cardState`)
+      assert.equal(message.direction, variant.expected.direction, `${variant.name}: direction`)
+      assert.equal(message.kind, variant.expected.kind, `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.expected.kind === 'card' ? 'wechatExchange' : null,
+        `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.expected.state, `${variant.name}: cardState`)
       assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
 
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
@@ -4577,6 +4633,196 @@ test('智联 105 只在候选人身份与 originType=2 同时成立时三路提�
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
     assert.equal(stateEndpointCalls, 0, '未验证的状态接口不得覆盖候选人请求的 pending 语义')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('智联 259 只在当前真机交换结果形状成立时三路提升为已换号卡', async () => {
+  const fixture = installM3SendFixture()
+  const staffID = globalThis.window.$session.staff.staffId
+  const variants = [
+    {
+      name: '真机接受结果', rawType: 'custom', envelopeType: '259',
+      from: fixture.peerRef, originType: 1, status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: true,
+    },
+    {
+      name: '字符串 originType=1', rawType: 'custom', envelopeType: 259,
+      from: fixture.peerRef, originType: ' 1 ', status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: true,
+    },
+    {
+      name: '缺候选人微信', rawType: 'custom', envelopeType: '259',
+      from: fixture.peerRef, originType: 1, status: 'success',
+      userWeChat: '', staffWeChat: 'staff-wechat-fixture', card: false,
+    },
+    {
+      name: '缺招聘方微信', rawType: 'custom', envelopeType: '259',
+      from: fixture.peerRef, originType: 1, status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: '', card: false,
+    },
+    {
+      name: '错误 originType', rawType: 'custom', envelopeType: '259',
+      from: fixture.peerRef, originType: 2, status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: false,
+    },
+    {
+      name: '招聘方发送者', rawType: 'custom', envelopeType: '259',
+      from: staffID, originType: 1, status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: false,
+    },
+    {
+      name: '非 success', rawType: 'custom', envelopeType: '259',
+      from: fixture.peerRef, originType: 1, status: 'failed',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: false,
+    },
+    {
+      name: '未证实的数字顶层类型', rawType: 259, envelopeType: '259',
+      from: fixture.peerRef, originType: 1, status: 'success',
+      userWeChat: 'candidate-wechat-fixture', staffWeChat: 'staff-wechat-fixture', card: false,
+    },
+  ]
+  try {
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = `server-type-259-${index}`
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: variant.status,
+        type: variant.rawType,
+        from: variant.from,
+        content: JSON.stringify({
+          type: variant.envelopeType,
+          content: JSON.stringify({
+            originType: variant.originType,
+            receiverTitle: '交换微信结果',
+            receiverText: '平台固定展示',
+            userWeChat: variant.userWeChat,
+            staffWeChat: variant.staffWeChat,
+          }),
+        }),
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.equal(message.direction, variant.card ? 'in' : 'system', `${variant.name}: direction`)
+      assert.equal(message.kind, variant.card ? 'card' : 'system', `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.card ? 'wechatExchange' : null, `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.card ? 'accepted' : null, `${variant.name}: cardState`)
+      assert.equal(message.text, variant.card ? '[微信交换成功]' : '[系统消息:259]', `${variant.name}: text`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+
+      const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('智联 355 只在当前真机新版邀面形状成立时三路提升为状态未知的邀面卡', async () => {
+  const fixture = installM3SendFixture()
+  const staffID = globalThis.window.$session.staff.staffId
+  const complete = {
+    interviewId: 'interview-fixture',
+    startTime: 1_800_000_000_000,
+    endTime: 1_800_001_800_000,
+    interviewType: 2,
+    interviewPlatform: 4,
+    state: 0,
+    staffTitle: '线上面试邀请',
+  }
+  const variants = [
+    { name: '真机新版邀面卡', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: complete, card: true },
+    { name: '候选人发送者', rawType: 'custom', envelopeType: '355', from: fixture.peerRef, status: 'success', details: complete, card: false },
+    { name: '缺 interviewId', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, interviewId: '' }, card: false },
+    { name: '无效开始时间', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, startTime: 0 }, card: false },
+    { name: '无效结束时间', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, endTime: 'invalid' }, card: false },
+    { name: '缺平台', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, interviewPlatform: '' }, card: false },
+    { name: '缺 state 字段', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: (() => { const { state, ...rest } = complete; return rest })(), card: false },
+    { name: '非 success', rawType: 'custom', envelopeType: '355', from: staffID, status: 'failed', details: complete, card: false },
+    { name: '未证实的数字顶层类型', rawType: 355, envelopeType: '355', from: staffID, status: 'success', details: complete, card: false },
+  ]
+  try {
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = `server-type-355-${index}`
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: variant.status,
+        type: variant.rawType,
+        from: variant.from,
+        content: JSON.stringify({
+          type: variant.envelopeType,
+          content: JSON.stringify(variant.details),
+        }),
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.equal(message.direction, variant.card ? 'out' : 'system', `${variant.name}: direction`)
+      assert.equal(message.kind, variant.card ? 'card' : 'system', `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.card ? 'interviewInvite' : null, `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.card ? 'unknown' : null, `${variant.name}: cardState`)
+      assert.equal(message.text, variant.card ? '[面试邀请]' : '[系统消息:355]', `${variant.name}: text`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+
+      const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('智联面试接受固定回执三路归一化为接受卡事件而不是普通对话', async () => {
+  const fixture = installM3SendFixture()
+  const staffID = globalThis.window.$session.staff.staffId
+  const acceptedText = '我已接受贵司的面试邀请，将准时参加面试'
+  const variants = [
+    { name: '候选人固定回执', from: fixture.peerRef, text: `  ${acceptedText}  `, card: true, direction: 'in' },
+    { name: '候选人近似文本', from: fixture.peerRef, text: `${acceptedText}。`, card: false, direction: 'in' },
+    { name: '招聘方同文', from: staffID, text: acceptedText, card: false, direction: 'out' },
+  ]
+  try {
+    globalThis.window.imEngine.getHistoryMsgs = async () => fixture.rows
+    for (const [index, variant] of variants.entries()) {
+      const idServer = `server-interview-accepted-${index}`
+      fixture.rows.splice(0, fixture.rows.length, {
+        idServer,
+        time: index + 1,
+        status: 'success',
+        type: 'text',
+        from: variant.from,
+        text: variant.text,
+      })
+
+      const page = await zhilianTestHooks.mainReadThreadPage(fixture.conversationRef, 8, null)
+      assert.equal(page.messages.length, 1, `${variant.name}: readThread 应保留一行`)
+      const [message] = page.messages
+      assert.equal(message.direction, variant.direction, `${variant.name}: direction`)
+      assert.equal(message.kind, variant.card ? 'card' : 'text', `${variant.name}: kind`)
+      assert.equal(message.cardType, variant.card ? 'interviewInvite' : null, `${variant.name}: cardType`)
+      assert.equal(message.cardState, variant.card ? 'accepted' : null, `${variant.name}: cardState`)
+      assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+
+      const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
+      const baseline = await fixture.capture(expectedTail)
+      assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
+      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+        `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
+    }
   } finally {
     fixture.restore()
   }

@@ -3880,7 +3880,25 @@ async function mainReadThreadPage(
     const from = clean(row.from)
     const originTypeIsCandidate = details.originType === 2 ||
       (typeof details.originType === 'string' && details.originType.trim() === '2')
-    const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+    const originTypeIsStaff = details.originType === 1 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '1')
+    const customSuccess = rawType === 'custom' && typeof row.content === 'string' &&
+      Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success'
+    const isCandidateWechatRequest = customSuccess && customType === 105 &&
+      from === target && originTypeIsCandidate
+    const isStaffWechatRequest = customSuccess && customType === 105 &&
+      from === staffID && originTypeIsStaff
+    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
+      from === target && originTypeIsStaff &&
+      Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    const isStaffInterviewInvite = customSuccess && customType === 355 &&
+      from === staffID && Boolean(clean(details.interviewId)) &&
+      Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
+      Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      Object.prototype.hasOwnProperty.call(details, 'state')
+    const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
+      clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
     const isCandidateOnlineResume = rawType === 'custom' && typeof row.content === 'string' &&
       typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
       Object.keys(inner).length > 0 && from === target &&
@@ -3895,7 +3913,13 @@ async function mainReadThreadPage(
     let state: ZhilianThreadMessage['cardState'] = null
     let identity = ''
 
-    if (rawType === 'text') {
+    if (isCandidateInterviewAcceptedText) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      text = clean(row.text)
+      state = 'accepted'
+      identity = stableMessageIdentity(row.idServer)
+    } else if (rawType === 'text') {
       if (!from) throw new Error('message_direction_unresolved')
       kind = 'text'
       text = clean(row.text)
@@ -3907,6 +3931,24 @@ async function mainReadThreadPage(
       ) || '[交换微信请求]'
       state = 'pending'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (isStaffWechatRequest) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[换微信请求]'
+      state = 'pending'
+      identity = stableMessageIdentity(row.idServer)
+    } else if (isCandidateWechatAccepted) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[微信交换成功]'
+      state = 'accepted'
+      identity = stableMessageIdentity(row.idServer)
+    } else if (isStaffInterviewInvite) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      text = '[面试邀请]'
+      state = 'unknown'
+      identity = stableMessageIdentity(row.idServer)
     } else if (isCandidateOnlineResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
@@ -4757,7 +4799,25 @@ async function mainCaptureSendBaseline(
       const from = clean(row.from)
       const originTypeIsCandidate = details.originType === 2 ||
         (typeof details.originType === 'string' && details.originType.trim() === '2')
-      const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+      const originTypeIsStaff = details.originType === 1 ||
+        (typeof details.originType === 'string' && details.originType.trim() === '1')
+      const customSuccess = rawType === 'custom' && row.contentWasString &&
+        Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success'
+      const isCandidateWechatRequest = customSuccess && customType === 105 &&
+        from === target && originTypeIsCandidate
+      const isStaffWechatRequest = customSuccess && customType === 105 &&
+        from === staffID && originTypeIsStaff
+      const isCandidateWechatAccepted = customSuccess && customType === 259 &&
+        from === target && originTypeIsStaff &&
+        Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+      const isStaffInterviewInvite = customSuccess && customType === 355 &&
+        from === staffID && Boolean(clean(details.interviewId)) &&
+        Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
+        Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+        Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+        Object.prototype.hasOwnProperty.call(details, 'state')
+      const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
+        clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
       const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
         typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
         Object.keys(inner).length > 0 && from === target &&
@@ -4768,9 +4828,14 @@ async function mainCaptureSendBaseline(
         : 'system'
       let kind: 'text' | 'card' | 'system' = 'system'
       let text: string | null = null
-      let cardType: 'wechatExchange' | 'resumeAttachment' | null = null
+      let cardType: 'interviewInvite' | 'wechatExchange' | 'resumeAttachment' | null = null
       let identity = ''
-      if (rawType === 'text') {
+      if (isCandidateInterviewAcceptedText) {
+        kind = 'card'
+        cardType = 'interviewInvite'
+        text = clean(row.text)
+        identity = row.idServer
+      } else if (rawType === 'text') {
         if (!from) return null
         kind = 'text'
         text = clean(row.text)
@@ -4781,6 +4846,21 @@ async function mainCaptureSendBaseline(
           details.userContent ?? details.receiverText ?? details.detail,
         ) || '[交换微信请求]'
         identity = clean(details.requestId ?? details.id ?? details.cardId)
+      } else if (isStaffWechatRequest) {
+        kind = 'card'
+        cardType = 'wechatExchange'
+        text = '[换微信请求]'
+        identity = row.idServer
+      } else if (isCandidateWechatAccepted) {
+        kind = 'card'
+        cardType = 'wechatExchange'
+        text = '[微信交换成功]'
+        identity = row.idServer
+      } else if (isStaffInterviewInvite) {
+        kind = 'card'
+        cardType = 'interviewInvite'
+        text = '[面试邀请]'
+        identity = row.idServer
       } else if (isCandidateOnlineResume) {
         kind = 'card'
         cardType = 'resumeAttachment'
@@ -5357,7 +5437,25 @@ function mainSendMessageOnce(
     const from = clean(row.from)
     const originTypeIsCandidate = details.originType === 2 ||
       (typeof details.originType === 'string' && details.originType.trim() === '2')
-    const isCandidateWechatRequest = customType === 105 && from === target && originTypeIsCandidate
+    const originTypeIsStaff = details.originType === 1 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '1')
+    const customSuccess = rawType === 'custom' && row.contentWasString &&
+      Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success'
+    const isCandidateWechatRequest = customSuccess && customType === 105 &&
+      from === target && originTypeIsCandidate
+    const isStaffWechatRequest = customSuccess && customType === 105 &&
+      from === staffID && originTypeIsStaff
+    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
+      from === target && originTypeIsStaff &&
+      Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    const isStaffInterviewInvite = customSuccess && customType === 355 &&
+      from === staffID && Boolean(clean(details.interviewId)) &&
+      Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
+      Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      Object.prototype.hasOwnProperty.call(details, 'state')
+    const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
+      clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
     const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
       typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
       Object.keys(inner).length > 0 && from === target &&
@@ -5368,9 +5466,14 @@ function mainSendMessageOnce(
       : 'system'
     let kind: 'text' | 'card' | 'system' = 'system'
     let normalizedText = ''
-    let cardType: 'wechatExchange' | 'resumeAttachment' | null = null
+    let cardType: 'interviewInvite' | 'wechatExchange' | 'resumeAttachment' | null = null
     let identity = ''
-    if (rawType === 'text') {
+    if (isCandidateInterviewAcceptedText) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      normalizedText = clean(row.text)
+      identity = row.idServer
+    } else if (rawType === 'text') {
       if (!from) return null
       kind = 'text'
       normalizedText = clean(row.text)
@@ -5381,6 +5484,21 @@ function mainSendMessageOnce(
         details.userContent ?? details.receiverText ?? details.detail,
       ) || '[交换微信请求]'
       identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (isStaffWechatRequest) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      normalizedText = '[换微信请求]'
+      identity = row.idServer
+    } else if (isCandidateWechatAccepted) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      normalizedText = '[微信交换成功]'
+      identity = row.idServer
+    } else if (isStaffInterviewInvite) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      normalizedText = '[面试邀请]'
+      identity = row.idServer
     } else if (isCandidateOnlineResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
