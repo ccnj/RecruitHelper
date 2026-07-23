@@ -38,13 +38,13 @@ const (
 )
 
 type V4PlannedAction struct {
-	ActionKey      string
-	Kind           V4ActionKind
-	Text           string
-	CardMessageSeq int64
-	Round          uint64
-	Stage          uint8
-	EndReason      V4EndReason
+	ActionKey      string       `json:"actionKey"`
+	Kind           V4ActionKind `json:"kind"`
+	Text           string       `json:"text,omitempty"`
+	CardMessageSeq int64        `json:"cardMessageSeq,omitempty"`
+	Round          uint64       `json:"round,omitempty"`
+	Stage          uint8        `json:"stage,omitempty"`
+	EndReason      V4EndReason  `json:"endReason,omitempty"`
 }
 
 type V4DialogueInput struct {

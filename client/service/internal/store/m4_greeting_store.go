@@ -382,6 +382,11 @@ func applyGreetingResultTx(
 	if profile.MainStatus == CandidateProfileGreeted && profile.SuccessfulGreetingIntentID != nil &&
 		*profile.SuccessfulGreetingIntentID == intent.IntentID && mutation.ConversationRef == "" &&
 		profile.ConversationRef == nil {
+		if _, _, err := applyCommunicationV4RootTx(
+			tx, profile.ProfileID, intent.IntentID, 0, at,
+		); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	if profile.MainStatus == CandidateProfileGreeted && profile.SuccessfulGreetingIntentID != nil &&
@@ -389,6 +394,11 @@ func applyGreetingResultTx(
 		profile.ConversationRef != nil && *profile.ConversationRef == mutation.ConversationRef {
 		var existing Message
 		if err := tx.First(&existing, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
+			return nil, err
+		}
+		if _, _, err := applyCommunicationV4RootTx(
+			tx, profile.ProfileID, intent.IntentID, existing.Seq, at,
+		); err != nil {
 			return nil, err
 		}
 		return &existing, nil
@@ -413,6 +423,11 @@ func applyGreetingResultTx(
 		}
 		if profileUpdated.RowsAffected != 1 {
 			return nil, ErrCandidateProfileState
+		}
+		if _, _, err := applyCommunicationV4RootTx(
+			tx, profile.ProfileID, intent.IntentID, 0, at,
+		); err != nil {
+			return nil, err
 		}
 		intent.ResultConversationRef = nil
 		intent.ResultMessageSeq = nil
@@ -508,6 +523,11 @@ func applyGreetingResultTx(
 	}
 	if profileUpdated.RowsAffected != 1 {
 		return nil, ErrCandidateProfileState
+	}
+	if _, _, err := applyCommunicationV4RootTx(
+		tx, profile.ProfileID, intent.IntentID, message.Seq, at,
+	); err != nil {
+		return nil, err
 	}
 	conversationRef := mutation.ConversationRef
 	intent.ResultConversationRef = &conversationRef

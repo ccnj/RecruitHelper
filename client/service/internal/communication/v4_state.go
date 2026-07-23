@@ -91,11 +91,11 @@ const (
 )
 
 type V4InterviewFollowupGroup struct {
-	MessageSeq           int64
-	NextStage            uint8
-	Active               bool
-	Rejected             bool
-	RejectionReceiptSent bool
+	MessageSeq           int64 `json:"messageSeq"`
+	NextStage            uint8 `json:"nextStage"`
+	Active               bool  `json:"active"`
+	Rejected             bool  `json:"rejected"`
+	RejectionReceiptSent bool  `json:"rejectionReceiptSent"`
 }
 
 // V4State is a platform-independent aggregate. It contains only monotone
@@ -103,39 +103,39 @@ type V4InterviewFollowupGroup struct {
 // effect must not mutate this value; only an observed platform fact or a
 // positive action confirmation may do so.
 type V4State struct {
-	MainStatus  V4MainStatus
-	EndReason   V4EndReason
-	WechatState V4WechatStatus
+	MainStatus  V4MainStatus   `json:"mainStatus"`
+	EndReason   V4EndReason    `json:"endReason,omitempty"`
+	WechatState V4WechatStatus `json:"wechatState"`
 
-	ColdPromptRemaining    uint8
-	ColdWechatRemaining    uint8
-	ColdPromptSentCount    uint8
-	RealMessageRound       uint64
-	LastColdPromptRound    uint64
-	LastRealMessageSeq     int64
-	LastOutboundMessageSeq int64
+	ColdPromptRemaining    uint8  `json:"coldPromptRemaining"`
+	ColdWechatRemaining    uint8  `json:"coldWechatRemaining"`
+	ColdPromptSentCount    uint8  `json:"coldPromptSentCount"`
+	RealMessageRound       uint64 `json:"realMessageRound"`
+	LastColdPromptRound    uint64 `json:"lastColdPromptRound"`
+	LastRealMessageSeq     int64  `json:"lastRealMessageSeq"`
+	LastOutboundMessageSeq int64  `json:"lastOutboundMessageSeq"`
 
-	RetentionSent                bool
-	ClosingSent                  bool
-	ColdWechatTextSent           bool
-	WechatReceiptSent            bool
-	InterviewAcceptedReceiptSent bool
-	RejectionTurnMessageSeq      int64
-	RejectionTurnID              string
-	RejectionStage               V4RejectionStage
+	RetentionSent                bool             `json:"retentionSent"`
+	ClosingSent                  bool             `json:"closingSent"`
+	ColdWechatTextSent           bool             `json:"coldWechatTextSent"`
+	WechatReceiptSent            bool             `json:"wechatReceiptSent"`
+	InterviewAcceptedReceiptSent bool             `json:"interviewAcceptedReceiptSent"`
+	RejectionTurnMessageSeq      int64            `json:"rejectionTurnMessageSeq"`
+	RejectionTurnID              string           `json:"rejectionTurnId,omitempty"`
+	RejectionStage               V4RejectionStage `json:"rejectionStage,omitempty"`
 
-	LastOutboundAt     *time.Time
-	LastBodyAt         *time.Time
-	ClockUncertain     bool
-	BodyClockUncertain bool
+	LastOutboundAt     *time.Time `json:"lastOutboundAt,omitempty"`
+	LastBodyAt         *time.Time `json:"lastBodyAt,omitempty"`
+	ClockUncertain     bool       `json:"clockUncertain"`
+	BodyClockUncertain bool       `json:"bodyClockUncertain"`
 
-	InterviewGroups []V4InterviewFollowupGroup
+	InterviewGroups []V4InterviewFollowupGroup `json:"interviewGroups"`
 }
 
 type V4EventAction struct {
-	ActionKey      string
-	Kind           V4ActionKind
-	CardMessageSeq int64
+	ActionKey      string       `json:"actionKey"`
+	Kind           V4ActionKind `json:"kind"`
+	CardMessageSeq int64        `json:"cardMessageSeq,omitempty"`
 }
 
 type V4EventDecision struct {
@@ -147,13 +147,13 @@ type V4EventDecision struct {
 }
 
 type V4ConfirmedAction struct {
-	ActionKey      string
-	Kind           V4ActionKind
-	MessageSeq     int64
-	CardMessageSeq int64
-	SentAt         *time.Time
-	Round          uint64
-	Stage          uint8
+	ActionKey      string       `json:"actionKey"`
+	Kind           V4ActionKind `json:"kind"`
+	MessageSeq     int64        `json:"messageSeq,omitempty"`
+	CardMessageSeq int64        `json:"cardMessageSeq,omitempty"`
+	SentAt         *time.Time   `json:"sentAt,omitempty"`
+	Round          uint64       `json:"round,omitempty"`
+	Stage          uint8        `json:"stage,omitempty"`
 }
 
 type v4ExpressionDisposition uint8
@@ -638,6 +638,13 @@ func validateV4State(state V4State) error {
 		previousSeq = group.MessageSeq
 	}
 	return nil
+}
+
+// ValidateV4State exposes the aggregate invariant to persistence and
+// orchestration layers without letting either layer duplicate the validation
+// rules. All durable V4 states must pass this exact validator before commit.
+func ValidateV4State(state V4State) error {
+	return validateV4State(state)
 }
 
 func validV4RejectionStage(stage V4RejectionStage) bool {

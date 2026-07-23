@@ -48,16 +48,16 @@ const (
 )
 
 type BusinessEvent struct {
-	Key              string
-	Kind             BusinessEventKind
-	Source           BusinessEventSource
-	MessageSeq       int64
-	OccurredAt       *time.Time
-	ExpressionKind   ExpressionKind
-	Text             string
-	IsBody           bool
-	BodyKindKnown    bool
-	ConservativeCode string
+	Key              string              `json:"key"`
+	Kind             BusinessEventKind   `json:"kind"`
+	Source           BusinessEventSource `json:"source"`
+	MessageSeq       int64               `json:"messageSeq"`
+	OccurredAt       *time.Time          `json:"occurredAt,omitempty"`
+	ExpressionKind   ExpressionKind      `json:"expressionKind,omitempty"`
+	Text             string              `json:"text,omitempty"`
+	IsBody           bool                `json:"isBody,omitempty"`
+	BodyKindKnown    bool                `json:"bodyKindKnown,omitempty"`
+	ConservativeCode string              `json:"conservativeCode,omitempty"`
 }
 
 // LedgerMessageFact deliberately mirrors only the platform-neutral message

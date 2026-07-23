@@ -3,6 +3,7 @@ package store
 import (
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
 )
 
@@ -333,13 +334,24 @@ const (
 	CandidateProfileSelected      CandidateProfileStatus = "selected"
 	CandidateProfileGreeted       CandidateProfileStatus = "greeted"
 	CandidateProfileCommunicating CandidateProfileStatus = "communicating"
+	CandidateProfileInvited       CandidateProfileStatus = "invited"
+	CandidateProfileInterviewed   CandidateProfileStatus = "interviewed"
 	CandidateProfileEnded         CandidateProfileStatus = "ended"
 	CandidateProfileEliminated    CandidateProfileStatus = "eliminated"
 )
 
 type CandidateProfileEndReason string
 
-const CandidateProfileEndGreetingFailed CandidateProfileEndReason = "greetingFailed"
+const (
+	CandidateProfileEndGreetingFailed         CandidateProfileEndReason = "greetingFailed"
+	CandidateProfileEndRejected               CandidateProfileEndReason = "rejected"
+	CandidateProfileEndBlacklisted            CandidateProfileEndReason = "blacklisted"
+	CandidateProfileEndFallbackArchive        CandidateProfileEndReason = "fallbackArchive"
+	CandidateProfileEndSilentInterviewPending CandidateProfileEndReason = "silentInterviewPending"
+	CandidateProfileEndSilentWechatInvited    CandidateProfileEndReason = "silentWechatInvited"
+	CandidateProfileEndSilentWechatExchanged  CandidateProfileEndReason = "silentWechatExchanged"
+	CandidateProfileEndSilent                 CandidateProfileEndReason = "silent"
+)
 
 type ResumeCaptureState string
 
@@ -377,7 +389,67 @@ type CandidateProfile struct {
 	CreatedAt                      time.Time
 	UpdatedAt                      time.Time
 
-	GreetingHead *CandidateGreetingHead `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	GreetingHead             *CandidateGreetingHead    `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+	CommunicationV4Aggregate *CommunicationV4Aggregate `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
+}
+
+type ProfileCommunicationAutomationStatus string
+
+const (
+	ProfileCommunicationAutomationActive         ProfileCommunicationAutomationStatus = "active"
+	ProfileCommunicationAutomationManualRequired ProfileCommunicationAutomationStatus = "manualRequired"
+)
+
+// CommunicationV4Aggregate is the durable V4 aggregate root for one profile.
+// CandidateProfile.MainStatus/EndReason are only the compact query projection
+// and advance in the same transaction. Revision counts applied immutable
+// inputs; root creation starts at zero.
+type CommunicationV4Aggregate struct {
+	ProfileID            string                               `gorm:"primaryKey"`
+	RootGreetingIntentID string                               `gorm:"not null;uniqueIndex"`
+	StateSchemaVersion   uint                                 `gorm:"not null"`
+	Revision             uint64                               `gorm:"not null"`
+	ProjectedThroughSeq  int64                                `gorm:"not null"`
+	State                communication.V4State                `gorm:"serializer:json;not null"`
+	AutomationStatus     ProfileCommunicationAutomationStatus `gorm:"not null;index"`
+	ManualReason         string
+	ManualRequiredAt     *time.Time
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+type CommunicationV4InputKind string
+
+const (
+	CommunicationV4InputBusinessEvent   CommunicationV4InputKind = "businessEvent"
+	CommunicationV4InputConfirmedAction CommunicationV4InputKind = "confirmedAction"
+	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
+)
+
+// CommunicationV4ApplicationOutcome stores only the decision data needed to
+// resume orchestration after a crash. Candidate text is deliberately absent.
+type CommunicationV4ApplicationOutcome struct {
+	Dialogue             communication.V4DialogueRequirement `json:"dialogue"`
+	DialogueAfterActions bool                                `json:"dialogueAfterActions"`
+	Actions              []communication.V4EventAction       `json:"actions"`
+	ManualReason         communication.V4ManualReason        `json:"manualReason,omitempty"`
+}
+
+// CommunicationV4ProjectionApplication is an immutable receipt for one input.
+// Persisting the reducer outcome beside the new aggregate prevents a crash
+// between state advancement and action planning from losing required work.
+type CommunicationV4ProjectionApplication struct {
+	ProfileID string                   `gorm:"primaryKey;uniqueIndex:ux_communication_v4_application_revision,priority:1"`
+	InputKind CommunicationV4InputKind `gorm:"primaryKey"`
+	InputKey  string                   `gorm:"primaryKey"`
+
+	InputDigest  string                            `gorm:"not null"`
+	SemanticKind string                            `gorm:"not null"`
+	MessageSeq   int64                             `gorm:"not null"`
+	FromRevision uint64                            `gorm:"not null"`
+	ToRevision   uint64                            `gorm:"not null;uniqueIndex:ux_communication_v4_application_revision,priority:2"`
+	Outcome      CommunicationV4ApplicationOutcome `gorm:"serializer:json;not null"`
+	AppliedAt    time.Time                         `gorm:"not null"`
 }
 
 // CandidateResumeSnapshot 是一次完整简历读取的不可变业务事实。正文只在本机
