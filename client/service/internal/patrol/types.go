@@ -157,6 +157,27 @@ type AutomaticReplyRunner interface {
 	StartAutomaticReply(context.Context, AutomaticReplyRequest) (AutomaticReplyHandle, error)
 }
 
+type AutomaticCardRequest struct {
+	ActionID         string
+	IntentID         string
+	PreviousIntentID string
+	ExpectedSession  string
+	ExpectedBootID   string
+	Platform         string
+	AccountRef       string
+	ConversationRef  string
+	Kind             store.CommunicationActionKind
+	Interview        *protocol.InterviewDetails
+}
+
+type AutomaticCardHandle interface {
+	Wait(context.Context) error
+}
+
+type AutomaticCardRunner interface {
+	StartAutomaticCard(context.Context, AutomaticCardRequest) (AutomaticCardHandle, error)
+}
+
 // AdviceExecutor is the provider seam for deterministic communication tests.
 // Production deliberately does not wire a real HTTP executor until batch 5;
 // when wired, each call still goes through the persisted AIInvocation gate.

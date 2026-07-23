@@ -925,6 +925,114 @@ func TestCommunicationV4PatrolSendsRejectionRetentionAfterWechatExchanged(t *tes
 	}
 }
 
+func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(t *testing.T) {
+	h := newHarness(t)
+	rejection := "不感兴趣"
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"rejection-text-wechat-card",
+		rejection,
+	)
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf(
+				"拒绝短路组合不得调用 AI: %s",
+				request.Purpose,
+			)
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取拒绝组合账号失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-rejection-text-wechat-card"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager,
+		account: account,
+		hand: HandState{
+			Online: true, Session: "session-1", BootID: "boot-1",
+		},
+		roundID: roundID,
+		now:     h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 1 || len(advice.requests) != 0 {
+		t.Fatalf(
+			"拒绝组合首步必须只发送正文: err=%v commands=%d advice=%+v",
+			err,
+			hand.commandCount(),
+			advice.requests,
+		)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
+		t.Fatalf("正文正证后应等待唯一卡片: turn=%+v err=%v", turn, err)
+	}
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInviteWechat ||
+		actions[1].Status != store.CommunicationActionPlanned ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID {
+		t.Fatalf("正文正证没有实体化唯一 dependent 卡片: actions=%+v err=%v", actions, err)
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 2 || len(advice.requests) != 0 {
+		t.Fatalf(
+			"拒绝组合第二步必须经 dispatcher 发送唯一卡片: err=%v commands=%d advice=%+v",
+			err,
+			hand.commandCount(),
+			advice.requests,
+		)
+	}
+	turn, err = h.db.DialogueTurnByID(turn.TurnID)
+	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
+		aggregateErr != nil ||
+		!aggregate.State.RetentionSent ||
+		aggregate.State.WechatState != communication.V4WechatInvited ||
+		aggregate.ProjectedThroughSeq != fixture.inboundSeq+2 {
+		t.Fatalf(
+			"拒绝组合未完成: turn=%+v aggregate=%+v err=%v aggregateErr=%v",
+			turn,
+			aggregate,
+			err,
+			aggregateErr,
+		)
+	}
+	actions, err = h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[1].Status != store.CommunicationActionSent ||
+		actions[0].EffectIntentID == nil ||
+		actions[1].EffectIntentID == nil {
+		t.Fatalf("拒绝组合动作未各自完成: actions=%+v err=%v", actions, err)
+	}
+	cardIntent, err := h.db.EffectIntentByID(*actions[1].EffectIntentID)
+	if err != nil || cardIntent == nil ||
+		cardIntent.Primitive != protocol.PrimChatSendWechatInvite ||
+		cardIntent.Status != store.EffectIntentOk {
+		t.Fatalf("dispatcher 未建立并完成换微信卡 WAL: intent=%+v err=%v", cardIntent, err)
+	}
+}
+
 func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableColdAction(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "thirty-six-hour-archive", []store.MessageDraft{{

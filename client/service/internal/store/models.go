@@ -590,7 +590,11 @@ type DialogueTurn struct {
 
 type CommunicationActionKind string
 
-const CommunicationActionReplyText CommunicationActionKind = "replyText"
+const (
+	CommunicationActionReplyText       CommunicationActionKind = "replyText"
+	CommunicationActionInviteWechat    CommunicationActionKind = "inviteWechat"
+	CommunicationActionInterviewInvite CommunicationActionKind = "interviewInvite"
+)
 
 type CommunicationActionStatus string
 
@@ -605,19 +609,23 @@ const (
 // CommunicationAction 是 AI 建议经确定性代码批准后的唯一业务动作事实。
 // 本表本身不派发；后续批次只能从 ActionID 稳定派生一个 effect intent。
 type CommunicationAction struct {
-	ActionID        string                    `gorm:"primaryKey"`
-	TurnID          string                    `gorm:"not null;index;uniqueIndex:ux_communication_action_turn_kind,priority:1"`
-	Kind            CommunicationActionKind   `gorm:"not null;uniqueIndex:ux_communication_action_turn_kind,priority:2"`
-	Text            string                    `gorm:"not null"`
-	ContentHash     string                    `gorm:"not null"`
-	Status          CommunicationActionStatus `gorm:"not null;index"`
-	EffectIntentID  *string                   `gorm:"uniqueIndex"`
-	FailureReason   string
-	PlannedAt       time.Time `gorm:"not null"`
-	EffectStartedAt *time.Time
-	SentAt          *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ActionID            string                  `gorm:"primaryKey"`
+	TurnID              string                  `gorm:"not null;index;uniqueIndex:ux_communication_action_turn_kind,priority:1"`
+	Kind                CommunicationActionKind `gorm:"not null;uniqueIndex:ux_communication_action_turn_kind,priority:2"`
+	Text                string                  `gorm:"not null"`
+	ContentHash         string                  `gorm:"not null"`
+	DependsOnActionID   *string                 `gorm:"index"`
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	Status              CommunicationActionStatus `gorm:"not null;index"`
+	EffectIntentID      *string                   `gorm:"uniqueIndex"`
+	FailureReason       string
+	PlannedAt           time.Time `gorm:"not null"`
+	EffectStartedAt     *time.Time
+	SentAt              *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 type AIInvocationStatus string

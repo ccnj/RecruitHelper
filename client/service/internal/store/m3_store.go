@@ -247,7 +247,14 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 			return ErrDomainBusy
 		}
 		if req.AutomaticActionID != "" {
-			if err := bindM5AutomaticActionTx(tx, req.AutomaticActionID, &i, &c, req.Now); err != nil {
+			if err := bindM5AutomaticActionTx(
+				tx,
+				req.AutomaticActionID,
+				req.PreviousIntentID,
+				&i,
+				&c,
+				req.Now,
+			); err != nil {
 				return err
 			}
 		}

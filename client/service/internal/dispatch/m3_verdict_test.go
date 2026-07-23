@@ -29,6 +29,28 @@ func makeEffectSuspectReviewable(t *testing.T, d *Dispatcher, st *store.Store, r
 	_ = d
 }
 
+func TestSendAutomaticInterviewCardRejectsNonThirtyMinuteDurationBeforeWAL(t *testing.T) {
+	actionID := "turn-non-thirty|interviewInvite"
+	intentID, err := store.M5AutomaticIntentID(actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
+	_, err = (&Dispatcher{}).SendAutomaticCard(SendAutomaticCardRequest{
+		IntentID: intentID, AutomaticActionID: actionID,
+		Platform: "zhilian", AccountRef: "account", ConversationRef: "conversation",
+		Primitive: protocol.PrimChatSendInviteCard,
+		Interview: &protocol.InterviewDetails{
+			StartsAt: startsAt,
+			EndsAt:   startsAt + (45 * time.Minute).Milliseconds(),
+			Method:   protocol.InterviewMethodWechatVideo,
+		},
+	})
+	if !errors.Is(err, store.ErrCommunicationActionInvalid) {
+		t.Fatalf("非 30 分钟邀面必须在 WAL 前拒绝: err=%v", err)
+	}
+}
+
 func TestRealEffectVerdictResolvedOKIsAtomicAndLateFailedNoneCorrectsLedger(t *testing.T) {
 	d, st, m := newDisp(t)
 	key := seedSendTarget(t, st, m, "acct-verdict-ok", "conv-verdict-ok")

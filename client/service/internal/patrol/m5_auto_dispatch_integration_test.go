@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +52,42 @@ func (r *m5AutomaticReplyRunner) StartAutomaticReply(
 	}, nil
 }
 
+func (r *m5AutomaticReplyRunner) StartAutomaticCard(
+	ctx context.Context,
+	req AutomaticCardRequest,
+) (AutomaticCardHandle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	primitive := ""
+	switch req.Kind {
+	case store.CommunicationActionInviteWechat:
+		primitive = protocol.PrimChatSendWechatInvite
+	case store.CommunicationActionInterviewInvite:
+		primitive = protocol.PrimChatSendInviteCard
+	default:
+		return nil, store.ErrCommunicationActionInvalid
+	}
+	receipt, err := r.dispatcher.SendAutomaticCard(dispatch.SendAutomaticCardRequest{
+		IntentID: req.IntentID, PreviousIntentID: req.PreviousIntentID,
+		AutomaticActionID: req.ActionID,
+		ExpectedSession:   req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
+		Platform: req.Platform, AccountRef: req.AccountRef,
+		ConversationRef: req.ConversationRef, Primitive: primitive,
+		Interview: req.Interview,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.LogicalDispatchID == "" {
+		return nil, errors.New("真实 dispatcher 未返回自动卡片 logical dispatch")
+	}
+	return &m5AutomaticReplyHandle{
+		dispatcher: r.dispatcher,
+		logicalID:  receipt.LogicalDispatchID,
+	}, nil
+}
+
 type m5AutomaticReplyHandle struct {
 	dispatcher *dispatch.Dispatcher
 	logicalID  string
@@ -84,13 +121,6 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 	if err := json.Unmarshal(env.Body, &body); err != nil {
 		return err
 	}
-	if body.Name != protocol.PrimChatSendMessage {
-		return fmt.Errorf("fake hand 收到非自动回复原语 %q", body.Name)
-	}
-	var args protocol.ChatSendMessageArgs
-	if err := json.Unmarshal(body.Args, &args); err != nil {
-		return err
-	}
 	h.mu.Lock()
 	h.commands = append(h.commands, body)
 	dispatcher := h.dispatcher
@@ -98,18 +128,60 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 	if dispatcher == nil {
 		return errors.New("fake hand 未绑定 dispatcher")
 	}
-	data, err := protocol.Encode(protocol.ChatSendMessageData{
-		ConversationRef: args.ConversationRef,
-		ContentHash:     syncledger.HashText(args.Text),
-		ObservedAt:      time.Now().UnixMilli(),
-	})
+	var data []byte
+	var evidenceType string
+	var err error
+	switch body.Name {
+	case protocol.PrimChatSendMessage:
+		var args protocol.ChatSendMessageArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		data, err = protocol.Encode(protocol.ChatSendMessageData{
+			ConversationRef: args.ConversationRef,
+			ContentHash:     syncledger.HashText(args.Text),
+			ObservedAt:      time.Now().UnixMilli(),
+		})
+		evidenceType = string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)
+	case protocol.PrimChatSendWechatInvite:
+		var args protocol.ChatSendWechatInviteArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		data, err = protocol.Encode(protocol.ChatSendWechatInviteData{
+			ConversationRef: args.ConversationRef,
+			ContentHash:     syncledger.WechatExchangeContentHash(),
+			SourceKey:       strings.Repeat("a", 64),
+			ObservedAt:      time.Now().UnixMilli(),
+		})
+		evidenceType = string(protocol.SendWechatInviteEvidenceTypeOutboundWechatInviteObserved)
+	case protocol.PrimChatSendInviteCard:
+		var args protocol.ChatSendInviteCardArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		data, err = protocol.Encode(protocol.ChatSendInviteCardData{
+			ConversationRef: args.ConversationRef,
+			ContentHash: syncledger.InterviewInviteContentHash(
+				args.Interview.StartsAt,
+				args.Interview.EndsAt,
+				string(args.Interview.Method),
+			),
+			SourceKey:  strings.Repeat("b", 64),
+			Interview:  args.Interview,
+			ObservedAt: time.Now().UnixMilli(),
+		})
+		evidenceType = string(protocol.SendInviteCardEvidenceTypeOutboundInterviewInviteObserved)
+	default:
+		return fmt.Errorf("fake hand 收到非自动沟通原语 %q", body.Name)
+	}
 	if err != nil {
 		return err
 	}
 	dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
 	dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
 		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: data,
-		Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
+		Evidence: []protocol.Evidence{{Type: evidenceType}},
 	})
 	return nil
 }
@@ -129,12 +201,16 @@ func (*m5PositiveHand) HandNegotiation(handID string) ([]string, []string, bool)
 	if handID != "hand-1" {
 		return nil, nil, false
 	}
-	return []string{protocol.PrimChatSendMessage + "@1"}, []string{
-		string(protocol.FeatureLease1),
-		string(protocol.FeatureProgress1),
-		string(protocol.FeatureCancel1),
-		string(protocol.FeatureWitness1),
-	}, true
+	return []string{
+			protocol.PrimChatSendMessage + "@1",
+			protocol.PrimChatSendWechatInvite + "@1",
+			protocol.PrimChatSendInviteCard + "@1",
+		}, []string{
+			string(protocol.FeatureLease1),
+			string(protocol.FeatureProgress1),
+			string(protocol.FeatureCancel1),
+			string(protocol.FeatureWitness1),
+		}, true
 }
 
 func (*m5PositiveHand) HandWitness(handID string) (dispatch.HandWitness, bool) {

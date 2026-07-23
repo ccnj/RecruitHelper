@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1510,9 +1511,26 @@ func (s *Store) RecheckDialogueTurnCurrent(turnID string, at time.Time) (bool, e
 		default:
 			return ErrDialogueTurnState
 		}
-		if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
-			if !errors.Is(err, ErrDialogueTurnBinding) {
+		var planned []CommunicationAction
+		if turn.Status == DialogueTurnAdviceReady {
+			if err := tx.Where(
+				"turn_id = ? AND status = ?",
+				turn.TurnID,
+				CommunicationActionPlanned,
+			).Find(&planned).Error; err != nil {
 				return err
+			}
+		}
+		var currentErr error
+		if len(planned) == 1 && planned[0].DependsOnActionID != nil {
+			_, currentErr = validateM5DependentActionCurrentTx(tx, turn, planned[0])
+		} else {
+			currentErr = validateDialogueTurnCurrentTx(tx, turn)
+		}
+		if currentErr != nil {
+			if !errors.Is(currentErr, ErrDialogueTurnBinding) &&
+				!errors.Is(currentErr, ErrCommunicationActionConflict) {
+				return currentErr
 			}
 			return markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", at)
 		}
@@ -1561,7 +1579,37 @@ func (s *Store) CommunicationActionByTurn(turnID string) (*CommunicationAction, 
 	return &action, nil
 }
 
-func communicationV4PlannedTextActionTx(
+func (s *Store) CommunicationActionByID(actionID string) (*CommunicationAction, error) {
+	var action CommunicationAction
+	err := s.db.First(&action, "action_id = ?", actionID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+func (s *Store) CommunicationActionsByTurn(turnID string) ([]CommunicationAction, error) {
+	var actions []CommunicationAction
+	err := s.db.Where("turn_id = ?", turnID).Order("planned_at, created_at, action_id").Find(&actions).Error
+	return actions, err
+}
+
+func (s *Store) PlannedCommunicationActionByTurn(turnID string) (*CommunicationAction, error) {
+	var action CommunicationAction
+	err := s.db.First(&action, "turn_id = ? AND status = ?", turnID, CommunicationActionPlanned).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &action, nil
+}
+
+func communicationV4PlannedActionTx(
 	tx *gorm.DB,
 	turn DialogueTurn,
 	action CommunicationAction,
@@ -1573,18 +1621,239 @@ func communicationV4PlannedTextActionTx(
 	if head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
 		head.Outcome.NextAdvice != communication.V4AdviceNone ||
 		head.Outcome.ManualReason != "" ||
-		len(head.Outcome.PlannedActions) != 1 {
+		len(head.Outcome.PlannedActions) < 1 ||
+		len(head.Outcome.PlannedActions) > 2 {
 		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
 	}
-	plan := head.Outcome.PlannedActions[0]
-	if plan.ActionKey != action.ActionID ||
-		!supportedCommunicationV4TextKind(plan.Kind) ||
-		action.Kind != CommunicationActionReplyText ||
-		strings.TrimSpace(action.Text) == "" ||
-		action.ContentHash != textcanon.Hash(action.Text) {
+	var plan *communication.V4PlannedAction
+	for index := range head.Outcome.PlannedActions {
+		if head.Outcome.PlannedActions[index].ActionKey == action.ActionID {
+			copy := head.Outcome.PlannedActions[index]
+			plan = &copy
+			break
+		}
+	}
+	if plan == nil || !communicationActionMatchesV4Plan(action, *plan) {
 		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
 	}
-	return plan, true, nil
+	return *plan, true, nil
+}
+
+func communicationActionMatchesV4Plan(
+	action CommunicationAction,
+	plan communication.V4PlannedAction,
+) bool {
+	switch action.Kind {
+	case CommunicationActionReplyText:
+		return supportedCommunicationV4TextKind(plan.Kind) &&
+			strings.TrimSpace(action.Text) != "" &&
+			action.ContentHash == textcanon.Hash(action.Text) &&
+			action.DependsOnActionID == nil &&
+			action.InterviewStartsAtMs == nil &&
+			action.InterviewEndsAtMs == nil &&
+			action.InterviewMethod == nil
+	case CommunicationActionInviteWechat:
+		return plan.Kind == communication.V4ActionInviteWechat &&
+			action.Text == "" &&
+			action.ContentHash == communicationWechatInviteContentHash() &&
+			action.DependsOnActionID != nil &&
+			action.InterviewStartsAtMs == nil &&
+			action.InterviewEndsAtMs == nil &&
+			action.InterviewMethod == nil
+	case CommunicationActionInterviewInvite:
+		return plan.Kind == communication.V4ActionInterviewInvite &&
+			action.Text == "" &&
+			action.DependsOnActionID != nil &&
+			action.InterviewStartsAtMs != nil &&
+			action.InterviewEndsAtMs != nil &&
+			action.InterviewMethod != nil &&
+			plan.InterviewStartsAtMs != nil &&
+			plan.InterviewEndsAtMs != nil &&
+			plan.InterviewMethod != nil &&
+			*action.InterviewStartsAtMs == *plan.InterviewStartsAtMs &&
+			*action.InterviewEndsAtMs == *plan.InterviewEndsAtMs &&
+			*action.InterviewMethod == *plan.InterviewMethod &&
+			*action.InterviewStartsAtMs > 0 &&
+			*action.InterviewEndsAtMs ==
+				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs &&
+			*action.InterviewMethod == "wechatVideo" &&
+			action.ContentHash == communicationInterviewInviteContentHash(
+				*action.InterviewStartsAtMs,
+				*action.InterviewEndsAtMs,
+				*action.InterviewMethod,
+			)
+	default:
+		return false
+	}
+}
+
+func nextCommunicationV4PlanTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	actionKey string,
+) (*communication.V4PlannedAction, error) {
+	head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+	if err != nil {
+		return nil, err
+	}
+	if !found ||
+		head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
+		head.Outcome.NextAdvice != communication.V4AdviceNone ||
+		head.Outcome.ManualReason != "" {
+		return nil, ErrCommunicationActionConflict
+	}
+	for index := range head.Outcome.PlannedActions {
+		if head.Outcome.PlannedActions[index].ActionKey != actionKey {
+			continue
+		}
+		if index+1 == len(head.Outcome.PlannedActions) {
+			return nil, nil
+		}
+		if index != 0 || len(head.Outcome.PlannedActions) != 2 {
+			return nil, ErrCommunicationActionConflict
+		}
+		next := head.Outcome.PlannedActions[index+1]
+		return &next, nil
+	}
+	return nil, ErrCommunicationActionConflict
+}
+
+func materializeDependentCommunicationActionTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	parentBeforeUpdate CommunicationAction,
+	plan communication.V4PlannedAction,
+	at time.Time,
+) error {
+	var parent CommunicationAction
+	if tx == nil {
+		return ErrCommunicationActionConflict
+	}
+	if err := tx.First(&parent, "action_id = ?", parentBeforeUpdate.ActionID).Error; err != nil {
+		return err
+	}
+	if parent.TurnID != turn.TurnID ||
+		parent.Status != CommunicationActionSent ||
+		!supportedCommunicationV4CardPlan(plan) ||
+		!approvedCommunicationV4VisibleCombination(
+			mustCommunicationV4PlanKindTx(tx, turn, parent.ActionID),
+			plan.Kind,
+		) {
+		return ErrCommunicationActionConflict
+	}
+	action := CommunicationAction{
+		ActionID:          plan.ActionKey,
+		TurnID:            turn.TurnID,
+		Text:              "",
+		Status:            CommunicationActionPlanned,
+		DependsOnActionID: &parent.ActionID,
+		PlannedAt:         at,
+		CreatedAt:         at,
+		UpdatedAt:         at,
+	}
+	switch plan.Kind {
+	case communication.V4ActionInviteWechat:
+		action.Kind = CommunicationActionInviteWechat
+		action.ContentHash = communicationWechatInviteContentHash()
+	case communication.V4ActionInterviewInvite:
+		action.Kind = CommunicationActionInterviewInvite
+		action.InterviewStartsAtMs = cloneOptionalInt64(plan.InterviewStartsAtMs)
+		action.InterviewEndsAtMs = cloneOptionalInt64(plan.InterviewEndsAtMs)
+		action.InterviewMethod = cloneOptionalString(plan.InterviewMethod)
+		action.ContentHash = communicationInterviewInviteContentHash(
+			*action.InterviewStartsAtMs,
+			*action.InterviewEndsAtMs,
+			*action.InterviewMethod,
+		)
+	default:
+		return ErrCommunicationActionConflict
+	}
+	var existing CommunicationAction
+	err := tx.First(&existing, "action_id = ?", action.ActionID).Error
+	if err == nil {
+		if !sameMaterializedCommunicationAction(existing, action) {
+			return ErrCommunicationActionConflict
+		}
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return tx.Create(&action).Error
+}
+
+func communicationWechatInviteContentHash() string {
+	return textcanon.Hash("card\x1fwechatExchange")
+}
+
+func communicationInterviewInviteContentHash(
+	startsAtMs int64,
+	endsAtMs int64,
+	method string,
+) string {
+	return textcanon.Hash(
+		"card\x1finterviewInvite\x1f" +
+			strconv.FormatInt(startsAtMs, 10) +
+			"\x1f" +
+			strconv.FormatInt(endsAtMs, 10) +
+			"\x1f" +
+			method,
+	)
+}
+
+func mustCommunicationV4PlanKindTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	actionKey string,
+) communication.V4ActionKind {
+	head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+	if err != nil || !found {
+		return ""
+	}
+	for _, plan := range head.Outcome.PlannedActions {
+		if plan.ActionKey == actionKey {
+			return plan.Kind
+		}
+	}
+	return ""
+}
+
+func sameMaterializedCommunicationAction(left, right CommunicationAction) bool {
+	return left.ActionID == right.ActionID &&
+		left.TurnID == right.TurnID &&
+		left.Kind == right.Kind &&
+		left.Text == right.Text &&
+		left.ContentHash == right.ContentHash &&
+		sameOptionalString(left.DependsOnActionID, right.DependsOnActionID) &&
+		sameOptionalInt64(left.InterviewStartsAtMs, right.InterviewStartsAtMs) &&
+		sameOptionalInt64(left.InterviewEndsAtMs, right.InterviewEndsAtMs) &&
+		sameOptionalString(left.InterviewMethod, right.InterviewMethod)
+}
+
+func communicationActionMatchesMessage(action CommunicationAction, message Message) bool {
+	if message.Direction != "out" || message.ContentHash != action.ContentHash {
+		return false
+	}
+	switch action.Kind {
+	case CommunicationActionReplyText:
+		return message.Kind == "text"
+	case CommunicationActionInviteWechat:
+		return message.Kind == "card" &&
+			message.CardType == "wechatExchange" &&
+			message.CardState == "pending" &&
+			message.InterviewStartsAtMs == nil &&
+			message.InterviewEndsAtMs == nil &&
+			message.InterviewMethod == nil
+	case CommunicationActionInterviewInvite:
+		return message.Kind == "card" &&
+			message.CardType == "interviewInvite" &&
+			message.CardState == "unknown" &&
+			sameOptionalInt64(message.InterviewStartsAtMs, action.InterviewStartsAtMs) &&
+			sameOptionalInt64(message.InterviewEndsAtMs, action.InterviewEndsAtMs) &&
+			sameOptionalString(message.InterviewMethod, action.InterviewMethod)
+	default:
+		return false
+	}
 }
 
 // bindM5AutomaticActionTx is the M5 intent-construction authorization point.
@@ -1593,6 +1862,7 @@ func communicationV4PlannedTextActionTx(
 func bindM5AutomaticActionTx(
 	tx *gorm.DB,
 	actionID string,
+	previousIntentID string,
 	intent *EffectIntent,
 	command *CmdRecord,
 	at time.Time,
@@ -1601,8 +1871,8 @@ func bindM5AutomaticActionTx(
 		return ErrCommunicationActionInvalid
 	}
 	expectedIntentID, err := M5AutomaticIntentID(actionID)
-	if err != nil || intent.IntentID != expectedIntentID || intent.Primitive != primitiveChatSendMessage ||
-		command.IntentID != intent.IntentID || command.Name != primitiveChatSendMessage {
+	if err != nil || intent.IntentID != expectedIntentID ||
+		command.IntentID != intent.IntentID || command.Name != intent.Primitive {
 		return ErrCommunicationActionInvalid
 	}
 	var action CommunicationAction
@@ -1612,22 +1882,34 @@ func bindM5AutomaticActionTx(
 		}
 		return err
 	}
-	if action.Kind != CommunicationActionReplyText || action.Status != CommunicationActionPlanned ||
-		action.EffectIntentID != nil || strings.TrimSpace(action.Text) == "" ||
-		strings.TrimSpace(action.ContentHash) == "" || action.ContentHash != intent.SendFingerprint {
+	if action.Status != CommunicationActionPlanned ||
+		action.EffectIntentID != nil ||
+		strings.TrimSpace(action.ContentHash) == "" ||
+		action.ContentHash != intent.SendFingerprint ||
+		communicationActionPrimitive(action.Kind) != intent.Primitive {
 		return ErrCommunicationActionConflict
 	}
 	var turn DialogueTurn
 	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
 		return err
 	}
-	if _, _, err := communicationV4PlannedTextActionTx(tx, turn, action); err != nil {
+	if _, _, err := communicationV4PlannedActionTx(tx, turn, action); err != nil {
 		return err
 	}
 	if turn.Status != DialogueTurnAdviceReady || turn.ConversationRef != intent.TargetRef {
 		return ErrDialogueTurnState
 	}
-	if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+	if action.DependsOnActionID == nil {
+		if err := validateDialogueTurnCurrentTx(tx, turn); err != nil {
+			return err
+		}
+	} else if err := validateM5ActionDependencyTx(
+		tx,
+		turn,
+		action,
+		previousIntentID,
+		intent,
+	); err != nil {
 		return err
 	}
 	var profile CandidateProfile
@@ -1638,9 +1920,7 @@ func bindM5AutomaticActionTx(
 		profile.ConversationRef == nil || *profile.ConversationRef != intent.TargetRef {
 		return ErrDialogueTurnBinding
 	}
-	var args protocol.ChatSendMessageArgs
-	if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
-		args.ConversationRef != turn.ConversationRef || args.Text != action.Text {
+	if err := validateM5AutomaticCommand(action, turn.ConversationRef, *command); err != nil {
 		return ErrCommunicationActionConflict
 	}
 	intentID := intent.IntentID
@@ -1670,7 +1950,7 @@ func bindM5AutomaticActionTx(
 
 func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent EffectIntent) error {
 	expectedIntentID, err := M5AutomaticIntentID(actionID)
-	if err != nil || expectedIntentID != intent.IntentID || intent.Primitive != primitiveChatSendMessage {
+	if err != nil || expectedIntentID != intent.IntentID {
 		return ErrCommunicationActionInvalid
 	}
 	var action CommunicationAction
@@ -1681,8 +1961,9 @@ func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent Effect
 		return err
 	}
 	if action.EffectIntentID == nil || *action.EffectIntentID != intent.IntentID ||
-		action.EffectStartedAt == nil || action.Kind != CommunicationActionReplyText ||
-		action.ContentHash != intent.SendFingerprint {
+		action.EffectStartedAt == nil ||
+		action.ContentHash != intent.SendFingerprint ||
+		communicationActionPrimitive(action.Kind) != intent.Primitive {
 		return ErrCommunicationActionConflict
 	}
 	switch action.Status {
@@ -1703,6 +1984,206 @@ func validateM5AutomaticIntentLinkTx(tx *gorm.DB, actionID string, intent Effect
 		return ErrCommunicationActionConflict
 	}
 	return nil
+}
+
+func communicationActionPrimitive(kind CommunicationActionKind) string {
+	switch kind {
+	case CommunicationActionReplyText:
+		return primitiveChatSendMessage
+	case CommunicationActionInviteWechat:
+		return primitiveChatSendWechatInvite
+	case CommunicationActionInterviewInvite:
+		return primitiveChatSendInviteCard
+	default:
+		return ""
+	}
+}
+
+func validateM5AutomaticCommand(
+	action CommunicationAction,
+	conversationRef string,
+	command CmdRecord,
+) error {
+	switch action.Kind {
+	case CommunicationActionReplyText:
+		var args protocol.ChatSendMessageArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef ||
+			args.Text != action.Text {
+			return ErrCommunicationActionConflict
+		}
+	case CommunicationActionInviteWechat:
+		var args protocol.ChatSendWechatInviteArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef {
+			return ErrCommunicationActionConflict
+		}
+	case CommunicationActionInterviewInvite:
+		var args protocol.ChatSendInviteCardArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef ||
+			action.InterviewStartsAtMs == nil ||
+			action.InterviewEndsAtMs == nil ||
+			action.InterviewMethod == nil ||
+			*action.InterviewEndsAtMs !=
+				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs ||
+			args.Interview.StartsAt != *action.InterviewStartsAtMs ||
+			args.Interview.EndsAt != *action.InterviewEndsAtMs ||
+			string(args.Interview.Method) != *action.InterviewMethod {
+			return ErrCommunicationActionConflict
+		}
+	default:
+		return ErrCommunicationActionInvalid
+	}
+	return nil
+}
+
+func validateM5ActionDependencyTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	action CommunicationAction,
+	previousIntentID string,
+	childIntent *EffectIntent,
+) error {
+	dependency, err := validateM5DependentActionCurrentTx(tx, turn, action)
+	if err != nil {
+		return err
+	}
+	if childIntent == nil {
+		return ErrCommunicationActionConflict
+	}
+	if previousIntentID != dependency.intent.IntentID {
+		return ErrEffectIntentCASConflict
+	}
+	head, latest, err := effectIntentHeadTx(
+		tx,
+		childIntent.Platform,
+		childIntent.AccountRef,
+		childIntent.TargetRef,
+	)
+	if err != nil {
+		return err
+	}
+	if head == nil ||
+		latest == nil ||
+		head.LatestIntentID != dependency.intent.IntentID ||
+		latest.IntentID != dependency.intent.IntentID {
+		return ErrDialogueTurnBinding
+	}
+	return nil
+}
+
+type m5DependentActionCurrent struct {
+	intent  EffectIntent
+	message Message
+}
+
+// validateM5DependentActionCurrentTx is the narrow current evaluator for the
+// card half of an approved text→card combination. The original inbound turn
+// boundary is expected to be behind the confirmed parent text at this point;
+// only that positive parent fact and the exact active ledger tail authorize
+// continuation.
+func validateM5DependentActionCurrentTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	action CommunicationAction,
+) (m5DependentActionCurrent, error) {
+	var out m5DependentActionCurrent
+	if action.DependsOnActionID == nil || strings.TrimSpace(*action.DependsOnActionID) == "" {
+		return out, ErrCommunicationActionConflict
+	}
+	var planned []CommunicationAction
+	if err := tx.Where(
+		"turn_id = ? AND status = ?",
+		turn.TurnID,
+		CommunicationActionPlanned,
+	).Find(&planned).Error; err != nil {
+		return out, err
+	}
+	if len(planned) != 1 || planned[0].ActionID != action.ActionID {
+		return out, ErrCommunicationActionConflict
+	}
+	if _, v4Turn, err := communicationV4PlannedActionTx(tx, turn, action); err != nil {
+		return out, err
+	} else if !v4Turn {
+		return out, ErrCommunicationActionConflict
+	}
+	var parent CommunicationAction
+	if err := tx.First(&parent, "action_id = ?", *action.DependsOnActionID).Error; err != nil {
+		return out, err
+	}
+	if parent.TurnID != turn.TurnID ||
+		parent.Kind != CommunicationActionReplyText ||
+		parent.Status != CommunicationActionSent ||
+		parent.EffectIntentID == nil ||
+		parent.SentAt == nil {
+		return out, ErrCommunicationActionConflict
+	}
+	var intent EffectIntent
+	if err := tx.First(&intent, "intent_id = ?", *parent.EffectIntentID).Error; err != nil {
+		return out, err
+	}
+	if intent.Status != EffectIntentOk && intent.Status != EffectIntentResolvedOk {
+		return out, ErrCommunicationActionConflict
+	}
+	var message Message
+	if err := tx.First(&message, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
+		return out, err
+	}
+	if message.RetractedAt != nil ||
+		message.Direction != "out" ||
+		message.Kind != "text" ||
+		message.ContentHash != parent.ContentHash {
+		return out, ErrCommunicationActionConflict
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
+		return out, err
+	}
+	if profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef {
+		return out, ErrDialogueTurnBinding
+	}
+	var activeTail int64
+	if err := tx.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL",
+			profile.Platform,
+			profile.AccountRef,
+			turn.ConversationRef,
+		).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&activeTail).Error; err != nil {
+		return out, err
+	}
+	if activeTail != message.Seq {
+		return out, ErrDialogueTurnBinding
+	}
+	confirmed, found, err := communicationV4ApplicationTx(
+		tx,
+		turn.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		parent.ActionID,
+	)
+	if err != nil {
+		return out, err
+	}
+	if !found ||
+		confirmed.SemanticKind == "" ||
+		confirmed.MessageSeq != message.Seq {
+		return out, ErrCommunicationActionConflict
+	}
+	aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
+	if err != nil {
+		return out, err
+	}
+	if aggregate.Revision != confirmed.ToRevision ||
+		aggregate.ProjectedThroughSeq != message.Seq ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		return out, ErrDialogueTurnBinding
+	}
+	out.intent = intent
+	out.message = message
+	return out, nil
 }
 
 func (s *Store) ValidateM5AutomaticIntentLink(actionID, intentID string) error {
@@ -1779,7 +2260,7 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 	if err := tx.First(&turn, "turn_id = ?", action.TurnID).Error; err != nil {
 		return err
 	}
-	v4Plan, v4Turn, err := communicationV4PlannedTextActionTx(tx, turn, action)
+	v4Plan, v4Turn, err := communicationV4PlannedActionTx(tx, turn, action)
 	if err != nil {
 		return err
 	}
@@ -1804,8 +2285,9 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		if err := tx.First(&message, "outbound_intent_id = ?", intent.IntentID).Error; err != nil {
 			return err
 		}
-		if message.RetractedAt != nil || message.Seq != *intent.ResultMessageSeq || message.Direction != "out" ||
-			message.ContentHash != action.ContentHash {
+		if message.RetractedAt != nil ||
+			message.Seq != *intent.ResultMessageSeq ||
+			!communicationActionMatchesMessage(action, message) {
 			return ErrCommunicationActionConflict
 		}
 		switch turn.Status {
@@ -1836,17 +2318,6 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		if updated.RowsAffected != 1 {
 			return ErrCommunicationActionConflict
 		}
-		updated = tx.Model(&DialogueTurn{}).
-			Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
-			Updates(map[string]any{
-				"status": DialogueTurnCompleted, "failure_reason": "", "updated_at": at,
-			})
-		if updated.Error != nil {
-			return updated.Error
-		}
-		if updated.RowsAffected != 1 {
-			return ErrDialogueTurnConflict
-		}
 		if v4Turn {
 			confirmedAt := sentAt
 			if message.TsApproxMs != nil {
@@ -1868,7 +2339,49 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 				},
 				at,
 			)
-			return err
+			if err != nil {
+				return err
+			}
+			nextPlan, err := nextCommunicationV4PlanTx(tx, turn, v4Plan.ActionKey)
+			if err != nil {
+				return err
+			}
+			nextStatus := DialogueTurnCompleted
+			if nextPlan != nil {
+				if err := materializeDependentCommunicationActionTx(
+					tx,
+					turn,
+					action,
+					*nextPlan,
+					at,
+				); err != nil {
+					return err
+				}
+				nextStatus = DialogueTurnAdviceReady
+			}
+			updated = tx.Model(&DialogueTurn{}).
+				Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+				Updates(map[string]any{
+					"status": nextStatus, "failure_reason": "", "updated_at": at,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrDialogueTurnConflict
+			}
+			return nil
+		}
+		updated = tx.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+			Updates(map[string]any{
+				"status": DialogueTurnCompleted, "failure_reason": "", "updated_at": at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
 		}
 		endedAt := selection.EndedAt
 		if endedAt == nil || selection.Status != M5TrialSelectionCompleted {
@@ -1916,8 +2429,7 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 				return err
 			}
 			if retracted.RetractedAt == nil ||
-				retracted.Direction != "out" ||
-				retracted.ContentHash != action.ContentHash {
+				!communicationActionMatchesMessage(action, retracted) {
 				return ErrCommunicationActionConflict
 			}
 			if _, _, _, err := retractCommunicationV4ConfirmedActionTx(

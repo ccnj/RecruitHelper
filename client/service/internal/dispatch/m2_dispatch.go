@@ -229,7 +229,9 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 				PreviousIntentID: opts.previousIntentID, SourcingSource: opts.sourcingGreetingSource,
 				Now: time.Now(),
 			})
-		case protocol.PrimChatSendMessage:
+		case protocol.PrimChatSendMessage,
+			protocol.PrimChatSendWechatInvite,
+			protocol.PrimChatSendInviteCard:
 			createdResult, createErr = d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
 				Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
 				PreviousIntentID: opts.previousIntentID, AutomaticActionID: opts.automaticActionID,

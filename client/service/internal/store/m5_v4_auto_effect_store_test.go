@@ -1,7 +1,9 @@
 package store
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +167,44 @@ func createCommunicationV4AutomaticEffect(
 	return fixture, req, created
 }
 
+func confirmCommunicationV4TextEffect(
+	t *testing.T,
+	s *Store,
+	fixture communicationV4AutomaticEffectFixture,
+	suffix string,
+) CreateEffectIntentRequest {
+	t.Helper()
+	req := communicationV4AutomaticEffectRequest(t, s, fixture, suffix)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("V4 正文 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	resultAt := fixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-"+suffix,
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &resultAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					Append:       true,
+					Text:         fixture.Action.Text,
+					ContentHash:  fixture.Action.ContentHash,
+					ObservedAtMs: resultAt.UnixMilli(),
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
 func assertCommunicationV4HasNoTrial(
 	t *testing.T,
 	s *Store,
@@ -198,6 +238,482 @@ func TestCommunicationV4AutomaticActionConstructsWALWithoutTrial(t *testing.T) {
 		replayed.Intent.IntentID != created.Intent.IntentID ||
 		replayed.Command.MsgID != created.Command.MsgID {
 		t.Fatalf("V4 WAL 重放发生增生: result=%+v err=%v", replayed, err)
+	}
+}
+
+func TestCommunicationV4RejectionTextThenWechatCardOwnIndependentEffects(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-rejection-combo")
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-profile-v4-rejection-combo")
+	inboundText := "暂时不考虑，谢谢"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: textcanon.Hash(inboundText), Text: &inboundText,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil || frozen.Turn.Status != DialogueTurnAdviceReady {
+		t.Fatalf("拒绝组合未冻结到正文待发: result=%+v err=%v", frozen, err)
+	}
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Kind != CommunicationActionReplyText {
+		t.Fatalf("正文正证前出现了卡片 action: actions=%+v err=%v", actions, err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	textFixture := communicationV4AutomaticEffectFixture{
+		resumeStoreFixture: fixture,
+		Turn:               frozen.Turn,
+		Action:             actions[0],
+		Now:                now,
+	}
+	textReq := communicationV4AutomaticEffectRequest(
+		t,
+		s,
+		textFixture,
+		"rejection-combo-text",
+	)
+	textCreated, err := s.CreateEffectIntentAndCmd(textReq)
+	if err != nil || !textCreated.Created {
+		t.Fatalf("拒绝正文 WAL 构造失败: result=%+v err=%v", textCreated, err)
+	}
+	textResultAt := now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		textCreated.Command.MsgID,
+		"result-v4-rejection-combo-text",
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &textResultAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					Append:       true,
+					Text:         actions[0].Text,
+					ContentHash:  actions[0].ContentHash,
+					ObservedAtMs: textResultAt.UnixMilli(),
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	actions, err = s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Status != CommunicationActionSent ||
+		actions[1].Kind != CommunicationActionInviteWechat ||
+		actions[1].Status != CommunicationActionPlanned ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID {
+		t.Fatalf("正文正证没有原子实体化唯一卡片 action: actions=%+v err=%v", actions, err)
+	}
+	turn, err := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if err != nil || turn == nil || turn.Status != DialogueTurnAdviceReady {
+		t.Fatalf("组合正文后 turn 未等待卡片: turn=%+v err=%v", turn, err)
+	}
+
+	card := actions[1]
+	childIntent := EffectIntent{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		TargetRef: fixture.ConversationRef,
+	}
+	if err := validateM5ActionDependencyTx(
+		s.db,
+		*turn,
+		card,
+		"",
+		&childIntent,
+	); !errors.Is(err, ErrEffectIntentCASConflict) {
+		t.Fatalf("dependent 卡片必须钉死正文 parent intent: err=%v", err)
+	}
+	rollback := errors.New("rollback inserted message fixture")
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		inserted := "候选人在正文后立即回复"
+		if err := tx.Create(&Message{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef, Seq: 4,
+			Direction: "in", Kind: "text", ContentHash: textcanon.Hash(inserted),
+			Text: &inserted, Origin: "external", CreatedAt: textResultAt.Add(time.Second),
+		}).Error; err != nil {
+			return err
+		}
+		if _, currentErr := validateM5DependentActionCurrentTx(tx, *turn, card); !errors.Is(currentErr, ErrDialogueTurnBinding) {
+			t.Fatalf("正文后出现新消息必须停止 dependent 卡片: err=%v", currentErr)
+		}
+		return rollback
+	}); !errors.Is(err, rollback) {
+		t.Fatalf("插入消息负例没有回滚: err=%v", err)
+	}
+	cardIntentID, err := M5AutomaticIntentID(card.ActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardArgs, err := protocol.Encode(protocol.ChatSendWechatInviteArgs{
+		ConversationRef: fixture.ConversationRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardAt := textResultAt.Add(time.Minute)
+	cardDeadline := cardAt.Add(time.Hour).UnixMilli()
+	cardReq := CreateEffectIntentRequest{
+		Intent: EffectIntent{
+			IntentID:        cardIntentID,
+			IdemKey:         "idem-v4-rejection-combo-card",
+			Platform:        fixture.Platform,
+			AccountRef:      fixture.AccountRef,
+			Primitive:       primitiveChatSendWechatInvite,
+			TargetRef:       fixture.ConversationRef,
+			PayloadHash:     "payload-v4-rejection-combo-card",
+			GuardsHash:      "guards-v4-rejection-combo-card",
+			Status:          EffectIntentDispatching,
+			DeadlineMs:      cardDeadline,
+			SendFingerprint: card.ContentHash,
+		},
+		Command: CmdRecord{
+			MsgID:                        "msg-v4-rejection-combo-card",
+			Name:                         primitiveChatSendWechatInvite,
+			Class:                        "effectful",
+			IdemKey:                      "idem-v4-rejection-combo-card",
+			Domain:                       fixture.Platform + ":" + fixture.AccountRef,
+			Platform:                     fixture.Platform,
+			AccountRef:                   fixture.AccountRef,
+			ExpectedPrincipalFingerprint: fixture.Principal,
+			IntentID:                     cardIntentID,
+			HandID:                       fixture.HandID,
+			Session:                      fixture.Session,
+			BootIDAtDispatch:             fixture.BootID,
+			Args:                         string(cardArgs),
+			Status:                       CmdQueued,
+			DeadlineMs:                   cardDeadline,
+			ExecBudgetMs:                 60_000,
+		},
+		ExpectedTailSeq:   3,
+		PreviousIntentID:  textReq.Intent.IntentID,
+		AutomaticActionID: card.ActionID,
+		Now:               cardAt,
+	}
+	cardCreated, err := s.CreateEffectIntentAndCmd(cardReq)
+	if err != nil || !cardCreated.Created {
+		t.Fatalf("换微信卡独立 WAL 构造失败: result=%+v err=%v", cardCreated, err)
+	}
+	cardResultAt := cardAt.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		cardCreated.Command.MsgID,
+		"result-v4-rejection-combo-card",
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &cardResultAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					ContentHash:  card.ContentHash,
+					Card: &CardResultMutation{
+						ConversationRef: fixture.ConversationRef,
+						CardType:        "wechatExchange",
+						CardState:       "pending",
+						ContentHash:     card.ContentHash,
+						SourceKey:       strings.Repeat("a", 64),
+					},
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	card, err = func() (CommunicationAction, error) {
+		found, lookupErr := s.CommunicationActionByID(actions[1].ActionID)
+		if found == nil {
+			return CommunicationAction{}, lookupErr
+		}
+		return *found, lookupErr
+	}()
+	turn, turnErr := s.DialogueTurnByID(frozen.Turn.TurnID)
+	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		card.Status != CommunicationActionSent ||
+		turnErr != nil ||
+		turn == nil ||
+		turn.Status != DialogueTurnCompleted ||
+		aggregateErr != nil ||
+		aggregate.State.WechatState != communication.V4WechatInvited ||
+		!aggregate.State.RetentionSent ||
+		aggregate.ProjectedThroughSeq != 4 {
+		t.Fatalf(
+			"组合卡片正证未完成 turn/v4: card=%+v turn=%+v aggregate=%+v errs=%v/%v/%v",
+			card,
+			turn,
+			aggregate,
+			err,
+			turnErr,
+			aggregateErr,
+		)
+	}
+	if textReq.Intent.IntentID == cardReq.Intent.IntentID ||
+		textReq.Command.MsgID == cardReq.Command.MsgID ||
+		textReq.Intent.IdemKey == cardReq.Intent.IdemKey {
+		t.Fatal("组合两动作必须拥有独立 intent/cmd/idemKey")
+	}
+}
+
+func TestCommunicationV4CombinationTextFailureNeverMaterializesCard(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-combo-text-failed")
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-profile-v4-combo-text-failed")
+	inboundText := "暂时不考虑，谢谢"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: textcanon.Hash(inboundText), Text: &inboundText,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 {
+		t.Fatalf("拒绝组合正文规划错误: actions=%+v err=%v", actions, err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	textFixture := communicationV4AutomaticEffectFixture{
+		resumeStoreFixture: fixture,
+		Turn:               frozen.Turn,
+		Action:             actions[0],
+		Now:                now,
+	}
+	req := communicationV4AutomaticEffectRequest(
+		t,
+		s,
+		textFixture,
+		"combo-text-failed",
+	)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("正文 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	failedAt := now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-v4-combo-text-failed",
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdFailed
+			cmd.SideEffect = "none"
+			cmd.TerminalAt = &failedAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentFailed,
+					Reason:       "failedNone",
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	actions, err = s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Status != CommunicationActionManualRequired {
+		t.Fatalf("正文失败不得实体化卡片: actions=%+v err=%v", actions, err)
+	}
+	var cardIntents int64
+	if err := s.db.Model(&EffectIntent{}).
+		Where("primitive IN ?", []string{
+			primitiveChatSendWechatInvite,
+			primitiveChatSendInviteCard,
+		}).
+		Count(&cardIntents).Error; err != nil || cardIntents != 0 {
+		t.Fatalf("正文失败不得创建卡片 WAL: count=%d err=%v", cardIntents, err)
+	}
+}
+
+func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t *testing.T) {
+	s := openTest(t)
+	fixture := seedPlannedCommunicationV4AutomaticAction(t, s, "interview-combo")
+	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
+	endsAt := startsAt + int64((30*time.Minute)/time.Millisecond)
+	method := "wechatVideo"
+	var advice CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&advice,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputDialogueAdvice,
+		communicationV4DialogueAdviceKey(fixture.Turn.TurnID, m5ai.PurposeReply),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	advice.Outcome.PlannedActions = append(
+		advice.Outcome.PlannedActions,
+		communication.V4PlannedAction{
+			ActionKey:           fixture.Turn.TurnID + "|interviewInvite",
+			Kind:                communication.V4ActionInterviewInvite,
+			InterviewStartsAtMs: &startsAt,
+			InterviewEndsAtMs:   &endsAt,
+			InterviewMethod:     &method,
+		},
+	)
+	// This test-only fixture mutation stands in for the separately scoped AI
+	// meeting-time matcher. Production still cannot create this second plan
+	// until that deterministic matcher lands.
+	if err := s.db.Save(&advice).Error; err != nil {
+		t.Fatal(err)
+	}
+	textReq := confirmCommunicationV4TextEffect(
+		t,
+		s,
+		fixture,
+		"interview-combo-text",
+	)
+	actions, err := s.CommunicationActionsByTurn(fixture.Turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[1].Kind != CommunicationActionInterviewInvite ||
+		actions[1].DependsOnActionID == nil ||
+		actions[1].InterviewStartsAtMs == nil ||
+		*actions[1].InterviewStartsAtMs != startsAt ||
+		actions[1].InterviewEndsAtMs == nil ||
+		*actions[1].InterviewEndsAtMs != endsAt ||
+		actions[1].InterviewMethod == nil ||
+		*actions[1].InterviewMethod != method {
+		t.Fatalf("正文正证未实体化邀面 action: actions=%+v err=%v", actions, err)
+	}
+	card := actions[1]
+	intentID, err := M5AutomaticIntentID(card.ActionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interview := protocol.InterviewDetails{
+		StartsAt: startsAt,
+		EndsAt:   endsAt,
+		Method:   protocol.InterviewMethodWechatVideo,
+	}
+	args, err := protocol.Encode(protocol.ChatSendInviteCardArgs{
+		ConversationRef: fixture.ConversationRef,
+		Interview:       interview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardAt := fixture.Now.Add(2 * time.Minute)
+	deadline := cardAt.Add(time.Hour).UnixMilli()
+	req := CreateEffectIntentRequest{
+		Intent: EffectIntent{
+			IntentID:        intentID,
+			IdemKey:         "idem-v4-interview-combo",
+			Platform:        fixture.Platform,
+			AccountRef:      fixture.AccountRef,
+			Primitive:       primitiveChatSendInviteCard,
+			TargetRef:       fixture.ConversationRef,
+			PayloadHash:     "payload-v4-interview-combo",
+			GuardsHash:      "guards-v4-interview-combo",
+			Status:          EffectIntentDispatching,
+			DeadlineMs:      deadline,
+			SendFingerprint: card.ContentHash,
+		},
+		Command: CmdRecord{
+			MsgID:                        "msg-v4-interview-combo",
+			Name:                         primitiveChatSendInviteCard,
+			Class:                        "effectful",
+			IdemKey:                      "idem-v4-interview-combo",
+			Domain:                       fixture.Platform + ":" + fixture.AccountRef,
+			Platform:                     fixture.Platform,
+			AccountRef:                   fixture.AccountRef,
+			ExpectedPrincipalFingerprint: fixture.Principal,
+			IntentID:                     intentID,
+			HandID:                       fixture.HandID,
+			Session:                      fixture.Session,
+			BootIDAtDispatch:             fixture.BootID,
+			Args:                         string(args),
+			Status:                       CmdQueued,
+			DeadlineMs:                   deadline,
+			ExecBudgetMs:                 120_000,
+		},
+		ExpectedTailSeq:   fixture.Turn.InboundThroughSeq + 1,
+		PreviousIntentID:  textReq.Intent.IntentID,
+		AutomaticActionID: card.ActionID,
+		Now:               cardAt,
+	}
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("邀面 action 未独立绑定 WAL: result=%+v err=%v", created, err)
+	}
+	resultAt := cardAt.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-v4-interview-combo",
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &resultAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					ContentHash:  card.ContentHash,
+					Card: &CardResultMutation{
+						ConversationRef:     fixture.ConversationRef,
+						CardType:            "interviewInvite",
+						CardState:           "unknown",
+						ContentHash:         card.ContentHash,
+						SourceKey:           strings.Repeat("b", 64),
+						InterviewStartsAtMs: &startsAt,
+						InterviewEndsAtMs:   &endsAt,
+						InterviewMethod:     &method,
+					},
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := s.CommunicationActionByID(card.ActionID)
+	turn, turnErr := s.DialogueTurnByID(fixture.Turn.TurnID)
+	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		settled == nil ||
+		settled.Status != CommunicationActionSent ||
+		turnErr != nil ||
+		turn == nil ||
+		turn.Status != DialogueTurnCompleted ||
+		aggregateErr != nil ||
+		aggregate.State.MainStatus != communication.V4StatusInvited ||
+		len(aggregate.State.InterviewGroups) != 1 ||
+		aggregate.State.InterviewGroups[0].MessageSeq != fixture.Turn.InboundThroughSeq+2 {
+		t.Fatalf(
+			"邀面正证未完成 action/turn/v4: action=%+v turn=%+v aggregate=%+v errs=%v/%v/%v",
+			settled,
+			turn,
+			aggregate,
+			err,
+			turnErr,
+			aggregateErr,
+		)
+	}
+}
+
+func TestCommunicationV4InterviewCardPlanRequiresThirtyMinutes(t *testing.T) {
+	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
+	method := "wechatVideo"
+	for _, duration := range []time.Duration{15 * time.Minute, 45 * time.Minute} {
+		endsAt := startsAt + duration.Milliseconds()
+		if supportedCommunicationV4CardPlan(communication.V4PlannedAction{
+			ActionKey:           "turn|interviewInvite",
+			Kind:                communication.V4ActionInterviewInvite,
+			InterviewStartsAtMs: &startsAt,
+			InterviewEndsAtMs:   &endsAt,
+			InterviewMethod:     &method,
+		}) {
+			t.Fatalf("非 30 分钟邀面计划不得获批: duration=%s", duration)
+		}
 	}
 }
 

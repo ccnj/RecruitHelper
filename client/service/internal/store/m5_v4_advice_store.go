@@ -194,7 +194,10 @@ func supportedCommunicationV4TextPlan(plan communication.V4PlannedAction) bool {
 	if strings.TrimSpace(plan.ActionKey) == "" || strings.TrimSpace(plan.Text) == "" {
 		return false
 	}
-	return supportedCommunicationV4TextKind(plan.Kind)
+	return supportedCommunicationV4TextKind(plan.Kind) &&
+		plan.InterviewStartsAtMs == nil &&
+		plan.InterviewEndsAtMs == nil &&
+		plan.InterviewMethod == nil
 }
 
 func supportedCommunicationV4TextKind(kind communication.V4ActionKind) bool {
@@ -214,7 +217,7 @@ func supportedCommunicationV4TextKind(kind communication.V4ActionKind) bool {
 
 func communicationV4AdvicePolicy(
 	decision communication.V4InboundTurnDecision,
-) (communication.V4InboundTurnDecision, *communication.V4PlannedAction, string) {
+) (communication.V4InboundTurnDecision, []communication.V4PlannedAction, string) {
 	if decision.ManualReason != "" || decision.Dialogue.Status == communication.V4DialogueManualRequired {
 		reason := string(decision.ManualReason)
 		if reason == "" {
@@ -225,17 +228,63 @@ func communicationV4AdvicePolicy(
 	if decision.Dialogue.Status != communication.V4DialogueActionsPlanned {
 		return decision, nil, ""
 	}
-	if len(decision.Dialogue.Actions) > 1 {
-		return decision, nil, communicationV4ManualMultiVisibleAction
-	}
 	if len(decision.Dialogue.Actions) == 0 {
 		return decision, nil, communicationV4ManualUnsupportedAction
 	}
-	plan := decision.Dialogue.Actions[0]
-	if !supportedCommunicationV4TextPlan(plan) {
+	plans := append([]communication.V4PlannedAction(nil), decision.Dialogue.Actions...)
+	if !supportedCommunicationV4TextPlan(plans[0]) {
 		return decision, nil, communicationV4ManualUnsupportedAction
 	}
-	return decision, &plan, ""
+	if len(plans) == 1 {
+		return decision, plans, ""
+	}
+	if len(plans) != 2 || !supportedCommunicationV4CardPlan(plans[1]) ||
+		!approvedCommunicationV4VisibleCombination(plans[0].Kind, plans[1].Kind) {
+		return decision, nil, communicationV4ManualMultiVisibleAction
+	}
+	return decision, plans, ""
+}
+
+func supportedCommunicationV4CardPlan(plan communication.V4PlannedAction) bool {
+	if strings.TrimSpace(plan.ActionKey) == "" || plan.Text != "" ||
+		plan.CardMessageSeq != 0 || plan.Round != 0 || plan.Stage != 0 || plan.EndReason != "" {
+		return false
+	}
+	switch plan.Kind {
+	case communication.V4ActionInviteWechat:
+		return plan.InterviewStartsAtMs == nil &&
+			plan.InterviewEndsAtMs == nil &&
+			plan.InterviewMethod == nil
+	case communication.V4ActionInterviewInvite:
+		return plan.InterviewStartsAtMs != nil &&
+			plan.InterviewEndsAtMs != nil &&
+			plan.InterviewMethod != nil &&
+			*plan.InterviewStartsAtMs > 0 &&
+			*plan.InterviewEndsAtMs ==
+				*plan.InterviewStartsAtMs+communication.V4InterviewDurationMs &&
+			*plan.InterviewMethod == "wechatVideo"
+	default:
+		return false
+	}
+}
+
+func approvedCommunicationV4VisibleCombination(
+	textKind communication.V4ActionKind,
+	cardKind communication.V4ActionKind,
+) bool {
+	switch cardKind {
+	case communication.V4ActionInviteWechat:
+		switch textKind {
+		case communication.V4ActionReplyText,
+			communication.V4ActionRejectionRetention,
+			communication.V4ActionColdWechatText,
+			communication.V4ActionInterviewAcceptedReceipt:
+			return true
+		}
+	case communication.V4ActionInterviewInvite:
+		return textKind == communication.V4ActionReplyText
+	}
+	return false
 }
 
 func dialogueTurnStatusFromCommunicationV4Decision(
@@ -308,7 +357,7 @@ func persistCommunicationV4AdviceTx(
 	if err != nil {
 		return nil, err
 	}
-	decision, plan, manualReason := communicationV4AdvicePolicy(decision)
+	decision, plans, manualReason := communicationV4AdvicePolicy(decision)
 	status, err := dialogueTurnStatusFromCommunicationV4Decision(decision, manualReason)
 	if err != nil {
 		return nil, err
@@ -365,9 +414,10 @@ func persistCommunicationV4AdviceTx(
 	if err := tx.First(turn, "turn_id = ?", turn.TurnID).Error; err != nil {
 		return nil, err
 	}
-	if plan == nil {
+	if len(plans) == 0 {
 		return nil, nil
 	}
+	plan := plans[0]
 	action := CommunicationAction{
 		ActionID: plan.ActionKey, TurnID: turn.TurnID, Kind: CommunicationActionReplyText,
 		Text: plan.Text, ContentHash: textcanon.Hash(plan.Text), Status: CommunicationActionPlanned,

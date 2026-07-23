@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -41,6 +42,19 @@ type SendMessageReceipt struct {
 	Created              bool
 	VerificationAttempts int
 	SuspectReason        string
+}
+
+type SendAutomaticCardRequest struct {
+	IntentID          string
+	PreviousIntentID  string
+	AutomaticActionID string
+	ExpectedSession   string
+	ExpectedBootID    string
+	Platform          string
+	AccountRef        string
+	ConversationRef   string
+	Primitive         string
+	Interview         *protocol.InterviewDetails
 }
 
 // SendMessage 是 chat.sendMessage 唯一产品入口。通用 /admin/cmd 和
@@ -201,6 +215,239 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 	}
 	receipt, receiptErr := d.sendReceipt(persisted, detailed.Created)
 	return receipt, errors.Join(dispatchErr, receiptErr)
+}
+
+// SendAutomaticCard is the only M5 product entry for the two approved
+// candidate-visible card primitives. The caller must supply a persisted
+// CommunicationAction; the WAL transaction revalidates its exact primitive,
+// payload and positive text dependency before any command can be queued.
+func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessageReceipt, error) {
+	req.IntentID = strings.TrimSpace(req.IntentID)
+	req.PreviousIntentID = strings.TrimSpace(req.PreviousIntentID)
+	req.AutomaticActionID = strings.TrimSpace(req.AutomaticActionID)
+	req.ExpectedSession = strings.TrimSpace(req.ExpectedSession)
+	req.ExpectedBootID = strings.TrimSpace(req.ExpectedBootID)
+	req.Platform = strings.TrimSpace(req.Platform)
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	req.ConversationRef = strings.TrimSpace(req.ConversationRef)
+	req.Primitive = strings.TrimSpace(req.Primitive)
+	if req.IntentID == "" ||
+		utf8.RuneCountInString(req.IntentID) > maxIntentIDRunes ||
+		req.AutomaticActionID == "" ||
+		req.Platform == "" ||
+		req.AccountRef == "" ||
+		req.ConversationRef == "" {
+		return nil, errors.New("缺少有效的卡片 intentId/actionId/账号/会话标识")
+	}
+	if (req.ExpectedSession == "") != (req.ExpectedBootID == "") {
+		return nil, errors.New("expected session/boot 必须成对提供")
+	}
+	expectedIntentID, err := store.M5AutomaticIntentID(req.AutomaticActionID)
+	if err != nil || req.IntentID != expectedIntentID {
+		return nil, store.ErrCommunicationActionInvalid
+	}
+
+	var argsRaw []byte
+	var fingerprint string
+	switch req.Primitive {
+	case protocol.PrimChatSendWechatInvite:
+		if req.Interview != nil {
+			return nil, store.ErrCommunicationActionInvalid
+		}
+		argsRaw, err = protocol.Encode(protocol.ChatSendWechatInviteArgs{
+			ConversationRef: req.ConversationRef,
+		})
+		fingerprint = syncledger.WechatExchangeContentHash()
+	case protocol.PrimChatSendInviteCard:
+		if req.Interview == nil ||
+			req.Interview.StartsAt <= 0 ||
+			req.Interview.EndsAt !=
+				req.Interview.StartsAt+communication.V4InterviewDurationMs ||
+			req.Interview.Method != protocol.InterviewMethodWechatVideo {
+			return nil, store.ErrCommunicationActionInvalid
+		}
+		argsRaw, err = protocol.Encode(protocol.ChatSendInviteCardArgs{
+			ConversationRef: req.ConversationRef,
+			Interview:       *req.Interview,
+		})
+		fingerprint = syncledger.InterviewInviteContentHash(
+			req.Interview.StartsAt,
+			req.Interview.EndsAt,
+			string(req.Interview.Method),
+		)
+	default:
+		return nil, store.ErrCommunicationActionInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+	meta := protocol.Primitives[req.Primitive]
+	if err := protocol.ValidatePrimitiveArgs(req.Primitive, meta.Ver, argsRaw); err != nil {
+		return nil, err
+	}
+	payloadHash := hashBytes(argsRaw)
+
+	if existing, lookupErr := d.st.EffectIntentByID(req.IntentID); lookupErr != nil {
+		return nil, lookupErr
+	} else if existing != nil {
+		if existing.Platform != req.Platform ||
+			existing.AccountRef != req.AccountRef ||
+			existing.Primitive != req.Primitive ||
+			existing.TargetRef != req.ConversationRef ||
+			existing.PayloadHash != payloadHash ||
+			existing.SendFingerprint != fingerprint {
+			return nil, store.ErrEffectIntentConflict
+		}
+		if err := d.st.ValidateM5AutomaticIntentLink(req.AutomaticActionID, req.IntentID); err != nil {
+			return nil, err
+		}
+		return d.sendReceipt(existing, false)
+	}
+	latest, latestErr := d.st.LatestEffectIntent(
+		req.Platform,
+		req.AccountRef,
+		req.ConversationRef,
+	)
+	if latestErr != nil {
+		return nil, latestErr
+	}
+	latestID := ""
+	if latest != nil {
+		latestID = latest.IntentID
+	}
+	if latestID != req.PreviousIntentID {
+		conflict := &store.EffectIntentCASConflictError{
+			PreviousIntentID: req.PreviousIntentID,
+			Current:          latest,
+		}
+		if latest == nil {
+			return nil, conflict
+		}
+		receipt, receiptErr := d.sendReceipt(latest, false)
+		return receipt, errors.Join(conflict, receiptErr)
+	}
+
+	key := store.ConversationKey{
+		Platform:        req.Platform,
+		AccountRef:      req.AccountRef,
+		ConversationRef: req.ConversationRef,
+	}
+	preparation, err := d.st.PrepareSend(key, 5)
+	if err != nil {
+		return nil, err
+	}
+	if preparation.Account.BoundHandID == "" ||
+		preparation.Account.PrincipalFingerprint == nil {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+	session, bootID, online := d.sender.HandSession(preparation.Account.BoundHandID)
+	if !online {
+		return nil, ErrHandOffline
+	}
+	if req.ExpectedSession != "" &&
+		(session != req.ExpectedSession || bootID != req.ExpectedBootID) {
+		return nil, ErrStaleSession
+	}
+	if preparation.Account.IdentityState != store.IdentityVerified ||
+		preparation.Account.IdentitySession != session ||
+		preparation.Account.IdentityBootID != bootID {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+
+	anchors := make([]protocol.MessageAnchor, len(preparation.Tail))
+	for index := range preparation.Tail {
+		anchors[index] = protocol.MessageAnchor{
+			Direction:   protocol.MessageDirection(preparation.Tail[index].Direction),
+			ContentHash: preparation.Tail[index].ContentHash,
+		}
+	}
+	guardsRaw, err := protocol.Encode(protocol.ChatSendMessageGuards{ExpectedTail: anchors})
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.ValidatePrimitiveGuards(req.Primitive, meta.Ver, guardsRaw); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	idemKey := BuildEffectIdemKey(
+		req.Platform,
+		req.AccountRef,
+		req.Primitive,
+		req.ConversationRef,
+		req.IntentID,
+	)
+	intent := store.EffectIntent{
+		IntentID:        req.IntentID,
+		IdemKey:         idemKey,
+		Platform:        req.Platform,
+		AccountRef:      req.AccountRef,
+		Primitive:       req.Primitive,
+		TargetRef:       req.ConversationRef,
+		PayloadHash:     payloadHash,
+		GuardsHash:      hashBytes(guardsRaw),
+		Status:          store.EffectIntentDispatching,
+		DeadlineMs:      deadlineMs,
+		SendFingerprint: fingerprint,
+	}
+	detailed, dispatchErr := d.dispatchDetailed(dispatchRequestForPreparedEffect(
+		preparation,
+		session,
+		bootID,
+		req,
+		argsRaw,
+		guardsRaw,
+		intent,
+	))
+	if dispatchErr != nil {
+		var conflict *store.EffectIntentCASConflictError
+		if errors.As(dispatchErr, &conflict) && conflict.Current != nil {
+			receipt, receiptErr := d.sendReceipt(conflict.Current, false)
+			return receipt, errors.Join(dispatchErr, receiptErr)
+		}
+	}
+	if detailed.MsgID == "" {
+		return nil, dispatchErr
+	}
+	persisted, lookupErr := d.st.EffectIntentByID(req.IntentID)
+	if lookupErr != nil {
+		return nil, errors.Join(dispatchErr, lookupErr)
+	}
+	if persisted == nil {
+		return nil, errors.Join(dispatchErr, store.ErrEffectIntentNotFound)
+	}
+	receipt, receiptErr := d.sendReceipt(persisted, detailed.Created)
+	return receipt, errors.Join(dispatchErr, receiptErr)
+}
+
+func dispatchRequestForPreparedEffect(
+	preparation *store.SendPreparation,
+	session string,
+	bootID string,
+	req SendAutomaticCardRequest,
+	argsRaw []byte,
+	guardsRaw []byte,
+	intent store.EffectIntent,
+) (DispatchRequest, dispatchOptions) {
+	return DispatchRequest{
+			HandID:          preparation.Account.BoundHandID,
+			ExpectedSession: session,
+			ExpectedBootID:  bootID,
+			Name:            req.Primitive,
+			Args:            argsRaw,
+			Guards:          guardsRaw,
+			Context: &protocol.CmdContext{
+				Platform:                     req.Platform,
+				AccountRef:                   req.AccountRef,
+				ExpectedPrincipalFingerprint: *preparation.Account.PrincipalFingerprint,
+			},
+		}, dispatchOptions{
+			effectIntent:      &intent,
+			expectedTailSeq:   preparation.Conversation.LastMessageSeq,
+			previousIntentID:  req.PreviousIntentID,
+			automaticActionID: req.AutomaticActionID,
+		}
 }
 
 func BuildEffectIdemKey(platform, accountRef, primitive, targetRef, intentID string) string {

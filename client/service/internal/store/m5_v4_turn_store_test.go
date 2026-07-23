@@ -557,7 +557,7 @@ func TestCommunicationV4AIAdviceRejectsAdvancedRevisionAtSameMessageBoundary(t *
 	}
 }
 
-func TestCommunicationV4RejectedIntentPersistsStateButSendsNothingOnTwoActionConflict(t *testing.T) {
+func TestCommunicationV4RejectedIntentPlansTextBeforeWechatCard(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-rejected")
 	setCommunicationV4FixedPhrasePackage(
@@ -592,25 +592,26 @@ func TestCommunicationV4RejectedIntentPersistsStateButSendsNothingOnTwoActionCon
 		Completion: completion, Label: m5ai.IntentRejected,
 		Source: DialogueIntentLLM, ManualReason: "intentRejected",
 	})
-	if err != nil || turn.Status != DialogueTurnManualRequired ||
+	if err != nil || turn.Status != DialogueTurnAdviceReady ||
 		turn.IntentLabel != m5ai.IntentRejected ||
-		turn.FailureReason != communicationV4ManualMultiVisibleAction {
-		t.Fatalf("拒绝双动作没有按硬约束收敛: turn=%+v err=%v", turn, err)
+		turn.FailureReason != "" {
+		t.Fatalf("拒绝组合没有进入正文待发: turn=%+v err=%v", turn, err)
 	}
 	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	if err != nil ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-		aggregate.ManualReason != communicationV4ManualMultiVisibleAction ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" ||
 		aggregate.State.ColdPromptRemaining != 0 ||
 		aggregate.State.ColdWechatRemaining != 0 ||
 		aggregate.State.RejectionStage != communication.V4RejectionStageRetention {
-		t.Fatalf("拒绝业务状态或自动化闸未原子推进: aggregate=%+v err=%v", aggregate, err)
+		t.Fatalf("拒绝业务状态未原子推进: aggregate=%+v err=%v", aggregate, err)
 	}
-	var actions int64
-	if err := s.db.Model(&CommunicationAction{}).
-		Where("turn_id = ?", frozen.Turn.TurnID).
-		Count(&actions).Error; err != nil || actions != 0 {
-		t.Fatalf("双动作冲突不得偷发其中一条: count=%d err=%v", actions, err)
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Kind != CommunicationActionReplyText ||
+		actions[0].Status != CommunicationActionPlanned ||
+		actions[0].DependsOnActionID != nil {
+		t.Fatalf("正文正证前只能实体化第一动作: actions=%+v err=%v", actions, err)
 	}
 	var advice CommunicationV4ProjectionApplication
 	if err := s.db.First(
@@ -629,7 +630,7 @@ func TestCommunicationV4RejectedIntentPersistsStateButSendsNothingOnTwoActionCon
 	}
 }
 
-func TestCommunicationV4RejectionShortCircuitAppliesVisibleActionPolicyAtFreeze(t *testing.T) {
+func TestCommunicationV4RejectionShortCircuitPlansTextBeforeWechatCardAtFreeze(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-short-rejected")
 	setCommunicationV4FixedPhrasePackage(
@@ -647,24 +648,23 @@ func TestCommunicationV4RejectionShortCircuitAppliesVisibleActionPolicyAtFreeze(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frozen.Turn.Status != DialogueTurnManualRequired ||
+	if frozen.Turn.Status != DialogueTurnAdviceReady ||
 		frozen.Turn.IntentLabel != m5ai.IntentRejected ||
 		frozen.Turn.IntentSource != DialogueIntentCodeShortCircuit ||
-		frozen.Turn.FailureReason != communicationV4ManualMultiVisibleAction {
-		t.Fatalf("拒绝短路未在冻结事务内收敛: %+v", frozen.Turn)
+		frozen.Turn.FailureReason != "" {
+		t.Fatalf("拒绝短路未在冻结事务内规划正文: %+v", frozen.Turn)
 	}
-	if frozen.Aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-		frozen.Aggregate.ManualReason != communicationV4ManualMultiVisibleAction ||
+	if frozen.Aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		frozen.Aggregate.ManualReason != "" ||
 		frozen.Aggregate.State.RejectionStage != communication.V4RejectionStageRetention ||
 		frozen.Aggregate.State.ColdPromptRemaining != 0 ||
 		frozen.Aggregate.State.ColdWechatRemaining != 0 {
-		t.Fatalf("拒绝短路状态或自动化闸错误: %+v", frozen.Aggregate)
+		t.Fatalf("拒绝短路状态错误: %+v", frozen.Aggregate)
 	}
 	if frozen.Application.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
-		frozen.Application.Outcome.ManualReason !=
-			communication.V4ManualReason(communicationV4ManualMultiVisibleAction) ||
+		frozen.Application.Outcome.ManualReason != "" ||
 		len(frozen.Application.Outcome.PlannedActions) != 2 {
-		t.Fatalf("拒绝短路回执未保留策略冲突证据: %+v", frozen.Application.Outcome)
+		t.Fatalf("拒绝短路回执未保留组合计划: %+v", frozen.Application.Outcome)
 	}
 	for _, plan := range frozen.Application.Outcome.PlannedActions {
 		if plan.Text != "" {
@@ -682,12 +682,12 @@ func TestCommunicationV4RejectionShortCircuitAppliesVisibleActionPolicyAtFreeze(
 		Count(&invocations).Error; err != nil {
 		t.Fatal(err)
 	}
-	if actions != 0 || invocations != 0 {
-		t.Fatalf("拒绝短路不得偷发或调用模型: actions=%d invocations=%d", actions, invocations)
+	if actions != 1 || invocations != 0 {
+		t.Fatalf("拒绝短路只能规划正文且不得调用模型: actions=%d invocations=%d", actions, invocations)
 	}
 	replayed, err := s.FreezeCommunicationV4Turn(req)
 	if err != nil || replayed.Created ||
-		replayed.Turn.Status != DialogueTurnManualRequired ||
+		replayed.Turn.Status != DialogueTurnAdviceReady ||
 		replayed.Aggregate.Revision != frozen.Aggregate.Revision {
 		t.Fatalf("拒绝短路冻结重放不幂等: result=%+v err=%v", replayed, err)
 	}

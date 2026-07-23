@@ -12,6 +12,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 const m5InvocationAttempt = 1
@@ -287,12 +288,7 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			return err
 		}
 		if turn.Status == store.DialogueTurnAdviceReady {
-			if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {
-				// Pure reducer/store tests may intentionally stop at the
-				// persisted action seam.
-				return nil
-			}
-			return a.dispatchM5Reply(ctx, turn)
+			return a.dispatchM5Action(ctx, turn)
 		}
 		if turn.Status == store.DialogueTurnCollected &&
 			v4Owned && nextV4Advice == communication.V4AdviceNone {
@@ -442,15 +438,34 @@ func m5ResumeReplyAdviceAuthorized(decision communication.V4InboundTurnDecision)
 		len(decision.Dialogue.Actions) == 0
 }
 
-func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTurn) error {
-	action, err := a.manager.store.CommunicationActionByTurn(turn.TurnID)
+func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTurn) error {
+	action, err := a.manager.store.PlannedCommunicationActionByTurn(turn.TurnID)
 	if err != nil {
 		return err
 	}
-	if action == nil || action.Kind != store.CommunicationActionReplyText ||
-		action.Status != store.CommunicationActionPlanned || action.EffectIntentID != nil {
+	if action == nil ||
+		action.Status != store.CommunicationActionPlanned ||
+		action.EffectIntentID != nil {
 		return a.manager.store.MarkDialogueTurnManualRequired(
 			turn.TurnID, "automaticActionUnavailable", a.manager.now(),
+		)
+	}
+	switch action.Kind {
+	case store.CommunicationActionReplyText:
+		if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {
+			// Pure reducer/store tests may intentionally stop at the
+			// persisted action seam.
+			return nil
+		}
+	case store.CommunicationActionInviteWechat, store.CommunicationActionInterviewInvite:
+		if _, ok := a.manager.runner.(AutomaticCardRunner); !ok {
+			return nil
+		}
+	default:
+		return a.manager.store.MarkM5AutomaticActionManualRequired(
+			action.ActionID,
+			"automaticActionUnsupported",
+			a.manager.now(),
 		)
 	}
 	profile, err := a.manager.store.CandidateProfileByID(turn.ProfileID)
@@ -466,15 +481,36 @@ func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTur
 			action.ActionID, "automaticIntentInvalid", a.manager.now(),
 		)
 	}
-	latest, err := a.manager.store.LatestEffectIntent(
-		profile.Platform, profile.AccountRef, turn.ConversationRef,
-	)
-	if err != nil {
-		return err
-	}
 	previousIntentID := ""
-	if latest != nil {
-		previousIntentID = latest.IntentID
+	if action.DependsOnActionID != nil {
+		parent, parentErr := a.manager.store.CommunicationActionByID(
+			*action.DependsOnActionID,
+		)
+		if parentErr != nil {
+			return parentErr
+		}
+		if parent == nil ||
+			parent.EffectIntentID == nil ||
+			parent.Status != store.CommunicationActionSent {
+			return a.manager.store.MarkM5AutomaticActionManualRequired(
+				action.ActionID,
+				"automaticDependencyUnavailable",
+				a.manager.now(),
+			)
+		}
+		previousIntentID = *parent.EffectIntentID
+	} else {
+		latest, latestErr := a.manager.store.LatestEffectIntent(
+			profile.Platform,
+			profile.AccountRef,
+			turn.ConversationRef,
+		)
+		if latestErr != nil {
+			return latestErr
+		}
+		if latest != nil {
+			previousIntentID = latest.IntentID
+		}
 	}
 	// The visible send interaction shares the same brain-owned pacing and
 	// post-wait authorization recheck as the sourcing workflow. The hand still
@@ -487,13 +523,58 @@ func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTur
 		}
 		return err
 	}
-	runner := a.manager.runner.(AutomaticReplyRunner)
-	handle, err := runner.StartAutomaticReply(ctx, AutomaticReplyRequest{
-		ActionID: action.ActionID, IntentID: intentID, PreviousIntentID: previousIntentID,
-		ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
-		Platform: profile.Platform, AccountRef: profile.AccountRef,
-		ConversationRef: turn.ConversationRef, Text: action.Text,
-	})
+	var handle interface {
+		Wait(context.Context) error
+	}
+	switch action.Kind {
+	case store.CommunicationActionReplyText:
+		handle, err = a.manager.runner.(AutomaticReplyRunner).StartAutomaticReply(
+			ctx,
+			AutomaticReplyRequest{
+				ActionID: action.ActionID, IntentID: intentID, PreviousIntentID: previousIntentID,
+				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+				Platform: profile.Platform, AccountRef: profile.AccountRef,
+				ConversationRef: turn.ConversationRef, Text: action.Text,
+			},
+		)
+	case store.CommunicationActionInviteWechat:
+		handle, err = a.manager.runner.(AutomaticCardRunner).StartAutomaticCard(
+			ctx,
+			AutomaticCardRequest{
+				ActionID: action.ActionID, IntentID: intentID, PreviousIntentID: previousIntentID,
+				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+				Platform: profile.Platform, AccountRef: profile.AccountRef,
+				ConversationRef: turn.ConversationRef, Kind: action.Kind,
+			},
+		)
+	case store.CommunicationActionInterviewInvite:
+		if action.InterviewStartsAtMs == nil ||
+			action.InterviewEndsAtMs == nil ||
+			action.InterviewMethod == nil ||
+			*action.InterviewEndsAtMs !=
+				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs ||
+			*action.InterviewMethod != string(protocol.InterviewMethodWechatVideo) {
+			return a.manager.store.MarkM5AutomaticActionManualRequired(
+				action.ActionID,
+				"automaticActionInvalid",
+				a.manager.now(),
+			)
+		}
+		interview := &protocol.InterviewDetails{
+			StartsAt: *action.InterviewStartsAtMs,
+			EndsAt:   *action.InterviewEndsAtMs,
+			Method:   protocol.InterviewMethod(*action.InterviewMethod),
+		}
+		handle, err = a.manager.runner.(AutomaticCardRunner).StartAutomaticCard(
+			ctx,
+			AutomaticCardRequest{
+				ActionID: action.ActionID, IntentID: intentID, PreviousIntentID: previousIntentID,
+				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
+				Platform: profile.Platform, AccountRef: profile.AccountRef,
+				ConversationRef: turn.ConversationRef, Kind: action.Kind, Interview: interview,
+			},
+		)
+	}
 	if err != nil || handle == nil {
 		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
 			action.ActionID, "automaticDispatchNotConstructed", a.manager.now(),
@@ -512,13 +593,22 @@ func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTur
 		// rail. Never turn a wait interruption into a second business intent.
 		return err
 	}
-	settled, err := a.manager.store.CommunicationActionByTurn(turn.TurnID)
+	settled, err := a.manager.store.CommunicationActionByID(action.ActionID)
 	if err != nil {
 		return err
 	}
 	if settled == nil || (settled.Status != store.CommunicationActionSent &&
 		settled.Status != store.CommunicationActionManualRequired) {
 		return store.ErrCommunicationActionConflict
+	}
+	if settled.Status == store.CommunicationActionSent {
+		next, nextErr := a.manager.store.PlannedCommunicationActionByTurn(turn.TurnID)
+		if nextErr != nil {
+			return nextErr
+		}
+		if next != nil {
+			return a.scheduleM5Continuation()
+		}
 	}
 	return nil
 }

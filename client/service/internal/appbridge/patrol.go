@@ -212,6 +212,51 @@ func (h *automaticReplyRunHandle) Wait(ctx context.Context) error {
 	return err
 }
 
+func (r PatrolRunner) StartAutomaticCard(
+	ctx context.Context,
+	req patrol.AutomaticCardRequest,
+) (patrol.AutomaticCardHandle, error) {
+	if r.Dispatcher == nil {
+		return nil, errors.New("dispatcher 不能为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	primitive := ""
+	switch req.Kind {
+	case store.CommunicationActionInviteWechat:
+		primitive = protocol.PrimChatSendWechatInvite
+	case store.CommunicationActionInterviewInvite:
+		primitive = protocol.PrimChatSendInviteCard
+	default:
+		return nil, store.ErrCommunicationActionInvalid
+	}
+	receipt, dispatchErr := r.Dispatcher.SendAutomaticCard(dispatch.SendAutomaticCardRequest{
+		IntentID:          req.IntentID,
+		PreviousIntentID:  req.PreviousIntentID,
+		AutomaticActionID: req.ActionID,
+		ExpectedSession:   req.ExpectedSession,
+		ExpectedBootID:    req.ExpectedBootID,
+		Platform:          req.Platform,
+		AccountRef:        req.AccountRef,
+		ConversationRef:   req.ConversationRef,
+		Primitive:         primitive,
+		Interview:         req.Interview,
+	})
+	if receipt == nil ||
+		receipt.IntentID != req.IntentID ||
+		receipt.LogicalDispatchID == "" {
+		if dispatchErr == nil {
+			dispatchErr = store.ErrEffectIntentConflict
+		}
+		return nil, dispatchErr
+	}
+	return &automaticReplyRunHandle{
+		dispatcher: r.Dispatcher,
+		logicalID:  receipt.LogicalDispatchID,
+	}, nil
+}
+
 func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	if leaf.ResultBody == "" {
 		code := protocol.ErrCodeCtxLostDuringExec

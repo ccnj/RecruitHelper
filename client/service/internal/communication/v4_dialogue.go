@@ -29,6 +29,8 @@ const (
 
 const IntentSourceBusinessEvent IntentSource = "businessEvent"
 
+const V4InterviewDurationMs int64 = 30 * 60 * 1000
+
 const (
 	V4ManualUnsupportedMedia       V4ManualReason = "unsupportedMedia"
 	V4ManualUnsupportedSemantic    V4ManualReason = "unsupportedSemantic"
@@ -38,13 +40,16 @@ const (
 )
 
 type V4PlannedAction struct {
-	ActionKey      string       `json:"actionKey"`
-	Kind           V4ActionKind `json:"kind"`
-	Text           string       `json:"text,omitempty"`
-	CardMessageSeq int64        `json:"cardMessageSeq,omitempty"`
-	Round          uint64       `json:"round,omitempty"`
-	Stage          uint8        `json:"stage,omitempty"`
-	EndReason      V4EndReason  `json:"endReason,omitempty"`
+	ActionKey           string       `json:"actionKey"`
+	Kind                V4ActionKind `json:"kind"`
+	Text                string       `json:"text,omitempty"`
+	CardMessageSeq      int64        `json:"cardMessageSeq,omitempty"`
+	InterviewStartsAtMs *int64       `json:"interviewStartsAtMs,omitempty"`
+	InterviewEndsAtMs   *int64       `json:"interviewEndsAtMs,omitempty"`
+	InterviewMethod     *string      `json:"interviewMethod,omitempty"`
+	Round               uint64       `json:"round,omitempty"`
+	Stage               uint8        `json:"stage,omitempty"`
+	EndReason           V4EndReason  `json:"endReason,omitempty"`
 }
 
 type V4DialogueInput struct {

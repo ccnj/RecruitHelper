@@ -179,7 +179,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err != nil {
 			return err
 		}
-		decision, plan, policyManualReason := communicationV4AdvicePolicy(decision)
+		decision, plans, policyManualReason := communicationV4AdvicePolicy(decision)
 		turn, err := dialogueTurnFromV4Decision(req, decision)
 		if err != nil {
 			return err
@@ -258,7 +258,8 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err := tx.Create(&turn).Error; err != nil {
 			return err
 		}
-		if plan != nil {
+		if len(plans) != 0 {
+			plan := plans[0]
 			action := CommunicationAction{
 				ActionID: plan.ActionKey, TurnID: turn.TurnID, Kind: CommunicationActionReplyText,
 				Text: plan.Text, ContentHash: textcanon.Hash(plan.Text),
