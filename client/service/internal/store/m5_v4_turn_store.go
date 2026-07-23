@@ -152,6 +152,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 			InputDigest: req.InputDigest, SemanticKind: communicationV4DialogueTurnSemanticKind,
 			MessageSeq: req.InboundThroughSeq, FromRevision: aggregate.Revision, ToRevision: next.Revision,
 			Outcome: CommunicationV4ApplicationOutcome{
+				Dialogue:       decision.Requirement,
 				Actions:        append([]communication.V4EventAction(nil), decision.EventActions...),
 				ManualReason:   decision.ManualReason,
 				DialogueStatus: decision.Dialogue.Status,

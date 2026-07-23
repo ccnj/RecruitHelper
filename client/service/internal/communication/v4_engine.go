@@ -18,7 +18,9 @@ type V4InboundTurnInput struct {
 }
 
 type V4InboundTurnDecision struct {
-	State        V4State
+	State       V4State
+	Requirement V4DialogueRequirement
+
 	EventActions []V4EventAction
 	Dialogue     V4DialogueDecision
 	ManualReason V4ManualReason
@@ -67,7 +69,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 
 	if len(ordinaryEvents) == 0 && len(specialEvents) == 0 {
 		if hasUnknown {
-			return manualV4InboundTurn(input.State, V4ManualUnknownPlatformEvent), nil
+			decision := manualV4InboundTurn(input.State, V4ManualUnknownPlatformEvent)
+			decision.Requirement = V4DialogueNone
+			return decision, nil
 		}
 		dialogue, err := ReduceV4Dialogue(V4DialogueInput{
 			State: input.State, Requirement: V4DialogueNone,
@@ -76,7 +80,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		if err != nil {
 			return V4InboundTurnDecision{}, err
 		}
-		return V4InboundTurnDecision{State: dialogue.State, Dialogue: dialogue}, nil
+		return V4InboundTurnDecision{
+			State: dialogue.State, Requirement: V4DialogueNone, Dialogue: dialogue,
+		}, nil
 	}
 
 	if len(specialEvents) > 1 || (len(specialEvents) == 1 && len(ordinaryEvents) > 0) {
@@ -84,7 +90,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		if err != nil {
 			return V4InboundTurnDecision{}, err
 		}
-		return manualV4InboundTurn(state, V4ManualUnsupportedSemantic), nil
+		decision := manualV4InboundTurn(state, V4ManualUnsupportedSemantic)
+		decision.Requirement = V4DialogueNone
+		return decision, nil
 	}
 
 	var event BusinessEvent
@@ -101,11 +109,14 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		return V4InboundTurnDecision{}, err
 	}
 	if eventDecision.ManualReason != "" {
-		return manualV4InboundTurn(eventDecision.State, eventDecision.ManualReason), nil
+		decision := manualV4InboundTurn(eventDecision.State, eventDecision.ManualReason)
+		decision.Requirement = eventDecision.Dialogue
+		return decision, nil
 	}
 	if hasUnknown {
 		return V4InboundTurnDecision{
 			State:        eventDecision.State,
+			Requirement:  eventDecision.Dialogue,
 			Dialogue:     manualV4Dialogue(eventDecision.State, V4ManualUnknownPlatformEvent, "", ""),
 			ManualReason: V4ManualUnknownPlatformEvent,
 		}, nil
@@ -120,8 +131,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		return V4InboundTurnDecision{}, err
 	}
 	return V4InboundTurnDecision{
-		State: dialogue.State, EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
-		Dialogue: dialogue, ManualReason: dialogue.ManualReason,
+		State: dialogue.State, Requirement: eventDecision.Dialogue,
+		EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
+		Dialogue:     dialogue, ManualReason: dialogue.ManualReason,
 	}, nil
 }
 

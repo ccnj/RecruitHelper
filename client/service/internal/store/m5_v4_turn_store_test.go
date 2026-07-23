@@ -104,6 +104,7 @@ func TestFreezeCommunicationV4TurnPersistsAggregateAndTurnWithoutTrial(t *testin
 		result.Aggregate.ProjectedThroughSeq != 3 ||
 		result.Aggregate.State.MainStatus != communication.V4StatusCommunicating ||
 		result.Application.InputKind != CommunicationV4InputDialogueTurn ||
+		result.Application.Outcome.Dialogue != communication.V4DialogueClassifyAndReply ||
 		result.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
 		result.Application.Outcome.NextAdvice != communication.V4AdviceIntent {
 		t.Fatalf("V4 普通轮未原子冻结: result=%+v err=%v", result, err)

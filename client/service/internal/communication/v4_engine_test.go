@@ -28,7 +28,8 @@ func TestV4InboundTurnClosesLedgerToDeterministicAdviceAndAction(t *testing.T) {
 	waiting, err := ReduceV4InboundTurn(input)
 	if err != nil || waiting.State.MainStatus != V4StatusCommunicating || waiting.State.RealMessageRound != 2 ||
 		waiting.State.LastRealMessageSeq != 3 || waiting.Dialogue.Status != V4DialogueWaitingAdvice ||
-		waiting.Dialogue.NextAdvice != V4AdviceIntent || len(waiting.EventActions) != 0 {
+		waiting.Dialogue.NextAdvice != V4AdviceIntent ||
+		waiting.Requirement != V4DialogueClassifyAndReply || len(waiting.EventActions) != 0 {
 		t.Fatalf("合法多消息轮没有归一化为单一计数轮与 intent 权限: decision=%+v err=%v", waiting, err)
 	}
 
@@ -65,6 +66,7 @@ func TestV4InboundTurnResumeCardSkipsIntentAI(t *testing.T) {
 	})
 	if err != nil || decision.State.MainStatus != V4StatusCommunicating ||
 		decision.Dialogue.Status != V4DialogueWaitingAdvice || decision.Dialogue.NextAdvice != V4AdviceReply ||
+		decision.Requirement != V4DialogueReplyKnownInterested ||
 		decision.Dialogue.IntentLabel != m5ai.IntentInterested || decision.Dialogue.IntentSource != IntentSourceBusinessEvent {
 		t.Fatalf("简历卡没有按确定性强意向跳过 intent AI: decision=%+v err=%v", decision, err)
 	}
@@ -82,7 +84,8 @@ func TestV4InboundTurnWechatRequestPlansDeterministicActionsBeforeAI(t *testing.
 	decision, err := ReduceV4InboundTurn(input)
 	if err != nil || len(decision.EventActions) != 2 || decision.EventActions[0].Kind != V4ActionAcceptWechat ||
 		decision.EventActions[1].Kind != V4ActionNotifyWechat || decision.Dialogue.Status != V4DialogueWaitingPrerequisite ||
-		decision.Dialogue.NextAdvice != V4AdviceNone {
+		decision.Dialogue.NextAdvice != V4AdviceNone ||
+		decision.Requirement != V4DialogueWechatContinuation {
 		t.Fatalf("主动换微信没有先给确定性动作: decision=%+v err=%v", decision, err)
 	}
 	input.PrerequisitesConfirmed = true
