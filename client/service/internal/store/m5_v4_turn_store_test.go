@@ -351,6 +351,92 @@ func TestCommunicationV4TurnAIAdviceDoesNotNeedTrialSlot(t *testing.T) {
 	}
 }
 
+func TestCommunicationV4ArchiveSupersedesAdviceReadyBeforeEffect(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-archive-advice")
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment",
+		CardState: "unknown", ContentHash: "v4-archive-advice-2",
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil || frozen.Turn.Status != DialogueTurnClassified {
+		t.Fatalf("投简历轮没有进入待回复状态: frozen=%+v err=%v", frozen, err)
+	}
+	invocationID := "invocation-v4-archive-advice"
+	reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: invocationID, TurnID: frozen.Turn.TurnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-v4-archive-advice",
+		CreatedAt: time.Now(),
+	})
+	if err != nil || !reserved.Created {
+		t.Fatalf("回复调用未获授权: result=%+v err=%v", reserved, err)
+	}
+	replyText := "合成的未发送回复"
+	completion := successfulInvocationCompletion(
+		invocationID,
+		time.Now().UTC().Truncate(time.Millisecond),
+	)
+	action, err := s.CompleteReplyInvocation(CompleteReplyInvocationRequest{
+		Completion: completion, ActionID: "caller-action-id-is-not-authoritative",
+		Text: replyText, ContentHash: textcanon.Hash(replyText),
+		PlannedAt: completion.FinishedAt,
+	})
+	if err != nil || action == nil || action.Status != CommunicationActionPlanned ||
+		action.EffectIntentID != nil {
+		t.Fatalf("未发送回复动作没有停在 planned: action=%+v err=%v", action, err)
+	}
+	beforeArchive, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveAction := communication.V4PlannedAction{
+		ActionKey: fixture.ProfileID + "|fixture|archive-before-effect",
+		Kind:      communication.V4ActionArchive,
+		EndReason: communication.V4EndFallback,
+	}
+	archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
+		fixture.ProfileID,
+		beforeArchive.Revision,
+		archiveAction,
+		time.Now().Add(8*24*time.Hour),
+	)
+	if err != nil || !applied ||
+		archived.State.MainStatus != communication.V4StatusEnded ||
+		archived.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("归档没有保持档案可唤醒: aggregate=%+v applied=%v err=%v",
+			archived, applied, err)
+	}
+	turn, turnErr := s.DialogueTurnByID(frozen.Turn.TurnID)
+	storedAction, actionErr := s.CommunicationActionByTurn(frozen.Turn.TurnID)
+	if turnErr != nil || turn == nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != communicationV4ArchiveSuperseded ||
+		actionErr != nil || storedAction == nil ||
+		storedAction.Status != CommunicationActionSuperseded ||
+		storedAction.FailureReason != communicationV4ArchiveSuperseded ||
+		storedAction.EffectIntentID != nil {
+		t.Fatalf("归档未原子作废 pre-effect 轮与动作: turn=%+v turnErr=%v action=%+v actionErr=%v",
+			turn, turnErr, storedAction, actionErr)
+	}
+	current, err := s.RecheckDialogueTurnCurrent(frozen.Turn.TurnID, time.Now())
+	if err != nil || current {
+		t.Fatalf("已作废旧轮不得再转人工或恢复执行: current=%v err=%v", current, err)
+	}
+
+	replayed, applied, err := s.ApplyCommunicationV4ArchiveAction(
+		fixture.ProfileID,
+		beforeArchive.Revision,
+		archiveAction,
+		time.Now().Add(9*24*time.Hour),
+	)
+	if err != nil || applied || replayed.Revision != archived.Revision {
+		t.Fatalf("归档重放发生增生: aggregate=%+v applied=%v err=%v",
+			replayed, applied, err)
+	}
+}
+
 func TestCommunicationV4TurnManualClosesOnlyAggregate(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-manual")

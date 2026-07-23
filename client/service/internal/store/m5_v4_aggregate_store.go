@@ -17,6 +17,7 @@ import (
 const (
 	communicationV4StateSchemaVersion = 1
 	communicationV4InputDigestPrefix  = "communication-v4-input-v1|"
+	communicationV4ArchiveSuperseded  = "scheduleArchivedBeforeEffect"
 )
 
 var (
@@ -639,6 +640,13 @@ func applyCommunicationV4ArchiveActionTx(
 	if err != nil {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
 	}
+	if err := supersedeCommunicationV4PreEffectTurnForArchiveTx(
+		tx,
+		profileID,
+		appliedAt,
+	); err != nil {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
 	next := aggregate
 	next.State = state
 	next.Revision++
@@ -654,6 +662,91 @@ func applyCommunicationV4ArchiveActionTx(
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
 	}
 	return next, application, true, nil
+}
+
+func supersedeCommunicationV4PreEffectTurnForArchiveTx(
+	tx *gorm.DB,
+	profileID string,
+	at time.Time,
+) error {
+	var turns []DialogueTurn
+	if err := tx.Where(
+		"profile_id = ? AND status IN ?",
+		profileID,
+		[]DialogueTurnStatus{
+			DialogueTurnCollected,
+			DialogueTurnClassified,
+			DialogueTurnAdviceReady,
+		},
+	).Order("created_at, turn_id").Find(&turns).Error; err != nil {
+		return err
+	}
+	ownedCount := 0
+	for index := range turns {
+		turn := turns[index]
+		_, owned, err := communicationV4TurnApplicationTx(tx, turn)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			continue
+		}
+		ownedCount++
+		if ownedCount > 1 {
+			return ErrCommunicationV4Corrupt
+		}
+
+		var actions []CommunicationAction
+		if err := tx.Where("turn_id = ?", turn.TurnID).
+			Order("action_id").
+			Find(&actions).Error; err != nil {
+			return err
+		}
+		if (turn.Status == DialogueTurnAdviceReady) != (len(actions) == 1) ||
+			len(actions) > 1 {
+			return ErrCommunicationV4Corrupt
+		}
+		for actionIndex := range actions {
+			action := actions[actionIndex]
+			if action.Status != CommunicationActionPlanned ||
+				action.EffectIntentID != nil ||
+				action.EffectStartedAt != nil ||
+				action.SentAt != nil {
+				return ErrCommunicationV4Corrupt
+			}
+			updated := tx.Model(&CommunicationAction{}).
+				Where(
+					"action_id = ? AND status = ? AND effect_intent_id IS NULL",
+					action.ActionID,
+					CommunicationActionPlanned,
+				).
+				Updates(map[string]any{
+					"status":         CommunicationActionSuperseded,
+					"failure_reason": communicationV4ArchiveSuperseded,
+					"updated_at":     at,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrCommunicationV4Conflict
+			}
+		}
+		updated := tx.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+			Updates(map[string]any{
+				"status":         DialogueTurnSuperseded,
+				"failure_reason": communicationV4ArchiveSuperseded,
+				"updated_at":     at,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrCommunicationV4Conflict
+		}
+	}
+	return nil
 }
 
 func communicationV4AggregateTx(

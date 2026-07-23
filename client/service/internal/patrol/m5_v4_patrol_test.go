@@ -401,7 +401,7 @@ func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 	}
 }
 
-func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *testing.T) {
+func TestCommunicationV4PatrolArchivesSevenDayFallbackAndSupersedesPendingDialogue(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTarget(
 		t,
@@ -409,6 +409,24 @@ func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *t
 		"seven-day-fallback",
 		"这条未处理消息也不能推迟七天兜底",
 	)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	pendingRoundID := "round-v4-seven-day-pending"
+	beginCommunicationV4PatrolRound(t, h, pendingRoundID)
+	pendingActor := &roundActor{
+		manager: h.manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: pendingRoundID, now: h.clock.Now(),
+	}
+	if err := pendingActor.processCommunicationV4Targets(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || pending == nil || pending.Status != store.DialogueTurnCollected {
+		t.Fatalf("provider 缺失时没有冻结待处理轮: turn=%+v err=%v", pending, err)
+	}
 	before, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 	if err != nil {
 		t.Fatal(err)
@@ -430,7 +448,7 @@ func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *t
 	}
 	roundID := "round-v4-seven-day-fallback"
 	beginCommunicationV4PatrolRound(t, h, roundID)
-	account, err := h.db.AccountByKey(h.key)
+	account, err = h.db.AccountByKey(h.key)
 	if err != nil || account == nil {
 		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
 	}
@@ -451,8 +469,10 @@ func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *t
 		aggregate.Revision != before.Revision+1 ||
 		profileErr != nil || profile == nil || profile.MainStatus != store.CandidateProfileEnded ||
 		profile.EndReason == nil || *profile.EndReason != store.CandidateProfileEndFallbackArchive ||
-		turnErr != nil || turn != nil {
-		t.Fatalf("七天兜底没有在未处理对话前原子归档: aggregate=%+v err=%v profile=%+v profileErr=%v turn=%+v turnErr=%v",
+		turnErr != nil || turn == nil || turn.Status != store.DialogueTurnSuperseded ||
+		turn.FailureReason != "scheduleArchivedBeforeEffect" ||
+		aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+		t.Fatalf("七天兜底没有原子归档并作废旧轮: aggregate=%+v err=%v profile=%+v profileErr=%v turn=%+v turnErr=%v",
 			aggregate, err, profile, profileErr, turn, turnErr)
 	}
 	revision := aggregate.Revision
