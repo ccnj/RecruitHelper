@@ -584,19 +584,25 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 		Kind:      communication.V4ActionArchive,
 		EndReason: communication.V4EndFallback,
 	}
-	var archived CommunicationV4Aggregate
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		next, _, applied, err := applyCommunicationV4ArchiveActionTx(
-			tx, root.ProfileID, archive, archiveAt,
-		)
-		if err == nil && !applied {
-			t.Fatal("首次归档必须推进")
-		}
-		archived = next
-		return err
-	})
+	if _, _, err := s.ApplyCommunicationV4ArchiveAction(
+		root.ProfileID,
+		confirmed.Revision-1,
+		archive,
+		archiveAt,
+	); !errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf("旧聚合快照不得授权归档: %v", err)
+	}
+	archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
+		root.ProfileID,
+		confirmed.Revision,
+		archive,
+		archiveAt,
+	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("首次归档必须推进")
 	}
 	if archived.Revision != 3 || archived.State.MainStatus != communication.V4StatusEnded ||
 		archived.State.EndReason != communication.V4EndFallback {
@@ -607,16 +613,16 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 		*profile.EndReason != CandidateProfileEndFallbackArchive {
 		t.Fatalf("归档未同步 CandidateProfile: %+v", profile)
 	}
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		next, _, applied, err := applyCommunicationV4ArchiveActionTx(
-			tx, root.ProfileID, archive, archiveAt.Add(time.Minute),
-		)
-		if err == nil && (applied || next.Revision != 3) {
-			t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", applied, next)
-		}
-		return err
-	})
+	replayed, applied, err := s.ApplyCommunicationV4ArchiveAction(
+		root.ProfileID,
+		confirmed.Revision,
+		archive,
+		archiveAt.Add(time.Minute),
+	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if applied || replayed.Revision != 3 {
+		t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", applied, replayed)
 	}
 }

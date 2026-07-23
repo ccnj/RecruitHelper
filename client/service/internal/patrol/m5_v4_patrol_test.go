@@ -380,6 +380,77 @@ func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 	}
 }
 
+func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"seven-day-fallback",
+		"这条未处理消息也不能推迟七天兜底",
+	)
+	before, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Add(8 * 24 * time.Hour)
+	if err := h.manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.BindAccountPrincipal(
+		h.key,
+		"hand-1",
+		"principal-1",
+		"session-1",
+		"boot-1",
+		h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	roundID := "round-v4-seven-day-fallback"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	actor := &roundActor{
+		manager: h.manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	if err := actor.processCommunicationV4Targets(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	profile, profileErr := h.db.CandidateProfileByID(fixture.profileID)
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || aggregate.State.MainStatus != communication.V4StatusEnded ||
+		aggregate.State.EndReason != communication.V4EndFallback ||
+		aggregate.Revision != before.Revision+1 ||
+		profileErr != nil || profile == nil || profile.MainStatus != store.CandidateProfileEnded ||
+		profile.EndReason == nil || *profile.EndReason != store.CandidateProfileEndFallbackArchive ||
+		turnErr != nil || turn != nil {
+		t.Fatalf("七天兜底没有在未处理对话前原子归档: aggregate=%+v err=%v profile=%+v profileErr=%v turn=%+v turnErr=%v",
+			aggregate, err, profile, profileErr, turn, turnErr)
+	}
+	revision := aggregate.Revision
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := actor.processCommunicationV4Targets(context.Background()); err != nil {
+			t.Fatalf("重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision {
+		t.Fatalf("七天兜底重复巡检发生增生: aggregate=%+v err=%v", replayed, err)
+	}
+	for _, name := range h.runner.names() {
+		if name == protocol.PrimChatSendMessage {
+			t.Fatalf("七天兜底不得产生候选人可见发送: calls=%+v", h.runner.names())
+		}
+	}
+}
+
 func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrowth(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "wechat-accepted", []store.MessageDraft{{

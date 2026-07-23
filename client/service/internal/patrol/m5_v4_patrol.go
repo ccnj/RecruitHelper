@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 )
@@ -37,6 +38,10 @@ func (a *roundActor) processCommunicationV4Target(
 	ctx context.Context,
 	target store.CommunicationTarget,
 ) error {
+	archived, err := a.processCommunicationV4Fallback(target)
+	if err != nil || archived {
+		return err
+	}
 	latest, err := a.manager.store.LatestDialogueTurnForProfile(target.Profile.ProfileID)
 	if err != nil {
 		return err
@@ -212,4 +217,34 @@ func (a *roundActor) processCommunicationV4Target(
 		return err
 	}
 	return a.advanceM5Turn(ctx, frozen.Turn)
+}
+
+func (a *roundActor) processCommunicationV4Fallback(
+	target store.CommunicationTarget,
+) (bool, error) {
+	decision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
+		ProfileKey:         target.Profile.ProfileID,
+		State:              target.Aggregate.State,
+		Now:                a.manager.now(),
+		HasPendingDialogue: true,
+		Reply:              communication.ReplyAdvice{State: communication.AdviceAbsent},
+	})
+	if err != nil {
+		return false, err
+	}
+	if decision.Status != communication.V4ScheduleActionsPlanned {
+		return false, nil
+	}
+	if len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != communication.V4ActionArchive ||
+		decision.Actions[0].EndReason != communication.V4EndFallback {
+		return false, store.ErrCommunicationV4Conflict
+	}
+	_, _, err = a.manager.store.ApplyCommunicationV4ArchiveAction(
+		target.Profile.ProfileID,
+		target.Aggregate.Revision,
+		decision.Actions[0],
+		a.manager.now(),
+	)
+	return err == nil, err
 }
