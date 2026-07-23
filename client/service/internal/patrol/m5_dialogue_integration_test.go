@@ -48,7 +48,7 @@ func (a *recordingAdviceExecutor) CompleteJSON(
 			return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
 		}
 		return m5ai.CompletionResponse{
-			JSONText: `{"话术_序列":["合成回复"],"动作":"忽略"}`, Usage: usage, ReasoningContentEmpty: true,
+			JSONText: `{"话术_序列":["合成回复"],"动作":"无"}`, Usage: usage, ReasoningContentEmpty: true,
 		}, nil
 	default:
 		return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", len(a.requests))
@@ -351,7 +351,7 @@ func TestAdvanceM5ResumeCardSkipsIntentAndPlansExactlyOneReply(t *testing.T) {
 		if !strings.Contains(request.UserContent, m5ResumeAttachmentHistoryText) {
 			return m5ai.CompletionResponse{}, fmt.Errorf("reply 历史未使用平台无关简历事件文本")
 		}
-		return safeFakeResponse(`{"话术_序列":["已收到您的简历，我们继续沟通一下岗位细节。"],"动作":"忽略"}`), nil
+		return safeFakeResponse(`{"话术_序列":["已收到您的简历，我们继续沟通一下岗位细节。"],"动作":"无"}`), nil
 	}}
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
@@ -636,7 +636,7 @@ func TestAdvanceM5TurnIntentFailureFallsBackOnceThenReplies(t *testing.T) {
 			if request.Purpose != m5ai.PurposeReply {
 				return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
 			}
-			return safeFakeResponse(`{"话术_序列":["合成兜底回复"],"动作":"忽略"}`), nil
+			return safeFakeResponse(`{"话术_序列":["合成兜底回复"],"动作":"无"}`), nil
 		default:
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
@@ -703,7 +703,7 @@ func TestAdvanceM5TurnMissingReasoningUsageWithEmptyContentCanPlan(t *testing.T)
 				return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
 			}
 			return m5ai.CompletionResponse{
-				JSONText:              `{"话术_序列":["缺失 usage 字段的合成回复"],"动作":"忽略"}`,
+				JSONText:              `{"话术_序列":["缺失 usage 字段的合成回复"],"动作":"无"}`,
 				Usage:                 m5ai.CompletionUsage{InputTokens: 4, OutputTokens: 3},
 				ReasoningContentEmpty: true,
 			}, nil

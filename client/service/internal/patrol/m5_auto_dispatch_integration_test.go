@@ -309,7 +309,7 @@ func TestM5ResumeBusinessEventCrossesExistingWALOnce(t *testing.T) {
 		if call != 1 || request.Purpose != m5ai.PurposeReply {
 			return m5ai.CompletionResponse{}, fmt.Errorf("简历分支发生未授权调用: call=%d purpose=%s", call, request.Purpose)
 		}
-		return safeFakeResponse(`{"话术_序列":["收到简历了，我们继续聊聊这个岗位。"],"动作":"忽略"}`), nil
+		return safeFakeResponse(`{"话术_序列":["收到简历了，我们继续聊聊这个岗位。"],"动作":"无"}`), nil
 	}}
 	hand := &m5PositiveHand{}
 	dispatcher := dispatch.New(h.db, hand)

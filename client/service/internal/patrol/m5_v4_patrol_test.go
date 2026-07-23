@@ -296,7 +296,7 @@ func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 			case m5ai.PurposeIntent:
 				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
 			case m5ai.PurposeReply:
-				return safeFakeResponse(`{"话术_序列":["合成多档案回复"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["合成多档案回复"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
 			}
@@ -507,7 +507,7 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 			case m5ai.PurposeIntent:
 				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
 			case m5ai.PurposeReply:
-				return safeFakeResponse(`{"话术_序列":["合成唤醒回复"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["合成唤醒回复"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
 			}
@@ -788,7 +788,7 @@ func TestCommunicationV4PatrolFreezesDialogueUntilProviderBecomesAvailable(t *te
 			case m5ai.PurposeIntent:
 				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
 			case m5ai.PurposeReply:
-				return safeFakeResponse(`{"话术_序列":["合成恢复回复"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["合成恢复回复"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
 			}
@@ -1175,7 +1175,7 @@ func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T
 			case m5ai.PurposeIntent:
 				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
 			case m5ai.PurposeReply:
-				return safeFakeResponse(`{"话术_序列":["合成系统边界回复"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["合成系统边界回复"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
 			}
@@ -1261,7 +1261,7 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 				if request.Purpose != m5ai.PurposeReply {
 					return m5ai.CompletionResponse{}, fmt.Errorf("首轮回复用途错误: %q", request.Purpose)
 				}
-				return safeFakeResponse(`{"话术_序列":["可以的，我们继续聊聊岗位细节"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["可以的，我们继续聊聊岗位细节"],"动作":"无"}`), nil
 			case 3:
 				if request.Purpose != m5ai.PurposeReply {
 					return m5ai.CompletionResponse{}, fmt.Errorf("服务态不得调用 %q", request.Purpose)
@@ -1270,7 +1270,7 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 					!strings.Contains(request.UserContent, "不得承诺“帮您反馈”“我去问下”") {
 					return m5ai.CompletionResponse{}, errors.New("服务态规则未进入 provider 请求")
 				}
-				return safeFakeResponse(`{"话术_序列":["面试地址以邀约信息为准，有其他细节我们微信上聊哈"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["面试地址以邀约信息为准，有其他细节我们微信上聊哈"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次建议调用", call)
 			}
@@ -1389,7 +1389,7 @@ func testCommunicationV4PatrolGlobalStop(t *testing.T, cancelContext bool) {
 						}
 					}
 				}
-				return safeFakeResponse(`{"话术_序列":["暂停前已生成的回复"],"动作":"忽略"}`), nil
+				return safeFakeResponse(`{"话术_序列":["暂停前已生成的回复"],"动作":"无"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
 			}

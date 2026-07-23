@@ -78,7 +78,7 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 			}
 			one := 1
 			return m5ai.CompletionResponse{
-				JSONText: `{"话术_序列":["不得派发的合成回复"],"动作":"忽略"}`,
+				JSONText: `{"话术_序列":["不得派发的合成回复"],"动作":"无"}`,
 				Usage: m5ai.CompletionUsage{
 					InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &one,
 				},
