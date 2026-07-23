@@ -153,6 +153,9 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("创建 AI trace 数据目录: %w", err)
 	}
 	databasePath := filepath.Join(dataDir, databaseFilename)
+	if err := preparePrivateDatabaseFile(databasePath); err != nil {
+		return nil, err
+	}
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)",
 		databasePath,
@@ -174,7 +177,35 @@ func Open(dataDir string) (*Store, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("迁移 AI trace 表: %w", err)
 	}
+	if err := secureSQLiteFiles(databasePath); err != nil {
+		_ = sqlDB.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+func preparePrivateDatabaseFile(databasePath string) error {
+	file, err := os.OpenFile(databasePath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("创建 AI trace SQLite: %w", err)
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		return fmt.Errorf("关闭 AI trace SQLite 预创建句柄: %w", closeErr)
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil {
+		return fmt.Errorf("收紧 AI trace SQLite 权限: %w", err)
+	}
+	return nil
+}
+
+func secureSQLiteFiles(databasePath string) error {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		path := databasePath + suffix
+		if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("收紧 AI trace SQLite 辅助文件权限: %w", err)
+		}
+	}
+	return nil
 }
 
 // Close releases this store's standalone SQLite connection.

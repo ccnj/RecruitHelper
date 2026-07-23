@@ -192,6 +192,33 @@ func TestStoreSurvivesRestartAndDoesNotCreateBrainDatabase(t *testing.T) {
 	}
 }
 
+func TestStoreRestrictsDatabaseAndAuxiliaryFilesToCurrentUser(t *testing.T) {
+	dir := t.TempDir()
+	traceStore := openTestStore(t, dir)
+	defer traceStore.Close()
+	if err := traceStore.Begin(context.Background(), BeginRecord{
+		InvocationID: "inv-private-mode", Purpose: PurposeReply,
+		Provider: "fixture", Model: "m", ConfigHash: "config",
+		ContextRevisionHash: "context", RequestJSON: []byte(`{"private":true}`),
+		StartedAt: time.Date(2026, 7, 23, 3, 30, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		path := filepath.Join(dir, databaseFilename) + suffix
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) && suffix != "" {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("读取 AI trace 文件权限(%s): %v", suffix, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("AI trace 文件%s权限=%#o，期望 0600", suffix, got)
+		}
+	}
+}
+
 func TestStoreRejectsInvocationContentConflicts(t *testing.T) {
 	traceStore := openTestStore(t, t.TempDir())
 	defer traceStore.Close()
