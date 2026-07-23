@@ -719,7 +719,7 @@ func (p *scriptedProvider) CompleteJSON(_ context.Context, request CompletionReq
 
 func TestAIAdvisorKeepsIntentAndReplyAsTwoCallsAndFallsBackOnce(t *testing.T) {
 	provider := &scriptedProvider{
-		responses: []CompletionResponse{{}, {JSONText: `{"话术_序列":[" 第一段 ","", "第二段"],"动作":"忽略","会议时间":""}`}},
+		responses: []CompletionResponse{{}, {JSONText: `{"话术_序列":[" 第一段 ","", "第二段"],"动作":"无","会议时间":""}`}},
 		errors:    []error{errors.New("intent failed"), nil},
 	}
 	advisor, _ := NewAIAdvisor(provider)
@@ -764,5 +764,77 @@ func TestStrictParsersAndEmptyProductionShortCircuit(t *testing.T) {
 	}
 	if got := ClassifyIntentShortCircuit([]string{"不考虑"}); got.Matched {
 		t.Fatalf("批次0B未启用的旧规则不得分类: %+v", got)
+	}
+}
+
+func TestParseReplySuggestionClosedActionVocabulary(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantAction  ReplyAction
+		wantMeeting string
+	}{
+		{
+			name:       "动作缺失归一为无",
+			raw:        `{"话术_序列":["你好"]}`,
+			wantAction: ReplyActionNone,
+		},
+		{
+			name:       "空动作归一为无",
+			raw:        `{"话术_序列":["你好"],"动作":"","会议时间":""}`,
+			wantAction: ReplyActionNone,
+		},
+		{
+			name:       "显式无",
+			raw:        `{"话术_序列":["你好"],"动作":"无"}`,
+			wantAction: ReplyActionNone,
+		},
+		{
+			name:        "线上会议携带时间",
+			raw:         `{"话术_序列":["可以约个时间聊聊"],"动作":"发起线上会议","会议时间":"2026-07-25 10:00"}`,
+			wantAction:  ReplyActionStartOnlineMeeting,
+			wantMeeting: "2026-07-25 10:00",
+		},
+		{
+			name:       "换微信邀请",
+			raw:        `{"话术_序列":["也可以加微信沟通"],"动作":"发起换微信邀请","会议时间":""}`,
+			wantAction: ReplyActionInviteWechat,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := ParseReplySuggestion(testCase.raw)
+			if err != nil || got.Text == "" || got.Action != testCase.wantAction ||
+				got.MeetingTime != testCase.wantMeeting {
+				t.Fatalf("封闭动作解析错误: got=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestParseReplySuggestionRejectsInvalidActionPayloadAsAWhole(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "动作非字符串", raw: `{"话术_序列":["你好"],"动作":1}`},
+		{name: "动作为空值", raw: `{"话术_序列":["你好"],"动作":null}`},
+		{name: "动作未知", raw: `{"话术_序列":["你好"],"动作":"忽略"}`},
+		{name: "动作带空白不是别名", raw: `{"话术_序列":["你好"],"动作":" 发起线上会议 ","会议时间":"明天"}`},
+		{name: "线上会议缺时间", raw: `{"话术_序列":["你好"],"动作":"发起线上会议"}`},
+		{name: "线上会议空时间", raw: `{"话术_序列":["你好"],"动作":"发起线上会议","会议时间":"  "}`},
+		{name: "无动作却有时间", raw: `{"话术_序列":["你好"],"动作":"无","会议时间":"明天"}`},
+		{name: "换微信却有时间", raw: `{"话术_序列":["你好"],"动作":"发起换微信邀请","会议时间":"明天"}`},
+		{name: "会议时间非字符串", raw: `{"话术_序列":["你好"],"动作":"发起线上会议","会议时间":123}`},
+		{name: "会议时间为空值", raw: `{"话术_序列":["你好"],"动作":"发起换微信邀请","会议时间":null}`},
+		{name: "未知顶层字段", raw: `{"话术_序列":["你好"],"动作":"无","额外字段":true}`},
+		{name: "非法话术", raw: `{"话术_序列":[1],"动作":"无"}`},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got, err := ParseReplySuggestion(testCase.raw); err == nil || got != (ReplySuggestion{}) {
+				t.Fatalf("非法输出必须整体拒绝: got=%+v err=%v", got, err)
+			}
+		})
 	}
 }

@@ -663,6 +663,19 @@ func TestFormatFixtureDrivesEveryReplyParserGolden(t *testing.T) {
 	section := fixture.Sections["replyParser"]
 	for _, testCase := range section.Cases {
 		t.Run(testCase.ID, func(t *testing.T) {
+			// These two M5-A goldens intentionally asserted that action fields
+			// were ignored. M5-B supersedes only that behavior with a closed
+			// action vocabulary; the remaining batch-0B format cases stay live.
+			if testCase.ID == "one_phrase_valid_action_ignored" {
+				_, err := ParseReplySuggestion(replyParserRaw(t, testCase.Input))
+				requireFixtureError(t, err, "invalidReplyAction")
+				return
+			}
+			if testCase.ID == "nonempty_meeting_time_ignored" {
+				_, err := ParseReplySuggestion(replyParserRaw(t, testCase.Input))
+				requireFixtureError(t, err, "unexpectedMeetingTime")
+				return
+			}
 			expected := decodeFormatFixture[struct {
 				Status          string `json:"status"`
 				Text            string `json:"text"`

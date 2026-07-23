@@ -76,8 +76,18 @@ type IntentSuggestion struct {
 	Label IntentLabel
 }
 
+type ReplyAction string
+
+const (
+	ReplyActionNone               ReplyAction = ""
+	ReplyActionStartOnlineMeeting ReplyAction = "startOnlineMeeting"
+	ReplyActionInviteWechat       ReplyAction = "inviteWechat"
+)
+
 type ReplySuggestion struct {
-	Text string
+	Text        string
+	Action      ReplyAction
+	MeetingTime string
 }
 
 type ScoringSuggestion struct {

@@ -104,11 +104,44 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 			return ReplySuggestion{}, errors.New("unknownOutputKey")
 		}
 	}
+	action := ReplyActionNone
+	if actionRaw, exists := object["动作"]; exists {
+		var decoded any
+		if json.Unmarshal(actionRaw, &decoded) != nil {
+			return ReplySuggestion{}, errors.New("invalidReplyActionType")
+		}
+		value, ok := decoded.(string)
+		if !ok {
+			return ReplySuggestion{}, errors.New("invalidReplyActionType")
+		}
+		switch value {
+		case "", "无":
+			action = ReplyActionNone
+		case "发起线上会议":
+			action = ReplyActionStartOnlineMeeting
+		case "发起换微信邀请":
+			action = ReplyActionInviteWechat
+		default:
+			return ReplySuggestion{}, errors.New("invalidReplyAction")
+		}
+	}
+	meetingTime := ""
 	if meetingTimeRaw, exists := object["会议时间"]; exists {
-		var meetingTime *string
-		if json.Unmarshal(meetingTimeRaw, &meetingTime) != nil || meetingTime == nil {
+		var decoded any
+		if json.Unmarshal(meetingTimeRaw, &decoded) != nil {
 			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
 		}
+		value, ok := decoded.(string)
+		if !ok {
+			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
+		}
+		meetingTime = value
+	}
+	if action == ReplyActionStartOnlineMeeting && strings.TrimSpace(meetingTime) == "" {
+		return ReplySuggestion{}, errors.New("missingMeetingTime")
+	}
+	if action != ReplyActionStartOnlineMeeting && meetingTime != "" {
+		return ReplySuggestion{}, errors.New("unexpectedMeetingTime")
 	}
 	var phrases []string
 	if err := json.Unmarshal(phrasesRaw, &phrases); err != nil || phrases == nil {
@@ -127,7 +160,7 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 	if err := ValidateSendText(text); err != nil {
 		return ReplySuggestion{}, err
 	}
-	return ReplySuggestion{Text: text}, nil
+	return ReplySuggestion{Text: text, Action: action, MeetingTime: meetingTime}, nil
 }
 
 type ShortCircuitResult struct {
