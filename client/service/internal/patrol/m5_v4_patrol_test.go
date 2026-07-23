@@ -751,6 +751,103 @@ func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableC
 	}
 }
 
+func TestCommunicationV4PatrolProjectsHumanOutboundTailAndSlidesClocks(t *testing.T) {
+	h := newHarness(t)
+	text := "真人已经在页面里回复"
+	manualAtMs := h.clock.Now().Add(time.Hour).UnixMilli()
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "human-outbound", []store.MessageDraft{{
+		Direction: "out", Kind: "text", ContentHash: syncledger.HashText(text),
+		Text: &text, Origin: "external", TsApproxMs: &manualAtMs,
+	}})
+	before, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-human-outbound"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: h.manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	if err := actor.processCommunicationV4Targets(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	turn, turnErr := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	manualAt := time.UnixMilli(manualAtMs).UTC()
+	if err != nil || aggregate.Revision != before.Revision+1 ||
+		aggregate.ProjectedThroughSeq != fixture.inboundSeq ||
+		aggregate.State.LastOutboundMessageSeq != fixture.inboundSeq ||
+		aggregate.State.LastOutboundAt == nil || !aggregate.State.LastOutboundAt.Equal(manualAt) ||
+		aggregate.State.LastBodyAt == nil || !aggregate.State.LastBodyAt.Equal(manualAt) ||
+		aggregate.State.ClockUncertain || aggregate.State.BodyClockUncertain ||
+		aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive ||
+		turnErr != nil || turn != nil {
+		t.Fatalf("真人出站没有只作为时钟事实收敛: aggregate=%+v err=%v turn=%+v turnErr=%v",
+			aggregate, err, turn, turnErr)
+	}
+	revision := aggregate.Revision
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := actor.processCommunicationV4Targets(context.Background()); err != nil {
+			t.Fatalf("重复巡检失败: attempt=%d err=%v", attempt+1, err)
+		}
+	}
+	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || replayed.Revision != revision {
+		t.Fatalf("真人出站重复巡检发生增生: aggregate=%+v err=%v", replayed, err)
+	}
+	if len(h.runner.names()) != 0 {
+		t.Fatalf("真人出站投影不得触发浏览器命令: calls=%+v", h.runner.names())
+	}
+}
+
+func TestCommunicationV4PatrolStillStopsInterleavedCandidateAndHumanOutbound(t *testing.T) {
+	h := newHarness(t)
+	inbound, outbound := "候选人先发来消息", "真人随后已经回复"
+	manualAtMs := h.clock.Now().Add(time.Hour).UnixMilli()
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "human-interleaved", []store.MessageDraft{
+		{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inbound),
+			Text: &inbound, Origin: "external",
+		},
+		{
+			Direction: "out", Kind: "text", ContentHash: syncledger.HashText(outbound),
+			Text: &outbound, Origin: "external", TsApproxMs: &manualAtMs,
+		},
+	})
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-human-interleaved"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: h.manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	if err := actor.processCommunicationV4Targets(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil ||
+		aggregate.AutomationStatus != store.ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != communicationV4ManualInterleavedOutbound {
+		t.Fatalf("候选人消息与真人回复交错仍应保守停止: aggregate=%+v err=%v", aggregate, err)
+	}
+	if len(h.runner.names()) != 0 {
+		t.Fatalf("交错边界不得触发浏览器命令: calls=%+v", h.runner.names())
+	}
+}
+
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
 	h := newHarness(t)
 	before, after := "合成系统前置", "合成系统尾部"

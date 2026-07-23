@@ -129,6 +129,7 @@ func (a *roundActor) processCommunicationV4Target(
 		return nil
 	}
 	hasCandidateInput := false
+	hasOutbound := false
 	for index := range boundary {
 		message := boundary[index]
 		switch {
@@ -136,6 +137,8 @@ func (a *roundActor) processCommunicationV4Target(
 		case message.Direction == "in" && message.Kind == "system":
 		case message.Direction == "in":
 			hasCandidateInput = true
+		case message.Direction == "out":
+			hasOutbound = true
 		default:
 			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 				target.Profile.ProfileID,
@@ -144,9 +147,18 @@ func (a *roundActor) processCommunicationV4Target(
 			)
 		}
 	}
+	if hasCandidateInput && hasOutbound {
+		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+			target.Profile.ProfileID,
+			communicationV4ManualInterleavedOutbound,
+			a.manager.now(),
+		)
+	}
 	if !hasCandidateInput {
-		// A system-only tail is not a candidate turn. Keep it in the
-		// ledger; it does not suppress the silence schedule.
+		target, err = a.projectCommunicationV4NonCandidateTail(target, boundary)
+		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+			return err
+		}
 		_, err := a.processCommunicationV4ScheduleArchive(target, false)
 		return err
 	}
@@ -219,6 +231,38 @@ func (a *roundActor) processCommunicationV4Target(
 		return err
 	}
 	return a.advanceM5Turn(ctx, frozen.Turn)
+}
+
+func (a *roundActor) projectCommunicationV4NonCandidateTail(
+	target store.CommunicationTarget,
+	messages []store.Message,
+) (store.CommunicationTarget, error) {
+	for index := range messages {
+		message := messages[index]
+		event, err := communication.NormalizeLedgerMessage(communication.LedgerMessageFact{
+			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
+			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
+			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+		})
+		if err != nil {
+			return target, err
+		}
+		result, err := a.manager.store.ApplyCommunicationV4BusinessEvent(
+			store.ApplyCommunicationV4BusinessEventRequest{
+				ProfileID: target.Profile.ProfileID,
+				Event:     event,
+				AppliedAt: a.manager.now(),
+			},
+		)
+		if err != nil {
+			return target, err
+		}
+		target.Aggregate = result.Aggregate
+		if target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+			return target, nil
+		}
+	}
+	return target, nil
 }
 
 func (a *roundActor) processCommunicationV4ScheduleArchive(
