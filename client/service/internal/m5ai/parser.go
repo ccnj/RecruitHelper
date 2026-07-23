@@ -105,8 +105,8 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 		}
 	}
 	if meetingTimeRaw, exists := object["会议时间"]; exists {
-		var meetingTime string
-		if json.Unmarshal(meetingTimeRaw, &meetingTime) != nil {
+		var meetingTime *string
+		if json.Unmarshal(meetingTimeRaw, &meetingTime) != nil || meetingTime == nil {
 			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
 		}
 	}

@@ -585,6 +585,16 @@
           }
         },
         {
+          "id": "null_meeting_time_invalid",
+          "input": {
+            "rawJSON": "{\"话术_序列\":[\"你好\"],\"会议时间\":null}"
+          },
+          "expected": {
+            "status": "rejected",
+            "errorClass": "invalidMeetingTimeType"
+          }
+        },
+        {
           "id": "multiple_phrases_trim_drop_empty_join_newline",
           "input": {
             "rawJSON": "{\"话术_序列\":[\" 第一段 \",\"  \",\"第二段\"]}"
