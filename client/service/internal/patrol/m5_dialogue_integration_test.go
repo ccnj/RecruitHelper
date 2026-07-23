@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,25 @@ type m5AdviceFixture struct {
 }
 
 func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
+	inboundText := "我想了解一下这个职位"
+	return seedM5AdviceFixtureWithInbound(t, h, store.MessageDraft{
+		Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inboundText),
+		Text: &inboundText, Origin: "external",
+	})
+}
+
+func seedM5ResumeAdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
+	return seedM5AdviceFixtureWithInbound(t, h, store.MessageDraft{
+		Direction: "in", Kind: "card", ContentHash: syncledger.HashText("card\x1fresumeAttachment"),
+		CardType: "resumeAttachment", CardState: "unknown", Origin: "external",
+	})
+}
+
+func seedM5AdviceFixtureWithInbound(
+	t *testing.T,
+	h *harness,
+	inbound store.MessageDraft,
+) m5AdviceFixture {
 	t.Helper()
 	now := h.clock.Now()
 	profileID := "profile-m5-advice"
@@ -223,17 +243,13 @@ func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
 		t.Fatal(err)
 	}
 
-	inboundText := "我想了解一下这个职位"
 	key := store.ConversationKey{
 		Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: conversationRef,
 	}
 	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
 		Key: key, ExpectedTailSeq: greetingMessage.Seq, PlatformUserRef: platformUserRef,
-		NewMessages: []store.MessageDraft{{
-			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inboundText),
-			Text: &inboundText, Origin: "external",
-		}},
-		SyncedAt: now,
+		NewMessages: []store.MessageDraft{inbound},
+		SyncedAt:    now,
 	})
 	if err != nil || len(changes.Inserted) != 1 {
 		t.Fatalf("追加合成入站失败: changes=%+v err=%v", changes, err)
@@ -321,6 +337,129 @@ func TestAdvanceM5TurnCallsIntentThenReplyOnceAndStopsAtPlannedAction(t *testing
 	restarted.mu.Unlock()
 	if err != nil || len(advice.requests) != 2 {
 		t.Fatalf("重启重放不得再次调用 provider: calls=%d err=%v", len(advice.requests), err)
+	}
+}
+
+func TestAdvanceM5ResumeCardSkipsIntentAndPlansExactlyOneReply(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5ResumeAdviceFixture(t, h)
+	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+		if call != 1 || request.Purpose != m5ai.PurposeReply {
+			return m5ai.CompletionResponse{}, fmt.Errorf("简历强意向分支发生未授权调用: call=%d purpose=%s", call, request.Purpose)
+		}
+		if !strings.Contains(request.UserContent, m5ResumeAttachmentHistoryText) {
+			return m5ai.CompletionResponse{}, fmt.Errorf("reply 历史未使用平台无关简历事件文本")
+		}
+		return safeFakeResponse(`{"话术_序列":["已收到您的简历，我们继续沟通一下岗位细节。"],"动作":"忽略"}`), nil
+	}}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+	h.manager.mu.Lock()
+	err := actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 1 || advice.requests[0].Purpose != m5ai.PurposeReply {
+		t.Fatalf("简历强意向必须零 intent、一次 reply: requests=%+v", advice.requests)
+	}
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || len(invocations) != 1 || invocations[0].Purpose != m5ai.PurposeReply {
+		t.Fatalf("简历强意向 invocation 事实错误: invocations=%+v err=%v", invocations, err)
+	}
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady ||
+		turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned ||
+		action.Kind != store.CommunicationActionReplyText || action.EffectIntentID != nil {
+		t.Fatalf("简历强意向唯一动作事实错误: turn=%+v action=%+v err=%v actionErr=%v", turn, action, err, actionErr)
+	}
+
+	restarted, err := NewManager(h.db, h.runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedActor := &roundActor{manager: restarted, now: h.clock.Now()}
+	restarted.mu.Lock()
+	err = restartedActor.advanceM5Turn(context.Background(), *turn)
+	restarted.mu.Unlock()
+	if err != nil || len(advice.requests) != 1 {
+		t.Fatalf("简历强意向重启重放不得再次调用 provider: calls=%d err=%v", len(advice.requests), err)
+	}
+}
+
+func TestResumeReplyReservationInterruptedBecomesManualWithoutSecondCall(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5ResumeAdviceFixture(t, h)
+	classified, err := h.db.ApplyResumeBusinessClassification(fixture.turn.TurnID, h.clock.Now())
+	if err != nil || classified == nil || classified.Status != store.DialogueTurnClassified ||
+		classified.IntentSource != store.DialogueIntentBusinessEvent {
+		t.Fatalf("简历业务事件分类失败: turn=%+v err=%v", classified, err)
+	}
+	reserved, err := h.db.ReserveAIInvocation(store.ReserveAIInvocationRequest{
+		InvocationID: stableM5ID("invocation", fixture.turn.TurnID, string(m5ai.PurposeReply), "1"),
+		TurnID:       fixture.turn.TurnID, Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "fake-provider", Model: "fake-model", InputHash: "synthetic-reply-input",
+		CreatedAt: h.clock.Now(),
+	})
+	if err != nil || reserved == nil || !reserved.Created {
+		t.Fatalf("reply 预留失败: reserved=%+v err=%v", reserved, err)
+	}
+	recovered, err := h.db.RecoverInterruptedAIInvocations(h.clock.Now().Add(time.Minute))
+	if err != nil || recovered != 1 {
+		t.Fatalf("reply 崩溃恢复失败: recovered=%d err=%v", recovered, err)
+	}
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnManualRequired ||
+		turn.FailureReason != "replyProcessInterrupted" || actionErr != nil || action != nil {
+		t.Fatalf("reply 预留崩溃不得重调或造动作: turn=%+v action=%+v err=%v actionErr=%v", turn, action, err, actionErr)
+	}
+}
+
+func TestInspectM5PendingKeepsUnsupportedCardShapesOutOfAutomaticTurns(t *testing.T) {
+	greetingText := "你好"
+	resumeHash := syncledger.HashText("card\x1fresumeAttachment")
+	text := "补充一条普通消息"
+	resume := func(seq int64) store.Message {
+		return store.Message{Seq: seq, Direction: "in", Kind: "card", ContentHash: resumeHash,
+			CardType: "resumeAttachment", CardState: "unknown", Origin: "external"}
+	}
+	tests := []struct {
+		name         string
+		messages     []store.Message
+		manualReason string
+		pending      int
+	}{
+		{name: "generic_card", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "generic", CardType: "unknown", CardState: "unknown", Origin: "external"}}, manualReason: "unsupportedSemantic"},
+		{name: "mixed_card_and_text", messages: []store.Message{resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
+		{name: "multiple_resume_cards", messages: []store.Message{resume(2), resume(3)}, manualReason: "unsupportedSemantic"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			messages := append([]store.Message{{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"}}, test.messages...)
+			pending := inspectM5Pending(messages)
+			if pending.manualReason != test.manualReason || len(pending.inbound) != test.pending {
+				t.Fatalf("不支持卡片形态进入自动轮: pending=%+v", pending)
+			}
+		})
+	}
+
+	cardThenText := inspectM5Pending([]store.Message{
+		{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"},
+		resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"},
+	})
+	if cardThenText.manualReason != "unsupportedSemantic" || len(cardThenText.inbound) != 0 {
+		t.Fatalf("卡后新消息必须阻断原简历轮: %+v", cardThenText)
+	}
+	humanText := "真人已经回复"
+	cardThenHuman := inspectM5Pending([]store.Message{
+		{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"},
+		resume(2), {Seq: 3, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(humanText), Text: &humanText, Origin: "external"},
+	})
+	if cardThenHuman.manualReason != "" || len(cardThenHuman.inbound) != 0 || cardThenHuman.lastOutbound == nil || cardThenHuman.lastOutbound.Seq != 3 {
+		t.Fatalf("卡后真人出站必须让原简历轮失去待处理资格: %+v", cardThenHuman)
 	}
 }
 

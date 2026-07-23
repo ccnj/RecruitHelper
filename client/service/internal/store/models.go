@@ -475,6 +475,7 @@ const (
 	DialogueIntentCodeShortCircuit DialogueIntentSource = "codeShortCircuit"
 	DialogueIntentLLM              DialogueIntentSource = "llm"
 	DialogueIntentLLMFailure       DialogueIntentSource = "llmFailureFallback"
+	DialogueIntentBusinessEvent    DialogueIntentSource = "businessEvent"
 )
 
 // DialogueTurn 是一次不可变输入边界及其确定性处理状态。正文仍来自消息账本、

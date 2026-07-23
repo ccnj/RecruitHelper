@@ -16,6 +16,8 @@ import (
 
 const m5InvocationAttempt = 1
 
+const m5ResumeAttachmentHistoryText = "候选人已投递简历"
+
 type m5PendingTurn struct {
 	lastOutbound *store.Message
 	inbound      []store.Message
@@ -27,6 +29,8 @@ type m5TurnMaterial struct {
 	profile      store.CandidateProfile
 	revision     store.JobAIContextRevision
 	snapshot     store.CandidateResumeSnapshot
+	inputKind    store.DialogueTurnInputKind
+	currentFacts []communication.LedgerMessageFact
 	history      []m5ai.AdviceMessage
 	current      []m5ai.AdviceMessage
 	throughTurn  []m5ai.AdviceMessage
@@ -199,7 +203,7 @@ func inspectM5Pending(messages []store.Message) m5PendingTurn {
 		if message.Direction == "out" {
 			result.lastOutbound = message
 		}
-		if message.Direction == "in" && isM5RealCandidateKind(message.Kind) && result.firstReal == nil {
+		if store.IsM5RealCandidateMessage(*message) && result.firstReal == nil {
 			copy := *message
 			result.firstReal = &copy
 		}
@@ -213,11 +217,10 @@ func inspectM5Pending(messages []store.Message) m5PendingTurn {
 		if message.Seq <= result.lastOutbound.Seq {
 			continue
 		}
-		if message.Direction != "in" || message.Kind != "text" || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
-			result.manualReason = m5UnsupportedReason(message.Kind)
-			continue
-		}
 		result.inbound = append(result.inbound, message)
+	}
+	if _, ok := store.DialogueTurnInputKindOf(result.inbound); !ok && len(result.inbound) > 0 {
+		result.manualReason = m5UnsupportedTurnReason(result.inbound)
 	}
 	if result.manualReason != "" {
 		result.inbound = nil
@@ -225,13 +228,11 @@ func inspectM5Pending(messages []store.Message) m5PendingTurn {
 	return result
 }
 
-func isM5RealCandidateKind(kind string) bool {
-	return kind == "text" || kind == "image" || kind == "voice" || kind == "file"
-}
-
-func m5UnsupportedReason(kind string) string {
-	if kind == "image" || kind == "voice" || kind == "file" {
-		return "unsupportedMedia"
+func m5UnsupportedTurnReason(messages []store.Message) string {
+	for i := range messages {
+		if messages[i].Kind == "image" || messages[i].Kind == "voice" || messages[i].Kind == "file" {
+			return "unsupportedMedia"
+		}
 	}
 	return "unsupportedSemantic"
 }
@@ -275,6 +276,16 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 
 		switch turn.Status {
 		case store.DialogueTurnCollected:
+			if material.inputKind == store.DialogueTurnInputResumeAttachment {
+				decision, reduceErr := reduceM5ResumeTurn(turn, material, communication.ReplyAdvice{State: communication.AdviceAbsent})
+				if reduceErr != nil || !m5ResumeReplyAdviceAuthorized(decision) {
+					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
+				}
+				if _, err := a.manager.store.ApplyResumeBusinessClassification(turn.TurnID, a.manager.now()); err != nil {
+					return err
+				}
+				break
+			}
 			decision, reduceErr := communication.Reduce(communication.ReduceInput{
 				Turn: facts, Intent: communication.IntentAdvice{State: communication.AdviceAbsent},
 				Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
@@ -294,6 +305,21 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 				}
 			}
 		case store.DialogueTurnClassified:
+			if material.inputKind == store.DialogueTurnInputResumeAttachment {
+				if turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent {
+					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+				}
+				decision, reduceErr := reduceM5ResumeTurn(turn, material, communication.ReplyAdvice{State: communication.AdviceAbsent})
+				if reduceErr != nil || !m5ResumeReplyAdviceAuthorized(decision) {
+					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+				}
+				if err := a.runM5ReplyAdvice(
+					ctx, turn, material, facts, communication.IntentAdvice{State: communication.AdviceAbsent},
+				); err != nil {
+					return err
+				}
+				break
+			}
 			intent := intentAdviceFromTurn(turn)
 			decision, reduceErr := communication.Reduce(communication.ReduceInput{
 				Turn: facts, Intent: intent,
@@ -325,6 +351,30 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 		turn = *reloaded
 	}
 	return nil
+}
+
+func reduceM5ResumeTurn(
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	reply communication.ReplyAdvice,
+) (communication.V4InboundTurnDecision, error) {
+	if material.inputKind != store.DialogueTurnInputResumeAttachment || len(material.currentFacts) != 1 {
+		return communication.V4InboundTurnDecision{}, communication.ErrInvalidV4StateTransition
+	}
+	return communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
+		State:  communication.NewV4GreetedState(material.profile.GreetedAt),
+		TurnID: turn.TurnID, Messages: material.currentFacts,
+		Intent: communication.IntentAdvice{State: communication.AdviceAbsent}, Reply: reply,
+	})
+}
+
+func m5ResumeReplyAdviceAuthorized(decision communication.V4InboundTurnDecision) bool {
+	return decision.ManualReason == "" && len(decision.EventActions) == 0 &&
+		decision.Dialogue.Status == communication.V4DialogueWaitingAdvice &&
+		decision.Dialogue.NextAdvice == communication.V4AdviceReply &&
+		decision.Dialogue.IntentLabel == m5ai.IntentInterested &&
+		decision.Dialogue.IntentSource == communication.IntentSourceBusinessEvent &&
+		len(decision.Dialogue.Actions) == 0
 }
 
 func (a *roundActor) dispatchM5Reply(ctx context.Context, turn store.DialogueTurn) error {
@@ -415,6 +465,8 @@ func intentAdviceFromTurn(turn store.DialogueTurn) communication.IntentAdvice {
 		return communication.IntentAdvice{State: communication.AdviceFailed}
 	case store.DialogueIntentCodeShortCircuit:
 		return communication.IntentAdvice{State: communication.AdviceAbsent}
+	case store.DialogueIntentBusinessEvent:
+		return communication.IntentAdvice{State: communication.AdviceAbsent}
 	default:
 		return communication.IntentAdvice{State: communication.AdviceState("invalid")}
 	}
@@ -444,8 +496,26 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	material := m5TurnMaterial{profile: *profile, revision: *revision, snapshot: *snapshot}
+	var currentMessages []store.Message
 	for _, message := range messages {
-		if message.Seq > turn.InboundThroughSeq || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
+		if message.Seq > turn.InboundThroughSeq {
+			continue
+		}
+		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
+			currentMessages = append(currentMessages, message)
+			material.currentFacts = append(material.currentFacts, communication.LedgerMessageFact{
+				Seq: message.Seq, Direction: message.Direction, Kind: message.Kind, Text: message.Text,
+				CardType: message.CardType, CardState: message.CardState, Origin: message.Origin,
+				TsApproxMs: message.TsApproxMs,
+			})
+		}
+		text := ""
+		if message.Direction == "in" && message.Kind == "card" && message.CardType == "resumeAttachment" {
+			text = m5ResumeAttachmentHistoryText
+		} else if message.Text != nil {
+			text = strings.TrimSpace(*message.Text)
+		}
+		if text == "" {
 			continue
 		}
 		direction := "inbound"
@@ -458,7 +528,7 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 			kind = "greeting"
 			material.sentGreeting = *message.Text
 		}
-		advice := m5ai.AdviceMessage{Seq: message.Seq, Direction: direction, Kind: kind, Text: *message.Text}
+		advice := m5ai.AdviceMessage{Seq: message.Seq, Direction: direction, Kind: kind, Text: text}
 		material.throughTurn = append(material.throughTurn, advice)
 		if message.Seq <= turn.HistoryThroughSeq {
 			material.history = append(material.history, advice)
@@ -467,7 +537,12 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 			material.current = append(material.current, advice)
 		}
 	}
-	if material.sentGreeting == "" || len(material.current) == 0 {
+	inputKind, ok := store.DialogueTurnInputKindOf(currentMessages)
+	if !ok {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	material.inputKind = inputKind
+	if material.sentGreeting == "" || len(material.current) == 0 || len(material.currentFacts) == 0 {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	return material, nil
@@ -543,7 +618,7 @@ func (a *roundActor) executeM5Advice(
 		if reserved.Invocation.FinishedAt != nil {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "invocationStateConflict", a.manager.now())
 		}
-		return a.finishInterruptedM5Advice(turn, facts, purpose, intent, reserved.Invocation)
+		return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
 	}
 
 	request := m5ai.CompletionRequest{Purpose: purpose, UserContent: content}
@@ -598,7 +673,7 @@ func (a *roundActor) executeM5Advice(
 			completion.ErrorClass = "invalidOutput"
 		}
 	}
-	decision, reduceErr := communication.Reduce(communication.ReduceInput{Turn: facts, Intent: intent, Reply: reply})
+	decision, reduceErr := reduceM5ReplyDecision(turn, material, facts, intent, reply)
 	if reduceErr != nil {
 		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
 	} else if callErr == nil && !reasoningUsageSafe(completion) {
@@ -612,6 +687,7 @@ func (a *roundActor) executeM5Advice(
 
 func (a *roundActor) finishInterruptedM5Advice(
 	turn store.DialogueTurn,
+	material m5TurnMaterial,
 	facts communication.FrozenTurnFacts,
 	purpose m5ai.CompletionPurpose,
 	intent communication.IntentAdvice,
@@ -631,13 +707,65 @@ func (a *roundActor) finishInterruptedM5Advice(
 		}
 		return a.completeM5Intent(turn.TurnID, completion, decision, "")
 	}
-	decision, err := communication.Reduce(communication.ReduceInput{
-		Turn: facts, Intent: intent, Reply: communication.ReplyAdvice{State: communication.AdviceFailed},
-	})
+	decision, err := reduceM5ReplyDecision(
+		turn, material, facts, intent, communication.ReplyAdvice{State: communication.AdviceFailed},
+	)
 	if err != nil {
 		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 	}
 	return a.completeM5Reply(turn.TurnID, completion, decision)
+}
+
+func reduceM5ReplyDecision(
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	intent communication.IntentAdvice,
+	reply communication.ReplyAdvice,
+) (communication.Decision, error) {
+	if material.inputKind != store.DialogueTurnInputResumeAttachment {
+		return communication.Reduce(communication.ReduceInput{Turn: facts, Intent: intent, Reply: reply})
+	}
+	if turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent ||
+		intent.State != communication.AdviceAbsent {
+		return communication.Decision{}, communication.ErrInvalidV4StateTransition
+	}
+	v4, err := reduceM5ResumeTurn(turn, material, reply)
+	if err != nil || v4.Dialogue.IntentLabel != m5ai.IntentInterested ||
+		v4.Dialogue.IntentSource != communication.IntentSourceBusinessEvent || len(v4.EventActions) != 0 {
+		return communication.Decision{}, communication.ErrInvalidV4StateTransition
+	}
+	decision := communication.Decision{
+		TurnID: turn.TurnID, IntentLabel: m5ai.IntentInterested,
+		IntentSource: communication.IntentSourceBusinessEvent,
+	}
+	switch v4.Dialogue.Status {
+	case communication.V4DialogueActionsPlanned:
+		if v4.Dialogue.NextAdvice != communication.V4AdviceNone || len(v4.Dialogue.Actions) != 1 {
+			return communication.Decision{}, communication.ErrInvalidV4StateTransition
+		}
+		action := v4.Dialogue.Actions[0]
+		if action.Kind != communication.V4ActionReplyText || action.CardMessageSeq != material.currentFacts[0].Seq ||
+			strings.TrimSpace(action.Text) == "" {
+			return communication.Decision{}, communication.ErrInvalidV4StateTransition
+		}
+		decision.TurnStatus = communication.TurnAdviceReady
+		decision.Action = &communication.CommunicationActionPlan{
+			TurnID: turn.TurnID, Kind: communication.CommunicationActionReplyText,
+			Text: action.Text, Status: communication.CommunicationActionPlanned,
+		}
+	case communication.V4DialogueManualRequired:
+		if v4.Dialogue.NextAdvice != communication.V4AdviceNone || len(v4.Dialogue.Actions) != 0 ||
+			(v4.Dialogue.ManualReason != communication.V4ManualReplyFailed &&
+				v4.Dialogue.ManualReason != communication.V4ManualReplyInvalid) {
+			return communication.Decision{}, communication.ErrInvalidV4StateTransition
+		}
+		decision.TurnStatus = communication.TurnManualRequired
+		decision.ManualReason = communication.ManualReason(v4.Dialogue.ManualReason)
+	default:
+		return communication.Decision{}, communication.ErrInvalidV4StateTransition
+	}
+	return decision, nil
 }
 
 func (a *roundActor) completeM5Intent(

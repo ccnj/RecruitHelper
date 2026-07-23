@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -287,5 +288,92 @@ func TestM5AutomaticReplyCrossesRealDispatcherOnceAndSurvivesRestart(t *testing.
 	if err != nil || afterSendCommands != 1 || len(afterMessages) != len(messages) || len(invocations) != 2 {
 		t.Fatalf("重启后持久事实增生: sendCmds=%d messages=%d/%d invocations=%d err=%v",
 			afterSendCommands, len(afterMessages), len(messages), len(invocations), err)
+	}
+}
+
+func TestM5ResumeBusinessEventCrossesExistingWALOnce(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5ResumeAdviceFixture(t, h)
+	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+		if call != 1 || request.Purpose != m5ai.PurposeReply {
+			return m5ai.CompletionResponse{}, fmt.Errorf("简历分支发生未授权调用: call=%d purpose=%s", call, request.Purpose)
+		}
+		return safeFakeResponse(`{"话术_序列":["收到简历了，我们继续聊聊这个岗位。"],"动作":"忽略"}`), nil
+	}}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取试运行账号失败: account=%+v err=%v", account, err)
+	}
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand: HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		now:  h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), fixture.turn)
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 1 || advice.requests[0].Purpose != m5ai.PurposeReply || hand.commandCount() != 1 {
+		t.Fatalf("简历分支必须零 intent、一次 reply、一次发送: advice=%+v commands=%d", advice.requests, hand.commandCount())
+	}
+	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || action == nil || action.Status != store.CommunicationActionSent || action.EffectIntentID == nil {
+		t.Fatalf("简历分支 action 未经既有正证轨道完成: action=%+v err=%v", action, err)
+	}
+	intent, err := h.db.EffectIntentByID(*action.EffectIntentID)
+	if err != nil || intent == nil || intent.Status != store.EffectIntentOk || intent.ResultMessageSeq == nil {
+		t.Fatalf("简历分支唯一 effect intent 未完成: intent=%+v err=%v", intent, err)
+	}
+	commands, err := h.db.RecentCmds(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendCommands := 0
+	for i := range commands {
+		if commands[i].Name == protocol.PrimChatSendMessage {
+			sendCommands++
+		}
+	}
+	key := store.ConversationKey{Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: fixture.conversationRef}
+	messages, err := h.db.MessagesForConversation(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfMessages := 0
+	for i := range messages {
+		if messages[i].OutboundIntentID != nil && *messages[i].OutboundIntentID == intent.IntentID {
+			selfMessages++
+		}
+	}
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || sendCommands != 1 || selfMessages != 1 || len(invocations) != 1 || invocations[0].Purpose != m5ai.PurposeReply {
+		t.Fatalf("简历分支持久事实不唯一: sendCmd=%d self=%d invocations=%+v err=%v", sendCommands, selfMessages, invocations, err)
+	}
+
+	restartedDispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(restartedDispatcher)
+	restarted, err := NewManager(h.db, &m5AutomaticReplyRunner{base: h.runner, dispatcher: restartedDispatcher}, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedActor := &roundActor{
+		manager: restarted, account: account,
+		hand: HandState{Online: true, Session: "session-1", BootID: "boot-1"}, now: h.clock.Now(),
+	}
+	restarted.mu.Lock()
+	err = restartedActor.processM5Trial(context.Background())
+	restarted.mu.Unlock()
+	if err != nil || len(advice.requests) != 1 || hand.commandCount() != 1 {
+		t.Fatalf("简历分支重启重放发生增生: advice=%d commands=%d err=%v", len(advice.requests), hand.commandCount(), err)
 	}
 }

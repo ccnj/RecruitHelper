@@ -116,7 +116,7 @@ func (s *Store) MarkProfileCommunicating(req MarkProfileCommunicatingRequest) (*
 			profile.Platform, profile.AccountRef, req.ConversationRef, req.MessageSeq).Error; err != nil {
 			return ErrDialogueTurnBinding
 		}
-		if message.Direction != "in" || !isRealCandidateMessageKind(message.Kind) {
+		if !IsM5RealCandidateMessage(message) {
 			return ErrDialogueTurnBinding
 		}
 		communicatingAt := message.CreatedAt
@@ -148,17 +148,8 @@ func (s *Store) MarkProfileCommunicating(req MarkProfileCommunicatingRequest) (*
 	return out, nil
 }
 
-func isRealCandidateMessageKind(kind string) bool {
-	switch kind {
-	case "text", "image", "voice", "file":
-		return true
-	default:
-		return false
-	}
-}
-
 // FreezeDialogueTurn 在同一事务中重验活动消息尾、简历与职位 revision 绑定，
-// 冻结唯一 turn，并在首次真实文字到达时推进 greeted→communicating。
+// 冻结唯一 turn，并在首次真实候选人事实到达时推进 greeted→communicating。
 func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialogueTurnResult, error) {
 	if strings.TrimSpace(req.TurnID) == "" || strings.TrimSpace(req.ProfileID) == "" ||
 		strings.TrimSpace(req.ConversationRef) == "" || strings.TrimSpace(req.InputDigest) == "" ||
@@ -261,10 +252,8 @@ func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialog
 		if len(inbound) == 0 || inbound[0].Seq != req.InboundFromSeq || inbound[len(inbound)-1].Seq != req.InboundThroughSeq {
 			return ErrDialogueTurnBinding
 		}
-		for i := range inbound {
-			if inbound[i].Direction != "in" || inbound[i].Kind != "text" || inbound[i].Text == nil {
-				return ErrDialogueTurnBinding
-			}
+		if _, ok := DialogueTurnInputKindOf(inbound); !ok {
+			return ErrDialogueTurnBinding
 		}
 		if digest, _, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound); err != nil ||
 			digest != req.InputDigest {
@@ -411,10 +400,8 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if len(inbound) == 0 || inbound[0].Seq != turn.InboundFromSeq || inbound[len(inbound)-1].Seq != turn.InboundThroughSeq {
 		return ErrDialogueTurnBinding
 	}
-	for i := range inbound {
-		if inbound[i].Direction != "in" || inbound[i].Kind != "text" || inbound[i].Text == nil {
-			return ErrDialogueTurnBinding
-		}
+	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
+		return ErrDialogueTurnBinding
 	}
 	if digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound); err != nil ||
 		digest != turn.InputDigest {
@@ -578,6 +565,71 @@ func (s *Store) ApplyCodeClassification(req CodeClassificationRequest) (*Dialogu
 			}
 		}
 		return tx.First(&out, "turn_id = ?", req.TurnID).Error
+	})
+	return &out, err
+}
+
+// ApplyResumeBusinessClassification is the narrow transactional bridge from
+// the v4 resumeSubmitted business event to M5's persisted turn lifecycle. It
+// accepts no caller-provided label or source: a current, single resume-card
+// boundary can only become interested/businessEvent, and no AI invocation is
+// involved in that transition.
+func (s *Store) ApplyResumeBusinessClassification(turnID string, classifiedAt time.Time) (*DialogueTurn, error) {
+	if strings.TrimSpace(turnID) == "" {
+		return nil, ErrDialogueTurnInvalid
+	}
+	if classifiedAt.IsZero() {
+		classifiedAt = time.Now()
+	}
+	var out DialogueTurn
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&out, "turn_id = ?", turnID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrDialogueTurnNotFound
+			}
+			return err
+		}
+		if err := validateDialogueTurnCurrentTx(tx, out); err != nil {
+			if !errors.Is(err, ErrDialogueTurnBinding) {
+				return err
+			}
+			return markDialogueTurnManualTx(tx, &out, "inputBoundaryChanged", classifiedAt)
+		}
+		var profile CandidateProfile
+		if err := tx.First(&profile, "profile_id = ?", out.ProfileID).Error; err != nil {
+			return err
+		}
+		var inbound []Message
+		if err := tx.Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq >= ? AND seq <= ? AND retracted_at IS NULL",
+			profile.Platform, profile.AccountRef, out.ConversationRef, out.InboundFromSeq, out.InboundThroughSeq,
+		).Order("seq").Find(&inbound).Error; err != nil {
+			return err
+		}
+		kind, ok := DialogueTurnInputKindOf(inbound)
+		if !ok || kind != DialogueTurnInputResumeAttachment {
+			return ErrDialogueTurnBinding
+		}
+		if out.Status != DialogueTurnCollected {
+			if out.Status == DialogueTurnClassified && out.IntentLabel == m5ai.IntentInterested &&
+				out.IntentSource == DialogueIntentBusinessEvent {
+				return nil
+			}
+			return ErrDialogueTurnState
+		}
+		updated := tx.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", out.TurnID, DialogueTurnCollected).
+			Updates(map[string]any{
+				"status": DialogueTurnClassified, "intent_label": m5ai.IntentInterested,
+				"intent_source": DialogueIntentBusinessEvent, "classified_at": classifiedAt,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrDialogueTurnConflict
+		}
+		return tx.First(&out, "turn_id = ?", out.TurnID).Error
 	})
 	return &out, err
 }

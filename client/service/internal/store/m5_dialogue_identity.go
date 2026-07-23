@@ -7,6 +7,63 @@ import (
 	"strings"
 )
 
+type DialogueTurnInputKind string
+
+const (
+	DialogueTurnInputText             DialogueTurnInputKind = "text"
+	DialogueTurnInputResumeAttachment DialogueTurnInputKind = "resumeAttachment"
+)
+
+// DialogueTurnInputKindOf is the canonical production eligibility evaluator
+// for M5's currently supported frozen inbound shapes. Ordinary text may span a
+// contiguous turn; the strong-interest business event is deliberately limited
+// to exactly one external resume card. Every other card or mixed shape remains
+// outside automatic processing.
+func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
+	if len(inbound) == 0 {
+		return "", false
+	}
+	allText := true
+	previous := int64(0)
+	for i := range inbound {
+		message := inbound[i]
+		if message.Direction != "in" || message.Seq <= previous {
+			return "", false
+		}
+		previous = message.Seq
+		if message.Kind != "text" || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
+			allText = false
+		}
+	}
+	if allText {
+		return DialogueTurnInputText, true
+	}
+	message := inbound[0]
+	if len(inbound) == 1 && message.Kind == "card" && message.CardType == "resumeAttachment" &&
+		message.CardState == "unknown" && message.Origin == "external" {
+		return DialogueTurnInputResumeAttachment, true
+	}
+	return "", false
+}
+
+// IsM5RealCandidateMessage controls only the greeted -> communicating fact.
+// A resume attachment is a real candidate action, but does not authorize an AI
+// call unless the complete turn also passes DialogueTurnInputKindOf.
+func IsM5RealCandidateMessage(message Message) bool {
+	if message.Direction != "in" {
+		return false
+	}
+	switch message.Kind {
+	case "text", "image", "voice", "file":
+		return true
+	case "card":
+		_, ok := DialogueTurnInputKindOf([]Message{message})
+		return ok
+	default:
+		return false
+	}
+}
+
 // DialogueTurnIdentity is the single canonical evaluator for an M5 turn's
 // immutable message boundary. Both the patrol producer and every store-side
 // authorization recheck use this exact function.
