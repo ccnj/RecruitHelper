@@ -6,6 +6,7 @@ import (
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/textcanon"
 
 	"gorm.io/gorm"
 )
@@ -121,9 +122,16 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err != nil {
 			return err
 		}
+		decision, plan, policyManualReason := communicationV4AdvicePolicy(decision)
 		turn, err := dialogueTurnFromV4Decision(req, decision)
 		if err != nil {
 			return err
+		}
+		manualReason := string(decision.ManualReason)
+		if policyManualReason != "" {
+			manualReason = policyManualReason
+			turn.Status = DialogueTurnManualRequired
+			turn.FailureReason = policyManualReason
 		}
 		monthStart, nextMonth := localMonthBounds(req.FrozenAt)
 		var monthlyTurns int64
@@ -141,10 +149,10 @@ func (s *Store) FreezeCommunicationV4Turn(
 		next.Revision++
 		next.ProjectedThroughSeq = req.InboundThroughSeq
 		next.UpdatedAt = req.FrozenAt
-		if decision.ManualReason != "" {
+		if manualReason != "" {
 			manualAt := req.FrozenAt
 			next.AutomationStatus = ProfileCommunicationAutomationManualRequired
-			next.ManualReason = string(decision.ManualReason)
+			next.ManualReason = manualReason
 			next.ManualRequiredAt = &manualAt
 		}
 		application = CommunicationV4ProjectionApplication{
@@ -156,12 +164,12 @@ func (s *Store) FreezeCommunicationV4Turn(
 			Outcome: CommunicationV4ApplicationOutcome{
 				Dialogue:       decision.Requirement,
 				Actions:        append([]communication.V4EventAction(nil), decision.EventActions...),
-				ManualReason:   decision.ManualReason,
+				ManualReason:   communication.V4ManualReason(manualReason),
 				DialogueStatus: decision.Dialogue.Status,
 				NextAdvice:     decision.Dialogue.NextAdvice,
 				IntentLabel:    decision.Dialogue.IntentLabel,
 				IntentSource:   decision.Dialogue.IntentSource,
-				PlannedActions: append([]communication.V4PlannedAction(nil), decision.Dialogue.Actions...),
+				PlannedActions: redactedCommunicationV4Plans(decision.Dialogue.Actions),
 			},
 			AppliedAt: req.FrozenAt,
 		}
@@ -192,6 +200,17 @@ func (s *Store) FreezeCommunicationV4Turn(
 		}
 		if err := tx.Create(&turn).Error; err != nil {
 			return err
+		}
+		if plan != nil {
+			action := CommunicationAction{
+				ActionID: plan.ActionKey, TurnID: turn.TurnID, Kind: CommunicationActionReplyText,
+				Text: plan.Text, ContentHash: textcanon.Hash(plan.Text),
+				Status:    CommunicationActionPlanned,
+				PlannedAt: req.FrozenAt, CreatedAt: req.FrozenAt, UpdatedAt: req.FrozenAt,
+			}
+			if err := tx.Create(&action).Error; err != nil {
+				return err
+			}
 		}
 		out.Turn = turn
 		out.Aggregate = next

@@ -506,6 +506,70 @@ func TestCommunicationV4RejectedIntentPersistsStateButSendsNothingOnTwoActionCon
 	}
 }
 
+func TestCommunicationV4RejectionShortCircuitAppliesVisibleActionPolicyAtFreeze(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-short-rejected")
+	setCommunicationV4FixedPhrasePackage(
+		t,
+		s,
+		"revision-profile-v4-short-rejected",
+	)
+	text := "暂时不考虑，谢谢"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-short-rejected-2", Text: &text,
+	})
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frozen.Turn.Status != DialogueTurnManualRequired ||
+		frozen.Turn.IntentLabel != m5ai.IntentRejected ||
+		frozen.Turn.IntentSource != DialogueIntentCodeShortCircuit ||
+		frozen.Turn.FailureReason != communicationV4ManualMultiVisibleAction {
+		t.Fatalf("拒绝短路未在冻结事务内收敛: %+v", frozen.Turn)
+	}
+	if frozen.Aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		frozen.Aggregate.ManualReason != communicationV4ManualMultiVisibleAction ||
+		frozen.Aggregate.State.RejectionStage != communication.V4RejectionStageRetention ||
+		frozen.Aggregate.State.ColdPromptRemaining != 0 ||
+		frozen.Aggregate.State.ColdWechatRemaining != 0 {
+		t.Fatalf("拒绝短路状态或自动化闸错误: %+v", frozen.Aggregate)
+	}
+	if frozen.Application.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
+		frozen.Application.Outcome.ManualReason !=
+			communication.V4ManualReason(communicationV4ManualMultiVisibleAction) ||
+		len(frozen.Application.Outcome.PlannedActions) != 2 {
+		t.Fatalf("拒绝短路回执未保留策略冲突证据: %+v", frozen.Application.Outcome)
+	}
+	for _, plan := range frozen.Application.Outcome.PlannedActions {
+		if plan.Text != "" {
+			t.Fatalf("不可变冻结回执不得复制固定话术正文: %+v", plan)
+		}
+	}
+	var actions, invocations int64
+	if err := s.db.Model(&CommunicationAction{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Count(&actions).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&AIInvocation{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Count(&invocations).Error; err != nil {
+		t.Fatal(err)
+	}
+	if actions != 0 || invocations != 0 {
+		t.Fatalf("拒绝短路不得偷发或调用模型: actions=%d invocations=%d", actions, invocations)
+	}
+	replayed, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || replayed.Created ||
+		replayed.Turn.Status != DialogueTurnManualRequired ||
+		replayed.Aggregate.Revision != frozen.Aggregate.Revision {
+		t.Fatalf("拒绝短路冻结重放不幂等: result=%+v err=%v", replayed, err)
+	}
+}
+
 func TestCommunicationV4InterruptedIntentPersistsFallbackContinuation(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-interrupted")
