@@ -22,18 +22,11 @@ func TestRenderScoringPromptReplacesExactlyOneResumeWithoutTruncation(t *testing
 	}
 }
 
-func TestRenderScoringPromptUsesUTF8ByteBudgetAndNeverTruncates(t *testing.T) {
-	withinBudget := strings.Repeat("界", ReplyInputTokenLimit/3) + "a"
-	rendered, err := RenderScoringPrompt(scoringResumePlaceholder, withinBudget)
-	if err != nil || rendered != withinBudget || len([]byte(rendered)) != ReplyInputTokenLimit {
-		t.Fatalf("预算内 UTF-8 输入被改写: bytes=%d err=%v", len([]byte(rendered)), err)
-	}
-
-	overBudget := withinBudget + "a"
-	rendered, err = RenderScoringPrompt(scoringResumePlaceholder, overBudget)
-	if err == nil || rendered != "" {
-		t.Fatalf("超预算输入不得截断后继续: bytes=%d renderedBytes=%d err=%v",
-			len([]byte(overBudget)), len([]byte(rendered)), err)
+func TestRenderScoringPromptPreservesInputLargerThanTokenLimitInBytes(t *testing.T) {
+	input := strings.Repeat("界", ReplyInputTokenLimit)
+	rendered, err := RenderScoringPrompt(scoringResumePlaceholder, input)
+	if err != nil || rendered != input || len([]byte(rendered)) <= ReplyInputTokenLimit {
+		t.Fatalf("评分渲染不应以 UTF-8 字节冒充 token: bytes=%d err=%v", len([]byte(rendered)), err)
 	}
 }
 

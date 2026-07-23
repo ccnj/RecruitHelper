@@ -43,16 +43,12 @@ func TestRenderGreetingPromptRejectsMissingRepeatedOrUnknownTokens(t *testing.T)
 	}
 }
 
-func TestRenderGreetingPromptUsesUTF8ByteBudgetWithoutTruncation(t *testing.T) {
-	input := GreetingInputV1{CareerState: "x", ResumeSummaryJSON: `{}`}
-	within := strings.Repeat("a", GreetingInputTokenLimit-3) + "{career_state}{resume_summary_json}"
-	rendered, err := RenderGreetingPrompt(within, input)
-	if err != nil || len([]byte(rendered)) != GreetingInputTokenLimit {
-		t.Fatalf("边界内招呼输入被拒绝: bytes=%d err=%v", len([]byte(rendered)), err)
-	}
-	over := "a" + within
-	if rendered, err := RenderGreetingPrompt(over, input); err == nil || rendered != "" {
-		t.Fatalf("越界招呼输入未拒绝: bytes=%d err=%v", len([]byte(rendered)), err)
+func TestRenderGreetingPromptPreservesInputLargerThanTokenLimitInBytes(t *testing.T) {
+	careerState := strings.Repeat("界", GreetingInputTokenLimit)
+	input := GreetingInputV1{CareerState: careerState, ResumeSummaryJSON: `{}`}
+	rendered, err := RenderGreetingPrompt("{career_state}{resume_summary_json}", input)
+	if err != nil || rendered != careerState+"{}" || len([]byte(rendered)) <= GreetingInputTokenLimit {
+		t.Fatalf("招呼渲染不应以 UTF-8 字节冒充 token: bytes=%d err=%v", len([]byte(rendered)), err)
 	}
 }
 

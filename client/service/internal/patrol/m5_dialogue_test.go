@@ -3,6 +3,7 @@ package patrol
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
@@ -90,5 +91,24 @@ func TestM5ProviderFailureUsesFixedClasses(t *testing.T) {
 	status, class = m5ProviderFailure(secret)
 	if status != store.AIInvocationTransportFailed || class != "transport" || class == secret.Error() {
 		t.Fatalf("未知 provider 错误泄漏正文: %s/%s", status, class)
+	}
+
+	status, class = m5ProviderFailure(&m5ai.ProviderError{Class: "inputTokenBudgetExceeded"})
+	if status != store.AIInvocationBudgetBlocked || class != "inputTokenBudgetExceeded" {
+		t.Fatalf("响应后输入 token 超限分类错误: %s/%s", status, class)
+	}
+
+	payloadErr := &m5ai.ProviderError{Class: "requestPayloadTooLarge"}
+	completion := m5CompletionFromProvider(
+		"invocation-payload-cap", m5ai.CompletionResponse{}, payloadErr,
+		5*time.Millisecond, time.Now(),
+	)
+	if completion.Status != store.AIInvocationTransportFailed ||
+		completion.ErrorClass != "requestPayloadTooLarge" ||
+		completion.InputTokens != 0 || completion.CachedInputTokens != 0 ||
+		completion.OutputTokens != 0 || completion.EstimatedCostMicros != 0 ||
+		completion.OutputHash != "" || completion.UsageShape != "" ||
+		completion.LatencyMs != 5 {
+		t.Fatalf("请求运输上限终局错误: %+v", completion)
 	}
 }

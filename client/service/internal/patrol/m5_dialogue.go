@@ -851,6 +851,10 @@ func m5CompletionFromProvider(
 	}
 	if callErr != nil {
 		completion.Status, completion.ErrorClass = m5ProviderFailure(callErr)
+		var providerErr *m5ai.ProviderError
+		if errors.As(callErr, &providerErr) && providerErr.Class == "inputTokenBudgetExceeded" {
+			return completion
+		}
 		completion.OutputHash = ""
 		completion.UsageShape = ""
 		completion.ReasoningTokens = nil
@@ -869,13 +873,13 @@ func m5ProviderFailure(err error) (store.AIInvocationStatus, string) {
 		return store.AIInvocationTransportFailed, "transport"
 	}
 	switch providerErr.Class {
-	case "budgetBlocked":
-		return store.AIInvocationBudgetBlocked, "budgetBlocked"
+	case "budgetBlocked", "inputTokenBudgetExceeded":
+		return store.AIInvocationBudgetBlocked, providerErr.Class
 	case "authentication", "rateLimited", "providerRejected":
 		return store.AIInvocationProviderRejected, providerErr.Class
 	case "responseInvalid":
 		return store.AIInvocationInvalidOutput, "responseInvalid"
-	case "timeout", "transport", "providerUnavailable", "requestInvalid":
+	case "timeout", "transport", "providerUnavailable", "requestInvalid", "requestPayloadTooLarge":
 		return store.AIInvocationTransportFailed, providerErr.Class
 	default:
 		return store.AIInvocationTransportFailed, "providerFailure"

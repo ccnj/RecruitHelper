@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -93,23 +94,19 @@ func TestOpenAICompatibleProviderAcceptsScoringWithReplyBudget(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleProviderBlocksScoringOutsideReplyBudgetBeforeTransport(t *testing.T) {
-	tests := []CompletionRequest{
-		{Purpose: PurposeScoring, UserContent: "fixture", MaxOutputTokens: ScoringOutputTokenLimit + 1},
-		{Purpose: PurposeScoring, UserContent: strings.Repeat("a", ReplyInputTokenLimit+1), MaxOutputTokens: ScoringOutputTokenLimit},
-	}
-	for _, request := range tests {
-		calls := 0
-		client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			calls++
-			return nil, errors.New("不应发起评分请求")
-		})}
-		provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
-		_, err := provider.CompleteJSON(context.Background(), request)
-		var providerErr *ProviderError
-		if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
-			t.Fatalf("评分预算未在网络前阻断: calls=%d request=%+v err=%v", calls, request, err)
-		}
+func TestOpenAICompatibleProviderBlocksScoringOutputOutsideReplyBudgetBeforeTransport(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("不应发起评分请求")
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	_, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeScoring, UserContent: "fixture", MaxOutputTokens: ScoringOutputTokenLimit + 1,
+	})
+	var providerErr *ProviderError
+	if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
+		t.Fatalf("评分输出预算未在网络前阻断: calls=%d err=%v", calls, err)
 	}
 }
 
@@ -140,22 +137,93 @@ func TestOpenAICompatibleProviderAcceptsGreetingWithinPDossier(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleProviderBlocksGreetingOutsidePDossierBeforeTransport(t *testing.T) {
-	requests := []CompletionRequest{
-		{Purpose: PurposeGreeting, UserContent: "fixture", MaxOutputTokens: GreetingOutputTokenLimit + 1},
-		{Purpose: PurposeGreeting, UserContent: strings.Repeat("a", GreetingInputTokenLimit+1), MaxOutputTokens: GreetingOutputTokenLimit},
+func TestOpenAICompatibleProviderBlocksGreetingOutputOutsidePDossierBeforeTransport(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("不应发起招呼请求")
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	_, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeGreeting, UserContent: "fixture", MaxOutputTokens: GreetingOutputTokenLimit + 1,
+	})
+	var providerErr *ProviderError
+	if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
+		t.Fatalf("招呼输出预算未在网络前阻断: calls=%d err=%v", calls, err)
 	}
-	for _, request := range requests {
-		calls := 0
-		client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			calls++
-			return nil, errors.New("不应发起招呼请求")
-		})}
-		provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
-		_, err := provider.CompleteJSON(context.Background(), request)
-		var providerErr *ProviderError
-		if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
-			t.Fatalf("招呼 P 档预算未在网络前阻断: calls=%d request=%+v err=%v", calls, request, err)
+}
+
+func TestOpenAICompatibleProviderAcceptsLargeChineseRequestByProviderTokenUsage(t *testing.T) {
+	content := strings.Repeat("中", 9_167)
+	if len([]byte(content)) != 27_501 {
+		t.Fatalf("测试输入字节数漂移: %d", len([]byte(content)))
+	}
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":15999,"completion_tokens":1}}`,
+			)),
+		}, nil
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeReply, UserContent: content, MaxOutputTokens: ReplyOutputTokenLimit,
+	})
+	if err != nil || calls != 1 || response.Usage.InputTokens != 15_999 || response.JSONText != "{}" {
+		t.Fatalf("27.5KB 中文请求被字节数误拦截: calls=%d response=%+v err=%v", calls, response, err)
+	}
+}
+
+func TestOpenAICompatibleProviderUsesReportedInputTokensForEveryPDossier(t *testing.T) {
+	tests := []struct {
+		name    string
+		purpose CompletionPurpose
+		limit   int
+		maxOut  int
+	}{
+		{name: "intent", purpose: PurposeIntent, limit: IntentInputTokenLimit, maxOut: IntentOutputTokenLimit},
+		{name: "reply", purpose: PurposeReply, limit: ReplyInputTokenLimit, maxOut: ReplyOutputTokenLimit},
+		{name: "scoring", purpose: PurposeScoring, limit: ReplyInputTokenLimit, maxOut: ScoringOutputTokenLimit},
+		{name: "greeting", purpose: PurposeGreeting, limit: GreetingInputTokenLimit, maxOut: GreetingOutputTokenLimit},
+	}
+	for _, testCase := range tests {
+		for _, delta := range []int{0, 1} {
+			name := fmt.Sprintf("%s/%d", testCase.name, testCase.limit+delta)
+			t.Run(name, func(t *testing.T) {
+				calls := 0
+				promptTokens := testCase.limit + delta
+				client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					calls++
+					raw := fmt.Sprintf(
+						`{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":%d,"completion_tokens":1,"prompt_cache_hit_tokens":2,"completion_tokens_details":{"reasoning_tokens":0}}}`,
+						promptTokens,
+					)
+					return &http.Response{
+						StatusCode: http.StatusOK, Header: make(http.Header),
+						Body: io.NopCloser(strings.NewReader(raw)),
+					}, nil
+				})}
+				provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+				response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+					Purpose: testCase.purpose, UserContent: "fixture", MaxOutputTokens: testCase.maxOut,
+				})
+				if calls != 1 || response.JSONText != "{}" || response.Usage.InputTokens != promptTokens ||
+					response.Usage.CachedInputTokens != 2 || response.Usage.OutputTokens != 1 ||
+					response.Usage.ReasoningTokens == nil || *response.Usage.ReasoningTokens != 0 {
+					t.Fatalf("provider 响应未完整返回: calls=%d response=%+v err=%v", calls, response, err)
+				}
+				var providerErr *ProviderError
+				if delta == 0 {
+					if err != nil {
+						t.Fatalf("token limit 边界被拒绝: %v", err)
+					}
+				} else if !errors.As(err, &providerErr) || providerErr.Class != "inputTokenBudgetExceeded" {
+					t.Fatalf("token limit+1 未在单次响应后阻断: err=%v", err)
+				}
+			})
 		}
 	}
 }
@@ -209,8 +277,13 @@ func TestOpenAICompatibleProviderRejectsInvalidChoiceAndUsageShapes(t *testing.T
 			max:  1,
 		},
 		{
-			name: "input exceeds approved budget",
-			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":8001,"completion_tokens":1}}`,
+			name: "missing input usage",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"completion_tokens":1}}`,
+			max:  1,
+		},
+		{
+			name: "missing output usage",
+			raw:  `{"choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"prompt_tokens":1}}`,
 			max:  1,
 		},
 		{
@@ -404,19 +477,21 @@ func TestOpenAICompatibleProviderBoundsTransportOutputAndInputFailures(t *testin
 		}
 	})
 
-	t.Run("input budget before transport", func(t *testing.T) {
+	t.Run("request payload cap before transport", func(t *testing.T) {
 		calls := 0
 		client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			calls++
 			return nil, errors.New("不应调用")
 		})}
 		provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
-		_, err := provider.CompleteJSON(context.Background(), CompletionRequest{
-			Purpose: PurposeIntent, UserContent: strings.Repeat("a", IntentInputTokenLimit+1), MaxOutputTokens: IntentOutputTokenLimit,
+		response, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+			Purpose: PurposeReply, UserContent: strings.Repeat("a", maxProviderRequestBytes),
+			MaxOutputTokens: ReplyOutputTokenLimit,
 		})
 		var providerErr *ProviderError
-		if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
-			t.Fatalf("输入预算未在网络前阻断: calls=%d err=%v", calls, err)
+		if calls != 0 || response != (CompletionResponse{}) || !errors.As(err, &providerErr) ||
+			providerErr.Class != "requestPayloadTooLarge" {
+			t.Fatalf("请求体上限未在网络前阻断: calls=%d response=%+v err=%v", calls, response, err)
 		}
 	})
 }

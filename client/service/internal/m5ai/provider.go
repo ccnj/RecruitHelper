@@ -14,6 +14,7 @@ import (
 )
 
 const (
+	maxProviderRequestBytes  = 256 << 10
 	maxProviderResponseBytes = 1 << 20
 
 	// DeepSeek V4 Pro USD prices frozen on 2026-07-21, expressed as
@@ -77,17 +78,6 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	if request.Purpose == PurposeIntent && inputLimit > IntentInputTokenLimit {
 		inputLimit = IntentInputTokenLimit
 	}
-	if request.Purpose == PurposeGreeting && inputLimit > GreetingInputTokenLimit {
-		inputLimit = GreetingInputTokenLimit
-	}
-	// UTF-8 byte length is a conservative tokenizer-independent upper bound for
-	// this plain-text path because every input token consumes at least one input
-	// byte. This may route a
-	// large Chinese prompt to a person early, but it can never silently exceed
-	// the approved P budget or truncate an input.
-	if len([]byte(request.UserContent)) > inputLimit {
-		return CompletionResponse{}, &ProviderError{Class: "budgetBlocked"}
-	}
 	payload := struct {
 		Model    string `json:"model"`
 		Messages []struct {
@@ -111,6 +101,9 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return CompletionResponse{}, err
+	}
+	if len(body) > maxProviderRequestBytes {
+		return CompletionResponse{}, &ProviderError{Class: "requestPayloadTooLarge"}
 	}
 	endpoint := strings.TrimRight(p.config.BaseURL, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
@@ -160,9 +153,9 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens         int `json:"prompt_tokens"`
-			CompletionTokens     int `json:"completion_tokens"`
-			PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+			PromptTokens         *int `json:"prompt_tokens"`
+			CompletionTokens     *int `json:"completion_tokens"`
+			PromptCacheHitTokens int  `json:"prompt_cache_hit_tokens"`
 			CompletionDetails    *struct {
 				ReasoningTokens *int `json:"reasoning_tokens"`
 			} `json:"completion_tokens_details"`
@@ -170,9 +163,14 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	}
 	if json.Unmarshal(raw, &decoded) != nil || len(decoded.Choices) != 1 ||
 		decoded.Choices[0].FinishReason != "stop" || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" ||
-		decoded.Usage.PromptTokens < 0 || decoded.Usage.PromptTokens > inputLimit || decoded.Usage.CompletionTokens < 0 ||
-		decoded.Usage.PromptCacheHitTokens < 0 || decoded.Usage.PromptCacheHitTokens > decoded.Usage.PromptTokens ||
-		decoded.Usage.CompletionTokens > request.MaxOutputTokens {
+		decoded.Usage.PromptTokens == nil || decoded.Usage.CompletionTokens == nil {
+		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
+	}
+	promptTokens := *decoded.Usage.PromptTokens
+	completionTokens := *decoded.Usage.CompletionTokens
+	if promptTokens < 0 || completionTokens < 0 ||
+		decoded.Usage.PromptCacheHitTokens < 0 || decoded.Usage.PromptCacheHitTokens > promptTokens ||
+		completionTokens > request.MaxOutputTokens {
 		return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
 	}
 	var reasoning *int
@@ -182,17 +180,21 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			return CompletionResponse{}, &ProviderError{Class: "responseInvalid"}
 		}
 	}
-	return CompletionResponse{
+	result := CompletionResponse{
 		JSONText: decoded.Choices[0].Message.Content,
 		Usage: CompletionUsage{
-			InputTokens:       decoded.Usage.PromptTokens,
+			InputTokens:       promptTokens,
 			CachedInputTokens: decoded.Usage.PromptCacheHitTokens,
-			OutputTokens:      decoded.Usage.CompletionTokens,
+			OutputTokens:      completionTokens,
 			ReasoningTokens:   reasoning,
 		},
 		ReasoningContentEmpty: decoded.Choices[0].Message.ReasoningContent == nil ||
 			*decoded.Choices[0].Message.ReasoningContent == "",
-	}, nil
+	}
+	if promptTokens > inputLimit {
+		return result, &ProviderError{Class: "inputTokenBudgetExceeded"}
+	}
+	return result, nil
 }
 
 func validateBaseURL(value string) error {

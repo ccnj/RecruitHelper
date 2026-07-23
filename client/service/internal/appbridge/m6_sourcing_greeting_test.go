@@ -135,6 +135,68 @@ func TestSelectedSourcingBatchGeneratesGreetingsWithoutTouchingHand(t *testing.T
 	}
 }
 
+func TestSelectedSourcingGreetingPostResponseTokenBudgetKeepsUsageWithoutText(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	batchID := prepareSelectedSourcingBatch(t, h, 1)
+	material, err := h.store.NextSelectedSourcingGreetingMaterial(batchID)
+	if err != nil || material == nil {
+		t.Fatalf("招呼前缺少 selected 材料: material=%+v err=%v", material, err)
+	}
+	beforeHandCalls := len(h.sender.order)
+	zero := 0
+	usage := m5ai.CompletionUsage{
+		InputTokens:       m5ai.GreetingInputTokenLimit + 1,
+		CachedInputTokens: 401,
+		OutputTokens:      9,
+		ReasoningTokens:   &zero,
+	}
+	advice := &postResponseInputBudgetAdvice{
+		response: m5ai.CompletionResponse{
+			JSONText: `{"招呼语":"不得持久化"}`, Usage: usage, ReasoningContentEmpty: true,
+		},
+		delay: 2 * time.Millisecond,
+	}
+	generator, err := patrol.NewManager(
+		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
+		patrol.Config{Clock: h.clock, Location: time.UTC}, advice,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := generator.GenerateSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || !progress.Completed || progress.OKCount != 0 || progress.FailedCount != 1 ||
+		progress.InputTokens != int64(usage.InputTokens) ||
+		progress.CachedInputTokens != int64(usage.CachedInputTokens) ||
+		progress.OutputTokens != int64(usage.OutputTokens) ||
+		progress.EstimatedCostMicros != m5ai.EstimatedCostMicros(usage) ||
+		len(advice.requests) != 1 {
+		t.Fatalf("超 token 招呼未形成带计量单次失败终局: progress=%+v calls=%d err=%v",
+			progress, len(advice.requests), err)
+	}
+	invocation, err := h.store.SourcingGreetingByProfileID(material.ProfileID)
+	if err != nil || invocation == nil ||
+		invocation.Status != store.AIInvocationBudgetBlocked ||
+		invocation.ErrorClass != "inputTokenBudgetExceeded" ||
+		invocation.GreetingText != "" || invocation.ContentHash != "" ||
+		invocation.OutputHash == "" ||
+		invocation.InputTokens != usage.InputTokens ||
+		invocation.CachedInputTokens != usage.CachedInputTokens ||
+		invocation.OutputTokens != usage.OutputTokens ||
+		invocation.UsageShape != store.AIInvocationUsageComplete ||
+		invocation.ReasoningTokens == nil || *invocation.ReasoningTokens != 0 ||
+		invocation.LatencyMs < 1 ||
+		invocation.EstimatedCostMicros != m5ai.EstimatedCostMicros(usage) {
+		t.Fatalf("超 token 招呼计量或零正文事实错误: invocation=%+v err=%v", invocation, err)
+	}
+	target, err := h.store.NextSourcingGreetingSendTarget(batchID)
+	if err != nil || target != nil {
+		t.Fatalf("超 token 招呼不得形成发送目标: target=%+v err=%v", target, err)
+	}
+	if len(h.sender.order) != beforeHandCalls {
+		t.Fatalf("超 token 招呼生成触碰了 hand: before=%d after=%d", beforeHandCalls, len(h.sender.order))
+	}
+}
+
 func TestSelectedSourcingBatchWithoutProviderCreatesNoGreetingReservation(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	batchID := prepareSelectedSourcingBatch(t, h, 1)

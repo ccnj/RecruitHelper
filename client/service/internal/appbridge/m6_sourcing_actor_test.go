@@ -71,6 +71,27 @@ func (a *sourcingBatchScoringAdvice) CompleteJSON(
 	}
 }
 
+type postResponseInputBudgetAdvice struct {
+	requests []m5ai.CompletionRequest
+	response m5ai.CompletionResponse
+	delay    time.Duration
+}
+
+func (*postResponseInputBudgetAdvice) ProviderName() string {
+	return "fixture-input-budget-provider"
+}
+func (*postResponseInputBudgetAdvice) ModelName() string { return "fixture-input-budget-model" }
+func (a *postResponseInputBudgetAdvice) CompleteJSON(
+	_ context.Context,
+	request m5ai.CompletionRequest,
+) (m5ai.CompletionResponse, error) {
+	a.requests = append(a.requests, request)
+	if a.delay > 0 {
+		time.Sleep(a.delay)
+	}
+	return a.response, &m5ai.ProviderError{Class: "inputTokenBudgetExceeded"}
+}
+
 type sourcingActorSender struct {
 	mu         sync.Mutex
 	dispatcher *dispatch.Dispatcher
@@ -562,6 +583,65 @@ func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T
 	replayed, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
 	if err != nil || !replayed.Completed || len(advice.requests) != 3 {
 		t.Fatalf("重复统一评分产生了新调用: progress=%+v requests=%d err=%v", replayed, len(advice.requests), err)
+	}
+}
+
+func TestCompletedSourcingBatchPostResponseTokenBudgetKeepsUsageWithoutScore(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || batch == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", batch, err)
+	}
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	run, err := h.store.NextSourcingBatchRunWithoutScore(batch.BatchID)
+	if err != nil || run == nil {
+		t.Fatalf("评分前缺少待评分成员: run=%+v err=%v", run, err)
+	}
+
+	zero := 0
+	usage := m5ai.CompletionUsage{
+		InputTokens:       m5ai.ReplyInputTokenLimit + 1,
+		CachedInputTokens: 301,
+		OutputTokens:      5,
+		ReasoningTokens:   &zero,
+	}
+	advice := &postResponseInputBudgetAdvice{
+		response: m5ai.CompletionResponse{
+			JSONText: `{"score":9}`, Usage: usage, ReasoningContentEmpty: true,
+		},
+		delay: 2 * time.Millisecond,
+	}
+	scorer, err := patrol.NewManager(
+		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
+		patrol.Config{Clock: h.clock, Location: time.UTC}, advice,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
+	if err != nil || !progress.Completed || progress.OKCount != 0 || progress.FailedCount != 1 ||
+		len(advice.requests) != 1 {
+		t.Fatalf("超 token 评分未形成单次失败终局: progress=%+v calls=%d err=%v",
+			progress, len(advice.requests), err)
+	}
+	invocation, err := h.store.SourcingScoreByRunID(run.RunID)
+	if err != nil || invocation == nil ||
+		invocation.Status != store.AIInvocationBudgetBlocked ||
+		invocation.ErrorClass != "inputTokenBudgetExceeded" || invocation.Score != nil ||
+		invocation.OutputHash == "" ||
+		invocation.InputTokens != usage.InputTokens ||
+		invocation.CachedInputTokens != usage.CachedInputTokens ||
+		invocation.OutputTokens != usage.OutputTokens ||
+		invocation.UsageShape != store.AIInvocationUsageComplete ||
+		invocation.ReasoningTokens == nil || *invocation.ReasoningTokens != 0 ||
+		invocation.LatencyMs < 1 ||
+		invocation.EstimatedCostMicros != m5ai.EstimatedCostMicros(usage) {
+		t.Fatalf("超 token 评分计量或零分数事实错误: invocation=%+v err=%v", invocation, err)
 	}
 }
 

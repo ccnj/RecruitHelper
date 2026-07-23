@@ -49,11 +49,7 @@ func RenderGreetingPrompt(prompt string, input GreetingInputV1) (string, error) 
 	if counts[greetingCareerStateToken] != 1 || counts[greetingResumeSummaryToken] != 1 {
 		return "", errors.New("invalidGreetingPrompt")
 	}
-	rendered := builder.String()
-	if len([]byte(rendered)) > GreetingInputTokenLimit {
-		return "", errors.New("greetingInputBudgetExceeded")
-	}
-	return rendered, nil
+	return builder.String(), nil
 }
 
 // ParseGreetingSuggestion consumes only the prompt's canonical Chinese body
