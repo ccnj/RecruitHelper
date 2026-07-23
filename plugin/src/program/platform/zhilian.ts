@@ -22,12 +22,17 @@ import type {
   ChatSendGreetingArgs,
   ChatSendGreetingData,
   ChatSendGreetingGuards,
+  ChatSendInviteCardArgs,
+  ChatSendInviteCardData,
   ChatSendMessageArgs,
   ChatSendMessageData,
   ChatSendMessageGuards,
+  ChatSendWechatInviteArgs,
+  ChatSendWechatInviteData,
   ConversationSummary,
   DebugInspectSendSurfaceData,
   ErrorCode,
+  InterviewDetails,
   MessageAnchor,
   NotReadyReason,
   ProbePlatformData,
@@ -84,6 +89,10 @@ export type ZhilianThreadPage = ChatReadThreadData
 export type ZhilianSendArgs = ChatSendMessageArgs
 export type ZhilianSendGuards = ChatSendMessageGuards
 export type ZhilianSendData = ChatSendMessageData
+export type ZhilianSendWechatInviteArgs = ChatSendWechatInviteArgs
+export type ZhilianSendWechatInviteData = ChatSendWechatInviteData
+export type ZhilianSendInviteCardArgs = ChatSendInviteCardArgs
+export type ZhilianSendInviteCardData = ChatSendInviteCardData
 
 interface MainProbeResult {
   pageKind: 'im' | 'recommend' | 'other'
@@ -403,6 +412,47 @@ function validatedMainSendBaseline(value: unknown): MainSendBaselineResult | nul
 interface MainObserveStableOutboundResult {
   selected: boolean
   matchingNewServerMessages: number
+}
+
+type MainCardAction = 'wechatInvite' | 'interviewInvite'
+type MainCardPhase = 'preflight' | 'commit'
+
+interface MainPreparedInterviewEditor {
+  startsAt: number
+  endsAt: number
+  method: 'wechatVideo'
+  dateValue: string
+  timeValue: string
+  durationValue: string
+  methodValue: string
+}
+
+type MainPrepareInterviewEditorResult =
+  | { status: 'ready'; prepared: MainPreparedInterviewEditor }
+  | {
+    status: 'failed'
+    reason: 'route_changed' | 'identity_changed' | 'target_changed' | 'composer_nonempty' |
+      'surface_unavailable' | 'editor_unavailable' | 'date_unavailable' | 'time_unavailable' |
+      'duration_unavailable' | 'method_unavailable' | 'input_rejected' | 'action_window_elapsed' |
+      'unexpected'
+  }
+
+type MainSendCardOnceResult =
+  | { status: 'ready' }
+  | { status: 'clicked' }
+  | {
+    status: 'failed'
+    reason: 'route_changed' | 'identity_changed' | 'target_changed' | 'baseline_changed' |
+      'guard_unresolved' | 'composer_nonempty' | 'surface_unavailable' | 'input_rejected' |
+      'action_window_elapsed'
+  }
+
+interface MainObserveStableOutboundCardResult {
+  selected: boolean
+  matchingNewServerMessages: number
+  contentHash?: string
+  sourceKey?: string
+  interview?: InterviewDetails
 }
 
 interface ListCursor {
@@ -3891,10 +3941,14 @@ async function mainReadThreadPage(
     const isCandidateWechatAccepted = customSuccess && customType === 259 &&
       from === target && originTypeIsStaff &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    const interviewStartsAt = toMillis(details.startTime)
+    const interviewEndsAt = toMillis(details.endTime)
+    const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+      ? 'wechatVideo' as const
+      : null
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
       from === staffID && Boolean(clean(details.interviewId)) &&
-      Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
-      Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+      interviewStartsAt !== null && interviewEndsAt !== null &&
       Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
       Object.prototype.hasOwnProperty.call(details, 'state')
     const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
@@ -3911,6 +3965,7 @@ async function mainReadThreadPage(
     let text: string | null = null
     let cardType: ZhilianThreadMessage['cardType'] = null
     let state: ZhilianThreadMessage['cardState'] = null
+    let interview: InterviewDetails | null = null
     let identity = ''
 
     if (isCandidateInterviewAcceptedText) {
@@ -3948,7 +4003,23 @@ async function mainReadThreadPage(
       cardType = 'interviewInvite'
       text = '[面试邀请]'
       state = 'unknown'
-      identity = stableMessageIdentity(row.idServer)
+      identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+        interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+        ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+        : [
+            stableMessageIdentity(row.idServer),
+            String(interviewStartsAt),
+            String(interviewEndsAt),
+            interviewMethod ?? 'unknown',
+          ].join('\x1f')
+      if (interviewMethod !== null && interviewStartsAt !== null && interviewEndsAt !== null &&
+          interviewEndsAt > interviewStartsAt) {
+        interview = {
+          startsAt: interviewStartsAt,
+          endsAt: interviewEndsAt,
+          method: interviewMethod,
+        }
+      }
     } else if (isCandidateOnlineResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
@@ -3987,8 +4058,16 @@ async function mainReadThreadPage(
     // NFC+空白规范化文本，媒体使用固定占位符；卡片只哈希类型+稳定身份且排除状态。
     // 方向在 anchor 中另列，不能再次混入 hash。
     const canonicalContent = clean(text)
+    const cardProjection = cardType === 'wechatExchange' &&
+      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      ? 'card\x1fwechatExchange'
+      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
+          interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+        ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+        : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || stableMessageID || text)}`
     const contentHash = kind === 'card'
-      ? await digest(`card\x1f${cardType ?? 'other'}\x1f${clean(identity || stableMessageID || text)}`)
+      ? await digest(cardProjection)
       : await digest(canonicalContent)
     output.push({
       sourceKey: await digest(`source-v1|${stableMessageID}`),
@@ -3999,6 +4078,7 @@ async function mainReadThreadPage(
       contentHash,
       cardType,
       cardState: state,
+      ...(interview ? { interview } : {}),
       tsApprox: toMillis(row.time),
     })
   }
@@ -4788,6 +4868,11 @@ async function mainCaptureSendBaseline(
         return {}
       }
     }
+    const toMillis = (value: unknown): number | null => {
+      const number = Number(value)
+      if (!Number.isFinite(number) || number <= 0) return null
+      return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
+    }
     const anchorFor = async (row: SnapshotRow, staffID: string): Promise<ZhilianMessageAnchor | null> => {
       const envelope = parseObject(row.content)
       const inner = parseObject(envelope.content)
@@ -4810,10 +4895,14 @@ async function mainCaptureSendBaseline(
       const isCandidateWechatAccepted = customSuccess && customType === 259 &&
         from === target && originTypeIsStaff &&
         Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+      const interviewStartsAt = toMillis(details.startTime)
+      const interviewEndsAt = toMillis(details.endTime)
+      const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+        ? 'wechatVideo'
+        : 'unknown'
       const isStaffInterviewInvite = customSuccess && customType === 355 &&
         from === staffID && Boolean(clean(details.interviewId)) &&
-        Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
-        Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+        interviewStartsAt !== null && interviewEndsAt !== null &&
         Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
         Object.prototype.hasOwnProperty.call(details, 'state')
       const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
@@ -4860,7 +4949,15 @@ async function mainCaptureSendBaseline(
         kind = 'card'
         cardType = 'interviewInvite'
         text = '[面试邀请]'
-        identity = row.idServer
+        identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+          ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+          : [
+              row.idServer,
+              String(interviewStartsAt),
+              String(interviewEndsAt),
+              interviewMethod,
+            ].join('\x1f')
       } else if (isCandidateOnlineResume) {
         kind = 'card'
         cardType = 'resumeAttachment'
@@ -4883,8 +4980,16 @@ async function mainCaptureSendBaseline(
       }
       if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
       const canonicalContent = clean(text)
+      const cardProjection = cardType === 'wechatExchange' &&
+        (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+        ? 'card\x1fwechatExchange'
+        : cardType === 'interviewInvite' && isStaffInterviewInvite &&
+            interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+            interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+          ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+          : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`
       const contentHash = kind === 'card'
-        ? await digest(`card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`)
+        ? await digest(cardProjection)
         : await digest(canonicalContent)
       return { direction, contentHash }
     }
@@ -5416,6 +5521,11 @@ function mainSendMessageOnce(
       return {}
     }
   }
+  const toMillis = (value: unknown): number | null => {
+    const number = Number(value)
+    if (!Number.isFinite(number) || number <= 0) return null
+    return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
+  }
   const runtimeStaffID = (): string => {
     const runtimeSession = asRecord(w.$session)
     const runtimeStaff = asRecord(runtimeSession?.staff)
@@ -5448,10 +5558,14 @@ function mainSendMessageOnce(
     const isCandidateWechatAccepted = customSuccess && customType === 259 &&
       from === target && originTypeIsStaff &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    const interviewStartsAt = toMillis(details.startTime)
+    const interviewEndsAt = toMillis(details.endTime)
+    const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+      ? 'wechatVideo'
+      : 'unknown'
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
       from === staffID && Boolean(clean(details.interviewId)) &&
-      Number.isFinite(Number(details.startTime)) && Number(details.startTime) > 0 &&
-      Number.isFinite(Number(details.endTime)) && Number(details.endTime) > 0 &&
+      interviewStartsAt !== null && interviewEndsAt !== null &&
       Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
       Object.prototype.hasOwnProperty.call(details, 'state')
     const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
@@ -5498,7 +5612,15 @@ function mainSendMessageOnce(
       kind = 'card'
       cardType = 'interviewInvite'
       normalizedText = '[面试邀请]'
-      identity = row.idServer
+      identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+        interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+        ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+        : [
+            row.idServer,
+            String(interviewStartsAt),
+            String(interviewEndsAt),
+            interviewMethod,
+          ].join('\x1f')
     } else if (isCandidateOnlineResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
@@ -5520,8 +5642,16 @@ function mainSendMessageOnce(
       ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
     }
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
+    const cardProjection = cardType === 'wechatExchange' &&
+      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      ? 'card\x1fwechatExchange'
+      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
+          interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
+          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
+        ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+        : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || normalizedText)}`
     const contentHash = kind === 'card'
-      ? digest(`card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || normalizedText)}`)
+      ? digest(cardProjection)
       : digest(clean(normalizedText))
     return { direction, contentHash }
   }
@@ -5678,6 +5808,1138 @@ function mainSendMessageOnce(
   } catch (error) {
     restoreDraft()
     throw error
+  }
+}
+
+// 邀面准备阶段只操作可撤销编辑器控件，绝不触碰最终发送按钮。所有相邻
+// 页面交互至少间隔 1 秒并带有限随机抖动；元素等待是条件轮询，最长 10 秒。
+async function mainPrepareInterviewEditor(
+  conversationRef: string,
+  interview: InterviewDetails,
+  expectedPrincipalFingerprint: string,
+  irreversibleNotAfterMs: number,
+): Promise<MainPrepareInterviewEditorResult> {
+  type AnyRecord = Record<string, unknown>
+  type FailureReason = Extract<MainPrepareInterviewEditorResult, { status: 'failed' }>['reason']
+  const failed = (reason: FailureReason): MainPrepareInterviewEditorResult => ({ status: 'failed', reason })
+  let emergencyCleanup: (() => Promise<void>) | null = null
+  try {
+    const w = window as unknown as AnyRecord
+    const asRecord = (value: unknown): AnyRecord | null =>
+      value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+    const clean = (value: unknown): string => String(value ?? '')
+      .normalize('NFC')
+      .replace(/\u00a0/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+    const visible = (element: Element): boolean => {
+      const node = element as HTMLElement
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+    }
+    const digest = async (value: string): Promise<string> => {
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+      return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    }
+    const normalizeIdentityPart = (value: unknown): string | null => {
+      if (typeof value === 'string') {
+        const normalized = value.trim()
+        return normalized.length > 0 ? normalized : null
+      }
+      if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+      return null
+    }
+    const readInitialState = (): AnyRecord => {
+      const source = Array.from(document.scripts)
+        .map((script) => script.textContent ?? '')
+        .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+      if (!source) return {}
+      const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+      const start = candidate.indexOf('{')
+      let depth = 0
+      let quoted = false
+      let escaped = false
+      for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+        const char = candidate[index]
+        if (quoted) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === '"') quoted = false
+          continue
+        }
+        if (char === '"') quoted = true
+        else if (char === '{') depth += 1
+        else if (char === '}' && --depth === 0) {
+          try { return JSON.parse(candidate.slice(start, index + 1)) as AnyRecord } catch { return {} }
+        }
+      }
+      return {}
+    }
+    const initial = readInitialState()
+    const principalCanonical = (): string | null => {
+      const initialSession = asRecord(asRecord(initial.session)?.session)
+      const runtimeSession = asRecord(w.$session)
+      const session: AnyRecord = { ...(initialSession ?? {}), ...(runtimeSession ?? {}) }
+      const staff: AnyRecord = {
+        ...(asRecord(initialSession?.staff) ?? {}),
+        ...(asRecord(runtimeSession?.staff) ?? {}),
+      }
+      const staffID = normalizeIdentityPart(staff.staffId)
+      const organizationID = normalizeIdentityPart(asRecord(session.org)?.orgId) ??
+        normalizeIdentityPart(asRecord(asRecord(initial.personal)?.imUserInfo)?.rootCompanyId)
+      const loginPoint = normalizeIdentityPart(staff.defaultLoginPoint)
+      if (session.isLoggedIn !== true || !staffID || !organizationID || !loginPoint) return null
+      const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
+      return pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+    }
+    const routeMatches = (): boolean => {
+      try {
+        const route = new URL(location.href)
+        return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+      } catch {
+        return false
+      }
+    }
+    const targetResolved = (): boolean => {
+      const engine = asRecord(w.imEngine)
+      const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+      const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+      return matches.length === 1 && clean(matches[0].peerPartnerId) !== ''
+    }
+    const composerEmpty = (): boolean => {
+      const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
+        'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
+      )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
+      return composers.length === 1 && composers[0].value === ''
+    }
+    const wait = (delayMs: number): Promise<void> =>
+      new Promise((resolve) => setTimeout(resolve, delayMs))
+    const interactionGap = (): Promise<void> => wait(1_000 + Math.floor(Math.random() * 501))
+    const interact = async (node: HTMLElement): Promise<boolean> => {
+      await interactionGap()
+      if (!node.isConnected || !visible(node) || Date.now() > irreversibleNotAfterMs) return false
+      const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+      Function.prototype.call.call(intrinsicClick, node)
+      return true
+    }
+    const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+      const deadline = Date.now() + Math.min(10_000, Math.max(0, timeoutMs))
+      while (Date.now() <= deadline) {
+        const value = read()
+        if (value !== null) return value
+        await wait(120)
+      }
+      return null
+    }
+    const selected = (node: Element): boolean => {
+      const input = node.matches('input') ? node as HTMLInputElement : node.querySelector<HTMLInputElement>('input')
+      return input?.checked === true || node.classList.contains('is-checked') ||
+        node.classList.contains('is-active') || node.getAttribute('aria-checked') === 'true'
+    }
+
+    if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
+        interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
+        interview.method !== 'wechatVideo' || interview.startsAt % 60_000 !== 0 ||
+        (interview.endsAt - interview.startsAt) % 60_000 !== 0) {
+      return failed('input_rejected')
+    }
+    if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
+      return failed('action_window_elapsed')
+    }
+    if (!routeMatches()) return failed('route_changed')
+    const principal = principalCanonical()
+    if (!principal || await digest(principal) !== expectedPrincipalFingerprint) return failed('identity_changed')
+    if (!targetResolved()) return failed('target_changed')
+    if (!composerEmpty()) return failed('composer_nonempty')
+
+    const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+    if (details.length !== 1) return failed('surface_unavailable')
+    const detail = details[0]
+    const launchers = Array.from(
+      detail.querySelectorAll<HTMLElement>('a[zp-stat-id="im_interview_invite_click"][type="button"]'),
+    ).filter((node) => visible(node) && clean(node.textContent) === '约面试')
+    if (launchers.length !== 1 || !await interact(launchers[0])) return failed('surface_unavailable')
+
+    const modal = await waitFor(() => {
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
+      ).filter((node) => visible(node) && node.querySelector('.interview-form') !== null)
+      return candidates.length === 1 ? candidates[0] : null
+    })
+    if (!modal) return failed('editor_unavailable')
+
+    const closeEditor = async (): Promise<void> => {
+      try {
+        if (!modal.isConnected || !visible(modal)) return
+        const cancelButtons = Array.from(
+          modal.querySelectorAll<HTMLElement>('button[type="button"], a[type="button"]'),
+        ).filter((node) => visible(node) && clean(node.textContent) === '取消')
+        if (cancelButtons.length !== 1) return
+        await interactionGap()
+        if (!cancelButtons[0].isConnected || !visible(cancelButtons[0])) return
+        const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+        const invokeClick = Function.prototype.call.bind(intrinsicClick, cancelButtons[0])
+        invokeClick()
+        // 取消也是页面交互：先等待至少一秒，再以条件轮询确认编辑器确已关闭。
+        await wait(1_000)
+        await waitFor(() => !modal.isConnected || !visible(modal) ? true : null)
+      } catch {
+        // best effort：清理失败不能篡改原始失败原因。
+      }
+    }
+    emergencyCleanup = closeEditor
+    const abort = async (reason: FailureReason): Promise<MainPrepareInterviewEditorResult> => {
+      await closeEditor()
+      emergencyCleanup = null
+      return failed(reason)
+    }
+
+    const onlineItems = Array.from(
+      modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
+    ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
+    if (onlineItems.length !== 1) return await abort('editor_unavailable')
+    const online = onlineItems[0]
+    const onlineSelected = (): boolean => {
+      const exactTitleNodes = Array.from(modal.querySelectorAll<HTMLElement>('*'))
+        .filter((node) => visible(node) && clean(node.textContent) === '参加 线上面试')
+        .filter((node) => !Array.from(node.children).some(
+          (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
+        ))
+      const selectedMarkers = Array.from(online.querySelectorAll<HTMLElement>(
+        'input, [aria-checked], [class*="icon"], .is-checked, .is-active',
+      )).filter(visible).filter(selected)
+      return exactTitleNodes.length === 1 && selectedMarkers.length === 1
+    }
+    if (!onlineSelected()) {
+      if (!await interact(online)) return await abort('editor_unavailable')
+      if (!await waitFor(() => onlineSelected() ? true : null)) {
+        return await abort('editor_unavailable')
+      }
+    }
+
+    const start = new Date(interview.startsAt)
+    if (!Number.isFinite(start.getTime())) return await abort('input_rejected')
+    const year = start.getFullYear()
+    const month = start.getMonth() + 1
+    const day = start.getDate()
+    const hour = start.getHours()
+    const minute = start.getMinutes()
+    const pad2 = (value: number): string => String(value).padStart(2, '0')
+    const expectedDateText = `${year}-${pad2(month)}-${pad2(day)}`
+    const expectedTimeText = `${pad2(hour)}:${pad2(minute)}`
+    const durationMinutes = (interview.endsAt - interview.startsAt) / 60_000
+    const expectedDurationText = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
+    if (![15, 30, 45, 60].includes(durationMinutes)) return await abort('input_rejected')
+
+    const timeFormItem = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item'))
+      .find((node) => visible(node) && /面试时间/u.test(clean(node.textContent))) ?? modal
+    const dateControl = timeFormItem.querySelector<HTMLElement>('.km-date-picker') ??
+      Array.from(modal.querySelectorAll<HTMLElement>('.km-date-picker')).find(visible)
+    if (!dateControl || !await interact(dateControl)) return await abort('date_unavailable')
+    let datePopover = await waitFor(() =>
+      Array.from(document.querySelectorAll<HTMLElement>(
+        '.km-popover.km-date-picker__popper, .km-date-picker__popper',
+      )).find(visible) ?? null)
+    if (!datePopover) return await abort('date_unavailable')
+    const calendarParts = (root: ParentNode): { year: number; month: number } => ({
+      year: Number(clean(root.querySelector('.km-date-picker__header-year')?.textContent).match(/\d+/u)?.[0]),
+      month: Number(clean(root.querySelector('.km-date-picker__header-month')?.textContent).match(/\d+/u)?.[0]),
+    })
+    for (let moves = 0; moves < 24; moves += 1) {
+      const current = calendarParts(datePopover)
+      if (current.year === year && current.month === month) break
+      if (!current.year || !current.month) return await abort('date_unavailable')
+      const buttons = Array.from(datePopover.querySelectorAll<HTMLElement>(
+        '.km-date-picker__header button',
+      )).filter(visible)
+      if (buttons.length < 2) return await abort('date_unavailable')
+      const direction = year * 12 + month > current.year * 12 + current.month ? 1 : -1
+      const button = direction > 0 ? buttons[buttons.length - 1] : buttons[0]
+      if (!await interact(button)) return await abort('date_unavailable')
+      datePopover = await waitFor(() => {
+        const candidate = Array.from(document.querySelectorAll<HTMLElement>(
+          '.km-popover.km-date-picker__popper, .km-date-picker__popper',
+        )).find(visible)
+        if (!candidate) return null
+        const next = calendarParts(candidate)
+        return next.year !== current.year || next.month !== current.month ? candidate : null
+      })
+      if (!datePopover) return await abort('date_unavailable')
+    }
+    const finalCalendar = calendarParts(datePopover)
+    if (finalCalendar.year !== year || finalCalendar.month !== month) {
+      return await abort('date_unavailable')
+    }
+    const dayCells = Array.from(datePopover.querySelectorAll<HTMLElement>('.km-date-picker__cell'))
+      .filter((cell) => visible(cell) &&
+        !cell.classList.contains('km-date-picker__cell--disabled') &&
+        !cell.classList.contains('km-date-picker__cell--silent') &&
+        clean(cell.querySelector('.km-date-picker__cell-value')?.textContent ?? cell.textContent) === String(day))
+    if (dayCells.length !== 1 || !await interact(dayCells[0])) return await abort('date_unavailable')
+    const exactDate = await waitFor(() => {
+      const labels = Array.from(
+        modal.querySelectorAll<HTMLElement>('.km-date-picker__label'),
+      ).filter((node) => visible(node) && clean(node.textContent) === expectedDateText)
+      return labels.length === 1 ? labels[0] : null
+    })
+    if (!exactDate) return await abort('date_unavailable')
+
+    const timeControl = Array.from(
+      modal.querySelectorAll<HTMLElement>('.timer-cascader .km-select, .interview-form__time--item .km-select'),
+    ).filter(visible).filter((node) =>
+      node.querySelector<HTMLInputElement>('input[placeholder="请选择时间"]') !== null)
+    if (timeControl.length !== 1 || !await interact(timeControl[0])) return await abort('time_unavailable')
+    const timerPopover = await waitFor(() =>
+      Array.from(document.querySelectorAll<HTMLElement>(
+        '.km-popover.timer-cascader__popper, .timer-cascader__popper',
+      )).find(visible) ?? null)
+    if (!timerPopover) return await abort('time_unavailable')
+    const hourNode = timerPopover.querySelector<HTMLElement>(`.timer-cascader__item[data-hour="${hour}"]`)
+    if (!hourNode || !visible(hourNode) || !await interact(hourNode)) return await abort('time_unavailable')
+    const minuteNode = await waitFor(() => {
+      const candidate = timerPopover.querySelector<HTMLElement>(
+        `.timer-cascader__item[data-value="${expectedTimeText}"]`,
+      )
+      return candidate && visible(candidate) && !candidate.classList.contains('timer-cascader__item--disabled')
+        ? candidate
+        : null
+    })
+    if (!minuteNode || !await interact(minuteNode)) return await abort('time_unavailable')
+    const exactTime = await waitFor(() => {
+      const inputs = Array.from(
+        modal.querySelectorAll<HTMLInputElement>('input[placeholder="请选择时间"]'),
+      ).filter((node) => visible(node) && clean(node.value) === expectedTimeText)
+      return inputs.length === 1 ? inputs[0] : null
+    })
+    if (!exactTime) return await abort('time_unavailable')
+
+    const durationItem = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item'))
+      .find((node) => visible(node) && /面试时长/u.test(clean(node.textContent)))
+    const durationControl = durationItem?.querySelector<HTMLElement>('.km-select') ?? null
+    if (!durationControl ||
+        durationControl.querySelector<HTMLInputElement>('input[placeholder="面试时长"]') === null ||
+        !await interact(durationControl)) return await abort('duration_unavailable')
+    const durationOption = await waitFor(() => {
+      const optionMinutes = (text: string): number | null => {
+        const normalized = clean(text)
+        const hours = Number(normalized.match(/(\d+(?:\.\d+)?)\s*小时/u)?.[1] ?? 0)
+        const minutes = Number(normalized.match(/(\d+)\s*分钟/u)?.[1] ?? 0)
+        const total = hours * 60 + minutes
+        return Number.isFinite(total) && total > 0 ? total : null
+      }
+      const options = Array.from(document.querySelectorAll<HTMLElement>(
+        '.km-popover [role="option"], .km-select-dropdown__item, .km-option',
+      )).filter(visible)
+      const matches = options.filter((node) => optionMinutes(node.textContent ?? '') === durationMinutes)
+      return matches.length === 1 ? matches[0] : null
+    })
+    if (!durationOption || !await interact(durationOption)) return await abort('duration_unavailable')
+    const exactDuration = await waitFor(() => {
+      const inputs = Array.from(
+        modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
+      ).filter((node) => visible(node) && clean(node.value) === expectedDurationText)
+      return inputs.length === 1 ? inputs[0] : null
+    })
+    if (!exactDuration) return await abort('duration_unavailable')
+
+    const methodCandidates = Array.from(
+      modal.querySelectorAll<HTMLElement>('.interview-platform__btn'),
+    ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+    if (methodCandidates.length !== 1) return await abort('method_unavailable')
+    let method = methodCandidates[0]
+    if (!method.classList.contains('is-checked')) {
+      if (!await interact(method)) return await abort('method_unavailable')
+      const exactMethod = await waitFor(() => {
+        const matches = Array.from(
+          modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
+        ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+        return matches.length === 1 ? matches[0] : null
+      })
+      if (!exactMethod) return await abort('method_unavailable')
+      method = exactMethod
+    }
+
+    // 最后一次编辑器交互与随后可能发生的最终发送之间也必须留出节奏间隔。
+    await interactionGap()
+    if (Date.now() > irreversibleNotAfterMs) return await abort('action_window_elapsed')
+    if (!routeMatches()) return await abort('route_changed')
+    if (!targetResolved()) return await abort('target_changed')
+    if (!composerEmpty()) return await abort('composer_nonempty')
+    if (!onlineSelected()) return await abort('input_rejected')
+    const dateValue = clean(exactDate.textContent)
+    const timeValue = clean(exactTime.value)
+    const durationValue = clean(exactDuration.value)
+    const methodValue = clean(method.textContent)
+    if (dateValue !== expectedDateText || timeValue !== expectedTimeText ||
+        durationValue !== expectedDurationText || methodValue !== '微信视频' ||
+        !method.classList.contains('is-checked')) {
+      return await abort('input_rejected')
+    }
+    emergencyCleanup = null
+    return {
+      status: 'ready',
+      prepared: {
+        startsAt: interview.startsAt,
+        endsAt: interview.endsAt,
+        method: 'wechatVideo',
+        dateValue,
+        timeValue,
+        durationValue,
+        methodValue,
+      },
+    }
+  } catch {
+    if (emergencyCleanup) {
+      try { await emergencyCleanup() } catch { /* best effort */ }
+    }
+    return failed('unexpected')
+  }
+}
+
+// 两类卡片的最终候选人可见动作共用这一份同步 evaluator。preflight 与
+// commit 传入字面同一函数和同一组冻结参数；commit 最后一份绿色结果后
+// 不再读页面，立即调用唯一一次标准 click。
+function mainSendCardOnce(
+  conversationRef: string,
+  cardKind: MainCardAction,
+  interview: InterviewDetails | null,
+  expectedTail: ZhilianMessageAnchor[],
+  expectedPrincipalFingerprint: string,
+  irreversibleNotAfterMs: number,
+  expectedBaselineServerSourceKeys: string[],
+  expectedTargetBindingToken: string,
+  phase: MainCardPhase,
+): MainSendCardOnceResult {
+  type AnyRecord = Record<string, unknown>
+  interface SnapshotRow {
+    idServer: string
+    status: string
+    type: string | number
+    from: string
+    text: string
+    content: string
+    contentWasString: boolean
+    time: number
+    sourceIndex: number
+  }
+  type FailureReason = Extract<MainSendCardOnceResult, { status: 'failed' }>['reason']
+  const failed = (reason: FailureReason): MainSendCardOnceResult => ({ status: 'failed', reason })
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
+  const rotateRight = (value: number, count: number): number =>
+    (value >>> count) | (value << (32 - count))
+  const digest = (value: string): string => {
+    const input = new TextEncoder().encode(value)
+    const totalLength = Math.ceil((input.length + 9) / 64) * 64
+    const padded = new Uint8Array(totalLength)
+    padded.set(input)
+    padded[input.length] = 0x80
+    const bitLength = input.length * 8
+    const view = new DataView(padded.buffer)
+    view.setUint32(totalLength - 8, Math.floor(bitLength / 0x100000000), false)
+    view.setUint32(totalLength - 4, bitLength >>> 0, false)
+    const constants = new Uint32Array([
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ])
+    const state = new Uint32Array([
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ])
+    const words = new Uint32Array(64)
+    for (let offset = 0; offset < totalLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) words[index] = view.getUint32(offset + index * 4, false)
+      for (let index = 16; index < 64; index += 1) {
+        const left = words[index - 15]
+        const right = words[index - 2]
+        const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3)
+        const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10)
+        words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0
+      }
+      let a = state[0]
+      let b = state[1]
+      let c = state[2]
+      let d = state[3]
+      let e = state[4]
+      let f = state[5]
+      let g = state[6]
+      let h = state[7]
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+        const choose = (e & f) ^ (~e & g)
+        const temp1 = (h + sum1 + choose + constants[index] + words[index]) >>> 0
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+        const majority = (a & b) ^ (a & c) ^ (b & c)
+        const temp2 = (sum0 + majority) >>> 0
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) >>> 0
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) >>> 0
+      }
+      state[0] = (state[0] + a) >>> 0
+      state[1] = (state[1] + b) >>> 0
+      state[2] = (state[2] + c) >>> 0
+      state[3] = (state[3] + d) >>> 0
+      state[4] = (state[4] + e) >>> 0
+      state[5] = (state[5] + f) >>> 0
+      state[6] = (state[6] + g) >>> 0
+      state[7] = (state[7] + h) >>> 0
+    }
+    return Array.from(state, (word) => word.toString(16).padStart(8, '0')).join('')
+  }
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const parseObject = (value: unknown): AnyRecord => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+    if (typeof value !== 'string' || value.length === 0) return {}
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return asRecord(parsed) ?? {}
+    } catch {
+      return {}
+    }
+  }
+  const toMillis = (value: unknown): number | null => {
+    const number = Number(value)
+    if (!Number.isFinite(number) || number <= 0) return null
+    return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
+  }
+  const readInitialState = (): AnyRecord => {
+    const source = Array.from(document.scripts)
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return {}
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try { return JSON.parse(candidate.slice(start, index + 1)) as AnyRecord } catch { return {} }
+      }
+    }
+    return {}
+  }
+  const initial = readInitialState()
+  const normalizeIdentityPart = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const normalized = value.trim()
+      return normalized.length > 0 ? normalized : null
+    }
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return null
+  }
+  const principalCanonical = (): string | null => {
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    const runtimeSession = asRecord(w.$session)
+    const session: AnyRecord = { ...(initialSession ?? {}), ...(runtimeSession ?? {}) }
+    const staff: AnyRecord = {
+      ...(asRecord(initialSession?.staff) ?? {}),
+      ...(asRecord(runtimeSession?.staff) ?? {}),
+    }
+    const staffID = normalizeIdentityPart(staff.staffId)
+    const organizationID = normalizeIdentityPart(asRecord(session.org)?.orgId) ??
+      normalizeIdentityPart(asRecord(asRecord(initial.personal)?.imUserInfo)?.rootCompanyId)
+    const loginPoint = normalizeIdentityPart(staff.defaultLoginPoint)
+    if (session.isLoggedIn !== true || !staffID || !organizationID || !loginPoint) return null
+    const pieces = ['zhilian-principal-v2', staffID, organizationID, loginPoint]
+    return pieces.map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
+  }
+  const routeMatches = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const currentTargetBinding = (): { target: string; token: string } | null => {
+    const engine = asRecord(w.imEngine)
+    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const target = matches.length === 1 ? clean(matches[0].peerPartnerId) : ''
+    return target ? { target, token: digest(JSON.stringify([conversationRef, target])) } : null
+  }
+  const snapshotContent = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    if (value === null || value === undefined) return ''
+    const serialized = JSON.stringify(value)
+    return serialized === undefined ? String(value) : serialized
+  }
+  const liveTimeline = (): { sourceKeys: string[]; rows: SnapshotRow[] } | null => {
+    const timelineSlot = (root: AnyRecord): unknown | null => {
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
+          entry.timeline === null || entry.timeline === undefined) return null
+      return entry.timeline
+    }
+    let timeline: unknown | null = null
+    const nuxt = asRecord(w.$nuxt)
+    const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+    if (nuxtRoot) timeline = timelineSlot(nuxtRoot)
+    if (timeline === null) {
+      const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+      if (timelines.length !== 1) return null
+      let current: HTMLElement | null = timelines[0]
+      for (let depth = 0; current && depth < 64; depth += 1) {
+        const holder = current as HTMLElement & { __vue__?: unknown }
+        if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+          const owner = asRecord(holder.__vue__)
+          const root = asRecord(owner?.$root)
+          if (root) {
+            timeline = timelineSlot(root)
+            if (timeline !== null) break
+          }
+        }
+        current = current.parentElement
+      }
+    }
+    if (!Array.isArray(timeline) || timeline.length > 4096) return null
+    const rows: SnapshotRow[] = []
+    for (let sourceIndex = 0; sourceIndex < timeline.length; sourceIndex += 1) {
+      const row = asRecord(timeline[sourceIndex])
+      if (!row) return null
+      const idServer = stableMessageIdentity(row.idServer)
+      const time = Number(row.time)
+      if (!idServer || !Number.isFinite(time) || time <= 0) return null
+      const rawType = row.type
+      rows.push({
+        idServer,
+        status: clean(row.status),
+        type: typeof rawType === 'number' || typeof rawType === 'string' ? rawType : String(rawType ?? ''),
+        from: clean(row.from),
+        text: String(row.text ?? ''),
+        content: snapshotContent(row.content),
+        contentWasString: typeof row.content === 'string',
+        time,
+        sourceIndex,
+      })
+    }
+    rows.sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const ordered = rows.filter((row) => {
+      if (seen.has(row.idServer)) return false
+      seen.add(row.idServer)
+      return true
+    }).slice(-64)
+    return {
+      sourceKeys: ordered.map((row) => digest(`source-v1|${row.idServer}`)),
+      rows: ordered,
+    }
+  }
+  const runtimeStaffID = (): string => {
+    const runtimeSession = asRecord(w.$session)
+    const initialSession = asRecord(asRecord(initial.session)?.session)
+    return clean(asRecord(runtimeSession?.staff)?.staffId) || clean(asRecord(initialSession?.staff)?.staffId)
+  }
+  const anchorFor = (row: SnapshotRow, staffID: string, target: string): ZhilianMessageAnchor | null => {
+    const envelope = parseObject(row.content)
+    const inner = parseObject(envelope.content)
+    const details = Object.keys(inner).length > 0 ? inner : envelope
+    const rawType = row.type
+    const customType = Number(
+      typeof rawType === 'number' || /^\d+$/u.test(String(rawType)) ? rawType : envelope.type,
+    )
+    const from = clean(row.from)
+    const originTypeIsCandidate = details.originType === 2 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '2')
+    const originTypeIsStaff = details.originType === 1 ||
+      (typeof details.originType === 'string' && details.originType.trim() === '1')
+    const customSuccess = rawType === 'custom' && row.contentWasString &&
+      Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success'
+    const isCandidateWechatRequest = customSuccess && customType === 105 &&
+      from === target && originTypeIsCandidate
+    const isStaffWechatRequest = customSuccess && customType === 105 &&
+      from === staffID && originTypeIsStaff
+    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
+      from === target && originTypeIsStaff &&
+      Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    const startsAt = toMillis(details.startTime)
+    const endsAt = toMillis(details.endTime)
+    const method = details.interviewType === 2 && details.interviewPlatform === 4
+      ? 'wechatVideo'
+      : 'unknown'
+    const isStaffInterviewInvite = customSuccess && customType === 355 &&
+      from === staffID && Boolean(clean(details.interviewId)) &&
+      startsAt !== null && endsAt !== null &&
+      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      Object.prototype.hasOwnProperty.call(details, 'state')
+    const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
+      clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
+    const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
+      typeof envelope.type === 'string' && envelope.type.trim() === '313' && customType === 313 &&
+      Object.keys(inner).length > 0 && from === target &&
+      clean(row.status).toLowerCase() === 'success' &&
+      clean(inner.staffText) === '对方向您发送了在线简历'
+    let direction: ZhilianMessageAnchor['direction'] = from ? from === staffID ? 'out' : 'in' : 'system'
+    let kind: 'text' | 'card' | 'system' = 'system'
+    let text = ''
+    let cardType: 'interviewInvite' | 'wechatExchange' | 'resumeAttachment' | null = null
+    let identity = ''
+    if (isCandidateInterviewAcceptedText) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      text = clean(row.text)
+      identity = row.idServer
+    } else if (rawType === 'text') {
+      if (!from) return null
+      kind = 'text'
+      text = clean(row.text)
+    } else if (isCandidateWechatRequest) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = clean(details.userContent ?? details.receiverText ?? details.detail) || '[交换微信请求]'
+      identity = clean(details.requestId ?? details.id ?? details.cardId)
+    } else if (isStaffWechatRequest) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[换微信请求]'
+      identity = row.idServer
+    } else if (isCandidateWechatAccepted) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[微信交换成功]'
+      identity = row.idServer
+    } else if (isStaffInterviewInvite) {
+      kind = 'card'
+      cardType = 'interviewInvite'
+      text = '[面试邀请]'
+      identity = method === 'wechatVideo' && startsAt !== null &&
+        endsAt !== null && endsAt > startsAt
+        ? [String(startsAt), String(endsAt), method].join('\x1f')
+        : [row.idServer, String(startsAt), String(endsAt), method].join('\x1f')
+    } else if (isCandidateOnlineResume) {
+      kind = 'card'
+      cardType = 'resumeAttachment'
+      text = clean(inner.staffText)
+      identity = row.idServer
+    } else if (customType === 131) {
+      if (!from) return null
+      kind = 'text'
+      text = clean(details.greetingText ?? envelope.greetingText)
+    } else if (rawType === 'custom' && customType === 148 && Boolean(from) && direction === 'in' &&
+      clean(row.status).toLowerCase() === 'success' && clean(details.staffText)) {
+      kind = 'text'
+      text = clean(details.staffText)
+    } else {
+      direction = 'system'
+      text = clean(
+        details.staffText ?? details.userText ?? details.title ?? details.content ??
+        envelope.msgb ?? envelope.msgc ?? envelope.text ?? row.text,
+      ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
+    }
+    if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
+    const cardProjection = cardType === 'wechatExchange' &&
+      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      ? 'card\x1fwechatExchange'
+      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
+          method === 'wechatVideo' && startsAt !== null && endsAt !== null && endsAt > startsAt
+        ? `card\x1finterviewInvite\x1f${startsAt}\x1f${endsAt}\x1fwechatVideo`
+        : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`
+    const contentHash = kind === 'card'
+      ? digest(cardProjection)
+      : digest(clean(text))
+    return { direction, contentHash }
+  }
+  const baselineMatches = (target: string): 'match' | 'changed' | 'unresolved' => {
+    const current = liveTimeline()
+    if (!current) return 'unresolved'
+    if (current.sourceKeys.length !== expectedBaselineServerSourceKeys.length ||
+        current.sourceKeys.some((key, index) => key !== expectedBaselineServerSourceKeys[index])) return 'changed'
+    if (expectedTail.length === 0) return 'match'
+    if (current.rows.length < expectedTail.length) return 'changed'
+    const staffID = runtimeStaffID()
+    if (!staffID) return 'unresolved'
+    const tail = current.rows.slice(-expectedTail.length)
+    for (let index = 0; index < tail.length; index += 1) {
+      const actual = anchorFor(tail[index], staffID, target)
+      const expected = expectedTail[index]
+      if (!actual || actual.direction !== expected.direction || actual.contentHash !== expected.contentHash) {
+        return 'changed'
+      }
+    }
+    return 'match'
+  }
+  const selected = (node: Element): boolean => {
+    const input = node.matches('input') ? node as HTMLInputElement : node.querySelector<HTMLInputElement>('input')
+    return input?.checked === true || node.classList.contains('is-checked') ||
+      node.classList.contains('is-active') || node.getAttribute('aria-checked') === 'true'
+  }
+  const validInterviewSurface = (modal: HTMLElement, value: InterviewDetails): boolean => {
+    if (!Number.isSafeInteger(value.startsAt) || !Number.isSafeInteger(value.endsAt) ||
+        value.startsAt <= 0 || value.endsAt <= value.startsAt || value.method !== 'wechatVideo' ||
+        value.startsAt % 60_000 !== 0 || (value.endsAt - value.startsAt) % 60_000 !== 0) return false
+    const start = new Date(value.startsAt)
+    if (!Number.isFinite(start.getTime())) return false
+    const pad2 = (part: number): string => String(part).padStart(2, '0')
+    const expectedDate = `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`
+    const expectedTime = `${pad2(start.getHours())}:${pad2(start.getMinutes())}`
+    const durationMinutes = (value.endsAt - value.startsAt) / 60_000
+    if (![15, 30, 45, 60].includes(durationMinutes)) return false
+    const expectedDuration = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
+    const dateMatches = Array.from(
+      modal.querySelectorAll<HTMLElement>('.km-date-picker__label'),
+    ).filter((node) => visible(node) && clean(node.textContent) === expectedDate)
+    const timeMatches = Array.from(
+      modal.querySelectorAll<HTMLInputElement>('input[placeholder="请选择时间"]'),
+    ).filter((node) => visible(node) && clean(node.value) === expectedTime)
+    const durationMatches = Array.from(
+      modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
+    ).filter((node) => visible(node) && clean(node.value) === expectedDuration)
+    const methodMatches = Array.from(
+      modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
+    ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+    const onlineItems = Array.from(
+      modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
+    ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
+    if (onlineItems.length !== 1) return false
+    const titleMatches = Array.from(modal.querySelectorAll<HTMLElement>('*'))
+      .filter((node) => visible(node) && clean(node.textContent) === '参加 线上面试')
+      .filter((node) => !Array.from(node.children).some(
+        (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
+      ))
+    const selectedMarkers = Array.from(onlineItems[0].querySelectorAll<HTMLElement>(
+      'input, [aria-checked], [class*="icon"], .is-checked, .is-active',
+    )).filter(visible).filter(selected)
+    return dateMatches.length === 1 && timeMatches.length === 1 &&
+      durationMatches.length === 1 && methodMatches.length === 1 &&
+      titleMatches.length === 1 && selectedMarkers.length === 1
+  }
+
+  if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
+    return failed('action_window_elapsed')
+  }
+  if (phase !== 'preflight' && phase !== 'commit') return failed('input_rejected')
+  if ((cardKind === 'wechatInvite' && interview !== null) ||
+      (cardKind === 'interviewInvite' && interview === null)) return failed('input_rejected')
+  if (!routeMatches()) return failed('route_changed')
+  const principal = principalCanonical()
+  if (!principal || digest(principal) !== expectedPrincipalFingerprint) return failed('identity_changed')
+  const binding = currentTargetBinding()
+  if (!binding) return failed('guard_unresolved')
+  if (binding.token !== expectedTargetBindingToken) return failed('target_changed')
+  const baseline = baselineMatches(binding.target)
+  if (baseline !== 'match') return failed(baseline === 'changed' ? 'baseline_changed' : 'guard_unresolved')
+  const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+  const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
+    'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
+  )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
+  if (details.length !== 1 || composers.length !== 1) return failed('surface_unavailable')
+  if (composers[0].closest('.im-session-detail') !== details[0]) return failed('surface_unavailable')
+  if (composers[0].value !== '') return failed('composer_nonempty')
+
+  let actionTarget: HTMLElement | null = null
+  if (cardKind === 'wechatInvite') {
+    const matches = Array.from(
+      details[0].querySelectorAll<HTMLElement>('a[zp-stat-id="im_ask_for_wx_open"][type="button"]'),
+    ).filter((node) => visible(node) && clean(node.textContent) === '换微信')
+    if (matches.length !== 1) return failed('surface_unavailable')
+    actionTarget = matches[0]
+  } else {
+    const modals = Array.from(
+      document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
+    ).filter((node) => visible(node) && node.querySelector('.interview-form') !== null)
+    if (modals.length !== 1 || interview === null || !validInterviewSurface(modals[0], interview)) {
+      return failed('input_rejected')
+    }
+    const buttons = Array.from(modals[0].querySelectorAll<HTMLElement>('button[type="button"]'))
+      .filter((node) => visible(node) && clean(node.textContent) === '发送')
+    if (buttons.length !== 1) return failed('surface_unavailable')
+    actionTarget = buttons[0]
+  }
+  if (!actionTarget || !actionTarget.isConnected || Date.now() > irreversibleNotAfterMs) {
+    return failed('action_window_elapsed')
+  }
+  if (phase === 'preflight') return { status: 'ready' }
+  const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+  const invokeClick = Function.prototype.call.bind(intrinsicClick, actionTarget)
+  invokeClick()
+  return { status: 'clicked' }
+}
+
+// 卡片发送后的正证只认与发送基线同源的实时 Vuex timeline：严格连续新增
+// 一条、服务端 id 唯一、方向/类型/参数精确匹配。任何阴性都只返回未确认。
+async function mainObserveStableOutboundCard(
+  conversationRef: string,
+  cardKind: MainCardAction,
+  interview: InterviewDetails | null,
+  baselineServerSourceKeys: string[],
+  expectedTargetBindingToken: string,
+): Promise<MainObserveStableOutboundCardResult> {
+  type AnyRecord = Record<string, unknown>
+  interface SnapshotRow {
+    idServer: string
+    status: string
+    type: string | number
+    from: string
+    content: string
+    contentWasString: boolean
+    time: number
+    sourceIndex: number
+  }
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  }
+  const parseObject = (value: unknown): AnyRecord => {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+    if (typeof value !== 'string' || value.length === 0) return {}
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return asRecord(parsed) ?? {}
+    } catch {
+      return {}
+    }
+  }
+  const toMillis = (value: unknown): number | null => {
+    const number = Number(value)
+    if (!Number.isFinite(number) || number <= 0) return null
+    return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
+  }
+  const routeMatches = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const failed = (): MainObserveStableOutboundCardResult => ({
+    selected: routeMatches(),
+    matchingNewServerMessages: 0,
+  })
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const readInitialStaffID = (): string => {
+    const source = Array.from(document.scripts)
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return ''
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try {
+          const initial = asRecord(JSON.parse(candidate.slice(start, index + 1)))
+          const session = asRecord(asRecord(initial?.session)?.session)
+          return clean(asRecord(session?.staff)?.staffId)
+        } catch {
+          return ''
+        }
+      }
+    }
+    return ''
+  }
+  const resolveTarget = (): string | null => {
+    const engine = asRecord(w.imEngine)
+    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    const target = matches.length === 1 ? clean(matches[0].peerPartnerId) : ''
+    return target || null
+  }
+  const resolveTimeline = (): unknown | null => {
+    const timelineSlot = (root: AnyRecord): unknown | null => {
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
+          entry.timeline === null || entry.timeline === undefined) return null
+      return entry.timeline
+    }
+    const nuxt = asRecord(w.$nuxt)
+    const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+    if (nuxtRoot) {
+      const timeline = timelineSlot(nuxtRoot)
+      if (timeline !== null) return timeline
+    }
+    const timelines = Array.from(document.querySelectorAll<HTMLElement>('.im-timeline__wrapper')).filter(visible)
+    if (timelines.length !== 1) return null
+    let current: HTMLElement | null = timelines[0]
+    for (let depth = 0; current && depth < 64; depth += 1) {
+      const holder = current as HTMLElement & { __vue__?: unknown }
+      if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+        const owner = asRecord(holder.__vue__)
+        const root = asRecord(owner?.$root)
+        if (root) {
+          const timeline = timelineSlot(root)
+          if (timeline !== null) return timeline
+        }
+      }
+      current = current.parentElement
+    }
+    return null
+  }
+
+  try {
+    if ((cardKind === 'wechatInvite' && interview !== null) ||
+        (cardKind === 'interviewInvite' && (
+          interview === null || !Number.isSafeInteger(interview.startsAt) ||
+          !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
+          interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo'
+        ))) return failed()
+    if (!routeMatches() || !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken)) return failed()
+    const target = resolveTarget()
+    if (!target || await digest(JSON.stringify([conversationRef, target])) !== expectedTargetBindingToken) {
+      return failed()
+    }
+    const sourceKeyPattern = /^[0-9a-f]{64}$/u
+    if (baselineServerSourceKeys.length > 64 ||
+        baselineServerSourceKeys.some((key) => !sourceKeyPattern.test(key)) ||
+        new Set(baselineServerSourceKeys).size !== baselineServerSourceKeys.length) return failed()
+
+    const rawRows = resolveTimeline()
+    if (!Array.isArray(rawRows) || rawRows.length > 4096) return failed()
+    const projected: SnapshotRow[] = []
+    for (let sourceIndex = 0; sourceIndex < rawRows.length; sourceIndex += 1) {
+      const row = asRecord(rawRows[sourceIndex])
+      if (!row) return failed()
+      const idServer = stableMessageIdentity(row.idServer)
+      const time = Number(row.time)
+      if (!idServer || !Number.isFinite(time) || time <= 0) return failed()
+      const rawType = row.type
+      const content = typeof row.content === 'string'
+        ? row.content
+        : row.content === null || row.content === undefined
+          ? ''
+          : JSON.stringify(row.content) ?? String(row.content)
+      projected.push({
+        idServer,
+        status: clean(row.status),
+        type: typeof rawType === 'number' || typeof rawType === 'string' ? rawType : String(rawType ?? ''),
+        from: clean(row.from),
+        content,
+        contentWasString: typeof row.content === 'string',
+        time,
+        sourceIndex,
+      })
+    }
+    projected.sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const rows = projected.filter((row) => {
+      if (seen.has(row.idServer)) return false
+      seen.add(row.idServer)
+      return true
+    }).slice(-64)
+    const currentSourceKeys: string[] = []
+    for (const row of rows) currentSourceKeys.push(await digest(`source-v1|${row.idServer}`))
+    const continuous = baselineServerSourceKeys.length < 64
+      ? currentSourceKeys.length === baselineServerSourceKeys.length + 1 &&
+        baselineServerSourceKeys.every((key, index) => currentSourceKeys[index] === key)
+      : currentSourceKeys.length === 64 &&
+        baselineServerSourceKeys.slice(1).every((key, index) => currentSourceKeys[index] === key)
+    if (!continuous || rows.length === 0) return failed()
+    const sourceKey = currentSourceKeys[currentSourceKeys.length - 1]
+    if (baselineServerSourceKeys.includes(sourceKey)) return failed()
+
+    const staffID = clean(asRecord(asRecord(w.$session)?.staff)?.staffId) || readInitialStaffID()
+    if (!staffID) return failed()
+    const row = rows[rows.length - 1]
+    const envelope = parseObject(row.content)
+    const inner = parseObject(envelope.content)
+    const commonShape = row.type === 'custom' && row.contentWasString &&
+      Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success' &&
+      row.from === staffID
+    if (!commonShape) return failed()
+
+    let contentHash = ''
+    let confirmedInterview: InterviewDetails | undefined
+    if (cardKind === 'wechatInvite') {
+      if (Number(envelope.type) !== 105 || inner.originType !== 1) return failed()
+      contentHash = await digest('card\x1fwechatExchange')
+    } else {
+      const expected = interview as InterviewDetails
+      const startsAt = toMillis(inner.startTime)
+      const endsAt = toMillis(inner.endTime)
+      if (Number(envelope.type) !== 355 || !clean(inner.interviewId) ||
+          !Object.prototype.hasOwnProperty.call(inner, 'state') ||
+          inner.interviewType !== 2 || inner.interviewPlatform !== 4 ||
+          startsAt !== expected.startsAt || endsAt !== expected.endsAt ||
+          startsAt === null || endsAt === null || endsAt <= startsAt) return failed()
+      confirmedInterview = { startsAt, endsAt, method: 'wechatVideo' }
+      contentHash = await digest(
+        `card\x1finterviewInvite\x1f${startsAt}\x1f${endsAt}\x1fwechatVideo`,
+      )
+    }
+
+    // digest 会让出事件循环；阳性返回前再次核对 route 与同一目标绑定。
+    if (!routeMatches() || resolveTarget() !== target) return failed()
+    return {
+      selected: true,
+      matchingNewServerMessages: 1,
+      contentHash,
+      sourceKey,
+      ...(confirmedInterview ? { interview: confirmedInterview } : {}),
+    }
+  } catch {
+    return failed()
   }
 }
 
@@ -6012,6 +7274,299 @@ export async function sendZhilianMessage(
   )
 }
 
+async function mainCancelPreparedInterviewEditor(): Promise<void> {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  try {
+    const modals = Array.from(
+      document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
+    ).filter((node) => visible(node) && node.querySelector('.interview-form') !== null)
+    if (modals.length !== 1) return
+    const modal = modals[0]
+    const buttons = Array.from(
+      modal.querySelectorAll<HTMLElement>('button[type="button"], a[type="button"]'),
+    ).filter((node) => visible(node) && clean(node.textContent) === '取消')
+    if (buttons.length !== 1) return
+    await wait(1_000 + Math.floor(Math.random() * 501))
+    if (!buttons[0].isConnected || !visible(buttons[0])) return
+    const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+    const invokeClick = Function.prototype.call.bind(intrinsicClick, buttons[0])
+    invokeClick()
+    await wait(1_000)
+    const deadline = Date.now() + 10_000
+    while (Date.now() <= deadline && modal.isConnected && visible(modal)) await wait(120)
+  } catch {
+    // 清理只尽力而为；原失败仍由调用方按原语语义返回。
+  }
+}
+
+function throwCardEvaluationFailure(evaluation: MainSendCardOnceResult): never {
+  if (evaluation.status !== 'failed') {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '卡片发送 evaluator 返回未知状态', 'manualOnly')
+  }
+  if (evaluation.reason === 'composer_nonempty') {
+    throw new ZhilianPlatformError('USER_ACTIVE', '发送前输入框出现人工草稿，已取消卡片发送', 'afterRecovery')
+  }
+  if (evaluation.reason === 'target_changed' || evaluation.reason === 'baseline_changed') {
+    throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送前目标绑定或消息基线发生变化', 'manualOnly')
+  }
+  if (evaluation.reason === 'route_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '卡片发送前目标会话发生切换', 'manualOnly')
+  }
+  if (evaluation.reason === 'identity_changed') {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '卡片发送前登录身份发生变化', 'manualOnly')
+  }
+  if (evaluation.reason === 'action_window_elapsed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '卡片不可逆动作窗口已过', 'manualOnly')
+  }
+  throw new ZhilianPlatformError(
+    evaluation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
+    `卡片发送前页面无法精确确认：${evaluation.reason}`,
+    'manualOnly',
+  )
+}
+
+async function sendZhilianCard(
+  conversationRef: string,
+  cardKind: MainCardAction,
+  interview: InterviewDetails | null,
+  guards: ZhilianSendGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<{
+  conversationRef: string
+  contentHash: string
+  sourceKey: string
+  interview?: InterviewDetails
+  observedAt: number
+}> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  if (cardKind === 'interviewInvite' && (
+    interview === null || !Number.isSafeInteger(interview.startsAt) ||
+    !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
+    interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo' ||
+    interview.startsAt % 60_000 !== 0 ||
+    (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
+    ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)
+  )) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '邀面时间或方式不受当前页面能力支持', 'manualOnly')
+  }
+  if (cardKind === 'wechatInvite' && interview !== null) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '换微信邀请不得携带邀面参数', 'manualOnly')
+  }
+  const tab = await sendZhilianTab(conversationRef)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const rawBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
+    conversationRef,
+    guards.expectedTail,
+  ])
+  const baseline = validatedMainSendBaseline(rawBaseline)
+  if (!baseline) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '卡片发送基线返回结构无效', 'afterRecovery', 'pageBroken')
+  }
+  if (baseline.status === 'failed') {
+    if (baseline.stage === 'route_changed' || baseline.stage === 'guard_snapshot_uncovered') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送基线在复核期间发生变化', 'manualOnly')
+    }
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信卡片发送基线', 'afterRecovery', 'pageBroken')
+  }
+
+  let editorPrepared = false
+  let finalActionStarted = false
+  const cleanupEditor = async (): Promise<void> => {
+    if (!editorPrepared || finalActionStarted) return
+    try {
+      await runMain(tab.id as number, mainCancelPreparedInterviewEditor, [])
+    } catch {
+      // best effort：清理失败不能覆盖原始原语失败。
+    }
+    editorPrepared = false
+  }
+  try {
+    if (cardKind === 'interviewInvite') {
+      const preparation = await runMain(tab.id, mainPrepareInterviewEditor, [
+        conversationRef,
+        interview as InterviewDetails,
+        expectedPrincipalFingerprint,
+        ctx.irreversibleNotAfterMs,
+      ])
+      if (preparation.status !== 'ready') {
+        if (preparation.reason === 'composer_nonempty') {
+          throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
+        }
+        if (preparation.reason === 'identity_changed') {
+          throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
+        }
+        if (preparation.reason === 'route_changed' || preparation.reason === 'target_changed') {
+          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备期间目标会话发生变化', 'manualOnly')
+        }
+        if (preparation.reason === 'action_window_elapsed') {
+          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备动作窗口已过', 'manualOnly')
+        }
+        throw new ZhilianPlatformError(
+          preparation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
+          `邀面编辑器无法精确准备：${preparation.reason}`,
+          'manualOnly',
+        )
+      }
+      editorPrepared = true
+    } else {
+      // 与此前可能的人工页面交互留出全局约定的最小随机节奏。
+      await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
+    }
+
+    const evaluatorArgs = [
+      conversationRef,
+      cardKind,
+      interview,
+      guards.expectedTail,
+      expectedPrincipalFingerprint,
+      ctx.irreversibleNotAfterMs,
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    ] as const
+    ctx.checkpoint()
+    const preflight = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'preflight'])
+    if (preflight.status !== 'ready') {
+      await cleanupEditor()
+      throwCardEvaluationFailure(preflight)
+    }
+    ctx.checkpoint()
+    await ctx.beforeSideEffect()
+    finalActionStarted = true
+    const action = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'commit'])
+    if (action.status !== 'clicked') {
+      finalActionStarted = false
+      await cleanupEditor()
+      throwCardEvaluationFailure(action)
+    }
+
+    const expectedHash = cardKind === 'wechatInvite'
+      ? await sha256Hex('card\x1fwechatExchange')
+      : await sha256Hex(
+          `card\x1finterviewInvite\x1f${interview?.startsAt}\x1f${interview?.endsAt}\x1fwechatVideo`,
+        )
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      ctx.checkpoint()
+      try {
+        const observed = await runMain(tab.id, mainObserveStableOutboundCard, [
+          conversationRef,
+          cardKind,
+          interview,
+          baseline.serverSourceKeys,
+          baseline.targetBindingToken,
+        ])
+        if (!observed.selected) {
+          throw new ZhilianPlatformError(
+            'CTX_LOST_DURING_EXEC',
+            '点击卡片发送后目标会话发生切换，无法确认后置条件',
+            'manualOnly',
+            undefined,
+            'possible',
+          )
+        }
+        if (observed.matchingNewServerMessages === 1 &&
+            observed.contentHash === expectedHash &&
+            typeof observed.sourceKey === 'string' && SHA256_HEX.test(observed.sourceKey) &&
+            (cardKind !== 'interviewInvite' ||
+              (observed.interview?.startsAt === interview?.startsAt &&
+                observed.interview?.endsAt === interview?.endsAt &&
+                observed.interview?.method === interview?.method))) {
+          try {
+            assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+          } catch (error) {
+            throw new ZhilianPlatformError(
+              'CTX_LOST_DURING_EXEC',
+              `点击卡片发送后账号身份无法复核：${asError(error).message}`,
+              'manualOnly',
+              undefined,
+              'possible',
+            )
+          }
+          const observedAt = Date.now()
+          await ctx.progress('已从实时消息时间线确认唯一新已发卡片', 100)
+          return {
+            conversationRef,
+            contentHash: observed.contentHash,
+            sourceKey: observed.sourceKey,
+            ...(observed.interview ? { interview: observed.interview } : {}),
+            observedAt,
+          }
+        }
+      } catch (error) {
+        if (error instanceof ZhilianPlatformError && error.sideEffect === 'possible') throw error
+        // 观察失败只能收敛为未确认，绝不能触发第二次候选人可见动作。
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED',
+      '卡片只点击发送一次，但未确认严格新增一条匹配的服务端消息',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  } catch (error) {
+    await cleanupEditor()
+    throw error
+  }
+}
+
+export async function sendZhilianWechatInvite(
+  args: ZhilianSendWechatInviteArgs,
+  guards: ZhilianSendGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSendWechatInviteData> {
+  return await sendZhilianCard(
+    args.conversationRef,
+    'wechatInvite',
+    null,
+    guards,
+    ctx,
+    expectedPrincipalFingerprint,
+  )
+}
+
+export async function sendZhilianInviteCard(
+  args: ZhilianSendInviteCardArgs,
+  guards: ZhilianSendGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSendInviteCardData> {
+  const data = await sendZhilianCard(
+    args.conversationRef,
+    'interviewInvite',
+    args.interview,
+    guards,
+    ctx,
+    expectedPrincipalFingerprint,
+  )
+  if (!data.interview) {
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED',
+      '已观察到邀面卡但缺少精确邀面参数',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+  return { ...data, interview: data.interview }
+}
+
 export async function readZhilianThread(
   args: ZhilianThreadArgs,
   ctx: PrimitiveContext,
@@ -6259,8 +7814,11 @@ export const zhilianTestHooks = Object.freeze({
   mainFindConversation,
   mainClickConversationOnce,
   mainObserveStableOutbound,
+  mainObserveStableOutboundCard,
+  mainPrepareInterviewEditor,
   mainReadListPage,
   mainReadThreadPage,
+  mainSendCardOnce,
   mainSendMessageOnce,
   ensureThreadRoute,
   runMain,

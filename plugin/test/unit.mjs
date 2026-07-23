@@ -23,6 +23,7 @@ const {
   CONTENT_MESSAGE,
   Connection,
   ContentSensor,
+  capabilities,
   DEFAULTS,
   Dispatcher,
   ErrorCode,
@@ -58,9 +59,13 @@ const {
   readZhilianSourcingWindow,
   readZhilianGreetingOutcome,
   refreshPagesAfterRuntimeReload,
+  registerM3Primitives,
   sendZhilianGreeting,
+  sendZhilianInviteCard,
   sendZhilianMessage,
+  sendZhilianWechatInvite,
   normalizeZhilianMessageText,
+  lookup,
   register,
   utf8ByteLength,
   validatePrimitiveResult,
@@ -4625,6 +4630,13 @@ test('智联 105 只在当前真机发起方形状成立时三路提升为请求
         `${variant.name}: cardType`)
       assert.equal(message.cardState, variant.expected.state, `${variant.name}: cardState`)
       assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+      if (variant.expected.kind === 'card') {
+        assert.equal(
+          message.contentHash,
+          m3Hash('card\x1fwechatExchange'),
+          `${variant.name}: contentHash 不得混入卡片状态、微信号或平台身份`,
+        )
+      }
 
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
@@ -4714,6 +4726,13 @@ test('智联 259 只在当前真机交换结果形状成立时三路提升为已
       assert.equal(message.cardState, variant.card ? 'accepted' : null, `${variant.name}: cardState`)
       assert.equal(message.text, variant.card ? '[微信交换成功]' : '[系统消息:259]', `${variant.name}: text`)
       assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+      if (variant.card) {
+        assert.equal(
+          message.contentHash,
+          m3Hash('card\x1fwechatExchange'),
+          `${variant.name}: 接受态不得改变换微信卡不可变身份 hash`,
+        )
+      }
 
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
@@ -4739,7 +4758,33 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
     staffTitle: '线上面试邀请',
   }
   const variants = [
-    { name: '真机新版邀面卡', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: complete, card: true },
+    {
+      name: '真机新版邀面卡', rawType: 'custom', envelopeType: '355',
+      from: staffID, status: 'success', details: complete, card: true,
+      interview: {
+        startsAt: complete.startTime,
+        endsAt: complete.endTime,
+        method: 'wechatVideo',
+      },
+    },
+    {
+      name: '旧字符串 VIDEO/TENCENT 不猜映射', rawType: 'custom', envelopeType: '355',
+      from: staffID, status: 'success',
+      details: { ...complete, interviewType: 'VIDEO', interviewPlatform: 'TENCENT' },
+      card: true,
+    },
+    {
+      name: '未知数字方式不猜映射', rawType: 'custom', envelopeType: '355',
+      from: staffID, status: 'success',
+      details: { ...complete, interviewPlatform: 99 },
+      card: true,
+    },
+    {
+      name: '结束不晚于开始不生成 interview', rawType: 'custom', envelopeType: '355',
+      from: staffID, status: 'success',
+      details: { ...complete, endTime: complete.startTime },
+      card: true,
+    },
     { name: '候选人发送者', rawType: 'custom', envelopeType: '355', from: fixture.peerRef, status: 'success', details: complete, card: false },
     { name: '缺 interviewId', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, interviewId: '' }, card: false },
     { name: '无效开始时间', rawType: 'custom', envelopeType: '355', from: staffID, status: 'success', details: { ...complete, startTime: 0 }, card: false },
@@ -4774,6 +4819,20 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
       assert.equal(message.cardState, variant.card ? 'unknown' : null, `${variant.name}: cardState`)
       assert.equal(message.text, variant.card ? '[面试邀请]' : '[系统消息:355]', `${variant.name}: text`)
       assert.equal(message.sourceKey, m3Hash(`source-v1|${idServer}`), `${variant.name}: sourceKey`)
+      assert.deepEqual(message.interview, variant.interview, `${variant.name}: interview`)
+      if (variant.interview) {
+        assert.equal(
+          message.contentHash,
+          m3Hash([
+            'card',
+            'interviewInvite',
+            String(variant.interview.startsAt),
+            String(variant.interview.endsAt),
+            variant.interview.method,
+          ].join('\x1f')),
+          `${variant.name}: contentHash 只覆盖平台无关邀面身份投影`,
+        )
+      }
 
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
@@ -5493,6 +5552,446 @@ test('M3 post 的 64 行滑窗严格左移一格，新增行四类语义不符�
   }
 })
 
+function appendM3CardRow(fixture, {
+  idServer,
+  cardKind,
+  time = fixture.rows.length + 1,
+  status = 'success',
+  from = globalThis.window.$session.staff.staffId,
+  rawType = 'custom',
+  overrides = {},
+} = {}) {
+  const details = cardKind === 'wechatInvite'
+    ? { originType: 1, staffContent: '招聘方请求换微信', ...overrides }
+    : {
+        interviewId: `interview-${idServer}`,
+        startTime: 1_800_000_000_000,
+        endTime: 1_800_001_800_000,
+        interviewType: 2,
+        interviewPlatform: 4,
+        state: 0,
+        staffTitle: '线上面试邀请',
+        ...overrides,
+      }
+  fixture.rows.push({
+    idServer,
+    time,
+    status,
+    type: rawType,
+    from,
+    content: JSON.stringify({
+      type: cardKind === 'wechatInvite' ? '105' : '355',
+      content: JSON.stringify(details),
+    }),
+  })
+}
+
+function installM5BCardActionSurface(fixture) {
+  const state = {
+    launchers: [],
+    modals: [],
+    dateValue: '2027-01-15',
+    timeValue: '16:00',
+    durationValue: '30分钟',
+    methodSelected: true,
+    onlineSelected: true,
+  }
+  const node = ({
+    text = '',
+    value = '',
+    placeholder = '',
+    active = false,
+  } = {}) => {
+    const element = new globalThis.HTMLElement()
+    const input = { value, placeholder, checked: active }
+    element.textContent = text
+    element.children = []
+    element.form = null
+    element.type = 'button'
+    element.matches = () => false
+    element.querySelector = (selector) => selector === 'input' ? input : null
+    element.querySelectorAll = () => []
+    element.classList = {
+      contains(name) {
+        return (name === 'is-active' || name === 'is-checked') && active
+      },
+    }
+    element.getAttribute = (name) => name === 'aria-checked' && active ? 'true' : null
+    return { element, input }
+  }
+
+  const launcher = node({ text: '换微信' }).element
+  const dateLabel = node({ text: state.dateValue }).element
+  const timeInput = node({ value: state.timeValue, placeholder: '请选择时间' }).element
+  timeInput.matches = (selector) => selector === 'input'
+  const durationInput = node({ value: state.durationValue, placeholder: '面试时长' }).element
+  durationInput.matches = (selector) => selector === 'input'
+  const method = node({ text: '微信视频', active: true }).element
+  const online = node({ text: '线上面试' }).element
+  const onlineMarker = node({ active: true }).element
+  const title = node({ text: '参加 线上面试' }).element
+  const send = node({ text: '发送' }).element
+  online.querySelectorAll = (selector) =>
+    selector === 'input, [aria-checked], [class*="icon"], .is-checked, .is-active' &&
+      state.onlineSelected
+      ? [onlineMarker]
+      : []
+  const modal = node().element
+  modal.querySelector = (selector) => selector === '.interview-form' ? {} : null
+  modal.querySelectorAll = (selector) => {
+    if (selector === '.km-date-picker__label') return [dateLabel]
+    if (selector === 'input[placeholder="请选择时间"]') return [timeInput]
+    if (selector === 'input[placeholder="面试时长"]') return [durationInput]
+    if (selector === '.interview-platform__btn.is-checked') {
+      return state.methodSelected ? [method] : []
+    }
+    if (selector === '.interview-form-way-list-item') return [online]
+    if (selector === '*') return [title]
+    if (selector === 'button[type="button"]') return [send]
+    return []
+  }
+  state.launchers = [launcher]
+  state.modals = [modal]
+
+  const originalDetailQuery = fixture.detail.querySelectorAll.bind(fixture.detail)
+  fixture.detail.querySelectorAll = (selector) => {
+    if (selector === 'a[zp-stat-id="im_ask_for_wx_open"][type="button"]') return state.launchers
+    return originalDetailQuery(selector)
+  }
+  const originalDocumentQuery = globalThis.document.querySelectorAll.bind(globalThis.document)
+  globalThis.document.querySelectorAll = (selector) => {
+    if (selector === '.km-modal__wrapper.interview-modal') return state.modals
+    return originalDocumentQuery(selector)
+  }
+
+  const syncInputs = () => {
+    dateLabel.textContent = state.dateValue
+    timeInput.value = state.timeValue
+    durationInput.value = state.durationValue
+    method.querySelector('input').checked = state.methodSelected
+    method.classList = {
+      contains(name) {
+        return state.methodSelected && (name === 'is-active' || name === 'is-checked')
+      },
+    }
+    method.getAttribute = (name) =>
+      name === 'aria-checked' && state.methodSelected ? 'true' : null
+    onlineMarker.querySelector('input').checked = state.onlineSelected
+    onlineMarker.classList = {
+      contains(name) {
+        return state.onlineSelected && (name === 'is-active' || name === 'is-checked')
+      },
+    }
+    onlineMarker.getAttribute = (name) =>
+      name === 'aria-checked' && state.onlineSelected ? 'true' : null
+  }
+  syncInputs()
+  return {
+    state,
+    syncInputs,
+  }
+}
+
+test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最终只 click 一次', async () => {
+  const fixture = installM3SendFixture()
+  const surface = installM5BCardActionSurface(fixture)
+  const interview = {
+    startsAt: 1_800_000_000_000,
+    endsAt: 1_800_001_800_000,
+    method: 'wechatVideo',
+  }
+  try {
+    const baseline = await fixture.capture()
+    assert.equal(baseline.status, 'ready')
+    const invoke = (cardKind, interviewValue, phase = 'preflight', overrides = {}) =>
+      zhilianTestHooks.mainSendCardOnce(
+        overrides.conversationRef ?? fixture.conversationRef,
+        cardKind,
+        interviewValue,
+        overrides.expectedTail ?? fixture.expectedTail,
+        overrides.fingerprint ?? m3Hash(fixture.principal),
+        overrides.deadline ?? Date.now() + 10_000,
+        overrides.baselineKeys ?? baseline.serverSourceKeys,
+        overrides.targetToken ?? baseline.targetBindingToken,
+        phase,
+      )
+
+    assert.deepEqual(invoke('wechatInvite', null, 'preflight'), { status: 'ready' })
+    assert.equal(fixture.state.intrinsicClicks, 0)
+    assert.deepEqual(invoke('wechatInvite', null, 'commit'), { status: 'clicked' })
+    assert.equal(fixture.state.intrinsicClicks, 1)
+
+    assert.deepEqual(invoke('interviewInvite', interview, 'preflight'), { status: 'ready' })
+    assert.equal(fixture.state.intrinsicClicks, 1)
+    assert.deepEqual(invoke('interviewInvite', interview, 'commit'), { status: 'clicked' })
+    assert.equal(fixture.state.intrinsicClicks, 2, '两条独立命令各只允许一次标准 click')
+
+    const clicksBeforeGuards = fixture.state.intrinsicClicks
+    fixture.composer.value = '人工草稿'
+    assert.deepEqual(invoke('wechatInvite', null), {
+      status: 'failed',
+      reason: 'composer_nonempty',
+    })
+    fixture.composer.value = ''
+
+    const originalHref = globalThis.location.href
+    globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other'
+    assert.deepEqual(invoke('wechatInvite', null), { status: 'failed', reason: 'route_changed' })
+    globalThis.location.href = originalHref
+
+    assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
+      fingerprint: '0'.repeat(64),
+    }), { status: 'failed', reason: 'identity_changed' })
+    assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
+      baselineKeys: ['1'.repeat(64)],
+    }), { status: 'failed', reason: 'baseline_changed' })
+    assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
+      targetToken: '2'.repeat(64),
+    }), { status: 'failed', reason: 'target_changed' })
+
+    surface.state.launchers.push(new globalThis.HTMLElement())
+    surface.state.launchers[1].textContent = '换微信'
+    assert.deepEqual(invoke('wechatInvite', null), {
+      status: 'failed',
+      reason: 'surface_unavailable',
+    })
+    surface.state.launchers.pop()
+
+    for (const [name, mutate] of [
+      ['日期不精确', () => { surface.state.dateValue = '2027-01-16' }],
+      ['时间不精确', () => { surface.state.timeValue = '16:01' }],
+      ['时长不精确', () => { surface.state.durationValue = '60分钟' }],
+      ['方式未选中', () => { surface.state.methodSelected = false }],
+      ['线上面试未选中', () => { surface.state.onlineSelected = false }],
+    ]) {
+      surface.state.dateValue = '2027-01-15'
+      surface.state.timeValue = '16:00'
+      surface.state.durationValue = '30分钟'
+      surface.state.methodSelected = true
+      surface.state.onlineSelected = true
+      mutate()
+      surface.syncInputs()
+      assert.deepEqual(
+        invoke('interviewInvite', interview),
+        { status: 'failed', reason: 'input_rejected' },
+        `${name}必须在最终动作前阻断`,
+      )
+    }
+    assert.equal(
+      fixture.state.intrinsicClicks,
+      clicksBeforeGuards,
+      '所有 guard/表单阴性都不得产生额外 click',
+    )
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M5-B 卡片 observer 只接受 baseline 后严格 +1，并返回规范 hash 与 sourceKey', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baselineRows = structuredClone(fixture.rows)
+    const baseline = await fixture.capture()
+    assert.equal(baseline.status, 'ready')
+    const observeWechat = () => zhilianTestHooks.mainObserveStableOutboundCard(
+      fixture.conversationRef,
+      'wechatInvite',
+      null,
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    )
+    const interview = {
+      startsAt: 1_800_000_000_000,
+      endsAt: 1_800_001_800_000,
+      method: 'wechatVideo',
+    }
+    const observeInterview = () => zhilianTestHooks.mainObserveStableOutboundCard(
+      fixture.conversationRef,
+      'interviewInvite',
+      interview,
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    )
+    const reset = () => fixture.rows.splice(
+      0,
+      fixture.rows.length,
+      ...structuredClone(baselineRows),
+    )
+
+    assert.deepEqual(await observeWechat(), {
+      selected: true,
+      matchingNewServerMessages: 0,
+    })
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-wechat-1',
+      cardKind: 'wechatInvite',
+    })
+    const wechat = await observeWechat()
+    assert.equal(wechat.selected, true)
+    assert.equal(wechat.matchingNewServerMessages, 1)
+    assert.equal(
+      wechat.sourceKey,
+      m3Hash('source-v1|server-m5b-wechat-1'),
+      '换微信卡必须返回稳定服务端消息身份的 sourceKey',
+    )
+    assert.equal(
+      wechat.contentHash,
+      m3Hash('card\x1fwechatExchange'),
+      '换微信卡 observer 必须返回 readThread 同口径 contentHash',
+    )
+    assert.equal(wechat.interview, undefined)
+
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-wechat-2',
+      cardKind: 'wechatInvite',
+    })
+    const ambiguousWechat = await observeWechat()
+    assert.equal(ambiguousWechat.selected, true)
+    assert.equal(ambiguousWechat.matchingNewServerMessages, 0, '严格 +2 不得形成换微信正证')
+    assert.equal(ambiguousWechat.sourceKey, undefined)
+    assert.equal(ambiguousWechat.contentHash, undefined)
+
+    reset()
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-interview-1',
+      cardKind: 'interviewInvite',
+    })
+    const invite = await observeInterview()
+    assert.equal(invite.selected, true)
+    assert.equal(invite.matchingNewServerMessages, 1)
+    assert.deepEqual(invite.interview, interview)
+    assert.equal(
+      invite.sourceKey,
+      m3Hash('source-v1|server-m5b-interview-1'),
+      '邀面卡必须返回稳定服务端消息身份的 sourceKey',
+    )
+    assert.equal(
+      invite.contentHash,
+      m3Hash([
+        'card',
+        'interviewInvite',
+        String(interview.startsAt),
+        String(interview.endsAt),
+        interview.method,
+      ].join('\x1f')),
+      '邀面卡 contentHash 不得混入平台消息身份或私有卡片 ID',
+    )
+
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-interview-2',
+      cardKind: 'interviewInvite',
+    })
+    assert.equal(
+      (await observeInterview()).matchingNewServerMessages,
+      0,
+      '严格 +2 不得形成邀面正证',
+    )
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M5-B 卡片 observer 对错形态、缺服务端 id、错误时间与目标变化保持阴性', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baselineRows = structuredClone(fixture.rows)
+    const baseline = await fixture.capture()
+    assert.equal(baseline.status, 'ready')
+    const interview = {
+      startsAt: 1_800_000_000_000,
+      endsAt: 1_800_001_800_000,
+      method: 'wechatVideo',
+    }
+    const observe = (cardKind, expectedInterview = null) =>
+      zhilianTestHooks.mainObserveStableOutboundCard(
+        fixture.conversationRef,
+        cardKind,
+        expectedInterview,
+        baseline.serverSourceKeys,
+        baseline.targetBindingToken,
+      )
+    const reset = () => fixture.rows.splice(
+      0,
+      fixture.rows.length,
+      ...structuredClone(baselineRows),
+    )
+
+    for (const [name, row] of [
+      ['105 非 success', {
+        idServer: 'server-m5b-bad-wechat-status',
+        cardKind: 'wechatInvite',
+        status: 'failed',
+      }],
+      ['105 不是招聘方发起', {
+        idServer: 'server-m5b-bad-wechat-origin',
+        cardKind: 'wechatInvite',
+        overrides: { originType: 2 },
+      }],
+      ['105 非 custom 顶层', {
+        idServer: 'server-m5b-bad-wechat-type',
+        cardKind: 'wechatInvite',
+        rawType: 105,
+      }],
+    ]) {
+      reset()
+      appendM3CardRow(fixture, row)
+      const result = await observe('wechatInvite')
+      assert.equal(result.selected, true, `${name}: 仍在目标会话`)
+      assert.equal(result.matchingNewServerMessages, 0, `${name}: 不得形成正证`)
+    }
+
+    reset()
+    appendM3CardRow(fixture, {
+      idServer: '',
+      cardKind: 'wechatInvite',
+    })
+    assert.equal(
+      (await observe('wechatInvite')).matchingNewServerMessages,
+      0,
+      '缺稳定服务端 id 不得形成正证',
+    )
+
+    reset()
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-wrong-time',
+      cardKind: 'interviewInvite',
+      overrides: { endTime: interview.endsAt + 60_000 },
+    })
+    assert.equal(
+      (await observe('interviewInvite', interview)).matchingNewServerMessages,
+      0,
+      '邀面时间必须与命令精确一致',
+    )
+
+    reset()
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-wrong-method',
+      cardKind: 'interviewInvite',
+      overrides: { interviewPlatform: 99 },
+    })
+    assert.equal(
+      (await observe('interviewInvite', interview)).matchingNewServerMessages,
+      0,
+      '无法映射规范 method 的卡片不得形成邀面正证',
+    )
+
+    fixture.session.peerPartnerId = 'candidate-rebound'
+    assert.equal(
+      (await observe('interviewInvite', interview)).matchingNewServerMessages,
+      0,
+      '目标换绑不得认领卡片后置条件',
+    )
+    fixture.session.peerPartnerId = fixture.peerRef
+    globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other'
+    assert.deepEqual(await observe('interviewInvite', interview), {
+      selected: false,
+      matchingNewServerMessages: 0,
+    })
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('debug.inspectSendSurface 只读单次公开 surface+timeline 且不发射私有阶段', async () => {
   const fixture = installM3SendFixture()
   const calls = []
@@ -5772,6 +6271,274 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
     assert.equal(mainSendCalls, 4, 'malformed ready baseline 不得进入 MAIN evaluator')
     assert.equal(mainReadThreadCalls, 0, 'send preflight 不得再复用可回退 DOM/SSR 的 mainReadThreadPage')
   } finally {
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴性观察绝不补动作', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const fingerprint = '8'.repeat(64)
+  const conversationRef = 'conversation-card-orchestration'
+  const expectedTail = [{ direction: 'in', contentHash: '7'.repeat(64) }]
+  const interview = {
+    startsAt: 1_800_000_000_000,
+    endsAt: 1_800_001_800_000,
+    method: 'wechatVideo',
+  }
+  const baseline = {
+    status: 'ready',
+    stage: 'ready',
+    serverSourceKeys: ['6'.repeat(64)],
+    targetBindingToken: '5'.repeat(64),
+  }
+  const targetTabId = 191
+  let observePositive = true
+  let evaluatorFunction = null
+  let preflightCalls = 0
+  let commitCalls = 0
+  let prepareCalls = 0
+  let baselineCalls = 0
+  let observerCalls = 0
+  const evaluatorArgs = []
+
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback)
+    return 1
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: targetTabId,
+          url: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+          status: 'complete',
+          active: true,
+          lastAccessed: Date.now(),
+        }]
+      },
+      async get(id) {
+        assert.equal(id, targetTabId)
+        return {
+          id: targetTabId,
+          url: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+          status: 'complete',
+          active: true,
+        }
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, targetTabId)
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im',
+            loginState: 'in',
+            principalFingerprint: fingerprint,
+            imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainCaptureSendBaseline') {
+          baselineCalls += 1
+          assert.deepEqual(args, [conversationRef, expectedTail])
+          return [{ result: structuredClone(baseline) }]
+        }
+        if (func.name === 'mainPrepareInterviewEditor') {
+          prepareCalls += 1
+          assert.equal(args[0], conversationRef)
+          assert.deepEqual(args[1], interview)
+          assert.equal(args[2], fingerprint)
+          return [{ result: {
+            status: 'ready',
+            prepared: {
+              ...interview,
+              dateValue: '2027-01-15',
+              timeValue: '16:00',
+              durationValue: '30分钟',
+              methodValue: '微信视频',
+            },
+          } }]
+        }
+        if (func.name === 'mainSendCardOnce') {
+          if (evaluatorFunction === null) evaluatorFunction = func
+          else assert.strictEqual(
+            func,
+            evaluatorFunction,
+            '两类卡片的 preflight/commit 必须注入字面同一份 evaluator',
+          )
+          evaluatorArgs.push(structuredClone(args))
+          const phase = args.at(-1)
+          assert.deepEqual(args.slice(6), [
+            baseline.serverSourceKeys,
+            baseline.targetBindingToken,
+            phase,
+          ])
+          if (phase === 'preflight') {
+            preflightCalls += 1
+            return [{ result: { status: 'ready' } }]
+          }
+          assert.equal(phase, 'commit')
+          commitCalls += 1
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainObserveStableOutboundCard') {
+          observerCalls += 1
+          const [observedConversation, cardKind, expectedInterview, baselineKeys, targetToken] = args
+          assert.equal(observedConversation, conversationRef)
+          assert.ok(['wechatInvite', 'interviewInvite'].includes(cardKind))
+          assert.deepEqual(
+            expectedInterview,
+            cardKind === 'interviewInvite' ? interview : null,
+          )
+          assert.deepEqual(baselineKeys, baseline.serverSourceKeys)
+          assert.equal(targetToken, baseline.targetBindingToken)
+          if (!observePositive) {
+            return [{ result: { selected: true, matchingNewServerMessages: 0 } }]
+          }
+          return [{ result: {
+            selected: true,
+            matchingNewServerMessages: 1,
+            contentHash: cardKind === 'interviewInvite'
+              ? m3Hash([
+                  'card',
+                  'interviewInvite',
+                  String(interview.startsAt),
+                  String(interview.endsAt),
+                  interview.method,
+                ].join('\x1f'))
+              : m3Hash('card\x1fwechatExchange'),
+            sourceKey: m3Hash(`source-v1|server-m5b-orchestration-${cardKind}`),
+            ...(cardKind === 'interviewInvite' ? { interview } : {}),
+          } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+
+  const context = (suffix) => {
+    const state = { barriers: 0 }
+    return {
+      state,
+      value: {
+        cmdMsgId: `card-orchestration-${suffix}`,
+        deadlineMs: Date.now() + 60_000,
+        irreversibleNotAfterMs: Date.now() + 60_000,
+        commandContext: undefined,
+        guards: undefined,
+        signal: new AbortController().signal,
+        async progress() {},
+        checkpoint() {},
+        async beforeSideEffect() { state.barriers += 1 },
+      },
+    }
+  }
+  try {
+    const wechatContext = context('wechat-positive')
+    const wechatBaselineStart = baselineCalls
+    const wechat = await sendZhilianWechatInvite(
+      { conversationRef },
+      { expectedTail },
+      wechatContext.value,
+      fingerprint,
+    )
+    assert.equal(wechat.conversationRef, conversationRef)
+    assert.match(wechat.contentHash, /^[0-9a-f]{64}$/u)
+    assert.match(wechat.sourceKey, /^[0-9a-f]{64}$/u)
+    assert.equal(wechatContext.state.barriers, 1)
+    assert.equal(baselineCalls - wechatBaselineStart, 1)
+    assert.equal(prepareCalls, 0, '换微信邀请不得打开邀面编辑器')
+
+    const inviteContext = context('invite-positive')
+    const inviteBaselineStart = baselineCalls
+    const invite = await sendZhilianInviteCard(
+      { conversationRef, interview },
+      { expectedTail },
+      inviteContext.value,
+      fingerprint,
+    )
+    assert.equal(invite.conversationRef, conversationRef)
+    assert.deepEqual(invite.interview, interview)
+    assert.match(invite.contentHash, /^[0-9a-f]{64}$/u)
+    assert.match(invite.sourceKey, /^[0-9a-f]{64}$/u)
+    assert.equal(inviteContext.state.barriers, 1)
+    assert.equal(baselineCalls - inviteBaselineStart, 1)
+    assert.equal(prepareCalls, 1, '邀面编辑器只允许准备一次')
+    assert.equal(preflightCalls, 2)
+    assert.equal(commitCalls, 2, '两条成功命令各只有一次最终动作')
+    assert.equal(evaluatorArgs[0][1], 'wechatInvite')
+    assert.equal(evaluatorArgs[1][1], 'wechatInvite')
+    assert.equal(evaluatorArgs[2][1], 'interviewInvite')
+    assert.equal(evaluatorArgs[3][1], 'interviewInvite')
+
+    registerM3Primitives()
+    const m3Capabilities = capabilities()
+    assert.ok(m3Capabilities.includes(`${Primitive.ChatSendWechatInvite}@1`))
+    assert.ok(m3Capabilities.includes(`${Primitive.ChatSendInviteCard}@1`))
+    assert.equal(
+      m3Capabilities.includes(`${Primitive.ChatAcceptWechat}@0`),
+      false,
+      '点击接受尚未过事实门，不得注册或上报 capability',
+    )
+    assert.equal(lookup(Primitive.ChatAcceptWechat), undefined)
+
+    for (const [name, args, evidenceType] of [
+      [
+        Primitive.ChatSendWechatInvite,
+        { conversationRef },
+        'outboundWechatInviteObserved',
+      ],
+      [
+        Primitive.ChatSendInviteCard,
+        { conversationRef, interview },
+        'outboundInterviewInviteObserved',
+      ],
+    ]) {
+      const primitive = lookup(name)
+      assert.ok(primitive, `${name} 必须注册生产 handler`)
+      const handlerContext = context(`${name}-handler`)
+      handlerContext.value.commandContext = {
+        platform: 'zhilian',
+        accountRef: 'account-card-orchestration',
+        expectedPrincipalFingerprint: fingerprint,
+      }
+      handlerContext.value.guards = { expectedTail }
+      const outcome = await primitive.handler(args, handlerContext.value)
+      assert.equal(outcome.status, 'ok')
+      assert.deepEqual(outcome.evidence, [{ type: evidenceType }])
+      assert.deepEqual(validatePrimitiveResult(name, 1, {
+        status: 'ok',
+        data: outcome.data,
+        evidence: outcome.evidence,
+        ref: `validate-${name}`,
+        execMs: 0,
+        replayed: false,
+      }), [])
+      assert.equal(handlerContext.state.barriers, 1)
+    }
+
+    observePositive = false
+    const negativeContext = context('wechat-negative')
+    const commitsBeforeNegative = commitCalls
+    const observersBeforeNegative = observerCalls
+    await assert.rejects(
+      sendZhilianWechatInvite(
+        { conversationRef },
+        { expectedTail },
+        negativeContext.value,
+        fingerprint,
+      ),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.PostconditionUnconfirmed &&
+        error.sideEffect === 'possible',
+    )
+    assert.equal(negativeContext.state.barriers, 1)
+    assert.equal(commitCalls - commitsBeforeNegative, 1,
+      '后置条件阴性也只允许一次 commit，observer 轮询不得补动作')
+    assert.ok(observerCalls > observersBeforeNegative, '阴性路径必须实际执行验证读')
+  } finally {
+    globalThis.chrome = originalChrome
     globalThis.setTimeout = originalSetTimeout
   }
 })

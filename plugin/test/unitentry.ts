@@ -14,7 +14,8 @@ export { readZhilianUnreadTotal, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../src/ba
 export { SensorBridge } from '../src/base/sensorBridge'
 export { NavigationTracker, navigationTracker } from '../src/base/navigation'
 export { CONTENT_MESSAGE, MANUAL_EMIT_MIN_MS } from '../src/base/contentMessages'
-export { register } from '../src/program/registry'
+export { capabilities, lookup, register } from '../src/program/registry'
+export { registerM3Primitives } from '../src/program/primitives/m3'
 export {
   readZhilianList,
   readZhilianThread,
@@ -26,7 +27,9 @@ export {
   readZhilianGreetingOutcome,
   inspectZhilianSendSurfaceDiagnostic,
   sendZhilianGreeting,
+  sendZhilianInviteCard,
   sendZhilianMessage,
+  sendZhilianWechatInvite,
   normalizeZhilianMessageText,
   zhilianTestHooks,
   ZhilianPlatformError,
