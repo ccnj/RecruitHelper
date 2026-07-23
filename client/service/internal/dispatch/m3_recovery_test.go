@@ -70,6 +70,73 @@ func TestEffectRecoveryUnknownSameWitnessResendsOriginalMsgIDOnce(t *testing.T) 
 	}
 }
 
+func TestEffectRecoveryRechecksCurrentCapabilityBeforeSafeRedispatch(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-recover-capability", "conv-recover-capability")
+	receipt, err := d.SendMessage(sendRequest("intent-recover-capability", key, "你好"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	d.SetEffectVerifier(blockingVerifier{release: release})
+	defer close(release)
+
+	reconnectEffect(t, d, m, "session-capability", "boot-capability", "witness-store-1")
+	if queryCount(m) != 1 {
+		t.Fatalf("重连必须先 query: %d", queryCount(m))
+	}
+	m.negotiate("hand-send",
+		[]string{protocol.PrimChatReadThread + "@1"},
+		append(append([]string(nil), allM2Features...), string(protocol.FeatureWitness1)),
+	)
+	d.OnReport("hand-send", "report-capability", "session-capability", "boot-capability", protocol.ReportBody{
+		Ref: receipt.MsgID, State: protocol.ReportStateUnknown, WitnessStoreId: "witness-store-1",
+	})
+
+	cmd, _ := st.CmdByMsgID(receipt.MsgID)
+	intent, _ := st.EffectIntentByID(receipt.IntentID)
+	if cmd.Status != store.CmdVerifying || intent.Status != store.EffectIntentVerifying ||
+		cmdCountFor(m, receipt.MsgID) != 1 {
+		t.Fatalf("当前手缺原 capability 必须零重投并改走验证: cmd=%+v intent=%+v count=%d",
+			cmd, intent, cmdCountFor(m, receipt.MsgID))
+	}
+	if !hasAudit(t, st, "effect_safe_redispatch_capability_blocked", receipt.MsgID) {
+		t.Fatal("capability 阻断必须留下审计")
+	}
+}
+
+func TestEffectRecoveryRechecksCapabilityAgainAtSocketWriteBoundary(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-recover-cap-race", "conv-recover-cap-race")
+	receipt, err := d.SendMessage(sendRequest("intent-recover-cap-race", key, "你好"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	d.SetEffectVerifier(blockingVerifier{release: release})
+	defer close(release)
+	if err := st.MutateCmd(receipt.MsgID, func(record *store.CmdRecord) error {
+		record.Status = store.CmdQueued
+		record.SentAt = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.negotiate("hand-send",
+		[]string{protocol.PrimChatReadThread + "@1"},
+		append(append([]string(nil), allM2Features...), string(protocol.FeatureWitness1)),
+	)
+	cmd, _ := st.CmdByMsgID(receipt.MsgID)
+	if d.resendCmdAt(*cmd, "s-test", time.Now()) {
+		t.Fatal("写前 capability 降档不得发送原 SX")
+	}
+	after, _ := st.CmdByMsgID(receipt.MsgID)
+	if after.Status != store.CmdVerifying || cmdCountFor(m, receipt.MsgID) != 1 {
+		t.Fatalf("写前 capability 降档必须改走验证且不增加物理发送: cmd=%+v count=%d",
+			after, cmdCountFor(m, receipt.MsgID))
+	}
+}
+
 func TestEffectRecoveryQueuedResendRemainsBlockedOnContractMismatch(t *testing.T) {
 	d, st, m := newDisp(t)
 	key := seedSendTarget(t, st, m, "acct-recover-contract", "conv-recover-contract")

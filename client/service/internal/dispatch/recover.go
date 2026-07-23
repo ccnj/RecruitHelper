@@ -263,6 +263,26 @@ func (d *Dispatcher) releaseSafeRecoveries(handID string) {
 		d.st.Audit("effect_recovery_release_failed", handID, "", err.Error())
 		return
 	}
+	// ReleaseSafeRecoveriesForHand 已把本手所有获准项原子放回 queued。
+	// 在发送任意一条之前，先按当前 active 手复核整组 capability；只要
+	// 一条缺失，就把整组改走验证，避免先重投一部分再发现同代手已降档。
+	for i := range commands {
+		meta, ok := protocol.Primitives[commands[i].Name]
+		if !ok || d.requireNegotiation(handID, commands[i].Name, meta) != nil {
+			reason := "安全恢复时当前手缺少原命令 capability，禁止重投并改走验证"
+			for j := range commands {
+				if moveErr := d.st.MoveEffectToVerification(commands[j].MsgID, reason, time.Now()); moveErr != nil {
+					d.st.Audit("effect_safe_redispatch_capability_transition_failed",
+						handID, commands[j].MsgID, moveErr.Error())
+					continue
+				}
+				d.st.Audit("effect_safe_redispatch_capability_blocked",
+					handID, commands[j].MsgID, reason)
+				d.kickVerification(commands[j].MsgID)
+			}
+			return
+		}
+	}
 	for i := range commands {
 		if d.resendCmdAt(commands[i], session, time.Now()) {
 			d.st.Audit("effect_safe_redispatch", handID, commands[i].MsgID,
@@ -285,6 +305,19 @@ func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.T
 	if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
 		return false
 	}
+	// 真实 SX 的首次派发已经过 capability 闸；重连后的同 msgId 重投
+	// 仍须复核当前 active 手，覆盖 release 预检与 socket 写之间的接管竞态。
+	if cmd.IntentID != "" {
+		meta, ok := protocol.Primitives[cmd.Name]
+		if !ok {
+			d.moveRecoveryCapabilityMismatchToVerification(cmd, "原命令 metadata 已不存在")
+			return false
+		}
+		if err := d.requireNegotiation(cmd.HandID, cmd.Name, meta); err != nil {
+			d.moveRecoveryCapabilityMismatchToVerification(cmd, err.Error())
+			return false
+		}
+	}
 	body, err := d.commandBody(cmd)
 	if err != nil {
 		d.st.Audit("resend_invalid", cmd.HandID, cmd.MsgID, err.Error())
@@ -298,6 +331,16 @@ func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.T
 	d.markSent(cmd.MsgID, cmd.Session, session)
 	d.st.Audit("resend", cmd.HandID, cmd.MsgID, "同 msgId 重发")
 	return true
+}
+
+func (d *Dispatcher) moveRecoveryCapabilityMismatchToVerification(cmd store.CmdRecord, detail string) {
+	reason := "安全恢复写前 capability 复核失败，禁止重投并改走验证"
+	if err := d.st.MoveEffectToVerification(cmd.MsgID, reason, time.Now()); err != nil {
+		d.st.Audit("effect_safe_redispatch_capability_transition_failed", cmd.HandID, cmd.MsgID, err.Error())
+		return
+	}
+	d.st.Audit("effect_safe_redispatch_capability_blocked", cmd.HandID, cmd.MsgID, reason+": "+detail)
+	d.kickVerification(cmd.MsgID)
 }
 
 // Recover 在任何 WS 监听前运行。真实 SX 进 pendingReconcile/verifying，
