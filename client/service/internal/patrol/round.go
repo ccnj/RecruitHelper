@@ -158,6 +158,22 @@ func (a *roundActor) execute(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	lateObservations := make([]store.LateGreetingConversationObservation, 0, len(entries))
+	for _, entry := range entries {
+		if entry.PlatformUserRef == "" {
+			continue
+		}
+		lateObservations = append(lateObservations, store.LateGreetingConversationObservation{
+			ConversationRef: entry.ConversationRef,
+			PlatformUserRef: entry.PlatformUserRef,
+		})
+	}
+	if _, err := a.manager.store.LateBindGreetedConversations(store.LateBindGreetedConversationsRequest{
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
+		ObservedAt: a.manager.now(), Conversations: lateObservations,
+	}); err != nil {
+		return err
+	}
 	listComplete := true
 	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
 		round.ListComplete = &listComplete
