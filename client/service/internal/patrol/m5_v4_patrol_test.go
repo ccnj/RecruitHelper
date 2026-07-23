@@ -259,6 +259,27 @@ func seedCommunicationV4PatrolTargetWithBoundary(
 	}
 }
 
+func makeCommunicationV4AIMaterialUnavailable(
+	t *testing.T,
+	h *harness,
+	profileID string,
+) {
+	t.Helper()
+	profile, err := h.db.CandidateProfileByID(profileID)
+	if err != nil || profile == nil || profile.ResumeCaptureLogicalDispatchID == nil {
+		t.Fatalf("读取简历材料绑定失败: profile=%+v err=%v", profile, err)
+	}
+	if err := h.db.FailResumeCapture(store.FailResumeCaptureRequest{
+		ProfileID: profileID, LogicalDispatchID: *profile.ResumeCaptureLogicalDispatchID,
+		Reason: "fixtureAIMaterialUnavailable", At: h.clock.Now(),
+	}); err != nil {
+		t.Fatalf("制造 AI 材料准备缺口失败: %v", err)
+	}
+	if material, ready, err := h.db.CommunicationAIMaterialForProfile(profileID); err != nil || ready {
+		t.Fatalf("AI 材料准备缺口不成立: material=%+v ready=%v err=%v", material, ready, err)
+	}
+}
+
 func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 	t *testing.T,
 ) {
@@ -392,6 +413,7 @@ func TestCommunicationV4PatrolArchivesSevenDayFallbackBeforePendingDialogue(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	makeCommunicationV4AIMaterialUnavailable(t, h, fixture.profileID)
 	h.clock.Add(8 * 24 * time.Hour)
 	if err := h.manager.EnableToday(h.key); err != nil {
 		t.Fatal(err)
@@ -692,6 +714,7 @@ func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableC
 		t.Fatalf("36 小时归档前置状态不成立: err=%v aggregate=%+v aggregateErr=%v sends=%d",
 			err, prepared, aggregateErr, hand.commandCount())
 	}
+	makeCommunicationV4AIMaterialUnavailable(t, h, fixture.profileID)
 
 	archiveAt := prepared.State.LastOutboundAt.Add(44 * time.Hour)
 	h.clock.Add(archiveAt.Sub(h.clock.Now()))
