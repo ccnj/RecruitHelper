@@ -1819,9 +1819,9 @@ async function mainApplySourcingFilters(
     }).join('|')
     return signature ? { status: 'ready', signature } : failed('list_unavailable')
   }
-  const stableList = async (): Promise<ListRead> => {
+  const stableList = async (previousSignature: string): Promise<ListRead> => {
     const deadline = Date.now() + 10_000
-    let previous: ListRead | null = null
+    let previousChanged: ListRead | null = null
     while (true) {
       const current = listSnapshot()
       if (current.status === 'failed') {
@@ -1830,12 +1830,15 @@ async function mainApplySourcingFilters(
             current.reason === 'position_title_mismatch') {
           return current
         }
-        previous = null
-      } else if (previous?.status === 'ready' &&
-          previous.signature === current.signature) {
+        previousChanged = null
+      } else if (current.signature === previousSignature) {
+        // 确定后的旧列表即便连续稳定，也不能冒充本次筛选产生的新推荐流。
+        previousChanged = null
+      } else if (previousChanged?.status === 'ready' &&
+          previousChanged.signature === current.signature) {
         return current
       } else {
-        previous = current
+        previousChanged = current
       }
       const remainingMs = deadline - Date.now()
       if (remainingMs <= 0) break
@@ -2023,6 +2026,8 @@ async function mainApplySourcingFilters(
         confirmButtons[0].getAttribute('aria-disabled') === 'true') {
       return failed('confirm_unavailable')
     }
+    const beforeSubmitList = listSnapshot()
+    if (beforeSubmitList.status === 'failed') return beforeSubmitList
     await interact(() => confirmButtons[0].click())
     const submittedDrawer = ownedDrawer
     const closed = await waitFor(() => drawerNodes().length === 0 ? true : null)
@@ -2032,7 +2037,7 @@ async function mainApplySourcingFilters(
     }
     ownedDrawer = null
 
-    const stable = await stableList()
+    const stable = await stableList(beforeSubmitList.signature)
     if (stable.status === 'failed') return stable
     const reopened = await openDrawer()
     if (!reopened) return failed('drawer_not_ready')

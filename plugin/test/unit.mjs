@@ -2776,6 +2776,7 @@ function installM6SourcingFilterFixture(options = {}) {
     cancels: 0,
     listVersion: 0,
     listReads: 0,
+    postConfirmListReads: 0,
     interactions: [],
     groupReads: new Map(),
   }
@@ -2980,7 +2981,9 @@ function installM6SourcingFilterFixture(options = {}) {
     interact('confirm')
     state.confirms += 1
     state.drawerOpen = false
-    state.listVersion += 1
+    if (options.delayedListChangeReads === undefined && options.neverListChange !== true) {
+      state.listVersion += 1
+    }
   }
   const drawer = node()
   Object.defineProperty(drawer, 'isConnected', { get() { return state.drawerOpen } })
@@ -3014,6 +3017,13 @@ function installM6SourcingFilterFixture(options = {}) {
   Object.defineProperty(listItem, 'outerHTML', {
     get() {
       state.listReads += 1
+      if (state.confirms > 0 && options.delayedListChangeReads !== undefined) {
+        state.postConfirmListReads += 1
+        if (state.postConfirmListReads > options.delayedListChangeReads &&
+            state.listVersion === 0) {
+          state.listVersion += 1
+        }
+      }
       const suffix = options.unstableList === true ? `-${state.listReads}` : ''
       return `<div data-index="0">stable-${state.listVersion}${suffix}</div>`
     },
@@ -3104,6 +3114,41 @@ test('candidate.applySourcingFilters MAIN 已完全一致仍完整提交回读�
     ])
     assert.equal(fixture.state.confirms, 1)
     assert.equal(fixture.state.cancels, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 等待旧列表延迟换代后再确认新列表稳定', async () => {
+  const fixture = installM6SourcingFilterFixture({ delayedListChangeReads: 3 })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready')
+    assert.ok(fixture.state.postConfirmListReads >= 5,
+      '必须先跨过若干次旧签名，再对新签名完成间隔一秒的双采样')
+    assert.equal(fixture.state.confirms, 1)
+    assert.equal(fixture.state.cancels, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 确定后始终停留旧列表签名则失败', async () => {
+  const fixture = installM6SourcingFilterFixture({ neverListChange: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.deepEqual(result, { status: 'failed', reason: 'list_unstable' })
+    assert.equal(fixture.state.confirms, 1)
+    assert.equal(fixture.state.openCount, 1, '未观察到换代时不得进入二次回读')
+    assert.equal(result.data, undefined)
   } finally {
     fixture.restore()
   }
