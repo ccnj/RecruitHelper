@@ -139,7 +139,7 @@ func seedSessionSourcingBatchForBootChange(
 	revision := m5ai.ContextRevision{
 		ContextID:    "context-session-feed-" + suffix,
 		RevisionHash: "revision-session-feed-" + suffix,
-		SourceKind:   "localImport", DisplayName: "synthetic-position",
+		SourceKind:   "localImport", SourceJobRef: "17", DisplayName: "synthetic-position",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",

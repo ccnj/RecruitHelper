@@ -140,7 +140,8 @@ func TestStartSourcingBatchIsIdempotentAndProtectsOpenScope(t *testing.T) {
 	}
 	first, err := s.StartSourcingBatch(req)
 	if err != nil || first == nil || !first.Created || first.Batch.Status != SourcingBatchPreparing ||
-		first.Batch.TargetCount != 150 || first.Batch.PositionRef != nil || !first.Batch.StartedAt.Equal(startedAt) {
+		first.Batch.TargetCount != 150 || first.Batch.BackendJobID == nil || *first.Batch.BackendJobID != "17" ||
+		first.Batch.PositionRef != nil || !first.Batch.StartedAt.Equal(startedAt) {
 		t.Fatalf("首次启动批次错误: result=%+v err=%v", first, err)
 	}
 

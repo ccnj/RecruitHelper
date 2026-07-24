@@ -270,10 +270,13 @@ type SourcingBatch struct {
 	AccountRef string `gorm:"not null;index:ux_sourcing_batch_open,unique,where:ended_at IS NULL,priority:2"`
 
 	ContextRevisionHash string `gorm:"not null;index"`
-	TargetCount         int    `gorm:"not null;check:ck_sourcing_batch_target_count,target_count > 0"`
-	PositionRef         *string
-	PositionTitle       *string
-	PositionBoundAt     *time.Time
+	// BackendJobID 是旧后台 Job.ID。历史孤儿允许为空；所有新批次必须由
+	// ContextRevisionHash 对应 revision 的 SourceJobRef 原子派生并写入。
+	BackendJobID    *string `gorm:"index"`
+	TargetCount     int     `gorm:"not null;check:ck_sourcing_batch_target_count,target_count > 0"`
+	PositionRef     *string
+	PositionTitle   *string
+	PositionBoundAt *time.Time
 
 	Status SourcingBatchStatus `gorm:"not null;index;check:ck_sourcing_batch_status,status IN ('preparing','collecting','blocked','completed','stopped')"`
 	Reason string
@@ -373,8 +376,11 @@ type CandidateProfile struct {
 	PlatformUserRef string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:3;index:ux_candidate_profile_active,unique,priority:2"`
 	PositionRef     string `gorm:"not null;uniqueIndex:ux_candidate_profile_identity,priority:4"`
 	PositionTitle   *string
-	MainStatus      CandidateProfileStatus `gorm:"not null;index"`
-	EndReason       *CandidateProfileEndReason
+	// BackendJobID 是沟通与职位配置路由的直接业务键。无法由既有事实唯一
+	// 回填的历史档案保持 NULL，任何需要职位配置的路径必须响亮停止。
+	BackendJobID *string                `gorm:"index"`
+	MainStatus   CandidateProfileStatus `gorm:"not null;index"`
+	EndReason    *CandidateProfileEndReason
 
 	SuccessfulGreetingIntentID     *string
 	ConversationRef                *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`

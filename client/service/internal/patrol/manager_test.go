@@ -169,7 +169,7 @@ func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
 		ContextID: "context-pause-sourcing", RevisionHash: "revision-pause-sourcing",
-		SourceKind: "localImport", DisplayName: "synthetic-position",
+		SourceKind: "localImport", SourceJobRef: "17", DisplayName: "synthetic-position",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts", MappingVersion: m5ai.MappingVersion,
@@ -346,7 +346,7 @@ func seedActiveSourcingBatchForFeedInvalidation(
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
 		ContextID: "context-" + batchID, RevisionHash: "revision-" + batchID,
-		SourceKind: "localImport", DisplayName: "synthetic-position",
+		SourceKind: "localImport", SourceJobRef: "17", DisplayName: "synthetic-position",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",

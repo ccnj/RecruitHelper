@@ -95,6 +95,19 @@ func Open(dataDir string) (*Store, error) {
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
+	backendJobBackfill, err := backfillBackendJobIDs(db)
+	if err != nil {
+		return nil, fmt.Errorf("回填后台职位 ID: %w", err)
+	}
+	if backendJobBackfill.BatchesUnresolved != 0 ||
+		backendJobBackfill.ProfilesUnresolved != 0 ||
+		backendJobBackfill.ProfilesAmbiguous != 0 {
+		slog.Warn("存在无法唯一回填后台职位 ID 的历史事实",
+			"batchUnresolved", backendJobBackfill.BatchesUnresolved,
+			"profileUnresolved", backendJobBackfill.ProfilesUnresolved,
+			"profileAmbiguous", backendJobBackfill.ProfilesAmbiguous,
+		)
+	}
 	if err := db.Model(&CandidateProfile{}).
 		Where("resume_capture_state IS NULL OR resume_capture_state = ?", "").
 		UpdateColumn("resume_capture_state", ResumeCaptureUnattempted).Error; err != nil {

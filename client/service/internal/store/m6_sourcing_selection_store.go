@@ -123,6 +123,10 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 			}
 			return err
 		}
+		backendJobID := strings.TrimSpace(revision.SourceJobRef)
+		if backendJobID == "" || batch.BackendJobID == nil || *batch.BackendJobID != backendJobID {
+			return ErrSourcingSelectionConflict
+		}
 		view, err := m5ai.DeriveSourcingView(revision.SourcePackage)
 		if err != nil {
 			return err
@@ -176,7 +180,13 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 					decision.Outcome = SourcingSelectionMaleRatioLimited
 					break
 				}
-				profile, err := createSourcingSelectedProfileTx(tx, row.Run, ids.NewProfileID(), decidedAt)
+				profile, err := createSourcingSelectedProfileTx(
+					tx,
+					row.Run,
+					backendJobID,
+					ids.NewProfileID(),
+					decidedAt,
+				)
 				if err != nil {
 					return err
 				}
@@ -436,9 +446,14 @@ func validatePersistedSourcingBatchSelectionTx(
 func createSourcingSelectedProfileTx(
 	tx *gorm.DB,
 	run SourcingCandidateRun,
+	backendJobID string,
 	profileID string,
 	at time.Time,
 ) (*CandidateProfile, error) {
+	backendJobID = strings.TrimSpace(backendJobID)
+	if backendJobID == "" {
+		return nil, ErrSourcingSelectionConflict
+	}
 	var account Account
 	if err := tx.First(&account, "platform = ? AND account_ref = ?", run.Platform, run.AccountRef).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -475,7 +490,8 @@ func createSourcingSelectedProfileTx(
 	profile := &CandidateProfile{
 		ProfileID: profileID, Platform: run.Platform, AccountRef: run.AccountRef,
 		PlatformUserRef: run.PlatformUserRef, PositionRef: run.PositionRef,
-		PositionTitle: run.PositionTitle, MainStatus: CandidateProfileSelected,
+		PositionTitle: run.PositionTitle, BackendJobID: &backendJobID,
+		MainStatus:         CandidateProfileSelected,
 		ResumeCaptureState: ResumeCaptureUnattempted, CreatedAt: at, UpdatedAt: at,
 	}
 	if err := tx.Create(profile).Error; err != nil {

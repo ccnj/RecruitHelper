@@ -44,7 +44,7 @@ func sourcingSelectionRevision(
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	return m5ai.ContextRevision{
 		ContextID: "context-" + revisionHash, RevisionHash: revisionHash,
-		SourceKind: "localImport", DisplayName: "合成职位",
+		SourceKind: "localImport", SourceJobRef: "11", DisplayName: "合成职位",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
@@ -82,10 +82,12 @@ func insertCompletedSelectionBatch(
 ) []SourcingCandidateRun {
 	t.Helper()
 	endedAt := base.Add(time.Hour)
+	backendJobID := "11"
 	if err := s.db.Create(&SourcingBatch{
 		BatchID: batchID, Platform: key.Platform, AccountRef: key.AccountRef,
-		ContextRevisionHash: revisionHash, TargetCount: len(fixtures),
-		Status: SourcingBatchCompleted, StartedAt: base.Add(-time.Minute), EndedAt: &endedAt,
+		ContextRevisionHash: revisionHash, BackendJobID: &backendJobID,
+		TargetCount: len(fixtures),
+		Status:      SourcingBatchCompleted, StartedAt: base.Add(-time.Minute), EndedAt: &endedAt,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -386,6 +388,11 @@ func TestSelectCompletedSourcingBatchReplayIsIdempotentAndCreatesNoSendFacts(t *
 	if decisions != 1 || profiles != 1 || summaries != 1 || intents != 0 || heads != 0 || commands != 0 {
 		t.Fatalf("重放增生或越界创建发送事实: decisions=%d profiles=%d summaries=%d intents=%d heads=%d commands=%d",
 			decisions, profiles, summaries, intents, heads, commands)
+	}
+	var profile CandidateProfile
+	if err := s.db.First(&profile).Error; err != nil ||
+		profile.BackendJobID == nil || *profile.BackendJobID != "11" {
+		t.Fatalf("selected 档案未继承后台职位 ID: profile=%+v err=%v", profile, err)
 	}
 }
 

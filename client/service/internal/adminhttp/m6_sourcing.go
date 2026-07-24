@@ -14,6 +14,7 @@ import (
 type sourcingStatusView struct {
 	BatchID             string                    `json:"batchId"`
 	ContextRevisionHash string                    `json:"contextRevisionHash"`
+	BackendJobID        *string                   `json:"backendJobId,omitempty"`
 	TargetCount         int                       `json:"targetCount"`
 	CapturedCount       int64                     `json:"capturedCount"`
 	RemainingCount      int                       `json:"remainingCount"`
@@ -165,7 +166,8 @@ func (a *API) writeSourcingStatus(w http.ResponseWriter, key store.AccountKey) {
 	}
 	view := sourcingStatusView{
 		BatchID: progress.BatchID, ContextRevisionHash: progress.ContextRevisionHash,
-		TargetCount: progress.TargetCount, CapturedCount: progress.CapturedCount,
+		BackendJobID: progress.BackendJobID,
+		TargetCount:  progress.TargetCount, CapturedCount: progress.CapturedCount,
 		RemainingCount: progress.RemainingCount, Status: progress.Status, Reason: progress.Reason,
 		StartedAt: progress.StartedAt, LastAttemptAt: progress.LastAttemptAt,
 		PositionBoundAt: progress.PositionBoundAt, EndedAt: progress.EndedAt,

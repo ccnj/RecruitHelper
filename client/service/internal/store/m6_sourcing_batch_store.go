@@ -72,6 +72,7 @@ type StopSourcingBatchRequest struct {
 type SourcingBatchProgress struct {
 	BatchID             string
 	ContextRevisionHash string
+	BackendJobID        *string
 	TargetCount         int
 	CapturedCount       int64
 	RemainingCount      int
@@ -225,19 +226,6 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 
 	result := StartSourcingBatchResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		var byID SourcingBatch
-		err := tx.First(&byID, "batch_id = ?", req.BatchID).Error
-		if err == nil {
-			if !sameSourcingBatchStartMaterial(byID, req) {
-				return ErrSourcingBatchConflict
-			}
-			result.Batch = byID
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-
 		var account Account
 		if err := tx.First(&account, "platform = ? AND account_ref = ?", req.Platform, req.AccountRef).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -252,11 +240,28 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 			}
 			return err
 		}
+		backendJobID := strings.TrimSpace(revision.SourceJobRef)
+		if backendJobID == "" {
+			return ErrJobAIContextRevisionInvalid
+		}
+
+		var byID SourcingBatch
+		err := tx.First(&byID, "batch_id = ?", req.BatchID).Error
+		if err == nil {
+			if !sameSourcingBatchStartMaterial(byID, req, backendJobID) {
+				return ErrSourcingBatchConflict
+			}
+			result.Batch = byID
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 
 		var open SourcingBatch
 		err = tx.First(&open, "platform = ? AND account_ref = ? AND ended_at IS NULL", req.Platform, req.AccountRef).Error
 		if err == nil {
-			if !sameSourcingBatchStartMaterial(open, req) {
+			if !sameSourcingBatchStartMaterial(open, req, backendJobID) {
 				return ErrSourcingBatchConflict
 			}
 			result.Batch = open
@@ -268,8 +273,9 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 
 		batch := SourcingBatch{
 			BatchID: req.BatchID, Platform: req.Platform, AccountRef: req.AccountRef,
-			ContextRevisionHash: req.ContextRevisionHash, TargetCount: req.TargetCount,
-			Status: SourcingBatchPreparing, StartedAt: req.StartedAt,
+			ContextRevisionHash: req.ContextRevisionHash, BackendJobID: &backendJobID,
+			TargetCount: req.TargetCount,
+			Status:      SourcingBatchPreparing, StartedAt: req.StartedAt,
 		}
 		if err := tx.Create(&batch).Error; err != nil {
 			return err
@@ -284,9 +290,15 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 	return &result, nil
 }
 
-func sameSourcingBatchStartMaterial(batch SourcingBatch, req StartSourcingBatchRequest) bool {
+func sameSourcingBatchStartMaterial(
+	batch SourcingBatch,
+	req StartSourcingBatchRequest,
+	backendJobID string,
+) bool {
 	return batch.Platform == req.Platform && batch.AccountRef == req.AccountRef &&
-		batch.ContextRevisionHash == req.ContextRevisionHash && batch.TargetCount == req.TargetCount
+		batch.ContextRevisionHash == req.ContextRevisionHash &&
+		batch.BackendJobID != nil && *batch.BackendJobID == backendJobID &&
+		batch.TargetCount == req.TargetCount
 }
 
 // BindSourcingBatchPosition 只从首个 candidate.readSourcingWindow 的持久
@@ -699,7 +711,8 @@ func sourcingBatchProgressTx(tx *gorm.DB, batch SourcingBatch) (SourcingBatchPro
 	}
 	return SourcingBatchProgress{
 		BatchID: batch.BatchID, ContextRevisionHash: batch.ContextRevisionHash,
-		TargetCount: batch.TargetCount, CapturedCount: captured, RemainingCount: remaining,
+		BackendJobID: batch.BackendJobID,
+		TargetCount:  batch.TargetCount, CapturedCount: captured, RemainingCount: remaining,
 		Status: batch.Status, Reason: batch.Reason, StartedAt: batch.StartedAt,
 		LastAttemptAt: batch.LastAttemptAt, PositionBoundAt: batch.PositionBoundAt, EndedAt: batch.EndedAt,
 	}, nil
