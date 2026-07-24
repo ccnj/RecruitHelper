@@ -50,6 +50,20 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 	if err != nil || run == nil {
 		return run, err
 	}
+	if run.Mode != workflow.ModeFull && run.Mode != workflow.ModeReplyOnly {
+		return run, ErrWorkflowPipelineInvalid
+	}
+	if run.Status == workflow.StatusRunning ||
+		run.Status == workflow.StatusAwaitingConfirmation {
+		synced, closed, syncErr := m.syncDailyWindow(run)
+		if syncErr != nil {
+			return synced, syncErr
+		}
+		run = synced
+		if closed {
+			return run, ErrMemberStartBlocked
+		}
+	}
 	if run.Mode == workflow.ModeReplyOnly {
 		// Reply-only is intentionally isolated from every M6 stage.
 		return run, nil
@@ -180,6 +194,46 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 	default:
 		return run, ErrWorkflowPipelineInvalid
 	}
+}
+
+// syncDailyWindow persists the midnight boundary even when a workflow is
+// merely waiting for a batch or for human confirmation and therefore has no
+// candidate member about to start. It uses the same pure evaluator as all
+// member loops, but does not mistake an open-window awaiting-confirmation
+// state (Allowed=false by design) for a failure.
+func (m *Manager) syncDailyWindow(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return fallback, false, err
+	}
+	if run == nil || run.RunID != fallback.RunID {
+		return currentRunOr(fallback, run, nil), false, store.ErrProductWorkflowConflict
+	}
+	decision, err := workflow.MayStartNextWorkflowMember(
+		stateOf(run),
+		m.clock.Now(),
+		m.location,
+	)
+	if err != nil {
+		return run, false, err
+	}
+	if !decision.Changed {
+		return run, false, nil
+	}
+	waiting, err := m.store.TransitionProductWorkflowRun(
+		store.TransitionProductWorkflowRunRequest{
+			RunID: run.RunID, From: stateOf(run), To: decision.State, At: m.clock.Now(),
+		},
+	)
+	if err != nil {
+		return run, false, err
+	}
+	return waiting, true, nil
 }
 
 func (m *Manager) enableCommunicationAfterSourcing(

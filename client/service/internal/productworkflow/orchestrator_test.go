@@ -124,6 +124,87 @@ func TestBlockedSourcingFailsRunAndExplicitRestartAdoptsSameBatch(t *testing.T) 
 	}
 }
 
+func TestPipelinePumpPersistsMidnightAcrossIdleBoundaries(t *testing.T) {
+	t.Run("reply only", func(t *testing.T) {
+		db, key, _ := productWorkflowFixture(t)
+		location := time.FixedZone("CST", 8*60*60)
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixturePipelineActor{
+			fixtureActor: &fixtureActor{store: db, clock: clock},
+		}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.StartReplyOnly(key); err != nil {
+			t.Fatal(err)
+		}
+		clock.now = time.Date(2026, 7, 26, 0, 0, 0, 0, location)
+
+		waiting, err := manager.AdvanceOnce(context.Background())
+		if !errors.Is(err, ErrMemberStartBlocked) ||
+			waiting == nil ||
+			waiting.Status != workflow.StatusWaitingDailyWindow ||
+			waiting.ResumeStatus != workflow.StatusRunning {
+			t.Fatalf("reply-only midnight = %+v, %v", waiting, err)
+		}
+	})
+
+	t.Run("sourcing", func(t *testing.T) {
+		db, key, revision := productWorkflowFixture(t)
+		location := time.FixedZone("CST", 8*60*60)
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixturePipelineActor{
+			fixtureActor: &fixtureActor{store: db, clock: clock},
+		}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.StartFull(key, revision.RevisionHash); err != nil {
+			t.Fatal(err)
+		}
+		clock.now = time.Date(2026, 7, 26, 0, 0, 0, 0, location)
+
+		waiting, err := manager.AdvanceOnce(context.Background())
+		if !errors.Is(err, ErrMemberStartBlocked) ||
+			waiting == nil ||
+			waiting.Status != workflow.StatusWaitingDailyWindow ||
+			waiting.ResumeStatus != workflow.StatusRunning ||
+			waiting.Stage != store.ProductWorkflowStageSourcing {
+			t.Fatalf("sourcing midnight = %+v, %v", waiting, err)
+		}
+	})
+
+	t.Run("awaiting confirmation", func(t *testing.T) {
+		manager, actor, _, _, _ := orchestratorFixtureAtGreetingGeneration(t)
+		actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+		awaiting, err := manager.AdvanceOnce(context.Background())
+		if err != nil || awaiting.Status != workflow.StatusAwaitingConfirmation {
+			t.Fatalf("enter awaiting = %+v, %v", awaiting, err)
+		}
+		manager.clock.(*fixtureClock).now = time.Date(
+			2026,
+			7,
+			26,
+			0,
+			0,
+			0,
+			0,
+			manager.location,
+		)
+
+		waiting, err := manager.AdvanceOnce(context.Background())
+		if !errors.Is(err, ErrMemberStartBlocked) ||
+			waiting == nil ||
+			waiting.Status != workflow.StatusWaitingDailyWindow ||
+			waiting.ResumeStatus != workflow.StatusAwaitingConfirmation ||
+			waiting.Stage != store.ProductWorkflowStageAwaitingConfirmation {
+			t.Fatalf("confirmation midnight = %+v, %v", waiting, err)
+		}
+	})
+}
+
 func TestConfirmAllRequiresExactSelectableSetAndOpenWindow(t *testing.T) {
 	manager, actor, db, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
