@@ -4414,10 +4414,13 @@ async function mainReadThreadPage(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
+    const attachmentFallback = parseObject(envelope.fallbackText)
     const isCandidateAttachmentResume = rawType === 'custom' && typeof row.content === 'string' &&
-      typeof envelope.type === 'string' && envelope.type.trim() === '177' && customType === 177 &&
+      typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      clean(row.text) === '您好，这是我的附件简历，请查收'
+      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
     let direction: ZhilianThreadMessage['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -4483,7 +4486,7 @@ async function mainReadThreadPage(
     } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
-      text = isCandidateOnlineResume ? clean(inner.staffText) : clean(row.text)
+      text = isCandidateOnlineResume ? clean(inner.staffText) : '您好，这是我的附件简历，请查收'
       state = 'unknown'
       identity = stableMessageIdentity(row.idServer)
     } else if (customType === 131) {
@@ -5372,10 +5375,13 @@ async function mainCaptureSendBaseline(
         Object.keys(inner).length > 0 && from === target &&
         clean(row.status).toLowerCase() === 'success' &&
         clean(inner.staffText) === '对方向您发送了在线简历'
+      const attachmentFallback = parseObject(envelope.fallbackText)
       const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-        typeof envelope.type === 'string' && envelope.type.trim() === '177' && customType === 177 &&
+        typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
         from === target && clean(row.status).toLowerCase() === 'success' &&
-        clean(row.text) === '您好，这是我的附件简历，请查收'
+        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
       let direction: ZhilianMessageAnchor['direction'] = from
         ? from === staffID ? 'out' : 'in'
         : 'system'
@@ -5425,7 +5431,7 @@ async function mainCaptureSendBaseline(
       } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
         kind = 'card'
         cardType = 'resumeAttachment'
-        text = isCandidateOnlineResume ? clean(inner.staffText) : clean(row.text)
+        text = isCandidateOnlineResume ? clean(inner.staffText) : '您好，这是我的附件简历，请查收'
         identity = row.idServer
       } else if (customType === 131) {
         if (!from) return null
@@ -6039,10 +6045,13 @@ function mainSendMessageOnce(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
+    const attachmentFallback = parseObject(envelope.fallbackText)
     const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-      typeof envelope.type === 'string' && envelope.type.trim() === '177' && customType === 177 &&
+      typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      clean(row.text) === '您好，这是我的附件简历，请查收'
+      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
     let direction: ZhilianMessageAnchor['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -6092,7 +6101,7 @@ function mainSendMessageOnce(
     } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
-      normalizedText = isCandidateOnlineResume ? clean(inner.staffText) : clean(row.text)
+      normalizedText = isCandidateOnlineResume ? clean(inner.staffText) : '您好，这是我的附件简历，请查收'
       identity = row.idServer
     } else if (customType === 131) {
       if (!from) return null
@@ -6969,10 +6978,13 @@ function mainSendCardOnce(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
+    const attachmentFallback = parseObject(envelope.fallbackText)
     const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-      typeof envelope.type === 'string' && envelope.type.trim() === '177' && customType === 177 &&
+      typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      clean(row.text) === '您好，这是我的附件简历，请查收'
+      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
     let direction: ZhilianMessageAnchor['direction'] = from ? from === staffID ? 'out' : 'in' : 'system'
     let kind: 'text' | 'card' | 'system' = 'system'
     let text = ''
@@ -7013,7 +7025,7 @@ function mainSendCardOnce(
     } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
-      text = isCandidateOnlineResume ? clean(inner.staffText) : clean(row.text)
+      text = isCandidateOnlineResume ? clean(inner.staffText) : '您好，这是我的附件简历，请查收'
       identity = row.idServer
     } else if (customType === 131) {
       if (!from) return null
