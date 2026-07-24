@@ -199,6 +199,8 @@ func main() {
 				if stateErr != nil {
 					return apphttp.RuntimeSnapshot{}, stateErr
 				}
+				snapshot.Platform = productState.Platform
+				snapshot.AccountRef = productState.AccountRef
 				snapshot.CurrentBatchID = productState.CurrentBatchID
 				snapshot.WorkflowMode = productState.WorkflowMode
 				snapshot.WorkflowStatus = productState.WorkflowStatus

@@ -16,11 +16,11 @@ import (
 const testBearer = "0123456789abcdef0123456789abcdef"
 
 type fakeProjections struct {
-	overviewReq    store.AppOverviewRequest
-	confirmationID string
-	candidateQuery store.AppCandidateListQuery
-	candidateID    string
-	detailErr      error
+	overviewReq          store.AppOverviewRequest
+	confirmationID       string
+	candidateQuery       store.AppCandidateListQuery
+	candidateQueryDetail store.AppCandidateDetailQuery
+	detailErr            error
 }
 
 func (f *fakeProjections) AppOverview(req store.AppOverviewRequest) (*store.AppOverviewProjection, error) {
@@ -43,13 +43,13 @@ func (f *fakeProjections) AppCandidates(query store.AppCandidateListQuery) (*sto
 	}, nil
 }
 
-func (f *fakeProjections) AppCandidateDetail(profileID string) (*store.AppCandidateDetailProjection, error) {
-	f.candidateID = profileID
+func (f *fakeProjections) AppCandidateDetail(query store.AppCandidateDetailQuery) (*store.AppCandidateDetailProjection, error) {
+	f.candidateQueryDetail = query
 	if f.detailErr != nil {
 		return nil, f.detailErr
 	}
 	return &store.AppCandidateDetailProjection{
-		Candidate: store.AppCandidateListItem{ProfileID: profileID},
+		Candidate: store.AppCandidateListItem{ProfileID: query.ProfileID},
 		Messages:  []store.AppMessageSummary{},
 		Actions:   []store.AppActionSummary{},
 	}, nil
@@ -127,7 +127,8 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 				Available: true, CustomerName: "合成客户", Authorized: true,
 				ProviderConfigured: true, Provider: " deepseek ", Model: " deepseek-v4-pro ",
 				PluginOnline: true, PluginHealth: " ready ", PluginVersion: " 1.2.3 ",
-				ContractMatch:  true,
+				ContractMatch: true,
+				Platform:      " zhilian ", AccountRef: " account-product ",
 				CurrentBatchID: "batch-private", WorkflowMode: "full",
 			}, nil
 		}),
@@ -136,7 +137,10 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
 	}
-	if fake.overviewReq.CurrentBatchID != "batch-private" || !fake.overviewReq.Now.Equal(now) {
+	if fake.overviewReq.CurrentBatchID != "batch-private" ||
+		fake.overviewReq.Platform != "zhilian" ||
+		fake.overviewReq.AccountRef != "account-product" ||
+		!fake.overviewReq.Now.Equal(now) {
 		t.Fatalf("overview request=%+v", fake.overviewReq)
 	}
 	if strings.Contains(res.Body.String(), "batch-private") {
@@ -153,7 +157,10 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 		!body.Runtime.ContractMatch {
 		t.Fatalf("unexpected body=%s err=%v", res.Body.String(), err)
 	}
-	for _, forbidden := range []string{"handId", "bootId", "contractHash", "caps", "api_key", "apiKey"} {
+	for _, forbidden := range []string{
+		"handId", "bootId", "contractHash", "caps", "api_key", "apiKey",
+		"zhilian", "account-product",
+	} {
 		if strings.Contains(res.Body.String(), forbidden) {
 			t.Fatalf("产品运行快照泄露内部字段 %q: %s", forbidden, res.Body.String())
 		}
@@ -211,20 +218,57 @@ func TestConfirmationIgnoresCallerChosenHistoricalBatch(t *testing.T) {
 
 func TestCandidateRoutesValidateAndHideStoreErrors(t *testing.T) {
 	fake := &fakeProjections{detailErr: errors.New("database error with candidate plaintext")}
-	handler := newTestAPI(t, fake)
+	handler := newTestAPI(t, fake,
+		WithRuntimeSnapshotProvider(func(context.Context) (RuntimeSnapshot, error) {
+			return RuntimeSnapshot{Platform: "zhilian", AccountRef: "account-product"}, nil
+		}),
+	)
 	res := request(t, handler, http.MethodGet,
 		"/app/candidates?view=communicating&search=%E5%80%99%E9%80%89&limit=20&offset=1",
 		"127.0.0.1:43000", testBearer)
 	if res.Code != http.StatusOK || fake.candidateQuery.View != store.AppCandidateViewCommunicating ||
 		fake.candidateQuery.Search != "候选" || fake.candidateQuery.Limit != 20 ||
-		fake.candidateQuery.Offset != 1 {
+		fake.candidateQuery.Offset != 1 || fake.candidateQuery.Platform != "zhilian" ||
+		fake.candidateQuery.AccountRef != "account-product" {
 		t.Fatalf("status=%d query=%+v body=%s", res.Code, fake.candidateQuery, res.Body.String())
 	}
 
 	res = request(t, handler, http.MethodGet,
 		"/app/candidates/P-sensitive", "127.0.0.1:43000", testBearer)
 	if res.Code != http.StatusInternalServerError ||
+		fake.candidateQueryDetail.ProfileID != "P-sensitive" ||
+		fake.candidateQueryDetail.Platform != "zhilian" ||
+		fake.candidateQueryDetail.AccountRef != "account-product" ||
 		strings.Contains(res.Body.String(), "candidate plaintext") {
 		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestProjectionRoutesFailClosedWithoutUniqueAccountScope(t *testing.T) {
+	fake := &fakeProjections{}
+	handler := newTestAPI(t, fake)
+	for _, target := range []string{
+		"/app/overview",
+		"/app/candidates?view=communicating",
+	} {
+		res := request(t, handler, http.MethodGet, target, "127.0.0.1:43000", testBearer)
+		if res.Code != http.StatusOK {
+			t.Fatalf("target=%s status=%d body=%s", target, res.Code, res.Body.String())
+		}
+	}
+	res := request(
+		t,
+		handler,
+		http.MethodGet,
+		"/app/candidates/P-hidden",
+		"127.0.0.1:43000",
+		testBearer,
+	)
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if fake.overviewReq.Platform != "" || fake.candidateQuery.Platform != "" ||
+		fake.candidateQueryDetail.ProfileID != "" {
+		t.Fatalf("空账号作用域不得进入 Store: %+v", fake)
 	}
 }

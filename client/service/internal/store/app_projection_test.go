@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -195,8 +196,27 @@ func TestAppCandidateListAndDetailUseProfileProjection(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	foreignAccountRef := "app-list-foreign-account"
+	createM4Account(t, s, platform, foreignAccountRef)
+	foreignUserRef := "opaque-user-foreign"
+	foreignDisplayName := "其他账号候选人"
+	if err := s.db.Create(&Candidate{
+		Platform: platform, PlatformUserRef: foreignUserRef, DisplayName: &foreignDisplayName,
+		FirstSeenAt: now.Add(-time.Hour), LastSeenAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CandidateProfile{
+		ProfileID: "P-app-foreign", Platform: platform, AccountRef: foreignAccountRef,
+		PlatformUserRef: foreignUserRef, PositionRef: "position-foreign",
+		MainStatus:         CandidateProfileCommunicating,
+		ResumeCaptureState: ResumeCaptureUnattempted,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	list, err := s.AppCandidates(AppCandidateListQuery{
+		Platform: platform, AccountRef: accountRef,
 		View: AppCandidateViewCommunicating, Search: "候选人",
 	})
 	if err != nil {
@@ -207,7 +227,9 @@ func TestAppCandidateListAndDetailUseProfileProjection(t *testing.T) {
 		!list.Items[0].ManualRequired {
 		t.Fatalf("unexpected list projection: %+v", list)
 	}
-	detail, err := s.AppCandidateDetail(profileID)
+	detail, err := s.AppCandidateDetail(AppCandidateDetailQuery{
+		Platform: platform, AccountRef: accountRef, ProfileID: profileID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +243,11 @@ func TestAppCandidateListAndDetailUseProfileProjection(t *testing.T) {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("产品详情投影泄漏内部引用 %q: %s", forbidden, encoded)
 		}
+	}
+	if _, err := s.AppCandidateDetail(AppCandidateDetailQuery{
+		Platform: platform, AccountRef: foreignAccountRef, ProfileID: profileID,
+	}); !errors.Is(err, ErrAppCandidateNotFound) {
+		t.Fatalf("其他账号不得探测候选人详情: %v", err)
 	}
 }
 
@@ -266,7 +293,9 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.AppOverview(AppOverviewRequest{Now: now})
+	got, err := s.AppOverview(AppOverviewRequest{
+		Now: now, Platform: "zhilian", AccountRef: "overview-account",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

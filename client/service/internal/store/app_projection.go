@@ -88,6 +88,8 @@ type AppInterviewSummary struct {
 type AppOverviewRequest struct {
 	Now            time.Time
 	CurrentBatchID string
+	Platform       string
+	AccountRef     string
 }
 
 type AppOverviewProjection struct {
@@ -127,10 +129,18 @@ type AppConfirmationProjection struct {
 }
 
 type AppCandidateListQuery struct {
-	View   AppCandidateView
-	Search string
-	Limit  int
-	Offset int
+	Platform   string
+	AccountRef string
+	View       AppCandidateView
+	Search     string
+	Limit      int
+	Offset     int
+}
+
+type AppCandidateDetailQuery struct {
+	Platform   string
+	AccountRef string
+	ProfileID  string
 }
 
 type AppCandidateListItem struct {
@@ -224,7 +234,10 @@ func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, err
 		req.Now = time.Now()
 	}
 	req.CurrentBatchID = strings.TrimSpace(req.CurrentBatchID)
-	if len(req.CurrentBatchID) > 128 {
+	req.Platform = strings.TrimSpace(req.Platform)
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	if len(req.CurrentBatchID) > 128 ||
+		!validAppAccountScope(req.Platform, req.AccountRef) {
 		return nil, ErrAppProjectionInvalid
 	}
 	start, end := localBusinessDay(req.Now)
@@ -235,20 +248,38 @@ func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, err
 		if err != nil {
 			return err
 		}
-		out.Funnel, err = appFunnelTx(tx, req.CurrentBatchID)
+		out.Funnel, err = appFunnelTx(
+			tx,
+			req.CurrentBatchID,
+			req.Platform,
+			req.AccountRef,
+		)
 		if err != nil {
 			return err
 		}
-		out.Statistics, err = appOverviewStatisticsTx(tx, start, end)
+		out.Statistics, err = appOverviewStatisticsTx(
+			tx,
+			start,
+			end,
+			req.Platform,
+			req.AccountRef,
+		)
 		if err != nil {
 			return err
 		}
-		out.TodayInterviews, err = appTodayInterviewsTx(tx, start, end)
+		out.TodayInterviews, err = appTodayInterviewsTx(
+			tx,
+			start,
+			end,
+			req.Platform,
+			req.AccountRef,
+		)
 		if err != nil {
 			return err
 		}
 		var firstProfile CandidateProfile
-		err = tx.Order("created_at ASC, profile_id ASC").First(&firstProfile).Error
+		err = tx.Where("platform = ? AND account_ref = ?", req.Platform, req.AccountRef).
+			Order("created_at ASC, profile_id ASC").First(&firstProfile).Error
 		switch {
 		case err == nil:
 			since := firstProfile.CreatedAt
@@ -302,7 +333,10 @@ func appCurrentJobTx(tx *gorm.DB) (AppJobProjection, error) {
 	}, nil
 }
 
-func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
+func appFunnelTx(
+	tx *gorm.DB,
+	batchID, platform, accountRef string,
+) (AppFunnelProjection, error) {
 	if batchID == "" {
 		return AppFunnelProjection{}, nil
 	}
@@ -313,34 +347,72 @@ func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
 		}
 		return AppFunnelProjection{}, err
 	}
+	if batch.Platform != platform || batch.AccountRef != accountRef {
+		return AppFunnelProjection{}, ErrAppProjectionConflict
+	}
 	out := AppFunnelProjection{
 		Available: true, BatchID: batch.BatchID, TargetCount: batch.TargetCount,
 		LastFailureReason: batch.Reason, StartedAt: &batch.StartedAt, FinishedAt: batch.EndedAt,
 	}
-	if err := tx.Model(&SourcingCandidateRun{}).Where("batch_id = ?", batch.BatchID).
+	if err := tx.Model(&SourcingCandidateRun{}).
+		Where(
+			"batch_id = ? AND platform = ? AND account_ref = ?",
+			batch.BatchID,
+			platform,
+			accountRef,
+		).
 		Count(&out.CapturedCount).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
 	if err := tx.Table("sourcing_score_invocations AS score").
 		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = score.run_id").
-		Where("run.batch_id = ? AND score.finished_at IS NOT NULL", batch.BatchID).
+		Where(
+			"run.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
+				"AND score.finished_at IS NOT NULL",
+			batch.BatchID,
+			platform,
+			accountRef,
+		).
 		Count(&out.ScoredCount).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
 	if err := tx.Table("sourcing_selection_decisions AS decision").
 		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
-		Where("run.batch_id = ? AND decision.outcome = ?", batch.BatchID, SourcingSelectionSelected).
+		Where(
+			"run.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
+				"AND decision.outcome = ?",
+			batch.BatchID,
+			platform,
+			accountRef,
+			SourcingSelectionSelected,
+		).
 		Count(&out.SelectedCount).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
-	if err := tx.Model(&SourcingGreetingInvocation{}).
-		Where("batch_id = ? AND status = ? AND finished_at IS NOT NULL", batch.BatchID, AIInvocationOK).
+	if err := tx.Table("sourcing_greeting_invocations AS greeting").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = greeting.run_id").
+		Where(
+			"greeting.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
+				"AND greeting.status = ? AND greeting.finished_at IS NOT NULL",
+			batch.BatchID,
+			platform,
+			accountRef,
+			AIInvocationOK,
+		).
 		Count(&out.GreetingReady).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
 	var generationFailed int64
-	if err := tx.Model(&SourcingGreetingInvocation{}).
-		Where("batch_id = ? AND status <> ? AND finished_at IS NOT NULL", batch.BatchID, AIInvocationOK).
+	if err := tx.Table("sourcing_greeting_invocations AS greeting").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = greeting.run_id").
+		Where(
+			"greeting.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
+				"AND greeting.status <> ? AND greeting.finished_at IS NOT NULL",
+			batch.BatchID,
+			platform,
+			accountRef,
+			AIInvocationOK,
+		).
 		Count(&generationFailed).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
@@ -348,7 +420,13 @@ func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
 	var intents []EffectIntent
 	if err := tx.Table("effect_intents AS effect").
 		Joins("JOIN sourcing_greeting_invocations AS greeting ON greeting.effect_intent_id = effect.intent_id").
-		Where("greeting.batch_id = ?", batch.BatchID).Find(&intents).Error; err != nil {
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = greeting.run_id").
+		Where(
+			"greeting.batch_id = ? AND run.platform = ? AND run.account_ref = ?",
+			batch.BatchID,
+			platform,
+			accountRef,
+		).Find(&intents).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
 	for i := range intents {
@@ -362,10 +440,20 @@ func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
 		}
 	}
 	if err := tx.Table("sourcing_greeting_invocations AS greeting").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = greeting.run_id").
 		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = greeting.profile_id").
-		Where("greeting.batch_id = ? AND greeting.status = ? AND greeting.finished_at IS NOT NULL "+
+		Where("greeting.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
+			"AND profile.platform = ? AND profile.account_ref = ? "+
+			"AND greeting.status = ? AND greeting.finished_at IS NOT NULL "+
 			"AND greeting.effect_intent_id IS NULL AND profile.main_status = ? AND profile.end_reason IS NULL",
-			batch.BatchID, AIInvocationOK, CandidateProfileSelected).
+			batch.BatchID,
+			platform,
+			accountRef,
+			platform,
+			accountRef,
+			AIInvocationOK,
+			CandidateProfileSelected,
+		).
 		Count(&out.PendingConfirm).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
@@ -399,7 +487,11 @@ func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
 	return out, nil
 }
 
-func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStatistics, error) {
+func appOverviewStatisticsTx(
+	tx *gorm.DB,
+	start, end time.Time,
+	platform, accountRef string,
+) (AppOverviewStatistics, error) {
 	var out AppOverviewStatistics
 	count := func(query *gorm.DB, target *int64) error { return query.Count(target).Error }
 	var value int64
@@ -408,6 +500,7 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = score.run_id").
 		Where("score.status = ? AND score.finished_at >= ? AND score.finished_at < ?",
 			AIInvocationOK, start, end).
+		Where("run.platform = ? AND run.account_ref = ?", platform, accountRef).
 		Group("run.platform, run.platform_user_ref")).
 		Count(&value).Error; err != nil {
 		return out, err
@@ -416,8 +509,10 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 
 	value = 0
 	if err := count(tx.Table("sourcing_selection_decisions AS decision").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
 		Where("decision.outcome = ? AND decision.decided_at >= ? AND decision.decided_at < ?",
 			SourcingSelectionSelected, start, end).
+		Where("run.platform = ? AND run.account_ref = ?", platform, accountRef).
 		Distinct("decision.profile_id"), &value); err != nil {
 		return out, err
 	}
@@ -425,6 +520,7 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
 		Where("greeted_at >= ? AND greeted_at < ?", start, end).
 		Distinct("profile_id"), &value); err != nil {
 		return out, err
@@ -432,7 +528,7 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 	out.TodayGreeted = exactMetric(value)
 
 	todayInvite, inviteExact, err := appTimedMessageProfileCountTx(
-		tx, "out", "card", "interviewInvite", start, end,
+		tx, platform, accountRef, "out", "card", "interviewInvite", start, end,
 	)
 	if err != nil {
 		return out, err
@@ -447,12 +543,14 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
 		Where("greeted_at IS NOT NULL").Distinct("profile_id"), &value); err != nil {
 		return out, err
 	}
 	out.TotalGreeted = exactMetric(value)
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
 		Where("main_status = ?", CandidateProfileInterviewed).
 		Distinct("profile_id"), &value); err != nil {
 		return out, err
@@ -461,12 +559,22 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 
 	value = 0
 	if err := count(tx.Model(&ContactAsset{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
 		Where("kind = ?", contactAssetKindWechat).Distinct("profile_id"), &value); err != nil {
 		return out, err
 	}
 	out.TotalWechat = exactMetric(value)
 
-	todayReply, replyExact, err := appTimedMessageProfileCountTx(tx, "in", "", "", start, end)
+	todayReply, replyExact, err := appTimedMessageProfileCountTx(
+		tx,
+		platform,
+		accountRef,
+		"in",
+		"",
+		"",
+		start,
+		end,
+	)
 	if err != nil {
 		return out, err
 	}
@@ -481,12 +589,14 @@ func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStat
 
 func appTimedMessageProfileCountTx(
 	tx *gorm.DB,
+	platform, accountRef string,
 	direction, kind, cardType string,
 	start, end time.Time,
 ) (int64, bool, error) {
 	base := tx.Table("messages AS message").
 		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
+		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
 		Where("message.direction = ? AND message.retracted_at IS NULL", direction)
 	if kind != "" {
 		base = base.Where("message.kind = ?", kind)
@@ -509,7 +619,11 @@ func appTimedMessageProfileCountTx(
 	return value, missingTime == 0, nil
 }
 
-func appTodayInterviewsTx(tx *gorm.DB, start, end time.Time) ([]AppInterviewSummary, error) {
+func appTodayInterviewsTx(
+	tx *gorm.DB,
+	start, end time.Time,
+	platform, accountRef string,
+) ([]AppInterviewSummary, error) {
 	type row struct {
 		ProfileID     string
 		DisplayName   *string
@@ -529,6 +643,7 @@ func appTodayInterviewsTx(tx *gorm.DB, start, end time.Time) ([]AppInterviewSumm
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
 		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
 			"AND candidate.platform_user_ref = profile.platform_user_ref").
+		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
 		Where("message.direction = ? AND message.kind = ? AND message.card_type = ? "+
 			"AND message.retracted_at IS NULL AND message.interview_starts_at_ms >= ? "+
 			"AND message.interview_starts_at_ms < ?",
@@ -571,6 +686,11 @@ func validAppCandidateView(view AppCandidateView) bool {
 	default:
 		return false
 	}
+}
+
+func validAppAccountScope(platform, accountRef string) bool {
+	return platform != "" && accountRef != "" &&
+		len(platform) <= 64 && len(accountRef) <= 128
 }
 
 func (s *Store) AppConfirmation(batchID string) (*AppConfirmationProjection, error) {
@@ -731,9 +851,12 @@ func appConfirmationCandidatesTx(
 }
 
 func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListProjection, error) {
+	query.Platform = strings.TrimSpace(query.Platform)
+	query.AccountRef = strings.TrimSpace(query.AccountRef)
 	query.Search = strings.TrimSpace(query.Search)
 	if !validAppCandidateView(query.View) || utf8.RuneCountInString(query.Search) > 100 ||
-		query.Offset < 0 || query.Limit < 0 || query.Limit > 200 {
+		query.Offset < 0 || query.Limit < 0 || query.Limit > 200 ||
+		!validAppAccountScope(query.Platform, query.AccountRef) {
 		return nil, ErrAppProjectionInvalid
 	}
 	if query.Limit == 0 {
@@ -741,7 +864,13 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 	}
 	var out AppCandidateListProjection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		base, err := appCandidateBaseQuery(tx, query.View, query.Search)
+		base, err := appCandidateBaseQuery(
+			tx,
+			query.Platform,
+			query.AccountRef,
+			query.View,
+			query.Search,
+		)
 		if err != nil {
 			return err
 		}
@@ -802,7 +931,9 @@ conversation.unread_count,
 aggregate.automation_status,
 aggregate.manual_reason,
 (SELECT asset.value FROM contact_assets AS asset
- WHERE asset.profile_id = profile.profile_id AND asset.kind = 'wechat'
+ WHERE asset.profile_id = profile.profile_id
+ AND asset.platform = profile.platform AND asset.account_ref = profile.account_ref
+ AND asset.kind = 'wechat'
  ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat,
 (SELECT message.interview_starts_at_ms FROM messages AS message
  WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
@@ -854,16 +985,18 @@ func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {
 
 func appCandidateBaseQuery(
 	tx *gorm.DB,
+	platform, accountRef string,
 	view AppCandidateView,
 	search string,
 ) (*gorm.DB, error) {
 	base := tx.Table("candidate_profiles AS profile").
-		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform " +
+		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
 			"AND candidate.platform_user_ref = profile.platform_user_ref").
-		Joins("LEFT JOIN conversations AS conversation ON conversation.platform = profile.platform " +
-			"AND conversation.account_ref = profile.account_ref " +
+		Joins("LEFT JOIN conversations AS conversation ON conversation.platform = profile.platform "+
+			"AND conversation.account_ref = profile.account_ref "+
 			"AND conversation.conversation_ref = profile.conversation_ref").
-		Joins("LEFT JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = profile.profile_id")
+		Joins("LEFT JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = profile.profile_id").
+		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef)
 	switch view {
 	case AppCandidateViewCommunicating:
 		base = base.Where("profile.main_status IN ?",
@@ -893,9 +1026,14 @@ func escapeLike(input string) string {
 	return replacer.Replace(input)
 }
 
-func (s *Store) AppCandidateDetail(profileID string) (*AppCandidateDetailProjection, error) {
-	profileID = strings.TrimSpace(profileID)
-	if profileID == "" || len(profileID) > 128 {
+func (s *Store) AppCandidateDetail(
+	query AppCandidateDetailQuery,
+) (*AppCandidateDetailProjection, error) {
+	query.Platform = strings.TrimSpace(query.Platform)
+	query.AccountRef = strings.TrimSpace(query.AccountRef)
+	query.ProfileID = strings.TrimSpace(query.ProfileID)
+	if query.ProfileID == "" || len(query.ProfileID) > 128 ||
+		!validAppAccountScope(query.Platform, query.AccountRef) {
 		return nil, ErrAppProjectionInvalid
 	}
 	var out AppCandidateDetailProjection
@@ -909,7 +1047,12 @@ func (s *Store) AppCandidateDetail(profileID string) (*AppCandidateDetailProject
 				"AND conversation.account_ref = profile.account_ref "+
 				"AND conversation.conversation_ref = profile.conversation_ref").
 			Joins("LEFT JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = profile.profile_id").
-			Where("profile.profile_id = ?", profileID).Scan(&rows).Error; err != nil {
+			Where(
+				"profile.profile_id = ? AND profile.platform = ? AND profile.account_ref = ?",
+				query.ProfileID,
+				query.Platform,
+				query.AccountRef,
+			).Scan(&rows).Error; err != nil {
 			return err
 		}
 		if len(rows) == 0 {
@@ -920,7 +1063,13 @@ func (s *Store) AppCandidateDetail(profileID string) (*AppCandidateDetailProject
 		}
 		out.Candidate = rows[0].projection()
 		var profile CandidateProfile
-		if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		if err := tx.First(
+			&profile,
+			"profile_id = ? AND platform = ? AND account_ref = ?",
+			query.ProfileID,
+			query.Platform,
+			query.AccountRef,
+		).Error; err != nil {
 			return err
 		}
 		var err error

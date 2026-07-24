@@ -202,9 +202,64 @@ func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	}
 	state, err := controller.RuntimeState()
 	if err != nil || state.CurrentBatchID != batch.BatchID ||
+		state.Platform != key.Platform || state.AccountRef != key.AccountRef ||
 		state.WorkflowMode != "full" ||
 		state.WorkflowStatus != "awaitingConfirmation" ||
 		state.CommunicationState != "idle" {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+}
+
+func TestRuntimeStateKeepsAccountAndUnfinishedBatchWithoutWorkflowRun(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.Local)
+	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(
+		syntheticCurrentJob(t, 42, "产品经理"),
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.SaveCurrentLegacyJobAIContext(revisions, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		BatchID: "batch-without-workflow", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: stored[0].RevisionHash, TargetCount: 30, StartedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := controller.RuntimeState()
+	if err != nil || state.Platform != key.Platform || state.AccountRef != key.AccountRef ||
+		state.CurrentBatchID != started.Batch.BatchID || state.WorkflowMode != "" ||
+		state.WorkflowStatus != "" {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+}
+
+func TestRuntimeStateFailsClosedWhenNoUniqueAccountExists(t *testing.T) {
+	db, _ := controllerFixture(t)
+	fingerprint := "principal-controller-second"
+	if err := db.CreateAccount(&store.Account{
+		Platform: "zhilian", AccountRef: "account-controller-second",
+		BoundHandID: "hand-controller-second", PrincipalFingerprint: &fingerprint,
+		IdentityState: store.IdentityVerified,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := controller.RuntimeState()
+	if err != nil || state.Platform != "" || state.AccountRef != "" ||
+		state.CurrentBatchID != "" {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
 }

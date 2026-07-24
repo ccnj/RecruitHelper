@@ -41,6 +41,8 @@ type Controller struct {
 }
 
 type RuntimeState struct {
+	Platform           string
+	AccountRef         string
 	CurrentBatchID     string
 	WorkflowMode       string
 	WorkflowStatus     string
@@ -161,6 +163,8 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 	}
 	state := RuntimeState{}
 	if run != nil {
+		state.Platform = run.Platform
+		state.AccountRef = run.AccountRef
 		state.WorkflowMode = string(run.Mode)
 		state.WorkflowStatus = string(run.Status)
 		if run.SourcingBatchID != nil {
@@ -188,6 +192,13 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 			return state, nil
 		}
 		return RuntimeState{}, err
+	}
+	state.Platform = key.Platform
+	state.AccountRef = key.AccountRef
+	if batch, loadErr := c.store.ActiveSourcingBatch(key); loadErr != nil {
+		return RuntimeState{}, loadErr
+	} else if batch != nil {
+		state.CurrentBatchID = batch.BatchID
 	}
 	state.CommunicationState, err = c.accountCommunicationState(key)
 	if err != nil {

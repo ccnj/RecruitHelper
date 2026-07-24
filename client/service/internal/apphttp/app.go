@@ -25,7 +25,7 @@ type ProjectionStore interface {
 	AppOverview(store.AppOverviewRequest) (*store.AppOverviewProjection, error)
 	AppConfirmation(string) (*store.AppConfirmationProjection, error)
 	AppCandidates(store.AppCandidateListQuery) (*store.AppCandidateListProjection, error)
-	AppCandidateDetail(string) (*store.AppCandidateDetailProjection, error)
+	AppCandidateDetail(store.AppCandidateDetailQuery) (*store.AppCandidateDetailProjection, error)
 }
 
 type RuntimeSnapshot struct {
@@ -40,6 +40,8 @@ type RuntimeSnapshot struct {
 	PluginHealth       string `json:"pluginHealth,omitempty"`
 	PluginVersion      string `json:"pluginVersion,omitempty"`
 	ContractMatch      bool   `json:"contractMatch"`
+	Platform           string `json:"-"`
+	AccountRef         string `json:"-"`
 	CurrentBatchID     string `json:"-"`
 	WorkflowMode       string `json:"workflowMode,omitempty"`
 	WorkflowStatus     string `json:"workflowStatus,omitempty"`
@@ -292,6 +294,8 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 	snapshot.Model = strings.TrimSpace(snapshot.Model)
 	snapshot.PluginHealth = strings.TrimSpace(snapshot.PluginHealth)
 	snapshot.PluginVersion = strings.TrimSpace(snapshot.PluginVersion)
+	snapshot.Platform = strings.TrimSpace(snapshot.Platform)
+	snapshot.AccountRef = strings.TrimSpace(snapshot.AccountRef)
 	snapshot.CurrentBatchID = strings.TrimSpace(snapshot.CurrentBatchID)
 	snapshot.WorkflowMode = strings.TrimSpace(snapshot.WorkflowMode)
 	snapshot.WorkflowStatus = strings.TrimSpace(snapshot.WorkflowStatus)
@@ -301,8 +305,20 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	runtime := a.runtimeSnapshot(r.Context())
+	if runtime.Platform == "" || runtime.AccountRef == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"overview": store.AppOverviewProjection{
+				Job:             store.AppJobProjection{SyncStatus: "missing"},
+				TodayInterviews: []store.AppInterviewSummary{},
+				RefreshedAt:     a.now(),
+			},
+			"runtime": runtime,
+		})
+		return
+	}
 	overview, err := a.projections.AppOverview(store.AppOverviewRequest{
 		Now: a.now(), CurrentBatchID: runtime.CurrentBatchID,
+		Platform: runtime.Platform, AccountRef: runtime.AccountRef,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "首页数据读取失败"})
@@ -343,6 +359,7 @@ func (a *API) confirmation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
+	runtime := a.runtimeSnapshot(r.Context())
 	view := store.AppCandidateView(strings.TrimSpace(r.URL.Query().Get("view")))
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	if utf8.RuneCountInString(search) > 100 {
@@ -359,7 +376,30 @@ func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "分页参数无效"})
 		return
 	}
+	switch view {
+	case store.AppCandidateViewCommunicating, store.AppCandidateViewPending,
+		store.AppCandidateViewInterviewed, store.AppCandidateViewWechat:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选人视图无效"})
+		return
+	}
+	if limit > 200 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "分页参数无效"})
+		return
+	}
+	if runtime.Platform == "" || runtime.AccountRef == "" {
+		if limit == 0 {
+			limit = 50
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"candidates": store.AppCandidateListProjection{
+				View: view, Items: []store.AppCandidateListItem{}, Limit: limit, Offset: offset,
+			},
+		})
+		return
+	}
 	projection, err := a.projections.AppCandidates(store.AppCandidateListQuery{
+		Platform: runtime.Platform, AccountRef: runtime.AccountRef,
 		View: view, Search: search, Limit: limit, Offset: offset,
 	})
 	if err != nil {
@@ -388,7 +428,14 @@ func (a *API) candidateDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "档案标识无效"})
 		return
 	}
-	projection, err := a.projections.AppCandidateDetail(profileID)
+	runtime := a.runtimeSnapshot(r.Context())
+	if runtime.Platform == "" || runtime.AccountRef == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "候选人详情读取失败"})
+		return
+	}
+	projection, err := a.projections.AppCandidateDetail(store.AppCandidateDetailQuery{
+		Platform: runtime.Platform, AccountRef: runtime.AccountRef, ProfileID: profileID,
+	})
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
