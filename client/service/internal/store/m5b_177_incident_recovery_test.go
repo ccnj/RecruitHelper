@@ -75,7 +75,7 @@ func seedM5B177IncidentFixture(t *testing.T, preceding int) m5B177IncidentFixtur
 			"last_message_seq":       2,
 			"last_message_direction": "in",
 			"last_message_kind":      "text",
-			"last_message_preview":   m5B177ResumeText,
+			"last_message_preview":   m5B177OldConversationPreview,
 			"adopted_boundary_seq":   1,
 		}).Error; err != nil {
 		t.Fatal(err)
@@ -390,7 +390,8 @@ func assertM5B177InitialState(t *testing.T, fixture m5B177IncidentFixture) {
 	}
 	conversation, err := fixture.store.ConversationByKey(fixture.key)
 	if err != nil || conversation.LastMessageDirection != "in" ||
-		conversation.LastMessageKind != "text" || conversation.LastMessageSeq != 2 {
+		conversation.LastMessageKind != "text" || conversation.LastMessageSeq != 2 ||
+		conversation.LastMessagePreview != m5B177OldConversationPreview {
 		t.Fatalf("失败事务留下会话部分修改: conversation=%+v err=%v", conversation, err)
 	}
 	var aggregate CommunicationV4Aggregate

@@ -17,12 +17,13 @@ import (
 var ErrM5B177IncidentRecoveryUnsafe = errors.New("M5-B 智联 177 事故恢复前置事实不完整")
 
 const (
-	m5B177RecoveryAuditCategory       = "m5b_177_incident_recovery"
-	m5B177FreshProofMaxAge            = 10 * time.Minute
-	m5B177MessageSeq            int64 = 2
-	m5B177CanonicalInputKey           = "message:2"
-	m5B177ArchivedInputKey            = "archivedSystemNotice/message:2"
-	m5B177ResumeText                  = "您好，这是我的附件简历，请查收"
+	m5B177RecoveryAuditCategory        = "m5b_177_incident_recovery"
+	m5B177FreshProofMaxAge             = 10 * time.Minute
+	m5B177MessageSeq             int64 = 2
+	m5B177CanonicalInputKey            = "message:2"
+	m5B177ArchivedInputKey             = "archivedSystemNotice/message:2"
+	m5B177ResumeText                   = "您好，这是我的附件简历，请查收"
+	m5B177OldConversationPreview       = "这是我的附件简历，请查收"
 )
 
 type M5B177IncidentRecoveryResult struct {
@@ -124,7 +125,7 @@ func (s *Store) RecoverM5B177Incident(
 			Where(conversationWhere(proof.key), conversationArgs(proof.key)...).
 			Where(
 				"last_message_seq = ? AND last_message_direction = ? AND last_message_kind = ? AND last_message_preview = ?",
-				m5B177MessageSeq, "in", "text", m5B177ResumeText,
+				m5B177MessageSeq, "in", "text", m5B177OldConversationPreview,
 			).
 			UpdateColumns(map[string]any{
 				"last_message_direction": "in",
@@ -377,6 +378,7 @@ func m5B177InitialState(
 	message := messages[1]
 	return conversation.LastMessageDirection == "in" &&
 		conversation.LastMessageKind == "text" &&
+		conversation.LastMessagePreview == m5B177OldConversationPreview &&
 		message.Direction == "system" && message.Kind == "system" &&
 		message.ContentHash == textcanon.Hash(m5B177ResumeText) &&
 		message.CardType == "" && message.CardState == "" &&
@@ -401,6 +403,7 @@ func m5B177AppliedState(
 	}
 	message := messages[1]
 	if conversation.LastMessageDirection != "in" || conversation.LastMessageKind != "card" ||
+		conversation.LastMessagePreview != m5B177ResumeText ||
 		message.Direction != "in" || message.Kind != "card" ||
 		message.CardType != "resumeAttachment" || message.CardState != "unknown" ||
 		message.InterviewStartsAtMs != nil || message.InterviewEndsAtMs != nil ||
@@ -423,7 +426,6 @@ func m5B177CommonShape(
 	if len(messages) != 2 ||
 		conversation.AdoptedBoundarySeq != messages[0].Seq ||
 		conversation.LastMessageSeq != m5B177MessageSeq ||
-		conversation.LastMessagePreview != m5B177ResumeText ||
 		profile.MainStatus != CandidateProfileGreeted || profile.EndReason != nil ||
 		profile.SuccessfulGreetingIntentID == nil || profile.GreetedAt == nil ||
 		profile.CommunicatingAt != nil || profile.FirstRealMessageSeq != nil ||
