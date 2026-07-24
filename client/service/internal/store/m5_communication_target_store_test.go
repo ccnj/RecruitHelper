@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/communication"
+	"recruithelper/client/service/internal/m5ai"
 )
 
 func seedReadyCommunicationTarget(
@@ -60,6 +61,34 @@ func moveReadyCommunicationTargetAccount(
 	return fixture
 }
 
+func advanceCommunicationJobHead(
+	t *testing.T,
+	s *Store,
+	profileID string,
+	revisionHash string,
+	at time.Time,
+) m5ai.ContextRevision {
+	t.Helper()
+	profile, err := s.CandidateProfileByID(profileID)
+	if err != nil || profile == nil || profile.BackendJobID == nil {
+		t.Fatalf("读取测试档案后台职位失败: profile=%+v err=%v", profile, err)
+	}
+	revision := contextRevisionFixture(
+		"context-current-"+*profile.BackendJobID,
+		revisionHash,
+		at,
+	)
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = *profile.BackendJobID
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		at,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return revision
+}
+
 func TestCommunicationTargetsRequireCompleteFactsAndUseStableOrder(t *testing.T) {
 	s := openTest(t)
 	first := seedReadyCommunicationTarget(t, s, "profile-target-a")
@@ -82,7 +111,6 @@ func TestCommunicationTargetsRequireCompleteFactsAndUseStableOrder(t *testing.T)
 	}
 	material, ready, err := s.CommunicationAIMaterialForProfile(first.ProfileID)
 	if err != nil || !ready ||
-		material.ContextBinding.RevisionHash != material.ContextRevision.RevisionHash ||
 		material.ResumeSnapshot.ProfileID != first.ProfileID {
 		t.Fatalf("按需 AI 材料不一致: material=%+v ready=%v err=%v",
 			material, ready, err)
@@ -103,8 +131,91 @@ func TestCommunicationTargetsRequireCompleteFactsAndUseStableOrder(t *testing.T)
 	}
 }
 
-func TestCommunicationAIMaterialRejectsClaimedDanglingContextOrResume(t *testing.T) {
-	t.Run("context revision mismatch", func(t *testing.T) {
+func TestCommunicationAIMaterialRoutesDifferentBackendJobsIndependently(t *testing.T) {
+	s := openTest(t)
+	first := seedReadyCommunicationTarget(t, s, "profile-target-job-a")
+	second := seedReadyCommunicationTarget(t, s, "profile-target-job-b")
+
+	firstMaterial, firstReady, firstErr := s.CommunicationAIMaterialForProfile(first.ProfileID)
+	secondMaterial, secondReady, secondErr := s.CommunicationAIMaterialForProfile(second.ProfileID)
+	if firstErr != nil || secondErr != nil || !firstReady || !secondReady {
+		t.Fatalf(
+			"不同职位材料未就绪: firstReady=%v firstErr=%v secondReady=%v secondErr=%v",
+			firstReady,
+			firstErr,
+			secondReady,
+			secondErr,
+		)
+	}
+	if firstMaterial.ContextRevision.SourceJobRef == secondMaterial.ContextRevision.SourceJobRef ||
+		firstMaterial.ContextRevision.RevisionHash == secondMaterial.ContextRevision.RevisionHash {
+		t.Fatalf(
+			"不同 BackendJobID 被路由到同一配置: first=%+v second=%+v",
+			firstMaterial.ContextRevision,
+			secondMaterial.ContextRevision,
+		)
+	}
+}
+
+func TestCommunicationAIMaterialUsesLatestHeadAndMissingRouteFailsClosed(t *testing.T) {
+	t.Run("latest head wins while audit binding stays historical", func(t *testing.T) {
+		s := openTest(t)
+		fixture := seedReadyCommunicationTarget(t, s, "profile-target-latest-head")
+		next := advanceCommunicationJobHead(
+			t,
+			s,
+			fixture.ProfileID,
+			"revision-profile-target-latest-head-v2",
+			time.Now().UTC().Add(time.Minute),
+		)
+		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+		binding, bindingErr := s.ActiveProfileAIContext(fixture.ProfileID)
+		if err != nil || !ready ||
+			material.ContextRevision.RevisionHash != next.RevisionHash ||
+			bindingErr != nil || binding == nil ||
+			binding.Binding.RevisionHash == next.RevisionHash {
+			t.Fatalf(
+				"新轮没有使用最新 head 或旧审计绑定被改写: material=%+v ready=%v err=%v binding=%+v bindingErr=%v",
+				material,
+				ready,
+				err,
+				binding,
+				bindingErr,
+			)
+		}
+	})
+
+	t.Run("missing backend job id", func(t *testing.T) {
+		s := openTest(t)
+		fixture := seedReadyCommunicationTarget(t, s, "profile-target-missing-job")
+		if err := s.db.Model(&CandidateProfile{}).
+			Where("profile_id = ?", fixture.ProfileID).
+			UpdateColumn("backend_job_id", nil).Error; err != nil {
+			t.Fatal(err)
+		}
+		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+		if err != nil || ready {
+			t.Fatalf("缺 BackendJobID 必须 fail closed: material=%+v ready=%v err=%v", material, ready, err)
+		}
+	})
+
+	t.Run("missing current head", func(t *testing.T) {
+		s := openTest(t)
+		fixture := seedReadyCommunicationTarget(t, s, "profile-target-missing-head")
+		if err := s.db.Model(&CandidateProfile{}).
+			Where("profile_id = ?", fixture.ProfileID).
+			UpdateColumn("backend_job_id", "job-without-head").Error; err != nil {
+			t.Fatal(err)
+		}
+		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+		if err != nil || ready {
+			t.Fatalf("缺 current head 必须 fail closed: material=%+v ready=%v err=%v", material, ready, err)
+		}
+	})
+}
+
+func TestCommunicationAIMaterialIgnoresAuditBindingButRejectsDanglingResume(t *testing.T) {
+	t.Run("audit binding mismatch does not control routing", func(t *testing.T) {
 		s := openTest(t)
 		fixture := seedReadyCommunicationTarget(t, s, "profile-target-context-conflict")
 		if err := s.db.Model(&ProfileAIContextBinding{}).
@@ -119,8 +230,8 @@ func TestCommunicationAIMaterialRejectsClaimedDanglingContextOrResume(t *testing
 			t.Fatalf("AI 上下文损坏不得隐藏基础目标: targets=%+v err=%v", targets, err)
 		}
 		material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
-		if ready || !errors.Is(err, ErrCommunicationTargetConflict) {
-			t.Fatalf("悬空职位上下文必须在按需加载时报错: material=%+v ready=%v err=%v",
+		if err != nil || !ready || material.ContextRevision.ContextID == "wrong-context" {
+			t.Fatalf("审计绑定不得覆盖 BackendJobID 当前配置: material=%+v ready=%v err=%v",
 				material, ready, err)
 		}
 	})
@@ -184,7 +295,7 @@ func TestCommunicationTargetsIncludeNormalAIPreparationGapsAndIgnoreTrials(t *te
 	}
 }
 
-func TestCommunicationAIMaterialMissingActiveContextIsNormalPreparationGap(t *testing.T) {
+func TestCommunicationAIMaterialDoesNotRequireActiveAuditBinding(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-target-context-waiting")
 	if err := s.db.Model(&ProfileAIContextBinding{}).
@@ -202,8 +313,8 @@ func TestCommunicationAIMaterialMissingActiveContextIsNormalPreparationGap(t *te
 		t.Fatalf("职位上下文准备缺口不得隐藏基础目标: targets=%+v err=%v", targets, err)
 	}
 	material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
-	if err != nil || ready {
-		t.Fatalf("无活动职位上下文应返回未就绪: material=%+v ready=%v err=%v",
+	if err != nil || !ready {
+		t.Fatalf("无活动审计绑定仍应使用 BackendJobID 当前配置: material=%+v ready=%v err=%v",
 			material, ready, err)
 	}
 }

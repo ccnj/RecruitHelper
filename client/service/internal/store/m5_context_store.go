@@ -159,12 +159,19 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 func (s *Store) CurrentLegacyJobAIContextByBackendJobID(
 	backendJobID string,
 ) (*JobAIContextRevision, error) {
+	return currentLegacyJobAIContextByBackendJobIDTx(s.db, backendJobID)
+}
+
+func currentLegacyJobAIContextByBackendJobIDTx(
+	tx *gorm.DB,
+	backendJobID string,
+) (*JobAIContextRevision, error) {
 	backendJobID = strings.TrimSpace(backendJobID)
-	if backendJobID == "" {
+	if tx == nil || backendJobID == "" {
 		return nil, ErrJobAIContextHeadInvalid
 	}
 	var head JobAIContextHead
-	err := s.db.First(
+	err := tx.First(
 		&head,
 		"source_kind = ? AND source_job_ref = ?",
 		legacyJobConfigSourceKind,
@@ -177,7 +184,7 @@ func (s *Store) CurrentLegacyJobAIContextByBackendJobID(
 		return nil, err
 	}
 	var revision JobAIContextRevision
-	if err := s.db.First(&revision, "revision_hash = ?", head.RevisionHash).Error; err != nil {
+	if err := tx.First(&revision, "revision_hash = ?", head.RevisionHash).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrJobAIContextRevisionNotFound
 		}

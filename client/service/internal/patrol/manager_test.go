@@ -110,6 +110,7 @@ func (r *fakeRunner) count(name string) int {
 
 type harness struct {
 	db      *store.Store
+	dataDir string
 	clock   *fakeClock
 	hands   *fakeHands
 	runner  *fakeRunner
@@ -120,7 +121,8 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	db, err := store.Open(t.TempDir())
+	dataDir := t.TempDir()
+	db, err := store.Open(dataDir)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -156,7 +158,10 @@ func newHarness(t *testing.T) *harness {
 	if err := manager.EnableToday(key); err != nil {
 		t.Fatalf("EnableToday: %v", err)
 	}
-	return &harness{db: db, clock: clock, hands: hands, runner: runner, manager: manager, key: key, config: config}
+	return &harness{
+		db: db, dataDir: dataDir, clock: clock, hands: hands, runner: runner,
+		manager: manager, key: key, config: config,
+	}
 }
 
 func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {

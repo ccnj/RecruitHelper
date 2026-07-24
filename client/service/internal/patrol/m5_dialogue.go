@@ -140,11 +140,18 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 		return nil
 	}
 
-	activeContext, err := a.manager.store.ActiveProfileAIContext(target.Profile.ProfileID)
+	if target.Profile.BackendJobID == nil || strings.TrimSpace(*target.Profile.BackendJobID) == "" {
+		return a.manager.store.MarkActiveM5TrialManualRequired(
+			target.Profile.ProfileID, "contextNotBound", a.manager.now(),
+		)
+	}
+	currentContext, err := a.manager.store.CurrentLegacyJobAIContextByBackendJobID(
+		strings.TrimSpace(*target.Profile.BackendJobID),
+	)
 	if err != nil {
 		return err
 	}
-	if activeContext == nil {
+	if currentContext == nil {
 		return a.manager.store.MarkActiveM5TrialManualRequired(
 			target.Profile.ProfileID, "contextNotBound", a.manager.now(),
 		)
@@ -186,7 +193,7 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 			InputDigest: digest, HistoryThroughSeq: pending.lastOutbound.Seq,
 			InboundFromSeq:      pending.inbound[0].Seq,
 			InboundThroughSeq:   pending.inbound[len(pending.inbound)-1].Seq,
-			ContextRevisionHash: activeContext.Revision.RevisionHash,
+			ContextRevisionHash: currentContext.RevisionHash,
 			ResumeSnapshotID:    snapshot.SnapshotID, RecommendedTimeText: recommended,
 			RenderFormatVersion: m5ai.DialogueRenderFormatVersion, FrozenAt: a.now,
 		})
@@ -636,12 +643,11 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
-	active, err := a.manager.store.ActiveProfileAIContext(turn.ProfileID)
-	if err != nil || active == nil || active.Binding.RevisionHash != turn.ContextRevisionHash {
-		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
-	}
 	revision, err := a.manager.store.JobAIContextRevisionByHash(turn.ContextRevisionHash)
-	if err != nil || revision == nil {
+	if err != nil || revision == nil ||
+		profile.BackendJobID == nil ||
+		strings.TrimSpace(*profile.BackendJobID) == "" ||
+		revision.SourceJobRef != strings.TrimSpace(*profile.BackendJobID) {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	snapshot, err := a.manager.store.CandidateResumeSnapshotByID(turn.ProfileID, turn.ResumeSnapshotID)

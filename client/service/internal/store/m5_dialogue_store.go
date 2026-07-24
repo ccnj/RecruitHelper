@@ -202,9 +202,11 @@ func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialog
 			req.ProfileID, M5TrialSelectionActive, m5TrialActiveSlot).Error; err != nil {
 			return ErrDialogueTurnBinding
 		}
-		var binding ProfileAIContextBinding
-		if err := tx.First(&binding, "profile_id = ? AND status = ?",
-			req.ProfileID, ProfileAIContextBindingActive).Error; err != nil || binding.RevisionHash != req.ContextRevisionHash {
+		currentRevision, currentReady, err := currentCommunicationJobAIContextTx(tx, profile)
+		if err != nil {
+			return err
+		}
+		if !currentReady || currentRevision.RevisionHash != req.ContextRevisionHash {
 			return ErrDialogueTurnBinding
 		}
 		var snapshot CandidateResumeSnapshot
@@ -336,7 +338,7 @@ func sameFrozenDialogueTurn(existing, wanted DialogueTurn) bool {
 }
 
 // validateDialogueTurnCurrentTx 在每个 AI 边界重验冻结引用仍指向当前活动事实。
-// 它不比较正文，只比较脑内不可变引用、活动消息边界和正式绑定。
+// 它不比较正文，只比较脑内不可变引用、活动消息边界和后台职位归属。
 func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	var profile CandidateProfile
 	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
@@ -371,9 +373,11 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 			return ErrDialogueTurnBinding
 		}
 	}
-	var binding ProfileAIContextBinding
-	if err := tx.First(&binding, "profile_id = ? AND status = ?",
-		turn.ProfileID, ProfileAIContextBindingActive).Error; err != nil || binding.RevisionHash != turn.ContextRevisionHash {
+	if _, err := frozenCommunicationJobAIContextTx(
+		tx,
+		profile,
+		turn.ContextRevisionHash,
+	); err != nil {
 		return ErrDialogueTurnBinding
 	}
 	var snapshot CandidateResumeSnapshot

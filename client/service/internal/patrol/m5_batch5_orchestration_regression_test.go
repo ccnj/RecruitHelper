@@ -160,13 +160,6 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 				appendM5BoundaryMessage(t, h, fixture, "out", "真人先行回复的合成消息")
 			},
 		},
-		{
-			name: "explicit_context_rebind",
-			mutate: func(t *testing.T, h *harness, fixture m5AdviceFixture) {
-				t.Helper()
-				rebindM5FixtureContext(t, h, fixture)
-			},
-		},
 	}
 
 	for _, test := range tests {

@@ -109,21 +109,18 @@ func (s *Store) reuseSourcingResume(
 			return ErrResumeCaptureBinding
 		}
 		if !requireActiveTrial {
-			var binding ProfileAIContextBinding
-			if err := tx.First(
-				&binding,
-				"profile_id = ? AND status = ?",
-				profile.ProfileID,
-				ProfileAIContextBindingActive,
-			).Error; err != nil {
+			if profile.BackendJobID == nil || strings.TrimSpace(*profile.BackendJobID) == "" {
 				return ErrResumeCaptureBinding
 			}
 			var revision JobAIContextRevision
-			if err := tx.First(&revision, "revision_hash = ?", binding.RevisionHash).Error; err != nil {
+			if err := tx.First(
+				&revision,
+				"revision_hash = ?",
+				invocation.ContextRevisionHash,
+			).Error; err != nil {
 				return ErrResumeCaptureBinding
 			}
-			if binding.RevisionHash != invocation.ContextRevisionHash ||
-				binding.ContextID != revision.ContextID {
+			if revision.SourceJobRef != strings.TrimSpace(*profile.BackendJobID) {
 				return ErrResumeCaptureBinding
 			}
 		}
@@ -283,17 +280,13 @@ func (s *Store) SourcingProfileIDsNeedingResumeForAccount(key AccountKey) ([]str
 				"AND gi.effect_intent_id = p.successful_greeting_intent_id",
 		).
 		Joins(
-			"JOIN profile_ai_context_bindings AS b ON b.profile_id = p.profile_id "+
-				"AND b.status = ? AND b.revision_hash = gi.context_revision_hash",
-			ProfileAIContextBindingActive,
-		).
-		Joins(
-			"JOIN job_ai_context_revisions AS r ON r.revision_hash = b.revision_hash "+
-				"AND r.context_id = b.context_id",
+			"JOIN job_ai_context_revisions AS r ON r.revision_hash = gi.context_revision_hash "+
+				"AND r.source_job_ref = p.backend_job_id",
 		).
 		Where(
 			"p.platform = ? AND p.account_ref = ? AND p.main_status IN ? AND p.end_reason IS NULL "+
-				"AND p.conversation_ref IS NOT NULL AND p.resume_capture_state = ? "+
+				"AND p.conversation_ref IS NOT NULL AND p.backend_job_id IS NOT NULL "+
+				"AND p.resume_capture_state = ? "+
 				"AND v4.automation_status = ? AND gi.status = ? AND gi.finished_at IS NOT NULL",
 			key.Platform,
 			key.AccountRef,

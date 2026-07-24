@@ -155,7 +155,8 @@ func seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
 	revision := m5ai.ContextRevision{
 		ContextID:    "context-v4-patrol-" + suffix,
 		RevisionHash: "revision-v4-patrol-" + suffix,
-		SourceKind:   "localImport", DisplayName: "合成职位上下文-" + suffix,
+		SourceKind:   "legacyJobConfig", SourceJobRef: "job-v4-patrol-" + suffix,
+		DisplayName:   "合成职位上下文-" + suffix,
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: replyPrompt, IntentPrompt: intentPrompt,
@@ -163,7 +164,17 @@ func seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
 		},
 		CreatedAt: now,
 	}
-	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+	if _, err := h.db.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCandidateBackendJobIDForTest(
+		h,
+		profileID,
+		revision.SourceJobRef,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.db.SelectM5TrialProfile(

@@ -2,8 +2,10 @@ package patrol
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -70,6 +72,37 @@ type m5AdviceFixture struct {
 	profileID       string
 	conversationRef string
 	greetingIntent  string
+}
+
+func setCandidateBackendJobIDForTest(
+	h *harness,
+	profileID string,
+	backendJobID string,
+) error {
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(h.dataDir, "brain.db")+"?_pragma=busy_timeout(5000)",
+	)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := db.Exec(
+		"UPDATE candidate_profiles SET backend_job_id = ? WHERE profile_id = ?",
+		backendJobID,
+		profileID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("测试档案后台职位更新行数错误: %d", rows)
+	}
+	return nil
 }
 
 func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
@@ -166,7 +199,8 @@ func seedM5AdviceFixtureWithInbound(
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
 		ContextID: "context-m5-advice", RevisionHash: "revision-m5-advice",
-		SourceKind: "localImport", DisplayName: "合成职位上下文",
+		SourceKind: "legacyJobConfig", SourceJobRef: "job-m5-advice",
+		DisplayName:   "合成职位上下文",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: replyPrompt, IntentPrompt: intentPrompt,
@@ -174,7 +208,17 @@ func seedM5AdviceFixtureWithInbound(
 		},
 		CreatedAt: now,
 	}
-	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+	if _, err := h.db.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := setCandidateBackendJobIDForTest(
+		h,
+		profileID,
+		revision.SourceJobRef,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.db.BindActiveM5TrialProfileAIContext(store.BindProfileAIContextRequest{

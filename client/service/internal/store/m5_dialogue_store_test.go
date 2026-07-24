@@ -25,6 +25,20 @@ func seedDialogueStoreFixture(t *testing.T, s *Store, profileID, kind string) di
 		SnapshotID:         "snapshot-" + profileID,
 		RevisionHash:       "revision-" + profileID,
 	}
+	backendJobID := "job-" + profileID
+	revision := contextRevisionFixture(
+		"context-"+profileID,
+		fixture.RevisionHash,
+		now,
+	)
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = backendJobID
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		now,
+	); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.db.Create(&CandidateResumeSnapshot{
 		SnapshotID: fixture.SnapshotID, ProfileID: profileID, SourceKind: "imConversation",
 		SourceConversationRef: base.ConversationRef, SourceLogicalDispatchID: "capture-" + profileID,
@@ -34,7 +48,8 @@ func seedDialogueStoreFixture(t *testing.T, s *Store, profileID, kind string) di
 		t.Fatal(err)
 	}
 	if err := s.db.Model(&CandidateProfile{}).Where("profile_id = ?", profileID).Updates(map[string]any{
-		"resume_capture_state": ResumeCaptureCaptured, "active_resume_snapshot_id": fixture.SnapshotID,
+		"backend_job_id": backendJobID, "resume_capture_state": ResumeCaptureCaptured,
+		"active_resume_snapshot_id": fixture.SnapshotID,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +662,7 @@ func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
 		}
 	})
 
-	t.Run("intent with changed binding stays unclassified manual", func(t *testing.T) {
+	t.Run("historical binding change does not invalidate frozen turn", func(t *testing.T) {
 		s := openTest(t)
 		fixture, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-recover-binding")
 		if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
@@ -665,20 +680,19 @@ func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
 		}
 		recovered, err := s.RecoverInterruptedAIInvocations(time.Now().UTC().Truncate(time.Millisecond))
 		if err != nil || recovered != 1 {
-			t.Fatalf("换绑后的 intent 遗留恢复失败: recovered=%d err=%v", recovered, err)
+			t.Fatalf("审计绑定变化后的 intent 遗留恢复失败: recovered=%d err=%v", recovered, err)
 		}
 		stored, _ := s.DialogueTurnByID(turn.TurnID)
-		if stored == nil || stored.Status != DialogueTurnManualRequired ||
-			stored.FailureReason != "inputBoundaryChanged" || stored.IntentLabel != "" ||
-			stored.IntentSource != "" || stored.ClassifiedAt != nil {
-			t.Fatalf("边界失效只能记 invocation 并转人工，不得伪造分类: %+v", stored)
+		if stored == nil || stored.Status != DialogueTurnClassified ||
+			stored.FailureReason != "" || stored.IntentLabel != m5ai.IntentNeutral ||
+			stored.IntentSource != DialogueIntentLLMFailure || stored.ClassifiedAt == nil {
+			t.Fatalf("冻结 revision 应继续收敛 neutral fallback: %+v", stored)
 		}
 		invocations, _ := s.AIInvocationsForTurn(turn.TurnID)
 		if len(invocations) != 1 || invocations[0].FinishedAt == nil ||
 			invocations[0].ErrorClass != "processInterrupted" {
 			t.Fatalf("中断 invocation 未终局化: %+v", invocations)
 		}
-		assertTrialManualRequired(t, s, "inputBoundaryChanged")
 	})
 
 	t.Run("reply manual", func(t *testing.T) {

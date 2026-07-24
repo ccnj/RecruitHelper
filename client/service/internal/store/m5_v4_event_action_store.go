@@ -581,29 +581,20 @@ func communicationV4FixedPhrasesForProfileTx(
 	tx *gorm.DB,
 	profileID string,
 ) (communication.V4FixedPhraseView, string, bool, error) {
-	var binding ProfileAIContextBinding
-	err := tx.First(
-		&binding,
-		"profile_id = ? AND status = ?",
-		profileID,
-		ProfileAIContextBindingActive,
-	).Error
+	var profile CandidateProfile
+	err := tx.First(&profile, "profile_id = ?", profileID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return communication.V4FixedPhraseView{}, "", false, nil
 	}
 	if err != nil {
 		return communication.V4FixedPhraseView{}, "", false, err
 	}
-	var revision JobAIContextRevision
-	err = tx.First(&revision, "revision_hash = ?", binding.RevisionHash).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return communication.V4FixedPhraseView{}, "", false, nil
-	}
+	revision, ready, err := currentCommunicationJobAIContextTx(tx, profile)
 	if err != nil {
 		return communication.V4FixedPhraseView{}, "", false, err
 	}
-	if revision.ContextID != binding.ContextID {
-		return communication.V4FixedPhraseView{}, revision.RevisionHash, false, nil
+	if !ready {
+		return communication.V4FixedPhraseView{}, "", false, nil
 	}
 	view, err := communication.BuildV4FixedPhraseView(revision.SourcePackage)
 	if err != nil {

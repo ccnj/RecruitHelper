@@ -141,7 +141,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 			return err
 		}
 		if !materialReady ||
-			material.ContextBinding.RevisionHash != req.ContextRevisionHash ||
+			material.ContextRevision.RevisionHash != req.ContextRevisionHash ||
 			material.ResumeSnapshot.SnapshotID != req.ResumeSnapshotID {
 			return ErrDialogueTurnBinding
 		}

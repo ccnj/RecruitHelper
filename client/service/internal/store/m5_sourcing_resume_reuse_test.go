@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -32,13 +33,19 @@ func seedM5SourcingResume(
 	contentHash := hex.EncodeToString(digest[:])
 	batchID := "batch-" + fixture.ProfileID
 	positionRef := "position-" + fixture.ProfileID
+	backendJobID := "job-" + fixture.ProfileID
 	endedAt := now
 	if err := s.db.Create(&SourcingBatch{
 		BatchID: batchID, Platform: fixture.Platform, AccountRef: fixture.AccountRef,
-		ContextRevisionHash: "revision-" + fixture.ProfileID,
-		TargetCount:         1, PositionRef: &positionRef, PositionBoundAt: &now,
+		ContextRevisionHash: "revision-" + fixture.ProfileID, BackendJobID: &backendJobID,
+		TargetCount: 1, PositionRef: &positionRef, PositionBoundAt: &now,
 		Status: SourcingBatchCompleted, StartedAt: now.Add(-time.Minute), EndedAt: &endedAt,
 	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		UpdateColumn("backend_job_id", backendJobID).Error; err != nil {
 		t.Fatal(err)
 	}
 	run := SourcingCandidateRun{
@@ -111,7 +118,12 @@ func seedCommunicationSourcingResume(
 		run.ContextRevisionHash,
 		now,
 	)
-	if _, _, err := s.SaveJobAIContextRevision(revision); err != nil {
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = "job-" + fixture.ProfileID
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.db.Create(&ProfileAIContextBinding{
@@ -203,18 +215,18 @@ func TestReuseSourcingResumeForCommunicationProfileDoesNotNeedTrialSlot(t *testi
 	}
 }
 
-func TestReuseSourcingResumeForCommunicationProfileRejectsRevisionMismatch(t *testing.T) {
+func TestReuseSourcingResumeForCommunicationProfileRejectsBackendJobMismatch(t *testing.T) {
 	s := openTest(t)
 	fixture, _ := seedCommunicationSourcingResume(t, s, "profile-reuse-context-mismatch")
-	if err := s.db.Model(&ProfileAIContextBinding{}).
-		Where("profile_id = ? AND status = ?", fixture.ProfileID, ProfileAIContextBindingActive).
-		Update("revision_hash", "other-revision").Error; err != nil {
+	if err := s.db.Model(&CandidateProfile{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Update("backend_job_id", "other-job").Error; err != nil {
 		t.Fatal(err)
 	}
 
 	result, err := s.ReuseSourcingResumeForCommunicationProfile(fixture.ProfileID, time.Now())
 	if result != nil || !errors.Is(err, ErrResumeCaptureBinding) {
-		t.Fatalf("职位 revision 错绑必须阻断: result=%+v err=%v", result, err)
+		t.Fatalf("后台职位与招呼 revision 错绑必须阻断: result=%+v err=%v", result, err)
 	}
 	var snapshots int64
 	if err := s.db.Model(&CandidateResumeSnapshot{}).

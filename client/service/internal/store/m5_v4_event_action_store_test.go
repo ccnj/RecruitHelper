@@ -46,7 +46,17 @@ func bindCommunicationV4EventActionContext(
 	at time.Time,
 ) {
 	t.Helper()
-	if _, _, err := s.SaveJobAIContextRevision(revision); err != nil {
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = "job-" + profileID
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		at,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).
+		Where("profile_id = ?", profileID).
+		UpdateColumn("backend_job_id", revision.SourceJobRef).Error; err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.BindActiveM5TrialProfileAIContext(BindProfileAIContextRequest{

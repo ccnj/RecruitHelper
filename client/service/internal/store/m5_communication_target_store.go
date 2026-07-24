@@ -28,7 +28,6 @@ type CommunicationTarget struct {
 // CommunicationAIMaterial 是冻结一个新 AI 对话轮所需的完整材料引用。
 // 候选人正文和职位正文仍保留在各自业务事实中，不复制到调度记录。
 type CommunicationAIMaterial struct {
-	ContextBinding  ProfileAIContextBinding
 	ContextRevision JobAIContextRevision
 	ResumeSnapshot  CandidateResumeSnapshot
 }
@@ -212,26 +211,14 @@ func communicationAIMaterialTx(
 		ConversationRef: target.Conversation.ConversationRef,
 	}
 
-	var binding ProfileAIContextBinding
-	err := tx.First(
-		&binding,
-		"profile_id = ? AND status = ?",
-		profile.ProfileID,
-		ProfileAIContextBindingActive,
-	).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return CommunicationAIMaterial{}, false, nil
-	}
+	revision, contextReady, err := currentCommunicationJobAIContextTx(tx, profile)
 	if err != nil {
 		return CommunicationAIMaterial{}, false, err
 	}
-	var revision JobAIContextRevision
-	if err := tx.First(&revision, "revision_hash = ?", binding.RevisionHash).Error; err != nil {
-		return CommunicationAIMaterial{}, false, ErrCommunicationTargetConflict
+	if !contextReady {
+		return CommunicationAIMaterial{}, false, nil
 	}
-	if revision.ContextID != binding.ContextID {
-		return CommunicationAIMaterial{}, false, ErrCommunicationTargetConflict
-	}
+
 	var sourcingInvocation SourcingGreetingInvocation
 	err = tx.First(&sourcingInvocation, "profile_id = ?", profile.ProfileID).Error
 	switch {
@@ -239,8 +226,17 @@ func communicationAIMaterialTx(
 		if sourcingInvocation.Status != AIInvocationOK ||
 			sourcingInvocation.FinishedAt == nil ||
 			sourcingInvocation.EffectIntentID == nil ||
-			*sourcingInvocation.EffectIntentID != target.Aggregate.RootGreetingIntentID ||
-			sourcingInvocation.ContextRevisionHash != binding.RevisionHash {
+			*sourcingInvocation.EffectIntentID != target.Aggregate.RootGreetingIntentID {
+			return CommunicationAIMaterial{}, false, ErrCommunicationTargetConflict
+		}
+		var greetingRevision JobAIContextRevision
+		if err := tx.First(
+			&greetingRevision,
+			"revision_hash = ?",
+			sourcingInvocation.ContextRevisionHash,
+		).Error; err != nil ||
+			profile.BackendJobID == nil ||
+			greetingRevision.SourceJobRef != strings.TrimSpace(*profile.BackendJobID) {
 			return CommunicationAIMaterial{}, false, ErrCommunicationTargetConflict
 		}
 	case errors.Is(err, gorm.ErrRecordNotFound):
@@ -275,6 +271,46 @@ func communicationAIMaterialTx(
 	}
 
 	return CommunicationAIMaterial{
-		ContextBinding: binding, ContextRevision: revision, ResumeSnapshot: snapshot,
+		ContextRevision: *revision, ResumeSnapshot: snapshot,
 	}, true, nil
+}
+
+func currentCommunicationJobAIContextTx(
+	tx *gorm.DB,
+	profile CandidateProfile,
+) (*JobAIContextRevision, bool, error) {
+	if profile.BackendJobID == nil || strings.TrimSpace(*profile.BackendJobID) == "" {
+		return nil, false, nil
+	}
+	revision, err := currentLegacyJobAIContextByBackendJobIDTx(
+		tx,
+		strings.TrimSpace(*profile.BackendJobID),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if revision == nil {
+		return nil, false, nil
+	}
+	return revision, true, nil
+}
+
+func frozenCommunicationJobAIContextTx(
+	tx *gorm.DB,
+	profile CandidateProfile,
+	revisionHash string,
+) (*JobAIContextRevision, error) {
+	if profile.BackendJobID == nil ||
+		strings.TrimSpace(*profile.BackendJobID) == "" ||
+		strings.TrimSpace(revisionHash) == "" {
+		return nil, ErrCommunicationTargetConflict
+	}
+	var revision JobAIContextRevision
+	if err := tx.First(&revision, "revision_hash = ?", revisionHash).Error; err != nil {
+		return nil, ErrCommunicationTargetConflict
+	}
+	if revision.SourceJobRef != strings.TrimSpace(*profile.BackendJobID) {
+		return nil, ErrCommunicationTargetConflict
+	}
+	return &revision, nil
 }

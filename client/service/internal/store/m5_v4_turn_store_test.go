@@ -192,7 +192,7 @@ func TestFreezeCommunicationV4TurnPersistsAggregateAndTurnWithoutTrial(t *testin
 	}
 }
 
-func TestFreezeCommunicationV4TurnReusesOnDemandAIMaterialValidation(t *testing.T) {
+func TestFreezeCommunicationV4TurnIgnoresLegacyAuditBinding(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-material-recheck")
 	text := "合成材料重验消息"
@@ -207,8 +207,8 @@ func TestFreezeCommunicationV4TurnReusesOnDemandAIMaterialValidation(t *testing.
 		t.Fatal(err)
 	}
 	result, err := s.FreezeCommunicationV4Turn(req)
-	if result != nil || !errors.Is(err, ErrCommunicationTargetConflict) {
-		t.Fatalf("Freeze 必须复用按需材料冲突判定: result=%+v err=%v", result, err)
+	if err != nil || result == nil || !result.Created {
+		t.Fatalf("旧审计绑定不得控制新 turn 配置: result=%+v err=%v", result, err)
 	}
 	var turns, applications int64
 	if err := s.db.Model(&DialogueTurn{}).
@@ -221,8 +221,51 @@ func TestFreezeCommunicationV4TurnReusesOnDemandAIMaterialValidation(t *testing.
 		Count(&applications).Error; err != nil {
 		t.Fatal(err)
 	}
-	if turns != 0 || applications != 0 {
-		t.Fatalf("材料冲突不得留下半成品: turns=%d applications=%d", turns, applications)
+	if turns != 1 || applications != 1 {
+		t.Fatalf("BackendJobID 路由应正常冻结: turns=%d applications=%d", turns, applications)
+	}
+}
+
+func TestFreezeCommunicationV4TurnUsesLatestHeadThenKeepsFrozenRevision(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-latest-head")
+	next := advanceCommunicationJobHead(
+		t,
+		s,
+		fixture.ProfileID,
+		"revision-profile-v4-turn-latest-head-v2",
+		time.Now().UTC().Add(time.Minute),
+	)
+	text := "合成最新配置消息"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-turn-latest-head-2", Text: &text,
+	})
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	if req.ContextRevisionHash != next.RevisionHash {
+		t.Fatalf("新 turn 请求未读取最新 head: req=%+v next=%+v", req, next)
+	}
+	first, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || first == nil || !first.Created ||
+		first.Turn.ContextRevisionHash != next.RevisionHash {
+		t.Fatalf("新 turn 未冻结最新配置: first=%+v err=%v", first, err)
+	}
+
+	advanceCommunicationJobHead(
+		t,
+		s,
+		fixture.ProfileID,
+		"revision-profile-v4-turn-latest-head-v3",
+		time.Now().UTC().Add(2*time.Minute),
+	)
+	replayed, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || replayed == nil || replayed.Created ||
+		replayed.Turn.ContextRevisionHash != next.RevisionHash {
+		t.Fatalf("已建 turn 重放不得漂移到新 head: replayed=%+v err=%v", replayed, err)
+	}
+	current, err := s.RecheckDialogueTurnCurrent(first.Turn.TurnID, time.Now())
+	if err != nil || !current {
+		t.Fatalf("head 更新不应使冻结 turn 失效: current=%v err=%v", current, err)
 	}
 }
 
