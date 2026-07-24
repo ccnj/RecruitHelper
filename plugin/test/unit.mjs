@@ -2500,16 +2500,15 @@ function installM6PositionSelectorFixture(options = {}) {
     scrollIntoView() {},
   })
   const titleNode = (title, withStatusTag = false) => {
-    const base = node(withStatusTag ? `${title} 已下架` : title)
-    base.cloneNode = () => {
-      const clone = node(base.textContent)
-      const removable = { remove() { clone.textContent = title } }
-      clone.querySelectorAll = (selector) =>
-        selector === '.job-tag-withdrawn, .job-tag-coordination, .icon-eye' && withStatusTag
-          ? [removable]
-          : []
-      return clone
-    }
+    const base = node(withStatusTag ? `未上线协作${title}` : title)
+    const decorations = withStatusTag
+      ? [node('未上线'), node('协作'), node('')]
+      : []
+    base.cloneNode = withStatusTag ? undefined : base.cloneNode
+    base.querySelectorAll = (selector) =>
+      selector === '.job-tag-withdrawn, .job-tag-coordination, .icon-eye'
+        ? decorations
+        : []
     return base
   }
   const makeJobItem = (title, jobRef, active = false, withStatusTag = false) => {

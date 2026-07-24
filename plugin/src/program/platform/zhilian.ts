@@ -1292,10 +1292,20 @@ async function mainSelectSourcingPosition(
   const titleOf = (item: HTMLElement): string => {
     const titleNode = item.querySelector<HTMLElement>('.job-side-selector__title')
     if (!titleNode) return ''
-    const clone = titleNode.cloneNode(true) as HTMLElement
-    clone.querySelectorAll('.job-tag-withdrawn, .job-tag-coordination, .icon-eye')
-      .forEach((node) => node.remove())
-    return clean(clone.textContent)
+    let title = clean(titleNode.textContent)
+    const decorations = Array.from(titleNode.querySelectorAll<HTMLElement>(
+      '.job-tag-withdrawn, .job-tag-coordination, .icon-eye',
+    )).map((node) => clean(node.textContent)).filter(Boolean)
+    for (const decoration of decorations) {
+      if (title.startsWith(decoration)) {
+        title = clean(title.slice(decoration.length))
+      } else if (title.endsWith(decoration)) {
+        title = clean(title.slice(0, -decoration.length))
+      } else {
+        return ''
+      }
+    }
+    return title
   }
   const closeOwnedDrawer = async (): Promise<MainSelectSourcingPositionFailureReason | null> => {
     const openDrawers = drawers()
