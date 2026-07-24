@@ -218,6 +218,8 @@ export function createProductFixture(): ProductData {
       },
     },
     confirmation: {
+      ready: true,
+      readinessReason: null,
       batchId: 'fixture-batch',
       createdAt: '今天 08:16',
       scoreCompleted: 30,
@@ -326,6 +328,8 @@ export function createEmptyProductData(): ProductData {
       },
     },
     confirmation: {
+      ready: false,
+      readinessReason: '当前没有等待确认的批次',
       batchId: null,
       createdAt: null,
       scoreCompleted: 0,

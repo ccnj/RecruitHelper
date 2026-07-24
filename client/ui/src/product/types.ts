@@ -186,6 +186,8 @@ export interface ConfirmationCandidateView extends CandidateViewItem {
 }
 
 export interface ConfirmationBatchView {
+  ready: boolean
+  readinessReason: string | null
   batchId: string | null
   createdAt: string | null
   scoreCompleted: ProductMetric

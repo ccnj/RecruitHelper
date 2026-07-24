@@ -26,10 +26,13 @@ export function ConfirmationPage({
 }: ConfirmationPageProps) {
   const selectable = batch.candidates.filter((candidate) => candidate.selectable)
   const selectedEligibleCount = selectable.filter((candidate) => selectedIds.has(candidate.profileId)).length
-  const allSelected = selectable.length > 0 && selectedEligibleCount === selectable.length
+  const allSelected = batch.ready &&
+    selectable.length > 0 &&
+    selectedEligibleCount === selectable.length
   const sendUnavailableReason = confirmationSendUnavailableReason(batch, allSelected, actions)
 
   function selectAll() {
+    if (!batch.ready) return
     onSelectionChange(new Set(selectable.map((candidate) => candidate.profileId)))
   }
 
@@ -38,6 +41,7 @@ export function ConfirmationPage({
   }
 
   function toggleCandidate(profileId: string, checked: boolean) {
+    if (!batch.ready) return
     const next = new Set(selectedIds)
     if (checked) next.add(profileId)
     else next.delete(profileId)
@@ -106,7 +110,7 @@ export function ConfirmationPage({
           <section className="rh-panel rh-confirmation-panel">
             <div className="rh-confirmation-toolbar">
               <div>
-                <button className="rh-text-button" disabled={selectable.length === 0} onClick={selectAll} type="button">全选</button>
+                <button className="rh-text-button" disabled={!batch.ready || selectable.length === 0} onClick={selectAll} type="button">全选</button>
                 <span className="rh-toolbar-divider" />
                 <button className="rh-text-button" disabled={selectedIds.size === 0} onClick={clearSelection} type="button">取消全选</button>
                 <span className="rh-selection-count">已选择 {selectedEligibleCount} / {selectable.length}</span>
@@ -139,7 +143,7 @@ export function ConfirmationPage({
                     <label className="rh-confirmation-check">
                       <input
                         checked={selectedIds.has(candidate.profileId)}
-                        disabled={!candidate.selectable}
+                        disabled={!batch.ready || !candidate.selectable}
                         onChange={(event) => toggleCandidate(candidate.profileId, event.target.checked)}
                         type="checkbox"
                       />
@@ -185,6 +189,7 @@ function confirmationSendUnavailableReason(
 ): string | null {
   if (batch.workflowPaused) return '工作流暂停期间不能发送，请先在首页恢复'
   if (!batch.businessWindowOpen) return '运行时间为 08:00～24:00'
+  if (!batch.ready) return batch.readinessReason ?? '当前批次尚未完成'
   if (!allSelected) return '请先全选本批所有可发送候选人'
   if (!batch.batchId) return '当前没有等待发送的批次'
   if (!actions.sendConfirmationBatch) return '发送入口尚未接入'
@@ -202,4 +207,3 @@ function sendStateTone(state: ConfirmationCandidateView['sendState']) {
   }
   return tones[state]
 }
-

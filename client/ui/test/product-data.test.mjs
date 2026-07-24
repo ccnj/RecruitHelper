@@ -180,6 +180,14 @@ check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首�
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')
 check(product.confirmation.candidates[0].sendState === 'ready' && product.confirmationBadge === 1, '候选确认只把可发送成员计入徽章')
+const generationInProgress = structuredClone(snapshot)
+generationInProgress.confirmation.confirmation.ready = false
+generationInProgress.confirmation.confirmation.reason = 'greetingGenerationPending'
+check(
+  !adaptProductSnapshot(generationInProgress, now).confirmation.ready &&
+    adaptProductSnapshot(generationInProgress, now).confirmationBadge === 0,
+  '整批未就绪时不提前开放候选确认或侧边栏徽章',
+)
 check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入待面试列表')
 check(product.candidates.interviewed[0].interviewResult === null, '不从邀面卡状态猜测正式面试结果')
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')

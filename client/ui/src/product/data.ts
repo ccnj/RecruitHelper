@@ -333,7 +333,9 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
     confirmation,
     candidates,
     connections: adaptConnections(runtime, job),
-    confirmationBadge: safeCount(snapshot.confirmation.confirmation.selectableCount),
+    confirmationBadge: snapshot.confirmation.confirmation.ready
+      ? safeCount(snapshot.confirmation.confirmation.selectableCount)
+      : 0,
     clientVersion: empty.clientVersion,
   }
 }
@@ -510,6 +512,8 @@ function adaptConfirmation(
   context: { workflowPaused: boolean; businessWindowOpen: boolean },
 ): ConfirmationBatchView {
   return {
+    ready: raw.available && raw.ready,
+    readinessReason: confirmationReadinessReason(raw),
     batchId: raw.available && clean(raw.batchId) ? clean(raw.batchId) : null,
     createdAt: formatRelativeDateTime(raw.createdAt),
     scoreCompleted: raw.available ? safeCount(raw.scoredCount) : null,
@@ -521,6 +525,16 @@ function adaptConfirmation(
     businessWindowOpen: context.businessWindowOpen,
     candidates: (raw.candidates ?? []).map((candidate) => adaptConfirmationCandidate(candidate)),
   }
+}
+
+function confirmationReadinessReason(raw: AppConfirmationRaw): string | null {
+  if (!raw.available) return '当前没有等待确认的批次'
+  if (raw.ready) return null
+  const reasons: Record<string, string> = {
+    selectionPending: '候选筛选尚未完成',
+    greetingGenerationPending: '招呼语仍在生成，整批就绪后才能全选发送',
+  }
+  return reasons[clean(raw.reason)] ?? '当前批次尚未完成，暂不能全选发送'
 }
 
 function adaptConfirmationCandidate(raw: AppConfirmationCandidateRaw): ConfirmationCandidateView {
