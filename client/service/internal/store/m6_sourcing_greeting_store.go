@@ -157,6 +157,31 @@ func (s *Store) SourcingGreetingByProfileID(profileID string) (*SourcingGreeting
 	return &invocation, nil
 }
 
+// SourcingGreetingRevision 返回本批招呼语生成阶段的配置。已有任意预留时
+// 沿用该阶段已记录 revision；完全未开始时才读取职位 current legacy head。
+func (s *Store) SourcingGreetingRevision(batchID string) (*JobAIContextRevision, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	var out *JobAIContextRevision
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := validateCompletedSourcingBatchForScoringTx(tx, batchID)
+		if err != nil {
+			return err
+		}
+		revision, err := sourcingStageRevisionTx(
+			tx, batch, "sourcing_greeting_invocations", true,
+		)
+		if err != nil {
+			return err
+		}
+		out = revision
+		return nil
+	})
+	return out, err
+}
+
 // SourcingGreetingEffectIntentID 把一个不可变生成 invocation 映射到唯一
 // 自动招呼意图。版本域属于持久身份配方，未来变更必须换域而不能迁移旧 key。
 func SourcingGreetingEffectIntentID(invocationID string) (string, error) {
@@ -274,7 +299,7 @@ func (s *Store) NextSourcingGreetingSendTarget(batchID string) (*SourcingGreetin
 			intentID := invocation.EffectIntentID
 			out = &SourcingGreetingSendTarget{
 				BatchID:             material.Batch.BatchID,
-				ContextRevisionHash: material.Batch.ContextRevisionHash,
+				ContextRevisionHash: invocation.ContextRevisionHash,
 				InvocationID:        invocation.InvocationID,
 				ProfileID:           material.Profile.ProfileID,
 				Platform:            material.Profile.Platform, AccountRef: material.Profile.AccountRef,
@@ -306,7 +331,6 @@ func (s *Store) SourcingBatchGreetingSendProgress(
 			return err
 		}
 		out.BatchID = batchID
-		out.ContextRevisionHash = batch.ContextRevisionHash
 		out.SelectedCount = len(materials)
 		unresolvedGeneration := int64(0)
 		for i := range materials {
@@ -314,6 +338,11 @@ func (s *Store) SourcingBatchGreetingSendProgress(
 			if invocation.InvocationID == "" || invocation.FinishedAt == nil {
 				unresolvedGeneration++
 				continue
+			}
+			if out.ContextRevisionHash == "" {
+				out.ContextRevisionHash = invocation.ContextRevisionHash
+			} else if out.ContextRevisionHash != invocation.ContextRevisionHash {
+				return ErrSourcingGreetingEffectConflict
 			}
 			if invocation.Status != AIInvocationOK {
 				out.FailedCount++
@@ -368,14 +397,20 @@ func (s *Store) SourcingBatchGreetingSendProgress(
 // NextSelectedSourcingGreetingMaterial 返回批次中尚无任何调用预留的最早
 // selected 成员。批次筛选、逐人 decision、profile 与 run 任一绑定不完整
 // 都响亮失败，不会退化为“看起来 selected”的宽松查询。
-func (s *Store) NextSelectedSourcingGreetingMaterial(batchID string) (*SourcingGreetingMaterial, error) {
+func (s *Store) NextSelectedSourcingGreetingMaterial(
+	batchID string,
+	contextRevisionHash string,
+) (*SourcingGreetingMaterial, error) {
 	batchID = strings.TrimSpace(batchID)
-	if batchID == "" {
+	contextRevisionHash = strings.TrimSpace(contextRevisionHash)
+	if batchID == "" || contextRevisionHash == "" {
 		return nil, ErrSourcingBatchInvalid
 	}
 	var next *SourcingGreetingMaterial
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID, true)
+		_, materials, invocations, err := loadSourcingGreetingScopeTx(
+			tx, batchID, true, contextRevisionHash,
+		)
 		if err != nil {
 			return err
 		}
@@ -411,7 +446,9 @@ func (s *Store) ReserveSourcingGreeting(req ReserveSourcingGreetingRequest) (*Re
 	}
 	out := &ReserveSourcingGreetingResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, materials, invocations, err := loadSourcingGreetingScopeTx(tx, req.BatchID, true)
+		_, materials, invocations, err := loadSourcingGreetingScopeTx(
+			tx, req.BatchID, true, req.ContextRevisionHash,
+		)
 		if err != nil {
 			return err
 		}
@@ -537,13 +574,14 @@ func (s *Store) SourcingBatchGreetingProgress(batchID string) (*SourcingBatchGre
 	}
 	var progress SourcingBatchGreetingProgress
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		selection, materials, invocations, err := loadSourcingGreetingScopeTx(tx, batchID, false)
+		selection, materials, invocations, err := loadSourcingGreetingScopeTx(
+			tx, batchID, false, "",
+		)
 		if err != nil {
 			return err
 		}
 		progress = SourcingBatchGreetingProgress{
-			BatchID: selection.BatchID, ContextRevisionHash: selection.ContextRevisionHash,
-			SelectedCount: selection.SelectedCount,
+			BatchID: selection.BatchID, SelectedCount: selection.SelectedCount,
 		}
 		byRun := make(map[string]SourcingGreetingInvocation, len(invocations))
 		for _, invocation := range invocations {
@@ -557,7 +595,10 @@ func (s *Store) SourcingBatchGreetingProgress(batchID string) (*SourcingBatchGre
 			}
 			if progress.Provider == "" {
 				progress.Provider, progress.Model = invocation.Provider, invocation.Model
+				progress.ContextRevisionHash = invocation.ContextRevisionHash
 			} else if progress.Provider != invocation.Provider || progress.Model != invocation.Model {
+				return ErrAIInvocationConflict
+			} else if progress.ContextRevisionHash != invocation.ContextRevisionHash {
 				return ErrAIInvocationConflict
 			}
 			progress.InputTokens += int64(invocation.InputTokens)
@@ -603,6 +644,7 @@ func loadSourcingGreetingScopeTx(
 	tx *gorm.DB,
 	batchID string,
 	requireCurrentSelected bool,
+	wantedRevisionHash string,
 ) (SourcingBatchSelection, []SourcingGreetingMaterial, []SourcingGreetingInvocation, error) {
 	batch, err := validateCompletedSourcingBatchForScoringTx(tx, strings.TrimSpace(batchID))
 	if err != nil {
@@ -642,7 +684,7 @@ func loadSourcingGreetingScopeTx(
 		if err := tx.First(&decision, "run_id = ?", run.RunID).Error; err != nil {
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingSelectionConflict
 		}
-		if decision.ContextRevisionHash != batch.ContextRevisionHash {
+		if decision.ContextRevisionHash != selection.ContextRevisionHash {
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingSelectionConflict
 		}
 		if decision.Outcome != SourcingSelectionSelected {
@@ -662,7 +704,9 @@ func loadSourcingGreetingScopeTx(
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingSelectionConflict
 		}
 		if profile.Platform != run.Platform || profile.AccountRef != run.AccountRef ||
-			profile.PlatformUserRef != run.PlatformUserRef || profile.PositionRef != run.PositionRef {
+			profile.PlatformUserRef != run.PlatformUserRef || profile.PositionRef != run.PositionRef ||
+			profile.BackendJobID == nil || batch.BackendJobID == nil ||
+			strings.TrimSpace(*profile.BackendJobID) != strings.TrimSpace(*batch.BackendJobID) {
 			return SourcingBatchSelection{}, nil, nil, ErrSourcingBinding
 		}
 		if requireCurrentSelected &&
@@ -671,8 +715,8 @@ func loadSourcingGreetingScopeTx(
 		}
 		seenProfiles[profile.ProfileID] = struct{}{}
 		materials = append(materials, SourcingGreetingMaterial{
-			BatchID: batch.BatchID, ContextRevisionHash: batch.ContextRevisionHash,
-			RunID: run.RunID, RunContentHash: run.ContentHash, ProfileID: profile.ProfileID,
+			BatchID: batch.BatchID, RunID: run.RunID,
+			RunContentHash: run.ContentHash, ProfileID: profile.ProfileID,
 			ResumeJSON: run.ResumeJSON, CapturedAt: run.CapturedAt,
 		})
 	}
@@ -697,11 +741,10 @@ func loadSourcingGreetingScopeTx(
 	}
 	seenRuns := make(map[string]struct{}, len(invocations))
 	seenInvocationProfiles := make(map[string]struct{}, len(invocations))
-	provider, model := "", ""
+	provider, model, stageRevisionHash := "", "", ""
 	for _, invocation := range invocations {
 		material, exists := materialByRun[invocation.RunID]
 		if !exists || invocation.BatchID != batch.BatchID || invocation.ProfileID != material.ProfileID ||
-			invocation.ContextRevisionHash != material.ContextRevisionHash ||
 			invocation.RunContentHash != material.RunContentHash || strings.TrimSpace(invocation.Provider) == "" ||
 			strings.TrimSpace(invocation.Model) == "" || strings.TrimSpace(invocation.InputHash) == "" {
 			return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
@@ -719,6 +762,41 @@ func loadSourcingGreetingScopeTx(
 		} else if provider != invocation.Provider || model != invocation.Model {
 			return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
 		}
+		if _, err := requireLegacyRevisionForSourcingBatchTx(
+			tx, batch, invocation.ContextRevisionHash,
+		); err != nil {
+			return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
+		}
+		if stageRevisionHash == "" {
+			stageRevisionHash = invocation.ContextRevisionHash
+		} else if stageRevisionHash != invocation.ContextRevisionHash {
+			return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
+		}
+	}
+	wantedRevisionHash = strings.TrimSpace(wantedRevisionHash)
+	if wantedRevisionHash != "" {
+		if _, err := requireLegacyRevisionForSourcingBatchTx(
+			tx, batch, wantedRevisionHash,
+		); err != nil {
+			return SourcingBatchSelection{}, nil, nil, ErrSourcingBinding
+		}
+		if stageRevisionHash != "" {
+			if stageRevisionHash != wantedRevisionHash {
+				return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
+			}
+		} else {
+			current, err := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+			if err != nil {
+				return SourcingBatchSelection{}, nil, nil, err
+			}
+			if current == nil || current.RevisionHash != wantedRevisionHash {
+				return SourcingBatchSelection{}, nil, nil, ErrSourcingBinding
+			}
+			stageRevisionHash = wantedRevisionHash
+		}
+	}
+	for index := range materials {
+		materials[index].ContextRevisionHash = stageRevisionHash
 	}
 	return selection, materials, invocations, nil
 }
@@ -784,6 +862,11 @@ func loadSourcingGreetingEffectMaterialTx(
 		Batch: batch, Selection: selection, Run: run, Decision: decision,
 		Invocation: invocation, Profile: profile, Account: account,
 	}
+	if _, err := requireLegacyRevisionForSourcingBatchTx(
+		tx, batch, invocation.ContextRevisionHash,
+	); err != nil {
+		return sourcingGreetingEffectMaterial{}, ErrSourcingGreetingEffectConflict
+	}
 	if err := validateSourcingGreetingGenerationMaterial(material, source); err != nil {
 		return sourcingGreetingEffectMaterial{}, err
 	}
@@ -829,8 +912,19 @@ func loadSourcingGreetingSendBatchTx(
 		return nil, err
 	}
 	invocationByRun := make(map[string]SourcingGreetingInvocation, len(invocations))
+	stageRevisionHash := ""
 	for _, invocation := range invocations {
 		if _, duplicate := invocationByRun[invocation.RunID]; duplicate {
+			return nil, ErrSourcingGreetingEffectConflict
+		}
+		if _, err := requireLegacyRevisionForSourcingBatchTx(
+			tx, batch, invocation.ContextRevisionHash,
+		); err != nil {
+			return nil, ErrSourcingGreetingEffectConflict
+		}
+		if stageRevisionHash == "" {
+			stageRevisionHash = invocation.ContextRevisionHash
+		} else if stageRevisionHash != invocation.ContextRevisionHash {
 			return nil, ErrSourcingGreetingEffectConflict
 		}
 		invocationByRun[invocation.RunID] = invocation
@@ -884,11 +978,13 @@ func validateSourcingGreetingSelectedBinding(material sourcingGreetingEffectMate
 	if run.BatchID == nil || *run.BatchID != batch.BatchID || run.Platform != batch.Platform ||
 		run.AccountRef != batch.AccountRef || run.ContextRevisionHash != batch.ContextRevisionHash ||
 		batch.PositionRef == nil || run.PositionRef != *batch.PositionRef || strings.TrimSpace(run.ContentHash) == "" ||
-		decision.RunID != run.RunID || decision.ContextRevisionHash != batch.ContextRevisionHash ||
+		decision.RunID != run.RunID || decision.ContextRevisionHash != material.Selection.ContextRevisionHash ||
 		decision.Outcome != SourcingSelectionSelected || decision.ProfileID == nil ||
 		*decision.ProfileID != profile.ProfileID || profile.Platform != run.Platform ||
 		profile.AccountRef != run.AccountRef || profile.PlatformUserRef != run.PlatformUserRef ||
-		profile.PositionRef != run.PositionRef {
+		profile.PositionRef != run.PositionRef || profile.BackendJobID == nil ||
+		batch.BackendJobID == nil ||
+		strings.TrimSpace(*profile.BackendJobID) != strings.TrimSpace(*batch.BackendJobID) {
 		return ErrSourcingGreetingEffectConflict
 	}
 	return nil
@@ -922,7 +1018,6 @@ func validateSourcingGreetingInvocationBinding(
 	if source.BatchID != material.Batch.BatchID || source.InvocationID != invocation.InvocationID ||
 		invocation.BatchID != material.Batch.BatchID || invocation.RunID != material.Run.RunID ||
 		invocation.ProfileID != material.Profile.ProfileID ||
-		invocation.ContextRevisionHash != material.Batch.ContextRevisionHash ||
 		invocation.RunContentHash != material.Run.ContentHash || strings.TrimSpace(invocation.Provider) == "" ||
 		strings.TrimSpace(invocation.Model) == "" || strings.TrimSpace(invocation.InputHash) == "" ||
 		(invocation.EffectIntentID == nil) != (invocation.EffectStartedAt == nil) {

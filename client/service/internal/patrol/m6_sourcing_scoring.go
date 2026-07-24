@@ -49,7 +49,7 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 		return progress, store.ErrAIInvocationConflict
 	}
 
-	revision, err := m.store.JobAIContextRevisionByHash(progress.ContextRevisionHash)
+	revision, err := m.store.SourcingScoringRevision(batchID)
 	if err != nil {
 		return progress, err
 	}
@@ -81,7 +81,9 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 			return progress, nil
 		}
 
-		if err := m.scoreSourcingBatchMember(ctx, batchID, view.ScoringPrompt, *run, provider, model); err != nil {
+		if err := m.scoreSourcingBatchMember(
+			ctx, batchID, view.ScoringPrompt, revision.RevisionHash, *run, provider, model,
+		); err != nil {
 			progress, _ = m.store.SourcingBatchScoringProgress(batchID)
 			return progress, err
 		}
@@ -90,7 +92,7 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 
 func (m *Manager) scoreSourcingBatchMember(
 	ctx context.Context,
-	batchID, prompt string,
+	batchID, prompt, contextRevisionHash string,
 	run store.SourcingCandidateRun,
 	provider, model string,
 ) error {
@@ -105,10 +107,12 @@ func (m *Manager) scoreSourcingBatchMember(
 		inputHash = sha256Hex(content)
 	}
 
-	invocationID := stableM5ID("score-invocation", run.RunID, run.ContextRevisionHash, run.ContentHash)
+	invocationID := stableM5ID(
+		"score-invocation", run.RunID, contextRevisionHash, run.ContentHash,
+	)
 	reserved, err := m.store.ReserveSourcingScore(store.ReserveSourcingScoreRequest{
 		InvocationID: invocationID, BatchID: batchID, RunID: run.RunID,
-		ContextRevisionHash: run.ContextRevisionHash, RunContentHash: run.ContentHash,
+		ContextRevisionHash: contextRevisionHash, RunContentHash: run.ContentHash,
 		Provider: provider, Model: model, InputHash: inputHash, StartedAt: m.now(),
 	})
 	if err != nil {
@@ -140,7 +144,7 @@ func (m *Manager) scoreSourcingBatchMember(
 	started := time.Now()
 	response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
 		InvocationID: invocationID, Purpose: m5ai.PurposeScoring,
-		ContextRevisionHash: run.ContextRevisionHash,
+		ContextRevisionHash: contextRevisionHash,
 		PromptRevision:      m5ai.ScoringInputFormatVersion,
 		UserContent:         content,
 		MaxOutputTokens:     m5ai.ScoringOutputTokenLimit,

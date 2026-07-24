@@ -44,7 +44,7 @@ func sourcingSelectionRevision(
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	return m5ai.ContextRevision{
 		ContextID: "context-" + revisionHash, RevisionHash: revisionHash,
-		SourceKind: "localImport", SourceJobRef: "11", DisplayName: "合成职位",
+		SourceKind: legacyJobConfigSourceKind, SourceJobRef: "11", DisplayName: "合成职位",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
@@ -64,9 +64,9 @@ func prepareSourcingSelectionStore(
 	s := openTest(t)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-" + revisionHash}
 	createM4Account(t, s, key.Platform, key.AccountRef)
-	if _, _, err := s.SaveJobAIContextRevision(sourcingSelectionRevision(
+	if _, err := s.SaveCurrentLegacyJobAIContext([]m5ai.ContextRevision{sourcingSelectionRevision(
 		base.Add(-time.Hour), revisionHash, minScore, targetMin, targetMax, maleRatioLimit,
-	)); err != nil {
+	)}, base.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	return s, key
@@ -235,6 +235,37 @@ func TestSelectCompletedSourcingBatchUsesScoreOrderAndStableTieBreak(t *testing.
 		if outcomes[runID].Outcome != outcome {
 			t.Fatalf("%s outcome=%s want=%s", runID, outcomes[runID].Outcome, outcome)
 		}
+	}
+}
+
+func TestSelectionUsesCurrentJobRevisionOnceAndReplaysAfterHeadAdvances(t *testing.T) {
+	base := time.Date(2026, 7, 24, 13, 0, 0, 0, time.UTC)
+	s, key := prepareSourcingSelectionStore(t, "selection-stage-a", 5, 1, 1, 100, base)
+	insertCompletedSelectionBatch(
+		t, s, key, "batch-selection-stage", "selection-stage-a", base,
+		[]selectionRunFixture{{RunID: "run-selection-stage", Score: intPointer(9)}},
+	)
+	second := sourcingSelectionRevision(base.Add(time.Hour), "selection-stage-b", 8, 1, 1, 100)
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{second}, base.Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	selection, err := s.SelectCompletedSourcingBatch("batch-selection-stage", base.Add(2*time.Hour))
+	if err != nil || selection == nil || selection.ContextRevisionHash != second.RevisionHash ||
+		selection.MinScore != 8 || selection.SelectedCount != 1 {
+		t.Fatalf("筛选未使用当前职位 revision: selection=%+v err=%v", selection, err)
+	}
+	third := sourcingSelectionRevision(base.Add(3*time.Hour), "selection-stage-c", 10, 1, 1, 100)
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{third}, base.Add(3*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := s.SelectCompletedSourcingBatch("batch-selection-stage", base.Add(4*time.Hour))
+	if err != nil || replayed == nil || replayed.ContextRevisionHash != second.RevisionHash ||
+		replayed.MinScore != 8 || replayed.SelectedCount != 1 {
+		t.Fatalf("既有筛选被新 head 重算: selection=%+v err=%v", replayed, err)
 	}
 }
 

@@ -51,7 +51,7 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 		return progress, store.ErrAIInvocationConflict
 	}
 
-	revision, err := m.store.JobAIContextRevisionByHash(progress.ContextRevisionHash)
+	revision, err := m.store.SourcingGreetingRevision(batchID)
 	if err != nil {
 		return progress, err
 	}
@@ -71,7 +71,9 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 			progress, _ = m.store.SourcingBatchGreetingProgress(batchID)
 			return progress, err
 		}
-		material, err := m.store.NextSelectedSourcingGreetingMaterial(batchID)
+		material, err := m.store.NextSelectedSourcingGreetingMaterial(
+			batchID, revision.RevisionHash,
+		)
 		if err != nil {
 			return progress, err
 		}

@@ -39,6 +39,32 @@ type SourcingBatchScoringProgress struct {
 	Completed           bool
 }
 
+// SourcingScoringRevision 返回本批评分阶段实际使用的配置。首条评分预留
+// 尚未出现时读取该 BackendJobID 最近成功同步的 legacy head；一旦已有任意
+// 预留，整批余下成员都继续使用该预留已经记录的 revision。
+func (s *Store) SourcingScoringRevision(batchID string) (*JobAIContextRevision, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	var out *JobAIContextRevision
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := validateCompletedSourcingBatchForScoringTx(tx, batchID)
+		if err != nil {
+			return err
+		}
+		revision, err := sourcingStageRevisionTx(
+			tx, batch, "sourcing_score_invocations", true,
+		)
+		if err != nil {
+			return err
+		}
+		out = revision
+		return nil
+	})
+	return out, err
+}
+
 // NextSourcingBatchRunWithoutScore 只消费一个已经完整结束的正式采集批次。
 // 同账号、同 revision 的其他批次以及 BatchID=NULL 的历史行不会进入查询。
 func (s *Store) NextSourcingBatchRunWithoutScore(batchID string) (*SourcingCandidateRun, error) {
@@ -116,8 +142,31 @@ func (s *Store) ReserveSourcingScore(req ReserveSourcingScoreRequest) (*ReserveS
 		if run.BatchID == nil || *run.BatchID != batch.BatchID ||
 			run.Platform != batch.Platform || run.AccountRef != batch.AccountRef ||
 			run.ContextRevisionHash != batch.ContextRevisionHash ||
-			req.ContextRevisionHash != batch.ContextRevisionHash || run.ContentHash != req.RunContentHash {
+			run.ContentHash != req.RunContentHash {
 			return ErrSourcingBinding
+		}
+		revision, err := requireLegacyRevisionForSourcingBatchTx(
+			tx, batch, req.ContextRevisionHash,
+		)
+		if err != nil || revision == nil {
+			return ErrSourcingBinding
+		}
+		stageRevision, err := sourcingStageRevisionTx(
+			tx, batch, "sourcing_score_invocations", false,
+		)
+		if err != nil {
+			return err
+		}
+		if stageRevision == nil {
+			current, currentErr := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+			if currentErr != nil {
+				return currentErr
+			}
+			if current == nil || current.RevisionHash != req.ContextRevisionHash {
+				return ErrSourcingBinding
+			}
+		} else if stageRevision.RevisionHash != req.ContextRevisionHash {
+			return ErrAIInvocationConflict
 		}
 		type providerModel struct {
 			Provider string
@@ -185,8 +234,7 @@ func (s *Store) SourcingBatchScoringProgress(batchID string) (*SourcingBatchScor
 			return err
 		}
 		progress = SourcingBatchScoringProgress{
-			BatchID: batch.BatchID, ContextRevisionHash: batch.ContextRevisionHash,
-			TargetCount: batch.TargetCount,
+			BatchID: batch.BatchID, TargetCount: batch.TargetCount,
 		}
 		type scoringRow struct {
 			RunContextRevisionHash        string
@@ -223,9 +271,18 @@ func (s *Store) SourcingBatchScoringProgress(batchID string) (*SourcingBatchScor
 				progress.PendingCount++
 				continue
 			}
-			if row.InvocationContextRevisionHash != batch.ContextRevisionHash ||
-				row.InvocationContextRevisionHash != row.RunContextRevisionHash ||
+			if row.RunContextRevisionHash != batch.ContextRevisionHash ||
 				row.InvocationRunContentHash != row.RunContentHash {
+				return ErrAIInvocationConflict
+			}
+			if _, err := requireLegacyRevisionForSourcingBatchTx(
+				tx, batch, row.InvocationContextRevisionHash,
+			); err != nil {
+				return ErrAIInvocationConflict
+			}
+			if progress.ContextRevisionHash == "" {
+				progress.ContextRevisionHash = row.InvocationContextRevisionHash
+			} else if progress.ContextRevisionHash != row.InvocationContextRevisionHash {
 				return ErrAIInvocationConflict
 			}
 			if progress.Provider == "" {
@@ -300,7 +357,118 @@ func validateCompletedSourcingBatchForScoringTx(tx *gorm.DB, batchID string) (So
 		}
 		return SourcingBatch{}, err
 	}
+	backendJobID, err := sourcingBatchBackendJobID(batch)
+	if err != nil || strings.TrimSpace(revision.SourceJobRef) != backendJobID {
+		return SourcingBatch{}, ErrSourcingBatchConflict
+	}
 	return batch, nil
+}
+
+func sourcingBatchBackendJobID(batch SourcingBatch) (string, error) {
+	if batch.BackendJobID == nil {
+		return "", ErrSourcingBatchConflict
+	}
+	backendJobID := strings.TrimSpace(*batch.BackendJobID)
+	if backendJobID == "" {
+		return "", ErrSourcingBatchConflict
+	}
+	return backendJobID, nil
+}
+
+func requireLegacyRevisionForSourcingBatchTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+	revisionHash string,
+) (*JobAIContextRevision, error) {
+	backendJobID, err := sourcingBatchBackendJobID(batch)
+	if err != nil || strings.TrimSpace(revisionHash) == "" {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	var revision JobAIContextRevision
+	if err := tx.First(&revision, "revision_hash = ?", strings.TrimSpace(revisionHash)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrJobAIContextRevisionNotFound
+		}
+		return nil, err
+	}
+	if revision.SourceKind != legacyJobConfigSourceKind ||
+		strings.TrimSpace(revision.SourceJobRef) != backendJobID {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	return &revision, nil
+}
+
+func currentLegacyRevisionForSourcingBatchTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+) (*JobAIContextRevision, error) {
+	backendJobID, err := sourcingBatchBackendJobID(batch)
+	if err != nil {
+		return nil, err
+	}
+	var head JobAIContextHead
+	err = tx.First(
+		&head,
+		"source_kind = ? AND source_job_ref = ?",
+		legacyJobConfigSourceKind,
+		backendJobID,
+	).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	revision, err := requireLegacyRevisionForSourcingBatchTx(tx, batch, head.RevisionHash)
+	if err != nil {
+		return nil, err
+	}
+	if revision.ContextID != head.ContextID {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	return revision, nil
+}
+
+// sourcingStageRevisionTx 从一个 invocation 表推导已经开始的阶段 revision。
+// allowCurrent=true 只供阶段入口在零预留时取 current head；Reserve 必须传
+// false 并自行在同一事务内重核 current，避免 head 切换与首条预留竞态。
+func sourcingStageRevisionTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+	table string,
+	allowCurrent bool,
+) (*JobAIContextRevision, error) {
+	if table != "sourcing_score_invocations" && table != "sourcing_greeting_invocations" {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	var hashes []string
+	query := tx.Table(table+" AS invocation").
+		Distinct("invocation.context_revision_hash").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = invocation.run_id").
+		Where("run.batch_id = ?", batch.BatchID)
+	if table == "sourcing_greeting_invocations" {
+		query = query.Where("invocation.batch_id = ?", batch.BatchID)
+	}
+	if err := query.Pluck("invocation.context_revision_hash", &hashes).Error; err != nil {
+		return nil, err
+	}
+	if len(hashes) > 1 {
+		return nil, ErrAIInvocationConflict
+	}
+	if len(hashes) == 1 {
+		return requireLegacyRevisionForSourcingBatchTx(tx, batch, hashes[0])
+	}
+	if allowCurrent {
+		revision, err := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+		if err != nil {
+			return nil, err
+		}
+		if revision == nil {
+			return nil, ErrJobAIContextRevisionNotFound
+		}
+		return revision, nil
+	}
+	return nil, nil
 }
 
 func sameSourcingScoreReservation(existing, wanted SourcingScoreInvocation) bool {

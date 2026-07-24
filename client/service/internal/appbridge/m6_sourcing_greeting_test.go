@@ -138,7 +138,11 @@ func TestSelectedSourcingBatchGeneratesGreetingsWithoutTouchingHand(t *testing.T
 func TestSelectedSourcingGreetingPostResponseTokenBudgetKeepsUsageWithoutText(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	batchID := prepareSelectedSourcingBatch(t, h, 1)
-	material, err := h.store.NextSelectedSourcingGreetingMaterial(batchID)
+	revision, err := h.store.SourcingGreetingRevision(batchID)
+	if err != nil || revision == nil {
+		t.Fatalf("招呼前缺少配置: revision=%+v err=%v", revision, err)
+	}
+	material, err := h.store.NextSelectedSourcingGreetingMaterial(batchID, revision.RevisionHash)
 	if err != nil || material == nil {
 		t.Fatalf("招呼前缺少 selected 材料: material=%+v err=%v", material, err)
 	}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"recruithelper/client/service/internal/m5ai"
 )
 
 func ensureSourcingScoreRevision(t *testing.T, s *Store, revisionHash string, at time.Time) {
@@ -15,9 +17,14 @@ func ensureSourcingScoreRevision(t *testing.T, s *Store, revisionHash string, at
 	if existing != nil {
 		return
 	}
-	if _, _, err := s.SaveJobAIContextRevision(contextRevisionFixture(
+	revision := contextRevisionFixture(
 		"context-"+revisionHash, revisionHash, at.Add(-time.Hour),
-	)); err != nil {
+	)
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = "11"
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision}, at.Add(-time.Hour),
+	); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -34,9 +41,10 @@ func seedCompletedSourcingScoreBatch(
 	t.Helper()
 	ensureSourcingScoreRevision(t, s, revisionHash, capturedAt)
 	endedAt := capturedAt.Add(time.Duration(len(runIDs)+1) * time.Minute)
+	backendJobID := "11"
 	if err := s.db.Create(&SourcingBatch{
 		BatchID: batchID, Platform: key.Platform, AccountRef: key.AccountRef,
-		ContextRevisionHash: revisionHash, TargetCount: len(runIDs),
+		ContextRevisionHash: revisionHash, BackendJobID: &backendJobID, TargetCount: len(runIDs),
 		Status: SourcingBatchCompleted, StartedAt: capturedAt.Add(-time.Minute), EndedAt: &endedAt,
 	}).Error; err != nil {
 		t.Fatal(err)
@@ -81,6 +89,44 @@ func sourcingScoreReservation(run SourcingCandidateRun, invocationID string, sta
 }
 
 func scorePointer(value int) *int { return &value }
+
+func TestSourcingScoreStageKeepsFirstInvocationRevisionAfterHeadAdvances(t *testing.T) {
+	s := openTest(t)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-stage-revision"}
+	base := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	runs := seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-stage-revision", key, "score-stage-a",
+		[]string{"run-score-stage-a", "run-score-stage-b"}, base,
+	)
+	first := sourcingScoreReservation(runs[0], "score-stage-first", base.Add(time.Minute))
+	if result, err := s.ReserveSourcingScore(first); err != nil || result == nil || !result.Created {
+		t.Fatalf("首条评分预留失败: result=%+v err=%v", result, err)
+	}
+
+	newer := contextRevisionFixture("context-score-stage-b", "score-stage-b", base.Add(time.Hour))
+	newer.SourceKind = legacyJobConfigSourceKind
+	newer.SourceJobRef = "11"
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{newer}, base.Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := s.SourcingScoringRevision("batch-score-stage-revision")
+	if err != nil || resolved == nil || resolved.RevisionHash != "score-stage-a" {
+		t.Fatalf("head 推进后评分阶段换版: revision=%+v err=%v", resolved, err)
+	}
+	second := sourcingScoreReservation(runs[1], "score-stage-second", base.Add(2*time.Minute))
+	if result, err := s.ReserveSourcingScore(second); err != nil || result == nil || !result.Created {
+		t.Fatalf("余下成员未沿用首条 revision: result=%+v err=%v", result, err)
+	}
+	wrong := second
+	wrong.InvocationID = "score-stage-wrong"
+	wrong.ContextRevisionHash = newer.RevisionHash
+	if result, err := s.ReserveSourcingScore(wrong); result != nil ||
+		!errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("评分阶段混入新 head: result=%+v err=%v", result, err)
+	}
+}
 
 func TestNextSourcingBatchRunWithoutScoreUsesOnlyCompletedTargetBatch(t *testing.T) {
 	s := openTest(t)

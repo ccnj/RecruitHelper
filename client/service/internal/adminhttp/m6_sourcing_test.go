@@ -282,7 +282,7 @@ func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	return m5ai.ContextRevision{
 		ContextID: "context-sourcing-admin", RevisionHash: "revision-sourcing-admin",
-		SourceKind: "localImport", SourceJobRef: "71", DisplayName: "admin-position-secret",
+		SourceKind: "legacyJobConfig", SourceJobRef: "71", DisplayName: "admin-position-secret",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: replyPrompt, IntentPrompt: intentPrompt,
@@ -318,7 +318,9 @@ func TestSourcingGreetingSendStatusReturnsNormalSafeAggregate(t *testing.T) {
 	defer st.Close()
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	revision := sourcingAdminRevision(now.Add(-time.Hour))
-	if _, _, err := st.SaveJobAIContextRevision(revision); err != nil {
+	if _, err := st.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision}, now.Add(-time.Hour),
+	); err != nil {
 		t.Fatal(err)
 	}
 	key := store.AccountKey{Platform: "zhilian", AccountRef: "account-admin-send-secret"}

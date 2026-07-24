@@ -309,7 +309,7 @@ func sourcingActorRevision(at time.Time) m5ai.ContextRevision {
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	return m5ai.ContextRevision{
 		ContextID: "context-sourcing-actor", RevisionHash: "revision-sourcing-actor",
-		SourceKind: "localImport", SourceJobRef: "61", DisplayName: "合成职位",
+		SourceKind: "legacyJobConfig", SourceJobRef: "61", DisplayName: "合成职位",
 		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
 		Communication: m5ai.CommunicationView{
 			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts", MappingVersion: m5ai.MappingVersion,
@@ -350,7 +350,9 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 	t.Cleanup(func() { _ = st.Close() })
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	revision := sourcingActorRevision(now.Add(-time.Hour))
-	if _, _, err := st.SaveJobAIContextRevision(revision); err != nil {
+	if _, err := st.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision}, now.Add(-time.Hour),
+	); err != nil {
 		t.Fatal(err)
 	}
 	key := store.AccountKey{Platform: "zhilian", AccountRef: "account-sourcing-actor"}

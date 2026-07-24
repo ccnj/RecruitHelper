@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -74,7 +75,9 @@ func TestSourcingGreetingRequiresCompleteSelectionAndExactSelectedBindings(t *te
 			Update("position_ref", positionRef).Error; err != nil {
 			t.Fatal(err)
 		}
-		if next, err := s.NextSelectedSourcingGreetingMaterial("batch-not-selected"); next != nil ||
+		if next, err := s.NextSelectedSourcingGreetingMaterial(
+			"batch-not-selected", "greeting-not-selected",
+		); next != nil ||
 			!errors.Is(err, ErrSourcingSelectionNotReady) {
 			t.Fatalf("未筛选批次进入招呼生成: next=%+v err=%v", next, err)
 		}
@@ -92,7 +95,9 @@ func TestSourcingGreetingRequiresCompleteSelectionAndExactSelectedBindings(t *te
 			Update("context_revision_hash", "wrong-revision").Error; err != nil {
 			t.Fatal(err)
 		}
-		if next, err := s.NextSelectedSourcingGreetingMaterial("batch-incomplete-selection"); next != nil ||
+		if next, err := s.NextSelectedSourcingGreetingMaterial(
+			"batch-incomplete-selection", "greeting-incomplete-selection",
+		); next != nil ||
 			!errors.Is(err, ErrSourcingSelectionConflict) {
 			t.Fatalf("错 revision 决策未阻断: next=%+v err=%v", next, err)
 		}
@@ -106,7 +111,9 @@ func TestSourcingGreetingRequiresCompleteSelectionAndExactSelectedBindings(t *te
 			Update("main_status", CandidateProfileGreeted).Error; err != nil {
 			t.Fatal(err)
 		}
-		if next, err := s.NextSelectedSourcingGreetingMaterial("batch-profile-state"); next != nil ||
+		if next, err := s.NextSelectedSourcingGreetingMaterial(
+			"batch-profile-state", "greeting-profile-state",
+		); next != nil ||
 			!errors.Is(err, ErrSourcingBinding) {
 			t.Fatalf("非 selected 档案未阻断: next=%+v err=%v", next, err)
 		}
@@ -134,7 +141,7 @@ func TestNextSelectedSourcingGreetingMaterialExcludesNonSelectedAndUsesCaptureOr
 	}
 	s, runs, decisions := prepareSourcingGreetingBatch(t, "batch-greeting-next", "greeting-next", 2, base, fixtures)
 
-	next, err := s.NextSelectedSourcingGreetingMaterial("batch-greeting-next")
+	next, err := s.NextSelectedSourcingGreetingMaterial("batch-greeting-next", "greeting-next")
 	if err != nil || next == nil || next.RunID != "run-selected-early" ||
 		next.ProfileID != *decisions["run-selected-early"].ProfileID || next.ResumeJSON == "" {
 		t.Fatalf("未按 selected 的采集顺序返回材料: next=%+v err=%v", next, err)
@@ -144,6 +151,58 @@ func TestNextSelectedSourcingGreetingMaterialExcludesNonSelectedAndUsesCaptureOr
 	quotaRequest.ProfileID = *decisions["run-selected-early"].ProfileID
 	if result, err := s.ReserveSourcingGreeting(quotaRequest); result != nil || !errors.Is(err, ErrSourcingBinding) {
 		t.Fatalf("非 selected run 获得调用预留: result=%+v err=%v", result, err)
+	}
+}
+
+func TestGreetingStageKeepsFirstInvocationRevisionAfterHeadAdvances(t *testing.T) {
+	base := time.Date(2026, 7, 24, 14, 0, 0, 0, time.UTC)
+	fixtures := []selectionRunFixture{
+		{RunID: "run-greeting-stage-a", Score: intPointer(10)},
+		{RunID: "run-greeting-stage-b", Score: intPointer(9)},
+	}
+	s, runs, decisions := prepareSourcingGreetingBatch(
+		t, "batch-greeting-stage", "greeting-stage-capture", 2, base, fixtures,
+	)
+	greetingRevision := sourcingSelectionRevision(
+		base.Add(time.Hour), "greeting-stage-current", 5, 2, 2, 100,
+	)
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{greetingRevision}, base.Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := s.SourcingGreetingRevision("batch-greeting-stage")
+	if err != nil || resolved == nil || resolved.RevisionHash != greetingRevision.RevisionHash {
+		t.Fatalf("招呼阶段未取 current head: revision=%+v err=%v", resolved, err)
+	}
+	firstRun := runByID(t, runs, "run-greeting-stage-a")
+	first := greetingReservation(
+		"batch-greeting-stage", firstRun, decisions[firstRun.RunID],
+		"greeting-stage-first", base.Add(2*time.Hour),
+	)
+	first.ContextRevisionHash = greetingRevision.RevisionHash
+	if result, err := s.ReserveSourcingGreeting(first); err != nil || result == nil || !result.Created {
+		t.Fatalf("首条招呼预留失败: result=%+v err=%v", result, err)
+	}
+
+	newer := sourcingSelectionRevision(base.Add(3*time.Hour), "greeting-stage-newer", 5, 2, 2, 100)
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{newer}, base.Add(3*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err = s.SourcingGreetingRevision("batch-greeting-stage")
+	if err != nil || resolved == nil || resolved.RevisionHash != greetingRevision.RevisionHash {
+		t.Fatalf("head 推进后招呼阶段换版: revision=%+v err=%v", resolved, err)
+	}
+	secondRun := runByID(t, runs, "run-greeting-stage-b")
+	second := greetingReservation(
+		"batch-greeting-stage", secondRun, decisions[secondRun.RunID],
+		"greeting-stage-second", base.Add(4*time.Hour),
+	)
+	second.ContextRevisionHash = greetingRevision.RevisionHash
+	if result, err := s.ReserveSourcingGreeting(second); err != nil || result == nil || !result.Created {
+		t.Fatalf("余下招呼未沿用首条 revision: result=%+v err=%v", result, err)
 	}
 }
 
@@ -227,7 +286,9 @@ func TestReserveSourcingGreetingChecksCrossBatchMaterialUniquenessAndProviderFre
 	if _, err := s.ReserveSourcingGreeting(second); err != nil {
 		t.Fatal(err)
 	}
-	if next, err := s.NextSelectedSourcingGreetingMaterial(first.BatchID); err != nil || next != nil {
+	if next, err := s.NextSelectedSourcingGreetingMaterial(
+		first.BatchID, first.ContextRevisionHash,
+	); err != nil || next != nil {
 		t.Fatalf("已有预留的 selected 被再次授权: next=%+v err=%v", next, err)
 	}
 }
@@ -336,7 +397,9 @@ func TestRecoverInterruptedSourcingGreetingIsTerminalAndNeverReauthorizes(t *tes
 		!stored.FinishedAt.Equal(recoveredAt) || stored.GreetingText != "" || stored.ContentHash != "" {
 		t.Fatalf("中断终局事实错误: stored=%+v err=%v", stored, err)
 	}
-	if next, err := s.NextSelectedSourcingGreetingMaterial(reservation.BatchID); err != nil || next != nil {
+	if next, err := s.NextSelectedSourcingGreetingMaterial(
+		reservation.BatchID, reservation.ContextRevisionHash,
+	); err != nil || next != nil {
 		t.Fatalf("中断调用被重新授权: next=%+v err=%v", next, err)
 	}
 	replay := reservation
@@ -369,7 +432,9 @@ func TestSourcingGreetingZeroSelectedCompletesWithoutInvocationOrSendFacts(t *te
 	if err != nil || progress.SelectedCount != 0 || !progress.Completed || progress.Provider != "" || progress.Model != "" {
 		t.Fatalf("零 selected 未空完成: progress=%+v err=%v", progress, err)
 	}
-	if next, err := s.NextSelectedSourcingGreetingMaterial(selection.BatchID); err != nil || next != nil {
+	if next, err := s.NextSelectedSourcingGreetingMaterial(
+		selection.BatchID, selection.ContextRevisionHash,
+	); err != nil || next != nil {
 		t.Fatalf("零 selected 返回了材料: next=%+v err=%v", next, err)
 	}
 	for _, model := range []any{&SourcingGreetingInvocation{}, &EffectIntent{}, &CandidateGreetingHead{}, &CmdRecord{}} {

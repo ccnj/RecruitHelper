@@ -116,15 +116,15 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 		if err != nil {
 			return err
 		}
-		var revision JobAIContextRevision
-		if err := tx.First(&revision, "revision_hash = ?", batch.ContextRevisionHash).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrJobAIContextRevisionNotFound
-			}
+		revision, err := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+		if err != nil {
 			return err
 		}
-		backendJobID := strings.TrimSpace(revision.SourceJobRef)
-		if backendJobID == "" || batch.BackendJobID == nil || *batch.BackendJobID != backendJobID {
+		if revision == nil {
+			return ErrJobAIContextRevisionNotFound
+		}
+		backendJobID, err := sourcingBatchBackendJobID(batch)
+		if err != nil {
 			return ErrSourcingSelectionConflict
 		}
 		view, err := m5ai.DeriveSourcingView(revision.SourcePackage)
@@ -133,11 +133,11 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 		}
 		selectionView := view.CandidateSelection
 		targetCount := stableSourcingSelectionTarget(
-			batch.BatchID, batch.ContextRevisionHash, selectionView.TargetMin, selectionView.TargetMax,
+			batch.BatchID, revision.RevisionHash, selectionView.TargetMin, selectionView.TargetMax,
 		)
 		maleLimit := targetCount * selectionView.MaleRatioLimit / 100
 		summary := SourcingBatchSelection{
-			BatchID: batch.BatchID, ContextRevisionHash: batch.ContextRevisionHash,
+			BatchID: batch.BatchID, ContextRevisionHash: revision.RevisionHash,
 			AlgorithmVersion: SourcingSelectionAlgorithmVersion,
 			MinScore:         selectionView.MinScore, TargetMin: selectionView.TargetMin,
 			TargetMax: selectionView.TargetMax, TargetCount: targetCount,
@@ -151,7 +151,7 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 				summary.UnknownGenderCount++
 			}
 			decision := SourcingSelectionDecision{
-				RunID: row.Run.RunID, ContextRevisionHash: batch.ContextRevisionHash,
+				RunID: row.Run.RunID, ContextRevisionHash: revision.RevisionHash,
 				Score: row.Invocation.Score, MinScore: selectionView.MinScore,
 				DecidedAt: decidedAt, CreatedAt: decidedAt,
 			}
@@ -249,6 +249,7 @@ func loadCompleteSourcingSelectionRowsTx(
 	}
 	byRun := make(map[string]SourcingScoreInvocation, len(invocations))
 	provider, model := "", ""
+	scoringRevisionHash := ""
 	for _, invocation := range invocations {
 		if _, exists := byRun[invocation.RunID]; exists {
 			return nil, ErrSourcingSelectionConflict
@@ -259,6 +260,16 @@ func loadCompleteSourcingSelectionRowsTx(
 		if provider == "" {
 			provider, model = invocation.Provider, invocation.Model
 		} else if provider != invocation.Provider || model != invocation.Model {
+			return nil, ErrSourcingSelectionConflict
+		}
+		if _, err := requireLegacyRevisionForSourcingBatchTx(
+			tx, batch, invocation.ContextRevisionHash,
+		); err != nil {
+			return nil, ErrSourcingSelectionConflict
+		}
+		if scoringRevisionHash == "" {
+			scoringRevisionHash = invocation.ContextRevisionHash
+		} else if scoringRevisionHash != invocation.ContextRevisionHash {
 			return nil, ErrSourcingSelectionConflict
 		}
 		if invocation.FinishedAt == nil {
@@ -286,7 +297,6 @@ func loadCompleteSourcingSelectionRowsTx(
 		if run.BatchID == nil || *run.BatchID != batch.BatchID ||
 			run.Platform != batch.Platform || run.AccountRef != batch.AccountRef ||
 			run.ContextRevisionHash != batch.ContextRevisionHash ||
-			invocation.ContextRevisionHash != run.ContextRevisionHash ||
 			invocation.RunContentHash != run.ContentHash {
 			return nil, ErrSourcingSelectionConflict
 		}
@@ -386,7 +396,7 @@ func validatePersistedSourcingBatchSelectionTx(
 	batch SourcingBatch,
 	selection SourcingBatchSelection,
 ) error {
-	if selection.BatchID != batch.BatchID || selection.ContextRevisionHash != batch.ContextRevisionHash ||
+	if selection.BatchID != batch.BatchID ||
 		selection.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
 		selection.PoolCount != batch.TargetCount || selection.TargetMin < 0 ||
 		selection.TargetMax < selection.TargetMin || selection.TargetCount < selection.TargetMin ||
@@ -399,14 +409,20 @@ func validatePersistedSourcingBatchSelectionTx(
 		selection.CompletedAt.IsZero() {
 		return ErrSourcingSelectionConflict
 	}
+	if _, err := requireLegacyRevisionForSourcingBatchTx(
+		tx, batch, selection.ContextRevisionHash,
+	); err != nil {
+		return ErrSourcingSelectionConflict
+	}
 	type persistedDecision struct {
-		RunID     string
-		Outcome   SourcingSelectionOutcome
-		ProfileID *string
+		RunID               string
+		ContextRevisionHash string
+		Outcome             SourcingSelectionOutcome
+		ProfileID           *string
 	}
 	var decisions []persistedDecision
 	if err := tx.Table("sourcing_selection_decisions AS decision").
-		Select("decision.run_id, decision.outcome, decision.profile_id").
+		Select("decision.run_id, decision.context_revision_hash, decision.outcome, decision.profile_id").
 		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
 		Where("run.batch_id = ?", batch.BatchID).
 		Find(&decisions).Error; err != nil {
@@ -417,6 +433,9 @@ func validatePersistedSourcingBatchSelectionTx(
 	}
 	selected := 0
 	for _, decision := range decisions {
+		if decision.ContextRevisionHash != selection.ContextRevisionHash {
+			return ErrSourcingSelectionConflict
+		}
 		switch decision.Outcome {
 		case SourcingSelectionSelected:
 			if decision.ProfileID == nil || strings.TrimSpace(*decision.ProfileID) == "" {
