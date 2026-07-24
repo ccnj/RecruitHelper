@@ -11,16 +11,21 @@ import (
 )
 
 type fakeWorkflowControl struct {
-	mode        string
-	pauseCalls  int
-	resumeCalls int
-	batchID     string
-	profileIDs  []string
-	err         error
+	mode         string
+	backendJobID string
+	pauseCalls   int
+	resumeCalls  int
+	batchID      string
+	profileIDs   []string
+	err          error
 }
 
-func (f *fakeWorkflowControl) Start(_ context.Context, mode string) error {
+func (f *fakeWorkflowControl) Start(
+	_ context.Context,
+	mode, backendJobID string,
+) error {
 	f.mode = mode
+	f.backendJobID = backendJobID
 	return f.err
 }
 
@@ -63,9 +68,21 @@ func TestWorkflowControlsForwardOnlyValidatedUserIntent(t *testing.T) {
 	control := &fakeWorkflowControl{}
 	handler := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(control))
 
-	response := productPOST(t, handler, "/app/workflow/start", `{"mode":"full"}`)
-	if response.Code != http.StatusAccepted || control.mode != "full" {
-		t.Fatalf("start status=%d mode=%q body=%s", response.Code, control.mode, response.Body.String())
+	response := productPOST(
+		t,
+		handler,
+		"/app/workflow/start",
+		`{"mode":"full","backendJobId":"42"}`,
+	)
+	if response.Code != http.StatusAccepted || control.mode != "full" ||
+		control.backendJobID != "42" {
+		t.Fatalf(
+			"start status=%d mode=%q backendJobID=%q body=%s",
+			response.Code,
+			control.mode,
+			control.backendJobID,
+			response.Body.String(),
+		)
 	}
 	response = productPOST(t, handler, "/app/workflow/pause", `{}`)
 	if response.Code != http.StatusAccepted || control.pauseCalls != 1 {
@@ -92,6 +109,8 @@ func TestWorkflowControlsRejectMalformedOrUnavailableRequestsWithoutCallingContr
 		body   string
 	}{
 		{target: "/app/workflow/start", body: `{"mode":"other"}`},
+		{target: "/app/workflow/start", body: `{"mode":"full"}`},
+		{target: "/app/workflow/start", body: `{"mode":"replyOnly","backendJobId":"42"}`},
 		{target: "/app/workflow/start", body: `{"mode":"full","targetCount":30}`},
 		{target: "/app/confirmation/send", body: `{"batchId":"batch-one","profileIds":[]}`},
 		{target: "/app/confirmation/send", body: `{"batchId":"batch-one","profileIds":["same","same"]}`},

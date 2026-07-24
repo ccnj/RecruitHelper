@@ -19,6 +19,7 @@ var (
 	ErrControllerInvalid    = errors.New("产品工作流控制器配置无效")
 	ErrAccountUnavailable   = errors.New("没有唯一可运行的平台账号")
 	ErrJobConfigUnavailable = errors.New("当前职位配置不可用")
+	ErrJobSelectionChanged  = errors.New("当前职位已变化，请刷新后重试")
 )
 
 type Workflow interface {
@@ -64,13 +65,24 @@ func New(
 	return &Controller{store: db, workflow: productWorkflow, source: source, now: now}, nil
 }
 
-func (c *Controller) Start(ctx context.Context, mode string) error {
+func (c *Controller) Start(
+	ctx context.Context,
+	mode, expectedBackendJobID string,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	switch strings.TrimSpace(mode) {
+	mode = strings.TrimSpace(mode)
+	expectedBackendJobID = strings.TrimSpace(expectedBackendJobID)
+	switch mode {
 	case string(workflow.ModeReplyOnly):
+		if expectedBackendJobID != "" {
+			return ErrJobSelectionChanged
+		}
 	case string(workflow.ModeFull):
+		if expectedBackendJobID == "" || len(expectedBackendJobID) > 128 {
+			return ErrJobConfigUnavailable
+		}
 	default:
 		return workflow.ErrInvalidMode
 	}
@@ -91,7 +103,7 @@ func (c *Controller) Start(ctx context.Context, mode string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(mode) == string(workflow.ModeReplyOnly) {
+	if mode == string(workflow.ModeReplyOnly) {
 		_, err = c.workflow.StartReplyOnly(key)
 		return err
 	}
@@ -99,17 +111,30 @@ func (c *Controller) Start(ctx context.Context, mode string) error {
 	// Repeated start and an unfinished batch are recovery paths. They already
 	// own an immutable revision, so a transient old-backend outage must not
 	// replace or strand that fact.
-	if active, loadErr := c.store.ActiveProductWorkflowRun(); loadErr != nil {
+	active, loadErr := c.store.ActiveProductWorkflowRun()
+	if loadErr != nil {
 		return loadErr
-	} else if active != nil {
-		_, err = c.workflow.StartFull(key, "")
-		return err
 	}
-	if batch, loadErr := c.store.ActiveSourcingBatch(key); loadErr != nil {
+	var batch *store.SourcingBatch
+	if active != nil && active.SourcingBatchID != nil {
+		batch, loadErr = c.store.SourcingBatchByID(*active.SourcingBatchID)
+	} else {
+		batch, loadErr = c.store.ActiveSourcingBatch(key)
+	}
+	if loadErr != nil {
 		return loadErr
-	} else if batch != nil {
+	}
+	if batch != nil {
+		if batch.Platform != key.Platform || batch.AccountRef != key.AccountRef ||
+			batch.BackendJobID == nil ||
+			strings.TrimSpace(*batch.BackendJobID) != expectedBackendJobID {
+			return ErrJobSelectionChanged
+		}
 		_, err = c.workflow.StartFull(key, batch.ContextRevisionHash)
 		return err
+	}
+	if active != nil {
+		return ErrJobConfigUnavailable
 	}
 
 	raw, err := c.source.FetchCurrent(ctx)
@@ -123,6 +148,9 @@ func (c *Controller) Start(ctx context.Context, mode string) error {
 	stored, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now())
 	if err != nil || len(stored) != 1 {
 		return errors.Join(ErrJobConfigUnavailable, err)
+	}
+	if strings.TrimSpace(stored[0].SourceJobRef) != expectedBackendJobID {
+		return ErrJobSelectionChanged
 	}
 	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
 	return err

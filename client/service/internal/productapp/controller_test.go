@@ -82,7 +82,7 @@ func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
@@ -109,7 +109,7 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "replyOnly"); err != nil {
+	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
 		t.Fatal(err)
 	}
 	if flow.replyKey != key || source.calls != 0 {
@@ -146,7 +146,7 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full"); !errors.Is(
+	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(
 		err,
 		workflow.ErrDailyWindowClosed,
 	) {
@@ -159,6 +159,76 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 			flow.fullKey,
 			flow.fullRevision,
 		)
+	}
+}
+
+func TestFullStartRejectsChangedBackendJobAfterSavingLatestHead(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 99, "新职位")}
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	controller, err := New(db, flow, source, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(
+		err,
+		ErrJobSelectionChanged,
+	) {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if flow.fullRevision != "" {
+		t.Fatalf("职位变化不得创建工作流: %+v", flow)
+	}
+	current, err := db.CurrentLegacyJobAIContextByBackendJobID("99")
+	if err != nil || current == nil || current.DisplayName != "新职位" {
+		t.Fatalf("最新职位仍应保存供页面下一轮刷新: current=%+v err=%v", current, err)
+	}
+}
+
+func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(
+		syntheticCurrentJob(t, 42, "产品经理"),
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.SaveCurrentLegacyJobAIContext(revisions, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		BatchID: "batch-recover-bound", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: stored[0].RevisionHash, TargetCount: 30, StartedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: []byte("must not fetch")}
+	controller, err := New(db, flow, source, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 0 || flow.fullRevision != started.Batch.ContextRevisionHash {
+		t.Fatalf(
+			"recovery fetched=%d revision=%q batch=%+v",
+			source.calls,
+			flow.fullRevision,
+			started.Batch,
+		)
+	}
+	if err := controller.Start(context.Background(), "full", "99"); !errors.Is(
+		err,
+		ErrJobSelectionChanged,
+	) {
+		t.Fatalf("错误职位不得接管既有批次: %v", err)
 	}
 }
 

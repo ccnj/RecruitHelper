@@ -54,7 +54,7 @@ type RuntimeSnapshotProvider func(context.Context) (RuntimeSnapshot, error)
 // remain in the brain and must reuse the production workflow and effect paths;
 // apphttp only validates and forwards user intent.
 type WorkflowControl interface {
-	Start(context.Context, string) error
+	Start(context.Context, string, string) error
 	Pause(context.Context) error
 	Resume(context.Context) error
 	ConfirmAll(context.Context, string, []string) error
@@ -155,10 +155,27 @@ func (a *API) guard(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Mode string `json:"mode"`
+		Mode         string `json:"mode"`
+		BackendJobID string `json:"backendJobId,omitempty"`
 	}
-	if decodeProductJSON(r, &request) != nil ||
-		(request.Mode != "full" && request.Mode != "replyOnly") {
+	if decodeProductJSON(r, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
+		return
+	}
+	request.Mode = strings.TrimSpace(request.Mode)
+	request.BackendJobID = strings.TrimSpace(request.BackendJobID)
+	switch request.Mode {
+	case "full":
+		if request.BackendJobID == "" || len(request.BackendJobID) > 128 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
+			return
+		}
+	case "replyOnly":
+		if request.BackendJobID != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
+			return
+		}
+	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
 		return
 	}
@@ -166,7 +183,7 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
 		return
 	}
-	if err := a.control.Start(r.Context(), request.Mode); err != nil {
+	if err := a.control.Start(r.Context(), request.Mode, request.BackendJobID); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法启动工作流"})
 		return
 	}
