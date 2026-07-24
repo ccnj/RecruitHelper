@@ -49,6 +49,15 @@ async function get<T>(path: string): Promise<T> {
   return readResponse<T>(response, path)
 }
 
+// 普通产品页只允许读取独立的 /app/* 投影。产品数据不写入浏览器持久存储，
+// bearer 仍只来自 Electron preload 的内存桥。
+export async function appGet<T>(path: string): Promise<T> {
+  if (!path.startsWith('/app/')) {
+    throw new Error('产品读取只允许访问 /app/*')
+  }
+  return get<T>(path)
+}
+
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(ADMIN_BASE + path, {
     method: 'POST',

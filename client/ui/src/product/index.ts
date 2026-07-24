@@ -1,4 +1,5 @@
 export { ProductApp, ProductPreviewApp, type ProductAppProps } from './ProductApp'
+export { ProductConnectedApp, type ProductConnectedAppProps } from './ProductConnectedApp'
 export { createEmptyProductData, createProductFixture } from './fixtures'
 export type {
   BoundJobView,
@@ -15,4 +16,3 @@ export type {
   ProductPage,
   WorkflowView,
 } from './types'
-

@@ -11,7 +11,7 @@ import {
 } from './candidate-workflow'
 import { sendStateLabel, sendSucceeded, sendSuspect, sendTerminal } from './send-intent-state'
 import { acknowledgeSendIntent, readSendResume } from './send-resume'
-import { ProductApp } from './product'
+import { ProductConnectedApp } from './product'
 
 interface PollState<T> {
   data: T | undefined
@@ -171,7 +171,7 @@ export function App() {
       </>
     )
   }
-  return <ProductApp actions={{ openDiagnostics: () => setDiagnosticsVisible(true) }} />
+  return <ProductConnectedApp onOpenDiagnostics={() => setDiagnosticsVisible(true)} />
 }
 
 function DiagnosticConsole() {

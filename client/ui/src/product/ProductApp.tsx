@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { CandidateDrawer } from './components/CandidateDrawer'
 import { CandidateStagePage } from './components/CandidateStagePage'
 import { ConfirmationPage } from './components/ConfirmationPage'
@@ -20,6 +20,7 @@ export interface ProductAppProps {
   actions?: ProductActions
   initialPage?: ProductPage
   fixtureNotice?: string
+  statusMessage?: string | null
 }
 
 const candidatePages = new Set<ProductPage>([
@@ -34,11 +35,14 @@ export function ProductApp({
   actions = {},
   initialPage = 'home',
   fixtureNotice,
+  statusMessage,
 }: ProductAppProps) {
   const [activePage, setActivePage] = useState<ProductPage>(initialPage)
   const [globalSearch, setGlobalSearch] = useState('')
   const [drawerCandidate, setDrawerCandidate] = useState<CandidateViewItem | null>(null)
+  const [drawerReadError, setDrawerReadError] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const detailRequest = useRef(0)
   const batchSelectionKey = useMemo(
     () => `${data.confirmation.batchId ?? 'none'}:${data.confirmation.candidates.map((candidate) => candidate.profileId).join(',')}`,
     [data.confirmation.batchId, data.confirmation.candidates],
@@ -49,8 +53,32 @@ export function ProductApp({
   }, [batchSelectionKey])
 
   function navigate(page: ProductPage) {
+    detailRequest.current += 1
     setActivePage(page)
     setDrawerCandidate(null)
+    setDrawerReadError(null)
+  }
+
+  async function openCandidate(candidate: CandidateViewItem) {
+    const request = detailRequest.current + 1
+    detailRequest.current = request
+    setDrawerCandidate(candidate)
+    setDrawerReadError(null)
+    if (!actions.loadCandidateDetail) return
+    try {
+      const detail = await actions.loadCandidateDetail(candidate.profileId, candidate)
+      if (detailRequest.current === request) setDrawerCandidate(detail)
+    } catch (reason) {
+      if (detailRequest.current === request) {
+        setDrawerReadError(reason instanceof Error ? reason.message : '候选人详情读取失败')
+      }
+    }
+  }
+
+  function closeCandidate() {
+    detailRequest.current += 1
+    setDrawerCandidate(null)
+    setDrawerReadError(null)
   }
 
   let content: JSX.Element
@@ -69,7 +97,7 @@ export function ProductApp({
         actions={actions}
         batch={data.confirmation}
         customer={data.customer}
-        onOpenCandidate={setDrawerCandidate}
+        onOpenCandidate={(candidate) => void openCandidate(candidate)}
         onSelectionChange={setSelectedIds}
         selectedIds={selectedIds}
       />
@@ -81,7 +109,7 @@ export function ProductApp({
         candidates={data.candidates[candidateView]}
         globalSearch={globalSearch}
         key={candidateView}
-        onOpenCandidate={setDrawerCandidate}
+        onOpenCandidate={(candidate) => void openCandidate(candidate)}
         view={candidateView}
       />
     )
@@ -105,9 +133,22 @@ export function ProductApp({
       />
       <main className="rh-product-main">
         {fixtureNotice && <div className="rh-fixture-notice">{fixtureNotice}</div>}
+        {statusMessage && (
+          <div className="rh-product-notice">
+            <span>{statusMessage}</span>
+            {actions.refresh && (
+              <button onClick={() => void actions.refresh?.()} type="button">重新读取</button>
+            )}
+          </div>
+        )}
+        {drawerReadError && (
+          <div className="rh-product-notice is-warning">
+            候选人详情暂时无法刷新，抽屉保留列表中的基础信息：{drawerReadError}
+          </div>
+        )}
         {content}
       </main>
-      <CandidateDrawer actions={actions} candidate={drawerCandidate} onClose={() => setDrawerCandidate(null)} />
+      <CandidateDrawer actions={actions} candidate={drawerCandidate} onClose={closeCandidate} />
     </div>
   )
 }
@@ -120,4 +161,3 @@ export function ProductPreviewApp() {
     />
   )
 }
-
