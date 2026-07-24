@@ -36,6 +36,7 @@ type AppMetric struct {
 
 type AppJobProjection struct {
 	Available    bool       `json:"available"`
+	BackendJobID string     `json:"backendJobId,omitempty"`
 	Name         string     `json:"name,omitempty"`
 	Environment  string     `json:"environment,omitempty"`
 	SyncStatus   string     `json:"syncStatus"`
@@ -244,7 +245,12 @@ func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, err
 	out := AppOverviewProjection{RefreshedAt: req.Now}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
-		out.Job, err = appCurrentJobTx(tx)
+		out.Job, err = appCurrentJobTx(
+			tx,
+			req.CurrentBatchID,
+			req.Platform,
+			req.AccountRef,
+		)
 		if err != nil {
 			return err
 		}
@@ -304,12 +310,80 @@ func localBusinessDay(now time.Time) (time.Time, time.Time) {
 	return start, start.AddDate(0, 0, 1)
 }
 
-func appCurrentJobTx(tx *gorm.DB) (AppJobProjection, error) {
+func appCurrentJobTx(
+	tx *gorm.DB,
+	batchID, platform, accountRef string,
+) (AppJobProjection, error) {
 	type row struct {
 		DisplayName  string
 		Environment  string
 		LastSyncedAt time.Time
 		SourceJobRef string
+	}
+	if batchID != "" {
+		var batch SourcingBatch
+		if err := tx.First(&batch, "batch_id = ?", batchID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return AppJobProjection{SyncStatus: "missing"}, nil
+			}
+			return AppJobProjection{}, err
+		}
+		if batch.Platform != platform || batch.AccountRef != accountRef ||
+			batch.BackendJobID == nil || strings.TrimSpace(*batch.BackendJobID) == "" {
+			return AppJobProjection{}, ErrAppProjectionConflict
+		}
+		backendJobID := strings.TrimSpace(*batch.BackendJobID)
+		var frozen JobAIContextRevision
+		if err := tx.First(
+			&frozen,
+			"revision_hash = ?",
+			batch.ContextRevisionHash,
+		).Error; err != nil {
+			return AppJobProjection{}, ErrAppProjectionConflict
+		}
+		if frozen.SourceKind != legacyJobConfigSourceKind ||
+			frozen.SourceJobRef != backendJobID {
+			return AppJobProjection{}, ErrAppProjectionConflict
+		}
+		var currentRows []row
+		err := tx.Table("job_ai_context_heads AS head").
+			Select(
+				"revision.display_name, revision.environment, "+
+					"head.last_synced_at, head.source_job_ref",
+			).
+			Joins(
+				"JOIN job_ai_context_revisions AS revision "+
+					"ON revision.revision_hash = head.revision_hash",
+			).
+			Where(
+				"head.source_kind = ? AND head.source_job_ref = ?",
+				legacyJobConfigSourceKind,
+				backendJobID,
+			).
+			Limit(1).
+			Scan(&currentRows).Error
+		switch {
+		case err != nil:
+			return AppJobProjection{}, err
+		case len(currentRows) == 1:
+			current := currentRows[0]
+			if current.SourceJobRef != backendJobID {
+				return AppJobProjection{}, ErrAppProjectionConflict
+			}
+			return AppJobProjection{
+				Available: true, BackendJobID: backendJobID,
+				Name: current.DisplayName, Environment: current.Environment,
+				SyncStatus: "synced", LastSyncedAt: &current.LastSyncedAt,
+			}, nil
+		case len(currentRows) == 0:
+			return AppJobProjection{
+				Available: true, BackendJobID: backendJobID,
+				Name: frozen.DisplayName, Environment: frozen.Environment,
+				SyncStatus: "stale",
+			}, nil
+		default:
+			return AppJobProjection{}, ErrAppProjectionConflict
+		}
 	}
 	var rows []row
 	if err := tx.Table("job_ai_context_heads AS head").
@@ -328,7 +402,8 @@ func appCurrentJobTx(tx *gorm.DB) (AppJobProjection, error) {
 		return AppJobProjection{SyncStatus: "ambiguous"}, nil
 	}
 	return AppJobProjection{
-		Available: true, Name: rows[0].DisplayName, Environment: rows[0].Environment,
+		Available: true, BackendJobID: rows[0].SourceJobRef,
+		Name: rows[0].DisplayName, Environment: rows[0].Environment,
 		SyncStatus: "synced", LastSyncedAt: &rows[0].LastSyncedAt,
 	}, nil
 }

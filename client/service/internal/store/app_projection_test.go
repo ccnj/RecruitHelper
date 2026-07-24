@@ -293,19 +293,89 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	otherRevision := revision
+	otherRevision.RevisionHash = "revision-overview-other"
+	otherRevision.ContextID = "context-overview-other"
+	otherRevision.SourceJobRef = "job-overview-other"
+	otherRevision.DisplayName = "数据分析师"
+	otherRevision.CreatedAt = now.Add(-30 * time.Minute)
+	if err := s.db.Create(&otherRevision).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&JobAIContextHead{
+		SourceKind: legacyJobConfigSourceKind, SourceJobRef: otherRevision.SourceJobRef,
+		ContextID: otherRevision.ContextID, RevisionHash: otherRevision.RevisionHash,
+		LastSyncedAt: now.Add(-30 * time.Minute),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	got, err := s.AppOverview(AppOverviewRequest{
 		Now: now, Platform: "zhilian", AccountRef: "overview-account",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Job.Available || got.Job.Name != "产品经理" ||
+	if !got.Job.Available || got.Job.Name != "数据分析师" ||
+		got.Job.BackendJobID != otherRevision.SourceJobRef ||
 		got.Statistics.TodayRated.Value == nil || *got.Statistics.TodayRated.Value != 1 {
 		t.Fatalf("unexpected overview: %+v", got)
 	}
 	if !got.Statistics.TotalInterviewed.Exact ||
 		got.Statistics.TodayCompletedInterviews.Exact {
 		t.Fatalf("历史状态可精确计数、缺少跃迁时刻的今日指标不得猜测: %+v", got.Statistics)
+	}
+
+	backendJobID := revision.SourceJobRef
+	if err := s.db.Create(&SourcingBatch{
+		BatchID: "batch-overview-bound", Platform: "zhilian", AccountRef: "overview-account",
+		ContextRevisionHash: revision.RevisionHash, BackendJobID: &backendJobID,
+		TargetCount: 30, Status: SourcingBatchPreparing, StartedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.AppOverview(AppOverviewRequest{
+		Now: now, CurrentBatchID: "batch-overview-bound",
+		Platform: "zhilian", AccountRef: "overview-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Job.BackendJobID != backendJobID || got.Job.Name != "产品经理" {
+		t.Fatalf("当前批次必须盖过全局较新职位: %+v", got.Job)
+	}
+
+	currentRevision := revision
+	currentRevision.RevisionHash = "revision-overview-current"
+	currentRevision.ContextID = "context-overview-current"
+	currentRevision.DisplayName = "高级产品经理"
+	currentRevision.CreatedAt = now
+	if err := s.db.Create(&currentRevision).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&JobAIContextHead{}).
+		Where("source_kind = ? AND source_job_ref = ?", legacyJobConfigSourceKind, backendJobID).
+		Updates(map[string]any{
+			"context_id":     currentRevision.ContextID,
+			"revision_hash":  currentRevision.RevisionHash,
+			"last_synced_at": now,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.AppOverview(AppOverviewRequest{
+		Now: now, CurrentBatchID: "batch-overview-bound",
+		Platform: "zhilian", AccountRef: "overview-account",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Job.BackendJobID != backendJobID || got.Job.Name != "高级产品经理" {
+		t.Fatalf("批次职位应显示同一 Job.ID 的最新配置: %+v", got.Job)
+	}
+	if _, err := s.AppOverview(AppOverviewRequest{
+		Now: now, CurrentBatchID: "batch-overview-bound",
+		Platform: "zhilian", AccountRef: "other-account",
+	}); !errors.Is(err, ErrAppProjectionConflict) {
+		t.Fatalf("跨账号批次不得回退到全局职位: %v", err)
 	}
 }
 
