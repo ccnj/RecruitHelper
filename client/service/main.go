@@ -18,6 +18,7 @@ import (
 	"recruithelper/client/service/internal/adminhttp"
 	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/appbridge"
+	"recruithelper/client/service/internal/apphttp"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
@@ -144,6 +145,29 @@ func main() {
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
 		SetJobConfigSource(jobConfigSource).Routes(mux)
+	if *adminToken != "" {
+		productAPI, productErr := apphttp.New(
+			st,
+			*adminToken,
+			apphttp.WithRuntimeSnapshotProvider(func(ctx context.Context) (apphttp.RuntimeSnapshot, error) {
+				view, statusErr := jobConfigSource.Status(ctx)
+				if statusErr != nil {
+					return apphttp.RuntimeSnapshot{}, statusErr
+				}
+				return apphttp.RuntimeSnapshot{
+					Available:      true,
+					CustomerName:   view.CustomerName,
+					CustomerStatus: view.CustomerStatus,
+					Authorized:     view.Configured && view.MachineIdentityReady && view.MachineMatch,
+				}, nil
+			}),
+		)
+		if productErr != nil {
+			slog.Error("产品 UI 投影初始化失败", "err", productErr)
+			os.Exit(1)
+		}
+		productAPI.Routes(mux)
+	}
 
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", *port), Handler: mux}
 	go func() {

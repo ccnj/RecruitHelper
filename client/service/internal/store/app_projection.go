@@ -1,0 +1,1093 @@
+package store
+
+import (
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"recruithelper/contract/gen/go/protocol"
+
+	"gorm.io/gorm"
+)
+
+var (
+	ErrAppProjectionInvalid  = errors.New("产品投影查询参数无效")
+	ErrAppCandidateNotFound  = errors.New("候选人档案不存在")
+	ErrAppProjectionConflict = errors.New("产品投影业务事实冲突")
+)
+
+type AppCandidateView string
+
+const (
+	AppCandidateViewCommunicating AppCandidateView = "communicating"
+	AppCandidateViewPending       AppCandidateView = "pending"
+	AppCandidateViewInterviewed   AppCandidateView = "interviewed"
+	AppCandidateViewWechat        AppCandidateView = "wechat"
+)
+
+type AppMetric struct {
+	Value             *int64 `json:"value"`
+	Exact             bool   `json:"exact"`
+	UnavailableReason string `json:"unavailableReason,omitempty"`
+}
+
+type AppJobProjection struct {
+	Available    bool       `json:"available"`
+	Name         string     `json:"name,omitempty"`
+	Environment  string     `json:"environment,omitempty"`
+	SyncStatus   string     `json:"syncStatus"`
+	LastSyncedAt *time.Time `json:"lastSyncedAt,omitempty"`
+}
+
+type AppFunnelProjection struct {
+	Available         bool       `json:"available"`
+	BatchID           string     `json:"batchId,omitempty"`
+	Stage             string     `json:"stage,omitempty"`
+	TargetCount       int        `json:"targetCount"`
+	CapturedCount     int64      `json:"capturedCount"`
+	ScoredCount       int64      `json:"scoredCount"`
+	SelectedCount     int64      `json:"selectedCount"`
+	GreetingReady     int64      `json:"greetingReady"`
+	PendingConfirm    int64      `json:"pendingConfirm"`
+	SentCount         int64      `json:"sentCount"`
+	FailedCount       int64      `json:"failedCount"`
+	SuspectCount      int64      `json:"suspectCount"`
+	LastFailureReason string     `json:"lastFailureReason,omitempty"`
+	StartedAt         *time.Time `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+}
+
+type AppOverviewStatistics struct {
+	TodayRated        AppMetric `json:"todayRated"`
+	TodayConfirmation AppMetric `json:"todayConfirmation"`
+	TodayGreeted      AppMetric `json:"todayGreeted"`
+	TodayInvited      AppMetric `json:"todayInvited"`
+
+	TotalGreeted     AppMetric `json:"totalGreeted"`
+	TotalInterviewed AppMetric `json:"totalInterviewed"`
+	TotalWechat      AppMetric `json:"totalWechat"`
+
+	TodayNewReplies          AppMetric `json:"todayNewReplies"`
+	TodayNewAppointments     AppMetric `json:"todayNewAppointments"`
+	TodayCompletedInterviews AppMetric `json:"todayCompletedInterviews"`
+}
+
+type AppInterviewSummary struct {
+	ProfileID   string `json:"profileId"`
+	DisplayName string `json:"displayName"`
+	JobName     string `json:"jobName,omitempty"`
+	StartsAtMs  int64  `json:"startsAtMs"`
+	EndsAtMs    *int64 `json:"endsAtMs,omitempty"`
+	Method      string `json:"method,omitempty"`
+	State       string `json:"state,omitempty"`
+}
+
+type AppOverviewRequest struct {
+	Now            time.Time
+	CurrentBatchID string
+}
+
+type AppOverviewProjection struct {
+	Job             AppJobProjection      `json:"job"`
+	Funnel          AppFunnelProjection   `json:"funnel"`
+	Statistics      AppOverviewStatistics `json:"statistics"`
+	TodayInterviews []AppInterviewSummary `json:"todayInterviews"`
+	BusinessSince   *time.Time            `json:"businessSince,omitempty"`
+	RefreshedAt     time.Time             `json:"refreshedAt"`
+}
+
+type AppConfirmationCandidate struct {
+	ProfileID    string `json:"profileId"`
+	DisplayName  string `json:"displayName"`
+	JobName      string `json:"jobName,omitempty"`
+	Score        *int   `json:"score"`
+	GreetingText string `json:"greetingText,omitempty"`
+	Status       string `json:"status"`
+	Selectable   bool   `json:"selectable"`
+	Failure      string `json:"failure,omitempty"`
+}
+
+type AppConfirmationProjection struct {
+	Available         bool                       `json:"available"`
+	Ready             bool                       `json:"ready"`
+	Reason            string                     `json:"reason,omitempty"`
+	BatchID           string                     `json:"batchId,omitempty"`
+	JobName           string                     `json:"jobName,omitempty"`
+	CreatedAt         *time.Time                 `json:"createdAt,omitempty"`
+	ScoredCount       int64                      `json:"scoredCount"`
+	SelectedCount     int64                      `json:"selectedCount"`
+	GeneratedCount    int64                      `json:"generatedCount"`
+	GenerationFailed  int64                      `json:"generationFailed"`
+	GenerationPending int64                      `json:"generationPending"`
+	SelectableCount   int64                      `json:"selectableCount"`
+	Candidates        []AppConfirmationCandidate `json:"candidates"`
+}
+
+type AppCandidateListQuery struct {
+	View   AppCandidateView
+	Search string
+	Limit  int
+	Offset int
+}
+
+type AppCandidateListItem struct {
+	ProfileID           string  `json:"profileId"`
+	DisplayName         string  `json:"displayName"`
+	JobName             string  `json:"jobName,omitempty"`
+	Status              string  `json:"status"`
+	EndReason           string  `json:"endReason,omitempty"`
+	LastMessagePreview  string  `json:"lastMessagePreview,omitempty"`
+	LastActivityAtMs    *int64  `json:"lastActivityAtMs,omitempty"`
+	UnreadCount         int     `json:"unreadCount"`
+	ManualRequired      bool    `json:"manualRequired"`
+	ManualReason        string  `json:"manualReason,omitempty"`
+	Wechat              *string `json:"wechat,omitempty"`
+	InterviewStartsAtMs *int64  `json:"interviewStartsAtMs,omitempty"`
+	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
+	InterviewMethod     *string `json:"interviewMethod,omitempty"`
+	InterviewCardState  string  `json:"interviewCardState,omitempty"`
+}
+
+type AppCandidateListProjection struct {
+	View   AppCandidateView       `json:"view"`
+	Total  int64                  `json:"total"`
+	Items  []AppCandidateListItem `json:"items"`
+	Limit  int                    `json:"limit"`
+	Offset int                    `json:"offset"`
+}
+
+type AppResumeField struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
+type AppResumeSummary struct {
+	Available       bool             `json:"available"`
+	Basic           []AppResumeField `json:"basic"`
+	Expectations    []AppResumeField `json:"expectations"`
+	SelfEvaluation  string           `json:"selfEvaluation,omitempty"`
+	Education       string           `json:"education,omitempty"`
+	WorkExperiences string           `json:"workExperiences,omitempty"`
+	Truncated       bool             `json:"truncated"`
+}
+
+type AppMessageSummary struct {
+	Seq                 int64   `json:"seq"`
+	Direction           string  `json:"direction"`
+	Kind                string  `json:"kind"`
+	Text                *string `json:"text,omitempty"`
+	CardType            string  `json:"cardType,omitempty"`
+	CardState           string  `json:"cardState,omitempty"`
+	TsApproxMs          *int64  `json:"tsApproxMs,omitempty"`
+	InterviewStartsAtMs *int64  `json:"interviewStartsAtMs,omitempty"`
+	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
+	InterviewMethod     *string `json:"interviewMethod,omitempty"`
+}
+
+type AppAIJudgementSummary struct {
+	Available    bool       `json:"available"`
+	Status       string     `json:"status,omitempty"`
+	IntentLabel  string     `json:"intentLabel,omitempty"`
+	IntentSource string     `json:"intentSource,omitempty"`
+	Failure      string     `json:"failure,omitempty"`
+	ClassifiedAt *time.Time `json:"classifiedAt,omitempty"`
+}
+
+type AppActionSummary struct {
+	Kind      string     `json:"kind"`
+	Status    string     `json:"status"`
+	Failure   string     `json:"failure,omitempty"`
+	CreatedAt *time.Time `json:"createdAt,omitempty"`
+}
+
+type AppCandidateDetailProjection struct {
+	Candidate AppCandidateListItem  `json:"candidate"`
+	Resume    AppResumeSummary      `json:"resume"`
+	Messages  []AppMessageSummary   `json:"messages"`
+	LatestAI  AppAIJudgementSummary `json:"latestAi"`
+	Actions   []AppActionSummary    `json:"actions"`
+}
+
+func exactMetric(value int64) AppMetric {
+	return AppMetric{Value: &value, Exact: true}
+}
+
+func unavailableMetric(reason string) AppMetric {
+	return AppMetric{Exact: false, UnavailableReason: reason}
+}
+
+func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, error) {
+	if req.Now.IsZero() {
+		req.Now = time.Now()
+	}
+	req.CurrentBatchID = strings.TrimSpace(req.CurrentBatchID)
+	if len(req.CurrentBatchID) > 128 {
+		return nil, ErrAppProjectionInvalid
+	}
+	start, end := localBusinessDay(req.Now)
+	out := AppOverviewProjection{RefreshedAt: req.Now}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		out.Job, err = appCurrentJobTx(tx)
+		if err != nil {
+			return err
+		}
+		out.Funnel, err = appFunnelTx(tx, req.CurrentBatchID)
+		if err != nil {
+			return err
+		}
+		out.Statistics, err = appOverviewStatisticsTx(tx, start, end)
+		if err != nil {
+			return err
+		}
+		out.TodayInterviews, err = appTodayInterviewsTx(tx, start, end)
+		if err != nil {
+			return err
+		}
+		var firstProfile CandidateProfile
+		err = tx.Order("created_at ASC, profile_id ASC").First(&firstProfile).Error
+		switch {
+		case err == nil:
+			since := firstProfile.CreatedAt
+			out.BusinessSince = &since
+		case errors.Is(err, gorm.ErrRecordNotFound):
+		default:
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out.TodayInterviews == nil {
+		out.TodayInterviews = []AppInterviewSummary{}
+	}
+	return &out, nil
+}
+
+func localBusinessDay(now time.Time) (time.Time, time.Time) {
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return start, start.AddDate(0, 0, 1)
+}
+
+func appCurrentJobTx(tx *gorm.DB) (AppJobProjection, error) {
+	type row struct {
+		DisplayName  string
+		Environment  string
+		LastSyncedAt time.Time
+		SourceJobRef string
+	}
+	var rows []row
+	if err := tx.Table("job_ai_context_heads AS head").
+		Select("revision.display_name, revision.environment, head.last_synced_at, head.source_job_ref").
+		Joins("JOIN job_ai_context_revisions AS revision ON revision.revision_hash = head.revision_hash").
+		Where("head.source_kind = ?", legacyJobConfigSourceKind).
+		Order("head.last_synced_at DESC, head.source_job_ref ASC").
+		Limit(2).Scan(&rows).Error; err != nil {
+		return AppJobProjection{}, err
+	}
+	if len(rows) == 0 {
+		return AppJobProjection{SyncStatus: "missing"}, nil
+	}
+	if len(rows) > 1 && rows[0].LastSyncedAt.Equal(rows[1].LastSyncedAt) &&
+		rows[0].SourceJobRef != rows[1].SourceJobRef {
+		return AppJobProjection{SyncStatus: "ambiguous"}, nil
+	}
+	return AppJobProjection{
+		Available: true, Name: rows[0].DisplayName, Environment: rows[0].Environment,
+		SyncStatus: "synced", LastSyncedAt: &rows[0].LastSyncedAt,
+	}, nil
+}
+
+func appFunnelTx(tx *gorm.DB, batchID string) (AppFunnelProjection, error) {
+	if batchID == "" {
+		return AppFunnelProjection{}, nil
+	}
+	var batch SourcingBatch
+	if err := tx.First(&batch, "batch_id = ?", batchID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return AppFunnelProjection{}, nil
+		}
+		return AppFunnelProjection{}, err
+	}
+	out := AppFunnelProjection{
+		Available: true, BatchID: batch.BatchID, TargetCount: batch.TargetCount,
+		LastFailureReason: batch.Reason, StartedAt: &batch.StartedAt, FinishedAt: batch.EndedAt,
+	}
+	if err := tx.Model(&SourcingCandidateRun{}).Where("batch_id = ?", batch.BatchID).
+		Count(&out.CapturedCount).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	if err := tx.Table("sourcing_score_invocations AS score").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = score.run_id").
+		Where("run.batch_id = ? AND score.finished_at IS NOT NULL", batch.BatchID).
+		Count(&out.ScoredCount).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	if err := tx.Table("sourcing_selection_decisions AS decision").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
+		Where("run.batch_id = ? AND decision.outcome = ?", batch.BatchID, SourcingSelectionSelected).
+		Count(&out.SelectedCount).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	if err := tx.Model(&SourcingGreetingInvocation{}).
+		Where("batch_id = ? AND status = ? AND finished_at IS NOT NULL", batch.BatchID, AIInvocationOK).
+		Count(&out.GreetingReady).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	var generationFailed int64
+	if err := tx.Model(&SourcingGreetingInvocation{}).
+		Where("batch_id = ? AND status <> ? AND finished_at IS NOT NULL", batch.BatchID, AIInvocationOK).
+		Count(&generationFailed).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	out.FailedCount = generationFailed
+	var intents []EffectIntent
+	if err := tx.Table("effect_intents AS effect").
+		Joins("JOIN sourcing_greeting_invocations AS greeting ON greeting.effect_intent_id = effect.intent_id").
+		Where("greeting.batch_id = ?", batch.BatchID).Find(&intents).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	for i := range intents {
+		switch intents[i].Status {
+		case EffectIntentOk, EffectIntentResolvedOk:
+			out.SentCount++
+		case EffectIntentFailed, EffectIntentResolvedFailed:
+			out.FailedCount++
+		case EffectIntentSuspect:
+			out.SuspectCount++
+		}
+	}
+	if err := tx.Table("sourcing_greeting_invocations AS greeting").
+		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = greeting.profile_id").
+		Where("greeting.batch_id = ? AND greeting.status = ? AND greeting.finished_at IS NOT NULL "+
+			"AND greeting.effect_intent_id IS NULL AND profile.main_status = ? AND profile.end_reason IS NULL",
+			batch.BatchID, AIInvocationOK, CandidateProfileSelected).
+		Count(&out.PendingConfirm).Error; err != nil {
+		return AppFunnelProjection{}, err
+	}
+	switch {
+	case batch.Status == SourcingBatchBlocked:
+		out.Stage = "failed"
+	case batch.Status == SourcingBatchPreparing || batch.Status == SourcingBatchCollecting:
+		out.Stage = "collecting"
+	case out.ScoredCount < int64(batch.TargetCount):
+		out.Stage = "scoring"
+	case out.SelectedCount == 0:
+		var selectionCount int64
+		if err := tx.Model(&SourcingBatchSelection{}).Where("batch_id = ?", batch.BatchID).
+			Count(&selectionCount).Error; err != nil {
+			return AppFunnelProjection{}, err
+		}
+		if selectionCount == 0 {
+			out.Stage = "selecting"
+		} else {
+			out.Stage = "completed"
+		}
+	case out.GreetingReady+generationFailed < out.SelectedCount:
+		out.Stage = "generatingGreetings"
+	case out.PendingConfirm > 0:
+		out.Stage = "awaitingConfirmation"
+	case out.SentCount+out.FailedCount+out.SuspectCount >= out.SelectedCount:
+		out.Stage = "completed"
+	default:
+		out.Stage = "sendingGreetings"
+	}
+	return out, nil
+}
+
+func appOverviewStatisticsTx(tx *gorm.DB, start, end time.Time) (AppOverviewStatistics, error) {
+	var out AppOverviewStatistics
+	count := func(query *gorm.DB, target *int64) error { return query.Count(target).Error }
+	var value int64
+	if err := tx.Table("(?) AS rated", tx.Table("sourcing_score_invocations AS score").
+		Select("run.platform, run.platform_user_ref").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = score.run_id").
+		Where("score.status = ? AND score.finished_at >= ? AND score.finished_at < ?",
+			AIInvocationOK, start, end).
+		Group("run.platform, run.platform_user_ref")).
+		Count(&value).Error; err != nil {
+		return out, err
+	}
+	out.TodayRated = exactMetric(value)
+
+	value = 0
+	if err := count(tx.Table("sourcing_selection_decisions AS decision").
+		Where("decision.outcome = ? AND decision.decided_at >= ? AND decision.decided_at < ?",
+			SourcingSelectionSelected, start, end).
+		Distinct("decision.profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TodayConfirmation = exactMetric(value)
+
+	value = 0
+	if err := count(tx.Model(&CandidateProfile{}).
+		Where("greeted_at >= ? AND greeted_at < ?", start, end).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TodayGreeted = exactMetric(value)
+
+	todayInvite, inviteExact, err := appTimedMessageProfileCountTx(
+		tx, "out", "card", "interviewInvite", start, end,
+	)
+	if err != nil {
+		return out, err
+	}
+	if inviteExact {
+		out.TodayInvited = exactMetric(todayInvite)
+		out.TodayNewAppointments = exactMetric(todayInvite)
+	} else {
+		out.TodayInvited = unavailableMetric("存在无平台时间的邀面事实")
+		out.TodayNewAppointments = unavailableMetric("存在无平台时间的邀面事实")
+	}
+
+	value = 0
+	if err := count(tx.Model(&CandidateProfile{}).
+		Where("greeted_at IS NOT NULL").Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TotalGreeted = exactMetric(value)
+	value = 0
+	if err := count(tx.Model(&CandidateProfile{}).
+		Where("main_status = ?", CandidateProfileInterviewed).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TotalInterviewed = exactMetric(value)
+
+	value = 0
+	if err := count(tx.Model(&ContactAsset{}).
+		Where("kind = ?", contactAssetKindWechat).Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TotalWechat = exactMetric(value)
+
+	todayReply, replyExact, err := appTimedMessageProfileCountTx(tx, "in", "", "", start, end)
+	if err != nil {
+		return out, err
+	}
+	if replyExact {
+		out.TodayNewReplies = exactMetric(todayReply)
+	} else {
+		out.TodayNewReplies = unavailableMetric("存在无平台时间的入站消息")
+	}
+	out.TodayCompletedInterviews = unavailableMetric("当前没有面试完成写入口")
+	return out, nil
+}
+
+func appTimedMessageProfileCountTx(
+	tx *gorm.DB,
+	direction, kind, cardType string,
+	start, end time.Time,
+) (int64, bool, error) {
+	base := tx.Table("messages AS message").
+		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
+			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
+		Where("message.direction = ? AND message.retracted_at IS NULL", direction)
+	if kind != "" {
+		base = base.Where("message.kind = ?", kind)
+	}
+	if cardType != "" {
+		base = base.Where("message.card_type = ?", cardType)
+	}
+	var missingTime int64
+	if err := base.Session(&gorm.Session{}).Where("message.ts_approx_ms IS NULL").
+		Count(&missingTime).Error; err != nil {
+		return 0, false, err
+	}
+	startMs, endMs := start.UnixMilli(), end.UnixMilli()
+	var value int64
+	if err := base.Session(&gorm.Session{}).
+		Where("message.ts_approx_ms >= ? AND message.ts_approx_ms < ?", startMs, endMs).
+		Distinct("profile.profile_id").Count(&value).Error; err != nil {
+		return 0, false, err
+	}
+	return value, missingTime == 0, nil
+}
+
+func appTodayInterviewsTx(tx *gorm.DB, start, end time.Time) ([]AppInterviewSummary, error) {
+	type row struct {
+		ProfileID     string
+		DisplayName   *string
+		PositionTitle *string
+		StartsAtMs    *int64
+		EndsAtMs      *int64
+		Method        *string
+		CardState     string
+		Seq           int64
+	}
+	var rows []row
+	if err := tx.Table("messages AS message").
+		Select("profile.profile_id, candidate.display_name, profile.position_title, "+
+			"message.interview_starts_at_ms AS starts_at_ms, message.interview_ends_at_ms AS ends_at_ms, "+
+			"message.interview_method AS method, message.card_state, message.seq").
+		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
+			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
+		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
+			"AND candidate.platform_user_ref = profile.platform_user_ref").
+		Where("message.direction = ? AND message.kind = ? AND message.card_type = ? "+
+			"AND message.retracted_at IS NULL AND message.interview_starts_at_ms >= ? "+
+			"AND message.interview_starts_at_ms < ?",
+			"out", "card", "interviewInvite", start.UnixMilli(), end.UnixMilli()).
+		Order("message.interview_starts_at_ms ASC, message.seq DESC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(rows))
+	out := make([]AppInterviewSummary, 0, len(rows))
+	for _, row := range rows {
+		if row.StartsAtMs == nil {
+			continue
+		}
+		if _, ok := seen[row.ProfileID]; ok {
+			continue
+		}
+		seen[row.ProfileID] = struct{}{}
+		out = append(out, AppInterviewSummary{
+			ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
+			JobName: valueOrEmpty(row.PositionTitle), StartsAtMs: *row.StartsAtMs,
+			EndsAtMs: row.EndsAtMs, Method: valueOrEmpty(row.Method), State: row.CardState,
+		})
+	}
+	return out, nil
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func validAppCandidateView(view AppCandidateView) bool {
+	switch view {
+	case AppCandidateViewCommunicating, AppCandidateViewPending,
+		AppCandidateViewInterviewed, AppCandidateViewWechat:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Store) AppConfirmation(batchID string) (*AppConfirmationProjection, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" || len(batchID) > 128 {
+		return nil, ErrAppProjectionInvalid
+	}
+	var out AppConfirmationProjection
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var batch SourcingBatch
+		if err := tx.First(&batch, "batch_id = ?", batchID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		out.Available, out.BatchID, out.CreatedAt = true, batch.BatchID, &batch.StartedAt
+		if batch.PositionTitle != nil {
+			out.JobName = *batch.PositionTitle
+		}
+		if err := tx.Table("sourcing_score_invocations AS score").
+			Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = score.run_id").
+			Where("run.batch_id = ? AND score.finished_at IS NOT NULL", batch.BatchID).
+			Count(&out.ScoredCount).Error; err != nil {
+			return err
+		}
+		var selection SourcingBatchSelection
+		if err := tx.First(&selection, "batch_id = ?", batch.BatchID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				out.Reason = "selectionPending"
+				return nil
+			}
+			return err
+		}
+		out.SelectedCount = int64(selection.SelectedCount)
+		candidates, err := appConfirmationCandidatesTx(tx, batch)
+		if err != nil {
+			return err
+		}
+		out.Candidates = candidates
+		for i := range candidates {
+			switch candidates[i].Status {
+			case "ready":
+				out.GeneratedCount++
+				out.SelectableCount++
+			case "generationFailed":
+				out.GenerationFailed++
+			case "generationPending", "generating":
+				out.GenerationPending++
+			default:
+				if candidates[i].GreetingText != "" {
+					out.GeneratedCount++
+				}
+			}
+		}
+		out.Ready = out.GenerationPending == 0
+		if !out.Ready {
+			out.Reason = "greetingGenerationPending"
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out.Candidates == nil {
+		out.Candidates = []AppConfirmationCandidate{}
+	}
+	return &out, nil
+}
+
+func appConfirmationCandidatesTx(
+	tx *gorm.DB,
+	batch SourcingBatch,
+) ([]AppConfirmationCandidate, error) {
+	type row struct {
+		ProfileID          string
+		DisplayName        *string
+		PositionTitle      *string
+		Score              *int
+		GreetingText       *string
+		GreetingStatus     *AIInvocationStatus
+		GreetingFinishedAt *time.Time
+		GreetingFailure    *string
+		EffectIntentID     *string
+		EffectStatus       *EffectIntentStatus
+		ProfileStatus      CandidateProfileStatus
+		EndReason          *CandidateProfileEndReason
+	}
+	var rows []row
+	if err := tx.Table("sourcing_selection_decisions AS decision").
+		Select("profile.profile_id, candidate.display_name, profile.position_title, score.score, "+
+			"greeting.greeting_text, greeting.status AS greeting_status, "+
+			"greeting.finished_at AS greeting_finished_at, greeting.error_detail_code AS greeting_failure, "+
+			"greeting.effect_intent_id, effect.status AS effect_status, "+
+			"profile.main_status AS profile_status, profile.end_reason").
+		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
+		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = decision.profile_id").
+		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
+			"AND candidate.platform_user_ref = profile.platform_user_ref").
+		Joins("LEFT JOIN sourcing_score_invocations AS score ON score.run_id = run.run_id").
+		Joins("LEFT JOIN sourcing_greeting_invocations AS greeting ON greeting.run_id = run.run_id "+
+			"AND greeting.profile_id = profile.profile_id").
+		Joins("LEFT JOIN effect_intents AS effect ON effect.intent_id = greeting.effect_intent_id").
+		Where("run.batch_id = ? AND decision.outcome = ?", batch.BatchID, SourcingSelectionSelected).
+		Order("run.captured_at ASC, run.run_id ASC").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	feedChanged := false
+	var account Account
+	if err := tx.First(&account, "platform = ? AND account_ref = ?",
+		batch.Platform, batch.AccountRef).Error; err == nil {
+		feedChanged = account.SourcingFeedInvalidatedAt != nil &&
+			!account.SourcingFeedInvalidatedAt.Before(batch.StartedAt)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	out := make([]AppConfirmationCandidate, 0, len(rows))
+	for _, row := range rows {
+		item := AppConfirmationCandidate{
+			ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
+			JobName: valueOrEmpty(row.PositionTitle), Score: row.Score,
+			GreetingText: valueOrEmpty(row.GreetingText),
+		}
+		switch {
+		case row.GreetingStatus == nil:
+			item.Status = "generationPending"
+		case row.GreetingFinishedAt == nil:
+			item.Status = "generating"
+		case *row.GreetingStatus != AIInvocationOK:
+			item.Status = "generationFailed"
+			item.Failure = valueOrEmpty(row.GreetingFailure)
+		case row.EffectIntentID == nil && feedChanged:
+			item.Status = "abandoned"
+			item.Failure = SourcingFeedChangedReason
+		case row.EffectIntentID == nil && row.ProfileStatus == CandidateProfileSelected && row.EndReason == nil:
+			item.Status, item.Selectable = "ready", true
+		case row.EffectIntentID == nil:
+			item.Status = "unavailable"
+		case row.EffectStatus == nil:
+			return nil, ErrAppProjectionConflict
+		default:
+			switch *row.EffectStatus {
+			case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
+				item.Status = "sending"
+			case EffectIntentOk, EffectIntentResolvedOk:
+				item.Status = "sent"
+			case EffectIntentFailed, EffectIntentResolvedFailed:
+				item.Status = "failed"
+			case EffectIntentSuspect:
+				item.Status = "suspect"
+			default:
+				return nil, ErrAppProjectionConflict
+			}
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListProjection, error) {
+	query.Search = strings.TrimSpace(query.Search)
+	if !validAppCandidateView(query.View) || utf8.RuneCountInString(query.Search) > 100 ||
+		query.Offset < 0 || query.Limit < 0 || query.Limit > 200 {
+		return nil, ErrAppProjectionInvalid
+	}
+	if query.Limit == 0 {
+		query.Limit = 50
+	}
+	var out AppCandidateListProjection
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		base, err := appCandidateBaseQuery(tx, query.View, query.Search)
+		if err != nil {
+			return err
+		}
+		if err := base.Session(&gorm.Session{}).Distinct("profile.profile_id").
+			Count(&out.Total).Error; err != nil {
+			return err
+		}
+		var rows []appCandidateRow
+		if err := base.Session(&gorm.Session{}).
+			Select(appCandidateSelect).
+			Order("conversation.last_activity_ms IS NULL ASC, conversation.last_activity_ms DESC, profile.updated_at DESC, profile.profile_id ASC").
+			Limit(query.Limit).Offset(query.Offset).Scan(&rows).Error; err != nil {
+			return err
+		}
+		out.Items = make([]AppCandidateListItem, len(rows))
+		for i := range rows {
+			out.Items[i] = rows[i].projection()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out.View, out.Limit, out.Offset = query.View, query.Limit, query.Offset
+	if out.Items == nil {
+		out.Items = []AppCandidateListItem{}
+	}
+	return &out, nil
+}
+
+type appCandidateRow struct {
+	ProfileID           string
+	DisplayName         *string
+	PositionTitle       *string
+	MainStatus          CandidateProfileStatus
+	EndReason           *CandidateProfileEndReason
+	LastMessagePreview  *string
+	LastActivityMs      *int64
+	UnreadCount         *int
+	AutomationStatus    *ProfileCommunicationAutomationStatus
+	ManualReason        *string
+	Wechat              *string
+	InterviewStartsAtMs *int64
+	InterviewEndsAtMs   *int64
+	InterviewMethod     *string
+	InterviewCardState  *string
+}
+
+const appCandidateSelect = `
+profile.profile_id,
+candidate.display_name,
+profile.position_title,
+profile.main_status,
+profile.end_reason,
+conversation.last_message_preview,
+conversation.last_activity_ms,
+conversation.unread_count,
+aggregate.automation_status,
+aggregate.manual_reason,
+(SELECT asset.value FROM contact_assets AS asset
+ WHERE asset.profile_id = profile.profile_id AND asset.kind = 'wechat'
+ ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat,
+(SELECT message.interview_starts_at_ms FROM messages AS message
+ WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
+ AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
+ AND message.kind = 'card' AND message.card_type = 'interviewInvite'
+ AND message.retracted_at IS NULL ORDER BY message.seq DESC LIMIT 1) AS interview_starts_at_ms,
+(SELECT message.interview_ends_at_ms FROM messages AS message
+ WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
+ AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
+ AND message.kind = 'card' AND message.card_type = 'interviewInvite'
+ AND message.retracted_at IS NULL ORDER BY message.seq DESC LIMIT 1) AS interview_ends_at_ms,
+(SELECT message.interview_method FROM messages AS message
+ WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
+ AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
+ AND message.kind = 'card' AND message.card_type = 'interviewInvite'
+ AND message.retracted_at IS NULL ORDER BY message.seq DESC LIMIT 1) AS interview_method,
+(SELECT message.card_state FROM messages AS message
+ WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
+ AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
+ AND message.kind = 'card' AND message.card_type = 'interviewInvite'
+ AND message.retracted_at IS NULL ORDER BY message.seq DESC LIMIT 1) AS interview_card_state`
+
+func (row appCandidateRow) projection() AppCandidateListItem {
+	unread := 0
+	if row.UnreadCount != nil {
+		unread = *row.UnreadCount
+	}
+	manual := row.AutomationStatus != nil &&
+		*row.AutomationStatus == ProfileCommunicationAutomationManualRequired
+	return AppCandidateListItem{
+		ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
+		JobName: valueOrEmpty(row.PositionTitle), Status: string(row.MainStatus),
+		EndReason:          valueOrEmptyCandidateEndReason(row.EndReason),
+		LastMessagePreview: valueOrEmpty(row.LastMessagePreview),
+		LastActivityAtMs:   row.LastActivityMs, UnreadCount: unread,
+		ManualRequired: manual, ManualReason: valueOrEmpty(row.ManualReason),
+		Wechat: row.Wechat, InterviewStartsAtMs: row.InterviewStartsAtMs,
+		InterviewEndsAtMs: row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
+		InterviewCardState: valueOrEmpty(row.InterviewCardState),
+	}
+}
+
+func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
+}
+
+func appCandidateBaseQuery(
+	tx *gorm.DB,
+	view AppCandidateView,
+	search string,
+) (*gorm.DB, error) {
+	base := tx.Table("candidate_profiles AS profile").
+		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform " +
+			"AND candidate.platform_user_ref = profile.platform_user_ref").
+		Joins("LEFT JOIN conversations AS conversation ON conversation.platform = profile.platform " +
+			"AND conversation.account_ref = profile.account_ref " +
+			"AND conversation.conversation_ref = profile.conversation_ref").
+		Joins("LEFT JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = profile.profile_id")
+	switch view {
+	case AppCandidateViewCommunicating:
+		base = base.Where("profile.main_status IN ?",
+			[]CandidateProfileStatus{
+				CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileEnded,
+			})
+	case AppCandidateViewPending:
+		base = base.Where("profile.main_status = ?", CandidateProfileInvited)
+	case AppCandidateViewInterviewed:
+		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed)
+	case AppCandidateViewWechat:
+		base = base.Where("EXISTS (SELECT 1 FROM contact_assets AS app_asset "+
+			"WHERE app_asset.profile_id = profile.profile_id AND app_asset.kind = ?)", contactAssetKindWechat)
+	default:
+		return nil, ErrAppProjectionInvalid
+	}
+	if search != "" {
+		pattern := "%" + escapeLike(search) + "%"
+		base = base.Where("(COALESCE(candidate.display_name, '') LIKE ? ESCAPE '\\' "+
+			"OR COALESCE(profile.position_title, '') LIKE ? ESCAPE '\\')", pattern, pattern)
+	}
+	return base, nil
+}
+
+func escapeLike(input string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(input)
+}
+
+func (s *Store) AppCandidateDetail(profileID string) (*AppCandidateDetailProjection, error) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" || len(profileID) > 128 {
+		return nil, ErrAppProjectionInvalid
+	}
+	var out AppCandidateDetailProjection
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var rows []appCandidateRow
+		if err := tx.Table("candidate_profiles AS profile").
+			Select(appCandidateSelect).
+			Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
+				"AND candidate.platform_user_ref = profile.platform_user_ref").
+			Joins("LEFT JOIN conversations AS conversation ON conversation.platform = profile.platform "+
+				"AND conversation.account_ref = profile.account_ref "+
+				"AND conversation.conversation_ref = profile.conversation_ref").
+			Joins("LEFT JOIN communication_v4_aggregates AS aggregate ON aggregate.profile_id = profile.profile_id").
+			Where("profile.profile_id = ?", profileID).Scan(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return ErrAppCandidateNotFound
+		}
+		if len(rows) != 1 {
+			return ErrAppProjectionConflict
+		}
+		out.Candidate = rows[0].projection()
+		var profile CandidateProfile
+		if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+			return err
+		}
+		var err error
+		out.Resume, err = appResumeSummaryTx(tx, profile)
+		if err != nil {
+			return err
+		}
+		out.Messages, err = appMessagesTx(tx, profile)
+		if err != nil {
+			return err
+		}
+		out.LatestAI, err = appLatestAIJudgementTx(tx, profile.ProfileID)
+		if err != nil {
+			return err
+		}
+		out.Actions, err = appActionSummariesTx(tx, profile.ProfileID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out.Messages == nil {
+		out.Messages = []AppMessageSummary{}
+	}
+	if out.Actions == nil {
+		out.Actions = []AppActionSummary{}
+	}
+	return &out, nil
+}
+
+func appResumeSummaryTx(tx *gorm.DB, profile CandidateProfile) (AppResumeSummary, error) {
+	var snapshot CandidateResumeSnapshot
+	var err error
+	if profile.ActiveResumeSnapshotID != nil {
+		err = tx.First(&snapshot,
+			"snapshot_id = ? AND profile_id = ?", *profile.ActiveResumeSnapshotID, profile.ProfileID).Error
+	} else {
+		err = tx.Where("profile_id = ?", profile.ProfileID).
+			Order("captured_at DESC, snapshot_id DESC").First(&snapshot).Error
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return AppResumeSummary{Basic: []AppResumeField{}, Expectations: []AppResumeField{}}, nil
+	}
+	if err != nil {
+		return AppResumeSummary{}, err
+	}
+	var raw struct {
+		Basic           []protocol.CandidateResumeLabelValue `json:"basic"`
+		Expectations    []protocol.CandidateResumeLabelValue `json:"expectations"`
+		SelfEvaluation  string                               `json:"selfEvaluation"`
+		Education       string                               `json:"education"`
+		WorkExperiences string                               `json:"workExperiences"`
+	}
+	if err := json.Unmarshal([]byte(snapshot.ResumeJSON), &raw); err != nil {
+		return AppResumeSummary{}, ErrAppProjectionConflict
+	}
+	summary := AppResumeSummary{Available: true}
+	summary.Basic, summary.Truncated = appResumeFields(raw.Basic, 24)
+	var truncated bool
+	summary.Expectations, truncated = appResumeFields(raw.Expectations, 24)
+	summary.Truncated = summary.Truncated || truncated
+	summary.SelfEvaluation, truncated = truncateRunesForApp(raw.SelfEvaluation, 800)
+	summary.Truncated = summary.Truncated || truncated
+	summary.Education, truncated = truncateRunesForApp(raw.Education, 800)
+	summary.Truncated = summary.Truncated || truncated
+	summary.WorkExperiences, truncated = truncateRunesForApp(raw.WorkExperiences, 800)
+	summary.Truncated = summary.Truncated || truncated
+	return summary, nil
+}
+
+func appResumeFields(
+	input []protocol.CandidateResumeLabelValue,
+	max int,
+) ([]AppResumeField, bool) {
+	truncated := len(input) > max
+	if len(input) > max {
+		input = input[:max]
+	}
+	out := make([]AppResumeField, 0, len(input))
+	for _, field := range input {
+		label, labelTruncated := truncateRunesForApp(field.Label, 80)
+		value, valueTruncated := truncateRunesForApp(field.Value, 240)
+		truncated = truncated || labelTruncated || valueTruncated
+		out = append(out, AppResumeField{Label: label, Value: value})
+	}
+	return out, truncated
+}
+
+func truncateRunesForApp(input string, limit int) (string, bool) {
+	if utf8.RuneCountInString(input) <= limit {
+		return input, false
+	}
+	runes := []rune(input)
+	return string(runes[:limit]), true
+}
+
+func appMessagesTx(tx *gorm.DB, profile CandidateProfile) ([]AppMessageSummary, error) {
+	if profile.ConversationRef == nil || strings.TrimSpace(*profile.ConversationRef) == "" {
+		return []AppMessageSummary{}, nil
+	}
+	var messages []Message
+	if err := tx.Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL",
+		profile.Platform, profile.AccountRef, *profile.ConversationRef).
+		Order("seq DESC").Limit(50).Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	out := make([]AppMessageSummary, len(messages))
+	for i := range messages {
+		message := messages[len(messages)-1-i]
+		out[i] = AppMessageSummary{
+			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
+			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
+			TsApproxMs: message.TsApproxMs, InterviewStartsAtMs: message.InterviewStartsAtMs,
+			InterviewEndsAtMs: message.InterviewEndsAtMs, InterviewMethod: message.InterviewMethod,
+		}
+	}
+	return out, nil
+}
+
+func appLatestAIJudgementTx(tx *gorm.DB, profileID string) (AppAIJudgementSummary, error) {
+	var turn DialogueTurn
+	err := tx.Where("profile_id = ?", profileID).
+		Order("created_at DESC, turn_id DESC").First(&turn).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return AppAIJudgementSummary{}, nil
+	}
+	if err != nil {
+		return AppAIJudgementSummary{}, err
+	}
+	return AppAIJudgementSummary{
+		Available: true, Status: string(turn.Status), IntentLabel: string(turn.IntentLabel),
+		IntentSource: string(turn.IntentSource), Failure: turn.FailureReason,
+		ClassifiedAt: turn.ClassifiedAt,
+	}, nil
+}
+
+func appActionSummariesTx(tx *gorm.DB, profileID string) ([]AppActionSummary, error) {
+	type actionRow struct {
+		Kind      string
+		Status    string
+		Failure   string
+		CreatedAt time.Time
+	}
+	var rows []actionRow
+	if err := tx.Raw(`
+SELECT action.kind AS kind, action.status AS status, action.failure_reason AS failure,
+       action.created_at AS created_at
+FROM communication_actions AS action
+JOIN dialogue_turns AS turn ON turn.turn_id = action.turn_id
+WHERE turn.profile_id = ?
+UNION ALL
+SELECT event.v4_kind AS kind, event.status AS status, event.failure_reason AS failure,
+       event.created_at AS created_at
+FROM communication_v4_event_actions AS event
+WHERE event.profile_id = ?
+ORDER BY created_at DESC
+LIMIT 30`, profileID, profileID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	out := make([]AppActionSummary, len(rows))
+	for i := range rows {
+		createdAt := rows[i].CreatedAt
+		out[i] = AppActionSummary{
+			Kind: rows[i].Kind, Status: rows[i].Status,
+			Failure: rows[i].Failure, CreatedAt: &createdAt,
+		}
+	}
+	return out, nil
+}
