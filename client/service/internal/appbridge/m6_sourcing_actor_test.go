@@ -133,6 +133,18 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 			ContentScriptOk: true, LoginState: protocol.LoginStateIn, PageKind: protocol.PageKindRecommend,
 			PrincipalFingerprint: &fingerprint,
 		}
+	case protocol.PrimCandidateSelectSourcingPosition:
+		var args protocol.CandidateSelectSourcingPositionArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		if args.PositionTitle != "合成职位" {
+			return fmt.Errorf("fixture 收到错误职位标题 %q", args.PositionTitle)
+		}
+		data = protocol.CandidateSelectSourcingPositionData{
+			PositionRef: s.position, PositionTitle: args.PositionTitle,
+			ObservedAt: time.Now().UnixMilli(),
+		}
 	case protocol.PrimCandidateReadSourcingWindow:
 		var args protocol.CandidateReadSourcingWindowArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -157,9 +169,10 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 		if s.window < 0 || s.window >= len(s.windows) {
 			return fmt.Errorf("fixture 没有窗口 %d", s.window)
 		}
+		positionTitle := "合成职位"
 		data = protocol.CandidateReadSourcingWindowData{
 			PositionRef: s.position, PlatformUserRefs: append([]string(nil), s.windows[s.window]...),
-			Moved: moved, ObservedAt: time.Now().UnixMilli(),
+			PositionTitle: &positionTitle, Moved: moved, ObservedAt: time.Now().UnixMilli(),
 		}
 	case protocol.PrimCandidateReadSourcingTargetResume:
 		var args protocol.CandidateReadSourcingTargetResumeArgs
@@ -226,6 +239,7 @@ func (s *sourcingActorSender) HandSession(string) (string, string, bool) {
 func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
+			protocol.PrimCandidateSelectSourcingPosition + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
 			protocol.PrimCandidateReadSourcingTargetResume + "@1",
 			protocol.PrimChatSendGreeting + "@1",

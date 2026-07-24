@@ -230,6 +230,11 @@ func defaultHandler(request RunRequest) (any, error) {
 		}, nil
 	case protocol.PrimNavEnsureSurface:
 		return protocol.NavEnsureSurfaceData{Ready: true, LoginState: protocol.LoginStateIn}, nil
+	case protocol.PrimCandidateSelectSourcingPosition:
+		return protocol.CandidateSelectSourcingPositionData{
+			PositionRef: "position-fixture", PositionTitle: "synthetic-position",
+			ObservedAt: time.Now().UnixMilli(),
+		}, nil
 	case protocol.PrimChatReadList:
 		return protocol.ChatReadListData{Sessions: []protocol.ConversationSummary{}, Complete: true}, nil
 	case protocol.PrimChatReadThread:

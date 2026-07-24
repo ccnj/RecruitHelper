@@ -2436,6 +2436,280 @@ function installM6SourcingWindowFixture(options = {}) {
   }
 }
 
+function installM6PositionSelectorFixture(options = {}) {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+  }
+  const refs = {
+    oldJob: 'fixture-old-job',
+    targetJob: 'fixture-target-job',
+    targetTitle: '目标 职位',
+  }
+  const state = {
+    drawerOpen: false,
+    currentJob: options.alreadySelected === true ? refs.targetJob : refs.oldJob,
+    currentTitle: options.alreadySelected === true ? refs.targetTitle : '旧职位',
+    interactions: [],
+  }
+  const classList = (...initial) => {
+    const values = new Set(initial)
+    return {
+      contains(value) { return values.has(value) },
+      add(value) { values.add(value) },
+      remove(value) { values.delete(value) },
+    }
+  }
+  const node = (text = '') => ({
+    textContent: text,
+    innerText: text,
+    classList: classList(),
+    getClientRects: () => [{}],
+    querySelectorAll() { return [] },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null },
+    cloneNode() { return node(this.textContent) },
+    closest() { return null },
+    click() {},
+    scrollIntoView() {},
+  })
+  const titleNode = (title, withStatusTag = false) => {
+    const base = node(withStatusTag ? `${title} 已下架` : title)
+    base.cloneNode = () => {
+      const clone = node(base.textContent)
+      const removable = { remove() { clone.textContent = title } }
+      clone.querySelectorAll = (selector) =>
+        selector === '.job-tag-withdrawn, .job-tag-coordination, .icon-eye' && withStatusTag
+          ? [removable]
+          : []
+      return clone
+    }
+    return base
+  }
+  const makeJobItem = (title, jobRef, active = false, withStatusTag = false) => {
+    const item = node(title)
+    item.classList = classList(...(active ? ['is-active'] : []))
+    const titleElement = titleNode(title, withStatusTag)
+    item.querySelectorAll = (selector) =>
+      selector === '.job-side-selector__title' ? [titleElement] : []
+    item.scrollIntoView = () => {
+      state.interactions.push(['scroll-target', Date.now()])
+    }
+    item.click = () => {
+      state.interactions.push(['click-target', Date.now()])
+      for (const candidate of jobItems) candidate.classList.remove('is-active')
+      item.classList.add('is-active')
+      state.currentJob = jobRef
+      state.currentTitle = title
+      globalThis.location.href =
+        `https://rd6.zhaopin.com/app/recommend?jobNumber=${encodeURIComponent(jobRef)}`
+    }
+    return item
+  }
+  const oldItem = makeJobItem(
+    '旧职位',
+    refs.oldJob,
+    options.alreadySelected !== true,
+  )
+  const targetItem = makeJobItem(
+    refs.targetTitle,
+    refs.targetJob,
+    options.alreadySelected === true,
+    true,
+  )
+  const duplicateTarget = makeJobItem(refs.targetTitle, 'fixture-duplicate-job')
+  const jobItems = options.omitTarget === true
+    ? [oldItem]
+    : options.duplicateTarget === true
+      ? [oldItem, targetItem, duplicateTarget]
+      : [oldItem, targetItem]
+  const closeButton = node('关闭')
+  closeButton.click = () => {
+    state.interactions.push(['close-drawer', Date.now()])
+    state.drawerOpen = false
+  }
+  const drawer = node()
+  drawer.closest = (selector) =>
+    selector === '.km-modal__wrapper--right.job-side-selector' ? drawer : null
+  drawer.querySelectorAll = (selector) => {
+    if (selector === '.job-side-selector__item') return jobItems
+    if (selector === '.km-modal__close-btn') return [closeButton]
+    return []
+  }
+  const trigger = node('选择职位')
+  trigger.click = () => {
+    state.interactions.push(['open-drawer', Date.now()])
+    state.drawerOpen = true
+  }
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${state.currentJob}`,
+  }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector === 'a[zp-stat-id="talent_more_jobs"]') return [trigger]
+      if (selector === '.job-side-selector') return state.drawerOpen ? [drawer] : []
+      if (selector === '.job-pane__item--active .job-pane__item-job-title') {
+        return [node(state.currentTitle)]
+      }
+      return []
+    },
+  }
+  return {
+    refs,
+    state,
+    targetItem,
+    restore() {
+      globalThis.document = original.document
+      globalThis.location = original.location
+      globalThis.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('candidate.selectSourcingPosition MAIN 精确唯一匹配并遵守交互间隔后确认稳定职位', async () => {
+  const fixture = installM6PositionSelectorFixture()
+  try {
+    const result = await zhilianTestHooks.mainSelectSourcingPosition('  目标\u00a0 职位  ')
+    assert.equal(result.status, 'ready')
+    assert.equal(result.data.positionRef, fixture.refs.targetJob)
+    assert.equal(result.data.positionTitle, fixture.refs.targetTitle)
+    assert.deepEqual(fixture.state.interactions.map(([name]) => name), [
+      'open-drawer', 'scroll-target', 'click-target', 'close-drawer',
+    ])
+    for (let index = 1; index < fixture.state.interactions.length; index += 1) {
+      const elapsed = fixture.state.interactions[index][1] - fixture.state.interactions[index - 1][1]
+      assert.ok(elapsed >= 990, `第 ${index + 1} 个页面动作与前一动作须至少间隔一秒`)
+    }
+    assert.equal(fixture.state.drawerOpen, false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.selectSourcingPosition MAIN 已在目标职位时不重复点击职位项', async () => {
+  const fixture = installM6PositionSelectorFixture({ alreadySelected: true })
+  try {
+    const result = await zhilianTestHooks.mainSelectSourcingPosition(fixture.refs.targetTitle)
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(fixture.state.interactions.map(([name]) => name), [
+      'open-drawer', 'close-drawer',
+    ])
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.selectSourcingPosition MAIN 目标零匹配或多匹配时均不选择', async () => {
+  for (const [options, reason] of [
+    [{ omitTarget: true }, 'target_absent'],
+    [{ duplicateTarget: true }, 'target_ambiguous'],
+  ]) {
+    const fixture = installM6PositionSelectorFixture(options)
+    try {
+      const result = await zhilianTestHooks.mainSelectSourcingPosition(fixture.refs.targetTitle)
+      assert.deepEqual(result, { status: 'failed', reason })
+      assert.deepEqual(fixture.state.interactions.map(([name]) => name), [
+        'open-drawer', 'close-drawer',
+      ])
+      assert.equal(fixture.state.drawerOpen, false)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.selectSourcingPosition MAIN 推荐路由变化时不执行页面动作', async () => {
+  const fixture = installM6PositionSelectorFixture()
+  try {
+    globalThis.location.href = 'https://rd6.zhaopin.com/app/im'
+    assert.deepEqual(
+      await zhilianTestHooks.mainSelectSourcingPosition(fixture.refs.targetTitle),
+      { status: 'failed', reason: 'route_changed' },
+    )
+    assert.deepEqual(fixture.state.interactions, [])
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.selectSourcingPosition outer 使用唯一推荐页并在动作前后复核账号', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '9'.repeat(64)
+  const tab = {
+    id: 600,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-old-job',
+  }
+  const mainCalls = []
+  const actionArgs = []
+  let probeCalls = 0
+  let barrierCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, tab.id)
+        mainCalls.push(func.name)
+        if (func.name === 'mainProbeZhilian') {
+          probeCalls += 1
+          return [{ result: {
+            pageKind: 'recommend',
+            loginState: 'in',
+            principalFingerprint: fingerprint,
+            imListVisible: false,
+          } }]
+        }
+        assert.equal(func.name, 'mainSelectSourcingPosition')
+        actionArgs.push(structuredClone(args))
+        return [{ result: {
+          status: 'ready',
+          data: {
+            positionRef: 'fixture-target-job',
+            positionTitle: '目标 职位',
+            observedAt: Date.now(),
+          },
+        } }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'select-sourcing-position-fixture',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barrierCalls += 1 },
+    async progress() {},
+  }
+  try {
+    const data = await zhilianTestHooks.selectZhilianSourcingPosition(
+      { positionTitle: '  目标\u00a0职位 ' },
+      context,
+      fingerprint,
+    )
+    assert.equal(data.positionRef, 'fixture-target-job')
+    assert.equal(data.positionTitle, '目标 职位')
+    assert.equal(barrierCalls, 1)
+    assert.equal(probeCalls, 3)
+    assert.deepEqual(mainCalls, [
+      'mainProbeZhilian',
+      'mainProbeZhilian',
+      'mainSelectSourcingPosition',
+      'mainProbeZhilian',
+    ])
+    assert.deepEqual(actionArgs, [['目标 职位']])
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('candidate.readSourcingWindow MAIN current/reset/next 只返回稳定身份并推进至多一窗', async () => {
   const fixture = installM6SourcingWindowFixture()
   try {

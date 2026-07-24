@@ -666,6 +666,20 @@
           "workExperiences": { "type": "string" }
         }
       },
+      "CandidateSelectSourcingPositionArgs": {
+        "type": "object",
+        "fields": {
+          "positionTitle": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+        }
+      },
+      "CandidateSelectSourcingPositionData": {
+        "type": "object",
+        "fields": {
+          "positionRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "positionTitle": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "CandidateReadSourcingWindowArgs": {
         "type": "object",
         "fields": {
@@ -976,6 +990,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "从当前明确的候选人采集页面打开并读取一位未列入 excludePlatformUserRefs 的候选人完整五分区简历;读取并再次核对目标绑定后,必须关闭本命令使用的详情,确认弹框消失且 URL 不再携带 resumeNumber 才可返回 ok;关闭无法确认时整体失败且不返回部分 data。打开详情可能产生幂等已查看记录。稳定身份与职位读不到、详情换绑、结构不完整或超限均失败且不返回部分 data;不得降级到姓名、resumeNumber、DOM 位置或列表序号作为身份"
+    },
+    "candidate.selectSourcingPosition": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "CandidateSelectSourcingPositionArgs", "dataSchema": "CandidateSelectSourcingPositionData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "note": "采集前按脑给出的职位展示名选择当前推荐页职位。手只接收 positionTitle,不得接收后台 Job.ID。标题按 NFC、trim 与 Unicode 空白折叠后唯一精确匹配;零个或多个匹配、页面未稳定、职位身份或标题无法确认均整体 failed。成功 data 只陈述本次页面最终观察;脑仍须紧接 candidate.readSourcingWindow 独立回读并在事务中核对后台职位后才能开始采集"
     },
     "candidate.readSourcingWindow": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",

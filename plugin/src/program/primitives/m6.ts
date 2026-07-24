@@ -4,6 +4,7 @@ import {
   CandidateReadSourcingResumeArgs,
   CandidateReadSourcingTargetResumeArgs,
   CandidateReadSourcingWindowArgs,
+  CandidateSelectSourcingPositionArgs,
   CmdClass,
   Primitive as PrimitiveName,
 } from '../../base/protocol'
@@ -12,6 +13,7 @@ import {
   readZhilianSourcingResume,
   readZhilianSourcingTargetResume,
   readZhilianSourcingWindow,
+  selectZhilianSourcingPosition,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
 } from '../platform/zhilian'
@@ -41,6 +43,26 @@ const readSourcingResume: Primitive = {
       }
       const data = await readZhilianSourcingResume(
         rawArgs as CandidateReadSourcingResumeArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
+const selectSourcingPosition: Primitive = {
+  name: PrimitiveName.CandidateSelectSourcingPosition,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await selectZhilianSourcingPosition(
+        rawArgs as CandidateSelectSourcingPositionArgs,
         ctx,
         ctx.commandContext.expectedPrincipalFingerprint,
       )
@@ -92,6 +114,7 @@ const readSourcingTargetResume: Primitive = {
 }
 
 export function registerM6Primitives(): void {
+  register(selectSourcingPosition)
   register(readSourcingResume)
   register(readSourcingWindow)
   register(readSourcingTargetResume)

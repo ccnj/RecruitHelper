@@ -94,22 +94,33 @@ func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
 	if !a.requireActor(w) {
 		return
 	}
+	if a.jobConfigSource == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "旧后台职位配置源尚未就绪"})
+		return
+	}
 	var req struct {
 		accountKeyRequest
-		ContextRevisionHash string `json:"contextRevisionHash"`
-		TargetCount         int    `json:"targetCount"`
+		TargetCount int `json:"targetCount"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
-	req.ContextRevisionHash = strings.TrimSpace(req.ContextRevisionHash)
-	if err != nil || req.ContextRevisionHash == "" || len(req.ContextRevisionHash) > 128 || req.TargetCount <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的账号、职位配置 revision 或目标采集数"})
+	if err != nil || req.TargetCount <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的账号或目标采集数"})
 		return
 	}
-	if err := a.actor.StartSourcing(key, req.ContextRevisionHash, req.TargetCount); err != nil {
+	contexts, syncFailure := a.syncCurrentJobConfigNow(r.Context())
+	if syncFailure != nil {
+		writeJSON(w, syncFailure.status, map[string]string{"error": syncFailure.message})
+		return
+	}
+	if len(contexts) != 1 || strings.TrimSpace(contexts[0].RevisionHash) == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "旧后台当前职位配置不是唯一可执行职位"})
+		return
+	}
+	if err := a.actor.StartSourcing(key, contexts[0].RevisionHash, req.TargetCount); err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, store.ErrJobAIContextRevisionNotFound) || errors.Is(err, store.ErrAccountNotFound) {
 			status = http.StatusNotFound

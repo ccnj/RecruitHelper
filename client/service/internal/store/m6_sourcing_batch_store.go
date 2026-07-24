@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/textcanon"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
 
@@ -302,8 +303,9 @@ func sameSourcingBatchStartMaterial(
 }
 
 // BindSourcingBatchPosition 只从首个 candidate.readSourcingWindow 的持久
-// 命令正结果派生职位绑定，调用方不能直接提交 positionRef。PositionTitle
-// 只是首次观测的展示快照，不参与幂等或身份判断。
+// 命令正结果派生职位绑定，调用方不能直接提交 positionRef。首次绑定时，
+// 页面职位标题必须与批次所锚后台职位的标题精确匹配；已经绑定后的幂等
+// 重放仍只按 positionRef 收敛，不允许刷新首次展示快照。
 func (s *Store) BindSourcingBatchPosition(req BindSourcingBatchPositionRequest) (*SourcingBatch, error) {
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.LogicalDispatchID = strings.TrimSpace(req.LogicalDispatchID)
@@ -360,6 +362,21 @@ func (s *Store) BindSourcingBatchPosition(req BindSourcingBatchPositionRequest) 
 		}
 		if batch.Status != SourcingBatchPreparing || batch.EndedAt != nil {
 			return ErrSourcingBatchStateConflict
+		}
+		var revision JobAIContextRevision
+		if err := tx.First(&revision, "revision_hash = ?", batch.ContextRevisionHash).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrJobAIContextRevisionNotFound
+			}
+			return err
+		}
+		backendJobID := strings.TrimSpace(revision.SourceJobRef)
+		if batch.BackendJobID == nil || backendJobID == "" ||
+			strings.TrimSpace(*batch.BackendJobID) != backendJobID ||
+			data.PositionTitle == nil ||
+			textcanon.Normalize(*data.PositionTitle) == "" ||
+			textcanon.Normalize(*data.PositionTitle) != textcanon.Normalize(revision.DisplayName) {
+			return ErrSourcingBinding
 		}
 		updates := map[string]any{
 			"position_ref":      data.PositionRef,

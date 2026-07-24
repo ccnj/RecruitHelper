@@ -280,7 +280,7 @@ func TestSourcingBatchPositionBlockResumeAndStopTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	title := "首次展示标题"
+	title := " \u00a0合成职位\t "
 	boundAt := startedAt.Add(time.Minute)
 	seedSourcingWindowProof(t, s, key, "window-bind-first", "position-stable", &title, boundAt)
 	bound, err := s.BindSourcingBatchPosition(BindSourcingBatchPositionRequest{
@@ -425,6 +425,44 @@ func TestSourcingBatchMembersAreNullableLegacyScopedAndCounted(t *testing.T) {
 	}
 }
 
+func TestSourcingBatchPositionBindingRequiresBackendJobAndExactNormalizedTitle(t *testing.T) {
+	s := openTest(t)
+	key, revisionHash := seedSourcingBatchDependencies(t, s, "position-identity")
+	enableSourcingBatchAccount(t, s, key)
+	startedAt := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	started, err := s.StartSourcingBatch(StartSourcingBatchRequest{
+		BatchID: "batch-position-identity", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: 2, StartedAt: startedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wrongTitle := "另一职位"
+	seedSourcingWindowProof(t, s, key, "window-wrong-title", "position-one", &wrongTitle, startedAt.Add(time.Minute))
+	if _, err := s.BindSourcingBatchPosition(BindSourcingBatchPositionRequest{
+		BatchID: started.Batch.BatchID, LogicalDispatchID: "window-wrong-title",
+	}); !errors.Is(err, ErrSourcingBinding) {
+		t.Fatalf("页面职位标题不符未在采集前拒绝: %v", err)
+	}
+	persisted, err := s.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || persisted == nil || persisted.Status != SourcingBatchPreparing || persisted.PositionRef != nil {
+		t.Fatalf("职位标题冲突污染批次: batch=%+v err=%v", persisted, err)
+	}
+
+	if err := s.db.Model(&SourcingBatch{}).Where("batch_id = ?", started.Batch.BatchID).
+		Update("backend_job_id", "99").Error; err != nil {
+		t.Fatal(err)
+	}
+	correctTitle := "合成职位"
+	seedSourcingWindowProof(t, s, key, "window-wrong-job", "position-one", &correctTitle, startedAt.Add(2*time.Minute))
+	if _, err := s.BindSourcingBatchPosition(BindSourcingBatchPositionRequest{
+		BatchID: started.Batch.BatchID, LogicalDispatchID: "window-wrong-job",
+	}); !errors.Is(err, ErrSourcingBinding) {
+		t.Fatalf("后台职位 ID 不符未在采集前拒绝: %v", err)
+	}
+}
+
 func TestCompleteSourcingBatchCandidateRunIsAtomicIdempotentAndStopsAtTarget(t *testing.T) {
 	s := openTest(t)
 	key, revisionHash := seedSourcingBatchDependencies(t, s, "formal-complete")
@@ -437,7 +475,7 @@ func TestCompleteSourcingBatchCandidateRunIsAtomicIdempotentAndStopsAtTarget(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	positionTitle := "仅展示职位"
+	positionTitle := "合成职位"
 	windowAt := startedAt.Add(time.Minute)
 	seedSourcingWindowProof(t, s, key, "window-formal-complete", "position-formal", &positionTitle, windowAt)
 	if _, err := s.BindSourcingBatchPosition(BindSourcingBatchPositionRequest{
@@ -549,7 +587,8 @@ func TestCompleteSourcingBatchCandidateRunRollsBackMemberWhenTargetPauseFails(t 
 		t.Fatal(err)
 	}
 	windowAt := startedAt.Add(time.Minute)
-	seedSourcingWindowProof(t, s, key, "window-formal-rollback", "position-rollback", nil, windowAt)
+	positionTitle := "合成职位"
+	seedSourcingWindowProof(t, s, key, "window-formal-rollback", "position-rollback", &positionTitle, windowAt)
 	if _, err := s.BindSourcingBatchPosition(BindSourcingBatchPositionRequest{
 		BatchID: started.Batch.BatchID, LogicalDispatchID: "window-formal-rollback",
 	}); err != nil {

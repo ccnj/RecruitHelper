@@ -13,6 +13,8 @@ import type {
   CandidateReadSourcingWindowArgs,
   CandidateReadSourcingWindowData,
   CandidateResumeLabelValue,
+  CandidateSelectSourcingPositionArgs,
+  CandidateSelectSourcingPositionData,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
   ChatReadListArgs,
@@ -74,6 +76,8 @@ export type ZhilianSourcingResumeData = CandidateReadSourcingResumeData
 export type ZhilianSourcingTargetResumeArgs = CandidateReadSourcingTargetResumeArgs
 export type ZhilianSourcingWindowArgs = CandidateReadSourcingWindowArgs
 export type ZhilianSourcingWindowData = CandidateReadSourcingWindowData
+export type ZhilianSelectSourcingPositionArgs = CandidateSelectSourcingPositionArgs
+export type ZhilianSelectSourcingPositionData = CandidateSelectSourcingPositionData
 export type ZhilianGreetingArgs = ChatSendGreetingArgs
 export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
@@ -245,6 +249,41 @@ interface MainSourcingWindowFailed {
 }
 
 type MainSourcingWindowResult = MainSourcingWindowReady | MainSourcingWindowFailed
+
+const MAIN_SELECT_SOURCING_POSITION_FAILURE_REASONS = [
+  'route_changed',
+  'trigger_cardinality',
+  'drawer_cardinality',
+  'drawer_not_ready',
+  'item_source_unavailable',
+  'target_absent',
+  'target_ambiguous',
+  'active_item_ambiguous',
+  'selection_not_confirmed',
+  'close_unavailable',
+  'close_not_confirmed',
+  'position_identity_unavailable',
+  'position_title_ambiguous',
+  'position_title_mismatch',
+  'page_unstable',
+  'unexpected',
+] as const
+
+type MainSelectSourcingPositionFailureReason =
+  typeof MAIN_SELECT_SOURCING_POSITION_FAILURE_REASONS[number]
+
+interface MainSelectSourcingPositionReady {
+  status: 'ready'
+  data: ZhilianSelectSourcingPositionData
+}
+
+interface MainSelectSourcingPositionFailed {
+  status: 'failed'
+  reason: MainSelectSourcingPositionFailureReason
+}
+
+type MainSelectSourcingPositionResult =
+  MainSelectSourcingPositionReady | MainSelectSourcingPositionFailed
 
 const MAIN_GREETING_FAILURE_REASONS = [
   'action_window_elapsed',
@@ -1123,6 +1162,218 @@ async function mainReadCurrentResume(
   } catch {
     const cleanupFailure = await cleanupOpenedModal()
     return cleanupFailure ?? failed('unexpected')
+  }
+}
+
+// 正式采集批次的职位选择 evaluator。它只操作推荐页的职位选择器，绝不触碰
+// 候选人卡片上的招呼、电话或详情入口。最终结果只要求公开路由与可见活动职位
+// 连续稳定；候选列表与内部职位源留给紧接的 readSourcingWindow 独立回读。
+async function mainSelectSourcingPosition(
+  requestedPositionTitle: string,
+): Promise<MainSelectSourcingPositionResult> {
+  type FinalSnapshot =
+    | {
+      status: 'ready'
+      positionRef: string
+      positionTitle: string
+    }
+    | { status: 'failed'; reason: MainSelectSourcingPositionFailureReason }
+
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/[\s\u00a0]+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const failed = (
+    reason: MainSelectSourcingPositionFailureReason,
+  ): MainSelectSourcingPositionFailed => ({ status: 'failed', reason })
+  const sleep = (delayMs: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, delayMs))
+  const randomInteractionGapMs = (): number =>
+    1_000 + Math.floor(Math.random() * 501)
+  let nextInteractionNotBefore = 0
+  const interact = async (action: () => void): Promise<void> => {
+    const delayMs = nextInteractionNotBefore - Date.now()
+    if (delayMs > 0) await sleep(delayMs)
+    action()
+    nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
+  }
+  const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+    const deadline = Date.now() + timeoutMs
+    while (true) {
+      const value = read()
+      if (value !== null) return value
+      if (Date.now() >= deadline) return null
+      await sleep(120)
+    }
+  }
+  const drawers = (): HTMLElement[] => visibleAll(document, '.job-side-selector')
+  const titleOf = (item: HTMLElement): string => {
+    const titleNode = item.querySelector<HTMLElement>('.job-side-selector__title')
+    if (!titleNode) return ''
+    const clone = titleNode.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('.job-tag-withdrawn, .job-tag-coordination, .icon-eye')
+      .forEach((node) => node.remove())
+    return clean(clone.textContent)
+  }
+  const closeOwnedDrawer = async (): Promise<MainSelectSourcingPositionFailureReason | null> => {
+    const openDrawers = drawers()
+    if (openDrawers.length === 0) return null
+    if (openDrawers.length !== 1) return 'drawer_cardinality'
+    const drawer = openDrawers[0]
+    const root = drawer.closest<HTMLElement>('.km-modal__wrapper--right.job-side-selector') ?? drawer
+    const closeButtons = visibleAll(root, '.km-modal__close-btn')
+    if (closeButtons.length !== 1) return 'close_unavailable'
+    await interact(() => closeButtons[0].click())
+    const closed = await waitFor(() => drawers().length === 0 ? true : null)
+    return closed === true ? null : 'close_not_confirmed'
+  }
+  const finalSnapshot = (targetTitle: string): FinalSnapshot => {
+    let currentRoute: URL
+    try {
+      currentRoute = new URL(location.href)
+    } catch {
+      return failed('route_changed')
+    }
+    if (!currentRoute.pathname.startsWith('/app/recommend')) return failed('route_changed')
+    const positionRef = opaque(currentRoute.searchParams.get('jobNumber'))
+    if (!positionRef) return failed('position_identity_unavailable')
+
+    const activeTitles = visibleAll(
+      document,
+      '.job-pane__item--active .job-pane__item-job-title',
+    ).map((element) => clean(element.textContent)).filter(Boolean)
+    if (activeTitles.length !== 1) return failed('position_title_ambiguous')
+    if (activeTitles[0] !== targetTitle) return failed('position_title_mismatch')
+
+    return {
+      status: 'ready',
+      positionRef,
+      positionTitle: activeTitles[0],
+    }
+  }
+
+  let ownsDrawer = false
+  try {
+    const targetTitle = clean(requestedPositionTitle)
+    if (!targetTitle || targetTitle.length > 256) return failed('target_absent')
+    let currentRoute: URL
+    try {
+      currentRoute = new URL(location.href)
+    } catch {
+      return failed('route_changed')
+    }
+    if (!currentRoute.pathname.startsWith('/app/recommend')) return failed('route_changed')
+    if (drawers().length !== 0) return failed('drawer_cardinality')
+
+    const triggers = visibleAll(document, 'a[zp-stat-id="talent_more_jobs"]')
+    if (triggers.length !== 1) return failed('trigger_cardinality')
+    await interact(() => triggers[0].click())
+    ownsDrawer = true
+
+    const drawer = await waitFor(() => {
+      const openDrawers = drawers()
+      return openDrawers.length === 1 ? openDrawers[0] : null
+    })
+    if (!drawer) return failed('drawer_not_ready')
+    if (drawers().length !== 1) return failed('drawer_cardinality')
+    const items = visibleAll(drawer, '.job-side-selector__item')
+    if (items.length === 0) {
+      const closeFailure = await closeOwnedDrawer()
+      return failed(closeFailure ?? 'item_source_unavailable')
+    }
+    const titledItems = items.map((item) => ({ item, title: titleOf(item) }))
+    if (titledItems.some(({ title }) => !title)) {
+      const closeFailure = await closeOwnedDrawer()
+      return failed(closeFailure ?? 'item_source_unavailable')
+    }
+    const matches = titledItems.filter(({ title }) => title === targetTitle)
+    if (matches.length !== 1) {
+      const closeFailure = await closeOwnedDrawer()
+      return failed(closeFailure ?? (matches.length === 0 ? 'target_absent' : 'target_ambiguous'))
+    }
+    const activeItems = items.filter((item) => item.classList.contains('is-active'))
+    if (activeItems.length > 1) {
+      const closeFailure = await closeOwnedDrawer()
+      return failed(closeFailure ?? 'active_item_ambiguous')
+    }
+    const target = matches[0].item
+    if (!target.classList.contains('is-active')) {
+      if (typeof target.scrollIntoView !== 'function') {
+        const closeFailure = await closeOwnedDrawer()
+        return failed(closeFailure ?? 'item_source_unavailable')
+      }
+      await interact(() => target.scrollIntoView({ block: 'center', inline: 'nearest' }))
+      await interact(() => target.click())
+      const selected = await waitFor(() => {
+        const openDrawers = drawers()
+        if (openDrawers.length === 0) return true
+        if (openDrawers.length !== 1) return null
+        const currentMatches = visibleAll(openDrawers[0], '.job-side-selector__item')
+          .filter((item) => titleOf(item) === targetTitle)
+        return currentMatches.length === 1 && currentMatches[0].classList.contains('is-active')
+          ? true
+          : null
+      })
+      if (selected !== true) {
+        const closeFailure = await closeOwnedDrawer()
+        return failed(closeFailure ?? 'selection_not_confirmed')
+      }
+    }
+
+    const closeFailure = await closeOwnedDrawer()
+    if (closeFailure) return failed(closeFailure)
+    ownsDrawer = false
+
+    const settleUntil = Date.now() + 10_000
+    let previousSignature = ''
+    let stableRounds = 0
+    let latestFailure: MainSelectSourcingPositionFailureReason = 'page_unstable'
+    while (Date.now() <= settleUntil) {
+      const snapshot = finalSnapshot(targetTitle)
+      if (snapshot.status === 'ready') {
+        const signature = `${snapshot.positionRef}|${snapshot.positionTitle}`
+        stableRounds = signature === previousSignature ? stableRounds + 1 : 0
+        previousSignature = signature
+        if (stableRounds >= 2) {
+          return {
+            status: 'ready',
+            data: {
+              positionRef: snapshot.positionRef,
+              positionTitle: snapshot.positionTitle,
+              observedAt: Date.now(),
+            },
+          }
+        }
+      } else {
+        if (snapshot.reason === 'route_changed') return snapshot
+        latestFailure = snapshot.reason
+        previousSignature = ''
+        stableRounds = 0
+      }
+      await sleep(120)
+    }
+    return failed(latestFailure === 'page_unstable' ? 'page_unstable' : latestFailure)
+  } catch {
+    if (ownsDrawer) {
+      try {
+        await closeOwnedDrawer()
+      } catch {
+        // 主失败保持 unexpected；清理失败只意味着页面仍需人工收口。
+      }
+    }
+    return failed('unexpected')
   }
 }
 
@@ -3141,6 +3392,20 @@ function validSourcingWindowResult(value: unknown): value is MainSourcingWindowR
     validatePrimitiveData(PrimitiveName.CandidateReadSourcingWindow, 1, record.data).length === 0
 }
 
+function validSelectSourcingPositionResult(
+  value: unknown,
+): value is MainSelectSourcingPositionResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_SELECT_SOURCING_POSITION_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  return record.status === 'ready' && record.data !== null && typeof record.data === 'object' &&
+    !Array.isArray(record.data) &&
+    validatePrimitiveData(PrimitiveName.CandidateSelectSourcingPosition, 1, record.data).length === 0
+}
+
 async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
   return (await chrome.tabs.query({
     url: TAB_QUERY,
@@ -3168,6 +3433,89 @@ function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐列表滚动窗口无法唯一确定', 'manualOnly')
   }
   throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐窗口身份或职位无法完整且唯一读取', 'manualOnly')
+}
+
+function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFailed): never {
+  if (result.reason === 'route_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '职位选择期间当前推荐页发生变化', 'manualOnly')
+  }
+  if (result.reason === 'target_absent') {
+    throw new ZhilianPlatformError('TARGET_NOT_FOUND', '后台绑定职位不在当前智联职位列表中', 'manualOnly')
+  }
+  if (result.reason === 'drawer_not_ready' || result.reason === 'page_unstable') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联职位选择页面尚未稳定', 'afterRecovery', 'pageBroken')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位无法唯一选择并确认', 'manualOnly')
+}
+
+export async function selectZhilianSourcingPosition(
+  args: ZhilianSelectSourcingPositionArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianSelectSourcingPositionData> {
+  const positionTitle = typeof args?.positionTitle === 'string'
+    ? args.positionTitle.normalize('NFC').replace(/[\s\u00a0]+/gu, ' ').trim()
+    : ''
+  if (!positionTitle || positionTitle.length > 256 ||
+      new TextEncoder().encode(positionTitle).length > 1_024) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位选择缺少合法的职位标题', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const initialTabs = await activeSourcingTabs()
+  if (initialTabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请保留一个已就绪的智联推荐页标签',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (initialTabs.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  const tab = initialTabs[0]
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (initialProbe.pageKind !== 'recommend') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对当前推荐页与登录身份', 10)
+
+  ctx.checkpoint()
+  const beforeActionTabs = await activeSourcingTabs()
+  if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
+      beforeActionTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '职位选择前推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+  const result = await runMain(tab.id, mainSelectSourcingPosition, [positionTitle])
+  if (!validSelectSourcingPositionResult(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位选择结果结构不符合当前契约', 'manualOnly')
+  }
+  if (result.status === 'failed') throwSelectSourcingPositionFailure(result)
+  if (result.data.positionTitle !== positionTitle) {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '职位选择结果与目标标题不一致', 'manualOnly')
+  }
+
+  ctx.checkpoint()
+  const latestTabs = await activeSourcingTabs()
+  if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '职位选择期间推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latestTabs[0]), expectedPrincipalFingerprint)
+  if (validatePrimitiveData(
+    PrimitiveName.CandidateSelectSourcingPosition,
+    1,
+    result.data,
+  ).length !== 0 || jsonBytes(result.data) > 4_096) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位选择结果不符合当前契约', 'manualOnly')
+  }
+  ctx.progress('智联推荐页职位选择完成', 100)
+  return result.data
 }
 
 export async function readZhilianSourcingWindow(
@@ -7789,6 +8137,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
   mainReadCurrentResume,
+  mainSelectSourcingPosition,
   mainReadSourcingWindow,
   mainReadSourcingResume,
   mainSendGreetingOnce,
@@ -7803,6 +8152,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadThreadPage,
   mainSendCardOnce,
   mainSendMessageOnce,
+  selectZhilianSourcingPosition,
   ensureThreadRoute,
   runMain,
 })

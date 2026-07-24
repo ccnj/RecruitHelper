@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -13,6 +14,7 @@ const sourcingWindowNoProgressLimit = 3
 
 const (
 	sourcingBlockInvalidState       = "invalidBatchState"
+	sourcingBlockPositionSelect     = "positionSelectFailed"
 	sourcingBlockWindowReadFailed   = "windowReadFailed"
 	sourcingBlockPositionBindFailed = "positionBindFailed"
 	sourcingBlockPositionChanged    = "positionChanged"
@@ -58,6 +60,28 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 
 	var window protocol.CandidateReadSourcingWindowData
 	if batch.Status == store.SourcingBatchPreparing {
+		revision, revisionErr := a.manager.store.JobAIContextRevisionByHash(batch.ContextRevisionHash)
+		if revisionErr != nil || revision == nil || batch.BackendJobID == nil ||
+			strings.TrimSpace(*batch.BackendJobID) == "" ||
+			strings.TrimSpace(*batch.BackendJobID) != strings.TrimSpace(revision.SourceJobRef) ||
+			strings.TrimSpace(revision.DisplayName) == "" {
+			return a.failSourcingBatch(
+				batch.BatchID, sourcingBlockPositionSelect,
+				errors.Join(store.ErrSourcingBinding, revisionErr),
+			)
+		}
+		if err := a.setStage("selectingSourcingPosition"); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+		}
+		if _, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateSelectSourcingPositionData](
+			ctx, a, protocol.PrimCandidateSelectSourcingPosition,
+			protocol.CandidateSelectSourcingPositionArgs{PositionTitle: revision.DisplayName},
+		); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+		}
+		if err := a.waitSourcingInteractionPace(ctx); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+		}
 		if err := a.setStage("bindingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionBindFailed, err)
 		}

@@ -13,6 +13,7 @@ import (
 
 	"recruithelper/client/service/internal/appbridge"
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
@@ -163,6 +164,18 @@ func (s *sourcingGreetingSendAdminSender) SendEnvelope(handID string, env protoc
 			ContentScriptOk: true, LoginState: protocol.LoginStateIn,
 			PageKind: protocol.PageKindRecommend, PrincipalFingerprint: &fingerprint,
 		}
+	case protocol.PrimCandidateSelectSourcingPosition:
+		var args protocol.CandidateSelectSourcingPositionArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		if args.PositionTitle != "admin-position-secret" {
+			return fmt.Errorf("管理状态 fixture 收到错误职位标题")
+		}
+		data = protocol.CandidateSelectSourcingPositionData{
+			PositionRef: s.positionRef, PositionTitle: args.PositionTitle,
+			ObservedAt: time.Now().UnixMilli(),
+		}
 	case protocol.PrimCandidateReadSourcingWindow:
 		var args protocol.CandidateReadSourcingWindowArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -171,9 +184,10 @@ func (s *sourcingGreetingSendAdminSender) SendEnvelope(handID string, env protoc
 		if args.Move != protocol.SourcingWindowMoveCurrent {
 			return fmt.Errorf("管理状态 fixture 不支持窗口动作 %s", args.Move)
 		}
+		positionTitle := "admin-position-secret"
 		data = protocol.CandidateReadSourcingWindowData{
 			PositionRef: s.positionRef, PlatformUserRefs: []string{s.platformUserRef},
-			Moved: false, ObservedAt: time.Now().UnixMilli(),
+			PositionTitle: &positionTitle, Moved: false, ObservedAt: time.Now().UnixMilli(),
 		}
 	case protocol.PrimCandidateReadSourcingTargetResume:
 		var args protocol.CandidateReadSourcingTargetResumeArgs
@@ -216,6 +230,7 @@ func (*sourcingGreetingSendAdminSender) HandContractMatch(string) (bool, bool) {
 func (*sourcingGreetingSendAdminSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
+			protocol.PrimCandidateSelectSourcingPosition + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
 			protocol.PrimCandidateReadSourcingTargetResume + "@1",
 		}, []string{
@@ -275,6 +290,24 @@ func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
 		},
 		CreatedAt: at,
 	}
+}
+
+func syntheticSourcingCurrentJobConfig(t *testing.T) []byte {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal(syntheticCurrentJobConfig(t), &payload); err != nil {
+		t.Fatal(err)
+	}
+	documents := payload["documents"].(map[string]any)
+	documents["打分"] = "fixture://score {resume_json}"
+	documents["招呼语"] = `{"prompt":"fixture://greeting {career_state} {resume_summary_json}"}`
+	payload["scoring"].(map[string]any)["prompt"] = documents["打分"]
+	payload["greeting"].(map[string]any)["prompt"] = "fixture://greeting {career_state} {resume_summary_json}"
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func TestSourcingGreetingSendStatusReturnsNormalSafeAggregate(t *testing.T) {
@@ -381,10 +414,35 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	}
 	defer st.Close()
 	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-	revision := sourcingAdminRevision(now.Add(-time.Hour))
-	if _, _, err := st.SaveJobAIContextRevision(revision); err != nil {
+	backendPayload := syntheticSourcingCurrentJobConfig(t)
+	imported, err := m5ai.ImportLegacyJobConfigFromBackend(backendPayload, now)
+	if err != nil || len(imported) != 1 {
+		t.Fatalf("合成旧后台配置不可导入: revisions=%+v err=%v", imported, err)
+	}
+	revision := imported[0]
+	var backendCalls int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCalls++
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/client/job-config" {
+			t.Errorf("意外旧后台请求: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(backendPayload)
+	}))
+	defer backend.Close()
+	configStore, err := jobconfig.NewConfigStore(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := configStore.Save(jobconfig.Config{
+		BaseURL: backend.URL, MachineID: adminTestMachineID, LicenseToken: "token-sourcing-private",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+		return adminTestMachineID, nil
+	})
 	key := store.AccountKey{Platform: "zhilian", AccountRef: "account-sourcing-admin"}
 	if err := st.CreateAccount(&store.Account{Platform: key.Platform, AccountRef: key.AccountRef}); err != nil {
 		t.Fatal(err)
@@ -401,12 +459,12 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := New(st, newFakeAdminHub(), nil, manager, nil, "")
+	api := New(st, newFakeAdminHub(), nil, manager, nil, "").SetJobConfigSource(source)
 	mux := http.NewServeMux()
 	api.Routes(mux)
 
 	missingTarget := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
-		`{"platform":"zhilian","accountRef":"account-sourcing-admin","contextRevisionHash":"revision-sourcing-admin"}`,
+		`{"platform":"zhilian","accountRef":"account-sourcing-admin"}`,
 	))
 	missingTarget.Header.Set("Content-Type", "application/json")
 	missingTargetResponse := httptest.NewRecorder()
@@ -415,8 +473,21 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 		t.Fatalf("缺少显式 targetCount 未拒绝: code=%d body=%s", missingTargetResponse.Code, missingTargetResponse.Body.String())
 	}
 
+	callerChosenRevision := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
+		`{"platform":"zhilian","accountRef":"account-sourcing-admin","contextRevisionHash":"caller-chosen","targetCount":150}`,
+	))
+	callerChosenRevision.Header.Set("Content-Type", "application/json")
+	callerChosenRevisionResponse := httptest.NewRecorder()
+	mux.ServeHTTP(callerChosenRevisionResponse, callerChosenRevision)
+	if callerChosenRevisionResponse.Code != http.StatusBadRequest || backendCalls != 0 {
+		t.Fatalf(
+			"调用方指定 revision 未在接触旧后台前拒绝: code=%d calls=%d body=%s",
+			callerChosenRevisionResponse.Code, backendCalls, callerChosenRevisionResponse.Body.String(),
+		)
+	}
+
 	start := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
-		`{"platform":"zhilian","accountRef":"account-sourcing-admin","contextRevisionHash":"revision-sourcing-admin","targetCount":150}`,
+		`{"platform":"zhilian","accountRef":"account-sourcing-admin","targetCount":150}`,
 	))
 	start.Header.Set("Content-Type", "application/json")
 	startResponse := httptest.NewRecorder()
@@ -424,8 +495,12 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 	startBody := startResponse.Body.String()
 	if startResponse.Code != http.StatusOK || !strings.Contains(startBody, `"status":"preparing"`) ||
 		!strings.Contains(startBody, `"targetCount":150`) || !strings.Contains(startBody, `"capturedCount":0`) ||
-		!strings.Contains(startBody, `"remainingCount":150`) || !strings.Contains(startBody, `"batchId":"sb-`) {
+		!strings.Contains(startBody, `"remainingCount":150`) || !strings.Contains(startBody, `"batchId":"sb-`) ||
+		!strings.Contains(startBody, `"backendJobId":"19"`) {
 		t.Fatalf("启动正式采集失败: code=%d body=%s", startResponse.Code, startBody)
+	}
+	if backendCalls != 1 {
+		t.Fatalf("启动采集未且仅未同步一次旧后台当前职位: calls=%d", backendCalls)
 	}
 
 	status := httptest.NewRequest(http.MethodGet,
@@ -593,4 +668,115 @@ func TestSourcingStartStatusAndStopExposeOnlyBatchMetadata(t *testing.T) {
 		t.Fatalf("列表发送未知批次未固定返回 404: code=%d body=%s",
 			missingSendRunResponse.Code, missingSendRunResponse.Body.String())
 	}
+}
+
+func TestSourcingStartRequiresAvailableUniqueCurrentBackendJob(t *testing.T) {
+	newHarness := func(t *testing.T, handler http.Handler) (*http.ServeMux, *store.Store, func()) {
+		t.Helper()
+		st, err := store.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+		key := store.AccountKey{Platform: "zhilian", AccountRef: "account-current-job-required"}
+		if err := st.CreateAccount(&store.Account{Platform: key.Platform, AccountRef: key.AccountRef}); err != nil {
+			t.Fatal(err)
+		}
+		manager, err := patrol.NewManager(st, sourcingAdminRunner{}, sourcingAdminHands{}, patrol.Config{
+			Clock: sourcingAdminClock{now: now}, Location: time.UTC,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		api := New(st, newFakeAdminHub(), nil, manager, nil, "")
+		var backend *httptest.Server
+		if handler != nil {
+			backend = httptest.NewServer(handler)
+			configStore, err := jobconfig.NewConfigStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := configStore.Save(jobconfig.Config{
+				BaseURL: backend.URL, MachineID: adminTestMachineID, LicenseToken: "token-start-private",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+				return adminTestMachineID, nil
+			})
+			api.SetJobConfigSource(source)
+		}
+		mux := http.NewServeMux()
+		api.Routes(mux)
+		cleanup := func() {
+			if backend != nil {
+				backend.Close()
+			}
+			st.Close()
+		}
+		return mux, st, cleanup
+	}
+	run := func(t *testing.T, mux *http.ServeMux, st *store.Store, wantStatus int) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/admin/sourcing/start", strings.NewReader(
+			`{"platform":"zhilian","accountRef":"account-current-job-required","targetCount":3}`,
+		))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != wantStatus {
+			t.Fatalf("启动采集错误状态: got=%d want=%d body=%s", response.Code, wantStatus, response.Body.String())
+		}
+		batch, err := st.ActiveSourcingBatch(store.AccountKey{
+			Platform: "zhilian", AccountRef: "account-current-job-required",
+		})
+		if err != nil || batch != nil {
+			t.Fatalf("失败路径错误创建采集批次: batch=%+v err=%v", batch, err)
+		}
+		for _, secret := range []string{adminTestMachineID, "token-start-private", "fixture://score"} {
+			if strings.Contains(response.Body.String(), secret) {
+				t.Fatalf("失败响应泄漏秘密 %q: %s", secret, response.Body.String())
+			}
+		}
+	}
+
+	t.Run("source missing", func(t *testing.T) {
+		mux, st, cleanup := newHarness(t, nil)
+		defer cleanup()
+		run(t, mux, st, http.StatusServiceUnavailable)
+	})
+	t.Run("upstream failure", func(t *testing.T) {
+		mux, st, cleanup := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "fixture upstream detail", http.StatusServiceUnavailable)
+		}))
+		defer cleanup()
+		run(t, mux, st, http.StatusBadGateway)
+	})
+	t.Run("plural current response", func(t *testing.T) {
+		var first map[string]any
+		if err := json.Unmarshal(syntheticSourcingCurrentJobConfig(t), &first); err != nil {
+			t.Fatal(err)
+		}
+		secondRaw, err := json.Marshal(first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var second map[string]any
+		if err := json.Unmarshal(secondRaw, &second); err != nil {
+			t.Fatal(err)
+		}
+		second["job"].(map[string]any)["id"] = float64(20)
+		second["job"].(map[string]any)["name"] = "第二合成职位"
+		plural, err := json.Marshal(map[string]any{
+			"currentJobId": 19, "jobs": []any{first, second},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mux, st, cleanup := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(plural)
+		}))
+		defer cleanup()
+		run(t, mux, st, http.StatusConflict)
+	})
 }
