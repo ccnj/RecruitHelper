@@ -3,6 +3,7 @@ package productapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -97,7 +98,14 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: []byte("must not read")}
-	controller, err := New(db, flow, source, time.Now)
+	controller, err := New(
+		db,
+		flow,
+		source,
+		func() time.Time {
+			return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +129,36 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	if flow.pauseCalls != 1 || flow.resumeCalls != 1 ||
 		flow.confirmBatch != "batch-one" || len(flow.confirmIDs) != 1 {
 		t.Fatalf("unexpected controls: %+v", flow)
+	}
+}
+
+func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	now := time.Date(2026, 7, 25, 7, 59, 59, 0, time.Local)
+	controller, err := New(db, flow, source, func() time.Time {
+		captured := now
+		now = time.Date(2026, 7, 25, 8, 0, 1, 0, time.Local)
+		return captured
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := controller.Start(context.Background(), "full"); !errors.Is(
+		err,
+		workflow.ErrDailyWindowClosed,
+	) {
+		t.Fatalf("closed-window Start() error = %v", err)
+	}
+	if source.calls != 0 || flow.fullRevision != "" || flow.fullKey.Platform != "" {
+		t.Fatalf(
+			"closed click crossed boundary: source=%d key=%+v revision=%q",
+			source.calls,
+			flow.fullKey,
+			flow.fullRevision,
+		)
 	}
 }
 

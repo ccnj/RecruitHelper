@@ -66,17 +66,32 @@ func (c *Controller) Start(ctx context.Context, mode string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	switch strings.TrimSpace(mode) {
+	case string(workflow.ModeReplyOnly):
+	case string(workflow.ModeFull):
+	default:
+		return workflow.ErrInvalidMode
+	}
+	// Capture the user's click-time window before any backend request or
+	// durable write. The workflow manager performs the second check at actual
+	// start, so a 07:59 click cannot become an implicit 08:00 reservation and
+	// a 23:59 click cannot cross midnight into a new run.
+	requestedAt := c.now()
+	open, err := workflow.EvaluateDailyWindow(requestedAt, time.Local)
+	if err != nil {
+		return err
+	}
+	if !open {
+		return workflow.ErrDailyWindowClosed
+	}
+
 	key, err := c.currentAccount()
 	if err != nil {
 		return err
 	}
-	switch strings.TrimSpace(mode) {
-	case string(workflow.ModeReplyOnly):
+	if strings.TrimSpace(mode) == string(workflow.ModeReplyOnly) {
 		_, err = c.workflow.StartReplyOnly(key)
 		return err
-	case string(workflow.ModeFull):
-	default:
-		return workflow.ErrInvalidMode
 	}
 
 	// Repeated start and an unfinished batch are recovery paths. They already
