@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -47,6 +48,16 @@ type RuntimeSnapshot struct {
 
 type RuntimeSnapshotProvider func(context.Context) (RuntimeSnapshot, error)
 
+// WorkflowControl is the ordinary user's narrow write surface. Implementations
+// remain in the brain and must reuse the production workflow and effect paths;
+// apphttp only validates and forwards user intent.
+type WorkflowControl interface {
+	Start(context.Context, string) error
+	Pause(context.Context) error
+	Resume(context.Context) error
+	ConfirmAll(context.Context, string, []string) error
+}
+
 type Option func(*API)
 
 func WithRuntimeSnapshotProvider(provider RuntimeSnapshotProvider) Option {
@@ -61,10 +72,15 @@ func WithClock(clock func() time.Time) Option {
 	}
 }
 
+func WithWorkflowControl(control WorkflowControl) Option {
+	return func(api *API) { api.control = control }
+}
+
 type API struct {
 	projections ProjectionStore
 	bearer      string
 	runtime     RuntimeSnapshotProvider
+	control     WorkflowControl
 	now         func() time.Time
 }
 
@@ -89,6 +105,10 @@ func (a *API) Routes(mux *http.ServeMux) {
 	h := func(next http.HandlerFunc) http.HandlerFunc { return a.guard(next) }
 	mux.HandleFunc("GET /app/overview", h(a.overview))
 	mux.HandleFunc("GET /app/confirmation", h(a.confirmation))
+	mux.HandleFunc("POST /app/workflow/start", h(a.startWorkflow))
+	mux.HandleFunc("POST /app/workflow/pause", h(a.pauseWorkflow))
+	mux.HandleFunc("POST /app/workflow/resume", h(a.resumeWorkflow))
+	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
@@ -111,8 +131,8 @@ func (a *API) guard(next http.HandlerFunc) http.HandlerFunc {
 		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		}
 		// 浏览器的 CORS preflight 不携带 Authorization；只在已经证明请求
 		// 来自 loopback 且 Origin 属于产品壳后放行，实际 GET 仍必须持 bearer。
@@ -129,6 +149,118 @@ func (a *API) guard(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Mode string `json:"mode"`
+	}
+	if decodeProductJSON(r, &request) != nil ||
+		(request.Mode != "full" && request.Mode != "replyOnly") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
+		return
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
+		return
+	}
+	if err := a.control.Start(r.Context(), request.Mode); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法启动工作流"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+func (a *API) pauseWorkflow(w http.ResponseWriter, r *http.Request) {
+	if decodeEmptyProductJSON(r) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "暂停请求无效"})
+		return
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
+		return
+	}
+	if err := a.control.Pause(r.Context()); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法暂停工作流"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+func (a *API) resumeWorkflow(w http.ResponseWriter, r *http.Request) {
+	if decodeEmptyProductJSON(r) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "恢复请求无效"})
+		return
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
+		return
+	}
+	if err := a.control.Resume(r.Context()); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法恢复工作流"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+func (a *API) confirmAll(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		BatchID    string   `json:"batchId"`
+		ProfileIDs []string `json:"profileIds"`
+	}
+	if decodeProductJSON(r, &request) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选确认请求无效"})
+		return
+	}
+	request.BatchID = strings.TrimSpace(request.BatchID)
+	if request.BatchID == "" || len(request.BatchID) > 128 ||
+		len(request.ProfileIDs) == 0 || len(request.ProfileIDs) > 1000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选确认请求无效"})
+		return
+	}
+	seen := make(map[string]struct{}, len(request.ProfileIDs))
+	for index := range request.ProfileIDs {
+		request.ProfileIDs[index] = strings.TrimSpace(request.ProfileIDs[index])
+		if request.ProfileIDs[index] == "" || len(request.ProfileIDs[index]) > 128 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选确认请求无效"})
+			return
+		}
+		if _, exists := seen[request.ProfileIDs[index]]; exists {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选确认请求含重复候选人"})
+			return
+		}
+		seen[request.ProfileIDs[index]] = struct{}{}
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "候选确认控制尚未就绪"})
+		return
+	}
+	if err := a.control.ConfirmAll(r.Context(), request.BatchID, request.ProfileIDs); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前批次无法确认发送"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+func decodeEmptyProductJSON(r *http.Request) error {
+	var request struct{}
+	return decodeProductJSON(r, &request)
+}
+
+func decodeProductJSON(r *http.Request, target any) error {
+	if r == nil || r.Body == nil {
+		return errors.New("请求体缺失")
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 32<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("请求体包含多余内容")
+	}
+	return nil
 }
 
 func requestFromLoopback(remoteAddr string) bool {
