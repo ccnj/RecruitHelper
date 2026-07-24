@@ -1796,8 +1796,10 @@ func testCommunicationV4PatrolGlobalStop(t *testing.T, cancelContext bool) {
 		t.Fatalf("首档案轮次缺失: turn=%+v err=%v", firstTurn, err)
 	}
 	firstAction, err := h.db.CommunicationActionByTurn(firstTurn.TurnID)
-	if err != nil || firstAction == nil || firstAction.Status != store.CommunicationActionManualRequired {
-		t.Fatalf("首档案未安全终结计划动作: action=%+v err=%v", firstAction, err)
+	if err != nil || firstAction == nil ||
+		firstAction.Status != store.CommunicationActionPlanned ||
+		firstAction.EffectIntentID != nil || firstAction.FailureReason != "" {
+		t.Fatalf("首档案的计划动作没有保留为可恢复状态: action=%+v err=%v", firstAction, err)
 	}
 	secondTurn, err := h.db.LatestDialogueTurnForProfile(second.profileID)
 	if err != nil || secondTurn != nil {

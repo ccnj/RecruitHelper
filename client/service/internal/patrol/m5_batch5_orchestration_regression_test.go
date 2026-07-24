@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -12,6 +13,182 @@ import (
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
+
+func TestM5PauseDuringAdviceStopsNextStageAndResumesSameTurn(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	gateClosed := errors.New("fixture workflow paused")
+	gateOpen := true
+	gateCalls := 0
+	advice := &recordingAdviceExecutor{complete: func(
+		call int,
+		request m5ai.CompletionRequest,
+	) (m5ai.CompletionResponse, error) {
+		switch call {
+		case 1:
+			if request.Purpose != m5ai.PurposeIntent {
+				return m5ai.CompletionResponse{}, fmt.Errorf("首次调用用途错误: %s", request.Purpose)
+			}
+			// Simulate the durable workflow pause linearizing while the
+			// provider call is in flight. The invocation itself may finish,
+			// but its caller must pass the same member gate before reply AI.
+			gateOpen = false
+			return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+		case 2:
+			if request.Purpose != m5ai.PurposeReply {
+				return m5ai.CompletionResponse{}, fmt.Errorf("恢复后调用用途错误: %s", request.Purpose)
+			}
+			return safeFakeResponse(`{"话术_序列":["恢复后的合成回复"],"动作":"无"}`), nil
+		default:
+			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
+		}
+	}}
+	h.manager.advice = advice
+	h.manager.SetWorkflowMemberGate(func() error {
+		gateCalls++
+		if !gateOpen {
+			return gateClosed
+		}
+		return nil
+	})
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号: account=%+v err=%v", account, err)
+	}
+	actor := &roundActor{
+		manager: h.manager,
+		account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		now:     h.clock.Now(),
+	}
+
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	if !errors.Is(err, gateClosed) || len(advice.requests) != 1 || gateCalls != 2 {
+		t.Fatalf(
+			"暂停后仍越过 AI 阶段边界: calls=%d gateCalls=%d err=%v",
+			len(advice.requests),
+			gateCalls,
+			err,
+		)
+	}
+	pausedTurn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || pausedTurn == nil ||
+		pausedTurn.Status != store.DialogueTurnClassified {
+		t.Fatalf("在途 intent 结果没有停在可恢复分类态: turn=%+v err=%v", pausedTurn, err)
+	}
+	if action, actionErr := h.db.CommunicationActionByTurn(
+		fixture.turn.TurnID,
+	); actionErr != nil || action != nil {
+		t.Fatalf("暂停后不应提前物化回复动作: action=%+v err=%v", action, actionErr)
+	}
+
+	gateOpen = true
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *pausedTurn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("恢复后没有从同一轮继续 reply AI: calls=%d err=%v", len(advice.requests), err)
+	}
+	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || action == nil ||
+		action.Status != store.CommunicationActionPlanned ||
+		action.EffectIntentID != nil {
+		t.Fatalf("恢复后的轮没有停在既有 planned seam: action=%+v err=%v", action, err)
+	}
+}
+
+func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T) {
+	tests := []struct {
+		name      string
+		interrupt func(*Manager, *harness) error
+		wantErr   error
+	}{
+		{
+			name: "user_pause",
+			interrupt: func(manager *Manager, h *harness) error {
+				return manager.PauseNow(h.key)
+			},
+			wantErr: ErrActorPaused,
+		},
+		{
+			name: "daily_boundary",
+			interrupt: func(_ *Manager, h *harness) error {
+				h.clock.Add(15 * time.Hour)
+				return nil
+			},
+			wantErr: ErrDailyWindowExpired,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			fixture := seedM5AdviceFixture(t, h)
+			advice := &recordingAdviceExecutor{}
+			h.manager.advice = advice
+			planningActor := &roundActor{manager: h.manager, now: h.clock.Now()}
+			h.manager.mu.Lock()
+			err := planningActor.advanceM5Turn(context.Background(), fixture.turn)
+			h.manager.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			plannedTurn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+			if err != nil || plannedTurn == nil ||
+				plannedTurn.Status != store.DialogueTurnAdviceReady {
+				t.Fatalf("没有形成待派发轮: turn=%+v err=%v", plannedTurn, err)
+			}
+
+			hand := &m5PositiveHand{}
+			dispatcher := dispatch.New(h.db, hand)
+			hand.setDispatcher(dispatcher)
+			runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+			config := h.config
+			var manager *Manager
+			config.InteractionPaceWait = func(context.Context) error {
+				return test.interrupt(manager, h)
+			}
+			manager, err = NewManager(h.db, runner, h.hands, config, advice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			account, err := h.db.AccountByKey(h.key)
+			if err != nil || account == nil {
+				t.Fatalf("读取试运行账号: account=%+v err=%v", account, err)
+			}
+			actor := &roundActor{
+				manager: manager,
+				account: account,
+				hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+				now:     h.clock.Now(),
+			}
+			beforeCommands := countM5SendMessageCommands(t, h)
+			manager.mu.Lock()
+			err = actor.advanceM5Turn(context.Background(), *plannedTurn)
+			manager.mu.Unlock()
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("预 WAL 中断错误: got=%v want=%v", err, test.wantErr)
+			}
+			action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+			if actionErr != nil || action == nil ||
+				action.Status != store.CommunicationActionPlanned ||
+				action.EffectIntentID != nil || action.FailureReason != "" {
+				t.Fatalf("普通中断不可把 planned 动作终局化: action=%+v err=%v", action, actionErr)
+			}
+			if hand.commandCount() != 0 ||
+				countM5SendMessageCommands(t, h) != beforeCommands {
+				t.Fatalf(
+					"预 WAL 中断仍构造发送: hand=%d before=%d after=%d",
+					hand.commandCount(),
+					beforeCommands,
+					countM5SendMessageCommands(t, h),
+				)
+			}
+		})
+	}
+}
 
 func TestM5ReplyProviderFailureStopsAfterTwoInvocationsWithoutEffect(t *testing.T) {
 	h := newHarness(t)

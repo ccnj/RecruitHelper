@@ -290,6 +290,9 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			store.DialogueTurnDispatching, store.DialogueTurnCompleted:
 			return nil
 		}
+		if err := a.mayAdvanceM5Turn(ctx); err != nil {
+			return err
+		}
 		nextV4Advice, v4Owned, err := a.manager.store.CommunicationV4NextAdvice(turn.TurnID)
 		if err != nil {
 			return err
@@ -421,6 +424,32 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 	return nil
 }
 
+// mayAdvanceM5Turn calls the literal workflow member gate also used by the
+// scoring, greeting-generation and greeting-send loops. It releases the actor
+// lock before entering that gate to preserve the control lock order
+// (workflow -> actor), then rechecks the actor generation after reacquiring it.
+// Consequently a pause which linearizes while one provider call is in flight
+// lets that call persist its result, but cannot authorize the next advice
+// stage or a new pre-WAL action.
+func (a *roundActor) mayAdvanceM5Turn(ctx context.Context) error {
+	a.manager.gateMu.RLock()
+	installed := a.manager.workflowMemberGate != nil
+	a.manager.gateMu.RUnlock()
+	if !installed {
+		return nil
+	}
+	var gateErr error
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		gateErr = a.manager.mayStartNextWorkflowMember()
+	}()
+	if gateErr != nil {
+		return gateErr
+	}
+	return a.ensureDispatchAllowed(ctx)
+}
+
 func reduceM5ResumeTurn(
 	turn store.DialogueTurn,
 	material m5TurnMaterial,
@@ -523,6 +552,9 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 	// post-wait authorization recheck as the sourcing workflow. The hand still
 	// receives one command and owns no business timer.
 	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
+		if preservesM5PlannedAction(err) {
+			return err
+		}
 		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
 			action.ActionID, "automaticDispatchNotAllowed", a.manager.now(),
 		); closeErr != nil {
@@ -621,6 +653,17 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 		}
 	}
 	return nil
+}
+
+// A pause, daily boundary or process shutdown before WAL construction removes
+// only the current dispatch authorization. The durable planned action remains
+// the resume point; converting it to manualRequired would make an ordinary
+// pause irreversibly consume otherwise valid work.
+func preservesM5PlannedAction(err error) bool {
+	return errors.Is(err, ErrActorPaused) ||
+		errors.Is(err, ErrDailyWindowExpired) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 func intentAdviceFromTurn(turn store.DialogueTurn) communication.IntentAdvice {
