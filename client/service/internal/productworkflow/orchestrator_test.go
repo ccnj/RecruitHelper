@@ -48,9 +48,10 @@ func (a *fixturePipelineActor) SendSelectedSourcingGreetings(
 }
 
 func TestGreetingGenerationStopsAtHumanConfirmationWithoutSending(t *testing.T) {
-	manager, actor, db, run, _ := orchestratorFixtureAtGreetingGeneration(t)
+	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
 	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{Completed: true}
+	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
 
 	awaiting, err := manager.AdvanceOnce(context.Background())
 	if err != nil {
@@ -69,6 +70,41 @@ func TestGreetingGenerationStopsAtHumanConfirmationWithoutSending(t *testing.T) 
 	if err != nil || persisted == nil ||
 		persisted.Status != workflow.StatusAwaitingConfirmation {
 		t.Fatalf("persisted awaiting confirmation = %+v, %v", persisted, err)
+	}
+}
+
+func TestGreetingGenerationWithNoSendableCandidateSkipsEmptyConfirmation(t *testing.T) {
+	manager, actor, _, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+	manager.confirmationProjection = func(requested string) (*store.AppConfirmationProjection, error) {
+		if requested != batchID {
+			return nil, store.ErrAppProjectionInvalid
+		}
+		return &store.AppConfirmationProjection{
+			Available: true,
+			Ready:     true,
+			BatchID:   batchID,
+			Candidates: []store.AppConfirmationCandidate{
+				{ProfileID: "profile-failed", Status: "generationFailed"},
+			},
+			GenerationFailed: 1,
+		}, nil
+	}
+
+	communication, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		communication.RunID != run.RunID ||
+		communication.Status != workflow.StatusRunning ||
+		communication.Stage != store.ProductWorkflowStageCommunication ||
+		actor.greetingCalls != 1 ||
+		actor.sendCalls != 0 {
+		t.Fatalf(
+			"zero-sendable generation = %+v greeting=%d send=%d err=%v",
+			communication,
+			actor.greetingCalls,
+			actor.sendCalls,
+			err,
+		)
 	}
 }
 
@@ -429,6 +465,7 @@ func orchestratorFixtureAtGreetingGeneration(
 			t.Fatal(err)
 		}
 	}
+	manager.confirmationProjection = fixtureConfirmationProjection(*run.SourcingBatchID)
 	return manager, actor, db, run, *run.SourcingBatchID
 }
 

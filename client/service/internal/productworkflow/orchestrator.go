@@ -179,6 +179,16 @@ func (m *Manager) AdvanceOnce(
 		if progress == nil || !progress.Completed {
 			return run, nil
 		}
+		confirmation, projectionErr := m.confirmationProjection(batchID)
+		if projectionErr != nil {
+			return run, projectionErr
+		}
+		if confirmationReadyWithoutSendableCandidates(confirmation, batchID) {
+			// 零入选或全部生成失败没有任何候选人可见动作可供确认。
+			// 直接完成漏斗并保留同一运行的多轮沟通控制，不能留下一个
+			// 永远无法提交的空人工闸。
+			return m.advanceStage(run, store.ProductWorkflowStageCommunication)
+		}
 		return m.enterAwaitingConfirmation(run)
 
 	case store.ProductWorkflowStageAwaitingConfirmation:
@@ -570,6 +580,28 @@ func exactSelectableProfiles(
 		return nil, ErrConfirmationNotReady
 	}
 	return canonical, nil
+}
+
+func confirmationReadyWithoutSendableCandidates(
+	projection *store.AppConfirmationProjection,
+	batchID string,
+) bool {
+	if projection == nil ||
+		!projection.Available ||
+		!projection.Ready ||
+		projection.BatchID != batchID ||
+		projection.SelectableCount != 0 ||
+		projection.GenerationPending != 0 {
+		return false
+	}
+	for i := range projection.Candidates {
+		switch projection.Candidates[i].Status {
+		case "generationFailed", "abandoned", "unavailable":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalProfileIDs(values []string) ([]string, error) {
