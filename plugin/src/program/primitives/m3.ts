@@ -1,6 +1,9 @@
 // 里程碑 3 首个真实外部副作用原语。program 只操作页面；attempting/outbox
 // 的持久顺序由 base Dispatcher 构造性保证，本模块不可访问 chrome.storage。
 import {
+  AcceptWechatEvidenceType,
+  ChatAcceptWechatArgs,
+  ChatReadWechatExchangeOutcomeArgs,
   ChatSendInviteCardArgs,
   ChatSendMessageArgs,
   ChatSendMessageGuards,
@@ -13,6 +16,8 @@ import {
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
+  acceptZhilianWechatRequest,
+  readZhilianWechatExchangeOutcome,
   sendZhilianInviteCard,
   sendZhilianMessage,
   sendZhilianWechatInvite,
@@ -84,6 +89,51 @@ const sendWechatInvite: Primitive = {
   },
 }
 
+const acceptWechat: Primitive = {
+  name: PrimitiveName.ChatAcceptWechat,
+  class: CmdClass.Effectful,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await acceptZhilianWechatRequest(
+        rawArgs as ChatAcceptWechatArgs,
+        ctx.guards as unknown as ChatSendMessageGuards,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return {
+        status: 'ok',
+        data,
+        evidence: [{ type: AcceptWechatEvidenceType.CandidateWechatRequestAcceptedObserved }],
+      }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
+const readWechatExchangeOutcome: Primitive = {
+  name: PrimitiveName.ChatReadWechatExchangeOutcome,
+  class: CmdClass.Readonly,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await readZhilianWechatExchangeOutcome(
+        rawArgs as ChatReadWechatExchangeOutcomeArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const sendInviteCard: Primitive = {
   name: PrimitiveName.ChatSendInviteCard,
   class: CmdClass.Effectful,
@@ -112,5 +162,7 @@ const sendInviteCard: Primitive = {
 export function registerM3Primitives(): void {
   register(sendMessage)
   register(sendWechatInvite)
+  register(acceptWechat)
+  register(readWechatExchangeOutcome)
   register(sendInviteCard)
 }

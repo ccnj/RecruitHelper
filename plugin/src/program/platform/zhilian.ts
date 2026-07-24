@@ -15,6 +15,8 @@ import type {
   CandidateResumeLabelValue,
   CandidateSelectSourcingPositionArgs,
   CandidateSelectSourcingPositionData,
+  ChatAcceptWechatArgs,
+  ChatAcceptWechatData,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
   ChatIdentifyCurrentConversationData,
@@ -22,6 +24,8 @@ import type {
   ChatReadListData,
   ChatReadThreadArgs,
   ChatReadThreadData,
+  ChatReadWechatExchangeOutcomeArgs,
+  ChatReadWechatExchangeOutcomeData,
   ChatSendGreetingArgs,
   ChatSendGreetingData,
   ChatSendGreetingGuards,
@@ -97,6 +101,10 @@ export type ZhilianSendGuards = ChatSendMessageGuards
 export type ZhilianSendData = ChatSendMessageData
 export type ZhilianSendWechatInviteArgs = ChatSendWechatInviteArgs
 export type ZhilianSendWechatInviteData = ChatSendWechatInviteData
+export type ZhilianAcceptWechatArgs = ChatAcceptWechatArgs
+export type ZhilianAcceptWechatData = ChatAcceptWechatData
+export type ZhilianReadWechatExchangeOutcomeArgs = ChatReadWechatExchangeOutcomeArgs
+export type ZhilianReadWechatExchangeOutcomeData = ChatReadWechatExchangeOutcomeData
 export type ZhilianSendInviteCardArgs = ChatSendInviteCardArgs
 export type ZhilianSendInviteCardData = ChatSendInviteCardData
 
@@ -456,6 +464,7 @@ interface MainObserveStableOutboundResult {
 }
 
 type MainCardAction = 'wechatInvite' | 'interviewInvite'
+type MainCardEvaluatorAction = MainCardAction | 'wechatAccept'
 type MainCardPhase = 'preflight' | 'commit'
 
 interface MainPreparedInterviewEditor {
@@ -494,6 +503,12 @@ interface MainObserveStableOutboundCardResult {
   contentHash?: string
   sourceKey?: string
   interview?: InterviewDetails
+}
+
+interface MainWechatExchangeOutcomeResult {
+  confirmed: boolean
+  exchangeSourceKey?: string
+  peerWechat?: string
 }
 
 interface ListCursor {
@@ -6628,13 +6643,14 @@ async function mainPrepareInterviewEditor(
   }
 }
 
-// 两类卡片的最终候选人可见动作共用这一份同步 evaluator。preflight 与
+// 两类卡片发送与微信请求接受共用这一份同步 evaluator。preflight 与
 // commit 传入字面同一函数和同一组冻结参数；commit 最后一份绿色结果后
 // 不再读页面，立即调用唯一一次标准 click。
 function mainSendCardOnce(
   conversationRef: string,
-  cardKind: MainCardAction,
+  cardKind: MainCardEvaluatorAction,
   interview: InterviewDetails | null,
+  requestSourceKey: string | null,
   expectedTail: ZhilianMessageAnchor[],
   expectedPrincipalFingerprint: string,
   irreversibleNotAfterMs: number,
@@ -7072,8 +7088,12 @@ function mainSendCardOnce(
     return failed('action_window_elapsed')
   }
   if (phase !== 'preflight' && phase !== 'commit') return failed('input_rejected')
-  if ((cardKind === 'wechatInvite' && interview !== null) ||
-      (cardKind === 'interviewInvite' && interview === null)) return failed('input_rejected')
+  if ((cardKind === 'wechatInvite' && (interview !== null || requestSourceKey !== null)) ||
+      (cardKind === 'interviewInvite' && (interview === null || requestSourceKey !== null)) ||
+      (cardKind === 'wechatAccept' && (
+        interview !== null || requestSourceKey === null ||
+        !/^[0-9a-f]{64}$/u.test(requestSourceKey)
+      ))) return failed('input_rejected')
   if (!routeMatches()) return failed('route_changed')
   const principal = principalCanonical()
   if (!principal || digest(principal) !== expectedPrincipalFingerprint) return failed('identity_changed')
@@ -7083,12 +7103,15 @@ function mainSendCardOnce(
   const baseline = baselineMatches(binding.target)
   if (baseline !== 'match') return failed(baseline === 'changed' ? 'baseline_changed' : 'guard_unresolved')
   const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+  if (details.length !== 1) return failed('surface_unavailable')
   const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
     'textarea.km-input__original.is-normal.is-textarea.is-autoresize',
   )).filter((element) => visible(element) && element.closest('.im-sender__input-wrapper') !== null)
-  if (details.length !== 1 || composers.length !== 1) return failed('surface_unavailable')
-  if (composers[0].closest('.im-session-detail') !== details[0]) return failed('surface_unavailable')
-  if (composers[0].value !== '') return failed('composer_nonempty')
+  if (cardKind !== 'wechatAccept') {
+    if (composers.length !== 1) return failed('surface_unavailable')
+    if (composers[0].closest('.im-session-detail') !== details[0]) return failed('surface_unavailable')
+    if (composers[0].value !== '') return failed('composer_nonempty')
+  }
 
   let actionTarget: HTMLElement | null = null
   if (cardKind === 'wechatInvite') {
@@ -7097,7 +7120,7 @@ function mainSendCardOnce(
     ).filter((node) => visible(node) && clean(node.textContent) === '换微信')
     if (matches.length !== 1) return failed('surface_unavailable')
     actionTarget = matches[0]
-  } else {
+  } else if (cardKind === 'interviewInvite') {
     const modals = Array.from(
       document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
     ).filter((node) => visible(node) && node.querySelector('.interview-form') !== null)
@@ -7108,6 +7131,72 @@ function mainSendCardOnce(
       .filter((node) => visible(node) && clean(node.textContent) === '发送')
     if (buttons.length !== 1) return failed('surface_unavailable')
     actionTarget = buttons[0]
+  } else {
+    const timeline = liveTimeline()
+    const staffID = runtimeStaffID()
+    if (!timeline || !staffID || requestSourceKey === null) return failed('guard_unresolved')
+    const requestIndexes = timeline.sourceKeys
+      .map((sourceKey, index) => sourceKey === requestSourceKey ? index : -1)
+      .filter((index) => index >= 0)
+    if (requestIndexes.length !== 1) return failed('input_rejected')
+    const requestIndex = requestIndexes[0]
+    const request = timeline.rows[requestIndex]
+    const requestEnvelope = parseObject(request.content)
+    const requestInner = parseObject(requestEnvelope.content)
+    const requestDetails = Object.keys(requestInner).length > 0 ? requestInner : requestEnvelope
+    const requestType = Number(
+      typeof request.type === 'number' || /^\d+$/u.test(String(request.type))
+        ? request.type
+        : requestEnvelope.type,
+    )
+    const candidateOrigin = requestDetails.originType === 2 ||
+      (typeof requestDetails.originType === 'string' && requestDetails.originType.trim() === '2')
+    if (request.type !== 'custom' || !request.contentWasString ||
+        Object.keys(requestInner).length === 0 ||
+        clean(request.status).toLowerCase() !== 'success' || requestType !== 105 ||
+        clean(request.from) !== binding.target || !candidateOrigin) {
+      return failed('input_rejected')
+    }
+    const nextRequestOffset = timeline.rows.slice(requestIndex + 1).findIndex((row) => {
+      const envelope = parseObject(row.content)
+      return Number(
+        typeof row.type === 'number' || /^\d+$/u.test(String(row.type)) ? row.type : envelope.type,
+      ) === 105
+    })
+    const outcomeEnd = nextRequestOffset < 0
+      ? timeline.rows.length
+      : requestIndex + 1 + nextRequestOffset
+    const existingOutcomes = timeline.rows.slice(requestIndex + 1, outcomeEnd).filter((row) => {
+      const envelope = parseObject(row.content)
+      const inner = parseObject(envelope.content)
+      const value = Object.keys(inner).length > 0 ? inner : envelope
+      const type = Number(
+        typeof row.type === 'number' || /^\d+$/u.test(String(row.type)) ? row.type : envelope.type,
+      )
+      const origin = value.originType === 2 ||
+        (typeof value.originType === 'string' && value.originType.trim() === '2')
+      return row.type === 'custom' && row.contentWasString && Object.keys(inner).length > 0 &&
+        clean(row.status).toLowerCase() === 'success' && type === 259 &&
+        clean(row.from) === binding.target && origin &&
+        Boolean(clean(value.userWeChat)) && Boolean(clean(value.staffWeChat))
+    })
+    if (existingOutcomes.length !== 0) return failed('surface_unavailable')
+
+    const pendingCards = Array.from(
+      details[0].querySelectorAll<HTMLElement>('.imc-wx-request'),
+    ).filter((card) => visible(card) &&
+      !card.classList.contains('is-wx-done') &&
+      card.querySelector('.is-wx-done') === null)
+    const candidates = pendingCards.flatMap((card) => {
+      const actions = Array.from(
+        card.querySelectorAll<HTMLElement>(
+          '.imc-wx-request__actions-success, button, a',
+        ),
+      ).filter((node) => visible(node) && clean(node.textContent) === '同意')
+      return actions.length === 1 ? [{ card, action: actions[0] }] : []
+    })
+    if (candidates.length !== 1 || pendingCards.length !== 1) return failed('surface_unavailable')
+    actionTarget = candidates[0].action
   }
   if (!actionTarget || !actionTarget.isConnected || Date.now() > irreversibleNotAfterMs) {
     return failed('action_window_elapsed')
@@ -7361,6 +7450,273 @@ async function mainObserveStableOutboundCard(
       contentHash,
       sourceKey,
       ...(confirmedInterview ? { interview: confirmedInterview } : {}),
+    }
+  } catch {
+    return failed()
+  }
+}
+
+// 微信交换结果只读面：requestSourceKey 只在当前实时 timeline 内定位两种已证实
+// 的 105 请求，并只认下一条 105 之前唯一的同 originType 259。招聘方微信只作
+// 布尔正证，永不返回。
+async function mainReadWechatExchangeOutcome(
+  conversationRef: string,
+  requestSourceKey: string,
+  baselineServerSourceKeys: string[] | null,
+  expectedTargetBindingToken: string | null,
+): Promise<MainWechatExchangeOutcomeResult> {
+  type AnyRecord = Record<string, unknown>
+  interface SnapshotRow {
+    idServer: string
+    status: string
+    type: string | number
+    from: string
+    content: string
+    contentWasString: boolean
+    time: number
+    sourceIndex: number
+  }
+  const failed = (): MainWechatExchangeOutcomeResult => ({ confirmed: false })
+  const w = window as unknown as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const stableMessageIdentity = (value: unknown): string => {
+    if (typeof value === 'string') return value
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+  }
+  const digest = async (value: string): Promise<string> => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+    return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  }
+  const parseObject = (value: unknown): AnyRecord => {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) return value as AnyRecord
+    if (typeof value !== 'string' || value.length === 0) return {}
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return asRecord(parsed) ?? {}
+    } catch {
+      return {}
+    }
+  }
+  const readInitialStaffID = (): string => {
+    const source = Array.from(document.scripts)
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return ''
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try {
+          const initial = asRecord(JSON.parse(candidate.slice(start, index + 1)))
+          const session = asRecord(asRecord(initial?.session)?.session)
+          return clean(asRecord(session?.staff)?.staffId)
+        } catch {
+          return ''
+        }
+      }
+    }
+    return ''
+  }
+  const routeMatches = (): boolean => {
+    try {
+      const route = new URL(location.href)
+      return route.pathname === '/app/im' && route.searchParams.get('sessionId') === conversationRef
+    } catch {
+      return false
+    }
+  }
+  const targetForCurrentRoute = (): string => {
+    const engine = asRecord(w.imEngine)
+    const sessions = Array.isArray(engine?.sessions) ? engine.sessions as AnyRecord[] : []
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    return matches.length === 1 ? clean(matches[0].peerPartnerId) : ''
+  }
+  const resolveTimeline = (): unknown | null => {
+    const timelineSlot = (root: AnyRecord): unknown | null => {
+      const store = asRecord(root.$store)
+      const state = asRecord(store?.state)
+      const im = asRecord(state?.im)
+      const timelineMap = asRecord(im?.timelineMap)
+      if (!timelineMap || !Object.prototype.hasOwnProperty.call(timelineMap, conversationRef)) return null
+      const entry = asRecord(timelineMap[conversationRef])
+      if (!entry || !Object.prototype.hasOwnProperty.call(entry, 'timeline') ||
+          entry.timeline === null || entry.timeline === undefined) return null
+      return entry.timeline
+    }
+    const nuxt = asRecord(w.$nuxt)
+    const nuxtRoot = asRecord(nuxt?.$root) ?? nuxt
+    if (nuxtRoot) {
+      const timeline = timelineSlot(nuxtRoot)
+      if (timeline !== null) return timeline
+    }
+    const timelines = Array.from(
+      document.querySelectorAll<HTMLElement>('.im-timeline__wrapper'),
+    ).filter(visible)
+    if (timelines.length !== 1) return null
+    let current: HTMLElement | null = timelines[0]
+    for (let depth = 0; current && depth < 64; depth += 1) {
+      const holder = current as HTMLElement & { __vue__?: unknown }
+      if (Object.prototype.hasOwnProperty.call(holder, '__vue__')) {
+        const owner = asRecord(holder.__vue__)
+        const root = asRecord(owner?.$root)
+        if (root) {
+          const timeline = timelineSlot(root)
+          if (timeline !== null) return timeline
+        }
+      }
+      current = current.parentElement
+    }
+    return null
+  }
+  const rowShape = (
+    row: SnapshotRow,
+    expectedType: number,
+    expectedOrigin: 1 | 2,
+    expectedFrom: string,
+  ): { matches: boolean; details: AnyRecord } => {
+    const envelope = parseObject(row.content)
+    const inner = parseObject(envelope.content)
+    const details = Object.keys(inner).length > 0 ? inner : envelope
+    const type = Number(
+      typeof row.type === 'number' || /^\d+$/u.test(String(row.type)) ? row.type : envelope.type,
+    )
+    const origin = details.originType === expectedOrigin ||
+      (typeof details.originType === 'string' &&
+        details.originType.trim() === String(expectedOrigin))
+    return {
+      matches: row.type === 'custom' && row.contentWasString &&
+        Object.keys(inner).length > 0 && clean(row.status).toLowerCase() === 'success' &&
+        type === expectedType && clean(row.from) === expectedFrom && origin,
+      details,
+    }
+  }
+
+  try {
+    if (!routeMatches() || !/^[0-9a-f]{64}$/u.test(requestSourceKey)) return failed()
+    const target = targetForCurrentRoute()
+    const staffID = clean(asRecord(asRecord(w.$session)?.staff)?.staffId) || readInitialStaffID()
+    if (!target || !staffID) return failed()
+    const rawRows = resolveTimeline()
+    if (!Array.isArray(rawRows) || rawRows.length > 4096) return failed()
+    const projected: SnapshotRow[] = []
+    for (let sourceIndex = 0; sourceIndex < rawRows.length; sourceIndex += 1) {
+      const row = asRecord(rawRows[sourceIndex])
+      if (!row) return failed()
+      const idServer = stableMessageIdentity(row.idServer)
+      const time = Number(row.time)
+      if (!idServer || !Number.isFinite(time) || time <= 0) return failed()
+      const rawType = row.type
+      const content = typeof row.content === 'string'
+        ? row.content
+        : row.content === null || row.content === undefined
+          ? ''
+          : JSON.stringify(row.content) ?? String(row.content)
+      projected.push({
+        idServer,
+        status: clean(row.status),
+        type: typeof rawType === 'number' || typeof rawType === 'string' ? rawType : String(rawType ?? ''),
+        from: clean(row.from),
+        content,
+        contentWasString: typeof row.content === 'string',
+        time,
+        sourceIndex,
+      })
+    }
+    projected.sort((left, right) => left.time - right.time || left.sourceIndex - right.sourceIndex)
+    const seen = new Set<string>()
+    const rows: SnapshotRow[] = []
+    const sourceKeys: string[] = []
+    for (const row of projected) {
+      if (seen.has(row.idServer)) continue
+      seen.add(row.idServer)
+      rows.push(row)
+      sourceKeys.push(await digest(`source-v1|${row.idServer}`))
+    }
+    if (baselineServerSourceKeys !== null) {
+      if (expectedTargetBindingToken === null ||
+          !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken) ||
+          await digest(JSON.stringify([conversationRef, target])) !== expectedTargetBindingToken ||
+          baselineServerSourceKeys.length > 64 ||
+          baselineServerSourceKeys.some((key) => !/^[0-9a-f]{64}$/u.test(key)) ||
+          new Set(baselineServerSourceKeys).size !== baselineServerSourceKeys.length) {
+        return failed()
+      }
+      const currentTail = sourceKeys.slice(-64)
+      const continuous = baselineServerSourceKeys.length < 64
+        ? currentTail.length === baselineServerSourceKeys.length + 1 &&
+          baselineServerSourceKeys.every((key, index) => currentTail[index] === key)
+        : currentTail.length === 64 &&
+          baselineServerSourceKeys.slice(1).every((key, index) => currentTail[index] === key)
+      if (!continuous) return failed()
+    } else if (expectedTargetBindingToken !== null) {
+      return failed()
+    }
+    const requestIndexes = sourceKeys
+      .map((sourceKey, index) => sourceKey === requestSourceKey ? index : -1)
+      .filter((index) => index >= 0)
+    if (requestIndexes.length !== 1) return failed()
+    const requestIndex = requestIndexes[0]
+    const candidateRequest = rowShape(rows[requestIndex], 105, 2, target).matches
+    const staffRequest = rowShape(rows[requestIndex], 105, 1, staffID).matches
+    if (candidateRequest === staffRequest) return failed()
+    const origin: 1 | 2 = candidateRequest ? 2 : 1
+    let end = rows.length
+    for (let index = requestIndex + 1; index < rows.length; index += 1) {
+      const envelope = parseObject(rows[index].content)
+      const type = Number(
+        typeof rows[index].type === 'number' || /^\d+$/u.test(String(rows[index].type))
+          ? rows[index].type
+          : envelope.type,
+      )
+      if (type === 105) {
+        end = index
+        break
+      }
+    }
+    const matches: Array<{ index: number; peerWechat: string }> = []
+    for (let index = requestIndex + 1; index < end; index += 1) {
+      const outcome = rowShape(rows[index], 259, origin, target)
+      const peerWechat = clean(outcome.details.userWeChat)
+      const ownWechat = clean(outcome.details.staffWeChat)
+      if (outcome.matches && peerWechat && ownWechat &&
+          peerWechat.length <= 256 &&
+          new TextEncoder().encode(peerWechat).length <= 1024) {
+        matches.push({ index, peerWechat })
+      }
+    }
+    if (matches.length !== 1) return failed()
+    const match = matches[0]
+    if (baselineServerSourceKeys !== null &&
+        sourceKeys[match.index] !== sourceKeys[sourceKeys.length - 1]) return failed()
+    // digest 期间若真人切走或 target 换绑，阳性必须降为未确认。
+    if (!routeMatches() || targetForCurrentRoute() !== target) return failed()
+    return {
+      confirmed: true,
+      exchangeSourceKey: sourceKeys[match.index],
+      peerWechat: match.peerWechat,
     }
   } catch {
     return failed()
@@ -7856,6 +8212,7 @@ async function sendZhilianCard(
       conversationRef,
       cardKind,
       interview,
+      null,
       guards.expectedTail,
       expectedPrincipalFingerprint,
       ctx.irreversibleNotAfterMs,
@@ -7963,6 +8320,192 @@ export async function sendZhilianWechatInvite(
     ctx,
     expectedPrincipalFingerprint,
   )
+}
+
+function throwWechatAcceptEvaluationFailure(evaluation: MainSendCardOnceResult): never {
+  if (evaluation.status !== 'failed') {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '微信接受 evaluator 返回未知状态', 'manualOnly')
+  }
+  if (evaluation.reason === 'target_changed' || evaluation.reason === 'baseline_changed' ||
+      evaluation.reason === 'input_rejected') {
+    throw new ZhilianPlatformError('GUARD_FAILED', '微信请求锚、目标或消息基线已经变化', 'manualOnly')
+  }
+  if (evaluation.reason === 'route_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '接受微信请求前目标会话发生切换', 'manualOnly')
+  }
+  if (evaluation.reason === 'identity_changed') {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '接受微信请求前登录身份发生变化', 'manualOnly')
+  }
+  if (evaluation.reason === 'action_window_elapsed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '微信接受不可逆动作窗口已过', 'manualOnly')
+  }
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    '当前无法唯一确认仍待处理的微信请求及同意动作',
+    'manualOnly',
+  )
+}
+
+export async function acceptZhilianWechatRequest(
+  args: ZhilianAcceptWechatArgs,
+  guards: ZhilianSendGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianAcceptWechatData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  if (!/^[0-9a-f]{64}$/u.test(args.requestSourceKey)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '微信请求缺少稳定来源锚', 'manualOnly')
+  }
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const rawBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
+    args.conversationRef,
+    guards.expectedTail,
+  ])
+  const baseline = validatedMainSendBaseline(rawBaseline)
+  if (!baseline) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '微信接受基线返回结构无效', 'afterRecovery', 'pageBroken')
+  }
+  if (baseline.status === 'failed') {
+    if (baseline.stage === 'route_changed' || baseline.stage === 'guard_snapshot_uncovered') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '微信接受基线在复核期间发生变化', 'manualOnly')
+    }
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信微信接受基线', 'afterRecovery', 'pageBroken')
+  }
+
+  // 与此前可能的真人交互留出全局约定的最小随机节奏；此等待发生在
+  // preflight 之前，不扩大最后一次绿色 evaluator 到唯一 click 的窗口。
+  await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
+  const evaluatorArgs = [
+    args.conversationRef,
+    'wechatAccept' as const,
+    null,
+    args.requestSourceKey,
+    guards.expectedTail,
+    expectedPrincipalFingerprint,
+    ctx.irreversibleNotAfterMs,
+    baseline.serverSourceKeys,
+    baseline.targetBindingToken,
+  ] as const
+  ctx.checkpoint()
+  const preflight = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'preflight'])
+  if (preflight.status !== 'ready') throwWechatAcceptEvaluationFailure(preflight)
+  ctx.checkpoint()
+  await ctx.beforeSideEffect()
+  const action = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'commit'])
+  if (action.status !== 'clicked') throwWechatAcceptEvaluationFailure(action)
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    try {
+      const observed = await runMain(tab.id, mainReadWechatExchangeOutcome, [
+        args.conversationRef,
+        args.requestSourceKey,
+        baseline.serverSourceKeys,
+        baseline.targetBindingToken,
+      ])
+      if (observed.confirmed && observed.exchangeSourceKey && observed.peerWechat) {
+        try {
+          assertExpectedPrincipal(
+            await probeTab(await chrome.tabs.get(tab.id)),
+            expectedPrincipalFingerprint,
+          )
+        } catch (error) {
+          throw new ZhilianPlatformError(
+            'CTX_LOST_DURING_EXEC',
+            `接受微信请求后账号身份无法复核：${asError(error).message}`,
+            'manualOnly',
+            undefined,
+            'possible',
+          )
+        }
+        const data: ZhilianAcceptWechatData = {
+          conversationRef: args.conversationRef,
+          requestSourceKey: args.requestSourceKey,
+          exchangeSourceKey: observed.exchangeSourceKey,
+          peerWechat: observed.peerWechat,
+          observedAt: Date.now(),
+        }
+        if (validatePrimitiveData(PrimitiveName.ChatAcceptWechat, 1, data).length !== 0) {
+          throw new ZhilianPlatformError(
+            'POSTCONDITION_UNCONFIRMED',
+            '微信交换结果不符合当前契约',
+            'manualOnly',
+            undefined,
+            'possible',
+          )
+        }
+        await ctx.progress('已确认唯一微信交换结果', 100)
+        return data
+      }
+    } catch (error) {
+      if (error instanceof ZhilianPlatformError && error.sideEffect === 'possible') throw error
+      // 观察失败只能收敛为未确认，绝不能补第二次“同意”。
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'POSTCONDITION_UNCONFIRMED',
+    '微信请求只点击同意一次，但未确认唯一交换结果',
+    'manualOnly',
+    undefined,
+    'possible',
+  )
+}
+
+export async function readZhilianWechatExchangeOutcome(
+  args: ZhilianReadWechatExchangeOutcomeArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianReadWechatExchangeOutcomeData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  if (!/^[0-9a-f]{64}$/u.test(args.requestSourceKey)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '微信结果读取缺少稳定请求锚', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  await assertCurrentThreadRoute(
+    tab.id,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    'none',
+  )
+  const observed = await runMain(tab.id, mainReadWechatExchangeOutcome, [
+    args.conversationRef,
+    args.requestSourceKey,
+    null,
+    null,
+  ])
+  ctx.checkpoint()
+  await assertCurrentThreadRoute(
+    tab.id,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    'none',
+  )
+  const data: ZhilianReadWechatExchangeOutcomeData = observed.confirmed &&
+      observed.exchangeSourceKey && observed.peerWechat
+    ? {
+        confirmed: true,
+        exchangeSourceKey: observed.exchangeSourceKey,
+        peerWechat: observed.peerWechat,
+        observedAt: Date.now(),
+      }
+    : { confirmed: false, observedAt: Date.now() }
+  if (validatePrimitiveData(PrimitiveName.ChatReadWechatExchangeOutcome, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '微信交换结果结构不符合当前契约', 'manualOnly')
+  }
+  await ctx.progress(data.confirmed ? '已确认微信交换结果' : '本轮未确认微信交换结果', 100)
+  return data
 }
 
 export async function sendZhilianInviteCard(
@@ -8280,6 +8823,7 @@ export const zhilianTestHooks = Object.freeze({
   mainClickConversationOnce,
   mainObserveStableOutbound,
   mainObserveStableOutboundCard,
+  mainReadWechatExchangeOutcome,
   mainPrepareInterviewEditor,
   mainReadListPage,
   mainReadThreadPage,

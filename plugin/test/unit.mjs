@@ -49,6 +49,7 @@ const {
   ResultStatus,
   SensorBridge,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
+  acceptZhilianWechatRequest,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   readZhilianUnreadTotal,
@@ -59,6 +60,7 @@ const {
   readZhilianSourcingTargetResume,
   readZhilianSourcingWindow,
   readZhilianGreetingOutcome,
+  readZhilianWechatExchangeOutcome,
   refreshPagesAfterRuntimeReload,
   registerM3Primitives,
   sendZhilianGreeting,
@@ -5954,6 +5956,54 @@ function installM5BCardActionSurface(fixture) {
   }
 }
 
+function appendM5BWechatRow(fixture, {
+  idServer,
+  type = 105,
+  originType = 2,
+  from = fixture.peerRef,
+  status = 'success',
+  userWeChat,
+  staffWeChat,
+  time = fixture.rows.length + 1,
+} = {}) {
+  fixture.rows.push({
+    idServer,
+    time,
+    status,
+    type: 'custom',
+    from,
+    content: JSON.stringify({
+      type: String(type),
+      content: JSON.stringify({
+        originType,
+        ...(type === 105 ? { userContent: '交换微信请求' } : {}),
+        ...(userWeChat === undefined ? {} : { userWeChat }),
+        ...(staffWeChat === undefined ? {} : { staffWeChat }),
+      }),
+    }),
+  })
+}
+
+function installM5BWechatAcceptSurface(fixture) {
+  const state = { done: false, cards: [] }
+  const action = new globalThis.HTMLElement()
+  action.textContent = '同意'
+  action.classList = { contains: () => false }
+  action.querySelector = () => null
+  action.querySelectorAll = () => []
+  const card = new globalThis.HTMLElement()
+  card.textContent = '交换微信 同意'
+  card.classList = { contains: (name) => name === 'is-wx-done' && state.done }
+  card.querySelector = (selector) => selector === '.is-wx-done' && state.done ? {} : null
+  card.querySelectorAll = (selector) =>
+    selector === '.imc-wx-request__actions-success, button, a' ? [action] : []
+  state.cards = [card]
+  const originalQuery = fixture.detail.querySelectorAll.bind(fixture.detail)
+  fixture.detail.querySelectorAll = (selector) =>
+    selector === '.imc-wx-request' ? state.cards : originalQuery(selector)
+  return { action, card, state }
+}
+
 test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最终只 click 一次', async () => {
   const fixture = installM3SendFixture()
   const surface = installM5BCardActionSurface(fixture)
@@ -5970,6 +6020,7 @@ test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最�
         overrides.conversationRef ?? fixture.conversationRef,
         cardKind,
         interviewValue,
+        null,
         overrides.expectedTail ?? fixture.expectedTail,
         overrides.fingerprint ?? m3Hash(fixture.principal),
         overrides.deadline ?? Date.now() + 10_000,
@@ -6044,6 +6095,159 @@ test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最�
       clicksBeforeGuards,
       '所有 guard/表单阴性都不得产生额外 click',
     )
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 click 一次', async () => {
+  const fixture = installM3SendFixture()
+  const surface = installM5BWechatAcceptSurface(fixture)
+  appendM5BWechatRow(fixture, { idServer: 'wechat-request-candidate' })
+  const requestSourceKey = m3Hash('source-v1|wechat-request-candidate')
+  try {
+    const baseline = await fixture.capture([])
+    assert.equal(baseline.status, 'ready')
+    const invoke = (phase = 'preflight', overrides = {}) =>
+      zhilianTestHooks.mainSendCardOnce(
+        fixture.conversationRef,
+        'wechatAccept',
+        null,
+        overrides.requestSourceKey ?? requestSourceKey,
+        [],
+        m3Hash(fixture.principal),
+        Date.now() + 10_000,
+        overrides.baselineKeys ?? baseline.serverSourceKeys,
+        baseline.targetBindingToken,
+        phase,
+      )
+
+    assert.deepEqual(invoke(), { status: 'ready' })
+    assert.equal(fixture.state.intrinsicClicks, 0)
+    assert.deepEqual(invoke('commit'), { status: 'clicked' })
+    assert.equal(fixture.state.intrinsicClicks, 1)
+
+    const clicksAfterSuccess = fixture.state.intrinsicClicks
+    surface.state.done = true
+    assert.deepEqual(invoke(), { status: 'failed', reason: 'surface_unavailable' })
+    surface.state.done = false
+    assert.deepEqual(invoke('preflight', { baselineKeys: ['f'.repeat(64)] }), {
+      status: 'failed',
+      reason: 'baseline_changed',
+    })
+    assert.deepEqual(invoke('preflight', { requestSourceKey: 'e'.repeat(64) }), {
+      status: 'failed',
+      reason: 'input_rejected',
+    })
+    appendM5BWechatRow(fixture, {
+      idServer: 'wechat-result-already-done',
+      type: 259,
+      userWeChat: 'peer_fixture',
+      staffWeChat: 'staff_fixture',
+    })
+    const afterOutcomeBaseline = await fixture.capture([])
+    assert.equal(afterOutcomeBaseline.status, 'ready')
+    assert.deepEqual(
+      zhilianTestHooks.mainSendCardOnce(
+        fixture.conversationRef,
+        'wechatAccept',
+        null,
+        requestSourceKey,
+        [],
+        m3Hash(fixture.principal),
+        Date.now() + 10_000,
+        afterOutcomeBaseline.serverSourceKeys,
+        afterOutcomeBaseline.targetBindingToken,
+        'preflight',
+      ),
+      { status: 'failed', reason: 'surface_unavailable' },
+      '已经存在交换结果时重复执行必须停在 click 前',
+    )
+    assert.equal(fixture.state.intrinsicClicks, clicksAfterSuccess)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或缺字段时保持阴性', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const reset = () => fixture.rows.splice(0, fixture.rows.length)
+    const read = (requestID) => zhilianTestHooks.mainReadWechatExchangeOutcome(
+      fixture.conversationRef,
+      m3Hash(`source-v1|${requestID}`),
+      null,
+      null,
+    )
+
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'candidate-request' })
+    appendM5BWechatRow(fixture, {
+      idServer: 'candidate-result',
+      type: 259,
+      userWeChat: 'peer_candidate_fixture',
+      staffWeChat: 'staff_fixture',
+    })
+    assert.deepEqual(await read('candidate-request'), {
+      confirmed: true,
+      exchangeSourceKey: m3Hash('source-v1|candidate-result'),
+      peerWechat: 'peer_candidate_fixture',
+    })
+
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'staff-request',
+      originType: 1,
+      from: globalThis.window.$session.staff.staffId,
+    })
+    appendM5BWechatRow(fixture, {
+      idServer: 'staff-result',
+      type: 259,
+      originType: 1,
+      userWeChat: 'peer_staff_fixture',
+      staffWeChat: 'staff_fixture',
+    })
+    assert.deepEqual(await read('staff-request'), {
+      confirmed: true,
+      exchangeSourceKey: m3Hash('source-v1|staff-result'),
+      peerWechat: 'peer_staff_fixture',
+    })
+
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'missing-field-request' })
+    appendM5BWechatRow(fixture, {
+      idServer: 'missing-field-result',
+      type: 259,
+      userWeChat: 'peer_fixture',
+    })
+    assert.deepEqual(await read('missing-field-request'), { confirmed: false })
+
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'ambiguous-request' })
+    appendM5BWechatRow(fixture, {
+      idServer: 'ambiguous-result-1',
+      type: 259,
+      userWeChat: 'peer_fixture_1',
+      staffWeChat: 'staff_fixture',
+    })
+    appendM5BWechatRow(fixture, {
+      idServer: 'ambiguous-result-2',
+      type: 259,
+      userWeChat: 'peer_fixture_2',
+      staffWeChat: 'staff_fixture',
+    })
+    assert.deepEqual(await read('ambiguous-request'), { confirmed: false })
+
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'bounded-request' })
+    appendM5BWechatRow(fixture, { idServer: 'next-request' })
+    appendM5BWechatRow(fixture, {
+      idServer: 'late-result',
+      type: 259,
+      userWeChat: 'peer_late_fixture',
+      staffWeChat: 'staff_fixture',
+    })
+    assert.deepEqual(await read('bounded-request'), { confirmed: false })
   } finally {
     fixture.restore()
   }
@@ -6631,7 +6835,7 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
           )
           evaluatorArgs.push(structuredClone(args))
           const phase = args.at(-1)
-          assert.deepEqual(args.slice(6), [
+          assert.deepEqual(args.slice(7), [
             baseline.serverSourceKeys,
             baseline.targetBindingToken,
             phase,
@@ -6738,12 +6942,8 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
     const m3Capabilities = capabilities()
     assert.ok(m3Capabilities.includes(`${Primitive.ChatSendWechatInvite}@1`))
     assert.ok(m3Capabilities.includes(`${Primitive.ChatSendInviteCard}@1`))
-    assert.equal(
-      m3Capabilities.includes(`${Primitive.ChatAcceptWechat}@0`),
-      false,
-      '点击接受尚未过事实门，不得注册或上报 capability',
-    )
-    assert.equal(lookup(Primitive.ChatAcceptWechat), undefined)
+    assert.ok(m3Capabilities.includes(`${Primitive.ChatAcceptWechat}@1`))
+    assert.ok(m3Capabilities.includes(`${Primitive.ChatReadWechatExchangeOutcome}@1`))
 
     for (const [name, args, evidenceType] of [
       [
@@ -6799,6 +6999,220 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
     assert.equal(commitCalls - commitsBeforeNegative, 1,
       '后置条件阴性也只允许一次 commit，observer 轮询不得补动作')
     assert.ok(observerCalls > observersBeforeNegative, '阴性路径必须实际执行验证读')
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 commit，结果读保持 readonly', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const fingerprint = '4'.repeat(64)
+  const conversationRef = 'conversation-wechat-accept-orchestration'
+  const requestSourceKey = '3'.repeat(64)
+  const exchangeSourceKey = '2'.repeat(64)
+  const expectedTail = [{ direction: 'in', contentHash: '1'.repeat(64) }]
+  const baseline = {
+    status: 'ready',
+    stage: 'ready',
+    serverSourceKeys: [requestSourceKey],
+    targetBindingToken: '0'.repeat(64),
+  }
+  const targetTabId = 192
+  const delays = []
+  let outcomePositive = true
+  let evaluatorFunction = null
+  let preflightCalls = 0
+  let commitCalls = 0
+  let outcomeReads = 0
+
+  globalThis.setTimeout = (callback, delay = 0) => {
+    delays.push(delay)
+    queueMicrotask(callback)
+    return 1
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: targetTabId,
+          url: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+          status: 'complete',
+          active: true,
+          lastAccessed: Date.now(),
+        }]
+      },
+      async get(id) {
+        assert.equal(id, targetTabId)
+        return {
+          id: targetTabId,
+          url: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+          status: 'complete',
+          active: true,
+        }
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, targetTabId)
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im',
+            loginState: 'in',
+            principalFingerprint: fingerprint,
+            imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainCaptureSendBaseline') {
+          assert.deepEqual(args, [conversationRef, expectedTail])
+          return [{ result: structuredClone(baseline) }]
+        }
+        if (func.name === 'mainSendCardOnce') {
+          if (evaluatorFunction === null) evaluatorFunction = func
+          else assert.strictEqual(func, evaluatorFunction,
+            '微信接受的 preflight/commit 必须是字面同一 evaluator')
+          assert.deepEqual(args.slice(0, 7), [
+            conversationRef,
+            'wechatAccept',
+            null,
+            requestSourceKey,
+            expectedTail,
+            fingerprint,
+            args[6],
+          ])
+          assert.deepEqual(args.slice(7, 9), [
+            baseline.serverSourceKeys,
+            baseline.targetBindingToken,
+          ])
+          if (args[9] === 'preflight') {
+            preflightCalls += 1
+            return [{ result: { status: 'ready' } }]
+          }
+          assert.equal(args[9], 'commit')
+          commitCalls += 1
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainReadWechatExchangeOutcome') {
+          outcomeReads += 1
+          assert.equal(args[0], conversationRef)
+          assert.equal(args[1], requestSourceKey)
+          if (args[2] === null) {
+            assert.equal(args[3], null, 'readonly 结果读不得伪造发送基线')
+          } else {
+            assert.deepEqual(args.slice(2), [
+              baseline.serverSourceKeys,
+              baseline.targetBindingToken,
+            ])
+          }
+          return [{ result: outcomePositive
+            ? {
+                confirmed: true,
+                exchangeSourceKey,
+                peerWechat: 'peer_wechat_fixture',
+              }
+            : { confirmed: false } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = (suffix) => {
+    const state = { barriers: 0 }
+    return {
+      state,
+      value: {
+        cmdMsgId: `wechat-accept-${suffix}`,
+        deadlineMs: Date.now() + 60_000,
+        irreversibleNotAfterMs: Date.now() + 60_000,
+        commandContext: undefined,
+        guards: undefined,
+        signal: new AbortController().signal,
+        async progress() {},
+        checkpoint() {},
+        async beforeSideEffect() { state.barriers += 1 },
+      },
+    }
+  }
+  try {
+    const acceptedContext = context('positive')
+    const accepted = await acceptZhilianWechatRequest(
+      { conversationRef, requestSourceKey },
+      { expectedTail },
+      acceptedContext.value,
+      fingerprint,
+    )
+    assert.deepEqual(accepted, {
+      conversationRef,
+      requestSourceKey,
+      exchangeSourceKey,
+      peerWechat: 'peer_wechat_fixture',
+      observedAt: accepted.observedAt,
+    })
+    assert.equal(acceptedContext.state.barriers, 1)
+    assert.equal(preflightCalls, 1)
+    assert.equal(commitCalls, 1)
+    assert.ok(delays[0] >= 1_000 && delays[0] <= 1_500,
+      '候选人可见接受动作前必须随机等待至少一秒')
+
+    const readonlyContext = context('readonly')
+    const readonly = await readZhilianWechatExchangeOutcome(
+      { conversationRef, requestSourceKey },
+      readonlyContext.value,
+      fingerprint,
+    )
+    assert.equal(readonly.confirmed, true)
+    assert.equal(readonly.exchangeSourceKey, exchangeSourceKey)
+    assert.equal(readonly.peerWechat, 'peer_wechat_fixture')
+    assert.equal(readonlyContext.state.barriers, 0, '专门结果读不得越过副作用 barrier')
+
+    registerM3Primitives()
+    const primitive = lookup(Primitive.ChatAcceptWechat)
+    assert.ok(primitive)
+    const handlerContext = context('handler')
+    handlerContext.value.commandContext = {
+      platform: 'zhilian',
+      accountRef: 'account-wechat-accept',
+      expectedPrincipalFingerprint: fingerprint,
+    }
+    handlerContext.value.guards = { expectedTail }
+    const outcome = await primitive.handler(
+      { conversationRef, requestSourceKey },
+      handlerContext.value,
+    )
+    assert.equal(outcome.status, 'ok')
+    assert.deepEqual(outcome.evidence, [{
+      type: 'candidateWechatRequestAcceptedObserved',
+    }])
+    assert.deepEqual(validatePrimitiveResult(Primitive.ChatAcceptWechat, 1, {
+      status: 'ok',
+      data: outcome.data,
+      evidence: outcome.evidence,
+      ref: 'validate-wechat-accept',
+      execMs: 0,
+      replayed: false,
+    }), [])
+
+    outcomePositive = false
+    const negativeContext = context('negative')
+    const commitsBefore = commitCalls
+    const readsBefore = outcomeReads
+    await assert.rejects(
+      acceptZhilianWechatRequest(
+        { conversationRef, requestSourceKey },
+        { expectedTail },
+        negativeContext.value,
+        fingerprint,
+      ),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.PostconditionUnconfirmed &&
+        error.sideEffect === 'possible',
+    )
+    assert.equal(commitCalls - commitsBefore, 1,
+      '阴性观察后不得补第二次接受动作')
+    assert.equal(outcomeReads - readsBefore, 40,
+      '接受动作后置观察总预算固定为 40×250ms，不扩大到第二次 click')
   } finally {
     globalThis.chrome = originalChrome
     globalThis.setTimeout = originalSetTimeout
