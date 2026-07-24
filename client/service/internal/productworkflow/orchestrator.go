@@ -82,6 +82,13 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 			store.SourcingBatchBlocked:
 			return run, nil
 		case store.SourcingBatchCompleted:
+			// 正式采集达到目标时，采集 actor 会先暂停账号。推荐页工作已经
+			// 结束，后续评分/生成不再占用手，因此在同一持久工作流仍为
+			// running 的前提下恢复既有会话巡检；等待人工确认期间多轮回复
+			// 也不会被漏斗无故冻住。
+			if err := m.enableCommunicationAfterSourcing(run); err != nil {
+				return m.currentRunOr(run), err
+			}
 			return m.advanceStage(run, store.ProductWorkflowStageScoring)
 		case store.SourcingBatchStopped:
 			return m.failStoppedPipeline(run, batch.Reason)
@@ -169,6 +176,45 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 	default:
 		return run, ErrWorkflowPipelineInvalid
 	}
+}
+
+func (m *Manager) enableCommunicationAfterSourcing(
+	fallback *store.ProductWorkflowRun,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return err
+	}
+	if run == nil || run.RunID != fallback.RunID ||
+		run.Status != workflow.StatusRunning ||
+		run.Stage != store.ProductWorkflowStageSourcing {
+		return store.ErrProductWorkflowConflict
+	}
+	open, err := workflow.EvaluateDailyWindow(m.clock.Now(), m.location)
+	if err != nil {
+		return err
+	}
+	if !open {
+		from := stateOf(run)
+		waiting := workflow.State{
+			Mode: run.Mode, Status: workflow.StatusWaitingDailyWindow,
+			ResumeStatus: workflow.StatusRunning,
+		}
+		if _, err := m.store.TransitionProductWorkflowRun(
+			store.TransitionProductWorkflowRunRequest{
+				RunID: run.RunID, From: from, To: waiting, At: m.clock.Now(),
+			},
+		); err != nil {
+			return err
+		}
+		return ErrMemberStartBlocked
+	}
+	return m.actor.EnableToday(store.AccountKey{
+		Platform: run.Platform, AccountRef: run.AccountRef,
+	})
 }
 
 // Run is a small restart-safe pump. Errors are observations, not permission

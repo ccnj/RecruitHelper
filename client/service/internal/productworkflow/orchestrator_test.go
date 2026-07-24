@@ -162,6 +162,58 @@ func TestRepeatedConfirmationNeverRepeatsBatchSender(t *testing.T) {
 	}
 }
 
+func TestCommunicationResumeAfterSourcingRechecksDurableWorkflow(t *testing.T) {
+	t.Run("running sourcing run enables existing communication", func(t *testing.T) {
+		db, key, revision := productWorkflowFixture(t)
+		location := time.FixedZone("CST", 8*60*60)
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixtureActor{store: db, clock: clock}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := manager.StartFull(key, revision.RevisionHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := manager.enableCommunicationAfterSourcing(run); err != nil {
+			t.Fatal(err)
+		}
+		if actor.enableCalls != 1 {
+			t.Fatalf("EnableToday calls = %d, want 1", actor.enableCalls)
+		}
+	})
+
+	t.Run("pause wins before communication resume", func(t *testing.T) {
+		db, key, revision := productWorkflowFixture(t)
+		location := time.FixedZone("CST", 8*60*60)
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixtureActor{store: db, clock: clock}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := manager.StartFull(key, revision.RevisionHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.Pause(); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := manager.enableCommunicationAfterSourcing(run); !errors.Is(
+			err,
+			store.ErrProductWorkflowConflict,
+		) {
+			t.Fatalf("enable after pause error = %v", err)
+		}
+		if actor.enableCalls != 0 {
+			t.Fatalf("EnableToday calls after pause = %d, want 0", actor.enableCalls)
+		}
+	})
+}
+
 func orchestratorFixtureAtGreetingGeneration(
 	t *testing.T,
 ) (*Manager, *fixturePipelineActor, *store.Store, *store.ProductWorkflowRun, string) {
