@@ -81,6 +81,10 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 			return progress, nil
 		}
 
+		if err := m.mayStartNextWorkflowMember(); err != nil {
+			progress, _ = m.store.SourcingBatchScoringProgress(batchID)
+			return progress, err
+		}
 		if err := m.scoreSourcingBatchMember(
 			ctx, batchID, view.ScoringPrompt, revision.RevisionHash, *run, provider, model,
 		); err != nil {

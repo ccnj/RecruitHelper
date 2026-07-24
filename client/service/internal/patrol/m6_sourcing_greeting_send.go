@@ -248,6 +248,12 @@ func (m *Manager) scanSourcingGreetingPass(
 			if !matched {
 				continue
 			}
+			// 只在尚未绑定 WAL 的新候选人边界裁决。已经绑定 intent 的
+			// 来源在 SendSelectedSourcingGreetings 顶层独立收编，不经过
+			// 本闸，确保暂停或跨日不会破坏唯一副作用的判定与收敛。
+			if err := m.mayStartNextWorkflowMember(); err != nil {
+				return err
+			}
 			// 每个全新候选人的 effect intent 形成前都保留候选人级随机
 			// 节奏；窗口只是定位提示，最终授权仍由 Store 和手端 evaluator
 			// 在既有正式轨道内独立重验。

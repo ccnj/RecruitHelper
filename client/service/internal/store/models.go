@@ -5,6 +5,7 @@ import (
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/workflow"
 )
 
 // 首个客户安装前仍用 AutoMigrate 快跑；Candidate/CandidateProfile 的正式身份语义
@@ -247,6 +248,40 @@ type Account struct {
 	// 该时刻启动的批次不得继续采集，也不得为尚未进入 WAL 的招呼新建意图。
 	SourcingFeedInvalidatedAt *time.Time
 
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ProductWorkflowRun is the durable control fact behind the ordinary user's
+// start/pause/resume buttons. It deliberately does not duplicate candidate
+// progress: sourcing batches, score/greeting invocations and communication
+// aggregates remain their own authorities.
+//
+// ActiveSlot is NULL for terminal history and "active" for the single current
+// workflow. The nullable unique index keeps restart recovery deterministic
+// without physically deleting prior runs.
+type ProductWorkflowRun struct {
+	RunID string `gorm:"primaryKey"`
+
+	ActiveSlot *string `gorm:"uniqueIndex"`
+	Platform   string  `gorm:"not null;index"`
+	AccountRef string  `gorm:"not null;index"`
+
+	Mode         workflow.Mode   `gorm:"not null"`
+	Status       workflow.Status `gorm:"not null;index"`
+	ResumeStatus workflow.Status
+	Stage        string `gorm:"not null;index"`
+
+	// A later user-authorized run may adopt the same still-open sourcing batch
+	// after an earlier controller start failed. ActiveSlot already prevents two
+	// live controllers, so history must not make BatchID globally unique.
+	SourcingBatchID *string `gorm:"index"`
+	FailureReason   string
+
+	StartedAt time.Time `gorm:"not null"`
+	PausedAt  *time.Time
+	ResumedAt *time.Time
+	EndedAt   *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

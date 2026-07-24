@@ -88,6 +88,10 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 			return progress, nil
 		}
 
+		if err := m.mayStartNextWorkflowMember(); err != nil {
+			progress, _ = m.store.SourcingBatchGreetingProgress(batchID)
+			return progress, err
+		}
 		if err := m.generateSourcingGreetingMember(
 			ctx, view.GreetingPrompt, *material, provider, model,
 		); err != nil {

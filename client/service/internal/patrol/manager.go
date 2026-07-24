@@ -28,6 +28,10 @@ type Manager struct {
 	tickMu     sync.Mutex // 只串行 Tick，不得阻塞传感事件和用户暂停
 	scoreMu    sync.Mutex // 串行统一评分；不占用 hand/巡检锁
 	greetingMu sync.Mutex // 串行批次招呼语生成；不占用 hand/巡检锁
+	gateMu     sync.RWMutex
+	// workflowMemberGate 只裁决“能否开始下一位”。已经绑定 WAL 的
+	// 唯一 intent 收编路径不得调用它，以免暂停破坏安全内核收敛。
+	workflowMemberGate func() error
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
@@ -52,6 +56,24 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 		manager.advice = advice[0]
 	}
 	return manager, nil
+}
+
+// SetWorkflowMemberGate installs the single product-workflow member boundary.
+// It is intentionally a local brain callback, not a protocol capability.
+func (m *Manager) SetWorkflowMemberGate(gate func() error) {
+	m.gateMu.Lock()
+	m.workflowMemberGate = gate
+	m.gateMu.Unlock()
+}
+
+func (m *Manager) mayStartNextWorkflowMember() error {
+	m.gateMu.RLock()
+	gate := m.workflowMemberGate
+	m.gateMu.RUnlock()
+	if gate == nil {
+		return nil
+	}
+	return gate()
 }
 
 // BindAccountObservationIfCurrent 是生产管理面绑定账号的唯一写入口。锁序固定

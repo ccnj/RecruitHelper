@@ -38,6 +38,8 @@ func NewSourcingRunID() string { return "sr-" + randHex(12) }
 
 func NewSourcingBatchID() string { return "sb-" + randHex(12) }
 
+func NewProductWorkflowRunID() string { return "wf-" + randHex(12) }
+
 func NewTrialSelectionID() string { return "ts-" + randHex(12) }
 
 func NewAIContextBindingID() string { return "cb-" + randHex(12) }
