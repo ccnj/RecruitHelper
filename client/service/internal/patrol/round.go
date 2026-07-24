@@ -23,6 +23,8 @@ type roundActor struct {
 	now                     time.Time
 	ensureUsed              bool
 	classificationCorrected bool
+	bypassManualQuiet       bool
+	requireCurrentThread    bool
 	projection              []ConversationProjection
 }
 
@@ -62,6 +64,8 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 
 	actor := &roundActor{
 		manager: m, account: account, hand: hand, roundID: roundID, trigger: trigger, now: now,
+		bypassManualQuiet:    trigger == TriggerCurrentConversation,
+		requireCurrentThread: trigger == TriggerCurrentConversation,
 	}
 	// 生产 Clock 下这个 timeout 会在本地 24:00 取消正在等待的 dispatcher。
 	// 注入假时钟的测试则由每次原语前后的日边界复核立即截断。
@@ -131,6 +135,12 @@ func (a *roundActor) execute(ctx context.Context) error {
 	batch, err := a.manager.store.ActiveSourcingBatch(a.key())
 	if err != nil {
 		return err
+	}
+	if a.trigger == TriggerCurrentConversation {
+		if batch != nil {
+			return ErrCurrentConversationSourcingActive
+		}
+		return a.executeCurrentConversationOnce(ctx)
 	}
 	if batch != nil {
 		if err := a.runSourcingBatch(ctx, batch); err != nil {
@@ -503,7 +513,25 @@ func (a *roundActor) needsProbe() bool {
 }
 
 func (a *roundActor) probeAndVerify(ctx context.Context) error {
-	data, err := invokePrimitive[protocol.ProbePlatformData](ctx, a, protocol.PrimProbePlatform, protocol.ProbePlatformArgs{})
+	var (
+		data protocol.ProbePlatformData
+		err  error
+	)
+	if a.trigger == TriggerCurrentConversation {
+		data, err = invokePrimitiveDirect[protocol.ProbePlatformData](
+			ctx,
+			a,
+			protocol.PrimProbePlatform,
+			protocol.ProbePlatformArgs{},
+		)
+	} else {
+		data, err = invokePrimitive[protocol.ProbePlatformData](
+			ctx,
+			a,
+			protocol.PrimProbePlatform,
+			protocol.ProbePlatformArgs{},
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -516,6 +544,9 @@ func (a *roundActor) probeAndVerify(ctx context.Context) error {
 		}
 		if err := a.markIdentityUnobservable(reason); err != nil {
 			return err
+		}
+		if a.trigger == TriggerCurrentConversation {
+			return wrapRunError(protocol.ErrCodeCtxNotReady, reason, ErrEnsureNotReady)
 		}
 		if err := a.ensureSurface(ctx, reason); err != nil {
 			return err
@@ -833,11 +864,30 @@ func (a *roundActor) readThread(ctx context.Context, conversationRef string, anc
 	for page := 0; page < a.manager.config.MaxPages; page++ {
 		args := protocol.ChatReadThreadArgs{
 			ConversationRef: conversationRef, Cursor: cursor,
+			RequireCurrent: a.requireCurrentThread,
 			Window: protocol.ThreadWindow{
 				AnchorTail: anchors, Deep: deep, MaxMessages: protocol.DefaultPaginationReadThreadMaxItems,
 			},
 		}
-		data, err := invokePrimitive[protocol.ChatReadThreadData](ctx, a, protocol.PrimChatReadThread, args)
+		var (
+			data protocol.ChatReadThreadData
+			err  error
+		)
+		if a.requireCurrentThread {
+			data, err = invokePrimitiveDirect[protocol.ChatReadThreadData](
+				ctx,
+				a,
+				protocol.PrimChatReadThread,
+				args,
+			)
+		} else {
+			data, err = invokePrimitive[protocol.ChatReadThreadData](
+				ctx,
+				a,
+				protocol.PrimChatReadThread,
+				args,
+			)
+		}
 		if err != nil {
 			if isRunError(err, protocol.ErrCodeCursorInvalid) && cursor != "" && restarts == 0 {
 				restarts++
@@ -1201,8 +1251,18 @@ func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
 	if !a.manager.enabledToday(*current, now) {
 		return ErrActorPaused
 	}
-	if current.ManualQuietUntil != nil && now.Before(*current.ManualQuietUntil) {
+	if !a.bypassManualQuiet &&
+		current.ManualQuietUntil != nil && now.Before(*current.ManualQuietUntil) {
 		return wrapRunError(protocol.ErrCodeUserActive, "", ErrManualQuietActive)
+	}
+	if a.trigger == TriggerCurrentConversation {
+		batch, batchErr := a.manager.store.ActiveSourcingBatch(a.key())
+		if batchErr != nil {
+			return batchErr
+		}
+		if batch != nil {
+			return ErrCurrentConversationSourcingActive
+		}
 	}
 	if current.BoundHandID != a.account.BoundHandID ||
 		!sameFingerprint(current.PrincipalFingerprint, a.account.PrincipalFingerprint) {

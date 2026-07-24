@@ -19,6 +19,9 @@ import (
 const (
 	TriggerTimer = "timer"
 	TriggerDirty = "dirty"
+	// TriggerCurrentConversation 是真人显式入口：只处理浏览器当前已经打开
+	// 的一个会话，不经过列表枚举，也不继承 manualQuiet。
+	TriggerCurrentConversation = "manualCurrentConversation"
 
 	surfaceRecoverySuffix = "+surfaceRecovery"
 
@@ -35,23 +38,28 @@ const (
 )
 
 var (
-	ErrNilStore               = errors.New("patrol store 不能为空")
-	ErrNilRunner              = errors.New("patrol runner 不能为空")
-	ErrNilHandAvailability    = errors.New("hand availability 不能为空")
-	ErrAccountNotBound        = errors.New("账号尚未绑定手和主体指纹")
-	ErrIdentityInvalid        = errors.New("账号身份绑定已失效，必须真人重新确认")
-	ErrIdentityUnobservable   = errors.New("当前页面无法确证账号主体")
-	ErrLoginRequired          = errors.New("招聘平台未登录")
-	ErrDailyWindowNotOpen     = errors.New("今日巡检需在本地时间 08:00 后由真人开启")
-	ErrDailyWindowExpired     = errors.New("巡检跨过本地日边界，已在 24:00 停止")
-	ErrActorPaused            = errors.New("账号 actor 已停止或暂停，不得派发新命令")
-	ErrActorGenerationChanged = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
-	ErrManualQuietActive      = errors.New("用户操作静默窗生效，不得派发新驱动命令")
-	ErrEventHandMismatch      = errors.New("传感事件来自非绑定手")
-	ErrEnsureNotReady         = errors.New("恢复 IM 页面后仍未就绪")
-	ErrPaginationLoop         = errors.New("分页 cursor 循环")
-	ErrPaginationLimit        = errors.New("分页超过脑侧安全上限")
-	ErrPeerChangedInPages     = errors.New("同一线程分页返回了冲突的候选人身份")
+	ErrNilStore                          = errors.New("patrol store 不能为空")
+	ErrNilRunner                         = errors.New("patrol runner 不能为空")
+	ErrNilHandAvailability               = errors.New("hand availability 不能为空")
+	ErrAccountNotBound                   = errors.New("账号尚未绑定手和主体指纹")
+	ErrIdentityInvalid                   = errors.New("账号身份绑定已失效，必须真人重新确认")
+	ErrIdentityUnobservable              = errors.New("当前页面无法确证账号主体")
+	ErrLoginRequired                     = errors.New("招聘平台未登录")
+	ErrDailyWindowNotOpen                = errors.New("今日巡检需在本地时间 08:00 后由真人开启")
+	ErrDailyWindowExpired                = errors.New("巡检跨过本地日边界，已在 24:00 停止")
+	ErrActorPaused                       = errors.New("账号 actor 已停止或暂停，不得派发新命令")
+	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
+	ErrManualQuietActive                 = errors.New("用户操作静默窗生效，不得派发新驱动命令")
+	ErrEventHandMismatch                 = errors.New("传感事件来自非绑定手")
+	ErrEnsureNotReady                    = errors.New("恢复 IM 页面后仍未就绪")
+	ErrPaginationLoop                    = errors.New("分页 cursor 循环")
+	ErrPaginationLimit                   = errors.New("分页超过脑侧安全上限")
+	ErrPeerChangedInPages                = errors.New("同一线程分页返回了冲突的候选人身份")
+	ErrCurrentConversationSourcingActive = errors.New("账号仍有活动采集批次，不能处理当前 IM 会话")
+	ErrCurrentConversationUntracked      = errors.New("浏览器当前会话没有可处理的 tracked 候选人档案")
+	ErrCurrentConversationV4NotReady     = errors.New("浏览器当前会话没有可自动推进的 V4 根")
+	ErrCurrentConversationJobUnbound     = errors.New("浏览器当前会话候选人未绑定后台职位")
+	ErrCurrentConversationContextMissing = errors.New("浏览器当前会话职位没有最近成功同步配置")
 )
 
 // RunRequest is the narrow seam between the actor and command delivery. The

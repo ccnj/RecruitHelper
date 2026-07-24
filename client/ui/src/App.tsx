@@ -286,6 +286,11 @@ export function App() {
                 onStop={() => target && runMutation('stop', '今天的自动巡检已停止', () => api.stopAccount(target))}
                 onPause={() => target && runMutation('pause', '已立即暂停，等待人工恢复', () => api.pauseAccount(target))}
                 onRun={() => target && runMutation('run', '已请求立即巡检一轮', () => api.runAccount(target))}
+                onProcessCurrent={() => target && runMutation(
+                  'process-current',
+                  '已处理浏览器当前打开会话一次',
+                  () => api.processCurrentConversationOnce(target),
+                )}
               />
 
               <M5AIConfiguration />
@@ -480,7 +485,7 @@ function AccountRail({
 }
 
 function AccountOverview({
-  account, busy, onEnable, onStop, onPause, onRun,
+  account, busy, onEnable, onStop, onPause, onRun, onProcessCurrent,
 }: {
   account: AccountView
   busy: string
@@ -488,6 +493,7 @@ function AccountOverview({
   onStop: () => void
   onPause: () => void
   onRun: () => void
+  onProcessCurrent: () => void
 }) {
   const latest = account.latestRound
   const isBusy = busy !== ''
@@ -513,6 +519,12 @@ function AccountOverview({
         </button>
         <button disabled={isBusy || !account.enabledToday || !account.handOnline} onClick={onRun}>
           {busy === 'run' ? '已排入…' : '立即巡一轮'}
+        </button>
+        <button
+          disabled={isBusy || !account.enabledToday || !account.handOnline}
+          onClick={onProcessCurrent}
+        >
+          {busy === 'process-current' ? '正在处理当前会话…' : '处理当前会话'}
         </button>
         <button disabled={isBusy || !account.enabledToday} onClick={onPause}>
           {busy === 'pause' ? '正在暂停…' : '立即暂停'}

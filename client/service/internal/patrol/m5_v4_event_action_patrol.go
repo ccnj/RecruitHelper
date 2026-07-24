@@ -23,6 +23,13 @@ const (
 // batch; this loop only chooses deterministic order and supplies the frozen
 // arguments.
 func (a *roundActor) drainCommunicationV4EventActions(ctx context.Context) error {
+	return a.drainCommunicationV4EventActionsForProfile(ctx, "")
+}
+
+func (a *roundActor) drainCommunicationV4EventActionsForProfile(
+	ctx context.Context,
+	profileID string,
+) error {
 	unresolved, err :=
 		a.manager.store.CommunicationV4EventActionsNeedingProfileManualForAccount(a.key())
 	if err != nil {
@@ -31,6 +38,9 @@ func (a *roundActor) drainCommunicationV4EventActions(ctx context.Context) error
 	isolatedProfiles := make(map[string]struct{})
 	for index := range unresolved {
 		action := unresolved[index]
+		if profileID != "" && action.ProfileID != profileID {
+			continue
+		}
 		if _, isolated := isolatedProfiles[action.ProfileID]; isolated {
 			continue
 		}
@@ -51,6 +61,9 @@ func (a *roundActor) drainCommunicationV4EventActions(ctx context.Context) error
 	stoppedProfiles := make(map[string]struct{})
 	for index := range actions {
 		action := actions[index]
+		if profileID != "" && action.ProfileID != profileID {
+			continue
+		}
 		if _, stopped := stoppedProfiles[action.ProfileID]; stopped {
 			continue
 		}

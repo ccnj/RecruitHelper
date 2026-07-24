@@ -197,6 +197,9 @@ globalThis.fetch = async (url, init = {}) => {
     ready: true, handId: 'hand-test', msgId: 'reload-msg', previousBootId: 'boot-old',
     bootId: 'boot-new', contractHash: 'sha256:new', extensionVersion: '0.1.0',
   }), { status: 200 })
+  if (String(url).includes('/admin/conversations/current/process-once')) {
+    return new Response('{"ok":true,"roundId":"round-current"}', { status: 200 })
+  }
   if (String(url).includes('/admin/accounts/bind')) return new Response('{"ok":true}', { status: 200 })
   if (String(url).includes('/admin/frames')) {
     return new Response('data: {"seq":7,"dir":"in","kind":"result","handId":"hand-test","msgId":"msg-test","ts":1}\n\n', {
@@ -219,6 +222,10 @@ const activatedJobSource = await authApi.activateJobConfigSource({
 const syncedJobSource = await authApi.syncCurrentJobConfig()
 await authApi.messages('zhi&lian', 'account ref', 'conversation/ref')
 await authApi.bindAccount('platform-from-user', 'hand-test', 'account-test')
+const processedCurrent = await authApi.processCurrentConversationOnce({
+  platform: 'zhilian',
+  accountRef: 'account-test',
+})
 const reloadReady = await authApi.reloadHand('hand-test')
 const candidatePreview = await authApi.readCurrentCandidate({ platform: 'zhilian', accountRef: 'account-test' })
 const candidateProfile = await authApi.selectCurrentCandidate(candidatePreview.selectionRef)
@@ -299,6 +306,15 @@ check(
 const bindRequest = requests.find((request) => request.url.includes('/admin/accounts/bind'))
 const bindBody = JSON.parse(String(bindRequest?.body || '{}'))
 check(bindBody.platform === 'platform-from-user' && bindBody.handId === 'hand-test' && bindBody.accountRef === 'account-test', '绑定平台由调用方传入且原样进入账号上下文')
+const processCurrentRequest = requests.find((request) => request.url.includes('/admin/conversations/current/process-once'))
+const processCurrentBody = JSON.parse(String(processCurrentRequest?.body || '{}'))
+check(
+  Object.keys(processCurrentBody).sort().join(',') === 'accountRef,platform'
+    && processCurrentBody.platform === 'zhilian'
+    && processCurrentBody.accountRef === 'account-test'
+    && processedCurrent.roundId === 'round-current',
+  '处理当前会话只提交账号上下文并返回本次正式巡检轮次',
+)
 const reloadRequest = requests.find((request) => request.url.includes('/admin/hands/reload'))
 check(JSON.parse(String(reloadRequest?.body || '{}')).handId === 'hand-test' && reloadReady.bootId === 'boot-new', '一键重载携带目标手并返回新 boot 就绪证词')
 const candidateReadRequest = requests.find((request) => request.url.includes('/admin/candidates/current/read'))

@@ -223,6 +223,30 @@ func (a *API) runAccount(w http.ResponseWriter, r *http.Request) {
 	a.accountAction(w, r, a.actor.RequestImmediate)
 }
 
+func (a *API) processCurrentConversationOnce(w http.ResponseWriter, r *http.Request) {
+	if !a.requireActor(w) {
+		return
+	}
+	var req accountKeyRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	key, err := validateAccountKey(req.Platform, req.AccountRef)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	outcome, err := a.actor.ProcessCurrentConversationOnce(r.Context(), key)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "roundId": outcome.RoundID,
+	})
+}
+
 func (a *API) accountAction(w http.ResponseWriter, r *http.Request, action func(store.AccountKey) error) {
 	var req accountKeyRequest
 	if err := decodeJSON(r, &req); err != nil {

@@ -200,6 +200,7 @@ export interface MutationResult {
   error?: string
   account?: AccountView
   trackingState?: string
+  roundId?: string
 }
 
 export interface M5AIContextView {
@@ -521,6 +522,9 @@ export const api = {
   stopAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/stop', target),
   pauseAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/pause', target),
   runAccount: (target: AccountTarget) => post<MutationResult>('/admin/accounts/run', target),
+  processCurrentConversationOnce: (target: AccountTarget) => (
+    post<MutationResult>('/admin/conversations/current/process-once', target)
+  ),
   readCurrentCandidate,
   selectCurrentCandidate,
   sendGreeting: (intentId: string, previousIntentId: string, profileId: string, text: string) => (

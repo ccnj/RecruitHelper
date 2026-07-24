@@ -87,6 +87,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/accounts/stop", h(a.stopAccount))
 	mux.HandleFunc("POST /admin/accounts/pause", h(a.pauseAccount))
 	mux.HandleFunc("POST /admin/accounts/run", h(a.runAccount))
+	mux.HandleFunc("POST /admin/conversations/current/process-once", h(a.processCurrentConversationOnce))
 	mux.HandleFunc("POST /admin/candidates/current/read", h(a.readCurrentCandidate))
 	mux.HandleFunc("POST /admin/candidates/current/select", h(a.selectCurrentCandidate))
 	mux.HandleFunc("POST /admin/candidates/greeting/send", h(a.sendGreeting))

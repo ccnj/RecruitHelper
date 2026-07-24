@@ -18,6 +18,13 @@ const (
 // normalized event and acknowledging the outbox remain intentionally separate:
 // a crash between them replays the immutable ProjectionApplication, then acks.
 func (a *roundActor) processCommunicationV4CardTransitions(ctx context.Context) error {
+	return a.processCommunicationV4CardTransitionsForProfile(ctx, "")
+}
+
+func (a *roundActor) processCommunicationV4CardTransitionsForProfile(
+	ctx context.Context,
+	profileID string,
+) error {
 	pending, err := a.manager.store.PendingCardTransitionsForAccount(
 		a.key(),
 		communicationV4CardTransitionReadLimit,
@@ -43,6 +50,9 @@ func (a *roundActor) processCommunicationV4CardTransitions(ctx context.Context) 
 			// A transition may predate M4 profile adoption. It remains pending
 			// until a real profile/root exists; absence is not authority to
 			// consume or reinterpret the fact.
+			continue
+		}
+		if profileID != "" && profile.ProfileID != profileID {
 			continue
 		}
 		aggregate, err := a.manager.store.CommunicationV4AggregateByProfile(profile.ProfileID)
