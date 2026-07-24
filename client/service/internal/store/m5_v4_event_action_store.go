@@ -173,9 +173,10 @@ func materializeCommunicationV4EventActionsTx(
 
 	var fixedPhrases communication.V4FixedPhraseView
 	var contextRevisionHash string
+	var salutation string
 	var fixedPhrasesReady bool
 	if communicationV4EventActionsNeedFixedPhrases(skeletons) {
-		fixedPhrases, contextRevisionHash, fixedPhrasesReady, err =
+		fixedPhrases, contextRevisionHash, salutation, fixedPhrasesReady, err =
 			communicationV4FixedPhrasesForProfileTx(tx, application.ProfileID)
 		if err != nil {
 			return nil, false, err
@@ -205,6 +206,7 @@ func materializeCommunicationV4EventActionsTx(
 				&row,
 				fixedPhrases,
 				contextRevisionHash,
+				salutation,
 				fixedPhrasesReady,
 			)
 		}
@@ -580,33 +582,61 @@ func communicationV4EventEffectKind(
 func communicationV4FixedPhrasesForProfileTx(
 	tx *gorm.DB,
 	profileID string,
-) (communication.V4FixedPhraseView, string, bool, error) {
+) (communication.V4FixedPhraseView, string, string, bool, error) {
 	var profile CandidateProfile
 	err := tx.First(&profile, "profile_id = ?", profileID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return communication.V4FixedPhraseView{}, "", false, nil
+		return communication.V4FixedPhraseView{}, "", "", false, nil
 	}
 	if err != nil {
-		return communication.V4FixedPhraseView{}, "", false, err
+		return communication.V4FixedPhraseView{}, "", "", false, err
 	}
 	revision, ready, err := currentCommunicationJobAIContextTx(tx, profile)
 	if err != nil {
-		return communication.V4FixedPhraseView{}, "", false, err
+		return communication.V4FixedPhraseView{}, "", "", false, err
 	}
 	if !ready {
-		return communication.V4FixedPhraseView{}, "", false, nil
+		return communication.V4FixedPhraseView{}, "", "", false, nil
 	}
 	view, err := communication.BuildV4FixedPhraseView(revision.SourcePackage)
 	if err != nil {
-		return communication.V4FixedPhraseView{}, revision.RevisionHash, false, nil
+		return communication.V4FixedPhraseView{}, revision.RevisionHash, "", false, nil
 	}
-	return view, revision.RevisionHash, true, nil
+	salutation, err := communicationV4ProfileSalutationTx(tx, profile)
+	if err != nil {
+		return communication.V4FixedPhraseView{}, "", "", false, err
+	}
+	return view, revision.RevisionHash, salutation, true, nil
+}
+
+func communicationV4ProfileSalutationTx(
+	tx *gorm.DB,
+	profile CandidateProfile,
+) (string, error) {
+	var candidate Candidate
+	err := tx.First(
+		&candidate,
+		"platform = ? AND platform_user_ref = ?",
+		profile.Platform,
+		profile.PlatformUserRef,
+	).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if candidate.DisplayName == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*candidate.DisplayName), nil
 }
 
 func materializeCommunicationV4EventActionDisposition(
 	row *CommunicationV4EventAction,
 	fixedPhrases communication.V4FixedPhraseView,
 	contextRevisionHash string,
+	salutation string,
 	fixedPhrasesReady bool,
 ) {
 	switch row.V4Kind {
@@ -622,9 +652,19 @@ func materializeCommunicationV4EventActionDisposition(
 			row.ContextRevisionHash = contextRevisionHash
 			return
 		}
+		rendered, err := communication.RenderV4FixedPhrase(
+			phrase.Text,
+			communication.V4FixedPhraseRenderInput{Salutation: salutation},
+		)
+		if err != nil {
+			row.Status = CommunicationV4EventActionManualRequired
+			row.FailureReason = CommunicationV4EventActionFailureFixedPhraseUnavailable
+			row.ContextRevisionHash = contextRevisionHash
+			return
+		}
 		row.Status = CommunicationV4EventActionPlanned
-		row.Text = phrase.Text
-		row.ContentHash = textcanon.Hash(phrase.Text)
+		row.Text = rendered
+		row.ContentHash = textcanon.Hash(rendered)
 		row.ContextRevisionHash = contextRevisionHash
 	case communication.V4ActionInviteWechat:
 		row.Status = CommunicationV4EventActionPlanned

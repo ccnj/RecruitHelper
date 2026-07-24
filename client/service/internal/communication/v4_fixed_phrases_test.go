@@ -146,3 +146,45 @@ func TestBuildV4FixedPhraseViewMarksIllegalKnownSceneShapeInvalid(t *testing.T) 
 		}
 	}
 }
+
+func TestRenderV4FixedPhraseUsesOnlyApprovedSalutationPlaceholder(t *testing.T) {
+	rendered, err := RenderV4FixedPhrase(
+		" {称呼}您好，稍后联系{称呼}。 ",
+		V4FixedPhraseRenderInput{Salutation: "候选人女士"},
+	)
+	if err != nil || rendered != "候选人女士您好，稍后联系候选人女士。" {
+		t.Fatalf("固定话术没有稳定渲染称呼: rendered=%q err=%v", rendered, err)
+	}
+
+	plain, err := RenderV4FixedPhrase(
+		"好的，稍后联系。",
+		V4FixedPhraseRenderInput{},
+	)
+	if err != nil || plain != "好的，稍后联系。" {
+		t.Fatalf("无占位固定话术不应依赖称呼: rendered=%q err=%v", plain, err)
+	}
+}
+
+func TestRenderV4FixedPhraseRejectsMissingUnknownAndResidualPlaceholders(t *testing.T) {
+	tests := []struct {
+		name       string
+		template   string
+		salutation string
+	}{
+		{name: "missing salutation", template: "{称呼}您好"},
+		{name: "unknown", template: "{姓名}您好", salutation: "候选人女士"},
+		{name: "unclosed", template: "{称呼您好", salutation: "候选人女士"},
+		{name: "stray close", template: "称呼}您好", salutation: "候选人女士"},
+		{name: "placeholder in value", template: "{称呼}您好", salutation: "{姓名}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if rendered, err := RenderV4FixedPhrase(
+				test.template,
+				V4FixedPhraseRenderInput{Salutation: test.salutation},
+			); !errors.Is(err, ErrInvalidV4FixedPhraseRender) || rendered != "" {
+				t.Fatalf("非法固定话术必须响亮失败: rendered=%q err=%v", rendered, err)
+			}
+		})
+	}
+}

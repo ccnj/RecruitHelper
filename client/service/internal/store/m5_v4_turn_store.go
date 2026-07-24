@@ -187,6 +187,28 @@ func (s *Store) FreezeCommunicationV4Turn(
 			return err
 		}
 		decision, plans, policyManualReason := communicationV4AdvicePolicy(decision)
+		if len(plans) > 0 {
+			rendered, ready, err := materializeCommunicationV4FixedTextPlanTx(
+				tx,
+				req.ProfileID,
+				plans[0],
+			)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				policyManualReason = string(communication.V4ManualFixedPhraseUnavailable)
+				plans = nil
+				decision.ManualReason = communication.V4ManualFixedPhraseUnavailable
+				decision.Dialogue.Status = communication.V4DialogueManualRequired
+				decision.Dialogue.NextAdvice = communication.V4AdviceNone
+				decision.Dialogue.ManualReason = communication.V4ManualFixedPhraseUnavailable
+				decision.Dialogue.Actions = nil
+			} else {
+				plans[0] = rendered
+				decision.Dialogue.Actions[0].Text = rendered.Text
+			}
+		}
 		turn, err := dialogueTurnFromV4Decision(req, decision)
 		if err != nil {
 			return err

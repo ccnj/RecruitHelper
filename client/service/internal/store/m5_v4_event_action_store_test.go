@@ -129,7 +129,7 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 	firstRevision := communicationV4EventActionContextFixture(
 		"context-v4-event-action",
 		"revision-v4-event-action-one",
-		"好的，晚点加你",
+		"{称呼}好的，晚点加你",
 		"面试安排已确认",
 		at,
 	)
@@ -166,7 +166,7 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 	wechatReceipt := wechatResult.Actions[2]
 	if wechatReceipt.EffectKind != CommunicationV4EventEffectReplyText ||
 		wechatReceipt.Status != CommunicationV4EventActionPlanned ||
-		wechatReceipt.Text != "好的，晚点加你" ||
+		wechatReceipt.Text != "候选人好的，晚点加你" ||
 		wechatReceipt.ContentHash != textcanon.Hash(wechatReceipt.Text) ||
 		wechatReceipt.ContextRevisionHash != firstRevision.RevisionHash {
 		t.Fatalf("微信回执未冻结话术与 context revision: %+v", wechatReceipt)

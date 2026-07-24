@@ -8,7 +8,10 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 )
 
-var ErrInvalidV4FixedPhrasePackage = errors.New("v4 固定话术包无效")
+var (
+	ErrInvalidV4FixedPhrasePackage = errors.New("v4 固定话术包无效")
+	ErrInvalidV4FixedPhraseRender  = errors.New("v4 固定话术渲染失败")
+)
 
 const v4FixedPhraseDocType = "固定话术"
 
@@ -41,6 +44,10 @@ type V4FixedPhrase struct {
 
 type V4FixedPhraseView struct {
 	Phrases map[V4FixedPhraseKind]V4FixedPhrase
+}
+
+type V4FixedPhraseRenderInput struct {
+	Salutation string
 }
 
 var v4FixedPhraseScenes = []struct {
@@ -98,6 +105,53 @@ func (view V4FixedPhraseView) Phrase(kind V4FixedPhraseKind) V4FixedPhrase {
 		return V4FixedPhrase{Kind: kind, State: V4PhraseMissing}
 	}
 	return phrase
+}
+
+// RenderV4FixedPhrase is the sole renderer for candidate-visible fixed
+// phrases. The supported placeholder surface stays deliberately closed:
+// configuration mistakes must stop before an action or content hash exists.
+func RenderV4FixedPhrase(
+	template string,
+	input V4FixedPhraseRenderInput,
+) (string, error) {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return "", ErrInvalidV4FixedPhraseRender
+	}
+
+	usesSalutation := false
+	remaining := template
+	for {
+		open := strings.Index(remaining, "{")
+		close := strings.Index(remaining, "}")
+		switch {
+		case open < 0 && close < 0:
+			remaining = ""
+		case open < 0 || close < 0 || close < open:
+			return "", ErrInvalidV4FixedPhraseRender
+		default:
+			if remaining[open:close+1] != "{称呼}" {
+				return "", ErrInvalidV4FixedPhraseRender
+			}
+			usesSalutation = true
+			remaining = remaining[close+1:]
+		}
+		if remaining == "" {
+			break
+		}
+	}
+
+	salutation := strings.TrimSpace(input.Salutation)
+	if usesSalutation &&
+		(salutation == "" || strings.ContainsAny(salutation, "{}")) {
+		return "", ErrInvalidV4FixedPhraseRender
+	}
+	rendered := strings.TrimSpace(strings.ReplaceAll(template, "{称呼}", salutation))
+	if strings.ContainsAny(rendered, "{}") ||
+		m5ai.ValidateSendText(rendered) != nil {
+		return "", ErrInvalidV4FixedPhraseRender
+	}
+	return rendered, nil
 }
 
 func newMissingV4FixedPhraseView() V4FixedPhraseView {

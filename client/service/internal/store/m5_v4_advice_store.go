@@ -362,6 +362,28 @@ func persistCommunicationV4AdviceTx(
 		return nil, err
 	}
 	decision, plans, manualReason := communicationV4AdvicePolicy(decision)
+	if len(plans) > 0 {
+		rendered, ready, err := materializeCommunicationV4FixedTextPlanTx(
+			tx,
+			turn.ProfileID,
+			plans[0],
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			manualReason = string(communication.V4ManualFixedPhraseUnavailable)
+			plans = nil
+			decision.ManualReason = communication.V4ManualFixedPhraseUnavailable
+			decision.Dialogue.Status = communication.V4DialogueManualRequired
+			decision.Dialogue.NextAdvice = communication.V4AdviceNone
+			decision.Dialogue.ManualReason = communication.V4ManualFixedPhraseUnavailable
+			decision.Dialogue.Actions = nil
+		} else {
+			plans[0] = rendered
+			decision.Dialogue.Actions[0].Text = rendered.Text
+		}
+	}
 	status, err := dialogueTurnStatusFromCommunicationV4Decision(decision, manualReason)
 	if err != nil {
 		return nil, err
@@ -431,6 +453,36 @@ func persistCommunicationV4AdviceTx(
 		return nil, err
 	}
 	return &action, nil
+}
+
+func materializeCommunicationV4FixedTextPlanTx(
+	tx *gorm.DB,
+	profileID string,
+	plan communication.V4PlannedAction,
+) (communication.V4PlannedAction, bool, error) {
+	switch plan.Kind {
+	case communication.V4ActionRejectionRetention,
+		communication.V4ActionRejectionClosing:
+	default:
+		return plan, true, nil
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		return communication.V4PlannedAction{}, false, err
+	}
+	salutation, err := communicationV4ProfileSalutationTx(tx, profile)
+	if err != nil {
+		return communication.V4PlannedAction{}, false, err
+	}
+	rendered, err := communication.RenderV4FixedPhrase(
+		plan.Text,
+		communication.V4FixedPhraseRenderInput{Salutation: salutation},
+	)
+	if err != nil {
+		return communication.V4PlannedAction{}, false, nil
+	}
+	plan.Text = rendered
+	return plan, true, nil
 }
 
 func completeCommunicationV4IntentTx(

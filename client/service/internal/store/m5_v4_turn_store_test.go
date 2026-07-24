@@ -105,8 +105,8 @@ func setCommunicationV4FixedPhrasePackage(
 			DocType: "固定话术",
 			Content: `{
 				"rejectWechat":{
-					"message":"合成挽留",
-					"messages":["合成挽留"],
+					"message":"{称呼}合成挽留",
+					"messages":["{称呼}合成挽留"],
 					"actions":[],
 					"enabled":true
 				},
@@ -1119,6 +1119,8 @@ func TestCommunicationV4RejectedIntentPlansTextBeforeWechatCard(t *testing.T) {
 	if err != nil || len(actions) != 1 ||
 		actions[0].Kind != CommunicationActionReplyText ||
 		actions[0].Status != CommunicationActionPlanned ||
+		actions[0].Text != "候选人合成挽留" ||
+		actions[0].ContentHash != textcanon.Hash("候选人合成挽留") ||
 		actions[0].DependsOnActionID != nil {
 		t.Fatalf("正文正证前只能实体化第一动作: actions=%+v err=%v", actions, err)
 	}
@@ -1193,6 +1195,16 @@ func TestCommunicationV4RejectionShortCircuitPlansTextBeforeWechatCardAtFreeze(t
 	}
 	if actions != 1 || invocations != 0 {
 		t.Fatalf("拒绝短路只能规划正文且不得调用模型: actions=%d invocations=%d", actions, invocations)
+	}
+	var action CommunicationAction
+	if err := s.db.First(
+		&action,
+		"turn_id = ?",
+		frozen.Turn.TurnID,
+	).Error; err != nil ||
+		action.Text != "候选人合成挽留" ||
+		action.ContentHash != textcanon.Hash("候选人合成挽留") {
+		t.Fatalf("拒绝短路没有共用固定话术渲染器: action=%+v err=%v", action, err)
 	}
 	replayed, err := s.FreezeCommunicationV4Turn(req)
 	if err != nil || replayed.Created ||
