@@ -23,6 +23,8 @@ import (
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
+	"recruithelper/client/service/internal/productapp"
+	"recruithelper/client/service/internal/productworkflow"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -122,6 +124,20 @@ func main() {
 		slog.Error("账号 actor 初始化失败", "err", err)
 		os.Exit(1)
 	}
+	productWorkflow, err := productworkflow.NewManager(
+		st, actor, productworkflow.Config{Clock: wallClock{}, Location: time.Local},
+	)
+	if err != nil {
+		slog.Error("产品工作流初始化失败", "err", err)
+		os.Exit(1)
+	}
+	productController, err := productapp.New(
+		st, productWorkflow, jobConfigSource, time.Now,
+	)
+	if err != nil {
+		slog.Error("产品工作流控制面初始化失败", "err", err)
+		os.Exit(1)
+	}
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
 	events := make(chan session.SensorEvent, 128)
@@ -139,6 +155,17 @@ func main() {
 	var background backgroundGroup
 	background.Go(func() { consumeSensorEvents(appCtx, st, actor, events) })
 	background.Go(func() { runPatrolLoop(appCtx, actor) })
+	lastWorkflowErrorCode := ""
+	background.Go(func() {
+		productWorkflow.Run(appCtx, time.Second, func(runErr error) {
+			code := productWorkflowErrorCode(runErr)
+			if code == lastWorkflowErrorCode {
+				return
+			}
+			lastWorkflowErrorCode = code
+			slog.Warn("产品工作流推进暂停", "errorCode", code)
+		})
+	})
 	background.Go(func() { hub.StartHealthLoop(appCtx) })
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
 	mux := http.NewServeMux()
@@ -168,8 +195,17 @@ func main() {
 				snapshot.PluginOnline, snapshot.PluginHealth,
 					snapshot.PluginVersion, snapshot.ContractMatch =
 					productPluginRuntime(hub.Registry().Snapshot())
+				productState, stateErr := productController.RuntimeState()
+				if stateErr != nil {
+					return apphttp.RuntimeSnapshot{}, stateErr
+				}
+				snapshot.CurrentBatchID = productState.CurrentBatchID
+				snapshot.WorkflowMode = productState.WorkflowMode
+				snapshot.WorkflowStatus = productState.WorkflowStatus
+				snapshot.CommunicationState = productState.CommunicationState
 				return snapshot, nil
 			}),
+			apphttp.WithWorkflowControl(productController),
 		)
 		if productErr != nil {
 			slog.Error("产品 UI 投影初始化失败", "err", productErr)
@@ -206,6 +242,29 @@ func main() {
 		slog.Warn("后台循环收束超时", "err", err)
 	}
 	backgroundCancel()
+}
+
+type wallClock struct{}
+
+func (wallClock) Now() time.Time { return time.Now() }
+
+func productWorkflowErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, productworkflow.ErrPipelineActorUnavailable):
+		return "pipelineActorUnavailable"
+	case errors.Is(err, productworkflow.ErrWorkflowPipelineInvalid):
+		return "workflowPipelineInvalid"
+	case errors.Is(err, productworkflow.ErrGreetingSendingRequiresManual):
+		return "greetingSendingRequiresManual"
+	case errors.Is(err, patrol.ErrSourcingScoringProviderUnavailable):
+		return "scoringProviderUnavailable"
+	case errors.Is(err, patrol.ErrSourcingGreetingProviderUnavailable):
+		return "greetingProviderUnavailable"
+	default:
+		return "workflowAdvanceFailed"
+	}
 }
 
 // productPluginRuntime 把手注册表收窄成普通用户配置页所需的四项状态。
