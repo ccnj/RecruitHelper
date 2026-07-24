@@ -216,19 +216,14 @@ func TestCommunicationTargetsIncludeEndedForWakeupButExcludeEliminated(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
-			fixture.ProfileID,
-			aggregate.Revision,
-			communication.V4PlannedAction{
-				ActionKey: fixture.ProfileID + "|fixture|archive",
-				Kind:      communication.V4ActionArchive,
-				EndReason: communication.V4EndFallback,
-			},
-			time.Now(),
+		archiveAt := aggregate.State.LastBodyAt.Add(8 * 24 * time.Hour)
+		result, err := s.ApplyCommunicationV4ArchiveAction(
+			communicationV4ArchiveRequestForTest(t, s, *aggregate, archiveAt, false),
 		)
-		if err != nil || !applied || archived.State.MainStatus != communication.V4StatusEnded {
+		if err != nil || result == nil || !result.Applied ||
+			result.Aggregate.State.MainStatus != communication.V4StatusEnded {
 			t.Fatalf("构造已结束档案失败: aggregate=%+v applied=%v err=%v",
-				archived, applied, err)
+				result, result != nil && result.Applied, err)
 		}
 
 		targets, err := s.CommunicationTargetsForAccount(AccountKey{

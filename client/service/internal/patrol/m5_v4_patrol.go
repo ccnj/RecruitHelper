@@ -285,12 +285,14 @@ func (a *roundActor) processCommunicationV4ScheduleArchive(
 	target store.CommunicationTarget,
 	hasPendingDialogue bool,
 ) (bool, error) {
+	evaluatedAt := a.manager.now()
 	decision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
-		ProfileKey:         target.Profile.ProfileID,
-		State:              target.Aggregate.State,
-		Now:                a.manager.now(),
-		HasPendingDialogue: hasPendingDialogue,
-		Reply:              communication.ReplyAdvice{State: communication.AdviceAbsent},
+		ProfileKey:          target.Profile.ProfileID,
+		State:               target.Aggregate.State,
+		ProjectedThroughSeq: target.Aggregate.ProjectedThroughSeq,
+		Now:                 evaluatedAt,
+		HasPendingDialogue:  hasPendingDialogue,
+		Reply:               communication.ReplyAdvice{State: communication.AdviceAbsent},
 	})
 	if err != nil {
 		return false, err
@@ -301,11 +303,17 @@ func (a *roundActor) processCommunicationV4ScheduleArchive(
 	if len(decision.Actions) != 1 || decision.Actions[0].Kind != communication.V4ActionArchive {
 		return false, nil
 	}
-	_, _, err = a.manager.store.ApplyCommunicationV4ArchiveAction(
-		target.Profile.ProfileID,
-		target.Aggregate.Revision,
-		decision.Actions[0],
-		a.manager.now(),
+	result, err := a.manager.store.ApplyCommunicationV4ArchiveAction(
+		store.ApplyCommunicationV4ArchiveActionRequest{
+			ProfileID:                   target.Profile.ProfileID,
+			ConversationRef:             target.Conversation.ConversationRef,
+			ExpectedRevision:            target.Aggregate.Revision,
+			ExpectedProjectedThroughSeq: target.Aggregate.ProjectedThroughSeq,
+			HasPendingDialogue:          hasPendingDialogue,
+			Action:                      decision.Actions[0],
+			EvaluatedAt:                 evaluatedAt,
+			AppliedAt:                   a.manager.now(),
+		},
 	)
-	return err == nil, err
+	return err == nil && result != nil, err
 }

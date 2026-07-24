@@ -567,52 +567,6 @@ func retractCommunicationV4ConfirmedActionTx(
 	return next, application, true, nil
 }
 
-// ApplyCommunicationV4ArchiveAction persists one deterministic schedule
-// archive against the exact aggregate revision that was evaluated. Replaying
-// the same ActionKey is idempotent; a different transition that wins the race
-// must be re-evaluated by the caller instead of archiving stale state.
-func (s *Store) ApplyCommunicationV4ArchiveAction(
-	profileID string,
-	expectedRevision uint64,
-	action communication.V4PlannedAction,
-	appliedAt time.Time,
-) (CommunicationV4Aggregate, bool, error) {
-	if strings.TrimSpace(profileID) == "" || strings.TrimSpace(action.ActionKey) == "" ||
-		action.Kind != communication.V4ActionArchive || appliedAt.IsZero() {
-		return CommunicationV4Aggregate{}, false, ErrCommunicationV4Invalid
-	}
-	var next CommunicationV4Aggregate
-	var applied bool
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, found, err := communicationV4ApplicationTx(
-			tx,
-			profileID,
-			CommunicationV4InputArchiveAction,
-			action.ActionKey,
-		)
-		if err != nil {
-			return err
-		}
-		if !found {
-			current, err := communicationV4AggregateTx(tx, profileID)
-			if err != nil {
-				return err
-			}
-			if current.Revision != expectedRevision {
-				return ErrCommunicationV4Conflict
-			}
-		}
-		next, _, applied, err = applyCommunicationV4ArchiveActionTx(
-			tx,
-			profileID,
-			action,
-			appliedAt,
-		)
-		return err
-	})
-	return next, applied, err
-}
-
 // applyCommunicationV4ArchiveActionTx persists a previously planned local
 // archive. It remains package-private so a controller cannot invent terminal
 // state without first passing the deterministic schedule evaluator.

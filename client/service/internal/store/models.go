@@ -514,6 +514,42 @@ type CommunicationV4EventAction struct {
 	UpdatedAt           time.Time
 }
 
+type CommunicationV4ScheduleOccurrenceStatus string
+
+const (
+	CommunicationV4ScheduleOccurrenceApplied CommunicationV4ScheduleOccurrenceStatus = "applied"
+)
+
+// CommunicationV4ScheduleOccurrence freezes one deterministic schedule
+// evaluation as an append-only business fact. The first slice persists only
+// internal archive occurrences, so applied is deliberately the sole status:
+// the occurrence and aggregate transition are committed in one transaction
+// and no planned archive half-state may exist.
+type CommunicationV4ScheduleOccurrence struct {
+	OccurrenceID  string                     `gorm:"primaryKey"`
+	OccurrenceKey string                     `gorm:"not null;uniqueIndex:ux_communication_v4_schedule_occurrence_key,priority:2"`
+	ProfileID     string                     `gorm:"not null;index;uniqueIndex:ux_communication_v4_schedule_occurrence_key,priority:1"`
+	Kind          communication.V4ActionKind `gorm:"not null"`
+
+	BasisRevision            uint64    `gorm:"not null"`
+	BasisProjectedThroughSeq int64     `gorm:"not null"`
+	ConversationRef          string    `gorm:"not null"`
+	AnchorMessageSeq         int64     `gorm:"not null"`
+	DueAt                    time.Time `gorm:"not null"`
+	EvaluatedAt              time.Time `gorm:"not null"`
+
+	Round          uint64                    `gorm:"not null"`
+	Stage          uint8                     `gorm:"not null"`
+	CardMessageSeq int64                     `gorm:"not null"`
+	EndReason      communication.V4EndReason `gorm:"not null"`
+
+	Status        CommunicationV4ScheduleOccurrenceStatus `gorm:"not null;index"`
+	FailureReason string
+	AppliedAt     time.Time `gorm:"not null"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 // CandidateResumeSnapshot 是一次完整简历读取的不可变业务事实。正文只在本机
 // 业务库保存；普通管理 API、审计和日志只暴露 hash/大小/覆盖信息。
 type CandidateResumeSnapshot struct {

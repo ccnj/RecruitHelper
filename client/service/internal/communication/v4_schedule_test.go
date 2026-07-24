@@ -14,8 +14,13 @@ func scheduleAt(state V4State, after time.Duration) time.Time {
 }
 
 func v4ScheduleInput(state V4State, now time.Time) V4ScheduleInput {
+	projectedThroughSeq := state.LastOutboundMessageSeq
+	if state.LastRealMessageSeq > projectedThroughSeq {
+		projectedThroughSeq = state.LastRealMessageSeq
+	}
 	return V4ScheduleInput{
-		ProfileKey: "profile-fixture", State: state, Now: now,
+		ProfileKey: "profile-fixture", State: state,
+		ProjectedThroughSeq: projectedThroughSeq, Now: now,
 		Reply: adviceReplyAbsent(), FixedPhrases: availableV4FixedPhrases(),
 		InterviewFollowupTexts: map[uint8]string{1: "跟催一", 2: "跟催二", 3: "跟催三"},
 	}

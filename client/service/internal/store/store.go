@@ -69,6 +69,7 @@ func Open(dataDir string) (*Store, error) {
 		&CommunicationV4Aggregate{},
 		&CommunicationV4ProjectionApplication{},
 		&CommunicationV4EventAction{},
+		&CommunicationV4ScheduleOccurrence{},
 		&CandidateResumeSnapshot{},
 		&M5TrialSelection{},
 		&JobAIContextRevision{},

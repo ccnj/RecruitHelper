@@ -515,7 +515,7 @@ func TestCommunicationV4UnknownEventPersistsManualBlockAndConcurrentReplayDoesNo
 func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *testing.T) {
 	s := openTest(t)
 	at := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
-	_, root := seedSuccessfulV4Greeting(t, s, "v4-actions", "conversation-v4-actions", at)
+	fixture, root := seedSuccessfulV4Greeting(t, s, "v4-actions", "conversation-v4-actions", at)
 	if root.State.LastOutboundAt == nil {
 		t.Fatal("测试招呼根缺少出站时钟")
 	}
@@ -577,33 +577,47 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 	if !errors.Is(err, ErrCommunicationV4Conflict) {
 		t.Fatalf("同 actionKey 偷换正证必须冲突: %v", err)
 	}
+	inboundText := "在吗"
+	outboundText := "回复"
+	if changes, err := s.ApplyConversationChanges(ApplyConversationChangesRequest{
+		Key: ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: "conversation-v4-actions",
+		},
+		ExpectedTailSeq: 1,
+		NewMessages: []MessageDraft{
+			{
+				Direction: "in", Kind: "text", ContentHash: "v4-actions-inbound",
+				Text: &inboundText, Origin: "external",
+			},
+			{
+				Direction: "out", Kind: "text", ContentHash: "v4-actions-outbound",
+				Text: &outboundText, Origin: "self",
+			},
+		},
+		SyncedAt: sentAt,
+	}); err != nil || len(changes.Inserted) != 2 ||
+		changes.Inserted[1].Seq != confirmed.ProjectedThroughSeq {
+		t.Fatalf("补齐归档 CAS 的活动账本尾失败: changes=%+v err=%v", changes, err)
+	}
 
 	archiveAt := at.Add(8 * 24 * time.Hour)
-	archive := communication.V4PlannedAction{
-		ActionKey: root.ProfileID + "|schedule|archive",
-		Kind:      communication.V4ActionArchive,
-		EndReason: communication.V4EndFallback,
-	}
-	if _, _, err := s.ApplyCommunicationV4ArchiveAction(
-		root.ProfileID,
-		confirmed.Revision-1,
-		archive,
-		archiveAt,
-	); !errors.Is(err, ErrCommunicationV4Conflict) {
+	archiveReq := communicationV4ArchiveRequestForTest(
+		t, s, confirmed, archiveAt, false,
+	)
+	staleReq := archiveReq
+	staleReq.ExpectedRevision--
+	if _, err := s.ApplyCommunicationV4ArchiveAction(staleReq); !errors.Is(err, ErrCommunicationV4Conflict) {
 		t.Fatalf("旧聚合快照不得授权归档: %v", err)
 	}
-	archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
-		root.ProfileID,
-		confirmed.Revision,
-		archive,
-		archiveAt,
-	)
+	archiveResult, err := s.ApplyCommunicationV4ArchiveAction(archiveReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applied {
+	if !archiveResult.Applied {
 		t.Fatal("首次归档必须推进")
 	}
+	archived := archiveResult.Aggregate
 	if archived.Revision != 3 || archived.State.MainStatus != communication.V4StatusEnded ||
 		archived.State.EndReason != communication.V4EndFallback {
 		t.Fatalf("归档未推进聚合: %+v", archived)
@@ -613,16 +627,11 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 		*profile.EndReason != CandidateProfileEndFallbackArchive {
 		t.Fatalf("归档未同步 CandidateProfile: %+v", profile)
 	}
-	replayed, applied, err := s.ApplyCommunicationV4ArchiveAction(
-		root.ProfileID,
-		confirmed.Revision,
-		archive,
-		archiveAt.Add(time.Minute),
-	)
+	replayed, err := s.ApplyCommunicationV4ArchiveAction(archiveReq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied || replayed.Revision != 3 {
-		t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", applied, replayed)
+	if replayed.Applied || replayed.Aggregate.Revision != 3 {
+		t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", replayed.Applied, replayed.Aggregate)
 	}
 }

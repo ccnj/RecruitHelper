@@ -3,6 +3,7 @@ package communication
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"recruithelper/client/service/internal/m5ai"
 )
@@ -44,12 +45,14 @@ type V4PlannedAction struct {
 	Kind                V4ActionKind `json:"kind"`
 	Text                string       `json:"text,omitempty"`
 	CardMessageSeq      int64        `json:"cardMessageSeq,omitempty"`
+	AnchorMessageSeq    int64        `json:"anchorMessageSeq,omitempty"`
 	InterviewStartsAtMs *int64       `json:"interviewStartsAtMs,omitempty"`
 	InterviewEndsAtMs   *int64       `json:"interviewEndsAtMs,omitempty"`
 	InterviewMethod     *string      `json:"interviewMethod,omitempty"`
 	Round               uint64       `json:"round,omitempty"`
 	Stage               uint8        `json:"stage,omitempty"`
 	EndReason           V4EndReason  `json:"endReason,omitempty"`
+	DueAt               *time.Time   `json:"dueAt,omitempty"`
 }
 
 type V4DialogueInput struct {

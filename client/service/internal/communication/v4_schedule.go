@@ -36,6 +36,7 @@ const (
 type V4ScheduleInput struct {
 	ProfileKey             string
 	State                  V4State
+	ProjectedThroughSeq    int64
 	Now                    time.Time
 	HasPendingDialogue     bool
 	Reply                  ReplyAdvice
@@ -57,6 +58,7 @@ type V4ScheduleDecision struct {
 // never spends a budget or slides an anchor.
 func EvaluateV4Schedule(input V4ScheduleInput) (V4ScheduleDecision, error) {
 	if err := validateV4State(input.State); err != nil || strings.TrimSpace(input.ProfileKey) == "" ||
+		input.ProjectedThroughSeq < input.State.LastOutboundMessageSeq ||
 		input.Now.IsZero() || !validAdviceState(input.Reply.State) {
 		return V4ScheduleDecision{}, ErrInvalidV4StateTransition
 	}
@@ -75,7 +77,13 @@ func EvaluateV4Schedule(input V4ScheduleInput) (V4ScheduleDecision, error) {
 		if input.Reply.State != AdviceAbsent {
 			return V4ScheduleDecision{}, ErrInvalidV4StateTransition
 		}
-		return plannedV4Archive(input.ProfileKey, state, V4EndFallback), nil
+		return plannedV4Archive(
+			input.ProfileKey,
+			state,
+			input.ProjectedThroughSeq,
+			state.LastBodyAt.Add(v4FallbackDelay),
+			V4EndFallback,
+		), nil
 	}
 	if input.HasPendingDialogue {
 		if input.Reply.State != AdviceAbsent {
@@ -128,7 +136,13 @@ func EvaluateV4Schedule(input V4ScheduleInput) (V4ScheduleDecision, error) {
 		return V4ScheduleDecision{}, ErrInvalidV4StateTransition
 	}
 	if elapsed >= v4ArchiveDelay && !v4ColdPromptAvailable(state) && !v4ColdWechatAvailable(state) {
-		return plannedV4Archive(input.ProfileKey, state, v4SilenceEndReason(state)), nil
+		return plannedV4Archive(
+			input.ProfileKey,
+			state,
+			input.ProjectedThroughSeq,
+			state.LastOutboundAt.Add(v4ArchiveDelay),
+			v4SilenceEndReason(state),
+		), nil
 	}
 	return noV4ScheduleAction(state), nil
 }
@@ -231,12 +245,30 @@ func v4SilenceEndReason(state V4State) V4EndReason {
 	}
 }
 
-func plannedV4Archive(profileKey string, state V4State, reason V4EndReason) V4ScheduleDecision {
+func plannedV4Archive(
+	profileKey string,
+	state V4State,
+	anchorMessageSeq int64,
+	dueAt time.Time,
+	reason V4EndReason,
+) V4ScheduleDecision {
+	key := fmt.Sprintf(
+		"%s|schedule|%s|round:%d|anchor:%d|reason:%s",
+		profileKey,
+		V4ActionArchive,
+		state.RealMessageRound,
+		anchorMessageSeq,
+		reason,
+	)
+	dueAt = dueAt.UTC()
 	return V4ScheduleDecision{
 		State: state, Status: V4ScheduleActionsPlanned, NextAdvice: V4AdviceNone,
 		Actions: []V4PlannedAction{{
-			ActionKey: stableV4ScheduleKey(profileKey, V4ActionArchive, 0, 0, 0) + "|reason:" + string(reason),
-			Kind:      V4ActionArchive, EndReason: reason,
+			ActionKey: key, Kind: V4ActionArchive,
+			AnchorMessageSeq: anchorMessageSeq,
+			Round:            state.RealMessageRound,
+			EndReason:        reason,
+			DueAt:            &dueAt,
 		}},
 	}
 }
@@ -270,7 +302,9 @@ func stableV4ScheduleKey(profileKey string, kind V4ActionKind, cardMessageSeq in
 // postcondition exists or is required.
 func ApplyV4ArchiveAction(input V4State, action V4PlannedAction) (V4State, error) {
 	if err := validateV4State(input); err != nil || action.Kind != V4ActionArchive ||
-		strings.TrimSpace(action.ActionKey) == "" || !validV4EndReason(action.EndReason) {
+		strings.TrimSpace(action.ActionKey) == "" || action.AnchorMessageSeq < 0 ||
+		action.Round != input.RealMessageRound || action.DueAt == nil || action.DueAt.IsZero() ||
+		!validV4EndReason(action.EndReason) {
 		return V4State{}, ErrInvalidV4StateTransition
 	}
 	state := cloneV4State(input)

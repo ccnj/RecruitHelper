@@ -563,9 +563,23 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 		t.Fatalf("归档前聚合缺少正文锚: aggregate=%+v err=%v", beforeArchive, err)
 	}
 	archiveAt := beforeArchive.State.LastBodyAt.Add(8 * 24 * time.Hour)
+	archiveLocal := archiveAt.In(manager.config.Location)
+	if archiveLocal.Hour() < manager.config.DailyStartHour {
+		archiveAt = time.Date(
+			archiveLocal.Year(),
+			archiveLocal.Month(),
+			archiveLocal.Day(),
+			manager.config.DailyStartHour,
+			archiveLocal.Minute(),
+			archiveLocal.Second(),
+			archiveLocal.Nanosecond(),
+			manager.config.Location,
+		)
+	}
 	h.clock.Add(archiveAt.Sub(h.clock.Now()))
 	archiveDecision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
-		ProfileKey: fixture.profileID, State: beforeArchive.State, Now: h.clock.Now(),
+		ProfileKey: fixture.profileID, State: beforeArchive.State,
+		ProjectedThroughSeq: beforeArchive.ProjectedThroughSeq, Now: h.clock.Now(),
 		Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
 	})
 	if err != nil || archiveDecision.Status != communication.V4ScheduleActionsPlanned ||
@@ -573,17 +587,25 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 		archiveDecision.Actions[0].Kind != communication.V4ActionArchive {
 		t.Fatalf("没有得到七天归档动作: decision=%+v err=%v", archiveDecision, err)
 	}
-	archived, applied, err := h.db.ApplyCommunicationV4ArchiveAction(
-		fixture.profileID,
-		beforeArchive.Revision,
-		archiveDecision.Actions[0],
-		h.clock.Now(),
+	archiveResult, err := h.db.ApplyCommunicationV4ArchiveAction(
+		store.ApplyCommunicationV4ArchiveActionRequest{
+			ProfileID:                   fixture.profileID,
+			ConversationRef:             fixture.conversationRef,
+			ExpectedRevision:            beforeArchive.Revision,
+			ExpectedProjectedThroughSeq: beforeArchive.ProjectedThroughSeq,
+			Action:                      archiveDecision.Actions[0],
+			EvaluatedAt:                 h.clock.Now(),
+			AppliedAt:                   h.clock.Now(),
+		},
 	)
-	if err != nil || !applied || archived.State.MainStatus != communication.V4StatusEnded ||
-		archived.State.ColdPromptRemaining != 0 || archived.State.ColdWechatRemaining != 0 {
-		t.Fatalf("归档前置没有收敛: aggregate=%+v applied=%v err=%v",
-			archived, applied, err)
+	if err != nil || archiveResult == nil || !archiveResult.Applied ||
+		archiveResult.Aggregate.State.MainStatus != communication.V4StatusEnded ||
+		archiveResult.Aggregate.State.ColdPromptRemaining != 0 ||
+		archiveResult.Aggregate.State.ColdWechatRemaining != 0 {
+		t.Fatalf("归档前置没有收敛: result=%+v err=%v",
+			archiveResult, err)
 	}
+	archived := archiveResult.Aggregate
 	archivedRevision := archived.Revision
 
 	if err := manager.EnableToday(h.key); err != nil {
@@ -689,9 +711,11 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 		}
 	}
 	replayed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
-	if err != nil || replayed.Revision != revision ||
+	if err != nil || replayed.Revision != revision+1 ||
+		replayed.State.MainStatus != communication.V4StatusEnded ||
+		replayed.State.EndReason != communication.V4EndFallback ||
 		len(advice.requests) != 4 || hand.commandCount() != 2 {
-		t.Fatalf("唤醒后重启/重复巡检发生增生: aggregate=%+v advice=%d sends=%d err=%v",
+		t.Fatalf("唤醒后到期的第二次归档没有唯一收敛: aggregate=%+v advice=%d sends=%d err=%v",
 			replayed, len(advice.requests), hand.commandCount(), err)
 	}
 }

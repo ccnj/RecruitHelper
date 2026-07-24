@@ -601,23 +601,18 @@ func TestCommunicationV4ArchiveSupersedesAdviceReadyBeforeEffect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	archiveAction := communication.V4PlannedAction{
-		ActionKey: fixture.ProfileID + "|fixture|archive-before-effect",
-		Kind:      communication.V4ActionArchive,
-		EndReason: communication.V4EndFallback,
-	}
-	archived, applied, err := s.ApplyCommunicationV4ArchiveAction(
-		fixture.ProfileID,
-		beforeArchive.Revision,
-		archiveAction,
-		time.Now().Add(8*24*time.Hour),
+	archiveAt := beforeArchive.State.LastBodyAt.Add(8 * 24 * time.Hour)
+	archiveReq := communicationV4ArchiveRequestForTest(
+		t, s, *beforeArchive, archiveAt, true,
 	)
-	if err != nil || !applied ||
-		archived.State.MainStatus != communication.V4StatusEnded ||
-		archived.AutomationStatus != ProfileCommunicationAutomationActive {
-		t.Fatalf("归档没有保持档案可唤醒: aggregate=%+v applied=%v err=%v",
-			archived, applied, err)
+	archiveResult, err := s.ApplyCommunicationV4ArchiveAction(archiveReq)
+	if err != nil || archiveResult == nil || !archiveResult.Applied ||
+		archiveResult.Aggregate.State.MainStatus != communication.V4StatusEnded ||
+		archiveResult.Aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("归档没有保持档案可唤醒: result=%+v err=%v",
+			archiveResult, err)
 	}
+	archived := archiveResult.Aggregate
 	turn, turnErr := s.DialogueTurnByID(frozen.Turn.TurnID)
 	storedAction, actionErr := s.CommunicationActionByTurn(frozen.Turn.TurnID)
 	if turnErr != nil || turn == nil || turn.Status != DialogueTurnSuperseded ||
@@ -634,15 +629,10 @@ func TestCommunicationV4ArchiveSupersedesAdviceReadyBeforeEffect(t *testing.T) {
 		t.Fatalf("已作废旧轮不得再转人工或恢复执行: current=%v err=%v", current, err)
 	}
 
-	replayed, applied, err := s.ApplyCommunicationV4ArchiveAction(
-		fixture.ProfileID,
-		beforeArchive.Revision,
-		archiveAction,
-		time.Now().Add(9*24*time.Hour),
-	)
-	if err != nil || applied || replayed.Revision != archived.Revision {
-		t.Fatalf("归档重放发生增生: aggregate=%+v applied=%v err=%v",
-			replayed, applied, err)
+	replayed, err := s.ApplyCommunicationV4ArchiveAction(archiveReq)
+	if err != nil || replayed.Applied || replayed.Aggregate.Revision != archived.Revision {
+		t.Fatalf("归档重放发生增生: result=%+v err=%v",
+			replayed, err)
 	}
 }
 
