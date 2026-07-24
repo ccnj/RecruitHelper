@@ -49,6 +49,16 @@ type Manager struct {
 	actor    Actor
 	clock    Clock
 	location *time.Location
+	// advanceMu prevents two background ticks from running the same pipeline
+	// phase concurrently. It is deliberately separate from mu: Pause and the
+	// shared member gate must remain able to close while one candidate's AI
+	// call or hand command is naturally finishing.
+	advanceMu sync.Mutex
+	// confirmationProjection is the sole source for the exact selectable set
+	// accepted by ConfirmAll. Production always uses Store.AppConfirmation;
+	// keeping it as a function also makes the control law testable without
+	// manufacturing candidate PII fixtures.
+	confirmationProjection func(string) (*store.AppConfirmationProjection, error)
 
 	// Control transitions and the per-member gate share this exact mutex. A
 	// resume cannot expose StatusRunning to a member loop until actor enabling
@@ -68,6 +78,7 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 	}
 	manager := &Manager{
 		store: db, actor: actor, clock: config.Clock, location: config.Location,
+		confirmationProjection: db.AppConfirmation,
 	}
 	if installer, ok := actor.(memberGateInstaller); ok {
 		installer.SetWorkflowMemberGate(manager.MayStartNextWorkflowMember)
