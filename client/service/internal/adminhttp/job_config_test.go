@@ -116,6 +116,69 @@ func TestJobConfigCurrentSyncIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestJobConfigCurrentSyncFailureKeepsPreviousHead(t *testing.T) {
+	var calls int
+	backendPayload := syntheticCurrentJobConfig(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(backendPayload)
+			return
+		}
+		http.Error(w, "upstream fixture", http.StatusServiceUnavailable)
+	}))
+	defer backend.Close()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	configStore, err := jobconfig.NewConfigStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configStore.Save(jobconfig.Config{
+		BaseURL: backend.URL, MachineID: adminTestMachineID, LicenseToken: "token-private",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
+		return adminTestMachineID, nil
+	})
+	api := New(st, newFakeAdminHub(), nil, nil, nil, "").SetJobConfigSource(source)
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	syncOnce := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/admin/job-config/sync-current",
+			strings.NewReader(`{}`),
+		)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		return response
+	}
+	if response := syncOnce(); response.Code != http.StatusOK {
+		t.Fatalf("首次同步失败: code=%d body=%s", response.Code, response.Body.String())
+	}
+	before, err := st.CurrentLegacyJobAIContextByBackendJobID("19")
+	if err != nil || before == nil {
+		t.Fatalf("首次同步未建立 head: current=%+v err=%v", before, err)
+	}
+	if response := syncOnce(); response.Code != http.StatusBadGateway {
+		t.Fatalf("上游失败未传播: code=%d body=%s", response.Code, response.Body.String())
+	}
+	after, err := st.CurrentLegacyJobAIContextByBackendJobID("19")
+	if err != nil || after == nil || after.RevisionHash != before.RevisionHash {
+		t.Fatalf("失败同步推进或丢失了既有 head: before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
 func TestLegacyActivationBindsThenSynchronizesCurrentJob(t *testing.T) {
 	const inviteCode = "invite-private"
 	const token = "token-new-private"

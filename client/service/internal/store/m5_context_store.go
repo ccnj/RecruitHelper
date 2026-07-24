@@ -18,12 +18,14 @@ var (
 	ErrJobAIContextRevisionInvalid     = errors.New("职位 AI 上下文 revision 无效")
 	ErrJobAIContextRevisionConflict    = errors.New("同一职位 AI 上下文 revision 的材料冲突")
 	ErrJobAIContextRevisionNotFound    = errors.New("职位 AI 上下文 revision 不存在")
+	ErrJobAIContextHeadInvalid         = errors.New("职位 AI 上下文 current head 无效")
 	ErrProfileAIContextBindingInvalid  = errors.New("职位 AI 上下文绑定无效")
 	ErrProfileAIContextBindingConflict = errors.New("职位 AI 上下文绑定冲突")
 	ErrM5TrialProfileMismatch          = errors.New("目标档案不是当前 M5 试运行档案")
 )
 
 const profileAIContextReboundReason = "contextRebound"
+const legacyJobConfigSourceKind = "legacyJobConfig"
 
 const (
 	sourcingProfileAIContextBindingDomain = "profile-ai-context-sourcing-v1|"
@@ -90,7 +92,128 @@ func (s *Store) SaveJobAIContextRevisions(inputs []m5ai.ContextRevision) ([]JobA
 	return revisions, nil
 }
 
+// SaveCurrentLegacyJobAIContext 原子保存旧后台 /client/job-config 的不可变
+// revision，并推进该 Job.ID 的最近成功同步 head。该接口只接受能唯一确定一个
+// 当前职位的 legacyJobConfig 输入；localImport 和复数响应都不能推进 head。
+func (s *Store) SaveCurrentLegacyJobAIContext(
+	inputs []m5ai.ContextRevision,
+	syncedAt time.Time,
+) ([]JobAIContextRevision, error) {
+	if len(inputs) != 1 || syncedAt.IsZero() {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	input := inputs[0]
+	if input.SourceKind != legacyJobConfigSourceKind || strings.TrimSpace(input.SourceJobRef) == "" {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	wanted, err := jobAIContextRevisionsFromInputs(inputs)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]saveJobAIContextRevisionResult, len(wanted))
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		for index := range wanted {
+			persisted, created, saveErr := saveJobAIContextRevisionTx(tx, wanted[index])
+			if saveErr != nil {
+				return saveErr
+			}
+			results[index] = saveJobAIContextRevisionResult{Revision: persisted, Created: created}
+		}
+		revision := results[0].Revision
+		var head JobAIContextHead
+		headErr := tx.First(
+			&head,
+			"source_kind = ? AND source_job_ref = ?",
+			legacyJobConfigSourceKind,
+			revision.SourceJobRef,
+		).Error
+		switch {
+		case errors.Is(headErr, gorm.ErrRecordNotFound):
+			head = JobAIContextHead{
+				SourceKind: legacyJobConfigSourceKind, SourceJobRef: revision.SourceJobRef,
+				ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
+				LastSyncedAt: syncedAt,
+			}
+			return tx.Create(&head).Error
+		case headErr != nil:
+			return headErr
+		default:
+			return tx.Model(&head).Updates(map[string]any{
+				"context_id": revision.ContextID, "revision_hash": revision.RevisionHash,
+				"last_synced_at": syncedAt, "updated_at": syncedAt,
+			}).Error
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	revisions := make([]JobAIContextRevision, len(results))
+	for index := range results {
+		revisions[index] = results[index].Revision
+	}
+	return revisions, nil
+}
+
+// CurrentLegacyJobAIContextByBackendJobID 返回旧后台职位最近一次成功同步的
+// revision。没有成功同步过时返回 nil；head 损坏或串到其他职位时 fail-closed。
+func (s *Store) CurrentLegacyJobAIContextByBackendJobID(
+	backendJobID string,
+) (*JobAIContextRevision, error) {
+	backendJobID = strings.TrimSpace(backendJobID)
+	if backendJobID == "" {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	var head JobAIContextHead
+	err := s.db.First(
+		&head,
+		"source_kind = ? AND source_job_ref = ?",
+		legacyJobConfigSourceKind,
+		backendJobID,
+	).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var revision JobAIContextRevision
+	if err := s.db.First(&revision, "revision_hash = ?", head.RevisionHash).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrJobAIContextRevisionNotFound
+		}
+		return nil, err
+	}
+	if revision.SourceKind != legacyJobConfigSourceKind ||
+		revision.SourceJobRef != backendJobID ||
+		revision.ContextID != head.ContextID {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	return &revision, nil
+}
+
 func (s *Store) saveJobAIContextRevisions(inputs []m5ai.ContextRevision) ([]saveJobAIContextRevisionResult, error) {
+	wanted, err := jobAIContextRevisionsFromInputs(inputs)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]saveJobAIContextRevisionResult, len(wanted))
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		for index := range wanted {
+			persisted, created, err := saveJobAIContextRevisionTx(tx, wanted[index])
+			if err != nil {
+				return err
+			}
+			results[index] = saveJobAIContextRevisionResult{Revision: persisted, Created: created}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func jobAIContextRevisionsFromInputs(inputs []m5ai.ContextRevision) ([]JobAIContextRevision, error) {
 	if len(inputs) == 0 {
 		return nil, ErrJobAIContextRevisionInvalid
 	}
@@ -112,21 +235,7 @@ func (s *Store) saveJobAIContextRevisions(inputs []m5ai.ContextRevision) ([]save
 			CreatedAt:     input.CreatedAt,
 		}
 	}
-	results := make([]saveJobAIContextRevisionResult, len(wanted))
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		for index := range wanted {
-			persisted, created, err := saveJobAIContextRevisionTx(tx, wanted[index])
-			if err != nil {
-				return err
-			}
-			results[index] = saveJobAIContextRevisionResult{Revision: persisted, Created: created}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return results, nil
+	return wanted, nil
 }
 
 func saveJobAIContextRevisionTx(tx *gorm.DB, wanted JobAIContextRevision) (JobAIContextRevision, bool, error) {

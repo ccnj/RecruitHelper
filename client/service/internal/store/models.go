@@ -611,6 +611,19 @@ type JobAIContextRevision struct {
 	CreatedAt     time.Time                     `gorm:"not null"`
 }
 
+// JobAIContextHead 记录某个配置来源职位最近一次成功同步后的当前 revision。
+// revision 本身继续不可变；head 只是可推进的当前指针，不能由 revision.CreatedAt
+// 反推，因为 A→B→A 会复用最初那条 A revision。
+type JobAIContextHead struct {
+	SourceKind   string `gorm:"primaryKey"`
+	SourceJobRef string `gorm:"primaryKey"`
+	ContextID    string `gorm:"not null;index"`
+	RevisionHash string `gorm:"not null;index"`
+	LastSyncedAt time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type ProfileAIContextBindingStatus string
 
 const (

@@ -91,19 +91,20 @@ type jobConfigSyncFailure struct {
 }
 
 func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jobConfigSyncFailure) {
+	syncedAt := time.Now()
 	raw, err := a.jobConfigSource.FetchCurrent(ctx)
 	if err != nil {
 		return nil, &jobConfigSyncFailure{
 			status: http.StatusBadGateway, message: "旧后台当前职位配置读取失败",
 		}
 	}
-	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, time.Now())
+	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, syncedAt)
 	if err != nil {
 		return nil, &jobConfigSyncFailure{
 			status: http.StatusConflict, message: "旧后台当前职位配置与本地执行约束不兼容",
 		}
 	}
-	stored, err := a.st.SaveJobAIContextRevisions(revisions)
+	stored, err := a.st.SaveCurrentLegacyJobAIContext(revisions, syncedAt)
 	if err != nil {
 		return nil, &jobConfigSyncFailure{
 			status: http.StatusConflict, message: "职位 AI 上下文未能原子导入",

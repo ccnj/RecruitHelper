@@ -73,6 +73,7 @@ func Open(dataDir string) (*Store, error) {
 		&CandidateResumeSnapshot{},
 		&M5TrialSelection{},
 		&JobAIContextRevision{},
+		&JobAIContextHead{},
 		&ProfileAIContextBinding{},
 		&DialogueTurn{},
 		&AIInvocation{},

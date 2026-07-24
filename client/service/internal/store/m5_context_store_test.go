@@ -155,6 +155,121 @@ func TestJobAIContextRevisionBatchIsAtomicOnLaterConflict(t *testing.T) {
 	}
 }
 
+func TestLegacyJobConfigHeadTracksSuccessfulSyncOrderIncludingABA(t *testing.T) {
+	s := openTest(t)
+	firstAt := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	first := contextRevisionFixture("legacy-context-19", "legacy-revision-a", firstAt)
+	first.SourceKind = legacyJobConfigSourceKind
+	first.SourceJobRef = "19"
+
+	second := first
+	second.RevisionHash = "legacy-revision-b"
+	second.CreatedAt = firstAt.Add(time.Hour)
+	second.SourcePackage.Documents = append(
+		[]m5ai.JobConfigDocument(nil),
+		first.SourcePackage.Documents...,
+	)
+	second.Communication.ReplyPrompt += "-b"
+	for index := range second.SourcePackage.Documents {
+		if second.SourcePackage.Documents[index].DocType == "多轮沟通" {
+			second.SourcePackage.Documents[index].Content = second.Communication.ReplyPrompt
+		}
+	}
+
+	if _, err := s.SaveCurrentLegacyJobAIContext([]m5ai.ContextRevision{first}, firstAt); err != nil {
+		t.Fatalf("首次同步 A 失败: %v", err)
+	}
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{second},
+		firstAt.Add(2*time.Hour),
+	); err != nil {
+		t.Fatalf("同步 B 失败: %v", err)
+	}
+	thirdAt := firstAt.Add(3 * time.Hour)
+	if _, err := s.SaveCurrentLegacyJobAIContext([]m5ai.ContextRevision{first}, thirdAt); err != nil {
+		t.Fatalf("再次同步 A 失败: %v", err)
+	}
+
+	current, err := s.CurrentLegacyJobAIContextByBackendJobID("19")
+	if err != nil || current == nil || current.RevisionHash != first.RevisionHash ||
+		!current.CreatedAt.Equal(firstAt) {
+		t.Fatalf("A→B→A 未回到不可变 A revision: current=%+v err=%v", current, err)
+	}
+	var head JobAIContextHead
+	if err := s.db.First(
+		&head,
+		"source_kind = ? AND source_job_ref = ?",
+		legacyJobConfigSourceKind,
+		"19",
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if head.RevisionHash != first.RevisionHash || !head.LastSyncedAt.Equal(thirdAt) {
+		t.Fatalf("head 未记录第三次成功同步: %+v", head)
+	}
+	var revisionCount int64
+	if err := s.db.Model(&JobAIContextRevision{}).Count(&revisionCount).Error; err != nil ||
+		revisionCount != 2 {
+		t.Fatalf("A→B→A 应只保留两条不可变 revision: count=%d err=%v", revisionCount, err)
+	}
+}
+
+func TestLocalImportDoesNotAdvanceLegacyJobConfigHead(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	legacy := contextRevisionFixture("legacy-context-19", "legacy-current", at)
+	legacy.SourceKind = legacyJobConfigSourceKind
+	legacy.SourceJobRef = "19"
+	if _, err := s.SaveCurrentLegacyJobAIContext([]m5ai.ContextRevision{legacy}, at); err != nil {
+		t.Fatal(err)
+	}
+
+	local := contextRevisionFixture("local-context-19", "local-newer", at.Add(time.Hour))
+	local.SourceJobRef = "19"
+	if _, _, err := s.SaveJobAIContextRevision(local); err != nil {
+		t.Fatalf("local import 保存失败: %v", err)
+	}
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{local},
+		at.Add(2*time.Hour),
+	); !errors.Is(err, ErrJobAIContextHeadInvalid) {
+		t.Fatalf("local import 被允许推进 legacy head: %v", err)
+	}
+
+	current, err := s.CurrentLegacyJobAIContextByBackendJobID("19")
+	if err != nil || current == nil || current.RevisionHash != legacy.RevisionHash {
+		t.Fatalf("local import 改写了 legacy head: current=%+v err=%v", current, err)
+	}
+}
+
+func TestLegacyJobConfigHeadRejectsAmbiguousCurrentResponseBeforeSaving(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+	first := contextRevisionFixture("legacy-context-19", "legacy-ambiguous-19", at)
+	first.SourceKind = legacyJobConfigSourceKind
+	first.SourceJobRef = "19"
+	second := contextRevisionFixture("legacy-context-20", "legacy-ambiguous-20", at)
+	second.SourceKind = legacyJobConfigSourceKind
+	second.SourceJobRef = "20"
+
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{first, second},
+		at,
+	); !errors.Is(err, ErrJobAIContextHeadInvalid) {
+		t.Fatalf("复数 current 响应未拒绝: %v", err)
+	}
+	var revisionCount, headCount int64
+	if err := s.db.Model(&JobAIContextRevision{}).Count(&revisionCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&JobAIContextHead{}).Count(&headCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if revisionCount != 0 || headCount != 0 {
+		t.Fatalf("复数响应在失败前留下数据: revisions=%d heads=%d", revisionCount, headCount)
+	}
+}
+
 func TestProfileAIContextBindingRebindsWithoutDeletingHistory(t *testing.T) {
 	s := openTest(t)
 	fixture := seedResumeStoreFixture(t, s, "profile-context-binding")
