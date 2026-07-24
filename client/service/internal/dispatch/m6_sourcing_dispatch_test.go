@@ -35,6 +35,22 @@ func sourcingIdentityDispatchRequest(name string, args json.RawMessage) Dispatch
 	}
 }
 
+func sourcingDispatchFilters() protocol.CandidateSourcingFilters {
+	return protocol.CandidateSourcingFilters{
+		Age:          protocol.CandidateSourcingAgeFilter{Mode: protocol.SourcingAgeModeRange, MinAge: 25, MaxAge: 45},
+		ActiveWindow: protocol.SourcingActiveWindowDays3,
+		CareerStatuses: []protocol.SourcingCareerStatus{
+			protocol.SourcingCareerStatusEmployedLooking,
+		},
+		Educations: []protocol.SourcingEducation{
+			protocol.SourcingEducationAssociate,
+			protocol.SourcingEducationBachelor,
+		},
+		Gender:        protocol.SourcingGenderAny,
+		ExcludeViewed: true,
+	}
+}
+
 func TestSourcingResumeContractMismatchBlocksBeforeWAL(t *testing.T) {
 	d, st, sender := newDisp(t)
 	sender.up("hand-sourcing-dispatch", "boot-sourcing-dispatch")
@@ -155,5 +171,74 @@ func TestSourcingWindowDuplicateIdentityBecomesFixedFailedResult(t *testing.T) {
 	if cmd == nil || cmd.Status != store.CmdFailed || cmd.ErrorCode != string(protocol.ErrCodeInternalHand) {
 		raw, _ := json.Marshal(cmd)
 		t.Fatalf("重复身份窗口未被固定失败: %s", raw)
+	}
+}
+
+func TestSourcingPositionAndFilterResultBindingsBecomeFixedFailed(t *testing.T) {
+	tests := []struct {
+		name      string
+		primitive string
+		args      any
+		data      any
+	}{
+		{
+			name:      "职位选择标题漂移",
+			primitive: protocol.PrimCandidateSelectSourcingPosition,
+			args: protocol.CandidateSelectSourcingPositionArgs{
+				PositionTitle: "后端工程师",
+			},
+			data: protocol.CandidateSelectSourcingPositionData{
+				PositionRef: "position-1", PositionTitle: "前端工程师", ObservedAt: time.Now().UnixMilli(),
+			},
+		},
+		{
+			name:      "筛选回读漂移",
+			primitive: protocol.PrimCandidateApplySourcingFilters,
+			args: protocol.CandidateApplySourcingFiltersArgs{
+				PositionRef: "position-1", PositionTitle: "后端工程师",
+				Filters: sourcingDispatchFilters(),
+			},
+			data: protocol.CandidateApplySourcingFiltersData{
+				PositionRef: "position-1", PositionTitle: "后端工程师",
+				Filters: func() protocol.CandidateSourcingFilters {
+					filters := sourcingDispatchFilters()
+					filters.ExcludeViewed = false
+					return filters
+				}(),
+				ObservedAt: time.Now().UnixMilli(),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, st, sender := newDisp(t)
+			sender.up("hand-sourcing-dispatch", "boot-sourcing-dispatch")
+			sender.negotiate("hand-sourcing-dispatch", []string{test.primitive + "@1"}, allM2Features)
+			args, err := protocol.Encode(test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msgID, err := d.DispatchStructured(sourcingIdentityDispatchRequest(test.primitive, args))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := protocol.Encode(test.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome, _, err := d.applyResultMessage(
+				"hand-sourcing-dispatch",
+				"result-"+msgID,
+				protocol.ResultBody{Ref: msgID, Status: protocol.ResultStatusOk, Data: data},
+			); err != nil || outcome != ocDone {
+				t.Fatalf("错绑结果终局化失败: outcome=%v err=%v", outcome, err)
+			}
+			cmd, err := st.CmdByMsgID(msgID)
+			if err != nil || cmd == nil || cmd.Status != store.CmdFailed ||
+				cmd.ErrorCode != string(protocol.ErrCodeInternalHand) {
+				raw, _ := json.Marshal(cmd)
+				t.Fatalf("错绑结果未固定失败: cmd=%s err=%v", raw, err)
+			}
+		})
 	}
 }

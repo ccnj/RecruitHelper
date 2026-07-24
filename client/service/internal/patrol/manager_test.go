@@ -13,6 +13,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/client/service/internal/testfixture"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -170,6 +171,10 @@ func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 		{DocType: "多轮沟通", Content: "reply"},
 		{DocType: "意向判断", Content: "intent"},
 		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "候选人筛选", Content: `{"minScore":5}`},
+		{DocType: "打分", Content: "请评分 {resume_json}"},
+		{DocType: "招呼语", Content: `{"prompt":"状态={career_state};简历={resume_summary_json}"}`},
+		{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
 	}
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	revision := m5ai.ContextRevision{
@@ -239,6 +244,15 @@ func defaultHandler(request RunRequest) (any, error) {
 		return protocol.CandidateSelectSourcingPositionData{
 			PositionRef: "position-fixture", PositionTitle: "synthetic-position",
 			ObservedAt: time.Now().UnixMilli(),
+		}, nil
+	case protocol.PrimCandidateApplySourcingFilters:
+		var args protocol.CandidateApplySourcingFiltersArgs
+		if err := json.Unmarshal(request.Args, &args); err != nil {
+			return nil, err
+		}
+		return protocol.CandidateApplySourcingFiltersData{
+			PositionRef: args.PositionRef, PositionTitle: args.PositionTitle,
+			Filters: args.Filters, ObservedAt: time.Now().UnixMilli(),
 		}, nil
 	case protocol.PrimChatReadList:
 		return protocol.ChatReadListData{Sessions: []protocol.ConversationSummary{}, Complete: true}, nil

@@ -3,9 +3,12 @@ package patrol
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/textcanon"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
 )
@@ -15,6 +18,7 @@ const sourcingWindowNoProgressLimit = 3
 const (
 	sourcingBlockInvalidState       = "invalidBatchState"
 	sourcingBlockPositionSelect     = "positionSelectFailed"
+	sourcingBlockFiltersApply       = "filtersApplyFailed"
 	sourcingBlockWindowReadFailed   = "windowReadFailed"
 	sourcingBlockPositionBindFailed = "positionBindFailed"
 	sourcingBlockPositionChanged    = "positionChanged"
@@ -64,23 +68,53 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if revisionErr != nil || revision == nil || batch.BackendJobID == nil ||
 			strings.TrimSpace(*batch.BackendJobID) == "" ||
 			strings.TrimSpace(*batch.BackendJobID) != strings.TrimSpace(revision.SourceJobRef) ||
-			strings.TrimSpace(revision.DisplayName) == "" {
+			textcanon.Normalize(revision.DisplayName) == "" {
 			return a.failSourcingBatch(
 				batch.BatchID, sourcingBlockPositionSelect,
 				errors.Join(store.ErrSourcingBinding, revisionErr),
 			)
 		}
+		view, viewErr := m5ai.DeriveSourcingView(revision.SourcePackage)
+		if viewErr != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, viewErr)
+		}
+		positionTitle := textcanon.Normalize(revision.DisplayName)
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}
-		if _, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateSelectSourcingPositionData](
+		selected, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateSelectSourcingPositionData](
 			ctx, a, protocol.PrimCandidateSelectSourcingPosition,
-			protocol.CandidateSelectSourcingPositionArgs{PositionTitle: revision.DisplayName},
-		); err != nil {
+			protocol.CandidateSelectSourcingPositionArgs{PositionTitle: positionTitle},
+		)
+		if err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+		}
+		if selected.PositionTitle != positionTitle {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, store.ErrSourcingBinding)
 		}
 		if err := a.waitSourcingInteractionPace(ctx); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+		}
+		if err := a.setStage("applyingSourcingFilters"); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, err)
+		}
+		filterArgs := protocol.CandidateApplySourcingFiltersArgs{
+			PositionRef: selected.PositionRef, PositionTitle: selected.PositionTitle,
+			Filters: view.JobFilters,
+		}
+		applied, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateApplySourcingFiltersData](
+			ctx, a, protocol.PrimCandidateApplySourcingFilters, filterArgs,
+		)
+		if err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, err)
+		}
+		if applied.PositionRef != selected.PositionRef ||
+			applied.PositionTitle != positionTitle ||
+			!reflect.DeepEqual(applied.Filters, view.JobFilters) {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, store.ErrSourcingBinding)
+		}
+		if err := a.waitSourcingInteractionPace(ctx); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, err)
 		}
 		if err := a.setStage("bindingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionBindFailed, err)
@@ -92,6 +126,10 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		)
 		if err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockWindowReadFailed, err)
+		}
+		if window.PositionRef != selected.PositionRef || window.PositionTitle == nil ||
+			*window.PositionTitle != positionTitle {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionBindFailed, store.ErrSourcingBinding)
 		}
 		batch, err = a.manager.store.BindSourcingBatchPosition(store.BindSourcingBatchPositionRequest{
 			BatchID: batch.BatchID, LogicalDispatchID: windowLogicalID,

@@ -177,6 +177,18 @@ func (s *sourcingGreetingSendAdminSender) SendEnvelope(handID string, env protoc
 			PositionRef: s.positionRef, PositionTitle: args.PositionTitle,
 			ObservedAt: time.Now().UnixMilli(),
 		}
+	case protocol.PrimCandidateApplySourcingFilters:
+		var args protocol.CandidateApplySourcingFiltersArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		if args.PositionRef != s.positionRef || args.PositionTitle != "admin-position-secret" {
+			return fmt.Errorf("管理状态 fixture 收到错误筛选职位")
+		}
+		data = protocol.CandidateApplySourcingFiltersData{
+			PositionRef: args.PositionRef, PositionTitle: args.PositionTitle,
+			Filters: args.Filters, ObservedAt: time.Now().UnixMilli(),
+		}
 	case protocol.PrimCandidateReadSourcingWindow:
 		var args protocol.CandidateReadSourcingWindowArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -232,6 +244,7 @@ func (*sourcingGreetingSendAdminSender) HandNegotiation(string) ([]string, []str
 	return []string{
 			protocol.PrimProbePlatform + "@1",
 			protocol.PrimCandidateSelectSourcingPosition + "@1",
+			protocol.PrimCandidateApplySourcingFilters + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
 			protocol.PrimCandidateReadSourcingTargetResume + "@1",
 		}, []string{

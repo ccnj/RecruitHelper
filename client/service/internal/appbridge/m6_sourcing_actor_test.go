@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
@@ -97,6 +98,7 @@ type sourcingActorSender struct {
 	mu         sync.Mutex
 	dispatcher *dispatch.Dispatcher
 	order      []string
+	filterArgs []protocol.CandidateApplySourcingFiltersArgs
 	moves      []protocol.SourcingWindowMove
 	targets    []string
 	windows    [][]string
@@ -106,6 +108,7 @@ type sourcingActorSender struct {
 
 	targetPositionOverride string
 	unreadableTargets      map[string]bool
+	filterFailures         int
 	online                 bool
 	holdGreeting           bool
 	greetings              []sourcingGreetingCommand
@@ -146,6 +149,31 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 		data = protocol.CandidateSelectSourcingPositionData{
 			PositionRef: s.position, PositionTitle: args.PositionTitle,
 			ObservedAt: time.Now().UnixMilli(),
+		}
+	case protocol.PrimCandidateApplySourcingFilters:
+		var args protocol.CandidateApplySourcingFiltersArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		s.filterArgs = append(s.filterArgs, args)
+		if s.filterFailures > 0 {
+			s.filterFailures--
+			s.dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
+			s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
+				Ref: env.MsgID, Status: protocol.ResultStatusFailed, ExecMs: 1,
+				Error: &protocol.ErrorBody{
+					Code: protocol.ErrCodeElementUnresolved, Message: "筛选面暂不可读",
+					Retryable: protocol.RetryableManualOnly, SideEffect: protocol.SideEffectNone,
+				},
+			})
+			return nil
+		}
+		if args.PositionRef != s.position || args.PositionTitle != "合成职位" {
+			return fmt.Errorf("fixture 收到错误筛选职位: %+v", args)
+		}
+		data = protocol.CandidateApplySourcingFiltersData{
+			PositionRef: args.PositionRef, PositionTitle: args.PositionTitle,
+			Filters: args.Filters, ObservedAt: time.Now().UnixMilli(),
 		}
 	case protocol.PrimCandidateReadSourcingWindow:
 		var args protocol.CandidateReadSourcingWindowArgs
@@ -242,6 +270,7 @@ func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
 			protocol.PrimCandidateSelectSourcingPosition + "@1",
+			protocol.PrimCandidateApplySourcingFilters + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
 			protocol.PrimCandidateReadSourcingTargetResume + "@1",
 			protocol.PrimChatSendGreeting + "@1",
@@ -437,6 +466,36 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
 		t.Fatalf("正式批采单轮失败: result=%+v err=%v", result, err)
 	}
+	var setupOrder []string
+	for _, name := range h.sender.order {
+		switch name {
+		case protocol.PrimCandidateSelectSourcingPosition,
+			protocol.PrimCandidateApplySourcingFilters,
+			protocol.PrimCandidateReadSourcingWindow:
+			setupOrder = append(setupOrder, name)
+		}
+		if len(setupOrder) == 3 {
+			break
+		}
+	}
+	if want := []string{
+		protocol.PrimCandidateSelectSourcingPosition,
+		protocol.PrimCandidateApplySourcingFilters,
+		protocol.PrimCandidateReadSourcingWindow,
+	}; !reflect.DeepEqual(setupOrder, want) {
+		t.Fatalf("采集准备顺序错误: got=%v want=%v order=%v", setupOrder, want, h.sender.order)
+	}
+	view, err := m5ai.DeriveSourcingView(h.revision.SourcePackage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.sender.filterArgs) != 1 ||
+		h.sender.filterArgs[0].PositionRef != h.position ||
+		h.sender.filterArgs[0].PositionTitle != h.revision.DisplayName ||
+		!reflect.DeepEqual(h.sender.filterArgs[0].Filters, view.JobFilters) {
+		t.Fatalf("筛选命令未绑定同一职位 revision: args=%+v view=%+v",
+			h.sender.filterArgs, view.JobFilters)
+	}
 	if got, want := h.sender.moves, []protocol.SourcingWindowMove{
 		protocol.SourcingWindowMoveCurrent, protocol.SourcingWindowMoveNext,
 	}; fmt.Sprint(got) != fmt.Sprint(want) {
@@ -451,6 +510,12 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	progresses, err := h.store.SourcingBatchProgressByID(started.BatchID)
 	if err != nil || progresses.Status != store.SourcingBatchCompleted || progresses.CapturedCount != 3 || progresses.RemainingCount != 0 {
 		t.Fatalf("批次没有原子达标: progress=%+v err=%v", progresses, err)
+	}
+	completedBatch, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || completedBatch == nil || completedBatch.PositionRef == nil ||
+		*completedBatch.PositionRef != h.position || completedBatch.PositionTitle == nil ||
+		*completedBatch.PositionTitle != h.revision.DisplayName {
+		t.Fatalf("筛选确认后的首窗未形成职位绑定: batch=%+v err=%v", completedBatch, err)
 	}
 	account, err := h.store.AccountByKey(h.key)
 	if err != nil || account == nil || account.StoppedAt == nil || account.PausedReason != patrol.PauseSourcingTargetReached {
@@ -470,6 +535,65 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	before := len(h.sender.order)
 	if second, err := h.manager.Tick(context.Background()); err != nil || len(second.Rounds) != 0 || len(h.sender.order) != before {
 		t.Fatalf("达标后仍继续读取: result=%+v err=%v order=%v", second, err, h.sender.order)
+	}
+}
+
+func TestFormalSourcingFilterFailureStaysUnboundAndResumeRepeatsPreparation(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	h.sender.filterFailures = 1
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
+	}
+	first, err := h.manager.Tick(context.Background())
+	if err != nil || len(first.Rounds) != 1 || first.Rounds[0].Err == nil {
+		t.Fatalf("筛选失败未响亮终止本轮: result=%+v err=%v", first, err)
+	}
+	blocked, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || blocked == nil || blocked.Status != store.SourcingBatchBlocked ||
+		blocked.Reason != "filtersApplyFailed" || blocked.PositionRef != nil ||
+		blocked.PositionTitle != nil || len(h.sender.moves) != 0 || len(h.sender.targets) != 0 {
+		t.Fatalf("筛选失败后批次越过绑定边界: batch=%+v moves=%v targets=%v err=%v",
+			blocked, h.sender.moves, h.sender.targets, err)
+	}
+	account, err := h.store.AccountByKey(h.key)
+	if err != nil || account == nil || account.PausedReason != patrol.PauseHandManualReview {
+		t.Fatalf("筛选失败未沿既有 manualOnly 路径暂停账号: account=%+v err=%v", account, err)
+	}
+
+	if _, err := h.store.ResumeSourcingBatch(store.ResumeSourcingBatchRequest{BatchID: started.BatchID}); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.now = h.clock.now.Add(time.Millisecond)
+	if err := h.manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	second, err := h.manager.Tick(context.Background())
+	if err != nil || len(second.Rounds) != 1 || second.Rounds[0].Err != nil {
+		t.Fatalf("重新武装后未重做完整准备链: result=%+v err=%v", second, err)
+	}
+	completed, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || completed == nil || completed.Status != store.SourcingBatchCompleted ||
+		completed.PositionRef == nil || *completed.PositionRef != h.position {
+		t.Fatalf("恢复后批次未成功绑定并完成: batch=%+v err=%v", completed, err)
+	}
+	if got, want := h.sender.order, []string{
+		protocol.PrimProbePlatform,
+		protocol.PrimCandidateSelectSourcingPosition,
+		protocol.PrimCandidateApplySourcingFilters,
+		protocol.PrimCandidateSelectSourcingPosition,
+		protocol.PrimCandidateApplySourcingFilters,
+		protocol.PrimCandidateReadSourcingWindow,
+		protocol.PrimCandidateReadSourcingTargetResume,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("恢复没有从职位选择重新执行: got=%v want=%v", got, want)
+	}
+	if len(h.sender.filterArgs) != 2 ||
+		!reflect.DeepEqual(h.sender.filterArgs[0], h.sender.filterArgs[1]) {
+		t.Fatalf("恢复前后筛选目标漂移: %+v", h.sender.filterArgs)
 	}
 }
 

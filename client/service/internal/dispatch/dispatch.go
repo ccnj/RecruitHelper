@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -494,6 +495,30 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = errors.New("简历读取 data 无法解析")
 		} else if data.ConversationRef != args.ConversationRef || data.PlatformUserRef != args.PlatformUserRef {
 			validationErr = errors.New("简历读取 result 的目标引用与原命令不一致")
+		}
+	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateSelectSourcingPosition && res.Status == protocol.ResultStatusOk {
+		var args protocol.CandidateSelectSourcingPositionArgs
+		var data protocol.CandidateSelectSourcingPositionData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = errors.New("采集职位选择 args 无法解析")
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("采集职位选择 data 无法解析")
+		} else if data.PositionTitle != args.PositionTitle {
+			validationErr = errors.New("采集职位选择 result 的职位标题与原命令不一致")
+		}
+	}
+	if validationErr == nil && cmd.Name == protocol.PrimCandidateApplySourcingFilters && res.Status == protocol.ResultStatusOk {
+		var args protocol.CandidateApplySourcingFiltersArgs
+		var data protocol.CandidateApplySourcingFiltersData
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			validationErr = errors.New("采集筛选 args 无法解析")
+		} else if err := json.Unmarshal(res.Data, &data); err != nil {
+			validationErr = errors.New("采集筛选 data 无法解析")
+		} else if data.PositionRef != args.PositionRef ||
+			data.PositionTitle != args.PositionTitle ||
+			!reflect.DeepEqual(data.Filters, args.Filters) {
+			validationErr = errors.New("采集筛选 result 的职位或筛选回读与原命令不一致")
 		}
 	}
 	if validationErr == nil && cmd.Name == protocol.PrimCandidateReadSourcingResume && res.Status == protocol.ResultStatusOk {
