@@ -39,6 +39,7 @@ func (r *m5AutomaticReplyRunner) StartAutomaticReply(
 		ExpectedSession:   req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
 		Platform: req.Platform, AccountRef: req.AccountRef,
 		ConversationRef: req.ConversationRef, Text: req.Text,
+		BypassManualQuiet: req.BypassManualQuiet,
 	})
 	if err != nil {
 		return nil, err
@@ -74,7 +75,8 @@ func (r *m5AutomaticReplyRunner) StartAutomaticCard(
 		ExpectedSession:   req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
 		Platform: req.Platform, AccountRef: req.AccountRef,
 		ConversationRef: req.ConversationRef, Primitive: primitive,
-		Interview: req.Interview,
+		Interview:         req.Interview,
+		BypassManualQuiet: req.BypassManualQuiet,
 	})
 	if err != nil {
 		return nil, err

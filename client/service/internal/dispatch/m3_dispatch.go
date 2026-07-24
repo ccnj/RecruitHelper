@@ -31,6 +31,7 @@ type SendMessageRequest struct {
 	AccountRef        string
 	ConversationRef   string
 	Text              string
+	BypassManualQuiet bool
 }
 
 type SendMessageReceipt struct {
@@ -55,6 +56,7 @@ type SendAutomaticCardRequest struct {
 	ConversationRef   string
 	Primitive         string
 	Interview         *protocol.InterviewDetails
+	BypassManualQuiet bool
 }
 
 // SendMessage 是 chat.sendMessage 唯一产品入口。通用 /admin/cmd 和
@@ -82,6 +84,9 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 		if deriveErr != nil || req.IntentID != expectedIntentID {
 			return nil, store.ErrCommunicationActionInvalid
 		}
+	}
+	if req.BypassManualQuiet && req.AutomaticActionID == "" {
+		return nil, errors.New("静默窗绕过只允许自动沟通动作")
 	}
 	actualText := req.Text
 	if strings.TrimSpace(actualText) == "" {
@@ -195,6 +200,7 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 	}, dispatchOptions{
 		effectIntent: &intent, expectedTailSeq: preparation.Conversation.LastMessageSeq,
 		previousIntentID: req.PreviousIntentID, automaticActionID: req.AutomaticActionID,
+		bypassManualQuiet: req.BypassManualQuiet,
 	})
 	if dispatchErr != nil {
 		var conflict *store.EffectIntentCASConflictError
@@ -447,6 +453,7 @@ func dispatchRequestForPreparedEffect(
 			expectedTailSeq:   preparation.Conversation.LastMessageSeq,
 			previousIntentID:  req.PreviousIntentID,
 			automaticActionID: req.AutomaticActionID,
+			bypassManualQuiet: req.BypassManualQuiet,
 		}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/communication"
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -157,6 +158,112 @@ func TestProcessCurrentConversationOnceBypassesOnlyQuietAndDoesNotAdvanceOtherPr
 			!beforeAccount.NextPatrolAt.Equal(*afterAccount.NextPatrolAt)) {
 		t.Fatalf("显式入口改写了自动巡检时刻: before=%v after=%v",
 			beforeAccount.NextPatrolAt, afterAccount.NextPatrolAt)
+	}
+}
+
+func TestProcessCurrentConversationOnceCarriesQuietBypassIntoAutomaticWAL(
+	t *testing.T,
+) {
+	h := newHarness(t)
+	current := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"current-quiet-wal",
+		"暂时不考虑，谢谢",
+	)
+	quietUntil := h.clock.Now().Add(time.Minute)
+	if err := h.db.MutateAccount(h.key, func(account *store.Account) error {
+		account.ManualQuietUntil = &quietUntil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatIdentifyCurrentConversation:
+			return protocol.ChatIdentifyCurrentConversationData{
+				ConversationRef: current.conversationRef,
+				ObservedAt:      h.clock.Now().UnixMilli(),
+			}, nil
+		case protocol.PrimChatReadThread:
+			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
+			if !args.RequireCurrent ||
+				args.ConversationRef != current.conversationRef {
+				t.Fatalf("显式入口读取越界: %+v", args)
+			}
+			return protocol.ChatReadThreadData{
+				Messages: currentConversationThreadMessages(
+					t,
+					h,
+					current.conversationRef,
+				),
+				Peer: &protocol.PeerSummary{
+					DisplayName:     "脱敏候选人",
+					PlatformUserRef: "person-v4-patrol-current-quiet-wal",
+				},
+				Complete:   true,
+				ReachedTop: true,
+			}, nil
+		default:
+			return nil, errors.New("显式拒绝短路不应调用其他只读原语")
+		}
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := manager.ProcessCurrentConversationOnce(
+		context.Background(),
+		h.key,
+	)
+	if err != nil || outcome.Status != "ok" {
+		t.Fatalf("显式拒绝短路未穿过事务静默窗: outcome=%+v err=%v", outcome, err)
+	}
+	if hand.commandCount() != 1 {
+		t.Fatalf("本轮必须恰好发送一条挽留正文: commands=%d", hand.commandCount())
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(current.profileID)
+	if err != nil || turn == nil {
+		t.Fatalf("读取拒绝轮失败: turn=%+v err=%v", turn, err)
+	}
+	action, err := h.db.CommunicationActionByTurn(turn.TurnID)
+	if err != nil || action == nil ||
+		action.Status != store.CommunicationActionSent ||
+		action.EffectIntentID == nil ||
+		action.FailureReason != "" {
+		t.Fatalf("挽留正文未通过 WAL 正证收敛: action=%+v err=%v", action, err)
+	}
+
+	outcome, err = manager.ProcessCurrentConversationOnce(
+		context.Background(),
+		h.key,
+	)
+	if err != nil || outcome.Status != "ok" || hand.commandCount() != 2 {
+		t.Fatalf("显式拒绝组合的卡片未穿过同一静默窗: outcome=%+v commands=%d err=%v",
+			outcome, hand.commandCount(), err)
+	}
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInviteWechat ||
+		actions[1].Status != store.CommunicationActionSent ||
+		actions[0].EffectIntentID == nil ||
+		actions[1].EffectIntentID == nil ||
+		*actions[0].EffectIntentID == *actions[1].EffectIntentID {
+		t.Fatalf("拒绝正文→换微信卡未形成两条独立正证 WAL: actions=%+v err=%v",
+			actions, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil ||
+		account.ManualQuietUntil == nil ||
+		!account.ManualQuietUntil.Equal(quietUntil) {
+		t.Fatalf("显式入口不得清除静默事实: account=%+v err=%v", account, err)
 	}
 }
 
