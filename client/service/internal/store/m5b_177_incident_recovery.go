@@ -124,7 +124,7 @@ func (s *Store) RecoverM5B177Incident(
 			Where(conversationWhere(proof.key), conversationArgs(proof.key)...).
 			Where(
 				"last_message_seq = ? AND last_message_direction = ? AND last_message_kind = ? AND last_message_preview = ?",
-				m5B177MessageSeq, "system", "system", m5B177ResumeText,
+				m5B177MessageSeq, "in", "text", m5B177ResumeText,
 			).
 			UpdateColumns(map[string]any{
 				"last_message_direction": "in",
@@ -375,8 +375,8 @@ func m5B177InitialState(
 		return false
 	}
 	message := messages[1]
-	return conversation.LastMessageDirection == "system" &&
-		conversation.LastMessageKind == "system" &&
+	return conversation.LastMessageDirection == "in" &&
+		conversation.LastMessageKind == "text" &&
 		message.Direction == "system" && message.Kind == "system" &&
 		message.ContentHash == textcanon.Hash(m5B177ResumeText) &&
 		message.CardType == "" && message.CardState == "" &&
@@ -421,7 +421,7 @@ func m5B177CommonShape(
 	application CommunicationV4ProjectionApplication,
 ) bool {
 	if len(messages) != 2 ||
-		conversation.AdoptedBoundarySeq != 0 ||
+		conversation.AdoptedBoundarySeq != messages[0].Seq ||
 		conversation.LastMessageSeq != m5B177MessageSeq ||
 		conversation.LastMessagePreview != m5B177ResumeText ||
 		profile.MainStatus != CandidateProfileGreeted || profile.EndReason != nil ||
