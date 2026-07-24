@@ -601,7 +601,7 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 		t.Fatalf("补齐归档 CAS 的活动账本尾失败: changes=%+v err=%v", changes, err)
 	}
 
-	archiveAt := at.Add(8 * 24 * time.Hour)
+	archiveAt := confirmed.State.LastBodyAt.Add(8 * 24 * time.Hour)
 	archiveReq := communicationV4ArchiveRequestForTest(
 		t, s, confirmed, archiveAt, false,
 	)
