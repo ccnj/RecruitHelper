@@ -1,0 +1,205 @@
+import type {
+  ConfirmationBatchView,
+  ConfirmationCandidateView,
+  CustomerView,
+  ProductActions,
+} from '../types'
+import { CandidateAvatar, EmptyState, MetricValue, PageHeader, StatusPill } from './ProductPrimitives'
+import { ProductIcon } from './ProductIcon'
+
+interface ConfirmationPageProps {
+  batch: ConfirmationBatchView
+  customer: CustomerView
+  selectedIds: ReadonlySet<string>
+  actions: ProductActions
+  onSelectionChange: (ids: Set<string>) => void
+  onOpenCandidate: (candidate: ConfirmationCandidateView) => void
+}
+
+export function ConfirmationPage({
+  batch,
+  customer,
+  selectedIds,
+  actions,
+  onSelectionChange,
+  onOpenCandidate,
+}: ConfirmationPageProps) {
+  const selectable = batch.candidates.filter((candidate) => candidate.selectable)
+  const selectedEligibleCount = selectable.filter((candidate) => selectedIds.has(candidate.profileId)).length
+  const allSelected = selectable.length > 0 && selectedEligibleCount === selectable.length
+  const sendUnavailableReason = confirmationSendUnavailableReason(batch, allSelected, actions)
+
+  function selectAll() {
+    onSelectionChange(new Set(selectable.map((candidate) => candidate.profileId)))
+  }
+
+  function clearSelection() {
+    onSelectionChange(new Set())
+  }
+
+  function toggleCandidate(profileId: string, checked: boolean) {
+    const next = new Set(selectedIds)
+    if (checked) next.add(profileId)
+    else next.delete(profileId)
+    onSelectionChange(next)
+  }
+
+  return (
+    <div className="rh-page">
+      <PageHeader
+        title="候选确认"
+        description="核对本批 AI 招呼语。只有全选并明确点击发送后，系统才会开始逐人发送。"
+        meta={<StatusPill label={customer.job.name ?? '尚未绑定职位'} tone={customer.job.name ? 'blue' : 'slate'} />}
+      />
+
+      {!batch.batchId ? (
+        <section className="rh-panel">
+          <EmptyState
+            icon="confirmation"
+            title="没有等待确认的候选人"
+            description="完整流程完成评分、筛选和招呼语生成后，当前批次会显示在这里。"
+          />
+        </section>
+      ) : (
+        <>
+          <section className="rh-confirmation-summary">
+            <div>
+              <span>批次创建</span>
+              <strong>{batch.createdAt ?? '—'}</strong>
+            </div>
+            <div>
+              <span>评分完成</span>
+              <strong><MetricValue value={batch.scoreCompleted} /></strong>
+            </div>
+            <div>
+              <span>筛选入选</span>
+              <strong><MetricValue value={batch.selectedCount} /></strong>
+            </div>
+            <div>
+              <span>招呼语成功</span>
+              <strong><MetricValue value={batch.greetingSucceeded} /></strong>
+            </div>
+            <div>
+              <span>生成失败</span>
+              <strong><MetricValue value={batch.greetingFailed} /></strong>
+            </div>
+            <div>
+              <span>仍待生成</span>
+              <strong><MetricValue value={batch.greetingPending} /></strong>
+            </div>
+          </section>
+
+          {(batch.workflowPaused || !batch.businessWindowOpen) && (
+            <div className="rh-page-alert">
+              <ProductIcon name="clock" size={18} />
+              <div>
+                <strong>{batch.workflowPaused ? '工作流已暂停' : '当前不在业务运行时间'}</strong>
+                <span>
+                  {batch.workflowPaused
+                    ? '仍可核对和选择候选人；恢复运行后才能发送。'
+                    : '当前只允许查看；08:00 后仍需手动恢复或开始。'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          <section className="rh-panel rh-confirmation-panel">
+            <div className="rh-confirmation-toolbar">
+              <div>
+                <button className="rh-text-button" disabled={selectable.length === 0} onClick={selectAll} type="button">全选</button>
+                <span className="rh-toolbar-divider" />
+                <button className="rh-text-button" disabled={selectedIds.size === 0} onClick={clearSelection} type="button">取消全选</button>
+                <span className="rh-selection-count">已选择 {selectedEligibleCount} / {selectable.length}</span>
+              </div>
+              <button
+                className="rh-button is-primary"
+                disabled={sendUnavailableReason !== null}
+                onClick={() => {
+                  if (batch.batchId && allSelected) {
+                    void actions.sendConfirmationBatch?.(batch.batchId, selectable.map((candidate) => candidate.profileId))
+                  }
+                }}
+                title={sendUnavailableReason ?? undefined}
+                type="button"
+              >
+                <ProductIcon name="confirmation" size={17} />
+                发送所选候选人
+              </button>
+            </div>
+            {sendUnavailableReason && (
+              <div className="rh-confirmation-hint">{sendUnavailableReason}</div>
+            )}
+
+            {batch.candidates.length === 0 ? (
+              <EmptyState title="本批没有可确认成员" description="请查看生成失败或筛选结果，当前页面不会伪造候选人。" />
+            ) : (
+              <div className="rh-confirmation-list">
+                {batch.candidates.map((candidate) => (
+                  <article className={`rh-confirmation-row${candidate.selectable ? '' : ' is-disabled'}`} key={candidate.profileId}>
+                    <label className="rh-confirmation-check">
+                      <input
+                        checked={selectedIds.has(candidate.profileId)}
+                        disabled={!candidate.selectable}
+                        onChange={(event) => toggleCandidate(candidate.profileId, event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span className="rh-sr-only">选择 {candidate.displayName}</span>
+                    </label>
+                    <CandidateAvatar name={candidate.displayName} />
+                    <div className="rh-confirmation-person">
+                      <button onClick={() => onOpenCandidate(candidate)} type="button">{candidate.displayName}</button>
+                      <span>
+                        {[candidate.age === null ? null : `${candidate.age} 岁`, candidate.education, candidate.experience]
+                          .filter(Boolean)
+                          .join(' · ') || '候选人信息待补充'}
+                      </span>
+                      <span>{candidate.currentRole ?? '当前职位待补充'}</span>
+                    </div>
+                    <div className="rh-confirmation-score">
+                      <span>AI 评分</span>
+                      <strong>{candidate.aiScore ?? '—'}</strong>
+                    </div>
+                    <div className="rh-greeting-copy">
+                      <span>AI 招呼语</span>
+                      <p>{candidate.greeting ?? '招呼语生成失败，本候选人不可发送。'}</p>
+                    </div>
+                    <div className="rh-confirmation-state">
+                      <StatusPill label={candidate.sendStateLabel} tone={sendStateTone(candidate.sendState)} />
+                      <span>{candidate.generationStateLabel}</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+    </div>
+  )
+}
+
+function confirmationSendUnavailableReason(
+  batch: ConfirmationBatchView,
+  allSelected: boolean,
+  actions: ProductActions,
+): string | null {
+  if (batch.workflowPaused) return '工作流暂停期间不能发送，请先在首页恢复'
+  if (!batch.businessWindowOpen) return '运行时间为 08:00～24:00'
+  if (!allSelected) return '请先全选本批所有可发送候选人'
+  if (!batch.batchId) return '当前没有等待发送的批次'
+  if (!actions.sendConfirmationBatch) return '发送入口尚未接入'
+  return null
+}
+
+function sendStateTone(state: ConfirmationCandidateView['sendState']) {
+  const tones: Record<ConfirmationCandidateView['sendState'], 'blue' | 'amber' | 'green' | 'red' | 'slate'> = {
+    ready: 'blue',
+    sending: 'amber',
+    sent: 'green',
+    failed: 'red',
+    suspect: 'red',
+    ineligible: 'slate',
+  }
+  return tones[state]
+}
+

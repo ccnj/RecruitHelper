@@ -35,6 +35,17 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+.diagnostics-return {
+  position: fixed;
+  top: 18px;
+  right: 22px;
+  z-index: 50;
+  border-color: var(--cobalt);
+  background: var(--paper);
+  color: var(--cobalt-deep);
+  box-shadow: var(--shadow);
+}
+
 button, input, select, textarea { font: inherit; }
 
 button {

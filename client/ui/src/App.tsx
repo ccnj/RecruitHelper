@@ -11,6 +11,7 @@ import {
 } from './candidate-workflow'
 import { sendStateLabel, sendSucceeded, sendSuspect, sendTerminal } from './send-intent-state'
 import { acknowledgeSendIntent, readSendResume } from './send-resume'
+import { ProductApp } from './product'
 
 interface PollState<T> {
   data: T | undefined
@@ -159,6 +160,21 @@ function detailText(detail: unknown): string {
 }
 
 export function App() {
+  const [diagnosticsVisible, setDiagnosticsVisible] = useState(false)
+  if (diagnosticsVisible) {
+    return (
+      <>
+        <button className="diagnostics-return" onClick={() => setDiagnosticsVisible(false)}>
+          返回客户端
+        </button>
+        <DiagnosticConsole />
+      </>
+    )
+  }
+  return <ProductApp actions={{ openDiagnostics: () => setDiagnosticsVisible(true) }} />
+}
+
+function DiagnosticConsole() {
   const health = usePolling<Health>(api.health, 1800, 'health')
   const hands = usePolling(api.handsHealth, 2200, 'hands')
   const accounts = usePolling(api.accounts, 2400, 'accounts')
