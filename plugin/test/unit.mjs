@@ -4814,7 +4814,7 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
   }
 })
 
-test('智联 177 附件简历只在真机严格形状成立时四路提升为简历卡', async () => {
+test('智联 177 附件简历按窄类型归一化在四路提升为同一简历卡', async () => {
   const fixture = installM3SendFixture()
   installM5BCardActionSurface(fixture)
   const canonicalText = '您好，这是我的附件简历，请查收'
@@ -4822,14 +4822,40 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
   const staffID = globalThis.window.$session.staff.staffId
   const variants = [
     {
-      name: '真机严格形状', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
+      name: '初始时间线数字类型', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
       status: 'success', contentString: true, card: true,
-      idServer: '  server-type-177-raw-identity  ',
+      idServer: 'server-type-177-equivalent',
     },
     {
-      name: '历史 API 规范正文形状', rawType: 'custom', envelopeType: '177',
+      name: '历史 API 规范字符串类型', rawType: 'custom', envelopeType: '177',
       from: fixture.peerRef, status: 'success', innerContent: canonicalText,
       omitFallback: true, contentString: true, card: true,
+      idServer: 'server-type-177-equivalent',
+    },
+    {
+      name: '字符串类型配时间线 fallback', rawType: 'custom', envelopeType: '177',
+      from: fixture.peerRef, status: 'success', contentString: true, card: true,
+    },
+    {
+      name: '数字类型配历史正文', rawType: 'custom', envelopeType: 177,
+      from: fixture.peerRef, status: 'success', innerContent: fallbackText,
+      omitFallback: true, contentString: true, card: true,
+    },
+    {
+      name: 'style 与展示文案变化不参与授权', rawType: 'custom', envelopeType: 177,
+      from: fixture.peerRef, status: 'success', receiverStyle: 'unexpected',
+      senderStyle: 99, receiverText: '展示文案变化', senderText: '',
+      contentString: true, card: true,
+    },
+    {
+      name: '无 fallback 与规范正文仍由枚举表达语义', rawType: 'custom',
+      envelopeType: '177', from: fixture.peerRef, status: 'success',
+      omitFallback: true, contentString: true, card: true,
+    },
+    {
+      name: '对象 content 与字符串 content 同义', rawType: 'custom',
+      envelopeType: 177, from: fixture.peerRef, status: 'success',
+      contentString: false, card: true,
     },
     {
       name: '招聘方发送者', rawType: 'custom', envelopeType: 177, from: staffID,
@@ -4848,38 +4874,20 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       status: 'failed', contentString: true, card: false,
     },
     {
-      name: '接收方固定文案不匹配', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
-      status: 'success', receiverText: '附件简历提示发生变化', contentString: true, card: false,
+      name: '字符串带空白不是规范类型', rawType: 'custom', envelopeType: ' 177 ',
+      from: fixture.peerRef, status: 'success', contentString: true, card: false,
     },
     {
-      name: '发送方固定文案不匹配', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
-      status: 'success', senderText: '附件简历提示发生变化', contentString: true, card: false,
+      name: '字符串带前导零不是规范类型', rawType: 'custom', envelopeType: '0177',
+      from: fixture.peerRef, status: 'success', contentString: true, card: false,
     },
     {
-      name: '只有非规范 row text', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
-      status: 'success', rowText: '附件简历提示发生变化', omitFallback: true,
-      contentString: true, card: false,
+      name: '字符串小数不是规范类型', rawType: 'custom', envelopeType: '177.0',
+      from: fixture.peerRef, status: 'success', contentString: true, card: false,
     },
     {
-      name: '只有规范 row text', rawType: 'custom', envelopeType: '177',
-      from: fixture.peerRef, status: 'success', rowText: canonicalText,
-      omitFallback: true, contentString: true, card: false,
-    },
-    {
-      name: '接收方 style 不是真机数字', rawType: 'custom', envelopeType: 177,
-      from: fixture.peerRef, status: 'success', receiverStyle: '1', contentString: true, card: false,
-    },
-    {
-      name: '发送方 style 不是真机值', rawType: 'custom', envelopeType: 177,
-      from: fixture.peerRef, status: 'success', senderStyle: 2, contentString: true, card: false,
-    },
-    {
-      name: '外层 content 不是序列化字符串', rawType: 'custom', envelopeType: 177,
-      from: fixture.peerRef, status: 'success', contentString: false, card: false,
-    },
-    {
-      name: '信封 type 是字符串', rawType: 'custom', envelopeType: '177', from: fixture.peerRef,
-      status: 'success', contentString: true, card: false,
+      name: '非整数数字不是规范类型', rawType: 'custom', envelopeType: 177.5,
+      from: fixture.peerRef, status: 'success', contentString: true, card: false,
     },
     {
       name: '相邻类型', rawType: 'custom', envelopeType: 178, from: fixture.peerRef,
@@ -4978,6 +4986,33 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       '177 缺少 idServer 时 readThread 必须响亮失败')
     const missingBaseline = await fixture.capture([])
     assert.equal(missingBaseline.status, 'failed', '177 缺少 idServer 时不得建立发送基线')
+    const nominalBaseline = {
+      status: 'ready',
+      stage: 'ready',
+      serverSourceKeys: [],
+      targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
+    }
+    assert.equal(
+      fixture.invoke(nominalBaseline, 'preflight', { expectedTail: [] }).status,
+      'failed',
+      '177 缺少 idServer 时正文 evaluator 必须停止',
+    )
+    assert.equal(
+      zhilianTestHooks.mainSendCardOnce(
+        fixture.conversationRef,
+        'wechatInvite',
+        null,
+        null,
+        [],
+        m3Hash(fixture.principal),
+        Date.now() + 10_000,
+        [],
+        nominalBaseline.targetBindingToken,
+        'preflight',
+      ).status,
+      'failed',
+      '177 缺少 idServer 时卡片 evaluator 必须停止',
+    )
   } finally {
     fixture.restore()
   }

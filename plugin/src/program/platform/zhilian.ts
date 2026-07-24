@@ -4414,19 +4414,11 @@ async function mainReadThreadPage(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
-    const attachmentFallback = parseObject(envelope.fallbackText)
-    const attachmentHistoryShapeMatches = typeof envelope.type === 'string' &&
-      envelope.type.trim() === '177' &&
-      clean(details.content) === '您好，这是我的附件简历，请查收'
-    const attachmentTimelineShapeMatches = typeof envelope.type === 'number' &&
-      envelope.type === 177 &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
-    const isCandidateAttachmentResume = rawType === 'custom' && typeof row.content === 'string' &&
-      customType === 177 &&
-      from === target && clean(row.status).toLowerCase() === 'success' &&
-      (attachmentHistoryShapeMatches || attachmentTimelineShapeMatches)
+    const normalizedAttachmentType =
+      envelope.type === 177 || envelope.type === '177' ? 177 : null
+    const isCandidateAttachmentResume = rawType === 'custom' &&
+      normalizedAttachmentType === 177 &&
+      from === target && clean(row.status).toLowerCase() === 'success'
     let direction: ZhilianThreadMessage['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -5381,19 +5373,11 @@ async function mainCaptureSendBaseline(
         Object.keys(inner).length > 0 && from === target &&
         clean(row.status).toLowerCase() === 'success' &&
         clean(inner.staffText) === '对方向您发送了在线简历'
-      const attachmentFallback = parseObject(envelope.fallbackText)
-      const attachmentHistoryShapeMatches = typeof envelope.type === 'string' &&
-        envelope.type.trim() === '177' &&
-        clean(details.content) === '您好，这是我的附件简历，请查收'
-      const attachmentTimelineShapeMatches = typeof envelope.type === 'number' &&
-        envelope.type === 177 &&
-        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
-      const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-        customType === 177 &&
-        from === target && clean(row.status).toLowerCase() === 'success' &&
-        (attachmentHistoryShapeMatches || attachmentTimelineShapeMatches)
+      const normalizedAttachmentType =
+        envelope.type === 177 || envelope.type === '177' ? 177 : null
+      const isCandidateAttachmentResume = rawType === 'custom' &&
+        normalizedAttachmentType === 177 &&
+        from === target && clean(row.status).toLowerCase() === 'success'
       let direction: ZhilianMessageAnchor['direction'] = from
         ? from === staffID ? 'out' : 'in'
         : 'system'
@@ -6057,19 +6041,11 @@ function mainSendMessageOnce(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
-    const attachmentFallback = parseObject(envelope.fallbackText)
-    const attachmentHistoryShapeMatches = typeof envelope.type === 'string' &&
-      envelope.type.trim() === '177' &&
-      clean(details.content) === '您好，这是我的附件简历，请查收'
-    const attachmentTimelineShapeMatches = typeof envelope.type === 'number' &&
-      envelope.type === 177 &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
-    const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-      customType === 177 &&
-      from === target && clean(row.status).toLowerCase() === 'success' &&
-      (attachmentHistoryShapeMatches || attachmentTimelineShapeMatches)
+    const normalizedAttachmentType =
+      envelope.type === 177 || envelope.type === '177' ? 177 : null
+    const isCandidateAttachmentResume = rawType === 'custom' &&
+      normalizedAttachmentType === 177 &&
+      from === target && clean(row.status).toLowerCase() === 'success'
     let direction: ZhilianMessageAnchor['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -6996,19 +6972,11 @@ function mainSendCardOnce(
       Object.keys(inner).length > 0 && from === target &&
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
-    const attachmentFallback = parseObject(envelope.fallbackText)
-    const attachmentHistoryShapeMatches = typeof envelope.type === 'string' &&
-      envelope.type.trim() === '177' &&
-      clean(details.content) === '您好，这是我的附件简历，请查收'
-    const attachmentTimelineShapeMatches = typeof envelope.type === 'number' &&
-      envelope.type === 177 &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
-    const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
-      customType === 177 &&
-      from === target && clean(row.status).toLowerCase() === 'success' &&
-      (attachmentHistoryShapeMatches || attachmentTimelineShapeMatches)
+    const normalizedAttachmentType =
+      envelope.type === 177 || envelope.type === '177' ? 177 : null
+    const isCandidateAttachmentResume = rawType === 'custom' &&
+      normalizedAttachmentType === 177 &&
+      from === target && clean(row.status).toLowerCase() === 'success'
     let direction: ZhilianMessageAnchor['direction'] = from ? from === staffID ? 'out' : 'in' : 'system'
     let kind: 'text' | 'card' | 'system' = 'system'
     let text = ''
