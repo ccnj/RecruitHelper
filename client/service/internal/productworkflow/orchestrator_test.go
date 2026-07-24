@@ -72,6 +72,58 @@ func TestGreetingGenerationStopsAtHumanConfirmationWithoutSending(t *testing.T) 
 	}
 }
 
+func TestBlockedSourcingFailsRunAndExplicitRestartAdoptsSameBatch(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor: &fixtureActor{store: db, clock: clock},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || first.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", first, err)
+	}
+	batchID := *first.SourcingBatchID
+	if _, err := db.BlockSourcingBatch(store.BlockSourcingBatchRequest{
+		BatchID: batchID, Reason: "windowNoProgress", BlockedAt: clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := manager.AdvanceOnce(context.Background())
+	if !errors.Is(err, ErrWorkflowPipelineInvalid) ||
+		failed == nil ||
+		failed.RunID != first.RunID ||
+		failed.Status != workflow.StatusFailed ||
+		failed.Stage != store.ProductWorkflowStageFailed {
+		t.Fatalf("blocked AdvanceOnce() = %+v, %v", failed, err)
+	}
+	if active, err := db.ActiveProductWorkflowRun(); err != nil || active != nil {
+		t.Fatalf("failed run retained active slot: %+v, %v", active, err)
+	}
+
+	restarted, err := manager.StartFull(key, "caller-must-not-replace-revision")
+	if err != nil ||
+		restarted == nil ||
+		restarted.RunID == first.RunID ||
+		restarted.SourcingBatchID == nil ||
+		*restarted.SourcingBatchID != batchID {
+		t.Fatalf("restart = %+v, %v", restarted, err)
+	}
+	batch, err := db.SourcingBatchByID(batchID)
+	if err != nil ||
+		batch == nil ||
+		batch.ContextRevisionHash != revision.RevisionHash ||
+		batch.TargetCount != NewFullWorkflowTargetCount ||
+		batch.Status != store.SourcingBatchPreparing {
+		t.Fatalf("restarted batch = %+v, %v", batch, err)
+	}
+}
+
 func TestConfirmAllRequiresExactSelectableSetAndOpenWindow(t *testing.T) {
 	manager, actor, db, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}

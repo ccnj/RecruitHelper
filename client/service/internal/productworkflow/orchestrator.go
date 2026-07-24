@@ -78,9 +78,13 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 			return run, store.ErrSourcingBatchNotFound
 		}
 		switch batch.Status {
-		case store.SourcingBatchPreparing, store.SourcingBatchCollecting,
-			store.SourcingBatchBlocked:
+		case store.SourcingBatchPreparing, store.SourcingBatchCollecting:
 			return run, nil
+		case store.SourcingBatchBlocked:
+			// blocked 是一次正式采集尝试的明确失败边界，而不是自动等待。
+			// 终局化产品 run 后，下一次真人点击 StartFull 才会走既有
+			// ResumeSourcingBatch 入口复用原批次、目标和 revision。
+			return m.failStoppedPipeline(run, batch.Reason)
 		case store.SourcingBatchCompleted:
 			// 正式采集达到目标时，采集 actor 会先暂停账号。推荐页工作已经
 			// 结束，后续评分/生成不再占用手，因此在同一持久工作流仍为
