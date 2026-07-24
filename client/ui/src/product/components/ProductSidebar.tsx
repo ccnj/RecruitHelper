@@ -60,9 +60,11 @@ export function ProductSidebar({
           const badge = item.key === 'confirmation' ? confirmationBadge : 0
           return (
             <button
+              aria-label={item.label}
               className={`rh-nav-item${activePage === item.key ? ' is-active' : ''}`}
               key={item.key}
               onClick={() => onNavigate(item.key)}
+              title={item.label}
               type="button"
             >
               <ProductIcon name={item.icon} size={19} />
@@ -95,4 +97,3 @@ export function ProductSidebar({
     </aside>
   )
 }
-

@@ -17,21 +17,21 @@ const stageConfigs: Record<CandidateView, StageConfig> = {
     description: '查看正在沟通、等候回复和需要人工关注的候选人。本页不提供发送入口。',
     emptyTitle: '当前没有沟通中的候选人',
     emptyDescription: '取得首次招呼发送正证的候选人会自动进入沟通范围。',
-    filters: ['全部', '已招呼', '已回复', '推约中', '等候回复', '需要人工', '沟通已结束'],
+    filters: ['全部', '已招呼', '已回复', '需要人工', '沟通已结束'],
   },
   pendingInterview: {
     title: '待面试',
     description: '查看已约面候选人的时间、方式和确认状态。本页只读。',
     emptyTitle: '当前没有待面试候选人',
     emptyDescription: '确定性状态机确认约面成功后，候选人会出现在这里。',
-    filters: ['全部', '今天', '本周', '待候选人确认', '已确认'],
+    filters: ['全部', '今天', '待候选人确认', '已确认'],
   },
   interviewed: {
     title: '已面试',
     description: '查看数据库中已有的真实面试结果，不在此处回填或修改。',
     emptyTitle: '当前没有已面试记录',
     emptyDescription: '完成面试并形成正式业务事实后，记录会出现在这里。',
-    filters: ['全部', '待回填', '已录用', '未录用', '爽约'],
+    filters: ['全部'],
   },
   wechat: {
     title: '已换微信',
@@ -174,10 +174,11 @@ function matchesSearch(candidate: CandidateViewItem, rawQuery: string): boolean 
 function matchesFilter(view: CandidateView, candidate: CandidateViewItem, filter: string): boolean {
   if (filter === '全部') return true
   if (filter === '需要人工') return candidate.manualRequired
+  if (view === 'communicating' && filter === '沟通已结束') {
+    return candidate.deterministicState?.startsWith('沟通已结束') ?? false
+  }
   if (view === 'pendingInterview' && filter === '今天') return candidate.interviewAt?.includes('今天') ?? false
-  if (view === 'pendingInterview' && filter === '本周') return candidate.interviewAt !== null
   if (view === 'wechat' && filter === '仍在自动沟通') return candidate.stillInAutoCommunication === true
   if (view === 'wechat' && filter === '已结束沟通') return candidate.stillInAutoCommunication === false
   return candidate.statusLabel.includes(filter)
 }
-
