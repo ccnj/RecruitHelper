@@ -278,17 +278,35 @@ func TestRepeatedConfirmationNeverRepeatsBatchSender(t *testing.T) {
 		t.Fatalf("post-send ConfirmAll() = %+v, %v", replayed, err)
 	}
 
-	completed, err := manager.AdvanceOnce(context.Background())
-	if err != nil || completed.Status != workflow.StatusCompleted ||
-		completed.Stage != store.ProductWorkflowStageCompleted || actor.enableCalls != 2 {
+	communication, err = manager.AdvanceOnce(context.Background())
+	if err != nil || communication.Status != workflow.StatusRunning ||
+		communication.Stage != store.ProductWorkflowStageCommunication || actor.enableCalls != 1 {
 		t.Fatalf("communication AdvanceOnce() = %+v enable=%d err=%v",
-			completed, actor.enableCalls, err)
+			communication, actor.enableCalls, err)
 	}
-	if replayed, err = manager.ConfirmAll(batchID, []string{"anything"}); err != nil || replayed.Status != workflow.StatusCompleted {
-		t.Fatalf("terminal ConfirmAll() = %+v, %v", replayed, err)
+	if replayed, err = manager.ConfirmAll(batchID, []string{"anything"}); err != nil ||
+		replayed.Status != workflow.StatusRunning ||
+		replayed.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("communication ConfirmAll() = %+v, %v", replayed, err)
 	}
-	if active, err := manager.AdvanceOnce(context.Background()); err != nil || active != nil {
-		t.Fatalf("terminal AdvanceOnce() = %+v, %v", active, err)
+	if active, err := manager.AdvanceOnce(context.Background()); err != nil ||
+		active == nil ||
+		active.RunID != communication.RunID ||
+		active.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("active communication AdvanceOnce() = %+v, %v", active, err)
+	}
+	paused, err := manager.Pause()
+	if err != nil ||
+		paused.Status != workflow.StatusPaused ||
+		paused.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("pause communication = %+v, %v", paused, err)
+	}
+	resumed, err := manager.Resume()
+	if err != nil ||
+		resumed.Status != workflow.StatusRunning ||
+		resumed.Stage != store.ProductWorkflowStageCommunication ||
+		actor.enableCalls != 2 {
+		t.Fatalf("resume communication = %+v enable=%d err=%v", resumed, actor.enableCalls, err)
 	}
 	if actor.sendCalls != 1 {
 		t.Fatalf("replay repeated sender: %d calls", actor.sendCalls)

@@ -213,7 +213,7 @@ func (m *Manager) AdvanceOnce(
 		return m.advanceStage(run, store.ProductWorkflowStageCommunication)
 
 	case store.ProductWorkflowStageCommunication:
-		return m.completeWithCommunication(run)
+		return m.keepCommunicationRunning(run)
 
 	default:
 		return run, ErrWorkflowPipelineInvalid
@@ -474,12 +474,12 @@ func (m *Manager) failStoppedPipeline(
 	return failed, cause
 }
 
-func (m *Manager) completeWithCommunication(
+func (m *Manager) keepCommunicationRunning(
 	fallback *store.ProductWorkflowRun,
 ) (*store.ProductWorkflowRun, error) {
-	// Linearize the final enable against Pause/Resume. Otherwise Pause could
+	// Linearize communication enabling against Pause/Resume. Otherwise Pause could
 	// close the durable gate and account actor between EnableToday and the
-	// terminal workflow transition, only to have a stale tick reopen it.
+	// returned state, only to have a stale tick reopen it.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -509,14 +509,27 @@ func (m *Manager) completeWithCommunication(
 		})
 	}
 	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	account, err := m.store.AccountByKey(key)
+	if err != nil {
+		return run, err
+	}
+	if account == nil {
+		return run, store.ErrAccountNotFound
+	}
+	localDate := now.In(m.location).Format("2006-01-02")
+	if account.EnabledDate == localDate &&
+		account.EnabledAt != nil &&
+		account.StoppedAt == nil &&
+		account.PausedReason == "" {
+		return run, nil
+	}
 	if err := m.actor.EnableToday(key); err != nil {
 		return run, err
 	}
-	to := workflow.State{Mode: run.Mode, Status: workflow.StatusCompleted}
-	return m.store.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
-		RunID: run.RunID, From: stateOf(run), To: to, At: now,
-		Stage: store.ProductWorkflowStageCompleted,
-	})
+	// 完整流程的漏斗已经终局，但“循环多轮回复”仍是同一用户运行。
+	// 保留 active run，首页才始终拥有真实的暂停/恢复入口；漏斗完成度
+	// 继续由已经终局的 sourcing batch 独立投影。
+	return run, nil
 }
 
 type memberBoundaryResult struct {
