@@ -2478,6 +2478,7 @@ function installM6PositionSelectorFixture(options = {}) {
     currentJob: options.alreadySelected === true ? refs.targetJob : refs.oldJob,
     currentTitle: options.alreadySelected === true ? refs.targetTitle : '旧职位',
     interactions: [],
+    itemReads: 0,
   }
   const classList = (...initial) => {
     const values = new Set(initial)
@@ -2557,7 +2558,11 @@ function installM6PositionSelectorFixture(options = {}) {
   drawer.closest = (selector) =>
     selector === '.km-modal__wrapper--right.job-side-selector' ? drawer : null
   drawer.querySelectorAll = (selector) => {
-    if (selector === '.job-side-selector__item') return jobItems
+    if (selector === '.job-side-selector__item') {
+      state.itemReads += 1
+      if (state.itemReads <= (options.delayedItemReads ?? 0)) return []
+      return jobItems
+    }
     if (selector === '.km-modal__close-btn') return [closeButton]
     return []
   }
@@ -2593,7 +2598,7 @@ function installM6PositionSelectorFixture(options = {}) {
 }
 
 test('candidate.selectSourcingPosition MAIN 精确唯一匹配并遵守交互间隔后确认稳定职位', async () => {
-  const fixture = installM6PositionSelectorFixture()
+  const fixture = installM6PositionSelectorFixture({ delayedItemReads: 3 })
   try {
     const result = await zhilianTestHooks.mainSelectSourcingPosition('  目标\u00a0 职位  ')
     assert.equal(result.status, 'ready')
@@ -2607,6 +2612,7 @@ test('candidate.selectSourcingPosition MAIN 精确唯一匹配并遵守交互间
       assert.ok(elapsed >= 990, `第 ${index + 1} 个页面动作与前一动作须至少间隔一秒`)
     }
     assert.equal(fixture.state.drawerOpen, false)
+    assert.ok(fixture.state.itemReads >= 4, '职位项异步出现前不得把瞬时空源判成永久失败')
   } finally {
     fixture.restore()
   }

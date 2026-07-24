@@ -1368,20 +1368,24 @@ async function mainSelectSourcingPosition(
     })
     if (!drawer) return failed('drawer_not_ready')
     if (drawers().length !== 1) return failed('drawer_cardinality')
-    const items = visibleAll(drawer, '.job-side-selector__item')
-    if (items.length === 0) {
+    let latestTitledItems: Array<{ item: HTMLElement; title: string }> | null = null
+    const targetItems = await waitFor(() => {
+      const items = visibleAll(drawer, '.job-side-selector__item')
+      if (items.length === 0) return null
+      const titledItems = items.map((item) => ({ item, title: titleOf(item) }))
+      if (titledItems.some(({ title }) => !title)) return null
+      latestTitledItems = titledItems
+      const matches = titledItems.filter(({ title }) => title === targetTitle)
+      return matches.length > 0 ? { items, matches } : null
+    })
+    if (!targetItems) {
       const closeFailure = await closeOwnedDrawer()
-      return failed(closeFailure ?? 'item_source_unavailable')
+      return failed(closeFailure ?? (latestTitledItems ? 'target_absent' : 'item_source_unavailable'))
     }
-    const titledItems = items.map((item) => ({ item, title: titleOf(item) }))
-    if (titledItems.some(({ title }) => !title)) {
-      const closeFailure = await closeOwnedDrawer()
-      return failed(closeFailure ?? 'item_source_unavailable')
-    }
-    const matches = titledItems.filter(({ title }) => title === targetTitle)
+    const { items, matches } = targetItems
     if (matches.length !== 1) {
       const closeFailure = await closeOwnedDrawer()
-      return failed(closeFailure ?? (matches.length === 0 ? 'target_absent' : 'target_ambiguous'))
+      return failed(closeFailure ?? 'target_ambiguous')
     }
     const activeItems = items.filter((item) => item.classList.contains('is-active'))
     if (activeItems.length > 1) {
