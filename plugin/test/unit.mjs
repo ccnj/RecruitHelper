@@ -2828,13 +2828,13 @@ function installM6SourcingFilterFixture(options = {}) {
     },
     careerStatuses: {
       selector: '.filter-item-careerStatuses',
-      title: '求职状态',
+      title: '求职状态可多选',
       labels: ['不限', '在职-正在找工作', '离职-正在找工作', '在职-看看机会', '在职-暂不找工作'],
       control: 'checkbox',
     },
     educations: {
       selector: '.filter-item-educations',
-      title: '学历要求',
+      title: '学历要求可多选',
       labels: ['不限', '初中及以下', '高中', '中专/中技', '大专', '本科', '硕士', 'MBA/EMBA', '博士'],
       control: 'checkbox',
     },
@@ -2846,7 +2846,7 @@ function installM6SourcingFilterFixture(options = {}) {
     },
     filterTypes: {
       selector: '.filter-item-filterTypes',
-      title: '人才范围',
+      title: '人才范围可多选',
       labels: ['不限', '过滤我已看过', '过滤同事已聊'],
       control: 'checkbox',
     },
