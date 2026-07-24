@@ -154,12 +154,21 @@ func main() {
 				if statusErr != nil {
 					return apphttp.RuntimeSnapshot{}, statusErr
 				}
-				return apphttp.RuntimeSnapshot{
+				snapshot := apphttp.RuntimeSnapshot{
 					Available:      true,
 					CustomerName:   view.CustomerName,
 					CustomerStatus: view.CustomerStatus,
 					Authorized:     view.Configured && view.MachineIdentityReady && view.MachineMatch,
-				}, nil
+				}
+				if configured, loadErr := providerConfig.Load(); loadErr == nil && configured != nil {
+					snapshot.ProviderConfigured = true
+					snapshot.Provider = configured.Provider
+					snapshot.Model = configured.Model
+				}
+				snapshot.PluginOnline, snapshot.PluginHealth,
+					snapshot.PluginVersion, snapshot.ContractMatch =
+					productPluginRuntime(hub.Registry().Snapshot())
+				return snapshot, nil
 			}),
 		)
 		if productErr != nil {
@@ -197,6 +206,26 @@ func main() {
 		slog.Warn("后台循环收束超时", "err", err)
 	}
 	backgroundCancel()
+}
+
+// productPluginRuntime 把手注册表收窄成普通用户配置页所需的四项状态。
+// 它有意不返回 handId、bootId、contractHash、caps 或协商细节。
+func productPluginRuntime(states []session.HandState) (online bool, health, version string, contractMatch bool) {
+	selected := -1
+	for i := range states {
+		if selected < 0 ||
+			(states[i].Online && !states[selected].Online) ||
+			(states[i].Online == states[selected].Online &&
+				states[i].SessionAt.After(states[selected].SessionAt)) {
+			selected = i
+		}
+	}
+	if selected < 0 {
+		return false, string(session.HealthOffline), "", false
+	}
+	current := states[selected]
+	return current.Online && current.Health == session.HealthReady,
+		string(current.Health), current.ExtVersion, current.ContractMatch
 }
 
 // backgroundGroup 只管理进程级长生命周期循环。所有 Go 调用必须先于 Wait；

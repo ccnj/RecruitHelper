@@ -125,6 +125,9 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 		WithRuntimeSnapshotProvider(func(context.Context) (RuntimeSnapshot, error) {
 			return RuntimeSnapshot{
 				Available: true, CustomerName: "合成客户", Authorized: true,
+				ProviderConfigured: true, Provider: " deepseek ", Model: " deepseek-v4-pro ",
+				PluginOnline: true, PluginHealth: " ready ", PluginVersion: " 1.2.3 ",
+				ContractMatch:  true,
 				CurrentBatchID: "batch-private", WorkflowMode: "full",
 			}, nil
 		}),
@@ -143,8 +146,41 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 		Runtime RuntimeSnapshot `json:"runtime"`
 	}
 	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil ||
-		body.Runtime.CustomerName != "合成客户" || !body.Runtime.Authorized {
+		body.Runtime.CustomerName != "合成客户" || !body.Runtime.Authorized ||
+		!body.Runtime.ProviderConfigured || body.Runtime.Provider != "deepseek" ||
+		body.Runtime.Model != "deepseek-v4-pro" || !body.Runtime.PluginOnline ||
+		body.Runtime.PluginHealth != "ready" || body.Runtime.PluginVersion != "1.2.3" ||
+		!body.Runtime.ContractMatch {
 		t.Fatalf("unexpected body=%s err=%v", res.Body.String(), err)
+	}
+	for _, forbidden := range []string{"handId", "bootId", "contractHash", "caps", "api_key", "apiKey"} {
+		if strings.Contains(res.Body.String(), forbidden) {
+			t.Fatalf("产品运行快照泄露内部字段 %q: %s", forbidden, res.Body.String())
+		}
+	}
+}
+
+func TestOverviewRuntimeFailureReturnsHonestUnavailableSnapshot(t *testing.T) {
+	handler := newTestAPI(t, &fakeProjections{},
+		WithRuntimeSnapshotProvider(func(context.Context) (RuntimeSnapshot, error) {
+			return RuntimeSnapshot{
+				Available: true, ProviderConfigured: true, Provider: "should-not-leak",
+			}, errors.New("runtime unavailable")
+		}),
+	)
+	res := request(t, handler, http.MethodGet, "/app/overview", "127.0.0.1:43000", testBearer)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Runtime RuntimeSnapshot `json:"runtime"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Runtime.Available || body.Runtime.ProviderConfigured ||
+		body.Runtime.PluginOnline || strings.Contains(res.Body.String(), "should-not-leak") {
+		t.Fatalf("运行态读取失败必须诚实降级为空快照: %s", res.Body.String())
 	}
 }
 

@@ -32,6 +32,13 @@ type RuntimeSnapshot struct {
 	CustomerName       string `json:"customerName,omitempty"`
 	CustomerStatus     string `json:"customerStatus,omitempty"`
 	Authorized         bool   `json:"authorized"`
+	ProviderConfigured bool   `json:"providerConfigured"`
+	Provider           string `json:"provider,omitempty"`
+	Model              string `json:"model,omitempty"`
+	PluginOnline       bool   `json:"pluginOnline"`
+	PluginHealth       string `json:"pluginHealth,omitempty"`
+	PluginVersion      string `json:"pluginVersion,omitempty"`
+	ContractMatch      bool   `json:"contractMatch"`
 	CurrentBatchID     string `json:"-"`
 	WorkflowMode       string `json:"workflowMode,omitempty"`
 	WorkflowStatus     string `json:"workflowStatus,omitempty"`
@@ -149,7 +156,14 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 	}
 	snapshot.CustomerName = strings.TrimSpace(snapshot.CustomerName)
 	snapshot.CustomerStatus = strings.TrimSpace(snapshot.CustomerStatus)
+	snapshot.Provider = strings.TrimSpace(snapshot.Provider)
+	snapshot.Model = strings.TrimSpace(snapshot.Model)
+	snapshot.PluginHealth = strings.TrimSpace(snapshot.PluginHealth)
+	snapshot.PluginVersion = strings.TrimSpace(snapshot.PluginVersion)
 	snapshot.CurrentBatchID = strings.TrimSpace(snapshot.CurrentBatchID)
+	snapshot.WorkflowMode = strings.TrimSpace(snapshot.WorkflowMode)
+	snapshot.WorkflowStatus = strings.TrimSpace(snapshot.WorkflowStatus)
+	snapshot.CommunicationState = strings.TrimSpace(snapshot.CommunicationState)
 	return snapshot
 }
 
