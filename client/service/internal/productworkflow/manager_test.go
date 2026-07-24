@@ -175,6 +175,35 @@ func TestReplyOnlyAndClosedWindowNeverCreateSourcingBatchOrReservation(t *testin
 	}
 }
 
+func TestReplyOnlyRejectsUnfinishedSourcingBatch(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.UTC
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	if _, err := db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		BatchID: "batch-block-reply-only", Platform: key.Platform, AccountRef: key.AccountRef,
+		ContextRevisionHash: revision.RevisionHash,
+		TargetCount:         NewFullWorkflowTargetCount,
+		StartedAt:           clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	actor := &fixtureActor{store: db, clock: clock}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := manager.StartReplyOnly(key)
+	if run != nil || !errors.Is(err, ErrSourcingBatchActive) {
+		t.Fatalf("StartReplyOnly() = %+v, %v", run, err)
+	}
+	if actor.enableCalls != 0 {
+		t.Fatalf("未终局采集批次存在时不得开启账号: %d", actor.enableCalls)
+	}
+	if active, loadErr := db.ActiveProductWorkflowRun(); loadErr != nil || active != nil {
+		t.Fatalf("拒绝后不得留下工作流: active=%+v err=%v", active, loadErr)
+	}
+}
+
 func TestResumeActorFailureRollsBackDurableMemberGate(t *testing.T) {
 	db, key, _ := productWorkflowFixture(t)
 	location := time.UTC

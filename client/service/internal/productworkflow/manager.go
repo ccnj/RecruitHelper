@@ -22,6 +22,7 @@ var (
 	ErrInvalidConfig         = errors.New("产品工作流配置无效")
 	ErrWorkflowNotActive     = errors.New("当前没有未终局产品工作流")
 	ErrWorkflowScopeConflict = errors.New("产品工作流账号范围冲突")
+	ErrSourcingBatchActive   = errors.New("存在未终局采集批次，不能启动仅多轮回复")
 	ErrMemberStartBlocked    = errors.New("当前不允许开始下一位候选人")
 )
 
@@ -170,6 +171,13 @@ func (m *Manager) StartReplyOnly(key store.AccountKey) (*store.ProductWorkflowRu
 	now := m.clock.Now()
 	if current, err := m.activeForStart(key, workflow.ModeReplyOnly, now); current != nil || err != nil {
 		return current, err
+	}
+	activeBatch, err := m.store.ActiveSourcingBatch(key)
+	if err != nil {
+		return nil, err
+	}
+	if activeBatch != nil {
+		return nil, ErrSourcingBatchActive
 	}
 	decision, err := workflow.Start(nil, workflow.ModeReplyOnly, now, m.location)
 	if err != nil {
