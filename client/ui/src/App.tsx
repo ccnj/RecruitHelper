@@ -161,6 +161,20 @@ function detailText(detail: unknown): string {
 
 export function App() {
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false)
+  useEffect(() => {
+    const toggleDiagnostics = (event: KeyboardEvent) => {
+      if (
+        event.shiftKey
+        && (event.metaKey || event.ctrlKey)
+        && event.key.toLowerCase() === 'd'
+      ) {
+        event.preventDefault()
+        setDiagnosticsVisible((visible) => !visible)
+      }
+    }
+    window.addEventListener('keydown', toggleDiagnostics)
+    return () => window.removeEventListener('keydown', toggleDiagnostics)
+  }, [])
   if (diagnosticsVisible) {
     return (
       <>
@@ -171,7 +185,7 @@ export function App() {
       </>
     )
   }
-  return <ProductConnectedApp onOpenDiagnostics={() => setDiagnosticsVisible(true)} />
+  return <ProductConnectedApp />
 }
 
 function DiagnosticConsole() {
