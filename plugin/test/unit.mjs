@@ -49,6 +49,7 @@ const {
   ResultStatus,
   SensorBridge,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
+  applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
@@ -63,6 +64,7 @@ const {
   readZhilianWechatExchangeOutcome,
   refreshPagesAfterRuntimeReload,
   registerM3Primitives,
+  registerM6Primitives,
   sendZhilianGreeting,
   sendZhilianInviteCard,
   sendZhilianMessage,
@@ -2317,6 +2319,17 @@ function installM6SourcingWindowFixture(options = {}) {
     document: globalThis.document,
     location: globalThis.location,
     getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+  }
+  if (options.virtualTime === true) {
+    let virtualNow = 1_780_000_000_000
+    Date.now = () => virtualNow
+    globalThis.setTimeout = (callback, delay = 0, ...args) => {
+      virtualNow += Math.max(0, Number(delay) || 0)
+      queueMicrotask(() => callback(...args))
+      return 1
+    }
   }
   const staticDomCount = Number.isInteger(options.staticDomCount) && options.staticDomCount > 0
     ? options.staticDomCount
@@ -2348,6 +2361,7 @@ function installM6SourcingWindowFixture(options = {}) {
     index: options.startAt === 'first' ? 0 : 1,
     visibleTitles: ['合成窗口职位'],
     transientReadsRemaining: 0,
+    windowReads: 0,
   }
   const scroller = {
     ...node(),
@@ -2407,9 +2421,16 @@ function installM6SourcingWindowFixture(options = {}) {
     scrollingElement: options.documentRoot === true ? scroller : null,
     querySelectorAll(selector) {
       if (selector === '.recommend-list__left div[role="listitem"]') {
+        state.windowReads += 1
         if (state.transientReadsRemaining > 0) {
           state.transientReadsRemaining -= 1
           return []
+        }
+        if (options.currentSwitchAfterReads === true) {
+          return state.windowReads <= 2 ? windows[0] : windows[1]
+        }
+        if (options.unstableCurrent === true) {
+          return windows[state.windowReads % 2]
         }
         return options.staticDom === true ? windows.flat() : windows[state.index]
       }
@@ -2435,6 +2456,8 @@ function installM6SourcingWindowFixture(options = {}) {
       globalThis.document = original.document
       globalThis.location = original.location
       globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.setTimeout = original.setTimeout
+      Date.now = original.dateNow
     },
   }
 }
@@ -2713,6 +2736,530 @@ test('candidate.selectSourcingPosition outer 使用唯一推荐页并在动作�
   }
 })
 
+const m6SourcingFilterTarget = {
+  age: { mode: 'range', minAge: 25, maxAge: 45 },
+  activeWindow: 'days3',
+  careerStatuses: [],
+  educations: ['associate', 'bachelor', 'master', 'mbaEmba', 'doctorate'],
+  gender: 'any',
+  excludeViewed: true,
+  excludeCoworkerContacted: false,
+}
+
+function installM6SourcingFilterFixture(options = {}) {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+    random: Math.random,
+  }
+  let now = 1_780_000_000_000
+  globalThis.setTimeout = (callback, delay = 0, ...args) => {
+    now += Math.max(0, Number(delay) || 0)
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  Date.now = () => now
+  Math.random = () => 0.5
+
+  const refs = {
+    job: 'fixture-filter-job',
+    title: '合成筛选职位',
+  }
+  const state = {
+    drawerOpen: false,
+    popover: null,
+    openCount: 0,
+    confirms: 0,
+    cancels: 0,
+    listVersion: 0,
+    listReads: 0,
+    interactions: [],
+    groupReads: new Map(),
+  }
+  const classList = (...initial) => {
+    const values = new Set(initial)
+    return {
+      contains(value) { return values.has(value) },
+      add(value) { values.add(value) },
+      remove(value) { values.delete(value) },
+    }
+  }
+  const node = (text = '') => ({
+    textContent: text,
+    innerText: text,
+    outerHTML: `<div>${text}</div>`,
+    classList: classList(),
+    disabled: false,
+    value: '',
+    query: new Map(),
+    attrs: new Map(),
+    getClientRects: () => [{}],
+    querySelectorAll(selector) { return this.query.get(selector) ?? [] },
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null },
+    getAttribute(name) { return this.attrs.get(name) ?? null },
+    hasAttribute(name) { return this.attrs.has(name) },
+    click() {},
+  })
+  const interact = (name) => {
+    state.interactions.push([name, Date.now()])
+  }
+
+  const groupSpecs = {
+    age: {
+      selector: '.filter-item-age',
+      title: '年龄要求',
+      labels: ['不限', '20-25', '25-30', '30-35', '35-40', '40以上', '自定义'],
+      control: 'checkbox',
+    },
+    activeTime: {
+      selector: '.filter-item-activeTime',
+      title: '活跃日期',
+      labels: ['不限', '今日活跃', '3天内活跃', '7天内活跃', '30天内活跃'],
+      control: 'radio',
+    },
+    careerStatuses: {
+      selector: '.filter-item-careerStatuses',
+      title: '求职状态',
+      labels: ['不限', '在职-正在找工作', '离职-正在找工作', '在职-看看机会', '在职-暂不找工作'],
+      control: 'checkbox',
+    },
+    educations: {
+      selector: '.filter-item-educations',
+      title: '学历要求',
+      labels: ['不限', '初中及以下', '高中', '中专/中技', '大专', '本科', '硕士', 'MBA/EMBA', '博士'],
+      control: 'checkbox',
+    },
+    gender: {
+      selector: '.filter-item-gender',
+      title: '性别要求',
+      labels: ['不限', '男', '女'],
+      control: 'radio',
+    },
+    filterTypes: {
+      selector: '.filter-item-filterTypes',
+      title: '人才范围',
+      labels: ['不限', '过滤我已看过', '过滤同事已聊'],
+      control: 'checkbox',
+    },
+  }
+  const initialSelections = options.initialTarget === true
+    ? {
+        age: ['自定义'],
+        activeTime: ['3天内活跃'],
+        careerStatuses: ['不限'],
+        educations: ['大专', '本科', '硕士', 'MBA/EMBA', '博士'],
+        gender: ['不限'],
+        filterTypes: ['过滤我已看过'],
+      }
+    : {
+        age: ['不限'],
+        activeTime: ['不限'],
+        careerStatuses: ['不限'],
+        educations: ['不限'],
+        gender: ['不限'],
+        filterTypes: ['不限'],
+      }
+
+  const groups = {}
+  const rangeValues = {
+    start: options.initialTarget === true ? '25岁' : '不限',
+    end: options.initialTarget === true ? '45岁' : '及以上',
+  }
+  const rangeDisplay = (kind) => {
+    const display = node(rangeValues[kind])
+    Object.defineProperty(display, 'textContent', {
+      get() { return rangeValues[kind] },
+      set(value) { rangeValues[kind] = String(value) },
+    })
+    return display
+  }
+  const rangeSelect = (kind) => {
+    const select = node()
+    const display = rangeDisplay(kind)
+    select.query.set('.km-input__custom, .km-input__inner', [display])
+    select.click = () => {
+      interact(`open-range-${kind}`)
+      const values = kind === 'start'
+        ? ['不限', ...Array.from({ length: 35 }, (_, index) => String(index + 16)), '55', '60', '65']
+        : ['及以上', ...Array.from({ length: 35 }, (_, index) => String(index + 16)), '55', '60', '65']
+      const optionsNodes = values.map((value) => {
+        const option = node(value === '及以上' ? value : `${value}岁`)
+        option.click = () => {
+          interact(`choose-range-${kind}-${value}`)
+          rangeValues[kind] = value === '及以上' ? value : `${value}岁`
+          state.popover = null
+        }
+        return option
+      })
+      const popover = node()
+      popover.query.set('.km-option', optionsNodes)
+      state.popover = popover
+    }
+    return select
+  }
+  const startSelect = rangeSelect('start')
+  const endSelect = rangeSelect('end')
+  const selector = node()
+  selector.query.set('.filter-select-two__start .km-select', [startSelect])
+  selector.query.set('.filter-select-two__end .km-select', [endSelect])
+
+  for (const [key, spec] of Object.entries(groupSpecs)) {
+    const group = node()
+    const title = node(spec.title)
+    const optionNodes = spec.labels.map((label) => {
+      const option = node(label)
+      const labelNode = node(label)
+      option.query.set('span', [labelNode])
+      if (spec.control === 'radio') option.query.set('.km-radio__label', [labelNode])
+      const setSelected = (selected) => {
+        if (spec.control === 'radio') {
+          if (selected) option.classList.add('km-radio--checked')
+          else option.classList.remove('km-radio--checked')
+        } else {
+          option.classList.remove(selected
+            ? 'recommend-checkbox-group__inactive'
+            : 'recommend-checkbox-group__active')
+          option.classList.add(selected
+            ? 'recommend-checkbox-group__active'
+            : 'recommend-checkbox-group__inactive')
+        }
+      }
+      option.setSelected = setSelected
+      setSelected(initialSelections[key].includes(label))
+      option.click = () => {
+        interact(`click-${key}-${label}`)
+        if (spec.control === 'radio' || key === 'age') {
+          for (const candidate of optionNodes) candidate.setSelected(candidate === option)
+          return
+        }
+        const unlimited = optionNodes.find((candidate) => candidate.textContent === '不限')
+        if (label === '不限') {
+          for (const candidate of optionNodes) candidate.setSelected(candidate === option)
+          return
+        }
+        unlimited.setSelected(false)
+        option.setSelected(!option.classList.contains('recommend-checkbox-group__active'))
+        const selectedSpecifics = optionNodes.filter((candidate) =>
+          candidate.textContent !== '不限' &&
+          candidate.classList.contains('recommend-checkbox-group__active'))
+        if (selectedSpecifics.length === 0) unlimited.setSelected(true)
+      }
+      return option
+    })
+    group.optionNodes = optionNodes
+    group.querySelectorAll = (query) => {
+      if (query === '.tr-talent-filter-item__title, .filter-group-major__title, .filter-item__title') {
+        return [title]
+      }
+      if (query === (spec.control === 'radio'
+        ? '.km-radio'
+        : '.recommend-checkbox-group__item')) {
+        return options.driftOptionSet === key ? optionNodes.slice(0, -1) : optionNodes
+      }
+      if (query === '.recommend-checkbox-group__selector') {
+        const custom = optionNodes.find((candidate) => candidate.textContent === '自定义')
+        return key === 'age' &&
+          custom.classList.contains('recommend-checkbox-group__active') ? [selector] : []
+      }
+      return []
+    }
+    groups[key] = group
+  }
+
+  const cancel = node('取消')
+  cancel.click = () => {
+    interact('cancel')
+    state.cancels += 1
+    state.drawerOpen = false
+  }
+  const confirm = node('确定')
+  confirm.click = () => {
+    interact('confirm')
+    state.confirms += 1
+    state.drawerOpen = false
+    state.listVersion += 1
+  }
+  const drawer = node()
+  Object.defineProperty(drawer, 'isConnected', { get() { return state.drawerOpen } })
+  drawer.querySelectorAll = (query) => {
+    for (const [key, spec] of Object.entries(groupSpecs)) {
+      if (query === spec.selector) {
+        state.groupReads.set(key, (state.groupReads.get(key) ?? 0) + 1)
+        if (options.missingGroup === key) return []
+        if (options.duplicateGroup === key) return [groups[key], groups[key]]
+        return [groups[key]]
+      }
+    }
+    if (query === 'button[zp-stat-id="rsmlist-confirm"]') return [confirm]
+    if (query === 'button') return [cancel, confirm]
+    return []
+  }
+  const trigger = node('筛选')
+  trigger.click = () => {
+    interact('open-filter')
+    state.openCount += 1
+    state.drawerOpen = true
+    if (options.driftOnReopen === true && state.openCount >= 2) {
+      for (const option of groups.activeTime.optionNodes) {
+        option.setSelected(option.textContent === '不限')
+      }
+    }
+  }
+  const title = node(refs.title)
+  const listItem = node()
+  listItem.attrs.set('data-index', '0')
+  Object.defineProperty(listItem, 'outerHTML', {
+    get() {
+      state.listReads += 1
+      const suffix = options.unstableList === true ? `-${state.listReads}` : ''
+      return `<div data-index="0">stable-${state.listVersion}${suffix}</div>`
+    },
+  })
+
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
+  }
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(query) {
+      if (query === '.km-modal.km-modal--open.km-modal--right') {
+        return state.drawerOpen ? [drawer] : []
+      }
+      if (query === 'a[zp-stat-id="talent-recommend-filter-click"]') return [trigger]
+      if (query === '.job-pane__item--active .job-pane__item-job-title') return [title]
+      if (query === '.recommend-list__left div[role="listitem"]') return [listItem]
+      if (query === '.km-popover.filter-select-two__popover') {
+        return state.popover ? [state.popover] : []
+      }
+      return []
+    },
+  }
+
+  return {
+    refs,
+    state,
+    groups,
+    restore() {
+      globalThis.document = original.document
+      globalThis.location = original.location
+      globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.setTimeout = original.setTimeout
+      Date.now = original.dateNow
+      Math.random = original.random
+    },
+  }
+}
+
+test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并二次回读后取消', async () => {
+  const fixture = installM6SourcingFilterFixture()
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(result.data.filters, m6SourcingFilterTarget)
+    assert.equal(result.data.positionRef, fixture.refs.job)
+    assert.equal(result.data.positionTitle, fixture.refs.title)
+    assert.equal(fixture.state.confirms, 1, '筛选命令只能点击一次确定')
+    assert.equal(fixture.state.cancels, 1, '二次回读只以取消收口')
+    assert.equal(fixture.state.drawerOpen, false)
+    assert.equal(fixture.state.openCount, 2)
+    for (const key of Object.keys(fixture.groups)) {
+      assert.equal(fixture.state.groupReads.get(key), 3,
+        `${key} 必须由字面同一 readFilters 完成初读、提交前回读和二次回读`)
+    }
+    const names = fixture.state.interactions.map(([name]) => name)
+    assert.equal(names.filter((name) => name === 'confirm').length, 1)
+    assert.equal(names.includes('click-careerStatuses-不限'), false, '相同多选不得冗余点击')
+    assert.equal(names.includes('click-gender-不限'), false, '相同单选不得冗余点击')
+    assert.ok(names.includes('click-age-自定义'))
+    assert.ok(names.includes('choose-range-start-25'))
+    assert.ok(names.includes('choose-range-end-45'))
+    for (let index = 1; index < fixture.state.interactions.length; index += 1) {
+      const elapsed =
+        fixture.state.interactions[index][1] - fixture.state.interactions[index - 1][1]
+      assert.ok(elapsed >= 1_000, `第 ${index + 1} 个页面动作与前一动作须至少间隔一秒`)
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 已完全一致仍完整提交回读且不点筛选项', async () => {
+  const fixture = installM6SourcingFilterFixture({ initialTarget: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(fixture.state.interactions.map(([name]) => name), [
+      'open-filter', 'confirm', 'open-filter', 'cancel',
+    ])
+    assert.equal(fixture.state.confirms, 1)
+    assert.equal(fixture.state.cancels, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 六组缺失、重复或选项漂移均不提交', async () => {
+  for (const [options, reason] of [
+    [{ missingGroup: 'gender' }, 'group_cardinality'],
+    [{ duplicateGroup: 'age' }, 'group_cardinality'],
+    [{ driftOptionSet: 'educations' }, 'option_set_mismatch'],
+  ]) {
+    const fixture = installM6SourcingFilterFixture(options)
+    try {
+      const result = await zhilianTestHooks.mainApplySourcingFilters(
+        fixture.refs.job,
+        fixture.refs.title,
+        structuredClone(m6SourcingFilterTarget),
+      )
+      assert.deepEqual(result, { status: 'failed', reason })
+      assert.equal(fixture.state.confirms, 0)
+      assert.equal(fixture.state.cancels, 1, '自有筛选面失败时须以取消尽力收口')
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 合法但平台无精确年龄选项时响亮失败且不近似', async () => {
+  const fixture = installM6SourcingFilterFixture()
+  try {
+    const target = structuredClone(m6SourcingFilterTarget)
+    target.age = { mode: 'range', minAge: 51, maxAge: 54 }
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      target,
+    )
+    assert.deepEqual(result, { status: 'failed', reason: 'range_option_unavailable' })
+    assert.equal(fixture.state.confirms, 0)
+    assert.equal(
+      fixture.state.interactions.some(([name]) => name === 'choose-range-start-50' ||
+        name === 'choose-range-start-55'),
+      false,
+      '不得把 51 岁近似成相邻平台选项',
+    )
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 列表不稳定或二次回读漂移时整体失败', async () => {
+  for (const [options, reason, expectedConfirms] of [
+    [{ unstableList: true }, 'list_unstable', 1],
+    [{ driftOnReopen: true }, 'filter_mismatch', 1],
+  ]) {
+    const fixture = installM6SourcingFilterFixture(options)
+    try {
+      const result = await zhilianTestHooks.mainApplySourcingFilters(
+        fixture.refs.job,
+        fixture.refs.title,
+        structuredClone(m6SourcingFilterTarget),
+      )
+      assert.deepEqual(result, { status: 'failed', reason })
+      assert.equal(fixture.state.confirms, expectedConfirms)
+      assert.equal(result.data, undefined, '失败不得返回部分筛选 data')
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('candidate.applySourcingFilters outer 使用唯一推荐页并在动作前后复核账号', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '8'.repeat(64)
+  const tab = {
+    id: 601,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-filter-job',
+  }
+  const mainCalls = []
+  const actionArgs = []
+  let probeCalls = 0
+  let barrierCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, tab.id)
+        mainCalls.push(func.name)
+        if (func.name === 'mainProbeZhilian') {
+          probeCalls += 1
+          return [{ result: {
+            pageKind: 'recommend',
+            loginState: 'in',
+            principalFingerprint: fingerprint,
+            imListVisible: false,
+          } }]
+        }
+        assert.equal(func.name, 'mainApplySourcingFilters')
+        actionArgs.push(structuredClone(args))
+        return [{ result: {
+          status: 'ready',
+          data: {
+            positionRef: 'fixture-filter-job',
+            positionTitle: '合成筛选职位',
+            filters: structuredClone(m6SourcingFilterTarget),
+            observedAt: Date.now(),
+          },
+        } }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'apply-sourcing-filter-fixture',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barrierCalls += 1 },
+    async progress() {},
+  }
+  try {
+    const data = await applyZhilianSourcingFilters({
+      positionRef: 'fixture-filter-job',
+      positionTitle: '  合成筛选职位 ',
+      filters: structuredClone(m6SourcingFilterTarget),
+    }, context, fingerprint)
+    assert.deepEqual(data.filters, m6SourcingFilterTarget)
+    assert.equal(barrierCalls, 1)
+    assert.equal(probeCalls, 3)
+    assert.deepEqual(mainCalls, [
+      'mainProbeZhilian',
+      'mainProbeZhilian',
+      'mainApplySourcingFilters',
+      'mainProbeZhilian',
+    ])
+    assert.deepEqual(actionArgs, [[
+      'fixture-filter-job',
+      '合成筛选职位',
+      m6SourcingFilterTarget,
+    ]])
+
+    registerM6Primitives()
+    assert.ok(capabilities().includes(`${Primitive.CandidateApplySourcingFilters}@1`))
+    assert.ok(lookup(Primitive.CandidateApplySourcingFilters),
+      'candidate.applySourcingFilters 必须注册生产 handler')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('candidate.readSourcingWindow MAIN current/reset/next 只返回稳定身份并推进至多一窗', async () => {
   const fixture = installM6SourcingWindowFixture()
   try {
@@ -2736,6 +3283,39 @@ test('candidate.readSourcingWindow MAIN current/reset/next 只返回稳定身份
     const serialized = JSON.stringify([current, reset, next])
     assert.equal(serialized.includes('绝不返回姓名'), false)
     assert.equal(serialized.includes('resumeNumber'), false)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN current 等待连续稳定窗口而非返回首次瞬时读', async () => {
+  const fixture = installM6SourcingWindowFixture({
+    startAt: 'first',
+    currentSwitchAfterReads: true,
+  })
+  try {
+    const current = await zhilianTestHooks.mainReadSourcingWindow('current')
+    assert.equal(current.status, 'ready')
+    assert.deepEqual(current.data.platformUserRefs, fixture.refs.secondWindow)
+    assert.equal(current.data.moved, false, 'current 只读稳定现状，不把渲染变化声明为主动移动')
+    assert.ok(fixture.state.windowReads >= 5, 'current 必须完成首次读后的连续稳定采样')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.readSourcingWindow MAIN current 持续抖动到十秒后失败而非冒充稳定', async () => {
+  const fixture = installM6SourcingWindowFixture({
+    startAt: 'first',
+    unstableCurrent: true,
+    virtualTime: true,
+  })
+  try {
+    assert.deepEqual(
+      await zhilianTestHooks.mainReadSourcingWindow('current'),
+      { status: 'failed', reason: 'page_unstable' },
+    )
+    assert.ok(fixture.state.windowReads > 5)
   } finally {
     fixture.restore()
   }
@@ -2790,6 +3370,7 @@ test('candidate.readSourcingWindow MAIN 从常驻 DOM 中只返回当前视口�
 test('candidate.readSourcingWindow MAIN 可遍历 document root 上超过 32 张常驻卡片并在尾部停止', async () => {
   const fixture = installM6SourcingWindowFixture({
     startAt: 'first', staticDom: true, staticDomCount: 34, documentRoot: true,
+    virtualTime: true,
   })
   try {
     delete fixture.windows[0][33].__vue__._props.source.userMasterId

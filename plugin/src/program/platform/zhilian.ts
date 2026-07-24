@@ -4,6 +4,8 @@
 import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
 import type {
+  CandidateApplySourcingFiltersArgs,
+  CandidateApplySourcingFiltersData,
   CandidateReadCurrentData,
   CandidateReadResumeArgs,
   CandidateReadResumeData,
@@ -15,6 +17,7 @@ import type {
   CandidateResumeLabelValue,
   CandidateSelectSourcingPositionArgs,
   CandidateSelectSourcingPositionData,
+  CandidateSourcingFilters,
   ChatAcceptWechatArgs,
   ChatAcceptWechatData,
   ChatReadGreetingOutcomeArgs,
@@ -47,7 +50,11 @@ import type {
   SideEffect,
   ThreadMessage,
 } from '../../base/protocol'
-import { Primitive as PrimitiveName, validatePrimitiveData } from '../../base/protocol'
+import {
+  Primitive as PrimitiveName,
+  validatePrimitiveArgs,
+  validatePrimitiveData,
+} from '../../base/protocol'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -83,6 +90,8 @@ export type ZhilianSourcingWindowArgs = CandidateReadSourcingWindowArgs
 export type ZhilianSourcingWindowData = CandidateReadSourcingWindowData
 export type ZhilianSelectSourcingPositionArgs = CandidateSelectSourcingPositionArgs
 export type ZhilianSelectSourcingPositionData = CandidateSelectSourcingPositionData
+export type ZhilianApplySourcingFiltersArgs = CandidateApplySourcingFiltersArgs
+export type ZhilianApplySourcingFiltersData = CandidateApplySourcingFiltersData
 export type ZhilianGreetingArgs = ChatSendGreetingArgs
 export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
@@ -243,6 +252,7 @@ const MAIN_SOURCING_WINDOW_FAILURE_REASONS = [
   'position_title_ambiguous',
   'position_title_mismatch',
   'scroll_unavailable',
+  'page_unstable',
   'unexpected',
 ] as const
 
@@ -294,6 +304,49 @@ interface MainSelectSourcingPositionFailed {
 
 type MainSelectSourcingPositionResult =
   MainSelectSourcingPositionReady | MainSelectSourcingPositionFailed
+
+const MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS = [
+  'route_changed',
+  'position_identity_unavailable',
+  'position_identity_mismatch',
+  'position_title_ambiguous',
+  'position_title_mismatch',
+  'trigger_cardinality',
+  'drawer_cardinality',
+  'drawer_not_ready',
+  'group_cardinality',
+  'group_title_mismatch',
+  'option_set_mismatch',
+  'selection_unreadable',
+  'custom_selector_unavailable',
+  'range_select_unavailable',
+  'range_option_unavailable',
+  'filter_mismatch',
+  'confirm_unavailable',
+  'confirm_not_closed',
+  'list_unavailable',
+  'list_unstable',
+  'cancel_unavailable',
+  'cancel_not_closed',
+  'cancel_changed_list',
+  'unexpected',
+] as const
+
+type MainApplySourcingFiltersFailureReason =
+  typeof MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS[number]
+
+interface MainApplySourcingFiltersReady {
+  status: 'ready'
+  data: ZhilianApplySourcingFiltersData
+}
+
+interface MainApplySourcingFiltersFailed {
+  status: 'failed'
+  reason: MainApplySourcingFiltersFailureReason
+}
+
+type MainApplySourcingFiltersResult =
+  MainApplySourcingFiltersReady | MainApplySourcingFiltersFailed
 
 const MAIN_GREETING_FAILURE_REASONS = [
   'action_window_elapsed',
@@ -1394,6 +1447,638 @@ async function mainSelectSourcingPosition(
   }
 }
 
+// 正式采集批次的筛选 evaluator。六组 DOM 映射、差异覆盖、提交前回读与
+// 提交后二次回读都封闭在同一个 MAIN task；readFilters 是三个阶段字面同一
+// 份读取器。它不触碰候选人卡片、招呼、电话或详情入口。
+async function mainApplySourcingFilters(
+  requestedPositionRef: string,
+  requestedPositionTitle: string,
+  requestedFilters: ZhilianApplySourcingFiltersArgs['filters'],
+): Promise<MainApplySourcingFiltersResult> {
+  type FilterKey =
+    | 'age'
+    | 'activeTime'
+    | 'careerStatuses'
+    | 'educations'
+    | 'gender'
+    | 'filterTypes'
+  type OptionState = {
+    node: HTMLElement
+    label: string
+    selected: boolean
+  }
+  type GroupState = {
+    node: HTMLElement
+    options: OptionState[]
+    selectedLabels: string[]
+  }
+  type FilterSnapshot = {
+    filters: CandidateSourcingFilters
+    groups: Record<FilterKey, GroupState>
+  }
+  type FilterRead = FilterSnapshot | MainApplySourcingFiltersFailed
+  type PositionRead =
+    | { status: 'ready'; positionRef: string; positionTitle: string }
+    | MainApplySourcingFiltersFailed
+  type ListRead =
+    | { status: 'ready'; signature: string }
+    | MainApplySourcingFiltersFailed
+
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/[\s\u00a0]+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      node.getClientRects().length > 0
+  }
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const failed = (
+    reason: MainApplySourcingFiltersFailureReason,
+  ): MainApplySourcingFiltersFailed => ({ status: 'failed', reason })
+  const sleep = (delayMs: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, delayMs))
+  const randomInteractionGapMs = (): number =>
+    1_000 + Math.floor(Math.random() * 501)
+  let nextInteractionNotBefore = 0
+  const interact = async (action: () => void): Promise<void> => {
+    const delayMs = nextInteractionNotBefore - Date.now()
+    if (delayMs > 0) await sleep(delayMs)
+    action()
+    nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
+  }
+  const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+    const deadline = Date.now() + timeoutMs
+    while (true) {
+      const value = read()
+      if (value !== null) return value
+      if (Date.now() >= deadline) return null
+      await sleep(120)
+    }
+  }
+  const sameStringSet = (left: string[], right: string[]): boolean =>
+    left.length === right.length &&
+    [...left].sort().every((value, index) => value === [...right].sort()[index])
+  const sameFilters = (
+    left: CandidateSourcingFilters,
+    right: CandidateSourcingFilters,
+  ): boolean => JSON.stringify(left) === JSON.stringify(right)
+
+  const careerOrder = [
+    'employedLooking',
+    'leftLooking',
+    'employedOpen',
+    'employedNotLooking',
+  ] as const
+  const educationOrder = [
+    'juniorHighOrBelow',
+    'highSchool',
+    'secondaryVocational',
+    'associate',
+    'bachelor',
+    'master',
+    'mbaEmba',
+    'doctorate',
+  ] as const
+  const normalizeFilters = (filters: CandidateSourcingFilters): CandidateSourcingFilters => ({
+    age: filters.age.mode === 'any'
+      ? { mode: 'any' }
+      : {
+          mode: 'range',
+          minAge: filters.age.minAge as number,
+          ...(filters.age.maxAge === undefined ? {} : { maxAge: filters.age.maxAge }),
+        },
+    activeWindow: filters.activeWindow,
+    careerStatuses: careerOrder.filter((value) => filters.careerStatuses.includes(value)),
+    educations: educationOrder.filter((value) => filters.educations.includes(value)),
+    gender: filters.gender,
+    excludeViewed: filters.excludeViewed,
+    excludeCoworkerContacted: filters.excludeCoworkerContacted,
+  })
+
+  const schemas: Record<FilterKey, {
+    title: string
+    selector: string
+    optionSelector: string
+    labels: string[]
+    control: 'checkbox' | 'radio'
+  }> = {
+    age: {
+      title: '年龄要求',
+      selector: '.filter-item-age',
+      optionSelector: '.recommend-checkbox-group__item',
+      labels: ['不限', '20-25', '25-30', '30-35', '35-40', '40以上', '自定义'],
+      control: 'checkbox',
+    },
+    activeTime: {
+      title: '活跃日期',
+      selector: '.filter-item-activeTime',
+      optionSelector: '.km-radio',
+      labels: ['不限', '今日活跃', '3天内活跃', '7天内活跃', '30天内活跃'],
+      control: 'radio',
+    },
+    careerStatuses: {
+      title: '求职状态',
+      selector: '.filter-item-careerStatuses',
+      optionSelector: '.recommend-checkbox-group__item',
+      labels: ['不限', '在职-正在找工作', '离职-正在找工作', '在职-看看机会', '在职-暂不找工作'],
+      control: 'checkbox',
+    },
+    educations: {
+      title: '学历要求',
+      selector: '.filter-item-educations',
+      optionSelector: '.recommend-checkbox-group__item',
+      labels: ['不限', '初中及以下', '高中', '中专/中技', '大专', '本科', '硕士', 'MBA/EMBA', '博士'],
+      control: 'checkbox',
+    },
+    gender: {
+      title: '性别要求',
+      selector: '.filter-item-gender',
+      optionSelector: '.km-radio',
+      labels: ['不限', '男', '女'],
+      control: 'radio',
+    },
+    filterTypes: {
+      title: '人才范围',
+      selector: '.filter-item-filterTypes',
+      optionSelector: '.recommend-checkbox-group__item',
+      labels: ['不限', '过滤我已看过', '过滤同事已聊'],
+      control: 'checkbox',
+    },
+  }
+  const filterKeys = Object.keys(schemas) as FilterKey[]
+
+  const optionLabel = (option: HTMLElement): string => {
+    const radioLabels = visibleAll(option, '.km-radio__label')
+    if (radioLabels.length === 1) return clean(radioLabels[0].textContent)
+    const firstSpan = option.querySelector<HTMLElement>('span')
+    return clean(firstSpan?.textContent ?? option.textContent)
+  }
+  const selectText = (select: HTMLElement): string => {
+    const display = select.querySelector<HTMLElement>('.km-input__custom, .km-input__inner')
+    if (display) return clean(display.textContent)
+    const input = select.querySelector<HTMLInputElement>('input')
+    if (input && typeof input.value === 'string' && clean(input.value)) return clean(input.value)
+    return clean(select.textContent)
+  }
+  const rangeToken = (value: string): string => {
+    const normalized = clean(value).replace(/\s/gu, '').replace(/岁/gu, '')
+    if (normalized === '及以上' || normalized === '不限') return 'open'
+    const matched = normalized.match(/^\d+$/u)
+    return matched ? matched[0] : ''
+  }
+  const ageFromSelected = (
+    group: HTMLElement,
+    selectedLabel: string,
+  ): CandidateSourcingFilters['age'] | null => {
+    const predefined: Record<string, CandidateSourcingFilters['age']> = {
+      '不限': { mode: 'any' },
+      '20-25': { mode: 'range', minAge: 20, maxAge: 25 },
+      '25-30': { mode: 'range', minAge: 25, maxAge: 30 },
+      '30-35': { mode: 'range', minAge: 30, maxAge: 35 },
+      '35-40': { mode: 'range', minAge: 35, maxAge: 40 },
+      '40以上': { mode: 'range', minAge: 40 },
+    }
+    if (selectedLabel !== '自定义') return predefined[selectedLabel] ?? null
+    const selectors = visibleAll(group, '.recommend-checkbox-group__selector')
+    if (selectors.length !== 1) return null
+    const starts = visibleAll(selectors[0], '.filter-select-two__start .km-select')
+    const ends = visibleAll(selectors[0], '.filter-select-two__end .km-select')
+    if (starts.length !== 1 || ends.length !== 1) return null
+    const minToken = rangeToken(selectText(starts[0]))
+    const maxToken = rangeToken(selectText(ends[0]))
+    if (!/^\d+$/u.test(minToken) || (!/^\d+$/u.test(maxToken) && maxToken !== 'open')) return null
+    const minAge = Number(minToken)
+    const maxAge = maxToken === 'open' ? undefined : Number(maxToken)
+    if (!Number.isInteger(minAge) || minAge < 16 || minAge > 65 ||
+        (maxAge !== undefined &&
+          (!Number.isInteger(maxAge) || maxAge < minAge || maxAge > 65))) {
+      return null
+    }
+    return {
+      mode: 'range',
+      minAge,
+      ...(maxAge === undefined ? {} : { maxAge }),
+    }
+  }
+  const enumLabels = {
+    activeTime: {
+      '不限': 'any',
+      '今日活跃': 'today',
+      '3天内活跃': 'days3',
+      '7天内活跃': 'days7',
+      '30天内活跃': 'days30',
+    },
+    careerStatuses: {
+      '在职-正在找工作': 'employedLooking',
+      '离职-正在找工作': 'leftLooking',
+      '在职-看看机会': 'employedOpen',
+      '在职-暂不找工作': 'employedNotLooking',
+    },
+    educations: {
+      '初中及以下': 'juniorHighOrBelow',
+      '高中': 'highSchool',
+      '中专/中技': 'secondaryVocational',
+      '大专': 'associate',
+      '本科': 'bachelor',
+      '硕士': 'master',
+      'MBA/EMBA': 'mbaEmba',
+      '博士': 'doctorate',
+    },
+    gender: {
+      '不限': 'any',
+      '男': 'male',
+      '女': 'female',
+    },
+  } as const
+
+  // 这是初读、提交前完整回读与提交后二次回读共用的字面同一份 evaluator。
+  const readFilters = (drawer: HTMLElement): FilterRead => {
+    const groups = {} as Record<FilterKey, GroupState>
+    for (const key of filterKeys) {
+      const schema = schemas[key]
+      const matches = visibleAll(drawer, schema.selector)
+      if (matches.length !== 1) return failed('group_cardinality')
+      const group = matches[0]
+      const titles = visibleAll(
+        group,
+        '.tr-talent-filter-item__title, .filter-group-major__title, .filter-item__title',
+      )
+      if (titles.length !== 1 || clean(titles[0].textContent) !== schema.title) {
+        return failed('group_title_mismatch')
+      }
+      const optionNodes = visibleAll(group, schema.optionSelector)
+      const options = optionNodes.map((node): OptionState | null => {
+        const label = optionLabel(node)
+        if (!label) return null
+        if (schema.control === 'checkbox') {
+          const active = node.classList.contains('recommend-checkbox-group__active')
+          const inactive = node.classList.contains('recommend-checkbox-group__inactive')
+          if (active === inactive) return null
+          return { node, label, selected: active }
+        }
+        return {
+          node,
+          label,
+          selected: node.classList.contains('km-radio--checked'),
+        }
+      })
+      if (options.some((option) => option === null)) return failed('selection_unreadable')
+      const concreteOptions = options as OptionState[]
+      const labels = concreteOptions.map(({ label }) => label)
+      if (new Set(labels).size !== labels.length || !sameStringSet(labels, schema.labels)) {
+        return failed('option_set_mismatch')
+      }
+      const selectedLabels = concreteOptions.filter(({ selected }) => selected)
+        .map(({ label }) => label)
+      if (schema.control === 'radio' && selectedLabels.length !== 1) {
+        return failed('selection_unreadable')
+      }
+      if (schema.control === 'checkbox' &&
+          (selectedLabels.length === 0 ||
+            (selectedLabels.includes('不限') && selectedLabels.length !== 1))) {
+        return failed('selection_unreadable')
+      }
+      groups[key] = { node: group, options: concreteOptions, selectedLabels }
+    }
+
+    const age = ageFromSelected(groups.age.node, groups.age.selectedLabels[0])
+    const activeWindow = enumLabels.activeTime[
+      groups.activeTime.selectedLabels[0] as keyof typeof enumLabels.activeTime
+    ]
+    const gender = enumLabels.gender[
+      groups.gender.selectedLabels[0] as keyof typeof enumLabels.gender
+    ]
+    if (!age || !activeWindow || !gender) return failed('selection_unreadable')
+    const careerStatuses = groups.careerStatuses.selectedLabels
+      .filter((label) => label !== '不限')
+      .map((label) => enumLabels.careerStatuses[
+        label as keyof typeof enumLabels.careerStatuses
+      ])
+    const educations = groups.educations.selectedLabels
+      .filter((label) => label !== '不限')
+      .map((label) => enumLabels.educations[label as keyof typeof enumLabels.educations])
+    if (careerStatuses.some((value) => !value) || educations.some((value) => !value)) {
+      return failed('selection_unreadable')
+    }
+    return {
+      filters: normalizeFilters({
+        age,
+        activeWindow,
+        careerStatuses,
+        educations,
+        gender,
+        excludeViewed: groups.filterTypes.selectedLabels.includes('过滤我已看过'),
+        excludeCoworkerContacted: groups.filterTypes.selectedLabels.includes('过滤同事已聊'),
+      }),
+      groups,
+    }
+  }
+
+  const position = (): PositionRead => {
+    let route: URL
+    try {
+      route = new URL(location.href)
+    } catch {
+      return failed('route_changed')
+    }
+    if (!route.pathname.startsWith('/app/recommend')) return failed('route_changed')
+    const currentRef = clean(route.searchParams.get('jobNumber'))
+    if (!currentRef) return failed('position_identity_unavailable')
+    if (currentRef !== requestedPositionRef) return failed('position_identity_mismatch')
+    const titles = visibleAll(
+      document,
+      '.job-pane__item--active .job-pane__item-job-title',
+    ).map((node) => clean(node.textContent)).filter(Boolean)
+    if (titles.length !== 1) return failed('position_title_ambiguous')
+    if (titles[0] !== requestedPositionTitle) return failed('position_title_mismatch')
+    return { status: 'ready', positionRef: currentRef, positionTitle: titles[0] }
+  }
+  const drawerNodes = (): HTMLElement[] =>
+    visibleAll(document, '.km-modal.km-modal--open.km-modal--right')
+  const trigger = (): HTMLElement | null => {
+    const matches = visibleAll(document, 'a[zp-stat-id="talent-recommend-filter-click"]')
+    return matches.length === 1 ? matches[0] : null
+  }
+  const cancelButton = (drawer: HTMLElement): HTMLElement | null => {
+    const matches = visibleAll(drawer, 'button').filter((button) => clean(button.textContent) === '取消')
+    return matches.length === 1 ? matches[0] : null
+  }
+  const listSnapshot = (): ListRead => {
+    const currentPosition = position()
+    if (currentPosition.status === 'failed') return currentPosition
+    const items = visibleAll(document, '.recommend-list__left div[role="listitem"]')
+    if (items.length === 0) return failed('list_unavailable')
+    const signature = items.map((item, index) => {
+      const dataIndex = clean(item.getAttribute('data-index'))
+      const html = typeof item.outerHTML === 'string' ? item.outerHTML : item.textContent
+      return `${index}:${dataIndex}:${clean(html)}`
+    }).join('|')
+    return signature ? { status: 'ready', signature } : failed('list_unavailable')
+  }
+  const stableList = async (): Promise<ListRead> => {
+    const deadline = Date.now() + 10_000
+    let previous: ListRead | null = null
+    while (true) {
+      const current = listSnapshot()
+      if (current.status === 'failed') {
+        if (current.reason === 'route_changed' ||
+            current.reason === 'position_identity_mismatch' ||
+            current.reason === 'position_title_mismatch') {
+          return current
+        }
+        previous = null
+      } else if (previous?.status === 'ready' &&
+          previous.signature === current.signature) {
+        return current
+      } else {
+        previous = current
+      }
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) break
+      await sleep(Math.min(1_000, remainingMs))
+    }
+    return failed('list_unstable')
+  }
+  const openDrawer = async (): Promise<HTMLElement | null> => {
+    const openTrigger = trigger()
+    if (!openTrigger) return null
+    await interact(() => openTrigger.click())
+    return waitFor(() => {
+      const drawers = drawerNodes()
+      return drawers.length === 1 ? drawers[0] : null
+    })
+  }
+  const closeOwnedDrawer = async (drawer: HTMLElement): Promise<boolean> => {
+    if (!drawer.isConnected && drawerNodes().length === 0) return true
+    const cancel = cancelButton(drawer)
+    if (!cancel) return false
+    await interact(() => cancel.click())
+    return await waitFor(() => drawerNodes().length === 0 ? true : null) === true
+  }
+  const clickOption = async (group: GroupState, label: string): Promise<boolean> => {
+    const matches = group.options.filter((option) => option.label === label)
+    if (matches.length !== 1) return false
+    await interact(() => matches[0].node.click())
+    return true
+  }
+  const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
+    const careerLabels: Record<string, string> = {
+      employedLooking: '在职-正在找工作',
+      leftLooking: '离职-正在找工作',
+      employedOpen: '在职-看看机会',
+      employedNotLooking: '在职-暂不找工作',
+    }
+    const educationLabels: Record<string, string> = {
+      juniorHighOrBelow: '初中及以下',
+      highSchool: '高中',
+      secondaryVocational: '中专/中技',
+      associate: '大专',
+      bachelor: '本科',
+      master: '硕士',
+      mbaEmba: 'MBA/EMBA',
+      doctorate: '博士',
+    }
+    const activeLabels: Record<string, string> = {
+      any: '不限',
+      today: '今日活跃',
+      days3: '3天内活跃',
+      days7: '7天内活跃',
+      days30: '30天内活跃',
+    }
+    const genderLabels: Record<string, string> = { any: '不限', male: '男', female: '女' }
+    const rangePresets: Array<{ minAge: number; maxAge?: number; label: string }> = [
+      { minAge: 20, maxAge: 25, label: '20-25' },
+      { minAge: 25, maxAge: 30, label: '25-30' },
+      { minAge: 30, maxAge: 35, label: '30-35' },
+      { minAge: 35, maxAge: 40, label: '35-40' },
+      { minAge: 40, label: '40以上' },
+    ]
+    const preset = filters.age.mode === 'range'
+      ? rangePresets.find((candidate) =>
+          candidate.minAge === filters.age.minAge && candidate.maxAge === filters.age.maxAge)
+      : undefined
+    return {
+      age: [filters.age.mode === 'any' ? '不限' : preset?.label ?? '自定义'],
+      activeTime: [activeLabels[filters.activeWindow]],
+      careerStatuses: filters.careerStatuses.length === 0
+        ? ['不限']
+        : filters.careerStatuses.map((value) => careerLabels[value]),
+      educations: filters.educations.length === 0
+        ? ['不限']
+        : filters.educations.map((value) => educationLabels[value]),
+      gender: [genderLabels[filters.gender]],
+      filterTypes: [
+        ...(filters.excludeViewed ? ['过滤我已看过'] : []),
+        ...(filters.excludeCoworkerContacted ? ['过滤同事已聊'] : []),
+      ].length === 0
+        ? ['不限']
+        : [
+            ...(filters.excludeViewed ? ['过滤我已看过'] : []),
+            ...(filters.excludeCoworkerContacted ? ['过滤同事已聊'] : []),
+          ],
+    }
+  }
+  const selectRangeValue = async (
+    select: HTMLElement,
+    value: number | undefined,
+  ): Promise<boolean> => {
+    const targetToken = value === undefined ? 'open' : String(value)
+    if (rangeToken(selectText(select)) === targetToken) return true
+    await interact(() => select.click())
+    const option = await waitFor(() => {
+      const popovers = visibleAll(document, '.km-popover.filter-select-two__popover')
+      if (popovers.length !== 1) return null
+      const matches = visibleAll(popovers[0], '.km-option')
+        .filter((candidate) => rangeToken(clean(candidate.textContent)) === targetToken)
+      return matches.length === 1 ? matches[0] : null
+    })
+    if (!option) return false
+    await interact(() => option.click())
+    const closed = await waitFor(() =>
+      visibleAll(document, '.km-popover.filter-select-two__popover').length === 0 ? true : null)
+    return closed === true
+  }
+
+  const targetFilters = normalizeFilters(requestedFilters)
+  let ownedDrawer: HTMLElement | null = null
+  try {
+    if (drawerNodes().length !== 0) return failed('drawer_cardinality')
+    const initialPosition = position()
+    if (initialPosition.status === 'failed') return initialPosition
+    if (!trigger()) return failed('trigger_cardinality')
+
+    ownedDrawer = await openDrawer()
+    if (!ownedDrawer) return failed('drawer_not_ready')
+    if (drawerNodes().length !== 1) return failed('drawer_cardinality')
+    const initialSnapshot = readFilters(ownedDrawer)
+    if ('status' in initialSnapshot) return initialSnapshot
+    const targets = desiredLabels(targetFilters)
+    if (Object.values(targets).some((labels) => labels.some((label) => !label))) {
+      return failed('filter_mismatch')
+    }
+
+    for (const key of filterKeys) {
+      const group = initialSnapshot.groups[key]
+      const targetLabels = targets[key]
+      if (key === 'age' || key === 'activeTime' || key === 'gender') {
+        if (group.selectedLabels[0] !== targetLabels[0] &&
+            !await clickOption(group, targetLabels[0])) {
+          return failed('option_set_mismatch')
+        }
+        continue
+      }
+      if (targetLabels.length === 1 && targetLabels[0] === '不限') {
+        if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
+            !await clickOption(group, '不限')) {
+          return failed('option_set_mismatch')
+        }
+        continue
+      }
+      for (const selected of group.selectedLabels) {
+        if (selected !== '不限' && !targetLabels.includes(selected) &&
+            !await clickOption(group, selected)) {
+          return failed('option_set_mismatch')
+        }
+      }
+      for (const desired of targetLabels) {
+        if (!group.selectedLabels.includes(desired) &&
+            !await clickOption(group, desired)) {
+          return failed('option_set_mismatch')
+        }
+      }
+    }
+
+    if (targetFilters.age.mode === 'range' && targets.age[0] === '自定义') {
+      const selector = await waitFor(() => {
+        const matches = visibleAll(initialSnapshot.groups.age.node, '.recommend-checkbox-group__selector')
+        return matches.length === 1 ? matches[0] : null
+      })
+      if (!selector) return failed('custom_selector_unavailable')
+      const starts = visibleAll(selector, '.filter-select-two__start .km-select')
+      const ends = visibleAll(selector, '.filter-select-two__end .km-select')
+      if (starts.length !== 1 || ends.length !== 1) return failed('range_select_unavailable')
+      if (!await selectRangeValue(starts[0], targetFilters.age.minAge) ||
+          !await selectRangeValue(ends[0], targetFilters.age.maxAge)) {
+        return failed('range_option_unavailable')
+      }
+    }
+
+    const confirmedSnapshot = await waitFor(() => {
+      const current = readFilters(ownedDrawer as HTMLElement)
+      return !('status' in current) && sameFilters(current.filters, targetFilters) ? current : null
+    })
+    if (!confirmedSnapshot) return failed('filter_mismatch')
+    const currentPosition = position()
+    if (currentPosition.status === 'failed') return currentPosition
+
+    const confirmButtons = visibleAll(
+      ownedDrawer,
+      'button[zp-stat-id="rsmlist-confirm"]',
+    )
+    if (confirmButtons.length !== 1 || confirmButtons[0].hasAttribute('disabled') ||
+        confirmButtons[0].getAttribute('aria-disabled') === 'true') {
+      return failed('confirm_unavailable')
+    }
+    await interact(() => confirmButtons[0].click())
+    const submittedDrawer = ownedDrawer
+    const closed = await waitFor(() => drawerNodes().length === 0 ? true : null)
+    if (closed !== true) return failed('confirm_not_closed')
+    if (submittedDrawer.isConnected && drawerNodes().length !== 0) {
+      return failed('confirm_not_closed')
+    }
+    ownedDrawer = null
+
+    const stable = await stableList()
+    if (stable.status === 'failed') return stable
+    const reopened = await openDrawer()
+    if (!reopened) return failed('drawer_not_ready')
+    ownedDrawer = reopened
+    if (drawerNodes().length !== 1) return failed('drawer_cardinality')
+    const finalSnapshot = readFilters(reopened)
+    if ('status' in finalSnapshot) return finalSnapshot
+    if (!sameFilters(finalSnapshot.filters, targetFilters)) return failed('filter_mismatch')
+    const finalPosition = position()
+    if (finalPosition.status === 'failed') return finalPosition
+
+    const cancel = cancelButton(reopened)
+    if (!cancel) return failed('cancel_unavailable')
+    await interact(() => cancel.click())
+    const cancelClosed = await waitFor(() => drawerNodes().length === 0 ? true : null)
+    if (cancelClosed !== true) return failed('cancel_not_closed')
+    ownedDrawer = null
+    await sleep(1_000)
+    const afterCancel = listSnapshot()
+    if (afterCancel.status === 'failed') return afterCancel
+    if (afterCancel.signature !== stable.signature) return failed('cancel_changed_list')
+    const afterPosition = position()
+    if (afterPosition.status === 'failed') return afterPosition
+
+    return {
+      status: 'ready',
+      data: {
+        positionRef: afterPosition.positionRef,
+        positionTitle: afterPosition.positionTitle,
+        filters: finalSnapshot.filters,
+        observedAt: Date.now(),
+      },
+    }
+  } catch {
+    return failed('unexpected')
+  } finally {
+    if (ownedDrawer) {
+      try {
+        await closeOwnedDrawer(ownedDrawer)
+      } catch {
+        // 返回原失败；页面收口失败由 outer 统一暴露为命令失败。
+      }
+    }
+  }
+}
+
 // 正式采集批次的推荐窗口 evaluator。只读取当前虚拟列表窗口中的稳定身份；
 // reset/next 最多各执行一次滚动动作，moved 只陈述本次是否观察到窗口或滚动位置推进。
 // 它没有“耗尽”语义，也不读取姓名与 resumeNumber。
@@ -1558,37 +2243,31 @@ async function mainReadSourcingWindow(
     const initial = collect(scroller)
     if ('status' in initial) return initial
     const initialSignature = signature(initial)
-    if (move === 'current') {
-      return {
-        status: 'ready',
-        data: {
-          positionRef: initial.positionRef,
-          positionTitle: initial.positionTitle,
-          platformUserRefs: initial.sources.map((source) => source.platformUserRef),
-          moved: false,
-          observedAt: Date.now(),
-        },
+    const beforeTop = scroller ? scrollTop(scroller) : 0
+    if (move !== 'current') {
+      if (!scroller) return failed('scroll_unavailable')
+      if (move === 'reset') {
+        scrollTo(scroller, 0)
+      } else {
+        const viewport = Math.max(Number(scroller.clientHeight) || 0, 1)
+        const maxTop = Math.max((Number(scroller.scrollHeight) || 0) - viewport, 0)
+        scrollTo(scroller, Math.min(beforeTop + viewport, maxTop))
       }
-    }
-
-    if (!scroller) return failed('scroll_unavailable')
-    const beforeTop = scrollTop(scroller)
-    if (move === 'reset') {
-      scrollTo(scroller, 0)
-    } else {
-      const viewport = Math.max(Number(scroller.clientHeight) || 0, 1)
-      const maxTop = Math.max((Number(scroller.scrollHeight) || 0) - viewport, 0)
-      scrollTo(scroller, Math.min(beforeTop + viewport, maxTop))
     }
 
     let latest = collect(scroller)
     let latestSignature = 'status' in latest ? '' : signature(latest)
     let stableRounds = 0
+    let settled = false
     const settleUntil = Date.now() + 10_000
     while (Date.now() < settleUntil) {
       if (!('status' in latest)) {
-        const movementObserved = latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop
-        if (stableRounds >= 2 && (move === 'reset' || movementObserved)) break
+        const movementObserved = latestSignature !== initialSignature ||
+          (scroller ? scrollTop(scroller) !== beforeTop : false)
+        if (stableRounds >= 2 && (move === 'current' || move === 'reset' || movementObserved)) {
+          settled = true
+          break
+        }
       } else if (latest.reason === 'route_changed') {
         return latest
       }
@@ -1606,6 +2285,10 @@ async function mainReadSourcingWindow(
       latestSignature = nextSignature
     }
     if ('status' in latest) return latest
+    // next 到达真实尾部时不会再产生 movement，但只有等满稳定窗口后才允许把
+    // 连续相同读解释为合法的 moved=false；不能在两三个采样点后抢跑判尾。
+    if (!settled && move === 'next' && stableRounds >= 2) settled = true
+    if (!settled) return failed('page_unstable')
     if (latest.positionRef !== initial.positionRef) return failed('position_identity_mismatch')
     if (latest.positionTitle !== initial.positionTitle) return failed('position_title_mismatch')
     return {
@@ -1614,7 +2297,10 @@ async function mainReadSourcingWindow(
         positionRef: latest.positionRef,
         positionTitle: latest.positionTitle,
         platformUserRefs: latest.sources.map((source) => source.platformUserRef),
-        moved: latestSignature !== initialSignature || scrollTop(scroller) !== beforeTop,
+        moved: move === 'current'
+          ? false
+          : latestSignature !== initialSignature ||
+            (scroller ? scrollTop(scroller) !== beforeTop : false),
         observedAt: Date.now(),
       },
     }
@@ -3514,6 +4200,20 @@ function validSelectSourcingPositionResult(
     validatePrimitiveData(PrimitiveName.CandidateSelectSourcingPosition, 1, record.data).length === 0
 }
 
+function validApplySourcingFiltersResult(
+  value: unknown,
+): value is MainApplySourcingFiltersResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') {
+    return typeof record.reason === 'string' &&
+      (MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS as readonly string[]).includes(record.reason)
+  }
+  return record.status === 'ready' && record.data !== null && typeof record.data === 'object' &&
+    !Array.isArray(record.data) &&
+    validatePrimitiveData(PrimitiveName.CandidateApplySourcingFilters, 1, record.data).length === 0
+}
+
 async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
   return (await chrome.tabs.query({
     url: TAB_QUERY,
@@ -3540,6 +4240,14 @@ function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
   if (result.reason === 'scroll_unavailable') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐列表滚动窗口无法唯一确定', 'manualOnly')
   }
+  if (result.reason === 'page_unstable') {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '当前推荐列表窗口尚未连续稳定',
+      'afterRecovery',
+      'pageBroken',
+    )
+  }
   throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐窗口身份或职位无法完整且唯一读取', 'manualOnly')
 }
 
@@ -3554,6 +4262,58 @@ function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFa
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联职位选择页面尚未稳定', 'afterRecovery', 'pageBroken')
   }
   throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位无法唯一选择并确认', 'manualOnly')
+}
+
+function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed): never {
+  if (result.reason === 'route_changed' ||
+      result.reason === 'position_identity_mismatch' ||
+      result.reason === 'position_title_mismatch') {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC',
+      '筛选应用期间当前推荐页或职位发生变化',
+      'manualOnly',
+    )
+  }
+  if (result.reason === 'drawer_not_ready' ||
+      result.reason === 'list_unavailable' ||
+      result.reason === 'list_unstable') {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '智联筛选面或推荐列表尚未稳定',
+      'afterRecovery',
+      'pageBroken',
+    )
+  }
+  if (result.reason === 'range_option_unavailable') {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '目标年龄在当前智联筛选选项中没有精确值',
+      'manualOnly',
+    )
+  }
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    '智联筛选条件无法完整覆盖并回读确认',
+    'manualOnly',
+  )
+}
+
+function sameSourcingFilters(
+  left: CandidateSourcingFilters,
+  right: CandidateSourcingFilters,
+): boolean {
+  const sameSet = (a: string[], b: string[]): boolean =>
+    a.length === b.length &&
+    [...a].sort().every((value, index) => value === [...b].sort()[index])
+  return left.age.mode === right.age.mode &&
+    left.age.minAge === right.age.minAge &&
+    left.age.maxAge === right.age.maxAge &&
+    left.activeWindow === right.activeWindow &&
+    sameSet(left.careerStatuses, right.careerStatuses) &&
+    sameSet(left.educations, right.educations) &&
+    left.gender === right.gender &&
+    left.excludeViewed === right.excludeViewed &&
+    left.excludeCoworkerContacted === right.excludeCoworkerContacted
 }
 
 export async function selectZhilianSourcingPosition(
@@ -3623,6 +4383,84 @@ export async function selectZhilianSourcingPosition(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位选择结果不符合当前契约', 'manualOnly')
   }
   ctx.progress('智联推荐页职位选择完成', 100)
+  return result.data
+}
+
+export async function applyZhilianSourcingFilters(
+  args: ZhilianApplySourcingFiltersArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianApplySourcingFiltersData> {
+  if (validatePrimitiveArgs(
+    PrimitiveName.CandidateApplySourcingFilters,
+    1,
+    args,
+  ).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '采集筛选目标不符合当前契约', 'manualOnly')
+  }
+  const positionRef = args.positionRef.trim()
+  const positionTitle = args.positionTitle.normalize('NFC').replace(/[\s\u00a0]+/gu, ' ').trim()
+  ctx.checkpoint()
+  const initialTabs = await activeSourcingTabs()
+  if (initialTabs.length === 0) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '请保留一个已就绪的智联推荐页标签',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (initialTabs.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  const tab = initialTabs[0]
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  const initialProbe = await probeTab(tab)
+  if (initialProbe.pageKind !== 'recommend') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
+  }
+  assertExpectedPrincipal(initialProbe, expectedPrincipalFingerprint)
+  ctx.progress('核对筛选目标、推荐页与登录身份', 10)
+
+  ctx.checkpoint()
+  const beforeActionTabs = await activeSourcingTabs()
+  if (beforeActionTabs.length !== 1 || beforeActionTabs[0].id !== tab.id ||
+      beforeActionTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '筛选应用前推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(beforeActionTabs[0]), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+  const result = await runMain(tab.id, mainApplySourcingFilters, [
+    positionRef,
+    positionTitle,
+    args.filters,
+  ])
+  if (!validApplySourcingFiltersResult(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '筛选应用结果结构不符合当前契约', 'manualOnly')
+  }
+  if (result.status === 'failed') throwApplySourcingFiltersFailure(result)
+  if (result.data.positionRef !== positionRef ||
+      result.data.positionTitle !== positionTitle ||
+      !sameSourcingFilters(result.data.filters, args.filters)) {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '筛选回读结果与目标绑定不一致', 'manualOnly')
+  }
+
+  ctx.checkpoint()
+  const latestTabs = await activeSourcingTabs()
+  if (latestTabs.length !== 1 || latestTabs[0].id !== tab.id || latestTabs[0].status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '筛选应用期间推荐页标签发生切换', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latestTabs[0]), expectedPrincipalFingerprint)
+  if (validatePrimitiveData(
+    PrimitiveName.CandidateApplySourcingFilters,
+    1,
+    result.data,
+  ).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '筛选应用结果不符合当前契约', 'manualOnly')
+  }
+  ctx.progress('智联采集筛选已覆盖并二次回读确认', 100)
   return result.data
 }
 
@@ -8834,6 +9672,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadGreetingListTarget,
   mainReadCurrentResume,
   mainSelectSourcingPosition,
+  mainApplySourcingFilters,
   mainReadSourcingWindow,
   mainReadSourcingResume,
   mainSendGreetingOnce,
@@ -8850,6 +9689,7 @@ export const zhilianTestHooks = Object.freeze({
   mainSendCardOnce,
   mainSendMessageOnce,
   selectZhilianSourcingPosition,
+  applyZhilianSourcingFilters,
   ensureThreadRoute,
   runMain,
 })

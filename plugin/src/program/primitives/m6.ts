@@ -1,6 +1,7 @@
 // 冒烟冲刺的单候选人采集原语。候选人选择、详情动作与完整性核验只存在于
 // 智联 program；本模块仅把生成契约接入唯一 dispatcher 注册表。
 import {
+  CandidateApplySourcingFiltersArgs,
   CandidateReadSourcingResumeArgs,
   CandidateReadSourcingTargetResumeArgs,
   CandidateReadSourcingWindowArgs,
@@ -10,6 +11,7 @@ import {
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
+  applyZhilianSourcingFilters,
   readZhilianSourcingResume,
   readZhilianSourcingTargetResume,
   readZhilianSourcingWindow,
@@ -73,6 +75,26 @@ const selectSourcingPosition: Primitive = {
   },
 }
 
+const applySourcingFilters: Primitive = {
+  name: PrimitiveName.CandidateApplySourcingFilters,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await applyZhilianSourcingFilters(
+        rawArgs as CandidateApplySourcingFiltersArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const readSourcingWindow: Primitive = {
   name: PrimitiveName.CandidateReadSourcingWindow,
   class: CmdClass.Intrusive,
@@ -115,6 +137,7 @@ const readSourcingTargetResume: Primitive = {
 
 export function registerM6Primitives(): void {
   register(selectSourcingPosition)
+  register(applySourcingFilters)
   register(readSourcingResume)
   register(readSourcingWindow)
   register(readSourcingTargetResume)
