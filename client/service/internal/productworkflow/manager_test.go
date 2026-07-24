@@ -39,9 +39,19 @@ func (a *fixtureActor) StartSourcing(key store.AccountKey, revision string, targ
 	return err
 }
 
-func (a *fixtureActor) EnableToday(store.AccountKey) error {
+func (a *fixtureActor) EnableToday(key store.AccountKey) error {
 	a.enableCalls++
-	return a.enableErr
+	if a.enableErr != nil {
+		return a.enableErr
+	}
+	now := a.clock.Now()
+	return a.store.MutateAccount(key, func(account *store.Account) error {
+		account.EnabledDate = now.Format("2006-01-02")
+		account.EnabledAt = &now
+		account.StoppedAt = nil
+		account.PausedReason = ""
+		return nil
+	})
 }
 
 func (a *fixtureActor) PauseNow(store.AccountKey) error {

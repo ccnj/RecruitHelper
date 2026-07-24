@@ -18,6 +18,7 @@ var (
 	ErrConfirmationNotReady          = errors.New("候选确认批次尚未就绪")
 	ErrConfirmationSelectionMismatch = errors.New("候选确认必须精确全选当前可发送候选人")
 	ErrGreetingSendingRequiresManual = errors.New("招呼发送存在待人工收敛成员")
+	ErrCommunicationResumeFailed     = errors.New("沟通巡检恢复失败")
 )
 
 // PipelineActor deliberately mirrors the already-existing M6 production
@@ -42,7 +43,9 @@ type PipelineActor interface {
 // AdvanceOnce advances at most one durable phase. Candidate-level methods may
 // finish several members internally, but they all call the exact member gate
 // installed by NewManager before beginning the next member.
-func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, error) {
+func (m *Manager) AdvanceOnce(
+	ctx context.Context,
+) (result *store.ProductWorkflowRun, resultErr error) {
 	m.advanceMu.Lock()
 	defer m.advanceMu.Unlock()
 
@@ -73,12 +76,30 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 		return run, ErrWorkflowPipelineInvalid
 	}
 	switch run.Status {
-	case workflow.StatusPaused, workflow.StatusWaitingDailyWindow,
-		workflow.StatusAwaitingConfirmation:
+	case workflow.StatusPaused, workflow.StatusWaitingDailyWindow:
 		return run, nil
-	case workflow.StatusRunning:
+	case workflow.StatusRunning, workflow.StatusAwaitingConfirmation:
 	default:
 		return run, ErrWorkflowPipelineInvalid
+	}
+
+	var communicationErr error
+	defer func() {
+		if communicationErr != nil {
+			resultErr = errors.Join(resultErr, communicationErr)
+		}
+	}()
+	if run.Stage != store.ProductWorkflowStageSourcing &&
+		run.Stage != store.ProductWorkflowStageCommunication {
+		if resumeErr := m.ensureCommunicationDuringFunnel(run); resumeErr != nil {
+			if !errors.Is(resumeErr, ErrCommunicationResumeFailed) {
+				return m.currentRunOr(run), resumeErr
+			}
+			// 漏斗的评分、筛选和生成不依赖手。沟通恢复失败会被本次
+			// 返回值记录，并在后续 tick 继续尝试，但不能把漏斗卡回
+			// sourcingCompleted。
+			communicationErr = resumeErr
+		}
 	}
 
 	batchID := *run.SourcingBatchID
@@ -104,8 +125,11 @@ func (m *Manager) AdvanceOnce(ctx context.Context) (*store.ProductWorkflowRun, e
 			// 结束，后续评分/生成不再占用手，因此在同一持久工作流仍为
 			// running 的前提下恢复既有会话巡检；等待人工确认期间多轮回复
 			// 也不会被漏斗无故冻住。
-			if err := m.enableCommunicationAfterSourcing(run); err != nil {
-				return m.currentRunOr(run), err
+			if resumeErr := m.ensureCommunicationDuringFunnel(run); resumeErr != nil {
+				if !errors.Is(resumeErr, ErrCommunicationResumeFailed) {
+					return m.currentRunOr(run), resumeErr
+				}
+				communicationErr = resumeErr
 			}
 			return m.advanceStage(run, store.ProductWorkflowStageScoring)
 		case store.SourcingBatchStopped:
@@ -236,7 +260,7 @@ func (m *Manager) syncDailyWindow(
 	return waiting, true, nil
 }
 
-func (m *Manager) enableCommunicationAfterSourcing(
+func (m *Manager) ensureCommunicationDuringFunnel(
 	fallback *store.ProductWorkflowRun,
 ) error {
 	m.mu.Lock()
@@ -247,8 +271,9 @@ func (m *Manager) enableCommunicationAfterSourcing(
 		return err
 	}
 	if run == nil || run.RunID != fallback.RunID ||
-		run.Status != workflow.StatusRunning ||
-		run.Stage != store.ProductWorkflowStageSourcing {
+		run.Stage != fallback.Stage ||
+		(run.Status != workflow.StatusRunning &&
+			run.Status != workflow.StatusAwaitingConfirmation) {
 		return store.ErrProductWorkflowConflict
 	}
 	open, err := workflow.EvaluateDailyWindow(m.clock.Now(), m.location)
@@ -270,9 +295,25 @@ func (m *Manager) enableCommunicationAfterSourcing(
 		}
 		return ErrMemberStartBlocked
 	}
-	return m.actor.EnableToday(store.AccountKey{
-		Platform: run.Platform, AccountRef: run.AccountRef,
-	})
+	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	account, err := m.store.AccountByKey(key)
+	if err != nil {
+		return err
+	}
+	if account == nil {
+		return store.ErrAccountNotFound
+	}
+	localDate := m.clock.Now().In(m.location).Format("2006-01-02")
+	if account.EnabledDate == localDate &&
+		account.EnabledAt != nil &&
+		account.StoppedAt == nil &&
+		account.PausedReason == "" {
+		return nil
+	}
+	if err := m.actor.EnableToday(key); err != nil {
+		return fmt.Errorf("%w: %v", ErrCommunicationResumeFailed, err)
+	}
+	return nil
 }
 
 // Run is a small restart-safe pump. Errors are observations, not permission

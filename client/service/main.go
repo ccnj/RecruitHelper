@@ -258,6 +258,8 @@ func productWorkflowErrorCode(err error) string {
 		return "workflowPipelineInvalid"
 	case errors.Is(err, productworkflow.ErrGreetingSendingRequiresManual):
 		return "greetingSendingRequiresManual"
+	case errors.Is(err, productworkflow.ErrCommunicationResumeFailed):
+		return "communicationResumeFailed"
 	case errors.Is(err, patrol.ErrSourcingScoringProviderUnavailable):
 		return "scoringProviderUnavailable"
 	case errors.Is(err, patrol.ErrSourcingGreetingProviderUnavailable):

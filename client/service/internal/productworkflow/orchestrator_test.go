@@ -280,7 +280,7 @@ func TestRepeatedConfirmationNeverRepeatsBatchSender(t *testing.T) {
 
 	completed, err := manager.AdvanceOnce(context.Background())
 	if err != nil || completed.Status != workflow.StatusCompleted ||
-		completed.Stage != store.ProductWorkflowStageCompleted || actor.enableCalls != 1 {
+		completed.Stage != store.ProductWorkflowStageCompleted || actor.enableCalls != 2 {
 		t.Fatalf("communication AdvanceOnce() = %+v enable=%d err=%v",
 			completed, actor.enableCalls, err)
 	}
@@ -310,7 +310,7 @@ func TestCommunicationResumeAfterSourcingRechecksDurableWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := manager.enableCommunicationAfterSourcing(run); err != nil {
+		if err := manager.ensureCommunicationDuringFunnel(run); err != nil {
 			t.Fatal(err)
 		}
 		if actor.enableCalls != 1 {
@@ -335,7 +335,7 @@ func TestCommunicationResumeAfterSourcingRechecksDurableWorkflow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := manager.enableCommunicationAfterSourcing(run); !errors.Is(
+		if err := manager.ensureCommunicationDuringFunnel(run); !errors.Is(
 			err,
 			store.ErrProductWorkflowConflict,
 		) {
@@ -345,6 +345,40 @@ func TestCommunicationResumeAfterSourcingRechecksDurableWorkflow(t *testing.T) {
 			t.Fatalf("EnableToday calls after pause = %d, want 0", actor.enableCalls)
 		}
 	})
+}
+
+func TestCommunicationFailureDoesNotBlockGreetingGeneration(t *testing.T) {
+	manager, actor, _, _, _ := orchestratorFixtureAtGreetingGeneration(t)
+	actor.enableErr = errors.New("fixture communication unavailable")
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+
+	awaiting, err := manager.AdvanceOnce(context.Background())
+	if !errors.Is(err, ErrCommunicationResumeFailed) ||
+		awaiting == nil ||
+		awaiting.Status != workflow.StatusAwaitingConfirmation ||
+		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation ||
+		actor.greetingCalls != 1 {
+		t.Fatalf(
+			"communication failure blocked generation: run=%+v greeting=%d err=%v",
+			awaiting,
+			actor.greetingCalls,
+			err,
+		)
+	}
+
+	actor.enableErr = nil
+	stillAwaiting, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		stillAwaiting == nil ||
+		stillAwaiting.Status != workflow.StatusAwaitingConfirmation ||
+		actor.enableCalls != 2 {
+		t.Fatalf(
+			"communication retry = %+v enable=%d err=%v",
+			stillAwaiting,
+			actor.enableCalls,
+			err,
+		)
+	}
 }
 
 func orchestratorFixtureAtGreetingGeneration(
