@@ -706,6 +706,126 @@ func TestM5CandidateReadResumeSchemas(t *testing.T) {
 	assertValidationError(t, ValidatePrimitiveData(PrimCandidateReadResume, 1, overLimitRaw), "$", "maxJsonBytes")
 }
 
+func TestM6CandidateApplySourcingFiltersSchemas(t *testing.T) {
+	meta := Primitives[PrimCandidateApplySourcingFilters]
+	wantPreconditions := []string{
+		"context.platform",
+		"context.accountRef",
+		"context.expectedPrincipalFingerprint",
+		"login.in",
+		"manualQuiet",
+	}
+	if meta.Ver != 1 || meta.Class != ClassIntrusive || meta.Batch != BatchS || meta.PlatformSideEffect != "none" ||
+		meta.ExecBudgetMs != 120000 || meta.DeadlineMs != 180000 || meta.LeaseMs != 30000 ||
+		meta.ArgsSchema != "CandidateApplySourcingFiltersArgs" || meta.DataSchema != "CandidateApplySourcingFiltersData" ||
+		meta.GuardsSchema != "" || meta.EvidenceSchema != "" || meta.VerificationPrimitive != "" ||
+		meta.VerificationVer != 0 || meta.VerificationMaxRounds != 0 || meta.ContextOptionalBeforeBinding ||
+		strings.Join(meta.Preconditions, "\x00") != strings.Join(wantPreconditions, "\x00") {
+		t.Fatalf("candidate.applySourcingFilters metadata 漂移:%+v", meta)
+	}
+
+	newFilters := func(age map[string]any) map[string]any {
+		return map[string]any{
+			"age":                      age,
+			"activeWindow":             "days3",
+			"careerStatuses":           []any{"employedLooking", "leftLooking"},
+			"educations":               []any{"associate", "bachelor", "master"},
+			"gender":                   "any",
+			"excludeViewed":            true,
+			"excludeCoworkerContacted": false,
+		}
+	}
+	commandFor := func(filters map[string]any) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"name": PrimCandidateApplySourcingFilters,
+			"ver":  1,
+			"context": map[string]any{
+				"platform":                     "zhilian",
+				"accountRef":                   "acc-1",
+				"expectedPrincipalFingerprint": "opaque",
+			},
+			"args": map[string]any{
+				"positionRef":   "position-1",
+				"positionTitle": "后端工程师",
+				"filters":       filters,
+			},
+			"deadline":     int64(1999999999999),
+			"execBudgetMs": int64(120000),
+			"leaseMs":      int64(30000),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	for name, filters := range map[string]map[string]any{
+		"不限年龄": newFilters(map[string]any{"mode": "any"}),
+		"年龄闭区间": newFilters(map[string]any{
+			"mode": "range", "minAge": 25, "maxAge": 45,
+		}),
+		"只有年龄下限": newFilters(map[string]any{
+			"mode": "range", "minAge": 25,
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateKindBody(KindCmd, commandFor(filters)); err != nil {
+				t.Fatalf("合法筛选命令应通过:%v", err)
+			}
+		})
+	}
+
+	anyWithMin := newFilters(map[string]any{"mode": "any", "minAge": 25})
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(anyWithMin)), "$.args.filters.age.minAge", "forbiddenWhen")
+
+	rangeWithoutMin := newFilters(map[string]any{"mode": "range", "maxAge": 45})
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(rangeWithoutMin)), "$.args.filters.age.minAge", "requiredWhen")
+
+	reversedRange := newFilters(map[string]any{"mode": "range", "minAge": 45, "maxAge": 25})
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(reversedRange)), "$.args.filters.age.maxAge", "lessThanOrEqualWhen")
+
+	duplicateCareers := newFilters(map[string]any{"mode": "any"})
+	duplicateCareers["careerStatuses"] = []any{"employedLooking", "employedLooking"}
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(duplicateCareers)), "$.args.filters.careerStatuses[1]", "uniqueItems")
+
+	duplicateEducations := newFilters(map[string]any{"mode": "any"})
+	duplicateEducations["educations"] = []any{"bachelor", "bachelor"}
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(duplicateEducations)), "$.args.filters.educations[1]", "uniqueItems")
+
+	unknownActiveWindow := newFilters(map[string]any{"mode": "any"})
+	unknownActiveWindow["activeWindow"] = "days14"
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(unknownActiveWindow)), "$.args.filters.activeWindow", "enum")
+
+	unknownGender := newFilters(map[string]any{"mode": "any"})
+	unknownGender["gender"] = "unknown"
+	assertValidationError(t, ValidateKindBody(KindCmd, commandFor(unknownGender)), "$.args.filters.gender", "enum")
+
+	validData, err := json.Marshal(map[string]any{
+		"positionRef":   "position-1",
+		"positionTitle": "后端工程师",
+		"filters":       newFilters(map[string]any{"mode": "range", "minAge": 25}),
+		"observedAt":    int64(20),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePrimitiveData(PrimCandidateApplySourcingFilters, 1, validData); err != nil {
+		t.Fatalf("合法筛选回读结果应通过:%v", err)
+	}
+
+	negativeObservedAt, err := json.Marshal(map[string]any{
+		"positionRef":   "position-1",
+		"positionTitle": "后端工程师",
+		"filters":       newFilters(map[string]any{"mode": "any"}),
+		"observedAt":    int64(-1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidationError(t, ValidatePrimitiveData(PrimCandidateApplySourcingFilters, 1, negativeObservedAt), "$.observedAt", "minimum")
+}
+
 func TestSendSurfaceDiagnosticStagesMatchCurrentProducer(t *testing.T) {
 	retained := []string{
 		"page_absent",

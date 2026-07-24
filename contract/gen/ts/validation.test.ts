@@ -533,6 +533,181 @@ expectIssue(
   "maxJsonBytes",
 );
 
+const sourcingFiltersMeta = PRIMITIVE_META["candidate.applySourcingFilters"];
+const expectedSourcingFiltersPreconditions = [
+  "context.platform",
+  "context.accountRef",
+  "context.expectedPrincipalFingerprint",
+  "login.in",
+  "manualQuiet",
+];
+if (
+  sourcingFiltersMeta.ver !== 1 ||
+  sourcingFiltersMeta.class !== "intrusive" ||
+  sourcingFiltersMeta.batch !== "S" ||
+  sourcingFiltersMeta.platformSideEffect !== "none" ||
+  sourcingFiltersMeta.execBudgetMs !== 120_000 ||
+  sourcingFiltersMeta.deadlineMs !== 180_000 ||
+  sourcingFiltersMeta.leaseMs !== 30_000 ||
+  sourcingFiltersMeta.argsSchema !== "CandidateApplySourcingFiltersArgs" ||
+  sourcingFiltersMeta.dataSchema !== "CandidateApplySourcingFiltersData" ||
+  sourcingFiltersMeta.guardsSchema !== null ||
+  sourcingFiltersMeta.evidenceSchema !== null ||
+  sourcingFiltersMeta.verificationPrimitive !== null ||
+  sourcingFiltersMeta.verificationVer !== null ||
+  sourcingFiltersMeta.verificationMaxRounds !== null ||
+  sourcingFiltersMeta.contextOptionalBeforeBinding ||
+  JSON.stringify(sourcingFiltersMeta.preconditions) !== JSON.stringify(expectedSourcingFiltersPreconditions)
+) {
+  throw new Error(`candidate.applySourcingFilters metadata drift: ${JSON.stringify(sourcingFiltersMeta)}`);
+}
+
+function sourcingFilters(age: Record<string, unknown>): Record<string, unknown> {
+  return {
+    age,
+    activeWindow: "days3",
+    careerStatuses: ["employedLooking", "leftLooking"],
+    educations: ["associate", "bachelor", "master"],
+    gender: "any",
+    excludeViewed: true,
+    excludeCoworkerContacted: false,
+  };
+}
+
+function sourcingFiltersCommand(filters: Record<string, unknown>): Record<string, unknown> {
+  return {
+    name: "candidate.applySourcingFilters",
+    ver: 1,
+    context: {
+      platform: "zhilian",
+      accountRef: "acc-1",
+      expectedPrincipalFingerprint: "opaque",
+    },
+    args: {
+      positionRef: "position-1",
+      positionTitle: "后端工程师",
+      filters,
+    },
+    deadline: 1_999_999_999_999,
+    execBudgetMs: 120_000,
+    leaseMs: 30_000,
+  };
+}
+
+expectValid(
+  "candidate sourcing filters any age",
+  validateKindBody(Kind.Cmd, sourcingFiltersCommand(sourcingFilters({ mode: "any" }))),
+);
+expectValid(
+  "candidate sourcing filters bounded age",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand(sourcingFilters({ mode: "range", minAge: 25, maxAge: 45 })),
+  ),
+);
+expectValid(
+  "candidate sourcing filters min-only age",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand(sourcingFilters({ mode: "range", minAge: 25 })),
+  ),
+);
+expectIssue(
+  "candidate sourcing filters any forbids minAge",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand(sourcingFilters({ mode: "any", minAge: 25 })),
+  ),
+  "$.args.filters.age.minAge",
+  "forbiddenWhen",
+);
+expectIssue(
+  "candidate sourcing filters range requires minAge",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand(sourcingFilters({ mode: "range", maxAge: 45 })),
+  ),
+  "$.args.filters.age.minAge",
+  "requiredWhen",
+);
+expectIssue(
+  "candidate sourcing filters ordered age range",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand(sourcingFilters({ mode: "range", minAge: 45, maxAge: 25 })),
+  ),
+  "$.args.filters.age.maxAge",
+  "lessThanOrEqualWhen",
+);
+expectIssue(
+  "candidate sourcing filters career statuses unique",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand({
+      ...sourcingFilters({ mode: "any" }),
+      careerStatuses: ["employedLooking", "employedLooking"],
+    }),
+  ),
+  "$.args.filters.careerStatuses[1]",
+  "uniqueItems",
+);
+expectIssue(
+  "candidate sourcing filters educations unique",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand({
+      ...sourcingFilters({ mode: "any" }),
+      educations: ["bachelor", "bachelor"],
+    }),
+  ),
+  "$.args.filters.educations[1]",
+  "uniqueItems",
+);
+expectIssue(
+  "candidate sourcing filters active window enum",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand({
+      ...sourcingFilters({ mode: "any" }),
+      activeWindow: "days14",
+    }),
+  ),
+  "$.args.filters.activeWindow",
+  "enum",
+);
+expectIssue(
+  "candidate sourcing filters gender enum",
+  validateKindBody(
+    Kind.Cmd,
+    sourcingFiltersCommand({
+      ...sourcingFilters({ mode: "any" }),
+      gender: "unknown",
+    }),
+  ),
+  "$.args.filters.gender",
+  "enum",
+);
+
+const validSourcingFiltersData = {
+  positionRef: "position-1",
+  positionTitle: "后端工程师",
+  filters: sourcingFilters({ mode: "range", minAge: 25 }),
+  observedAt: 20,
+};
+expectValid(
+  "candidate sourcing filters data",
+  validatePrimitiveData("candidate.applySourcingFilters", 1, validSourcingFiltersData),
+);
+expectIssue(
+  "candidate sourcing filters observedAt minimum",
+  validatePrimitiveData("candidate.applySourcingFilters", 1, {
+    ...validSourcingFiltersData,
+    observedAt: -1,
+  }),
+  "$.observedAt",
+  "minimum",
+);
+
 const greetingCommand = {
   name: "chat.sendGreeting",
   ver: 1,

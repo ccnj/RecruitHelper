@@ -737,6 +737,55 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "CandidateSourcingAgeFilter": {
+        "type": "object",
+        "fields": {
+          "mode": { "type": "string", "enumRef": "enums.sourcingAgeMode" },
+          "minAge": { "type": "int", "optional": true, "minimum": 16, "maximum": 65 },
+          "maxAge": { "type": "int", "optional": true, "minimum": 16, "maximum": 65 }
+        },
+        "rules": [
+          { "kind": "forbiddenWhen", "field": "minAge", "whenField": "mode", "equals": ["any"] },
+          { "kind": "forbiddenWhen", "field": "maxAge", "whenField": "mode", "equals": ["any"] },
+          { "kind": "requiredWhen", "field": "minAge", "whenField": "mode", "equals": ["range"] },
+          { "kind": "lessThanOrEqualWhen", "fields": ["minAge", "maxAge"], "whenField": "mode", "equals": ["range"] }
+        ]
+      },
+      "CandidateSourcingFilters": {
+        "type": "object",
+        "fields": {
+          "age": { "ref": "CandidateSourcingAgeFilter" },
+          "activeWindow": { "type": "string", "enumRef": "enums.sourcingActiveWindow" },
+          "careerStatuses": {
+            "type": "array", "maxItems": 4, "uniqueItems": true,
+            "items": { "type": "string", "enumRef": "enums.sourcingCareerStatus" }
+          },
+          "educations": {
+            "type": "array", "maxItems": 8, "uniqueItems": true,
+            "items": { "type": "string", "enumRef": "enums.sourcingEducation" }
+          },
+          "gender": { "type": "string", "enumRef": "enums.sourcingGender" },
+          "excludeViewed": { "type": "boolean" },
+          "excludeCoworkerContacted": { "type": "boolean" }
+        }
+      },
+      "CandidateApplySourcingFiltersArgs": {
+        "type": "object",
+        "fields": {
+          "positionRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "positionTitle": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "filters": { "ref": "CandidateSourcingFilters" }
+        }
+      },
+      "CandidateApplySourcingFiltersData": {
+        "type": "object",
+        "fields": {
+          "positionRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "positionTitle": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "filters": { "ref": "CandidateSourcingFilters" },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "CandidateReadSourcingWindowArgs": {
         "type": "object",
         "fields": {
@@ -902,6 +951,11 @@
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
     "interviewMethod": ["wechatVideo"],
     "candidateContactState": ["unestablished", "established", "unknown"],
+    "sourcingAgeMode": ["any", "range"],
+    "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],
+    "sourcingCareerStatus": ["employedLooking", "leftLooking", "employedOpen", "employedNotLooking"],
+    "sourcingEducation": ["juniorHighOrBelow", "highSchool", "secondaryVocational", "associate", "bachelor", "master", "mbaEmba", "doctorate"],
+    "sourcingGender": ["any", "male", "female"],
     "sourcingWindowMove": ["current", "reset", "next"],
     "notReadyReason": ["pageAbsent", "loginRequired", "contentScriptDead", "pageBroken", "identityUnverified", "unknown"],
     "cancelReason": ["leaseExpired", "deadlineImminent", "superseded", "operator", "shutdown"],
@@ -1061,7 +1115,14 @@
       "argsSchema": "CandidateSelectSourcingPositionArgs", "dataSchema": "CandidateSelectSourcingPositionData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
-      "note": "采集前按脑给出的职位展示名选择当前推荐页职位。手只接收 positionTitle,不得接收后台 Job.ID。标题按 NFC、trim 与 Unicode 空白折叠后唯一精确匹配;零个或多个匹配、页面未稳定、职位身份或标题无法确认均整体 failed。成功 data 只陈述本次页面最终观察;脑仍须紧接 candidate.readSourcingWindow 独立回读并在事务中核对后台职位后才能开始采集"
+      "note": "采集前按脑给出的职位展示名选择当前推荐页职位。手只接收 positionTitle,不得接收后台 Job.ID。标题按 NFC、trim 与 Unicode 空白折叠后唯一精确匹配;零个或多个匹配、页面未稳定、职位身份或标题无法确认均整体 failed。成功 data 只陈述本次页面最终观察;脑仍须紧接 candidate.applySourcingFilters,再用 candidate.readSourcingWindow 独立回读并在事务中核对后台职位后才能开始采集"
+    },
+    "candidate.applySourcingFilters": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "CandidateApplySourcingFiltersArgs", "dataSchema": "CandidateApplySourcingFiltersData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 120000, "deadlineMs": 180000, "leaseMs": 30000,
+      "note": "采集前在已核对职位的推荐页精确覆盖六组平台中立筛选;用字面同一状态读取器完成差异覆盖、提交前完整回读、唯一确定、推荐窗口稳定、二次完整回读与取消收口。成功 data 必须回显最终观察到的同一 positionRef、positionTitle 与完全相等 filters。任一字段/选项零或多匹配、状态不可读、职位变化、提交或稳定失败、二次回读不一致、取消未收口均整体 failed。不得接收后台 Job.ID、selector、平台内部状态或候选人正文"
     },
     "candidate.readSourcingWindow": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",

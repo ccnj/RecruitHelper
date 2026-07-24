@@ -386,6 +386,25 @@ func assertSchemaNode(c, types map[string]any, path string, node map[string]any)
 			die("%s.enumRef 引用不存在的枚举 %q", path, enumRef)
 		}
 	}
+	if rawUnique, exists := node["uniqueItems"]; exists {
+		if typ != "array" {
+			die("%s.uniqueItems 只允许用于 array", path)
+		}
+		if _, ok := rawUnique.(bool); !ok {
+			die("%s.uniqueItems 必须是 boolean", path)
+		}
+	}
+	if rawRules, ok := node["rules"].([]any); ok {
+		for i, raw := range rawRules {
+			rule, ok := raw.(map[string]any)
+			if !ok {
+				die("%s.rules[%d] 必须是对象", path, i)
+			}
+			if str(rule["kind"]) == "lessThanOrEqualWhen" && len(strSlice(rule["fields"])) != 2 {
+				die("%s.rules[%d].fields 必须恰有两个字段", path, i)
+			}
+		}
+	}
 }
 
 func schemaFieldInt(types map[string]any, typeName, fieldName, key string) int64 {
@@ -804,6 +823,7 @@ func genGoTypes(c map[string]any) []byte {
 	w("\tMaximum *int64 `json:\"maximum\"`")
 	w("\tMinItems int `json:\"minItems\"`")
 	w("\tMaxItems int `json:\"maxItems\"`")
+	w("\tUniqueItems bool `json:\"uniqueItems\"`")
 	w("\tMinLength int `json:\"minLength\"`")
 	w("\tMaxLength int `json:\"maxLength\"`")
 	w("\tMaxBytes int `json:\"maxBytes\"`")
@@ -1129,7 +1149,17 @@ func genGoTypes(c map[string]any) []byte {
 	w("\t\tif len(v) < spec.MinItems { return validationError(path, \"minItems\", \"元素数 %d 小于下限 %d\", len(v), spec.MinItems) }")
 	w("\t\tif spec.MaxItems > 0 && len(v) > spec.MaxItems { return validationError(path, \"maxItems\", \"元素数 %d 超过上限 %d\", len(v), spec.MaxItems) }")
 	w("\t\tif spec.Items == nil { return validationError(path, \"schema\", \"array 缺 items\") }")
-	w("\t\tfor i, item := range v { if err := validateSpec(*spec.Items, item, fmt.Sprintf(\"%s[%d]\", path, i)); err != nil { return err } }")
+	w("\t\tseen := make(map[string]struct{}, len(v))")
+	w("\t\tfor i, item := range v {")
+	w("\t\t\tif err := validateSpec(*spec.Items, item, fmt.Sprintf(\"%s[%d]\", path, i)); err != nil { return err }")
+	w("\t\t\tif spec.UniqueItems {")
+	w("\t\t\t\tencoded, err := json.Marshal(item)")
+	w("\t\t\t\tif err != nil { return validationError(fmt.Sprintf(\"%s[%d]\", path, i), \"uniqueItems\", \"元素无法规范编码\") }")
+	w("\t\t\t\tkey := string(encoded)")
+	w("\t\t\t\tif _, duplicate := seen[key]; duplicate { return validationError(fmt.Sprintf(\"%s[%d]\", path, i), \"uniqueItems\", \"数组元素必须唯一\") }")
+	w("\t\t\t\tseen[key] = struct{}{}")
+	w("\t\t\t}")
+	w("\t\t}")
 	w("\t\treturn nil")
 	w("\tcase \"object\":")
 	w("\t\tv, ok := value.(map[string]any)")
@@ -1166,6 +1196,15 @@ func genGoTypes(c map[string]any) []byte {
 	w("\t\tif !matched { return validationError(path, \"atLeastOneTrueWhen\", \"条件成立时 %v 至少一个必须为 true\", rule.Fields) }")
 	w("\tcase \"allFalseWhen\":")
 	w("\t\tfor _, field := range rule.Fields { if value, ok := values[field].(bool); !ok || value { return validationError(path+\".\"+field, \"allFalseWhen\", \"条件成立时必须为 false\") } }")
+	w("\tcase \"lessThanOrEqualWhen\":")
+	w("\t\tif len(rule.Fields) != 2 { return validationError(path, \"schema\", \"lessThanOrEqualWhen 需要两个字段\") }")
+	w("\t\tleft, leftOK := values[rule.Fields[0]].(json.Number)")
+	w("\t\tright, rightOK := values[rule.Fields[1]].(json.Number)")
+	w("\t\tif !leftOK || !rightOK { return nil }")
+	w("\t\tleftValue, leftErr := left.Int64()")
+	w("\t\trightValue, rightErr := right.Int64()")
+	w("\t\tif leftErr != nil || rightErr != nil { return validationError(path, \"schema\", \"lessThanOrEqualWhen 字段必须是整数\") }")
+	w("\t\tif leftValue > rightValue { return validationError(path+\".\"+rule.Fields[1], \"lessThanOrEqualWhen\", \"%s 必须不小于 %s\", rule.Fields[1], rule.Fields[0]) }")
 	w("\tdefault:")
 	w("\t\treturn validationError(path, \"schema\", \"未知规则 %q\", rule.Kind)")
 	w("\t}")
@@ -1504,7 +1543,7 @@ func genTSSchemas(c map[string]any) []byte {
 	must(err, "序列化 TS error data schemas")
 
 	w("interface SchemaRule {")
-	w("  kind: \"requiredWhen\" | \"forbiddenWhen\" | \"exactlyOneWhen\" | \"atLeastOneTrueWhen\" | \"allFalseWhen\";")
+	w("  kind: \"requiredWhen\" | \"forbiddenWhen\" | \"exactlyOneWhen\" | \"atLeastOneTrueWhen\" | \"allFalseWhen\" | \"lessThanOrEqualWhen\";")
 	w("  field?: string;")
 	w("  fields?: readonly string[];")
 	w("  whenField: string;")
@@ -1524,6 +1563,7 @@ func genTSSchemas(c map[string]any) []byte {
 	w("  maximum?: number;")
 	w("  minItems?: number;")
 	w("  maxItems?: number;")
+	w("  uniqueItems?: boolean;")
 	w("  minLength?: number;")
 	w("  maxLength?: number;")
 	w("  maxBytes?: number;")
@@ -1667,6 +1707,14 @@ function validateSpec(spec: SchemaSpec, value: unknown, path: string, issues: Va
       if (spec.maxItems !== undefined && value.length > spec.maxItems) pushIssue(issues, path, "maxItems", "元素数 " + value.length + " 超过上限 " + spec.maxItems);
       if (spec.items === undefined) pushIssue(issues, path, "schema", "array 缺 items");
       else value.forEach((item, index) => validateSpec(spec.items as SchemaSpec, item, path + "[" + index + "]", issues));
+      if (spec.uniqueItems === true) {
+        const seen = new Set<string>();
+        value.forEach((item, index) => {
+          const key = JSON.stringify(item);
+          if (seen.has(key)) pushIssue(issues, path + "[" + index + "]", "uniqueItems", "数组元素必须唯一");
+          seen.add(key);
+        });
+      }
       return;
     case "object":
       if (!isRecord(value)) {
@@ -1712,6 +1760,19 @@ function validateSchemaRule(rule: SchemaRule, values: Record<string, unknown>, p
         if (values[field] !== false) pushIssue(issues, path + "." + field, "allFalseWhen", "条件成立时必须为 false");
       }
       return;
+    case "lessThanOrEqualWhen": {
+      const fields = rule.fields ?? [];
+      if (fields.length !== 2) {
+        pushIssue(issues, path, "schema", "lessThanOrEqualWhen 需要两个字段");
+        return;
+      }
+      const left = values[fields[0]];
+      const right = values[fields[1]];
+      if (typeof left === "number" && typeof right === "number" && left > right) {
+        pushIssue(issues, path + "." + fields[1], "lessThanOrEqualWhen", fields[1] + " 必须不小于 " + fields[0]);
+      }
+      return;
+    }
   }
 }
 

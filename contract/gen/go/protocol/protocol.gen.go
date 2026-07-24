@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:ed46ad702a481815e63a44e06ec4775ccd55f61c5be1cd7bec27bbd8fe8da122"
+	ContractHash       = "sha256:e04f877d7b7f0cb1b900be8551c1dc0514c83aace5fbe20566ef6eec6aa1000b"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -443,6 +443,90 @@ var SideEffectValues = []SideEffect{
 	SideEffectConfirmed,
 }
 
+type SourcingActiveWindow string
+
+const (
+	SourcingActiveWindowAny    SourcingActiveWindow = "any"
+	SourcingActiveWindowToday  SourcingActiveWindow = "today"
+	SourcingActiveWindowDays3  SourcingActiveWindow = "days3"
+	SourcingActiveWindowDays7  SourcingActiveWindow = "days7"
+	SourcingActiveWindowDays30 SourcingActiveWindow = "days30"
+)
+
+var SourcingActiveWindowValues = []SourcingActiveWindow{
+	SourcingActiveWindowAny,
+	SourcingActiveWindowToday,
+	SourcingActiveWindowDays3,
+	SourcingActiveWindowDays7,
+	SourcingActiveWindowDays30,
+}
+
+type SourcingAgeMode string
+
+const (
+	SourcingAgeModeAny   SourcingAgeMode = "any"
+	SourcingAgeModeRange SourcingAgeMode = "range"
+)
+
+var SourcingAgeModeValues = []SourcingAgeMode{
+	SourcingAgeModeAny,
+	SourcingAgeModeRange,
+}
+
+type SourcingCareerStatus string
+
+const (
+	SourcingCareerStatusEmployedLooking    SourcingCareerStatus = "employedLooking"
+	SourcingCareerStatusLeftLooking        SourcingCareerStatus = "leftLooking"
+	SourcingCareerStatusEmployedOpen       SourcingCareerStatus = "employedOpen"
+	SourcingCareerStatusEmployedNotLooking SourcingCareerStatus = "employedNotLooking"
+)
+
+var SourcingCareerStatusValues = []SourcingCareerStatus{
+	SourcingCareerStatusEmployedLooking,
+	SourcingCareerStatusLeftLooking,
+	SourcingCareerStatusEmployedOpen,
+	SourcingCareerStatusEmployedNotLooking,
+}
+
+type SourcingEducation string
+
+const (
+	SourcingEducationJuniorHighOrBelow   SourcingEducation = "juniorHighOrBelow"
+	SourcingEducationHighSchool          SourcingEducation = "highSchool"
+	SourcingEducationSecondaryVocational SourcingEducation = "secondaryVocational"
+	SourcingEducationAssociate           SourcingEducation = "associate"
+	SourcingEducationBachelor            SourcingEducation = "bachelor"
+	SourcingEducationMaster              SourcingEducation = "master"
+	SourcingEducationMbaEmba             SourcingEducation = "mbaEmba"
+	SourcingEducationDoctorate           SourcingEducation = "doctorate"
+)
+
+var SourcingEducationValues = []SourcingEducation{
+	SourcingEducationJuniorHighOrBelow,
+	SourcingEducationHighSchool,
+	SourcingEducationSecondaryVocational,
+	SourcingEducationAssociate,
+	SourcingEducationBachelor,
+	SourcingEducationMaster,
+	SourcingEducationMbaEmba,
+	SourcingEducationDoctorate,
+}
+
+type SourcingGender string
+
+const (
+	SourcingGenderAny    SourcingGender = "any"
+	SourcingGenderMale   SourcingGender = "male"
+	SourcingGenderFemale SourcingGender = "female"
+)
+
+var SourcingGenderValues = []SourcingGender{
+	SourcingGenderAny,
+	SourcingGenderMale,
+	SourcingGenderFemale,
+}
+
 type SourcingWindowMove string
 
 const (
@@ -673,6 +757,7 @@ const (
 )
 
 const (
+	PrimCandidateApplySourcingFilters     = "candidate.applySourcingFilters"
 	PrimCandidateReadCurrent              = "candidate.readCurrent"
 	PrimCandidateReadResume               = "candidate.readResume"
 	PrimCandidateReadSourcingResume       = "candidate.readSourcingResume"
@@ -718,6 +803,7 @@ type PrimitiveMeta struct {
 }
 
 var Primitives = map[string]PrimitiveMeta{
+	PrimCandidateApplySourcingFilters:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 120000, DeadlineMs: 180000, LeaseMs: 30000, ArgsSchema: "CandidateApplySourcingFiltersArgs", DataSchema: "CandidateApplySourcingFiltersData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateReadCurrent:              {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "CandidateReadCurrentArgs", DataSchema: "CandidateReadCurrentData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateReadResume:               {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 60000, DeadlineMs: 120000, LeaseMs: 30000, ArgsSchema: "CandidateReadResumeArgs", DataSchema: "CandidateReadResumeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateReadSourcingResume:       {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 60000, DeadlineMs: 120000, LeaseMs: 30000, ArgsSchema: "CandidateReadSourcingResumeArgs", DataSchema: "CandidateReadSourcingResumeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
