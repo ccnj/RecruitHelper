@@ -51,6 +51,7 @@ const {
   ZHILIAN_UNREAD_BADGE_SELECTOR,
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
+  ensureZhilianIM,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   readZhilianUnreadTotal,
@@ -9031,6 +9032,73 @@ function installThreadRouteHarness(conversationRef, {
     },
   }
 }
+
+test('ensureZhilianIM 保留推荐流并另开后台 IM 标签', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'f'.repeat(64)
+  const recommendTab = {
+    id: 70,
+    url: 'https://rd6.zhaopin.com/app/recommend',
+    status: 'complete',
+    active: true,
+  }
+  const imTab = {
+    id: 71,
+    url: 'https://rd6.zhaopin.com/app/im',
+    status: 'complete',
+    active: false,
+  }
+  const created = []
+  const updated = []
+  try {
+    globalThis.chrome = {
+      tabs: {
+        async query() { return [recommendTab] },
+        async create(options) {
+          created.push(options)
+          return { ...imTab }
+        },
+        async update(id, options) {
+          updated.push({ id, options })
+          return { ...imTab }
+        },
+        async get(id) {
+          assert.equal(id, imTab.id)
+          return { ...imTab }
+        },
+        async sendMessage() { return { ok: true } },
+      },
+      scripting: {
+        async executeScript({ target }) {
+          assert.equal(target.tabId, imTab.id)
+          return [{
+            result: {
+              pageKind: 'im',
+              loginState: 'in',
+              principalFingerprint: fingerprint,
+              imListVisible: true,
+            },
+          }]
+        },
+      },
+    }
+    const result = await ensureZhilianIM({
+      deadlineMs: Date.now() + 10_000,
+      irreversibleNotAfterMs: Date.now() + 10_000,
+      signal: new AbortController().signal,
+      async progress() {},
+      checkpoint() {},
+    }, fingerprint)
+
+    assert.equal(result.ready, true)
+    assert.equal(result.createdTab, true)
+    assert.deepEqual(created, [{ url: 'https://rd6.zhaopin.com/app/im', active: false }])
+    assert.deepEqual(updated, [], '推荐页不得被导航离开')
+    assert.equal(recommendTab.url, 'https://rd6.zhaopin.com/app/recommend')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
 
 test('identifyCurrentConversation 只读唯一 IM URL，首页无会话或多 IM 均失败', async () => {
   const originalChrome = globalThis.chrome

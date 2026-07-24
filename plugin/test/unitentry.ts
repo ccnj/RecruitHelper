@@ -21,6 +21,7 @@ export {
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
   identifyZhilianCurrentConversation,
+  ensureZhilianIM,
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,
