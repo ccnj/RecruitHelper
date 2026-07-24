@@ -4276,7 +4276,11 @@ function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFa
   if (result.reason === 'drawer_not_ready' || result.reason === 'page_unstable') {
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联职位选择页面尚未稳定', 'afterRecovery', 'pageBroken')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位无法唯一选择并确认', 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    `智联职位无法唯一选择并确认（${result.reason}）`,
+    'manualOnly',
+  )
 }
 
 function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed): never {
