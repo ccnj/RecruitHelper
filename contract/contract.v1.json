@@ -616,6 +616,51 @@
           "type": { "type": "string", "enumRef": "enums.sendWechatInviteEvidenceType" }
         }
       },
+      "ChatAcceptWechatArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "requestSourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 }
+        }
+      },
+      "ChatAcceptWechatData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "requestSourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
+          "exchangeSourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
+          "peerWechat": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ChatAcceptWechatEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.acceptWechatEvidenceType" }
+        }
+      },
+      "ChatReadWechatExchangeOutcomeArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "requestSourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 }
+        }
+      },
+      "ChatReadWechatExchangeOutcomeData": {
+        "type": "object",
+        "fields": {
+          "confirmed": { "type": "boolean" },
+          "exchangeSourceKey": { "type": "string", "optional": true, "minLength": 64, "maxLength": 64, "maxBytes": 64 },
+          "peerWechat": { "type": "string", "optional": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        },
+        "rules": [
+          { "kind": "requiredWhen", "whenField": "confirmed", "equals": [true], "field": "exchangeSourceKey" },
+          { "kind": "requiredWhen", "whenField": "confirmed", "equals": [true], "field": "peerWechat" },
+          { "kind": "forbiddenWhen", "whenField": "confirmed", "equals": [false], "field": "exchangeSourceKey" },
+          { "kind": "forbiddenWhen", "whenField": "confirmed", "equals": [false], "field": "peerWechat" }
+        ]
+      },
       "ChatSendInviteCardArgs": {
         "type": "object",
         "fields": {
@@ -853,6 +898,7 @@
     "sendMessageEvidenceType": ["outboundMessageObserved"],
     "sendGreetingEvidenceType": ["outboundGreetingObserved"],
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
+    "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
     "interviewMethod": ["wechatVideo"],
     "candidateContactState": ["unestablished", "established", "unknown"],
@@ -1075,12 +1121,20 @@
       "note": "只向既有 tracked 会话发送一次线上邀面卡,当前 method 仅支持 wechatVideo,且 endsAt 必须大于 startsAt。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与 startsAt/endsAt/method 全部精确相等;平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
     "chat.acceptWechat": {
-      "ver": 0, "class": "effectful", "batch": "X",
-      "note": "候选人主动换微信请求的接受能力占位;点击接受的公开动作与后置状态真机事实门未完成,ver=0 不得上报 caps、派发或注册生产 handler"
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "ChatAcceptWechatArgs", "dataSchema": "ChatAcceptWechatData",
+      "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatAcceptWechatEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"],
+      "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
+      "verification": { "primitive": "chat.readWechatExchangeOutcome", "ver": 1, "maxRounds": 3 },
+      "note": "只接受当前 tracked 会话中由 requestSourceKey 精确锚定的候选人主动微信请求。preflight 与最终 click 前必须字面调用同一 evaluator,核对账号、目标、expectedTail、稳定消息基线、唯一 105/in/originType=2/success 请求、唯一可见且非 done 的标准同意动作;原语内只 click 一次且不重试。成功只接受相对基线唯一新增的 259/in/originType=2/success 稳定消息,该行必须同时具有候选人与招聘方微信字段;data 只返回候选人 peerWechat。任何缺失、歧义、并发新增、目标换绑或读取失败均为未确认,进入专门 outcome 读或 suspect,禁止第二次接受"
     },
     "chat.readWechatExchangeOutcome": {
-      "ver": 0, "class": "intrusive", "batch": "X",
-      "note": "换微信交换结果专门回读占位;当前 259 只经 chat.readThread 感知,独立读面事实门未完成,ver=0 不得上报 caps、派发或注册生产 handler"
+      "ver": 1, "class": "readonly", "batch": "X",
+      "argsSchema": "ChatReadWechatExchangeOutcomeArgs", "dataSchema": "ChatReadWechatExchangeOutcomeData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
+      "execBudgetMs": 30000, "deadlineMs": 300000,
+      "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。requestSourceKey 只允许锚定已证实的两种请求:105/in/originType=2/success 后唯一 259/in/originType=2/success,或 105/out/originType=1/success 后唯一 259/in/originType=1/success;匹配结果必须位于下一条 105 之前且双方微信字段齐全,才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
     }
   },
   "events": {

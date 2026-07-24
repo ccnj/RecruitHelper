@@ -179,6 +179,44 @@ expectIssue(
   "atLeastOneTrueWhen",
 );
 
+const wechatExchangeOutcome = {
+  confirmed: true,
+  exchangeSourceKey: "b".repeat(64),
+  peerWechat: "peer-wechat",
+  observedAt: 20,
+};
+expectValid(
+  "wechat exchange outcome confirmed",
+  validatePrimitiveData("chat.readWechatExchangeOutcome", 1, wechatExchangeOutcome),
+);
+for (const field of ["exchangeSourceKey", "peerWechat"] as const) {
+  const missing: Record<string, unknown> = { ...wechatExchangeOutcome };
+  delete missing[field];
+  expectIssue(
+    `wechat exchange outcome confirmed needs ${field}`,
+    validatePrimitiveData("chat.readWechatExchangeOutcome", 1, missing),
+    `$.${field}`,
+    "requiredWhen",
+  );
+  expectIssue(
+    `wechat exchange outcome unconfirmed forbids ${field}`,
+    validatePrimitiveData("chat.readWechatExchangeOutcome", 1, {
+      confirmed: false,
+      observedAt: 20,
+      [field]: wechatExchangeOutcome[field],
+    }),
+    `$.${field}`,
+    "forbiddenWhen",
+  );
+}
+expectValid(
+  "wechat exchange outcome unconfirmed",
+  validatePrimitiveData("chat.readWechatExchangeOutcome", 1, {
+    confirmed: false,
+    observedAt: 20,
+  }),
+);
+
 const event = {
   name: "unreadBadge",
   context: { platform: "zhilian", accountRef: "acc-01" },

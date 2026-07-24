@@ -542,14 +542,65 @@ func TestM5BCardPrimitiveSchemas(t *testing.T) {
 	}`)
 	assertValidationError(t, ValidatePrimitiveData(PrimChatReadThread, 1, threadWithInvalidMethod), "$.messages[0].interview.method", "enum")
 
-	for _, primitive := range []string{PrimChatAcceptWechat, PrimChatReadWechatExchangeOutcome} {
-		meta := Primitives[primitive]
-		if meta.Ver != 0 || meta.ArgsSchema != "" || meta.DataSchema != "" || meta.GuardsSchema != "" || meta.EvidenceSchema != "" {
-			t.Fatalf("%s 应保持 ver=0 无 schema 占位:%+v", primitive, meta)
-		}
-		command := json.RawMessage(`{"name":"` + primitive + `","ver":1,"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},"args":{},"idemKey":"ik-1","deadline":1999999999999,"execBudgetMs":60000}`)
-		assertValidationError(t, ValidateKindBody(KindCmd, command), "$.name", "primitive")
+	acceptCommand := json.RawMessage(`{
+		"name":"chat.acceptWechat","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","requestSourceKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"idemKey":"ik1:zhilian:acc-1:chat.acceptWechat:conv-1:req-1",
+		"deadline":1999999999999,"execBudgetMs":60000,"leaseMs":30000,
+		"guards":{"expectedTail":[{"direction":"in","contentHash":"tail-hash"}]}
+	}`)
+	if err := ValidateKindBody(KindCmd, acceptCommand); err != nil {
+		t.Fatalf("合法 chat.acceptWechat 命令应通过:%v", err)
 	}
+	acceptResult := json.RawMessage(`{
+		"ref":"accept-1","status":"ok",
+		"data":{"conversationRef":"conv-1",
+			"requestSourceKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"exchangeSourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"peerWechat":"peer-wechat","observedAt":20},
+		"evidence":[{"type":"candidateWechatRequestAcceptedObserved"}],"replayed":false,"execMs":10
+	}`)
+	if err := ValidatePrimitiveResult(PrimChatAcceptWechat, 1, acceptResult); err != nil {
+		t.Fatalf("合法接受微信 result 应通过:%v", err)
+	}
+	acceptWrongEvidence := json.RawMessage(`{
+		"ref":"accept-1","status":"ok",
+		"data":{"conversationRef":"conv-1",
+			"requestSourceKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"exchangeSourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"peerWechat":"peer-wechat","observedAt":20},
+		"evidence":[{"type":"outboundWechatInviteObserved"}],"replayed":false,"execMs":10
+	}`)
+	assertValidationError(t, ValidatePrimitiveResult(PrimChatAcceptWechat, 1, acceptWrongEvidence), "$.evidence[0].type", "enum")
+
+	readOutcomeCommand := json.RawMessage(`{
+		"name":"chat.readWechatExchangeOutcome","ver":1,
+		"context":{"platform":"zhilian","accountRef":"acc-1","expectedPrincipalFingerprint":"opaque"},
+		"args":{"conversationRef":"conv-1","requestSourceKey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		"deadline":1999999999999,"execBudgetMs":30000
+	}`)
+	if err := ValidateKindBody(KindCmd, readOutcomeCommand); err != nil {
+		t.Fatalf("合法微信 outcome 读命令应通过:%v", err)
+	}
+	confirmedOutcome := json.RawMessage(`{
+		"confirmed":true,
+		"exchangeSourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"peerWechat":"peer-wechat","observedAt":20
+	}`)
+	if err := ValidatePrimitiveData(PrimChatReadWechatExchangeOutcome, 1, confirmedOutcome); err != nil {
+		t.Fatalf("合法微信 outcome data 应通过:%v", err)
+	}
+	unconfirmedOutcome := json.RawMessage(`{"confirmed":false,"observedAt":20}`)
+	if err := ValidatePrimitiveData(PrimChatReadWechatExchangeOutcome, 1, unconfirmedOutcome); err != nil {
+		t.Fatalf("合法未确认 outcome data 应通过:%v", err)
+	}
+	unconfirmedWithContact := json.RawMessage(`{
+		"confirmed":false,
+		"exchangeSourceKey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"peerWechat":"peer-wechat","observedAt":20
+	}`)
+	assertValidationError(t, ValidatePrimitiveData(PrimChatReadWechatExchangeOutcome, 1, unconfirmedWithContact), "$.exchangeSourceKey", "forbiddenWhen")
 
 	for _, primitive := range []string{PrimChatSendWechatInvite, PrimChatSendInviteCard} {
 		meta := Primitives[primitive]
@@ -559,6 +610,21 @@ func TestM5BCardPrimitiveSchemas(t *testing.T) {
 			meta.VerificationMaxRounds != DefaultVerificationMaxRounds {
 			t.Fatalf("%s 卡片发送元数据漂移:%+v", primitive, meta)
 		}
+	}
+	acceptMeta := Primitives[PrimChatAcceptWechat]
+	if acceptMeta.Ver != 1 || acceptMeta.Class != ClassEffectful || acceptMeta.Batch != BatchX ||
+		acceptMeta.GuardsSchema != "ChatSendMessageGuards" ||
+		acceptMeta.EvidenceSchema != "ChatAcceptWechatEvidence" ||
+		acceptMeta.VerificationPrimitive != PrimChatReadWechatExchangeOutcome ||
+		acceptMeta.VerificationVer != 1 ||
+		acceptMeta.VerificationMaxRounds != DefaultVerificationMaxRounds {
+		t.Fatalf("chat.acceptWechat 元数据漂移:%+v", acceptMeta)
+	}
+	outcomeMeta := Primitives[PrimChatReadWechatExchangeOutcome]
+	if outcomeMeta.Ver != 1 || outcomeMeta.Class != ClassReadonly || outcomeMeta.Batch != BatchX ||
+		outcomeMeta.GuardsSchema != "" || outcomeMeta.EvidenceSchema != "" ||
+		outcomeMeta.VerificationPrimitive != "" {
+		t.Fatalf("chat.readWechatExchangeOutcome 元数据漂移:%+v", outcomeMeta)
 	}
 }
 
