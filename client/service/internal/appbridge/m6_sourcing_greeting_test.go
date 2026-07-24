@@ -331,7 +331,9 @@ func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(
 		t.Fatalf("列表直接招呼未成功收敛: progress=%+v err=%v", progress, err)
 	}
 	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
-		protocol.SourcingWindowMoveReset, protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveCurrent,
 	}); got != want {
 		t.Fatalf("定位必须固定 reset→next: got=%s want=%s", got, want)
 	}
@@ -385,7 +387,10 @@ func TestSelectedSourcingGreetingsScanOnceAndSendInCurrentPageOrder(t *testing.T
 	}
 	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
 		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveCurrent,
+		protocol.SourcingWindowMoveCurrent,
 		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveCurrent,
 	}); got != want {
 		t.Fatalf("批量招呼不应为每个目标回到顶部: got=%s want=%s", got, want)
 	}
@@ -395,6 +400,54 @@ func TestSelectedSourcingGreetingsScanOnceAndSendInCurrentPageOrder(t *testing.T
 	}
 	if *paceWaits != 3 {
 		t.Fatalf("三个全新候选人必须分别等待一次: %d", *paceWaits)
+	}
+}
+
+func TestSelectedSourcingGreetingsRecheckCurrentWindowBeforeCreatingNextIntent(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}})
+	manager, batchID, plan, _ := prepareGeneratedSourcingGreetings(t, h, 2)
+	var candidateB store.SourcingGreetingSendTarget
+	for _, target := range plan.Targets {
+		if target.PlatformUserRef == "candidate-b" {
+			candidateB = target
+			break
+		}
+	}
+	if candidateB.InvocationID == "" {
+		t.Fatalf("续扫投影缺少 candidate-b: %+v", plan)
+	}
+	h.sender.windows = [][]string{{"candidate-a", "candidate-b"}}
+	h.sender.window = 0
+	h.sender.moves = nil
+	h.sender.afterFirstGreeting = [][]string{{"candidate-a"}}
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if !errors.Is(err, patrol.ErrSourcingGreetingTargetNotFound) || progress == nil ||
+		progress.SentCount != 1 || progress.PendingCount != 1 ||
+		progress.InFlightCount != 0 || progress.FailedCount != 0 {
+		t.Fatalf("重排后消失目标没有保持 pending: progress=%+v err=%v", progress, err)
+	}
+	if got, want := fmt.Sprint(sourcingGreetingPlatformRefs(h.sender)),
+		fmt.Sprint([]string{"candidate-a"}); got != want {
+		t.Fatalf("重排后仍尝试了已消失目标: got=%s want=%s", got, want)
+	}
+	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveCurrent,
+		protocol.SourcingWindowMoveCurrent,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+	}); got != want {
+		t.Fatalf("重排复核或顶部兜底命令序列错误: got=%s want=%s", got, want)
+	}
+	intentID, err := store.SourcingGreetingEffectIntentID(candidateB.InvocationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := h.store.EffectIntentByID(intentID)
+	if err != nil || intent != nil {
+		t.Fatalf("已消失目标不应形成 WAL intent: intent=%+v err=%v", intent, err)
 	}
 }
 
@@ -452,6 +505,8 @@ func TestSelectedSourcingGreetingsStopOneWindowAfterCapturedTail(t *testing.T) {
 	}
 	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
 		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveCurrent,
+		protocol.SourcingWindowMoveCurrent,
 		protocol.SourcingWindowMoveNext,
 		protocol.SourcingWindowMoveReset,
 		protocol.SourcingWindowMoveNext,

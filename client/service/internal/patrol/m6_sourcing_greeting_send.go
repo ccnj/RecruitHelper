@@ -224,18 +224,11 @@ func (m *Manager) scanSourcingGreetingPass(
 		if err != nil {
 			return err
 		}
-		if window.PositionRef != plan.PositionRef {
-			return ErrSourcingGreetingPositionChanged
+		if err := validateSourcingGreetingWindow(window, plan.PositionRef); err != nil {
+			return err
 		}
 		if move == protocol.SourcingWindowMoveNext && !window.Moved {
 			return nil
-		}
-		identityCounts := make(map[string]int, len(window.PlatformUserRefs))
-		for _, ref := range window.PlatformUserRefs {
-			identityCounts[ref]++
-			if ref == "" || identityCounts[ref] != 1 {
-				return ErrSourcingGreetingWindowRepeated
-			}
 		}
 		windowKey := strings.Join(window.PlatformUserRefs, "\x00")
 		if _, repeated := seenWindows[windowKey]; repeated {
@@ -261,6 +254,21 @@ func (m *Manager) scanSourcingGreetingPass(
 			if err := m.config.SourcingPaceWait(ctx); err != nil {
 				return err
 			}
+			// 节奏等待和前序真实发送都可能让虚拟列表重排。必须在 WAL
+			// 形成前复读当前稳定窗口；目标已经卸载只表示本轮未定位，
+			// 不能把它终局成一次 sideEffect=none 的失败意图。
+			current, err := m.readSourcingGreetingWindow(
+				ctx, generation, protocol.SourcingWindowMoveCurrent,
+			)
+			if err != nil {
+				return err
+			}
+			if err := validateSourcingGreetingWindow(current, plan.PositionRef); err != nil {
+				return err
+			}
+			if !sourcingGreetingWindowContains(current.PlatformUserRefs, ref) {
+				continue
+			}
 			if err := m.runAutomaticSourcingGreeting(ctx, &generation, AutomaticGreetingRequest{
 				BatchID: target.BatchID, InvocationID: target.InvocationID,
 			}); err != nil {
@@ -277,6 +285,32 @@ func (m *Manager) scanSourcingGreetingPass(
 		move = protocol.SourcingWindowMoveNext
 	}
 	return nil
+}
+
+func validateSourcingGreetingWindow(
+	window protocol.CandidateReadSourcingWindowData,
+	positionRef string,
+) error {
+	if window.PositionRef != positionRef {
+		return ErrSourcingGreetingPositionChanged
+	}
+	identityCounts := make(map[string]int, len(window.PlatformUserRefs))
+	for _, ref := range window.PlatformUserRefs {
+		identityCounts[ref]++
+		if ref == "" || identityCounts[ref] != 1 {
+			return ErrSourcingGreetingWindowRepeated
+		}
+	}
+	return nil
+}
+
+func sourcingGreetingWindowContains(refs []string, target string) bool {
+	for _, ref := range refs {
+		if ref == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) readSourcingGreetingWindow(

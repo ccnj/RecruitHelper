@@ -108,6 +108,7 @@ type sourcingActorSender struct {
 	online                 bool
 	holdGreeting           bool
 	greetings              []sourcingGreetingCommand
+	afterFirstGreeting     [][]string
 }
 
 type sourcingGreetingCommand struct {
@@ -265,6 +266,14 @@ func (s *sourcingActorSender) completeGreeting(command sourcingGreetingCommand) 
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	if len(s.greetings) == 1 && s.afterFirstGreeting != nil {
+		s.windows = s.afterFirstGreeting
+		if s.window >= len(s.windows) {
+			s.window = len(s.windows) - 1
+		}
+	}
+	s.mu.Unlock()
 	s.dispatcher.OnResult(command.handID, "result-"+command.msgID, protocol.ResultBody{
 		Ref: command.msgID, Status: protocol.ResultStatusOk, Data: data, ExecMs: 1,
 		Evidence: []protocol.Evidence{{Type: string(protocol.SendGreetingEvidenceTypeOutboundGreetingObserved)}},
