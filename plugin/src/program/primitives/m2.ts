@@ -1,6 +1,7 @@
 // 里程碑 2 正式感知原语。所有入口都经 base Dispatcher；没有测试模式分支。
 
 import {
+  ChatIdentifyCurrentConversationData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
@@ -14,6 +15,7 @@ import {
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
   ensureZhilianIM,
+  identifyZhilianCurrentConversation,
   probeZhilian,
   readZhilianList,
   readZhilianThread,
@@ -107,6 +109,22 @@ const readList: Primitive = {
   },
 }
 
+const identifyCurrentConversation: Primitive = {
+  name: PrimitiveName.ChatIdentifyCurrentConversation,
+  class: CmdClass.Readonly,
+  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      assertZhilianContext(ctx.commandContext)
+      const data: ChatIdentifyCurrentConversationData = await identifyZhilianCurrentConversation(
+        ctx.commandContext?.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const readThread: Primitive = {
   name: PrimitiveName.ChatReadThread,
   class: CmdClass.Intrusive,
@@ -133,5 +151,6 @@ export function registerM2Primitives(): void {
   register(probePlatform)
   register(ensureSurface)
   register(readList)
+  register(identifyCurrentConversation)
   register(readThread)
 }

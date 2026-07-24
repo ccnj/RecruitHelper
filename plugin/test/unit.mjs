@@ -49,6 +49,7 @@ const {
   ResultStatus,
   SensorBridge,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
+  identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   readZhilianUnreadTotal,
   readZhilianList,
@@ -7714,6 +7715,7 @@ test('readThread 不把 MAIN 注入 null 结果降级为 INTERNAL_HAND', async (
 function installThreadRouteHarness(conversationRef, {
   selected = false,
   readBehavior,
+  routeAfterRead,
   routeReadyAfterClick = true,
 } = {}) {
   const fingerprint = '7'.repeat(64)
@@ -7754,7 +7756,9 @@ function installThreadRouteHarness(conversationRef, {
         if (func.name === 'mainReadThreadPage') {
           state.reads += 1
           state.events.push('read')
-          return [{ result: readBehavior ? await readBehavior(...args) : page }]
+          const result = readBehavior ? await readBehavior(...args) : page
+          if (routeAfterRead) currentURL = routeAfterRead
+          return [{ result }]
         }
         throw new Error(`unexpected MAIN function ${func.name}`)
       },
@@ -7779,6 +7783,71 @@ function installThreadRouteHarness(conversationRef, {
   }
 }
 
+test('identifyCurrentConversation 只读唯一 IM URL，首页无会话或多 IM 均失败', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'f'.repeat(64)
+  const session = 'a'.repeat(32)
+  let tabs = [{ id: 70, url: `https://rd6.zhaopin.com/app/im?sessionId=${session}`, status: 'complete' }]
+  let probes = 0
+  try {
+    globalThis.chrome = {
+      tabs: {
+        async query() { return tabs },
+        async get(id) { return { ...tabs.find((tab) => tab.id === id) } },
+        async sendMessage() { return { ok: true } },
+      },
+      scripting: {
+        async executeScript({ func }) {
+          assert.equal(func.name, 'mainProbeZhilian')
+          probes += 1
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        },
+      },
+    }
+    const found = await identifyZhilianCurrentConversation(fingerprint)
+    assert.equal(found.conversationRef, session)
+    assert.ok(Number.isSafeInteger(found.observedAt))
+
+    tabs = [{ id: 70, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }]
+    await assert.rejects(
+      identifyZhilianCurrentConversation(fingerprint),
+      (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.ElementUnresolved,
+    )
+
+    tabs = [
+      { id: 70, url: `https://rd6.zhaopin.com/app/im?sessionId=${session}`, status: 'complete' },
+      { id: 71, url: `https://rd6.zhaopin.com/app/im?sessionId=${'b'.repeat(32)}`, status: 'complete' },
+    ]
+    await assert.rejects(
+      identifyZhilianCurrentConversation(fingerprint),
+      (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.ElementUnresolved,
+    )
+    assert.equal(probes, 3, '多 IM 应在读取任何页面内部状态前直接拒绝')
+
+    tabs = [{ id: 70, url: `https://rd6.zhaopin.com/app/im?sessionId=${session}`, status: 'complete' }]
+    let getCount = 0
+    globalThis.chrome.tabs.get = async (id) => {
+      getCount += 1
+      const tab = { ...tabs.find((item) => item.id === id) }
+      if (getCount >= 2) {
+        tab.url = `https://rd6.zhaopin.com/app/im?sessionId=${'c'.repeat(32)}`
+      }
+      return tab
+    }
+    await assert.rejects(
+      identifyZhilianCurrentConversation(fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.UserActive &&
+        error.sideEffect === 'none',
+      '只读识别期间路由漂移不得虚报可能产生读回执',
+    )
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('readThread 从基础路由唯一切到目标后只消费一次 barrier 再读取一次', async () => {
   const conversationRef = 'conversation-route-open'
   const harness = installThreadRouteHarness(conversationRef)
@@ -7793,6 +7862,35 @@ test('readThread 从基础路由唯一切到目标后只消费一次 barrier 再
   assert.equal(harness.state.clicks, 1)
   assert.equal(harness.state.reads, 1)
   assert.deepEqual(harness.state.events, ['find', 'barrier', 'click', 'read'])
+})
+
+test('readThread requireCurrent 不定位会话并在读取后路由漂移时失败', async () => {
+  const conversationRef = 'conversation-current-only'
+  const ready = installThreadRouteHarness(conversationRef, { selected: true })
+  await readZhilianThread({
+    conversationRef,
+    requireCurrent: true,
+    window: { maxMessages: 1, anchorTail: [], deep: false },
+  }, ready.context, ready.fingerprint)
+  assert.deepEqual(ready.state.events, ['barrier', 'read'])
+  assert.equal(ready.state.finds, 0)
+  assert.equal(ready.state.clicks, 0)
+
+  const drifted = installThreadRouteHarness(conversationRef, {
+    selected: true,
+    routeAfterRead: 'https://rd6.zhaopin.com/app/im?sessionId=another-conversation',
+  })
+  await assert.rejects(
+    readZhilianThread({
+      conversationRef,
+      requireCurrent: true,
+      window: { maxMessages: 1, anchorTail: [], deep: false },
+    }, drifted.context, drifted.fingerprint),
+    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.UserActive,
+  )
+  assert.deepEqual(drifted.state.events, ['barrier', 'read'])
+  assert.equal(drifted.state.finds, 0)
+  assert.equal(drifted.state.clicks, 0)
 })
 
 test('readThread 已在目标路由时不定位不点击并在 history 前消费唯一 barrier', async () => {

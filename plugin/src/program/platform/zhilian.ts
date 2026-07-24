@@ -17,6 +17,7 @@ import type {
   CandidateSelectSourcingPositionData,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
+  ChatIdentifyCurrentConversationData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
@@ -87,6 +88,7 @@ export type ZhilianListArgs = ChatReadListArgs
 export type ZhilianConversationSummary = ConversationSummary
 export type ZhilianListPage = ChatReadListData
 export type ZhilianMessageAnchor = MessageAnchor
+export type ZhilianCurrentConversation = ChatIdentifyCurrentConversationData
 export type ZhilianThreadArgs = ChatReadThreadArgs
 export type ZhilianThreadMessage = ThreadMessage
 export type ZhilianThreadPage = ChatReadThreadData
@@ -3276,6 +3278,97 @@ async function verifiedIMTab(expected: string | undefined): Promise<chrome.tabs.
   }
   assertExpectedPrincipal(probe, expected)
   return tab
+}
+
+async function uniqueVerifiedIMTab(expected: string | undefined): Promise<chrome.tabs.Tab> {
+  const candidates = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => tab.id !== undefined && pageKindFromURL(tab.url) === 'im')
+  if (candidates.length === 0) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面不存在', 'afterRecovery', 'pageAbsent')
+  }
+  if (candidates.length !== 1) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '存在多个智联 IM 标签页，无法唯一确认真人当前打开的会话',
+      'manualOnly',
+    )
+  }
+  const tab = candidates[0]
+  const probe = await probeTab(tab)
+  if (!probe.contentScriptOk || !probe.surface?.imListVisible) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '智联 content script 或 IM 列表未就绪',
+      'afterRecovery',
+      probe.contentScriptOk ? 'pageBroken' : 'contentScriptDead',
+    )
+  }
+  assertExpectedPrincipal(probe, expected)
+  return tab
+}
+
+function currentConversationRefFromTab(tab: chrome.tabs.Tab): string {
+  try {
+    const route = new URL(tab.url ?? '')
+    if (route.pathname !== '/app/im') throw new Error('not im')
+    const conversationRef = route.searchParams.get('sessionId')?.trim() ?? ''
+    if (!conversationRef ||
+        conversationRef.length > 512 ||
+        new TextEncoder().encode(conversationRef).length > 2048) {
+      throw new Error('conversation missing')
+    }
+    return conversationRef
+  } catch {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '当前智联 IM 标签页 URL 没有可确认的会话标识',
+      'manualOnly',
+    )
+  }
+}
+
+async function assertCurrentThreadRoute(
+  tabId: number,
+  conversationRef: string,
+  expectedPrincipalFingerprint: string,
+  sideEffect: SideEffect,
+): Promise<chrome.tabs.Tab> {
+  const current = await chrome.tabs.get(tabId)
+  if (currentConversationRefFromTab(current) !== conversationRef) {
+    throw new ZhilianPlatformError(
+      'USER_ACTIVE',
+      '读取期间真人切换了当前会话，本轮已停止',
+      'afterRecovery',
+      undefined,
+      sideEffect,
+    )
+  }
+  assertExpectedPrincipal(await probeTab(current), expectedPrincipalFingerprint)
+  return current
+}
+
+export async function identifyZhilianCurrentConversation(
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianCurrentConversation> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const before = currentConversationRefFromTab(await chrome.tabs.get(tab.id))
+  const latest = await assertCurrentThreadRoute(
+    tab.id,
+    before,
+    expectedPrincipalFingerprint,
+    'none',
+  )
+  const after = currentConversationRefFromTab(latest)
+  if (before !== after) {
+    throw new ZhilianPlatformError('USER_ACTIVE', '识别期间真人切换了当前会话', 'afterRecovery')
+  }
+  return { conversationRef: after, observedAt: Date.now() }
 }
 
 async function sendZhilianTab(conversationRef: string): Promise<chrome.tabs.Tab> {
@@ -7906,8 +7999,19 @@ export async function readZhilianThread(
   if (!expectedPrincipalFingerprint) {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
-  const tab = await verifiedIMTab(expectedPrincipalFingerprint)
+  const requireCurrent = args.requireCurrent === true
+  const tab = requireCurrent
+    ? await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+    : await verifiedIMTab(expectedPrincipalFingerprint)
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  if (requireCurrent) {
+    await assertCurrentThreadRoute(
+      tab.id,
+      args.conversationRef,
+      expectedPrincipalFingerprint,
+      'none',
+    )
+  }
   const maxMessages = Math.min(64, Math.max(1, args.window.maxMessages ?? 50))
   const anchors = args.window.anchorTail ?? []
   const binding = await bindingHash({
@@ -7918,6 +8022,7 @@ export async function readZhilianThread(
     maxMessages,
     anchors,
     deep: args.window.deep === true,
+    requireCurrent,
   })
   const decoded = decodeCursor(args.cursor)
   if (decoded && (decoded.kind !== 'thread' || decoded.mode !== 'api' || decoded.binding !== binding)) {
@@ -7944,12 +8049,14 @@ export async function readZhilianThread(
   // 真机已证实 getHistoryMsgs 在基础路由会拒绝：所有参数与 opaque cursor 先完成
   // 无副作用校验，再按完整 conversationRef 打开目标。切换本身可能产生已读，因此
   // ensureThreadRoute 返回 true 时已经消费了本命令唯一的 cancellation barrier。
-  const routeConsumedBarrier = await ensureThreadRoute(
-    tab,
-    args.conversationRef,
-    expectedPrincipalFingerprint,
-    ctx,
-  )
+  const routeConsumedBarrier = requireCurrent
+    ? false
+    : await ensureThreadRoute(
+        tab,
+        args.conversationRef,
+        expectedPrincipalFingerprint,
+        ctx,
+      )
   const newerPrefixMask = Number(rawAnchorPrefixMask)
   let cursor: { endTime: number; lastMsgId: string } | null = threadCursor
     ? { endTime: threadCursor.endTime, lastMsgId: threadCursor.lastMsgId }
@@ -7970,6 +8077,14 @@ export async function readZhilianThread(
       // 该钩子抛出的 StopExecution 必须原样回到 Dispatcher，不能在平台错误映射中吞掉。
       await ctx.beforeSideEffect()
       platformReadStarted = true
+    }
+    if (requireCurrent) {
+      await assertCurrentThreadRoute(
+        tab.id,
+        args.conversationRef,
+        expectedPrincipalFingerprint,
+        'possible',
+      )
     }
     try {
       page = await runMain(tab.id, mainReadThreadPage, [
@@ -7996,6 +8111,14 @@ export async function readZhilianThread(
         `读取智联会话失败：${message}`,
         'afterRecovery',
         undefined,
+        'possible',
+      )
+    }
+    if (requireCurrent) {
+      await assertCurrentThreadRoute(
+        tab.id,
+        args.conversationRef,
+        expectedPrincipalFingerprint,
         'possible',
       )
     }
@@ -8076,7 +8199,16 @@ export async function readZhilianThread(
     if (!cursor || page.messages.length === 0) break
   }
 
-  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  if (requireCurrent) {
+    await assertCurrentThreadRoute(
+      tab.id,
+      args.conversationRef,
+      expectedPrincipalFingerprint,
+      platformReadStarted ? 'possible' : 'none',
+    )
+  } else {
+    assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  }
   const anchorResolution = resolveAnchor(collected, anchors, newerPrefixMask)
   const selected = anchorResolution.count === 1
     ? collected.slice(anchorResolution.outputStart as number)
@@ -8134,6 +8266,7 @@ export const zhilianTestHooks = Object.freeze({
   decodeCursor,
   encodeCursor,
   mainProbeZhilian,
+  identifyZhilianCurrentConversation,
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
   mainReadCurrentResume,

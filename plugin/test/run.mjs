@@ -640,7 +640,8 @@ try {
   const online = health.hands.find((hand) => hand.handId === handId)
   for (const capability of [
     'debug.inspectSendSurface@1',
-    'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1', 'chat.readThread@1',
+    'probe.platform@1', 'nav.ensureSurface@1', 'chat.readList@1',
+    'chat.identifyCurrentConversation@1', 'chat.readThread@1',
     'candidate.readCurrent@1',
     'candidate.readResume@1',
     'candidate.readSourcingResume@1',

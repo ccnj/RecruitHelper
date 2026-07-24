@@ -451,12 +451,24 @@
           "deep": { "type": "boolean", "optional": true, "default": false }
         }
       },
+      "ChatIdentifyCurrentConversationArgs": {
+        "type": "object",
+        "fields": {}
+      },
+      "ChatIdentifyCurrentConversationData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "ChatReadThreadArgs": {
         "type": "object",
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "window": { "ref": "ThreadWindow" },
-          "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+          "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "requireCurrent": { "type": "boolean", "optional": true, "default": false }
         }
       },
       "InterviewDetails": {
@@ -963,12 +975,19 @@
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
       "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true;unreadCount 遵守两次一致"
     },
+    "chat.identifyCurrentConversation": {
+      "ver": 1, "class": "readonly", "batch": "S",
+      "argsSchema": "ChatIdentifyCurrentConversationArgs", "dataSchema": "ChatIdentifyCurrentConversationData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
+      "execBudgetMs": 5000, "deadlineMs": 30000,
+      "note": "只从唯一已打开且身份匹配的 IM 标签页公开 URL 读取当前 conversationRef;不搜索、不滚动、不点击、不切换会话。零个或多个 IM 标签页、URL 无当前会话或读取前后路由漂移均失败"
+    },
     "chat.readThread": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
       "argsSchema": "ChatReadThreadArgs", "dataSchema": "ChatReadThreadData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 30000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐。稳定服务端消息可带 sourceKey=sha256(\"source-v1|\"+平台稳定消息身份) 的 64 字符小写 hex;原始平台身份不得出手"
+      "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐。requireCurrent=true 时只读已经打开的目标会话，禁止定位、点击或切换，并在每页读取前后核对公开路由，漂移即失败。稳定服务端消息可带 sourceKey=sha256(\"source-v1|\"+平台稳定消息身份) 的 64 字符小写 hex;原始平台身份不得出手"
     },
     "candidate.readCurrent": {
       "ver": 1, "class": "readonly", "batch": "X",
