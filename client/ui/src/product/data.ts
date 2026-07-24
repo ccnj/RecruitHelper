@@ -290,6 +290,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
       shortName: Array.from(customerName)[0] ?? '客',
       authorizationLabel: authorizationLabel(runtime),
       authorized: runtime.authorized,
+      activationRequired: runtime.available && !runtime.authorized,
       job,
     },
     overview: {

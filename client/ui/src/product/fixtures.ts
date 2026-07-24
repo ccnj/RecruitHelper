@@ -149,6 +149,7 @@ export function createProductFixture(): ProductData {
       shortName: '演',
       authorizationLabel: '授权有效',
       authorized: true,
+      activationRequired: false,
       job: {
         name: '高级招聘顾问',
         syncState: 'synced',
@@ -252,6 +253,7 @@ export function createEmptyProductData(): ProductData {
       shortName: '客',
       authorizationLabel: '等待激活',
       authorized: false,
+      activationRequired: false,
       job: {
         name: null,
         syncState: 'unavailable',
@@ -350,4 +352,3 @@ export function createEmptyProductData(): ProductData {
     clientVersion: '0.1.0',
   }
 }
-

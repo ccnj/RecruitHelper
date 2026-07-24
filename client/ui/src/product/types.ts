@@ -24,6 +24,7 @@ export interface CustomerView {
   shortName: string
   authorizationLabel: string
   authorized: boolean
+  activationRequired: boolean
   job: BoundJobView
 }
 

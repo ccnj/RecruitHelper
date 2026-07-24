@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
+import { shouldShowActivation } from './activation'
 import { readCandidateDetail, readProductData } from './api'
 import { ProductApp } from './ProductApp'
+import { ActivationPage } from './components/ActivationPage'
 import { createEmptyProductData } from './fixtures'
 import type { ProductData } from './types'
 
@@ -55,6 +57,20 @@ export function ProductConnectedApp({
     : readState === 'stale'
       ? `本机业务数据暂时无法刷新，页面保留上次成功结果：${readError ?? '读取失败'}`
       : null
+
+  async function refreshAfterActivation() {
+    const next = await readProductData()
+    setData(next)
+    setReadState('ready')
+    setReadError(null)
+    if (!next.customer.authorized) {
+      throw new Error('本机授权状态尚未更新，请稍后重新读取。')
+    }
+  }
+
+  if (shouldShowActivation(readState, data.customer)) {
+    return <ActivationPage onActivated={refreshAfterActivation} />
+  }
 
   return (
     <ProductApp

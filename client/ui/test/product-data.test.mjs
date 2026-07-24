@@ -155,6 +155,19 @@ const snapshot = {
 
 const product = adaptProductSnapshot(snapshot, now)
 check(product.customer.name === '微领' && product.customer.authorized, '客户授权与绑定职位来自产品投影')
+check(!product.customer.activationRequired, '已授权产品投影不会要求再次激活')
+const unactivatedSnapshot = structuredClone(snapshot)
+unactivatedSnapshot.overview.runtime.authorized = false
+check(
+  adaptProductSnapshot(unactivatedSnapshot, now).customer.activationRequired,
+  '运行态明确未授权时要求首次激活',
+)
+const unreadableAuthorizationSnapshot = structuredClone(unactivatedSnapshot)
+unreadableAuthorizationSnapshot.overview.runtime.available = false
+check(
+  !adaptProductSnapshot(unreadableAuthorizationSnapshot, now).customer.activationRequired,
+  '运行态不可读取时不把未知授权状态当成首次激活',
+)
 check(product.customer.job.name === '产品经理' && product.customer.job.syncState === 'synced', '职位同步状态如实映射')
 check(product.overview.workflow.state === 'awaitingConfirmation' && !product.overview.workflow.canStart, '工作流等待确认时不会误显示可开始')
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
