@@ -3,6 +3,7 @@ package appbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -597,15 +598,15 @@ func TestFormalSourcingFilterFailureStaysUnboundAndResumeRepeatsPreparation(t *t
 	}
 }
 
-func TestFormalSourcingManualStartDoesNotInheritCommunicationStartHour(t *testing.T) {
+func TestFormalSourcingManualStartRespectsUnifiedBusinessWindow(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.clock.now = time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
-		t.Fatalf("真人显式采集不应被 08:00 沟通巡检门拦截: %v", err)
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); !errors.Is(err, patrol.ErrDailyWindowNotOpen) {
+		t.Fatalf("08:00 前正式采集必须被统一业务窗口拒绝: %v", err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
-	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing {
-		t.Fatalf("夜间手工采集未建立唯一正式批次: batch=%+v err=%v", batch, err)
+	if err != nil || batch != nil {
+		t.Fatalf("夜间拒绝不得留下正式批次: batch=%+v err=%v", batch, err)
 	}
 }
 
