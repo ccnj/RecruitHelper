@@ -4827,8 +4827,8 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       idServer: '  server-type-177-raw-identity  ',
     },
     {
-      name: '历史 API 规范正文形状', rawType: 'custom', envelopeType: 177,
-      from: fixture.peerRef, status: 'success', rowText: canonicalText,
+      name: '历史 API 规范正文形状', rawType: 'custom', envelopeType: '177',
+      from: fixture.peerRef, status: 'success', innerContent: canonicalText,
       omitFallback: true, contentString: true, card: true,
     },
     {
@@ -4859,6 +4859,11 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       name: '只有非规范 row text', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
       status: 'success', rowText: '附件简历提示发生变化', omitFallback: true,
       contentString: true, card: false,
+    },
+    {
+      name: '只有规范 row text', rawType: 'custom', envelopeType: '177',
+      from: fixture.peerRef, status: 'success', rowText: canonicalText,
+      omitFallback: true, contentString: true, card: false,
     },
     {
       name: '接收方 style 不是真机数字', rawType: 'custom', envelopeType: 177,
@@ -4899,7 +4904,9 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
             senderText: variant.senderText ?? fallbackText,
           },
         }),
-        content: JSON.stringify({}),
+        content: JSON.stringify(variant.innerContent === undefined
+          ? {}
+          : { content: variant.innerContent }),
       }
       fixture.rows.splice(0, fixture.rows.length, {
         idServer,
