@@ -23,8 +23,9 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
   const { workflow } = overview
   const startFullReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    workflow.canStart,
-    workflow.unavailableReason,
+    workflow.canStart && customer.job.backendJobId !== null,
+    workflow.unavailableReason ??
+      (customer.job.backendJobId === null ? '同步并绑定职位后可开始完整流程' : null),
   )
   const startReplyReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('replyOnly') : undefined,
@@ -290,4 +291,3 @@ function activityWidth(value: ProductMetric, target: number): string {
   if (value === null || target <= 0) return '0%'
   return `${Math.min(100, Math.round((value / target) * 100))}%`
 }
-

@@ -48,6 +48,7 @@ const snapshot = {
     overview: {
       job: {
         available: true,
+        backendJobId: '42',
         name: '产品经理',
         environment: 'online',
         syncStatus: 'synced',
@@ -168,7 +169,12 @@ check(
   !adaptProductSnapshot(unreadableAuthorizationSnapshot, now).customer.activationRequired,
   '运行态不可读取时不把未知授权状态当成首次激活',
 )
-check(product.customer.job.name === '产品经理' && product.customer.job.syncState === 'synced', '职位同步状态如实映射')
+check(
+  product.customer.job.name === '产品经理' &&
+    product.customer.job.backendJobId === '42' &&
+    product.customer.job.syncState === 'synced',
+  '职位同步状态和仅供启动绑定的 Job.ID 如实映射',
+)
 check(product.overview.workflow.state === 'awaitingConfirmation' && !product.overview.workflow.canStart, '工作流等待确认时不会误显示可开始')
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
@@ -180,6 +186,18 @@ check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')
+
+const replyOnlyWithoutJob = structuredClone(snapshot)
+replyOnlyWithoutJob.overview.overview.job = {
+  available: false,
+  syncStatus: 'missing',
+}
+replyOnlyWithoutJob.overview.runtime.workflowMode = undefined
+replyOnlyWithoutJob.overview.runtime.workflowStatus = undefined
+check(
+  adaptProductSnapshot(replyOnlyWithoutJob, now).overview.workflow.canStart,
+  '无绑定职位不再误禁仅多轮回复',
+)
 
 check(!isBusinessWindowOpen(new Date(2026, 6, 25, 7, 59)), '08:00 前产品页保持只读')
 check(isBusinessWindowOpen(new Date(2026, 6, 25, 8, 0)), '08:00 起进入业务窗口')

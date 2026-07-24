@@ -24,6 +24,7 @@ export interface AppMetricRaw {
 
 export interface AppJobRaw {
   available: boolean
+  backendJobId?: string
   name?: string
   environment?: string
   syncStatus: string
@@ -270,7 +271,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
       : '客户状态暂不可读取'
   )
   const job = adaptJob(rawOverview.job)
-  const workflow = adaptWorkflow(runtime, job.name !== null, businessWindowOpen)
+  const workflow = adaptWorkflow(runtime, businessWindowOpen)
   const funnel = adaptFunnel(rawOverview.funnel)
   const confirmation = adaptConfirmation(snapshot.confirmation.confirmation, {
     businessWindowOpen,
@@ -356,6 +357,7 @@ function adaptJob(raw: AppJobRaw): ProductData['customer']['job'] {
           ? '职位配置不唯一'
           : '尚未同步职位'
   return {
+    backendJobId: raw.available ? clean(raw.backendJobId) || null : null,
     name: raw.available ? clean(raw.name) || null : null,
     syncState,
     syncStateLabel,
@@ -366,7 +368,6 @@ function adaptJob(raw: AppJobRaw): ProductData['customer']['job'] {
 
 function adaptWorkflow(
   runtime: AppRuntimeRaw,
-  hasJob: boolean,
   businessWindowOpen: boolean,
 ): WorkflowView {
   const rawMode = clean(runtime.workflowMode)
@@ -384,7 +385,6 @@ function adaptWorkflow(
   let unavailableReason: string | null = null
   if (!runtime.available) unavailableReason = '授权状态暂不可读取'
   else if (!runtime.authorized) unavailableReason = '完成激活后可开始'
-  else if (!hasJob) unavailableReason = '同步并绑定职位后可开始'
   else if (!businessWindowOpen) unavailableReason = '运行时间为 08:00～24:00'
 
   const labels: Record<WorkflowView['state'], string> = {

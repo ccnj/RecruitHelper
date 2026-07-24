@@ -151,6 +151,7 @@ export function createProductFixture(): ProductData {
       authorized: true,
       activationRequired: false,
       job: {
+        backendJobId: 'fixture-job-42',
         name: '高级招聘顾问',
         syncState: 'synced',
         syncStateLabel: '配置已同步',
@@ -255,6 +256,7 @@ export function createEmptyProductData(): ProductData {
       authorized: false,
       activationRequired: false,
       job: {
+        backendJobId: null,
         name: null,
         syncState: 'unavailable',
         syncStateLabel: '尚未同步职位',

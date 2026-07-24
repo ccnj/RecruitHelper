@@ -34,7 +34,7 @@ const productAPI = await import(
   pathToFileURL(process.cwd() + '/test/dist/product-api.mjs').href + `?run=${Date.now()}`
 )
 
-await productAPI.startProductWorkflow('full')
+await productAPI.startProductWorkflow('full', '42')
 await productAPI.startProductWorkflow('replyOnly')
 await productAPI.pauseProductWorkflow()
 await productAPI.resumeProductWorkflow()
@@ -68,7 +68,7 @@ check(
 )
 check(
   requests.map((request) => request.body).join('|') === [
-    '{"mode":"full"}',
+    '{"mode":"full","backendJobId":"42"}',
     '{"mode":"replyOnly"}',
     '{}',
     '{}',

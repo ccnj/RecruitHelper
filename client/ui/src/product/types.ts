@@ -12,6 +12,7 @@ export type CandidateView = Exclude<ProductPage, 'home' | 'confirmation' | 'sett
 export type ProductMetric = number | null
 
 export interface BoundJobView {
+  backendJobId: string | null
   name: string | null
   syncState: 'synced' | 'syncing' | 'stale' | 'unavailable'
   syncStateLabel: string

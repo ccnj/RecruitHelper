@@ -47,7 +47,19 @@ interface ProductAcceptedResponse {
   accepted: boolean
 }
 
-export async function startProductWorkflow(mode: 'full' | 'replyOnly'): Promise<void> {
+export async function startProductWorkflow(
+  mode: 'full' | 'replyOnly',
+  backendJobId?: string | null,
+): Promise<void> {
+  if (mode === 'full') {
+    const normalized = backendJobId?.trim() ?? ''
+    if (!normalized) throw new Error('完整流程尚未绑定后台职位')
+    await appPost<ProductAcceptedResponse>('/app/workflow/start', {
+      mode,
+      backendJobId: normalized,
+    })
+    return
+  }
   await appPost<ProductAcceptedResponse>('/app/workflow/start', { mode })
 }
 

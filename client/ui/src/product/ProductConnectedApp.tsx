@@ -113,7 +113,10 @@ export function ProductConnectedApp({
         ),
         startWorkflow: (mode) => performProductAction(
           mode === 'full' ? '完整流程' : '仅多轮回复',
-          () => startProductWorkflow(mode),
+          () => startProductWorkflow(
+            mode,
+            mode === 'full' ? data.customer.job.backendJobId : null,
+          ),
         ),
         copyWechat: async (wechatAccount) => {
           await navigator.clipboard.writeText(wechatAccount)
