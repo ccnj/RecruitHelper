@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"recruithelper/client/service/internal/testfixture"
 )
 
 func syntheticLegacyBundle(t *testing.T, jobID int, name string) map[string]any {
@@ -19,7 +21,7 @@ func syntheticLegacyBundle(t *testing.T, jobID int, name string) map[string]any 
 		"打分":    "fixture://score",
 		"招呼语":   "fixture://greeting",
 		"沉默追问":  "fixture://silence",
-		"职位筛选":  `[]`,
+		"职位筛选":  testfixture.SourcingFiltersDocument,
 	}
 	block := func(prompt string) map[string]any {
 		return map[string]any{"prompt": prompt, "apiKey": "sk-must-not-persist", "model": "legacy-model", "baseUrl": "https://legacy.invalid"}

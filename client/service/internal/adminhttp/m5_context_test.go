@@ -12,6 +12,7 @@ import (
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/testfixture"
 )
 
 func syntheticAdminJobBundle() map[string]any {
@@ -25,7 +26,7 @@ func syntheticAdminJobBundle() map[string]any {
 		"打分":    "fixture-score",
 		"招呼语":   "fixture-greeting",
 		"沉默追问":  "fixture-silence",
-		"职位筛选":  `[]`,
+		"职位筛选":  testfixture.SourcingFiltersDocument,
 	}
 	block := func(prompt string) map[string]any {
 		return map[string]any{

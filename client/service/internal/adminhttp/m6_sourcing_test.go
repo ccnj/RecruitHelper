@@ -17,6 +17,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/testfixture"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -277,7 +278,7 @@ func sourcingAdminRevision(at time.Time) m5ai.ContextRevision {
 		{DocType: "意向判断", Content: intentPrompt},
 		{DocType: "打分", Content: "admin-score-secret {resume_json}"},
 		{DocType: "招呼语", Content: `{"prompt":"admin-greeting-secret {career_state} {resume_summary_json}"}`},
-		{DocType: "职位筛选", Content: `[]`},
+		{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
 	}
 	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
 	return m5ai.ContextRevision{
