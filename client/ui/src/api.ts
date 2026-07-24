@@ -67,6 +67,14 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return readResponse<T>(response, path)
 }
 
+// 普通产品写入口同样被限制在 /app/*；组件不能借此调用诊断管理面。
+export async function appPost<T>(path: string, body?: unknown): Promise<T> {
+  if (!path.startsWith('/app/')) {
+    throw new Error('产品操作只允许访问 /app/*')
+  }
+  return post<T>(path, body)
+}
+
 function query(path: string, values: Record<string, string | undefined>): string {
   const params = new URLSearchParams()
   for (const [key, value] of Object.entries(values)) {

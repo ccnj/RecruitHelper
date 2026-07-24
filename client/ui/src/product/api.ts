@@ -1,4 +1,4 @@
-import { appGet } from '../api'
+import { appGet, appPost } from '../api'
 import {
   adaptCandidateDetail,
   adaptProductSnapshot,
@@ -41,4 +41,27 @@ export async function readCandidateDetail(
     `/app/candidates/${encodeURIComponent(profileId)}`,
   )
   return adaptCandidateDetail(response, fallback, now)
+}
+
+interface ProductAcceptedResponse {
+  accepted: boolean
+}
+
+export async function startProductWorkflow(mode: 'full' | 'replyOnly'): Promise<void> {
+  await appPost<ProductAcceptedResponse>('/app/workflow/start', { mode })
+}
+
+export async function pauseProductWorkflow(): Promise<void> {
+  await appPost<ProductAcceptedResponse>('/app/workflow/pause', {})
+}
+
+export async function resumeProductWorkflow(): Promise<void> {
+  await appPost<ProductAcceptedResponse>('/app/workflow/resume', {})
+}
+
+export async function sendProductConfirmation(
+  batchId: string,
+  profileIds: string[],
+): Promise<void> {
+  await appPost<ProductAcceptedResponse>('/app/confirmation/send', { batchId, profileIds })
 }

@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { shouldShowActivation } from './activation'
-import { readCandidateDetail, readProductData } from './api'
+import {
+  pauseProductWorkflow,
+  readCandidateDetail,
+  readProductData,
+  resumeProductWorkflow,
+  sendProductConfirmation,
+  startProductWorkflow,
+} from './api'
 import { ProductApp } from './ProductApp'
 import { ActivationPage } from './components/ActivationPage'
 import { createEmptyProductData } from './fixtures'
@@ -18,7 +25,9 @@ export function ProductConnectedApp({
   const [data, setData] = useState<ProductData>(() => createEmptyProductData())
   const [readState, setReadState] = useState<'loading' | 'ready' | 'stale'>('loading')
   const [readError, setReadError] = useState<string | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [refreshRevision, setRefreshRevision] = useState(0)
+  const actionRunning = useRef(false)
 
   const refresh = useCallback(() => {
     setRefreshRevision((revision) => revision + 1)
@@ -36,6 +45,7 @@ export function ProductConnectedApp({
         setData(next)
         setReadState('ready')
         setReadError(null)
+        setActionMessage(null)
       } catch (reason) {
         if (cancelled) return
         setReadState('stale')
@@ -52,17 +62,34 @@ export function ProductConnectedApp({
     }
   }, [pollIntervalMs, refreshRevision])
 
-  const statusMessage = readState === 'loading'
+  const readStatusMessage = readState === 'loading'
     ? '正在读取本机业务数据…'
     : readState === 'stale'
       ? `本机业务数据暂时无法刷新，页面保留上次成功结果：${readError ?? '读取失败'}`
       : null
+  const statusMessage = actionMessage ?? readStatusMessage
+
+  async function performProductAction(label: string, action: () => Promise<void>) {
+    if (actionRunning.current) return
+    actionRunning.current = true
+    setActionMessage(`${label}已提交，正在等待脑确认…`)
+    try {
+      await action()
+      setActionMessage(`${label}已受理，正在刷新业务状态。`)
+      refresh()
+    } catch (reason) {
+      setActionMessage(`${label}未能执行：${errorText(reason)}`)
+    } finally {
+      actionRunning.current = false
+    }
+  }
 
   async function refreshAfterActivation() {
     const next = await readProductData()
     setData(next)
     setReadState('ready')
     setReadError(null)
+    setActionMessage(null)
     if (!next.customer.authorized) {
       throw new Error('本机授权状态尚未更新，请稍后重新读取。')
     }
@@ -77,7 +104,20 @@ export function ProductConnectedApp({
       actions={{
         loadCandidateDetail: (profileId, fallback) => readCandidateDetail(profileId, fallback),
         openDiagnostics: onOpenDiagnostics,
+        pauseWorkflow: () => performProductAction('暂停', pauseProductWorkflow),
         refresh,
+        resumeWorkflow: () => performProductAction('恢复', resumeProductWorkflow),
+        sendConfirmationBatch: (batchId, profileIds) => performProductAction(
+          '候选确认发送',
+          () => sendProductConfirmation(batchId, profileIds),
+        ),
+        startWorkflow: (mode) => performProductAction(
+          mode === 'full' ? '完整流程' : '仅多轮回复',
+          () => startProductWorkflow(mode),
+        ),
+        copyWechat: async (wechatAccount) => {
+          await navigator.clipboard.writeText(wechatAccount)
+        },
       }}
       data={data}
       statusMessage={statusMessage}
