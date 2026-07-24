@@ -4316,7 +4316,7 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '智联筛选条件无法完整覆盖并回读确认',
+    `智联筛选条件无法完整覆盖并回读确认（${result.reason}）`,
     'manualOnly',
   )
 }
