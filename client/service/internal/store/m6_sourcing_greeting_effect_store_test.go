@@ -155,6 +155,160 @@ func invalidateSourcingGreetingFixture(
 	return result
 }
 
+func TestSourcingGreetingSendScanPlanReturnsEveryUnresolvedReadyTarget(t *testing.T) {
+	fixture := seedSourcingGreetingEffectFixture(t, "scan-plan", 3)
+	s := fixture.Store
+
+	plan, err := s.SourcingGreetingSendScanPlan(fixture.BatchID)
+	if err != nil || plan == nil {
+		t.Fatalf("读取批量招呼续扫投影失败: plan=%+v err=%v", plan, err)
+	}
+	if plan.BatchID != fixture.BatchID ||
+		plan.Platform != fixture.AccountKey.Platform ||
+		plan.AccountRef != fixture.AccountKey.AccountRef ||
+		plan.PositionRef != "position-"+fixture.BatchID ||
+		plan.CapturedCount != 3 ||
+		plan.BatchTailAnchor != "user-run-effect-scan-plan-c" ||
+		len(plan.Targets) != 3 {
+		t.Fatalf("续扫投影范围或尾锚错误: %+v", plan)
+	}
+	for i := range plan.Targets {
+		target := plan.Targets[i]
+		if target.InvocationID != fixture.Invocations[i].InvocationID ||
+			target.PlatformUserRef != "user-run-effect-scan-plan-"+string(rune('a'+i)) ||
+			target.PositionRef != plan.PositionRef || target.EffectIntentID != nil {
+			t.Fatalf("第 %d 个未绑定目标投影错误: %+v", i, target)
+		}
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	terminalReq := sourcingGreetingEffectRequest(
+		t, fixture, fixture.Invocations[1], now,
+	)
+	terminal, err := s.CreateGreetingEffectIntentAndCmd(terminalReq)
+	if err != nil || terminal == nil || !terminal.Created {
+		t.Fatalf("建立终局 WAL 失败: result=%+v err=%v", terminal, err)
+	}
+	terminalAt := now.Add(2 * time.Minute)
+	if err := s.db.Model(&CmdRecord{}).Where("msg_id = ?", terminal.Command.MsgID).
+		Updates(map[string]any{"status": CmdOk, "terminal_at": terminalAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&EffectIntent{}).Where("intent_id = ?", terminal.Intent.IntentID).
+		Update("status", EffectIntentOk).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CandidateProfile{}).Where("profile_id = ?", terminal.Intent.TargetRef).
+		Updates(map[string]any{
+			"main_status":                   CandidateProfileGreeted,
+			"successful_greeting_intent_id": terminal.Intent.IntentID,
+			"greeted_at":                    terminalAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	linkedReq := sourcingGreetingEffectRequest(
+		t, fixture, fixture.Invocations[0], now.Add(3*time.Minute),
+	)
+	linked, err := s.CreateGreetingEffectIntentAndCmd(linkedReq)
+	if err != nil || linked == nil || !linked.Created {
+		t.Fatalf("建立 linked WAL 失败: result=%+v err=%v", linked, err)
+	}
+	if err := s.db.Model(&SourcingGreetingInvocation{}).
+		Where("invocation_id = ?", fixture.Invocations[2].InvocationID).
+		Updates(map[string]any{
+			"status": AIInvocationTransportFailed, "greeting_text": "", "content_hash": "",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err = s.SourcingGreetingSendScanPlan(fixture.BatchID)
+	if err != nil || plan == nil || len(plan.Targets) != 1 ||
+		plan.Targets[0].InvocationID != fixture.Invocations[0].InvocationID ||
+		plan.Targets[0].EffectIntentID == nil ||
+		*plan.Targets[0].EffectIntentID != linked.Intent.IntentID {
+		t.Fatalf("linked/terminal/生成失败分类错误: plan=%+v err=%v", plan, err)
+	}
+
+	invalidateSourcingGreetingFixture(t, fixture, now.Add(3*time.Minute))
+	plan, err = s.SourcingGreetingSendScanPlan(fixture.BatchID)
+	if err != nil || plan == nil || len(plan.Targets) != 1 ||
+		plan.Targets[0].EffectIntentID == nil ||
+		*plan.Targets[0].EffectIntentID != linked.Intent.IntentID {
+		t.Fatalf("推荐流换代错误丢弃 linked WAL: plan=%+v err=%v", plan, err)
+	}
+
+	if err := s.db.Model(&CmdRecord{}).Where("msg_id = ?", linked.Command.MsgID).
+		Update("args", `{}`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := s.SourcingGreetingSendScanPlan(fixture.BatchID); plan != nil ||
+		!errors.Is(err, ErrSourcingGreetingEffectConflict) {
+		t.Fatalf("损坏 linked WAL 未被续扫投影复用校验拒绝: plan=%+v err=%v", plan, err)
+	}
+}
+
+func TestSourcingGreetingSendScanPlanTailComesFromWholeCapturedBatch(t *testing.T) {
+	base := time.Date(2026, 7, 24, 15, 0, 0, 0, time.UTC)
+	revisionHash := "revision-effect-scan-tail"
+	batchID := "batch-effect-scan-tail"
+	s, key := prepareSourcingSelectionStore(t, revisionHash, 5, 2, 2, 100, base)
+	fixtures := []selectionRunFixture{
+		{RunID: "run-effect-scan-tail-a", Score: intPointer(9), CapturedAt: base},
+		{RunID: "run-effect-scan-tail-b", Score: intPointer(8), CapturedAt: base.Add(time.Minute)},
+		{RunID: "run-effect-scan-tail-c", Score: intPointer(4), CapturedAt: base.Add(2 * time.Minute)},
+	}
+	runs := insertCompletedSelectionBatch(t, s, key, batchID, revisionHash, base, fixtures)
+	positionRef := "position-" + batchID
+	boundAt := base.Add(-time.Second)
+	if err := s.db.Model(&SourcingBatch{}).Where("batch_id = ?", batchID).Updates(map[string]any{
+		"position_ref": positionRef, "position_bound_at": boundAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	selection, err := s.SelectCompletedSourcingBatch(batchID, base.Add(2*time.Hour))
+	if err != nil || selection == nil || selection.SelectedCount != 2 {
+		t.Fatalf("构造含非 selected 尾成员的批次失败: selection=%+v err=%v", selection, err)
+	}
+	decisions := sourcingSelectionOutcomes(t, s, batchID)
+	zero := 0
+	for i := 0; i < 2; i++ {
+		reservation := greetingReservation(
+			batchID,
+			runs[i],
+			decisions[runs[i].RunID],
+			"invocation-effect-scan-tail-"+string(rune('a'+i)),
+			base.Add(3*time.Hour+time.Duration(i)*time.Minute),
+		)
+		if _, err := s.ReserveSourcingGreeting(reservation); err != nil {
+			t.Fatal(err)
+		}
+		text := "全批尾锚测试招呼 " + string(rune('甲'+i))
+		if _, err := s.CompleteSourcingGreeting(CompleteSourcingGreetingRequest{
+			Completion: AIInvocationCompletion{
+				InvocationID: reservation.InvocationID, Status: AIInvocationOK,
+				OutputHash:  "output-effect-scan-tail-" + string(rune('a'+i)),
+				InputTokens: 10, OutputTokens: 5, ReasoningTokens: &zero,
+				UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
+				FinishedAt: base.Add(4*time.Hour + time.Duration(i)*time.Minute),
+			},
+			GreetingText: text, ContentHash: sourcingGreetingContentHash(text),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	plan, err := s.SourcingGreetingSendScanPlan(batchID)
+	if err != nil || plan == nil || plan.CapturedCount != 3 ||
+		plan.BatchTailAnchor != runs[2].PlatformUserRef || len(plan.Targets) != 2 {
+		t.Fatalf("尾锚未取全批最后采集成员: plan=%+v err=%v", plan, err)
+	}
+	for _, target := range plan.Targets {
+		if target.PlatformUserRef == plan.BatchTailAnchor {
+			t.Fatalf("非 selected 尾成员错误进入发送目标: plan=%+v", plan)
+		}
+	}
+}
+
 func TestSourcingGreetingEffectSourceAtomicallyBindsWALAndPreciselyReplays(t *testing.T) {
 	fixture := seedSourcingGreetingEffectFixture(t, "atomic", 1)
 	s := fixture.Store

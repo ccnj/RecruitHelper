@@ -64,6 +64,34 @@ func (a *sourcingBatchGreetingAdvice) CompleteJSON(
 	}, nil
 }
 
+type sourcingBatchGreetingAllSuccessAdvice struct {
+	requests []m5ai.CompletionRequest
+}
+
+func (*sourcingBatchGreetingAllSuccessAdvice) ProviderName() string {
+	return "fixture-greeting-all-success-provider"
+}
+func (*sourcingBatchGreetingAllSuccessAdvice) ModelName() string {
+	return "fixture-greeting-all-success-model"
+}
+func (a *sourcingBatchGreetingAllSuccessAdvice) CompleteJSON(
+	_ context.Context,
+	request m5ai.CompletionRequest,
+) (m5ai.CompletionResponse, error) {
+	a.requests = append(a.requests, request)
+	zero := 0
+	return m5ai.CompletionResponse{
+		JSONText: fmt.Sprintf(
+			`{"招呼语":"你好，这是页面续扫测试中的第 %d 条招呼。"}`,
+			len(a.requests),
+		),
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 20, CachedInputTokens: 3, OutputTokens: 8, ReasoningTokens: &zero,
+		},
+		ReasoningContentEmpty: true,
+	}, nil
+}
+
 func prepareSelectedSourcingBatch(t *testing.T, h *sourcingActorHarness, targetCount int) string {
 	t.Helper()
 	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, targetCount); err != nil {
@@ -231,8 +259,22 @@ func prepareGeneratedSourcingGreeting(
 	h *sourcingActorHarness,
 ) (*patrol.Manager, string, *store.SourcingGreetingSendTarget, *int) {
 	t.Helper()
-	batchID := prepareSelectedSourcingBatch(t, h, 1)
-	advice := &sourcingBatchGreetingAdvice{}
+	manager, batchID, plan, paceWaits := prepareGeneratedSourcingGreetings(t, h, 1)
+	if len(plan.Targets) != 1 {
+		t.Fatalf("单人正式招呼目标数量错误: %+v", plan)
+	}
+	target := plan.Targets[0]
+	return manager, batchID, &target, paceWaits
+}
+
+func prepareGeneratedSourcingGreetings(
+	t *testing.T,
+	h *sourcingActorHarness,
+	targetCount int,
+) (*patrol.Manager, string, *store.SourcingGreetingSendScanPlan, *int) {
+	t.Helper()
+	batchID := prepareSelectedSourcingBatch(t, h, targetCount)
+	advice := &sourcingBatchGreetingAllSuccessAdvice{}
 	paceWaits := 0
 	manager, err := patrol.NewManager(
 		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
@@ -254,14 +296,26 @@ func prepareGeneratedSourcingGreeting(
 		t.Fatal(err)
 	}
 	progress, err := manager.GenerateSelectedSourcingGreetings(context.Background(), batchID)
-	if err != nil || !progress.Completed || progress.OKCount != 1 {
-		t.Fatalf("单人正式招呼语未完成: progress=%+v err=%v", progress, err)
+	if err != nil || !progress.Completed || progress.OKCount != int64(targetCount) ||
+		len(advice.requests) != targetCount {
+		t.Fatalf("正式招呼语批次未完成: progress=%+v calls=%d err=%v",
+			progress, len(advice.requests), err)
 	}
-	target, err := h.store.NextSourcingGreetingSendTarget(batchID)
-	if err != nil || target == nil || target.EffectIntentID != nil {
-		t.Fatalf("缺少未绑定发送目标: target=%+v err=%v", target, err)
+	plan, err := h.store.SourcingGreetingSendScanPlan(batchID)
+	if err != nil || plan == nil || len(plan.Targets) != targetCount {
+		t.Fatalf("缺少未绑定发送续扫投影: plan=%+v err=%v", plan, err)
 	}
-	return manager, batchID, target, &paceWaits
+	return manager, batchID, plan, &paceWaits
+}
+
+func sourcingGreetingPlatformRefs(sender *sourcingActorSender) []string {
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	refs := make([]string, len(sender.greetings))
+	for i := range sender.greetings {
+		refs[i] = sender.greetings[i].args.PlatformUserRef
+	}
+	return refs
 }
 
 func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(t *testing.T) {
@@ -302,6 +356,48 @@ func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(
 	}
 }
 
+func TestSelectedSourcingGreetingsScanOnceAndSendInCurrentPageOrder(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{
+		{"candidate-a", "candidate-b"},
+		{"candidate-b", "candidate-c"},
+	})
+	manager, batchID, plan, paceWaits := prepareGeneratedSourcingGreetings(t, h, 3)
+	byRef := make(map[string]store.SourcingGreetingSendTarget, len(plan.Targets))
+	for _, target := range plan.Targets {
+		byRef[target.PlatformUserRef] = target
+	}
+	for _, ref := range []string{"candidate-a", "candidate-b", "candidate-c"} {
+		if _, ok := byRef[ref]; !ok {
+			t.Fatalf("续扫投影缺少候选人 %q: %+v", ref, plan)
+		}
+	}
+
+	h.sender.windows = [][]string{
+		{"other-visible-a", "candidate-b", "candidate-a"},
+		{"other-visible-b", "candidate-c"},
+	}
+	h.sender.window = 1
+	h.sender.moves = nil
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || progress == nil || !progress.Completed ||
+		progress.SentCount != 3 || progress.PendingCount != 0 {
+		t.Fatalf("页面顺序续扫未完整发送: progress=%+v err=%v", progress, err)
+	}
+	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+	}); got != want {
+		t.Fatalf("批量招呼不应为每个目标回到顶部: got=%s want=%s", got, want)
+	}
+	if got, want := fmt.Sprint(sourcingGreetingPlatformRefs(h.sender)),
+		fmt.Sprint([]string{"candidate-b", "candidate-a", "candidate-c"}); got != want {
+		t.Fatalf("发送顺序没有服从当前页面顺序: got=%s want=%s", got, want)
+	}
+	if *paceWaits != 3 {
+		t.Fatalf("三个全新候选人必须分别等待一次: %d", *paceWaits)
+	}
+}
+
 func TestSelectedSourcingGreetingMissingTargetCreatesNoEffect(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
 	manager, batchID, target, _ := prepareGeneratedSourcingGreeting(t, h)
@@ -310,9 +406,17 @@ func TestSelectedSourcingGreetingMissingTargetCreatesNoEffect(t *testing.T) {
 	h.sender.moves = nil
 
 	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
-	if !errors.Is(err, patrol.ErrSourcingGreetingWindowStopped) || progress == nil ||
+	if !errors.Is(err, patrol.ErrSourcingGreetingTargetNotFound) || progress == nil ||
 		progress.PendingCount != 1 || progress.InFlightCount != 0 || progress.SentCount != 0 {
 		t.Fatalf("未定位目标没有保守停止: progress=%+v err=%v", progress, err)
+	}
+	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+	}); got != want {
+		t.Fatalf("漏项应且仅应执行一次顶部兜底: got=%s want=%s", got, want)
 	}
 	if h.sender.greetingCount() != 0 {
 		t.Fatalf("未定位目标仍调用了 effect runner: %d", h.sender.greetingCount())
@@ -324,6 +428,39 @@ func TestSelectedSourcingGreetingMissingTargetCreatesNoEffect(t *testing.T) {
 	intent, err := h.store.EffectIntentByID(intentID)
 	if err != nil || intent != nil {
 		t.Fatalf("未定位目标仍形成 effect intent: intent=%+v err=%v", intent, err)
+	}
+}
+
+func TestSelectedSourcingGreetingsStopOneWindowAfterCapturedTail(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{
+		{"candidate-a", "candidate-b"},
+		{"candidate-b", "candidate-c"},
+	})
+	manager, batchID, _, _ := prepareGeneratedSourcingGreetings(t, h, 3)
+	h.sender.windows = [][]string{
+		{"candidate-a", "candidate-c"},
+		{"one-window-after-tail"},
+		{"candidate-b"},
+	}
+	h.sender.window = 2
+	h.sender.moves = nil
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if !errors.Is(err, patrol.ErrSourcingGreetingTargetNotFound) || progress == nil ||
+		progress.SentCount != 2 || progress.PendingCount != 1 {
+		t.Fatalf("尾锚边界没有留下超过一窗的漏项: progress=%+v err=%v", progress, err)
+	}
+	if got, want := fmt.Sprint(h.sender.moves), fmt.Sprint([]protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveReset,
+		protocol.SourcingWindowMoveNext,
+	}); got != want {
+		t.Fatalf("尾锚后扫描超过一窗或兜底次数错误: got=%s want=%s", got, want)
+	}
+	if got, want := fmt.Sprint(sourcingGreetingPlatformRefs(h.sender)),
+		fmt.Sprint([]string{"candidate-a", "candidate-c"}); got != want {
+		t.Fatalf("尾锚边界内的发送集合错误: got=%s want=%s", got, want)
 	}
 }
 

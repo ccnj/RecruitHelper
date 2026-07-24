@@ -60,6 +60,20 @@ type SourcingGreetingSendTarget struct {
 	EffectIntentID      *string
 }
 
+// SourcingGreetingSendScanPlan 是批量招呼页面续扫的一次性脑内投影。
+// Targets 只包含生成成功且尚未终局的成员：未绑定成员可参与当前页面匹配，
+// 已绑定成员只供既有 WAL 优先收编。BatchTailAnchor 与 CapturedCount 来自
+// 全批采集成员而非 selected 子集。该投影不得进入管理 API、普通日志或持久化。
+type SourcingGreetingSendScanPlan struct {
+	BatchID         string
+	Platform        string
+	AccountRef      string
+	PositionRef     string
+	CapturedCount   int
+	BatchTailAnchor string
+	Targets         []SourcingGreetingSendTarget
+}
+
 // SourcingBatchGreetingSendProgress 是列表发送阶段的脱敏聚合。ReadyCount
 // 是生成成功总数；其余发送桶只对可发送成员互斥计数。
 type SourcingBatchGreetingSendProgress struct {
@@ -182,6 +196,71 @@ func (s *Store) SourcingGreetingRevision(batchID string) (*JobAIContextRevision,
 	return out, err
 }
 
+// SourcingGreetingSendScanPlan 返回当前批次续扫所需的最小内部材料。窗口、
+// 游标、扫描轮次和 notLocated 均不持久化；页面命中也不授权发送，最终授权
+// 仍由 PrepareSourcingGreetingSend 与 WAL 创建事务重新校验。
+func (s *Store) SourcingGreetingSendScanPlan(
+	batchID string,
+) (*SourcingGreetingSendScanPlan, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingGreetingEffectInvalid
+	}
+	var out SourcingGreetingSendScanPlan
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		materials, err := loadSourcingGreetingSendBatchTx(tx, batchID)
+		if err != nil {
+			return err
+		}
+		var batch SourcingBatch
+		if err := tx.First(&batch, "batch_id = ?", batchID).Error; err != nil {
+			return err
+		}
+		if batch.PositionRef == nil || strings.TrimSpace(*batch.PositionRef) == "" {
+			return ErrSourcingBinding
+		}
+		var runs []SourcingCandidateRun
+		if err := tx.Where("batch_id = ?", batch.BatchID).
+			Order("captured_at ASC, run_id ASC").Find(&runs).Error; err != nil {
+			return err
+		}
+		if len(runs) != batch.TargetCount || len(runs) == 0 {
+			return ErrSourcingBatchConflict
+		}
+		for i := range runs {
+			run := runs[i]
+			if run.BatchID == nil || *run.BatchID != batch.BatchID ||
+				run.Platform != batch.Platform || run.AccountRef != batch.AccountRef ||
+				run.ContextRevisionHash != batch.ContextRevisionHash ||
+				run.PositionRef != *batch.PositionRef ||
+				strings.TrimSpace(run.PlatformUserRef) == "" || run.CapturedAt.IsZero() {
+				return ErrSourcingGreetingEffectConflict
+			}
+		}
+
+		out = SourcingGreetingSendScanPlan{
+			BatchID: batch.BatchID, Platform: batch.Platform, AccountRef: batch.AccountRef,
+			PositionRef: *batch.PositionRef, CapturedCount: len(runs),
+			BatchTailAnchor: runs[len(runs)-1].PlatformUserRef,
+			Targets:         make([]SourcingGreetingSendTarget, 0, len(materials)),
+		}
+		for i := range materials {
+			target, err := unresolvedSourcingGreetingSendTargetTx(tx, materials[i])
+			if err != nil {
+				return err
+			}
+			if target != nil {
+				out.Targets = append(out.Targets, *target)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SourcingGreetingEffectIntentID 把一个不可变生成 invocation 映射到唯一
 // 自动招呼意图。版本域属于持久身份配方，未来变更必须换域而不能迁移旧 key。
 func SourcingGreetingEffectIntentID(invocationID string) (string, error) {
@@ -253,64 +332,69 @@ func (s *Store) PrepareSourcingGreetingSend(
 // NextSourcingGreetingSendTarget 返回固定 selection 顺序中的首个待发送或
 // 在途成员。既有终局由聚合状态收编，不会被重新定位或另铸 intent。
 func (s *Store) NextSourcingGreetingSendTarget(batchID string) (*SourcingGreetingSendTarget, error) {
-	batchID = strings.TrimSpace(batchID)
-	if batchID == "" {
-		return nil, ErrSourcingGreetingEffectInvalid
+	plan, err := s.SourcingGreetingSendScanPlan(batchID)
+	if err != nil || len(plan.Targets) == 0 {
+		return nil, err
 	}
-	var out *SourcingGreetingSendTarget
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		materials, err := loadSourcingGreetingSendBatchTx(tx, batchID)
-		if err != nil {
-			return err
+	target := plan.Targets[0]
+	return &target, nil
+}
+
+// unresolvedSourcingGreetingSendTargetTx 与旧 Next 及新续扫投影共用同一份
+// ready/linked/terminal 分类。已绑定来源必须先完整复核既有 intent/cmd；
+// 未绑定来源若推荐流已换代则不再返回。
+func unresolvedSourcingGreetingSendTargetTx(
+	tx *gorm.DB,
+	material sourcingGreetingEffectMaterial,
+) (*SourcingGreetingSendTarget, error) {
+	invocation := material.Invocation
+	if invocation.InvocationID == "" || invocation.FinishedAt == nil ||
+		invocation.Status != AIInvocationOK {
+		return nil, nil
+	}
+	if invocation.EffectIntentID == nil {
+		if sourcingGreetingFeedChanged(material) {
+			return nil, nil
 		}
-		for i := range materials {
-			material := materials[i]
-			invocation := material.Invocation
-			if invocation.InvocationID == "" || invocation.FinishedAt == nil || invocation.Status != AIInvocationOK {
-				continue
-			}
-			if invocation.EffectIntentID == nil && sourcingGreetingFeedChanged(material) {
-				continue
-			}
-			if invocation.EffectIntentID != nil {
-				var intent EffectIntent
-				if err := tx.First(&intent, "intent_id = ?", *invocation.EffectIntentID).Error; err != nil {
-					return ErrSourcingGreetingEffectConflict
-				}
-				var command CmdRecord
-				if err := tx.First(&command, "msg_id = ?", intent.RootMsgID).Error; err != nil {
-					return ErrSourcingGreetingEffectConflict
-				}
-				if err := validateSourcingGreetingEffectReplayMaterial(material,
-					SourcingGreetingEffectSource{BatchID: material.Batch.BatchID, InvocationID: invocation.InvocationID},
-					intent, command,
-				); err != nil {
-					return err
-				}
-				switch intent.Status {
-				case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
-				case EffectIntentOk, EffectIntentResolvedOk, EffectIntentFailed,
-					EffectIntentResolvedFailed, EffectIntentSuspect:
-					continue
-				default:
-					return ErrSourcingGreetingEffectConflict
-				}
-			}
-			intentID := invocation.EffectIntentID
-			out = &SourcingGreetingSendTarget{
-				BatchID:             material.Batch.BatchID,
-				ContextRevisionHash: invocation.ContextRevisionHash,
-				InvocationID:        invocation.InvocationID,
-				ProfileID:           material.Profile.ProfileID,
-				Platform:            material.Profile.Platform, AccountRef: material.Profile.AccountRef,
-				PlatformUserRef: material.Profile.PlatformUserRef,
-				PositionRef:     material.Profile.PositionRef, EffectIntentID: intentID,
-			}
-			break
+	} else {
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", *invocation.EffectIntentID).Error; err != nil {
+			return nil, ErrSourcingGreetingEffectConflict
 		}
-		return nil
-	})
-	return out, err
+		var command CmdRecord
+		if err := tx.First(&command, "msg_id = ?", intent.RootMsgID).Error; err != nil {
+			return nil, ErrSourcingGreetingEffectConflict
+		}
+		if err := validateSourcingGreetingEffectReplayMaterial(
+			material,
+			SourcingGreetingEffectSource{
+				BatchID: material.Batch.BatchID, InvocationID: invocation.InvocationID,
+			},
+			intent,
+			command,
+		); err != nil {
+			return nil, err
+		}
+		switch intent.Status {
+		case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
+		case EffectIntentOk, EffectIntentResolvedOk, EffectIntentFailed,
+			EffectIntentResolvedFailed, EffectIntentSuspect:
+			return nil, nil
+		default:
+			return nil, ErrSourcingGreetingEffectConflict
+		}
+	}
+	return &SourcingGreetingSendTarget{
+		BatchID:             material.Batch.BatchID,
+		ContextRevisionHash: invocation.ContextRevisionHash,
+		InvocationID:        invocation.InvocationID,
+		ProfileID:           material.Profile.ProfileID,
+		Platform:            material.Profile.Platform,
+		AccountRef:          material.Profile.AccountRef,
+		PlatformUserRef:     material.Profile.PlatformUserRef,
+		PositionRef:         material.Profile.PositionRef,
+		EffectIntentID:      invocation.EffectIntentID,
+	}, nil
 }
 
 func (s *Store) SourcingBatchGreetingSendProgress(

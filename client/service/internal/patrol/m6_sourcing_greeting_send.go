@@ -14,7 +14,6 @@ import (
 var (
 	ErrAutomaticGreetingRunnerUnavailable = errors.New("自动招呼 runner 尚未接线")
 	ErrSourcingGreetingTargetNotFound     = errors.New("正式批次招呼目标未在有界推荐窗口中定位")
-	ErrSourcingGreetingWindowStopped      = errors.New("正式批次招呼推荐窗口停止前进")
 	ErrSourcingGreetingWindowRepeated     = errors.New("正式批次招呼推荐窗口重复")
 	ErrSourcingGreetingPositionChanged    = errors.New("正式批次招呼职位上下文已变化")
 )
@@ -28,9 +27,10 @@ type sourcingGreetingGeneration struct {
 }
 
 // SendSelectedSourcingGreetings is the narrow production orchestrator for a
-// completed M6 selection. It only locates an unbound target; once the source is
-// linked to a WAL intent, every replay skips the page scan and collects that
-// same logical dispatch.
+// completed M6 selection. A page pass sends every currently visible target in
+// page order without resetting between candidates. Once a source is linked to
+// a WAL intent, every replay skips the page scan and collects that same logical
+// dispatch.
 func (m *Manager) SendSelectedSourcingGreetings(
 	ctx context.Context,
 	batchID string,
@@ -43,7 +43,46 @@ func (m *Manager) SendSelectedSourcingGreetings(
 	m.greetingMu.Lock()
 	defer m.greetingMu.Unlock()
 
-	for {
+	for pass := 0; pass < 2; pass++ {
+		// 已绑定 WAL 的来源必须先独立收编。页面顺序可能与采集顺序不同，
+		// 不能让一次崩溃留下的在途来源被后续页面扫描越过。
+		for {
+			progress, err := m.store.SourcingBatchGreetingSendProgress(batchID)
+			if err != nil {
+				return nil, err
+			}
+			if progress.Completed || progress.SuspectCount > 0 {
+				return progress, nil
+			}
+			plan, err := m.store.SourcingGreetingSendScanPlan(batchID)
+			if err != nil {
+				return progress, err
+			}
+			var linked *store.SourcingGreetingSendTarget
+			for i := range plan.Targets {
+				if plan.Targets[i].EffectIntentID != nil {
+					target := plan.Targets[i]
+					linked = &target
+					break
+				}
+			}
+			if linked == nil {
+				if len(plan.Targets) == 0 {
+					return progress, ErrSourcingGreetingTargetNotFound
+				}
+				break
+			}
+			if err := m.runAutomaticSourcingGreeting(ctx, nil, AutomaticGreetingRequest{
+				BatchID: linked.BatchID, InvocationID: linked.InvocationID,
+			}); err != nil {
+				latest, progressErr := m.store.SourcingBatchGreetingSendProgress(batchID)
+				if progressErr != nil {
+					return progress, errors.Join(err, progressErr)
+				}
+				return latest, err
+			}
+		}
+
 		progress, err := m.store.SourcingBatchGreetingSendProgress(batchID)
 		if err != nil {
 			return nil, err
@@ -51,32 +90,24 @@ func (m *Manager) SendSelectedSourcingGreetings(
 		if progress.Completed || progress.SuspectCount > 0 {
 			return progress, nil
 		}
-		target, err := m.store.NextSourcingGreetingSendTarget(batchID)
+		plan, err := m.store.SourcingGreetingSendScanPlan(batchID)
 		if err != nil {
 			return progress, err
 		}
-		if target == nil {
+		if len(plan.Targets) == 0 {
 			return progress, ErrSourcingGreetingTargetNotFound
 		}
-
-		var generation *sourcingGreetingGeneration
-		if target.EffectIntentID == nil {
-			// 每个全新候选人的 effect intent 形成前由脑侧加入随机节奏；
-			// 已绑定 WAL 的恢复路径不得再次等待或重新定位。
-			if err := m.config.SourcingPaceWait(ctx); err != nil {
-				return progress, err
-			}
-			generation, err = m.currentSourcingGreetingGeneration(ctx, *target)
-			if err != nil {
-				return progress, err
-			}
-			if err := m.locateSourcingGreetingTarget(ctx, *generation, *target); err != nil {
+		if pass > 0 {
+			// 第一遍向下扫描未完全命中时，只允许这一回顶部兜底。
+			if err := m.config.InteractionPaceWait(ctx); err != nil {
 				return progress, err
 			}
 		}
-		if err := m.runAutomaticSourcingGreeting(ctx, generation, AutomaticGreetingRequest{
-			BatchID: target.BatchID, InvocationID: target.InvocationID,
-		}); err != nil {
+		generation, err := m.currentSourcingGreetingGeneration(ctx, plan.Targets[0])
+		if err != nil {
+			return progress, err
+		}
+		if err := m.scanSourcingGreetingPass(ctx, *generation, *plan); err != nil {
 			latest, progressErr := m.store.SourcingBatchGreetingSendProgress(batchID)
 			if progressErr != nil {
 				return progress, errors.Join(err, progressErr)
@@ -84,6 +115,14 @@ func (m *Manager) SendSelectedSourcingGreetings(
 			return latest, err
 		}
 	}
+	progress, err := m.store.SourcingBatchGreetingSendProgress(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if progress.Completed || progress.SuspectCount > 0 {
+		return progress, nil
+	}
+	return progress, ErrSourcingGreetingTargetNotFound
 }
 
 func (m *Manager) currentSourcingGreetingGeneration(
@@ -145,13 +184,36 @@ func (m *Manager) validateSourcingGreetingGenerationLocked(
 	return nil
 }
 
-func (m *Manager) locateSourcingGreetingTarget(
+func (m *Manager) scanSourcingGreetingPass(
 	ctx context.Context,
 	generation sourcingGreetingGeneration,
-	target store.SourcingGreetingSendTarget,
+	plan store.SourcingGreetingSendScanPlan,
 ) error {
+	if plan.BatchID == "" || plan.Platform == "" || plan.AccountRef == "" ||
+		plan.PositionRef == "" || plan.CapturedCount <= 0 || plan.BatchTailAnchor == "" {
+		return store.ErrSourcingGreetingEffectConflict
+	}
+	targets := make(map[string]store.SourcingGreetingSendTarget, len(plan.Targets))
+	for i := range plan.Targets {
+		target := plan.Targets[i]
+		if target.BatchID != plan.BatchID || target.Platform != plan.Platform ||
+			target.AccountRef != plan.AccountRef || target.PositionRef != plan.PositionRef ||
+			target.PlatformUserRef == "" || target.EffectIntentID != nil {
+			return store.ErrSourcingGreetingEffectConflict
+		}
+		if _, duplicate := targets[target.PlatformUserRef]; duplicate {
+			return store.ErrSourcingGreetingEffectConflict
+		}
+		targets[target.PlatformUserRef] = target
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
 	seenWindows := make(map[string]struct{}, m.config.MaxPages)
+	seenIdentities := make(map[string]struct{}, plan.CapturedCount*2)
 	move := protocol.SourcingWindowMoveReset
+	tailSeen := false
 	for page := 0; page < m.config.MaxPages; page++ {
 		if page > 0 {
 			if err := m.config.InteractionPaceWait(ctx); err != nil {
@@ -162,32 +224,59 @@ func (m *Manager) locateSourcingGreetingTarget(
 		if err != nil {
 			return err
 		}
-		if window.PositionRef != target.PositionRef {
+		if window.PositionRef != plan.PositionRef {
 			return ErrSourcingGreetingPositionChanged
 		}
 		if move == protocol.SourcingWindowMoveNext && !window.Moved {
-			return ErrSourcingGreetingWindowStopped
+			return nil
+		}
+		identityCounts := make(map[string]int, len(window.PlatformUserRefs))
+		for _, ref := range window.PlatformUserRefs {
+			identityCounts[ref]++
+			if ref == "" || identityCounts[ref] != 1 {
+				return ErrSourcingGreetingWindowRepeated
+			}
 		}
 		windowKey := strings.Join(window.PlatformUserRefs, "\x00")
 		if _, repeated := seenWindows[windowKey]; repeated {
-			return ErrSourcingGreetingWindowRepeated
+			return nil
 		}
 		seenWindows[windowKey] = struct{}{}
-		matches := 0
+
+		wasTailSeen := tailSeen
 		for _, ref := range window.PlatformUserRefs {
-			if ref == target.PlatformUserRef {
-				matches++
+			seenIdentities[ref] = struct{}{}
+			if ref == plan.BatchTailAnchor {
+				tailSeen = true
 			}
 		}
-		if matches == 1 {
-			return m.config.InteractionPaceWait(ctx)
+		for _, ref := range window.PlatformUserRefs {
+			target, matched := targets[ref]
+			if !matched {
+				continue
+			}
+			// 每个全新候选人的 effect intent 形成前都保留候选人级随机
+			// 节奏；窗口只是定位提示，最终授权仍由 Store 和手端 evaluator
+			// 在既有正式轨道内独立重验。
+			if err := m.config.SourcingPaceWait(ctx); err != nil {
+				return err
+			}
+			if err := m.runAutomaticSourcingGreeting(ctx, &generation, AutomaticGreetingRequest{
+				BatchID: target.BatchID, InvocationID: target.InvocationID,
+			}); err != nil {
+				return err
+			}
+			delete(targets, ref)
+			if len(targets) == 0 {
+				return nil
+			}
 		}
-		if matches > 1 {
-			return ErrSourcingGreetingWindowRepeated
+		if wasTailSeen || (!tailSeen && len(seenIdentities) >= plan.CapturedCount*2) {
+			return nil
 		}
 		move = protocol.SourcingWindowMoveNext
 	}
-	return ErrSourcingGreetingTargetNotFound
+	return nil
 }
 
 func (m *Manager) readSourcingGreetingWindow(
