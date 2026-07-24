@@ -260,5 +260,58 @@ check(detail.messages.length === 2 && detail.messages[1].kindLabel === '邀面�
 check(detail.decisions[0].summary.includes('有意向'), '最近 AI 判断转换为只读说明')
 check(detail.actions[0].resultLabel === '服务端已确认', '动作结果使用业务状态文案')
 
+const unknownInternalCodes = structuredClone(snapshot)
+unknownInternalCodes.candidates.communicating.candidates.items = [rawCandidate({
+  status: 'newPlatformState',
+  endReason: 'opaqueReasonCode',
+})]
+const unknownProduct = adaptProductSnapshot(unknownInternalCodes, now)
+check(
+  unknownProduct.candidates.communicating[0].statusLabel === '状态待确认' &&
+    !JSON.stringify(unknownProduct.candidates.communicating[0]).includes('newPlatformState'),
+  '未知候选状态不向普通客户端透出内部枚举值',
+)
+const unknownDetail = adaptCandidateDetail({
+  candidate: {
+    candidate: rawCandidate(),
+    resume: {
+      available: false,
+      basic: [],
+      expectations: [],
+      selfEvaluation: '',
+      education: '',
+      workExperiences: '',
+      truncated: false,
+    },
+    messages: [{
+      seq: 1,
+      direction: 'in',
+      kind: 'opaqueMessageKind',
+      tsApproxMs: todayAt(9, 0),
+    }],
+    latestAi: {
+      available: true,
+      status: 'completed',
+      intentLabel: 'opaqueIntent',
+      intentSource: 'opaqueSource',
+      failure: 'providerInternalCode',
+      classifiedAt: new Date(2026, 6, 25, 9, 21).toISOString(),
+    },
+    actions: [{
+      kind: 'opaqueAction',
+      status: 'opaqueStatus',
+      failure: 'internalActionFailure',
+      createdAt: new Date(2026, 6, 25, 9, 22).toISOString(),
+    }],
+  },
+}, product.candidates.communicating[0], now)
+check(
+  unknownDetail.messages[0].kindLabel === '其他消息' &&
+    unknownDetail.decisions[0].summary === '意向：待确认；来源：其他来源；异常：本轮判断未完成' &&
+    unknownDetail.actions[0].label === '业务动作' &&
+    unknownDetail.actions[0].resultLabel === '需要人工复核',
+  '未知消息、AI 与动作枚举统一收敛为普通用户文案',
+)
+
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAIL`)
 process.exit(fail === 0 ? 0 : 1)

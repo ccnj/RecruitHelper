@@ -129,5 +129,7 @@ export function ProductConnectedApp({
 }
 
 function errorText(reason: unknown): string {
-  return reason instanceof Error ? reason.message : '读取失败'
+  if (!(reason instanceof Error)) return '读取失败'
+  if (reason.message === 'Failed to fetch') return '本机服务未连接'
+  return reason.message
 }

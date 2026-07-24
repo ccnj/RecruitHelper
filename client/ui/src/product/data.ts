@@ -550,7 +550,7 @@ function adaptConfirmationCandidate(raw: AppConfirmationCandidateRaw): Confirmat
     sendStateLabel: confirmationStatusLabel(raw.status),
     selectable: raw.selectable,
     manualRequired: raw.status === 'suspect',
-    manualReason: clean(raw.failure) || null,
+    manualReason: clean(raw.failure) ? '本条招呼语未能生成，请人工复核' : null,
   }
 }
 
@@ -584,9 +584,9 @@ function confirmationStatusLabel(status: string): string {
 function generationStateLabel(raw: AppConfirmationCandidateRaw): string {
   if (raw.status === 'generationPending') return '等待生成招呼语'
   if (raw.status === 'generating') return '正在生成招呼语'
-  if (raw.status === 'generationFailed') return clean(raw.failure) || '招呼语生成失败'
+  if (raw.status === 'generationFailed') return '招呼语生成失败'
   if (clean(raw.greetingText)) return '招呼语已生成'
-  return clean(raw.failure) || '当前无可用招呼语'
+  return '当前无可用招呼语'
 }
 
 function confirmationStatusTone(
@@ -715,7 +715,7 @@ function candidateStatus(
       deterministicState: `沟通已结束${endReasonLabel(raw.endReason) ? `：${endReasonLabel(raw.endReason)}` : ''}`,
     }
   }
-  return { label: clean(raw.status) || '状态待确认', tone: 'slate', deterministicState: clean(raw.status) || '状态待确认' }
+  return { label: '状态待确认', tone: 'slate', deterministicState: '状态待确认' }
 }
 
 export function adaptCandidateDetail(
@@ -814,7 +814,7 @@ function messageKindLabel(raw: AppMessageRaw): string | undefined {
   if (raw.kind === 'card' && raw.cardType === 'interviewInvite') return '邀面卡'
   if (raw.kind === 'card' && raw.cardType === 'wechatInvite') return '换微信卡'
   if (raw.kind === 'card') return '卡片'
-  if (raw.kind !== 'text') return clean(raw.kind) || undefined
+  if (raw.kind !== 'text') return '其他消息'
   return undefined
 }
 
@@ -823,7 +823,7 @@ function adaptAIJudgement(raw: AppAIJudgementRaw): CandidateDecisionView[] {
   const summary = [
     raw.intentLabel ? `意向：${intentLabel(raw.intentLabel)}` : '',
     raw.intentSource ? `来源：${intentSourceLabel(raw.intentSource)}` : '',
-    raw.failure ? `异常：${raw.failure}` : '',
+    raw.failure ? '异常：本轮判断未完成' : '',
   ].filter(Boolean).join('；') || '本轮 AI 判断已形成'
   return [{
     id: `ai-${clean(raw.classifiedAt) || 'latest'}`,
@@ -837,7 +837,7 @@ function adaptAction(raw: AppActionRaw, index: number, now: Date): CandidateActi
   return {
     id: `action-${index}-${clean(raw.createdAt) || 'unknown'}`,
     label: actionKindLabel(raw.kind),
-    resultLabel: clean(raw.failure) || actionStatusLabel(raw.status),
+    resultLabel: clean(raw.failure) ? '需要人工复核' : actionStatusLabel(raw.status),
     occurredAt: formatRelativeDateTime(raw.createdAt, now) ?? '时间未知',
     tone: actionTone(raw.status),
   }
@@ -1006,7 +1006,7 @@ function endReasonLabel(reason: string | undefined): string {
     silentWechatExchanged: '换微信后沉默归档',
     silent: '长期无回复归档',
   }
-  return labels[clean(reason)] ?? clean(reason)
+  return labels[clean(reason)] ?? (clean(reason) ? '其他终止原因' : '')
 }
 
 function intentLabel(value: string): string {
@@ -1015,7 +1015,7 @@ function intentLabel(value: string): string {
     neutral: '中性',
     rejected: '拒绝',
   }
-  return labels[value] ?? value
+  return labels[value] ?? '待确认'
 }
 
 function intentSourceLabel(value: string): string {
@@ -1024,7 +1024,7 @@ function intentSourceLabel(value: string): string {
     deterministic: '确定性规则',
     resumeSubmission: '投递简历事件',
   }
-  return labels[value] ?? value
+  return labels[value] ?? '其他来源'
 }
 
 function dialogueStatusLabel(value: string | undefined): string {
@@ -1047,7 +1047,7 @@ function actionKindLabel(value: string): string {
     acceptWechat: '接受换微信邀请',
     interviewInvite: '发起线上会议',
   }
-  return labels[value] ?? (value || '业务动作')
+  return labels[value] ?? '业务动作'
 }
 
 function actionStatusLabel(value: string): string {
@@ -1061,7 +1061,7 @@ function actionStatusLabel(value: string): string {
     failed: '执行失败',
     suspect: '结果待人工确认',
   }
-  return labels[value] ?? (value || '状态待确认')
+  return labels[value] ?? '状态待确认'
 }
 
 function actionTone(value: string): CandidateActionView['tone'] {
