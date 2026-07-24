@@ -4827,6 +4827,11 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       idServer: '  server-type-177-raw-identity  ',
     },
     {
+      name: '历史 API 规范正文形状', rawType: 'custom', envelopeType: 177,
+      from: fixture.peerRef, status: 'success', rowText: canonicalText,
+      omitFallback: true, contentString: true, card: true,
+    },
+    {
       name: '招聘方发送者', rawType: 'custom', envelopeType: 177, from: staffID,
       status: 'success', contentString: true, card: false,
     },
@@ -4849,6 +4854,11 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
     {
       name: '发送方固定文案不匹配', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
       status: 'success', senderText: '附件简历提示发生变化', contentString: true, card: false,
+    },
+    {
+      name: '只有非规范 row text', rawType: 'custom', envelopeType: 177, from: fixture.peerRef,
+      status: 'success', rowText: '附件简历提示发生变化', omitFallback: true,
+      contentString: true, card: false,
     },
     {
       name: '接收方 style 不是真机数字', rawType: 'custom', envelopeType: 177,
@@ -4881,12 +4891,14 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
       const idServer = variant.idServer ?? `server-type-177-${index}`
       const envelope = {
         type: variant.envelopeType,
-        fallbackText: {
-          receiverStyle: variant.receiverStyle ?? 1,
-          receiverText: variant.receiverText ?? fallbackText,
-          senderStyle: variant.senderStyle ?? 1,
-          senderText: variant.senderText ?? fallbackText,
-        },
+        ...(variant.omitFallback ? {} : {
+          fallbackText: {
+            receiverStyle: variant.receiverStyle ?? 1,
+            receiverText: variant.receiverText ?? fallbackText,
+            senderStyle: variant.senderStyle ?? 1,
+            senderText: variant.senderText ?? fallbackText,
+          },
+        }),
         content: JSON.stringify({}),
       }
       fixture.rows.splice(0, fixture.rows.length, {
@@ -4895,7 +4907,7 @@ test('智联 177 附件简历只在真机严格形状成立时四路提升为简
         status: variant.status,
         type: variant.rawType,
         from: variant.from,
-        text: '',
+        text: variant.rowText ?? '',
         content: variant.contentString ? JSON.stringify(envelope) : envelope,
       })
 

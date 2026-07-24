@@ -4415,12 +4415,17 @@ async function mainReadThreadPage(
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
     const attachmentFallback = parseObject(envelope.fallbackText)
+    const attachmentTextShapeMatches =
+      clean(row.text) === '您好，这是我的附件简历，请查收' ||
+      (
+        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      )
     const isCandidateAttachmentResume = rawType === 'custom' && typeof row.content === 'string' &&
       typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      attachmentTextShapeMatches
     let direction: ZhilianThreadMessage['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -5376,12 +5381,17 @@ async function mainCaptureSendBaseline(
         clean(row.status).toLowerCase() === 'success' &&
         clean(inner.staffText) === '对方向您发送了在线简历'
       const attachmentFallback = parseObject(envelope.fallbackText)
+      const attachmentTextShapeMatches =
+        clean(row.text) === '您好，这是我的附件简历，请查收' ||
+        (
+          attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+          clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+          clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+        )
       const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
         typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
         from === target && clean(row.status).toLowerCase() === 'success' &&
-        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+        attachmentTextShapeMatches
       let direction: ZhilianMessageAnchor['direction'] = from
         ? from === staffID ? 'out' : 'in'
         : 'system'
@@ -6046,12 +6056,17 @@ function mainSendMessageOnce(
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
     const attachmentFallback = parseObject(envelope.fallbackText)
+    const attachmentTextShapeMatches =
+      clean(row.text) === '您好，这是我的附件简历，请查收' ||
+      (
+        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      )
     const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
       typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      attachmentTextShapeMatches
     let direction: ZhilianMessageAnchor['direction'] = from
       ? from === staffID ? 'out' : 'in'
       : 'system'
@@ -6979,12 +6994,17 @@ function mainSendCardOnce(
       clean(row.status).toLowerCase() === 'success' &&
       clean(inner.staffText) === '对方向您发送了在线简历'
     const attachmentFallback = parseObject(envelope.fallbackText)
+    const attachmentTextShapeMatches =
+      clean(row.text) === '您好，这是我的附件简历，请查收' ||
+      (
+        attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
+        clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
+        clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      )
     const isCandidateAttachmentResume = rawType === 'custom' && row.contentWasString &&
       typeof envelope.type === 'number' && envelope.type === 177 && customType === 177 &&
       from === target && clean(row.status).toLowerCase() === 'success' &&
-      attachmentFallback.receiverStyle === 1 && attachmentFallback.senderStyle === 1 &&
-      clean(attachmentFallback.receiverText) === '这是我的附件简历，请查收' &&
-      clean(attachmentFallback.senderText) === '这是我的附件简历，请查收'
+      attachmentTextShapeMatches
     let direction: ZhilianMessageAnchor['direction'] = from ? from === staffID ? 'out' : 'in' : 'system'
     let kind: 'text' | 'card' | 'system' = 'system'
     let text = ''
