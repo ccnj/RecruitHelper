@@ -9,6 +9,7 @@ import (
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/patrol"
+	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -30,11 +31,80 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 		return v.verifySendMessage(ctx, req)
 	case protocol.PrimChatSendWechatInvite, protocol.PrimChatSendInviteCard:
 		return v.verifyCard(ctx, req)
+	case protocol.PrimChatAcceptWechat:
+		return v.verifyAcceptWechat(ctx, req)
 	case protocol.PrimChatSendGreeting:
 		return v.verifyGreeting(ctx, req)
 	default:
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是已支持的真实副作用意图")
 	}
+}
+
+func (v EffectVerifier) verifyAcceptWechat(
+	ctx context.Context,
+	req dispatch.VerificationRequest,
+) (dispatch.VerificationObservation, error) {
+	if req.Command.Name != protocol.PrimChatAcceptWechat ||
+		req.AcceptWechatArgs == nil ||
+		req.AcceptWechatArgs.ConversationRef == "" ||
+		req.AcceptWechatArgs.RequestSourceKey == "" {
+		return dispatch.VerificationObservation{},
+			errors.New("验证请求不是完整 chat.acceptWechat 意图")
+	}
+	argsRaw, err := protocol.Encode(
+		protocol.ChatReadWechatExchangeOutcomeArgs{
+			ConversationRef:  req.AcceptWechatArgs.ConversationRef,
+			RequestSourceKey: req.AcceptWechatArgs.RequestSourceKey,
+		},
+	)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	state, err := v.Dispatcher.RunVerificationRead(
+		ctx,
+		req.Command.MsgID,
+		dispatch.DispatchRequest{
+			HandID: req.Command.HandID,
+			Name:   protocol.PrimChatReadWechatExchangeOutcome,
+			Args:   argsRaw,
+			Context: &protocol.CmdContext{
+				Platform:                     req.Command.Platform,
+				AccountRef:                   req.Command.AccountRef,
+				ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
+			},
+		},
+	)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	dataRaw, err := resultData(state.Leaf)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	var data protocol.ChatReadWechatExchangeOutcomeData
+	if err := json.Unmarshal(dataRaw, &data); err != nil {
+		return dispatch.VerificationObservation{},
+			fmt.Errorf("解析验证 readWechatExchangeOutcome: %w", err)
+	}
+	if !data.Confirmed {
+		return dispatch.VerificationObservation{
+			Reason: "本轮未取得同一请求的唯一微信交换正证",
+		}, nil
+	}
+	fingerprint, err := store.AcceptWechatFingerprint(
+		req.AcceptWechatArgs.RequestSourceKey,
+	)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	return dispatch.VerificationObservation{
+		Confirmed:   true,
+		ContentHash: fingerprint,
+		SourceKey:   data.ExchangeSourceKey,
+		PeerWechat:  data.PeerWechat,
+		ObservedAt:  data.ObservedAt,
+		Reason:      "同一微信请求后唯一命中交换完成正证",
+	}, nil
 }
 
 func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {

@@ -3,14 +3,17 @@ package patrol
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 const (
 	communicationV4CardTransitionReadLimit   = 500
 	communicationV4ManualCardProfileMismatch = "cardTransitionProfileMismatch"
+	communicationV4ManualWechatContactRead   = "wechatContactUnconfirmed"
 )
 
 // processCommunicationV4CardTransitions drains the M2 append-only card
@@ -62,7 +65,12 @@ func (a *roundActor) processCommunicationV4CardTransitionsForProfile(
 			}
 			return err
 		}
-		if err := a.processCommunicationV4CardTransition(item, *profile, *aggregate); err != nil {
+		if err := a.processCommunicationV4CardTransition(
+			ctx,
+			item,
+			*profile,
+			*aggregate,
+		); err != nil {
 			return err
 		}
 	}
@@ -70,6 +78,7 @@ func (a *roundActor) processCommunicationV4CardTransitionsForProfile(
 }
 
 func (a *roundActor) processCommunicationV4CardTransition(
+	ctx context.Context,
 	pending store.PendingCardTransition,
 	profile store.CandidateProfile,
 	aggregate store.CommunicationV4Aggregate,
@@ -78,6 +87,29 @@ func (a *roundActor) processCommunicationV4CardTransition(
 		if err := a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			profile.ProfileID,
 			communicationV4ManualCardProfileMismatch,
+			a.manager.now(),
+		); err != nil {
+			return err
+		}
+		_, err := a.manager.store.AcknowledgeCardTransition(
+			pending.Transition.Key(),
+			a.manager.now(),
+		)
+		return err
+	}
+
+	manual, err := a.collectWechatContactBeforeTransition(
+		ctx,
+		pending,
+		profile,
+	)
+	if err != nil {
+		return err
+	}
+	if manual {
+		if err := a.manager.store.MarkCommunicationV4AutomationManualRequired(
+			profile.ProfileID,
+			communicationV4ManualWechatContactRead,
 			a.manager.now(),
 		); err != nil {
 			return err
@@ -146,6 +178,84 @@ func (a *roundActor) processCommunicationV4CardTransition(
 		a.manager.now(),
 	)
 	return err
+}
+
+func (a *roundActor) collectWechatContactBeforeTransition(
+	ctx context.Context,
+	pending store.PendingCardTransition,
+	profile store.CandidateProfile,
+) (bool, error) {
+	transition := pending.Transition
+	message := pending.Message
+	if transition.CardType != "wechatExchange" ||
+		transition.FromState != "pending" ||
+		transition.ToState != "accepted" ||
+		message.Direction != "out" {
+		return false, nil
+	}
+	if message.SourceKey == nil ||
+		strings.TrimSpace(*message.SourceKey) == "" {
+		return false, store.ErrCardTransitionCorrupt
+	}
+	hasAsset, err := a.manager.store.HasWechatContactAssetForRequest(
+		profile.ProfileID,
+		*message.SourceKey,
+	)
+	if err != nil || hasAsset {
+		return false, err
+	}
+
+	// Ordinary patrol may have reconciled several conversations before it
+	// drains transition facts. Re-open this exact thread through the existing
+	// read primitive; the explicit current-conversation entry is already on
+	// the required route and must not navigate away.
+	if !a.requireCurrentThread {
+		if _, err := a.readThread(
+			ctx,
+			transition.ConversationRef,
+			nil,
+			false,
+		); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return false, ctxErr
+			}
+			return true, nil
+		}
+	}
+	data, err := invokePrimitiveDirect[protocol.ChatReadWechatExchangeOutcomeData](
+		ctx,
+		a,
+		protocol.PrimChatReadWechatExchangeOutcome,
+		protocol.ChatReadWechatExchangeOutcomeArgs{
+			ConversationRef:  transition.ConversationRef,
+			RequestSourceKey: *message.SourceKey,
+		},
+	)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		return true, nil
+	}
+	if !data.Confirmed ||
+		strings.TrimSpace(data.ExchangeSourceKey) == "" ||
+		strings.TrimSpace(data.PeerWechat) == "" {
+		return true, nil
+	}
+	_, _, err = a.manager.store.RecordObservedWechatContact(
+		store.WechatContactAssetRequest{
+			ProfileID:         profile.ProfileID,
+			Platform:          profile.Platform,
+			AccountRef:        profile.AccountRef,
+			ConversationRef:   transition.ConversationRef,
+			RequestSourceKey:  *message.SourceKey,
+			ExchangeSourceKey: data.ExchangeSourceKey,
+			PeerWechat:        data.PeerWechat,
+			ObservedAtMs:      data.ObservedAt,
+			RecordedAt:        a.manager.now(),
+		},
+	)
+	return false, err
 }
 
 func communicationV4CardTransitionMatchesProfile(

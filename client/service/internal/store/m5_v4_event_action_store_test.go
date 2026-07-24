@@ -124,7 +124,7 @@ func TestCommunicationV4EventActionAutoMigrateAndScopedID(t *testing.T) {
 func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing.T) {
 	s := openTest(t)
 	profileID := "profile-v4-event-action-six"
-	seedResumeStoreFixture(t, s, profileID)
+	fixture := seedResumeStoreFixture(t, s, profileID)
 	at := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	firstRevision := communicationV4EventActionContextFixture(
 		"context-v4-event-action",
@@ -136,6 +136,16 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 	bindCommunicationV4EventActionContext(t, s, profileID, firstRevision, at)
 
 	wechatSource := "message:20"
+	wechatRequestSourceKey := strings.Repeat("1", 64)
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef, Seq: 20,
+		Direction: "in", Kind: "card", CardType: "wechatExchange",
+		CardState: "pending", ContentHash: strings.Repeat("2", 64),
+		Origin: "external", SourceKey: &wechatRequestSourceKey, CreatedAt: at,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
 	createCommunicationV4BusinessEventApplication(
 		t,
 		s,
@@ -157,11 +167,18 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 	if err != nil || !wechatResult.Created || len(wechatResult.Actions) != 3 {
 		t.Fatalf("微信事件动作未完整物化: result=%+v err=%v", wechatResult, err)
 	}
-	if wechatResult.Actions[0].Status != CommunicationV4EventActionDeferred ||
-		wechatResult.Actions[0].FailureReason != CommunicationV4EventActionFailurePrimitiveUnavailable ||
+	acceptFingerprint, err := AcceptWechatFingerprint(wechatRequestSourceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wechatResult.Actions[0].Status != CommunicationV4EventActionPlanned ||
+		wechatResult.Actions[0].EffectKind != CommunicationV4EventEffectAcceptWechat ||
+		wechatResult.Actions[0].FailureReason != "" ||
+		wechatResult.Actions[0].ContentHash != acceptFingerprint ||
+		wechatResult.Actions[0].ContentHash == wechatRequestSourceKey ||
 		wechatResult.Actions[1].Status != CommunicationV4EventActionDeferred ||
 		wechatResult.Actions[1].FailureReason != CommunicationV4EventActionFailureNotificationChannelDeferred {
-		t.Fatalf("未开放能力未显式 deferred: %+v", wechatResult.Actions)
+		t.Fatalf("微信接受动作与通知处置错误: %+v", wechatResult.Actions)
 	}
 	wechatReceipt := wechatResult.Actions[2]
 	if wechatReceipt.EffectKind != CommunicationV4EventEffectReplyText ||
@@ -237,6 +254,82 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 		replayed.Actions[0].ContextRevisionHash != firstRevision.RevisionHash ||
 		!replayed.Actions[0].PlannedAt.Equal(at.Add(3*time.Minute)) {
 		t.Fatalf("配置改版后的重放改写了冻结事实: result=%+v err=%v", replayed, err)
+	}
+}
+
+func TestCommunicationV4LegacyDeferredAcceptRemainsReadableAndNeverRevives(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(
+		t,
+		s,
+		"profile-v4-event-action-legacy-accept",
+	)
+	requestSourceKey := strings.Repeat("3", 64)
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+		CardState: "pending", ContentHash: strings.Repeat("4", 64),
+		SourceKey: &requestSourceKey,
+	})
+	freezeReq := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(freezeReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions, err := s.CommunicationV4EventActionsBySource(
+		fixture.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accept *CommunicationV4EventAction
+	for index := range actions {
+		if actions[index].V4Kind == communication.V4ActionAcceptWechat {
+			copy := actions[index]
+			accept = &copy
+			break
+		}
+	}
+	if accept == nil || accept.Status != CommunicationV4EventActionPlanned {
+		t.Fatalf("新接受动作前置未就绪: %+v", actions)
+	}
+
+	// Simulate the exact pre-batch row already present in a developer database.
+	// Migration/replay must interpret it, not rewrite or revive it.
+	if err := s.db.Model(&CommunicationV4EventAction{}).
+		Where("action_id = ?", accept.ActionID).
+		Updates(map[string]any{
+			"status":         CommunicationV4EventActionDeferred,
+			"failure_reason": CommunicationV4EventActionFailurePrimitiveUnavailable,
+			"content_hash":   "",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := s.FreezeCommunicationV4Turn(freezeReq)
+	if err != nil || replayed.Created {
+		t.Fatalf("历史 deferred 接受动作无法只读重放: result=%+v err=%v", replayed, err)
+	}
+	var retained CommunicationV4EventAction
+	if err := s.db.First(&retained, "action_id = ?", accept.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retained.Status != CommunicationV4EventActionDeferred ||
+		retained.FailureReason != CommunicationV4EventActionFailurePrimitiveUnavailable ||
+		retained.ContentHash != "" ||
+		retained.EffectIntentID != nil {
+		t.Fatalf("历史 deferred 接受动作被改写或复活: %+v", retained)
+	}
+	planned, err := s.PlannedCommunicationV4EventActionsForAccount(
+		AccountKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range planned {
+		if action.ActionID == accept.ActionID {
+			t.Fatalf("历史 deferred 接受动作进入派发队列: %+v", action)
+		}
 	}
 }
 

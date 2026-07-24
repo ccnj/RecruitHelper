@@ -719,9 +719,11 @@ func TestCommunicationV4TurnManualClosesOnlyAggregate(t *testing.T) {
 func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-turn-prerequisite")
+	requestSourceKey := strings.Repeat("9", 64)
 	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
 		Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
 		CardState: "pending", ContentHash: "v4-turn-prerequisite-2",
+		SourceKey: &requestSourceKey,
 	})
 	frozen, err := s.FreezeCommunicationV4Turn(
 		communicationV4TurnRequest(t, s, fixture, inbound),
@@ -740,18 +742,22 @@ func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 		t.Fatalf("主动换微信前置动作未物化: actions=%+v err=%v", eventActions, err)
 	}
 	for _, action := range eventActions {
-		if action.Status != CommunicationV4EventActionDeferred {
-			t.Fatalf("未获准前置动作不得进入派发态: %+v", action)
-		}
 		switch action.V4Kind {
 		case communication.V4ActionAcceptWechat:
-			if action.FailureReason !=
-				CommunicationV4EventActionFailurePrimitiveUnavailable {
-				t.Fatalf("接受换微信缺少不可用原因: %+v", action)
+			fingerprint, fingerprintErr := AcceptWechatFingerprint(requestSourceKey)
+			if fingerprintErr != nil {
+				t.Fatal(fingerprintErr)
+			}
+			if action.Status != CommunicationV4EventActionPlanned ||
+				action.FailureReason != "" ||
+				action.ContentHash != fingerprint ||
+				action.ContentHash == requestSourceKey {
+				t.Fatalf("接受换微信动作未冻结为可派发摘要: %+v", action)
 			}
 		case communication.V4ActionNotifyWechat:
-			if action.FailureReason !=
-				CommunicationV4EventActionFailureNotificationChannelDeferred {
+			if action.Status != CommunicationV4EventActionDeferred ||
+				action.FailureReason !=
+					CommunicationV4EventActionFailureNotificationChannelDeferred {
 				t.Fatalf("换微信通知缺少后置原因: %+v", action)
 			}
 		default:

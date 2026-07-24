@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -155,6 +156,17 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			return
 		}
 		request.InviteCardArgs = &args
+	case protocol.PrimChatAcceptWechat:
+		var args protocol.ChatAcceptWechatArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			recordMiss("验证读无法解析接受微信请求 args: " + err.Error())
+			return
+		}
+		if err := json.Unmarshal([]byte(cmd.Guards), &request.Guards); err != nil {
+			recordMiss("验证读无法解析接受微信请求 guards: " + err.Error())
+			return
+		}
+		request.AcceptWechatArgs = &args
 	case protocol.PrimChatSendGreeting:
 		var greetingArgs protocol.ChatSendGreetingArgs
 		if err := json.Unmarshal([]byte(cmd.Args), &greetingArgs); err != nil {
@@ -325,6 +337,49 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			ResultBody: string(resultRaw), ResolutionReason: "verification interview card uniquely matched",
 			At: time.Now(),
 		})
+	case protocol.PrimChatAcceptWechat:
+		if request.AcceptWechatArgs == nil ||
+			!validLowerHex64(observation.SourceKey) ||
+			strings.TrimSpace(observation.PeerWechat) == "" ||
+			observation.Interview != nil {
+			recordMiss("接受微信请求验证正证缺少稳定交换身份或候选人联系方式")
+			return
+		}
+		data := protocol.ChatAcceptWechatData{
+			ConversationRef:   request.AcceptWechatArgs.ConversationRef,
+			RequestSourceKey:  request.AcceptWechatArgs.RequestSourceKey,
+			ExchangeSourceKey: observation.SourceKey,
+			PeerWechat:        observation.PeerWechat,
+			ObservedAt:        observation.ObservedAt,
+		}
+		result := protocol.ResultBody{
+			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
+			Data: mustEncode(data),
+			Evidence: []protocol.Evidence{{
+				Type: string(protocol.AcceptWechatEvidenceTypeCandidateWechatRequestAcceptedObserved),
+			}},
+		}
+		resultRaw, err := protocol.Encode(result)
+		if err != nil {
+			recordMiss("接受微信请求验证成功证词编码失败: " + err.Error())
+			return
+		}
+		_, commitErr = d.st.ResolveWechatAcceptVerified(
+			store.VerifiedWechatAcceptSuccess{
+				Ref: ref,
+				ConversationKey: store.ConversationKey{
+					Platform: intent.Platform, AccountRef: intent.AccountRef,
+					ConversationRef: intent.TargetRef,
+				},
+				RequestSourceKey:  request.AcceptWechatArgs.RequestSourceKey,
+				ExchangeSourceKey: observation.SourceKey,
+				PeerWechat:        observation.PeerWechat,
+				ObservedAtMs:      observation.ObservedAt,
+				ResultBody:        string(resultRaw),
+				ResolutionReason:  "verification wechat exchange uniquely matched",
+				At:                time.Now(),
+			},
+		)
 	}
 	if commitErr != nil {
 		if !errors.Is(commitErr, store.ErrRecoveryStateConflict) {

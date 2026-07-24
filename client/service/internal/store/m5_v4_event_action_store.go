@@ -198,6 +198,17 @@ func materializeCommunicationV4EventActionsTx(
 			CreatedAt:         materializedAt,
 			UpdatedAt:         materializedAt,
 		}
+		if row.V4Kind == communication.V4ActionAcceptWechat {
+			fingerprint, err := communicationV4AcceptWechatFingerprintTx(
+				tx,
+				row.ProfileID,
+				row.CardMessageSeq,
+			)
+			if err != nil {
+				return nil, false, err
+			}
+			row.ContentHash = fingerprint
+		}
 		if skeleton.dialogueOwned {
 			row.Status = CommunicationV4EventActionDeferred
 			row.FailureReason = CommunicationV4EventActionFailureDialogueActionOwned
@@ -673,9 +684,126 @@ func materializeCommunicationV4EventActionDisposition(
 		row.Status = CommunicationV4EventActionDeferred
 		row.FailureReason = CommunicationV4EventActionFailureNotificationChannelDeferred
 	case communication.V4ActionAcceptWechat:
-		row.Status = CommunicationV4EventActionDeferred
-		row.FailureReason = CommunicationV4EventActionFailurePrimitiveUnavailable
+		row.Status = CommunicationV4EventActionPlanned
 	}
+}
+
+func communicationV4AcceptWechatFingerprintTx(
+	tx *gorm.DB,
+	profileID string,
+	cardMessageSeq int64,
+) (string, error) {
+	if tx == nil || strings.TrimSpace(profileID) == "" || cardMessageSeq <= 0 {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		return "", err
+	}
+	if profile.ConversationRef == nil ||
+		strings.TrimSpace(*profile.ConversationRef) == "" {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	var message Message
+	if err := tx.First(
+		&message,
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+		profile.Platform,
+		profile.AccountRef,
+		*profile.ConversationRef,
+		cardMessageSeq,
+	).Error; err != nil {
+		return "", err
+	}
+	if message.RetractedAt != nil ||
+		message.Direction != "in" ||
+		message.Kind != "card" ||
+		message.CardType != "wechatExchange" ||
+		message.CardState != "pending" ||
+		message.SourceKey == nil {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	return AcceptWechatFingerprint(*message.SourceKey)
+}
+
+// CommunicationV4AcceptWechatRequestSource returns the private request anchor
+// for one persisted accept action. Callers may use it only to construct the
+// typed command args; the WAL transaction repeats this exact lookup.
+func (s *Store) CommunicationV4AcceptWechatRequestSource(
+	actionID string,
+) (string, error) {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" {
+		return "", ErrCommunicationV4EventActionInvalid
+	}
+	var sourceKey string
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var action CommunicationV4EventAction
+		if err := tx.First(&action, "action_id = ?", actionID).Error; err != nil {
+			return err
+		}
+		var profile CandidateProfile
+		if err := tx.First(&profile, "profile_id = ?", action.ProfileID).Error; err != nil {
+			return err
+		}
+		if profile.ConversationRef == nil {
+			return ErrCommunicationV4EventActionConflict
+		}
+		var err error
+		sourceKey, err = communicationV4AcceptWechatRequestSourceTx(
+			tx,
+			action,
+			*profile.ConversationRef,
+		)
+		return err
+	})
+	return sourceKey, err
+}
+
+func communicationV4AcceptWechatRequestSourceTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	conversationRef string,
+) (string, error) {
+	if tx == nil ||
+		action.V4Kind != communication.V4ActionAcceptWechat ||
+		action.EffectKind != CommunicationV4EventEffectAcceptWechat ||
+		action.CardMessageSeq <= 0 ||
+		strings.TrimSpace(conversationRef) == "" {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", action.ProfileID).Error; err != nil {
+		return "", err
+	}
+	if profile.ConversationRef == nil ||
+		*profile.ConversationRef != conversationRef {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	var message Message
+	if err := tx.First(
+		&message,
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+		profile.Platform,
+		profile.AccountRef,
+		conversationRef,
+		action.CardMessageSeq,
+	).Error; err != nil {
+		return "", err
+	}
+	if message.RetractedAt != nil ||
+		message.Direction != "in" ||
+		message.Kind != "card" ||
+		message.CardType != "wechatExchange" ||
+		message.CardState != "pending" ||
+		message.SourceKey == nil {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	fingerprint, err := AcceptWechatFingerprint(*message.SourceKey)
+	if err != nil || action.ContentHash != fingerprint {
+		return "", ErrCommunicationV4EventActionConflict
+	}
+	return *message.SourceKey, nil
 }
 
 func communicationV4EventActionReplayMatches(
@@ -784,8 +912,39 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			row.FailureReason == CommunicationV4EventActionFailureNotificationChannelDeferred &&
 			validCommunicationV4EventActionEffectFields(row)
 	case communication.V4ActionAcceptWechat:
-		return row.Status == CommunicationV4EventActionDeferred &&
-			row.FailureReason == CommunicationV4EventActionFailurePrimitiveUnavailable &&
+		// Before chat.acceptWechat@1 existed, materialization persisted this
+		// explicit deferred fact. It remains readable for immutable replay but
+		// PlannedCommunicationV4EventActionsForAccount never revives it.
+		if row.Status == CommunicationV4EventActionDeferred {
+			return row.FailureReason ==
+				CommunicationV4EventActionFailurePrimitiveUnavailable &&
+				row.Text == "" &&
+				row.ContentHash == "" &&
+				row.ContextRevisionHash == "" &&
+				validCommunicationV4EventActionEffectFields(row)
+		}
+		if row.Status != CommunicationV4EventActionPlanned &&
+			row.Status != CommunicationV4EventActionEffectPending &&
+			row.Status != CommunicationV4EventActionSent &&
+			row.Status != CommunicationV4EventActionManualRequired {
+			return false
+		}
+		if row.Status == CommunicationV4EventActionManualRequired &&
+			communicationV4EventActionPreWALFailureReason(row.FailureReason) {
+			return row.Text == "" &&
+				validMessageSourceKey(row.ContentHash) &&
+				row.ContextRevisionHash == "" &&
+				row.EffectIntentID == nil &&
+				row.EffectStartedAt == nil &&
+				row.SentAt == nil
+		}
+		return (row.Status != CommunicationV4EventActionManualRequired ||
+			validCommunicationV4EventActionFailureReason(row.FailureReason)) &&
+			row.Text == "" &&
+			validMessageSourceKey(row.ContentHash) &&
+			row.ContextRevisionHash == "" &&
+			(row.Status == CommunicationV4EventActionManualRequired ||
+				row.FailureReason == "") &&
 			validCommunicationV4EventActionEffectFields(row)
 	default:
 		return false

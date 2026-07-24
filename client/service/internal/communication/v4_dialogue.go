@@ -38,6 +38,7 @@ const (
 	V4ManualReplyFailed            V4ManualReason = "replyFailed"
 	V4ManualReplyInvalid           V4ManualReason = "replyInvalid"
 	V4ManualFixedPhraseUnavailable V4ManualReason = "fixedPhraseUnavailable"
+	V4ManualWechatContinuation     V4ManualReason = "wechatContinuationManual"
 )
 
 type V4PlannedAction struct {

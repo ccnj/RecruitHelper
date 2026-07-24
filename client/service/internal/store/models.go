@@ -399,6 +399,26 @@ type CandidateProfile struct {
 	CommunicationV4Aggregate *CommunicationV4Aggregate `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 }
 
+// ContactAsset is the local business authority for candidate contact details.
+// Value and both source identities are deliberately excluded from JSON so this
+// model cannot accidentally become an admin/log projection. Rows are business
+// facts and are never physically deleted.
+type ContactAsset struct {
+	AssetID          string  `gorm:"primaryKey"`
+	ProfileID        string  `gorm:"not null;index"`
+	Platform         string  `gorm:"not null;uniqueIndex:ux_contact_asset_source,priority:1"`
+	AccountRef       string  `gorm:"not null;uniqueIndex:ux_contact_asset_source,priority:2"`
+	ConversationRef  string  `gorm:"not null;uniqueIndex:ux_contact_asset_source,priority:3"`
+	Kind             string  `gorm:"not null;uniqueIndex:ux_contact_asset_source,priority:4"`
+	SourceKey        string  `json:"-" gorm:"not null;uniqueIndex:ux_contact_asset_source,priority:5"`
+	RequestSourceKey string  `json:"-" gorm:"not null"`
+	Value            string  `json:"-" gorm:"not null"`
+	EffectIntentID   *string `json:"-" gorm:"uniqueIndex"`
+	ObservedAtMs     int64   `gorm:"not null"`
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
 type ProfileCommunicationAutomationStatus string
 
 const (
@@ -696,6 +716,7 @@ const (
 	CommunicationActionReplyText       CommunicationActionKind = "replyText"
 	CommunicationActionInviteWechat    CommunicationActionKind = "inviteWechat"
 	CommunicationActionInterviewInvite CommunicationActionKind = "interviewInvite"
+	CommunicationActionAcceptWechat    CommunicationActionKind = "acceptWechat"
 )
 
 type CommunicationActionStatus string

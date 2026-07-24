@@ -3,12 +3,14 @@ package patrol
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 type communicationV4CardTransitionFixture struct {
@@ -41,6 +43,24 @@ func seedCommunicationV4PendingInterviewTransitionWithCardProjection(
 	t *testing.T,
 	h *harness,
 	suffix string,
+	toState string,
+	projectCard bool,
+) communicationV4CardTransitionFixture {
+	return seedCommunicationV4PendingCardTransitionWithCardProjection(
+		t,
+		h,
+		suffix,
+		"interviewInvite",
+		toState,
+		projectCard,
+	)
+}
+
+func seedCommunicationV4PendingCardTransitionWithCardProjection(
+	t *testing.T,
+	h *harness,
+	suffix string,
+	cardType string,
 	toState string,
 	projectCard bool,
 ) communicationV4CardTransitionFixture {
@@ -82,14 +102,14 @@ func seedCommunicationV4PendingInterviewTransitionWithCardProjection(
 
 	roundID := "round-v4-card-transition-" + suffix
 	beginCommunicationV4PatrolRound(t, h, roundID)
-	cardText := "合成邀面卡"
-	cardHash := syncledger.HashText("card\x1finterviewInvite\x1f" + suffix)
+	cardText := "合成卡片"
+	cardHash := syncledger.HashText("card\x1f" + cardType + "\x1f" + suffix)
 	sourceKey := syncledger.HashText("source-key-" + suffix)
 	appendResult, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
 		Key: key, RoundID: roundID, ExpectedTailSeq: target.inboundSeq,
 		NewMessages: []store.MessageDraft{{
 			Direction: "out", Kind: "card", ContentHash: cardHash,
-			Text: &cardText, CardType: "interviewInvite", CardState: "pending",
+			Text: &cardText, CardType: cardType, CardState: "pending",
 			Origin: "self", SourceKey: &sourceKey,
 		}},
 		SyncedAt: h.clock.Now().Add(time.Minute),
@@ -309,6 +329,177 @@ func TestCommunicationV4CardTransitionProjectsPredecessorCardBeforeTransition(t 
 	}
 }
 
+func TestCommunicationV4WechatAcceptedCollectsContactBeforeEventProjection(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PendingCardTransitionWithCardProjection(
+		t,
+		h,
+		"wechat-contact-success",
+		"wechatExchange",
+		"accepted",
+		true,
+	)
+	exchangeSourceKey := strings.Repeat("8", 64)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadWechatExchangeOutcome:
+			args := decodeArgs[protocol.ChatReadWechatExchangeOutcomeArgs](t, request)
+			if args.ConversationRef != fixture.key.ConversationRef ||
+				args.RequestSourceKey != fixture.sourceKey {
+				t.Fatalf("微信结果回读未锚定原卡片: %+v", args)
+			}
+			return protocol.ChatReadWechatExchangeOutcomeData{
+				Confirmed:         true,
+				ExchangeSourceKey: exchangeSourceKey,
+				PeerWechat:        "synthetic-wechat-origin-one",
+				ObservedAt:        h.clock.Now().UnixMilli(),
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+	messagesBefore, err := h.db.MessagesForConversation(fixture.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregateBefore, err := h.db.CommunicationV4AggregateByProfile(fixture.target.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = fixture.actor.processCommunicationV4CardTransition(
+		context.Background(),
+		fixture.pending,
+		fixture.profile,
+		*aggregateBefore,
+	)
+	h.manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, err := h.db.ContactAssetsByProfile(fixture.target.profileID)
+	if err != nil || len(assets) != 1 ||
+		assets[0].RequestSourceKey != fixture.sourceKey ||
+		assets[0].SourceKey != exchangeSourceKey ||
+		assets[0].Value != "synthetic-wechat-origin-one" ||
+		assets[0].EffectIntentID != nil {
+		t.Fatalf("origin1 联系方式未在事件前收编: assets=%+v err=%v", assets, err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.target.profileID)
+	if err != nil ||
+		aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.Revision != aggregateBefore.Revision+1 {
+		t.Fatalf("收号后微信接受事件未投影: aggregate=%+v err=%v", aggregate, err)
+	}
+	messagesAfter, err := h.db.MessagesForConversation(fixture.key)
+	if err != nil || len(messagesAfter) != len(messagesBefore) {
+		t.Fatalf("只读收号不得增生候选人可见消息: before=%d after=%d err=%v",
+			len(messagesBefore), len(messagesAfter), err)
+	}
+	if got := h.runner.names(); len(got) != 2 ||
+		got[0] != protocol.PrimChatReadThread ||
+		got[1] != protocol.PrimChatReadWechatExchangeOutcome {
+		t.Fatalf("origin1 收号只应走两条只读原语: %+v", got)
+	}
+}
+
+func TestCommunicationV4WechatContactUnconfirmedGoesManualAndAcknowledges(t *testing.T) {
+	testCases := []struct {
+		name string
+		data protocol.ChatReadWechatExchangeOutcomeData
+	}{
+		{
+			name: "confirmed-false",
+			data: protocol.ChatReadWechatExchangeOutcomeData{Confirmed: false},
+		},
+		{
+			name: "confirmed-with-missing-fields",
+			data: protocol.ChatReadWechatExchangeOutcomeData{Confirmed: true},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			h := newHarness(t)
+			fixture := seedCommunicationV4PendingCardTransitionWithCardProjection(
+				t,
+				h,
+				"wechat-contact-"+testCase.name,
+				"wechatExchange",
+				"accepted",
+				true,
+			)
+			testCase.data.ObservedAt = h.clock.Now().UnixMilli()
+			h.runner.handler = func(request RunRequest) (any, error) {
+				switch request.Name {
+				case protocol.PrimChatReadWechatExchangeOutcome:
+					return testCase.data, nil
+				default:
+					return defaultHandler(request)
+				}
+			}
+			before, err := h.db.CommunicationV4AggregateByProfile(
+				fixture.target.profileID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.manager.mu.Lock()
+			err = fixture.actor.processCommunicationV4CardTransition(
+				context.Background(),
+				fixture.pending,
+				fixture.profile,
+				*before,
+			)
+			h.manager.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			aggregate, err := h.db.CommunicationV4AggregateByProfile(
+				fixture.target.profileID,
+			)
+			if err != nil ||
+				aggregate.AutomationStatus != store.ProfileCommunicationAutomationManualRequired ||
+				aggregate.ManualReason != communicationV4ManualWechatContactRead ||
+				aggregate.Revision != before.Revision ||
+				aggregate.State.WechatState != communication.V4WechatInvited {
+				t.Fatalf("联系方式未确认没有保守转人工: aggregate=%+v err=%v",
+					aggregate, err)
+			}
+			assets, err := h.db.ContactAssetsByProfile(fixture.target.profileID)
+			if err != nil || len(assets) != 0 {
+				t.Fatalf("联系方式未确认不得建资产: assets=%+v err=%v", assets, err)
+			}
+			actions, err := h.db.CommunicationV4EventActionsByProfile(
+				fixture.target.profileID,
+			)
+			if err != nil || len(actions) != 0 {
+				t.Fatalf("收号失败不得物化固定回执/effect: actions=%+v err=%v",
+					actions, err)
+			}
+			pending, err := h.db.PendingCardTransitionsForAccount(h.key, 10)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("人工收敛后跃迁必须 ack，不能永久重试: pending=%+v err=%v",
+					pending, err)
+			}
+			namesBeforeReplay := len(h.runner.names())
+			h.manager.mu.Lock()
+			err = fixture.actor.processCommunicationV4CardTransitions(context.Background())
+			h.manager.mu.Unlock()
+			if err != nil || len(h.runner.names()) != namesBeforeReplay {
+				t.Fatalf("已 ack 的人工事实被自动重试: names=%+v err=%v",
+					h.runner.names(), err)
+			}
+			for _, name := range h.runner.names() {
+				if name != protocol.PrimChatReadThread &&
+					name != protocol.PrimChatReadWechatExchangeOutcome {
+					t.Fatalf("联系方式未确认触发候选人可见 effect: %+v",
+						h.runner.names())
+				}
+			}
+		})
+	}
+}
+
 func TestCommunicationV4CardTransitionAppliesAfterCursorPassedOlderCard(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PendingInterviewTransition(t, h, "older-card", "accepted")
@@ -391,6 +582,7 @@ func TestCommunicationV4CardTransitionMismatchManualZeroEffectAndAck(t *testing.
 		t.Fatal(err)
 	}
 	if err := fixture.actor.processCommunicationV4CardTransition(
+		context.Background(),
 		fixture.pending,
 		mismatched,
 		*before,

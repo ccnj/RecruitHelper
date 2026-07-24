@@ -114,6 +114,18 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 				store.CommunicationV4EventActionFailureRunnerUnavailable,
 			)
 		}
+	case action.EffectKind == store.CommunicationV4EventEffectAcceptWechat &&
+		action.V4Kind == communication.V4ActionAcceptWechat &&
+		action.DependsOnActionID == nil &&
+		strings.TrimSpace(action.ContentHash) != "":
+		var ok bool
+		cardRunner, ok = a.manager.runner.(AutomaticCardRunner)
+		if !ok {
+			return a.markCommunicationV4EventActionManual(
+				action,
+				store.CommunicationV4EventActionFailureRunnerUnavailable,
+			)
+		}
 	default:
 		return a.markCommunicationV4EventActionManual(
 			action,
@@ -210,6 +222,26 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
 				ConversationRef:   *profile.ConversationRef,
 				Kind:              store.CommunicationActionInviteWechat,
+				BypassManualQuiet: a.bypassManualQuiet,
+			},
+		)
+	case store.CommunicationV4EventEffectAcceptWechat:
+		requestSourceKey, sourceErr :=
+			a.manager.store.CommunicationV4AcceptWechatRequestSource(action.ActionID)
+		if sourceErr != nil {
+			err = sourceErr
+			break
+		}
+		handle, err = cardRunner.StartAutomaticCard(
+			ctx,
+			AutomaticCardRequest{
+				ActionID: action.ActionID, IntentID: intentID,
+				PreviousIntentID: previousIntentID,
+				ExpectedSession:  a.hand.Session, ExpectedBootID: a.hand.BootID,
+				Platform: profile.Platform, AccountRef: profile.AccountRef,
+				ConversationRef:   *profile.ConversationRef,
+				Kind:              store.CommunicationActionAcceptWechat,
+				RequestSourceKey:  requestSourceKey,
 				BypassManualQuiet: a.bypassManualQuiet,
 			},
 		)

@@ -449,15 +449,16 @@ type ResultCommandMutation struct {
 }
 
 type EffectResultMutation struct {
-	IntentStatus EffectIntentStatus
-	Append       bool
-	Retract      bool
-	Greeting     *GreetingResultMutation
-	Card         *CardResultMutation
-	Text         string
-	ContentHash  string
-	ObservedAtMs int64
-	Reason       string
+	IntentStatus  EffectIntentStatus
+	Append        bool
+	Retract       bool
+	Greeting      *GreetingResultMutation
+	Card          *CardResultMutation
+	WechatContact *WechatContactResultMutation
+	Text          string
+	ContentHash   string
+	ObservedAtMs  int64
+	Reason        string
 }
 
 type CardResultMutation struct {
@@ -469,6 +470,14 @@ type CardResultMutation struct {
 	InterviewStartsAtMs *int64
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
+}
+
+type WechatContactResultMutation struct {
+	ConversationRef   string
+	RequestSourceKey  string
+	ExchangeSourceKey string
+	PeerWechat        string
+	ObservedAtMs      int64
 }
 
 type ApplyResultMessageResult struct {
@@ -575,10 +584,16 @@ func (s *Store) ApplyResultMessage(
 			if plan.Effect.Append && plan.Effect.Retract {
 				return ErrEffectIntentConflict
 			}
-			if plan.Effect.Greeting != nil && (plan.Effect.Append || plan.Effect.Retract || plan.Effect.Card != nil) {
+			if plan.Effect.Greeting != nil && (plan.Effect.Append || plan.Effect.Retract ||
+				plan.Effect.Card != nil || plan.Effect.WechatContact != nil) {
 				return ErrEffectIntentConflict
 			}
-			if plan.Effect.Card != nil && (plan.Effect.Append || plan.Effect.Retract) {
+			if plan.Effect.Card != nil && (plan.Effect.Append || plan.Effect.Retract ||
+				plan.Effect.WechatContact != nil) {
+				return ErrEffectIntentConflict
+			}
+			if plan.Effect.WechatContact != nil &&
+				(plan.Effect.Append || plan.Effect.Retract) {
 				return ErrEffectIntentConflict
 			}
 			if plan.Effect.Append {
@@ -612,6 +627,18 @@ func (s *Store) ApplyResultMessage(
 					return err
 				}
 				intent.ResultMessageSeq = &message.Seq
+				intent.ResolvedAt = &effectAt
+			}
+			if plan.Effect.WechatContact != nil {
+				if _, _, err := applyWechatContactResultTx(
+					tx,
+					&intent,
+					*plan.Effect.WechatContact,
+					effectAt,
+				); err != nil {
+					return err
+				}
+				intent.ResultMessageSeq = nil
 				intent.ResolvedAt = &effectAt
 			}
 			if plan.Effect.IntentStatus == EffectIntentFailed || plan.Effect.IntentStatus == EffectIntentSuspect ||

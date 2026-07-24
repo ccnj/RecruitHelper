@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -15,10 +16,11 @@ import (
 
 type communicationV4EventEffectFixture struct {
 	resumeStoreFixture
-	FreezeRequest FreezeDialogueTurnRequest
-	Turn          DialogueTurn
-	Action        CommunicationV4EventAction
-	Now           time.Time
+	FreezeRequest    FreezeDialogueTurnRequest
+	Turn             DialogueTurn
+	Action           CommunicationV4EventAction
+	RequestSourceKey string
+	Now              time.Time
 }
 
 func seedCommunicationV4WechatReceiptEffect(
@@ -63,6 +65,57 @@ func seedCommunicationV4WechatReceiptEffect(
 		FreezeRequest:      req,
 		Turn:               frozen.Turn,
 		Action:             *receipt,
+		Now:                req.FrozenAt.Add(time.Second),
+	}
+}
+
+func seedCommunicationV4WechatAcceptEffect(
+	t *testing.T,
+	s *Store,
+	suffix string,
+) communicationV4EventEffectFixture {
+	t.Helper()
+	profileID := "profile-v4-event-accept-" + suffix
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	requestSourceKey := strings.Repeat("5", 63) + "a"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+		CardState: "pending", ContentHash: "wechat-request-" + suffix,
+		SourceKey: &requestSourceKey,
+	})
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite {
+		t.Fatalf("主动换微信前置轮冻结失败: result=%+v err=%v", frozen, err)
+	}
+	actions, err := s.CommunicationV4EventActionsBySource(
+		profileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accept *CommunicationV4EventAction
+	for index := range actions {
+		if actions[index].V4Kind == communication.V4ActionAcceptWechat {
+			copy := actions[index]
+			accept = &copy
+			break
+		}
+	}
+	if accept == nil ||
+		accept.Status != CommunicationV4EventActionPlanned ||
+		accept.EffectKind != CommunicationV4EventEffectAcceptWechat {
+		t.Fatalf("接受微信动作未就绪: %+v", actions)
+	}
+	return communicationV4EventEffectFixture{
+		resumeStoreFixture: fixture,
+		FreezeRequest:      req,
+		Turn:               frozen.Turn,
+		Action:             *accept,
+		RequestSourceKey:   requestSourceKey,
 		Now:                req.FrozenAt.Add(time.Second),
 	}
 }
@@ -200,6 +253,19 @@ func communicationV4EventEffectRequest(
 			ConversationRef: fixture.ConversationRef,
 			Text:            action.Text,
 		})
+	case primitiveChatAcceptWechat:
+		requestSourceKey := fixture.RequestSourceKey
+		if requestSourceKey == "" {
+			requestSourceKey, err =
+				s.CommunicationV4AcceptWechatRequestSource(action.ActionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		args, err = protocol.Encode(protocol.ChatAcceptWechatArgs{
+			ConversationRef:  fixture.ConversationRef,
+			RequestSourceKey: requestSourceKey,
+		})
 	case primitiveChatSendWechatInvite:
 		args, err = protocol.Encode(protocol.ChatSendWechatInviteArgs{
 			ConversationRef: fixture.ConversationRef,
@@ -297,6 +363,266 @@ func settleCommunicationV4EventTextEffect(
 		},
 	); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func settleCommunicationV4WechatAcceptEffect(
+	t *testing.T,
+	s *Store,
+	fixture communicationV4EventEffectFixture,
+	created *CreateEffectIntentResult,
+	resultMsgID string,
+	exchangeSourceKey string,
+	peerWechat string,
+) {
+	t.Helper()
+	resultAt := fixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		resultMsgID,
+		"result",
+		fixture.HandID,
+		func(command *CmdRecord) (ResultCommandMutation, error) {
+			command.Status = CmdOk
+			command.TerminalAt = &resultAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk,
+					ContentHash:  fixture.Action.ContentHash,
+					WechatContact: &WechatContactResultMutation{
+						ConversationRef:   fixture.ConversationRef,
+						RequestSourceKey:  fixture.RequestSourceKey,
+						ExchangeSourceKey: exchangeSourceKey,
+						PeerWechat:        peerWechat,
+						ObservedAtMs:      resultAt.UnixMilli(),
+					},
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertCommunicationV4WechatAcceptSettled(
+	t *testing.T,
+	s *Store,
+	fixture communicationV4EventEffectFixture,
+	created *CreateEffectIntentResult,
+	exchangeSourceKey string,
+	peerWechat string,
+	messageCount int,
+) {
+	t.Helper()
+	intent, err := s.EffectIntentByID(created.Intent.IntentID)
+	if err != nil || intent == nil ||
+		intent.Status != EffectIntentOk ||
+		intent.ResultMessageSeq != nil {
+		t.Fatalf("接受微信意图未以零消息正证终局: intent=%+v err=%v", intent, err)
+	}
+	var action CommunicationV4EventAction
+	if err := s.db.First(
+		&action,
+		"action_id = ?",
+		fixture.Action.ActionID,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != CommunicationV4EventActionSent ||
+		action.EffectIntentID == nil ||
+		*action.EffectIntentID != created.Intent.IntentID ||
+		action.SentAt == nil {
+		t.Fatalf("接受微信动作未收束 sent: %+v", action)
+	}
+	assets, err := s.ContactAssetsByProfile(fixture.ProfileID)
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("联系方式账本不唯一: assets=%+v err=%v", assets, err)
+	}
+	asset := assets[0]
+	if asset.RequestSourceKey != fixture.RequestSourceKey ||
+		asset.SourceKey != exchangeSourceKey ||
+		asset.Value != peerWechat ||
+		asset.EffectIntentID == nil ||
+		*asset.EffectIntentID != created.Intent.IntentID {
+		t.Fatalf("联系方式业务事实错误: %+v", asset)
+	}
+	messages, err := s.MessagesForConversation(ConversationKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef,
+	})
+	if err != nil || len(messages) != messageCount {
+		t.Fatalf("接受微信不得伪造 outbound Message: count=%d messages=%+v err=%v",
+			messageCount, messages, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != string(communication.V4ManualWechatContinuation) {
+		t.Fatalf("接受正证未推进微信状态并显式移交人工: aggregate=%+v err=%v",
+			aggregate, err)
+	}
+}
+
+func TestCommunicationV4WechatAcceptDirectResultIsAtomicAndPrivate(t *testing.T) {
+	s := openTest(t)
+	fixture := seedCommunicationV4WechatAcceptEffect(t, s, "direct")
+	req := communicationV4EventEffectRequest(
+		t,
+		s,
+		fixture,
+		fixture.Action,
+		"accept-direct",
+	)
+	fingerprint, err := AcceptWechatFingerprint(fixture.RequestSourceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.Action.ContentHash != fingerprint ||
+		req.Intent.SendFingerprint != fingerprint ||
+		req.Intent.SendFingerprint == fixture.RequestSourceKey ||
+		strings.Contains(req.Intent.PayloadHash, fixture.RequestSourceKey) ||
+		strings.Contains(req.Intent.GuardsHash, fixture.RequestSourceKey) {
+		t.Fatalf("私有请求身份泄漏进动作/WAL 摘要: action=%+v intent=%+v",
+			fixture.Action, req.Intent)
+	}
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("接受微信 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	var args protocol.ChatAcceptWechatArgs
+	if err := json.Unmarshal([]byte(created.Command.Args), &args); err != nil ||
+		args.RequestSourceKey != fixture.RequestSourceKey {
+		t.Fatalf("命令未保留原始请求身份: args=%+v err=%v", args, err)
+	}
+	messagesBefore, err := s.MessagesForConversation(ConversationKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchangeSourceKey := strings.Repeat("6", 64)
+	settleCommunicationV4WechatAcceptEffect(
+		t,
+		s,
+		fixture,
+		created,
+		"result-v4-accept-direct",
+		exchangeSourceKey,
+		"synthetic-wechat-direct",
+	)
+	assertCommunicationV4WechatAcceptSettled(
+		t,
+		s,
+		fixture,
+		created,
+		exchangeSourceKey,
+		"synthetic-wechat-direct",
+		len(messagesBefore),
+	)
+}
+
+func TestCommunicationV4WechatAcceptVerificationAndRestartAreIdempotent(t *testing.T) {
+	dataDir := t.TempDir()
+	s, err := Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := seedCommunicationV4WechatAcceptEffect(t, s, "verified")
+	req := communicationV4EventEffectRequest(
+		t,
+		s,
+		fixture,
+		fixture.Action,
+		"accept-verified",
+	)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("接受微信 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	verifyingAt := fixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-v4-accept-possible",
+		"result",
+		fixture.HandID,
+		func(command *CmdRecord) (ResultCommandMutation, error) {
+			command.Status = CmdVerifying
+			command.TerminalAt = nil
+			command.VerificationReason = "result.sideEffect=possible"
+			command.VerificationNextAt = &verifyingAt
+			return ResultCommandMutation{
+				Save:            true,
+				KeepCommandOpen: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentVerifying,
+					ContentHash:  fixture.Action.ContentHash,
+					Reason:       "result.sideEffect=possible",
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	exchangeSourceKey := strings.Repeat("7", 64)
+	resolveReq := VerifiedWechatAcceptSuccess{
+		Ref: created.Command.MsgID,
+		ConversationKey: ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		},
+		RequestSourceKey:  fixture.RequestSourceKey,
+		ExchangeSourceKey: exchangeSourceKey,
+		PeerWechat:        "synthetic-wechat-verified",
+		ObservedAtMs:      verifyingAt.UnixMilli(),
+		ResultBody:        `{"status":"ok"}`,
+		ResolutionReason:  "verifiedAcceptWechat",
+		At:                verifyingAt.Add(time.Second),
+	}
+	if _, err := s.ResolveWechatAcceptVerified(resolveReq); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := s.MessagesForConversation(resolveReq.ConversationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommunicationV4WechatAcceptSettled(
+		t,
+		s,
+		fixture,
+		created,
+		exchangeSourceKey,
+		"synthetic-wechat-verified",
+		len(messages),
+	)
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := aggregate.Revision
+	if _, err := s.ResolveWechatAcceptVerified(resolveReq); err != nil {
+		t.Fatalf("重复验证未幂等: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if _, err := restarted.ResolveWechatAcceptVerified(resolveReq); err != nil {
+		t.Fatalf("重启后验证重放未幂等: %v", err)
+	}
+	replayed, err := restarted.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || replayed.Revision != revision {
+		t.Fatalf("重复/重启验证增生 V4 投影: aggregate=%+v err=%v", replayed, err)
+	}
+	assets, err := restarted.ContactAssetsByProfile(fixture.ProfileID)
+	if err != nil || len(assets) != 1 {
+		t.Fatalf("重复/重启验证增生联系方式: assets=%+v err=%v", assets, err)
 	}
 }
 

@@ -2086,8 +2086,16 @@ func bindCommunicationV4EventActionTx(
 		return ErrDialogueTurnBinding
 	}
 	if action.DependsOnActionID == nil {
-		if action.EffectKind != CommunicationV4EventEffectReplyText ||
-			aggregate.Revision != application.ToRevision {
+		if aggregate.Revision != application.ToRevision {
+			return ErrCommunicationActionConflict
+		}
+		switch action.EffectKind {
+		case CommunicationV4EventEffectReplyText:
+		case CommunicationV4EventEffectAcceptWechat:
+			if action.V4Kind != communication.V4ActionAcceptWechat {
+				return ErrCommunicationActionConflict
+			}
+		default:
 			return ErrCommunicationActionConflict
 		}
 	} else if err := validateCommunicationV4EventActionDependencyTx(
@@ -2103,6 +2111,7 @@ func bindCommunicationV4EventActionTx(
 		return err
 	}
 	if err := validateCommunicationV4EventActionCommand(
+		tx,
 		action,
 		conversation.ConversationRef,
 		*command,
@@ -2244,6 +2253,10 @@ func communicationV4EventActionPrimitive(
 		if action.V4Kind == communication.V4ActionInviteWechat {
 			return primitiveChatSendWechatInvite
 		}
+	case CommunicationV4EventEffectAcceptWechat:
+		if action.V4Kind == communication.V4ActionAcceptWechat {
+			return primitiveChatAcceptWechat
+		}
 	}
 	return ""
 }
@@ -2291,6 +2304,7 @@ func communicationV4EventActionCurrentProfileTx(
 }
 
 func validateCommunicationV4EventActionCommand(
+	tx *gorm.DB,
 	action CommunicationV4EventAction,
 	conversationRef string,
 	command CmdRecord,
@@ -2307,6 +2321,20 @@ func validateCommunicationV4EventActionCommand(
 		var args protocol.ChatSendWechatInviteArgs
 		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
 			args.ConversationRef != conversationRef {
+			return ErrCommunicationActionConflict
+		}
+	case CommunicationV4EventEffectAcceptWechat:
+		var args protocol.ChatAcceptWechatArgs
+		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
+			args.ConversationRef != conversationRef {
+			return ErrCommunicationActionConflict
+		}
+		expectedSourceKey, err := communicationV4AcceptWechatRequestSourceTx(
+			tx,
+			action,
+			conversationRef,
+		)
+		if err != nil || args.RequestSourceKey != expectedSourceKey {
 			return ErrCommunicationActionConflict
 		}
 	default:
@@ -2796,6 +2824,67 @@ func applyCommunicationV4EventActionEffectStatusTx(
 	case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
 		return nil
 	case EffectIntentOk, EffectIntentResolvedOk:
+		if action.EffectKind == CommunicationV4EventEffectAcceptWechat {
+			if action.V4Kind != communication.V4ActionAcceptWechat ||
+				intent.ResultMessageSeq != nil {
+				return ErrCommunicationActionConflict
+			}
+			asset, err := contactAssetByEffectIntentTx(tx, intent.IntentID)
+			if err != nil {
+				return err
+			}
+			if asset == nil ||
+				asset.ProfileID != action.ProfileID ||
+				asset.Platform != intent.Platform ||
+				asset.AccountRef != intent.AccountRef ||
+				asset.ConversationRef != intent.TargetRef ||
+				asset.Kind != contactAssetKindWechat {
+				return ErrCommunicationActionConflict
+			}
+			sentAt := action.SentAt
+			if sentAt == nil {
+				sentAt = &at
+			}
+			updated := tx.Model(&CommunicationV4EventAction{}).
+				Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+				Updates(map[string]any{
+					"status":         CommunicationV4EventActionSent,
+					"failure_reason": "",
+					"sent_at":        sentAt,
+					"updated_at":     at,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrCommunicationActionConflict
+			}
+			_, _, _, err = applyCommunicationV4ConfirmedActionTx(
+				tx,
+				action.ProfileID,
+				communication.V4ConfirmedAction{
+					ActionKey:      action.SemanticActionKey,
+					Kind:           action.V4Kind,
+					MessageSeq:     0,
+					CardMessageSeq: action.CardMessageSeq,
+					SentAt:         sentAt,
+				},
+				at,
+			)
+			if err != nil {
+				return err
+			}
+			// The accepted request has become a durable contact fact, but the
+			// same-turn continuation body is deliberately outside the current
+			// authorization. Stop this profile explicitly instead of leaving
+			// DialogueAfterActions waiting with no consumer.
+			return markCommunicationV4AutomationManualTx(
+				tx,
+				action.ProfileID,
+				string(communication.V4ManualWechatContinuation),
+				at,
+			)
+		}
 		if intent.ResultMessageSeq == nil {
 			return ErrCommunicationActionConflict
 		}

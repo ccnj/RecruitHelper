@@ -177,6 +177,7 @@ type AutomaticCardRequest struct {
 	ConversationRef   string
 	Kind              store.CommunicationActionKind
 	Interview         *protocol.InterviewDetails
+	RequestSourceKey  string
 	BypassManualQuiet bool
 }
 

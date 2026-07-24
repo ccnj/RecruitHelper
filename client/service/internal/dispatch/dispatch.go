@@ -600,8 +600,134 @@ func (d *Dispatcher) realEffectResultPlan(
 		return d.realGreetingResultPlan(r, res, body, now, plan, oc)
 	case protocol.PrimChatSendWechatInvite, protocol.PrimChatSendInviteCard:
 		return d.realCardResultPlan(r, res, body, now, plan, oc)
+	case protocol.PrimChatAcceptWechat:
+		return d.realAcceptWechatResultPlan(r, res, body, now, plan, oc)
 	default:
 		return store.ResultCommandMutation{}, fmt.Errorf("未知真实副作用原语 %q", r.Name)
+	}
+}
+
+func (d *Dispatcher) realAcceptWechatResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	var args protocol.ChatAcceptWechatArgs
+	if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+		return store.ResultCommandMutation{}, err
+	}
+	fingerprint, err := store.AcceptWechatFingerprint(args.RequestSourceKey)
+	if err != nil {
+		return store.ResultCommandMutation{}, err
+	}
+	resultEffect := func(
+		status store.EffectIntentStatus,
+		reason string,
+	) *store.EffectResultMutation {
+		return &store.EffectResultMutation{
+			IntentStatus: status,
+			ContentHash:  fingerprint,
+			Reason:       reason,
+		}
+	}
+
+	wasHumanResolved := r.Status == store.CmdResolvedOk ||
+		r.Status == store.CmdResolvedFailed
+	wasSuspect := r.Status == store.CmdSuspect
+	if r.Status.Terminal() && !wasHumanResolved && !wasSuspect {
+		*oc = ocLate
+		plan.Save = false
+		return plan, nil
+	}
+
+	switch res.Status {
+	case protocol.ResultStatusOk:
+		var data protocol.ChatAcceptWechatData
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		if data.ConversationRef != args.ConversationRef ||
+			data.RequestSourceKey != args.RequestSourceKey ||
+			!validLowerHex64(data.ExchangeSourceKey) ||
+			strings.TrimSpace(data.PeerWechat) == "" ||
+			validateSingleEvidence(
+				res.Evidence,
+				string(protocol.AcceptWechatEvidenceTypeCandidateWechatRequestAcceptedObserved),
+			) != nil {
+			return store.ResultCommandMutation{}, errors.New("接受微信请求正证与原始意图不一致")
+		}
+		r.Status = store.CmdOk
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		r.SuspectReason = ""
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentOk, "")
+		plan.Effect.WechatContact = &store.WechatContactResultMutation{
+			ConversationRef:   data.ConversationRef,
+			RequestSourceKey:  data.RequestSourceKey,
+			ExchangeSourceKey: data.ExchangeSourceKey,
+			PeerWechat:        data.PeerWechat,
+			ObservedAtMs:      data.ObservedAt,
+		}
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	case protocol.ResultStatusFailed:
+		if res.Error == nil {
+			return store.ResultCommandMutation{}, errors.New("effectful failed 缺少 error")
+		}
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		switch res.Error.SideEffect {
+		case protocol.SideEffectPossible, protocol.SideEffectConfirmed:
+			if wasHumanResolved {
+				plan.Save = false
+				*oc = ocHumanVerdictKept
+				return plan, nil
+			}
+			r.Status = store.CmdVerifying
+			r.TerminalAt = nil
+			r.VerificationReason = "result.sideEffect=" +
+				string(res.Error.SideEffect)
+			r.VerificationNextAt = &now
+			r.ReviewReady = false
+			r.ReviewAfterMs = 0
+			plan.KeepCommandOpen = true
+			plan.Effect = resultEffect(
+				store.EffectIntentVerifying,
+				r.VerificationReason,
+			)
+			*oc = ocEffSuspect
+			return plan, nil
+		case protocol.SideEffectNone:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = ""
+			plan.Effect = resultEffect(store.EffectIntentFailed, "")
+			if wasHumanResolved || wasSuspect {
+				*oc = ocSuspectCleared
+			}
+			return plan, nil
+		default:
+			return store.ResultCommandMutation{},
+				errors.New("effectful result 缺少 sideEffect")
+		}
+	case protocol.ResultStatusCanceled, protocol.ResultStatusExpired:
+		r.Status = mapResultStatus(res.Status)
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentFailed, string(res.Status))
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	default:
+		return store.ResultCommandMutation{}, errors.New("未知 result status")
 	}
 }
 

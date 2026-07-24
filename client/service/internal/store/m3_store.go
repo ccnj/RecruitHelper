@@ -27,6 +27,7 @@ const (
 	primitiveChatSendGreeting     = "chat.sendGreeting"
 	primitiveChatSendWechatInvite = "chat.sendWechatInvite"
 	primitiveChatSendInviteCard   = "chat.sendInviteCard"
+	primitiveChatAcceptWechat     = "chat.acceptWechat"
 
 	messageRetractionReasonAuthoritativeSafeTerminal = "authoritative_safe_terminal"
 	messageRetractionReasonManualResolvedFailed      = "manual_resolved_failed"
@@ -931,9 +932,11 @@ func (s *Store) RejectEffectCommand(ref, errorCode, reason string, at time.Time)
 
 // CreateVerificationCmd 是 suspect 冻结域的唯一例外入口。它不跳过
 // 命令 WAL，只是把“原 SX 正在 verifying”与“同域只有一条为它服务的
-// intrusive read”放在同一事务中证明。
+// formal verification read”放在同一事务中证明。具体验证原语可以是
+// intrusive 或 readonly，但绝不能是 effectful。
 func (s *Store) CreateVerificationCmd(parentRef string, child *CmdRecord) error {
-	if child == nil || parentRef == "" || child.MsgID == "" || child.Class != "intrusive" ||
+	if child == nil || parentRef == "" || child.MsgID == "" ||
+		(child.Class != "intrusive" && child.Class != "readonly") ||
 		child.VerificationForMsgID != parentRef {
 		return errors.New("验证读命令非法")
 	}

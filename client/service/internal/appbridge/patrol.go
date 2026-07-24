@@ -229,6 +229,8 @@ func (r PatrolRunner) StartAutomaticCard(
 		primitive = protocol.PrimChatSendWechatInvite
 	case store.CommunicationActionInterviewInvite:
 		primitive = protocol.PrimChatSendInviteCard
+	case store.CommunicationActionAcceptWechat:
+		primitive = protocol.PrimChatAcceptWechat
 	default:
 		return nil, store.ErrCommunicationActionInvalid
 	}
@@ -243,6 +245,7 @@ func (r PatrolRunner) StartAutomaticCard(
 		ConversationRef:   req.ConversationRef,
 		Primitive:         primitive,
 		Interview:         req.Interview,
+		RequestSourceKey:  req.RequestSourceKey,
 		BypassManualQuiet: req.BypassManualQuiet,
 	})
 	if receipt == nil ||

@@ -56,6 +56,7 @@ type SendAutomaticCardRequest struct {
 	ConversationRef   string
 	Primitive         string
 	Interview         *protocol.InterviewDetails
+	RequestSourceKey  string
 	BypassManualQuiet bool
 }
 
@@ -237,6 +238,7 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 	req.AccountRef = strings.TrimSpace(req.AccountRef)
 	req.ConversationRef = strings.TrimSpace(req.ConversationRef)
 	req.Primitive = strings.TrimSpace(req.Primitive)
+	req.RequestSourceKey = strings.TrimSpace(req.RequestSourceKey)
 	if req.IntentID == "" ||
 		utf8.RuneCountInString(req.IntentID) > maxIntentIDRunes ||
 		req.AutomaticActionID == "" ||
@@ -257,7 +259,7 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 	var fingerprint string
 	switch req.Primitive {
 	case protocol.PrimChatSendWechatInvite:
-		if req.Interview != nil {
+		if req.Interview != nil || req.RequestSourceKey != "" {
 			return nil, store.ErrCommunicationActionInvalid
 		}
 		argsRaw, err = protocol.Encode(protocol.ChatSendWechatInviteArgs{
@@ -266,6 +268,7 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 		fingerprint = syncledger.WechatExchangeContentHash()
 	case protocol.PrimChatSendInviteCard:
 		if req.Interview == nil ||
+			req.RequestSourceKey != "" ||
 			req.Interview.StartsAt <= 0 ||
 			req.Interview.EndsAt !=
 				req.Interview.StartsAt+communication.V4InterviewDurationMs ||
@@ -281,6 +284,17 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 			req.Interview.EndsAt,
 			string(req.Interview.Method),
 		)
+	case protocol.PrimChatAcceptWechat:
+		if req.Interview != nil {
+			return nil, store.ErrCommunicationActionInvalid
+		}
+		argsRaw, err = protocol.Encode(protocol.ChatAcceptWechatArgs{
+			ConversationRef:  req.ConversationRef,
+			RequestSourceKey: req.RequestSourceKey,
+		})
+		if err == nil {
+			fingerprint, err = store.AcceptWechatFingerprint(req.RequestSourceKey)
+		}
 	default:
 		return nil, store.ErrCommunicationActionInvalid
 	}
@@ -526,6 +540,7 @@ type VerificationRequest struct {
 	GreetingArgs     *protocol.ChatSendGreetingArgs
 	WechatInviteArgs *protocol.ChatSendWechatInviteArgs
 	InviteCardArgs   *protocol.ChatSendInviteCardArgs
+	AcceptWechatArgs *protocol.ChatAcceptWechatArgs
 }
 
 type VerificationObservation struct {
@@ -534,6 +549,7 @@ type VerificationObservation struct {
 	SourceKey       string
 	Interview       *protocol.InterviewDetails
 	ConversationRef string
+	PeerWechat      string
 	ObservedAt      int64
 	Reason          string
 }
