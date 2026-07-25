@@ -70,6 +70,93 @@ func TestV4DialogueOrdinaryTurnAuthorizesIntentThenReplyInOrder(t *testing.T) {
 	}
 }
 
+func TestV4DialoguePreservesPhraseOrderAndPutsSuggestedCardLast(t *testing.T) {
+	input := V4DialogueInput{
+		State:       activeV4DialogueState(),
+		Requirement: V4DialogueClassifyAndReply,
+		Turn: FrozenTurnFacts{
+			TurnID:   "turn-multi-bubble",
+			Messages: ordinaryTurn().Messages,
+		},
+		Intent: IntentAdvice{
+			State:      AdviceOK,
+			Suggestion: m5ai.IntentSuggestion{Label: m5ai.IntentInterested},
+		},
+		Reply: ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Phrases: []string{"第一句", "第二句", "第三句"},
+				Text:    "第一句\n第二句\n第三句",
+				Action:  m5ai.ReplyActionInviteWechat,
+			},
+		},
+	}
+
+	planned, err := ReduceV4Dialogue(input)
+	if err != nil || planned.Status != V4DialogueActionsPlanned || len(planned.Actions) != 4 {
+		t.Fatalf("多气泡+卡片没有形成完整有序计划: decision=%+v err=%v", planned, err)
+	}
+	wantKinds := []V4ActionKind{
+		V4ActionReplyText,
+		V4ActionReplyText,
+		V4ActionReplyText,
+		V4ActionInviteWechat,
+	}
+	wantTexts := []string{"第一句", "第二句", "第三句", ""}
+	wantKeys := []string{
+		"turn-multi-bubble|replyText",
+		"turn-multi-bubble|replyText|bubble:2",
+		"turn-multi-bubble|replyText|bubble:3",
+		"turn-multi-bubble|inviteWechat",
+	}
+	seenKeys := make(map[string]struct{}, len(planned.Actions))
+	for index, action := range planned.Actions {
+		if action.Kind != wantKinds[index] || action.Text != wantTexts[index] ||
+			action.ActionKey != wantKeys[index] {
+			t.Fatalf("动作[%d]的顺序、正文或稳定键错误: action=%+v", index, action)
+		}
+		if _, exists := seenKeys[action.ActionKey]; exists {
+			t.Fatalf("动作键重复: %q", action.ActionKey)
+		}
+		seenKeys[action.ActionKey] = struct{}{}
+	}
+
+	replayed, err := ReduceV4Dialogue(input)
+	if err != nil || !reflect.DeepEqual(planned, replayed) {
+		t.Fatalf("同一多气泡冻结轮重复归约不确定: first=%+v replayed=%+v err=%v", planned, replayed, err)
+	}
+}
+
+func TestV4DialogueReplyOnlyConvertsEveryPhraseAndKeepsKeysUnique(t *testing.T) {
+	state := activeV4DialogueState()
+	state.MainStatus = V4StatusInterviewed
+	input := V4DialogueInput{
+		State:       state,
+		Requirement: V4DialogueServiceReply,
+		Turn:        FrozenTurnFacts{TurnID: "turn-service-multi"},
+		Intent:      IntentAdvice{State: AdviceAbsent},
+		Reply: ReplyAdvice{
+			State: AdviceOK,
+			Suggestion: m5ai.ReplySuggestion{
+				Phrases: []string{"第一句", "第二句"},
+				Text:    "第一句\n第二句",
+			},
+		},
+	}
+
+	planned, err := ReduceV4Dialogue(input)
+	if err != nil || planned.Status != V4DialogueActionsPlanned || len(planned.Actions) != 2 {
+		t.Fatalf("服务态多气泡没有形成两条动作: decision=%+v err=%v", planned, err)
+	}
+	if planned.Actions[0].Kind != V4ActionServiceReply ||
+		planned.Actions[0].ActionKey != "turn-service-multi|serviceReply" ||
+		planned.Actions[1].Kind != V4ActionServiceReply ||
+		planned.Actions[1].ActionKey != "turn-service-multi|serviceReply|bubble:2" ||
+		planned.Actions[0].ActionKey == planned.Actions[1].ActionKey {
+		t.Fatalf("服务态没有转换每条气泡或稳定键不唯一: actions=%+v", planned.Actions)
+	}
+}
+
 func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
 	baseTurn := ordinaryTurn()
 	baseTurn.RecommendedSlots = []string{

@@ -142,6 +142,21 @@ func TestReducerCreatesExactlyOneReplyTextPlanForInterestedOrNeutral(t *testing.
 	}
 }
 
+func TestReducerKeepsJoinedCompatibilitySummaryForOrderedPhrases(t *testing.T) {
+	decision, err := Reduce(ReduceInput{
+		Turn:   ordinaryTurn(),
+		Intent: IntentAdvice{State: AdviceOK, Suggestion: m5ai.IntentSuggestion{Label: m5ai.IntentInterested}},
+		Reply: ReplyAdvice{State: AdviceOK, Suggestion: m5ai.ReplySuggestion{
+			Phrases: []string{"第一句", "第二句", "第三句"},
+			Text:    "第一句\n第二句\n第三句",
+		}},
+	})
+	if err != nil || decision.TurnStatus != TurnAdviceReady || decision.Action == nil ||
+		decision.Action.Text != "第一句\n第二句\n第三句" {
+		t.Fatalf("归约器没有保留多气泡的兼容摘要: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestReducerInvalidIntentOutputUsesApprovedFallback(t *testing.T) {
 	decision, err := Reduce(ReduceInput{
 		Turn:   ordinaryTurn(),

@@ -182,7 +182,8 @@ func Reduce(input ReduceInput) (Decision, error) {
 	case AdviceFailed:
 		return manualDecision(input.Turn.TurnID, ManualReplyFailed, label, source), nil
 	case AdviceOK:
-		if err := m5ai.ValidateSendText(input.Reply.Suggestion.Text); err != nil {
+		_, text, err := m5ai.CanonicalReplyPhrases(input.Reply.Suggestion)
+		if err != nil {
 			return manualDecision(input.Turn.TurnID, ManualReplyInvalid, label, source), nil
 		}
 		return Decision{
@@ -190,7 +191,7 @@ func Reduce(input ReduceInput) (Decision, error) {
 			IntentLabel: label, IntentSource: source,
 			Action: &CommunicationActionPlan{
 				TurnID: input.Turn.TurnID, Kind: CommunicationActionReplyText,
-				Text: input.Reply.Suggestion.Text, Status: CommunicationActionPlanned,
+				Text: text, Status: CommunicationActionPlanned,
 			},
 		}, nil
 	default:

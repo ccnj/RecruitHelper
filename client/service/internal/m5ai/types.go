@@ -15,6 +15,7 @@ const (
 	ProviderAssemblyVersion     = 1
 	DialogueRenderFormatVersion = "m5-history1-schedule1-assembly1"
 	SendTextMaxUTF8Bytes        = 2048
+	ReplyPhraseMaxItems         = 5
 	HistoryLimit                = 20
 	IntentInputTokenLimit       = 8000
 	ReplyInputTokenLimit        = 16000
@@ -85,6 +86,10 @@ const (
 )
 
 type ReplySuggestion struct {
+	// Phrases preserves the provider's 话术_序列 item boundaries. Text remains
+	// the canonical newline-joined compatibility summary; dispatch planners
+	// must use Phrases instead of splitting Text.
+	Phrases     []string
 	Text        string
 	Action      ReplyAction
 	MeetingTime string

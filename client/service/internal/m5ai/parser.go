@@ -156,11 +156,56 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 	if len(trimmed) == 0 {
 		return ReplySuggestion{}, errors.New("emptyPhraseSequence")
 	}
+	if len(trimmed) > ReplyPhraseMaxItems {
+		return ReplySuggestion{}, errors.New("phraseSequenceLimit")
+	}
+	for _, phrase := range trimmed {
+		if err := ValidateSendText(phrase); err != nil {
+			return ReplySuggestion{}, err
+		}
+	}
 	text := strings.Join(trimmed, "\n")
 	if err := ValidateSendText(text); err != nil {
 		return ReplySuggestion{}, err
 	}
-	return ReplySuggestion{Text: text, Action: action, MeetingTime: meetingTime}, nil
+	return ReplySuggestion{
+		Phrases: append([]string(nil), trimmed...),
+		Text:    text, Action: action, MeetingTime: meetingTime,
+	}, nil
+}
+
+// CanonicalReplyPhrases returns the provider-defined bubble boundaries and
+// their newline-joined compatibility summary. A legacy in-memory suggestion
+// with only Text remains one bubble even when that text contains a newline;
+// planners must never infer new boundaries by splitting Text.
+func CanonicalReplyPhrases(suggestion ReplySuggestion) ([]string, string, error) {
+	if len(suggestion.Phrases) == 0 {
+		if err := ValidateSendText(suggestion.Text); err != nil {
+			return nil, "", err
+		}
+		return []string{suggestion.Text}, suggestion.Text, nil
+	}
+	if len(suggestion.Phrases) > ReplyPhraseMaxItems {
+		return nil, "", errors.New("phraseSequenceLimit")
+	}
+	phrases := make([]string, len(suggestion.Phrases))
+	for index, phrase := range suggestion.Phrases {
+		if phrase == "" || phrase != strings.TrimSpace(phrase) {
+			return nil, "", errors.New("invalidPhraseSequence")
+		}
+		if err := ValidateSendText(phrase); err != nil {
+			return nil, "", err
+		}
+		phrases[index] = phrase
+	}
+	text := strings.Join(phrases, "\n")
+	if err := ValidateSendText(text); err != nil {
+		return nil, "", err
+	}
+	if suggestion.Text != "" && suggestion.Text != text {
+		return nil, "", errors.New("replySummaryMismatch")
+	}
+	return phrases, text, nil
 }
 
 type ShortCircuitResult struct {

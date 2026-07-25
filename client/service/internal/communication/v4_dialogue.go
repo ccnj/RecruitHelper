@@ -155,7 +155,6 @@ func reduceV4ClassifiedDialogue(input V4DialogueInput, state V4State) (V4Dialogu
 		actions, valid := planV4ReplyActions(
 			state,
 			input.Turn,
-			base.Action.Text,
 			input.Reply.Suggestion,
 			true,
 		)
@@ -270,13 +269,9 @@ func reduceV4ReplyOnly(
 	case AdviceFailed:
 		return manualV4Dialogue(state, V4ManualReplyFailed, label, source), nil
 	case AdviceOK:
-		if err := m5ai.ValidateSendText(input.Reply.Suggestion.Text); err != nil {
-			return manualV4Dialogue(state, V4ManualReplyInvalid, label, source), nil
-		}
 		actions, valid := planV4ReplyActions(
 			state,
 			input.Turn,
-			input.Reply.Suggestion.Text,
 			input.Reply.Suggestion,
 			purpose == V4AdviceReply,
 		)
@@ -286,13 +281,21 @@ func reduceV4ReplyOnly(
 		if len(actions) == 0 || actions[0].Kind != V4ActionReplyText {
 			return V4DialogueDecision{}, ErrInvalidV4StateTransition
 		}
-		actions[0].Kind = actionKind
-		actions[0].ActionKey = stableV4TurnActionKey(
-			input.Turn.TurnID,
-			actionKind,
-			input.CardMessageSeq,
-		)
-		actions[0].CardMessageSeq = input.CardMessageSeq
+		textOrdinal := 0
+		for index := range actions {
+			if actions[index].Kind != V4ActionReplyText {
+				break
+			}
+			textOrdinal++
+			actions[index].Kind = actionKind
+			actions[index].ActionKey = stableV4TurnPhraseActionKey(
+				input.Turn.TurnID,
+				actionKind,
+				input.CardMessageSeq,
+				textOrdinal,
+			)
+			actions[index].CardMessageSeq = input.CardMessageSeq
+		}
 		return V4DialogueDecision{
 			State: state, Status: V4DialogueActionsPlanned, IntentLabel: label,
 			IntentSource: source, NextAdvice: V4AdviceNone,
@@ -306,34 +309,42 @@ func reduceV4ReplyOnly(
 func planV4ReplyActions(
 	state V4State,
 	turn FrozenTurnFacts,
-	text string,
 	suggestion m5ai.ReplySuggestion,
 	allowSuggestedAction bool,
 ) ([]V4PlannedAction, bool) {
-	textPlan := V4PlannedAction{
-		ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionReplyText, 0),
-		Kind:      V4ActionReplyText,
-		Text:      text,
+	phrases, _, err := m5ai.CanonicalReplyPhrases(suggestion)
+	if err != nil {
+		return nil, false
+	}
+	plans := make([]V4PlannedAction, 0, len(phrases)+1)
+	for index, phrase := range phrases {
+		plans = append(plans, V4PlannedAction{
+			ActionKey: stableV4TurnPhraseActionKey(
+				turn.TurnID,
+				V4ActionReplyText,
+				0,
+				index+1,
+			),
+			Kind: V4ActionReplyText,
+			Text: phrase,
+		})
 	}
 	switch suggestion.Action {
 	case m5ai.ReplyActionNone:
 		if suggestion.MeetingTime != "" {
 			return nil, false
 		}
-		return []V4PlannedAction{textPlan}, true
+		return plans, true
 	case m5ai.ReplyActionInviteWechat:
 		if !allowSuggestedAction || suggestion.MeetingTime != "" ||
 			!v4ReplyActionEligible(state, turn) ||
 			state.WechatState != V4WechatNotInvited {
 			return nil, false
 		}
-		return []V4PlannedAction{
-			textPlan,
-			{
-				ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionInviteWechat, 0),
-				Kind:      V4ActionInviteWechat,
-			},
-		}, true
+		return append(plans, V4PlannedAction{
+			ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionInviteWechat, 0),
+			Kind:      V4ActionInviteWechat,
+		}), true
 	case m5ai.ReplyActionStartOnlineMeeting:
 		if !allowSuggestedAction || !v4ReplyActionEligible(state, turn) {
 			return nil, false
@@ -347,16 +358,13 @@ func planV4ReplyActions(
 		}
 		endsAt := startsAt + V4InterviewDurationMs
 		method := "wechatVideo"
-		return []V4PlannedAction{
-			textPlan,
-			{
-				ActionKey:           stableV4TurnActionKey(turn.TurnID, V4ActionInterviewInvite, 0),
-				Kind:                V4ActionInterviewInvite,
-				InterviewStartsAtMs: &startsAt,
-				InterviewEndsAtMs:   &endsAt,
-				InterviewMethod:     &method,
-			},
-		}, true
+		return append(plans, V4PlannedAction{
+			ActionKey:           stableV4TurnActionKey(turn.TurnID, V4ActionInterviewInvite, 0),
+			Kind:                V4ActionInterviewInvite,
+			InterviewStartsAtMs: &startsAt,
+			InterviewEndsAtMs:   &endsAt,
+			InterviewMethod:     &method,
+		}), true
 	default:
 		return nil, false
 	}
@@ -382,6 +390,22 @@ func stableV4TurnActionKey(turnID string, kind V4ActionKind, cardMessageSeq int6
 		return fmt.Sprintf("%s|%s|card:%d", turnID, kind, cardMessageSeq)
 	}
 	return fmt.Sprintf("%s|%s", turnID, kind)
+}
+
+func stableV4TurnPhraseActionKey(
+	turnID string,
+	kind V4ActionKind,
+	cardMessageSeq int64,
+	ordinal int,
+) string {
+	if ordinal == 1 {
+		return stableV4TurnActionKey(turnID, kind, cardMessageSeq)
+	}
+	return fmt.Sprintf(
+		"%s|bubble:%d",
+		stableV4TurnActionKey(turnID, kind, cardMessageSeq),
+		ordinal,
+	)
 }
 
 func manualV4Dialogue(state V4State, reason V4ManualReason, label m5ai.IntentLabel, source IntentSource) V4DialogueDecision {

@@ -731,7 +731,9 @@ func TestAIAdvisorKeepsIntentAndReplyAsTwoCallsAndFallsBackOnce(t *testing.T) {
 		t.Fatalf("intent 失败必须持久化为 neutral fallback: %s", intent.Label)
 	}
 	reply, _, err := advisor.SuggestReply(context.Background(), "reply")
-	if err != nil || reply.Text != "第一段\n第二段" || len(provider.requests) != 2 ||
+	if err != nil || reply.Text != "第一段\n第二段" ||
+		len(reply.Phrases) != 2 || reply.Phrases[0] != "第一段" || reply.Phrases[1] != "第二段" ||
+		len(provider.requests) != 2 ||
 		provider.requests[0].Purpose != PurposeIntent || provider.requests[1].Purpose != PurposeReply {
 		t.Fatalf("两调用/fallback 语义错误: reply=%+v requests=%+v err=%v", reply, provider.requests, err)
 	}
@@ -832,9 +834,54 @@ func TestParseReplySuggestionRejectsInvalidActionPayloadAsAWhole(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got, err := ParseReplySuggestion(testCase.raw); err == nil || got != (ReplySuggestion{}) {
+			if got, err := ParseReplySuggestion(testCase.raw); err == nil ||
+				len(got.Phrases) != 0 || got.Text != "" || got.Action != ReplyActionNone ||
+				got.MeetingTime != "" {
 				t.Fatalf("非法输出必须整体拒绝: got=%+v err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestParseReplySuggestionPreservesBoundedPhraseItems(t *testing.T) {
+	got, err := ParseReplySuggestion(
+		"{\"话术_序列\":[\" 第一项第一行\\n第一项第二行 \",\"  \",\"第二项\"]}",
+	)
+	if err != nil ||
+		len(got.Phrases) != 2 ||
+		got.Phrases[0] != "第一项第一行\n第一项第二行" ||
+		got.Phrases[1] != "第二项" ||
+		got.Text != "第一项第一行\n第一项第二行\n第二项" {
+		t.Fatalf("数组项边界或兼容摘要错误: got=%+v err=%v", got, err)
+	}
+
+	six := `{"话术_序列":["一","二","三","四","五","六"]}`
+	if _, err := ParseReplySuggestion(six); err == nil || err.Error() != "phraseSequenceLimit" {
+		t.Fatalf("超过五个非空数组项必须整体拒绝: %v", err)
+	}
+
+	overlongItem, _ := json.Marshal(map[string]any{
+		"话术_序列": []string{strings.Repeat("a", SendTextMaxUTF8Bytes+1)},
+	})
+	if _, err := ParseReplySuggestion(string(overlongItem)); err == nil || err.Error() != "sendTextLimit" {
+		t.Fatalf("单项越界必须整体拒绝: %v", err)
+	}
+
+	groupOverLimit, _ := json.Marshal(map[string]any{
+		"话术_序列": []string{
+			strings.Repeat("a", SendTextMaxUTF8Bytes/2),
+			strings.Repeat("b", SendTextMaxUTF8Bytes/2),
+		},
+	})
+	if _, err := ParseReplySuggestion(string(groupOverLimit)); err == nil || err.Error() != "sendTextLimit" {
+		t.Fatalf("整组兼容摘要越界必须整体拒绝: %v", err)
+	}
+}
+
+func TestCanonicalReplyPhrasesTreatsLegacyTextAsOneBubble(t *testing.T) {
+	phrases, summary, err := CanonicalReplyPhrases(ReplySuggestion{Text: "第一行\n第二行"})
+	if err != nil || len(phrases) != 1 || phrases[0] != "第一行\n第二行" ||
+		summary != "第一行\n第二行" {
+		t.Fatalf("兼容 Text 不得按换行推断新气泡: phrases=%q summary=%q err=%v", phrases, summary, err)
 	}
 }
