@@ -1033,8 +1033,14 @@ func communicationV4AggregateTx(
 		return CommunicationV4Aggregate{}, ErrCommunicationV4Corrupt
 	}
 	status, endReason, err := candidateProfileProjection(aggregate.State)
-	if err != nil || !sameCandidateProfileProjection(profile, status, endReason) ||
-		profile.SuccessfulGreetingIntentID == nil ||
+	if err != nil || !sameCandidateProfileProjection(profile, status, endReason) {
+		return CommunicationV4Aggregate{}, ErrCommunicationV4Corrupt
+	}
+	if IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
+		if err := validateInboundConversationV4RootTx(tx, aggregate, profile); err != nil {
+			return CommunicationV4Aggregate{}, ErrCommunicationV4Corrupt
+		}
+	} else if profile.SuccessfulGreetingIntentID == nil ||
 		*profile.SuccessfulGreetingIntentID != aggregate.RootGreetingIntentID {
 		return CommunicationV4Aggregate{}, ErrCommunicationV4Corrupt
 	}

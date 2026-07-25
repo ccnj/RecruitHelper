@@ -35,6 +35,26 @@ func TestNewV4GreetedStateFreezesInitialBudgetsAndClocks(t *testing.T) {
 	}
 }
 
+func TestNewV4InboundConversationStateHasNoInventedOutboundFact(t *testing.T) {
+	state := NewV4InboundConversationState()
+	if err := ValidateV4State(state); err != nil {
+		t.Fatalf("主动来聊初态应满足统一不变量: %v", err)
+	}
+	if state.MainStatus != V4StatusCommunicating ||
+		state.WechatState != V4WechatNotInvited ||
+		state.ColdPromptRemaining != 2 ||
+		state.ColdWechatRemaining != 1 ||
+		state.RealMessageRound != 0 ||
+		state.LastRealMessageSeq != 0 ||
+		state.LastOutboundMessageSeq != 0 ||
+		state.LastOutboundAt != nil ||
+		state.LastBodyAt != nil ||
+		!state.ClockUncertain ||
+		!state.BodyClockUncertain {
+		t.Fatalf("主动来聊初态伪造了招呼或时钟事实: %+v", state)
+	}
+}
+
 func TestV4RealExpressionAdvancesMainlineOpensRoundAndCancelsCards(t *testing.T) {
 	state := NewV4GreetedState(v4Time(8))
 	state.MainStatus = V4StatusInvited

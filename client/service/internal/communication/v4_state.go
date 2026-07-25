@@ -179,6 +179,25 @@ func NewV4GreetedState(greetedAt *time.Time) V4State {
 	return state
 }
 
+// NewV4InboundConversationState creates the honest pre-projection state for a
+// candidate-initiated conversation. There is no fabricated greeting or
+// outbound clock: the first stable inbound message is still pending at the
+// aggregate's sequence-zero projection boundary and will become real-message
+// round one through the ordinary reducer.
+func NewV4InboundConversationState() V4State {
+	return V4State{
+		MainStatus:             V4StatusCommunicating,
+		WechatState:            V4WechatNotInvited,
+		ColdPromptRemaining:    2,
+		ColdWechatRemaining:    1,
+		ClockUncertain:         true,
+		BodyClockUncertain:     true,
+		RealMessageRound:       0,
+		LastRealMessageSeq:     0,
+		LastOutboundMessageSeq: 0,
+	}
+}
+
 // ApplyV4BusinessEvent consumes one already-normalized fact. The caller may
 // replay the same fact: message events are deduplicated by their stable ledger
 // sequence, card-derived plans carry stable ActionKey values, and no budget or

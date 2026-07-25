@@ -141,6 +141,13 @@ func communicationTargetTx(tx *gorm.DB, profileID string) (CommunicationTarget, 
 		}
 	}
 
+	if IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
+		return CommunicationTarget{
+			Profile: profile, Account: account, Conversation: conversation,
+			Aggregate: aggregate,
+		}, true, nil
+	}
+
 	var greeting EffectIntent
 	if err := tx.First(&greeting, "intent_id = ?", aggregate.RootGreetingIntentID).Error; err != nil {
 		return CommunicationTarget{}, false, ErrCommunicationTargetConflict
