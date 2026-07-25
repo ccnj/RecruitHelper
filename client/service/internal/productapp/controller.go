@@ -118,7 +118,8 @@ func (c *Controller) Start(
 	}
 	additionalBatch := active != nil &&
 		active.Stage == store.ProductWorkflowStageCommunication &&
-		active.Status == workflow.StatusRunning
+		(active.Status == workflow.StatusRunning || active.Status == workflow.StatusPaused)
+	resumeBeforeAdditionalBatch := additionalBatch && active.Status == workflow.StatusPaused
 	var batch *store.SourcingBatch
 	if active != nil && active.SourcingBatchID != nil && !additionalBatch {
 		batch, loadErr = c.store.SourcingBatchByID(*active.SourcingBatchID)
@@ -155,6 +156,11 @@ func (c *Controller) Start(
 	}
 	if strings.TrimSpace(stored[0].SourceJobRef) != expectedBackendJobID {
 		return ErrJobSelectionChanged
+	}
+	if resumeBeforeAdditionalBatch {
+		if _, err = c.workflow.Resume(); err != nil {
+			return err
+		}
 	}
 	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
 	return err
@@ -199,8 +205,8 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 		state.AccountRef = run.AccountRef
 		state.WorkflowMode = string(run.Mode)
 		state.WorkflowStatus = string(run.Status)
-		state.CanAddBatch = run.Status == workflow.StatusRunning &&
-			run.Stage == store.ProductWorkflowStageCommunication
+		state.CanAddBatch = run.Stage == store.ProductWorkflowStageCommunication &&
+			(run.Status == workflow.StatusRunning || run.Status == workflow.StatusPaused)
 		if run.SourcingBatchID != nil {
 			state.CurrentBatchID = *run.SourcingBatchID
 		}

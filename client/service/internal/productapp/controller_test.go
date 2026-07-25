@@ -19,6 +19,7 @@ type fakeWorkflow struct {
 	replyKey     store.AccountKey
 	pauseCalls   int
 	resumeCalls  int
+	callOrder    []string
 	confirmBatch string
 	confirmIDs   []string
 }
@@ -27,6 +28,7 @@ func (f *fakeWorkflow) StartFull(
 	key store.AccountKey,
 	revision string,
 ) (*store.ProductWorkflowRun, error) {
+	f.callOrder = append(f.callOrder, "full")
 	f.fullKey, f.fullRevision = key, revision
 	return &store.ProductWorkflowRun{
 		RunID: "wf-fake", Platform: key.Platform, AccountRef: key.AccountRef,
@@ -51,6 +53,7 @@ func (f *fakeWorkflow) Pause() (*store.ProductWorkflowRun, error) {
 
 func (f *fakeWorkflow) Resume() (*store.ProductWorkflowRun, error) {
 	f.resumeCalls++
+	f.callOrder = append(f.callOrder, "resume")
 	return &store.ProductWorkflowRun{}, nil
 }
 
@@ -267,6 +270,40 @@ func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
 	}
 }
 
+func TestAdditionalBatchFromPausedCommunicationResumesBeforeStarting(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+		RunID:      "wf-communication-paused",
+		Platform:   key.Platform,
+		AccountRef: key.AccountRef,
+		State: workflow.State{
+			Mode:         workflow.ModeFull,
+			Status:       workflow.StatusPaused,
+			ResumeStatus: workflow.StatusRunning,
+		},
+		Stage:     store.ProductWorkflowStageCommunication,
+		StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	controller, err := New(db, flow, source, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 || flow.resumeCalls != 1 ||
+		len(flow.callOrder) != 2 ||
+		flow.callOrder[0] != "resume" || flow.callOrder[1] != "full" {
+		t.Fatalf("paused additional source=%d flow=%+v", source.calls, flow)
+	}
+}
+
 func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Now()
@@ -315,7 +352,7 @@ func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	}
 }
 
-func TestRuntimeStateAllowsAdditionalBatchOnlyFromRunningCommunication(t *testing.T) {
+func TestRuntimeStateAllowsAdditionalBatchFromRunningOrPausedCommunication(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.Local)
 	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
@@ -337,6 +374,19 @@ func TestRuntimeStateAllowsAdditionalBatchOnlyFromRunningCommunication(t *testin
 	state, err := controller.RuntimeState()
 	if err != nil || !state.CanAddBatch {
 		t.Fatalf("running communication state=%+v err=%v", state, err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: "wf-can-add-batch",
+		From:  workflow.State{Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeReplyOnly, Status: workflow.StatusPaused, ResumeStatus: workflow.StatusRunning},
+		At:    now,
+		Stage: store.ProductWorkflowStageCommunication,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = controller.RuntimeState()
+	if err != nil || !state.CanAddBatch {
+		t.Fatalf("paused communication state=%+v err=%v", state, err)
 	}
 }
 
