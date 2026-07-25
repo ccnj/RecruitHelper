@@ -27,6 +27,13 @@ pnpm start                                        # 壳自动起脑 + 开窗
 # 若想连已在跑的脑并用 vite dev:UI_URL=http://localhost:5273 pnpm start
 ```
 
+若开发期需要让 Electron 继续使用仓库现有的 `data/brain.db`，只覆盖脑的数据
+目录，不要用 `--user-data-dir` 指向仓库根：
+
+```bash
+BRAIN_DATA_DIR=<仓库根>/data pnpm start
+```
+
 ## 3. 装插件(手端)
 
 ```bash

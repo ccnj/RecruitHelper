@@ -25,7 +25,12 @@ function serviceSpec(dataDir, adminToken) {
 }
 
 async function boot() {
-  const dataDir = path.join(app.getPath('userData'), 'data')
+  // 开发期可只覆盖脑数据库目录，避免为了复用工作区数据而把 Chromium
+  // userData 错指到仓库根目录；正式客户端默认仍使用 Electron 标准目录。
+  const configuredDataDir = process.env.BRAIN_DATA_DIR?.trim()
+  const dataDir = configuredDataDir
+    ? path.resolve(configuredDataDir)
+    : path.join(app.getPath('userData'), 'data')
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
   const spec = serviceSpec(dataDir, adminToken)
