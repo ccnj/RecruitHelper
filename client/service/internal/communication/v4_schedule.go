@@ -110,11 +110,13 @@ func EvaluateV4Schedule(input V4ScheduleInput) (V4ScheduleDecision, error) {
 				if text == "" || m5ai.ValidateSendText(text) != nil {
 					return manualV4Schedule(state, V4ManualFollowupPhraseUnavailable), nil
 				}
+				dueAt := state.LastOutboundAt.Add(delay)
 				return V4ScheduleDecision{
 					State: state, Status: V4ScheduleActionsPlanned, NextAdvice: V4AdviceNone,
 					Actions: []V4PlannedAction{{
 						ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionInterviewFollowup, group.MessageSeq, 0, group.NextStage),
 						Kind:      V4ActionInterviewFollowup, Text: text, CardMessageSeq: group.MessageSeq, Stage: group.NextStage,
+						DueAt: &dueAt,
 					}},
 				}, nil
 			}
@@ -160,12 +162,13 @@ func evaluateV4ColdPrompt(input V4ScheduleInput, state V4State) (V4ScheduleDecis
 			return manualV4Schedule(state, V4ManualReplyInvalid), nil
 		}
 		stage := state.ColdPromptSentCount + 1
+		dueAt := state.LastOutboundAt.Add(v4ColdDelay)
 		return V4ScheduleDecision{
 			State: state, Status: V4ScheduleActionsPlanned, NextAdvice: V4AdviceNone,
 			Actions: []V4PlannedAction{{
 				ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdPrompt, 0, state.RealMessageRound, stage),
 				Kind:      V4ActionColdPrompt, Text: input.Reply.Suggestion.Text,
-				Round: state.RealMessageRound, Stage: stage,
+				Round: state.RealMessageRound, Stage: stage, DueAt: &dueAt,
 			}},
 		}, nil
 	default:
@@ -178,16 +181,17 @@ func evaluateV4ColdWechat(input V4ScheduleInput, state V4State) V4ScheduleDecisi
 	if !state.ColdWechatTextSent && (phrase.State != V4PhraseAvailable || m5ai.ValidateSendText(phrase.Text) != nil) {
 		return manualV4Schedule(state, V4ManualFixedPhraseUnavailable)
 	}
+	dueAt := state.LastOutboundAt.Add(v4ColdDelay)
 	actions := make([]V4PlannedAction, 0, 2)
 	if !state.ColdWechatTextSent {
 		actions = append(actions, V4PlannedAction{
 			ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdWechatText, 0, 0, 0),
-			Kind:      V4ActionColdWechatText, Text: phrase.Text,
+			Kind:      V4ActionColdWechatText, Text: phrase.Text, DueAt: &dueAt,
 		})
 	}
 	actions = append(actions, V4PlannedAction{
 		ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdWechatInvite, 0, 0, 0),
-		Kind:      V4ActionColdWechatInvite,
+		Kind:      V4ActionColdWechatInvite, DueAt: &dueAt,
 	})
 	return V4ScheduleDecision{
 		State: state, Status: V4ScheduleActionsPlanned, NextAdvice: V4AdviceNone, Actions: actions,

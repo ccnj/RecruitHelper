@@ -104,7 +104,9 @@ func TestV4ScheduleInterviewFollowupsArePerCardSequentialAndLowestFirst(t *testi
 	decision, err := EvaluateV4Schedule(input)
 	if err != nil || decision.Status != V4ScheduleActionsPlanned || len(decision.Actions) != 1 ||
 		decision.Actions[0].Kind != V4ActionInterviewFollowup || decision.Actions[0].CardMessageSeq != 30 ||
-		decision.Actions[0].Stage != 1 || decision.Actions[0].Text != "跟催一" {
+		decision.Actions[0].Stage != 1 || decision.Actions[0].Text != "跟催一" ||
+		decision.Actions[0].DueAt == nil ||
+		!decision.Actions[0].DueAt.Equal(state.LastOutboundAt.Add(10*time.Minute)) {
 		t.Fatalf("没有选当前最低档并精确绑定所属卡: decision=%+v err=%v", decision, err)
 	}
 	if decision.State.InterviewGroups[1].NextStage != 1 {
@@ -154,6 +156,8 @@ func TestV4ScheduleColdLadderUsesAIThenFixedTextAndInvite(t *testing.T) {
 	coldOne, err := EvaluateV4Schedule(input)
 	if err != nil || coldOne.Status != V4ScheduleActionsPlanned || len(coldOne.Actions) != 1 ||
 		coldOne.Actions[0].Kind != V4ActionColdPrompt || coldOne.Actions[0].Round != 1 || coldOne.Actions[0].Stage != 1 ||
+		coldOne.Actions[0].DueAt == nil ||
+		!coldOne.Actions[0].DueAt.Equal(state.LastOutboundAt.Add(24*time.Hour)) ||
 		coldOne.State.ColdPromptRemaining != 2 {
 		t.Fatalf("催1 建议没有形成单一动作，或计划提前扣预算: decision=%+v err=%v", coldOne, err)
 	}
@@ -171,7 +175,10 @@ func TestV4ScheduleColdLadderUsesAIThenFixedTextAndInvite(t *testing.T) {
 	coldTwo, err := EvaluateV4Schedule(secondInput)
 	if err != nil || coldTwo.Status != V4ScheduleActionsPlanned || coldTwo.NextAdvice != V4AdviceNone ||
 		len(coldTwo.Actions) != 2 || coldTwo.Actions[0].Kind != V4ActionColdWechatText ||
-		coldTwo.Actions[1].Kind != V4ActionColdWechatInvite {
+		coldTwo.Actions[1].Kind != V4ActionColdWechatInvite ||
+		coldTwo.Actions[0].DueAt == nil || coldTwo.Actions[1].DueAt == nil ||
+		!coldTwo.Actions[0].DueAt.Equal(secondDue) ||
+		!coldTwo.Actions[1].DueAt.Equal(secondDue) {
 		t.Fatalf("同一轮催1用过后没有进入固定催2+邀请: decision=%+v err=%v", coldTwo, err)
 	}
 
