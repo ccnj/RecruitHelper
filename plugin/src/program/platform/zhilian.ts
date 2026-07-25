@@ -3708,6 +3708,7 @@ async function mainReadListPage(
   pageNo: number,
   pageSize: number,
   filter: 'all' | 'unread',
+  apiTimeoutMs = 10_000,
 ): Promise<MainListPageResult> {
   type AnyRecord = Record<string, unknown>
   const w = window as unknown as AnyRecord
@@ -3715,11 +3716,32 @@ async function mainReadListPage(
   const getSessions = engine?.getSessions
   if (typeof getSessions !== 'function') throw new Error('imEngine.getSessions unavailable')
 
+  const deadline = Date.now() + apiTimeoutMs
+  const withinDeadline = async <T>(promise: Promise<T>): Promise<T> => {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('list_api_timeout')
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('list_api_timeout')), remaining)
+        }),
+      ])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
   const payload: AnyRecord = { pageNo, pageSize, includeResume: true }
   if (filter === 'unread') payload.filterUnread = true
-  const first = await (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload })
+  const first = await withinDeadline(
+    (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload }),
+  )
   await new Promise((resolve) => setTimeout(resolve, 120))
-  const second = await (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload })
+  const second = await withinDeadline(
+    (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload }),
+  )
   if (!first || !second || !Array.isArray(first.curSessions) || !Array.isArray(second.curSessions)) {
     throw new Error('imEngine.getSessions response shape invalid')
   }
@@ -4886,6 +4908,8 @@ async function readZhilianListFromDOM(
         'manualOnly',
       )
     }
+    // 本次已经交付当前可见 DOM 窗口，不在同一命令里继续滚动聚合。
+    if (accepted.length > 0) break
     previousWindowDigest = pageDigest
     windowNo += 1
     windowOffset = 0
@@ -4910,7 +4934,9 @@ export async function readZhilianList(
   const tab = await verifiedIMTab(expectedPrincipalFingerprint)
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
   const cutoffDays = Math.min(30, Math.max(1, args.stopOlderThanDays ?? 8))
-  const maxSessions = Math.min(32, Math.max(1, args.maxSessions ?? 32))
+  // 一轮巡检只把当前 API/DOM 窗口交给脑。调用方即使请求 32 条，
+  // 也不能在手侧跨窗搜人；下一窗只能由脑在下一轮显式请求。
+  const maxSessions = Math.min(LIST_PAGE_SIZE, Math.min(32, Math.max(1, args.maxSessions ?? 32)))
   const binding = await bindingHash({
     kind: 'list', principal: expectedPrincipalFingerprint ?? '', filter: args.filter,
     cutoffDays, maxSessions,
@@ -5026,7 +5052,8 @@ export async function readZhilianList(
       sessions.push(item)
     }
     if (payloadFull) break
-    if (crossedCutoff || !page.hasMore) {
+    const consumedWholePage = !payloadFull && consumed >= candidates.length
+    if (crossedCutoff || (consumedWholePage && !page.hasMore)) {
       complete = true
       break
     }
@@ -5034,6 +5061,8 @@ export async function readZhilianList(
       pageOffset += consumed
       break
     }
+    // 本次已经交付当前窗口的业务行，不在同一命令里继续跨窗聚合。
+    if (accepted.length > 0) break
     previousCompletedPageDigest = pageDigest
     pageNo += 1
     pageOffset = 0
@@ -5058,6 +5087,7 @@ async function mainReadThreadPage(
   conversationRef: string,
   limit: number,
   cursor: { endTime: number; lastMsgId: string } | null,
+  apiTimeoutMs = 10_000,
 ): Promise<MainThreadPageResult> {
   // 当前 Chrome 版本在 MAIN-world Promise reject 时可能只给 InjectionResult.result=undefined，
   // 不附带 error。把本函数内部异常转换为脱敏、可序列化的哨兵，使外层能响亮区分
@@ -5120,51 +5150,13 @@ async function mainReadThreadPage(
   diagnosticStage = 'resolve_session_runtime'
   let sessions = (engine && Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
   let session = sessions.find((item) => String(item.sessionId ?? '') === conversationRef)
-  if (!session && engine && typeof engine.getSessions === 'function') {
-    diagnosticStage = 'resolve_session_scan'
-    const getSessions = engine.getSessions as (arg: AnyRecord) => Promise<unknown>
-    const seenPages = new Set<string>()
-    const readPage = async (pageNo: number): Promise<{ rows: AnyRecord[]; hasMore: boolean }> => {
-      const loaded = await getSessions.call(engine, { pageNo, pageSize: 8, includeResume: true })
-      if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded) ||
-          !Array.isArray((loaded as AnyRecord).curSessions)) {
-        throw new Error('session_lookup_response_invalid')
-      }
-      const rawHasMore = (loaded as AnyRecord).hasMoreSession ?? (loaded as AnyRecord).hasMore
-      if (typeof rawHasMore !== 'boolean') throw new Error('session_lookup_has_more_missing')
-      return { rows: (loaded as AnyRecord).curSessions as AnyRecord[], hasMore: rawHasMore }
-    }
-    for (let pageNo = 1; pageNo <= 128; pageNo += 1) {
-      const firstPage = await readPage(pageNo)
-      const page = firstPage.rows
-      const pageKey = `${String(page[0]?.sessionId ?? '')}\u001f${String(page[page.length - 1]?.sessionId ?? '')}\u001f${page.length}`
-      if (seenPages.has(pageKey)) throw new Error('session_lookup_pagination_stalled')
-      seenPages.add(pageKey)
-      const firstMatches = page.filter((item) => String(item.sessionId ?? '') === conversationRef)
-      if (firstMatches.length > 1) throw new Error('session_lookup_duplicate_target')
-      if (firstMatches.length === 1) {
-        // 命中页再采一次，只要求目标身份投影稳定；列表中其他会话的实时变化不能
-        // 迫使我们猜目标，也不能把一次瞬态命中当成跨会话绑定证词。
-        const secondPage = await readPage(pageNo)
-        const secondMatches = secondPage.rows.filter((item) => String(item.sessionId ?? '') === conversationRef)
-        if (secondMatches.length !== 1) throw new Error('session_lookup_target_unstable')
-        const targetProjection = (item: AnyRecord): string => JSON.stringify([
-          String(item.sessionId ?? ''),
-          String(item.peerPartnerId ?? ''),
-          item.scene ?? item.sessionType ?? null,
-        ])
-        if (targetProjection(firstMatches[0]) !== targetProjection(secondMatches[0])) {
-          throw new Error('session_lookup_target_unstable')
-        }
-        session = secondMatches[0]
-        break
-      }
-      if (!firstPage.hasMore) break
-      if (pageNo === 128) throw new Error('session_lookup_page_limit')
-    }
-  }
   diagnosticStage = 'resolve_session_initial_state'
-  if (!session) session = readInitialSessions().find((item) => String(item.sessionId ?? '') === conversationRef)
+  const selectedConversationRef = (() => {
+    try { return new URL(location.href).searchParams.get('sessionId') ?? '' } catch { return '' }
+  })()
+  if (!session && selectedConversationRef === conversationRef) {
+    session = readInitialSessions().find((item) => String(item.sessionId ?? '') === conversationRef)
+  }
   if (!session) throw new Error('conversation_not_found')
 
   const target = String(session.peerPartnerId ?? '')
@@ -5181,12 +5173,23 @@ async function mainReadThreadPage(
       request.lastMsgId = cursor.lastMsgId
     }
     try {
-      history = await (engine.getHistoryMsgs as (arg: AnyRecord) => Promise<unknown[]>).call(engine, request)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        history = await Promise.race([
+          (engine.getHistoryMsgs as (arg: AnyRecord) => Promise<unknown[]>).call(engine, request),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('history_api_timeout')), apiTimeoutMs)
+          }),
+        ])
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
       if (!Array.isArray(history)) {
         history = null
         historyFailure = 'shape'
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === 'history_api_timeout') throw error
       history = null
       historyFailure = 'rejected'
     }
@@ -5514,6 +5517,7 @@ async function mainReadThreadPage(
       'session_lookup_page_limit',
       'conversation_not_found',
       'conversation_target_missing',
+      'history_api_timeout',
       'history_api_unavailable_on_base_route',
       'history_api_rejected_on_base_route',
       'history_api_shape_on_base_route',
@@ -5702,8 +5706,8 @@ export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspec
 }
 
 // 直接拼接 ?sessionId=... 在目标尚未进入智联当前虚拟列表时会被平台剥回 /app/im。
-// finder 只滚动并把完整 sessionId 唯一命中的行留在视口，绝不 click。即使注入在
-// dispatcher 取消/超时后才返回，最多改变滚动位置，不可能产生迟到导航。
+// finder 只检查当前已加载窗口，完整 sessionId 唯一命中才返回 found；它不复位、
+// 不滚动也不 click，数据库中的旧会话因此不能驱动手在长列表里全局搜人。
 async function mainFindConversation(conversationRef: string): Promise<MainFindConversationResult> {
   type AnyRecord = Record<string, unknown>
   const w = window as unknown as AnyRecord
@@ -5721,16 +5725,6 @@ async function mainFindConversation(conversationRef: string): Promise<MainFindCo
   }
   const virtual = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
   if (!virtual) return { status: 'failed', reason: 'list_surface_missing' }
-  const scrollCandidates = [
-    virtual,
-    ...Array.from(virtual.querySelectorAll<HTMLElement>('.km-scrollbar__wrap, .km-scrollbar__view')),
-    virtual.parentElement,
-  ].filter((item): item is HTMLElement => item !== null)
-  const scrollElement = scrollCandidates.sort((left, right) =>
-    (right.scrollHeight - right.clientHeight) - (left.scrollHeight - left.clientHeight))[0]
-  if (!scrollElement || scrollElement.clientHeight <= 0) {
-    return { status: 'failed', reason: 'list_surface_missing' }
-  }
   const itemSelector =
     '.im-session-list .im-session-list__virtual .im-session-list__virtual--box div[role="listitem"]'
   const refsOf = (node: HTMLElement): Set<string> => {
@@ -5778,45 +5772,14 @@ async function mainFindConversation(conversationRef: string): Promise<MainFindCo
     return pairs.map(({ node, refs }) => ({ node, ref: [...refs][0] }))
   }
 
-  scrollElement.scrollTop = 0
-  scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
-  await new Promise((resolve) => setTimeout(resolve, 250))
-  const seenWindows = new Set<string>()
-  for (let windowNo = 0; windowNo < 128; windowNo += 1) {
-    let rows = readWindow()
-    if (rows !== null && rows.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      rows = readWindow()
-    }
-    if (rows === null) return { status: 'failed', reason: 'list_binding_unresolved' }
-    if (rows.length === 0) return { status: 'failed', reason: 'list_items_missing' }
-    const refs = rows.map(({ ref }) => ref)
-    // 虚拟列表带 overscan：相邻两个合法 scrollTop 可能暂时呈现同一首尾行。
-    // 把实际位置纳入停滞键，真正不前进由下方 scrollTop 断言单独拦截。
-    const windowKey = `${Math.round(scrollElement.scrollTop)}\u001f${refs[0]}\u001f${refs[refs.length - 1]}\u001f${refs.length}`
-    if (seenWindows.has(windowKey)) return { status: 'failed', reason: 'list_window_repeated' }
-    seenWindows.add(windowKey)
-    const matches = rows.filter(({ ref }) => ref === conversationRef)
-    if (matches.length > 1) return { status: 'failed', reason: 'target_binding_duplicated' }
-    if (matches.length === 1) {
-      matches[0].node.scrollIntoView({ block: 'center', inline: 'nearest' })
-      await new Promise((resolve) => setTimeout(resolve, 150))
-      const rebound = readWindow()
-      if (rebound === null) return { status: 'failed', reason: 'list_binding_unresolved' }
-      const reboundMatches = rebound.filter(({ ref }) => ref === conversationRef)
-      if (reboundMatches.length !== 1) return { status: 'failed', reason: 'target_binding_changed' }
-      return { status: 'found' }
-    }
-    const maxTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight)
-    if (scrollElement.scrollTop >= maxTop - 2) return { status: 'failed', reason: 'target_not_found' }
-    const beforeTop = scrollElement.scrollTop
-    const step = Math.max(200, Math.floor(scrollElement.clientHeight * 0.8))
-    scrollElement.scrollTop = Math.min(maxTop, beforeTop + step)
-    scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    if (scrollElement.scrollTop <= beforeTop) return { status: 'failed', reason: 'list_scroll_stalled' }
-  }
-  return { status: 'failed', reason: 'target_not_found' }
+  const rows = readWindow()
+  if (rows === null) return { status: 'failed', reason: 'list_binding_unresolved' }
+  if (rows.length === 0) return { status: 'failed', reason: 'list_items_missing' }
+  const matches = rows.filter(({ ref }) => ref === conversationRef)
+  if (matches.length > 1) return { status: 'failed', reason: 'target_binding_duplicated' }
+  return matches.length === 1
+    ? { status: 'found' }
+    : { status: 'failed', reason: 'target_not_found' }
 }
 
 // finder 返回后由 extension 先 checkpoint 并重新核验账号；只有这个无 await 的短 task

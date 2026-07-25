@@ -6521,7 +6521,7 @@ test('智联未知消息类型日志只含去重后的类型码且不改变消�
   }
 })
 
-test('智联会话选择拆成只滚动 finder 与同步 click-once', async () => {
+test('智联会话 finder 只检查当前窗口且不改变滚动位置，click-once 仍独立执行', async () => {
   const original = {
     window: globalThis.window,
     document: globalThis.document,
@@ -6530,8 +6530,9 @@ test('智联会话选择拆成只滚动 finder 与同步 click-once', async () =
   }
   const targetRef = 'conversation-target-exact'
   let clickCalls = 0
+  let scrollIntoViewCalls = 0
   const scrollElement = {
-    scrollTop: 0,
+    scrollTop: 321,
     scrollHeight: 1_000,
     clientHeight: 400,
     parentElement: null,
@@ -6559,13 +6560,14 @@ test('智联会话选择拆成只滚动 finder 与同步 click-once', async () =
     },
     querySelectorAll() { return [] },
     contains(node) { return node === result || node === clickNode },
-    scrollIntoView() {},
+    scrollIntoView() { scrollIntoViewCalls += 1 },
     }
     return result
   }
   const firstClickNode = { isConnected: true, getClientRects() { return [{}] } }
   const firstRow = row('conversation-first-window', firstClickNode)
   const targetRow = row(targetRef, clickTarget)
+  let windowRows = [targetRow]
   globalThis.location = { href: 'https://rd6.zhaopin.com/app/im' }
   globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
   const staffId = 'staff-select-fixture'
@@ -6585,14 +6587,22 @@ test('智联会话选择拆成只滚动 finder 与同步 click-once', async () =
     },
     querySelectorAll(selector) {
       if (selector.startsWith('textarea.')) return []
-      return scrollElement.scrollTop < 300 ? [firstRow] : [targetRow]
+      return windowRows
     },
   }
   try {
     const found = await zhilianTestHooks.mainFindConversation(targetRef)
     assert.deepEqual(found, { status: 'found' })
     assert.equal(clickCalls, 0, 'finder 无论耗时多久都不得 click')
+    assert.equal(scrollElement.scrollTop, 321)
+    assert.equal(scrollIntoViewCalls, 0)
     assert.equal(globalThis.location.href, 'https://rd6.zhaopin.com/app/im')
+
+    windowRows = [firstRow]
+    const absent = await zhilianTestHooks.mainFindConversation(targetRef)
+    assert.deepEqual(absent, { status: 'failed', reason: 'target_not_found' })
+    assert.equal(scrollElement.scrollTop, 321, '目标只在下一窗时 finder 不得滚动寻找')
+    windowRows = [targetRow]
 
     const principal = ['zhilian-principal-v2', staffId, orgId, loginPoint]
       .map((piece) => `${new TextEncoder().encode(piece).length}:${piece}`).join('|')
@@ -8764,6 +8774,9 @@ test('发送 baseline Promise 卡死跨过 timer，释放后也不能进入 atte
 
 test('智联 MAIN 线程解析：runtime $session 缺失时复用 initial state 确定消息方向', async () => {
   const conversationRef = 'conversation-initial-staff'
+  globalThis.location = {
+    href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
+  }
   const initial = {
     im: {
       sessions: [{ sessionId: conversationRef, peerPartnerId: 'candidate-initial', name: '脱敏候选人' }],
@@ -8795,12 +8808,12 @@ test('智联 MAIN 线程解析：runtime $session 缺失时复用 initial state 
   assert.equal(scriptsReadCount, 1, '会话与 staff 回退必须复用同一份 initial state 解析结果')
 })
 
-test('智联线程不依赖未验证 getSessionsByIds，分页命中后必须二次稳定采样', async () => {
+test('智联线程从当前 runtime 窗口读取且不调用 getSessions 全局扫描', async () => {
   const conversationRef = 'conversation-stable-page'
   let byIdsCalls = 0
   let pageCalls = 0
   const engine = {
-    sessions: [],
+    sessions: [{ sessionId: conversationRef, peerPartnerId: 'peer-stable', name: '脱敏候选人' }],
     async getSessionsByIds() {
       byIdsCalls += 1
       throw new Error('不得调用未经验证的按 ID API')
@@ -8827,10 +8840,10 @@ test('智联线程不依赖未验证 getSessionsByIds，分页命中后必须二
   assert.equal(page.messages.length, 1)
   assert.equal(page.messages[0].direction, 'in')
   assert.equal(byIdsCalls, 0)
-  assert.equal(pageCalls, 2)
+  assert.equal(pageCalls, 0)
 })
 
-test('智联线程按已验证 getSessions 分页精确回退且不依赖目标已在首屏', async () => {
+test('智联线程目标只存在 getSessions 后续页时立即失败且不扫描', async () => {
   const conversationRef = 'conversation-from-page-two'
   let byIdsCalls = 0
   const requestedPages = []
@@ -8867,12 +8880,10 @@ test('智联线程按已验证 getSessions 分页精确回退且不依赖目标�
   globalThis.window = { $session: { staff: { staffId: 'staff-page-two' } }, imEngine: engine }
 
   const page = await zhilianTestHooks.mainReadThreadPage(conversationRef, 8, null)
-  assert.equal(page.messages.length, 1)
-  assert.equal(page.messages[0].direction, 'in')
-  assert.equal(page.peer.platformUserRef, 'peer-page-two')
+  assert.match(page.__recruitHelperMainError, /resolve_session_initial_state:conversation_not_found/u)
   assert.equal(byIdsCalls, 0)
-  assert.deepEqual(requestedPages, [1, 2, 2])
-  assert.equal(historyCalls, 1)
+  assert.deepEqual(requestedPages, [])
+  assert.equal(historyCalls, 0)
 })
 
 test('智联线程 history 拒绝在列表页响亮分阶段失败，不伪装成 DOM 路由问题', async () => {
@@ -8910,16 +8921,15 @@ test('智联 MAIN 线程内部异常以脱敏哨兵穿过 Chrome InjectionResult
     $session: { staff: { staffId: 'staff' } },
     imEngine: {
       sessions: [],
-      async getSessions() { return { curSessions: null, hasMoreSession: false } },
     },
   }
   const sentinel = await zhilianTestHooks.mainReadThreadPage('missing-conversation', 8, null)
-  assert.match(sentinel.__recruitHelperMainError, /resolve_session_scan:session_lookup_response_invalid/u)
+  assert.match(sentinel.__recruitHelperMainError, /resolve_session_initial_state:conversation_not_found/u)
 
   globalThis.chrome = { scripting: { async executeScript() { return [{ result: sentinel }] } } }
   await assert.rejects(
     zhilianTestHooks.runMain(7, async () => ({ ok: true }), []),
-    /read_thread_main_failed:resolve_session_scan:session_lookup_response_invalid/u,
+    /read_thread_main_failed:resolve_session_initial_state:conversation_not_found/u,
   )
 })
 
@@ -8965,6 +8975,84 @@ test('智联列表 API 响应缺少真实 hasMore 时响亮失败', async () => 
     zhilianTestHooks.mainReadListPage(1, 8, 'all'),
     /hasMore missing/,
   )
+})
+
+test('智联列表与线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
+  let listCalls = 0
+  globalThis.window = {
+    imEngine: {
+      getSessions() {
+        listCalls += 1
+        return listCalls === 1
+          ? Promise.resolve({ curSessions: [], hasMoreSession: true })
+          : new Promise(() => {})
+      },
+    },
+  }
+  await assert.rejects(
+    zhilianTestHooks.mainReadListPage(1, 8, 'all', 150),
+    /list_api_timeout/u,
+  )
+  assert.equal(listCalls, 2, '两次稳定采样必须共享同一截止时间')
+
+  const conversationRef = 'conversation-history-timeout'
+  globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
+  globalThis.document = { scripts: [] }
+  globalThis.window = {
+    $session: { staff: { staffId: 'staff-timeout' } },
+    imEngine: {
+      sessions: [{ sessionId: conversationRef, peerPartnerId: 'peer-timeout', name: '脱敏候选人' }],
+      getHistoryMsgs() { return new Promise(() => {}) },
+    },
+  }
+  const failure = await zhilianTestHooks.mainReadThreadPage(conversationRef, 8, null, 5)
+  assert.match(failure.__recruitHelperMainError, /read_history_api:history_api_timeout/u)
+})
+
+test('readList 请求 32 条时也只交付当前 8 条 API 窗口并如实返回游标', async () => {
+  const fingerprint = '9'.repeat(64)
+  let listCalls = 0
+  const rows = Array.from({ length: 8 }, (_unused, index) => ({
+    conversationRef: `conversation-window-${index}`,
+    peer: { displayName: `候选人${index}`, platformUserRef: `peer-${index}` },
+    unreadCount: index,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '新消息' },
+    lastActivityTs: Date.now() - index,
+  }))
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 18, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }] },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainReadListPage') {
+          listCalls += 1
+          return [{ result: { sessions: rows, hasMore: true, unstable: false } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'list-window', deadlineMs: Date.now() + 10_000, commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, beforeSideEffect() {},
+  }
+  const page = await readZhilianList(
+    { filter: 'all', stopOlderThanDays: 8, maxSessions: 32 },
+    context,
+    fingerprint,
+  )
+  assert.equal(listCalls, 1)
+  assert.equal(page.sessions.length, 8)
+  assert.equal(page.complete, false)
+  assert.ok(page.nextCursor)
 })
 
 test('智联线程 API 不可用时只接受目标路由上的稳定 Vue 时间线与明确 90 天边界', async () => {
