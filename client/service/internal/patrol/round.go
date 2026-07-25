@@ -232,6 +232,10 @@ func (a *roundActor) processConversationListPage(
 	}); err != nil {
 		return err
 	}
+	newInboundProfileIDs, err := a.adoptInboundConversationProfiles(page.sessions)
+	if err != nil {
+		return err
+	}
 	if err := a.ensureCommunicationV4Roots(); err != nil {
 		return err
 	}
@@ -278,11 +282,137 @@ func (a *roundActor) processConversationListPage(
 		if profile == nil {
 			continue
 		}
+		if _, newlyAdopted := newInboundProfileIDs[profile.ProfileID]; newlyAdopted {
+			// This batch deliberately stops after page-driven adoption and
+			// reconciliation. The following root-and-resume batch will attach
+			// the first stable inbound event before V4 automation is allowed.
+			continue
+		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+const inboundProfileAdoptionAuditCategory = "inbound_profile_adoption"
+
+func (a *roundActor) adoptInboundConversationProfiles(
+	sessions []protocol.ConversationSummary,
+) (map[string]struct{}, error) {
+	adopted := make(map[string]struct{})
+	for _, summary := range sessions {
+		key := store.ConversationKey{
+			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+			ConversationRef: summary.ConversationRef,
+		}
+		existing, err := a.manager.store.CandidateProfileByConversation(key)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			continue
+		}
+
+		reason := ""
+		switch {
+		case strings.TrimSpace(summary.Peer.PlatformUserRef) == "":
+			reason = "missingPlatformUserRef"
+		case strings.TrimSpace(summary.Peer.DisplayName) == "":
+			reason = "missingDisplayName"
+		case summary.PositionTitle == nil || strings.TrimSpace(*summary.PositionTitle) == "":
+			reason = "missingPositionTitle"
+		}
+		if reason != "" {
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=skipped reason="+reason,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		result, err := a.manager.store.AdoptInboundConversationProfile(
+			store.AdoptInboundConversationProfileRequest{
+				Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+				ConversationRef: summary.ConversationRef,
+				PlatformUserRef: summary.Peer.PlatformUserRef,
+				DisplayName:     summary.Peer.DisplayName,
+				PositionTitle:   *summary.PositionTitle,
+				ObservedAt:      a.manager.now(),
+			},
+		)
+		if err != nil {
+			conflictReason := ""
+			switch {
+			case errors.Is(err, store.ErrInboundProfileAdoptionConflict):
+				conflictReason = "identityFactConflict"
+			case errors.Is(err, store.ErrCandidateAlreadyProfiled):
+				conflictReason = "humanProfileConflict"
+			case errors.Is(err, store.ErrInboundProfileAdoptionInvalid):
+				conflictReason = "invalidPageIdentity"
+			}
+			if conflictReason == "" {
+				return nil, err
+			}
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=manualRequired reason="+conflictReason,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if result == nil {
+			return nil, errors.New("主动来聊候选人收编返回空结果")
+		}
+		switch result.Outcome {
+		case store.InboundProfileAdopted:
+			if result.Profile == nil || strings.TrimSpace(result.Profile.ProfileID) == "" {
+				return nil, errors.New("主动来聊候选人收编成功但缺少 profileId")
+			}
+			adopted[result.Profile.ProfileID] = struct{}{}
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=adopted",
+			); err != nil {
+				return nil, err
+			}
+		case store.InboundProfileAlreadyAdopted:
+			// A concurrent/idempotent adoption is not newly owned by this
+			// page pass. The ordinary profile path decides its next action.
+		case store.InboundProfilePositionNoMatch:
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=skipped reason=positionNoMatch",
+			); err != nil {
+				return nil, err
+			}
+		case store.InboundProfilePositionAmbiguous:
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=skipped reason=positionAmbiguous",
+			); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("未知主动来聊候选人收编结果: %q", result.Outcome)
+		}
+	}
+	return adopted, nil
+}
+
+func (a *roundActor) appendInboundProfileAdoptionAudit(
+	conversationRef string,
+	detail string,
+) error {
+	return a.manager.store.AppendAudit(&store.AuditEntry{
+		At: a.manager.now(), Category: inboundProfileAdoptionAuditCategory,
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		ConversationRef: conversationRef, RoundID: a.roundID,
+		Detail: detail,
+	})
 }
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
