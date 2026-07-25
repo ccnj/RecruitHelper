@@ -1508,6 +1508,59 @@ test('execBudget 到期响亮失败，并隔离忽略信号的僵尸 handler', a
   assert.equal(results(out.frames, 'budget-1').length, 1, '晚到 ok 不得覆盖预算终局')
 })
 
+test('最大执行预算准点或晚触发都保留 EXEC_TIMEOUT_HAND，诊断时长封顶', async () => {
+  const realDateNow = Date.now
+  for (const observedElapsed of [
+    DEFAULTS.execBudgetDefaultMs.capMs,
+    DEFAULTS.execBudgetDefaultMs.capMs + 11,
+  ]) {
+    let now = 1_700_000_000_000
+    let releaseHandler = () => {}
+    Date.now = () => now
+    mock.timers.enable({ apis: ['setTimeout'] })
+    try {
+      const handlerGate = new Promise((resolve) => { releaseHandler = resolve })
+      register({
+        name: Primitive.DebugPing,
+        class: 'readonly',
+        async handler() {
+          await handlerGate
+          return pingOk()
+        },
+      })
+      const out = recorder()
+      const dispatcher = new Dispatcher(out.send)
+      const ref = `budget-cap-${observedElapsed}`
+      await dispatcher.handleCmd(ref, 's', 's', command(Primitive.DebugPing, {}, {
+        deadline: now + DEFAULTS.execBudgetDefaultMs.capMs + 60_000,
+        execBudgetMs: DEFAULTS.execBudgetDefaultMs.capMs,
+      }))
+
+      now += observedElapsed
+      mock.timers.tick(DEFAULTS.execBudgetDefaultMs.capMs)
+      for (let round = 0; round < 20 && results(out.frames, ref).length === 0; round++) {
+        await Promise.resolve()
+      }
+      const terminal = results(out.frames, ref)[0]?.body
+      assert.equal(terminal?.status, ResultStatus.Failed)
+      assert.equal(terminal?.error.code, ErrorCode.ExecTimeoutHand)
+      assert.equal(terminal?.error.retryable, Retryable.Yes)
+      assert.equal(terminal?.error.sideEffect, 'none')
+      assert.equal(terminal?.execMs, DEFAULTS.execBudgetDefaultMs.capMs)
+
+      releaseHandler()
+      for (let round = 0; round < 20 && dispatcher.snapshot().inFlight !== null; round++) {
+        await Promise.resolve()
+      }
+      assert.equal(results(out.frames, ref).length, 1)
+    } finally {
+      releaseHandler()
+      mock.timers.reset()
+      Date.now = realDateNow
+    }
+  }
+})
+
 test('handler progress 为 QoS0 帧，终局后不再上报', async () => {
   register({
     name: Primitive.DebugPing,

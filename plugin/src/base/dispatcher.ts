@@ -873,11 +873,17 @@ export class Dispatcher {
   }
 
   private resultBody(ref: string, result: PrimitiveResult, execMs: number): ResultBody {
+    // execMs 是 Dispatcher 自己生成的诊断值。预算定时器受事件循环调度影响，
+    // 可能在 cap 后数毫秒才运行；这不改变超时终局，但诊断字段必须留在契约范围内，
+    // 否则 ensureResultBody 会把正确的 EXEC_TIMEOUT_HAND 二次改写成 INTERNAL_HAND。
+    const boundedExecMs = Number.isFinite(execMs)
+      ? Math.min(DEFAULTS.execBudgetDefaultMs.capMs, Math.max(0, Math.trunc(execMs)))
+      : 0
     const body: ResultBody = {
       ref,
       status: result.status,
       replayed: false,
-      execMs,
+      execMs: boundedExecMs,
     }
     if (result.data !== undefined) body.data = result.data
     if (result.error !== undefined) body.error = result.error as ErrorBody
