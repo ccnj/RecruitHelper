@@ -1,6 +1,6 @@
 // 打包 base service worker 与 rd6 allowlist content script。
-// program 与 base 在 M1 一起编译进 SW(l7eval5 远程交付机制悬置);
-// program 保持"不注册任何 chrome 监听、只经原语注册表暴露能力"的形态,故此约束靠约定 + code review 守。
+// program 与 base 一起编译进 SW，并作为一个可验证插件构建整体交付；
+// program 保持"不注册任何 chrome 监听、只经原语注册表暴露能力"的形态，故此约束靠约定 + code review 守。
 import * as esbuild from 'esbuild'
 import { cpSync, mkdirSync } from 'node:fs'
 

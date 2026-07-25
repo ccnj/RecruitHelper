@@ -1,5 +1,5 @@
 // 原语注册表(program 层)。program 不注册任何 chrome 监听、只经此表暴露能力(宪法禁令 5)。
-// 这是"交付机制悬置"得以成立的形态:base 只认这张表,不认具体业务。
+// 这是单一监听/分发入口与整包可验证构建的边界：base 只认这张表，不认具体业务。
 import { CmdClass, PRIMITIVE_META } from '../base/protocol'
 import type { ErrorBody, Evidence, ResultStatus } from '../base/protocol'
 import type { ExecutionHooks } from '../base/dispatcher'
