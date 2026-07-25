@@ -389,7 +389,11 @@ func appCurrentJobTx(
 	if err := tx.Table("job_ai_context_heads AS head").
 		Select("revision.display_name, revision.environment, head.last_synced_at, head.source_job_ref").
 		Joins("JOIN job_ai_context_revisions AS revision ON revision.revision_hash = head.revision_hash").
-		Where("head.source_kind = ?", legacyJobConfigSourceKind).
+		Where(
+			"head.source_kind = ? AND head.activation_current = ?",
+			legacyJobConfigSourceKind,
+			true,
+		).
 		Order("head.last_synced_at DESC, head.source_job_ref ASC").
 		Limit(2).Scan(&rows).Error; err != nil {
 		return AppJobProjection{}, err
@@ -397,8 +401,7 @@ func appCurrentJobTx(
 	if len(rows) == 0 {
 		return AppJobProjection{SyncStatus: "missing"}, nil
 	}
-	if len(rows) > 1 && rows[0].LastSyncedAt.Equal(rows[1].LastSyncedAt) &&
-		rows[0].SourceJobRef != rows[1].SourceJobRef {
+	if len(rows) > 1 {
 		return AppJobProjection{SyncStatus: "ambiguous"}, nil
 	}
 	return AppJobProjection{

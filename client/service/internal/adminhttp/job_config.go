@@ -54,6 +54,12 @@ func (a *API) activateJobConfigSource(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if err := a.st.InvalidateCurrentLegacyJobAIContext(time.Now()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "旧职位配置未能安全退出当前激活",
+		})
+		return
+	}
 	contexts, syncFailure := a.syncCurrentJobConfigNow(r.Context())
 	response := map[string]any{
 		"activated": true, "synced": syncFailure == nil,

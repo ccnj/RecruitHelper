@@ -53,8 +53,8 @@ type AdoptInboundConversationProfileResult struct {
 // this inbound-only path: the IM list contract exposes the visible position
 // title, not a separately trusted platform position identity. Because the
 // production configuration plane currently syncs exactly one current job,
-// historical heads never participate: only the most recently synchronized
-// head may match, while a timestamp tie is treated as ambiguous.
+// historical heads never participate: only the head re-qualified by a
+// successful sync after the latest activation boundary may match.
 func (s *Store) AdoptInboundConversationProfile(
 	req AdoptInboundConversationProfileRequest,
 ) (*AdoptInboundConversationProfileResult, error) {
@@ -246,7 +246,11 @@ func currentLegacyJobMatchByTitleTx(
 		return nil, false, ErrInboundProfileAdoptionInvalid
 	}
 	var heads []JobAIContextHead
-	if err := tx.Where("source_kind = ?", legacyJobConfigSourceKind).
+	if err := tx.Where(
+		"source_kind = ? AND activation_current = ?",
+		legacyJobConfigSourceKind,
+		true,
+	).
 		Order("last_synced_at DESC, source_job_ref ASC").
 		Limit(2).
 		Find(&heads).Error; err != nil {
@@ -255,9 +259,7 @@ func currentLegacyJobMatchByTitleTx(
 	if len(heads) == 0 {
 		return nil, false, nil
 	}
-	if len(heads) > 1 &&
-		heads[0].LastSyncedAt.Equal(heads[1].LastSyncedAt) &&
-		heads[0].SourceJobRef != heads[1].SourceJobRef {
+	if len(heads) > 1 {
 		return nil, true, nil
 	}
 	revision, err := currentLegacyJobAIContextByBackendJobIDTx(

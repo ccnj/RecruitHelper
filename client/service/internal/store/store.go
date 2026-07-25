@@ -65,6 +65,9 @@ func Open(dataDir string) (*Store, error) {
 	// 确定性迁移。表已存在但某会话 head 丢失属于损坏，
 	// 重启不得重算并掩盖，后续读/写必须 fail-closed。
 	effectHeadTableExisted := db.Migrator().HasTable(&ConversationEffectHead{})
+	jobAIContextHeadTableExisted := db.Migrator().HasTable(&JobAIContextHead{})
+	jobActivationCurrentColumnExisted := jobAIContextHeadTableExisted &&
+		db.Migrator().HasColumn(&JobAIContextHead{}, "ActivationCurrent")
 	if err := db.AutoMigrate(
 		&Hand{},
 		&Account{},
@@ -134,6 +137,11 @@ func Open(dataDir string) (*Store, error) {
 	if !effectHeadTableExisted {
 		if err := backfillConversationEffectHeads(db); err != nil {
 			return nil, fmt.Errorf("回填会话副作用 head: %w", err)
+		}
+	}
+	if jobAIContextHeadTableExisted && !jobActivationCurrentColumnExisted {
+		if err := backfillLegacyJobConfigActivationCurrent(db); err != nil {
+			return nil, fmt.Errorf("回填当前激活职位资格: %w", err)
 		}
 	}
 	return &Store{db: db}, nil

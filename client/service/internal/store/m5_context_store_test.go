@@ -207,10 +207,97 @@ func TestLegacyJobConfigHeadTracksSuccessfulSyncOrderIncludingABA(t *testing.T) 
 	if head.RevisionHash != first.RevisionHash || !head.LastSyncedAt.Equal(thirdAt) {
 		t.Fatalf("head 未记录第三次成功同步: %+v", head)
 	}
+	if !head.ActivationCurrent {
+		t.Fatalf("最近成功同步职位未取得当前激活资格: %+v", head)
+	}
 	var revisionCount int64
 	if err := s.db.Model(&JobAIContextRevision{}).Count(&revisionCount).Error; err != nil ||
 		revisionCount != 2 {
 		t.Fatalf("A→B→A 应只保留两条不可变 revision: count=%d err=%v", revisionCount, err)
+	}
+}
+
+func TestLegacyJobConfigActivationInvalidationClosesOldCurrentHead(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 24, 8, 30, 0, 0, time.UTC)
+	revision := contextRevisionFixture("legacy-context-current", "legacy-revision-current", at)
+	revision.SourceKind = legacyJobConfigSourceKind
+	revision.SourceJobRef = "job-current"
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		at,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InvalidateCurrentLegacyJobAIContext(at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var head JobAIContextHead
+	if err := s.db.First(
+		&head,
+		"source_kind = ? AND source_job_ref = ?",
+		legacyJobConfigSourceKind,
+		revision.SourceJobRef,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if head.ActivationCurrent {
+		t.Fatalf("新激活边界后旧职位仍可自动绑定: %+v", head)
+	}
+	if current, err := s.CurrentLegacyJobAIContextByBackendJobID(revision.SourceJobRef); err != nil ||
+		current == nil ||
+		current.RevisionHash != revision.RevisionHash {
+		t.Fatalf("失效当前资格不应删除历史职位 head: current=%+v err=%v", current, err)
+	}
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{revision},
+		at.Add(2*time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.First(
+		&head,
+		"source_kind = ? AND source_job_ref = ?",
+		legacyJobConfigSourceKind,
+		revision.SourceJobRef,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !head.ActivationCurrent {
+		t.Fatalf("后续成功同步未恢复唯一当前资格: %+v", head)
+	}
+}
+
+func TestLegacyJobConfigActivationCurrentBackfillUsesUniqueNewestHead(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 24, 8, 45, 0, 0, time.UTC)
+	for _, head := range []JobAIContextHead{
+		{
+			SourceKind: legacyJobConfigSourceKind, SourceJobRef: "job-old",
+			ContextID: "context-old", RevisionHash: "revision-old",
+			LastSyncedAt: at.Add(-time.Hour),
+		},
+		{
+			SourceKind: legacyJobConfigSourceKind, SourceJobRef: "job-new",
+			ContextID: "context-new", RevisionHash: "revision-new",
+			LastSyncedAt: at,
+		},
+	} {
+		if err := s.db.Create(&head).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := backfillLegacyJobConfigActivationCurrent(s.db); err != nil {
+		t.Fatal(err)
+	}
+	var heads []JobAIContextHead
+	if err := s.db.Order("source_job_ref").Find(&heads).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != 2 ||
+		heads[0].SourceJobRef != "job-new" || !heads[0].ActivationCurrent ||
+		heads[1].SourceJobRef != "job-old" || heads[1].ActivationCurrent {
+		t.Fatalf("旧库当前职位资格回填错误: %+v", heads)
 	}
 }
 

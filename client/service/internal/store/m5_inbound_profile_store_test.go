@@ -208,6 +208,13 @@ func TestAdoptInboundConversationProfileConservativelySkipsMissingOrAmbiguousJob
 			for _, job := range fixture.jobs {
 				saveInboundLegacyJob(t, s, job.id, job.title, at.Add(-time.Minute))
 			}
+			if fixture.want == InboundProfilePositionAmbiguous {
+				if err := s.db.Model(&JobAIContextHead{}).
+					Where("source_kind = ?", legacyJobConfigSourceKind).
+					Update("activation_current", true).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			result, err := s.AdoptInboundConversationProfile(req)
 			if err != nil || result == nil ||

@@ -120,6 +120,18 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 			results[index] = saveJobAIContextRevisionResult{Revision: persisted, Created: created}
 		}
 		revision := results[0].Revision
+		if err := tx.Model(&JobAIContextHead{}).
+			Where(
+				"source_kind = ? AND activation_current = ?",
+				legacyJobConfigSourceKind,
+				true,
+			).
+			Updates(map[string]any{
+				"activation_current": false,
+				"updated_at":         syncedAt,
+			}).Error; err != nil {
+			return err
+		}
 		var head JobAIContextHead
 		headErr := tx.First(
 			&head,
@@ -132,7 +144,7 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 			head = JobAIContextHead{
 				SourceKind: legacyJobConfigSourceKind, SourceJobRef: revision.SourceJobRef,
 				ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
-				LastSyncedAt: syncedAt,
+				ActivationCurrent: true, LastSyncedAt: syncedAt,
 			}
 			return tx.Create(&head).Error
 		case headErr != nil:
@@ -140,7 +152,9 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 		default:
 			return tx.Model(&head).Updates(map[string]any{
 				"context_id": revision.ContextID, "revision_hash": revision.RevisionHash,
-				"last_synced_at": syncedAt, "updated_at": syncedAt,
+				"activation_current": true,
+				"last_synced_at":     syncedAt,
+				"updated_at":         syncedAt,
 			}).Error
 		}
 	})
@@ -152,6 +166,56 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 		revisions[index] = results[index].Revision
 	}
 	return revisions, nil
+}
+
+// InvalidateCurrentLegacyJobAIContext closes the automatic position-binding
+// eligibility of the previous activation before a newly bound customer is
+// allowed to reuse any synchronized job. Immutable revisions and historical
+// per-job heads remain intact; a later successful /client/job-config sync
+// promotes exactly one head again through SaveCurrentLegacyJobAIContext.
+func (s *Store) InvalidateCurrentLegacyJobAIContext(at time.Time) error {
+	if s == nil || s.db == nil || at.IsZero() {
+		return ErrJobAIContextHeadInvalid
+	}
+	return s.db.Model(&JobAIContextHead{}).
+		Where(
+			"source_kind = ? AND activation_current = ?",
+			legacyJobConfigSourceKind,
+			true,
+		).
+		Updates(map[string]any{
+			"activation_current": false,
+			"updated_at":         at,
+		}).Error
+}
+
+// backfillLegacyJobConfigActivationCurrent is a one-time upgrade bridge for
+// databases created before ActivationCurrent existed. The previous product
+// projection defined the most recently synchronized head as current, so that
+// single deterministic winner keeps its qualification. A tied maximum is
+// deliberately left with no qualified head until the next successful sync.
+func backfillLegacyJobConfigActivationCurrent(tx *gorm.DB) error {
+	if tx == nil {
+		return ErrJobAIContextHeadInvalid
+	}
+	var heads []JobAIContextHead
+	if err := tx.Where("source_kind = ?", legacyJobConfigSourceKind).
+		Order("last_synced_at DESC, source_job_ref ASC").
+		Limit(2).
+		Find(&heads).Error; err != nil {
+		return err
+	}
+	if len(heads) == 0 ||
+		(len(heads) > 1 && heads[0].LastSyncedAt.Equal(heads[1].LastSyncedAt)) {
+		return nil
+	}
+	return tx.Model(&JobAIContextHead{}).
+		Where(
+			"source_kind = ? AND source_job_ref = ?",
+			legacyJobConfigSourceKind,
+			heads[0].SourceJobRef,
+		).
+		UpdateColumn("activation_current", true).Error
 }
 
 // CurrentLegacyJobAIContextByBackendJobID 返回旧后台职位最近一次成功同步的

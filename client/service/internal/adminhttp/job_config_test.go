@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/jobconfig"
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/testfixture"
 )
@@ -273,6 +275,19 @@ func TestLegacyActivationKeepsCredentialWhenAutomaticSyncFails(t *testing.T) {
 	dataDir := t.TempDir()
 	st, _ := store.Open(dataDir)
 	defer st.Close()
+	oldRevisions, err := m5ai.ImportLegacyJobConfigFromBackend(
+		syntheticCurrentJobConfig(t),
+		time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveCurrentLegacyJobAIContext(
+		oldRevisions,
+		time.Date(2026, 7, 25, 8, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatal(err)
+	}
 	configStore, _ := jobconfig.NewConfigStore(dataDir)
 	source := jobconfig.NewSource(configStore, backend.Client(), func(context.Context) (string, error) {
 		return adminTestMachineID, nil
@@ -294,6 +309,17 @@ func TestLegacyActivationKeepsCredentialWhenAutomaticSyncFails(t *testing.T) {
 	loaded, err := configStore.Load()
 	if err != nil || loaded == nil || loaded.LicenseToken != token {
 		t.Fatalf("同步失败丢失正式授权: loaded=%+v err=%v", loaded, err)
+	}
+	overview, err := st.AppOverview(store.AppOverviewRequest{
+		Now:        time.Date(2026, 7, 25, 9, 0, 0, 0, time.UTC),
+		Platform:   "zhilian",
+		AccountRef: "account-activation-failure",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Job.Available || overview.Job.SyncStatus != "missing" {
+		t.Fatalf("新激活同步失败后旧职位仍具当前资格: %+v", overview.Job)
 	}
 }
 

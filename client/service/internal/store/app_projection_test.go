@@ -312,7 +312,7 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 	if err := s.db.Create(&JobAIContextHead{
 		SourceKind: legacyJobConfigSourceKind, SourceJobRef: "job-overview",
 		ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
-		LastSyncedAt: now.Add(-time.Hour),
+		ActivationCurrent: false, LastSyncedAt: now.Add(-time.Hour),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 	if err := s.db.Create(&JobAIContextHead{
 		SourceKind: legacyJobConfigSourceKind, SourceJobRef: otherRevision.SourceJobRef,
 		ContextID: otherRevision.ContextID, RevisionHash: otherRevision.RevisionHash,
-		LastSyncedAt: now.Add(-30 * time.Minute),
+		ActivationCurrent: true, LastSyncedAt: now.Add(-30 * time.Minute),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
