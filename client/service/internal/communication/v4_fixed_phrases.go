@@ -13,7 +13,11 @@ var (
 	ErrInvalidV4FixedPhraseRender  = errors.New("v4 固定话术渲染失败")
 )
 
-const v4FixedPhraseDocType = "固定话术"
+const (
+	v4FixedPhraseDocType         = "固定话术"
+	v4LocalRejectionClosingScene = "local:rejectionClosing:v1"
+	v4LocalRejectionClosingText  = "好的，理解，感谢您的回复，祝您接下来一切顺利。"
+)
 
 type V4FixedPhraseKind string
 
@@ -60,7 +64,8 @@ var v4FixedPhraseScenes = []struct {
 	{kind: V4PhraseInterviewAccepted, scene: "meetingAccepted"},
 }
 
-// BuildV4FixedPhraseView parses only the four approved legacy scene mappings.
+// BuildV4FixedPhraseView parses only the four approved legacy scene mappings
+// and adds the locally approved rejection-closing default.
 // The old actions array is shape-checked and then discarded: all action and
 // state authority remains in the deterministic v4 reducer. A broken, disabled
 // or missing scene degrades only that branch; the immutable source package is
@@ -155,11 +160,17 @@ func RenderV4FixedPhrase(
 }
 
 func newMissingV4FixedPhraseView() V4FixedPhraseView {
-	view := V4FixedPhraseView{Phrases: make(map[V4FixedPhraseKind]V4FixedPhrase, len(v4FixedPhraseScenes))}
+	view := V4FixedPhraseView{Phrases: make(map[V4FixedPhraseKind]V4FixedPhrase, len(v4FixedPhraseScenes)+1)}
 	for _, mapping := range v4FixedPhraseScenes {
 		view.Phrases[mapping.kind] = V4FixedPhrase{
 			Kind: mapping.kind, SourceScene: mapping.scene, State: V4PhraseMissing,
 		}
+	}
+	view.Phrases[V4PhraseRejectionClosing] = V4FixedPhrase{
+		Kind:        V4PhraseRejectionClosing,
+		SourceScene: v4LocalRejectionClosingScene,
+		State:       V4PhraseAvailable,
+		Text:        v4LocalRejectionClosingText,
 	}
 	return view
 }

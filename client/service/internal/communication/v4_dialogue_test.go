@@ -412,7 +412,7 @@ func TestV4DialogueRejectedMissingPhraseOnlyDegradesThatBranch(t *testing.T) {
 	}
 }
 
-func TestV4DialogueSecondRejectionDoesNotInventMissingClosingPhrase(t *testing.T) {
+func TestV4DialogueSecondRejectionStopsWhenClosingViewIsAbsent(t *testing.T) {
 	state := activeV4DialogueState()
 	state.RetentionSent = true
 	input := V4DialogueInput{
@@ -426,7 +426,30 @@ func TestV4DialogueSecondRejectionDoesNotInventMissingClosingPhrase(t *testing.T
 	decision, err := ReduceV4Dialogue(input)
 	if err != nil || decision.Status != V4DialogueManualRequired || decision.ManualReason != V4ManualFixedPhraseUnavailable ||
 		len(decision.Actions) != 0 {
-		t.Fatalf("现有配置没有拒绝收场话术，不能拆 rejectWechat 数组猜造: decision=%+v err=%v", decision, err)
+		t.Fatalf("调用方缺少本地收场视图时不得拆 rejectWechat 数组猜造: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4DialogueSecondRejectionUsesApprovedLocalClosingDefault(t *testing.T) {
+	state := activeV4DialogueState()
+	state.RetentionSent = true
+	phrases, err := BuildV4FixedPhraseView(m5ai.JobConfigDocumentPackage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := ReduceV4Dialogue(V4DialogueInput{
+		State: state, Requirement: V4DialogueClassifyAndReply,
+		Turn: FrozenTurnFacts{TurnID: "turn-rejected-local-closing", Messages: []FrozenInboundMessage{
+			{Seq: 5, Kind: FrozenMessageText, Text: "还是不考虑"},
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: phrases,
+	})
+	if err != nil || decision.Status != V4DialogueActionsPlanned ||
+		len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != V4ActionRejectionClosing ||
+		decision.Actions[0].Text != v4LocalRejectionClosingText {
+		t.Fatalf("第二次拒绝没有使用获批本地收场话术: decision=%+v err=%v", decision, err)
 	}
 }
 

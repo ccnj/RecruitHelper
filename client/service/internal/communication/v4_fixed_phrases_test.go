@@ -30,6 +30,7 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 	}
 	want := map[V4FixedPhraseKind]string{
 		V4PhraseRejectionRetention: "挽留一\n挽留二",
+		V4PhraseRejectionClosing:   v4LocalRejectionClosingText,
 		V4PhraseColdWechat:         "冷催二",
 		V4PhraseWechatReceipt:      "收到",
 		V4PhraseInterviewAccepted:  "确认一\n确认二",
@@ -40,7 +41,7 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 			t.Fatalf("场景映射错误 kind=%s phrase=%+v", kind, phrase)
 		}
 	}
-	if len(view.Phrases) != 4 {
+	if len(view.Phrases) != 5 {
 		t.Fatalf("未批准场景不应进入可执行视图: %+v", view.Phrases)
 	}
 }
@@ -103,6 +104,11 @@ func TestBuildV4FixedPhraseViewKeepsMissingDocumentAndScenesLocal(t *testing.T) 
 		if got := view.Phrase(mapping.kind); got.State != V4PhraseMissing || got.SourceScene != mapping.scene {
 			t.Fatalf("缺文档时每个分支应独立标缺: %+v", got)
 		}
+	}
+	if got := view.Phrase(V4PhraseRejectionClosing); got.State != V4PhraseAvailable ||
+		got.SourceScene != v4LocalRejectionClosingScene ||
+		got.Text != v4LocalRejectionClosingText {
+		t.Fatalf("本地拒绝收场默认不应依赖旧后台文档: %+v", got)
 	}
 
 	view, err = BuildV4FixedPhraseView(fixedPhrasePackage(`{"rejectWechat":{"message":"挽留","messages":["挽留"],"actions":[]}}`))
