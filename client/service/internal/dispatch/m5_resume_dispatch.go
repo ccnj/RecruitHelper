@@ -35,7 +35,18 @@ func (d *Dispatcher) DispatchResumeCapture(req ResumeCaptureDispatchRequest) (*R
 		return nil, err
 	}
 	if target == nil || target.Profile.ProfileID != req.ProfileID {
-		return nil, store.ErrM5TrialNotActive
+		target, err = d.st.InboundResumeCaptureTarget(req.ProfileID)
+		if errors.Is(err, store.ErrCandidateProfileNotFound) {
+			return nil, store.ErrM5TrialNotActive
+		}
+		if err != nil {
+			return nil, err
+		}
+		if target == nil ||
+			target.Profile.Platform != req.Platform ||
+			target.Profile.AccountRef != req.AccountRef {
+			return nil, store.ErrM5TrialNotActive
+		}
 	}
 	if target.Profile.ResumeCaptureState == store.ResumeCaptureInFlight {
 		if target.Profile.ResumeCaptureLogicalDispatchID == nil || *target.Profile.ResumeCaptureLogicalDispatchID == "" {
