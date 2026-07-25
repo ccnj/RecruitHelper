@@ -1162,6 +1162,7 @@ func (a *roundActor) completeM5Reply(
 	request := store.CompleteReplyInvocationRequest{Completion: completion, PlannedAt: a.manager.now()}
 	if decision.Action != nil {
 		request.ActionID = stableM5ID("action", turnID, string(decision.Action.Kind))
+		request.Phrases = append([]string(nil), suggestion.Phrases...)
 		request.Text = decision.Action.Text
 		request.Action = suggestion.Action
 		request.MeetingTime = suggestion.MeetingTime

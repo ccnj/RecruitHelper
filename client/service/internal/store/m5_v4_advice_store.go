@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ type communicationV4AdviceDigestInput struct {
 	IntentLabel  m5ai.IntentLabel       `json:"intentLabel,omitempty"`
 	IntentSource DialogueIntentSource   `json:"intentSource,omitempty"`
 	TextHash     string                 `json:"textHash,omitempty"`
+	PhraseHashes []string               `json:"phraseHashes,omitempty"`
 	ReplyAction  m5ai.ReplyAction       `json:"replyAction,omitempty"`
 	MeetingTime  string                 `json:"meetingTime,omitempty"`
 	ManualReason string                 `json:"manualReason,omitempty"`
@@ -39,11 +41,19 @@ func communicationV4AdviceDigest(
 	reply m5ai.ReplySuggestion,
 	manualReason string,
 ) (string, error) {
+	var phraseHashes []string
+	if len(reply.Phrases) > 0 {
+		phraseHashes = make([]string, len(reply.Phrases))
+		for index, phrase := range reply.Phrases {
+			phraseHashes[index] = textcanon.Hash(phrase)
+		}
+	}
 	return communicationV4InputDigest(communicationV4AdviceDigestInput{
 		TurnID: turn.TurnID, InvocationID: invocation.InvocationID,
 		Purpose: invocation.Purpose, Status: invocation.Status, OutputHash: invocation.OutputHash,
 		IntentLabel: label, IntentSource: source, TextHash: textcanon.Hash(reply.Text),
-		ReplyAction: reply.Action, MeetingTime: reply.MeetingTime, ManualReason: manualReason,
+		PhraseHashes: phraseHashes, ReplyAction: reply.Action,
+		MeetingTime: reply.MeetingTime, ManualReason: manualReason,
 	})
 }
 
@@ -236,17 +246,54 @@ func communicationV4AdvicePolicy(
 		return decision, nil, communicationV4ManualUnsupportedAction
 	}
 	plans := append([]communication.V4PlannedAction(nil), decision.Dialogue.Actions...)
-	if !supportedCommunicationV4TextPlan(plans[0]) {
+	actionKeys := make(map[string]struct{}, len(plans))
+	texts := make([]string, 0, len(plans))
+	var textKind communication.V4ActionKind
+	for index, plan := range plans {
+		if _, duplicate := actionKeys[plan.ActionKey]; strings.TrimSpace(plan.ActionKey) == "" || duplicate {
+			return decision, nil, communicationV4ManualMultiVisibleAction
+		}
+		actionKeys[plan.ActionKey] = struct{}{}
+		if supportedCommunicationV4TextPlan(plan) {
+			if len(texts) >= m5ai.ReplyPhraseMaxItems ||
+				(len(texts) > 0 && plan.Kind != textKind) {
+				return decision, nil, communicationV4ManualMultiVisibleAction
+			}
+			if err := m5ai.ValidateSendText(plan.Text); err != nil {
+				return decision, nil, communicationV4ManualUnsupportedAction
+			}
+			if len(texts) == 0 {
+				textKind = plan.Kind
+			}
+			texts = append(texts, plan.Text)
+			continue
+		}
+		if index != len(plans)-1 || len(texts) == 0 ||
+			!supportedCommunicationV4CardPlan(plan) ||
+			!approvedCommunicationV4VisibleCombination(textKind, plan.Kind) {
+			return decision, nil, communicationV4ManualMultiVisibleAction
+		}
+	}
+	if len(texts) == 0 {
 		return decision, nil, communicationV4ManualUnsupportedAction
 	}
-	if len(plans) == 1 {
-		return decision, plans, ""
-	}
-	if len(plans) != 2 || !supportedCommunicationV4CardPlan(plans[1]) ||
-		!approvedCommunicationV4VisibleCombination(plans[0].Kind, plans[1].Kind) {
-		return decision, nil, communicationV4ManualMultiVisibleAction
+	if err := m5ai.ValidateSendText(strings.Join(texts, "\n")); err != nil {
+		return decision, nil, communicationV4ManualUnsupportedAction
 	}
 	return decision, plans, ""
+}
+
+func communicationV4ReplyPhrases(
+	plans []communication.V4PlannedAction,
+) []string {
+	phrases := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		if !supportedCommunicationV4TextKind(plan.Kind) {
+			break
+		}
+		phrases = append(phrases, plan.Text)
+	}
+	return phrases
 }
 
 func supportedCommunicationV4CardPlan(plan communication.V4PlannedAction) bool {
@@ -342,7 +389,9 @@ func persistCommunicationV4AdviceTx(
 			return nil, ErrCommunicationV4Conflict
 		}
 		var action CommunicationAction
-		err := tx.First(&action, "turn_id = ?", turn.TurnID).Error
+		err := tx.Where("turn_id = ?", turn.TurnID).
+			Order("planned_at, created_at, action_id").
+			First(&action).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, tx.First(turn, "turn_id = ?", turn.TurnID).Error
 		}
@@ -427,6 +476,13 @@ func persistCommunicationV4AdviceTx(
 	updates := map[string]any{
 		"status": status, "intent_label": label, "intent_source": source,
 		"classified_at": classifiedAt, "failure_reason": manualReason, "updated_at": at,
+	}
+	if phrases := communicationV4ReplyPhrases(plans); len(phrases) > 0 {
+		encoded, err := json.Marshal(phrases)
+		if err != nil {
+			return nil, err
+		}
+		updates["reply_phrases"] = string(encoded)
 	}
 	updated := tx.Model(&DialogueTurn{}).
 		Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
@@ -552,9 +608,11 @@ func completeCommunicationV4ReplyTx(
 	manualReason string,
 	at time.Time,
 ) (*CommunicationAction, error) {
-	if manualReason == "" && invocation.Status == AIInvocationOK &&
-		(strings.TrimSpace(reply.Text) == "" || contentHash != textcanon.Hash(reply.Text)) {
-		return nil, ErrCommunicationActionInvalid
+	if manualReason == "" && invocation.Status == AIInvocationOK {
+		_, text, err := m5ai.CanonicalReplyPhrases(reply)
+		if err != nil || contentHash != textcanon.Hash(text) {
+			return nil, ErrCommunicationActionInvalid
+		}
 	}
 	digest, err := communicationV4AdviceDigest(
 		*turn, invocation, turn.IntentLabel, turn.IntentSource, reply, manualReason,
@@ -572,7 +630,9 @@ func completeCommunicationV4ReplyTx(
 			return nil, ErrCommunicationV4Conflict
 		}
 		var action CommunicationAction
-		err := tx.First(&action, "turn_id = ?", turn.TurnID).Error
+		err := tx.Where("turn_id = ?", turn.TurnID).
+			Order("planned_at, created_at, action_id").
+			First(&action).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, tx.First(turn, "turn_id = ?", turn.TurnID).Error
 		}

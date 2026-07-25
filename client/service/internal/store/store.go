@@ -55,6 +55,12 @@ func Open(dataDir string) (*Store, error) {
 	if err := prepareCmdLineageMigration(db); err != nil {
 		return nil, fmt.Errorf("预迁移命令逻辑派发: %w", err)
 	}
+	// 多气泡把同一 turn 的多个 replyText 拆成独立业务动作。旧索引把
+	// (turn_id, kind) 错当成动作身份，必须在 AutoMigrate 前精确移除；
+	// action_id 主键继续承担幂等身份，既有动作行原样保留。
+	if err := prepareCommunicationActionMultiBubbleMigration(db); err != nil {
+		return nil, fmt.Errorf("预迁移多气泡沟通动作: %w", err)
+	}
 	// 只有旧库首次引入 head 表时允许从历史意图做一次
 	// 确定性迁移。表已存在但某会话 head 丢失属于损坏，
 	// 重启不得重算并掩盖，后续读/写必须 fail-closed。
@@ -204,6 +210,15 @@ func prepareCmdLineageMigration(db *gorm.DB) error {
 		}
 	}
 	return db.Exec("UPDATE cmd_records SET logical_dispatch_id = msg_id WHERE logical_dispatch_id IS NULL OR logical_dispatch_id = ''").Error
+}
+
+func prepareCommunicationActionMultiBubbleMigration(db *gorm.DB) error {
+	const retiredIndex = "ux_communication_action_turn_kind"
+	if !db.Migrator().HasTable(&CommunicationAction{}) ||
+		!db.Migrator().HasIndex(&CommunicationAction{}, retiredIndex) {
+		return nil
+	}
+	return db.Migrator().DropIndex(&CommunicationAction{}, retiredIndex)
 }
 
 func (s *Store) Close() error {

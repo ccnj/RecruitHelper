@@ -534,7 +534,7 @@ func bindLegacyCommunicationV4DialogueReceiptTx(
 		return err
 	}
 	if action.Kind != CommunicationActionReplyText ||
-		!communicationActionMatchesV4Plan(action, plan) ||
+		!communicationActionMatchesV4Plan(action, plan, action.Text, nil) ||
 		!validLegacyCommunicationV4DialogueReceiptStatus(action.Status) {
 		return ErrCommunicationV4EventActionConflict
 	}

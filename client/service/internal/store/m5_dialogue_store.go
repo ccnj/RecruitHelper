@@ -976,6 +976,7 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 type CompleteReplyInvocationRequest struct {
 	Completion   AIInvocationCompletion
 	ActionID     string
+	Phrases      []string
 	Text         string
 	Action       m5ai.ReplyAction
 	MeetingTime  string
@@ -1021,6 +1022,7 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 				&turn,
 				invocation,
 				m5ai.ReplySuggestion{
+					Phrases:     append([]string(nil), req.Phrases...),
 					Text:        req.Text,
 					Action:      req.Action,
 					MeetingTime: req.MeetingTime,
@@ -1579,7 +1581,9 @@ func (s *Store) AIInvocationsForTurn(turnID string) ([]AIInvocation, error) {
 
 func (s *Store) CommunicationActionByTurn(turnID string) (*CommunicationAction, error) {
 	var action CommunicationAction
-	err := s.db.First(&action, "turn_id = ? AND kind = ?", turnID, CommunicationActionReplyText).Error
+	err := s.db.Where("turn_id = ? AND kind = ?", turnID, CommunicationActionReplyText).
+		Order("planned_at, created_at, action_id").
+		First(&action).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -1609,7 +1613,9 @@ func (s *Store) CommunicationActionsByTurn(turnID string) ([]CommunicationAction
 
 func (s *Store) PlannedCommunicationActionByTurn(turnID string) (*CommunicationAction, error) {
 	var action CommunicationAction
-	err := s.db.First(&action, "turn_id = ? AND status = ?", turnID, CommunicationActionPlanned).Error
+	err := s.db.Where("turn_id = ? AND status = ?", turnID, CommunicationActionPlanned).
+		Order("planned_at, created_at, action_id").
+		First(&action).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -1631,34 +1637,54 @@ func communicationV4PlannedActionTx(
 	if head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
 		head.Outcome.NextAdvice != communication.V4AdviceNone ||
 		head.Outcome.ManualReason != "" ||
-		len(head.Outcome.PlannedActions) < 1 ||
-		len(head.Outcome.PlannedActions) > 2 {
+		!validPersistedCommunicationV4Plans(head.Outcome.PlannedActions) {
 		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
 	}
-	var plan *communication.V4PlannedAction
+	planIndex := -1
 	for index := range head.Outcome.PlannedActions {
 		if head.Outcome.PlannedActions[index].ActionKey == action.ActionID {
-			copy := head.Outcome.PlannedActions[index]
-			plan = &copy
+			planIndex = index
 			break
 		}
 	}
-	if plan == nil || !communicationActionMatchesV4Plan(action, *plan) {
+	if planIndex < 0 {
 		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
 	}
-	return *plan, true, nil
+	plan := head.Outcome.PlannedActions[planIndex]
+	expectedParent := communicationV4ExpectedParentActionID(
+		head.Outcome.PlannedActions,
+		planIndex,
+	)
+	expectedText, ready := communicationV4PlanText(
+		turn,
+		head.Outcome.PlannedActions,
+		planIndex,
+		action.Text,
+	)
+	if !ready || !communicationActionMatchesV4Plan(
+		action,
+		plan,
+		expectedText,
+		expectedParent,
+	) {
+		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
+	}
+	return plan, true, nil
 }
 
 func communicationActionMatchesV4Plan(
 	action CommunicationAction,
 	plan communication.V4PlannedAction,
+	expectedText string,
+	expectedParent *string,
 ) bool {
 	switch action.Kind {
 	case CommunicationActionReplyText:
 		return supportedCommunicationV4TextKind(plan.Kind) &&
-			strings.TrimSpace(action.Text) != "" &&
+			strings.TrimSpace(expectedText) != "" &&
+			action.Text == expectedText &&
 			action.ContentHash == textcanon.Hash(action.Text) &&
-			action.DependsOnActionID == nil &&
+			sameOptionalString(action.DependsOnActionID, expectedParent) &&
 			action.InterviewStartsAtMs == nil &&
 			action.InterviewEndsAtMs == nil &&
 			action.InterviewMethod == nil
@@ -1666,14 +1692,18 @@ func communicationActionMatchesV4Plan(
 		return plan.Kind == communication.V4ActionInviteWechat &&
 			action.Text == "" &&
 			action.ContentHash == communicationWechatInviteContentHash() &&
-			action.DependsOnActionID != nil &&
+			expectedText == "" &&
+			expectedParent != nil &&
+			sameOptionalString(action.DependsOnActionID, expectedParent) &&
 			action.InterviewStartsAtMs == nil &&
 			action.InterviewEndsAtMs == nil &&
 			action.InterviewMethod == nil
 	case CommunicationActionInterviewInvite:
 		return plan.Kind == communication.V4ActionInterviewInvite &&
 			action.Text == "" &&
-			action.DependsOnActionID != nil &&
+			expectedText == "" &&
+			expectedParent != nil &&
+			sameOptionalString(action.DependsOnActionID, expectedParent) &&
 			action.InterviewStartsAtMs != nil &&
 			action.InterviewEndsAtMs != nil &&
 			action.InterviewMethod != nil &&
@@ -1697,6 +1727,95 @@ func communicationActionMatchesV4Plan(
 	}
 }
 
+func validPersistedCommunicationV4Plans(
+	plans []communication.V4PlannedAction,
+) bool {
+	if len(plans) < 1 || len(plans) > m5ai.ReplyPhraseMaxItems+1 {
+		return false
+	}
+	keys := make(map[string]struct{}, len(plans))
+	textCount := 0
+	var textKind communication.V4ActionKind
+	for index, plan := range plans {
+		if strings.TrimSpace(plan.ActionKey) == "" || plan.Text != "" {
+			return false
+		}
+		if _, duplicate := keys[plan.ActionKey]; duplicate {
+			return false
+		}
+		keys[plan.ActionKey] = struct{}{}
+		if supportedCommunicationV4TextKind(plan.Kind) &&
+			plan.InterviewStartsAtMs == nil &&
+			plan.InterviewEndsAtMs == nil &&
+			plan.InterviewMethod == nil {
+			if textCount >= m5ai.ReplyPhraseMaxItems ||
+				(textCount > 0 && plan.Kind != textKind) {
+				return false
+			}
+			if textCount == 0 {
+				textKind = plan.Kind
+			}
+			textCount++
+			continue
+		}
+		if index != len(plans)-1 || textCount == 0 ||
+			!supportedCommunicationV4CardPlan(plan) ||
+			!approvedCommunicationV4VisibleCombination(textKind, plan.Kind) {
+			return false
+		}
+	}
+	return textCount > 0
+}
+
+func communicationV4ExpectedParentActionID(
+	plans []communication.V4PlannedAction,
+	index int,
+) *string {
+	if index <= 0 || index >= len(plans) {
+		return nil
+	}
+	parent := plans[index-1].ActionKey
+	return &parent
+}
+
+func communicationV4PlanText(
+	turn DialogueTurn,
+	plans []communication.V4PlannedAction,
+	index int,
+	legacyText string,
+) (string, bool) {
+	if index < 0 || index >= len(plans) {
+		return "", false
+	}
+	textOrdinal := -1
+	textCount := 0
+	for planIndex, plan := range plans {
+		if !supportedCommunicationV4TextKind(plan.Kind) {
+			break
+		}
+		if planIndex == index {
+			textOrdinal = textCount
+		}
+		textCount++
+	}
+	if textOrdinal < 0 {
+		return "", true
+	}
+	if len(turn.ReplyPhrases) == textCount {
+		text := turn.ReplyPhrases[textOrdinal]
+		return text, m5ai.ValidateSendText(text) == nil
+	}
+	// Pre-migration V4 turns have no ReplyPhrases and could contain only one
+	// text action. Its already-materialized action remains the immutable body
+	// source; no future text can be invented from a redacted projection.
+	if len(turn.ReplyPhrases) == 0 && textCount == 1 &&
+		strings.TrimSpace(legacyText) != "" &&
+		m5ai.ValidateSendText(legacyText) == nil {
+		return legacyText, true
+	}
+	return "", false
+}
+
 func nextCommunicationV4PlanTx(
 	tx *gorm.DB,
 	turn DialogueTurn,
@@ -1709,7 +1828,8 @@ func nextCommunicationV4PlanTx(
 	if !found ||
 		head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
 		head.Outcome.NextAdvice != communication.V4AdviceNone ||
-		head.Outcome.ManualReason != "" {
+		head.Outcome.ManualReason != "" ||
+		!validPersistedCommunicationV4Plans(head.Outcome.PlannedActions) {
 		return nil, ErrCommunicationActionConflict
 	}
 	for index := range head.Outcome.PlannedActions {
@@ -1718,9 +1838,6 @@ func nextCommunicationV4PlanTx(
 		}
 		if index+1 == len(head.Outcome.PlannedActions) {
 			return nil, nil
-		}
-		if index != 0 || len(head.Outcome.PlannedActions) != 2 {
-			return nil, ErrCommunicationActionConflict
 		}
 		next := head.Outcome.PlannedActions[index+1]
 		return &next, nil
@@ -1742,19 +1859,39 @@ func materializeDependentCommunicationActionTx(
 	if err := tx.First(&parent, "action_id = ?", parentBeforeUpdate.ActionID).Error; err != nil {
 		return err
 	}
-	if parent.TurnID != turn.TurnID ||
-		parent.Status != CommunicationActionSent ||
-		!supportedCommunicationV4CardPlan(plan) ||
-		!approvedCommunicationV4VisibleCombination(
-			mustCommunicationV4PlanKindTx(tx, turn, parent.ActionID),
-			plan.Kind,
-		) {
+	head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+	if err != nil {
+		return err
+	}
+	if !found || !validPersistedCommunicationV4Plans(head.Outcome.PlannedActions) {
+		return ErrCommunicationActionConflict
+	}
+	planIndex := -1
+	for index := range head.Outcome.PlannedActions {
+		if head.Outcome.PlannedActions[index].ActionKey == plan.ActionKey {
+			planIndex = index
+			break
+		}
+	}
+	if planIndex <= 0 ||
+		!sameCommunicationV4Plan(head.Outcome.PlannedActions[planIndex], plan) ||
+		head.Outcome.PlannedActions[planIndex-1].ActionKey != parent.ActionID ||
+		parent.TurnID != turn.TurnID ||
+		parent.Status != CommunicationActionSent {
+		return ErrCommunicationActionConflict
+	}
+	text, textReady := communicationV4PlanText(
+		turn,
+		head.Outcome.PlannedActions,
+		planIndex,
+		"",
+	)
+	if !textReady {
 		return ErrCommunicationActionConflict
 	}
 	action := CommunicationAction{
 		ActionID:          plan.ActionKey,
 		TurnID:            turn.TurnID,
-		Text:              "",
 		Status:            CommunicationActionPlanned,
 		DependsOnActionID: &parent.ActionID,
 		PlannedAt:         at,
@@ -1762,6 +1899,16 @@ func materializeDependentCommunicationActionTx(
 		UpdatedAt:         at,
 	}
 	switch plan.Kind {
+	case communication.V4ActionReplyText,
+		communication.V4ActionServiceReply,
+		communication.V4ActionRejectionRetention,
+		communication.V4ActionRejectionClosing,
+		communication.V4ActionWechatReceipt,
+		communication.V4ActionInterviewAcceptedReceipt,
+		communication.V4ActionInterviewRejectionReply:
+		action.Kind = CommunicationActionReplyText
+		action.Text = text
+		action.ContentHash = textcanon.Hash(text)
 	case communication.V4ActionInviteWechat:
 		action.Kind = CommunicationActionInviteWechat
 		action.ContentHash = communicationWechatInviteContentHash()
@@ -1779,7 +1926,7 @@ func materializeDependentCommunicationActionTx(
 		return ErrCommunicationActionConflict
 	}
 	var existing CommunicationAction
-	err := tx.First(&existing, "action_id = ?", action.ActionID).Error
+	err = tx.First(&existing, "action_id = ?", action.ActionID).Error
 	if err == nil {
 		if !sameMaterializedCommunicationAction(existing, action) {
 			return ErrCommunicationActionConflict
@@ -1790,6 +1937,31 @@ func materializeDependentCommunicationActionTx(
 		return err
 	}
 	return tx.Create(&action).Error
+}
+
+func sameCommunicationV4Plan(
+	left communication.V4PlannedAction,
+	right communication.V4PlannedAction,
+) bool {
+	return left.ActionKey == right.ActionKey &&
+		left.Kind == right.Kind &&
+		left.Text == right.Text &&
+		left.CardMessageSeq == right.CardMessageSeq &&
+		left.AnchorMessageSeq == right.AnchorMessageSeq &&
+		sameOptionalInt64(left.InterviewStartsAtMs, right.InterviewStartsAtMs) &&
+		sameOptionalInt64(left.InterviewEndsAtMs, right.InterviewEndsAtMs) &&
+		sameOptionalString(left.InterviewMethod, right.InterviewMethod) &&
+		left.Round == right.Round &&
+		left.Stage == right.Stage &&
+		left.EndReason == right.EndReason &&
+		sameOptionalTime(left.DueAt, right.DueAt)
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
 }
 
 func communicationWechatInviteContentHash() string {
@@ -1809,23 +1981,6 @@ func communicationInterviewInviteContentHash(
 			"\x1f" +
 			method,
 	)
-}
-
-func mustCommunicationV4PlanKindTx(
-	tx *gorm.DB,
-	turn DialogueTurn,
-	actionKey string,
-) communication.V4ActionKind {
-	head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
-	if err != nil || !found {
-		return ""
-	}
-	for _, plan := range head.Outcome.PlannedActions {
-		if plan.ActionKey == actionKey {
-			return plan.Kind
-		}
-	}
-	return ""
 }
 
 func sameMaterializedCommunicationAction(left, right CommunicationAction) bool {

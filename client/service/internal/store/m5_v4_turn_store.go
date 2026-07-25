@@ -213,6 +213,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err != nil {
 			return err
 		}
+		turn.ReplyPhrases = communicationV4ReplyPhrases(plans)
 		manualReason := string(decision.ManualReason)
 		if policyManualReason != "" {
 			manualReason = policyManualReason

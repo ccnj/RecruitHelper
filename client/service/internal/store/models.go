@@ -722,8 +722,9 @@ const (
 	DialogueIntentBusinessEvent    DialogueIntentSource = "businessEvent"
 )
 
-// DialogueTurn 是一次不可变输入边界及其确定性处理状态。正文仍来自消息账本、
-// 简历快照和职位 revision；此表只冻结稳定引用、边界和分类结果。
+// DialogueTurn 是一次不可变输入边界及其确定性处理状态。输入正文仍来自消息账本、
+// 简历快照和职位 revision；ReplyPhrases 是经确定性代码批准后、供后续逐气泡物化
+// 使用的业务事实，不进入无正文诊断投影。
 type DialogueTurn struct {
 	TurnID              string             `gorm:"primaryKey"`
 	ProfileID           string             `gorm:"not null;index;uniqueIndex:ux_dialogue_turn_input,priority:1"`
@@ -740,6 +741,7 @@ type DialogueTurn struct {
 	IntentLabel         m5ai.IntentLabel
 	IntentSource        DialogueIntentSource
 	ClassifiedAt        *time.Time
+	ReplyPhrases        []string `gorm:"serializer:json"`
 	FailureReason       string
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
@@ -768,8 +770,8 @@ const (
 // 本表本身不派发；后续批次只能从 ActionID 稳定派生一个 effect intent。
 type CommunicationAction struct {
 	ActionID            string                  `gorm:"primaryKey"`
-	TurnID              string                  `gorm:"not null;index;uniqueIndex:ux_communication_action_turn_kind,priority:1"`
-	Kind                CommunicationActionKind `gorm:"not null;uniqueIndex:ux_communication_action_turn_kind,priority:2"`
+	TurnID              string                  `gorm:"not null;index"`
+	Kind                CommunicationActionKind `gorm:"not null;index"`
 	Text                string                  `gorm:"not null"`
 	ContentHash         string                  `gorm:"not null"`
 	DependsOnActionID   *string                 `gorm:"index"`
