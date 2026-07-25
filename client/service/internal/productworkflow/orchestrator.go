@@ -73,7 +73,8 @@ func (m *Manager) AdvanceOnce(
 	}
 	if run.Mode == workflow.ModeReplyOnly {
 		// Reply-only is intentionally isolated from every M6 stage.
-		return run, nil
+		synced, _, syncErr := m.syncAccountPause(run)
+		return synced, syncErr
 	}
 	if run.Mode == workflow.ModeFull &&
 		run.Status == workflow.StatusRunning &&
@@ -85,6 +86,11 @@ func (m *Manager) AdvanceOnce(
 		strings.TrimSpace(*run.SourcingBatchID) == "" {
 		return run, ErrWorkflowPipelineInvalid
 	}
+	synced, paused, syncErr := m.syncAccountPause(run)
+	if syncErr != nil || paused {
+		return synced, syncErr
+	}
+	run = synced
 	switch run.Status {
 	case workflow.StatusPaused, workflow.StatusWaitingDailyWindow:
 		return run, nil
@@ -258,6 +264,79 @@ func (m *Manager) AdvanceOnce(
 	default:
 		return run, ErrWorkflowPipelineInvalid
 	}
+}
+
+// syncAccountPause keeps the ordinary product projection aligned with the
+// account actor's durable stop state. A sourcing batch's own terminal state
+// remains authoritative: completed/blocked/stopped must first pass through the
+// existing sourcing switch so it can advance or terminalize the workflow.
+func (m *Manager) syncAccountPause(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return fallback, false, err
+	}
+	if run == nil || run.RunID != fallback.RunID {
+		return currentRunOr(fallback, run, nil), false, store.ErrProductWorkflowConflict
+	}
+	if run.Status != workflow.StatusRunning &&
+		run.Status != workflow.StatusAwaitingConfirmation {
+		return run, false, nil
+	}
+	if run.Mode == workflow.ModeFull &&
+		run.Stage == store.ProductWorkflowStageSourcing {
+		if run.SourcingBatchID == nil ||
+			strings.TrimSpace(*run.SourcingBatchID) == "" {
+			return run, false, nil
+		}
+		batch, loadErr := m.store.SourcingBatchByID(*run.SourcingBatchID)
+		if loadErr != nil {
+			return run, false, loadErr
+		}
+		if batch == nil {
+			return run, false, store.ErrSourcingBatchNotFound
+		}
+		if batch.Status != store.SourcingBatchPreparing &&
+			batch.Status != store.SourcingBatchCollecting {
+			return run, false, nil
+		}
+	}
+
+	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	account, err := m.store.AccountByKey(key)
+	if err != nil {
+		return run, false, err
+	}
+	if account == nil {
+		return run, false, store.ErrAccountNotFound
+	}
+	if account.StoppedAt == nil && strings.TrimSpace(account.PausedReason) == "" {
+		return run, false, nil
+	}
+
+	decision, err := workflow.Pause(stateOf(run))
+	if err != nil {
+		return run, false, err
+	}
+	if !decision.Changed {
+		return run, false, nil
+	}
+	paused, err := m.store.TransitionProductWorkflowRun(
+		store.TransitionProductWorkflowRunRequest{
+			RunID: run.RunID,
+			From:  stateOf(run),
+			To:    decision.State,
+			At:    m.clock.Now(),
+		},
+	)
+	if err != nil {
+		return run, false, err
+	}
+	return paused, true, nil
 }
 
 func (m *Manager) recoverInterruptedFullStart(

@@ -210,6 +210,174 @@ func TestBlockedSourcingFailsRunAndExplicitRestartAdoptsSameBatch(t *testing.T) 
 	}
 }
 
+func TestAdvanceOnceProjectsAccountPauseAndResumesSameFullRunAndBatch(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor: &fixtureActor{store: db, clock: clock},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	batchID := *started.SourcingBatchID
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = "handManualReview"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	paused, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		paused == nil ||
+		paused.RunID != started.RunID ||
+		paused.Status != workflow.StatusPaused ||
+		paused.ResumeStatus != workflow.StatusRunning ||
+		paused.Stage != store.ProductWorkflowStageSourcing ||
+		paused.SourcingBatchID == nil ||
+		*paused.SourcingBatchID != batchID {
+		t.Fatalf("project account pause = %+v, %v", paused, err)
+	}
+
+	resumed, err := manager.Resume()
+	if err != nil ||
+		resumed == nil ||
+		resumed.RunID != started.RunID ||
+		resumed.Status != workflow.StatusRunning ||
+		resumed.Stage != store.ProductWorkflowStageSourcing ||
+		resumed.SourcingBatchID == nil ||
+		*resumed.SourcingBatchID != batchID {
+		t.Fatalf("resume same run and batch = %+v, %v", resumed, err)
+	}
+}
+
+func TestAdvanceOnceProjectsReplyOnlyAccountPause(t *testing.T) {
+	db, key, _ := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor: &fixtureActor{store: db, clock: clock},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartReplyOnly(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = "handManualReview"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	paused, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		paused == nil ||
+		paused.RunID != started.RunID ||
+		paused.Mode != workflow.ModeReplyOnly ||
+		paused.Status != workflow.StatusPaused ||
+		paused.ResumeStatus != workflow.StatusRunning ||
+		paused.Stage != store.ProductWorkflowStageCommunication ||
+		paused.SourcingBatchID != nil {
+		t.Fatalf("project reply-only pause = %+v, %v", paused, err)
+	}
+}
+
+func TestAdvanceOnceProjectsAwaitingConfirmationPauseAndResumeStatus(t *testing.T) {
+	manager, actor, db, started, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+	awaiting, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		awaiting == nil ||
+		awaiting.Status != workflow.StatusAwaitingConfirmation {
+		t.Fatalf("enter awaiting confirmation = %+v, %v", awaiting, err)
+	}
+	key := store.AccountKey{Platform: awaiting.Platform, AccountRef: awaiting.AccountRef}
+	now := manager.clock.Now()
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &now
+		account.PausedReason = "handManualReview"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	paused, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		paused == nil ||
+		paused.RunID != started.RunID ||
+		paused.Status != workflow.StatusPaused ||
+		paused.ResumeStatus != workflow.StatusAwaitingConfirmation ||
+		paused.Stage != store.ProductWorkflowStageAwaitingConfirmation ||
+		paused.SourcingBatchID == nil ||
+		*paused.SourcingBatchID != batchID {
+		t.Fatalf("project awaiting pause = %+v, %v", paused, err)
+	}
+
+	resumed, err := manager.Resume()
+	if err != nil ||
+		resumed == nil ||
+		resumed.RunID != started.RunID ||
+		resumed.Status != workflow.StatusAwaitingConfirmation ||
+		resumed.ResumeStatus != "" ||
+		resumed.Stage != store.ProductWorkflowStageAwaitingConfirmation ||
+		resumed.SourcingBatchID == nil ||
+		*resumed.SourcingBatchID != batchID {
+		t.Fatalf("resume awaiting confirmation = %+v, %v", resumed, err)
+	}
+}
+
+func TestAdvanceOnceKeepsStoppedSourcingTerminalizationAheadOfAccountPause(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor: &fixtureActor{store: db, clock: clock},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	if _, err := db.StopSourcingBatch(store.StopSourcingBatchRequest{
+		BatchID:   *started.SourcingBatchID,
+		Reason:    "fixtureStopped",
+		StoppedAt: clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = "handManualReview"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	failed, err := manager.AdvanceOnce(context.Background())
+	if !errors.Is(err, ErrWorkflowPipelineInvalid) ||
+		failed == nil ||
+		failed.RunID != started.RunID ||
+		failed.Status != workflow.StatusFailed ||
+		failed.Stage != store.ProductWorkflowStageFailed {
+		t.Fatalf("stopped sourcing terminalization = %+v, %v", failed, err)
+	}
+}
+
 func TestInterruptedFullStartRecoversWithoutLeavingActiveSlotLocked(t *testing.T) {
 	t.Run("attach batch created before interruption", func(t *testing.T) {
 		db, key, revision := productWorkflowFixture(t)
