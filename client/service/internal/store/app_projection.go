@@ -514,23 +514,18 @@ func appFunnelTx(
 			out.SuspectCount++
 		}
 	}
-	if err := tx.Table("sourcing_greeting_invocations AS greeting").
-		Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = greeting.run_id").
-		Joins("JOIN candidate_profiles AS profile ON profile.profile_id = greeting.profile_id").
-		Where("greeting.batch_id = ? AND run.platform = ? AND run.account_ref = ? "+
-			"AND profile.platform = ? AND profile.account_ref = ? "+
-			"AND greeting.status = ? AND greeting.finished_at IS NOT NULL "+
-			"AND greeting.effect_intent_id IS NULL AND profile.main_status = ? AND profile.end_reason IS NULL",
-			batch.BatchID,
-			platform,
-			accountRef,
-			platform,
-			accountRef,
-			AIInvocationOK,
-			CandidateProfileSelected,
-		).
-		Count(&out.PendingConfirm).Error; err != nil {
+	confirmationCandidates, err := appConfirmationCandidatesTx(tx, batch)
+	if err != nil {
 		return AppFunnelProjection{}, err
+	}
+	var settledWithoutSend int64
+	for i := range confirmationCandidates {
+		switch confirmationCandidates[i].Status {
+		case "ready":
+			out.PendingConfirm++
+		case "abandoned", "unavailable":
+			settledWithoutSend++
+		}
 	}
 	switch {
 	case batch.Status == SourcingBatchBlocked:
@@ -554,7 +549,7 @@ func appFunnelTx(
 		out.Stage = "generatingGreetings"
 	case out.PendingConfirm > 0:
 		out.Stage = "awaitingConfirmation"
-	case out.SentCount+out.FailedCount+out.SuspectCount >= out.SelectedCount:
+	case out.SentCount+out.FailedCount+out.SuspectCount+settledWithoutSend >= out.SelectedCount:
 		out.Stage = "completed"
 	default:
 		out.Stage = "sendingGreetings"

@@ -112,6 +112,29 @@ func TestAppConfirmationProjectsOnlyCurrentExplicitBatch(t *testing.T) {
 			t.Fatalf("产品确认投影泄漏内部引用 %q: %s", forbidden, encoded)
 		}
 	}
+
+	invalidatedAt := now
+	if err := s.db.Model(&Account{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Update("sourcing_feed_invalidated_at", invalidatedAt).Error; err != nil {
+		t.Fatal(err)
+	}
+	invalidated, err := s.AppConfirmation(batchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalidated.SelectableCount != 0 ||
+		len(invalidated.Candidates) != 1 ||
+		invalidated.Candidates[0].Status != "abandoned" {
+		t.Fatalf("unexpected invalidated confirmation: %+v", invalidated)
+	}
+	funnel, err := appFunnelTx(s.db, batchID, platform, accountRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if funnel.PendingConfirm != 0 || funnel.Stage != "completed" {
+		t.Fatalf("invalidated funnel did not settle: %+v", funnel)
+	}
 }
 
 func TestAppCandidateListAndDetailUseProfileProjection(t *testing.T) {
