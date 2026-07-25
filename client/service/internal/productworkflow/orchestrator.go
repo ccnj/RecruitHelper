@@ -202,8 +202,28 @@ func (m *Manager) AdvanceOnce(
 		return m.enterAwaitingConfirmation(run)
 
 	case store.ProductWorkflowStageAwaitingConfirmation:
-		// This branch is intentionally inert. Only ConfirmAll may move it to
-		// greetingSending, regardless of timers, restarts or repeated ticks.
+		confirmation, projectionErr := m.confirmationProjection(batchID)
+		if projectionErr != nil {
+			return run, projectionErr
+		}
+		if confirmationReadyWithoutSendableCandidates(confirmation, batchID) {
+			// 推荐流换代可能在人工闸建立之后令全部未绑定发送意图的
+			// 候选人变为 abandoned。此时已经不存在可由真人确认的
+			// 外部动作，继续占住人工闸只会让“再采一批”永久不可用。
+			// 业务事实与 abandoned 原因保留不动，仅关闭空人工闸。
+			from := stateOf(run)
+			to := workflow.State{Mode: run.Mode, Status: workflow.StatusRunning}
+			return m.store.TransitionProductWorkflowRun(
+				store.TransitionProductWorkflowRunRequest{
+					RunID: run.RunID,
+					From:  from,
+					To:    to,
+					At:    m.clock.Now(),
+					Stage: store.ProductWorkflowStageCommunication,
+				},
+			)
+		}
+		// 仍有可发送候选人时，只有 ConfirmAll 可以授权进入发送阶段。
 		return run, nil
 
 	case store.ProductWorkflowStageGreetingSending:

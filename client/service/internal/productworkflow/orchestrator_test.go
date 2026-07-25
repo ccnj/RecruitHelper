@@ -108,6 +108,56 @@ func TestGreetingGenerationWithNoSendableCandidateSkipsEmptyConfirmation(t *test
 	}
 }
 
+func TestAwaitingConfirmationClosesWhenFeedChangeLeavesNoSendableCandidate(t *testing.T) {
+	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+
+	awaiting, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		awaiting.RunID != run.RunID ||
+		awaiting.Status != workflow.StatusAwaitingConfirmation ||
+		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation {
+		t.Fatalf("enter awaiting confirmation = %+v, %v", awaiting, err)
+	}
+	manager.confirmationProjection = func(requested string) (*store.AppConfirmationProjection, error) {
+		if requested != batchID {
+			return nil, store.ErrAppProjectionInvalid
+		}
+		return &store.AppConfirmationProjection{
+			Available: true,
+			Ready:     true,
+			BatchID:   batchID,
+			Candidates: []store.AppConfirmationCandidate{
+				{ProfileID: "profile-a", Status: "abandoned"},
+				{ProfileID: "profile-b", Status: "abandoned"},
+				{ProfileID: "profile-c", Status: "generationFailed"},
+			},
+			GenerationFailed: 1,
+		}, nil
+	}
+
+	communication, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		communication.RunID != run.RunID ||
+		communication.Status != workflow.StatusRunning ||
+		communication.Stage != store.ProductWorkflowStageCommunication ||
+		actor.sendCalls != 0 {
+		t.Fatalf(
+			"close empty confirmation = %+v send=%d err=%v",
+			communication,
+			actor.sendCalls,
+			err,
+		)
+	}
+	persisted, err := db.ActiveProductWorkflowRun()
+	if err != nil ||
+		persisted == nil ||
+		persisted.Status != workflow.StatusRunning ||
+		persisted.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("persisted communication = %+v, %v", persisted, err)
+	}
+}
+
 func TestBlockedSourcingFailsRunAndExplicitRestartAdoptsSameBatch(t *testing.T) {
 	db, key, revision := productWorkflowFixture(t)
 	location := time.FixedZone("CST", 8*60*60)
