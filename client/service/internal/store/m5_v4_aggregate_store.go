@@ -741,22 +741,37 @@ func supersedeCommunicationV4PreEffectTurnForArchiveTx(
 			Find(&actions).Error; err != nil {
 			return err
 		}
-		if (turn.Status == DialogueTurnAdviceReady) != (len(actions) == 1) ||
-			len(actions) > 1 {
+		var tail *CommunicationAction
+		switch {
+		case turn.Status != DialogueTurnAdviceReady && len(actions) == 0:
+		case turn.Status == DialogueTurnAdviceReady && len(actions) == 1:
+			tail = &actions[0]
+		case turn.Status == DialogueTurnAdviceReady && len(actions) > 1:
+			validatedTail, err := communicationV4ArchiveMultiBubbleTailTx(
+				tx,
+				turn,
+				actions,
+			)
+			if err != nil {
+				return err
+			}
+			tail = validatedTail
+		default:
 			return ErrCommunicationV4Corrupt
 		}
-		for actionIndex := range actions {
-			action := actions[actionIndex]
-			if action.Status != CommunicationActionPlanned ||
-				action.EffectIntentID != nil ||
-				action.EffectStartedAt != nil ||
-				action.SentAt != nil {
+		if tail != nil {
+			if tail.Status != CommunicationActionPlanned ||
+				tail.FailureReason != "" ||
+				tail.EffectIntentID != nil ||
+				tail.EffectStartedAt != nil ||
+				tail.SentAt != nil {
 				return ErrCommunicationV4Corrupt
 			}
 			updated := tx.Model(&CommunicationAction{}).
 				Where(
-					"action_id = ? AND status = ? AND effect_intent_id IS NULL",
-					action.ActionID,
+					"action_id = ? AND status = ? AND effect_intent_id IS NULL "+
+						"AND effect_started_at IS NULL AND sent_at IS NULL",
+					tail.ActionID,
 					CommunicationActionPlanned,
 				).
 				Updates(map[string]any{
@@ -784,6 +799,196 @@ func supersedeCommunicationV4PreEffectTurnForArchiveTx(
 		if updated.RowsAffected != 1 {
 			return ErrCommunicationV4Conflict
 		}
+	}
+	return nil
+}
+
+// communicationV4ArchiveMultiBubbleTailTx recognizes the only post-effect
+// dialogue shape that a seven-day fallback may safely close: a contiguous
+// prefix already backed by positive effect facts and one not-yet-started
+// materialized tail. It deliberately does not require the last confirmed
+// message to remain the current conversation tail; a later candidate inbound
+// is precisely one of the cases where the seven-day fallback must still win.
+func communicationV4ArchiveMultiBubbleTailTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	actions []CommunicationAction,
+) (*CommunicationAction, error) {
+	if tx == nil ||
+		turn.Status != DialogueTurnAdviceReady ||
+		len(actions) < 2 {
+		return nil, ErrCommunicationV4Corrupt
+	}
+	head, owned, err := communicationV4TurnHeadApplicationTx(tx, turn)
+	if err != nil {
+		return nil, err
+	}
+	if !owned ||
+		head.Outcome.DialogueStatus != communication.V4DialogueActionsPlanned ||
+		head.Outcome.NextAdvice != communication.V4AdviceNone ||
+		head.Outcome.ManualReason != "" ||
+		!validPersistedCommunicationV4Plans(head.Outcome.PlannedActions) ||
+		len(actions) > len(head.Outcome.PlannedActions) {
+		return nil, ErrCommunicationV4Corrupt
+	}
+
+	byID := make(map[string]CommunicationAction, len(actions))
+	for index := range actions {
+		action := actions[index]
+		if _, duplicate := byID[action.ActionID]; duplicate {
+			return nil, ErrCommunicationV4Corrupt
+		}
+		byID[action.ActionID] = action
+	}
+	ordered := make([]CommunicationAction, len(actions))
+	for index := range ordered {
+		plan := head.Outcome.PlannedActions[index]
+		action, found := byID[plan.ActionKey]
+		if !found {
+			return nil, ErrCommunicationV4Corrupt
+		}
+		expectedText, ready := communicationV4PlanText(
+			turn,
+			head.Outcome.PlannedActions,
+			index,
+			action.Text,
+		)
+		if !ready ||
+			!communicationActionMatchesV4Plan(
+				action,
+				plan,
+				expectedText,
+				communicationV4ExpectedParentActionID(
+					head.Outcome.PlannedActions,
+					index,
+				),
+			) {
+			return nil, ErrCommunicationV4Corrupt
+		}
+		ordered[index] = action
+	}
+
+	tail := ordered[len(ordered)-1]
+	if tail.Status != CommunicationActionPlanned ||
+		tail.FailureReason != "" ||
+		tail.EffectIntentID != nil ||
+		tail.EffectStartedAt != nil ||
+		tail.SentAt != nil {
+		return nil, ErrCommunicationV4Corrupt
+	}
+	for index := 0; index < len(ordered)-1; index++ {
+		if err := validateCommunicationV4ArchiveSentPrefixTx(
+			tx,
+			turn,
+			ordered[index],
+			head.Outcome.PlannedActions[index],
+		); err != nil {
+			return nil, err
+		}
+	}
+	return &tail, nil
+}
+
+func validateCommunicationV4ArchiveSentPrefixTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	action CommunicationAction,
+	plan communication.V4PlannedAction,
+) error {
+	if action.Status != CommunicationActionSent ||
+		action.FailureReason != "" ||
+		action.EffectIntentID == nil ||
+		action.EffectStartedAt == nil ||
+		action.SentAt == nil {
+		return ErrCommunicationV4Corrupt
+	}
+	var intent EffectIntent
+	if err := tx.First(
+		&intent,
+		"intent_id = ?",
+		*action.EffectIntentID,
+	).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCommunicationV4Corrupt
+		}
+		return err
+	}
+	if intent.Status != EffectIntentOk &&
+		intent.Status != EffectIntentResolvedOk {
+		return ErrCommunicationV4Corrupt
+	}
+	if err := validateM5AutomaticIntentLinkTx(
+		tx,
+		action.ActionID,
+		intent,
+	); err != nil {
+		return ErrCommunicationV4Corrupt
+	}
+	if intent.ResultMessageSeq == nil {
+		return ErrCommunicationV4Corrupt
+	}
+
+	var messages []Message
+	if err := tx.Where("outbound_intent_id = ?", intent.IntentID).
+		Limit(2).
+		Find(&messages).Error; err != nil {
+		return err
+	}
+	if len(messages) != 1 {
+		return ErrCommunicationV4Corrupt
+	}
+	message := messages[0]
+	if message.RetractedAt != nil ||
+		message.OutboundIntentID == nil ||
+		*message.OutboundIntentID != intent.IntentID ||
+		message.Origin != "self" ||
+		message.ConversationRef != turn.ConversationRef ||
+		message.Seq != *intent.ResultMessageSeq ||
+		!communicationActionMatchesMessage(action, message) {
+		return ErrCommunicationV4Corrupt
+	}
+
+	confirmedAt := action.SentAt
+	if message.TsApproxMs != nil {
+		value := time.UnixMilli(*message.TsApproxMs).UTC()
+		confirmedAt = &value
+	}
+	confirmed := communication.V4ConfirmedAction{
+		ActionKey:      plan.ActionKey,
+		Kind:           plan.Kind,
+		MessageSeq:     message.Seq,
+		CardMessageSeq: plan.CardMessageSeq,
+		SentAt:         confirmedAt,
+		Round:          plan.Round,
+		Stage:          plan.Stage,
+	}
+	digest, err := communicationV4InputDigest(confirmed)
+	if err != nil {
+		return err
+	}
+	application, found, err := communicationV4ApplicationTx(
+		tx,
+		turn.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		plan.ActionKey,
+	)
+	if err != nil {
+		return err
+	}
+	if !found ||
+		application.InputDigest != digest ||
+		application.SemanticKind != string(plan.Kind) ||
+		application.MessageSeq != message.Seq ||
+		application.FromRevision == ^uint64(0) ||
+		application.ToRevision != application.FromRevision+1 ||
+		application.Outcome.Dialogue != communication.V4DialogueNone ||
+		application.Outcome.StateBeforeAction == nil ||
+		application.Outcome.ProjectedThroughSeqBefore == nil ||
+		*application.Outcome.ProjectedThroughSeqBefore+1 != message.Seq ||
+		communication.ValidateV4State(
+			*application.Outcome.StateBeforeAction,
+		) != nil {
+		return ErrCommunicationV4Corrupt
 	}
 	return nil
 }
