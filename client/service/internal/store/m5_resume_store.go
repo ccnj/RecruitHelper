@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"recruithelper/contract/gen/go/protocol"
@@ -193,6 +194,153 @@ func boundResumeTargetTx(tx *gorm.DB, profile CandidateProfile) (*ResumeCaptureT
 	return &ResumeCaptureTarget{Profile: profile, Account: account, Conversation: conversation}, nil
 }
 
+// resumeCaptureCommandTargetTx keeps the original one-shot M5 trial route
+// unchanged and admits one additional production fact chain: a selected
+// profile created from an adopted inbound conversation. The two routes share
+// the exact same CmdRecord/WAL and completion implementation below; no trial
+// selection is fabricated for the inbound route.
+func resumeCaptureCommandTargetTx(tx *gorm.DB, profileID string) (*ResumeCaptureTarget, error) {
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrCandidateProfileNotFound
+		}
+		return nil, err
+	}
+	if profile.MainStatus == CandidateProfileSelected &&
+		profile.SuccessfulGreetingIntentID == nil {
+		return inboundResumeTargetTx(tx, profile)
+	}
+	return eligibleResumeTargetTx(tx, profileID, true)
+}
+
+// InboundResumeCaptureTarget is the patrol-facing query for one profile that
+// was adopted from the IM conversation list. A nil target means that the
+// profile is not this route or no longer needs capture. Once this route is
+// recognized, an incomplete or drifted fact chain is returned as the existing
+// binding/not-allowed error instead of being silently treated as another
+// profile kind.
+func (s *Store) InboundResumeCaptureTarget(profileID string) (*ResumeCaptureTarget, error) {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return nil, ErrResumeCaptureNotAllowed
+	}
+	var out *ResumeCaptureTarget
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var profile CandidateProfile
+		if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCandidateProfileNotFound
+			}
+			return err
+		}
+		if profile.MainStatus != CandidateProfileSelected ||
+			profile.SuccessfulGreetingIntentID != nil {
+			return nil
+		}
+		switch profile.ResumeCaptureState {
+		case ResumeCaptureUnattempted, ResumeCaptureInFlight:
+		case ResumeCaptureCaptured, ResumeCaptureManualRequired:
+			return nil
+		default:
+			return ErrCandidateProfileState
+		}
+		target, err := inboundResumeTargetTx(tx, profile)
+		if err != nil {
+			return err
+		}
+		out = target
+		return nil
+	})
+	return out, err
+}
+
+func inboundResumeTargetTx(tx *gorm.DB, profile CandidateProfile) (*ResumeCaptureTarget, error) {
+	if profile.MainStatus != CandidateProfileSelected ||
+		profile.EndReason != nil ||
+		profile.ConversationRef == nil ||
+		strings.TrimSpace(*profile.ConversationRef) == "" ||
+		profile.SuccessfulGreetingIntentID != nil ||
+		profile.BackendJobID == nil ||
+		strings.TrimSpace(*profile.BackendJobID) == "" {
+		return nil, ErrResumeCaptureNotAllowed
+	}
+
+	var account Account
+	if err := tx.First(
+		&account,
+		"platform = ? AND account_ref = ?",
+		profile.Platform,
+		profile.AccountRef,
+	).Error; err != nil {
+		return nil, err
+	}
+	key := ConversationKey{
+		Platform:        profile.Platform,
+		AccountRef:      profile.AccountRef,
+		ConversationRef: *profile.ConversationRef,
+	}
+	var conversation Conversation
+	if err := tx.Where(conversationWhere(key), conversationArgs(key)...).
+		First(&conversation).Error; err != nil {
+		return nil, err
+	}
+	var tracked TrackedIntent
+	if err := tx.Where(conversationWhere(key), conversationArgs(key)...).
+		First(&tracked).Error; err != nil {
+		return nil, err
+	}
+	if conversation.TrackingState != TrackingAdopted ||
+		tracked.Status != TrackingAdopted ||
+		tracked.RequestedBy != inboundProfileRequestedBy ||
+		conversation.PlatformUserRef != profile.PlatformUserRef {
+		return nil, ErrResumeCaptureBinding
+	}
+
+	var inbound []Message
+	if err := tx.Where(
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND "+
+			activeMessageCondition+" AND direction = ? AND origin = ? AND source_key IS NOT NULL",
+		key.Platform,
+		key.AccountRef,
+		key.ConversationRef,
+		"in",
+		"external",
+	).Find(&inbound).Error; err != nil {
+		return nil, err
+	}
+	foundStableInbound := false
+	for i := range inbound {
+		if IsM5RealCandidateMessage(inbound[i]) &&
+			inbound[i].SourceKey != nil &&
+			validMessageSourceKey(*inbound[i].SourceKey) {
+			foundStableInbound = true
+			break
+		}
+	}
+	if !foundStableInbound {
+		return nil, ErrResumeCaptureNotAllowed
+	}
+
+	var outboundN int64
+	if err := tx.Model(&Message{}).Where(
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND "+
+			activeMessageCondition+" AND direction = ?",
+		key.Platform,
+		key.AccountRef,
+		key.ConversationRef,
+		"out",
+	).Count(&outboundN).Error; err != nil {
+		return nil, err
+	}
+	if outboundN != 0 {
+		return nil, ErrResumeCaptureNotAllowed
+	}
+	return &ResumeCaptureTarget{
+		Profile: profile, Account: account, Conversation: conversation,
+	}, nil
+}
+
 type CreateResumeCaptureCmdRequest struct {
 	ProfileID string
 	Command   CmdRecord
@@ -214,7 +362,7 @@ func (s *Store) CreateResumeCaptureCmd(req CreateResumeCaptureCmdRequest) (*Crea
 	}
 	out := &CreateResumeCaptureCmdResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		target, err := eligibleResumeTargetTx(tx, req.ProfileID, true)
+		target, err := resumeCaptureCommandTargetTx(tx, req.ProfileID)
 		if err != nil {
 			return err
 		}
@@ -324,7 +472,7 @@ func (s *Store) CompleteResumeCapture(req CompleteResumeCaptureRequest) (*Candid
 	var out CandidateResumeSnapshot
 	var transitionErr error
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		target, bindErr := eligibleResumeTargetTx(tx, req.ProfileID, true)
+		target, bindErr := resumeCaptureCommandTargetTx(tx, req.ProfileID)
 		if bindErr != nil {
 			transitionErr = bindErr
 			return markResumeCaptureManualTx(tx, req.ProfileID, req.LogicalDispatchID, "bindingChanged", time.Now())
