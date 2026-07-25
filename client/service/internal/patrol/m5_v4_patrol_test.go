@@ -1065,6 +1065,11 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	paceCalls := 0
+	h.config.InteractionPaceWait = func(ctx context.Context) error {
+		paceCalls++
+		return ctx.Err()
+	}
 	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
 	if err != nil {
 		t.Fatal(err)
@@ -1088,41 +1093,20 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 	manager.mu.Lock()
 	err = actor.processCommunicationV4Targets(context.Background())
 	manager.mu.Unlock()
-	if err != nil || hand.commandCount() != 1 || len(advice.requests) != 0 {
+	if err != nil || hand.commandCount() != 2 || paceCalls != 2 ||
+		len(advice.requests) != 0 {
 		t.Fatalf(
-			"拒绝组合首步必须只发送正文: err=%v commands=%d advice=%+v",
+			"拒绝正文与微信卡必须留在同一处理轮并各自等待: err=%v commands=%d pace=%d advice=%+v",
 			err,
 			hand.commandCount(),
+			paceCalls,
 			advice.requests,
 		)
 	}
 	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
-	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
-		t.Fatalf("正文正证后应等待唯一卡片: turn=%+v err=%v", turn, err)
+	if err != nil || turn == nil {
+		t.Fatalf("读取拒绝组合 turn 失败: turn=%+v err=%v", turn, err)
 	}
-	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
-	if err != nil || len(actions) != 2 ||
-		actions[0].Kind != store.CommunicationActionReplyText ||
-		actions[0].Status != store.CommunicationActionSent ||
-		actions[1].Kind != store.CommunicationActionInviteWechat ||
-		actions[1].Status != store.CommunicationActionPlanned ||
-		actions[1].DependsOnActionID == nil ||
-		*actions[1].DependsOnActionID != actions[0].ActionID {
-		t.Fatalf("正文正证没有实体化唯一 dependent 卡片: actions=%+v err=%v", actions, err)
-	}
-
-	manager.mu.Lock()
-	err = actor.processCommunicationV4Targets(context.Background())
-	manager.mu.Unlock()
-	if err != nil || hand.commandCount() != 2 || len(advice.requests) != 0 {
-		t.Fatalf(
-			"拒绝组合第二步必须经 dispatcher 发送唯一卡片: err=%v commands=%d advice=%+v",
-			err,
-			hand.commandCount(),
-			advice.requests,
-		)
-	}
-	turn, err = h.db.DialogueTurnByID(turn.TurnID)
 	aggregate, aggregateErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 	if err != nil || turn == nil || turn.Status != store.DialogueTurnCompleted ||
 		aggregateErr != nil ||
@@ -1137,11 +1121,17 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 			aggregateErr,
 		)
 	}
-	actions, err = h.db.CommunicationActionsByTurn(turn.TurnID)
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
 	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInviteWechat ||
 		actions[1].Status != store.CommunicationActionSent ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID ||
 		actions[0].EffectIntentID == nil ||
-		actions[1].EffectIntentID == nil {
+		actions[1].EffectIntentID == nil ||
+		*actions[0].EffectIntentID == *actions[1].EffectIntentID {
 		t.Fatalf("拒绝组合动作未各自完成: actions=%+v err=%v", actions, err)
 	}
 	cardIntent, err := h.db.EffectIntentByID(*actions[1].EffectIntentID)
@@ -1150,7 +1140,107 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 		cardIntent.Status != store.EffectIntentOk {
 		t.Fatalf("dispatcher 未建立并完成换微信卡 WAL: intent=%+v err=%v", cardIntent, err)
 	}
+	hand.mu.Lock()
+	commands := append([]protocol.CmdBody(nil), hand.commands...)
+	hand.mu.Unlock()
+	if commands[0].Name != protocol.PrimChatSendMessage ||
+		commands[1].Name != protocol.PrimChatSendWechatInvite {
+		t.Fatalf("拒绝组合命令顺序错误: %+v", commands)
+	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 2 || paceCalls != 2 {
+		t.Fatalf(
+			"拒绝组合重复推进发生增生: err=%v commands=%d pace=%d",
+			err,
+			hand.commandCount(),
+			paceCalls,
+		)
+	}
+}
 
+func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"dependent-card-workflow-gate",
+		"不感兴趣",
+	)
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf(
+				"拒绝短路组合不得调用 AI: %s",
+				request.Purpose,
+			)
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	paceCalls := 0
+	h.config.InteractionPaceWait = func(ctx context.Context) error {
+		paceCalls++
+		return ctx.Err()
+	}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetWorkflowMemberGate(func() error {
+		if hand.commandCount() == 1 {
+			return ErrActorPaused
+		}
+		return nil
+	})
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取 dependent 卡片账号失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-dependent-card-workflow-gate"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager,
+		account: account,
+		hand: HandState{
+			Online: true, Session: "session-1", BootID: "boot-1",
+		},
+		roundID: roundID,
+		now:     h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if !errors.Is(err, ErrActorPaused) || hand.commandCount() != 1 ||
+		paceCalls != 1 || len(advice.requests) != 0 {
+		t.Fatalf(
+			"父动作后暂停必须阻止子动作构造 WAL: err=%v commands=%d pace=%d advice=%+v",
+			err,
+			hand.commandCount(),
+			paceCalls,
+			advice.requests,
+		)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
+		t.Fatalf("暂停后 turn 必须保留在可恢复状态: turn=%+v err=%v", turn, err)
+	}
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[0].EffectIntentID == nil ||
+		actions[1].Kind != store.CommunicationActionInviteWechat ||
+		actions[1].Status != store.CommunicationActionPlanned ||
+		actions[1].EffectIntentID != nil ||
+		actions[1].FailureReason != "" ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID {
+		t.Fatalf("暂停误伤了 dependent 卡片恢复点: actions=%+v err=%v", actions, err)
+	}
 }
 
 func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *testing.T) {
@@ -1205,6 +1295,11 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	paceCalls := 0
+	h.config.InteractionPaceWait = func(ctx context.Context) error {
+		paceCalls++
+		return ctx.Err()
+	}
 	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
 	if err != nil {
 		t.Fatal(err)
@@ -1228,46 +1323,19 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 	manager.mu.Lock()
 	err = actor.processCommunicationV4Targets(context.Background())
 	manager.mu.Unlock()
-	if err != nil || hand.commandCount() != 1 || len(advice.requests) != 2 {
+	if err != nil || hand.commandCount() != 2 || paceCalls != 2 ||
+		len(advice.requests) != 2 {
 		t.Fatalf(
-			"邀面组合首步必须只发送 AI 正文: err=%v commands=%d advice=%+v",
+			"AI 正文与邀面卡必须留在同一处理轮并各自等待: err=%v commands=%d pace=%d advice=%+v",
 			err,
 			hand.commandCount(),
+			paceCalls,
 			advice.requests,
 		)
 	}
 	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
-	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
-		t.Fatalf("正文正证后应等待唯一邀面卡: turn=%+v err=%v", turn, err)
-	}
-	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
-	if err != nil || len(actions) != 2 ||
-		actions[0].Kind != store.CommunicationActionReplyText ||
-		actions[0].Status != store.CommunicationActionSent ||
-		actions[1].Kind != store.CommunicationActionInterviewInvite ||
-		actions[1].Status != store.CommunicationActionPlanned ||
-		actions[1].DependsOnActionID == nil ||
-		*actions[1].DependsOnActionID != actions[0].ActionID ||
-		actions[1].InterviewStartsAtMs == nil ||
-		*actions[1].InterviewStartsAtMs != selected.UnixMilli() ||
-		actions[1].InterviewEndsAtMs == nil ||
-		*actions[1].InterviewEndsAtMs !=
-			selected.UnixMilli()+communication.V4InterviewDurationMs ||
-		actions[1].InterviewMethod == nil ||
-		*actions[1].InterviewMethod != "wechatVideo" {
-		t.Fatalf("正文正证没有实体化固定参数邀面卡: actions=%+v err=%v", actions, err)
-	}
-
-	manager.mu.Lock()
-	err = actor.processCommunicationV4Targets(context.Background())
-	manager.mu.Unlock()
-	if err != nil || hand.commandCount() != 2 || len(advice.requests) != 2 {
-		t.Fatalf(
-			"邀面组合第二步必须经 dispatcher 发送唯一卡片: err=%v commands=%d advice=%d",
-			err,
-			hand.commandCount(),
-			len(advice.requests),
-		)
+	if err != nil || turn == nil {
+		t.Fatalf("读取邀面组合 turn 失败: turn=%+v err=%v", turn, err)
 	}
 	hand.mu.Lock()
 	commands := append([]protocol.CmdBody(nil), hand.commands...)
@@ -1302,12 +1370,24 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 			aggregateErr,
 		)
 	}
-	actions, err = h.db.CommunicationActionsByTurn(turn.TurnID)
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
 	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInterviewInvite ||
 		actions[1].Status != store.CommunicationActionSent ||
+		actions[1].DependsOnActionID == nil ||
+		*actions[1].DependsOnActionID != actions[0].ActionID ||
 		actions[0].EffectIntentID == nil ||
 		actions[1].EffectIntentID == nil ||
-		*actions[0].EffectIntentID == *actions[1].EffectIntentID {
+		*actions[0].EffectIntentID == *actions[1].EffectIntentID ||
+		actions[1].InterviewStartsAtMs == nil ||
+		*actions[1].InterviewStartsAtMs != selected.UnixMilli() ||
+		actions[1].InterviewEndsAtMs == nil ||
+		*actions[1].InterviewEndsAtMs !=
+			selected.UnixMilli()+communication.V4InterviewDurationMs ||
+		actions[1].InterviewMethod == nil ||
+		*actions[1].InterviewMethod != "wechatVideo" {
 		t.Fatalf("邀面组合没有形成两条独立 WAL: actions=%+v err=%v", actions, err)
 	}
 }

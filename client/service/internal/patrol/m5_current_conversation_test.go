@@ -225,8 +225,8 @@ func TestProcessCurrentConversationOnceCarriesQuietBypassIntoAutomaticWAL(
 	if err != nil || outcome.Status != "ok" {
 		t.Fatalf("显式拒绝短路未穿过事务静默窗: outcome=%+v err=%v", outcome, err)
 	}
-	if hand.commandCount() != 1 {
-		t.Fatalf("本轮必须恰好发送一条挽留正文: commands=%d", hand.commandCount())
+	if hand.commandCount() != 2 {
+		t.Fatalf("同一显式处理轮必须发送挽留正文与 dependent 卡片: commands=%d", hand.commandCount())
 	}
 	turn, err := h.db.LatestDialogueTurnForProfile(current.profileID)
 	if err != nil || turn == nil {
@@ -240,14 +240,6 @@ func TestProcessCurrentConversationOnceCarriesQuietBypassIntoAutomaticWAL(
 		t.Fatalf("挽留正文未通过 WAL 正证收敛: action=%+v err=%v", action, err)
 	}
 
-	outcome, err = manager.ProcessCurrentConversationOnce(
-		context.Background(),
-		h.key,
-	)
-	if err != nil || outcome.Status != "ok" || hand.commandCount() != 2 {
-		t.Fatalf("显式拒绝组合的卡片未穿过同一静默窗: outcome=%+v commands=%d err=%v",
-			outcome, hand.commandCount(), err)
-	}
 	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
 	if err != nil || len(actions) != 2 ||
 		actions[0].Status != store.CommunicationActionSent ||

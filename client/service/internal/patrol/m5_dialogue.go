@@ -649,7 +649,20 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 			return nextErr
 		}
 		if next != nil {
-			return a.scheduleM5Continuation()
+			// The positive parent result has atomically materialized the only
+			// dependent child. Keep the current conversation surface and reuse
+			// the exact same dispatch path instead of yielding to another
+			// page-driven patrol, which may switch the IM route first.
+			//
+			// This is still a new candidate-visible action: re-enter the literal
+			// workflow member gate before dispatchM5Action performs its own
+			// interaction pacing and post-wait authorization check. The child
+			// therefore keeps an independent action, WAL/idemKey, witness and
+			// positive-evidence boundary.
+			if err := a.mayAdvanceM5Turn(ctx); err != nil {
+				return err
+			}
+			return a.dispatchM5Action(ctx, turn)
 		}
 	}
 	return nil
