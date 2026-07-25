@@ -59,6 +59,7 @@ import {
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
 export const ZHILIAN_IM_URL = `https://${ZHILIAN_HOST}/app/im`
+export const ZHILIAN_RECOMMEND_URL = `https://${ZHILIAN_HOST}/app/recommend`
 
 const TAB_QUERY = `https://${ZHILIAN_HOST}/*`
 // 每个平台页只取 8 条，保证单页即便字段接近 schema 上限也不会顶穿 64KiB data 门禁。
@@ -4245,6 +4246,84 @@ async function activeSourcingTabs(): Promise<chrome.tabs.Tab[]> {
   })).filter((tab) => tab.id !== undefined && pageKindFromURL(tab.url) === 'recommend')
 }
 
+async function waitForSourcingReady(
+  tab: chrome.tabs.Tab,
+  ctx: PrimitiveContext,
+): Promise<{ tab: chrome.tabs.Tab; probe: ZhilianProbe }> {
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+
+  // 页面导航也是一次交互；即使 Chrome 很快返回 complete，也给页面至少一秒完成初始化。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  for (let attempt = 0; attempt < 34; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tab.id)
+    if (latest.status === 'complete' && pageKindFromURL(latest.url) === 'recommend') {
+      try {
+        const probe = await probeTab(latest)
+        if (probe.loginState === 'out' || probe.contentScriptOk) {
+          return { tab: latest, probe }
+        }
+      } catch (error) {
+        if (!(error instanceof ZhilianPlatformError) || error.code !== 'CTX_NOT_READY') throw error
+      }
+    }
+    if (attempt % 8 === 0) {
+      await ctx.progress('等待智联推荐页就绪', Math.min(95, 15 + attempt * 2))
+    }
+    if (attempt < 33) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    }
+  }
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY',
+    '智联推荐页在期限内未就绪',
+    'afterRecovery',
+    'pageBroken',
+  )
+}
+
+async function ensureZhilianSourcingTab(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<{ tab: chrome.tabs.Tab; probe: ZhilianProbe | null }> {
+  const recommend = await activeSourcingTabs()
+  if (recommend.length > 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  if (recommend.length === 1) return { tab: recommend[0], probe: null }
+
+  ctx.checkpoint()
+  await ctx.progress('准备智联推荐页', 5)
+  let tab = await canonicalZhilianTab()
+  if (!tab) {
+    // pageAbsent 仍由脑通过既有 nav.ensureSurface 唯一恢复；恢复后重入本
+    // 原语时会复用 nav 创建的智联标签，而不是另开第二张推荐页。
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      'Chrome 中没有可复用的智联页面',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  // 复用其他智联路由前先核对账号；不能先切页再发现切动了错误账号。
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
+  try {
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_RECOMMEND_URL })
+  } catch (error) {
+    commandNavigation.end()
+    throw error
+  }
+  return waitForSourcingReady(tab, ctx)
+}
+
 function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
   if (result.reason === 'payload_limit') {
     throw new ZhilianPlatformError('PAYLOAD_LIMIT', '完整采集简历超过当前内联载荷上限', 'manualOnly')
@@ -4358,23 +4437,12 @@ export async function selectZhilianSourcingPosition(
     throw new ZhilianPlatformError('GUARD_FAILED', '职位选择缺少合法的职位标题', 'manualOnly')
   }
   ctx.checkpoint()
-  const initialTabs = await activeSourcingTabs()
-  if (initialTabs.length === 0) {
-    throw new ZhilianPlatformError(
-      'CTX_NOT_READY',
-      '请保留一个已就绪的智联推荐页标签',
-      'afterRecovery',
-      'pageAbsent',
-    )
-  }
-  if (initialTabs.length !== 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
-  }
-  const tab = initialTabs[0]
+  const prepared = await ensureZhilianSourcingTab(ctx, expectedPrincipalFingerprint)
+  const tab = prepared.tab
   if (tab.id === undefined || tab.status !== 'complete') {
     throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联推荐页尚未就绪', 'afterRecovery', 'pageBroken')
   }
-  const initialProbe = await probeTab(tab)
+  const initialProbe = prepared.probe ?? await probeTab(tab)
   if (initialProbe.pageKind !== 'recommend') {
     throw new ZhilianPlatformError('CTX_NOT_READY', '当前智联页面不是推荐页', 'afterRecovery', 'pageAbsent')
   }

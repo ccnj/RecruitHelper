@@ -82,7 +82,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}
-		selected, _, err := invokePrimitiveDirectWithLogicalID[protocol.CandidateSelectSourcingPositionData](
+		selected, err := invokePrimitive[protocol.CandidateSelectSourcingPositionData](
 			ctx, a, protocol.PrimCandidateSelectSourcingPosition,
 			protocol.CandidateSelectSourcingPositionArgs{PositionTitle: positionTitle},
 		)

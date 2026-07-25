@@ -2742,6 +2742,283 @@ test('candidate.selectSourcingPosition outer 使用唯一推荐页并在动作�
   }
 })
 
+test('candidate.selectSourcingPosition outer 无推荐页时复用既有智联标签并在同一命令继续', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const originalRandom = Math.random
+  const fingerprint = '8'.repeat(64)
+  const tab = {
+    id: 601,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/im',
+  }
+  const created = []
+  const updated = []
+  const delays = []
+  const events = []
+  let barrierCalls = 0
+  let actionCalls = 0
+  globalThis.setTimeout = (callback, delay = 0, ...args) => {
+    delays.push(delay)
+    callback(...args)
+    return 1
+  }
+  Math.random = () => 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+      async create(options) {
+        created.push(options)
+        throw new Error('已有智联标签时不应新建')
+      },
+      async update(id, options) {
+        assert.equal(id, tab.id)
+        events.push('update')
+        updated.push({ id, options })
+        tab.url = options.url
+        return { ...tab }
+      },
+      async get(id) {
+        assert.equal(id, tab.id)
+        return { ...tab }
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ target, func, args }) {
+        assert.equal(target.tabId, tab.id)
+        if (func.name === 'mainProbeZhilian') {
+          const pageKind = tab.url.includes('/app/recommend') ? 'recommend' : 'im'
+          events.push(`probe:${pageKind}`)
+          return [{ result: {
+            pageKind,
+            loginState: 'in',
+            principalFingerprint: fingerprint,
+            imListVisible: pageKind === 'im',
+          } }]
+        }
+        assert.equal(func.name, 'mainSelectSourcingPosition')
+        events.push('select')
+        actionCalls += 1
+        assert.deepEqual(args, ['目标职位'])
+        return [{ result: {
+          status: 'ready',
+          data: {
+            positionRef: 'fixture-target-job',
+            positionTitle: '目标职位',
+            observedAt: Date.now(),
+          },
+        } }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'select-sourcing-position-reuse-tab',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barrierCalls += 1 },
+    async progress() {},
+  }
+  try {
+    const data = await zhilianTestHooks.selectZhilianSourcingPosition(
+      { positionTitle: '目标职位' },
+      context,
+      fingerprint,
+    )
+    assert.equal(data.positionRef, 'fixture-target-job')
+    assert.deepEqual(created, [])
+    assert.deepEqual(updated, [{
+      id: tab.id,
+      options: { url: 'https://rd6.zhaopin.com/app/recommend' },
+    }])
+    assert.equal(delays[0], 1_000)
+    assert.equal(actionCalls, 1)
+    assert.equal(barrierCalls, 1)
+    assert.deepEqual(events.slice(0, 2), ['probe:im', 'update'])
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+    Math.random = originalRandom
+  }
+})
+
+test('candidate.selectSourcingPosition outer 没有任何智联标签时交回既有 nav 恢复通道', async () => {
+  const originalChrome = globalThis.chrome
+  const created = []
+  const updated = []
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [] },
+      async create(options) {
+        created.push(options)
+        throw new Error('candidate 原语不得越过 nav.ensureSurface 自建页面')
+      },
+      async update(id, options) {
+        updated.push({ id, options })
+        throw new Error('没有智联标签时不应调用 update')
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'select-sourcing-position-create-tab',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() {},
+    async progress() {},
+  }
+  try {
+    await assert.rejects(
+      zhilianTestHooks.selectZhilianSourcingPosition(
+        { positionTitle: '目标职位' },
+        context,
+        '7'.repeat(64),
+      ),
+      (error) => error?.code === 'CTX_NOT_READY' && error?.reason === 'pageAbsent',
+    )
+    assert.deepEqual(created, [])
+    assert.deepEqual(updated, [])
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('candidate.selectSourcingPosition outer 复用其他智联页前账号不符则零导航', async () => {
+  const originalChrome = globalThis.chrome
+  const tab = {
+    id: 602,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/im',
+  }
+  let updateCalls = 0
+  let barrierCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+      async update() {
+        updateCalls += 1
+        throw new Error('账号不符时不应导航')
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        assert.equal(func.name, 'mainProbeZhilian')
+        return [{ result: {
+          pageKind: 'im',
+          loginState: 'in',
+          principalFingerprint: '5'.repeat(64),
+          imListVisible: true,
+        } }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'select-sourcing-position-account-mismatch',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barrierCalls += 1 },
+    async progress() {},
+  }
+  try {
+    await assert.rejects(
+      zhilianTestHooks.selectZhilianSourcingPosition(
+        { positionTitle: '目标职位' },
+        context,
+        '4'.repeat(64),
+      ),
+      (error) => error?.code === 'ACCOUNT_MISMATCH',
+    )
+    assert.equal(updateCalls, 0)
+    assert.equal(barrierCalls, 0)
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('candidate.selectSourcingPosition outer 推荐页超时未就绪时不执行职位动作', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const originalRandom = Math.random
+  const tab = {
+    id: 603,
+    active: true,
+    status: 'complete',
+    url: 'https://rd6.zhaopin.com/app/im',
+  }
+  let barrierCalls = 0
+  let scriptCalls = 0
+  globalThis.setTimeout = (callback, _delay = 0, ...args) => {
+    callback(...args)
+    return 1
+  }
+  Math.random = () => 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ ...tab }] },
+      async update(_id, options) {
+        tab.url = options.url
+        tab.status = 'loading'
+        return { ...tab }
+      },
+      async get() { return { ...tab } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        scriptCalls += 1
+        assert.equal(func.name, 'mainProbeZhilian')
+        return [{ result: {
+          pageKind: 'im',
+          loginState: 'in',
+          principalFingerprint: '6'.repeat(64),
+          imListVisible: true,
+        } }]
+      },
+    },
+  }
+  const context = {
+    signal: new AbortController().signal,
+    cmdMsgId: 'select-sourcing-position-page-timeout',
+    deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined,
+    guards: undefined,
+    checkpoint() {},
+    async beforeSideEffect() { barrierCalls += 1 },
+    async progress() {},
+  }
+  try {
+    await assert.rejects(
+      zhilianTestHooks.selectZhilianSourcingPosition(
+        { positionTitle: '目标职位' },
+        context,
+        '6'.repeat(64),
+      ),
+      (error) => error?.code === 'CTX_NOT_READY' && error?.reason === 'pageBroken',
+    )
+    assert.equal(barrierCalls, 0)
+    assert.equal(scriptCalls, 1, '只允许导航前账号复核，不执行职位动作')
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+    Math.random = originalRandom
+  }
+})
+
 const m6SourcingFilterTarget = {
   age: { mode: 'range', minAge: 25, maxAge: 45 },
   activeWindow: 'days3',

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
@@ -227,6 +228,89 @@ func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
 	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing || batch.Reason != "" || batch.EndedAt != nil {
 		t.Fatalf("普通暂停改写了正式批次: batch=%+v err=%v", batch, err)
+	}
+}
+
+func TestSourcingPositionSelectUsesExistingSurfaceRecoveryWithoutAnotherUserStart(t *testing.T) {
+	h := newHarness(t)
+	documents := []m5ai.JobConfigDocument{
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "意向判断", Content: "intent"},
+		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "候选人筛选", Content: `{"minScore":5}`},
+		{DocType: "打分", Content: "请评分 {resume_json}"},
+		{DocType: "招呼语", Content: `{"prompt":"状态={career_state};简历={resume_summary_json}"}`},
+		{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
+	}
+	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
+	revision := m5ai.ContextRevision{
+		ContextID: "context-sourcing-surface-recovery", RevisionHash: "revision-sourcing-surface-recovery",
+		SourceKind: "localImport", SourceJobRef: "17", DisplayName: "synthetic-position",
+		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+		Communication: m5ai.CommunicationView{
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
+			MappingVersion: m5ai.MappingVersion,
+		},
+		CreatedAt: h.clock.Now(),
+	}
+	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revision.RevisionHash, TargetCount: 1, StartedAt: h.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selectCalls := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimCandidateSelectSourcingPosition:
+			selectCalls++
+			if selectCalls == 1 {
+				return nil, wrapRunError(
+					protocol.ErrCodeCtxNotReady,
+					protocol.NotReadyReasonPageAbsent,
+					ErrEnsureNotReady,
+				)
+			}
+			return defaultHandler(request)
+		case protocol.PrimCandidateApplySourcingFilters:
+			// 第二次职位选择已经成功即达到本测试出口；用可恢复取消阻止后续
+			// 绑定逻辑把本测试扩大成完整采集夹具。
+			return nil, context.Canceled
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	result, tickErr := h.manager.Tick(context.Background())
+	if tickErr != nil {
+		t.Fatalf("Tick: %v", tickErr)
+	}
+	if len(result.Rounds) != 1 || !errors.Is(result.Rounds[0].Err, context.Canceled) {
+		t.Fatalf("恢复后的定向停止结果不符: %+v", result.Rounds)
+	}
+	if selectCalls != 2 || h.runner.count(protocol.PrimNavEnsureSurface) != 1 ||
+		h.runner.count(protocol.PrimProbePlatform) != 1 {
+		t.Fatalf("页面恢复链不符: %v", h.runner.names())
+	}
+	wantPrefix := []string{
+		protocol.PrimCandidateSelectSourcingPosition,
+		protocol.PrimNavEnsureSurface,
+		protocol.PrimProbePlatform,
+		protocol.PrimCandidateSelectSourcingPosition,
+		protocol.PrimCandidateApplySourcingFilters,
+	}
+	if got := h.runner.names(); !reflect.DeepEqual(got, wantPrefix) {
+		t.Fatalf("同一次开始未按 select→ensure→probe→select 继续: got=%v", got)
+	}
+	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing ||
+		batch.Reason != "" || batch.EndedAt != nil {
+		t.Fatalf("页面恢复后取消不应破坏 preparing 批次: batch=%+v err=%v", batch, err)
 	}
 }
 
