@@ -172,17 +172,37 @@ func TestPipelinePumpPersistsMidnightAcrossIdleBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := manager.StartReplyOnly(key); err != nil {
+		first, err := manager.StartReplyOnly(key)
+		if err != nil {
 			t.Fatal(err)
 		}
 		clock.now = time.Date(2026, 7, 26, 0, 0, 0, 0, location)
 
-		waiting, err := manager.AdvanceOnce(context.Background())
-		if !errors.Is(err, ErrMemberStartBlocked) ||
-			waiting == nil ||
-			waiting.Status != workflow.StatusWaitingDailyWindow ||
-			waiting.ResumeStatus != workflow.StatusRunning {
-			t.Fatalf("reply-only midnight = %+v, %v", waiting, err)
+		completed, err := manager.AdvanceOnce(context.Background())
+		if err != nil ||
+			completed == nil ||
+			completed.RunID != first.RunID ||
+			completed.Status != workflow.StatusCompleted ||
+			completed.Stage != store.ProductWorkflowStageCompleted ||
+			actor.pauseCalls != 1 {
+			t.Fatalf(
+				"reply-only midnight = %+v pause=%d err=%v",
+				completed,
+				actor.pauseCalls,
+				err,
+			)
+		}
+		if active, loadErr := db.ActiveProductWorkflowRun(); loadErr != nil || active != nil {
+			t.Fatalf("expired communication retained active slot: %+v, %v", active, loadErr)
+		}
+
+		clock.now = time.Date(2026, 7, 26, 8, 0, 0, 0, location)
+		restarted, err := manager.StartReplyOnly(key)
+		if err != nil ||
+			restarted == nil ||
+			restarted.RunID == first.RunID ||
+			restarted.Status != workflow.StatusRunning {
+			t.Fatalf("next-day explicit start = %+v, %v", restarted, err)
 		}
 	})
 

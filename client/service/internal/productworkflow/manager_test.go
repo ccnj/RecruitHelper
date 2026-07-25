@@ -175,6 +175,57 @@ func TestReplyOnlyAndClosedWindowNeverCreateSourcingBatchOrReservation(t *testin
 	}
 }
 
+func TestFullStartAfterReplyOnlyCommunicationCreatesOneNewBatch(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.UTC
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixtureActor{store: db, clock: clock}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	communication, err := manager.StartReplyOnly(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	additional, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil ||
+		additional == nil ||
+		additional.RunID == communication.RunID ||
+		additional.Stage != store.ProductWorkflowStageSourcing ||
+		additional.SourcingBatchID == nil ||
+		len(actor.startTargets) != 1 {
+		t.Fatalf(
+			"additional=%+v startTargets=%v err=%v",
+			additional,
+			actor.startTargets,
+			err,
+		)
+	}
+	historical, err := db.ProductWorkflowRunByID(communication.RunID)
+	if err != nil ||
+		historical == nil ||
+		historical.Status != workflow.StatusCompleted ||
+		historical.Stage != store.ProductWorkflowStageCompleted ||
+		historical.ActiveSlot != nil {
+		t.Fatalf("historical communication=%+v err=%v", historical, err)
+	}
+
+	replayed, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil ||
+		replayed == nil ||
+		replayed.RunID != additional.RunID ||
+		len(actor.startTargets) != 1 {
+		t.Fatalf(
+			"replayed additional=%+v startTargets=%v err=%v",
+			replayed,
+			actor.startTargets,
+			err,
+		)
+	}
+}
+
 func TestReplyOnlyRejectsUnfinishedSourcingBatch(t *testing.T) {
 	db, key, revision := productWorkflowFixture(t)
 	location := time.UTC

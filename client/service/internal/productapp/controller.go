@@ -115,8 +115,11 @@ func (c *Controller) Start(
 	if loadErr != nil {
 		return loadErr
 	}
+	additionalBatch := active != nil &&
+		active.Stage == store.ProductWorkflowStageCommunication &&
+		active.Status == workflow.StatusRunning
 	var batch *store.SourcingBatch
-	if active != nil && active.SourcingBatchID != nil {
+	if active != nil && active.SourcingBatchID != nil && !additionalBatch {
 		batch, loadErr = c.store.SourcingBatchByID(*active.SourcingBatchID)
 	} else {
 		batch, loadErr = c.store.ActiveSourcingBatch(key)
@@ -133,7 +136,7 @@ func (c *Controller) Start(
 		_, err = c.workflow.StartFull(key, batch.ContextRevisionHash)
 		return err
 	}
-	if active != nil {
+	if active != nil && !additionalBatch {
 		return ErrJobConfigUnavailable
 	}
 

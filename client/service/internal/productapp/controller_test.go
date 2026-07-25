@@ -232,6 +232,41 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 	}
 }
 
+func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+		RunID:      "wf-reply-only-running",
+		Platform:   key.Platform,
+		AccountRef: key.AccountRef,
+		State: workflow.State{
+			Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning,
+		},
+		Stage:     store.ProductWorkflowStageCommunication,
+		StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	controller, err := New(db, flow, source, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
+		t.Fatalf(
+			"additional source=%d key=%+v revision=%q",
+			source.calls,
+			flow.fullKey,
+			flow.fullRevision,
+		)
+	}
+}
+
 func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Now()

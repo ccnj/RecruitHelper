@@ -104,7 +104,7 @@ func (m *Manager) StartFull(
 		return nil, store.ErrProductWorkflowInvalid
 	}
 	now := m.clock.Now()
-	if current, err := m.activeForStart(key, workflow.ModeFull, now); current != nil || err != nil {
+	if current, err := m.prepareFullStart(key, now); current != nil || err != nil {
 		return current, err
 	}
 
@@ -157,6 +157,41 @@ func (m *Manager) StartFull(
 		return nil, m.failStart(run, key, err)
 	}
 	return attached, nil
+}
+
+// prepareFullStart keeps repeated clicks idempotent while giving an explicit
+// full-start click one narrow additional-batch meaning after the prior funnel
+// has already reached communication. The terminal transition only releases
+// the product-control slot; candidate facts, the completed sourcing batch and
+// the independently enabled communication actor remain untouched.
+func (m *Manager) prepareFullStart(
+	key store.AccountKey,
+	now time.Time,
+) (*store.ProductWorkflowRun, error) {
+	current, err := m.store.ActiveProductWorkflowRun()
+	if err != nil || current == nil {
+		return current, err
+	}
+	if current.Platform != key.Platform || current.AccountRef != key.AccountRef {
+		return nil, ErrWorkflowScopeConflict
+	}
+	if current.Stage != store.ProductWorkflowStageCommunication ||
+		current.Status != workflow.StatusRunning {
+		return m.activeForStart(key, workflow.ModeFull, now)
+	}
+	completed := workflow.State{Mode: current.Mode, Status: workflow.StatusCompleted}
+	if _, err := m.store.TransitionProductWorkflowRun(
+		store.TransitionProductWorkflowRunRequest{
+			RunID: current.RunID,
+			From:  stateOf(current),
+			To:    completed,
+			At:    now,
+			Stage: store.ProductWorkflowStageCompleted,
+		},
+	); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func (m *Manager) StartReplyOnly(key store.AccountKey) (*store.ProductWorkflowRun, error) {

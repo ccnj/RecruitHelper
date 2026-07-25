@@ -56,6 +56,10 @@ func (m *Manager) AdvanceOnce(
 	if run.Mode != workflow.ModeFull && run.Mode != workflow.ModeReplyOnly {
 		return run, ErrWorkflowPipelineInvalid
 	}
+	if run.Stage == store.ProductWorkflowStageCommunication &&
+		m.communicationRunExpired(run) {
+		return m.completeExpiredCommunicationRun(run)
+	}
 	if run.Status == workflow.StatusRunning ||
 		run.Status == workflow.StatusAwaitingConfirmation {
 		synced, closed, syncErr := m.syncDailyWindow(run)
@@ -228,6 +232,62 @@ func (m *Manager) AdvanceOnce(
 	default:
 		return run, ErrWorkflowPipelineInvalid
 	}
+}
+
+// communicationRunExpired separates the user's daily run switch from the
+// one-shot funnel. A funnel which crossed midnight may still resume and finish
+// on the next day; ResumedAt therefore becomes that run's effective task day.
+// Once the run is already in communication, the next civil day requires a new
+// explicit click instead of silently re-enabling yesterday's task.
+func (m *Manager) communicationRunExpired(run *store.ProductWorkflowRun) bool {
+	if run == nil || run.StartedAt.IsZero() {
+		return false
+	}
+	activatedAt := run.StartedAt
+	if run.ResumedAt != nil && run.ResumedAt.After(activatedAt) {
+		activatedAt = *run.ResumedAt
+	}
+	now := m.clock.Now().In(m.location)
+	activated := activatedAt.In(m.location)
+	return now.Year() != activated.Year() || now.YearDay() != activated.YearDay()
+}
+
+func (m *Manager) completeExpiredCommunicationRun(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return fallback, err
+	}
+	if run == nil || run.RunID != fallback.RunID ||
+		run.Stage != store.ProductWorkflowStageCommunication {
+		return currentRunOr(fallback, run, nil), store.ErrProductWorkflowConflict
+	}
+	if !m.communicationRunExpired(run) {
+		return run, nil
+	}
+	completed, err := m.store.TransitionProductWorkflowRun(
+		store.TransitionProductWorkflowRunRequest{
+			RunID: run.RunID,
+			From:  stateOf(run),
+			To: workflow.State{
+				Mode: run.Mode, Status: workflow.StatusCompleted,
+			},
+			At:    m.clock.Now(),
+			Stage: store.ProductWorkflowStageCompleted,
+		},
+	)
+	if err != nil {
+		return run, err
+	}
+	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	if err := m.actor.PauseNow(key); err != nil {
+		return completed, err
+	}
+	return completed, nil
 }
 
 // syncDailyWindow persists the midnight boundary even when a workflow is
