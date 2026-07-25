@@ -75,6 +75,12 @@ func (m *Manager) AdvanceOnce(
 		// Reply-only is intentionally isolated from every M6 stage.
 		return run, nil
 	}
+	if run.Mode == workflow.ModeFull &&
+		run.Status == workflow.StatusRunning &&
+		run.Stage == store.ProductWorkflowStageSourcing &&
+		(run.SourcingBatchID == nil || strings.TrimSpace(*run.SourcingBatchID) == "") {
+		return m.recoverInterruptedFullStart(run)
+	}
 	if run.Mode != workflow.ModeFull || run.SourcingBatchID == nil ||
 		strings.TrimSpace(*run.SourcingBatchID) == "" {
 		return run, ErrWorkflowPipelineInvalid
@@ -232,6 +238,56 @@ func (m *Manager) AdvanceOnce(
 	default:
 		return run, ErrWorkflowPipelineInvalid
 	}
+}
+
+func (m *Manager) recoverInterruptedFullStart(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return fallback, err
+	}
+	if run == nil || run.RunID != fallback.RunID {
+		return currentRunOr(fallback, run, nil), store.ErrProductWorkflowConflict
+	}
+	if run.SourcingBatchID != nil && strings.TrimSpace(*run.SourcingBatchID) != "" {
+		return run, nil
+	}
+	if run.Mode != workflow.ModeFull ||
+		run.Status != workflow.StatusRunning ||
+		run.Stage != store.ProductWorkflowStageSourcing {
+		return run, ErrWorkflowPipelineInvalid
+	}
+
+	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	batch, err := m.store.ActiveSourcingBatch(key)
+	if err != nil {
+		return run, err
+	}
+	if batch != nil {
+		return m.store.AttachProductWorkflowSourcingBatch(run.RunID, batch.BatchID)
+	}
+
+	failed, err := m.store.TransitionProductWorkflowRun(
+		store.TransitionProductWorkflowRunRequest{
+			RunID: run.RunID,
+			From:  stateOf(run),
+			To: workflow.State{
+				Mode: run.Mode, Status: workflow.StatusFailed,
+			},
+			At:      m.clock.Now(),
+			Stage:   store.ProductWorkflowStageFailed,
+			Failure: "startInterruptedBeforeBatch",
+		},
+	)
+	if err != nil {
+		return run, err
+	}
+	pauseErr := m.actor.PauseNow(key)
+	return failed, errors.Join(ErrWorkflowPipelineInvalid, pauseErr)
 }
 
 // communicationRunExpired separates the user's daily run switch from the

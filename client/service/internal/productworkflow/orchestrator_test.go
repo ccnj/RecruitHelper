@@ -160,6 +160,88 @@ func TestBlockedSourcingFailsRunAndExplicitRestartAdoptsSameBatch(t *testing.T) 
 	}
 }
 
+func TestInterruptedFullStartRecoversWithoutLeavingActiveSlotLocked(t *testing.T) {
+	t.Run("attach batch created before interruption", func(t *testing.T) {
+		db, key, revision := productWorkflowFixture(t)
+		location := time.UTC
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixturePipelineActor{
+			fixtureActor: &fixtureActor{store: db, clock: clock},
+		}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+			RunID: "wf-interrupted-with-batch", Platform: key.Platform, AccountRef: key.AccountRef,
+			State: workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+			Stage: store.ProductWorkflowStageSourcing, StartedAt: clock.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started, err := db.StartSourcingBatch(store.StartSourcingBatchRequest{
+			BatchID:  "batch-created-before-interruption",
+			Platform: key.Platform, AccountRef: key.AccountRef,
+			ContextRevisionHash: revision.RevisionHash,
+			TargetCount:         NewFullWorkflowTargetCount,
+			StartedAt:           clock.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		recovered, err := manager.AdvanceOnce(context.Background())
+		if err != nil ||
+			recovered == nil ||
+			recovered.RunID != run.RunID ||
+			recovered.SourcingBatchID == nil ||
+			*recovered.SourcingBatchID != started.Batch.BatchID {
+			t.Fatalf("recovered=%+v err=%v", recovered, err)
+		}
+	})
+
+	t.Run("terminalize run when no batch exists", func(t *testing.T) {
+		db, key, _ := productWorkflowFixture(t)
+		location := time.UTC
+		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+		actor := &fixturePipelineActor{
+			fixtureActor: &fixtureActor{store: db, clock: clock},
+		}
+		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+			RunID: "wf-interrupted-without-batch", Platform: key.Platform, AccountRef: key.AccountRef,
+			State: workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+			Stage: store.ProductWorkflowStageSourcing, StartedAt: clock.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		failed, err := manager.AdvanceOnce(context.Background())
+		if !errors.Is(err, ErrWorkflowPipelineInvalid) ||
+			failed == nil ||
+			failed.RunID != run.RunID ||
+			failed.Status != workflow.StatusFailed ||
+			failed.Stage != store.ProductWorkflowStageFailed ||
+			failed.FailureReason != "startInterruptedBeforeBatch" ||
+			actor.pauseCalls != 1 {
+			t.Fatalf(
+				"failed=%+v pause=%d err=%v",
+				failed,
+				actor.pauseCalls,
+				err,
+			)
+		}
+		if active, loadErr := db.ActiveProductWorkflowRun(); loadErr != nil || active != nil {
+			t.Fatalf("interrupted run retained active slot: %+v, %v", active, loadErr)
+		}
+	})
+}
+
 func TestPipelinePumpPersistsMidnightAcrossIdleBoundaries(t *testing.T) {
 	t.Run("reply only", func(t *testing.T) {
 		db, key, _ := productWorkflowFixture(t)
