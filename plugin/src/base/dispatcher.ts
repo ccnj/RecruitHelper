@@ -104,6 +104,9 @@ class StopExecution extends Error {
 
 const DEDUP_CAP = DEFAULTS.handDedupLru
 const QUEUE_CAP = DEFAULTS.handQueueDepth
+const LEASE_PULSE_MAX_MS = 10_000
+const LEASE_PULSE_MIN_MS = 1_000
+
 export class Dispatcher {
   // 去重表:内存,作用域=SW 一次生命(bootId)。键=cmd msgId。禁写 chrome.storage(宪法禁令 2/16)。
   private dedup = new Map<string, DedupEntry>()
@@ -117,6 +120,7 @@ export class Dispatcher {
   private fusedReportSessions = new Map<string, string>()
   private quarantinedSX = new Map<string, QuarantinedSX>()
   private authorizedRecoverySX = new Set<string>()
+  private leasePulses = new Map<string, ReturnType<typeof setInterval>>()
 
   constructor(
     private send: SendFn,
@@ -347,6 +351,7 @@ export class Dispatcher {
       witnessed: this.isWitnessed(item),
     })
     this.send(Kind.Ack, responseSession, { ref: cmdMsgId, status: AckStatus.Accepted })
+    this.startLeasePulse(item)
     this.pump()
   }
 
@@ -610,6 +615,7 @@ export class Dispatcher {
     }
 
     if (timer) clearTimeout(timer)
+    this.stopLeasePulse(item.msgId)
     if (this.inFlight === running) this.inFlight = null
     this.pump()
   }
@@ -626,12 +632,46 @@ export class Dispatcher {
 
   private reportProgress(running: InFlight, stage: string, pct?: number): void {
     if (this.inFlight !== running || running.terminalSent || running.controller.signal.aborted) return
+    this.publishProgress(running.item, stage, pct)
+  }
+
+  private publishProgress(item: QueueItem, stage: string, pct?: number): void {
     if (typeof stage !== 'string' || stage.length === 0) return
-    const body: ProgressBody = { ref: running.item.msgId, stage }
+    const body: ProgressBody = { ref: item.msgId, stage }
     if (typeof pct === 'number' && Number.isInteger(pct)) body.pct = Math.max(0, Math.min(100, pct))
     if (validateKindBody(Kind.Progress, body).length > 0) return
     // progress 是 QoS0/租约活性触碰：无 ack、无重发；stage 只供人读。
-    this.send(Kind.Progress, running.item.session, body)
+    this.send(Kind.Progress, item.session, body)
+  }
+
+  private startLeasePulse(item: QueueItem): void {
+    if (!item.body.leaseMs || this.leasePulses.has(item.msgId)) return
+    const intervalMs = Math.min(
+      LEASE_PULSE_MAX_MS,
+      Math.max(LEASE_PULSE_MIN_MS, Math.floor(item.body.leaseMs / 3)),
+    )
+    const timer = setInterval(() => {
+      const state = this.dedup.get(item.msgId)?.state
+      if (state !== 'queued' && state !== 'executing') {
+        this.stopLeasePulse(item.msgId)
+        return
+      }
+      if (state === 'executing') {
+        const running = this.inFlight
+        if (!running || running.item.msgId !== item.msgId || running.terminalSent ||
+            running.controller.signal.aborted) {
+          return
+        }
+      }
+      this.publishProgress(item, state === 'queued' ? '命令排队中' : '命令执行中')
+    }, intervalMs)
+    this.leasePulses.set(item.msgId, timer)
+  }
+
+  private stopLeasePulse(ref: string): void {
+    const timer = this.leasePulses.get(ref)
+    if (timer !== undefined) clearInterval(timer)
+    this.leasePulses.delete(ref)
   }
 
   private resultForThrown(running: InFlight, error: unknown): PrimitiveResult {
@@ -679,6 +719,9 @@ export class Dispatcher {
     resultBody: ResultBody,
     witnessBarrierPassed = false,
   ): Promise<void> {
+    // 一旦本地决定发布终局，就不再允许后续 progress 越过 result。
+    // result 若未送达，脑应由既有 lease/recovery 轨道收敛，而不是被旧心跳续命。
+    this.stopLeasePulse(item.msgId)
     resultBody = this.ensureResultBody(item, resultBody)
     const witnessed = this.isWitnessed(item)
     const sent = await this.publishResult(
@@ -774,6 +817,7 @@ export class Dispatcher {
         item: queued,
         bodyJSON: JSON.stringify(queued.body),
       })
+      this.stopLeasePulse(queued.msgId)
       this.fusedRefs.add(queued.msgId)
       if (!this.fusedOriginalSessions.has(queued.msgId)) {
         this.fusedOriginalSessions.set(queued.msgId, queued.session)

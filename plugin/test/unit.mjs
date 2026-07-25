@@ -1,6 +1,7 @@
 // 无需真脑的 base 单元测试。用 esbuild 加载与生产相同的 TypeScript 源码。
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { mock } from 'node:test'
 import * as esbuild from 'esbuild'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -1523,6 +1524,158 @@ test('handler progress 为 QoS0 帧，终局后不再上报', async () => {
   await eventually(() => results(out.frames, 'progress-1').length === 1, 'progress 用例未收束')
   const progress = out.frames.find((frame) => frame.kind === Kind.Progress)
   assert.deepEqual(progress?.body, { ref: 'progress-1', stage: 'page 1', pct: 25 })
+})
+
+test('带租约命令在执行与排队期间按 ref 发送活性心跳，终局后停止', async () => {
+  let releaseFirst = () => {}
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] })
+  try {
+    const firstGate = new Promise((resolve) => { releaseFirst = resolve })
+    const starts = []
+    register({
+      name: Primitive.ChatReadList,
+      class: 'intrusive',
+      async handler(args) {
+        starts.push(args.filter)
+        if (args.filter === 'all') await firstGate
+        return { status: 'ok', data: { complete: true, sessions: [] } }
+      },
+    })
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    const leasedCommand = (filter) => ({
+      name: Primitive.ChatReadList,
+      ver: 1,
+      context: {
+        platform: 'zhilian',
+        accountRef: 'account-lease-pulse',
+        expectedPrincipalFingerprint: 'principal-lease-pulse',
+      },
+      args: { filter, maxSessions: 10 },
+      deadline: Date.now() + 100_000,
+      execBudgetMs: 60_000,
+      leaseMs: 30_000,
+    })
+
+    await dispatcher.handleCmd('lease-running', 's', 's', leasedCommand('all'))
+    await dispatcher.handleCmd('lease-queued', 's', 's', leasedCommand('unread'))
+    await dispatcher.handleCmd('lease-canceled', 's', 's', leasedCommand('unread'))
+    assert.deepEqual(starts, ['all'])
+    assert.deepEqual(dispatcher.snapshot(), { queueDepth: 2, inFlight: 'lease-running' })
+
+    mock.timers.tick(10_000)
+    await Promise.resolve()
+    const runningPulse = out.frames.find((frame) =>
+      frame.kind === Kind.Progress && frame.body.ref === 'lease-running')
+    const queuedPulse = out.frames.find((frame) =>
+      frame.kind === Kind.Progress && frame.body.ref === 'lease-queued')
+    const canceledPulse = out.frames.find((frame) =>
+      frame.kind === Kind.Progress && frame.body.ref === 'lease-canceled')
+    assert.deepEqual(runningPulse?.body, { ref: 'lease-running', stage: '命令执行中' })
+    assert.deepEqual(queuedPulse?.body, { ref: 'lease-queued', stage: '命令排队中' })
+    assert.deepEqual(canceledPulse?.body, { ref: 'lease-canceled', stage: '命令排队中' })
+
+    dispatcher.handleCancel(
+      'cancel-lease-canceled',
+      's',
+      's',
+      { ref: 'lease-canceled', reason: 'operator' },
+    )
+    for (let round = 0; round < 20 && results(out.frames, 'lease-canceled').length === 0; round++) {
+      await Promise.resolve()
+    }
+    assert.equal(results(out.frames, 'lease-canceled')[0]?.body.status, ResultStatus.Canceled)
+    assert.deepEqual(dispatcher.snapshot(), { queueDepth: 1, inFlight: 'lease-running' })
+
+    releaseFirst()
+    for (let round = 0; round < 20 && results(out.frames, 'lease-queued').length === 0; round++) {
+      await Promise.resolve()
+    }
+    assert.deepEqual(starts, ['all', 'unread'])
+    assert.equal(results(out.frames, 'lease-running')[0]?.body.status, ResultStatus.Ok)
+    assert.equal(results(out.frames, 'lease-queued')[0]?.body.status, ResultStatus.Ok)
+
+    const pulseCount = out.frames.filter((frame) => frame.kind === Kind.Progress).length
+    mock.timers.tick(30_000)
+    await Promise.resolve()
+    assert.equal(
+      out.frames.filter((frame) => frame.kind === Kind.Progress).length,
+      pulseCount,
+      '终局后不得残留租约心跳',
+    )
+  } finally {
+    releaseFirst()
+    mock.timers.reset()
+  }
+})
+
+test('租约心跳不延长 execBudget，预算终局后立即停止', async () => {
+  let releaseHandler = () => {}
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] })
+  try {
+    const handlerGate = new Promise((resolve) => { releaseHandler = resolve })
+    register({
+      name: Primitive.ChatReadList,
+      class: 'intrusive',
+      async handler() {
+        await handlerGate
+        return { status: 'ok', data: { complete: true, sessions: [] } }
+      },
+    })
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('lease-budget', 's', 's', {
+      name: Primitive.ChatReadList,
+      ver: 1,
+      context: {
+        platform: 'zhilian',
+        accountRef: 'account-lease-budget',
+        expectedPrincipalFingerprint: 'principal-lease-budget',
+      },
+      args: { filter: 'all', maxSessions: 10 },
+      deadline: Date.now() + 100_000,
+      execBudgetMs: 25_000,
+      leaseMs: 9_000,
+    })
+
+    mock.timers.tick(24_000)
+    await Promise.resolve()
+    assert.equal(results(out.frames, 'lease-budget').length, 0)
+    assert.ok(
+      out.frames.filter((frame) =>
+        frame.kind === Kind.Progress && frame.body.ref === 'lease-budget').length >= 2,
+      '预算内长执行必须持续发送租约心跳',
+    )
+
+    mock.timers.tick(1_000)
+    for (let round = 0; round < 20 && results(out.frames, 'lease-budget').length === 0; round++) {
+      await Promise.resolve()
+    }
+    const terminal = results(out.frames, 'lease-budget')[0]?.body
+    assert.equal(terminal?.status, ResultStatus.Failed)
+    assert.equal(terminal?.error.code, ErrorCode.ExecTimeoutHand)
+
+    const pulseCount = out.frames.filter((frame) =>
+      frame.kind === Kind.Progress && frame.body.ref === 'lease-budget').length
+    mock.timers.tick(30_000)
+    await Promise.resolve()
+    assert.equal(
+      out.frames.filter((frame) =>
+        frame.kind === Kind.Progress && frame.body.ref === 'lease-budget').length,
+      pulseCount,
+      'execBudget 终局后不得继续续租',
+    )
+
+    releaseHandler()
+    for (let round = 0; round < 20 && dispatcher.snapshot().inFlight !== null; round++) {
+      await Promise.resolve()
+    }
+    assert.equal(dispatcher.snapshot().inFlight, null)
+    assert.equal(results(out.frames, 'lease-budget').length, 1, '晚到 handler 结果不得覆盖预算终局')
+  } finally {
+    releaseHandler()
+    mock.timers.reset()
+  }
 })
 
 test('generated CmdContext 原样只读暴露给 program handler', async () => {
