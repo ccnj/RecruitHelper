@@ -51,7 +51,10 @@ type AdoptInboundConversationProfileResult struct {
 //
 // PositionRef intentionally stores the same backend Job.ID as BackendJobID for
 // this inbound-only path: the IM list contract exposes the visible position
-// title, not a separately trusted platform position identity.
+// title, not a separately trusted platform position identity. Because the
+// production configuration plane currently syncs exactly one current job,
+// historical heads never participate: only the most recently synchronized
+// head may match, while a timestamp tie is treated as ambiguous.
 func (s *Store) AdoptInboundConversationProfile(
 	req AdoptInboundConversationProfileRequest,
 ) (*AdoptInboundConversationProfileResult, error) {
@@ -130,22 +133,22 @@ func (s *Store) AdoptInboundConversationProfile(
 			return ErrInboundProfileAdoptionConflict
 		}
 
-		matches, err := currentLegacyJobMatchesByTitleTx(tx, positionTitle)
+		match, ambiguous, err := currentLegacyJobMatchByTitleTx(tx, positionTitle)
 		if err != nil {
 			return err
 		}
-		switch len(matches) {
-		case 0:
-			out.Outcome = InboundProfilePositionNoMatch
-			return nil
-		case 1:
-			// Continue inside this transaction so the matched current head and
-			// the new profile cannot observe different configuration states.
-		default:
+		switch {
+		case ambiguous:
 			out.Outcome = InboundProfilePositionAmbiguous
 			return nil
+		case match == nil:
+			out.Outcome = InboundProfilePositionNoMatch
+			return nil
+		default:
+			// Continue inside this transaction so the matched current head and
+			// the new profile cannot observe different configuration states.
 		}
-		backendJobID := strings.TrimSpace(matches[0].SourceJobRef)
+		backendJobID := strings.TrimSpace(match.SourceJobRef)
 		if backendJobID == "" {
 			return ErrJobAIContextHeadInvalid
 		}
@@ -235,37 +238,42 @@ func (s *Store) AdoptInboundConversationProfile(
 	return out, nil
 }
 
-func currentLegacyJobMatchesByTitleTx(
+func currentLegacyJobMatchByTitleTx(
 	tx *gorm.DB,
 	positionTitle string,
-) ([]JobAIContextRevision, error) {
+) (*JobAIContextRevision, bool, error) {
 	if tx == nil || textcanon.Normalize(positionTitle) == "" {
-		return nil, ErrInboundProfileAdoptionInvalid
+		return nil, false, ErrInboundProfileAdoptionInvalid
 	}
 	var heads []JobAIContextHead
 	if err := tx.Where("source_kind = ?", legacyJobConfigSourceKind).
-		Order("source_job_ref").
+		Order("last_synced_at DESC, source_job_ref ASC").
+		Limit(2).
 		Find(&heads).Error; err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	wanted := textcanon.Normalize(positionTitle)
-	matches := make([]JobAIContextRevision, 0, 2)
-	for _, head := range heads {
-		revision, err := currentLegacyJobAIContextByBackendJobIDTx(
-			tx,
-			head.SourceJobRef,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if revision == nil {
-			return nil, ErrJobAIContextHeadInvalid
-		}
-		if textcanon.Normalize(revision.DisplayName) == wanted {
-			matches = append(matches, *revision)
-		}
+	if len(heads) == 0 {
+		return nil, false, nil
 	}
-	return matches, nil
+	if len(heads) > 1 &&
+		heads[0].LastSyncedAt.Equal(heads[1].LastSyncedAt) &&
+		heads[0].SourceJobRef != heads[1].SourceJobRef {
+		return nil, true, nil
+	}
+	revision, err := currentLegacyJobAIContextByBackendJobIDTx(
+		tx,
+		heads[0].SourceJobRef,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if revision == nil {
+		return nil, false, ErrJobAIContextHeadInvalid
+	}
+	if textcanon.Normalize(revision.DisplayName) != textcanon.Normalize(positionTitle) {
+		return nil, false, nil
+	}
+	return revision, false, nil
 }
 
 func inboundProfileByConversationTx(

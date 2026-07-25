@@ -162,8 +162,6 @@ func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T
 func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *testing.T) {
 	h := newHarness(t)
 	savePatrolInboundLegacyJob(t, h, "job-valid", "客户经理")
-	savePatrolInboundLegacyJob(t, h, "job-duplicate-a", "重复职位")
-	savePatrolInboundLegacyJob(t, h, "job-duplicate-b", " 重复职位 ")
 
 	displayName, oldPositionTitle := "既有候选人", "既有职位"
 	if _, err := h.db.SelectCandidateProfile(store.SelectCandidateProfileRequest{
@@ -199,12 +197,10 @@ func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *tes
 
 	validPosition := "客户经理"
 	noMatchPosition := "未配置职位"
-	ambiguousPosition := "重复职位"
 	sessions := []protocol.ConversationSummary{
 		inboundSummary("conversation-missing-identity", "", "合成候选人", &validPosition),
 		inboundSummary("conversation-missing-position", "peer-missing-position", "合成候选人", nil),
 		inboundSummary("conversation-no-match", "peer-no-match", "合成候选人", &noMatchPosition),
-		inboundSummary("conversation-ambiguous", "peer-ambiguous", "合成候选人", &ambiguousPosition),
 		inboundSummary("conversation-human-conflict", "peer-human-conflict", "合成候选人", &validPosition),
 		inboundSummary(factConflictKey.ConversationRef, "peer-fact-conflict", "合成候选人", &validPosition),
 		inboundSummary("conversation-valid-last", "peer-valid-last", "合成候选人", &validPosition),
@@ -253,7 +249,6 @@ func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *tes
 		"conversation-missing-identity",
 		"conversation-missing-position",
 		"conversation-no-match",
-		"conversation-ambiguous",
 		"conversation-human-conflict",
 		factConflictKey.ConversationRef,
 	} {
@@ -270,7 +265,6 @@ func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *tes
 		"conversation-missing-identity": "status=skipped reason=missingPlatformUserRef",
 		"conversation-missing-position": "status=skipped reason=missingPositionTitle",
 		"conversation-no-match":         "status=skipped reason=positionNoMatch",
-		"conversation-ambiguous":        "status=skipped reason=positionAmbiguous",
 		"conversation-human-conflict":   "status=manualRequired reason=humanProfileConflict",
 		factConflictKey.ConversationRef: "status=manualRequired reason=identityFactConflict",
 		validKey.ConversationRef:        "status=adopted",
@@ -299,7 +293,7 @@ func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *tes
 			continue
 		}
 		for _, secret := range []string{
-			"peer-", "合成候选人", "客户经理", "重复职位", "未配置职位",
+			"peer-", "合成候选人", "客户经理", "未配置职位",
 		} {
 			if strings.Contains(audit.Detail, secret) {
 				t.Fatalf("收编审计泄露页面身份或职位明文: %+v", audit)

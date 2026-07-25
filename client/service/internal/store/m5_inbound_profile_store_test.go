@@ -220,6 +220,63 @@ func TestAdoptInboundConversationProfileConservativelySkipsMissingOrAmbiguousJob
 	}
 }
 
+func TestAdoptInboundConversationProfileOnlyMatchesMostRecentlySyncedJob(t *testing.T) {
+	at := time.Date(2026, 7, 26, 9, 15, 0, 0, time.UTC)
+
+	t.Run("old customer matching title cannot win", func(t *testing.T) {
+		s := openTest(t)
+		req := inboundAdoptionRequest(at)
+		req.PositionTitle = "客户经理"
+		seedInboundConversation(
+			t,
+			s,
+			req.Platform,
+			req.AccountRef,
+			req.ConversationRef,
+			req.PlatformUserRef,
+			"候选人甲",
+			at,
+		)
+		saveInboundLegacyJob(t, s, "old-customer-job", "客户经理", at.Add(-time.Hour))
+		saveInboundLegacyJob(t, s, "current-customer-job", "销售经理", at.Add(-time.Minute))
+
+		result, err := s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfilePositionNoMatch ||
+			result.Profile != nil {
+			t.Fatalf("旧客户职位不得参与当前匹配: result=%+v err=%v", result, err)
+		}
+		assertInboundAdoptionLeftNoFacts(t, s, req)
+	})
+
+	t.Run("same title binds current customer job", func(t *testing.T) {
+		s := openTest(t)
+		req := inboundAdoptionRequest(at)
+		req.PositionTitle = "客户经理"
+		seedInboundConversation(
+			t,
+			s,
+			req.Platform,
+			req.AccountRef,
+			req.ConversationRef,
+			req.PlatformUserRef,
+			"候选人甲",
+			at,
+		)
+		saveInboundLegacyJob(t, s, "old-customer-job", "客户经理", at.Add(-time.Hour))
+		saveInboundLegacyJob(t, s, "current-customer-job", "客户经理", at.Add(-time.Minute))
+
+		result, err := s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfileAdopted ||
+			result.Profile == nil ||
+			result.Profile.BackendJobID == nil ||
+			*result.Profile.BackendJobID != "current-customer-job" {
+			t.Fatalf("同名职位必须绑定最近同步的当前职位: result=%+v err=%v", result, err)
+		}
+	})
+}
+
 func TestAdoptInboundConversationProfileHonorsHumanLevelProfileGate(t *testing.T) {
 	s := openTest(t)
 	at := time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC)
