@@ -249,14 +249,15 @@ func (s *Store) FreezeCommunicationV4Turn(
 			InputDigest: req.InputDigest, SemanticKind: communicationV4DialogueTurnSemanticKind,
 			MessageSeq: req.InboundThroughSeq, FromRevision: aggregate.Revision, ToRevision: next.Revision,
 			Outcome: CommunicationV4ApplicationOutcome{
-				Dialogue:       decision.Requirement,
-				Actions:        append([]communication.V4EventAction(nil), decision.EventActions...),
-				ManualReason:   communication.V4ManualReason(manualReason),
-				DialogueStatus: decision.Dialogue.Status,
-				NextAdvice:     decision.Dialogue.NextAdvice,
-				IntentLabel:    decision.Dialogue.IntentLabel,
-				IntentSource:   decision.Dialogue.IntentSource,
-				PlannedActions: redactedCommunicationV4Plans(decision.Dialogue.Actions),
+				Dialogue:             decision.Requirement,
+				DialogueAfterActions: decision.DialogueAfterActions,
+				Actions:              append([]communication.V4EventAction(nil), decision.EventActions...),
+				ManualReason:         communication.V4ManualReason(manualReason),
+				DialogueStatus:       decision.Dialogue.Status,
+				NextAdvice:           decision.Dialogue.NextAdvice,
+				IntentLabel:          decision.Dialogue.IntentLabel,
+				IntentSource:         decision.Dialogue.IntentSource,
+				PlannedActions:       redactedCommunicationV4Plans(decision.Dialogue.Actions),
 			},
 			AppliedAt: req.FrozenAt,
 		}
@@ -446,6 +447,59 @@ func communicationV4TurnHeadApplicationTx(
 	head, found, err := communicationV4TurnApplicationTx(tx, turn)
 	if err != nil || !found {
 		return head, found, err
+	}
+	if head.Outcome.DialogueAfterActions {
+		if head.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+			head.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+			head.Outcome.NextAdvice != communication.V4AdviceNone {
+			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+		}
+		actions, err := communicationV4EventActionsBySourceTx(
+			tx,
+			turn.ProfileID,
+			CommunicationV4InputDialogueTurn,
+			turn.TurnID,
+		)
+		if err != nil {
+			return CommunicationV4ProjectionApplication{}, false, err
+		}
+		var accept *CommunicationV4EventAction
+		for index := range actions {
+			if actions[index].V4Kind != communication.V4ActionAcceptWechat {
+				continue
+			}
+			if accept != nil {
+				return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+			}
+			copy := actions[index]
+			accept = &copy
+		}
+		if accept == nil {
+			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+		}
+		if accept.Status == CommunicationV4EventActionSent {
+			continuation, exists, err := communicationV4ApplicationTx(
+				tx,
+				turn.ProfileID,
+				CommunicationV4InputConfirmedAction,
+				accept.SemanticActionKey,
+			)
+			if err != nil {
+				return CommunicationV4ProjectionApplication{}, false, err
+			}
+			if !exists ||
+				continuation.SemanticKind != string(communication.V4ActionAcceptWechat) ||
+				continuation.MessageSeq != 0 ||
+				continuation.FromRevision != head.ToRevision ||
+				continuation.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+				continuation.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+				continuation.Outcome.NextAdvice != communication.V4AdviceReply ||
+				continuation.Outcome.IntentLabel != m5ai.IntentInterested ||
+				continuation.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+				return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+			}
+			head = continuation
+		}
 	}
 	for _, purpose := range []m5ai.CompletionPurpose{m5ai.PurposeIntent, m5ai.PurposeReply} {
 		key := communicationV4DialogueAdviceKey(turn.TurnID, purpose)

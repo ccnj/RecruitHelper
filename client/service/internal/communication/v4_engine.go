@@ -21,8 +21,9 @@ type V4InboundTurnInput struct {
 }
 
 type V4InboundTurnDecision struct {
-	State       V4State
-	Requirement V4DialogueRequirement
+	State                V4State
+	Requirement          V4DialogueRequirement
+	DialogueAfterActions bool
 
 	EventActions []V4EventAction
 	Dialogue     V4DialogueDecision
@@ -136,8 +137,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 	); handled {
 		return V4InboundTurnDecision{
 			State: eventDecision.State, Requirement: eventDecision.Dialogue,
-			EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
-			Dialogue:     receipt, ManualReason: receipt.ManualReason,
+			DialogueAfterActions: eventDecision.DialogueAfterActions,
+			EventActions:         append([]V4EventAction(nil), eventDecision.Actions...),
+			Dialogue:             receipt, ManualReason: receipt.ManualReason,
 		}, nil
 	}
 
@@ -151,8 +153,9 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 	}
 	return V4InboundTurnDecision{
 		State: dialogue.State, Requirement: eventDecision.Dialogue,
-		EventActions: append([]V4EventAction(nil), eventDecision.Actions...),
-		Dialogue:     dialogue, ManualReason: dialogue.ManualReason,
+		DialogueAfterActions: eventDecision.DialogueAfterActions,
+		EventActions:         append([]V4EventAction(nil), eventDecision.Actions...),
+		Dialogue:             dialogue, ManualReason: dialogue.ManualReason,
 	}, nil
 }
 

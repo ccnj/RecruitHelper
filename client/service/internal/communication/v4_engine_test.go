@@ -85,12 +85,15 @@ func TestV4InboundTurnWechatRequestPlansDeterministicActionsBeforeAI(t *testing.
 	if err != nil || len(decision.EventActions) != 2 || decision.EventActions[0].Kind != V4ActionAcceptWechat ||
 		decision.EventActions[1].Kind != V4ActionNotifyWechat || decision.Dialogue.Status != V4DialogueWaitingPrerequisite ||
 		decision.Dialogue.NextAdvice != V4AdviceNone ||
-		decision.Requirement != V4DialogueWechatContinuation {
+		decision.Requirement != V4DialogueWechatContinuation ||
+		!decision.DialogueAfterActions {
 		t.Fatalf("主动换微信没有先给确定性动作: decision=%+v err=%v", decision, err)
 	}
 	input.PrerequisitesConfirmed = true
 	afterAccept, err := ReduceV4InboundTurn(input)
-	if err != nil || afterAccept.Dialogue.Status != V4DialogueWaitingAdvice || afterAccept.Dialogue.NextAdvice != V4AdviceReply {
+	if err != nil || afterAccept.Dialogue.Status != V4DialogueWaitingAdvice ||
+		afterAccept.Dialogue.NextAdvice != V4AdviceReply ||
+		!afterAccept.DialogueAfterActions {
 		t.Fatalf("同意动作确认后没有开放唯一 reply AI: decision=%+v err=%v", afterAccept, err)
 	}
 }

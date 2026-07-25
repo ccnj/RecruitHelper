@@ -458,10 +458,46 @@ func assertCommunicationV4WechatAcceptSettled(
 	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	if err != nil ||
 		aggregate.State.WechatState != communication.V4WechatExchanged ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-		aggregate.ManualReason != string(communication.V4ManualWechatContinuation) {
-		t.Fatalf("接受正证未推进微信状态并显式移交人工: aggregate=%+v err=%v",
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("接受正证未推进微信状态并保留自动承接资格: aggregate=%+v err=%v",
 			aggregate, err)
+	}
+	turn, err := s.DialogueTurnByID(fixture.Turn.TurnID)
+	if err != nil || turn == nil ||
+		turn.Status != DialogueTurnClassified ||
+		turn.IntentLabel != m5ai.IntentInterested ||
+		turn.IntentSource != DialogueIntentBusinessEvent ||
+		turn.ClassifiedAt == nil {
+		t.Fatalf("接受正证未把原轮推进到一次回复建议: turn=%+v err=%v", turn, err)
+	}
+	var initial CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&initial,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		fixture.Turn.TurnID,
+	).Error; err != nil ||
+		initial.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+		!initial.Outcome.DialogueAfterActions ||
+		initial.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite {
+		t.Fatalf("主动换微信轮没有冻结动作后承接语义: initial=%+v err=%v", initial, err)
+	}
+	var confirmed CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&confirmed,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		fixture.Action.SemanticActionKey,
+	).Error; err != nil ||
+		confirmed.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+		confirmed.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+		confirmed.Outcome.NextAdvice != communication.V4AdviceReply ||
+		confirmed.Outcome.IntentLabel != m5ai.IntentInterested ||
+		confirmed.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+		t.Fatalf("接受正证没有形成不可变回复授权: confirmed=%+v err=%v", confirmed, err)
 	}
 }
 
@@ -524,6 +560,84 @@ func TestCommunicationV4WechatAcceptDirectResultIsAtomicAndPrivate(t *testing.T)
 	)
 }
 
+func TestCommunicationV4WechatAcceptAuthorizesOneReplyAndFailureKeepsContact(t *testing.T) {
+	s := openTest(t)
+	fixture := seedCommunicationV4WechatAcceptEffect(t, s, "continuation")
+	req := communicationV4EventEffectRequest(
+		t,
+		s,
+		fixture,
+		fixture.Action,
+		"accept-continuation",
+	)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("接受微信 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	settleCommunicationV4WechatAcceptEffect(
+		t,
+		s,
+		fixture,
+		created,
+		"result-v4-accept-continuation",
+		strings.Repeat("8", 64),
+		"synthetic-wechat-continuation",
+	)
+
+	reservation := ReserveAIInvocationRequest{
+		InvocationID: "invocation-v4-wechat-continuation",
+		TurnID:       fixture.Turn.TurnID,
+		Purpose:      m5ai.PurposeReply,
+		Attempt:      1,
+		Provider:     "deepseek",
+		Model:        "deepseek-v4-pro",
+		InputHash:    "input-v4-wechat-continuation",
+		CreatedAt:    fixture.Now.Add(2 * time.Minute),
+	}
+	reserved, err := s.ReserveAIInvocation(reservation)
+	if err != nil || reserved == nil || !reserved.Created {
+		t.Fatalf("接受正证后唯一回复调用未获授权: result=%+v err=%v", reserved, err)
+	}
+	replayed, err := s.ReserveAIInvocation(reservation)
+	if err != nil || replayed == nil || replayed.Created ||
+		replayed.Invocation.InvocationID != reservation.InvocationID {
+		t.Fatalf("回复调用重放发生增生: result=%+v err=%v", replayed, err)
+	}
+	var invocationCount int64
+	if err := s.db.Model(&AIInvocation{}).
+		Where("turn_id = ? AND purpose = ?", fixture.Turn.TurnID, m5ai.PurposeReply).
+		Count(&invocationCount).Error; err != nil || invocationCount != 1 {
+		t.Fatalf("同轮回复调用不唯一: count=%d err=%v", invocationCount, err)
+	}
+
+	finishedAt := reservation.CreatedAt.Add(time.Second)
+	action, err := s.CompleteReplyInvocation(CompleteReplyInvocationRequest{
+		Completion: AIInvocationCompletion{
+			InvocationID: reservation.InvocationID,
+			Status:       AIInvocationInvalidOutput,
+			OutputHash:   "invalid-v4-wechat-continuation",
+			LatencyMs:    20,
+			ErrorClass:   "invalidJSON",
+			FinishedAt:   finishedAt,
+		},
+	})
+	if err != nil || action != nil {
+		t.Fatalf("承接 AI 失败应只转人工且不创建正文: action=%+v err=%v", action, err)
+	}
+	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	assets, assetsErr := s.ContactAssetsByProfile(fixture.ProfileID)
+	if aggregateErr != nil ||
+		aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		assetsErr != nil ||
+		len(assets) != 1 ||
+		assets[0].EffectIntentID == nil ||
+		*assets[0].EffectIntentID != created.Intent.IntentID {
+		t.Fatalf("承接 AI 失败回滚了接受/联系方式事实: aggregate=%+v assets=%+v errs=(%v,%v)",
+			aggregate, assets, aggregateErr, assetsErr)
+	}
+}
+
 func TestCommunicationV4WechatAcceptVerificationAndRestartAreIdempotent(t *testing.T) {
 	dataDir := t.TempDir()
 	s, err := Open(dataDir)
@@ -565,6 +679,17 @@ func TestCommunicationV4WechatAcceptVerificationAndRestartAreIdempotent(t *testi
 		},
 	); err != nil {
 		t.Fatal(err)
+	}
+	turnBeforeVerification, err := s.LatestDialogueTurnForProfile(fixture.ProfileID)
+	if err != nil ||
+		turnBeforeVerification == nil ||
+		turnBeforeVerification.Status != DialogueTurnCollected {
+		t.Fatalf("接受结果未确认时不应推进承接轮: turn=%+v err=%v", turnBeforeVerification, err)
+	}
+	invocationsBeforeVerification, err := s.AIInvocationsForTurn(fixture.Turn.TurnID)
+	if err != nil || len(invocationsBeforeVerification) != 0 {
+		t.Fatalf("接受结果未确认时不得构造承接 AI: invocations=%+v err=%v",
+			invocationsBeforeVerification, err)
 	}
 	exchangeSourceKey := strings.Repeat("7", 64)
 	resolveReq := VerifiedWechatAcceptSuccess{

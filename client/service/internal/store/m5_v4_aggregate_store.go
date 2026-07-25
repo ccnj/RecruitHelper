@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/communication"
+	"recruithelper/client/service/internal/m5ai"
 
 	"gorm.io/gorm"
 )
@@ -405,8 +406,36 @@ func applyCommunicationV4ConfirmedActionTx(
 	action communication.V4ConfirmedAction,
 	appliedAt time.Time,
 ) (CommunicationV4Aggregate, CommunicationV4ProjectionApplication, bool, error) {
+	return applyCommunicationV4ConfirmedActionWithContinuationTx(
+		tx,
+		profileID,
+		action,
+		nil,
+		appliedAt,
+	)
+}
+
+type communicationV4WechatContinuation struct {
+	Turn                 DialogueTurn
+	ExpectedFromRevision uint64
+}
+
+func applyCommunicationV4ConfirmedActionWithContinuationTx(
+	tx *gorm.DB,
+	profileID string,
+	action communication.V4ConfirmedAction,
+	continuation *communicationV4WechatContinuation,
+	appliedAt time.Time,
+) (CommunicationV4Aggregate, CommunicationV4ProjectionApplication, bool, error) {
 	if tx == nil || strings.TrimSpace(profileID) == "" || strings.TrimSpace(action.ActionKey) == "" ||
 		appliedAt.IsZero() {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+	}
+	if continuation != nil &&
+		(action.Kind != communication.V4ActionAcceptWechat ||
+			action.MessageSeq != 0 ||
+			continuation.Turn.ProfileID != profileID ||
+			strings.TrimSpace(continuation.Turn.TurnID) == "") {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
 	}
 	appliedAt = appliedAt.UTC()
@@ -429,12 +458,23 @@ func applyCommunicationV4ConfirmedActionTx(
 			existing.MessageSeq != action.MessageSeq {
 			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 		}
+		if continuation != nil &&
+			(existing.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+				existing.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+				existing.Outcome.NextAdvice != communication.V4AdviceReply ||
+				existing.Outcome.IntentLabel != m5ai.IntentInterested ||
+				existing.Outcome.IntentSource != communication.IntentSourceBusinessEvent) {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
 		return aggregate, existing, false, nil
 	}
 	if aggregate.Revision == ^uint64(0) {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 	}
 	if action.MessageSeq > 0 && action.MessageSeq != aggregate.ProjectedThroughSeq+1 {
+		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	}
+	if continuation != nil && continuation.ExpectedFromRevision != aggregate.Revision {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 	}
 	state, err := communication.ApplyV4ConfirmedAction(aggregate.State, action)
@@ -450,19 +490,50 @@ func applyCommunicationV4ConfirmedActionTx(
 	next.UpdatedAt = appliedAt
 	stateBeforeAction := aggregate.State
 	projectedThroughSeqBefore := aggregate.ProjectedThroughSeq
+	outcome := CommunicationV4ApplicationOutcome{
+		Dialogue:                  communication.V4DialogueNone,
+		StateBeforeAction:         &stateBeforeAction,
+		ProjectedThroughSeqBefore: &projectedThroughSeqBefore,
+	}
+	if continuation != nil {
+		outcome.Dialogue = communication.V4DialogueWechatContinuation
+		outcome.DialogueStatus = communication.V4DialogueWaitingAdvice
+		outcome.NextAdvice = communication.V4AdviceReply
+		outcome.IntentLabel = m5ai.IntentInterested
+		outcome.IntentSource = communication.IntentSourceBusinessEvent
+	}
 	application := CommunicationV4ProjectionApplication{
 		ProfileID: profileID, InputKind: CommunicationV4InputConfirmedAction, InputKey: action.ActionKey,
 		InputDigest: digest, SemanticKind: string(action.Kind), MessageSeq: action.MessageSeq,
 		FromRevision: aggregate.Revision, ToRevision: next.Revision,
-		Outcome: CommunicationV4ApplicationOutcome{
-			Dialogue:                  communication.V4DialogueNone,
-			StateBeforeAction:         &stateBeforeAction,
-			ProjectedThroughSeqBefore: &projectedThroughSeqBefore,
-		},
+		Outcome:   outcome,
 		AppliedAt: appliedAt,
 	}
 	if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+	}
+	if continuation != nil {
+		updated := tx.Model(&DialogueTurn{}).
+			Where(
+				"turn_id = ? AND profile_id = ? AND status = ? AND intent_label = ? AND intent_source = ?",
+				continuation.Turn.TurnID,
+				profileID,
+				DialogueTurnCollected,
+				m5ai.IntentInterested,
+				DialogueIntentBusinessEvent,
+			).
+			Updates(map[string]any{
+				"status":         DialogueTurnClassified,
+				"classified_at":  appliedAt,
+				"failure_reason": "",
+				"updated_at":     appliedAt,
+			})
+		if updated.Error != nil {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
 	}
 	return next, application, true, nil
 }

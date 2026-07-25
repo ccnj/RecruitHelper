@@ -730,7 +730,8 @@ func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 	)
 	if err != nil ||
 		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
-		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone {
+		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone ||
+		!frozen.Application.Outcome.DialogueAfterActions {
 		t.Fatalf("主动换微信没有冻结为前置动作等待: frozen=%+v err=%v", frozen, err)
 	}
 	eventActions, err := s.CommunicationV4EventActionsBySource(

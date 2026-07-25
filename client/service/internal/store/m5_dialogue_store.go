@@ -785,13 +785,18 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 			return nil
 		}
 		dayStart, nextDay := localDayBounds(req.CreatedAt)
-		var dailyCalls int64
+		var dialogueCalls, scheduleCalls int64
 		if err := tx.Model(&AIInvocation{}).
 			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&dailyCalls).Error; err != nil {
+			Count(&dialogueCalls).Error; err != nil {
 			return err
 		}
-		if dailyCalls >= m5DailyProviderCallLimit {
+		if err := tx.Model(&CommunicationV4ScheduleAIInvocation{}).
+			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
+			Count(&scheduleCalls).Error; err != nil {
+			return err
+		}
+		if dialogueCalls+scheduleCalls >= m5DailyProviderCallLimit {
 			return ErrAIInvocationBudget
 		}
 		if err := tx.Create(&wanted).Error; err != nil {
@@ -3022,6 +3027,72 @@ func (s *Store) MarkM5AutomaticActionManualRequired(actionID, reason string, at 
 	})
 }
 
+func communicationV4WechatContinuationForAcceptedActionTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+	intent EffectIntent,
+	asset ContactAsset,
+) (*communicationV4WechatContinuation, bool, error) {
+	if tx == nil ||
+		action.V4Kind != communication.V4ActionAcceptWechat ||
+		action.EffectKind != CommunicationV4EventEffectAcceptWechat ||
+		action.SourceInputKind != CommunicationV4InputDialogueTurn ||
+		strings.TrimSpace(action.SourceInputKey) == "" ||
+		action.ProfileID == "" ||
+		action.EffectIntentID == nil ||
+		*action.EffectIntentID != intent.IntentID ||
+		asset.EffectIntentID == nil ||
+		*asset.EffectIntentID != intent.IntentID {
+		return nil, false, nil
+	}
+	initial, found, err := communicationV4ApplicationTx(
+		tx,
+		action.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		action.SourceInputKey,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, ErrCommunicationV4Corrupt
+	}
+	if initial.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+		!initial.Outcome.DialogueAfterActions ||
+		initial.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		initial.Outcome.NextAdvice != communication.V4AdviceNone ||
+		initial.Outcome.IntentLabel != m5ai.IntentInterested ||
+		initial.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+		return nil, false, ErrCommunicationV4Corrupt
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", action.SourceInputKey).Error; err != nil {
+		return nil, false, err
+	}
+	if turn.ProfileID != action.ProfileID {
+		return nil, false, ErrCommunicationV4Corrupt
+	}
+	_, alreadyConfirmed, err := communicationV4ApplicationTx(
+		tx,
+		action.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		action.SemanticActionKey,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if !alreadyConfirmed &&
+		(turn.Status != DialogueTurnCollected ||
+			turn.IntentLabel != m5ai.IntentInterested ||
+			turn.IntentSource != DialogueIntentBusinessEvent) {
+		return nil, false, ErrCommunicationV4Corrupt
+	}
+	return &communicationV4WechatContinuation{
+		Turn:                 turn,
+		ExpectedFromRevision: initial.ToRevision,
+	}, true, nil
+}
+
 func applyCommunicationV4EventActionEffectStatusTx(
 	tx *gorm.DB,
 	action CommunicationV4EventAction,
@@ -3077,30 +3148,47 @@ func applyCommunicationV4EventActionEffectStatusTx(
 			if updated.RowsAffected != 1 {
 				return ErrCommunicationActionConflict
 			}
+			confirmed := communication.V4ConfirmedAction{
+				ActionKey:      action.SemanticActionKey,
+				Kind:           action.V4Kind,
+				MessageSeq:     0,
+				CardMessageSeq: action.CardMessageSeq,
+				SentAt:         sentAt,
+			}
+			continuation, continuationReady, err :=
+				communicationV4WechatContinuationForAcceptedActionTx(
+					tx,
+					action,
+					*intent,
+					*asset,
+				)
+			if err != nil {
+				return err
+			}
+			if continuationReady {
+				_, _, _, err = applyCommunicationV4ConfirmedActionWithContinuationTx(
+					tx,
+					action.ProfileID,
+					confirmed,
+					continuation,
+					at,
+				)
+				return err
+			}
 			_, _, _, err = applyCommunicationV4ConfirmedActionTx(
 				tx,
 				action.ProfileID,
-				communication.V4ConfirmedAction{
-					ActionKey:      action.SemanticActionKey,
-					Kind:           action.V4Kind,
-					MessageSeq:     0,
-					CardMessageSeq: action.CardMessageSeq,
-					SentAt:         sentAt,
-				},
+				confirmed,
 				at,
 			)
 			if err != nil {
 				return err
 			}
-			// The accepted request has become a durable contact fact, but the
-			// same-turn continuation body is deliberately outside the current
-			// authorization. Stop this profile explicitly instead of leaving
-			// DialogueAfterActions waiting with no consumer.
+			// Historical/business-event-only sources have no frozen dialogue
+			// turn to continue. Keep the old conservative terminal for those
+			// rows instead of inventing a new AI input boundary.
 			return markCommunicationV4AutomationManualTx(
-				tx,
-				action.ProfileID,
-				string(communication.V4ManualWechatContinuation),
-				at,
+				tx, action.ProfileID, string(communication.V4ManualWechatContinuation), at,
 			)
 		}
 		if intent.ResultMessageSeq == nil {

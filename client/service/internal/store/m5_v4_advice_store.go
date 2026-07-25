@@ -110,10 +110,23 @@ func communicationV4TurnReducerInputTx(
 	if err != nil {
 		return communication.V4InboundTurnDecision{}, ErrDialogueTurnBinding
 	}
+	prerequisitesConfirmed := false
+	if requirement == communication.V4DialogueWechatContinuation {
+		head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+		if err != nil {
+			return communication.V4InboundTurnDecision{}, err
+		}
+		prerequisitesConfirmed = found &&
+			head.InputKind == CommunicationV4InputConfirmedAction &&
+			head.Outcome.Dialogue == communication.V4DialogueWechatContinuation &&
+			head.Outcome.DialogueStatus == communication.V4DialogueWaitingAdvice &&
+			head.Outcome.NextAdvice == communication.V4AdviceReply
+	}
 	decision, err := communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
 		State: aggregate.State, TurnID: turn.TurnID, Messages: facts,
 		RecommendedSlots: recommendedSlots,
 		Intent:           intent, Reply: reply, FixedPhrases: fixedPhrases,
+		PrerequisitesConfirmed: prerequisitesConfirmed,
 	})
 	if err != nil {
 		return communication.V4InboundTurnDecision{}, err
@@ -452,14 +465,15 @@ func persistCommunicationV4AdviceTx(
 		InputDigest: digest, SemanticKind: string(invocation.Purpose),
 		MessageSeq: turn.InboundThroughSeq, FromRevision: aggregate.Revision, ToRevision: next.Revision,
 		Outcome: CommunicationV4ApplicationOutcome{
-			Dialogue:       decision.Requirement,
-			Actions:        append([]communication.V4EventAction(nil), decision.EventActions...),
-			ManualReason:   communication.V4ManualReason(manualReason),
-			DialogueStatus: decision.Dialogue.Status,
-			NextAdvice:     decision.Dialogue.NextAdvice,
-			IntentLabel:    decision.Dialogue.IntentLabel,
-			IntentSource:   decision.Dialogue.IntentSource,
-			PlannedActions: redactedCommunicationV4Plans(decision.Dialogue.Actions),
+			Dialogue:             decision.Requirement,
+			DialogueAfterActions: decision.DialogueAfterActions,
+			Actions:              append([]communication.V4EventAction(nil), decision.EventActions...),
+			ManualReason:         communication.V4ManualReason(manualReason),
+			DialogueStatus:       decision.Dialogue.Status,
+			NextAdvice:           decision.Dialogue.NextAdvice,
+			IntentLabel:          decision.Dialogue.IntentLabel,
+			IntentSource:         decision.Dialogue.IntentSource,
+			PlannedActions:       redactedCommunicationV4Plans(decision.Dialogue.Actions),
 		},
 		AppliedAt: at,
 	}
