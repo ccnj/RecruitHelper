@@ -309,6 +309,72 @@ func makeCommunicationV4AIMaterialUnavailable(
 	}
 }
 
+func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
+	h := newHarness(t)
+	firstInbound := "页面当前窗入站"
+	secondInbound := "数据库旧目标入站"
+	first := seedCommunicationV4PatrolTarget(t, h, "page-observed", firstInbound)
+	second := seedCommunicationV4PatrolTarget(t, h, "page-absent", secondInbound)
+
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(first.conversationRef, "person-v4-patrol-page-observed", firstInbound, 0),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			t.Fatal("摘要与账本一致时不应读取线程")
+		default:
+			return defaultHandler(request)
+		}
+		return nil, errors.New("unreachable")
+	}
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			switch request.Purpose {
+			case m5ai.PurposeIntent:
+				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+			case m5ai.PurposeReply:
+				return safeFakeResponse(`{"话术_序列":["页面驱动回复"],"动作":"无"}`), nil
+			default:
+				return m5ai.CompletionResponse{}, fmt.Errorf("未知建议用途 %q", request.Purpose)
+			}
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, tickErr := manager.Tick(context.Background())
+	if tickErr != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("页面驱动 Tick 失败: result=%+v err=%v", result, tickErr)
+	}
+	if len(advice.requests) != 2 || hand.commandCount() != 1 {
+		t.Fatalf("只应推进页面当前窗档案: advice=%d sends=%d",
+			len(advice.requests), hand.commandCount())
+	}
+	firstTurn, err := h.db.LatestDialogueTurnForProfile(first.profileID)
+	if err != nil || firstTurn == nil || firstTurn.Status != store.DialogueTurnCompleted {
+		t.Fatalf("页面已见档案未完成: turn=%+v err=%v", firstTurn, err)
+	}
+	secondTurn, err := h.db.LatestDialogueTurnForProfile(second.profileID)
+	if err != nil || secondTurn != nil {
+		t.Fatalf("页面未见档案被数据库枚举推进: turn=%+v err=%v", secondTurn, err)
+	}
+	secondAggregate, err := h.db.CommunicationV4AggregateByProfile(second.profileID)
+	if err != nil || secondAggregate.ProjectedThroughSeq >= second.inboundSeq {
+		t.Fatalf("页面未见档案游标被推进: aggregate=%+v err=%v", secondAggregate, err)
+	}
+}
+
 func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 	t *testing.T,
 ) {

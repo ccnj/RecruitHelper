@@ -191,34 +191,7 @@ func (a *roundActor) executeCurrentConversationOnce(ctx context.Context) error {
 		return nil
 	}
 
-	if err := a.processCommunicationV4CardTransitionsForProfile(
-		ctx,
-		profile.ProfileID,
-	); err != nil {
-		return err
-	}
-	if err := a.drainCommunicationV4EventActionsForProfile(
-		ctx,
-		profile.ProfileID,
-	); err != nil {
-		return err
-	}
-	target, ready, err = a.manager.store.CommunicationTargetForProfile(profile.ProfileID)
-	if err != nil {
-		if errors.Is(err, store.ErrCommunicationV4Missing) {
-			return ErrCurrentConversationV4NotReady
-		}
-		return err
-	}
-	if !ready || target == nil {
-		// 本轮刚收编的卡片或动作可能已经把当前档案推进到人工/终态；
-		// 这表示精确目标已收敛，不授权处理其他档案。
-		return nil
-	}
-	if err := a.processCommunicationV4Target(ctx, *target); err != nil {
-		return err
-	}
-	return a.drainCommunicationV4EventActionsForProfile(ctx, profile.ProfileID)
+	return a.processCommunicationV4Profile(ctx, profile.ProfileID)
 }
 
 func (a *roundActor) finishCurrentConversation(runErr error) error {

@@ -40,6 +40,12 @@ type dirtyConversation struct {
 	ledger       []store.Message
 }
 
+type conversationListPage struct {
+	sessions   []protocol.ConversationSummary
+	complete   bool
+	nextCursor string
+}
+
 func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, hand HandState, trigger string, now time.Time) RoundOutcome {
 	key := store.AccountKey{Platform: account.Platform, AccountRef: account.AccountRef}
 	roundID := m.config.NewRoundID()
@@ -150,21 +156,53 @@ func (a *roundActor) execute(ctx context.Context) error {
 		return nil
 	}
 
-	if err := a.setStage("readingList"); err != nil {
-		return err
+	cursor := ""
+	seenCursors := make(map[string]struct{})
+	seenConversations := make(map[string]struct{})
+	for pageNumber := 0; pageNumber < a.manager.config.MaxPages; pageNumber++ {
+		if err := a.setStage("readingList"); err != nil {
+			return err
+		}
+		page, err := a.readListPage(ctx, cursor)
+		if err != nil {
+			a.handleCommandFailure(err)
+			return err
+		}
+		for _, summary := range page.sessions {
+			if _, duplicate := seenConversations[summary.ConversationRef]; duplicate {
+				return fmt.Errorf("%w: %s", store.ErrDuplicateConversationEntry, summary.ConversationRef)
+			}
+			seenConversations[summary.ConversationRef] = struct{}{}
+		}
+		if err := a.processConversationListPage(ctx, page); err != nil {
+			return err
+		}
+		if a.classificationCorrected || page.complete {
+			return nil
+		}
+		if page.nextCursor == "" || page.nextCursor == cursor {
+			return ErrPaginationLoop
+		}
+		if _, duplicate := seenCursors[page.nextCursor]; duplicate {
+			return ErrPaginationLoop
+		}
+		seenCursors[page.nextCursor] = struct{}{}
+		cursor = page.nextCursor
 	}
-	sessions, err := a.readList(ctx)
-	if err != nil {
-		a.handleCommandFailure(err)
-		return err
-	}
-	entries, err := listEntries(sessions)
+	return ErrPaginationLimit
+}
+
+func (a *roundActor) processConversationListPage(
+	ctx context.Context,
+	page conversationListPage,
+) error {
+	entries, err := listEntries(page.sessions)
 	if err != nil {
 		return err
 	}
 	if err := a.manager.store.SaveConversationList(store.SaveConversationListRequest{
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
-		ObservedAt: a.manager.now(), Complete: true, Entries: entries,
+		ObservedAt: a.manager.now(), Complete: page.complete, Entries: entries,
 	}); err != nil {
 		return err
 	}
@@ -193,35 +231,48 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err := a.ensureSourcingCommunicationResumes(); err != nil {
 		return err
 	}
-	listComplete := true
-	if err := a.manager.store.MutatePatrolRound(a.account.Platform, a.account.AccountRef, a.roundID, func(round *store.PatrolRound) error {
-		round.ListComplete = &listComplete
-		return nil
-	}); err != nil {
-		return err
-	}
 
-	dirty, err := a.detectDirty(sessions)
+	dirty, err := a.detectDirty(page.sessions)
 	if err != nil {
 		return err
 	}
-	for i := range dirty {
-		if err := a.setStage("readingThread"); err != nil {
-			return err
+	dirtyByRef := make(map[string]dirtyConversation, len(dirty))
+	for index := range dirty {
+		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
+	}
+	for _, summary := range page.sessions {
+		if dirtyConversation, ok := dirtyByRef[summary.ConversationRef]; ok {
+			if err := a.setStage("readingThread"); err != nil {
+				return err
+			}
+			projection, err := a.reconcileConversation(ctx, dirtyConversation)
+			if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
+				a.projection = append(a.projection, projection)
+			}
+			if err != nil {
+				a.handleCommandFailure(err)
+				return err
+			}
+			if a.classificationCorrected {
+				return nil
+			}
 		}
-		projection, err := a.reconcileConversation(ctx, dirty[i])
-		if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
-			a.projection = append(a.projection, projection)
+		key := store.ConversationKey{
+			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+			ConversationRef: summary.ConversationRef,
 		}
+		profile, err := a.manager.store.CandidateProfileByConversation(key)
 		if err != nil {
-			a.handleCommandFailure(err)
 			return err
 		}
-		if a.classificationCorrected {
-			return nil
+		if profile == nil {
+			continue
+		}
+		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
+			return err
 		}
 	}
-	return a.processCommunicationV4Targets(ctx)
+	return nil
 }
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
@@ -608,40 +659,37 @@ func (a *roundActor) markIdentityUnobservable(reason protocol.NotReadyReason) er
 	return nil
 }
 
-func (a *roundActor) readList(ctx context.Context) ([]protocol.ConversationSummary, error) {
-	var aggregate []protocol.ConversationSummary
-	cursor := ""
-	restarts := 0
-	seen := map[string]struct{}{}
-	for page := 0; page < a.manager.config.MaxPages; page++ {
-		args := protocol.ChatReadListArgs{
-			Cursor: cursor, Filter: protocol.ListFilterAll,
-			MaxSessions: protocol.DefaultPaginationReadListMaxItems, StopOlderThanDays: 8,
-		}
-		data, err := invokePrimitive[protocol.ChatReadListData](ctx, a, protocol.PrimChatReadList, args)
-		if err != nil {
-			if isRunError(err, protocol.ErrCodeCursorInvalid) && cursor != "" && restarts == 0 {
-				restarts++
-				aggregate = nil
-				cursor = ""
-				seen = map[string]struct{}{}
-				page = -1
-				continue
-			}
-			return nil, err
-		}
-		aggregate = append(aggregate, data.Sessions...)
-		if data.Complete {
-			return aggregate, nil
-		}
-		next := *data.NextCursor // generated validation requires it here.
-		if _, duplicate := seen[next]; duplicate || next == cursor {
-			return nil, ErrPaginationLoop
-		}
-		seen[next] = struct{}{}
-		cursor = next
+func (a *roundActor) readListPage(
+	ctx context.Context,
+	cursor string,
+) (conversationListPage, error) {
+	args := protocol.ChatReadListArgs{
+		Cursor: cursor, Filter: protocol.ListFilterAll,
+		MaxSessions: protocol.DefaultPaginationReadListMaxItems, StopOlderThanDays: 8,
 	}
-	return nil, ErrPaginationLimit
+	data, err := invokePrimitive[protocol.ChatReadListData](
+		ctx,
+		a,
+		protocol.PrimChatReadList,
+		args,
+	)
+	if err != nil {
+		return conversationListPage{}, err
+	}
+	page := conversationListPage{
+		sessions: data.Sessions,
+		complete: data.Complete,
+	}
+	if !data.Complete {
+		// contract validation guarantees a non-empty cursor for an incomplete
+		// page. Keep the defensive branch local so a malformed hand result
+		// cannot be interpreted as completion.
+		if data.NextCursor == nil || *data.NextCursor == "" {
+			return conversationListPage{}, ErrPaginationLoop
+		}
+		page.nextCursor = *data.NextCursor
+	}
+	return page, nil
 }
 
 func listEntries(sessions []protocol.ConversationSummary) ([]store.ListIndexEntry, error) {
@@ -664,16 +712,20 @@ func listEntries(sessions []protocol.ConversationSummary) ([]store.ListIndexEntr
 
 func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dirtyConversation, error) {
 	observedAt := a.manager.now()
-	byRef := make(map[string]protocol.ConversationSummary, len(sessions))
-	for _, summary := range sessions {
-		byRef[summary.ConversationRef] = summary
-	}
 	tracked, err := a.manager.store.TrackedConversations(a.key())
 	if err != nil {
 		return nil, err
 	}
-	out := make([]dirtyConversation, 0, len(tracked))
+	trackedByRef := make(map[string]store.Conversation, len(tracked))
 	for _, conversation := range tracked {
+		trackedByRef[conversation.ConversationRef] = conversation
+	}
+	out := make([]dirtyConversation, 0, len(sessions))
+	for _, summary := range sessions {
+		conversation, listed := trackedByRef[summary.ConversationRef]
+		if !listed {
+			continue
+		}
 		key := store.ConversationKey{
 			Platform: conversation.Platform, AccountRef: conversation.AccountRef,
 			ConversationRef: conversation.ConversationRef,
@@ -689,15 +741,13 @@ func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dir
 			// 同文连续消息或旧卡状态变化时仍能恢复账本。
 			dirty = true
 		}
-		if summary, listed := byRef[conversation.ConversationRef]; listed {
-			if summary.UnreadCount > 0 || len(ledger) == 0 {
-				dirty = true
-			} else if !syncledger.ListPreviewMatches(syncledger.ListPreview{
-				Direction: string(summary.LastMessage.Direction), Kind: string(summary.LastMessage.Kind),
-				Text: summary.LastMessage.TextPreview,
-			}, ledger[len(ledger)-1]) {
-				dirty = true
-			}
+		if summary.UnreadCount > 0 || len(ledger) == 0 {
+			dirty = true
+		} else if !syncledger.ListPreviewMatches(syncledger.ListPreview{
+			Direction: string(summary.LastMessage.Direction), Kind: string(summary.LastMessage.Kind),
+			Text: summary.LastMessage.TextPreview,
+		}, ledger[len(ledger)-1]) {
+			dirty = true
 		}
 		if dirty {
 			out = append(out, dirtyConversation{conversation: conversation, ledger: ledger})

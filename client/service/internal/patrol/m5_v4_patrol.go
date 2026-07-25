@@ -46,6 +46,35 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 	return a.drainCommunicationV4EventActions(ctx)
 }
 
+// processCommunicationV4Profile advances exactly one page-observed profile
+// through the same card, event, dialogue and effect rails used by the explicit
+// current-conversation entrypoint. It never enumerates account-wide targets.
+func (a *roundActor) processCommunicationV4Profile(
+	ctx context.Context,
+	profileID string,
+) error {
+	if err := a.processCommunicationV4CardTransitionsForProfile(ctx, profileID); err != nil {
+		return err
+	}
+	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
+		return err
+	}
+	target, ready, err := a.manager.store.CommunicationTargetForProfile(profileID)
+	if err != nil {
+		if errors.Is(err, store.ErrCommunicationV4Missing) {
+			return nil
+		}
+		return err
+	}
+	if !ready || target == nil {
+		return nil
+	}
+	if err := a.processCommunicationV4Target(ctx, *target); err != nil {
+		return err
+	}
+	return a.drainCommunicationV4EventActionsForProfile(ctx, profileID)
+}
+
 func (a *roundActor) processCommunicationV4Target(
 	ctx context.Context,
 	target store.CommunicationTarget,

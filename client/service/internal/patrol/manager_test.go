@@ -1462,7 +1462,7 @@ func TestZeroOverlapDiscardsShallowThenDeepRebaselinesWithoutProjection(t *testi
 	}
 }
 
-func TestCursorInvalidDiscardsPartialListBeforeSafeRestart(t *testing.T) {
+func TestCursorInvalidAfterProcessedWindowStopsWithoutRestart(t *testing.T) {
 	h := newHarness(t)
 	firstPageCalls := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
@@ -1486,14 +1486,144 @@ func TestCursorInvalidDiscardsPartialListBeforeSafeRestart(t *testing.T) {
 		}, nil
 	}
 	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+	if err != nil || len(result.Rounds) != 1 ||
+		!isRunError(result.Rounds[0].Err, protocol.ErrCodeCursorInvalid) {
 		t.Fatalf("Tick = %+v, %v", result, err)
 	}
 	conversations, err := h.db.ConversationsForAccount(h.key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(conversations) != 1 || conversations[0].ConversationRef != "keep-me" {
-		t.Fatalf("partial aggregate leaked across cursor restart: %+v", conversations)
+	if firstPageCalls != 1 || len(conversations) != 1 ||
+		conversations[0].ConversationRef != "discard-me" {
+		t.Fatalf("已处理窗口不应在游标失效后被重放: calls=%d conversations=%+v",
+			firstPageCalls, conversations)
+	}
+	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
+	if err != nil || len(rounds) != 1 || rounds[0].ListComplete == nil ||
+		*rounds[0].ListComplete {
+		t.Fatalf("游标失效后的部分窗口不得冒充完整列表: rounds=%+v err=%v", rounds, err)
+	}
+}
+
+func TestConversationListWindowsAreProcessedBeforeReadingNextWindow(t *testing.T) {
+	h := newHarness(t)
+	first := seedTracked(t, h, "window-first", "peer-window-first", []store.MessageDraft{
+		draftText("first-old"),
+	})
+	second := seedTracked(t, h, "window-second", "peer-window-second", []store.MessageDraft{
+		draftText("second-old"),
+	})
+	firstSettled := false
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Cursor == "" {
+				next := "window-2"
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary(first.ConversationRef, "peer-window-first", "first-new", 1),
+					},
+					Complete: false, NextCursor: &next,
+				}, nil
+			}
+			if args.Cursor != "window-2" {
+				t.Fatalf("unexpected cursor %q", args.Cursor)
+			}
+			if !firstSettled {
+				t.Fatal("下一窗口读取发生在当前窗口会话收束之前")
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(second.ConversationRef, "peer-window-second", "second-new", 1),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
+			switch args.ConversationRef {
+			case first.ConversationRef:
+				firstSettled = true
+				return protocol.ChatReadThreadData{
+					Messages: []protocol.ThreadMessage{
+						threadText(0, "first-old"),
+						threadText(1, "first-new"),
+					},
+					Complete: true, AnchorMatched: true,
+				}, nil
+			case second.ConversationRef:
+				return protocol.ChatReadThreadData{
+					Messages: []protocol.ThreadMessage{
+						threadText(0, "second-old"),
+						threadText(1, "second-new"),
+					},
+					Complete: true, AnchorMatched: true,
+				}, nil
+			default:
+				t.Fatalf("unexpected conversation %q", args.ConversationRef)
+			}
+		default:
+			return defaultHandler(request)
+		}
+		return nil, errors.New("unreachable")
+	}
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("Tick = %+v, %v", result, err)
+	}
+	want := []string{
+		protocol.PrimChatReadList,
+		protocol.PrimChatReadThread,
+		protocol.PrimChatReadList,
+		protocol.PrimChatReadThread,
+	}
+	if got := h.runner.names(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("页面窗口未逐窗收束: got=%v want=%v", got, want)
+	}
+}
+
+func TestDatabaseConversationAbsentFromObservedWindowCannotDriveThreadRead(t *testing.T) {
+	h := newHarness(t)
+	visible := seedTracked(t, h, "window-visible", "peer-window-visible", []store.MessageDraft{
+		draftText("visible-old"),
+	})
+	hidden := seedTracked(t, h, "window-hidden", "peer-window-hidden", []store.MessageDraft{
+		draftText("hidden-old"),
+	})
+	h.clock.Add(31 * time.Minute)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(visible.ConversationRef, "peer-window-visible", "visible-old", 0),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
+			if args.ConversationRef == hidden.ConversationRef {
+				t.Fatal("数据库中但页面未见的会话驱动了线程读取")
+			}
+			if args.ConversationRef != visible.ConversationRef {
+				t.Fatalf("unexpected conversation %q", args.ConversationRef)
+			}
+			return protocol.ChatReadThreadData{
+				Messages: []protocol.ThreadMessage{threadText(0, "visible-old")},
+				Complete: true, AnchorMatched: true,
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("Tick = %+v, %v", result, err)
+	}
+	if got := h.runner.count(protocol.PrimChatReadThread); got != 1 {
+		t.Fatalf("只应读取页面观察到的一个会话，实际 %d", got)
 	}
 }
