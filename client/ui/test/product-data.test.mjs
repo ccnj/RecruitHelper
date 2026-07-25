@@ -184,6 +184,11 @@ check(
   adaptProductSnapshot(addBatchSnapshot, now).overview.workflow.canAddBatch,
   '追加采集入口只采用脑返回的明确授权',
 )
+addBatchSnapshot.overview.runtime.workflowStatus = 'paused'
+check(
+  adaptProductSnapshot(addBatchSnapshot, now).overview.workflow.canAddBatch,
+  '暂停状态保留脑明确授权的追加采集入口',
+)
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')

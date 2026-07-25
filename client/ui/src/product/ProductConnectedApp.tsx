@@ -118,7 +118,7 @@ export function ProductConnectedApp({
         ),
         startWorkflow: (mode) => performProductAction(
           mode === 'full'
-            ? (data.overview.workflow.state === 'running' ? '追加采集' : '今日任务')
+            ? (data.overview.workflow.canAddBatch ? '追加采集' : '今日任务')
             : '只处理消息',
           () => startProductWorkflow(
             mode,

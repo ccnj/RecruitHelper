@@ -120,16 +120,29 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
               </>
             )}
             {(workflow.state === 'paused' || workflow.state === 'waitingDailyWindow') && (
-              <button
-                className="rh-button is-primary"
-                disabled={resumeReason !== null}
-                onClick={() => void actions.resumeWorkflow?.()}
-                title={resumeReason ?? undefined}
-                type="button"
-              >
-                <ProductIcon name="play" size={17} />
-                继续今日任务
-              </button>
+              <>
+                <button
+                  className="rh-button is-primary"
+                  disabled={resumeReason !== null}
+                  onClick={() => void actions.resumeWorkflow?.()}
+                  title={resumeReason ?? undefined}
+                  type="button"
+                >
+                  <ProductIcon name="play" size={17} />
+                  继续今日任务
+                </button>
+                {workflow.state === 'paused' && workflow.canAddBatch && (
+                  <button
+                    className="rh-button is-quiet"
+                    disabled={additionalBatchReason !== null}
+                    onClick={() => void actions.startWorkflow?.('full')}
+                    title={additionalBatchReason ?? undefined}
+                    type="button"
+                  >
+                    再采一批（30 人）
+                  </button>
+                )}
+              </>
             )}
             {workflow.state === 'awaitingConfirmation' && (
               <>
