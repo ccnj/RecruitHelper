@@ -577,9 +577,14 @@ func communicationV4EventEffectKind(
 	kind communication.V4ActionKind,
 ) (CommunicationV4EventEffectKind, error) {
 	switch kind {
-	case communication.V4ActionWechatReceipt, communication.V4ActionInterviewAcceptedReceipt:
+	case communication.V4ActionWechatReceipt,
+		communication.V4ActionInterviewAcceptedReceipt,
+		communication.V4ActionColdPrompt,
+		communication.V4ActionColdWechatText,
+		communication.V4ActionInterviewFollowup:
 		return CommunicationV4EventEffectReplyText, nil
-	case communication.V4ActionInviteWechat:
+	case communication.V4ActionInviteWechat,
+		communication.V4ActionColdWechatInvite:
 		return CommunicationV4EventEffectInviteWechat, nil
 	case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
 		return CommunicationV4EventEffectNotification, nil
@@ -838,7 +843,11 @@ func communicationV4EventActionReplayMatches(
 
 func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) bool {
 	switch row.V4Kind {
-	case communication.V4ActionWechatReceipt, communication.V4ActionInterviewAcceptedReceipt:
+	case communication.V4ActionWechatReceipt,
+		communication.V4ActionInterviewAcceptedReceipt,
+		communication.V4ActionColdPrompt,
+		communication.V4ActionColdWechatText,
+		communication.V4ActionInterviewFollowup:
 		switch row.Status {
 		case CommunicationV4EventActionPlanned:
 			return row.Text != "" &&
@@ -883,7 +892,15 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 		default:
 			return false
 		}
-	case communication.V4ActionInviteWechat:
+	case communication.V4ActionInviteWechat, communication.V4ActionColdWechatInvite:
+		expectedContextHash := ""
+		if row.V4Kind == communication.V4ActionColdWechatInvite &&
+			row.SourceInputKind == CommunicationV4InputSchedulePlan {
+			expectedContextHash = row.ContextRevisionHash
+			if expectedContextHash == "" {
+				return false
+			}
+		}
 		if row.Status != CommunicationV4EventActionPlanned &&
 			row.Status != CommunicationV4EventActionEffectPending &&
 			row.Status != CommunicationV4EventActionSent &&
@@ -894,7 +911,7 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			communicationV4EventActionPreWALFailureReason(row.FailureReason) {
 			return row.Text == "" &&
 				row.ContentHash == communicationWechatInviteContentHash() &&
-				row.ContextRevisionHash == "" &&
+				row.ContextRevisionHash == expectedContextHash &&
 				row.EffectIntentID == nil &&
 				row.EffectStartedAt == nil &&
 				row.SentAt == nil
@@ -903,7 +920,7 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			validCommunicationV4EventActionFailureReason(row.FailureReason)) &&
 			row.Text == "" &&
 			row.ContentHash == communicationWechatInviteContentHash() &&
-			row.ContextRevisionHash == "" &&
+			row.ContextRevisionHash == expectedContextHash &&
 			(row.Status == CommunicationV4EventActionManualRequired ||
 				row.FailureReason == "") &&
 			validCommunicationV4EventActionEffectFields(row)

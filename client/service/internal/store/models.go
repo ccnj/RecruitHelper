@@ -488,6 +488,7 @@ const (
 	CommunicationV4InputConfirmedAction CommunicationV4InputKind = "confirmedAction"
 	CommunicationV4InputRetractedAction CommunicationV4InputKind = "retractedAction"
 	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
+	CommunicationV4InputSchedulePlan    CommunicationV4InputKind = "schedulePlan"
 )
 
 // CommunicationV4ApplicationOutcome stores only the decision data needed to
@@ -580,6 +581,31 @@ type CommunicationV4ScheduleOccurrenceStatus string
 const (
 	CommunicationV4ScheduleOccurrenceApplied CommunicationV4ScheduleOccurrenceStatus = "applied"
 )
+
+// CommunicationV4SchedulePlan freezes one non-archive schedule decision
+// against the exact aggregate and active ledger boundary from which it was
+// derived. The plan is immutable; execution state belongs to the separately
+// persisted CommunicationV4EventAction rows and the existing effect WAL.
+type CommunicationV4SchedulePlan struct {
+	PlanID  string `gorm:"primaryKey"`
+	PlanKey string `gorm:"not null;uniqueIndex:ux_communication_v4_schedule_plan_key,priority:2"`
+
+	ProfileID       string `gorm:"not null;index;uniqueIndex:ux_communication_v4_schedule_plan_key,priority:1"`
+	ConversationRef string `gorm:"not null;index"`
+
+	BasisRevision            uint64 `gorm:"not null"`
+	BasisProjectedThroughSeq int64  `gorm:"not null"`
+	BasisMessageTailSeq      int64  `gorm:"not null"`
+	ContextRevisionHash      string `gorm:"not null;index"`
+
+	EvaluatedAt    time.Time                       `gorm:"not null"`
+	DueAt          time.Time                       `gorm:"not null"`
+	PlannedActions []communication.V4PlannedAction `gorm:"serializer:json;not null"`
+	ActionsDigest  string                          `gorm:"not null"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
 
 // CommunicationV4ScheduleOccurrence freezes one deterministic schedule
 // evaluation as an append-only business fact. The first slice persists only

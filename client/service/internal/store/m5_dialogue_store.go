@@ -2208,10 +2208,11 @@ func bindCommunicationV4EventActionTx(
 		communicationV4EventActionPrimitive(action) != intent.Primitive {
 		return ErrCommunicationActionConflict
 	}
-	application, source, err := communicationV4EventActionSourceTx(tx, action)
+	sourceInfo, err := communicationV4EventActionSourceTx(tx, action)
 	if err != nil {
 		return err
 	}
+	source := sourceInfo.Action
 	if source.ActionKey != action.SemanticActionKey ||
 		source.Kind != action.V4Kind ||
 		source.CardMessageSeq != action.CardMessageSeq {
@@ -2240,12 +2241,21 @@ func bindCommunicationV4EventActionTx(
 		aggregate.ProjectedThroughSeq != conversation.LastMessageSeq {
 		return ErrDialogueTurnBinding
 	}
+	if action.SourceInputKind == CommunicationV4InputSchedulePlan &&
+		sourceInfo.ConversationRef != conversation.ConversationRef {
+		return ErrDialogueTurnBinding
+	}
 	if action.DependsOnActionID == nil {
-		if aggregate.Revision != application.ToRevision {
+		if aggregate.Revision != sourceInfo.BasisRevision {
 			return ErrCommunicationActionConflict
 		}
 		switch action.EffectKind {
 		case CommunicationV4EventEffectReplyText:
+		case CommunicationV4EventEffectInviteWechat:
+			if action.SourceInputKind != CommunicationV4InputSchedulePlan ||
+				action.V4Kind != communication.V4ActionColdWechatInvite {
+				return ErrCommunicationActionConflict
+			}
 		case CommunicationV4EventEffectAcceptWechat:
 			if action.V4Kind != communication.V4ActionAcceptWechat {
 				return ErrCommunicationActionConflict
@@ -2256,7 +2266,7 @@ func bindCommunicationV4EventActionTx(
 	} else if err := validateCommunicationV4EventActionDependencyTx(
 		tx,
 		action,
-		application,
+		sourceInfo,
 		previousIntentID,
 		intent,
 		profile,
@@ -2317,7 +2327,7 @@ func validateCommunicationV4EventActionIntentLinkTx(
 	default:
 		return ErrCommunicationActionConflict
 	}
-	if _, _, err := communicationV4EventActionSourceTx(tx, action); err != nil {
+	if _, err := communicationV4EventActionSourceTx(tx, action); err != nil {
 		return err
 	}
 	var profile CandidateProfile
@@ -2333,12 +2343,18 @@ func validateCommunicationV4EventActionIntentLinkTx(
 	return nil
 }
 
+type communicationV4EventActionSource struct {
+	Action          communication.V4EventAction
+	Actions         []communication.V4EventAction
+	BasisRevision   uint64
+	ConversationRef string
+}
+
 func communicationV4EventActionSourceTx(
 	tx *gorm.DB,
 	action CommunicationV4EventAction,
 ) (
-	CommunicationV4ProjectionApplication,
-	communication.V4EventAction,
+	communicationV4EventActionSource,
 	error,
 ) {
 	if tx == nil ||
@@ -2347,8 +2363,7 @@ func communicationV4EventActionSourceTx(
 		strings.TrimSpace(action.SourceInputKey) == "" ||
 		action.SourceOrdinal < 0 ||
 		!validCommunicationV4EventActionDisposition(action) {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
+		return communicationV4EventActionSource{},
 			ErrCommunicationActionConflict
 	}
 	expectedActionID, err := CommunicationV4EventActionID(
@@ -2356,15 +2371,47 @@ func communicationV4EventActionSourceTx(
 		action.SemanticActionKey,
 	)
 	if err != nil || expectedActionID != action.ActionID {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
+		return communicationV4EventActionSource{},
 			ErrCommunicationActionConflict
+	}
+	if action.SourceInputKind == CommunicationV4InputSchedulePlan {
+		plan, found, err := communicationV4SchedulePlanTx(
+			tx,
+			action.SourceInputKey,
+		)
+		if err != nil {
+			return communicationV4EventActionSource{}, err
+		}
+		if !found ||
+			plan.ProfileID != action.ProfileID ||
+			action.SourceOrdinal >= len(plan.PlannedActions) ||
+			!communicationV4ScheduleEventActionMatches(
+				action,
+				plan,
+				plan.PlannedActions[action.SourceOrdinal],
+				action.SourceOrdinal,
+			) {
+			return communicationV4EventActionSource{},
+				ErrCommunicationActionConflict
+		}
+		actions := make([]communication.V4EventAction, len(plan.PlannedActions))
+		for index, planned := range plan.PlannedActions {
+			actions[index] = communication.V4EventAction{
+				ActionKey:      planned.ActionKey,
+				Kind:           planned.Kind,
+				CardMessageSeq: planned.CardMessageSeq,
+			}
+		}
+		return communicationV4EventActionSource{
+			Action:          actions[action.SourceOrdinal],
+			Actions:         actions,
+			BasisRevision:   plan.BasisRevision,
+			ConversationRef: plan.ConversationRef,
+		}, nil
 	}
 	if action.SourceInputKind != CommunicationV4InputBusinessEvent &&
 		action.SourceInputKind != CommunicationV4InputDialogueTurn {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
-			ErrCommunicationActionConflict
+		return communicationV4EventActionSource{}, ErrCommunicationActionConflict
 	}
 	application, found, err := communicationV4ApplicationTx(
 		tx,
@@ -2373,25 +2420,23 @@ func communicationV4EventActionSourceTx(
 		action.SourceInputKey,
 	)
 	if err != nil {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
-			err
+		return communicationV4EventActionSource{}, err
 	}
 	if !found ||
 		action.SourceOrdinal >= len(application.Outcome.Actions) {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
-			ErrCommunicationActionConflict
+		return communicationV4EventActionSource{}, ErrCommunicationActionConflict
 	}
 	source := application.Outcome.Actions[action.SourceOrdinal]
 	if source.ActionKey != action.SemanticActionKey ||
 		source.Kind != action.V4Kind ||
 		source.CardMessageSeq != action.CardMessageSeq {
-		return CommunicationV4ProjectionApplication{},
-			communication.V4EventAction{},
-			ErrCommunicationActionConflict
+		return communicationV4EventActionSource{}, ErrCommunicationActionConflict
 	}
-	return application, source, nil
+	return communicationV4EventActionSource{
+		Action:        source,
+		Actions:       application.Outcome.Actions,
+		BasisRevision: application.ToRevision,
+	}, nil
 }
 
 func communicationV4EventActionPrimitive(
@@ -2401,11 +2446,15 @@ func communicationV4EventActionPrimitive(
 	case CommunicationV4EventEffectReplyText:
 		switch action.V4Kind {
 		case communication.V4ActionWechatReceipt,
-			communication.V4ActionInterviewAcceptedReceipt:
+			communication.V4ActionInterviewAcceptedReceipt,
+			communication.V4ActionColdPrompt,
+			communication.V4ActionColdWechatText,
+			communication.V4ActionInterviewFollowup:
 			return primitiveChatSendMessage
 		}
 	case CommunicationV4EventEffectInviteWechat:
-		if action.V4Kind == communication.V4ActionInviteWechat {
+		if action.V4Kind == communication.V4ActionInviteWechat ||
+			action.V4Kind == communication.V4ActionColdWechatInvite {
 			return primitiveChatSendWechatInvite
 		}
 	case CommunicationV4EventEffectAcceptWechat:
@@ -2512,14 +2561,15 @@ type communicationV4PositiveActionParent struct {
 func validateCommunicationV4EventActionDependencyTx(
 	tx *gorm.DB,
 	action CommunicationV4EventAction,
-	application CommunicationV4ProjectionApplication,
+	sourceInfo communicationV4EventActionSource,
 	previousIntentID string,
 	childIntent *EffectIntent,
 	profile CandidateProfile,
 	aggregate CommunicationV4Aggregate,
 	conversation Conversation,
 ) error {
-	if action.V4Kind != communication.V4ActionInviteWechat ||
+	if (action.V4Kind != communication.V4ActionInviteWechat &&
+		action.V4Kind != communication.V4ActionColdWechatInvite) ||
 		action.EffectKind != CommunicationV4EventEffectInviteWechat ||
 		action.DependsOnActionID == nil ||
 		strings.TrimSpace(*action.DependsOnActionID) == "" ||
@@ -2527,20 +2577,33 @@ func validateCommunicationV4EventActionDependencyTx(
 		return ErrCommunicationActionConflict
 	}
 	var expectedParent *communication.V4EventAction
-	for index := range application.Outcome.Actions {
-		candidate := application.Outcome.Actions[index]
-		if candidate.Kind != communication.V4ActionInterviewAcceptedReceipt {
-			continue
-		}
-		if expectedParent != nil {
+	if action.SourceInputKind == CommunicationV4InputSchedulePlan {
+		if action.V4Kind != communication.V4ActionColdWechatInvite ||
+			action.SourceOrdinal <= 0 ||
+			action.SourceOrdinal >= len(sourceInfo.Actions) {
 			return ErrCommunicationActionConflict
 		}
-		copy := candidate
-		expectedParent = &copy
-	}
-	if expectedParent == nil ||
-		expectedParent.CardMessageSeq != action.CardMessageSeq {
-		return ErrCommunicationActionConflict
+		candidate := sourceInfo.Actions[action.SourceOrdinal-1]
+		if candidate.Kind != communication.V4ActionColdWechatText {
+			return ErrCommunicationActionConflict
+		}
+		expectedParent = &candidate
+	} else {
+		for index := range sourceInfo.Actions {
+			candidate := sourceInfo.Actions[index]
+			if candidate.Kind != communication.V4ActionInterviewAcceptedReceipt {
+				continue
+			}
+			if expectedParent != nil {
+				return ErrCommunicationActionConflict
+			}
+			copy := candidate
+			expectedParent = &copy
+		}
+		if expectedParent == nil ||
+			expectedParent.CardMessageSeq != action.CardMessageSeq {
+			return ErrCommunicationActionConflict
+		}
 	}
 	parent, err := communicationV4PositiveActionParentTx(
 		tx,
@@ -2662,7 +2725,7 @@ func communicationV4PositiveActionParentTx(
 			event.FailureReason != "" {
 			return communicationV4PositiveActionParent{}, ErrCommunicationActionConflict
 		}
-		if _, _, err := communicationV4EventActionSourceTx(tx, event); err != nil {
+		if _, err := communicationV4EventActionSourceTx(tx, event); err != nil {
 			return communicationV4PositiveActionParent{}, err
 		}
 		return communicationV4PositiveActionParent{
@@ -3089,6 +3152,40 @@ func applyCommunicationV4EventActionEffectStatusTx(
 				CardMessageSeq: action.CardMessageSeq,
 				SentAt:         confirmedAt,
 			},
+			at,
+		)
+		if err != nil {
+			return err
+		}
+		if action.SourceInputKind != CommunicationV4InputSchedulePlan {
+			return nil
+		}
+		plan, found, err := communicationV4SchedulePlanTx(
+			tx,
+			action.SourceInputKey,
+		)
+		if err != nil {
+			return err
+		}
+		if !found ||
+			action.SourceOrdinal < 0 ||
+			action.SourceOrdinal >= len(plan.PlannedActions) ||
+			!communicationV4ScheduleEventActionMatches(
+				action,
+				plan,
+				plan.PlannedActions[action.SourceOrdinal],
+				action.SourceOrdinal,
+			) {
+			return ErrCommunicationActionConflict
+		}
+		nextOrdinal := action.SourceOrdinal + 1
+		if nextOrdinal >= len(plan.PlannedActions) {
+			return nil
+		}
+		_, _, err = materializeCommunicationV4ScheduleActionTx(
+			tx,
+			plan,
+			nextOrdinal,
 			at,
 		)
 		return err
