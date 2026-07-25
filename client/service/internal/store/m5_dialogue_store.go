@@ -2353,6 +2353,8 @@ type communicationV4EventActionSource struct {
 	Actions         []communication.V4EventAction
 	BasisRevision   uint64
 	ConversationRef string
+	Round           uint64
+	Stage           uint8
 }
 
 func communicationV4EventActionSourceTx(
@@ -2412,6 +2414,8 @@ func communicationV4EventActionSourceTx(
 			Actions:         actions,
 			BasisRevision:   plan.BasisRevision,
 			ConversationRef: plan.ConversationRef,
+			Round:           plan.PlannedActions[action.SourceOrdinal].Round,
+			Stage:           plan.PlannedActions[action.SourceOrdinal].Stage,
 		}, nil
 	}
 	if action.SourceInputKind != CommunicationV4InputBusinessEvent &&
@@ -3106,6 +3110,10 @@ func applyCommunicationV4EventActionEffectStatusTx(
 	); err != nil {
 		return err
 	}
+	sourceInfo, err := communicationV4EventActionSourceTx(tx, action)
+	if err != nil {
+		return err
+	}
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -3230,7 +3238,7 @@ func applyCommunicationV4EventActionEffectStatusTx(
 			value := time.UnixMilli(*message.TsApproxMs).UTC()
 			confirmedAt = &value
 		}
-		_, _, _, err := applyCommunicationV4ConfirmedActionTx(
+		_, _, _, err = applyCommunicationV4ConfirmedActionTx(
 			tx,
 			action.ProfileID,
 			communication.V4ConfirmedAction{
@@ -3239,6 +3247,8 @@ func applyCommunicationV4EventActionEffectStatusTx(
 				MessageSeq:     message.Seq,
 				CardMessageSeq: action.CardMessageSeq,
 				SentAt:         confirmedAt,
+				Round:          sourceInfo.Round,
+				Stage:          sourceInfo.Stage,
 			},
 			at,
 		)

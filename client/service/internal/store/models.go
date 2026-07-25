@@ -607,6 +607,49 @@ type CommunicationV4SchedulePlan struct {
 	UpdatedAt time.Time
 }
 
+// CommunicationV4ScheduleAIInvocation is the persisted one-shot provider
+// authorization for a silence-followup schedule tier. It deliberately does
+// not reuse AIInvocation.TurnID: schedule advice has no DialogueTurn and must
+// not manufacture one. The suggested body is an immutable local business
+// result; raw provider request/response remains exclusive to ai-traces.db.
+type CommunicationV4ScheduleAIInvocation struct {
+	InvocationID string `gorm:"primaryKey"`
+	AdviceKey    string `gorm:"not null;uniqueIndex:ux_communication_v4_schedule_ai_advice,priority:2"`
+	ProfileID    string `gorm:"not null;index;uniqueIndex:ux_communication_v4_schedule_ai_advice,priority:1"`
+
+	ConversationRef          string `gorm:"not null;index"`
+	BasisRevision            uint64 `gorm:"not null"`
+	BasisProjectedThroughSeq int64  `gorm:"not null"`
+	ContextRevisionHash      string `gorm:"not null;index"`
+	ResumeSnapshotID         string `gorm:"not null"`
+	EvaluatedAt              time.Time
+	Purpose                  m5ai.CompletionPurpose `gorm:"not null"`
+	Attempt                  int                    `gorm:"not null"`
+	Provider                 string                 `gorm:"not null"`
+	Model                    string                 `gorm:"not null"`
+	InputHash                string                 `gorm:"not null"`
+	SuggestionText           string
+	OutputHash               string
+	InputTokens              int
+	CachedInputTokens        int
+	OutputTokens             int
+	ReasoningTokens          *int
+	UsageShape               AIInvocationUsageShape
+	ReasoningContentEmpty    bool
+	LatencyMs                int64
+	Status                   AIInvocationStatus `gorm:"not null;index"`
+	ErrorClass               string
+	FailureStage             string
+	ErrorDetailCode          string
+	ProviderHTTPStatus       *int
+	RequestBytes             int
+	ResponseBytes            int
+	TraceStatus              m5ai.TraceStatus
+	EstimatedCostMicros      int64
+	CreatedAt                time.Time `gorm:"not null"`
+	FinishedAt               *time.Time
+}
+
 // CommunicationV4ScheduleOccurrence freezes one deterministic schedule
 // evaluation as an append-only business fact. The first slice persists only
 // internal archive occurrences, so applied is deliberately the sole status:

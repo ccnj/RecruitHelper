@@ -22,12 +22,6 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 	if err := a.processCommunicationV4CardTransitions(ctx); err != nil {
 		return err
 	}
-	// Card-transition projection may have just materialized fixed receipts and
-	// dependent cards. Drain them before taking profile snapshots, so no target
-	// is processed against state made stale by a newly confirmed effect.
-	if err := a.drainCommunicationV4EventActions(ctx); err != nil {
-		return err
-	}
 	targets, err := a.manager.store.CommunicationTargetsForAccount(a.key())
 	if err != nil {
 		return err
@@ -36,14 +30,43 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 		if err := a.ensureDispatchAllowed(ctx); err != nil {
 			return err
 		}
-		if err := a.processCommunicationV4Target(ctx, targets[index]); err != nil {
+		target := targets[index]
+		// The seven-day fallback outranks every previously planned browser
+		// action. Apply it before draining this profile so an old schedule row
+		// can never cross its terminal archive boundary into the WAL.
+		archived, err := a.processCommunicationV4ScheduleArchive(target, true)
+		if err != nil {
+			return err
+		}
+		if archived {
+			continue
+		}
+		if err := a.drainCommunicationV4EventActionsForProfile(
+			ctx,
+			target.Profile.ProfileID,
+		); err != nil {
+			return err
+		}
+		refreshed, ready, err := a.manager.store.CommunicationTargetForProfile(
+			target.Profile.ProfileID,
+		)
+		if err != nil {
+			return err
+		}
+		if !ready || refreshed == nil {
+			continue
+		}
+		if err := a.processCommunicationV4Target(ctx, *refreshed); err != nil {
+			return err
+		}
+		if err := a.drainCommunicationV4EventActionsForProfile(
+			ctx,
+			target.Profile.ProfileID,
+		); err != nil {
 			return err
 		}
 	}
-	// Dialogue and non-candidate-tail projection can materialize event actions
-	// during the profile loop. They are dispatched only after all snapshots
-	// have been consumed; no profile flow follows this drain in the same round.
-	return a.drainCommunicationV4EventActions(ctx)
+	return nil
 }
 
 // processCommunicationV4Profile advances exactly one page-observed profile
@@ -56,14 +79,25 @@ func (a *roundActor) processCommunicationV4Profile(
 	if err := a.processCommunicationV4CardTransitionsForProfile(ctx, profileID); err != nil {
 		return err
 	}
-	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
-		return err
-	}
 	target, ready, err := a.manager.store.CommunicationTargetForProfile(profileID)
 	if err != nil {
 		if errors.Is(err, store.ErrCommunicationV4Missing) {
 			return nil
 		}
+		return err
+	}
+	if !ready || target == nil {
+		return nil
+	}
+	archived, err := a.processCommunicationV4ScheduleArchive(*target, true)
+	if err != nil || archived {
+		return err
+	}
+	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
+		return err
+	}
+	target, ready, err = a.manager.store.CommunicationTargetForProfile(profileID)
+	if err != nil {
 		return err
 	}
 	if !ready || target == nil {
@@ -147,8 +181,7 @@ func (a *roundActor) processCommunicationV4Target(
 	}
 	if len(messages) == 0 ||
 		messages[len(messages)-1].Seq <= target.Aggregate.ProjectedThroughSeq {
-		_, err := a.processCommunicationV4ScheduleArchive(target, false)
-		return err
+		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
 	cursorIndex := -1
@@ -200,8 +233,7 @@ func (a *roundActor) processCommunicationV4Target(
 		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
 			return err
 		}
-		_, err := a.processCommunicationV4ScheduleArchive(target, false)
-		return err
+		return a.processCommunicationV4Schedule(ctx, target)
 	}
 	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
 		target.Profile.ProfileID,

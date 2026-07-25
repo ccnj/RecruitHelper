@@ -325,3 +325,86 @@ func TestCommunicationV4SchedulePlanFreezesOneInterviewFollowup(t *testing.T) {
 		t.Fatalf("邀面跟催未冻结为单条已渲染动作: result=%+v err=%v", result, err)
 	}
 }
+
+func TestCommunicationV4ScheduleAIInvocationPersistsOnceAndReplays(
+	t *testing.T,
+) {
+	s := openTest(t)
+	fixture, aggregate, revision :=
+		seedCommunicationV4SchedulePlanFixture(t, s, "silence-ai", false)
+	state := aggregate.State
+	state.MainStatus = communication.V4StatusCommunicating
+	state.ColdPromptRemaining = 2
+	state.LastColdPromptRound = 0
+	state.RealMessageRound = 1
+	persistCommunicationV4ScheduleState(t, s, &aggregate, state)
+	material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+	if err != nil || !ready {
+		t.Fatalf("沉默建议材料不可用: ready=%v err=%v", ready, err)
+	}
+	evaluatedAt := state.LastOutboundAt.Add(25 * time.Hour)
+	req := ReserveCommunicationV4ScheduleAIInvocationRequest{
+		ProfileID:                   fixture.ProfileID,
+		ConversationRef:             fixture.ConversationRef,
+		ExpectedRevision:            aggregate.Revision,
+		ExpectedProjectedThroughSeq: aggregate.ProjectedThroughSeq,
+		ContextRevisionHash:         revision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		EvaluatedAt:                 evaluatedAt,
+		Provider:                    "fixture-provider",
+		Model:                       "fixture-model",
+		InputHash:                   strings.Repeat("a", 64),
+		CreatedAt:                   evaluatedAt,
+	}
+	first, err := s.ReserveCommunicationV4ScheduleAIInvocation(req)
+	if err != nil || first == nil || !first.Created ||
+		first.Invocation.FinishedAt != nil ||
+		first.Invocation.Purpose != m5ai.PurposeSilenceFollowup ||
+		first.Invocation.AdviceKey == "" {
+		t.Fatalf("沉默建议未持久预留: result=%+v err=%v", first, err)
+	}
+	replayed, err := s.ReserveCommunicationV4ScheduleAIInvocation(req)
+	if err != nil || replayed == nil || replayed.Created ||
+		replayed.Invocation.InvocationID != first.Invocation.InvocationID {
+		t.Fatalf("沉默建议预留发生增生: result=%+v err=%v", replayed, err)
+	}
+
+	zero := 0
+	completion := AIInvocationCompletion{
+		InvocationID:          first.Invocation.InvocationID,
+		Status:                AIInvocationOK,
+		OutputHash:            strings.Repeat("b", 64),
+		InputTokens:           20,
+		CachedInputTokens:     2,
+		OutputTokens:          5,
+		ReasoningTokens:       &zero,
+		UsageShape:            AIInvocationUsageComplete,
+		ReasoningContentEmpty: true,
+		LatencyMs:             20,
+		TraceStatus:           m5ai.TraceStatusComplete,
+		FinishedAt:            evaluatedAt.Add(time.Second),
+	}
+	finished, err := s.CompleteCommunicationV4ScheduleAIInvocation(
+		CompleteCommunicationV4ScheduleAIInvocationRequest{
+			Completion:     completion,
+			SuggestionText: "合成沉默追问",
+		},
+	)
+	if err != nil || finished == nil ||
+		finished.Status != AIInvocationOK ||
+		finished.SuggestionText != "合成沉默追问" ||
+		finished.FinishedAt == nil {
+		t.Fatalf("沉默建议终局未保存: invocation=%+v err=%v", finished, err)
+	}
+	finishedReplay, err := s.CompleteCommunicationV4ScheduleAIInvocation(
+		CompleteCommunicationV4ScheduleAIInvocationRequest{
+			Completion:     completion,
+			SuggestionText: "合成沉默追问",
+		},
+	)
+	if err != nil || finishedReplay == nil ||
+		finishedReplay.InvocationID != finished.InvocationID {
+		t.Fatalf("沉默建议终局不能幂等重放: invocation=%+v err=%v",
+			finishedReplay, err)
+	}
+}

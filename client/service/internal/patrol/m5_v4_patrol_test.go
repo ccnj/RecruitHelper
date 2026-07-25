@@ -148,6 +148,7 @@ func seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
 	documents := []m5ai.JobConfigDocument{
 		{DocType: "多轮沟通", Content: replyPrompt},
 		{DocType: "意向判断", Content: intentPrompt},
+		{DocType: "沉默追问", Content: "姓名={姓名}\n年龄={年龄}\n性别={性别}\n简历={简历}\n只返回话术 JSON"},
 		{DocType: "客户事实库", Content: ""},
 		{DocType: "固定话术", Content: fixedPhrases},
 	}
@@ -282,9 +283,13 @@ func seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
 	if err != nil || len(changes.Inserted) != len(boundary) {
 		t.Fatalf("追加 V4 入站失败: changes=%+v err=%v", changes, err)
 	}
+	tailSeq := greetingMessage.Seq
+	if len(changes.Inserted) != 0 {
+		tailSeq = changes.Inserted[len(changes.Inserted)-1].Seq
+	}
 	return communicationV4PatrolFixture{
 		profileID: profileID, conversationRef: conversationRef,
-		inboundSeq: changes.Inserted[len(changes.Inserted)-1].Seq,
+		inboundSeq: tailSeq,
 	}
 }
 

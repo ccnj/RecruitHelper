@@ -54,28 +54,40 @@ func (a *roundActor) drainCommunicationV4EventActionsForProfile(
 		isolatedProfiles[action.ProfileID] = struct{}{}
 	}
 
-	actions, err := a.manager.store.PlannedCommunicationV4EventActionsForAccount(a.key())
-	if err != nil {
-		return err
-	}
 	stoppedProfiles := make(map[string]struct{})
-	for index := range actions {
-		action := actions[index]
-		if profileID != "" && action.ProfileID != profileID {
-			continue
-		}
-		if _, stopped := stoppedProfiles[action.ProfileID]; stopped {
-			continue
-		}
-		stopProfile, err := a.dispatchCommunicationV4EventAction(ctx, action)
+	seenActions := make(map[string]struct{})
+	for {
+		actions, err :=
+			a.manager.store.PlannedCommunicationV4EventActionsForAccount(a.key())
 		if err != nil {
 			return err
 		}
-		if stopProfile {
-			stoppedProfiles[action.ProfileID] = struct{}{}
+		foundNew := false
+		for index := range actions {
+			action := actions[index]
+			if profileID != "" && action.ProfileID != profileID {
+				continue
+			}
+			if _, seen := seenActions[action.ActionID]; seen {
+				continue
+			}
+			seenActions[action.ActionID] = struct{}{}
+			foundNew = true
+			if _, stopped := stoppedProfiles[action.ProfileID]; stopped {
+				continue
+			}
+			stopProfile, err := a.dispatchCommunicationV4EventAction(ctx, action)
+			if err != nil {
+				return err
+			}
+			if stopProfile {
+				stoppedProfiles[action.ProfileID] = struct{}{}
+			}
+		}
+		if !foundNew {
+			return nil
 		}
 	}
-	return nil
 }
 
 // dispatchCommunicationV4EventAction returns stopProfile when this profile was
@@ -90,7 +102,10 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 	switch {
 	case action.EffectKind == store.CommunicationV4EventEffectReplyText &&
 		(action.V4Kind == communication.V4ActionWechatReceipt ||
-			action.V4Kind == communication.V4ActionInterviewAcceptedReceipt) &&
+			action.V4Kind == communication.V4ActionInterviewAcceptedReceipt ||
+			action.V4Kind == communication.V4ActionColdPrompt ||
+			action.V4Kind == communication.V4ActionColdWechatText ||
+			action.V4Kind == communication.V4ActionInterviewFollowup) &&
 		action.DependsOnActionID == nil &&
 		strings.TrimSpace(action.Text) != "" &&
 		strings.TrimSpace(action.ContentHash) != "":
@@ -103,7 +118,8 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 			)
 		}
 	case action.EffectKind == store.CommunicationV4EventEffectInviteWechat &&
-		action.V4Kind == communication.V4ActionInviteWechat &&
+		(action.V4Kind == communication.V4ActionInviteWechat ||
+			action.V4Kind == communication.V4ActionColdWechatInvite) &&
 		action.DependsOnActionID != nil &&
 		strings.TrimSpace(action.ContentHash) != "":
 		var ok bool
@@ -195,6 +211,12 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 		// action planned for the next authorized patrol.
 		return false, err
 	}
+	if action.SourceInputKind == store.CommunicationV4InputSchedulePlan {
+		stopped, err := a.recheckCommunicationV4ScheduleFallbackBeforeWAL(action)
+		if err != nil || stopped {
+			return stopped, err
+		}
+	}
 
 	var handle interface {
 		Wait(context.Context) error
@@ -282,6 +304,31 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 	default:
 		return false, store.ErrCommunicationV4EventActionConflict
 	}
+}
+
+func (a *roundActor) recheckCommunicationV4ScheduleFallbackBeforeWAL(
+	action store.CommunicationV4EventAction,
+) (bool, error) {
+	target, ready, err := a.manager.store.CommunicationTargetForProfile(
+		action.ProfileID,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !ready || target == nil {
+		return a.markCommunicationV4EventActionManual(
+			action,
+			store.CommunicationV4EventActionFailureBindingUnavailable,
+		)
+	}
+	if target.Aggregate.State.MainStatus == communication.V4StatusEnded {
+		return true, nil
+	}
+	archived, err := a.processCommunicationV4ScheduleArchive(*target, false)
+	if err != nil || archived {
+		return archived, err
+	}
+	return false, nil
 }
 
 func (a *roundActor) communicationV4EventDependency(

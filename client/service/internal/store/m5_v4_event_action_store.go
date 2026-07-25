@@ -268,6 +268,19 @@ func (s *Store) PlannedCommunicationV4EventActionsForAccount(
 			CommunicationV4EventActionPlanned,
 			ProfileCommunicationAutomationActive,
 		).
+		Where(
+			`action.source_input_kind <> ? OR NOT EXISTS (
+				SELECT 1
+				FROM communication_v4_schedule_occurrences AS occurrence
+				JOIN communication_v4_schedule_plans AS schedule_plan
+					ON schedule_plan.plan_id = action.source_input_key
+				WHERE occurrence.profile_id = action.profile_id
+					AND occurrence.status = ?
+					AND occurrence.basis_revision >= schedule_plan.basis_revision
+			)`,
+			CommunicationV4InputSchedulePlan,
+			CommunicationV4ScheduleOccurrenceApplied,
+		).
 		Order("action.planned_at, action.profile_id, action.source_input_kind, action.source_input_key, action.source_ordinal, action.action_id").
 		Scan(&actions).Error
 	return actions, err

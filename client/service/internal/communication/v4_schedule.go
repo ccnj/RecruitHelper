@@ -48,6 +48,7 @@ type V4ScheduleDecision struct {
 	State        V4State
 	Status       V4ScheduleDecisionStatus
 	NextAdvice   V4AdvicePurpose
+	AdviceKey    string
 	Actions      []V4PlannedAction
 	ManualReason V4ManualReason
 }
@@ -154,6 +155,12 @@ func evaluateV4ColdPrompt(input V4ScheduleInput, state V4State) (V4ScheduleDecis
 	case AdviceAbsent:
 		return V4ScheduleDecision{
 			State: state, Status: V4ScheduleWaitingAdvice, NextAdvice: V4AdviceSilenceFollowup,
+			AdviceKey: stableV4ScheduleAdviceKey(
+				input.ProfileKey,
+				V4AdviceSilenceFollowup,
+				state.RealMessageRound,
+				state.ColdPromptSentCount+1,
+			),
 		}, nil
 	case AdviceFailed:
 		return manualV4Schedule(state, V4ManualReplyFailed), nil
@@ -299,6 +306,21 @@ func stableV4ScheduleKey(profileKey string, kind V4ActionKind, cardMessageSeq in
 		key += fmt.Sprintf("|stage:%d", stage)
 	}
 	return key
+}
+
+func stableV4ScheduleAdviceKey(
+	profileKey string,
+	purpose V4AdvicePurpose,
+	round uint64,
+	stage uint8,
+) string {
+	return fmt.Sprintf(
+		"%s|schedule-advice|%s|round:%d|stage:%d",
+		profileKey,
+		purpose,
+		round,
+		stage,
+	)
 }
 
 // ApplyV4ArchiveAction is the internal, non-effectful completion for a planned

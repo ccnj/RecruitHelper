@@ -14,6 +14,7 @@ const (
 	ScheduleFormatVersion           = 1
 	ProviderAssemblyVersion         = 1
 	DialogueRenderFormatVersion     = "m5-history1-schedule1-assembly1"
+	SilenceFollowupRenderVersion    = "m5-silence-followup-v1"
 	SendTextMaxUTF8Bytes            = 2048
 	ReplyPhraseMaxItems             = 5
 	HistoryLimit                    = 20
