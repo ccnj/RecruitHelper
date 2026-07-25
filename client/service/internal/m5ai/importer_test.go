@@ -20,7 +20,7 @@ func syntheticLegacyBundle(t *testing.T, jobID int, name string) map[string]any 
 		"意向判断":  "招呼={招呼语}\n回复={回复}",
 		"打分":    "fixture://score",
 		"招呼语":   "fixture://greeting",
-		"沉默追问":  "fixture://silence",
+		"沉默追问":  "姓名={姓名}\n年龄={年龄}\n性别={性别}\n简历={简历}",
 		"职位筛选":  testfixture.SourcingFiltersDocument,
 	}
 	block := func(prompt string) map[string]any {
@@ -53,6 +53,10 @@ func TestImportLegacyJobConfigPreservesEveryDocumentAndDropsCredentials(t *testi
 		t.Fatalf("revision 元数据不完整: %+v", revision)
 	}
 	source := bundle["documents"].(map[string]string)
+	silencePrompt, promptErr := SilenceFollowupPrompt(revision)
+	if promptErr != nil || silencePrompt != source["沉默追问"] {
+		t.Fatalf("沉默追问原文未从 source package 唯一提取: prompt=%q err=%v", silencePrompt, promptErr)
+	}
 	if len(revision.SourcePackage.Documents) != len(source) {
 		t.Fatalf("文档数不守恒: got=%d want=%d", len(revision.SourcePackage.Documents), len(source))
 	}

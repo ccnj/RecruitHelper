@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+func TestSilenceFollowupIsAnAcceptedTracePurpose(t *testing.T) {
+	if !validPurpose(PurposeSilenceFollowup) {
+		t.Fatal("沉默追问 trace purpose 未登记")
+	}
+}
+
 func TestStorePersistsSuccessfulTraceAndExactRetriesAreIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	traceStore := openTestStore(t, dir)

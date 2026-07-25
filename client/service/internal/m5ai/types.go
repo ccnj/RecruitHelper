@@ -9,21 +9,23 @@ import (
 )
 
 const (
-	MappingVersion              = "m5-communication-v1"
-	HistoryFormatVersion        = 1
-	ScheduleFormatVersion       = 1
-	ProviderAssemblyVersion     = 1
-	DialogueRenderFormatVersion = "m5-history1-schedule1-assembly1"
-	SendTextMaxUTF8Bytes        = 2048
-	ReplyPhraseMaxItems         = 5
-	HistoryLimit                = 20
-	IntentInputTokenLimit       = 8000
-	ReplyInputTokenLimit        = 16000
-	GreetingInputTokenLimit     = ReplyInputTokenLimit
-	IntentOutputTokenLimit      = 64
-	ReplyOutputTokenLimit       = 512
-	ScoringOutputTokenLimit     = 512
-	GreetingOutputTokenLimit    = ReplyOutputTokenLimit
+	MappingVersion                  = "m5-communication-v1"
+	HistoryFormatVersion            = 1
+	ScheduleFormatVersion           = 1
+	ProviderAssemblyVersion         = 1
+	DialogueRenderFormatVersion     = "m5-history1-schedule1-assembly1"
+	SendTextMaxUTF8Bytes            = 2048
+	ReplyPhraseMaxItems             = 5
+	HistoryLimit                    = 20
+	IntentInputTokenLimit           = 8000
+	ReplyInputTokenLimit            = 16000
+	SilenceFollowupInputTokenLimit  = ReplyInputTokenLimit
+	GreetingInputTokenLimit         = ReplyInputTokenLimit
+	IntentOutputTokenLimit          = 64
+	ReplyOutputTokenLimit           = 512
+	SilenceFollowupOutputTokenLimit = ReplyOutputTokenLimit
+	ScoringOutputTokenLimit         = 512
+	GreetingOutputTokenLimit        = ReplyOutputTokenLimit
 )
 
 type JobConfigDocument struct {
@@ -103,13 +105,18 @@ type GreetingSuggestion struct {
 	Text string
 }
 
+type SilenceFollowupSuggestion struct {
+	Text string
+}
+
 type CompletionPurpose string
 
 const (
-	PurposeIntent   CompletionPurpose = "intent"
-	PurposeReply    CompletionPurpose = "reply"
-	PurposeScoring  CompletionPurpose = "scoring"
-	PurposeGreeting CompletionPurpose = "greeting"
+	PurposeIntent          CompletionPurpose = "intent"
+	PurposeReply           CompletionPurpose = "reply"
+	PurposeSilenceFollowup CompletionPurpose = "silenceFollowup"
+	PurposeScoring         CompletionPurpose = "scoring"
+	PurposeGreeting        CompletionPurpose = "greeting"
 )
 
 type CompletionRequest struct {

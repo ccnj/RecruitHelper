@@ -30,10 +30,11 @@ const (
 	TraceStateRequestCaptured = "requestCaptured"
 	TraceStateCompleted       = "completed"
 
-	PurposeIntent   = "intent"
-	PurposeReply    = "reply"
-	PurposeScoring  = "scoring"
-	PurposeGreeting = "greeting"
+	PurposeIntent          = "intent"
+	PurposeReply           = "reply"
+	PurposeSilenceFollowup = "silenceFollowup"
+	PurposeScoring         = "scoring"
+	PurposeGreeting        = "greeting"
 )
 
 var (
@@ -363,7 +364,7 @@ func validateBegin(record BeginRecord) error {
 
 func validPurpose(purpose string) bool {
 	switch purpose {
-	case PurposeIntent, PurposeReply, PurposeScoring, PurposeGreeting:
+	case PurposeIntent, PurposeReply, PurposeSilenceFollowup, PurposeScoring, PurposeGreeting:
 		return true
 	default:
 		return false

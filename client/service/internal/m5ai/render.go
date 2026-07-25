@@ -30,6 +30,7 @@ var allowedTokens = map[string]map[string]string{
 		"简历": "input", "推荐时段": "input", "对话历史": "input", "话术_序列": "output",
 	},
 	"意向判断": {"回复": "input", "招呼语": "input"},
+	"沉默追问": {"姓名": "input", "年龄": "input", "性别": "input", "简历": "input"},
 }
 
 func ValidatePromptTokens(docType, prompt string) ([]string, error) {

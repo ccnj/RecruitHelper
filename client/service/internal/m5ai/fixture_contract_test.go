@@ -71,6 +71,7 @@ func TestSanitizedProductionShapeDrivesCompleteDocumentImport(t *testing.T) {
 	// the importer preserves those exact synthetic bytes.
 	synthetic["多轮沟通"] = "简历={简历}\n时段={推荐时段}\n历史={对话历史}"
 	synthetic["意向判断"] = "招呼={招呼语}\n回复={回复}"
+	synthetic["沉默追问"] = "姓名={姓名}\n年龄={年龄}\n性别={性别}\n简历={简历}"
 	synthetic["客户事实库"] = "fixture://客户事实库"
 	bundle := syntheticLegacyBundle(t, 9, "fixture job")
 	bundle["documents"] = synthetic

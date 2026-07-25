@@ -111,6 +111,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		preflight.TraceStatus = TraceStatusUnavailable
 	}
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply &&
+		request.Purpose != PurposeSilenceFollowup &&
 		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting {
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("requestInvalid", FailureStageRequestBuild, "unknownPurpose")
@@ -125,7 +126,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			newProviderError("requestInvalid", FailureStageRequestBuild, "traceMetadataMissing")
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
-		((request.Purpose == PurposeReply || request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting) &&
+		((request.Purpose == PurposeReply || request.Purpose == PurposeSilenceFollowup ||
+			request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting) &&
 			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("budgetBlocked", FailureStageRequestBuild, "outputTokenBudgetExceeded")
@@ -463,5 +465,20 @@ func (a *AIAdvisor) SuggestReply(ctx context.Context, userContent string) (Reply
 		return ReplySuggestion{}, CompletionUsage{}, err
 	}
 	suggestion, err := ParseReplySuggestion(response.JSONText)
+	return suggestion, response.Usage, err
+}
+
+func (a *AIAdvisor) SuggestSilenceFollowup(
+	ctx context.Context,
+	userContent string,
+) (SilenceFollowupSuggestion, CompletionUsage, error) {
+	response, err := a.provider.CompleteJSON(ctx, CompletionRequest{
+		Purpose: PurposeSilenceFollowup, UserContent: userContent,
+		MaxOutputTokens: SilenceFollowupOutputTokenLimit,
+	})
+	if err != nil {
+		return SilenceFollowupSuggestion{}, CompletionUsage{}, err
+	}
+	suggestion, err := ParseSilenceFollowupSuggestion(response.JSONText)
 	return suggestion, response.Usage, err
 }

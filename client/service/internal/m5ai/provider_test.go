@@ -371,6 +371,7 @@ func TestOpenAICompatibleProviderUsesReportedInputTokensForEveryPDossier(t *test
 	}{
 		{name: "intent", purpose: PurposeIntent, limit: IntentInputTokenLimit, maxOut: IntentOutputTokenLimit},
 		{name: "reply", purpose: PurposeReply, limit: ReplyInputTokenLimit, maxOut: ReplyOutputTokenLimit},
+		{name: "silenceFollowup", purpose: PurposeSilenceFollowup, limit: SilenceFollowupInputTokenLimit, maxOut: SilenceFollowupOutputTokenLimit},
 		{name: "scoring", purpose: PurposeScoring, limit: ReplyInputTokenLimit, maxOut: ScoringOutputTokenLimit},
 		{name: "greeting", purpose: PurposeGreeting, limit: GreetingInputTokenLimit, maxOut: GreetingOutputTokenLimit},
 	}
@@ -410,6 +411,23 @@ func TestOpenAICompatibleProviderUsesReportedInputTokensForEveryPDossier(t *test
 				}
 			})
 		}
+	}
+}
+
+func TestOpenAICompatibleProviderBlocksSilenceFollowupOutsideReplyOutputBudget(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("不应发起沉默追问请求")
+	})}
+	provider, _ := NewOpenAICompatibleProvider(configuredProvider("https://provider.invalid"), client)
+	_, err := provider.CompleteJSON(context.Background(), CompletionRequest{
+		Purpose: PurposeSilenceFollowup, UserContent: "fixture",
+		MaxOutputTokens: SilenceFollowupOutputTokenLimit + 1,
+	})
+	var providerErr *ProviderError
+	if calls != 0 || !errors.As(err, &providerErr) || providerErr.Class != "budgetBlocked" {
+		t.Fatalf("沉默追问输出预算未在网络前阻断: calls=%d err=%v", calls, err)
 	}
 }
 
