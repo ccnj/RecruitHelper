@@ -22,8 +22,63 @@ type m5AutomaticReplyRunner struct {
 	dispatcher *dispatch.Dispatcher
 }
 
+type m5InboundAutomaticRunner struct {
+	*m5AutomaticReplyRunner
+}
+
 func (r *m5AutomaticReplyRunner) Start(ctx context.Context, req RunRequest) (RunHandle, error) {
 	return r.base.Start(ctx, req)
+}
+
+func (r *m5InboundAutomaticRunner) StartResumeCapture(
+	ctx context.Context,
+	req ResumeCaptureRequest,
+) (ResumeCaptureHandle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	receipt, err := r.dispatcher.DispatchResumeCapture(
+		dispatch.ResumeCaptureDispatchRequest{
+			ProfileID: req.ProfileID, HandID: req.HandID,
+			ExpectedSession: req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
+			Platform: req.Platform, AccountRef: req.AccountRef,
+			ExpectedPrincipalFingerprint: req.ExpectedPrincipalFingerprint,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &m5InboundResumeHandle{
+		dispatcher: r.dispatcher,
+		logicalID:  receipt.LogicalDispatchID,
+	}, nil
+}
+
+type m5InboundResumeHandle struct {
+	dispatcher *dispatch.Dispatcher
+	logicalID  string
+}
+
+func (h *m5InboundResumeHandle) LogicalDispatchID() string { return h.logicalID }
+
+func (h *m5InboundResumeHandle) Wait(ctx context.Context) (json.RawMessage, error) {
+	logical, err := h.dispatcher.WaitLogical(ctx, h.logicalID)
+	if err != nil {
+		return nil, err
+	}
+	if logical == nil || logical.Leaf.ResultBody == "" {
+		return nil, errors.New("简历补采缺少持久结果")
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal([]byte(logical.Leaf.ResultBody), &result); err != nil {
+		return nil, err
+	}
+	if result.Status != protocol.ResultStatusOk ||
+		len(result.Data) == 0 ||
+		string(result.Data) == "null" {
+		return nil, errors.New("简历补采未成功")
+	}
+	return append(json.RawMessage(nil), result.Data...), nil
 }
 
 func (r *m5AutomaticReplyRunner) StartAutomaticReply(
@@ -134,6 +189,25 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 	var evidenceType string
 	var err error
 	switch body.Name {
+	case protocol.PrimCandidateReadResume:
+		var args protocol.CandidateReadResumeArgs
+		if err := json.Unmarshal(body.Args, &args); err != nil {
+			return err
+		}
+		data, err = protocol.Encode(protocol.CandidateReadResumeData{
+			ConversationRef: args.ConversationRef,
+			PlatformUserRef: args.PlatformUserRef,
+			ObservedAt:      time.Now().UnixMilli(),
+			Basic: []protocol.CandidateResumeLabelValue{
+				{Label: "学历", Value: "本科"},
+			},
+			Expectations: []protocol.CandidateResumeLabelValue{
+				{Label: "职位", Value: "合成职位"},
+			},
+			SelfEvaluation:  "合成自评",
+			Education:       "合成教育",
+			WorkExperiences: "合成经历",
+		})
 	case protocol.PrimChatSendMessage:
 		var args protocol.ChatSendMessageArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -180,10 +254,14 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 	if err != nil {
 		return err
 	}
+	evidence := []protocol.Evidence(nil)
+	if evidenceType != "" {
+		evidence = []protocol.Evidence{{Type: evidenceType}}
+	}
 	dispatcher.OnAck(handID, protocol.AckBody{Ref: env.MsgID, Status: protocol.AckStatusAccepted})
 	dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
 		Ref: env.MsgID, Status: protocol.ResultStatusOk, Data: data,
-		Evidence: []protocol.Evidence{{Type: evidenceType}},
+		Evidence: evidence,
 	})
 	return nil
 }
@@ -204,6 +282,7 @@ func (*m5PositiveHand) HandNegotiation(handID string) ([]string, []string, bool)
 		return nil, nil, false
 	}
 	return []string{
+			protocol.PrimCandidateReadResume + "@1",
 			protocol.PrimChatSendMessage + "@1",
 			protocol.PrimChatSendWechatInvite + "@1",
 			protocol.PrimChatSendInviteCard + "@1",

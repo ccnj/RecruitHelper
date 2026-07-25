@@ -9,24 +9,25 @@ import (
 )
 
 const (
-	MappingVersion                  = "m5-communication-v1"
-	HistoryFormatVersion            = 1
-	ScheduleFormatVersion           = 1
-	ProviderAssemblyVersion         = 1
-	DialogueRenderFormatVersion     = "m5-history1-schedule1-assembly1"
-	SilenceFollowupRenderVersion    = "m5-silence-followup-v1"
-	SendTextMaxUTF8Bytes            = 2048
-	ReplyPhraseMaxItems             = 5
-	HistoryLimit                    = 20
-	IntentInputTokenLimit           = 8000
-	ReplyInputTokenLimit            = 16000
-	SilenceFollowupInputTokenLimit  = ReplyInputTokenLimit
-	GreetingInputTokenLimit         = ReplyInputTokenLimit
-	IntentOutputTokenLimit          = 64
-	ReplyOutputTokenLimit           = 512
-	SilenceFollowupOutputTokenLimit = ReplyOutputTokenLimit
-	ScoringOutputTokenLimit         = 512
-	GreetingOutputTokenLimit        = ReplyOutputTokenLimit
+	MappingVersion                    = "m5-communication-v1"
+	InboundConversationNoGreetingText = "（候选人主动发起会话，我方尚未发送招呼语）"
+	HistoryFormatVersion              = 1
+	ScheduleFormatVersion             = 1
+	ProviderAssemblyVersion           = 1
+	DialogueRenderFormatVersion       = "m5-history1-schedule1-assembly1"
+	SilenceFollowupRenderVersion      = "m5-silence-followup-v1"
+	SendTextMaxUTF8Bytes              = 2048
+	ReplyPhraseMaxItems               = 5
+	HistoryLimit                      = 20
+	IntentInputTokenLimit             = 8000
+	ReplyInputTokenLimit              = 16000
+	SilenceFollowupInputTokenLimit    = ReplyInputTokenLimit
+	GreetingInputTokenLimit           = ReplyInputTokenLimit
+	IntentOutputTokenLimit            = 64
+	ReplyOutputTokenLimit             = 512
+	SilenceFollowupOutputTokenLimit   = ReplyOutputTokenLimit
+	ScoringOutputTokenLimit           = 512
+	GreetingOutputTokenLimit          = ReplyOutputTokenLimit
 )
 
 type JobConfigDocument struct {

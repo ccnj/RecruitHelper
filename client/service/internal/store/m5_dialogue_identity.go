@@ -139,6 +139,59 @@ func DialogueTurnIdentity(profileID string, lastOutbound Message, inbound []Mess
 	return hexDigest, "turn-" + hexDigest, nil
 }
 
+// DialogueTurnIdentityFromInboundRoot is the canonical evaluator for the
+// exceptional first turn of a candidate who initiated the conversation.
+// There is deliberately no fabricated outbound message at sequence zero: the
+// versioned root reference binds the turn to the first stable inbound platform
+// fact, while the ordinary message digests bind the complete candidate turn.
+func DialogueTurnIdentityFromInboundRoot(
+	profileID string,
+	rootRef string,
+	inbound []Message,
+) (string, string, error) {
+	if strings.TrimSpace(profileID) == "" ||
+		!IsInboundConversationV4Root(rootRef) ||
+		len(inbound) == 0 {
+		return "", "", ErrDialogueTurnInvalid
+	}
+	type digestMessage struct {
+		Seq         int64  `json:"seq"`
+		Kind        string `json:"kind"`
+		ContentHash string `json:"contentHash"`
+	}
+	canonical := struct {
+		Version        string          `json:"version"`
+		ProfileID      string          `json:"profileId"`
+		RootRef        string          `json:"rootRef"`
+		HistoryThrough int64           `json:"historyThroughSeq"`
+		Messages       []digestMessage `json:"messages"`
+	}{
+		Version: "inbound-root-turn-v1", ProfileID: profileID,
+		RootRef: rootRef, HistoryThrough: 0,
+		Messages: make([]digestMessage, 0, len(inbound)),
+	}
+	var previous int64
+	for i := range inbound {
+		message := inbound[i]
+		if message.Direction != "in" || message.Seq <= previous ||
+			strings.TrimSpace(message.Kind) == "" ||
+			strings.TrimSpace(message.ContentHash) == "" {
+			return "", "", ErrDialogueTurnInvalid
+		}
+		previous = message.Seq
+		canonical.Messages = append(canonical.Messages, digestMessage{
+			Seq: message.Seq, Kind: message.Kind, ContentHash: message.ContentHash,
+		})
+	}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", "", err
+	}
+	digest := sha256.Sum256(raw)
+	hexDigest := hex.EncodeToString(digest[:])
+	return hexDigest, "turn-" + hexDigest, nil
+}
+
 // M5AutomaticIntentID binds one persisted communication action to exactly one
 // chat.sendMessage intent across repeated patrols and brain restarts.
 func M5AutomaticIntentID(actionID string) (string, error) {

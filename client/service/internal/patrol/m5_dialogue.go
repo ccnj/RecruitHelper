@@ -759,6 +759,16 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 			material.current = append(material.current, advice)
 		}
 	}
+	if material.sentGreeting == "" && turn.HistoryThroughSeq == 0 {
+		aggregate, aggregateErr := a.manager.store.CommunicationV4AggregateByProfile(
+			turn.ProfileID,
+		)
+		if aggregateErr != nil || aggregate == nil ||
+			!store.IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
+			return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+		}
+		material.sentGreeting = m5ai.InboundConversationNoGreetingText
+	}
 	currentMessages, validBoundary := store.DialogueTurnCandidateMessages(currentBoundary)
 	if !validBoundary {
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding

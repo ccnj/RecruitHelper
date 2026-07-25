@@ -2,24 +2,25 @@ package patrol
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"strings"
 	"testing"
 
+	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
-func TestPageDrivenPatrolAdoptsUniqueInboundProfileAndStopsBeforeV4Root(t *testing.T) {
+func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T) {
 	h := newHarness(t)
 	savePatrolInboundLegacyJob(t, h, "job-inbound", "客户 经理")
 
 	conversationRef := "conversation-inbound-unique"
 	platformUserRef := "peer-inbound-unique"
 	positionTitle := " 客户\t经理 "
+	sourceKey := strings.Repeat("a", 64)
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
@@ -50,7 +51,7 @@ func TestPageDrivenPatrolAdoptsUniqueInboundProfileAndStopsBeforeV4Root(t *testi
 				Messages: []protocol.ThreadMessage{{
 					Idx: 0, Direction: protocol.MessageDirectionIn,
 					Kind: protocol.MessageKindText, Text: &text,
-					ContentHash: syncledger.HashText(text),
+					ContentHash: syncledger.HashText(text), SourceKey: sourceKey,
 				}},
 				Peer: &protocol.PeerSummary{
 					PlatformUserRef: platformUserRef,
@@ -63,9 +64,20 @@ func TestPageDrivenPatrolAdoptsUniqueInboundProfileAndStopsBeforeV4Root(t *testi
 		}
 	}
 
-	result, err := h.manager.Tick(context.Background())
+	advice := &recordingAdviceExecutor{}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5InboundAutomaticRunner{m5AutomaticReplyRunner: &m5AutomaticReplyRunner{
+		base: h.runner, dispatcher: dispatcher,
+	}}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Tick(context.Background())
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
-		t.Fatalf("页面驱动主动建档巡检失败: result=%+v err=%v", result, err)
+		t.Fatalf("页面驱动主动来聊闭环失败: result=%+v err=%v", result, err)
 	}
 	if h.runner.count(protocol.PrimChatReadThread) != 1 {
 		t.Fatalf("主动建档后应在同轮收编消息: calls=%v", h.runner.names())
@@ -76,30 +88,74 @@ func TestPageDrivenPatrolAdoptsUniqueInboundProfileAndStopsBeforeV4Root(t *testi
 	}
 	profile, err := h.db.CandidateProfileByConversation(key)
 	if err != nil || profile == nil ||
-		profile.MainStatus != store.CandidateProfileSelected ||
+		profile.MainStatus != store.CandidateProfileCommunicating ||
 		profile.PlatformUserRef != platformUserRef ||
 		profile.PositionRef != "job-inbound" ||
 		profile.BackendJobID == nil || *profile.BackendJobID != "job-inbound" ||
-		profile.PositionTitle == nil || *profile.PositionTitle != "客户 经理" {
+		profile.PositionTitle == nil || *profile.PositionTitle != "客户 经理" ||
+		profile.ResumeCaptureState != store.ResumeCaptureCaptured ||
+		profile.ActiveResumeSnapshotID == nil {
 		t.Fatalf("页面职位未唯一绑定到后台 Job.ID: profile=%+v err=%v", profile, err)
 	}
 	conversation, err := h.db.ConversationByKey(key)
 	messages, messagesErr := h.db.MessagesForConversation(key)
 	if err != nil || messagesErr != nil || conversation == nil ||
 		conversation.TrackingState != store.TrackingAdopted ||
-		len(messages) != 1 || messages[0].Direction != "in" {
-		t.Fatalf("主动建档后消息账本未收束: conversation=%+v messages=%+v err=%v messagesErr=%v",
-			conversation, messages, err, messagesErr)
+		len(messages) != 2 ||
+		messages[0].Direction != "in" ||
+		messages[1].Direction != "out" ||
+		messages[1].Origin != "self" {
+		root, rootErr := h.db.CommunicationV4AggregateByProfile(profile.ProfileID)
+		turn, turnErr := h.db.LatestDialogueTurnForProfile(profile.ProfileID)
+		var action *store.CommunicationAction
+		var actionErr error
+		if turn != nil {
+			action, actionErr = h.db.CommunicationActionByTurn(turn.TurnID)
+		}
+		t.Fatalf("主动建档后消息账本未收束: conversation=%+v messages=%+v root=%+v rootErr=%v turn=%+v turnErr=%v action=%+v actionErr=%v advice=%d handCommands=%d err=%v messagesErr=%v",
+			conversation, messages, root, rootErr, turn, turnErr, action, actionErr,
+			len(advice.requests), hand.commandCount(), err, messagesErr)
 	}
 	root, rootErr := h.db.CommunicationV4AggregateByProfile(profile.ProfileID)
-	if !errors.Is(rootErr, store.ErrCommunicationV4Missing) || root != nil {
-		t.Fatalf("本窄批次不得伪造 V4 root: root=%+v err=%v", root, rootErr)
+	if rootErr != nil || root == nil ||
+		!store.IsInboundConversationV4Root(root.RootGreetingIntentID) ||
+		root.ProjectedThroughSeq != 2 {
+		t.Fatalf("主动来聊事实根未推进首轮: root=%+v err=%v", root, rootErr)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(profile.ProfileID)
+	if err != nil || turn == nil ||
+		turn.HistoryThroughSeq != 0 ||
+		turn.Status != store.DialogueTurnCompleted {
+		t.Fatalf("主动来聊首轮未完成: turn=%+v err=%v", turn, err)
+	}
+	action, err := h.db.CommunicationActionByTurn(turn.TurnID)
+	if err != nil || action == nil ||
+		action.Status != store.CommunicationActionSent ||
+		action.EffectIntentID == nil {
+		t.Fatalf("主动来聊回复未以 WAL 正证完成: action=%+v err=%v", action, err)
+	}
+	if len(advice.requests) != 2 ||
+		advice.requests[0].Purpose != m5ai.PurposeIntent ||
+		advice.requests[1].Purpose != m5ai.PurposeReply ||
+		hand.commandCount() != 2 {
+		t.Fatalf("主动来聊调用链不完整: advice=%+v handCommands=%d",
+			advice.requests, hand.commandCount())
+	}
+	trial, err := h.db.M5TrialStatus()
+	if err != nil || trial != nil {
+		t.Fatalf("主动来聊不得伪造一次性试运行: trial=%+v err=%v", trial, err)
 	}
 	assertInboundAdoptionAudit(
 		t,
 		h,
 		conversationRef,
 		"status=adopted",
+	)
+	assertInboundAdoptionAudit(
+		t,
+		h,
+		conversationRef,
+		"status=rooted",
 	)
 }
 

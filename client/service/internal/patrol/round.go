@@ -232,8 +232,7 @@ func (a *roundActor) processConversationListPage(
 	}); err != nil {
 		return err
 	}
-	newInboundProfileIDs, err := a.adoptInboundConversationProfiles(page.sessions)
-	if err != nil {
+	if _, err := a.adoptInboundConversationProfiles(page.sessions); err != nil {
 		return err
 	}
 	if err := a.ensureCommunicationV4Roots(); err != nil {
@@ -282,11 +281,11 @@ func (a *roundActor) processConversationListPage(
 		if profile == nil {
 			continue
 		}
-		if _, newlyAdopted := newInboundProfileIDs[profile.ProfileID]; newlyAdopted {
-			// This batch deliberately stops after page-driven adoption and
-			// reconciliation. The following root-and-resume batch will attach
-			// the first stable inbound event before V4 automation is allowed.
-			continue
+		if err := a.prepareInboundConversationProfile(
+			ctx,
+			*profile,
+		); err != nil {
+			return err
 		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
 			return err
@@ -413,6 +412,89 @@ func (a *roundActor) appendInboundProfileAdoptionAudit(
 		ConversationRef: conversationRef, RoundID: a.roundID,
 		Detail: detail,
 	})
+}
+
+func (a *roundActor) prepareInboundConversationProfile(
+	ctx context.Context,
+	profile store.CandidateProfile,
+) error {
+	if profile.MainStatus != store.CandidateProfileSelected ||
+		profile.SuccessfulGreetingIntentID != nil ||
+		profile.ConversationRef == nil {
+		return nil
+	}
+	switch profile.ResumeCaptureState {
+	case store.ResumeCaptureUnattempted, store.ResumeCaptureInFlight:
+		target, err := a.manager.store.InboundResumeCaptureTarget(profile.ProfileID)
+		if err != nil {
+			if errors.Is(err, store.ErrResumeCaptureBinding) ||
+				errors.Is(err, store.ErrResumeCaptureNotAllowed) ||
+				errors.Is(err, store.ErrCandidateProfileState) {
+				return a.appendInboundProfileAdoptionAudit(
+					*profile.ConversationRef,
+					"status=manualRequired reason=resumeTargetConflict",
+				)
+			}
+			return err
+		}
+		if target == nil {
+			return nil
+		}
+		if err := a.captureResumeForProfile(ctx, target.Profile); err != nil {
+			if errors.Is(err, store.ErrResumeCaptureBinding) ||
+				errors.Is(err, store.ErrResumeCaptureNotAllowed) ||
+				errors.Is(err, store.ErrResumeCaptureConflict) ||
+				errors.Is(err, store.ErrCandidateProfileState) {
+				return a.appendInboundProfileAdoptionAudit(
+					*profile.ConversationRef,
+					"status=manualRequired reason=resumeCaptureConflict",
+				)
+			}
+			return err
+		}
+		refreshed, err := a.manager.store.CandidateProfileByConversation(
+			store.ConversationKey{
+				Platform: profile.Platform, AccountRef: profile.AccountRef,
+				ConversationRef: *profile.ConversationRef,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if refreshed == nil {
+			return store.ErrCandidateProfileState
+		}
+		profile = *refreshed
+	case store.ResumeCaptureCaptured:
+		// Continue below.
+	case store.ResumeCaptureManualRequired:
+		return nil
+	default:
+		return store.ErrCandidateProfileState
+	}
+	if profile.ResumeCaptureState != store.ResumeCaptureCaptured {
+		return nil
+	}
+	_, _, err := a.manager.store.EnsureInboundConversationV4Root(
+		profile.ProfileID,
+		a.manager.now(),
+	)
+	if err == nil {
+		return a.appendInboundProfileAdoptionAudit(
+			*profile.ConversationRef,
+			"status=rooted",
+		)
+	}
+	if errors.Is(err, store.ErrCommunicationV4Invalid) ||
+		errors.Is(err, store.ErrCommunicationV4Conflict) ||
+		errors.Is(err, store.ErrCommunicationV4Corrupt) ||
+		errors.Is(err, store.ErrCommunicationV4Missing) {
+		return a.appendInboundProfileAdoptionAudit(
+			*profile.ConversationRef,
+			"status=manualRequired reason=inboundRootConflict",
+		)
+	}
+	return err
 }
 
 const communicationV4RootActivationAuditCategory = "communication_v4_root_activation"
@@ -594,7 +676,14 @@ func (a *roundActor) captureTrialResume(ctx context.Context) error {
 	if err != nil || target == nil {
 		return err
 	}
-	switch target.Profile.ResumeCaptureState {
+	return a.captureResumeForProfile(ctx, target.Profile)
+}
+
+func (a *roundActor) captureResumeForProfile(
+	ctx context.Context,
+	profile store.CandidateProfile,
+) error {
+	switch profile.ResumeCaptureState {
 	case store.ResumeCaptureCaptured:
 		return nil
 	case store.ResumeCaptureUnattempted, store.ResumeCaptureInFlight:
@@ -619,7 +708,7 @@ func (a *roundActor) captureTrialResume(ctx context.Context) error {
 		expected = *a.account.PrincipalFingerprint
 	}
 	handle, err := runner.StartResumeCapture(ctx, ResumeCaptureRequest{
-		ProfileID: target.Profile.ProfileID,
+		ProfileID: profile.ProfileID,
 		HandID:    a.account.BoundHandID, ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
 		ExpectedPrincipalFingerprint: expected,
@@ -642,18 +731,18 @@ func (a *roundActor) captureTrialResume(ctx context.Context) error {
 		if !errors.As(err, &runErr) {
 			return err
 		}
-		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, resumeFailureReason(runErr))
+		return a.finishResumeCaptureFailure(profile.ProfileID, logicalID, resumeFailureReason(runErr))
 	}
 	meta := protocol.Primitives[protocol.PrimCandidateReadResume]
 	if err := protocol.ValidatePrimitiveData(protocol.PrimCandidateReadResume, meta.Ver, raw); err != nil {
-		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, "invalidResult")
+		return a.finishResumeCaptureFailure(profile.ProfileID, logicalID, "invalidResult")
 	}
 	var data protocol.CandidateReadResumeData
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return a.finishResumeCaptureFailure(target.Profile.ProfileID, logicalID, "invalidResult")
+		return a.finishResumeCaptureFailure(profile.ProfileID, logicalID, "invalidResult")
 	}
 	_, err = a.manager.store.CompleteResumeCapture(store.CompleteResumeCaptureRequest{
-		ProfileID: target.Profile.ProfileID, LogicalDispatchID: logicalID,
+		ProfileID: profile.ProfileID, LogicalDispatchID: logicalID,
 		SnapshotID: ids.NewResumeSnapshotID(), Data: data,
 	})
 	if errors.Is(err, store.ErrResumeCaptureBinding) || errors.Is(err, store.ErrResumeCaptureConflict) {

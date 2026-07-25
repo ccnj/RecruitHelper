@@ -167,7 +167,12 @@ func (s *Store) FreezeCommunicationV4Turn(
 		if err != nil {
 			return err
 		}
-		digest, turnID, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound)
+		digest, turnID, err := communicationV4TurnIdentity(
+			aggregate,
+			req.ProfileID,
+			lastOutbound,
+			inbound,
+		)
 		if err != nil || digest != req.InputDigest || turnID != req.TurnID {
 			return ErrDialogueTurnBinding
 		}
@@ -325,7 +330,7 @@ func validateFreezeDialogueTurnRequest(req FreezeDialogueTurnRequest) error {
 		strings.TrimSpace(req.ConversationRef) == "" || !validCommunicationV4Digest(req.InputDigest) ||
 		strings.TrimSpace(req.ContextRevisionHash) == "" || strings.TrimSpace(req.ResumeSnapshotID) == "" ||
 		strings.TrimSpace(req.RecommendedTimeText) == "" || strings.TrimSpace(req.RenderFormatVersion) == "" ||
-		req.HistoryThroughSeq <= 0 || req.InboundFromSeq <= req.HistoryThroughSeq ||
+		req.HistoryThroughSeq < 0 || req.InboundFromSeq <= req.HistoryThroughSeq ||
 		req.InboundThroughSeq < req.InboundFromSeq {
 		return ErrDialogueTurnInvalid
 	}
@@ -599,15 +604,22 @@ func loadCommunicationV4TurnBoundaryTx(
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
 	var lastOutbound Message
-	if err := tx.First(
-		&lastOutbound,
-		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
-		profile.Platform,
-		profile.AccountRef,
-		req.ConversationRef,
-		req.HistoryThroughSeq,
-	).Error; err != nil || lastOutbound.Direction != "out" {
-		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	if req.HistoryThroughSeq > 0 {
+		if err := tx.First(
+			&lastOutbound,
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
+			profile.Platform,
+			profile.AccountRef,
+			req.ConversationRef,
+			req.HistoryThroughSeq,
+		).Error; err != nil || lastOutbound.Direction != "out" {
+			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+		}
+	} else {
+		aggregate, err := communicationV4AggregateTx(tx, profile.ProfileID)
+		if err != nil || !IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
+			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+		}
 	}
 	var boundary []Message
 	if err := tx.Where(
@@ -642,5 +654,44 @@ func loadCommunicationV4TurnBoundaryTx(
 			firstReal = &copy
 		}
 	}
+	if req.HistoryThroughSeq == 0 {
+		if firstReal == nil || firstReal.SourceKey == nil ||
+			strings.TrimSpace(*firstReal.SourceKey) == "" {
+			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+		}
+		aggregate, err := communicationV4AggregateTx(tx, profile.ProfileID)
+		if err != nil {
+			return Message{}, nil, nil, nil, err
+		}
+		expectedRoot, err := InboundConversationV4RootRef(
+			profile.Platform,
+			profile.AccountRef,
+			req.ConversationRef,
+			*firstReal.SourceKey,
+		)
+		if err != nil || expectedRoot != aggregate.RootGreetingIntentID {
+			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+		}
+	}
 	return lastOutbound, inbound, facts, firstReal, nil
+}
+
+func communicationV4TurnIdentity(
+	aggregate CommunicationV4Aggregate,
+	profileID string,
+	lastOutbound Message,
+	inbound []Message,
+) (string, string, error) {
+	if aggregate.ProjectedThroughSeq == 0 {
+		if !IsInboundConversationV4Root(aggregate.RootGreetingIntentID) ||
+			lastOutbound.Seq != 0 {
+			return "", "", ErrDialogueTurnBinding
+		}
+		return DialogueTurnIdentityFromInboundRoot(
+			profileID,
+			aggregate.RootGreetingIntentID,
+			inbound,
+		)
+	}
+	return DialogueTurnIdentity(profileID, lastOutbound, inbound)
 }

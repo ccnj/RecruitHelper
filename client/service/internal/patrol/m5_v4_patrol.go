@@ -184,21 +184,38 @@ func (a *roundActor) processCommunicationV4Target(
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
-	cursorIndex := -1
-	for index := range messages {
-		if messages[index].Seq == target.Aggregate.ProjectedThroughSeq {
-			cursorIndex = index
-			break
+	historyThroughSeq := target.Aggregate.ProjectedThroughSeq
+	var lastOutbound store.Message
+	var boundary []store.Message
+	if historyThroughSeq == 0 {
+		if !store.IsInboundConversationV4Root(
+			target.Aggregate.RootGreetingIntentID,
+		) {
+			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+				target.Profile.ProfileID,
+				communicationV4ManualMissingOutbound,
+				a.manager.now(),
+			)
 		}
+		boundary = messages
+	} else {
+		cursorIndex := -1
+		for index := range messages {
+			if messages[index].Seq == historyThroughSeq {
+				cursorIndex = index
+				break
+			}
+		}
+		if cursorIndex < 0 || messages[cursorIndex].Direction != "out" {
+			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+				target.Profile.ProfileID,
+				communicationV4ManualMissingOutbound,
+				a.manager.now(),
+			)
+		}
+		lastOutbound = messages[cursorIndex]
+		boundary = messages[cursorIndex+1:]
 	}
-	if cursorIndex < 0 || messages[cursorIndex].Direction != "out" {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualMissingOutbound,
-			a.manager.now(),
-		)
-	}
-	boundary := messages[cursorIndex+1:]
 	if len(boundary) == 0 {
 		return nil
 	}
@@ -253,11 +270,20 @@ func (a *roundActor) processCommunicationV4Target(
 		)
 	}
 
-	digest, turnID, err := store.DialogueTurnIdentity(
-		target.Profile.ProfileID,
-		messages[cursorIndex],
-		inbound,
-	)
+	var digest, turnID string
+	if historyThroughSeq == 0 {
+		digest, turnID, err = store.DialogueTurnIdentityFromInboundRoot(
+			target.Profile.ProfileID,
+			target.Aggregate.RootGreetingIntentID,
+			inbound,
+		)
+	} else {
+		digest, turnID, err = store.DialogueTurnIdentity(
+			target.Profile.ProfileID,
+			lastOutbound,
+			inbound,
+		)
+	}
 	if err != nil {
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			target.Profile.ProfileID,
@@ -279,7 +305,7 @@ func (a *roundActor) processCommunicationV4Target(
 	frozen, err := a.manager.store.FreezeCommunicationV4Turn(store.FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: target.Profile.ProfileID,
 		ConversationRef: target.Conversation.ConversationRef,
-		InputDigest:     digest, HistoryThroughSeq: messages[cursorIndex].Seq,
+		InputDigest:     digest, HistoryThroughSeq: historyThroughSeq,
 		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: boundary[len(boundary)-1].Seq,
 		ContextRevisionHash: material.ContextRevision.RevisionHash,
 		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,

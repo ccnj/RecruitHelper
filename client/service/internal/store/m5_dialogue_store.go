@@ -348,6 +348,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err != nil {
 		return err
 	}
+	var v4Aggregate *CommunicationV4Aggregate
 	if v4Turn {
 		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
 		if err != nil {
@@ -358,6 +359,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 			aggregate.ProjectedThroughSeq != turn.InboundThroughSeq {
 			return ErrDialogueTurnBinding
 		}
+		v4Aggregate = &aggregate
 	}
 	if profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID ||
@@ -409,10 +411,15 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		return ErrDialogueTurnBinding
 	}
 	var lastOutbound Message
-	if err := tx.First(&lastOutbound,
-		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
-		profile.Platform, profile.AccountRef, turn.ConversationRef, turn.HistoryThroughSeq).Error; err != nil ||
-		lastOutbound.Direction != "out" {
+	if turn.HistoryThroughSeq > 0 {
+		if err := tx.First(&lastOutbound,
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
+			profile.Platform, profile.AccountRef, turn.ConversationRef, turn.HistoryThroughSeq).Error; err != nil ||
+			lastOutbound.Direction != "out" {
+			return ErrDialogueTurnBinding
+		}
+	} else if !v4Turn || v4Aggregate == nil ||
+		!IsInboundConversationV4Root(v4Aggregate.RootGreetingIntentID) {
 		return ErrDialogueTurnBinding
 	}
 	var boundary []Message
@@ -442,9 +449,53 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 			return ErrDialogueTurnBinding
 		}
 	}
-	if digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound); err != nil ||
-		digest != turn.InputDigest {
+	var digest string
+	if turn.HistoryThroughSeq == 0 {
+		if v4Aggregate == nil ||
+			!IsInboundConversationV4Root(v4Aggregate.RootGreetingIntentID) {
+			return ErrDialogueTurnBinding
+		}
+		firstReal := firstM5RealCandidateMessage(inbound)
+		if firstReal == nil || firstReal.SourceKey == nil ||
+			strings.TrimSpace(*firstReal.SourceKey) == "" {
+			return ErrDialogueTurnBinding
+		}
+		expectedRoot, rootErr := InboundConversationV4RootRef(
+			profile.Platform,
+			profile.AccountRef,
+			turn.ConversationRef,
+			*firstReal.SourceKey,
+		)
+		if rootErr != nil || expectedRoot != v4Aggregate.RootGreetingIntentID {
+			return ErrDialogueTurnBinding
+		}
+		digest, _, err = DialogueTurnIdentityFromInboundRoot(
+			turn.ProfileID,
+			v4Aggregate.RootGreetingIntentID,
+			inbound,
+		)
+		if err != nil {
+			return ErrDialogueTurnBinding
+		}
+	} else {
+		digest, _, err = DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound)
+		if err != nil {
+			return ErrDialogueTurnBinding
+		}
+	}
+	if digest != turn.InputDigest {
 		return ErrDialogueTurnBinding
+	}
+	return nil
+}
+
+func firstM5RealCandidateMessage(messages []Message) *Message {
+	for index := range messages {
+		if !IsM5RealCandidateMessage(messages[index]) {
+			continue
+		}
+		message := messages[index]
+		return &message
 	}
 	return nil
 }
