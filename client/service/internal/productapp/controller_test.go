@@ -67,13 +67,18 @@ func (f *fakeWorkflow) ConfirmAll(
 }
 
 type fakeSource struct {
-	raw   []byte
-	calls int
+	raw       []byte
+	err       error
+	calls     int
+	callOrder *[]string
 }
 
 func (f *fakeSource) FetchCurrent(context.Context) ([]byte, error) {
 	f.calls++
-	return f.raw, nil
+	if f.callOrder != nil {
+		*f.callOrder = append(*f.callOrder, "fetch")
+	}
+	return f.raw, f.err
 }
 
 func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
@@ -288,7 +293,10 @@ func TestAdditionalBatchFromPausedCommunicationResumesBeforeStarting(t *testing.
 		t.Fatal(err)
 	}
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	source := &fakeSource{
+		raw:       syntheticCurrentJob(t, 42, "产品经理"),
+		callOrder: &flow.callOrder,
+	}
 	controller, err := New(db, flow, source, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
@@ -298,9 +306,52 @@ func TestAdditionalBatchFromPausedCommunicationResumesBeforeStarting(t *testing.
 		t.Fatal(err)
 	}
 	if source.calls != 1 || flow.resumeCalls != 1 ||
-		len(flow.callOrder) != 2 ||
-		flow.callOrder[0] != "resume" || flow.callOrder[1] != "full" {
+		len(flow.callOrder) != 3 ||
+		flow.callOrder[0] != "fetch" ||
+		flow.callOrder[1] != "resume" || flow.callOrder[2] != "full" {
 		t.Fatalf("paused additional source=%d flow=%+v", source.calls, flow)
+	}
+}
+
+func TestAdditionalBatchSyncFailureKeepsCommunicationPaused(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+		RunID:      "wf-paused-sync-failure",
+		Platform:   key.Platform,
+		AccountRef: key.AccountRef,
+		State: workflow.State{
+			Mode:         workflow.ModeFull,
+			Status:       workflow.StatusPaused,
+			ResumeStatus: workflow.StatusRunning,
+		},
+		Stage:     store.ProductWorkflowStageCommunication,
+		StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow := &fakeWorkflow{}
+	sourceErr := errors.New("fixture backend unavailable")
+	controller, err := New(
+		db,
+		flow,
+		&fakeSource{err: sourceErr},
+		func() time.Time { return now },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(err, sourceErr) {
+		t.Fatalf("Start() error=%v", err)
+	}
+	if flow.resumeCalls != 0 || flow.fullRevision != "" || len(flow.callOrder) != 0 {
+		t.Fatalf("sync failure advanced workflow: %+v", flow)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.Status != workflow.StatusPaused ||
+		active.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("paused run changed after sync failure: run=%+v err=%v", active, err)
 	}
 }
 
