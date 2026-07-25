@@ -3626,7 +3626,7 @@ test('candidate.applySourcingFilters MAIN 等待旧列表延迟换代后再确�
   }
 })
 
-test('candidate.applySourcingFilters MAIN 确定后始终停留旧列表签名则失败', async () => {
+test('candidate.applySourcingFilters MAIN 条件已生效时允许列表签名保持稳定', async () => {
   const fixture = installM6SourcingFilterFixture({ neverListChange: true })
   try {
     const result = await zhilianTestHooks.mainApplySourcingFilters(
@@ -3634,10 +3634,11 @@ test('candidate.applySourcingFilters MAIN 确定后始终停留旧列表签名�
       fixture.refs.title,
       structuredClone(m6SourcingFilterTarget),
     )
-    assert.deepEqual(result, { status: 'failed', reason: 'list_unstable' })
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(result.data.filters, m6SourcingFilterTarget)
     assert.equal(fixture.state.confirms, 1)
-    assert.equal(fixture.state.openCount, 1, '未观察到换代时不得进入二次回读')
-    assert.equal(result.data, undefined)
+    assert.equal(fixture.state.openCount, 2, '稳定后仍须二次打开并回读筛选条件')
+    assert.equal(fixture.state.cancels, 1)
   } finally {
     fixture.restore()
   }

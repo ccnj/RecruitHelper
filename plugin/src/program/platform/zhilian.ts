@@ -1834,9 +1834,9 @@ async function mainApplySourcingFilters(
     }).join('|')
     return signature ? { status: 'ready', signature } : failed('list_unavailable')
   }
-  const stableList = async (previousSignature: string): Promise<ListRead> => {
+  const stableList = async (): Promise<ListRead> => {
     const deadline = Date.now() + 10_000
-    let previousChanged: ListRead | null = null
+    let previous: ListRead | null = null
     while (true) {
       const current = listSnapshot()
       if (current.status === 'failed') {
@@ -1845,15 +1845,12 @@ async function mainApplySourcingFilters(
             current.reason === 'position_title_mismatch') {
           return current
         }
-        previousChanged = null
-      } else if (current.signature === previousSignature) {
-        // 确定后的旧列表即便连续稳定，也不能冒充本次筛选产生的新推荐流。
-        previousChanged = null
-      } else if (previousChanged?.status === 'ready' &&
-          previousChanged.signature === current.signature) {
+        previous = null
+      } else if (previous?.status === 'ready' &&
+          previous.signature === current.signature) {
         return current
       } else {
-        previousChanged = current
+        previous = current
       }
       const remainingMs = deadline - Date.now()
       if (remainingMs <= 0) break
@@ -2052,7 +2049,10 @@ async function mainApplySourcingFilters(
     }
     ownedDrawer = null
 
-    const stable = await stableList(beforeSubmitList.signature)
+    // “确定”可能因目标条件本来就已生效而保留同一推荐列表。这里确认的是
+    // 列表重新进入连续稳定状态；筛选是否真正生效由随后字面同一份
+    // readFilters 二次回读裁决，不能把“列表必须变化”当作平台契约。
+    const stable = await stableList()
     if (stable.status === 'failed') return stable
     const reopened = await openDrawer()
     if (!reopened) return failed('drawer_not_ready')
