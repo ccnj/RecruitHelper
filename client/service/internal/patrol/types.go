@@ -49,6 +49,7 @@ var (
 	ErrDailyWindowExpired                = errors.New("巡检跨过本地日边界，已在 24:00 停止")
 	ErrActorPaused                       = errors.New("账号 actor 已停止或暂停，不得派发新命令")
 	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
+	ErrRoundSupersededBySourcingBatch    = errors.New("活动采集批次已换代，旧巡检轮不得继续派发命令")
 	ErrManualQuietActive                 = errors.New("用户操作静默窗生效，不得派发新驱动命令")
 	ErrEventHandMismatch                 = errors.New("传感事件来自非绑定手")
 	ErrEnsureNotReady                    = errors.New("恢复 IM 页面后仍未就绪")

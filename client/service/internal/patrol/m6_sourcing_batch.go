@@ -301,6 +301,8 @@ func (a *roundActor) failSourcingBatch(batchID, reason string, cause error) erro
 // 重新开启账号后仍从同一个 preparing/collecting 批次继续。
 func preservesSourcingBatch(err error) bool {
 	return errors.Is(err, ErrActorPaused) || errors.Is(err, ErrDailyWindowExpired) ||
-		errors.Is(err, ErrActorGenerationChanged) || errors.Is(err, ErrManualQuietActive) ||
+		errors.Is(err, ErrActorGenerationChanged) ||
+		errors.Is(err, ErrRoundSupersededBySourcingBatch) ||
+		errors.Is(err, ErrManualQuietActive) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

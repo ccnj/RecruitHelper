@@ -93,7 +93,9 @@ func (m *Manager) runCurrentConversationRound(
 	m.mu.Lock()
 	func() {
 		defer m.mu.Unlock()
-		outcome.Err = actor.execute(roundCtx)
+		if outcome.Err = actor.freezeSourcingBatchGeneration(); outcome.Err == nil {
+			outcome.Err = actor.execute(roundCtx)
+		}
 	}()
 	cancel()
 	if errors.Is(outcome.Err, context.DeadlineExceeded) &&
@@ -103,12 +105,20 @@ func (m *Manager) runCurrentConversationRound(
 	if errors.Is(outcome.Err, ErrDailyWindowExpired) {
 		_ = m.pauseAccount(key, PauseDailyExpired, m.now())
 	}
+	m.mu.Lock()
+	var generationErr error
+	outcome.Err, generationErr = actor.resolveFinishGeneration(outcome.Err)
+	finishErr := actor.finishCurrentConversation(outcome.Err)
+	m.mu.Unlock()
+	if generationErr != nil {
+		finishErr = errors.Join(finishErr, generationErr)
+	}
 	outcome.EnsureUsed = actor.ensureUsed
 	outcome.Projections = actor.projection
 	if outcome.Err == nil {
 		outcome.Status = "ok"
 	}
-	if finishErr := actor.finishCurrentConversation(outcome.Err); finishErr != nil {
+	if finishErr != nil {
 		if outcome.Err == nil {
 			outcome.Err = finishErr
 			outcome.Status = "failed"
@@ -201,6 +211,10 @@ func (a *roundActor) finishCurrentConversation(runErr error) error {
 	if runErr != nil {
 		status = "failed"
 		stage = "failed"
+	}
+	if a.superseded {
+		status = "failed"
+		stage = "superseded"
 	}
 	return a.manager.store.MutatePatrolRound(
 		a.account.Platform,

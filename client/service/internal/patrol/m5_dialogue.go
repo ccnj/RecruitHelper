@@ -662,6 +662,7 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 func preservesM5PlannedAction(err error) bool {
 	return errors.Is(err, ErrActorPaused) ||
 		errors.Is(err, ErrDailyWindowExpired) ||
+		errors.Is(err, ErrRoundSupersededBySourcingBatch) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }

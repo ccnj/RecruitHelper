@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -474,6 +475,40 @@ func seedActiveSourcingBatchForFeedInvalidation(
 		t.Fatalf("建立 active 采集批次失败: result=%+v err=%v", started, err)
 	}
 	return &started.Batch
+}
+
+func seedStartableSourcingRevision(
+	t *testing.T,
+	h *harness,
+	suffix string,
+) string {
+	t.Helper()
+	documents := []m5ai.JobConfigDocument{
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "意向判断", Content: "intent"},
+		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "候选人筛选", Content: `{"minScore":5}`},
+		{DocType: "打分", Content: "请评分 {resume_json}"},
+		{DocType: "招呼语", Content: `{"prompt":"状态={career_state};简历={resume_summary_json}"}`},
+		{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
+	}
+	sort.Slice(documents, func(i, j int) bool {
+		return documents[i].DocType < documents[j].DocType
+	})
+	revision := m5ai.ContextRevision{
+		ContextID: "context-handoff-" + suffix, RevisionHash: "revision-handoff-" + suffix,
+		SourceKind: "localImport", SourceJobRef: "17", DisplayName: "synthetic-position",
+		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+		Communication: m5ai.CommunicationView{
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
+			MappingVersion: m5ai.MappingVersion,
+		},
+		CreatedAt: h.clock.Now(),
+	}
+	if _, _, err := h.db.SaveJobAIContextRevision(revision); err != nil {
+		t.Fatal(err)
+	}
+	return revision.RevisionHash
 }
 
 func countAudit(entries []store.AuditEntry, category string) int {
@@ -1150,6 +1185,257 @@ func TestManualOnlyThreadFailurePausesInsteadOfRecurringIntrusiveRead(t *testing
 	if err != nil || len(third.Rounds) != 1 || third.Rounds[0].Err == nil ||
 		h.runner.count(protocol.PrimChatReadThread) != 2 {
 		t.Fatalf("真人重新开启后未获得一次正常对账机会: result=%+v err=%v calls=%v", third, err, h.runner.names())
+	}
+}
+
+func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *testing.T) {
+	h := newHarness(t)
+	revisionHash := seedStartableSourcingRevision(t, h, "local-failure")
+	conversationKey := seedTracked(
+		t,
+		h,
+		"conversation-generation-local",
+		"peer-generation-local",
+		[]store.MessageDraft{draftText("old")},
+	)
+	waitEntered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	var once sync.Once
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(conversationKey.ConversationRef, "peer-generation-local", "new", 1),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			once.Do(func() { close(waitEntered) })
+			<-releaseWait
+			return nil, &RunError{
+				Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
+				SideEffect: protocol.SideEffectNone, Cause: errors.New("旧读取局部失败"),
+			}
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	tickDone := make(chan TickResult, 1)
+	go func() {
+		result, _ := h.manager.Tick(context.Background())
+		tickDone <- result
+	}()
+	select {
+	case <-waitEntered:
+	case <-time.After(time.Second):
+		t.Fatal("旧巡检未进入 readThread Wait")
+	}
+
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- h.manager.StartSourcing(h.key, revisionHash, 30)
+	}()
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("StartSourcing: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("新采集启动被旧 readThread Wait 阻塞")
+	}
+	close(releaseWait)
+
+	var result TickResult
+	select {
+	case result = <-tickDone:
+	case <-time.After(time.Second):
+		t.Fatal("旧巡检迟到结果未收束")
+	}
+	if len(result.Rounds) != 1 ||
+		!errors.Is(result.Rounds[0].Err, ErrRoundSupersededBySourcingBatch) {
+		t.Fatalf("旧巡检未按 generation 换代终止: %+v", result)
+	}
+	batch, err := h.db.ActiveSourcingBatch(h.key)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing {
+		t.Fatalf("新采集批次被旧失败破坏: batch=%+v err=%v", batch, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("AccountByKey: account=%+v err=%v", account, err)
+	}
+	if account.StoppedAt != nil || account.PausedReason != "" ||
+		account.LastPatrolAt != nil || account.NextPatrolAt == nil ||
+		!account.NextPatrolAt.Equal(h.clock.Now()) {
+		t.Fatalf("旧巡检覆盖了新批次 Account 调度: %+v", account)
+	}
+	wantCalls := []string{protocol.PrimChatReadList, protocol.PrimChatReadThread}
+	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
+		t.Fatalf("换代后仍派发旧命令: got=%v want=%v", got, wantCalls)
+	}
+}
+
+func TestSourcingGenerationHandoffPreservesGlobalAccountFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		runErr      *RunError
+		pauseReason string
+	}{
+		{
+			name: "account mismatch",
+			runErr: &RunError{
+				Code: protocol.ErrCodeAccountMismatch, Retryable: protocol.RetryableManualOnly,
+				SideEffect: protocol.SideEffectNone, Cause: errors.New("当前账号不一致"),
+			},
+			pauseReason: PauseAccountMismatch,
+		},
+		{
+			name: "login required",
+			runErr: &RunError{
+				Code: protocol.ErrCodeCtxNotReady, Reason: protocol.NotReadyReasonLoginRequired,
+				Retryable: protocol.RetryableAfterRecovery, SideEffect: protocol.SideEffectNone,
+				Cause: errors.New("当前账号已登出"),
+			},
+			pauseReason: PauseLoginRequired,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			revisionHash := seedStartableSourcingRevision(t, h, strings.ReplaceAll(test.name, " ", "-"))
+			conversationKey := seedTracked(
+				t,
+				h,
+				"conversation-generation-global",
+				"peer-generation-global",
+				[]store.MessageDraft{draftText("old")},
+			)
+			waitEntered := make(chan struct{})
+			releaseWait := make(chan struct{})
+			var once sync.Once
+			h.runner.handler = func(request RunRequest) (any, error) {
+				switch request.Name {
+				case protocol.PrimChatReadList:
+					return protocol.ChatReadListData{
+						Sessions: []protocol.ConversationSummary{
+							summary(conversationKey.ConversationRef, "peer-generation-global", "new", 1),
+						},
+						Complete: true,
+					}, nil
+				case protocol.PrimChatReadThread:
+					once.Do(func() { close(waitEntered) })
+					<-releaseWait
+					return nil, test.runErr
+				default:
+					return defaultHandler(request)
+				}
+			}
+			tickDone := make(chan TickResult, 1)
+			go func() {
+				result, _ := h.manager.Tick(context.Background())
+				tickDone <- result
+			}()
+			select {
+			case <-waitEntered:
+			case <-time.After(time.Second):
+				t.Fatal("旧巡检未进入 readThread Wait")
+			}
+			if err := h.manager.StartSourcing(h.key, revisionHash, 30); err != nil {
+				t.Fatal(err)
+			}
+			close(releaseWait)
+			var result TickResult
+			select {
+			case result = <-tickDone:
+			case <-time.After(time.Second):
+				t.Fatal("全局错误未完成收束")
+			}
+			if len(result.Rounds) != 1 {
+				t.Fatalf("Tick rounds=%+v", result)
+			}
+			gotErr := runError(result.Rounds[0].Err)
+			if gotErr == nil || gotErr.Code != test.runErr.Code ||
+				gotErr.Reason != test.runErr.Reason {
+				t.Fatalf("全局错误被 generation 换代屏蔽: got=%v want=%v", result.Rounds[0].Err, test.runErr)
+			}
+			account, err := h.db.AccountByKey(h.key)
+			if err != nil || account == nil || account.StoppedAt == nil ||
+				account.PausedReason != test.pauseReason ||
+				account.IdentityState != store.IdentityInvalid {
+				t.Fatalf("全局错误未沿用既有停机语义: account=%+v err=%v", account, err)
+			}
+			batch, err := h.db.ActiveSourcingBatch(h.key)
+			if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing {
+				t.Fatalf("全局停机不应抹掉新批次事实: batch=%+v err=%v", batch, err)
+			}
+		})
+	}
+}
+
+func TestSourcingGenerationHandoffStopsBeforeNextCommandAfterLateSuccess(t *testing.T) {
+	h := newHarness(t)
+	revisionHash := seedStartableSourcingRevision(t, h, "late-success")
+	conversationKey := seedTracked(
+		t,
+		h,
+		"conversation-generation-success",
+		"peer-generation-success",
+		[]store.MessageDraft{draftText("old")},
+	)
+	waitEntered := make(chan struct{})
+	releaseWait := make(chan struct{})
+	var once sync.Once
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Cursor != "" {
+				t.Fatalf("generation 换代后仍读取下一窗口: cursor=%q", args.Cursor)
+			}
+			next := "must-not-be-read"
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(conversationKey.ConversationRef, "peer-generation-success", "new", 1),
+				},
+				Complete: false, NextCursor: &next,
+			}, nil
+		case protocol.PrimChatReadThread:
+			once.Do(func() { close(waitEntered) })
+			<-releaseWait
+			return protocol.ChatReadThreadData{
+				Messages: []protocol.ThreadMessage{
+					threadText(0, "old"),
+					threadText(1, "new"),
+				},
+				Complete: true, AnchorMatched: true,
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+	tickDone := make(chan TickResult, 1)
+	go func() {
+		result, _ := h.manager.Tick(context.Background())
+		tickDone <- result
+	}()
+	select {
+	case <-waitEntered:
+	case <-time.After(time.Second):
+		t.Fatal("旧巡检未进入 readThread Wait")
+	}
+	if err := h.manager.StartSourcing(h.key, revisionHash, 30); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseWait)
+	result := <-tickDone
+	if len(result.Rounds) != 1 ||
+		!errors.Is(result.Rounds[0].Err, ErrRoundSupersededBySourcingBatch) {
+		t.Fatalf("迟到成功未在下一命令前停止: %+v", result)
+	}
+	wantCalls := []string{protocol.PrimChatReadList, protocol.PrimChatReadThread}
+	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
+		t.Fatalf("迟到成功后仍派发旧任务命令: got=%v want=%v", got, wantCalls)
 	}
 }
 

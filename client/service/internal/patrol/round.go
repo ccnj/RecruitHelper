@@ -25,6 +25,8 @@ type roundActor struct {
 	classificationCorrected bool
 	bypassManualQuiet       bool
 	requireCurrentThread    bool
+	sourcingBatchIDAtStart  string
+	superseded              bool
 	projection              []ConversationProjection
 }
 
@@ -83,7 +85,9 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 	m.mu.Lock()
 	func() {
 		defer m.mu.Unlock()
-		err = actor.execute(roundCtx)
+		if err = actor.freezeSourcingBatchGeneration(); err == nil {
+			err = actor.execute(roundCtx)
+		}
 	}()
 	cancel()
 	if errors.Is(err, context.DeadlineExceeded) && m.localDate(m.now()) != m.localDate(now) {
@@ -92,14 +96,20 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 	if errors.Is(err, ErrDailyWindowExpired) {
 		_ = m.pauseAccount(key, PauseDailyExpired, m.now())
 	}
+	m.mu.Lock()
+	err, generationErr := actor.resolveFinishGeneration(err)
+	finishErr := actor.finish(err)
+	m.mu.Unlock()
+	if generationErr != nil {
+		finishErr = errors.Join(finishErr, generationErr)
+	}
 	outcome.EnsureUsed = actor.ensureUsed
 	outcome.Projections = actor.projection
 	outcome.Err = err
 	if err == nil {
 		outcome.Status = "ok"
 	}
-
-	if finishErr := actor.finish(err); finishErr != nil {
+	if finishErr != nil {
 		if outcome.Err == nil {
 			outcome.Err = finishErr
 			outcome.Status = "failed"
@@ -1128,11 +1138,8 @@ func invokePrimitiveDirectWithLogicalID[T any](
 	// 命令在途期间可能发生人工暂停、切号/改绑或 hand session/boot 更替。
 	// 返回数据入账前复用同一门禁；任何代际变化都丢弃本轮观察，留给下一轮
 	// fresh probe，不能把旧手/旧主体的数据写进当前账号根。
-	if gateErr := actor.ensureDispatchAllowed(ctx); gateErr != nil {
-		return zero, logicalID, gateErr
-	}
-	if err != nil {
-		return zero, logicalID, err
+	if waitErr := actor.resolvePostWait(ctx, err); waitErr != nil {
+		return zero, logicalID, waitErr
 	}
 	if err := protocol.ValidatePrimitiveData(name, meta.Ver, rawData); err != nil {
 		return zero, logicalID, err
@@ -1208,6 +1215,10 @@ func (a *roundActor) finish(runErr error) error {
 		status = "failed"
 		stage = "failed"
 	}
+	if a.superseded {
+		status = "failed"
+		stage = "superseded"
+	}
 	trigger := a.trigger
 	if a.ensureUsed {
 		trigger += surfaceRecoverySuffix
@@ -1221,6 +1232,12 @@ func (a *roundActor) finish(runErr error) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	// StartSourcing 已在与本函数相同的 Manager.mu 下建立新批次并写好
+	// Enabled/Dirty/Next。换代后的旧轮只终局化自己的 PatrolRound，不能再
+	// 用旧 LastPatrolAt、NextPatrolAt 或 surfaceRecovery 计数覆盖新任务。
+	if a.superseded {
+		return nil
 	}
 	if err := a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
 		account.LastPatrolAt = timePointer(finishedAt)
@@ -1305,15 +1322,6 @@ func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
 		current.ManualQuietUntil != nil && now.Before(*current.ManualQuietUntil) {
 		return wrapRunError(protocol.ErrCodeUserActive, "", ErrManualQuietActive)
 	}
-	if a.trigger == TriggerCurrentConversation {
-		batch, batchErr := a.manager.store.ActiveSourcingBatch(a.key())
-		if batchErr != nil {
-			return batchErr
-		}
-		if batch != nil {
-			return ErrCurrentConversationSourcingActive
-		}
-	}
 	if current.BoundHandID != a.account.BoundHandID ||
 		!sameFingerprint(current.PrincipalFingerprint, a.account.PrincipalFingerprint) {
 		return ErrActorGenerationChanged
@@ -1325,7 +1333,114 @@ func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
 	if !hand.Online || hand.Session != a.hand.Session || hand.BootID != a.hand.BootID {
 		return ErrActorGenerationChanged
 	}
+	return a.ensureSourcingBatchGenerationCurrent()
+}
+
+// freezeSourcingBatchGeneration 在线性化的 actor 开始点只冻结活动批次 ID。
+// preparing→collecting 等同批状态变化不构成任务换代；空串明确表示当时没有
+// 活动采集批次。
+func (a *roundActor) freezeSourcingBatchGeneration() error {
+	batchID, err := a.activeSourcingBatchID()
+	if err != nil {
+		return err
+	}
+	a.sourcingBatchIDAtStart = batchID
 	return nil
+}
+
+func (a *roundActor) activeSourcingBatchID() (string, error) {
+	batch, err := a.manager.store.ActiveSourcingBatch(a.key())
+	if err != nil || batch == nil {
+		return "", err
+	}
+	return batch.BatchID, nil
+}
+
+func (a *roundActor) detectSourcingBatchSuperseded() error {
+	currentID, err := a.activeSourcingBatchID()
+	if err != nil {
+		return err
+	}
+	if currentID == a.sourcingBatchIDAtStart {
+		return nil
+	}
+	// 达标事务会把本轮自己持有的批次原子终局为 completed，使 active
+	// 查询自然从原 ID 变为空。这是本轮的正常出口，不是另一个任务接管。
+	// 若此时已有新 active ID，或原批次是 stopped，则仍按换代处理。
+	if a.sourcingBatchIDAtStart != "" && currentID == "" {
+		original, loadErr := a.manager.store.SourcingBatchByID(a.sourcingBatchIDAtStart)
+		if loadErr != nil {
+			return loadErr
+		}
+		if original != nil &&
+			original.Status == store.SourcingBatchCompleted &&
+			original.EndedAt != nil {
+			return nil
+		}
+	}
+	a.superseded = true
+	return ErrRoundSupersededBySourcingBatch
+}
+
+func (a *roundActor) ensureSourcingBatchGenerationCurrent() error {
+	if err := a.detectSourcingBatchSuperseded(); err != nil {
+		return err
+	}
+	if a.trigger == TriggerCurrentConversation && a.sourcingBatchIDAtStart != "" {
+		return ErrCurrentConversationSourcingActive
+	}
+	return nil
+}
+
+// resolvePostWait 只在逻辑命令已由 Wait 收编后裁决旧任务是否还能消费结果。
+// 账号错位、登出等当前世界事实仍按既有账号级语义处理；其余旧任务局部失败
+// 在采集批次换代后只终止旧轮，不能触发 handManualReview 暂停新批次。
+func (a *roundActor) resolvePostWait(ctx context.Context, waitErr error) error {
+	gateErr := a.ensureDispatchAllowed(ctx)
+	if errors.Is(gateErr, ErrRoundSupersededBySourcingBatch) &&
+		isAccountWideRunFailure(waitErr) {
+		return waitErr
+	}
+	if gateErr != nil {
+		return gateErr
+	}
+	return waitErr
+}
+
+// resolveFinishGeneration 覆盖“最后一条命令已返回、旧 execute 刚结束、新批次
+// 才线性化”的窄窗口。调用方与 StartSourcing 共持 Manager.mu，因而要么旧轮
+// 先正常收尾、再由新批次覆盖调度，要么旧轮观察到换代并完全不碰 Account。
+func (a *roundActor) resolveFinishGeneration(runErr error) (error, error) {
+	generationErr := a.detectSourcingBatchSuperseded()
+	if generationErr == nil {
+		return runErr, nil
+	}
+	if !errors.Is(generationErr, ErrRoundSupersededBySourcingBatch) {
+		return runErr, generationErr
+	}
+	if isAccountWideRunFailure(runErr) {
+		return runErr, nil
+	}
+	return ErrRoundSupersededBySourcingBatch, nil
+}
+
+func isAccountWideRunFailure(err error) bool {
+	typed := runError(err)
+	if typed == nil {
+		return false
+	}
+	switch {
+	case typed.Code == protocol.ErrCodeAccountMismatch:
+		return true
+	case typed.Code == protocol.ErrCodeCtxNotReady &&
+		(typed.Reason == protocol.NotReadyReasonLoginRequired ||
+			typed.Reason == protocol.NotReadyReasonIdentityUnverified):
+		return true
+	case typed.Code == protocol.ErrCodeUserActive:
+		return true
+	default:
+		return false
+	}
 }
 
 func sameFingerprint(left, right *string) bool {
