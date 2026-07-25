@@ -45,7 +45,6 @@ export function ProductConnectedApp({
         setData(next)
         setReadState('ready')
         setReadError(null)
-        setActionMessage(null)
       } catch (reason) {
         if (cancelled) return
         setReadState('stale')
@@ -68,6 +67,12 @@ export function ProductConnectedApp({
       ? `本机业务数据暂时无法刷新，页面保留上次成功结果：${readError ?? '读取失败'}`
       : null
   const statusMessage = actionMessage ?? readStatusMessage
+
+  useEffect(() => {
+    if (!actionMessage) return
+    const timer = window.setTimeout(() => setActionMessage(null), 8_000)
+    return () => window.clearTimeout(timer)
+  }, [actionMessage])
 
   async function performProductAction(label: string, action: () => Promise<void>) {
     if (actionRunning.current) return

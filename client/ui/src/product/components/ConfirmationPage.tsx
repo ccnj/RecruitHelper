@@ -29,7 +29,13 @@ export function ConfirmationPage({
   const allSelected = batch.ready &&
     selectable.length > 0 &&
     selectedEligibleCount === selectable.length
+  const sendProgress = confirmationSendProgress(batch)
   const sendUnavailableReason = confirmationSendUnavailableReason(batch, allSelected, actions)
+  const sendHint = sendProgress.started
+    ? sendProgress.completed
+      ? `本批发送完成：成功 ${sendProgress.sent} 人${sendProgress.failed > 0 ? `，异常 ${sendProgress.failed} 人` : ''}`
+      : `系统正在逐人发送：已成功 ${sendProgress.sent} / ${sendProgress.total} 人，请勿重复点击`
+    : sendUnavailableReason
 
   function selectAll() {
     if (!batch.ready) return
@@ -113,25 +119,33 @@ export function ConfirmationPage({
                 <button className="rh-text-button" disabled={!batch.ready || selectable.length === 0} onClick={selectAll} type="button">全选</button>
                 <span className="rh-toolbar-divider" />
                 <button className="rh-text-button" disabled={selectedIds.size === 0} onClick={clearSelection} type="button">取消全选</button>
-                <span className="rh-selection-count">已选择 {selectedEligibleCount} / {selectable.length}</span>
+                <span className="rh-selection-count">
+                  {sendProgress.started
+                    ? `已确认 ${sendProgress.total} 人 · 已发送 ${sendProgress.sent} 人`
+                    : `已选择 ${selectedEligibleCount} / ${selectable.length}`}
+                </span>
               </div>
               <button
                 className="rh-button is-primary"
-                disabled={sendUnavailableReason !== null}
+                disabled={sendProgress.started || sendUnavailableReason !== null}
                 onClick={() => {
                   if (batch.batchId && allSelected) {
                     void actions.sendConfirmationBatch?.(batch.batchId, selectable.map((candidate) => candidate.profileId))
                   }
                 }}
-                title={sendUnavailableReason ?? undefined}
+                title={sendHint ?? undefined}
                 type="button"
               >
                 <ProductIcon name="confirmation" size={17} />
-                发送所选候选人
+                {sendProgress.completed
+                  ? '本批发送完成'
+                  : sendProgress.started
+                    ? `正在发送 ${sendProgress.sent}/${sendProgress.total}`
+                    : '发送所选候选人'}
               </button>
             </div>
-            {sendUnavailableReason && (
-              <div className="rh-confirmation-hint">{sendUnavailableReason}</div>
+            {sendHint && (
+              <div className={`rh-confirmation-hint${sendProgress.started ? ' is-progress' : ''}`}>{sendHint}</div>
             )}
 
             {batch.candidates.length === 0 ? (
@@ -180,6 +194,21 @@ export function ConfirmationPage({
       )}
     </div>
   )
+}
+
+function confirmationSendProgress(batch: ConfirmationBatchView) {
+  const candidates = batch.candidates.filter((candidate) => candidate.sendState !== 'ineligible')
+  const sent = candidates.filter((candidate) => candidate.sendState === 'sent').length
+  const sending = candidates.filter((candidate) => candidate.sendState === 'sending').length
+  const failed = candidates.filter((candidate) =>
+    candidate.sendState === 'failed' || candidate.sendState === 'suspect').length
+  const started = sent + sending + failed > 0
+  const completed = started &&
+    candidates.every((candidate) =>
+      candidate.sendState === 'sent' ||
+      candidate.sendState === 'failed' ||
+      candidate.sendState === 'suspect')
+  return { completed, failed, sent, started, total: candidates.length }
 }
 
 function confirmationSendUnavailableReason(

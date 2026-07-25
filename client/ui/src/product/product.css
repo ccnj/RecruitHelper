@@ -1526,6 +1526,12 @@
   font-size: 10px;
 }
 
+.rh-confirmation-hint.is-progress {
+  border-bottom-color: #cbdcf7;
+  background: #f1f6ff;
+  color: #34527f;
+}
+
 .rh-confirmation-row {
   display: grid;
   grid-template-columns: 28px 40px minmax(150px, 0.8fr) 70px minmax(260px, 1.8fr) 92px;
