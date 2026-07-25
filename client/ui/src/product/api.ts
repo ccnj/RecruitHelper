@@ -53,7 +53,7 @@ export async function startProductWorkflow(
 ): Promise<void> {
   if (mode === 'full') {
     const normalized = backendJobId?.trim() ?? ''
-    if (!normalized) throw new Error('完整流程尚未绑定后台职位')
+    if (!normalized) throw new Error('当前没有已绑定职位，暂时不能开始今日任务')
     await appPost<ProductAcceptedResponse>('/app/workflow/start', {
       mode,
       backendJobId: normalized,

@@ -936,6 +936,26 @@
   color: var(--rh-primary);
 }
 
+.rh-product-app .rh-button.is-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--rh-primary-dark);
+  box-shadow: none;
+}
+
+.rh-product-app .rh-button.is-quiet:hover:not(:disabled) {
+  border-color: #dbe6ff;
+  background: #f3f7ff;
+  transform: none;
+}
+
+.rh-task-actions .rh-button.is-primary {
+  min-height: 42px;
+  padding-right: 18px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
 .rh-product-app .rh-button.is-compact {
   min-height: 31px;
   padding: 0 10px;

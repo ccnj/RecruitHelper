@@ -117,7 +117,9 @@ export function ProductConnectedApp({
           () => sendProductConfirmation(batchId, profileIds),
         ),
         startWorkflow: (mode) => performProductAction(
-          mode === 'full' ? '完整流程' : '仅多轮回复',
+          mode === 'full'
+            ? (data.overview.workflow.state === 'running' ? '追加采集' : '今日任务')
+            : '只处理消息',
           () => startProductWorkflow(
             mode,
             mode === 'full' ? data.customer.job.backendJobId : null,

@@ -412,9 +412,9 @@ function adaptWorkflow(
 function workflowPositionLabel(state: WorkflowView['state'], mode: WorkflowView['mode']): string | null {
   if (state === 'awaitingConfirmation') return '招呼语已经生成，等待候选确认'
   if (state === 'waitingDailyWindow') return '业务运行已停在成员边界，08:00 后需手动恢复'
-  if (state === 'paused') return mode === 'replyOnly' ? '多轮回复已暂停' : '完整流程已暂停'
-  if (state === 'running') return mode === 'replyOnly' ? '正在运行多轮回复' : '正在推进完整流程'
-  if (state === 'failed') return '请查看流程中的最近失败原因'
+  if (state === 'paused') return mode === 'replyOnly' ? '消息处理已暂停' : '今日任务已暂停'
+  if (state === 'running') return mode === 'replyOnly' ? '正在处理候选人消息' : '今日任务正在运行'
+  if (state === 'failed') return '今日任务没有完成，请查看下方失败原因'
   return null
 }
 
@@ -458,6 +458,7 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     ...values[key],
   }))
   return {
+    stage: clean(raw.stage) || null,
     stateLabel: funnelStateLabel(raw.stage),
     target,
     pending: safeCount(raw.pendingConfirm),

@@ -175,6 +175,7 @@ export function createProductFixture(): ProductData {
         unavailableReason: null,
       },
       funnel: {
+        stage: 'awaitingConfirmation',
         stateLabel: '等待候选确认',
         target: 30,
         pending: 18,
@@ -287,6 +288,7 @@ export function createEmptyProductData(): ProductData {
         unavailableReason: '完成激活并绑定职位后可开始',
       },
       funnel: {
+        stage: null,
         stateLabel: '尚无运行批次',
         target: null,
         pending: null,

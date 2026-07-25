@@ -25,7 +25,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
     workflow.canStart && customer.job.backendJobId !== null,
     workflow.unavailableReason ??
-      (customer.job.backendJobId === null ? '同步并绑定职位后可开始完整流程' : null),
+      (customer.job.backendJobId === null ? '同步并绑定职位后可开始今日任务' : null),
   )
   const startReplyReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('replyOnly') : undefined,
@@ -34,9 +34,20 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
   )
   const pauseReason = controlDisabledReason(actions.pauseWorkflow, workflow.canPause, workflow.unavailableReason)
   const resumeReason = controlDisabledReason(actions.resumeWorkflow, workflow.canResume, workflow.unavailableReason)
-  const showStart = workflow.state === 'idle' || workflow.state === 'failed'
-  const showResume = workflow.state === 'paused' || workflow.state === 'waitingDailyWindow'
+  const canAddBatch = workflow.state === 'running' &&
+    (workflow.mode === 'replyOnly' || overview.funnel.stage === 'completed')
+  const additionalBatchReason = controlDisabledReason(
+    actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
+    canAddBatch && customer.job.backendJobId !== null && workflow.unavailableReason === null,
+    workflow.unavailableReason ??
+      (customer.job.backendJobId === null ? '同步并绑定职位后可再次采集' : null),
+  )
   const confirmationCount = overview.funnel.stages.find((stage) => stage.key === 'confirm')?.target ?? 0
+  const taskPosition = workflow.state === 'running' && overview.funnel.stage === 'completed'
+    ? '本批候选人已经处理完成，正在继续回复候选人消息。'
+    : workflow.state === 'idle'
+      ? '点击开始后，系统会自动采集、评分并生成招呼语。'
+      : workflow.positionLabel ?? workflow.unavailableReason ?? '今日任务准备就绪。'
 
   return (
     <div className="rh-page rh-home-page">
@@ -79,15 +90,15 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
               <h2>{workflow.stateLabel}</h2>
             </div>
             <StatusPill
-              label={workflow.mode === 'full' ? '完整流程' : workflow.mode === 'replyOnly' ? '仅多轮回复' : '未选择模式'}
+              label={workflow.mode === 'full' ? '自动招聘' : workflow.mode === 'replyOnly' ? '只处理消息' : '等待开始'}
               tone={workflow.state === 'running' || workflow.state === 'awaitingConfirmation' ? 'green' : 'slate'}
             />
           </div>
           <p className="rh-task-position">
-            {workflow.positionLabel ?? workflow.unavailableReason ?? '开始后会在这里显示当前进度。'}
+            {taskPosition}
           </p>
           <div className="rh-task-actions">
-            {showStart && (
+            {(workflow.state === 'idle' || workflow.state === 'failed') && (
               <>
                 <button
                   className="rh-button is-primary"
@@ -97,20 +108,20 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   type="button"
                 >
                   <ProductIcon name="play" size={17} />
-                  开始完整流程
+                  {workflow.state === 'failed' ? '重新开始今日任务' : '开始今日任务'}
                 </button>
                 <button
-                  className="rh-button is-secondary"
+                  className="rh-button is-quiet"
                   disabled={startReplyReason !== null}
                   onClick={() => void actions.startWorkflow?.('replyOnly')}
                   title={startReplyReason ?? undefined}
                   type="button"
                 >
-                  仅运行多轮回复
+                  只处理新消息
                 </button>
               </>
             )}
-            {showResume ? (
+            {(workflow.state === 'paused' || workflow.state === 'waitingDailyWindow') && (
               <button
                 className="rh-button is-primary"
                 disabled={resumeReason !== null}
@@ -119,22 +130,54 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                 type="button"
               >
                 <ProductIcon name="play" size={17} />
-                恢复
-              </button>
-            ) : !showStart && (
-              <button
-                className="rh-button is-secondary"
-                disabled={pauseReason !== null}
-                onClick={() => void actions.pauseWorkflow?.()}
-                title={pauseReason ?? undefined}
-                type="button"
-              >
-                <ProductIcon name="pause" size={17} />
-                暂停
+                继续今日任务
               </button>
             )}
+            {workflow.state === 'awaitingConfirmation' && (
+              <>
+                <button className="rh-button is-primary" onClick={onOpenConfirmation} type="button">
+                  去确认候选人
+                  <ProductIcon name="chevron" size={16} />
+                </button>
+                <button
+                  className="rh-button is-quiet"
+                  disabled={pauseReason !== null}
+                  onClick={() => void actions.pauseWorkflow?.()}
+                  title={pauseReason ?? undefined}
+                  type="button"
+                >
+                  暂停
+                </button>
+              </>
+            )}
+            {workflow.state === 'running' && (
+              <>
+                <button
+                  className="rh-button is-primary"
+                  disabled={pauseReason !== null}
+                  onClick={() => void actions.pauseWorkflow?.()}
+                  title={pauseReason ?? undefined}
+                  type="button"
+                >
+                  <ProductIcon name="pause" size={17} />
+                  暂停
+                </button>
+                {canAddBatch && (
+                  <button
+                    className="rh-button is-quiet"
+                    disabled={additionalBatchReason !== null}
+                    onClick={() => void actions.startWorkflow?.('full')}
+                    title={additionalBatchReason ?? undefined}
+                    type="button"
+                  >
+                    再采一批（30 人）
+                  </button>
+                )}
+              </>
+            )}
           </div>
-          {(startFullReason || startReplyReason) && showStart && (
+          {(startFullReason || startReplyReason) &&
+            (workflow.state === 'idle' || workflow.state === 'failed') && (
             <div className="rh-inline-note"><ProductIcon name="warning" size={15} />{startFullReason}</div>
           )}
         </section>
@@ -192,12 +235,8 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           <div className="rh-confirmation-callout">
             <div>
               <strong>{confirmationCount} 位候选人的招呼语等待确认</strong>
-              <span>系统不会自动发送，请前往候选确认页全选并发送。</span>
+              <span>系统不会自动发送，请在候选确认页全选后发送。</span>
             </div>
-            <button className="rh-button is-primary" onClick={onOpenConfirmation} type="button">
-              前往候选确认
-              <ProductIcon name="chevron" size={16} />
-            </button>
           </div>
         )}
       </section>

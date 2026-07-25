@@ -58,6 +58,7 @@ export interface FunnelStageView {
 }
 
 export interface FunnelView {
+  stage: string | null
   stateLabel: string
   target: number | null
   pending: number | null
