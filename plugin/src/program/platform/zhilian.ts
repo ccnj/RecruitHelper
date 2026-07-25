@@ -3794,10 +3794,17 @@ async function mainReadListPage(
       senderType === 'STAFF' ? 'out' : senderType === 'USER' ? 'in' : 'system'
     const displayName = clean(row.name ?? row.realName) || '未命名候选人'
     const platformUserRef = clean(row.peerPartnerId ?? row.typeUserId ?? row.userId)
+    const rawPositionTitle = clean(row.jobTitle ?? row.subtitlePrefix)
+    const positionTitle = rawPositionTitle &&
+      Array.from(rawPositionTitle).length <= 256 &&
+      new TextEncoder().encode(rawPositionTitle).length <= 1_024
+      ? rawPositionTitle
+      : null
     const textPreview = clampPreview(clean(last.text) || clean(last.title))
     sessions.push({
       conversationRef,
       peer: platformUserRef ? { displayName, platformUserRef } : { displayName },
+      positionTitle,
       unreadCount: unreadRaw,
       lastMessage: {
         direction,
@@ -3943,9 +3950,17 @@ async function mainReadListDOMWindow(
             : 'system'
       const displayName = clean(source.name ?? source.realName) ||
         clean(node?.querySelector('.im-session-item__name-title')?.textContent) || '未命名候选人'
+      const rawPositionTitle = clean(source.jobTitle ?? source.subtitlePrefix) ||
+        clean(node?.querySelector('.im-session-item-subtitle__suffix')?.getAttribute('title'))
+      const positionTitle = rawPositionTitle &&
+        Array.from(rawPositionTitle).length <= 256 &&
+        new TextEncoder().encode(rawPositionTitle).length <= 1_024
+        ? rawPositionTitle
+        : null
       sessions.push({
         conversationRef,
         peer: { displayName, platformUserRef },
+        positionTitle,
         unreadCount,
         lastMessage: {
           direction,

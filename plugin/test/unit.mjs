@@ -9040,6 +9040,38 @@ test('智联列表 API 响应缺少真实 hasMore 时响亮失败', async () => 
   )
 })
 
+test('智联列表把每个会话自己的可见职位标题规范化进摘要', async () => {
+  const rows = [{
+    sessionId: 'conversation-position-title',
+    peerPartnerId: 'peer-position-title',
+    name: '脱敏候选人',
+    unreadCount: 1,
+    lastSentence: JSON.stringify({
+      senderType: 'USER',
+      text: '脱敏消息',
+      sendTime: 1_700_000_000_000,
+    }),
+    sortTime: 1_700_000_000_000,
+    jobTitle: '  大客户经理\u00a0（养老&财富传承）  ',
+  }]
+  globalThis.window = {
+    imEngine: {
+      async getSessions() {
+        return { curSessions: structuredClone(rows), hasMoreSession: false }
+      },
+    },
+  }
+  const page = await zhilianTestHooks.mainReadListPage(1, 8, 'all')
+  assert.equal(page.sessions.length, 1)
+  assert.equal(page.sessions[0].positionTitle, '大客户经理 （养老&财富传承）')
+
+  rows[0].jobTitle = ''
+  rows[0].subtitlePrefix = ''
+  const missing = await zhilianTestHooks.mainReadListPage(1, 8, 'all')
+  assert.equal(missing.sessions[0].positionTitle, null,
+    '职位读取不到时必须显式保守，不得从当前默认职位猜测')
+})
+
 test('智联列表与线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
   let listCalls = 0
   globalThis.window = {
