@@ -1188,6 +1188,91 @@ func TestManualOnlyThreadFailurePausesInsteadOfRecurringIntrusiveRead(t *testing
 	}
 }
 
+func TestPageDrivenStaleThreadTargetEndsRoundAndRereadsListWithoutPausing(t *testing.T) {
+	h := newHarness(t)
+	conversationKey := seedTracked(
+		t,
+		h,
+		"conversation-stale-page-window",
+		"peer-stale-page-window",
+		[]store.MessageDraft{draftText("old")},
+	)
+	threadReads := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(
+						conversationKey.ConversationRef,
+						"peer-stale-page-window",
+						"new",
+						1,
+					),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			threadReads++
+			if threadReads == 1 {
+				return nil, &RunError{
+					Code:       protocol.ErrCodeTargetNotFound,
+					Retryable:  protocol.RetryableNo,
+					SideEffect: protocol.SideEffectNone,
+					Cause:      errors.New("页面列表目标已离开当前虚拟窗口"),
+				}
+			}
+			return protocol.ChatReadThreadData{
+				Messages: []protocol.ThreadMessage{
+					threadText(0, "old"),
+					threadText(1, "new"),
+				},
+				Peer: ptr(protocol.PeerSummary{
+					DisplayName:     "候选人",
+					PlatformUserRef: "peer-stale-page-window",
+				}),
+				Complete: true, ReachedTop: true,
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	first, err := h.manager.Tick(context.Background())
+	if err != nil || len(first.Rounds) != 1 ||
+		!isRunError(first.Rounds[0].Err, protocol.ErrCodeTargetNotFound) {
+		t.Fatalf("陈旧页面目标应只终止当前轮: result=%+v err=%v", first, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("AccountByKey: account=%+v err=%v", account, err)
+	}
+	if account.StoppedAt != nil || account.PausedReason != "" || !account.DirtyHint {
+		t.Fatalf("陈旧页面目标不得暂停账号，应保留下轮重读提示: %+v", account)
+	}
+	if got := h.runner.names(); !reflect.DeepEqual(got, []string{
+		protocol.PrimChatReadList,
+		protocol.PrimChatReadThread,
+	}) {
+		t.Fatalf("陈旧目标后不得原地重试或继续派发: %v", got)
+	}
+
+	h.clock.Add(h.config.PatrolInterval)
+	second, err := h.manager.Tick(context.Background())
+	if err != nil || len(second.Rounds) != 1 || second.Rounds[0].Err != nil {
+		t.Fatalf("下一轮未从页面列表重新开始: result=%+v err=%v", second, err)
+	}
+	if h.runner.count(protocol.PrimChatReadList) != 2 ||
+		h.runner.count(protocol.PrimChatReadThread) != 2 {
+		t.Fatalf("下一轮没有按 list→thread 重读: %v", h.runner.names())
+	}
+	messages, err := h.db.MessagesForConversation(conversationKey)
+	if err != nil || len(messages) != 2 ||
+		messages[1].Text == nil || *messages[1].Text != "new" {
+		t.Fatalf("重读后的消息账本未正常收敛: messages=%+v err=%v", messages, err)
+	}
+}
+
 func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *testing.T) {
 	h := newHarness(t)
 	revisionHash := seedStartableSourcingRevision(t, h, "local-failure")

@@ -8745,6 +8745,16 @@ async function ensureThreadRoute(
   if (selected === conversationRef) return false
   const finder = await runMain(tab.id, mainFindConversation, [conversationRef])
   if (finder.status !== 'found') {
+    if (finder.reason === 'target_not_found') {
+      // readList 观察到的行可能在 readThread 切换前因列表实时重排而离开
+      // 当前虚拟窗口。此时尚未 click，也没有开始平台历史读取；把它明确
+      // 表达为无副作用的陈旧页面目标，让脑结束本轮并从下一轮列表重读。
+      throw new ZhilianPlatformError(
+        'TARGET_NOT_FOUND',
+        '目标会话已离开本轮聊天列表窗口',
+        'no',
+      )
+    }
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
       `无法按完整会话标识唯一定位目标会话：${finder.reason ?? 'unknown'}`,

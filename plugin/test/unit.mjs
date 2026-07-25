@@ -8610,6 +8610,68 @@ test('会话切换等待异常时 commandNavigation 必经 finally 清理', asyn
   }
 })
 
+test('页面列表目标在 readThread 前离开窗口时只报无副作用 TARGET_NOT_FOUND', async () => {
+  const originalChrome = globalThis.chrome
+  const conversationRef = 'conversation-stale-page-window'
+  let finderReason = 'target_not_found'
+  let clickCalls = 0
+  globalThis.chrome = {
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainFindConversation') {
+          return [{ result: { status: 'failed', reason: finderReason } }]
+        }
+        if (func.name === 'mainClickConversationOnce') {
+          clickCalls += 1
+          return [{ result: { status: 'clicked' } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'stale-page-window', deadlineMs: Date.now() + 10_000,
+    irreversibleNotAfterMs: Date.now() + 10_000,
+    commandContext: undefined, guards: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, async beforeSideEffect() {
+      throw new Error('陈旧页面目标不得越过副作用 barrier')
+    },
+  }
+  try {
+    await assert.rejects(
+      zhilianTestHooks.ensureThreadRoute(
+        { id: 95, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' },
+        conversationRef,
+        '7'.repeat(64),
+        context,
+      ),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.TargetNotFound &&
+        error.retryable === 'no' &&
+        error.sideEffect === 'none',
+    )
+    assert.equal(clickCalls, 0)
+
+    finderReason = 'list_binding_unresolved'
+    await assert.rejects(
+      zhilianTestHooks.ensureThreadRoute(
+        { id: 95, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' },
+        conversationRef,
+        '7'.repeat(64),
+        context,
+      ),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.ElementUnresolved &&
+        error.retryable === 'manualOnly',
+      '只有精确 target_not_found 可以降级，列表绑定异常仍须响亮停止',
+    )
+    assert.equal(clickCalls, 0)
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('会话 finder 在取消后才返回也不能进入同步 click task', async () => {
   const originalChrome = globalThis.chrome
   const conversationRef = 'conversation-delayed-finder'
