@@ -409,6 +409,7 @@
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "peer": { "ref": "PeerSummary" },
+          "positionTitle": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "unreadCount": { "type": "int", "minimum": 0, "maximum": 1000000 },
           "lastMessage": { "ref": "LastMessageSummary" },
           "lastActivityTs": { "type": "int64", "nullable": true, "minimum": 0 }
@@ -1073,7 +1074,7 @@
       "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true;unreadCount 遵守两次一致"
+      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true;unreadCount 遵守两次一致。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
     },
     "chat.identifyCurrentConversation": {
       "ver": 1, "class": "readonly", "batch": "S",
