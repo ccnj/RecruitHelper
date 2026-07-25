@@ -95,6 +95,7 @@ export interface AppRuntimeRaw {
   contractMatch: boolean
   workflowMode?: string
   workflowStatus?: string
+  canAddBatch: boolean
   communicationState?: string
 }
 
@@ -403,6 +404,7 @@ function adaptWorkflow(
     stateLabel: labels[state],
     positionLabel: workflowPositionLabel(state, mode),
     canStart: (state === 'idle' || state === 'failed') && unavailableReason === null,
+    canAddBatch: runtime.canAddBatch && unavailableReason === null,
     canPause: (state === 'running' || state === 'awaitingConfirmation') && runtime.authorized,
     canResume: (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
     unavailableReason,

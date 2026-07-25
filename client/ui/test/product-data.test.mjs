@@ -105,6 +105,7 @@ const snapshot = {
       contractMatch: true,
       workflowMode: 'full',
       workflowStatus: 'awaitingConfirmation',
+      canAddBatch: false,
       communicationState: 'running',
     },
   },
@@ -176,6 +177,13 @@ check(
   '职位同步状态和仅供启动绑定的 Job.ID 如实映射',
 )
 check(product.overview.workflow.state === 'awaitingConfirmation' && !product.overview.workflow.canStart, '工作流等待确认时不会误显示可开始')
+const addBatchSnapshot = structuredClone(snapshot)
+addBatchSnapshot.overview.runtime.workflowStatus = 'running'
+addBatchSnapshot.overview.runtime.canAddBatch = true
+check(
+  adaptProductSnapshot(addBatchSnapshot, now).overview.workflow.canAddBatch,
+  '追加采集入口只采用脑返回的明确授权',
+)
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')

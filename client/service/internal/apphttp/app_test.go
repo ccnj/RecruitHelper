@@ -130,6 +130,7 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 				ContractMatch: true,
 				Platform:      " zhilian ", AccountRef: " account-product ",
 				CurrentBatchID: "batch-private", WorkflowMode: "full",
+				CanAddBatch: true,
 			}, nil
 		}),
 	)
@@ -154,7 +155,7 @@ func TestOverviewUsesRuntimeBatchWithoutExposingItInRuntimeJSON(t *testing.T) {
 		!body.Runtime.ProviderConfigured || body.Runtime.Provider != "deepseek" ||
 		body.Runtime.Model != "deepseek-v4-pro" || !body.Runtime.PluginOnline ||
 		body.Runtime.PluginHealth != "ready" || body.Runtime.PluginVersion != "1.2.3" ||
-		!body.Runtime.ContractMatch {
+		!body.Runtime.ContractMatch || !body.Runtime.CanAddBatch {
 		t.Fatalf("unexpected body=%s err=%v", res.Body.String(), err)
 	}
 	for _, forbidden := range []string{

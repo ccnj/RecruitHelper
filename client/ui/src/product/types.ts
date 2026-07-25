@@ -35,6 +35,7 @@ export interface WorkflowView {
   stateLabel: string
   positionLabel: string | null
   canStart: boolean
+  canAddBatch: boolean
   canPause: boolean
   canResume: boolean
   unavailableReason: string | null

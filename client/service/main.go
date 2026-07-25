@@ -204,6 +204,7 @@ func main() {
 				snapshot.CurrentBatchID = productState.CurrentBatchID
 				snapshot.WorkflowMode = productState.WorkflowMode
 				snapshot.WorkflowStatus = productState.WorkflowStatus
+				snapshot.CanAddBatch = productState.CanAddBatch
 				snapshot.CommunicationState = productState.CommunicationState
 				return snapshot, nil
 			}),

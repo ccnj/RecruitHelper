@@ -315,6 +315,31 @@ func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateAllowsAdditionalBatchOnlyFromRunningCommunication(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.Local)
+	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+		RunID:      "wf-can-add-batch",
+		Platform:   key.Platform,
+		AccountRef: key.AccountRef,
+		State: workflow.State{
+			Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning,
+		},
+		Stage:     store.ProductWorkflowStageCommunication,
+		StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := controller.RuntimeState()
+	if err != nil || !state.CanAddBatch {
+		t.Fatalf("running communication state=%+v err=%v", state, err)
+	}
+}
+
 func TestRuntimeStateKeepsAccountAndUnfinishedBatchWithoutWorkflowRun(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 10, 0, 0, 0, time.Local)

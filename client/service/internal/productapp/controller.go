@@ -47,6 +47,7 @@ type RuntimeState struct {
 	CurrentBatchID     string
 	WorkflowMode       string
 	WorkflowStatus     string
+	CanAddBatch        bool
 	CommunicationState string
 }
 
@@ -198,6 +199,8 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 		state.AccountRef = run.AccountRef
 		state.WorkflowMode = string(run.Mode)
 		state.WorkflowStatus = string(run.Status)
+		state.CanAddBatch = run.Status == workflow.StatusRunning &&
+			run.Stage == store.ProductWorkflowStageCommunication
 		if run.SourcingBatchID != nil {
 			state.CurrentBatchID = *run.SourcingBatchID
 		}

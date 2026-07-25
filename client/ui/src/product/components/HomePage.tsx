@@ -34,11 +34,9 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
   )
   const pauseReason = controlDisabledReason(actions.pauseWorkflow, workflow.canPause, workflow.unavailableReason)
   const resumeReason = controlDisabledReason(actions.resumeWorkflow, workflow.canResume, workflow.unavailableReason)
-  const canAddBatch = workflow.state === 'running' &&
-    (workflow.mode === 'replyOnly' || overview.funnel.stage === 'completed')
   const additionalBatchReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    canAddBatch && customer.job.backendJobId !== null && workflow.unavailableReason === null,
+    workflow.canAddBatch && customer.job.backendJobId !== null,
     workflow.unavailableReason ??
       (customer.job.backendJobId === null ? '同步并绑定职位后可再次采集' : null),
   )
@@ -162,7 +160,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   <ProductIcon name="pause" size={17} />
                   暂停
                 </button>
-                {canAddBatch && (
+                {workflow.canAddBatch && (
                   <button
                     className="rh-button is-quiet"
                     disabled={additionalBatchReason !== null}

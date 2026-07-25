@@ -45,6 +45,7 @@ type RuntimeSnapshot struct {
 	CurrentBatchID     string `json:"-"`
 	WorkflowMode       string `json:"workflowMode,omitempty"`
 	WorkflowStatus     string `json:"workflowStatus,omitempty"`
+	CanAddBatch        bool   `json:"canAddBatch"`
 	CommunicationState string `json:"communicationState,omitempty"`
 }
 
