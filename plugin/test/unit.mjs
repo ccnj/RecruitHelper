@@ -10600,7 +10600,7 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
             {
               conversationRef,
               peer: { displayName: '候选人甲', platformUserRef: 'peer-open' },
-              unreadCount: 2,
+              unreadCount: 0,
               lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
               lastActivityTs: Date.now(),
             },
@@ -10636,7 +10636,8 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
     )
     assert.equal(result.conversationRef, conversationRef)
     assert.ok(result.observedAt > 0)
-    assert.equal(clickCalls, 1)
+    assert.equal(clickCalls, 1,
+      '公开未读筛选已确认且目标唯一时，低保真行级零值不得阻断唯一打开动作')
     assert.equal(barriers, 1)
     assert.equal(findCalls, 2, '行离开必须连续双读，不能用单个瞬时空窗宣告成功')
   } finally {
@@ -10653,7 +10654,6 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
   let currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
   let filterReady = false
   let clickCalls = 0
-  let targetUnreadCount = 1
   globalThis.setTimeout = (callback) => {
     queueMicrotask(callback)
     return 1
@@ -10678,7 +10678,7 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
           sessions: [{
             conversationRef,
             peer: { displayName: '候选人乙', platformUserRef: 'peer-pending' },
-            unreadCount: targetUnreadCount,
+            unreadCount: 1,
             lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
             lastActivityTs: Date.now(),
           }],
@@ -10723,18 +10723,6 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
     )
     assert.equal(clickCalls, 0)
 
-    targetUnreadCount = 0
-    await assert.rejects(
-      openZhilianConversation({ conversationRef }, context, fingerprint),
-      (error) => error instanceof ZhilianPlatformError &&
-        error.code === ErrorCode.TargetNotFound &&
-        error.retryable === 'no' &&
-        error.sideEffect === 'none',
-      '目标行已经归零时必须零 click 并让脑继续处理其他会话',
-    )
-    assert.equal(clickCalls, 0)
-
-    targetUnreadCount = 1
     currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
     await assert.rejects(
       openZhilianConversation({ conversationRef }, context, fingerprint),

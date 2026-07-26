@@ -4310,13 +4310,6 @@ export async function openZhilianConversation(
   if (targetMatches.length !== 1) {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '目标在当前未读窗口内身份不唯一', 'manualOnly')
   }
-  if (targetMatches[0].unreadCount <= 0) {
-    throw new ZhilianPlatformError(
-      'TARGET_NOT_FOUND',
-      '目标会话的未读标记已经归零，本原语未执行打开动作',
-      'no',
-    )
-  }
 
   // 上一条列表命令可能刚刚滚动或切换筛选；无论实际间隔多少，本命令在唯一 click
   // 前都再留出 1s+抖动，保证跨命令相邻可见交互也不贴连。
