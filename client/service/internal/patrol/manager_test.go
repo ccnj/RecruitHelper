@@ -203,6 +203,72 @@ func TestProductWorkflowConversationAndPatrolBoundaries(t *testing.T) {
 	}
 }
 
+func TestConversationGateDoesNotInvertWorkflowAndPatrolLocks(t *testing.T) {
+	h := newHarness(t)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号: account=%+v err=%v", account, err)
+	}
+	actor := &roundActor{
+		manager: h.manager,
+		account: account,
+		hand: HandState{
+			Online: true, Session: "session-1", BootID: "boot-1",
+		},
+		now: h.clock.Now(),
+	}
+
+	var workflowMu sync.Mutex
+	workflowHeld := make(chan struct{})
+	beginPause := make(chan struct{})
+	pauseDone := make(chan error, 1)
+	go func() {
+		workflowMu.Lock()
+		close(workflowHeld)
+		<-beginPause
+		pauseDone <- h.manager.PauseNow(h.key)
+		workflowMu.Unlock()
+	}()
+	<-workflowHeld
+
+	gateEntered := make(chan struct{})
+	h.manager.SetWorkflowConversationGate(func() (bool, error) {
+		close(gateEntered)
+		workflowMu.Lock()
+		workflowMu.Unlock()
+		return true, nil
+	})
+	patrolHeld := make(chan struct{})
+	gateDone := make(chan error, 1)
+	go func() {
+		h.manager.mu.Lock()
+		close(patrolHeld)
+		_, gateErr := actor.mayStartNextConversation(context.Background())
+		h.manager.mu.Unlock()
+		gateDone <- gateErr
+	}()
+	<-patrolHeld
+	<-gateEntered
+	close(beginPause)
+
+	select {
+	case pauseErr := <-pauseDone:
+		if pauseErr != nil {
+			t.Fatalf("PauseNow: %v", pauseErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workflow.mu → patrol.mu 与 patrol.mu → workflow.mu 发生锁序死锁")
+	}
+	select {
+	case gateErr := <-gateDone:
+		if !errors.Is(gateErr, ErrActorPaused) {
+			t.Fatalf("gate 返回后没有复核暂停状态: %v", gateErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("会话 gate 在暂停完成后未返回")
+	}
+}
+
 func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 	h := newHarness(t)
 	documents := []m5ai.JobConfigDocument{

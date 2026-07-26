@@ -271,7 +271,7 @@ func (a *roundActor) processConversationListPage(
 		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
 	}
 	for _, summary := range page.sessions {
-		allowed, gateErr := a.manager.mayStartNextConversation()
+		allowed, gateErr := a.mayStartNextConversation(ctx)
 		if gateErr != nil {
 			return false, gateErr
 		}
@@ -331,6 +331,39 @@ func (a *roundActor) processConversationListPage(
 		}
 	}
 	return false, nil
+}
+
+// mayStartNextConversation calls the coarse product-workflow gate without
+// holding the patrol actor lock. Product controls acquire their workflow lock
+// before pausing the patrol actor, so entering the gate under Manager.mu would
+// invert that order. After reacquiring Manager.mu, the same dispatch recheck
+// used around network waits proves that the account, hand generation, daily
+// window and sourcing context still belong to this round.
+func (a *roundActor) mayStartNextConversation(
+	ctx context.Context,
+) (bool, error) {
+	a.manager.gateMu.RLock()
+	installed := a.manager.workflowConversationGate != nil
+	a.manager.gateMu.RUnlock()
+	if !installed {
+		return true, nil
+	}
+	var (
+		allowed bool
+		gateErr error
+	)
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		allowed, gateErr = a.manager.mayStartNextConversation()
+	}()
+	if gateErr != nil {
+		return false, gateErr
+	}
+	if err := a.ensureDispatchAllowed(ctx); err != nil {
+		return false, err
+	}
+	return allowed, nil
 }
 
 const inboundProfileAdoptionAuditCategory = "inbound_profile_adoption"
