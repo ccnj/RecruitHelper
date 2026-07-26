@@ -13,19 +13,35 @@ func availableV4FixedPhrases() V4FixedPhraseView {
 	return V4FixedPhraseView{Phrases: map[V4FixedPhraseKind]V4FixedPhrase{
 		V4PhraseRejectionRetention: {
 			Kind: V4PhraseRejectionRetention, SourceScene: "rejectWechat",
-			State: V4PhraseAvailable, Text: "方便的话也可以先加个微信了解一下。",
+			State: V4PhraseAvailable,
+			Messages: []string{
+				"方便的话也可以先加个微信了解一下。",
+			},
+			Text: "方便的话也可以先加个微信了解一下。",
 		},
 		V4PhraseWechatReceipt: {
 			Kind: V4PhraseWechatReceipt, SourceScene: "wechatAccepted",
-			State: V4PhraseAvailable, Text: "好的，晚点加你。",
+			State: V4PhraseAvailable,
+			Messages: []string{
+				"好的，晚点加你。",
+			},
+			Text: "好的，晚点加你。",
 		},
 		V4PhraseInterviewAccepted: {
 			Kind: V4PhraseInterviewAccepted, SourceScene: "meetingAccepted",
-			State: V4PhraseAvailable, Text: "好的，面试安排已确认。",
+			State: V4PhraseAvailable,
+			Messages: []string{
+				"好的，面试安排已确认。",
+			},
+			Text: "好的，面试安排已确认。",
 		},
 		V4PhraseColdWechat: {
 			Kind: V4PhraseColdWechat, SourceScene: "silence48Wechat",
-			State: V4PhraseAvailable, Text: "如果方便，也可以先加微信了解。",
+			State: V4PhraseAvailable,
+			Messages: []string{
+				"如果方便，也可以先加微信了解。",
+			},
+			Text: "如果方便，也可以先加微信了解。",
 		},
 	}}
 }
@@ -382,6 +398,51 @@ func TestV4DialogueRejectedFirstTurnUsesFixedPhraseWithoutReplyAI(t *testing.T) 
 		if action.ActionKey == "" {
 			t.Fatalf("拒绝分支动作缺稳定键: %+v", decision.Actions)
 		}
+	}
+}
+
+func TestV4DialogueRejectedPreservesFixedMessageBubblesBeforeWechatCard(t *testing.T) {
+	fixed := availableV4FixedPhrases()
+	retention := fixed.Phrases[V4PhraseRejectionRetention]
+	retention.Messages = []string{
+		"第一项。",
+		"第二项第一行。\n第二项第二行。",
+		"第三项包含两句话。仍然是同一个数组项。",
+	}
+	retention.Text = strings.Join(retention.Messages, "\n")
+	fixed.Phrases[V4PhraseRejectionRetention] = retention
+	input := V4DialogueInput{
+		State: activeV4DialogueState(), Requirement: V4DialogueClassifyAndReply,
+		Turn: FrozenTurnFacts{TurnID: "turn-rejected-fixed-bubbles", Messages: []FrozenInboundMessage{
+			{Seq: 4, Kind: FrozenMessageText, Text: "暂时不考虑，谢谢"},
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: fixed,
+	}
+
+	decision, err := ReduceV4Dialogue(input)
+	if err != nil || decision.Status != V4DialogueActionsPlanned ||
+		decision.NextAdvice != V4AdviceNone ||
+		len(decision.Actions) != len(retention.Messages)+1 {
+		t.Fatalf("固定挽留多气泡没有形成完整计划: decision=%+v err=%v", decision, err)
+	}
+	for index, message := range retention.Messages {
+		action := decision.Actions[index]
+		if action.Kind != V4ActionRejectionRetention ||
+			action.Text != message ||
+			action.ActionKey != stableV4TurnPhraseActionKey(
+				input.Turn.TurnID,
+				V4ActionRejectionRetention,
+				0,
+				index+1,
+			) {
+			t.Fatalf("固定挽留气泡[%d]边界或稳定键错误: action=%+v", index, action)
+		}
+	}
+	card := decision.Actions[len(decision.Actions)-1]
+	if card.Kind != V4ActionInviteWechat ||
+		card.ActionKey != stableV4TurnActionKey(input.Turn.TurnID, V4ActionInviteWechat, 0) {
+		t.Fatalf("换微信卡没有排在固定话术最后: %+v", card)
 	}
 }
 

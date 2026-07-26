@@ -192,7 +192,9 @@ func TestV4InboundTurnRejectedReplayCannotAdvanceTheSameTurnToClosing(t *testing
 	state := NewV4GreetedState(v4Time(8))
 	phrases := availableV4FixedPhrases()
 	phrases.Phrases[V4PhraseRejectionClosing] = V4FixedPhrase{
-		Kind: V4PhraseRejectionClosing, State: V4PhraseAvailable, Text: "好的，后续有机会再联系。",
+		Kind: V4PhraseRejectionClosing, State: V4PhraseAvailable,
+		Messages: []string{"好的，后续有机会再联系。"},
+		Text:     "好的，后续有机会再联系。",
 	}
 	firstInput := V4InboundTurnInput{
 		State: state, TurnID: "turn-rejected-replay", Messages: []LedgerMessageFact{v4InboundText(2, "暂时不考虑，谢谢")},

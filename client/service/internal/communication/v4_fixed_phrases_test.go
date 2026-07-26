@@ -35,9 +35,18 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 		V4PhraseWechatReceipt:      "收到",
 		V4PhraseInterviewAccepted:  "确认一\n确认二",
 	}
+	wantMessages := map[V4FixedPhraseKind][]string{
+		V4PhraseRejectionRetention: {"挽留一", "挽留二"},
+		V4PhraseRejectionClosing:   {v4LocalRejectionClosingText},
+		V4PhraseColdWechat:         {"冷催二"},
+		V4PhraseWechatReceipt:      {"收到"},
+		V4PhraseInterviewAccepted:  {"确认一", "确认二"},
+	}
 	for kind, text := range want {
 		phrase := view.Phrase(kind)
-		if phrase.State != V4PhraseAvailable || phrase.Text != text {
+		if phrase.State != V4PhraseAvailable ||
+			phrase.Text != text ||
+			!reflect.DeepEqual(phrase.Messages, wantMessages[kind]) {
 			t.Fatalf("场景映射错误 kind=%s phrase=%+v", kind, phrase)
 		}
 	}
@@ -74,7 +83,9 @@ func TestBuildV4FixedPhraseViewDegradesOnlyBrokenScene(t *testing.T) {
 	if got := view.Phrase(V4PhraseInterviewAccepted); got.State != V4PhraseAvailable || got.Text != "确认" {
 		t.Fatalf("一个坏场景不应阻断其他场景: %+v", got)
 	}
-	if got := view.Phrase(V4PhraseRejectionRetention); got.State != V4PhraseInvalid || got.Text != "" {
+	if got := view.Phrase(V4PhraseRejectionRetention); got.State != V4PhraseInvalid ||
+		len(got.Messages) != 0 ||
+		got.Text != "" {
 		t.Fatalf("兼容镜像不一致必须只禁用本场景: %+v", got)
 	}
 	if got := view.Phrase(V4PhraseColdWechat); got.State != V4PhraseDisabled {
@@ -90,8 +101,33 @@ func TestBuildV4FixedPhraseViewSupportsLegacyMessageFallback(t *testing.T) {
   "wechatAccepted":{"message":"兼容单消息","actions":[]}
 }`))
 	if err != nil || view.Phrase(V4PhraseWechatReceipt).State != V4PhraseAvailable ||
+		!reflect.DeepEqual(view.Phrase(V4PhraseWechatReceipt).Messages, []string{"兼容单消息"}) ||
 		view.Phrase(V4PhraseWechatReceipt).Text != "兼容单消息" {
 		t.Fatalf("messages 缺失时没有使用旧 message 镜像: view=%+v err=%v", view, err)
+	}
+}
+
+func TestBuildV4FixedPhraseViewDoesNotSplitInsideMessageItem(t *testing.T) {
+	view, err := BuildV4FixedPhraseView(fixedPhrasePackage(`{
+  "rejectWechat":{
+    "message":"第一项。包含两句话。仍是一项。",
+    "messages":[
+      "第一项。包含两句话。仍是一项。",
+      "第二项第一行。\n第二项第二行。"
+    ],
+    "actions":[]
+  }
+}`))
+	phrase := view.Phrase(V4PhraseRejectionRetention)
+	want := []string{
+		"第一项。包含两句话。仍是一项。",
+		"第二项第一行。\n第二项第二行。",
+	}
+	if err != nil ||
+		phrase.State != V4PhraseAvailable ||
+		!reflect.DeepEqual(phrase.Messages, want) ||
+		phrase.Text != strings.Join(want, "\n") {
+		t.Fatalf("固定话术数组项边界被标点或项内换行改写: phrase=%+v err=%v", phrase, err)
 	}
 }
 
@@ -107,6 +143,7 @@ func TestBuildV4FixedPhraseViewKeepsMissingDocumentAndScenesLocal(t *testing.T) 
 	}
 	if got := view.Phrase(V4PhraseRejectionClosing); got.State != V4PhraseAvailable ||
 		got.SourceScene != v4LocalRejectionClosingScene ||
+		!reflect.DeepEqual(got.Messages, []string{v4LocalRejectionClosingText}) ||
 		got.Text != v4LocalRejectionClosingText {
 		t.Fatalf("本地拒绝收场默认不应依赖旧后台文档: %+v", got)
 	}

@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,40 @@ func setCommunicationV4FixedPhrasePackage(
 	revisionHash string,
 ) {
 	t.Helper()
+	setCommunicationV4FixedPhrasePackageContent(
+		t,
+		s,
+		revisionHash,
+		`{
+			"rejectWechat":{
+				"message":"{称呼}合成挽留",
+				"messages":["{称呼}合成挽留"],
+				"actions":[],
+				"enabled":true
+			},
+			"wechatAccepted":{
+				"message":"合成微信回执",
+				"messages":["合成微信回执"],
+				"actions":[],
+				"enabled":true
+			},
+			"meetingAccepted":{
+				"message":"合成面试回执",
+				"messages":["合成面试回执"],
+				"actions":[],
+				"enabled":true
+			}
+		}`,
+	)
+}
+
+func setCommunicationV4FixedPhrasePackageContent(
+	t *testing.T,
+	s *Store,
+	revisionHash string,
+	content string,
+) {
+	t.Helper()
 	var revision JobAIContextRevision
 	if err := s.db.First(&revision, "revision_hash = ?", revisionHash).Error; err != nil {
 		t.Fatal(err)
@@ -103,26 +138,7 @@ func setCommunicationV4FixedPhrasePackage(
 		revision.SourcePackage.Documents,
 		m5ai.JobConfigDocument{
 			DocType: "固定话术",
-			Content: `{
-				"rejectWechat":{
-					"message":"{称呼}合成挽留",
-					"messages":["{称呼}合成挽留"],
-					"actions":[],
-					"enabled":true
-				},
-				"wechatAccepted":{
-					"message":"合成微信回执",
-					"messages":["合成微信回执"],
-					"actions":[],
-					"enabled":true
-				},
-				"meetingAccepted":{
-					"message":"合成面试回执",
-					"messages":["合成面试回执"],
-					"actions":[],
-					"enabled":true
-				}
-			}`,
+			Content: content,
 		},
 	)
 	body, err := json.Marshal(revision.SourcePackage)
@@ -1218,6 +1234,98 @@ func TestCommunicationV4RejectionShortCircuitPlansTextBeforeWechatCardAtFreeze(t
 		replayed.Turn.Status != DialogueTurnAdviceReady ||
 		replayed.Aggregate.Revision != frozen.Aggregate.Revision {
 		t.Fatalf("拒绝短路冻结重放不幂等: result=%+v err=%v", replayed, err)
+	}
+}
+
+func TestCommunicationV4RejectionFixedMessagesRenderAndMaterializeOneAtATime(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-short-rejected-bubbles")
+	setCommunicationV4FixedPhrasePackageContent(
+		t,
+		s,
+		"revision-profile-v4-short-rejected-bubbles",
+		`{
+			"rejectWechat":{
+				"message":"{称呼}第一项",
+				"messages":[
+					"{称呼}第一项",
+					"第二项第一行。\n第二项第二行。",
+					"第三项。仍然是同一个气泡。"
+				],
+				"actions":[],
+				"enabled":true
+			}
+		}`,
+	)
+	inboundText := "暂时不考虑，谢谢"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text",
+		ContentHash: "v4-short-rejected-bubbles-2", Text: &inboundText,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	wantPhrases := []string{
+		"候选人第一项",
+		"第二项第一行。\n第二项第二行。",
+		"第三项。仍然是同一个气泡。",
+	}
+	if err != nil ||
+		frozen.Turn.Status != DialogueTurnAdviceReady ||
+		!reflect.DeepEqual(frozen.Turn.ReplyPhrases, wantPhrases) ||
+		len(frozen.Application.Outcome.PlannedActions) != len(wantPhrases)+1 {
+		t.Fatalf("固定挽留数组未按渲染后边界冻结: result=%+v err=%v", frozen, err)
+	}
+	for index, plan := range frozen.Application.Outcome.PlannedActions {
+		if plan.Text != "" {
+			t.Fatalf("冻结计划[%d]泄露固定话术正文: %+v", index, plan)
+		}
+	}
+
+	effectFixture := communicationV4AutomaticEffectFixture{
+		resumeStoreFixture: fixture,
+		Turn:               frozen.Turn,
+		Now:                frozen.Turn.UpdatedAt,
+	}
+	for index, want := range wantPhrases {
+		actions, actionErr := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+		if actionErr != nil || len(actions) != index+1 {
+			t.Fatalf("第 %d 个气泡前出现后续动作: actions=%+v err=%v", index+1, actions, actionErr)
+		}
+		current := actions[index]
+		if current.Kind != CommunicationActionReplyText ||
+			current.Status != CommunicationActionPlanned ||
+			current.Text != want {
+			t.Fatalf("第 %d 个固定气泡正文或状态错误: %+v", index+1, current)
+		}
+		if index == 0 {
+			if current.DependsOnActionID != nil {
+				t.Fatalf("首个固定气泡不得有父动作: %+v", current)
+			}
+		} else if current.DependsOnActionID == nil ||
+			*current.DependsOnActionID != actions[index-1].ActionID {
+			t.Fatalf("第 %d 个固定气泡未依赖上一项正证: %+v", index+1, current)
+		}
+		confirmCommunicationV4Bubble(
+			t,
+			s,
+			effectFixture,
+			current,
+			frozen.Turn.InboundThroughSeq+int64(index),
+			"fixed-rejection-bubble-"+string(rune('1'+index)),
+		)
+	}
+
+	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
+	if err != nil || len(actions) != len(wantPhrases)+1 {
+		t.Fatalf("最后固定气泡正证后未物化卡片: actions=%+v err=%v", actions, err)
+	}
+	card := actions[len(actions)-1]
+	if card.Kind != CommunicationActionInviteWechat ||
+		card.Status != CommunicationActionPlanned ||
+		card.DependsOnActionID == nil ||
+		*card.DependsOnActionID != actions[len(actions)-2].ActionID {
+		t.Fatalf("换微信卡没有只依赖最后固定气泡: %+v", card)
 	}
 }
 

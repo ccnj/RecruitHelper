@@ -198,13 +198,14 @@ func reduceV4Rejected(input V4DialogueInput, state V4State, source IntentSource)
 	switch state.RejectionStage {
 	case V4RejectionStageRetention:
 		phrase := input.FixedPhrases.Phrase(V4PhraseRejectionRetention)
-		if phrase.State != V4PhraseAvailable {
+		actions, valid := planV4FixedPhraseActions(
+			state.RejectionTurnID,
+			V4ActionRejectionRetention,
+			phrase,
+		)
+		if !valid {
 			return manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, m5ai.IntentRejected, source), nil
 		}
-		actions := []V4PlannedAction{{
-			ActionKey: stableV4TurnActionKey(state.RejectionTurnID, V4ActionRejectionRetention, 0),
-			Kind:      V4ActionRejectionRetention, Text: phrase.Text,
-		}}
 		if state.WechatState == V4WechatNotInvited {
 			actions = append(actions, V4PlannedAction{
 				ActionKey: stableV4TurnActionKey(state.RejectionTurnID, V4ActionInviteWechat, 0),
@@ -217,16 +218,18 @@ func reduceV4Rejected(input V4DialogueInput, state V4State, source IntentSource)
 		}, nil
 	case V4RejectionStageClosing:
 		phrase := input.FixedPhrases.Phrase(V4PhraseRejectionClosing)
-		if phrase.State != V4PhraseAvailable {
+		actions, valid := planV4FixedPhraseActions(
+			state.RejectionTurnID,
+			V4ActionRejectionClosing,
+			phrase,
+		)
+		if !valid {
 			return manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, m5ai.IntentRejected, source), nil
 		}
 		return V4DialogueDecision{
 			State: state, Status: V4DialogueActionsPlanned, IntentLabel: m5ai.IntentRejected,
 			IntentSource: source, NextAdvice: V4AdviceNone,
-			Actions: []V4PlannedAction{{
-				ActionKey: stableV4TurnActionKey(state.RejectionTurnID, V4ActionRejectionClosing, 0),
-				Kind:      V4ActionRejectionClosing, Text: phrase.Text,
-			}},
+			Actions: actions,
 		}, nil
 	case V4RejectionStageArchive:
 		archiveV4State(&state, V4EndRejected)
@@ -237,6 +240,43 @@ func reduceV4Rejected(input V4DialogueInput, state V4State, source IntentSource)
 	default:
 		return V4DialogueDecision{}, ErrInvalidV4StateTransition
 	}
+}
+
+func planV4FixedPhraseActions(
+	turnID string,
+	kind V4ActionKind,
+	phrase V4FixedPhrase,
+) ([]V4PlannedAction, bool) {
+	if strings.TrimSpace(turnID) == "" ||
+		phrase.State != V4PhraseAvailable ||
+		len(phrase.Messages) == 0 ||
+		len(phrase.Messages) > m5ai.ReplyPhraseMaxItems {
+		return nil, false
+	}
+	messages := make([]string, len(phrase.Messages))
+	actions := make([]V4PlannedAction, len(phrase.Messages))
+	for index, message := range phrase.Messages {
+		if strings.TrimSpace(message) != message ||
+			m5ai.ValidateSendText(message) != nil {
+			return nil, false
+		}
+		messages[index] = message
+		actions[index] = V4PlannedAction{
+			ActionKey: stableV4TurnPhraseActionKey(
+				turnID,
+				kind,
+				0,
+				index+1,
+			),
+			Kind: kind,
+			Text: message,
+		}
+	}
+	if strings.Join(messages, "\n") != phrase.Text ||
+		m5ai.ValidateSendText(phrase.Text) != nil {
+		return nil, false
+	}
+	return actions, true
 }
 
 func chooseV4RejectionStage(state V4State) V4RejectionStage {

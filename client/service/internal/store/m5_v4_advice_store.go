@@ -425,10 +425,10 @@ func persistCommunicationV4AdviceTx(
 	}
 	decision, plans, manualReason := communicationV4AdvicePolicy(decision)
 	if len(plans) > 0 {
-		rendered, ready, err := materializeCommunicationV4FixedTextPlanTx(
+		rendered, ready, err := materializeCommunicationV4FixedTextPlansTx(
 			tx,
 			turn.ProfileID,
-			plans[0],
+			plans,
 		)
 		if err != nil {
 			return nil, err
@@ -442,8 +442,11 @@ func persistCommunicationV4AdviceTx(
 			decision.Dialogue.ManualReason = communication.V4ManualFixedPhraseUnavailable
 			decision.Dialogue.Actions = nil
 		} else {
-			plans[0] = rendered
-			decision.Dialogue.Actions[0].Text = rendered.Text
+			plans = rendered
+			decision.Dialogue.Actions = append(
+				[]communication.V4PlannedAction(nil),
+				rendered...,
+			)
 		}
 	}
 	status, err := dialogueTurnStatusFromCommunicationV4Decision(decision, manualReason)
@@ -553,6 +556,29 @@ func materializeCommunicationV4FixedTextPlanTx(
 	}
 	plan.Text = rendered
 	return plan, true, nil
+}
+
+func materializeCommunicationV4FixedTextPlansTx(
+	tx *gorm.DB,
+	profileID string,
+	plans []communication.V4PlannedAction,
+) ([]communication.V4PlannedAction, bool, error) {
+	rendered := append([]communication.V4PlannedAction(nil), plans...)
+	for index := range rendered {
+		plan, ready, err := materializeCommunicationV4FixedTextPlanTx(
+			tx,
+			profileID,
+			rendered[index],
+		)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ready {
+			return nil, false, nil
+		}
+		rendered[index] = plan
+	}
+	return rendered, true, nil
 }
 
 func completeCommunicationV4IntentTx(

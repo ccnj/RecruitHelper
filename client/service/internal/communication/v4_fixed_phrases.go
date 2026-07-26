@@ -43,7 +43,11 @@ type V4FixedPhrase struct {
 	Kind        V4FixedPhraseKind
 	SourceScene string
 	State       V4FixedPhraseState
-	Text        string
+	Messages    []string
+	// Text is the canonical newline-joined compatibility summary. Candidate-
+	// visible planning must use Messages so the configured bubble boundaries
+	// are not lost.
+	Text string
 }
 
 type V4FixedPhraseView struct {
@@ -98,7 +102,7 @@ func BuildV4FixedPhraseView(source m5ai.JobConfigDocumentPackage) (V4FixedPhrase
 		if !exists {
 			continue
 		}
-		phrase.State, phrase.Text = parseV4FixedPhraseScene(raw)
+		phrase.State, phrase.Messages, phrase.Text = parseV4FixedPhraseScene(raw)
 		view.Phrases[mapping.kind] = phrase
 	}
 	return view, nil
@@ -170,24 +174,25 @@ func newMissingV4FixedPhraseView() V4FixedPhraseView {
 		Kind:        V4PhraseRejectionClosing,
 		SourceScene: v4LocalRejectionClosingScene,
 		State:       V4PhraseAvailable,
+		Messages:    []string{v4LocalRejectionClosingText},
 		Text:        v4LocalRejectionClosingText,
 	}
 	return view
 }
 
-func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, string) {
+func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, []string, string) {
 	var scene map[string]json.RawMessage
 	if json.Unmarshal(raw, &scene) != nil || scene == nil {
-		return V4PhraseInvalid, ""
+		return V4PhraseInvalid, nil, ""
 	}
 
 	if enabledRaw, exists := scene["enabled"]; exists {
 		var enabled bool
 		if isJSONNull(enabledRaw) || json.Unmarshal(enabledRaw, &enabled) != nil {
-			return V4PhraseInvalid, ""
+			return V4PhraseInvalid, nil, ""
 		}
 		if !enabled {
-			return V4PhraseDisabled, ""
+			return V4PhraseDisabled, nil, ""
 		}
 	}
 
@@ -195,7 +200,7 @@ func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, string) {
 	if messageRaw, exists := scene["message"]; exists {
 		var message string
 		if json.Unmarshal(messageRaw, &message) != nil {
-			return V4PhraseInvalid, ""
+			return V4PhraseInvalid, nil, ""
 		}
 		compatibilityMessage = &message
 	}
@@ -203,10 +208,10 @@ func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, string) {
 	var messages []string
 	if messagesRaw, exists := scene["messages"]; exists {
 		if isJSONNull(messagesRaw) || json.Unmarshal(messagesRaw, &messages) != nil {
-			return V4PhraseInvalid, ""
+			return V4PhraseInvalid, nil, ""
 		}
 		if compatibilityMessage != nil && (len(messages) == 0 || *compatibilityMessage != messages[0]) {
-			return V4PhraseInvalid, ""
+			return V4PhraseInvalid, nil, ""
 		}
 	} else if compatibilityMessage != nil {
 		messages = []string{*compatibilityMessage}
@@ -215,7 +220,7 @@ func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, string) {
 	if actionsRaw, exists := scene["actions"]; exists {
 		var actions []string
 		if isJSONNull(actionsRaw) || json.Unmarshal(actionsRaw, &actions) != nil {
-			return V4PhraseInvalid, ""
+			return V4PhraseInvalid, nil, ""
 		}
 	}
 
@@ -226,13 +231,18 @@ func parseV4FixedPhraseScene(raw json.RawMessage) (V4FixedPhraseState, string) {
 		}
 	}
 	if len(nonEmpty) == 0 {
-		return V4PhraseEmpty, ""
+		return V4PhraseEmpty, nil, ""
+	}
+	for _, message := range nonEmpty {
+		if err := m5ai.ValidateSendText(message); err != nil {
+			return V4PhraseInvalid, nil, ""
+		}
 	}
 	text := strings.Join(nonEmpty, "\n")
 	if err := m5ai.ValidateSendText(text); err != nil {
-		return V4PhraseInvalid, ""
+		return V4PhraseInvalid, nil, ""
 	}
-	return V4PhraseAvailable, text
+	return V4PhraseAvailable, append([]string(nil), nonEmpty...), text
 }
 
 func isJSONNull(raw json.RawMessage) bool {
