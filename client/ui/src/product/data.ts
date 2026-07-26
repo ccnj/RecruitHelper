@@ -300,7 +300,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
       businessWindowOpen,
       workflow,
       funnel,
-      communication: adaptCommunication(runtime.communicationState),
+      communication: adaptCommunication(runtime.communicationState, businessWindowOpen),
       todayMetrics: [
         { label: 'AI 评级人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '候选确认人数', value: metricValue(statistics.todayConfirmation), tone: 'amber' },
@@ -397,7 +397,7 @@ function adaptWorkflow(
     idle: '尚未开始',
     running: '运行中',
     paused: '已暂停',
-    waitingDailyWindow: '等待 08:00 开启',
+    waitingDailyWindow: businessWindowOpen ? '等待手动恢复' : '等待 08:00 开启',
     awaitingConfirmation: '等待人工确认',
     failed: '运行失败',
   }
@@ -405,7 +405,7 @@ function adaptWorkflow(
     mode,
     state,
     stateLabel: labels[state],
-    positionLabel: workflowPositionLabel(state, mode),
+    positionLabel: workflowPositionLabel(state, mode, businessWindowOpen),
     canStart: (state === 'idle' || state === 'failed') && unavailableReason === null,
     canAddBatch: runtime.canAddBatch && pendingAction === null && unavailableReason === null,
     canEnd: runtime.canEnd === true && pendingAction === null,
@@ -418,9 +418,17 @@ function adaptWorkflow(
   }
 }
 
-function workflowPositionLabel(state: WorkflowView['state'], mode: WorkflowView['mode']): string | null {
+function workflowPositionLabel(
+  state: WorkflowView['state'],
+  mode: WorkflowView['mode'],
+  businessWindowOpen: boolean,
+): string | null {
   if (state === 'awaitingConfirmation') return '招呼语已经生成，等待候选确认'
-  if (state === 'waitingDailyWindow') return '业务运行已停在成员边界，08:00 后需手动恢复'
+  if (state === 'waitingDailyWindow') {
+    return businessWindowOpen
+      ? '业务运行已停在成员边界，等待手动恢复'
+      : '业务运行已停在成员边界，08:00 后需手动恢复'
+  }
   if (state === 'paused') return mode === 'replyOnly' ? '消息处理已暂停' : '今日任务已暂停'
   if (state === 'running') return mode === 'replyOnly' ? '正在处理候选人消息' : '今日任务正在运行'
   if (state === 'failed') return '今日任务没有完成，请查看下方失败原因'
@@ -502,14 +510,21 @@ function funnelStateLabel(stage: string | undefined): string {
   return labels[clean(stage)] ?? '候选漏斗'
 }
 
-function adaptCommunication(raw: string | undefined): ProductData['overview']['communication'] {
+function adaptCommunication(
+  raw: string | undefined,
+  businessWindowOpen: boolean,
+): ProductData['overview']['communication'] {
   const state = clean(raw)
   if (state === 'running' || state === 'active') {
     return { state: 'running', stateLabel: '运行中', lastPatrolAt: null }
   }
   if (state === 'paused') return { state: 'paused', stateLabel: '已暂停', lastPatrolAt: null }
   if (state === 'waitingDailyWindow') {
-    return { state: 'waitingDailyWindow', stateLabel: '等待 08:00 开启', lastPatrolAt: null }
+    return {
+      state: 'waitingDailyWindow',
+      stateLabel: businessWindowOpen ? '等待手动恢复' : '等待 08:00 开启',
+      lastPatrolAt: null,
+    }
   }
   if (state === 'manualRequired') {
     return { state: 'manualRequired', stateLabel: '需要人工', lastPatrolAt: null }

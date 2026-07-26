@@ -254,6 +254,17 @@ check(
   adaptProductSnapshot(brainOpenedWindow, new Date(2026, 6, 25, 1, 0)).overview.workflow.canStart,
   'UI 在凌晨也只采用脑返回的开发期开窗结论',
 )
+brainOpenedWindow.overview.runtime.workflowMode = 'replyOnly'
+brainOpenedWindow.overview.runtime.workflowStatus = 'waitingDailyWindow'
+brainOpenedWindow.overview.runtime.communicationState = 'waitingDailyWindow'
+const openedWaiting = adaptProductSnapshot(brainOpenedWindow, new Date(2026, 6, 25, 1, 0))
+check(
+  openedWaiting.overview.workflow.canResume &&
+    openedWaiting.overview.workflow.stateLabel === '等待手动恢复' &&
+    openedWaiting.overview.workflow.positionLabel === '业务运行已停在成员边界，等待手动恢复' &&
+    openedWaiting.overview.communication.stateLabel === '等待手动恢复',
+  '开发期开窗后旧 waitingDailyWindow 状态不再误提示等待 08:00',
+)
 check(productCandidatePath('pendingInterview').includes('view=pending'), '产品页名称映射到唯一后端候选视图')
 
 const detail = adaptCandidateDetail({
