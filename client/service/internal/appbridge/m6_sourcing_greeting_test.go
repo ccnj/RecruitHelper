@@ -358,6 +358,87 @@ func TestSelectedSourcingGreetingLocatesByResetThenNextAndReplaysCompletedBatch(
 	}
 }
 
+func TestSelectedSourcingGreetingRefreshesStaleSessionOnSamePluginBoot(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, _, _ := prepareGeneratedSourcingGreeting(t, h)
+	if err := h.store.MutateAccount(h.key, func(account *store.Account) error {
+		account.IdentitySession = "session-before-brain-restart"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.sender.order)
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || progress == nil || !progress.Completed || progress.SentCount != 1 {
+		t.Fatalf("同 boot 重连后未恢复招呼发送: progress=%+v err=%v", progress, err)
+	}
+	if got := h.sender.order[before:]; len(got) == 0 || got[0] != protocol.PrimProbePlatform {
+		t.Fatalf("同 boot 重连没有先做只读身份探针: %v", got)
+	}
+	account, err := h.store.AccountByKey(h.key)
+	if err != nil || account == nil ||
+		account.IdentitySession != "session-sourcing-actor" ||
+		account.IdentityBootID != "boot-sourcing-actor" {
+		t.Fatalf("身份会话未更新到当前代际: account=%+v err=%v", account, err)
+	}
+}
+
+func TestSelectedSourcingGreetingDoesNotRepairPluginBootChange(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, _, _ := prepareGeneratedSourcingGreeting(t, h)
+	if err := h.store.MutateAccount(h.key, func(account *store.Account) error {
+		account.IdentitySession = "session-before-plugin-reload"
+		account.IdentityBootID = "boot-before-plugin-reload"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.sender.order)
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if !errors.Is(err, store.ErrAccountIdentityNotCurrent) ||
+		progress == nil || progress.SentCount != 0 || progress.PendingCount != 1 {
+		t.Fatalf("plugin boot 变化未保守停止: progress=%+v err=%v", progress, err)
+	}
+	if got := h.sender.order[before:]; len(got) != 0 {
+		t.Fatalf("plugin boot 变化仍触碰页面: %v", got)
+	}
+	if h.sender.greetingCount() != 0 {
+		t.Fatalf("plugin boot 变化仍创建招呼动作: %d", h.sender.greetingCount())
+	}
+}
+
+func TestSelectedSourcingGreetingRejectsReconnectProbeFingerprintMismatch(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, _, _ := prepareGeneratedSourcingGreeting(t, h)
+	if err := h.store.MutateAccount(h.key, func(account *store.Account) error {
+		account.IdentitySession = "session-before-brain-restart"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.sender.probeFingerprint = "different-principal"
+	before := len(h.sender.order)
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if !errors.Is(err, store.ErrAccountIdentityNotCurrent) ||
+		progress == nil || progress.SentCount != 0 || progress.PendingCount != 1 {
+		t.Fatalf("指纹冲突未保守停止: progress=%+v err=%v", progress, err)
+	}
+	if got := h.sender.order[before:]; len(got) != 1 || got[0] != protocol.PrimProbePlatform {
+		t.Fatalf("指纹冲突触碰了探针以外页面动作: %v", got)
+	}
+	if h.sender.greetingCount() != 0 {
+		t.Fatalf("指纹冲突仍创建招呼动作: %d", h.sender.greetingCount())
+	}
+	account, accountErr := h.store.AccountByKey(h.key)
+	if accountErr != nil || account == nil ||
+		account.IdentitySession != "session-before-brain-restart" {
+		t.Fatalf("指纹冲突仍更新身份: account=%+v err=%v", account, accountErr)
+	}
+}
+
 func TestSelectedSourcingGreetingsScanOnceAndSendInCurrentPageOrder(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{
 		{"candidate-a", "candidate-b"},

@@ -130,14 +130,167 @@ func (m *Manager) currentSourcingGreetingGeneration(
 	target store.SourcingGreetingSendTarget,
 ) (*sourcingGreetingGeneration, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	generation := sourcingGreetingGeneration{
 		key: store.AccountKey{Platform: target.Platform, AccountRef: target.AccountRef},
 	}
-	if err := m.validateSourcingGreetingGenerationLocked(ctx, &generation, true); err != nil {
+	refresh, err := m.captureSourcingGreetingGenerationLocked(ctx, &generation)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	if !refresh {
+		m.mu.Unlock()
+		return &generation, nil
+	}
+	handle, err := m.startSourcingGreetingIdentityProbeLocked(ctx, generation)
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if handle == nil || handle.LogicalDispatchID() == "" {
+		return nil, errors.New("招呼前身份探针未返回持久逻辑派发引用")
+	}
+	raw, err := handle.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.ValidatePrimitiveData(
+		protocol.PrimProbePlatform,
+		protocol.Primitives[protocol.PrimProbePlatform].Ver,
+		raw,
+	); err != nil {
+		return nil, err
+	}
+	var probe protocol.ProbePlatformData
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.commitSourcingGreetingIdentityProbeLocked(ctx, generation, probe); err != nil {
 		return nil, err
 	}
 	return &generation, nil
+}
+
+// captureSourcingGreetingGenerationLocked only permits the narrow reconnect
+// recovery needed by a brain restart: same bound hand, same plugin boot and an
+// already verified identity whose WS session alone is stale. A plugin boot
+// change invalidates the recommendation feed and must never be repaired here.
+func (m *Manager) captureSourcingGreetingGenerationLocked(
+	ctx context.Context,
+	generation *sourcingGreetingGeneration,
+) (bool, error) {
+	if generation == nil {
+		return false, ErrActorGenerationChanged
+	}
+	account, err := m.store.AccountByKey(generation.key)
+	if err != nil {
+		return false, err
+	}
+	if account == nil {
+		return false, store.ErrAccountNotFound
+	}
+	if account.IdentityState != store.IdentityVerified || account.BoundHandID == "" ||
+		account.PrincipalFingerprint == nil || strings.TrimSpace(*account.PrincipalFingerprint) == "" {
+		return false, store.ErrAccountIdentityNotCurrent
+	}
+	hand, err := m.hands.State(ctx, account.BoundHandID)
+	if err != nil {
+		return false, err
+	}
+	if !hand.Online || hand.Session == "" || hand.BootID == "" {
+		return false, store.ErrAccountIdentityNotCurrent
+	}
+	generation.handID = account.BoundHandID
+	generation.fingerprint = *account.PrincipalFingerprint
+	generation.session = hand.Session
+	generation.bootID = hand.BootID
+	if account.IdentitySession == hand.Session && account.IdentityBootID == hand.BootID {
+		return false, nil
+	}
+	if account.IdentityBootID != hand.BootID || account.IdentitySession == "" {
+		return false, store.ErrAccountIdentityNotCurrent
+	}
+	return true, nil
+}
+
+func (m *Manager) startSourcingGreetingIdentityProbeLocked(
+	ctx context.Context,
+	generation sourcingGreetingGeneration,
+) (RunHandle, error) {
+	meta, ok := protocol.Primitives[protocol.PrimProbePlatform]
+	if !ok || meta.Ver == 0 {
+		return nil, fmt.Errorf("未激活原语 %q", protocol.PrimProbePlatform)
+	}
+	args, err := protocol.Encode(protocol.ProbePlatformArgs{})
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.ValidatePrimitiveArgs(
+		protocol.PrimProbePlatform,
+		meta.Ver,
+		args,
+	); err != nil {
+		return nil, err
+	}
+	return m.runner.Start(ctx, RunRequest{
+		HandID: generation.handID, ExpectedSession: generation.session,
+		ExpectedBootID: generation.bootID, Platform: generation.key.Platform,
+		AccountRef:                   generation.key.AccountRef,
+		ExpectedPrincipalFingerprint: generation.fingerprint,
+		Name:                         protocol.PrimProbePlatform, Version: meta.Ver, Args: args,
+	})
+}
+
+func (m *Manager) commitSourcingGreetingIdentityProbeLocked(
+	ctx context.Context,
+	generation sourcingGreetingGeneration,
+	probe protocol.ProbePlatformData,
+) error {
+	account, err := m.store.AccountByKey(generation.key)
+	if err != nil {
+		return err
+	}
+	if account == nil {
+		return store.ErrAccountNotFound
+	}
+	hand, err := m.hands.State(ctx, generation.handID)
+	if err != nil {
+		return err
+	}
+	if !hand.Online || hand.Session != generation.session ||
+		hand.BootID != generation.bootID ||
+		account.IdentityState != store.IdentityVerified ||
+		account.BoundHandID != generation.handID ||
+		account.PrincipalFingerprint == nil ||
+		*account.PrincipalFingerprint != generation.fingerprint ||
+		account.IdentityBootID != generation.bootID {
+		return store.ErrAccountIdentityNotCurrent
+	}
+	if probe.LoginState != protocol.LoginStateIn ||
+		probe.PrincipalFingerprint == nil ||
+		*probe.PrincipalFingerprint != generation.fingerprint {
+		return store.ErrAccountIdentityNotCurrent
+	}
+	verifiedAt := m.now()
+	if err := m.store.MutateAccount(generation.key, func(current *store.Account) error {
+		if current.IdentityState != store.IdentityVerified ||
+			current.BoundHandID != generation.handID ||
+			current.PrincipalFingerprint == nil ||
+			*current.PrincipalFingerprint != generation.fingerprint ||
+			current.IdentityBootID != generation.bootID {
+			return store.ErrAccountIdentityNotCurrent
+		}
+		current.IdentityVerifiedAt = timePointer(verifiedAt)
+		current.IdentitySession = generation.session
+		current.IdentityReason = ""
+		return nil
+	}); err != nil {
+		return err
+	}
+	return m.validateSourcingGreetingGenerationLocked(ctx, &generation, false)
 }
 
 // validateSourcingGreetingGenerationLocked intentionally ignores the daily

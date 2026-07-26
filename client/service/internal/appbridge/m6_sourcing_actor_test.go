@@ -114,6 +114,7 @@ type sourcingActorSender struct {
 	holdGreeting           bool
 	greetings              []sourcingGreetingCommand
 	afterFirstGreeting     [][]string
+	probeFingerprint       string
 }
 
 type sourcingGreetingCommand struct {
@@ -135,6 +136,9 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 	switch body.Name {
 	case protocol.PrimProbePlatform:
 		fingerprint := "principal-sourcing-actor"
+		if s.probeFingerprint != "" {
+			fingerprint = s.probeFingerprint
+		}
 		data = protocol.ProbePlatformData{
 			ContentScriptOk: true, LoginState: protocol.LoginStateIn, PageKind: protocol.PageKindRecommend,
 			PrincipalFingerprint: &fingerprint,
