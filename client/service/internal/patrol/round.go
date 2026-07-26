@@ -271,6 +271,16 @@ func (a *roundActor) processConversationListPage(
 		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
 	}
 	for _, summary := range page.sessions {
+		allowed, gateErr := a.manager.mayStartNextConversation()
+		if gateErr != nil {
+			return false, gateErr
+		}
+		if !allowed {
+			// 当前候选人若有动作链，已经在上一轮循环中完整收束。这里
+			// 只是不再领取下一位；外层随后释放 tickMu，让工作流编排器
+			// 在线性化边界切换页面或结束任务。
+			return true, nil
+		}
 		_, readCurrent := dirtyByRef[summary.ConversationRef]
 		if dirtyConversation, ok := dirtyByRef[summary.ConversationRef]; ok {
 			if err := a.setStage("readingThread"); err != nil {

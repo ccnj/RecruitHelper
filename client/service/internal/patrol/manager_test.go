@@ -167,6 +167,42 @@ func newHarness(t *testing.T) *harness {
 	}
 }
 
+func TestProductWorkflowConversationAndPatrolBoundaries(t *testing.T) {
+	h := newHarness(t)
+
+	h.manager.SetWorkflowConversationGate(func() (bool, error) {
+		return false, nil
+	})
+	allowed, err := h.manager.mayStartNextConversation()
+	if err != nil || allowed {
+		t.Fatalf("conversation gate = %v, %v; want false, nil", allowed, err)
+	}
+
+	h.manager.tickMu.Lock()
+	actionStarted := make(chan struct{})
+	actionDone := make(chan error, 1)
+	go func() {
+		actionDone <- h.manager.RunAtPatrolBoundary(func() error {
+			close(actionStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-actionStarted:
+		t.Fatal("boundary action ran before the current patrol boundary")
+	case <-time.After(20 * time.Millisecond):
+	}
+	h.manager.tickMu.Unlock()
+	select {
+	case err := <-actionDone:
+		if err != nil {
+			t.Fatalf("RunAtPatrolBoundary: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("boundary action did not run after patrol released")
+	}
+}
+
 func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 	h := newHarness(t)
 	documents := []m5ai.JobConfigDocument{

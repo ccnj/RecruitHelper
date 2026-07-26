@@ -32,6 +32,10 @@ type Manager struct {
 	// workflowMemberGate 只裁决“能否开始下一位”。已经绑定 WAL 的
 	// 唯一 intent 收编路径不得调用它，以免暂停破坏安全内核收敛。
 	workflowMemberGate func() error
+	// workflowConversationGate 只在页面列表准备开始下一位候选人时读取。
+	// 它不会插入当前候选人的 AI、WAL、正文或卡片动作链中，因此“再采
+	// 一批/结束”请求可以等待当前候选人自然收束，而不会切断半轮动作。
+	workflowConversationGate func() (bool, error)
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
@@ -66,6 +70,15 @@ func (m *Manager) SetWorkflowMemberGate(gate func() error) {
 	m.gateMu.Unlock()
 }
 
+// SetWorkflowConversationGate installs the product workflow's coarse
+// candidate boundary. It is a local brain callback and does not expand the
+// brain-hand contract.
+func (m *Manager) SetWorkflowConversationGate(gate func() (bool, error)) {
+	m.gateMu.Lock()
+	m.workflowConversationGate = gate
+	m.gateMu.Unlock()
+}
+
 func (m *Manager) mayStartNextWorkflowMember() error {
 	m.gateMu.RLock()
 	gate := m.workflowMemberGate
@@ -74,6 +87,28 @@ func (m *Manager) mayStartNextWorkflowMember() error {
 		return nil
 	}
 	return gate()
+}
+
+func (m *Manager) mayStartNextConversation() (bool, error) {
+	m.gateMu.RLock()
+	gate := m.workflowConversationGate
+	m.gateMu.RUnlock()
+	if gate == nil {
+		return true, nil
+	}
+	return gate()
+}
+
+// RunAtPatrolBoundary waits for any current Tick (and therefore its current
+// candidate action chain) to finish, then runs action before another Tick can
+// begin. Callers must not hold a lock that a patrol round may acquire.
+func (m *Manager) RunAtPatrolBoundary(action func() error) error {
+	if action == nil {
+		return errors.New("巡检边界动作不能为空")
+	}
+	m.tickMu.Lock()
+	defer m.tickMu.Unlock()
+	return action()
 }
 
 // BindAccountObservationIfCurrent 是生产管理面绑定账号的唯一写入口。锁序固定
