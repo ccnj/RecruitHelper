@@ -18,7 +18,6 @@ var (
 	ErrConfirmationNotReady          = errors.New("候选确认批次尚未就绪")
 	ErrConfirmationSelectionMismatch = errors.New("候选确认必须精确全选当前可发送候选人")
 	ErrGreetingSendingRequiresManual = errors.New("招呼发送存在待人工收敛成员")
-	ErrCommunicationResumeFailed     = errors.New("沟通巡检恢复失败")
 )
 
 // PipelineActor deliberately mirrors the already-existing M6 production
@@ -99,25 +98,6 @@ func (m *Manager) AdvanceOnce(
 		return run, ErrWorkflowPipelineInvalid
 	}
 
-	var communicationErr error
-	defer func() {
-		if communicationErr != nil {
-			resultErr = errors.Join(resultErr, communicationErr)
-		}
-	}()
-	if run.Stage != store.ProductWorkflowStageSourcing &&
-		run.Stage != store.ProductWorkflowStageCommunication {
-		if resumeErr := m.ensureCommunicationDuringFunnel(run); resumeErr != nil {
-			if !errors.Is(resumeErr, ErrCommunicationResumeFailed) {
-				return m.currentRunOr(run), resumeErr
-			}
-			// 漏斗的评分、筛选和生成不依赖手。沟通恢复失败会被本次
-			// 返回值记录，并在后续 tick 继续尝试，但不能把漏斗卡回
-			// sourcingCompleted。
-			communicationErr = resumeErr
-		}
-	}
-
 	batchID := *run.SourcingBatchID
 	switch run.Stage {
 	case store.ProductWorkflowStageSourcing:
@@ -137,16 +117,10 @@ func (m *Manager) AdvanceOnce(
 			// ResumeSourcingBatch 入口复用原批次、目标和 revision。
 			return m.failStoppedPipeline(run, batch.Reason)
 		case store.SourcingBatchCompleted:
-			// 正式采集达到目标时，采集 actor 会先暂停账号。推荐页工作已经
-			// 结束，后续评分/生成不再占用手，因此在同一持久工作流仍为
-			// running 的前提下恢复既有会话巡检；等待人工确认期间多轮回复
-			// 也不会被漏斗无故冻住。
-			if resumeErr := m.ensureCommunicationDuringFunnel(run); resumeErr != nil {
-				if !errors.Is(resumeErr, ErrCommunicationResumeFailed) {
-					return m.currentRunOr(run), resumeErr
-				}
-				communicationErr = resumeErr
-			}
+			// 采集 actor 达标后暂停账号，漏斗继续在推荐页事实之上完成
+			// 评分、筛选、招呼语生成、确认与招呼发送。只有全部招呼终局、
+			// stage 进入 communication 后，keepCommunicationRunning 才会
+			// 开启 IM 巡检；漏斗与沟通不再并行争用智联工作页。
 			return m.advanceStage(run, store.ProductWorkflowStageScoring)
 		case store.SourcingBatchStopped:
 			return m.failStoppedPipeline(run, batch.Reason)
@@ -483,62 +457,6 @@ func (m *Manager) syncDailyWindow(
 		return run, false, err
 	}
 	return waiting, true, nil
-}
-
-func (m *Manager) ensureCommunicationDuringFunnel(
-	fallback *store.ProductWorkflowRun,
-) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	run, err := m.store.ActiveProductWorkflowRun()
-	if err != nil {
-		return err
-	}
-	if run == nil || run.RunID != fallback.RunID ||
-		run.Stage != fallback.Stage ||
-		(run.Status != workflow.StatusRunning &&
-			run.Status != workflow.StatusAwaitingConfirmation) {
-		return store.ErrProductWorkflowConflict
-	}
-	open, err := workflow.EvaluateDailyWindow(m.clock.Now(), m.location)
-	if err != nil {
-		return err
-	}
-	if !open {
-		from := stateOf(run)
-		waiting := workflow.State{
-			Mode: run.Mode, Status: workflow.StatusWaitingDailyWindow,
-			ResumeStatus: workflow.StatusRunning,
-		}
-		if _, err := m.store.TransitionProductWorkflowRun(
-			store.TransitionProductWorkflowRunRequest{
-				RunID: run.RunID, From: from, To: waiting, At: m.clock.Now(),
-			},
-		); err != nil {
-			return err
-		}
-		return ErrMemberStartBlocked
-	}
-	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
-	account, err := m.store.AccountByKey(key)
-	if err != nil {
-		return err
-	}
-	if account == nil {
-		return store.ErrAccountNotFound
-	}
-	localDate := m.clock.Now().In(m.location).Format("2006-01-02")
-	if account.EnabledDate == localDate &&
-		account.EnabledAt != nil &&
-		account.StoppedAt == nil &&
-		account.PausedReason == "" {
-		return nil
-	}
-	if err := m.actor.EnableToday(key); err != nil {
-		return fmt.Errorf("%w: %v", ErrCommunicationResumeFailed, err)
-	}
-	return nil
 }
 
 // Run is a small restart-safe pump. Errors are observations, not permission

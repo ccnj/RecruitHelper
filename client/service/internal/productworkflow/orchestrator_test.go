@@ -669,86 +669,22 @@ func TestRepeatedConfirmationNeverRepeatsBatchSender(t *testing.T) {
 	}
 }
 
-func TestCommunicationResumeAfterSourcingRechecksDurableWorkflow(t *testing.T) {
-	t.Run("running sourcing run enables existing communication", func(t *testing.T) {
-		db, key, revision := productWorkflowFixture(t)
-		location := time.FixedZone("CST", 8*60*60)
-		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
-		actor := &fixtureActor{store: db, clock: clock}
-		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
-		if err != nil {
-			t.Fatal(err)
-		}
-		run, err := manager.StartFull(key, revision.RevisionHash)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if err := manager.ensureCommunicationDuringFunnel(run); err != nil {
-			t.Fatal(err)
-		}
-		if actor.enableCalls != 1 {
-			t.Fatalf("EnableToday calls = %d, want 1", actor.enableCalls)
-		}
-	})
-
-	t.Run("pause wins before communication resume", func(t *testing.T) {
-		db, key, revision := productWorkflowFixture(t)
-		location := time.FixedZone("CST", 8*60*60)
-		clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
-		actor := &fixtureActor{store: db, clock: clock}
-		manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
-		if err != nil {
-			t.Fatal(err)
-		}
-		run, err := manager.StartFull(key, revision.RevisionHash)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := manager.Pause(); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := manager.ensureCommunicationDuringFunnel(run); !errors.Is(
-			err,
-			store.ErrProductWorkflowConflict,
-		) {
-			t.Fatalf("enable after pause error = %v", err)
-		}
-		if actor.enableCalls != 0 {
-			t.Fatalf("EnableToday calls after pause = %d, want 0", actor.enableCalls)
-		}
-	})
-}
-
-func TestCommunicationFailureDoesNotBlockGreetingGeneration(t *testing.T) {
+func TestGreetingGenerationDoesNotEnableCommunicationDuringFunnel(t *testing.T) {
 	manager, actor, _, _, _ := orchestratorFixtureAtGreetingGeneration(t)
 	actor.enableErr = errors.New("fixture communication unavailable")
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
 
 	awaiting, err := manager.AdvanceOnce(context.Background())
-	if !errors.Is(err, ErrCommunicationResumeFailed) ||
+	if err != nil ||
 		awaiting == nil ||
 		awaiting.Status != workflow.StatusAwaitingConfirmation ||
 		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation ||
-		actor.greetingCalls != 1 {
+		actor.greetingCalls != 1 ||
+		actor.enableCalls != 0 {
 		t.Fatalf(
-			"communication failure blocked generation: run=%+v greeting=%d err=%v",
+			"funnel unexpectedly enabled communication: run=%+v greeting=%d enable=%d err=%v",
 			awaiting,
 			actor.greetingCalls,
-			err,
-		)
-	}
-
-	actor.enableErr = nil
-	stillAwaiting, err := manager.AdvanceOnce(context.Background())
-	if err != nil ||
-		stillAwaiting == nil ||
-		stillAwaiting.Status != workflow.StatusAwaitingConfirmation ||
-		actor.enableCalls != 2 {
-		t.Fatalf(
-			"communication retry = %+v enable=%d err=%v",
-			stillAwaiting,
 			actor.enableCalls,
 			err,
 		)
