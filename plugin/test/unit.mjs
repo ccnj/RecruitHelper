@@ -10908,13 +10908,13 @@ test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数',
 
   const unreadCount = () => harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).length
   const beforeMismatch = unreadCount()
-  harness.state.unreadReads = [0, 2]
+  harness.state.unreadReads = [0, 2, 3]
   sensor.onDOMMutation()
   harness.runTimers()
   assert.equal(unreadCount(), beforeMismatch, '两次读数不一致不得上报')
 
   harness.state.now = 1_000
-  harness.state.unreadReads = [3, 3]
+  harness.state.unreadReads = [3]
   sensor.onDOMMutation()
   harness.runTimers()
   const throttled = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
@@ -10928,6 +10928,52 @@ test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数',
   const emitted = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
   assert.equal(emitted.emitEvent, true)
   assert.equal(emitted.prev, 0)
+
+  const stableSnapshotBefore = unreadCount()
+  const businessEventsBefore = harness.messages.filter((message) =>
+    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length
+  harness.state.unreadReads = [4, 4]
+  sensor.configure({
+    badgeDebounceMs: 800,
+    badgeMinEmitIntervalMs: 5_000,
+    navSettleMs: 500,
+    manualQuietMs: 45_000,
+  }, true)
+  harness.runTimers()
+  assert.equal(unreadCount(), stableSnapshotBefore + 1,
+    '新 SW 请求快照时，同一个稳定值也必须重新交付')
+  const repeatedSnapshot = harness.messages
+    .filter((message) => message.type === CONTENT_MESSAGE.UnreadStable)
+    .at(-1)
+  assert.deepEqual(repeatedSnapshot, {
+    type: CONTENT_MESSAGE.UnreadStable,
+    emitEvent: false,
+    observedAt: 6_000,
+    prev: 4,
+    value: 4,
+  })
+  assert.equal(harness.messages.filter((message) =>
+    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length, businessEventsBefore,
+  '强制快照只能回补 SW 现货，不能制造重复业务事件')
+
+  harness.state.unreadReads = [5, 5]
+  sensor.configure({
+    badgeDebounceMs: 800,
+    badgeMinEmitIntervalMs: 5_000,
+    navSettleMs: 500,
+    manualQuietMs: 45_000,
+  })
+  const unreadReadsBeforeMutations = harness.state.unreadReads.length
+  for (let index = 0; index < 20; index += 1) sensor.onDOMMutation()
+  assert.equal(harness.state.unreadReads.length, unreadReadsBeforeMutations,
+    '采样窗已经在路上时，高频 DOM mutation 不得重启双读首样本')
+  harness.runTimers()
+  assert.equal(
+    harness.messages.filter((message) =>
+      message.type === CONTENT_MESSAGE.UnreadStable && message.value === 5).length,
+    1,
+    '持续渲染期间既有采样窗仍必须按期完成',
+  )
 
   const manualBefore = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.ManualInteraction).length
   sensor.onTrustedPointer(false)

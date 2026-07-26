@@ -61,8 +61,7 @@ function isNavigationTarget(target: EventTarget | null): boolean {
 }
 
 function applyConfig(sensor: ContentSensor, message: ContentConfigureMessage): void {
-  sensor.configure(message.sensors)
-  if (message.requestSnapshot) sensor.onDOMMutation()
+  sensor.configure(message.sensors, message.requestSnapshot === true)
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

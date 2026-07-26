@@ -29,6 +29,7 @@ export class ContentSensor {
   private badgeTimer: unknown = null
   private loginTimer: unknown = null
   private navigationTimer: unknown = null
+  private forceUnreadSnapshot = false
   private lastStableUnread: number | null = null
   private lastEmittedUnread: number | null = null
   private lastUnreadEmitAt = Number.NEGATIVE_INFINITY
@@ -50,8 +51,9 @@ export class ContentSensor {
     this.armAll()
   }
 
-  configure(config: SensorParams | null): void {
+  configure(config: SensorParams | null, requestSnapshot = false): void {
     this.config = config ? Object.freeze({ ...config }) : null
+    this.forceUnreadSnapshot = this.config !== null && requestSnapshot
     this.clearSamplingTimers()
     this.armAll()
   }
@@ -98,7 +100,9 @@ export class ContentSensor {
   private armBadge(): void {
     const config = this.config
     if (!config) return
-    if (this.badgeTimer !== null) this.env.clearTimer(this.badgeTimer)
+    // DOM 高频变化只负责保证“至少有一次采样在路上”，不能不断把同一个
+    // debounce 窗口推迟；否则持续渲染的聊天列表会让未读传感器永远饿死。
+    if (this.badgeTimer !== null) return
     const first = this.env.readUnreadTotal()
     if (first === null) {
       this.badgeTimer = null
@@ -107,11 +111,21 @@ export class ContentSensor {
     this.badgeTimer = this.env.setTimer(() => {
       this.badgeTimer = null
       const second = this.env.readUnreadTotal()
-      if (second === null || second !== first || second === this.lastStableUnread) return
+      if (second === null) return
+      if (second !== first) {
+        // 双读不一致不产生事实，但重新建立一个有界采样窗，避免只能等待
+        // 下一次碰巧出现的 DOM mutation 才恢复传感。
+        this.armBadge()
+        return
+      }
+      if (second === this.lastStableUnread && !this.forceUnreadSnapshot) return
       const observedAt = this.env.now()
       const prev = this.lastEmittedUnread
-      const emitEvent = second !== prev && observedAt - this.lastUnreadEmitAt >= config.badgeMinEmitIntervalMs
+      const emitEvent = !this.forceUnreadSnapshot &&
+        second !== prev &&
+        observedAt - this.lastUnreadEmitAt >= config.badgeMinEmitIntervalMs
       this.lastStableUnread = second
+      this.forceUnreadSnapshot = false
       if (emitEvent) {
         this.lastEmittedUnread = second
         this.lastUnreadEmitAt = observedAt
