@@ -70,10 +70,11 @@ func New(
 
 func (a *API) Routes(mux *http.ServeMux) {
 	h := func(f http.HandlerFunc) http.HandlerFunc { return a.guard(f) }
+	maintenance := func(f http.HandlerFunc) http.HandlerFunc { return a.maintenanceGuard(f) }
 	mux.HandleFunc("GET /admin/health", h(a.health))
 	mux.HandleFunc("GET /admin/hands", h(a.hands))
 	mux.HandleFunc("GET /admin/hands/health", h(a.handHealth))
-	mux.HandleFunc("POST /admin/hands/reload", h(a.reloadHand))
+	mux.HandleFunc("POST /admin/hands/reload", maintenance(a.reloadHand))
 	mux.HandleFunc("POST /admin/cmd", h(a.postCmd))
 	mux.HandleFunc("POST /admin/messages/send", h(a.sendMessage))
 	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
@@ -126,6 +127,19 @@ func (a *API) Routes(mux *http.ServeMux) {
 // guard 把本地管理面与任意网页隔离：生产 Electron 使用每次启动随机 bearer；
 // 无 token 的 go run 开发态只接受无 Origin 的本机工具和固定 Vite Origin。
 func (a *API) guard(next http.HandlerFunc) http.HandlerFunc {
+	return a.guardWithMaintenanceException(next, false)
+}
+
+// maintenanceGuard 只给部署硬切换的插件重载编排放开 bearer。Origin、
+// Content-Type 与路由本身仍由同一份管理面守卫约束。
+func (a *API) maintenanceGuard(next http.HandlerFunc) http.HandlerFunc {
+	return a.guardWithMaintenanceException(next, true)
+}
+
+func (a *API) guardWithMaintenanceException(
+	next http.HandlerFunc,
+	allowReloadWithoutBearer bool,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		trustedDevOrigin := origin == "http://127.0.0.1:5273" || origin == "http://localhost:5273"
@@ -152,7 +166,8 @@ func (a *API) guard(next http.HandlerFunc) http.HandlerFunc {
 		// 健康探针允许不带 Origin 的 Electron 主进程访问；所有浏览器请求及其他
 		// 管理请求仍经过同一认证边界。
 		publicProcessHealth := r.URL.Path == "/admin/health" && origin == ""
-		if !publicProcessHealth {
+		publicReloadMaintenance := allowReloadWithoutBearer && r.URL.Path == "/admin/hands/reload"
+		if !publicProcessHealth && !publicReloadMaintenance {
 			if a.adminToken != "" {
 				expected := "Bearer " + a.adminToken
 				provided := r.Header.Get("Authorization")

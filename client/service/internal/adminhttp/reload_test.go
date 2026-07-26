@@ -166,6 +166,125 @@ func TestReloadHandWaitsForNewReadyBootAndMatchingContract(t *testing.T) {
 	}
 }
 
+func TestReloadHandAllowsNarrowUnauthenticatedUniqueSelection(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	hub := newFakeAdminHub()
+	hub.set("session-old", "boot-old", true)
+	hub.Registry().OnlineWithBuild(
+		"hand-unique", "session-old", "boot-old",
+		[]string{protocol.PrimDebugReload + "@1"}, nil,
+		protocol.ContractHash, true, "0.0.9", time.Now(),
+	)
+	api := New(
+		st, hub, dispatch.New(st, &reloadSender{hub: hub}), nil, nil,
+		"random-per-start-token",
+	)
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	reload := httptest.NewRequest(
+		http.MethodPost, "/admin/hands/reload", bytes.NewBufferString(`{}`),
+	)
+	reload.Header.Set("Content-Type", "application/json")
+	reloadResponse := httptest.NewRecorder()
+	mux.ServeHTTP(reloadResponse, reload)
+	if reloadResponse.Code != http.StatusOK {
+		t.Fatalf("无 bearer 的唯一手重载应成功: code=%d body=%s",
+			reloadResponse.Code, reloadResponse.Body.String())
+	}
+	var response reloadHandView
+	if err := json.Unmarshal(reloadResponse.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.HandID != "hand-unique" || !response.Ready {
+		t.Fatalf("未选择唯一在线手: %+v", response)
+	}
+
+	cmd := httptest.NewRequest(
+		http.MethodPost, "/admin/cmd", bytes.NewBufferString(`{}`),
+	)
+	cmd.Header.Set("Content-Type", "application/json")
+	cmdResponse := httptest.NewRecorder()
+	mux.ServeHTTP(cmdResponse, cmd)
+	if cmdResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("重载例外不得扩到 /admin/cmd，得到 %d", cmdResponse.Code)
+	}
+}
+
+func TestReloadHandUnauthenticatedGuardStillRejectsUnsafeRequests(t *testing.T) {
+	api := New(nil, newFakeAdminHub(), nil, nil, nil, "random-per-start-token")
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	untrusted := httptest.NewRequest(
+		http.MethodPost, "/admin/hands/reload", bytes.NewBufferString(`{}`),
+	)
+	untrusted.Header.Set("Content-Type", "application/json")
+	untrusted.Header.Set("Origin", "https://evil.example")
+	untrustedResponse := httptest.NewRecorder()
+	mux.ServeHTTP(untrustedResponse, untrusted)
+	if untrustedResponse.Code != http.StatusForbidden {
+		t.Fatalf("陌生 Origin 应在编排前拒绝，得到 %d", untrustedResponse.Code)
+	}
+
+	badMedia := httptest.NewRequest(
+		http.MethodPost, "/admin/hands/reload", bytes.NewBufferString(`{}`),
+	)
+	badMedia.Header.Set("Content-Type", "text/plain")
+	badMediaResponse := httptest.NewRecorder()
+	mux.ServeHTTP(badMediaResponse, badMedia)
+	if badMediaResponse.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("错误 Content-Type 应在编排前拒绝，得到 %d", badMediaResponse.Code)
+	}
+}
+
+func TestReloadHandEmptySelectionRequiresExactlyOneReadyCapableHand(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeAdminHub)
+	}{
+		{name: "zero", setup: func(*fakeAdminHub) {}},
+		{name: "multiple", setup: func(hub *fakeAdminHub) {
+			for _, handID := range []string{"hand-a", "hand-b"} {
+				hub.Registry().OnlineWithBuild(
+					handID, "session-"+handID, "boot-"+handID,
+					[]string{protocol.PrimDebugReload + "@1"}, nil,
+					protocol.ContractHash, true, "0.0.9", time.Now(),
+				)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			hub := newFakeAdminHub()
+			tc.setup(hub)
+			api := New(st, hub, dispatch.New(st, &reloadSender{hub: hub}), nil, nil, "")
+			mux := http.NewServeMux()
+			api.Routes(mux)
+
+			req := httptest.NewRequest(
+				http.MethodPost, "/admin/hands/reload", bytes.NewBufferString(`{}`),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusConflict ||
+				!bytes.Contains(w.Body.Bytes(), []byte("无法唯一选择")) {
+				t.Fatalf("零只/多只手必须响亮拒绝: code=%d body=%s",
+					w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestReloadHandRequiresExistingCapability(t *testing.T) {
 	hub := newFakeAdminHub()
 	hub.set("session-old", "boot-old", true)

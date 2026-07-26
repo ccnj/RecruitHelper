@@ -37,8 +37,20 @@ func (a *API) reloadHand(w http.ResponseWriter, r *http.Request) {
 	}
 	req.HandID = strings.TrimSpace(req.HandID)
 	if req.HandID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的 handId"})
-		return
+		candidates := make([]string, 0, 1)
+		capability := protocol.PrimDebugReload + "@1"
+		for _, state := range a.hub.Registry().Snapshot() {
+			if state.Online && state.Health == session.HealthReady && hasString(state.Caps, capability) {
+				candidates = append(candidates, state.HandID)
+			}
+		}
+		if len(candidates) != 1 {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "无法唯一选择可重载的在线插件，请检查插件连接状态或显式指定 handId",
+			})
+			return
+		}
+		req.HandID = candidates[0]
 	}
 	before, ok := a.hub.Registry().Get(req.HandID)
 	if !ok || !before.Online || before.Health != session.HealthReady {
