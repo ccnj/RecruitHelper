@@ -439,6 +439,46 @@ func TestSelectedSourcingGreetingRejectsReconnectProbeFingerprintMismatch(t *tes
 	}
 }
 
+func TestSelectedSourcingGreetingAbandonsChangedFeedAfterSingleUnavailableWindow(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-selected"}})
+	manager, batchID, target, _ := prepareGeneratedSourcingGreeting(t, h)
+	h.sender.windowPageAbsent = true
+	before := len(h.sender.order)
+
+	progress, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || progress == nil || !progress.Completed ||
+		progress.PendingCount != 0 || progress.AbandonedCount != 1 ||
+		progress.SentCount != 0 || progress.InFlightCount != 0 {
+		t.Fatalf("推荐页丢失未收敛为 abandoned: progress=%+v err=%v", progress, err)
+	}
+	if got := h.sender.order[before:]; len(got) != 1 ||
+		got[0] != protocol.PrimCandidateReadSourcingWindow {
+		t.Fatalf("推荐页丢失发生无界重派或额外动作: %v", got)
+	}
+	if h.sender.greetingCount() != 0 {
+		t.Fatalf("推荐页丢失仍创建招呼动作: %d", h.sender.greetingCount())
+	}
+	intentID, intentErr := store.SourcingGreetingEffectIntentID(target.InvocationID)
+	if intentErr != nil {
+		t.Fatal(intentErr)
+	}
+	intent, intentErr := h.store.EffectIntentByID(intentID)
+	if intentErr != nil || intent != nil {
+		t.Fatalf("推荐页丢失仍形成 effect intent: intent=%+v err=%v", intent, intentErr)
+	}
+	account, accountErr := h.store.AccountByKey(h.key)
+	if accountErr != nil || account == nil || account.SourcingFeedInvalidatedAt == nil {
+		t.Fatalf("推荐流换代 marker 未写入: account=%+v err=%v", account, accountErr)
+	}
+
+	replayed, err := manager.SendSelectedSourcingGreetings(context.Background(), batchID)
+	if err != nil || replayed == nil || !replayed.Completed ||
+		len(h.sender.order) != before+1 {
+		t.Fatalf("完成态重放仍读取页面: progress=%+v order=%v err=%v",
+			replayed, h.sender.order[before:], err)
+	}
+}
+
 func TestSelectedSourcingGreetingsScanOnceAndSendInCurrentPageOrder(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{
 		{"candidate-a", "candidate-b"},

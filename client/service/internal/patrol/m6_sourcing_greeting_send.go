@@ -108,6 +108,24 @@ func (m *Manager) SendSelectedSourcingGreetings(
 			return progress, err
 		}
 		if err := m.scanSourcingGreetingPass(ctx, *generation, *plan); err != nil {
+			if sourcingGreetingFeedUnavailable(err) {
+				if _, invalidateErr := m.store.InvalidateSourcingFeed(
+					store.InvalidateSourcingFeedRequest{
+						Platform: plan.Platform, AccountRef: plan.AccountRef,
+						Trigger: "greetingRecommendationPageUnavailable", At: m.now(),
+					},
+				); invalidateErr != nil {
+					return progress, errors.Join(err, invalidateErr)
+				}
+				latest, progressErr := m.store.SourcingBatchGreetingSendProgress(batchID)
+				if progressErr != nil {
+					return progress, errors.Join(err, progressErr)
+				}
+				if latest.Completed {
+					return latest, nil
+				}
+				return latest, err
+			}
 			latest, progressErr := m.store.SourcingBatchGreetingSendProgress(batchID)
 			if progressErr != nil {
 				return progress, errors.Join(err, progressErr)
@@ -123,6 +141,21 @@ func (m *Manager) SendSelectedSourcingGreetings(
 		return progress, nil
 	}
 	return progress, ErrSourcingGreetingTargetNotFound
+}
+
+func sourcingGreetingFeedUnavailable(err error) bool {
+	typed := runError(err)
+	if typed == nil || typed.Code != protocol.ErrCodeCtxNotReady {
+		return false
+	}
+	switch typed.Reason {
+	case protocol.NotReadyReasonPageAbsent,
+		protocol.NotReadyReasonPageBroken,
+		protocol.NotReadyReasonContentScriptDead:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) currentSourcingGreetingGeneration(

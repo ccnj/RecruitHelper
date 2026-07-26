@@ -115,6 +115,7 @@ type sourcingActorSender struct {
 	greetings              []sourcingGreetingCommand
 	afterFirstGreeting     [][]string
 	probeFingerprint       string
+	windowPageAbsent       bool
 }
 
 type sourcingGreetingCommand struct {
@@ -181,6 +182,21 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 			Filters: args.Filters, ObservedAt: time.Now().UnixMilli(),
 		}
 	case protocol.PrimCandidateReadSourcingWindow:
+		if s.windowPageAbsent {
+			s.dispatcher.OnAck(handID, protocol.AckBody{
+				Ref: env.MsgID, Status: protocol.AckStatusAccepted,
+			})
+			s.dispatcher.OnResult(handID, "result-"+env.MsgID, protocol.ResultBody{
+				Ref: env.MsgID, Status: protocol.ResultStatusFailed, ExecMs: 1,
+				Error: &protocol.ErrorBody{
+					Code:    protocol.ErrCodeCtxNotReady,
+					Data:    json.RawMessage(`{"reason":"pageAbsent"}`),
+					Message: "当前智联页面不是推荐页", Retryable: protocol.RetryableAfterRecovery,
+					SideEffect: protocol.SideEffectNone,
+				},
+			})
+			return nil
+		}
 		var args protocol.CandidateReadSourcingWindowArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
 			return err
