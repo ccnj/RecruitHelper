@@ -3677,7 +3677,7 @@ test('candidate.applySourcingFilters MAIN 取消后仅页面样式变化不误�
   }
 })
 
-test('candidate.applySourcingFilters MAIN 取消后稳定身份变化仍拦截', async () => {
+test('candidate.applySourcingFilters MAIN 取消后候选身份变化交由后续窗口独立回读', async () => {
   const fixture = installM6SourcingFilterFixture({ identityChangeOnCancel: true })
   try {
     const result = await zhilianTestHooks.mainApplySourcingFilters(
@@ -3685,10 +3685,10 @@ test('candidate.applySourcingFilters MAIN 取消后稳定身份变化仍拦截',
       fixture.refs.title,
       structuredClone(m6SourcingFilterTarget),
     )
-    assert.deepEqual(result, { status: 'failed', reason: 'cancel_changed_list' })
+    assert.equal(result.status, 'ready')
+    assert.deepEqual(result.data.filters, m6SourcingFilterTarget)
     assert.equal(fixture.state.confirms, 1)
     assert.equal(fixture.state.cancels, 1)
-    assert.equal(result.data, undefined)
   } finally {
     fixture.restore()
   }

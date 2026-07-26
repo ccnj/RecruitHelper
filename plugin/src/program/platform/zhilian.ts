@@ -329,7 +329,6 @@ const MAIN_APPLY_SOURCING_FILTERS_FAILURE_REASONS = [
   'list_unstable',
   'cancel_unavailable',
   'cancel_not_closed',
-  'cancel_changed_list',
   'unexpected',
 ] as const
 
@@ -2087,10 +2086,6 @@ async function mainApplySourcingFilters(
     const cancelClosed = await waitFor(() => drawerNodes().length === 0 ? true : null)
     if (cancelClosed !== true) return failed('cancel_not_closed')
     ownedDrawer = null
-    await sleep(1_000)
-    const afterCancel = listSnapshot()
-    if (afterCancel.status === 'failed') return afterCancel
-    if (afterCancel.signature !== stable.signature) return failed('cancel_changed_list')
     const afterPosition = position()
     if (afterPosition.status === 'failed') return afterPosition
 
