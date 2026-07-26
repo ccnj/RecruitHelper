@@ -16,7 +16,11 @@ await esbuild.build({
   logLevel: 'error',
 })
 const moduleUrl = pathToFileURL(process.cwd() + '/test/dist/product-home.mjs').href
-const { HomePage } = await import(moduleUrl + `?run=${Date.now()}`)
+const {
+  END_WORKFLOW_CONFIRMATION,
+  HomePage,
+  confirmEndWorkflow,
+} = await import(moduleUrl + `?run=${Date.now()}`)
 
 const customer = {
   name: '测试客户',
@@ -128,5 +132,30 @@ assert.ok(
   endPendingButtons.every((button) => button.html.includes('disabled')),
   '待结束时首页其余运行控制全部禁用',
 )
+
+let endRequests = 0
+let confirmationMessage = ''
+confirmEndWorkflow(
+  (message) => {
+    confirmationMessage = message
+    return false
+  },
+  () => {
+    endRequests += 1
+  },
+)
+assert.equal(confirmationMessage, END_WORKFLOW_CONFIRMATION,
+  '结束操作先展示固定中文确认说明')
+assert.equal(endRequests, 0,
+  '用户取消确认时不得调用结束工作流写入口')
+
+await confirmEndWorkflow(
+  () => true,
+  async () => {
+    endRequests += 1
+  },
+)
+assert.equal(endRequests, 1,
+  '用户确认后只调用一次结束工作流写入口')
 
 console.log('产品首页结束与待切换控制测试通过')

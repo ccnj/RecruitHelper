@@ -19,6 +19,17 @@ function controlDisabledReason(
   return null
 }
 
+export const END_WORKFLOW_CONFIRMATION =
+  '结束后不能继续本次任务；已有数据和已发送消息不会删除。'
+
+export function confirmEndWorkflow(
+  confirm: (message: string) => boolean,
+  endWorkflow: () => void | Promise<void>,
+): void | Promise<void> {
+  if (!confirm(END_WORKFLOW_CONFIRMATION)) return
+  return endWorkflow()
+}
+
 export function HomePage({ customer, overview, actions, onOpenConfirmation }: HomePageProps) {
   const { workflow } = overview
   const pendingEnd = workflow.pendingAction === 'end'
@@ -167,7 +178,14 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   <button
                     className="rh-button is-quiet"
                     disabled={endReason !== null}
-                    onClick={() => void actions.endWorkflow?.()}
+                    onClick={() => {
+                      if (actions.endWorkflow) {
+                        void confirmEndWorkflow(
+                          (message) => window.confirm(message),
+                          actions.endWorkflow,
+                        )
+                      }
+                    }}
                     title={endReason ?? undefined}
                     type="button"
                   >
@@ -220,7 +238,14 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   <button
                     className="rh-button is-quiet"
                     disabled={endReason !== null}
-                    onClick={() => void actions.endWorkflow?.()}
+                    onClick={() => {
+                      if (actions.endWorkflow) {
+                        void confirmEndWorkflow(
+                          (message) => window.confirm(message),
+                          actions.endWorkflow,
+                        )
+                      }
+                    }}
                     title={endReason ?? undefined}
                     type="button"
                   >
