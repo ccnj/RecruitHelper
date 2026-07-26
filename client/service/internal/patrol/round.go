@@ -41,8 +41,10 @@ type threadSnapshot struct {
 }
 
 type dirtyConversation struct {
-	conversation store.Conversation
-	ledger       []store.Message
+	conversation        store.Conversation
+	ledger              []store.Message
+	listHintKey         listHintVerificationKey
+	listHintFingerprint string
 }
 
 type conversationListPage struct {
@@ -331,6 +333,10 @@ func (a *roundActor) processConversationListPage(
 				a.handleCommandFailure(err)
 				return conversationListPageContinue, err
 			}
+			a.manager.markListHintVerified(
+				dirtyConversation.listHintKey,
+				dirtyConversation.listHintFingerprint,
+			)
 			if a.classificationCorrected {
 				return conversationListPageStop, nil
 			}
@@ -1074,23 +1080,44 @@ func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dir
 		if err != nil {
 			return nil, err
 		}
-		dirty := conversation.TrackingState == store.TrackingPending
+		principalFingerprint := ""
+		if a.account.PrincipalFingerprint != nil {
+			principalFingerprint = *a.account.PrincipalFingerprint
+		}
+		hintKey := makeListHintVerificationKey(
+			conversation.Platform,
+			conversation.AccountRef,
+			principalFingerprint,
+			conversation.ConversationRef,
+		)
+		hintFingerprint := listHintFingerprint(hintKey, summary)
+		hintAlreadyVerified, hintChangedFromVerified :=
+			a.manager.observeListHintFingerprint(hintKey, hintFingerprint)
+
+		forceReconcile := conversation.TrackingState == store.TrackingPending
 		if conversation.LastSyncedAt == nil ||
 			!observedAt.Before(conversation.LastSyncedAt.Add(a.manager.config.TrackedReconcileInterval)) {
 			// 事件、未读与列表摘要都是提示；低频到期对账才保证提示全丢、
 			// 同文连续消息或旧卡状态变化时仍能恢复账本。
-			dirty = true
+			forceReconcile = true
 		}
-		if summary.UnreadCount > 0 || len(ledger) == 0 {
-			dirty = true
-		} else if !syncledger.ListPreviewMatches(syncledger.ListPreview{
+		if len(ledger) == 0 {
+			forceReconcile = true
+		}
+		hintDirty := summary.UnreadCount > 0 || hintChangedFromVerified
+		if len(ledger) > 0 && !syncledger.ListPreviewMatches(syncledger.ListPreview{
 			Direction: string(summary.LastMessage.Direction), Kind: string(summary.LastMessage.Kind),
 			Text: summary.LastMessage.TextPreview,
 		}, ledger[len(ledger)-1]) {
-			dirty = true
+			hintDirty = true
 		}
-		if dirty {
-			out = append(out, dirtyConversation{conversation: conversation, ledger: ledger})
+		if forceReconcile || (hintDirty && !hintAlreadyVerified) {
+			out = append(out, dirtyConversation{
+				conversation:        conversation,
+				ledger:              ledger,
+				listHintKey:         hintKey,
+				listHintFingerprint: hintFingerprint,
+			})
 		}
 	}
 	return out, nil

@@ -36,6 +36,11 @@ type Manager struct {
 	// 它不会插入当前候选人的 AI、WAL、正文或卡片动作链中，因此“再采
 	// 一批/结束”请求可以等待当前候选人自然收束，而不会切断半轮动作。
 	workflowConversationGate func() (bool, error)
+
+	// verifiedListHints is a process-local convergence memory for low-fidelity
+	// conversation-list hints. It is accessed only while mu is held and is
+	// intentionally absent from persistence, diagnostics and product APIs.
+	verifiedListHints map[listHintVerificationKey]string
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
@@ -55,7 +60,10 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	manager := &Manager{store: db, runner: runner, hands: hands, config: config}
+	manager := &Manager{
+		store: db, runner: runner, hands: hands, config: config,
+		verifiedListHints: make(map[listHintVerificationKey]string),
+	}
 	if len(advice) > 0 {
 		manager.advice = advice[0]
 	}
