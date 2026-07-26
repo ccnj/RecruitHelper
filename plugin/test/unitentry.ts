@@ -16,6 +16,7 @@ export { NavigationTracker, navigationTracker } from '../src/base/navigation'
 export { CONTENT_MESSAGE, MANUAL_EMIT_MIN_MS } from '../src/base/contentMessages'
 export { capabilities, lookup, register } from '../src/program/registry'
 export { registerM3Primitives } from '../src/program/primitives/m3'
+export { registerM2Primitives } from '../src/program/primitives/m2'
 export { registerM6Primitives } from '../src/program/primitives/m6'
 export {
   applyZhilianSourcingFilters,
@@ -23,6 +24,7 @@ export {
   canonicalZhilianTab,
   identifyZhilianCurrentConversation,
   ensureZhilianIM,
+  openZhilianConversation,
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,

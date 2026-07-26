@@ -2,6 +2,8 @@
 
 import {
   ChatIdentifyCurrentConversationData,
+  ChatOpenConversationArgs,
+  ChatOpenConversationData,
   ChatReadListArgs,
   ChatReadListData,
   ChatReadThreadArgs,
@@ -16,6 +18,7 @@ import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
   ensureZhilianIM,
   identifyZhilianCurrentConversation,
+  openZhilianConversation,
   probeZhilian,
   readZhilianList,
   readZhilianThread,
@@ -125,6 +128,24 @@ const identifyCurrentConversation: Primitive = {
   },
 }
 
+const openConversation: Primitive = {
+  name: PrimitiveName.ChatOpenConversation,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      assertZhilianContext(ctx.commandContext)
+      const data: ChatOpenConversationData = await openZhilianConversation(
+        rawArgs as ChatOpenConversationArgs,
+        ctx,
+        ctx.commandContext?.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const readThread: Primitive = {
   name: PrimitiveName.ChatReadThread,
   class: CmdClass.Intrusive,
@@ -152,5 +173,6 @@ export function registerM2Primitives(): void {
   register(ensureSurface)
   register(readList)
   register(identifyCurrentConversation)
+  register(openConversation)
   register(readThread)
 }

@@ -56,6 +56,7 @@ const {
   ensureZhilianIM,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
+  openZhilianConversation,
   readZhilianUnreadTotal,
   readZhilianList,
   readZhilianThread,
@@ -6685,6 +6686,12 @@ test('智联会话 finder 只检查当前窗口且不改变滚动位置，click-
     assert.equal(clickCalls, 1)
     assert.match(globalThis.location.href, /conversation-target-exact/u)
 
+    windowRows = [firstRow]
+    const leftUnreadList = await zhilianTestHooks.mainFindConversation(targetRef, true)
+    assert.deepEqual(leftUnreadList, { status: 'failed', reason: 'target_not_found' },
+      '路由已经命中目标时，未读后置观察仍必须继续检查行是否离开')
+    windowRows = [targetRow]
+
     globalThis.location.href = 'https://rd6.zhaopin.com/app/im'
     const expired = zhilianTestHooks.mainClickConversationOnce(targetRef, '', fingerprint, Date.now() - 1)
     assert.deepEqual(expired, { status: 'failed', reason: 'action_window_elapsed' })
@@ -9152,6 +9159,9 @@ test('readList 只交付当前可定位 DOM 窗口并如实返回游标', async 
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
         }
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
+        }
         if (func.name === 'mainReadListDOMWindow') {
           domCalls += 1
           return [{ result: {
@@ -9688,6 +9698,9 @@ function installThreadRouteHarness(conversationRef, {
           return [{ result: {
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
+        }
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
         }
         if (func.name === 'mainReadListDOMWindow') {
           state.finds += 1
@@ -10227,6 +10240,9 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
         }
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
+        }
         if (func.name === 'mainReadListDOMWindow') {
           domCalls.push(args)
           return [{ result: domPageForArgs(args) }]
@@ -10330,6 +10346,362 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
   assert.deepEqual(prefixNext.sessions.map((item) => item.conversationRef), ['prefix-c'],
     '20→31 式前缀追加只能交付新增后缀，旧窗口不得再次进入脑')
   assert.deepEqual(domCalls.slice(-2), [[false, false], [true, false]])
+})
+
+test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年龄截止', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '6'.repeat(64)
+  const now = Date.now()
+  let activeFilter = 'all'
+  let barriers = 0
+  const filterCalls = []
+  const oldUnread = {
+    conversationRef: 'conversation-old-unread',
+    peer: { displayName: '候选人甲', platformUserRef: 'peer-old-unread' },
+    unreadCount: 1,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '旧未读' },
+    lastActivityTs: now - 60 * 86_400_000,
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 108, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }] },
+      async get() { return { id: 108, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func, args }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainEnsureChatListFilter') {
+          filterCalls.push(args)
+          const target = args[0] ? 'unread' : 'all'
+          if (activeFilter === target) return [{ result: { status: 'ready', changed: false } }]
+          if (!args[1]) return [{ result: { status: 'needs_action' } }]
+          activeFilter = target
+          return [{ result: { status: 'ready', changed: true } }]
+        }
+        if (func.name === 'mainReadListDOMWindow') {
+          return [{ result: {
+            sessions: [oldUnread],
+            atBottom: true,
+            moved: true,
+            scrollHeight: 1_000,
+            scrollTop: 0,
+            unstable: false,
+          } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'list-real-filter', deadlineMs: now + 60_000,
+    irreversibleNotAfterMs: now + 60_000,
+    commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, async beforeSideEffect() { barriers += 1 },
+  }
+  try {
+    const unread = await readZhilianList({ filter: 'unread' }, context, fingerprint)
+    assert.deepEqual(unread.sessions.map((item) => item.conversationRef), ['conversation-old-unread'],
+      '未读轮不得把 60 天前会话套进普通 8 天截止')
+    assert.equal(unread.complete, true)
+    assert.deepEqual(filterCalls.slice(0, 2), [[true, false], [true, true]])
+    assert.equal(barriers, 1)
+
+    const all = await readZhilianList(
+      { filter: 'all', stopOlderThanDays: 8 },
+      context,
+      fingerprint,
+    )
+    assert.deepEqual(all.sessions, [], '普通轮仍按 8 天截止')
+    assert.equal(all.complete, true)
+    assert.deepEqual(filterCalls.slice(2), [[false, false], [false, true]])
+    assert.equal(barriers, 2)
+
+    await assert.rejects(
+      readZhilianList({ filter: 'unread', stopOlderThanDays: 8 }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.GuardFailed,
+      'unread 携带年龄截止必须在任何页面交互前拒绝',
+    )
+
+    activeFilter = 'unread'
+    const badUnread = { ...oldUnread, unreadCount: 0 }
+    globalThis.chrome.scripting.executeScript = async ({ func }) => {
+      if (func.name === 'mainProbeZhilian') return [{ result: {
+        pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+      } }]
+      if (func.name === 'mainEnsureChatListFilter') {
+        return [{ result: { status: 'ready', changed: false } }]
+      }
+      if (func.name === 'mainReadListDOMWindow') return [{ result: {
+        sessions: [badUnread], atBottom: true, moved: true,
+        scrollHeight: 1_000, scrollTop: 0, unstable: false,
+      } }]
+      throw new Error(`unexpected MAIN function ${func.name}`)
+    }
+    await assert.rejects(
+      readZhilianList({ filter: 'unread' }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.ElementUnresolved,
+      '平台未读视图若出现无未读行，不得退化为手内过滤',
+    )
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('IM 列表筛选 evaluator 只点差异并用标准 checked 回读', async () => {
+  const original = {
+    document: globalThis.document,
+    location: globalThis.location,
+    getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+  }
+  let popupOpen = false
+  let triggerClicks = 0
+  let optionClicks = 0
+  let inputClicks = 0
+  const scheduled = []
+  const interactionOrder = []
+  const label = { textContent: '具体职位', getClientRects() { return [{}] } }
+  const input = {
+    type: 'checkbox',
+    disabled: false,
+    checked: false,
+    click() { inputClicks += 1; interactionOrder.push('input'); this.checked = !this.checked },
+  }
+  const wrapper = {
+    textContent: '未读',
+    getClientRects() { return [{}] },
+    querySelectorAll(selector) { return selector === 'input[type="checkbox"]' ? [input] : [] },
+  }
+  const trigger = {
+    getClientRects() { return [{}] },
+    click() { triggerClicks += 1; interactionOrder.push('trigger'); popupOpen = true },
+  }
+  const option = {
+    textContent: '全部职位',
+    getClientRects() { return [{}] },
+    click() {
+      optionClicks += 1
+      interactionOrder.push('option')
+      label.textContent = '全部职位'
+      popupOpen = false
+    },
+  }
+  try {
+    globalThis.location = { href: 'https://rd6.zhaopin.com/app/im' }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    globalThis.setTimeout = (callback, delay) => {
+      scheduled.push(delay)
+      if (delay >= 1_000) interactionOrder.push('wait')
+      queueMicrotask(callback)
+      return 1
+    }
+    globalThis.document = {
+      querySelectorAll(selector) {
+        if (selector === '.app-job-selector') return [trigger]
+        if (selector === '.app-job-selector .im-job-filter__label') return [label]
+        if (selector === '.side-panel-header__checkbox') return [wrapper]
+        if (selector.includes('.app-job-selector-item')) return popupOpen ? [option] : []
+        return []
+      },
+    }
+    const preflight = await zhilianTestHooks.mainEnsureChatListFilter(true, false)
+    assert.deepEqual(preflight, { status: 'needs_action' })
+    assert.equal(triggerClicks + optionClicks + inputClicks, 0)
+
+    const applied = await zhilianTestHooks.mainEnsureChatListFilter(true, true)
+    assert.deepEqual(applied, { status: 'ready', changed: true })
+    assert.deepEqual([triggerClicks, optionClicks, inputClicks], [1, 1, 1])
+    assert.equal(input.checked, true)
+    assert.deepEqual(interactionOrder, [
+      'wait', 'trigger', 'wait', 'option', 'wait', 'input', 'wait',
+    ], '首个 click 前及每个相邻可见交互之间都必须有 1s+抖动')
+    assert.ok(scheduled.filter((delay) => delay >= 1_000 && delay <= 1_400).length >= 4)
+
+    interactionOrder.length = 0
+    const closed = await zhilianTestHooks.mainEnsureChatListFilter(false, true)
+    assert.deepEqual(closed, { status: 'ready', changed: true })
+    assert.deepEqual(interactionOrder, ['wait', 'input', 'wait'],
+      '已经是全部职位、只需切换未读时，首个 checkbox click 前同样必须等待')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离开双读收束', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const fingerprint = '5'.repeat(64)
+  const conversationRef = 'conversation-unread-open'
+  let currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
+  let clickCalls = 0
+  let findCalls = 0
+  let barriers = 0
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback)
+    return 1
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() {
+        return [{ id: 109, url: currentURL, status: 'complete', active: true }]
+      },
+      async get() {
+        return { id: 109, url: currentURL, status: 'complete', active: true }
+      },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+        } }]
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
+        }
+        if (func.name === 'mainReadListDOMWindow') return [{ result: {
+          sessions: [{
+            conversationRef,
+            peer: { displayName: '候选人甲', platformUserRef: 'peer-open' },
+            unreadCount: 2,
+            lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
+            lastActivityTs: Date.now(),
+          }],
+          atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+        } }]
+        if (func.name === 'mainClickConversationOnce') {
+          clickCalls += 1
+          assert.equal(barriers, 1, '唯一 click 必须在取消安全点之后')
+          currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainFindConversation') {
+          findCalls += 1
+          return [{ result: { status: 'failed', reason: 'target_not_found' } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'open-unread', deadlineMs: Date.now() + 60_000,
+    irreversibleNotAfterMs: Date.now() + 60_000,
+    commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, async beforeSideEffect() { barriers += 1 },
+  }
+  try {
+    const result = await openZhilianConversation(
+      { conversationRef },
+      context,
+      fingerprint,
+    )
+    assert.equal(result.conversationRef, conversationRef)
+    assert.ok(result.observedAt > 0)
+    assert.equal(clickCalls, 1)
+    assert.equal(barriers, 1)
+    assert.equal(findCalls, 2, '行离开必须连续双读，不能用单个瞬时空窗宣告成功')
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('chat.openConversation 筛选未就绪时零 click，点击后未读不收敛只报 possible', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const fingerprint = '4'.repeat(64)
+  const conversationRef = 'conversation-unread-pending'
+  let currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
+  let filterReady = false
+  let clickCalls = 0
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback)
+    return 1
+  }
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 110, url: currentURL, status: 'complete' }] },
+      async get() { return { id: 110, url: currentURL, status: 'complete' } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+        } }]
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: filterReady
+            ? { status: 'ready', changed: false }
+            : { status: 'needs_action' } }]
+        }
+        if (func.name === 'mainReadListDOMWindow') return [{ result: {
+          sessions: [{
+            conversationRef,
+            peer: { displayName: '候选人乙', platformUserRef: 'peer-pending' },
+            unreadCount: 1,
+            lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
+            lastActivityTs: Date.now(),
+          }],
+          atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+        } }]
+        if (func.name === 'mainClickConversationOnce') {
+          clickCalls += 1
+          currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+          return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainFindConversation') {
+          return [{ result: { status: 'found', unreadMarkerCleared: false } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'open-unread-pending', deadlineMs: Date.now() + 60_000,
+    irreversibleNotAfterMs: Date.now() + 60_000,
+    commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, async beforeSideEffect() {},
+  }
+  try {
+    await assert.rejects(
+      openZhilianConversation({ conversationRef }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.GuardFailed && error.sideEffect === 'none',
+    )
+    assert.equal(clickCalls, 0)
+
+    filterReady = true
+    currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+    await assert.rejects(
+      openZhilianConversation({ conversationRef }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.TargetNotFound &&
+        error.retryable === 'no' &&
+        error.sideEffect === 'none',
+      '已经打开的目标不能伪造成 ok，也不能升级为账号级人工停机',
+    )
+    assert.equal(clickCalls, 0)
+
+    currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
+    await assert.rejects(
+      openZhilianConversation({ conversationRef }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.PostconditionUnconfirmed &&
+        error.sideEffect === 'possible',
+    )
+    assert.equal(clickCalls, 1, '未读结果阴性也不得补第二次 click')
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+  }
 })
 
 test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', async () => {

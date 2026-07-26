@@ -20,6 +20,8 @@ import type {
   CandidateSourcingFilters,
   ChatAcceptWechatArgs,
   ChatAcceptWechatData,
+  ChatOpenConversationArgs,
+  ChatOpenConversationData,
   ChatReadGreetingOutcomeArgs,
   ChatReadGreetingOutcomeData,
   ChatIdentifyCurrentConversationData,
@@ -98,6 +100,8 @@ export type ZhilianGreetingGuards = ChatSendGreetingGuards
 export type ZhilianGreetingData = ChatSendGreetingData
 export type ZhilianGreetingOutcomeArgs = ChatReadGreetingOutcomeArgs
 export type ZhilianGreetingOutcomeData = ChatReadGreetingOutcomeData
+export type ZhilianOpenConversationArgs = ChatOpenConversationArgs
+export type ZhilianOpenConversationData = ChatOpenConversationData
 export type ZhilianListArgs = ChatReadListArgs
 export type ZhilianConversationSummary = ConversationSummary
 export type ZhilianListPage = ChatReadListData
@@ -395,6 +399,17 @@ interface MainListDOMWindowResult {
   unstable: boolean
 }
 
+type MainChatListFilterResult =
+  | { status: 'ready'; changed: boolean }
+  | { status: 'needs_action' }
+  | {
+    status: 'failed'
+    reason: 'route_changed' | 'job_trigger_cardinality' | 'job_label_unreadable' |
+      'job_option_cardinality' | 'job_selection_unconfirmed' |
+      'unread_control_cardinality' | 'unread_control_unsafe' |
+      'unread_selection_unconfirmed' | 'unexpected'
+  }
+
 interface MainThreadPageResult {
   messages: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }>
   reachedTop: boolean
@@ -439,6 +454,7 @@ interface MainSendSurfaceResult {
 
 interface MainFindConversationResult {
   status: 'found' | 'failed'
+  unreadMarkerCleared?: boolean
   reason?: 'list_surface_missing' | 'list_items_missing' | 'list_binding_unresolved' |
     'list_window_repeated' | 'target_binding_duplicated' | 'target_binding_changed' |
     'target_not_found' | 'list_scroll_stalled'
@@ -3711,6 +3727,138 @@ export async function ensureZhilianIM(
   }
 }
 
+// 只使用当前真机已经确认的公开控件：职位触发器的可见标题与标准 checkbox.checked。
+// apply=false 是零交互预检；只有明确返回 needs_action 后，extension 才穿过取消闸并
+// 以 apply=true 执行最小可逆交互。每次 click 后都先满足 1s+抖动，再做最长 10s 条件等待。
+async function mainEnsureChatListFilter(
+  unread: boolean,
+  apply: boolean,
+): Promise<MainChatListFilterResult> {
+  const failed = (reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason']):
+  MainChatListFilterResult => ({ status: 'failed', reason })
+  try {
+    const clean = (value: unknown): string => String(value ?? '')
+      .normalize('NFC')
+      .replace(/\u00a0/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+    const visible = (element: Element): boolean => {
+      const node = element as HTMLElement
+      const style = getComputedStyle(node)
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        node.getClientRects().length > 0
+    }
+    const routeReady = (): boolean => {
+      try { return new URL(location.href).pathname === '/app/im' } catch { return false }
+    }
+    const triggers = (): HTMLElement[] =>
+      Array.from(document.querySelectorAll<HTMLElement>('.app-job-selector'))
+        .filter((node) => visible(node))
+    const selectedTitle = (): string | null => {
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>('.app-job-selector .im-job-filter__label'),
+      ).filter((node) => visible(node))
+      return candidates.length === 1 ? clean(candidates[0].textContent) : null
+    }
+    const unreadControls = (): Array<{ wrapper: HTMLElement; input: HTMLInputElement }> =>
+      Array.from(document.querySelectorAll<HTMLElement>('.side-panel-header__checkbox'))
+        .filter((wrapper) => visible(wrapper) && clean(wrapper.textContent).includes('未读'))
+        .flatMap((wrapper) => {
+          const inputs = Array.from(wrapper.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+          return inputs.length === 1 ? [{ wrapper, input: inputs[0] }] : []
+        })
+    const readState = ():
+    | { status: 'ready'; trigger: HTMLElement; input: HTMLInputElement; allJobs: boolean; unread: boolean }
+    | { status: 'failed'; reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason'] } => {
+      if (!routeReady()) return { status: 'failed', reason: 'route_changed' }
+      const triggerMatches = triggers()
+      if (triggerMatches.length !== 1) return { status: 'failed', reason: 'job_trigger_cardinality' }
+      const title = selectedTitle()
+      if (!title) return { status: 'failed', reason: 'job_label_unreadable' }
+      const controls = unreadControls()
+      if (controls.length !== 1) return { status: 'failed', reason: 'unread_control_cardinality' }
+      const input = controls[0].input
+      if (input.type !== 'checkbox' || input.disabled) {
+        return { status: 'failed', reason: 'unread_control_unsafe' }
+      }
+      return {
+        status: 'ready',
+        trigger: triggerMatches[0],
+        input,
+        allJobs: title === '全部职位',
+        unread: input.checked,
+      }
+    }
+    const waitInteraction = async (): Promise<void> => {
+      await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 401)))
+    }
+    const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const value = read()
+        if (value !== null) return value
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      return read()
+    }
+
+    const initial = readState()
+    if (initial.status === 'failed') return failed(initial.reason)
+    if (initial.allJobs && initial.unread === unread) return { status: 'ready', changed: false }
+    if (!apply) return { status: 'needs_action' }
+
+    let changed = false
+    // 脑侧 readList 没有跨命令统一节拍器；首个可见动作前也必须主动留足间隔，
+    // 不能只在本函数相邻 click 之间等待。
+    await waitInteraction()
+    if (!initial.allJobs) {
+      initial.trigger.click()
+      changed = true
+      await waitInteraction()
+      let ambiguousOption = false
+      const option = await waitFor(() => {
+        if (!routeReady()) return null
+        const matches = Array.from(document.querySelectorAll<HTMLElement>(
+          '.app-job-selector-item, .km-select-option, .km-option, [role="option"]',
+        )).filter((node) => visible(node) && clean(node.textContent) === '全部职位')
+        if (matches.length > 1) ambiguousOption = true
+        return matches.length === 1 ? matches[0] : null
+      })
+      if (!routeReady()) return failed('route_changed')
+      if (!option || ambiguousOption) return failed('job_option_cardinality')
+      option.click()
+      await waitInteraction()
+      const selected = await waitFor(() => selectedTitle() === '全部职位' ? true : null)
+      if (!routeReady()) return failed('route_changed')
+      if (selected !== true) return failed('job_selection_unconfirmed')
+    }
+
+    const beforeUnread = readState()
+    if (beforeUnread.status === 'failed') return failed(beforeUnread.reason)
+    if (beforeUnread.unread !== unread) {
+      beforeUnread.input.click()
+      changed = true
+      await waitInteraction()
+      const confirmed = await waitFor(() => {
+        const latest = readState()
+        return latest.status === 'ready' && latest.allJobs && latest.unread === unread
+          ? true
+          : null
+      })
+      if (!routeReady()) return failed('route_changed')
+      if (confirmed !== true) return failed('unread_selection_unconfirmed')
+    }
+
+    const finalState = readState()
+    if (finalState.status === 'failed') return failed(finalState.reason)
+    if (!finalState.allJobs) return failed('job_selection_unconfirmed')
+    if (finalState.unread !== unread) return failed('unread_selection_unconfirmed')
+    return { status: 'ready', changed }
+  } catch {
+    return failed('unexpected')
+  }
+}
+
 // 页面驱动巡检只读取当前真实渲染、且能被后续会话定位器再次找到的虚拟列表窗口。
 // 每一行必须带稳定 sessionId/peerPartnerId 的 MAIN-world Vue source；不再用
 // getSessions 的独立分页结果或页面启动快照充当导航目标。
@@ -4093,6 +4241,172 @@ export async function identifyZhilianCurrentConversation(
     throw new ZhilianPlatformError('USER_ACTIVE', '识别期间真人切换了当前会话', 'afterRecovery')
   }
   return { conversationRef: after, observedAt: Date.now() }
+}
+
+export async function openZhilianConversation(
+  args: ZhilianOpenConversationArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianOpenConversationData> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatOpenConversation, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '打开未读会话参数不符合当前契约', 'manualOnly')
+  }
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  const tab = await verifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+
+  ctx.checkpoint()
+  const filterState = await runMain(tab.id, mainEnsureChatListFilter, [true, false])
+  if (filterState.status !== 'ready') {
+    const reason = filterState.status === 'failed' ? filterState.reason : 'not_unread'
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED',
+      `当前聊天列表尚未确认为全部职位未读列表：${reason}`,
+      'manualOnly',
+    )
+  }
+  let selected = ''
+  try {
+    const route = new URL((await chrome.tabs.get(tab.id)).url ?? '')
+    if (route.pathname !== '/app/im') throw new Error('not im')
+    selected = route.searchParams.get('sessionId') ?? ''
+  } catch {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '打开会话前页面离开智联沟通页', 'manualOnly')
+  }
+  if (selected === args.conversationRef) {
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND',
+      '目标未读会话已经是当前路由，本原语没有新的打开动作可执行',
+      'no',
+    )
+  }
+
+  let currentWindow: MainListDOMWindowResult
+  try {
+    currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      `当前未读列表无法建立 fresh 可见窗口：${asError(error).message}`,
+      'manualOnly',
+    )
+  }
+  if (currentWindow.unstable || currentWindow.sessions.some((session) => session.unreadCount <= 0)) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '当前未读列表尚未稳定或含无未读标记的会话',
+      'manualOnly',
+    )
+  }
+  const targetMatches = currentWindow.sessions
+    .filter((session) => session.conversationRef === args.conversationRef)
+  if (targetMatches.length === 0) {
+    throw new ZhilianPlatformError('TARGET_NOT_FOUND', '目标已离开本轮 fresh 未读列表', 'no')
+  }
+  if (targetMatches.length !== 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '目标在当前未读窗口内身份不唯一', 'manualOnly')
+  }
+
+  // 上一条列表命令可能刚刚滚动或切换筛选；无论实际间隔多少，本命令在唯一 click
+  // 前都再留出 1s+抖动，保证跨命令相邻可见交互也不贴连。
+  await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 401)))
+  ctx.checkpoint()
+  const changed = await ensureThreadRoute(
+    tab,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    ctx,
+  )
+  if (!changed) {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED',
+      '目标会话没有产生本原语要求的唯一打开动作',
+      'manualOnly',
+    )
+  }
+
+  let positiveRounds = 0
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tab.id)
+    let routeMatches = false
+    try {
+      const route = new URL(latest.url ?? '')
+      routeMatches = route.pathname === '/app/im' &&
+        route.searchParams.get('sessionId') === args.conversationRef
+    } catch {
+      routeMatches = false
+    }
+    if (!routeMatches) {
+      throw new ZhilianPlatformError(
+        'POSTCONDITION_UNCONFIRMED',
+        '打开会话后公开路由未保持目标绑定',
+        'manualOnly',
+        undefined,
+        'possible',
+      )
+    }
+    const latestFilter = await runMain(tab.id, mainEnsureChatListFilter, [true, false])
+    if (latestFilter.status !== 'ready') {
+      throw new ZhilianPlatformError(
+        'POSTCONDITION_UNCONFIRMED',
+        '打开会话后全部职位未读筛选状态发生变化',
+        'manualOnly',
+        undefined,
+        'possible',
+      )
+    }
+    const observed = await runMain(tab.id, mainFindConversation, [
+      args.conversationRef,
+      true,
+    ])
+    const positive = observed.status === 'found'
+      ? observed.unreadMarkerCleared === true
+      : observed.reason === 'target_not_found'
+    positiveRounds = positive ? positiveRounds + 1 : 0
+    if (positiveRounds >= 2) {
+      assertExpectedPrincipal(await probeTab(latest), expectedPrincipalFingerprint)
+      const data: ZhilianOpenConversationData = {
+        conversationRef: args.conversationRef,
+        observedAt: Date.now(),
+      }
+      if (validatePrimitiveData(PrimitiveName.ChatOpenConversation, 1, data).length !== 0) {
+        throw new ZhilianPlatformError(
+          'POSTCONDITION_UNCONFIRMED',
+          '打开会话结果不符合当前契约',
+          'manualOnly',
+          undefined,
+          'possible',
+        )
+      }
+      await ctx.progress('目标未读会话已打开并确认已读收敛', 100)
+      return data
+    }
+    if (observed.status === 'failed' && observed.reason !== 'target_not_found') {
+      throw new ZhilianPlatformError(
+        'POSTCONDITION_UNCONFIRMED',
+        `打开会话后未读行无法复核：${observed.reason ?? 'unknown'}`,
+        'manualOnly',
+        undefined,
+        'possible',
+      )
+    }
+    if (attempt % 8 === 0) {
+      await ctx.progress('等待目标会话未读状态收敛', Math.min(90, 20 + attempt))
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'POSTCONDITION_UNCONFIRMED',
+    '目标只打开一次，但未确认未读标记清除或会话行离开未读列表',
+    'manualOnly',
+    undefined,
+    'possible',
+  )
 }
 
 async function sendZhilianTab(conversationRef: string): Promise<chrome.tabs.Tab> {
@@ -4768,7 +5082,7 @@ async function readZhilianListFromDOM(
   tab: chrome.tabs.Tab,
   binding: string,
   cursor: ListCursor | null,
-  cutoffMs: number,
+  cutoffMs: number | null,
   maxSessions: number,
 ): Promise<ZhilianListPage> {
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
@@ -4795,6 +5109,13 @@ async function readZhilianListFromDOM(
     try {
       page = await runMain(tab.id, mainReadListDOMWindow, [advance, resetToTop])
     } catch (error) {
+      if (args.filter === 'unread' && asError(error).message.includes('dom_list_items_missing')) {
+        throw new ZhilianPlatformError(
+          'ELEMENT_UNRESOLVED',
+          '未读筛选已开启，但当前页面没有可确认的非空列表或可信空态',
+          'manualOnly',
+        )
+      }
       throw new ZhilianPlatformError(
         'CTX_LOST_DURING_EXEC',
         `智联会话列表页面读取失败：${asError(error).message}`,
@@ -4861,11 +5182,17 @@ async function readZhilianListFromDOM(
     const candidates = page.sessions.slice(effectiveWindowOffset)
     for (const item of candidates) {
       consumed += 1
-      if (item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
+      if (cutoffMs !== null && item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
         crossedCutoff = true
         continue
       }
-      if (args.filter === 'unread' && item.unreadCount === 0) continue
+      if (args.filter === 'unread' && item.unreadCount === 0) {
+        throw new ZhilianPlatformError(
+          'ELEMENT_UNRESOLVED',
+          '平台未读筛选回读到无未读标记的会话，拒绝在手内静默过滤',
+          'manualOnly',
+        )
+      }
       if (seen.has(item.conversationRef)) continue
       if (jsonBytes({
         sessions: [...sessions, ...accepted, item],
@@ -4929,9 +5256,14 @@ export async function readZhilianList(
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
 ): Promise<ZhilianListPage> {
+  if (validatePrimitiveArgs(PrimitiveName.ChatReadList, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '会话列表读取参数不符合当前契约', 'manualOnly')
+  }
   const tab = await verifiedIMTab(expectedPrincipalFingerprint)
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
-  const cutoffDays = Math.min(30, Math.max(1, args.stopOlderThanDays ?? 8))
+  const cutoffDays = args.filter === 'all'
+    ? Math.min(30, Math.max(1, args.stopOlderThanDays ?? 8))
+    : null
   // 一轮巡检只把当前真实渲染、可由 readThread 定位的 DOM/Vue 窗口交给脑。
   // 调用方即使请求 32 条，也不能用独立 API 分页制造页面上不可定位的目标。
   const maxSessions = Math.min(LIST_PAGE_SIZE, Math.min(32, Math.max(1, args.maxSessions ?? 32)))
@@ -4956,7 +5288,42 @@ export async function readZhilianList(
       ))) {
     throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页游标越界')
   }
-  const cutoffMs = Date.now() - cutoffDays * 86_400_000
+
+  ctx.checkpoint()
+  let filterState = await runMain(tab.id, mainEnsureChatListFilter, [
+    args.filter === 'unread',
+    false,
+  ])
+  if (filterState.status === 'failed') {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      `智联聊天列表筛选状态无法回读：${filterState.reason}`,
+      'manualOnly',
+    )
+  }
+  if (filterState.status === 'needs_action') {
+    if (cursor !== null) {
+      throw new ZhilianPlatformError('CURSOR_INVALID', '列表筛选状态已变化，旧分页游标不可继续使用')
+    }
+    ctx.checkpoint()
+    assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+    await ctx.beforeSideEffect()
+    filterState = await runMain(tab.id, mainEnsureChatListFilter, [
+      args.filter === 'unread',
+      true,
+    ])
+    if (filterState.status !== 'ready') {
+      const reason = filterState.status === 'failed' ? filterState.reason : 'not_applied'
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        `智联聊天列表筛选无法覆盖并回读确认：${reason}`,
+        'manualOnly',
+      )
+    }
+    assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
+  }
+
+  const cutoffMs = cutoffDays === null ? null : Date.now() - cutoffDays * 86_400_000
   return readZhilianListFromDOM(
     args,
     ctx,
@@ -5596,7 +5963,10 @@ export async function inspectZhilianSendSurfaceDiagnostic(): Promise<DebugInspec
 // 直接拼接 ?sessionId=... 在目标尚未进入智联当前虚拟列表时会被平台剥回 /app/im。
 // finder 只检查当前已加载窗口，完整 sessionId 唯一命中才返回 found；它不复位、
 // 不滚动也不 click，数据库中的旧会话因此不能驱动手在长列表里全局搜人。
-async function mainFindConversation(conversationRef: string): Promise<MainFindConversationResult> {
+async function mainFindConversation(
+  conversationRef: string,
+  observeUnreadMarker = false,
+): Promise<MainFindConversationResult> {
   type AnyRecord = Record<string, unknown>
   const w = window as unknown as AnyRecord
   const asRecord = (value: unknown): AnyRecord | null =>
@@ -5604,7 +5974,9 @@ async function mainFindConversation(conversationRef: string): Promise<MainFindCo
   const current = (): string => {
     try { return new URL(location.href).searchParams.get('sessionId') ?? '' } catch { return '' }
   }
-  if (current() === conversationRef) return { status: 'found' }
+  // 普通 finder 只需知道公开路由已经选中；openConversation 的后置观察还必须
+  // 继续读取未读列表，不能因路由命中提前跳过“标记清除/行离开”的正证。
+  if (!observeUnreadMarker && current() === conversationRef) return { status: 'found' }
 
   const visible = (element: Element): boolean => {
     const node = element as HTMLElement
@@ -5665,9 +6037,15 @@ async function mainFindConversation(conversationRef: string): Promise<MainFindCo
   if (rows.length === 0) return { status: 'failed', reason: 'list_items_missing' }
   const matches = rows.filter(({ ref }) => ref === conversationRef)
   if (matches.length > 1) return { status: 'failed', reason: 'target_binding_duplicated' }
-  return matches.length === 1
-    ? { status: 'found' }
-    : { status: 'failed', reason: 'target_not_found' }
+  if (matches.length !== 1) return { status: 'failed', reason: 'target_not_found' }
+  if (!observeUnreadMarker) return { status: 'found' }
+  const unreadMarkers = Array.from(
+    matches[0].node.querySelectorAll<HTMLElement>('.im-session-item__unread'),
+  ).filter((node) => visible(node))
+  const markerValues = unreadMarkers.map((node) => String(node.textContent ?? '').trim())
+  const unreadMarkerCleared = markerValues.length === 0 ||
+    (markerValues.length === 1 && markerValues[0] === '0')
+  return { status: 'found', unreadMarkerCleared }
 }
 
 // finder 返回后由 extension 先 checkpoint 并重新核验账号；只有这个无 await 的短 task
@@ -9646,6 +10024,7 @@ export const zhilianTestHooks = Object.freeze({
   mainApplySourcingFilters,
   mainReadSourcingWindow,
   mainReadSourcingResume,
+  mainEnsureChatListFilter,
   mainReadListDOMWindow,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,
