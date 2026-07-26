@@ -10776,7 +10776,7 @@ test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', asy
   }
 })
 
-test('readList MAIN 在行节点无 __vue__ 时从同一行 Nuxt 组件读取稳定身份', async () => {
+test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒挂不阻断页面顺序', async () => {
   const original = {
     document: globalThis.document,
     window: globalThis.window,
@@ -10810,8 +10810,10 @@ test('readList MAIN 在行节点无 __vue__ 时从同一行 Nuxt 组件读取稳
       unreadCount: 0,
       name: '候选人乙',
       jobTitle: '销售',
-      sortTime: 1_000,
-      lastSentence: { senderType: 'STAFF', text: '稍后联系', sendTime: 1_000 },
+      // 真机可见列表顺序与私有 sortTime 可能短暂倒挂；页面顺序是读取事实，
+      // 私有字段不取得整窗授权权力。
+      sortTime: 3_000,
+      lastSentence: { senderType: 'STAFF', text: '稍后联系', sendTime: 3_000 },
     },
   ]
   const virtual = {

@@ -4044,10 +4044,6 @@ async function mainReadListDOMWindow(
         lastActivityTs: toMillis(source.sortTime ?? last.sendTime ?? source.modifiedTime),
       })
     }
-    const orderedTimes = sessions.map((session) => session.lastActivityTs).filter((value): value is number => value !== null)
-    for (let index = 1; index < orderedTimes.length; index += 1) {
-      if (orderedTimes[index] > orderedTimes[index - 1]) throw new Error('dom_list_sort_order_invalid')
-    }
     const scrollHeight = scrollElement.scrollHeight
     const clientHeight = scrollElement.clientHeight
     return {
@@ -4126,7 +4122,6 @@ async function mainReadListDOMWindow(
       'dom_list_items_missing',
       'dom_list_identity_invalid',
       'dom_list_unread_invalid',
-      'dom_list_sort_order_invalid',
     ].find((code) => raw.includes(code)) ?? 'unexpected'
     return {
       __recruitHelperMainError: `read_list_main_failed:${diagnosticStage}:${known}`,
