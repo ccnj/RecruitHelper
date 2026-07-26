@@ -419,6 +419,7 @@
         "type": "object",
         "fields": {
           "filter": { "type": "string", "enumRef": "enums.listFilter" },
+          "startAt": { "type": "string", "optional": true, "default": "top", "enumRef": "enums.listStart" },
           "stopOlderThanDays": { "type": "int", "optional": true, "default": 8, "minimum": 1, "maximum": 30 },
           "maxSessions": { "type": "int", "optional": true, "default": 32, "minimum": 1, "maximum": 32 },
           "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
@@ -995,6 +996,7 @@
     "loginChangeState": ["in", "out"],
     "surfaceName": ["im"],
     "listFilter": ["all", "unread"],
+    "listStart": ["top", "current"],
     "messageDirection": ["in", "out", "system"],
     "messageKind": ["text", "image", "voice", "file", "card", "system"],
     "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
@@ -1090,7 +1092,7 @@
       "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。unreadCount 遵守两次一致。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
+      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true。无 cursor 的 fresh 首读以 startAt=top 从当前筛选列表顶部建立快照，startAt=current 从当前物理窗口建立快照；省略默认 top。startAt 只决定 fresh 首窗，cursor 续页不得借其复用旧快照。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。未读筛选窗口的单行 unreadCount 是低保真提示，零值不得单独导致整窗失败或被手静默过滤。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
     },
     "chat.identifyCurrentConversation": {
       "ver": 1, "class": "readonly", "batch": "S",
@@ -1223,7 +1225,7 @@
     }
   },
   "events": {
-    "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "仅拉前巡检;减小/清零仅记录" },
+    "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "正数拉前巡检并锁存非持久页面对账待办;减小/清零仅记录,不清待办" },
     "pageNavigated":     { "batch": "S", "dataSchema": "PageNavigatedEventData", "brainMay": "更新页面健康;不得直接触发业务命令" },
     "loginStateChanged": { "batch": "S", "dataSchema": "LoginStateChangedEventData", "brainMay": "out=暂停该账号+告警;logout→login 使身份绑定失效,须真人重确认" },
     "manualInteraction": { "batch": "S", "dataSchema": "ManualInteractionEventData", "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" }

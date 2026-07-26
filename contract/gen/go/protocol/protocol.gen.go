@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:5feef6372422a289764a48e9d30e3372b7e5dcc9af1d14206f077cc3478ab1be"
+	ContractHash       = "sha256:d6437d530a94a40503e4eafe9921146fccb99a23bb8e901df0bebe0d65032b06"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -187,6 +187,18 @@ const (
 var ListFilterValues = []ListFilter{
 	ListFilterAll,
 	ListFilterUnread,
+}
+
+type ListStart string
+
+const (
+	ListStartTop     ListStart = "top"
+	ListStartCurrent ListStart = "current"
+)
+
+var ListStartValues = []ListStart{
+	ListStartTop,
+	ListStartCurrent,
 }
 
 type LoginChangeState string

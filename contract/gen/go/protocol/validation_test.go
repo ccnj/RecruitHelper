@@ -107,6 +107,8 @@ func TestValidateDebugReloadPrimitive(t *testing.T) {
 func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 	for label, raw := range map[string]json.RawMessage{
 		"all 默认八天":     json.RawMessage(`{"filter":"all"}`),
+		"all 从顶部 fresh": json.RawMessage(`{"filter":"all","startAt":"top"}`),
+		"all 从当前窗 fresh": json.RawMessage(`{"filter":"all","startAt":"current"}`),
 		"all 显式八天":     json.RawMessage(`{"filter":"all","stopOlderThanDays":8}`),
 		"unread 无年龄截止": json.RawMessage(`{"filter":"unread"}`),
 	} {
@@ -121,6 +123,12 @@ func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"unread","stopOlderThanDays":8}`)),
 		"$.stopOlderThanDays",
 		"forbiddenWhen",
+	)
+	assertValidationError(
+		t,
+		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"all","startAt":"middle"}`)),
+		"$.startAt",
+		"enum",
 	)
 
 	if err := ValidatePrimitiveArgs(

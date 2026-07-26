@@ -89,6 +89,20 @@ expectValid(
 );
 expectValid("readList all default cutoff", validatePrimitiveArgs("chat.readList", 1, { filter: "all" }));
 expectValid(
+  "readList fresh top",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "top" }),
+);
+expectValid(
+  "readList fresh current",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "current" }),
+);
+expectIssue(
+  "readList rejects unknown start",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "middle" }),
+  "$.startAt",
+  "enum",
+);
+expectValid(
   "readList all explicit cutoff",
   validatePrimitiveArgs("chat.readList", 1, { filter: "all", stopOlderThanDays: 8 }),
 );
