@@ -278,6 +278,10 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 		}
 		return stopProfile, nil
 	}
+	// A constructed candidate-visible effect can reorder the IM list before its
+	// waiter returns. Preserve the action's WAL-owned convergence, but forbid
+	// every caller from navigating with the pre-action list snapshot.
+	a.invalidateListSnapshot()
 
 	func() {
 		a.manager.mu.Unlock()

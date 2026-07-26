@@ -625,6 +625,10 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 		}
 		return nil
 	}
+	// Start returned the persistent effect handle, so the candidate-visible
+	// action now owns convergence even if Wait is interrupted. The IM list may
+	// already have reordered; callers must continue only from a fresh list.
+	a.invalidateListSnapshot()
 	func() {
 		a.manager.mu.Unlock()
 		defer a.manager.mu.Lock()

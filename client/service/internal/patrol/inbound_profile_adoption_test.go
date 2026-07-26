@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -157,6 +158,119 @@ func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T
 		conversationRef,
 		"status=rooted",
 	)
+}
+
+func TestInboundResumeCaptureInvalidatesConversationListSnapshot(t *testing.T) {
+	h := newHarness(t)
+	savePatrolInboundLegacyJob(t, h, "job-resume-fresh", "客户经理")
+
+	conversationRef := "conversation-resume-fresh"
+	platformUserRef := "peer-resume-fresh"
+	positionTitle := "客户经理"
+	inboundText := "想了解一下"
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: conversationRef,
+	}
+	if err := h.db.SaveConversationList(store.SaveConversationListRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ObservedAt: h.clock.Now(), Complete: true,
+		Entries: []store.ListIndexEntry{{
+			ConversationRef: conversationRef, PlatformUserRef: platformUserRef,
+			PeerDisplayName: "合成候选人", LastMessageDirection: "in",
+			LastMessageKind: "text", LastMessagePreview: inboundText,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := h.db.AdoptInboundConversationProfile(
+		store.AdoptInboundConversationProfileRequest{
+			Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+			ConversationRef: conversationRef, PlatformUserRef: platformUserRef,
+			DisplayName: "合成候选人", PositionTitle: positionTitle,
+			ObservedAt: h.clock.Now(),
+		},
+	)
+	if err != nil || adopted == nil || adopted.Profile == nil ||
+		adopted.Outcome != store.InboundProfileAdopted {
+		t.Fatalf("预置主动来聊档案失败: result=%+v err=%v", adopted, err)
+	}
+	stableSourceKey := strings.Repeat("a", 64)
+	inbound := draftText(inboundText)
+	inbound.SourceKey = &stableSourceKey
+	if _, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: 0, PlatformUserRef: platformUserRef,
+		NewMessages: []store.MessageDraft{inbound},
+		Adopt:       true, SyncedAt: h.clock.Now(),
+	}); err != nil {
+		t.Fatalf("预置已收编会话失败: %v", err)
+	}
+
+	listCalls := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Cursor != "" {
+				t.Fatalf("简历补采后不得复用旧 cursor: %q", args.Cursor)
+			}
+			listCalls++
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{{
+					ConversationRef: conversationRef,
+					Peer: protocol.PeerSummary{
+						PlatformUserRef: platformUserRef,
+						DisplayName:     "合成候选人",
+					},
+					PositionTitle: &positionTitle,
+					UnreadCount:   0,
+					LastMessage: protocol.LastMessageSummary{
+						Direction:   protocol.MessageDirectionIn,
+						Kind:        protocol.MessageKindText,
+						TextPreview: inboundText,
+					},
+				}},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			t.Fatal("账本与摘要一致时不得靠 readThread 触发 fresh")
+		default:
+			return defaultHandler(request)
+		}
+		return nil, errors.New("unreachable")
+	}
+
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5InboundAutomaticRunner{m5AutomaticReplyRunner: &m5AutomaticReplyRunner{
+		base: h.runner, dispatcher: dispatcher,
+	}}
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, errors.New("fixture stops before candidate-visible action")
+		},
+	}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("简历补采巡检失败: result=%+v err=%v", result, err)
+	}
+	if h.runner.count(protocol.PrimChatReadThread) != 0 || hand.commandCount() != 1 {
+		t.Fatalf("场景必须只包含一次简历动作: calls=%v handCommands=%d",
+			h.runner.names(), hand.commandCount())
+	}
+	if listCalls != 2 {
+		t.Fatalf("简历动作后未从 fresh 列表收束: listCalls=%d", listCalls)
+	}
+	profile, err := h.db.CandidateProfileByID(adopted.Profile.ProfileID)
+	if err != nil || profile == nil ||
+		profile.ResumeCaptureState != store.ResumeCaptureCaptured {
+		t.Fatalf("简历动作未完成: profile=%+v err=%v", profile, err)
+	}
 }
 
 func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *testing.T) {

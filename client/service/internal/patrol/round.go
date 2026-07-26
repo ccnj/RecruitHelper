@@ -28,6 +28,8 @@ type roundActor struct {
 	sourcingBatchIDAtStart  string
 	superseded              bool
 	freshListRequired       bool
+	listSnapshotGeneration  uint64
+	checkedConversationRefs map[string]struct{}
 	projection              []ConversationProjection
 }
 
@@ -48,6 +50,14 @@ type conversationListPage struct {
 	complete   bool
 	nextCursor string
 }
+
+type conversationListPageOutcome uint8
+
+const (
+	conversationListPageContinue conversationListPageOutcome = iota
+	conversationListPageFresh
+	conversationListPageStop
+)
 
 func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, hand HandState, trigger string, now time.Time) RoundOutcome {
 	key := store.AccountKey{Platform: account.Platform, AccountRef: account.AccountRef}
@@ -170,7 +180,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 	cursor := ""
 	seenCursors := make(map[string]struct{})
 	seenConversations := make(map[string]struct{})
-	for pageNumber := 0; pageNumber < a.manager.config.MaxPages; pageNumber++ {
+	a.checkedConversationRefs = make(map[string]struct{})
+	for pagesRead := 0; pagesRead < a.manager.config.MaxPages; pagesRead++ {
 		if err := a.setStage("readingList"); err != nil {
 			return err
 		}
@@ -193,16 +204,28 @@ func (a *roundActor) execute(ctx context.Context) error {
 			}
 			seenConversations[summary.ConversationRef] = struct{}{}
 		}
-		consumedTarget, err := a.processConversationListPage(ctx, page)
+		outcome, err := a.processConversationListPage(ctx, page)
 		if err != nil {
 			return err
 		}
-		if consumedTarget {
-			// readThread 可能切换会话、清除未读，后续回复/卡片还会重排
-			// 列表。旧 page/cursor 此刻不再是导航依据；每份页面快照
-			// 最多处理一个需要 readThread 的会话。
-			a.freshListRequired = true
+		switch outcome {
+		case conversationListPageFresh:
+			// readThread、简历读取或候选人可见动作都可能切换会话、清除
+			// 未读或重排列表。旧 page/cursor 此刻不再是导航依据；同一
+			// 完整扫描保留 checked 集合，但从无 cursor 的 fresh 页面
+			// 快照继续。
+			cursor = ""
+			seenCursors = make(map[string]struct{})
+			seenConversations = make(map[string]struct{})
+			continue
+		case conversationListPageStop:
+			// 工作流候选人边界与分类修正是明确停止，不得被误解释成
+			// fresh 续扫后重新领取候选人。
 			return nil
+		case conversationListPageContinue:
+			// 当前快照仍可继续分页。
+		default:
+			return errors.New("未知会话列表处理结果")
 		}
 		if a.classificationCorrected || page.complete {
 			return nil
@@ -216,22 +239,26 @@ func (a *roundActor) execute(ctx context.Context) error {
 		seenCursors[page.nextCursor] = struct{}{}
 		cursor = page.nextCursor
 	}
-	return ErrPaginationLimit
+	// MaxPages 是本次完整扫描所有 fresh restart 共享的总读取预算。
+	// 预算耗尽只表示部分扫描已经安全收束；不把它伪装成业务失败，
+	// 下一轮从 fresh 当前列表继续。
+	a.freshListRequired = true
+	return nil
 }
 
 func (a *roundActor) processConversationListPage(
 	ctx context.Context,
 	page conversationListPage,
-) (bool, error) {
+) (conversationListPageOutcome, error) {
 	entries, err := listEntries(page.sessions)
 	if err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	if err := a.manager.store.SaveConversationList(store.SaveConversationListRequest{
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
 		ObservedAt: a.manager.now(), Complete: page.complete, Entries: entries,
 	}); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	lateObservations := make([]store.LateGreetingConversationObservation, 0, len(entries))
 	for _, entry := range entries {
@@ -247,44 +274,48 @@ func (a *roundActor) processConversationListPage(
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
 		ObservedAt: a.manager.now(), Conversations: lateObservations,
 	}); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	if _, err := a.adoptInboundConversationProfiles(page.sessions); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	if err := a.ensureCommunicationV4Roots(); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	if err := a.ensureSourcingCommunicationContexts(); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	if err := a.ensureSourcingCommunicationResumes(); err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 
 	dirty, err := a.detectDirty(page.sessions)
 	if err != nil {
-		return false, err
+		return conversationListPageContinue, err
 	}
 	dirtyByRef := make(map[string]dirtyConversation, len(dirty))
 	for index := range dirty {
 		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
 	}
 	for _, summary := range page.sessions {
+		if _, checked := a.checkedConversationRefs[summary.ConversationRef]; checked {
+			continue
+		}
 		allowed, gateErr := a.mayStartNextConversation(ctx)
 		if gateErr != nil {
-			return false, gateErr
+			return conversationListPageContinue, gateErr
 		}
 		if !allowed {
 			// 当前候选人若有动作链，已经在上一轮循环中完整收束。这里
 			// 只是不再领取下一位；外层随后释放 tickMu，让工作流编排器
 			// 在线性化边界切换页面或结束任务。
-			return true, nil
+			return conversationListPageStop, nil
 		}
 		_, readCurrent := dirtyByRef[summary.ConversationRef]
 		if dirtyConversation, ok := dirtyByRef[summary.ConversationRef]; ok {
+			a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
 			if err := a.setStage("readingThread"); err != nil {
-				return false, err
+				return conversationListPageContinue, err
 			}
 			projection, err := a.reconcileConversation(ctx, dirtyConversation)
 			if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
@@ -293,14 +324,15 @@ func (a *roundActor) processConversationListPage(
 			if err != nil {
 				if isRunError(err, protocol.ErrCodeTargetNotFound) {
 					// 目标在 click 前离开本轮可定位窗口，没有产生页面
-					// 副作用。把它视为快照过期，禁止数据库反向找人。
-					return true, nil
+					// 副作用。把它视为快照过期，禁止数据库反向找人；
+					// 当前 ref 本次已尝试，fresh 后继续后续会话。
+					return conversationListPageFresh, nil
 				}
 				a.handleCommandFailure(err)
-				return false, err
+				return conversationListPageContinue, err
 			}
 			if a.classificationCorrected {
-				return true, nil
+				return conversationListPageStop, nil
 			}
 		}
 		key := store.ConversationKey{
@@ -309,28 +341,30 @@ func (a *roundActor) processConversationListPage(
 		}
 		profile, err := a.manager.store.CandidateProfileByConversation(key)
 		if err != nil {
-			return false, err
+			return conversationListPageContinue, err
 		}
 		if profile == nil {
 			if readCurrent {
-				return true, nil
+				return conversationListPageFresh, nil
 			}
 			continue
 		}
+		a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
+		snapshotGeneration := a.listSnapshotGeneration
 		if err := a.prepareInboundConversationProfile(
 			ctx,
 			*profile,
 		); err != nil {
-			return false, err
+			return conversationListPageContinue, err
 		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
-			return false, err
+			return conversationListPageContinue, err
 		}
-		if readCurrent {
-			return true, nil
+		if readCurrent || a.listSnapshotGeneration != snapshotGeneration {
+			return conversationListPageFresh, nil
 		}
 	}
-	return false, nil
+	return conversationListPageContinue, nil
 }
 
 // mayStartNextConversation calls the coarse product-workflow gate without
@@ -788,6 +822,11 @@ func (a *roundActor) captureResumeForProfile(
 	if err != nil {
 		return err
 	}
+	// Resume capture is an intrusive current-conversation action. Even if the
+	// result later fails, the page may already have opened/closed a resume
+	// surface, so a previously observed conversation-list cursor is no longer
+	// a valid navigation basis.
+	a.invalidateListSnapshot()
 	logicalID := handle.LogicalDispatchID()
 	var raw json.RawMessage
 	func() {
@@ -1224,6 +1263,10 @@ func (a *roundActor) readThread(ctx context.Context, conversationRef string, anc
 			data protocol.ChatReadThreadData
 			err  error
 		)
+		// chat.readThread is intrusive: it may switch the current conversation
+		// and clear an unread receipt. Once attempted, no caller may continue
+		// navigating with the conversation-list snapshot observed before it.
+		a.invalidateListSnapshot()
 		if a.requireCurrentThread {
 			data, err = invokePrimitiveDirect[protocol.ChatReadThreadData](
 				ctx,
@@ -1590,6 +1633,10 @@ func (a *roundActor) setStage(stage string) error {
 
 func (a *roundActor) key() store.AccountKey {
 	return store.AccountKey{Platform: a.account.Platform, AccountRef: a.account.AccountRef}
+}
+
+func (a *roundActor) invalidateListSnapshot() {
+	a.listSnapshotGeneration++
 }
 
 func (a *roundActor) ensureWithinDailyWindow() error {

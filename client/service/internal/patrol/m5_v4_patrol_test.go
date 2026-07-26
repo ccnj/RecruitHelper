@@ -321,9 +321,15 @@ func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
 	first := seedCommunicationV4PatrolTarget(t, h, "page-observed", firstInbound)
 	second := seedCommunicationV4PatrolTarget(t, h, "page-absent", secondInbound)
 
+	listCalls := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Cursor != "" {
+				t.Fatalf("候选人可见动作后不得复用旧 cursor: %q", args.Cursor)
+			}
+			listCalls++
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{
 					summary(first.conversationRef, "person-v4-patrol-page-observed", firstInbound, 0),
@@ -365,6 +371,9 @@ func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
 	if len(advice.requests) != 2 || hand.commandCount() != 1 {
 		t.Fatalf("只应推进页面当前窗档案: advice=%d sends=%d",
 			len(advice.requests), hand.commandCount())
+	}
+	if listCalls != 2 {
+		t.Fatalf("候选人可见动作后未用 fresh 列表收束: listCalls=%d", listCalls)
 	}
 	firstTurn, err := h.db.LatestDialogueTurnForProfile(first.profileID)
 	if err != nil || firstTurn == nil || firstTurn.Status != store.DialogueTurnCompleted {
