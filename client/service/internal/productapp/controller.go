@@ -36,10 +36,11 @@ type JobConfigSource interface {
 }
 
 type Controller struct {
-	store    *store.Store
-	workflow Workflow
-	source   JobConfigSource
-	now      func() time.Time
+	store       *store.Store
+	workflow    Workflow
+	source      JobConfigSource
+	now         func() time.Time
+	dailyWindow workflow.DailyWindowPolicy
 }
 
 type RuntimeState struct {
@@ -60,6 +61,7 @@ func New(
 	productWorkflow Workflow,
 	source JobConfigSource,
 	now func() time.Time,
+	dailyWindow workflow.DailyWindowPolicy,
 ) (*Controller, error) {
 	if db == nil || productWorkflow == nil || source == nil {
 		return nil, ErrControllerInvalid
@@ -67,7 +69,10 @@ func New(
 	if now == nil {
 		now = time.Now
 	}
-	return &Controller{store: db, workflow: productWorkflow, source: source, now: now}, nil
+	return &Controller{
+		store: db, workflow: productWorkflow, source: source, now: now,
+		dailyWindow: dailyWindow,
+	}, nil
 }
 
 func (c *Controller) Start(
@@ -96,7 +101,7 @@ func (c *Controller) Start(
 	// start, so a 07:59 click cannot become an implicit 08:00 reservation and
 	// a 23:59 click cannot cross midnight into a new run.
 	requestedAt := c.now()
-	open, err := workflow.EvaluateDailyWindow(requestedAt, time.Local)
+	open, err := c.dailyWindow.Evaluate(requestedAt, time.Local)
 	if err != nil {
 		return err
 	}

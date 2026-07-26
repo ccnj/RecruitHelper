@@ -308,7 +308,7 @@ func (m *Manager) executePendingAtBoundary(
 		)
 
 	case store.ProductWorkflowPendingActionSourcing:
-		open, windowErr := workflow.EvaluateDailyWindow(now, m.location)
+		open, windowErr := m.dailyWindow.Evaluate(now, m.location)
 		if windowErr != nil {
 			return run, windowErr
 		}
@@ -579,6 +579,7 @@ func (m *Manager) syncDailyWindow(
 		stateOf(run),
 		m.clock.Now(),
 		m.location,
+		m.dailyWindow,
 	)
 	if err != nil {
 		return run, false, err
@@ -670,7 +671,7 @@ func (m *Manager) ConfirmAll(
 	}
 
 	now := m.clock.Now()
-	open, err := workflow.EvaluateDailyWindow(now, m.location)
+	open, err := m.dailyWindow.Evaluate(now, m.location)
 	if err != nil {
 		return nil, err
 	}
@@ -776,7 +777,7 @@ func (m *Manager) keepCommunicationRunning(
 		return run, store.ErrProductWorkflowConflict
 	}
 	now := m.clock.Now()
-	open, err := workflow.EvaluateDailyWindow(now, m.location)
+	open, err := m.dailyWindow.Evaluate(now, m.location)
 	if err != nil {
 		return run, err
 	}

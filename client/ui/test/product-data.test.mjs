@@ -15,7 +15,6 @@ const moduleUrl = pathToFileURL(process.cwd() + '/test/dist/product-data.mjs').h
 const {
   adaptCandidateDetail,
   adaptProductSnapshot,
-  isBusinessWindowOpen,
   productCandidatePath,
 } = await import(moduleUrl)
 
@@ -103,6 +102,7 @@ const snapshot = {
       pluginHealth: 'ready',
       pluginVersion: '0.1.0',
       contractMatch: true,
+      businessWindowOpen: true,
       workflowMode: 'full',
       workflowStatus: 'awaitingConfirmation',
       canAddBatch: false,
@@ -242,8 +242,18 @@ check(
   '无绑定职位不再误禁仅多轮回复',
 )
 
-check(!isBusinessWindowOpen(new Date(2026, 6, 25, 7, 59)), '08:00 前产品页保持只读')
-check(isBusinessWindowOpen(new Date(2026, 6, 25, 8, 0)), '08:00 起进入业务窗口')
+const brainClosedWindow = structuredClone(replyOnlyWithoutJob)
+brainClosedWindow.overview.runtime.businessWindowOpen = false
+check(
+  !adaptProductSnapshot(brainClosedWindow, new Date(2026, 6, 25, 12, 0)).overview.workflow.canStart,
+  'UI 不用渲染进程的中午时钟覆盖脑返回的闭窗结论',
+)
+const brainOpenedWindow = structuredClone(replyOnlyWithoutJob)
+brainOpenedWindow.overview.runtime.businessWindowOpen = true
+check(
+  adaptProductSnapshot(brainOpenedWindow, new Date(2026, 6, 25, 1, 0)).overview.workflow.canStart,
+  'UI 在凌晨也只采用脑返回的开发期开窗结论',
+)
 check(productCandidatePath('pendingInterview').includes('view=pending'), '产品页名称映射到唯一后端候选视图')
 
 const detail = adaptCandidateDetail({

@@ -50,15 +50,17 @@ type patrolBoundaryActor interface {
 }
 
 type Config struct {
-	Clock    Clock
-	Location *time.Location
+	Clock       Clock
+	Location    *time.Location
+	DailyWindow workflow.DailyWindowPolicy
 }
 
 type Manager struct {
-	store    *store.Store
-	actor    Actor
-	clock    Clock
-	location *time.Location
+	store       *store.Store
+	actor       Actor
+	clock       Clock
+	location    *time.Location
+	dailyWindow workflow.DailyWindowPolicy
 	// advanceMu prevents two background ticks from running the same pipeline
 	// phase concurrently. It is deliberately separate from mu: Pause and the
 	// shared member gate must remain able to close while one candidate's AI
@@ -88,6 +90,7 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 	}
 	manager := &Manager{
 		store: db, actor: actor, clock: config.Clock, location: config.Location,
+		dailyWindow:            config.DailyWindow,
 		confirmationProjection: db.AppConfirmation,
 	}
 	if installer, ok := actor.(memberGateInstaller); ok {
@@ -145,7 +148,9 @@ func (m *Manager) startFullLocked(
 		return nil, store.ErrJobAIContextRevisionInvalid
 	}
 
-	decision, err := workflow.Start(nil, workflow.ModeFull, now, m.location)
+	decision, err := workflow.Start(
+		nil, workflow.ModeFull, now, m.location, m.dailyWindow,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +236,9 @@ func (m *Manager) StartReplyOnly(key store.AccountKey) (*store.ProductWorkflowRu
 	if activeBatch != nil {
 		return nil, ErrSourcingBatchActive
 	}
-	decision, err := workflow.Start(nil, workflow.ModeReplyOnly, now, m.location)
+	decision, err := workflow.Start(
+		nil, workflow.ModeReplyOnly, now, m.location, m.dailyWindow,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +302,7 @@ func (m *Manager) Resume() (*store.ProductWorkflowRun, error) {
 	}
 	from := stateOf(run)
 	now := m.clock.Now()
-	decision, err := workflow.Resume(from, now, m.location)
+	decision, err := workflow.Resume(from, now, m.location, m.dailyWindow)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +407,7 @@ func (m *Manager) MayStartNextWorkflowMember() error {
 		return err
 	}
 	if run == nil {
-		open, err := workflow.EvaluateDailyWindow(now, m.location)
+		open, err := m.dailyWindow.Evaluate(now, m.location)
 		if err != nil {
 			return err
 		}
@@ -410,7 +417,9 @@ func (m *Manager) MayStartNextWorkflowMember() error {
 		return nil
 	}
 	from := stateOf(run)
-	decision, err := workflow.MayStartNextWorkflowMember(from, now, m.location)
+	decision, err := workflow.MayStartNextWorkflowMember(
+		from, now, m.location, m.dailyWindow,
+	)
 	if err != nil {
 		return err
 	}
@@ -442,7 +451,9 @@ func (m *Manager) activeForStart(
 		return nil, ErrWorkflowScopeConflict
 	}
 	currentState := stateOf(current)
-	if _, err := workflow.Start(&currentState, mode, now, m.location); err != nil {
+	if _, err := workflow.Start(
+		&currentState, mode, now, m.location, m.dailyWindow,
+	); err != nil {
 		return nil, err
 	}
 	return current, nil

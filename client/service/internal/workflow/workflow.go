@@ -10,6 +10,8 @@ import (
 
 const DailyStartHour = 8
 
+const DevelopmentAllowOutOfWindowEnv = "RECRUITHELPER_DEV_ALLOW_OUT_OF_WINDOW"
+
 var (
 	ErrInvalidMode       = errors.New("工作流模式无效")
 	ErrInvalidStatus     = errors.New("工作流状态无效")
@@ -65,12 +67,33 @@ type MemberStartDecision struct {
 	Changed bool
 }
 
+// DailyWindowPolicy is the one civil-time policy shared by product controls,
+// candidate-member gates, patrol enablement and the product UI projection.
+// AllowOutOfWindow is a startup-only development override; it never changes
+// the supplied clock or grants any non-time business authority.
+type DailyWindowPolicy struct {
+	AllowOutOfWindow bool
+}
+
+// ParseDevelopmentAllowOutOfWindow accepts only the explicitly documented
+// value. Missing, empty and typoed values fail closed.
+func ParseDevelopmentAllowOutOfWindow(value string) bool {
+	return value == "1"
+}
+
 // EvaluateDailyWindow is the sole civil-time evaluator for workflow start,
 // resume and per-member dispatch. The open interval is [08:00, 24:00) in the
 // supplied client-local location.
 func EvaluateDailyWindow(now time.Time, location *time.Location) (bool, error) {
+	return (DailyWindowPolicy{}).Evaluate(now, location)
+}
+
+func (p DailyWindowPolicy) Evaluate(now time.Time, location *time.Location) (bool, error) {
 	if now.IsZero() || location == nil {
 		return false, ErrInvalidTime
+	}
+	if p.AllowOutOfWindow {
+		return true, nil
 	}
 	return now.In(location).Hour() >= DailyStartHour, nil
 }
@@ -79,7 +102,13 @@ func EvaluateDailyWindow(now time.Time, location *time.Location) (bool, error) {
 // the same request against an existing non-terminal workflow is a no-op;
 // changing its mode is rejected. Callers must pass nil after they have
 // deliberately selected a new run following a terminal one.
-func Start(current *State, requested Mode, now time.Time, location *time.Location) (StartDecision, error) {
+func Start(
+	current *State,
+	requested Mode,
+	now time.Time,
+	location *time.Location,
+	dailyWindow DailyWindowPolicy,
+) (StartDecision, error) {
 	if !validMode(requested) {
 		return StartDecision{}, ErrInvalidMode
 	}
@@ -95,7 +124,7 @@ func Start(current *State, requested Mode, now time.Time, location *time.Locatio
 		}
 		return StartDecision{State: *current}, nil
 	}
-	open, err := EvaluateDailyWindow(now, location)
+	open, err := dailyWindow.Evaluate(now, location)
 	if err != nil {
 		return StartDecision{}, err
 	}
@@ -129,14 +158,19 @@ func Pause(current State) (TransitionDecision, error) {
 	}
 }
 
-// Resume is always an explicit user action. It never turns a closed-window
-// request into a reservation, and a waitingDailyWindow state stays blocked
-// after 08:00 until this function is called.
-func Resume(current State, now time.Time, location *time.Location) (TransitionDecision, error) {
+// Resume is always an explicit user action. It never turns a request rejected
+// by the supplied policy into a reservation, and a waitingDailyWindow state
+// stays blocked until this function is called under an open policy.
+func Resume(
+	current State,
+	now time.Time,
+	location *time.Location,
+	dailyWindow DailyWindowPolicy,
+) (TransitionDecision, error) {
 	if err := validateState(current); err != nil {
 		return TransitionDecision{}, err
 	}
-	open, err := EvaluateDailyWindow(now, location)
+	open, err := dailyWindow.Evaluate(now, location)
 	if err != nil {
 		return TransitionDecision{}, err
 	}
@@ -168,13 +202,19 @@ func Resume(current State, now time.Time, location *time.Location) (TransitionDe
 // MayStartNextWorkflowMember is the literal shared gate that scoring,
 // greeting generation, greeting sending and communication loops must call
 // before starting their next candidate. It does not interrupt work that has
-// already begun. When an active state crosses midnight, the returned state is
-// waitingDailyWindow and must be persisted before the loop stops.
-func MayStartNextWorkflowMember(current State, now time.Time, location *time.Location) (MemberStartDecision, error) {
+// already begun. Under the formal policy, when an active state crosses
+// midnight the returned state is waitingDailyWindow and must be persisted
+// before the loop stops.
+func MayStartNextWorkflowMember(
+	current State,
+	now time.Time,
+	location *time.Location,
+	dailyWindow DailyWindowPolicy,
+) (MemberStartDecision, error) {
 	if err := validateState(current); err != nil {
 		return MemberStartDecision{}, err
 	}
-	open, err := EvaluateDailyWindow(now, location)
+	open, err := dailyWindow.Evaluate(now, location)
 	if err != nil {
 		return MemberStartDecision{}, err
 	}

@@ -53,17 +53,49 @@ func TestEvaluateDailyWindowUsesSuppliedLocalTimeAndExactBoundaries(t *testing.T
 	}
 }
 
+func TestDailyWindowPolicyDevelopmentOverrideIsExplicitAndKeepsTimeValidation(t *testing.T) {
+	location := mustLocation(t, "Asia/Shanghai")
+	closed := time.Date(2026, 7, 25, 1, 30, 0, 0, location)
+	policy := DailyWindowPolicy{AllowOutOfWindow: true}
+	if open, err := policy.Evaluate(closed, location); err != nil || !open {
+		t.Fatalf("development override = (%v, %v), want (true, nil)", open, err)
+	}
+	started, err := Start(nil, ModeReplyOnly, closed, location, policy)
+	if err != nil || !started.Created || started.State.Status != StatusRunning {
+		t.Fatalf("override Start() = %+v, %v", started, err)
+	}
+	member, err := MayStartNextWorkflowMember(started.State, closed, location, policy)
+	if err != nil || !member.Allowed || member.Changed {
+		t.Fatalf("override member gate = %+v, %v", member, err)
+	}
+	if _, err := policy.Evaluate(time.Time{}, location); !errors.Is(err, ErrInvalidTime) {
+		t.Fatalf("override zero time error = %v, want ErrInvalidTime", err)
+	}
+	if _, err := policy.Evaluate(closed, nil); !errors.Is(err, ErrInvalidTime) {
+		t.Fatalf("override nil location error = %v, want ErrInvalidTime", err)
+	}
+	for value, want := range map[string]bool{
+		"": false, "0": false, "true": false, "01": false, "1": true,
+	} {
+		if got := ParseDevelopmentAllowOutOfWindow(value); got != want {
+			t.Fatalf("ParseDevelopmentAllowOutOfWindow(%q)=%v want %v", value, got, want)
+		}
+	}
+}
+
 func TestStartCreatesOnceAndDoesNotChangeAnActiveWorkflow(t *testing.T) {
 	location := mustLocation(t, "Asia/Shanghai")
 	open := time.Date(2026, 7, 25, 8, 0, 0, 0, location)
 
 	for _, mode := range []Mode{ModeFull, ModeReplyOnly} {
-		created, err := Start(nil, mode, open, location)
+		created, err := Start(nil, mode, open, location, DailyWindowPolicy{})
 		if err != nil || !created.Created ||
 			created.State != (State{Mode: mode, Status: StatusRunning}) {
 			t.Fatalf("Start(nil, %s) = %+v, %v", mode, created, err)
 		}
-		replayed, err := Start(&created.State, mode, open.Add(time.Minute), location)
+		replayed, err := Start(
+			&created.State, mode, open.Add(time.Minute), location, DailyWindowPolicy{},
+		)
 		if err != nil || replayed.Created || replayed.State != created.State {
 			t.Fatalf("replayed Start(%s) = %+v, %v", mode, replayed, err)
 		}
@@ -72,16 +104,20 @@ func TestStartCreatesOnceAndDoesNotChangeAnActiveWorkflow(t *testing.T) {
 	existing := State{
 		Mode: ModeFull, Status: StatusPaused, ResumeStatus: StatusRunning,
 	}
-	replayed, err := Start(&existing, ModeFull, open, location)
+	replayed, err := Start(&existing, ModeFull, open, location, DailyWindowPolicy{})
 	if err != nil || replayed.Created || replayed.State != existing {
 		t.Fatalf("paused replay = %+v, %v", replayed, err)
 	}
-	if decision, err := Start(&existing, ModeReplyOnly, open, location); !errors.Is(err, ErrModeConflict) ||
+	if decision, err := Start(
+		&existing, ModeReplyOnly, open, location, DailyWindowPolicy{},
+	); !errors.Is(err, ErrModeConflict) ||
 		decision.State != existing {
 		t.Fatalf("mode conflict = %+v, %v", decision, err)
 	}
 	terminalState := State{Mode: ModeFull, Status: StatusCompleted}
-	if decision, err := Start(&terminalState, ModeFull, open, location); !errors.Is(err, ErrTerminalWorkflow) ||
+	if decision, err := Start(
+		&terminalState, ModeFull, open, location, DailyWindowPolicy{},
+	); !errors.Is(err, ErrTerminalWorkflow) ||
 		decision.State != terminalState {
 		t.Fatalf("terminal start = %+v, %v", decision, err)
 	}
@@ -90,7 +126,7 @@ func TestStartCreatesOnceAndDoesNotChangeAnActiveWorkflow(t *testing.T) {
 func TestStartRejectsClosedWindowWithoutCreatingReservation(t *testing.T) {
 	location := mustLocation(t, "Asia/Shanghai")
 	closed := time.Date(2026, 7, 25, 7, 59, 59, 0, location)
-	decision, err := Start(nil, ModeFull, closed, location)
+	decision, err := Start(nil, ModeFull, closed, location, DailyWindowPolicy{})
 	if !errors.Is(err, ErrDailyWindowClosed) || decision.Created || decision.State != (State{}) {
 		t.Fatalf("closed Start = %+v, %v", decision, err)
 	}
@@ -179,7 +215,7 @@ func TestResumeRequiresOpenWindowAndRestoresExactStatus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			decision, err := Resume(tc.current, open, location)
+			decision, err := Resume(tc.current, open, location, DailyWindowPolicy{})
 			if err != nil || !decision.Changed || decision.State != tc.want {
 				t.Fatalf("Resume() = %+v, %v, want %+v", decision, err, tc.want)
 			}
@@ -187,7 +223,7 @@ func TestResumeRequiresOpenWindowAndRestoresExactStatus(t *testing.T) {
 	}
 
 	paused := State{Mode: ModeFull, Status: StatusPaused, ResumeStatus: StatusRunning}
-	decision, err := Resume(paused, closed, location)
+	decision, err := Resume(paused, closed, location, DailyWindowPolicy{})
 	if !errors.Is(err, ErrDailyWindowClosed) || decision.Changed || decision.State != paused {
 		t.Fatalf("closed Resume() = %+v, %v", decision, err)
 	}
@@ -198,7 +234,7 @@ func TestResumeReplayCannotAuthorizeWorkAfterMidnight(t *testing.T) {
 	closed := time.Date(2026, 7, 26, 0, 0, 0, 0, location)
 	current := State{Mode: ModeReplyOnly, Status: StatusRunning}
 
-	decision, err := Resume(current, closed, location)
+	decision, err := Resume(current, closed, location, DailyWindowPolicy{})
 	if !errors.Is(err, ErrDailyWindowClosed) || decision.Changed || decision.State != current {
 		t.Fatalf("midnight Resume replay = %+v, %v", decision, err)
 	}
@@ -208,7 +244,7 @@ func TestResumeReplayCannotAuthorizeWorkAfterMidnight(t *testing.T) {
 		ResumeStatus: StatusRunning,
 	}
 	open := time.Date(2026, 7, 26, 8, 0, 0, 0, location)
-	repeated, err := Resume(waiting, open, location)
+	repeated, err := Resume(waiting, open, location, DailyWindowPolicy{})
 	if err != nil || !repeated.Changed ||
 		repeated.State != (State{Mode: ModeReplyOnly, Status: StatusRunning}) {
 		t.Fatalf("explicit next-day Resume = %+v, %v", repeated, err)
@@ -221,12 +257,16 @@ func TestMayStartNextWorkflowMemberIsTheSharedMemberBoundaryGate(t *testing.T) {
 	closed := time.Date(2026, 7, 26, 0, 0, 0, 0, location)
 
 	running := State{Mode: ModeFull, Status: StatusRunning}
-	decision, err := MayStartNextWorkflowMember(running, open, location)
+	decision, err := MayStartNextWorkflowMember(
+		running, open, location, DailyWindowPolicy{},
+	)
 	if err != nil || !decision.Allowed || decision.Changed || decision.State != running {
 		t.Fatalf("open running gate = %+v, %v", decision, err)
 	}
 
-	decision, err = MayStartNextWorkflowMember(running, closed, location)
+	decision, err = MayStartNextWorkflowMember(
+		running, closed, location, DailyWindowPolicy{},
+	)
 	wantWaiting := State{
 		Mode: ModeFull, Status: StatusWaitingDailyWindow,
 		ResumeStatus: StatusRunning,
@@ -236,7 +276,9 @@ func TestMayStartNextWorkflowMemberIsTheSharedMemberBoundaryGate(t *testing.T) {
 	}
 
 	// Reaching 08:00 is not authority to resume.
-	decision, err = MayStartNextWorkflowMember(wantWaiting, open, location)
+	decision, err = MayStartNextWorkflowMember(
+		wantWaiting, open, location, DailyWindowPolicy{},
+	)
 	if err != nil || decision.Allowed || decision.Changed || decision.State != wantWaiting {
 		t.Fatalf("waiting gate auto-resumed = %+v, %v", decision, err)
 	}
@@ -247,7 +289,9 @@ func TestMayStartNextWorkflowMemberPreservesConfirmationAcrossMidnight(t *testin
 	closed := time.Date(2026, 7, 26, 0, 0, 0, 0, location)
 	awaiting := State{Mode: ModeFull, Status: StatusAwaitingConfirmation}
 
-	decision, err := MayStartNextWorkflowMember(awaiting, closed, location)
+	decision, err := MayStartNextWorkflowMember(
+		awaiting, closed, location, DailyWindowPolicy{},
+	)
 	want := State{
 		Mode: ModeFull, Status: StatusWaitingDailyWindow,
 		ResumeStatus: StatusAwaitingConfirmation,
@@ -268,7 +312,9 @@ func TestBlockedAndTerminalStatesNeverStartAnotherMember(t *testing.T) {
 		{Mode: ModeFull, Status: StatusFailed},
 	}
 	for _, state := range states {
-		decision, err := MayStartNextWorkflowMember(state, open, location)
+		decision, err := MayStartNextWorkflowMember(
+			state, open, location, DailyWindowPolicy{},
+		)
 		if err != nil || decision.Allowed || decision.Changed || decision.State != state {
 			t.Fatalf("gate(%s) = %+v, %v", state.Status, decision, err)
 		}
@@ -283,10 +329,14 @@ func TestInvalidStateCannotBeUsedAsImplicitResumeAuthority(t *testing.T) {
 	if _, err := Pause(invalid); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("Pause invalid state error = %v", err)
 	}
-	if _, err := Resume(invalid, open, location); !errors.Is(err, ErrInvalidStatus) {
+	if _, err := Resume(
+		invalid, open, location, DailyWindowPolicy{},
+	); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("Resume invalid state error = %v", err)
 	}
-	if _, err := MayStartNextWorkflowMember(invalid, open, location); !errors.Is(err, ErrInvalidStatus) {
+	if _, err := MayStartNextWorkflowMember(
+		invalid, open, location, DailyWindowPolicy{},
+	); !errors.Is(err, ErrInvalidStatus) {
 		t.Fatalf("MayStart invalid state error = %v", err)
 	}
 }
@@ -299,7 +349,9 @@ func TestTerminalControlRequestsAreRejected(t *testing.T) {
 		if _, err := Pause(state); !errors.Is(err, ErrTerminalWorkflow) {
 			t.Fatalf("Pause(%s) error = %v", status, err)
 		}
-		if _, err := Resume(state, open, location); !errors.Is(err, ErrTerminalWorkflow) {
+		if _, err := Resume(
+			state, open, location, DailyWindowPolicy{},
+		); !errors.Is(err, ErrTerminalWorkflow) {
 			t.Fatalf("Resume(%s) error = %v", status, err)
 		}
 	}

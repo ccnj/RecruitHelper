@@ -27,6 +27,7 @@ import (
 	"recruithelper/client/service/internal/productworkflow"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/workflow"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -37,6 +38,14 @@ func main() {
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	dailyWindow := workflow.DailyWindowPolicy{
+		AllowOutOfWindow: workflow.ParseDevelopmentAllowOutOfWindow(
+			os.Getenv(workflow.DevelopmentAllowOutOfWindowEnv),
+		),
+	}
+	if dailyWindow.AllowOutOfWindow {
+		slog.Warn("开发期业务窗口覆盖已启用")
+	}
 
 	st, err := store.Open(*dataDir)
 	if err != nil {
@@ -116,23 +125,31 @@ func main() {
 	runner := &appbridge.PatrolRunner{Dispatcher: disp}
 	var actor *patrol.Manager
 	if advice == nil {
-		actor, err = patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{})
+		actor, err = patrol.NewManager(
+			st, runner, appbridge.HandAvailability{Hub: hub},
+			patrol.Config{DailyWindow: dailyWindow},
+		)
 	} else {
-		actor, err = patrol.NewManager(st, runner, appbridge.HandAvailability{Hub: hub}, patrol.Config{}, advice)
+		actor, err = patrol.NewManager(
+			st, runner, appbridge.HandAvailability{Hub: hub},
+			patrol.Config{DailyWindow: dailyWindow}, advice,
+		)
 	}
 	if err != nil {
 		slog.Error("账号 actor 初始化失败", "err", err)
 		os.Exit(1)
 	}
 	productWorkflow, err := productworkflow.NewManager(
-		st, actor, productworkflow.Config{Clock: wallClock{}, Location: time.Local},
+		st, actor, productworkflow.Config{
+			Clock: wallClock{}, Location: time.Local, DailyWindow: dailyWindow,
+		},
 	)
 	if err != nil {
 		slog.Error("产品工作流初始化失败", "err", err)
 		os.Exit(1)
 	}
 	productController, err := productapp.New(
-		st, productWorkflow, jobConfigSource, time.Now,
+		st, productWorkflow, jobConfigSource, time.Now, dailyWindow,
 	)
 	if err != nil {
 		slog.Error("产品工作流控制面初始化失败", "err", err)
@@ -187,6 +204,11 @@ func main() {
 					CustomerStatus: view.CustomerStatus,
 					Authorized:     view.Configured && view.MachineIdentityReady && view.MachineMatch,
 				}
+				windowOpen, windowErr := dailyWindow.Evaluate(time.Now(), time.Local)
+				if windowErr != nil {
+					return apphttp.RuntimeSnapshot{}, windowErr
+				}
+				snapshot.BusinessWindowOpen = windowOpen
 				if configured, loadErr := providerConfig.Load(); loadErr == nil && configured != nil {
 					snapshot.ProviderConfigured = true
 					snapshot.Provider = configured.Provider

@@ -92,7 +92,9 @@ func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
-	controller, err := New(db, flow, source, func() time.Time { return now })
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +121,7 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 		func() time.Time {
 			return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 		},
+		workflow.DailyWindowPolicy{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +161,7 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 		captured := now
 		now = time.Date(2026, 7, 25, 8, 0, 1, 0, time.Local)
 		return captured
-	})
+	}, workflow.DailyWindowPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,12 +182,41 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 	}
 }
 
+func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.T) {
+	db, key := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	now := time.Date(2026, 7, 25, 1, 30, 0, 0, time.Local)
+	controller, err := New(
+		db,
+		flow,
+		source,
+		func() time.Time { return now },
+		workflow.DailyWindowPolicy{AllowOutOfWindow: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
+		t.Fatalf("source=%d key=%+v revision=%q", source.calls, flow.fullKey, flow.fullRevision)
+	}
+	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
+	if err != nil || revision == nil || !revision.CreatedAt.Equal(now) {
+		t.Fatalf("override must keep real timestamp: revision=%+v err=%v", revision, err)
+	}
+}
+
 func TestFullStartRejectsChangedBackendJobAfterSavingLatestHead(t *testing.T) {
 	db, _ := controllerFixture(t)
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: syntheticCurrentJob(t, 99, "新职位")}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
-	controller, err := New(db, flow, source, func() time.Time { return now })
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +258,9 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 	}
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: []byte("must not fetch")}
-	controller, err := New(db, flow, source, func() time.Time { return now })
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +300,9 @@ func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
 	}
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
-	controller, err := New(db, flow, source, func() time.Time { return now })
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +342,9 @@ func TestAdditionalBatchFromPausedCommunicationQueuesWithoutResuming(t *testing.
 		raw:       syntheticCurrentJob(t, 42, "产品经理"),
 		callOrder: &flow.callOrder,
 	}
-	controller, err := New(db, flow, source, func() time.Time { return now })
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +384,7 @@ func TestAdditionalBatchSyncFailureKeepsCommunicationPaused(t *testing.T) {
 		flow,
 		&fakeSource{err: sourceErr},
 		func() time.Time { return now },
+		workflow.DailyWindowPolicy{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +437,9 @@ func TestRuntimeStateUsesDurableWorkflowBatch(t *testing.T) {
 	if _, err := db.AttachProductWorkflowSourcingBatch(run.RunID, batch.BatchID); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, time.Now)
+	controller, err := New(
+		db, &fakeWorkflow{}, &fakeSource{}, time.Now, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +468,10 @@ func TestRuntimeStateAllowsAdditionalBatchFromRunningOrPausedCommunication(t *te
 	}); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now })
+	controller, err := New(
+		db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now },
+		workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +516,10 @@ func TestRuntimeStateKeepsAccountAndUnfinishedBatchWithoutWorkflowRun(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now })
+	controller, err := New(
+		db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now },
+		workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +541,9 @@ func TestRuntimeStateFailsClosedWhenNoUniqueAccountExists(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := New(db, &fakeWorkflow{}, &fakeSource{}, time.Now)
+	controller, err := New(
+		db, &fakeWorkflow{}, &fakeSource{}, time.Now, workflow.DailyWindowPolicy{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

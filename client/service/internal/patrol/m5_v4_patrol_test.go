@@ -15,6 +15,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/client/service/internal/workflow"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -655,12 +656,12 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 	}
 	archiveAt := beforeArchive.State.LastBodyAt.Add(8 * 24 * time.Hour)
 	archiveLocal := archiveAt.In(manager.config.Location)
-	if archiveLocal.Hour() < manager.config.DailyStartHour {
+	if archiveLocal.Hour() < workflow.DailyStartHour {
 		archiveAt = time.Date(
 			archiveLocal.Year(),
 			archiveLocal.Month(),
 			archiveLocal.Day(),
-			manager.config.DailyStartHour,
+			workflow.DailyStartHour,
 			archiveLocal.Minute(),
 			archiveLocal.Second(),
 			archiveLocal.Nanosecond(),

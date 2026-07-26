@@ -16,6 +16,7 @@ import (
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/client/service/internal/testfixture"
+	"recruithelper/client/service/internal/workflow"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -929,6 +930,21 @@ func TestEnableTodayRequiresConfiguredStartHour(t *testing.T) {
 	h.clock.Add(-2 * time.Hour) // 07:00
 	if err := h.manager.EnableToday(h.key); !errors.Is(err, ErrDailyWindowNotOpen) {
 		t.Fatalf("08:00 前不得开启巡检: %v", err)
+	}
+}
+
+func TestDevelopmentWindowOverrideAllowsExplicitEnableAtRealClock(t *testing.T) {
+	h := newHarness(t)
+	h.clock.Add(16 * time.Hour) // 次日 01:00
+	h.manager.config.DailyWindow = workflow.DailyWindowPolicy{AllowOutOfWindow: true}
+	if err := h.manager.EnableToday(h.key); err != nil {
+		t.Fatalf("开发窗口覆盖后显式开启失败: %v", err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil ||
+		account.EnabledDate != h.clock.Now().Format("2006-01-02") ||
+		account.EnabledAt == nil || !account.EnabledAt.Equal(h.clock.Now()) {
+		t.Fatalf("覆盖必须保留真实日期和时间: account=%+v err=%v", account, err)
 	}
 }
 

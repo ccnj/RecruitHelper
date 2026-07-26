@@ -165,7 +165,11 @@ func (m *Manager) EnableToday(key store.AccountKey) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
-	if now.In(m.config.Location).Hour() < m.config.DailyStartHour {
+	open, err := m.config.DailyWindow.Evaluate(now, m.config.Location)
+	if err != nil {
+		return err
+	}
+	if !open {
 		return ErrDailyWindowNotOpen
 	}
 	return m.store.MutateAccount(key, func(account *store.Account) error {
@@ -189,7 +193,11 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targe
 	now := m.now()
 	// 采集与沟通共用同一业务窗口。凌晨真人点击也不登记预约，更不能先建
 	// 批次后等待到点；先拒绝，保证零业务事实和零后续派发。
-	if now.In(m.config.Location).Hour() < m.config.DailyStartHour {
+	open, err := m.config.DailyWindow.Evaluate(now, m.config.Location)
+	if err != nil {
+		return err
+	}
+	if !open {
 		return ErrDailyWindowNotOpen
 	}
 	revision, err := m.store.JobAIContextRevisionByHash(revisionHash)

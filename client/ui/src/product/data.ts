@@ -93,6 +93,7 @@ export interface AppRuntimeRaw {
   pluginHealth?: string
   pluginVersion?: string
   contractMatch: boolean
+  businessWindowOpen: boolean
   workflowMode?: string
   workflowStatus?: string
   canAddBatch: boolean
@@ -259,15 +260,10 @@ export function productCandidatePath(view: CandidateView): string {
   return `/app/candidates?view=${candidateViewToAPI[view]}&limit=200`
 }
 
-export function isBusinessWindowOpen(now: Date): boolean {
-  const hour = now.getHours()
-  return hour >= 8 && hour < 24
-}
-
 export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()): ProductData {
   const empty = createEmptyProductData()
   const { overview: rawOverview, runtime } = snapshot.overview
-  const businessWindowOpen = isBusinessWindowOpen(now)
+  const businessWindowOpen = runtime.businessWindowOpen
   const customerName = clean(runtime.customerName) || (
     runtime.available
       ? runtime.authorized ? '当前客户' : '尚未激活'

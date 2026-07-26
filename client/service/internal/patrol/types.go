@@ -13,6 +13,7 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
+	"recruithelper/client/service/internal/workflow"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -296,7 +297,7 @@ type Config struct {
 	ManualQuiet              time.Duration
 	TrackedReconcileInterval time.Duration
 	MaxPages                 int
-	DailyStartHour           int
+	DailyWindow              workflow.DailyWindowPolicy
 	NewRoundID               func() string
 	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
 	// 生产默认使用 2～4 秒随机等待；测试可注入无等待实现，手端
@@ -332,9 +333,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxPages <= 0 {
 		c.MaxPages = 256
-	}
-	if c.DailyStartHour == 0 {
-		c.DailyStartHour = 8
 	}
 	if c.SourcingPaceWait == nil {
 		c.SourcingPaceWait = defaultSourcingPaceWait
@@ -413,8 +411,7 @@ func errorCode(err error) string {
 func validateConfig(c Config) error {
 	if c.PatrolInterval <= 0 || c.IdentityFreshFor <= 0 || c.CoalesceWindow <= 0 ||
 		c.MinimumRoundGap <= 0 || c.ManualQuiet <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
-		c.DailyStartHour < 0 || c.DailyStartHour > 23 || c.SourcingPaceWait == nil ||
-		c.InteractionPaceWait == nil {
+		c.SourcingPaceWait == nil || c.InteractionPaceWait == nil {
 		return fmt.Errorf("patrol config 含非正参数: %+v", c)
 	}
 	return nil

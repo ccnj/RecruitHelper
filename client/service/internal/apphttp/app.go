@@ -40,6 +40,7 @@ type RuntimeSnapshot struct {
 	PluginHealth          string `json:"pluginHealth,omitempty"`
 	PluginVersion         string `json:"pluginVersion,omitempty"`
 	ContractMatch         bool   `json:"contractMatch"`
+	BusinessWindowOpen    bool   `json:"businessWindowOpen"`
 	Platform              string `json:"-"`
 	AccountRef            string `json:"-"`
 	CurrentBatchID        string `json:"-"`
