@@ -271,6 +271,15 @@ func (m *Manager) PauseNow(key store.AccountKey) error {
 	return m.stop(key, PauseUserRequested)
 }
 
+// HoldAfterSourcing keeps the browser actor stopped while the product workflow
+// advances through local AI, selection, confirmation and greeting sending.
+// It deliberately does not enable IM; communication owns that later boundary.
+func (m *Manager) HoldAfterSourcing(key store.AccountKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pauseAccount(key, PauseSourcingTargetReached, m.now())
+}
+
 func (m *Manager) stop(key store.AccountKey, reason string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

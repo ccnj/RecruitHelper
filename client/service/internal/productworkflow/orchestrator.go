@@ -437,15 +437,18 @@ func isExpectedSourcingTargetPause(
 	run *store.ProductWorkflowRun,
 	account *store.Account,
 ) bool {
-	return run != nil &&
-		account != nil &&
-		run.Mode == workflow.ModeFull &&
-		run.Stage != store.ProductWorkflowStageSourcing &&
-		run.SourcingBatchID != nil &&
-		strings.TrimSpace(*run.SourcingBatchID) != "" &&
-		account.StoppedAt != nil &&
-		strings.TrimSpace(account.PausedReason) ==
-			store.SourcingTargetReachedPauseReason
+	if run == nil ||
+		account == nil ||
+		account.StoppedAt == nil ||
+		strings.TrimSpace(account.PausedReason) !=
+			store.SourcingTargetReachedPauseReason {
+		return false
+	}
+	return usesSourcingTargetHold(run) ||
+		(run.Mode == workflow.ModeFull &&
+			run.Stage == store.ProductWorkflowStageCommunication &&
+			run.SourcingBatchID != nil &&
+			strings.TrimSpace(*run.SourcingBatchID) != "")
 }
 
 func (m *Manager) recoverInterruptedFullStart(

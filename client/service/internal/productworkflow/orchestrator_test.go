@@ -368,6 +368,120 @@ func TestAdvanceOnceStillProjectsManualPauseDuringScoring(t *testing.T) {
 	}
 }
 
+func TestResumeScoringRestoresSourcingHoldWithoutEnablingCommunication(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor:  &fixtureActor{store: db, clock: clock},
+		scoreProgress: &store.SourcingBatchScoringProgress{},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	scoring, err := db.AdvanceProductWorkflowStage(
+		store.AdvanceProductWorkflowStageRequest{
+			RunID: started.RunID, ExpectedStage: started.Stage,
+			ExpectedStatus: workflow.StatusRunning,
+			NextStage:      store.ProductWorkflowStageScoring,
+			At:             clock.Now(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := manager.Pause()
+	if err != nil ||
+		paused.Status != workflow.StatusPaused ||
+		paused.Stage != store.ProductWorkflowStageScoring {
+		t.Fatalf("Pause() = %+v, %v", paused, err)
+	}
+
+	resumed, err := manager.Resume()
+	if err != nil ||
+		resumed == nil ||
+		resumed.RunID != scoring.RunID ||
+		resumed.Status != workflow.StatusRunning ||
+		resumed.Stage != store.ProductWorkflowStageScoring ||
+		actor.holdCalls != 1 ||
+		actor.enableCalls != 0 {
+		t.Fatalf(
+			"Resume() = %+v hold=%d enable=%d err=%v",
+			resumed,
+			actor.holdCalls,
+			actor.enableCalls,
+			err,
+		)
+	}
+	account, err := db.AccountByKey(key)
+	if err != nil ||
+		account == nil ||
+		account.StoppedAt == nil ||
+		account.PausedReason != store.SourcingTargetReachedPauseReason {
+		t.Fatalf("post-sourcing hold = %+v, %v", account, err)
+	}
+}
+
+func TestResumeScoringHoldFailureRollsBackWorkflowPause(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	holdErr := errors.New("fixture hold unavailable")
+	actor := &fixturePipelineActor{
+		fixtureActor: &fixtureActor{
+			store: db, clock: clock, holdErr: holdErr,
+		},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	if _, err := db.AdvanceProductWorkflowStage(
+		store.AdvanceProductWorkflowStageRequest{
+			RunID: started.RunID, ExpectedStage: started.Stage,
+			ExpectedStatus: workflow.StatusRunning,
+			NextStage:      store.ProductWorkflowStageScoring,
+			At:             clock.Now(),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Pause(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := manager.Resume()
+	if !errors.Is(err, holdErr) ||
+		resumed != nil ||
+		actor.holdCalls != 1 ||
+		actor.enableCalls != 0 {
+		t.Fatalf(
+			"Resume() = %+v hold=%d enable=%d err=%v",
+			resumed,
+			actor.holdCalls,
+			actor.enableCalls,
+			err,
+		)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil ||
+		active == nil ||
+		active.Status != workflow.StatusPaused ||
+		active.ResumeStatus != workflow.StatusRunning ||
+		active.Stage != store.ProductWorkflowStageScoring {
+		t.Fatalf("rollback = %+v, %v", active, err)
+	}
+}
+
 func TestAdvanceOnceProjectsReplyOnlyAccountPause(t *testing.T) {
 	db, key, _ := productWorkflowFixture(t)
 	location := time.FixedZone("CST", 8*60*60)

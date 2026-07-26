@@ -33,6 +33,7 @@ type Clock interface {
 type Actor interface {
 	StartSourcing(store.AccountKey, string, int) error
 	EnableToday(store.AccountKey) error
+	HoldAfterSourcing(store.AccountKey) error
 	PauseNow(store.AccountKey) error
 }
 
@@ -308,13 +309,41 @@ func (m *Manager) Resume() (*store.ProductWorkflowRun, error) {
 		return nil, err
 	}
 	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
-	if err := m.actor.EnableToday(key); err != nil {
+	var actorErr error
+	if usesSourcingTargetHold(resumed) {
+		// 恢复本地漏斗不等于恢复 IM actor。评分到招呼发送仍需保持
+		// sourcingTargetReached hold，直到 communication 才由
+		// keepCommunicationRunning 唯一地重新启用聊天巡检。
+		actorErr = m.actor.HoldAfterSourcing(key)
+	} else {
+		actorErr = m.actor.EnableToday(key)
+	}
+	if actorErr != nil {
 		_, rollbackErr := m.store.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
 			RunID: run.RunID, From: decision.State, To: from, At: now,
 		})
-		return nil, errors.Join(err, rollbackErr)
+		return nil, errors.Join(actorErr, rollbackErr)
 	}
 	return resumed, nil
+}
+
+func usesSourcingTargetHold(run *store.ProductWorkflowRun) bool {
+	if run == nil ||
+		run.Mode != workflow.ModeFull ||
+		run.SourcingBatchID == nil ||
+		strings.TrimSpace(*run.SourcingBatchID) == "" {
+		return false
+	}
+	switch run.Stage {
+	case store.ProductWorkflowStageScoring,
+		store.ProductWorkflowStageSelection,
+		store.ProductWorkflowStageGreetingGeneration,
+		store.ProductWorkflowStageAwaitingConfirmation,
+		store.ProductWorkflowStageGreetingSending:
+		return true
+	default:
+		return false
+	}
 }
 
 // End requests a communication-only terminal handoff. It never interrupts the

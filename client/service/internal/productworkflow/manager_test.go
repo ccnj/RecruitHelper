@@ -28,6 +28,8 @@ type fixtureActor struct {
 	boundaryCalls    int
 	startErr         error
 	enableErr        error
+	holdErr          error
+	holdCalls        int
 }
 
 func (a *fixtureActor) StartSourcing(key store.AccountKey, revision string, target int) error {
@@ -60,6 +62,19 @@ func (a *fixtureActor) EnableToday(key store.AccountKey) error {
 func (a *fixtureActor) PauseNow(store.AccountKey) error {
 	a.pauseCalls++
 	return nil
+}
+
+func (a *fixtureActor) HoldAfterSourcing(key store.AccountKey) error {
+	a.holdCalls++
+	if a.holdErr != nil {
+		return a.holdErr
+	}
+	now := a.clock.Now()
+	return a.store.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &now
+		account.PausedReason = store.SourcingTargetReachedPauseReason
+		return nil
+	})
 }
 
 func (a *fixtureActor) SetWorkflowMemberGate(gate func() error) { a.gate = gate }
