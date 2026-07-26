@@ -204,7 +204,10 @@ func main() {
 				snapshot.CurrentBatchID = productState.CurrentBatchID
 				snapshot.WorkflowMode = productState.WorkflowMode
 				snapshot.WorkflowStatus = productState.WorkflowStatus
+				snapshot.WorkflowStage = productState.WorkflowStage
+				snapshot.WorkflowPendingAction = productState.WorkflowPendingAction
 				snapshot.CanAddBatch = productState.CanAddBatch
+				snapshot.CanEnd = productState.CanEnd
 				snapshot.CommunicationState = productState.CommunicationState
 				return snapshot, nil
 			}),
@@ -261,8 +264,6 @@ func productWorkflowErrorCode(err error) string {
 		return "workflowPipelineInvalid"
 	case errors.Is(err, productworkflow.ErrGreetingSendingRequiresManual):
 		return "greetingSendingRequiresManual"
-	case errors.Is(err, productworkflow.ErrCommunicationResumeFailed):
-		return "communicationResumeFailed"
 	case errors.Is(err, patrol.ErrSourcingScoringProviderUnavailable):
 		return "scoringProviderUnavailable"
 	case errors.Is(err, patrol.ErrSourcingGreetingProviderUnavailable):

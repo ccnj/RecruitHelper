@@ -29,24 +29,27 @@ type ProjectionStore interface {
 }
 
 type RuntimeSnapshot struct {
-	Available          bool   `json:"available"`
-	CustomerName       string `json:"customerName,omitempty"`
-	CustomerStatus     string `json:"customerStatus,omitempty"`
-	Authorized         bool   `json:"authorized"`
-	ProviderConfigured bool   `json:"providerConfigured"`
-	Provider           string `json:"provider,omitempty"`
-	Model              string `json:"model,omitempty"`
-	PluginOnline       bool   `json:"pluginOnline"`
-	PluginHealth       string `json:"pluginHealth,omitempty"`
-	PluginVersion      string `json:"pluginVersion,omitempty"`
-	ContractMatch      bool   `json:"contractMatch"`
-	Platform           string `json:"-"`
-	AccountRef         string `json:"-"`
-	CurrentBatchID     string `json:"-"`
-	WorkflowMode       string `json:"workflowMode,omitempty"`
-	WorkflowStatus     string `json:"workflowStatus,omitempty"`
-	CanAddBatch        bool   `json:"canAddBatch"`
-	CommunicationState string `json:"communicationState,omitempty"`
+	Available             bool   `json:"available"`
+	CustomerName          string `json:"customerName,omitempty"`
+	CustomerStatus        string `json:"customerStatus,omitempty"`
+	Authorized            bool   `json:"authorized"`
+	ProviderConfigured    bool   `json:"providerConfigured"`
+	Provider              string `json:"provider,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	PluginOnline          bool   `json:"pluginOnline"`
+	PluginHealth          string `json:"pluginHealth,omitempty"`
+	PluginVersion         string `json:"pluginVersion,omitempty"`
+	ContractMatch         bool   `json:"contractMatch"`
+	Platform              string `json:"-"`
+	AccountRef            string `json:"-"`
+	CurrentBatchID        string `json:"-"`
+	WorkflowMode          string `json:"workflowMode,omitempty"`
+	WorkflowStatus        string `json:"workflowStatus,omitempty"`
+	WorkflowStage         string `json:"workflowStage,omitempty"`
+	WorkflowPendingAction string `json:"workflowPendingAction,omitempty"`
+	CanAddBatch           bool   `json:"canAddBatch"`
+	CanEnd                bool   `json:"canEnd"`
+	CommunicationState    string `json:"communicationState,omitempty"`
 }
 
 type RuntimeSnapshotProvider func(context.Context) (RuntimeSnapshot, error)
@@ -58,6 +61,7 @@ type WorkflowControl interface {
 	Start(context.Context, string, string) error
 	Pause(context.Context) error
 	Resume(context.Context) error
+	End(context.Context) error
 	ConfirmAll(context.Context, string, []string) error
 }
 
@@ -111,6 +115,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/workflow/start", h(a.startWorkflow))
 	mux.HandleFunc("POST /app/workflow/pause", h(a.pauseWorkflow))
 	mux.HandleFunc("POST /app/workflow/resume", h(a.resumeWorkflow))
+	mux.HandleFunc("POST /app/workflow/end", h(a.endWorkflow))
 	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
@@ -223,6 +228,22 @@ func (a *API) resumeWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
 
+func (a *API) endWorkflow(w http.ResponseWriter, r *http.Request) {
+	if decodeEmptyProductJSON(r) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "结束请求无效"})
+		return
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
+		return
+	}
+	if err := a.control.End(r.Context()); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法结束工作流"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
 func (a *API) confirmAll(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		BatchID    string   `json:"batchId"`
@@ -317,6 +338,8 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 	snapshot.CurrentBatchID = strings.TrimSpace(snapshot.CurrentBatchID)
 	snapshot.WorkflowMode = strings.TrimSpace(snapshot.WorkflowMode)
 	snapshot.WorkflowStatus = strings.TrimSpace(snapshot.WorkflowStatus)
+	snapshot.WorkflowStage = strings.TrimSpace(snapshot.WorkflowStage)
+	snapshot.WorkflowPendingAction = strings.TrimSpace(snapshot.WorkflowPendingAction)
 	snapshot.CommunicationState = strings.TrimSpace(snapshot.CommunicationState)
 	return snapshot
 }

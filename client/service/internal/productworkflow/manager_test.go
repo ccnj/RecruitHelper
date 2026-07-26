@@ -1,6 +1,7 @@
 package productworkflow
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"testing"
@@ -17,14 +18,16 @@ type fixtureClock struct{ now time.Time }
 func (c *fixtureClock) Now() time.Time { return c.now }
 
 type fixtureActor struct {
-	store        *store.Store
-	clock        *fixtureClock
-	startTargets []int
-	enableCalls  int
-	pauseCalls   int
-	gate         func() error
-	startErr     error
-	enableErr    error
+	store            *store.Store
+	clock            *fixtureClock
+	startTargets     []int
+	enableCalls      int
+	pauseCalls       int
+	gate             func() error
+	conversationGate func() (bool, error)
+	boundaryCalls    int
+	startErr         error
+	enableErr        error
 }
 
 func (a *fixtureActor) StartSourcing(key store.AccountKey, revision string, target int) error {
@@ -61,6 +64,15 @@ func (a *fixtureActor) PauseNow(store.AccountKey) error {
 
 func (a *fixtureActor) SetWorkflowMemberGate(gate func() error) { a.gate = gate }
 
+func (a *fixtureActor) SetWorkflowConversationGate(gate func() (bool, error)) {
+	a.conversationGate = gate
+}
+
+func (a *fixtureActor) RunAtPatrolBoundary(action func() error) error {
+	a.boundaryCalls++
+	return action()
+}
+
 func TestFullWorkflowPersistsPauseResumeAndExplicitDailyWindowRecovery(t *testing.T) {
 	db, key, revision := productWorkflowFixture(t)
 	location := time.FixedZone("CST", 8*60*60)
@@ -70,8 +82,8 @@ func TestFullWorkflowPersistsPauseResumeAndExplicitDailyWindowRecovery(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actor.gate == nil {
-		t.Fatal("manager did not install the shared member gate")
+	if actor.gate == nil || actor.conversationGate == nil {
+		t.Fatal("manager did not install the shared member and conversation gates")
 	}
 
 	run, err := manager.StartFull(key, revision.RevisionHash)
@@ -192,14 +204,34 @@ func TestFullStartAfterReplyOnlyCommunicationCreatesOneNewBatch(t *testing.T) {
 	additional, err := manager.StartFull(key, revision.RevisionHash)
 	if err != nil ||
 		additional == nil ||
-		additional.RunID == communication.RunID ||
-		additional.Stage != store.ProductWorkflowStageSourcing ||
-		additional.SourcingBatchID == nil ||
-		len(actor.startTargets) != 1 {
+		additional.RunID != communication.RunID ||
+		additional.PendingAction != store.ProductWorkflowPendingActionSourcing ||
+		additional.PendingContextRevisionHash != revision.RevisionHash ||
+		len(actor.startTargets) != 0 {
 		t.Fatalf(
-			"additional=%+v startTargets=%v err=%v",
+			"pending additional=%+v startTargets=%v err=%v",
 			additional,
 			actor.startTargets,
+			err,
+		)
+	}
+	allowed, err := manager.MayStartNextConversation()
+	if err != nil || allowed {
+		t.Fatalf("pending additional conversation gate = %v, %v", allowed, err)
+	}
+	started, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		started == nil ||
+		started.RunID == communication.RunID ||
+		started.Stage != store.ProductWorkflowStageSourcing ||
+		started.SourcingBatchID == nil ||
+		len(actor.startTargets) != 1 ||
+		actor.boundaryCalls != 1 {
+		t.Fatalf(
+			"started additional=%+v startTargets=%v boundary=%d err=%v",
+			started,
+			actor.startTargets,
+			actor.boundaryCalls,
 			err,
 		)
 	}
@@ -208,6 +240,8 @@ func TestFullStartAfterReplyOnlyCommunicationCreatesOneNewBatch(t *testing.T) {
 		historical == nil ||
 		historical.Status != workflow.StatusCompleted ||
 		historical.Stage != store.ProductWorkflowStageCompleted ||
+		historical.EndReason != productWorkflowEndReasonAdditionalBatch ||
+		historical.PendingAction != store.ProductWorkflowPendingActionSourcing ||
 		historical.ActiveSlot != nil {
 		t.Fatalf("historical communication=%+v err=%v", historical, err)
 	}
@@ -215,7 +249,7 @@ func TestFullStartAfterReplyOnlyCommunicationCreatesOneNewBatch(t *testing.T) {
 	replayed, err := manager.StartFull(key, revision.RevisionHash)
 	if err != nil ||
 		replayed == nil ||
-		replayed.RunID != additional.RunID ||
+		replayed.RunID != started.RunID ||
 		len(actor.startTargets) != 1 {
 		t.Fatalf(
 			"replayed additional=%+v startTargets=%v err=%v",
@@ -223,6 +257,55 @@ func TestFullStartAfterReplyOnlyCommunicationCreatesOneNewBatch(t *testing.T) {
 			actor.startTargets,
 			err,
 		)
+	}
+}
+
+func TestEndCommunicationWaitsForBoundaryThenReleasesActiveSlot(t *testing.T) {
+	db, key, _ := productWorkflowFixture(t)
+	location := time.UTC
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixtureActor{store: db, clock: clock}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	communication, err := manager.StartReplyOnly(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ending, err := manager.End()
+	if err != nil ||
+		ending.RunID != communication.RunID ||
+		ending.PendingAction != store.ProductWorkflowPendingActionEnd ||
+		actor.pauseCalls != 0 {
+		t.Fatalf("End() = %+v pause=%d err=%v", ending, actor.pauseCalls, err)
+	}
+	if allowed, gateErr := manager.MayStartNextConversation(); gateErr != nil || allowed {
+		t.Fatalf("ending conversation gate = %v, %v", allowed, gateErr)
+	}
+
+	completed, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		completed == nil ||
+		completed.RunID != communication.RunID ||
+		completed.Status != workflow.StatusCompleted ||
+		completed.Stage != store.ProductWorkflowStageCompleted ||
+		completed.EndReason != productWorkflowEndReasonUserEnded ||
+		completed.PendingAction != store.ProductWorkflowPendingActionEnd ||
+		completed.ActiveSlot != nil ||
+		actor.pauseCalls != 1 ||
+		actor.boundaryCalls != 1 {
+		t.Fatalf(
+			"completed end=%+v pause=%d boundary=%d err=%v",
+			completed,
+			actor.pauseCalls,
+			actor.boundaryCalls,
+			err,
+		)
+	}
+	if active, err := db.ActiveProductWorkflowRun(); err != nil || active != nil {
+		t.Fatalf("ended workflow still active: %+v, %v", active, err)
 	}
 }
 

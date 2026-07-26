@@ -18,6 +18,12 @@ var (
 	ErrConfirmationNotReady          = errors.New("候选确认批次尚未就绪")
 	ErrConfirmationSelectionMismatch = errors.New("候选确认必须精确全选当前可发送候选人")
 	ErrGreetingSendingRequiresManual = errors.New("招呼发送存在待人工收敛成员")
+	ErrPatrolBoundaryUnavailable     = errors.New("沟通候选人收束边界尚未接线")
+)
+
+const (
+	productWorkflowEndReasonAdditionalBatch = "additionalBatch"
+	productWorkflowEndReasonUserEnded       = "userEnded"
 )
 
 // PipelineActor deliberately mirrors the already-existing M6 production
@@ -54,6 +60,9 @@ func (m *Manager) AdvanceOnce(
 	}
 	if run.Mode != workflow.ModeFull && run.Mode != workflow.ModeReplyOnly {
 		return run, ErrWorkflowPipelineInvalid
+	}
+	if run.PendingAction != "" {
+		return m.executePendingControl(run)
 	}
 	if run.Stage == store.ProductWorkflowStageCommunication &&
 		m.communicationRunExpired(run) {
@@ -237,6 +246,110 @@ func (m *Manager) AdvanceOnce(
 
 	default:
 		return run, ErrWorkflowPipelineInvalid
+	}
+}
+
+func (m *Manager) executePendingControl(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, error) {
+	boundary, ok := m.actor.(patrolBoundaryActor)
+	if !ok {
+		return fallback, ErrPatrolBoundaryUnavailable
+	}
+	var resolved *store.ProductWorkflowRun
+	err := boundary.RunAtPatrolBoundary(func() error {
+		var actionErr error
+		resolved, actionErr = m.executePendingAtBoundary(fallback)
+		return actionErr
+	})
+	if resolved == nil {
+		resolved = m.currentRunOr(fallback)
+	}
+	return resolved, err
+}
+
+func (m *Manager) executePendingAtBoundary(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return fallback, err
+	}
+	if run == nil || run.RunID != fallback.RunID ||
+		run.Stage != store.ProductWorkflowStageCommunication ||
+		run.PendingAction == "" ||
+		run.PendingAction != fallback.PendingAction {
+		return currentRunOr(fallback, run, nil), store.ErrProductWorkflowConflict
+	}
+
+	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	now := m.clock.Now()
+	switch run.PendingAction {
+	case store.ProductWorkflowPendingActionEnd:
+		// Pause the actor while tickMu is still held. Only after the account
+		// gate is closed do we release the active product slot.
+		if err := m.actor.PauseNow(key); err != nil {
+			return run, err
+		}
+		return m.store.TransitionProductWorkflowRun(
+			store.TransitionProductWorkflowRunRequest{
+				RunID: run.RunID,
+				From:  stateOf(run),
+				To: workflow.State{
+					Mode: run.Mode, Status: workflow.StatusCompleted,
+				},
+				At:        now,
+				Stage:     store.ProductWorkflowStageCompleted,
+				EndReason: productWorkflowEndReasonUserEnded,
+			},
+		)
+
+	case store.ProductWorkflowPendingActionSourcing:
+		open, windowErr := workflow.EvaluateDailyWindow(now, m.location)
+		if windowErr != nil {
+			return run, windowErr
+		}
+		if !open {
+			cleared, clearErr := m.store.ClearProductWorkflowPendingAction(
+				store.ClearProductWorkflowPendingActionRequest{
+					RunID:          run.RunID,
+					ExpectedAction: store.ProductWorkflowPendingActionSourcing,
+				},
+			)
+			return currentRunOr(run, cleared, clearErr), errors.Join(
+				workflow.ErrDailyWindowClosed,
+				clearErr,
+			)
+		}
+		revisionHash := strings.TrimSpace(run.PendingContextRevisionHash)
+		completed, err := m.store.TransitionProductWorkflowRun(
+			store.TransitionProductWorkflowRunRequest{
+				RunID: run.RunID,
+				From:  stateOf(run),
+				To: workflow.State{
+					Mode: run.Mode, Status: workflow.StatusCompleted,
+				},
+				At:        now,
+				Stage:     store.ProductWorkflowStageCompleted,
+				EndReason: productWorkflowEndReasonAdditionalBatch,
+			},
+		)
+		if err != nil {
+			return run, err
+		}
+		started, startErr := m.startFullLocked(key, revisionHash, now)
+		if startErr != nil {
+			// If the new run could not take ownership, do not leave the old
+			// communication actor running without an active product control.
+			return completed, errors.Join(startErr, m.actor.PauseNow(key))
+		}
+		return started, nil
+
+	default:
+		return run, store.ErrProductWorkflowInvalid
 	}
 }
 

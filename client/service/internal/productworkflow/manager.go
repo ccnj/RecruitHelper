@@ -40,6 +40,14 @@ type memberGateInstaller interface {
 	SetWorkflowMemberGate(func() error)
 }
 
+type conversationGateInstaller interface {
+	SetWorkflowConversationGate(func() (bool, error))
+}
+
+type patrolBoundaryActor interface {
+	RunAtPatrolBoundary(func() error) error
+}
+
 type Config struct {
 	Clock    Clock
 	Location *time.Location
@@ -84,6 +92,9 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 	if installer, ok := actor.(memberGateInstaller); ok {
 		installer.SetWorkflowMemberGate(manager.MayStartNextWorkflowMember)
 	}
+	if installer, ok := actor.(conversationGateInstaller); ok {
+		installer.SetWorkflowConversationGate(manager.MayStartNextConversation)
+	}
 	return manager, nil
 }
 
@@ -104,10 +115,21 @@ func (m *Manager) StartFull(
 		return nil, store.ErrProductWorkflowInvalid
 	}
 	now := m.clock.Now()
-	if current, err := m.prepareFullStart(key, now); current != nil || err != nil {
+	if current, err := m.prepareFullStart(
+		key,
+		contextRevisionHash,
+		now,
+	); current != nil || err != nil {
 		return current, err
 	}
+	return m.startFullLocked(key, contextRevisionHash, now)
+}
 
+func (m *Manager) startFullLocked(
+	key store.AccountKey,
+	contextRevisionHash string,
+	now time.Time,
+) (*store.ProductWorkflowRun, error) {
 	activeBatch, err := m.store.ActiveSourcingBatch(key)
 	if err != nil {
 		return nil, err
@@ -159,13 +181,13 @@ func (m *Manager) StartFull(
 	return attached, nil
 }
 
-// prepareFullStart keeps repeated clicks idempotent while giving an explicit
-// full-start click one narrow additional-batch meaning after the prior funnel
-// has already reached communication. The terminal transition only releases
-// the product-control slot; candidate facts, the completed sourcing batch and
-// the independently enabled communication actor remain untouched.
+// prepareFullStart keeps repeated clicks idempotent. Once the prior funnel has
+// reached communication, “再采一批” is durably queued instead of terminating
+// the communication run immediately; the orchestrator consumes it only at the
+// patrol candidate boundary.
 func (m *Manager) prepareFullStart(
 	key store.AccountKey,
+	contextRevisionHash string,
 	now time.Time,
 ) (*store.ProductWorkflowRun, error) {
 	current, err := m.store.ActiveProductWorkflowRun()
@@ -175,23 +197,17 @@ func (m *Manager) prepareFullStart(
 	if current.Platform != key.Platform || current.AccountRef != key.AccountRef {
 		return nil, ErrWorkflowScopeConflict
 	}
-	if current.Stage != store.ProductWorkflowStageCommunication ||
-		current.Status != workflow.StatusRunning {
+	if current.Stage != store.ProductWorkflowStageCommunication {
 		return m.activeForStart(key, workflow.ModeFull, now)
 	}
-	completed := workflow.State{Mode: current.Mode, Status: workflow.StatusCompleted}
-	if _, err := m.store.TransitionProductWorkflowRun(
-		store.TransitionProductWorkflowRunRequest{
-			RunID: current.RunID,
-			From:  stateOf(current),
-			To:    completed,
-			At:    now,
-			Stage: store.ProductWorkflowStageCompleted,
+	return m.store.RequestProductWorkflowPendingAction(
+		store.RequestProductWorkflowPendingActionRequest{
+			RunID:               current.RunID,
+			Action:              store.ProductWorkflowPendingActionSourcing,
+			ContextRevisionHash: contextRevisionHash,
+			RequestedAt:         now,
 		},
-	); err != nil {
-		return nil, err
-	}
-	return nil, nil
+	)
 }
 
 func (m *Manager) StartReplyOnly(key store.AccountKey) (*store.ProductWorkflowRun, error) {
@@ -299,6 +315,47 @@ func (m *Manager) Resume() (*store.ProductWorkflowRun, error) {
 		return nil, errors.Join(err, rollbackErr)
 	}
 	return resumed, nil
+}
+
+// End requests a communication-only terminal handoff. It never interrupts the
+// current candidate's advice/WAL/action chain; AdvanceOnce consumes the request
+// under the patrol boundary and releases the active product slot afterwards.
+func (m *Manager) End() (*store.ProductWorkflowRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, ErrWorkflowNotActive
+	}
+	return m.store.RequestProductWorkflowPendingAction(
+		store.RequestProductWorkflowPendingActionRequest{
+			RunID:       run.RunID,
+			Action:      store.ProductWorkflowPendingActionEnd,
+			RequestedAt: m.clock.Now(),
+		},
+	)
+}
+
+// MayStartNextConversation is deliberately coarser than the shared member
+// gate. A pending page handoff closes only the next candidate boundary; the
+// current candidate may still finish every already-authorized advice/action
+// stage and effect WAL.
+func (m *Manager) MayStartNextConversation() (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, err := m.store.ActiveProductWorkflowRun()
+	if err != nil {
+		return false, err
+	}
+	if run == nil {
+		return true, nil
+	}
+	return run.PendingAction == "", nil
 }
 
 // MayStartNextWorkflowMember is the one literal persistent boundary used by

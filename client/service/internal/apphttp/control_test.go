@@ -15,6 +15,7 @@ type fakeWorkflowControl struct {
 	backendJobID string
 	pauseCalls   int
 	resumeCalls  int
+	endCalls     int
 	batchID      string
 	profileIDs   []string
 	err          error
@@ -36,6 +37,11 @@ func (f *fakeWorkflowControl) Pause(context.Context) error {
 
 func (f *fakeWorkflowControl) Resume(context.Context) error {
 	f.resumeCalls++
+	return f.err
+}
+
+func (f *fakeWorkflowControl) End(context.Context) error {
+	f.endCalls++
 	return f.err
 }
 
@@ -91,6 +97,10 @@ func TestWorkflowControlsForwardOnlyValidatedUserIntent(t *testing.T) {
 	response = productPOST(t, handler, "/app/workflow/resume", `{}`)
 	if response.Code != http.StatusAccepted || control.resumeCalls != 1 {
 		t.Fatalf("resume status=%d calls=%d", response.Code, control.resumeCalls)
+	}
+	response = productPOST(t, handler, "/app/workflow/end", `{}`)
+	if response.Code != http.StatusAccepted || control.endCalls != 1 {
+		t.Fatalf("end status=%d calls=%d", response.Code, control.endCalls)
 	}
 	response = productPOST(t, handler, "/app/confirmation/send",
 		`{"batchId":"batch-one","profileIds":["profile-a","profile-b"]}`)

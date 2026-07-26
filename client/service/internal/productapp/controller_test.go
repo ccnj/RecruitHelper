@@ -19,6 +19,7 @@ type fakeWorkflow struct {
 	replyKey     store.AccountKey
 	pauseCalls   int
 	resumeCalls  int
+	endCalls     int
 	callOrder    []string
 	confirmBatch string
 	confirmIDs   []string
@@ -54,6 +55,11 @@ func (f *fakeWorkflow) Pause() (*store.ProductWorkflowRun, error) {
 func (f *fakeWorkflow) Resume() (*store.ProductWorkflowRun, error) {
 	f.resumeCalls++
 	f.callOrder = append(f.callOrder, "resume")
+	return &store.ProductWorkflowRun{}, nil
+}
+
+func (f *fakeWorkflow) End() (*store.ProductWorkflowRun, error) {
+	f.endCalls++
 	return &store.ProductWorkflowRun{}, nil
 }
 
@@ -129,12 +135,15 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	if err := controller.Resume(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if err := controller.End(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if err := controller.ConfirmAll(
 		context.Background(), "batch-one", []string{"profile-one"},
 	); err != nil {
 		t.Fatal(err)
 	}
-	if flow.pauseCalls != 1 || flow.resumeCalls != 1 ||
+	if flow.pauseCalls != 1 || flow.resumeCalls != 1 || flow.endCalls != 1 ||
 		flow.confirmBatch != "batch-one" || len(flow.confirmIDs) != 1 {
 		t.Fatalf("unexpected controls: %+v", flow)
 	}
@@ -275,7 +284,7 @@ func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
 	}
 }
 
-func TestAdditionalBatchFromPausedCommunicationResumesBeforeStarting(t *testing.T) {
+func TestAdditionalBatchFromPausedCommunicationQueuesWithoutResuming(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
@@ -305,10 +314,10 @@ func TestAdditionalBatchFromPausedCommunicationResumesBeforeStarting(t *testing.
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 1 || flow.resumeCalls != 1 ||
-		len(flow.callOrder) != 3 ||
+	if source.calls != 1 || flow.resumeCalls != 0 ||
+		len(flow.callOrder) != 2 ||
 		flow.callOrder[0] != "fetch" ||
-		flow.callOrder[1] != "resume" || flow.callOrder[2] != "full" {
+		flow.callOrder[1] != "full" {
 		t.Fatalf("paused additional source=%d flow=%+v", source.calls, flow)
 	}
 }
@@ -423,7 +432,8 @@ func TestRuntimeStateAllowsAdditionalBatchFromRunningOrPausedCommunication(t *te
 		t.Fatal(err)
 	}
 	state, err := controller.RuntimeState()
-	if err != nil || !state.CanAddBatch {
+	if err != nil || !state.CanAddBatch || !state.CanEnd ||
+		state.WorkflowStage != store.ProductWorkflowStageCommunication {
 		t.Fatalf("running communication state=%+v err=%v", state, err)
 	}
 	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
@@ -436,7 +446,7 @@ func TestRuntimeStateAllowsAdditionalBatchFromRunningOrPausedCommunication(t *te
 		t.Fatal(err)
 	}
 	state, err = controller.RuntimeState()
-	if err != nil || !state.CanAddBatch {
+	if err != nil || !state.CanAddBatch || !state.CanEnd {
 		t.Fatalf("paused communication state=%+v err=%v", state, err)
 	}
 }
