@@ -678,3 +678,207 @@ func TestUnreadPriorityGenerationChangeStops(t *testing.T) {
 		t.Fatalf("手代际变化没有停止当前轮: result=%+v err=%v", result, err)
 	}
 }
+
+func TestUnreadPendingSurvivesNilOrZeroSnapshotAfterFailedPass(t *testing.T) {
+	tests := []struct {
+		name string
+		next *int
+	}{
+		{name: "nil", next: nil},
+		{name: "zero", next: ptr(0)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			setUnreadHintForTest(h, ptr(2))
+			h.runner.handler = func(request RunRequest) (any, error) {
+				if request.Name == protocol.PrimChatReadList {
+					args := decodeArgs[protocol.ChatReadListArgs](t, request)
+					if args.Filter == protocol.ListFilterUnread {
+						return nil, &RunError{
+							Code:       protocol.ErrCodeElementUnresolved,
+							Retryable:  protocol.RetryableManualOnly,
+							SideEffect: protocol.SideEffectNone,
+						}
+					}
+					return protocol.ChatReadListData{
+						Sessions: []protocol.ConversationSummary{}, Complete: true,
+					}, nil
+				}
+				return defaultHandler(request)
+			}
+
+			requireUnreadRoundOK(t, h)
+			setUnreadHintForTest(h, test.next)
+			h.clock.Add(h.config.MinimumRoundGap)
+			before := len(unreadListFilters(t, h))
+			requireUnreadRoundOK(t, h)
+			after := unreadListFilters(t, h)
+			if len(after) <= before ||
+				after[before].Filter != protocol.ListFilterUnread {
+				t.Fatalf("失败后的 pending 被 %s 快照覆盖: %+v", test.name, after[before:])
+			}
+		})
+	}
+}
+
+func TestUnreadPendingClearsOnlyAfterExplicitEmptyAndStableZero(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(1))
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadList {
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter == protocol.ListFilterUnread {
+				setUnreadHintForTest(h, ptr(0))
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{}, Complete: true,
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+
+	requireUnreadRoundOK(t, h)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
+	}
+	h.manager.mu.Lock()
+	_, pending := h.manager.unreadPendingGeneration(account)
+	h.manager.mu.Unlock()
+	if pending {
+		t.Fatal("明确空未读列表且稳定总气泡为零后仍保留 pending")
+	}
+
+	setUnreadHintForTest(h, nil)
+	h.clock.Add(h.config.PatrolInterval)
+	before := len(unreadListFilters(t, h))
+	requireUnreadRoundOK(t, h)
+	after := unreadListFilters(t, h)
+	if len(after) != before+1 ||
+		after[before].Filter != protocol.ListFilterAll {
+		t.Fatalf("已清 pending 后下一轮仍错误插队: %+v", after[before:])
+	}
+}
+
+func TestUnreadFirstPositiveEventPullsForwardAndStartsUnreadPass(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, nil)
+	requireUnreadRoundOK(t, h)
+
+	prevFilters := len(unreadListFilters(t, h))
+	if err := h.manager.HandleEvent(
+		"hand-1",
+		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
+			Prev: nil, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
+		}),
+	); err != nil {
+		t.Fatalf("首帧正数事件失败: %v", err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.LastPatrolAt == nil ||
+		account.NextPatrolAt == nil {
+		t.Fatalf("读取事件后调度状态失败: account=%+v err=%v", account, err)
+	}
+	wantNext := account.LastPatrolAt.Add(h.config.MinimumRoundGap)
+	if !account.NextPatrolAt.Equal(wantNext) {
+		t.Fatalf("首帧正数没有拉前到最小轮间隔: got=%v want=%v", account.NextPatrolAt, wantNext)
+	}
+
+	setUnreadHintForTest(h, ptr(0))
+	h.clock.Add(h.config.MinimumRoundGap)
+	requireUnreadRoundOK(t, h)
+	after := unreadListFilters(t, h)
+	if len(after) <= prevFilters ||
+		after[prevFilters].Filter != protocol.ListFilterUnread {
+		t.Fatalf("首帧正数没有建立 pending 插队: %+v", after[prevFilters:])
+	}
+}
+
+func TestUnreadPendingGenerationPreventsOlderPassFromClearingNewEvent(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(1))
+	raisedDuringFirstPass := false
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadList {
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter == protocol.ListFilterUnread {
+				if !raisedDuringFirstPass {
+					raisedDuringFirstPass = true
+					prev := 1
+					if err := h.manager.HandleEvent(
+						"hand-1",
+						eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
+							Prev: &prev, Scope: protocol.UnreadScopeTotal,
+							Stable: true, Value: 2,
+						}),
+					); err != nil {
+						return nil, err
+					}
+				}
+				// Model the later stable zero arriving before the older list read
+				// finishes. The generation, rather than timing, must protect the
+				// newly observed work from that older pass's clear.
+				setUnreadHintForTest(h, ptr(0))
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{}, Complete: true,
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+
+	requireUnreadRoundOK(t, h)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
+	}
+	h.manager.mu.Lock()
+	generation, pending := h.manager.unreadPendingGeneration(account)
+	h.manager.mu.Unlock()
+	if !pending || generation != 2 {
+		t.Fatalf("旧 pass 误清了新事件: pending=%v generation=%d", pending, generation)
+	}
+
+	h.clock.Add(h.config.MinimumRoundGap)
+	before := len(unreadListFilters(t, h))
+	requireUnreadRoundOK(t, h)
+	after := unreadListFilters(t, h)
+	if len(after) <= before ||
+		after[before].Filter != protocol.ListFilterUnread {
+		t.Fatalf("新一代 pending 没有在下一轮重试: %+v", after[before:])
+	}
+	h.manager.mu.Lock()
+	_, pending = h.manager.unreadPendingGeneration(account)
+	h.manager.mu.Unlock()
+	if pending {
+		t.Fatal("新一代 pending 在自己的明确空态后没有清除")
+	}
+}
+
+func TestUnreadPendingIsScopedByPrincipal(t *testing.T) {
+	h := newHarness(t)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
+	}
+	h.manager.mu.Lock()
+	h.manager.observeUnreadSnapshot(account, ptr(1))
+	h.manager.mu.Unlock()
+
+	if err := h.db.BindAccountPrincipal(
+		h.key, "hand-1", "principal-2", "session-1", "boot-1", h.clock.Now(),
+	); err != nil {
+		t.Fatalf("改绑新主体失败: %v", err)
+	}
+	rebound, err := h.db.AccountByKey(h.key)
+	if err != nil || rebound == nil {
+		t.Fatalf("读取改绑账号失败: account=%+v err=%v", rebound, err)
+	}
+	h.manager.mu.Lock()
+	_, pending := h.manager.unreadPendingGeneration(rebound)
+	h.manager.mu.Unlock()
+	if pending {
+		t.Fatal("新主体继承了旧主体的未读 pending")
+	}
+}

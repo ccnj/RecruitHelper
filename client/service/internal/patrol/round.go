@@ -31,6 +31,7 @@ type roundActor struct {
 	listSnapshotGeneration  uint64
 	checkedConversationRefs map[string]struct{}
 	unreadPassAttempted     bool
+	unreadPassGeneration    uint64
 	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
 }
@@ -102,6 +103,7 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 	m.mu.Lock()
 	func() {
 		defer m.mu.Unlock()
+		m.observeUnreadSnapshot(actor.account, actor.hand.UnreadTotal)
 		if err = actor.freezeSourcingBatchGeneration(); err == nil {
 			err = actor.execute(roundCtx)
 		}
@@ -190,13 +192,12 @@ func (a *roundActor) execute(ctx context.Context) error {
 	seenConversations := make(map[string]struct{})
 	a.checkedConversationRefs = make(map[string]struct{})
 	a.unreadAttemptedRefs = make(map[string]struct{})
-	hand, err := a.refreshHandState(ctx)
+	_, err = a.refreshHandState(ctx)
 	if err != nil {
 		return err
 	}
-	if unreadHintPositive(hand.UnreadTotal) && a.manager.config.MaxPages >= 2 {
+	if a.manager.config.MaxPages >= 2 && a.beginUnreadPass() {
 		filter = protocol.ListFilterUnread
-		a.unreadPassAttempted = true
 	}
 	pagesRead := 0
 	resetListRead := func(nextStart protocol.ListStart) {
@@ -266,12 +267,11 @@ func (a *roundActor) execute(ctx context.Context) error {
 			if filter == protocol.ListFilterAll &&
 				!a.unreadPassAttempted &&
 				pagesRead < a.manager.config.MaxPages-1 {
-				hand, stateErr := a.refreshHandState(ctx)
+				_, stateErr := a.refreshHandState(ctx)
 				if stateErr != nil {
 					return stateErr
 				}
-				if unreadHintPositive(hand.UnreadTotal) {
-					a.unreadPassAttempted = true
+				if a.beginUnreadPass() {
 					filter = protocol.ListFilterUnread
 					resetListRead(protocol.ListStartTop)
 					continue
@@ -280,7 +280,6 @@ func (a *roundActor) execute(ctx context.Context) error {
 			resetListRead(protocol.ListStartCurrent)
 			continue
 		case conversationListPageSwitchUnread:
-			a.unreadPassAttempted = true
 			filter = protocol.ListFilterUnread
 			resetListRead(protocol.ListStartTop)
 			continue
@@ -397,11 +396,11 @@ func (a *roundActor) processConversationListPage(
 			continue
 		}
 		if canEnterUnread {
-			hand, stateErr := a.refreshHandState(ctx)
+			_, stateErr := a.refreshHandState(ctx)
 			if stateErr != nil {
 				return conversationListPageContinue, stateErr
 			}
-			if unreadHintPositive(hand.UnreadTotal) {
+			if a.beginUnreadPass() {
 				return conversationListPageSwitchUnread, nil
 			}
 		}
@@ -571,6 +570,14 @@ func (a *roundActor) processUnreadConversationListPage(
 		return conversationListPageContinue, err
 	}
 	switch {
+	case len(page.sessions) == 0 && hand.UnreadTotal != nil && *hand.UnreadTotal == 0:
+		if !a.manager.clearUnreadPending(a.account, a.unreadPassGeneration) {
+			if err := a.appendUnreadPatrolAudit(
+				"status=inconsistent reason=unreadPendingGenerationAdvanced",
+			); err != nil {
+				return conversationListPageContinue, err
+			}
+		}
 	case hand.UnreadTotal == nil:
 		if err := a.appendUnreadPatrolAudit(
 			"status=inconsistent reason=unreadListEmptyHintUnknown",
@@ -1869,6 +1876,12 @@ func (a *roundActor) handleCommandFailure(err error) {
 
 func (a *roundActor) finish(runErr error) error {
 	finishedAt := a.manager.now()
+	// Pending unread work is a process-local scheduling latch. If this round
+	// could not prove the empty-list + stable-zero exit, retry at the ordinary
+	// minimum round boundary instead of waiting a full patrol interval.
+	if _, pending := a.manager.unreadPendingGeneration(a.account); pending {
+		a.freshListRequired = true
+	}
 	status := "ok"
 	stage := "finished"
 	if runErr != nil {
@@ -1965,8 +1978,19 @@ func (a *roundActor) invalidateListSnapshot() {
 	a.listSnapshotGeneration++
 }
 
-func unreadHintPositive(value *int) bool {
-	return value != nil && *value > 0
+// beginUnreadPass consumes no pending work. It only captures the current
+// generation and enforces at most one unread pass in this actor round.
+func (a *roundActor) beginUnreadPass() bool {
+	if a.unreadPassAttempted {
+		return false
+	}
+	generation, pending := a.manager.unreadPendingGeneration(a.account)
+	if !pending {
+		return false
+	}
+	a.unreadPassAttempted = true
+	a.unreadPassGeneration = generation
+	return true
 }
 
 func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {
@@ -1988,6 +2012,7 @@ func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {
 		a.hand.UnreadTotal = &value
 		state.UnreadTotal = &value
 	}
+	a.manager.observeUnreadSnapshot(a.account, state.UnreadTotal)
 	return state, nil
 }
 
