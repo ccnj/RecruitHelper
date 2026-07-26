@@ -3759,18 +3759,81 @@ async function mainReadListDOMWindow(
     return style.display !== 'none' && style.visibility !== 'hidden' &&
       node.getClientRects().length > 0
   }
-  const vueSource = (node: HTMLElement): AnyRecord => {
-    const candidates = [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]
-    for (const candidate of candidates) {
-      const vue = (candidate as HTMLElement & { __vue__?: AnyRecord }).__vue__
-      const props = vue?._props as AnyRecord | undefined
-      const source = props?.source
-      if (source && typeof source === 'object' && !Array.isArray(source) &&
-          clean((source as AnyRecord).sessionId)) {
-        return source as AnyRecord
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const rowSource = (node: HTMLElement): AnyRecord => {
+    const components: AnyRecord[] = []
+    const addComponent = (value: unknown): void => {
+      const component = asRecord(value)
+      if (component) components.push(component)
+    }
+    for (const candidate of [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]) {
+      addComponent((candidate as HTMLElement & { __vue__?: unknown }).__vue__)
+    }
+
+    // 智联实时插入新会话后，行节点上的 __vue__ 可能不再暴露；同一页面
+    // 的 Nuxt 组件树仍持有与该行 $el 直接绑定的 source。这里只扩宽只读
+    // 感知通道，仍要求稳定 sessionId + peerPartnerId 唯一一致，不按姓名、
+    // 文本或 DOM 位置猜身份。
+    const root = asRecord((window as unknown as AnyRecord).$nuxt)
+    if (root) {
+      const queue: AnyRecord[] = [root]
+      const seen = new Set<AnyRecord>()
+      while (queue.length > 0 && seen.size < 4096) {
+        const component = queue.shift()
+        if (!component || seen.has(component)) continue
+        seen.add(component)
+        const element = component.$el as HTMLElement | undefined
+        if (element && (element === node ||
+            (typeof node.contains === 'function' && node.contains(element)))) {
+          components.push(component)
+        }
+        const children = component.$children
+        if (Array.isArray(children)) {
+          for (const child of children) {
+            const record = asRecord(child)
+            if (record) queue.push(record)
+          }
+        }
       }
     }
-    throw new Error('dom_list_vue_source_unavailable')
+
+    const sources: AnyRecord[] = []
+    const seenSources = new Set<AnyRecord>()
+    const addSource = (value: unknown): void => {
+      const source = asRecord(value)
+      if (!source || seenSources.has(source)) return
+      seenSources.add(source)
+      if (clean(source.sessionId) && clean(source.peerPartnerId)) sources.push(source)
+    }
+    for (const component of components) {
+      for (const container of [
+        component,
+        asRecord(component._props),
+        asRecord(component.$props),
+        asRecord(component.$data),
+      ]) {
+        if (!container) continue
+        addSource(container)
+        addSource(container.source)
+      }
+    }
+    const identityPairs = new Set(sources.map((source) =>
+      `${clean(source.sessionId)}\u0000${clean(source.peerPartnerId)}`))
+    if (identityPairs.size !== 1) {
+      throw new Error(identityPairs.size === 0
+        ? 'dom_list_identity_source_unavailable'
+        : 'dom_list_identity_invalid')
+    }
+    sources.sort((left, right) => {
+      const richness = (source: AnyRecord): number =>
+        (source.lastSentence !== undefined ? 8 : 0) +
+        (Number.isInteger(Number(source.unreadCount)) ? 4 : 0) +
+        (source.sortTime !== undefined || source.modifiedTime !== undefined ? 2 : 0) +
+        (clean(source.name ?? source.realName) ? 1 : 0)
+      return richness(right) - richness(left)
+    })
+    return sources[0]
   }
   const collect = (): {
     sessions: ZhilianConversationSummary[]
@@ -3784,7 +3847,7 @@ async function mainReadListDOMWindow(
       .filter((node) => visible(node) &&
         node.querySelector('.im-session-item__box, .im-session-item') !== null)
     if (nodes.length === 0) throw new Error('dom_list_items_missing')
-    const sourcePairs = nodes.map((node) => ({ source: vueSource(node), node }))
+    const sourcePairs = nodes.map((node) => ({ source: rowSource(node), node }))
     const seen = new Set<string>()
     const sessions: ZhilianConversationSummary[] = []
     for (const { source, node } of sourcePairs) {
@@ -3904,7 +3967,7 @@ async function mainReadListDOMWindow(
       'dom_list_scroll_surface_missing',
       'dom_list_last_sentence_missing',
       'dom_list_last_sentence_invalid',
-      'dom_list_vue_source_unavailable',
+      'dom_list_identity_source_unavailable',
       'dom_list_items_missing',
       'dom_list_identity_invalid',
       'dom_list_unread_invalid',

@@ -10282,6 +10282,92 @@ test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', asy
   }
 })
 
+test('readList MAIN 在行节点无 __vue__ 时从同一行 Nuxt 组件读取稳定身份', async () => {
+  const original = {
+    document: globalThis.document,
+    window: globalThis.window,
+    getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+  }
+  const marker = {}
+  const makeRow = () => ({
+    getClientRects: () => [{}],
+    contains: (element) => element === marker,
+    querySelector(selector) {
+      if (selector === '.im-session-item__box, .im-session-item') return marker
+      return null
+    },
+    querySelectorAll() { return [] },
+  })
+  const rows = [makeRow(), makeRow()]
+  const sources = [
+    {
+      sessionId: 'session-nuxt-a',
+      peerPartnerId: 'peer-nuxt-a',
+      unreadCount: 1,
+      name: '候选人甲',
+      jobTitle: '销售',
+      sortTime: 2_000,
+      lastSentence: { senderType: 'USER', text: '你好', sendTime: 2_000 },
+    },
+    {
+      sessionId: 'session-nuxt-b',
+      peerPartnerId: 'peer-nuxt-b',
+      unreadCount: 0,
+      name: '候选人乙',
+      jobTitle: '销售',
+      sortTime: 1_000,
+      lastSentence: { senderType: 'STAFF', text: '稍后联系', sendTime: 1_000 },
+    },
+  ]
+  const virtual = {
+    scrollTop: 0,
+    scrollHeight: 600,
+    clientHeight: 300,
+    parentElement: null,
+    querySelectorAll() { return [] },
+  }
+  try {
+    globalThis.setTimeout = (callback) => {
+      callback()
+      return 0
+    }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    globalThis.document = {
+      querySelector(selector) {
+        return selector === '.im-session-list .im-session-list__virtual' ? virtual : null
+      },
+      querySelectorAll(selector) {
+        return selector.includes('div[role="listitem"]') ? rows : []
+      },
+    }
+    globalThis.window = {
+      $nuxt: {
+        $children: rows.map((row, index) => ({
+          $el: row,
+          _props: { source: sources[index] },
+          $children: [],
+        })),
+      },
+    }
+    const result = await zhilianTestHooks.mainReadListDOMWindow(false, false)
+    assert.equal(result.__recruitHelperMainError, undefined)
+    assert.deepEqual(
+      result.sessions.map((item) => [
+        item.conversationRef,
+        item.peer.platformUserRef,
+        item.lastMessage.direction,
+      ]),
+      [
+        ['session-nuxt-a', 'peer-nuxt-a', 'in'],
+        ['session-nuxt-b', 'peer-nuxt-b', 'out'],
+      ],
+    )
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
   const selectors = []
   assert.equal(readZhilianUnreadTotal({ querySelector(selector) { selectors.push(selector); return null } }), null,
