@@ -3656,7 +3656,14 @@ export async function ensureZhilianIM(
 ): Promise<{ ready: boolean; loginState: 'in' | 'out' | 'unknown'; createdTab: boolean }> {
   ctx.checkpoint()
   await ctx.progress('选择智联 canonical 标签页', 5)
-  let tab = await canonicalZhilianTab()
+  const sourcingTabs = await activeSourcingTabs()
+  if (sourcingTabs.length > 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联推荐页标签无法唯一确定', 'manualOnly')
+  }
+  // 推荐→IM 是同一产品工作页的阶段交接。即使浏览器里还留有健康 IM 页，
+  // 也应优先把本轮唯一推荐页导航到 IM；只有没有推荐页时才走 canonical
+  // 兜底复用其他智联页面。
+  let tab = sourcingTabs[0] ?? await canonicalZhilianTab()
   let createdTab = false
   if (!tab) {
     tab = await chrome.tabs.create({ url: ZHILIAN_IM_URL, active: false })
@@ -3667,7 +3674,7 @@ export async function ensureZhilianIM(
     // 智联工作页，避免为两个互斥业务阶段长期保留第二张后台标签。
     const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
     try {
-      tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL })
+      tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL, active: true })
     } catch (error) {
       // update 未产生导航时不会有 webNavigation 来消费窗口，必须显式撤销。
       commandNavigation.end()

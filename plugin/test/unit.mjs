@@ -52,6 +52,7 @@ const {
   ZHILIAN_UNREAD_BADGE_SELECTOR,
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
+  canonicalZhilianTab,
   ensureZhilianIM,
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
@@ -9792,9 +9793,97 @@ test('ensureZhilianIM 复用 canonical 推荐页并在同一标签导航到 IM',
     assert.deepEqual(created, [])
     assert.deepEqual(updated, [{
       id: tab.id,
-      options: { url: 'https://rd6.zhaopin.com/app/im' },
+      options: { url: 'https://rd6.zhaopin.com/app/im', active: true },
     }])
     assert.equal(tab.url, 'https://rd6.zhaopin.com/app/im')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('ensureZhilianIM 双页现场优先把唯一推荐页交接到 IM', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'e'.repeat(64)
+  const recommendTab = {
+    id: 72,
+    url: 'https://rd6.zhaopin.com/app/recommend?jobNumber=fixture-job',
+    status: 'complete',
+    active: false,
+    lastAccessed: 100,
+    windowId: 1,
+  }
+  const existingIMTab = {
+    id: 73,
+    url: 'https://rd6.zhaopin.com/app/im',
+    status: 'complete',
+    active: true,
+    lastAccessed: 200,
+    windowId: 1,
+  }
+  const updated = []
+  const probed = []
+  try {
+    globalThis.chrome = {
+      tabs: {
+        async query() {
+          return [{ ...existingIMTab }, { ...recommendTab }]
+        },
+        async create() {
+          throw new Error('双页现场不得新建第三张智联标签')
+        },
+        async update(id, options) {
+          assert.equal(id, recommendTab.id, '应接管刚完成漏斗的推荐页，而不是复用旧 IM 页')
+          updated.push({ id, options })
+          recommendTab.url = options.url
+          if (options.active) {
+            recommendTab.active = true
+            existingIMTab.active = false
+          }
+          return { ...recommendTab }
+        },
+        async get(id) {
+          assert.equal(id, recommendTab.id)
+          return { ...recommendTab }
+        },
+        async sendMessage(id) {
+          assert.ok(id === recommendTab.id || id === existingIMTab.id)
+          return { ok: true }
+        },
+      },
+      scripting: {
+        async executeScript({ target }) {
+          assert.equal(target.tabId, recommendTab.id)
+          probed.push(target.tabId)
+          return [{
+            result: {
+              pageKind: 'im',
+              loginState: 'in',
+              principalFingerprint: fingerprint,
+              imListVisible: true,
+            },
+          }]
+        },
+      },
+    }
+
+    const result = await ensureZhilianIM({
+      deadlineMs: Date.now() + 10_000,
+      irreversibleNotAfterMs: Date.now() + 10_000,
+      signal: new AbortController().signal,
+      async progress() {},
+      checkpoint() {},
+    }, fingerprint)
+
+    assert.deepEqual(result, { ready: true, loginState: 'in', createdTab: false })
+    assert.deepEqual(updated, [{
+      id: recommendTab.id,
+      options: { url: 'https://rd6.zhaopin.com/app/im', active: true },
+    }])
+    assert.deepEqual(probed, [recommendTab.id])
+    assert.equal((await canonicalZhilianTab())?.id, recommendTab.id,
+      '交接完成后后续 canonical 读取仍应选中本轮工作页')
+    assert.equal(existingIMTab.url, 'https://rd6.zhaopin.com/app/im',
+      '既有 IM 页不是本轮工作页，不应被导航或关闭')
   } finally {
     globalThis.chrome = originalChrome
   }

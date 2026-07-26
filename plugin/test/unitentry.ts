@@ -20,6 +20,7 @@ export { registerM6Primitives } from '../src/program/primitives/m6'
 export {
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
+  canonicalZhilianTab,
   identifyZhilianCurrentConversation,
   ensureZhilianIM,
   readZhilianList,
