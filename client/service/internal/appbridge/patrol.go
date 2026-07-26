@@ -396,10 +396,16 @@ func resultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	}
 }
 
-// HandAvailability deliberately exposes only online/session/boot information;
-// actor policy cannot reach tabs, selectors or other hand internals.
+// HandAvailability deliberately exposes only the active hand generation and
+// its stable unread sensor. Actor policy cannot reach tabs, selectors or other
+// hand internals.
+type handAvailabilityHub interface {
+	HandSession(string) (string, string, bool)
+	Registry() *session.Registry
+}
+
 type HandAvailability struct {
-	Hub *session.Hub
+	Hub handAvailabilityHub
 }
 
 func (h HandAvailability) State(_ context.Context, handID string) (patrol.HandState, error) {
@@ -407,5 +413,17 @@ func (h HandAvailability) State(_ context.Context, handID string) (patrol.HandSt
 		return patrol.HandState{}, errors.New("hub 不能为空")
 	}
 	sessionID, bootID, online := h.Hub.HandSession(handID)
-	return patrol.HandState{Online: online, Session: sessionID, BootID: bootID}, nil
+	state := patrol.HandState{Online: online, Session: sessionID, BootID: bootID}
+	if !online {
+		return state, nil
+	}
+	registered, ok := h.Hub.Registry().Get(handID)
+	if !ok || !registered.Online ||
+		registered.SessionID != sessionID || registered.BootID != bootID ||
+		registered.Sensors == nil || registered.Sensors.UnreadTotal == nil {
+		return state, nil
+	}
+	value := registered.Sensors.UnreadTotal.Value
+	state.UnreadTotal = &value
+	return state, nil
 }

@@ -231,9 +231,10 @@ func (e *RunError) Unwrap() error {
 }
 
 type HandState struct {
-	Online  bool
-	Session string
-	BootID  string
+	Online      bool
+	Session     string
+	BootID      string
+	UnreadTotal *int
 }
 
 type HandAvailability interface {

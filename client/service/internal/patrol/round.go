@@ -30,6 +30,8 @@ type roundActor struct {
 	freshListRequired       bool
 	listSnapshotGeneration  uint64
 	checkedConversationRefs map[string]struct{}
+	unreadPassAttempted     bool
+	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
 }
 
@@ -58,6 +60,8 @@ type conversationListPageOutcome uint8
 const (
 	conversationListPageContinue conversationListPageOutcome = iota
 	conversationListPageFresh
+	conversationListPageSwitchUnread
+	conversationListPageSwitchAll
 	conversationListPageStop
 )
 
@@ -179,16 +183,52 @@ func (a *roundActor) execute(ctx context.Context) error {
 		return nil
 	}
 
+	filter := protocol.ListFilterAll
 	cursor := ""
 	seenCursors := make(map[string]struct{})
 	seenConversations := make(map[string]struct{})
 	a.checkedConversationRefs = make(map[string]struct{})
-	for pagesRead := 0; pagesRead < a.manager.config.MaxPages; pagesRead++ {
+	a.unreadAttemptedRefs = make(map[string]struct{})
+	hand, err := a.refreshHandState(ctx)
+	if err != nil {
+		return err
+	}
+	if unreadHintPositive(hand.UnreadTotal) && a.manager.config.MaxPages >= 2 {
+		filter = protocol.ListFilterUnread
+		a.unreadPassAttempted = true
+	}
+	pagesRead := 0
+	resetListRead := func() {
+		cursor = ""
+		seenCursors = make(map[string]struct{})
+		seenConversations = make(map[string]struct{})
+	}
+	for pagesRead < a.manager.config.MaxPages {
+		// Entering unread reserves one actual all-list read to close the
+		// platform filter. The reserve is part of the same MaxPages budget.
+		if filter == protocol.ListFilterUnread &&
+			pagesRead >= a.manager.config.MaxPages-1 {
+			filter = protocol.ListFilterAll
+			resetListRead()
+			continue
+		}
 		if err := a.setStage("readingList"); err != nil {
 			return err
 		}
-		page, err := a.readListPage(ctx, cursor)
+		page, err := a.readListPage(ctx, cursor, filter)
+		pagesRead++
 		if err != nil {
+			if filter == protocol.ListFilterUnread &&
+				isRunError(err, protocol.ErrCodeElementUnresolved) {
+				if auditErr := a.appendUnreadPatrolAudit(
+					"status=inconsistent reason=unreadListElementUnresolved",
+				); auditErr != nil {
+					return auditErr
+				}
+				filter = protocol.ListFilterAll
+				resetListRead()
+				continue
+			}
 			if isRunError(err, protocol.ErrCodeUserActive) ||
 				isRunError(err, protocol.ErrCodeCursorInvalid) {
 				// readList 的 USER_ACTIVE/CURSOR_INVALID 只说明本轮页面
@@ -206,7 +246,12 @@ func (a *roundActor) execute(ctx context.Context) error {
 			}
 			seenConversations[summary.ConversationRef] = struct{}{}
 		}
-		outcome, err := a.processConversationListPage(ctx, page)
+		outcome, err := a.processConversationListPage(
+			ctx,
+			page,
+			filter,
+			!a.unreadPassAttempted && pagesRead < a.manager.config.MaxPages-1,
+		)
 		if err != nil {
 			return err
 		}
@@ -216,9 +261,28 @@ func (a *roundActor) execute(ctx context.Context) error {
 			// 未读或重排列表。旧 page/cursor 此刻不再是导航依据；同一
 			// 完整扫描保留 checked 集合，但从无 cursor 的 fresh 页面
 			// 快照继续。
-			cursor = ""
-			seenCursors = make(map[string]struct{})
-			seenConversations = make(map[string]struct{})
+			if filter == protocol.ListFilterAll &&
+				!a.unreadPassAttempted &&
+				pagesRead < a.manager.config.MaxPages-1 {
+				hand, stateErr := a.refreshHandState(ctx)
+				if stateErr != nil {
+					return stateErr
+				}
+				if unreadHintPositive(hand.UnreadTotal) {
+					a.unreadPassAttempted = true
+					filter = protocol.ListFilterUnread
+				}
+			}
+			resetListRead()
+			continue
+		case conversationListPageSwitchUnread:
+			a.unreadPassAttempted = true
+			filter = protocol.ListFilterUnread
+			resetListRead()
+			continue
+		case conversationListPageSwitchAll:
+			filter = protocol.ListFilterAll
+			resetListRead()
 			continue
 		case conversationListPageStop:
 			// 工作流候选人边界与分类修正是明确停止，不得被误解释成
@@ -229,7 +293,18 @@ func (a *roundActor) execute(ctx context.Context) error {
 		default:
 			return errors.New("未知会话列表处理结果")
 		}
-		if a.classificationCorrected || page.complete {
+		if a.classificationCorrected {
+			return nil
+		}
+		if page.complete {
+			if filter == protocol.ListFilterUnread {
+				// The unread page processor normally returns SwitchAll here.
+				// Keep a defensive close so no future branch can leave the
+				// platform filter active at round completion.
+				filter = protocol.ListFilterAll
+				resetListRead()
+				continue
+			}
 			return nil
 		}
 		if page.nextCursor == "" || page.nextCursor == cursor {
@@ -251,6 +326,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 func (a *roundActor) processConversationListPage(
 	ctx context.Context,
 	page conversationListPage,
+	filter protocol.ListFilter,
+	canEnterUnread bool,
 ) (conversationListPageOutcome, error) {
 	entries, err := listEntries(page.sessions)
 	if err != nil {
@@ -291,7 +368,10 @@ func (a *roundActor) processConversationListPage(
 		return conversationListPageContinue, err
 	}
 
-	dirty, err := a.detectDirty(page.sessions)
+	dirty, err := a.detectDirty(
+		page.sessions,
+		filter == protocol.ListFilterUnread,
+	)
 	if err != nil {
 		return conversationListPageContinue, err
 	}
@@ -299,9 +379,27 @@ func (a *roundActor) processConversationListPage(
 	for index := range dirty {
 		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
 	}
+	if filter == protocol.ListFilterAll && a.classificationCorrected {
+		// A classification correction encountered in unread mode still needs
+		// this actual all-list read to close the page filter, but it must not
+		// authorize another candidate after the correction stop boundary.
+		return conversationListPageStop, nil
+	}
+	if filter == protocol.ListFilterUnread {
+		return a.processUnreadConversationListPage(ctx, page, dirtyByRef)
+	}
 	for _, summary := range page.sessions {
 		if _, checked := a.checkedConversationRefs[summary.ConversationRef]; checked {
 			continue
+		}
+		if canEnterUnread {
+			hand, stateErr := a.refreshHandState(ctx)
+			if stateErr != nil {
+				return conversationListPageContinue, stateErr
+			}
+			if unreadHintPositive(hand.UnreadTotal) {
+				return conversationListPageSwitchUnread, nil
+			}
 		}
 		allowed, gateErr := a.mayStartNextConversation(ctx)
 		if gateErr != nil {
@@ -371,6 +469,192 @@ func (a *roundActor) processConversationListPage(
 		}
 	}
 	return conversationListPageContinue, nil
+}
+
+const unreadPatrolAuditCategory = "unread_patrol"
+
+func (a *roundActor) processUnreadConversationListPage(
+	ctx context.Context,
+	page conversationListPage,
+	dirtyByRef map[string]dirtyConversation,
+) (conversationListPageOutcome, error) {
+	for _, summary := range page.sessions {
+		if _, attempted := a.unreadAttemptedRefs[summary.ConversationRef]; attempted {
+			continue
+		}
+		allowed, gateErr := a.mayStartNextConversation(ctx)
+		if gateErr != nil {
+			return conversationListPageContinue, gateErr
+		}
+		if !allowed {
+			return conversationListPageStop, nil
+		}
+
+		// The attempt marker precedes the intrusive action. A locally failed
+		// open/read therefore cannot spin on the same residual unread row in
+		// this complete scan.
+		a.unreadAttemptedRefs[summary.ConversationRef] = struct{}{}
+		a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
+		key := store.ConversationKey{
+			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+			ConversationRef: summary.ConversationRef,
+		}
+		profile, err := a.manager.store.CandidateProfileByConversation(key)
+		if err != nil {
+			return conversationListPageContinue, err
+		}
+		if profile == nil {
+			return a.openUnreadConversationWithoutAutomation(ctx, summary.ConversationRef)
+		}
+		_, ready, targetErr := a.manager.store.CommunicationTargetForProfile(
+			profile.ProfileID,
+		)
+		// A retained profile without a V4 root is not automation-ready. It
+		// still has to be opened once to clear unread, but may not be promoted
+		// into resume capture, state-machine work or AI from this cleanup pass.
+		if targetErr != nil && !errors.Is(targetErr, store.ErrCommunicationV4Missing) {
+			return conversationListPageContinue, targetErr
+		}
+		if !ready {
+			return a.openUnreadConversationWithoutAutomation(ctx, summary.ConversationRef)
+		}
+
+		dirtyConversation, ok := dirtyByRef[summary.ConversationRef]
+		if !ok {
+			return conversationListPageContinue, errors.New(
+				"已有候选人档案的未读会话缺少可对账会话事实",
+			)
+		}
+		if err := a.setStage("readingThread"); err != nil {
+			return conversationListPageContinue, err
+		}
+		projection, err := a.reconcileConversation(ctx, dirtyConversation)
+		if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
+			a.projection = append(a.projection, projection)
+		}
+		if err != nil {
+			if a.isLocallyAttemptedUnreadError(err) {
+				if auditErr := a.appendUnreadPatrolAudit(
+					"status=attempted outcome=" + unreadLocalOutcome(err),
+				); auditErr != nil {
+					return conversationListPageContinue, auditErr
+				}
+				return conversationListPageFresh, nil
+			}
+			a.handleCommandFailure(err)
+			return conversationListPageContinue, err
+		}
+		a.manager.markListHintVerified(
+			dirtyConversation.listHintKey,
+			dirtyConversation.listHintFingerprint,
+		)
+		if a.classificationCorrected {
+			return conversationListPageSwitchAll, nil
+		}
+		if err := a.prepareInboundConversationProfile(ctx, *profile); err != nil {
+			return conversationListPageContinue, err
+		}
+		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
+			return conversationListPageContinue, err
+		}
+		return conversationListPageFresh, nil
+	}
+	if !page.complete {
+		return conversationListPageContinue, nil
+	}
+	hand, err := a.refreshHandState(ctx)
+	if err != nil {
+		return conversationListPageContinue, err
+	}
+	switch {
+	case hand.UnreadTotal == nil:
+		if err := a.appendUnreadPatrolAudit(
+			"status=inconsistent reason=unreadListEmptyHintUnknown",
+		); err != nil {
+			return conversationListPageContinue, err
+		}
+	case *hand.UnreadTotal > 0:
+		if err := a.appendUnreadPatrolAudit(
+			"status=inconsistent reason=unreadListEmptyHintPositive",
+		); err != nil {
+			return conversationListPageContinue, err
+		}
+	}
+	return conversationListPageSwitchAll, nil
+}
+
+func (a *roundActor) openUnreadConversationWithoutAutomation(
+	ctx context.Context,
+	conversationRef string,
+) (conversationListPageOutcome, error) {
+	if err := a.setStage("openingUnreadConversation"); err != nil {
+		return conversationListPageContinue, err
+	}
+	a.invalidateListSnapshot()
+	data, err := invokePrimitive[protocol.ChatOpenConversationData](
+		ctx,
+		a,
+		protocol.PrimChatOpenConversation,
+		protocol.ChatOpenConversationArgs{ConversationRef: conversationRef},
+	)
+	if err != nil {
+		if a.isLocallyAttemptedUnreadError(err) {
+			if auditErr := a.appendUnreadPatrolAudit(
+				"status=attempted outcome=" + unreadLocalOutcome(err),
+			); auditErr != nil {
+				return conversationListPageContinue, auditErr
+			}
+			return conversationListPageFresh, nil
+		}
+		a.handleCommandFailure(err)
+		return conversationListPageContinue, err
+	}
+	if data.ConversationRef != conversationRef {
+		err := &RunError{
+			Code:       protocol.ErrCodeInternalHand,
+			Retryable:  protocol.RetryableManualOnly,
+			SideEffect: protocol.SideEffectPossible,
+			Cause:      errors.New("未读会话打开结果与目标会话不一致"),
+		}
+		a.handleCommandFailure(err)
+		return conversationListPageContinue, err
+	}
+	return conversationListPageFresh, nil
+}
+
+func (a *roundActor) isLocallyAttemptedUnreadError(err error) bool {
+	typed := runError(err)
+	if typed == nil {
+		return false
+	}
+	return (typed.Code == protocol.ErrCodeTargetNotFound &&
+		typed.Retryable == protocol.RetryableNo &&
+		typed.SideEffect == protocol.SideEffectNone) ||
+		(typed.Code == protocol.ErrCodePostconditionUnconfirmed &&
+			typed.SideEffect == protocol.SideEffectPossible)
+}
+
+func unreadLocalOutcome(err error) string {
+	typed := runError(err)
+	if typed == nil {
+		return "unknown"
+	}
+	switch typed.Code {
+	case protocol.ErrCodeTargetNotFound:
+		return "targetNotFound"
+	case protocol.ErrCodePostconditionUnconfirmed:
+		return "postconditionUnconfirmed"
+	default:
+		return "unknown"
+	}
+}
+
+func (a *roundActor) appendUnreadPatrolAudit(detail string) error {
+	return a.manager.store.AppendAudit(&store.AuditEntry{
+		At: a.manager.now(), Category: unreadPatrolAuditCategory,
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		RoundID: a.roundID, Detail: detail,
+	})
 }
 
 // mayStartNextConversation calls the coarse product-workflow gate without
@@ -1008,10 +1292,14 @@ func (a *roundActor) markIdentityUnobservable(reason protocol.NotReadyReason) er
 func (a *roundActor) readListPage(
 	ctx context.Context,
 	cursor string,
+	filter protocol.ListFilter,
 ) (conversationListPage, error) {
 	args := protocol.ChatReadListArgs{
-		Cursor: cursor, Filter: protocol.ListFilterAll,
-		MaxSessions: protocol.DefaultPaginationReadListMaxItems, StopOlderThanDays: 8,
+		Cursor: cursor, Filter: filter,
+		MaxSessions: protocol.DefaultPaginationReadListMaxItems,
+	}
+	if filter == protocol.ListFilterAll {
+		args.StopOlderThanDays = 8
 	}
 	data, err := invokePrimitive[protocol.ChatReadListData](
 		ctx,
@@ -1056,7 +1344,10 @@ func listEntries(sessions []protocol.ConversationSummary) ([]store.ListIndexEntr
 	return entries, nil
 }
 
-func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dirtyConversation, error) {
+func (a *roundActor) detectDirty(
+	sessions []protocol.ConversationSummary,
+	forceUnread bool,
+) ([]dirtyConversation, error) {
 	observedAt := a.manager.now()
 	tracked, err := a.manager.store.TrackedConversations(a.key())
 	if err != nil {
@@ -1111,7 +1402,7 @@ func (a *roundActor) detectDirty(sessions []protocol.ConversationSummary) ([]dir
 		}, ledger[len(ledger)-1]) {
 			hintDirty = true
 		}
-		if forceReconcile || (hintDirty && !hintAlreadyVerified) {
+		if forceUnread || forceReconcile || (hintDirty && !hintAlreadyVerified) {
 			out = append(out, dirtyConversation{
 				conversation:        conversation,
 				ledger:              ledger,
@@ -1664,6 +1955,32 @@ func (a *roundActor) key() store.AccountKey {
 
 func (a *roundActor) invalidateListSnapshot() {
 	a.listSnapshotGeneration++
+}
+
+func unreadHintPositive(value *int) bool {
+	return value != nil && *value > 0
+}
+
+func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {
+	if err := ctx.Err(); err != nil {
+		return HandState{}, err
+	}
+	state, err := a.manager.hands.State(ctx, a.account.BoundHandID)
+	if err != nil {
+		return HandState{}, err
+	}
+	if !state.Online ||
+		state.Session != a.hand.Session ||
+		state.BootID != a.hand.BootID {
+		return HandState{}, ErrActorGenerationChanged
+	}
+	a.hand.UnreadTotal = nil
+	if state.UnreadTotal != nil {
+		value := *state.UnreadTotal
+		a.hand.UnreadTotal = &value
+		state.UnreadTotal = &value
+	}
+	return state, nil
 }
 
 func (a *roundActor) ensureWithinDailyWindow() error {
