@@ -3266,6 +3266,7 @@ function installM6SourcingFilterFixture(options = {}) {
     listVersion: 0,
     listReads: 0,
     postConfirmListReads: 0,
+    styleVersion: 0,
     interactions: [],
     groupReads: new Map(),
   }
@@ -3463,6 +3464,7 @@ function installM6SourcingFilterFixture(options = {}) {
   cancel.click = () => {
     interact('cancel')
     state.cancels += 1
+    if (options.styleChangeOnCancel === true) state.styleVersion += 1
     state.drawerOpen = false
   }
   const confirm = node('确定')
@@ -3501,22 +3503,36 @@ function installM6SourcingFilterFixture(options = {}) {
     }
   }
   const title = node(refs.title)
-  const listItem = node()
-  listItem.attrs.set('data-index', '0')
-  Object.defineProperty(listItem, 'outerHTML', {
-    get() {
-      state.listReads += 1
-      if (state.confirms > 0 && options.delayedListChangeReads !== undefined) {
-        state.postConfirmListReads += 1
-        if (state.postConfirmListReads > options.delayedListChangeReads &&
-            state.listVersion === 0) {
-          state.listVersion += 1
-        }
+  const listIdentity = () => {
+    state.listReads += 1
+    if (state.confirms > 0 && options.delayedListChangeReads !== undefined) {
+      state.postConfirmListReads += 1
+      if (state.postConfirmListReads <= options.delayedListChangeReads) {
+        return `fixture-user-pending-${state.postConfirmListReads}`
       }
-      const suffix = options.unstableList === true ? `-${state.listReads}` : ''
-      return `<div data-index="0">stable-${state.listVersion}${suffix}</div>`
-    },
-  })
+      if (state.listVersion === 0) state.listVersion += 1
+    }
+    if (options.missingListIdentity === true) return ''
+    const unstableSuffix = options.unstableList === true ? `-${state.listReads}` : ''
+    const cancelSuffix =
+      options.identityChangeOnCancel === true && state.cancels > 0 ? '-after-cancel' : ''
+    return `fixture-user-${state.listVersion}${unstableSuffix}${cancelSuffix}`
+  }
+  const makeListItem = (dataIndex) => {
+    const listItem = node()
+    listItem.attrs.set('data-index', String(dataIndex))
+    const source = {}
+    Object.defineProperty(source, 'userMasterId', { get: listIdentity })
+    listItem.__vue__ = { _props: { source } }
+    Object.defineProperty(listItem, 'outerHTML', {
+      get() {
+        return `<div data-index="${dataIndex}" style="top:${state.styleVersion}px">same card</div>`
+      },
+    })
+    return listItem
+  }
+  const listItems = [makeListItem(0)]
+  if (options.duplicateListIdentity === true) listItems.push(makeListItem(1))
 
   globalThis.location = {
     href: `https://rd6.zhaopin.com/app/recommend?jobNumber=${refs.job}`,
@@ -3529,7 +3545,7 @@ function installM6SourcingFilterFixture(options = {}) {
       }
       if (query === 'a[zp-stat-id="talent-recommend-filter-click"]') return [trigger]
       if (query === '.job-pane__item--active .job-pane__item-job-title') return [title]
-      if (query === '.recommend-list__left div[role="listitem"]') return [listItem]
+      if (query === '.recommend-list__left div[role="listitem"]') return listItems
       if (query === '.km-popover.filter-select-two__popover') {
         return state.popover ? [state.popover] : []
       }
@@ -3608,7 +3624,7 @@ test('candidate.applySourcingFilters MAIN 已完全一致仍完整提交回读�
   }
 })
 
-test('candidate.applySourcingFilters MAIN 等待旧列表延迟换代后再确认新列表稳定', async () => {
+test('candidate.applySourcingFilters MAIN 等待推荐身份延迟稳定后再二次回读', async () => {
   const fixture = installM6SourcingFilterFixture({ delayedListChangeReads: 3 })
   try {
     const result = await zhilianTestHooks.mainApplySourcingFilters(
@@ -3618,7 +3634,7 @@ test('candidate.applySourcingFilters MAIN 等待旧列表延迟换代后再确�
     )
     assert.equal(result.status, 'ready')
     assert.ok(fixture.state.postConfirmListReads >= 5,
-      '必须先跨过若干次旧签名，再对新签名完成间隔一秒的双采样')
+      '必须先跨过若干次不稳定身份，再对稳定身份完成间隔一秒的双采样')
     assert.equal(fixture.state.confirms, 1)
     assert.equal(fixture.state.cancels, 1)
   } finally {
@@ -3641,6 +3657,61 @@ test('candidate.applySourcingFilters MAIN 条件已生效时允许列表签名�
     assert.equal(fixture.state.cancels, 1)
   } finally {
     fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 取消后仅页面样式变化不误判推荐流', async () => {
+  const fixture = installM6SourcingFilterFixture({ styleChangeOnCancel: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready')
+    assert.equal(fixture.state.confirms, 1)
+    assert.equal(fixture.state.cancels, 1)
+    assert.equal(fixture.state.styleVersion, 1, 'fixture 必须真实模拟取消后的无关 style 漂移')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 取消后稳定身份变化仍拦截', async () => {
+  const fixture = installM6SourcingFilterFixture({ identityChangeOnCancel: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.deepEqual(result, { status: 'failed', reason: 'cancel_changed_list' })
+    assert.equal(fixture.state.confirms, 1)
+    assert.equal(fixture.state.cancels, 1)
+    assert.equal(result.data, undefined)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('candidate.applySourcingFilters MAIN 稳定身份缺失或重复时不提交', async () => {
+  for (const options of [
+    { missingListIdentity: true },
+    { duplicateListIdentity: true },
+  ]) {
+    const fixture = installM6SourcingFilterFixture(options)
+    try {
+      const result = await zhilianTestHooks.mainApplySourcingFilters(
+        fixture.refs.job,
+        fixture.refs.title,
+        structuredClone(m6SourcingFilterTarget),
+      )
+      assert.deepEqual(result, { status: 'failed', reason: 'list_unavailable' })
+      assert.equal(fixture.state.confirms, 0)
+      assert.equal(fixture.state.cancels, 1, '提交前身份不可用时仍须关闭自有筛选面')
+    } finally {
+      fixture.restore()
+    }
   }
 })
 

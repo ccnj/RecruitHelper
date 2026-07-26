@@ -1470,6 +1470,7 @@ async function mainApplySourcingFilters(
   requestedPositionTitle: string,
   requestedFilters: ZhilianApplySourcingFiltersArgs['filters'],
 ): Promise<MainApplySourcingFiltersResult> {
+  type AnyRecord = Record<string, unknown>
   type FilterKey =
     | 'age'
     | 'activeTime'
@@ -1503,6 +1504,15 @@ async function mainApplySourcingFilters(
     .normalize('NFC')
     .replace(/[\s\u00a0]+/gu, ' ')
     .trim()
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? value as AnyRecord
+      : null
+  const opaque = (value: unknown): string => {
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value)
+    return ''
+  }
   const visible = (element: Element): boolean => {
     const node = element as HTMLElement
     const style = getComputedStyle(node)
@@ -1827,12 +1837,19 @@ async function mainApplySourcingFilters(
     if (currentPosition.status === 'failed') return currentPosition
     const items = visibleAll(document, '.recommend-list__left div[role="listitem"]')
     if (items.length === 0) return failed('list_unavailable')
-    const signature = items.map((item, index) => {
-      const dataIndex = clean(item.getAttribute('data-index'))
-      const html = typeof item.outerHTML === 'string' ? item.outerHTML : item.textContent
-      return `${index}:${dataIndex}:${clean(html)}`
-    }).join('|')
-    return signature ? { status: 'ready', signature } : failed('list_unavailable')
+    const identities = items.map((item) => {
+      const owner = asRecord((item as HTMLElement & { __vue__?: unknown }).__vue__)
+      const source = asRecord(asRecord(owner?._props)?.source)
+      return opaque(source?.userMasterId)
+    })
+    if (identities.some((identity) => !identity) ||
+        new Set(identities).size !== identities.length) {
+      return failed('list_unavailable')
+    }
+    return {
+      status: 'ready',
+      signature: `${currentPosition.positionRef}|${identities.join('|')}`,
+    }
   }
   const stableList = async (): Promise<ListRead> => {
     const deadline = Date.now() + 10_000
