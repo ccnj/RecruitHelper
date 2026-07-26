@@ -422,7 +422,10 @@
           "stopOlderThanDays": { "type": "int", "optional": true, "default": 8, "minimum": 1, "maximum": 30 },
           "maxSessions": { "type": "int", "optional": true, "default": 32, "minimum": 1, "maximum": 32 },
           "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
-        }
+        },
+        "rules": [
+          { "kind": "forbiddenWhen", "field": "stopOlderThanDays", "whenField": "filter", "equals": ["unread"] }
+        ]
       },
       "ChatReadListData": {
         "type": "object",
@@ -457,6 +460,19 @@
         "fields": {}
       },
       "ChatIdentifyCurrentConversationData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "ChatOpenConversationArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "ChatOpenConversationData": {
         "type": "object",
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
@@ -1074,7 +1090,7 @@
       "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true;unreadCount 遵守两次一致。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
+      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。unreadCount 遵守两次一致。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
     },
     "chat.identifyCurrentConversation": {
       "ver": 1, "class": "readonly", "batch": "S",
@@ -1082,6 +1098,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "只从唯一已打开且身份匹配的 IM 标签页公开 URL 读取当前 conversationRef;不搜索、不滚动、不点击、不切换会话。零个或多个 IM 标签页、URL 无当前会话或读取前后路由漂移均失败"
+    },
+    "chat.openConversation": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
+      "argsSchema": "ChatOpenConversationArgs", "dataSchema": "ChatOpenConversationData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
+      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 30000,
+      "note": "只在当前已回读为“全部职位+未读”的 fresh 列表中，按完整 conversationRef 唯一定位并标准点击一次；不得全局搜索，不得按姓名、职位、序号或 DOM 位置降级。ok 前必须复核公开路由仍绑定目标，并确认目标可见未读标记已清除或该行已离开未读列表；不读取消息正文、不创建或收编档案、不运行状态机、不发送。目标消失、身份不唯一、路由漂移或已读结果未确认时必须失败，不得宣告成功"
     },
     "chat.readThread": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",

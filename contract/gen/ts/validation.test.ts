@@ -3,6 +3,7 @@ import {
   PRIMITIVE_META,
   SendSurfaceDiagnosticStage,
   validateKindBody,
+  validatePrimitiveArgs,
   validatePrimitiveData,
   validatePrimitiveGuards,
   validatePrimitiveResult,
@@ -86,6 +87,56 @@ expectValid(
     execMs: 1,
   }),
 );
+expectValid("readList all default cutoff", validatePrimitiveArgs("chat.readList", 1, { filter: "all" }));
+expectValid(
+  "readList all explicit cutoff",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", stopOlderThanDays: 8 }),
+);
+expectValid("readList unread without cutoff", validatePrimitiveArgs("chat.readList", 1, { filter: "unread" }));
+expectIssue(
+  "readList unread forbids cutoff",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "unread", stopOlderThanDays: 8 }),
+  "$.stopOlderThanDays",
+  "forbiddenWhen",
+);
+expectValid(
+  "chat.openConversation args",
+  validatePrimitiveArgs("chat.openConversation", 1, { conversationRef: "conversation-1" }),
+);
+expectIssue(
+  "chat.openConversation non-empty ref",
+  validatePrimitiveArgs("chat.openConversation", 1, { conversationRef: "" }),
+  "$.conversationRef",
+  "minLength",
+);
+expectValid(
+  "chat.openConversation data",
+  validatePrimitiveData("chat.openConversation", 1, {
+    conversationRef: "conversation-1",
+    observedAt: 20,
+  }),
+);
+expectIssue(
+  "chat.openConversation observedAt",
+  validatePrimitiveData("chat.openConversation", 1, {
+    conversationRef: "conversation-1",
+    observedAt: -1,
+  }),
+  "$.observedAt",
+  "minimum",
+);
+const openConversationMeta = PRIMITIVE_META["chat.openConversation"];
+if (
+  openConversationMeta.ver !== 1 ||
+  openConversationMeta.class !== "intrusive" ||
+  openConversationMeta.batch !== "S" ||
+  openConversationMeta.platformSideEffect !== "idempotentReadReceipt" ||
+  openConversationMeta.execBudgetMs !== 30_000 ||
+  openConversationMeta.deadlineMs !== 60_000 ||
+  openConversationMeta.leaseMs !== 30_000
+) {
+  throw new Error(`chat.openConversation metadata drift: ${JSON.stringify(openConversationMeta)}`);
+}
 const commandWithoutContext: Record<string, unknown> = { ...validCommand };
 delete commandWithoutContext.context;
 expectIssue(

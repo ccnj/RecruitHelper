@@ -157,6 +157,9 @@ func assertContract(c map[string]any) {
 	if !hasConditionalRule(types, "JournalEntry", "forbiddenWhen", "result", "state", "attempting") {
 		die("schemas.types.JournalEntry 必须规定 attempting 时 result 禁止")
 	}
+	if !hasConditionalRule(types, "ChatReadListArgs", "forbiddenWhen", "stopOlderThanDays", "filter", "unread") {
+		die("schemas.types.ChatReadListArgs 必须规定 unread 时 stopOlderThanDays 禁止")
+	}
 	assertSchemaRef(types, "errorObject.schema", str(obj(c, "errorObject")["schema"]))
 
 	bodies := obj(c, "bodies")

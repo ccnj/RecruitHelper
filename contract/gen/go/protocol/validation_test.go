@@ -104,6 +104,69 @@ func TestValidateDebugReloadPrimitive(t *testing.T) {
 	}
 }
 
+func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
+	for label, raw := range map[string]json.RawMessage{
+		"all 默认八天":     json.RawMessage(`{"filter":"all"}`),
+		"all 显式八天":     json.RawMessage(`{"filter":"all","stopOlderThanDays":8}`),
+		"unread 无年龄截止": json.RawMessage(`{"filter":"unread"}`),
+	} {
+		t.Run(label, func(t *testing.T) {
+			if err := ValidatePrimitiveArgs(PrimChatReadList, 1, raw); err != nil {
+				t.Fatalf("合法 chat.readList 参数应通过: %v", err)
+			}
+		})
+	}
+	assertValidationError(
+		t,
+		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"unread","stopOlderThanDays":8}`)),
+		"$.stopOlderThanDays",
+		"forbiddenWhen",
+	)
+
+	if err := ValidatePrimitiveArgs(
+		PrimChatOpenConversation,
+		1,
+		json.RawMessage(`{"conversationRef":"conversation-1"}`),
+	); err != nil {
+		t.Fatalf("合法 chat.openConversation 参数应通过: %v", err)
+	}
+	assertValidationError(
+		t,
+		ValidatePrimitiveArgs(PrimChatOpenConversation, 1, json.RawMessage(`{"conversationRef":""}`)),
+		"$.conversationRef",
+		"minLength",
+	)
+
+	if err := ValidatePrimitiveData(
+		PrimChatOpenConversation,
+		1,
+		json.RawMessage(`{"conversationRef":"conversation-1","observedAt":20}`),
+	); err != nil {
+		t.Fatalf("合法 chat.openConversation 数据应通过: %v", err)
+	}
+	assertValidationError(
+		t,
+		ValidatePrimitiveData(
+			PrimChatOpenConversation,
+			1,
+			json.RawMessage(`{"conversationRef":"conversation-1","observedAt":-1}`),
+		),
+		"$.observedAt",
+		"minimum",
+	)
+
+	meta := Primitives[PrimChatOpenConversation]
+	if meta.Ver != 1 ||
+		meta.Class != ClassIntrusive ||
+		meta.Batch != BatchS ||
+		meta.PlatformSideEffect != "idempotentReadReceipt" ||
+		meta.ExecBudgetMs != 30_000 ||
+		meta.DeadlineMs != 60_000 ||
+		meta.LeaseMs != 30_000 {
+		t.Fatalf("chat.openConversation metadata 漂移: %+v", meta)
+	}
+}
+
 func TestValidateEventDataAndConst(t *testing.T) {
 	valid := json.RawMessage(`{"name":"unreadBadge","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"scope":"total","value":3,"prev":2,"stable":true,"future":1}}`)
 	if err := ValidateKindBody(KindEvent, valid); err != nil {
