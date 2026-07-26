@@ -50,6 +50,14 @@ type Manager struct {
 	// The map is accessed only while mu is held. Principal is part of the key so
 	// an account rebind can never inherit the previous recruiter's unread work.
 	unreadPendingByPrincipal map[unreadPendingKey]unreadPendingState
+	// unreadPassEndTotalByPrincipal remembers the stable sidebar unread total
+	// observed after the last complete unread pass. It is process-local
+	// scheduling memory only. A missing value means the next positive total may
+	// enter once; zero removes the baseline.
+	//
+	// The map is accessed only while mu is held and is deliberately separate
+	// from unreadPendingByPrincipal until the round consumer migrates.
+	unreadPassEndTotalByPrincipal map[unreadBaselineKey]int
 }
 
 type unreadPendingKey struct {
@@ -59,6 +67,11 @@ type unreadPendingKey struct {
 
 type unreadPendingState struct {
 	Generation uint64
+}
+
+type unreadBaselineKey struct {
+	Account   store.AccountKey
+	Principal string
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
@@ -80,8 +93,9 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	}
 	manager := &Manager{
 		store: db, runner: runner, hands: hands, config: config,
-		verifiedListHints:        make(map[listHintVerificationKey]string),
-		unreadPendingByPrincipal: make(map[unreadPendingKey]unreadPendingState),
+		verifiedListHints:             make(map[listHintVerificationKey]string),
+		unreadPendingByPrincipal:      make(map[unreadPendingKey]unreadPendingState),
+		unreadPassEndTotalByPrincipal: make(map[unreadBaselineKey]int),
 	}
 	if len(advice) > 0 {
 		manager.advice = advice[0]
@@ -511,6 +525,57 @@ func unreadPendingKeyForAccount(account *store.Account) (unreadPendingKey, bool)
 		return unreadPendingKey{}, false
 	}
 	return unreadPendingKey{
+		Account: store.AccountKey{
+			Platform: account.Platform, AccountRef: account.AccountRef,
+		},
+		Principal: *account.PrincipalFingerprint,
+	}, true
+}
+
+// unreadPassNeeded compares the current stable sidebar total with the total
+// observed after the last complete unread pass. It owns no business decision:
+// true only authorizes entering the unread page at the next safe candidate
+// boundary. A stable zero clears the old baseline; a missing value leaves it
+// unchanged.
+//
+// Caller must hold Manager.mu.
+func (m *Manager) unreadPassNeeded(account *store.Account, unread *int) bool {
+	key, ok := unreadBaselineKeyForAccount(account)
+	if !ok || unread == nil || *unread < 0 {
+		return false
+	}
+	if *unread == 0 {
+		delete(m.unreadPassEndTotalByPrincipal, key)
+		return false
+	}
+	last, exists := m.unreadPassEndTotalByPrincipal[key]
+	return !exists || last != *unread
+}
+
+// recordUnreadPassEnd records only the stable total observed after a complete
+// unread pass. A stable zero removes the baseline so a later positive total is
+// treated as new work. Missing or invalid values cannot fabricate completion.
+//
+// Caller must hold Manager.mu.
+func (m *Manager) recordUnreadPassEnd(account *store.Account, unread *int) bool {
+	key, ok := unreadBaselineKeyForAccount(account)
+	if !ok || unread == nil || *unread < 0 {
+		return false
+	}
+	if *unread == 0 {
+		delete(m.unreadPassEndTotalByPrincipal, key)
+		return true
+	}
+	m.unreadPassEndTotalByPrincipal[key] = *unread
+	return true
+}
+
+func unreadBaselineKeyForAccount(account *store.Account) (unreadBaselineKey, bool) {
+	if account == nil || account.Platform == "" || account.AccountRef == "" ||
+		account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
+		return unreadBaselineKey{}, false
+	}
+	return unreadBaselineKey{
 		Account: store.AccountKey{
 			Platform: account.Platform, AccountRef: account.AccountRef,
 		},
