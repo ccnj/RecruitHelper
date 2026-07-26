@@ -7970,9 +7970,12 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
         if (func.name === 'mainProbeZhilian') return [{ result: {
           pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
         } }]
-        if (func.name === 'mainFindConversation') {
+        if (func.name === 'mainReadListDOMWindow') {
           selectCalls += 1
-          return [{ result: { status: 'found' } }]
+          return [{ result: {
+            sessions: [{ conversationRef }],
+            atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+          } }]
         }
         if (func.name === 'mainClickConversationOnce') {
           currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
@@ -8637,7 +8640,10 @@ test('会话切换等待异常时 commandNavigation 必经 finally 清理', asyn
     },
     scripting: {
       async executeScript({ func }) {
-        if (func.name === 'mainFindConversation') return [{ result: { status: 'found' } }]
+        if (func.name === 'mainReadListDOMWindow') return [{ result: {
+          sessions: [{ conversationRef }],
+          atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+        } }]
         if (func.name === 'mainProbeZhilian') return [{ result: {
           pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
         } }]
@@ -8689,8 +8695,14 @@ test('页面列表目标在 readThread 前离开窗口时只报无副作用 TARG
   globalThis.chrome = {
     scripting: {
       async executeScript({ func }) {
-        if (func.name === 'mainFindConversation') {
-          return [{ result: { status: 'failed', reason: finderReason } }]
+        if (func.name === 'mainReadListDOMWindow') {
+          if (finderReason === 'list_binding_unresolved') {
+            throw new Error('list_binding_unresolved')
+          }
+          return [{ result: {
+            sessions: [],
+            atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+          } }]
         }
         if (func.name === 'mainClickConversationOnce') {
           clickCalls += 1
@@ -8753,9 +8765,12 @@ test('会话 finder 在取消后才返回也不能进入同步 click task', asyn
   globalThis.chrome = {
     scripting: {
       async executeScript({ func }) {
-        if (func.name === 'mainFindConversation') {
+        if (func.name === 'mainReadListDOMWindow') {
           await finderGate
-          return [{ result: { status: 'found' } }]
+          return [{ result: {
+            sessions: [{ conversationRef }],
+            atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+          } }]
         }
         if (func.name === 'mainClickConversationOnce') {
           clickCalls += 1
@@ -9099,68 +9114,7 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
   )
 })
 
-test('智联列表 API 响应缺少真实 hasMore 时响亮失败', async () => {
-  globalThis.window = {
-    imEngine: {
-      async getSessions() { return { curSessions: [] } },
-    },
-  }
-  await assert.rejects(
-    zhilianTestHooks.mainReadListPage(1, 8, 'all'),
-    /hasMore missing/,
-  )
-})
-
-test('智联列表把每个会话自己的可见职位标题规范化进摘要', async () => {
-  const rows = [{
-    sessionId: 'conversation-position-title',
-    peerPartnerId: 'peer-position-title',
-    name: '脱敏候选人',
-    unreadCount: 1,
-    lastSentence: JSON.stringify({
-      senderType: 'USER',
-      text: '脱敏消息',
-      sendTime: 1_700_000_000_000,
-    }),
-    sortTime: 1_700_000_000_000,
-    jobTitle: '  大客户经理\u00a0（养老&财富传承）  ',
-  }]
-  globalThis.window = {
-    imEngine: {
-      async getSessions() {
-        return { curSessions: structuredClone(rows), hasMoreSession: false }
-      },
-    },
-  }
-  const page = await zhilianTestHooks.mainReadListPage(1, 8, 'all')
-  assert.equal(page.sessions.length, 1)
-  assert.equal(page.sessions[0].positionTitle, '大客户经理 （养老&财富传承）')
-
-  rows[0].jobTitle = ''
-  rows[0].subtitlePrefix = ''
-  const missing = await zhilianTestHooks.mainReadListPage(1, 8, 'all')
-  assert.equal(missing.sessions[0].positionTitle, null,
-    '职位读取不到时必须显式保守，不得从当前默认职位猜测')
-})
-
-test('智联列表与线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
-  let listCalls = 0
-  globalThis.window = {
-    imEngine: {
-      getSessions() {
-        listCalls += 1
-        return listCalls === 1
-          ? Promise.resolve({ curSessions: [], hasMoreSession: true })
-          : new Promise(() => {})
-      },
-    },
-  }
-  await assert.rejects(
-    zhilianTestHooks.mainReadListPage(1, 8, 'all', 150),
-    /list_api_timeout/u,
-  )
-  assert.equal(listCalls, 2, '两次稳定采样必须共享同一截止时间')
-
+test('智联线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
   const conversationRef = 'conversation-history-timeout'
   globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
   globalThis.document = { scripts: [] }
@@ -9175,9 +9129,9 @@ test('智联列表与线程页面 API 不响应时由 MAIN 本地截止响亮释
   assert.match(failure.__recruitHelperMainError, /read_history_api:history_api_timeout/u)
 })
 
-test('readList 请求 32 条时也只交付当前 8 条 API 窗口并如实返回游标', async () => {
+test('readList 只交付当前可定位 DOM 窗口并如实返回游标', async () => {
   const fingerprint = '9'.repeat(64)
-  let listCalls = 0
+  let domCalls = 0
   const rows = Array.from({ length: 8 }, (_unused, index) => ({
     conversationRef: `conversation-window-${index}`,
     peer: { displayName: `候选人${index}`, platformUserRef: `peer-${index}` },
@@ -9197,9 +9151,16 @@ test('readList 请求 32 条时也只交付当前 8 条 API 窗口并如实返�
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
         }
-        if (func.name === 'mainReadListPage') {
-          listCalls += 1
-          return [{ result: { sessions: rows, hasMore: true, unstable: false } }]
+        if (func.name === 'mainReadListDOMWindow') {
+          domCalls += 1
+          return [{ result: {
+            sessions: rows,
+            atBottom: false,
+            moved: true,
+            scrollHeight: 2_000,
+            scrollTop: 0,
+            unstable: false,
+          } }]
         }
         throw new Error(`unexpected MAIN function ${func.name}`)
       },
@@ -9215,7 +9176,7 @@ test('readList 请求 32 条时也只交付当前 8 条 API 窗口并如实返�
     context,
     fingerprint,
   )
-  assert.equal(listCalls, 1)
+  assert.equal(domCalls, 1)
   assert.equal(page.sessions.length, 8)
   assert.equal(page.complete, false)
   assert.ok(page.nextCursor)
@@ -9727,10 +9688,13 @@ function installThreadRouteHarness(conversationRef, {
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
         }
-        if (func.name === 'mainFindConversation') {
+        if (func.name === 'mainReadListDOMWindow') {
           state.finds += 1
           state.events.push('find')
-          return [{ result: { status: 'found' } }]
+          return [{ result: {
+            sessions: [{ conversationRef }],
+            atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+          } }]
         }
         if (func.name === 'mainClickConversationOnce') {
           state.clicks += 1
@@ -10135,7 +10099,7 @@ test('readThread 游标绑定参数、设置读取安全点并拒绝原地游标
   assert.equal(mainReadCalls, readsBeforeLost + 1, '上下文丢失时不得重跑完整 MAIN 读取')
 })
 
-test('readList API 失效时走 Vue DOM 虚拟列表，只有跨过 cutoff 才宣告 complete', async () => {
+test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部正常收束', async () => {
   const fingerprint = 'e'.repeat(64)
   const now = Date.now()
   let domPage = {
@@ -10161,6 +10125,7 @@ test('readList API 失效时走 Vue DOM 虚拟列表，只有跨过 cutoff 才�
     scrollTop: 500,
     unstable: false,
   }
+  let domPageForArgs = () => domPage
   const domCalls = []
   globalThis.chrome = {
     tabs: {
@@ -10174,10 +10139,9 @@ test('readList API 失效时走 Vue DOM 虚拟列表，只有跨过 cutoff 才�
             pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
           } }]
         }
-        if (func.name === 'mainReadListPage') throw new Error('imEngine unavailable')
         if (func.name === 'mainReadListDOMWindow') {
           domCalls.push(args)
-          return [{ result: domPage }]
+          return [{ result: domPageForArgs(args) }]
         }
         throw new Error(`unexpected MAIN function ${func.name}`)
       },
@@ -10199,10 +10163,14 @@ test('readList API 失效时走 Vue DOM 虚拟列表，只有跨过 cutoff 才�
     sessions: [domPage.sessions[0]],
     atBottom: true,
   }
-  await assert.rejects(
-    readZhilianList({ filter: 'all', stopOlderThanDays: 8 }, context, fingerprint),
-    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.ElementUnresolved,
+  const currentBottom = await readZhilianList(
+    { filter: 'all', stopOlderThanDays: 8 },
+    context,
+    fingerprint,
   )
+  assert.equal(currentBottom.complete, true)
+  assert.equal(currentBottom.nextCursor, null)
+  assert.deepEqual(currentBottom.sessions.map((item) => item.conversationRef), ['newer'])
 
   const stableWindow = [
     { ...domPage.sessions[0], conversationRef: 'cursor-a', lastActivityTs: now },
@@ -10230,6 +10198,50 @@ test('readList API 失效时走 Vue DOM 虚拟列表，只有跨过 cutoff 才�
     (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.CursorInvalid,
   )
   assert.deepEqual(domCalls.at(-1), [false, false])
+
+  const prefixWindow = [
+    { ...stableWindow[0], conversationRef: 'prefix-a' },
+    { ...stableWindow[1], conversationRef: 'prefix-b' },
+  ]
+  const appendedWindow = [
+    ...prefixWindow,
+    {
+      ...stableWindow[0],
+      conversationRef: 'prefix-c',
+      peer: { displayName: '候选人丁', platformUserRef: 'peer-d' },
+      lastActivityTs: now - 2_000,
+    },
+  ]
+  domPage = {
+    ...domPage,
+    sessions: prefixWindow,
+    atBottom: false,
+    scrollTop: 0,
+  }
+  domPageForArgs = ([advance]) => advance
+    ? {
+        ...domPage,
+        sessions: appendedWindow,
+        atBottom: true,
+        scrollTop: 600,
+      }
+    : domPage
+  const prefixFirst = await readZhilianList({
+    filter: 'all', stopOlderThanDays: 8, maxSessions: 2,
+  }, context, fingerprint)
+  assert.deepEqual(prefixFirst.sessions.map((item) => item.conversationRef), ['prefix-a', 'prefix-b'])
+  assert.ok(prefixFirst.nextCursor)
+  const prefixNext = await readZhilianList({
+    filter: 'all',
+    stopOlderThanDays: 8,
+    maxSessions: 2,
+    cursor: prefixFirst.nextCursor,
+  }, context, fingerprint)
+  assert.equal(prefixNext.complete, true)
+  assert.equal(prefixNext.nextCursor, null)
+  assert.deepEqual(prefixNext.sessions.map((item) => item.conversationRef), ['prefix-c'],
+    '20→31 式前缀追加只能交付新增后缀，旧窗口不得再次进入脑')
+  assert.deepEqual(domCalls.slice(-2), [[false, false], [true, false]])
 })
 
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {

@@ -27,6 +27,7 @@ type roundActor struct {
 	requireCurrentThread    bool
 	sourcingBatchIDAtStart  string
 	superseded              bool
+	freshListRequired       bool
 	projection              []ConversationProjection
 }
 
@@ -175,6 +176,14 @@ func (a *roundActor) execute(ctx context.Context) error {
 		}
 		page, err := a.readListPage(ctx, cursor)
 		if err != nil {
+			if isRunError(err, protocol.ErrCodeUserActive) ||
+				isRunError(err, protocol.ErrCodeCursorInvalid) {
+				// readList 的 USER_ACTIVE/CURSOR_INVALID 只说明本轮页面
+				// 快照已经换代。已完成的会话事实照常保留，下一巡检从
+				// fresh 当前窗口重读；这里没有人工草稿或发送动作可重试。
+				a.freshListRequired = true
+				return nil
+			}
 			a.handleCommandFailure(err)
 			return err
 		}
@@ -184,8 +193,16 @@ func (a *roundActor) execute(ctx context.Context) error {
 			}
 			seenConversations[summary.ConversationRef] = struct{}{}
 		}
-		if err := a.processConversationListPage(ctx, page); err != nil {
+		consumedTarget, err := a.processConversationListPage(ctx, page)
+		if err != nil {
 			return err
+		}
+		if consumedTarget {
+			// readThread 可能切换会话、清除未读，后续回复/卡片还会重排
+			// 列表。旧 page/cursor 此刻不再是导航依据；每份页面快照
+			// 最多处理一个需要 readThread 的会话。
+			a.freshListRequired = true
+			return nil
 		}
 		if a.classificationCorrected || page.complete {
 			return nil
@@ -205,16 +222,16 @@ func (a *roundActor) execute(ctx context.Context) error {
 func (a *roundActor) processConversationListPage(
 	ctx context.Context,
 	page conversationListPage,
-) error {
+) (bool, error) {
 	entries, err := listEntries(page.sessions)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := a.manager.store.SaveConversationList(store.SaveConversationListRequest{
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
 		ObservedAt: a.manager.now(), Complete: page.complete, Entries: entries,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	lateObservations := make([]store.LateGreetingConversationObservation, 0, len(entries))
 	for _, entry := range entries {
@@ -230,44 +247,50 @@ func (a *roundActor) processConversationListPage(
 		Platform: a.account.Platform, AccountRef: a.account.AccountRef, RoundID: a.roundID,
 		ObservedAt: a.manager.now(), Conversations: lateObservations,
 	}); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := a.adoptInboundConversationProfiles(page.sessions); err != nil {
-		return err
+		return false, err
 	}
 	if err := a.ensureCommunicationV4Roots(); err != nil {
-		return err
+		return false, err
 	}
 	if err := a.ensureSourcingCommunicationContexts(); err != nil {
-		return err
+		return false, err
 	}
 	if err := a.ensureSourcingCommunicationResumes(); err != nil {
-		return err
+		return false, err
 	}
 
 	dirty, err := a.detectDirty(page.sessions)
 	if err != nil {
-		return err
+		return false, err
 	}
 	dirtyByRef := make(map[string]dirtyConversation, len(dirty))
 	for index := range dirty {
 		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
 	}
 	for _, summary := range page.sessions {
+		_, readCurrent := dirtyByRef[summary.ConversationRef]
 		if dirtyConversation, ok := dirtyByRef[summary.ConversationRef]; ok {
 			if err := a.setStage("readingThread"); err != nil {
-				return err
+				return false, err
 			}
 			projection, err := a.reconcileConversation(ctx, dirtyConversation)
 			if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
 				a.projection = append(a.projection, projection)
 			}
 			if err != nil {
+				if isRunError(err, protocol.ErrCodeTargetNotFound) {
+					// 目标在 click 前离开本轮可定位窗口，没有产生页面
+					// 副作用。把它视为快照过期，禁止数据库反向找人。
+					return true, nil
+				}
 				a.handleCommandFailure(err)
-				return err
+				return false, err
 			}
 			if a.classificationCorrected {
-				return nil
+				return true, nil
 			}
 		}
 		key := store.ConversationKey{
@@ -276,22 +299,28 @@ func (a *roundActor) processConversationListPage(
 		}
 		profile, err := a.manager.store.CandidateProfileByConversation(key)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if profile == nil {
+			if readCurrent {
+				return true, nil
+			}
 			continue
 		}
 		if err := a.prepareInboundConversationProfile(
 			ctx,
 			*profile,
 		); err != nil {
-			return err
+			return false, err
 		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
-			return err
+			return false, err
+		}
+		if readCurrent {
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 const inboundProfileAdoptionAuditCategory = "inbound_profile_adoption"
@@ -1433,6 +1462,10 @@ func (a *roundActor) finish(runErr error) error {
 	if runErr != nil {
 		status = "failed"
 		stage = "failed"
+	} else if a.freshListRequired {
+		// 页面窗口自然换代是一次已收束的部分巡检，不冒充完整扫描，
+		// 也不记成业务失败。下一轮仍从无 cursor 的当前窗口开始。
+		stage = "freshListPending"
 	}
 	if a.superseded {
 		status = "failed"
@@ -1461,6 +1494,14 @@ func (a *roundActor) finish(runErr error) error {
 	if err := a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
 		account.LastPatrolAt = timePointer(finishedAt)
 		regularNext := finishedAt.Add(a.manager.config.PatrolInterval)
+		if a.freshListRequired {
+			account.DirtyHint = true
+			freshNext := finishedAt.Add(a.manager.config.MinimumRoundGap)
+			if account.NextPatrolAt == nil || account.NextPatrolAt.After(freshNext) {
+				account.NextPatrolAt = timePointer(freshNext)
+			}
+			return nil
+		}
 		if runErr != nil {
 			account.DirtyHint = true
 		}

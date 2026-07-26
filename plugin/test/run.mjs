@@ -449,9 +449,10 @@ try {
           platform.greetingServerMessageCreated = true
           return [{ result: { status: 'clicked' } }]
         }
-        if (name === 'mainReadListPage') {
-          const [pageNo] = args
-          assert.equal(pageNo, 1)
+        if (name === 'mainReadListDOMWindow') {
+          const [advance, resetToTop] = args
+          assert.equal(typeof advance, 'boolean')
+          assert.equal(typeof resetToTop, 'boolean')
           const sessions = [{
             conversationRef: fixtureConversationRef,
             peer: { displayName: '合成候选人', platformUserRef: fixturePeerRef },
@@ -470,14 +471,12 @@ try {
           }
           return [{ result: {
             sessions,
-            hasMore: false,
+            atBottom: false,
+            moved: true,
+            scrollHeight: 2_000,
+            scrollTop: advance ? 600 : 0,
             unstable: false,
           } }]
-        }
-        if (name === 'mainFindConversation') {
-          assert.equal(args.length, 1)
-          assert.ok([fixtureConversationRef, fixtureGreetingConversationRef].includes(args[0]))
-          return [{ result: { status: 'found' } }]
         }
         if (name === 'mainClickConversationOnce') {
           const [
@@ -736,7 +735,7 @@ try {
   assert.equal(postPaths.filter((path) => path === '/admin/cmd').length, 0,
     'M2 链路不得使用 /admin/cmd 旁路')
   for (const expectedCall of [
-    'mainProbeZhilian', 'mainReadListPage', 'mainFindConversation',
+    'mainProbeZhilian', 'mainReadListDOMWindow',
     'mainClickConversationOnce', 'mainReadThreadPage',
   ]) {
     assert.ok(platform.mainCalls.includes(expectedCall), `生产平台接缝没有执行 ${expectedCall}`)
@@ -748,9 +747,6 @@ try {
   const intentId = 'fixture-intent-send-001'
   const sessionBeforeSend = conn.status().session
   const socketsBeforeSend = harnessSockets.length
-  const routeFindCallsBeforeSend = platform.mainCalls.filter(
-    (name) => name === 'mainFindConversation',
-  ).length
   const routeClickCallsBeforeSend = platform.mainCalls.filter(
     (name) => name === 'mainClickConversationOnce',
   ).length
@@ -836,8 +832,6 @@ try {
   }
   assert.equal(platform.mainCalls.includes('mainInspectSendSurface'), false,
     '生产发送不得再由另一套 DOM preflight 逻辑授权')
-  assert.equal(platform.mainCalls.filter((name) => name === 'mainFindConversation').length,
-    routeFindCallsBeforeSend, 'M3 发送不得搜索或切换会话')
   assert.equal(platform.mainCalls.filter((name) => name === 'mainClickConversationOnce').length,
     routeClickCallsBeforeSend, 'M3 发送不得点击会话行')
 

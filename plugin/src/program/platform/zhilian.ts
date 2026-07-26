@@ -125,12 +125,6 @@ interface MainProbeResult {
   imListVisible: boolean
 }
 
-interface MainListPageResult {
-  sessions: ZhilianConversationSummary[]
-  hasMore: boolean
-  unstable: boolean
-}
-
 const MAIN_CURRENT_CANDIDATE_FAILURE_REASONS = [
   'route_missing',
   'detail_absent',
@@ -3714,128 +3708,11 @@ export async function ensureZhilianIM(
   }
 }
 
-// 自包含 MAIN-world 列表读取。两次请求不是失败重试，而是 unread/排序一致性采样；
-// 任一差异交由脑下轮重算，手不在本命令内继续猜。
-async function mainReadListPage(
-  pageNo: number,
-  pageSize: number,
-  filter: 'all' | 'unread',
-  apiTimeoutMs = 10_000,
-): Promise<MainListPageResult> {
-  type AnyRecord = Record<string, unknown>
-  const w = window as unknown as AnyRecord
-  const engine = w.imEngine as AnyRecord | undefined
-  const getSessions = engine?.getSessions
-  if (typeof getSessions !== 'function') throw new Error('imEngine.getSessions unavailable')
-
-  const deadline = Date.now() + apiTimeoutMs
-  const withinDeadline = async <T>(promise: Promise<T>): Promise<T> => {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) throw new Error('list_api_timeout')
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error('list_api_timeout')), remaining)
-        }),
-      ])
-    } finally {
-      if (timer !== undefined) clearTimeout(timer)
-    }
-  }
-
-  const payload: AnyRecord = { pageNo, pageSize, includeResume: true }
-  if (filter === 'unread') payload.filterUnread = true
-  const first = await withinDeadline(
-    (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload }),
-  )
-  await new Promise((resolve) => setTimeout(resolve, 120))
-  const second = await withinDeadline(
-    (getSessions as (arg: AnyRecord) => Promise<AnyRecord>).call(engine, { ...payload }),
-  )
-  if (!first || !second || !Array.isArray(first.curSessions) || !Array.isArray(second.curSessions)) {
-    throw new Error('imEngine.getSessions response shape invalid')
-  }
-  const hasMoreOf = (value: AnyRecord): boolean => {
-    if (typeof value.hasMoreSession === 'boolean') return value.hasMoreSession
-    if (typeof value.hasMore === 'boolean') return value.hasMore
-    throw new Error('imEngine.getSessions hasMore missing')
-  }
-  const firstHasMore = hasMoreOf(first)
-  const secondHasMore = hasMoreOf(second)
-  const firstRows = first.curSessions as AnyRecord[]
-  const secondRows = second.curSessions as AnyRecord[]
-  const firstByID = new Map(firstRows.map((row) => [String(row.sessionId ?? ''), row]))
-  const stableProjection = (row: AnyRecord): unknown[] => [
-    row.sessionId, row.peerPartnerId, row.unreadCount, row.isUnRead,
-    row.lastSentence, row.sortTime, row.modifiedTime,
-  ]
-  let unstable = firstHasMore !== secondHasMore ||
-    JSON.stringify(firstRows.map(stableProjection)) !== JSON.stringify(secondRows.map(stableProjection))
-
-  const clean = (value: unknown): string => String(value ?? '')
-    .normalize('NFC')
-    .replace(/\u00a0/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim()
-  const clampPreview = (value: string): string => Array.from(value).slice(0, 200).join('')
-  const toMillis = (value: unknown): number | null => {
-    const number = Number(value)
-    if (!Number.isFinite(number) || number <= 0) return null
-    return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number)
-  }
-
-  const sessions: ZhilianConversationSummary[] = []
-  for (const row of secondRows) {
-    const conversationRef = clean(row.sessionId)
-    if (!conversationRef) throw new Error('session identity missing')
-    const unreadRaw = Number(row.unreadCount)
-    if (!Number.isInteger(unreadRaw) || unreadRaw < 0) throw new Error('session unreadCount invalid')
-    const prior = firstByID.get(conversationRef)
-    if (!prior || Number(prior.unreadCount) !== unreadRaw) unstable = true
-    if (filter === 'unread' && unreadRaw <= 0) continue
-    let last: AnyRecord = {}
-    try {
-      last = typeof row.lastSentence === 'string' ? JSON.parse(row.lastSentence) as AnyRecord : (row.lastSentence as AnyRecord) ?? {}
-    } catch {
-      unstable = true
-    }
-    const senderType = clean(last.senderType).toUpperCase()
-    const direction: 'in' | 'out' | 'system' =
-      senderType === 'STAFF' ? 'out' : senderType === 'USER' ? 'in' : 'system'
-    const displayName = clean(row.name ?? row.realName) || '未命名候选人'
-    const platformUserRef = clean(row.peerPartnerId ?? row.typeUserId ?? row.userId)
-    const rawPositionTitle = clean(row.jobTitle ?? row.subtitlePrefix)
-    const positionTitle = rawPositionTitle &&
-      Array.from(rawPositionTitle).length <= 256 &&
-      new TextEncoder().encode(rawPositionTitle).length <= 1_024
-      ? rawPositionTitle
-      : null
-    const textPreview = clampPreview(clean(last.text) || clean(last.title))
-    sessions.push({
-      conversationRef,
-      peer: platformUserRef ? { displayName, platformUserRef } : { displayName },
-      positionTitle,
-      unreadCount: unreadRaw,
-      lastMessage: {
-        direction,
-        kind: direction === 'system' ? 'system' : 'text',
-        textPreview,
-      },
-      lastActivityTs: toMillis(row.sortTime ?? last.sendTime ?? row.modifiedTime),
-    })
-  }
-  return {
-    sessions,
-    hasMore: secondHasMore,
-    unstable,
-  }
-}
-
-// API 不可用时的保守虚拟列表兜底。顶部先用当前真机已验证的启动状态；滚动后的
-// 动态窗只接受带稳定 sessionId/peerPartnerId 的 MAIN-world Vue source，否则响亮失败。
-// 滚到底本身不证明平台 hasMore=false，外层只在跨过时间 cutoff 时宣告 complete。
+// 页面驱动巡检只读取当前真实渲染、且能被后续会话定位器再次找到的虚拟列表窗口。
+// 每一行必须带稳定 sessionId/peerPartnerId 的 MAIN-world Vue source；不再用
+// getSessions 的独立分页结果或页面启动快照充当导航目标。
+// 当前可见底部只收束本轮页面扫描，不承诺平台历史永久穷尽；后续定时巡检仍从
+// 新鲜顶部开始，不能因为本轮到底把账号转入人工暂停。
 async function mainReadListDOMWindow(
   advance: boolean,
   resetToTop: boolean,
@@ -3875,42 +3752,12 @@ async function mainReadListDOMWindow(
     }
     return parsed as AnyRecord
   }
-  const initialSessions = (): AnyRecord[] => {
-    const source = Array.from(document.scripts)
-      .map((script) => script.textContent ?? '')
-      .find((text) => text.includes('__INITIAL_STATE__='))
-    if (!source) return []
-    const marker = '__INITIAL_STATE__='
-    const candidate = source.slice(source.indexOf(marker) + marker.length).trim()
-    const objectStart = candidate.indexOf('{')
-    let depth = 0
-    let quoted = false
-    let escaped = false
-    let objectEnd = -1
-    for (let index = objectStart; index >= 0 && index < candidate.length; index += 1) {
-      const char = candidate[index]
-      if (quoted) {
-        if (escaped) escaped = false
-        else if (char === '\\') escaped = true
-        else if (char === '"') quoted = false
-        continue
-      }
-      if (char === '"') quoted = true
-      else if (char === '{') depth += 1
-      else if (char === '}') {
-        depth -= 1
-        if (depth === 0) {
-          objectEnd = index + 1
-          break
-        }
-      }
-    }
-    if (objectStart < 0 || objectEnd < 0) throw new Error('dom_list_initial_state_boundary_invalid')
-    const initial = JSON.parse(candidate.slice(objectStart, objectEnd)) as AnyRecord
-    const im = initial.im as AnyRecord | undefined
-    return Array.isArray(im?.sessions) ? im.sessions as AnyRecord[] : []
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      node.getClientRects().length > 0
   }
-  const startupSessions = initialSessions()
   const vueSource = (node: HTMLElement): AnyRecord => {
     const candidates = [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]
     for (const candidate of candidates) {
@@ -3932,15 +3779,11 @@ async function mainReadListDOMWindow(
     atBottom: boolean
   } => {
     const scrollTop = scrollElement.scrollTop
-    const useStartupState = scrollTop <= 2 && startupSessions.length > 0
-    const nodes = useStartupState
-      ? []
-      : Array.from(document.querySelectorAll<HTMLElement>(itemSelector))
-          .filter((node) => node.querySelector('.im-session-item__box, .im-session-item') !== null)
-    if (!useStartupState && nodes.length === 0) throw new Error('dom_list_items_missing')
-    const sourcePairs: Array<{ source: AnyRecord; node: HTMLElement | null }> = useStartupState
-      ? startupSessions.map((source) => ({ source, node: null }))
-      : nodes.map((node) => ({ source: vueSource(node), node }))
+    const nodes = Array.from(document.querySelectorAll<HTMLElement>(itemSelector))
+      .filter((node) => visible(node) &&
+        node.querySelector('.im-session-item__box, .im-session-item') !== null)
+    if (nodes.length === 0) throw new Error('dom_list_items_missing')
+    const sourcePairs = nodes.map((node) => ({ source: vueSource(node), node }))
     const seen = new Set<string>()
     const sessions: ZhilianConversationSummary[] = []
     for (const { source, node } of sourcePairs) {
@@ -4003,11 +3846,17 @@ async function mainReadListDOMWindow(
     clientHeight: snapshot.clientHeight,
     atBottom: snapshot.atBottom,
   })
+  const waitAfterVisibleInteraction = async (): Promise<void> => {
+    const delayMs = 1_000 + Math.floor(Math.random() * 401)
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+  }
 
   if (resetToTop) {
-    scrollElement.scrollTop = 0
-    scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    if (scrollElement.scrollTop > 1) {
+      scrollElement.scrollTop = 0
+      scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+      await waitAfterVisibleInteraction()
+    }
   }
   const before = collect()
   if (advance) {
@@ -4015,9 +3864,10 @@ async function mainReadListDOMWindow(
     const step = Math.max(Math.floor(before.clientHeight * 0.8), 8 * 72)
     scrollElement.scrollTop = Math.min(maxTop, before.scrollTop + step)
     scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
+    await waitAfterVisibleInteraction()
   }
 
-  await new Promise((resolve) => setTimeout(resolve, advance ? 500 : 150))
+  await new Promise((resolve) => setTimeout(resolve, 150))
   let latest = collect()
   let stableRounds = 0
   for (let attempt = 0; attempt < 6 && stableRounds < 2; attempt += 1) {
@@ -4832,6 +4682,7 @@ async function readZhilianListFromDOM(
   let expectedWindowDigest = cursor?.pageDigest ?? null
   let resumeCursor: ListCursor | null = cursor
   let previousWindowDigest: string | null = null
+  let previousWindowSessions: ZhilianConversationSummary[] | null = null
   let advance = false
   let resetToTop = cursor === null
   let complete = false
@@ -4841,14 +4692,14 @@ async function readZhilianListFromDOM(
   while (sessions.length < maxSessions) {
     if (windowNo > 100_000) throw new ZhilianPlatformError('CURSOR_INVALID', 'DOM 列表分页超过安全窗数')
     ctx.checkpoint()
-    await ctx.progress(`DOM 兜底读取智联会话列表第 ${windowNo} 窗`, Math.min(95, 5 + sessions.length))
+    await ctx.progress(`读取智联会话列表第 ${windowNo} 窗`, Math.min(95, 5 + sessions.length))
     let page: MainListDOMWindowResult
     try {
       page = await runMain(tab.id, mainReadListDOMWindow, [advance, resetToTop])
     } catch (error) {
       throw new ZhilianPlatformError(
         'CTX_LOST_DURING_EXEC',
-        `智联会话列表 DOM 兜底失败：${asError(error).message}`,
+        `智联会话列表页面读取失败：${asError(error).message}`,
       )
     }
     if (page.unstable) {
@@ -4856,11 +4707,9 @@ async function readZhilianListFromDOM(
     }
     if (advance && !page.moved) {
       if (page.atBottom) {
-        throw new ZhilianPlatformError(
-          'ELEMENT_UNRESOLVED',
-          'DOM 已到可见底部但没有平台 hasMore 证词，也尚未跨过时间截止线',
-          'manualOnly',
-        )
+        complete = true
+        resumeCursor = null
+        break
       }
       throw new ZhilianPlatformError('CURSOR_INVALID', 'DOM 虚拟列表滚动没有向前推进')
     }
@@ -4882,11 +4731,36 @@ async function readZhilianListFromDOM(
     expectedWindowDigest = null
     resetToTop = false
 
+    let overlap = 0
+    if (advance && previousWindowSessions !== null) {
+      const previousRefs = previousWindowSessions.map((item) => item.conversationRef)
+      const currentRefs = page.sessions.map((item) => item.conversationRef)
+      const maxOverlap = Math.min(previousRefs.length, currentRefs.length)
+      for (let size = maxOverlap; size > 0; size -= 1) {
+        const previousStart = previousRefs.length - size
+        let matches = true
+        for (let index = 0; index < size; index += 1) {
+          if (previousRefs[previousStart + index] !== currentRefs[index]) {
+            matches = false
+            break
+          }
+        }
+        if (matches) {
+          overlap = size
+          break
+        }
+      }
+      const previousRefSet = new Set(previousRefs)
+      if (currentRefs.slice(overlap).some((ref) => previousRefSet.has(ref))) {
+        throw new ZhilianPlatformError('CURSOR_INVALID', 'DOM 列表滚动后的重叠边界不连续')
+      }
+    }
+    const effectiveWindowOffset = advance ? overlap : windowOffset
     let crossedCutoff = false
     let payloadFull = false
     let consumed = 0
     const accepted: ZhilianConversationSummary[] = []
-    const candidates = page.sessions.slice(windowOffset)
+    const candidates = page.sessions.slice(effectiveWindowOffset)
     for (const item of candidates) {
       consumed += 1
       if (item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
@@ -4916,7 +4790,7 @@ async function readZhilianListFromDOM(
       mode: 'dom',
       binding,
       pageNo: windowNo,
-      offset: windowOffset + consumed,
+      offset: effectiveWindowOffset + consumed,
       pageDigest,
     }
     for (const item of accepted) {
@@ -4929,22 +4803,21 @@ async function readZhilianListFromDOM(
     }
     if (payloadFull || consumed < candidates.length || sessions.length >= maxSessions) break
     if (page.atBottom) {
-      throw new ZhilianPlatformError(
-        'ELEMENT_UNRESOLVED',
-        'DOM 已到可见底部但没有平台 hasMore 证词，也尚未跨过时间截止线',
-        'manualOnly',
-      )
+      complete = true
+      resumeCursor = null
+      break
     }
     // 本次已经交付当前可见 DOM 窗口，不在同一命令里继续滚动聚合。
     if (accepted.length > 0) break
     previousWindowDigest = pageDigest
+    previousWindowSessions = page.sessions
     windowNo += 1
     windowOffset = 0
     advance = true
   }
 
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  await ctx.progress('智联会话列表 DOM 兜底读取完成', 100)
+  await ctx.progress('智联会话列表页面读取完成', 100)
   if (!complete && !resumeCursor) throw new ZhilianPlatformError('CURSOR_INVALID', 'DOM 列表没有可恢复游标')
   return {
     sessions,
@@ -4961,8 +4834,8 @@ export async function readZhilianList(
   const tab = await verifiedIMTab(expectedPrincipalFingerprint)
   if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
   const cutoffDays = Math.min(30, Math.max(1, args.stopOlderThanDays ?? 8))
-  // 一轮巡检只把当前 API/DOM 窗口交给脑。调用方即使请求 32 条，
-  // 也不能在手侧跨窗搜人；下一窗只能由脑在下一轮显式请求。
+  // 一轮巡检只把当前真实渲染、可由 readThread 定位的 DOM/Vue 窗口交给脑。
+  // 调用方即使请求 32 条，也不能用独立 API 分页制造页面上不可定位的目标。
   const maxSessions = Math.min(LIST_PAGE_SIZE, Math.min(32, Math.max(1, args.maxSessions ?? 32)))
   const binding = await bindingHash({
     kind: 'list', principal: expectedPrincipalFingerprint ?? '', filter: args.filter,
@@ -4970,16 +4843,15 @@ export async function readZhilianList(
   })
   const decoded = decodeCursor(args.cursor)
   if (decoded && (
-    decoded.kind !== 'list' || !['api', 'dom'].includes(decoded.mode) || decoded.binding !== binding
+    decoded.kind !== 'list' || decoded.mode !== 'dom' || decoded.binding !== binding
   )) {
     throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页游标与账号或参数不匹配')
   }
   const cursor = decoded as ListCursor | null
-  let pageNo = cursor?.pageNo ?? 1
-  let pageOffset = cursor?.offset ?? 0
-  const maxCursorOffset = cursor?.mode === 'dom' ? 1_000 : LIST_PAGE_SIZE
+  const pageNo = cursor?.pageNo ?? 1
+  const pageOffset = cursor?.offset ?? 0
   if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > 100_000 ||
-      !Number.isInteger(pageOffset) || pageOffset < 0 || pageOffset > maxCursorOffset ||
+      !Number.isInteger(pageOffset) || pageOffset < 0 || pageOffset > 1_000 ||
       (cursor !== null && (
         !SHA256_HEX.test(cursor.binding) ||
         typeof cursor.pageDigest !== 'string' || !SHA256_HEX.test(cursor.pageDigest)
@@ -4987,125 +4859,16 @@ export async function readZhilianList(
     throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页游标越界')
   }
   const cutoffMs = Date.now() - cutoffDays * 86_400_000
-  if (cursor?.mode === 'dom') {
-    return readZhilianListFromDOM(
-      args,
-      ctx,
-      expectedPrincipalFingerprint,
-      tab,
-      binding,
-      cursor,
-      cutoffMs,
-      maxSessions,
-    )
-  }
-  const sessions: ZhilianConversationSummary[] = []
-  const seen = new Set<string>()
-  let complete = false
-  let expectedPageDigest = cursor?.pageDigest ?? null
-  let resumeCursor: ListCursor | null = cursor
-  let previousCompletedPageDigest: string | null = null
-
-  while (sessions.length < maxSessions) {
-    if (pageNo > 100_000) throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页超过安全页数')
-    ctx.checkpoint()
-    await ctx.progress(`读取智联会话列表第 ${pageNo} 页`, Math.min(95, 5 + sessions.length))
-    let page: MainListPageResult
-    try {
-      page = await runMain(tab.id, mainReadListPage, [pageNo, LIST_PAGE_SIZE, args.filter])
-    } catch (error) {
-      if (cursor === null && pageNo === 1 && pageOffset === 0 && sessions.length === 0) {
-        await ctx.progress('页面 API 不可用，切换到保守 DOM 虚拟列表兜底', 5)
-        return readZhilianListFromDOM(
-          args,
-          ctx,
-          expectedPrincipalFingerprint,
-          tab,
-          binding,
-          null,
-          cutoffMs,
-          maxSessions,
-        )
-      }
-      throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', `读取智联会话列表失败：${asError(error).message}`)
-    }
-    if (page.unstable) {
-      throw new ZhilianPlatformError('USER_ACTIVE', '会话列表两次采样不一致，交由下一轮巡检重算')
-    }
-    const pageDigest = await bindingHash({ sessions: page.sessions, hasMore: page.hasMore })
-    if (expectedPageDigest !== null && pageDigest !== expectedPageDigest) {
-      throw new ZhilianPlatformError('CURSOR_INVALID', '会话列表在分页间发生重排')
-    }
-    if (previousCompletedPageDigest === pageDigest) {
-      throw new ZhilianPlatformError('CURSOR_INVALID', '会话列表分页没有向前推进')
-    }
-    if (pageOffset > page.sessions.length) {
-      throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页游标超出当前稳定页')
-    }
-    expectedPageDigest = null
-    let crossedCutoff = false
-    const accepted: ZhilianConversationSummary[] = []
-    const candidates = page.sessions.slice(pageOffset)
-    let consumed = 0
-    let payloadFull = false
-    for (const item of candidates) {
-      consumed += 1
-      if (item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
-        crossedCutoff = true
-        continue
-      }
-      if (seen.has(item.conversationRef)) continue
-      if (jsonBytes({
-        sessions: [...sessions, ...accepted, item],
-        complete: false,
-        nextCursor: 'x'.repeat(512),
-      }) > RESULT_DATA_BUDGET) {
-        consumed -= 1 // 当前 item 尚未交付，cursor 必须停在它之前。
-        if (sessions.length === 0 && accepted.length === 0) {
-          throw new ZhilianPlatformError('PAYLOAD_LIMIT', '单条会话索引超过内联载荷上限')
-        }
-        payloadFull = true
-        break
-      }
-      accepted.push(item)
-      if (sessions.length + accepted.length >= maxSessions) break
-    }
-    resumeCursor = {
-      v: 1, kind: 'list', mode: 'api', binding, pageNo,
-      offset: pageOffset + consumed, pageDigest,
-    }
-    for (const item of accepted) {
-      seen.add(item.conversationRef)
-      sessions.push(item)
-    }
-    if (payloadFull) break
-    const consumedWholePage = !payloadFull && consumed >= candidates.length
-    if (crossedCutoff || (consumedWholePage && !page.hasMore)) {
-      complete = true
-      break
-    }
-    if (consumed < candidates.length) {
-      pageOffset += consumed
-      break
-    }
-    // 本次已经交付当前窗口的业务行，不在同一命令里继续跨窗聚合。
-    if (accepted.length > 0) break
-    previousCompletedPageDigest = pageDigest
-    pageNo += 1
-    pageOffset = 0
-  }
-
-  // 返回业务数据前再次确证身份，防止长命令中途切号造成跨账号数据交付。
-  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  await ctx.progress('智联会话列表读取完成', 100)
-  if (!complete && !resumeCursor) {
-    throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页没有可恢复锚点')
-  }
-  return {
-    sessions,
-    complete,
-    nextCursor: complete ? null : encodeCursor(resumeCursor as ListCursor),
-  }
+  return readZhilianListFromDOM(
+    args,
+    ctx,
+    expectedPrincipalFingerprint,
+    tab,
+    binding,
+    cursor,
+    cutoffMs,
+    maxSessions,
+  )
 }
 
 // 自包含 MAIN-world 历史读取。直接调用 imEngine.getHistoryMsgs；与 Vuex getTimeline 不同，
@@ -8770,21 +8533,34 @@ async function ensureThreadRoute(
     // verifiedIMTab 已确认 IM route；URL 解析失败仍按需要导航处理。
   }
   if (selected === conversationRef) return false
-  const finder = await runMain(tab.id, mainFindConversation, [conversationRef])
-  if (finder.status !== 'found') {
-    if (finder.reason === 'target_not_found') {
-      // readList 观察到的行可能在 readThread 切换前因列表实时重排而离开
-      // 当前虚拟窗口。此时尚未 click，也没有开始平台历史读取；把它明确
-      // 表达为无副作用的陈旧页面目标，让脑结束本轮并从下一轮列表重读。
-      throw new ZhilianPlatformError(
-        'TARGET_NOT_FOUND',
-        '目标会话已离开本轮聊天列表窗口',
-        'no',
-      )
-    }
+  let currentWindow: MainListDOMWindowResult
+  try {
+    // 字面复用 readList 的同一 MAIN 窗口读取器。数据库事实或独立 API
+    // 分页都不能在这里重新制造一个页面导航目标。
+    currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
+  } catch (error) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      `无法按完整会话标识唯一定位目标会话：${finder.reason ?? 'unknown'}`,
+      `无法读取当前可定位会话窗口：${asError(error).message}`,
+      'manualOnly',
+    )
+  }
+  const matches = currentWindow.sessions
+    .filter((session) => session.conversationRef === conversationRef)
+  if (currentWindow.unstable || matches.length === 0) {
+    // readList 观察到的行可能在 readThread 切换前因列表实时重排而离开
+    // 当前虚拟窗口。此时尚未 click，也没有开始平台历史读取；把它明确
+    // 表达为无副作用的陈旧页面目标，让脑结束本轮并从下一轮列表重读。
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND',
+      '目标会话已离开本轮聊天列表窗口',
+      'no',
+    )
+  }
+  if (matches.length !== 1) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '当前可定位会话窗口内目标身份不唯一',
       'manualOnly',
     )
   }
@@ -9781,7 +9557,6 @@ export const zhilianTestHooks = Object.freeze({
   mainObserveStableOutboundCard,
   mainReadWechatExchangeOutcome,
   mainPrepareInterviewEditor,
-  mainReadListPage,
   mainReadThreadPage,
   mainSendCardOnce,
   mainSendMessageOnce,
