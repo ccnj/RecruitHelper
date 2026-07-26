@@ -10244,6 +10244,45 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
   assert.deepEqual(domCalls.slice(-2), [[false, false], [true, false]])
 })
 
+test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', async () => {
+  const original = {
+    chrome: globalThis.chrome,
+    document: globalThis.document,
+  }
+  try {
+    globalThis.document = {
+      querySelector() { return null },
+    }
+    const sentinel = await zhilianTestHooks.mainReadListDOMWindow(false, false)
+    assert.match(
+      sentinel.__recruitHelperMainError,
+      /^read_list_main_failed:resolve_surface:dom_list_virtual_missing$/u,
+    )
+
+    globalThis.chrome = {
+      scripting: {
+        async executeScript({ func, args }) {
+          return [{ result: await func(...args) }]
+        },
+      },
+    }
+    await assert.rejects(
+      zhilianTestHooks.runMain(
+        8,
+        zhilianTestHooks.mainReadListDOMWindow,
+        [false, false],
+      ),
+      (error) => {
+        assert.match(error.message, /read_list_main_failed:resolve_surface:dom_list_virtual_missing/u)
+        assert.doesNotMatch(error.message, /页面脚本未返回结果/u)
+        return true
+      },
+    )
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
   const selectors = []
   assert.equal(readZhilianUnreadTotal({ querySelector(selector) { selectors.push(selector); return null } }), null,

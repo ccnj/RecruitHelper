@@ -3717,7 +3717,12 @@ async function mainReadListDOMWindow(
   advance: boolean,
   resetToTop: boolean,
 ): Promise<MainListDOMWindowResult> {
+  // Chrome 在 MAIN-world Promise reject 时可能只返回空 result。与线程读取一致，
+  // 在页面函数内部把异常收敛为脱敏哨兵，避免真实 dom_list_* 阶段丢失。
+  let diagnosticStage = 'start'
+  const execute = async (): Promise<MainListDOMWindowResult> => {
   type AnyRecord = Record<string, unknown>
+  diagnosticStage = 'resolve_surface'
   const virtual = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
   if (!virtual) throw new Error('dom_list_virtual_missing')
   const itemSelector =
@@ -3851,6 +3856,7 @@ async function mainReadListDOMWindow(
     await new Promise((resolve) => setTimeout(resolve, delayMs))
   }
 
+  diagnosticStage = 'reset_to_top'
   if (resetToTop) {
     if (scrollElement.scrollTop > 1) {
       scrollElement.scrollTop = 0
@@ -3858,8 +3864,10 @@ async function mainReadListDOMWindow(
       await waitAfterVisibleInteraction()
     }
   }
+  diagnosticStage = 'collect_initial'
   const before = collect()
   if (advance) {
+    diagnosticStage = 'advance_window'
     const maxTop = Math.max(0, before.scrollHeight - before.clientHeight)
     const step = Math.max(Math.floor(before.clientHeight * 0.8), 8 * 72)
     scrollElement.scrollTop = Math.min(maxTop, before.scrollTop + step)
@@ -3867,9 +3875,11 @@ async function mainReadListDOMWindow(
     await waitAfterVisibleInteraction()
   }
 
+  diagnosticStage = 'settle_window'
   await new Promise((resolve) => setTimeout(resolve, 150))
   let latest = collect()
   let stableRounds = 0
+  diagnosticStage = 'collect_stability'
   for (let attempt = 0; attempt < 6 && stableRounds < 2; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250))
     const next = collect()
@@ -3878,6 +3888,7 @@ async function mainReadListDOMWindow(
   }
   const beforeRefs = before.sessions.map((session) => session.conversationRef).join('|')
   const afterRefs = latest.sessions.map((session) => session.conversationRef).join('|')
+  diagnosticStage = 'return_result'
   return {
     sessions: latest.sessions,
     atBottom: latest.atBottom,
@@ -3885,6 +3896,27 @@ async function mainReadListDOMWindow(
     scrollHeight: latest.scrollHeight,
     scrollTop: latest.scrollTop,
     unstable: stableRounds < 2,
+  }
+  }
+
+  try {
+    return await execute()
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : ''
+    const known = [
+      'dom_list_virtual_missing',
+      'dom_list_scroll_surface_missing',
+      'dom_list_last_sentence_missing',
+      'dom_list_last_sentence_invalid',
+      'dom_list_vue_source_unavailable',
+      'dom_list_items_missing',
+      'dom_list_identity_invalid',
+      'dom_list_unread_invalid',
+      'dom_list_sort_order_invalid',
+    ].find((code) => raw.includes(code)) ?? 'unexpected'
+    return {
+      __recruitHelperMainError: `read_list_main_failed:${diagnosticStage}:${known}`,
+    } as unknown as MainListDOMWindowResult
   }
 }
 
@@ -9548,6 +9580,7 @@ export const zhilianTestHooks = Object.freeze({
   mainApplySourcingFilters,
   mainReadSourcingWindow,
   mainReadSourcingResume,
+  mainReadListDOMWindow,
   mainSendGreetingOnce,
   mainCaptureSendBaseline,
   mainInspectSendSurface,
