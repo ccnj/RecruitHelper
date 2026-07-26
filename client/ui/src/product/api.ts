@@ -71,6 +71,10 @@ export async function resumeProductWorkflow(): Promise<void> {
   await appPost<ProductAcceptedResponse>('/app/workflow/resume', {})
 }
 
+export async function endProductWorkflow(): Promise<void> {
+  await appPost<ProductAcceptedResponse>('/app/workflow/end', {})
+}
+
 export async function sendProductConfirmation(
   batchId: string,
   profileIds: string[],

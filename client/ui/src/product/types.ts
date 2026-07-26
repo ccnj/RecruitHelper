@@ -36,8 +36,10 @@ export interface WorkflowView {
   positionLabel: string | null
   canStart: boolean
   canAddBatch: boolean
+  canEnd: boolean
   canPause: boolean
   canResume: boolean
+  pendingAction: 'sourcing' | 'end' | null
   unavailableReason: string | null
 }
 
@@ -223,6 +225,7 @@ export interface ProductActions {
   startWorkflow?: (mode: 'full' | 'replyOnly') => void | Promise<void>
   pauseWorkflow?: () => void | Promise<void>
   resumeWorkflow?: () => void | Promise<void>
+  endWorkflow?: () => void | Promise<void>
   sendConfirmationBatch?: (batchId: string, profileIds: string[]) => void | Promise<void>
   loadCandidateDetail?: (profileId: string, fallback?: CandidateViewItem) => Promise<CandidateViewItem>
   refresh?: () => void | Promise<void>

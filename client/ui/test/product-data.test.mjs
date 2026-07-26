@@ -106,6 +106,7 @@ const snapshot = {
       workflowMode: 'full',
       workflowStatus: 'awaitingConfirmation',
       canAddBatch: false,
+      canEnd: false,
       communicationState: 'running',
     },
   },
@@ -188,6 +189,27 @@ addBatchSnapshot.overview.runtime.workflowStatus = 'paused'
 check(
   adaptProductSnapshot(addBatchSnapshot, now).overview.workflow.canAddBatch,
   '暂停状态保留脑明确授权的追加采集入口',
+)
+const communicationSnapshot = structuredClone(snapshot)
+communicationSnapshot.overview.runtime.workflowStatus = 'running'
+communicationSnapshot.overview.runtime.canEnd = true
+check(
+  adaptProductSnapshot(communicationSnapshot, now).overview.workflow.canEnd,
+  '结束入口只采用脑返回的明确授权',
+)
+communicationSnapshot.overview.runtime.workflowPendingAction = 'sourcing'
+check(
+  adaptProductSnapshot(communicationSnapshot, now).overview.workflow.pendingAction === 'sourcing' &&
+    !adaptProductSnapshot(communicationSnapshot, now).overview.workflow.canAddBatch &&
+    !adaptProductSnapshot(communicationSnapshot, now).overview.workflow.canEnd,
+  '待切换采集时禁止重复追加和结束',
+)
+communicationSnapshot.overview.runtime.workflowPendingAction = 'end'
+check(
+  adaptProductSnapshot(communicationSnapshot, now).overview.workflow.pendingAction === 'end' &&
+    !adaptProductSnapshot(communicationSnapshot, now).overview.workflow.canPause &&
+    !adaptProductSnapshot(communicationSnapshot, now).overview.workflow.canResume,
+  '待结束时禁用其余运行控制',
 )
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')

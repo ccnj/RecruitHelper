@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { shouldShowActivation } from './activation'
 import {
+  endProductWorkflow,
   pauseProductWorkflow,
   readCandidateDetail,
   readProductData,
@@ -109,6 +110,7 @@ export function ProductConnectedApp({
       actions={{
         loadCandidateDetail: (profileId, fallback) => readCandidateDetail(profileId, fallback),
         openDiagnostics: onOpenDiagnostics,
+        endWorkflow: () => performProductAction('结束本次任务', endProductWorkflow),
         pauseWorkflow: () => performProductAction('暂停', pauseProductWorkflow),
         refresh,
         resumeWorkflow: () => performProductAction('恢复', resumeProductWorkflow),

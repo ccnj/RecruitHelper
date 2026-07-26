@@ -38,6 +38,7 @@ await productAPI.startProductWorkflow('full', '42')
 await productAPI.startProductWorkflow('replyOnly')
 await productAPI.pauseProductWorkflow()
 await productAPI.resumeProductWorkflow()
+await productAPI.endProductWorkflow()
 await productAPI.sendProductConfirmation('batch-one', ['profile-a', 'profile-b'])
 
 let fail = 0
@@ -52,9 +53,10 @@ check(
     'http://127.0.0.1:18888/app/workflow/start',
     'http://127.0.0.1:18888/app/workflow/pause',
     'http://127.0.0.1:18888/app/workflow/resume',
+    'http://127.0.0.1:18888/app/workflow/end',
     'http://127.0.0.1:18888/app/confirmation/send',
   ].join('|'),
-  '五类产品操作只访问 /app/* 正式入口',
+  '六类产品操作只访问 /app/* 正式入口',
 )
 check(
   requests.every((request) => request.method === 'POST'),
@@ -70,6 +72,7 @@ check(
   requests.map((request) => request.body).join('|') === [
     '{"mode":"full","backendJobId":"42"}',
     '{"mode":"replyOnly"}',
+    '{}',
     '{}',
     '{}',
     '{"batchId":"batch-one","profileIds":["profile-a","profile-b"]}',

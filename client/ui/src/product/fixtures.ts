@@ -171,8 +171,10 @@ export function createProductFixture(): ProductData {
         positionLabel: '18 位候选人的招呼语已经生成',
         canStart: false,
         canAddBatch: false,
+        canEnd: false,
         canPause: true,
         canResume: false,
+        pendingAction: null,
         unavailableReason: null,
       },
       funnel: {
@@ -285,8 +287,10 @@ export function createEmptyProductData(): ProductData {
         positionLabel: null,
         canStart: false,
         canAddBatch: false,
+        canEnd: false,
         canPause: false,
         canResume: false,
+        pendingAction: null,
         unavailableReason: '完成激活并绑定职位后可开始',
       },
       funnel: {

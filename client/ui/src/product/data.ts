@@ -96,6 +96,8 @@ export interface AppRuntimeRaw {
   workflowMode?: string
   workflowStatus?: string
   canAddBatch: boolean
+  canEnd: boolean
+  workflowPendingAction?: 'sourcing' | 'end'
   communicationState?: string
 }
 
@@ -385,6 +387,11 @@ function adaptWorkflow(
   ].includes(rawState)
     ? rawState as WorkflowView['state']
     : 'idle'
+  const rawPendingAction = clean(runtime.workflowPendingAction)
+  const pendingAction: WorkflowView['pendingAction'] =
+    rawPendingAction === 'sourcing' || rawPendingAction === 'end'
+      ? rawPendingAction
+      : null
   let unavailableReason: string | null = null
   if (!runtime.available) unavailableReason = '授权状态暂不可读取'
   else if (!runtime.authorized) unavailableReason = '完成激活后可开始'
@@ -404,9 +411,13 @@ function adaptWorkflow(
     stateLabel: labels[state],
     positionLabel: workflowPositionLabel(state, mode),
     canStart: (state === 'idle' || state === 'failed') && unavailableReason === null,
-    canAddBatch: runtime.canAddBatch && unavailableReason === null,
-    canPause: (state === 'running' || state === 'awaitingConfirmation') && runtime.authorized,
-    canResume: (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
+    canAddBatch: runtime.canAddBatch && pendingAction === null && unavailableReason === null,
+    canEnd: runtime.canEnd === true && pendingAction === null,
+    canPause: pendingAction !== 'end' &&
+      (state === 'running' || state === 'awaitingConfirmation') && runtime.authorized,
+    canResume: pendingAction !== 'end' &&
+      (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
+    pendingAction,
     unavailableReason,
   }
 }

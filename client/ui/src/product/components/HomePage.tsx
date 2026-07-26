@@ -21,27 +21,48 @@ function controlDisabledReason(
 
 export function HomePage({ customer, overview, actions, onOpenConfirmation }: HomePageProps) {
   const { workflow } = overview
+  const pendingEnd = workflow.pendingAction === 'end'
+  const pendingSourcing = workflow.pendingAction === 'sourcing'
+  const pendingEndReason = pendingEnd ? '正在结束当前候选人，请稍候' : null
+  const pendingSourcingReason = pendingSourcing ? '当前候选人处理完后会开始新一批' : null
   const startFullReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    workflow.canStart && customer.job.backendJobId !== null,
-    workflow.unavailableReason ??
+    workflow.canStart && !pendingEnd && customer.job.backendJobId !== null,
+    pendingEndReason ?? workflow.unavailableReason ??
       (customer.job.backendJobId === null ? '同步并绑定职位后可开始今日任务' : null),
   )
   const startReplyReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('replyOnly') : undefined,
-    workflow.canStart,
-    workflow.unavailableReason,
+    workflow.canStart && !pendingEnd,
+    pendingEndReason ?? workflow.unavailableReason,
   )
-  const pauseReason = controlDisabledReason(actions.pauseWorkflow, workflow.canPause, workflow.unavailableReason)
-  const resumeReason = controlDisabledReason(actions.resumeWorkflow, workflow.canResume, workflow.unavailableReason)
+  const pauseReason = controlDisabledReason(
+    actions.pauseWorkflow,
+    workflow.canPause && !pendingEnd,
+    pendingEndReason ?? workflow.unavailableReason,
+  )
+  const resumeReason = controlDisabledReason(
+    actions.resumeWorkflow,
+    workflow.canResume && !pendingEnd,
+    pendingEndReason ?? workflow.unavailableReason,
+  )
   const additionalBatchReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    workflow.canAddBatch && customer.job.backendJobId !== null,
-    workflow.unavailableReason ??
+    workflow.canAddBatch && !pendingSourcing && !pendingEnd && customer.job.backendJobId !== null,
+    pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason ??
       (customer.job.backendJobId === null ? '同步并绑定职位后可再次采集' : null),
   )
+  const endReason = controlDisabledReason(
+    actions.endWorkflow,
+    workflow.canEnd && !pendingEnd && !pendingSourcing,
+    pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason,
+  )
   const confirmationCount = overview.funnel.stages.find((stage) => stage.key === 'confirm')?.target ?? 0
-  const taskPosition = workflow.state === 'running' && overview.funnel.stage === 'completed'
+  const taskPosition = pendingEnd
+    ? '正在结束当前候选人…'
+    : pendingSourcing
+      ? '当前候选人处理完后开始新一批'
+      : workflow.state === 'running' && overview.funnel.stage === 'completed'
     ? '本批候选人已经处理完成，正在继续回复候选人消息。'
     : workflow.state === 'idle'
       ? '点击开始后，系统会自动采集、评分并生成招呼语。'
@@ -131,7 +152,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   <ProductIcon name="play" size={17} />
                   继续今日任务
                 </button>
-                {workflow.state === 'paused' && workflow.canAddBatch && (
+                {workflow.state === 'paused' && (workflow.canAddBatch || pendingSourcing) && (
                   <button
                     className="rh-button is-quiet"
                     disabled={additionalBatchReason !== null}
@@ -139,7 +160,18 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                     title={additionalBatchReason ?? undefined}
                     type="button"
                   >
-                    再采一批（30 人）
+                    {pendingSourcing ? '新一批已安排' : '再采一批（30 人）'}
+                  </button>
+                )}
+                {(workflow.canEnd || workflow.pendingAction !== null) && (
+                  <button
+                    className="rh-button is-quiet"
+                    disabled={endReason !== null}
+                    onClick={() => void actions.endWorkflow?.()}
+                    title={endReason ?? undefined}
+                    type="button"
+                  >
+                    {pendingEnd ? '正在结束…' : '结束本次任务'}
                   </button>
                 )}
               </>
@@ -173,7 +205,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                   <ProductIcon name="pause" size={17} />
                   暂停
                 </button>
-                {workflow.canAddBatch && (
+                {(workflow.canAddBatch || pendingSourcing) && (
                   <button
                     className="rh-button is-quiet"
                     disabled={additionalBatchReason !== null}
@@ -181,7 +213,18 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                     title={additionalBatchReason ?? undefined}
                     type="button"
                   >
-                    再采一批（30 人）
+                    {pendingSourcing ? '新一批已安排' : '再采一批（30 人）'}
+                  </button>
+                )}
+                {(workflow.canEnd || workflow.pendingAction !== null) && (
+                  <button
+                    className="rh-button is-quiet"
+                    disabled={endReason !== null}
+                    onClick={() => void actions.endWorkflow?.()}
+                    title={endReason ?? undefined}
+                    type="button"
+                  >
+                    {pendingEnd ? '正在结束…' : '结束本次任务'}
                   </button>
                 )}
               </>
