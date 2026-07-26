@@ -10260,21 +10260,30 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
   assert.equal(result.complete, true)
   assert.equal(result.nextCursor, null)
   assert.deepEqual(result.sessions.map((item) => item.conversationRef), ['newer'])
-  assert.deepEqual(domCalls[0], [false, true], '首次 DOM 兜底必须先复位列表顶部')
+  assert.deepEqual(domCalls[0], [false, true], '省略 startAt 的 fresh 首窗默认复位列表顶部')
 
   domPage = {
     ...domPage,
     sessions: [domPage.sessions[0]],
     atBottom: true,
   }
+  const explicitTop = await readZhilianList(
+    { filter: 'all', startAt: 'top', stopOlderThanDays: 8 },
+    context,
+    fingerprint,
+  )
+  assert.equal(explicitTop.complete, true)
+  assert.deepEqual(domCalls.at(-1), [false, true], '显式 top 必须复位列表顶部')
+
   const currentBottom = await readZhilianList(
-    { filter: 'all', stopOlderThanDays: 8 },
+    { filter: 'all', startAt: 'current', stopOlderThanDays: 8 },
     context,
     fingerprint,
   )
   assert.equal(currentBottom.complete, true)
   assert.equal(currentBottom.nextCursor, null)
   assert.deepEqual(currentBottom.sessions.map((item) => item.conversationRef), ['newer'])
+  assert.deepEqual(domCalls.at(-1), [false, false], 'fresh current 必须保留当前物理视口')
 
   const stableWindow = [
     { ...domPage.sessions[0], conversationRef: 'cursor-a', lastActivityTs: now },
@@ -10292,6 +10301,20 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
   assert.equal(firstWindow.complete, false)
   assert.ok(firstWindow.nextCursor)
   assert.deepEqual(domCalls.at(-1), [false, true])
+
+  const callsBeforeCursorCurrent = domCalls.length
+  await assert.rejects(
+    readZhilianList({
+      filter: 'all',
+      startAt: 'current',
+      stopOlderThanDays: 8,
+      maxSessions: 1,
+      cursor: firstWindow.nextCursor,
+    }, context, fingerprint),
+    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.CursorInvalid,
+    'current 只允许建立 fresh 首窗，不能借旧 cursor 续页',
+  )
+  assert.equal(domCalls.length, callsBeforeCursorCurrent, 'cursor+current 必须在读取 DOM 前拒绝')
 
   // 继续读时不自作主张复位；当前窗的会话重排/人工滚动必须使 digest 失配并响亮拒绝。
   domPage = { ...domPage, sessions: [...stableWindow].reverse(), scrollTop: 600 }

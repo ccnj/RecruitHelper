@@ -2064,6 +2064,7 @@ func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
 		draftText("second-old"),
 	})
 	listCalls := 0
+	listStarts := make([]protocol.ListStart, 0, 3)
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
@@ -2071,6 +2072,7 @@ func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
 			if args.Cursor != "" {
 				t.Fatalf("readThread 后旧列表 cursor 不得继续使用: %q", args.Cursor)
 			}
+			listStarts = append(listStarts, args.StartAt)
 			listCalls++
 			if listCalls == 1 {
 				next := "window-2"
@@ -2135,6 +2137,14 @@ func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
 	}
 	if got := h.runner.names(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("fresh 续行顺序错误: got=%v want=%v", got, want)
+	}
+	if wantStarts := []protocol.ListStart{
+		protocol.ListStartTop,
+		protocol.ListStartCurrent,
+		protocol.ListStartCurrent,
+	}; !reflect.DeepEqual(listStarts, wantStarts) {
+		t.Fatalf("新轮必须从顶部开始、会话动作后必须从当前位置 fresh: got=%v want=%v",
+			listStarts, wantStarts)
 	}
 	for _, key := range []store.ConversationKey{first, second} {
 		messages, messagesErr := h.db.MessagesForConversation(key)

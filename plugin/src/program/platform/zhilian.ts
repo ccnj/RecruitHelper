@@ -5096,7 +5096,8 @@ async function readZhilianListFromDOM(
   let previousWindowDigest: string | null = null
   let previousWindowSessions: ZhilianConversationSummary[] | null = null
   let advance = false
-  let resetToTop = cursor === null
+  const startAt = args.startAt ?? 'top'
+  let resetToTop = cursor === null && startAt === 'top'
   let complete = false
   const sessions: ZhilianConversationSummary[] = []
   const seen = new Set<string>()
@@ -5278,6 +5279,12 @@ export async function readZhilianList(
     throw new ZhilianPlatformError('CURSOR_INVALID', '列表分页游标与账号或参数不匹配')
   }
   const cursor = decoded as ListCursor | null
+  if (cursor !== null && args.startAt === 'current') {
+    throw new ZhilianPlatformError(
+      'CURSOR_INVALID',
+      '列表当前位置起读只适用于 fresh 首窗，不能与旧分页游标并用',
+    )
+  }
   const pageNo = cursor?.pageNo ?? 1
   const pageOffset = cursor?.offset ?? 0
   if (!Number.isInteger(pageNo) || pageNo < 1 || pageNo > 100_000 ||

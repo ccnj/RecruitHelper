@@ -185,6 +185,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 
 	filter := protocol.ListFilterAll
 	cursor := ""
+	startAt := protocol.ListStartTop
 	seenCursors := make(map[string]struct{})
 	seenConversations := make(map[string]struct{})
 	a.checkedConversationRefs = make(map[string]struct{})
@@ -198,8 +199,9 @@ func (a *roundActor) execute(ctx context.Context) error {
 		a.unreadPassAttempted = true
 	}
 	pagesRead := 0
-	resetListRead := func() {
+	resetListRead := func(nextStart protocol.ListStart) {
 		cursor = ""
+		startAt = nextStart
 		seenCursors = make(map[string]struct{})
 		seenConversations = make(map[string]struct{})
 	}
@@ -209,13 +211,13 @@ func (a *roundActor) execute(ctx context.Context) error {
 		if filter == protocol.ListFilterUnread &&
 			pagesRead >= a.manager.config.MaxPages-1 {
 			filter = protocol.ListFilterAll
-			resetListRead()
+			resetListRead(protocol.ListStartTop)
 			continue
 		}
 		if err := a.setStage("readingList"); err != nil {
 			return err
 		}
-		page, err := a.readListPage(ctx, cursor, filter)
+		page, err := a.readListPage(ctx, cursor, filter, startAt)
 		pagesRead++
 		if err != nil {
 			if filter == protocol.ListFilterUnread &&
@@ -226,7 +228,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 					return auditErr
 				}
 				filter = protocol.ListFilterAll
-				resetListRead()
+				resetListRead(protocol.ListStartTop)
 				continue
 			}
 			if isRunError(err, protocol.ErrCodeUserActive) ||
@@ -259,8 +261,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 		case conversationListPageFresh:
 			// readThread、简历读取或候选人可见动作都可能切换会话、清除
 			// 未读或重排列表。旧 page/cursor 此刻不再是导航依据；同一
-			// 完整扫描保留 checked 集合，但从无 cursor 的 fresh 页面
-			// 快照继续。
+			// 完整扫描保留 checked 集合，并从当前物理窗口建立无 cursor
+			// 的 fresh 页面快照继续。只有筛选切换才重新从顶部建立快照。
 			if filter == protocol.ListFilterAll &&
 				!a.unreadPassAttempted &&
 				pagesRead < a.manager.config.MaxPages-1 {
@@ -271,18 +273,20 @@ func (a *roundActor) execute(ctx context.Context) error {
 				if unreadHintPositive(hand.UnreadTotal) {
 					a.unreadPassAttempted = true
 					filter = protocol.ListFilterUnread
+					resetListRead(protocol.ListStartTop)
+					continue
 				}
 			}
-			resetListRead()
+			resetListRead(protocol.ListStartCurrent)
 			continue
 		case conversationListPageSwitchUnread:
 			a.unreadPassAttempted = true
 			filter = protocol.ListFilterUnread
-			resetListRead()
+			resetListRead(protocol.ListStartTop)
 			continue
 		case conversationListPageSwitchAll:
 			filter = protocol.ListFilterAll
-			resetListRead()
+			resetListRead(protocol.ListStartTop)
 			continue
 		case conversationListPageStop:
 			// 工作流候选人边界与分类修正是明确停止，不得被误解释成
@@ -302,7 +306,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 				// Keep a defensive close so no future branch can leave the
 				// platform filter active at round completion.
 				filter = protocol.ListFilterAll
-				resetListRead()
+				resetListRead(protocol.ListStartTop)
 				continue
 			}
 			return nil
@@ -1293,10 +1297,14 @@ func (a *roundActor) readListPage(
 	ctx context.Context,
 	cursor string,
 	filter protocol.ListFilter,
+	startAt protocol.ListStart,
 ) (conversationListPage, error) {
 	args := protocol.ChatReadListArgs{
 		Cursor: cursor, Filter: filter,
 		MaxSessions: protocol.DefaultPaginationReadListMaxItems,
+	}
+	if cursor == "" {
+		args.StartAt = startAt
 	}
 	if filter == protocol.ListFilterAll {
 		args.StopOlderThanDays = 8
