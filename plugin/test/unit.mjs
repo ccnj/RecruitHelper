@@ -9734,44 +9734,40 @@ function installThreadRouteHarness(conversationRef, {
   }
 }
 
-test('ensureZhilianIM 保留推荐流并另开后台 IM 标签', async () => {
+test('ensureZhilianIM 复用 canonical 推荐页并在同一标签导航到 IM', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = 'f'.repeat(64)
-  const recommendTab = {
+  const tab = {
     id: 70,
     url: 'https://rd6.zhaopin.com/app/recommend',
     status: 'complete',
     active: true,
-  }
-  const imTab = {
-    id: 71,
-    url: 'https://rd6.zhaopin.com/app/im',
-    status: 'complete',
-    active: false,
   }
   const created = []
   const updated = []
   try {
     globalThis.chrome = {
       tabs: {
-        async query() { return [recommendTab] },
+        async query() { return [{ ...tab }] },
         async create(options) {
           created.push(options)
-          return { ...imTab }
+          throw new Error('已有 canonical 智联标签时不得新建')
         },
         async update(id, options) {
+          assert.equal(id, tab.id)
           updated.push({ id, options })
-          return { ...imTab }
+          tab.url = options.url
+          return { ...tab }
         },
         async get(id) {
-          assert.equal(id, imTab.id)
-          return { ...imTab }
+          assert.equal(id, tab.id)
+          return { ...tab }
         },
         async sendMessage() { return { ok: true } },
       },
       scripting: {
         async executeScript({ target }) {
-          assert.equal(target.tabId, imTab.id)
+          assert.equal(target.tabId, tab.id)
           return [{
             result: {
               pageKind: 'im',
@@ -9792,10 +9788,13 @@ test('ensureZhilianIM 保留推荐流并另开后台 IM 标签', async () => {
     }, fingerprint)
 
     assert.equal(result.ready, true)
-    assert.equal(result.createdTab, true)
-    assert.deepEqual(created, [{ url: 'https://rd6.zhaopin.com/app/im', active: false }])
-    assert.deepEqual(updated, [], '推荐页不得被导航离开')
-    assert.equal(recommendTab.url, 'https://rd6.zhaopin.com/app/recommend')
+    assert.equal(result.createdTab, false)
+    assert.deepEqual(created, [])
+    assert.deepEqual(updated, [{
+      id: tab.id,
+      options: { url: 'https://rd6.zhaopin.com/app/im' },
+    }])
+    assert.equal(tab.url, 'https://rd6.zhaopin.com/app/im')
   } finally {
     globalThis.chrome = originalChrome
   }

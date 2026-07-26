@@ -3661,14 +3661,10 @@ export async function ensureZhilianIM(
   if (!tab) {
     tab = await chrome.tabs.create({ url: ZHILIAN_IM_URL, active: false })
     createdTab = true
-  } else if (pageKindFromURL(tab.url) === 'recommend') {
-    // 推荐页从首个采集窗口到最后一位计划招呼终局都属于不可重建的
-    // 运行现场。IM 恢复不得把它导航离开；另开后台标签即可复用同一
-    // 浏览器登录态，也不会刷新或替换当前推荐流。
-    tab = await chrome.tabs.create({ url: ZHILIAN_IM_URL, active: false })
-    createdTab = true
   } else if (pageKindFromURL(tab.url) !== 'im') {
     if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+    // 产品工作流只会在推荐批次已经终局后恢复 IM。复用同一 canonical
+    // 智联工作页，避免为两个互斥业务阶段长期保留第二张后台标签。
     const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
     try {
       tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL })
