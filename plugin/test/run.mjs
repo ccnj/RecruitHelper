@@ -449,6 +449,12 @@ try {
           platform.greetingServerMessageCreated = true
           return [{ result: { status: 'clicked' } }]
         }
+        if (name === 'mainEnsureChatListFilter') {
+          const [expectUnread, allowAction] = args
+          assert.equal(typeof expectUnread, 'boolean')
+          assert.equal(typeof allowAction, 'boolean')
+          return [{ result: { status: 'ready', changed: false } }]
+        }
         if (name === 'mainReadListDOMWindow') {
           const [advance, resetToTop] = args
           assert.equal(typeof advance, 'boolean')
