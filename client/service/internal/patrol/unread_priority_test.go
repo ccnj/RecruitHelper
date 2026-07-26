@@ -174,6 +174,7 @@ func TestUnreadPriorityInterruptsAfterOrdinaryThreadAction(t *testing.T) {
 					return protocol.ChatReadListData{
 						Sessions: []protocol.ConversationSummary{
 							summary(key.ConversationRef, "peer-ordinary-action-interrupt", "新消息", 0),
+							summary("ordinary-after-action", "peer-after-action", "普通", 0),
 						},
 						Complete: true,
 					}, nil
@@ -249,18 +250,83 @@ func TestUnreadPriorityUnknownConversationOpensAtMostOnceThenReturnsAll(t *testi
 	}
 
 	requireUnreadRoundOK(t, h)
-	if unreadReads != 2 ||
+	if unreadReads != 1 ||
 		h.runner.count(protocol.PrimChatOpenConversation) != 1 ||
 		h.runner.count(protocol.PrimChatReadThread) != 0 {
 		t.Fatalf("残留气泡重复打开或走错路径: calls=%v unreadReads=%d", h.runner.names(), unreadReads)
 	}
 	got := unreadListFilters(t, h)
-	if len(got) != 3 || got[2].Filter != protocol.ListFilterAll {
+	if len(got) != 2 || got[1].Filter != protocol.ListFilterAll {
 		t.Fatalf("残留气泡后没有实际切回全部列表: %+v", got)
 	}
 	audits, err := h.db.AuditEntries(100)
 	if err != nil || countAudit(audits, unreadPatrolAuditCategory) == 0 {
 		t.Fatalf("残留气泡未记录无 PII 子轮完成审计: audits=%+v err=%v", audits, err)
+	}
+}
+
+func TestUnreadPriorityOverlappingWindowsOpenEachConversationOnce(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(3))
+	first := summary("unread-window-a", "peer-unread-window-a", "未读一", 1)
+	second := summary("unread-window-b", "peer-unread-window-b", "未读二", 1)
+	third := summary("unread-window-c", "peer-unread-window-c", "未读三", 1)
+	unreadReads := 0
+	var opened []string
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter != protocol.ListFilterUnread {
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{},
+					Complete: true,
+				}, nil
+			}
+			unreadReads++
+			if unreadReads == 1 {
+				if args.Move != protocol.ListWindowMoveReset {
+					t.Fatalf("未读子轮必须 reset 起步: %+v", args)
+				}
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{first, second},
+					Complete: false,
+				}, nil
+			}
+			if args.Move != protocol.ListWindowMoveNext {
+				t.Fatalf("未读重叠窗口必须 next 续扫: %+v", args)
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{second, third},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatOpenConversation:
+			args := decodeArgs[protocol.ChatOpenConversationArgs](t, request)
+			opened = append(opened, args.ConversationRef)
+			return protocol.ChatOpenConversationData{
+				ConversationRef: args.ConversationRef,
+				ObservedAt:      h.clock.Now().UnixMilli(),
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	requireUnreadRoundOK(t, h)
+	if want := []string{
+		first.ConversationRef,
+		second.ConversationRef,
+		third.ConversationRef,
+	}; !reflect.DeepEqual(opened, want) {
+		t.Fatalf("重叠未读窗口重复或漏开会话: got=%v want=%v", opened, want)
+	}
+	got := unreadListFilters(t, h)
+	if len(got) != 3 ||
+		got[0].Move != protocol.ListWindowMoveReset ||
+		got[1].Move != protocol.ListWindowMoveNext ||
+		got[2].Filter != protocol.ListFilterAll ||
+		got[2].Move != protocol.ListWindowMoveReset {
+		t.Fatalf("未读窗口移动或切回 all 错误: %+v", got)
 	}
 }
 
@@ -325,8 +391,9 @@ func TestUnreadPriorityLocalOpenFailuresContinueToLaterRows(t *testing.T) {
 			}
 
 			requireUnreadRoundOK(t, h)
-			if openCalls != 2 {
-				t.Fatalf("局部失败阻断了后续未读: calls=%v", h.runner.names())
+			if unreadReads != 1 || openCalls != 2 {
+				t.Fatalf("局部失败未在同一窗口继续后续未读: reads=%d calls=%v",
+					unreadReads, h.runner.names())
 			}
 		})
 	}
@@ -720,7 +787,7 @@ func TestUnreadCompletePassWithRetainedRowsRecordsBaseline(t *testing.T) {
 		t.Fatalf("保留行在同一未读子轮被重复打开: %v", h.runner.names())
 	}
 	first := unreadListFilters(t, h)
-	if countListFilter(first, protocol.ListFilterUnread) != 2 ||
+	if countListFilter(first, protocol.ListFilterUnread) != 1 ||
 		first[len(first)-1].Filter != protocol.ListFilterAll {
 		t.Fatalf("未读保留行没有完整遍历并切回全部列表: %+v", first)
 	}
@@ -812,6 +879,7 @@ func TestUnreadReturnToAllRebuildsCheckedAndUsesFingerprint(t *testing.T) {
 				return protocol.ChatReadListData{
 					Sessions: []protocol.ConversationSummary{
 						summary(key.ConversationRef, "peer-unread-return-all", "新消息一", 0),
+						summary("ordinary-unread-boundary", "peer-unread-boundary", "普通", 0),
 					},
 					Complete: true,
 				}, nil
@@ -862,7 +930,6 @@ func TestUnreadReturnToAllRebuildsCheckedAndUsesFingerprint(t *testing.T) {
 	want := []protocol.ListFilter{
 		protocol.ListFilterAll,
 		protocol.ListFilterUnread,
-		protocol.ListFilterAll,
 		protocol.ListFilterAll,
 	}
 	filters := make([]protocol.ListFilter, 0, len(got))

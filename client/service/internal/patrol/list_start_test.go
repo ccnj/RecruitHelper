@@ -8,7 +8,7 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-func TestConversationListCursorContinuationOmitsFreshStart(t *testing.T) {
+func TestConversationListWindowContinuationMovesFromResetToNext(t *testing.T) {
 	h := newHarness(t)
 	var got []protocol.ChatReadListArgs
 	h.runner.handler = func(request RunRequest) (any, error) {
@@ -16,12 +16,10 @@ func TestConversationListCursorContinuationOmitsFreshStart(t *testing.T) {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
 			got = append(got, args)
-			if args.Cursor == "" {
-				next := "page-two"
+			if args.Move == protocol.ListWindowMoveReset {
 				return protocol.ChatReadListData{
-					Sessions:   []protocol.ConversationSummary{},
-					Complete:   false,
-					NextCursor: &next,
+					Sessions: []protocol.ConversationSummary{},
+					Complete: false,
 				}, nil
 			}
 			return protocol.ChatReadListData{
@@ -38,11 +36,9 @@ func TestConversationListCursorContinuationOmitsFreshStart(t *testing.T) {
 		t.Fatalf("Tick = %+v, %v", result, err)
 	}
 	if len(got) != 2 ||
-		got[0].Cursor != "" ||
-		got[0].StartAt != protocol.ListStartTop ||
-		got[1].Cursor != "page-two" ||
-		got[1].StartAt != "" {
-		t.Fatalf("游标续页不得混入 fresh 起点: %+v", got)
+		got[0].Move != protocol.ListWindowMoveReset ||
+		got[1].Move != protocol.ListWindowMoveNext {
+		t.Fatalf("可见窗口必须 reset 起步、next 续窗: %+v", got)
 	}
 }
 
@@ -85,13 +81,10 @@ func TestConversationListFilterSwitchesRestartFromTop(t *testing.T) {
 		t.Fatalf("Tick = %+v, %v", result, err)
 	}
 	gotFilters := make([]protocol.ListFilter, 0, len(got))
-	gotStarts := make([]protocol.ListStart, 0, len(got))
+	gotMoves := make([]protocol.ListWindowMove, 0, len(got))
 	for _, args := range got {
 		gotFilters = append(gotFilters, args.Filter)
-		gotStarts = append(gotStarts, args.StartAt)
-		if args.Cursor != "" {
-			t.Fatalf("筛选切换必须建立 fresh 快照: %+v", got)
-		}
+		gotMoves = append(gotMoves, args.Move)
 	}
 	if want := []protocol.ListFilter{
 		protocol.ListFilterAll,
@@ -100,11 +93,11 @@ func TestConversationListFilterSwitchesRestartFromTop(t *testing.T) {
 	}; !reflect.DeepEqual(gotFilters, want) {
 		t.Fatalf("筛选切换顺序错误: got=%v want=%v", gotFilters, want)
 	}
-	if want := []protocol.ListStart{
-		protocol.ListStartTop,
-		protocol.ListStartTop,
-		protocol.ListStartTop,
-	}; !reflect.DeepEqual(gotStarts, want) {
-		t.Fatalf("筛选切换必须从列表顶部建立 fresh 快照: got=%v want=%v", gotStarts, want)
+	if want := []protocol.ListWindowMove{
+		protocol.ListWindowMoveReset,
+		protocol.ListWindowMoveReset,
+		protocol.ListWindowMoveReset,
+	}; !reflect.DeepEqual(gotMoves, want) {
+		t.Fatalf("筛选切换必须从列表顶部建立可见窗口: got=%v want=%v", gotMoves, want)
 	}
 }

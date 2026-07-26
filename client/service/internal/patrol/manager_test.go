@@ -631,15 +631,14 @@ func TestFirstAdoptionPaginatesAndProjectsNoHistory(t *testing.T) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor == "" {
-				next := "list-page-2"
+			if args.Move == protocol.ListWindowMoveReset {
 				return protocol.ChatReadListData{
 					Sessions: []protocol.ConversationSummary{summary("other", "peer-other", "irrelevant", 0)},
-					Complete: false, NextCursor: &next,
+					Complete: false,
 				}, nil
 			}
-			if args.Cursor != "list-page-2" {
-				t.Fatalf("unexpected list cursor %q", args.Cursor)
+			if args.Move != protocol.ListWindowMoveNext {
+				t.Fatalf("unexpected list move %q", args.Move)
 			}
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{summary("conversation-1", "peer-1", "old-2", 1)}, Complete: true,
@@ -694,8 +693,6 @@ func TestFirstAdoptionPaginatesAndProjectsNoHistory(t *testing.T) {
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
 		protocol.PrimChatReadThread,
-		protocol.PrimChatReadList,
-		protocol.PrimChatReadList,
 	}
 	if got := h.runner.names(); fmt.Sprint(got) != fmt.Sprint(wantNames) {
 		t.Fatalf("command order = %v, want %v", got, wantNames)
@@ -1328,7 +1325,7 @@ func TestManualOnlyThreadFailurePausesInsteadOfRecurringIntrusiveRead(t *testing
 	}
 }
 
-func TestPageDrivenStaleThreadTargetFreshContinuesToLaterConversation(t *testing.T) {
+func TestPageDrivenStaleThreadTargetContinuesVisibleWindow(t *testing.T) {
 	h := newHarness(t)
 	stale := seedTracked(
 		t,
@@ -1348,8 +1345,8 @@ func TestPageDrivenStaleThreadTargetFreshContinuesToLaterConversation(t *testing
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor != "" {
-				t.Fatalf("fresh 续行不得携带旧 cursor: %q", args.Cursor)
+			if args.Move != protocol.ListWindowMoveReset {
+				t.Fatalf("完整单窗只应 reset 一次: %+v", args)
 			}
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{
@@ -1399,7 +1396,7 @@ func TestPageDrivenStaleThreadTargetFreshContinuesToLaterConversation(t *testing
 
 	result, err := h.manager.Tick(context.Background())
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
-		t.Fatalf("陈旧目标后应同轮 fresh 续行: result=%+v err=%v", result, err)
+		t.Fatalf("陈旧目标后应继续当前窗口: result=%+v err=%v", result, err)
 	}
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil {
@@ -1411,12 +1408,10 @@ func TestPageDrivenStaleThreadTargetFreshContinuesToLaterConversation(t *testing
 	wantCalls := []string{
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
-		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
-		protocol.PrimChatReadList,
 	}
 	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
-		t.Fatalf("陈旧目标后没有 fresh 续到后续会话: got=%v want=%v", got, wantCalls)
+		t.Fatalf("陈旧目标后没有继续当前窗口后续会话: got=%v want=%v", got, wantCalls)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
 	if err != nil || len(rounds) != 1 || rounds[0].Stage != "finished" {
@@ -1433,7 +1428,7 @@ func TestPageDrivenStaleThreadTargetFreshContinuesToLaterConversation(t *testing
 	}
 }
 
-func TestReadListSnapshotDriftRequestsFreshWithoutInventingManualQuiet(t *testing.T) {
+func TestReadListWindowDriftSchedulesResetWithoutInventingManualQuiet(t *testing.T) {
 	h := newHarness(t)
 	h.runner.handler = func(request RunRequest) (any, error) {
 		if request.Name == protocol.PrimChatReadList {
@@ -1457,7 +1452,7 @@ func TestReadListSnapshotDriftRequestsFreshWithoutInventingManualQuiet(t *testin
 		t.Fatalf("readList 页面漂移不得伪造人工静默或暂停: account=%+v err=%v", account, err)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
-	if err != nil || len(rounds) != 1 || rounds[0].Stage != "freshListPending" ||
+	if err != nil || len(rounds) != 1 || rounds[0].Stage != "listWindowPending" ||
 		rounds[0].Status != "ok" {
 		t.Fatalf("readList 页面漂移状态错误: rounds=%+v err=%v", rounds, err)
 	}
@@ -1665,15 +1660,14 @@ func TestSourcingGenerationHandoffStopsBeforeNextCommandAfterLateSuccess(t *test
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor != "" {
-				t.Fatalf("generation 换代后仍读取下一窗口: cursor=%q", args.Cursor)
+			if args.Move != protocol.ListWindowMoveReset {
+				t.Fatalf("generation 换代后仍读取下一窗口: move=%q", args.Move)
 			}
-			next := "must-not-be-read"
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{
 					summary(conversationKey.ConversationRef, "peer-generation-success", "new", 1),
 				},
-				Complete: false, NextCursor: &next,
+				Complete: false,
 			}, nil
 		case protocol.PrimChatReadThread:
 			once.Do(func() { close(waitEntered) })
@@ -2023,55 +2017,7 @@ func TestZeroOverlapDiscardsShallowThenDeepRebaselinesWithoutProjection(t *testi
 	}
 }
 
-func TestCursorInvalidAfterProcessedWindowRequestsFreshListWithoutFailingRound(t *testing.T) {
-	h := newHarness(t)
-	firstPageCalls := 0
-	h.runner.handler = func(request RunRequest) (any, error) {
-		if request.Name != protocol.PrimChatReadList {
-			return defaultHandler(request)
-		}
-		args := decodeArgs[protocol.ChatReadListArgs](t, request)
-		if args.Cursor == "expired-cursor" {
-			return nil, &RunError{Code: protocol.ErrCodeCursorInvalid, Cause: errors.New("expired")}
-		}
-		firstPageCalls++
-		if firstPageCalls == 1 {
-			next := "expired-cursor"
-			return protocol.ChatReadListData{
-				Sessions: []protocol.ConversationSummary{summary("discard-me", "peer-old", "old", 0)},
-				Complete: false, NextCursor: &next,
-			}, nil
-		}
-		return protocol.ChatReadListData{
-			Sessions: []protocol.ConversationSummary{summary("keep-me", "peer-new", "new", 0)}, Complete: true,
-		}, nil
-	}
-	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
-		t.Fatalf("Tick = %+v, %v", result, err)
-	}
-	conversations, err := h.db.ConversationsForAccount(h.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstPageCalls != 1 || len(conversations) != 1 ||
-		conversations[0].ConversationRef != "discard-me" {
-		t.Fatalf("已处理窗口不应在游标失效后被重放: calls=%d conversations=%+v",
-			firstPageCalls, conversations)
-	}
-	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
-	if err != nil || len(rounds) != 1 || rounds[0].ListComplete == nil ||
-		*rounds[0].ListComplete || rounds[0].Status != "ok" ||
-		rounds[0].Stage != "freshListPending" {
-		t.Fatalf("游标失效后的部分窗口不得冒充完整列表: rounds=%+v err=%v", rounds, err)
-	}
-	account, err := h.db.AccountByKey(h.key)
-	if err != nil || account == nil || !account.DirtyHint {
-		t.Fatalf("页面快照换代后必须安排 fresh 巡检: account=%+v err=%v", account, err)
-	}
-}
-
-func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
+func TestConversationListOverlappingWindowsUseLatestFingerprint(t *testing.T) {
 	h := newHarness(t)
 	first := seedTracked(t, h, "window-first", "peer-window-first", []store.MessageDraft{
 		draftText("first-old"),
@@ -2080,41 +2026,56 @@ func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
 		draftText("second-old"),
 	})
 	listCalls := 0
-	listStarts := make([]protocol.ListStart, 0, 3)
+	var listMoves []protocol.ListWindowMove
+	firstThreadCalls := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor != "" {
-				t.Fatalf("readThread 后旧列表 cursor 不得继续使用: %q", args.Cursor)
-			}
-			listStarts = append(listStarts, args.StartAt)
+			listMoves = append(listMoves, args.Move)
 			listCalls++
-			if listCalls == 1 {
-				next := "window-2"
+			switch listCalls {
+			case 1:
 				return protocol.ChatReadListData{
 					Sessions: []protocol.ConversationSummary{
-						summary(first.ConversationRef, "peer-window-first", "first-new", 1),
+						summary(first.ConversationRef, "peer-window-first", "first-new-1", 1),
+						summary(second.ConversationRef, "peer-window-second", "second-old", 0),
 					},
-					Complete: false, NextCursor: &next,
+					Complete: false,
+				}, nil
+			case 2:
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary(first.ConversationRef, "peer-window-first", "first-new-1", 1),
+						summary(second.ConversationRef, "peer-window-second", "second-new", 1),
+					},
+					Complete: false,
+				}, nil
+			default:
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary(first.ConversationRef, "peer-window-first", "first-new-2", 1),
+						summary(second.ConversationRef, "peer-window-second", "second-new", 1),
+					},
+					Complete: true,
 				}, nil
 			}
-			return protocol.ChatReadListData{
-				Sessions: []protocol.ConversationSummary{
-					summary(first.ConversationRef, "peer-window-first", "first-new", 1),
-					summary(second.ConversationRef, "peer-window-second", "second-new", 1),
-				},
-				Complete: true,
-			}, nil
 		case protocol.PrimChatReadThread:
 			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
 			switch args.ConversationRef {
 			case first.ConversationRef:
+				firstThreadCalls++
+				newText := "first-new-1"
+				messages := []protocol.ThreadMessage{
+					threadText(0, "first-old"),
+					threadText(1, newText),
+				}
+				if firstThreadCalls == 2 {
+					newText = "first-new-2"
+					messages = append(messages, threadText(2, newText))
+				}
 				return protocol.ChatReadThreadData{
-					Messages: []protocol.ThreadMessage{
-						threadText(0, "first-old"),
-						threadText(1, "first-new"),
-					},
+					Messages: messages,
 					Peer: ptr(protocol.PeerSummary{
 						DisplayName: "候选人", PlatformUserRef: "peer-window-first",
 					}),
@@ -2150,28 +2111,35 @@ func TestConversationListFreshContinuesWithoutUsingOldCursor(t *testing.T) {
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
 		protocol.PrimChatReadList,
+		protocol.PrimChatReadThread,
 	}
 	if got := h.runner.names(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("fresh 续行顺序错误: got=%v want=%v", got, want)
+		t.Fatalf("窗口重叠/变化处理顺序错误: got=%v want=%v", got, want)
 	}
-	if wantStarts := []protocol.ListStart{
-		protocol.ListStartTop,
-		protocol.ListStartCurrent,
-		protocol.ListStartCurrent,
-	}; !reflect.DeepEqual(listStarts, wantStarts) {
-		t.Fatalf("新轮必须从顶部开始、会话动作后必须从当前位置 fresh: got=%v want=%v",
-			listStarts, wantStarts)
+	if wantMoves := []protocol.ListWindowMove{
+		protocol.ListWindowMoveReset,
+		protocol.ListWindowMoveNext,
+		protocol.ListWindowMoveNext,
+	}; !reflect.DeepEqual(listMoves, wantMoves) {
+		t.Fatalf("窗口移动错误: got=%v want=%v", listMoves, wantMoves)
+	}
+	if firstThreadCalls != 2 {
+		t.Fatalf("同 fingerprint 应跳过、变化后应重读: firstThreadCalls=%d", firstThreadCalls)
 	}
 	for _, key := range []store.ConversationKey{first, second} {
 		messages, messagesErr := h.db.MessagesForConversation(key)
-		if messagesErr != nil || len(messages) != 2 {
+		wantCount := 2
+		if key == first {
+			wantCount = 3
+		}
+		if messagesErr != nil || len(messages) != wantCount {
 			t.Fatalf("%s 未被公平收敛: messages=%+v err=%v",
 				key.ConversationRef, messages, messagesErr)
 		}
 	}
 }
 
-func TestConversationListFreshRestartsShareMaxPagesBudget(t *testing.T) {
+func TestConversationListWindowBudgetProcessesWholeVisibleWindow(t *testing.T) {
 	h := newHarness(t)
 	h.manager.config.MaxPages = 1
 	first := seedTracked(t, h, "budget-first", "peer-budget-first", []store.MessageDraft{
@@ -2188,20 +2156,25 @@ func TestConversationListFreshRestartsShareMaxPagesBudget(t *testing.T) {
 					summary(first.ConversationRef, "peer-budget-first", "first-new", 1),
 					summary(second.ConversationRef, "peer-budget-second", "second-new", 1),
 				},
-				Complete: true,
+				Complete: false,
 			}, nil
 		case protocol.PrimChatReadThread:
 			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
-			if args.ConversationRef != first.ConversationRef {
-				t.Fatalf("单页总预算内不应读第二个会话: %q", args.ConversationRef)
+			oldText := "first-old"
+			newText := "first-new"
+			peerRef := "peer-budget-first"
+			if args.ConversationRef == second.ConversationRef {
+				oldText = "second-old"
+				newText = "second-new"
+				peerRef = "peer-budget-second"
 			}
 			return protocol.ChatReadThreadData{
 				Messages: []protocol.ThreadMessage{
-					threadText(0, "first-old"),
-					threadText(1, "first-new"),
+					threadText(0, oldText),
+					threadText(1, newText),
 				},
 				Peer: ptr(protocol.PeerSummary{
-					DisplayName: "候选人", PlatformUserRef: "peer-budget-first",
+					DisplayName: "候选人", PlatformUserRef: peerRef,
 				}),
 				Complete: true, AnchorMatched: true,
 			}, nil
@@ -2217,21 +2190,22 @@ func TestConversationListFreshRestartsShareMaxPagesBudget(t *testing.T) {
 	if got := h.runner.names(); !reflect.DeepEqual(got, []string{
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
+		protocol.PrimChatReadThread,
 	}) {
-		t.Fatalf("fresh restart 绕过了共享 MaxPages: %v", got)
+		t.Fatalf("窗口预算不应截断当前可见窗口: %v", got)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
 	if err != nil || len(rounds) != 1 || rounds[0].Status != "ok" ||
-		rounds[0].Stage != "freshListPending" {
+		rounds[0].Stage != "listWindowPending" {
 		t.Fatalf("预算耗尽未记为部分完成: rounds=%+v err=%v", rounds, err)
 	}
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil || !account.DirtyHint {
-		t.Fatalf("预算耗尽未安排 fresh 后续轮: account=%+v err=%v", account, err)
+		t.Fatalf("预算耗尽未安排后续 reset: account=%+v err=%v", account, err)
 	}
 	secondMessages, err := h.db.MessagesForConversation(second)
-	if err != nil || len(secondMessages) != 1 {
-		t.Fatalf("第二会话不应越过总预算被处理: messages=%+v err=%v", secondMessages, err)
+	if err != nil || len(secondMessages) != 2 {
+		t.Fatalf("当前窗口第二会话也必须处理: messages=%+v err=%v", secondMessages, err)
 	}
 }
 

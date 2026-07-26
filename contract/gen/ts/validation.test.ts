@@ -30,7 +30,7 @@ const validCommand = {
     expectedPrincipalFingerprint: "opaque-01",
     futureContextField: true,
   },
-  args: { filter: "all", maxSessions: 32, futureArgField: true },
+  args: { filter: "all", move: "reset", futureArgField: true },
   deadline: 1_999_999_999_999,
   execBudgetMs: 240_000,
   leaseMs: 60_000,
@@ -87,29 +87,41 @@ expectValid(
     execMs: 1,
   }),
 );
-expectValid("readList all default cutoff", validatePrimitiveArgs("chat.readList", 1, { filter: "all" }));
 expectValid(
-  "readList fresh top",
-  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "top" }),
+  "readList all default cutoff",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", move: "reset" }),
 );
 expectValid(
-  "readList fresh current",
-  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "current" }),
+  "readList reset window",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", move: "reset" }),
+);
+expectValid(
+  "readList next window",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", move: "next" }),
 );
 expectIssue(
-  "readList rejects unknown start",
-  validatePrimitiveArgs("chat.readList", 1, { filter: "all", startAt: "middle" }),
-  "$.startAt",
+  "readList rejects unknown move",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", move: "middle" }),
+  "$.move",
   "enum",
+);
+expectIssue(
+  "readList requires move",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all" }),
+  "$.move",
+  "required",
 );
 expectValid(
   "readList all explicit cutoff",
-  validatePrimitiveArgs("chat.readList", 1, { filter: "all", stopOlderThanDays: 8 }),
+  validatePrimitiveArgs("chat.readList", 1, { filter: "all", move: "reset", stopOlderThanDays: 8 }),
 );
-expectValid("readList unread without cutoff", validatePrimitiveArgs("chat.readList", 1, { filter: "unread" }));
+expectValid(
+  "readList unread without cutoff",
+  validatePrimitiveArgs("chat.readList", 1, { filter: "unread", move: "reset" }),
+);
 expectIssue(
   "readList unread forbids cutoff",
-  validatePrimitiveArgs("chat.readList", 1, { filter: "unread", stopOlderThanDays: 8 }),
+  validatePrimitiveArgs("chat.readList", 1, { filter: "unread", move: "reset", stopOlderThanDays: 8 }),
   "$.stopOlderThanDays",
   "forbiddenWhen",
 );
@@ -174,13 +186,11 @@ expectIssue(
 
 expectValid(
   "list continuation",
-  validatePrimitiveData("chat.readList", 1, { sessions: [], complete: false, nextCursor: "opaque-next" }),
-);
-expectIssue(
-  "list cursor required",
   validatePrimitiveData("chat.readList", 1, { sessions: [], complete: false }),
-  "$.nextCursor",
-  "requiredWhen",
+);
+expectValid(
+  "list completion",
+  validatePrimitiveData("chat.readList", 1, { sessions: [], complete: true }),
 );
 expectValid(
   "thread continuation",

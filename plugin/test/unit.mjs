@@ -1606,7 +1606,7 @@ test('带租约命令在执行与排队期间按 ref 发送活性心跳，终局
         accountRef: 'account-lease-pulse',
         expectedPrincipalFingerprint: 'principal-lease-pulse',
       },
-      args: { filter, maxSessions: 10 },
+      args: { filter, move: 'reset' },
       deadline: Date.now() + 100_000,
       execBudgetMs: 60_000,
       leaseMs: 30_000,
@@ -1687,7 +1687,7 @@ test('租约心跳不延长 execBudget，预算终局后立即停止', async () 
         accountRef: 'account-lease-budget',
         expectedPrincipalFingerprint: 'principal-lease-budget',
       },
-      args: { filter: 'all', maxSessions: 10 },
+      args: { filter: 'all', move: 'reset' },
       deadline: Date.now() + 100_000,
       execBudgetMs: 25_000,
       leaseMs: 9_000,
@@ -1755,7 +1755,7 @@ test('generated CmdContext 原样只读暴露给 program handler', async () => {
     name: Primitive.ChatReadList,
     ver: 1,
     context,
-    args: { filter: 'all', maxSessions: 10 },
+    args: { filter: 'all', move: 'reset' },
     deadline: Date.now() + 1_000,
     execBudgetMs: 500,
     leaseMs: 60_000,
@@ -9137,7 +9137,7 @@ test('智联线程页面 API 不响应时由 MAIN 本地截止响亮释放', asy
   assert.match(failure.__recruitHelperMainError, /read_history_api:history_api_timeout/u)
 })
 
-test('readList 只交付当前可定位 DOM 窗口并如实返回游标', async () => {
+test('readList 只交付当前可定位 DOM 窗口且不制造列表游标', async () => {
   const fingerprint = '9'.repeat(64)
   let domCalls = 0
   const rows = Array.from({ length: 8 }, (_unused, index) => ({
@@ -9183,14 +9183,14 @@ test('readList 只交付当前可定位 DOM 窗口并如实返回游标', async 
     async progress() {}, checkpoint() {}, beforeSideEffect() {},
   }
   const page = await readZhilianList(
-    { filter: 'all', stopOlderThanDays: 8, maxSessions: 32 },
+    { filter: 'all', move: 'reset', stopOlderThanDays: 8 },
     context,
     fingerprint,
   )
   assert.equal(domCalls, 1)
   assert.equal(page.sessions.length, 8)
   assert.equal(page.complete, false)
-  assert.ok(page.nextCursor)
+  assert.deepEqual(Object.keys(page).sort(), ['complete', 'sessions'])
 })
 
 test('智联线程 API 不可用时只接受目标路由上的稳定 Vue 时间线与明确 90 天边界', async () => {
@@ -10200,33 +10200,44 @@ test('readThread 游标绑定参数、设置读取安全点并拒绝原地游标
   assert.equal(mainReadCalls, readsBeforeLost + 1, '上下文丢失时不得重跑完整 MAIN 读取')
 })
 
-test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部正常收束', async () => {
+test('readList 走无游标 DOM 窗口，reset 回顶且 next 原样交付跨窗重复项', async () => {
   const fingerprint = 'e'.repeat(64)
   const now = Date.now()
-  let domPage = {
-    sessions: [
-      {
-        conversationRef: 'newer',
-        peer: { displayName: '候选人甲', platformUserRef: 'peer-a' },
-        unreadCount: 1,
-        lastMessage: { direction: 'in', kind: 'text', textPreview: '新消息' },
-        lastActivityTs: now,
-      },
-      {
-        conversationRef: 'older',
-        peer: { displayName: '候选人乙', platformUserRef: 'peer-b' },
-        unreadCount: 0,
-        lastMessage: { direction: 'out', kind: 'text', textPreview: '旧消息' },
-        lastActivityTs: now - 9 * 86_400_000,
-      },
-    ],
+  const first = {
+    conversationRef: 'window-a',
+    peer: { displayName: '候选人甲', platformUserRef: 'peer-a' },
+    unreadCount: 1,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '新消息' },
+    lastActivityTs: now,
+  }
+  const repeated = {
+    conversationRef: 'window-b',
+    peer: { displayName: '候选人乙', platformUserRef: 'peer-b' },
+    unreadCount: 0,
+    lastMessage: { direction: 'out', kind: 'text', textPreview: '旧消息' },
+    lastActivityTs: now - 1_000,
+  }
+  const last = {
+    conversationRef: 'window-c',
+    peer: { displayName: '候选人丙', platformUserRef: 'peer-c' },
+    unreadCount: 0,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '再问一下' },
+    lastActivityTs: now - 2_000,
+  }
+  const resetPage = {
+    sessions: [first, repeated],
     atBottom: false,
     moved: true,
     scrollHeight: 2_000,
-    scrollTop: 500,
+    scrollTop: 0,
     unstable: false,
   }
-  let domPageForArgs = () => domPage
+  const nextPage = {
+    ...resetPage,
+    sessions: [repeated, last],
+    atBottom: true,
+    scrollTop: 700,
+  }
   const domCalls = []
   globalThis.chrome = {
     tabs: {
@@ -10245,7 +10256,7 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
         }
         if (func.name === 'mainReadListDOMWindow') {
           domCalls.push(args)
-          return [{ result: domPageForArgs(args) }]
+          return [{ result: args[0] ? nextPage : resetPage }]
         }
         throw new Error(`unexpected MAIN function ${func.name}`)
       },
@@ -10256,119 +10267,24 @@ test('readList 走 Vue DOM 虚拟列表，吸收前缀追加并让当前底部�
     signal: new AbortController().signal,
     async progress() {}, checkpoint() {}, beforeSideEffect() {},
   }
-  const result = await readZhilianList({ filter: 'all', stopOlderThanDays: 8 }, context, fingerprint)
-  assert.equal(result.complete, true)
-  assert.equal(result.nextCursor, null)
-  assert.deepEqual(result.sessions.map((item) => item.conversationRef), ['newer'])
-  assert.deepEqual(domCalls[0], [false, true], '省略 startAt 的 fresh 首窗默认复位列表顶部')
-
-  domPage = {
-    ...domPage,
-    sessions: [domPage.sessions[0]],
-    atBottom: true,
-  }
-  const explicitTop = await readZhilianList(
-    { filter: 'all', startAt: 'top', stopOlderThanDays: 8 },
+  const reset = await readZhilianList(
+    { filter: 'all', move: 'reset', stopOlderThanDays: 8 },
     context,
     fingerprint,
   )
-  assert.equal(explicitTop.complete, true)
-  assert.deepEqual(domCalls.at(-1), [false, true], '显式 top 必须复位列表顶部')
+  assert.equal(reset.complete, false)
+  assert.deepEqual(reset.sessions.map((item) => item.conversationRef), ['window-a', 'window-b'])
+  assert.deepEqual(domCalls.at(-1), [false, true], 'reset 必须回到顶部后读取')
 
-  const currentBottom = await readZhilianList(
-    { filter: 'all', startAt: 'current', stopOlderThanDays: 8 },
+  const next = await readZhilianList(
+    { filter: 'all', move: 'next', stopOlderThanDays: 8 },
     context,
     fingerprint,
   )
-  assert.equal(currentBottom.complete, true)
-  assert.equal(currentBottom.nextCursor, null)
-  assert.deepEqual(currentBottom.sessions.map((item) => item.conversationRef), ['newer'])
-  assert.deepEqual(domCalls.at(-1), [false, false], 'fresh current 必须保留当前物理视口')
-
-  const stableWindow = [
-    { ...domPage.sessions[0], conversationRef: 'cursor-a', lastActivityTs: now },
-    {
-      ...domPage.sessions[0],
-      conversationRef: 'cursor-b',
-      peer: { displayName: '候选人丙', platformUserRef: 'peer-c' },
-      lastActivityTs: now - 1_000,
-    },
-  ]
-  domPage = { ...domPage, sessions: stableWindow, atBottom: false, scrollTop: 500 }
-  const firstWindow = await readZhilianList({
-    filter: 'all', stopOlderThanDays: 8, maxSessions: 1,
-  }, context, fingerprint)
-  assert.equal(firstWindow.complete, false)
-  assert.ok(firstWindow.nextCursor)
-  assert.deepEqual(domCalls.at(-1), [false, true])
-
-  const callsBeforeCursorCurrent = domCalls.length
-  await assert.rejects(
-    readZhilianList({
-      filter: 'all',
-      startAt: 'current',
-      stopOlderThanDays: 8,
-      maxSessions: 1,
-      cursor: firstWindow.nextCursor,
-    }, context, fingerprint),
-    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.CursorInvalid,
-    'current 只允许建立 fresh 首窗，不能借旧 cursor 续页',
-  )
-  assert.equal(domCalls.length, callsBeforeCursorCurrent, 'cursor+current 必须在读取 DOM 前拒绝')
-
-  // 继续读时不自作主张复位；当前窗的会话重排/人工滚动必须使 digest 失配并响亮拒绝。
-  domPage = { ...domPage, sessions: [...stableWindow].reverse(), scrollTop: 600 }
-  await assert.rejects(
-    readZhilianList({
-      filter: 'all', stopOlderThanDays: 8, maxSessions: 1, cursor: firstWindow.nextCursor,
-    }, context, fingerprint),
-    (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.CursorInvalid,
-  )
-  assert.deepEqual(domCalls.at(-1), [false, false])
-
-  const prefixWindow = [
-    { ...stableWindow[0], conversationRef: 'prefix-a' },
-    { ...stableWindow[1], conversationRef: 'prefix-b' },
-  ]
-  const appendedWindow = [
-    ...prefixWindow,
-    {
-      ...stableWindow[0],
-      conversationRef: 'prefix-c',
-      peer: { displayName: '候选人丁', platformUserRef: 'peer-d' },
-      lastActivityTs: now - 2_000,
-    },
-  ]
-  domPage = {
-    ...domPage,
-    sessions: prefixWindow,
-    atBottom: false,
-    scrollTop: 0,
-  }
-  domPageForArgs = ([advance]) => advance
-    ? {
-        ...domPage,
-        sessions: appendedWindow,
-        atBottom: true,
-        scrollTop: 600,
-      }
-    : domPage
-  const prefixFirst = await readZhilianList({
-    filter: 'all', stopOlderThanDays: 8, maxSessions: 2,
-  }, context, fingerprint)
-  assert.deepEqual(prefixFirst.sessions.map((item) => item.conversationRef), ['prefix-a', 'prefix-b'])
-  assert.ok(prefixFirst.nextCursor)
-  const prefixNext = await readZhilianList({
-    filter: 'all',
-    stopOlderThanDays: 8,
-    maxSessions: 2,
-    cursor: prefixFirst.nextCursor,
-  }, context, fingerprint)
-  assert.equal(prefixNext.complete, true)
-  assert.equal(prefixNext.nextCursor, null)
-  assert.deepEqual(prefixNext.sessions.map((item) => item.conversationRef), ['prefix-c'],
-    '20→31 式前缀追加只能交付新增后缀，旧窗口不得再次进入脑')
-  assert.deepEqual(domCalls.slice(-2), [[false, false], [true, false]])
+  assert.equal(next.complete, true)
+  assert.deepEqual(next.sessions.map((item) => item.conversationRef), ['window-b', 'window-c'],
+    '跨窗重复由脑按指纹跳过，手必须原样交付')
+  assert.deepEqual(domCalls.at(-1), [true, false], 'next 只向下移动，不复位顶部')
 })
 
 test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年龄截止', async () => {
@@ -10428,25 +10344,40 @@ test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年
     async progress() {}, checkpoint() {}, async beforeSideEffect() { barriers += 1 },
   }
   try {
-    const unread = await readZhilianList({ filter: 'unread' }, context, fingerprint)
+    const unread = await readZhilianList({ filter: 'unread', move: 'reset' }, context, fingerprint)
     assert.deepEqual(unread.sessions.map((item) => item.conversationRef), ['conversation-old-unread'],
       '未读轮不得把 60 天前会话套进普通 8 天截止')
     assert.equal(unread.complete, true)
     assert.deepEqual(filterCalls.slice(0, 2), [[true, false], [true, true]])
     assert.equal(barriers, 1)
 
+    const callsBeforeMismatchedNext = filterCalls.length
+    await assert.rejects(
+      readZhilianList(
+        { filter: 'all', move: 'next', stopOlderThanDays: 8 },
+        context,
+        fingerprint,
+      ),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.ElementUnresolved,
+      'next 遇到筛选变化必须要求脑以 reset 重建窗口，不能在手内切换筛选',
+    )
+    assert.deepEqual(filterCalls.slice(callsBeforeMismatchedNext), [[false, false]])
+    assert.equal(barriers, 1, '被拒绝的 next 不得跨越页面动作栅栏')
+
+    const allFilterStart = filterCalls.length
     const all = await readZhilianList(
-      { filter: 'all', stopOlderThanDays: 8 },
+      { filter: 'all', move: 'reset', stopOlderThanDays: 8 },
       context,
       fingerprint,
     )
     assert.deepEqual(all.sessions, [], '普通轮仍按 8 天截止')
     assert.equal(all.complete, true)
-    assert.deepEqual(filterCalls.slice(2), [[false, false], [false, true]])
+    assert.deepEqual(filterCalls.slice(allFilterStart), [[false, false], [false, true]])
     assert.equal(barriers, 2)
 
     await assert.rejects(
-      readZhilianList({ filter: 'unread', stopOlderThanDays: 8 }, context, fingerprint),
+      readZhilianList({ filter: 'unread', move: 'reset', stopOlderThanDays: 8 }, context, fingerprint),
       (error) => error instanceof ZhilianPlatformError && error.code === ErrorCode.GuardFailed,
       'unread 携带年龄截止必须在任何页面交互前拒绝',
     )
@@ -10466,7 +10397,11 @@ test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年
       } }]
       throw new Error(`unexpected MAIN function ${func.name}`)
     }
-    const mixedUnread = await readZhilianList({ filter: 'unread' }, context, fingerprint)
+    const mixedUnread = await readZhilianList(
+      { filter: 'unread', move: 'reset' },
+      context,
+      fingerprint,
+    )
     assert.equal(mixedUnread.complete, true)
     assert.equal(mixedUnread.sessions.length, 1)
     assert.equal(mixedUnread.sessions[0].conversationRef, badUnread.conversationRef)
@@ -10822,9 +10757,13 @@ test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒
     clientHeight: 300,
     parentElement: null,
     querySelectorAll() { return [] },
+    dispatchEvent() {},
   }
+  let timerCalls = 0
   try {
     globalThis.setTimeout = (callback) => {
+      timerCalls += 1
+      sources[0].unreadCount = timerCalls
       callback()
       return 0
     }
@@ -10859,6 +10798,11 @@ test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒
         ['session-nuxt-b', 'peer-nuxt-b', 'out'],
       ],
     )
+    assert.ok(timerCalls >= 3, '测试必须覆盖稳定等待期间业务字段持续变化')
+    const advanced = await zhilianTestHooks.mainReadListDOMWindow(true, false)
+    assert.equal(advanced.__recruitHelperMainError, undefined)
+    assert.equal(advanced.scrollTop, 210, 'next 每次只移动当前视口高度的 70%，保留跨窗重叠')
+    assert.equal(advanced.moved, true)
   } finally {
     Object.assign(globalThis, original)
   }

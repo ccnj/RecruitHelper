@@ -27,9 +27,8 @@ type roundActor struct {
 	requireCurrentThread    bool
 	sourcingBatchIDAtStart  string
 	superseded              bool
-	freshListRequired       bool
-	listSnapshotGeneration  uint64
-	checkedConversationRefs map[string]struct{}
+	listTraversalIncomplete bool
+	checkedListFingerprints map[string]string
 	unreadRetryDeferred     bool
 	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
@@ -50,16 +49,14 @@ type dirtyConversation struct {
 }
 
 type conversationListPage struct {
-	sessions   []protocol.ConversationSummary
-	complete   bool
-	nextCursor string
+	sessions []protocol.ConversationSummary
+	complete bool
 }
 
 type conversationListPageOutcome uint8
 
 const (
 	conversationListPageContinue conversationListPageOutcome = iota
-	conversationListPageFresh
 	conversationListPageSwitchUnread
 	conversationListPageSwitchAll
 	conversationListPageStop
@@ -184,11 +181,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 	}
 
 	filter := protocol.ListFilterAll
-	cursor := ""
-	startAt := protocol.ListStartTop
-	seenCursors := make(map[string]struct{})
-	seenConversations := make(map[string]struct{})
-	a.checkedConversationRefs = make(map[string]struct{})
+	move := protocol.ListWindowMoveReset
+	a.checkedListFingerprints = make(map[string]string)
 	_, err = a.refreshHandState(ctx)
 	if err != nil {
 		return err
@@ -196,26 +190,20 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if a.manager.config.MaxPages >= 2 && a.beginUnreadPass() {
 		filter = protocol.ListFilterUnread
 	}
-	pagesRead := 0
-	resetListRead := func(nextStart protocol.ListStart) {
-		cursor = ""
-		startAt = nextStart
-		seenCursors = make(map[string]struct{})
-		seenConversations = make(map[string]struct{})
-	}
+	windowsRead := 0
 	startAllScan := func() {
 		filter = protocol.ListFilterAll
-		resetListRead(protocol.ListStartTop)
-		// Returning from unread creates a new ordinary scan generation. The
-		// process-local list fingerprint, not this call-stack set, decides
-		// whether a previously seen conversation needs another detail read.
-		a.checkedConversationRefs = make(map[string]struct{})
+		move = protocol.ListWindowMoveReset
+		// Returning from unread restarts the physical all-list traversal, but
+		// keeps this actor's ref -> fingerprint decisions. Overlapping rows are
+		// skipped while a conversation whose visible hint changed is eligible
+		// for another authoritative read.
 	}
-	for pagesRead < a.manager.config.MaxPages {
+	for windowsRead < a.manager.config.MaxPages {
 		// Entering unread reserves one actual all-list read to close the
 		// platform filter. The reserve is part of the same MaxPages budget.
 		if filter == protocol.ListFilterUnread &&
-			pagesRead >= a.manager.config.MaxPages-1 {
+			windowsRead >= a.manager.config.MaxPages-1 {
 			a.unreadRetryDeferred = true
 			startAllScan()
 			continue
@@ -223,8 +211,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 		if err := a.setStage("readingList"); err != nil {
 			return err
 		}
-		page, err := a.readListPage(ctx, cursor, filter, startAt)
-		pagesRead++
+		page, err := a.readListPage(ctx, filter, move)
+		windowsRead++
 		if err != nil {
 			if filter == protocol.ListFilterUnread &&
 				isRunError(err, protocol.ErrCodeElementUnresolved) {
@@ -237,55 +225,29 @@ func (a *roundActor) execute(ctx context.Context) error {
 				startAllScan()
 				continue
 			}
-			if isRunError(err, protocol.ErrCodeUserActive) ||
-				isRunError(err, protocol.ErrCodeCursorInvalid) {
-				// readList 的 USER_ACTIVE/CURSOR_INVALID 只说明本轮页面
-				// 快照已经换代。已完成的会话事实照常保留，下一巡检从
-				// fresh 当前窗口重读；这里没有人工草稿或发送动作可重试。
-				a.freshListRequired = true
+			if isRunError(err, protocol.ErrCodeUserActive) {
+				// 用户在窗口移动期间改变了页面。已经完成的会话事实照常
+				// 保留，本轮按部分遍历收束；下一巡检重新 reset，不复用
+				// 任何页面位置或跨命令快照。
+				a.listTraversalIncomplete = true
 				return nil
 			}
 			a.handleCommandFailure(err)
 			return err
 		}
-		for _, summary := range page.sessions {
-			if _, duplicate := seenConversations[summary.ConversationRef]; duplicate {
-				return fmt.Errorf("%w: %s", store.ErrDuplicateConversationEntry, summary.ConversationRef)
-			}
-			seenConversations[summary.ConversationRef] = struct{}{}
-		}
 		outcome, err := a.processConversationListPage(
 			ctx,
 			page,
 			filter,
-			pagesRead < a.manager.config.MaxPages-1,
+			windowsRead < a.manager.config.MaxPages-1,
 		)
 		if err != nil {
 			return err
 		}
 		switch outcome {
-		case conversationListPageFresh:
-			// readThread、简历读取或候选人可见动作都可能切换会话、清除
-			// 未读或重排列表。旧 page/cursor 此刻不再是导航依据；同一
-			// 完整扫描保留 checked 集合，并从当前物理窗口建立无 cursor
-			// 的 fresh 页面快照继续。只有筛选切换才重新从顶部建立快照。
-			if filter == protocol.ListFilterAll &&
-				pagesRead < a.manager.config.MaxPages-1 {
-				_, stateErr := a.refreshHandState(ctx)
-				if stateErr != nil {
-					return stateErr
-				}
-				if a.beginUnreadPass() {
-					filter = protocol.ListFilterUnread
-					resetListRead(protocol.ListStartTop)
-					continue
-				}
-			}
-			resetListRead(protocol.ListStartCurrent)
-			continue
 		case conversationListPageSwitchUnread:
 			filter = protocol.ListFilterUnread
-			resetListRead(protocol.ListStartTop)
+			move = protocol.ListWindowMoveReset
 			continue
 		case conversationListPageSwitchAll:
 			startAllScan()
@@ -313,19 +275,11 @@ func (a *roundActor) execute(ctx context.Context) error {
 			}
 			return nil
 		}
-		if page.nextCursor == "" || page.nextCursor == cursor {
-			return ErrPaginationLoop
-		}
-		if _, duplicate := seenCursors[page.nextCursor]; duplicate {
-			return ErrPaginationLoop
-		}
-		seenCursors[page.nextCursor] = struct{}{}
-		cursor = page.nextCursor
+		move = protocol.ListWindowMoveNext
 	}
-	// MaxPages 是本次完整扫描所有 fresh restart 共享的总读取预算。
-	// 预算耗尽只表示部分扫描已经安全收束；不把它伪装成业务失败，
-	// 下一轮从 fresh 当前列表继续。
-	a.freshListRequired = true
+	// MaxPages 仍是单轮窗口总量的高位止损。预算耗尽只表示部分遍历
+	// 已经安全收束；下一轮重新 reset，不持久化或猜测页面位置。
+	a.listTraversalIncomplete = true
 	return nil
 }
 
@@ -373,18 +327,11 @@ func (a *roundActor) processConversationListPage(
 	if err := a.ensureSourcingCommunicationResumes(); err != nil {
 		return conversationListPageContinue, err
 	}
-
-	dirty, err := a.detectDirty(
-		page.sessions,
-		filter == protocol.ListFilterUnread,
-	)
+	tracked, err := a.trackedConversationsByRef()
 	if err != nil {
 		return conversationListPageContinue, err
 	}
-	dirtyByRef := make(map[string]dirtyConversation, len(dirty))
-	for index := range dirty {
-		dirtyByRef[dirty[index].conversation.ConversationRef] = dirty[index]
-	}
+
 	if filter == protocol.ListFilterAll && a.classificationCorrected {
 		// A classification correction encountered in unread mode still needs
 		// this actual all-list read to close the page filter, but it must not
@@ -392,10 +339,11 @@ func (a *roundActor) processConversationListPage(
 		return conversationListPageStop, nil
 	}
 	if filter == protocol.ListFilterUnread {
-		return a.processUnreadConversationListPage(ctx, page, dirtyByRef)
+		return a.processUnreadConversationListPage(ctx, page, tracked)
 	}
 	for _, summary := range page.sessions {
-		if _, checked := a.checkedConversationRefs[summary.ConversationRef]; checked {
+		fingerprint := a.listFingerprint(summary)
+		if checked, exists := a.checkedListFingerprints[summary.ConversationRef]; exists && checked == fingerprint {
 			continue
 		}
 		if canEnterUnread {
@@ -417,9 +365,23 @@ func (a *roundActor) processConversationListPage(
 			// 在线性化边界切换页面或结束任务。
 			return conversationListPageStop, nil
 		}
-		_, readCurrent := dirtyByRef[summary.ConversationRef]
-		if dirtyConversation, ok := dirtyByRef[summary.ConversationRef]; ok {
-			a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
+		// Mark only after the unread and workflow gates. If unread preempts
+		// this candidate, returning to all/reset must still be allowed to
+		// process it. Once claimed, however, a local failure cannot spin on
+		// the same unchanged row in an overlapping window.
+		a.checkedListFingerprints[summary.ConversationRef] = fingerprint
+
+		dirty, err := a.detectDirtySummary(
+			summary,
+			false,
+			tracked,
+		)
+		if err != nil {
+			return conversationListPageContinue, err
+		}
+		readCurrent := dirty != nil
+		if readCurrent {
+			dirtyConversation := *dirty
 			if err := a.setStage("readingThread"); err != nil {
 				return conversationListPageContinue, err
 			}
@@ -429,10 +391,10 @@ func (a *roundActor) processConversationListPage(
 			}
 			if err != nil {
 				if isRunError(err, protocol.ErrCodeTargetNotFound) {
-					// 目标在 click 前离开本轮可定位窗口，没有产生页面
-					// 副作用。把它视为快照过期，禁止数据库反向找人；
-					// 当前 ref 本次已尝试，fresh 后继续后续会话。
-					return conversationListPageFresh, nil
+					// 目标在 click 前离开当前可定位窗口，没有产生页面
+					// 副作用。当前 fingerprint 已尝试；继续使用本次命令
+					// 返回的其他稳定 ref，下一窗口的重叠不会围绕它打转。
+					continue
 				}
 				a.handleCommandFailure(err)
 				return conversationListPageContinue, err
@@ -454,13 +416,8 @@ func (a *roundActor) processConversationListPage(
 			return conversationListPageContinue, err
 		}
 		if profile == nil {
-			if readCurrent {
-				return conversationListPageFresh, nil
-			}
 			continue
 		}
-		a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
-		snapshotGeneration := a.listSnapshotGeneration
 		if err := a.prepareInboundConversationProfile(
 			ctx,
 			*profile,
@@ -470,8 +427,8 @@ func (a *roundActor) processConversationListPage(
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
 			return conversationListPageContinue, err
 		}
-		if readCurrent || a.listSnapshotGeneration != snapshotGeneration {
-			return conversationListPageFresh, nil
+		if a.classificationCorrected {
+			return conversationListPageStop, nil
 		}
 	}
 	return conversationListPageContinue, nil
@@ -482,7 +439,7 @@ const unreadPatrolAuditCategory = "unread_patrol"
 func (a *roundActor) processUnreadConversationListPage(
 	ctx context.Context,
 	page conversationListPage,
-	dirtyByRef map[string]dirtyConversation,
+	tracked map[string]store.Conversation,
 ) (conversationListPageOutcome, error) {
 	for _, summary := range page.sessions {
 		if _, attempted := a.unreadAttemptedRefs[summary.ConversationRef]; attempted {
@@ -509,7 +466,13 @@ func (a *roundActor) processUnreadConversationListPage(
 			return conversationListPageContinue, err
 		}
 		if profile == nil {
-			return a.openUnreadConversationWithoutAutomation(ctx, summary.ConversationRef)
+			if err := a.openUnreadConversationWithoutAutomation(
+				ctx,
+				summary.ConversationRef,
+			); err != nil {
+				return conversationListPageContinue, err
+			}
+			continue
 		}
 		_, ready, targetErr := a.manager.store.CommunicationTargetForProfile(
 			profile.ProfileID,
@@ -521,15 +484,29 @@ func (a *roundActor) processUnreadConversationListPage(
 			return conversationListPageContinue, targetErr
 		}
 		if !ready {
-			return a.openUnreadConversationWithoutAutomation(ctx, summary.ConversationRef)
+			if err := a.openUnreadConversationWithoutAutomation(
+				ctx,
+				summary.ConversationRef,
+			); err != nil {
+				return conversationListPageContinue, err
+			}
+			continue
 		}
 
-		dirtyConversation, ok := dirtyByRef[summary.ConversationRef]
-		if !ok {
+		dirty, err := a.detectDirtySummary(
+			summary,
+			true,
+			tracked,
+		)
+		if err != nil {
+			return conversationListPageContinue, err
+		}
+		if dirty == nil {
 			return conversationListPageContinue, errors.New(
 				"已有候选人档案的未读会话缺少可对账会话事实",
 			)
 		}
+		dirtyConversation := *dirty
 		if err := a.setStage("readingThread"); err != nil {
 			return conversationListPageContinue, err
 		}
@@ -544,7 +521,7 @@ func (a *roundActor) processUnreadConversationListPage(
 				); auditErr != nil {
 					return conversationListPageContinue, auditErr
 				}
-				return conversationListPageFresh, nil
+				continue
 			}
 			a.handleCommandFailure(err)
 			return conversationListPageContinue, err
@@ -563,7 +540,10 @@ func (a *roundActor) processUnreadConversationListPage(
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
 			return conversationListPageContinue, err
 		}
-		return conversationListPageFresh, nil
+		if a.classificationCorrected {
+			a.unreadRetryDeferred = true
+			return conversationListPageSwitchAll, nil
+		}
 	}
 	if !page.complete {
 		return conversationListPageContinue, nil
@@ -601,11 +581,10 @@ func (a *roundActor) processUnreadConversationListPage(
 func (a *roundActor) openUnreadConversationWithoutAutomation(
 	ctx context.Context,
 	conversationRef string,
-) (conversationListPageOutcome, error) {
+) error {
 	if err := a.setStage("openingUnreadConversation"); err != nil {
-		return conversationListPageContinue, err
+		return err
 	}
-	a.invalidateListSnapshot()
 	data, err := invokePrimitive[protocol.ChatOpenConversationData](
 		ctx,
 		a,
@@ -617,12 +596,12 @@ func (a *roundActor) openUnreadConversationWithoutAutomation(
 			if auditErr := a.appendUnreadPatrolAudit(
 				"status=attempted outcome=" + unreadLocalOutcome(err),
 			); auditErr != nil {
-				return conversationListPageContinue, auditErr
+				return auditErr
 			}
-			return conversationListPageFresh, nil
+			return nil
 		}
 		a.handleCommandFailure(err)
-		return conversationListPageContinue, err
+		return err
 	}
 	if data.ConversationRef != conversationRef {
 		err := &RunError{
@@ -632,9 +611,9 @@ func (a *roundActor) openUnreadConversationWithoutAutomation(
 			Cause:      errors.New("未读会话打开结果与目标会话不一致"),
 		}
 		a.handleCommandFailure(err)
-		return conversationListPageContinue, err
+		return err
 	}
-	return conversationListPageFresh, nil
+	return nil
 }
 
 func (a *roundActor) isLocallyAttemptedUnreadError(err error) bool {
@@ -1127,11 +1106,6 @@ func (a *roundActor) captureResumeForProfile(
 	if err != nil {
 		return err
 	}
-	// Resume capture is an intrusive current-conversation action. Even if the
-	// result later fails, the page may already have opened/closed a resume
-	// surface, so a previously observed conversation-list cursor is no longer
-	// a valid navigation basis.
-	a.invalidateListSnapshot()
 	logicalID := handle.LogicalDispatchID()
 	var raw json.RawMessage
 	func() {
@@ -1306,16 +1280,12 @@ func (a *roundActor) markIdentityUnobservable(reason protocol.NotReadyReason) er
 
 func (a *roundActor) readListPage(
 	ctx context.Context,
-	cursor string,
 	filter protocol.ListFilter,
-	startAt protocol.ListStart,
+	move protocol.ListWindowMove,
 ) (conversationListPage, error) {
 	args := protocol.ChatReadListArgs{
-		Cursor: cursor, Filter: filter,
-		MaxSessions: protocol.DefaultPaginationReadListMaxItems,
-	}
-	if cursor == "" {
-		args.StartAt = startAt
+		Filter: filter,
+		Move:   move,
 	}
 	if filter == protocol.ListFilterAll {
 		args.StopOlderThanDays = 8
@@ -1329,20 +1299,28 @@ func (a *roundActor) readListPage(
 	if err != nil {
 		return conversationListPage{}, err
 	}
-	page := conversationListPage{
+	return conversationListPage{
 		sessions: data.Sessions,
 		complete: data.Complete,
+	}, nil
+}
+
+func (a *roundActor) listFingerprint(
+	summary protocol.ConversationSummary,
+) string {
+	principalFingerprint := ""
+	if a.account.PrincipalFingerprint != nil {
+		principalFingerprint = *a.account.PrincipalFingerprint
 	}
-	if !data.Complete {
-		// contract validation guarantees a non-empty cursor for an incomplete
-		// page. Keep the defensive branch local so a malformed hand result
-		// cannot be interpreted as completion.
-		if data.NextCursor == nil || *data.NextCursor == "" {
-			return conversationListPage{}, ErrPaginationLoop
-		}
-		page.nextCursor = *data.NextCursor
-	}
-	return page, nil
+	return listHintFingerprint(
+		makeListHintVerificationKey(
+			a.account.Platform,
+			a.account.AccountRef,
+			principalFingerprint,
+			summary.ConversationRef,
+		),
+		summary,
+	)
 }
 
 func listEntries(sessions []protocol.ConversationSummary) ([]store.ListIndexEntry, error) {
@@ -1363,11 +1341,10 @@ func listEntries(sessions []protocol.ConversationSummary) ([]store.ListIndexEntr
 	return entries, nil
 }
 
-func (a *roundActor) detectDirty(
-	sessions []protocol.ConversationSummary,
-	forceUnread bool,
-) ([]dirtyConversation, error) {
-	observedAt := a.manager.now()
+func (a *roundActor) trackedConversationsByRef() (
+	map[string]store.Conversation,
+	error,
+) {
 	tracked, err := a.manager.store.TrackedConversations(a.key())
 	if err != nil {
 		return nil, err
@@ -1376,61 +1353,67 @@ func (a *roundActor) detectDirty(
 	for _, conversation := range tracked {
 		trackedByRef[conversation.ConversationRef] = conversation
 	}
-	out := make([]dirtyConversation, 0, len(sessions))
-	for _, summary := range sessions {
-		conversation, listed := trackedByRef[summary.ConversationRef]
-		if !listed {
-			continue
-		}
-		key := store.ConversationKey{
-			Platform: conversation.Platform, AccountRef: conversation.AccountRef,
-			ConversationRef: conversation.ConversationRef,
-		}
-		ledger, err := a.manager.store.MessagesForConversation(key)
-		if err != nil {
-			return nil, err
-		}
-		principalFingerprint := ""
-		if a.account.PrincipalFingerprint != nil {
-			principalFingerprint = *a.account.PrincipalFingerprint
-		}
-		hintKey := makeListHintVerificationKey(
-			conversation.Platform,
-			conversation.AccountRef,
-			principalFingerprint,
-			conversation.ConversationRef,
-		)
-		hintFingerprint := listHintFingerprint(hintKey, summary)
-		hintAlreadyVerified, hintChangedFromVerified :=
-			a.manager.observeListHintFingerprint(hintKey, hintFingerprint)
+	return trackedByRef, nil
+}
 
-		forceReconcile := conversation.TrackingState == store.TrackingPending
-		if conversation.LastSyncedAt == nil ||
-			!observedAt.Before(conversation.LastSyncedAt.Add(a.manager.config.TrackedReconcileInterval)) {
-			// 事件、未读与列表摘要都是提示；低频到期对账才保证提示全丢、
-			// 同文连续消息或旧卡状态变化时仍能恢复账本。
-			forceReconcile = true
-		}
-		if len(ledger) == 0 {
-			forceReconcile = true
-		}
-		hintDirty := summary.UnreadCount > 0 || hintChangedFromVerified
-		if len(ledger) > 0 && !syncledger.ListPreviewMatches(syncledger.ListPreview{
-			Direction: string(summary.LastMessage.Direction), Kind: string(summary.LastMessage.Kind),
-			Text: summary.LastMessage.TextPreview,
-		}, ledger[len(ledger)-1]) {
-			hintDirty = true
-		}
-		if forceUnread || forceReconcile || (hintDirty && !hintAlreadyVerified) {
-			out = append(out, dirtyConversation{
-				conversation:        conversation,
-				ledger:              ledger,
-				listHintKey:         hintKey,
-				listHintFingerprint: hintFingerprint,
-			})
-		}
+func (a *roundActor) detectDirtySummary(
+	summary protocol.ConversationSummary,
+	forceUnread bool,
+	trackedByRef map[string]store.Conversation,
+) (*dirtyConversation, error) {
+	conversation, listed := trackedByRef[summary.ConversationRef]
+	if !listed {
+		return nil, nil
 	}
-	return out, nil
+	key := store.ConversationKey{
+		Platform: conversation.Platform, AccountRef: conversation.AccountRef,
+		ConversationRef: conversation.ConversationRef,
+	}
+	ledger, err := a.manager.store.MessagesForConversation(key)
+	if err != nil {
+		return nil, err
+	}
+	principalFingerprint := ""
+	if a.account.PrincipalFingerprint != nil {
+		principalFingerprint = *a.account.PrincipalFingerprint
+	}
+	hintKey := makeListHintVerificationKey(
+		conversation.Platform,
+		conversation.AccountRef,
+		principalFingerprint,
+		conversation.ConversationRef,
+	)
+	hintFingerprint := listHintFingerprint(hintKey, summary)
+	hintAlreadyVerified, hintChangedFromVerified :=
+		a.manager.observeListHintFingerprint(hintKey, hintFingerprint)
+
+	forceReconcile := conversation.TrackingState == store.TrackingPending
+	observedAt := a.manager.now()
+	if conversation.LastSyncedAt == nil ||
+		!observedAt.Before(conversation.LastSyncedAt.Add(a.manager.config.TrackedReconcileInterval)) {
+		// 事件、未读与列表摘要都是提示；低频到期对账才保证提示全丢、
+		// 同文连续消息或旧卡状态变化时仍能恢复账本。
+		forceReconcile = true
+	}
+	if len(ledger) == 0 {
+		forceReconcile = true
+	}
+	hintDirty := summary.UnreadCount > 0 || hintChangedFromVerified
+	if len(ledger) > 0 && !syncledger.ListPreviewMatches(syncledger.ListPreview{
+		Direction: string(summary.LastMessage.Direction), Kind: string(summary.LastMessage.Kind),
+		Text: summary.LastMessage.TextPreview,
+	}, ledger[len(ledger)-1]) {
+		hintDirty = true
+	}
+	if !forceUnread && !forceReconcile && (!hintDirty || hintAlreadyVerified) {
+		return nil, nil
+	}
+	return &dirtyConversation{
+		conversation:        conversation,
+		ledger:              ledger,
+		listHintKey:         hintKey,
+		listHintFingerprint: hintFingerprint,
+	}, nil
 }
 
 // M5 的简历读取与自动回复都只作用于已绑定的当前 IM 会话，原语本身按契约
@@ -1600,10 +1583,6 @@ func (a *roundActor) readThread(ctx context.Context, conversationRef string, anc
 			data protocol.ChatReadThreadData
 			err  error
 		)
-		// chat.readThread is intrusive: it may switch the current conversation
-		// and clear an unread receipt. Once attempted, no caller may continue
-		// navigating with the conversation-list snapshot observed before it.
-		a.invalidateListSnapshot()
 		if a.requireCurrentThread {
 			data, err = invokePrimitiveDirect[protocol.ChatReadThreadData](
 				ctx,
@@ -1885,10 +1864,10 @@ func (a *roundActor) finish(runErr error) error {
 	if runErr != nil {
 		status = "failed"
 		stage = "failed"
-	} else if a.freshListRequired {
-		// 页面窗口自然换代是一次已收束的部分巡检，不冒充完整扫描，
-		// 也不记成业务失败。下一轮仍从无 cursor 的当前窗口开始。
-		stage = "freshListPending"
+	} else if a.listTraversalIncomplete {
+		// 页面窗口遍历被用户活动或高位预算截断。已完成的会话事实照常
+		// 保留；下一轮从 reset 重新建立页面现场。
+		stage = "listWindowPending"
 	}
 	if a.superseded {
 		status = "failed"
@@ -1917,11 +1896,11 @@ func (a *roundActor) finish(runErr error) error {
 	if err := a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
 		account.LastPatrolAt = timePointer(finishedAt)
 		regularNext := finishedAt.Add(a.manager.config.PatrolInterval)
-		if a.freshListRequired {
+		if a.listTraversalIncomplete {
 			account.DirtyHint = true
-			freshNext := finishedAt.Add(a.manager.config.MinimumRoundGap)
-			if account.NextPatrolAt == nil || account.NextPatrolAt.After(freshNext) {
-				account.NextPatrolAt = timePointer(freshNext)
+			windowNext := finishedAt.Add(a.manager.config.MinimumRoundGap)
+			if account.NextPatrolAt == nil || account.NextPatrolAt.After(windowNext) {
+				account.NextPatrolAt = timePointer(windowNext)
 			}
 			return nil
 		}
@@ -1970,10 +1949,6 @@ func (a *roundActor) setStage(stage string) error {
 
 func (a *roundActor) key() store.AccountKey {
 	return store.AccountKey{Platform: a.account.Platform, AccountRef: a.account.AccountRef}
-}
-
-func (a *roundActor) invalidateListSnapshot() {
-	a.listSnapshotGeneration++
 }
 
 // beginUnreadPass uses the same baseline comparison at every ordinary

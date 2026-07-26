@@ -160,12 +160,14 @@ func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T
 	)
 }
 
-func TestInboundResumeCaptureInvalidatesConversationListSnapshot(t *testing.T) {
+func TestInboundResumeCaptureContinuesCurrentVisibleWindow(t *testing.T) {
 	h := newHarness(t)
 	savePatrolInboundLegacyJob(t, h, "job-resume-fresh", "客户经理")
 
 	conversationRef := "conversation-resume-fresh"
+	laterConversationRef := "conversation-after-resume-capture"
 	platformUserRef := "peer-resume-fresh"
+	laterPlatformUserRef := "peer-after-resume-capture"
 	positionTitle := "客户经理"
 	inboundText := "想了解一下"
 	key := store.ConversationKey{
@@ -205,35 +207,71 @@ func TestInboundResumeCaptureInvalidatesConversationListSnapshot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("预置已收编会话失败: %v", err)
 	}
+	seedTracked(
+		t,
+		h,
+		laterConversationRef,
+		laterPlatformUserRef,
+		[]store.MessageDraft{draftText("旧消息")},
+	)
 
 	listCalls := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor != "" {
-				t.Fatalf("简历补采后不得复用旧 cursor: %q", args.Cursor)
+			if args.Move != protocol.ListWindowMoveReset {
+				t.Fatalf("完整可见窗口无需 fresh 重读或 next 续窗: %+v", args)
 			}
 			listCalls++
 			return protocol.ChatReadListData{
-				Sessions: []protocol.ConversationSummary{{
-					ConversationRef: conversationRef,
-					Peer: protocol.PeerSummary{
-						PlatformUserRef: platformUserRef,
-						DisplayName:     "合成候选人",
+				Sessions: []protocol.ConversationSummary{
+					{
+						ConversationRef: conversationRef,
+						Peer: protocol.PeerSummary{
+							PlatformUserRef: platformUserRef,
+							DisplayName:     "合成候选人",
+						},
+						PositionTitle: &positionTitle,
+						UnreadCount:   0,
+						LastMessage: protocol.LastMessageSummary{
+							Direction:   protocol.MessageDirectionIn,
+							Kind:        protocol.MessageKindText,
+							TextPreview: inboundText,
+						},
 					},
-					PositionTitle: &positionTitle,
-					UnreadCount:   0,
-					LastMessage: protocol.LastMessageSummary{
-						Direction:   protocol.MessageDirectionIn,
-						Kind:        protocol.MessageKindText,
-						TextPreview: inboundText,
+					{
+						ConversationRef: laterConversationRef,
+						Peer: protocol.PeerSummary{
+							PlatformUserRef: laterPlatformUserRef,
+							DisplayName:     "合成候选人",
+						},
+						UnreadCount: 1,
+						LastMessage: protocol.LastMessageSummary{
+							Direction:   protocol.MessageDirectionIn,
+							Kind:        protocol.MessageKindText,
+							TextPreview: "更新消息",
+						},
 					},
-				}},
+				},
 				Complete: true,
 			}, nil
 		case protocol.PrimChatReadThread:
-			t.Fatal("账本与摘要一致时不得靠 readThread 触发 fresh")
+			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
+			if args.ConversationRef != laterConversationRef {
+				t.Fatalf("简历补采会话账本与摘要一致，不应深读: %+v", args)
+			}
+			return protocol.ChatReadThreadData{
+				Messages: []protocol.ThreadMessage{
+					threadText(0, "旧消息"),
+					threadText(1, "更新消息"),
+				},
+				Peer: &protocol.PeerSummary{
+					PlatformUserRef: laterPlatformUserRef,
+					DisplayName:     "合成候选人",
+				},
+				Complete: true, ReachedTop: true,
+			}, nil
 		default:
 			return defaultHandler(request)
 		}
@@ -259,18 +297,24 @@ func TestInboundResumeCaptureInvalidatesConversationListSnapshot(t *testing.T) {
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
 		t.Fatalf("简历补采巡检失败: result=%+v err=%v", result, err)
 	}
-	if h.runner.count(protocol.PrimChatReadThread) != 0 || hand.commandCount() != 1 {
-		t.Fatalf("场景必须只包含一次简历动作: calls=%v handCommands=%d",
+	if h.runner.count(protocol.PrimChatReadThread) != 1 || hand.commandCount() != 1 {
+		t.Fatalf("简历动作后必须继续深读同屏后一会话: calls=%v handCommands=%d",
 			h.runner.names(), hand.commandCount())
 	}
-	if listCalls != 2 {
-		t.Fatalf("简历动作后未从 fresh 列表收束: listCalls=%d", listCalls)
+	if listCalls != 1 {
+		t.Fatalf("简历动作后不应重读完整可见窗口: listCalls=%d", listCalls)
 	}
 	profile, err := h.db.CandidateProfileByID(adopted.Profile.ProfileID)
 	if err != nil || profile == nil ||
 		profile.ResumeCaptureState != store.ResumeCaptureCaptured {
 		t.Fatalf("简历动作未完成: profile=%+v err=%v", profile, err)
 	}
+	assertInboundAdoptionAudit(
+		t,
+		h,
+		laterConversationRef,
+		"status=skipped reason=missingPositionTitle",
+	)
 }
 
 func TestPageDrivenInboundAdoptionSkipsLocalFailuresAndContinuesLaterRows(t *testing.T) {

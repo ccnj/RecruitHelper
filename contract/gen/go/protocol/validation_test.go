@@ -106,11 +106,10 @@ func TestValidateDebugReloadPrimitive(t *testing.T) {
 
 func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 	for label, raw := range map[string]json.RawMessage{
-		"all 默认八天":     json.RawMessage(`{"filter":"all"}`),
-		"all 从顶部 fresh": json.RawMessage(`{"filter":"all","startAt":"top"}`),
-		"all 从当前窗 fresh": json.RawMessage(`{"filter":"all","startAt":"current"}`),
-		"all 显式八天":     json.RawMessage(`{"filter":"all","stopOlderThanDays":8}`),
-		"unread 无年龄截止": json.RawMessage(`{"filter":"unread"}`),
+		"all 回顶窗口":     json.RawMessage(`{"filter":"all","move":"reset"}`),
+		"all 下一窗口":     json.RawMessage(`{"filter":"all","move":"next"}`),
+		"all 显式八天":     json.RawMessage(`{"filter":"all","move":"reset","stopOlderThanDays":8}`),
+		"unread 无年龄截止": json.RawMessage(`{"filter":"unread","move":"reset"}`),
 	} {
 		t.Run(label, func(t *testing.T) {
 			if err := ValidatePrimitiveArgs(PrimChatReadList, 1, raw); err != nil {
@@ -120,15 +119,21 @@ func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 	}
 	assertValidationError(
 		t,
-		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"unread","stopOlderThanDays":8}`)),
+		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"unread","move":"reset","stopOlderThanDays":8}`)),
 		"$.stopOlderThanDays",
 		"forbiddenWhen",
 	)
 	assertValidationError(
 		t,
-		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"all","startAt":"middle"}`)),
-		"$.startAt",
+		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"all","move":"middle"}`)),
+		"$.move",
 		"enum",
+	)
+	assertValidationError(
+		t,
+		ValidatePrimitiveArgs(PrimChatReadList, 1, json.RawMessage(`{"filter":"all"}`)),
+		"$.move",
+		"required",
 	)
 
 	if err := ValidatePrimitiveArgs(
@@ -212,14 +217,18 @@ func TestValidateThreadPayloadLimitsAndNullable(t *testing.T) {
 }
 
 func TestPaginationCursorConsistency(t *testing.T) {
-	listContinue := json.RawMessage(`{"sessions":[],"complete":false,"nextCursor":"opaque-next"}`)
+	listContinue := json.RawMessage(`{"sessions":[],"complete":false}`)
 	if err := ValidatePrimitiveData(PrimChatReadList, 1, listContinue); err != nil {
-		t.Fatalf("合法列表续页应通过:%v", err)
+		t.Fatalf("合法未完成列表窗口应通过:%v", err)
 	}
-	listMissingCursor := json.RawMessage(`{"sessions":[],"complete":false}`)
-	assertValidationError(t, ValidatePrimitiveData(PrimChatReadList, 1, listMissingCursor), "$.nextCursor", "requiredWhen")
-	listFinishedWithCursor := json.RawMessage(`{"sessions":[],"complete":true,"nextCursor":"stale"}`)
-	assertValidationError(t, ValidatePrimitiveData(PrimChatReadList, 1, listFinishedWithCursor), "$.nextCursor", "forbiddenWhen")
+	listFinished := json.RawMessage(`{"sessions":[],"complete":true}`)
+	if err := ValidatePrimitiveData(PrimChatReadList, 1, listFinished); err != nil {
+		t.Fatalf("合法完成列表窗口应通过:%v", err)
+	}
+	legacyListCursor := json.RawMessage(`{"sessions":[],"complete":true,"nextCursor":"旧端未知字段"}`)
+	if err := ValidatePrimitiveData(PrimChatReadList, 1, legacyListCursor); err != nil {
+		t.Fatalf("must-ignore 接收纪律不得因旧列表字段失败:%v", err)
+	}
 
 	threadContinue := json.RawMessage(`{"messages":[],"reachedTop":false,"anchorMatched":false,"peer":null,"complete":false,"nextCursor":"opaque-next"}`)
 	if err := ValidatePrimitiveData(PrimChatReadThread, 1, threadContinue); err != nil {

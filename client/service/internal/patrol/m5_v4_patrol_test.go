@@ -327,8 +327,8 @@ func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Cursor != "" {
-				t.Fatalf("候选人可见动作后不得复用旧 cursor: %q", args.Cursor)
+			if args.Move != protocol.ListWindowMoveReset {
+				t.Fatalf("完整单窗不应因候选人动作重新读取: %+v", args)
 			}
 			listCalls++
 			return protocol.ChatReadListData{
@@ -373,8 +373,8 @@ func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
 		t.Fatalf("只应推进页面当前窗档案: advice=%d sends=%d",
 			len(advice.requests), hand.commandCount())
 	}
-	if listCalls != 2 {
-		t.Fatalf("候选人可见动作后未用 fresh 列表收束: listCalls=%d", listCalls)
+	if listCalls != 1 {
+		t.Fatalf("候选人可见动作不应打断当前可见窗口: listCalls=%d", listCalls)
 	}
 	firstTurn, err := h.db.LatestDialogueTurnForProfile(first.profileID)
 	if err != nil || firstTurn == nil || firstTurn.Status != store.DialogueTurnCompleted {

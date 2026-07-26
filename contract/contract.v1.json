@@ -419,10 +419,8 @@
         "type": "object",
         "fields": {
           "filter": { "type": "string", "enumRef": "enums.listFilter" },
-          "startAt": { "type": "string", "optional": true, "default": "top", "enumRef": "enums.listStart" },
-          "stopOlderThanDays": { "type": "int", "optional": true, "default": 8, "minimum": 1, "maximum": 30 },
-          "maxSessions": { "type": "int", "optional": true, "default": 32, "minimum": 1, "maximum": 32 },
-          "cursor": { "type": "string", "optional": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+          "move": { "type": "string", "enumRef": "enums.listWindowMove" },
+          "stopOlderThanDays": { "type": "int", "optional": true, "default": 8, "minimum": 1, "maximum": 30 }
         },
         "rules": [
           { "kind": "forbiddenWhen", "field": "stopOlderThanDays", "whenField": "filter", "equals": ["unread"] }
@@ -433,13 +431,8 @@
         "maxJsonBytes": 65536,
         "fields": {
           "sessions": { "type": "array", "maxItems": 32, "items": { "ref": "ConversationSummary" } },
-          "complete": { "type": "boolean" },
-          "nextCursor": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
-        },
-        "rules": [
-          { "kind": "requiredWhen", "field": "nextCursor", "whenField": "complete", "equals": [false] },
-          { "kind": "forbiddenWhen", "field": "nextCursor", "whenField": "complete", "equals": [true] }
-        ]
+          "complete": { "type": "boolean" }
+        }
       },
       "MessageAnchor": {
         "type": "object",
@@ -996,7 +989,7 @@
     "loginChangeState": ["in", "out"],
     "surfaceName": ["im"],
     "listFilter": ["all", "unread"],
-    "listStart": ["top", "current"],
+    "listWindowMove": ["reset", "next"],
     "messageDirection": ["in", "out", "system"],
     "messageKind": ["text", "image", "voice", "file", "card", "system"],
     "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
@@ -1020,7 +1013,7 @@
     "USER_ACTIVE":               { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
     "ACCOUNT_MISMATCH":          { "retryable": "manualOnly", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
     "CONVERSATION_NOT_FOUND":    { "retryable": "no", "sideEffect": ["none"], "batch": "S", "phase": "execution" },
-    "CURSOR_INVALID":            { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "opaque cursor 过期、跨账号/会话/参数误用;脑丢弃本轮聚合并从无 cursor 重启" },
+    "CURSOR_INVALID":            { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "仍使用 opaque cursor 的分页原语发生游标过期、跨上下文误用或未推进;脑丢弃该原语未入账聚合并从无 cursor 重启" },
     "TARGET_NOT_FOUND":          { "retryable": "no", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "仅供非会话类未来原语;chat.* 不得使用,避免与 CONVERSATION_NOT_FOUND 同义" },
     "ELEMENT_UNRESOLVED":        { "retryable": "manualOnly", "sideEffect": ["none", "possible"], "batch": "S", "phase": "execution" },
     "PAYLOAD_LIMIT":             { "retryable": "afterRecovery", "sideEffect": ["none"], "batch": "S", "phase": "execution", "note": "完整结果无法在协商的 inline/blob 能力内表达;禁止裁剪" },
@@ -1092,7 +1085,7 @@
       "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
       "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
-      "note": "有界分页:cursor 对脑不透明;每页最多 32 项且完整 data<=64KB;complete=false 必带 nextCursor,脑续页至 complete=true。无 cursor 的 fresh 首读以 startAt=top 从当前筛选列表顶部建立快照，startAt=current 从当前物理窗口建立快照；省略默认 top。startAt 只决定 fresh 首窗，cursor 续页不得借其复用旧快照。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。未读筛选窗口的单行 unreadCount 是低保真提示，零值不得单独导致整窗失败或被手静默过滤。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
+      "note": "无游标窗口遍历:每次只返回当前平台列表已经加载、可由同一会话定位器操作的稳定窗口,最多 32 项且完整 data<=64KB。move=reset 切换并回读目标筛选、回到顶部后读取窗口;move=next 要求筛选未变、向下移动小于一屏并等待稳定后读取窗口。跨窗口重复 conversationRef 是正常输入,由脑按 fingerprint 跳过;单窗口内身份重复仍失败。complete=true 只表示当前物理底部或 all 的年龄截止。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。未读筛选窗口的单行 unreadCount 是低保真提示，零值不得单独导致整窗失败或被手静默过滤。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
     },
     "chat.identifyCurrentConversation": {
       "ver": 1, "class": "readonly", "batch": "S",
