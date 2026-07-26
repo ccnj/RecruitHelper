@@ -277,6 +277,15 @@ type ProductWorkflowRun struct {
 	// live controllers, so history must not make BatchID globally unique.
 	SourcingBatchID *string `gorm:"index"`
 	FailureReason   string
+	EndReason       string `gorm:"not null;default:''"`
+
+	// PendingAction is the durable control handoff requested while a workflow
+	// is already in communication. It deliberately stays on terminal history;
+	// consumers clear it explicitly only when the requested handoff is
+	// withdrawn rather than completed.
+	PendingAction              ProductWorkflowPendingAction `gorm:"not null;default:''"`
+	PendingContextRevisionHash string                       `gorm:"not null;default:''"`
+	PendingRequestedAt         *time.Time
 
 	StartedAt time.Time `gorm:"not null"`
 	PausedAt  *time.Time

@@ -29,7 +29,16 @@ const (
 	ProductWorkflowStageFailed                = "failed"
 	productWorkflowActiveSlot                 = "active"
 	maxProductWorkflowFailureReasonCharacters = 512
+	maxProductWorkflowEndReasonCharacters     = 128
+	maxProductWorkflowRevisionHashCharacters  = 128
 	maxProductWorkflowStageCharacters         = 64
+)
+
+type ProductWorkflowPendingAction string
+
+const (
+	ProductWorkflowPendingActionSourcing ProductWorkflowPendingAction = "sourcing"
+	ProductWorkflowPendingActionEnd      ProductWorkflowPendingAction = "end"
 )
 
 type CreateProductWorkflowRunRequest struct {
@@ -42,12 +51,25 @@ type CreateProductWorkflowRunRequest struct {
 }
 
 type TransitionProductWorkflowRunRequest struct {
-	RunID   string
-	From    workflow.State
-	To      workflow.State
-	At      time.Time
-	Stage   string
-	Failure string
+	RunID     string
+	From      workflow.State
+	To        workflow.State
+	At        time.Time
+	Stage     string
+	Failure   string
+	EndReason string
+}
+
+type RequestProductWorkflowPendingActionRequest struct {
+	RunID               string
+	Action              ProductWorkflowPendingAction
+	ContextRevisionHash string
+	RequestedAt         time.Time
+}
+
+type ClearProductWorkflowPendingActionRequest struct {
+	RunID          string
+	ExpectedAction ProductWorkflowPendingAction
 }
 
 type AdvanceProductWorkflowStageRequest struct {
@@ -163,9 +185,12 @@ func (s *Store) TransitionProductWorkflowRun(
 	req.RunID = strings.TrimSpace(req.RunID)
 	req.Stage = strings.TrimSpace(req.Stage)
 	req.Failure = strings.TrimSpace(req.Failure)
+	req.EndReason = strings.TrimSpace(req.EndReason)
 	if req.RunID == "" || req.At.IsZero() ||
 		!validProductWorkflowState(req.From) || !validProductWorkflowState(req.To) ||
-		len([]rune(req.Failure)) > maxProductWorkflowFailureReasonCharacters {
+		len([]rune(req.Failure)) > maxProductWorkflowFailureReasonCharacters ||
+		len([]rune(req.EndReason)) > maxProductWorkflowEndReasonCharacters ||
+		(req.EndReason != "" && !productWorkflowTerminalStatus(req.To.Status)) {
 		return nil, ErrProductWorkflowInvalid
 	}
 
@@ -180,6 +205,10 @@ func (s *Store) TransitionProductWorkflowRun(
 		}
 		currentState := productWorkflowState(current)
 		if currentState == req.To {
+			if productWorkflowTerminalStatus(req.To.Status) &&
+				current.EndReason != req.EndReason {
+				return ErrProductWorkflowConflict
+			}
 			out = current
 			return nil
 		}
@@ -208,6 +237,7 @@ func (s *Store) TransitionProductWorkflowRun(
 		case workflow.StatusCompleted, workflow.StatusFailed:
 			updates["active_slot"] = nil
 			updates["ended_at"] = req.At
+			updates["end_reason"] = req.EndReason
 		}
 		updated := tx.Model(&ProductWorkflowRun{}).
 			Where("run_id = ? AND status = ? AND resume_status = ? AND active_slot = ?",
@@ -223,6 +253,132 @@ func (s *Store) TransitionProductWorkflowRun(
 			return err
 		}
 		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RequestProductWorkflowPendingAction durably records the user's next control
+// intent while communication still owns the browser. Replaying the same
+// action and sourcing revision preserves the first request time; a competing
+// action or revision is surfaced instead of being silently overwritten.
+func (s *Store) RequestProductWorkflowPendingAction(
+	req RequestProductWorkflowPendingActionRequest,
+) (*ProductWorkflowRun, error) {
+	req.RunID = strings.TrimSpace(req.RunID)
+	req.ContextRevisionHash = strings.TrimSpace(req.ContextRevisionHash)
+	if req.RunID == "" || req.RequestedAt.IsZero() ||
+		!validProductWorkflowPendingAction(req.Action) ||
+		len([]rune(req.ContextRevisionHash)) > maxProductWorkflowRevisionHashCharacters ||
+		(req.Action == ProductWorkflowPendingActionSourcing && req.ContextRevisionHash == "") ||
+		(req.Action == ProductWorkflowPendingActionEnd && req.ContextRevisionHash != "") {
+		return nil, ErrProductWorkflowInvalid
+	}
+
+	var out ProductWorkflowRun
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var current ProductWorkflowRun
+		if err := tx.First(&current, "run_id = ?", req.RunID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrProductWorkflowNotFound
+			}
+			return err
+		}
+		if !productWorkflowAcceptsPendingAction(current) {
+			return ErrProductWorkflowConflict
+		}
+		if current.PendingAction != "" {
+			if current.PendingAction == req.Action &&
+				current.PendingContextRevisionHash == req.ContextRevisionHash &&
+				current.PendingRequestedAt != nil {
+				out = current
+				return nil
+			}
+			return ErrProductWorkflowConflict
+		}
+
+		updated := tx.Model(&ProductWorkflowRun{}).
+			Where(
+				"run_id = ? AND active_slot = ? AND stage = ? AND status = ? AND (pending_action = ? OR pending_action IS NULL)",
+				req.RunID,
+				productWorkflowActiveSlot,
+				ProductWorkflowStageCommunication,
+				current.Status,
+				ProductWorkflowPendingAction(""),
+			).
+			Updates(map[string]any{
+				"pending_action":                req.Action,
+				"pending_context_revision_hash": req.ContextRevisionHash,
+				"pending_requested_at":          req.RequestedAt,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrProductWorkflowConflict
+		}
+		return tx.First(&out, "run_id = ?", req.RunID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ClearProductWorkflowPendingAction withdraws exactly the expected pending
+// action. Clearing an already-empty slot is idempotent while the same active
+// communication run remains eligible; it never erases a competing request.
+func (s *Store) ClearProductWorkflowPendingAction(
+	req ClearProductWorkflowPendingActionRequest,
+) (*ProductWorkflowRun, error) {
+	req.RunID = strings.TrimSpace(req.RunID)
+	if req.RunID == "" || !validProductWorkflowPendingAction(req.ExpectedAction) {
+		return nil, ErrProductWorkflowInvalid
+	}
+
+	var out ProductWorkflowRun
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var current ProductWorkflowRun
+		if err := tx.First(&current, "run_id = ?", req.RunID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrProductWorkflowNotFound
+			}
+			return err
+		}
+		if !productWorkflowAcceptsPendingAction(current) {
+			return ErrProductWorkflowConflict
+		}
+		if current.PendingAction == "" {
+			out = current
+			return nil
+		}
+		if current.PendingAction != req.ExpectedAction {
+			return ErrProductWorkflowConflict
+		}
+
+		updated := tx.Model(&ProductWorkflowRun{}).
+			Where(
+				"run_id = ? AND active_slot = ? AND stage = ? AND status = ? AND pending_action = ?",
+				req.RunID,
+				productWorkflowActiveSlot,
+				ProductWorkflowStageCommunication,
+				current.Status,
+				req.ExpectedAction,
+			).
+			Updates(map[string]any{
+				"pending_action":                ProductWorkflowPendingAction(""),
+				"pending_context_revision_hash": "",
+				"pending_requested_at":          nil,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrProductWorkflowConflict
+		}
+		return tx.First(&out, "run_id = ?", req.RunID).Error
 	})
 	if err != nil {
 		return nil, err
@@ -368,4 +524,25 @@ func validProductWorkflowState(state workflow.State) bool {
 func productWorkflowStageAdvanceStatus(status workflow.Status) bool {
 	return status == workflow.StatusRunning ||
 		status == workflow.StatusAwaitingConfirmation
+}
+
+func productWorkflowTerminalStatus(status workflow.Status) bool {
+	return status == workflow.StatusCompleted || status == workflow.StatusFailed
+}
+
+func validProductWorkflowPendingAction(action ProductWorkflowPendingAction) bool {
+	return action == ProductWorkflowPendingActionSourcing ||
+		action == ProductWorkflowPendingActionEnd
+}
+
+func productWorkflowAcceptsPendingAction(run ProductWorkflowRun) bool {
+	if run.ActiveSlot == nil || run.Stage != ProductWorkflowStageCommunication {
+		return false
+	}
+	switch run.Status {
+	case workflow.StatusRunning, workflow.StatusPaused, workflow.StatusWaitingDailyWindow:
+		return true
+	default:
+		return false
+	}
 }
