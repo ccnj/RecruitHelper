@@ -42,31 +42,14 @@ type Manager struct {
 	// conversation-list hints. It is accessed only while mu is held and is
 	// intentionally absent from persistence, diagnostics and product APIs.
 	verifiedListHints map[listHintVerificationKey]string
-	// unreadPendingByPrincipal latches a positive total-unread observation until
-	// an unread pass proves both an explicitly empty unread list and a stable
-	// zero total. It is scheduling memory only: process restart deliberately
-	// loses it, then the hand's requested sensor snapshot reconstructs it.
-	//
-	// The map is accessed only while mu is held. Principal is part of the key so
-	// an account rebind can never inherit the previous recruiter's unread work.
-	unreadPendingByPrincipal map[unreadPendingKey]unreadPendingState
 	// unreadPassEndTotalByPrincipal remembers the stable sidebar unread total
 	// observed after the last complete unread pass. It is process-local
 	// scheduling memory only. A missing value means the next positive total may
 	// enter once; zero removes the baseline.
 	//
-	// The map is accessed only while mu is held and is deliberately separate
-	// from unreadPendingByPrincipal until the round consumer migrates.
+	// The map is accessed only while mu is held. Principal is part of the key so
+	// an account rebind can never inherit the previous recruiter's unread work.
 	unreadPassEndTotalByPrincipal map[unreadBaselineKey]int
-}
-
-type unreadPendingKey struct {
-	Account   store.AccountKey
-	Principal string
-}
-
-type unreadPendingState struct {
-	Generation uint64
 }
 
 type unreadBaselineKey struct {
@@ -94,7 +77,6 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	manager := &Manager{
 		store: db, runner: runner, hands: hands, config: config,
 		verifiedListHints:             make(map[listHintVerificationKey]string),
-		unreadPendingByPrincipal:      make(map[unreadPendingKey]unreadPendingState),
 		unreadPassEndTotalByPrincipal: make(map[unreadBaselineKey]int),
 	}
 	if len(advice) > 0 {
@@ -364,12 +346,10 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err
 		}
-		_, pendingBefore := m.unreadPendingGeneration(account)
-		increased := data.Prev != nil && data.Value > *data.Prev
-		// A first stable positive sample after content-script/SW startup has no
-		// prev value. It is still real scheduling evidence and must not wait for
-		// a later 0→positive transition.
-		pullForward := data.Value > 0 && (!pendingBefore || data.Prev == nil || increased)
+		// The stable total is a scheduling hint only. A positive value pulls the
+		// patrol forward exactly when it differs from the last complete unread
+		// pass; a stable zero clears that process-local baseline.
+		pullForward := m.unreadPassNeeded(account, &data.Value)
 		if err := m.store.MutateAccount(key, func(account *store.Account) error {
 			account.DirtyHint = true
 			if pullForward {
@@ -379,7 +359,6 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 		}); err != nil {
 			return err
 		}
-		m.observeUnreadEvent(account, data.Value, increased)
 		return nil
 	case protocol.EventPageNavigated:
 		var data protocol.PageNavigatedEventData
@@ -446,90 +425,6 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 	default:
 		return fmt.Errorf("不支持的传感事件 %q", event.Name)
 	}
-}
-
-// unreadPendingGeneration returns the current process-local latch for account.
-// Caller must hold Manager.mu.
-func (m *Manager) unreadPendingGeneration(account *store.Account) (uint64, bool) {
-	key, ok := unreadPendingKeyForAccount(account)
-	if !ok {
-		return 0, false
-	}
-	state, ok := m.unreadPendingByPrincipal[key]
-	return state.Generation, ok
-}
-
-// observeUnreadSnapshot latches a positive hand snapshot without advancing an
-// existing generation. Repeated pings and requested snapshots are allowed to
-// repeat the same stable fact.
-// Caller must hold Manager.mu.
-func (m *Manager) observeUnreadSnapshot(account *store.Account, unread *int) {
-	if unread == nil || *unread <= 0 {
-		return
-	}
-	key, ok := unreadPendingKeyForAccount(account)
-	if !ok {
-		return
-	}
-	if _, exists := m.unreadPendingByPrincipal[key]; !exists {
-		m.unreadPendingByPrincipal[key] = unreadPendingState{Generation: 1}
-	}
-}
-
-// observeUnreadEvent advances the generation only for an observed positive
-// increase. This lets an event arriving while an unread pass is in flight
-// prevent that older pass from clearing newer work.
-// Caller must hold Manager.mu.
-func (m *Manager) observeUnreadEvent(account *store.Account, value int, increased bool) {
-	if value <= 0 {
-		return
-	}
-	key, ok := unreadPendingKeyForAccount(account)
-	if !ok {
-		return
-	}
-	state, exists := m.unreadPendingByPrincipal[key]
-	if !exists {
-		m.unreadPendingByPrincipal[key] = unreadPendingState{Generation: 1}
-		return
-	}
-	if increased {
-		state.Generation++
-		if state.Generation == 0 {
-			state.Generation = 1
-		}
-		m.unreadPendingByPrincipal[key] = state
-	}
-}
-
-// clearUnreadPending removes only the exact generation captured when the pass
-// began. A later positive event therefore survives even if the older pass
-// subsequently observes an empty list and a zero badge.
-// Caller must hold Manager.mu.
-func (m *Manager) clearUnreadPending(account *store.Account, generation uint64) bool {
-	key, ok := unreadPendingKeyForAccount(account)
-	if !ok {
-		return false
-	}
-	state, exists := m.unreadPendingByPrincipal[key]
-	if !exists || state.Generation != generation {
-		return false
-	}
-	delete(m.unreadPendingByPrincipal, key)
-	return true
-}
-
-func unreadPendingKeyForAccount(account *store.Account) (unreadPendingKey, bool) {
-	if account == nil || account.Platform == "" || account.AccountRef == "" ||
-		account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
-		return unreadPendingKey{}, false
-	}
-	return unreadPendingKey{
-		Account: store.AccountKey{
-			Platform: account.Platform, AccountRef: account.AccountRef,
-		},
-		Principal: *account.PrincipalFingerprint,
-	}, true
 }
 
 // unreadPassNeeded compares the current stable sidebar total with the total

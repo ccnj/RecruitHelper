@@ -260,7 +260,7 @@ func TestUnreadPriorityUnknownConversationOpensAtMostOnceThenReturnsAll(t *testi
 	}
 	audits, err := h.db.AuditEntries(100)
 	if err != nil || countAudit(audits, unreadPatrolAuditCategory) == 0 {
-		t.Fatalf("残留气泡未记录无 PII 不一致审计: audits=%+v err=%v", audits, err)
+		t.Fatalf("残留气泡未记录无 PII 子轮完成审计: audits=%+v err=%v", audits, err)
 	}
 }
 
@@ -394,7 +394,7 @@ func TestUnreadPriorityTreatsOnlyUnreadListElementUnresolvedAsInconsistency(t *t
 	if len(got) != 2 ||
 		got[0].Filter != protocol.ListFilterUnread ||
 		got[1].Filter != protocol.ListFilterAll {
-		t.Fatalf("未读空态异常没有切回全部: %+v", got)
+		t.Fatalf("未读列表读取异常没有切回全部: %+v", got)
 	}
 }
 
@@ -679,85 +679,276 @@ func TestUnreadPriorityGenerationChangeStops(t *testing.T) {
 	}
 }
 
-func TestUnreadPendingSurvivesNilOrZeroSnapshotAfterFailedPass(t *testing.T) {
-	tests := []struct {
-		name string
-		next *int
-	}{
-		{name: "nil", next: nil},
-		{name: "zero", next: ptr(0)},
+func TestUnreadCompletePassWithRetainedRowsRecordsBaseline(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(3))
+	retained := summary("unread-retained", "peer-unread-retained", "旧未读", 1)
+	ordinary := []protocol.ConversationSummary{
+		summary("ordinary-after-unread-a", "peer-after-unread-a", "普通一", 0),
+		summary("ordinary-after-unread-b", "peer-after-unread-b", "普通二", 0),
+		summary("ordinary-after-unread-c", "peer-after-unread-c", "普通三", 0),
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			h := newHarness(t)
-			setUnreadHintForTest(h, ptr(2))
-			h.runner.handler = func(request RunRequest) (any, error) {
-				if request.Name == protocol.PrimChatReadList {
-					args := decodeArgs[protocol.ChatReadListArgs](t, request)
-					if args.Filter == protocol.ListFilterUnread {
-						return nil, &RunError{
-							Code:       protocol.ErrCodeElementUnresolved,
-							Retryable:  protocol.RetryableManualOnly,
-							SideEffect: protocol.SideEffectNone,
-						}
-					}
-					return protocol.ChatReadListData{
-						Sessions: []protocol.ConversationSummary{}, Complete: true,
-					}, nil
-				}
-				return defaultHandler(request)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter == protocol.ListFilterUnread {
+				// Opening the target does not remove its row. The second fresh
+				// read sees the same retained row and completes by attempted-ref,
+				// not by waiting for an empty list.
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{retained},
+					Complete: true,
+				}, nil
 			}
+			return protocol.ChatReadListData{
+				Sessions: ordinary, Complete: true,
+			}, nil
+		case protocol.PrimChatOpenConversation:
+			args := decodeArgs[protocol.ChatOpenConversationArgs](t, request)
+			return protocol.ChatOpenConversationData{
+				ConversationRef: args.ConversationRef,
+				ObservedAt:      h.clock.Now().UnixMilli(),
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
 
-			requireUnreadRoundOK(t, h)
-			setUnreadHintForTest(h, test.next)
-			h.clock.Add(h.config.MinimumRoundGap)
-			before := len(unreadListFilters(t, h))
-			requireUnreadRoundOK(t, h)
-			after := unreadListFilters(t, h)
-			if len(after) <= before ||
-				after[before].Filter != protocol.ListFilterUnread {
-				t.Fatalf("失败后的 pending 被 %s 快照覆盖: %+v", test.name, after[before:])
-			}
-		})
+	requireUnreadRoundOK(t, h)
+	if h.runner.count(protocol.PrimChatOpenConversation) != 1 {
+		t.Fatalf("保留行在同一未读子轮被重复打开: %v", h.runner.names())
+	}
+	first := unreadListFilters(t, h)
+	if countListFilter(first, protocol.ListFilterUnread) != 2 ||
+		first[len(first)-1].Filter != protocol.ListFilterAll {
+		t.Fatalf("未读保留行没有完整遍历并切回全部列表: %+v", first)
+	}
+
+	h.clock.Add(h.config.PatrolInterval)
+	before := len(first)
+	requireUnreadRoundOK(t, h)
+	after := unreadListFilters(t, h)
+	for _, args := range after[before:] {
+		if args.Filter == protocol.ListFilterUnread {
+			t.Fatalf("结束气泡数仍为 3 时重复插队: %+v", after[before:])
+		}
+	}
+	if h.runner.count(protocol.PrimChatOpenConversation) != 1 {
+		t.Fatalf("同值基线下残留行被再次打开: %v", h.runner.names())
 	}
 }
 
-func TestUnreadPendingClearsOnlyAfterExplicitEmptyAndStableZero(t *testing.T) {
+func TestUnreadChangedTotalCanReenterWithinSameActor(t *testing.T) {
 	h := newHarness(t)
 	setUnreadHintForTest(h, ptr(1))
+	allReads := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
-		if request.Name == protocol.PrimChatReadList {
-			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Filter == protocol.ListFilterUnread {
-				setUnreadHintForTest(h, ptr(0))
-			}
+		if request.Name != protocol.PrimChatReadList {
+			return defaultHandler(request)
+		}
+		args := decodeArgs[protocol.ChatReadListArgs](t, request)
+		if args.Filter == protocol.ListFilterUnread {
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{}, Complete: true,
 			}, nil
 		}
-		return defaultHandler(request)
+		allReads++
+		if allReads == 1 {
+			setUnreadHintForTest(h, ptr(2))
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary("ordinary-before-second-unread", "peer-before-second-unread", "普通", 0),
+				},
+				Complete: true,
+			}, nil
+		}
+		return protocol.ChatReadListData{
+			Sessions: []protocol.ConversationSummary{}, Complete: true,
+		}, nil
 	}
 
 	requireUnreadRoundOK(t, h)
-	account, err := h.db.AccountByKey(h.key)
-	if err != nil || account == nil {
-		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
+	got := unreadListFilters(t, h)
+	want := []protocol.ListFilter{
+		protocol.ListFilterUnread,
+		protocol.ListFilterAll,
+		protocol.ListFilterUnread,
+		protocol.ListFilterAll,
 	}
-	h.manager.mu.Lock()
-	_, pending := h.manager.unreadPendingGeneration(account)
-	h.manager.mu.Unlock()
-	if pending {
-		t.Fatal("明确空未读列表且稳定总气泡为零后仍保留 pending")
+	filters := make([]protocol.ListFilter, 0, len(got))
+	for _, args := range got {
+		filters = append(filters, args.Filter)
+	}
+	if !reflect.DeepEqual(filters, want) {
+		t.Fatalf("气泡数 1→2 后没有在下一会话边界再次插队: got=%v want=%v", filters, want)
+	}
+}
+
+func TestUnreadReturnToAllRebuildsCheckedAndUsesFingerprint(t *testing.T) {
+	h := newHarness(t)
+	key := seedTracked(
+		t,
+		h,
+		"unread-return-all",
+		"peer-unread-return-all",
+		[]store.MessageDraft{draftText("旧消息")},
+	)
+	setUnreadHintForTest(h, ptr(0))
+	allReads := 0
+	threadReads := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter == protocol.ListFilterUnread {
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{}, Complete: true,
+				}, nil
+			}
+			allReads++
+			switch allReads {
+			case 1:
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary(key.ConversationRef, "peer-unread-return-all", "新消息一", 0),
+					},
+					Complete: true,
+				}, nil
+			case 2:
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary(key.ConversationRef, "peer-unread-return-all", "新消息二", 0),
+					},
+					Complete: true,
+				}, nil
+			default:
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{}, Complete: true,
+				}, nil
+			}
+		case protocol.PrimChatReadThread:
+			threadReads++
+			messages := []protocol.ThreadMessage{
+				threadText(0, "旧消息"),
+				threadText(1, "新消息一"),
+			}
+			if threadReads == 1 {
+				// The first ordinary conversation completes before unread is
+				// allowed to preempt.
+				setUnreadHintForTest(h, ptr(1))
+			} else {
+				messages = append(messages, threadText(2, "新消息二"))
+			}
+			return protocol.ChatReadThreadData{
+				Messages: messages,
+				Peer: &protocol.PeerSummary{
+					DisplayName:     "合成候选人",
+					PlatformUserRef: "peer-unread-return-all",
+				},
+				Complete: true, ReachedTop: true,
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
 	}
 
-	setUnreadHintForTest(h, nil)
+	requireUnreadRoundOK(t, h)
+	if threadReads != 2 {
+		t.Fatalf("返回 all 后旧 checked 压掉了已变化会话: readThread=%d calls=%v",
+			threadReads, h.runner.names())
+	}
+	got := unreadListFilters(t, h)
+	want := []protocol.ListFilter{
+		protocol.ListFilterAll,
+		protocol.ListFilterUnread,
+		protocol.ListFilterAll,
+		protocol.ListFilterAll,
+	}
+	filters := make([]protocol.ListFilter, 0, len(got))
+	for _, args := range got {
+		filters = append(filters, args.Filter)
+	}
+	if !reflect.DeepEqual(filters, want) {
+		t.Fatalf("普通→未读→新普通扫描顺序错误: got=%v want=%v", filters, want)
+	}
+}
+
+func TestUnreadIncompletePassDefersWithinActorAndRetriesNextOrdinaryRound(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(2))
+	failFirstUnread := true
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name != protocol.PrimChatReadList {
+			return defaultHandler(request)
+		}
+		args := decodeArgs[protocol.ChatReadListArgs](t, request)
+		if args.Filter == protocol.ListFilterUnread && failFirstUnread {
+			failFirstUnread = false
+			return nil, &RunError{
+				Code:       protocol.ErrCodeElementUnresolved,
+				Retryable:  protocol.RetryableManualOnly,
+				SideEffect: protocol.SideEffectNone,
+			}
+		}
+		return protocol.ChatReadListData{
+			Sessions: []protocol.ConversationSummary{}, Complete: true,
+		}, nil
+	}
+
+	requireUnreadRoundOK(t, h)
+	first := unreadListFilters(t, h)
+	if got := countListFilter(first, protocol.ListFilterUnread); got != 1 {
+		t.Fatalf("失败现场在同一 actor 内重复进入未读: filters=%+v", first)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.LastPatrolAt == nil ||
+		account.NextPatrolAt == nil {
+		t.Fatalf("读取失败后调度状态: account=%+v err=%v", account, err)
+	}
+	if !account.NextPatrolAt.Equal(account.LastPatrolAt.Add(h.config.PatrolInterval)) {
+		t.Fatalf("未完成子轮被旧 pending 拉成紧循环: last=%v next=%v",
+			account.LastPatrolAt, account.NextPatrolAt)
+	}
+
 	h.clock.Add(h.config.PatrolInterval)
-	before := len(unreadListFilters(t, h))
+	before := len(first)
 	requireUnreadRoundOK(t, h)
 	after := unreadListFilters(t, h)
-	if len(after) != before+1 ||
-		after[before].Filter != protocol.ListFilterAll {
-		t.Fatalf("已清 pending 后下一轮仍错误插队: %+v", after[before:])
+	if len(after) <= before ||
+		after[before].Filter != protocol.ListFilterUnread {
+		t.Fatalf("下一普通巡检没有重试未完成子轮: %+v", after[before:])
+	}
+}
+
+func TestUnreadUnknownEndTotalDoesNotRecordBaseline(t *testing.T) {
+	h := newHarness(t)
+	setUnreadHintForTest(h, ptr(2))
+	firstUnread := true
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name != protocol.PrimChatReadList {
+			return defaultHandler(request)
+		}
+		args := decodeArgs[protocol.ChatReadListArgs](t, request)
+		if args.Filter == protocol.ListFilterUnread && firstUnread {
+			firstUnread = false
+			setUnreadHintForTest(h, nil)
+		}
+		return protocol.ChatReadListData{
+			Sessions: []protocol.ConversationSummary{}, Complete: true,
+		}, nil
+	}
+
+	requireUnreadRoundOK(t, h)
+	first := unreadListFilters(t, h)
+	setUnreadHintForTest(h, ptr(2))
+	h.clock.Add(h.config.PatrolInterval)
+	before := len(first)
+	requireUnreadRoundOK(t, h)
+	after := unreadListFilters(t, h)
+	if len(after) <= before ||
+		after[before].Filter != protocol.ListFilterUnread {
+		t.Fatalf("缺失结束读数错误伪造了同值基线: %+v", after[before:])
 	}
 }
 
@@ -785,100 +976,73 @@ func TestUnreadFirstPositiveEventPullsForwardAndStartsUnreadPass(t *testing.T) {
 		t.Fatalf("首帧正数没有拉前到最小轮间隔: got=%v want=%v", account.NextPatrolAt, wantNext)
 	}
 
-	setUnreadHintForTest(h, ptr(0))
+	setUnreadHintForTest(h, ptr(1))
 	h.clock.Add(h.config.MinimumRoundGap)
 	requireUnreadRoundOK(t, h)
 	after := unreadListFilters(t, h)
 	if len(after) <= prevFilters ||
 		after[prevFilters].Filter != protocol.ListFilterUnread {
-		t.Fatalf("首帧正数没有建立 pending 插队: %+v", after[prevFilters:])
-	}
-}
-
-func TestUnreadPendingGenerationPreventsOlderPassFromClearingNewEvent(t *testing.T) {
-	h := newHarness(t)
-	setUnreadHintForTest(h, ptr(1))
-	raisedDuringFirstPass := false
-	h.runner.handler = func(request RunRequest) (any, error) {
-		if request.Name == protocol.PrimChatReadList {
-			args := decodeArgs[protocol.ChatReadListArgs](t, request)
-			if args.Filter == protocol.ListFilterUnread {
-				if !raisedDuringFirstPass {
-					raisedDuringFirstPass = true
-					prev := 1
-					if err := h.manager.HandleEvent(
-						"hand-1",
-						eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
-							Prev: &prev, Scope: protocol.UnreadScopeTotal,
-							Stable: true, Value: 2,
-						}),
-					); err != nil {
-						return nil, err
-					}
-				}
-				// Model the later stable zero arriving before the older list read
-				// finishes. The generation, rather than timing, must protect the
-				// newly observed work from that older pass's clear.
-				setUnreadHintForTest(h, ptr(0))
-			}
-			return protocol.ChatReadListData{
-				Sessions: []protocol.ConversationSummary{}, Complete: true,
-			}, nil
-		}
-		return defaultHandler(request)
+		t.Fatalf("首帧正数没有触发首次未读插队: %+v", after[prevFilters:])
 	}
 
-	requireUnreadRoundOK(t, h)
-	account, err := h.db.AccountByKey(h.key)
-	if err != nil || account == nil {
-		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.NextPatrolAt == nil {
+		t.Fatalf("读取首次插队后调度状态失败: account=%+v err=%v", account, err)
 	}
-	h.manager.mu.Lock()
-	generation, pending := h.manager.unreadPendingGeneration(account)
-	h.manager.mu.Unlock()
-	if !pending || generation != 2 {
-		t.Fatalf("旧 pass 误清了新事件: pending=%v generation=%d", pending, generation)
-	}
-
-	h.clock.Add(h.config.MinimumRoundGap)
-	before := len(unreadListFilters(t, h))
-	requireUnreadRoundOK(t, h)
-	after := unreadListFilters(t, h)
-	if len(after) <= before ||
-		after[before].Filter != protocol.ListFilterUnread {
-		t.Fatalf("新一代 pending 没有在下一轮重试: %+v", after[before:])
-	}
-	h.manager.mu.Lock()
-	_, pending = h.manager.unreadPendingGeneration(account)
-	h.manager.mu.Unlock()
-	if pending {
-		t.Fatal("新一代 pending 在自己的明确空态后没有清除")
-	}
-}
-
-func TestUnreadPendingIsScopedByPrincipal(t *testing.T) {
-	h := newHarness(t)
-	account, err := h.db.AccountByKey(h.key)
-	if err != nil || account == nil {
-		t.Fatalf("读取账号失败: account=%+v err=%v", account, err)
-	}
-	h.manager.mu.Lock()
-	h.manager.observeUnreadSnapshot(account, ptr(1))
-	h.manager.mu.Unlock()
-
-	if err := h.db.BindAccountPrincipal(
-		h.key, "hand-1", "principal-2", "session-1", "boot-1", h.clock.Now(),
+	regularNext := *account.NextPatrolAt
+	prev := 1
+	if err := h.manager.HandleEvent(
+		"hand-1",
+		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
+			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
+		}),
 	); err != nil {
-		t.Fatalf("改绑新主体失败: %v", err)
+		t.Fatalf("同值事件失败: %v", err)
 	}
-	rebound, err := h.db.AccountByKey(h.key)
-	if err != nil || rebound == nil {
-		t.Fatalf("读取改绑账号失败: account=%+v err=%v", rebound, err)
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.NextPatrolAt == nil {
+		t.Fatalf("读取同值事件后状态失败: account=%+v err=%v", account, err)
 	}
-	h.manager.mu.Lock()
-	_, pending := h.manager.unreadPendingGeneration(rebound)
-	h.manager.mu.Unlock()
-	if pending {
-		t.Fatal("新主体继承了旧主体的未读 pending")
+	if !account.NextPatrolAt.Equal(regularNext) {
+		t.Fatalf("与结束基线相同的事件错误拉前: got=%v want=%v",
+			account.NextPatrolAt, regularNext)
 	}
+
+	if err := h.manager.HandleEvent(
+		"hand-1",
+		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
+			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 0,
+		}),
+	); err != nil {
+		t.Fatalf("零值事件失败: %v", err)
+	}
+	prev = 0
+	if err := h.manager.HandleEvent(
+		"hand-1",
+		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
+			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
+		}),
+	); err != nil {
+		t.Fatalf("零值后正数事件失败: %v", err)
+	}
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.LastPatrolAt == nil ||
+		account.NextPatrolAt == nil {
+		t.Fatalf("读取重新拉前状态失败: account=%+v err=%v", account, err)
+	}
+	wantNext = account.LastPatrolAt.Add(h.config.MinimumRoundGap)
+	if !account.NextPatrolAt.Equal(wantNext) {
+		t.Fatalf("零值清基线后同一正数没有重新拉前: got=%v want=%v",
+			account.NextPatrolAt, wantNext)
+	}
+}
+
+func countListFilter(got []protocol.ChatReadListArgs, filter protocol.ListFilter) int {
+	count := 0
+	for _, args := range got {
+		if args.Filter == filter {
+			count++
+		}
+	}
+	return count
 }

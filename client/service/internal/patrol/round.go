@@ -30,8 +30,7 @@ type roundActor struct {
 	freshListRequired       bool
 	listSnapshotGeneration  uint64
 	checkedConversationRefs map[string]struct{}
-	unreadPassAttempted     bool
-	unreadPassGeneration    uint64
+	unreadRetryDeferred     bool
 	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
 }
@@ -103,7 +102,6 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 	m.mu.Lock()
 	func() {
 		defer m.mu.Unlock()
-		m.observeUnreadSnapshot(actor.account, actor.hand.UnreadTotal)
 		if err = actor.freezeSourcingBatchGeneration(); err == nil {
 			err = actor.execute(roundCtx)
 		}
@@ -191,7 +189,6 @@ func (a *roundActor) execute(ctx context.Context) error {
 	seenCursors := make(map[string]struct{})
 	seenConversations := make(map[string]struct{})
 	a.checkedConversationRefs = make(map[string]struct{})
-	a.unreadAttemptedRefs = make(map[string]struct{})
 	_, err = a.refreshHandState(ctx)
 	if err != nil {
 		return err
@@ -206,13 +203,21 @@ func (a *roundActor) execute(ctx context.Context) error {
 		seenCursors = make(map[string]struct{})
 		seenConversations = make(map[string]struct{})
 	}
+	startAllScan := func() {
+		filter = protocol.ListFilterAll
+		resetListRead(protocol.ListStartTop)
+		// Returning from unread creates a new ordinary scan generation. The
+		// process-local list fingerprint, not this call-stack set, decides
+		// whether a previously seen conversation needs another detail read.
+		a.checkedConversationRefs = make(map[string]struct{})
+	}
 	for pagesRead < a.manager.config.MaxPages {
 		// Entering unread reserves one actual all-list read to close the
 		// platform filter. The reserve is part of the same MaxPages budget.
 		if filter == protocol.ListFilterUnread &&
 			pagesRead >= a.manager.config.MaxPages-1 {
-			filter = protocol.ListFilterAll
-			resetListRead(protocol.ListStartTop)
+			a.unreadRetryDeferred = true
+			startAllScan()
 			continue
 		}
 		if err := a.setStage("readingList"); err != nil {
@@ -228,8 +233,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 				); auditErr != nil {
 					return auditErr
 				}
-				filter = protocol.ListFilterAll
-				resetListRead(protocol.ListStartTop)
+				a.unreadRetryDeferred = true
+				startAllScan()
 				continue
 			}
 			if isRunError(err, protocol.ErrCodeUserActive) ||
@@ -253,7 +258,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 			ctx,
 			page,
 			filter,
-			!a.unreadPassAttempted && pagesRead < a.manager.config.MaxPages-1,
+			pagesRead < a.manager.config.MaxPages-1,
 		)
 		if err != nil {
 			return err
@@ -265,7 +270,6 @@ func (a *roundActor) execute(ctx context.Context) error {
 			// 完整扫描保留 checked 集合，并从当前物理窗口建立无 cursor
 			// 的 fresh 页面快照继续。只有筛选切换才重新从顶部建立快照。
 			if filter == protocol.ListFilterAll &&
-				!a.unreadPassAttempted &&
 				pagesRead < a.manager.config.MaxPages-1 {
 				_, stateErr := a.refreshHandState(ctx)
 				if stateErr != nil {
@@ -284,8 +288,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 			resetListRead(protocol.ListStartTop)
 			continue
 		case conversationListPageSwitchAll:
-			filter = protocol.ListFilterAll
-			resetListRead(protocol.ListStartTop)
+			startAllScan()
 			continue
 		case conversationListPageStop:
 			// 工作流候选人边界与分类修正是明确停止，不得被误解释成
@@ -304,8 +307,8 @@ func (a *roundActor) execute(ctx context.Context) error {
 				// The unread page processor normally returns SwitchAll here.
 				// Keep a defensive close so no future branch can leave the
 				// platform filter active at round completion.
-				filter = protocol.ListFilterAll
-				resetListRead(protocol.ListStartTop)
+				a.unreadRetryDeferred = true
+				startAllScan()
 				continue
 			}
 			return nil
@@ -497,7 +500,6 @@ func (a *roundActor) processUnreadConversationListPage(
 		// open/read therefore cannot spin on the same residual unread row in
 		// this complete scan.
 		a.unreadAttemptedRefs[summary.ConversationRef] = struct{}{}
-		a.checkedConversationRefs[summary.ConversationRef] = struct{}{}
 		key := store.ConversationKey{
 			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
 			ConversationRef: summary.ConversationRef,
@@ -552,6 +554,7 @@ func (a *roundActor) processUnreadConversationListPage(
 			dirtyConversation.listHintFingerprint,
 		)
 		if a.classificationCorrected {
+			a.unreadRetryDeferred = true
 			return conversationListPageSwitchAll, nil
 		}
 		if err := a.prepareInboundConversationProfile(ctx, *profile); err != nil {
@@ -569,27 +572,28 @@ func (a *roundActor) processUnreadConversationListPage(
 	if err != nil {
 		return conversationListPageContinue, err
 	}
-	switch {
-	case len(page.sessions) == 0 && hand.UnreadTotal != nil && *hand.UnreadTotal == 0:
-		if !a.manager.clearUnreadPending(a.account, a.unreadPassGeneration) {
-			if err := a.appendUnreadPatrolAudit(
-				"status=inconsistent reason=unreadPendingGenerationAdvanced",
-			); err != nil {
-				return conversationListPageContinue, err
-			}
-		}
-	case hand.UnreadTotal == nil:
+	if hand.UnreadTotal == nil {
+		a.unreadRetryDeferred = true
 		if err := a.appendUnreadPatrolAudit(
-			"status=inconsistent reason=unreadListEmptyHintUnknown",
+			"status=incomplete reason=unreadPassEndTotalUnknown",
 		); err != nil {
 			return conversationListPageContinue, err
 		}
-	case *hand.UnreadTotal > 0:
+		return conversationListPageSwitchAll, nil
+	}
+	if !a.manager.recordUnreadPassEnd(a.account, hand.UnreadTotal) {
+		a.unreadRetryDeferred = true
 		if err := a.appendUnreadPatrolAudit(
-			"status=inconsistent reason=unreadListEmptyHintPositive",
+			"status=incomplete reason=unreadPassEndTotalInvalid",
 		); err != nil {
 			return conversationListPageContinue, err
 		}
+		return conversationListPageSwitchAll, nil
+	}
+	if err := a.appendUnreadPatrolAudit(
+		fmt.Sprintf("status=completed endUnreadTotal=%d", *hand.UnreadTotal),
+	); err != nil {
+		return conversationListPageContinue, err
 	}
 	return conversationListPageSwitchAll, nil
 }
@@ -1876,12 +1880,6 @@ func (a *roundActor) handleCommandFailure(err error) {
 
 func (a *roundActor) finish(runErr error) error {
 	finishedAt := a.manager.now()
-	// Pending unread work is a process-local scheduling latch. If this round
-	// could not prove the empty-list + stable-zero exit, retry at the ordinary
-	// minimum round boundary instead of waiting a full patrol interval.
-	if _, pending := a.manager.unreadPendingGeneration(a.account); pending {
-		a.freshListRequired = true
-	}
 	status := "ok"
 	stage := "finished"
 	if runErr != nil {
@@ -1978,18 +1976,16 @@ func (a *roundActor) invalidateListSnapshot() {
 	a.listSnapshotGeneration++
 }
 
-// beginUnreadPass consumes no pending work. It only captures the current
-// generation and enforces at most one unread pass in this actor round.
+// beginUnreadPass uses the same baseline comparison at every ordinary
+// candidate boundary. A completed pass records its end total, so an unchanged
+// residual badge will not re-enter. An incomplete pass defers retry until the
+// next ordinary scan instead of spinning inside this actor.
 func (a *roundActor) beginUnreadPass() bool {
-	if a.unreadPassAttempted {
+	if a.unreadRetryDeferred ||
+		!a.manager.unreadPassNeeded(a.account, a.hand.UnreadTotal) {
 		return false
 	}
-	generation, pending := a.manager.unreadPendingGeneration(a.account)
-	if !pending {
-		return false
-	}
-	a.unreadPassAttempted = true
-	a.unreadPassGeneration = generation
+	a.unreadAttemptedRefs = make(map[string]struct{})
 	return true
 }
 
@@ -2012,7 +2008,6 @@ func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {
 		a.hand.UnreadTotal = &value
 		state.UnreadTotal = &value
 	}
-	a.manager.observeUnreadSnapshot(a.account, state.UnreadTotal)
 	return state, nil
 }
 
