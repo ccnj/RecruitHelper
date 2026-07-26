@@ -10466,12 +10466,12 @@ test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年
       } }]
       throw new Error(`unexpected MAIN function ${func.name}`)
     }
-    await assert.rejects(
-      readZhilianList({ filter: 'unread' }, context, fingerprint),
-      (error) => error instanceof ZhilianPlatformError &&
-        error.code === ErrorCode.ElementUnresolved,
-      '平台未读视图若出现无未读行，不得退化为手内过滤',
-    )
+    const mixedUnread = await readZhilianList({ filter: 'unread' }, context, fingerprint)
+    assert.equal(mixedUnread.complete, true)
+    assert.equal(mixedUnread.sessions.length, 1)
+    assert.equal(mixedUnread.sessions[0].conversationRef, badUnread.conversationRef)
+    assert.equal(mixedUnread.sessions[0].unreadCount, 0,
+      '未读视图里的瞬时零标记必须如实交给脑，不能整页失败或在手内静默过滤')
   } finally {
     globalThis.chrome = originalChrome
   }
@@ -10589,13 +10589,22 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
           return [{ result: { status: 'ready', changed: false } }]
         }
         if (func.name === 'mainReadListDOMWindow') return [{ result: {
-          sessions: [{
-            conversationRef,
-            peer: { displayName: '候选人甲', platformUserRef: 'peer-open' },
-            unreadCount: 2,
-            lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
-            lastActivityTs: Date.now(),
-          }],
+          sessions: [
+            {
+              conversationRef: 'conversation-transient-zero',
+              peer: { displayName: '候选人乙', platformUserRef: 'peer-zero' },
+              unreadCount: 0,
+              lastMessage: { direction: 'out', kind: 'text', textPreview: '已读消息' },
+              lastActivityTs: Date.now(),
+            },
+            {
+              conversationRef,
+              peer: { displayName: '候选人甲', platformUserRef: 'peer-open' },
+              unreadCount: 2,
+              lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
+              lastActivityTs: Date.now(),
+            },
+          ],
           atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
         } }]
         if (func.name === 'mainClickConversationOnce') {
@@ -10644,6 +10653,7 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
   let currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
   let filterReady = false
   let clickCalls = 0
+  let targetUnreadCount = 1
   globalThis.setTimeout = (callback) => {
     queueMicrotask(callback)
     return 1
@@ -10668,7 +10678,7 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
           sessions: [{
             conversationRef,
             peer: { displayName: '候选人乙', platformUserRef: 'peer-pending' },
-            unreadCount: 1,
+            unreadCount: targetUnreadCount,
             lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
             lastActivityTs: Date.now(),
           }],
@@ -10713,6 +10723,18 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
     )
     assert.equal(clickCalls, 0)
 
+    targetUnreadCount = 0
+    await assert.rejects(
+      openZhilianConversation({ conversationRef }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === ErrorCode.TargetNotFound &&
+        error.retryable === 'no' &&
+        error.sideEffect === 'none',
+      '目标行已经归零时必须零 click 并让脑继续处理其他会话',
+    )
+    assert.equal(clickCalls, 0)
+
+    targetUnreadCount = 1
     currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
     await assert.rejects(
       openZhilianConversation({ conversationRef }, context, fingerprint),

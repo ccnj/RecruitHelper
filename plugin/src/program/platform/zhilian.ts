@@ -4295,10 +4295,10 @@ export async function openZhilianConversation(
       'manualOnly',
     )
   }
-  if (currentWindow.unstable || currentWindow.sessions.some((session) => session.unreadCount <= 0)) {
+  if (currentWindow.unstable) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      '当前未读列表尚未稳定或含无未读标记的会话',
+      '当前未读列表尚未稳定',
       'manualOnly',
     )
   }
@@ -4309,6 +4309,13 @@ export async function openZhilianConversation(
   }
   if (targetMatches.length !== 1) {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '目标在当前未读窗口内身份不唯一', 'manualOnly')
+  }
+  if (targetMatches[0].unreadCount <= 0) {
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND',
+      '目标会话的未读标记已经归零，本原语未执行打开动作',
+      'no',
+    )
   }
 
   // 上一条列表命令可能刚刚滚动或切换筛选；无论实际间隔多少，本命令在唯一 click
@@ -5186,13 +5193,6 @@ async function readZhilianListFromDOM(
       if (cutoffMs !== null && item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
         crossedCutoff = true
         continue
-      }
-      if (args.filter === 'unread' && item.unreadCount === 0) {
-        throw new ZhilianPlatformError(
-          'ELEMENT_UNRESOLVED',
-          '平台未读筛选回读到无未读标记的会话，拒绝在手内静默过滤',
-          'manualOnly',
-        )
       }
       if (seen.has(item.conversationRef)) continue
       if (jsonBytes({
