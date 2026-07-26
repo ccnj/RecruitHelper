@@ -379,13 +379,6 @@ func (s *Store) SuspectCmds() ([]CmdRecord, error) {
 	return cs, err
 }
 
-// HasSuspectInDomain:该串行域是否存在 suspect(法条4 串行域冻结)。
-func (s *Store) HasSuspectInDomain(domain string) (bool, error) {
-	var n int64
-	err := s.db.Model(&CmdRecord{}).Where("domain = ? AND status = ?", domain, CmdSuspect).Count(&n).Error
-	return n > 0, err
-}
-
 // HasSuspectIdemKey:该幂等键是否被 suspect 冻结(法条3 幂等键冻结)。
 func (s *Store) HasSuspectIdemKey(idemKey string) (bool, error) {
 	if idemKey == "" {

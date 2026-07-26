@@ -42,8 +42,8 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 	nowMs := now.UnixMilli()
 	leaseHandled := d.sweepLeases(now)
 	grace := int64(protocol.DefaultSuspectGraceMs)
-	// 第一趟(修红队 F4 残漏):过期 effectful 先全部 suspect 冻结相关域,使第二趟 intrusive
-	// void+重派与 queued 重投的冻结复查看到同趟 effectful,不依赖枚举顺序。
+	// 第一趟先收束过期 effectful；其原 idemKey/业务动作由 suspect 隔离，
+	// suspect 本身不再占用账号串行域。
 	for _, cmd := range cmds {
 		if leaseHandled[cmd.MsgID] {
 			continue
@@ -87,12 +87,6 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 			if cmd.NotBeforeAt != nil && now.Before(*cmd.NotBeforeAt) {
 				continue
 			}
-			// 法条4:冻结域内不重投 effectful/intrusive(readonly 不进串行域,豁免);修 F4 残漏。
-			if cmd.Class != string(protocol.ClassReadonly) {
-				if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
-					continue
-				}
-			}
 			if session, _, online := d.sender.HandSession(cmd.HandID); online {
 				d.resendCmdAt(cmd, session, now)
 			}
@@ -123,8 +117,8 @@ func (d *Dispatcher) sweepFaults(now time.Time) {
 	}
 }
 
-// markSuspect:effectful 命令转 suspect(法条1/2)。冻结由后续 Dispatch 查询 suspect 存在性达成
-// (法条3/4);此处只落状态、审计、告警(v1 通知=日志+审计,UI 队列在 2.6)。
+// markSuspect:effectful 命令转 suspect(法条1/2)。原 idemKey 与业务动作继续隔离，
+// 账号串行域释放；此处只落状态、审计、告警(v1 通知=日志+审计,UI 队列在 2.6)。
 func (d *Dispatcher) markSuspect(cmd store.CmdRecord, reason string) {
 	err := d.st.MutateCmd(cmd.MsgID, func(r *store.CmdRecord) error {
 		if r.Status.Terminal() {
@@ -159,15 +153,6 @@ func (d *Dispatcher) voidAndRedispatch(cmd store.CmdRecord, reason string, delay
 			fmt.Sprintf("class=%s 重派耗尽(%d/%d)", cmd.Class, cmd.RedispatchN, cap))
 		slog.Warn("重派耗尽,健康告警", "handId", cmd.HandID, "class", cmd.Class, "n", cmd.RedispatchN)
 		return
-	}
-	// 法条4:重派前复查串行域冻结。intrusive 在冻结域内不得重派(留 void 待解冻);红队 F4。
-	// readonly 不进串行域,不受此约束。
-	if cmd.Class == string(protocol.ClassIntrusive) {
-		if frozen, _ := d.st.HasSuspectInDomain(cmd.Domain); frozen {
-			d.terminalizeVoid(cmd, reason)
-			d.st.Audit("redispatch_frozen", cmd.HandID, cmd.MsgID, "冻结域内不重派 intrusive(法条4)")
-			return
-		}
 	}
 	d.redispatchFrom(cmd, reason, delay)
 }

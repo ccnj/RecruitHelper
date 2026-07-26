@@ -24,7 +24,6 @@ import (
 var (
 	ErrHandOffline        = errors.New("手不在线")
 	ErrStaleSession       = errors.New("手会话已更替")
-	ErrDomainFrozen       = errors.New("串行域存在 suspect,冻结中(法条4)")
 	ErrIdemFrozen         = errors.New("幂等键被 suspect 冻结(法条3)")
 	ErrNotSuspect         = errors.New("命令不在 suspect 状态")
 	ErrVerdictNotReady    = errors.New("对账未完成,不许人裁(法条5前置):手在线同代或离线不足时长")

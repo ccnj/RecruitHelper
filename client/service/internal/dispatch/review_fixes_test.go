@@ -39,19 +39,18 @@ func TestSuspectPossibleLateResultKept(t *testing.T) {
 	}
 }
 
-// F4:intrusive 在冻结域内不重派(留 void)。
-func TestIntrusiveNotRedispatchedInFrozenDomain(t *testing.T) {
+// suspect 不阻塞同账号无关 intrusive 的正常恢复。
+func TestIntrusiveRedispatchedPastSuspect(t *testing.T) {
 	d, st, m := newDisp(t)
 	m.up("hand-01", "b-1")
-	// 先造一个 suspect 冻结 debug:hand-01 域
+	// 先造一个即将进入 suspect 的 effectful。
 	sID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
 	// 再派一个 intrusive(此刻域尚未冻结,能派出)
 	iID, _ := d.Dispatch("hand-01", protocol.PrimDebugSwitchWindow, json.RawMessage(`{}`))
 	if iID == "" {
 		t.Fatalf("intrusive 派发前置失败")
 	}
-	before := m.sentCount()
-	// sweep:slowEcho 先 suspect(冻结域),switchWindow 后 void——重派应被冻结拦下
+	// sweep:slowEcho 先 suspect，switchWindow 后 void 并安排正常重派。
 	d.sweepFaults(future())
 	if rec, _ := st.CmdByMsgID(sID); rec.Status != store.CmdSuspect {
 		t.Fatalf("slowEcho 应 suspect")
@@ -59,11 +58,8 @@ func TestIntrusiveNotRedispatchedInFrozenDomain(t *testing.T) {
 	if rec, _ := st.CmdByMsgID(iID); rec.Status != store.CmdVoid {
 		t.Fatalf("switchWindow 应 void,得到 %s", rec.Status)
 	}
-	if m.sentCount() != before {
-		t.Fatalf("冻结域内 intrusive 不应重派(不新增发送)")
-	}
-	if !hasAudit(t, st, "redispatch_frozen", iID) {
-		t.Fatalf("应有 redispatch_frozen 审计")
+	if !hasAudit(t, st, "redispatch_scheduled", "") {
+		t.Fatalf("suspect 不应阻塞 intrusive 重派")
 	}
 }
 
@@ -209,15 +205,12 @@ func TestVerdictRaces(t *testing.T) {
 	}
 }
 
-// F4 残漏:OnReconnect 两阶段——intrusive 创建早于同域 effectful,换代收编时 intrusive
-// 不应被派进即将冻结的域(不依赖 created_at 枚举顺序)。
-func TestReconnectTwoPhaseFreeze(t *testing.T) {
+// 换代收编把 effectful 隔离为 suspect 后，无关 intrusive 仍按正常恢复轨收束。
+func TestReconnectSuspectDoesNotFreezeIntrusive(t *testing.T) {
 	d, st, m := newDisp(t)
 	m.up("hand-01", "b-1")
 	iID, _ := d.Dispatch("hand-01", protocol.PrimDebugSwitchWindow, json.RawMessage(`{}`)) // intrusive 先建
 	eID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
-	sentBefore := m.sentCount()
-
 	m.up("hand-01", "b-2") // 换代重连
 	d.OnReconnect("hand-01", "b-2")
 
@@ -227,11 +220,8 @@ func TestReconnectTwoPhaseFreeze(t *testing.T) {
 	if rec, _ := st.CmdByMsgID(iID); rec.Status != store.CmdVoid {
 		t.Fatalf("换代 intrusive 应 void,得到 %s", rec.Status)
 	}
-	if m.sentCount() != sentBefore {
-		t.Fatalf("冻结域内 intrusive 不应重派(不新增发送)")
-	}
-	if !hasAudit(t, st, "redispatch_frozen", iID) {
-		t.Fatalf("应有 redispatch_frozen 审计(两阶段生效)")
+	if !hasAudit(t, st, "redispatch", "") {
+		t.Fatalf("suspect 不应阻塞 intrusive 恢复")
 	}
 }
 

@@ -192,8 +192,7 @@ func (s *Store) CreateGreetingEffectIntentAndCmd(
 		}
 
 		var busy int64
-		frozenStatuses := append(append([]CmdStatus(nil), nonTerminalStatuses...), CmdSuspect)
-		if err := tx.Model(&CmdRecord{}).Where("domain = ? AND status IN ?", c.Domain, frozenStatuses).
+		if err := tx.Model(&CmdRecord{}).Where("domain = ? AND status IN ?", c.Domain, nonTerminalStatuses).
 			Count(&busy).Error; err != nil {
 			return err
 		}

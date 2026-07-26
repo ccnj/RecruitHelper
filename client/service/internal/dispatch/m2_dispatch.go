@@ -189,13 +189,6 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 		return dispatchResult{}, fmt.Errorf("命令契约校验: %w", err)
 	}
 
-	// 旧 debug wrapper 保留 M1 的 suspect 冻结语义；业务入口由 Store 在单写事务里
-	// 原子完成“检查 domain + 创建 queued”，避免跨手同账号的 TOCTOU。
-	if opts.legacyDebug && meta.Class != protocol.ClassReadonly {
-		if frozen, _ := d.st.HasSuspectInDomain(domain); frozen {
-			return dispatchResult{}, ErrDomainFrozen
-		}
-	}
 	if meta.Class == protocol.ClassEffectful {
 		if frozen, _ := d.st.HasSuspectIdemKey(idemKey); frozen {
 			return dispatchResult{}, ErrIdemFrozen

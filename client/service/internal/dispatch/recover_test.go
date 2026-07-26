@@ -154,28 +154,21 @@ func TestVerdictGating(t *testing.T) {
 	}
 }
 
-// resolvedFailed 解冻同域后可再派 effectful(域内已无 suspect)。
-func TestVerdictUnfreezesDomain(t *testing.T) {
+// suspect 落下时账号域已经释放，人裁不再承担解冻账号的职责。
+func TestSuspectReleasesDomainBeforeVerdict(t *testing.T) {
 	d, st, m := newDisp(t)
 	d.SetManualDelayMs(0)
 	m.up("hand-01", "b-1")
 	msgID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
 	d.sweepFaults(future())
-	// 域冻结生效
-	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"ok"}`)); err != ErrDomainFrozen {
-		t.Fatalf("前置:应域冻结")
+	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"ok"}`)); err != nil {
+		t.Fatalf("suspect 后其他动作应可派发: %v", err)
 	}
-	// 离线放行裁决
 	m.mu.Lock()
 	m.online["hand-01"] = false
 	m.mu.Unlock()
 	if err := d.Verdict(msgID, store.CmdResolvedFailed); err != nil {
 		t.Fatalf("裁决: %v", err)
-	}
-	// 重新上线,同域可再派
-	m.up("hand-01", "b-1")
-	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"ok"}`)); err != nil {
-		t.Fatalf("裁决解冻后应可再派,得到 %v", err)
 	}
 	_ = st
 }

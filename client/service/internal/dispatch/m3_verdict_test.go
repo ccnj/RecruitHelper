@@ -180,7 +180,7 @@ func TestLateConfirmedResultWinsResolvedFailedAndResultFirstBlocksVerdict(t *tes
 	})
 }
 
-func TestReviewAfterBlocksEarlyVerdictAndNewIntentUntilZombieWindowEnds(t *testing.T) {
+func TestReviewAfterBlocksEarlyVerdictButReleasesDomain(t *testing.T) {
 	d, st, m := newDisp(t)
 	key := seedSendTarget(t, st, m, "acct-review-after", "conv-review-after")
 	receipt, _ := d.SendMessage(sendRequest("intent-review-after", key, "你好"))
@@ -199,8 +199,8 @@ func TestReviewAfterBlocksEarlyVerdictAndNewIntentUntilZombieWindowEnds(t *testi
 	}
 	next := sendRequest("intent-review-after-new", key, "再发")
 	next.PreviousIntentID = receipt.IntentID
-	if _, err := d.SendMessage(next); !errors.Is(err, store.ErrDomainBusy) {
-		t.Fatalf("reviewAfter 之前 suspect 域必须冻结新 intent: %v", err)
+	if _, err := d.SendMessage(next); err != nil {
+		t.Fatalf("suspect 只冻结原 idemKey/业务动作，不应继续占用账号域: %v", err)
 	}
 	if err := st.MutateCmd(receipt.MsgID, func(record *store.CmdRecord) error {
 		record.ReviewAfterMs = time.Now().Add(-time.Second).UnixMilli()

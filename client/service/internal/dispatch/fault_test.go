@@ -276,8 +276,8 @@ func TestSuspectLateResultCleared(t *testing.T) {
 	}
 }
 
-// 串行域冻结(法条4):域内有 suspect → 拒新 effectful/intrusive;readonly 放行。
-func TestDomainFreeze(t *testing.T) {
+// suspect 只隔离原 idemKey/业务动作，不再占用账号串行域。
+func TestSuspectReleasesDomain(t *testing.T) {
 	d, st, m := newDisp(t)
 	m.up("hand-01", "b-1")
 	msgID, _ := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"silent"}`))
@@ -285,17 +285,14 @@ func TestDomainFreeze(t *testing.T) {
 	if rec, _ := st.CmdByMsgID(msgID); rec.Status != store.CmdSuspect {
 		t.Fatalf("前置:应 suspect")
 	}
-	// 新 effectful 被冻结
-	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"ok"}`)); err != ErrDomainFrozen {
-		t.Fatalf("effectful 应被域冻结,得到 %v", err)
+	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSlowEcho, json.RawMessage(`{"ms":0,"outcome":"ok"}`)); err != nil {
+		t.Fatalf("其他 effectful 应继续派发,得到 %v", err)
 	}
-	// 新 intrusive 被冻结
-	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSwitchWindow, json.RawMessage(`{}`)); err != ErrDomainFrozen {
-		t.Fatalf("intrusive 应被域冻结,得到 %v", err)
+	if _, err := d.Dispatch("hand-01", protocol.PrimDebugSwitchWindow, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("其他 intrusive 应继续派发,得到 %v", err)
 	}
-	// readonly 放行(不进串行域)
 	if _, err := d.Dispatch("hand-01", protocol.PrimDebugPing, json.RawMessage(`{}`)); err != nil {
-		t.Fatalf("readonly 不应被冻结,得到 %v", err)
+		t.Fatalf("readonly 应继续派发,得到 %v", err)
 	}
 }
 

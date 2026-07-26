@@ -249,8 +249,7 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 		}
 
 		var busy int64
-		frozenStatuses := append(append([]CmdStatus(nil), nonTerminalStatuses...), CmdSuspect)
-		if err := tx.Model(&CmdRecord{}).Where("domain = ? AND status IN ?", c.Domain, frozenStatuses).Count(&busy).Error; err != nil {
+		if err := tx.Model(&CmdRecord{}).Where("domain = ? AND status IN ?", c.Domain, nonTerminalStatuses).Count(&busy).Error; err != nil {
 			return err
 		}
 		if busy != 0 {
@@ -930,7 +929,7 @@ func (s *Store) RejectEffectCommand(ref, errorCode, reason string, at time.Time)
 	})
 }
 
-// CreateVerificationCmd 是 suspect 冻结域的唯一例外入口。它不跳过
+// CreateVerificationCmd 是未终态 SX 占用串行域时的配套验证入口。它不跳过
 // 命令 WAL，只是把“原 SX 正在 verifying”与“同域只有一条为它服务的
 // formal verification read”放在同一事务中证明。具体验证原语可以是
 // intrusive 或 readonly，但绝不能是 effectful。

@@ -28,7 +28,7 @@ var (
 	ErrCardTransitionNotFound      = errors.New("卡片状态跃迁事实不存在")
 	ErrCardTransitionCorrupt       = errors.New("卡片状态跃迁事实与活动消息账本不一致")
 	ErrInvalidMessageSourceKey     = errors.New("消息 sourceKey 必须是 64 位小写 hex")
-	ErrDomainBusy                  = errors.New("串行域已有在途或 suspect 命令")
+	ErrDomainBusy                  = errors.New("串行域已有在途命令")
 	ErrLogicalDispatchNotFound     = errors.New("逻辑派发不存在")
 	ErrLineageConflict             = errors.New("逻辑派发链冲突")
 	ErrLineageCorrupt              = errors.New("逻辑派发链损坏")
@@ -271,7 +271,7 @@ func validIdentityState(s IdentityState) bool {
 // ---------- 命令上下文、串行域与逻辑重派链 ----------
 
 // CreateCmdIfDomainAvailable 把“检查域空闲+创建 queued 命令”放在同一个 SQLite 单写事务里。
-// readonly 不占域;intrusive/effectful 会同时受在途与 suspect 冻结约束。
+// readonly 不占域;intrusive/effectful 只受未终态命令的串行约束。
 func (s *Store) CreateCmdIfDomainAvailable(c *CmdRecord) error {
 	if c == nil {
 		return errors.New("命令不能为空")
@@ -289,7 +289,7 @@ func createCmdIfDomainAvailableTx(tx *gorm.DB, c *CmdRecord) error {
 	if c.Class != "readonly" && c.Domain != "" {
 		var n int64
 		if err := tx.Model(&CmdRecord{}).
-			Where("domain = ? AND status IN ?", c.Domain, append(append([]CmdStatus(nil), nonTerminalStatuses...), CmdSuspect)).
+			Where("domain = ? AND status IN ?", c.Domain, nonTerminalStatuses).
 			Count(&n).Error; err != nil {
 			return err
 		}
