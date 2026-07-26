@@ -401,6 +401,13 @@ func (m *Manager) syncAccountPause(
 	if account == nil {
 		return run, false, store.ErrAccountNotFound
 	}
+	// 达到采集目标后停止账号 actor，只是为了释放推荐页并让后续评分、
+	// 筛选、生成、确认和发送串行使用同一工作页。它不是用户暂停产品
+	// 工作流。漏斗进入 communication 后，keepCommunicationRunning 会
+	// 再启用账号 actor；在此之前不得把这条内部暂停投影成 workflow pause。
+	if isExpectedSourcingTargetPause(run, account) {
+		return run, false, nil
+	}
 	if account.StoppedAt == nil && strings.TrimSpace(account.PausedReason) == "" {
 		return run, false, nil
 	}
@@ -424,6 +431,21 @@ func (m *Manager) syncAccountPause(
 		return run, false, err
 	}
 	return paused, true, nil
+}
+
+func isExpectedSourcingTargetPause(
+	run *store.ProductWorkflowRun,
+	account *store.Account,
+) bool {
+	return run != nil &&
+		account != nil &&
+		run.Mode == workflow.ModeFull &&
+		run.Stage != store.ProductWorkflowStageSourcing &&
+		run.SourcingBatchID != nil &&
+		strings.TrimSpace(*run.SourcingBatchID) != "" &&
+		account.StoppedAt != nil &&
+		strings.TrimSpace(account.PausedReason) ==
+			store.SourcingTargetReachedPauseReason
 }
 
 func (m *Manager) recoverInterruptedFullStart(

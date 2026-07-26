@@ -21,7 +21,10 @@ var (
 	ErrSourcingBatchStateConflict = errors.New("采集批次状态不允许当前操作")
 )
 
-const SourcingFeedChangedReason = "recommendationFeedChanged"
+const (
+	SourcingFeedChangedReason        = "recommendationFeedChanged"
+	SourcingTargetReachedPauseReason = "sourcingTargetReached"
+)
 
 type InvalidateSourcingFeedRequest struct {
 	Platform   string

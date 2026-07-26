@@ -34,7 +34,7 @@ const (
 	PauseSurfaceDrivenAway     = "surfaceDrivenAway"
 	PauseHandManualReview      = "handManualReview"
 	PauseSourcingBlocked       = "sourcingBlocked"
-	PauseSourcingTargetReached = "sourcingTargetReached"
+	PauseSourcingTargetReached = store.SourcingTargetReachedPauseReason
 )
 
 var (

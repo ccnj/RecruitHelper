@@ -401,7 +401,9 @@ func (s *Store) CompleteSourcingBatchCandidateRun(
 			updatedAccount := tx.Model(&Account{}).
 				Where("platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef).
 				Updates(map[string]any{
-					"stopped_at": leaf.TerminalAt, "paused_reason": "sourcingTargetReached", "dirty_hint": true,
+					"stopped_at":    leaf.TerminalAt,
+					"paused_reason": SourcingTargetReachedPauseReason,
+					"dirty_hint":    true,
 				})
 			if updatedAccount.Error != nil {
 				return updatedAccount.Error

@@ -258,6 +258,116 @@ func TestAdvanceOnceProjectsAccountPauseAndResumesSameFullRunAndBatch(t *testing
 	}
 }
 
+func TestAdvanceOnceKeepsSourcingTargetPauseInsidePostSourcingFunnel(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor:  &fixtureActor{store: db, clock: clock},
+		scoreProgress: &store.SourcingBatchScoringProgress{},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	scoring, err := db.AdvanceProductWorkflowStage(
+		store.AdvanceProductWorkflowStageRequest{
+			RunID: started.RunID, ExpectedStage: started.Stage,
+			ExpectedStatus: workflow.StatusRunning,
+			NextStage:      store.ProductWorkflowStageScoring,
+			At:             clock.Now(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = store.SourcingTargetReachedPauseReason
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	advanced, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		advanced == nil ||
+		advanced.RunID != scoring.RunID ||
+		advanced.Status != workflow.StatusRunning ||
+		advanced.Stage != store.ProductWorkflowStageScoring ||
+		actor.scoreCalls != 1 {
+		t.Fatalf(
+			"sourcing target pause leaked into workflow: run=%+v scoreCalls=%d err=%v",
+			advanced,
+			actor.scoreCalls,
+			err,
+		)
+	}
+	account, err := db.AccountByKey(key)
+	if err != nil ||
+		account == nil ||
+		account.StoppedAt == nil ||
+		account.PausedReason != store.SourcingTargetReachedPauseReason {
+		t.Fatalf("internal actor pause was unexpectedly cleared: %+v, %v", account, err)
+	}
+}
+
+func TestAdvanceOnceStillProjectsManualPauseDuringScoring(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor:  &fixtureActor{store: db, clock: clock},
+		scoreProgress: &store.SourcingBatchScoringProgress{},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	scoring, err := db.AdvanceProductWorkflowStage(
+		store.AdvanceProductWorkflowStageRequest{
+			RunID: started.RunID, ExpectedStage: started.Stage,
+			ExpectedStatus: workflow.StatusRunning,
+			NextStage:      store.ProductWorkflowStageScoring,
+			At:             clock.Now(),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = "handManualReview"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	paused, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		paused == nil ||
+		paused.RunID != scoring.RunID ||
+		paused.Status != workflow.StatusPaused ||
+		paused.ResumeStatus != workflow.StatusRunning ||
+		paused.Stage != store.ProductWorkflowStageScoring ||
+		actor.scoreCalls != 0 {
+		t.Fatalf(
+			"manual scoring pause not projected: run=%+v scoreCalls=%d err=%v",
+			paused,
+			actor.scoreCalls,
+			err,
+		)
+	}
+}
+
 func TestAdvanceOnceProjectsReplyOnlyAccountPause(t *testing.T) {
 	db, key, _ := productWorkflowFixture(t)
 	location := time.FixedZone("CST", 8*60*60)
