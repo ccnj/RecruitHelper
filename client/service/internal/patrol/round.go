@@ -88,10 +88,9 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 		manager: m, account: account, hand: hand, roundID: roundID, trigger: trigger, now: now,
 		requireCurrentThread: trigger == TriggerCurrentConversation,
 	}
-	// 生产 Clock 下这个 timeout 会在本地 24:00 取消正在等待的 dispatcher。
-	// 注入假时钟的测试则由每次原语前后的日边界复核立即截断。
-	untilMidnight := m.nextLocalMidnight(now).Sub(now)
-	roundCtx, cancel := context.WithTimeout(ctx, untilMidnight)
+	// 按《24点边界裁决-2026-07-28》不再以 24:00 wall-clock 超时取消等待中
+	// 的 dispatcher：已发首条可见动作的链要跨点收束到终局，日界收束由链首
+	// 与下一候选人边界的 ensureDispatchAllowed 日界复核承担。
 	// actor 短锁覆盖所有本地判定、Start 与账本提交，但 invokePrimitiveDirect
 	// 会在 Wait 期间主动释放它。事件/暂停/改绑因此只能线性化在命令启动前
 	// 或启动后，绝不会钻进“门禁已过、socket 尚未送入”的缝隙。
@@ -99,13 +98,9 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 	func() {
 		defer m.mu.Unlock()
 		if err = actor.freezeSourcingBatchGeneration(); err == nil {
-			err = actor.execute(roundCtx)
+			err = actor.execute(ctx)
 		}
 	}()
-	cancel()
-	if errors.Is(err, context.DeadlineExceeded) && m.localDate(m.now()) != m.localDate(now) {
-		err = ErrDailyWindowExpired
-	}
 	if errors.Is(err, ErrDailyWindowExpired) {
 		_ = m.pauseAccount(key, PauseDailyExpired, m.now())
 	}
@@ -2064,6 +2059,41 @@ func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
 		return store.ErrAccountNotFound
 	}
 	if !a.manager.enabledToday(*current, now) {
+		return ErrActorPaused
+	}
+	if current.BoundHandID != a.account.BoundHandID ||
+		!sameFingerprint(current.PrincipalFingerprint, a.account.PrincipalFingerprint) {
+		return ErrActorGenerationChanged
+	}
+	hand, err := a.manager.hands.State(ctx, a.account.BoundHandID)
+	if err != nil {
+		return err
+	}
+	if !hand.Online || hand.Session != a.hand.Session || hand.BootID != a.hand.BootID {
+		return ErrActorGenerationChanged
+	}
+	return a.ensureSourcingBatchGenerationCurrent()
+}
+
+// ensureChainDispatchAllowed 是链内推进（同一 turn 内紧接前项正证的下一
+// 动作）专用的派发复核。按《24点边界裁决-2026-07-28》，已发出首条可见
+// 动作的链跨过 24:00 继续收束，因此链内不复核日窗口与本地日界；其余闸
+// 原样保留——上下文取消、账号显式暂停/停止（用户点暂停必须仍能在下一
+// 动作前截住链）、手换代与采集批次换代。次日恢复轨对残留 planned 的派
+// 发不是链内推进，仍走 ensureDispatchAllowed 的完整复核。
+func (a *roundActor) ensureChainDispatchAllowed(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	current, err := a.manager.store.AccountByKey(a.key())
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return store.ErrAccountNotFound
+	}
+	if current.EnabledAt == nil || current.StoppedAt != nil ||
+		current.PausedReason != "" {
 		return ErrActorPaused
 	}
 	if current.BoundHandID != a.account.BoundHandID ||

@@ -22,8 +22,9 @@ var (
 )
 
 const (
-	productWorkflowEndReasonAdditionalBatch = "additionalBatch"
-	productWorkflowEndReasonUserEnded       = "userEnded"
+	productWorkflowEndReasonAdditionalBatch   = "additionalBatch"
+	productWorkflowEndReasonUserEnded         = "userEnded"
+	productWorkflowEndReasonDailyWindowClosed = "dailyWindowClosed"
 )
 
 // PipelineActor deliberately mirrors the already-existing M6 production
@@ -522,6 +523,28 @@ func (m *Manager) communicationRunExpired(run *store.ProductWorkflowRun) bool {
 func (m *Manager) completeExpiredCommunicationRun(
 	fallback *store.ProductWorkflowRun,
 ) (*store.ProductWorkflowRun, error) {
+	// 跨日终局必须等当前巡检 Tick——含正在跨点收束的候选人动作链——自然
+	// 结束后再停账号，否则 PauseNow 会在链内动作间截断本应收束到终局的链
+	//（《24点边界裁决-2026-07-28》）。复用 End 的同一巡检边界。
+	boundary, ok := m.actor.(patrolBoundaryActor)
+	if !ok {
+		return fallback, ErrPatrolBoundaryUnavailable
+	}
+	var resolved *store.ProductWorkflowRun
+	err := boundary.RunAtPatrolBoundary(func() error {
+		var completeErr error
+		resolved, completeErr = m.completeExpiredCommunicationRunAtBoundary(fallback)
+		return completeErr
+	})
+	if resolved == nil {
+		resolved = m.currentRunOr(fallback)
+	}
+	return resolved, err
+}
+
+func (m *Manager) completeExpiredCommunicationRunAtBoundary(
+	fallback *store.ProductWorkflowRun,
+) (*store.ProductWorkflowRun, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -543,8 +566,9 @@ func (m *Manager) completeExpiredCommunicationRun(
 			To: workflow.State{
 				Mode: run.Mode, Status: workflow.StatusCompleted,
 			},
-			At:    m.clock.Now(),
-			Stage: store.ProductWorkflowStageCompleted,
+			At:        m.clock.Now(),
+			Stage:     store.ProductWorkflowStageCompleted,
+			EndReason: productWorkflowEndReasonDailyWindowClosed,
 		},
 	)
 	if err != nil {

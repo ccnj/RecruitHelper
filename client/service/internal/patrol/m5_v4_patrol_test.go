@@ -1175,7 +1175,7 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 	}
 }
 
-func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testing.T) {
+func TestCommunicationV4DependentCardPauseDuringChainCutsBeforeChildWAL(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTarget(
 		t,
@@ -1195,9 +1195,17 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	// 子动作的节奏等待期间到达用户暂停：链内复核必须在发出子命令前截住
+	// 链（《24点边界裁决-2026-07-28》链内只豁免日界，不豁免暂停）。
+	var manager *Manager
 	paceCalls := 0
 	h.config.InteractionPaceWait = func(ctx context.Context) error {
 		paceCalls++
+		if paceCalls == 2 {
+			if pauseErr := manager.PauseNow(h.key); pauseErr != nil {
+				return pauseErr
+			}
+		}
 		return ctx.Err()
 	}
 	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
@@ -1205,8 +1213,8 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 		t.Fatal(err)
 	}
 	manager.SetWorkflowMemberGate(func() error {
-		if hand.commandCount() == 1 {
-			return ErrActorPaused
+		if hand.commandCount() >= 1 {
+			t.Errorf("链内推进不得重进 workflow member gate: commands=%d", hand.commandCount())
 		}
 		return nil
 	})
@@ -1230,7 +1238,7 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 	err = actor.processCommunicationV4Targets(context.Background())
 	manager.mu.Unlock()
 	if !errors.Is(err, ErrActorPaused) || hand.commandCount() != 1 ||
-		paceCalls != 1 || len(advice.requests) != 0 {
+		paceCalls != 2 || len(advice.requests) != 0 {
 		t.Fatalf(
 			"父动作后暂停必须阻止子动作构造 WAL: err=%v commands=%d pace=%d advice=%+v",
 			err,
