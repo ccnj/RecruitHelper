@@ -3,11 +3,16 @@ package apphttp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"recruithelper/client/service/internal/productapp"
+	"recruithelper/client/service/internal/workflow"
 )
 
 type fakeWorkflowControl struct {
@@ -138,6 +143,56 @@ func TestWorkflowControlsRejectMalformedOrUnavailableRequestsWithoutCallingContr
 	response := productPOST(t, unavailable, "/app/workflow/pause", `{}`)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unavailable status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestStartFailureMapsKnownSentinelsToFixedTextOnly(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "jobSelectionChanged",
+			err:  fmt.Errorf("start: %w", productapp.ErrJobSelectionChanged),
+			want: "当前职位已变化，请刷新后重试",
+		},
+		{
+			name: "dailyWindowClosed",
+			err:  workflow.ErrDailyWindowClosed,
+			want: "当前不在业务运行窗口内",
+		},
+		{
+			name: "accountUnavailable",
+			err:  productapp.ErrAccountUnavailable,
+			want: "没有唯一可运行的平台账号",
+		},
+		{
+			name: "jobConfigUnavailableKeepsChainDetailInside",
+			err:  errors.Join(productapp.ErrJobConfigUnavailable, errors.New("internal detail must not leave brain")),
+			want: "当前职位配置不可用",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			control := &fakeWorkflowControl{err: test.err}
+			handler := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(control))
+			response := productPOST(
+				t,
+				handler,
+				"/app/workflow/start",
+				`{"mode":"full","backendJobId":"42"}`,
+			)
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body=%s err=%v", response.Body.String(), err)
+			}
+			if response.Code != http.StatusConflict || body.Error != test.want ||
+				bytes.Contains(response.Body.Bytes(), []byte("internal detail")) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
