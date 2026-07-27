@@ -585,6 +585,10 @@ func (a *roundActor) openUnreadConversationWithoutAutomation(
 	if err := a.setStage("openingUnreadConversation"); err != nil {
 		return err
 	}
+	// 打开会话是候选人可见的页面切换，与发送共享脑侧拟人节奏。
+	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
+		return err
+	}
 	data, err := invokePrimitive[protocol.ChatOpenConversationData](
 		ctx,
 		a,
@@ -1290,6 +1294,10 @@ func (a *roundActor) readListPage(
 	if filter == protocol.ListFilterAll {
 		args.StopOlderThanDays = 8
 	}
+	// 列表翻窗（滚动/切筛选）同为可见交互，套用统一节奏。
+	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
+		return conversationListPage{}, err
+	}
 	data, err := invokePrimitive[protocol.ChatReadListData](
 		ctx,
 		a,
@@ -1583,6 +1591,13 @@ func (a *roundActor) readThread(ctx context.Context, conversationRef string, anc
 			data protocol.ChatReadThreadData
 			err  error
 		)
+		// 深读首页会把页面切到目标会话，按候选人切换节奏停顿；
+		// 同会话内的分页滚动不再叠加大停顿。
+		if cursor == "" {
+			if paceErr := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); paceErr != nil {
+				return threadSnapshot{}, paceErr
+			}
+		}
 		if a.requireCurrentThread {
 			data, err = invokePrimitiveDirect[protocol.ChatReadThreadData](
 				ctx,
