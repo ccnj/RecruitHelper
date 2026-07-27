@@ -22,10 +22,11 @@ const (
 )
 
 var (
-	ErrCommunicationV4Invalid  = errors.New("V4 沟通聚合输入无效")
-	ErrCommunicationV4Missing  = errors.New("V4 沟通聚合不存在")
-	ErrCommunicationV4Conflict = errors.New("V4 沟通聚合或投影冲突")
-	ErrCommunicationV4Corrupt  = errors.New("V4 沟通聚合损坏")
+	ErrCommunicationV4Invalid            = errors.New("V4 沟通聚合输入无效")
+	ErrCommunicationV4Missing            = errors.New("V4 沟通聚合不存在")
+	ErrCommunicationV4Conflict           = errors.New("V4 沟通聚合或投影冲突")
+	ErrCommunicationV4Corrupt            = errors.New("V4 沟通聚合损坏")
+	ErrCommunicationV4AnchorUnresolvable = errors.New("V4 沟通轮出站锚不可解析")
 )
 
 func (s *Store) CommunicationV4AggregateByProfile(
@@ -167,6 +168,9 @@ func applyCommunicationV4RootTx(
 	}
 
 	state := communication.NewV4GreetedState(profile.GreetedAt)
+	if projectedThroughSeq > 0 {
+		state.LastOutboundMessageSeq = projectedThroughSeq
+	}
 	if err := communication.ValidateV4State(state); err != nil {
 		return nil, false, ErrCommunicationV4Corrupt
 	}
@@ -184,11 +188,11 @@ func applyCommunicationV4RootTx(
 	return &aggregate, true, nil
 }
 
-// bindCommunicationV4RootConversationTx advances only the ledger projection
-// boundary when a previously unbound successful greeting is materialized as
-// message 1 during late conversation adoption. The greeting is already part
-// of the root state, so this is not a new reducer input and does not increment
-// Revision.
+// bindCommunicationV4RootConversationTx advances the ledger projection
+// boundary and materializes the outbound turn anchor when a previously
+// unbound successful greeting becomes message 1 during late conversation
+// adoption. The greeting is already part of the root state, so this is not a
+// new reducer input and does not increment Revision.
 func bindCommunicationV4RootConversationTx(
 	tx *gorm.DB,
 	profileID string,
@@ -222,9 +226,22 @@ func bindCommunicationV4RootConversationTx(
 		aggregate.State.MainStatus != communication.V4StatusGreeted {
 		return ErrCommunicationV4Conflict
 	}
+	state := aggregate.State
+	state.LastOutboundMessageSeq = messageSeq
+	if err := communication.ValidateV4State(state); err != nil {
+		return ErrCommunicationV4Corrupt
+	}
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
 	updated := tx.Model(&CommunicationV4Aggregate{}).
 		Where("profile_id = ? AND revision = 0 AND projected_through_seq = 0", profileID).
-		Updates(map[string]any{"projected_through_seq": messageSeq, "updated_at": now.UTC()})
+		Updates(map[string]any{
+			"projected_through_seq": messageSeq,
+			"state":                 string(stateJSON),
+			"updated_at":            now.UTC(),
+		})
 	if updated.Error != nil {
 		return updated.Error
 	}
@@ -232,6 +249,39 @@ func bindCommunicationV4RootConversationTx(
 		return ErrCommunicationV4Conflict
 	}
 	return nil
+}
+
+// communicationV4OutboundAnchorSeqTx resolves the turn-boundary outbound
+// anchor for one aggregate. State carries the anchor from root creation or
+// the latest confirmed action; pre-decoupling greeting roots never recorded
+// it, so the greeting message is recovered through its immutable intent
+// linkage instead of guessing from the newest outbound row. Candidate-
+// initiated roots legitimately have no outbound anchor.
+func communicationV4OutboundAnchorSeqTx(
+	tx *gorm.DB,
+	aggregate CommunicationV4Aggregate,
+) (int64, error) {
+	if aggregate.State.LastOutboundMessageSeq > 0 {
+		return aggregate.State.LastOutboundMessageSeq, nil
+	}
+	if IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
+		return 0, nil
+	}
+	var greeting Message
+	if err := tx.First(
+		&greeting,
+		"outbound_intent_id = ? AND retracted_at IS NULL",
+		aggregate.RootGreetingIntentID,
+	).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, ErrCommunicationV4AnchorUnresolvable
+		}
+		return 0, err
+	}
+	if greeting.Direction != "out" || greeting.Seq <= 0 {
+		return 0, ErrCommunicationV4AnchorUnresolvable
+	}
+	return greeting.Seq, nil
 }
 
 type ApplyCommunicationV4BusinessEventRequest struct {

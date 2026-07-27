@@ -29,6 +29,25 @@ type m5B177IncidentFixture struct {
 	initialV4  CommunicationV4Aggregate
 }
 
+func stripV4AnchorForHistoricalShape(t *testing.T, s *Store, profileID string) {
+	t.Helper()
+	aggregate, err := s.CommunicationV4AggregateByProfile(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := aggregate.State
+	state.LastOutboundMessageSeq = 0
+	stateJSON, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ?", profileID).
+		Updates(map[string]any{"state": string(stateJSON)}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func seedM5B177IncidentFixture(t *testing.T, preceding int) m5B177IncidentFixture {
 	t.Helper()
 	s := openTest(t)
@@ -37,6 +56,10 @@ func seedM5B177IncidentFixture(t *testing.T, preceding int) m5B177IncidentFixtur
 	profileID := "profile-m5b-177"
 	conversationRef := "conversation-m5b-177"
 	ledger, _ := seedSuccessfulV4Greeting(t, s, profileID, conversationRef, greetedAt)
+	// 177 事故行创建于出站锚解耦（0727当日计划3）之前，历史聚合 state 的
+	// lastOutboundMessageSeq 恒为 0。剥掉新建路径落的锚，复现事实门锁定的
+	// 原始形状；生产门本身保持字节精确，不放宽。
+	stripV4AnchorForHistoricalShape(t, s, profileID)
 	key := ConversationKey{
 		Platform: ledger.Platform, AccountRef: ledger.AccountRef, ConversationRef: conversationRef,
 	}

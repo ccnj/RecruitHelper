@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -633,5 +634,105 @@ func TestCommunicationV4ConfirmedActionAndArchiveAreDurableAndIdempotent(t *test
 	}
 	if replayed.Applied || replayed.Aggregate.Revision != 3 {
 		t.Fatalf("归档重放发生增生: applied=%v aggregate=%+v", replayed.Applied, replayed.Aggregate)
+	}
+}
+
+func TestCommunicationV4RootAnchorsOutboundSeq(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+
+	_, bound := seedSuccessfulV4Greeting(t, s, "anchor-bound", "conversation-anchor-bound", at)
+	if bound.ProjectedThroughSeq != 1 || bound.State.LastOutboundMessageSeq != 1 {
+		t.Fatalf("已绑定招呼根未落出站锚: %+v", bound)
+	}
+
+	seedLegacyGreetedProfile(t, s, "anchor-late", "", 0, at)
+	unbound, created, err := s.EnsureCommunicationV4RootForGreetedProfile("anchor-late", at.Add(time.Minute))
+	if err != nil || !created || unbound.ProjectedThroughSeq != 0 || unbound.State.LastOutboundMessageSeq != 0 {
+		t.Fatalf("未绑定根不得虚构锚: aggregate=%+v created=%v err=%v", unbound, created, err)
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		return bindCommunicationV4RootConversationTx(tx, "anchor-late", "intent-anchor-late", 1, at.Add(2*time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	late, err := s.CommunicationV4AggregateByProfile("anchor-late")
+	if err != nil || late.Revision != 0 || late.ProjectedThroughSeq != 1 || late.State.LastOutboundMessageSeq != 1 {
+		t.Fatalf("晚绑定未同时物化边界与锚: aggregate=%+v err=%v", late, err)
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		return bindCommunicationV4RootConversationTx(tx, "anchor-late", "intent-anchor-late", 1, at.Add(3*time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		seq, anchorErr := communicationV4OutboundAnchorSeqTx(tx, *late)
+		if anchorErr != nil || seq != 1 {
+			t.Fatalf("state 已有锚未直通: seq=%d err=%v", seq, anchorErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy := bound
+	legacy.State.LastOutboundMessageSeq = 0
+	stateJSON, err := json.Marshal(legacy.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ?", legacy.ProfileID).
+		Updates(map[string]any{"state": string(stateJSON)}).Error; err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := s.CommunicationV4AggregateByProfile(legacy.ProfileID)
+	if err != nil || stripped.State.LastOutboundMessageSeq != 0 {
+		t.Fatalf("存量零锚模拟失败: %+v err=%v", stripped, err)
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		seq, anchorErr := communicationV4OutboundAnchorSeqTx(tx, *stripped)
+		if anchorErr != nil || seq != 1 {
+			t.Fatalf("存量零锚未经招呼链接派生: seq=%d err=%v", seq, anchorErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retractedAt := at.Add(4 * time.Minute)
+	if err := s.db.Model(&Message{}).
+		Where("outbound_intent_id = ?", "intent-anchor-bound").
+		Updates(map[string]any{"retracted_at": retractedAt, "retraction_reason": "test"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		_, anchorErr := communicationV4OutboundAnchorSeqTx(tx, *stripped)
+		if !errors.Is(anchorErr, ErrCommunicationV4AnchorUnresolvable) {
+			t.Fatalf("招呼不可用时必须显式不可解析: %v", anchorErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceKey := strings.Repeat("ab", 32)
+	rootRef, err := InboundConversationV4RootRef("zhilian", "account-anchor", "conversation-inbound", sourceKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboundRoot := CommunicationV4Aggregate{
+		RootGreetingIntentID: rootRef,
+		State:                communication.NewV4InboundConversationState(),
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		seq, anchorErr := communicationV4OutboundAnchorSeqTx(tx, inboundRoot)
+		if anchorErr != nil || seq != 0 {
+			t.Fatalf("来聊根必须合法零锚: seq=%d err=%v", seq, anchorErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
