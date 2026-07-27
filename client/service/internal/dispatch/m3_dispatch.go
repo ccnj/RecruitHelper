@@ -464,6 +464,175 @@ func dispatchRequestForPreparedEffect(
 		}
 }
 
+// SendDirectInterviewCardRequest 是 2026-07-27 甲方批准的冒烟生产者输入：按
+// "测试页=命令生产者"约定直发一张线上邀面卡，与生产动作轨共用同一原语、WAL、
+// idemKey、守卫与验证实现，仅意图出生地不同（admin 而非 CommunicationAction）。
+type SendDirectInterviewCardRequest struct {
+	IntentID         string
+	PreviousIntentID string
+	Platform         string
+	AccountRef       string
+	ConversationRef  string
+	Interview        protocol.InterviewDetails
+}
+
+// SendDirectInterviewCard 走 M2 直发轨发送邀面卡。聚合非 active 闸由调用方
+// （adminhttp）先行判定；本函数只承担直发轨既有校验，不挂接自动动作。
+func (d *Dispatcher) SendDirectInterviewCard(
+	req SendDirectInterviewCardRequest,
+) (*SendMessageReceipt, error) {
+	req.IntentID = strings.TrimSpace(req.IntentID)
+	req.PreviousIntentID = strings.TrimSpace(req.PreviousIntentID)
+	req.Platform = strings.TrimSpace(req.Platform)
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	req.ConversationRef = strings.TrimSpace(req.ConversationRef)
+	if req.IntentID == "" || utf8.RuneCountInString(req.IntentID) > maxIntentIDRunes ||
+		req.Platform == "" || req.AccountRef == "" || req.ConversationRef == "" {
+		return nil, errors.New("缺少有效的 intentId/账号/会话标识")
+	}
+	if req.Interview.StartsAt <= 0 ||
+		req.Interview.EndsAt != req.Interview.StartsAt+communication.V4InterviewDurationMs ||
+		req.Interview.Method != protocol.InterviewMethodWechatVideo {
+		return nil, errors.New("邀面参数必须是 startsAt+30 分钟的微信视频形态")
+	}
+	argsRaw, err := protocol.Encode(protocol.ChatSendInviteCardArgs{
+		ConversationRef: req.ConversationRef,
+		Interview:       req.Interview,
+	})
+	if err != nil {
+		return nil, err
+	}
+	meta := protocol.Primitives[protocol.PrimChatSendInviteCard]
+	if err := protocol.ValidatePrimitiveArgs(
+		protocol.PrimChatSendInviteCard, meta.Ver, argsRaw,
+	); err != nil {
+		return nil, err
+	}
+	payloadHash := hashBytes(argsRaw)
+	fingerprint := syncledger.InterviewInviteContentHash(
+		req.Interview.StartsAt,
+		req.Interview.EndsAt,
+		string(req.Interview.Method),
+	)
+
+	if existing, lookupErr := d.st.EffectIntentByID(req.IntentID); lookupErr != nil {
+		return nil, lookupErr
+	} else if existing != nil {
+		if existing.Platform != req.Platform ||
+			existing.AccountRef != req.AccountRef ||
+			existing.Primitive != protocol.PrimChatSendInviteCard ||
+			existing.TargetRef != req.ConversationRef ||
+			existing.PayloadHash != payloadHash ||
+			existing.SendFingerprint != fingerprint {
+			return nil, store.ErrEffectIntentConflict
+		}
+		return d.sendReceipt(existing, false)
+	}
+	latest, latestErr := d.st.LatestEffectIntent(req.Platform, req.AccountRef, req.ConversationRef)
+	if latestErr != nil {
+		return nil, latestErr
+	}
+	latestID := ""
+	if latest != nil {
+		latestID = latest.IntentID
+	}
+	if latestID != req.PreviousIntentID {
+		conflict := &store.EffectIntentCASConflictError{
+			PreviousIntentID: req.PreviousIntentID,
+			Current:          latest,
+		}
+		if latest == nil {
+			return nil, conflict
+		}
+		receipt, receiptErr := d.sendReceipt(latest, false)
+		return receipt, errors.Join(conflict, receiptErr)
+	}
+
+	key := store.ConversationKey{
+		Platform: req.Platform, AccountRef: req.AccountRef, ConversationRef: req.ConversationRef,
+	}
+	preparation, err := d.st.PrepareSend(key, 5)
+	if err != nil {
+		return nil, err
+	}
+	if preparation.Account.BoundHandID == "" || preparation.Account.PrincipalFingerprint == nil {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+	session, bootID, online := d.sender.HandSession(preparation.Account.BoundHandID)
+	if !online {
+		return nil, ErrHandOffline
+	}
+	if preparation.Account.IdentityState != store.IdentityVerified ||
+		preparation.Account.IdentitySession != session ||
+		preparation.Account.IdentityBootID != bootID {
+		return nil, store.ErrAccountIdentityNotCurrent
+	}
+
+	anchors := make([]protocol.MessageAnchor, len(preparation.Tail))
+	for index := range preparation.Tail {
+		anchors[index] = protocol.MessageAnchor{
+			Direction:   protocol.MessageDirection(preparation.Tail[index].Direction),
+			ContentHash: preparation.Tail[index].ContentHash,
+		}
+	}
+	guardsRaw, err := protocol.Encode(protocol.ChatSendMessageGuards{ExpectedTail: anchors})
+	if err != nil {
+		return nil, err
+	}
+	if err := protocol.ValidatePrimitiveGuards(
+		protocol.PrimChatSendInviteCard, meta.Ver, guardsRaw,
+	); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	intent := store.EffectIntent{
+		IntentID: req.IntentID,
+		IdemKey: BuildEffectIdemKey(
+			req.Platform, req.AccountRef, protocol.PrimChatSendInviteCard,
+			req.ConversationRef, req.IntentID,
+		),
+		Platform: req.Platform, AccountRef: req.AccountRef,
+		Primitive: protocol.PrimChatSendInviteCard, TargetRef: req.ConversationRef,
+		PayloadHash: payloadHash, GuardsHash: hashBytes(guardsRaw),
+		Status:     store.EffectIntentDispatching,
+		DeadlineMs: now.UnixMilli() + effectiveDeadlineMs(meta), SendFingerprint: fingerprint,
+	}
+	detailed, dispatchErr := d.dispatchDetailed(dispatchRequestForPreparedEffect(
+		preparation,
+		session,
+		bootID,
+		SendAutomaticCardRequest{
+			IntentID: req.IntentID, PreviousIntentID: req.PreviousIntentID,
+			Platform: req.Platform, AccountRef: req.AccountRef,
+			ConversationRef: req.ConversationRef,
+			Primitive:       protocol.PrimChatSendInviteCard,
+		},
+		argsRaw,
+		guardsRaw,
+		intent,
+	))
+	if dispatchErr != nil {
+		var conflict *store.EffectIntentCASConflictError
+		if errors.As(dispatchErr, &conflict) && conflict.Current != nil {
+			receipt, receiptErr := d.sendReceipt(conflict.Current, false)
+			return receipt, errors.Join(dispatchErr, receiptErr)
+		}
+	}
+	if detailed.MsgID == "" {
+		return nil, dispatchErr
+	}
+	persisted, lookupErr := d.st.EffectIntentByID(req.IntentID)
+	if lookupErr != nil {
+		return nil, errors.Join(dispatchErr, lookupErr)
+	}
+	if persisted == nil {
+		return nil, errors.Join(dispatchErr, store.ErrEffectIntentNotFound)
+	}
+	receipt, receiptErr := d.sendReceipt(persisted, detailed.Created)
+	return receipt, errors.Join(dispatchErr, receiptErr)
+}
+
 func BuildEffectIdemKey(platform, accountRef, primitive, targetRef, intentID string) string {
 	return fmt.Sprintf("ik1:%s:%s:%s:%s:%s", platform, accountRef, primitive, targetRef, intentID)
 }

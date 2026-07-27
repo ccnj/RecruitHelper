@@ -26,7 +26,10 @@ func (*sendAPISender) HandSession(string) (string, string, bool) {
 	return "session-api", "boot-api", true
 }
 func (*sendAPISender) HandNegotiation(string) ([]string, []string, bool) {
-	return []string{protocol.PrimChatSendMessage + "@1"}, []string{
+	return []string{
+		protocol.PrimChatSendMessage + "@1",
+		protocol.PrimChatSendInviteCard + "@1",
+	}, []string{
 		string(protocol.FeatureWitness1), string(protocol.FeatureLease1),
 		string(protocol.FeatureProgress1), string(protocol.FeatureCancel1),
 	}, true

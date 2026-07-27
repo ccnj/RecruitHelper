@@ -29,6 +29,26 @@ var (
 	ErrCommunicationV4AnchorUnresolvable = errors.New("V4 沟通轮出站锚不可解析")
 )
 
+// CommunicationV4DirectSendBlocked 判定一个会话是否禁止 admin 冒烟直发候选人
+// 可见卡片（2026-07-27 甲方批准的冒烟生产者附带闸）：仅当档案的 V4 沟通自动化
+// 仍为 active 时阻止——active 档案的轮出站锚只认动作轨自己的出站，计划外出站会
+// 在候选人下次回话时判 outboundBoundaryMissing 挂人工。无档案、无聚合或已挂
+// 人工的会话放行。
+func (s *Store) CommunicationV4DirectSendBlocked(key ConversationKey) (bool, error) {
+	profile, err := s.CandidateProfileByConversation(key)
+	if err != nil || profile == nil {
+		return false, err
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(profile.ProfileID)
+	if errors.Is(err, ErrCommunicationV4Missing) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return aggregate.AutomationStatus == ProfileCommunicationAutomationActive, nil
+}
+
 func (s *Store) CommunicationV4AggregateByProfile(
 	profileID string,
 ) (*CommunicationV4Aggregate, error) {
