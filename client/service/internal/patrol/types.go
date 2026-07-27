@@ -250,11 +250,13 @@ type realClock struct{}
 
 func (realClock) Now() time.Time { return time.Now() }
 
+// 2026-07-27 甲方调慢拟人节奏：交互 2.5~5 秒、换人 4~8 秒。
+// AGENTS.md 冻结的是下限（交互 ≥1 秒、换人 ≥2 秒），本值只准往慢改。
 const (
-	interactionPaceMin = time.Second
-	interactionPaceMax = 1500 * time.Millisecond
-	sourcingPaceMin    = 2 * time.Second
-	sourcingPaceMax    = 4 * time.Second
+	interactionPaceMin = 2500 * time.Millisecond
+	interactionPaceMax = 5 * time.Second
+	sourcingPaceMin    = 4 * time.Second
+	sourcingPaceMax    = 8 * time.Second
 )
 
 func randomInteractionPaceDelay() time.Duration {
