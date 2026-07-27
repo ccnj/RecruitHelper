@@ -65,6 +65,9 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 		); err != nil {
 			return err
 		}
+		if err := a.captureNotificationEvidence(ctx, target.Profile.ProfileID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -106,7 +109,10 @@ func (a *roundActor) processCommunicationV4Profile(
 	if err := a.processCommunicationV4Target(ctx, *target); err != nil {
 		return err
 	}
-	return a.drainCommunicationV4EventActionsForProfile(ctx, profileID)
+	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
+		return err
+	}
+	return a.captureNotificationEvidence(ctx, profileID)
 }
 
 func (a *roundActor) processCommunicationV4Target(

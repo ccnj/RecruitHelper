@@ -463,6 +463,44 @@ type ContactAsset struct {
 	UpdatedAt        time.Time
 }
 
+// NotificationOutbox 是运营通知发件箱(AGENTS.md「运营通知 webhook」2026-07-28
+// 裁决)。业务事实提交时同事务只入队一行(EventKey 幂等),渲染与发送由 notify
+// runner 在发送时刻按最新业务事实执行;行内只有事件元数据,不存候选人姓名、
+// 微信号或正文。行是业务事实:终态只标记(sent/failed/skipped/expired),不物理删除。
+type NotificationOutbox struct {
+	ID          uint64 `gorm:"primaryKey;autoIncrement"`
+	NotifyType  string `gorm:"not null;index"`
+	EventKey    string `gorm:"not null;uniqueIndex"`
+	ProfileID   string `gorm:"not null;index"`
+	PayloadJSON string `gorm:"not null;default:'{}'"`
+	Status      string `gorm:"not null;default:pending;index"`
+	Attempts    int    `gorm:"not null;default:0"`
+	// SentWithWechat 只对约面通知有意义:该条发出时正文是否已带微信号,
+	// 是微信互加通知去重的唯一权威事实(照抄旧项目语义)。
+	SentWithWechat bool `gorm:"not null;default:false"`
+	// AssetsRequestedAt 非空表示取证截图已为本通知派发过(每通知至多一轮),
+	// 截图失败不重拍,由 15 分钟兜底闸门按纯文本发送。
+	AssetsRequestedAt *time.Time
+	LastError         string
+	CreatedAt         time.Time `gorm:"index"`
+	SentAt            *time.Time
+	UpdatedAt         time.Time
+}
+
+// CandidateScreenshot 是候选人取证截图事实行(聊天/简历)。图像字节在 blob
+// 内容寻址存储,此处只登记引用与元数据;追加行、消费方取最新,不覆盖更新、
+// 不物理删除。截图字节不进普通日志、审计 detail 与管理 API。
+type CandidateScreenshot struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID    string `gorm:"not null;index:idx_candidate_screenshot_profile_kind,priority:1"`
+	Kind         string `gorm:"not null;index:idx_candidate_screenshot_profile_kind,priority:2"`
+	BlobRef      string `gorm:"not null"`
+	ByteSize     int64  `gorm:"not null"`
+	Truncated    bool   `gorm:"not null"`
+	CapturedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
 type ProfileCommunicationAutomationStatus string
 
 const (

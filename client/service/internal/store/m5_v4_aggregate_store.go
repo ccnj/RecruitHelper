@@ -446,6 +446,20 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 		if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
 			return err
 		}
+		// 约面成功的权威时点=主线真迁入 interviewed 的这次提交(重放/重发同一
+		// 事件不触发);运营通知同事务幂等入队(每候选人终身一次,照抄旧项目)。
+		if aggregate.State.MainStatus != communication.V4StatusInterviewed &&
+			decision.State.MainStatus == communication.V4StatusInterviewed {
+			if err := enqueueNotificationTx(
+				tx,
+				NotificationTypeInterviewAccepted,
+				"interviewAccepted:"+req.ProfileID,
+				req.ProfileID,
+				req.AppliedAt,
+			); err != nil {
+				return err
+			}
+		}
 		if _, _, err := materializeCommunicationV4EventActionsTx(
 			tx,
 			application,

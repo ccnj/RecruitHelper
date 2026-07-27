@@ -106,6 +106,8 @@ func Open(dataDir string) (*Store, error) {
 		&CardTransitionFact{},
 		&PatrolRound{},
 		&AuditEntry{},
+		&NotificationOutbox{},
+		&CandidateScreenshot{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
