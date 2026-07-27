@@ -211,7 +211,7 @@ func TestSendMessageAuthoritativeGatesRemainAfterPreflightPruning(t *testing.T) 
 		}
 	})
 
-	t.Run("manual quiet is enforced by store transaction", func(t *testing.T) {
+	t.Run("removed manual quiet no longer gates direct send", func(t *testing.T) {
 		d, st, m := newDisp(t)
 		key := seedSendTarget(t, st, m, "acct-send-quiet", "conv-send-quiet")
 		until := time.Now().Add(time.Minute)
@@ -223,11 +223,8 @@ func TestSendMessageAuthoritativeGatesRemainAfterPreflightPruning(t *testing.T) 
 		}
 		intentID := "intent-send-quiet"
 		receipt, err := d.SendMessage(sendRequest(intentID, key, "你好"))
-		if receipt != nil || !errors.Is(err, store.ErrManualQuietActive) || m.sentCount() != 0 {
-			t.Fatalf("事务 quiet 闸未拒绝: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
-		}
-		if intent, lookupErr := st.EffectIntentByID(intentID); lookupErr != nil || intent != nil {
-			t.Fatalf("quiet 拒绝不得留下 intent: intent=%+v err=%v", intent, lookupErr)
+		if err != nil || receipt == nil || m.sentCount() != 1 {
+			t.Fatalf("静默窗已废除，遗留窗口值不得阻塞发送: receipt=%+v err=%v sent=%d", receipt, err, m.sentCount())
 		}
 	})
 

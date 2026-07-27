@@ -187,10 +187,6 @@ func (s *Store) CreateGreetingEffectIntentAndCmd(
 			*account.PrincipalFingerprint != c.ExpectedPrincipalFingerprint {
 			return ErrAccountIdentityNotCurrent
 		}
-		if account.ManualQuietUntil != nil && req.Now.Before(*account.ManualQuietUntil) {
-			return ErrManualQuietActive
-		}
-
 		var busy int64
 		if err := tx.Model(&CmdRecord{}).Where("domain = ? AND status IN ?", c.Domain, nonTerminalStatuses).
 			Count(&busy).Error; err != nil {

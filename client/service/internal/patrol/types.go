@@ -21,7 +21,7 @@ const (
 	TriggerTimer = "timer"
 	TriggerDirty = "dirty"
 	// TriggerCurrentConversation 是真人显式入口：只处理浏览器当前已经打开
-	// 的一个会话，不经过列表枚举，也不继承 manualQuiet。
+	// 的一个会话，不经过列表枚举。
 	TriggerCurrentConversation = "manualCurrentConversation"
 
 	surfaceRecoverySuffix = "+surfaceRecovery"
@@ -51,7 +51,6 @@ var (
 	ErrActorPaused                       = errors.New("账号 actor 已停止或暂停，不得派发新命令")
 	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
 	ErrRoundSupersededBySourcingBatch    = errors.New("活动采集批次已换代，旧巡检轮不得继续派发命令")
-	ErrManualQuietActive                 = errors.New("用户操作静默窗生效，不得派发新驱动命令")
 	ErrEventHandMismatch                 = errors.New("传感事件来自非绑定手")
 	ErrEnsureNotReady                    = errors.New("恢复 IM 页面后仍未就绪")
 	ErrPaginationLoop                    = errors.New("分页 cursor 循环")
@@ -157,7 +156,6 @@ type AutomaticReplyRequest struct {
 	AccountRef        string
 	ConversationRef   string
 	Text              string
-	BypassManualQuiet bool
 }
 
 type AutomaticReplyHandle interface {
@@ -180,7 +178,6 @@ type AutomaticCardRequest struct {
 	Kind              store.CommunicationActionKind
 	Interview         *protocol.InterviewDetails
 	RequestSourceKey  string
-	BypassManualQuiet bool
 }
 
 type AutomaticCardHandle interface {
@@ -296,7 +293,6 @@ type Config struct {
 	IdentityFreshFor         time.Duration
 	CoalesceWindow           time.Duration
 	MinimumRoundGap          time.Duration
-	ManualQuiet              time.Duration
 	TrackedReconcileInterval time.Duration
 	MaxPages                 int
 	DailyWindow              workflow.DailyWindowPolicy
@@ -327,9 +323,6 @@ func (c Config) withDefaults() Config {
 	if c.MinimumRoundGap <= 0 {
 		c.MinimumRoundGap = time.Duration(protocol.DefaultSensorsPatrolPullForwardMinGapMs) * time.Millisecond
 	}
-	if c.ManualQuiet <= 0 {
-		c.ManualQuiet = time.Duration(protocol.DefaultSensorsManualQuietMs) * time.Millisecond
-	}
 	if c.TrackedReconcileInterval <= 0 {
 		c.TrackedReconcileInterval = 30 * time.Minute
 	}
@@ -350,7 +343,6 @@ type SkipReason string
 const (
 	SkipNotEnabled SkipReason = "notEnabled"
 	SkipNotDue     SkipReason = "notDue"
-	SkipQuiet      SkipReason = "manualQuiet"
 	SkipOffline    SkipReason = "handOffline"
 	SkipHandState  SkipReason = "handStateError"
 )
@@ -412,7 +404,7 @@ func errorCode(err error) string {
 
 func validateConfig(c Config) error {
 	if c.PatrolInterval <= 0 || c.IdentityFreshFor <= 0 || c.CoalesceWindow <= 0 ||
-		c.MinimumRoundGap <= 0 || c.ManualQuiet <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
+		c.MinimumRoundGap <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
 		c.SourcingPaceWait == nil || c.InteractionPaceWait == nil {
 		return fmt.Errorf("patrol config 含非正参数: %+v", c)
 	}

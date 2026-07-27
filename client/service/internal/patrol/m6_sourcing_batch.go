@@ -303,6 +303,5 @@ func preservesSourcingBatch(err error) bool {
 	return errors.Is(err, ErrActorPaused) || errors.Is(err, ErrDailyWindowExpired) ||
 		errors.Is(err, ErrActorGenerationChanged) ||
 		errors.Is(err, ErrRoundSupersededBySourcingBatch) ||
-		errors.Is(err, ErrManualQuietActive) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

@@ -191,7 +191,6 @@ func (r PatrolRunner) StartAutomaticReply(
 		ExpectedSession:   req.ExpectedSession, ExpectedBootID: req.ExpectedBootID,
 		Platform: req.Platform, AccountRef: req.AccountRef,
 		ConversationRef: req.ConversationRef, Text: req.Text,
-		BypassManualQuiet: req.BypassManualQuiet,
 	})
 	if receipt == nil || receipt.IntentID != req.IntentID || receipt.LogicalDispatchID == "" {
 		if dispatchErr == nil {
@@ -246,7 +245,6 @@ func (r PatrolRunner) StartAutomaticCard(
 		Primitive:         primitive,
 		Interview:         req.Interview,
 		RequestSourceKey:  req.RequestSourceKey,
-		BypassManualQuiet: req.BypassManualQuiet,
 	})
 	if receipt == nil ||
 		receipt.IntentID != req.IntentID ||

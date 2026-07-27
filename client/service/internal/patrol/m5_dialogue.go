@@ -569,7 +569,6 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
 				ConversationRef: turn.ConversationRef, Text: action.Text,
-				BypassManualQuiet: a.bypassManualQuiet,
 			},
 		)
 	case store.CommunicationActionInviteWechat:
@@ -580,7 +579,6 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
 				ConversationRef: turn.ConversationRef, Kind: action.Kind,
-				BypassManualQuiet: a.bypassManualQuiet,
 			},
 		)
 	case store.CommunicationActionInterviewInvite:
@@ -608,7 +606,6 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 				ExpectedSession: a.hand.Session, ExpectedBootID: a.hand.BootID,
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
 				ConversationRef: turn.ConversationRef, Kind: action.Kind, Interview: interview,
-				BypassManualQuiet: a.bypassManualQuiet,
 			},
 		)
 	}

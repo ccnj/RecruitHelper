@@ -23,7 +23,6 @@ type roundActor struct {
 	now                     time.Time
 	ensureUsed              bool
 	classificationCorrected bool
-	bypassManualQuiet       bool
 	requireCurrentThread    bool
 	sourcingBatchIDAtStart  string
 	superseded              bool
@@ -86,7 +85,6 @@ func (m *Manager) runAccountRound(ctx context.Context, account *store.Account, h
 
 	actor := &roundActor{
 		manager: m, account: account, hand: hand, roundID: roundID, trigger: trigger, now: now,
-		bypassManualQuiet:    trigger == TriggerCurrentConversation,
 		requireCurrentThread: trigger == TriggerCurrentConversation,
 	}
 	// 生产 Clock 下这个 timeout 会在本地 24:00 取消正在等待的 dispatcher。
@@ -1027,8 +1025,7 @@ func (a *roundActor) captureSourcingResume(ctx context.Context) (*store.Sourcing
 			return nil, markErr
 		}
 		if runErr.Code == protocol.ErrCodeAccountMismatch ||
-			(runErr.Code == protocol.ErrCodeCtxNotReady && runErr.Reason == protocol.NotReadyReasonLoginRequired) ||
-			runErr.Code == protocol.ErrCodeUserActive {
+			(runErr.Code == protocol.ErrCodeCtxNotReady && runErr.Reason == protocol.NotReadyReasonLoginRequired) {
 			return nil, err
 		}
 		// 推荐页无候选人、页面局部变化等只结束本次采集，不阻断同轮 IM 对账。
@@ -1853,11 +1850,9 @@ func (a *roundActor) handleCommandFailure(err error) {
 		_ = a.manager.store.SetAccountIdentityState(a.key(), store.IdentityInvalid, string(typed.Reason))
 		_ = a.manager.pauseAccount(a.key(), PauseLoginRequired, a.now)
 	case typed != nil && typed.Code == protocol.ErrCodeUserActive:
+		// 2026-07-27 甲方裁决废除静默窗：真人活动只催下一轮巡检，
+		// 让位本轮自动重试，不冻结账号。
 		_ = a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
-			until := a.manager.now().Add(a.manager.config.ManualQuiet)
-			if account.ManualQuietUntil == nil || account.ManualQuietUntil.Before(until) {
-				account.ManualQuietUntil = timePointer(until)
-			}
 			account.DirtyHint = true
 			return nil
 		})
@@ -2030,10 +2025,6 @@ func (a *roundActor) ensureDispatchAllowed(ctx context.Context) error {
 	if !a.manager.enabledToday(*current, now) {
 		return ErrActorPaused
 	}
-	if !a.bypassManualQuiet &&
-		current.ManualQuietUntil != nil && now.Before(*current.ManualQuietUntil) {
-		return wrapRunError(protocol.ErrCodeUserActive, "", ErrManualQuietActive)
-	}
 	if current.BoundHandID != a.account.BoundHandID ||
 		!sameFingerprint(current.PrincipalFingerprint, a.account.PrincipalFingerprint) {
 		return ErrActorGenerationChanged
@@ -2148,9 +2139,9 @@ func isAccountWideRunFailure(err error) bool {
 		(typed.Reason == protocol.NotReadyReasonLoginRequired ||
 			typed.Reason == protocol.NotReadyReasonIdentityUnverified):
 		return true
-	case typed.Code == protocol.ErrCodeUserActive:
-		return true
 	default:
+		// USER_ACTIVE 不再是账号级失败：真人活动让位本轮、下轮重试
+		//（2026-07-27 甲方裁决废除静默窗）。
 		return false
 	}
 }

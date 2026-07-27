@@ -34,7 +34,6 @@ type dispatchOptions struct {
 	expectedTailSeq        int64
 	previousIntentID       string
 	automaticActionID      string
-	bypassManualQuiet      bool
 	verificationFor        string
 	resumeCaptureProfileID string
 }
@@ -230,8 +229,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			createdResult, createErr = d.st.CreateEffectIntentAndCmd(store.CreateEffectIntentRequest{
 				Intent: *opts.effectIntent, Command: *rec, ExpectedTailSeq: opts.expectedTailSeq,
 				PreviousIntentID: opts.previousIntentID, AutomaticActionID: opts.automaticActionID,
-				BypassManualQuiet: opts.bypassManualQuiet,
-				Now:               time.Now(),
+				Now: time.Now(),
 			})
 		default:
 			createErr = fmt.Errorf("真实副作用原语没有账本入口 %q", opts.effectIntent.Primitive)

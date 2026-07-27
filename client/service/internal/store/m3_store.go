@@ -14,7 +14,6 @@ var (
 	ErrEffectIntentConflict       = errors.New("同一 intentId 的发送材料不一致")
 	ErrEffectIntentFrozen         = errors.New("发送意图已终局或冻结")
 	ErrAccountIdentityNotCurrent  = errors.New("账号身份未在当前手会话验证")
-	ErrManualQuietActive          = errors.New("真人操作静默窗仍有效")
 	ErrRecoveryStateConflict      = errors.New("副作用恢复状态冲突")
 	ErrRecoveryReportSource       = errors.New("恢复 report 与命令或手不匹配")
 	ErrVerificationAlreadyRunning = errors.New("该副作用已有验证读在途")
@@ -118,10 +117,6 @@ type CreateEffectIntentRequest struct {
 	ExpectedTailSeq   int64
 	PreviousIntentID  string
 	AutomaticActionID string
-	// BypassManualQuiet is valid only for a persisted automatic action
-	// explicitly selected through the current-conversation entrypoint. It
-	// never weakens the default patrol or direct-send quiet gate.
-	BypassManualQuiet bool
 	Now               time.Time
 }
 
@@ -145,9 +140,6 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 		c.Platform != i.Platform || c.AccountRef != i.AccountRef || c.Name != i.Primitive ||
 		c.Class != "effectful" || c.Domain == "" {
 		return nil, errors.New("发送意图/命令缺少一致的必填字段")
-	}
-	if req.BypassManualQuiet && req.AutomaticActionID == "" {
-		return nil, errors.New("静默窗绕过只允许已持久化自动动作")
 	}
 	if i.RootMsgID == "" {
 		i.RootMsgID = c.MsgID
@@ -219,12 +211,6 @@ func (s *Store) CreateEffectIntentAndCmd(req CreateEffectIntentRequest) (*Create
 			*account.PrincipalFingerprint != c.ExpectedPrincipalFingerprint {
 			return ErrAccountIdentityNotCurrent
 		}
-		if !req.BypassManualQuiet &&
-			account.ManualQuietUntil != nil &&
-			req.Now.Before(*account.ManualQuietUntil) {
-			return ErrManualQuietActive
-		}
-
 		key := ConversationKey{Platform: i.Platform, AccountRef: i.AccountRef, ConversationRef: i.TargetRef}
 		var conversation Conversation
 		if err := tx.Where(conversationWhere(key), conversationArgs(key)...).First(&conversation).Error; err != nil {

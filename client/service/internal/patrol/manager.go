@@ -393,10 +393,6 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 		}
 		return m.store.MutateAccount(key, func(account *store.Account) error {
 			account.DirtyHint = true
-			quietUntil := now.Add(m.config.ManualQuiet)
-			if account.ManualQuietUntil == nil || account.ManualQuietUntil.Before(quietUntil) {
-				account.ManualQuietUntil = timePointer(quietUntil)
-			}
 			m.pullForward(account, now, m.config.CoalesceWindow)
 			return nil
 		})
@@ -511,10 +507,6 @@ func (m *Manager) Tick(ctx context.Context) (TickResult, error) {
 		}
 		if !m.enabledToday(account, now) {
 			result.Skipped = append(result.Skipped, AccountSkip{Key: key, Reason: SkipNotEnabled})
-			continue
-		}
-		if account.ManualQuietUntil != nil && now.Before(*account.ManualQuietUntil) {
-			result.Skipped = append(result.Skipped, AccountSkip{Key: key, Reason: SkipQuiet})
 			continue
 		}
 		if !m.due(account, now) {

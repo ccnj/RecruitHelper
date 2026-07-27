@@ -146,7 +146,7 @@ func newHarness(t *testing.T) *harness {
 	config := Config{
 		Clock: clock, Location: time.UTC, PatrolInterval: 5 * time.Minute,
 		IdentityFreshFor: time.Hour, CoalesceWindow: 25 * time.Second,
-		MinimumRoundGap: time.Minute, ManualQuiet: 45 * time.Second, MaxPages: 16,
+		MinimumRoundGap: time.Minute, MaxPages: 16,
 		NewRoundID: func() string {
 			sequence++
 			return fmt.Sprintf("round-%03d", sequence)
@@ -988,9 +988,6 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 				Complete: true,
 			}, nil
 		}
-		if request.Name == protocol.PrimChatReadThread {
-			t.Fatal("静默窗在 readList 途中生效后不得再派 readThread")
-		}
 		return defaultHandler(request)
 	}
 	tickDone := make(chan error, 1)
@@ -1019,8 +1016,8 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 		t.Fatal("Tick 持有全局锁跨网络命令，阻塞了用户事件")
 	}
 	account, _ := h.db.AccountByKey(h.key)
-	if account.ManualQuietUntil == nil {
-		t.Fatal("用户事件未及时打开静默窗")
+	if account.ManualQuietUntil != nil {
+		t.Fatalf("静默窗已废除，真人事件不得再开窗: %+v", account.ManualQuietUntil)
 	}
 	close(release)
 	select {
@@ -1031,8 +1028,8 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("长命令释放后 Tick 未结束")
 	}
-	if h.runner.count(protocol.PrimChatReadThread) != 0 {
-		t.Fatal("用户静默窗未阻止后续 intrusive 命令")
+	if h.runner.count(protocol.PrimChatReadThread) == 0 {
+		t.Fatal("废除静默窗后，真人事件不得阻止本轮继续对账")
 	}
 	account, _ = h.db.AccountByKey(h.key)
 	if !account.DirtyHint {
@@ -1065,8 +1062,8 @@ func TestRecommendNavigationEventInvalidatesActiveSourcingFeed(t *testing.T) {
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil || account.SourcingFeedInvalidatedAt == nil ||
 		!account.SourcingFeedInvalidatedAt.Equal(now) || account.StoppedAt == nil ||
-		account.PausedReason != store.SourcingFeedChangedReason || account.ManualQuietUntil == nil {
-		t.Fatalf("推荐页 navigation 未写 marker、暂停账号或保留手动静默: account=%+v err=%v", account, err)
+		account.PausedReason != store.SourcingFeedChangedReason || account.ManualQuietUntil != nil {
+		t.Fatalf("推荐页 navigation 未写 marker、暂停账号（静默窗已废除不得再开）: account=%+v err=%v", account, err)
 	}
 }
 
@@ -1198,7 +1195,9 @@ func TestAccountRebindDuringReadListStopsBeforeUsingResult(t *testing.T) {
 	}
 }
 
-func TestUserActiveQuietStartsWhenFailureIsObserved(t *testing.T) {
+// 2026-07-27 甲方裁决废除静默窗：手报 USER_ACTIVE 只让位本轮并催下轮
+// 重试，不再开窗、不冻结账号。
+func TestUserActiveYieldsRoundWithoutQuietWindow(t *testing.T) {
 	h := newHarness(t)
 	conversationKey := seedTracked(
 		t,
@@ -1207,7 +1206,6 @@ func TestUserActiveQuietStartsWhenFailureIsObserved(t *testing.T) {
 		"peer-manual-active",
 		[]store.MessageDraft{draftText("old")},
 	)
-	var existingUntil time.Time
 	h.runner.handler = func(request RunRequest) (any, error) {
 		if request.Name == protocol.PrimChatReadList {
 			return protocol.ChatReadListData{
@@ -1218,27 +1216,23 @@ func TestUserActiveQuietStartsWhenFailureIsObserved(t *testing.T) {
 			}, nil
 		}
 		if request.Name == protocol.PrimChatReadThread {
-			h.clock.Add(2 * time.Minute)
-			existingUntil = h.clock.Now().Add(2 * h.config.ManualQuiet)
-			if err := h.db.MutateAccount(h.key, func(account *store.Account) error {
-				account.ManualQuietUntil = timePointer(existingUntil)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
 			return nil, wrapRunError(protocol.ErrCodeUserActive, "", errors.New("manual activity"))
 		}
 		return defaultHandler(request)
 	}
 
-	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
-		t.Fatalf("USER_ACTIVE 应终止本轮: result=%+v err=%v", result, err)
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatalf("USER_ACTIVE 不得升级为 Tick 失败: %v", err)
 	}
 	account, _ := h.db.AccountByKey(h.key)
-	want := existingUntil
-	if account.ManualQuietUntil == nil || !account.ManualQuietUntil.Equal(want) {
-		t.Fatalf("静默窗应从错误被观察时起算且只能延长: got=%v want=%v", account.ManualQuietUntil, want)
+	if account.ManualQuietUntil != nil {
+		t.Fatalf("静默窗已废除，USER_ACTIVE 不得再开窗: %+v", account.ManualQuietUntil)
+	}
+	if account.PausedReason != "" || account.StoppedAt != nil {
+		t.Fatalf("USER_ACTIVE 不得暂停账号: %+v", account)
+	}
+	if !account.DirtyHint {
+		t.Fatal("USER_ACTIVE 让位后必须催下一轮重试")
 	}
 }
 
@@ -1739,6 +1733,7 @@ func TestPageAbsentRecoveryFailureKeepsOpaqueBindingUnobservable(t *testing.T) {
 	}
 }
 
+// 2026-07-27 甲方裁决废除静默窗：manualInteraction 只催巡检，不再压制派发。
 func TestManualQuietAndEventCoalescingRespectMinimumGap(t *testing.T) {
 	h := newHarness(t)
 	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction, protocol.ManualInteractionEventData{
@@ -1746,15 +1741,9 @@ func TestManualQuietAndEventCoalescingRespectMinimumGap(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	h.clock.Add(44 * time.Second)
-	before, err := h.manager.Tick(context.Background())
-	if err != nil || len(before.Rounds) != 0 || len(h.runner.names()) != 0 {
-		t.Fatalf("quiet window dispatched work: %+v %v calls=%v", before, err, h.runner.names())
-	}
-	h.clock.Add(time.Second)
 	after, err := h.manager.Tick(context.Background())
 	if err != nil || len(after.Rounds) != 1 || after.Rounds[0].Err != nil {
-		t.Fatalf("quiet expiry did not run: %+v %v", after, err)
+		t.Fatalf("废除静默窗后事件不得压制派发: %+v %v", after, err)
 	}
 
 	// Two unread increases inside the 25s merge window do not slide the

@@ -160,10 +160,12 @@ func TestM5AutomaticActionAndEffectIntentAreConstructedAtomically(t *testing.T) 
 	}
 }
 
-func TestM5AutomaticActionManualQuietBypassIsExplicitAndScoped(t *testing.T) {
+// 2026-07-27 甲方裁决废除脑侧手动静默窗：账号行遗留的窗口值不再阻塞
+// 自动动作，也不再存在按布尔绕过的旁路。
+func TestM5AutomaticActionIgnoresRemovedManualQuietWindow(t *testing.T) {
 	s := openTest(t)
-	fixture := seedPlannedM5AutomaticAction(t, s, "quiet-bypass")
-	req := automaticEffectIntentRequest(t, fixture, "quiet-bypass")
+	fixture := seedPlannedM5AutomaticAction(t, s, "quiet-removed")
+	req := automaticEffectIntentRequest(t, fixture, "quiet-removed")
 	quietUntil := fixture.Now.Add(time.Minute)
 	if err := s.MutateAccount(
 		AccountKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef},
@@ -174,31 +176,9 @@ func TestM5AutomaticActionManualQuietBypassIsExplicitAndScoped(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-
-	if created, err := s.CreateEffectIntentAndCmd(req); created != nil ||
-		!errors.Is(err, ErrManualQuietActive) {
-		t.Fatalf("普通自动巡检必须继续受静默窗约束: result=%+v err=%v", created, err)
-	}
-	if intent, err := s.EffectIntentByID(req.Intent.IntentID); err != nil || intent != nil {
-		t.Fatalf("静默窗拒绝不得留下 WAL: intent=%+v err=%v", intent, err)
-	}
-
-	req.BypassManualQuiet = true
 	created, err := s.CreateEffectIntentAndCmd(req)
 	if err != nil || created == nil || !created.Created {
-		t.Fatalf("显式当前会话自动动作未穿过静默窗: result=%+v err=%v", created, err)
-	}
-
-	unscoped := req
-	unscoped.Intent.IntentID = "unscoped-quiet-bypass"
-	unscoped.Intent.IdemKey = "unscoped-quiet-bypass"
-	unscoped.Command.MsgID = "msg-unscoped-quiet-bypass"
-	unscoped.Command.IntentID = unscoped.Intent.IntentID
-	unscoped.Command.IdemKey = unscoped.Intent.IdemKey
-	unscoped.Intent.RootMsgID = ""
-	unscoped.AutomaticActionID = ""
-	if result, err := s.CreateEffectIntentAndCmd(unscoped); result != nil || err == nil {
-		t.Fatalf("非自动动作不得借布尔值绕过静默窗: result=%+v err=%v", result, err)
+		t.Fatalf("遗留静默窗值不得阻塞自动动作: result=%+v err=%v", created, err)
 	}
 }
 

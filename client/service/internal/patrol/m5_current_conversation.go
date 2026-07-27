@@ -86,7 +86,7 @@ func (m *Manager) runCurrentConversationRound(
 	actor := &roundActor{
 		manager: m, account: account, hand: hand, roundID: roundID,
 		trigger: TriggerCurrentConversation, now: now,
-		bypassManualQuiet: true, requireCurrentThread: true,
+		requireCurrentThread: true,
 	}
 	untilMidnight := m.nextLocalMidnight(now).Sub(now)
 	roundCtx, cancel := context.WithTimeout(ctx, untilMidnight)
