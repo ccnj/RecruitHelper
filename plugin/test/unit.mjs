@@ -8193,6 +8193,7 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
   let prepareCalls = 0
   let baselineCalls = 0
   let observerCalls = 0
+  let closeModalCalls = 0
   const evaluatorArgs = []
 
   globalThis.setTimeout = (callback) => {
@@ -8275,6 +8276,12 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
           commitCalls += 1
           return [{ result: { status: 'clicked' } }]
         }
+        if (func.name === 'mainCloseInterviewSuccessModal') {
+          closeModalCalls += 1
+          assert.ok(commitCalls > 0, '成功弹窗清理只允许出现在 commit 之后')
+          assert.deepEqual(args, [])
+          return [{ result: { found: true, closed: true } }]
+        }
         if (func.name === 'mainObserveStableOutboundCard') {
           observerCalls += 1
           const [observedConversation, cardKind, expectedInterview, baselineKeys, targetToken] = args
@@ -8342,6 +8349,7 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
     assert.equal(wechatContext.state.barriers, 1)
     assert.equal(baselineCalls - wechatBaselineStart, 1)
     assert.equal(prepareCalls, 0, '换微信邀请不得打开邀面编辑器')
+    assert.equal(closeModalCalls, 0, '换微信邀请不触碰邀面成功弹窗')
 
     const inviteContext = context('invite-positive')
     const inviteBaselineStart = baselineCalls
@@ -8358,6 +8366,7 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
     assert.equal(inviteContext.state.barriers, 1)
     assert.equal(baselineCalls - inviteBaselineStart, 1)
     assert.equal(prepareCalls, 1, '邀面编辑器只允许准备一次')
+    assert.equal(closeModalCalls, 1, '邀面卡确认成功后必须尝试关闭成功弹窗一次')
     assert.equal(preflightCalls, 2)
     assert.equal(commitCalls, 2, '两条成功命令各只有一次最终动作')
     assert.equal(evaluatorArgs[0][1], 'wechatInvite')
@@ -8406,6 +8415,7 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
       }), [])
       assert.equal(handlerContext.state.barriers, 1)
     }
+    assert.equal(closeModalCalls, 2, '生产 handler 的邀面成功路径同样清理成功弹窗')
 
     observePositive = false
     const negativeContext = context('wechat-negative')

@@ -9166,6 +9166,55 @@ async function mainCancelPreparedInterviewEditor(): Promise<void> {
   }
 }
 
+// 2026-07-27 真机：邀面卡发出后平台弹出含"面试邀请已发出"的成功弹窗
+// （本次观察为 interview-success-modal + 右上 .km-modal__close-btn），带全屏
+// 遮罩、会拦截后续页面操作；老项目另记录过 2026-07 改版的服务号推广弹窗形态
+// （真机未见，不实现类名依赖）。按文本锚 best-effort 关闭：找不到、关不掉都
+// 只如实返回，不重试发送、不改变已取得的发送结果。
+async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; closed: boolean }> {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const findModals = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>(
+    '.km-modal__wrapper, .km-modal, [class*="modal"], [role="dialog"]',
+  )).filter((node) => visible(node) && /面试邀请已发出/u.test(clean(node.textContent)))
+  try {
+    const modals = findModals()
+    if (modals.length === 0) return { found: false, closed: false }
+    let closeButton: HTMLElement | null = null
+    for (const modal of modals) {
+      closeButton =
+        Array.from(modal.querySelectorAll<HTMLElement>('.km-modal__close-btn')).find(visible) ??
+        Array.from(modal.querySelectorAll<HTMLElement>('[class*="close"]')).find(visible) ?? null
+      if (closeButton) break
+    }
+    if (!closeButton) return { found: true, closed: false }
+    await wait(1_000 + Math.floor(Math.random() * 501))
+    if (!closeButton.isConnected || !visible(closeButton)) {
+      return { found: true, closed: findModals().length === 0 }
+    }
+    const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+    const invokeClick = Function.prototype.call.bind(intrinsicClick, closeButton)
+    invokeClick()
+    const deadline = Date.now() + 3_000
+    while (Date.now() <= deadline) {
+      if (findModals().length === 0) return { found: true, closed: true }
+      await wait(120)
+    }
+    return { found: true, closed: false }
+  } catch {
+    return { found: false, closed: false }
+  }
+}
+
 function throwCardEvaluationFailure(evaluation: MainSendCardOnceResult): never {
   if (evaluation.status !== 'failed') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '卡片发送 evaluator 返回未知状态', 'manualOnly')
@@ -9355,6 +9404,18 @@ async function sendZhilianCard(
             )
           }
           const observedAt = Date.now()
+          if (cardKind === 'interviewInvite') {
+            try {
+              const closeOutcome = await runMain(tab.id, mainCloseInterviewSuccessModal, [])
+              console.info(
+                '[RecruitHelper] interview_success_modal_close',
+                closeOutcome.found,
+                closeOutcome.closed,
+              )
+            } catch {
+              // 弹窗清理只尽力而为，不影响已取得的发送正证。
+            }
+          }
           await ctx.progress('已从实时消息时间线确认唯一新已发卡片', 100)
           return {
             conversationRef,
@@ -9379,6 +9440,15 @@ async function sendZhilianCard(
     )
   } catch (error) {
     await cleanupEditor()
+    if (finalActionStarted && cardKind === 'interviewInvite') {
+      // commit 已发生：无论确认结果如何，成功弹窗都可能已弹出并遮挡页面，
+      // 尽力关闭以免拖垮同页后续操作；失败不改变原始错误。
+      try {
+        await runMain(tab.id, mainCloseInterviewSuccessModal, [])
+      } catch {
+        // best effort
+      }
+    }
     throw error
   }
 }
@@ -9905,6 +9975,7 @@ export const zhilianTestHooks = Object.freeze({
   mainObserveStableOutboundCard,
   mainReadWechatExchangeOutcome,
   mainPrepareInterviewEditor,
+  mainCloseInterviewSuccessModal,
   mainReadThreadPage,
   mainSendCardOnce,
   mainSendMessageOnce,
