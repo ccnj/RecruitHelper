@@ -918,9 +918,13 @@ type AIInvocation struct {
 	FinishedAt          *time.Time
 }
 
-// SourcingScoreInvocation 是采集 run 的一次且仅一次评分调用事实。它与
+// SourcingScoreInvocation 是采集 run 至多一行的评分调用终局事实。它与
 // DialogueTurn/AIInvocation 分表，避免把 RunID 偷塞进 TurnID；调用前预留仍
-// 沿用 transportFailed+FinishedAt=NULL 表示 inFlight，且不授权启动恢复重调。
+// 沿用 transportFailed+FinishedAt=NULL 表示 inFlight。按 2026-07-28 并行重试
+// 裁决，inFlight 行允许被评分编排器续驱动（进程内重试与重启接手），每次
+// provider HTTP 尝试发出前登记 AttemptCount；BudgetedAttemptCount 只统计
+// 计入非 429 预算的尝试（首次、非 429 失败后的重试、接手后的首次保守计入），
+// 预算耗尽写终局失败。终局仍只写回本行一次。
 type SourcingScoreInvocation struct {
 	InvocationID        string `gorm:"primaryKey"`
 	RunID               string `gorm:"not null;uniqueIndex"`
@@ -929,6 +933,9 @@ type SourcingScoreInvocation struct {
 	Provider            string `gorm:"not null"`
 	Model               string `gorm:"not null"`
 	InputHash           string `gorm:"not null"`
+
+	AttemptCount         int `gorm:"not null;default:0"`
+	BudgetedAttemptCount int `gorm:"not null;default:0"`
 
 	Status              AIInvocationStatus `gorm:"not null;index"`
 	Score               *int
@@ -951,10 +958,12 @@ type SourcingScoreInvocation struct {
 	FinishedAt          *time.Time
 }
 
-// SourcingGreetingInvocation 是正式筛选批次中一位 selected 成员的一次且
-// 仅一次招呼语生成调用事实。BatchID/RunID/ProfileID 三重绑定防止跨批
+// SourcingGreetingInvocation 是正式筛选批次中一位 selected 成员至多一行的
+// 招呼语生成调用终局事实。BatchID/RunID/ProfileID 三重绑定防止跨批
 // 复用；调用前预留沿用 transportFailed+FinishedAt=NULL 表示 inFlight，
-// 且只有 ok 终局允许保存 GreetingText/ContentHash 业务正文事实。
+// 且只有 ok 终局允许保存 GreetingText/ContentHash 业务正文事实。按
+// 2026-07-28 并行重试裁决，inFlight 行允许被生成编排器续驱动，尝试计数
+// 语义与 SourcingScoreInvocation 相同。
 type SourcingGreetingInvocation struct {
 	InvocationID        string `gorm:"primaryKey"`
 	BatchID             string `gorm:"not null;index"`
@@ -965,6 +974,9 @@ type SourcingGreetingInvocation struct {
 	Provider            string `gorm:"not null"`
 	Model               string `gorm:"not null"`
 	InputHash           string `gorm:"not null"`
+
+	AttemptCount         int `gorm:"not null;default:0"`
+	BudgetedAttemptCount int `gorm:"not null;default:0"`
 
 	Status              AIInvocationStatus `gorm:"not null;index"`
 	GreetingText        string

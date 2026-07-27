@@ -98,6 +98,100 @@ func (s *Store) NextSourcingBatchRunWithoutScore(batchID string) (*SourcingCandi
 	return run, err
 }
 
+// SourcingScoreWorkItem 是评分编排器的一个待驱动成员。Invocation 为 nil
+// 表示尚无预留；非 nil 时必为未终局（inFlight）行，按 2026-07-28 并行重试
+// 裁决允许续驱动。
+type SourcingScoreWorkItem struct {
+	Run        SourcingCandidateRun
+	Invocation *SourcingScoreInvocation
+}
+
+// PendingSourcingScoreWork 按采集顺序返回批次内全部仍需驱动的成员：
+// 尚无预留的与 inFlight 的。已终局成员不出现。
+func (s *Store) PendingSourcingScoreWork(batchID string) ([]SourcingScoreWorkItem, error) {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	var items []SourcingScoreWorkItem
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := validateCompletedSourcingBatchForScoringTx(tx, batchID)
+		if err != nil {
+			return err
+		}
+		var runs []SourcingCandidateRun
+		if err := tx.Where("batch_id = ? AND context_revision_hash = ?",
+			batch.BatchID, batch.ContextRevisionHash).
+			Order("captured_at ASC, run_id ASC").Find(&runs).Error; err != nil {
+			return err
+		}
+		if len(runs) == 0 {
+			return nil
+		}
+		runIDs := make([]string, 0, len(runs))
+		for i := range runs {
+			runIDs = append(runIDs, runs[i].RunID)
+		}
+		var invocations []SourcingScoreInvocation
+		if err := tx.Where("run_id IN ?", runIDs).Find(&invocations).Error; err != nil {
+			return err
+		}
+		byRun := make(map[string]SourcingScoreInvocation, len(invocations))
+		for i := range invocations {
+			byRun[invocations[i].RunID] = invocations[i]
+		}
+		for i := range runs {
+			invocation, exists := byRun[runs[i].RunID]
+			if !exists {
+				items = append(items, SourcingScoreWorkItem{Run: runs[i]})
+				continue
+			}
+			if invocation.FinishedAt != nil {
+				continue
+			}
+			inFlight := invocation
+			items = append(items, SourcingScoreWorkItem{Run: runs[i], Invocation: &inFlight})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// RecordSourcingScoreAttempt 在一次 provider HTTP 尝试发出前登记该尝试。
+// 只允许作用于未终局预留；budgeted 表示本次尝试计入非 429 预算。返回
+// 更新后的行，供调用方以 AttemptCount 派生 attempt 追踪身份。
+func (s *Store) RecordSourcingScoreAttempt(invocationID string, budgeted bool) (*SourcingScoreInvocation, error) {
+	invocationID = strings.TrimSpace(invocationID)
+	if invocationID == "" {
+		return nil, ErrAIInvocationInvalid
+	}
+	var out SourcingScoreInvocation
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{"attempt_count": gorm.Expr("attempt_count + 1")}
+		if budgeted {
+			updates["budgeted_attempt_count"] = gorm.Expr("budgeted_attempt_count + 1")
+		}
+		updated := tx.Model(&SourcingScoreInvocation{}).
+			Where("invocation_id = ? AND finished_at IS NULL AND status = ?",
+				invocationID, AIInvocationTransportFailed).
+			Updates(updates)
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrAIInvocationConflict
+		}
+		return tx.First(&out, "invocation_id = ?", invocationID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 type ReserveSourcingScoreRequest struct {
 	InvocationID        string
 	BatchID             string

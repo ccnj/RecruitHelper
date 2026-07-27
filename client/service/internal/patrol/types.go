@@ -302,6 +302,12 @@ type Config struct {
 	// 仍无业务定时器。
 	SourcingPaceWait    func(context.Context) error
 	InteractionPaceWait func(context.Context) error
+	// SourcingAIRetryWait 控制评分/招呼语生成失败后的重试退避。生产默认
+	// 指数退避加抖动：非 429 封顶 4 秒，429（unlimited=true）封顶 60 秒；
+	// retrySequence 是该成员本进程内的连续重试序号（从 1 起）。返回非
+	// nil（ctx 取消）时调用方停止驱动并保留 inFlight。测试可注入无等待
+	// 实现。
+	SourcingAIRetryWait func(ctx context.Context, unlimited bool, retrySequence int) error
 }
 
 func (c Config) withDefaults() Config {
@@ -334,6 +340,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.InteractionPaceWait == nil {
 		c.InteractionPaceWait = defaultInteractionPaceWait
+	}
+	if c.SourcingAIRetryWait == nil {
+		c.SourcingAIRetryWait = defaultSourcingAIRetryWait
 	}
 	return c
 }

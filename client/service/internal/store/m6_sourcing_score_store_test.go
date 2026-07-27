@@ -431,3 +431,75 @@ func TestCompleteSourcingScoreCASValidationAndIdempotency(t *testing.T) {
 		t.Fatalf("失败评分未以 score=nil 终局: failed=%+v err=%v", failed, err)
 	}
 }
+
+func TestPendingSourcingScoreWorkReturnsUnreservedAndInFlight(t *testing.T) {
+	s := openTest(t)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-pending-work"}
+	base := time.Date(2026, 7, 28, 9, 0, 0, 0, time.UTC)
+	runs := seedCompletedSourcingScoreBatch(
+		t, s, "batch-score-pending-work", key, "revision-score-pending-work",
+		[]string{"run-pw-a", "run-pw-b", "run-pw-c"}, base,
+	)
+	reserveB := sourcingScoreReservation(runs[1], "pw-invocation-b", base.Add(time.Minute))
+	if result, err := s.ReserveSourcingScore(reserveB); err != nil || result == nil || !result.Created {
+		t.Fatalf("inFlight 预留失败: result=%+v err=%v", result, err)
+	}
+	reserveC := sourcingScoreReservation(runs[2], "pw-invocation-c", base.Add(time.Minute))
+	if result, err := s.ReserveSourcingScore(reserveC); err != nil || result == nil || !result.Created {
+		t.Fatalf("终局预留失败: result=%+v err=%v", result, err)
+	}
+	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
+		Completion: AIInvocationCompletion{
+			InvocationID: "pw-invocation-c", Status: AIInvocationTransportFailed,
+			ErrorClass: "transport", FinishedAt: base.Add(2 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := s.PendingSourcingScoreWork("batch-score-pending-work")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("待驱动成员集错误: items=%d err=%v", len(items), err)
+	}
+	if items[0].Run.RunID != "run-pw-a" || items[0].Invocation != nil {
+		t.Fatalf("未预留成员形态错误: %+v", items[0])
+	}
+	if items[1].Run.RunID != "run-pw-b" || items[1].Invocation == nil ||
+		items[1].Invocation.InvocationID != "pw-invocation-b" ||
+		items[1].Invocation.FinishedAt != nil {
+		t.Fatalf("inFlight 成员形态错误: %+v", items[1])
+	}
+}
+
+func TestRecordSourcingScoreAttemptCountsAndRejectsFinished(t *testing.T) {
+	s := openTest(t)
+	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-attempt"}
+	base := time.Date(2026, 7, 28, 9, 30, 0, 0, time.UTC)
+	run := seedSourcingScoreRun(t, s, "run-attempt-count", key, "revision-attempt-count", base)
+	reservation := sourcingScoreReservation(run, "attempt-count-invocation", base.Add(time.Minute))
+	if _, err := s.ReserveSourcingScore(reservation); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.RecordSourcingScoreAttempt("attempt-count-invocation", true)
+	if err != nil || first.AttemptCount != 1 || first.BudgetedAttemptCount != 1 {
+		t.Fatalf("首次尝试计数错误: invocation=%+v err=%v", first, err)
+	}
+	second, err := s.RecordSourcingScoreAttempt("attempt-count-invocation", false)
+	if err != nil || second.AttemptCount != 2 || second.BudgetedAttemptCount != 1 {
+		t.Fatalf("非预算尝试计数错误: invocation=%+v err=%v", second, err)
+	}
+	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
+		Completion: AIInvocationCompletion{
+			InvocationID: "attempt-count-invocation", Status: AIInvocationTransportFailed,
+			ErrorClass: "transport", FinishedAt: base.Add(2 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordSourcingScoreAttempt("attempt-count-invocation", true); !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("终局行不得再登记尝试: err=%v", err)
+	}
+	if _, err := s.RecordSourcingScoreAttempt("attempt-count-missing", true); !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("缺失预留不得登记尝试: err=%v", err)
+	}
+}
