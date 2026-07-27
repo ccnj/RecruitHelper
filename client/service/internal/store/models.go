@@ -1086,6 +1086,12 @@ type Conversation struct {
 	LastSyncedRoundID  string
 	LastSyncedAt       *time.Time
 
+	// 巡检单人隔离标记（2026-07-27 甲方裁决：单个候选人的确定性错误只隔离
+	// 该会话，不停整个账号轮）。打标后人工解除前，巡检不再自动对账或推进
+	// 该会话；这是运行状态列，不是业务事实删除。
+	PatrolQuarantinedAt    *time.Time
+	PatrolQuarantineReason string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
