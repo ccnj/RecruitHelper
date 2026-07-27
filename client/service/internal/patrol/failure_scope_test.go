@@ -145,6 +145,188 @@ func TestPatrolRoundContinuesPastQuarantinedConversation(t *testing.T) {
 	}
 }
 
+// 聚合投影正处于漂移（档案已推进而聚合尚未投影，加载器报"损坏"）的候选人
+// 确定性失败：会话级隔离照常生效，冻结聚合按 best-effort 容忍失败
+// （profileFrozen=false），坏聚合本身留给人工——绝不因此把整轮打死。
+func TestQuarantineToleratesCorruptAggregateProjection(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	conversationKey := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: fixture.conversationRef,
+	}
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary(fixture.conversationRef, "person-m5-advice", "毒化预览", 1),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			return nil, &RunError{
+				Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
+				SideEffect: protocol.SideEffectPossible, Cause: errors.New("单人确定性异常"),
+			}
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	// 前置自证：该 fixture 的聚合确实处于投影漂移（加载器报损坏）。
+	if _, aggErr := h.db.CommunicationV4AggregateByProfile(fixture.profileID); aggErr == nil {
+		// 聚合尚未创建也可接受（Missing 同属容忍分支），但若可正常加载则
+		// 本测试失去意义。
+		t.Fatal("fixture 聚合意外可正常加载，测试前提失效")
+	}
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("坏聚合候选人失败不得停轮: result=%+v err=%v", result, err)
+	}
+	conversation, err := h.db.ConversationByKey(conversationKey)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil {
+		t.Fatalf("会话必须被隔离: conversation=%+v err=%v", conversation, err)
+	}
+	audits, err := h.db.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, audit := range audits {
+		if audit.Category == patrolQuarantineAuditCategory &&
+			audit.ConversationRef == fixture.conversationRef &&
+			strings.Contains(audit.Detail, "profileFrozen=false") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("隔离审计必须如实记录聚合未能冻结")
+	}
+}
+
+// 有一致聚合的候选人（洪建辉案的真实形状）确定性失败：会话打隔离标记的
+// 同时，V4 聚合必须挂 manualRequired，审计记 profileFrozen=true。
+func TestQuarantineFreezesProfileAggregateWhenPresent(t *testing.T) {
+	h := newHarness(t)
+	profileID := seedGreetedProfileWithV4Root(t, h, "conversation-freeze", "peer-freeze")
+	conversationKey := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: "conversation-freeze",
+	}
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{
+					summary("conversation-freeze", "peer-freeze", "毒化预览", 1),
+				},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			return nil, &RunError{
+				Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
+				SideEffect: protocol.SideEffectPossible, Cause: errors.New("单人确定性异常"),
+			}
+		default:
+			return defaultHandler(request)
+		}
+	}
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("有档案候选人失败不得停轮: result=%+v err=%v", result, err)
+	}
+	conversation, err := h.db.ConversationByKey(conversationKey)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil {
+		t.Fatalf("会话必须被隔离: conversation=%+v err=%v", conversation, err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(profileID)
+	if err != nil || aggregate.AutomationStatus != store.ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != "patrolQuarantine:hand:INTERNAL_HAND" {
+		t.Fatalf("V4 聚合必须挂 manualRequired: aggregate=%+v err=%v", aggregate, err)
+	}
+	audits, err := h.db.AuditEntries(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, audit := range audits {
+		if audit.Category == patrolQuarantineAuditCategory &&
+			audit.ConversationRef == "conversation-freeze" &&
+			strings.Contains(audit.Detail, "profileFrozen=true") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("隔离审计必须记录聚合已冻结")
+	}
+}
+
+// seedGreetedProfileWithV4Root 建一个"已招呼、无入站、聚合与档案投影一致"
+// 的候选人：走真实招呼链（intent→verification→服务端正证），聚合由轮内
+// ensureCommunicationV4Roots 现建即可保持一致。
+func seedGreetedProfileWithV4Root(
+	t *testing.T,
+	h *harness,
+	conversationRef string,
+	platformUserRef string,
+) string {
+	t.Helper()
+	now := h.clock.Now()
+	profileID := "profile-" + conversationRef
+	displayName, positionTitle := "合成候选人", "合成职位"
+	if _, err := h.db.SelectCandidateProfile(store.SelectCandidateProfileRequest{
+		ProfileID: profileID,
+		Scope: store.CandidateProfileScope{
+			Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+			PlatformUserRef: platformUserRef, PositionRef: "position-" + conversationRef,
+		},
+		DisplayName: &displayName, PositionTitle: &positionTitle, ObservedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	greetingIntent := "intent-" + conversationRef
+	greetingText := "合成招呼"
+	greetingHash := syncledger.HashText(greetingText)
+	deadline := now.Add(time.Hour).UnixMilli()
+	greeting, err := h.db.CreateGreetingEffectIntentAndCmd(store.CreateGreetingEffectIntentRequest{
+		Intent: store.EffectIntent{
+			IntentID: greetingIntent, IdemKey: "idem-" + conversationRef,
+			Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+			Primitive: protocol.PrimChatSendGreeting, TargetRef: profileID,
+			PayloadHash: "payload-" + conversationRef, GuardsHash: "guards-" + conversationRef,
+			SendFingerprint: greetingHash, Status: store.EffectIntentDispatching, DeadlineMs: deadline,
+		},
+		Command: store.CmdRecord{
+			MsgID: "msg-" + conversationRef, Name: protocol.PrimChatSendGreeting,
+			Class: string(protocol.ClassEffectful), IdemKey: "idem-" + conversationRef,
+			Domain: h.key.Platform + ":" + h.key.AccountRef,
+			Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+			ExpectedPrincipalFingerprint: "principal-1", IntentID: greetingIntent,
+			HandID: "hand-1", Session: "session-1", BootIDAtDispatch: "boot-1",
+			Status: store.CmdQueued, DeadlineMs: deadline, ExecBudgetMs: 60_000,
+		},
+		Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.MoveEffectToVerification(greeting.Command.MsgID, "fixturePositiveRead", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.ResolveGreetingVerified(store.VerifiedGreetingSuccess{
+		Ref: greeting.Command.MsgID, ProfileID: profileID, PlatformUserRef: platformUserRef,
+		PositionRef: "position-" + conversationRef, ConversationRef: conversationRef,
+		Text: greetingText, ContentHash: greetingHash, ObservedAtMs: now.UnixMilli(),
+		ResolutionReason: "fixturePositiveRead", At: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return profileID
+}
+
 // 瞬时错误（目标暂离窗口）：本轮跳过并留汇总审计，下一轮自然重试；不隔离。
 func TestPatrolRoundTransientSkipLeavesTraceAndRetriesNextRound(t *testing.T) {
 	h := newHarness(t)

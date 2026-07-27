@@ -167,8 +167,12 @@ func (a *roundActor) quarantineConversation(
 		case markErr == nil:
 			frozeProfile = true
 		case errors.Is(markErr, store.ErrCommunicationV4Missing),
-			errors.Is(markErr, store.ErrCommunicationV4Conflict):
-			// 没有可冻结的聚合，或聚合已处于人工/终态：会话级标记已生效。
+			errors.Is(markErr, store.ErrCommunicationV4Conflict),
+			errors.Is(markErr, store.ErrCommunicationV4Corrupt):
+			// 没有可冻结的聚合、聚合已处于人工/终态，或聚合投影正处于
+			// 漂移/损坏（档案已推进而聚合尚未投影）：会话级标记已经完成
+			// 隔离，坏聚合本身正是需要人工处理的对象，不得反过来把整轮
+			// 打死。
 		default:
 			return false, errors.Join(cause, markErr)
 		}
