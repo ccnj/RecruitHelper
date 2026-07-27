@@ -16,7 +16,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/workflow"
 )
 
 var ErrInvalidConfiguration = errors.New("产品 API 配置无效")
@@ -191,10 +193,26 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.control.Start(r.Context(), request.Mode, request.BackendJobID); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前状态无法启动工作流"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": startFailureText(err)})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
+}
+
+// startFailureText 只把已知业务哨兵映射为固定文案；未匹配的错误一律保持
+// 笼统提示，底层错误链的细节不得进入产品面响应。
+func startFailureText(err error) string {
+	switch {
+	case errors.Is(err, productapp.ErrJobSelectionChanged):
+		return "当前职位已变化，请刷新后重试"
+	case errors.Is(err, workflow.ErrDailyWindowClosed):
+		return "当前不在业务运行窗口内"
+	case errors.Is(err, productapp.ErrAccountUnavailable):
+		return "没有唯一可运行的平台账号"
+	case errors.Is(err, productapp.ErrJobConfigUnavailable):
+		return "当前职位配置不可用"
+	}
+	return "当前状态无法启动工作流"
 }
 
 func (a *API) pauseWorkflow(w http.ResponseWriter, r *http.Request) {
