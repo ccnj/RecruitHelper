@@ -24,6 +24,7 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/productworkflow"
@@ -198,6 +199,16 @@ func main() {
 	})
 	background.Go(func() { hub.StartHealthLoop(appCtx) })
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
+	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,
+	// 不受业务运行窗口约束;失败只降级不阻塞业务主线。
+	notifyRunner := notify.NewRunner(st, blobStore, func() string {
+		view, statusErr := jobConfigSource.Status(context.Background())
+		if statusErr != nil {
+			return ""
+		}
+		return view.CustomerName
+	})
+	background.Go(func() { notifyRunner.Run(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)

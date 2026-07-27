@@ -214,3 +214,94 @@ func truncateErrorText(text string) string {
 	}
 	return text[:limit]
 }
+
+// NotificationRenderSnapshot 是通知正文按发送时刻现算所需的最新业务事实。
+// WechatID 来自权威 ContactAsset;运营通知 webhook 正文是其获准位置之一
+// (AGENTS.md 2026-07-28 裁决),本快照不得回流进日志、审计或管理 API。
+type NotificationRenderSnapshot struct {
+	ProfileID           string
+	DisplayName         string
+	PositionTitle       string
+	MainStatus          CandidateProfileStatus
+	WechatState         string
+	WechatID            string
+	InterviewStartsAtMs *int64
+	ChatShot            *CandidateScreenshot
+	ResumeShot          *CandidateScreenshot
+}
+
+// NotificationRenderSnapshotForProfile 汇集渲染一条运营通知所需的最新事实。
+func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*NotificationRenderSnapshot, error) {
+	profile, err := s.CandidateProfileByID(profileID)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, nil
+	}
+	snapshot := &NotificationRenderSnapshot{
+		ProfileID:  profileID,
+		MainStatus: profile.MainStatus,
+	}
+	if profile.PositionTitle != nil {
+		snapshot.PositionTitle = strings.TrimSpace(*profile.PositionTitle)
+	}
+	var person Candidate
+	err = s.db.First(
+		&person,
+		"platform = ? AND platform_user_ref = ?",
+		profile.Platform,
+		profile.PlatformUserRef,
+	).Error
+	if err == nil && person.DisplayName != nil {
+		snapshot.DisplayName = strings.TrimSpace(*person.DisplayName)
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(profileID)
+	if err == nil {
+		snapshot.WechatState = string(aggregate.State.WechatState)
+	} else if !errors.Is(err, ErrCommunicationV4Missing) {
+		return nil, err
+	}
+	assets, err := s.ContactAssetsByProfile(profileID)
+	if err != nil {
+		return nil, err
+	}
+	for index := len(assets) - 1; index >= 0; index-- {
+		if assets[index].Kind == contactAssetKindWechat {
+			snapshot.WechatID = assets[index].Value
+			break
+		}
+	}
+	shots, err := s.LatestCandidateScreenshots(profileID)
+	if err != nil {
+		return nil, err
+	}
+	if shot, ok := shots[CandidateScreenshotKindChat]; ok {
+		copied := shot
+		snapshot.ChatShot = &copied
+	}
+	if shot, ok := shots[CandidateScreenshotKindResume]; ok {
+		copied := shot
+		snapshot.ResumeShot = &copied
+	}
+	if profile.ConversationRef != nil {
+		var card Message
+		err := s.db.
+			Where(
+				"platform = ? AND account_ref = ? AND conversation_ref = ? AND interview_starts_at_ms IS NOT NULL",
+				profile.Platform,
+				profile.AccountRef,
+				*profile.ConversationRef,
+			).
+			Order("seq DESC").
+			First(&card).Error
+		if err == nil {
+			snapshot.InterviewStartsAtMs = card.InterviewStartsAtMs
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
+	return snapshot, nil
+}
