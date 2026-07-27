@@ -619,6 +619,9 @@ try {
     registerM4Primitives,
     registerM5Primitives,
     registerM6Primitives,
+    registerM7Primitives,
+    putSessionBlob,
+    sessionBlobParams,
   } = await import(`${bundleURL}?t=${Date.now()}`)
 
   storage.infra = { wsUrl: brain.wsURL }
@@ -628,6 +631,7 @@ try {
   registerM4Primitives()
   registerM5Primitives()
   registerM6Primitives()
+  registerM7Primitives()
   conn = new Connection()
 
   console.log('本地稳定 handId 与生产 Connection 自动握手')
@@ -653,10 +657,24 @@ try {
     'chat.readGreetingOutcome@1',
     'chat.sendMessage@1',
     'chat.sendGreeting@1',
+    'chat.captureThreadScreenshot@1',
   ]) {
     assert.ok(online.caps.includes(capability), `hello 能力集缺少 ${capability}`)
   }
   console.log('  PASS 稳定 handId、自动登记、M2/M3/M4/M5 能力集及在线会话')
+
+  console.log('blob/1 上行通道(§13 激活记录):welcome 协商 + 内容寻址 PUT 幂等')
+  const blobParams = sessionBlobParams()
+  assert.ok(blobParams, 'welcome 未携带 blob 参数')
+  assert.match(blobParams.token, /^bt-[0-9a-f]{64}$/)
+  assert.ok(blobParams.endpoint.endsWith('/v1/blobs'))
+  const blobContent = new TextEncoder().encode('blob-smoke-片段-' + Date.now()).buffer
+  const putOutcome = await putSessionBlob(blobContent)
+  const expectedRef = 'sha256:' + createHash('sha256').update(Buffer.from(blobContent)).digest('hex')
+  assert.equal(putOutcome.ref, expectedRef, 'blob 引用必须是内容 sha256')
+  const replay = await putSessionBlob(blobContent)
+  assert.equal(replay.ref, expectedRef, '同内容重复 PUT 必须幂等成功')
+  console.log('  PASS blob 参数协商、内容寻址上行与幂等重放')
 
   console.log('正式绑定探测与 actor 页面恢复/列表索引')
   const bound = await admin.post('/admin/accounts/bind', {

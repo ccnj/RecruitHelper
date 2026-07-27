@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/appbridge"
 	"recruithelper/client/service/internal/apphttp"
+	"recruithelper/client/service/internal/blobstore"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
@@ -106,6 +108,17 @@ func main() {
 	defer appCancel()
 
 	hub := session.NewHub(st, protocol.DefaultHbGraceMs)
+	blobStore, err := blobstore.New(filepath.Join(*dataDir, "blobs"))
+	if err != nil {
+		slog.Error("blob 存储初始化失败", "err", err)
+		os.Exit(1)
+	}
+	blobTokens := blobstore.NewTokenRegistry()
+	hub.SetBlob(
+		blobTokens,
+		fmt.Sprintf("http://127.0.0.1:%d/v1/blobs", *port),
+		protocol.DefaultPayloadBlobMaxBytes,
+	)
 	disp := dispatch.New(st, hub)
 	hub.SetDispatcher(disp)
 	disp.SetEffectVerifier(appbridge.EffectVerifier{Dispatcher: disp})
@@ -187,6 +200,7 @@ func main() {
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
+	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
 	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
 		SetJobConfigSource(jobConfigSource).Routes(mux)
 	if *adminToken != "" {

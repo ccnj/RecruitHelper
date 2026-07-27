@@ -47,6 +47,7 @@ import {
   newMsgId,
 } from './config'
 import { capabilities } from '../program/registry'
+import { setSessionBlobParams } from './capture'
 import { Dispatcher, SendOutcome } from './dispatcher'
 import { acknowledgeRuntimeReloadResult } from './reload'
 import { WitnessAdvertisement, WitnessStore, WitnessStorage } from './witness'
@@ -219,6 +220,7 @@ export class Connection {
     // welcome 下发的 limits 只属于上一会话；新握手必须从协议默认硬边界开始。
     this.maxMsgBytes = DEFAULTS.maxMsgBytes
     this.inlineBytes = DEFAULTS.inlineBytes
+    setSessionBlobParams(null) // blob token 同属上一会话,新握手前作废
     this.heartbeatIntervalMs = HB_INTERVAL_MS
     this.resetPongWatch()
     this.applySensorConfig(undefined)
@@ -389,6 +391,7 @@ export class Connection {
     }
     this.applyWelcomeLimits(body.limits)
     this.applySensorConfig(body.sensors)
+    setSessionBlobParams(body.blob) // §13 上行子集:会话作用域,缺席=未协商
     this.heartbeatIntervalMs = body.hb.intervalMs
     this.resetPongWatch()
     this.session = body.session

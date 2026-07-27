@@ -7,6 +7,8 @@ import type {
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
   CandidateReadCurrentData,
+  CaptureScreenshotData,
+  ChatCaptureThreadScreenshotArgs,
   CandidateReadResumeArgs,
   CandidateReadResumeData,
   CandidateReadSourcingResumeArgs,
@@ -57,6 +59,13 @@ import {
   validatePrimitiveArgs,
   validatePrimitiveData,
 } from '../../base/protocol'
+import {
+  BlobChannelError,
+  BlobPutOutcome,
+  captureVisibleTabJpegDataUrl,
+  putSessionBlob,
+  sessionBlobParams,
+} from '../../base/capture'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -9949,6 +9958,473 @@ export async function readZhilianThread(
   return result
 }
 
+// ============================================================================
+// 成功取证截图(chat.captureThreadScreenshot / candidate.captureResumeScreenshot)
+//
+// 技术路线照抄旧项目复盘结论:页面内 foreignObject→canvas 在 Chrome 上固有污染、
+// 导不出 JPEG,唯一可行路线是 SW 里 chrome.tabs.captureVisibleTab 截真实渲染像素、
+// 按内容偏移滚动拼接成单张长图。新架构下原语在 SW 执行,循环反转为:
+//   SW 循环 { executeScript(量测/滚动) → captureVisibleTab → OffscreenCanvas 裁剪合成 }
+// executeScript 之间无法持有 DOM 引用,每步都按同一确定性规则重解析滚动容器,
+// 以冻结坐标系核对(高度/落点漂移 ≤4px)兜住"重解析到别的节点"与页面自身搅动。
+// 一切异常只产生"缺图"失败,绝不发送白图/错位图。
+// ============================================================================
+
+// 页面步进结果:纯数值快照,DOM 细节不出页面。
+interface MainCaptureStepReady {
+  status: 'ready'
+  visible: boolean
+  clientH: number
+  scrollHeight: number
+  scrollTop: number
+  dpr: number
+  innerW: number
+  innerH: number
+  rectTop: number
+  rectBottom: number
+  rectLeft: number
+  rectRight: number
+}
+interface MainCaptureStepFailed {
+  status: 'failed'
+  reason: 'route_changed' | 'container_unresolved'
+}
+type MainCaptureStepResult = MainCaptureStepReady | MainCaptureStepFailed
+
+// 必须自包含:executeScript 序列化到 MAIN world,不得引用模块闭包。
+// op: measure(解析+入视口) | pinTop(钉顶,驱动懒加载排干) | anchorBottom(底部锚定)
+//     | scrollTo(滚到 requestedTop) | readback(纯读,不动滚动)
+// 聊天滚动容器解析规则移植自旧项目 getZhilianImChatScreenshotTarget +
+// resolveScrollContainer:km-scrollbar 结构真正可滚的是 __wrap;__view(内容层)与
+// 根(overflow:hidden)写 scrollTop 是 no-op,直接驱动会拼出"首屏+大片留白"的坏图。
+async function mainChatCaptureStep(
+  conversationRef: string,
+  op: string,
+  requestedTop: number,
+): Promise<MainCaptureStepResult> {
+  const failed = (reason: 'route_changed' | 'container_unresolved'): MainCaptureStepFailed =>
+    ({ status: 'failed', reason })
+  try {
+    const route = new URL(location.href)
+    if (route.pathname !== '/app/im' || route.searchParams.get('sessionId') !== conversationRef) {
+      return failed('route_changed')
+    }
+  } catch {
+    return failed('route_changed')
+  }
+  const isScrollableY = (el: HTMLElement): boolean => {
+    const oy = window.getComputedStyle(el).overflowY
+    return (oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4
+  }
+  const resolveScrollContainer = (el: HTMLElement): HTMLElement => {
+    const room = (n: HTMLElement | null): n is HTMLElement =>
+      !!n && n.scrollHeight > n.clientHeight + 4
+    const descWrap = el.querySelector<HTMLElement>('.km-scrollbar__wrap')
+    if (room(descWrap)) return descWrap
+    const ancWrap = el.closest<HTMLElement>('.km-scrollbar__wrap')
+    if (room(ancWrap)) return ancWrap
+    if (el.scrollHeight > el.clientHeight + 4) return el
+    let best: HTMLElement | null = null
+    let bestRoom = 80
+    el.querySelectorAll<HTMLElement>('*').forEach((c) => {
+      if (isScrollableY(c) && c.scrollHeight - c.clientHeight > bestRoom) {
+        best = c
+        bestRoom = c.scrollHeight - c.clientHeight
+      }
+    })
+    return best || el
+  }
+  const timeline = document.querySelector<HTMLElement>('.im-timeline')
+  const target =
+    timeline?.closest<HTMLElement>('.km-scrollbar__view') ||
+    timeline ||
+    document.querySelector<HTMLElement>('.im-timeline__wrapper .km-scrollbar__view') ||
+    document.querySelector<HTMLElement>('.im-timeline__wrapper')
+  if (!target) return failed('container_unresolved')
+  const scrollEl = resolveScrollContainer(target)
+  if (op === 'measure') {
+    scrollEl.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  } else if (op === 'pinTop') {
+    scrollEl.scrollTop = 0
+  } else if (op === 'anchorBottom') {
+    scrollEl.scrollTop = Math.max(0, scrollEl.scrollHeight - Math.max(1, scrollEl.clientHeight))
+  } else if (op === 'scrollTo') {
+    scrollEl.scrollTop = Math.max(0, requestedTop)
+  }
+  const rect = scrollEl.getBoundingClientRect()
+  return {
+    status: 'ready',
+    visible: document.visibilityState === 'visible',
+    clientH: Math.max(1, scrollEl.clientHeight),
+    scrollHeight: Math.max(scrollEl.scrollHeight, Math.max(1, scrollEl.clientHeight)),
+    scrollTop: scrollEl.scrollTop,
+    dpr: window.devicePixelRatio || 1,
+    innerW: window.innerWidth,
+    innerH: window.innerHeight,
+    rectTop: rect.top,
+    rectBottom: rect.bottom,
+    rectLeft: rect.left,
+    rectRight: rect.right,
+  }
+}
+
+// SW 侧步进器:把一次页面操作绑定到具体 tab 与页面函数。
+type CaptureStepRunner = (op: string, requestedTop?: number) => Promise<MainCaptureStepReady>
+
+class CaptureDirty extends Error {
+  constructor(kind: string) {
+    super(`capture-stitch-dirty:${kind}`)
+    this.name = 'CaptureDirty'
+  }
+}
+
+const CAPTURE_MAX_SIDE = 16_000
+const CAPTURE_TARGET_MAX_BYTES = 1_900_000 // 企微 image 原图上限 2MB,留余量(旧项目同值)
+const CAPTURE_FRAME_QUALITY = 92
+
+function swSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+// 平台交互节奏(2026-07-23 甲方裁决):相邻平台可见交互(含滚动)至少间隔 1 秒 + 有界抖动。
+// 拼接的逐帧滚动、懒加载排干与锚定都是滚动交互,统一经此闸;纯读 readback 不占节奏。
+class MutationPacer {
+  private lastMutationAt = 0
+  async beforeMutation(): Promise<void> {
+    const gap = 1_000 + Math.floor(Math.random() * 301)
+    const wait = this.lastMutationAt + gap - Date.now()
+    if (wait > 0) await swSleep(wait)
+    this.lastMutationAt = Date.now()
+  }
+}
+
+interface StitchOutcome {
+  jpeg: Blob
+  width: number
+  height: number
+  frames: number
+  truncated: boolean
+}
+
+// 懒加载排干+锚定等稳(移植旧 settleScrollContainer):
+// 聊天滚到顶会触发平台 prepend 更早历史并顶开 scrollTop,开拍前必须先排干等稳,
+// 否则坐标系中途平移必出坏图。连续 2 轮(各 ≥1s 观测窗)高度零增长视为到头;
+// 历史超出帧预算可拍范围时提前停止排干。
+async function settleForCapture(
+  step: CaptureStepRunner,
+  pacer: MutationPacer,
+  ctx: PrimitiveContext,
+  options: { anchor: 'top' | 'bottom'; maxFrames: number },
+): Promise<MainCaptureStepReady> {
+  let metrics = await step('measure')
+  const budgetPx = (options.maxFrames + 1) * metrics.clientH
+  let quietRounds = 0
+  for (let round = 0; round < 20 && quietRounds < 2; round += 1) {
+    if (metrics.scrollHeight >= budgetPx) break
+    const before = metrics.scrollHeight
+    ctx.checkpoint()
+    await pacer.beforeMutation()
+    await step('pinTop')
+    await swSleep(300)
+    metrics = await step('readback')
+    quietRounds = metrics.scrollHeight === before ? quietRounds + 1 : 0
+  }
+  if (options.anchor === 'bottom') {
+    await pacer.beforeMutation()
+    metrics = await step('anchorBottom')
+  } else {
+    await pacer.beforeMutation()
+    metrics = await step('pinTop')
+  }
+  let stableReads = 0
+  let lastHeight = metrics.scrollHeight
+  for (let read = 0; read < 8 && stableReads < 2; read += 1) {
+    ctx.checkpoint()
+    await swSleep(300)
+    metrics = await step('readback')
+    if (metrics.scrollHeight === lastHeight) {
+      stableReads += 1
+    } else {
+      stableReads = 0
+      lastHeight = metrics.scrollHeight
+    }
+  }
+  return metrics
+}
+
+async function decodeFrame(dataUrl: string): Promise<ImageBitmap> {
+  const response = await fetch(dataUrl)
+  return await createImageBitmap(await response.blob())
+}
+
+async function canvasToJpeg(canvas: OffscreenCanvas, quality: number): Promise<Blob> {
+  return await canvas.convertToBlob({ type: 'image/jpeg', quality: quality / 100 })
+}
+
+// 单次拼接(移植旧 stitchScrollElementOnce 的全部护栏):
+// 开拍时冻结坐标系(clientH/totalScroll);逐帧核对高度与落点漂移(≤4px),成像前后
+// 双读复核;首帧必须落画布顶端;多屏画布覆盖率过低判失败。发现坐标系失效抛
+// CaptureDirty 由调用方整体重拍一次。
+async function stitchOnce(
+  tab: chrome.tabs.Tab,
+  step: CaptureStepRunner,
+  pacer: MutationPacer,
+  ctx: PrimitiveContext,
+  settled: MainCaptureStepReady,
+  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+): Promise<StitchOutcome> {
+  const dpr = settled.dpr
+  const clientH = settled.clientH
+  const totalScroll = Math.max(settled.scrollHeight, clientH)
+
+  const framesForContent = Math.max(1, Math.ceil(totalScroll / clientH))
+  const framesByCanvas = Math.max(1, Math.floor(CAPTURE_MAX_SIDE / Math.max(1, Math.round(clientH * dpr))))
+  const budget = Math.min(options.maxFrames, framesForContent, framesByCanvas)
+  const coveredCssH = Math.min(totalScroll, budget * clientH)
+  const startTop = options.anchor === 'bottom' ? Math.max(0, totalScroll - coveredCssH) : 0
+
+  const cropCssLeft = Math.max(0, settled.rectLeft)
+  const cropCssRight = Math.min(settled.innerW, settled.rectRight)
+  const cropCssW = Math.max(1, cropCssRight - cropCssLeft)
+
+  const outW = Math.max(1, Math.min(CAPTURE_MAX_SIDE, Math.round(cropCssW * dpr)))
+  const outH = Math.max(1, Math.min(CAPTURE_MAX_SIDE, Math.round(coveredCssH * dpr)))
+
+  const canvas = new OffscreenCanvas(outW, outH)
+  const draw = canvas.getContext('2d')
+  if (!draw) throw new ZhilianPlatformError('CTX_NOT_READY', '截图画布不可用', 'afterRecovery')
+  draw.fillStyle = '#ffffff'
+  draw.fillRect(0, 0, outW, outH)
+
+  let frames = 0
+  let lastTop = -1
+  let drawnBottom = 0
+  let drawnTop = Number.POSITIVE_INFINITY
+  for (let i = 0; i < budget; i += 1) {
+    ctx.checkpoint()
+    const maxScrollable = Math.max(0, totalScroll - clientH)
+    const requestedTop = Math.max(0, Math.min(Math.round(startTop + i * clientH), maxScrollable))
+    await pacer.beforeMutation()
+    await step('scrollTo', requestedTop)
+    await swSleep(150)
+    const before = await step('readback')
+    if (!before.visible) break // 中途切走标签:captureVisibleTab 会截到别的标签,用已拼部分
+    if (Math.abs(before.scrollHeight - totalScroll) > 4) throw new CaptureDirty('height-changed')
+    if (Math.abs(before.scrollTop - requestedTop) > 4) throw new CaptureDirty('scroll-drift')
+    if (i > 0 && before.scrollTop <= lastTop) break // 滚不动了(不可滚/到底)
+    lastTop = before.scrollTop
+
+    let frame: ImageBitmap
+    try {
+      frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY))
+    } catch {
+      await swSleep(1_200) // 可能是 captureVisibleTab 配额超限,多等一轮再试一次
+      try {
+        frame = await decodeFrame(await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY))
+      } catch (secondError) {
+        if (frames === 0) {
+          throw new ZhilianPlatformError(
+            'CTX_NOT_READY',
+            `截屏原语一帧未得:${secondError instanceof Error ? secondError.message : String(secondError)}`,
+            'afterRecovery',
+          )
+        }
+        break
+      }
+    }
+
+    // 成像前后双读:脏检查与实际成像之间隔着异步 IPC,该窗口被搅动的帧不可采信。
+    const after = await step('readback')
+    if (Math.abs(after.scrollTop - requestedTop) > 4 || Math.abs(after.scrollHeight - totalScroll) > 4) {
+      frame.close()
+      throw new CaptureDirty('frame-moved')
+    }
+
+    const vTop = Math.max(0, after.rectTop)
+    const vBottom = Math.min(after.innerH, after.rectBottom)
+    const vCssH = Math.max(0, vBottom - vTop)
+    if (vCssH < 1) {
+      frame.close()
+      break
+    }
+    const sx = Math.min(Math.max(0, Math.round(cropCssLeft * dpr)), Math.max(0, frame.width - 1))
+    const sy = Math.min(Math.max(0, Math.round(vTop * dpr)), Math.max(0, frame.height - 1))
+    const sw = Math.max(1, Math.min(frame.width - sx, outW))
+    const sh = Math.max(1, Math.min(frame.height - sy, Math.round(vCssH * dpr)))
+
+    let destY = Math.round((before.scrollTop - startTop) * dpr)
+    let srcSkip = 0
+    if (destY < 0 && destY >= -Math.round(6 * dpr)) {
+      // 高 DPI/分数缩放下 scrollTop 对齐物理像素栅格,落点可比起点低亚像素级:
+      // 裁掉帧顶溢出的一两个像素照画,不丢整帧(丢帧会让 top-blank 检查永久判死)。
+      srcSkip = -destY
+      destY = 0
+    }
+    if (destY >= 0 && destY < outH && sh > srcSkip) {
+      const drawH = Math.min(sh - srcSkip, outH - destY)
+      draw.drawImage(frame, sx, sy + srcSkip, sw, drawH, 0, destY, sw, drawH)
+      drawnBottom = Math.max(drawnBottom, destY + drawH)
+      drawnTop = Math.min(drawnTop, destY)
+    }
+    frame.close()
+    frames += 1
+    await ctx.progress(`${options.progressLabel} ${frames}/${budget}`, Math.min(90, 20 + Math.round((frames / budget) * 65)))
+    if (before.scrollTop + clientH >= totalScroll - 1) break // 已到底
+  }
+
+  // 一帧未画成(入口通过后被切走/容器滚出视口)→ 纯白画布,绝不当截图发出
+  if (frames === 0 || drawnBottom === 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '截图一帧未成,放弃取证', 'manualOnly')
+  }
+  // 首帧必须画在画布顶端:顶部白带=首帧落点已被顶开(懒加载/自动滚底典型产物)
+  if (drawnTop > Math.round(12 * dpr)) throw new CaptureDirty('top-blank')
+  // 覆盖率安全网:多屏画布只画了首屏 = 滚动没生效/容器解析错,判失败不发白图
+  if (outH > Math.round(clientH * dpr) * 1.5 && drawnBottom < outH * 0.4) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '截图大面积留白,放弃取证', 'manualOnly')
+  }
+
+  let quality = CAPTURE_FRAME_QUALITY
+  let jpeg = await canvasToJpeg(canvas, quality)
+  let finalW = outW
+  let finalH = outH
+  for (const stepQuality of [80, 65, 50, 38]) {
+    if (jpeg.size <= CAPTURE_TARGET_MAX_BYTES) break
+    quality = stepQuality
+    jpeg = await canvasToJpeg(canvas, quality)
+  }
+  // 分辨率兜底:最低质量仍超限(长图含照片消息时可能)就整图等比缩小重编码;
+  // 企微按 2MB 硬拒收,超限发出等于白拍,缩小后看清文字足够。
+  for (const scale of [0.7, 0.5]) {
+    if (jpeg.size <= CAPTURE_TARGET_MAX_BYTES) break
+    const scaledW = Math.max(1, Math.round(outW * scale))
+    const scaledH = Math.max(1, Math.round(outH * scale))
+    const scaled = new OffscreenCanvas(scaledW, scaledH)
+    const scaledDraw = scaled.getContext('2d')
+    if (!scaledDraw) break
+    scaledDraw.drawImage(canvas, 0, 0, scaledW, scaledH)
+    jpeg = await canvasToJpeg(scaled, 65)
+    finalW = scaledW
+    finalH = scaledH
+  }
+  if (jpeg.size > CAPTURE_TARGET_MAX_BYTES) {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '截图压缩后仍超过发送上限', 'manualOnly')
+  }
+  return {
+    jpeg,
+    width: finalW,
+    height: finalH,
+    frames,
+    truncated: coveredCssH < totalScroll - 1 || frames < budget,
+  }
+}
+
+// 拼接入口:排干等稳 → 单次拼接;坐标系中途失效(CaptureDirty)整体重拍一次。
+// 重拍不是重演:上一轮已加载的历史留在 DOM,这一轮 settle 从更接近排干的状态继续。
+async function stitchCapture(
+  tab: chrome.tabs.Tab,
+  step: CaptureStepRunner,
+  ctx: PrimitiveContext,
+  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+): Promise<StitchOutcome> {
+  const pacer = new MutationPacer()
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const settled = await settleForCapture(step, pacer, ctx, options)
+    if (!settled.visible) {
+      throw new ZhilianPlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+    }
+    try {
+      return await stitchOnce(tab, step, pacer, ctx, settled, options)
+    } catch (error) {
+      if (!(error instanceof CaptureDirty) || attempt >= 2) {
+        if (error instanceof CaptureDirty) {
+          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', `截图期间页面持续变动(${error.message})`, 'manualOnly')
+        }
+        throw error
+      }
+      // 容器拍摄中途变动(懒加载 prepend/自动滚底/新气泡):重新排干等稳后整体重拍一次。
+    }
+  }
+  throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '截图期间页面持续变动', 'manualOnly')
+}
+
+function captureStepFailure(result: MainCaptureStepFailed): never {
+  if (result.reason === 'route_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '截图期间目标会话绑定无法确证', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '截图目标滚动容器无法解析', 'manualOnly')
+}
+
+async function uploadCaptureJpeg(outcome: StitchOutcome): Promise<CaptureScreenshotData> {
+  let put: BlobPutOutcome
+  try {
+    put = await putSessionBlob(await outcome.jpeg.arrayBuffer())
+  } catch (error) {
+    if (error instanceof BlobChannelError) {
+      throw new ZhilianPlatformError(
+        error.permanent ? 'PAYLOAD_LIMIT' : 'CTX_NOT_READY',
+        `截图 blob 上行失败:${error.message}`,
+        error.permanent ? 'manualOnly' : 'afterRecovery',
+      )
+    }
+    throw error
+  }
+  return {
+    imageBlobRef: put.ref,
+    byteSize: put.byteSize,
+    truncated: outcome.truncated,
+    capturedAt: Date.now(),
+  }
+}
+
+// chat.captureThreadScreenshot@1:当前 tracked 会话聊天区长图(底部锚定)。
+// 尽力而为的降级型感知:任何失败只产生"缺图",不推进业务状态、不授权重试 effectful。
+export async function captureZhilianThreadScreenshot(
+  args: ChatCaptureThreadScreenshotArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<CaptureScreenshotData> {
+  if (!args || typeof args.conversationRef !== 'string' || !args.conversationRef) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '聊天截图缺少目标会话引用', 'manualOnly')
+  }
+  if (!sessionBlobParams()) {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '当前会话未协商 blob 通道,禁止内联图像', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标智联会话页面尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  if (!tab.active) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标会话标签页不在前台,放弃截图', 'afterRecovery')
+  }
+  const probe = await probeTab(tab)
+  if (!probe.contentScriptOk || probe.pageKind !== 'im') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面感知通道尚未就绪', 'afterRecovery', 'contentScriptDead')
+  }
+  assertExpectedPrincipal(probe, expectedPrincipalFingerprint)
+  await ctx.progress('聊天截图准备', 10)
+
+  const tabId = tab.id
+  const step: CaptureStepRunner = async (op, requestedTop = 0) => {
+    const result = await runMain(tabId, mainChatCaptureStep, [args.conversationRef, op, requestedTop])
+    if (result.status === 'failed') captureStepFailure(result)
+    return result
+  }
+  const outcome = await stitchCapture(tab, step, ctx, {
+    anchor: 'bottom',
+    maxFrames: 16,
+    progressLabel: '聊天截图',
+  })
+  const data = await uploadCaptureJpeg(outcome)
+  if (validatePrimitiveData(PrimitiveName.ChatCaptureThreadScreenshot, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '截图结果不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+  await ctx.progress('聊天截图完成', 100)
+  return data
+}
+
 // 仅导出纯解析/游标函数供 Node 用同一份生产代码做脱敏 fixture 测试；生产 bundle
 // 没有引用时由 esbuild tree-shake，不形成第二条运行路径。
 export const zhilianTestHooks = Object.freeze({
@@ -9960,6 +10436,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
   mainReadCurrentResume,
+  mainChatCaptureStep,
   mainSelectSourcingPosition,
   mainApplySourcingFilters,
   mainReadSourcingWindow,
