@@ -3024,12 +3024,27 @@ func (s *Store) MarkM5AutomaticActionManualRequired(actionID, reason string, at 
 	})
 }
 
+// communicationV4AcceptContinuationDisposition 区分接受动作正证后的三种
+// 合法记账走向。它只描述"该轮冻结时安排了什么"，不重新裁决业务。
+type communicationV4AcceptContinuationDisposition uint8
+
+const (
+	// 非 turn 来源（历史/纯事件）：没有可承接的冻结轮，确认后保持既有的
+	// 保守转人工终态。
+	communicationV4AcceptManualConservative communicationV4AcceptContinuationDisposition = iota
+	// turn 来源但该轮冻结时就没有安排对话跟随（服务态主动换微信）：确认
+	// 记账即完成，不承接、不转人工，回执由 wechatExchanged 事件轨给出。
+	communicationV4AcceptConfirmOnly
+	// 推进态承接组合完整：确认与轮推进在同一事务内继续。
+	communicationV4AcceptContinuationReady
+)
+
 func communicationV4WechatContinuationForAcceptedActionTx(
 	tx *gorm.DB,
 	action CommunicationV4EventAction,
 	intent EffectIntent,
 	asset ContactAsset,
-) (*communicationV4WechatContinuation, bool, error) {
+) (*communicationV4WechatContinuation, communicationV4AcceptContinuationDisposition, error) {
 	if tx == nil ||
 		action.V4Kind != communication.V4ActionAcceptWechat ||
 		action.EffectKind != CommunicationV4EventEffectAcceptWechat ||
@@ -3040,7 +3055,7 @@ func communicationV4WechatContinuationForAcceptedActionTx(
 		*action.EffectIntentID != intent.IntentID ||
 		asset.EffectIntentID == nil ||
 		*asset.EffectIntentID != intent.IntentID {
-		return nil, false, nil
+		return nil, communicationV4AcceptManualConservative, nil
 	}
 	initial, found, err := communicationV4ApplicationTx(
 		tx,
@@ -3049,25 +3064,27 @@ func communicationV4WechatContinuationForAcceptedActionTx(
 		action.SourceInputKey,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, communicationV4AcceptManualConservative, err
 	}
 	if !found {
-		return nil, false, ErrCommunicationV4Corrupt
+		return nil, communicationV4AcceptManualConservative, ErrCommunicationV4Corrupt
+	}
+	if !initial.Outcome.DialogueAfterActions {
+		return nil, communicationV4AcceptConfirmOnly, nil
 	}
 	if initial.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
-		!initial.Outcome.DialogueAfterActions ||
 		initial.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
 		initial.Outcome.NextAdvice != communication.V4AdviceNone ||
 		initial.Outcome.IntentLabel != m5ai.IntentInterested ||
 		initial.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
-		return nil, false, ErrCommunicationV4Corrupt
+		return nil, communicationV4AcceptManualConservative, ErrCommunicationV4Corrupt
 	}
 	var turn DialogueTurn
 	if err := tx.First(&turn, "turn_id = ?", action.SourceInputKey).Error; err != nil {
-		return nil, false, err
+		return nil, communicationV4AcceptManualConservative, err
 	}
 	if turn.ProfileID != action.ProfileID {
-		return nil, false, ErrCommunicationV4Corrupt
+		return nil, communicationV4AcceptManualConservative, ErrCommunicationV4Corrupt
 	}
 	_, alreadyConfirmed, err := communicationV4ApplicationTx(
 		tx,
@@ -3076,18 +3093,18 @@ func communicationV4WechatContinuationForAcceptedActionTx(
 		action.SemanticActionKey,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, communicationV4AcceptManualConservative, err
 	}
 	if !alreadyConfirmed &&
 		(turn.Status != DialogueTurnCollected ||
 			turn.IntentLabel != m5ai.IntentInterested ||
 			turn.IntentSource != DialogueIntentBusinessEvent) {
-		return nil, false, ErrCommunicationV4Corrupt
+		return nil, communicationV4AcceptManualConservative, ErrCommunicationV4Corrupt
 	}
 	return &communicationV4WechatContinuation{
 		Turn:                 turn,
 		ExpectedFromRevision: initial.ToRevision,
-	}, true, nil
+	}, communicationV4AcceptContinuationReady, nil
 }
 
 func applyCommunicationV4EventActionEffectStatusTx(
@@ -3156,7 +3173,7 @@ func applyCommunicationV4EventActionEffectStatusTx(
 				CardMessageSeq: action.CardMessageSeq,
 				SentAt:         sentAt,
 			}
-			continuation, continuationReady, err :=
+			continuation, disposition, err :=
 				communicationV4WechatContinuationForAcceptedActionTx(
 					tx,
 					action,
@@ -3166,12 +3183,25 @@ func applyCommunicationV4EventActionEffectStatusTx(
 			if err != nil {
 				return err
 			}
-			if continuationReady {
+			switch disposition {
+			case communicationV4AcceptContinuationReady:
 				_, _, _, err = applyCommunicationV4ConfirmedActionWithContinuationTx(
 					tx,
 					action.ProfileID,
 					confirmed,
 					continuation,
+					at,
+				)
+				return err
+			case communicationV4AcceptConfirmOnly:
+				// The frozen turn never scheduled a dialogue followup (service
+				// state accepting a candidate-initiated exchange). Confirming
+				// the fact completes the flow; the fixed receipt arrives via
+				// the ordinary wechatExchanged event rail.
+				_, _, _, err = applyCommunicationV4ConfirmedActionTx(
+					tx,
+					action.ProfileID,
+					confirmed,
 					at,
 				)
 				return err
