@@ -515,6 +515,90 @@ func (s *Store) NextSelectedSourcingGreetingMaterial(
 	return next, err
 }
 
+// SourcingGreetingWorkItem 是招呼语生成编排器的一个待驱动成员。Invocation
+// 为 nil 表示尚无预留；非 nil 时必为未终局（inFlight）行，按 2026-07-28
+// 并行重试裁决允许续驱动。
+type SourcingGreetingWorkItem struct {
+	Material   SourcingGreetingMaterial
+	Invocation *SourcingGreetingInvocation
+}
+
+// PendingSourcingGreetingWork 按采集顺序返回批次内全部仍需驱动的 selected
+// 成员：尚无预留的与 inFlight 的。已终局成员不出现。
+func (s *Store) PendingSourcingGreetingWork(
+	batchID string,
+	contextRevisionHash string,
+) ([]SourcingGreetingWorkItem, error) {
+	batchID = strings.TrimSpace(batchID)
+	contextRevisionHash = strings.TrimSpace(contextRevisionHash)
+	if batchID == "" || contextRevisionHash == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	var items []SourcingGreetingWorkItem
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		_, materials, invocations, err := loadSourcingGreetingScopeTx(
+			tx, batchID, true, contextRevisionHash,
+		)
+		if err != nil {
+			return err
+		}
+		byRun := make(map[string]SourcingGreetingInvocation, len(invocations))
+		for i := range invocations {
+			byRun[invocations[i].RunID] = invocations[i]
+		}
+		for i := range materials {
+			invocation, exists := byRun[materials[i].RunID]
+			if !exists {
+				items = append(items, SourcingGreetingWorkItem{Material: materials[i]})
+				continue
+			}
+			if invocation.FinishedAt != nil {
+				continue
+			}
+			inFlight := invocation
+			items = append(items, SourcingGreetingWorkItem{
+				Material: materials[i], Invocation: &inFlight,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// RecordSourcingGreetingAttempt 在一次 provider HTTP 尝试发出前登记该尝试。
+// 只允许作用于未终局预留；budgeted 表示本次尝试计入非 429 预算。
+func (s *Store) RecordSourcingGreetingAttempt(invocationID string, budgeted bool) (*SourcingGreetingInvocation, error) {
+	invocationID = strings.TrimSpace(invocationID)
+	if invocationID == "" {
+		return nil, ErrAIInvocationInvalid
+	}
+	var out SourcingGreetingInvocation
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{"attempt_count": gorm.Expr("attempt_count + 1")}
+		if budgeted {
+			updates["budgeted_attempt_count"] = gorm.Expr("budgeted_attempt_count + 1")
+		}
+		updated := tx.Model(&SourcingGreetingInvocation{}).
+			Where("invocation_id = ? AND finished_at IS NULL AND status = ?",
+				invocationID, AIInvocationTransportFailed).
+			Updates(updates)
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrAIInvocationConflict
+		}
+		return tx.First(&out, "invocation_id = ?", invocationID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ReserveSourcingGreeting 是 provider 调用的唯一持久授权点。RunID 与
 // ProfileID 任一已存在预留都只能重放原事实，不授权第二次网络调用。
 func (s *Store) ReserveSourcingGreeting(req ReserveSourcingGreetingRequest) (*ReserveSourcingGreetingResult, error) {
