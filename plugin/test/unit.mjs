@@ -7314,7 +7314,9 @@ function installM5BCardActionSurface(fixture) {
   durationInput.matches = (selector) => selector === 'input'
   const method = node({ text: '微信视频', active: true }).element
   const online = node({ text: '线上面试' }).element
-  const title = node({ text: '参加 线上面试' }).element
+  // 2026-07-27 真机：标题为"邀请{候选人姓名}参加 线上面试"，不存在字面恰好
+  // "参加 线上面试"的节点；夹具用虚构姓名钉住包含匹配语义。
+  const title = node({ text: '邀请 测试候选人 参加 线上面试' }).element
   const send = node({ text: '发送' }).element
   const modal = node().element
   modal.querySelector = (selector) => selector === '.interview-form' ? {} : null
@@ -7356,7 +7358,9 @@ function installM5BCardActionSurface(fixture) {
     }
     method.getAttribute = (name) =>
       name === 'aria-checked' && state.methodSelected ? 'true' : null
-    title.textContent = state.onlineSelected ? '参加 线上面试' : '参加 现场面试'
+    title.textContent = state.onlineSelected
+      ? '邀请 测试候选人 参加 线上面试'
+      : '邀请 测试候选人 参加 现场面试'
   }
   syncInputs()
   return {

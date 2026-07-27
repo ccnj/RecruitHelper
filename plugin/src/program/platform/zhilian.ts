@@ -7482,12 +7482,16 @@ async function mainPrepareInterviewEditor(
     if (onlineItems.length !== 1) return await abort('editor_unavailable')
     const online = onlineItems[0]
     const onlineSelected = (): boolean => {
-      const exactTitleNodes = Array.from(modal.querySelectorAll<HTMLElement>('*'))
-        .filter((node) => visible(node) && clean(node.textContent) === '参加 线上面试')
+      // 2026-07-27 真机：弹窗标题是"邀请{候选人姓名}参加 线上面试"并实时跟随类型
+      // 切换（现场面试时为"参加 现场面试"），页面上不存在字面恰好"参加 线上面试"
+      // 的节点；按包含匹配取叶层节点。
+      const onlineTitle = /参加\s*线上面试/u
+      const titleNodes = Array.from(modal.querySelectorAll<HTMLElement>('*'))
+        .filter((node) => visible(node) && onlineTitle.test(clean(node.textContent)))
         .filter((node) => !Array.from(node.children).some(
-          (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
+          (child) => visible(child) && onlineTitle.test(clean(child.textContent)),
         ))
-      return exactTitleNodes.length === 1
+      return titleNodes.length >= 1
     }
     if (!onlineSelected()) {
       if (!await interact(online)) return await abort('editor_unavailable')
@@ -8111,14 +8115,16 @@ function mainSendCardOnce(
       modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
     ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
     if (onlineItems.length !== 1) return false
+    // 2026-07-27 真机：标题为"邀请{候选人姓名}参加 线上面试"，按包含匹配取叶层节点。
+    const onlineTitle = /参加\s*线上面试/u
     const titleMatches = Array.from(modal.querySelectorAll<HTMLElement>('*'))
-      .filter((node) => visible(node) && clean(node.textContent) === '参加 线上面试')
+      .filter((node) => visible(node) && onlineTitle.test(clean(node.textContent)))
       .filter((node) => !Array.from(node.children).some(
-        (child) => visible(child) && clean(child.textContent) === '参加 线上面试',
+        (child) => visible(child) && onlineTitle.test(clean(child.textContent)),
       ))
     return dateMatches.length === 1 && timeMatches.length === 1 &&
       durationMatches.length === 1 && methodMatches.length === 1 &&
-      titleMatches.length === 1
+      titleMatches.length >= 1
   }
 
   if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
