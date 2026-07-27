@@ -108,6 +108,55 @@ func TestGreetingGenerationWithNoSendableCandidateSkipsEmptyConfirmation(t *test
 	}
 }
 
+func TestCommunicationRunCrossingMidnightTerminalizesAtPatrolBoundary(t *testing.T) {
+	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+	manager.confirmationProjection = func(requested string) (*store.AppConfirmationProjection, error) {
+		if requested != batchID {
+			return nil, store.ErrAppProjectionInvalid
+		}
+		return &store.AppConfirmationProjection{
+			Available: true,
+			Ready:     true,
+			BatchID:   batchID,
+			Candidates: []store.AppConfirmationCandidate{
+				{ProfileID: "profile-failed", Status: "generationFailed"},
+			},
+			GenerationFailed: 1,
+		}, nil
+	}
+	communication, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		communication.Status != workflow.StatusRunning ||
+		communication.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("enter communication = %+v, %v", communication, err)
+	}
+
+	// 次日 00:00:30。跨日终局必须经巡检边界（等当前 Tick 与收束中的链
+	// 结束）执行，随后停账号，并记录 dailyWindowClosed 终局原因
+	//（《24点边界裁决-2026-07-28》）。
+	actor.clock.now = actor.clock.now.Add(15*time.Hour + 30*time.Second)
+	boundaryBefore := actor.boundaryCalls
+	pauseBefore := actor.pauseCalls
+	completed, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		completed.RunID != run.RunID ||
+		completed.Status != workflow.StatusCompleted ||
+		completed.Stage != store.ProductWorkflowStageCompleted ||
+		completed.EndReason != productWorkflowEndReasonDailyWindowClosed {
+		t.Fatalf("cross-midnight terminalize = %+v, %v", completed, err)
+	}
+	if actor.boundaryCalls != boundaryBefore+1 || actor.pauseCalls != pauseBefore+1 {
+		t.Fatalf(
+			"boundary=%d->%d pause=%d->%d; 跨日终局必须经巡检边界并停账号",
+			boundaryBefore, actor.boundaryCalls, pauseBefore, actor.pauseCalls,
+		)
+	}
+	if active, err := db.ActiveProductWorkflowRun(); err != nil || active != nil {
+		t.Fatalf("跨日终局后不得残留活动 run: %+v, %v", active, err)
+	}
+}
+
 func TestAwaitingConfirmationClosesWhenFeedChangeLeavesNoSendableCandidate(t *testing.T) {
 	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
