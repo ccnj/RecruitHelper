@@ -730,12 +730,17 @@ func TestEmptyFirstAdoptionStaysPendingAndRecoveredHistoryIsNotProjected(t *test
 	}
 
 	first, err := h.manager.Tick(context.Background())
-	if err != nil || len(first.Rounds) != 1 || !errors.Is(first.Rounds[0].Err, syncledger.ErrAdoptionSnapshotEmpty) {
-		t.Fatalf("空首次快照应响亮失败: result=%+v err=%v", first, err)
+	// 空首次快照是页面观察异常（2026-07-27 裁决归瞬时）：本轮跳过该会话，
+	// 轮正常收尾，下轮自然重读。
+	if err != nil || len(first.Rounds) != 1 || first.Rounds[0].Err != nil {
+		t.Fatalf("空首次快照不得停轮: result=%+v err=%v", first, err)
 	}
 	conversation, _ := h.db.ConversationByKey(conversationKey)
 	if conversation.TrackingState != store.TrackingPending || conversation.AdoptedBoundarySeq != 0 || conversation.LastMessageSeq != 0 {
 		t.Fatalf("空快照不得完成收编: %+v", conversation)
+	}
+	if conversation.PatrolQuarantinedAt != nil {
+		t.Fatalf("空快照是瞬时错误，不得隔离: %+v", conversation)
 	}
 
 	h.clock.Add(h.config.MinimumRoundGap)
@@ -1262,7 +1267,10 @@ func TestProbeMismatchPausesBeforeAnyAccountDataRead(t *testing.T) {
 	}
 }
 
-func TestManualOnlyThreadFailurePausesInsteadOfRecurringIntrusiveRead(t *testing.T) {
+// 2026-07-27 甲方裁决：单个候选人 readThread 的 manualOnly 失败只隔离该会话，
+// 轮与账号照常运行；不再自动重读由会话级隔离标记保证，人工解除后才有下一次
+// 对账机会。
+func TestManualOnlyThreadFailureQuarantinesConversationInsteadOfPausingAccount(t *testing.T) {
 	h := newHarness(t)
 	conversationKey := seedTracked(t, h, "conversation-manual-only", "peer-manual-only", []store.MessageDraft{
 		draftText("old"),
@@ -1287,35 +1295,47 @@ func TestManualOnlyThreadFailurePausesInsteadOfRecurringIntrusiveRead(t *testing
 	}
 
 	first, err := h.manager.Tick(context.Background())
-	if err != nil || len(first.Rounds) != 1 || first.Rounds[0].Err == nil {
-		t.Fatalf("manualOnly 首轮应响亮失败: result=%+v err=%v", first, err)
+	if err != nil || len(first.Rounds) != 1 || first.Rounds[0].Err != nil ||
+		first.Rounds[0].Status != "ok" {
+		t.Fatalf("manualOnly 只隔离当事人，轮必须正常收尾: result=%+v err=%v", first, err)
 	}
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil {
 		t.Fatalf("AccountByKey: account=%+v err=%v", account, err)
 	}
-	if account.PausedReason != PauseHandManualReview || account.StoppedAt == nil || !account.DirtyHint {
-		t.Fatalf("manualOnly 未停止 actor 并保留待对账提示: %+v", account)
+	if account.PausedReason != "" || account.StoppedAt != nil {
+		t.Fatalf("manualOnly 不得再暂停整个账号: %+v", account)
 	}
 	if got := h.runner.count(protocol.PrimChatReadThread); got != 1 {
 		t.Fatalf("首轮 readThread 次数=%d, want 1", got)
 	}
+	conversation, err := h.db.ConversationByKey(conversationKey)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
+		conversation.PatrolQuarantineReason != "patrolQuarantine:hand:INTERNAL_HAND" {
+		t.Fatalf("manualOnly 必须隔离该会话: conversation=%+v err=%v", conversation, err)
+	}
 
-	// 即使跨过 minimum gap 和多个正常巡检周期，真人重新开启前也不能把
-	// 同一 manualOnly 失败伪装成新的自动对账机会。
+	// 跨过多个巡检周期：轮照常运行，但被隔离会话不得再自动重读。
 	h.clock.Add(3 * h.config.PatrolInterval)
 	second, err := h.manager.Tick(context.Background())
-	if err != nil || len(second.Rounds) != 0 || h.runner.count(protocol.PrimChatReadThread) != 1 {
-		t.Fatalf("暂停后仍自动重复 intrusive: result=%+v err=%v calls=%v", second, err, h.runner.names())
+	if err != nil || len(second.Rounds) != 1 || second.Rounds[0].Err != nil ||
+		h.runner.count(protocol.PrimChatReadThread) != 1 {
+		t.Fatalf("隔离后仍自动重复 intrusive: result=%+v err=%v calls=%v", second, err, h.runner.names())
 	}
 
-	if err := h.manager.EnableToday(h.key); err != nil {
-		t.Fatalf("真人重新开启: %v", err)
+	// 人工解除隔离后才允许下一次对账尝试；再次失败会重新隔离。
+	if cleared, err := h.db.ClearConversationPatrolQuarantine(conversationKey, h.clock.Now()); err != nil || !cleared {
+		t.Fatalf("人工解除隔离: cleared=%v err=%v", cleared, err)
 	}
+	h.clock.Add(h.config.PatrolInterval + time.Minute)
 	third, err := h.manager.Tick(context.Background())
-	if err != nil || len(third.Rounds) != 1 || third.Rounds[0].Err == nil ||
+	if err != nil || len(third.Rounds) != 1 || third.Rounds[0].Err != nil ||
 		h.runner.count(protocol.PrimChatReadThread) != 2 {
-		t.Fatalf("真人重新开启后未获得一次正常对账机会: result=%+v err=%v calls=%v", third, err, h.runner.names())
+		t.Fatalf("人工解除后未获得一次正常对账机会: result=%+v err=%v calls=%v", third, err, h.runner.names())
+	}
+	conversation, err = h.db.ConversationByKey(conversationKey)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil {
+		t.Fatalf("再次失败必须重新隔离: conversation=%+v err=%v", conversation, err)
 	}
 }
 

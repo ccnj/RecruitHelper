@@ -31,6 +31,7 @@ type roundActor struct {
 	unreadRetryDeferred     bool
 	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
+	transientSkips          []conversationSkipNote
 }
 
 type threadSnapshot struct {
@@ -344,6 +345,13 @@ func (a *roundActor) processConversationListPage(
 		if checked, exists := a.checkedListFingerprints[summary.ConversationRef]; exists && checked == fingerprint {
 			continue
 		}
+		// 已被巡检隔离的会话在人工解除前不再自动对账或推进（2026-07-27
+		// 甲方裁决），也不消耗工作流候选人闸。
+		if conversation, exists := tracked[summary.ConversationRef]; exists &&
+			conversation.PatrolQuarantinedAt != nil {
+			a.checkedListFingerprints[summary.ConversationRef] = fingerprint
+			continue
+		}
 		if canEnterUnread {
 			_, stateErr := a.refreshHandState(ctx)
 			if stateErr != nil {
@@ -369,13 +377,21 @@ func (a *roundActor) processConversationListPage(
 		// the same unchanged row in an overlapping window.
 		a.checkedListFingerprints[summary.ConversationRef] = fingerprint
 
+		key := store.ConversationKey{
+			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+			ConversationRef: summary.ConversationRef,
+		}
 		dirty, err := a.detectDirtySummary(
 			summary,
 			false,
 			tracked,
 		)
 		if err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		readCurrent := dirty != nil
 		if readCurrent {
@@ -388,14 +404,14 @@ func (a *roundActor) processConversationListPage(
 				a.projection = append(a.projection, projection)
 			}
 			if err != nil {
-				if isRunError(err, protocol.ErrCodeTargetNotFound) {
-					// 目标在 click 前离开当前可定位窗口，没有产生页面
-					// 副作用。当前 fingerprint 已尝试；继续使用本次命令
-					// 返回的其他稳定 ref，下一窗口的重叠不会围绕它打转。
-					continue
+				// 目标暂离窗口等瞬时错误只本轮跳过；确定性错误隔离该会话；
+				// 账号级信号仍全停（2026-07-27 甲方裁决）。当前 fingerprint
+				// 已尝试，重叠窗口不会围绕它打转。
+				handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+				if !handled {
+					return conversationListPageContinue, fatalErr
 				}
-				a.handleCommandFailure(err)
-				return conversationListPageContinue, err
+				continue
 			}
 			a.manager.markListHintVerified(
 				dirtyConversation.listHintKey,
@@ -405,13 +421,13 @@ func (a *roundActor) processConversationListPage(
 				return conversationListPageStop, nil
 			}
 		}
-		key := store.ConversationKey{
-			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
-			ConversationRef: summary.ConversationRef,
-		}
 		profile, err := a.manager.store.CandidateProfileByConversation(key)
 		if err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if profile == nil {
 			continue
@@ -420,10 +436,18 @@ func (a *roundActor) processConversationListPage(
 			ctx,
 			*profile,
 		); err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if a.classificationCorrected {
 			return conversationListPageStop, nil
@@ -441,6 +465,13 @@ func (a *roundActor) processUnreadConversationListPage(
 ) (conversationListPageOutcome, error) {
 	for _, summary := range page.sessions {
 		if _, attempted := a.unreadAttemptedRefs[summary.ConversationRef]; attempted {
+			continue
+		}
+		// 已被巡检隔离的会话在人工解除前不再自动打开或对账（2026-07-27
+		// 甲方裁决）；其未读气泡由 pass 收尾基线吸收。
+		if conversation, exists := tracked[summary.ConversationRef]; exists &&
+			conversation.PatrolQuarantinedAt != nil {
+			a.unreadAttemptedRefs[summary.ConversationRef] = struct{}{}
 			continue
 		}
 		allowed, gateErr := a.mayStartNextConversation(ctx)
@@ -461,14 +492,21 @@ func (a *roundActor) processUnreadConversationListPage(
 		}
 		profile, err := a.manager.store.CandidateProfileByConversation(key)
 		if err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if profile == nil {
 			if err := a.openUnreadConversationWithoutAutomation(
 				ctx,
 				summary.ConversationRef,
 			); err != nil {
-				return conversationListPageContinue, err
+				handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+				if !handled {
+					return conversationListPageContinue, fatalErr
+				}
 			}
 			continue
 		}
@@ -479,14 +517,21 @@ func (a *roundActor) processUnreadConversationListPage(
 		// still has to be opened once to clear unread, but may not be promoted
 		// into resume capture, state-machine work or AI from this cleanup pass.
 		if targetErr != nil && !errors.Is(targetErr, store.ErrCommunicationV4Missing) {
-			return conversationListPageContinue, targetErr
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, targetErr)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if !ready {
 			if err := a.openUnreadConversationWithoutAutomation(
 				ctx,
 				summary.ConversationRef,
 			); err != nil {
-				return conversationListPageContinue, err
+				handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+				if !handled {
+					return conversationListPageContinue, fatalErr
+				}
 			}
 			continue
 		}
@@ -497,12 +542,21 @@ func (a *roundActor) processUnreadConversationListPage(
 			tracked,
 		)
 		if err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if dirty == nil {
-			return conversationListPageContinue, errors.New(
-				"已有候选人档案的未读会话缺少可对账会话事实",
+			handled, fatalErr := a.settleConversationFailure(
+				ctx, key, profile.ProfileID,
+				errors.New("已有候选人档案的未读会话缺少可对账会话事实"),
 			)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		dirtyConversation := *dirty
 		if err := a.setStage("readingThread"); err != nil {
@@ -521,8 +575,11 @@ func (a *roundActor) processUnreadConversationListPage(
 				}
 				continue
 			}
-			a.handleCommandFailure(err)
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		a.manager.markListHintVerified(
 			dirtyConversation.listHintKey,
@@ -533,10 +590,18 @@ func (a *roundActor) processUnreadConversationListPage(
 			return conversationListPageSwitchAll, nil
 		}
 		if err := a.prepareInboundConversationProfile(ctx, *profile); err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
-			return conversationListPageContinue, err
+			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+			if !handled {
+				return conversationListPageContinue, fatalErr
+			}
+			continue
 		}
 		if a.classificationCorrected {
 			a.unreadRetryDeferred = true
@@ -602,18 +667,17 @@ func (a *roundActor) openUnreadConversationWithoutAutomation(
 			}
 			return nil
 		}
-		a.handleCommandFailure(err)
+		// 失败分流（含账号级信号的 handleCommandFailure）由调用方的
+		// settleConversationFailure 统一执行。
 		return err
 	}
 	if data.ConversationRef != conversationRef {
-		err := &RunError{
+		return &RunError{
 			Code:       protocol.ErrCodeInternalHand,
 			Retryable:  protocol.RetryableManualOnly,
 			SideEffect: protocol.SideEffectPossible,
 			Cause:      errors.New("未读会话打开结果与目标会话不一致"),
 		}
-		a.handleCommandFailure(err)
-		return err
 	}
 	return nil
 }
@@ -1496,7 +1560,7 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 	}
 	plan, err := syncledger.Reconcile(input)
 	if err != nil {
-		return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
+		return ConversationProjection{Key: key}, err
 	}
 	if plan.NeedsDeep() {
 		snapshot, err = a.readThread(ctx, key.ConversationRef, protocolAnchors, true)
@@ -1513,7 +1577,7 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		input.AnchorMatched = snapshot.anchorMatched
 		plan, err = syncledger.Reconcile(input)
 		if err != nil {
-			return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
+			return ConversationProjection{Key: key}, err
 		}
 	}
 
@@ -1525,7 +1589,7 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		plan.Correction.PauseReason = PauseUserRequested
 	}
 	if _, err := syncledger.ApplyPlan(a.manager.store, plan); err != nil {
-		return ConversationProjection{Key: key}, a.convergeReconcileFailure(key, err)
+		return ConversationProjection{Key: key}, err
 	}
 	if plan.Decision != syncledger.DecisionAuditedRebaseline {
 		for i := range plan.Audits {
@@ -1542,33 +1606,6 @@ func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConve
 		a.classificationCorrected = true
 	}
 	return projection, nil
-}
-
-func (a *roundActor) convergeReconcileFailure(key store.ConversationKey, reconcileErr error) error {
-	unsafeCorrection := errors.Is(reconcileErr, syncledger.ErrUnsafeMessageClassificationCorrection) ||
-		errors.Is(reconcileErr, store.ErrMessageClassificationCorrectionUnsafe)
-	sourceIdentityConflict := errors.Is(reconcileErr, syncledger.ErrSourceKeySemanticConflict) ||
-		errors.Is(reconcileErr, store.ErrMessageSourceKeyConflict)
-	if !unsafeCorrection && !sourceIdentityConflict {
-		return reconcileErr
-	}
-	// Stable-identity conflicts and incomplete correction evidence are not
-	// retryable page-read failures. Stop the account actor before recording the
-	// diagnostic so a later audit failure still cannot cause automatic rereads.
-	pauseErr := a.manager.pauseAccount(a.key(), PauseHandManualReview, a.manager.now())
-	category := "conversation_source_identity_conflict"
-	detail := "稳定消息等值键的方向或正文哈希冲突，已暂停账号等待人工处理"
-	if unsafeCorrection {
-		category = "conversation_classification_correction_unsafe"
-		detail = "候选修正缺少完整唯一证据，已暂停账号等待人工处理"
-	}
-	auditErr := a.manager.store.AppendAudit(&store.AuditEntry{
-		At: a.manager.now(), Category: category,
-		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: key.ConversationRef,
-		RoundID: a.roundID,
-		Detail:  detail,
-	})
-	return errors.Join(reconcileErr, pauseErr, auditErr)
 }
 
 func (a *roundActor) readThread(ctx context.Context, conversationRef string, anchors []protocol.MessageAnchor, deep bool) (threadSnapshot, error) {
@@ -1863,11 +1900,15 @@ func (a *roundActor) handleCommandFailure(err error) {
 		// 不重派、下一巡检再偷偷生产一条”的同义词。停止整个账号 actor，
 		// 由真人重新开启后才允许下一次正常对账，避免 INTERNAL_HAND 等实现
 		// 异常在每个 dirty/周期轮次中无界重放页面驱动。
+		// 2026-07-27 甲方裁决后本分支只覆盖账号/页面级命令（probe、readList
+		// 等）：单个候选人处理中的 manualOnly 由 settleConversationFailure
+		// 隔离该会话，不再进入这里暂停整个账号。
 		_ = a.manager.pauseAccount(a.key(), PauseHandManualReview, a.manager.now())
 	}
 }
 
 func (a *roundActor) finish(runErr error) error {
+	a.appendTransientSkipSummary()
 	finishedAt := a.manager.now()
 	status := "ok"
 	stage := "finished"

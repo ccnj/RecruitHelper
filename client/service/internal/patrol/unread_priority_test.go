@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -687,7 +688,9 @@ func TestUnreadPriorityAdoptedProfileWithoutV4RootUsesOpenOnly(t *testing.T) {
 	}
 }
 
-func TestUnreadPriorityDoesNotSwallowElementUnresolvedFromOpen(t *testing.T) {
+// 2026-07-27 甲方裁决：未读清理 open 的 manualOnly 失败只隔离该会话，
+// 不再暂停整个账号；轮正常收尾且下一轮不再自动重开。
+func TestUnreadPriorityElementUnresolvedFromOpenQuarantinesConversation(t *testing.T) {
 	h := newHarness(t)
 	setUnreadHintForTest(h, ptr(1))
 	h.runner.handler = func(request RunRequest) (any, error) {
@@ -710,13 +713,28 @@ func TestUnreadPriorityDoesNotSwallowElementUnresolvedFromOpen(t *testing.T) {
 	}
 
 	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 ||
-		!isRunError(result.Rounds[0].Err, protocol.ErrCodeElementUnresolved) {
-		t.Fatalf("open 的 ELEMENT_UNRESOLVED 被误吞: result=%+v err=%v", result, err)
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil ||
+		result.Rounds[0].Status != "ok" {
+		t.Fatalf("open 的 manualOnly 只隔离当事人，轮必须正常收尾: result=%+v err=%v", result, err)
 	}
 	account, err := h.db.AccountByKey(h.key)
-	if err != nil || account == nil || account.PausedReason != PauseHandManualReview {
-		t.Fatalf("open 的 manualOnly 没有保留正常停机语义: account=%+v err=%v", account, err)
+	if err != nil || account == nil || account.PausedReason != "" || account.StoppedAt != nil {
+		t.Fatalf("open 的 manualOnly 不得再暂停账号: account=%+v err=%v", account, err)
+	}
+	conversation, err := h.db.ConversationByKey(store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: "unread-open-unresolved",
+	})
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
+		conversation.PatrolQuarantineReason != "patrolQuarantine:hand:ELEMENT_UNRESOLVED" {
+		t.Fatalf("open 失败必须隔离该会话: conversation=%+v err=%v", conversation, err)
+	}
+	openCount := h.runner.count(protocol.PrimChatOpenConversation)
+	h.clock.Add(h.config.PatrolInterval + time.Minute)
+	next, err := h.manager.Tick(context.Background())
+	if err != nil || len(next.Rounds) != 1 ||
+		h.runner.count(protocol.PrimChatOpenConversation) != openCount {
+		t.Fatalf("被隔离会话不得自动重开: next=%+v err=%v calls=%v", next, err, h.runner.names())
 	}
 }
 

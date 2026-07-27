@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/store"
-	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -357,9 +356,10 @@ func TestApplyPlanFailureDoesNotVerifyListHint(t *testing.T) {
 	}
 
 	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 ||
-		!errors.Is(result.Rounds[0].Err, store.ErrConversationVersionConflict) {
-		t.Fatalf("预期 ApplyPlan 版本冲突: result=%+v err=%v", result, err)
+	// 版本冲突是与事件摄入的良性写竞争：本轮跳过该会话（2026-07-27 裁决
+	// 归瞬时），轮正常收尾，不隔离、不登记指纹。
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("ApplyPlan 版本冲突不得停轮: result=%+v err=%v", result, err)
 	}
 	cacheKey := verificationKeyForHarness(t, h, key.ConversationRef)
 	h.manager.mu.Lock()
@@ -367,6 +367,10 @@ func TestApplyPlanFailureDoesNotVerifyListHint(t *testing.T) {
 	h.manager.mu.Unlock()
 	if cached {
 		t.Fatal("ApplyPlan 失败后错误登记了已核对 fingerprint")
+	}
+	conversation, err := h.db.ConversationByKey(key)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt != nil {
+		t.Fatalf("版本冲突是瞬时错误，不得隔离: conversation=%+v err=%v", conversation, err)
 	}
 }
 
@@ -402,9 +406,10 @@ func TestSourceIdentityConflictDoesNotVerifyListHint(t *testing.T) {
 	}
 
 	result, err := h.manager.Tick(context.Background())
-	if err != nil || len(result.Rounds) != 1 ||
-		!errors.Is(result.Rounds[0].Err, syncledger.ErrSourceKeySemanticConflict) {
-		t.Fatalf("预期稳定消息身份冲突: result=%+v err=%v", result, err)
+	// 源身份冲突是确定性错误：隔离该会话（2026-07-27 裁决），轮正常收尾，
+	// 指纹不登记。
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("稳定身份冲突只隔离当事人，不得停轮: result=%+v err=%v", result, err)
 	}
 	cacheKey := verificationKeyForHarness(t, h, key.ConversationRef)
 	h.manager.mu.Lock()
@@ -412,6 +417,11 @@ func TestSourceIdentityConflictDoesNotVerifyListHint(t *testing.T) {
 	h.manager.mu.Unlock()
 	if cached {
 		t.Fatal("稳定身份冲突后错误登记了已核对 fingerprint")
+	}
+	conversation, err := h.db.ConversationByKey(key)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
+		conversation.PatrolQuarantineReason != "patrolQuarantine:sourceIdentityConflict" {
+		t.Fatalf("稳定身份冲突必须隔离该会话: conversation=%+v err=%v", conversation, err)
 	}
 }
 
