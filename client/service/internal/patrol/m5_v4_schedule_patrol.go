@@ -33,6 +33,8 @@ func (a *roundActor) processCommunicationV4Schedule(
 			Now:                 evaluatedAt,
 			HasPendingDialogue:  false,
 			Reply:               communication.ReplyAdvice{State: communication.AdviceAbsent},
+			// 预评估与冻结同源传入跟催文案；冻结事务内仍会带称呼重渲染。
+			InterviewFollowupTexts: communicationV4InterviewFollowupTexts,
 		},
 	)
 	if err != nil {
@@ -75,6 +77,7 @@ func (a *roundActor) processCommunicationV4Schedule(
 		ContextRevisionHash:         material.ContextRevision.RevisionHash,
 		HasPendingDialogue:          false,
 		Reply:                       communication.ReplyAdvice{State: communication.AdviceAbsent},
+		InterviewFollowupTexts:      communicationV4InterviewFollowupTexts,
 		EvaluatedAt:                 evaluatedAt,
 		FrozenAt:                    a.manager.now(),
 	}
