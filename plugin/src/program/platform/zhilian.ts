@@ -7596,12 +7596,15 @@ async function mainPrepareInterviewEditor(
     })
     if (!exactTime) return await abort('time_unavailable')
 
-    const durationItem = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item'))
-      .find((node) => visible(node) && /面试时长/u.test(clean(node.textContent)))
-    const durationControl = durationItem?.querySelector<HTMLElement>('.km-select') ?? null
-    if (!durationControl ||
-        durationControl.querySelector<HTMLInputElement>('input[placeholder="面试时长"]') === null ||
-        !await interact(durationControl)) return await abort('duration_unavailable')
+    // 2026-07-27 真机："面试时长"只出现在输入框 placeholder（不进任何表单项文本），
+    // 控件与日期/时间同处"面试时间"一行；按 placeholder 反向定位所属 km-select。
+    const durationInputs = Array.from(
+      modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
+    ).filter((node) => visible(node))
+    const durationControl = durationInputs.length === 1
+      ? durationInputs[0].closest<HTMLElement>('.km-select')
+      : null
+    if (!durationControl || !await interact(durationControl)) return await abort('duration_unavailable')
     const durationOption = await waitFor(() => {
       const optionMinutes = (text: string): number | null => {
         const normalized = clean(text)
