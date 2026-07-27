@@ -6,6 +6,7 @@ import { beginCommandNavigation } from '../../base/navigation'
 import type {
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
+  CandidateCaptureResumeScreenshotArgs,
   CandidateReadCurrentData,
   CaptureScreenshotData,
   ChatCaptureThreadScreenshotArgs,
@@ -10326,7 +10327,17 @@ async function stitchCapture(
   ctx: PrimitiveContext,
   options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
 ): Promise<StitchOutcome> {
-  const pacer = new MutationPacer()
+  return await stitchCaptureWithPacer(tab, step, new MutationPacer(), ctx, options)
+}
+
+// 与调用方共享同一节奏闸的拼接入口(简历路径的打开/关闭点击也计入节奏)。
+async function stitchCaptureWithPacer(
+  tab: chrome.tabs.Tab,
+  step: CaptureStepRunner,
+  pacer: MutationPacer,
+  ctx: PrimitiveContext,
+  options: { anchor: 'top' | 'bottom'; maxFrames: number; progressLabel: string },
+): Promise<StitchOutcome> {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const settled = await settleForCapture(step, pacer, ctx, options)
     if (!settled.visible) {
@@ -10373,6 +10384,295 @@ async function uploadCaptureJpeg(outcome: StitchOutcome): Promise<CaptureScreens
     byteSize: put.byteSize,
     truncated: outcome.truncated,
     capturedAt: Date.now(),
+  }
+}
+
+interface MainResumeCaptureFailed {
+  status: 'failed'
+  reason:
+    | 'route_changed'
+    | 'target_changed'
+    | 'container_unresolved'
+    | 'stale_modal'
+    | 'entry_unresolved'
+    | 'modal_cardinality'
+    | 'open_failed'
+    | 'close_failed'
+}
+type MainResumeCaptureStepResult = MainCaptureStepReady | MainResumeCaptureFailed
+
+// 简历截图的页面步进(自包含,serialize 到 MAIN world)。与 mainReadCurrentResume
+// 共享同一批页面事实:入口「查看详情」、弹窗 .new-shortcut-resume__modal、
+// 关闭 .new-shortcut-resume__close;滚动容器经 resolveScrollContainer 归一
+// (简历:根 overflow:hidden,真滚动层是内层 .km-scrollbar__wrap)。
+// op: open(点入口等弹窗) | measure | pinTop | scrollTo | readback | close
+async function mainResumeCaptureStep(
+  conversationRef: string,
+  platformUserRef: string,
+  op: string,
+  requestedTop: number,
+): Promise<MainResumeCaptureStepResult> {
+  type AnyRecord = Record<string, unknown>
+  const asRecord = (value: unknown): AnyRecord | null =>
+    value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC').replace(/\u00a0/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const failed = (reason: MainResumeCaptureFailed['reason']): MainResumeCaptureFailed =>
+    ({ status: 'failed', reason })
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
+  const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+
+  try {
+    const route = new URL(location.href)
+    if (route.pathname !== '/app/im' || route.searchParams.get('sessionId') !== conversationRef) {
+      return failed('route_changed')
+    }
+  } catch {
+    return failed('route_changed')
+  }
+  const initialSessions = (): AnyRecord[] | null => {
+    const source = Array.from(document.scripts ?? [])
+      .map((script) => script.textContent ?? '')
+      .find((candidate) => candidate.includes('__INITIAL_STATE__='))
+    if (!source) return null
+    const candidate = source.slice(source.indexOf('__INITIAL_STATE__=') + '__INITIAL_STATE__='.length).trim()
+    const start = candidate.indexOf('{')
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index >= 0 && index < candidate.length; index += 1) {
+      const char = candidate[index]
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (char === '\\') escaped = true
+        else if (char === '"') quoted = false
+        continue
+      }
+      if (char === '"') quoted = true
+      else if (char === '{') depth += 1
+      else if (char === '}' && --depth === 0) {
+        try {
+          const initial = asRecord(JSON.parse(candidate.slice(start, index + 1)))
+          const im = asRecord(initial?.im)
+          return Array.isArray(im?.sessions) ? im.sessions as AnyRecord[] : null
+        } catch {
+          return null
+        }
+      }
+    }
+    return null
+  }
+  const targetMatches = (): boolean => {
+    const engine = asRecord((window as unknown as AnyRecord).imEngine)
+    const sessions = engine && Array.isArray(engine.sessions)
+      ? engine.sessions as AnyRecord[]
+      : initialSessions()
+    if (sessions === null) return false
+    const matches = sessions.filter((item) => clean(item.sessionId) === conversationRef)
+    return matches.length === 1 && clean(matches[0].peerPartnerId) === platformUserRef
+  }
+  if (!targetMatches()) return failed('target_changed')
+
+  const isScrollableY = (el: HTMLElement): boolean => {
+    const oy = window.getComputedStyle(el).overflowY
+    return (oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4
+  }
+  const resolveScrollContainer = (el: HTMLElement): HTMLElement => {
+    const room = (n: HTMLElement | null): n is HTMLElement =>
+      !!n && n.scrollHeight > n.clientHeight + 4
+    const descWrap = el.querySelector<HTMLElement>('.km-scrollbar__wrap')
+    if (room(descWrap)) return descWrap
+    const ancWrap = el.closest<HTMLElement>('.km-scrollbar__wrap')
+    if (room(ancWrap)) return ancWrap
+    if (el.scrollHeight > el.clientHeight + 4) return el
+    let best: HTMLElement | null = null
+    let bestRoom = 80
+    el.querySelectorAll<HTMLElement>('*').forEach((c) => {
+      if (isScrollableY(c) && c.scrollHeight - c.clientHeight > bestRoom) {
+        best = c
+        bestRoom = c.scrollHeight - c.clientHeight
+      }
+    })
+    return best || el
+  }
+  const metricsOf = (scrollEl: HTMLElement): MainCaptureStepReady => {
+    const rect = scrollEl.getBoundingClientRect()
+    return {
+      status: 'ready',
+      visible: document.visibilityState === 'visible',
+      clientH: Math.max(1, scrollEl.clientHeight),
+      scrollHeight: Math.max(scrollEl.scrollHeight, Math.max(1, scrollEl.clientHeight)),
+      scrollTop: scrollEl.scrollTop,
+      dpr: window.devicePixelRatio || 1,
+      innerW: window.innerWidth,
+      innerH: window.innerHeight,
+      rectTop: rect.top,
+      rectBottom: rect.bottom,
+      rectLeft: rect.left,
+      rectRight: rect.right,
+    }
+  }
+
+  if (op === 'open') {
+    if (visibleAll(document, '.new-shortcut-resume__modal').length !== 0) return failed('stale_modal')
+    const details = visibleAll(document, '.im-session-detail')
+    if (details.length !== 1) return failed('entry_unresolved')
+    const detail = details[0]
+    const entries = visibleAll(detail, '.hover-resume-footer__button, button, a, [role="button"]')
+      .filter((element) => clean(element.textContent) === '查看详情' &&
+        element.closest('.im-session-detail') === detail)
+    if (entries.length !== 1) return failed('entry_unresolved')
+    entries[0].click()
+    const waitUntil = Date.now() + 6_000
+    let modals: HTMLElement[] = []
+    while (Date.now() < waitUntil) {
+      modals = visibleAll(document, '.new-shortcut-resume__modal')
+      if (modals.length !== 0) break
+      await sleep(120)
+    }
+    if (modals.length !== 1) return failed(modals.length === 0 ? 'open_failed' : 'modal_cardinality')
+    return metricsOf(resolveScrollContainer(modals[0]))
+  }
+
+  const modals = visibleAll(document, '.new-shortcut-resume__modal')
+  if (modals.length !== 1) return failed(modals.length === 0 ? 'open_failed' : 'modal_cardinality')
+  const modal = modals[0]
+
+  if (op === 'close') {
+    const closeButtons = visibleAll(modal, '.new-shortcut-resume__close')
+    if (closeButtons.length !== 1) return failed('close_failed')
+    closeButtons[0].click()
+    const closeUntil = Date.now() + 10_000
+    while (Date.now() < closeUntil) {
+      if (visibleAll(document, '.new-shortcut-resume__modal').length === 0) {
+        const anchor = document.scrollingElement || document.documentElement
+        return metricsOf(anchor as HTMLElement)
+      }
+      await sleep(120)
+    }
+    return failed('close_failed')
+  }
+
+  const roots = visibleAll(modal, '.resume-detail')
+  if (roots.length !== 1) return failed('container_unresolved')
+  const scrollEl = resolveScrollContainer(modal)
+  if (op === 'measure') {
+    // 弹窗自身固定居中,无需 scrollIntoView;仅量测。
+  } else if (op === 'pinTop') {
+    scrollEl.scrollTop = 0
+  } else if (op === 'scrollTo') {
+    scrollEl.scrollTop = Math.max(0, requestedTop)
+  }
+  return metricsOf(scrollEl)
+}
+
+function resumeCaptureStepFailure(result: MainResumeCaptureFailed): never {
+  if (result.reason === 'route_changed' || result.reason === 'target_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '简历截图期间目标会话绑定无法确证', 'manualOnly')
+  }
+  if (result.reason === 'close_failed') {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '简历弹窗未能关闭还原', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `简历截图目标无法解析(${result.reason})`, 'manualOnly')
+}
+
+// candidate.captureResumeScreenshot@1:打开与 candidate.readResume 同款的简历
+// 详情弹窗,顶部锚定拼接后关闭还原。ok = 图已上行且弹窗已关闭;任何失败只产生
+// "缺图",关闭在失败路径上也尽力执行,绝不静默留下残余弹窗遮挡后续原语。
+export async function captureZhilianResumeScreenshot(
+  args: CandidateCaptureResumeScreenshotArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<CaptureScreenshotData> {
+  if (!args || typeof args.conversationRef !== 'string' || !args.conversationRef ||
+      typeof args.platformUserRef !== 'string' || !args.platformUserRef) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '简历截图缺少目标会话或候选人引用', 'manualOnly')
+  }
+  if (!sessionBlobParams()) {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '当前会话未协商 blob 通道,禁止内联图像', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined || tab.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标智联会话页面尚未就绪', 'afterRecovery', 'pageBroken')
+  }
+  if (!tab.active) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标会话标签页不在前台,放弃截图', 'afterRecovery')
+  }
+  const probe = await probeTab(tab)
+  if (!probe.contentScriptOk || probe.pageKind !== 'im') {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联 IM 页面感知通道尚未就绪', 'afterRecovery', 'contentScriptDead')
+  }
+  assertExpectedPrincipal(probe, expectedPrincipalFingerprint)
+  await ctx.progress('简历截图准备', 10)
+
+  const tabId = tab.id
+  const step: CaptureStepRunner = async (op, requestedTop = 0) => {
+    const result = await runMain(tabId, mainResumeCaptureStep, [
+      args.conversationRef,
+      args.platformUserRef,
+      op,
+      requestedTop,
+    ])
+    if (result.status === 'failed') resumeCaptureStepFailure(result)
+    return result
+  }
+
+  const pacer = new MutationPacer()
+  await pacer.beforeMutation()
+  const opened = await step('open')
+  if (!opened.visible) {
+    await closeResumeModalBestEffort(step, pacer, Date.now())
+    throw new ZhilianPlatformError('CTX_NOT_READY', '目标标签页不在前台,放弃截图', 'afterRecovery')
+  }
+  const openedAt = Date.now()
+
+  let outcome: StitchOutcome
+  try {
+    outcome = await stitchCaptureWithPacer(tab, step, pacer, ctx, {
+      anchor: 'top',
+      maxFrames: 16,
+      progressLabel: '简历截图',
+    })
+  } catch (error) {
+    await closeResumeModalBestEffort(step, pacer, openedAt)
+    throw error
+  }
+  // 打开简历后必须至少停留 2 秒(交互节奏裁决);拼接通常已远超,此处兜底早退路径。
+  const stayUntil = openedAt + 2_000 + Math.floor(Math.random() * 501)
+  if (Date.now() < stayUntil) await swSleep(stayUntil - Date.now())
+  await pacer.beforeMutation()
+  await step('close')
+
+  const data = await uploadCaptureJpeg(outcome)
+  if (validatePrimitiveData(PrimitiveName.CandidateCaptureResumeScreenshot, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '截图结果不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+  await ctx.progress('简历截图完成', 100)
+  return data
+}
+
+// 失败路径的弹窗还原:满足最短停留后尽力关闭;二次异常只吞掉(主错误优先上报)。
+async function closeResumeModalBestEffort(
+  step: CaptureStepRunner,
+  pacer: MutationPacer,
+  openedAt: number,
+): Promise<void> {
+  try {
+    const stayUntil = openedAt + 2_000 + Math.floor(Math.random() * 501)
+    if (Date.now() < stayUntil) await swSleep(stayUntil - Date.now())
+    await pacer.beforeMutation()
+    await step('close')
+  } catch {
+    // 弹窗状态交由有人值守兜底;主失败原因已在调用方抛出。
   }
 }
 
@@ -10437,6 +10737,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadGreetingListTarget,
   mainReadCurrentResume,
   mainChatCaptureStep,
+  mainResumeCaptureStep,
   mainSelectSourcingPosition,
   mainApplySourcingFilters,
   mainReadSourcingWindow,

@@ -658,6 +658,7 @@ try {
     'chat.sendMessage@1',
     'chat.sendGreeting@1',
     'chat.captureThreadScreenshot@1',
+    'candidate.captureResumeScreenshot@1',
   ]) {
     assert.ok(online.caps.includes(capability), `hello 能力集缺少 ${capability}`)
   }
