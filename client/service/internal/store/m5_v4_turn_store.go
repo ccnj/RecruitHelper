@@ -126,7 +126,7 @@ func (s *Store) FreezeCommunicationV4Turn(
 			return nil
 		}
 		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
-			aggregate.ProjectedThroughSeq != req.HistoryThroughSeq {
+			aggregate.ProjectedThroughSeq != req.ExpectedProjectedThroughSeq {
 			return ErrDialogueTurnBinding
 		}
 		target, ready, err := communicationTargetTx(tx, req.ProfileID)
@@ -161,11 +161,34 @@ func (s *Store) FreezeCommunicationV4Turn(
 			return ErrDialogueTurnState
 		}
 
-		lastOutbound, inbound, facts, firstReal, err := loadCommunicationV4TurnBoundaryTx(
-			tx, target.Profile, req,
+		lastOutbound, inbound, facts, firstReal, err := reconstructCommunicationV4TurnBoundaryTx(
+			tx, target.Profile, req.ConversationRef, req.InboundFromSeq, req.InboundThroughSeq,
 		)
 		if err != nil {
 			return err
+		}
+		if lastOutbound.Seq != req.OutboundAnchorSeq {
+			return ErrDialogueTurnBinding
+		}
+		// 游标之后、本轮首条候选人输入之前不得存在未领候选人消息；
+		// 中间只允许尚未投影或已投影的中性 system 行。
+		var unclaimed int64
+		if err := tx.Model(&Message{}).
+			Where(
+				"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND kind <> ? AND seq > ? AND seq < ?",
+				target.Profile.Platform,
+				target.Profile.AccountRef,
+				req.ConversationRef,
+				"in",
+				"system",
+				req.ExpectedProjectedThroughSeq,
+				req.InboundFromSeq,
+			).
+			Count(&unclaimed).Error; err != nil {
+			return err
+		}
+		if unclaimed != 0 {
+			return ErrDialogueTurnBinding
 		}
 		digest, turnID, err := communicationV4TurnIdentity(
 			aggregate,
@@ -333,8 +356,11 @@ func validateFreezeDialogueTurnRequest(req FreezeDialogueTurnRequest) error {
 		strings.TrimSpace(req.ConversationRef) == "" || !validCommunicationV4Digest(req.InputDigest) ||
 		strings.TrimSpace(req.ContextRevisionHash) == "" || strings.TrimSpace(req.ResumeSnapshotID) == "" ||
 		strings.TrimSpace(req.RecommendedTimeText) == "" || strings.TrimSpace(req.RenderFormatVersion) == "" ||
-		req.HistoryThroughSeq < 0 || req.InboundFromSeq <= req.HistoryThroughSeq ||
-		req.InboundThroughSeq < req.InboundFromSeq {
+		req.HistoryThroughSeq < 0 || req.InboundFromSeq != req.HistoryThroughSeq+1 ||
+		req.InboundThroughSeq < req.InboundFromSeq ||
+		req.OutboundAnchorSeq < 0 || req.OutboundAnchorSeq >= req.InboundFromSeq ||
+		req.ExpectedProjectedThroughSeq < req.OutboundAnchorSeq ||
+		req.ExpectedProjectedThroughSeq >= req.InboundFromSeq {
 		return ErrDialogueTurnInvalid
 	}
 	return nil
@@ -576,70 +602,100 @@ func markCommunicationV4AutomationManualTx(
 	return nil
 }
 
-func loadCommunicationV4TurnBoundaryTx(
+// reconstructCommunicationV4TurnBoundaryTx rebuilds one v4 turn boundary
+// from the immutable ledger under the decoupled semantics (0727当日计划3):
+// the outbound identity anchor is the newest non-retracted outbound before
+// InboundFromSeq (zero only for a candidate-initiated root), the candidate
+// interval is [InboundFromSeq, InboundThroughSeq], and trailing platform
+// system rows after the interval are tolerated. Callers must verify the
+// derived identity digest against the frozen turn; a wrongly reconstructed
+// anchor can never reproduce the frozen digest, so the scan is self-verifying.
+func reconstructCommunicationV4TurnBoundaryTx(
 	tx *gorm.DB,
 	profile CandidateProfile,
-	req FreezeDialogueTurnRequest,
+	conversationRef string,
+	inboundFromSeq int64,
+	inboundThroughSeq int64,
 ) (Message, []Message, []communication.LedgerMessageFact, *Message, error) {
-	var tail int64
-	if err := tx.Model(&Message{}).
-		Where(
-			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL",
-			profile.Platform,
-			profile.AccountRef,
-			req.ConversationRef,
-		).
-		Select("COALESCE(MAX(seq), 0)").
-		Scan(&tail).Error; err != nil || tail != req.InboundThroughSeq {
+	if inboundFromSeq <= 0 || inboundThroughSeq < inboundFromSeq {
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
-	var outboundTail int64
+	var anchorSeq int64
 	if err := tx.Model(&Message{}).
 		Where(
-			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ?",
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq < ?",
 			profile.Platform,
 			profile.AccountRef,
-			req.ConversationRef,
+			conversationRef,
 			"out",
+			inboundFromSeq,
 		).
 		Select("COALESCE(MAX(seq), 0)").
-		Scan(&outboundTail).Error; err != nil || outboundTail != req.HistoryThroughSeq {
+		Scan(&anchorSeq).Error; err != nil {
+		return Message{}, nil, nil, nil, err
+	}
+	var lateOutbound int64
+	if err := tx.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq >= ?",
+			profile.Platform,
+			profile.AccountRef,
+			conversationRef,
+			"out",
+			inboundFromSeq,
+		).
+		Count(&lateOutbound).Error; err != nil {
+		return Message{}, nil, nil, nil, err
+	}
+	if lateOutbound != 0 {
+		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
+	}
+	var candidateTail int64
+	if err := tx.Model(&Message{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND kind <> ?",
+			profile.Platform,
+			profile.AccountRef,
+			conversationRef,
+			"in",
+			"system",
+		).
+		Select("COALESCE(MAX(seq), 0)").
+		Scan(&candidateTail).Error; err != nil {
+		return Message{}, nil, nil, nil, err
+	}
+	if candidateTail != inboundThroughSeq {
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
 	var lastOutbound Message
-	if req.HistoryThroughSeq > 0 {
+	if anchorSeq > 0 {
 		if err := tx.First(
 			&lastOutbound,
 			"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND retracted_at IS NULL",
 			profile.Platform,
 			profile.AccountRef,
-			req.ConversationRef,
-			req.HistoryThroughSeq,
+			conversationRef,
+			anchorSeq,
 		).Error; err != nil || lastOutbound.Direction != "out" {
-			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
-		}
-	} else {
-		aggregate, err := communicationV4AggregateTx(tx, profile.ProfileID)
-		if err != nil || !IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
 			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 		}
 	}
 	var boundary []Message
 	if err := tx.Where(
-		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq > ? AND seq <= ? "+
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq >= ? AND seq <= ? "+
 			"AND retracted_at IS NULL",
 		profile.Platform,
 		profile.AccountRef,
-		req.ConversationRef,
-		req.HistoryThroughSeq,
-		req.InboundThroughSeq,
+		conversationRef,
+		inboundFromSeq,
+		inboundThroughSeq,
 	).Order("seq").Find(&boundary).Error; err != nil {
 		return Message{}, nil, nil, nil, err
 	}
 	inbound, validBoundary := DialogueTurnCandidateMessages(boundary)
 	if !validBoundary || len(boundary) == 0 ||
-		boundary[len(boundary)-1].Seq != req.InboundThroughSeq ||
-		inbound[0].Seq != req.InboundFromSeq {
+		inbound[0].Seq != inboundFromSeq ||
+		inbound[len(inbound)-1].Seq != inboundThroughSeq {
 		return Message{}, nil, nil, nil, ErrDialogueTurnBinding
 	}
 	facts := make([]communication.LedgerMessageFact, 0, len(boundary))
@@ -657,7 +713,7 @@ func loadCommunicationV4TurnBoundaryTx(
 			firstReal = &copy
 		}
 	}
-	if req.HistoryThroughSeq == 0 {
+	if anchorSeq == 0 {
 		if firstReal == nil || firstReal.SourceKey == nil ||
 			strings.TrimSpace(*firstReal.SourceKey) == "" {
 			return Message{}, nil, nil, nil, ErrDialogueTurnBinding
@@ -669,7 +725,7 @@ func loadCommunicationV4TurnBoundaryTx(
 		expectedRoot, err := InboundConversationV4RootRef(
 			profile.Platform,
 			profile.AccountRef,
-			req.ConversationRef,
+			conversationRef,
 			*firstReal.SourceKey,
 		)
 		if err != nil || expectedRoot != aggregate.RootGreetingIntentID {
@@ -685,9 +741,11 @@ func communicationV4TurnIdentity(
 	lastOutbound Message,
 	inbound []Message,
 ) (string, string, error) {
-	if aggregate.ProjectedThroughSeq == 0 {
-		if !IsInboundConversationV4Root(aggregate.RootGreetingIntentID) ||
-			lastOutbound.Seq != 0 {
+	// 身份分支只看出站锚是否存在，不看投影游标：游标可以合法地停在
+	// system/in 行上（0727当日计划3），来聊根在前置 system 已投影后
+	// 游标同样大于零。
+	if lastOutbound.Seq == 0 {
+		if !IsInboundConversationV4Root(aggregate.RootGreetingIntentID) {
 			return "", "", ErrDialogueTurnBinding
 		}
 		return DialogueTurnIdentityFromInboundRoot(

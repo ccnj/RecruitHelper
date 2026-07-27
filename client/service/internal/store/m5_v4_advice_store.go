@@ -86,20 +86,17 @@ func communicationV4TurnReducerInputTx(
 	if err := tx.First(&profile, "profile_id = ?", turn.ProfileID).Error; err != nil {
 		return communication.V4InboundTurnDecision{}, err
 	}
-	_, _, facts, _, err := loadCommunicationV4TurnBoundaryTx(
-		tx,
-		profile,
-		FreezeDialogueTurnRequest{
-			TurnID: turn.TurnID, ProfileID: turn.ProfileID, ConversationRef: turn.ConversationRef,
-			InputDigest: turn.InputDigest, HistoryThroughSeq: turn.HistoryThroughSeq,
-			InboundFromSeq: turn.InboundFromSeq, InboundThroughSeq: turn.InboundThroughSeq,
-			ContextRevisionHash: turn.ContextRevisionHash, ResumeSnapshotID: turn.ResumeSnapshotID,
-			RecommendedTimeText: turn.RecommendedTimeText, RenderFormatVersion: turn.RenderFormatVersion,
-			FrozenAt: turn.CreatedAt,
-		},
+	lastOutbound, inbound, facts, _, err := reconstructCommunicationV4TurnBoundaryTx(
+		tx, profile, turn.ConversationRef, turn.InboundFromSeq, turn.InboundThroughSeq,
 	)
 	if err != nil {
 		return communication.V4InboundTurnDecision{}, err
+	}
+	digest, turnID, err := communicationV4TurnIdentity(
+		aggregate, turn.ProfileID, lastOutbound, inbound,
+	)
+	if err != nil || digest != turn.InputDigest || turnID != turn.TurnID {
+		return communication.V4InboundTurnDecision{}, ErrDialogueTurnBinding
 	}
 	recommendedSlots, _ := m5ai.FrozenRecommendedSlots(turn.RecommendedTimeText)
 	var revision JobAIContextRevision

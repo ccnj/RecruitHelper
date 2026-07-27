@@ -48,6 +48,13 @@ type FreezeDialogueTurnRequest struct {
 	RecommendedTimeText string
 	RenderFormatVersion string
 	FrozenAt            time.Time
+	// ExpectedProjectedThroughSeq 与 OutboundAnchorSeq 仅 v4 冻结路径使用：
+	// 前者是投影游标的事务 CAS 期望值（可停在 in/out/system 任意行），
+	// 后者是轮身份出站锚（候选人主动来聊根为 0）。v4 的 HistoryThroughSeq
+	// 自 0727当日计划3 起仅表示 AI 历史渲染边界，恒等于 InboundFromSeq-1。
+	// legacy M5-A 路径不读这两个新字段，其 HistoryThroughSeq 仍为出站锚。
+	ExpectedProjectedThroughSeq int64
+	OutboundAnchorSeq           int64
 }
 
 type FreezeDialogueTurnResult struct {
@@ -398,6 +405,26 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		tracked.Status != TrackingAdopted {
 		return ErrDialogueTurnBinding
 	}
+	if v4Turn {
+		// v4 分支走解耦后的统一重建（0727当日计划3）：锚由账本派生并经
+		// digest 自证，区间尾允许平台 system 行，游标不再要求指向出站。
+		if v4Aggregate == nil {
+			return ErrDialogueTurnBinding
+		}
+		lastOutbound, inbound, _, _, err := reconstructCommunicationV4TurnBoundaryTx(
+			tx, profile, turn.ConversationRef, turn.InboundFromSeq, turn.InboundThroughSeq,
+		)
+		if err != nil {
+			return err
+		}
+		digest, turnID, err := communicationV4TurnIdentity(
+			*v4Aggregate, turn.ProfileID, lastOutbound, inbound,
+		)
+		if err != nil || digest != turn.InputDigest || turnID != turn.TurnID {
+			return ErrDialogueTurnBinding
+		}
+		return nil
+	}
 	var activeTail, outboundTail int64
 	base := tx.Model(&Message{}).Where(
 		"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL",
@@ -418,8 +445,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 			lastOutbound.Direction != "out" {
 			return ErrDialogueTurnBinding
 		}
-	} else if !v4Turn || v4Aggregate == nil ||
-		!IsInboundConversationV4Root(v4Aggregate.RootGreetingIntentID) {
+	} else {
 		return ErrDialogueTurnBinding
 	}
 	var boundary []Message
@@ -433,55 +459,16 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		return ErrDialogueTurnBinding
 	}
 	inbound := boundary
-	if v4Turn {
-		var valid bool
-		inbound, valid = DialogueTurnCandidateMessages(boundary)
-		if !valid {
-			return ErrDialogueTurnBinding
-		}
-	}
 	if len(inbound) == 0 || inbound[0].Seq != turn.InboundFromSeq ||
-		(!v4Turn && inbound[len(inbound)-1].Seq != turn.InboundThroughSeq) {
+		inbound[len(inbound)-1].Seq != turn.InboundThroughSeq {
 		return ErrDialogueTurnBinding
 	}
-	if !v4Turn {
-		if _, ok := DialogueTurnInputKindOf(inbound); !ok {
-			return ErrDialogueTurnBinding
-		}
+	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
+		return ErrDialogueTurnBinding
 	}
-	var digest string
-	if turn.HistoryThroughSeq == 0 {
-		if v4Aggregate == nil ||
-			!IsInboundConversationV4Root(v4Aggregate.RootGreetingIntentID) {
-			return ErrDialogueTurnBinding
-		}
-		firstReal := firstM5RealCandidateMessage(inbound)
-		if firstReal == nil || firstReal.SourceKey == nil ||
-			strings.TrimSpace(*firstReal.SourceKey) == "" {
-			return ErrDialogueTurnBinding
-		}
-		expectedRoot, rootErr := InboundConversationV4RootRef(
-			profile.Platform,
-			profile.AccountRef,
-			turn.ConversationRef,
-			*firstReal.SourceKey,
-		)
-		if rootErr != nil || expectedRoot != v4Aggregate.RootGreetingIntentID {
-			return ErrDialogueTurnBinding
-		}
-		digest, _, err = DialogueTurnIdentityFromInboundRoot(
-			turn.ProfileID,
-			v4Aggregate.RootGreetingIntentID,
-			inbound,
-		)
-		if err != nil {
-			return ErrDialogueTurnBinding
-		}
-	} else {
-		digest, _, err = DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound)
-		if err != nil {
-			return ErrDialogueTurnBinding
-		}
+	digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound)
+	if err != nil {
+		return ErrDialogueTurnBinding
 	}
 	if digest != turn.InputDigest {
 		return ErrDialogueTurnBinding

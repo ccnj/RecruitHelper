@@ -855,6 +855,7 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 		TurnID: turnID, ProfileID: fixture.ProfileID,
 		ConversationRef: fixture.ConversationRef, InputDigest: digest,
 		HistoryThroughSeq: 3, InboundFromSeq: 4, InboundThroughSeq: 4,
+		ExpectedProjectedThroughSeq: 3, OutboundAnchorSeq: 3,
 		ContextRevisionHash: material.ContextRevision.RevisionHash,
 		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
 		RecommendedTimeText: "合成推荐时段",

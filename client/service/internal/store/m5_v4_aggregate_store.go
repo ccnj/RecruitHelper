@@ -284,6 +284,29 @@ func communicationV4OutboundAnchorSeqTx(
 	return greeting.Seq, nil
 }
 
+// CommunicationV4OutboundAnchorSeq exposes the turn-boundary outbound anchor
+// to the patrol layer. Zero means a candidate-initiated root; greeting roots
+// without a resolvable anchor return ErrCommunicationV4AnchorUnresolvable.
+func (s *Store) CommunicationV4OutboundAnchorSeq(profileID string) (int64, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return 0, ErrCommunicationV4Invalid
+	}
+	var seq int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		aggregate, err := communicationV4AggregateTx(tx, profileID)
+		if err != nil {
+			return err
+		}
+		anchor, anchorErr := communicationV4OutboundAnchorSeqTx(tx, aggregate)
+		if anchorErr != nil {
+			return anchorErr
+		}
+		seq = anchor
+		return nil
+	})
+	return seq, err
+}
+
 type ApplyCommunicationV4BusinessEventRequest struct {
 	ProfileID string
 	Event     communication.BusinessEvent
@@ -521,8 +544,43 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 	if aggregate.Revision == ^uint64(0) {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 	}
-	if action.MessageSeq > 0 && action.MessageSeq != aggregate.ProjectedThroughSeq+1 {
-		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+	if action.MessageSeq > 0 {
+		if action.MessageSeq <= aggregate.ProjectedThroughSeq {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		}
+		// 确认投影不得越过任何候选人输入、另一条我方出站或账本缺行；
+		// 游标与确认消息之间的每个 seq 都必须存在且是平台中性 system 行
+		// （0727当日计划3）。中性行本就是 no-op 事件，被越过与逐条投影
+		// 同终态。
+		if action.MessageSeq != aggregate.ProjectedThroughSeq+1 {
+			var profile CandidateProfile
+			if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+			}
+			if profile.ConversationRef == nil {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+			}
+			var neutral int64
+			if err := tx.Model(&Message{}).
+				Where(
+					"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL "+
+						"AND seq > ? AND seq < ? AND (direction = ? OR (direction = ? AND kind = ?))",
+					profile.Platform,
+					profile.AccountRef,
+					*profile.ConversationRef,
+					aggregate.ProjectedThroughSeq,
+					action.MessageSeq,
+					"system",
+					"in",
+					"system",
+				).
+				Count(&neutral).Error; err != nil {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
+			}
+			if neutral != action.MessageSeq-aggregate.ProjectedThroughSeq-1 {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+			}
+		}
 	}
 	if continuation != nil && continuation.ExpectedFromRevision != aggregate.Revision {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict

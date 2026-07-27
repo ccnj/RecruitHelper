@@ -53,17 +53,19 @@ func TestInboundConversationV4FirstTurnUsesFactRootWithoutFakeOutbound(t *testin
 	request := FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: fixture.ProfileID,
 		ConversationRef: fixture.ConversationRef,
-		InputDigest:     digest, HistoryThroughSeq: 0,
-		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: messages[len(messages)-1].Seq,
-		ContextRevisionHash: material.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-		RecommendedTimeText: recommended,
-		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-		FrozenAt:            rootAt.Add(time.Second),
+		InputDigest:     digest, HistoryThroughSeq: inbound[0].Seq - 1,
+		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[len(inbound)-1].Seq,
+		ExpectedProjectedThroughSeq: aggregate.ProjectedThroughSeq,
+		OutboundAnchorSeq:           0,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         recommended,
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    rootAt.Add(time.Second),
 	}
 	frozen, err := s.FreezeCommunicationV4Turn(request)
 	if err != nil || frozen == nil || !frozen.Created ||
-		frozen.Turn.HistoryThroughSeq != 0 ||
+		frozen.Turn.HistoryThroughSeq != inbound[0].Seq-1 ||
 		frozen.Aggregate.ProjectedThroughSeq != messages[len(messages)-1].Seq ||
 		frozen.Aggregate.State.MainStatus != communication.V4StatusCommunicating ||
 		frozen.Aggregate.State.RealMessageRound != 1 ||

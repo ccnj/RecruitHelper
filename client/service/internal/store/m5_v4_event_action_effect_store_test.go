@@ -187,15 +187,21 @@ func seedCommunicationV4InterviewEventActions(
 	if err != nil || !ready {
 		t.Fatalf("邀面接受轮材料未就绪: ready=%v err=%v", ready, err)
 	}
+	aggregateRow, err := s.CommunicationV4AggregateByProfile(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	freezeReq := FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
-		InputDigest: digest, HistoryThroughSeq: inviteMessage.Seq,
+		InputDigest: digest, HistoryThroughSeq: accepted[0].Seq - 1,
 		InboundFromSeq: accepted[0].Seq, InboundThroughSeq: accepted[0].Seq,
-		ContextRevisionHash: material.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-		RecommendedTimeText: "合成推荐时段",
-		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-		FrozenAt:            at.Add(3 * time.Second),
+		ExpectedProjectedThroughSeq: aggregateRow.ProjectedThroughSeq,
+		OutboundAnchorSeq:           inviteMessage.Seq,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         "合成推荐时段",
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    at.Add(3 * time.Second),
 	}
 	frozen, err := s.FreezeCommunicationV4Turn(freezeReq)
 	if err != nil {

@@ -184,37 +184,15 @@ func (a *roundActor) processCommunicationV4Target(
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
-	historyThroughSeq := target.Aggregate.ProjectedThroughSeq
-	var lastOutbound store.Message
+	// 投影游标只表示顺序进度，可停在 in/out/system 任意行；边界一律取
+	// 游标之后的全部账本行，轮身份锚另由聚合 state/招呼链接解析
+	// （0727当日计划3）。
+	cursor := target.Aggregate.ProjectedThroughSeq
 	var boundary []store.Message
-	if historyThroughSeq == 0 {
-		if !store.IsInboundConversationV4Root(
-			target.Aggregate.RootGreetingIntentID,
-		) {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				communicationV4ManualMissingOutbound,
-				a.manager.now(),
-			)
+	for index := range messages {
+		if messages[index].Seq > cursor {
+			boundary = append(boundary, messages[index])
 		}
-		boundary = messages
-	} else {
-		cursorIndex := -1
-		for index := range messages {
-			if messages[index].Seq == historyThroughSeq {
-				cursorIndex = index
-				break
-			}
-		}
-		if cursorIndex < 0 || messages[cursorIndex].Direction != "out" {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				communicationV4ManualMissingOutbound,
-				a.manager.now(),
-			)
-		}
-		lastOutbound = messages[cursorIndex]
-		boundary = messages[cursorIndex+1:]
 	}
 	if len(boundary) == 0 {
 		return nil
@@ -270,17 +248,44 @@ func (a *roundActor) processCommunicationV4Target(
 		)
 	}
 
+	anchorSeq, err := a.manager.store.CommunicationV4OutboundAnchorSeq(
+		target.Profile.ProfileID,
+	)
+	if err != nil {
+		if errors.Is(err, store.ErrCommunicationV4AnchorUnresolvable) {
+			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+				target.Profile.ProfileID,
+				communicationV4ManualMissingOutbound,
+				a.manager.now(),
+			)
+		}
+		return err
+	}
 	var digest, turnID string
-	if historyThroughSeq == 0 {
+	if anchorSeq == 0 {
 		digest, turnID, err = store.DialogueTurnIdentityFromInboundRoot(
 			target.Profile.ProfileID,
 			target.Aggregate.RootGreetingIntentID,
 			inbound,
 		)
 	} else {
+		var anchorMessage *store.Message
+		for index := range messages {
+			if messages[index].Seq == anchorSeq {
+				anchorMessage = &messages[index]
+				break
+			}
+		}
+		if anchorMessage == nil || anchorMessage.Direction != "out" {
+			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+				target.Profile.ProfileID,
+				communicationV4ManualMissingOutbound,
+				a.manager.now(),
+			)
+		}
 		digest, turnID, err = store.DialogueTurnIdentity(
 			target.Profile.ProfileID,
-			lastOutbound,
+			*anchorMessage,
 			inbound,
 		)
 	}
@@ -305,13 +310,15 @@ func (a *roundActor) processCommunicationV4Target(
 	frozen, err := a.manager.store.FreezeCommunicationV4Turn(store.FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: target.Profile.ProfileID,
 		ConversationRef: target.Conversation.ConversationRef,
-		InputDigest:     digest, HistoryThroughSeq: historyThroughSeq,
-		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: boundary[len(boundary)-1].Seq,
-		ContextRevisionHash: material.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-		RecommendedTimeText: recommended,
-		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-		FrozenAt:            a.manager.now(),
+		InputDigest:     digest, HistoryThroughSeq: inbound[0].Seq - 1,
+		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[len(inbound)-1].Seq,
+		ExpectedProjectedThroughSeq: cursor,
+		OutboundAnchorSeq:           anchorSeq,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         recommended,
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    a.manager.now(),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {

@@ -80,13 +80,15 @@ func communicationV4TurnRequest(
 	}
 	return FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: fixture.ProfileID, ConversationRef: fixture.ConversationRef,
-		InputDigest: digest, HistoryThroughSeq: greeting.Seq,
+		InputDigest: digest, HistoryThroughSeq: inbound[0].Seq - 1,
 		InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[len(inbound)-1].Seq,
-		ContextRevisionHash: material.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-		RecommendedTimeText: "合成推荐时段",
-		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-		FrozenAt:            time.Now().UTC().Truncate(time.Millisecond),
+		ExpectedProjectedThroughSeq: targets[0].Aggregate.ProjectedThroughSeq,
+		OutboundAnchorSeq:           greeting.Seq,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         "合成推荐时段",
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    time.Now().UTC().Truncate(time.Millisecond),
 	}
 }
 
@@ -840,15 +842,21 @@ func TestFreezeCommunicationV4WechatReceiptUsesProfileScopedEventAction(t *testi
 		if err != nil || !ready {
 			t.Fatalf("换微信回执材料未就绪: ready=%v err=%v", ready, err)
 		}
+		aggregateRow, err := s.CommunicationV4AggregateByProfile(profileID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		req := FreezeDialogueTurnRequest{
 			TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
-			InputDigest: digest, HistoryThroughSeq: greeting.Seq,
+			InputDigest: digest, HistoryThroughSeq: inbound[0].Seq - 1,
 			InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[0].Seq,
-			ContextRevisionHash: material.ContextRevision.RevisionHash,
-			ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-			RecommendedTimeText: "合成推荐时段",
-			RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-			FrozenAt:            time.Now().UTC().Truncate(time.Millisecond),
+			ExpectedProjectedThroughSeq: aggregateRow.ProjectedThroughSeq,
+			OutboundAnchorSeq:           greeting.Seq,
+			ContextRevisionHash:         material.ContextRevision.RevisionHash,
+			ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+			RecommendedTimeText:         "合成推荐时段",
+			RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+			FrozenAt:                    time.Now().UTC().Truncate(time.Millisecond),
 		}
 		frozen, err := s.FreezeCommunicationV4Turn(req)
 		if err != nil || !frozen.Created ||
@@ -987,15 +995,21 @@ func TestFreezeCommunicationV4InterviewReceiptChainsEventInvite(t *testing.T) {
 	if err != nil || !ready {
 		t.Fatalf("邀面接受轮材料未就绪: ready=%v err=%v", ready, err)
 	}
+	aggregateRow, err := s.CommunicationV4AggregateByProfile(profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	frozen, err := s.FreezeCommunicationV4Turn(FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
-		InputDigest: digest, HistoryThroughSeq: inviteMessage.Seq,
+		InputDigest: digest, HistoryThroughSeq: accepted[0].Seq - 1,
 		InboundFromSeq: accepted[0].Seq, InboundThroughSeq: accepted[0].Seq,
-		ContextRevisionHash: material.ContextRevision.RevisionHash,
-		ResumeSnapshotID:    material.ResumeSnapshot.SnapshotID,
-		RecommendedTimeText: "合成推荐时段",
-		RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
-		FrozenAt:            at.Add(3 * time.Second),
+		ExpectedProjectedThroughSeq: aggregateRow.ProjectedThroughSeq,
+		OutboundAnchorSeq:           inviteMessage.Seq,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         "合成推荐时段",
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    at.Add(3 * time.Second),
 	})
 	if err != nil || frozen.Turn.Status != DialogueTurnCompleted ||
 		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueNoAction ||
@@ -1736,5 +1750,50 @@ func TestCommunicationV4InterruptedInvocationWithChangedBoundaryRecoversAfterRes
 	if err != nil || len(invocations) != 1 || invocations[0].FinishedAt == nil ||
 		invocations[0].ErrorClass != "processInterrupted" {
 		t.Fatalf("重启恢复未终局化 pending invocation: invocations=%+v err=%v", invocations, err)
+	}
+}
+
+// 同一出站锚下的连续两个候选人轮次（0727当日计划3）：轮1完成且无我方
+// 出站后，候选人再次开口必须能以同锚、不同身份开出轮2，而不是撞上
+// "游标必须指向出站"的旧断言。
+func TestCommunicationV4ConsecutiveTurnsShareAnchorWithoutOutbound(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-consecutive"
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	first := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+		CardState: "accepted", ContentHash: "wechat-accepted-consecutive",
+	})
+	firstReq := communicationV4TurnRequest(t, s, fixture, first)
+	firstFrozen, err := s.FreezeCommunicationV4Turn(firstReq)
+	if err != nil || firstFrozen.Turn.Status != DialogueTurnCompleted ||
+		firstFrozen.Aggregate.ProjectedThroughSeq != 2 {
+		t.Fatalf("轮1未完成或游标未停在候选人行: result=%+v err=%v", firstFrozen, err)
+	}
+
+	text := "我再考虑一下"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text",
+		Text: &text, ContentHash: "consecutive-second",
+	})
+	secondReq := communicationV4TurnRequest(t, s, fixture, second)
+	if secondReq.OutboundAnchorSeq != 1 || secondReq.HistoryThroughSeq != 2 ||
+		secondReq.ExpectedProjectedThroughSeq != 2 {
+		t.Fatalf("轮2请求未按解耦语义派生: %+v", secondReq)
+	}
+	secondFrozen, err := s.FreezeCommunicationV4Turn(secondReq)
+	if err != nil || !secondFrozen.Created ||
+		secondFrozen.Turn.TurnID == firstFrozen.Turn.TurnID ||
+		secondFrozen.Turn.HistoryThroughSeq != 2 ||
+		secondFrozen.Aggregate.ProjectedThroughSeq != 3 {
+		t.Fatalf("同锚第二轮未独立开出: result=%+v err=%v", secondFrozen, err)
+	}
+	current, err := s.RecheckDialogueTurnCurrent(
+		secondFrozen.Turn.TurnID,
+		secondReq.FrozenAt.Add(time.Second),
+	)
+	if err != nil || !current {
+		t.Fatalf("同锚第二轮未通过统一重验: current=%v err=%v", current, err)
 	}
 }

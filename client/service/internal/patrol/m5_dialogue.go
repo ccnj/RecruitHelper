@@ -716,7 +716,21 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 	}
 	key := store.ConversationKey{Platform: profile.Platform, AccountRef: profile.AccountRef, ConversationRef: turn.ConversationRef}
 	messages, err := a.manager.store.MessagesForConversation(key)
-	if err != nil || len(messages) == 0 || messages[len(messages)-1].Seq != turn.InboundThroughSeq {
+	if err != nil || len(messages) == 0 ||
+		messages[len(messages)-1].Seq < turn.InboundThroughSeq {
+		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
+	}
+	// 轮区间之后允许平台中性 system 行滞留（0727当日计划3）；出现新的
+	// 候选人消息或我方出站仍视为边界失效。
+	for index := range messages {
+		message := messages[index]
+		if message.Seq <= turn.InboundThroughSeq {
+			continue
+		}
+		if message.Direction == "system" ||
+			(message.Direction == "in" && message.Kind == "system") {
+			continue
+		}
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	material := m5TurnMaterial{profile: *profile, revision: *revision, snapshot: *snapshot}
@@ -759,7 +773,9 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 			material.current = append(material.current, advice)
 		}
 	}
-	if material.sentGreeting == "" && turn.HistoryThroughSeq == 0 {
+	// 不以 HistoryThroughSeq==0 判来聊根：解耦后来聊根首轮在前置 system
+	// 已投影时渲染边界大于零。凡找不到已发招呼，一律经聚合根裁决。
+	if material.sentGreeting == "" {
 		aggregate, aggregateErr := a.manager.store.CommunicationV4AggregateByProfile(
 			turn.ProfileID,
 		)
