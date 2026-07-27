@@ -33,7 +33,7 @@
     "lease/1": { "batch": "S", "note": "ack(accepted) 到达脑时启动;合法 progress 按脑接收时刻续租;绝不越过绝对 deadline" },
     "cancel/1": { "batch": "S", "note": "尽力取消;ack 只确认取消请求已收妥;目标 cmd 的 result 永远是终局真相" },
     "witness/1": { "batch": "X", "note": "首个真实外部副作用批次:持久 journal/outbox、query/report 四阶段恢复与 effectful guards/evidence 强制;无此特性禁止派发真实 SX" },
-    "blob/1": { "batch": "X", "note": "Claim Check 大载荷;未协商时超限必须响亮失败,禁止截断" }
+    "blob/1": { "batch": "X", "note": "Claim Check 大载荷;未协商时超限必须响亮失败,禁止截断;2026-07-28 随首个大载荷证据原语(成功取证截图)到期激活:脑侧 PUT /v1/blobs + welcome 下发 BlobParams(§13),GC 清扫仍列后置" }
   },
   "kinds": {
     "hello":    { "dir": "H2B", "ackBy": "welcome|bye", "batch": "M1" },
@@ -672,6 +672,28 @@
           { "kind": "forbiddenWhen", "whenField": "confirmed", "equals": [false], "field": "peerWechat" }
         ]
       },
+      "ChatCaptureThreadScreenshotArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "CandidateCaptureResumeScreenshotArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "platformUserRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "CaptureScreenshotData": {
+        "type": "object",
+        "fields": {
+          "imageBlobRef": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "byteSize": { "type": "int64", "minimum": 1 },
+          "truncated": { "type": "boolean" },
+          "capturedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "ChatSendInviteCardArgs": {
         "type": "object",
         "fields": {
@@ -1215,6 +1237,20 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 30000, "deadlineMs": 300000,
       "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。requestSourceKey 只允许锚定已证实的两种请求:105/in/originType=2/success 后唯一 259/in/originType=2/success,或 105/out/originType=1/success 后唯一 259/in/originType=1/success;匹配结果必须位于下一条 105 之前且双方微信字段齐全,才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
+    },
+    "chat.captureThreadScreenshot": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "ChatCaptureThreadScreenshotArgs", "dataSchema": "CaptureScreenshotData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"],
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "note": "只对当前 tracked 且公开路由精确匹配的会话,截取聊天区真实渲染像素并按底部锚定滚动拼接为单张 JPEG;逐帧滚动间隔遵守平台交互节奏下限与截图配额。图像原始字节必须先经 blob/1 PUT 成功,data 只携带 imageBlobRef 引用与元数据;帧预算内截断须 truncated=true。未协商 blob、标签非前台可见、滚动容器无法归一、无有效像素或任何拼接/上传异常均响亮失败,不返回部分图像、不静默截断。不定位其他会话、不点击、不发送,消息正文不进 data"
+    },
+    "candidate.captureResumeScreenshot": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "CandidateCaptureResumeScreenshotArgs", "dataSchema": "CaptureScreenshotData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"],
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "note": "只对脑已绑定 tracked 会话中同一 platformUserRef 的简历详情面,按 candidate.readResume 同款打开方式截取真实渲染像素并顶部锚定滚动拼接为单张 JPEG;打开后满足最短停留才允许收口,逐帧滚动同守交互节奏下限。图像字节先经 blob/1 PUT,data 只携带 imageBlobRef 引用与元数据;帧预算内截断须 truncated=true。未协商 blob、非前台、面板打不开或换绑、容器无法归一或拼接/上传异常均响亮失败,不返回部分图像。不搜索、不按姓名/职位/DOM 位置兜底"
     }
   },
   "events": {
