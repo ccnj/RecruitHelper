@@ -2,7 +2,6 @@ package patrol
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"recruithelper/client/service/internal/communication"
@@ -174,13 +173,6 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 			},
 		)
 	if err != nil {
-		if errors.Is(err, store.ErrAIInvocationBudget) {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				"dailyProviderBudgetBlocked",
-				a.manager.now(),
-			)
-		}
 		return err
 	}
 	invocation := reserved.Invocation

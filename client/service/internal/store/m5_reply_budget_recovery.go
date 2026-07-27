@@ -257,16 +257,6 @@ func (s *Store) ReserveAuthorizedM5ReplyBudgetRecovery(
 		default:
 			return ErrM5ReplyBudgetRecoveryUnsafe
 		}
-		dayStart, nextDay := localDayBounds(req.CreatedAt)
-		var dailyCalls int64
-		if err := tx.Model(&AIInvocation{}).
-			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&dailyCalls).Error; err != nil {
-			return err
-		}
-		if dailyCalls >= m5DailyProviderCallLimit {
-			return ErrAIInvocationBudget
-		}
 		if err := tx.Create(&wanted).Error; err != nil {
 			return err
 		}

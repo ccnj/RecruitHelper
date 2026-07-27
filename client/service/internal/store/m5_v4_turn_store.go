@@ -251,17 +251,6 @@ func (s *Store) FreezeCommunicationV4Turn(
 			turn.Status = DialogueTurnManualRequired
 			turn.FailureReason = policyManualReason
 		}
-		monthStart, nextMonth := localMonthBounds(req.FrozenAt)
-		var monthlyTurns int64
-		if err := tx.Model(&DialogueTurn{}).
-			Where("created_at >= ? AND created_at < ?", monthStart, nextMonth).
-			Count(&monthlyTurns).Error; err != nil {
-			return err
-		}
-		if monthlyTurns >= m5MonthlyTurnLimit {
-			return ErrDialogueTurnBudget
-		}
-
 		next := aggregate
 		next.State = decision.State
 		next.Revision++

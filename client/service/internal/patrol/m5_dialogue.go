@@ -203,11 +203,6 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 					target.Profile.ProfileID, "turnBoundaryChanged", a.manager.now(),
 				)
 			}
-			if errors.Is(freezeErr, store.ErrDialogueTurnBudget) {
-				return a.manager.store.MarkActiveM5TrialManualRequired(
-					target.Profile.ProfileID, "monthlyTurnBudgetBlocked", a.manager.now(),
-				)
-			}
 			return freezeErr
 		}
 		turn = &frozen.Turn
@@ -880,9 +875,6 @@ func (a *roundActor) executeM5Advice(
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
 			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 		}
-		if errors.Is(err, store.ErrAIInvocationBudget) {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now())
-		}
 		return err
 	}
 	if !reserved.Created {
@@ -908,10 +900,6 @@ func (a *roundActor) executeM5Advice(
 				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
 					return a.manager.store.MarkDialogueTurnManualRequired(
 						turn.TurnID, "inputBoundaryChanged", a.manager.now(),
-					)
-				case errors.Is(recoveryErr, store.ErrAIInvocationBudget):
-					return a.manager.store.MarkDialogueTurnManualRequired(
-						turn.TurnID, "dailyProviderBudgetBlocked", a.manager.now(),
 					)
 				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
 					return a.manager.store.MarkDialogueTurnManualRequired(

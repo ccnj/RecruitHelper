@@ -328,13 +328,6 @@ func (a *roundActor) processCommunicationV4Target(
 				a.manager.now(),
 			)
 		}
-		if errors.Is(err, store.ErrDialogueTurnBudget) {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				"monthlyTurnBudgetBlocked",
-				a.manager.now(),
-			)
-		}
 		return err
 	}
 	if err := a.setStage("advising"); err != nil {

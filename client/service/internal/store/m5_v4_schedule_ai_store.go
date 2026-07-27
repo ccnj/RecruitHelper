@@ -116,21 +116,6 @@ func (s *Store) ReserveCommunicationV4ScheduleAIInvocation(
 			return err
 		}
 
-		dayStart, nextDay := localDayBounds(req.CreatedAt)
-		var dialogueCalls, scheduleCalls int64
-		if err := tx.Model(&AIInvocation{}).
-			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&dialogueCalls).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&CommunicationV4ScheduleAIInvocation{}).
-			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&scheduleCalls).Error; err != nil {
-			return err
-		}
-		if dialogueCalls+scheduleCalls >= m5DailyProviderCallLimit {
-			return ErrAIInvocationBudget
-		}
 		if err := tx.Create(&wanted).Error; err != nil {
 			return err
 		}

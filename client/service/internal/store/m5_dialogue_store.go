@@ -21,18 +21,11 @@ var (
 	ErrDialogueTurnNotFound        = errors.New("沟通轮不存在")
 	ErrDialogueTurnState           = errors.New("沟通轮状态不允许当前操作")
 	ErrDialogueTurnBinding         = errors.New("沟通轮冻结边界或档案绑定已变化")
-	ErrDialogueTurnBudget          = errors.New("当月自动沟通轮预算已用尽")
 	ErrAIInvocationInvalid         = errors.New("AI 调用事实无效")
 	ErrAIInvocationConflict        = errors.New("AI 调用事实冲突")
 	ErrAIInvocationNotFound        = errors.New("AI 调用事实不存在")
-	ErrAIInvocationBudget          = errors.New("当日 provider 调用预算已用尽")
 	ErrCommunicationActionInvalid  = errors.New("沟通动作事实无效")
 	ErrCommunicationActionConflict = errors.New("沟通动作事实冲突")
-)
-
-const (
-	m5DailyProviderCallLimit = int64(20)
-	m5MonthlyTurnLimit       = int64(100)
 )
 
 type FreezeDialogueTurnRequest struct {
@@ -271,17 +264,6 @@ func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialog
 			digest != req.InputDigest {
 			return ErrDialogueTurnBinding
 		}
-		monthStart, nextMonth := localMonthBounds(req.FrozenAt)
-		var monthlyTurns int64
-		if err := tx.Model(&DialogueTurn{}).
-			Where("created_at >= ? AND created_at < ?", monthStart, nextMonth).
-			Count(&monthlyTurns).Error; err != nil {
-			return err
-		}
-		if monthlyTurns >= m5MonthlyTurnLimit {
-			return ErrDialogueTurnBudget
-		}
-
 		if err := tx.Create(&wanted).Error; err != nil {
 			return err
 		}
@@ -822,21 +804,6 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 			boundaryChanged = true
 			return nil
 		}
-		dayStart, nextDay := localDayBounds(req.CreatedAt)
-		var dialogueCalls, scheduleCalls int64
-		if err := tx.Model(&AIInvocation{}).
-			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&dialogueCalls).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&CommunicationV4ScheduleAIInvocation{}).
-			Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-			Count(&scheduleCalls).Error; err != nil {
-			return err
-		}
-		if dialogueCalls+scheduleCalls >= m5DailyProviderCallLimit {
-			return ErrAIInvocationBudget
-		}
 		if err := tx.Create(&wanted).Error; err != nil {
 			return err
 		}
@@ -851,18 +818,6 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 		return nil, ErrDialogueTurnBinding
 	}
 	return out, nil
-}
-
-func localDayBounds(at time.Time) (time.Time, time.Time) {
-	local := at.In(at.Location())
-	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
-	return start, start.AddDate(0, 0, 1)
-}
-
-func localMonthBounds(at time.Time) (time.Time, time.Time) {
-	local := at.In(at.Location())
-	start := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, local.Location())
-	return start, start.AddDate(0, 1, 0)
 }
 
 func sameInvocationReservation(existing, wanted AIInvocation) bool {

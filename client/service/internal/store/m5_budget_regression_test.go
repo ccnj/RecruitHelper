@@ -1,7 +1,6 @@
 package store
 
 import (
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -28,46 +27,34 @@ func historicalBudgetTurn(index int, at time.Time) DialogueTurn {
 	}
 }
 
-func TestAIInvocationDailyBudgetReplaysExistingBeforeRejectingTwentyFirst(t *testing.T) {
+// 2026-07-27 甲方裁决废除全局调用量配额（每日 20 次 provider、每月 100 轮）。
+// 本回归钉死"配额闸不存在"：超出旧上限的调用与建轮必须照常放行，
+// 不产生 budget 类错误或 manualRequired。每用途 token 上限另有其闸，不在此测。
+func TestAIInvocationProceedsBeyondFormerDailyQuota(t *testing.T) {
 	s := openTest(t)
-	_, turn := seedFrozenDialogueTurn(t, s, "profile-provider-daily-budget")
-	at := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
-	request := ReserveAIInvocationRequest{
-		InvocationID: "invocation-provider-budget-current",
-		TurnID:       turn.TurnID,
-		Purpose:      m5ai.PurposeIntent,
-		Attempt:      1,
-		Provider:     "deepseek",
-		Model:        "deepseek-v4-pro",
-		InputHash:    "input-provider-budget-current",
-		CreatedAt:    at,
-	}
-	first, err := s.ReserveAIInvocation(request)
-	if err != nil || !first.Created {
-		t.Fatalf("首条 provider 预留失败: result=%+v err=%v", first, err)
-	}
-
+	_, turn := seedFrozenDialogueTurn(t, s, "profile-provider-daily-quota")
+	at := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
 	finishedAt := at.Add(time.Minute)
 	zero := 0
-	for index := 1; index < int(m5DailyProviderCallLimit); index++ {
-		turn := historicalBudgetTurn(index, at.Add(-time.Duration(index)*time.Minute))
+	for index := 1; index <= 20; index++ {
+		historical := historicalBudgetTurn(index, at.Add(-time.Duration(index)*time.Minute))
 		invocation := AIInvocation{
-			InvocationID:        fmt.Sprintf("invocation-provider-budget-history-%02d", index),
-			TurnID:              turn.TurnID,
+			InvocationID:        fmt.Sprintf("invocation-provider-quota-history-%02d", index),
+			TurnID:              historical.TurnID,
 			Purpose:             m5ai.PurposeIntent,
 			Attempt:             1,
 			Provider:            "deepseek",
 			Model:               "deepseek-v4-pro",
-			ContextRevisionHash: turn.ContextRevisionHash,
-			InputHash:           fmt.Sprintf("input-provider-budget-history-%02d", index),
-			OutputHash:          fmt.Sprintf("output-provider-budget-history-%02d", index),
+			ContextRevisionHash: historical.ContextRevisionHash,
+			InputHash:           fmt.Sprintf("input-provider-quota-history-%02d", index),
+			OutputHash:          fmt.Sprintf("output-provider-quota-history-%02d", index),
 			ReasoningTokens:     &zero,
 			UsageShape:          AIInvocationUsageComplete,
 			Status:              AIInvocationOK,
-			CreatedAt:           turn.CreatedAt,
+			CreatedAt:           historical.CreatedAt,
 			FinishedAt:          &finishedAt,
 		}
-		if err := s.db.Create(&turn).Error; err != nil {
+		if err := s.db.Create(&historical).Error; err != nil {
 			t.Fatalf("写入历史 turn[%d]: %v", index, err)
 		}
 		if err := s.db.Create(&invocation).Error; err != nil {
@@ -75,70 +62,37 @@ func TestAIInvocationDailyBudgetReplaysExistingBeforeRejectingTwentyFirst(t *tes
 		}
 	}
 
-	replayed, err := s.ReserveAIInvocation(request)
-	if err != nil || replayed.Created || replayed.Invocation.InvocationID != request.InvocationID {
-		t.Fatalf("满额后既有 invocation 未优先收编: result=%+v err=%v", replayed, err)
+	beyond := ReserveAIInvocationRequest{
+		InvocationID: "invocation-provider-quota-beyond",
+		TurnID:       turn.TurnID,
+		Purpose:      m5ai.PurposeIntent,
+		Attempt:      1,
+		Provider:     "deepseek",
+		Model:        "deepseek-v4-pro",
+		InputHash:    "input-provider-quota-beyond",
+		CreatedAt:    at,
 	}
-	completion := successfulInvocationCompletion(request.InvocationID, at.Add(2*time.Minute))
-	if _, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
-		Completion: completion,
-		Label:      m5ai.IntentNeutral,
-		Source:     DialogueIntentLLM,
-	}); err != nil {
-		t.Fatalf("完成第20条 intent invocation: %v", err)
-	}
-
-	twentyFirst := request
-	twentyFirst.InvocationID = "invocation-provider-budget-twenty-first"
-	twentyFirst.Purpose = m5ai.PurposeReply
-	twentyFirst.InputHash = "input-provider-budget-twenty-first"
-	if result, err := s.ReserveAIInvocation(twentyFirst); result != nil || !errors.Is(err, ErrAIInvocationBudget) {
-		t.Fatalf("第21条新预留未被日预算拒绝: result=%+v err=%v", result, err)
-	}
-	dayStart, nextDay := localDayBounds(at)
-	var count int64
-	if err := s.db.Model(&AIInvocation{}).
-		Where("created_at >= ? AND created_at < ?", dayStart, nextDay).
-		Count(&count).Error; err != nil || count != m5DailyProviderCallLimit {
-		t.Fatalf("预算拒绝后 invocation 数量漂移: count=%d err=%v", count, err)
+	result, err := s.ReserveAIInvocation(beyond)
+	if err != nil || result == nil || !result.Created {
+		t.Fatalf("超出旧日限的调用必须放行: result=%+v err=%v", result, err)
 	}
 }
 
-func TestDialogueTurnMonthlyBudgetReplaysExistingBeforeRejectingHundredFirst(t *testing.T) {
+func TestDialogueTurnProceedsBeyondFormerMonthlyQuota(t *testing.T) {
 	s := openTest(t)
-	fixture, turn := seedFrozenDialogueTurn(t, s, "profile-turn-monthly-budget-current")
-	at := turn.CreatedAt
-	for index := 1; index < int(m5MonthlyTurnLimit); index++ {
+	fixture := seedDialogueStoreFixture(t, s, "profile-turn-monthly-quota", "text")
+	at := time.Date(2026, 7, 27, 11, 0, 0, 0, time.UTC)
+	for index := 1; index <= 100; index++ {
 		historical := historicalBudgetTurn(index, at)
 		if err := s.db.Create(&historical).Error; err != nil {
 			t.Fatalf("写入历史 turn[%d]: %v", index, err)
 		}
 	}
 
-	replayRequest := dialogueTurnRequest(fixture, turn.TurnID, "")
-	replayed, err := s.FreezeDialogueTurn(replayRequest)
-	if err != nil || replayed.Created || replayed.Turn.TurnID != turn.TurnID {
-		t.Fatalf("满额后既有 turn 未优先收编: result=%+v err=%v", replayed, err)
-	}
-	if err := s.MarkDialogueTurnManualRequired(turn.TurnID, "budgetFixtureClosed", at.Add(time.Minute)); err != nil {
-		t.Fatalf("释放既有试运行槽: %v", err)
-	}
-
-	newFixture := seedDialogueStoreFixture(t, s, "profile-turn-monthly-budget-new", "text")
-	newRequest := dialogueTurnRequest(newFixture, "turn-monthly-budget-hundred-first", "")
-	newRequest.FrozenAt = at.Add(2 * time.Minute)
-	if result, err := s.FreezeDialogueTurn(newRequest); result != nil || !errors.Is(err, ErrDialogueTurnBudget) {
-		t.Fatalf("第101个新 turn 未被月预算拒绝: result=%+v err=%v", result, err)
-	}
-	var count int64
-	monthStart, nextMonth := localMonthBounds(at)
-	if err := s.db.Model(&DialogueTurn{}).
-		Where("created_at >= ? AND created_at < ?", monthStart, nextMonth).
-		Count(&count).Error; err != nil || count != m5MonthlyTurnLimit {
-		t.Fatalf("预算拒绝后 turn 数量漂移: count=%d err=%v", count, err)
-	}
-	profile, err := s.CandidateProfileByID(newFixture.ProfileID)
-	if err != nil || profile == nil || profile.MainStatus != CandidateProfileGreeted {
-		t.Fatalf("预算失败事务不得推进新 profile: profile=%+v err=%v", profile, err)
+	request := dialogueTurnRequest(fixture, "turn-monthly-quota-beyond", "")
+	request.FrozenAt = at.Add(time.Minute)
+	result, err := s.FreezeDialogueTurn(request)
+	if err != nil || result == nil || !result.Created {
+		t.Fatalf("超出旧月限的建轮必须放行: result=%+v err=%v", result, err)
 	}
 }
