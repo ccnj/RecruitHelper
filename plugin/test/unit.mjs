@@ -6429,7 +6429,7 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
   }
   const variants = [
     {
-      name: '真机新版邀面卡', rawType: 'custom', envelopeType: '355',
+      name: '数字枚举 2/4 保留既有容忍映射', rawType: 'custom', envelopeType: '355',
       from: staffID, status: 'success', details: complete, card: true,
       interview: {
         startsAt: complete.startTime,
@@ -6438,7 +6438,18 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
       },
     },
     {
-      name: '旧字符串 VIDEO/TENCENT 不猜映射', rawType: 'custom', envelopeType: '355',
+      name: '真机字符串枚举 VIDEO/WECHAT_VIDEO 映射微信视频（2026-07-27）', rawType: 'custom', envelopeType: '355',
+      from: staffID, status: 'success',
+      details: { ...complete, interviewType: 'VIDEO', interviewPlatform: 'WECHAT_VIDEO' },
+      card: true,
+      interview: {
+        startsAt: complete.startTime,
+        endsAt: complete.endTime,
+        method: 'wechatVideo',
+      },
+    },
+    {
+      name: '字符串平台 TENCENT 不猜映射', rawType: 'custom', envelopeType: '355',
       from: staffID, status: 'success',
       details: { ...complete, interviewType: 'VIDEO', interviewPlatform: 'TENCENT' },
       card: true,

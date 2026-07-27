@@ -5445,7 +5445,11 @@ async function mainReadThreadPage(
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
-    const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+    // 2026-07-27 真机：355 卡负载以字符串枚举 interviewType="VIDEO"、
+    // interviewPlatform="WECHAT_VIDEO" 表达微信视频；数字形态保留为既有容忍。
+    // 其他取值（如 TENCENT）不猜映射。
+    const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
+      (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo' as const
       : null
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
@@ -6375,7 +6379,8 @@ async function mainCaptureSendBaseline(
         Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
       const interviewStartsAt = toMillis(details.startTime)
       const interviewEndsAt = toMillis(details.endTime)
-      const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+      const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
+      (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
         ? 'wechatVideo'
         : 'unknown'
       const isStaffInterviewInvite = customSuccess && customType === 355 &&
@@ -7043,7 +7048,8 @@ function mainSendMessageOnce(
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
-    const interviewMethod = details.interviewType === 2 && details.interviewPlatform === 4
+    const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
+      (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo'
       : 'unknown'
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
@@ -7981,7 +7987,8 @@ function mainSendCardOnce(
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const startsAt = toMillis(details.startTime)
     const endsAt = toMillis(details.endTime)
-    const method = details.interviewType === 2 && details.interviewPlatform === 4
+    const method = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
+      (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo'
       : 'unknown'
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
@@ -8479,7 +8486,8 @@ async function mainObserveStableOutboundCard(
       const endsAt = toMillis(inner.endTime)
       if (Number(envelope.type) !== 355 || !clean(inner.interviewId) ||
           !Object.prototype.hasOwnProperty.call(inner, 'state') ||
-          inner.interviewType !== 2 || inner.interviewPlatform !== 4 ||
+          !(inner.interviewType === 2 || inner.interviewType === 'VIDEO') ||
+          !(inner.interviewPlatform === 4 || inner.interviewPlatform === 'WECHAT_VIDEO') ||
           startsAt !== expected.startsAt || endsAt !== expected.endsAt ||
           startsAt === null || endsAt === null || endsAt <= startsAt) return failed()
       confirmedInterview = { startsAt, endsAt, method: 'wechatVideo' }
