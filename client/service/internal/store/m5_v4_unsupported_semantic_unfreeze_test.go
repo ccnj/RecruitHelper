@@ -241,6 +241,67 @@ func TestUnfreezeThenReplyCompletionPersistsPlannedAction(t *testing.T) {
 	}
 }
 
+// 直击 2026-07-28 启动阻断回归:聚合已被巡检隔离(原因先到先得)+ 该轮
+// 存在未终局 reply 调用时,启动收束必须诚实终局调用与轮并继续启动,不改
+// 写聚合原因,更不能 exit。
+func TestRecoverInterruptedInvocationOnQuarantinedAggregateKeepsBooting(t *testing.T) {
+	s := openTest(t)
+	profileID, turnID := seedFrozenUnsupportedSemanticResumeMix(t, s)
+	if results, err := s.UnfreezeV4UnsupportedSemanticProfiles(); err != nil ||
+		len(results) != 1 || !results[0].Unfrozen {
+		t.Fatalf("解冻失败: results=%+v err=%v", results, err)
+	}
+	now := time.Date(2026, 7, 28, 7, 30, 0, 0, time.UTC)
+	if _, err := s.ApplyResumeBusinessClassification(turnID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: "invocation-quarantine-boot", TurnID: turnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "fake-provider", Model: "fake-model", InputHash: "input-hash",
+		CreatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	quarantineReason := "patrolQuarantine:communicationV4Conflict"
+	quarantinedAt := now.Add(2 * time.Second)
+	if err := s.db.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ?", profileID).
+		Updates(map[string]any{
+			"automation_status": ProfileCommunicationAutomationManualRequired,
+			"manual_reason":     quarantineReason, "manual_required_at": quarantinedAt,
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := s.RecoverInterruptedAIInvocations(now.Add(time.Minute))
+	if err != nil || recovered != 1 {
+		t.Fatalf("启动收束在隔离现场必须成功: recovered=%d err=%v", recovered, err)
+	}
+	var invocation AIInvocation
+	if err := s.db.First(&invocation, "invocation_id = ?", "invocation-quarantine-boot").Error; err != nil ||
+		invocation.FinishedAt == nil || invocation.Status != AIInvocationTransportFailed ||
+		invocation.ErrorClass != "processInterrupted" {
+		t.Fatalf("中断调用未诚实终局: invocation=%+v err=%v", invocation, err)
+	}
+	turn, err := s.DialogueTurnByID(turnID)
+	if err != nil || turn == nil || turn.Status != DialogueTurnManualRequired ||
+		turn.FailureReason != "replyProcessInterrupted" {
+		t.Fatalf("悬轮未交给人工: turn=%+v err=%v", turn, err)
+	}
+	var aggregate CommunicationV4Aggregate
+	if err := s.db.First(&aggregate, "profile_id = ?", profileID).Error; err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != quarantineReason {
+		t.Fatalf("隔离原因不得被收束改写: aggregate=%+v err=%v", aggregate, err)
+	}
+
+	again, err := s.RecoverInterruptedAIInvocations(now.Add(2 * time.Minute))
+	if err != nil || again != 0 {
+		t.Fatalf("收束重跑必须为空: recovered=%d err=%v", again, err)
+	}
+}
+
 func TestUnfreezeV4UnsupportedSemanticKeepsNonResumeShapesFrozen(t *testing.T) {
 	s := openTest(t)
 	profileID, turnID := seedFrozenUnsupportedSemanticResumeMix(t, s)

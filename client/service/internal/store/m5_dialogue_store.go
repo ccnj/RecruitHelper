@@ -1339,26 +1339,22 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 			if _, v4Turn, err := communicationV4TurnApplicationTx(tx, turn); err != nil {
 				return err
 			} else if v4Turn {
+				var completeErr error
+				var failureReason string
 				if invocation.Purpose == m5ai.PurposeReply {
-					_, err := completeCommunicationV4ReplyTx(
+					failureReason = "replyProcessInterrupted"
+					_, completeErr = completeCommunicationV4ReplyTx(
 						tx,
 						&turn,
 						invocation,
 						m5ai.ReplySuggestion{},
 						"",
-						"replyProcessInterrupted",
+						failureReason,
 						at.UTC(),
 					)
-					if err := settleCommunicationV4AdviceErrorTx(
-						tx,
-						&turn,
-						err,
-						at.UTC(),
-					); err != nil {
-						return err
-					}
 				} else {
-					err := completeCommunicationV4IntentTx(
+					failureReason = "intentProcessInterrupted"
+					completeErr = completeCommunicationV4IntentTx(
 						tx,
 						&turn,
 						invocation,
@@ -1367,13 +1363,38 @@ func (s *Store) RecoverInterruptedAIInvocations(at time.Time) (int, error) {
 						"",
 						at.UTC(),
 					)
-					if err := settleCommunicationV4AdviceErrorTx(
-						tx,
-						&turn,
-						err,
-						at.UTC(),
-					); err != nil {
-						return err
+				}
+				settleErr := settleCommunicationV4AdviceErrorTx(tx, &turn, completeErr, at.UTC())
+				if settleErr != nil {
+					if !errors.Is(settleErr, ErrCommunicationV4Conflict) {
+						return settleErr
+					}
+					// 聚合已被巡检隔离或人工接管(原因先到先得):中断调用
+					// 已诚实终局,这里只把轮交给人工,不改写聚合原因、不再
+					// 强行推进 v4 投影,启动不因此失败。聚合仍 active 时该
+					// 冲突是真账本矛盾,照旧响亮退出。
+					aggregate, aggErr := communicationV4AggregateTx(tx, turn.ProfileID)
+					if aggErr != nil {
+						return aggErr
+					}
+					if aggregate.AutomationStatus == ProfileCommunicationAutomationActive {
+						return settleErr
+					}
+					stalled := tx.Model(&DialogueTurn{}).
+						Where(
+							"turn_id = ? AND (status IN ? OR (status = ? AND failure_reason = ?))",
+							turn.TurnID,
+							[]DialogueTurnStatus{
+								DialogueTurnCollected, DialogueTurnClassified, DialogueTurnAdviceReady,
+							},
+							DialogueTurnManualRequired, "inputBoundaryChanged",
+						).
+						Updates(map[string]any{
+							"status": DialogueTurnManualRequired, "failure_reason": failureReason,
+							"updated_at": at.UTC(),
+						})
+					if stalled.Error != nil {
+						return stalled.Error
 					}
 				}
 				continue
