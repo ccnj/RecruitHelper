@@ -7538,8 +7538,11 @@ async function mainPrepareInterviewEditor(
         parts.push(`u=${durationValues.join(',') || '-'}`)
       } catch { parts.push('u=?') }
       try {
+        // 校验文案是快照里唯一的页面生成文本。若平台某条错误回显字段内容
+        // （手机号/微信号形状的长英数串），先打码再上行：微信号不得进入
+        // 错误详情是冻结条款，不赌平台文案的实现。
         const formErrors = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item__error'))
-          .filter(visible).map((node) => clean(node.textContent))
+          .filter(visible).map((node) => clean(node.textContent).replace(/[0-9A-Za-z_-]{6,}/gu, '#'))
           .filter((text) => text !== '').slice(0, 2)
         if (formErrors.length > 0) parts.push(`err=${formErrors.join('|').slice(0, 60)}`)
       } catch { /* 无校验错误面板时静默 */ }
