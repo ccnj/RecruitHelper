@@ -25,9 +25,13 @@ type fakeClock struct {
 	now time.Time
 }
 
+// Now 每次读取前进 1 毫秒。冻结时钟会让同一处理轮里的"规划"与"确认"
+// 落在完全相同的瞬间,planned_at 排序退化到 action_id 字典序,偏离生产
+// 单调时钟下的真实顺序;单调假时钟保持确定性,且与真实挂钟无关。
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.now = c.now.Add(time.Millisecond)
 	return c.now
 }
 
@@ -132,6 +136,9 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	clock := &fakeClock{now: time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC)}
+	// Store 内部自取的业务时间戳(如 result 应用的 effectAt→SentAt→
+	// LastOutboundAt)也必须走假时钟,否则统一业务窗口断言随真实时刻漂移。
+	db.SetNowFunc(clock.Now)
 	hands := &fakeHands{state: HandState{Online: true, Session: "session-1", BootID: "boot-1"}}
 	runner := &fakeRunner{}
 	runner.handler = defaultHandler
@@ -939,13 +946,15 @@ func TestDevelopmentWindowOverrideAllowsExplicitEnableAtRealClock(t *testing.T) 
 	h := newHarness(t)
 	h.clock.Add(16 * time.Hour) // 次日 01:00
 	h.manager.config.DailyWindow = workflow.DailyWindowPolicy{AllowOutOfWindow: true}
+	beforeEnable := h.clock.Now()
 	if err := h.manager.EnableToday(h.key); err != nil {
 		t.Fatalf("开发窗口覆盖后显式开启失败: %v", err)
 	}
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil ||
 		account.EnabledDate != h.clock.Now().Format("2006-01-02") ||
-		account.EnabledAt == nil || !account.EnabledAt.Equal(h.clock.Now()) {
+		account.EnabledAt == nil || account.EnabledAt.Before(beforeEnable) ||
+		account.EnabledAt.After(h.clock.Now()) {
 		t.Fatalf("覆盖必须保留真实日期和时间: account=%+v err=%v", account, err)
 	}
 }
@@ -1005,6 +1014,7 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("巡检未进入长命令")
 	}
+	beforeEvent := h.clock.Now()
 	eventDone := make(chan error, 1)
 	go func() {
 		eventDone <- h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction,
@@ -1020,6 +1030,7 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		t.Fatal("Tick 持有全局锁跨网络命令，阻塞了用户事件")
 	}
+	afterEvent := h.clock.Now()
 	account, _ := h.db.AccountByKey(h.key)
 	if account.ManualQuietUntil != nil {
 		t.Fatalf("静默窗已废除，真人事件不得再开窗: %+v", account.ManualQuietUntil)
@@ -1040,9 +1051,13 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	if !account.DirtyHint {
 		t.Fatal("长轮次中到达的用户事件被成功 finish 清掉")
 	}
-	wantPulled := h.clock.Now().Add(h.config.CoalesceWindow)
-	if account.NextPatrolAt == nil || !account.NextPatrolAt.Equal(wantPulled) {
-		t.Fatalf("事件拉前时刻被 finish 覆盖: got=%v want=%v", account.NextPatrolAt, wantPulled)
+	// 事件拉前 = 事件处理时刻 + 合并窗;被 finish 覆盖则是巡检间隔(5 分钟),
+	// 远在该区间之外。单调假时钟下事件处理时刻只能界定在事件前后读数之间。
+	if account.NextPatrolAt == nil ||
+		account.NextPatrolAt.Before(beforeEvent.Add(h.config.CoalesceWindow)) ||
+		account.NextPatrolAt.After(afterEvent.Add(h.config.CoalesceWindow)) {
+		t.Fatalf("事件拉前时刻被 finish 覆盖: got=%v want=[%v,%v]", account.NextPatrolAt,
+			beforeEvent.Add(h.config.CoalesceWindow), afterEvent.Add(h.config.CoalesceWindow))
 	}
 }
 
@@ -1059,14 +1074,17 @@ func TestRecommendNavigationEventInvalidatesActiveSourcingFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	handled := h.clock.Now()
 	batch, err := h.db.SourcingBatchByID(started.BatchID)
 	if err != nil || batch == nil || batch.Status != store.SourcingBatchStopped ||
-		batch.Reason != store.SourcingFeedChangedReason || batch.EndedAt == nil || !batch.EndedAt.Equal(now) {
+		batch.Reason != store.SourcingFeedChangedReason || batch.EndedAt == nil ||
+		batch.EndedAt.Before(now) || batch.EndedAt.After(handled) {
 		t.Fatalf("推荐页 navigation 未终止旧 active 批次: batch=%+v err=%v", batch, err)
 	}
 	account, err := h.db.AccountByKey(h.key)
 	if err != nil || account == nil || account.SourcingFeedInvalidatedAt == nil ||
-		!account.SourcingFeedInvalidatedAt.Equal(now) || account.StoppedAt == nil ||
+		account.SourcingFeedInvalidatedAt.Before(now) ||
+		account.SourcingFeedInvalidatedAt.After(handled) || account.StoppedAt == nil ||
 		account.PausedReason != store.SourcingFeedChangedReason || account.ManualQuietUntil != nil {
 		t.Fatalf("推荐页 navigation 未写 marker、暂停账号（静默窗已废除不得再开）: account=%+v err=%v", account, err)
 	}
@@ -1517,6 +1535,7 @@ func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *t
 		t.Fatal("旧巡检未进入 readThread Wait")
 	}
 
+	beforeStart := h.clock.Now()
 	startDone := make(chan error, 1)
 	go func() {
 		startDone <- h.manager.StartSourcing(h.key, revisionHash, 30)
@@ -1551,7 +1570,8 @@ func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *t
 	}
 	if account.StoppedAt != nil || account.PausedReason != "" ||
 		account.LastPatrolAt != nil || account.NextPatrolAt == nil ||
-		!account.NextPatrolAt.Equal(h.clock.Now()) {
+		account.NextPatrolAt.Before(beforeStart) ||
+		account.NextPatrolAt.After(h.clock.Now()) {
 		t.Fatalf("旧巡检覆盖了新批次 Account 调度: %+v", account)
 	}
 	wantCalls := []string{protocol.PrimChatReadList, protocol.PrimChatReadThread}

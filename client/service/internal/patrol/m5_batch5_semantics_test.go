@@ -147,7 +147,7 @@ func TestM5ImportedRevisionWithoutRebindLeavesFrozenTurnExecutable(t *testing.T)
 			Documents: documents,
 		},
 		Communication: oldRevision.Communication,
-		CreatedAt:     time.Now().UTC().Add(time.Minute),
+		CreatedAt:     h.clock.Now().Add(time.Minute),
 	}
 	newRevision.Communication.ReplyPrompt = newReplyPrompt
 	if _, created, err := h.db.SaveJobAIContextRevision(newRevision); err != nil || !created {

@@ -580,7 +580,7 @@ func (s *Store) ApplyResultMessage(
 			intent.Status = plan.Effect.IntentStatus
 			intent.SuspectReason = plan.Effect.Reason
 			intent.ResultMsgID = resultMsgID
-			effectAt := time.Now()
+			effectAt := s.now()
 			if plan.Effect.Append && plan.Effect.Retract {
 				return ErrEffectIntentConflict
 			}

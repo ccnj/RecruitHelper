@@ -37,7 +37,7 @@ func TestCommunicationV4PatrolSplitSystemThenCandidateAcrossRounds(t *testing.T)
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}

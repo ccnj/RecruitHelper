@@ -141,7 +141,7 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 				t.Fatalf("没有形成待派发轮: turn=%+v err=%v", plannedTurn, err)
 			}
 
-			hand := &m5PositiveHand{}
+			hand := &m5PositiveHand{now: h.clock.Now}
 			dispatcher := dispatch.New(h.db, hand)
 			hand.setDispatcher(dispatcher)
 			runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -359,7 +359,7 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 
 			test.mutate(t, h, fixture)
 			beforeCommands := countM5SendMessageCommands(t, h)
-			hand := &m5PositiveHand{}
+			hand := &m5PositiveHand{now: h.clock.Now}
 			dispatcher := dispatch.New(h.db, hand)
 			hand.setDispatcher(dispatcher)
 			runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}

@@ -356,7 +356,7 @@ func TestPageDrivenRoundAdvancesOnlyObservedV4Profile(t *testing.T) {
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -412,7 +412,7 @@ func TestCommunicationV4PatrolAdvancesMultipleProfilesAndNextRoundWithoutGrowth(
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -623,7 +623,7 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -785,14 +785,37 @@ func TestCommunicationV4PatrolWakesEndedProfileWithoutRestoringColdBudget(t *tes
 	}
 	revision := awake.Revision
 
+	// 唤醒回复后再推进 8 天,让七天回退归档真正到期;此前该分支靠
+	// 真实挂钟污染出的"时钟倒退"保守路径误通过,注入时钟一致后必须
+	// 显式经历沉默时长。
+	h.clock.Add(8 * 24 * time.Hour)
 	restarted, err := NewManager(h.db, runner, h.hands, h.config, advice)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := restarted.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.BindAccountPrincipal(
+		h.key,
+		"hand-1",
+		"principal-1",
+		"session-1",
+		"boot-1",
+		h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("二次归档轮账号读取失败: account=%+v err=%v", account, err)
+	}
+	restartRoundID := "round-v4-ended-wakeup-second-archive"
+	beginCommunicationV4PatrolRound(t, h, restartRoundID)
 	restartedActor := &roundActor{
 		manager: restarted, account: account,
 		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
-		roundID: wakeupRoundID, now: h.clock.Now(),
+		roundID: restartRoundID, now: h.clock.Now(),
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		restarted.mu.Lock()
@@ -818,7 +841,7 @@ func TestCommunicationV4PatrolConsumesWechatAcceptedMessageWithoutAIOrReplayGrow
 		Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted",
 		ContentHash: syncledger.HashText("wechat-exchanged-fixture"), Origin: "external",
 	}})
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -928,7 +951,7 @@ func TestCommunicationV4PatrolFreezesDialogueUntilProviderBecomesAvailable(t *te
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -972,7 +995,7 @@ func TestCommunicationV4PatrolSendsRejectionRetentionAfterWechatExchanged(t *tes
 			return m5ai.CompletionResponse{}, fmt.Errorf("拒绝短路与换微信回执都不得调用 AI: %s", request.Purpose)
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1076,7 +1099,7 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 			)
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1191,7 +1214,7 @@ func TestCommunicationV4DependentCardPauseDuringChainCutsBeforeChildWAL(t *testi
 			)
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1282,7 +1305,7 @@ func TestCommunicationV4DependentCardStartedChainFinishesAcrossMidnight(t *testi
 			)
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1412,7 +1435,7 @@ func TestCommunicationV4PatrolSendsAIReplyThenInterviewCardThroughDispatcher(t *
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1524,7 +1547,7 @@ func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableC
 			return m5ai.CompletionResponse{}, fmt.Errorf("固定事件与拒绝短路不得调用 AI: %s", request.Purpose)
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1771,7 +1794,7 @@ func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -1866,7 +1889,7 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -2024,7 +2047,7 @@ func testCommunicationV4PatrolGlobalStop(t *testing.T, cancelContext bool) {
 			}
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
