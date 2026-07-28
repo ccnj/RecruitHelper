@@ -246,17 +246,37 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 	if profile.PositionTitle != nil {
 		snapshot.PositionTitle = strings.TrimSpace(*profile.PositionTitle)
 	}
-	var person Candidate
-	err = s.db.First(
-		&person,
-		"platform = ? AND platform_user_ref = ?",
-		profile.Platform,
-		profile.PlatformUserRef,
-	).Error
-	if err == nil && person.DisplayName != nil {
-		snapshot.DisplayName = strings.TrimSpace(*person.DisplayName)
-	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
+	// 姓名优先取 IM 会话里的对方展示名:候选人身份根上的名字可能来自推荐/采集
+	// 列表的脱敏形态(如"胡先生"),而运营要靠这个名字在微信里对上人。真机上
+	// 两者绝大多数一致,少数不一致时会话侧才是真名。会话缺失时回落身份根。
+	if profile.ConversationRef != nil {
+		var conversation Conversation
+		convErr := s.db.First(
+			&conversation,
+			"platform = ? AND account_ref = ? AND conversation_ref = ?",
+			profile.Platform,
+			profile.AccountRef,
+			*profile.ConversationRef,
+		).Error
+		if convErr == nil {
+			snapshot.DisplayName = strings.TrimSpace(conversation.PeerDisplayName)
+		} else if !errors.Is(convErr, gorm.ErrRecordNotFound) {
+			return nil, convErr
+		}
+	}
+	if snapshot.DisplayName == "" {
+		var person Candidate
+		err = s.db.First(
+			&person,
+			"platform = ? AND platform_user_ref = ?",
+			profile.Platform,
+			profile.PlatformUserRef,
+		).Error
+		if err == nil && person.DisplayName != nil {
+			snapshot.DisplayName = strings.TrimSpace(*person.DisplayName)
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
 	}
 	aggregate, err := s.CommunicationV4AggregateByProfile(profileID)
 	if err == nil {

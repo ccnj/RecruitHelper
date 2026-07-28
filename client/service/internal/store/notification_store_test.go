@@ -204,6 +204,47 @@ func enqueueForTest(t *testing.T, s *Store, notifyType, eventKey, profileID stri
 	return row.ID
 }
 
+// 通知姓名优先取 IM 会话展示名:身份根上的名字可能是推荐列表的脱敏形态
+// (真机 2026-07-28:会话侧"胡卫华"、身份根"胡先生"),运营要靠真名对上人。
+func TestNotificationSnapshotPrefersConversationDisplayName(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 28, 21, 0, 0, 0, time.UTC)
+	fixture, _ := seedSuccessfulV4Greeting(t, s, "notify-name", "conversation-notify-name", at)
+
+	masked := "胡先生"
+	if err := s.db.Model(&Candidate{}).
+		Where("platform = ? AND platform_user_ref = ?", fixture.Platform, "person-notify-name").
+		UpdateColumn("display_name", masked).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&Conversation{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ?",
+			fixture.Platform, fixture.AccountRef, "conversation-notify-name",
+		).
+		UpdateColumn("peer_display_name", "胡卫华").Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil || snapshot.DisplayName != "胡卫华" {
+		t.Fatalf("未优先取会话真名: snapshot=%+v err=%v", snapshot, err)
+	}
+
+	// 会话侧为空时回落身份根,不至于渲染成"候选人"。
+	if err := s.db.Model(&Conversation{}).
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ?",
+			fixture.Platform, fixture.AccountRef, "conversation-notify-name",
+		).
+		UpdateColumn("peer_display_name", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil || snapshot.DisplayName != masked {
+		t.Fatalf("会话名为空未回落身份根: snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
 // 发件箱生命周期:取件、失败重试上限、发送、跳过与过期都只标记不删除。
 func TestNotificationOutboxLifecycle(t *testing.T) {
 	s := openTest(t)
