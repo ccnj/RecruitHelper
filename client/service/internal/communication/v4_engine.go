@@ -33,8 +33,9 @@ type V4InboundTurnDecision struct {
 // ReduceV4InboundTurn closes the pure vertical slice:
 // neutral ledger -> normalized events -> v4 state -> optional AI/action plan.
 // Multiple ordinary messages in the contiguous segment open exactly one cold
-// counting round. Mixed special events are kept conservative until a richer
-// turn-envelope fact is introduced.
+// counting round. Per spec §5 mixed-input turns (2026-07-28), resume cards mix
+// freely with ordinary text and reduce to one resume event; mixes involving
+// other special events stay conservative until batches B/C activate them.
 func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error) {
 	if err := validateV4State(input.State); err != nil || strings.TrimSpace(input.TurnID) == "" || len(input.Messages) == 0 ||
 		!validAdviceState(input.Intent.State) || !validAdviceState(input.Reply.State) {
@@ -93,7 +94,14 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		}, nil
 	}
 
-	if len(specialEvents) > 1 || (len(specialEvents) == 1 && len(ordinaryEvents) > 0) {
+	allResumeSpecials := len(specialEvents) > 0
+	for _, special := range specialEvents {
+		if special.Kind != EventResumeSubmitted {
+			allResumeSpecials = false
+			break
+		}
+	}
+	if !allResumeSpecials && (len(specialEvents) > 1 || (len(specialEvents) == 1 && len(ordinaryEvents) > 0)) {
 		state, err := applyV4AggregateOrdinaryTurn(input.State, input.TurnID, frozen.Messages[len(frozen.Messages)-1].Seq)
 		if err != nil {
 			return V4InboundTurnDecision{}, err
@@ -104,9 +112,17 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 	}
 
 	var event BusinessEvent
-	if len(specialEvents) == 1 {
+	switch {
+	case len(specialEvents) == 1 && len(ordinaryEvents) == 0:
 		event = specialEvents[0]
-	} else {
+	case allResumeSpecials:
+		// 简历卡与文字混合(或多张简历卡)合成一次简历事件:一轮只开一个
+		// 真实消息轮,seq 取整段尾以覆盖重放边界。
+		event = BusinessEvent{
+			Key: "turn:" + input.TurnID, Kind: EventResumeSubmitted,
+			Source: EventSourceMessage, MessageSeq: frozen.Messages[len(frozen.Messages)-1].Seq,
+		}
+	default:
 		event = BusinessEvent{
 			Key: "turn:" + input.TurnID, Kind: EventCandidateExpressionReceived,
 			Source: EventSourceMessage, MessageSeq: ordinaryEvents[len(ordinaryEvents)-1].MessageSeq,

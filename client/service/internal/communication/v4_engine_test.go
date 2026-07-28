@@ -277,19 +277,71 @@ func TestV4InboundTurnUnknownShapePreservesMainlineFactButGrantsNoAction(t *test
 	}
 }
 
-func TestV4InboundTurnMixedSpecialSemanticsStayManualAndOpenOneRound(t *testing.T) {
-	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
-		State: NewV4GreetedState(v4Time(8)), TurnID: "turn-mixed-special",
-		Messages: []LedgerMessageFact{
+func TestV4InboundTurnResumeMixReducesToOneKnownInterestedRound(t *testing.T) {
+	resumeCard := func(seq int64) LedgerMessageFact {
+		return LedgerMessageFact{Seq: seq, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"}
+	}
+	tests := []struct {
+		name     string
+		messages []LedgerMessageFact
+		lastSeq  int64
+	}{
+		{name: "text_card_text", messages: []LedgerMessageFact{v4InboundText(2, "请问做几休几"), resumeCard(3), v4InboundText(4, "工作时间是")}, lastSeq: 4},
+		{name: "card_then_text", messages: []LedgerMessageFact{resumeCard(2), v4InboundText(3, "另外补充一句")}, lastSeq: 3},
+		{name: "text_then_card", messages: []LedgerMessageFact{v4InboundText(2, "简历发您看下"), resumeCard(3)}, lastSeq: 3},
+		{name: "double_card", messages: []LedgerMessageFact{resumeCard(2), resumeCard(3)}, lastSeq: 3},
+		{name: "rejection_like_text_with_card", messages: []LedgerMessageFact{v4InboundText(2, "不考虑了"), resumeCard(3)}, lastSeq: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+				State: NewV4GreetedState(v4Time(8)), TurnID: "turn-resume-mix",
+				Messages: test.messages,
+				Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			})
+			if err != nil || decision.ManualReason != "" || decision.State.MainStatus != V4StatusCommunicating ||
+				decision.State.RealMessageRound != 2 || decision.State.LastRealMessageSeq != test.lastSeq ||
+				decision.Requirement != V4DialogueReplyKnownInterested || len(decision.EventActions) != 0 ||
+				decision.Dialogue.Status != V4DialogueWaitingAdvice || decision.Dialogue.NextAdvice != V4AdviceReply ||
+				decision.Dialogue.IntentLabel != m5ai.IntentInterested || decision.Dialogue.IntentSource != IntentSourceBusinessEvent ||
+				len(decision.Dialogue.Actions) != 0 {
+				t.Fatalf("简历混合轮应合成一次已知有意向轮: decision=%+v err=%v", decision, err)
+			}
+		})
+	}
+}
+
+func TestV4InboundTurnNonResumeSpecialMixStaysManualAndOpenOneRound(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []LedgerMessageFact
+	}{
+		{name: "wechat_pending_with_text", messages: []LedgerMessageFact{
+			{Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "pending", Origin: "external"},
+			v4InboundText(3, "加个微信聊"),
+		}},
+		{name: "resume_with_wechat_accepted", messages: []LedgerMessageFact{
 			{Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
-			v4InboundText(3, "另外补充一句"),
-		},
-		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
-	})
-	if err != nil || decision.State.MainStatus != V4StatusCommunicating || decision.State.RealMessageRound != 2 ||
-		decision.State.LastRealMessageSeq != 3 || decision.ManualReason != V4ManualUnsupportedSemantic ||
-		len(decision.EventActions) != 0 || decision.Dialogue.NextAdvice != V4AdviceNone {
-		t.Fatalf("混合特殊语义不应猜优先级或开多个轮: decision=%+v err=%v", decision, err)
+			{Seq: 3, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted", Origin: "external"},
+		}},
+		{name: "interview_accepted_with_text", messages: []LedgerMessageFact{
+			{Seq: 2, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"},
+			v4InboundText(3, "那到时候见"),
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+				State: NewV4GreetedState(v4Time(8)), TurnID: "turn-mixed-special",
+				Messages: test.messages,
+				Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			})
+			if err != nil || decision.State.MainStatus != V4StatusCommunicating || decision.State.RealMessageRound != 2 ||
+				decision.State.LastRealMessageSeq != 3 || decision.ManualReason != V4ManualUnsupportedSemantic ||
+				len(decision.EventActions) != 0 || decision.Dialogue.NextAdvice != V4AdviceNone {
+				t.Fatalf("批B/C激活前非简历特殊卡混合必须保守转人工: decision=%+v err=%v", decision, err)
+			}
+		})
 	}
 }
 

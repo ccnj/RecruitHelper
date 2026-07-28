@@ -16,14 +16,15 @@ const (
 
 // DialogueTurnInputKindOf is the canonical production eligibility evaluator
 // for M5's currently supported frozen inbound shapes. Ordinary text may span a
-// contiguous turn; the strong-interest business event is deliberately limited
-// to exactly one external resume card. Every other card or mixed shape remains
-// outside automatic processing.
+// contiguous turn. Per spec §5 mixed-input turns (2026-07-28, batch A), one or
+// more external resume cards mix freely with non-empty text and share one
+// strong-interest semantics; every other card kind, media message or empty
+// text keeps the whole turn outside automatic processing.
 func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 	if len(inbound) == 0 {
 		return "", false
 	}
-	allText := true
+	resumeCards := 0
 	previous := int64(0)
 	for i := range inbound {
 		message := inbound[i]
@@ -31,19 +32,19 @@ func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 			return "", false
 		}
 		previous = message.Seq
-		if message.Kind != "text" || message.Text == nil || strings.TrimSpace(*message.Text) == "" {
-			allText = false
+		switch {
+		case message.Kind == "text" && message.Text != nil && strings.TrimSpace(*message.Text) != "":
+		case message.Kind == "card" && message.CardType == "resumeAttachment" &&
+			message.CardState == "unknown" && message.Origin == "external":
+			resumeCards++
+		default:
+			return "", false
 		}
 	}
-	if allText {
+	if resumeCards == 0 {
 		return DialogueTurnInputText, true
 	}
-	message := inbound[0]
-	if len(inbound) == 1 && message.Kind == "card" && message.CardType == "resumeAttachment" &&
-		message.CardState == "unknown" && message.Origin == "external" {
-		return DialogueTurnInputResumeAttachment, true
-	}
-	return "", false
+	return DialogueTurnInputResumeAttachment, true
 }
 
 // DialogueTurnCandidateMessages removes neutral system notices from one
