@@ -7440,6 +7440,36 @@ async function mainPrepareInterviewEditor(
       Function.prototype.call.call(intrinsicClick, node)
       return true
     }
+    // 翻月按钮不响应 HTMLElement.prototype.click 合成调用，只认按压事件序列
+    // （2026-07-29 真机：intrinsic click 页头纹丝不动，pointer/mouse 序列翻页
+    // 成功）。事件直接派发给节点本身，坐标只是事件属性，不按坐标命中，不存在
+    // 误中其他元素的可能。仅翻月按钮使用本变体；其余控件 intrinsic click 已被
+    // 真机证明有效，不换扳机。节奏与守卫同 interact。
+    const interactByPointer = async (node: HTMLElement): Promise<boolean> => {
+      await interactionGap()
+      if (!node.isConnected || !visible(node) || Date.now() > irreversibleNotAfterMs) return false
+      const rect = node.getBoundingClientRect()
+      const clientX = rect.x + rect.width / 2
+      const clientY = rect.y + rect.height / 2
+      const fireMouse = (type: string, extra: MouseEventInit = {}): void => {
+        node.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, view: window, clientX, clientY, ...extra,
+        }))
+      }
+      const firePointer = (type: string): void => {
+        try {
+          node.dispatchEvent(new PointerEvent(type, {
+            bubbles: true, cancelable: true, clientX, clientY, pointerId: 1, isPrimary: true,
+          }))
+        } catch { /* PointerEvent 不可用时退化为纯鼠标序列 */ }
+      }
+      firePointer('pointerdown')
+      fireMouse('mousedown', { buttons: 1 })
+      firePointer('pointerup')
+      fireMouse('mouseup')
+      fireMouse('click')
+      return true
+    }
     const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
       const deadline = Date.now() + Math.min(10_000, Math.max(0, timeoutMs))
       while (Date.now() <= deadline) {
@@ -7637,7 +7667,7 @@ async function mainPrepareInterviewEditor(
       if (buttons.length < 2) return await abort('date_unavailable', `navBtn n=${buttons.length}`)
       const direction = year * 12 + month > current.year * 12 + current.month ? 1 : -1
       const button = direction > 0 ? buttons[buttons.length - 1] : buttons[0]
-      if (!await interact(button)) return await abort('date_unavailable', 'nav.click')
+      if (!await interactByPointer(button)) return await abort('date_unavailable', 'nav.click')
       // 翻月点击生效与否 2.5 秒内必有分晓（真机翻不动时页头永不变化），
       // 不沿用 10 秒默认等待。
       datePopover = await waitFor(() => {
