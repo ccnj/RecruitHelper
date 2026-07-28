@@ -61,14 +61,17 @@ func communicationV4InitialRequirementTx(
 	tx *gorm.DB,
 	turn DialogueTurn,
 ) (communication.V4DialogueRequirement, error) {
-	initial, found, err := communicationV4TurnApplicationTx(tx, turn)
+	// 对话要求以回执链 head 为准:既有场景链上 Dialogue 值恒等(链环与
+	// advice 回执均校验与前项一致),离线解冻场景则由 manualUnfreeze 链环
+	// 把原回执的 none 演进为重放后的真实要求。
+	head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
 	if err != nil {
 		return "", err
 	}
-	if !found || initial.Outcome.Dialogue == "" {
+	if !found || head.Outcome.Dialogue == "" {
 		return "", ErrCommunicationV4Corrupt
 	}
-	return initial.Outcome.Dialogue, nil
+	return head.Outcome.Dialogue, nil
 }
 
 func communicationV4TurnReducerInputTx(
