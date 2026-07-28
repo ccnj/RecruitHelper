@@ -5284,8 +5284,13 @@ async function mainReadThreadPage(
   if (engine && typeof engine.getHistoryMsgs === 'function' && target) {
     diagnosticStage = 'read_history_api'
     const request: AnyRecord = { to: target, limit, asc: true }
+    // 真机 2026-07-28:现网 session.scene 为 undefined,而 sessionType 不是
+    // getHistoryMsgs 的合法 scene(合法枚举仅 p2p/team,来自平台参数校验的
+    // 错误消息与真机对照实验)。传入非法值会让 API 主路径 100% 被拒并退化
+    // 到受渲染时序影响的 DOM 兜底;不传 scene 时接口正常。因此只透传已验证
+    // 的合法值,其余一律不传。
     const scene = session.scene ?? session.sessionType
-    if (scene != null && String(scene) !== '') request.scene = scene
+    if (scene === 'p2p' || scene === 'team') request.scene = scene
     if (cursor) {
       request.endTime = cursor.endTime
       request.lastMsgId = cursor.lastMsgId
