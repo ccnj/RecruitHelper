@@ -93,7 +93,10 @@ h1, h2, h3, p { margin-top: 0; }
   --face: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "PingFang SC", "Microsoft YaHei", monospace;
 
   position: relative;
-  min-height: 100vh;
+  /* 固定视口高 + 内部滚动：主面板才能真正被约束在一屏内。若用
+     min-height，flex:1 会随内容一起长高，页面又长出外层滚动条。 */
+  height: 100vh;
+  overflow-y: auto;
   padding: 0.75rem clamp(0.75rem, 1.6vw, 1.35rem) 1.35rem;
   display: flex;
   flex-direction: column;
@@ -256,6 +259,18 @@ h1, h2, h3, p { margin-top: 0; }
   background: linear-gradient(180deg, rgba(22, 29, 35, 0.97), rgba(14, 19, 24, 0.97));
   backdrop-filter: blur(8px);
   box-shadow: 0 1px 0 rgba(77, 163, 255, 0.12), 0 8px 22px rgba(0, 0, 0, 0.45);
+}
+
+/* dc-shell 有 padding-top，顶栏 sticky 住之后上方会留一条缝，滚动内容
+   会从缝里露出来。用一块不透明挡板把这条缝盖掉。 */
+.dc-topbar::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  bottom: 100%;
+  height: 0.8rem;
+  background: var(--void);
 }
 
 .dc-seal { display: flex; align-items: baseline; gap: 0.45rem; flex: 0 0 auto; }
