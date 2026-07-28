@@ -5,7 +5,9 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -228,6 +230,70 @@ type NotificationRenderSnapshot struct {
 	InterviewStartsAtMs *int64
 	ChatShot            *CandidateScreenshot
 	ResumeShot          *CandidateScreenshot
+	// 画像摘要:AGENTS.md 2026-07-28 补充裁决允许的封闭四项,逐项可空。
+	// 简历未采到、快照结构异常或标签缺失时留空,渲染侧逐项省略,绝不阻断通知。
+	Age           string
+	Education     string
+	City          string
+	DesiredSalary string
+}
+
+// notificationProfileLabels 是画像摘要四项在简历快照里的标签名。
+// 只认这四个精确标签,不做同义猜测——猜错会把别的简历内容带出本机。
+var notificationProfileLabels = struct {
+	age, education, city, salary string
+}{age: "年龄", education: "最高学历", city: "现居地", salary: "期望薪资"}
+
+const notificationProfileValueMaxRunes = 24
+
+// fillNotificationProfileSummary 从简历快照抽取画像四项。
+// 全程尽力而为:没有快照、JSON 解析失败、分区不是数组、标签缺失、值超长,
+// 任何一种都只让对应项留空,不返回错误、不阻断通知发送。
+func fillNotificationProfileSummary(snapshot *NotificationRenderSnapshot, resumeJSON string) {
+	resumeJSON = strings.TrimSpace(resumeJSON)
+	if resumeJSON == "" {
+		return
+	}
+	var parsed struct {
+		Basic []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		} `json:"basic"`
+		Expectations []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		} `json:"expectations"`
+	}
+	if err := json.Unmarshal([]byte(resumeJSON), &parsed); err != nil {
+		return
+	}
+	take := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		// 简历值理论上短,但异常快照可能塞进整段文字;截断保证正文不被撑爆。
+		runes := []rune(value)
+		if len(runes) > notificationProfileValueMaxRunes {
+			return string(runes[:notificationProfileValueMaxRunes]) + "…"
+		}
+		return value
+	}
+	for _, item := range parsed.Basic {
+		switch strings.TrimSpace(item.Label) {
+		case notificationProfileLabels.age:
+			snapshot.Age = take(item.Value)
+		case notificationProfileLabels.education:
+			snapshot.Education = take(item.Value)
+		case notificationProfileLabels.city:
+			snapshot.City = take(item.Value)
+		}
+	}
+	for _, item := range parsed.Expectations {
+		if strings.TrimSpace(item.Label) == notificationProfileLabels.salary {
+			snapshot.DesiredSalary = take(item.Value)
+		}
+	}
 }
 
 // NotificationRenderSnapshotForProfile 汇集渲染一条运营通知所需的最新事实。
@@ -246,17 +312,37 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 	if profile.PositionTitle != nil {
 		snapshot.PositionTitle = strings.TrimSpace(*profile.PositionTitle)
 	}
-	var person Candidate
-	err = s.db.First(
-		&person,
-		"platform = ? AND platform_user_ref = ?",
-		profile.Platform,
-		profile.PlatformUserRef,
-	).Error
-	if err == nil && person.DisplayName != nil {
-		snapshot.DisplayName = strings.TrimSpace(*person.DisplayName)
-	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
+	// 姓名优先取 IM 会话里的对方展示名:候选人身份根上的名字可能来自推荐/采集
+	// 列表的脱敏形态(如"胡先生"),而运营要靠这个名字在微信里对上人。真机上
+	// 两者绝大多数一致,少数不一致时会话侧才是真名。会话缺失时回落身份根。
+	if profile.ConversationRef != nil {
+		var conversation Conversation
+		convErr := s.db.First(
+			&conversation,
+			"platform = ? AND account_ref = ? AND conversation_ref = ?",
+			profile.Platform,
+			profile.AccountRef,
+			*profile.ConversationRef,
+		).Error
+		if convErr == nil {
+			snapshot.DisplayName = strings.TrimSpace(conversation.PeerDisplayName)
+		} else if !errors.Is(convErr, gorm.ErrRecordNotFound) {
+			return nil, convErr
+		}
+	}
+	if snapshot.DisplayName == "" {
+		var person Candidate
+		err = s.db.First(
+			&person,
+			"platform = ? AND platform_user_ref = ?",
+			profile.Platform,
+			profile.PlatformUserRef,
+		).Error
+		if err == nil && person.DisplayName != nil {
+			snapshot.DisplayName = strings.TrimSpace(*person.DisplayName)
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
 	}
 	aggregate, err := s.CommunicationV4AggregateByProfile(profileID)
 	if err == nil {
@@ -272,6 +358,21 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 		if assets[index].Kind == contactAssetKindWechat {
 			snapshot.WechatID = assets[index].Value
 			break
+		}
+	}
+	// 画像摘要:没有活动快照就整行不出,读取失败也只当没有,绝不阻断通知。
+	if profile.ActiveResumeSnapshotID != nil {
+		var resume CandidateResumeSnapshot
+		resumeErr := s.db.First(
+			&resume,
+			"snapshot_id = ? AND profile_id = ?",
+			*profile.ActiveResumeSnapshotID,
+			profileID,
+		).Error
+		if resumeErr == nil {
+			fillNotificationProfileSummary(snapshot, resume.ResumeJSON)
+		} else if !errors.Is(resumeErr, gorm.ErrRecordNotFound) {
+			slog.Warn("运营通知画像摘要读取失败,按无画像发送", "profileId", profileID, "err", resumeErr)
 		}
 	}
 	shots, err := s.LatestCandidateScreenshots(profileID)

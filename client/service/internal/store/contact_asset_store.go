@@ -76,6 +76,41 @@ func (s *Store) ContactAssetsByProfile(profileID string) ([]ContactAsset, error)
 	return assets, err
 }
 
+// LatestOutboundWechatInviteSourceKey 返回该会话中我方最近一张仍有效的换微信
+// 邀请卡的稳定消息键。它只服务"我方发起→对方接受"形态的收号锚定：候选人主动
+// 发起的请求卡是 in 方向，不会被这里选中，因此该查询天然把另一形态排除在外。
+// 取最近一张而不是最早一张：平台正证要求结果消息落在下一张请求卡之前，只有
+// 最近一次邀请的锚才可能匹配到本次交换结果。
+func (s *Store) LatestOutboundWechatInviteSourceKey(
+	key ConversationKey,
+) (string, bool, error) {
+	var message Message
+	err := s.db.
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND "+
+				"direction = ? AND card_type = ? AND source_key IS NOT NULL AND "+
+				activeMessageCondition,
+			key.Platform,
+			key.AccountRef,
+			key.ConversationRef,
+			"out",
+			"wechatExchange",
+		).
+		Order("seq DESC").
+		First(&message).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	sourceKey := strings.TrimSpace(*message.SourceKey)
+	if !validMessageSourceKey(sourceKey) {
+		return "", false, nil
+	}
+	return sourceKey, true, nil
+}
+
 func (s *Store) HasWechatContactAssetForRequest(
 	profileID string,
 	requestSourceKey string,

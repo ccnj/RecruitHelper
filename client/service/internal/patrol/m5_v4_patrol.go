@@ -65,6 +65,11 @@ func (a *roundActor) processCommunicationV4Targets(ctx context.Context) error {
 		); err != nil {
 			return err
 		}
+		// 收号排在取证之前:同一轮内补齐"号 + 两张图",发件箱三资产闸门
+		// 可以立即放行,不必等 15 分钟兜底。
+		if err := a.collectExchangedWechatContact(ctx, target.Profile.ProfileID); err != nil {
+			return err
+		}
 		if err := a.captureNotificationEvidence(ctx, target.Profile.ProfileID); err != nil {
 			return err
 		}
@@ -110,6 +115,9 @@ func (a *roundActor) processCommunicationV4Profile(
 		return err
 	}
 	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
+		return err
+	}
+	if err := a.collectExchangedWechatContact(ctx, profileID); err != nil {
 		return err
 	}
 	return a.captureNotificationEvidence(ctx, profileID)
