@@ -187,6 +187,16 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		decision.Requirement = V4DialogueNone
 		return decision, nil
 	}
+	if hasUnknown {
+		// 含未知平台事件的轮整体转人工:在任何回执抑制/义务置位之前短路,
+		// 否则回执义务会被标记为已由承接承载,而承接根本不会发生。
+		return V4InboundTurnDecision{
+			State:        state,
+			Requirement:  requirement,
+			Dialogue:     manualV4Dialogue(state, V4ManualUnknownPlatformEvent, "", ""),
+			ManualReason: V4ManualUnknownPlatformEvent,
+		}, nil
+	}
 	if requirement != V4DialogueNone {
 		// 规格 §五(三):轮内存在对话承接(文字或简历触发回复、换微信承接、
 		// 服务应答)时,该轮固定回执由这一次 AI 调用替代——候选人可见回复
@@ -197,15 +207,6 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		// 无对话轮沿用各单卡既有语义,但同类回执一轮至多一条(多张同类卡
 		// 不叠加候选人可见动作)。
 		eventActions = dedupeV4ReceiptActions(eventActions)
-	}
-
-	if hasUnknown {
-		return V4InboundTurnDecision{
-			State:        state,
-			Requirement:  requirement,
-			Dialogue:     manualV4Dialogue(state, V4ManualUnknownPlatformEvent, "", ""),
-			ManualReason: V4ManualUnknownPlatformEvent,
-		}, nil
 	}
 	if requirement == V4DialogueNone {
 		if receipt, handled := v4ReceiptDialogue(state, eventActions, input.FixedPhrases); handled {

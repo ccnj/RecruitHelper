@@ -558,6 +558,23 @@ func TestV4InboundTurnWechatMixActivatedByBatchB(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown_event_short_circuits_before_receipt_suppression", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: NewV4GreetedState(v4Time(8)), TurnID: "turn-b-unknown-mix",
+			Messages: []LedgerMessageFact{
+				acceptedCard(2),
+				v4InboundText(3, "看下这个"),
+				{Seq: 4, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "pending", Origin: "external"},
+			},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.ManualReason != V4ManualUnknownPlatformEvent ||
+			decision.State.WechatReceiptSent ||
+			len(decision.EventActions) != 0 {
+			t.Fatalf("未知事件轮必须在义务置位前整轮转人工: decision=%+v err=%v", decision, err)
+		}
+	})
+
 	t.Run("eliminated_pending_with_text_no_action", func(t *testing.T) {
 		state := NewV4GreetedState(v4Time(8))
 		state.MainStatus = V4StatusEliminated
