@@ -15,12 +15,10 @@ import { createEmptyProductData } from './fixtures'
 import type { ProductData } from './types'
 
 export interface ProductConnectedAppProps {
-  onOpenDiagnostics?: () => void
   pollIntervalMs?: number
 }
 
 export function ProductConnectedApp({
-  onOpenDiagnostics,
   pollIntervalMs = 5_000,
 }: ProductConnectedAppProps) {
   const [data, setData] = useState<ProductData>(() => createEmptyProductData())
@@ -109,7 +107,6 @@ export function ProductConnectedApp({
     <ProductApp
       actions={{
         loadCandidateDetail: (profileId, fallback) => readCandidateDetail(profileId, fallback),
-        openDiagnostics: onOpenDiagnostics,
         endWorkflow: () => performProductAction('结束本次任务', endProductWorkflow),
         pauseWorkflow: () => performProductAction('暂停', pauseProductWorkflow),
         refresh,

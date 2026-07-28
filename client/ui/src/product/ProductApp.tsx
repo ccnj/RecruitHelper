@@ -126,7 +126,6 @@ export function ProductApp({
         customerShortName={data.customer.shortName}
         jobName={data.customer.job.name}
         onNavigate={navigate}
-        onOpenDiagnostics={actions.openDiagnostics}
         onSearch={setGlobalSearch}
         searchValue={globalSearch}
         version={data.clientVersion}
