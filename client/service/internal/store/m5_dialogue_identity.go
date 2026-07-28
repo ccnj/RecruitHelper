@@ -12,26 +12,29 @@ import (
 type DialogueTurnInputKind string
 
 const (
-	DialogueTurnInputText             DialogueTurnInputKind = "text"
-	DialogueTurnInputResumeAttachment DialogueTurnInputKind = "resumeAttachment"
-	DialogueTurnInputWechatCard       DialogueTurnInputKind = "wechatCard"
+	DialogueTurnInputText              DialogueTurnInputKind = "text"
+	DialogueTurnInputResumeAttachment  DialogueTurnInputKind = "resumeAttachment"
+	DialogueTurnInputWechatCard        DialogueTurnInputKind = "wechatCard"
+	DialogueTurnInputInterviewAccepted DialogueTurnInputKind = "interviewAccepted"
 )
 
 // DialogueTurnInputKindOf is the canonical production eligibility evaluator
 // for M5's currently supported frozen inbound shapes. Ordinary text may span a
-// contiguous turn. Per spec §5 mixed-input turns (2026-07-28): batch A lets
-// external resume cards mix freely with non-empty text under one
-// strong-interest semantics; batch B additionally admits wechat-exchange cards
-// (pending/accepted) mixing with text and resume cards — the turn is labeled
-// wechatCard so downstream keeps the accept-chain/receipt semantics. Every
-// other card kind, media message or empty text keeps the whole turn outside
-// automatic processing.
+// contiguous turn. Per spec §5 mixed-input turns (2026-07-28) all three
+// activation batches are live: external resume cards (batch A),
+// wechat-exchange cards pending/accepted (batch B) and interview-accepted
+// cards (batch C) mix freely with non-empty text and each other. The label
+// priority wechatCard > interviewAccepted > resumeAttachment routes downstream
+// to the strictest applicable branch (accept-chain first, then service reply).
+// Every other card kind, media message or empty text keeps the whole turn
+// outside automatic processing.
 func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 	if len(inbound) == 0 {
 		return "", false
 	}
 	resumeCards := 0
 	wechatCards := 0
+	interviewAccepted := 0
 	previous := int64(0)
 	for i := range inbound {
 		message := inbound[i]
@@ -48,12 +51,18 @@ func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 			(message.CardState == "pending" || message.CardState == "accepted") &&
 			message.Origin == "external":
 			wechatCards++
+		case message.Kind == "card" && message.CardType == "interviewInvite" &&
+			message.CardState == "accepted" && message.Origin == "external":
+			interviewAccepted++
 		default:
 			return "", false
 		}
 	}
 	if wechatCards > 0 {
 		return DialogueTurnInputWechatCard, true
+	}
+	if interviewAccepted > 0 {
+		return DialogueTurnInputInterviewAccepted, true
 	}
 	if resumeCards == 0 {
 		return DialogueTurnInputText, true

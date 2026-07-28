@@ -311,37 +311,102 @@ func TestV4InboundTurnResumeMixReducesToOneKnownInterestedRound(t *testing.T) {
 	}
 }
 
-func TestV4InboundTurnInterviewMixStaysManualBeforeBatchC(t *testing.T) {
-	tests := []struct {
-		name     string
-		messages []LedgerMessageFact
-	}{
-		{name: "interview_accepted_with_text", messages: []LedgerMessageFact{
-			{Seq: 2, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"},
-			v4InboundText(3, "那到时候见"),
-		}},
-		{name: "interview_accepted_with_resume", messages: []LedgerMessageFact{
-			{Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
-			{Seq: 3, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"},
-		}},
-		{name: "interview_accepted_with_wechat_accepted", messages: []LedgerMessageFact{
-			{Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted", Origin: "external"},
-			{Seq: 3, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"},
-		}},
+func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
+	acceptedCard := func(seq int64) LedgerMessageFact {
+		return LedgerMessageFact{Seq: seq, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"}
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
-				State: NewV4GreetedState(v4Time(8)), TurnID: "turn-mixed-special",
-				Messages: test.messages,
-				Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
-			})
-			if err != nil || decision.ManualReason != V4ManualUnsupportedSemantic ||
-				len(decision.EventActions) != 0 || decision.Dialogue.NextAdvice != V4AdviceNone {
-				t.Fatalf("批C激活前邀面接受卡混合必须保守转人工: decision=%+v err=%v", decision, err)
-			}
+	communicating := func() V4State {
+		state := NewV4GreetedState(v4Time(8))
+		state.MainStatus = V4StatusCommunicating
+		state.RealMessageRound = 1
+		state.LastRealMessageSeq = 1
+		return state
+	}
+
+	t.Run("accepted_with_text_service_reply_replaces_receipt_and_invite", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: communicating(), TurnID: "turn-c-accepted-text",
+			Messages: []LedgerMessageFact{acceptedCard(2), v4InboundText(3, "请问要准备什么")},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 		})
-	}
+		if err != nil || decision.ManualReason != "" ||
+			decision.Requirement != V4DialogueServiceReply ||
+			decision.State.MainStatus != V4StatusInterviewed ||
+			!decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 1 ||
+			decision.EventActions[0].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.Dialogue.Status != V4DialogueWaitingAdvice ||
+			decision.Dialogue.NextAdvice != V4AdviceServiceReply {
+			t.Fatalf("邀面接受+文字应由一次服务应答替代回执并撤下追邀卡: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("accepted_alone_keeps_receipt_and_invite_chain", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: communicating(), TurnID: "turn-c-accepted-alone",
+			Messages: []LedgerMessageFact{acceptedCard(2)},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.Requirement != V4DialogueNone ||
+			len(decision.EventActions) != 3 ||
+			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.EventActions[2].Kind != V4ActionInviteWechat ||
+			decision.State.InterviewAcceptedReceiptSent {
+			t.Fatalf("无文字单卡轮必须保持既有回执+追邀链: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("accepted_with_resume_service_reply", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: communicating(), TurnID: "turn-c-accepted-resume",
+			Messages: []LedgerMessageFact{
+				{Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
+				acceptedCard(3),
+			},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.ManualReason != "" ||
+			decision.Requirement != V4DialogueServiceReply ||
+			!decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 1 ||
+			decision.EventActions[0].Kind != V4ActionNotifyInterviewAccepted {
+			t.Fatalf("简历+邀面接受轮应走服务应答承接: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("accepted_with_wechat_accepted_text_single_dialogue", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: communicating(), TurnID: "turn-c-accepted-wechat",
+			Messages: []LedgerMessageFact{
+				{Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "accepted", Origin: "external"},
+				acceptedCard(3),
+				v4InboundText(4, "都弄好了"),
+			},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.ManualReason != "" ||
+			decision.Requirement != V4DialogueServiceReply ||
+			decision.State.WechatState != V4WechatExchanged ||
+			!decision.State.WechatReceiptSent ||
+			!decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 2 ||
+			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
+			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted {
+			t.Fatalf("多类服务卡+文字应动作并集且对话仅一次: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("greeted_accepted_alone_stays_manual_invalid_transition", func(t *testing.T) {
+		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+			State: NewV4GreetedState(v4Time(8)), TurnID: "turn-c-greeted-alone",
+			Messages: []LedgerMessageFact{acceptedCard(2)},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		})
+		if err != nil || decision.ManualReason != V4ManualInvalidTransition {
+			t.Fatalf("未进入沟通态的纯接受卡保持既有保守语义: decision=%+v err=%v", decision, err)
+		}
+	})
 }
 
 func TestV4InboundTurnWechatMixActivatedByBatchB(t *testing.T) {

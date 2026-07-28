@@ -56,9 +56,9 @@ func (s v4TurnShape) hasSpecial() bool {
 // neutral ledger -> normalized events -> v4 state -> optional AI/action plan.
 // Per spec §5 mixed-input turns (2026-07-28) the whole turn opens at most one
 // real-message round (anchor slides to the turn tail), while every special
-// card applies its deterministic actions member by member in seq order.
-// Mixes involving wechat/interview cards stay conservative until batches B/C
-// activate them.
+// card applies its deterministic actions member by member in seq order. All
+// three activation batches (A resume, B wechat, C interview-accepted) are
+// live; unknown cards and media still freeze the whole turn.
 func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error) {
 	if err := validateV4State(input.State); err != nil || strings.TrimSpace(input.TurnID) == "" || len(input.Messages) == 0 ||
 		!validAdviceState(input.Intent.State) || !validAdviceState(input.Reply.State) {
@@ -128,16 +128,6 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		return V4InboundTurnDecision{
 			State: dialogue.State, Requirement: V4DialogueNone, Dialogue: dialogue,
 		}, nil
-	}
-
-	if !v4TurnShapeActivated(shape) {
-		state, err := applyV4AggregateOrdinaryTurn(input.State, input.TurnID, frozen.Messages[len(frozen.Messages)-1].Seq)
-		if err != nil {
-			return V4InboundTurnDecision{}, err
-		}
-		decision := manualV4InboundTurn(state, V4ManualUnsupportedSemantic)
-		decision.Requirement = V4DialogueNone
-		return decision, nil
 	}
 
 	turnTailSeq := frozen.Messages[len(frozen.Messages)-1].Seq
@@ -244,30 +234,6 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 	}, nil
 }
 
-// v4TurnShapeActivated gates which member mixes are live. Batch A activated
-// resume cards mixing with text; batch B activated both wechat card states.
-// Interview-accepted cards (batch C) stay conservative until activation.
-func v4TurnShapeActivated(shape v4TurnShape) bool {
-	if shape.hasInterviewAccepted {
-		// 批 C 未激活:邀面接受卡只放行单卡无文字轮(既有语义)。
-		specials := 0
-		if shape.hasResume {
-			specials++
-		}
-		if shape.hasWechatRequested {
-			specials++
-		}
-		if shape.hasWechatExchanged {
-			specials++
-		}
-		if shape.hasInterviewAccepted {
-			specials++
-		}
-		return !shape.hasText && specials == 1
-	}
-	return true
-}
-
 // applyV4TurnMemberEvent applies the non-expressive part of one special-card
 // member. Expression advancement (round counter, silence anchor, greeted ->
 // communicating) is owned by the turn-level anchor; everything else keeps the
@@ -355,7 +321,12 @@ func v4TurnRequirement(state V4State, shape v4TurnShape) (V4DialogueRequirement,
 // the corresponding obligation flags as fulfilled. Per spec §5 clause 3 the
 // continuation replaces the fixed receipt; on continuation failure the turn
 // goes manual and the fixed phrase is never fallen back to, so flipping the
-// flag here is the only consistent reading of the obligation.
+// flag here is the only consistent reading of the obligation. The
+// interview-accepted follow-up wechat invite is removed together with its
+// receipt: its dispatch anchor is the receipt text (body before card), and a
+// cross-track dependency on the continuation reply is a mechanism this batch
+// deliberately does not add — the follow-up invite stays available through
+// the AI action suggestion and cold-followup tracks.
 func suppressV4ReceiptActions(actions []V4EventAction, state V4State) ([]V4EventAction, V4State) {
 	kept := make([]V4EventAction, 0, len(actions))
 	next := cloneV4State(state)
@@ -367,21 +338,24 @@ func suppressV4ReceiptActions(actions []V4EventAction, state V4State) ([]V4Event
 		case V4ActionInterviewAcceptedReceipt:
 			next.InterviewAcceptedReceiptSent = true
 			continue
+		case V4ActionInviteWechat:
+			continue
 		}
 		kept = append(kept, actions[index])
 	}
 	return kept, next
 }
 
-// dedupeV4ReceiptActions keeps at most one receipt action per receipt kind in
-// a no-text turn: multiple same-kind cards in one turn must not stack multiple
-// candidate-visible fixed phrases (one candidate-visible action per turn).
+// dedupeV4ReceiptActions keeps at most one candidate-visible action per kind
+// in a no-dialogue turn: multiple same-kind cards in one turn must not stack
+// multiple fixed phrases or follow-up invite cards.
 func dedupeV4ReceiptActions(actions []V4EventAction) []V4EventAction {
 	kept := make([]V4EventAction, 0, len(actions))
-	seen := make(map[V4ActionKind]bool, 2)
+	seen := make(map[V4ActionKind]bool, 3)
 	for index := range actions {
 		kind := actions[index].Kind
-		if kind == V4ActionWechatReceipt || kind == V4ActionInterviewAcceptedReceipt {
+		if kind == V4ActionWechatReceipt || kind == V4ActionInterviewAcceptedReceipt ||
+			kind == V4ActionInviteWechat {
 			if seen[kind] {
 				continue
 			}
