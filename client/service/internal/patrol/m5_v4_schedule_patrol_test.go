@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,11 +19,18 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 	h := newHarness(t)
 	h.clock.Add(scheduleTestBusinessNow().Sub(h.clock.Now()))
 	h.clock.Add(-25 * time.Hour)
-	fixture := seedCommunicationV4PatrolTargetWithBoundary(
+	// 催2配置为两个气泡:正文链必须逐项正证后再物化下一项,最后才发卡。
+	fixture := seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
 		t,
 		h,
 		"schedule-cold-sequence",
 		nil,
+		`{
+			"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
+			"silence48Wechat":{"enabled":true,"messages":["合成冷催上","合成冷催下"]},
+			"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
+			"meetingAccepted":{"enabled":true,"messages":["好的，面试安排已确认"]}
+		}`,
 	)
 	h.clock.Add(25 * time.Hour)
 
@@ -91,38 +99,52 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 		manager,
 		"round-v4-schedule-cold-two",
 	)
-	if len(advice.requests) != 1 || hand.commandCount() != 3 {
+	if len(advice.requests) != 1 || hand.commandCount() != 4 {
 		aggregate, _ := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 		t.Fatalf(
-			"冷催二必须不调用 AI 且按正文→卡片各发一次: advice=%d sends=%d aggregate=%+v",
+			"冷催二必须不调用 AI 且按气泡×2→卡片各发一次: advice=%d sends=%d aggregate=%+v",
 			len(advice.requests),
 			hand.commandCount(),
 			aggregate,
 		)
 	}
 	actions, err = h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
-	if err != nil || len(actions) != 3 {
+	if err != nil || len(actions) != 4 {
 		t.Fatalf("冷催动作事实数量错误: actions=%+v err=%v", actions, err)
 	}
-	var coldText, coldInvite *store.CommunicationV4EventAction
+	var coldTextOne, coldTextTwo, coldInvite *store.CommunicationV4EventAction
 	for index := range actions {
 		switch actions[index].V4Kind {
 		case communication.V4ActionColdWechatText:
-			coldText = &actions[index]
+			if actions[index].SourceOrdinal == 0 {
+				coldTextOne = &actions[index]
+			} else {
+				coldTextTwo = &actions[index]
+			}
 		case communication.V4ActionColdWechatInvite:
 			coldInvite = &actions[index]
 		}
 	}
-	if coldText == nil || coldInvite == nil ||
-		coldText.Status != store.CommunicationV4EventActionSent ||
+	if coldTextOne == nil || coldTextTwo == nil || coldInvite == nil ||
+		coldTextOne.Status != store.CommunicationV4EventActionSent ||
+		coldTextTwo.Status != store.CommunicationV4EventActionSent ||
 		coldInvite.Status != store.CommunicationV4EventActionSent ||
+		coldTextOne.Text != "合成冷催上" ||
+		coldTextTwo.Text != "合成冷催下" ||
+		strings.Contains(coldTextOne.SemanticActionKey, "|bubble:") ||
+		!strings.HasSuffix(coldTextTwo.SemanticActionKey, "|bubble:2") ||
+		coldTextOne.DependsOnActionID != nil ||
+		coldTextTwo.DependsOnActionID == nil ||
+		*coldTextTwo.DependsOnActionID != coldTextOne.ActionID ||
 		coldInvite.DependsOnActionID == nil ||
-		*coldInvite.DependsOnActionID != coldText.ActionID ||
-		coldText.EffectIntentID == nil ||
+		*coldInvite.DependsOnActionID != coldTextTwo.ActionID ||
+		coldTextOne.EffectIntentID == nil ||
+		coldTextTwo.EffectIntentID == nil ||
 		coldInvite.EffectIntentID == nil {
 		t.Fatalf(
-			"冷催二没有按正文正证→卡片依赖收敛: text=%+v invite=%+v",
-			coldText,
+			"冷催二没有按气泡正证链→卡片依赖收敛: one=%+v two=%+v invite=%+v",
+			coldTextOne,
+			coldTextTwo,
 			coldInvite,
 		)
 	}
@@ -150,7 +172,7 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 			malformed,
 		)
 		manager.mu.Unlock()
-		if dispatchErr != nil || !stopped || hand.commandCount() != 3 {
+		if dispatchErr != nil || !stopped || hand.commandCount() != 4 {
 			t.Fatalf(
 				"缺父依赖的冷催卡不得进入派发: stopped=%v sends=%d err=%v",
 				stopped,

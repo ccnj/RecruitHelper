@@ -164,6 +164,21 @@ func (s *Store) FreezeCommunicationV4SchedulePlan(
 			return nil
 		}
 
+		// 链没走完不许重新规划:前一个时钟计划仍有非终局动作时铸新计划,
+		// 会造成邀请越过未发完的正文气泡插队成第二条平行轨。对话轨由 turn
+		// 状态机天然持有该性质(Dispatching 期间巡检直接跳过),时钟轨的
+		// 触发源无法冻结,须在此显式核对。
+		pending, err := communicationV4PendingScheduleActionsExistTx(
+			tx,
+			req.ProfileID,
+		)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return ErrCommunicationV4Conflict
+		}
+
 		plan := CommunicationV4SchedulePlan{
 			PlanID: planID, PlanKey: planKey,
 			ProfileID: req.ProfileID, ConversationRef: req.ConversationRef,
@@ -213,6 +228,32 @@ func (s *Store) CommunicationV4SchedulePlanByID(
 		return nil, err
 	}
 	return &plan, nil
+}
+
+// communicationV4PendingScheduleActionsExistTx reports whether any schedule-
+// sourced event action for the profile is still owned by the dispatch/WAL
+// rail (planned or effectPending). Sent/manualRequired/deferred are terminal
+// for this question.
+func communicationV4PendingScheduleActionsExistTx(
+	tx *gorm.DB,
+	profileID string,
+) (bool, error) {
+	var count int64
+	err := tx.Model(&CommunicationV4EventAction{}).
+		Where(
+			"profile_id = ? AND source_input_kind = ? AND status IN ?",
+			profileID,
+			CommunicationV4InputSchedulePlan,
+			[]CommunicationV4EventActionStatus{
+				CommunicationV4EventActionPlanned,
+				CommunicationV4EventActionEffectPending,
+			},
+		).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func communicationV4SchedulePlanID(profileID, planKey string) string {
@@ -268,7 +309,9 @@ func validateCommunicationV4ScheduleActions(
 	actions []communication.V4PlannedAction,
 	evaluatedAt time.Time,
 ) (time.Time, error) {
-	if len(actions) == 0 || len(actions) > 2 || evaluatedAt.IsZero() {
+	if len(actions) == 0 ||
+		len(actions) > m5ai.ReplyPhraseMaxItems+1 ||
+		evaluatedAt.IsZero() {
 		return time.Time{}, ErrCommunicationV4Invalid
 	}
 	seen := make(map[string]struct{}, len(actions))
@@ -298,14 +341,12 @@ func validateCommunicationV4ScheduleActions(
 				return time.Time{}, ErrCommunicationV4Invalid
 			}
 		case communication.V4ActionColdWechatText:
-			if index != 0 || strings.TrimSpace(action.Text) == "" ||
+			if strings.TrimSpace(action.Text) == "" ||
 				m5ai.ValidateSendText(action.Text) != nil {
 				return time.Time{}, ErrCommunicationV4Invalid
 			}
 		case communication.V4ActionColdWechatInvite:
-			if (len(actions) == 2 && index != 1) ||
-				(len(actions) == 1 && index != 0) ||
-				action.Text != "" {
+			if action.Text != "" {
 				return time.Time{}, ErrCommunicationV4Invalid
 			}
 		case communication.V4ActionInterviewFollowup:
@@ -319,9 +360,26 @@ func validateCommunicationV4ScheduleActions(
 			return time.Time{}, ErrCommunicationV4Invalid
 		}
 	}
-	if len(actions) == 2 &&
-		(actions[0].Kind != communication.V4ActionColdWechatText ||
-			actions[1].Kind != communication.V4ActionColdWechatInvite) {
+	// 合法计划形态是封闭枚举:单项催1/跟催,或"0~5 个催2正文气泡 + 末位邀请"。
+	// 正文气泡必须连续从 0 开始,邀请只能是最后一项。
+	switch actions[0].Kind {
+	case communication.V4ActionColdPrompt,
+		communication.V4ActionInterviewFollowup:
+		if len(actions) != 1 {
+			return time.Time{}, ErrCommunicationV4Invalid
+		}
+	case communication.V4ActionColdWechatText,
+		communication.V4ActionColdWechatInvite:
+		last := len(actions) - 1
+		if actions[last].Kind != communication.V4ActionColdWechatInvite {
+			return time.Time{}, ErrCommunicationV4Invalid
+		}
+		for index := 0; index < last; index++ {
+			if actions[index].Kind != communication.V4ActionColdWechatText {
+				return time.Time{}, ErrCommunicationV4Invalid
+			}
+		}
+	default:
 		return time.Time{}, ErrCommunicationV4Invalid
 	}
 	return dueAt, nil
@@ -548,15 +606,28 @@ func renderCommunicationV4ScheduleFixedPhrases(
 	if phrase.State != communication.V4PhraseAvailable {
 		return view
 	}
-	rendered, err := communication.RenderV4FixedPhrase(
-		phrase.Text,
-		communication.V4FixedPhraseRenderInput{Salutation: salutation},
-	)
-	if err != nil {
+	// 逐项渲染:Messages 是候选人可见的气泡边界,Text 只是由渲染结果重建
+	// 的兼容摘要;任一项渲染失败即整体降级,不发半截序列。
+	messages := make([]string, 0, len(phrase.Messages))
+	valid := len(phrase.Messages) > 0
+	for _, template := range phrase.Messages {
+		rendered, err := communication.RenderV4FixedPhrase(
+			template,
+			communication.V4FixedPhraseRenderInput{Salutation: salutation},
+		)
+		if err != nil {
+			valid = false
+			break
+		}
+		messages = append(messages, rendered)
+	}
+	if !valid {
 		phrase.State = communication.V4PhraseInvalid
 		phrase.Text = ""
+		phrase.Messages = nil
 	} else {
-		phrase.Text = rendered
+		phrase.Messages = messages
+		phrase.Text = strings.Join(messages, "\n")
 	}
 	view.Phrases[communication.V4PhraseColdWechat] = phrase
 	return view

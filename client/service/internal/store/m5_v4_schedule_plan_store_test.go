@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,20 @@ func seedCommunicationV4SchedulePlanFixture(
 	coldWechat bool,
 ) (resumeStoreFixture, CommunicationV4Aggregate, JobAIContextRevision) {
 	t.Helper()
+	var messages []string
+	if coldWechat {
+		messages = []string{"{称呼}您好，还方便继续沟通吗"}
+	}
+	return seedCommunicationV4SchedulePlanFixtureMessages(t, s, suffix, messages)
+}
+
+func seedCommunicationV4SchedulePlanFixtureMessages(
+	t *testing.T,
+	s *Store,
+	suffix string,
+	coldMessages []string,
+) (resumeStoreFixture, CommunicationV4Aggregate, JobAIContextRevision) {
+	t.Helper()
 	fixture := seedReadyCommunicationTarget(
 		t,
 		s,
@@ -28,7 +44,7 @@ func seedCommunicationV4SchedulePlanFixture(
 	if err != nil || !ready {
 		t.Fatalf("读取时刻表配置失败: ready=%v err=%v", ready, err)
 	}
-	if coldWechat {
+	if len(coldMessages) > 0 {
 		var revision JobAIContextRevision
 		if err := s.db.First(
 			&revision,
@@ -37,18 +53,22 @@ func seedCommunicationV4SchedulePlanFixture(
 		).Error; err != nil {
 			t.Fatal(err)
 		}
+		payload, err := json.Marshal(map[string]any{
+			"silence48Wechat": map[string]any{
+				"message":  coldMessages[0],
+				"messages": coldMessages,
+				"actions":  []string{},
+				"enabled":  true,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		revision.SourcePackage.Documents = append(
 			revision.SourcePackage.Documents,
 			m5ai.JobConfigDocument{
 				DocType: "固定话术",
-				Content: `{
-					"silence48Wechat":{
-						"message":"{称呼}您好，还方便继续沟通吗",
-						"messages":["{称呼}您好，还方便继续沟通吗"],
-						"actions":[],
-						"enabled":true
-					}
-				}`,
+				Content: string(payload),
 			},
 		)
 		raw, err := json.Marshal(revision.SourcePackage)
@@ -105,8 +125,27 @@ func freezeCommunicationV4ColdWechatPlan(
 	*FreezeCommunicationV4SchedulePlanResult,
 ) {
 	t.Helper()
+	return freezeCommunicationV4ColdWechatPlanMessages(
+		t,
+		s,
+		suffix,
+		[]string{"{称呼}您好，还方便继续沟通吗"},
+	)
+}
+
+func freezeCommunicationV4ColdWechatPlanMessages(
+	t *testing.T,
+	s *Store,
+	suffix string,
+	messages []string,
+) (
+	resumeStoreFixture,
+	FreezeCommunicationV4SchedulePlanRequest,
+	*FreezeCommunicationV4SchedulePlanResult,
+) {
+	t.Helper()
 	fixture, aggregate, revision :=
-		seedCommunicationV4SchedulePlanFixture(t, s, suffix, true)
+		seedCommunicationV4SchedulePlanFixtureMessages(t, s, suffix, messages)
 	state := aggregate.State
 	state.MainStatus = communication.V4StatusCommunicating
 	state.ColdPromptRemaining = 0
@@ -127,7 +166,8 @@ func freezeCommunicationV4ColdWechatPlan(
 	}
 	result, err := s.FreezeCommunicationV4SchedulePlan(req)
 	if err != nil || result == nil || !result.Created ||
-		result.Plan == nil || len(result.Plan.PlannedActions) != 2 ||
+		result.Plan == nil ||
+		len(result.Plan.PlannedActions) != len(messages)+1 ||
 		len(result.Actions) != 1 {
 		t.Fatalf("冷催二计划未原子冻结首项: result=%+v err=%v", result, err)
 	}
@@ -284,6 +324,296 @@ func TestCommunicationV4SchedulePlanFailedTextNeverMaterializesInvite(t *testing
 	child, err := s.CommunicationV4EventActionByID(childID)
 	if err != nil || child != nil {
 		t.Fatalf("正文失败后不得物化邀请: child=%+v err=%v", child, err)
+	}
+}
+
+func TestCommunicationV4SchedulePlanMultiBubbleChainMaterializesInOrder(t *testing.T) {
+	s := openTest(t)
+	messages := []string{
+		"{称呼}您好，考虑得怎么样了",
+		"我们下周还有面试名额",
+		"方便的话加个微信细聊",
+	}
+	fixture, _, result := freezeCommunicationV4ColdWechatPlanMessages(
+		t,
+		s,
+		"cold-multi",
+		messages,
+	)
+	plans := result.Plan.PlannedActions
+	if len(plans) != 4 ||
+		plans[0].Kind != communication.V4ActionColdWechatText ||
+		plans[1].Kind != communication.V4ActionColdWechatText ||
+		plans[2].Kind != communication.V4ActionColdWechatText ||
+		plans[3].Kind != communication.V4ActionColdWechatInvite ||
+		plans[1].ActionKey != plans[0].ActionKey+"|bubble:2" ||
+		plans[2].ActionKey != plans[0].ActionKey+"|bubble:3" ||
+		strings.Contains(plans[0].ActionKey, "|bubble:") ||
+		strings.Contains(plans[0].Text, "{称呼}") ||
+		plans[1].Text != messages[1] ||
+		plans[2].Text != messages[2] {
+		t.Fatalf("多气泡计划形态错误: %+v", plans)
+	}
+	ids := make([]string, len(plans))
+	for index := range plans {
+		id, err := CommunicationV4EventActionID(
+			fixture.ProfileID,
+			plans[index].ActionKey,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[index] = id
+	}
+	for _, id := range ids[1:] {
+		if action, err := s.CommunicationV4EventActionByID(id); err != nil || action != nil {
+			t.Fatalf("前项正证前不应物化后项: action=%+v err=%v", action, err)
+		}
+	}
+	now := result.Plan.CreatedAt.Add(time.Second)
+	current := result.Actions[0]
+	parentIntentID := ""
+	for index := range plans {
+		effectFixture := communicationV4EventEffectFixture{
+			resumeStoreFixture: fixture,
+			Action:             current,
+			Now:                now,
+		}
+		suffix := fmt.Sprintf("cold-multi-%d", index)
+		req := communicationV4EventEffectRequest(t, s, effectFixture, current, suffix)
+		if index > 0 && req.PreviousIntentID != parentIntentID {
+			t.Fatalf(
+				"第 %d 项没有钉住父 intent: got=%q want=%q",
+				index+1,
+				req.PreviousIntentID,
+				parentIntentID,
+			)
+		}
+		created, err := s.CreateEffectIntentAndCmd(req)
+		if err != nil || !created.Created {
+			t.Fatalf("第 %d 项 WAL 构造失败: result=%+v err=%v", index+1, created, err)
+		}
+		if index == len(plans)-1 {
+			break
+		}
+		settleCommunicationV4EventTextEffect(t, s, effectFixture, current, created, suffix)
+		parentIntentID = req.Intent.IntentID
+		next, err := s.CommunicationV4EventActionByID(ids[index+1])
+		if err != nil || next == nil ||
+			next.Status != CommunicationV4EventActionPlanned ||
+			next.V4Kind != plans[index+1].Kind ||
+			next.SourceOrdinal != index+1 ||
+			next.DependsOnActionID == nil ||
+			*next.DependsOnActionID != current.ActionID {
+			t.Fatalf("第 %d 项正证后未按序物化后项: next=%+v err=%v", index+1, next, err)
+		}
+		for _, id := range ids[index+2:] {
+			if action, err := s.CommunicationV4EventActionByID(id); err != nil || action != nil {
+				t.Fatalf("越级物化: action=%+v err=%v", action, err)
+			}
+		}
+		current = *next
+		now = now.Add(2 * time.Minute)
+	}
+}
+
+func TestCommunicationV4SchedulePlanMidChainFailureStopsPosterior(t *testing.T) {
+	s := openTest(t)
+	messages := []string{"第一句", "第二句", "第三句"}
+	fixture, _, result := freezeCommunicationV4ColdWechatPlanMessages(
+		t,
+		s,
+		"cold-midfail",
+		messages,
+	)
+	plans := result.Plan.PlannedActions
+	first := result.Actions[0]
+	effectFixture := communicationV4EventEffectFixture{
+		resumeStoreFixture: fixture,
+		Action:             first,
+		Now:                result.Plan.CreatedAt.Add(time.Second),
+	}
+	firstReq := communicationV4EventEffectRequest(
+		t,
+		s,
+		effectFixture,
+		first,
+		"cold-midfail-1",
+	)
+	firstCreated, err := s.CreateEffectIntentAndCmd(firstReq)
+	if err != nil || !firstCreated.Created {
+		t.Fatalf("首气泡 WAL 构造失败: result=%+v err=%v", firstCreated, err)
+	}
+	settleCommunicationV4EventTextEffect(
+		t,
+		s,
+		effectFixture,
+		first,
+		firstCreated,
+		"cold-midfail-1",
+	)
+	secondID, err := CommunicationV4EventActionID(fixture.ProfileID, plans[1].ActionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CommunicationV4EventActionByID(secondID)
+	if err != nil || second == nil {
+		t.Fatalf("首气泡正证后第二气泡未物化: second=%+v err=%v", second, err)
+	}
+	effectFixture.Action = *second
+	effectFixture.Now = effectFixture.Now.Add(2 * time.Minute)
+	secondReq := communicationV4EventEffectRequest(
+		t,
+		s,
+		effectFixture,
+		*second,
+		"cold-midfail-2",
+	)
+	secondCreated, err := s.CreateEffectIntentAndCmd(secondReq)
+	if err != nil || !secondCreated.Created {
+		t.Fatalf("第二气泡 WAL 构造失败: result=%+v err=%v", secondCreated, err)
+	}
+	failedAt := effectFixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		secondCreated.Command.MsgID,
+		"result-cold-midfail-2",
+		"result",
+		fixture.HandID,
+		func(command *CmdRecord) (ResultCommandMutation, error) {
+			command.Status = CmdFailed
+			command.SideEffect = "none"
+			command.TerminalAt = &failedAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentFailed,
+					Reason:       "failedNone",
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{plans[2].ActionKey, plans[3].ActionKey} {
+		id, err := CommunicationV4EventActionID(fixture.ProfileID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action, err := s.CommunicationV4EventActionByID(id); err != nil || action != nil {
+			t.Fatalf("链中失败后不得物化后项: action=%+v err=%v", action, err)
+		}
+	}
+	settled, err := s.CommunicationV4EventActionByID(second.ActionID)
+	if err != nil || settled == nil ||
+		settled.Status == CommunicationV4EventActionSent {
+		t.Fatalf("失败气泡不得记为已发送: settled=%+v err=%v", settled, err)
+	}
+}
+
+func TestCommunicationV4SchedulePlanRefusesNewPlanWhilePriorPending(t *testing.T) {
+	s := openTest(t)
+	fixture, req, _ := freezeCommunicationV4ColdWechatPlan(t, s, "cold-gate")
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || aggregate == nil {
+		t.Fatalf("读取聚合失败: aggregate=%+v err=%v", aggregate, err)
+	}
+	state := aggregate.State
+	state.ColdWechatTextSent = true
+	persistCommunicationV4ScheduleState(t, s, aggregate, state)
+	blocked := req
+	blocked.EvaluatedAt = req.EvaluatedAt.Add(time.Hour)
+	blocked.FrozenAt = blocked.EvaluatedAt.Add(time.Second)
+	result, err := s.FreezeCommunicationV4SchedulePlan(blocked)
+	if !errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf(
+			"前计划动作未终局时新计划必须被拒绝: result=%+v err=%v",
+			result,
+			err,
+		)
+	}
+}
+
+func TestCommunicationV4SchedulePlanInviteOnlyResumeFreezes(t *testing.T) {
+	s := openTest(t)
+	fixture, aggregate, revision :=
+		seedCommunicationV4SchedulePlanFixture(t, s, "cold-resume", true)
+	state := aggregate.State
+	state.MainStatus = communication.V4StatusCommunicating
+	state.ColdPromptRemaining = 0
+	state.ColdWechatRemaining = 1
+	state.ColdWechatTextSent = true
+	state.WechatState = communication.V4WechatNotInvited
+	persistCommunicationV4ScheduleState(t, s, &aggregate, state)
+	evaluatedAt := state.LastOutboundAt.Add(25 * time.Hour)
+	result, err := s.FreezeCommunicationV4SchedulePlan(
+		FreezeCommunicationV4SchedulePlanRequest{
+			ProfileID:                   fixture.ProfileID,
+			ConversationRef:             fixture.ConversationRef,
+			ExpectedRevision:            aggregate.Revision,
+			ExpectedProjectedThroughSeq: aggregate.ProjectedThroughSeq,
+			ContextRevisionHash:         revision.RevisionHash,
+			Reply:                       communication.ReplyAdvice{State: communication.AdviceAbsent},
+			EvaluatedAt:                 evaluatedAt,
+			FrozenAt:                    evaluatedAt.Add(time.Second),
+		},
+	)
+	if err != nil || result == nil || !result.Created ||
+		result.Plan == nil || len(result.Plan.PlannedActions) != 1 ||
+		len(result.Actions) != 1 ||
+		result.Actions[0].V4Kind != communication.V4ActionColdWechatInvite ||
+		result.Actions[0].SourceOrdinal != 0 ||
+		result.Actions[0].DependsOnActionID != nil {
+		t.Fatalf("正文已发后的邀请续接计划未冻结: result=%+v err=%v", result, err)
+	}
+}
+
+func TestValidateCommunicationV4ScheduleActionShapes(t *testing.T) {
+	evaluatedAt := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	dueAt := evaluatedAt.Add(-time.Minute)
+	text := func(key, body string) communication.V4PlannedAction {
+		return communication.V4PlannedAction{
+			ActionKey: key,
+			Kind:      communication.V4ActionColdWechatText,
+			Text:      body,
+			DueAt:     &dueAt,
+		}
+	}
+	invite := func(key string) communication.V4PlannedAction {
+		return communication.V4PlannedAction{
+			ActionKey: key,
+			Kind:      communication.V4ActionColdWechatInvite,
+			DueAt:     &dueAt,
+		}
+	}
+	prompt := communication.V4PlannedAction{
+		ActionKey: "k|prompt",
+		Kind:      communication.V4ActionColdPrompt,
+		Text:      "催一正文",
+		Round:     1,
+		Stage:     1,
+		DueAt:     &dueAt,
+	}
+	valid := []communication.V4PlannedAction{
+		text("k1", "第一句"), text("k2", "第二句"), text("k3", "第三句"), invite("k4"),
+	}
+	if _, err := validateCommunicationV4ScheduleActions(valid, evaluatedAt); err != nil {
+		t.Fatalf("正文×3+邀请必须合法: err=%v", err)
+	}
+	sixTexts := []communication.V4PlannedAction{
+		text("k1", "一"), text("k2", "二"), text("k3", "三"),
+		text("k4", "四"), text("k5", "五"), text("k6", "六"), invite("k7"),
+	}
+	invalid := [][]communication.V4PlannedAction{
+		{invite("k1"), text("k2", "颠倒")},
+		{text("k1", "缺邀请")},
+		{text("k1", "一"), invite("k2"), text("k3", "邀请后还有正文")},
+		{prompt, invite("k2")},
+		sixTexts,
+	}
+	for index, actions := range invalid {
+		if _, err := validateCommunicationV4ScheduleActions(actions, evaluatedAt); err == nil {
+			t.Fatalf("非法形态 %d 被放行: %+v", index, actions)
+		}
 	}
 }
 
