@@ -567,13 +567,18 @@ type MainPrepareInterviewEditorResult =
   }
 
 type MainSendCardOnceResult =
-  | { status: 'ready' }
-  | { status: 'clicked' }
+  | { status: 'ready'; wechatCopyCards?: number }
+  // wechatCopyCards：click 前观察到的“复制微信号”形态请求卡数量，只在
+  // wechatAccept 下给出，作为可见后置状态正证的比较基准（协议规格 §9.3）。
+  | { status: 'clicked'; wechatCopyCards?: number }
   | {
     status: 'failed'
     reason: 'route_changed' | 'identity_changed' | 'target_changed' | 'baseline_changed' |
       'guard_unresolved' | 'composer_nonempty' | 'surface_unavailable' | 'input_rejected' |
       'action_window_elapsed'
+    // 失败点细分：只含选择器命中数与我方自设常量，随 error.message 上行帮助
+    // 脑侧诊断该改哪一处判据；绝不携带候选人/联系人字段或任何页面文本。
+    detail?: string
   }
 
 interface MainObserveStableOutboundCardResult {
@@ -588,6 +593,15 @@ interface MainWechatExchangeOutcomeResult {
   confirmed: boolean
   exchangeSourceKey?: string
   peerWechat?: string
+  // 请求卡的可见后置状态观测：只在 chat.acceptWechat 的正证判定里使用，
+  // 不进契约、不进 readonly 面的 data。只有路由、目标绑定与请求锚全部复核
+  // 通过时才带出，否则整体缺席（未解析）。
+  surface?: {
+    // 仍有可见同意动作的待处理请求卡数量。
+    pendingRequestCards: number
+    // 已转入“复制微信号”可见形态的请求卡数量。
+    copyWechatCards: number
+  }
 }
 
 interface ThreadCursor {
@@ -5475,8 +5489,11 @@ async function mainReadThreadPage(
       from === target && originTypeIsCandidate
     const isStaffWechatRequest = customSuccess && customType === 105 &&
       from === staffID && originTypeIsStaff
-    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
-      from === target && originTypeIsStaff &&
+    // 259 交换成功恒归属点同意的一方：我方发起(originType=1)由候选人点同意，
+    // 259 归对方(in)；候选人发起(originType=2)由我方点同意，259 归我方(out)。
+    // 两形态都必须双微信字段齐全。2026-07-28 生产页面双样本直读。
+    const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
+      ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
@@ -5538,7 +5555,7 @@ async function mainReadThreadPage(
       text = '[换微信请求]'
       state = 'pending'
       identity = stableMessageIdentity(row.idServer)
-    } else if (isCandidateWechatAccepted) {
+    } else if (isWechatExchangeSucceeded) {
       kind = 'card'
       cardType = 'wechatExchange'
       text = '[微信交换成功]'
@@ -5605,7 +5622,7 @@ async function mainReadThreadPage(
     // 方向在 anchor 中另列，不能再次混入 hash。
     const canonicalContent = clean(text)
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite &&
           interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
@@ -6409,8 +6426,11 @@ async function mainCaptureSendBaseline(
         from === target && originTypeIsCandidate
       const isStaffWechatRequest = customSuccess && customType === 105 &&
         from === staffID && originTypeIsStaff
-      const isCandidateWechatAccepted = customSuccess && customType === 259 &&
-        from === target && originTypeIsStaff &&
+      // 259 交换成功恒归属点同意的一方：我方发起(originType=1)由候选人点同意，
+      // 259 归对方(in)；候选人发起(originType=2)由我方点同意，259 归我方(out)。
+      // 两形态都必须双微信字段齐全。2026-07-28 生产页面双样本直读。
+      const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
+        ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
         Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
       const interviewStartsAt = toMillis(details.startTime)
       const interviewEndsAt = toMillis(details.endTime)
@@ -6463,7 +6483,7 @@ async function mainCaptureSendBaseline(
         cardType = 'wechatExchange'
         text = '[换微信请求]'
         identity = row.idServer
-      } else if (isCandidateWechatAccepted) {
+      } else if (isWechatExchangeSucceeded) {
         kind = 'card'
         cardType = 'wechatExchange'
         text = '[微信交换成功]'
@@ -6504,7 +6524,7 @@ async function mainCaptureSendBaseline(
       if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
       const canonicalContent = clean(text)
       const cardProjection = cardType === 'wechatExchange' &&
-        (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+        (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
         ? 'card\x1fwechatExchange'
         : cardType === 'interviewInvite' && isStaffInterviewInvite &&
             interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
@@ -7078,8 +7098,11 @@ function mainSendMessageOnce(
       from === target && originTypeIsCandidate
     const isStaffWechatRequest = customSuccess && customType === 105 &&
       from === staffID && originTypeIsStaff
-    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
-      from === target && originTypeIsStaff &&
+    // 259 交换成功恒归属点同意的一方：我方发起(originType=1)由候选人点同意，
+    // 259 归对方(in)；候选人发起(originType=2)由我方点同意，259 归我方(out)。
+    // 两形态都必须双微信字段齐全。2026-07-28 生产页面双样本直读。
+    const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
+      ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
@@ -7132,7 +7155,7 @@ function mainSendMessageOnce(
       cardType = 'wechatExchange'
       normalizedText = '[换微信请求]'
       identity = row.idServer
-    } else if (isCandidateWechatAccepted) {
+    } else if (isWechatExchangeSucceeded) {
       kind = 'card'
       cardType = 'wechatExchange'
       normalizedText = '[微信交换成功]'
@@ -7172,7 +7195,7 @@ function mainSendMessageOnce(
     }
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite &&
           interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
@@ -7904,7 +7927,9 @@ function mainSendCardOnce(
     sourceIndex: number
   }
   type FailureReason = Extract<MainSendCardOnceResult, { status: 'failed' }>['reason']
-  const failed = (reason: FailureReason): MainSendCardOnceResult => ({ status: 'failed', reason })
+  const failed = (reason: FailureReason, detail?: string): MainSendCardOnceResult =>
+    detail === undefined ? { status: 'failed', reason } : { status: 'failed', reason, detail }
+  let wechatCopyCardsBeforeClick: number | undefined
   const w = window as unknown as AnyRecord
   const asRecord = (value: unknown): AnyRecord | null =>
     value !== null && typeof value === 'object' && !Array.isArray(value) ? value as AnyRecord : null
@@ -8170,8 +8195,11 @@ function mainSendCardOnce(
       from === target && originTypeIsCandidate
     const isStaffWechatRequest = customSuccess && customType === 105 &&
       from === staffID && originTypeIsStaff
-    const isCandidateWechatAccepted = customSuccess && customType === 259 &&
-      from === target && originTypeIsStaff &&
+    // 259 交换成功恒归属点同意的一方：我方发起(originType=1)由候选人点同意，
+    // 259 归对方(in)；候选人发起(originType=2)由我方点同意，259 归我方(out)。
+    // 两形态都必须双微信字段齐全。2026-07-28 生产页面双样本直读。
+    const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
+      ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const startsAt = toMillis(details.startTime)
     const endsAt = toMillis(details.endTime)
@@ -8220,7 +8248,7 @@ function mainSendCardOnce(
       cardType = 'wechatExchange'
       text = '[换微信请求]'
       identity = row.idServer
-    } else if (isCandidateWechatAccepted) {
+    } else if (isWechatExchangeSucceeded) {
       kind = 'card'
       cardType = 'wechatExchange'
       text = '[微信交换成功]'
@@ -8255,7 +8283,7 @@ function mainSendCardOnce(
     }
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isCandidateWechatAccepted)
+      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite &&
           method === 'wechatVideo' && startsAt !== null && endsAt !== null && endsAt > startsAt
@@ -8407,6 +8435,8 @@ function mainSendCardOnce(
     const outcomeEnd = nextRequestOffset < 0
       ? timeline.rows.length
       : requestIndex + 1 + nextRequestOffset
+    // 候选人主动发起(originType=2)时由我方点同意，259 交换成功归我方(out)，
+    // 故已存在的交换结果要按 staffID 而非 target 认。2026-07-28 生产页面直读。
     const existingOutcomes = timeline.rows.slice(requestIndex + 1, outcomeEnd).filter((row) => {
       const envelope = parseObject(row.content)
       const inner = parseObject(envelope.content)
@@ -8418,35 +8448,71 @@ function mainSendCardOnce(
         (typeof value.originType === 'string' && value.originType.trim() === '2')
       return row.type === 'custom' && row.contentWasString && Object.keys(inner).length > 0 &&
         clean(row.status).toLowerCase() === 'success' && type === 259 &&
-        clean(row.from) === binding.target && origin &&
+        clean(row.from) === staffID && origin &&
         Boolean(clean(value.userWeChat)) && Boolean(clean(value.staffWeChat))
     })
-    if (existingOutcomes.length !== 0) return failed('surface_unavailable')
+    if (existingOutcomes.length !== 0) {
+      return failed('surface_unavailable', `wxaccept:already_exchanged n=${existingOutcomes.length}`)
+    }
 
-    const pendingCards = Array.from(
+    // 否定式必须排除："不同意"字面包含"同意"，放宽为包含匹配后若不排除，
+    // 唯一命中的可能正是拒绝控件——那是真实的错误副作用。
+    const rejecting = (text: string): boolean => /不同意|拒绝|婉拒|忽略/u.test(text)
+    const allCards = Array.from(
       details[0].querySelectorAll<HTMLElement>('.imc-wx-request'),
-    ).filter((card) => visible(card) &&
+    ).filter(visible)
+    const pendingCards = allCards.filter((card) =>
       !card.classList.contains('is-wx-done') &&
       card.querySelector('.is-wx-done') === null)
-    const candidates = pendingCards.flatMap((card) => {
-      const actions = Array.from(
-        card.querySelectorAll<HTMLElement>(
-          '.imc-wx-request__actions-success, button, a',
-        ),
-      ).filter((node) => visible(node) && clean(node.textContent) === '同意')
-      return actions.length === 1 ? [{ card, action: actions[0] }] : []
-    })
-    if (candidates.length !== 1 || pendingCards.length !== 1) return failed('surface_unavailable')
-    actionTarget = candidates[0].action
+    if (allCards.length === 0) return failed('surface_unavailable', 'wxaccept:no_card')
+    if (pendingCards.length === 0) {
+      return failed('surface_unavailable', `wxaccept:all_done cards=${allCards.length}`)
+    }
+    if (pendingCards.length !== 1) {
+      return failed(
+        'surface_unavailable',
+        `wxaccept:multi_card cards=${allCards.length} pending=${pendingCards.length}`,
+      )
+    }
+    // 类名优先：.imc-wx-request__actions-success 的类名语义即"同意"，旧项目
+    // 生产上长期以它为首选；缺失时才按可见文本兜底。类名路径不要求文本命中
+    // （可能是图标按钮），但同样排除否定式。
+    const byClass = Array.from(
+      pendingCards[0].querySelectorAll<HTMLElement>('.imc-wx-request__actions-success'),
+    ).filter((node) => visible(node) && !rejecting(clean(node.textContent)))
+    const byText = Array.from(
+      pendingCards[0].querySelectorAll<HTMLElement>('button, a'),
+    ).filter((node) => visible(node) &&
+      /同意/u.test(clean(node.textContent)) && !rejecting(clean(node.textContent)))
+    const actions = byClass.length > 0 ? byClass : byText
+    if (actions.length === 0) {
+      return failed('surface_unavailable', 'wxaccept:no_action byClass=0 byText=0')
+    }
+    if (actions.length !== 1) {
+      return failed(
+        'surface_unavailable',
+        `wxaccept:multi_action byClass=${byClass.length} byText=${byText.length}`,
+      )
+    }
+    wechatCopyCardsBeforeClick = allCards.filter(
+      (card) => /复制微信号/u.test(clean(card.textContent)),
+    ).length
+    actionTarget = actions[0]
   }
   if (!actionTarget || !actionTarget.isConnected || Date.now() > irreversibleNotAfterMs) {
     return failed('action_window_elapsed')
   }
-  if (phase === 'preflight') return { status: 'ready' }
+  if (phase === 'preflight') {
+    return wechatCopyCardsBeforeClick === undefined
+      ? { status: 'ready' }
+      : { status: 'ready', wechatCopyCards: wechatCopyCardsBeforeClick }
+  }
   const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
   const invokeClick = Function.prototype.call.bind(intrinsicClick, actionTarget)
   invokeClick()
-  return { status: 'clicked' }
+  return wechatCopyCardsBeforeClick === undefined
+    ? { status: 'clicked' }
+    : { status: 'clicked', wechatCopyCards: wechatCopyCardsBeforeClick }
 }
 
 // 卡片发送后的正证只认与发送基线同源的实时 Vuex timeline：严格连续新增
@@ -8897,6 +8963,9 @@ async function mainReadWechatExchangeOutcome(
       rows.push(row)
       sourceKeys.push(await digest(`source-v1|${row.idServer}`))
     }
+    // 基线最后一条在当前 timeline 中的位置；其后各条都是本次动作之后的新增。
+    // 无基线（独立只读面）或空基线时为 -1，即全部行都算“基线之后”。
+    let baselineEnd = -1
     if (baselineServerSourceKeys !== null) {
       if (expectedTargetBindingToken === null ||
           !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken) ||
@@ -8906,13 +8975,24 @@ async function mainReadWechatExchangeOutcome(
           new Set(baselineServerSourceKeys).size !== baselineServerSourceKeys.length) {
         return failed()
       }
-      const currentTail = sourceKeys.slice(-64)
-      const continuous = baselineServerSourceKeys.length < 64
-        ? currentTail.length === baselineServerSourceKeys.length + 1 &&
-          baselineServerSourceKeys.every((key, index) => currentTail[index] === key)
-        : currentTail.length === 64 &&
-          baselineServerSourceKeys.slice(1).every((key, index) => currentTail[index] === key)
-      if (!continuous) return failed()
+      // 基线之后允许新增 0..N 条：acceptWechat 的正证已改为可见后置状态，
+      // 259 可能晚到甚至本轮不到（协议规格 §9.3）。基线仍必须是当前 timeline
+      // 里的连续块、且其后全部是新增，页面重载、历史跳变与目标换绑照旧拒绝。
+      if (baselineServerSourceKeys.length > 0) {
+        const lastBaselineKey = baselineServerSourceKeys[baselineServerSourceKeys.length - 1]
+        const anchorPositions = sourceKeys
+          .map((key, index) => key === lastBaselineKey ? index : -1)
+          .filter((index) => index >= 0)
+        if (anchorPositions.length !== 1) return failed()
+        baselineEnd = anchorPositions[0]
+        const blockStart = baselineEnd - baselineServerSourceKeys.length + 1
+        if (blockStart < 0) return failed()
+        // 基线未被截断(<64)时它就是当时的全部历史，必须仍从头对齐。
+        if (baselineServerSourceKeys.length < 64 && blockStart !== 0) return failed()
+        if (!baselineServerSourceKeys.every((key, index) => sourceKeys[blockStart + index] === key)) {
+          return failed()
+        }
+      }
     } else if (expectedTargetBindingToken !== null) {
       return failed()
     }
@@ -8925,6 +9005,31 @@ async function mainReadWechatExchangeOutcome(
     const staffRequest = rowShape(rows[requestIndex], 105, 1, staffID).matches
     if (candidateRequest === staffRequest) return failed()
     const origin: 1 | 2 = candidateRequest ? 2 : 1
+    // 路由、目标绑定与请求锚都已复核通过，此处才允许带出请求卡的可见后置状态。
+    // 判据全部按可见文本：仍可点的“同意”动作 vs 已转入的“复制微信号”形态；
+    // .imc-wx-request 只作卡片定位。计数不携带任何页面文本。
+    const sessionDetails = baselineServerSourceKeys === null
+      ? []
+      : Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
+    // 只有接受流程（带发送基线）才需要 surface；独立 readonly 面不看页面卡片。
+    // 会话面板不唯一时也不给出 surface：缺席即“未观察到”，SW 侧只会继续等待
+    // 直至预算耗尽转人工，永远不会据此判成功。
+    const requestCards = sessionDetails.length === 1
+      ? Array.from(sessionDetails[0].querySelectorAll<HTMLElement>('.imc-wx-request')).filter(visible)
+      : null
+    const surface = requestCards === null ? undefined : {
+      pendingRequestCards: requestCards.filter((card) => Array.from(
+        card.querySelectorAll<HTMLElement>('.imc-wx-request__actions-success, button, a'),
+      ).some((node) => visible(node) && /同意/u.test(clean(node.textContent)) &&
+        !/不同意|拒绝|婉拒|忽略/u.test(clean(node.textContent)))).length,
+      copyWechatCards: requestCards.filter(
+        (card) => /复制微信号/u.test(clean(card.textContent)),
+      ).length,
+    }
+    const unconfirmed = (): MainWechatExchangeOutcomeResult =>
+      routeMatches() && targetForCurrentRoute() === target && surface !== undefined
+        ? { confirmed: false, surface }
+        : failed()
     let end = rows.length
     for (let index = requestIndex + 1; index < rows.length; index += 1) {
       const envelope = parseObject(rows[index].content)
@@ -8938,9 +9043,13 @@ async function mainReadWechatExchangeOutcome(
         break
       }
     }
+    // 结果消息恒归属点同意的一方：候选人发起(origin=2)时是我方点同意，259
+    // 归我方(out)；我方发起(origin=1)时是候选人点同意，259 归对方(in)。
+    // 2026-07-28 生产页面双样本直读，见协议规格 §9.3。
+    const outcomeFrom = origin === 2 ? staffID : target
     const matches: Array<{ index: number; peerWechat: string }> = []
     for (let index = requestIndex + 1; index < end; index += 1) {
-      const outcome = rowShape(rows[index], 259, origin, target)
+      const outcome = rowShape(rows[index], 259, origin, outcomeFrom)
       const peerWechat = clean(outcome.details.userWeChat)
       const ownWechat = clean(outcome.details.staffWeChat)
       if (outcome.matches && peerWechat && ownWechat &&
@@ -8949,17 +9058,19 @@ async function mainReadWechatExchangeOutcome(
         matches.push({ index, peerWechat })
       }
     }
-    if (matches.length !== 1) return failed()
+    if (matches.length !== 1) return unconfirmed()
     const match = matches[0]
-    if (baselineServerSourceKeys !== null &&
-        sourceKeys[match.index] !== sourceKeys[sourceKeys.length - 1]) return failed()
+    // 接受流程里 259 必须严格晚于基线，即确由本次动作产生；基线之前的
+    // 已有交换在 evaluator 阶段就已拒绝派发。
+    if (baselineServerSourceKeys !== null && match.index <= baselineEnd) return unconfirmed()
     // digest 期间若真人切走或 target 换绑，阳性必须降为未确认。
     if (!routeMatches() || targetForCurrentRoute() !== target) return failed()
-    return {
+    const positive: MainWechatExchangeOutcomeResult = {
       confirmed: true,
       exchangeSourceKey: sourceKeys[match.index],
       peerWechat: match.peerWechat,
     }
+    return surface === undefined ? positive : { ...positive, surface }
   } catch {
     return failed()
   }
@@ -9689,9 +9800,14 @@ function throwWechatAcceptEvaluationFailure(evaluation: MainSendCardOnceResult):
   if (evaluation.reason === 'action_window_elapsed') {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '微信接受不可逆动作窗口已过', 'manualOnly')
   }
+  // 定位失败的细分成因随 message 上行：本批没有待处理样本可预先验证判据，
+  // 首次真机若定位失败，必须能直接判断该改哪一处，而不是重跑猜测。
+  // detail 只含选择器命中数与我方自设常量，不含任何页面文本。
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '当前无法唯一确认仍待处理的微信请求及同意动作',
+    evaluation.detail === undefined
+      ? '当前无法唯一确认仍待处理的微信请求及同意动作'
+      : `当前无法唯一确认仍待处理的微信请求及同意动作(${evaluation.detail})`,
     'manualOnly',
   )
 }
@@ -9749,62 +9865,96 @@ export async function acceptZhilianWechatRequest(
   const action = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'commit'])
   if (action.status !== 'clicked') throwWechatAcceptEvaluationFailure(action)
 
+  // 成功正证是同一张请求卡的可见后置状态（协议规格 §9.3）：唯一那张待处理卡
+  // 的同意动作消失、且“复制微信号”形态较 click 前净增。259 只是可选加成，
+  // 晚到或不到都不推翻正证，号由 chat.readWechatExchangeOutcome 延迟收编。
+  const copyCardsBeforeClick = action.wechatCopyCards ?? 0
+  const readOutcome = async (): Promise<MainWechatExchangeOutcomeResult> =>
+    runMain(tab.id as number, mainReadWechatExchangeOutcome, [
+      args.conversationRef,
+      args.requestSourceKey,
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    ])
+  let confirmation: MainWechatExchangeOutcomeResult | null = null
   for (let attempt = 0; attempt < 40; attempt += 1) {
     ctx.checkpoint()
     try {
-      const observed = await runMain(tab.id, mainReadWechatExchangeOutcome, [
-        args.conversationRef,
-        args.requestSourceKey,
-        baseline.serverSourceKeys,
-        baseline.targetBindingToken,
-      ])
-      if (observed.confirmed && observed.exchangeSourceKey && observed.peerWechat) {
-        try {
-          assertExpectedPrincipal(
-            await probeTab(await chrome.tabs.get(tab.id)),
-            expectedPrincipalFingerprint,
-          )
-        } catch (error) {
-          throw new ZhilianPlatformError(
-            'CTX_LOST_DURING_EXEC',
-            `接受微信请求后账号身份无法复核：${asError(error).message}`,
-            'manualOnly',
-            undefined,
-            'possible',
-          )
-        }
-        const data: ZhilianAcceptWechatData = {
-          conversationRef: args.conversationRef,
-          requestSourceKey: args.requestSourceKey,
-          exchangeSourceKey: observed.exchangeSourceKey,
-          peerWechat: observed.peerWechat,
-          observedAt: Date.now(),
-        }
-        if (validatePrimitiveData(PrimitiveName.ChatAcceptWechat, 1, data).length !== 0) {
-          throw new ZhilianPlatformError(
-            'POSTCONDITION_UNCONFIRMED',
-            '微信交换结果不符合当前契约',
-            'manualOnly',
-            undefined,
-            'possible',
-          )
-        }
-        await ctx.progress('已确认唯一微信交换结果', 100)
-        return data
+      const observed = await readOutcome()
+      if (observed.surface && observed.surface.pendingRequestCards === 0 &&
+          observed.surface.copyWechatCards > copyCardsBeforeClick) {
+        confirmation = observed
+        break
       }
-    } catch (error) {
-      if (error instanceof ZhilianPlatformError && error.sideEffect === 'possible') throw error
+    } catch {
       // 观察失败只能收敛为未确认，绝不能补第二次“同意”。
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  throw new ZhilianPlatformError(
-    'POSTCONDITION_UNCONFIRMED',
-    '微信请求只点击同意一次，但未确认唯一交换结果',
-    'manualOnly',
-    undefined,
-    'possible',
-  )
+  if (!confirmation) {
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED',
+      '微信请求只点击同意一次，但未观察到请求卡的可见后置状态',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+  try {
+    assertExpectedPrincipal(
+      await probeTab(await chrome.tabs.get(tab.id)),
+      expectedPrincipalFingerprint,
+    )
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC',
+      `接受微信请求后账号身份无法复核：${asError(error).message}`,
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+
+  // 可选加成：正证成立后再给 259 一段独立预算；取不到只是“无号成功”，
+  // 号留给 chat.readWechatExchangeOutcome 延迟收编，绝不推翻正证。
+  let harvested = confirmation
+  for (let attempt = 0;
+    attempt < 20 && !(harvested.confirmed && harvested.exchangeSourceKey && harvested.peerWechat);
+    attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    ctx.checkpoint()
+    try {
+      harvested = await readOutcome()
+    } catch {
+      break
+    }
+  }
+  const collected = harvested.confirmed && Boolean(harvested.exchangeSourceKey) &&
+    Boolean(harvested.peerWechat)
+  const data: ZhilianAcceptWechatData = collected
+    ? {
+        conversationRef: args.conversationRef,
+        requestSourceKey: args.requestSourceKey,
+        exchangeSourceKey: harvested.exchangeSourceKey,
+        peerWechat: harvested.peerWechat,
+        observedAt: Date.now(),
+      }
+    : {
+        conversationRef: args.conversationRef,
+        requestSourceKey: args.requestSourceKey,
+        observedAt: Date.now(),
+      }
+  if (validatePrimitiveData(PrimitiveName.ChatAcceptWechat, 1, data).length !== 0) {
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED',
+      '微信接受结果不符合当前契约',
+      'manualOnly',
+      undefined,
+      'possible',
+    )
+  }
+  await ctx.progress(collected ? '已确认接受并取得交换结果' : '已确认接受，交换结果待后续收编', 100)
+  return data
 }
 
 export async function readZhilianWechatExchangeOutcome(
