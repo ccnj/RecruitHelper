@@ -697,7 +697,8 @@ func TestInspectM5PendingCardShapeEligibility(t *testing.T) {
 		pending      int
 	}{
 		{name: "generic_card", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "generic", CardType: "unknown", CardState: "unknown", Origin: "external"}}, manualReason: "unsupportedSemantic"},
-		{name: "wechat_card_with_text", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "wx", CardType: "wechatExchange", CardState: "pending", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
+		{name: "wechat_card_with_text_batch_b", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "wx", CardType: "wechatExchange", CardState: "pending", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
+		{name: "interview_card_with_text_before_batch_c", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "iv", CardType: "interviewInvite", CardState: "accepted", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
 		{name: "mixed_card_and_text", messages: []store.Message{resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
 		{name: "multiple_resume_cards", messages: []store.Message{resume(2), resume(3)}, manualReason: "", pending: 2},
 	}

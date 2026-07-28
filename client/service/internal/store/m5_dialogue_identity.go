@@ -14,19 +14,24 @@ type DialogueTurnInputKind string
 const (
 	DialogueTurnInputText             DialogueTurnInputKind = "text"
 	DialogueTurnInputResumeAttachment DialogueTurnInputKind = "resumeAttachment"
+	DialogueTurnInputWechatCard       DialogueTurnInputKind = "wechatCard"
 )
 
 // DialogueTurnInputKindOf is the canonical production eligibility evaluator
 // for M5's currently supported frozen inbound shapes. Ordinary text may span a
-// contiguous turn. Per spec §5 mixed-input turns (2026-07-28, batch A), one or
-// more external resume cards mix freely with non-empty text and share one
-// strong-interest semantics; every other card kind, media message or empty
-// text keeps the whole turn outside automatic processing.
+// contiguous turn. Per spec §5 mixed-input turns (2026-07-28): batch A lets
+// external resume cards mix freely with non-empty text under one
+// strong-interest semantics; batch B additionally admits wechat-exchange cards
+// (pending/accepted) mixing with text and resume cards — the turn is labeled
+// wechatCard so downstream keeps the accept-chain/receipt semantics. Every
+// other card kind, media message or empty text keeps the whole turn outside
+// automatic processing.
 func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 	if len(inbound) == 0 {
 		return "", false
 	}
 	resumeCards := 0
+	wechatCards := 0
 	previous := int64(0)
 	for i := range inbound {
 		message := inbound[i]
@@ -39,9 +44,16 @@ func DialogueTurnInputKindOf(inbound []Message) (DialogueTurnInputKind, bool) {
 		case message.Kind == "card" && message.CardType == "resumeAttachment" &&
 			message.CardState == "unknown" && message.Origin == "external":
 			resumeCards++
+		case message.Kind == "card" && message.CardType == "wechatExchange" &&
+			(message.CardState == "pending" || message.CardState == "accepted") &&
+			message.Origin == "external":
+			wechatCards++
 		default:
 			return "", false
 		}
+	}
+	if wechatCards > 0 {
+		return DialogueTurnInputWechatCard, true
 	}
 	if resumeCards == 0 {
 		return DialogueTurnInputText, true
@@ -80,8 +92,11 @@ func DialogueTurnCandidateMessages(boundary []Message) ([]Message, bool) {
 }
 
 // IsM5RealCandidateMessage controls only the greeted -> communicating fact.
-// A resume attachment is a real candidate action, but does not authorize an AI
-// call unless the complete turn also passes DialogueTurnInputKindOf.
+// A resume attachment and a candidate-initiated wechat request are real
+// candidate actions; an accepted exchange-result card is a service fact that
+// must not open the communicating state by itself. Passing this check does not
+// authorize an AI call unless the complete turn also passes
+// DialogueTurnInputKindOf.
 func IsM5RealCandidateMessage(message Message) bool {
 	if message.Direction != "in" {
 		return false
@@ -90,8 +105,17 @@ func IsM5RealCandidateMessage(message Message) bool {
 	case "text", "image", "voice", "file":
 		return true
 	case "card":
-		_, ok := DialogueTurnInputKindOf([]Message{message})
-		return ok
+		if message.Origin != "external" {
+			return false
+		}
+		switch {
+		case message.CardType == "resumeAttachment" && message.CardState == "unknown":
+			return true
+		case message.CardType == "wechatExchange" && message.CardState == "pending":
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}

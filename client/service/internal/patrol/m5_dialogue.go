@@ -363,6 +363,30 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 				}
 				break
 			}
+			if v4Owned && nextV4Advice == communication.V4AdviceReply &&
+				material.inputKind == store.DialogueTurnInputWechatCard {
+				// 批B换微信混合/承接轮:对话要求已由 v4 回执链裁决(请求卡轮
+				// 只有接受链完成的接续回执才推进到 reply),settle 侧还会以
+				// 聚合态全量重放校验 requirement;此处只核对轮标签形状,不用
+				// 招呼态重放(请求卡轮会被误判为仍在等待前置)。
+				if turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent {
+					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+				}
+				if a.manager.advice == nil {
+					return nil
+				}
+				if err := a.runM5ReplyAdvice(
+					ctx,
+					turn,
+					material,
+					facts,
+					communication.IntentAdvice{State: communication.AdviceAbsent},
+					communication.V4AdviceReply,
+				); err != nil {
+					return err
+				}
+				break
+			}
 			if material.inputKind == store.DialogueTurnInputResumeAttachment {
 				if turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent {
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())

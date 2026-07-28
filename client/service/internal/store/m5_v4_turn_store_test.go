@@ -1797,3 +1797,115 @@ func TestCommunicationV4ConsecutiveTurnsShareAnchorWithoutOutbound(t *testing.T)
 		t.Fatalf("同锚第二轮未通过统一重验: current=%v err=%v", current, err)
 	}
 }
+
+func TestFreezeCommunicationV4WechatAcceptedWithTextReplacesReceiptByContinuation(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-batchb-accepted-text"
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	text := "加好了,后面微信聊"
+	inbound := appendCommunicationV4Inbound(t, s, fixture,
+		Message{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "accepted", ContentHash: "v4-batchb-accepted-card",
+		},
+		Message{
+			Seq: 3, Direction: "in", Kind: "text", Text: &text,
+			ContentHash: "v4-batchb-accepted-text",
+		},
+	)
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || !frozen.Created ||
+		frozen.Turn.Status != DialogueTurnClassified ||
+		frozen.Turn.IntentLabel != m5ai.IntentInterested ||
+		frozen.Turn.IntentSource != DialogueIntentBusinessEvent ||
+		frozen.Application.Outcome.Dialogue != communication.V4DialogueReplyKnownInterested ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+		frozen.Application.Outcome.NextAdvice != communication.V4AdviceReply ||
+		len(frozen.Application.Outcome.Actions) != 1 ||
+		frozen.Application.Outcome.Actions[0].Kind != communication.V4ActionNotifyWechat ||
+		!frozen.Aggregate.State.WechatReceiptSent ||
+		frozen.Aggregate.State.WechatState != communication.V4WechatExchanged {
+		t.Fatalf("交换成功+文字轮应由承接替代固定回执并置位: frozen=%+v err=%v", frozen, err)
+	}
+	eventActions, err := s.CommunicationV4EventActionsBySource(
+		profileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil || len(eventActions) != 1 ||
+		eventActions[0].V4Kind != communication.V4ActionNotifyWechat ||
+		eventActions[0].Status != CommunicationV4EventActionDeferred {
+		t.Fatalf("批B交换成功轮只应物化通知动作: actions=%+v err=%v", eventActions, err)
+	}
+	kind, ok := DialogueTurnInputKindOf(inbound)
+	if !ok || kind != DialogueTurnInputWechatCard {
+		t.Fatalf("输入形态应判为换微信卡混合: kind=%v ok=%v", kind, ok)
+	}
+	replayed, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || replayed.Created {
+		t.Fatalf("批B交换成功轮重放失败: replayed=%+v err=%v", replayed, err)
+	}
+}
+
+func TestFreezeCommunicationV4WechatPendingWithTextWaitsAcceptChain(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-batchb-pending-text"
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	text := "方便加个微信细聊吗"
+	requestSourceKey := strings.Repeat("ab", 32)
+	inbound := appendCommunicationV4Inbound(t, s, fixture,
+		Message{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "pending", ContentHash: "v4-batchb-pending-card",
+			SourceKey: &requestSourceKey,
+		},
+		Message{
+			Seq: 3, Direction: "in", Kind: "text", Text: &text,
+			ContentHash: "v4-batchb-pending-text",
+		},
+	)
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || !frozen.Created ||
+		frozen.Turn.Status != DialogueTurnCollected ||
+		frozen.Turn.IntentLabel != m5ai.IntentInterested ||
+		frozen.Turn.IntentSource != DialogueIntentBusinessEvent ||
+		frozen.Application.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+		!frozen.Application.Outcome.DialogueAfterActions ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone ||
+		len(frozen.Application.Outcome.Actions) != 2 ||
+		frozen.Application.Outcome.Actions[0].Kind != communication.V4ActionAcceptWechat ||
+		frozen.Application.Outcome.Actions[1].Kind != communication.V4ActionNotifyWechat {
+		t.Fatalf("请求卡+文字轮应挂起等待接受链: frozen=%+v err=%v", frozen, err)
+	}
+	nextAdvice, v4Owned, err := s.CommunicationV4NextAdvice(frozen.Turn.TurnID)
+	if err != nil || !v4Owned || nextAdvice != communication.V4AdviceNone {
+		t.Fatalf("挂起轮的下一建议应为 none 由接受链接续: advice=%v owned=%v err=%v",
+			nextAdvice, v4Owned, err)
+	}
+	eventActions, err := s.CommunicationV4EventActionsBySource(
+		profileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil || len(eventActions) != 2 {
+		t.Fatalf("批B请求卡轮事件动作未物化: actions=%+v err=%v", eventActions, err)
+	}
+	var accept *CommunicationV4EventAction
+	for index := range eventActions {
+		if eventActions[index].V4Kind == communication.V4ActionAcceptWechat {
+			accept = &eventActions[index]
+		}
+	}
+	if accept == nil || accept.Status != CommunicationV4EventActionPlanned {
+		t.Fatalf("接受动作未按计划物化: actions=%+v", eventActions)
+	}
+	replayed, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || replayed.Created {
+		t.Fatalf("批B请求卡轮重放失败: replayed=%+v err=%v", replayed, err)
+	}
+}
