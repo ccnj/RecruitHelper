@@ -446,20 +446,6 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 		if err := persistCommunicationV4TransitionTx(tx, aggregate, next, application); err != nil {
 			return err
 		}
-		// 约面成功的权威时点=主线真迁入 interviewed 的这次提交(重放/重发同一
-		// 事件不触发);运营通知同事务幂等入队(每候选人终身一次,照抄旧项目)。
-		if aggregate.State.MainStatus != communication.V4StatusInterviewed &&
-			decision.State.MainStatus == communication.V4StatusInterviewed {
-			if err := enqueueNotificationTx(
-				tx,
-				NotificationTypeInterviewAccepted,
-				"interviewAccepted:"+req.ProfileID,
-				req.ProfileID,
-				req.AppliedAt,
-			); err != nil {
-				return err
-			}
-		}
 		if _, _, err := materializeCommunicationV4EventActionsTx(
 			tx,
 			application,
@@ -1299,6 +1285,23 @@ func persistCommunicationV4TransitionTx(
 	}
 	if profileUpdated.RowsAffected != 1 {
 		return ErrCommunicationV4Corrupt
+	}
+	// 约面成功的权威时点=主线跨入 interviewed 的这次持久化。本函数是全部 V4
+	// 聚合转换的唯一持久化汇点(事件应用、inbound 轮冻结、建议应用、动作
+	// 确认/回退各路径都经此),在此入队才覆盖真实链路——真机上候选人接受
+	// 表现为 in 方向 accepted 卡消息,走 inbound 轮冻结,不产生卡片跃迁事实。
+	// event_key 幂等保证每候选人终身一次(2026-07-28 裁决,照抄旧项目)。
+	if current.State.MainStatus != communication.V4StatusInterviewed &&
+		next.State.MainStatus == communication.V4StatusInterviewed {
+		if err := enqueueNotificationTx(
+			tx,
+			NotificationTypeInterviewAccepted,
+			"interviewAccepted:"+next.ProfileID,
+			next.ProfileID,
+			application.AppliedAt,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }

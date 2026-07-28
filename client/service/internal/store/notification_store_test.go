@@ -72,6 +72,65 @@ func TestInterviewAcceptedEnqueuesNotificationExactlyOnce(t *testing.T) {
 	}
 }
 
+// 真实链路回归:候选人接受在真机表现为 in 方向 accepted 卡消息,单独成轮经
+// FreezeCommunicationV4Turn 迁入 interviewed,不产生卡片跃迁事实(手侧我方
+// 邀面卡状态恒 unknown)。入队钩子必须在该路径同样生效——挂在全部 V4 聚合
+// 转换的唯一持久化汇点 persistCommunicationV4TransitionTx。
+func TestInterviewAcceptedEnqueuesOnInboundTurnFreeze(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "notify-freeze")
+	// 账本先落 seq2 文本与 seq3 accepted 卡,再经消息事件把主线推进到
+	// communicating(投影游标到 2):混合轮(文字+特殊卡同批)按设计转人工
+	// 不迁移,真实迁移形态是 accepted 卡单独成轮。
+	expression := "我想继续了解岗位"
+	messages := appendCommunicationV4Inbound(t, s, fixture,
+		Message{
+			Seq: 2, Direction: "in", Kind: "text", ContentHash: "notify-freeze-2",
+			Text: &expression, CreatedAt: time.Now().Add(-time.Second),
+		},
+		Message{
+			Seq: 3, Direction: "in", Kind: "card", CardType: "interviewInvite",
+			CardState: "accepted", ContentHash: "notify-freeze-3", CreatedAt: time.Now(),
+		},
+	)
+	if _, err := s.ApplyCommunicationV4BusinessEvent(ApplyCommunicationV4BusinessEventRequest{
+		ProfileID: fixture.ProfileID,
+		Event: communication.BusinessEvent{
+			Key: "message:2", Kind: communication.EventCandidateExpressionReceived,
+			Source: communication.EventSourceMessage, MessageSeq: 2,
+			ExpressionKind: communication.ExpressionText, Text: expression,
+		},
+		AppliedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	material, ready, err := s.CommunicationAIMaterialForProfile(fixture.ProfileID)
+	if err != nil || !ready {
+		t.Fatalf("AI 材料未就绪: %v", err)
+	}
+	setCommunicationV4FixedPhrasePackage(t, s, material.ContextRevision.RevisionHash)
+	req := communicationV4TurnRequest(t, s, fixture, messages[1:])
+
+	result, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Aggregate.State.MainStatus != communication.V4StatusInterviewed {
+		t.Fatalf("inbound 轮未迁入 interviewed: %+v", result.Aggregate.State)
+	}
+	rows := outboxRows(t, s, NotificationTypeInterviewAccepted)
+	if len(rows) != 1 || rows[0].ProfileID != fixture.ProfileID ||
+		rows[0].EventKey != "interviewAccepted:"+fixture.ProfileID {
+		t.Fatalf("inbound 轮冻结未入队约面通知: %+v", rows)
+	}
+	if _, err := s.FreezeCommunicationV4Turn(req); err != nil {
+		t.Fatal(err)
+	}
+	if rows := outboxRows(t, s, NotificationTypeInterviewAccepted); len(rows) != 1 {
+		t.Fatalf("turn 重放导致通知增生: %+v", rows)
+	}
+}
+
 // 换微信成功入队:ContactAsset 创建的同事务入队;同一收编重放不增生。
 func TestWechatAdoptionEnqueuesNotificationExactlyOnce(t *testing.T) {
 	s := openTest(t)
