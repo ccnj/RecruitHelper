@@ -37,6 +37,16 @@ type Hub struct {
 	active     map[string]*Conn // handId → 当前活连接(单活)
 	takeoverMu sync.Mutex
 	takeovers  map[string]*takeoverGate // 仅串行同 handId 的 welcome→接管→收编
+
+	// blob/1 上行子集(协议规格 §13 激活记录):配置后 welcome 携带 BlobParams。
+	blobIssuer   BlobTokenIssuer
+	blobEndpoint string
+	blobMaxBytes int64
+}
+
+// BlobTokenIssuer 为每次 welcome 轮换会话作用域 blob token(旧值即刻作废)。
+type BlobTokenIssuer interface {
+	Rotate(handID string) string
 }
 
 func NewHub(st *store.Store, graceMs int64) *Hub {
@@ -59,6 +69,13 @@ func (h *Hub) SetDispatcher(d *dispatch.Dispatcher) { h.dispatcher = d }
 
 // SetEventSink 安装传感事件消费者。processed_msgs 的持久去重先于回调发生。
 func (h *Hub) SetEventSink(s EventSink) { h.eventSink = s }
+
+// SetBlob 接线 blob/1 上行子集:此后每次 welcome 轮换并下发会话作用域 token。
+func (h *Hub) SetBlob(issuer BlobTokenIssuer, endpoint string, maxBytes int64) {
+	h.blobIssuer = issuer
+	h.blobEndpoint = endpoint
+	h.blobMaxBytes = maxBytes
+}
 
 // Registry:注册表访问器(状态页/测试)。
 func (h *Hub) Registry() *Registry { return h.reg }
@@ -422,6 +439,16 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 			ManualQuietMs:          protocol.DefaultSensorsManualQuietMs,
 			NavSettleMs:            protocol.DefaultSensorsNavSettleMs,
 		},
+	}
+	if c.hub.blobIssuer != nil {
+		// token 熵源失败时宁缺勿滥:不带 blob 字段,本会话按未协商 blob 运行。
+		if token := c.hub.blobIssuer.Rotate(c.handID); token != "" {
+			welcome.Blob = &protocol.BlobParams{
+				Endpoint: c.hub.blobEndpoint,
+				Token:    token,
+				MaxBytes: c.hub.blobMaxBytes,
+			}
+		}
 	}
 	old, err := c.hub.activate(c, func() error {
 		return c.send(ctx, protocol.KindWelcome, nil, welcome)

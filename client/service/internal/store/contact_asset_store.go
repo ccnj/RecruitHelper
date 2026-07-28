@@ -207,6 +207,17 @@ func upsertWechatContactAssetTx(
 	if err := tx.Create(asset).Error; err != nil {
 		return nil, false, err
 	}
+	// 换微信成功的权威时点即 ContactAsset 创建;两条收编路径(候选人主动接受
+	// 与我方邀请被接受)在此汇合,运营通知同事务幂等入队(每候选人终身一次)。
+	if err := enqueueNotificationTx(
+		tx,
+		NotificationTypeWechatAdded,
+		"wechatAdded:"+req.ProfileID,
+		req.ProfileID,
+		req.RecordedAt,
+	); err != nil {
+		return nil, false, err
+	}
 	return asset, true, nil
 }
 

@@ -1,0 +1,141 @@
+package notify
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"recruithelper/client/service/internal/store"
+)
+
+// 正文渲染照抄旧项目 notify.py:纯文本(msgtype=text,不用 markdown 符号),
+// 关键行动信息(面试时间、联系方式)在前;结尾提示是否附截图。
+// 画像行(年龄/学历/城市/期望薪资)按计划列为后置项,当前字段面不含。
+
+var weekdayCN = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+var mobileRe = regexp.MustCompile(`^1[3-9]\d{9}$`)
+
+var mainStatusLabels = map[store.CandidateProfileStatus]string{
+	store.CandidateProfileSelected:      "已选中",
+	store.CandidateProfileGreeted:       "已招呼",
+	store.CandidateProfileCommunicating: "沟通中",
+	store.CandidateProfileInvited:       "已邀面",
+	store.CandidateProfileInterviewed:   "已约面",
+	store.CandidateProfileEnded:         "已结束",
+	store.CandidateProfileEliminated:    "已淘汰",
+}
+
+// V4 微信线状态 → 展示文案(状态名本身不改,只改读法;照抄旧项目语义)。
+var wechatStateLabels = map[string]string{
+	"notInvited": "未邀微信",
+	"invited":    "已邀微信",
+	"exchanged":  "已成功交换微信",
+}
+
+func formatInterviewTime(startsAtMs *int64) string {
+	if startsAtMs == nil || *startsAtMs <= 0 {
+		return "未获取到,请在客户端核对"
+	}
+	at := time.UnixMilli(*startsAtMs).Local()
+	return fmt.Sprintf(
+		"%02d-%02d(%s) %02d:%02d",
+		at.Month(), at.Day(), weekdayCN[at.Weekday()], at.Hour(), at.Minute(),
+	)
+}
+
+func formatContact(snapshot *store.NotificationRenderSnapshot) string {
+	status := wechatStateLabels[snapshot.WechatState]
+	wechatID := strings.TrimSpace(snapshot.WechatID)
+	if wechatID == "" {
+		if status == "" {
+			status = "待跟进"
+		}
+		return "未获取(" + status + ")"
+	}
+	kind := "微信"
+	if mobileRe.MatchString(wechatID) {
+		kind = "手机"
+	}
+	line := kind + " " + wechatID
+	if status != "" {
+		line += "(" + status + ")"
+	}
+	return line
+}
+
+func candidateTitle(prefix string, snapshot *store.NotificationRenderSnapshot, customerName string) string {
+	name := strings.TrimSpace(snapshot.DisplayName)
+	if name == "" {
+		name = "候选人"
+	}
+	title := "「" + prefix + "」" + name
+	if customerName != "" {
+		title += "(" + customerName + ")"
+	}
+	return title
+}
+
+func screenshotHintLine(snapshot *store.NotificationRenderSnapshot) string {
+	// 提示只列实际就绪的截图,避免文案宣称有简历图而追发时其实只有聊天图。
+	parts := []string{}
+	if snapshot.ChatShot != nil {
+		parts = append(parts, "聊天记录")
+	}
+	if snapshot.ResumeShot != nil {
+		parts = append(parts, "简历")
+	}
+	if len(parts) == 0 {
+		return "(本次未附截图)"
+	}
+	return strings.Join(parts, "、") + "见下图"
+}
+
+// renderInterviewAccepted 渲染「面试确认」通知(约面成功)。
+func renderInterviewAccepted(snapshot *store.NotificationRenderSnapshot, customerName string) string {
+	lines := []string{candidateTitle("面试确认", snapshot, customerName)}
+	lines = append(lines, "面试时间:"+formatInterviewTime(snapshot.InterviewStartsAtMs))
+	lines = append(lines, "联系方式:"+formatContact(snapshot))
+	if snapshot.PositionTitle != "" {
+		lines = append(lines, "职位:"+snapshot.PositionTitle)
+	}
+	lines = append(lines, screenshotHintLine(snapshot))
+	return truncateBytes(strings.Join(lines, "\n"), wecomTextLimitBytes)
+}
+
+// renderWechatAdded 渲染「微信互加」通知(换微信成功)。
+func renderWechatAdded(snapshot *store.NotificationRenderSnapshot, customerName string) string {
+	lines := []string{candidateTitle("微信互加", snapshot, customerName)}
+	lines = append(lines, "联系方式:"+formatContact(snapshot))
+	statusLine := "当前状态:" + mainStatusLabel(snapshot.MainStatus)
+	if snapshot.MainStatus == store.CandidateProfileInterviewed && snapshot.InterviewStartsAtMs != nil {
+		statusLine += " · 面试 " + formatInterviewTime(snapshot.InterviewStartsAtMs)
+	}
+	lines = append(lines, statusLine)
+	if snapshot.PositionTitle != "" {
+		lines = append(lines, "职位:"+snapshot.PositionTitle)
+	}
+	lines = append(lines, screenshotHintLine(snapshot))
+	return truncateBytes(strings.Join(lines, "\n"), wecomTextLimitBytes)
+}
+
+func mainStatusLabel(status store.CandidateProfileStatus) string {
+	if label, ok := mainStatusLabels[status]; ok {
+		return label
+	}
+	return "沟通中"
+}
+
+func truncateBytes(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit - len("…")
+	for cut > 0 && !utf8RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…"
+}
+
+func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
