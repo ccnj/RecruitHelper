@@ -7607,7 +7607,19 @@ async function mainPrepareInterviewEditor(
       year: Number(clean(root.querySelector('.km-date-picker__header-year')?.textContent).match(/\d+/u)?.[0]),
       month: Number(clean(root.querySelector('.km-date-picker__header-month')?.textContent).match(/\d+/u)?.[0]),
     })
-    for (let moves = 0; moves < 24; moves += 1) {
+    // 智联邀面日历真机只开放今天起数天（2026-07-28 实测 4 天），目标月至多
+    // 相邻；翻月按钮无 disabled 标记、点击可能毫无反应（真机已证）。因此按
+    // 月距离精确圈定翻页轮数、越界立即失败，不再让不可达月份把等待链拖满。
+    const initialCalendar = calendarParts(datePopover)
+    if (!initialCalendar.year || !initialCalendar.month) return await abort('date_unavailable', 'calHdr')
+    const expectedMoves = Math.abs(year * 12 + month - (initialCalendar.year * 12 + initialCalendar.month))
+    if (expectedMoves > 12) {
+      return await abort(
+        'date_unavailable',
+        `navRange cal=${initialCalendar.year}-${initialCalendar.month} want=${year}-${month}`,
+      )
+    }
+    for (let moves = 0; moves < expectedMoves + 1; moves += 1) {
       const current = calendarParts(datePopover)
       if (current.year === year && current.month === month) break
       if (!current.year || !current.month) return await abort('date_unavailable', 'calHdr')
@@ -7618,6 +7630,8 @@ async function mainPrepareInterviewEditor(
       const direction = year * 12 + month > current.year * 12 + current.month ? 1 : -1
       const button = direction > 0 ? buttons[buttons.length - 1] : buttons[0]
       if (!await interact(button)) return await abort('date_unavailable', 'nav.click')
+      // 翻月点击生效与否 2.5 秒内必有分晓（真机翻不动时页头永不变化），
+      // 不沿用 10 秒默认等待。
       datePopover = await waitFor(() => {
         const candidate = Array.from(document.querySelectorAll<HTMLElement>(
           '.km-popover.km-date-picker__popper, .km-date-picker__popper',
@@ -7625,7 +7639,7 @@ async function mainPrepareInterviewEditor(
         if (!candidate) return null
         const next = calendarParts(candidate)
         return next.year !== current.year || next.month !== current.month ? candidate : null
-      })
+      }, 2_500)
       if (!datePopover) {
         return await abort(
           'date_unavailable',
