@@ -245,6 +245,70 @@ func TestNotificationSnapshotPrefersConversationDisplayName(t *testing.T) {
 	}
 }
 
+// 画像摘要抽取必须尽力而为:结构异常、标签缺失、值超长都只让对应项留空,
+// 绝不返回错误——一条通知不能因为简历没采全就发不出去。
+func TestFillNotificationProfileSummaryIsDefensive(t *testing.T) {
+	full := `{"basic":[{"label":"姓名","value":"张三"},{"label":"年龄","value":"35岁"},
+	 {"label":"最高学历","value":"本科"},{"label":"现居地","value":"上海"}],
+	 "expectations":[{"label":"期望薪资","value":"20-30k"},{"label":"期望地点","value":"上海"}]}`
+	snapshot := &NotificationRenderSnapshot{}
+	fillNotificationProfileSummary(snapshot, full)
+	if snapshot.Age != "35岁" || snapshot.Education != "本科" ||
+		snapshot.City != "上海" || snapshot.DesiredSalary != "20-30k" {
+		t.Fatalf("完整快照抽取不符: %+v", snapshot)
+	}
+
+	for name, raw := range map[string]string{
+		"空串":      "",
+		"空白":      "   ",
+		"非JSON":   "not-json{",
+		"空对象":     "{}",
+		"分区为null": `{"basic":null,"expectations":null}`,
+		"分区非数组":   `{"basic":"oops","expectations":123}`,
+		"标签缺失":    `{"basic":[{"label":"户口地","value":"江苏"}],"expectations":[]}`,
+		"值为空":     `{"basic":[{"label":"年龄","value":""}],"expectations":[{"label":"期望薪资","value":"  "}]}`,
+		"旧格式合并标签": `{"basic":[],"expectations":[{"label":"求职期望","value":"上海 顾问 面议"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := &NotificationRenderSnapshot{}
+			fillNotificationProfileSummary(out, raw) // 不得 panic
+			if out.Age != "" || out.Education != "" || out.City != "" || out.DesiredSalary != "" {
+				t.Fatalf("异常输入不得抽出画像: %+v", out)
+			}
+		})
+	}
+
+	// 异常快照塞进整段文字时截断,避免撑爆正文。
+	long := strings.Repeat("很", 200)
+	overflow := &NotificationRenderSnapshot{}
+	fillNotificationProfileSummary(overflow, `{"basic":[{"label":"现居地","value":"`+long+`"}]}`)
+	if len([]rune(overflow.City)) > notificationProfileValueMaxRunes+1 {
+		t.Fatalf("超长值未截断: %d", len([]rune(overflow.City)))
+	}
+}
+
+// 没有活动简历快照的档案照样能渲染快照(画像四项留空)。
+func TestNotificationSnapshotWithoutResumeStillRenders(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 28, 22, 0, 0, 0, time.UTC)
+	fixture, _ := seedSuccessfulV4Greeting(t, s, "notify-noresume", "conversation-notify-noresume", at)
+	profile, err := s.CandidateProfileByID(fixture.ProfileID)
+	if err != nil || profile == nil {
+		t.Fatalf("读取档案: %v", err)
+	}
+	if profile.ActiveResumeSnapshotID != nil {
+		t.Fatalf("该夹具不该带简历快照")
+	}
+	snapshot, err := s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil {
+		t.Fatalf("无简历时快照渲染失败: %v", err)
+	}
+	if snapshot.Age != "" || snapshot.Education != "" ||
+		snapshot.City != "" || snapshot.DesiredSalary != "" {
+		t.Fatalf("无简历却抽出画像: %+v", snapshot)
+	}
+}
+
 // 发件箱生命周期:取件、失败重试上限、发送、跳过与过期都只标记不删除。
 func TestNotificationOutboxLifecycle(t *testing.T) {
 	s := openTest(t)

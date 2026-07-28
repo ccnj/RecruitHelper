@@ -90,6 +90,46 @@ func TestRenderWechatAdded(t *testing.T) {
 	}
 }
 
+// 画像行逐项可缺:简历没采到、字段缺失都只是少一段文字,绝不阻断通知。
+func TestProfileLineDegradesPerField(t *testing.T) {
+	base := func() *store.NotificationRenderSnapshot {
+		s := fullSnapshot()
+		s.Age, s.Education, s.City, s.DesiredSalary = "35岁", "本科", "上海", "20-30k"
+		return s
+	}
+	if got := profileLine(base()); got != "候选人:35岁/本科/上海 · 期望 20-30k" {
+		t.Fatalf("完整画像行不符: %q", got)
+	}
+	only := base()
+	only.Education, only.City = "", ""
+	if got := profileLine(only); got != "候选人:35岁 · 期望 20-30k" {
+		t.Fatalf("缺学历/城市未逐项省略: %q", got)
+	}
+	noSalary := base()
+	noSalary.DesiredSalary = "  "
+	if got := profileLine(noSalary); got != "候选人:35岁/本科/上海" {
+		t.Fatalf("缺薪资未省略后缀: %q", got)
+	}
+	salaryOnly := base()
+	salaryOnly.Age, salaryOnly.Education, salaryOnly.City = "", "", ""
+	if got := profileLine(salaryOnly); got != "期望 20-30k" {
+		t.Fatalf("只剩薪资时不该留空前缀: %q", got)
+	}
+	empty := base()
+	empty.Age, empty.Education, empty.City, empty.DesiredSalary = "", "", "", ""
+	if got := profileLine(empty); got != "" {
+		t.Fatalf("四项全缺必须整行省略: %q", got)
+	}
+	// 整行缺失时通知照常渲染,不能少了关键行、更不能报错。
+	text := renderWechatAdded(empty, "客户丁", false)
+	if strings.Contains(text, "候选人:") || strings.Contains(text, "期望 ") {
+		t.Fatalf("四项全缺不得留下画像残句:\n%s", text)
+	}
+	if !strings.Contains(text, "联系方式:") || !strings.Contains(text, "当前状态:") {
+		t.Fatalf("画像缺失影响了其它行:\n%s", text)
+	}
+}
+
 func TestTruncateBytesIsRuneSafe(t *testing.T) {
 	long := strings.Repeat("很", 2048)
 	out := truncateBytes(long, wecomTextLimitBytes)

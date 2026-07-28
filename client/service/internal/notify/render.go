@@ -77,6 +77,33 @@ func candidateTitle(prefix string, snapshot *store.NotificationRenderSnapshot, c
 	return title
 }
 
+// profileLine 渲染画像摘要行(AGENTS.md 2026-07-28 补充裁决的封闭四项)。
+// 简历常常没采到或字段缺失,所以逐项可缺:有几项写几项,一项都没有就返回空串
+// 由调用方整行省略。任何缺失都只是少一段文字,不影响通知本身发出。
+func profileLine(snapshot *store.NotificationRenderSnapshot) string {
+	parts := []string{}
+	for _, value := range []string{
+		strings.TrimSpace(snapshot.Age),
+		strings.TrimSpace(snapshot.Education),
+		strings.TrimSpace(snapshot.City),
+	} {
+		if value != "" {
+			parts = append(parts, value)
+		}
+	}
+	line := ""
+	if len(parts) > 0 {
+		line = "候选人:" + strings.Join(parts, "/")
+	}
+	if salary := strings.TrimSpace(snapshot.DesiredSalary); salary != "" {
+		if line != "" {
+			line += " · "
+		}
+		line += "期望 " + salary
+	}
+	return line
+}
+
 func screenshotHintLine(snapshot *store.NotificationRenderSnapshot) string {
 	// 提示只列实际就绪的截图,避免文案宣称有简历图而追发时其实只有聊天图。
 	parts := []string{}
@@ -99,6 +126,9 @@ func renderInterviewAccepted(snapshot *store.NotificationRenderSnapshot, custome
 	lines = append(lines, "联系方式:"+formatContact(snapshot))
 	if snapshot.PositionTitle != "" {
 		lines = append(lines, "职位:"+snapshot.PositionTitle)
+	}
+	if profile := profileLine(snapshot); profile != "" {
+		lines = append(lines, profile)
 	}
 	lines = append(lines, screenshotHintLine(snapshot))
 	return truncateBytes(strings.Join(lines, "\n"), wecomTextLimitBytes)
@@ -125,6 +155,9 @@ func renderWechatAdded(
 	lines = append(lines, statusLine)
 	if snapshot.PositionTitle != "" {
 		lines = append(lines, "职位:"+snapshot.PositionTitle)
+	}
+	if profile := profileLine(snapshot); profile != "" {
+		lines = append(lines, profile)
 	}
 	lines = append(lines, screenshotHintLine(snapshot))
 	return truncateBytes(strings.Join(lines, "\n"), wecomTextLimitBytes)
