@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -202,4 +204,36 @@ func M5AutomaticIntentID(actionID string) (string, error) {
 	}
 	digest := sha256.Sum256([]byte(actionID))
 	return "intent-" + hex.EncodeToString(digest[:]), nil
+}
+
+// communicationActionRetrySuffix 是邀面卡干净失败自动重试(2026-07-29 甲方
+// 裁决,协议规格 §8.4 例外)的尝试序号后缀。每次重试铸造带新后缀的动作 ID,
+// 使派生 intentId/idemKey 全新,单次尝试的幂等闸不变。
+var communicationActionRetrySuffix = regexp.MustCompile(`\|try([0-9]+)$`)
+
+// communicationActionPlanKey 剥离自动重试后缀,返回与 v4 plan.ActionKey 对齐
+// 的基础动作键;非重试动作原样返回。
+func communicationActionPlanKey(actionID string) string {
+	return communicationActionRetrySuffix.ReplaceAllString(actionID, "")
+}
+
+// IsRetryCommunicationActionID 报告动作 ID 是否携带自动重试后缀。巡检对
+// 重试动作把 WAL CAS 锚改取会话最新 intent(前次失败尝试),依赖校验的透明
+// 锚判定据此收窄。
+func IsRetryCommunicationActionID(actionID string) bool {
+	return communicationActionRetrySuffix.MatchString(actionID)
+}
+
+// communicationActionNextRetryID 返回下一次自动重试的动作 ID:基础键追加
+// |try{n},首次重试为 try2。
+func communicationActionNextRetryID(actionID string) string {
+	match := communicationActionRetrySuffix.FindStringSubmatch(actionID)
+	if match == nil {
+		return actionID + "|try2"
+	}
+	attempt, err := strconv.Atoi(match[1])
+	if err != nil || attempt < 2 {
+		return communicationActionPlanKey(actionID) + "|try2"
+	}
+	return communicationActionPlanKey(actionID) + "|try" + strconv.Itoa(attempt+1)
 }
