@@ -25,6 +25,8 @@ data/
 appdata/
 .env
 .env.*
+# 扩展签名私钥:manifest 只带公钥,私钥永不入库
+*.pem
 !.env.template
 
 # 构建与发布产物

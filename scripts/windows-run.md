@@ -1,7 +1,8 @@
 # Windows 开发验证包 · 构建与运行
 
 本文件覆盖"**开发验证包**":能在一台 Windows 机器上把客户端跑起来做人眼验收。
-它**不是**正式客户交付物 —— 插件仍靠人工加载,没有代码签名、安装器与自动更新。
+它**不是**正式客户交付物 —— 没有代码签名,也没有自动更新;插件文件虽然已经迁到
+安装目录之外的固定目录并由客户端自动换代,但**在 Chrome 里加载/重载仍靠人工**。
 正式交付还欠的义务见
 [`docs/插件交付与更新决策-2026-07-25.md`](../docs/插件交付与更新决策-2026-07-25.md) 第三节。
 
@@ -11,34 +12,51 @@
 ./scripts/build-win.sh
 ```
 
-一条命令做四件事:交叉编译脑服务(`CGO_ENABLED=0 GOOS=windows GOARCH=amd64`)、
-构建 UI、构建插件、打 Electron 壳,最后核对产物完整性。产物在:
+一条命令做五件事:交叉编译脑服务(`CGO_ENABLED=0 GOOS=windows GOARCH=amd64`)、
+构建 UI、构建插件、打 Electron 壳(dir)、用 `makensis` 编译安装器,最后核对产物。
 
 ```
-release/win-unpacked/
-├── RecruitHelper.exe          ← 双击这个
-└── resources/
-    ├── brain/service.exe      ← Go 脑服务(单二进制,无 cgo)
-    ├── ui/                    ← React 构建产物
-    └── plugin/                ← Chrome MV3 插件(需人工加载)
+release/
+├── RecruitHelper-0.1.0-setup.exe   ← 交付用,约 96MB
+└── win-unpacked/                    ← 免安装目录,调试用,约 306MB
+    ├── RecruitHelper.exe
+    └── resources/
+        ├── brain/RecruitHelperBrain.exe   ← Go 脑服务(单二进制,无 cgo)
+        ├── ui/                            ← React 构建产物
+        └── plugin/                        ← 插件母版(不是 Chrome 加载的那份,见第四节)
 ```
 
-首次构建会下载 Windows 版 Electron(约 100MB),慢或失败重跑即可。
-`target=dir` 不需要 wine。
+全程不需要 Docker、不需要 wine。首次构建会下载 Windows 版 Electron(约 115MB)。
 
-## 二、拷到 Windows 并启动
+> **构建工具链的两个坑**(改脚本前务必先读):
+> 1. **别用 Homebrew 的 makensis。** 3.12 在 macOS 26 / arm64 上是坏的 —— Section 里
+>    只要有 `File`、`WriteUninstaller`、`ExecWait` 任一实质指令就 `std::bad_alloc`
+>    退出,且不打印任何有用错误。脚本刻意优先用 electron-builder 缓存里的 3.04。
+> 2. **[`installer.nsi`](installer.nsi) 必须保持纯 ASCII,注释也是。** macOS 的
+>    makensis 是 ANSI-only 构建,脚本里出现任何非 ASCII 字节都会
+>    `Bad text encoding: line 1`,`-INPUTCHARSET UTF8` 和 UTF-8 BOM 都救不了。
+>    产品 UI 文案照常中文,只有安装器受限于程序标识 `RecruitHelper`。
 
-1. 把**整个** `win-unpacked` 目录拷到 Windows 机器(目录内文件互相依赖,不能只拷 exe);
-2. 双击 `RecruitHelper.exe`。
+## 二、安装
 
-**首次会被 SmartScreen 拦截**(包未签名):点"更多信息" → "仍要运行"。
+把 `RecruitHelper-0.1.0-setup.exe` 拷到 Windows,双击。
 
-启动后壳会拉起 `resources\brain\service.exe`、等 `admin/health` 就绪、再开窗。
-若包不完整(缺脑二进制),会**当场弹窗报错并退出**,不会留一个开了窗却没有脑的壳。
+- 装到 `%LOCALAPPDATA%\Programs\RecruitHelper`,**用户级安装,没有 UAC 提权弹窗**;
+- 桌面与开始菜单会有 `RecruitHelper` 快捷方式,控制面板"应用和功能"里可卸载;
+- **首次会被 SmartScreen 拦截**(未签名):点"更多信息" → "仍要运行"。
+
+升级 = 直接装新版:安装器会先结束运行中的 `RecruitHelper.exe` 与
+`RecruitHelperBrain.exe`,清掉旧文件再写入。脑被结束后,进行中的 WAL、未收束命令与
+suspect 判定走既有恢复轨在下次启动时收敛 —— 安装器不为此另开旁路。
+
+**卸载不会删业务数据与插件目录**,重装即可续用。要彻底清除得手工删
+`%APPDATA%\RecruitHelper` 与 `%LOCALAPPDATA%\RecruitHelper`。
+
+调试时也可以直接拷 `win-unpacked` 整个目录跑,不装。
 
 ## 三、首次在新机器上:四件事
 
-包里带的是壳、脑、UI、插件文件。**拷过去不等于能开工**,还要按顺序做完下面四步。
+包里带的是壳、脑、UI、插件文件。**装完不等于能开工**,还要按顺序做完下面四步。
 
 ### 1. Chrome 浏览器(前提,包里没有)
 
@@ -46,16 +64,18 @@ release/win-unpacked/
 
 ### 2. 加载插件(人工,一次)
 
+**先启动一次客户端**,让它把插件安置到固定目录(见第四节),然后:
+
 ```
 chrome://extensions → 右上"开发者模式" → "加载已解压的扩展程序"
-→ 选 win-unpacked\resources\plugin
+→ 选 %LOCALAPPDATA%\RecruitHelper\plugin
 ```
+
+注意选的是 `%LOCALAPPDATA%` 下那份,**不是**安装目录里的 `resources\plugin`
+(那是母版,升级时会被整体替换)。
 
 插件自己生成并保存 `handId`,连上本地脑后自动登记,不需要配对。
 客户端 UI 的手区应显示该手在线。
-
-> 注意:`resources\plugin` 是随包目录,重新拷包会覆盖它。正式交付要求的固定目录、
-> 暂存→原子替换、保留上一版等能力**本包没有**,更新插件目前只能重新加载。
 
 ### 3. 激活(产品 UI)
 
@@ -70,7 +90,36 @@ chrome://extensions → 右上"开发者模式" → "加载已解压的扩展程
 **缺这一步脑照常启动、UI 照常打开,但 AI 环节(评分、招呼语、回复建议)不可用**,
 诊断台会显示"模型连接尚未配齐"。这是新机器上最容易漏的一步。key 只存在本机该文件里。
 
-## 四、数据目录
+## 四、插件目录与扩展身份
+
+Chrome 实际加载的是这个固定目录,它在安装目录**之外**:
+
+```
+%LOCALAPPDATA%\RecruitHelper\plugin
+```
+
+客户端每次启动会比对随包母版与该目录的内容指纹,不一致就先写临时目录、校验
+manifest、再原子替换;替换失败保留旧版并记录,不阻断启动(此时插件版本落后,既有
+contractMatch 会挡住 effectful 派发,不会带着错版插件发出副作用)。
+
+**只在启动那一刻替换** —— 那时还没有任何批次在跑,天然落在业务安全窗口内。运行期间
+的暂存、延迟重试与 `debug.reload` 握手不在本轮范围。
+
+插件 manifest 里写死了公钥 `key`,扩展 ID 恒定为:
+
+```
+oankodckocoibcofboconjjeinpjpdnb
+```
+
+ID 不再随加载路径变化,以后挪目录也不会换身份、不会丢 `handId`。
+
+> **从旧的免安装目录版升级过来时,扩展 ID 会变一次**(此前由路径派生)。需要在
+> `chrome://extensions` 删掉旧扩展、重新加载新目录一次;`handId` 会重新生成,脑那边
+> 旧手成为僵尸条目。一次性成本,之后不再发生。
+
+**插件文件被替换后 Chrome 不会自动生效**,仍需人工在 `chrome://extensions` 点重载。
+
+## 五、数据目录
 
 打包态固定用 Electron 标准目录,**不认** `BRAIN_DATA_DIR`:
 
@@ -82,7 +131,7 @@ chrome://extensions → 右上"开发者模式" → "加载已解压的扩展程
 开发态(`pnpm start`)仍可用 `BRAIN_DATA_DIR` 覆盖,见
 [`scripts/dev-run.md`](dev-run.md)。
 
-## 五、业务运行窗口
+## 六、业务运行窗口
 
 正式规则照常:每天 `08:00～24:00`,由用户在客户端显式点开始/恢复。
 本包**不内置** `RECRUITHELPER_DEV_ALLOW_OUT_OF_WINDOW`。有人值守验收确需放开时间门,
@@ -95,16 +144,17 @@ set RECRUITHELPER_DEV_ALLOW_OUT_OF_WINDOW=1 && RecruitHelper.exe
 该开关只在脑启动时读取,不改系统时间、不改业务时间戳、不自动开跑任务。
 恢复正式规则必须**完整退出**(托盘右键"退出",不是关窗口)后不带变量重启。
 
-## 六、维护入口
+## 七、维护入口
 
 窗口内按 `Ctrl+Shift+D` 进出开发者诊断台(普通用户侧边栏不显示该入口)。
 
-## 七、已知限制
+## 八、已知限制
 
 | 限制 | 现状 |
 |---|---|
 | 代码签名 | 无,SmartScreen 每台机器首次需人工放行 |
-| 安装器 | 无,拷目录即用 |
-| 自动更新 | 无,换版本 = 重新拷包 |
-| 插件固定目录与原子替换 | 未实现,人工加载 |
+| 自动更新 | 无,换版本 = 发新 setup.exe 装一次 |
+| 插件在 Chrome 里的重载 | 人工,`debug.reload` 自动握手未接 |
+| exe 版本元数据 | 无(跳过了 rcedit,它在 arm64 上要 wine) |
+| 安装器界面语言 | 英文(makensis 的 ANSI-only 限制) |
 | 开机自启 | 无 |

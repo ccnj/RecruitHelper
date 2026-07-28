@@ -6,6 +6,7 @@ const crypto = require('node:crypto')
 const path = require('node:path')
 const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
+const { pluginInstallDir, ensurePluginInstalled } = require('./pluginSeed')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -27,6 +28,15 @@ async function boot() {
     packaged: app.isPackaged,
     userDataDir: app.getPath('userData'),
   })
+  // 只有打包态才安置插件:开发期插件由开发者自己从 plugin/dist 加载。
+  // 放在起脑之前是因为这一刻还没有任何批次在跑,替换天然安全;失败只降级。
+  if (app.isPackaged) {
+    ensurePluginInstalled({
+      sourceDir: layout.pluginDir,
+      targetDir: pluginInstallDir({ userDataDir: app.getPath('userData') }),
+      log: (l) => console.log(l),
+    })
+  }
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
   service = new BrainService({

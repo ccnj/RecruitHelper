@@ -36,8 +36,8 @@ check(devOverride.brainBin === '/tmp/braind', '开发态 BRAIND_BIN 优先')
 check(devOverride.brainArgs.length === 0, 'BRAIND_BIN 时不带 go run 参数')
 
 // —— 打包态 ——
-check(brainBinaryName('win32') === 'service.exe', 'Windows 脑二进制带 .exe')
-check(brainBinaryName('darwin') === 'service', '非 Windows 脑二进制无扩展名')
+check(brainBinaryName('win32') === 'RecruitHelperBrain.exe', 'Windows 脑二进制带 .exe')
+check(brainBinaryName('darwin') === 'RecruitHelperBrain', '非 Windows 脑二进制无扩展名')
 
 const win = resolveLayout({
   packaged: true,
@@ -47,7 +47,7 @@ const win = resolveLayout({
   env: {},
   exists: present,
 })
-check(win.brainBin === join(RES, 'brain', 'service.exe'), '打包态脑二进制取自 resources/brain')
+check(win.brainBin === join(RES, 'brain', 'RecruitHelperBrain.exe'), '打包态脑二进制取自 resources/brain')
 check(win.brainArgs.length === 0, '打包态不带 go run 参数')
 check(win.brainCwd === join(RES, 'brain'), '打包态 cwd 是脑二进制所在目录')
 check(win.uiEntry === join(RES, 'ui', 'index.html'), '打包态 UI 取自 resources/ui')
@@ -61,7 +61,7 @@ const mac = resolveLayout({
   env: {},
   exists: present,
 })
-check(mac.brainBin === join(RES, 'brain', 'service'), '打包态 mac 脑二进制无扩展名')
+check(mac.brainBin === join(RES, 'brain', 'RecruitHelperBrain'), '打包态 mac 脑二进制无扩展名')
 
 // 安装包不完整:必须抛错,绝不静默退回开发期的 `go run`(客户机没有 Go 工具链)。
 let threw = null

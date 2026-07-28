@@ -4,9 +4,14 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
+// 脑二进制的文件名。刻意不叫 service.exe:安装器升级前要按映像名结束残留的脑
+// 进程,`taskkill /IM service.exe` 会打到系统上任何同名进程。独特名字让这一刀
+// 精确,也让用户在任务管理器里认得出这是谁。
+const BRAIN_BINARY_BASENAME = 'RecruitHelperBrain'
+
 /** 随包脑二进制的文件名(按目标平台)。 */
 function brainBinaryName(platform) {
-  return platform === 'win32' ? 'service.exe' : 'service'
+  return platform === 'win32' ? `${BRAIN_BINARY_BASENAME}.exe` : BRAIN_BINARY_BASENAME
 }
 
 /**
@@ -82,4 +87,4 @@ function resolveDataDir(opts) {
   return path.resolve(configured)
 }
 
-module.exports = { resolveLayout, resolveDataDir, brainBinaryName }
+module.exports = { resolveLayout, resolveDataDir, brainBinaryName, BRAIN_BINARY_BASENAME }
