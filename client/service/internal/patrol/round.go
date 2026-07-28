@@ -32,6 +32,9 @@ type roundActor struct {
 	unreadAttemptedRefs     map[string]struct{}
 	projection              []ConversationProjection
 	transientSkips          []conversationSkipNote
+	// 本轮取得正证的接受微信动作所属档案：接受是唯一"我方先于账本知情"的
+	// 动作，需要在同一轮定向重对账把 259 结果补进账本（立案 4.3）。
+	wechatAcceptedProfiles map[string]struct{}
 }
 
 type threadSnapshot struct {

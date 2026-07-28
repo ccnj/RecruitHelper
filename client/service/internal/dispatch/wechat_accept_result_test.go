@@ -83,10 +83,48 @@ func TestWechatAcceptResultParserCrossChecksArgsDataAndEvidence(t *testing.T) {
 			plan, outcome, err)
 	}
 
+	// 成功正证是请求卡的可见后置状态，取号是可选加成（协议规格 §9.3）：259
+	// 晚到时两个取号字段一并缺席，动作照样 ok，只是本次不收编资产。
+	noNumber := validResult()
+	noNumberData, err := protocol.Encode(protocol.ChatAcceptWechatData{
+		ConversationRef:  conversationRef,
+		RequestSourceKey: requestSourceKey,
+		ObservedAt:       time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noNumber.Data = noNumberData
+	noNumberPlan, noNumberOutcome, err := parse(t, noNumber, store.CmdQueued)
+	if err != nil ||
+		noNumberOutcome != ocDone ||
+		!noNumberPlan.Save ||
+		noNumberPlan.Effect == nil ||
+		noNumberPlan.Effect.IntentStatus != store.EffectIntentOk ||
+		noNumberPlan.Effect.WechatContact != nil {
+		t.Fatalf("无号正证必须 ok 且不收编资产: plan=%+v outcome=%v err=%v",
+			noNumberPlan, noNumberOutcome, err)
+	}
+
 	testCases := []struct {
 		name   string
 		mutate func(*protocol.ChatAcceptWechatData, *protocol.ResultBody)
 	}{
+		{
+			// 两个取号字段必须同时出现或同时缺席：现有 schema rule 全部以
+			// whenField 取值为条件，表达不了"按字段是否存在"的配对约束，故
+			// 这道闸只能落在代码层，必须有回归。
+			name: "peer present without exchange source",
+			mutate: func(data *protocol.ChatAcceptWechatData, _ *protocol.ResultBody) {
+				data.ExchangeSourceKey = ""
+			},
+		},
+		{
+			name: "exchange source present without peer",
+			mutate: func(data *protocol.ChatAcceptWechatData, _ *protocol.ResultBody) {
+				data.PeerWechat = "   "
+			},
+		},
 		{
 			name: "conversation mismatch",
 			mutate: func(data *protocol.ChatAcceptWechatData, _ *protocol.ResultBody) {

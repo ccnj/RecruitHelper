@@ -296,6 +296,14 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 	}
 	switch settled.Status {
 	case store.CommunicationV4EventActionSent:
+		if action.EffectKind == store.CommunicationV4EventEffectAcceptWechat {
+			// 接受动作的正证一到手，我方就已知交换成功，而消息账本要等下一轮
+			// 对账才知道。登记档案，由本轮稍后的定向重对账补齐（立案 4.3）。
+			if a.wechatAcceptedProfiles == nil {
+				a.wechatAcceptedProfiles = make(map[string]struct{})
+			}
+			a.wechatAcceptedProfiles[action.ProfileID] = struct{}{}
+		}
 		return false, nil
 	case store.CommunicationV4EventActionManualRequired:
 		return true, nil

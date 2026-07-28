@@ -673,10 +673,16 @@ func (d *Dispatcher) realAcceptWechatResultPlan(
 		if err := json.Unmarshal(res.Data, &data); err != nil {
 			return store.ResultCommandMutation{}, err
 		}
+		// 成功正证是请求卡的可见后置状态，取号是可选加成（协议规格 §9.3）：
+		// 两个取号字段必须同时出现或同时缺席，缺席时动作照样 ok，只是本次不
+		// 收编资产，号留给 chat.readWechatExchangeOutcome 延迟收编。
+		collected := validLowerHex64(data.ExchangeSourceKey) &&
+			strings.TrimSpace(data.PeerWechat) != ""
+		absent := strings.TrimSpace(data.ExchangeSourceKey) == "" &&
+			strings.TrimSpace(data.PeerWechat) == ""
 		if data.ConversationRef != args.ConversationRef ||
 			data.RequestSourceKey != args.RequestSourceKey ||
-			!validLowerHex64(data.ExchangeSourceKey) ||
-			strings.TrimSpace(data.PeerWechat) == "" ||
+			!(collected || absent) ||
 			validateSingleEvidence(
 				res.Evidence,
 				string(protocol.AcceptWechatEvidenceTypeCandidateWechatRequestAcceptedObserved),
@@ -689,12 +695,14 @@ func (d *Dispatcher) realAcceptWechatResultPlan(
 		r.SuspectReason = ""
 		applyResultError(r, res)
 		plan.Effect = resultEffect(store.EffectIntentOk, "")
-		plan.Effect.WechatContact = &store.WechatContactResultMutation{
-			ConversationRef:   data.ConversationRef,
-			RequestSourceKey:  data.RequestSourceKey,
-			ExchangeSourceKey: data.ExchangeSourceKey,
-			PeerWechat:        data.PeerWechat,
-			ObservedAtMs:      data.ObservedAt,
+		if collected {
+			plan.Effect.WechatContact = &store.WechatContactResultMutation{
+				ConversationRef:   data.ConversationRef,
+				RequestSourceKey:  data.RequestSourceKey,
+				ExchangeSourceKey: data.ExchangeSourceKey,
+				PeerWechat:        data.PeerWechat,
+				ObservedAtMs:      data.ObservedAt,
+			}
 		}
 		if wasHumanResolved || wasSuspect {
 			*oc = ocSuspectCleared
