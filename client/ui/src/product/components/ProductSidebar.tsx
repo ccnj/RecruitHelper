@@ -27,7 +27,6 @@ interface ProductSidebarProps {
   version: string
   onNavigate: (page: ProductPage) => void
   onSearch: (value: string) => void
-  onOpenDiagnostics?: () => void
 }
 
 export function ProductSidebar({
@@ -40,7 +39,6 @@ export function ProductSidebar({
   version,
   onNavigate,
   onSearch,
-  onOpenDiagnostics,
 }: ProductSidebarProps) {
   return (
     <aside className="rh-sidebar">
@@ -86,12 +84,6 @@ export function ProductSidebar({
             value={searchValue}
           />
         </label>
-        {onOpenDiagnostics && (
-          <button className="rh-diagnostics-link" onClick={onOpenDiagnostics} type="button">
-            <ProductIcon name="code" size={15} />
-            开发者诊断
-          </button>
-        )}
         <div className="rh-sidebar-version">RecruitHelper v{version}</div>
       </div>
     </aside>

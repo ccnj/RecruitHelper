@@ -175,6 +175,16 @@ export function App() {
     window.addEventListener('keydown', toggleDiagnostics)
     return () => window.removeEventListener('keydown', toggleDiagnostics)
   }, [])
+
+  // 诊断台是深色仪表舱，产品端是浅色工作台；根节点标记让两套主题
+  // 各自成立，退出时必须还原，否则产品页会留在深色背景上。
+  useEffect(() => {
+    const root = document.documentElement
+    if (diagnosticsVisible) root.setAttribute('data-console', 'on')
+    else root.removeAttribute('data-console')
+    return () => root.removeAttribute('data-console')
+  }, [diagnosticsVisible])
+
   if (diagnosticsVisible) {
     return (
       <>
@@ -190,14 +200,13 @@ export function App() {
 
 function DiagnosticConsole() {
   const health = usePolling<Health>(api.health, 1800, 'health')
-  const hands = usePolling(api.handsHealth, 2200, 'hands')
+  const hands = usePolling(api.handsHealth, 1500, 'hands')
   const accounts = usePolling(api.accounts, 2400, 'accounts')
   const [selectedAccountKey, setSelectedAccountKey] = useState('')
   const [selectedConversationRef, setSelectedConversationRef] = useState('')
   const [activityTab, setActivityTab] = useState<'messages' | 'audits'>('messages')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
 
   const accountRows = accounts.data?.accounts ?? []
   const selectedAccount = accountRows.find((row) => accountIdentity(row) === selectedAccountKey) ?? null
@@ -272,42 +281,100 @@ function DiagnosticConsole() {
     : null
 
   return (
-    <div className="app-shell">
-      <header className="masthead">
-        <div className="brand-block">
-          <span className="eyebrow">RecruitHelper · 本地脑</span>
-          <h1>值班巡检台</h1>
-          <p>今天由脑决定何时看，手只负责如实读取。</p>
-        </div>
+    <div className="dc-shell">
+      <header className="dc-topbar">
         <ServiceSeal health={health.data} error={health.error} />
+        <HandsBar hands={hands.data?.hands ?? []} onRefresh={hands.refresh} />
+        <span className="dc-endpoint mono">{ADMIN_BASE}</span>
       </header>
 
       {notice && (
         <div className={`notice ${notice.kind}`} role="status" aria-live="polite">
-          <span>{notice.kind === 'ok' ? '已记入值班账' : '本次操作未完成'}</span>
           <strong>{notice.text}</strong>
           <button className="icon-button" onClick={() => setNotice(null)} aria-label="关闭提示">×</button>
         </div>
       )}
 
-      <div className="desk-layout">
-        <AccountRail
-          accounts={accountRows}
-          accountsError={accounts.error}
-          hands={hands.data?.hands ?? []}
-          selectedKey={selectedAccountKey}
-          busy={busy}
-          onSelect={setSelectedAccountKey}
-          onBind={(platform, handId, accountRef) => runMutation(
-            accountRef ? 'rebind' : 'bind',
-            accountRef ? '账号绑定已更新' : '当前平台账号已加入值班台',
-            () => api.bindAccount(platform, handId, accountRef),
-          )}
-        />
+      <Suspects />
 
-        <main className="workbench">
-          {selectedAccount ? (
-            <>
+      <div className="dc-split">
+        <Ledger />
+        <Frames />
+      </div>
+
+      <QuickActions
+        hands={hands.data?.hands ?? []}
+        busy={busy}
+        canProcessCurrent={Boolean(target) && Boolean(selectedAccount?.handOnline)}
+        onProcessCurrent={() => target && runMutation(
+          'process-current',
+          '已处理浏览器当前打开会话一次',
+          () => api.processCurrentConversationOnce(target),
+        )}
+      />
+
+      <Fold title="会话账与消息明细" hint={selectedAccount ? accountKey : '需先在下方选择账号'}>
+        {selectedAccount ? (
+          <div className="ledger-grid">
+            <ConversationLedger
+              rows={conversations.data?.conversations ?? []}
+              loading={conversations.loading}
+              error={conversations.error}
+              selectedRef={selectedConversationRef}
+              onSelect={(conversationRef) => {
+                setSelectedConversationRef(conversationRef)
+                setActivityTab('messages')
+              }}
+            />
+            <ActivityLedger
+              account={selectedAccount}
+              conversation={selectedConversation}
+              messages={messages.data?.messages ?? []}
+              audits={audits.data?.audits ?? []}
+              messagesError={messages.error}
+              auditsError={audits.error}
+              tab={activityTab}
+              busy={busy}
+              onTab={setActivityTab}
+              onTrack={() => selectedConversation && runMutation(
+                'track',
+                '该会话已纳入跟踪；现有消息只建立基线，不算作新消息',
+                () => api.trackConversation(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
+              )}
+              onSelectM5Trial={() => selectedConversation && runMutation(
+                'm5-trial',
+                '该档案已被明确选为 M5 简历补采试运行；巡检会沿正式路径执行一次',
+                () => api.selectM5Trial(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
+              )}
+              onSendChanged={() => {
+                conversations.refresh()
+                messages.refresh()
+                audits.refresh()
+              }}
+            />
+          </div>
+        ) : (
+          <EmptyWorkbench loading={accounts.loading} error={accounts.error} />
+        )}
+      </Fold>
+
+      <Fold title="账号绑定与巡检控制" hint={`${accountRows.length} 个账号`}>
+        <div className="desk-layout">
+          <AccountRail
+            accounts={accountRows}
+            accountsError={accounts.error}
+            hands={hands.data?.hands ?? []}
+            selectedKey={selectedAccountKey}
+            busy={busy}
+            onSelect={setSelectedAccountKey}
+            onBind={(platform, handId, accountRef) => runMutation(
+              accountRef ? 'rebind' : 'bind',
+              accountRef ? '账号绑定已更新' : '当前平台账号已加入值班台',
+              () => api.bindAccount(platform, handId, accountRef),
+            )}
+          />
+          <main className="workbench">
+            {selectedAccount ? (
               <AccountOverview
                 key={accountKey}
                 account={selectedAccount}
@@ -316,103 +383,60 @@ function DiagnosticConsole() {
                 onStop={() => target && runMutation('stop', '今天的自动巡检已停止', () => api.stopAccount(target))}
                 onPause={() => target && runMutation('pause', '已立即暂停，等待人工恢复', () => api.pauseAccount(target))}
                 onRun={() => target && runMutation('run', '已请求立即巡检一轮', () => api.runAccount(target))}
-                onProcessCurrent={() => target && runMutation(
-                  'process-current',
-                  '已处理浏览器当前打开会话一次',
-                  () => api.processCurrentConversationOnce(target),
-                )}
               />
+            ) : (
+              <EmptyWorkbench loading={accounts.loading} error={accounts.error} />
+            )}
+          </main>
+        </div>
+      </Fold>
 
-              <M5AIConfiguration />
-
-              <div className="ledger-grid">
-                <ConversationLedger
-                  rows={conversations.data?.conversations ?? []}
-                  loading={conversations.loading}
-                  error={conversations.error}
-                  selectedRef={selectedConversationRef}
-                  onSelect={(conversationRef) => {
-                    setSelectedConversationRef(conversationRef)
-                    setActivityTab('messages')
-                  }}
-                />
-                <ActivityLedger
-                  account={selectedAccount}
-                  conversation={selectedConversation}
-                  messages={messages.data?.messages ?? []}
-                  audits={audits.data?.audits ?? []}
-                  messagesError={messages.error}
-                  auditsError={audits.error}
-                  tab={activityTab}
-                  busy={busy}
-                  onTab={setActivityTab}
-                  onTrack={() => selectedConversation && runMutation(
-                    'track',
-                    '该会话已纳入跟踪；现有消息只建立基线，不算作新消息',
-                    () => api.trackConversation(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
-                  )}
-                  onSelectM5Trial={() => selectedConversation && runMutation(
-                    'm5-trial',
-                    '该档案已被明确选为 M5 简历补采试运行；巡检会沿正式路径执行一次',
-                    () => api.selectM5Trial(selectedAccount.platform, selectedAccount.accountRef, selectedConversation.conversationRef),
-                  )}
-                  onSendChanged={() => {
-                    conversations.refresh()
-                    messages.refresh()
-                    audits.refresh()
-                  }}
-                />
-              </div>
-            </>
-          ) : (
-            <EmptyWorkbench loading={accounts.loading} error={accounts.error} />
-          )}
-        </main>
-      </div>
-
-      <details
-        className="diagnostics"
-        onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
-      >
-        <summary>
-          <span>协议与运行诊断</span>
-          <small>M1 工具 · 手状态、命令账本、suspect 与实时帧</small>
-        </summary>
-        {diagnosticsOpen && <Diagnostics />}
-      </details>
-
-      <footer className="footer-note">
-        <span>脑服务地址 {ADMIN_BASE}</span>
-        <span>所有资料只保存在本机</span>
-      </footer>
+      <Fold title="模型连接与职位同步">
+        <M5AIConfiguration />
+      </Fold>
     </div>
+  )
+}
+
+function Fold({ title, hint, children }: {
+  title: string
+  hint?: string
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <details className="dc-fold" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <span>{title}</span>
+        {hint && <small className="mono">{hint}</small>}
+      </summary>
+      {open && <div className="dc-fold-body">{children}</div>}
+    </details>
   )
 }
 
 function ServiceSeal({ health, error }: { health: Health | undefined; error: string | null }) {
   if (error) {
     return (
-      <div className="service-seal is-offline">
+      <div className="dc-seal is-offline" title={error}>
         <span className="signal-dot" />
-        <div><strong>脑未连接</strong><small>检查本地服务是否启动</small></div>
+        <strong>脑未连接</strong>
       </div>
     )
   }
   if (!health) {
     return (
-      <div className="service-seal is-waiting">
+      <div className="dc-seal is-waiting">
         <span className="signal-dot" />
-        <div><strong>正在接通</strong><small>读取本地值班账</small></div>
+        <strong>连接中</strong>
       </div>
     )
   }
   return (
-    <div className="service-seal is-online">
+    <div className="dc-seal is-online">
       <span className="signal-dot" />
-      <div>
-        <strong>脑在线 · {health.activeHands.length} 只手</strong>
-        <small>协议 v{health.proto} · 本地自动登记</small>
-      </div>
+      <strong>脑在线</strong>
+      <span className="mono dim">proto v{health.proto}</span>
     </div>
   )
 }
@@ -447,8 +471,7 @@ function AccountRail({
   return (
     <aside className="account-rail" aria-label="招聘账号">
       <div className="rail-heading">
-        <span className="section-index">账号轨</span>
-        <strong>{accounts.length} 个值班账号</strong>
+        <strong>已绑定账号 {accounts.length}</strong>
       </div>
 
       <div className="account-list">
@@ -515,7 +538,7 @@ function AccountRail({
 }
 
 function AccountOverview({
-  account, busy, onEnable, onStop, onPause, onRun, onProcessCurrent,
+  account, busy, onEnable, onStop, onPause, onRun,
 }: {
   account: AccountView
   busy: string
@@ -523,25 +546,29 @@ function AccountOverview({
   onStop: () => void
   onPause: () => void
   onRun: () => void
-  onProcessCurrent: () => void
 }) {
   const latest = account.latestRound
   const isBusy = busy !== ''
   const shownIdentityState = effectiveIdentityState(account)
+  const quietUntil = toDate(account.manualQuietUntil)
+  const quietActive = Boolean(quietUntil && quietUntil.getTime() > Date.now())
   return (
     <section className="shift-sheet" aria-labelledby="shift-title">
       <div className="sheet-heading">
-        <div>
-          <span className="section-index">今日值班单</span>
-          <h2 id="shift-title">{account.platform} 账号 <span className="mono">{shortRef(account.accountRef, 11)}</span></h2>
-        </div>
+        <h2 id="shift-title">{account.platform} <span className="mono">{shortRef(account.accountRef, 11)}</span></h2>
         <div className="identity-mark">
           <span className={account.identityCurrent ? 'verified' : 'attention'} />
           {identityLabel(shownIdentityState)}
         </div>
       </div>
 
-      <PatrolTrack account={account} />
+      <div className="dc-account-facts">
+        <span>今日开启 <strong>{account.enabledToday ? account.enabledDate || '已开启' : '未开启'}</strong></span>
+        <span>上轮 <strong>{clock(account.lastPatrolAt, '尚无')}</strong></span>
+        <span>下轮 <strong>{account.enabledToday && !account.pausedReason ? clock(account.nextPatrolAt) : '未安排'}</strong></span>
+        <span>静默 <strong className={quietActive ? 'ink-amber' : ''}>{quietActive ? `至 ${clock(account.manualQuietUntil)}` : '无'}</strong></span>
+        {account.pausedReason && <span>暂停 <strong className="ink-amber">{pauseReasonLabel(account.pausedReason)}</strong></span>}
+      </div>
 
       <div className="shift-controls" aria-label="巡检控制">
         <button className="primary-button" disabled={isBusy || account.enabledToday || !account.handOnline} onClick={onEnable}>
@@ -549,12 +576,6 @@ function AccountOverview({
         </button>
         <button disabled={isBusy || !account.enabledToday || !account.handOnline} onClick={onRun}>
           {busy === 'run' ? '已排入…' : '立即巡一轮'}
-        </button>
-        <button
-          disabled={isBusy || !account.enabledToday || !account.handOnline}
-          onClick={onProcessCurrent}
-        >
-          {busy === 'process-current' ? '正在处理当前会话…' : '处理当前会话'}
         </button>
         <button disabled={isBusy || !account.enabledToday} onClick={onPause}>
           {busy === 'pause' ? '正在暂停…' : '立即暂停'}
@@ -608,13 +629,11 @@ function M5AIConfiguration() {
   const [contextsError, setContextsError] = useState('')
   const [bundleText, setBundleText] = useState('')
   const [selectedRevision, setSelectedRevision] = useState('')
-  const [contextBusy, setContextBusy] = useState<'activate' | 'sync' | 'import' | 'bind' | ''>('')
+  const [contextBusy, setContextBusy] = useState<'sync' | 'import' | 'bind' | ''>('')
   const [contextNotice, setContextNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
   const [jobSource, setJobSource] = useState<JobConfigSourceView | null>(null)
   const [jobSourceLoading, setJobSourceLoading] = useState(true)
   const [jobSourceError, setJobSourceError] = useState('')
-  const [jobSourceBaseURL, setJobSourceBaseURL] = useState('')
-  const [jobSourceInviteCode, setJobSourceInviteCode] = useState('')
   const [providerConfig, setProviderConfig] = useState<M5ProviderConfigView | null>(null)
   const [providerLoading, setProviderLoading] = useState(true)
   const [providerError, setProviderError] = useState('')
@@ -668,30 +687,6 @@ function M5AIConfiguration() {
     void loadJobSource()
   }, [loadContexts, loadJobSource, loadProvider])
 
-  const activateJobSource = async () => {
-    setContextBusy('activate')
-    setContextNotice(null)
-    try {
-      const result = await api.activateJobConfigSource({
-        base_url: jobSourceBaseURL.trim(), invite_code: jobSourceInviteCode.trim(),
-      })
-      const synced = Array.isArray(result.contexts) ? result.contexts : []
-      if (synced[0]) setSelectedRevision(synced[0].revisionHash)
-      setJobSourceBaseURL('')
-      setJobSourceInviteCode('')
-      setJobSourceError('')
-      setContextNotice(result.synced
-        ? { kind: 'ok', text: '旧后台已正式激活，当前职位已同步为本地不可变版本。' }
-        : { kind: 'bad', text: result.syncError || '激活已成功，但当前职位同步失败；可直接重试同步。' })
-      await loadJobSource()
-      await loadContexts()
-    } catch (reason) {
-      setContextNotice({ kind: 'bad', text: errorText(reason) })
-    } finally {
-      setContextBusy('')
-    }
-  }
-
   const syncCurrentJob = async () => {
     setContextBusy('sync')
     setContextNotice(null)
@@ -726,7 +721,7 @@ function M5AIConfiguration() {
     try {
       await api.importM5Contexts(bundle)
       setBundleText('')
-      setContextNotice({ kind: 'ok', text: '职位资料已导入；请在右侧明确选择要绑定的版本。' })
+      setContextNotice({ kind: 'ok', text: '职位资料已导入；请在上方列表明确选择要绑定的版本。' })
       await loadContexts()
     } catch (reason) {
       setContextNotice({ kind: 'bad', text: errorText(reason) })
@@ -773,123 +768,39 @@ function M5AIConfiguration() {
   const providerReady = providerConfig?.baseUrlConfigured === true && providerConfig.keyConfigured === true
   const sourceReady = jobSource?.configured === true
     && jobSource.machineIdentityReady === true && jobSource.machineMatch === true
-  const activationInputsReady = (jobSource?.baseUrlConfigured || jobSourceBaseURL.trim() !== '')
-    && jobSourceInviteCode.trim() !== ''
-
   return (
     <section className="m5-ai-panel" aria-labelledby="m5-ai-title">
       <div className="m5-ai-heading">
-        <div>
-          <span className="section-index">M5 建议层</span>
-          <h2 id="m5-ai-title">M5 AI 配置</h2>
-        </div>
+        <h2 id="m5-ai-title">模型连接与职位同步</h2>
         <div className={`m5-ai-readiness ${providerReady ? 'is-ready' : ''}`}>
           <span />
           {providerLoading ? '正在核对模型配置' : providerReady ? '模型连接材料已齐' : '模型连接尚未配齐'}
         </div>
       </div>
 
-      <div className="m5-ai-wire" aria-label="AI 配置步骤">
-        <section className="m5-ai-step" aria-labelledby="m5-import-title">
-          <header><span>01</span><div><strong id="m5-import-title">同步职位资料</strong><small>旧后台当前职位 · 不继承旧模型密钥</small></div></header>
+      <div className="m5-ai-wire">
+        <section className="m5-ai-step" aria-labelledby="m5-source-title">
+          <header><strong id="m5-source-title">职位同步</strong><small>激活与首次绑定在产品端「激活这台电脑」完成，此处只重新同步</small></header>
           <div className="m5-provider-state m5-source-state">
             <span>后台地址 <strong>{jobSource?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
             <span>本机身份 <strong>{jobSource?.machineIdentityReady ? '可用' : '不可用'}</strong></span>
             <span>正式授权 <strong>{sourceReady ? jobSource?.customerName || '已激活' : '未激活或不匹配'}</strong></span>
           </div>
-          <label htmlFor="job-source-base-url">旧后台地址</label>
-          <input
-            id="job-source-base-url"
-            type="url"
-            value={jobSourceBaseURL}
-            onChange={(event) => setJobSourceBaseURL(event.target.value)}
-            autoComplete="off"
-            placeholder={jobSource?.baseUrlConfigured ? '留空则保留现有地址' : 'http://…'}
-          />
-          <label htmlFor="job-source-invite-code">后台激活码</label>
-          <input
-            id="job-source-invite-code"
-            type="password"
-            value={jobSourceInviteCode}
-            onChange={(event) => setJobSourceInviteCode(event.target.value)}
-            autoComplete="new-password"
-            placeholder="输入一次性激活码"
-          />
           {jobSourceError && <p className="m5-ai-message bad" role="alert">{jobSourceError}</p>}
           <button
             type="button"
-            disabled={contextBusy !== '' || jobSourceLoading || !activationInputsReady}
-            onClick={() => void activateJobSource()}
+            disabled={contextBusy !== '' || jobSourceLoading || !sourceReady}
+            onClick={() => void syncCurrentJob()}
           >
-            {contextBusy === 'activate' ? '正在激活并同步…' : sourceReady ? '重新激活并同步' : '激活并同步当前职位'}
+            {contextBusy === 'sync' ? '正在同步…' : '仅重新同步当前职位'}
           </button>
-          {sourceReady && (
-            <button
-              type="button"
-              disabled={contextBusy !== '' || jobSourceLoading}
-              onClick={() => void syncCurrentJob()}
-            >
-              {contextBusy === 'sync' ? '正在同步…' : '仅重新同步当前职位'}
-            </button>
+          {!sourceReady && !jobSourceLoading && (
+            <p className="dc-note">本机尚未激活或身份不匹配，先在产品端完成激活。</p>
           )}
-          <details className="m5-manual-import">
-            <summary>开发期手工导入 JSON</summary>
-            <textarea
-              value={bundleText}
-              onChange={(event) => setBundleText(event.target.value)}
-              rows={5}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="粘贴完整 job-config JSON"
-              aria-label="旧 job-config JSON"
-            />
-            <button
-              type="button"
-              disabled={contextBusy !== '' || bundleText.trim() === ''}
-              onClick={() => void importBundle()}
-            >
-              {contextBusy === 'import' ? '正在导入…' : '手工导入'}
-            </button>
-          </details>
-        </section>
-
-        <section className="m5-ai-step" aria-labelledby="m5-bind-title">
-          <header><span>02</span><div><strong id="m5-bind-title">明确绑定版本</strong><small>只绑定到当前 active 试运行档案</small></div></header>
-          <div className="m5-context-list" role="radiogroup" aria-label="可用职位资料版本">
-            {contextsLoading && <p className="m5-ai-empty">正在读取已导入资料…</p>}
-            {!contextsLoading && contexts.length === 0 && !contextsError && (
-              <p className="m5-ai-empty">还没有可用资料。先完成左侧导入。</p>
-            )}
-            {contexts.map((context) => (
-              <label key={context.revisionHash} className={`m5-context-option ${selectedRevision === context.revisionHash ? 'is-selected' : ''}`}>
-                <input
-                  type="radio"
-                  name="m5-context"
-                  value={context.revisionHash}
-                  checked={selectedRevision === context.revisionHash}
-                  onChange={() => setSelectedRevision(context.revisionHash)}
-                />
-                <span>
-                  <strong>{context.displayName}</strong>
-                  <small>{context.environment || '环境未标注'} · {context.documentCount} 份文档</small>
-                  <code>context {context.contextId}</code>
-                  <code>revision {context.revisionHash}</code>
-                </span>
-              </label>
-            ))}
-          </div>
-          {contextsError && <p className="m5-ai-message bad" role="alert">{contextsError}</p>}
-          <button
-            type="button"
-            disabled={contextBusy !== '' || selectedRevision === ''}
-            onClick={() => void bindContext()}
-          >
-            {contextBusy === 'bind' ? '正在绑定…' : '绑定所选版本'}
-          </button>
         </section>
 
         <section className="m5-ai-step" aria-labelledby="m5-provider-title">
-          <header><span>03</span><div><strong id="m5-provider-title">配置模型连接</strong><small>DeepSeek V4 Pro · P 档</small></div></header>
+          <header><strong id="m5-provider-title">模型连接</strong><small>DeepSeek V4 Pro · P 档 · 唯一配置入口</small></header>
           <div className="m5-provider-state">
             <span>服务地址 <strong>{providerConfig?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
             <span>API Key <strong>{providerConfig?.keyConfigured ? '已配置' : '未配置'}</strong></span>
@@ -925,6 +836,65 @@ function M5AIConfiguration() {
           </button>
         </section>
       </div>
+
+      <details className="dc-legacy">
+        <summary>
+          <span>M5 遗留 · 半退役</span>
+          <small>试运行档案绑定与手工导入。processM5Trial 在生产代码里已无调用者，删除前需专门核实</small>
+        </summary>
+        <div className="dc-legacy-body">
+          <div className="m5-context-list" role="radiogroup" aria-label="可用职位资料版本">
+            {contextsLoading && <p className="m5-ai-empty">正在读取已导入资料…</p>}
+            {!contextsLoading && contexts.length === 0 && !contextsError && (
+              <p className="m5-ai-empty">还没有可用资料。</p>
+            )}
+            {contexts.map((context) => (
+              <label key={context.revisionHash} className={`m5-context-option ${selectedRevision === context.revisionHash ? 'is-selected' : ''}`}>
+                <input
+                  type="radio"
+                  name="m5-context"
+                  value={context.revisionHash}
+                  checked={selectedRevision === context.revisionHash}
+                  onChange={() => setSelectedRevision(context.revisionHash)}
+                />
+                <span>
+                  <strong>{context.displayName}</strong>
+                  <small>{context.environment || '环境未标注'} · {context.documentCount} 份文档</small>
+                  <code>context {context.contextId}</code>
+                  <code>revision {context.revisionHash}</code>
+                </span>
+              </label>
+            ))}
+          </div>
+          {contextsError && <p className="m5-ai-message bad" role="alert">{contextsError}</p>}
+          <button
+            type="button"
+            disabled={contextBusy !== '' || selectedRevision === ''}
+            onClick={() => void bindContext()}
+          >
+            {contextBusy === 'bind' ? '正在绑定…' : '绑定所选版本到 active 试运行档案'}
+          </button>
+          <details className="m5-manual-import">
+            <summary>开发期手工导入 JSON</summary>
+            <textarea
+              value={bundleText}
+              onChange={(event) => setBundleText(event.target.value)}
+              rows={5}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="粘贴完整 job-config JSON"
+              aria-label="旧 job-config JSON"
+            />
+            <button
+              type="button"
+              disabled={contextBusy !== '' || bundleText.trim() === ''}
+              onClick={() => void importBundle()}
+            >
+              {contextBusy === 'import' ? '正在导入…' : '手工导入'}
+            </button>
+          </details>
+        </div>
+      </details>
 
       {(contextNotice || providerNotice) && (
         <div className="m5-ai-notices" aria-live="polite">
@@ -975,10 +945,7 @@ function CandidateIntake({ account }: { account: AccountView }) {
   return (
     <section className="candidate-intake" aria-labelledby="candidate-intake-title">
       <div className="candidate-intake-heading">
-        <div>
-          <span className="section-index">主动建联</span>
-          <h3 id="candidate-intake-title">人工指定页面中的候选人</h3>
-        </div>
+        <h3 id="candidate-intake-title">人工指定页面中的候选人</h3>
         <button
           type="button"
           disabled={!readable}
@@ -1222,32 +1189,6 @@ function GreetingComposer({ account, profileId }: { account: AccountView; profil
   )
 }
 
-function PatrolTrack({ account }: { account: AccountView }) {
-  const quietUntil = toDate(account.manualQuietUntil)
-  const quietActive = Boolean(quietUntil && quietUntil.getTime() > Date.now())
-  const nodes = [
-    { label: '开启', value: account.enabledToday || account.pausedReason ? (account.enabledDate || '今天') : '未开启', state: account.enabledToday || account.pausedReason ? 'done' : 'idle' },
-    { label: '上轮', value: clock(account.lastPatrolAt, '尚无'), state: account.lastPatrolAt ? 'done' : 'idle' },
-    { label: '静默', value: quietActive ? `至 ${clock(account.manualQuietUntil)}` : '无静默', state: quietActive ? 'quiet' : 'idle' },
-    { label: '下轮', value: account.enabledToday && !account.pausedReason ? clock(account.nextPatrolAt) : '未安排', state: account.enabledToday && !account.pausedReason ? 'next' : 'idle' },
-    { label: '午夜', value: '自动收班', state: 'terminal' },
-  ]
-  return (
-    <div className="patrol-track" aria-label="今日巡检轨">
-      <div className="track-title"><span>今日巡检轨</span><small>{account.pausedReason ? `暂停原因：${pauseReasonLabel(account.pausedReason)}` : '节奏由脑统一安排'}</small></div>
-      <ol>
-        {nodes.map((node) => (
-          <li key={node.label} className={node.state}>
-            <span className="track-node" />
-            <strong>{node.label}</strong>
-            <small>{node.value}</small>
-          </li>
-        ))}
-      </ol>
-    </div>
-  )
-}
-
 function ConversationLedger({ rows, loading, error, selectedRef, onSelect }: {
   rows: ConversationView[]
   loading: boolean
@@ -1258,7 +1199,7 @@ function ConversationLedger({ rows, loading, error, selectedRef, onSelect }: {
   return (
     <section className="ledger-sheet conversations" aria-labelledby="conversation-title">
       <div className="ledger-heading">
-        <div><span className="section-index">会话账</span><h2 id="conversation-title">最近对话</h2></div>
+        <h2 id="conversation-title">最近对话</h2>
         <span className="count-label">{rows.length} 条</span>
       </div>
       <div className="conversation-list">
@@ -1309,10 +1250,7 @@ function ActivityLedger({
   return (
     <section className="ledger-sheet activity" aria-labelledby="activity-title">
       <div className="ledger-heading activity-heading">
-        <div>
-          <span className="section-index">明细账</span>
-          <h2 id="activity-title">{conversation?.peerDisplayName || '账号记录'}</h2>
-        </div>
+        <h2 id="activity-title">{conversation?.peerDisplayName || '账号记录'}</h2>
         {conversation && !isTracked(conversation.trackingState) && (
           <button className="compact-button" disabled={busy !== ''} onClick={onTrack}>
             {busy === 'track' ? '正在纳入…' : '纳入跟踪'}
@@ -1599,34 +1537,17 @@ function InlineError({ text }: { text: string }) {
 function EmptyWorkbench({ loading, error }: { loading: boolean; error: string | null }) {
   return (
     <section className="empty-workbench">
-      <span className="empty-rule" />
-      <div>
-        <span className="section-index">今日值班单</span>
-        <h2>{loading ? '正在读取本地值班账…' : error ? '值班账暂时不可用' : '先绑定一个已登录的平台账号'}</h2>
-        <p>{error || '在左侧选择一只在线的手。脑会核验当前身份并建立账号绑定，不会保存登录凭据。'}</p>
-      </div>
+      <h2>{loading ? '正在读取…' : error ? '账号数据暂时不可用' : '先绑定一个已登录的平台账号'}</h2>
+      <p>{error || '在左侧选择一只在线的手。脑会核验当前身份并建立账号绑定，不会保存登录凭据。'}</p>
     </section>
   )
 }
 
-function Diagnostics() {
-  return (
-    <div className="diagnostic-grid">
-      <Hands />
-      <Commands />
-      <Suspects />
-      <Ledger />
-      <Frames />
-    </div>
-  )
+function DiagnosticCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return <section className="diagnostic-card"><h3>{title}</h3>{children}</section>
 }
 
-function DiagnosticCard({ title, children, wide }: { title: string; children: React.ReactNode; wide?: boolean }) {
-  return <section className={`diagnostic-card${wide ? ' wide' : ''}`}><h3>{title}</h3>{children}</section>
-}
-
-function Hands() {
-  const health = usePolling(api.handsHealth, 1500, 'diagnostic-hands')
+function HandsBar({ hands, onRefresh }: { hands: HandHealth[]; onRefresh: () => void }) {
   const [reloading, setReloading] = useState('')
   const [message, setMessage] = useState('')
   const reload = async (handId: string) => {
@@ -1635,7 +1556,7 @@ function Hands() {
     try {
       const result = await api.reloadHand(handId)
       setMessage(`新版本已就绪 · boot ${shortRef(result.bootId, 10)} · 扩展 ${result.extensionVersion || '版本未知'}`)
-      health.refresh()
+      onRefresh()
     } catch (reason) {
       setMessage(errorText(reason))
     } finally {
@@ -1643,39 +1564,38 @@ function Hands() {
     }
   }
   return (
-    <DiagnosticCard title="手（在线状态）">
-      <table>
-        <thead><tr><th>handId</th><th>状态</th><th>构建</th><th>心跳</th><th>维护</th></tr></thead>
-        <tbody>
-          {(health.data?.hands ?? []).map((hand: HandHealth) => (
-            <tr key={hand.handId}>
-              <td>{hand.handId}</td>
-              <td className={hand.online ? 'ok' : 'dim'}>{hand.online ? '在线' : '离线'}</td>
-              <td className={!hand.contractMatch ? 'warn' : hand.health === 'stalled' ? 'bad' : ''}>
-                {hand.contractMatch ? hand.extensionVersion || '已匹配' : '契约不匹配'}
-              </td>
-              <td className="dim">{hand.online ? `${Math.round(hand.lastHbAgoMs / 1000)} 秒前` : '—'}</td>
-              <td>
-                <button
-                  disabled={!hand.online || reloading !== '' || !hand.caps.includes('debug.reload@1')}
-                  onClick={() => void reload(hand.handId)}
-                >
-                  {reloading === hand.handId ? '重载中…' : '重载并确认'}
-                </button>
-              </td>
-            </tr>
-          ))}
-          {health.data && health.data.hands.length === 0 && <tr><td colSpan={5} className="dim">暂无手</td></tr>}
-        </tbody>
-      </table>
-      <div className="hint">{message || '硬切换前先暂停派发并等待命令收束；首次启用本能力仍需人工重载一次。'}</div>
-    </DiagnosticCard>
+    <div className="dc-hands">
+      {hands.length === 0 && <span className="dim">暂无手</span>}
+      {hands.map((hand) => (
+        <div key={hand.handId} className={`dc-hand ${hand.online ? 'is-online' : 'is-offline'}`}>
+          <span className="signal-dot" />
+          <span className="mono">{shortRef(hand.handId, 10)}</span>
+          <span className={!hand.contractMatch ? 'warn' : hand.health === 'stalled' ? 'bad' : 'dim'}>
+            {hand.contractMatch ? hand.extensionVersion || '契约匹配' : '契约不匹配'}
+          </span>
+          <span className="dim mono">{hand.online ? `${Math.round(hand.lastHbAgoMs / 1000)}s` : '离线'}</span>
+          <button
+            className="compact-button"
+            disabled={!hand.online || reloading !== '' || !hand.caps.includes('debug.reload@1')}
+            onClick={() => void reload(hand.handId)}
+            title="重载并确认：换代插件后必须在安全窗口内执行"
+          >
+            {reloading === hand.handId ? '重载中…' : '重载'}
+          </button>
+        </div>
+      ))}
+      {message && <span className="dc-hand-msg dim">{message}</span>}
+    </div>
   )
 }
 
-function Commands() {
-  const health = usePolling(api.handsHealth, 2000, 'diagnostic-command-hands')
-  const online = (health.data?.hands ?? []).filter((hand) => hand.online)
+function QuickActions({ hands, busy, canProcessCurrent, onProcessCurrent }: {
+  hands: HandHealth[]
+  busy: string
+  canProcessCurrent: boolean
+  onProcessCurrent: () => void
+}) {
+  const online = hands.filter((hand) => hand.online)
   const [handId, setHandId] = useState('')
   const [outcome, setOutcome] = useState('ok')
   const [last, setLast] = useState('')
@@ -1688,28 +1608,34 @@ function Commands() {
     } catch (reason) { setLast(errorText(reason)) }
   }
   return (
-    <DiagnosticCard title="派发命令（测试）">
-      <div className="row">
-        <label>目标手</label>
-        <select value={target} onChange={(event) => setHandId(event.target.value)}>
-          {online.length === 0 && <option value="">（无在线手）</option>}
-          {online.map((hand) => <option key={hand.handId} value={hand.handId}>{hand.handId}</option>)}
-        </select>
-      </div>
-      <div className="button-row">
-        <button onClick={() => send('debug.ping', { echo: 'hi' })}>debug.ping</button>
-        <button onClick={() => send('debug.switchWindow', {})}>debug.switchWindow</button>
-      </div>
-      <div className="row">
-        <button onClick={() => send('debug.slowEcho', { ms: 500, outcome })}>debug.slowEcho</button>
-        <select value={outcome} onChange={(event) => setOutcome(event.target.value)}>
-          <option value="ok">ok</option>
-          <option value="failed">failed（possible → suspect）</option>
-          <option value="silent">silent（超时 → suspect）</option>
-        </select>
-      </div>
-      <div className="hint mono">{last}</div>
-    </DiagnosticCard>
+    <section className="dc-actions" aria-label="快捷动作">
+      <button
+        className="primary-button"
+        disabled={!canProcessCurrent || busy !== ''}
+        onClick={onProcessCurrent}
+        title="真人先在平台打开目标会话，脑只处理这一个"
+      >
+        {busy === 'process-current' ? '正在处理当前会话…' : '处理当前会话'}
+      </button>
+      <span className="dc-actions-sep" />
+      <select
+        value={target}
+        aria-label="目标手"
+        onChange={(event) => setHandId(event.target.value)}
+      >
+        {online.length === 0 && <option value="">（无在线手）</option>}
+        {online.map((hand) => <option key={hand.handId} value={hand.handId}>{shortRef(hand.handId, 10)}</option>)}
+      </select>
+      <button onClick={() => send('debug.ping', { echo: 'hi' })}>ping</button>
+      <button onClick={() => send('debug.switchWindow', {})}>switchWindow</button>
+      <button onClick={() => send('debug.slowEcho', { ms: 500, outcome })}>slowEcho</button>
+      <select value={outcome} aria-label="slowEcho 结果" onChange={(event) => setOutcome(event.target.value)}>
+        <option value="ok">ok</option>
+        <option value="failed">failed → suspect</option>
+        <option value="silent">silent → suspect</option>
+      </select>
+      <span className="hint mono">{last}</span>
+    </section>
   )
 }
 
@@ -1724,44 +1650,57 @@ function Suspects() {
     } catch (reason) { setMessage(errorText(reason)) }
   }
   const rows = suspects.data?.suspects ?? []
+  if (rows.length === 0) {
+    return (
+      <div className="dc-suspect-clear">
+        <span>suspect 队列为空</span>
+        {message && <span className="dim">{message}</span>}
+      </div>
+    )
+  }
   return (
-    <DiagnosticCard title={`suspect 队列（转人工）${rows.length ? ` · ${rows.length}` : ''}`}>
-      {rows.length === 0 ? <p className="dim">无 suspect</p> : (
-        <ul className="diagnostic-list">
-          {rows.map((item: Suspect) => (
-            <li key={item.msgId}>
-              <span>{item.name}</span><span className="dim">{item.reason}</span>
-              <span className="dim">
-                已验证 {item.verificationAttempts} 轮
-                {!item.reviewReady && item.reviewAfter ? ` · 最早 ${dateTime(item.reviewAfter)} 可裁决` : ''}
-              </span>
-              <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedOk')}>确认已发生</button>
-              <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedFailed')}>确认未发生</button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="hint">{message}</div>
-    </DiagnosticCard>
+    <section className="dc-suspects" aria-label="suspect 队列">
+      <h3>suspect 队列 · 待人工裁决 {rows.length}</h3>
+      <ul className="diagnostic-list">
+        {rows.map((item: Suspect) => (
+          <li key={item.msgId}>
+            <span>{item.name}</span><span className="dim">{item.reason}</span>
+            <span className="dim">
+              已验证 {item.verificationAttempts} 轮
+              {!item.reviewReady && item.reviewAfter ? ` · 最早 ${dateTime(item.reviewAfter)} 可裁决` : ''}
+            </span>
+            <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedOk')}>确认已发生</button>
+            <button disabled={!item.reviewReady} onClick={() => verdict(item.msgId, 'resolvedFailed')}>确认未发生</button>
+          </li>
+        ))}
+      </ul>
+      {message && <div className="hint">{message}</div>}
+    </section>
   )
 }
 
 function Ledger() {
   const ledger = usePolling(api.ledger, 1200, 'diagnostic-ledger')
   const statusClass = (status: string) => status === 'ok' ? 'ok' : status === 'suspect' ? 'bad' : ['failed', 'void', 'rejected', 'expired'].includes(status) ? 'warn' : 'dim'
+  const rows = ledger.data?.ledger ?? []
   return (
-    <DiagnosticCard title="命令账本" wide>
-      <table>
-        <thead><tr><th>msgId</th><th>原语</th><th>类</th><th>状态</th><th>试</th></tr></thead>
-        <tbody>
-          {(ledger.data?.ledger ?? []).slice(0, 15).map((row: LedgerRow) => (
-            <tr key={row.msgId}>
-              <td className="mono dim">{row.msgId.slice(0, 14)}…</td><td>{row.name}</td><td className="dim">{row.class}</td>
-              <td className={statusClass(row.status)}>{row.status}{row.errorCode ? ` (${row.errorCode})` : ''}</td><td className="dim">{row.attempt}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <DiagnosticCard title="命令账本">
+      <div className="dc-ledger-scroll">
+        <table>
+          <thead><tr><th>msgId</th><th>原语</th><th>类</th><th>状态</th><th>试</th></tr></thead>
+          <tbody>
+            {rows.slice(0, 15).map((row: LedgerRow) => (
+              <tr key={row.msgId}>
+                <td className="mono dim">{row.msgId.slice(0, 14)}…</td><td>{row.name}</td><td className="dim">{row.class}</td>
+                <td className={statusClass(row.status)}>{row.status}{row.errorCode ? ` (${row.errorCode})` : ''}</td><td className="dim">{row.attempt}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td className="dim" colSpan={5}>{ledger.error ? `读取失败 · ${ledger.error}` : '暂无命令记录'}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </DiagnosticCard>
   )
 }
@@ -1781,7 +1720,7 @@ function Frames() {
   }, [onEvent])
   useEffect(() => { boxRef.current?.scrollTo(0, boxRef.current.scrollHeight) }, [frames])
   return (
-    <DiagnosticCard title="协议帧观测台（实时）" wide>
+    <DiagnosticCard title="协议帧观测台（实时）">
       <div className="frames mono" ref={boxRef}>
         {frames.map((frame) => (
           <div key={frame.seq} className="frame-line">
