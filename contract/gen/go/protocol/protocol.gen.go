@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:06be3ada3aa8c6d58384553c48779554d720bac2e84edded4786c249b38538a0"
+	ContractHash       = "sha256:62bc3b2d9a0c26cc308738d0a9fa060b3d4fbd779e9f6eb2d32481bf96cb10c6"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -791,6 +791,7 @@ const (
 	PrimChatSendWechatInvite              = "chat.sendWechatInvite"
 	PrimDebugInspectSendSurface           = "debug.inspectSendSurface"
 	PrimDebugPing                         = "debug.ping"
+	PrimDebugProbeInterviewEditor         = "debug.probeInterviewEditor"
 	PrimDebugReload                       = "debug.reload"
 	PrimDebugSlowEcho                     = "debug.slowEcho"
 	PrimDebugSwitchWindow                 = "debug.switchWindow"
@@ -840,6 +841,7 @@ var Primitives = map[string]PrimitiveMeta{
 	PrimChatSendWechatInvite:              {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 60000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendWechatInviteArgs", DataSchema: "ChatSendWechatInviteData", GuardsSchema: "ChatSendMessageGuards", EvidenceSchema: "ChatSendWechatInviteEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"}, VerificationPrimitive: "chat.readThread", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
 	PrimDebugInspectSendSurface:           {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugInspectSendSurfaceArgs", DataSchema: "DebugInspectSendSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugPing:                         {Ver: 1, Class: ClassReadonly, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugPingArgs", DataSchema: "DebugPingData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimDebugProbeInterviewEditor:         {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 90000, DeadlineMs: 120000, LeaseMs: 0, ArgsSchema: "DebugProbeInterviewEditorArgs", DataSchema: "DebugProbeInterviewEditorData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugReload:                       {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugReloadArgs", DataSchema: "DebugReloadData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugSlowEcho:                     {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "DebugSlowEchoArgs", DataSchema: "DebugSlowEchoData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugSwitchWindow:                 {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugSwitchWindowArgs", DataSchema: "DebugSwitchWindowData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},

@@ -346,6 +346,24 @@
       },
       "DebugReloadArgs": { "type": "object", "fields": {} },
       "DebugReloadData": { "type": "object", "fields": {} },
+      "DebugProbeInterviewEditorArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "interview": { "ref": "InterviewDetails" }
+        }
+      },
+      "DebugProbeInterviewEditorData": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "dateValue": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "timeValue": { "type": "string", "minLength": 1, "maxLength": 16 },
+          "durationValue": { "type": "string", "minLength": 1, "maxLength": 16 },
+          "methodValue": { "type": "string", "minLength": 1, "maxLength": 16 },
+          "canceled": { "type": "boolean" }
+        }
+      },
       "DebugSwitchWindowArgs": { "type": "object", "fields": {} },
       "DebugSwitchWindowData": {
         "type": "object",
@@ -1080,6 +1098,20 @@
       "preconditions": [],
       "execBudgetMs": 10000, "deadlineMs": 30000,
       "note": "激活当前窗口的下一个标签页,肉眼可见;tab 细节只进 evidence/日志"
+    },
+    "debug.probeInterviewEditor": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "DebugProbeInterviewEditorArgs", "dataSchema": "DebugProbeInterviewEditorData",
+      "preconditions": [
+        "context.platform",
+        "context.accountRef",
+        "context.expectedPrincipalFingerprint",
+        "surface.im",
+        "login.in",
+        "manualQuiet"
+      ],
+      "execBudgetMs": 90000, "deadlineMs": 120000,
+      "note": "邀面编辑器彩排:与 chat.sendInviteCard 字面共用同一编辑器准备实现,真实完成全部选择(类型/日期/时间/时长/方式)与期望值终核回读,随后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并复核弹窗已关。构造性不包含发送路径:不评估发送守卫、不建立发送基线、不触碰发送控件,不产生候选人可见动作,失败与取消结果只如实上报。data 四个回读值仅含我方自设的日期/时间/时长/方式文本。仅供开发期有人值守验收与回归使用,不得复用为发送授权、发送基线或业务状态依据"
     },
     "debug.slowEcho": {
       "ver": 1, "class": "effectful", "batch": "M1", "note": "无真实副作用,专用于演练 effectful 全轨道(超时/suspect/幂等键冻结)",
