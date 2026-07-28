@@ -42,6 +42,15 @@ func TestClassifyVerifiedSendRequiresUniqueAnchorAndUniqueTargetAfterTail(t *tes
 	if err != nil || observation.Confirmed || observation.Reason == "" {
 		t.Fatalf("没有 expectedTail 不得确认: observation=%+v err=%v", observation, err)
 	}
+
+	// 真机 2026-07-28:平台历史接口在 IM 页刚导航后的同步窗口内可能对
+	// 非空会话返回空成功。空验证窗口只能落"未确认"(错过→重试→耗尽→
+	// suspect),不得被当成"未发生"的负证。
+	var empty []protocol.ThreadMessage
+	observation, err = classifyVerifiedSend(empty, matchingAnchorStarts(empty, anchors), len(anchors), "target")
+	if err != nil || observation.Confirmed || observation.Reason == "" {
+		t.Fatalf("空验证窗口只能未确认,不得当负证: observation=%+v err=%v", observation, err)
+	}
 }
 
 func TestMatchingAnchorStartsTreatsRepeatedTailAsAmbiguous(t *testing.T) {

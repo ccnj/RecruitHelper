@@ -59,11 +59,14 @@ func classifyConversationFailure(err error) conversationFailureScope {
 		}
 		return failureScopeQuarantine
 	}
-	// 脑侧的两个已知瞬时例外：它们不是稳定账本的纯函数——版本冲突来自与
-	// 事件摄入的良性写竞争（账本已变，下轮重读即收敛）；空收编快照依赖
-	// 活页面观察（下轮重读通常恢复出历史）。
+	// 脑侧的三个已知瞬时例外：它们不是稳定账本的纯函数——版本冲突来自与
+	// 事件摄入的良性写竞争（账本已变，下轮重读即收敛）；空收编快照与已
+	// 收编空快照都依赖活页面观察（真机 2026-07-28：IM 页刚导航后的同步
+	// 窗口内平台历史接口可能空成功，下轮重读通常恢复出历史）。跳过即
+	// 保持脏、本轮不消化不派发，无上界（2026-07-28 甲方裁决不加界）。
 	if errors.Is(err, store.ErrConversationVersionConflict) ||
-		errors.Is(err, syncledger.ErrAdoptionSnapshotEmpty) {
+		errors.Is(err, syncledger.ErrAdoptionSnapshotEmpty) ||
+		errors.Is(err, syncledger.ErrTrackedSnapshotEmpty) {
 		return failureScopeSkipRound
 	}
 	return failureScopeQuarantine
@@ -96,6 +99,8 @@ func conversationFailureClass(err error) string {
 		return "conversationVersionConflict"
 	case errors.Is(err, syncledger.ErrAdoptionSnapshotEmpty):
 		return "adoptionSnapshotEmpty"
+	case errors.Is(err, syncledger.ErrTrackedSnapshotEmpty):
+		return "trackedSnapshotEmpty"
 	}
 	return "unclassified"
 }

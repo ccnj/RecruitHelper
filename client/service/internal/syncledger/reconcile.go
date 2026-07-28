@@ -14,6 +14,7 @@ var (
 	ErrInvalidLedger                         = errors.New("持久化会话账本无效")
 	ErrAdoptionHasLedger                     = errors.New("首次收编时账本必须为空")
 	ErrAdoptionSnapshotEmpty                 = errors.New("首次收编快照不能为空")
+	ErrTrackedSnapshotEmpty                  = errors.New("已收编会话快照为空,与非空账本矛盾")
 	ErrAnchorContractMismatch                = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
 	ErrSourceKeySemanticConflict             = errors.New("相同 sourceKey 的消息语义冲突")
 	ErrUnsafeMessageClassificationCorrection = errors.New("发现可能的消息分类修正，但缺少完整唯一证据")
@@ -153,7 +154,11 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 	}
 
 	if len(normalized) == 0 {
-		return &Plan{Decision: DecisionNoChange, Apply: baseApply(false, nil, nil)}, nil
+		// 消息不会从平台消失:账本非空的已收编会话读回整窗空快照,只能是
+		// 感知通道退化(真机 2026-07-28:IM 页刚导航出来的同步窗口内,平台
+		// 历史接口对明明有消息的会话返回空成功)。健康的"无新增"读取至少
+		// 包含锚点前缀,不会为空;消化成 NoChange 会把陈旧基线放行给排程。
+		return nil, ErrTrackedSnapshotEmpty
 	}
 
 	matches := suffixSnapshotMatches(ledgerKeys, snapshotKeys)
