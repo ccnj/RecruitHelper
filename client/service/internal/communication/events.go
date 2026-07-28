@@ -173,8 +173,19 @@ func normalizeOutboundMessage(event BusinessEvent, fact LedgerMessageFact) Busin
 			event.Kind = EventInterviewInvited
 			return event
 		case "wechatExchange":
-			event.Kind = EventWechatInvited
-			return event
+			// 与入站分支同构：pending 只证明"请求已存在"，accepted 只证明
+			// "交换结果已成立"。交换结果卡归属点同意的一方，我方接受候选人
+			// 主动请求时它就是出站的；只按 cardType 一律读成"我方发起邀请"
+			// 会把交换成功误记为又发了一次邀请，微信线永远推不到已换号。
+			switch fact.CardState {
+			case "pending":
+				event.Kind = EventWechatInvited
+				return event
+			case "accepted":
+				event.Kind = EventWechatExchanged
+				return event
+			}
+			return unknownEvent(event, "outboundWechatCardState")
 		default:
 			return unknownEvent(event, "unsupportedOutboundCard")
 		}

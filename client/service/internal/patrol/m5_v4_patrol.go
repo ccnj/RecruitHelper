@@ -117,6 +117,16 @@ func (a *roundActor) processCommunicationV4Profile(
 	if err := a.drainCommunicationV4EventActionsForProfile(ctx, profileID); err != nil {
 		return err
 	}
+	// 位置在动作排空之后、收号之前:接受动作的正证使我方先于账本知情,本轮补齐
+	// 账本与微信线状态,让收号、运营通知与产品 UI 当轮一致(立案 4.3)。补齐后
+	// 新规划的候选人可见动作本轮不再排空,留给下一轮——否则回执可能抢在联系
+	// 方式收编事务之前发出,与 2026-07-26 甲方裁决的前置条件相悖。
+	if err := a.reconcileAfterWechatAccepted(ctx, profileID); err != nil {
+		return err
+	}
+	if a.classificationCorrected {
+		return nil
+	}
 	if err := a.collectExchangedWechatContact(ctx, profileID); err != nil {
 		return err
 	}

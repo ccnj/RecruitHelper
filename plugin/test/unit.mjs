@@ -6992,6 +6992,7 @@ function installM3SendFixture() {
     root,
     rows,
     session,
+    staffId,
     state,
     text,
     timeline,
@@ -7409,23 +7410,34 @@ function appendM5BWechatRow(fixture, {
 }
 
 function installM5BWechatAcceptSurface(fixture) {
-  const state = { done: false, cards: [] }
-  const action = new globalThis.HTMLElement()
-  action.textContent = '同意'
-  action.classList = { contains: () => false }
-  action.querySelector = () => null
-  action.querySelectorAll = () => []
+  // byClass = .imc-wx-request__actions-success 命中的控件；byText = 卡内
+  // button/a。evaluator 2026-07-29 起类名优先、缺失才按可见文本兜底。
+  const state = { done: false, cards: [], byClass: [], byText: [] }
+  const node = (text) => {
+    const element = new globalThis.HTMLElement()
+    element.textContent = text
+    element.classList = { contains: () => false }
+    element.querySelector = () => null
+    element.querySelectorAll = () => []
+    return element
+  }
+  const action = node('同意')
+  state.byClass = [action]
+  state.byText = [action]
   const card = new globalThis.HTMLElement()
   card.textContent = '交换微信 同意'
   card.classList = { contains: (name) => name === 'is-wx-done' && state.done }
   card.querySelector = (selector) => selector === '.is-wx-done' && state.done ? {} : null
-  card.querySelectorAll = (selector) =>
-    selector === '.imc-wx-request__actions-success, button, a' ? [action] : []
+  card.querySelectorAll = (selector) => {
+    if (selector === '.imc-wx-request__actions-success') return state.byClass
+    if (selector === 'button, a') return state.byText
+    return []
+  }
   state.cards = [card]
   const originalQuery = fixture.detail.querySelectorAll.bind(fixture.detail)
   fixture.detail.querySelectorAll = (selector) =>
     selector === '.imc-wx-request' ? state.cards : originalQuery(selector)
-  return { action, card, state }
+  return { action, card, state, node }
 }
 
 test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最终只 click 一次', async () => {
@@ -7546,14 +7558,18 @@ test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 
         phase,
       )
 
-    assert.deepEqual(invoke(), { status: 'ready' })
+    assert.deepEqual(invoke(), { status: 'ready', wechatCopyCards: 0 })
     assert.equal(fixture.state.intrinsicClicks, 0)
-    assert.deepEqual(invoke('commit'), { status: 'clicked' })
+    assert.deepEqual(invoke('commit'), { status: 'clicked', wechatCopyCards: 0 })
     assert.equal(fixture.state.intrinsicClicks, 1)
 
     const clicksAfterSuccess = fixture.state.intrinsicClicks
     surface.state.done = true
-    assert.deepEqual(invoke(), { status: 'failed', reason: 'surface_unavailable' })
+    assert.deepEqual(invoke(), {
+      status: 'failed',
+      reason: 'surface_unavailable',
+      detail: 'wxaccept:all_done cards=1',
+    })
     surface.state.done = false
     assert.deepEqual(invoke('preflight', { baselineKeys: ['f'.repeat(64)] }), {
       status: 'failed',
@@ -7563,9 +7579,50 @@ test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 
       status: 'failed',
       reason: 'input_rejected',
     })
+    // 类名优先：类名命中时不再看文本，图标按钮也能定位（旧项目生产同款）。
+    surface.state.byClass = [surface.node('')]
+    surface.state.byText = []
+    assert.deepEqual(invoke(), { status: 'ready', wechatCopyCards: 0 },
+      '.imc-wx-request__actions-success 命中即可定位，不要求文本')
+    // 类名缺失才按可见文本兜底，且判据是"包含同意"而非全等。
+    surface.state.byClass = []
+    surface.state.byText = [surface.node('同意 (1)')]
+    assert.deepEqual(invoke(), { status: 'ready', wechatCopyCards: 0 },
+      '类名缺失时文本包含"同意"即可兜底')
+    // "不同意"字面包含"同意"：放宽为包含匹配后必须排除否定式，否则唯一
+    // 命中的正是拒绝控件——那是真实的错误副作用。
+    surface.state.byText = [surface.node('不同意')]
+    assert.deepEqual(invoke(), {
+      status: 'failed',
+      reason: 'surface_unavailable',
+      detail: 'wxaccept:no_action byClass=0 byText=0',
+    }, '否定式控件绝不可被当作同意动作')
+    surface.state.byText = [surface.node('同意'), surface.node('我同意')]
+    assert.deepEqual(invoke(), {
+      status: 'failed',
+      reason: 'surface_unavailable',
+      detail: 'wxaccept:multi_action byClass=0 byText=2',
+    }, '候选控件不唯一必须停在 click 前')
+    surface.state.cards = []
+    assert.deepEqual(invoke(), { status: 'failed', reason: 'surface_unavailable', detail: 'wxaccept:no_card' })
+    surface.state.cards = [surface.card, surface.card]
+    assert.deepEqual(invoke(), {
+      status: 'failed',
+      reason: 'surface_unavailable',
+      detail: 'wxaccept:multi_card cards=2 pending=2',
+    })
+    surface.state.cards = [surface.card]
+    surface.state.byClass = [surface.action]
+    surface.state.byText = [surface.action]
+    assert.equal(fixture.state.intrinsicClicks, clicksAfterSuccess,
+      '以上全部定位失败分支都不得点击')
+
+    // 候选人主动发起(originType=2)的交换结果归我方(out)，故已存在的 259
+    // 必须按 staffId 认；按 target 认会永远漏判而重复派发。
     appendM5BWechatRow(fixture, {
       idServer: 'wechat-result-already-done',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_fixture',
       staffWeChat: 'staff_fixture',
     })
@@ -7584,7 +7641,7 @@ test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 
         afterOutcomeBaseline.targetBindingToken,
         'preflight',
       ),
-      { status: 'failed', reason: 'surface_unavailable' },
+      { status: 'failed', reason: 'surface_unavailable', detail: 'wxaccept:already_exchanged n=1' },
       '已经存在交换结果时重复执行必须停在 click 前',
     )
     assert.equal(fixture.state.intrinsicClicks, clicksAfterSuccess)
@@ -7604,11 +7661,14 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
       null,
     )
 
+    // 形态 A（候选人主动发起，originType=2）：由我方点同意，259 归我方(out)。
+    // 2026-07-28 生产页面直读；旧锚写成 in 是本形态全线不通的直接原因。
     reset()
     appendM5BWechatRow(fixture, { idServer: 'candidate-request' })
     appendM5BWechatRow(fixture, {
       idServer: 'candidate-result',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_candidate_fixture',
       staffWeChat: 'staff_fixture',
     })
@@ -7617,6 +7677,17 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
       exchangeSourceKey: m3Hash('source-v1|candidate-result'),
       peerWechat: 'peer_candidate_fixture',
     })
+
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'candidate-request-wrong-side' })
+    appendM5BWechatRow(fixture, {
+      idServer: 'candidate-result-wrong-side',
+      type: 259,
+      userWeChat: 'peer_candidate_fixture',
+      staffWeChat: 'staff_fixture',
+    })
+    assert.deepEqual(await read('candidate-request-wrong-side'), { confirmed: false },
+      'originType=2 的 259 若归对方(in)则方向不符，必须保持阴性')
 
     reset()
     appendM5BWechatRow(fixture, {
@@ -7642,6 +7713,7 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
     appendM5BWechatRow(fixture, {
       idServer: 'missing-field-result',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_fixture',
     })
     assert.deepEqual(await read('missing-field-request'), { confirmed: false })
@@ -7651,12 +7723,14 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
     appendM5BWechatRow(fixture, {
       idServer: 'ambiguous-result-1',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_fixture_1',
       staffWeChat: 'staff_fixture',
     })
     appendM5BWechatRow(fixture, {
       idServer: 'ambiguous-result-2',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_fixture_2',
       staffWeChat: 'staff_fixture',
     })
@@ -7668,6 +7742,7 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
     appendM5BWechatRow(fixture, {
       idServer: 'late-result',
       type: 259,
+      from: fixture.staffId,
       userWeChat: 'peer_late_fixture',
       staffWeChat: 'staff_fixture',
     })
@@ -8459,6 +8534,7 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
   const targetTabId = 192
   const delays = []
   let outcomePositive = true
+  let surfaceAccepted = true
   let evaluatorFunction = null
   let preflightCalls = 0
   let commitCalls = 0
@@ -8543,13 +8619,18 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
               baseline.targetBindingToken,
             ])
           }
+          // surface 是成功正证（可见后置状态），confirmed/号只是可选加成。
+          const surface = args[2] === null
+            ? undefined
+            : { surface: { pendingRequestCards: surfaceAccepted ? 0 : 1, copyWechatCards: surfaceAccepted ? 1 : 0 } }
           return [{ result: outcomePositive
             ? {
                 confirmed: true,
                 exchangeSourceKey,
                 peerWechat: 'peer_wechat_fixture',
+                ...surface,
               }
-            : { confirmed: false } }]
+            : { confirmed: false, ...surface } }]
         }
         throw new Error(`unexpected MAIN function ${func.name}`)
       },
@@ -8631,7 +8712,36 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
       replayed: false,
     }), [])
 
+    // 可见后置状态成立但 259 未到：仍是成功，只是无号，号留给延迟收编。
     outcomePositive = false
+    const noNumberContext = context('no-number')
+    const commitsBeforeNoNumber = commitCalls
+    const readsBeforeNoNumber = outcomeReads
+    const noNumber = await acceptZhilianWechatRequest(
+      { conversationRef, requestSourceKey },
+      { expectedTail },
+      noNumberContext.value,
+      fingerprint,
+    )
+    assert.deepEqual(noNumber, {
+      conversationRef,
+      requestSourceKey,
+      observedAt: noNumber.observedAt,
+    }, '259 未到不推翻可见后置状态正证，data 里两个取号字段必须一并缺席')
+    assert.deepEqual(validatePrimitiveResult(Primitive.ChatAcceptWechat, 1, {
+      status: 'ok',
+      data: noNumber,
+      evidence: [{ type: 'candidateWechatRequestAcceptedObserved' }],
+      ref: 'validate-wechat-accept-no-number',
+      execMs: 0,
+      replayed: false,
+    }), [], '无号 data 必须符合契约')
+    assert.equal(commitCalls - commitsBeforeNoNumber, 1, '无号成功也只允许一次 commit')
+    assert.equal(outcomeReads - readsBeforeNoNumber, 21,
+      '正证 1 次 + 取号加成 20 次，取号预算不扩大到第二次 click')
+
+    // 可见后置状态始终不成立：未确认转人工，绝不补第二次同意。
+    surfaceAccepted = false
     const negativeContext = context('negative')
     const commitsBefore = commitCalls
     const readsBefore = outcomeReads
