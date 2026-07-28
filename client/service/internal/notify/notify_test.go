@@ -33,7 +33,7 @@ func fullSnapshot() *store.NotificationRenderSnapshot {
 func TestRenderInterviewAccepted(t *testing.T) {
 	text := renderInterviewAccepted(fullSnapshot(), "客户甲")
 	for _, want := range []string{
-		"「面试确认」测试候选(客户甲)",
+		"【面试确认】测试候选(客户甲)",
 		"面试时间:07-30(周四) 12:30",
 		"联系方式:微信 wx-demo-88(已成功交换微信)",
 		"职位:资深销售",
@@ -52,7 +52,7 @@ func TestRenderInterviewAccepted(t *testing.T) {
 	bare.ResumeShot = nil
 	text = renderInterviewAccepted(bare, "")
 	for _, want := range []string{
-		"「面试确认」测试候选",
+		"【面试确认】测试候选",
 		"面试时间:未获取到,请在客户端核对",
 		"联系方式:未获取(已邀微信)",
 		"(本次未附截图)",
@@ -71,7 +71,7 @@ func TestRenderInterviewAccepted(t *testing.T) {
 func TestRenderWechatAdded(t *testing.T) {
 	text := renderWechatAdded(fullSnapshot(), "客户乙", false)
 	for _, want := range []string{
-		"「微信互加」测试候选(客户乙)",
+		"【微信互加】测试候选(客户乙)",
 		"联系方式:微信 wx-demo-88(已成功交换微信)",
 		"当前状态:已约面 · 面试 07-30(周四) 12:30",
 		"职位:资深销售",
@@ -367,7 +367,7 @@ func TestTickRendersInterviewSupplementTitle(t *testing.T) {
 	if summary.Sent != 1 || len(capture.texts) != 1 {
 		t.Fatalf("补号通知未发出: summary=%+v texts=%+v", summary, capture.texts)
 	}
-	if !strings.HasPrefix(capture.texts[0], "「面试确认--补微信号」") {
+	if !strings.HasPrefix(capture.texts[0], "【面试确认--补微信号】") {
 		t.Fatalf("补号标题未改写:\n%s", capture.texts[0])
 	}
 	if !strings.Contains(capture.texts[0], "微信 wx-demo-88") {

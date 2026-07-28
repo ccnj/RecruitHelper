@@ -70,7 +70,7 @@ func candidateTitle(prefix string, snapshot *store.NotificationRenderSnapshot, c
 	if name == "" {
 		name = "候选人"
 	}
-	title := "「" + prefix + "」" + name
+	title := "【" + prefix + "】" + name
 	if customerName != "" {
 		title += "(" + customerName + ")"
 	}
