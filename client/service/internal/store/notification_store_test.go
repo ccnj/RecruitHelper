@@ -61,6 +61,30 @@ func TestInterviewAcceptedEnqueuesNotificationExactlyOnce(t *testing.T) {
 		rows[0].Status != NotificationStatusPending {
 		t.Fatalf("约面通知入队不符: %+v", rows)
 	}
+	// 同一事务的两轨衔接:发件箱持有唯一发送义务,事件动作轨的通知行只是
+	// 不可变记录,必须标记为发件箱承接而不是待发欠账(2026-07-28 收束)。
+	eventActions, err := s.CommunicationV4EventActionsBySource(
+		root.ProfileID,
+		CommunicationV4InputBusinessEvent,
+		accepted.Key,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifyRows := 0
+	for _, action := range eventActions {
+		if action.V4Kind != communication.V4ActionNotifyInterviewAccepted {
+			continue
+		}
+		notifyRows++
+		if action.Status != CommunicationV4EventActionDeferred ||
+			action.FailureReason != CommunicationV4EventActionFailureNotificationOutboxOwned {
+			t.Fatalf("约面通知事件动作行未标记为发件箱承接: %+v", action)
+		}
+	}
+	if notifyRows != 1 {
+		t.Fatalf("约面通知事件动作行数不符: actions=%+v", eventActions)
+	}
 
 	if _, err := s.ApplyCommunicationV4BusinessEvent(ApplyCommunicationV4BusinessEventRequest{
 		ProfileID: root.ProfileID, Event: accepted, AppliedAt: at.Add(2 * time.Minute),

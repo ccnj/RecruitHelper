@@ -177,7 +177,7 @@ func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing
 		wechatResult.Actions[0].ContentHash != acceptFingerprint ||
 		wechatResult.Actions[0].ContentHash == wechatRequestSourceKey ||
 		wechatResult.Actions[1].Status != CommunicationV4EventActionDeferred ||
-		wechatResult.Actions[1].FailureReason != CommunicationV4EventActionFailureNotificationChannelDeferred {
+		wechatResult.Actions[1].FailureReason != CommunicationV4EventActionFailureNotificationOutboxOwned {
 		t.Fatalf("微信接受动作与通知处置错误: %+v", wechatResult.Actions)
 	}
 	wechatReceipt := wechatResult.Actions[2]
