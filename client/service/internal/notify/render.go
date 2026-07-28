@@ -104,9 +104,19 @@ func renderInterviewAccepted(snapshot *store.NotificationRenderSnapshot, custome
 	return truncateBytes(strings.Join(lines, "\n"), wecomTextLimitBytes)
 }
 
-// renderWechatAdded 渲染「微信互加」通知(换微信成功)。
-func renderWechatAdded(snapshot *store.NotificationRenderSnapshot, customerName string) string {
-	lines := []string{candidateTitle("微信互加", snapshot, customerName)}
+// renderWechatAdded 渲染换微信成功通知。supplement 为真表示约面通知已经发到
+// 运营手上、但当时还没收到号(15 分钟兜底先发,正文写的是"联系方式:未获取"),
+// 这条是那次面试确认的补号——标题据此改写,免得运营当成一个新事件重复跟进。
+func renderWechatAdded(
+	snapshot *store.NotificationRenderSnapshot,
+	customerName string,
+	supplement bool,
+) string {
+	prefix := "微信互加"
+	if supplement {
+		prefix = "面试确认--补微信号"
+	}
+	lines := []string{candidateTitle(prefix, snapshot, customerName)}
 	lines = append(lines, "联系方式:"+formatContact(snapshot))
 	statusLine := "当前状态:" + mainStatusLabel(snapshot.MainStatus)
 	if snapshot.MainStatus == store.CandidateProfileInterviewed && snapshot.InterviewStartsAtMs != nil {

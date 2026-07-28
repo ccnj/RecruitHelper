@@ -108,7 +108,8 @@ func (r *Runner) Tick() tickSummary {
 			}
 			continue
 		}
-		switch r.decide(row, snapshot, now) {
+		verdict, supplement := r.decide(row, snapshot, now)
+		switch verdict {
 		case decisionHold:
 			summary.Held++
 			if !r.heldNotified[row.ID] {
@@ -133,7 +134,7 @@ func (r *Runner) Tick() tickSummary {
 			slog.Info("运营通知去重丢弃", "notifyId", row.ID, "type", row.NotifyType, "profileId", row.ProfileID)
 			continue
 		}
-		content := r.render(row, snapshot)
+		content := r.render(row, snapshot, supplement)
 		if err := sendWecomText(r.client, r.webhookURL, content); err != nil {
 			slog.Warn(
 				"运营通知发送失败",
@@ -192,37 +193,44 @@ func (r *Runner) decide(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
 	now time.Time,
-) decision {
+) (decision, bool) {
+	supplement := false
 	if row.NotifyType == store.NotificationTypeWechatAdded {
-		if verdict := r.decideWechatAdded(row); verdict != decisionSend {
-			return verdict
+		verdict, isSupplement := r.decideWechatAdded(row)
+		if verdict != decisionSend {
+			return verdict, false
 		}
+		supplement = isSupplement
 	}
-	return r.gateReady(row, snapshot, now)
+	return r.gateReady(row, snapshot, now), supplement
 }
 
-func (r *Runner) decideWechatAdded(row store.NotificationOutbox) decision {
+// decideWechatAdded 第二个返回值表示"这条是约面通知的补号"——只在约面通知
+// 确实已经发到运营手上、却因当时还没收到号而写了"联系方式:未获取"时为真。
+// 此时运营视角里它不是新事件,而是刚才那条面试确认的补丁,标题据此改写。
+// 约面通知终败/过期时运营根本没收到过面试确认,仍按独立的微信互加渲染。
+func (r *Runner) decideWechatAdded(row store.NotificationOutbox) (decision, bool) {
 	meeting, err := r.store.InterviewNotificationForProfile(row.ProfileID)
 	if err != nil {
 		slog.Warn("微信互加去重查询失败,按独立发送处理", "notifyId", row.ID, "err", err)
-		return decisionSend
+		return decisionSend, false
 	}
 	if meeting == nil {
-		return decisionSend // 无约面通知:独立事件
+		return decisionSend, false // 无约面通知:独立事件
 	}
 	if row.ID < meeting.ID {
-		return decisionSend // 微信在约面之前就换到:独立事件,始终发
+		return decisionSend, false // 微信在约面之前就换到:独立事件,始终发
 	}
 	switch meeting.Status {
 	case store.NotificationStatusPending:
-		return decisionHold // 约面通知尚未落定,号可能随它带出,等它先判
+		return decisionHold, false // 约面通知尚未落定,号可能随它带出,等它先判
 	case store.NotificationStatusSent:
 		if meeting.SentWithWechat {
-			return decisionDrop
+			return decisionDrop, false
 		}
-		return decisionSend // 约面 15 分钟兜底先发且未带号:单独补发
+		return decisionSend, true // 约面 15 分钟兜底先发且未带号:补号
 	default:
-		return decisionSend // 约面终败/过期:单独补发
+		return decisionSend, false // 约面终败/过期:运营没见过面试确认,按独立事件发
 	}
 }
 
@@ -262,13 +270,17 @@ func (r *Runner) gateReady(
 	return decisionHold
 }
 
-func (r *Runner) render(row store.NotificationOutbox, snapshot *store.NotificationRenderSnapshot) string {
+func (r *Runner) render(
+	row store.NotificationOutbox,
+	snapshot *store.NotificationRenderSnapshot,
+	supplement bool,
+) string {
 	customer := ""
 	if r.customerName != nil {
 		customer = strings.TrimSpace(r.customerName())
 	}
 	if row.NotifyType == store.NotificationTypeWechatAdded {
-		return renderWechatAdded(snapshot, customer)
+		return renderWechatAdded(snapshot, customer, supplement)
 	}
 	return renderInterviewAccepted(snapshot, customer)
 }

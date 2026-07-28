@@ -69,7 +69,7 @@ func TestRenderInterviewAccepted(t *testing.T) {
 }
 
 func TestRenderWechatAdded(t *testing.T) {
-	text := renderWechatAdded(fullSnapshot(), "客户乙")
+	text := renderWechatAdded(fullSnapshot(), "客户乙", false)
 	for _, want := range []string{
 		"「微信互加」测试候选(客户乙)",
 		"联系方式:微信 wx-demo-88(已成功交换微信)",
@@ -83,7 +83,7 @@ func TestRenderWechatAdded(t *testing.T) {
 	onlyChat := fullSnapshot()
 	onlyChat.MainStatus = store.CandidateProfileCommunicating
 	onlyChat.ResumeShot = nil
-	text = renderWechatAdded(onlyChat, "")
+	text = renderWechatAdded(onlyChat, "", false)
 	if !strings.Contains(text, "当前状态:沟通中") || !strings.Contains(text, "聊天记录见下图") ||
 		strings.Contains(text, "简历见下图") && strings.Contains(text, "、简历") {
 		t.Fatalf("仅聊天图提示不符: %s", text)
@@ -310,17 +310,21 @@ func TestWechatAddedDedupMatrix(t *testing.T) {
 		ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
 	}
 	cases := []struct {
-		name    string
-		meeting *store.NotificationOutbox
-		rowID   uint64
-		want    decision
+		name       string
+		meeting    *store.NotificationOutbox
+		rowID      uint64
+		want       decision
+		supplement bool
 	}{
-		{"无约面通知", nil, 10, decisionSend},
-		{"约面前换到", &store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionSend},
-		{"约面仍pending", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusPending}, 10, decisionHold},
-		{"已随约面带出", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionDrop},
-		{"约面发出未带号", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: false}, 10, decisionSend},
-		{"约面终败", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusFailed}, 10, decisionSend},
+		{"无约面通知", nil, 10, decisionSend, false},
+		{"约面前换到", &store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionSend, false},
+		{"约面仍pending", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusPending}, 10, decisionHold, false},
+		{"已随约面带出", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionDrop, false},
+		// 唯一的补号形态:约面通知确实发到运营手上了,但当时没号。
+		{"约面发出未带号", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: false}, 10, decisionSend, true},
+		// 运营从没收到过面试确认,不能叫"补微信号"。
+		{"约面终败", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusFailed}, 10, decisionSend, false},
+		{"约面过期", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusExpired}, 10, decisionSend, false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -331,10 +335,43 @@ func TestWechatAddedDedupMatrix(t *testing.T) {
 			runner := newTestRunner(ledger, &fakeBlobs{}, "http://127.0.0.1:1", now)
 			row := baseRow
 			row.ID = testCase.rowID
-			if got := runner.decideWechatAdded(row); got != testCase.want {
-				t.Fatalf("判定不符: got=%v want=%v", got, testCase.want)
+			got, supplement := runner.decideWechatAdded(row)
+			if got != testCase.want || supplement != testCase.supplement {
+				t.Fatalf("判定不符: got=(%v,%v) want=(%v,%v)",
+					got, supplement, testCase.want, testCase.supplement)
 			}
 		})
+	}
+}
+
+// 补号形态在 tick 里必须真的改写标题:约面通知已发但未带号 → 「面试确认--补微信号」。
+func TestTickRendersInterviewSupplementTitle(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 7, 28, 18, 0, 0, 0, time.Local)
+	snapshot := fullSnapshot()
+	snapshot.ChatShot = nil
+	snapshot.ResumeShot = nil
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{{
+			ID: 30, NotifyType: store.NotificationTypeWechatAdded,
+			ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
+		}},
+		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting: map[string]*store.NotificationOutbox{
+			"p1": {ID: 7, Status: store.NotificationStatusSent, SentWithWechat: false},
+		},
+	}
+	summary := newTestRunner(ledger, &fakeBlobs{}, server.URL, now).Tick()
+	if summary.Sent != 1 || len(capture.texts) != 1 {
+		t.Fatalf("补号通知未发出: summary=%+v texts=%+v", summary, capture.texts)
+	}
+	if !strings.HasPrefix(capture.texts[0], "「面试确认--补微信号」") {
+		t.Fatalf("补号标题未改写:\n%s", capture.texts[0])
+	}
+	if !strings.Contains(capture.texts[0], "微信 wx-demo-88") {
+		t.Fatalf("补号正文必须带上号:\n%s", capture.texts[0])
 	}
 }
 
