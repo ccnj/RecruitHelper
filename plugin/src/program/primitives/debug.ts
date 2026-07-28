@@ -1,10 +1,15 @@
 // debug 原语归 debug.* 命名空间,不占平台无关业务词汇表。
 // 平台无关纪律:tabId 之类只进 evidence/日志,不进 result 的语义字段。
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import { CmdClass, Primitive as PrimName } from '../../base/protocol'
+import { CmdClass, DebugProbeInterviewEditorArgs, Primitive as PrimName } from '../../base/protocol'
 import { SW_STARTED_AT } from '../../base/config'
 import { armRuntimeReload } from '../../base/reload'
-import { inspectZhilianSendSurfaceDiagnostic } from '../platform/zhilian'
+import {
+  inspectZhilianSendSurfaceDiagnostic,
+  probeZhilianInterviewEditor,
+  ZHILIAN_PLATFORM,
+  ZhilianPlatformError,
+} from '../platform/zhilian'
 
 const pingPrim: Primitive = {
   name: PrimName.DebugPing,
@@ -75,10 +80,43 @@ const slowEchoPrim: Primitive = {
   },
 }
 
+// debug.probeInterviewEditor:邀面编辑器彩排。与 chat.sendInviteCard 字面共用
+// 同一编辑器准备实现,填毕停留至少 5 秒供肉眼确认后取消;构造性不含发送路径。
+const probeInterviewEditorPrim: Primitive = {
+  name: PrimName.DebugProbeInterviewEditor,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await probeZhilianInterviewEditor(
+        rawArgs as DebugProbeInterviewEditorArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      if (!(error instanceof ZhilianPlatformError)) throw error
+      return {
+        status: 'failed',
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          sideEffect: error.sideEffect,
+          ...(error.reason ? { data: { reason: error.reason } } : {}),
+        },
+      }
+    }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
   register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)
+  register(probeInterviewEditorPrim)
 }

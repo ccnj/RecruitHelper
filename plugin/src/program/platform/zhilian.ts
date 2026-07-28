@@ -46,6 +46,8 @@ import type {
   ChatSendWechatInviteData,
   ConversationSummary,
   DebugInspectSendSurfaceData,
+  DebugProbeInterviewEditorArgs,
+  DebugProbeInterviewEditorData,
   ErrorCode,
   InterviewDetails,
   MessageAnchor,
@@ -9381,6 +9383,37 @@ async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; close
   }
 }
 
+// 邀面编辑器准备失败的统一错误映射。sendZhilianCard 与 probeZhilianInterviewEditor
+// 共用同一 mainPrepareInterviewEditor 与同一失败语义,不各自维护副本。
+function throwInterviewPreparationFailure(
+  preparation: Exclude<MainPrepareInterviewEditorResult, { status: 'ready' }>,
+): never {
+  if (preparation.reason === 'composer_nonempty') {
+    throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
+  }
+  if (preparation.reason === 'identity_changed') {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
+  }
+  if (preparation.reason === 'route_changed' || preparation.reason === 'target_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备期间目标会话发生变化', 'manualOnly')
+  }
+  if (preparation.reason === 'action_window_elapsed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备动作窗口已过', 'manualOnly')
+  }
+  // detail 是手侧白名单现场快照（abort 点标记+命中数+我方自设值回读）；
+  // 契约 ErrorBody.message 上限 500 字符/2000 字节，这里再做一道防御截断。
+  const prepareDetail = preparation.detail === undefined ? '' : `（${preparation.detail}）`
+  let prepareMessage = `邀面编辑器无法精确准备：${preparation.reason}${prepareDetail}`.slice(0, 480)
+  while (new TextEncoder().encode(prepareMessage).length > 1900) {
+    prepareMessage = prepareMessage.slice(0, -16)
+  }
+  throw new ZhilianPlatformError(
+    preparation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
+    prepareMessage,
+    'manualOnly',
+  )
+}
+
 function throwCardEvaluationFailure(evaluation: MainSendCardOnceResult): never {
   if (evaluation.status !== 'failed') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '卡片发送 evaluator 返回未知状态', 'manualOnly')
@@ -9476,30 +9509,7 @@ async function sendZhilianCard(
         ctx.irreversibleNotAfterMs,
       ])
       if (preparation.status !== 'ready') {
-        if (preparation.reason === 'composer_nonempty') {
-          throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
-        }
-        if (preparation.reason === 'identity_changed') {
-          throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
-        }
-        if (preparation.reason === 'route_changed' || preparation.reason === 'target_changed') {
-          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备期间目标会话发生变化', 'manualOnly')
-        }
-        if (preparation.reason === 'action_window_elapsed') {
-          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备动作窗口已过', 'manualOnly')
-        }
-        // detail 是手侧白名单现场快照（abort 点标记+命中数+我方自设值回读）；
-        // 契约 ErrorBody.message 上限 500 字符/2000 字节，这里再做一道防御截断。
-        const prepareDetail = preparation.detail === undefined ? '' : `（${preparation.detail}）`
-        let prepareMessage = `邀面编辑器无法精确准备：${preparation.reason}${prepareDetail}`.slice(0, 480)
-        while (new TextEncoder().encode(prepareMessage).length > 1900) {
-          prepareMessage = prepareMessage.slice(0, -16)
-        }
-        throw new ZhilianPlatformError(
-          preparation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
-          prepareMessage,
-          'manualOnly',
-        )
+        throwInterviewPreparationFailure(preparation)
       }
       editorPrepared = true
     } else {
@@ -9852,6 +9862,77 @@ export async function sendZhilianInviteCard(
     )
   }
   return { ...data, interview: data.interview }
+}
+
+// 彩排取消后的只读复核：邀面弹窗是否仍可见。自包含，供 runMain 注入。
+async function mainIsInterviewEditorOpen(): Promise<boolean> {
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  return Array.from(
+    document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
+  ).some((node) => visible(node) && node.querySelector('.interview-form') !== null)
+}
+
+// debug.probeInterviewEditor:邀面编辑器彩排。与 sendZhilianCard 的
+// interviewInvite 前半段字面共用 mainPrepareInterviewEditor(全部选择框与
+// 终核回读),准备成功后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并
+// 复核弹窗已关。构造性不含发送路径:不建基线、不评估 expectedTail、不调用
+// mainSendCardOnce。失败沿用同一 throwInterviewPreparationFailure 映射。
+export async function probeZhilianInterviewEditor(
+  args: DebugProbeInterviewEditorArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<DebugProbeInterviewEditorData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  const interview = args.interview
+  if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
+      interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
+      interview.method !== 'wechatVideo' ||
+      interview.startsAt % 60_000 !== 0 ||
+      (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
+      ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '邀面时间或方式不受当前页面能力支持', 'manualOnly')
+  }
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const preparation = await runMain(tab.id, mainPrepareInterviewEditor, [
+    args.conversationRef,
+    interview,
+    expectedPrincipalFingerprint,
+    ctx.irreversibleNotAfterMs,
+  ])
+  if (preparation.status !== 'ready') {
+    throwInterviewPreparationFailure(preparation)
+  }
+  // 甲方裁决(2026-07-29):填毕停留至少 5 秒供肉眼确认。停留放在彩排编排层,
+  // 与生产共用的准备函数不因此变化。
+  await new Promise((resolve) => setTimeout(resolve, 5_000))
+  try {
+    await runMain(tab.id, mainCancelPreparedInterviewEditor, [])
+  } catch {
+    // 取消尽力而为,结果由下方只读复核如实上报。
+  }
+  let canceled = false
+  try {
+    canceled = !await runMain(tab.id, mainIsInterviewEditorOpen, [])
+  } catch {
+    canceled = false
+  }
+  return {
+    conversationRef: args.conversationRef,
+    dateValue: preparation.prepared.dateValue,
+    timeValue: preparation.prepared.timeValue,
+    durationValue: preparation.prepared.durationValue,
+    methodValue: preparation.prepared.methodValue,
+    canceled,
+  }
 }
 
 export async function readZhilianThread(
