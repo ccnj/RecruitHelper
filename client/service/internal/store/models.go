@@ -881,6 +881,9 @@ const (
 	CommunicationActionSent           CommunicationActionStatus = "sent"
 	CommunicationActionManualRequired CommunicationActionStatus = "manualRequired"
 	CommunicationActionSuperseded     CommunicationActionStatus = "superseded"
+	// CommunicationActionRetried 是邀面卡干净失败自动重试例外(2026-07-29 甲方
+	// 裁决)下原失败动作的留档终态;重试由带 |try{n} 后缀的新动作行承载。
+	CommunicationActionRetried CommunicationActionStatus = "retried"
 )
 
 // CommunicationAction 是 AI 建议经确定性代码批准后的唯一业务动作事实。

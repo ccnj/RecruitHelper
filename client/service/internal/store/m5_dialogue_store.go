@@ -1639,8 +1639,10 @@ func communicationV4PlannedActionTx(
 		return communication.V4PlannedAction{}, true, ErrCommunicationActionConflict
 	}
 	planIndex := -1
+	// 自动重试动作携带 |try{n} 后缀,与 plan 对账按剥后缀的基础键进行
+	// (2026-07-29 邀面卡干净失败自动重试例外)。
 	for index := range head.Outcome.PlannedActions {
-		if head.Outcome.PlannedActions[index].ActionKey == action.ActionID {
+		if head.Outcome.PlannedActions[index].ActionKey == communicationActionPlanKey(action.ActionID) {
 			planIndex = index
 			break
 		}
@@ -2838,7 +2840,8 @@ func validateM5ActionDependencyTx(
 	if childIntent == nil {
 		return ErrCommunicationActionConflict
 	}
-	if previousIntentID != dependency.intent.IntentID {
+	if previousIntentID != dependency.intent.IntentID &&
+		!retriedInterviewSiblingAnchorTx(tx, previousIntentID, action) {
 		return ErrEffectIntentCASConflict
 	}
 	head, latest, err := effectIntentHeadTx(
@@ -2850,13 +2853,50 @@ func validateM5ActionDependencyTx(
 	if err != nil {
 		return err
 	}
-	if head == nil ||
-		latest == nil ||
-		head.LatestIntentID != dependency.intent.IntentID ||
-		latest.IntentID != dependency.intent.IntentID {
+	if head == nil || latest == nil {
 		return ErrDialogueTurnBinding
 	}
+	if head.LatestIntentID != dependency.intent.IntentID ||
+		latest.IntentID != dependency.intent.IntentID {
+		// 邀面卡干净失败自动重试例外:会话最新 intent 若是本动作的前次已
+		// 失败尝试(零副作用终局、动作已标 retried),视为透明锚;任何其他
+		// 出站仍然拒绝,正文→卡片之间的保序 CAS 语义不变。
+		if head.LatestIntentID != latest.IntentID ||
+			!retriedInterviewSiblingAnchorTx(tx, latest.IntentID, action) {
+			return ErrDialogueTurnBinding
+		}
+	}
 	return nil
+}
+
+// retriedInterviewSiblingAnchorTx 判定 intentID 是否为当前重试动作的前次已
+// 失败尝试:同 turn、同基础动作键、原动作已标 retried、intent 终局 failed
+// (构造性零副作用)。四条全中才允许作为透明锚。
+func retriedInterviewSiblingAnchorTx(
+	tx *gorm.DB,
+	intentID string,
+	action CommunicationAction,
+) bool {
+	if intentID == "" ||
+		action.Kind != CommunicationActionInterviewInvite ||
+		!IsRetryCommunicationActionID(action.ActionID) {
+		return false
+	}
+	var sibling CommunicationAction
+	if err := tx.First(&sibling, "effect_intent_id = ?", intentID).Error; err != nil {
+		return false
+	}
+	if sibling.Kind != CommunicationActionInterviewInvite ||
+		sibling.Status != CommunicationActionRetried ||
+		sibling.TurnID != action.TurnID ||
+		communicationActionPlanKey(sibling.ActionID) != communicationActionPlanKey(action.ActionID) {
+		return false
+	}
+	var intent EffectIntent
+	if err := tx.First(&intent, "intent_id = ?", intentID).Error; err != nil {
+		return false
+	}
+	return intent.Status == EffectIntentFailed
 }
 
 type m5DependentActionCurrent struct {
@@ -3377,6 +3417,79 @@ func applyCommunicationV4EventActionEffectStatusTx(
 	}
 }
 
+// retryCommunicationInterviewInviteTx 执行邀面卡干净失败自动重试例外的账本
+// 迁移。返回 true 表示已铸重试动作并把 turn 复位为 adviceReady;返回 false
+// 表示面试开始时间已到期,调用方继续走转人工原路径。每次重试是全新动作行
+// (基础语义键不变),原失败动作与原 intent 照常终局留档。
+func retryCommunicationInterviewInviteTx(
+	tx *gorm.DB,
+	turn DialogueTurn,
+	action CommunicationAction,
+	at time.Time,
+) (bool, error) {
+	if action.InterviewStartsAtMs == nil || *action.InterviewStartsAtMs <= at.UnixMilli() {
+		if err := tx.Create(&AuditEntry{
+			At: at, Category: "interview_invite_retry_abandoned",
+			ConversationRef: turn.ConversationRef,
+			Detail:          "action=" + action.ActionID + " reason=startsAtElapsed",
+		}).Error; err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	retryID := communicationActionNextRetryID(action.ActionID)
+	var existing CommunicationAction
+	err := tx.First(&existing, "action_id = ?", retryID).Error
+	if err == nil {
+		// 结果重放:重试行已存在即本次入账已完成,不重复铸造。
+		return true, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, err
+	}
+	updated := tx.Model(&CommunicationAction{}).
+		Where("action_id = ? AND status = ?", action.ActionID, action.Status).
+		Updates(map[string]any{
+			"status": CommunicationActionRetried, "failure_reason": "effectFailed",
+			"sent_at": nil, "updated_at": at,
+		})
+	if updated.Error != nil {
+		return false, updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return false, ErrCommunicationActionConflict
+	}
+	retry := CommunicationAction{
+		ActionID: retryID, TurnID: action.TurnID, Kind: action.Kind,
+		Text: action.Text, ContentHash: action.ContentHash,
+		DependsOnActionID:   cloneOptionalString(action.DependsOnActionID),
+		InterviewStartsAtMs: cloneOptionalInt64(action.InterviewStartsAtMs),
+		InterviewEndsAtMs:   cloneOptionalInt64(action.InterviewEndsAtMs),
+		InterviewMethod:     cloneOptionalString(action.InterviewMethod),
+		Status:              CommunicationActionPlanned,
+		PlannedAt:           at, CreatedAt: at, UpdatedAt: at,
+	}
+	if err := tx.Create(&retry).Error; err != nil {
+		return false, err
+	}
+	updatedTurn := tx.Model(&DialogueTurn{}).
+		Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+		Updates(map[string]any{
+			"status": DialogueTurnAdviceReady, "failure_reason": "", "updated_at": at,
+		})
+	if updatedTurn.Error != nil {
+		return false, updatedTurn.Error
+	}
+	if updatedTurn.RowsAffected != 1 {
+		return false, ErrDialogueTurnConflict
+	}
+	return true, tx.Create(&AuditEntry{
+		At: at, Category: "interview_invite_auto_retry",
+		ConversationRef: turn.ConversationRef,
+		Detail:          "action=" + action.ActionID + " retry=" + retryID,
+	}).Error
+}
+
 func communicationV4EventActionMatchesMessage(
 	action CommunicationV4EventAction,
 	message Message,
@@ -3602,6 +3715,22 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 			reason = "effectSuspect"
 		} else if intent.Status == EffectIntentResolvedFailed {
 			reason = "effectResolvedFailed"
+		}
+		// 邀面卡干净失败自动重试例外(2026-07-29 甲方裁决,协议规格 §8.4):
+		// intent 终局 failed 构造性蕴含发送从未发生,且动作仍处派发中(排除
+		// sent 后被撤回的场景)时,原动作标 retried 留档、同事务铸带尝试序号
+		// 的新动作,turn 回 adviceReady、档案自动化不冻结,由巡检按既有派发
+		// 轨无限重试;面试开始时间已到期则照旧转人工终局。
+		if v4Turn && intent.Status == EffectIntentFailed &&
+			action.Kind == CommunicationActionInterviewInvite &&
+			action.Status == CommunicationActionEffectPending {
+			retried, err := retryCommunicationInterviewInviteTx(tx, turn, action, at)
+			if err != nil {
+				return err
+			}
+			if retried {
+				return nil
+			}
 		}
 		if v4Turn && action.Status == CommunicationActionSent {
 			var retracted Message

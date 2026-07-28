@@ -538,6 +538,22 @@ func (a *roundActor) dispatchM5Action(
 			)
 		}
 		previousIntentID = *parent.EffectIntentID
+		if store.IsRetryCommunicationActionID(action.ActionID) {
+			// 邀面卡自动重试(协议规格 §8.4 例外):前次失败尝试是会话最新
+			// intent,WAL CAS 锚取最新;依赖校验仍以父正证 intent 为语义锚,
+			// 并按透明锚四条件核验该最新 intent 确为前次零副作用失败尝试。
+			latest, latestErr := a.manager.store.LatestEffectIntent(
+				profile.Platform,
+				profile.AccountRef,
+				turn.ConversationRef,
+			)
+			if latestErr != nil {
+				return latestErr
+			}
+			if latest != nil {
+				previousIntentID = latest.IntentID
+			}
+		}
 	} else {
 		latest, latestErr := a.manager.store.LatestEffectIntent(
 			profile.Platform,
