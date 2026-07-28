@@ -776,8 +776,8 @@ func TestCommunicationV4WaitingPrerequisiteCannotReserveAI(t *testing.T) {
 		case communication.V4ActionNotifyWechat:
 			if action.Status != CommunicationV4EventActionDeferred ||
 				action.FailureReason !=
-					CommunicationV4EventActionFailureNotificationChannelDeferred {
-				t.Fatalf("换微信通知缺少后置原因: %+v", action)
+					CommunicationV4EventActionFailureNotificationOutboxOwned {
+				t.Fatalf("换微信通知未标记为发件箱承接: %+v", action)
 			}
 		default:
 			t.Fatalf("主动换微信出现未知事件动作: %+v", action)
@@ -900,7 +900,7 @@ func TestFreezeCommunicationV4WechatReceiptUsesProfileScopedEventAction(t *testi
 			notification == nil ||
 			notification.Status != CommunicationV4EventActionDeferred ||
 			notification.FailureReason !=
-				CommunicationV4EventActionFailureNotificationChannelDeferred {
+				CommunicationV4EventActionFailureNotificationOutboxOwned {
 			t.Fatalf("换微信事件动作处置错误: actions=%+v", eventActions)
 		}
 		observed = append(observed, observedReceipt{

@@ -16,15 +16,23 @@ import (
 const (
 	communicationV4EventActionIDDomain = "communication-v4-event-action-v1|"
 
-	CommunicationV4EventActionFailureFixedPhraseUnavailable      = "fixedPhraseUnavailable"
+	CommunicationV4EventActionFailureFixedPhraseUnavailable = "fixedPhraseUnavailable"
+	// notificationChannelDeferred 只存在于 2026-07-28 运营通知 webhook 裁决
+	// 之前物化的存量历史行（当时尚无任何通知渠道）。这些行是不可变事件层
+	// 记录，永不补发；新行一律使用 notificationOutboxOwned。
 	CommunicationV4EventActionFailureNotificationChannelDeferred = "notificationChannelDeferred"
-	CommunicationV4EventActionFailurePrimitiveUnavailable        = "primitiveUnavailable"
-	CommunicationV4EventActionFailureDialogueActionOwned         = "dialogueActionOwned"
-	CommunicationV4EventActionFailureRunnerUnavailable           = "automaticRunnerUnavailable"
-	CommunicationV4EventActionFailureBindingUnavailable          = "automaticBindingUnavailable"
-	CommunicationV4EventActionFailureDependencyUnavailable       = "automaticDependencyUnavailable"
-	CommunicationV4EventActionFailureDispatchNotConstructed      = "automaticDispatchNotConstructed"
-	CommunicationV4EventActionFailureActionInvalid               = "automaticActionInvalid"
+	// notificationOutboxOwned：运营通知的发送义务由 NotificationOutbox
+	// （企微 webhook 发件箱，2026-07-28 裁决）在收编/迁入事务内按 event_key
+	// 幂等承接。事件动作行自此只是事件层的不可变记录，不代表待发欠账，
+	// 任何渠道都不得再按本行补发。
+	CommunicationV4EventActionFailureNotificationOutboxOwned = "notificationOutboxOwned"
+	CommunicationV4EventActionFailurePrimitiveUnavailable    = "primitiveUnavailable"
+	CommunicationV4EventActionFailureDialogueActionOwned     = "dialogueActionOwned"
+	CommunicationV4EventActionFailureRunnerUnavailable       = "automaticRunnerUnavailable"
+	CommunicationV4EventActionFailureBindingUnavailable      = "automaticBindingUnavailable"
+	CommunicationV4EventActionFailureDependencyUnavailable   = "automaticDependencyUnavailable"
+	CommunicationV4EventActionFailureDispatchNotConstructed  = "automaticDispatchNotConstructed"
+	CommunicationV4EventActionFailureActionInvalid           = "automaticActionInvalid"
 )
 
 var (
@@ -699,8 +707,10 @@ func materializeCommunicationV4EventActionDisposition(
 		row.Status = CommunicationV4EventActionPlanned
 		row.ContentHash = communicationWechatInviteContentHash()
 	case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
+		// 发送义务在 NotificationOutbox（收编/迁入事务内 event_key 幂等入队，
+		// 见 enqueueNotificationTx 调用点），本行只保留事件层不可变记录。
 		row.Status = CommunicationV4EventActionDeferred
-		row.FailureReason = CommunicationV4EventActionFailureNotificationChannelDeferred
+		row.FailureReason = CommunicationV4EventActionFailureNotificationOutboxOwned
 	case communication.V4ActionAcceptWechat:
 		row.Status = CommunicationV4EventActionPlanned
 	}
@@ -938,8 +948,11 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 				row.FailureReason == "") &&
 			validCommunicationV4EventActionEffectFields(row)
 	case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
+		// notificationChannelDeferred 是 webhook 裁决前的存量历史形态，重放
+		// 时继续可读；新建行一律 notificationOutboxOwned。
 		return row.Status == CommunicationV4EventActionDeferred &&
-			row.FailureReason == CommunicationV4EventActionFailureNotificationChannelDeferred &&
+			(row.FailureReason == CommunicationV4EventActionFailureNotificationOutboxOwned ||
+				row.FailureReason == CommunicationV4EventActionFailureNotificationChannelDeferred) &&
 			validCommunicationV4EventActionEffectFields(row)
 	case communication.V4ActionAcceptWechat:
 		// Before chat.acceptWechat@1 existed, materialization persisted this
