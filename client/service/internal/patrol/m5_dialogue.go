@@ -293,7 +293,7 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			return err
 		}
 		if turn.Status == store.DialogueTurnAdviceReady {
-			return a.dispatchM5Action(ctx, turn)
+			return a.dispatchM5Action(ctx, turn, false)
 		}
 		if turn.Status == store.DialogueTurnCollected &&
 			v4Owned && nextV4Advice == communication.V4AdviceNone {
@@ -469,7 +469,15 @@ func m5ResumeReplyAdviceAuthorized(decision communication.V4InboundTurnDecision)
 		len(decision.Dialogue.Actions) == 0
 }
 
-func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTurn) error {
+// dispatchM5Action 派发 turn 当前唯一的 planned 动作。withinChain 表示本次
+// 调用是同一 turn 内紧接前项正证的链内推进：按《24点边界裁决-2026-07-28》
+// 链内只做 ensureChainDispatchAllowed 复核（不查日窗口/日界），链首与次日
+// 恢复轨调用传 false，仍走 workflow 成员闸与完整日界复核。
+func (a *roundActor) dispatchM5Action(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	withinChain bool,
+) error {
 	action, err := a.manager.store.PlannedCommunicationActionByTurn(turn.TurnID)
 	if err != nil {
 		return err
@@ -545,8 +553,13 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 	}
 	// The visible send interaction shares the same brain-owned pacing and
 	// post-wait authorization recheck as the sourcing workflow. The hand still
-	// receives one command and owns no business timer.
-	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
+	// receives one command and owns no business timer. Within a chain the
+	// post-wait recheck drops only the daily-boundary clauses.
+	paceWait := a.waitSourcingDelay
+	if withinChain {
+		paceWait = a.waitChainDelay
+	}
+	if err := paceWait(ctx, a.manager.config.InteractionPaceWait); err != nil {
 		if preservesM5PlannedAction(err) {
 			return err
 		}
@@ -646,18 +659,37 @@ func (a *roundActor) dispatchM5Action(ctx context.Context, turn store.DialogueTu
 			// the exact same dispatch path instead of yielding to another
 			// page-driven patrol, which may switch the IM route first.
 			//
-			// This is still a new candidate-visible action: re-enter the literal
-			// workflow member gate before dispatchM5Action performs its own
-			// interaction pacing and post-wait authorization check. The child
-			// therefore keeps an independent action, WAL/idemKey, witness and
-			// positive-evidence boundary.
-			if err := a.mayAdvanceM5Turn(ctx); err != nil {
+			// This is still a new candidate-visible action with its own
+			// action, WAL/idemKey, witness and positive-evidence boundary.
+			// Per《24点边界裁决-2026-07-28》the chain interior does not
+			// re-enter the workflow member gate: its daily-window clause is
+			// exactly what a started chain is allowed to cross, and a user
+			// pause closes the account projection which the chain recheck
+			// still honors. Cancel and hand handover cut the chain too.
+			if err := a.ensureChainDispatchAllowed(ctx); err != nil {
 				return err
 			}
-			return a.dispatchM5Action(ctx, turn)
+			return a.dispatchM5Action(ctx, turn, true)
 		}
 	}
 	return nil
+}
+
+// waitChainDelay keeps the brain-owned interaction pacing for a chain-interior
+// action but rechecks with ensureChainDispatchAllowed afterwards, so a chain
+// finishing across midnight is not cut by the daily-boundary clauses while a
+// pause or handover arriving during the wait still cuts it.
+func (a *roundActor) waitChainDelay(ctx context.Context, wait func(context.Context) error) error {
+	var waitErr error
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		waitErr = wait(ctx)
+	}()
+	if waitErr != nil {
+		return waitErr
+	}
+	return a.ensureChainDispatchAllowed(ctx)
 }
 
 // A pause, daily boundary or process shutdown before WAL construction removes

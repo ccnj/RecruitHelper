@@ -1175,7 +1175,7 @@ func TestCommunicationV4PatrolSendsRejectionTextThenWechatCardThroughDispatcher(
 	}
 }
 
-func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testing.T) {
+func TestCommunicationV4DependentCardPauseDuringChainCutsBeforeChildWAL(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCommunicationV4PatrolTarget(
 		t,
@@ -1195,9 +1195,17 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	// 子动作的节奏等待期间到达用户暂停：链内复核必须在发出子命令前截住
+	// 链（《24点边界裁决-2026-07-28》链内只豁免日界，不豁免暂停）。
+	var manager *Manager
 	paceCalls := 0
 	h.config.InteractionPaceWait = func(ctx context.Context) error {
 		paceCalls++
+		if paceCalls == 2 {
+			if pauseErr := manager.PauseNow(h.key); pauseErr != nil {
+				return pauseErr
+			}
+		}
 		return ctx.Err()
 	}
 	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
@@ -1205,8 +1213,8 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 		t.Fatal(err)
 	}
 	manager.SetWorkflowMemberGate(func() error {
-		if hand.commandCount() == 1 {
-			return ErrActorPaused
+		if hand.commandCount() >= 1 {
+			t.Errorf("链内推进不得重进 workflow member gate: commands=%d", hand.commandCount())
 		}
 		return nil
 	})
@@ -1230,7 +1238,7 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 	err = actor.processCommunicationV4Targets(context.Background())
 	manager.mu.Unlock()
 	if !errors.Is(err, ErrActorPaused) || hand.commandCount() != 1 ||
-		paceCalls != 1 || len(advice.requests) != 0 {
+		paceCalls != 2 || len(advice.requests) != 0 {
 		t.Fatalf(
 			"父动作后暂停必须阻止子动作构造 WAL: err=%v commands=%d pace=%d advice=%+v",
 			err,
@@ -1255,6 +1263,104 @@ func TestCommunicationV4DependentCardRechecksWorkflowGateBeforeChildWAL(t *testi
 		actions[1].DependsOnActionID == nil ||
 		*actions[1].DependsOnActionID != actions[0].ActionID {
 		t.Fatalf("暂停误伤了 dependent 卡片恢复点: actions=%+v err=%v", actions, err)
+	}
+}
+
+func TestCommunicationV4DependentCardStartedChainFinishesAcrossMidnight(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4PatrolTarget(
+		t,
+		h,
+		"dependent-card-cross-midnight",
+		"不感兴趣",
+	)
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf(
+				"拒绝短路组合不得调用 AI: %s",
+				request.Purpose,
+			)
+		},
+	}
+	hand := &m5PositiveHand{}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	// 子卡片的节奏等待期间本地时间跨过 24:00。按《24点边界裁决-2026-07-28》
+	// 已发出首条可见动作的链必须继续收束到终局，而不是把卡片留在 planned
+	// 隔夜（正是 2026-07-27 真实案例的形态）。
+	paceCalls := 0
+	h.config.InteractionPaceWait = func(ctx context.Context) error {
+		paceCalls++
+		if paceCalls == 2 {
+			h.clock.Add(15 * time.Hour)
+		}
+		return ctx.Err()
+	}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetWorkflowMemberGate(func() error {
+		if hand.commandCount() >= 1 {
+			t.Errorf("链内推进不得重进 workflow member gate: commands=%d", hand.commandCount())
+		}
+		return nil
+	})
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取跨日链账号失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-dependent-card-cross-midnight"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager,
+		account: account,
+		hand: HandState{
+			Online: true, Session: "session-1", BootID: "boot-1",
+		},
+		roundID: roundID,
+		now:     h.clock.Now(),
+	}
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil || hand.commandCount() != 2 || paceCalls != 2 ||
+		len(advice.requests) != 0 {
+		t.Fatalf(
+			"已开始的链未跨点收束: err=%v commands=%d pace=%d advice=%+v",
+			err,
+			hand.commandCount(),
+			paceCalls,
+			advice.requests,
+		)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil {
+		t.Fatalf("读取跨日链 turn 失败: turn=%+v err=%v", turn, err)
+	}
+	actions, err := h.db.CommunicationActionsByTurn(turn.TurnID)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Kind != store.CommunicationActionReplyText ||
+		actions[0].Status != store.CommunicationActionSent ||
+		actions[1].Kind != store.CommunicationActionInviteWechat ||
+		actions[1].Status != store.CommunicationActionSent ||
+		actions[1].EffectIntentID == nil {
+		t.Fatalf("跨点后组合动作未各自终局: actions=%+v err=%v", actions, err)
+	}
+	cardIntent, err := h.db.EffectIntentByID(*actions[1].EffectIntentID)
+	if err != nil || cardIntent == nil ||
+		cardIntent.Primitive != protocol.PrimChatSendWechatInvite ||
+		cardIntent.Status != store.EffectIntentOk {
+		t.Fatalf("跨点卡片未取得正证: intent=%+v err=%v", cardIntent, err)
+	}
+	hand.mu.Lock()
+	commands := append([]protocol.CmdBody(nil), hand.commands...)
+	hand.mu.Unlock()
+	if commands[0].Name != protocol.PrimChatSendMessage ||
+		commands[1].Name != protocol.PrimChatSendWechatInvite {
+		t.Fatalf("跨点链命令顺序错误: %+v", commands)
 	}
 }
 

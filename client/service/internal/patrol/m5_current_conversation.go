@@ -88,20 +88,15 @@ func (m *Manager) runCurrentConversationRound(
 		trigger: TriggerCurrentConversation, now: now,
 		requireCurrentThread: true,
 	}
-	untilMidnight := m.nextLocalMidnight(now).Sub(now)
-	roundCtx, cancel := context.WithTimeout(ctx, untilMidnight)
+	// 与 runAccountRound 一致：不再以 24:00 wall-clock 超时取消等待，日界
+	// 收束交由链首与候选人边界的日界复核（《24点边界裁决-2026-07-28》）。
 	m.mu.Lock()
 	func() {
 		defer m.mu.Unlock()
 		if outcome.Err = actor.freezeSourcingBatchGeneration(); outcome.Err == nil {
-			outcome.Err = actor.execute(roundCtx)
+			outcome.Err = actor.execute(ctx)
 		}
 	}()
-	cancel()
-	if errors.Is(outcome.Err, context.DeadlineExceeded) &&
-		m.localDate(m.now()) != m.localDate(now) {
-		outcome.Err = ErrDailyWindowExpired
-	}
 	if errors.Is(outcome.Err, ErrDailyWindowExpired) {
 		_ = m.pauseAccount(key, PauseDailyExpired, m.now())
 	}

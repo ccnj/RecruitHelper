@@ -580,11 +580,6 @@ func (m *Manager) localDate(at time.Time) string {
 	return at.In(m.config.Location).Format("2006-01-02")
 }
 
-func (m *Manager) nextLocalMidnight(at time.Time) time.Time {
-	local := at.In(m.config.Location)
-	return time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, m.config.Location)
-}
-
 func timePointer(value time.Time) *time.Time {
 	copy := value
 	return &copy

@@ -399,6 +399,11 @@ func errorCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	// 日界收束是正常的边界终局，不是脑内部故障；给它专属码，免得诊断
+	// 面把每晚 24:00 的自然收束当成 BRAIN_INTERNAL 事故追查。
+	if errors.Is(err, ErrDailyWindowExpired) {
+		return "DAILY_WINDOW_EXPIRED"
+	}
 	return "BRAIN_INTERNAL"
 }
 
