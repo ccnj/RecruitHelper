@@ -450,7 +450,7 @@ func reduceM5ResumeTurn(
 	material m5TurnMaterial,
 	reply communication.ReplyAdvice,
 ) (communication.V4InboundTurnDecision, error) {
-	if material.inputKind != store.DialogueTurnInputResumeAttachment || len(material.currentFacts) != 1 {
+	if material.inputKind != store.DialogueTurnInputResumeAttachment || len(material.currentFacts) == 0 {
 		return communication.V4InboundTurnDecision{}, communication.ErrInvalidV4StateTransition
 	}
 	return communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
@@ -1149,7 +1149,8 @@ func (a *roundActor) reduceM5ReplyDecision(
 			return communication.Decision{}, communication.ErrInvalidV4StateTransition
 		}
 		action := v4.Dialogue.Actions[0]
-		if action.Kind != communication.V4ActionReplyText || action.CardMessageSeq != material.currentFacts[0].Seq ||
+		// 简历轮动作锚定引擎合成事件的段尾 seq;单卡轮里它就是该卡的 seq。
+		if action.Kind != communication.V4ActionReplyText || action.CardMessageSeq != turn.InboundThroughSeq ||
 			strings.TrimSpace(action.Text) == "" {
 			return communication.Decision{}, communication.ErrInvalidV4StateTransition
 		}

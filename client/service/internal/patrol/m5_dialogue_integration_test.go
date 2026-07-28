@@ -124,6 +124,7 @@ func seedM5AdviceFixtureWithInbound(
 	t *testing.T,
 	h *harness,
 	inbound store.MessageDraft,
+	moreInbound ...store.MessageDraft,
 ) m5AdviceFixture {
 	t.Helper()
 	now := h.clock.Now()
@@ -291,12 +292,13 @@ func seedM5AdviceFixtureWithInbound(
 	key := store.ConversationKey{
 		Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: conversationRef,
 	}
+	inbounds := append([]store.MessageDraft{inbound}, moreInbound...)
 	changes, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
 		Key: key, ExpectedTailSeq: greetingMessage.Seq, PlatformUserRef: platformUserRef,
-		NewMessages: []store.MessageDraft{inbound},
+		NewMessages: inbounds,
 		SyncedAt:    now,
 	})
-	if err != nil || len(changes.Inserted) != 1 {
+	if err != nil || len(changes.Inserted) != len(inbounds) {
 		t.Fatalf("追加合成入站失败: changes=%+v err=%v", changes, err)
 	}
 	digest, turnID, err := store.DialogueTurnIdentity(profileID, *greetingMessage, changes.Inserted)
@@ -310,7 +312,7 @@ func seedM5AdviceFixtureWithInbound(
 	frozen, err := h.db.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: profileID, ConversationRef: conversationRef,
 		InputDigest: digest, HistoryThroughSeq: greetingMessage.Seq,
-		InboundFromSeq: changes.Inserted[0].Seq, InboundThroughSeq: changes.Inserted[0].Seq,
+		InboundFromSeq: changes.Inserted[0].Seq, InboundThroughSeq: changes.Inserted[len(changes.Inserted)-1].Seq,
 		ContextRevisionHash: revision.RevisionHash, ResumeSnapshotID: snapshot.SnapshotID,
 		RecommendedTimeText: recommended, RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt: now,
@@ -431,6 +433,65 @@ func TestAdvanceM5ResumeCardSkipsIntentAndPlansExactlyOneReply(t *testing.T) {
 	restarted.mu.Unlock()
 	if err != nil || len(advice.requests) != 1 {
 		t.Fatalf("简历强意向重启重放不得再次调用 provider: calls=%d err=%v", len(advice.requests), err)
+	}
+}
+
+// 混合输入轮(规格 §五,2026-07-28 批 A)端到端:文字+简历卡+文字的一轮走
+// "冻结→businessEvent 分类→一次 reply→planned 动作",零意向调用,文字与
+// 简历占位文本全部进回复上下文。
+func TestAdvanceM5MixedResumeTurnSkipsIntentAndPlansExactlyOneReply(t *testing.T) {
+	h := newHarness(t)
+	firstText, secondText := "请问做几休几", "工作时间是"
+	fixture := seedM5AdviceFixtureWithInbound(t, h,
+		store.MessageDraft{Direction: "in", Kind: "text", ContentHash: syncledger.HashText(firstText), Text: &firstText, Origin: "external"},
+		store.MessageDraft{Direction: "in", Kind: "card", ContentHash: syncledger.HashText("card\x1fresumeAttachment"), CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
+		store.MessageDraft{Direction: "in", Kind: "text", ContentHash: syncledger.HashText(secondText), Text: &secondText, Origin: "external"},
+	)
+	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+		if call != 1 || request.Purpose != m5ai.PurposeReply {
+			return m5ai.CompletionResponse{}, fmt.Errorf("混合简历轮发生未授权调用: call=%d purpose=%s", call, request.Purpose)
+		}
+		if !strings.Contains(request.UserContent, m5ResumeAttachmentHistoryText) ||
+			!strings.Contains(request.UserContent, firstText) ||
+			!strings.Contains(request.UserContent, secondText) {
+			return m5ai.CompletionResponse{}, fmt.Errorf("reply 上下文缺失文字或简历事件文本")
+		}
+		return safeFakeResponse(`{"话术_序列":["简历收到了，工作时间我们详细说下。"],"动作":"无"}`), nil
+	}}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+	h.manager.mu.Lock()
+	err := actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(advice.requests) != 1 || advice.requests[0].Purpose != m5ai.PurposeReply {
+		t.Fatalf("混合简历轮必须零 intent、一次 reply: requests=%+v", advice.requests)
+	}
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || len(invocations) != 1 || invocations[0].Purpose != m5ai.PurposeReply {
+		t.Fatalf("混合简历轮 invocation 事实错误: invocations=%+v err=%v", invocations, err)
+	}
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady ||
+		turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned ||
+		action.Kind != store.CommunicationActionReplyText || action.EffectIntentID != nil {
+		t.Fatalf("混合简历轮唯一动作事实错误: turn=%+v action=%+v err=%v actionErr=%v", turn, action, err, actionErr)
+	}
+
+	restarted, err := NewManager(h.db, h.runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedActor := &roundActor{manager: restarted, now: h.clock.Now()}
+	restarted.mu.Lock()
+	err = restartedActor.advanceM5Turn(context.Background(), *turn)
+	restarted.mu.Unlock()
+	if err != nil || len(advice.requests) != 1 {
+		t.Fatalf("混合简历轮重启重放不得再次调用 provider: calls=%d err=%v", len(advice.requests), err)
 	}
 }
 
@@ -621,7 +682,7 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 	}
 }
 
-func TestInspectM5PendingKeepsUnsupportedCardShapesOutOfAutomaticTurns(t *testing.T) {
+func TestInspectM5PendingCardShapeEligibility(t *testing.T) {
 	greetingText := "你好"
 	resumeHash := syncledger.HashText("card\x1fresumeAttachment")
 	text := "补充一条普通消息"
@@ -636,25 +697,18 @@ func TestInspectM5PendingKeepsUnsupportedCardShapesOutOfAutomaticTurns(t *testin
 		pending      int
 	}{
 		{name: "generic_card", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "generic", CardType: "unknown", CardState: "unknown", Origin: "external"}}, manualReason: "unsupportedSemantic"},
-		{name: "mixed_card_and_text", messages: []store.Message{resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
-		{name: "multiple_resume_cards", messages: []store.Message{resume(2), resume(3)}, manualReason: "unsupportedSemantic"},
+		{name: "wechat_card_with_text", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "wx", CardType: "wechatExchange", CardState: "pending", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
+		{name: "mixed_card_and_text", messages: []store.Message{resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
+		{name: "multiple_resume_cards", messages: []store.Message{resume(2), resume(3)}, manualReason: "", pending: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			messages := append([]store.Message{{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"}}, test.messages...)
 			pending := inspectM5Pending(messages)
 			if pending.manualReason != test.manualReason || len(pending.inbound) != test.pending {
-				t.Fatalf("不支持卡片形态进入自动轮: pending=%+v", pending)
+				t.Fatalf("卡片形态资格判定不符合混合输入轮规格: pending=%+v", pending)
 			}
 		})
-	}
-
-	cardThenText := inspectM5Pending([]store.Message{
-		{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"},
-		resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"},
-	})
-	if cardThenText.manualReason != "unsupportedSemantic" || len(cardThenText.inbound) != 0 {
-		t.Fatalf("卡后新消息必须阻断原简历轮: %+v", cardThenText)
 	}
 	humanText := "真人已经回复"
 	cardThenHuman := inspectM5Pending([]store.Message{
