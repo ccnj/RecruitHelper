@@ -5331,12 +5331,15 @@ async function mainReadThreadPage(
     const timeline = document.querySelector<HTMLElement>('.im-timeline__wrapper .km-list') ??
       document.querySelector<HTMLElement>('.im-timeline__wrapper .im-timeline')
     if (!timeline) throw new Error('dom_thread_timeline_missing')
-    const boundary = document.querySelector<HTMLElement>('.im-timeline-ending')
-    const boundaryText = `${String(boundary?.textContent ?? '')} ${String(timeline.parentElement?.textContent ?? '')}`
     // 只有页面明确声明 90 天可见边界，DOM 回退才有资格声称已到顶。
     // “以下是90天内的聊天消息”是真机当前文案；其余分支兼容已验证过的同义文案。
-    const hasExplicitNinetyDayBoundary = /(?:以下是\s*90\s*天内(?:的)?聊天消息|(?:仅展示|只展示)(?:近)?\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息|近\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息)/u
-      .test(boundaryText)
+    // 边界条与消息都可能晚渲染,统一在复读收敛后再取最终值。
+    const readNinetyDayBoundary = (): boolean => {
+      const boundary = document.querySelector<HTMLElement>('.im-timeline-ending')
+      const boundaryText = `${String(boundary?.textContent ?? '')} ${String(timeline.parentElement?.textContent ?? '')}`
+      return /(?:以下是\s*90\s*天内(?:的)?聊天消息|(?:仅展示|只展示)(?:近)?\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息|近\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息)/u
+        .test(boundaryText)
+    }
     const readRows = (): unknown[] => {
       const vue = (timeline as HTMLElement & { __vue__?: AnyRecord }).__vue__
       const props = vue?._props as AnyRecord | undefined
@@ -5345,6 +5348,18 @@ async function mainReadThreadPage(
       return readInitialTimeline()
     }
     let rawRows = readRows()
+    if (rawRows.length === 0) {
+      // 真机 2026-07-28:打开会话后"90 天"边界条先于消息约 150~300ms 渲染,
+      // 立即读取会把仍在渲染的会话误判成"合法空"。0 条不立刻下结论:按
+      // 条件轮询纪律每 150ms 复读,读出消息即继续,至多等 2 秒。
+      diagnosticStage = 'read_history_dom_empty_settle'
+      const emptyDeadline = performance.now() + 2_000
+      while (rawRows.length === 0 && performance.now() < emptyDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        rawRows = readRows()
+      }
+    }
+    const hasExplicitNinetyDayBoundary = readNinetyDayBoundary()
     if (rawRows.length === 0 && !hasExplicitNinetyDayBoundary) {
       throw new Error('dom_thread_data_unavailable')
     }
