@@ -157,6 +157,17 @@ type m5PositiveHand struct {
 	mu         sync.Mutex
 	dispatcher *dispatch.Dispatcher
 	commands   []protocol.CmdBody
+	// now 必须注入 harness 假时钟:合成 result 的 ObservedAt 会经出站消息
+	// TsApproxMs 成为业务出站时钟(LastOutboundAt),掺入真实挂钟会让统一
+	// 业务窗口断言随测试执行的真实时刻漂移。
+	now func() time.Time
+}
+
+func (h *m5PositiveHand) observedAtMilli() int64 {
+	if h.now == nil {
+		panic("m5PositiveHand 缺少注入时钟,禁止回退真实挂钟")
+	}
+	return h.now().UnixMilli()
 }
 
 func (h *m5PositiveHand) setDispatcher(dispatcher *dispatch.Dispatcher) {
@@ -195,7 +206,7 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 		data, err = protocol.Encode(protocol.CandidateReadResumeData{
 			ConversationRef: args.ConversationRef,
 			PlatformUserRef: args.PlatformUserRef,
-			ObservedAt:      time.Now().UnixMilli(),
+			ObservedAt:      h.observedAtMilli(),
 			Basic: []protocol.CandidateResumeLabelValue{
 				{Label: "学历", Value: "本科"},
 			},
@@ -214,7 +225,7 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 		data, err = protocol.Encode(protocol.ChatSendMessageData{
 			ConversationRef: args.ConversationRef,
 			ContentHash:     syncledger.HashText(args.Text),
-			ObservedAt:      time.Now().UnixMilli(),
+			ObservedAt:      h.observedAtMilli(),
 		})
 		evidenceType = string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)
 	case protocol.PrimChatSendWechatInvite:
@@ -226,7 +237,7 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 			ConversationRef: args.ConversationRef,
 			ContentHash:     syncledger.WechatExchangeContentHash(),
 			SourceKey:       strings.Repeat("a", 64),
-			ObservedAt:      time.Now().UnixMilli(),
+			ObservedAt:      h.observedAtMilli(),
 		})
 		evidenceType = string(protocol.SendWechatInviteEvidenceTypeOutboundWechatInviteObserved)
 	case protocol.PrimChatSendInviteCard:
@@ -243,7 +254,7 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 			),
 			SourceKey:  strings.Repeat("b", 64),
 			Interview:  args.Interview,
-			ObservedAt: time.Now().UnixMilli(),
+			ObservedAt: h.observedAtMilli(),
 		})
 		evidenceType = string(protocol.SendInviteCardEvidenceTypeOutboundInterviewInviteObserved)
 	default:
@@ -312,7 +323,7 @@ func TestM5AutomaticReplyCrossesRealDispatcherOnceAndSurvivesRestart(t *testing.
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	paceCalls := 0
 	h.config.InteractionPaceWait = func(ctx context.Context) error {
 		if hand.commandCount() != 0 {
@@ -466,7 +477,7 @@ func TestM5ResumeBusinessEventCrossesExistingWALOnce(t *testing.T) {
 		}
 		return safeFakeResponse(`{"话术_序列":["收到简历了，我们继续聊聊这个岗位。"],"动作":"无"}`), nil
 	}}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}

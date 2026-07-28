@@ -209,7 +209,7 @@ func TestProcessCurrentConversationOnceCarriesQuietBypassIntoAutomaticWAL(
 			return nil, errors.New("显式拒绝短路不应调用其他只读原语")
 		}
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}

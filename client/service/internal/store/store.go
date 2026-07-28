@@ -20,6 +20,23 @@ import (
 
 type Store struct {
 	db *gorm.DB
+	// nowFn 覆盖 Store 内部自取的业务时间戳来源(如 result 应用时的
+	// effectAt,它会成为动作 SentAt 进而驱动沟通出站时钟)。生产不设置,
+	// 保持真实时钟;自动化测试注入假时钟后,业务时刻才能与测试时钟一致,
+	// 统一业务窗口断言不再随测试执行的真实时刻漂移。
+	nowFn func() time.Time
+}
+
+func (s *Store) now() time.Time {
+	if s.nowFn == nil {
+		return time.Now()
+	}
+	return s.nowFn()
+}
+
+// SetNowFunc 注入内部时间戳时钟;nil 恢复真实时钟。仅供测试使用。
+func (s *Store) SetNowFunc(fn func() time.Time) {
+	s.nowFn = fn
 }
 
 // Open 打开(必要时创建)数据目录下的 brain.db,开 WAL,建/补表。

@@ -66,7 +66,7 @@ func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T
 	}
 
 	advice := &recordingAdviceExecutor{}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5InboundAutomaticRunner{m5AutomaticReplyRunner: &m5AutomaticReplyRunner{
@@ -277,7 +277,7 @@ func TestInboundResumeCaptureContinuesCurrentVisibleWindow(t *testing.T) {
 		}
 	}
 
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5InboundAutomaticRunner{m5AutomaticReplyRunner: &m5AutomaticReplyRunner{

@@ -39,7 +39,7 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 			return safeFakeResponse(`{"话术":"合成冷催一","抓的点":"合成经历"}`), nil
 		},
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -209,7 +209,7 @@ func TestCommunicationV4SchedulePatrolArchivesBeforeOldPlannedAction(
 	fallbackAt := lastBodyAt.Add(8 * 24 * time.Hour)
 	h.clock.Add(fallbackAt.Sub(h.clock.Now()))
 
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -271,7 +271,7 @@ func TestCommunicationV4SchedulePatrolRechecksFallbackBetweenColdTextAndInvite(
 	t *testing.T,
 ) {
 	h := newHarness(t)
-	wall := time.Now().UTC()
+	wall := scheduleTestWallAnchor
 	secondRoundAt := nextScheduleTestBusinessTime(wall.Add(25 * time.Hour))
 	bodyAt := secondRoundAt.Add(-167 * time.Hour)
 	h.clock.Add(bodyAt.Sub(h.clock.Now()))
@@ -298,7 +298,7 @@ func TestCommunicationV4SchedulePatrolRechecksFallbackBetweenColdTextAndInvite(
 		}
 		return ctx.Err()
 	}
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -402,18 +402,14 @@ func runCommunicationV4ScheduleRound(
 	}
 }
 
+// scheduleTestWallAnchor 是 schedule 测试的固定挂钟锚点。必须晚于
+// newHarness 的假时钟纪元(2026-07-17 09:00 UTC)至少 167 小时,保证
+// 各测试从锚点回拨 25h/167h 定位 fixture 时不会早于账号建档时刻;
+// 小时钉在 10:00 UTC 使统一业务窗口判定与真实执行时刻无关。
+var scheduleTestWallAnchor = time.Date(2026, 7, 24, 10, 0, 0, 0, time.UTC)
+
 func scheduleTestBusinessNow() time.Time {
-	wall := time.Now().UTC()
-	return time.Date(
-		wall.Year(),
-		wall.Month(),
-		wall.Day(),
-		10,
-		0,
-		0,
-		0,
-		time.UTC,
-	)
+	return scheduleTestWallAnchor
 }
 
 func nextScheduleTestBusinessTime(notBefore time.Time) time.Time {

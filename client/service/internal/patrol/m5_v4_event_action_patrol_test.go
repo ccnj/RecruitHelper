@@ -20,7 +20,7 @@ func TestCommunicationV4EventActionPatrolSendsReceiptThenWechatInviteOnce(
 		"event-action-positive",
 		"accepted",
 	)
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
@@ -208,7 +208,7 @@ func TestCommunicationV4EventActionPatrolPacingInterruptionKeepsPlan(
 		"event-action-pacing-stop",
 		"accepted",
 	)
-	hand := &m5PositiveHand{}
+	hand := &m5PositiveHand{now: h.clock.Now}
 	dispatcher := dispatch.New(h.db, hand)
 	hand.setDispatcher(dispatcher)
 	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
