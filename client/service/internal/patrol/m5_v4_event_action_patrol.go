@@ -106,7 +106,9 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 			action.V4Kind == communication.V4ActionColdPrompt ||
 			action.V4Kind == communication.V4ActionColdWechatText ||
 			action.V4Kind == communication.V4ActionInterviewFollowup) &&
-		action.DependsOnActionID == nil &&
+		// 催2正文自第二个气泡起依赖前一个气泡的正证;其余文本动作仍是链首。
+		(action.DependsOnActionID == nil ||
+			action.V4Kind == communication.V4ActionColdWechatText) &&
 		strings.TrimSpace(action.Text) != "" &&
 		strings.TrimSpace(action.ContentHash) != "":
 		var ok bool

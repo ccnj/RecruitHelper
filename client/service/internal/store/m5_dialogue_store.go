@@ -2570,9 +2570,14 @@ func validateCommunicationV4EventActionDependencyTx(
 	aggregate CommunicationV4Aggregate,
 	conversation Conversation,
 ) error {
-	if (action.V4Kind != communication.V4ActionInviteWechat &&
-		action.V4Kind != communication.V4ActionColdWechatInvite) ||
-		action.EffectKind != CommunicationV4EventEffectInviteWechat ||
+	validInviteChild := (action.V4Kind == communication.V4ActionInviteWechat ||
+		action.V4Kind == communication.V4ActionColdWechatInvite) &&
+		action.EffectKind == CommunicationV4EventEffectInviteWechat
+	// 催2正文自第二个气泡起以前一气泡为父,复用与卡片同一条正证依赖轨。
+	validColdTextChild := action.V4Kind == communication.V4ActionColdWechatText &&
+		action.EffectKind == CommunicationV4EventEffectReplyText &&
+		action.SourceInputKind == CommunicationV4InputSchedulePlan
+	if (!validInviteChild && !validColdTextChild) ||
 		action.DependsOnActionID == nil ||
 		strings.TrimSpace(*action.DependsOnActionID) == "" ||
 		childIntent == nil {
@@ -2580,7 +2585,8 @@ func validateCommunicationV4EventActionDependencyTx(
 	}
 	var expectedParent *communication.V4EventAction
 	if action.SourceInputKind == CommunicationV4InputSchedulePlan {
-		if action.V4Kind != communication.V4ActionColdWechatInvite ||
+		if (action.V4Kind != communication.V4ActionColdWechatInvite &&
+			action.V4Kind != communication.V4ActionColdWechatText) ||
 			action.SourceOrdinal <= 0 ||
 			action.SourceOrdinal >= len(sourceInfo.Actions) {
 			return ErrCommunicationActionConflict

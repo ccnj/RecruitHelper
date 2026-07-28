@@ -183,18 +183,32 @@ func evaluateV4ColdPrompt(input V4ScheduleInput, state V4State) (V4ScheduleDecis
 	}
 }
 
+// evaluateV4ColdWechat plans the 催2 tier. The fixed phrase's Messages items
+// are the candidate-visible bubble boundaries: one planned action per item,
+// then the invite card as the final chain member. Joined Text stays a
+// compatibility summary only and never becomes a send payload.
 func evaluateV4ColdWechat(input V4ScheduleInput, state V4State) V4ScheduleDecision {
 	phrase := input.FixedPhrases.Phrase(V4PhraseColdWechat)
-	if !state.ColdWechatTextSent && (phrase.State != V4PhraseAvailable || m5ai.ValidateSendText(phrase.Text) != nil) {
-		return manualV4Schedule(state, V4ManualFixedPhraseUnavailable)
-	}
 	dueAt := state.LastOutboundAt.Add(v4ColdDelay)
-	actions := make([]V4PlannedAction, 0, 2)
+	actions := make([]V4PlannedAction, 0, len(phrase.Messages)+1)
 	if !state.ColdWechatTextSent {
-		actions = append(actions, V4PlannedAction{
-			ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdWechatText, 0, 0, 0),
-			Kind:      V4ActionColdWechatText, Text: phrase.Text, DueAt: &dueAt,
-		})
+		if phrase.State != V4PhraseAvailable ||
+			len(phrase.Messages) == 0 ||
+			len(phrase.Messages) > m5ai.ReplyPhraseMaxItems ||
+			strings.Join(phrase.Messages, "\n") != phrase.Text ||
+			m5ai.ValidateSendText(phrase.Text) != nil {
+			return manualV4Schedule(state, V4ManualFixedPhraseUnavailable)
+		}
+		for index, message := range phrase.Messages {
+			if strings.TrimSpace(message) != message ||
+				m5ai.ValidateSendText(message) != nil {
+				return manualV4Schedule(state, V4ManualFixedPhraseUnavailable)
+			}
+			actions = append(actions, V4PlannedAction{
+				ActionKey: stableV4SchedulePhraseKey(input.ProfileKey, V4ActionColdWechatText, index+1),
+				Kind:      V4ActionColdWechatText, Text: message, DueAt: &dueAt,
+			})
+		}
 	}
 	actions = append(actions, V4PlannedAction{
 		ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdWechatInvite, 0, 0, 0),
@@ -306,6 +320,20 @@ func stableV4ScheduleKey(profileKey string, kind V4ActionKind, cardMessageSeq in
 		key += fmt.Sprintf("|stage:%d", stage)
 	}
 	return key
+}
+
+// stableV4SchedulePhraseKey mirrors stableV4TurnPhraseActionKey: the first
+// bubble keeps the unsuffixed schedule key so single-item configurations and
+// already-persisted plans keep their identity; later bubbles append |bubble:N.
+func stableV4SchedulePhraseKey(profileKey string, kind V4ActionKind, ordinal int) string {
+	if ordinal == 1 {
+		return stableV4ScheduleKey(profileKey, kind, 0, 0, 0)
+	}
+	return fmt.Sprintf(
+		"%s|bubble:%d",
+		stableV4ScheduleKey(profileKey, kind, 0, 0, 0),
+		ordinal,
+	)
 }
 
 func stableV4ScheduleAdviceKey(

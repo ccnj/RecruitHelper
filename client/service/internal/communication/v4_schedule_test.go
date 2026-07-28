@@ -2,6 +2,7 @@ package communication
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -203,6 +204,58 @@ func TestV4ScheduleColdLadderUsesAIThenFixedTextAndInvite(t *testing.T) {
 	if err != nil || len(archive.Actions) != 1 || archive.Actions[0].Kind != V4ActionArchive ||
 		archive.Actions[0].EndReason != V4EndSilentWechatInvited {
 		t.Fatalf("无可用催后没有按微信线归档: decision=%+v err=%v", archive, err)
+	}
+}
+
+func TestV4ScheduleColdWechatExpandsFixedPhraseBubbles(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.ColdPromptRemaining = 0
+	input := v4ScheduleInput(state, scheduleAt(state, 24*time.Hour))
+	phrase := input.FixedPhrases.Phrase(V4PhraseColdWechat)
+	phrase.Messages = []string{"看到消息了吗", "职位还留着", "方便的话加个微信细聊"}
+	phrase.Text = "看到消息了吗\n职位还留着\n方便的话加个微信细聊"
+	input.FixedPhrases.Phrases[V4PhraseColdWechat] = phrase
+	decision, err := EvaluateV4Schedule(input)
+	if err != nil || decision.Status != V4ScheduleActionsPlanned ||
+		len(decision.Actions) != 4 {
+		t.Fatalf("催2没有按数组展开为逐项气泡: decision=%+v err=%v", decision, err)
+	}
+	base := decision.Actions[0].ActionKey
+	dueAt := state.LastOutboundAt.Add(24 * time.Hour)
+	for index, message := range phrase.Messages {
+		action := decision.Actions[index]
+		expectedKey := base
+		if index > 0 {
+			expectedKey = fmt.Sprintf("%s|bubble:%d", base, index+1)
+		}
+		if action.Kind != V4ActionColdWechatText || action.Text != message ||
+			action.ActionKey != expectedKey ||
+			action.DueAt == nil || !action.DueAt.Equal(dueAt) {
+			t.Fatalf("第 %d 个气泡形态错误: %+v", index+1, action)
+		}
+	}
+	invite := decision.Actions[3]
+	if invite.Kind != V4ActionColdWechatInvite || invite.Text != "" ||
+		invite.DueAt == nil || !invite.DueAt.Equal(dueAt) {
+		t.Fatalf("邀请没有收尾: %+v", invite)
+	}
+}
+
+func TestV4ScheduleColdWechatInconsistentPhraseGoesManual(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.ColdPromptRemaining = 0
+	input := v4ScheduleInput(state, scheduleAt(state, 24*time.Hour))
+	phrase := input.FixedPhrases.Phrase(V4PhraseColdWechat)
+	phrase.Messages = []string{"第一句", "第二句"}
+	phrase.Text = "第一句"
+	input.FixedPhrases.Phrases[V4PhraseColdWechat] = phrase
+	decision, err := EvaluateV4Schedule(input)
+	if err != nil || decision.Status != V4ScheduleManualRequired ||
+		decision.ManualReason != V4ManualFixedPhraseUnavailable ||
+		len(decision.Actions) != 0 {
+		t.Fatalf("Messages 与 Text 不一致必须整体转人工: decision=%+v err=%v", decision, err)
 	}
 }
 
