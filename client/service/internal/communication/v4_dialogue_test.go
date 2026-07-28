@@ -654,3 +654,26 @@ func TestV4DialogueRejectsAdviceOnNoActionAndBranchMismatches(t *testing.T) {
 		}
 	}
 }
+
+func TestRoundUpToInterviewTimeGrid(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int64
+		want int64
+	}{
+		{"整点不变", 1785391200000, 1785391200000},           // 2026-07-30 14:00:00
+		{"格点不变", 1785391500000, 1785391500000},           // 14:05:00
+		{"14:03 进到 14:05", 1785391380000, 1785391500000}, // 14:03:00
+		{"14:01 进到 14:05", 1785391260000, 1785391500000}, // 14:01:00
+		{"零点后一毫秒进整格", 1785391200001, 1785391500000},      // 14:00:00.001
+		{"14:59 进到 15:00", 1785394740000, 1785394800000}, // 14:59:00
+	}
+	for _, tc := range cases {
+		if got := roundUpToInterviewTimeGrid(tc.in); got != tc.want {
+			t.Fatalf("%s: roundUpToInterviewTimeGrid(%d)=%d, want %d", tc.name, tc.in, got, tc.want)
+		}
+	}
+	if V4InterviewDurationMs%V4InterviewTimeGridMs != 0 {
+		t.Fatalf("面试时长必须落在平台时间格上: duration=%d grid=%d", V4InterviewDurationMs, V4InterviewTimeGridMs)
+	}
+}

@@ -7451,10 +7451,15 @@ async function mainPrepareInterviewEditor(
     }
     if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
         interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
-        interview.method !== 'wechatVideo' || interview.startsAt % 60_000 !== 0 ||
+        interview.method !== 'wechatVideo' ||
         (interview.endsAt - interview.startsAt) % 60_000 !== 0) {
       return failed('input_rejected')
     }
+    // 平台时间选择器是 5 分钟格（2026-07-28 真机）；脑侧已在时间出生点向上
+    // 取整，非格点时间抵达手侧说明上游有 bug——立即拒绝，绝不在手侧擅自
+    // 取整（平台读回正证按脑侧毫秒值精确配对，手侧改时会让发出的卡片永远
+    // 无法确认），也不再让它走到分钟项查找处白等 10 秒。
+    if (interview.startsAt % 300_000 !== 0) return failed('input_rejected', 'startGrid')
     if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
       return failed('action_window_elapsed')
     }
