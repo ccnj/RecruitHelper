@@ -536,6 +536,11 @@ const (
 	CommunicationV4InputRetractedAction CommunicationV4InputKind = "retractedAction"
 	CommunicationV4InputArchiveAction   CommunicationV4InputKind = "archiveAction"
 	CommunicationV4InputSchedulePlan    CommunicationV4InputKind = "schedulePlan"
+	// CommunicationV4InputManualUnfreeze is appended only by the offline
+	// unsupported-semantic unfreeze CLI: it advances a manualRequired turn
+	// receipt to the replayed waiting-advice outcome without rewriting the
+	// immutable original receipt.
+	CommunicationV4InputManualUnfreeze CommunicationV4InputKind = "manualUnfreeze"
 )
 
 // CommunicationV4ApplicationOutcome stores only the decision data needed to

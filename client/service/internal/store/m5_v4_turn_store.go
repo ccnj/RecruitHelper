@@ -12,6 +12,8 @@ import (
 )
 
 const communicationV4DialogueTurnSemanticKind = "inboundTurn"
+
+const communicationV4ManualUnfreezeSemanticKind = "manualUnfreeze"
 const communicationV4DialogueAdviceKeySeparator = "|advice|"
 
 type FreezeCommunicationV4TurnResult struct {
@@ -523,6 +525,30 @@ func communicationV4TurnHeadApplicationTx(
 			}
 			head = continuation
 		}
+	}
+	if unfreeze, exists, err := communicationV4ApplicationTx(
+		tx,
+		turn.ProfileID,
+		CommunicationV4InputManualUnfreeze,
+		turn.TurnID,
+	); err != nil {
+		return CommunicationV4ProjectionApplication{}, false, err
+	} else if exists {
+		// 离线解冻链环只允许把 manualRequired 的轮回执演进为"等待回复建
+		// 议";任何其他形状都是坏账本,响亮失败而不是静默续跑。
+		if head.Outcome.ManualReason != communication.V4ManualUnsupportedSemantic ||
+			unfreeze.InputDigest != head.InputDigest ||
+			unfreeze.SemanticKind != communicationV4ManualUnfreezeSemanticKind ||
+			unfreeze.MessageSeq != turn.InboundThroughSeq ||
+			unfreeze.FromRevision != head.ToRevision ||
+			unfreeze.Outcome.Dialogue != communication.V4DialogueReplyKnownInterested ||
+			unfreeze.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+			unfreeze.Outcome.NextAdvice != communication.V4AdviceReply ||
+			unfreeze.Outcome.IntentLabel != m5ai.IntentInterested ||
+			unfreeze.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+		}
+		head = unfreeze
 	}
 	for _, purpose := range []m5ai.CompletionPurpose{m5ai.PurposeIntent, m5ai.PurposeReply} {
 		key := communicationV4DialogueAdviceKey(turn.TurnID, purpose)
