@@ -6,6 +6,7 @@ import (
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/textcanon"
 )
 
 // 手工重建批 A 激活前的真实冻结账本形状(对照生产库 2026-07-28 个案):
@@ -26,12 +27,45 @@ func seedFrozenUnsupportedSemanticResumeMix(t *testing.T, s *Store) (string, str
 		t.Fatal(err)
 	}
 	greetingIntentID := "intent-unfreeze-root"
+	backendJobID := "job-unfreeze"
+	snapshotID := "snapshot-unfreeze"
+	logicalID := "logical-unfreeze"
 	if err := s.db.Create(&CandidateProfile{
 		ProfileID: profileID, Platform: platform, AccountRef: accountRef,
 		PlatformUserRef: platformUserRef, PositionRef: "position-unfreeze",
-		MainStatus:                   CandidateProfileCommunicating,
-		SuccessfulGreetingIntentID:   &greetingIntentID,
-		ConversationRef:              &conversationRef,
+		MainStatus:                 CandidateProfileCommunicating,
+		SuccessfulGreetingIntentID: &greetingIntentID,
+		ConversationRef:            &conversationRef,
+		BackendJobID:               &backendJobID,
+		ResumeCaptureState:         ResumeCaptureCaptured,
+		ResumeCaptureLogicalDispatchID: &logicalID,
+		ActiveResumeSnapshotID:         &snapshotID,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CandidateResumeSnapshot{
+		SnapshotID: snapshotID, ProfileID: profileID,
+		SourceKind: resumeSnapshotSourceIM, SourceConversationRef: conversationRef,
+		SourceLogicalDispatchID: logicalID,
+		ObservedAt:              at.Add(-time.Hour).UnixMilli(), CapturedAt: at.Add(-time.Hour),
+		SchemaVersion: resumeSnapshotSchemaV1,
+		ContentHash:   "resume-content-unfreeze", ResumeJSON: `{"basic":[]}`,
+		CreatedAt: at.Add(-time.Hour),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	contextRevision := contextRevisionFixture("ctx-unfreeze", "revision-unfreeze", at.Add(-time.Hour))
+	contextRevision.SourceKind = legacyJobConfigSourceKind
+	contextRevision.SourceJobRef = backendJobID
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{contextRevision}, at.Add(-time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	adoptedAt := at.Add(-2 * time.Hour)
+	if err := s.db.Create(&TrackedIntent{
+		Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef,
+		Status: TrackingAdopted, RequestedBy: "fixture", RequestedAt: adoptedAt, AdoptedAt: &adoptedAt,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +182,62 @@ func TestUnfreezeV4UnsupportedSemanticResumeMixRestoresWaitingReply(t *testing.T
 	replayed, err := s.UnfreezeV4UnsupportedSemanticProfiles()
 	if err != nil || len(replayed) != 0 {
 		t.Fatalf("解冻重跑必须为空: results=%+v err=%v", replayed, err)
+	}
+}
+
+// 直击 2026-07-28 真机回归:解冻后分类、预约并完成回复建议的持久化全链
+// 必须走通——对话要求必须以回执链 head(含 manualUnfreeze 链环)为准,而
+// 不是原始轮回执里冻结的 none。
+func TestUnfreezeThenReplyCompletionPersistsPlannedAction(t *testing.T) {
+	s := openTest(t)
+	profileID, turnID := seedFrozenUnsupportedSemanticResumeMix(t, s)
+	if results, err := s.UnfreezeV4UnsupportedSemanticProfiles(); err != nil ||
+		len(results) != 1 || !results[0].Unfrozen {
+		t.Fatalf("解冻失败: results=%+v err=%v", results, err)
+	}
+	now := time.Date(2026, 7, 28, 7, 30, 0, 0, time.UTC)
+	if _, err := s.ApplyResumeBusinessClassification(turnID, now); err != nil {
+		t.Fatalf("businessEvent 分类失败: %v", err)
+	}
+	if turnMid, err := s.DialogueTurnByID(turnID); err != nil || turnMid.Status != DialogueTurnClassified {
+		t.Fatalf("分类后中间态: turn=%+v err=%v", turnMid, err)
+	}
+	if next, owned, err := s.CommunicationV4NextAdvice(turnID); err != nil || !owned || next != communication.V4AdviceReply {
+		t.Fatalf("分类后 head 建议: next=%v owned=%v err=%v", next, owned, err)
+	}
+	if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+		InvocationID: "invocation-unfreeze-reply", TurnID: turnID,
+		Purpose: m5ai.PurposeReply, Attempt: 1,
+		Provider: "fake-provider", Model: "fake-model", InputHash: "input-hash",
+		CreatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("预约回复调用失败: %v", err)
+	}
+	text := "简历收到了，工作时间我们详细说下。"
+	action, err := s.CompleteReplyInvocation(CompleteReplyInvocationRequest{
+		Completion: AIInvocationCompletion{
+			InvocationID: "invocation-unfreeze-reply", Status: AIInvocationOK,
+			OutputHash: "output-hash", UsageShape: AIInvocationReasoningFieldAbsent, ReasoningContentEmpty: true,
+			LatencyMs: 10, FinishedAt: now.Add(2 * time.Second),
+		},
+		ActionID: "action-unfreeze-reply", Phrases: []string{text}, Text: text,
+		ContentHash: textcanon.Hash(text), PlannedAt: now.Add(2 * time.Second),
+	})
+	if err != nil || action == nil || action.Status != CommunicationActionPlanned ||
+		action.Kind != CommunicationActionReplyText || action.Text != text {
+		debugTurn, _ := s.DialogueTurnByID(turnID)
+		t.Fatalf("回复建议持久化未产出 planned 动作: action=%+v err=%v turnStatus=%s failureReason=%s",
+			action, err, debugTurn.Status, debugTurn.FailureReason)
+	}
+	turn, err := s.DialogueTurnByID(turnID)
+	if err != nil || turn == nil || turn.Status != DialogueTurnAdviceReady {
+		t.Fatalf("turn 未停在 adviceReady: turn=%+v err=%v", turn, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(profileID)
+	if err != nil || aggregate == nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.Revision != 3 {
+		t.Fatalf("advice 回执未接在解冻链环之后: aggregate=%+v err=%v", aggregate, err)
 	}
 }
 
