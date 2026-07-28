@@ -275,7 +275,6 @@ func TestInboundResumeCaptureContinuesCurrentVisibleWindow(t *testing.T) {
 		default:
 			return defaultHandler(request)
 		}
-		return nil, errors.New("unreachable")
 	}
 
 	hand := &m5PositiveHand{}
