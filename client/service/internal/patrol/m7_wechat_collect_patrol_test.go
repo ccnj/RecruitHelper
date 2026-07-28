@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -20,10 +21,12 @@ type wechatCollectFixture struct {
 	actor           *roundActor
 }
 
-// seedExchangedWechatConversation 复现真机形态:我方发出邀请卡(out/pending,
-// 带稳定键),平台不翻转它;候选人同意表现为新增一条归属候选人方向的结果卡,
-// 状态机据此把微信线推到"已换号"。withOutboundInvite=false 时只落候选人方向
-// 的卡,用于验证"对方发起"形态不被本触发器碰。
+// seedExchangedWechatConversation 复现两种真机形态。
+// 我方发起(withOutboundInvite=true):我方发出邀请卡(out/pending,带稳定键),
+// 平台不翻转它;候选人同意表现为新增一条归属候选人方向的结果卡(in/accepted)。
+// withOutboundInvite=false 时只落 in/accepted 结果卡、不落任何请求卡,用于验证
+// 无锚时本触发器不介入。候选人主动发起的形态由
+// seedCandidateInitiatedWechatConversation 单独构造(请求卡 in、结果卡 out)。
 func seedExchangedWechatConversation(
 	t *testing.T,
 	h *harness,
@@ -124,6 +127,98 @@ func seedExchangedWechatConversation(
 	}
 }
 
+// 候选人主动发起(形态 A):请求卡是 in/pending,交换结果卡归属点同意的一方——
+// 我方——所以是 out/accepted。2026-07-28 生产页面直读。收号锚必须是那张 in
+// 请求卡;若误取 out 结果卡,原语锚不到 105,收号永远阴性。
+func seedCandidateInitiatedWechatConversation(
+	t *testing.T,
+	h *harness,
+	suffix string,
+) wechatCollectFixture {
+	t.Helper()
+	target := seedCommunicationV4PatrolTarget(t, h, "wechat-collect-"+suffix, "我想了解这个岗位")
+	key := store.ConversationKey{
+		Platform:        h.key.Platform,
+		AccountRef:      h.key.AccountRef,
+		ConversationRef: target.conversationRef,
+	}
+	roundID := "round-wechat-collect-" + suffix
+	beginCommunicationV4PatrolRound(t, h, roundID)
+
+	requestText := "[交换微信请求]"
+	requestSourceKey := syncledger.HashText("wechat-request-" + suffix)
+	resultText := "[微信交换成功]"
+	resultSourceKey := syncledger.HashText("wechat-result-" + suffix)
+	appended, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, RoundID: roundID, ExpectedTailSeq: target.inboundSeq,
+		NewMessages: []store.MessageDraft{
+			{
+				Direction: "in", Kind: "card",
+				ContentHash: syncledger.HashText("request\x1f" + suffix),
+				Text:        &requestText, CardType: "wechatExchange", CardState: "pending",
+				Origin: "external", SourceKey: &requestSourceKey,
+			},
+			{
+				Direction: "out", Kind: "card",
+				ContentHash: syncledger.HashText("result\x1f" + suffix),
+				Text:        &resultText, CardType: "wechatExchange", CardState: "accepted",
+				Origin: "external", SourceKey: &resultSourceKey,
+			},
+		},
+		SyncedAt: h.clock.Now().Add(time.Minute),
+	})
+	if err != nil || len(appended.Inserted) != 2 {
+		t.Fatalf("追加形态 A 请求卡与结果卡: result=%+v err=%v", appended, err)
+	}
+	// 投影游标必须逐条推进：种子里的候选人文字 → in 请求卡 → out 结果卡。
+	project := func(message store.Message, at time.Time) communication.BusinessEvent {
+		t.Helper()
+		event, err := communication.NormalizeLedgerMessage(communication.LedgerMessageFact{
+			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
+			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
+			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.db.ApplyCommunicationV4BusinessEvent(
+			store.ApplyCommunicationV4BusinessEventRequest{
+				ProfileID: target.profileID, Event: event, AppliedAt: at,
+			},
+		); err != nil {
+			t.Fatalf("投影 seq=%d 失败: %v", message.Seq, err)
+		}
+		return event
+	}
+	inbound, err := h.db.MessageBySeq(key, target.inboundSeq)
+	if err != nil || inbound == nil {
+		t.Fatalf("读取候选人消息失败: message=%+v err=%v", inbound, err)
+	}
+	project(*inbound, h.clock.Now())
+	project(appended.Inserted[0], h.clock.Now().Add(time.Minute))
+	if event := project(appended.Inserted[1], h.clock.Now().Add(2*time.Minute)); //
+	event.Kind != communication.EventWechatExchanged {
+		t.Fatalf("出站交换结果卡未被读成已换号: event=%+v", event)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(target.profileID)
+	if err != nil || aggregate.State.WechatState != communication.V4WechatExchanged {
+		t.Fatalf("形态 A 微信线未进入已换号: aggregate=%+v err=%v", aggregate, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	return wechatCollectFixture{
+		profileID: target.profileID, conversationRef: target.conversationRef,
+		inviteSourceKey: requestSourceKey,
+		actor: &roundActor{
+			manager: h.manager, account: account,
+			hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+			roundID: roundID, now: h.clock.Now(),
+		},
+	}
+}
+
 func runCollect(t *testing.T, h *harness, fixture wechatCollectFixture) error {
 	t.Helper()
 	h.manager.mu.Lock()
@@ -187,14 +282,54 @@ func TestCollectExchangedWechatContactRecordsAssetAndEnqueues(t *testing.T) {
 	}
 }
 
-// 对方发起、我方接受的形态没有我方邀请卡:本触发器必须完全不介入,
-// 那条链的收编由接受动作正证在自己的事务里完成。
-func TestCollectExchangedWechatContactSkipsCandidateInitiatedForm(t *testing.T) {
+// 形态 A 兜底:接受动作当场没取到号(259 晚到)时,本触发器按 in 请求卡为锚补收。
+func TestCollectExchangedWechatContactCollectsCandidateInitiatedForm(t *testing.T) {
 	h := newHarness(t)
-	fixture := seedExchangedWechatConversation(t, h, "candidate-initiated", false)
+	fixture := seedCandidateInitiatedWechatConversation(t, h, "candidate-initiated")
+	exchangeSourceKey := strings.Repeat("d", 64)
+	var anchored string
 	h.runner.handler = func(request RunRequest) (any, error) {
 		if request.Name == protocol.PrimChatReadWechatExchangeOutcome {
-			t.Errorf("对方发起形态不得由本触发器派发收号读")
+			var args protocol.ChatReadWechatExchangeOutcomeArgs
+			if err := json.Unmarshal(request.Args, &args); err != nil {
+				t.Errorf("收号读参数解析失败: %v", err)
+				return nil, errors.New("bad args")
+			}
+			anchored = args.RequestSourceKey
+			return protocol.ChatReadWechatExchangeOutcomeData{
+				Confirmed: true, ExchangeSourceKey: exchangeSourceKey,
+				PeerWechat: "synthetic-peer-wechat-a", ObservedAt: h.clock.Now().UnixMilli(),
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+	if err := runCollect(t, h, fixture); err != nil {
+		t.Fatal(err)
+	}
+	if anchored != fixture.inviteSourceKey {
+		t.Fatalf("形态 A 必须锚在候选人那张 in 请求卡: got=%q want=%q",
+			anchored, fixture.inviteSourceKey)
+	}
+	assets, err := h.db.ContactAssetsByProfile(fixture.profileID)
+	if err != nil || len(assets) != 1 ||
+		assets[0].RequestSourceKey != fixture.inviteSourceKey ||
+		assets[0].Value != "synthetic-peer-wechat-a" {
+		t.Fatalf("形态 A 微信资产未落账: assets=%+v err=%v", assets, err)
+	}
+	pending, err := h.db.NotificationsNeedingCapture(fixture.profileID)
+	if err != nil || len(pending) != 1 ||
+		pending[0].NotifyType != store.NotificationTypeWechatAdded {
+		t.Fatalf("形态 A 收编未同事务入队运营通知: pending=%+v err=%v", pending, err)
+	}
+}
+
+// 账本里没有任何请求卡时无锚可用:本触发器必须完全不介入,不拿结果卡凑数。
+func TestCollectExchangedWechatContactWithoutRequestCardStaysSilent(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedExchangedWechatConversation(t, h, "no-request-card", false)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadWechatExchangeOutcome {
+			t.Errorf("无请求卡锚时不得派发收号读")
 			return nil, errors.New("unexpected dispatch")
 		}
 		return defaultHandler(request)
@@ -204,10 +339,10 @@ func TestCollectExchangedWechatContactSkipsCandidateInitiatedForm(t *testing.T) 
 	}
 	assets, err := h.db.ContactAssetsByProfile(fixture.profileID)
 	if err != nil || len(assets) != 0 {
-		t.Fatalf("对方发起形态不得由本触发器建资产: assets=%+v err=%v", assets, err)
+		t.Fatalf("无锚时不得建资产: assets=%+v err=%v", assets, err)
 	}
 	if h.runner.count(protocol.PrimChatReadWechatExchangeOutcome) != 0 {
-		t.Fatalf("对方发起形态被误派发: %v", h.runner.names())
+		t.Fatalf("无锚时被误派发: %v", h.runner.names())
 	}
 }
 

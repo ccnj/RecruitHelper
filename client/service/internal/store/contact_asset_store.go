@@ -76,25 +76,29 @@ func (s *Store) ContactAssetsByProfile(profileID string) ([]ContactAsset, error)
 	return assets, err
 }
 
-// LatestOutboundWechatInviteSourceKey 返回该会话中我方最近一张仍有效的换微信
-// 邀请卡的稳定消息键。它只服务"我方发起→对方接受"形态的收号锚定：候选人主动
-// 发起的请求卡是 in 方向，不会被这里选中，因此该查询天然把另一形态排除在外。
+// LatestWechatExchangeRequestSourceKey 返回该会话中最近一张仍有效的换微信
+// 「请求」卡的稳定消息键，两种发起形态通用：我方发起的请求卡是 out 方向、
+// 候选人主动发起的是 in 方向，而两者的交换「结果」卡都是 accepted 状态，
+// 由 card_state='pending' 排除在外——否则形态 A 的结果卡（2026-07-29 起也
+// 投影为 out 方向的 wechatExchange）会被误当成我方邀请，锚到非 105 消息上，
+// 收号原语必然阴性。
 // 取最近一张而不是最早一张：平台正证要求结果消息落在下一张请求卡之前，只有
-// 最近一次邀请的锚才可能匹配到本次交换结果。
-func (s *Store) LatestOutboundWechatInviteSourceKey(
+// 最近一次请求的锚才可能匹配到本次交换结果。方向与 originType 的配对由原语
+// 自己核对，这里不替它裁决形态。
+func (s *Store) LatestWechatExchangeRequestSourceKey(
 	key ConversationKey,
 ) (string, bool, error) {
 	var message Message
 	err := s.db.
 		Where(
 			"platform = ? AND account_ref = ? AND conversation_ref = ? AND "+
-				"direction = ? AND card_type = ? AND source_key IS NOT NULL AND "+
+				"card_type = ? AND card_state = ? AND source_key IS NOT NULL AND "+
 				activeMessageCondition,
 			key.Platform,
 			key.AccountRef,
 			key.ConversationRef,
-			"out",
 			"wechatExchange",
+			"pending",
 		).
 		Order("seq DESC").
 		First(&message).Error

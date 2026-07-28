@@ -70,6 +70,19 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 			fact: LedgerMessageFact{Seq: 7, Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "pending", Origin: "external"},
 			want: BusinessEvent{Key: "message:7", Kind: EventInterviewInvited, Source: EventSourceMessage, MessageSeq: 7},
 		},
+		{
+			name: "outbound wechat request card",
+			fact: LedgerMessageFact{Seq: 12, Direction: "out", Kind: "card", CardType: "wechatExchange", CardState: "pending", Origin: "self"},
+			want: BusinessEvent{Key: "message:12", Kind: EventWechatInvited, Source: EventSourceMessage, MessageSeq: 12},
+		},
+		{
+			// 交换结果卡归属点同意的一方：我方接受候选人主动请求时它是出站的。
+			// 只按 cardType 一律读成"我方发起邀请"会把交换成功误记为又发了一次
+			// 邀请，微信线永远推不到已换号（2026-07-29 形态 A 修复）。
+			name: "outbound wechat exchange result card",
+			fact: LedgerMessageFact{Seq: 13, Direction: "out", Kind: "card", CardType: "wechatExchange", CardState: "accepted", Origin: "external"},
+			want: BusinessEvent{Key: "message:13", Kind: EventWechatExchanged, Source: EventSourceMessage, MessageSeq: 13},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +134,8 @@ func TestNormalizeLedgerMessageKeepsUnsupportedShapesConservative(t *testing.T) 
 		{name: "pending interview card is not acceptance", fact: LedgerMessageFact{Seq: 6, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "pending", Origin: "external"}, code: "inboundInterviewCardState"},
 		{name: "unknown interview card is not acceptance", fact: LedgerMessageFact{Seq: 7, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "unknown", Origin: "external"}, code: "inboundInterviewCardState"},
 		{name: "empty text", fact: LedgerMessageFact{Seq: 4, Direction: "in", Kind: "text", Text: textPointer("  "), Origin: "external"}, code: "emptyInboundText"},
+		{name: "rejected outbound wechat card is unproven", fact: LedgerMessageFact{Seq: 8, Direction: "out", Kind: "card", CardType: "wechatExchange", CardState: "rejected", Origin: "self"}, code: "outboundWechatCardState"},
+		{name: "unknown outbound wechat card is neither invite nor exchange", fact: LedgerMessageFact{Seq: 9, Direction: "out", Kind: "card", CardType: "wechatExchange", CardState: "unknown", Origin: "self"}, code: "outboundWechatCardState"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
