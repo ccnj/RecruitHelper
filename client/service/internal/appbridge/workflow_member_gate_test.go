@@ -42,10 +42,10 @@ func TestScoringCallsSharedWorkflowGateBeforeEachNewCandidate(t *testing.T) {
 
 	progress, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
 	if !errors.Is(err, blocked) || progress == nil || progress.OKCount != 1 ||
-		progress.PendingCount != 1 || len(advice.requests) != 1 || gateCalls != 2 {
+		progress.PendingCount != 1 || advice.requestCount() != 1 || gateCalls != 2 {
 		t.Fatalf(
 			"member gate did not stop exactly before candidate 2: progress=%+v calls=%d advice=%d err=%v",
-			progress, gateCalls, len(advice.requests), err,
+			progress, gateCalls, advice.requestCount(), err,
 		)
 	}
 }

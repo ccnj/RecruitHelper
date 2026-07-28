@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,19 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
+func greetingFixtureResponse(jsonText string) m5ai.CompletionResponse {
+	zero := 0
+	return m5ai.CompletionResponse{
+		JSONText: jsonText,
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 20, CachedInputTokens: 3, OutputTokens: 8, ReasoningTokens: &zero,
+		},
+		ReasoningContentEmpty: true,
+	}
+}
+
 type sourcingGreetingScoringAdvice struct {
+	mu       sync.Mutex
 	requests []m5ai.CompletionRequest
 }
 
@@ -26,7 +39,9 @@ func (a *sourcingGreetingScoringAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
+	a.mu.Lock()
 	a.requests = append(a.requests, request)
+	a.mu.Unlock()
 	zero := 0
 	return m5ai.CompletionResponse{
 		JSONText: `{"score":8}`,
@@ -37,8 +52,14 @@ func (a *sourcingGreetingScoringAdvice) CompleteJSON(
 	}, nil
 }
 
+// sourcingBatchGreetingAdvice 按成员标记与该成员的第几次尝试出剧本。生成
+// 编排器并发驱动成员且失败会重试，fake 必须并发安全并按成员分流。
 type sourcingBatchGreetingAdvice struct {
+	mu       sync.Mutex
 	requests []m5ai.CompletionRequest
+	markers  []string
+	attempts map[string]int
+	respond  func(marker string, attempt int) (m5ai.CompletionResponse, error)
 }
 
 func (*sourcingBatchGreetingAdvice) ProviderName() string { return "fixture-greeting-provider" }
@@ -47,24 +68,44 @@ func (a *sourcingBatchGreetingAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
+	a.mu.Lock()
 	a.requests = append(a.requests, request)
-	if len(a.requests) == 2 {
-		return m5ai.CompletionResponse{}, fmt.Errorf("fixture greeting transport failed")
+	marker := ""
+	for _, candidate := range a.markers {
+		if strings.Contains(request.UserContent, candidate) {
+			marker = candidate
+			break
+		}
 	}
-	if len(a.requests) > 2 {
-		return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次招呼语调用", len(a.requests))
+	if a.attempts == nil {
+		a.attempts = make(map[string]int)
 	}
-	zero := 0
-	return m5ai.CompletionResponse{
-		JSONText: `{"招呼语":"你好，看到你的经历很匹配，方便聊聊吗？"}`,
-		Usage: m5ai.CompletionUsage{
-			InputTokens: 20, CachedInputTokens: 3, OutputTokens: 8, ReasoningTokens: &zero,
-		},
-		ReasoningContentEmpty: true,
-	}, nil
+	a.attempts[marker]++
+	attempt := a.attempts[marker]
+	respond := a.respond
+	a.mu.Unlock()
+	if respond == nil {
+		return greetingFixtureResponse(`{"招呼语":"你好，看到你的经历很匹配，方便聊聊吗？"}`), nil
+	}
+	return respond(marker, attempt)
+}
+
+func (a *sourcingBatchGreetingAdvice) requestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.requests)
+}
+
+func (a *sourcingBatchGreetingAdvice) requestsSnapshot() []m5ai.CompletionRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]m5ai.CompletionRequest, len(a.requests))
+	copy(out, a.requests)
+	return out
 }
 
 type sourcingBatchGreetingAllSuccessAdvice struct {
+	mu       sync.Mutex
 	requests []m5ai.CompletionRequest
 }
 
@@ -78,18 +119,19 @@ func (a *sourcingBatchGreetingAllSuccessAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
+	a.mu.Lock()
 	a.requests = append(a.requests, request)
-	zero := 0
-	return m5ai.CompletionResponse{
-		JSONText: fmt.Sprintf(
-			`{"招呼语":"你好，这是页面续扫测试中的第 %d 条招呼。"}`,
-			len(a.requests),
-		),
-		Usage: m5ai.CompletionUsage{
-			InputTokens: 20, CachedInputTokens: 3, OutputTokens: 8, ReasoningTokens: &zero,
-		},
-		ReasoningContentEmpty: true,
-	}, nil
+	sequence := len(a.requests)
+	a.mu.Unlock()
+	return greetingFixtureResponse(fmt.Sprintf(
+		`{"招呼语":"你好，这是页面续扫测试中的第 %d 条招呼。"}`, sequence,
+	)), nil
+}
+
+func (a *sourcingBatchGreetingAllSuccessAdvice) requestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.requests)
 }
 
 func prepareSelectedSourcingBatch(t *testing.T, h *sourcingActorHarness, targetCount int) string {
@@ -125,13 +167,30 @@ func prepareSelectedSourcingBatch(t *testing.T, h *sourcingActorHarness, targetC
 
 func TestSelectedSourcingBatchGeneratesGreetingsWithoutTouchingHand(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}})
+	for ref, marker := range map[string]string{
+		"candidate-a": "greet-marker-alpha", "candidate-b": "greet-marker-bravo",
+	} {
+		candidate := h.sender.candidates[ref]
+		candidate.SelfEvaluation = marker
+		h.sender.candidates[ref] = candidate
+	}
 	batchID := prepareSelectedSourcingBatch(t, h, 2)
 	beforeHandCalls := len(h.sender.order)
 
-	advice := &sourcingBatchGreetingAdvice{}
+	// alpha 一次成功；bravo 每次传输失败，预算耗尽（1+3 次）后终局失败。
+	advice := &sourcingBatchGreetingAdvice{
+		markers: []string{"greet-marker-alpha", "greet-marker-bravo"},
+		respond: func(marker string, attempt int) (m5ai.CompletionResponse, error) {
+			if marker == "greet-marker-bravo" {
+				return m5ai.CompletionResponse{}, fmt.Errorf("fixture greeting transport failed")
+			}
+			return greetingFixtureResponse(`{"招呼语":"你好，看到你的经历很匹配，方便聊聊吗？"}`), nil
+		},
+	}
 	generator, err := patrol.NewManager(
 		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
-		patrol.Config{Clock: h.clock, Location: time.UTC}, advice,
+		patrol.Config{Clock: h.clock, Location: time.UTC, SourcingAIRetryWait: noSourcingAIRetryWait},
+		advice,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -145,8 +204,8 @@ func TestSelectedSourcingBatchGeneratesGreetingsWithoutTouchingHand(t *testing.T
 		progress.Provider != advice.ProviderName() || progress.Model != advice.ModelName() {
 		t.Fatalf("招呼语批次没有完整终局: %+v", progress)
 	}
-	if len(advice.requests) != 2 {
-		t.Fatalf("provider 调用次数错误: %d", len(advice.requests))
+	if advice.requestCount() != 5 {
+		t.Fatalf("provider 调用次数错误(1 成功 + 4 预算耗尽): %d", advice.requestCount())
 	}
 	for _, request := range advice.requests {
 		if request.Purpose != m5ai.PurposeGreeting || request.MaxOutputTokens != m5ai.GreetingOutputTokenLimit {
@@ -158,8 +217,8 @@ func TestSelectedSourcingBatchGeneratesGreetingsWithoutTouchingHand(t *testing.T
 	}
 
 	replayed, err := generator.GenerateSelectedSourcingGreetings(context.Background(), batchID)
-	if err != nil || !replayed.Completed || len(advice.requests) != 2 {
-		t.Fatalf("重复生成产生了新调用: progress=%+v requests=%d err=%v", replayed, len(advice.requests), err)
+	if err != nil || !replayed.Completed || advice.requestCount() != 5 {
+		t.Fatalf("重复生成产生了新调用: progress=%+v requests=%d err=%v", replayed, advice.requestCount(), err)
 	}
 }
 
@@ -297,9 +356,9 @@ func prepareGeneratedSourcingGreetings(
 	}
 	progress, err := manager.GenerateSelectedSourcingGreetings(context.Background(), batchID)
 	if err != nil || !progress.Completed || progress.OKCount != int64(targetCount) ||
-		len(advice.requests) != targetCount {
+		advice.requestCount() != targetCount {
 		t.Fatalf("正式招呼语批次未完成: progress=%+v calls=%d err=%v",
-			progress, len(advice.requests), err)
+			progress, advice.requestCount(), err)
 	}
 	plan, err := h.store.SourcingGreetingSendScanPlan(batchID)
 	if err != nil || plan == nil || len(plan.Targets) != targetCount {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,8 +43,26 @@ func (a *sourcingActorAdvice) CompleteJSON(
 	return m5ai.CompletionResponse{}, fmt.Errorf("正式纯采集不得调用 provider")
 }
 
+// sourcingBatchScoringAdvice 按成员标记与该成员的第几次尝试出剧本。评分
+// 编排器并发驱动成员且失败会重试，fake 必须并发安全并按成员分流，不能再
+// 按全局调用序号假设顺序。
 type sourcingBatchScoringAdvice struct {
+	mu       sync.Mutex
 	requests []m5ai.CompletionRequest
+	markers  []string
+	attempts map[string]int
+	respond  func(marker string, attempt int) (m5ai.CompletionResponse, error)
+}
+
+func scoringFixtureResponse(jsonText string) m5ai.CompletionResponse {
+	zero := 0
+	return m5ai.CompletionResponse{
+		JSONText:              jsonText,
+		ReasoningContentEmpty: true,
+		Usage: m5ai.CompletionUsage{
+			InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &zero,
+		},
+	}
 }
 
 func (*sourcingBatchScoringAdvice) ProviderName() string { return "fixture-score-provider" }
@@ -52,29 +71,46 @@ func (a *sourcingBatchScoringAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
+	a.mu.Lock()
 	a.requests = append(a.requests, request)
-	zero := 0
-	response := m5ai.CompletionResponse{
-		ReasoningContentEmpty: true,
-		Usage: m5ai.CompletionUsage{
-			InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &zero,
-		},
+	marker := ""
+	for _, candidate := range a.markers {
+		if strings.Contains(request.UserContent, candidate) {
+			marker = candidate
+			break
+		}
 	}
-	switch len(a.requests) {
-	case 1:
-		response.JSONText = `{"score":8}`
-		return response, nil
-	case 2:
-		return m5ai.CompletionResponse{}, fmt.Errorf("fixture transport failed")
-	case 3:
-		response.JSONText = `{"score":"bad"}`
-		return response, nil
-	default:
-		return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次评分调用", len(a.requests))
+	if a.attempts == nil {
+		a.attempts = make(map[string]int)
 	}
+	a.attempts[marker]++
+	attempt := a.attempts[marker]
+	respond := a.respond
+	a.mu.Unlock()
+	if respond == nil {
+		return scoringFixtureResponse(`{"score":8}`), nil
+	}
+	return respond(marker, attempt)
 }
 
+func (a *sourcingBatchScoringAdvice) requestCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.requests)
+}
+
+func (a *sourcingBatchScoringAdvice) requestsSnapshot() []m5ai.CompletionRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]m5ai.CompletionRequest, len(a.requests))
+	copy(out, a.requests)
+	return out
+}
+
+func noSourcingAIRetryWait(context.Context, bool, int) error { return nil }
+
 type postResponseInputBudgetAdvice struct {
+	mu       sync.Mutex
 	requests []m5ai.CompletionRequest
 	response m5ai.CompletionResponse
 	delay    time.Duration
@@ -88,7 +124,9 @@ func (a *postResponseInputBudgetAdvice) CompleteJSON(
 	_ context.Context,
 	request m5ai.CompletionRequest,
 ) (m5ai.CompletionResponse, error) {
+	a.mu.Lock()
 	a.requests = append(a.requests, request)
+	a.mu.Unlock()
 	if a.delay > 0 {
 		time.Sleep(a.delay)
 	}
@@ -710,6 +748,13 @@ func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
 
 func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b", "candidate-c"}})
+	for ref, marker := range map[string]string{
+		"candidate-a": "marker-alpha", "candidate-b": "marker-bravo", "candidate-c": "marker-charlie",
+	} {
+		candidate := h.sender.candidates[ref]
+		candidate.SelfEvaluation = marker
+		h.sender.candidates[ref] = candidate
+	}
 	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
 		t.Fatal(err)
 	}
@@ -722,10 +767,29 @@ func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T
 	}
 
 	beforeHandCalls := len(h.sender.order)
-	advice := &sourcingBatchScoringAdvice{}
+	work, err := h.store.PendingSourcingScoreWork(batch.BatchID)
+	if err != nil || len(work) != 3 {
+		t.Fatalf("评分前待驱动成员错误: work=%d err=%v", len(work), err)
+	}
+	// alpha 一次成功；bravo 每次传输失败，预算耗尽（1+3 次）后终局失败；
+	// charlie 每次输出不可解析，同样耗尽预算后终局失败。
+	advice := &sourcingBatchScoringAdvice{
+		markers: []string{"marker-alpha", "marker-bravo", "marker-charlie"},
+		respond: func(marker string, attempt int) (m5ai.CompletionResponse, error) {
+			switch marker {
+			case "marker-alpha":
+				return scoringFixtureResponse(`{"score":8}`), nil
+			case "marker-bravo":
+				return m5ai.CompletionResponse{}, fmt.Errorf("fixture transport failed")
+			default:
+				return scoringFixtureResponse(`{"score":"bad"}`), nil
+			}
+		},
+	}
 	scorer, err := patrol.NewManager(
 		h.store, PatrolRunner{Dispatcher: h.sender.dispatcher}, sourcingActorHands{},
-		patrol.Config{Clock: h.clock, Location: time.UTC}, advice,
+		patrol.Config{Clock: h.clock, Location: time.UTC, SourcingAIRetryWait: noSourcingAIRetryWait},
+		advice,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -739,21 +803,57 @@ func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T
 		progress.Provider != advice.ProviderName() || progress.Model != advice.ModelName() {
 		t.Fatalf("统一评分没有完整终局: %+v", progress)
 	}
-	if len(advice.requests) != 3 {
-		t.Fatalf("provider 调用次数错误: %d", len(advice.requests))
+	requests := advice.requestsSnapshot()
+	if len(requests) != 9 {
+		t.Fatalf("provider 调用次数错误(1 成功 + 2×4 预算耗尽): %d", len(requests))
 	}
-	for _, request := range advice.requests {
+	attemptSuffixes := 0
+	for _, request := range requests {
 		if request.Purpose != m5ai.PurposeScoring || request.MaxOutputTokens != m5ai.ScoringOutputTokenLimit {
 			t.Fatalf("评分请求越界: %+v", request)
 		}
+		if strings.Contains(request.InvocationID, "#a") {
+			attemptSuffixes++
+		}
+	}
+	if attemptSuffixes != 6 {
+		t.Fatalf("重试尝试缺少独立追踪身份: suffixed=%d requests=%d", attemptSuffixes, len(requests))
 	}
 	if len(h.sender.order) != beforeHandCalls {
 		t.Fatalf("统一评分触碰了 hand: before=%d after=%d order=%v", beforeHandCalls, len(h.sender.order), h.sender.order)
 	}
+	for marker, wantAttempts := range map[string]int{
+		"marker-bravo": 4, "marker-charlie": 4,
+	} {
+		if got := advice.attempts[marker]; got != wantAttempts {
+			t.Fatalf("%s 预算内尝试次数错误: got=%d want=%d", marker, got, wantAttempts)
+		}
+	}
+	failedRuns := 0
+	for _, item := range work {
+		invocation, err := h.store.SourcingScoreByRunID(item.Run.RunID)
+		if err != nil || invocation == nil {
+			t.Fatalf("成员缺少评分终局: run=%s err=%v", item.Run.RunID, err)
+		}
+		if invocation.Status == store.AIInvocationOK {
+			if invocation.AttemptCount != 1 || invocation.BudgetedAttemptCount != 1 {
+				t.Fatalf("成功成员尝试计数错误: %+v", invocation)
+			}
+			continue
+		}
+		failedRuns++
+		if invocation.AttemptCount != 4 || invocation.BudgetedAttemptCount != 4 ||
+			invocation.Score != nil || invocation.FinishedAt == nil {
+			t.Fatalf("失败成员未按预算耗尽终局: %+v", invocation)
+		}
+	}
+	if failedRuns != 2 {
+		t.Fatalf("失败成员数量错误: %d", failedRuns)
+	}
 
 	replayed, err := scorer.ScoreCompletedSourcingBatch(context.Background(), batch.BatchID)
-	if err != nil || !replayed.Completed || len(advice.requests) != 3 {
-		t.Fatalf("重复统一评分产生了新调用: progress=%+v requests=%d err=%v", replayed, len(advice.requests), err)
+	if err != nil || !replayed.Completed || advice.requestCount() != 9 {
+		t.Fatalf("重复统一评分产生了新调用: progress=%+v requests=%d err=%v", replayed, advice.requestCount(), err)
 	}
 }
 

@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -19,7 +20,9 @@ var (
 // GenerateSelectedSourcingGreetings is the sole production orchestrator for
 // generating greeting text for a completed selection. It only persists model
 // suggestions: it never reaches a hand, opens a candidate, or constructs a
-// greeting effect.
+// greeting effect. Members are driven by a bounded concurrent pool with
+// classified retries (2026-07-28 adjudication); interruption leaves inFlight
+// reservations that the next invocation resumes.
 func (m *Manager) GenerateSelectedSourcingGreetings(
 	ctx context.Context,
 	batchID string,
@@ -66,47 +69,41 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 		return progress, ErrSourcingGreetingPlatformDefault
 	}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			progress, _ = m.store.SourcingBatchGreetingProgress(batchID)
-			return progress, err
-		}
-		material, err := m.store.NextSelectedSourcingGreetingMaterial(
-			batchID, revision.RevisionHash,
-		)
-		if err != nil {
-			return progress, err
-		}
-		if material == nil {
-			progress, err = m.store.SourcingBatchGreetingProgress(batchID)
-			if err != nil {
-				return nil, err
-			}
-			if !progress.Completed {
-				return progress, ErrSourcingGreetingIncomplete
-			}
-			return progress, nil
-		}
-
-		if err := m.mayStartNextWorkflowMember(); err != nil {
-			progress, _ = m.store.SourcingBatchGreetingProgress(batchID)
-			return progress, err
-		}
-		if err := m.generateSourcingGreetingMember(
-			ctx, view.GreetingPrompt, *material, provider, model,
-		); err != nil {
-			progress, _ = m.store.SourcingBatchGreetingProgress(batchID)
-			return progress, err
-		}
+	items, err := m.store.PendingSourcingGreetingWork(batchID, revision.RevisionHash)
+	if err != nil {
+		return progress, err
 	}
+	poolErr := m.runSourcingAIMemberPool(ctx, len(items), func(index int) error {
+		return m.driveSourcingGreetingMember(
+			ctx, view.GreetingPrompt, items[index], provider, model,
+		)
+	})
+
+	progress, err = m.store.SourcingBatchGreetingProgress(batchID)
+	if err != nil {
+		return nil, err
+	}
+	if poolErr != nil {
+		return progress, poolErr
+	}
+	if err := ctx.Err(); err != nil {
+		return progress, err
+	}
+	if !progress.Completed {
+		return progress, ErrSourcingGreetingIncomplete
+	}
+	return progress, nil
 }
 
-func (m *Manager) generateSourcingGreetingMember(
+// driveSourcingGreetingMember drives one selected member's reservation to its
+// single terminal fact, mirroring driveSourcingScoreMember's retry contract.
+func (m *Manager) driveSourcingGreetingMember(
 	ctx context.Context,
 	prompt string,
-	material store.SourcingGreetingMaterial,
+	item store.SourcingGreetingWorkItem,
 	provider, model string,
 ) error {
+	material := item.Material
 	input, inputErr := m5ai.RenderGreetingInputV1(material.ResumeJSON)
 	content := ""
 	renderErr := inputErr
@@ -121,18 +118,35 @@ func (m *Manager) generateSourcingGreetingMember(
 	invocationID := stableM5ID(
 		"greeting-invocation", material.RunID, material.ContextRevisionHash, material.RunContentHash,
 	)
-	reserved, err := m.store.ReserveSourcingGreeting(store.ReserveSourcingGreetingRequest{
-		InvocationID: invocationID, BatchID: material.BatchID, RunID: material.RunID,
-		ProfileID: material.ProfileID, ContextRevisionHash: material.ContextRevisionHash,
-		RunContentHash: material.RunContentHash, Provider: provider, Model: model,
-		InputHash: inputHash, StartedAt: m.now(),
-	})
-	if err != nil {
-		return err
+	invocation := item.Invocation
+	if invocation == nil {
+		reserved, err := m.store.ReserveSourcingGreeting(store.ReserveSourcingGreetingRequest{
+			InvocationID: invocationID, BatchID: material.BatchID, RunID: material.RunID,
+			ProfileID: material.ProfileID, ContextRevisionHash: material.ContextRevisionHash,
+			RunContentHash: material.RunContentHash, Provider: provider, Model: model,
+			InputHash: inputHash, StartedAt: m.now(),
+		})
+		if err != nil {
+			return err
+		}
+		reservation := reserved.Invocation
+		if !reserved.Created && reservation.FinishedAt != nil {
+			return nil
+		}
+		invocation = &reservation
+	} else {
+		// 接手 inFlight 行前核对调用身份；漂移必须响亮冲突。
+		if invocation.InvocationID != invocationID ||
+			invocation.BatchID != material.BatchID ||
+			invocation.ProfileID != material.ProfileID ||
+			invocation.ContextRevisionHash != material.ContextRevisionHash ||
+			invocation.RunContentHash != material.RunContentHash ||
+			invocation.Provider != provider || invocation.Model != model ||
+			invocation.InputHash != inputHash {
+			return store.ErrAIInvocationConflict
+		}
 	}
-	if !reserved.Created {
-		return nil
-	}
+
 	if renderErr != nil {
 		errorClass := "greetingInputBudgetBlocked"
 		if inputErr != nil {
@@ -144,7 +158,7 @@ func (m *Manager) generateSourcingGreetingMember(
 			ErrorDetailCode: errorClass, FinishedAt: m.now(),
 		}
 		logAIInvocationOutcome(m.advice, m5ai.PurposeGreeting, completion, "")
-		_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
+		_, err := m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
 			Completion: completion,
 		})
 		if err != nil {
@@ -153,39 +167,113 @@ func (m *Manager) generateSourcingGreetingMember(
 		return err
 	}
 
-	started := time.Now()
-	response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-		InvocationID: invocationID, Purpose: m5ai.PurposeGreeting,
-		ContextRevisionHash: material.ContextRevisionHash,
-		PromptRevision:      m5ai.GreetingInputFormatVersion,
-		UserContent:         content,
-		MaxOutputTokens:     m5ai.GreetingOutputTokenLimit,
-	})
-	completion := m5CompletionFromProvider(
-		invocationID, response, callErr, time.Since(started), m.now(),
-	)
-	greetingText := ""
-	contentHash := ""
-	if callErr == nil {
-		suggestion, parseErr := m5ai.ParseGreetingSuggestion(response.JSONText)
-		switch {
-		case parseErr != nil:
-			markBusinessParseFailure(&completion, parseErr)
-		case !reasoningUsageSafe(completion):
-			markReasoningUsageInvalidOutput(&completion)
-		default:
-			greetingText = suggestion.Text
-			contentHash = sha256Hex(greetingText)
+	retrySequence := 0
+	consecutiveRateLimited := 0
+	nextAttemptBudgeted := true
+	var lastFailedCompletion *store.AIInvocationCompletion
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if nextAttemptBudgeted &&
+			invocation.BudgetedAttemptCount >= sourcingAIBudgetedAttemptLimit {
+			completion := store.AIInvocationCompletion{
+				InvocationID: invocationID, Status: store.AIInvocationTransportFailed,
+				ErrorClass: "transport", FailureStage: m5ai.FailureStageTransport,
+				ErrorDetailCode: "attemptBudgetExhausted", FinishedAt: m.now(),
+			}
+			if lastFailedCompletion != nil {
+				completion = *lastFailedCompletion
+				completion.FinishedAt = m.now()
+			}
+			logAIInvocationOutcome(m.advice, m5ai.PurposeGreeting, completion, "")
+			_, err := m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
+				Completion: completion,
+			})
+			if err != nil {
+				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+			}
+			return err
+		}
+		updated, err := m.store.RecordSourcingGreetingAttempt(invocationID, nextAttemptBudgeted)
+		if err != nil {
+			return err
+		}
+		invocation = updated
+
+		started := time.Now()
+		response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+			InvocationID: sourcingAIAttemptID(invocationID, invocation.AttemptCount),
+			Purpose:      m5ai.PurposeGreeting,
+			ContextRevisionHash: material.ContextRevisionHash,
+			PromptRevision:      m5ai.GreetingInputFormatVersion,
+			UserContent:         content,
+			MaxOutputTokens:     m5ai.GreetingOutputTokenLimit,
+		})
+		completion := m5CompletionFromProvider(
+			invocationID, response, callErr, time.Since(started), m.now(),
+		)
+		greetingText := ""
+		contentHash := ""
+		terminalOK := false
+		retryClass := sourcingAIRetryNone
+		if callErr == nil {
+			suggestion, parseErr := m5ai.ParseGreetingSuggestion(response.JSONText)
+			switch {
+			case parseErr != nil:
+				markBusinessParseFailure(&completion, parseErr)
+				retryClass = sourcingAIRetryBudgeted
+			case !reasoningUsageSafe(completion):
+				markReasoningUsageInvalidOutput(&completion)
+				retryClass = sourcingAIRetryBudgeted
+			default:
+				greetingText = suggestion.Text
+				contentHash = sha256Hex(greetingText)
+				terminalOK = true
+			}
+		} else {
+			if ctx.Err() != nil {
+				return nil
+			}
+			retryClass = classifySourcingAIFailure(callErr)
+		}
+		logAIInvocationOutcome(
+			m.advice, m5ai.PurposeGreeting, completion, response.Diagnostics.TraceErrorCode,
+		)
+		if terminalOK || retryClass == sourcingAIRetryNone {
+			_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
+				Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
+			})
+			if err != nil {
+				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+			}
+			return err
+		}
+
+		failed := completion
+		lastFailedCompletion = &failed
+		nextAttemptBudgeted = retryClass != sourcingAIRetryUnlimited
+		if retryClass == sourcingAIRetryUnlimited {
+			consecutiveRateLimited++
+			if consecutiveRateLimited%sourcingAIRateLimitAlertEvery == 0 {
+				slog.Warn("招呼语生成连续限速重试中",
+					slog.String("invocationId", invocationID),
+					slog.Int("consecutiveRateLimited", consecutiveRateLimited),
+					slog.Int("attemptCount", invocation.AttemptCount),
+				)
+			}
+		} else {
+			consecutiveRateLimited = 0
+		}
+		retrySequence++
+		if err := m.config.SourcingAIRetryWait(
+			ctx, retryClass == sourcingAIRetryUnlimited, retrySequence,
+		); err != nil {
+			return nil
+		}
+		if err := m.mayStartNextWorkflowMember(); err != nil {
+			// 闸关闭：保留 inFlight，交由下次驱动续跑。
+			return err
 		}
 	}
-	logAIInvocationOutcome(
-		m.advice, m5ai.PurposeGreeting, completion, response.Diagnostics.TraceErrorCode,
-	)
-	_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
-		Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
-	})
-	if err != nil {
-		logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
-	}
-	return err
 }
