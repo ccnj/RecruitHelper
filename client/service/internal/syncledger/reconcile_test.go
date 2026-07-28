@@ -587,6 +587,25 @@ func TestRepeatedSnapshotAtCurrentTailRemainsNoChange(t *testing.T) {
 	}
 }
 
+func TestTrackedSnapshotEmptyContradictsLedger(t *testing.T) {
+	_, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-empty-contradiction", PlatformUserRef: "user-1",
+		Ledger: textLedger(t, "你好", "收到"),
+	})
+	if !errors.Is(err, ErrTrackedSnapshotEmpty) {
+		t.Fatalf("账本非空而快照整窗为空必须判矛盾而非 NoChange,得到 %v", err)
+	}
+}
+
+func TestTrackedSnapshotEmptyDoesNotFireOnEmptyLedger(t *testing.T) {
+	plan, err := Reconcile(ReconcileInput{
+		Key: testConversationKey, RoundID: "round-both-empty", PlatformUserRef: "user-1",
+	})
+	if err != nil || plan.Decision != DecisionAppend || len(plan.Apply.NewMessages) != 0 {
+		t.Fatalf("账本与快照同空的未收编读取不属于矛盾: plan=%+v err=%v", plan, err)
+	}
+}
+
 func TestFirstAdoptionRequiresPlatformUserRef(t *testing.T) {
 	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Adopt: true, Snapshot: textSnapshot("history"),
@@ -924,7 +943,7 @@ func TestReconcileRepeatedTextBoundarySoak(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(seed))
 	decisionCounts := make(map[Decision]int)
-	var generatedMessages, primaryRepeats, ambiguous, ambiguityAudits, replayChecks int
+	var generatedMessages, primaryRepeats, ambiguous, ambiguityAudits, replayChecks, emptyContradictions int
 
 	for caseN := 0; caseN < caseCount; caseN++ {
 		ledgerLen := 4 + rng.Intn(17)
@@ -944,7 +963,8 @@ func TestReconcileRepeatedTextBoundarySoak(t *testing.T) {
 		observableAppend := 0
 		switch caseN % 23 {
 		case 0:
-			// Empty bounded reads are an explicit no-change result.
+			// 账本非空时的整窗空读不再是 no-change,而是确定性的
+			// ErrTrackedSnapshotEmpty 矛盾(2026-07-28);soak 钉住该错误路径。
 			snapshot = nil
 		case 1, 2:
 			// A deterministic zero-overlap read exercises both the shallow
@@ -978,6 +998,13 @@ func TestReconcileRepeatedTextBoundarySoak(t *testing.T) {
 			AnchorMatched: anchorMatched,
 		}
 		plan, err := Reconcile(input)
+		if len(snapshot) == 0 {
+			if !errors.Is(err, ErrTrackedSnapshotEmpty) {
+				t.Fatalf("seed=%d case=%d 账本非空的空快照必须判矛盾,得到 %v", seed, caseN, err)
+			}
+			emptyContradictions++
+			continue
+		}
 		if err != nil {
 			t.Fatalf("seed=%d case=%d Reconcile: %v", seed, caseN, err)
 		}
@@ -1031,9 +1058,10 @@ func TestReconcileRepeatedTextBoundarySoak(t *testing.T) {
 		}
 	}
 
-	if generatedMessages < 20_000 || primaryRepeats*2 < generatedMessages || ambiguous == 0 || replayChecks == 0 {
-		t.Fatalf("soak coverage too weak: messages=%d primaryRepeats=%d ambiguous=%d replayChecks=%d",
-			generatedMessages, primaryRepeats, ambiguous, replayChecks)
+	if generatedMessages < 20_000 || primaryRepeats*2 < generatedMessages || ambiguous == 0 || replayChecks == 0 ||
+		emptyContradictions == 0 {
+		t.Fatalf("soak coverage too weak: messages=%d primaryRepeats=%d ambiguous=%d replayChecks=%d emptyContradictions=%d",
+			generatedMessages, primaryRepeats, ambiguous, replayChecks, emptyContradictions)
 	}
 	t.Logf("seed=%d cases=%d messages=%d primaryRepeats=%d append=%d noChange=%d stale=%d needDeep=%d rebaseline=%d ambiguous=%d ambiguityAudits=%d replayChecks=%d",
 		seed, caseCount, generatedMessages, primaryRepeats,

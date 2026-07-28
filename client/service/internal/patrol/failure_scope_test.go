@@ -52,6 +52,7 @@ func TestClassifyConversationFailure(t *testing.T) {
 		{"手声明只准人工", &RunError{
 			Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
 		}, failureScopeQuarantine},
+		{"已收编空快照矛盾", syncledger.ErrTrackedSnapshotEmpty, failureScopeSkipRound},
 		{"源身份冲突", syncledger.ErrSourceKeySemanticConflict, failureScopeQuarantine},
 		{"store 等值键冲突", store.ErrMessageSourceKeyConflict, failureScopeQuarantine},
 		{"不安全修正", syncledger.ErrUnsafeMessageClassificationCorrection, failureScopeQuarantine},
@@ -67,6 +68,9 @@ func TestClassifyConversationFailure(t *testing.T) {
 		Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
 	}); class != "hand:INTERNAL_HAND" {
 		t.Fatalf("手侧类别标签错误: %s", class)
+	}
+	if class := conversationFailureClass(syncledger.ErrTrackedSnapshotEmpty); class != "trackedSnapshotEmpty" {
+		t.Fatalf("已收编空快照类别标签错误: %s", class)
 	}
 	if class := conversationFailureClass(store.ErrMessageSourceKeyConflict); class != "sourceIdentityConflict" {
 		t.Fatalf("脑侧类别标签错误: %s", class)
