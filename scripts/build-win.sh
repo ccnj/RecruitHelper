@@ -17,7 +17,10 @@ cd "$REPO_ROOT"
 STAGE="$REPO_ROOT/build/stage"
 OUT="$REPO_ROOT/release"
 UNPACKED="$OUT/win-unpacked"
-BRAIN_EXE="RecruitHelperBrain.exe"
+# 可执行文件名各有唯一源头,别在这里另抄一份:脑的名字在 layout.js(壳靠它定位
+# 二进制,安装器靠它精确 taskkill),壳的名字由 electron-builder 的 productName 决定。
+BRAIN_EXE="$(node -p "require('./client/electron/layout.js').brainBinaryName('win32')")"
+APP_EXE="$(node -p "require('./client/electron/package.json').build.productName").exe"
 VERSION="$(node -p "require('./client/electron/package.json').version")"
 SETUP="$OUT/RecruitHelper-$VERSION-setup.exe"
 
@@ -72,6 +75,8 @@ fi
   -DSOURCE_DIR="$UNPACKED" \
   -DOUT_FILE="$SETUP" \
   -DVERSION="$VERSION" \
+  -DAPP_EXE="$APP_EXE" \
+  -DBRAIN_EXE="$BRAIN_EXE" \
   "$REPO_ROOT/scripts/installer.nsi"
 
 echo "==> 核对产物完整性"

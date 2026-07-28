@@ -33,8 +33,16 @@ SetCompressor /SOLID lzma
 !endif
 
 !define APP_NAME "RecruitHelper"
-!define APP_EXE "RecruitHelper.exe"
-!define BRAIN_EXE "RecruitHelperBrain.exe"
+; Executable names come from build-win.sh, which reads them from the single
+; sources of truth (layout.js for the brain, package.json for the shell).
+; Hardcoding them here would let a rename drift: the kill below would silently
+; miss the real process and the upgrade overwrite would fail.
+!ifndef APP_EXE
+  !error "missing -DAPP_EXE"
+!endif
+!ifndef BRAIN_EXE
+  !error "missing -DBRAIN_EXE"
+!endif
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\RecruitHelper"
 
 Name "${APP_NAME}"
@@ -73,6 +81,13 @@ UninstPage instfiles
 !macroend
 
 Section "Install"
+  ; $INSTDIR is derived from $LOCALAPPDATA. If that were empty the path would
+  ; collapse to \Programs\RecruitHelper on the current drive, and the RMDir /r
+  ; below would wipe whatever happens to sit there. Refuse instead.
+  StrCmp $LOCALAPPDATA "" 0 +3
+    MessageBox MB_ICONSTOP "LOCALAPPDATA is not set; cannot determine a safe install directory."
+    Abort
+
   !insertmacro StopRunningApp
 
   ; Clear the old files before overwriting so nothing from the previous version
@@ -80,9 +95,12 @@ Section "Install"
   ; (business DB lives in %APPDATA%, the plugin in %LOCALAPPDATA%).
   RMDir /r "$INSTDIR"
   SetOutPath "$INSTDIR"
+  ; "*" rather than "*.*": the latter only matches names containing a dot, so an
+  ; extensionless file appearing in a future Electron build would be dropped from
+  ; the installer without a word.
   ; Forward slashes: this is a compile-time host path, resolved by makensis on
   ; macOS. Runtime paths below ($INSTDIR etc.) stay backslashed for Windows.
-  File /r "${SOURCE_DIR}/*.*"
+  File /r "${SOURCE_DIR}/*"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
