@@ -46,6 +46,8 @@ import type {
   ChatSendWechatInviteData,
   ConversationSummary,
   DebugInspectSendSurfaceData,
+  DebugProbeInterviewEditorArgs,
+  DebugProbeInterviewEditorData,
   ErrorCode,
   InterviewDetails,
   MessageAnchor,
@@ -559,6 +561,9 @@ type MainPrepareInterviewEditorResult =
       'surface_unavailable' | 'editor_unavailable' | 'date_unavailable' | 'time_unavailable' |
       'duration_unavailable' | 'method_unavailable' | 'input_rejected' | 'action_window_elapsed' |
       'unexpected'
+    // 失败点定位与白名单现场快照（只含选择器命中数、控件三态和我方自设值的
+    // 回读），随 error.message 上行帮助脑侧诊断；绝不携带候选人/联系人字段。
+    detail?: string
   }
 
 type MainSendCardOnceResult =
@@ -7345,7 +7350,18 @@ async function mainPrepareInterviewEditor(
 ): Promise<MainPrepareInterviewEditorResult> {
   type AnyRecord = Record<string, unknown>
   type FailureReason = Extract<MainPrepareInterviewEditorResult, { status: 'failed' }>['reason']
-  const failed = (reason: FailureReason): MainPrepareInterviewEditorResult => ({ status: 'failed', reason })
+  // detail 只允许白名单内容：abort 点标记、选择器命中数、控件存在/可见/禁用
+  // 三态、以及我方自己填入的日期/时间/时长回读值。弹窗标题、联系人、留言等
+  // 含身份信息的字段一律不采（数据边界裁决：微信号/手机号不得进入错误详情）。
+  const capDetail = (value: string): string => {
+    let out = value.slice(0, 220)
+    while (new TextEncoder().encode(out).length > 880) out = out.slice(0, -8)
+    return out
+  }
+  const failed = (reason: FailureReason, detail?: string): MainPrepareInterviewEditorResult =>
+    detail === undefined || detail === ''
+      ? { status: 'failed', reason }
+      : { status: 'failed', reason, detail: capDetail(detail) }
   let emergencyCleanup: (() => Promise<void>) | null = null
   try {
     const w = window as unknown as AnyRecord
@@ -7446,6 +7462,36 @@ async function mainPrepareInterviewEditor(
       Function.prototype.call.call(intrinsicClick, node)
       return true
     }
+    // 翻月按钮不响应 HTMLElement.prototype.click 合成调用，只认按压事件序列
+    // （2026-07-29 真机：intrinsic click 页头纹丝不动，pointer/mouse 序列翻页
+    // 成功）。事件直接派发给节点本身，坐标只是事件属性，不按坐标命中，不存在
+    // 误中其他元素的可能。仅翻月按钮使用本变体；其余控件 intrinsic click 已被
+    // 真机证明有效，不换扳机。节奏与守卫同 interact。
+    const interactByPointer = async (node: HTMLElement): Promise<boolean> => {
+      await interactionGap()
+      if (!node.isConnected || !visible(node) || Date.now() > irreversibleNotAfterMs) return false
+      const rect = node.getBoundingClientRect()
+      const clientX = rect.x + rect.width / 2
+      const clientY = rect.y + rect.height / 2
+      const fireMouse = (type: string, extra: MouseEventInit = {}): void => {
+        node.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, view: window, clientX, clientY, ...extra,
+        }))
+      }
+      const firePointer = (type: string): void => {
+        try {
+          node.dispatchEvent(new PointerEvent(type, {
+            bubbles: true, cancelable: true, clientX, clientY, pointerId: 1, isPrimary: true,
+          }))
+        } catch { /* PointerEvent 不可用时退化为纯鼠标序列 */ }
+      }
+      firePointer('pointerdown')
+      fireMouse('mousedown', { buttons: 1 })
+      firePointer('pointerup')
+      fireMouse('mouseup')
+      fireMouse('click')
+      return true
+    }
     const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
       const deadline = Date.now() + Math.min(10_000, Math.max(0, timeoutMs))
       while (Date.now() <= deadline) {
@@ -7457,10 +7503,15 @@ async function mainPrepareInterviewEditor(
     }
     if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
         interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
-        interview.method !== 'wechatVideo' || interview.startsAt % 60_000 !== 0 ||
+        interview.method !== 'wechatVideo' ||
         (interview.endsAt - interview.startsAt) % 60_000 !== 0) {
       return failed('input_rejected')
     }
+    // 平台时间选择器是 5 分钟格（2026-07-28 真机）；脑侧已在时间出生点向上
+    // 取整，非格点时间抵达手侧说明上游有 bug——立即拒绝，绝不在手侧擅自
+    // 取整（平台读回正证按脑侧毫秒值精确配对，手侧改时会让发出的卡片永远
+    // 无法确认），也不再让它走到分钟项查找处白等 10 秒。
+    if (interview.startsAt % 300_000 !== 0) return failed('input_rejected', 'startGrid')
     if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
       return failed('action_window_elapsed')
     }
@@ -7476,7 +7527,8 @@ async function mainPrepareInterviewEditor(
     const launchers = Array.from(
       detail.querySelectorAll<HTMLElement>('a[zp-stat-id="im_interview_invite_click"][type="button"]'),
     ).filter((node) => visible(node) && clean(node.textContent) === '约面试')
-    if (launchers.length !== 1 || !await interact(launchers[0])) return failed('surface_unavailable')
+    if (launchers.length !== 1) return failed('surface_unavailable', `at=launcher n=${launchers.length}`)
+    if (!await interact(launchers[0])) return failed('surface_unavailable', 'at=launcher.click')
 
     const modal = await waitFor(() => {
       const candidates = Array.from(
@@ -7484,7 +7536,7 @@ async function mainPrepareInterviewEditor(
       ).filter((node) => visible(node) && node.querySelector('.interview-form') !== null)
       return candidates.length === 1 ? candidates[0] : null
     })
-    if (!modal) return failed('editor_unavailable')
+    if (!modal) return failed('editor_unavailable', 'at=modal')
 
     const closeEditor = async (): Promise<void> => {
       try {
@@ -7506,16 +7558,64 @@ async function mainPrepareInterviewEditor(
       }
     }
     emergencyCleanup = closeEditor
-    const abort = async (reason: FailureReason): Promise<MainPrepareInterviewEditorResult> => {
+    // 白名单现场快照：两类浮层可见数、日期标签/时间/时长输入的当前值（全部
+    // 是我方自设值或平台预置枚举）、以及表单校验错误的平台文案。逐项 try，
+    // 任何一项读不到都不影响其余与主流程。
+    const snapshot = (): string => {
+      const parts: string[] = []
+      try {
+        const datePoppers = Array.from(document.querySelectorAll<HTMLElement>(
+          '.km-popover.km-date-picker__popper, .km-date-picker__popper',
+        )).filter(visible).length
+        const timerPoppers = Array.from(document.querySelectorAll<HTMLElement>(
+          '.km-popover.timer-cascader__popper, .timer-cascader__popper',
+        )).filter(visible).length
+        parts.push(`dpop=${datePoppers}`, `tpop=${timerPoppers}`)
+      } catch { parts.push('pop=?') }
+      try {
+        const labels = Array.from(modal.querySelectorAll<HTMLElement>('.km-date-picker__label'))
+          .filter(visible).map((node) => clean(node.textContent))
+        parts.push(`lbl=${labels.join(',') || '-'}`)
+      } catch { parts.push('lbl=?') }
+      try {
+        const timeValues = Array.from(modal.querySelectorAll<HTMLInputElement>(
+          'input[placeholder="请选择时间"]',
+        )).filter(visible).map((node) => clean(node.value) || '-')
+        parts.push(`t=${timeValues.join(',') || '-'}`)
+      } catch { parts.push('t=?') }
+      try {
+        const durationValues = Array.from(modal.querySelectorAll<HTMLInputElement>(
+          'input[placeholder="面试时长"]',
+        )).filter(visible).map((node) => clean(node.value) || '-')
+        parts.push(`u=${durationValues.join(',') || '-'}`)
+      } catch { parts.push('u=?') }
+      try {
+        // 校验文案是快照里唯一的页面生成文本。若平台某条错误回显字段内容
+        // （手机号/微信号形状的长英数串），先打码再上行：微信号不得进入
+        // 错误详情是冻结条款，不赌平台文案的实现。
+        const formErrors = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item__error'))
+          .filter(visible).map((node) => clean(node.textContent).replace(/[0-9A-Za-z_-]{6,}/gu, '#'))
+          .filter((text) => text !== '').slice(0, 2)
+        if (formErrors.length > 0) parts.push(`err=${formErrors.join('|').slice(0, 60)}`)
+      } catch { /* 无校验错误面板时静默 */ }
+      return parts.join(' ')
+    }
+    const abort = async (reason: FailureReason, at?: string): Promise<MainPrepareInterviewEditorResult> => {
+      let detail: string | undefined
+      try {
+        detail = `${at === undefined ? '' : `at=${at} `}${snapshot()}`
+      } catch {
+        detail = at === undefined ? undefined : `at=${at}`
+      }
       await closeEditor()
       emergencyCleanup = null
-      return failed(reason)
+      return failed(reason, detail)
     }
 
     const onlineItems = Array.from(
       modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
     ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
-    if (onlineItems.length !== 1) return await abort('editor_unavailable')
+    if (onlineItems.length !== 1) return await abort('editor_unavailable', `online n=${onlineItems.length}`)
     const online = onlineItems[0]
     const onlineSelected = (): boolean => {
       // 2026-07-27 真机：弹窗标题是"邀请{候选人姓名}参加 线上面试"并实时跟随类型
@@ -7530,14 +7630,14 @@ async function mainPrepareInterviewEditor(
       return titleNodes.length >= 1
     }
     if (!onlineSelected()) {
-      if (!await interact(online)) return await abort('editor_unavailable')
+      if (!await interact(online)) return await abort('editor_unavailable', 'online.click')
       if (!await waitFor(() => onlineSelected() ? true : null)) {
-        return await abort('editor_unavailable')
+        return await abort('editor_unavailable', 'online.echo')
       }
     }
 
     const start = new Date(interview.startsAt)
-    if (!Number.isFinite(start.getTime())) return await abort('input_rejected')
+    if (!Number.isFinite(start.getTime())) return await abort('input_rejected', 'startInvalid')
     const year = start.getFullYear()
     const month = start.getMonth() + 1
     const day = start.getDate()
@@ -7548,33 +7648,50 @@ async function mainPrepareInterviewEditor(
     const expectedTimeText = `${pad2(hour)}:${pad2(minute)}`
     const durationMinutes = (interview.endsAt - interview.startsAt) / 60_000
     const expectedDurationText = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
-    if (![15, 30, 45, 60].includes(durationMinutes)) return await abort('input_rejected')
+    if (![15, 30, 45, 60].includes(durationMinutes)) {
+      return await abort('input_rejected', `durationEnum min=${durationMinutes}`)
+    }
 
     const timeFormItem = Array.from(modal.querySelectorAll<HTMLElement>('.km-form-item'))
       .find((node) => visible(node) && /面试时间/u.test(clean(node.textContent))) ?? modal
     const dateControl = timeFormItem.querySelector<HTMLElement>('.km-date-picker') ??
       Array.from(modal.querySelectorAll<HTMLElement>('.km-date-picker')).find(visible)
-    if (!dateControl || !await interact(dateControl)) return await abort('date_unavailable')
+    if (!dateControl) return await abort('date_unavailable', 'dateCtl.miss')
+    if (!await interact(dateControl)) return await abort('date_unavailable', 'dateCtl.click')
     let datePopover = await waitFor(() =>
       Array.from(document.querySelectorAll<HTMLElement>(
         '.km-popover.km-date-picker__popper, .km-date-picker__popper',
       )).find(visible) ?? null)
-    if (!datePopover) return await abort('date_unavailable')
+    if (!datePopover) return await abort('date_unavailable', 'datePop')
     const calendarParts = (root: ParentNode): { year: number; month: number } => ({
       year: Number(clean(root.querySelector('.km-date-picker__header-year')?.textContent).match(/\d+/u)?.[0]),
       month: Number(clean(root.querySelector('.km-date-picker__header-month')?.textContent).match(/\d+/u)?.[0]),
     })
-    for (let moves = 0; moves < 24; moves += 1) {
+    // 智联邀面日历真机只开放今天起数天（2026-07-28 实测 4 天），目标月至多
+    // 相邻；翻月按钮无 disabled 标记、点击可能毫无反应（真机已证）。因此按
+    // 月距离精确圈定翻页轮数、越界立即失败，不再让不可达月份把等待链拖满。
+    const initialCalendar = calendarParts(datePopover)
+    if (!initialCalendar.year || !initialCalendar.month) return await abort('date_unavailable', 'calHdr')
+    const expectedMoves = Math.abs(year * 12 + month - (initialCalendar.year * 12 + initialCalendar.month))
+    if (expectedMoves > 12) {
+      return await abort(
+        'date_unavailable',
+        `navRange cal=${initialCalendar.year}-${initialCalendar.month} want=${year}-${month}`,
+      )
+    }
+    for (let moves = 0; moves < expectedMoves + 1; moves += 1) {
       const current = calendarParts(datePopover)
       if (current.year === year && current.month === month) break
-      if (!current.year || !current.month) return await abort('date_unavailable')
+      if (!current.year || !current.month) return await abort('date_unavailable', 'calHdr')
       const buttons = Array.from(datePopover.querySelectorAll<HTMLElement>(
         '.km-date-picker__header button',
       )).filter(visible)
-      if (buttons.length < 2) return await abort('date_unavailable')
+      if (buttons.length < 2) return await abort('date_unavailable', `navBtn n=${buttons.length}`)
       const direction = year * 12 + month > current.year * 12 + current.month ? 1 : -1
       const button = direction > 0 ? buttons[buttons.length - 1] : buttons[0]
-      if (!await interact(button)) return await abort('date_unavailable')
+      if (!await interactByPointer(button)) return await abort('date_unavailable', 'nav.click')
+      // 翻月点击生效与否 2.5 秒内必有分晓（真机翻不动时页头永不变化），
+      // 不沿用 10 秒默认等待。
       datePopover = await waitFor(() => {
         const candidate = Array.from(document.querySelectorAll<HTMLElement>(
           '.km-popover.km-date-picker__popper, .km-date-picker__popper',
@@ -7582,39 +7699,70 @@ async function mainPrepareInterviewEditor(
         if (!candidate) return null
         const next = calendarParts(candidate)
         return next.year !== current.year || next.month !== current.month ? candidate : null
-      })
-      if (!datePopover) return await abort('date_unavailable')
+      }, 2_500)
+      if (!datePopover) {
+        return await abort(
+          'date_unavailable',
+          `navStuck cal=${current.year}-${current.month} want=${year}-${month}`,
+        )
+      }
     }
     const finalCalendar = calendarParts(datePopover)
     if (finalCalendar.year !== year || finalCalendar.month !== month) {
-      return await abort('date_unavailable')
+      return await abort(
+        'date_unavailable',
+        `calMiss cal=${finalCalendar.year}-${finalCalendar.month} want=${year}-${month}`,
+      )
     }
     const dayCells = Array.from(datePopover.querySelectorAll<HTMLElement>('.km-date-picker__cell'))
       .filter((cell) => visible(cell) &&
         !cell.classList.contains('km-date-picker__cell--disabled') &&
         !cell.classList.contains('km-date-picker__cell--silent') &&
         clean(cell.querySelector('.km-date-picker__cell-value')?.textContent ?? cell.textContent) === String(day))
-    if (dayCells.length !== 1 || !await interact(dayCells[0])) return await abort('date_unavailable')
+    if (dayCells.length !== 1) return await abort('date_unavailable', `dayCell n=${dayCells.length} d=${day}`)
+    if (!await interact(dayCells[0])) return await abort('date_unavailable', 'dayCell.click')
     const exactDate = await waitFor(() => {
       const labels = Array.from(
         modal.querySelectorAll<HTMLElement>('.km-date-picker__label'),
       ).filter((node) => visible(node) && clean(node.textContent) === expectedDateText)
       return labels.length === 1 ? labels[0] : null
     })
-    if (!exactDate) return await abort('date_unavailable')
+    if (!exactDate) return await abort('date_unavailable', 'dateEcho')
 
     const timeControl = Array.from(
       modal.querySelectorAll<HTMLElement>('.timer-cascader .km-select, .interview-form__time--item .km-select'),
     ).filter(visible).filter((node) =>
       node.querySelector<HTMLInputElement>('input[placeholder="请选择时间"]') !== null)
-    if (timeControl.length !== 1 || !await interact(timeControl[0])) return await abort('time_unavailable')
+    if (timeControl.length !== 1) return await abort('time_unavailable', `timeCtl n=${timeControl.length}`)
+    if (!await interact(timeControl[0])) return await abort('time_unavailable', 'timeCtl.click')
     const timerPopover = await waitFor(() =>
       Array.from(document.querySelectorAll<HTMLElement>(
         '.km-popover.timer-cascader__popper, .timer-cascader__popper',
       )).find(visible) ?? null)
-    if (!timerPopover) return await abort('time_unavailable')
+    if (!timerPopover) return await abort('time_unavailable', 'timerPop')
+    // 时间浮层普查：项总数、带 data-hour 的小时项数、目标项三态。只含计数
+    // 与状态词，不含任何页面自由文本。
+    const timerCensus = (): string => {
+      try {
+        const items = timerPopover.querySelectorAll('.timer-cascader__item').length
+        const hourItems = timerPopover.querySelectorAll('.timer-cascader__item[data-hour]').length
+        return `items=${items} hours=${hourItems}`
+      } catch { return 'items=?' }
+    }
+    const minuteState = (): string => {
+      try {
+        const node = timerPopover.querySelector<HTMLElement>(
+          `.timer-cascader__item[data-value="${expectedTimeText}"]`,
+        )
+        if (!node) return 'target=miss'
+        const disabled = node.classList.contains('timer-cascader__item--disabled')
+        return `target=${visible(node) ? 'vis' : 'hidden'}${disabled ? '.disabled' : ''}`
+      } catch { return 'target=?' }
+    }
     const hourNode = timerPopover.querySelector<HTMLElement>(`.timer-cascader__item[data-hour="${hour}"]`)
-    if (!hourNode || !visible(hourNode) || !await interact(hourNode)) return await abort('time_unavailable')
+    if (!hourNode) return await abort('time_unavailable', `hourNode.miss h=${hour} ${timerCensus()}`)
+    if (!visible(hourNode)) return await abort('time_unavailable', `hourNode.invisible h=${hour} ${timerCensus()}`)
+    if (!await interact(hourNode)) return await abort('time_unavailable', `hourNode.click h=${hour} ${timerCensus()}`)
     const minuteNode = await waitFor(() => {
       const candidate = timerPopover.querySelector<HTMLElement>(
         `.timer-cascader__item[data-value="${expectedTimeText}"]`,
@@ -7623,14 +7771,15 @@ async function mainPrepareInterviewEditor(
         ? candidate
         : null
     })
-    if (!minuteNode || !await interact(minuteNode)) return await abort('time_unavailable')
+    if (!minuteNode) return await abort('time_unavailable', `minuteNode ${minuteState()} ${timerCensus()}`)
+    if (!await interact(minuteNode)) return await abort('time_unavailable', `minuteNode.click ${timerCensus()}`)
     const exactTime = await waitFor(() => {
       const inputs = Array.from(
         modal.querySelectorAll<HTMLInputElement>('input[placeholder="请选择时间"]'),
       ).filter((node) => visible(node) && clean(node.value) === expectedTimeText)
       return inputs.length === 1 ? inputs[0] : null
     })
-    if (!exactTime) return await abort('time_unavailable')
+    if (!exactTime) return await abort('time_unavailable', 'timeEcho')
 
     // 2026-07-27 真机："面试时长"只出现在输入框 placeholder（不进任何表单项文本），
     // 控件与日期/时间同处"面试时间"一行；按 placeholder 反向定位所属 km-select。
@@ -7640,7 +7789,8 @@ async function mainPrepareInterviewEditor(
     const durationControl = durationInputs.length === 1
       ? durationInputs[0].closest<HTMLElement>('.km-select')
       : null
-    if (!durationControl || !await interact(durationControl)) return await abort('duration_unavailable')
+    if (!durationControl) return await abort('duration_unavailable', `durCtl n=${durationInputs.length}`)
+    if (!await interact(durationControl)) return await abort('duration_unavailable', 'durCtl.click')
     const durationOption = await waitFor(() => {
       const optionMinutes = (text: string): number | null => {
         const normalized = clean(text)
@@ -7655,29 +7805,32 @@ async function mainPrepareInterviewEditor(
       const matches = options.filter((node) => optionMinutes(node.textContent ?? '') === durationMinutes)
       return matches.length === 1 ? matches[0] : null
     })
-    if (!durationOption || !await interact(durationOption)) return await abort('duration_unavailable')
+    if (!durationOption) return await abort('duration_unavailable', `durOpt min=${durationMinutes}`)
+    if (!await interact(durationOption)) return await abort('duration_unavailable', 'durOpt.click')
     const exactDuration = await waitFor(() => {
       const inputs = Array.from(
         modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
       ).filter((node) => visible(node) && clean(node.value) === expectedDurationText)
       return inputs.length === 1 ? inputs[0] : null
     })
-    if (!exactDuration) return await abort('duration_unavailable')
+    if (!exactDuration) return await abort('duration_unavailable', 'durEcho')
 
     const methodCandidates = Array.from(
       modal.querySelectorAll<HTMLElement>('.interview-platform__btn'),
     ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
-    if (methodCandidates.length !== 1) return await abort('method_unavailable')
+    if (methodCandidates.length !== 1) {
+      return await abort('method_unavailable', `method n=${methodCandidates.length}`)
+    }
     let method = methodCandidates[0]
     if (!method.classList.contains('is-checked')) {
-      if (!await interact(method)) return await abort('method_unavailable')
+      if (!await interact(method)) return await abort('method_unavailable', 'method.click')
       const exactMethod = await waitFor(() => {
         const matches = Array.from(
           modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
         ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
         return matches.length === 1 ? matches[0] : null
       })
-      if (!exactMethod) return await abort('method_unavailable')
+      if (!exactMethod) return await abort('method_unavailable', 'method.echo')
       method = exactMethod
     }
 
@@ -7687,7 +7840,7 @@ async function mainPrepareInterviewEditor(
     if (!routeMatches()) return await abort('route_changed')
     if (!targetResolved()) return await abort('target_changed')
     if (!composerEmpty()) return await abort('composer_nonempty')
-    if (!onlineSelected()) return await abort('input_rejected')
+    if (!onlineSelected()) return await abort('input_rejected', 'finalOnline')
     const dateValue = clean(exactDate.textContent)
     const timeValue = clean(exactTime.value)
     const durationValue = clean(exactDuration.value)
@@ -7695,7 +7848,11 @@ async function mainPrepareInterviewEditor(
     if (dateValue !== expectedDateText || timeValue !== expectedTimeText ||
         durationValue !== expectedDurationText || methodValue !== '微信视频' ||
         !method.classList.contains('is-checked')) {
-      return await abort('input_rejected')
+      // 四个回读值全部来自我方设定或平台预置枚举，可整体回带。
+      return await abort(
+        'input_rejected',
+        `finalEcho d=${dateValue || '-'} t=${timeValue || '-'} u=${durationValue || '-'} m=${methodValue || '-'}`,
+      )
     }
     emergencyCleanup = null
     return {
@@ -7710,11 +7867,12 @@ async function mainPrepareInterviewEditor(
         methodValue,
       },
     }
-  } catch {
+  } catch (error) {
     if (emergencyCleanup) {
       try { await emergencyCleanup() } catch { /* best effort */ }
     }
-    return failed('unexpected')
+    // 只带异常类名（TypeError 等语言级标识），不带异常消息——消息可能含页面内容。
+    return failed('unexpected', `exc=${error instanceof Error ? error.name : typeof error}`)
   }
 }
 
@@ -9245,6 +9403,37 @@ async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; close
   }
 }
 
+// 邀面编辑器准备失败的统一错误映射。sendZhilianCard 与 probeZhilianInterviewEditor
+// 共用同一 mainPrepareInterviewEditor 与同一失败语义,不各自维护副本。
+function throwInterviewPreparationFailure(
+  preparation: Exclude<MainPrepareInterviewEditorResult, { status: 'ready' }>,
+): never {
+  if (preparation.reason === 'composer_nonempty') {
+    throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
+  }
+  if (preparation.reason === 'identity_changed') {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
+  }
+  if (preparation.reason === 'route_changed' || preparation.reason === 'target_changed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备期间目标会话发生变化', 'manualOnly')
+  }
+  if (preparation.reason === 'action_window_elapsed') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备动作窗口已过', 'manualOnly')
+  }
+  // detail 是手侧白名单现场快照（abort 点标记+命中数+我方自设值回读）；
+  // 契约 ErrorBody.message 上限 500 字符/2000 字节，这里再做一道防御截断。
+  const prepareDetail = preparation.detail === undefined ? '' : `（${preparation.detail}）`
+  let prepareMessage = `邀面编辑器无法精确准备：${preparation.reason}${prepareDetail}`.slice(0, 480)
+  while (new TextEncoder().encode(prepareMessage).length > 1900) {
+    prepareMessage = prepareMessage.slice(0, -16)
+  }
+  throw new ZhilianPlatformError(
+    preparation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
+    prepareMessage,
+    'manualOnly',
+  )
+}
+
 function throwCardEvaluationFailure(evaluation: MainSendCardOnceResult): never {
   if (evaluation.status !== 'failed') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '卡片发送 evaluator 返回未知状态', 'manualOnly')
@@ -9340,23 +9529,7 @@ async function sendZhilianCard(
         ctx.irreversibleNotAfterMs,
       ])
       if (preparation.status !== 'ready') {
-        if (preparation.reason === 'composer_nonempty') {
-          throw new ZhilianPlatformError('USER_ACTIVE', '邀面准备期间出现人工草稿，已取消编辑器', 'afterRecovery')
-        }
-        if (preparation.reason === 'identity_changed') {
-          throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '邀面准备期间登录身份发生变化', 'manualOnly')
-        }
-        if (preparation.reason === 'route_changed' || preparation.reason === 'target_changed') {
-          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备期间目标会话发生变化', 'manualOnly')
-        }
-        if (preparation.reason === 'action_window_elapsed') {
-          throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '邀面准备动作窗口已过', 'manualOnly')
-        }
-        throw new ZhilianPlatformError(
-          preparation.reason === 'input_rejected' ? 'GUARD_FAILED' : 'ELEMENT_UNRESOLVED',
-          `邀面编辑器无法精确准备：${preparation.reason}`,
-          'manualOnly',
-        )
+        throwInterviewPreparationFailure(preparation)
       }
       editorPrepared = true
     } else {
@@ -9709,6 +9882,77 @@ export async function sendZhilianInviteCard(
     )
   }
   return { ...data, interview: data.interview }
+}
+
+// 彩排取消后的只读复核：邀面弹窗是否仍可见。自包含，供 runMain 注入。
+async function mainIsInterviewEditorOpen(): Promise<boolean> {
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  return Array.from(
+    document.querySelectorAll<HTMLElement>('.km-modal__wrapper.interview-modal'),
+  ).some((node) => visible(node) && node.querySelector('.interview-form') !== null)
+}
+
+// debug.probeInterviewEditor:邀面编辑器彩排。与 sendZhilianCard 的
+// interviewInvite 前半段字面共用 mainPrepareInterviewEditor(全部选择框与
+// 终核回读),准备成功后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并
+// 复核弹窗已关。构造性不含发送路径:不建基线、不评估 expectedTail、不调用
+// mainSendCardOnce。失败沿用同一 throwInterviewPreparationFailure 映射。
+export async function probeZhilianInterviewEditor(
+  args: DebugProbeInterviewEditorArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<DebugProbeInterviewEditorData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  const interview = args.interview
+  if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
+      interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
+      interview.method !== 'wechatVideo' ||
+      interview.startsAt % 60_000 !== 0 ||
+      (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
+      ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '邀面时间或方式不受当前页面能力支持', 'manualOnly')
+  }
+  const tab = await sendZhilianTab(args.conversationRef)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const preparation = await runMain(tab.id, mainPrepareInterviewEditor, [
+    args.conversationRef,
+    interview,
+    expectedPrincipalFingerprint,
+    ctx.irreversibleNotAfterMs,
+  ])
+  if (preparation.status !== 'ready') {
+    throwInterviewPreparationFailure(preparation)
+  }
+  // 甲方裁决(2026-07-29):填毕停留至少 5 秒供肉眼确认。停留放在彩排编排层,
+  // 与生产共用的准备函数不因此变化。
+  await new Promise((resolve) => setTimeout(resolve, 5_000))
+  try {
+    await runMain(tab.id, mainCancelPreparedInterviewEditor, [])
+  } catch {
+    // 取消尽力而为,结果由下方只读复核如实上报。
+  }
+  let canceled = false
+  try {
+    canceled = !await runMain(tab.id, mainIsInterviewEditorOpen, [])
+  } catch {
+    canceled = false
+  }
+  return {
+    conversationRef: args.conversationRef,
+    dateValue: preparation.prepared.dateValue,
+    timeValue: preparation.prepared.timeValue,
+    durationValue: preparation.prepared.durationValue,
+    methodValue: preparation.prepared.methodValue,
+    canceled,
+  }
 }
 
 export async function readZhilianThread(

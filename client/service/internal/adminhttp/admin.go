@@ -78,6 +78,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/cmd", h(a.postCmd))
 	mux.HandleFunc("POST /admin/messages/send", h(a.sendMessage))
 	mux.HandleFunc("POST /admin/cards/interview", h(a.sendInterviewCard))
+	mux.HandleFunc("POST /admin/cards/interview/probe", h(a.probeInterviewEditor))
 	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
 	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
 	mux.HandleFunc("GET /admin/suspects", h(a.suspects))

@@ -32,6 +32,21 @@ const IntentSourceBusinessEvent IntentSource = "businessEvent"
 
 const V4InterviewDurationMs int64 = 30 * 60 * 1000
 
+// V4InterviewTimeGridMs 是智联邀面时间选择器的分钟粒度（5 分钟格，2026-07-28
+// 真机事实：分钟列仅 00/05/…/55）。
+const V4InterviewTimeGridMs int64 = 5 * 60 * 1000
+
+// roundUpToInterviewTimeGrid 把邀面开始时间向上取整到平台时间格。取整只允许
+// 发生在时间出生点：plan/动作/contentHash/命令 args/平台读回全链按同一毫秒值
+// 精确配对，手侧擅自取整会让发出的卡片永远无法确认（2026-07-28 甲方裁决）。
+func roundUpToInterviewTimeGrid(ms int64) int64 {
+	remainder := ms % V4InterviewTimeGridMs
+	if remainder == 0 {
+		return ms
+	}
+	return ms + V4InterviewTimeGridMs - remainder
+}
+
 const (
 	V4ManualUnsupportedMedia       V4ManualReason = "unsupportedMedia"
 	V4ManualUnsupportedSemantic    V4ManualReason = "unsupportedSemantic"
@@ -396,6 +411,9 @@ func planV4ReplyActions(
 		if !matched {
 			return nil, false
 		}
+		// 当前冻结时段恒为整点（槽位解析强制 Minute()==0），本行为未来时段
+		// 策略放开时的保险，今天恒为 no-op。
+		startsAt = roundUpToInterviewTimeGrid(startsAt)
 		endsAt := startsAt + V4InterviewDurationMs
 		method := "wechatVideo"
 		return append(plans, V4PlannedAction{
