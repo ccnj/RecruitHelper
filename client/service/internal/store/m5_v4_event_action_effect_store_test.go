@@ -120,6 +120,117 @@ func seedCommunicationV4WechatAcceptEffect(
 	}
 }
 
+// seedCommunicationV4InterviewedWechatAcceptEffect 构造服务态（已约面）候选人
+// 主动发起换微信请求的完整前置：真实文字 -> 邀面卡 -> 卡片接受 -> 请求卡轮。
+// 冻结的轮不安排任何对话跟随，接受动作仍走既有 WAL 轨。
+func seedCommunicationV4InterviewedWechatAcceptEffect(
+	t *testing.T,
+	s *Store,
+	suffix string,
+) communicationV4EventEffectFixture {
+	t.Helper()
+	profileID := "profile-v4-service-accept-" + suffix
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	requestSourceKey := strings.Repeat("7", 63) + "b"
+	candidateText := "您好，想再确认一下面试安排"
+	occurredAt := time.Now().UTC().Truncate(time.Millisecond)
+	rows := appendCommunicationV4Inbound(t, s, fixture,
+		Message{
+			Seq: 2, Direction: "in", Kind: "text",
+			Text: &candidateText, ContentHash: "service-text-" + suffix,
+		},
+		Message{
+			Seq: 3, Direction: "out", Kind: "card", CardType: "interviewInvite",
+			CardState: "pending", ContentHash: "service-card-" + suffix,
+		},
+		Message{
+			Seq: 4, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "pending", ContentHash: "service-request-" + suffix,
+			SourceKey: &requestSourceKey,
+		},
+	)
+	for _, event := range []communication.BusinessEvent{
+		{Key: "message:2", Kind: communication.EventCandidateExpressionReceived,
+			Source: communication.EventSourceMessage, MessageSeq: 2},
+		{Key: "message:3", Kind: communication.EventInterviewInvited,
+			Source: communication.EventSourceMessage, MessageSeq: 3, OccurredAt: &occurredAt},
+		{Key: "card:3:pending:accepted", Kind: communication.EventInterviewAccepted,
+			Source: communication.EventSourceCardTransition, MessageSeq: 3},
+	} {
+		if _, err := s.ApplyCommunicationV4BusinessEvent(ApplyCommunicationV4BusinessEventRequest{
+			ProfileID: profileID, Event: event, AppliedAt: occurredAt,
+		}); err != nil {
+			t.Fatalf("推进服务态前置失败: event=%+v err=%v", event, err)
+		}
+	}
+	var anchor Message
+	if err := s.db.First(
+		&anchor,
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = 3",
+		fixture.Platform, fixture.AccountRef, fixture.ConversationRef,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	inbound := rows[2:3]
+	digest, turnID, err := DialogueTurnIdentity(profileID, anchor, inbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, materialReady, err := s.CommunicationAIMaterialForProfile(profileID)
+	if err != nil || !materialReady {
+		t.Fatalf("服务态轮 AI 材料未就绪: ready=%v err=%v", materialReady, err)
+	}
+	frozen, err := s.FreezeCommunicationV4Turn(FreezeDialogueTurnRequest{
+		TurnID: turnID, ProfileID: profileID, ConversationRef: fixture.ConversationRef,
+		InputDigest: digest, HistoryThroughSeq: 3,
+		InboundFromSeq: 4, InboundThroughSeq: 4,
+		ExpectedProjectedThroughSeq: 3,
+		OutboundAnchorSeq:           3,
+		ContextRevisionHash:         material.ContextRevision.RevisionHash,
+		ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
+		RecommendedTimeText:         "合成推荐时段",
+		RenderFormatVersion:         m5ai.DialogueRenderFormatVersion,
+		FrozenAt:                    occurredAt.Add(time.Second),
+	})
+	if err != nil ||
+		frozen.Turn.Status != DialogueTurnCompleted ||
+		frozen.Application.Outcome.Dialogue != communication.V4DialogueNone ||
+		frozen.Application.Outcome.DialogueAfterActions ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueNoAction ||
+		frozen.Aggregate.State.MainStatus != communication.V4StatusInterviewed {
+		t.Fatalf("服务态换微信轮没有冻结为无跟随完成态: result=%+v err=%v", frozen, err)
+	}
+	actions, err := s.CommunicationV4EventActionsBySource(
+		profileID,
+		CommunicationV4InputDialogueTurn,
+		frozen.Turn.TurnID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var accept *CommunicationV4EventAction
+	for index := range actions {
+		if actions[index].V4Kind == communication.V4ActionAcceptWechat {
+			copy := actions[index]
+			accept = &copy
+			break
+		}
+	}
+	if accept == nil ||
+		accept.Status != CommunicationV4EventActionPlanned ||
+		accept.EffectKind != CommunicationV4EventEffectAcceptWechat {
+		t.Fatalf("服务态接受微信动作未就绪: %+v", actions)
+	}
+	return communicationV4EventEffectFixture{
+		resumeStoreFixture: fixture,
+		Turn:               frozen.Turn,
+		Action:             *accept,
+		RequestSourceKey:   requestSourceKey,
+		Now:                occurredAt.Add(2 * time.Second),
+	}
+}
+
 func seedCommunicationV4InterviewEventActions(
 	t *testing.T,
 	s *Store,
@@ -641,6 +752,98 @@ func TestCommunicationV4WechatAcceptAuthorizesOneReplyAndFailureKeepsContact(t *
 		*assets[0].EffectIntentID != created.Intent.IntentID {
 		t.Fatalf("承接 AI 失败回滚了接受/联系方式事实: aggregate=%+v assets=%+v errs=(%v,%v)",
 			aggregate, assets, aggregateErr, assetsErr)
+	}
+}
+
+func TestCommunicationV4InterviewedWechatAcceptConfirmsWithoutContinuation(t *testing.T) {
+	s := openTest(t)
+	fixture := seedCommunicationV4InterviewedWechatAcceptEffect(t, s, "service")
+	req := communicationV4EventEffectRequest(
+		t,
+		s,
+		fixture,
+		fixture.Action,
+		"accept-service",
+	)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("服务态接受微信 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	messagesBefore, err := s.MessagesForConversation(ConversationKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchangeSourceKey := strings.Repeat("9", 64)
+	settleCommunicationV4WechatAcceptEffect(
+		t,
+		s,
+		fixture,
+		created,
+		"result-v4-accept-service",
+		exchangeSourceKey,
+		"synthetic-wechat-service",
+	)
+
+	action, err := s.CommunicationV4EventActionByID(fixture.Action.ActionID)
+	if err != nil || action == nil ||
+		action.Status != CommunicationV4EventActionSent ||
+		action.EffectIntentID == nil ||
+		*action.EffectIntentID != created.Intent.IntentID {
+		t.Fatalf("服务态接受动作未收束 sent: action=%+v err=%v", action, err)
+	}
+	assets, err := s.ContactAssetsByProfile(fixture.ProfileID)
+	if err != nil || len(assets) != 1 ||
+		assets[0].Value != "synthetic-wechat-service" ||
+		assets[0].RequestSourceKey != fixture.RequestSourceKey {
+		t.Fatalf("服务态收号事实错误: assets=%+v err=%v", assets, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		aggregate.State.MainStatus != communication.V4StatusInterviewed ||
+		aggregate.State.WechatState != communication.V4WechatExchanged ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("服务态接受正证后聚合被误转人工或未推进微信线: aggregate=%+v err=%v",
+			aggregate, err)
+	}
+	turn, err := s.DialogueTurnByID(fixture.Turn.TurnID)
+	if err != nil || turn == nil || turn.Status != DialogueTurnCompleted {
+		t.Fatalf("服务态换微信轮不应被承接推进: turn=%+v err=%v", turn, err)
+	}
+	var confirmed CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&confirmed,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		fixture.Action.SemanticActionKey,
+	).Error; err != nil ||
+		confirmed.Outcome.Dialogue != communication.V4DialogueNone ||
+		confirmed.Outcome.DialogueStatus != "" ||
+		confirmed.Outcome.NextAdvice != "" {
+		t.Fatalf("服务态接受确认不应携带承接授权: confirmed=%+v err=%v", confirmed, err)
+	}
+	var invocationCount int64
+	if err := s.db.Model(&AIInvocation{}).
+		Where("turn_id = ?", fixture.Turn.TurnID).
+		Count(&invocationCount).Error; err != nil || invocationCount != 0 {
+		t.Fatalf("服务态换微信不得产生任何 AI 调用: count=%d err=%v", invocationCount, err)
+	}
+	messagesAfter, err := s.MessagesForConversation(ConversationKey{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef,
+	})
+	if err != nil || len(messagesAfter) != len(messagesBefore) {
+		t.Fatalf("服务态接受不得伪造 outbound Message: before=%d after=%d err=%v",
+			len(messagesBefore), len(messagesAfter), err)
+	}
+	next, owned, err := s.CommunicationV4NextAdvice(fixture.Turn.TurnID)
+	if err != nil || !owned || next != communication.V4AdviceNone {
+		t.Fatalf("服务态换微信轮 head 计算应干净返回: next=%q owned=%v err=%v",
+			next, owned, err)
 	}
 }
 

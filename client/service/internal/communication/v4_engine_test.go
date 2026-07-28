@@ -98,6 +98,30 @@ func TestV4InboundTurnWechatRequestPlansDeterministicActionsBeforeAI(t *testing.
 	}
 }
 
+func TestV4InboundTurnInterviewedWechatRequestAcceptsWithoutDialogue(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusInterviewed
+	input := V4InboundTurnInput{
+		State: state, TurnID: "turn-wechat-card-interviewed",
+		Messages: []LedgerMessageFact{{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "pending", Origin: "external",
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+	}
+	decision, err := ReduceV4InboundTurn(input)
+	if err != nil || decision.State.MainStatus != V4StatusInterviewed ||
+		decision.Requirement != V4DialogueNone || decision.DialogueAfterActions ||
+		decision.Dialogue.Status != V4DialogueNoAction ||
+		decision.Dialogue.NextAdvice != V4AdviceNone ||
+		decision.ManualReason != "" ||
+		len(decision.EventActions) != 2 ||
+		decision.EventActions[0].Kind != V4ActionAcceptWechat ||
+		decision.EventActions[1].Kind != V4ActionNotifyWechat {
+		t.Fatalf("服务态主动换微信应只产出确定性动作且无 AI 需求: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 	t.Run("wechat exchanged", func(t *testing.T) {
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{

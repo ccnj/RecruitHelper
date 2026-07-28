@@ -115,6 +115,35 @@ func TestV4ServiceStateSkipsIntentAndTimeStateMachine(t *testing.T) {
 	}
 }
 
+func TestV4InterviewedWechatRequestAcceptsWithoutDialogueFollowup(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusInterviewed
+	event := v4MessageEvent("message:2", 2, EventWechatRequested)
+
+	decision, err := ApplyV4BusinessEvent(state, event)
+	if err != nil || decision.State.MainStatus != V4StatusInterviewed ||
+		decision.Dialogue != V4DialogueNone || decision.DialogueAfterActions ||
+		decision.ManualReason != "" {
+		t.Fatalf("服务态主动换微信不应安排 AI 对话跟随: decision=%+v err=%v", decision, err)
+	}
+	if len(decision.Actions) != 2 ||
+		decision.Actions[0].Kind != V4ActionAcceptWechat ||
+		decision.Actions[1].Kind != V4ActionNotifyWechat {
+		t.Fatalf("服务态主动换微信仍必须无条件同意并通知运营: %+v", decision.Actions)
+	}
+	if decision.State.RealMessageRound != 2 || decision.State.LastRealMessageSeq != 2 ||
+		decision.State.ColdPromptRemaining != 2 || decision.State.ColdWechatRemaining != 1 {
+		t.Fatalf("主动换微信视同真实文字且不动预算: %+v", decision.State)
+	}
+
+	replayed, err := ApplyV4BusinessEvent(decision.State, event)
+	if err != nil || replayed.Dialogue != V4DialogueNone || replayed.DialogueAfterActions ||
+		!reflect.DeepEqual(replayed.Actions, decision.Actions) ||
+		replayed.State.RealMessageRound != 2 {
+		t.Fatalf("服务态换微信重放应幂等: decision=%+v err=%v", replayed, err)
+	}
+}
+
 func TestV4ResumeAndWechatRequestChooseTheirOwnDeterministicBranches(t *testing.T) {
 	state := NewV4GreetedState(v4Time(8))
 	resume, err := ApplyV4BusinessEvent(state, v4MessageEvent("message:2", 2, EventResumeSubmitted))

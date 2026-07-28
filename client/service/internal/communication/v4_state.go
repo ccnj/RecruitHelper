@@ -219,6 +219,16 @@ func ApplyV4BusinessEvent(input V4State, event BusinessEvent) (V4EventDecision, 
 		if err != nil || disposition == v4ExpressionStale || decision.State.MainStatus == V4StatusEliminated {
 			return decision, err
 		}
+		if decision.State.MainStatus == V4StatusInterviewed {
+			// 服务态只保留确定性的接受与收号通知，不安排 AI 对话跟随：没有
+			// 约面可推，候选人可见回执由随后的 wechatExchanged 事件按固定
+			// 确认语给出（规格 §七"收号+回执"）。
+			decision.Actions = append(decision.Actions,
+				eventAction(event, V4ActionAcceptWechat),
+				eventAction(event, V4ActionNotifyWechat),
+			)
+			return decision, nil
+		}
 		decision.Dialogue = dialogueForState(decision.State, V4DialogueWechatContinuation)
 		if decision.Dialogue != V4DialogueNone {
 			decision.DialogueAfterActions = true
