@@ -50,7 +50,7 @@ release/
 suspect 判定走既有恢复轨在下次启动时收敛 —— 安装器不为此另开旁路。
 
 **卸载不会删业务数据与插件目录**,重装即可续用。要彻底清除得手工删
-`%APPDATA%\RecruitHelper` 与 `%LOCALAPPDATA%\RecruitHelper`。
+`%APPDATA%\recruithelper-client` 与 `%LOCALAPPDATA%\RecruitHelper`。
 
 调试时也可以直接拷 `win-unpacked` 整个目录跑,不装。
 
@@ -85,7 +85,7 @@ chrome://extensions → 右上"开发者模式" → "加载已解压的扩展程
 ### 4. 模型连接(诊断台)
 
 `Ctrl+Shift+D` 进诊断台 → "模型连接" → 填 base_url 与 key,写入
-`%APPDATA%\RecruitHelper\data\llm-provider.json`。
+`%APPDATA%\recruithelper-client\data\llm-provider.json`。
 
 **缺这一步脑照常启动、UI 照常打开,但 AI 环节(评分、招呼语、回复建议)不可用**,
 诊断台会显示"模型连接尚未配齐"。这是新机器上最容易漏的一步。key 只存在本机该文件里。
@@ -124,12 +124,24 @@ ID 不再随加载路径变化,以后挪目录也不会换身份、不会丢 `ha
 打包态固定用 Electron 标准目录,**不认** `BRAIN_DATA_DIR`:
 
 ```
-%APPDATA%\RecruitHelper\data
+%APPDATA%\recruithelper-client\data
 ```
 
 这条是硬的 —— 装到机器上的包不该因为一个残留环境变量去写另一份业务库。
 开发态(`pnpm start`)仍可用 `BRAIN_DATA_DIR` 覆盖,见
 [`scripts/dev-run.md`](dev-run.md)。
+
+> **三个目录名不一致,是有意留着的,别去"统一"。**
+>
+> | 用途 | 目录 | 名字来自 |
+> |---|---|---|
+> | 安装位置 | `%LOCALAPPDATA%\Programs\RecruitHelper` | electron-builder 的 `build.productName` |
+> | 业务库与日志 | `%APPDATA%\recruithelper-client\` | `app.getName()`,读 package.json 顶层 `name` |
+> | 插件目录 | `%LOCALAPPDATA%\RecruitHelper\plugin` | pluginSeed.js 里硬编码 |
+>
+> 想让业务库也叫 `RecruitHelper`,只需给 package.json 加个顶层 `productName` ——
+> 但那会让**已经激活、已同步职位、已绑定账号的现有安装指向一个空目录**,等于全部
+> 重来。命名整齐不值这个代价。
 
 ## 六、业务运行窗口
 
@@ -151,7 +163,7 @@ set RECRUITHELPER_DEV_ALLOW_OUT_OF_WINDOW=1 && RecruitHelper.exe
 脑的运行日志(slog + GORM,也就是开发态在终端里看到的那些)落在:
 
 ```
-%APPDATA%\RecruitHelper\logs\brain.log
+%APPDATA%\recruithelper-client\logs\brain.log
 ```
 
 打包后客户端是 GUI 进程、**没有控制台**,不落盘就什么都留不下 —— 现场排查先看这个
