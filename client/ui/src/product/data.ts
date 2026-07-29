@@ -912,7 +912,7 @@ function adaptConnections(
         pluginHealth ? `状态 ${pluginHealth}` : '',
       ].filter(Boolean).join('；') || '尚未取得插件运行状态',
     },
-    { label: '客户端版本', value: '0.1.0', tone: 'neutral', detail: '开发者模式' },
+    { label: '客户端版本', value: __APP_VERSION__, tone: 'neutral', detail: '开发者模式' },
   ]
 }
 

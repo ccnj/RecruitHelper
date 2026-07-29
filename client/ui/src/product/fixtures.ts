@@ -246,10 +246,10 @@ export function createProductFixture(): ProductData {
       { label: '后台职位配置', value: '已同步', tone: 'success', detail: '最近同步：今天 07:58' },
       { label: 'AI 模型', value: 'DeepSeek V4 Pro', tone: 'success', detail: '已配置，密钥不在此处显示' },
       { label: 'Chrome 插件', value: '在线', tone: 'success', detail: '版本与契约一致' },
-      { label: '客户端版本', value: '0.1.0', tone: 'neutral', detail: '开发者模式' },
+      { label: '客户端版本', value: __APP_VERSION__, tone: 'neutral', detail: '开发者模式' },
     ],
     confirmationBadge: confirmationCandidates.length,
-    clientVersion: '0.1.0',
+    clientVersion: __APP_VERSION__,
   }
 }
 
@@ -360,9 +360,9 @@ export function createEmptyProductData(): ProductData {
       { label: '后台职位配置', value: '尚未同步', tone: 'neutral' },
       { label: 'AI 模型', value: '尚未配置', tone: 'neutral' },
       { label: 'Chrome 插件', value: '等待连接', tone: 'neutral' },
-      { label: '客户端版本', value: '0.1.0', tone: 'neutral' },
+      { label: '客户端版本', value: __APP_VERSION__, tone: 'neutral' },
     ],
     confirmationBadge: 0,
-    clientVersion: '0.1.0',
+    clientVersion: __APP_VERSION__,
   }
 }
