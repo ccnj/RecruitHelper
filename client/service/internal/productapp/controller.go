@@ -6,6 +6,7 @@ package productapp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type Workflow interface {
 
 type JobConfigSource interface {
 	FetchCurrent(context.Context) ([]byte, error)
+	FetchAll(context.Context) ([]byte, error)
 }
 
 type Controller struct {
@@ -158,6 +160,10 @@ func (c *Controller) Start(
 	if err != nil || len(revisions) != 1 {
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
+	// 先刷有效集再落当前职位:SaveCurrentLegacyJobAIContext 只加不减,这个顺序
+	// 保证当前工作职位一定留在有效集里,不必为"复数响应恰好不含当前职位"另写
+	// 一条保护分支。
+	c.SyncEffectiveJobs(ctx)
 	stored, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now())
 	if err != nil || len(stored) != 1 {
 		return errors.Join(ErrJobConfigUnavailable, err)
@@ -167,6 +173,39 @@ func (c *Controller) Start(
 	}
 	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
 	return err
+}
+
+// SyncEffectiveJobs 刷新有效职位集,并刻意不向业务主线返回错误。
+//
+// 有效集只决定"主动来聊的候选人能否被自动建档",一次配置面故障不该阻断用户
+// 点下的开始。任何失败路径都保持既有集合原样:用一次网络抖动把全部职位清空,
+// 会让所有入站候选人集体 noMatch,方向比"晚一轮才接上"坏得多。失败必须响亮,
+// 因此每条不合格职位都单独告警——运营要据此知道去后台补哪个职位的配置。
+func (c *Controller) SyncEffectiveJobs(ctx context.Context) {
+	raw, err := c.source.FetchAll(ctx)
+	if err != nil {
+		slog.Warn("有效职位集同步失败，保持既有集合", "error", err)
+		return
+	}
+	revisions, skipped, err := m5ai.ImportLegacyJobConfigsTolerant(raw, c.now())
+	for index := range skipped {
+		slog.Warn("职位配置不合格，未进入有效职位集",
+			"jobIndex", skipped[index].Index,
+			"backendJobId", skipped[index].SourceJobRef,
+			"reason", skipped[index].Reason,
+		)
+	}
+	if err != nil {
+		slog.Warn("有效职位集整包无效，保持既有集合", "error", err)
+		return
+	}
+	stored, err := c.store.SaveEffectiveLegacyJobAIContexts(revisions, c.now())
+	if err != nil {
+		slog.Warn("有效职位集写入失败，保持既有集合", "error", err)
+		return
+	}
+	slog.Info("有效职位集已刷新",
+		"eligible", len(stored), "skipped", len(skipped))
 }
 
 func (c *Controller) Pause(ctx context.Context) error {

@@ -288,6 +288,46 @@ func (s *Store) SaveEffectiveLegacyJobAIContexts(
 	return stored, nil
 }
 
+// EffectiveLegacyJob 是有效职位集的只读投影:职位身份与可见名,不含任何文档
+// 正文与 provider 凭据。
+type EffectiveLegacyJob struct {
+	BackendJobID string
+	DisplayName  string
+}
+
+// EffectiveLegacyJobs 列出当前可接住主动来聊候选人的职位。有效集是一份会
+// 影响自动建档的持久状态,必须可被读出来核对——否则运营遇到 noMatch 时无法
+// 回答"现在到底哪些职位有效"。
+func (s *Store) EffectiveLegacyJobs() ([]EffectiveLegacyJob, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	var heads []JobAIContextHead
+	if err := s.db.Where(
+		"source_kind = ? AND inbound_eligible = ?",
+		legacyJobConfigSourceKind,
+		true,
+	).
+		Order("source_job_ref ASC").
+		Find(&heads).Error; err != nil {
+		return nil, err
+	}
+	out := make([]EffectiveLegacyJob, 0, len(heads))
+	for index := range heads {
+		revision, err := currentLegacyJobAIContextByBackendJobIDTx(s.db, heads[index].SourceJobRef)
+		if err != nil {
+			return nil, err
+		}
+		if revision == nil {
+			return nil, ErrJobAIContextHeadInvalid
+		}
+		out = append(out, EffectiveLegacyJob{
+			BackendJobID: revision.SourceJobRef, DisplayName: revision.DisplayName,
+		})
+	}
+	return out, nil
+}
+
 // backfillLegacyJobConfigInboundEligible is the one-time upgrade bridge for
 // databases created before InboundEligible existed. Before this column, the
 // single activation-current job was the only job inbound adoption could ever
