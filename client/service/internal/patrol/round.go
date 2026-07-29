@@ -769,6 +769,13 @@ func (a *roundActor) adoptInboundConversationProfiles(
 
 		reason := ""
 		switch {
+		case inboundHandoverBlocked(
+			summary.LastActivityTs,
+			a.manager.config.InboundHandoverCutoff,
+		):
+			// 交接前存量优先于身份事实判定：旧会话即便同时缺 positionTitle，
+			// "不属于本产品"也比"页面事实不全"更准确地解释为何没接管。
+			reason = inboundHandoverSkipReason
 		case strings.TrimSpace(summary.Peer.PlatformUserRef) == "":
 			reason = "missingPlatformUserRef"
 		case strings.TrimSpace(summary.Peer.DisplayName) == "":

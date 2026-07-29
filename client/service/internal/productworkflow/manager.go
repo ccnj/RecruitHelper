@@ -14,7 +14,7 @@ import (
 	"recruithelper/client/service/internal/workflow"
 )
 
-const NewFullWorkflowTargetCount = 30
+const NewFullWorkflowTargetCount = 150
 
 var (
 	ErrNilStore              = errors.New("产品工作流 store 不能为空")
@@ -102,7 +102,7 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 	return manager, nil
 }
 
-// StartFull starts a new full workflow at 30 candidates, except when the
+// StartFull starts a new full workflow at 150 candidates, except when the
 // account already has an unfinished sourcing batch. In that case it adopts
 // the batch's original revision and target unchanged.
 func (m *Manager) StartFull(

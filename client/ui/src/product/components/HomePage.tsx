@@ -171,7 +171,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                     title={additionalBatchReason ?? undefined}
                     type="button"
                   >
-                    {pendingSourcing ? '新一批已安排' : '再采一批（30 人）'}
+                    {pendingSourcing ? '新一批已安排' : '再采一批（150 人）'}
                   </button>
                 )}
                 {(workflow.canEnd || workflow.pendingAction !== null) && (
@@ -231,7 +231,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                     title={additionalBatchReason ?? undefined}
                     type="button"
                   >
-                    {pendingSourcing ? '新一批已安排' : '再采一批（30 人）'}
+                    {pendingSourcing ? '新一批已安排' : '再采一批（150 人）'}
                   </button>
                 )}
                 {(workflow.canEnd || workflow.pendingAction !== null) && (
