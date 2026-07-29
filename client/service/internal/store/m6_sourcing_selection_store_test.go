@@ -272,7 +272,9 @@ func TestSelectionUsesCurrentJobRevisionOnceAndReplaysAfterHeadAdvances(t *testi
 
 func TestSelectCompletedSourcingBatchCoversGenderAndTerminalBranches(t *testing.T) {
 	base := time.Date(2026, 7, 22, 17, 0, 0, 0, time.UTC)
-	s, key := prepareSourcingSelectionStore(t, "selection-branches", 5, 5, 5, 20, base)
+	// 配额取 6：放行"同事聊过"后合格者多一位，配额留够才能验证它真的入选，
+	// 而不是把结论压在谁先抢到名额的排序细节上。
+	s, key := prepareSourcingSelectionStore(t, "selection-branches", 5, 6, 6, 20, base)
 	fixtures := []selectionRunFixture{
 		{RunID: "run-existing", Score: intPointer(10), DisplayName: textPointer("已有档案")},
 		{RunID: "run-male-explicit", Score: intPointer(10), Basic: []protocol.CandidateResumeLabelValue{{Label: "性别", Value: "男"}}},
@@ -282,8 +284,11 @@ func TestSelectCompletedSourcingBatchCoversGenderAndTerminalBranches(t *testing.
 		{RunID: "run-unknown", Score: intPointer(7), DisplayName: textPointer("候选人甲")},
 		{RunID: "run-explicit-unknown", Score: intPointer(6), DisplayName: textPointer("不应回退先生"), Basic: []protocol.CandidateResumeLabelValue{{Label: "性别", Value: "未知"}}},
 		{RunID: "run-failed", ScoreFailed: true},
+		// established(同事聊过)自 2026-07-29 裁决起放行,只是排在配额之后;
+		// unknown(页面没有唯一可点的"打招呼")仍是唯一的关系状态排除理由。
 		{RunID: "run-contacted", Score: intPointer(10), Contact: "established"},
 		{RunID: "run-low-score", Score: intPointer(4)},
+		{RunID: "run-unknown-contact", Score: intPointer(10), Contact: "unknown"},
 	}
 	runs := insertCompletedSelectionBatch(
 		t, s, key, "batch-selection-branches", "selection-branches", base, fixtures,
@@ -309,8 +314,8 @@ func TestSelectCompletedSourcingBatchCoversGenderAndTerminalBranches(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if selection.TargetCount != 5 || selection.MaleLimit != 1 || selection.EligibleCount != 6 ||
-		selection.SelectedCount != 5 || selection.MaleSelectedCount != 1 || selection.UnknownGenderCount != 6 {
+	if selection.TargetCount != 6 || selection.MaleLimit != 1 || selection.EligibleCount != 7 ||
+		selection.SelectedCount != 6 || selection.MaleSelectedCount != 1 || selection.UnknownGenderCount != 7 {
 		t.Fatalf("分支摘要错误: %+v", selection)
 	}
 	outcomes := sourcingSelectionOutcomes(t, s, selection.BatchID)
@@ -323,12 +328,14 @@ func TestSelectCompletedSourcingBatchCoversGenderAndTerminalBranches(t *testing.
 		"run-unknown":          SourcingSelectionSelected,
 		"run-explicit-unknown": SourcingSelectionSelected,
 		"run-failed":           SourcingSelectionScoringFailed,
-		"run-contacted":        SourcingSelectionContactStateRejected,
-		"run-low-score":        SourcingSelectionScoreBelowThreshold,
+		// 同事聊过已通过关系状态闸,与其他合格者一样入选。
+		"run-contacted":       SourcingSelectionSelected,
+		"run-low-score":       SourcingSelectionScoreBelowThreshold,
+		"run-unknown-contact": SourcingSelectionContactStateRejected,
 	}
 	for runID, outcome := range want {
 		if outcomes[runID].Outcome != outcome {
-			t.Fatalf("%s outcome=%s want=%s", runID, outcomes[runID].Outcome, outcome)
+			t.Errorf("%s outcome=%s want=%s", runID, outcomes[runID].Outcome, outcome)
 		}
 	}
 }

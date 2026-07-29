@@ -158,7 +158,12 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 			switch {
 			case row.Invocation.Status != AIInvocationOK || row.Invocation.Score == nil:
 				decision.Outcome = SourcingSelectionScoringFailed
-			case row.Run.ContactState != string(protocol.CandidateContactStateUnestablished):
+			// 只排除 unknown:页面上没有唯一可点的"打招呼"按钮,常见成因是本
+			// 账号已经打过、按钮已变"继续沟通",协议规格 §614 明确 unknown 永
+			// 不授权 sendGreeting。established 是同事聊过,真机确认其卡片按钮
+			// 仍为"打招呼",平台仍允许招呼,故放行(2026-07-29 甲方裁决,见
+			// docs/同事聊过候选人放行裁决-2026-07-29.md)。
+			case row.Run.ContactState == string(protocol.CandidateContactStateUnknown):
 				decision.Outcome = SourcingSelectionContactStateRejected
 			case *row.Invocation.Score < selectionView.MinScore:
 				decision.Outcome = SourcingSelectionScoreBelowThreshold
