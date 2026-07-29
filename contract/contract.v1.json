@@ -868,6 +868,68 @@
         "type": "object",
         "fields": {}
       },
+      "JobPrepareDraftArgs": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
+          "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "experience": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMin": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMax": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMonths": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "keywords": {
+            "type": "array", "minItems": 1, "maxItems": 11,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          },
+          "headcount": { "type": "int64", "minimum": 1, "maximum": 9999 },
+          "showToSeeker": { "type": "boolean" },
+          "syncToMailbox": { "type": "boolean" }
+        }
+      },
+      "JobPrepareDraftKeywordOutcome": {
+        "type": "object",
+        "fields": {
+          "matched": {
+            "type": "array", "minItems": 0, "maxItems": 11,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          },
+          "custom": {
+            "type": "array", "minItems": 0, "maxItems": 11,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          },
+          "dropped": {
+            "type": "array", "minItems": 0, "maxItems": 11,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          },
+          "sectionTitles": {
+            "type": "array", "minItems": 0, "maxItems": 24,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          }
+        }
+      },
+      "JobPrepareDraftData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "descriptionLength": { "type": "int64", "minimum": 0 },
+          "autoJobClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "experience": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMin": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMax": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "salaryMonths": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "keywords": { "ref": "JobPrepareDraftKeywordOutcome" },
+          "workplace": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "headcount": { "type": "int64", "minimum": 0 },
+          "discarded": { "type": "boolean" },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "JobReadPublishedListData": {
         "type": "object",
         "maxJsonBytes": 65536,
@@ -1232,6 +1294,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
       "note": "读取本账号在平台上已存在的职位名全集,供脑侧发布前预检判定同名职位是否已存在。必须遍历平台上全部职位状态分区并合并,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。只返回按平台原样文本去重后的职位名与 observedAt,不返回状态、平台职位 ID、DOM 位置或候选人数据。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
+    },
+    "job.prepareDraft": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPrepareDraftData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 180000, "deadlineMs": 240000, "leaseMs": 45000,
+      "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",

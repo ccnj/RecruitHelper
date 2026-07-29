@@ -3,8 +3,9 @@ import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, BackendJobView, ConversationView, FrameEvent, HandHealth, Health,
-  JobConfigSourceView, JobPublishPrecheckView, LedgerRow, M5AIContextView, M5ProviderConfigView,
-  MessageView, MutationResult, PublishParamsState, PublishVerdict, SendIntentView, Suspect, TimeValue,
+  JobConfigSourceView, JobDraftReport, JobPublishPrecheckView, LedgerRow, M5AIContextView,
+  M5ProviderConfigView, MessageView, MutationResult, PublishParamsState, PublishVerdict,
+  SendIntentView, Suspect, TimeValue,
 } from './api'
 import {
   candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
@@ -635,9 +636,62 @@ const PUBLISH_VERDICT_LABEL: Record<PublishVerdict, string> = {
   blocked: '参数有问题',
 }
 
-// 预检结论面板。本轮只呈现结论，不提供发布入口——发布是独立的一轮，
+// 试填回读报告。它证明的是"能不能填进去"，不是"发布了"——手侧原语不允许
+// 点击提交控件，且回读后必须离开表单。
+function DraftReportBlock({ report }: { report: JobDraftReport }) {
+  const { keywords } = report
+  return (
+    <div className="publish-draft-report">
+      <p>
+        <span>类别</span><strong>{report.autoJobClass || '平台未判定'}</strong>
+        <span>薪资</span><strong>{report.salaryMin}-{report.salaryMax} × {report.salaryMonths}</strong>
+        <span>学历经验</span><strong>{report.education} · {report.experience}</strong>
+      </p>
+      <p>
+        <span>描述</span><strong>{report.descriptionLength} 字</strong>
+        <span>人数</span><strong>{report.headcount}</strong>
+        <span>地址</span><strong>{report.workplace}</strong>
+      </p>
+      <p>
+        <span>关键词</span>
+        <strong>命中 {keywords.matched.length} · 自定义 {keywords.custom.length} · 丢弃 {keywords.dropped.length}</strong>
+      </p>
+      {keywords.dropped.length > 0 && (
+        <p className="publish-draft-dropped">未能填入：{keywords.dropped.join('、')}</p>
+      )}
+      {keywords.sectionTitles.length > 0 && (
+        <p className="publish-draft-sections">本次分组：{keywords.sectionTitles.join(' / ')}</p>
+      )}
+      <p className={report.discarded ? 'publish-draft-clean' : 'publish-draft-dropped'}>
+        {report.discarded ? '已离开发布表单，页面未留草稿' : '警告：未确认离开发布表单，请人工检查页面'}
+      </p>
+    </div>
+  )
+}
+
+// 预检结论面板。本轮只呈现结论与试填诊断，不提供发布入口——发布是独立的一轮，
 // 需要先在真机确定"发布成功"的可见后置状态才能定义完成信号。
-function PublishPrecheckPanel({ view, at }: { view: JobPublishPrecheckView; at: string }) {
+function PublishPrecheckPanel({
+  view, at, account,
+}: { view: JobPublishPrecheckView; at: string; account: AccountView | null }) {
+  const [drafts, setDrafts] = useState<Record<string, JobDraftReport>>({})
+  const [draftBusy, setDraftBusy] = useState('')
+  const [draftError, setDraftError] = useState<Record<string, string>>({})
+
+  const tryDraft = async (jobId: string) => {
+    if (!account) return
+    setDraftBusy(jobId)
+    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
+    try {
+      const result = await api.jobPublishPrepareDraft(account.platform, account.accountRef, jobId)
+      setDrafts((prev) => ({ ...prev, [jobId]: result.report }))
+    } catch (reason) {
+      setDraftError((prev) => ({ ...prev, [jobId]: errorText(reason) }))
+    } finally {
+      setDraftBusy('')
+    }
+  }
+
   const ready = view.rows.filter((row) => row.verdict === 'ready')
   const others = view.rows.filter((row) => row.verdict !== 'ready')
   return (
@@ -657,7 +711,21 @@ function PublishPrecheckPanel({ view, at }: { view: JobPublishPrecheckView; at: 
               <strong>{row.jobName || '未命名职位'}</strong>
               {row.isCurrent && <em className="backend-jobs-current">当前职位</em>}
               <code>#{row.jobId}</code>
+              {row.verdict === 'ready' && (
+                <button
+                  type="button"
+                  disabled={draftBusy !== '' || !account}
+                  title="在发布页试填一次并回读，不会点击发布"
+                  onClick={() => void tryDraft(row.jobId)}
+                >
+                  {draftBusy === row.jobId ? '正在试填…' : '试填一次'}
+                </button>
+              )}
             </div>
+            {draftError[row.jobId] && (
+              <p className="publish-precheck-issue">{draftError[row.jobId]}</p>
+            )}
+            {drafts[row.jobId] && <DraftReportBlock report={drafts[row.jobId]} />}
             {row.issues?.map((issue, index) => (
               <p key={`i-${index}`} className="publish-precheck-issue">
                 {issue.field ? `${issue.field}：` : ''}{issue.message}
@@ -755,7 +823,7 @@ function BackendJobsTable({ account }: { account: AccountView | null }) {
       {error && <p className="m5-ai-message bad" role="alert">{error}</p>}
       {precheckError && <p className="m5-ai-message bad" role="alert">{precheckError}</p>}
       {precheck && (
-        <PublishPrecheckPanel view={precheck} at={precheckAt} />
+        <PublishPrecheckPanel view={precheck} at={precheckAt} account={account} />
       )}
       <div className="backend-jobs-scroll">
         <table>

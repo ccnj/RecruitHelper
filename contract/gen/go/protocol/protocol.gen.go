@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:511a6be4f4353594d65c76f0de53a6658271f1f580acf97a4ef8d4a1ea61f185"
+	ContractHash       = "sha256:e75e80c050cbc13cfcdfd1de1822b4f95686ffca296fe21da39a2e539867c7c6"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -795,6 +795,7 @@ const (
 	PrimDebugReload                       = "debug.reload"
 	PrimDebugSlowEcho                     = "debug.slowEcho"
 	PrimDebugSwitchWindow                 = "debug.switchWindow"
+	PrimJobPrepareDraft                   = "job.prepareDraft"
 	PrimJobReadPublishedList              = "job.readPublishedList"
 	PrimNavEnsureSurface                  = "nav.ensureSurface"
 	PrimProbePlatform                     = "probe.platform"
@@ -846,6 +847,7 @@ var Primitives = map[string]PrimitiveMeta{
 	PrimDebugReload:                       {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugReloadArgs", DataSchema: "DebugReloadData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugSlowEcho:                     {Ver: 1, Class: ClassEffectful, Batch: BatchM1, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "DebugSlowEchoArgs", DataSchema: "DebugSlowEchoData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimDebugSwitchWindow:                 {Ver: 1, Class: ClassIntrusive, Batch: BatchM1, PlatformSideEffect: "none", ExecBudgetMs: 10000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "DebugSwitchWindowArgs", DataSchema: "DebugSwitchWindowData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimJobPrepareDraft:                   {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 240000, LeaseMs: 45000, ArgsSchema: "JobPrepareDraftArgs", DataSchema: "JobPrepareDraftData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimJobReadPublishedList:              {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 90000, DeadlineMs: 150000, LeaseMs: 30000, ArgsSchema: "JobReadPublishedListArgs", DataSchema: "JobReadPublishedListData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimNavEnsureSurface:                  {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "NavEnsureSurfaceArgs", DataSchema: "NavEnsureSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimProbePlatform:                     {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ProbePlatformArgs", DataSchema: "ProbePlatformData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: true},

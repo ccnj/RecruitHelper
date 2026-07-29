@@ -863,6 +863,17 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-precheck-notice { margin: 0.16rem 0 0 4.95rem; font-size: 0.64rem; line-height: 1.5; }
 .publish-precheck-issue { color: #ffb3ae; }
 .publish-precheck-notice { color: var(--txt-faint); }
+.dc-shell .publish-precheck-row button { width: auto; margin: 0 0 0 auto; padding: 0.12rem 0.36rem; font-size: 0.62rem; }
+
+/* 试填回读报告：证明"能填进去"，不是"发布了" */
+.publish-draft-report { margin: 0.3rem 0 0 4.95rem; padding: 0.3rem 0.4rem; border-left: 2px solid var(--rule-hi); background: #0c1116; }
+.publish-draft-report p { display: flex; flex-wrap: wrap; gap: 0.2rem 0.5rem; margin: 0 0 0.14rem; font-size: 0.63rem; line-height: 1.5; }
+.publish-draft-report p:last-child { margin-bottom: 0; }
+.publish-draft-report span { color: var(--txt-faint); }
+.publish-draft-report strong { color: var(--txt); font-weight: 500; }
+.publish-draft-dropped { color: var(--warn); }
+.publish-draft-sections { color: var(--txt-faint); }
+.publish-draft-clean { color: var(--live); }
 
 /* M5 遗留：明确降级的视觉，不与在用配置抢注意力 */
 .dc-legacy { border-top: 1px solid var(--rule); background: #0a0e12; }

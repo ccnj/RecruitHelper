@@ -295,6 +295,31 @@ export interface JobPublishPrecheckView {
   observedAt: number
 }
 
+export interface JobDraftKeywordOutcome {
+  matched: string[]
+  custom: string[]
+  dropped: string[]
+  sectionTitles: string[]
+}
+
+export interface JobDraftReport {
+  jobName: string
+  employmentType: string
+  descriptionLength: number
+  autoJobClass: string | null
+  education: string
+  experience: string
+  salaryMin: string
+  salaryMax: string
+  salaryMonths: string
+  keywords: JobDraftKeywordOutcome
+  workplace: string
+  headcount: number
+  /** 手是否已确认离开发布表单。false 意味着页面上留着一个填满的表单。 */
+  discarded: boolean
+  observedAt: number
+}
+
 export interface BackendJobView {
   jobId: string
   jobName: string
@@ -599,6 +624,10 @@ export const api = {
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
     post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
+  jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string) =>
+    post<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
+      platform, accountRef, jobId,
+    }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
   bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {

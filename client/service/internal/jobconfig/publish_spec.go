@@ -81,6 +81,26 @@ type PublishSpec struct {
 	DeadJobClass string
 }
 
+// DraftArgs 把校验通过的 spec 组装成手侧试填参数。jobName 只接受调用方传入的
+// 后台职位名——发布参数里的职位名称是死字段，绝不从 spec 取。职位类别同样不在
+// 参数里：平台按职位描述自动判定。
+func (s PublishSpec) DraftArgs(jobName string) map[string]any {
+	return map[string]any{
+		"jobName":        strings.TrimSpace(jobName),
+		"employmentType": s.EmploymentType,
+		"description":    s.Description,
+		"education":      s.Education,
+		"experience":     s.Experience,
+		"salaryMin":      s.SalaryMin,
+		"salaryMax":      s.SalaryMax,
+		"salaryMonths":   s.SalaryMonths,
+		"keywords":       s.Keywords,
+		"headcount":      s.Headcount,
+		"showToSeeker":   s.ShowToSeeker,
+		"syncToMailbox":  s.SyncToMailbox,
+	}
+}
+
 // PublishIssue 是一条预检问题。Field 为空表示问题不归属单一字段。
 type PublishIssue struct {
 	Field   string `json:"field,omitempty"`

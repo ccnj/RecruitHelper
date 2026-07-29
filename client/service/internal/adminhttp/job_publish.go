@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
@@ -144,6 +145,162 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobPublishPrecheckView{
 		Rows: rows, PlatformPosting: len(postings), ObservedAt: observedAt,
 	})
+}
+
+type jobPublishDraftView struct {
+	JobID  string                       `json:"jobId"`
+	Report protocol.JobPrepareDraftData `json:"report"`
+}
+
+// jobPublishPrepareDraft 对单个职位在平台发布表单上试填一次并回读。
+//
+// 它**不发布**：手侧原语契约上就不允许点击提交控件，且回读完成后必须主动
+// 离开表单。这一步存在的意义是在承担发布风险之前，先把"填不进去"和平台的
+// 自动行为暴露出来。
+func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Platform   string `json:"platform"`
+		AccountRef string `json:"accountRef"`
+		JobID      string `json:"jobId"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
+		return
+	}
+	key, err := validateAccountKey(req.Platform, req.AccountRef)
+	req.JobID = strings.TrimSpace(req.JobID)
+	if err != nil || req.JobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
+		return
+	}
+	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "发布试填服务尚未就绪"})
+		return
+	}
+	batch, err := a.st.ActiveSourcingBatch(key)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		return
+	}
+	if batch != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "当前有采集批次在运行，发布试填会打断推荐流；请先结束批次",
+		})
+		return
+	}
+	account, sessionID, bootID, err := a.currentCandidateAccount(key)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 250*time.Second)
+	defer cancel()
+	raw, err := a.jobConfigSource.FetchAll(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
+		return
+	}
+	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
+		return
+	}
+	var target *jobconfig.BackendJobPublishSource
+	for i := range sources {
+		if sources[i].JobID == req.JobID {
+			target = &sources[i]
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位当前不在后台启用职位中"})
+		return
+	}
+	spec, issues := jobconfig.ParsePublishSpec(target.PublishParams)
+	if len(issues) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位发布参数未通过预检，先修参数再试填"})
+		return
+	}
+	args, err := json.Marshal(spec.DraftArgs(target.JobName))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "试填命令构造失败"})
+		return
+	}
+	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobPrepareDraft, 1, args); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "试填参数不符合当前契约"})
+		return
+	}
+
+	logicalRef, err := a.disp.DispatchStructured(dispatch.DispatchRequest{
+		HandID: account.BoundHandID, ExpectedSession: sessionID, ExpectedBootID: bootID,
+		Name: protocol.PrimJobPrepareDraft, Args: args,
+		Context: &protocol.CmdContext{
+			Platform: key.Platform, AccountRef: key.AccountRef,
+			ExpectedPrincipalFingerprint: *account.PrincipalFingerprint,
+		},
+	})
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填未能派发"})
+		return
+	}
+	logical, err := a.disp.WaitLogical(ctx, logicalRef)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填未完成"})
+		return
+	}
+	report, err := parsePrepareDraftProof(logicalRef, logical, account, key)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填证词无效：" + err.Error()})
+		return
+	}
+	// 手侧契约要求试填后必须离开表单。没有这个确认就等于把一个填满的发布表单
+	// 留在了页面上，此时宁可报错让人去看一眼，也不回一个"成功"。
+	if !report.Discarded {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "试填后未确认离开发布表单，请人工检查页面"})
+		return
+	}
+	writeJSON(w, http.StatusOK, jobPublishDraftView{JobID: target.JobID, Report: report})
+}
+
+func parsePrepareDraftProof(
+	logicalRef string,
+	logical *store.LogicalDispatchState,
+	account *store.Account,
+	key store.AccountKey,
+) (protocol.JobPrepareDraftData, error) {
+	var zero protocol.JobPrepareDraftData
+	if logical == nil || !logical.Settled || logical.LogicalDispatchID != logicalRef {
+		return zero, errors.New("逻辑派发未终局")
+	}
+	leaf := logical.Leaf
+	if leaf.LogicalDispatchID != logicalRef || leaf.Name != protocol.PrimJobPrepareDraft ||
+		leaf.Status != store.CmdOk || leaf.ResultBody == "" {
+		return zero, errors.New("叶子不符合要求")
+	}
+	resultRaw := json.RawMessage(leaf.ResultBody)
+	if err := protocol.ValidatePrimitiveResult(protocol.PrimJobPrepareDraft, 1, resultRaw); err != nil {
+		return zero, errors.New("结果不符合契约")
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal(resultRaw, &result); err != nil ||
+		result.Ref != leaf.MsgID || result.Status != protocol.ResultStatusOk {
+		return zero, errors.New("结果关联无效")
+	}
+	var data protocol.JobPrepareDraftData
+	if err := json.Unmarshal(result.Data, &data); err != nil {
+		return zero, errors.New("数据无法解析")
+	}
+	var cmdContext protocol.CmdContext
+	if err := json.Unmarshal([]byte(leaf.ContextJSON), &cmdContext); err != nil {
+		return zero, errors.New("上下文无法解析")
+	}
+	if account == nil || account.PrincipalFingerprint == nil ||
+		cmdContext.Platform != key.Platform || cmdContext.AccountRef != key.AccountRef ||
+		cmdContext.ExpectedPrincipalFingerprint != *account.PrincipalFingerprint {
+		return zero, errors.New("上下文与当前账号不符")
+	}
+	return data, nil
 }
 
 // parsePublishedListProof 复核证词链：逻辑派发终局、叶子就是本次读取原语、

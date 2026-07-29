@@ -50,6 +50,8 @@ import type {
   DebugProbeInterviewEditorData,
   ErrorCode,
   InterviewDetails,
+  JobPrepareDraftArgs,
+  JobPrepareDraftData,
   JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
@@ -5256,6 +5258,653 @@ export async function readZhilianPublishedJobs(
   }
   await ctx.progress('智联职位名清单读取完成', 100)
   return data
+}
+
+// ── 职位发布表单试填与回读 ────────────────────────────────────────────
+//
+// 只填不交:全程不点击"发布"或任何提交控件,回读完成后主动离开表单。
+// 一个填满的发布表单只差一次点击,留在页面上等同于给人工误操作递刀。
+//
+// 下面这些 MAIN world 片段的每一条判据都在真机上逐条验证过:富文本要靠
+// 异步同步到隐藏 textarea、职位类别只在描述失焦后才由平台生成、下拉面板
+// 挂在 body 下且两种结构不同、关键词分组随职位类别变化。
+
+const ZHILIAN_JOB_PUBLISH_URL = `https://${ZHILIAN_HOST}/job/publish`
+
+function isZhilianJobPublishURL(url: string | undefined): boolean {
+  if (!url) return false
+  try {
+    return new URL(url).pathname === '/job/publish'
+  } catch {
+    return false
+  }
+}
+
+type MainStep = { status: 'ok'; detail?: string } | { status: 'failed'; reason: string }
+
+function validMainStep(value: unknown): value is MainStep {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'ok') return record.detail === undefined || typeof record.detail === 'string'
+  return record.status === 'failed' && typeof record.reason === 'string'
+}
+
+// 职位名称:Vue 的 v-model 只认原生 input 事件,且必须走原型 setter,
+// 否则框架对 value 的属性劫持会吃掉这次赋值。
+function mainFillZhilianJobName(name: string): MainStep {
+  const input = document.querySelector('.publish-form__name input') as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'name_input_absent' }
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+  if (!setter) return { status: 'failed', reason: 'name_setter_absent' }
+  setter.call(input, name)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
+  return input.value === name ? { status: 'ok' } : { status: 'failed', reason: 'name_not_applied' }
+}
+
+// 职位描述:jqte 富文本。按行包 div 与真实键盘输入产生的结构一致;
+// 隐藏 textarea 是异步同步的,所以这里只写入,由调用方轮询确认同步完成。
+function mainWriteZhilianDescription(lines: string[]): MainStep {
+  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  const escape = (text: string): string =>
+    text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const html = lines.length === 0
+    ? ''
+    : escape(lines[0]) + lines.slice(1).map((line) => `<div>${escape(line)}</div>`).join('')
+  editor.innerHTML = html
+  editor.dispatchEvent(new Event('input', { bubbles: true }))
+  return { status: 'ok', detail: html }
+}
+
+function mainReadZhilianDescriptionSync(expectedHTML: string): MainStep {
+  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '职位描述'
+  })
+  const area = item?.querySelector('textarea') as HTMLTextAreaElement | null
+  if (!editor || !area) return { status: 'failed', reason: 'description_editor_absent' }
+  if (area.value !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+  return { status: 'ok', detail: String(editor.innerText.trim().length) }
+}
+
+// 平台只在描述失焦后才判定职位类别;这一串事件是真机验证过的最小触发集。
+function mainBlurZhilianDescription(): MainStep {
+  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  editor.focus()
+  editor.dispatchEvent(new Event('input', { bubbles: true }))
+  editor.dispatchEvent(new Event('keyup', { bubbles: true }))
+  editor.blur()
+  editor.dispatchEvent(new Event('blur', { bubbles: true }))
+  editor.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+  return { status: 'ok' }
+}
+
+function mainReadZhilianAutoJobClass(): MainStep {
+  const node = document.querySelector('.job-subType-input') as HTMLElement | null
+  if (!node) return { status: 'failed', reason: 'job_class_absent' }
+  const text = node.innerText.trim().split('\n')[0].trim()
+  if (!text || text === '请选择') return { status: 'failed', reason: 'job_class_pending' }
+  return { status: 'ok', detail: text.slice(0, 64) }
+}
+
+function mainPickZhilianEmployment(label: string): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const node2 = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return node2?.innerText.trim() === '工作性质'
+  })
+  if (!item) return { status: 'failed', reason: 'employment_group_absent' }
+  const buttons = Array.from(item.querySelectorAll('button')) as HTMLElement[]
+  const hit = buttons.filter((button) => button.innerText.trim() === label)
+  if (hit.length !== 1) {
+    return { status: 'failed', reason: hit.length === 0 ? 'employment_absent' : 'employment_ambiguous' }
+  }
+  hit[0].click()
+  return { status: 'ok' }
+}
+
+function mainReadZhilianEmployment(): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '工作性质'
+  })
+  if (!item) return { status: 'failed', reason: 'employment_group_absent' }
+  const active = Array.from(item.querySelectorAll('button')).filter((button) =>
+    /active|selected|is-current|checked/i.test(button.className))
+  if (active.length !== 1) return { status: 'failed', reason: 'employment_state_unreadable' }
+  return { status: 'ok', detail: (active[0] as HTMLElement).innerText.trim() }
+}
+
+function mainCloseZhilianPanels(): MainStep {
+  const visible = Array.from(document.querySelectorAll('.km-select__dropdown, .salary-popover')).filter((node) => {
+    const style = window.getComputedStyle(node)
+    return node.getBoundingClientRect().height > 0 && style.opacity === '1' && style.visibility !== 'hidden'
+  })
+  if (visible.length === 0) return { status: 'ok', detail: 'closed' }
+  document.body.click()
+  return { status: 'ok', detail: 'closing' }
+}
+
+// 下拉:面板挂在 body 下、与触发控件没有 DOM 父子关系,只能按水平位置就近匹配。
+// 选项在两种面板里结构不同(普通下拉是 li,薪资是 a.km-option),不能用宽泛的
+// [class*="option"]——列表容器自身也带 option 字样,会把整张列表当成一个选项。
+function mainOpenZhilianSelect(placeholder: string): MainStep {
+  const input = document.querySelector(`input[placeholder="${placeholder}"]`) as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'select_input_absent' }
+  input.click()
+  return { status: 'ok', detail: String(Math.round(input.getBoundingClientRect().left)) }
+}
+
+function mainPickZhilianSelectOption(anchorLeft: number, wanted: string): MainStep {
+  const visible = Array.from(document.querySelectorAll('.km-select__dropdown, .salary-popover')).filter((node) => {
+    const style = window.getComputedStyle(node)
+    return node.getBoundingClientRect().height > 0 && style.opacity === '1' && style.visibility !== 'hidden'
+  })
+  if (visible.length === 0) return { status: 'failed', reason: 'select_panel_absent' }
+  const panel = visible.sort((a, b) =>
+    Math.abs(a.getBoundingClientRect().left - anchorLeft) -
+    Math.abs(b.getBoundingClientRect().left - anchorLeft))[0]
+  const options = Array.from(panel.querySelectorAll('li, a.km-option')) as HTMLElement[]
+  const hit = options.filter((option) => option.textContent?.trim() === wanted)
+  if (hit.length !== 1) {
+    return { status: 'failed', reason: hit.length === 0 ? 'option_absent' : 'option_ambiguous' }
+  }
+  hit[0].click()
+  return { status: 'ok' }
+}
+
+function mainReadZhilianSelectValue(placeholder: string): MainStep {
+  const input = document.querySelector(`input[placeholder="${placeholder}"]`) as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'select_input_absent' }
+  return { status: 'ok', detail: input.value }
+}
+
+// 薪资月数没有 placeholder(平台预置了默认值),只能按当前值形态定位。
+function mainReadZhilianSalaryMonths(): MainStep {
+  const inputs = Array.from(document.querySelectorAll('input')).filter((input) =>
+    /^\d+个月$/.test((input as HTMLInputElement).value.trim())) as HTMLInputElement[]
+  if (inputs.length !== 1) return { status: 'failed', reason: 'salary_months_unresolved' }
+  return { status: 'ok', detail: inputs[0].value.trim() }
+}
+
+function mainOpenZhilianSalaryMonths(): MainStep {
+  const inputs = Array.from(document.querySelectorAll('input')).filter((input) =>
+    /^\d+个月$/.test((input as HTMLInputElement).value.trim())) as HTMLInputElement[]
+  if (inputs.length !== 1) return { status: 'failed', reason: 'salary_months_unresolved' }
+  inputs[0].click()
+  return { status: 'ok', detail: String(Math.round(inputs[0].getBoundingClientRect().left)) }
+}
+
+function mainFillZhilianHeadcount(headcount: number): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '招聘人数'
+  })
+  const input = item?.querySelector('input[type="text"], input:not([type])') as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'headcount_input_absent' }
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+  if (!setter) return { status: 'failed', reason: 'headcount_setter_absent' }
+  setter.call(input, String(headcount))
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new Event('change', { bubbles: true }))
+  return { status: 'ok', detail: input.value.trim() }
+}
+
+function mainReadZhilianWorkplace(): MainStep {
+  const input = document.querySelector('input[placeholder="请输入工作地址"]') as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'workplace_absent' }
+  const value = input.value.trim()
+  if (!value) return { status: 'failed', reason: 'workplace_empty' }
+  return { status: 'ok', detail: value.slice(0, 256) }
+}
+
+// 关键词弹层。分组数量、分组名称、组内词库与是否自动预选全都随职位类别变化,
+// 因此这里不认任何固定词表:先整体清空平台的预选(消除不可预测的配额占用),
+// 再按当前实际词库全等匹配。
+// 注意:下面每个 main* 片段都会被序列化后注入 MAIN world 执行,
+// 因此不能引用模块作用域的任何常量,选择器一律就地内联。
+type MainKeywordSnapshot =
+  | {
+    status: 'ok'
+    selected: string[]
+    sectionTitles: string[]
+    available: string[]
+    confirmLabel: string
+  }
+  | { status: 'failed'; reason: string }
+
+function mainZhilianKeywordDialog(): HTMLElement | null {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  return nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+}
+
+function mainOpenZhilianKeywords(): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '职位关键词'
+  })
+  const button = item?.querySelector('button') as HTMLElement | null
+  if (!button) return { status: 'failed', reason: 'keyword_entry_absent' }
+  button.click()
+  return { status: 'ok' }
+}
+
+function mainSnapshotZhilianKeywords(): MainKeywordSnapshot {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const items = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item')) as HTMLElement[]
+  const selected = items.filter((item) => item.className.includes('--selected'))
+    .map((item) => (item.textContent ?? '').trim()).filter(Boolean)
+  const available = items.map((item) => (item.textContent ?? '').trim()).filter(Boolean)
+  const sectionTitles = Array.from(
+    dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__list-item'),
+  ).map((group) => (group as HTMLElement).innerText.split('\n')[0].trim()).filter(Boolean)
+  const confirm = Array.from(dialog.querySelectorAll('.s-button')).map((button) =>
+    (button as HTMLElement).innerText.trim()).find((text) => /^确定/.test(text)) ?? ''
+  return { status: 'ok', selected, sectionTitles, available, confirmLabel: confirm }
+}
+
+function validKeywordSnapshot(value: unknown): value is MainKeywordSnapshot {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') return typeof record.reason === 'string'
+  return record.status === 'ok' && Array.isArray(record.selected) &&
+    Array.isArray(record.sectionTitles) && Array.isArray(record.available) &&
+    typeof record.confirmLabel === 'string'
+}
+
+// 再次点击已选词条即取消。整体清空后配额才算得准。
+function mainClearOneZhilianKeyword(): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const selected = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item'))
+    .filter((item) => item.className.includes('--selected')) as HTMLElement[]
+  if (selected.length === 0) return { status: 'ok', detail: 'empty' }
+  selected[0].click()
+  return { status: 'ok', detail: 'cleared' }
+}
+
+function mainPickZhilianKeyword(word: string): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const items = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item')) as HTMLElement[]
+  const hit = items.filter((item) => (item.textContent ?? '').trim() === word)
+  if (hit.length === 0) return { status: 'failed', reason: 'keyword_absent' }
+  if (hit[0].className.includes('--selected')) return { status: 'ok', detail: 'already' }
+  hit[0].click()
+  return { status: 'ok', detail: 'picked' }
+}
+
+// 未命中词库的词一律进最后一个分组「您还有哪些招聘要求？」:它没有预设词条,
+// 语义上就是兜底组。分组顺序由平台给出,这里只取最后一个自定义入口。
+function mainAddZhilianCustomKeyword(word: string): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const adds = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item__add')) as HTMLElement[]
+  if (adds.length === 0) return { status: 'failed', reason: 'keyword_custom_entry_absent' }
+  adds[adds.length - 1].click()
+  const input = Array.from(dialog.querySelectorAll('input.s-input__inner'))
+    .find((node) => node.getBoundingClientRect().height > 0) as HTMLInputElement | undefined
+  if (!input) return { status: 'failed', reason: 'keyword_custom_input_absent' }
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+  if (!setter) return { status: 'failed', reason: 'keyword_custom_setter_absent' }
+  setter.call(input, word)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  const confirm = Array.from(dialog.querySelectorAll('button, .s-button, [class*="btn"]'))
+    .filter((node) => (node as HTMLElement).innerText.trim() === '添加' &&
+      node.getBoundingClientRect().height > 0) as HTMLElement[]
+  if (confirm.length === 0) return { status: 'failed', reason: 'keyword_custom_add_absent' }
+  confirm[0].click()
+  return { status: 'ok' }
+}
+
+function mainConfirmZhilianKeywords(): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const confirm = Array.from(dialog.querySelectorAll('.s-button'))
+    .find((button) => /^确定/.test((button as HTMLElement).innerText.trim())) as HTMLElement | undefined
+  if (!confirm) return { status: 'failed', reason: 'keyword_confirm_absent' }
+  confirm.click()
+  return { status: 'ok' }
+}
+
+function mainReadZhilianKeywordTags(): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '职位关键词'
+  })
+  if (!item) return { status: 'failed', reason: 'keyword_entry_absent' }
+  if (mainZhilianKeywordDialog()) return { status: 'failed', reason: 'keyword_dialog_open' }
+  const text = (item as HTMLElement).innerText.replace(/\s+/g, ' ').replace('职位关键词', '').trim()
+  return { status: 'ok', detail: text.slice(0, 512) }
+}
+
+function throwPrepareDraftFailure(reason: string): never {
+  if (reason === 'job_class_pending') {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '平台未在期限内按职位描述判定职位类别', 'manualOnly',
+    )
+  }
+  if (reason.endsWith('_absent') || reason.endsWith('_unresolved')) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `发布表单元素不可解析: ${reason}`, 'manualOnly')
+  }
+  throw new ZhilianPlatformError('GUARD_FAILED', `发布表单填充未通过: ${reason}`, 'manualOnly')
+}
+
+async function runStep(tabId: number, func: () => MainStep, label: string): Promise<string> {
+  const result = await runMain(tabId, func, [])
+  if (!validMainStep(result)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `${label}结果结构不符合预期`, 'manualOnly')
+  }
+  if (result.status === 'failed') throwPrepareDraftFailure(result.reason)
+  return result.detail ?? ''
+}
+
+async function pollStep(
+  tabId: number,
+  func: () => MainStep,
+  ctx: PrimitiveContext,
+  label: string,
+  attempts = 40,
+): Promise<string> {
+  let lastReason = 'unknown'
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    ctx.checkpoint()
+    const result = await runMain(tabId, func, [])
+    if (!validMainStep(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `${label}结果结构不符合预期`, 'manualOnly')
+    }
+    if (result.status === 'ok') return result.detail ?? ''
+    lastReason = result.reason
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throwPrepareDraftFailure(lastReason)
+}
+
+// 相邻平台可见交互至少间隔一秒并带随机抖动。
+async function pace(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+}
+
+async function pickZhilianSelect(
+  tabId: number,
+  ctx: PrimitiveContext,
+  placeholder: string,
+  wanted: string,
+): Promise<string> {
+  // 上一次操作可能留着面板;不先收口,这次点击会把它 toggle 关掉。
+  await pollStep(tabId, mainCloseZhilianPanels, ctx, '关闭下拉面板', 20)
+  await pace()
+  const anchor = Number(await runStep(tabId, () => mainOpenZhilianSelect(placeholder), '展开下拉'))
+  await pollStep(tabId, () => mainPickZhilianSelectOption(anchor, wanted), ctx, `选择${placeholder}`)
+  return pollStep(tabId, () => {
+    const read = mainReadZhilianSelectValue(placeholder)
+    if (read.status === 'failed') return read
+    return read.detail === wanted ? read : { status: 'failed', reason: 'select_value_not_applied' }
+  }, ctx, `回读${placeholder}`)
+}
+
+async function applyZhilianKeywords(
+  tabId: number,
+  ctx: PrimitiveContext,
+  keywords: string[],
+): Promise<{ matched: string[]; custom: string[]; dropped: string[]; sectionTitles: string[] }> {
+  await runStep(tabId, mainOpenZhilianKeywords, '打开关键词弹层')
+  // 弹层内容异步加载:分组和词库要等平台按当前职位类别返回后才渲染。
+  let snapshot = await pollKeywordSnapshot(tabId, ctx)
+
+  // 先整体清空平台预选:预选一次有一次无,不清就算不准分组配额。
+  for (let guard = 0; guard < 24 && snapshot.selected.length > 0; guard += 1) {
+    await runStep(tabId, mainClearOneZhilianKeyword, '清空关键词预选')
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    snapshot = await pollKeywordSnapshot(tabId, ctx)
+  }
+  if (snapshot.selected.length > 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '关键词预选未能清空', 'manualOnly')
+  }
+  const sectionTitles = snapshot.sectionTitles.slice(0, 24)
+
+  const matched: string[] = []
+  const custom: string[] = []
+  const dropped: string[] = []
+  for (const keyword of keywords) {
+    ctx.checkpoint()
+    await new Promise<void>((resolve) => setTimeout(resolve, 300))
+    const available = new Set(snapshot.available)
+    if (available.has(keyword)) {
+      const result = await runMain(tabId, () => mainPickZhilianKeyword(keyword), [])
+      if (!validMainStep(result)) {
+        throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词点选结果结构不符合预期', 'manualOnly')
+      }
+      snapshot = await pollKeywordSnapshot(tabId, ctx)
+      // 分组配额占满时平台会拒绝这次点选;按裁决丢弃并如实记录，不改投自定义
+      // ——改投会把它落到另一个语义分组里，超出运营本意。
+      if (result.status === 'ok' && snapshot.selected.includes(keyword)) matched.push(keyword)
+      else dropped.push(keyword)
+      continue
+    }
+    const added = await runMain(tabId, () => mainAddZhilianCustomKeyword(keyword), [])
+    if (!validMainStep(added)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词自定义结果结构不符合预期', 'manualOnly')
+    }
+    snapshot = await pollKeywordSnapshot(tabId, ctx)
+    if (added.status === 'ok' && snapshot.selected.includes(keyword)) custom.push(keyword)
+    else dropped.push(keyword)
+  }
+
+  await pace()
+  await runStep(tabId, mainConfirmZhilianKeywords, '确认关键词')
+  const tags = await pollStep(tabId, mainReadZhilianKeywordTags, ctx, '回读关键词标签')
+  for (const keyword of [...matched, ...custom]) {
+    if (!tags.includes(keyword)) {
+      throw new ZhilianPlatformError('GUARD_FAILED', '关键词确认后未在表单上回读到', 'manualOnly')
+    }
+  }
+  return { matched, custom, dropped, sectionTitles }
+}
+
+async function pollKeywordSnapshot(
+  tabId: number,
+  ctx: PrimitiveContext,
+): Promise<{ selected: string[]; sectionTitles: string[]; available: string[]; confirmLabel: string }> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const result = await runMain(tabId, mainSnapshotZhilianKeywords, [])
+    if (!validKeywordSnapshot(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词弹层结构不符合预期', 'manualOnly')
+    }
+    if (result.status === 'ok' && result.sectionTitles.length > 0) {
+      return {
+        selected: result.selected, sectionTitles: result.sectionTitles,
+        available: result.available, confirmLabel: result.confirmLabel,
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词弹层未在期限内加载出分组', 'manualOnly')
+}
+
+export async function prepareZhilianJobDraft(
+  args: JobPrepareDraftArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobPrepareDraftData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobPrepareDraft, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '发布试填参数不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  // 每次都从干净的发布页开始:表单只在页面内存里,残留状态会污染这次回读。
+  const tab = await ensureZhilianJobPublishTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联发布页与登录身份', 10)
+
+  await runStep(tabId, () => mainPickZhilianEmployment(args.employmentType), '选择工作性质')
+  const employment = await pollStep(tabId, () => {
+    const read = mainReadZhilianEmployment()
+    if (read.status === 'failed') return read
+    return read.detail === args.employmentType
+      ? read
+      : { status: 'failed' as const, reason: 'employment_not_applied' }
+  }, ctx, '回读工作性质')
+
+  await pace()
+  await runStep(tabId, () => mainFillZhilianJobName(args.jobName), '填入职位名称')
+
+  await pace()
+  const lines = args.description.split('\n')
+  const expectedHTML = await runStep(tabId, () => mainWriteZhilianDescription(lines), '写入职位描述')
+  // 富文本到隐藏 textarea 是异步同步的;一致即是这一步的正证。
+  const descriptionLength = Number(await pollStep(
+    tabId, () => mainReadZhilianDescriptionSync(expectedHTML), ctx, '确认职位描述同步',
+  ))
+  await runStep(tabId, mainBlurZhilianDescription, '触发职位描述失焦')
+  await ctx.progress('等待平台按职位描述判定类别', 35)
+  // 职位类别是平台自动生成的必填项,不是我们能填的字段;等它出现即可。
+  const autoJobClass = await pollStep(tabId, mainReadZhilianAutoJobClass, ctx, '读取自动职位类别', 60)
+
+  const education = await pickZhilianSelect(tabId, ctx, '最低学历', args.education)
+  const experience = await pickZhilianSelect(tabId, ctx, '工作经验', args.experience)
+  await ctx.progress('填写学历与经验', 50)
+
+  // 薪资三段是联动渲染:最高月薪与薪资月数在选定最低月薪之前根本不存在。
+  const salaryMin = await pickZhilianSelect(tabId, ctx, '最低月薪', args.salaryMin)
+  const salaryMax = await pickZhilianSelect(tabId, ctx, '最高月薪', args.salaryMax)
+  await pollStep(tabId, mainCloseZhilianPanels, ctx, '关闭下拉面板', 20)
+  await pace()
+  let salaryMonths = await pollStep(tabId, mainReadZhilianSalaryMonths, ctx, '读取薪资月数')
+  if (salaryMonths !== args.salaryMonths) {
+    const anchor = Number(await runStep(tabId, mainOpenZhilianSalaryMonths, '展开薪资月数'))
+    await pollStep(tabId, () => mainPickZhilianSelectOption(anchor, args.salaryMonths), ctx, '选择薪资月数')
+    salaryMonths = await pollStep(tabId, () => {
+      const read = mainReadZhilianSalaryMonths()
+      if (read.status === 'failed') return read
+      return read.detail === args.salaryMonths
+        ? read
+        : { status: 'failed' as const, reason: 'salary_months_not_applied' }
+    }, ctx, '回读薪资月数')
+  }
+  await ctx.progress('填写薪资范围', 65)
+
+  const keywords = await applyZhilianKeywords(tabId, ctx, args.keywords)
+  await ctx.progress('填写职位关键词', 85)
+
+  await pace()
+  const headcount = await runStep(tabId, () => mainFillZhilianHeadcount(args.headcount), '填写招聘人数')
+  const workplace = await pollStep(tabId, mainReadZhilianWorkplace, ctx, '回读工作地址')
+
+  const data: JobPrepareDraftData = {
+    jobName: args.jobName,
+    employmentType: employment,
+    descriptionLength: Number.isFinite(descriptionLength) ? descriptionLength : 0,
+    autoJobClass: autoJobClass || null,
+    education, experience, salaryMin, salaryMax, salaryMonths,
+    keywords: {
+      matched: keywords.matched, custom: keywords.custom,
+      dropped: keywords.dropped, sectionTitles: keywords.sectionTitles,
+    },
+    workplace,
+    headcount: Number(headcount) || 0,
+    discarded: false,
+    observedAt: Date.now(),
+  }
+
+  // 试填完成后必须离开:一个填满的发布表单只差一次点击,留在页面上等同于
+  // 给人工误操作递刀。离开确认不了就整体失败,不返回"填好了"的成功结论。
+  await discardZhilianJobDraft(tabId, ctx)
+  data.discarded = true
+
+  if (validatePrimitiveData(PrimitiveName.JobPrepareDraft, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '发布试填回读不符合当前契约', 'manualOnly')
+  }
+  await ctx.progress('发布表单试填与回读完成', 100)
+  return data
+}
+
+async function discardZhilianJobDraft(tabId: number, ctx: PrimitiveContext): Promise<void> {
+  const commandNavigation = beginCommandNavigation(tabId, ctx.irreversibleNotAfterMs)
+  try {
+    await chrome.tabs.update(tabId, { url: ZHILIAN_JOB_LIST_URL })
+  } catch (error) {
+    commandNavigation.end()
+    throw error
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tabId)
+    if (latest.status === 'complete' && !isZhilianJobPublishURL(latest.url)) return
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '试填后未能确认离开发布表单', 'manualOnly')
+}
+
+async function ensureZhilianJobPublishTab(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<chrome.tabs.Tab> {
+  const tabs = (await chrome.tabs.query({ url: TAB_QUERY })).filter((tab) => tab.id !== undefined)
+  if (tabs.length > 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联标签无法唯一确定', 'manualOnly')
+  }
+  let tab = tabs.length === 1 ? tabs[0] : await canonicalZhilianTab()
+  if (!tab || tab.id === undefined) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
+    )
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
+  try {
+    // 即使当前已在发布页也重新导航一次:表单只活在页面内存里,
+    // 上一次的残留会污染这次回读。
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL })
+  } catch (error) {
+    commandNavigation.end()
+    throw error
+  }
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tabId)
+    if (latest.status === 'complete' && isZhilianJobPublishURL(latest.url)) {
+      const probed = await runMain(tabId, mainReadZhilianWorkplace, [])
+      if (validMainStep(probed) && probed.status === 'ok') return latest
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY', '智联发布页在期限内未就绪', 'afterRecovery', 'pageBroken',
+  )
 }
 
 export async function readZhilianSourcingResume(

@@ -3,10 +3,12 @@
 // 不上下线任何职位,也不产生候选人可见动作。
 import {
   CmdClass,
+  JobPrepareDraftArgs,
   Primitive as PrimitiveName,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
+  prepareZhilianJobDraft,
   readZhilianPublishedJobs,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
@@ -46,6 +48,27 @@ const readPublishedList: Primitive = {
   },
 }
 
+const prepareDraft: Primitive = {
+  name: PrimitiveName.JobPrepareDraft,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await prepareZhilianJobDraft(
+        rawArgs as JobPrepareDraftArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 export function registerJobPublishPrimitives(): void {
   register(readPublishedList)
+  register(prepareDraft)
 }

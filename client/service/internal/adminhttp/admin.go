@@ -105,6 +105,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
 	mux.HandleFunc("POST /admin/job-publish/precheck", h(a.jobPublishPrecheck))
+	mux.HandleFunc("POST /admin/job-publish/prepare-draft", h(a.jobPublishPrepareDraft))
 	mux.HandleFunc("POST /admin/job-config/activate", h(a.activateJobConfigSource))
 	mux.HandleFunc("POST /admin/job-config/sync-current", h(a.syncCurrentJobConfig))
 	mux.HandleFunc("POST /admin/sourcing/start", h(a.startSourcing))
