@@ -226,6 +226,7 @@ export interface ProductActions {
   pauseWorkflow?: () => void | Promise<void>
   resumeWorkflow?: () => void | Promise<void>
   endWorkflow?: () => void | Promise<void>
+  syncJobs?: () => void | Promise<void>
   sendConfirmationBatch?: (batchId: string, profileIds: string[]) => void | Promise<void>
   loadCandidateDetail?: (profileId: string, fallback?: CandidateViewItem) => Promise<CandidateViewItem>
   refresh?: () => void | Promise<void>

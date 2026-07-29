@@ -175,6 +175,34 @@ func (c *Controller) Start(
 	return err
 }
 
+// SyncJobs 是产品面"同步职位"的入口:刷新有效职位集,并把旧后台当前职位重新
+// 拉取落库,与开始按钮之前那次同步同形。
+//
+// 它不启动、不恢复任何工作流,也不改写已冻结批次的 revision 绑定与已建档候选人
+// 的职位归属——那些是不可变事实。后台当前职位若在运行期间变过,下一次开始仍由
+// 既有的 ErrJobSelectionChanged 拦住,本入口不替它做裁决。
+//
+// 不受统一业务运行窗口约束:同步配置不产生任何候选人可见动作,也不创建新链。
+func (c *Controller) SyncJobs(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	raw, err := c.source.FetchCurrent(ctx)
+	if err != nil {
+		return errors.Join(ErrJobConfigUnavailable, err)
+	}
+	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
+	if err != nil || len(revisions) != 1 {
+		return errors.Join(ErrJobConfigUnavailable, err)
+	}
+	// 与 Start 同序:先刷有效集,再落当前职位。
+	c.SyncEffectiveJobs(ctx)
+	if _, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now()); err != nil {
+		return errors.Join(ErrJobConfigUnavailable, err)
+	}
+	return nil
+}
+
 // SyncEffectiveJobs 刷新有效职位集,并刻意不向业务主线返回错误。
 //
 // 有效集只决定"主动来聊的候选人能否被自动建档",一次配置面故障不该阻断用户

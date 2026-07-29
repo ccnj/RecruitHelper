@@ -110,6 +110,19 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           <span>{customer.job.environment}</span>
           <span>{customer.job.lastSyncedAt ? `同步于 ${customer.job.lastSyncedAt}` : '尚无同步记录'}</span>
         </div>
+        <button
+          className="rh-button is-quiet"
+          disabled={!actions.syncJobs}
+          onClick={() => void actions.syncJobs?.()}
+          title={
+            actions.syncJobs
+              ? '重新读取后台职位：更新当前绑定职位，并让主动来聊的候选人能匹配到后台在招的其他职位'
+              : '运行控制尚未接入'
+          }
+          type="button"
+        >
+          同步职位
+        </button>
       </section>
 
       <div className="rh-home-primary-grid">

@@ -66,6 +66,7 @@ type WorkflowControl interface {
 	Resume(context.Context) error
 	End(context.Context) error
 	ConfirmAll(context.Context, string, []string) error
+	SyncJobs(context.Context) error
 }
 
 type Option func(*API)
@@ -120,6 +121,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/workflow/resume", h(a.resumeWorkflow))
 	mux.HandleFunc("POST /app/workflow/end", h(a.endWorkflow))
 	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
+	mux.HandleFunc("POST /app/jobs/sync", h(a.syncJobs))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
@@ -213,6 +215,24 @@ func startFailureText(err error) string {
 		return "当前职位配置不可用"
 	}
 	return "当前状态无法启动工作流"
+}
+
+// syncJobs 重新拉取旧后台职位配置：刷新有效职位集，并把当前职位重新落库。
+// 它不启动、不恢复工作流，因此不参与业务运行窗口裁决。
+func (a *API) syncJobs(w http.ResponseWriter, r *http.Request) {
+	if decodeEmptyProductJSON(r) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "同步职位请求无效"})
+		return
+	}
+	if a.control == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
+		return
+	}
+	if err := a.control.SyncJobs(r.Context()); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "职位配置同步失败"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
 
 func (a *API) pauseWorkflow(w http.ResponseWriter, r *http.Request) {

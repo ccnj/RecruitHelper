@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"recruithelper/client/service/internal/productapp"
@@ -21,9 +22,15 @@ type fakeWorkflowControl struct {
 	pauseCalls   int
 	resumeCalls  int
 	endCalls     int
+	syncJobCalls int
 	batchID      string
 	profileIDs   []string
 	err          error
+}
+
+func (f *fakeWorkflowControl) SyncJobs(context.Context) error {
+	f.syncJobCalls++
+	return f.err
 }
 
 func (f *fakeWorkflowControl) Start(
@@ -112,6 +119,42 @@ func TestWorkflowControlsForwardOnlyValidatedUserIntent(t *testing.T) {
 	if response.Code != http.StatusAccepted || control.batchID != "batch-one" ||
 		!reflect.DeepEqual(control.profileIDs, []string{"profile-a", "profile-b"}) {
 		t.Fatalf("confirm status=%d batch=%q profiles=%v", response.Code, control.batchID, control.profileIDs)
+	}
+}
+
+func TestSyncJobsEndpointForwardsAndKeepsFailureDetailInside(t *testing.T) {
+	control := &fakeWorkflowControl{}
+	handler := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(control))
+	response := productPOST(t, handler, "/app/jobs/sync", `{}`)
+	if response.Code != http.StatusAccepted || control.syncJobCalls != 1 {
+		t.Fatalf("sync status=%d calls=%d", response.Code, control.syncJobCalls)
+	}
+
+	rejecting := &fakeWorkflowControl{
+		err: errors.Join(
+			productapp.ErrJobConfigUnavailable,
+			errors.New("internal detail must not leave brain"),
+		),
+	}
+	failing := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(rejecting))
+	response = productPOST(t, failing, "/app/jobs/sync", `{}`)
+	if response.Code != http.StatusConflict ||
+		strings.Contains(response.Body.String(), "internal detail") {
+		t.Fatalf("失败详情泄漏到产品面: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	malformed := &fakeWorkflowControl{}
+	handler = newTestAPI(t, &fakeProjections{}, WithWorkflowControl(malformed))
+	if response := productPOST(t, handler, "/app/jobs/sync", `{"unexpected":1}`); response.Code != http.StatusBadRequest {
+		t.Fatalf("非空请求体应被拒: status=%d", response.Code)
+	}
+	if malformed.syncJobCalls != 0 {
+		t.Fatal("无效请求不得抵达控制层")
+	}
+
+	unavailable := newTestAPI(t, &fakeProjections{})
+	if response := productPOST(t, unavailable, "/app/jobs/sync", `{}`); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("控制未就绪应为 503: status=%d", response.Code)
 	}
 }
 
