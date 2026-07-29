@@ -24,6 +24,7 @@ const (
 	ConfigFilename   = "legacy-job-config.json"
 	bindPath         = "/api/v1/client/bind"
 	currentJobPath   = "/api/v1/client/job-config"
+	allJobsPath      = "/api/v1/client/job-configs"
 	maxResponseBytes = 4 << 20
 	requestTimeout   = 8 * time.Second
 )
@@ -307,6 +308,20 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 // existing verification side effect (last_seen_at + client.verified audit) is
 // an explicitly accepted property of the old configuration plane.
 func (s *Source) FetchCurrent(ctx context.Context) ([]byte, error) {
+	return s.postConfigPlane(ctx, currentJobPath, nil)
+}
+
+// FetchAll reads the approved plural endpoint. includeDocuments is always true:
+// the caller needs per-job document presence, and the endpoint blanks documents
+// without that flag. Same single-request, no-retry discipline and the same
+// accepted verification side effect as FetchCurrent.
+func (s *Source) FetchAll(ctx context.Context) ([]byte, error) {
+	return s.postConfigPlane(ctx, allJobsPath, map[string]any{"includeDocuments": true})
+}
+
+// postConfigPlane is the only outbound shape for the approved configuration
+// plane: one request, no retry, credentials never widened by the caller.
+func (s *Source) postConfigPlane(ctx context.Context, path string, extra map[string]any) ([]byte, error) {
 	config, err := s.LoadConfig()
 	if err != nil {
 		return nil, err
@@ -321,13 +336,17 @@ func (s *Source) FetchCurrent(ctx context.Context) ([]byte, error) {
 	if config.MachineID != machineID {
 		return nil, ErrMachineMismatch
 	}
-	payload, err := json.Marshal(map[string]string{
-		"machineId": machineID, "licenseToken": config.LicenseToken,
-	})
+	body := make(map[string]any, len(extra)+2)
+	for key, value := range extra {
+		body[key] = value
+	}
+	body["machineId"] = machineID
+	body["licenseToken"] = config.LicenseToken
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, ErrConfigInvalid
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, config.BaseURL+currentJobPath, bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, config.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, ErrConfigInvalid
 	}

@@ -73,6 +73,36 @@ func (a *API) activateJobConfigSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+// backendJobs 只读投影旧后台该客户的启用职位，用于诊断面的发布参数总览。
+// 刻意不经 m5ai 收编路径：那条路径会因为任何一个职位提示词不合格而整批失败，
+// 且会写入不可变的 job_ai_context_revisions——看一眼列表不该产生业务事实。
+func (a *API) backendJobs(w http.ResponseWriter, r *http.Request) {
+	if a.jobConfigSource == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "旧后台职位配置源尚未就绪"})
+		return
+	}
+	raw, err := a.jobConfigSource.FetchAll(r.Context())
+	if err != nil {
+		switch {
+		case errors.Is(err, jobconfig.ErrConfigMissing):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "旧后台尚未激活，无法读取职位列表"})
+		case errors.Is(err, jobconfig.ErrMachineMismatch):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "旧后台授权与当前机器不匹配"})
+		case errors.Is(err, jobconfig.ErrMachineIdentity):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "当前机器身份不可用"})
+		default:
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
+		}
+		return
+	}
+	jobs, err := jobconfig.ParseBackendJobs(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
 func (a *API) syncCurrentJobConfig(w http.ResponseWriter, r *http.Request) {
 	if a.jobConfigSource == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "旧后台职位配置源尚未就绪"})
