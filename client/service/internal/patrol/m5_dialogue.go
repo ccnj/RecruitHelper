@@ -785,7 +785,10 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding
 	}
 	// 轮区间之后允许平台中性 system 行滞留（0727当日计划3）；出现新的
-	// 候选人消息或我方出站仍视为边界失效。
+	// 候选人消息或我方出站仍视为边界失效。唯一豁免:交换结果卡(259/出站)
+	// 是本轮接受动作的平台产物,不是我方新发言——形态 A 当轮定向重对账会
+	// 在承接 advice 前把它收进账本,不豁免则"接受链完成→承接"永不可达
+	// (与 reconstructCommunicationV4TurnBoundaryTx 的 lateOutbound 豁免同规则)。
 	for index := range messages {
 		message := messages[index]
 		if message.Seq <= turn.InboundThroughSeq {
@@ -793,6 +796,10 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		}
 		if message.Direction == "system" ||
 			(message.Direction == "in" && message.Kind == "system") {
+			continue
+		}
+		if message.Direction == "out" && message.Kind == "card" &&
+			message.CardType == "wechatExchange" && message.CardState == "accepted" {
 			continue
 		}
 		return m5TurnMaterial{}, store.ErrDialogueTurnBinding

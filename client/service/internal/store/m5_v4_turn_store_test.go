@@ -2022,3 +2022,51 @@ func TestFreezeCommunicationV4InterviewAcceptedWithTextServiceReplyReplacesRecei
 		t.Fatalf("批C轮重放失败: replayed=%+v err=%v", replayed, err)
 	}
 }
+
+func TestValidateDialogueTurnCurrentToleratesExchangeResultCardAfterTurn(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-batchb-late-259"
+	fixture := seedReadyCommunicationTarget(t, s, profileID)
+	setCommunicationV4FixedPhrasePackage(t, s, "revision-"+profileID)
+	text := "加个微信详聊"
+	requestSourceKey := strings.Repeat("cd", 32)
+	inbound := appendCommunicationV4Inbound(t, s, fixture,
+		Message{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "pending", ContentHash: "v4-late-259-card",
+			SourceKey: &requestSourceKey,
+		},
+		Message{
+			Seq: 3, Direction: "in", Kind: "text", Text: &text,
+			ContentHash: "v4-late-259-text",
+		},
+	)
+	req := communicationV4TurnRequest(t, s, fixture, inbound)
+	frozen, err := s.FreezeCommunicationV4Turn(req)
+	if err != nil || !frozen.Created {
+		t.Fatalf("请求卡+文字轮冻结失败: %+v err=%v", frozen, err)
+	}
+	// 形态 A 定向重对账把接受产生的交换结果卡(259/出站)当轮收进账本。
+	appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 4, Direction: "out", Kind: "card", CardType: "wechatExchange",
+		CardState: "accepted", ContentHash: "v4-late-259-result", Origin: "self",
+	})
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		return validateDialogueTurnCurrentTx(tx, frozen.Turn)
+	})
+	if err != nil {
+		t.Fatalf("轮后交换结果卡不得作废承接轮: err=%v", err)
+	}
+	// 真人出站文本仍然作废本轮。
+	human := "我手动回了一句"
+	appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 5, Direction: "out", Kind: "text", Text: &human,
+		ContentHash: "v4-late-human-text", Origin: "external",
+	})
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		return validateDialogueTurnCurrentTx(tx, frozen.Turn)
+	})
+	if !errors.Is(err, ErrDialogueTurnBinding) {
+		t.Fatalf("真人出站必须仍作废本轮: err=%v", err)
+	}
+}

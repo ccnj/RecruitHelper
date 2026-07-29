@@ -652,12 +652,20 @@ func reconstructCommunicationV4TurnBoundaryTx(
 	var lateOutbound int64
 	if err := tx.Model(&Message{}).
 		Where(
-			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq >= ?",
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq >= ? "+
+				// 交换结果卡(259/出站)是本轮接受动作的平台产物,不是我方新
+				// 发言:形态 A 的当轮定向重对账会在承接 advice 之前把它收进
+				// 账本,规格 §五(四)"接受链完成→承接"必然发生在它之后,不
+				// 豁免则该分支永不可达。真人出站与系统回复仍照旧作废本轮。
+				"AND NOT (kind = ? AND card_type = ? AND card_state = ?)",
 			profile.Platform,
 			profile.AccountRef,
 			conversationRef,
 			"out",
 			inboundFromSeq,
+			"card",
+			"wechatExchange",
+			"accepted",
 		).
 		Count(&lateOutbound).Error; err != nil {
 		return Message{}, nil, nil, nil, err
