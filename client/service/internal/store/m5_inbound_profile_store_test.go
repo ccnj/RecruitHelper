@@ -32,6 +32,32 @@ func saveInboundLegacyJob(
 	}
 }
 
+// saveInboundEffectiveLegacyJobs 用一次成功的复数同步建立有效职位集,
+// 不触碰当前工作职位。
+func saveInboundEffectiveLegacyJobs(
+	t *testing.T,
+	s *Store,
+	at time.Time,
+	jobs map[string]string,
+) {
+	t.Helper()
+	revisions := make([]m5ai.ContextRevision, 0, len(jobs))
+	for jobID, displayName := range jobs {
+		revision := contextRevisionFixture(
+			"inbound-context-"+jobID,
+			"inbound-revision-"+jobID,
+			at,
+		)
+		revision.SourceKind = legacyJobConfigSourceKind
+		revision.SourceJobRef = jobID
+		revision.DisplayName = displayName
+		revisions = append(revisions, revision)
+	}
+	if _, err := s.SaveEffectiveLegacyJobAIContexts(revisions, at); err != nil {
+		t.Fatalf("保存有效职位集: %v", err)
+	}
+}
+
 func seedInboundConversation(
 	t *testing.T,
 	s *Store,
@@ -208,13 +234,6 @@ func TestAdoptInboundConversationProfileConservativelySkipsMissingOrAmbiguousJob
 			for _, job := range fixture.jobs {
 				saveInboundLegacyJob(t, s, job.id, job.title, at.Add(-time.Minute))
 			}
-			if fixture.want == InboundProfilePositionAmbiguous {
-				if err := s.db.Model(&JobAIContextHead{}).
-					Where("source_kind = ?", legacyJobConfigSourceKind).
-					Update("activation_current", true).Error; err != nil {
-					t.Fatal(err)
-				}
-			}
 
 			result, err := s.AdoptInboundConversationProfile(req)
 			if err != nil || result == nil ||
@@ -227,60 +246,109 @@ func TestAdoptInboundConversationProfileConservativelySkipsMissingOrAmbiguousJob
 	}
 }
 
-func TestAdoptInboundConversationProfileOnlyMatchesMostRecentlySyncedJob(t *testing.T) {
+func TestAdoptInboundConversationProfileMatchesAcrossEffectiveJobSet(t *testing.T) {
 	at := time.Date(2026, 7, 26, 9, 15, 0, 0, time.UTC)
 
-	t.Run("old customer matching title cannot win", func(t *testing.T) {
+	t.Run("non-current effective job still adopts", func(t *testing.T) {
 		s := openTest(t)
 		req := inboundAdoptionRequest(at)
 		req.PositionTitle = "客户经理"
 		seedInboundConversation(
-			t,
-			s,
-			req.Platform,
-			req.AccountRef,
-			req.ConversationRef,
-			req.PlatformUserRef,
-			"候选人甲",
-			at,
+			t, s, req.Platform, req.AccountRef, req.ConversationRef,
+			req.PlatformUserRef, "候选人甲", at,
 		)
-		saveInboundLegacyJob(t, s, "old-customer-job", "客户经理", at.Add(-time.Hour))
-		saveInboundLegacyJob(t, s, "current-customer-job", "销售经理", at.Add(-time.Minute))
-
-		result, err := s.AdoptInboundConversationProfile(req)
-		if err != nil || result == nil ||
-			result.Outcome != InboundProfilePositionNoMatch ||
-			result.Profile != nil {
-			t.Fatalf("旧客户职位不得参与当前匹配: result=%+v err=%v", result, err)
-		}
-		assertInboundAdoptionLeftNoFacts(t, s, req)
-	})
-
-	t.Run("same title binds current customer job", func(t *testing.T) {
-		s := openTest(t)
-		req := inboundAdoptionRequest(at)
-		req.PositionTitle = "客户经理"
-		seedInboundConversation(
-			t,
-			s,
-			req.Platform,
-			req.AccountRef,
-			req.ConversationRef,
-			req.PlatformUserRef,
-			"候选人甲",
-			at,
-		)
-		saveInboundLegacyJob(t, s, "old-customer-job", "客户经理", at.Add(-time.Hour))
-		saveInboundLegacyJob(t, s, "current-customer-job", "客户经理", at.Add(-time.Minute))
+		// 漏斗此刻在为"销售经理"工作,但"客户经理"仍是后台返回的有效职位。
+		// 主动来聊客户经理的候选人没有理由被挡在外面。
+		saveInboundEffectiveLegacyJobs(t, s, at.Add(-time.Minute), map[string]string{
+			"job-sales": "销售经理", "job-account": "客户经理",
+		})
+		saveInboundLegacyJob(t, s, "job-sales", "销售经理", at.Add(-time.Minute))
 
 		result, err := s.AdoptInboundConversationProfile(req)
 		if err != nil || result == nil ||
 			result.Outcome != InboundProfileAdopted ||
 			result.Profile == nil ||
 			result.Profile.BackendJobID == nil ||
-			*result.Profile.BackendJobID != "current-customer-job" {
-			t.Fatalf("同名职位必须绑定最近同步的当前职位: result=%+v err=%v", result, err)
+			*result.Profile.BackendJobID != "job-account" {
+			t.Fatalf("有效集内非当前职位必须可建档: result=%+v err=%v", result, err)
 		}
+	})
+
+	t.Run("duplicate title inside effective set is ambiguous", func(t *testing.T) {
+		s := openTest(t)
+		req := inboundAdoptionRequest(at)
+		req.PositionTitle = "客户经理"
+		seedInboundConversation(
+			t, s, req.Platform, req.AccountRef, req.ConversationRef,
+			req.PlatformUserRef, "候选人甲", at,
+		)
+		// 平台 IM 列表只给可见标题,两个同名职位无法区分。掷骰子选中一个会让
+		// 候选人按错误职位的薪资与事实库被聊下去,因此只能转人工。
+		saveInboundEffectiveLegacyJobs(t, s, at.Add(-time.Minute), map[string]string{
+			"job-beijing": "客户经理", "job-shanghai": "客户经理",
+		})
+
+		result, err := s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfilePositionAmbiguous ||
+			result.Profile != nil {
+			t.Fatalf("有效集内同名职位必须转人工: result=%+v err=%v", result, err)
+		}
+		assertInboundAdoptionLeftNoFacts(t, s, req)
+	})
+
+	t.Run("empty effective set is distinguishable from title mismatch", func(t *testing.T) {
+		s := openTest(t)
+		req := inboundAdoptionRequest(at)
+		req.PositionTitle = "客户经理"
+		seedInboundConversation(
+			t, s, req.Platform, req.AccountRef, req.ConversationRef,
+			req.PlatformUserRef, "候选人甲", at,
+		)
+
+		result, err := s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfileNoEligibleJobs ||
+			result.Profile != nil {
+			t.Fatalf("空有效集必须与标题对不上区分开: result=%+v err=%v", result, err)
+		}
+
+		saveInboundEffectiveLegacyJobs(t, s, at.Add(-time.Minute), map[string]string{
+			"job-sales": "销售经理",
+		})
+		result, err = s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfilePositionNoMatch ||
+			result.Profile != nil {
+			t.Fatalf("同步后标题对不上应为 positionNoMatch: result=%+v err=%v", result, err)
+		}
+		assertInboundAdoptionLeftNoFacts(t, s, req)
+	})
+
+	t.Run("customer handover revokes the previous effective set", func(t *testing.T) {
+		s := openTest(t)
+		req := inboundAdoptionRequest(at)
+		req.PositionTitle = "客户经理"
+		seedInboundConversation(
+			t, s, req.Platform, req.AccountRef, req.ConversationRef,
+			req.PlatformUserRef, "候选人甲", at,
+		)
+		saveInboundEffectiveLegacyJobs(t, s, at.Add(-time.Hour), map[string]string{
+			"old-customer-job": "客户经理",
+		})
+		// 换客户:上一个客户的全部职位必须一起出局,否则新客户的候选人会按
+		// 旧客户的职位上下文被聊下去。
+		if err := s.InvalidateCurrentLegacyJobAIContext(at.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := s.AdoptInboundConversationProfile(req)
+		if err != nil || result == nil ||
+			result.Outcome != InboundProfileNoEligibleJobs ||
+			result.Profile != nil {
+			t.Fatalf("旧客户职位不得在换客户后继续接住候选人: result=%+v err=%v", result, err)
+		}
+		assertInboundAdoptionLeftNoFacts(t, s, req)
 	})
 }
 

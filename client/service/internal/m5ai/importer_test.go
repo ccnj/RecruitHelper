@@ -93,6 +93,97 @@ func TestImportLegacyPluralImportsAllWithoutChoosingByTitle(t *testing.T) {
 	}
 }
 
+func TestTolerantPluralImportKeepsGoodJobsWhenOneJobIsUnderConfigured(t *testing.T) {
+	broken := syntheticLegacyBundle(t, 2, "配置不全的历史职位")
+	// The realistic failure in a customer's backend: a job whose documents were
+	// never completed. All-or-nothing would disqualify jobs 1 and 3 with it.
+	delete(broken["documents"].(map[string]string), "意向判断")
+	broken["intent"] = map[string]any{"prompt": ""}
+	payload := map[string]any{
+		"currentJobId": 1,
+		"jobs": []any{
+			syntheticLegacyBundle(t, 1, "健康职位甲"),
+			broken,
+			syntheticLegacyBundle(t, 3, "健康职位乙"),
+		},
+	}
+	raw, _ := json.Marshal(payload)
+	now := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+
+	if _, err := ImportLegacyJobConfigFromBackend(raw, now); err == nil {
+		t.Fatal("既有 all-or-nothing 入口必须仍然整批失败，本测试的前提才成立")
+	}
+
+	revisions, skipped, err := ImportLegacyJobConfigsTolerant(raw, now)
+	if err != nil {
+		t.Fatalf("容错导入不应整批失败: %v", err)
+	}
+	if len(revisions) != 2 {
+		t.Fatalf("健康职位未全部保留: got=%d want=2", len(revisions))
+	}
+	for _, revision := range revisions {
+		if revision.SourceJobRef == "2" {
+			t.Fatal("配置不全的职位不得进入有效职位集")
+		}
+		if revision.SourceKind != "legacyJobConfig" {
+			t.Fatalf("来源身份错误: %q", revision.SourceKind)
+		}
+	}
+	if len(skipped) != 1 || skipped[0].SourceJobRef != "2" || skipped[0].Index != 1 {
+		t.Fatalf("跳过职位未被如实记录: %+v", skipped)
+	}
+	if skipped[0].Reason == "" {
+		t.Fatal("跳过原因不得为空，否则运营无法判断要去后台补什么")
+	}
+	// The skip reason travels into logs and the admin diagnostic surface, so it
+	// must stay structural: no document content, no provider credential.
+	for _, forbidden := range []string{
+		"sk-must-not-persist", "legacy-model", "https://legacy.invalid",
+		"fixture://facts", "fixture://score", "fixture://greeting",
+	} {
+		if strings.Contains(skipped[0].Reason, forbidden) {
+			t.Fatalf("跳过原因泄漏配置正文或凭据: %q", skipped[0].Reason)
+		}
+	}
+}
+
+func TestTolerantPluralImportFailsWholePayloadDamageAndSkipsDuplicateJobID(t *testing.T) {
+	now := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+
+	t.Run("whole payload damage still fails", func(t *testing.T) {
+		for name, raw := range map[string][]byte{
+			"invalid json": []byte(`{`),
+			"not plural":   []byte(`{"job":{"id":1,"name":"职位"},"documents":{}}`),
+			"empty jobs":   []byte(`{"currentJobId":null,"jobs":[]}`),
+		} {
+			if _, _, err := ImportLegacyJobConfigsTolerant(raw, now); err == nil {
+				t.Fatalf("%s 必须整体失败，不得静默退化成零个有效职位", name)
+			}
+		}
+	})
+
+	t.Run("duplicate job id keeps first arrival", func(t *testing.T) {
+		payload := map[string]any{
+			"currentJobId": 1,
+			"jobs": []any{
+				syntheticLegacyBundle(t, 1, "先到"),
+				syntheticLegacyBundle(t, 1, "后到"),
+			},
+		}
+		raw, _ := json.Marshal(payload)
+		revisions, skipped, err := ImportLegacyJobConfigsTolerant(raw, now)
+		if err != nil {
+			t.Fatalf("重复 job id 不应整批失败: %v", err)
+		}
+		if len(revisions) != 1 || revisions[0].DisplayName != "先到" {
+			t.Fatalf("重复 job id 未保留首次到达: %+v", revisions)
+		}
+		if len(skipped) != 1 || skipped[0].Index != 1 {
+			t.Fatalf("重复项未被记录: %+v", skipped)
+		}
+	})
+}
+
 func TestBackendImportRecordsDistinctStableSourceKind(t *testing.T) {
 	bundle := syntheticLegacyBundle(t, 17, "合成职位")
 	raw, _ := json.Marshal(bundle)

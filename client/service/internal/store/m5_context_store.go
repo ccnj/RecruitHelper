@@ -144,15 +144,20 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 			head = JobAIContextHead{
 				SourceKind: legacyJobConfigSourceKind, SourceJobRef: revision.SourceJobRef,
 				ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
-				ActivationCurrent: true, LastSyncedAt: syncedAt,
+				ActivationCurrent: true, InboundEligible: true, LastSyncedAt: syncedAt,
 			}
 			return tx.Create(&head).Error
 		case headErr != nil:
 			return headErr
 		default:
+			// 当前工作职位按定义属于有效职位集,不必等复数同步确认: 漏斗正在为
+			// 它工作,主动来聊它的候选人没有理由被挡在外面。这里只加不减——上面
+			// 的清零只针对 ActivationCurrent,不得顺手撤销其他职位由复数同步取得
+			// 的建档资格。
 			return tx.Model(&head).Updates(map[string]any{
 				"context_id": revision.ContextID, "revision_hash": revision.RevisionHash,
 				"activation_current": true,
+				"inbound_eligible":   true,
 				"last_synced_at":     syncedAt,
 				"updated_at":         syncedAt,
 			}).Error
@@ -173,20 +178,133 @@ func (s *Store) SaveCurrentLegacyJobAIContext(
 // allowed to reuse any synchronized job. Immutable revisions and historical
 // per-job heads remain intact; a later successful /client/job-config sync
 // promotes exactly one head again through SaveCurrentLegacyJobAIContext.
+//
+// 有效职位集必须在同一处一起撤销。它按定义属于"当前这个客户的后台还在返回的
+// 职位",换客户后一条也不再成立;漏掉它,新客户主动来聊的候选人会被建到上一个
+// 客户的职位下,并按那个客户的薪资、事实库与话术被聊下去——跨客户错靶。
 func (s *Store) InvalidateCurrentLegacyJobAIContext(at time.Time) error {
 	if s == nil || s.db == nil || at.IsZero() {
 		return ErrJobAIContextHeadInvalid
 	}
 	return s.db.Model(&JobAIContextHead{}).
 		Where(
-			"source_kind = ? AND activation_current = ?",
+			"source_kind = ? AND (activation_current = ? OR inbound_eligible = ?)",
 			legacyJobConfigSourceKind,
+			true,
 			true,
 		).
 		Updates(map[string]any{
 			"activation_current": false,
+			"inbound_eligible":   false,
 			"updated_at":         at,
 		}).Error
+}
+
+// SaveEffectiveLegacyJobAIContexts 用一次成功的复数同步整体重算有效职位集:
+// 本次返回且配置合格的职位全部标记为可建档,其余历史 head 一律撤销资格——后台
+// 不再返回一个职位,就是它不该再接住新的主动来聊候选人。
+//
+// 刻意不碰 ActivationCurrent: 有效集换一批不代表漏斗此刻换了工作职位。
+// 调用方必须只在同步成功时调用本函数;同步失败时保持既有有效集不变,绝不能
+// 用一次网络故障把全部职位清空,那会让所有入站候选人集体 noMatch。
+func (s *Store) SaveEffectiveLegacyJobAIContexts(
+	revisions []m5ai.ContextRevision,
+	syncedAt time.Time,
+) ([]JobAIContextRevision, error) {
+	if s == nil || s.db == nil || syncedAt.IsZero() {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	if len(revisions) == 0 {
+		return nil, ErrJobAIContextHeadInvalid
+	}
+	for index := range revisions {
+		if revisions[index].SourceKind != legacyJobConfigSourceKind ||
+			strings.TrimSpace(revisions[index].SourceJobRef) == "" {
+			return nil, ErrJobAIContextHeadInvalid
+		}
+	}
+	wanted, err := jobAIContextRevisionsFromInputs(revisions)
+	if err != nil {
+		return nil, err
+	}
+	stored := make([]JobAIContextRevision, len(wanted))
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		eligible := make([]string, 0, len(wanted))
+		for index := range wanted {
+			persisted, _, saveErr := saveJobAIContextRevisionTx(tx, wanted[index])
+			if saveErr != nil {
+				return saveErr
+			}
+			stored[index] = persisted
+			eligible = append(eligible, persisted.SourceJobRef)
+		}
+		if err := tx.Model(&JobAIContextHead{}).
+			Where("source_kind = ?", legacyJobConfigSourceKind).
+			Where("source_job_ref NOT IN ?", eligible).
+			Where("inbound_eligible = ?", true).
+			Updates(map[string]any{
+				"inbound_eligible": false,
+				"updated_at":       syncedAt,
+			}).Error; err != nil {
+			return err
+		}
+		for index := range stored {
+			revision := stored[index]
+			var head JobAIContextHead
+			headErr := tx.First(
+				&head,
+				"source_kind = ? AND source_job_ref = ?",
+				legacyJobConfigSourceKind,
+				revision.SourceJobRef,
+			).Error
+			switch {
+			case errors.Is(headErr, gorm.ErrRecordNotFound):
+				head = JobAIContextHead{
+					SourceKind: legacyJobConfigSourceKind, SourceJobRef: revision.SourceJobRef,
+					ContextID: revision.ContextID, RevisionHash: revision.RevisionHash,
+					InboundEligible: true, LastSyncedAt: syncedAt,
+				}
+				if err := tx.Create(&head).Error; err != nil {
+					return err
+				}
+			case headErr != nil:
+				return headErr
+			default:
+				if err := tx.Model(&head).Updates(map[string]any{
+					"context_id": revision.ContextID, "revision_hash": revision.RevisionHash,
+					"inbound_eligible": true,
+					"last_synced_at":   syncedAt,
+					"updated_at":       syncedAt,
+				}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stored, nil
+}
+
+// backfillLegacyJobConfigInboundEligible is the one-time upgrade bridge for
+// databases created before InboundEligible existed. Before this column, the
+// single activation-current job was the only job inbound adoption could ever
+// match, so granting it eligibility preserves the previous behavior exactly.
+// Upgrading must not silently narrow inbound adoption to zero jobs while
+// waiting for the first plural sync.
+func backfillLegacyJobConfigInboundEligible(tx *gorm.DB) error {
+	if tx == nil {
+		return ErrJobAIContextHeadInvalid
+	}
+	return tx.Model(&JobAIContextHead{}).
+		Where(
+			"source_kind = ? AND activation_current = ?",
+			legacyJobConfigSourceKind,
+			true,
+		).
+		UpdateColumn("inbound_eligible", true).Error
 }
 
 // backfillLegacyJobConfigActivationCurrent is a one-time upgrade bridge for

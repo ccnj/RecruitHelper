@@ -790,12 +790,17 @@ type JobAIContextRevision struct {
 // JobAIContextHead 记录某个配置来源职位最近一次成功同步后的当前 revision。
 // revision 本身继续不可变；head 只是可推进的当前指针，不能由 revision.CreatedAt
 // 反推，因为 A→B→A 会复用最初那条 A revision。
+// ActivationCurrent 与 InboundEligible 是两个不同的问题，刻意不合并成一个字段:
+// 前者回答"漏斗/采集/批量招呼此刻在为哪个职位工作",必须唯一;后者回答"主动来
+// 聊的候选人可以被建到哪些职位下",是最近一次成功复数同步返回且配置合格的职位
+// 全集。当前工作职位必然属于有效集,反之不成立。
 type JobAIContextHead struct {
 	SourceKind        string `gorm:"primaryKey"`
 	SourceJobRef      string `gorm:"primaryKey"`
 	ContextID         string `gorm:"not null;index"`
 	RevisionHash      string `gorm:"not null;index"`
 	ActivationCurrent bool   `gorm:"not null;default:false;index"`
+	InboundEligible   bool   `gorm:"not null;default:false;index"`
 	LastSyncedAt      time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
