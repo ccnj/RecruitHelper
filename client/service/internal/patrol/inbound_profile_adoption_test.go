@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/m5ai"
@@ -32,8 +33,9 @@ func TestPageDrivenPatrolAdoptsInboundProfileAndCompletesFirstReply(t *testing.T
 						PlatformUserRef: platformUserRef,
 						DisplayName:     "合成候选人",
 					},
-					PositionTitle: &positionTitle,
-					UnreadCount:   1,
+					PositionTitle:  &positionTitle,
+					LastActivityTs: inboundListActivityMs(),
+					UnreadCount:    1,
 					LastMessage: protocol.LastMessageSummary{
 						Direction:   protocol.MessageDirectionIn,
 						Kind:        protocol.MessageKindText,
@@ -232,8 +234,9 @@ func TestInboundResumeCaptureContinuesCurrentVisibleWindow(t *testing.T) {
 							PlatformUserRef: platformUserRef,
 							DisplayName:     "合成候选人",
 						},
-						PositionTitle: &positionTitle,
-						UnreadCount:   0,
+						PositionTitle:  &positionTitle,
+						LastActivityTs: inboundListActivityMs(),
+						UnreadCount:    0,
 						LastMessage: protocol.LastMessageSummary{
 							Direction:   protocol.MessageDirectionIn,
 							Kind:        protocol.MessageKindText,
@@ -246,7 +249,10 @@ func TestInboundResumeCaptureContinuesCurrentVisibleWindow(t *testing.T) {
 							PlatformUserRef: laterPlatformUserRef,
 							DisplayName:     "合成候选人",
 						},
-						UnreadCount: 1,
+						// 本行验证的是缺职位标题被跳过，活动时间取交接闸之后，
+						// 免得先被交接闸拦下、测不到原本的判定。
+						LastActivityTs: inboundListActivityMs(),
+						UnreadCount:    1,
 						LastMessage: protocol.LastMessageSummary{
 							Direction:   protocol.MessageDirectionIn,
 							Kind:        protocol.MessageKindText,
@@ -494,6 +500,13 @@ func savePatrolInboundLegacyJob(
 	}
 }
 
+// inboundListActivityMs 是既有入站用例的列表行活动时间：取测试时钟当日，
+// 晚于 harness 配置的交接闸（07-01），因此这些用例照常建档。
+func inboundListActivityMs() *int64 {
+	ms := time.Date(2026, 7, 17, 9, 0, 0, 0, time.UTC).UnixMilli()
+	return &ms
+}
+
 func inboundSummary(
 	conversationRef string,
 	platformUserRef string,
@@ -506,8 +519,9 @@ func inboundSummary(
 			PlatformUserRef: platformUserRef,
 			DisplayName:     displayName,
 		},
-		PositionTitle: positionTitle,
-		UnreadCount:   1,
+		PositionTitle:  positionTitle,
+		LastActivityTs: inboundListActivityMs(),
+		UnreadCount:    1,
 		LastMessage: protocol.LastMessageSummary{
 			Direction:   protocol.MessageDirectionIn,
 			Kind:        protocol.MessageKindText,

@@ -645,6 +645,7 @@ func TestUnreadPriorityAdoptedProfileWithoutV4RootUsesOpenOnly(t *testing.T) {
 		1,
 	)
 	current.PositionTitle = ptr("合成职位上下文-unread-missing-root-context")
+	current.LastActivityTs = inboundListActivityMs()
 	unreadReads := 0
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
