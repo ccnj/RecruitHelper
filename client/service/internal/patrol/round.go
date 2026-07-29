@@ -1469,8 +1469,10 @@ func (a *roundActor) detectDirtySummary(
 	observedAt := a.manager.now()
 	if conversation.LastSyncedAt == nil ||
 		!observedAt.Before(conversation.LastSyncedAt.Add(a.manager.config.TrackedReconcileInterval)) {
-		// 事件、未读与列表摘要都是提示；低频到期对账才保证提示全丢、
-		// 同文连续消息或旧卡状态变化时仍能恢复账本。
+		// 事件、未读与列表摘要都是提示；低频到期对账兜住提示整体失真的场景。
+		// 同文连续消息与卡片静默变化都会改写指纹的 lastActivityMs，由下面的
+		// hintDirty 负责，不依赖本闸；真正只能靠它捞回的是平台不返回任何时间
+		// 戳的会话。间隔取值理由见 Config.withDefaults。
 		forceReconcile = true
 	}
 	if len(ledger) == 0 {

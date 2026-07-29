@@ -334,7 +334,25 @@ func (c Config) withDefaults() Config {
 		c.MinimumRoundGap = time.Duration(protocol.DefaultSensorsPatrolPullForwardMinGapMs) * time.Millisecond
 	}
 	if c.TrackedReconcileInterval <= 0 {
-		c.TrackedReconcileInterval = 30 * time.Minute
+		// 一年不是精算出来的周期，是甲方 2026-07-29 的明确选择：周期性强制
+		// 对账事实上关闭，只保留代码路径，观察一段真实运行后再决定要不要把
+		// 它调回正常值。改回来只需要改这一个数字。
+		//
+		// 关闭的依据是同日真机事实：系统消息（含卡片状态变化的回执）不冒泡
+		// 到会话列表行的预览，列表行的 direction/kind/preview 三项都不动；
+		// 但该会话会被顶到列表顶部，平台排序时间随之更新，指纹第四项
+		// lastActivityMs 因此失配——卡片静默变化仍会在下一轮被捞出来，且因
+		// 为跳到顶部必定落在第一个窗口，比等到期兜底更快。旧的 30 分钟值会
+		// 让每轮巡检里约四十个会话被集中重读，约占运行时间一成。
+		//
+		// 知情接受的代价：本闸原本还兜住两个指纹看不见的盲区——平台不返回
+		// 任何时间戳（lastActivityTs 为空）、以及列表数据整体失真。关闭后这
+		// 两种会话的账本可能长期停在旧状态。二者都罕见，且失败方向是"不
+		// 推进"而非"多发"，人工发现后改回本值即可恢复，不构成不可逆损害。
+		//
+		// 注意本闸关闭不等于会话不再被对账：TrackingPending、账本为空、未读
+		// 面 forceUnread 与指纹失配四条路径都不受影响，仍会强制或按需读取。
+		c.TrackedReconcileInterval = 365 * 24 * time.Hour
 	}
 	if c.MaxPages <= 0 {
 		c.MaxPages = 256
