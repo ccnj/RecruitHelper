@@ -841,6 +841,28 @@ h1, h2, h3, p { margin-top: 0; }
 .backend-jobs-params.is-absent { color: var(--txt-faint); }
 .dc-shell .backend-jobs-scroll button { width: auto; margin: 0; padding: 0.16rem 0.4rem; font-size: 0.65rem; }
 .backend-jobs-none { color: var(--txt-faint); }
+.backend-jobs-actions { display: flex; flex: 0 0 auto; gap: 0.35rem; }
+
+/* 发布前预检结论：可发布的排在前面，问题与提示逐条摊开而不折叠 */
+.publish-precheck { margin-bottom: 0.55rem; border: 1px solid var(--rule); background: #0a0e12; }
+.publish-precheck-head { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--rule); }
+.publish-precheck-head strong { font-size: 0.72rem; }
+.publish-precheck-head small { display: block; margin-top: 0.08rem; color: var(--txt-faint); font-size: 0.64rem; }
+.publish-precheck-list { max-height: 210px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.publish-precheck-list li { padding: 0.35rem 0.5rem; border-bottom: 1px solid rgba(32, 41, 50, 0.55); border-left: 2px solid transparent; }
+.publish-precheck-list li:last-child { border-bottom: 0; }
+.publish-precheck-list li.is-ready { border-left-color: var(--live); }
+.publish-precheck-list li.is-existing { border-left-color: var(--txt-faint); }
+.publish-precheck-list li.is-blocked { border-left-color: var(--alarm); }
+.publish-precheck-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem; font-size: 0.7rem; }
+.publish-precheck-verdict { min-width: 4.6rem; color: var(--txt-dim); font-size: 0.64rem; }
+.is-ready .publish-precheck-verdict { color: var(--live); }
+.is-blocked .publish-precheck-verdict { color: var(--alarm); }
+.publish-precheck-row code { color: var(--txt-faint); font-family: var(--face); font-size: 0.62rem; }
+.publish-precheck-issue,
+.publish-precheck-notice { margin: 0.16rem 0 0 4.95rem; font-size: 0.64rem; line-height: 1.5; }
+.publish-precheck-issue { color: #ffb3ae; }
+.publish-precheck-notice { color: var(--txt-faint); }
 
 /* M5 遗留：明确降级的视觉，不与在用配置抢注意力 */
 .dc-legacy { border-top: 1px solid var(--rule); background: #0a0e12; }

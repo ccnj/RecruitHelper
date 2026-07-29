@@ -43,40 +43,59 @@ type BackendJob struct {
 
 // backendJobsPayload 只声明本地需要的字段。Go 的结构体解码天然丢弃其余部分，
 // 这正是不让 provider 凭据进入本地读 API 的构造性保证——别改成 map[string]any。
+type backendJob struct {
+	ID          json.Number `json:"id"`
+	Name        string      `json:"name"`
+	Environment string      `json:"environment"`
+}
+
+type backendJobEntry struct {
+	Job         *backendJob       `json:"job"`
+	Documents   map[string]string `json:"documents"`
+	MissingDocs []string          `json:"missingDocs"`
+}
+
 type backendJobsPayload struct {
-	CurrentJobID json.Number `json:"currentJobId"`
-	Jobs         []struct {
-		Job *struct {
-			ID          json.Number `json:"id"`
-			Name        string      `json:"name"`
-			Environment string      `json:"environment"`
-		} `json:"job"`
-		Documents   map[string]string `json:"documents"`
-		MissingDocs []string          `json:"missingDocs"`
-	} `json:"jobs"`
+	CurrentJobID json.Number       `json:"currentJobId"`
+	Jobs         []backendJobEntry `json:"jobs"`
 }
 
 // ParseBackendJobs 把 /client/job-configs 的响应投影成诊断面职位列表。
 // 纯函数：不落库、不收编、不做 m5ai 的执行约束校验——那条路径会因为任何一个
 // 职位提示词不合格而整批失败，而这张表恰恰要显示配置不全的职位。
-func ParseBackendJobs(raw []byte) ([]BackendJob, error) {
+func decodeBackendJobs(raw []byte) (backendJobsPayload, string, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var payload backendJobsPayload
 	if err := decoder.Decode(&payload); err != nil {
-		return nil, fmt.Errorf("%w: JSON 无效", ErrBackendJobsInvalid)
+		return backendJobsPayload{}, "", fmt.Errorf("%w: JSON 无效", ErrBackendJobsInvalid)
 	}
-	currentJobID := strings.TrimSpace(payload.CurrentJobID.String())
+	return payload, strings.TrimSpace(payload.CurrentJobID.String()), nil
+}
+
+func backendJobID(job *backendJob, index int) (string, error) {
+	if job == nil {
+		return "", fmt.Errorf("%w: jobs[%d] 缺少 job", ErrBackendJobsInvalid, index)
+	}
+	jobID := strings.TrimSpace(job.ID.String())
+	if parsed, err := strconv.ParseInt(jobID, 10, 64); err != nil || parsed <= 0 {
+		return "", fmt.Errorf("%w: jobs[%d] 的 job id 不是正整数", ErrBackendJobsInvalid, index)
+	}
+	return jobID, nil
+}
+
+func ParseBackendJobs(raw []byte) ([]BackendJob, error) {
+	payload, currentJobID, err := decodeBackendJobs(raw)
+	if err != nil {
+		return nil, err
+	}
 
 	jobs := make([]BackendJob, 0, len(payload.Jobs))
 	for i := range payload.Jobs {
 		entry := payload.Jobs[i]
-		if entry.Job == nil {
-			return nil, fmt.Errorf("%w: jobs[%d] 缺少 job", ErrBackendJobsInvalid, i)
-		}
-		jobID := strings.TrimSpace(entry.Job.ID.String())
-		if parsed, err := strconv.ParseInt(jobID, 10, 64); err != nil || parsed <= 0 {
-			return nil, fmt.Errorf("%w: jobs[%d] 的 job id 不是正整数", ErrBackendJobsInvalid, i)
+		jobID, err := backendJobID(entry.Job, i)
+		if err != nil {
+			return nil, err
 		}
 		jobs = append(jobs, BackendJob{
 			JobID:         jobID,
@@ -89,6 +108,44 @@ func ParseBackendJobs(raw []byte) ([]BackendJob, error) {
 		})
 	}
 	return jobs, nil
+}
+
+// BackendJobPublishSource 是发布预检用的后台职位投影，**含发布参数正文**。
+//
+// 与 BackendJob 分成两个类型是刻意的：正文只在脑内参与预检校验，绝不进入
+// 任何读 API 响应。类型分离让"正文漏进 UI"成为编译期就写不出来的事，而不是
+// 靠每个 handler 记得挑字段。
+type BackendJobPublishSource struct {
+	JobID         string
+	JobName       string
+	Environment   string
+	IsCurrent     bool
+	PublishParams string
+}
+
+// ParseBackendJobPublishSources 与 ParseBackendJobs 同源，只是多带出发布参数
+// 正文供本地校验使用。
+func ParseBackendJobPublishSources(raw []byte) ([]BackendJobPublishSource, error) {
+	payload, currentJobID, err := decodeBackendJobs(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BackendJobPublishSource, 0, len(payload.Jobs))
+	for i := range payload.Jobs {
+		entry := payload.Jobs[i]
+		jobID, err := backendJobID(entry.Job, i)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, BackendJobPublishSource{
+			JobID:         jobID,
+			JobName:       strings.TrimSpace(entry.Job.Name),
+			Environment:   strings.TrimSpace(entry.Job.Environment),
+			IsCurrent:     currentJobID != "" && jobID == currentJobID,
+			PublishParams: entry.Documents[PublishParamsDocType],
+		})
+	}
+	return out, nil
 }
 
 func publishParamsState(documents map[string]string) string {

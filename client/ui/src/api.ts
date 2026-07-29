@@ -269,6 +269,32 @@ export interface JobConfigActivationInput {
 /** 旧后台对空的发布参数刻意放行，所以"文档存在"不等于"填了参数"：只有 present 可发布。 */
 export type PublishParamsState = 'present' | 'empty' | 'absent'
 
+/** ready 是唯一可以进入发布的分类。 */
+export type PublishVerdict = 'ready' | 'existing' | 'blocked'
+
+export interface PublishIssue {
+  field?: string
+  message: string
+}
+
+export interface JobPublishPrecheckRow {
+  jobId: string
+  jobName: string
+  environment?: string
+  isCurrent: boolean
+  verdict: PublishVerdict
+  /** 阻塞发布的参数问题。 */
+  issues?: PublishIssue[]
+  /** 不阻塞的提示，例如"这个字段不参与发布"。 */
+  notices?: PublishIssue[]
+}
+
+export interface JobPublishPrecheckView {
+  rows: JobPublishPrecheckRow[]
+  platformPostingCount: number
+  observedAt: number
+}
+
 export interface BackendJobView {
   jobId: string
   jobName: string
@@ -571,6 +597,8 @@ export const api = {
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
+  jobPublishPrecheck: (platform: string, accountRef: string) =>
+    post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
   bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {

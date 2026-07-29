@@ -3,8 +3,8 @@ import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, BackendJobView, ConversationView, FrameEvent, HandHealth, Health,
-  JobConfigSourceView, LedgerRow, M5AIContextView, M5ProviderConfigView, MessageView, MutationResult,
-  PublishParamsState, SendIntentView, Suspect, TimeValue,
+  JobConfigSourceView, JobPublishPrecheckView, LedgerRow, M5AIContextView, M5ProviderConfigView,
+  MessageView, MutationResult, PublishParamsState, PublishVerdict, SendIntentView, Suspect, TimeValue,
 } from './api'
 import {
   candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
@@ -392,7 +392,7 @@ function DiagnosticConsole() {
       </Fold>
 
       <Fold title="模型连接与职位同步">
-        <M5AIConfiguration />
+        <M5AIConfiguration account={selectedAccount} />
       </Fold>
     </div>
   )
@@ -629,13 +629,84 @@ const PUBLISH_PARAMS_LABEL: Record<PublishParamsState, string> = {
   absent: '未创建',
 }
 
+const PUBLISH_VERDICT_LABEL: Record<PublishVerdict, string> = {
+  ready: '可发布',
+  existing: '平台已存在',
+  blocked: '参数有问题',
+}
+
+// 预检结论面板。本轮只呈现结论，不提供发布入口——发布是独立的一轮，
+// 需要先在真机确定"发布成功"的可见后置状态才能定义完成信号。
+function PublishPrecheckPanel({ view, at }: { view: JobPublishPrecheckView; at: string }) {
+  const ready = view.rows.filter((row) => row.verdict === 'ready')
+  const others = view.rows.filter((row) => row.verdict !== 'ready')
+  return (
+    <div className="publish-precheck">
+      <div className="publish-precheck-head">
+        <strong>预检结论</strong>
+        <small>
+          可发布 {ready.length} 个 · 平台现存 {view.platformPostingCount} 个职位
+          {at && ` · 预检于 ${at}`}
+        </small>
+      </div>
+      <ul className="publish-precheck-list">
+        {[...ready, ...others].map((row) => (
+          <li key={row.jobId} className={`is-${row.verdict}`}>
+            <div className="publish-precheck-row">
+              <span className="publish-precheck-verdict">{PUBLISH_VERDICT_LABEL[row.verdict] || row.verdict}</span>
+              <strong>{row.jobName || '未命名职位'}</strong>
+              {row.isCurrent && <em className="backend-jobs-current">当前职位</em>}
+              <code>#{row.jobId}</code>
+            </div>
+            {row.issues?.map((issue, index) => (
+              <p key={`i-${index}`} className="publish-precheck-issue">
+                {issue.field ? `${issue.field}：` : ''}{issue.message}
+              </p>
+            ))}
+            {row.notices?.map((notice, index) => (
+              <p key={`n-${index}`} className="publish-precheck-notice">
+                {notice.field ? `${notice.field}：` : ''}{notice.message}
+              </p>
+            ))}
+          </li>
+        ))}
+      </ul>
+      {view.rows.length === 0 && <p className="m5-ai-empty">后台没有可预检的启用职位。</p>}
+    </div>
+  )
+}
+
 // 旧后台该客户的启用职位总览。只读投影：拉一次列表不写任何本地业务事实，
 // 也不做执行约束校验——配置不全的职位正是这张表要显示的内容。
-function BackendJobsTable() {
+function BackendJobsTable({ account }: { account: AccountView | null }) {
   const [jobs, setJobs] = useState<BackendJobView[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [loadedAt, setLoadedAt] = useState('')
+  const [precheck, setPrecheck] = useState<JobPublishPrecheckView | null>(null)
+  const [precheckBusy, setPrecheckBusy] = useState(false)
+  const [precheckError, setPrecheckError] = useState('')
+  const [precheckAt, setPrecheckAt] = useState('')
+
+  const precheckable = account !== null && account.handOnline && account.identityCurrent
+
+  const runPrecheck = async () => {
+    if (!account) return
+    setPrecheckBusy(true)
+    setPrecheckError('')
+    try {
+      const result = await api.jobPublishPrecheck(account.platform, account.accountRef)
+      setPrecheck(result)
+      setPrecheckAt(new Date().toLocaleTimeString('zh-CN'))
+    } catch (reason) {
+      // 预检失败时清掉上一次结论：它描述的是另一个时刻的平台状态，
+      // 留着会让人以为"可发布"仍然成立。
+      setPrecheck(null)
+      setPrecheckError(errorText(reason))
+    } finally {
+      setPrecheckBusy(false)
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -667,11 +738,25 @@ function BackendJobsTable() {
             {loadedAt && ` · 数据读取于 ${loadedAt}`}
           </small>
         </div>
-        <button type="button" disabled={loading} onClick={() => void load()}>
-          {loading ? '正在读取…' : '刷新'}
-        </button>
+        <div className="backend-jobs-actions">
+          <button
+            type="button"
+            disabled={precheckBusy || !precheckable}
+            title={precheckable ? '读取平台现存职位并逐个校验发布参数，不发送任何内容' : '需要账号在线且身份已核对'}
+            onClick={() => void runPrecheck()}
+          >
+            {precheckBusy ? '正在预检…' : '全部发布前预检'}
+          </button>
+          <button type="button" disabled={loading} onClick={() => void load()}>
+            {loading ? '正在读取…' : '刷新'}
+          </button>
+        </div>
       </header>
       {error && <p className="m5-ai-message bad" role="alert">{error}</p>}
+      {precheckError && <p className="m5-ai-message bad" role="alert">{precheckError}</p>}
+      {precheck && (
+        <PublishPrecheckPanel view={precheck} at={precheckAt} />
+      )}
       <div className="backend-jobs-scroll">
         <table>
           <thead>
@@ -723,7 +808,7 @@ function BackendJobsTable() {
   )
 }
 
-function M5AIConfiguration() {
+function M5AIConfiguration({ account }: { account: AccountView | null }) {
   const [contexts, setContexts] = useState<M5AIContextView[]>([])
   const [contextsLoading, setContextsLoading] = useState(true)
   const [contextsError, setContextsError] = useState('')
@@ -937,7 +1022,7 @@ function M5AIConfiguration() {
         </section>
       </div>
 
-      <BackendJobsTable />
+      <BackendJobsTable account={account} />
 
       <details className="dc-legacy">
         <summary>
