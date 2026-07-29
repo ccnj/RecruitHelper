@@ -168,11 +168,17 @@ func Open(dataDir string) (*Store, error) {
 
 // newStoreLogger 保留错误/慢查询可见性，但永不把绑定参数插回 SQL。
 // Candidate 的不透明平台 userId 属于权威本机数据，不得因数据库错误进入日志。
+//
+// IgnoreRecordNotFoundError 为 true：本库里“查不到”绝大多数是正常状态而非
+// 错误——典型如“当前有没有活跃工作流”，产品 UI 每秒轮询一次，没开跑就每次都
+// 查空。Windows 真机日志实测 2 分半钟写了 572 条 record not found，占全部行数
+// 的一半以上，既淹没真问题，也会让运行日志的单代轮转在半天内把现场顶掉。
+// 慢查询与真正的数据库错误照常记录。
 func newStoreLogger(writer io.Writer) gormlogger.Interface {
 	return gormlogger.New(log.New(writer, "\r\n", log.LstdFlags), gormlogger.Config{
 		SlowThreshold:             200 * time.Millisecond,
 		LogLevel:                  gormlogger.Warn,
-		IgnoreRecordNotFoundError: false,
+		IgnoreRecordNotFoundError: true,
 		ParameterizedQueries:      true,
 		Colorful:                  false,
 	})

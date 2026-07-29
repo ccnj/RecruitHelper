@@ -2,7 +2,6 @@ package store
 
 import (
 	"bytes"
-	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,16 +28,29 @@ func TestStoreLoggerDoesNotInterpolateOpaqueIdentity(t *testing.T) {
 	if err := db.AutoMigrate(&Candidate{}); err != nil {
 		t.Fatal(err)
 	}
-	output.Reset()
 	const sentinel = "RAW-USER-REF-MUST-NOT-LEAK-3f6bd4"
-	var candidate Candidate
-	queryErr := db.First(&candidate, "platform = ? AND platform_user_ref = ?", "zhilian", sentinel).Error
-	if !errors.Is(queryErr, gorm.ErrRecordNotFound) {
-		t.Fatalf("应制造一条可记录的查询失败: %v", queryErr)
+	now := time.Now()
+	first := Candidate{
+		Platform: "zhilian", PlatformUserRef: sentinel,
+		FirstSeenAt: now, LastSeenAt: now,
+	}
+	if err := db.Create(&first).Error; err != nil {
+		t.Fatalf("首次写入应成功: %v", err)
+	}
+	// 用主键冲突而非 record-not-found 制造日志：后者在生产配置里被刻意静默
+	// (查不到多数是正常状态)，而主键冲突是真正的数据库错误，正是本测试关心
+	// 的那类"会带着 SQL 进日志"的场景。
+	output.Reset()
+	duplicate := Candidate{
+		Platform: "zhilian", PlatformUserRef: sentinel,
+		FirstSeenAt: now, LastSeenAt: now,
+	}
+	if err := db.Create(&duplicate).Error; err == nil {
+		t.Fatal("重复主键应当写入失败，否则制造不出可记录的错误")
 	}
 	logged := output.String()
 	if logged == "" {
-		t.Fatal("测试必须实际捕获一条 GORM warn 日志")
+		t.Fatal("测试必须实际捕获一条 GORM 错误日志")
 	}
 	if strings.Contains(logged, sentinel) {
 		t.Fatalf("参数化查询日志泄漏不透明平台身份: %s", logged)

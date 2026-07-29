@@ -131,7 +131,7 @@ Section "Uninstall"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "${UNINST_KEY}"
 
-  ; Deliberately keeps the business data (%APPDATA%\RecruitHelper) and the
+  ; Deliberately keeps the business data (%APPDATA%\recruithelper-client) and the
   ; plugin directory (%LOCALAPPDATA%\RecruitHelper\plugin): an uninstaller must
   ; not destroy business facts, and wiping the plugin directory would leave
   ; Chrome reporting a corrupt extension.
