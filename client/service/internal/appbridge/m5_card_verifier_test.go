@@ -11,60 +11,72 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-func TestClassifyVerifiedCardRequiresUniqueStrictMatchAfterAnchor(t *testing.T) {
-	anchorHash := syncledger.HashText("anchor")
+func TestClassifyVerifiedCardConfirmsPageVisibleCardTakingNewest(t *testing.T) {
+	dispatchedAt := time.Now().UnixMilli()
 	sourceKey := strings.Repeat("a", 64)
+	newestSourceKey := strings.Repeat("f", 64)
 	wechatType, pending := protocol.CardTypeWechatExchange, protocol.CardStatePending
 	wechatHash := syncledger.WechatExchangeContentHash()
-	wechat := protocol.ThreadMessage{
-		Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
-		ContentHash: wechatHash, SourceKey: sourceKey,
-		CardType: &wechatType, CardState: &pending,
+	build := func(source string, tsMs int64) protocol.ThreadMessage {
+		message := protocol.ThreadMessage{
+			Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
+			ContentHash: wechatHash, SourceKey: source,
+			CardType: &wechatType, CardState: &pending,
+		}
+		if tsMs > 0 {
+			ts := tsMs
+			message.TsApprox = &ts
+		}
+		return message
 	}
-	anchor := verificationThreadMessage(0, protocol.MessageDirectionIn, anchorHash)
-
+	// 容差外历史同类卡不认领;容差内多条取最新
+	window := []protocol.ThreadMessage{
+		build(strings.Repeat("0", 64), dispatchedAt-600_000),
+		build(sourceKey, dispatchedAt+500),
+		build(newestSourceKey, dispatchedAt+2_000),
+	}
 	observation, err := classifyVerifiedCard(
-		[]protocol.ThreadMessage{wechat, anchor, wechat}, []int{1}, 1,
-		protocol.PrimChatSendWechatInvite, wechatHash, nil,
+		window, protocol.PrimChatSendWechatInvite, wechatHash, nil, dispatchedAt,
 	)
-	if err != nil || !observation.Confirmed || observation.SourceKey != sourceKey {
-		t.Fatalf("锚前同卡不得制造歧义，锚后唯一卡应确认: observation=%+v err=%v", observation, err)
+	if err != nil || !observation.Confirmed || observation.SourceKey != newestSourceKey {
+		t.Fatalf("容差内页面可见卡应确认且取新: observation=%+v err=%v", observation, err)
 	}
 
 	accepted := protocol.CardStateAccepted
-	invalidState := wechat
+	fresh := build(sourceKey, dispatchedAt+1_000)
+	invalidState := fresh
 	invalidState.CardState = &accepted
-	uppercaseSource := wechat
+	uppercaseSource := fresh
 	uppercaseSource.SourceKey = strings.Repeat("A", 64)
-	wrongHash := wechat
+	wrongHash := fresh
 	wrongHash.ContentHash = strings.Repeat("b", 64)
+	staleTs := build(sourceKey, dispatchedAt-verificationClockToleranceMs-1)
+	missingTs := build(sourceKey, 0)
 	cases := []struct {
-		name         string
-		messages     []protocol.ThreadMessage
-		anchorStarts []int
+		name     string
+		messages []protocol.ThreadMessage
 	}{
-		{name: "missing anchor", messages: []protocol.ThreadMessage{wechat}},
-		{name: "duplicate anchor", messages: []protocol.ThreadMessage{anchor, wechat}, anchorStarts: []int{0, 0}},
-		{name: "wrong state", messages: []protocol.ThreadMessage{anchor, invalidState}, anchorStarts: []int{0}},
-		{name: "unstable source", messages: []protocol.ThreadMessage{anchor, uppercaseSource}, anchorStarts: []int{0}},
-		{name: "wrong hash", messages: []protocol.ThreadMessage{anchor, wrongHash}, anchorStarts: []int{0}},
-		{name: "multiple matches", messages: []protocol.ThreadMessage{anchor, wechat, wechat}, anchorStarts: []int{0}},
+		{name: "empty window", messages: nil},
+		{name: "wrong state", messages: []protocol.ThreadMessage{invalidState}},
+		{name: "unstable source", messages: []protocol.ThreadMessage{uppercaseSource}},
+		{name: "wrong hash", messages: []protocol.ThreadMessage{wrongHash}},
+		{name: "stale ts", messages: []protocol.ThreadMessage{staleTs}},
+		{name: "missing ts", messages: []protocol.ThreadMessage{missingTs}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			got, classifyErr := classifyVerifiedCard(
-				test.messages, test.anchorStarts, 1,
-				protocol.PrimChatSendWechatInvite, wechatHash, nil,
+				test.messages, protocol.PrimChatSendWechatInvite, wechatHash, nil, dispatchedAt,
 			)
 			if classifyErr != nil || got.Confirmed {
-				t.Fatalf("阴性/歧义只能保持未确认: observation=%+v err=%v", got, classifyErr)
+				t.Fatalf("阴性只能保持未确认: observation=%+v err=%v", got, classifyErr)
 			}
 		})
 	}
 }
 
 func TestClassifyVerifiedInterviewCardRequiresExactFrozenParameters(t *testing.T) {
-	anchorHash := syncledger.HashText("anchor")
+	dispatchedAt := time.Now().UnixMilli()
 	sourceKey := strings.Repeat("b", 64)
 	cardType, state := protocol.CardTypeInterviewInvite, protocol.CardStateUnknown
 	expected := protocol.InterviewDetails{
@@ -74,15 +86,15 @@ func TestClassifyVerifiedInterviewCardRequiresExactFrozenParameters(t *testing.T
 	targetHash := syncledger.InterviewInviteContentHash(
 		expected.StartsAt, expected.EndsAt, string(expected.Method),
 	)
-	anchor := verificationThreadMessage(0, protocol.MessageDirectionIn, anchorHash)
+	ts := dispatchedAt + 1_200
 	card := protocol.ThreadMessage{
 		Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
 		ContentHash: targetHash, SourceKey: sourceKey, CardType: &cardType, CardState: &state,
-		Interview: &expected,
+		Interview: &expected, TsApprox: &ts,
 	}
 	observation, err := classifyVerifiedCard(
-		[]protocol.ThreadMessage{anchor, card}, []int{0}, 1,
-		protocol.PrimChatSendInviteCard, targetHash, &expected,
+		[]protocol.ThreadMessage{card}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
 	)
 	if err != nil || !observation.Confirmed || observation.Interview == nil ||
 		*observation.Interview != expected {
@@ -91,10 +103,11 @@ func TestClassifyVerifiedInterviewCardRequiresExactFrozenParameters(t *testing.T
 
 	different := expected
 	different.EndsAt += 300_000
-	card.Interview = &different
+	mismatch := card
+	mismatch.Interview = &different
 	observation, err = classifyVerifiedCard(
-		[]protocol.ThreadMessage{anchor, card}, []int{0}, 1,
-		protocol.PrimChatSendInviteCard, targetHash, &expected,
+		[]protocol.ThreadMessage{mismatch}, protocol.PrimChatSendInviteCard,
+		targetHash, &expected, dispatchedAt,
 	)
 	if err != nil || observation.Confirmed {
 		t.Fatalf("邀面参数不一致只能未确认: observation=%+v err=%v", observation, err)
@@ -117,10 +130,11 @@ func TestCardVerificationReadAtomicallyAdoptsObservedCard(t *testing.T) {
 			hash: syncledger.WechatExchangeContentHash(), cardType: "wechatExchange", cardState: "pending",
 			message: func(sourceKey string) protocol.ThreadMessage {
 				cardType, state := protocol.CardTypeWechatExchange, protocol.CardStatePending
+				observedAt := time.Now().UnixMilli()
 				return protocol.ThreadMessage{
 					Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
 					ContentHash: syncledger.WechatExchangeContentHash(), SourceKey: sourceKey,
-					CardType: &cardType, CardState: &state,
+					CardType: &cardType, CardState: &state, TsApprox: &observedAt,
 				}
 			},
 		},
@@ -143,13 +157,14 @@ func TestCardVerificationReadAtomicallyAdoptsObservedCard(t *testing.T) {
 					StartsAt: 1_722_000_000_000, EndsAt: 1_722_001_800_000,
 					Method: protocol.InterviewMethodWechatVideo,
 				}
+				observedAt := time.Now().UnixMilli()
 				return protocol.ThreadMessage{
 					Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
 					ContentHash: syncledger.InterviewInviteContentHash(
 						interview.StartsAt, interview.EndsAt, string(interview.Method),
 					),
 					SourceKey: sourceKey, CardType: &cardType, CardState: &state,
-					Interview: &interview,
+					Interview: &interview, TsApprox: &observedAt,
 				}
 			},
 		},
@@ -192,16 +207,15 @@ func TestCardVerificationReadAtomicallyAdoptsObservedCard(t *testing.T) {
 				t.Fatalf("验证合成的卡片 result 不符合契约: %v", err)
 			}
 			reads := sender.readCalls()
-			if len(reads) != 2 {
-				t.Fatalf("应复用 readThread 分页读取锚与新卡: %+v", reads)
+			if len(reads) != 1 {
+				t.Fatalf("页面可见验证只应浅读一页最近窗口: %+v", reads)
 			}
-			for _, read := range reads {
-				if read.args.ConversationRef != key.ConversationRef ||
-					!read.args.Window.Deep ||
-					len(read.args.Window.AnchorTail) != 1 ||
-					read.args.Window.AnchorTail[0].ContentHash != anchorHash {
-					t.Fatalf("卡片验证读必须原样复用 conversationRef/expectedTail: %+v", read)
-				}
+			read := reads[0]
+			if read.args.ConversationRef != key.ConversationRef ||
+				read.args.Cursor != "" || read.args.Window.Deep ||
+				len(read.args.Window.AnchorTail) != 0 ||
+				read.args.Window.MaxMessages != verificationRecentWindow {
+				t.Fatalf("卡片验证读必须是无锚浅读: %+v", read)
 			}
 		})
 	}
