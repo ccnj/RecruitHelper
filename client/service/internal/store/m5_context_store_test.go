@@ -301,6 +301,45 @@ func TestLegacyJobConfigActivationCurrentBackfillUsesUniqueNewestHead(t *testing
 	}
 }
 
+func TestLegacyJobConfigInboundEligibleBackfillFollowsActivationCurrent(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 7, 24, 8, 45, 0, 0, time.UTC)
+	for _, head := range []JobAIContextHead{
+		{
+			SourceKind: legacyJobConfigSourceKind, SourceJobRef: "job-old",
+			ContextID: "context-old", RevisionHash: "revision-old",
+			LastSyncedAt: at.Add(-time.Hour),
+		},
+		{
+			SourceKind: legacyJobConfigSourceKind, SourceJobRef: "job-new",
+			ContextID: "context-new", RevisionHash: "revision-new",
+			LastSyncedAt: at,
+		},
+	} {
+		if err := s.db.Create(&head).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 同时缺两列的老库按 Open 里的顺序回填:先定出当前职位,再据此授予建档
+	// 资格。顺序颠倒会让升级后的有效集为空,所有主动来聊的候选人集体落到
+	// noEligibleJobs,直到用户手工点一次同步。
+	if err := backfillLegacyJobConfigActivationCurrent(s.db); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillLegacyJobConfigInboundEligible(s.db); err != nil {
+		t.Fatal(err)
+	}
+	var heads []JobAIContextHead
+	if err := s.db.Order("source_job_ref").Find(&heads).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(heads) != 2 ||
+		heads[0].SourceJobRef != "job-new" || !heads[0].InboundEligible ||
+		heads[1].SourceJobRef != "job-old" || heads[1].InboundEligible {
+		t.Fatalf("升级后建档资格不等于原当前职位: %+v", heads)
+	}
+}
+
 func TestLocalImportDoesNotAdvanceLegacyJobConfigHead(t *testing.T) {
 	s := openTest(t)
 	at := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
