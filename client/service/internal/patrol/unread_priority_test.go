@@ -70,11 +70,13 @@ func TestUnreadPriorityStartsFromPositiveHintAndClosesWithAll(t *testing.T) {
 
 	requireUnreadRoundOK(t, h)
 	got := unreadListFilters(t, h)
+	// harness 时钟距交接日远超上界，all 面因此取 listStopOlderThanDaysMax；
+	// 断言的是"all 带年龄截止、unread 不带"，不是某个具体天数。
 	if len(got) != 2 ||
 		got[0].Filter != protocol.ListFilterUnread ||
 		got[0].StopOlderThanDays != 0 ||
 		got[1].Filter != protocol.ListFilterAll ||
-		got[1].StopOlderThanDays != 8 {
+		got[1].StopOlderThanDays != listStopOlderThanDaysMax {
 		t.Fatalf("未读→全部筛选或年龄参数错误: %+v", got)
 	}
 }
@@ -95,7 +97,7 @@ func TestUnreadPriorityDoesNotStartFromZeroOrUnknownHint(t *testing.T) {
 			got := unreadListFilters(t, h)
 			if len(got) != 1 ||
 				got[0].Filter != protocol.ListFilterAll ||
-				got[0].StopOlderThanDays != 8 {
+				got[0].StopOlderThanDays != listStopOlderThanDaysMax {
 				t.Fatalf("零/未知提示不应进入未读: %+v", got)
 			}
 		})

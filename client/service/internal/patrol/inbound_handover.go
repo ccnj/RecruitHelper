@@ -55,3 +55,47 @@ func inboundHandoverBlocked(lastActivityTs *int64, cutoff time.Time) bool {
 	}
 	return *lastActivityTs < cutoff.UnixMilli()
 }
+
+const (
+	// listStopOlderThanDaysMax 是滚动窗口上界，取值依据是沉默跟进的七天兜底
+	// 归档周期加一天余量：超过它的会话已经没有自动化动作等待触发，继续向下
+	// 翻只会消耗窗口预算。它同时是本函数唯一的无界防线——交接日是固定日历
+	// 日，单独用它推导会让遍历范围随时间单调增长。
+	listStopOlderThanDaysMax = 8
+	listStopOlderThanDaysMin = 1
+)
+
+// listStopOlderThanDays 推导 all 面列表遍历的年龄截止。取滚动上界与"距交接日
+// 天数"的较小值：交接日之前的会话一律不建档（inboundHandoverBlocked），继续
+// 向下翻只会读到永远不会被处理的存量，而平台列表按最后活动时间倒序排列，
+// 因此撞上第一个交接前会话即可安全收束本轮。
+//
+// 两条不变式，改动此函数时必须同时保住：
+//
+//  1. 手端把参数解释为滚动的 days×24h（cutoffMs = Date.now() - days*86400000），
+//     而交接日是本地日历日 00:00。"+1" 正是两种时间语义的转换余量：设 now =
+//     今日00:00 + t（0 ≤ t < 24h）、今日00:00 - 交接日 = D 天，则手端截止
+//     = 交接日 + t - 24h < 交接日。**手端截止永远早于交接日**，所以本函数
+//     只会多读、不会少读。
+//
+//  2. 已建档且仍在自动化沟通中的会话不会掉出范围：V4 聚合以我方招呼为根，
+//     招呼不早于交接日且发送本身会刷新 lastActivityTs；即使候选人始终不回，
+//     七天兜底归档也会在上界之内终局它。掉出范围的只可能是尚无 V4 根的会话，
+//     它们的推进走漏斗的推荐页扫描，不经过 IM 列表遍历。
+//
+// 交接日被配置到未来时不缩小范围，直接退回上界：异常配置的方向必须是多读。
+func listStopOlderThanDays(now, cutoff time.Time, location *time.Location) int {
+	if location == nil {
+		location = time.Local
+	}
+	year, month, day := now.In(location).Date()
+	today := time.Date(year, month, day, 0, 0, 0, 0, location)
+	days := int(today.Sub(cutoff)/(24*time.Hour)) + 1
+	if days < listStopOlderThanDaysMin {
+		return listStopOlderThanDaysMax
+	}
+	if days > listStopOlderThanDaysMax {
+		return listStopOlderThanDaysMax
+	}
+	return days
+}

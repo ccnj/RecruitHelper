@@ -235,3 +235,82 @@ func TestInboundHandoverGateLeavesExistingProfilesUntouched(t *testing.T) {
 			profileBefore, profileAfter)
 	}
 }
+
+func TestListStopOlderThanDays(t *testing.T) {
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Date(2026, 7, 29, 0, 0, 0, 0, shanghai)
+	for _, tc := range []struct {
+		name string
+		now  time.Time
+		want int
+	}{
+		{
+			name: "交接日当天清晨只翻一天",
+			now:  time.Date(2026, 7, 29, 0, 30, 0, 0, shanghai), want: 1,
+		},
+		{
+			name: "交接日当天深夜仍是一天",
+			now:  time.Date(2026, 7, 29, 23, 59, 59, 0, shanghai), want: 1,
+		},
+		{
+			name: "交接次日翻两天",
+			now:  time.Date(2026, 7, 30, 9, 0, 0, 0, shanghai), want: 2,
+		},
+		{
+			name: "第七天翻七天",
+			now:  time.Date(2026, 8, 4, 12, 0, 0, 0, shanghai), want: 7,
+		},
+		{
+			name: "第八天到达上界",
+			now:  time.Date(2026, 8, 5, 12, 0, 0, 0, shanghai), want: 8,
+		},
+		{
+			name: "远超交接日固定在上界，范围不随时间增长",
+			now:  time.Date(2026, 12, 31, 12, 0, 0, 0, shanghai), want: 8,
+		},
+		{
+			name: "交接日被配置到未来时退回上界而非收窄",
+			now:  time.Date(2026, 7, 20, 12, 0, 0, 0, shanghai), want: 8,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := listStopOlderThanDays(tc.now, cutoff, shanghai); got != tc.want {
+				t.Fatalf("年龄截止不符: got=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
+
+// 核心不变式：手端把参数解释为滚动的 days×24h，本函数推导出的截止必须永远
+// 早于交接日 00:00。任何一处让它晚于交接日，都会让当天最早的一批会话在建档
+// 闸放行之前就被年龄截止丢掉——那是静默漏人，且表里不留痕迹。
+func TestListStopOlderThanDaysNeverCutsInsideHandoverDay(t *testing.T) {
+	shanghai, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Date(2026, 7, 29, 0, 0, 0, 0, shanghai)
+	// 交接日起逐日推进，每天取多个时刻，覆盖上界生效前后两侧。
+	for dayOffset := 0; dayOffset < 12; dayOffset++ {
+		for _, hour := range []int{0, 1, 8, 12, 18, 23} {
+			now := time.Date(2026, 7, 29+dayOffset, hour, 30, 0, 0, shanghai)
+			days := listStopOlderThanDays(now, cutoff, shanghai)
+			if days < listStopOlderThanDaysMin || days > listStopOlderThanDaysMax {
+				t.Fatalf("越界: now=%s days=%d", now, days)
+			}
+			handCutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+			// 上界生效后（交接日已过去 8 天以上）手端截止本就应当晚于交接日，
+			// 那是滚动窗口的既有语义，不适用本不变式。
+			if days == listStopOlderThanDaysMax && now.Sub(cutoff) > listStopOlderThanDaysMax*24*time.Hour {
+				continue
+			}
+			if !handCutoff.Before(cutoff) {
+				t.Fatalf("手端年龄截止落进交接日之内: now=%s days=%d handCutoff=%s cutoff=%s",
+					now, days, handCutoff, cutoff)
+			}
+		}
+	}
+}

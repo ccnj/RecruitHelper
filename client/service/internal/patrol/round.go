@@ -1358,7 +1358,11 @@ func (a *roundActor) readListPage(
 		Move:   move,
 	}
 	if filter == protocol.ListFilterAll {
-		args.StopOlderThanDays = 8
+		args.StopOlderThanDays = listStopOlderThanDays(
+			a.manager.now(),
+			a.manager.config.InboundHandoverCutoff,
+			a.manager.config.Location,
+		)
 	}
 	// 列表翻窗（滚动/切筛选）同为可见交互，套用统一节奏。
 	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
