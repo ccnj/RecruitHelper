@@ -8,13 +8,21 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
-	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
-const verificationMaxPages = 32
+// 2026-07-29「成功=发后页面可见」裁决(docs/发后核验成功判据裁决-2026-07-29.md):
+// 消息与卡片的发后核验只浅读一页最近窗口,不再做 expectedTail 锚对齐、深分页
+// 与历史到顶判定。成功判据 = 方向/内容与本次动作一致 + 服务器时间不早于派发
+// 时刻减时钟容差;同文多条取满足条件的最新一条。失败标志由手侧行映射承担:
+// out 行非 success 在手内直接判读取失败,不会出现在窗口里。零匹配只落未确认,
+// 由 miss 计数走向 suspect 转人工,禁止自动重发。
+const (
+	verificationRecentWindow     = 16
+	verificationClockToleranceMs = 5_000
+)
 
 // EffectVerifier 通过每个真实 SX metadata 指定的正式读取原语消解歧义。
 // 它只比较 generated 结构化字段，不解析 evidence/DOM。
@@ -108,96 +116,61 @@ func (v EffectVerifier) verifyAcceptWechat(
 }
 
 func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {
-	if req.Command.Name != protocol.PrimChatSendMessage || req.Args.ConversationRef == "" ||
-		len(req.Guards.ExpectedTail) == 0 {
+	if req.Command.Name != protocol.PrimChatSendMessage || req.Args.ConversationRef == "" {
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendMessage 意图")
 	}
-	aggregate, anchorStarts, err := v.readThreadWindow(ctx, req, req.Args.ConversationRef)
+	dispatchedAtMs, err := dispatchReferenceMs(req)
 	if err != nil {
 		return dispatch.VerificationObservation{}, err
 	}
-	return classifyVerifiedSend(
-		aggregate, anchorStarts, len(req.Guards.ExpectedTail), req.Intent.SendFingerprint,
-	)
+	window, err := v.readRecentWindow(ctx, req, req.Args.ConversationRef)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	return classifyVerifiedSend(window, req.Intent.SendFingerprint, dispatchedAtMs)
 }
 
-func (v EffectVerifier) readThreadWindow(
+// readRecentWindow 浅读一页最近消息。不携带 anchorTail、不开 deep、不消费
+// cursor:页面可见判据只关心"刚发生"的窗口,分页完整性与历史到顶都不再是
+// 成功前提;窗口读取失败按原语失败沿 miss→suspect 收敛。
+func (v EffectVerifier) readRecentWindow(
 	ctx context.Context,
 	req dispatch.VerificationRequest,
 	conversationRef string,
-) ([]protocol.ThreadMessage, []int, error) {
-	var aggregate []protocol.ThreadMessage
-	cursor := ""
-	restarts := 0
-	seen := map[string]struct{}{}
-	for page := 0; page < verificationMaxPages; page++ {
-		args := protocol.ChatReadThreadArgs{
-			ConversationRef: conversationRef, Cursor: cursor,
-			Window: protocol.ThreadWindow{
-				AnchorTail: req.Guards.ExpectedTail, Deep: true,
-				MaxMessages: protocol.DefaultPaginationReadThreadMaxItems,
-			},
-		}
-		argsRaw, err := protocol.Encode(args)
-		if err != nil {
-			return nil, nil, err
-		}
-		state, err := v.Dispatcher.RunVerificationRead(ctx, req.Command.MsgID, dispatch.DispatchRequest{
-			HandID: req.Command.HandID, Name: protocol.PrimChatReadThread, Args: argsRaw,
-			Context: &protocol.CmdContext{
-				Platform: req.Command.Platform, AccountRef: req.Command.AccountRef,
-				ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
-			},
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		dataRaw, err := resultData(state.Leaf)
-		if err != nil {
-			if cursor != "" && restarts == 0 && isCursorInvalid(err) {
-				restarts++
-				aggregate = nil
-				cursor = ""
-				seen = map[string]struct{}{}
-				page = -1
-				continue
-			}
-			return nil, nil, err
-		}
-		var data protocol.ChatReadThreadData
-		if err := json.Unmarshal(dataRaw, &data); err != nil {
-			return nil, nil, fmt.Errorf("解析验证 readThread: %w", err)
-		}
-		if cursor == "" {
-			aggregate = append([]protocol.ThreadMessage(nil), data.Messages...)
-		} else {
-			// 首页最新，cursor 页更旧，聚合后始终保持旧→新。
-			aggregate = append(append([]protocol.ThreadMessage(nil), data.Messages...), aggregate...)
-		}
-		anchorStarts := matchingAnchorStarts(aggregate, req.Guards.ExpectedTail)
-		if data.Complete || data.ReachedTop || len(anchorStarts) != 0 {
-			return aggregate, anchorStarts, nil
-		}
-		if data.NextCursor == nil || *data.NextCursor == "" {
-			return nil, nil, errors.New("验证分页未完成但缺少 nextCursor")
-		}
-		next := *data.NextCursor
-		if _, duplicate := seen[next]; duplicate || next == cursor {
-			return nil, nil, errors.New("验证分页 cursor 循环")
-		}
-		seen[next] = struct{}{}
-		cursor = next
+) ([]protocol.ThreadMessage, error) {
+	args := protocol.ChatReadThreadArgs{
+		ConversationRef: conversationRef,
+		Window:          protocol.ThreadWindow{MaxMessages: verificationRecentWindow},
 	}
-	return nil, nil, errors.New("验证分页超过上限")
+	argsRaw, err := protocol.Encode(args)
+	if err != nil {
+		return nil, err
+	}
+	state, err := v.Dispatcher.RunVerificationRead(ctx, req.Command.MsgID, dispatch.DispatchRequest{
+		HandID: req.Command.HandID, Name: protocol.PrimChatReadThread, Args: argsRaw,
+		Context: &protocol.CmdContext{
+			Platform: req.Command.Platform, AccountRef: req.Command.AccountRef,
+			ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	dataRaw, err := resultData(state.Leaf)
+	if err != nil {
+		return nil, err
+	}
+	var data protocol.ChatReadThreadData
+	if err := json.Unmarshal(dataRaw, &data); err != nil {
+		return nil, fmt.Errorf("解析验证 readThread: %w", err)
+	}
+	return data.Messages, nil
 }
 
 func (v EffectVerifier) verifyCard(
 	ctx context.Context,
 	req dispatch.VerificationRequest,
 ) (dispatch.VerificationObservation, error) {
-	if len(req.Guards.ExpectedTail) == 0 {
-		return dispatch.VerificationObservation{}, errors.New("卡片验证请求缺少 expectedTail")
-	}
 	var (
 		conversationRef string
 		targetHash      string
@@ -226,14 +199,15 @@ func (v EffectVerifier) verifyCard(
 	default:
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是卡片意图")
 	}
-	aggregate, anchorStarts, err := v.readThreadWindow(ctx, req, conversationRef)
+	dispatchedAtMs, err := dispatchReferenceMs(req)
 	if err != nil {
 		return dispatch.VerificationObservation{}, err
 	}
-	return classifyVerifiedCard(
-		aggregate, anchorStarts, len(req.Guards.ExpectedTail),
-		req.Command.Name, targetHash, interview,
-	)
+	window, err := v.readRecentWindow(ctx, req, conversationRef)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	return classifyVerifiedCard(window, req.Command.Name, targetHash, interview, dispatchedAtMs)
 }
 
 func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {
@@ -277,92 +251,79 @@ func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.Verific
 	}, nil
 }
 
-func matchingAnchorStarts(messages []protocol.ThreadMessage, anchors []protocol.MessageAnchor) []int {
-	if len(anchors) == 0 || len(messages) < len(anchors) {
-		return nil
+// dispatchReferenceMs 取"本次派发"的时间参照:优先命令最近一次进入 sent 的
+// 时刻。安全重投同 msgId 的前提是前次已证明零副作用,取最近一次仍是正确下界。
+// 结果先于发送闭环落库的路径可能尚未记录 SentAt,退回意图创建时刻——它只会
+// 更早,窗口只放宽不收窄,仍排除派发前已存在的历史同文消息。
+func dispatchReferenceMs(req dispatch.VerificationRequest) (int64, error) {
+	if req.Command.SentAt != nil && !req.Command.SentAt.IsZero() {
+		return req.Command.SentAt.UnixMilli(), nil
 	}
-	var starts []int
-	for start := 0; start+len(anchors) <= len(messages); start++ {
-		matched := true
-		for offset := range anchors {
-			if messages[start+offset].Direction != anchors[offset].Direction ||
-				messages[start+offset].ContentHash != anchors[offset].ContentHash {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			starts = append(starts, start)
-		}
+	if !req.Intent.CreatedAt.IsZero() {
+		return req.Intent.CreatedAt.UnixMilli(), nil
 	}
-	return starts
+	return 0, errors.New("验证缺少派发时刻参照")
+}
+
+// withinDispatchWindow 判定消息服务器时间落在"本次派发"窗口:不早于派发时刻
+// 减 5 秒时钟容差(2026-07-29 甲方裁决),往晚不设界。时间缺失按不合格处理:
+// 失效方向是少认(→复读→suspect 转人工),不是误认旧消息。
+func withinDispatchWindow(message protocol.ThreadMessage, dispatchedAtMs int64) bool {
+	return message.TsApprox != nil && *message.TsApprox > 0 &&
+		*message.TsApprox >= dispatchedAtMs-verificationClockToleranceMs
 }
 
 func classifyVerifiedSend(
 	messages []protocol.ThreadMessage,
-	anchorStarts []int,
-	tailLength int,
 	targetHash string,
+	dispatchedAtMs int64,
 ) (dispatch.VerificationObservation, error) {
-	if len(anchorStarts) != 1 {
-		reason := "未找到 expectedTail"
-		if len(anchorStarts) > 1 {
-			reason = "expectedTail 在当前窗口出现多次，无法唯一定位"
-		}
-		return dispatch.VerificationObservation{Reason: reason}, nil
+	if targetHash == "" || dispatchedAtMs <= 0 {
+		return dispatch.VerificationObservation{}, errors.New("验证分类缺少目标指纹或派发时刻")
 	}
-	start := anchorStarts[0] + tailLength
-	if tailLength <= 0 || start > len(messages) {
-		return dispatch.VerificationObservation{}, errors.New("验证分类的 expectedTail 长度非法")
-	}
-	var matched []protocol.ThreadMessage
-	for i := start; i < len(messages); i++ {
+	var matched *protocol.ThreadMessage
+	for i := range messages {
 		message := messages[i]
-		if message.Direction == protocol.MessageDirectionOut && message.Kind == protocol.MessageKindText &&
-			message.ContentHash == targetHash {
-			matched = append(matched, message)
+		if message.Direction == protocol.MessageDirectionOut &&
+			message.Kind == protocol.MessageKindText &&
+			message.ContentHash == targetHash &&
+			withinDispatchWindow(message, dispatchedAtMs) {
+			matched = &messages[i]
 		}
 	}
-	if len(matched) != 1 {
-		reason := "expectedTail 之后未找到目标 out/text 指纹"
-		if len(matched) > 1 {
-			reason = "expectedTail 之后出现多条相同 out/text 指纹，结果歧义"
-		}
-		return dispatch.VerificationObservation{Reason: reason}, nil
+	if matched == nil {
+		return dispatch.VerificationObservation{
+			Reason: "最近窗口未见时间容差内的目标 out/text 指纹",
+		}, nil
 	}
 	return dispatch.VerificationObservation{
-		Confirmed: true, ContentHash: matched[0].ContentHash, ObservedAt: observedAt(matched[0]),
-		Reason: "expectedTail 之后唯一命中目标 out/text 指纹",
+		Confirmed: true, ContentHash: matched.ContentHash, ObservedAt: observedAt(*matched),
+		Reason: "最近窗口命中目标 out/text 指纹(同文取最新)",
 	}, nil
 }
 
 func classifyVerifiedCard(
 	messages []protocol.ThreadMessage,
-	anchorStarts []int,
-	tailLength int,
 	primitive string,
 	targetHash string,
 	expectedInterview *protocol.InterviewDetails,
+	dispatchedAtMs int64,
 ) (dispatch.VerificationObservation, error) {
-	if len(anchorStarts) != 1 {
-		reason := "未找到 expectedTail"
-		if len(anchorStarts) > 1 {
-			reason = "expectedTail 在当前窗口出现多次，无法唯一定位"
-		}
-		return dispatch.VerificationObservation{Reason: reason}, nil
+	if primitive != protocol.PrimChatSendWechatInvite && primitive != protocol.PrimChatSendInviteCard {
+		return dispatch.VerificationObservation{}, errors.New("卡片验证原语非法")
 	}
-	start := anchorStarts[0] + tailLength
-	if tailLength <= 0 || start > len(messages) {
-		return dispatch.VerificationObservation{}, errors.New("卡片验证分类的 expectedTail 长度非法")
+	if targetHash == "" || dispatchedAtMs <= 0 {
+		return dispatch.VerificationObservation{}, errors.New("卡片验证分类缺少目标指纹或派发时刻")
 	}
-	var matched []protocol.ThreadMessage
-	for i := start; i < len(messages); i++ {
+	var matched *protocol.ThreadMessage
+	for i := range messages {
 		message := messages[i]
 		if message.Direction != protocol.MessageDirectionOut ||
 			message.Kind != protocol.MessageKindCard ||
 			message.ContentHash != targetHash ||
 			!validOpaqueSourceKey(message.SourceKey) ||
-			message.CardType == nil || message.CardState == nil {
+			message.CardType == nil || message.CardState == nil ||
+			!withinDispatchWindow(message, dispatchedAtMs) {
 			continue
 		}
 		switch primitive {
@@ -370,7 +331,7 @@ func classifyVerifiedCard(
 			if *message.CardType == protocol.CardTypeWechatExchange &&
 				*message.CardState == protocol.CardStatePending &&
 				message.Interview == nil {
-				matched = append(matched, message)
+				matched = &messages[i]
 			}
 		case protocol.PrimChatSendInviteCard:
 			if expectedInterview != nil &&
@@ -378,29 +339,24 @@ func classifyVerifiedCard(
 				*message.CardState == protocol.CardStateUnknown &&
 				message.Interview != nil &&
 				*message.Interview == *expectedInterview {
-				matched = append(matched, message)
+				matched = &messages[i]
 			}
-		default:
-			return dispatch.VerificationObservation{}, errors.New("卡片验证原语非法")
 		}
 	}
-	if len(matched) != 1 {
-		reason := "expectedTail 之后未找到严格匹配的 out/card 正证"
-		if len(matched) > 1 {
-			reason = "expectedTail 之后出现多条严格匹配的 out/card，结果歧义"
-		}
-		return dispatch.VerificationObservation{Reason: reason}, nil
+	if matched == nil {
+		return dispatch.VerificationObservation{
+			Reason: "最近窗口未见时间容差内的严格卡片正证",
+		}, nil
 	}
-	confirmed := matched[0]
 	var interview *protocol.InterviewDetails
-	if confirmed.Interview != nil {
-		value := *confirmed.Interview
+	if matched.Interview != nil {
+		value := *matched.Interview
 		interview = &value
 	}
 	return dispatch.VerificationObservation{
-		Confirmed: true, ContentHash: confirmed.ContentHash, SourceKey: confirmed.SourceKey,
-		Interview: interview, ObservedAt: observedAt(confirmed),
-		Reason: "expectedTail 之后唯一命中严格卡片正证",
+		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
+		Interview: interview, ObservedAt: observedAt(*matched),
+		Reason: "最近窗口命中严格卡片正证(同类取最新)",
 	}, nil
 }
 
@@ -415,11 +371,6 @@ func validOpaqueSourceKey(value string) bool {
 		}
 	}
 	return true
-}
-
-func isCursorInvalid(err error) bool {
-	var runErr *patrol.RunError
-	return errors.As(err, &runErr) && runErr.Code == protocol.ErrCodeCursorInvalid
 }
 
 func observedAt(message protocol.ThreadMessage) int64 {

@@ -274,7 +274,7 @@ func waitVerificationStatus(t *testing.T, st *store.Store, ref string, want stor
 	return nil
 }
 
-func TestEffectVerifierProductionPaginationUsesDistinctChildren(t *testing.T) {
+func TestEffectVerifierRecentWindowUsesSingleShallowRead(t *testing.T) {
 	d, st, sender, receipt, anchorHash, targetHash := newVerificationFixture(t, "intent-verifier-pages")
 	sender.mu.Lock()
 	sender.autoPages, sender.anchorHash, sender.targetHash = true, anchorHash, targetHash
@@ -286,9 +286,13 @@ func TestEffectVerifierProductionPaginationUsesDistinctChildren(t *testing.T) {
 	if parent.VerificationN != 0 {
 		t.Fatalf("确认命中不应计 miss: %d", parent.VerificationN)
 	}
+	// 2026-07-29「成功=发后页面可见」:验证只浅读一页最近窗口,不带锚、
+	// 不开 deep、不消费 cursor;首页即含容差内目标,分页不再是成功前提。
 	reads := sender.readCalls()
-	if len(reads) != 2 || reads[0].msgID == reads[1].msgID || reads[0].args.Cursor != "" || reads[1].args.Cursor != "older-page" {
-		t.Fatalf("每个已消费分页必须是不同 child: %+v", reads)
+	if len(reads) != 1 || reads[0].args.Cursor != "" ||
+		reads[0].args.Window.Deep || len(reads[0].args.Window.AnchorTail) != 0 ||
+		reads[0].args.Window.MaxMessages != verificationRecentWindow {
+		t.Fatalf("页面可见验证必须是无锚单页浅读: %+v", reads)
 	}
 	intent, _ := st.EffectIntentByID(receipt.IntentID)
 	if intent == nil || intent.Status != store.EffectIntentOk {
