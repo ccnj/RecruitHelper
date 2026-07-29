@@ -1,6 +1,6 @@
 {
   "name": "recruithelper-plugin",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "description": "招聘助手手端(Chrome MV3):base 稳定壳 + program 原语。脑手协议见 ../contract。",
   "type": "module",
