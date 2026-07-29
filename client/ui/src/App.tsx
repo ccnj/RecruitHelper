@@ -2,9 +2,9 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
-  AccountView, AuditView, ConversationView, FrameEvent, HandHealth, Health,
+  AccountView, AuditView, BackendJobView, ConversationView, FrameEvent, HandHealth, Health,
   JobConfigSourceView, LedgerRow, M5AIContextView, M5ProviderConfigView, MessageView, MutationResult,
-  SendIntentView, Suspect, TimeValue,
+  PublishParamsState, SendIntentView, Suspect, TimeValue,
 } from './api'
 import {
   candidateWorkflowReducer, canConfirmCandidate, initialCandidateWorkflow,
@@ -623,6 +623,106 @@ const M5_PROVIDER_BUDGET = {
   max_reply_output_tokens: 512 as const,
 }
 
+const PUBLISH_PARAMS_LABEL: Record<PublishParamsState, string> = {
+  present: '已填写',
+  empty: '空白',
+  absent: '未创建',
+}
+
+// 旧后台该客户的启用职位总览。只读投影：拉一次列表不写任何本地业务事实，
+// 也不做执行约束校验——配置不全的职位正是这张表要显示的内容。
+function BackendJobsTable() {
+  const [jobs, setJobs] = useState<BackendJobView[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [loadedAt, setLoadedAt] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const result = await api.backendJobs()
+      setJobs(Array.isArray(result.jobs) ? result.jobs : [])
+      setLoadedAt(new Date().toLocaleTimeString('zh-CN'))
+      setError('')
+    } catch (reason) {
+      // 刻意保留上一次的行：错误横幅与"数据时刻"一起呈现，
+      // 比清空表格更能让人看出自己在看旧数据。
+      setError(errorText(reason))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  return (
+    <section className="backend-jobs" aria-labelledby="backend-jobs-title">
+      <header className="backend-jobs-head">
+        <div>
+          <strong id="backend-jobs-title">后台职位与发布</strong>
+          <small>
+            旧后台该客户的启用职位。归档的、没有生效版本的、以及重名被服务端去重的职位不在其中
+            {loadedAt && ` · 数据读取于 ${loadedAt}`}
+          </small>
+        </div>
+        <button type="button" disabled={loading} onClick={() => void load()}>
+          {loading ? '正在读取…' : '刷新'}
+        </button>
+      </header>
+      {error && <p className="m5-ai-message bad" role="alert">{error}</p>}
+      <div className="backend-jobs-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">职位</th>
+              <th scope="col">环境</th>
+              <th scope="col">文档</th>
+              <th scope="col">发布参数</th>
+              <th scope="col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map((job) => (
+              <tr key={job.jobId}>
+                <td>
+                  <strong>{job.jobName || '未命名职位'}</strong>
+                  {job.isCurrent && <em className="backend-jobs-current">当前职位</em>}
+                  <code>#{job.jobId}</code>
+                </td>
+                <td>{job.environment || '未标注'}</td>
+                <td>
+                  {job.documentCount} 份
+                  {job.missingDocs && job.missingDocs.length > 0 && (
+                    <em className="backend-jobs-missing" title={`回复链路缺: ${job.missingDocs.join('、')}`}>
+                      缺 {job.missingDocs.length} 份
+                    </em>
+                  )}
+                </td>
+                <td className={`backend-jobs-params is-${job.publishParams}`}>
+                  {PUBLISH_PARAMS_LABEL[job.publishParams] || job.publishParams}
+                </td>
+                <td>
+                  {job.publishParams === 'present' ? (
+                    <button type="button" disabled title="发布能力尚未实现">发布到智联</button>
+                  ) : (
+                    <span className="backend-jobs-none">—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {jobs.length === 0 && !loading && !error && (
+          <p className="m5-ai-empty">后台没有可下发的启用职位。若确认后台有职位，检查多职位下发是否被止血开关关闭。</p>
+        )}
+        {jobs.length === 0 && loading && <p className="m5-ai-empty">正在读取旧后台职位…</p>}
+      </div>
+    </section>
+  )
+}
+
 function M5AIConfiguration() {
   const [contexts, setContexts] = useState<M5AIContextView[]>([])
   const [contextsLoading, setContextsLoading] = useState(true)
@@ -836,6 +936,8 @@ function M5AIConfiguration() {
           </button>
         </section>
       </div>
+
+      <BackendJobsTable />
 
       <details className="dc-legacy">
         <summary>

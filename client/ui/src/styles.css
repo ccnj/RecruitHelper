@@ -824,6 +824,24 @@ h1, h2, h3, p { margin-top: 0; }
 
 .dc-note { margin: 0.5rem 0 0; color: var(--txt-faint); font-size: 0.66rem; line-height: 1.55; }
 
+/* 旧后台职位总览：只读表，发布参数三态一眼可辨 */
+.backend-jobs { border-top: 1px solid var(--rule); padding: 0.6rem 0.7rem 0.7rem; }
+.backend-jobs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
+.backend-jobs-head strong { display: block; font-size: 0.76rem; font-weight: 600; }
+.backend-jobs-head small { display: block; margin-top: 0.08rem; color: var(--txt-faint); font-size: 0.65rem; line-height: 1.5; }
+.dc-shell .backend-jobs-head button { flex: 0 0 auto; width: auto; margin: 0; }
+.backend-jobs-scroll { max-height: 230px; overflow: auto; border: 1px solid var(--rule); background: #0a0e12; }
+.backend-jobs-scroll td { vertical-align: top; }
+.backend-jobs-scroll td strong { font-weight: 600; }
+.backend-jobs-scroll code { display: block; margin-top: 0.1rem; color: var(--txt-faint); font-family: var(--face); font-size: 0.62rem; }
+.backend-jobs-current { margin-left: 0.35rem; padding: 0.02rem 0.22rem; border: 1px solid var(--beam); color: var(--beam); font-size: 0.6rem; font-style: normal; }
+.backend-jobs-missing { display: block; margin-top: 0.1rem; color: var(--warn); font-size: 0.62rem; font-style: normal; }
+.backend-jobs-params.is-present { color: var(--live); }
+.backend-jobs-params.is-empty { color: var(--warn); }
+.backend-jobs-params.is-absent { color: var(--txt-faint); }
+.dc-shell .backend-jobs-scroll button { width: auto; margin: 0; padding: 0.16rem 0.4rem; font-size: 0.65rem; }
+.backend-jobs-none { color: var(--txt-faint); }
+
 /* M5 遗留：明确降级的视觉，不与在用配置抢注意力 */
 .dc-legacy { border-top: 1px solid var(--rule); background: #0a0e12; }
 .dc-legacy > summary {

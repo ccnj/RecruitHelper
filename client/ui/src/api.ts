@@ -266,6 +266,19 @@ export interface JobConfigActivationInput {
   invite_code: string
 }
 
+/** 旧后台对空的发布参数刻意放行，所以"文档存在"不等于"填了参数"：只有 present 可发布。 */
+export type PublishParamsState = 'present' | 'empty' | 'absent'
+
+export interface BackendJobView {
+  jobId: string
+  jobName: string
+  environment?: string
+  isCurrent: boolean
+  documentCount: number
+  publishParams: PublishParamsState
+  missingDocs?: string[]
+}
+
 export interface JobConfigActivationResult {
   activated: boolean
   synced: boolean
@@ -557,6 +570,7 @@ export const api = {
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
+  backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
   bindM5Context: (contextId: string, revisionHash: string) => post<MutationResult>('/admin/m5/context-binding', {
