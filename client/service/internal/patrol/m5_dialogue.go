@@ -808,7 +808,13 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 	var currentBoundary []store.Message
 	for _, message := range messages {
 		if message.Seq > turn.InboundThroughSeq {
-			continue
+			// 轮后唯一被容忍的非 system 行是接受动作产生的交换结果卡(见上
+			// 方边界豁免);它是承接的前情事实,必须进入对话历史渲染,否则
+			// 模型不知道微信已交换、会再建议换微信动作而撞前置裁决转人工。
+			if !(message.Direction == "out" && message.Kind == "card" &&
+				message.CardType == "wechatExchange" && message.CardState == "accepted") {
+				continue
+			}
 		}
 		if message.Seq >= turn.InboundFromSeq && message.Seq <= turn.InboundThroughSeq {
 			currentBoundary = append(currentBoundary, message)
