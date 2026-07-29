@@ -50,6 +50,7 @@ import type {
   DebugProbeInterviewEditorData,
   ErrorCode,
   InterviewDetails,
+  JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
   ProbePlatformData,
@@ -5015,6 +5016,246 @@ export async function readZhilianSourcingTargetResume(
   }
   ctx.progress('推荐候选人定点简历读取完成', 100)
   return result.data
+}
+
+// ── 职位发布前预检:读取本账号在平台上已存在的职位名全集 ──────────────
+//
+// 只服务发布前的"同名是否已存在"判定。分区(在线中/未上线/审核中/未过审)
+// 必须全部读到并合并:少读一个分区会把"已存在"误判成"可发",方向即多发。
+// 分区按 DOM 顺序整体遍历而不按文案匹配,平台改文案或新增分区时仍然全覆盖。
+
+const ZHILIAN_JOB_LIST_URL = `https://${ZHILIAN_HOST}/app/job`
+
+function isZhilianJobListURL(url: string | undefined): boolean {
+  if (!url) return false
+  try {
+    const path = new URL(url).pathname
+    return path === '/app/job' || path.startsWith('/app/job/')
+  } catch {
+    // URL 来自 chrome.tabs,解析失败即按"不是职位页"响亮降级,不猜。
+    return false
+  }
+}
+
+type MainJobSectionResult =
+  | {
+    status: 'ok'
+    sectionCount: number
+    activeIndex: number
+    names: string[]
+    // null = 页面未渲染分页统计,此时 names 必须为空(空分区)。
+    total: number | null
+  }
+  | { status: 'failed'; reason: string }
+
+function mainReadZhilianJobSection(): MainJobSectionResult {
+  const bar = document.querySelector('.job-status-bar ul')
+  if (!bar) return { status: 'failed', reason: 'section_bar_absent' }
+  const items = Array.from(bar.children).filter((node) => node.tagName === 'LI')
+  if (items.length === 0) return { status: 'failed', reason: 'section_bar_absent' }
+  const activeIndex = items.findIndex((node) => node.className.split(/\s+/).includes('is-active'))
+  if (activeIndex < 0) return { status: 'failed', reason: 'section_not_active' }
+
+  const names: string[] = []
+  for (const anchor of Array.from(document.querySelectorAll('a.job-item__title--jobname'))) {
+    const text = ((anchor as HTMLElement).innerText || '')
+      .normalize('NFC').replace(/[\s ]+/gu, ' ').trim()
+    // 读到一张卡片却拿不到名字时不能跳过:那正是会被误判成"可发"的那一个。
+    if (!text || text.length > 256) return { status: 'failed', reason: 'posting_name_unreadable' }
+    names.push(text)
+  }
+
+  let total: number | null = null
+  const totalNode = document.querySelector('.km-pagination__total')
+  if (totalNode) {
+    const matched = /共\s*(\d+)\s*条/.exec((totalNode as HTMLElement).innerText || '')
+    if (!matched) return { status: 'failed', reason: 'total_unreadable' }
+    total = Number(matched[1])
+    if (!Number.isSafeInteger(total) || total < 0) {
+      return { status: 'failed', reason: 'total_unreadable' }
+    }
+  }
+  return { status: 'ok', sectionCount: items.length, activeIndex, names, total }
+}
+
+function mainClickZhilianJobSection(index: number): { status: 'ok' } | { status: 'failed'; reason: string } {
+  const bar = document.querySelector('.job-status-bar ul')
+  if (!bar) return { status: 'failed', reason: 'section_bar_absent' }
+  const items = Array.from(bar.children).filter((node) => node.tagName === 'LI')
+  if (index < 0 || index >= items.length) return { status: 'failed', reason: 'section_index_out_of_range' }
+  const target = items[index] as HTMLElement
+  if (typeof target.click !== 'function') return { status: 'failed', reason: 'section_not_clickable' }
+  target.click()
+  return { status: 'ok' }
+}
+
+function validJobSectionResult(value: unknown): value is MainJobSectionResult {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') return typeof record.reason === 'string'
+  if (record.status !== 'ok') return false
+  return typeof record.sectionCount === 'number' && typeof record.activeIndex === 'number' &&
+    Array.isArray(record.names) && record.names.every((name) => typeof name === 'string') &&
+    (record.total === null || typeof record.total === 'number')
+}
+
+async function ensureZhilianJobListTab(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<chrome.tabs.Tab> {
+  const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => tab.id !== undefined && isZhilianJobListURL(tab.url))
+  if (existing.length > 1) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位页标签无法唯一确定', 'manualOnly')
+  }
+  if (existing.length === 1 && existing[0].status === 'complete') {
+    assertExpectedPrincipal(await probeTab(existing[0]), expectedPrincipalFingerprint)
+    return existing[0]
+  }
+
+  ctx.checkpoint()
+  await ctx.progress('准备智联职位页', 5)
+  let tab = existing.length === 1 ? existing[0] : await canonicalZhilianTab()
+  if (!tab || tab.id === undefined) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
+    )
+  }
+  // 复用其他智联路由前先核对账号;不能先切页再发现切动了错误账号。
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
+  try {
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_LIST_URL })
+  } catch (error) {
+    commandNavigation.end()
+    throw error
+  }
+  return waitForZhilianJobListReady(tab, ctx)
+}
+
+async function waitForZhilianJobListReady(
+  tab: chrome.tabs.Tab,
+  ctx: PrimitiveContext,
+): Promise<chrome.tabs.Tab> {
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  // 页面导航也是一次交互;即使 Chrome 很快返回 complete,也给页面至少一秒完成初始化。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  // 条件轮询:就绪即继续,最长约 10 秒,不做固定等待。
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tab.id)
+    if (latest.status === 'complete' && isZhilianJobListURL(latest.url)) {
+      const probed = await runMain(latest.id as number, mainReadZhilianJobSection, [])
+      if (validJobSectionResult(probed) && probed.status === 'ok') return latest
+    }
+    if (attempt % 10 === 0) {
+      await ctx.progress('等待智联职位页就绪', Math.min(20, 5 + attempt))
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY', '智联职位页在期限内未就绪', 'afterRecovery', 'pageBroken',
+  )
+}
+
+function throwJobSectionFailure(reason: string): never {
+  if (reason === 'posting_name_unreadable' || reason === 'total_unreadable') {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位页条目无法完整读取', 'manualOnly')
+  }
+  throw new ZhilianPlatformError('CTX_NOT_READY', '智联职位页分区结构不可识别', 'afterRecovery', 'pageBroken')
+}
+
+// 切到指定分区并读取它。条件轮询等待分区真正激活且条目渲染完整。
+async function readZhilianJobSection(
+  tabId: number,
+  index: number,
+  ctx: PrimitiveContext,
+): Promise<{ names: string[]; sectionCount: number }> {
+  const clicked = await runMain(tabId, mainClickZhilianJobSection, [index])
+  if (typeof clicked !== 'object' || clicked === null || (clicked as { status?: string }).status !== 'ok') {
+    const reason = (clicked as { reason?: string } | null)?.reason ?? 'section_click_failed'
+    throwJobSectionFailure(reason)
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const result = await runMain(tabId, mainReadZhilianJobSection, [])
+    if (!validJobSectionResult(result)) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位分区结果结构不符合预期', 'manualOnly')
+    }
+    if (result.status === 'failed') throwJobSectionFailure(result.reason)
+    // 分区已激活,且"共 N 条"与实际读到的卡片数一致才算渲染完整。
+    // 数量对不上意味着还在渲染,或者存在未读到的分页——两种都不能当作读全。
+    if (result.activeIndex === index) {
+      const expected = result.total ?? 0
+      if (result.names.length === expected) return { names: result.names, sectionCount: result.sectionCount }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  // 稳定不下来的最常见原因是条目超过单页:此时读到的一定少于"共 N 条"。
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED', '智联职位分区未在期限内完整渲染(可能存在未读取的分页)', 'manualOnly',
+  )
+}
+
+export async function readZhilianPublishedJobs(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobReadPublishedListData> {
+  ctx.checkpoint()
+  const tab = await ensureZhilianJobListTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联职位页与登录身份', 15)
+
+  const first = await runMain(tabId, mainReadZhilianJobSection, [])
+  if (!validJobSectionResult(first)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位分区结果结构不符合预期', 'manualOnly')
+  }
+  if (first.status === 'failed') throwJobSectionFailure(first.reason)
+  const sectionCount = first.sectionCount
+  if (sectionCount < 1 || sectionCount > 16) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位分区数量超出已知范围', 'manualOnly')
+  }
+
+  const collected = new Set<string>()
+  for (let index = 0; index < sectionCount; index += 1) {
+    ctx.checkpoint()
+    // 相邻平台可见交互至少间隔一秒并带随机抖动。
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+    })
+    const section = await readZhilianJobSection(tabId, index, ctx)
+    if (section.sectionCount !== sectionCount) {
+      throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '读取期间智联职位分区结构发生变化', 'manualOnly')
+    }
+    for (const name of section.names) collected.add(name)
+    await ctx.progress(`已读取第 ${index + 1}/${sectionCount} 个职位分区`, 15 + Math.floor((index + 1) * 70 / sectionCount))
+  }
+
+  // 分区遍历会切走页面;返回前再复核一次身份,避免中途换号。
+  const latest = await chrome.tabs.get(tabId)
+  if (!isZhilianJobListURL(latest.url) || latest.status !== 'complete') {
+    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '读取期间智联职位页发生跳转', 'manualOnly')
+  }
+  assertExpectedPrincipal(await probeTab(latest), expectedPrincipalFingerprint)
+
+  const postingNames = Array.from(collected)
+  if (postingNames.length > 200) {
+    throw new ZhilianPlatformError('PAYLOAD_LIMIT', '平台职位数量超过当前契约上限', 'manualOnly')
+  }
+  const data: JobReadPublishedListData = { postingNames, observedAt: Date.now() }
+  if (validatePrimitiveData(PrimitiveName.JobReadPublishedList, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位名清单不符合当前契约', 'manualOnly')
+  }
+  await ctx.progress('智联职位名清单读取完成', 100)
+  return data
 }
 
 export async function readZhilianSourcingResume(

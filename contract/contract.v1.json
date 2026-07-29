@@ -864,6 +864,21 @@
           "positionRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
         }
       },
+      "JobReadPublishedListArgs": {
+        "type": "object",
+        "fields": {}
+      },
+      "JobReadPublishedListData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "postingNames": {
+            "type": "array", "minItems": 0, "maxItems": 200,
+            "items": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+          },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "CandidateReadSourcingResumeArgs": {
         "type": "object",
         "fields": {
@@ -1210,6 +1225,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "只打开并读取当前推荐窗口中唯一匹配 platformUserRef+positionRef 的候选人完整五分区简历;不搜索、不滚动、不改筛选。读取并再次核对目标绑定后必须关闭本命令使用的详情,确认弹框消失且 URL 不再携带 resumeNumber 才可返回 ok;关闭无法确认时整体失败且不返回部分 data。不得降级到姓名、resumeNumber、DOM 位置或列表序号作为目标"
+    },
+    "job.readPublishedList": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "JobReadPublishedListArgs", "dataSchema": "JobReadPublishedListData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
+      "note": "读取本账号在平台上已存在的职位名全集,供脑侧发布前预检判定同名职位是否已存在。必须遍历平台上全部职位状态分区并合并,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。只返回按平台原样文本去重后的职位名与 observedAt,不返回状态、平台职位 ID、DOM 位置或候选人数据。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",
