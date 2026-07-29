@@ -77,6 +77,10 @@ type fakeSource struct {
 	err       error
 	calls     int
 	callOrder *[]string
+
+	allRaw   []byte
+	allErr   error
+	allCalls int
 }
 
 func (f *fakeSource) FetchCurrent(context.Context) ([]byte, error) {
@@ -85,6 +89,22 @@ func (f *fakeSource) FetchCurrent(context.Context) ([]byte, error) {
 		*f.callOrder = append(*f.callOrder, "fetch")
 	}
 	return f.raw, f.err
+}
+
+// FetchAll 默认失败:绝大多数既有用例并不关心有效职位集,让它们顺带证明
+// 复数同步故障不会阻断开始。需要真实有效集的用例显式给 allRaw。
+func (f *fakeSource) FetchAll(context.Context) ([]byte, error) {
+	f.allCalls++
+	if f.callOrder != nil {
+		*f.callOrder = append(*f.callOrder, "fetchAll")
+	}
+	if f.allErr != nil {
+		return nil, f.allErr
+	}
+	if f.allRaw == nil {
+		return nil, errors.New("用例未提供多职位响应")
+	}
+	return f.allRaw, nil
 }
 
 func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
@@ -352,10 +372,14 @@ func TestAdditionalBatchFromPausedCommunicationQueuesWithoutResuming(t *testing.
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 1 || flow.resumeCalls != 0 ||
-		len(flow.callOrder) != 2 ||
+	// fetchAll 必须落在 fetch 与 full 之间:有效职位集要先于当前职位落库刷新,
+	// SaveCurrentLegacyJobAIContext 的"只加不减"才能保证当前工作职位一定留在
+	// 有效集里。顺序颠倒会让复数同步反过来撤销当前职位的建档资格。
+	if source.calls != 1 || source.allCalls != 1 || flow.resumeCalls != 0 ||
+		len(flow.callOrder) != 3 ||
 		flow.callOrder[0] != "fetch" ||
-		flow.callOrder[1] != "full" {
+		flow.callOrder[1] != "fetchAll" ||
+		flow.callOrder[2] != "full" {
 		t.Fatalf("paused additional source=%d flow=%+v", source.calls, flow)
 	}
 }
@@ -571,6 +595,86 @@ func controllerFixture(t *testing.T) (*store.Store, store.AccountKey) {
 		t.Fatal(err)
 	}
 	return db, key
+}
+
+// syntheticAllJobs 拼出复数端点的真实顶层形状 {currentJobId,jobs}。
+func syntheticAllJobs(t *testing.T, currentJobID int, jobs map[int]string) []byte {
+	t.Helper()
+	bundles := make([]any, 0, len(jobs))
+	for jobID, name := range jobs {
+		var bundle map[string]any
+		if err := json.Unmarshal(syntheticCurrentJob(t, jobID, name), &bundle); err != nil {
+			t.Fatal(err)
+		}
+		bundles = append(bundles, bundle)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"currentJobId": currentJobID, "jobs": bundles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestFullStartBuildsEffectiveJobSetAndSurvivesPluralFailure(t *testing.T) {
+	now := time.Date(2026, 7, 29, 9, 0, 0, 0, time.Local)
+
+	t.Run("plural sync establishes the effective set", func(t *testing.T) {
+		db, _ := controllerFixture(t)
+		source := &fakeSource{
+			raw: syntheticCurrentJob(t, 42, "产品经理"),
+			allRaw: syntheticAllJobs(t, 42, map[int]string{
+				42: "产品经理", 43: "客户经理",
+			}),
+		}
+		controller, err := New(
+			db, &fakeWorkflow{}, source,
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+			t.Fatal(err)
+		}
+		// 非当前职位也必须进有效集，这正是本轮要交付的能力。
+		effective, err := db.EffectiveLegacyJobs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(effective) != 2 ||
+			effective[0].BackendJobID != "42" || effective[0].DisplayName != "产品经理" ||
+			effective[1].BackendJobID != "43" || effective[1].DisplayName != "客户经理" {
+			t.Fatalf("有效职位集不正确: %+v", effective)
+		}
+	})
+
+	t.Run("plural failure keeps start working and preserves the set", func(t *testing.T) {
+		db, _ := controllerFixture(t)
+		source := &fakeSource{
+			raw:    syntheticCurrentJob(t, 42, "产品经理"),
+			allErr: errors.New("旧后台不可达"),
+		}
+		controller, err := New(
+			db, &fakeWorkflow{}, source,
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// 有效集只影响主动来聊候选人能否建档，配置面故障不得阻断用户点下的开始。
+		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+			t.Fatalf("复数同步失败不应阻断开始: %v", err)
+		}
+		effective, err := db.EffectiveLegacyJobs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(effective) != 1 || effective[0].BackendJobID != "42" {
+			t.Fatalf("当前工作职位必须始终留在有效职位集内: %+v", effective)
+		}
+	})
 }
 
 func syntheticCurrentJob(t *testing.T, jobID int, name string) []byte {

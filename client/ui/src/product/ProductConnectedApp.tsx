@@ -8,6 +8,7 @@ import {
   resumeProductWorkflow,
   sendProductConfirmation,
   startProductWorkflow,
+  syncProductJobs,
 } from './api'
 import { ProductApp } from './ProductApp'
 import { ActivationPage } from './components/ActivationPage'
@@ -111,6 +112,7 @@ export function ProductConnectedApp({
         pauseWorkflow: () => performProductAction('暂停', pauseProductWorkflow),
         refresh,
         resumeWorkflow: () => performProductAction('恢复', resumeProductWorkflow),
+        syncJobs: () => performProductAction('同步职位', syncProductJobs),
         sendConfirmationBatch: (batchId, profileIds) => performProductAction(
           '候选确认发送',
           () => sendProductConfirmation(batchId, profileIds),

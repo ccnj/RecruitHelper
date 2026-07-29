@@ -856,6 +856,13 @@ func (a *roundActor) adoptInboundConversationProfiles(
 			); err != nil {
 				return nil, err
 			}
+		case store.InboundProfileNoEligibleJobs:
+			if err := a.appendInboundProfileAdoptionAudit(
+				summary.ConversationRef,
+				"status=skipped reason=noEligibleJobs",
+			); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("未知主动来聊候选人收编结果: %q", result.Outcome)
 		}

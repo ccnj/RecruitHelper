@@ -787,7 +787,7 @@
 .rh-job-strip {
   min-height: 62px;
   display: grid;
-  grid-template-columns: auto minmax(180px, auto) auto 1fr;
+  grid-template-columns: auto minmax(180px, auto) auto 1fr auto;
   align-items: center;
   gap: 12px;
   margin-bottom: 16px;
@@ -2540,7 +2540,8 @@
   }
 
   .rh-job-strip {
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    /* 窄屏隐藏 rh-job-meta，它不再占列；剩下 mark、copy、状态、同步按钮四列。 */
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
 
   .rh-job-meta {

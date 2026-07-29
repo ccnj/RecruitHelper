@@ -85,6 +85,8 @@ func Open(dataDir string) (*Store, error) {
 	jobAIContextHeadTableExisted := db.Migrator().HasTable(&JobAIContextHead{})
 	jobActivationCurrentColumnExisted := jobAIContextHeadTableExisted &&
 		db.Migrator().HasColumn(&JobAIContextHead{}, "ActivationCurrent")
+	jobInboundEligibleColumnExisted := jobAIContextHeadTableExisted &&
+		db.Migrator().HasColumn(&JobAIContextHead{}, "InboundEligible")
 	if err := db.AutoMigrate(
 		&Hand{},
 		&Account{},
@@ -161,6 +163,11 @@ func Open(dataDir string) (*Store, error) {
 	if jobAIContextHeadTableExisted && !jobActivationCurrentColumnExisted {
 		if err := backfillLegacyJobConfigActivationCurrent(db); err != nil {
 			return nil, fmt.Errorf("回填当前激活职位资格: %w", err)
+		}
+	}
+	if jobAIContextHeadTableExisted && !jobInboundEligibleColumnExisted {
+		if err := backfillLegacyJobConfigInboundEligible(db); err != nil {
+			return nil, fmt.Errorf("回填入站可建档职位资格: %w", err)
 		}
 	}
 	return &Store{db: db}, nil

@@ -111,6 +111,83 @@ func ImportLegacyJobConfigFromBackend(raw []byte, now time.Time) ([]ContextRevis
 	return importLegacyJobConfig(raw, now, sourceKindLegacyJobConfig)
 }
 
+// SkippedLegacyJob records one job that could not enter the effective job set.
+// Reason carries only structural diagnostics (which document is missing, which
+// template token is unacceptable) — never document content or provider
+// credentials, both of which importBundle rejects or drops before this point.
+type SkippedLegacyJob struct {
+	// Index locates the job inside the plural payload when its own id could
+	// not be parsed, which is exactly when SourceJobRef is empty.
+	Index        int
+	SourceJobRef string
+	Reason       string
+}
+
+// ImportLegacyJobConfigsTolerant imports the approved plural old-backend
+// response job by job. It deliberately diverges from the all-or-nothing
+// semantics of ImportLegacyJobConfigFromBackend: the effective job set exists
+// so an inbound candidate can find their own job context by visible position
+// title, and one under-configured historical job in the customer's backend
+// must not disqualify every other job.
+//
+// Whole-payload damage still fails as a whole. A response that is not valid
+// JSON, is not the plural shape, or carries no jobs is not one bad job — it is
+// an untrustworthy response, and silently treating it as "zero effective jobs"
+// would quietly disable inbound adoption instead of reporting a fault.
+func ImportLegacyJobConfigsTolerant(
+	raw []byte,
+	now time.Time,
+) ([]ContextRevision, []SkippedLegacyJob, error) {
+	if now.IsZero() {
+		return nil, nil, fmt.Errorf("%w: 缺少导入时刻", ErrInvalidJobConfig)
+	}
+	var shape map[string]json.RawMessage
+	if err := decodeUseNumber(raw, &shape); err != nil {
+		return nil, nil, fmt.Errorf("%w: JSON 无效", ErrInvalidJobConfig)
+	}
+	if _, plural := shape["jobs"]; !plural {
+		return nil, nil, fmt.Errorf("%w: 不是多职位整包", ErrInvalidJobConfig)
+	}
+	var payload legacyPlural
+	if err := decodeUseNumber(raw, &payload); err != nil {
+		return nil, nil, fmt.Errorf("%w: 多职位整包无效: %v", ErrInvalidJobConfig, err)
+	}
+	if len(payload.Jobs) == 0 {
+		return nil, nil, fmt.Errorf("%w: 多职位整包为空", ErrInvalidJobConfig)
+	}
+
+	revisions := make([]ContextRevision, 0, len(payload.Jobs))
+	skipped := make([]SkippedLegacyJob, 0)
+	seen := make(map[string]int, len(payload.Jobs))
+	for i := range payload.Jobs {
+		sourceJobRef := ""
+		if payload.Jobs[i].Job != nil {
+			sourceJobRef = strings.TrimSpace(payload.Jobs[i].Job.ID.String())
+		}
+		revision, err := importBundle(payload.Jobs[i], now, sourceKindLegacyJobConfig)
+		if err != nil {
+			skipped = append(skipped, SkippedLegacyJob{
+				Index: i, SourceJobRef: sourceJobRef, Reason: err.Error(),
+			})
+			continue
+		}
+		// A repeated job id means the payload contradicts itself about which
+		// configuration belongs to that job. Keeping the first arrival and
+		// skipping the rest is the conservative direction: the effective set
+		// may end up short, never wrong-by-overwrite.
+		if firstIndex, exists := seen[revision.ContextID]; exists {
+			skipped = append(skipped, SkippedLegacyJob{
+				Index: i, SourceJobRef: revision.SourceJobRef,
+				Reason: fmt.Sprintf("job id 与 jobs[%d] 重复", firstIndex),
+			})
+			continue
+		}
+		seen[revision.ContextID] = i
+		revisions = append(revisions, revision)
+	}
+	return revisions, skipped, nil
+}
+
 func importLegacyJobConfig(raw []byte, now time.Time, sourceKind string) ([]ContextRevision, error) {
 	if now.IsZero() {
 		return nil, fmt.Errorf("%w: 缺少导入时刻", ErrInvalidJobConfig)
