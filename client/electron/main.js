@@ -1,13 +1,16 @@
 // Electron 主进程(壳):启动脑服务 → 等就绪 → 开窗加载 UI → 显式退出时停服务。
 // 三层职责硬边界:壳只管窗口与进程;逻辑中枢在 Go 服务;UI 只展示与人工回填。
 'use strict'
-const { app, BrowserWindow, Menu, Tray, nativeImage } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage } = require('electron')
 const crypto = require('node:crypto')
 const path = require('node:path')
 const { BrainService } = require('./service')
+const { resolveLayout, resolveDataDir } = require('./layout')
+const { pluginInstallDir, ensurePluginInstalled } = require('./pluginSeed')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
+// 仅开发态有意义:打包后主进程在 asar 内,一切资源改由 resources 提供。
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 
 let service = null
@@ -15,35 +18,43 @@ let win = null
 let tray = null
 let quitting = false
 
-// 脑服务二进制:优先环境变量指定的预编译二进制;否则开发期用 `go run`。
-function serviceSpec(dataDir, adminToken) {
-  const bin = process.env.BRAIND_BIN
-  const args = ['-port', String(PORT), '-data', dataDir]
-  const env = { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken }
-  if (bin) return { bin, args, cwd: REPO_ROOT, env }
-  return { bin: 'go', args: ['run', './client/service', ...args], cwd: REPO_ROOT, env }
-}
-
 async function boot() {
-  // 开发期可只覆盖脑数据库目录，避免为了复用工作区数据而把 Chromium
-  // userData 错指到仓库根目录；正式客户端默认仍使用 Electron 标准目录。
-  const configuredDataDir = process.env.BRAIN_DATA_DIR?.trim()
-  const dataDir = configuredDataDir
-    ? path.resolve(configuredDataDir)
-    : path.join(app.getPath('userData'), 'data')
+  const layout = resolveLayout({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    repoRoot: REPO_ROOT,
+  })
+  const dataDir = resolveDataDir({
+    packaged: app.isPackaged,
+    userDataDir: app.getPath('userData'),
+  })
+  // 只有打包态才安置插件:开发期插件由开发者自己从 plugin/dist 加载。
+  // 放在起脑之前是因为这一刻还没有任何批次在跑,替换天然安全;失败只降级。
+  if (app.isPackaged) {
+    ensurePluginInstalled({
+      sourceDir: layout.pluginDir,
+      targetDir: pluginInstallDir({ userDataDir: app.getPath('userData') }),
+      log: (l) => console.log(l),
+    })
+  }
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
-  const spec = serviceSpec(dataDir, adminToken)
-  service = new BrainService({ ...spec, onLog: (l) => console.log(l) })
+  service = new BrainService({
+    bin: layout.brainBin,
+    args: [...layout.brainArgs, '-port', String(PORT), '-data', dataDir],
+    cwd: layout.brainCwd,
+    env: { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken },
+    onLog: (l) => console.log(l),
+  })
   service.start()
   const healthy = await service.waitHealthy(ADMIN_BASE)
   if (!healthy) console.error('[main] 脑服务未在期限内就绪')
 
-  createWindow(adminToken)
+  createWindow(adminToken, layout.uiEntry)
   createTray()
 }
 
-function createWindow(adminToken) {
+function createWindow(adminToken, uiEntry) {
   win = new BrowserWindow({
     width: 1200,
     height: 840,
@@ -58,10 +69,10 @@ function createWindow(adminToken) {
       ],
     },
   })
-  // 开发期用 vite dev(UI_URL);打包后加载 UI 构建产物。
-  const devUrl = process.env.UI_URL
+  // 开发期用 vite dev(UI_URL);打包后加载随包 UI 构建产物。
+  const devUrl = app.isPackaged ? '' : process.env.UI_URL
   if (devUrl) win.loadURL(devUrl)
-  else win.loadFile(path.join(REPO_ROOT, 'client', 'ui', 'dist', 'index.html'))
+  else win.loadFile(uiEntry)
   win.on('close', (event) => {
     // 普通用户关闭窗口只是在收起 UI。脑仍在同一 Electron 进程中运行，
     // 完整流程、巡检和暂停事实都不由 renderer 的生命周期决定。
@@ -124,7 +135,14 @@ if (!primaryInstance) {
   app.quit()
 } else {
   app.on('second-instance', showWindow)
-  app.whenReady().then(boot)
+  app.whenReady().then(boot).catch((error) => {
+    // 安装包不完整等启动前置失败必须当场可见,不留一个开了窗却没有脑的壳。
+    const detail = String(error?.message || error)
+    console.error('[main] 启动失败', detail)
+    dialog.showErrorBox('招聘助手无法启动', detail)
+    quitting = true
+    app.quit()
+  })
 }
 
 app.on('activate', showWindow)

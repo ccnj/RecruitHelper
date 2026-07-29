@@ -2,13 +2,52 @@
   "name": "recruithelper-client",
   "version": "0.1.0",
   "private": true,
+  "author": "aliyutaozi",
   "description": "招聘助手客户端外壳(Electron):启停 Go 脑服务 + 加载 UI。",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test:node": "node test/service.test.mjs"
+    "dist": "electron-builder",
+    "test:node": "node test/service.test.mjs && node test/layout.test.mjs && node test/pluginSeed.test.mjs"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aliyutaozi.recruithelper",
+    "productName": "RecruitHelper",
+    "directories": {
+      "output": "../../release"
+    },
+    "files": [
+      "*.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../build/stage/brain",
+        "to": "brain"
+      },
+      {
+        "from": "../ui/dist",
+        "to": "ui"
+      },
+      {
+        "from": "../../plugin/dist",
+        "to": "plugin"
+      }
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        "dir"
+      ]
+    }
   }
 }
