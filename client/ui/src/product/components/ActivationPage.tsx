@@ -202,7 +202,7 @@ export function ActivationPage({ onActivated }: ActivationPageProps) {
 
           <footer>
             <span>需要新的激活码时，请联系管理员。</span>
-            <span>客户端版本 0.1.0</span>
+            <span>客户端版本 {__APP_VERSION__}</span>
           </footer>
         </section>
       </div>
