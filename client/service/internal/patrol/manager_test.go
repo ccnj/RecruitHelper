@@ -154,6 +154,9 @@ func newHarness(t *testing.T) *harness {
 		Clock: clock, Location: time.UTC, PatrolInterval: 5 * time.Minute,
 		IdentityFreshFor: time.Hour, CoalesceWindow: 25 * time.Second,
 		MinimumRoundGap: time.Minute, MaxPages: 16,
+		// 既有用例的现场都在交接之后，闸设在测试时钟（07-17）之前，
+		// 让它们照常建档；闸自身的边界由专门用例覆盖。
+		InboundHandoverCutoff: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		NewRoundID: func() string {
 			sequence++
 			return fmt.Sprintf("round-%03d", sequence)

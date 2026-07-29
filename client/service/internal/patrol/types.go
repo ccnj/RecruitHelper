@@ -296,7 +296,11 @@ type Config struct {
 	TrackedReconcileInterval time.Duration
 	MaxPages                 int
 	DailyWindow              workflow.DailyWindowPolicy
-	NewRoundID               func() string
+	// InboundHandoverCutoff 是交接日入站建档闸的界（客户端本地时区当日
+	// 00:00），早于它的会话不予建档。零值按 DefaultInboundHandoverDate
+	// 与 Location 推导。
+	InboundHandoverCutoff time.Time
+	NewRoundID            func() string
 	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
 	// 生产默认使用 2～4 秒随机等待；测试可注入无等待实现，手端
 	// 仍无业务定时器。
@@ -334,6 +338,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxPages <= 0 {
 		c.MaxPages = 256
+	}
+	if c.InboundHandoverCutoff.IsZero() {
+		// 默认常量恒合法；万一被改坏，validateConfig 会拦下零值，不静默放行。
+		if cutoff, err := ParseInboundHandoverCutoff("", c.Location); err == nil {
+			c.InboundHandoverCutoff = cutoff
+		}
 	}
 	if c.SourcingPaceWait == nil {
 		c.SourcingPaceWait = defaultSourcingPaceWait
@@ -421,6 +431,9 @@ func validateConfig(c Config) error {
 		c.MinimumRoundGap <= 0 || c.TrackedReconcileInterval <= 0 || c.MaxPages <= 0 ||
 		c.SourcingPaceWait == nil || c.InteractionPaceWait == nil {
 		return fmt.Errorf("patrol config 含非正参数: %+v", c)
+	}
+	if c.InboundHandoverCutoff.IsZero() {
+		return errors.New("patrol config 缺少交接日入站建档闸的时间界")
 	}
 	return nil
 }

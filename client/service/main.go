@@ -49,6 +49,16 @@ func main() {
 	if dailyWindow.AllowOutOfWindow {
 		slog.Warn("开发期业务窗口覆盖已启用")
 	}
+	inboundHandoverCutoff, handoverErr := patrol.ParseInboundHandoverCutoff(
+		os.Getenv(patrol.InboundHandoverDateEnv), time.Local,
+	)
+	if handoverErr != nil {
+		// 非法日期拒绝启动：静默回落会放进一批本应挡住的交接前旧会话。
+		slog.Error("交接日配置无效，脑服务拒绝启动", "err", handoverErr)
+		os.Exit(1)
+	}
+	slog.Info("交接日入站建档闸已生效",
+		"handoverDate", inboundHandoverCutoff.Format("2006-01-02"))
 
 	st, err := store.Open(*dataDir)
 	if err != nil {
@@ -138,15 +148,17 @@ func main() {
 	}
 	runner := &appbridge.PatrolRunner{Dispatcher: disp}
 	var actor *patrol.Manager
+	patrolConfig := patrol.Config{
+		DailyWindow:           dailyWindow,
+		InboundHandoverCutoff: inboundHandoverCutoff,
+	}
 	if advice == nil {
 		actor, err = patrol.NewManager(
-			st, runner, appbridge.HandAvailability{Hub: hub},
-			patrol.Config{DailyWindow: dailyWindow},
+			st, runner, appbridge.HandAvailability{Hub: hub}, patrolConfig,
 		)
 	} else {
 		actor, err = patrol.NewManager(
-			st, runner, appbridge.HandAvailability{Hub: hub},
-			patrol.Config{DailyWindow: dailyWindow}, advice,
+			st, runner, appbridge.HandAvailability{Hub: hub}, patrolConfig, advice,
 		)
 	}
 	if err != nil {
