@@ -220,3 +220,86 @@ func TestListPreviewUsesSameNormalizationAndRuneTruncation(t *testing.T) {
 		t.Fatal("媒体列表摘要必须统一为协议占位符")
 	}
 }
+
+// 2026-07-31 真机：线下(到场)邀面卡 interviewType="ATTENDANCE"，平台不下发
+// interviewPlatform 且 endTime 恒为 "0"。协议规格 §4.5 据此把 endsAt 改为
+// optional，投影为空串而不得由 startsAt 合成。
+func TestInterviewProjectionAcceptsOnsiteWithoutEndsAt(t *testing.T) {
+	startsAt, method := int64(1_785_448_800_000), "onsite"
+	expected := sha256.Sum256([]byte(
+		"card\x1finterviewInvite\x1f1785448800000\x1f\x1fonsite",
+	))
+	normalized, err := NormalizeMessage(SnapshotMessage{
+		Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "unknown",
+		InterviewStartsAtMs: &startsAt, InterviewMethod: &method, Origin: "external",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := normalized.ContentHash, hex.EncodeToString(expected[:]); got != want {
+		t.Fatalf("线下邀面卡 hash=%s, want %s", got, want)
+	}
+	if normalized.InterviewEndsAtMs != nil {
+		t.Fatalf("缺席的 endsAt 不得被合成: %v", *normalized.InterviewEndsAtMs)
+	}
+	if draft := normalized.draft(); draft.InterviewEndsAtMs != nil ||
+		draft.InterviewStartsAtMs == nil || *draft.InterviewStartsAtMs != startsAt ||
+		draft.InterviewMethod == nil || *draft.InterviewMethod != method {
+		t.Fatalf("线下邀面参数未正确穿透落库草案: %+v", draft)
+	}
+}
+
+// endsAt 转 optional 不得改变既有 wechatVideo 卡的任何一个字节——它同时是
+// 发送侧正证判据，漂移会让存量邀面动作全部对不上。
+func TestInterviewProjectionKeepsWechatVideoByteIdentical(t *testing.T) {
+	startsAt, endsAt, method := int64(1_722_000_000_000), int64(1_722_001_800_000), "wechatVideo"
+	normalized, err := NormalizeMessage(SnapshotMessage{
+		Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "unknown",
+		InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+		Origin: "external",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.ContentHash != InterviewInviteContentHash(startsAt, endsAt, method) {
+		t.Fatal("wechatVideo 卡的归一化 hash 必须与发送侧冻结投影逐字节一致")
+	}
+}
+
+func TestInterviewProjectionRejectsUnknownMethodAndBadOnsiteEnds(t *testing.T) {
+	startsAt, sameAsStart := int64(1_785_448_800_000), int64(1_785_448_800_000)
+	// TENCENT 旧样本已见但本仓库真机未见，按平台枚举面事实门不得放行。
+	tencent, onsite := "tencentVideo", "onsite"
+	for _, test := range []struct {
+		name    string
+		message SnapshotMessage
+	}{
+		{
+			name: "unknown method",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewStartsAtMs: &startsAt, InterviewMethod: &tencent,
+			},
+		},
+		{
+			name: "onsite ends not after starts",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &sameAsStart, InterviewMethod: &onsite,
+			},
+		},
+		{
+			name: "ends without starts",
+			message: SnapshotMessage{
+				Direction: "out", Kind: "card", CardType: "interviewInvite",
+				InterviewEndsAtMs: &sameAsStart, InterviewMethod: &onsite,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NormalizeMessage(test.message); !errors.Is(err, ErrInvalidInterview) {
+				t.Fatalf("非法邀面参数必须响亮失败: %v", err)
+			}
+		})
+	}
+}

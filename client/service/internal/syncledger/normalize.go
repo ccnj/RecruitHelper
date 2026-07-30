@@ -185,10 +185,15 @@ func canonicalIdentity(in SnapshotMessage, normalizedText *string) (string, bool
 			}
 		case "interviewInvite":
 			if in.InterviewStartsAtMs != nil {
+				// endsAt 缺席(线下到场面试,平台恒返回 0)时投影为空串,分隔符
+				// 位数不变;wechatVideo 卡的结果与本条改写前逐字节相同。
+				ends := ""
+				if in.InterviewEndsAtMs != nil {
+					ends = strconv.FormatInt(*in.InterviewEndsAtMs, 10)
+				}
 				return "card\x1finterviewInvite\x1f" +
 					strconv.FormatInt(*in.InterviewStartsAtMs, 10) + "\x1f" +
-					strconv.FormatInt(*in.InterviewEndsAtMs, 10) + "\x1f" +
-					*in.InterviewMethod, true, nil
+					ends + "\x1f" + *in.InterviewMethod, true, nil
 			}
 		}
 		if in.CardIdentity == "" {
@@ -217,10 +222,13 @@ func validateInterviewProjection(in SnapshotMessage) error {
 	if !hasStarts && !hasEnds && !hasMethod {
 		return nil
 	}
+	// 2026-07-31 甲方裁决：endsAt 对线下到场面试 optional——平台恒返回 0，按
+	// 协议规格 §4.5 必须省略而不得由 startsAt 合成；有值时仍要求晚于 startsAt。
 	if in.Kind != "card" || in.CardType != "interviewInvite" ||
-		!hasStarts || !hasEnds || !hasMethod ||
-		*in.InterviewStartsAtMs <= 0 || *in.InterviewEndsAtMs <= *in.InterviewStartsAtMs ||
-		*in.InterviewMethod != "wechatVideo" {
+		!hasStarts || !hasMethod ||
+		*in.InterviewStartsAtMs <= 0 ||
+		(hasEnds && *in.InterviewEndsAtMs <= *in.InterviewStartsAtMs) ||
+		(*in.InterviewMethod != "wechatVideo" && *in.InterviewMethod != "onsite") {
 		return ErrInvalidInterview
 	}
 	return nil
