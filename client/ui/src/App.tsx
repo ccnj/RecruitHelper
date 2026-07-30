@@ -2,7 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
-  AccountView, AuditView, BackendJobView, ConversationView, FrameEvent, HandHealth, Health,
+  AccountView, AuditView, BackendJobView, ConversationView, DetailedError, FrameEvent, HandHealth, Health,
   JobConfigSourceView, JobDraftReport, JobPublishPrecheckView, LedgerRow, M5AIContextView,
   M5ProviderConfigView, MessageView, MutationResult, PublishParamsState, PublishVerdict,
   SendIntentView, Suspect, TimeValue,
@@ -636,6 +636,48 @@ const PUBLISH_VERDICT_LABEL: Record<PublishVerdict, string> = {
   blocked: '参数有问题',
 }
 
+// 试填失败现场。按固定顺序摊平成人读的行，未知键一律兜底显示，
+// 避免手侧以后加了字段界面这边静默丢掉。
+const DIAG_LABELS: Array<[string, string]> = [
+  ['step', '卡在'],
+  ['reason', '原因'],
+  ['platformHints', '平台提示'],
+  ['descriptionLength', '描述已填字数'],
+  ['keywordAt', '关键词进度'],
+  ['keyword', '当前关键词'],
+  ['keywordRoute', '走的路径'],
+  ['autoJobClass', '平台判定类别'],
+  ['matched', '已命中'],
+  ['custom', '已自定义'],
+  ['dropped', '已丢弃'],
+  ['sectionTitles', '当时分组'],
+  ['availableSample', '当时词库'],
+  ['customInputVisible', '自定义输入框可见'],
+  ['handMessage', '手侧报错'],
+]
+
+function formatDiagValue(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (Array.isArray(value)) return value.length === 0 ? '(空)' : value.join('、')
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  return String(value)
+}
+
+function DraftDiagnosticsBlock({ diagnostics }: { diagnostics: Record<string, unknown> }) {
+  const known = new Set(DIAG_LABELS.map(([key]) => key))
+  const extras = Object.keys(diagnostics).filter((key) => !known.has(key))
+  return (
+    <div className="publish-draft-report publish-draft-diag">
+      {DIAG_LABELS.filter(([key]) => diagnostics[key] !== undefined).map(([key, label]) => (
+        <p key={key}><span>{label}</span><strong>{formatDiagValue(diagnostics[key])}</strong></p>
+      ))}
+      {extras.map((key) => (
+        <p key={key}><span>{key}</span><strong>{formatDiagValue(diagnostics[key])}</strong></p>
+      ))}
+    </div>
+  )
+}
+
 // 试填回读报告。它证明的是"能不能填进去"，不是"发布了"——手侧原语不允许
 // 点击提交控件，且回读后必须离开表单。
 function DraftReportBlock({ report }: { report: JobDraftReport }) {
@@ -677,16 +719,23 @@ function PublishPrecheckPanel({
   const [drafts, setDrafts] = useState<Record<string, JobDraftReport>>({})
   const [draftBusy, setDraftBusy] = useState('')
   const [draftError, setDraftError] = useState<Record<string, string>>({})
+  const [draftDiag, setDraftDiag] = useState<Record<string, Record<string, unknown>>>({})
 
   const tryDraft = async (jobId: string) => {
     if (!account) return
     setDraftBusy(jobId)
     setDraftError((prev) => ({ ...prev, [jobId]: '' }))
+    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
     try {
       const result = await api.jobPublishPrepareDraft(account.platform, account.accountRef, jobId)
       setDrafts((prev) => ({ ...prev, [jobId]: result.report }))
     } catch (reason) {
       setDraftError((prev) => ({ ...prev, [jobId]: errorText(reason) }))
+      // 失败现场快照：卡在哪一步、当时的分组与词库长什么样。没有它就只能靠
+      // 反复重跑去猜，而分组和词库每次都随职位类别变化、事后无从复原。
+      if (reason instanceof DetailedError && reason.diagnostics) {
+        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
+      }
     } finally {
       setDraftBusy('')
     }
@@ -724,6 +773,9 @@ function PublishPrecheckPanel({
             </div>
             {draftError[row.jobId] && (
               <p className="publish-precheck-issue">{draftError[row.jobId]}</p>
+            )}
+            {draftDiag[row.jobId] && Object.keys(draftDiag[row.jobId]).length > 0 && (
+              <DraftDiagnosticsBlock diagnostics={draftDiag[row.jobId]} />
             )}
             {drafts[row.jobId] && <DraftReportBlock report={drafts[row.jobId]} />}
             {row.issues?.map((issue, index) => (

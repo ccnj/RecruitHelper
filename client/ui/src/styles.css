@@ -965,3 +965,4 @@ h1, h2, h3, p { margin-top: 0; }
     animation-iteration-count: 1 !important;
   }
 }
+.publish-draft-diag { border-left-color: var(--alarm); }

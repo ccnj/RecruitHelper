@@ -67,6 +67,41 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
   return readResponse<T>(response, path)
 }
 
+/** 携带失败现场快照的错误。诊断结构由手侧自由决定，这里只原样传给界面显示。 */
+export class DetailedError extends Error {
+  constructor(message: string, readonly diagnostics?: Record<string, unknown>) {
+    super(message)
+    this.name = 'DetailedError'
+  }
+}
+
+// 失败时把服务端附带的 diagnostics 一并抛出，供界面展示失败现场。
+async function postWithDetail<T>(path: string, body?: unknown): Promise<T> {
+  const response = await fetch(ADMIN_BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authorizationHeaders() },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await response.text()
+  let parsed: unknown
+  if (text) {
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw new Error(`${path}: 脑返回了无法识别的数据`)
+    }
+  }
+  if (!response.ok) {
+    const record = (parsed ?? {}) as Record<string, unknown>
+    const detail = typeof record.error === 'string' ? record.error : `HTTP ${response.status}`
+    const diagnostics = record.diagnostics && typeof record.diagnostics === 'object'
+      ? record.diagnostics as Record<string, unknown>
+      : undefined
+    throw new DetailedError(detail, diagnostics)
+  }
+  return (parsed ?? {}) as T
+}
+
 // 普通产品写入口同样被限制在 /app/*；组件不能借此调用诊断管理面。
 export async function appPost<T>(path: string, body?: unknown): Promise<T> {
   if (!path.startsWith('/app/')) {
@@ -625,7 +660,7 @@ export const api = {
   jobPublishPrecheck: (platform: string, accountRef: string) =>
     post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
   jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string) =>
-    post<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
+    postWithDetail<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
       platform, accountRef, jobId,
     }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),

@@ -16,6 +16,10 @@ import {
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
   if (!(error instanceof ZhilianPlatformError)) throw error
+  // 试填链路长且每步都依赖平台的异步行为,失败现场快照直接进 error.data
+  // (契约里是 raw 对象)。它只给人读,不参与任何业务判定。
+  const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
+  if (error.reason && data.reason === undefined) data.reason = error.reason
   return {
     status: 'failed',
     error: {
@@ -24,7 +28,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
       retryable: error.retryable,
       // intrusive 原语没有资格用 effectful 的 possible/confirmed 语义。
       sideEffect: 'none',
-      ...(error.reason ? { data: { reason: error.reason } } : {}),
+      ...(Object.keys(data).length > 0 ? { data } : {}),
     },
   }
 }

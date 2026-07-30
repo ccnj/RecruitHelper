@@ -251,7 +251,13 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	report, err := parsePrepareDraftProof(logicalRef, logical, account, key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填证词无效：" + err.Error()})
+		// 试填失败时把手侧的失败现场快照一并透出：链路长、每步都依赖平台异步
+		// 行为，只报一句"叶子不符合要求"等于让人靠反复重跑去猜卡在哪。
+		response := map[string]any{"error": "发布试填未成功：" + err.Error()}
+		if diagnostics := prepareDraftFailureDiagnostics(logical); diagnostics != nil {
+			response["diagnostics"] = diagnostics
+		}
+		writeJSON(w, http.StatusConflict, response)
 		return
 	}
 	// 手侧契约要求试填后必须离开表单。没有这个确认就等于把一个填满的发布表单
@@ -261,6 +267,35 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, jobPublishDraftView{JobID: target.JobID, Report: report})
+}
+
+// prepareDraftFailureDiagnostics 取手侧 failed 结果里的失败现场快照。它是
+// 手写进 error.data 的自由结构，只透给人看，不参与任何判定；读不出来就当没有。
+func prepareDraftFailureDiagnostics(logical *store.LogicalDispatchState) any {
+	if logical == nil || logical.Leaf.ResultBody == "" {
+		return nil
+	}
+	var result struct {
+		Status string `json:"status"`
+		Error  struct {
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(logical.Leaf.ResultBody), &result); err != nil {
+		return nil
+	}
+	if result.Status != "failed" || len(result.Error.Data) == 0 {
+		return nil
+	}
+	var data map[string]any
+	if err := json.Unmarshal(result.Error.Data, &data); err != nil {
+		return nil
+	}
+	if result.Error.Message != "" {
+		data["handMessage"] = result.Error.Message
+	}
+	return data
 }
 
 func parsePrepareDraftProof(
