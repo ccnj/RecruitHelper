@@ -1,6 +1,12 @@
 import * as esbuild from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+
+// __APP_VERSION__ 由 vite.config.ts 在构建期注入；测试自己走 esbuild，
+// 必须同样注入，否则打包产物一引用它就 ReferenceError。
+const { version } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+)
 
 mkdirSync('test/dist', { recursive: true })
 await esbuild.build({
@@ -9,6 +15,7 @@ await esbuild.build({
   format: 'esm',
   platform: 'neutral',
   outfile: 'test/dist/product-data.mjs',
+  define: { __APP_VERSION__: JSON.stringify(version) },
   logLevel: 'error',
 })
 const moduleUrl = pathToFileURL(process.cwd() + '/test/dist/product-data.mjs').href
@@ -223,7 +230,7 @@ check(
     adaptProductSnapshot(generationInProgress, now).confirmationBadge === 0,
   '整批未就绪时不提前开放候选确认或侧边栏徽章',
 )
-check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入待面试列表')
+check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入已邀面列表')
 check(product.candidates.interviewed[0].interviewResult === null, '不从邀面卡状态猜测正式面试结果')
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')

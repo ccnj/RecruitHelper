@@ -121,11 +121,11 @@ assert.ok(buttons(sourcingPending).find((button) => button.text === '结束本�
 const endPending = render({ canEnd: true, canAddBatch: true, pendingAction: 'end' })
 assert.match(endPending, /正在结束当前候选人…/u)
 const endPendingButtons = buttons(endPending).filter((button) =>
-  button.text === '暂停' || button.text === '再采一批（30 人）' || button.text === '正在结束…'
+  button.text === '暂停' || button.text === '再采一批（150 人）' || button.text === '正在结束…'
 )
 assert.deepEqual(
   endPendingButtons.map((button) => button.text),
-  ['暂停', '再采一批（30 人）', '正在结束…'],
+  ['暂停', '再采一批（150 人）', '正在结束…'],
   '待结束时三个运行控制都应保持可见',
 )
 assert.ok(
