@@ -5526,9 +5526,20 @@ function mainSnapshotZhilianKeywords(): MainKeywordSnapshot {
   const selected = items.filter((item) => item.className.includes('--selected'))
     .map((item) => (item.textContent ?? '').trim()).filter(Boolean)
   const available = items.map((item) => (item.textContent ?? '').trim()).filter(Boolean)
-  const sectionTitles = Array.from(
-    dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__list-item'),
-  ).map((group) => (group as HTMLElement).innerText.split('\n')[0].trim()).filter(Boolean)
+  // 兜底组「您还有哪些招聘要求？」的 DOM 结构与其他分组不同,不在 __list-item
+  // 里。按 (已选/上限) 计数文本抓才能覆盖全部分组——只认 __list-item 会漏掉它,
+  // 让诊断看起来像"这个职位没有兜底组",而实际上词就是加进它里面的。
+  const sectionTitles: string[] = []
+  for (const node of Array.from(dialog.querySelectorAll('div'))) {
+    // 分组标题的形态固定是「……？ (已选/上限)」。按它匹配 innerText 的首行,
+    // 既能覆盖结构与众不同的兜底组「您还有哪些招聘要求？」,又不会把裸计数
+    // 节点当成分组。嵌套 div 的首行相同,靠去重收敛。
+    const firstLine = ((node as HTMLElement).innerText ?? '')
+      .split('\n')[0].trim().replace(/\s+/g, ' ')
+    if (!/？\s*\(\d+\/\d+\)$/.test(firstLine) || firstLine.length > 60) continue
+    if (!sectionTitles.includes(firstLine)) sectionTitles.push(firstLine)
+    if (sectionTitles.length >= 24) break
+  }
   const confirm = Array.from(dialog.querySelectorAll('.s-button')).map((button) =>
     (button as HTMLElement).innerText.trim()).find((text) => /^确定/.test(text)) ?? ''
   return { status: 'ok', selected, sectionTitles, available, confirmLabel: confirm }
