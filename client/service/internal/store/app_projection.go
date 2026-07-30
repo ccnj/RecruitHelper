@@ -155,17 +155,21 @@ type AppCandidateDetailQuery struct {
 }
 
 type AppCandidateListItem struct {
-	ProfileID           string  `json:"profileId"`
-	DisplayName         string  `json:"displayName"`
-	JobName             string  `json:"jobName,omitempty"`
-	Status              string  `json:"status"`
-	EndReason           string  `json:"endReason,omitempty"`
-	LastMessagePreview  string  `json:"lastMessagePreview,omitempty"`
-	LastActivityAtMs    *int64  `json:"lastActivityAtMs,omitempty"`
-	UnreadCount         int     `json:"unreadCount"`
-	ManualRequired      bool    `json:"manualRequired"`
-	ManualReason        string  `json:"manualReason,omitempty"`
-	Wechat              *string `json:"wechat,omitempty"`
+	ProfileID          string  `json:"profileId"`
+	DisplayName        string  `json:"displayName"`
+	JobName            string  `json:"jobName,omitempty"`
+	Status             string  `json:"status"`
+	EndReason          string  `json:"endReason,omitempty"`
+	LastMessagePreview string  `json:"lastMessagePreview,omitempty"`
+	LastActivityAtMs   *int64  `json:"lastActivityAtMs,omitempty"`
+	UnreadCount        int     `json:"unreadCount"`
+	ManualRequired     bool    `json:"manualRequired"`
+	ManualReason       string  `json:"manualReason,omitempty"`
+	Wechat             *string `json:"wechat,omitempty"`
+	// WechatObservedAtMs 是该微信资产的收编观测时刻。资产行一直有它(上面那个
+	// 子查询就是按它排序取最新号的),此前没有投影出去,产品端只能常年显示
+	// "时间未知"。
+	WechatObservedAtMs  *int64  `json:"wechatObservedAtMs,omitempty"`
 	InterviewStartsAtMs *int64  `json:"interviewStartsAtMs,omitempty"`
 	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
 	InterviewMethod     *string `json:"interviewMethod,omitempty"`
@@ -1002,6 +1006,7 @@ type appCandidateRow struct {
 	AutomationStatus    *ProfileCommunicationAutomationStatus
 	ManualReason        *string
 	Wechat              *string
+	WechatObservedAtMs  *int64
 	InterviewStartsAtMs *int64
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
@@ -1024,6 +1029,11 @@ aggregate.manual_reason,
  AND asset.platform = profile.platform AND asset.account_ref = profile.account_ref
  AND asset.kind = 'wechat'
  ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat,
+(SELECT asset.observed_at_ms FROM contact_assets AS asset
+ WHERE asset.profile_id = profile.profile_id
+ AND asset.platform = profile.platform AND asset.account_ref = profile.account_ref
+ AND asset.kind = 'wechat'
+ ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat_observed_at_ms,
 (SELECT message.interview_starts_at_ms FROM messages AS message
  WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
  AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
@@ -1059,8 +1069,9 @@ func (row appCandidateRow) projection() AppCandidateListItem {
 		LastMessagePreview: valueOrEmpty(row.LastMessagePreview),
 		LastActivityAtMs:   row.LastActivityMs, UnreadCount: unread,
 		ManualRequired: manual, ManualReason: valueOrEmpty(row.ManualReason),
-		Wechat: row.Wechat, InterviewStartsAtMs: row.InterviewStartsAtMs,
-		InterviewEndsAtMs: row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
+		Wechat: row.Wechat, WechatObservedAtMs: row.WechatObservedAtMs,
+		InterviewStartsAtMs: row.InterviewStartsAtMs,
+		InterviewEndsAtMs:   row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
 		InterviewCardState: valueOrEmpty(row.InterviewCardState),
 	}
 }

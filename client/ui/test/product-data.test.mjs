@@ -168,6 +168,7 @@ const snapshot = {
     wechat: candidateResponse('wechat', [rawCandidate({
       profileId: 'profile-wechat',
       wechat: 'candidate_wechat',
+      wechatObservedAtMs: todayAt(9, 5),
     })]),
   },
 }
@@ -285,6 +286,11 @@ check(
   '今日邀面卡人数按已邀面表述，不与已约面混名',
 )
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
+// 收编时刻资产行一直有，此前没投影出去，产品端只能常年显示"时间未知"。
+check(
+  product.candidates.wechat[0].wechatExchangedAt === '今天 09:05',
+  '换微信时间取资产的收编观测时刻',
+)
 // 单页读取有上限,items 只是前若干位;人数必须来自脑侧 total,否则超过
 // 上限后计数会永远停在上限值,与首页累计账面互相矛盾。
 const truncatedList = structuredClone(snapshot)

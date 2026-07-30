@@ -151,6 +151,7 @@ export interface AppCandidateListItemRaw {
   manualRequired: boolean
   manualReason?: string
   wechat?: string | null
+  wechatObservedAtMs?: number | null
   interviewStartsAtMs?: number | null
   interviewEndsAtMs?: number | null
   interviewMethod?: string | null
@@ -688,7 +689,7 @@ function adaptCandidateListItem(
     interviewAt: formatEpochRelative(raw.interviewStartsAtMs, now),
     interviewMethod: clean(raw.interviewMethod) || null,
     wechatAccount: clean(raw.wechat) || null,
-    wechatExchangedAt: null,
+    wechatExchangedAt: formatEpochRelative(raw.wechatObservedAtMs, now),
     stillInAutoCommunication: raw.status
       ? !raw.manualRequired && raw.status !== 'ended'
       : null,

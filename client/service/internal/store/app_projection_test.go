@@ -250,6 +250,12 @@ func TestAppCandidateListAndDetailUseProfileProjection(t *testing.T) {
 		!list.Items[0].ManualRequired {
 		t.Fatalf("unexpected list projection: %+v", list)
 	}
+	// 收编观测时刻资产行一直有(取最新号的子查询就按它排序),必须投影出去,
+	// 否则产品端"换微信时间"只能常年显示"时间未知"。
+	if list.Items[0].WechatObservedAtMs == nil ||
+		*list.Items[0].WechatObservedAtMs != now.UnixMilli() {
+		t.Fatalf("微信资产收编时刻未投影: %+v", list.Items[0])
+	}
 	detail, err := s.AppCandidateDetail(AppCandidateDetailQuery{
 		Platform: platform, AccountRef: accountRef, ProfileID: profileID,
 	})
