@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	// DefaultInterval:版本更新是低频事件,查勤了只是白跑。
-	DefaultInterval = 6 * time.Hour
-	// InitialDelay:启动那阵子壳、脑、插件都在忙,不必挤在一起。
-	InitialDelay = 2 * time.Minute
+	// DefaultInterval:清单只有几百字节,查得勤一点几乎不花什么,换来的是发布后
+	// 客户很快就能拿到。真正的负载是那 96MB 的包,而它下好校验过就不再重下。
+	DefaultInterval = 15 * time.Minute
+	// InitialDelay:启动那阵子壳、脑、插件都在忙,让一让。
+	InitialDelay = 30 * time.Second
 	// feedTimeout 只取一个几百字节的 JSON。
 	feedTimeout = 30 * time.Second
 	// downloadTimeout 覆盖约 95MB 的整包下载,给慢网络留足余量。
@@ -58,9 +60,10 @@ type Checker struct {
 	HTTP           *http.Client
 	Interval       time.Duration
 
-	mu       sync.Mutex
-	status   Status
-	failures map[string]int
+	mu          sync.Mutex
+	status      Status
+	failures    map[string]int
+	lastFailure string // 上次报告过的失败原因，只为日志去重
 }
 
 // New 返回一个可用的 Checker;配置不全时返回 nil,调用方据此不启用自更新。
@@ -96,7 +99,23 @@ func (c *Checker) Status() Status {
 	return c.status
 }
 
-// Run 周期检查,直到 ctx 取消。首次检查延后 InitialDelay。
+// jitter 把一个固定间隔散成 0.75~1.25 倍,期望值仍是原值。
+//
+// 固定间隔会把本来分散的客户端**同步化**:这是个上班时间用的工具,客户多半在同一
+// 个早晨时段开机,固定首检延迟就意味着他们在同一分钟一起来取 96MB 的包。更糟的是
+// 失败之后 —— 所有人同一刻超时、又在同一刻重试,同步性反而被强化。抖动只改时刻、
+// 不改期望频率,代价接近于零。
+//
+// 它治的是"撞在一起",治不了带宽本身:出口就那么宽,客户数上去之后该换 CDN 还是
+// 得换。
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return time.Duration(float64(d) * (0.75 + rand.Float64()*0.5))
+}
+
+// Run 周期检查,直到 ctx 取消。首次检查延后 InitialDelay(带抖动)。
 func (c *Checker) Run(ctx context.Context) {
 	if c == nil {
 		return
@@ -104,19 +123,44 @@ func (c *Checker) Run(ctx context.Context) {
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(InitialDelay):
+	case <-time.After(jitter(InitialDelay)):
 	}
 	for {
-		if err := c.CheckOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			// 网络不通、404、超时都走这里。更新源不可达不是故障,下一轮再说。
-			slog.Info("检查客户端更新未成功，稍后重试", "err", err)
+		err := c.CheckOnce(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			// 网络不通、404、超时都走这里。更新源不可达不是故障,下一轮再说 ——
+			// 但只在"由通转不通"时说一次:15 分钟一轮,一台断网的机器不该在日志里
+			// 每天刷出上百条同样的话。
+			if c.noteFailure(err) {
+				slog.Info("检查客户端更新未成功，稍后重试", "err", err)
+			}
+		} else if err == nil {
+			c.noteSuccess()
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(c.Interval):
+		case <-time.After(jitter(c.Interval)):
 		}
 	}
+}
+
+// noteFailure 报告这次失败是否值得说出来:同一类失败连着发生时只说第一次。
+func (c *Checker) noteFailure(err error) bool {
+	message := err.Error()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastFailure == message {
+		return false
+	}
+	c.lastFailure = message
+	return true
+}
+
+func (c *Checker) noteSuccess() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastFailure = ""
 }
 
 // CheckOnce 走一遍:取清单 → 比版本 → 本地已备好就认账 → 否则下载校验。
