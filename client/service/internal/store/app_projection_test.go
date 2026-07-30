@@ -577,5 +577,132 @@ func TestAppTodayMetricsSkipUntimedMessagesInsteadOfGoingBlind(t *testing.T) {
 	}
 }
 
+// 已约面/已面试是读侧按时间分流的展示分类,不是业务状态:两者同源于
+// main_status = interviewed,判据是最新邀面卡的结束时间(缺失退到开始时间)
+// 有没有过去。时间读不出来的归"已面试"(2026-07-30 甲方裁决)。
+// 已邀面(invited)没有独立页面,并入沟通中,不得从产品端消失。
+func TestAppCandidateViewsSplitInterviewedByDeadline(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.Local)
+	platform, accountRef := "zhilian", "deadline-account"
+	createM4Account(t, s, platform, accountRef)
+
+	seed := func(profileID string, status CandidateProfileStatus) {
+		t.Helper()
+		userRef, conversationRef := "U-"+profileID, "C-"+profileID
+		displayName := "候选人" + profileID
+		if err := s.db.Create(&Candidate{
+			Platform: platform, PlatformUserRef: userRef, DisplayName: &displayName,
+			FirstSeenAt: now.Add(-48 * time.Hour), LastSeenAt: now,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Create(&CandidateProfile{
+			ProfileID: profileID, Platform: platform, AccountRef: accountRef,
+			PlatformUserRef: userRef, PositionRef: "position-" + profileID,
+			MainStatus: status, ConversationRef: &conversationRef,
+			ResumeCaptureState: ResumeCaptureUnattempted,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	card := func(profileID string, seq int64, starts time.Time, ends *time.Time) {
+		t.Helper()
+		startsMs := starts.UnixMilli()
+		var endsMs *int64
+		if ends != nil {
+			value := ends.UnixMilli()
+			endsMs = &value
+		}
+		if err := s.db.Create(&Message{
+			Platform: platform, AccountRef: accountRef, ConversationRef: "C-" + profileID,
+			Seq: seq, Direction: "out", Kind: "card", CardType: "interviewInvite",
+			CardState: "accepted", ContentHash: strings.Repeat(profileID[len(profileID)-1:], 64),
+			InterviewStartsAtMs: &startsMs, InterviewEndsAtMs: endsMs, Origin: "self",
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A：面试还没开始 → 已约面。
+	seed("P-future", CandidateProfileInterviewed)
+	card("P-future", 1, now.Add(3*time.Hour), nil)
+	// B：已经开始、但结束时间还没到 → 仍算已约面，进行中的面试不提前归过去。
+	seed("P-running", CandidateProfileInterviewed)
+	card("P-running", 1, now.Add(-30*time.Minute), appPtrTime(now.Add(30*time.Minute)))
+	// C：结束时间已过 → 已面试。
+	seed("P-done", CandidateProfileInterviewed)
+	card("P-done", 1, now.Add(-3*time.Hour), appPtrTime(now.Add(-2*time.Hour)))
+	// D：没有结束时间、开始时间已过 → 已面试。
+	seed("P-started", CandidateProfileInterviewed)
+	card("P-started", 1, now.Add(-time.Hour), nil)
+	// E：已约面但读不到任何邀面卡时间 → 按裁决归已面试。
+	seed("P-blind", CandidateProfileInterviewed)
+	// F：已邀面（发了卡、候选人还没接受）→ 并入沟通中，不落在任何面试视图。
+	seed("P-invited", CandidateProfileInvited)
+	card("P-invited", 1, now.Add(5*time.Hour), nil)
+
+	collect := func(view AppCandidateView) map[string]struct{} {
+		t.Helper()
+		list, err := s.AppCandidates(AppCandidateListQuery{
+			Platform: platform, AccountRef: accountRef, View: view, Now: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make(map[string]struct{}, len(list.Items))
+		for _, item := range list.Items {
+			got[item.ProfileID] = struct{}{}
+		}
+		if int64(len(got)) != list.Total {
+			t.Fatalf("%s 视图 total %d 与条数 %d 不一致", view, list.Total, len(got))
+		}
+		return got
+	}
+	for view, want := range map[AppCandidateView][]string{
+		AppCandidateViewInterviewed:      {"P-future", "P-running"},
+		AppCandidateViewInterviewElapsed: {"P-done", "P-started", "P-blind"},
+		AppCandidateViewCommunicating:    {"P-invited"},
+	} {
+		got := collect(view)
+		if len(got) != len(want) {
+			t.Fatalf("%s 视图应有 %v，实得 %v", view, want, got)
+		}
+		for _, profileID := range want {
+			if _, ok := got[profileID]; !ok {
+				t.Fatalf("%s 视图缺少 %s，实得 %v", view, profileID, got)
+			}
+		}
+	}
+
+	// 时间往后走，已约面的人自动转入已面试，无需任何写入或状态跃迁。
+	later := now.Add(4 * time.Hour)
+	if _, ok := collect(AppCandidateViewInterviewed)["P-future"]; !ok {
+		t.Fatal("前置断言失效")
+	}
+	list, err := s.AppCandidates(AppCandidateListQuery{
+		Platform: platform, AccountRef: accountRef,
+		View: AppCandidateViewInterviewElapsed, Now: later,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := false
+	for _, item := range list.Items {
+		if item.ProfileID == "P-future" {
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatalf("面试时间过去后应自动归入已面试: %+v", list.Items)
+	}
+
+	if _, err := s.AppCandidates(AppCandidateListQuery{
+		Platform: platform, AccountRef: accountRef, View: "pending", Now: now,
+	}); !errors.Is(err, ErrAppProjectionInvalid) {
+		t.Fatal("已下线的 pending 视图不得继续受理")
+	}
+}
+
 func appPtrTime(value time.Time) *time.Time { return &value }
 func appPtrString(value string) *string     { return &value }

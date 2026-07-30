@@ -25,8 +25,8 @@ export interface ProductAppProps {
 
 const candidatePages = new Set<ProductPage>([
   'communicating',
-  'pendingInterview',
   'interviewed',
+  'interviewElapsed',
   'wechat',
 ])
 

@@ -40,7 +40,6 @@ function candidate(index) {
     manualReason: null,
     interviewAt: null,
     interviewMethod: null,
-    interviewResult: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: null,

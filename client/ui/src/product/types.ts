@@ -2,8 +2,11 @@ export type ProductPage =
   | 'home'
   | 'confirmation'
   | 'communicating'
-  | 'pendingInterview'
+  // interviewed = 已约面(面试时间界未过)，interviewElapsed = 已面试(时间界
+  // 已过)。两者同源于脑侧 main_status = interviewed，只按时间分流；已邀面
+  // (invited)没有独立页面，并入 communicating。
   | 'interviewed'
+  | 'interviewElapsed'
   | 'wechat'
   | 'settings'
 
@@ -163,7 +166,6 @@ export interface CandidateViewItem {
   manualReason: string | null
   interviewAt: string | null
   interviewMethod: string | null
-  interviewResult: string | null
   wechatAccount: string | null
   wechatExchangedAt: string | null
   stillInAutoCommunication: boolean | null

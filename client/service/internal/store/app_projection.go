@@ -23,9 +23,12 @@ type AppCandidateView string
 
 const (
 	AppCandidateViewCommunicating AppCandidateView = "communicating"
-	AppCandidateViewPending       AppCandidateView = "pending"
-	AppCandidateViewInterviewed   AppCandidateView = "interviewed"
-	AppCandidateViewWechat        AppCandidateView = "wechat"
+	// AppCandidateViewInterviewed 是已约面且面试时间界未过;
+	// AppCandidateViewInterviewElapsed 是已约面且时间界已过。两者同源于
+	// main_status = interviewed,只按时间分流,不对应任何新业务状态。
+	AppCandidateViewInterviewed      AppCandidateView = "interviewed"
+	AppCandidateViewInterviewElapsed AppCandidateView = "interviewElapsed"
+	AppCandidateViewWechat           AppCandidateView = "wechat"
 )
 
 type AppMetric struct {
@@ -136,6 +139,9 @@ type AppCandidateListQuery struct {
 	Search     string
 	Limit      int
 	Offset     int
+	// Now 是已约面/已面试分流的时间基准,由调用方(产品 API)给出脑侧本机
+	// 时间;零值回落 time.Now()。前端不按渲染进程时钟自行判断。
+	Now time.Time
 }
 
 type AppCandidateDetailQuery struct {
@@ -754,8 +760,8 @@ func valueOrEmpty(value *string) string {
 
 func validAppCandidateView(view AppCandidateView) bool {
 	switch view {
-	case AppCandidateViewCommunicating, AppCandidateViewPending,
-		AppCandidateViewInterviewed, AppCandidateViewWechat:
+	case AppCandidateViewCommunicating, AppCandidateViewInterviewed,
+		AppCandidateViewInterviewElapsed, AppCandidateViewWechat:
 		return true
 	default:
 		return false
@@ -936,6 +942,9 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 	if query.Limit == 0 {
 		query.Limit = 50
 	}
+	if query.Now.IsZero() {
+		query.Now = time.Now()
+	}
 	var out AppCandidateListProjection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		base, err := appCandidateBaseQuery(
@@ -944,6 +953,7 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 			query.AccountRef,
 			query.View,
 			query.Search,
+			query.Now,
 		)
 		if err != nil {
 			return err
@@ -1057,11 +1067,26 @@ func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {
 	return string(*value)
 }
 
+// appLatestInterviewDeadlineMs 取该档案最新一张未撤回邀面卡的时间界:结束时间
+// 优先、缺失则退到开始时间(2026-07-30 甲方裁决)。用结束时间是为了让进行中的
+// 面试不被提前归为已过去。没有卡、卡的三列全空或档案没有 conversationRef 时
+// 整个表达式为 NULL,按同一裁决归入"已面试"。
+//
+// 取最新卡与 appCandidateSelect、appTodayInterviewsTx 同口径:候选人改期会重发
+// 新卡,只有最新那张才代表当前约定。
+const appLatestInterviewDeadlineMs = `(SELECT COALESCE(deadline.interview_ends_at_ms, deadline.interview_starts_at_ms)
+ FROM messages AS deadline
+ WHERE deadline.platform = profile.platform AND deadline.account_ref = profile.account_ref
+ AND deadline.conversation_ref = profile.conversation_ref AND deadline.direction = 'out'
+ AND deadline.kind = 'card' AND deadline.card_type = 'interviewInvite'
+ AND deadline.retracted_at IS NULL ORDER BY deadline.seq DESC LIMIT 1)`
+
 func appCandidateBaseQuery(
 	tx *gorm.DB,
 	platform, accountRef string,
 	view AppCandidateView,
 	search string,
+	now time.Time,
 ) (*gorm.DB, error) {
 	base := tx.Table("candidate_profiles AS profile").
 		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
@@ -1073,14 +1098,26 @@ func appCandidateBaseQuery(
 		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef)
 	switch view {
 	case AppCandidateViewCommunicating:
+		// 已邀面(invited)并入沟通中:规格 §51 把它与已招呼、沟通中同列为推进
+		// 态、同在沉默轨上,跟催时钟仍在跑。它没有独立页面,但不能因此从产品
+		// 端消失——发了邀面卡、候选人迟迟不确认的人正是要盯的一批。
 		base = base.Where("profile.main_status IN ?",
 			[]CandidateProfileStatus{
-				CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileEnded,
+				CandidateProfileGreeted, CandidateProfileCommunicating,
+				CandidateProfileInvited, CandidateProfileEnded,
 			})
-	case AppCandidateViewPending:
-		base = base.Where("profile.main_status = ?", CandidateProfileInvited)
 	case AppCandidateViewInterviewed:
-		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed)
+		// 已约面且面试时间界尚未过去。时间界读不出来的不留在这里,与
+		// interviewElapsed 互补,两个视图不重不漏。
+		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed).
+			Where(appLatestInterviewDeadlineMs+" >= ?", now.UnixMilli())
+	case AppCandidateViewInterviewElapsed:
+		// "已面试"是读侧派生的展示分类,不是业务事实:它只说明约定的面试时间
+		// 已经过去,不代表面试确实发生过(候选人可能没到场)。系统没有面试
+		// 完成写入口,也不打算按这个分类推进任何业务状态。
+		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed).
+			Where("("+appLatestInterviewDeadlineMs+" IS NULL OR "+
+				appLatestInterviewDeadlineMs+" < ?)", now.UnixMilli())
 	case AppCandidateViewWechat:
 		base = base.Where("EXISTS (SELECT 1 FROM contact_assets AS app_asset "+
 			"WHERE app_asset.profile_id = profile.profile_id AND app_asset.kind = ?)", contactAssetKindWechat)

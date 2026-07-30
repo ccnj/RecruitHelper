@@ -13,8 +13,8 @@ import type { CandidateView, CandidateViewItem, ProductData } from './types'
 
 const candidateViews: CandidateView[] = [
   'communicating',
-  'pendingInterview',
   'interviewed',
+  'interviewElapsed',
   'wechat',
 ]
 

@@ -142,9 +142,10 @@ const snapshot = {
     },
   },
   candidates: {
-    communicating: candidateResponse('communicating', [rawCandidate()]),
-    pendingInterview: candidateResponse('pending', [rawCandidate({
-      profileId: 'profile-pending',
+    // 已邀面(invited)并入沟通中:它是推进态、跟催时钟仍在跑,不能因为没有
+    // 独立页面就从产品端消失。
+    communicating: candidateResponse('communicating', [rawCandidate(), rawCandidate({
+      profileId: 'profile-invited',
       status: 'invited',
       interviewStartsAtMs: todayAt(15, 0),
       interviewMethod: '微信视频',
@@ -155,6 +156,13 @@ const snapshot = {
       status: 'interviewed',
       interviewStartsAtMs: todayAt(10, 0),
       interviewCardState: 'rejected',
+    })]),
+    interviewElapsed: candidateResponse('interviewElapsed', [rawCandidate({
+      profileId: 'profile-elapsed',
+      status: 'interviewed',
+      interviewStartsAtMs: todayAt(8, 0),
+      interviewEndsAtMs: todayAt(9, 0),
+      interviewCardState: 'accepted',
     })]),
     wechat: candidateResponse('wechat', [rawCandidate({
       profileId: 'profile-wechat',
@@ -230,8 +238,21 @@ check(
     adaptProductSnapshot(generationInProgress, now).confirmationBadge === 0,
   '整批未就绪时不提前开放候选确认或侧边栏徽章',
 )
-check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入已邀面列表')
-check(product.candidates.interviewed[0].interviewResult === null, '不从邀面卡状态猜测正式面试结果')
+check(
+  product.candidates.communicating.find((item) => item.profileId === 'profile-invited')
+    ?.statusLabel === '邀面已确认',
+  '已邀面候选人并入沟通中且标签可分辨',
+)
+// "已面试"只表示约定时间已过，不代表候选人到场；系统没有面试结果事实。
+check(
+  product.candidates.interviewElapsed[0].statusLabel === '已面试' &&
+    product.candidates.interviewElapsed[0].deterministicState === '约定的面试时间已过',
+  '已面试分类按时间已过表述，不冒充面试结果',
+)
+check(
+  product.candidates.interviewed[0].statusLabel === '已约面',
+  '面试时间未过的仍留在已约面',
+)
 // 命名必须与脑侧 notify/render.go 的 mainStatusLabels 一致:invited=已邀面
 // (发出邀面卡)、interviewed=已约面(候选人点了接受)。系统没有面试完成事实,
 // 任何"已面试/面试完成"措辞都会让人把已约面读成已经面完。
@@ -260,9 +281,10 @@ check(
   '候选人总数取脑侧 total，不用本页条数代替',
 )
 const brokenTotal = structuredClone(snapshot)
+const loadedCommunicating = snapshot.candidates.communicating.candidates.items.length
 brokenTotal.candidates.communicating.candidates.total = 0
 check(
-  adaptProductSnapshot(brokenTotal, now).candidateTotals.communicating === 1,
+  adaptProductSnapshot(brokenTotal, now).candidateTotals.communicating === loadedCommunicating,
   '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
 )
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
@@ -304,7 +326,11 @@ check(
     openedWaiting.overview.communication.stateLabel === '等待手动恢复',
   '开发期开窗后旧 waitingDailyWindow 状态不再误提示等待 08:00',
 )
-check(productCandidatePath('pendingInterview').includes('view=pending'), '产品页名称映射到唯一后端候选视图')
+check(
+  productCandidatePath('interviewed').includes('view=interviewed') &&
+    productCandidatePath('interviewElapsed').includes('view=interviewElapsed'),
+  '产品页名称映射到唯一后端候选视图',
+)
 
 const detail = adaptCandidateDetail({
   candidate: {

@@ -36,7 +36,6 @@ function candidate(index: number, overrides: Partial<CandidateViewItem> = {}): C
     manualReason: null,
     interviewAt: null,
     interviewMethod: null,
-    interviewResult: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: true,
@@ -70,42 +69,43 @@ const communicating = [
     statusTone: 'slate',
     lastMessage: '已发送岗位介绍，正在等待候选人回复。',
   }),
-]
-
-const pendingInterview = [
-  candidate(4, {
-    displayName: '演示候选人 D',
-    statusLabel: '已确认',
-    statusTone: 'green',
-    lastMessage: '好的，周五下午可以。',
-    interviewAt: '7 月 25 日 14:00',
-    interviewMethod: '微信视频',
-  }),
   candidate(5, {
     displayName: '演示候选人 E',
-    statusLabel: '待候选人确认',
+    statusLabel: '已邀面',
     statusTone: 'amber',
+    lastMessage: '已发出邀面卡，等候候选人确认。',
     interviewAt: '7 月 25 日 16:30',
     interviewMethod: '微信视频',
   }),
 ]
 
+// 已约面 = 面试时间界未过;已面试 = 时间界已过。两者同源于脑侧
+// main_status = interviewed，只按时间分流。
 const interviewed = [
+  candidate(4, {
+    displayName: '演示候选人 D',
+    statusLabel: '已约面',
+    statusTone: 'green',
+    lastMessage: '好的，周五下午可以。',
+    interviewAt: '7 月 25 日 14:00',
+    interviewMethod: '微信视频',
+  }),
+]
+
+const interviewElapsed = [
   candidate(6, {
     displayName: '演示候选人 F',
-    statusLabel: '待回填',
-    statusTone: 'amber',
+    statusLabel: '已面试',
+    statusTone: 'green',
     interviewAt: '7 月 24 日 15:00',
     interviewMethod: '微信视频',
-    interviewResult: null,
   }),
   candidate(7, {
     displayName: '演示候选人 G',
-    statusLabel: '已录用',
+    statusLabel: '已面试',
     statusTone: 'green',
     interviewAt: '7 月 23 日 10:30',
     interviewMethod: '微信视频',
-    interviewResult: '已录用',
   }),
 ]
 
@@ -237,14 +237,14 @@ export function createProductFixture(): ProductData {
     },
     candidates: {
       communicating,
-      pendingInterview,
       interviewed,
+      interviewElapsed,
       wechat,
     },
     candidateTotals: {
       communicating: communicating.length,
-      pendingInterview: pendingInterview.length,
       interviewed: interviewed.length,
+      interviewElapsed: interviewElapsed.length,
       wechat: wechat.length,
     },
     connections: [
@@ -357,14 +357,14 @@ export function createEmptyProductData(): ProductData {
     },
     candidates: {
       communicating: [],
-      pendingInterview: [],
       interviewed: [],
+      interviewElapsed: [],
       wechat: [],
     },
     candidateTotals: {
       communicating: 0,
-      pendingInterview: 0,
       interviewed: 0,
+      interviewElapsed: 0,
       wechat: 0,
     },
     connections: [
