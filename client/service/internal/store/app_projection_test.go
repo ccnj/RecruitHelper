@@ -402,5 +402,100 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 	}
 }
 
+// 改期后必须只认最新那张邀面卡。首页日程一度先按日期筛卡、再在当天的卡
+// 里挑最新，于是已经作废的旧时段留在今日日程里，而候选人列表按 seq DESC
+// 取最新卡，同一个人在两个页面显示两个时间；改期到明天时更是明明今天没
+// 有面试却仍在列。
+func TestAppTodayInterviewsFollowsLatestInviteCard(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.Local)
+	platform, accountRef := "zhilian", "today-interview-account"
+	createM4Account(t, s, platform, accountRef)
+
+	seed := func(userRef, profileID, conversationRef string) {
+		t.Helper()
+		displayName := "候选人" + profileID
+		if err := s.db.Create(&Candidate{
+			Platform: platform, PlatformUserRef: userRef, DisplayName: &displayName,
+			FirstSeenAt: now.Add(-48 * time.Hour), LastSeenAt: now,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+		positionTitle := "测试职位"
+		if err := s.db.Create(&CandidateProfile{
+			ProfileID: profileID, Platform: platform, AccountRef: accountRef,
+			PlatformUserRef: userRef, PositionRef: "position-" + profileID,
+			PositionTitle: &positionTitle, MainStatus: CandidateProfileInterviewed,
+			ConversationRef: &conversationRef, ResumeCaptureState: ResumeCaptureUnattempted,
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	card := func(conversationRef string, seq int64, startsAt time.Time) {
+		t.Helper()
+		starts := startsAt.UnixMilli()
+		tsApprox := now.Add(-time.Hour).UnixMilli()
+		if err := s.db.Create(&Message{
+			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef,
+			Seq: seq, Direction: "out", Kind: "card", CardType: "interviewInvite",
+			CardState:   "accepted",
+			ContentHash: strings.Repeat("a", 62) + string(rune('0'+seq)) + conversationRef[len(conversationRef)-1:],
+			InterviewStartsAtMs: &starts, TsApproxMs: &tsApprox, Origin: "self",
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 甲：约今天 10:00 后改期到今天 15:00。
+	seed("U-move", "P-move", "C-move")
+	card("C-move", 1, time.Date(2026, 7, 30, 10, 0, 0, 0, time.Local))
+	card("C-move", 2, time.Date(2026, 7, 30, 15, 0, 0, 0, time.Local))
+	// 乙：约今天 11:00 后改期到明天，今天已经不该有他。
+	seed("U-post", "P-post", "C-post")
+	card("C-post", 1, time.Date(2026, 7, 30, 11, 0, 0, 0, time.Local))
+	card("C-post", 2, time.Date(2026, 7, 31, 9, 0, 0, 0, time.Local))
+	// 丙：昨天约过，改期到今天 09:00，今天必须出现。
+	seed("U-pull", "P-pull", "C-pull")
+	card("C-pull", 1, time.Date(2026, 7, 29, 16, 0, 0, 0, time.Local))
+	card("C-pull", 2, time.Date(2026, 7, 30, 9, 0, 0, 0, time.Local))
+
+	overview, err := s.AppOverview(AppOverviewRequest{
+		Now: now, Platform: platform, AccountRef: accountRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]string, len(overview.TodayInterviews))
+	for _, item := range overview.TodayInterviews {
+		got[item.ProfileID] = time.UnixMilli(item.StartsAtMs).In(time.Local).Format("15:04")
+	}
+	want := map[string]string{"P-move": "15:00", "P-pull": "09:00"}
+	if len(got) != len(want) {
+		t.Fatalf("今日面试应只剩最新卡落在今天的候选人，实得 %v", got)
+	}
+	for profileID, clock := range want {
+		if got[profileID] != clock {
+			t.Fatalf("%s 今日面试时间应为 %s，实得 %q（全量 %v）", profileID, clock, got[profileID], got)
+		}
+	}
+
+	// 与候选人列表同口径：两处都取最新卡，不得各说各话。
+	list, err := s.AppCandidates(AppCandidateListQuery{
+		Platform: platform, AccountRef: accountRef, View: AppCandidateViewInterviewed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		if item.InterviewStartsAtMs == nil {
+			t.Fatalf("%s 列表缺少面试时间", item.ProfileID)
+		}
+		listClock := time.UnixMilli(*item.InterviewStartsAtMs).In(time.Local).Format("15:04")
+		if summaryClock, ok := got[item.ProfileID]; ok && summaryClock != listClock {
+			t.Fatalf("%s 首页日程 %s 与列表 %s 不一致", item.ProfileID, summaryClock, listClock)
+		}
+	}
+}
+
 func appPtrTime(value time.Time) *time.Time { return &value }
 func appPtrString(value string) *string     { return &value }

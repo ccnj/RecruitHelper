@@ -705,36 +705,40 @@ func appTodayInterviewsTx(
 		EndsAtMs      *int64
 		Method        *string
 		CardState     string
-		Seq           int64
 	}
+	// 每人只看最新一张邀面卡，判定"今天有没有面试"必须先取最新卡、再看它
+	// 落不落在今天，不能在今天的卡里挑最新：候选人要求改期后会重发一张新
+	// 卡，先按日期筛就会把已经作废的旧时段留在今日日程里，改期到明天时更
+	// 是明明今天没有面试却仍在列。候选人列表(appCandidateSelect)一直按
+	// seq DESC 取最新卡，这里同口径，两处不再各说各话。
 	var rows []row
 	if err := tx.Table("messages AS message").
 		Select("profile.profile_id, candidate.display_name, profile.position_title, "+
 			"message.interview_starts_at_ms AS starts_at_ms, message.interview_ends_at_ms AS ends_at_ms, "+
-			"message.interview_method AS method, message.card_state, message.seq").
+			"message.interview_method AS method, message.card_state").
 		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
 		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
 			"AND candidate.platform_user_ref = profile.platform_user_ref").
 		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
 		Where("message.direction = ? AND message.kind = ? AND message.card_type = ? "+
-			"AND message.retracted_at IS NULL AND message.interview_starts_at_ms >= ? "+
-			"AND message.interview_starts_at_ms < ?",
-			"out", "card", "interviewInvite", start.UnixMilli(), end.UnixMilli()).
-		Order("message.interview_starts_at_ms ASC, message.seq DESC").
+			"AND message.retracted_at IS NULL", "out", "card", "interviewInvite").
+		Where("message.seq = (SELECT MAX(latest.seq) FROM messages AS latest "+
+			"WHERE latest.platform = message.platform AND latest.account_ref = message.account_ref "+
+			"AND latest.conversation_ref = message.conversation_ref AND latest.direction = 'out' "+
+			"AND latest.kind = 'card' AND latest.card_type = 'interviewInvite' "+
+			"AND latest.retracted_at IS NULL)").
+		Where("message.interview_starts_at_ms >= ? AND message.interview_starts_at_ms < ?",
+			start.UnixMilli(), end.UnixMilli()).
+		Order("message.interview_starts_at_ms ASC, profile.profile_id ASC").
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{}, len(rows))
 	out := make([]AppInterviewSummary, 0, len(rows))
 	for _, row := range rows {
 		if row.StartsAtMs == nil {
 			continue
 		}
-		if _, ok := seen[row.ProfileID]; ok {
-			continue
-		}
-		seen[row.ProfileID] = struct{}{}
 		out = append(out, AppInterviewSummary{
 			ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
 			JobName: valueOrEmpty(row.PositionTitle), StartsAtMs: *row.StartsAtMs,
