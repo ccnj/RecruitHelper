@@ -966,3 +966,61 @@ h1, h2, h3, p { margin-top: 0; }
   }
 }
 .publish-draft-diag { border-left-color: var(--alarm); }
+
+/* ── SQL 控制台 ─────────────────────────────────────── */
+
+.sql-console { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.sql-input {
+  width: 100%;
+  min-height: 7.5rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--rule-hi);
+  border-radius: 4px;
+  background: var(--void);
+  color: var(--txt);
+  font-family: var(--face);
+  font-size: 0.74rem;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.sql-input:focus { outline: none; border-color: var(--beam); }
+.sql-input::placeholder { color: var(--txt-faint); }
+
+.sql-bar { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.sql-bar small { color: var(--txt-faint); font-size: 0.68rem; }
+
+.sql-ok, .sql-error {
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.71rem;
+}
+
+.sql-ok { background: rgba(61, 220, 151, 0.08); color: var(--live); }
+.sql-error {
+  background: rgba(255, 95, 86, 0.09);
+  color: var(--alarm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 结果集横向自己滚,不让宽表把整个诊断台撑出横向滚动条。 */
+.sql-table-scroll {
+  max-height: 26rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+.sql-table td {
+  max-width: 32rem;
+  padding: 0.28rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sql-table .sql-null { color: var(--txt-faint); font-style: italic; }
