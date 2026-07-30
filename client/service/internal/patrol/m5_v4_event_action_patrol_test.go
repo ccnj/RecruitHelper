@@ -31,11 +31,22 @@ func TestCommunicationV4EventActionPatrolSendsReceiptThenWechatInviteOnce(
 	actor := *fixture.actor
 	actor.manager = manager
 
+	readsBefore := h.runner.count(protocol.PrimChatReadThread)
 	manager.mu.Lock()
 	err = actor.processCommunicationV4Targets(context.Background())
 	manager.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// 2026-07-30 出口回归:派发前的定向对账只属于时刻表链首。本轮唯一一次
+	// readThread 来自卡片迁移取证前的既有重开会话;事件输入的动作链不得在
+	// 此之外新增任何读取。
+	if h.runner.count(protocol.PrimChatReadThread) != readsBefore+1 {
+		t.Fatalf(
+			"事件输入动作排空只允许卡片迁移那一次既有读取: before=%d after=%d",
+			readsBefore,
+			h.runner.count(protocol.PrimChatReadThread),
+		)
 	}
 	hand.mu.Lock()
 	commands := append([]protocol.CmdBody(nil), hand.commands...)

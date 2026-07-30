@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/contract/gen/go/protocol"
 )
 
 func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
@@ -33,6 +35,8 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 		}`,
 	)
 	h.clock.Add(25 * time.Hour)
+	// 时刻表链首派发前会定向对账目标会话;把夹具账本回声成页面快照放行发送。
+	h.runner.handler = scheduleThreadEchoHandler(t, h, fixture.conversationRef)
 
 	advice := &recordingAdviceExecutor{
 		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
@@ -304,6 +308,8 @@ func TestCommunicationV4SchedulePatrolRechecksFallbackBetweenColdTextAndInvite(
 		nil,
 	)
 	h.clock.Add(scheduleTestWindowAtOrAfter(wall).Sub(h.clock.Now()))
+	// 时刻表链首派发前会定向对账目标会话;把夹具账本回声成页面快照放行发送。
+	h.runner.handler = scheduleThreadEchoHandler(t, h, fixture.conversationRef)
 
 	advice := &recordingAdviceExecutor{
 		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
@@ -315,7 +321,9 @@ func TestCommunicationV4SchedulePatrolRechecksFallbackBetweenColdTextAndInvite(
 	config := h.config
 	config.InteractionPaceWait = func(ctx context.Context) error {
 		paceCalls++
-		if !crossAt.IsZero() && paceCalls == 2 {
+		// 第二轮的节奏序列:链首对账读(1)→冷催正文发送(2)→换微信卡发送(3)。
+		// 在卡片自己的节奏等待里跨过七天边界,由 WAL 前复核把卡拦下。
+		if !crossAt.IsZero() && paceCalls == 3 {
 			h.clock.Add(crossAt.Sub(h.clock.Now()))
 		}
 		return ctx.Err()
@@ -467,4 +475,209 @@ func scheduleTestWindowAtOrAfter(notBefore time.Time) time.Time {
 		0,
 		time.UTC,
 	)
+}
+
+// scheduleThreadEchoHandler 把夹具会话的当前账本回声成 readThread 快照,其余
+// 原语走 defaultHandler。时刻表链首派发前的定向对账要求一次真实读取;账本
+// 回声带全 cardType/cardState/sourceKey 才能与锚完整重叠、判为无新增。
+func scheduleThreadEchoHandler(
+	t *testing.T,
+	h *harness,
+	conversationRef string,
+) func(RunRequest) (any, error) {
+	t.Helper()
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: conversationRef,
+	}
+	return func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadThread {
+			return protocol.ChatReadThreadData{
+				Messages: echoLedgerAsThread(t, h, key),
+				Complete: true, ReachedTop: true,
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+}
+
+// scheduleOrderRecordingRunner 在共享序列里记录发送时点,与 handler 记录的
+// 读取时点合成同一条时间线,用于断言"先对账导航、后发送"的顺序。
+type scheduleOrderRecordingRunner struct {
+	*m5AutomaticReplyRunner
+	mu    *sync.Mutex
+	order *[]string
+}
+
+func (r *scheduleOrderRecordingRunner) StartAutomaticReply(
+	ctx context.Context,
+	req AutomaticReplyRequest,
+) (AutomaticReplyHandle, error) {
+	r.mu.Lock()
+	*r.order = append(*r.order, "send:"+req.ConversationRef)
+	r.mu.Unlock()
+	return r.m5AutomaticReplyRunner.StartAutomaticReply(ctx, req)
+}
+
+// 出口回归(2026-07-30):send 系原语只认已打开的会话页、自身不导航,时刻表
+// 链首必须先经定向对账把目标会话页打开再发送;顺序颠倒就是当日真机
+// 49/49 CTX_NOT_READY/pageAbsent 事故的形态。
+func TestCommunicationV4SchedulePatrolNavigatesBeforeChainHeadSend(
+	t *testing.T,
+) {
+	h := newHarness(t)
+	h.clock.Add(scheduleTestBusinessNow().Sub(h.clock.Now()))
+	h.clock.Add(-25 * time.Hour)
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(
+		t,
+		h,
+		"schedule-navigate-first",
+		nil,
+	)
+	h.clock.Add(25 * time.Hour)
+
+	var mu sync.Mutex
+	var order []string
+	echo := scheduleThreadEchoHandler(t, h, fixture.conversationRef)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadThread {
+			args := decodeArgs[protocol.ChatReadThreadArgs](t, request)
+			mu.Lock()
+			order = append(order, "read:"+args.ConversationRef)
+			mu.Unlock()
+		}
+		return echo(request)
+	}
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return safeFakeResponse(`{"话术":"合成冷催一","抓的点":"合成经历"}`), nil
+		},
+	}
+	hand := &m5PositiveHand{now: h.clock.Now}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &scheduleOrderRecordingRunner{
+		m5AutomaticReplyRunner: &m5AutomaticReplyRunner{
+			base: h.runner, dispatcher: dispatcher,
+		},
+		mu: &mu, order: &order,
+	}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	runCommunicationV4ScheduleRound(
+		t,
+		h,
+		manager,
+		"round-v4-schedule-navigate-first",
+	)
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	want := []string{
+		"read:" + fixture.conversationRef,
+		"send:" + fixture.conversationRef,
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("链首必须恰好一次对账读取在前、一次发送在后: got=%v", got)
+	}
+	actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Status != store.CommunicationV4EventActionSent ||
+		actions[0].EffectIntentID == nil {
+		t.Fatalf("导航后链首没有走 WAL 正证轨: actions=%+v err=%v", actions, err)
+	}
+}
+
+// 出口回归(2026-07-30):链首对账失败只允许"本轮跳过、动作保持 planned",不得
+// 铸意图、不得转 manualRequired。真机已证实刚导航出的同步窗口内平台会对有
+// 消息的会话返回空快照(2026-07-28 事实),该瞬时失败必须能在后续轮自愈。
+func TestCommunicationV4SchedulePatrolKeepsChainHeadPlannedWhenNavigationUnconfirmed(
+	t *testing.T,
+) {
+	h := newHarness(t)
+	h.clock.Add(scheduleTestBusinessNow().Sub(h.clock.Now()))
+	h.clock.Add(-25 * time.Hour)
+	fixture := seedCommunicationV4PatrolTargetWithBoundary(
+		t,
+		h,
+		"schedule-navigate-degrade",
+		nil,
+	)
+	h.clock.Add(25 * time.Hour)
+	// defaultHandler 的 readThread 返回空快照,正是真机"导航同步窗口空读"的
+	// 形态;只额外计数,不放行。
+	reads := 0
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadThread {
+			reads++
+		}
+		return defaultHandler(request)
+	}
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return safeFakeResponse(`{"话术":"合成冷催一","抓的点":"合成经历"}`), nil
+		},
+	}
+	hand := &m5PositiveHand{now: h.clock.Now}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	assertPlannedUntouched := func(stage string, wantReads int) {
+		t.Helper()
+		if hand.commandCount() != 0 {
+			t.Fatalf("%s: 对账未确认不得发送: sends=%d", stage, hand.commandCount())
+		}
+		if reads != wantReads {
+			t.Fatalf("%s: 每次派发尝试恰好一次读取、不得原地重试: reads=%d want=%d",
+				stage, reads, wantReads)
+		}
+		actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
+		if err != nil || len(actions) != 1 ||
+			actions[0].Status != store.CommunicationV4EventActionPlanned ||
+			actions[0].EffectIntentID != nil {
+			t.Fatalf("%s: 链首必须保持 planned 且未铸意图: actions=%+v err=%v",
+				stage, actions, err)
+		}
+		aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+		if err != nil ||
+			aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+			t.Fatalf("%s: 对账失败不得把档案转人工: aggregate=%+v err=%v",
+				stage, aggregate, err)
+		}
+	}
+
+	// 第一轮:链首动作在两次排空之间才冻结出来,只有后一次排空尝试对账,
+	// 失败即降级。
+	runCommunicationV4ScheduleRound(t, h, manager, "round-v4-schedule-degrade-one")
+	assertPlannedUntouched("首轮", 1)
+	// 第二轮:两次排空各尝试一次,仍失败,不累积状态、不转人工。
+	runCommunicationV4ScheduleRound(t, h, manager, "round-v4-schedule-degrade-two")
+	assertPlannedUntouched("次轮", 3)
+
+	// 读取恢复后,同一动作在下一轮自愈发出,advice 不再重复调用。
+	h.runner.handler = scheduleThreadEchoHandler(t, h, fixture.conversationRef)
+	runCommunicationV4ScheduleRound(t, h, manager, "round-v4-schedule-degrade-heal")
+	if hand.commandCount() != 1 || len(advice.requests) != 1 {
+		t.Fatalf("对账恢复后链首必须自愈发出且不重复调用 AI: sends=%d advice=%d",
+			hand.commandCount(), len(advice.requests))
+	}
+	actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].Status != store.CommunicationV4EventActionSent ||
+		actions[0].EffectIntentID == nil {
+		t.Fatalf("自愈后链首没有走 WAL 正证轨: actions=%+v err=%v", actions, err)
+	}
 }
