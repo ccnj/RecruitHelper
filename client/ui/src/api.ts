@@ -355,6 +355,16 @@ export interface JobDraftReport {
   observedAt: number
 }
 
+export interface JobPublishResult {
+  jobId: string
+  intentId: string
+  status: string
+  created: boolean
+  /** 取得平台正证时才有；未确认时看 diagnostics。 */
+  report?: JobDraftReport & { postingVisible: boolean; verifyRounds: number; platformFeedback: string | null }
+  diagnostics?: Record<string, unknown>
+}
+
 export interface BackendJobView {
   jobId: string
   jobName: string
@@ -659,6 +669,11 @@ export const api = {
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
     post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
+  // 唯一会产生对外副作用的调用：一次只发一个职位。失败时同样带出现场快照。
+  jobPublishPublish: (platform: string, accountRef: string, jobId: string) =>
+    postWithDetail<JobPublishResult>('/admin/job-publish/publish', {
+      platform, accountRef, jobId,
+    }),
   jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string) =>
     postWithDetail<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
       platform, accountRef, jobId,

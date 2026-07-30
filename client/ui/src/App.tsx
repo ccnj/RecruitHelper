@@ -3,7 +3,7 @@ import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
   AccountView, AuditView, BackendJobView, ConversationView, DetailedError, FrameEvent, HandHealth, Health,
-  JobConfigSourceView, JobDraftReport, JobPublishPrecheckView, LedgerRow, M5AIContextView,
+  JobConfigSourceView, JobDraftReport, JobPublishPrecheckView, JobPublishResult, LedgerRow, M5AIContextView,
   M5ProviderConfigView, MessageView, MutationResult, PublishParamsState, PublishVerdict,
   SendIntentView, Suspect, TimeValue,
 } from './api'
@@ -711,8 +711,35 @@ function DraftReportBlock({ report }: { report: JobDraftReport }) {
   )
 }
 
-// 预检结论面板。本轮只呈现结论与试填诊断，不提供发布入口——发布是独立的一轮，
-// 需要先在真机确定"发布成功"的可见后置状态才能定义完成信号。
+// 发布结果。postingVisible 是平台正证：没有它就不算成功，界面必须说清"可能已经
+// 发出去了但没验到"，而不是含糊地显示失败——那会诱导人再发一次。
+function PublishResultBlock({ result }: { result: JobPublishResult }) {
+  const confirmed = result.report?.postingVisible === true
+  return (
+    <div className={`publish-draft-report ${confirmed ? '' : 'publish-draft-diag'}`}>
+      <p>
+        <span>发布</span>
+        <strong className={confirmed ? 'ok' : 'bad'}>
+          {confirmed ? '已取得平台正证' : '未确认——请去平台核对，不要重发'}
+        </strong>
+        <span>意图</span><strong>{result.intentId}</strong>
+        <span>账本状态</span><strong>{result.status}</strong>
+      </p>
+      {result.report && (
+        <p>
+          <span>平台判定类别</span><strong>{result.report.autoJobClass || '未判定'}</strong>
+          <span>回读轮次</span><strong>{result.report.verifyRounds}</strong>
+        </p>
+      )}
+      {result.report?.platformFeedback && (
+        <p className="publish-draft-sections">平台提示：{result.report.platformFeedback}</p>
+      )}
+    </div>
+  )
+}
+
+// 预检结论面板：呈现结论、试填诊断与发布入口。发布按钮需要连点两次，
+// 因为它是这条链上唯一不可逆的动作。
 function PublishPrecheckPanel({
   view, at, account,
 }: { view: JobPublishPrecheckView; at: string; account: AccountView | null }) {
@@ -720,6 +747,33 @@ function PublishPrecheckPanel({
   const [draftBusy, setDraftBusy] = useState('')
   const [draftError, setDraftError] = useState<Record<string, string>>({})
   const [draftDiag, setDraftDiag] = useState<Record<string, Record<string, unknown>>>({})
+  const [publishBusy, setPublishBusy] = useState('')
+  const [publishArmed, setPublishArmed] = useState('')
+  const [publishResult, setPublishResult] = useState<Record<string, JobPublishResult>>({})
+
+  // 发布是唯一不可逆的动作：第一次点只解锁按钮，第二次点才真发。
+  const publish = async (jobId: string, jobName: string) => {
+    if (!account) return
+    if (publishArmed !== jobId) {
+      setPublishArmed(jobId)
+      return
+    }
+    setPublishArmed('')
+    setPublishBusy(jobId)
+    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
+    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
+    try {
+      const result = await api.jobPublishPublish(account.platform, account.accountRef, jobId)
+      setPublishResult((prev) => ({ ...prev, [jobId]: result }))
+    } catch (reason) {
+      setDraftError((prev) => ({ ...prev, [jobId]: `发布「${jobName}」未成功：${errorText(reason)}` }))
+      if (reason instanceof DetailedError && reason.diagnostics) {
+        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
+      }
+    } finally {
+      setPublishBusy('')
+    }
+  }
 
   const tryDraft = async (jobId: string) => {
     if (!account) return
@@ -763,11 +817,24 @@ function PublishPrecheckPanel({
               {row.verdict === 'ready' && (
                 <button
                   type="button"
-                  disabled={draftBusy !== '' || !account}
+                  disabled={draftBusy !== '' || publishBusy !== '' || !account}
                   title="在发布页试填一次并回读，不会点击发布"
                   onClick={() => void tryDraft(row.jobId)}
                 >
                   {draftBusy === row.jobId ? '正在试填…' : '试填一次'}
+                </button>
+              )}
+              {row.verdict === 'ready' && !publishResult[row.jobId] && (
+                <button
+                  type="button"
+                  className={publishArmed === row.jobId ? 'danger-button' : undefined}
+                  disabled={publishBusy !== '' || draftBusy !== '' || !account}
+                  title="真正发布到平台，求职者立刻可见；不可撤销，只能到平台手动下架"
+                  onClick={() => void publish(row.jobId, row.jobName)}
+                >
+                  {publishBusy === row.jobId
+                    ? '正在发布…'
+                    : publishArmed === row.jobId ? '确认发布？再点一次' : '发布到平台'}
                 </button>
               )}
             </div>
@@ -777,6 +844,7 @@ function PublishPrecheckPanel({
             {draftDiag[row.jobId] && Object.keys(draftDiag[row.jobId]).length > 0 && (
               <DraftDiagnosticsBlock diagnostics={draftDiag[row.jobId]} />
             )}
+            {publishResult[row.jobId] && <PublishResultBlock result={publishResult[row.jobId]} />}
             {drafts[row.jobId] && <DraftReportBlock report={drafts[row.jobId]} />}
             {row.issues?.map((issue, index) => (
               <p key={`i-${index}`} className="publish-precheck-issue">
