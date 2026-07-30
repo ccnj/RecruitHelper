@@ -457,8 +457,8 @@ func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch view {
-	case store.AppCandidateViewCommunicating, store.AppCandidateViewPending,
-		store.AppCandidateViewInterviewed, store.AppCandidateViewWechat:
+	case store.AppCandidateViewCommunicating, store.AppCandidateViewInterviewed,
+		store.AppCandidateViewInterviewElapsed, store.AppCandidateViewWechat:
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选人视图无效"})
 		return
@@ -481,6 +481,7 @@ func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
 	projection, err := a.projections.AppCandidates(store.AppCandidateListQuery{
 		Platform: runtime.Platform, AccountRef: runtime.AccountRef,
 		View: view, Search: search, Limit: limit, Offset: offset,
+		Now: a.now(),
 	})
 	if err != nil {
 		status := http.StatusInternalServerError

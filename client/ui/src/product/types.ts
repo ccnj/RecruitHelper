@@ -2,8 +2,11 @@ export type ProductPage =
   | 'home'
   | 'confirmation'
   | 'communicating'
-  | 'pendingInterview'
+  // interviewed = 已约面(面试时间界未过)，interviewElapsed = 已面试(时间界
+  // 已过)。两者同源于脑侧 main_status = interviewed，只按时间分流；已邀面
+  // (invited)没有独立页面，并入 communicating。
   | 'interviewed'
+  | 'interviewElapsed'
   | 'wechat'
   | 'settings'
 
@@ -101,7 +104,7 @@ export interface TodayActivityView {
   greetingDisplayTarget: number | null
   newReplies: ProductMetric
   newInterviews: ProductMetric
-  completedInterviews: ProductMetric
+  elapsedInterviews: ProductMetric
 }
 
 export interface OverviewView {
@@ -163,7 +166,6 @@ export interface CandidateViewItem {
   manualReason: string | null
   interviewAt: string | null
   interviewMethod: string | null
-  interviewResult: string | null
   wechatAccount: string | null
   wechatExchangedAt: string | null
   stillInAutoCommunication: boolean | null
@@ -178,6 +180,9 @@ export type ConfirmationSendState =
   | 'sent'
   | 'failed'
   | 'suspect'
+  // 招呼语已就绪但最终没能发出。与 ineligible(招呼语没生成)分开，才能让
+  // 发送进度的分母在整批过程中单调不减。
+  | 'settledWithoutSend'
   | 'ineligible'
 
 export interface ConfirmationCandidateView extends CandidateViewItem {
@@ -216,6 +221,11 @@ export interface ProductData {
   overview: OverviewView
   confirmation: ConfirmationBatchView
   candidates: Record<CandidateView, CandidateViewItem[]>
+  // candidateTotals 是脑侧该视图的真实总数，与 candidates 同处构造。
+  // 单页读取有上限，candidates 可能只是前若干位；页面上的人数必须报
+  // 这个总数，否则超过上限后计数会永远停在上限值，与首页累计账面互相
+  // 矛盾。两者之差即被截断的数量。
+  candidateTotals: Record<CandidateView, number>
   connections: ProductConnectionView[]
   confirmationBadge: number
   clientVersion: string
