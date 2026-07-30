@@ -338,11 +338,39 @@ export interface JobDraftKeywordOutcome {
   sectionTitles: string[]
 }
 
+export interface JobClassCandidate {
+  name: string
+  /** 平台给这个类别的官方释义。它是判断贴合度的依据，不是装饰。 */
+  definition: string
+}
+
+export interface JobClassResolveView {
+  jobId: string
+  jobName: string
+  /** 平台针对这个职位给出的全部可选类别，本次决定的封闭候选集。 */
+  candidates: JobClassCandidate[]
+  /** 平台自动预填的类别（若有）。平台只在自己有把握时才填。 */
+  prefilledClass?: string
+  /** 定下来的类别。发布时必须原样带回。 */
+  jobClass: string
+  /** configuredExactMatch = 后台配置值精确命中；model = 大模型选定。 */
+  source: 'configuredExactMatch' | 'model'
+  /** 后台配置的职位类别原值，用来让运营看见"我填的那个有没有被用上"。 */
+  configuredClass?: string
+  confidence?: number
+  reason?: string
+  /** 大模型每次尝试的结果分类，不含模型原文。 */
+  attempts?: string[]
+}
+
 export interface JobDraftReport {
   jobName: string
   employmentType: string
   descriptionLength: number
-  autoJobClass: string | null
+  /** 我们选中并回读确认后生效的职位类别。 */
+  jobClass: string
+  /** 平台原本自动预填的类别，纯诊断。 */
+  prefilledClass: string | null
   education: string
   experience: string
   salaryMin: string
@@ -670,14 +698,21 @@ export const api = {
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
     post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
-  // 唯一会产生对外副作用的调用：一次只发一个职位。失败时同样带出现场快照。
-  jobPublishPublish: (platform: string, accountRef: string, jobId: string) =>
-    postWithDetail<JobPublishResult>('/admin/job-publish/publish', {
+  // 发布前先定类别：读平台候选，后台配置值精确命中就用它，命中不了由大模型
+  // 从候选里选。零对外副作用——只填三项、读完就离开发布页。
+  jobPublishClassCandidates: (platform: string, accountRef: string, jobId: string) =>
+    postWithDetail<JobClassResolveView>('/admin/job-publish/class-candidates', {
       platform, accountRef, jobId,
     }),
-  jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string) =>
+  // 唯一会产生对外副作用的调用：一次只发一个职位。失败时同样带出现场快照。
+  // jobClass 必须是上一步定下的平台候选原文，缺了后端直接 400。
+  jobPublishPublish: (platform: string, accountRef: string, jobId: string, jobClass: string) =>
+    postWithDetail<JobPublishResult>('/admin/job-publish/publish', {
+      platform, accountRef, jobId, jobClass,
+    }),
+  jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string, jobClass: string) =>
     postWithDetail<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
-      platform, accountRef, jobId,
+      platform, accountRef, jobId, jobClass,
     }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),
