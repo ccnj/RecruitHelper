@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 
 	"recruithelper/client/service/internal/communication"
@@ -90,9 +91,12 @@ func (a *roundActor) drainCommunicationV4EventActionsForProfile(
 	}
 }
 
-// dispatchCommunicationV4EventAction returns stopProfile when this profile was
-// deliberately transferred to manual handling. A dependency that is still
-// owned by the WAL recovery rail merely waits for a later patrol.
+// dispatchCommunicationV4EventAction returns stopProfile when this profile
+// must not advance further in this round: either it was deliberately
+// transferred to manual handling, or a schedule chain-head could not confirm
+// its conversation page this round and every remaining action stays planned
+// for a later patrol. A dependency that is still owned by the WAL recovery
+// rail merely waits for a later patrol.
 func (a *roundActor) dispatchCommunicationV4EventAction(
 	ctx context.Context,
 	action store.CommunicationV4EventAction,
@@ -206,6 +210,23 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 			action,
 			store.CommunicationV4EventActionFailureActionInvalid,
 		)
+	}
+	if action.SourceInputKind == store.CommunicationV4InputSchedulePlan &&
+		action.DependsOnActionID == nil {
+		// 时刻表链首的目标会话通常未被本轮列表标脏、从未被打开;先用库内
+		// 复核挡掉已终局/已归档档案(它们按设计仍在目标枚举里,残留 planned
+		// 行不能换来每轮一次的页面白读),再定向对账完成页面导航与投影。
+		stopped, err := a.recheckCommunicationV4ScheduleFallbackBeforeWAL(action)
+		if err != nil || stopped {
+			return stopped, err
+		}
+		stopped, err = a.reconcileCommunicationV4ScheduleConversationBeforeDispatch(
+			ctx,
+			action,
+		)
+		if err != nil || stopped {
+			return stopped, err
+		}
 	}
 	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
 		// A process stop, account pause or hand-generation change during the
@@ -333,6 +354,64 @@ func (a *roundActor) recheckCommunicationV4ScheduleFallbackBeforeWAL(
 	archived, err := a.processCommunicationV4ScheduleArchive(*target, false)
 	if err != nil || archived {
 		return archived, err
+	}
+	return false, nil
+}
+
+// reconcileCommunicationV4ScheduleConversationBeforeDispatch 在时刻表链首动作
+// 进入 WAL 前对目标会话做一次定向对账。send 系原语只认"已经打开的会话页"
+// (按标签页 URL 定位、自身绝不导航),而时刻表到期的会话恰恰是列表未标脏、
+// 本轮从未 readThread 过的静默会话;缺了这一步,链首派发必然
+// CTX_NOT_READY/pageAbsent(2026-07-30 真机 49/49 全败)。readThread 内的路由
+// 切换完成导航,读到的快照照常投影入账,随后的 WAL 前复核据此看到最新事实
+// (候选人已回话即归档跟催)。链内后续气泡与卡片搭链首打开的页面,不逐项重读。
+// 失败方向只允许"本轮跳过、动作保持 planned 留待下一轮",不得转 manualRequired,
+// 更不得放行发送;残留 planned 行的寿命由既有七天归档兜底。
+func (a *roundActor) reconcileCommunicationV4ScheduleConversationBeforeDispatch(
+	ctx context.Context,
+	action store.CommunicationV4EventAction,
+) (bool, error) {
+	target, ready, err := a.manager.store.CommunicationTargetForProfile(action.ProfileID)
+	if err != nil {
+		if errors.Is(err, store.ErrCommunicationV4Missing) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !ready || target == nil {
+		// 绑定缺失交由随后的 WAL 前复核按既有语义定性,这里不重复裁决。
+		return false, nil
+	}
+	key := store.ConversationKey{
+		Platform:        target.Profile.Platform,
+		AccountRef:      target.Profile.AccountRef,
+		ConversationRef: target.Conversation.ConversationRef,
+	}
+	ledger, err := a.manager.store.MessagesForConversation(key)
+	if err != nil {
+		return false, err
+	}
+	projection, err := a.reconcileConversation(ctx, dirtyConversation{
+		conversation: target.Conversation,
+		ledger:       ledger,
+	})
+	if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
+		a.projection = append(a.projection, projection)
+	}
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, ctxErr
+		}
+		slog.Warn(
+			"时刻表链首派发前定向对账失败,动作保持 planned 留待下一轮",
+			"profileId", action.ProfileID,
+			"actionId", action.ActionID,
+			"err", err,
+		)
+		return true, nil
+	}
+	if a.classificationCorrected {
+		return true, nil
 	}
 	return false, nil
 }
