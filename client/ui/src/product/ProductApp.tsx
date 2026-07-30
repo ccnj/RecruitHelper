@@ -5,6 +5,7 @@ import { ConfirmationPage } from './components/ConfirmationPage'
 import { HomePage } from './components/HomePage'
 import { ProductSidebar } from './components/ProductSidebar'
 import { SettingsPage } from './components/SettingsPage'
+import type { ProductUpdateStatus } from './api'
 import { createEmptyProductData, createProductFixture } from './fixtures'
 import type {
   CandidateView,
@@ -21,6 +22,7 @@ export interface ProductAppProps {
   initialPage?: ProductPage
   fixtureNotice?: string
   statusMessage?: string | null
+  updateStatus?: ProductUpdateStatus | null
 }
 
 const candidatePages = new Set<ProductPage>([
@@ -36,6 +38,7 @@ export function ProductApp({
   initialPage = 'home',
   fixtureNotice,
   statusMessage,
+  updateStatus = null,
 }: ProductAppProps) {
   const [activePage, setActivePage] = useState<ProductPage>(initialPage)
   const [globalSearch, setGlobalSearch] = useState('')
@@ -129,7 +132,12 @@ export function ProductApp({
         onNavigate={navigate}
         onSearch={setGlobalSearch}
         searchValue={globalSearch}
+        updateStatus={updateStatus ?? null}
         version={data.clientVersion}
+        workflowActive={
+          data.overview.workflow.state === 'running'
+          || data.overview.workflow.state === 'awaitingConfirmation'
+        }
       />
       <main className="rh-product-main">
         {fixtureNotice && <div className="rh-fixture-notice">{fixtureNotice}</div>}

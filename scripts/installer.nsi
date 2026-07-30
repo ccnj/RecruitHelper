@@ -138,6 +138,17 @@ Section "Install"
 
   DetailPrint "Installed. Still required on first run: load the plugin in Chrome,"
   DetailPrint "activate this machine, and configure the model connection."
+
+  ; Silent install means the running client handed us the installer and then quit
+  ; on purpose (the in-app "update now" button). Nobody is watching the screen, so
+  ; if we do not start the app again the machine is simply left with no client
+  ; running and no indication why. An interactive install is the opposite case:
+  ; a human is right there and will start it from the shortcut.
+  ;
+  ; Exec, not ExecWait: waiting would keep the installer process alive for the
+  ; whole session, and the client that spawned us is already gone.
+  IfSilent 0 +2
+    Exec '"$INSTDIR\${APP_EXE}"'
 SectionEnd
 
 Section "Uninstall"

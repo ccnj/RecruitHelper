@@ -258,6 +258,78 @@
   text-align: center;
 }
 
+/* 侧边栏底部的更新提示。默认不占位——没有新版时整块不渲染。 */
+.rh-update-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+  text-align: center;
+}
+
+.rh-update-title {
+  color: #e6ebf2;
+  font-weight: 600;
+}
+
+.rh-update-hint {
+  color: #a0a9b6;
+  line-height: 1.5;
+}
+
+.rh-update-error {
+  color: #ff9b9b;
+  line-height: 1.5;
+}
+
+.rh-update-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #c8d0da;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.rh-update-confirm p {
+  margin: 0;
+}
+
+.rh-update-confirm-hint {
+  color: #ffcf8b;
+}
+
+.rh-update-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rh-update-banner button {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  background: transparent;
+  color: #d7dde5;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.rh-update-banner button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.rh-update-banner .rh-update-primary {
+  border-color: transparent;
+  background: #2f6fed;
+  color: #fff;
+}
+
 /* 首次激活是七页工作台之前的独立入口，不复用诊断台表单。 */
 .rh-activation-page {
   --activation-blue: #2f6cf4;

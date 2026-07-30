@@ -5,6 +5,8 @@ import {
   pauseProductWorkflow,
   readCandidateDetail,
   readProductData,
+  readProductUpdateStatus,
+  type ProductUpdateStatus,
   resumeProductWorkflow,
   sendProductConfirmation,
   startProductWorkflow,
@@ -27,6 +29,7 @@ export function ProductConnectedApp({
   const [readError, setReadError] = useState<string | null>(null)
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [refreshRevision, setRefreshRevision] = useState(0)
+  const [updateStatus, setUpdateStatus] = useState<ProductUpdateStatus | null>(null)
   const actionRunning = useRef(false)
 
   const refresh = useCallback(() => {
@@ -60,6 +63,26 @@ export function ProductConnectedApp({
       window.clearInterval(timer)
     }
   }, [pollIntervalMs, refreshRevision])
+
+  // 更新状态与业务数据分开轮询:它变化慢得多,而且读失败绝不该影响业务页面。
+  // 一分钟一次足够 —— 脑那边本来就要 15 分钟才去问一次更新源。
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const next = await readProductUpdateStatus()
+        if (!cancelled) setUpdateStatus(next)
+      } catch {
+        // 读不到就当没有新版,不打扰用户:这是个提示,不是业务事实。
+      }
+    }
+    void load()
+    const timer = window.setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [])
 
   const readStatusMessage = readState === 'loading'
     ? '正在读取本机业务数据…'
@@ -132,6 +155,7 @@ export function ProductConnectedApp({
       }}
       data={data}
       statusMessage={statusMessage}
+      updateStatus={updateStatus}
     />
   )
 }
