@@ -889,6 +889,31 @@
           "syncToMailbox": { "type": "boolean" }
         }
       },
+      "JobPublishDraftGuards": {
+        "type": "object",
+        "fields": {
+          "expectAbsentOnPlatform": { "type": "boolean", "const": true }
+        }
+      },
+      "JobPublishDraftEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.publishDraftEvidenceType" }
+        }
+      },
+      "JobPublishDraftData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "autoJobClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "postingVisible": { "type": "boolean" },
+          "verifyRounds": { "type": "int64", "minimum": 0 },
+          "keywords": { "ref": "JobPrepareDraftKeywordOutcome" },
+          "platformFeedback": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 900, "maxBytes": 3600 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "JobPrepareDraftKeywordOutcome": {
         "type": "object",
         "fields": {
@@ -1074,6 +1099,7 @@
     "witnessUnavailableReason": ["writeFailed", "capacityExceeded", "storeCorrupt"],
     "sendMessageEvidenceType": ["outboundMessageObserved"],
     "sendGreetingEvidenceType": ["outboundGreetingObserved"],
+    "publishDraftEvidenceType": ["platformPostingObserved"],
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
@@ -1301,6 +1327,15 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 180000, "deadlineMs": 240000, "leaseMs": 45000,
       "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文"
+    },
+    "job.publishDraft": {
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPublishDraftData",
+      "guardsSchema": "JobPublishDraftGuards", "evidenceSchema": "JobPublishDraftEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
+      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 45000,
+      "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
+      "note": "把一个职位真正发布到平台。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",

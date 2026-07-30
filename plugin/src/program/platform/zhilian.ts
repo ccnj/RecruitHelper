@@ -52,6 +52,8 @@ import type {
   InterviewDetails,
   JobPrepareDraftArgs,
   JobPrepareDraftData,
+  JobPublishDraftData,
+  JobPublishDraftGuards,
   JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
@@ -5977,14 +5979,16 @@ async function pollKeywordSnapshot(
     undefined, 'none', progress ? snapshotProgress(progress, 'keyword_sections_pending') : undefined)
 }
 
-export async function prepareZhilianJobDraft(
+// 填完整张发布表单并逐字段回读。试填与真发共用同一段填充逻辑——两者只在
+// 收尾不同(试填离开表单,真发点一次「发布」),填充过程必须字面同一份代码,
+// 否则"试填通过"就不能证明"真发也填得进去"。
+//
+// 本函数返回时表单已填好且仍在发布页;调用方负责收尾。
+async function fillZhilianJobForm(
   args: JobPrepareDraftArgs,
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
-): Promise<JobPrepareDraftData> {
-  if (validatePrimitiveArgs(PrimitiveName.JobPrepareDraft, 1, args).length !== 0) {
-    throw new ZhilianPlatformError('GUARD_FAILED', '发布试填参数不符合当前契约', 'manualOnly')
-  }
+): Promise<{ tabId: number; progress: DraftProgress; data: JobPrepareDraftData }> {
   ctx.checkpoint()
   const progress = newDraftProgress()
   // 每次都从干净的发布页开始:表单只在页面内存里,残留状态会污染这次回读。
@@ -6081,6 +6085,196 @@ export async function prepareZhilianJobDraft(
     discarded: false,
     observedAt: Date.now(),
   }
+
+  return { tabId, progress, data }
+}
+
+// 点击「发布」之前的最后一道 guards:回读表单上几个决定性字段,确认页面里躺着的
+// 就是本次意图。它问的是"世界是否处于脑预期的状态",不审计平台实现。
+function mainReadZhilianPublishGuards(): MainStep {
+  const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
+  if (!name) return { status: 'failed', reason: 'name_input_absent' }
+  const salaryMin = document.querySelector('input[placeholder="最低月薪"]') as HTMLInputElement | null
+  const salaryMax = document.querySelector('input[placeholder="最高月薪"]') as HTMLInputElement | null
+  const months = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[])
+    .filter((input) => /^\d+个月$/.test(input.value.trim()))
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const headcountItem = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '招聘人数'
+  })
+  const headcount = headcountItem?.querySelector('input[type="text"], input:not([type])') as HTMLInputElement | null
+  if (!salaryMin || !salaryMax || months.length !== 1 || !headcount) {
+    return { status: 'failed', reason: 'publish_guard_fields_absent' }
+  }
+  // 用  拼接,避免与字段内容里的任何可见分隔符冲突。
+  return {
+    status: 'ok',
+    detail: [
+      name.value.trim(), salaryMin.value.trim(), salaryMax.value.trim(),
+      months[0].value.trim(), headcount.value.trim(),
+    ].join(''),
+  }
+}
+
+// 唯一一次点击。检查的是按钮自身的标准 DOM 语义(存在、可见、未禁用),
+// 不去核对平台内部实现。
+function mainClickZhilianPublish(): MainStep {
+  const scope = document.querySelector('form.publish-form__inner') ?? document
+  const buttons = (Array.from(scope.querySelectorAll('button')) as HTMLButtonElement[])
+    .filter((button) => button.innerText.trim() === '发布' && button.getBoundingClientRect().height > 0)
+  if (buttons.length !== 1) return { status: 'failed', reason: 'publish_button_unresolved' }
+  if (buttons[0].disabled) return { status: 'failed', reason: 'publish_button_disabled' }
+  if (buttons[0].type === 'reset') return { status: 'failed', reason: 'publish_button_wrong_type' }
+  buttons[0].click()
+  return { status: 'ok' }
+}
+
+// 手侧的同名归一化。必须与脑侧 jobconfig.normalizeJobName 保持同一套规则:
+// 全半角括号与空白折叠。两侧口径都只放宽匹配、不放宽发布。
+function normalizeZhilianPostingName(name: string): string {
+  const folded = name
+    .replace(/（/g, '(').replace(/）/g, ')')
+    .replace(/［/g, '[').replace(/］/g, ']')
+    .replace(/【/g, '[').replace(/】/g, ']')
+    .replace(/　/g, ' ').replace(/／/g, '/')
+    .replace(/，/g, ',').replace(/、/g, ',').replace(/：/g, ':')
+  return folded.split(/\s+/).join('')
+}
+
+export async function publishZhilianJobDraft(
+  args: JobPrepareDraftArgs,
+  guards: JobPublishDraftGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobPublishDraftData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobPublishDraft, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位发布参数不符合当前契约', 'manualOnly')
+  }
+  if (guards?.expectAbsentOnPlatform !== true) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位发布缺少同名不存在的条件写', 'manualOnly')
+  }
+  const target = normalizeZhilianPostingName(args.jobName)
+  if (!target) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位名归一化后为空', 'manualOnly')
+  }
+
+  // ── 点击之前:一切失败都是 sideEffect=none,未发布,可安全重试 ──────────
+  //
+  // 幂等闸:先确认平台上还没有同名职位。这一步必须在填表之前——读列表要离开
+  // 发布页、会丢弃已填表单,所以复核无法挪到点击前的最后一刻。填表期间(数十秒)
+  // 出现同名的 TOCTOU 由甲方 2026-07-30 知情裁决为不予防护。
+  ctx.checkpoint()
+  await ctx.progress('确认平台上尚无同名职位', 5)
+  const before = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
+  if (before.postingNames.some((name) => normalizeZhilianPostingName(name) === target)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '平台上已存在同名职位,不再发布', 'manualOnly')
+  }
+
+  const { tabId, progress, data: filled } = await fillZhilianJobForm(
+    args, ctx, expectedPrincipalFingerprint,
+  )
+  await ctx.progress('表单已填好,复核后发布', 88)
+
+  // 点击前最后一道 guards:页面里躺着的必须就是本次意图。
+  const snapshot = (await runStep(
+    tabId, mainReadZhilianPublishGuards, [], '发布前复核表单', progress,
+  )).split('')
+  const expected = [
+    args.jobName, args.salaryMin, args.salaryMax, args.salaryMonths, String(args.headcount),
+  ]
+  if (snapshot.length !== expected.length ||
+      snapshot.some((value, index) => value !== expected[index])) {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', '发布前复核发现表单与本次意图不一致', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'publish_guard_mismatch'),
+    )
+  }
+  // 身份最后一次复核:此后就是不可逆动作。
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+  await pace()
+
+  // ── 不可逆点击。此后一律 sideEffect=possible,原语内绝不重试、绝不第二次点击 ──
+  const clicked = await runMain(tabId, mainClickZhilianPublish, [])
+  if (!validMainStep(clicked)) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '发布点击结果结构不符合预期', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (clicked.status === 'failed') {
+    // 按钮不可解析/被禁用都发生在点击之前,未产生副作用。
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', `发布按钮不可点击: ${clicked.reason}`, 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, clicked.reason),
+    )
+  }
+  await ctx.progress('已点击发布,开始回读正证', 92)
+
+  // 平台的即时反馈只作诊断:失败提示能让人一眼看出发不出去的原因,
+  // 但它不参与判定——正证只认职位管理列表里出现同名职位。
+  let platformFeedback: string | null = null
+  try {
+    const hints = await runMain(tabId, mainReadZhilianFormHints, [])
+    if (validMainStep(hints) && hints.status === 'ok' && hints.detail) {
+      platformFeedback = hints.detail.slice(0, 900)
+    }
+  } catch {
+    // 读提示失败不影响正证判定,保持 null。
+  }
+
+  // 发后核验:回读列表,读到同名职位即成功。读不到只记未确认,
+  // 绝不推断失败、绝不再次发布。
+  let visible = false
+  let rounds = 0
+  for (let round = 0; round < 2 && !visible; round += 1) {
+    ctx.checkpoint()
+    await new Promise<void>((resolve) => setTimeout(resolve, round === 0 ? 3_000 : 6_000))
+    rounds = round + 1
+    try {
+      const after = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
+      visible = after.postingNames.some((name) => normalizeZhilianPostingName(name) === target)
+    } catch (error) {
+      if (!(error instanceof ZhilianPlatformError)) throw error
+      // 回读失败同样只是"未确认",不改变已经发生的副作用。
+    }
+  }
+
+  const data: JobPublishDraftData = {
+    jobName: args.jobName,
+    autoJobClass: filled.autoJobClass,
+    postingVisible: visible,
+    verifyRounds: rounds,
+    keywords: filled.keywords,
+    platformFeedback,
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.JobPublishDraft, 1, data).length !== 0) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '发布结果不符合当前契约', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (!visible) {
+    // 副作用可能已经发生,但没有正证:交给脑的验证轮与 suspect,不在原语内重试。
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED', '发布后未在职位列表读到同名职位', 'manualOnly',
+      undefined, 'possible',
+      { ...snapshotProgress(progress, 'posting_not_visible'), platformFeedback, verifyRounds: rounds },
+    )
+  }
+  await ctx.progress('职位发布已取得平台正证', 100)
+  return data
+}
+
+export async function prepareZhilianJobDraft(
+  args: JobPrepareDraftArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobPrepareDraftData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobPrepareDraft, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '发布试填参数不符合当前契约', 'manualOnly')
+  }
+  const { tabId, data } = await fillZhilianJobForm(args, ctx, expectedPrincipalFingerprint)
 
   // 试填完成后必须离开:一个填满的发布表单只差一次点击,留在页面上等同于
   // 给人工误操作递刀。离开确认不了就整体失败,不返回"填好了"的成功结论。
