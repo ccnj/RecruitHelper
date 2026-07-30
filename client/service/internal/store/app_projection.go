@@ -47,21 +47,25 @@ type AppJobProjection struct {
 }
 
 type AppFunnelProjection struct {
-	Available         bool       `json:"available"`
-	BatchID           string     `json:"batchId,omitempty"`
-	Stage             string     `json:"stage,omitempty"`
-	TargetCount       int        `json:"targetCount"`
-	CapturedCount     int64      `json:"capturedCount"`
-	ScoredCount       int64      `json:"scoredCount"`
-	SelectedCount     int64      `json:"selectedCount"`
-	GreetingReady     int64      `json:"greetingReady"`
-	PendingConfirm    int64      `json:"pendingConfirm"`
-	SentCount         int64      `json:"sentCount"`
-	FailedCount       int64      `json:"failedCount"`
-	SuspectCount      int64      `json:"suspectCount"`
-	LastFailureReason string     `json:"lastFailureReason,omitempty"`
-	StartedAt         *time.Time `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+	Available      bool   `json:"available"`
+	BatchID        string `json:"batchId,omitempty"`
+	Stage          string `json:"stage,omitempty"`
+	TargetCount    int    `json:"targetCount"`
+	CapturedCount  int64  `json:"capturedCount"`
+	ScoredCount    int64  `json:"scoredCount"`
+	SelectedCount  int64  `json:"selectedCount"`
+	GreetingReady  int64  `json:"greetingReady"`
+	PendingConfirm int64  `json:"pendingConfirm"`
+	SentCount      int64  `json:"sentCount"`
+	// 生成失败与发送失败是两个阶段的两件事,必须分开报。合成一个字段时
+	// 前端在"生成招呼语"和"发送招呼"两格都读它,1 次生成失败 + 2 次发送
+	// 失败会在两格各显示"失败 3",看起来像 6 处失败。
+	GenerationFailedCount int64      `json:"generationFailedCount"`
+	SendFailedCount       int64      `json:"sendFailedCount"`
+	SuspectCount          int64      `json:"suspectCount"`
+	LastFailureReason     string     `json:"lastFailureReason,omitempty"`
+	StartedAt             *time.Time `json:"startedAt,omitempty"`
+	FinishedAt            *time.Time `json:"finishedAt,omitempty"`
 }
 
 type AppOverviewStatistics struct {
@@ -500,7 +504,7 @@ func appFunnelTx(
 		Count(&generationFailed).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
-	out.FailedCount = generationFailed
+	out.GenerationFailedCount = generationFailed
 	var intents []EffectIntent
 	if err := tx.Table("effect_intents AS effect").
 		Joins("JOIN sourcing_greeting_invocations AS greeting ON greeting.effect_intent_id = effect.intent_id").
@@ -518,7 +522,7 @@ func appFunnelTx(
 		case EffectIntentOk, EffectIntentResolvedOk:
 			out.SentCount++
 		case EffectIntentFailed, EffectIntentResolvedFailed:
-			out.FailedCount++
+			out.SendFailedCount++
 		case EffectIntentSuspect:
 			out.SuspectCount++
 		}
@@ -558,7 +562,8 @@ func appFunnelTx(
 		out.Stage = "generatingGreetings"
 	case out.PendingConfirm > 0:
 		out.Stage = "awaitingConfirmation"
-	case out.SentCount+out.FailedCount+out.SuspectCount+settledWithoutSend >= out.SelectedCount:
+	case out.SentCount+out.GenerationFailedCount+out.SendFailedCount+
+		out.SuspectCount+settledWithoutSend >= out.SelectedCount:
 		out.Stage = "completed"
 	default:
 		out.Stage = "sendingGreetings"

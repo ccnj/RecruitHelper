@@ -71,7 +71,8 @@ const snapshot = {
         greetingReady: 12,
         pendingConfirm: 12,
         sentCount: 0,
-        failedCount: 0,
+        generationFailedCount: 0,
+        sendFailedCount: 0,
         suspectCount: 0,
       },
       statistics: {
@@ -229,6 +230,18 @@ check(
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')
+// 生成失败与发送失败分属两格。合成一个字段时两格都读它，1 次生成失败 + 2 次
+// 发送失败会在两格各显示"失败 3"，看起来像 6 处失败。
+const splitFailures = structuredClone(snapshot)
+splitFailures.overview.overview.funnel.generationFailedCount = 1
+splitFailures.overview.overview.funnel.sendFailedCount = 2
+const splitFunnel = adaptProductSnapshot(splitFailures, now).overview.funnel
+check(
+  splitFunnel.stages.find((stage) => stage.key === 'greeting').failed === 1 &&
+    splitFunnel.stages.find((stage) => stage.key === 'send').failed === 2,
+  '生成失败与发送失败各归各阶段，不在两格重复出现',
+)
+check(splitFunnel.failed === 3, '顶部汇总仍是两阶段失败之和')
 check(product.confirmation.candidates[0].sendState === 'ready' && product.confirmationBadge === 1, '候选确认只把可发送成员计入徽章')
 const generationInProgress = structuredClone(snapshot)
 generationInProgress.confirmation.confirmation.ready = false

@@ -42,7 +42,8 @@ export interface AppFunnelRaw {
   greetingReady: number
   pendingConfirm: number
   sentCount: number
-  failedCount: number
+  generationFailedCount: number
+  sendFailedCount: number
   suspectCount: number
   lastFailureReason?: string
   startedAt?: string | null
@@ -468,12 +469,17 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     collect: { completed: safeCount(raw.capturedCount), target, failed: 0 },
     score: { completed: safeCount(raw.scoredCount), target, failed: 0 },
     select: { completed: selected, target: safeCount(raw.scoredCount), failed: 0 },
-    greeting: { completed: safeCount(raw.greetingReady), target: selected, failed: safeCount(raw.failedCount) },
+    greeting: {
+      completed: safeCount(raw.greetingReady),
+      target: selected,
+      failed: safeCount(raw.generationFailedCount),
+    },
     confirm: { completed: confirmed, target: selected, failed: 0 },
     send: {
       completed: safeCount(raw.sentCount),
       target: selected,
-      failed: safeCount(raw.failedCount) + safeCount(raw.suspectCount),
+      // suspect 是结果未确认，归到发送阶段的异常里由人工收敛。
+      failed: safeCount(raw.sendFailedCount) + safeCount(raw.suspectCount),
     },
   }
   const stages: FunnelStageView[] = stageOrder.map((key, index) => ({
@@ -493,7 +499,9 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     stateLabel: funnelStateLabel(raw.stage),
     target,
     pending: safeCount(raw.pendingConfirm),
-    failed: safeCount(raw.failedCount) + safeCount(raw.suspectCount),
+    // 顶部汇总是两个阶段的失败之和，明细各归各格。
+    failed: safeCount(raw.generationFailedCount) + safeCount(raw.sendFailedCount) +
+      safeCount(raw.suspectCount),
     latestFailure: clean(raw.lastFailureReason) || null,
     stages,
   }
