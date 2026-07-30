@@ -84,7 +84,7 @@ export function ProductSidebar({
             value={searchValue}
           />
         </label>
-        <div className="rh-sidebar-version">RecruitHelper v{version}</div>
+        <div className="rh-sidebar-version">AI增员助手 v{version}</div>
       </div>
     </aside>
   )

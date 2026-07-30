@@ -1,9 +1,9 @@
 {
   "name": "recruithelper-client",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "author": "aliyutaozi",
-  "description": "招聘助手客户端外壳(Electron):启停 Go 脑服务 + 加载 UI。",
+  "description": "AI增员助手客户端外壳(Electron):启停 Go 脑服务 + 加载 UI。",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
