@@ -212,8 +212,9 @@ func main() {
 	})
 	background.Go(func() { hub.StartHealthLoop(appCtx) })
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
-	// 客户端换代后,pluginSeed 已把新插件写进固定目录,但 Chrome 里跑的还是旧代码:
-	// contractMatch 挡住 effectful 派发 —— 安全,可业务静止,现场也没人知道要去
+	// 客户端换代后,pluginSeed 已把新插件写进固定目录,但 Chrome 里跑的还是旧代码。
+	// 改了契约的版本会让 effectful 被禁派——安全,可业务静止;没改契约的版本更隐蔽,
+	// 业务带着旧插件代码照常跑。两种都得认出来,现场也没人知道要去
 	// chrome://extensions 点一次刷新。这个循环替人点那一下,判据与诊断台按钮完全
 	// 相同(handreload 包共用同一条路径),另加"没有活跃产品工作流"一条。
 	pluginReloader := handreload.NewAutoReloader(
@@ -221,7 +222,7 @@ func main() {
 			Store: st, Registry: hub.Registry(), Dispatcher: disp, Feeds: actor,
 			Trigger: handreload.TriggerAuto,
 		},
-		st, handreload.DefaultInterval,
+		st, os.Getenv(handreload.PluginDirEnv), handreload.DefaultInterval,
 	)
 	background.Go(func() { pluginReloader.Run(appCtx) })
 	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,

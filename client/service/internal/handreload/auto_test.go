@@ -3,6 +3,8 @@ package handreload
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -69,6 +71,7 @@ type harness struct {
 	dispatcher *fakeDispatcher
 	feeds      *fakeFeeds
 	auto       *AutoReloader
+	pluginDir  string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -91,8 +94,32 @@ func newHarness(t *testing.T) *harness {
 		Store: h.store, Registry: registry, Dispatcher: h.dispatcher, Feeds: h.feeds,
 		Trigger: TriggerAuto, Timeout: time.Second, Poll: time.Millisecond,
 	}
-	h.auto = NewAutoReloader(orchestrator, h.store, time.Hour)
+	h.auto = NewAutoReloader(orchestrator, h.store, "", time.Hour)
 	return h
+}
+
+// withPluginDir 造一个只含 manifest.json 的固定插件目录,代表"磁盘上是哪一版"。
+func (h *harness) withPluginDir(t *testing.T, manifest string) {
+	t.Helper()
+	dir := t.TempDir()
+	if manifest != "" {
+		if err := os.WriteFile(
+			filepath.Join(dir, "manifest.json"), []byte(manifest), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.pluginDir = dir
+	h.auto.pluginDir = dir
+}
+
+// contractIsFine 让手的契约与脑一致,这样触发与否只取决于版本比对。
+func (h *harness) contractIsFine(extVersion string) {
+	h.registry.OnlineWithBuild(
+		testHand, "session-old", testOldBoot,
+		[]string{Capability()}, nil,
+		protocol.ContractHash, true, extVersion, time.Now(),
+	)
 }
 
 func (h *harness) arriveNewBoot(contractHash string, match bool, caps []string) {
@@ -322,3 +349,110 @@ func TestAutoReloadHaltsWhenDispatchRejected(t *testing.T) {
 }
 
 var errWireClosed = &Error{Kind: KindDispatchRejected, Message: "连接已关闭"}
+
+// —— 版本比对:绝大多数更新不动契约,这条路径才是常态 ——
+
+func TestAutoReloadTriggersWhenDiskVersionIsNewerThanRunningPlugin(t *testing.T) {
+	// 契约没变,业务本来照常在跑 —— 跑的却是旧插件代码。这正是最隐蔽的那种。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+	h.dispatcher.afterDispatch = func() {
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()})
+	}
+
+	outcome := h.evaluate()
+	if !outcome.Triggered || outcome.Err != nil {
+		t.Fatalf("磁盘版本更新时应自动重载: %+v", outcome)
+	}
+	if h.dispatcher.calls != 1 {
+		t.Fatalf("应恰好派发一次，实际 %d 次", h.dispatcher.calls)
+	}
+}
+
+func TestAutoReloadSkipsWhenRunningPluginMatchesDisk(t *testing.T) {
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.2","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+	if outcome := h.evaluate(); outcome.Triggered || h.dispatcher.calls != 0 {
+		t.Fatalf("版本一致时不该重载: %+v", outcome)
+	}
+}
+
+func TestAutoReloadStaysQuietWhenDiskVersionUnknown(t *testing.T) {
+	// 读不到磁盘版本是"缺证据",不是"手过时了"的反证。误判的代价是无谓重载并
+	// 顺带作废推荐流,所以一律降级为只看契约。
+	for _, tc := range []struct {
+		name     string
+		manifest string
+		noDir    bool
+	}{
+		{name: "目录未配置", noDir: true},
+		{name: "目录里没有manifest", manifest: ""},
+		{name: "manifest不是JSON", manifest: `{{{`},
+		{name: "version缺失", manifest: `{"manifest_version":3}`},
+		{name: "version不是纯数字段", manifest: `{"version":"0.2.3-beta"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			if !tc.noDir {
+				h.withPluginDir(t, tc.manifest)
+			}
+			h.contractIsFine("0.0.1") // 一个明显旧的版本号
+			if outcome := h.evaluate(); outcome.Triggered || h.dispatcher.calls != 0 {
+				t.Fatalf("磁盘版本不可知时不得据此重载: %+v", outcome)
+			}
+		})
+	}
+}
+
+func TestAutoReloadStaysQuietWhenHandReportsNoVersion(t *testing.T) {
+	// 手报不出版本同样是缺证据,与磁盘读不到对称。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
+	h.contractIsFine("")
+	if outcome := h.evaluate(); outcome.Triggered || h.dispatcher.calls != 0 {
+		t.Fatalf("手未上报版本时不得据此重载: %+v", outcome)
+	}
+}
+
+func TestAutoReloadSkipsWhenPluginSeedFailedAndDiskStillOld(t *testing.T) {
+	// pluginSeed 换代失败时磁盘留在旧版,与手上跑的是同一版 —— 重载出来还是它,
+	// 白白作废一次推荐流。这一支必须安静。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.2","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+	if outcome := h.evaluate(); outcome.Triggered || h.feeds.calls != 0 {
+		t.Fatalf("换代失败后磁盘仍是旧版，不该重载: %+v feeds=%d", outcome, h.feeds.calls)
+	}
+}
+
+func TestAutoReloadStillTriggersOnContractDriftRegardlessOfVersion(t *testing.T) {
+	// 契约是硬信号:即便版本号看起来一致(比如忘了升号),契约对不上也必须重载。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.2","manifest_version":3}`)
+	h.registry.OnlineWithBuild(
+		testHand, "session-old", testOldBoot,
+		[]string{Capability()}, nil,
+		"sha256:stale-plugin", false, "0.2.2", time.Now(),
+	)
+	if outcome := h.evaluate(); !outcome.Triggered || outcome.Err != nil {
+		t.Fatalf("契约漂移应始终触发重载: %+v", outcome)
+	}
+}
+
+func TestExpectedPluginVersionReadsDiskManifest(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, "manifest.json"),
+		[]byte(`{"name":"x","version":"1.2.3.4","manifest_version":3}`), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := ExpectedPluginVersion(dir); got != "1.2.3.4" {
+		t.Fatalf("四段版本号应被接受，得到 %q", got)
+	}
+	if got := ExpectedPluginVersion(""); got != "" {
+		t.Fatalf("空目录应返回未知，得到 %q", got)
+	}
+}
