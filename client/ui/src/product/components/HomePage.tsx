@@ -83,7 +83,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     <div className="rh-page rh-home-page">
       <section className="rh-home-welcome">
         <div>
-          <span className="rh-kicker">招聘工作台</span>
+          <span className="rh-kicker">增员工作台</span>
           <h1>欢迎回来，{customer.name}</h1>
           <p>{overview.dateLabel}</p>
         </div>
