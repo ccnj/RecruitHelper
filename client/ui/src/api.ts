@@ -247,6 +247,16 @@ export interface AuditView {
   detail: unknown
 }
 
+// 开发者 SQL 控制台的回执。error 是数据库的原话;returnedRows 区分
+// "产出了结果集"与"写入类语句",决定该看 rows 还是 rowsAffected。
+export interface DevSQLResult {
+  returnedRows?: boolean
+  columns?: string[]
+  rows?: unknown[][]
+  rowsAffected?: number
+  error?: string
+}
+
 export interface MutationResult {
   ok?: boolean
   error?: string
@@ -656,6 +666,7 @@ export const api = {
   }),
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
+  devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
