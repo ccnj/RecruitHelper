@@ -228,7 +228,13 @@ func startFailureText(err error) string {
 	case errors.Is(err, workflow.ErrDailyWindowClosed):
 		return "当前不在业务运行窗口内"
 	case errors.Is(err, productapp.ErrAccountUnavailable):
-		return "没有唯一可运行的平台账号"
+		return "没有可运行的平台账号"
+	case errors.Is(err, productapp.ErrHandUnavailable):
+		return "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试"
+	case errors.Is(err, productapp.ErrHandAmbiguous):
+		return "检测到多个在线插件，请只保留一个装有插件的 Chrome"
+	case errors.Is(err, productapp.ErrLoginRequired):
+		return "请先在 Chrome 中登录智联招聘端，再点击开始"
 	case errors.Is(err, productapp.ErrJobConfigUnavailable):
 		return "当前职位配置不可用"
 	}

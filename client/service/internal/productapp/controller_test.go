@@ -555,13 +555,24 @@ func TestRuntimeStateKeepsAccountAndUnfinishedBatchWithoutWorkflowRun(t *testing
 	}
 }
 
-func TestRuntimeStateFailsClosedWhenNoUniqueAccountExists(t *testing.T) {
-	db, _ := controllerFixture(t)
+// 多账号是受支持的形态(账号跟随登录,2026-07-30 裁决):只读投影不再因为库里
+// 有两个账号而失明,而是取最近一次身份验证通过的那个。巡检每轮成功探测都会
+// 刷新 IdentityVerifiedAt,启发式因此自动收敛到当前真实登录的账号。
+func TestRuntimeStatePicksMostRecentlyVerifiedAccount(t *testing.T) {
+	db, elder := controllerFixture(t)
+	elderVerifiedAt := time.Date(2026, 7, 25, 8, 0, 0, 0, time.Local)
+	if err := db.MutateAccount(elder, func(account *store.Account) error {
+		account.IdentityVerifiedAt = &elderVerifiedAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	fingerprint := "principal-controller-second"
+	recentVerifiedAt := time.Date(2026, 7, 25, 9, 30, 0, 0, time.Local)
 	if err := db.CreateAccount(&store.Account{
 		Platform: "zhilian", AccountRef: "account-controller-second",
 		BoundHandID: "hand-controller-second", PrincipalFingerprint: &fingerprint,
-		IdentityState: store.IdentityVerified,
+		IdentityState: store.IdentityVerified, IdentityVerifiedAt: &recentVerifiedAt,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -572,9 +583,8 @@ func TestRuntimeStateFailsClosedWhenNoUniqueAccountExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := controller.RuntimeState()
-	if err != nil || state.Platform != "" || state.AccountRef != "" ||
-		state.CurrentBatchID != "" {
-		t.Fatalf("state=%+v err=%v", state, err)
+	if err != nil || state.AccountRef != "account-controller-second" {
+		t.Fatalf("未选中最近验证的账号: state=%+v err=%v", state, err)
 	}
 }
 
@@ -712,4 +722,64 @@ func syntheticCurrentJob(t *testing.T, jobID int, name string) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+type fakeResolver struct {
+	key   store.AccountKey
+	err   error
+	calls int
+}
+
+func (f *fakeResolver) ResolveCurrent(context.Context) (store.AccountKey, error) {
+	f.calls++
+	if f.err != nil {
+		return store.AccountKey{}, f.err
+	}
+	return f.key, nil
+}
+
+// 账号跟随登录:开始用的是解析器探测出的账号,不是库内扫描选中的账号。
+func TestStartFollowsResolvedLoginAccount(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	resolved := store.AccountKey{Platform: "zhilian", AccountRef: "account-resolved-by-login"}
+	resolver := &fakeResolver{key: resolved}
+	controller, err := New(
+		db, flow, &fakeSource{}, func() time.Time {
+			return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+		}, workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.SetAccountResolver(resolver)
+	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.calls != 1 || flow.replyKey != resolved {
+		t.Fatalf("resolver.calls=%d replyKey=%+v", resolver.calls, flow.replyKey)
+	}
+}
+
+func TestStartPropagatesResolverSentinels(t *testing.T) {
+	db, _ := controllerFixture(t)
+	for _, sentinel := range []error{ErrHandUnavailable, ErrHandAmbiguous, ErrLoginRequired} {
+		flow := &fakeWorkflow{}
+		controller, err := New(
+			db, flow, &fakeSource{}, func() time.Time {
+				return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+			}, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetAccountResolver(&fakeResolver{err: sentinel})
+		startErr := controller.Start(context.Background(), "replyOnly", "")
+		if !errors.Is(startErr, sentinel) {
+			t.Fatalf("sentinel %v 未透传: %v", sentinel, startErr)
+		}
+		if flow.replyKey != (store.AccountKey{}) {
+			t.Fatalf("解析失败仍启动了工作流: %+v", flow.replyKey)
+		}
+	}
 }
