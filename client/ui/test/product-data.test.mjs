@@ -251,6 +251,20 @@ check(
   '今日邀面卡人数按已邀面表述，不与已约面混名',
 )
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
+// 单页读取有上限,items 只是前若干位;人数必须来自脑侧 total,否则超过
+// 上限后计数会永远停在上限值,与首页累计账面互相矛盾。
+const truncatedList = structuredClone(snapshot)
+truncatedList.candidates.communicating.candidates.total = 320
+check(
+  adaptProductSnapshot(truncatedList, now).candidateTotals.communicating === 320,
+  '候选人总数取脑侧 total，不用本页条数代替',
+)
+const brokenTotal = structuredClone(snapshot)
+brokenTotal.candidates.communicating.candidates.total = 0
+check(
+  adaptProductSnapshot(brokenTotal, now).candidateTotals.communicating === 1,
+  '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
+)
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')

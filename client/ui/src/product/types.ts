@@ -216,6 +216,11 @@ export interface ProductData {
   overview: OverviewView
   confirmation: ConfirmationBatchView
   candidates: Record<CandidateView, CandidateViewItem[]>
+  // candidateTotals 是脑侧该视图的真实总数，与 candidates 同处构造。
+  // 单页读取有上限，candidates 可能只是前若干位；页面上的人数必须报
+  // 这个总数，否则超过上限后计数会永远停在上限值，与首页累计账面互相
+  // 矛盾。两者之差即被截断的数量。
+  candidateTotals: Record<CandidateView, number>
   connections: ProductConnectionView[]
   confirmationBadge: number
   clientVersion: string

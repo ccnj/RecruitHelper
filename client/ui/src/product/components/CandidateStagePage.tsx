@@ -45,6 +45,7 @@ const stageConfigs: Record<CandidateView, StageConfig> = {
 interface CandidateStagePageProps {
   view: CandidateView
   candidates: CandidateViewItem[]
+  total: number
   globalSearch: string
   onOpenCandidate: (candidate: CandidateViewItem) => void
 }
@@ -52,6 +53,7 @@ interface CandidateStagePageProps {
 export function CandidateStagePage({
   view,
   candidates,
+  total,
   globalSearch,
   onOpenCandidate,
 }: CandidateStagePageProps) {
@@ -61,6 +63,11 @@ export function CandidateStagePage({
     () => candidates.filter((candidate) => matchesSearch(candidate, globalSearch) && matchesFilter(view, candidate, filter)),
     [candidates, filter, globalSearch, view],
   )
+  // 单页读取有上限，candidates 可能只是脑侧前若干位。计数必须报 total，
+  // 否则人数会永远停在上限值、看起来像"正好这么多人"，还会跟首页累计
+  // 账面对不上。筛选是在已加载的这些人里做的，所以截断时必须说清楚。
+  const truncated = total > candidates.length
+  const filtering = globalSearch.trim() !== '' || filter !== '全部'
 
   return (
     <div className="rh-page">
@@ -83,8 +90,17 @@ export function CandidateStagePage({
             </button>
           ))}
         </div>
-        <span className="rh-result-count">{filtered.length} 位候选人</span>
+        <span className="rh-result-count">
+          {stageCountLabel(filtered.length, candidates.length, total, filtering, truncated)}
+        </span>
       </div>
+
+      {truncated && (
+        <div className="rh-inline-note">
+          <ProductIcon name="warning" size={15} />
+          共 {total} 位候选人，本页只加载了最近活动的 {candidates.length} 位；更早的暂未显示。
+        </div>
+      )}
 
       <section className="rh-panel rh-candidate-list-panel">
         {filtered.length === 0 ? (
@@ -126,6 +142,18 @@ export function CandidateStagePage({
       </section>
     </div>
   )
+}
+
+export function stageCountLabel(
+  filteredCount: number,
+  loadedCount: number,
+  total: number,
+  filtering: boolean,
+  truncated: boolean,
+): string {
+  if (!filtering) return `${total} 位候选人`
+  if (truncated) return `已加载 ${loadedCount} 位中筛出 ${filteredCount} 位`
+  return `${filteredCount} / ${total} 位候选人`
 }
 
 function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidate: CandidateViewItem }) {

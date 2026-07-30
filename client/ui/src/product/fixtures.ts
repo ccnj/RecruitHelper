@@ -241,6 +241,12 @@ export function createProductFixture(): ProductData {
       interviewed,
       wechat,
     },
+    candidateTotals: {
+      communicating: communicating.length,
+      pendingInterview: pendingInterview.length,
+      interviewed: interviewed.length,
+      wechat: wechat.length,
+    },
     connections: [
       { label: '客户授权', value: '授权有效', tone: 'success', detail: '当前设备已绑定' },
       { label: '后台职位配置', value: '已同步', tone: 'success', detail: '最近同步：今天 07:58' },
@@ -354,6 +360,12 @@ export function createEmptyProductData(): ProductData {
       pendingInterview: [],
       interviewed: [],
       wechat: [],
+    },
+    candidateTotals: {
+      communicating: 0,
+      pendingInterview: 0,
+      interviewed: 0,
+      wechat: 0,
     },
     connections: [
       { label: '客户授权', value: '等待激活', tone: 'warning', detail: '激活后会显示正式授权状态' },

@@ -282,6 +282,15 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
     interviewed: adaptCandidateList(snapshot.candidates.interviewed, 'interviewed', now),
     wechat: adaptCandidateList(snapshot.candidates.wechat, 'wechat', now),
   }
+  const candidateTotals = {
+    communicating: candidateTotal(snapshot.candidates.communicating, candidates.communicating),
+    pendingInterview: candidateTotal(
+      snapshot.candidates.pendingInterview,
+      candidates.pendingInterview,
+    ),
+    interviewed: candidateTotal(snapshot.candidates.interviewed, candidates.interviewed),
+    wechat: candidateTotal(snapshot.candidates.wechat, candidates.wechat),
+  }
   const statistics = rawOverview.statistics
 
   return {
@@ -331,6 +340,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
     },
     confirmation,
     candidates,
+    candidateTotals,
     connections: adaptConnections(runtime, job),
     confirmationBadge: snapshot.confirmation.confirmation.ready
       ? safeCount(snapshot.confirmation.confirmation.selectableCount)
@@ -634,6 +644,16 @@ export function adaptCandidateList(
   now = new Date(),
 ): CandidateViewItem[] {
   return (response.candidates.items ?? []).map((item) => adaptCandidateListItem(item, view, now))
+}
+
+// candidateTotal 取脑侧 total。脑总是随列表一起给出总数,但它若缺失或比
+// 本页条数还小(只可能是响应损坏),就退回本页条数——宁可少报,不能报出
+// 一个比看得见的人还少的总数。
+function candidateTotal(
+  response: AppCandidateListResponse | undefined,
+  items: CandidateViewItem[],
+): number {
+  return Math.max(safeCount(response?.candidates?.total), items.length)
 }
 
 function adaptCandidateListItem(
