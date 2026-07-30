@@ -571,14 +571,21 @@ func TestAppTodayMetricsSkipUntimedMessagesInsteadOfGoingBlind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 只有这两个指标由消息时间戳产出;今日新约面已改取 interviewed_at,与
+	// 平台消息时间无关。
 	for name, metric := range map[string]AppMetric{
-		"todayNewReplies":      got.Statistics.TodayNewReplies,
-		"todayInvited":         got.Statistics.TodayInvited,
-		"todayNewAppointments": got.Statistics.TodayNewAppointments,
+		"todayNewReplies": got.Statistics.TodayNewReplies,
+		"todayInvited":    got.Statistics.TodayInvited,
 	} {
 		if !metric.Exact || metric.Value == nil || *metric.Value != 1 {
 			t.Fatalf("%s 应忽略无平台时间的消息并给出精确 1，实得 %+v", name, metric)
 		}
+	}
+	// 该档案没有接受过面试邀约,今日新约面为精确 0。
+	if !got.Statistics.TodayNewAppointments.Exact ||
+		got.Statistics.TodayNewAppointments.Value == nil ||
+		*got.Statistics.TodayNewAppointments.Value != 0 {
+		t.Fatalf("今日新约面应为精确 0: %+v", got.Statistics.TodayNewAppointments)
 	}
 	// 该档案是沟通中、没有邀面卡，今日已过面试时间为精确 0。
 	if !got.Statistics.TodayElapsedInterviews.Exact ||

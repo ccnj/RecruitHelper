@@ -626,7 +626,18 @@ func appOverviewStatisticsTx(
 		return out, err
 	}
 	out.TodayInvited = exactMetric(todayInvite)
-	out.TodayNewAppointments = exactMetric(todayInvite)
+
+	// 今日新约面数的是"今天有几个人接受了面试邀约",取 interviewed_at。它此前
+	// 直接复制 todayInvited(今天发出邀面卡的人数),两个不同标签共用一个数字。
+	// 发卡与被接受是两件事,消息时间戳只能算出前者。
+	value = 0
+	if err := count(tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("interviewed_at >= ? AND interviewed_at < ?", start, end).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TodayNewAppointments = exactMetric(value)
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
