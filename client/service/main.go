@@ -175,7 +175,7 @@ func main() {
 		os.Exit(1)
 	}
 	productController, err := productapp.New(
-		st, productWorkflow, jobConfigSource, time.Now, dailyWindow,
+		st, productWorkflow, jobConfigSource, time.Now, dailyWindow, providerConfig,
 	)
 	if err != nil {
 		slog.Error("产品工作流控制面初始化失败", "err", err)

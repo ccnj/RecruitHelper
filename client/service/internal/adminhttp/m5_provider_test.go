@@ -65,7 +65,11 @@ func TestM5ProviderConfigAPIAlwaysMasksSecretAndBaseURL(t *testing.T) {
 	}
 }
 
-func TestM5ProviderConfigRejectsUnapprovedModel(t *testing.T) {
+// AGENTS.md 2026-07-30 甲方裁决放开了厂商与模型名校验(base_url/model 都改由旧
+// 后台下发,日后要换用非 deepseek 模型),所以"未批准模型必须被拒"这条旧断言已经
+// 作废。留下的义务是格式合法性:模型链首项的提取发生在导入侧,落到配置里的必须
+// 是单个模型 ID,不能再带分隔符或空白。
+func TestM5ProviderConfigAcceptsAnyWellFormedModel(t *testing.T) {
 	dataDir := t.TempDir()
 	st, _ := store.Open(dataDir)
 	defer st.Close()
@@ -73,16 +77,27 @@ func TestM5ProviderConfigRejectsUnapprovedModel(t *testing.T) {
 	api := New(st, newFakeAdminHub(), nil, nil, nil, "", configStore)
 	mux := http.NewServeMux()
 	api.Routes(mux)
-	config := m5ai.DefaultProviderConfig()
-	config.Model = "deepseek-v4-flash"
-	config.BaseURL = "https://provider.fixture/v1"
-	config.APIKey = "sk-fixture"
-	raw, _ := json.Marshal(config)
-	request := httptest.NewRequest(http.MethodPost, "/admin/m5/provider-config", strings.NewReader(string(raw)))
-	request.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
-	if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "deepseek-v4-flash") {
-		t.Fatalf("未批准模型未被安全拒绝: code=%d body=%s", response.Code, response.Body.String())
+	post := func(model string) int {
+		config := m5ai.DefaultProviderConfig()
+		config.Model = model
+		config.BaseURL = "https://provider.fixture/v1"
+		config.APIKey = "sk-fixture"
+		raw, _ := json.Marshal(config)
+		request := httptest.NewRequest(http.MethodPost, "/admin/m5/provider-config", strings.NewReader(string(raw)))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		return response.Code
+	}
+	for _, accepted := range []string{"deepseek-v4-flash", "kimi-k2-turbo", "qwen3-max"} {
+		if code := post(accepted); code != http.StatusOK {
+			t.Fatalf("合法模型 %q 被拒: code=%d", accepted, code)
+		}
+	}
+	// 模型链原样落盘会让 ProviderName/ModelName 与批次一致性校验失去意义,必须挡住。
+	for _, rejected := range []string{"deepseek-v4-pro,deepseek-v4-flash", "deepseek v4", " ", ""} {
+		if code := post(rejected); code != http.StatusBadRequest {
+			t.Fatalf("非法模型 %q 未被拒: code=%d", rejected, code)
+		}
 	}
 }

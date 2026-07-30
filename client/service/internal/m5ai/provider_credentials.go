@@ -1,0 +1,151 @@
+package m5ai
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"strings"
+)
+
+// BackendProviderCredentials 是旧后台 job-config 响应里的 provider 配置面
+// (AGENTS.md 2026-07-30 甲方裁决)。三字段在旧后台都是客户级配置,该客户下
+// 所有职位、所有提示词共用同一值,因此这里不按职位或用途区分,取第一个非空值
+// 即可。它不进入不可变职位配置版本,也不参与 revisionHash——只是每次同步顺手
+// 刷新的本机凭据。
+type BackendProviderCredentials struct {
+	BaseURL string
+	APIKey  string
+	// Model 是已经取过首项的单个模型 ID。旧后台那一列是"模型链"自由文本
+	// (实测 "deepseek-v4-pro,deepseek-v4-flash"),甲方裁决只取首项、其余
+	// 忽略,不实现失败换模型或任何主备切换。
+	Model string
+}
+
+func (c BackendProviderCredentials) empty() bool {
+	return c.BaseURL == "" && c.APIKey == "" && c.Model == ""
+}
+
+// credentialBlock 只解析 provider 三字段,刻意不复用 importer 的
+// legacyJobBundle:文档集合的严格校验(重复 doc_type、占位符、结构化区一致性)
+// 不该阻断凭据提取,两者是各自独立的失败面。
+type credentialBlock struct {
+	APIKey  *string `json:"apiKey"`
+	Model   *string `json:"model"`
+	BaseURL *string `json:"baseUrl"`
+}
+
+type credentialBundle struct {
+	Communication   credentialBlock `json:"communication"`
+	Scoring         credentialBlock `json:"scoring"`
+	Greeting        credentialBlock `json:"greeting"`
+	Intent          credentialBlock `json:"intent"`
+	SilenceFollowup credentialBlock `json:"silenceFollowup"`
+}
+
+func (b credentialBundle) blocks() []credentialBlock {
+	// 固定优先级只为"某个 block 恰好没配值"留退路,不是为了处理多值分歧——
+	// 实测同一客户下这些值本来就相同。
+	return []credentialBlock{b.Communication, b.Scoring, b.Greeting, b.Intent, b.SilenceFollowup}
+}
+
+type credentialPlural struct {
+	Jobs []credentialBundle `json:"jobs"`
+}
+
+// ExtractProviderCredentials 接受单职位或多职位形态的 job-config 响应,返回其中
+// 的 provider 凭据。解析不出结构时返回 error;结构正常但三字段都没值时返回空
+// 凭据且 err 为 nil——那是"后台没配"的正常状态,由调用方按兜底路径处理。
+func ExtractProviderCredentials(raw []byte) (BackendProviderCredentials, error) {
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		return BackendProviderCredentials{}, errors.New("job-config 响应无法解析 provider 凭据")
+	}
+	var bundles []credentialBundle
+	if _, plural := shape["jobs"]; plural {
+		var payload credentialPlural
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return BackendProviderCredentials{}, errors.New("job-config 多职位响应无法解析 provider 凭据")
+		}
+		bundles = payload.Jobs
+	} else {
+		var payload credentialBundle
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return BackendProviderCredentials{}, errors.New("job-config 单职位响应无法解析 provider 凭据")
+		}
+		bundles = []credentialBundle{payload}
+	}
+	var out BackendProviderCredentials
+	for _, bundle := range bundles {
+		for _, block := range bundle.blocks() {
+			if out.BaseURL == "" {
+				out.BaseURL = trimPointer(block.BaseURL)
+			}
+			if out.APIKey == "" {
+				out.APIKey = trimPointer(block.APIKey)
+			}
+			if out.Model == "" {
+				out.Model = firstModelInChain(trimPointer(block.Model))
+			}
+			if out.BaseURL != "" && out.APIKey != "" && out.Model != "" {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// RefreshBackendProviderConfig 用一次 job-config 响应刷新本机 provider 配置。
+//
+// 它刻意不返回错误:provider 凭据与职位配置导入是两条独立的失败面。凭据取不到
+// 不该挡住职位配置同步,更不该阻断脑启动或任何业务裁决;取不到就沿用本机既有
+// 配置,由既有的"模型连接尚未配齐 + 手工配置入口"兜底。
+//
+// 日志只出现 model、刷新了哪些字段与错误分类。base_url 原值与 API key 一概不记
+// (AGENTS.md「AI provider 数据边界」)。实际生效的 provider/model 由脑启动时的
+// "M5 建议层已就绪"负责记录,这里不重复。
+func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte) {
+	if store == nil {
+		return
+	}
+	credentials, err := ExtractProviderCredentials(raw)
+	if err != nil {
+		slog.Warn("旧后台 provider 凭据无法解析，沿用本机模型配置",
+			"errorCode", "providerCredentialsUnparsable")
+		return
+	}
+	if credentials.empty() {
+		return
+	}
+	applied, err := store.ApplyBackendCredentials(credentials)
+	if err != nil {
+		slog.Warn("旧后台 provider 凭据未能落盘，沿用本机模型配置",
+			"errorCode", "providerCredentialsNotStored")
+		return
+	}
+	if applied {
+		slog.Info("已按旧后台下发刷新模型配置，生效于下次启动",
+			"model", credentials.Model,
+			"baseUrlRefreshed", credentials.BaseURL != "",
+			"keyRefreshed", credentials.APIKey != "")
+	}
+}
+
+func trimPointer(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+// firstModelInChain 取模型链首项。旧后台那一列按逗号分隔,旧客户端另外还容忍
+// 换行,这里保持同样的宽容度,但只取首项。
+func firstModelInChain(raw string) string {
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r'
+	}) {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
