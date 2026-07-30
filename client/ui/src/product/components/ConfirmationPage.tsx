@@ -33,7 +33,9 @@ export function ConfirmationPage({
   const sendUnavailableReason = confirmationSendUnavailableReason(batch, allSelected, actions)
   const sendHint = sendProgress.started
     ? sendProgress.completed
-      ? `本批发送完成：成功 ${sendProgress.sent} 人${sendProgress.failed > 0 ? `，异常 ${sendProgress.failed} 人` : ''}`
+      ? `本批发送完成：成功 ${sendProgress.sent} 人` +
+        `${sendProgress.failed > 0 ? `，异常 ${sendProgress.failed} 人` : ''}` +
+        `${sendProgress.settledWithoutSend > 0 ? `，未发出 ${sendProgress.settledWithoutSend} 人` : ''}`
       : `系统正在逐人发送：已成功 ${sendProgress.sent} / ${sendProgress.total} 人，请勿重复点击`
     : sendUnavailableReason
 
@@ -196,19 +198,27 @@ export function ConfirmationPage({
   )
 }
 
+// 分母是"本次确认名单的人数"，必须在整批发送过程中单调不减。它一度按
+// sendState !== 'ineligible' 算，而 ineligible 把"招呼语没生成"和"招呼语就绪
+// 但最终没发出"糊在一起：推荐流一失效，还没铸造发送意图的人从 ready 掉成
+// abandoned，就被算进 ineligible、从分母里消失，用户看到已确认人数往下走。
+// 现在只把招呼语尚未就绪的排除在外，settledWithoutSend 留在分母里。
 function confirmationSendProgress(batch: ConfirmationBatchView) {
   const candidates = batch.candidates.filter((candidate) => candidate.sendState !== 'ineligible')
   const sent = candidates.filter((candidate) => candidate.sendState === 'sent').length
   const sending = candidates.filter((candidate) => candidate.sendState === 'sending').length
   const failed = candidates.filter((candidate) =>
     candidate.sendState === 'failed' || candidate.sendState === 'suspect').length
+  const settledWithoutSend = candidates.filter((candidate) =>
+    candidate.sendState === 'settledWithoutSend').length
   const started = sent + sending + failed > 0
   const completed = started &&
     candidates.every((candidate) =>
       candidate.sendState === 'sent' ||
       candidate.sendState === 'failed' ||
-      candidate.sendState === 'suspect')
-  return { completed, failed, sent, started, total: candidates.length }
+      candidate.sendState === 'suspect' ||
+      candidate.sendState === 'settledWithoutSend')
+  return { completed, failed, sent, settledWithoutSend, started, total: candidates.length }
 }
 
 function confirmationSendUnavailableReason(
@@ -232,6 +242,7 @@ function sendStateTone(state: ConfirmationCandidateView['sendState']) {
     sent: 'green',
     failed: 'red',
     suspect: 'red',
+    settledWithoutSend: 'slate',
     ineligible: 'slate',
   }
   return tones[state]

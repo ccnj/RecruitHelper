@@ -180,6 +180,9 @@ export type ConfirmationSendState =
   | 'sent'
   | 'failed'
   | 'suspect'
+  // 招呼语已就绪但最终没能发出。与 ineligible(招呼语没生成)分开，才能让
+  // 发送进度的分母在整批过程中单调不减。
+  | 'settledWithoutSend'
   | 'ineligible'
 
 export interface ConfirmationCandidateView extends CandidateViewItem {

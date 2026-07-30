@@ -609,6 +609,12 @@ function confirmationSendState(status: string): ConfirmationSendState {
   case 'sent': return 'sent'
   case 'failed': return 'failed'
   case 'suspect': return 'suspect'
+  // 招呼语已就绪、但最终没能发出(推荐流已变化、档案不再可发送)。它必须与
+  // "招呼语根本没生成"区分开:这些人当初是在确认名单里的,发送进度的分母得
+  // 一直算上他们,否则分母会在发送途中往下走。
+  case 'abandoned':
+  case 'unavailable':
+    return 'settledWithoutSend'
   default: return 'ineligible'
   }
 }
@@ -646,6 +652,7 @@ function confirmationStatusTone(
     sent: 'green',
     failed: 'red',
     suspect: 'red',
+    settledWithoutSend: 'slate',
     ineligible: 'slate',
   }
   return tones[state]

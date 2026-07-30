@@ -244,6 +244,21 @@ check(
 )
 check(splitFunnel.failed === 3, '顶部汇总仍是两阶段失败之和')
 check(product.confirmation.candidates[0].sendState === 'ready' && product.confirmationBadge === 1, '候选确认只把可发送成员计入徽章')
+// 招呼语已就绪但最终没发出的，必须与"招呼语根本没生成"分开：他们当初在确认
+// 名单里，被糊成 ineligible 会让发送进度的分母在途中往下走。
+const settledStates = structuredClone(snapshot)
+settledStates.confirmation.confirmation.candidates = [
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-abandoned', status: 'abandoned', selectable: false },
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-unavailable', status: 'unavailable', selectable: false },
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-genfailed', status: 'generationFailed', selectable: false },
+]
+const settledView = adaptProductSnapshot(settledStates, now).confirmation.candidates
+check(
+  settledView[0].sendState === 'settledWithoutSend' &&
+    settledView[1].sendState === 'settledWithoutSend' &&
+    settledView[2].sendState === 'ineligible',
+  '已就绪未发出与招呼语未生成映射为不同发送态',
+)
 const generationInProgress = structuredClone(snapshot)
 generationInProgress.confirmation.confirmation.ready = false
 generationInProgress.confirmation.confirmation.reason = 'greetingGenerationPending'
