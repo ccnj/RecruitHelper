@@ -600,19 +600,14 @@ func appOverviewStatisticsTx(
 	}
 	out.TodayGreeted = exactMetric(value)
 
-	todayInvite, inviteExact, err := appTimedMessageProfileCountTx(
+	todayInvite, err := appTimedMessageProfileCountTx(
 		tx, platform, accountRef, "out", "card", "interviewInvite", start, end,
 	)
 	if err != nil {
 		return out, err
 	}
-	if inviteExact {
-		out.TodayInvited = exactMetric(todayInvite)
-		out.TodayNewAppointments = exactMetric(todayInvite)
-	} else {
-		out.TodayInvited = unavailableMetric("存在无平台时间的邀面事实")
-		out.TodayNewAppointments = unavailableMetric("存在无平台时间的邀面事实")
-	}
+	out.TodayInvited = exactMetric(todayInvite)
+	out.TodayNewAppointments = exactMetric(todayInvite)
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
@@ -638,7 +633,7 @@ func appOverviewStatisticsTx(
 	}
 	out.TotalWechat = exactMetric(value)
 
-	todayReply, replyExact, err := appTimedMessageProfileCountTx(
+	todayReply, err := appTimedMessageProfileCountTx(
 		tx,
 		platform,
 		accountRef,
@@ -651,21 +646,28 @@ func appOverviewStatisticsTx(
 	if err != nil {
 		return out, err
 	}
-	if replyExact {
-		out.TodayNewReplies = exactMetric(todayReply)
-	} else {
-		out.TodayNewReplies = unavailableMetric("存在无平台时间的入站消息")
-	}
+	out.TodayNewReplies = exactMetric(todayReply)
 	out.TodayCompletedInterviews = unavailableMetric("当前没有面试完成写入口")
 	return out, nil
 }
 
+// appTimedMessageProfileCountTx 数当天窗口内有过该类消息的候选人数。
+//
+// 读不出平台时间的消息直接不计入(2026-07-30 甲方裁决)。此前的做法是:只要
+// 该账号历史上存在任何一条无平台时间的同类消息,整个指标就标为不可用。判定
+// 范围是全库而不是当天,于是三个月前的一条无时间戳老消息——跟"今天有几个人
+// 回复"毫无关系——会把今天的数字打成"—";业务事实又禁止物理删除,那条消息
+// 永远在库里,指标从此永久哑掉,再也不会出现数字。平台不给消息时间是常态,
+// 这条路径很容易被走到。
+//
+// 代价是少报且不作声:今天真有三人回复、其中一条没有平台时间,就只报两人。
+// 方向是宁可少报,与仓库既有保守取向一致。
 func appTimedMessageProfileCountTx(
 	tx *gorm.DB,
 	platform, accountRef string,
 	direction, kind, cardType string,
 	start, end time.Time,
-) (int64, bool, error) {
+) (int64, error) {
 	base := tx.Table("messages AS message").
 		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
@@ -677,19 +679,14 @@ func appTimedMessageProfileCountTx(
 	if cardType != "" {
 		base = base.Where("message.card_type = ?", cardType)
 	}
-	var missingTime int64
-	if err := base.Session(&gorm.Session{}).Where("message.ts_approx_ms IS NULL").
-		Count(&missingTime).Error; err != nil {
-		return 0, false, err
-	}
-	startMs, endMs := start.UnixMilli(), end.UnixMilli()
 	var value int64
-	if err := base.Session(&gorm.Session{}).
-		Where("message.ts_approx_ms >= ? AND message.ts_approx_ms < ?", startMs, endMs).
+	if err := base.
+		Where("message.ts_approx_ms >= ? AND message.ts_approx_ms < ?",
+			start.UnixMilli(), end.UnixMilli()).
 		Distinct("profile.profile_id").Count(&value).Error; err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	return value, missingTime == 0, nil
+	return value, nil
 }
 
 func appTodayInterviewsTx(

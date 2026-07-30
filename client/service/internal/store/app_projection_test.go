@@ -497,5 +497,85 @@ func TestAppTodayInterviewsFollowsLatestInviteCard(t *testing.T) {
 	}
 }
 
+// 缺平台时间的消息只是不计入当天，不得把整个指标打成不可用(2026-07-30
+// 甲方裁决)。此前判定范围是全库:一条三个月前的无时间戳消息就能让今日指标
+// 永久显示"—"，而业务事实禁止物理删除，那条消息永远都在。
+func TestAppTodayMetricsSkipUntimedMessagesInsteadOfGoingBlind(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.Local)
+	platform, accountRef, conversationRef := "zhilian", "untimed-account", "C-untimed"
+	createM4Account(t, s, platform, accountRef)
+
+	displayName, userRef, profileID := "候选人丁", "U-untimed", "P-untimed"
+	if err := s.db.Create(&Candidate{
+		Platform: platform, PlatformUserRef: userRef, DisplayName: &displayName,
+		FirstSeenAt: now.Add(-90 * 24 * time.Hour), LastSeenAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CandidateProfile{
+		ProfileID: profileID, Platform: platform, AccountRef: accountRef,
+		PlatformUserRef: userRef, PositionRef: "position-untimed",
+		MainStatus: CandidateProfileCommunicating, ConversationRef: &conversationRef,
+		ResumeCaptureState: ResumeCaptureUnattempted,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	todayMs := now.Add(-time.Hour).UnixMilli()
+	inviteStarts := time.Date(2026, 7, 31, 10, 0, 0, 0, time.Local).UnixMilli()
+	for _, message := range []Message{
+		// 三个月前落库、平台没给时间的老消息。
+		{
+			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef, Seq: 1,
+			Direction: "in", Kind: "text", ContentHash: strings.Repeat("7", 64),
+			Text: appPtrString("在吗"), Origin: "external",
+		},
+		// 今天的正常回复。
+		{
+			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef, Seq: 2,
+			Direction: "in", Kind: "text", ContentHash: strings.Repeat("8", 64),
+			Text: appPtrString("有兴趣"), Origin: "external", TsApproxMs: &todayMs,
+		},
+		// 昨天发出、平台没给时间的邀面卡。
+		{
+			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef, Seq: 3,
+			Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "accepted",
+			ContentHash: strings.Repeat("9", 64), InterviewStartsAtMs: &inviteStarts,
+			Origin: "self",
+		},
+		// 今天发出的邀面卡。
+		{
+			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef, Seq: 4,
+			Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "accepted",
+			ContentHash: strings.Repeat("6", 64), InterviewStartsAtMs: &inviteStarts,
+			TsApproxMs: &todayMs, Origin: "self",
+		},
+	} {
+		if err := s.db.Create(&message).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.AppOverview(AppOverviewRequest{
+		Now: now, Platform: platform, AccountRef: accountRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, metric := range map[string]AppMetric{
+		"todayNewReplies":      got.Statistics.TodayNewReplies,
+		"todayInvited":         got.Statistics.TodayInvited,
+		"todayNewAppointments": got.Statistics.TodayNewAppointments,
+	} {
+		if !metric.Exact || metric.Value == nil || *metric.Value != 1 {
+			t.Fatalf("%s 应忽略无平台时间的消息并给出精确 1，实得 %+v", name, metric)
+		}
+	}
+	// 没有面试完成写入口的指标仍然如实报不可用，本次不动它。
+	if got.Statistics.TodayCompletedInterviews.Exact {
+		t.Fatalf("无写入口的指标不得改口称精确: %+v", got.Statistics.TodayCompletedInterviews)
+	}
+}
+
 func appPtrTime(value time.Time) *time.Time { return &value }
 func appPtrString(value string) *string     { return &value }
