@@ -269,6 +269,168 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jobPublishDraftView{JobID: target.JobID, Report: report})
 }
 
+type jobPublishResultView struct {
+	JobID    string `json:"jobId"`
+	IntentID string `json:"intentId"`
+	Status   string `json:"status"`
+	Created  bool   `json:"created"`
+	// 取得平台正证时才有；未确认时为空，由 diagnostics 说明现场。
+	Report      *protocol.JobPublishDraftData `json:"report,omitempty"`
+	Diagnostics any                           `json:"diagnostics,omitempty"`
+}
+
+// jobPublishPublish 真正把一个职位发布到平台。
+//
+// 这是本能力唯一会产生对外副作用的入口：一次请求最多发一个职位，绝不循环。
+// 幂等由 intentID（职位 + 发布参数 hash 派生）与 WAL 保证，HTTP 重试只会收编
+// 原意图，不会再发一次。
+func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Platform   string `json:"platform"`
+		AccountRef string `json:"accountRef"`
+		JobID      string `json:"jobId"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
+		return
+	}
+	key, err := validateAccountKey(req.Platform, req.AccountRef)
+	req.JobID = strings.TrimSpace(req.JobID)
+	if err != nil || req.JobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
+		return
+	}
+	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "职位发布服务尚未就绪"})
+		return
+	}
+	// 与预检同一道闸：发布要占用页面并导航，批次在跑时一律拒绝。
+	batch, err := a.st.ActiveSourcingBatch(key)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		return
+	}
+	if batch != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "当前有采集批次在运行，发布会打断推荐流；请先结束批次",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
+	defer cancel()
+	raw, err := a.jobConfigSource.FetchAll(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
+		return
+	}
+	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
+		return
+	}
+	var target *jobconfig.BackendJobPublishSource
+	for i := range sources {
+		if sources[i].JobID == req.JobID {
+			target = &sources[i]
+			break
+		}
+	}
+	if target == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位当前不在后台启用职位中"})
+		return
+	}
+	// 发布前再跑一次确定性参数预检：参数不合格就不该消耗一次不可逆动作。
+	spec, issues := jobconfig.ParsePublishSpec(target.PublishParams)
+	if len(issues) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位发布参数未通过预检，先修参数再发布"})
+		return
+	}
+	var args protocol.JobPrepareDraftArgs
+	argsRaw, err := json.Marshal(spec.DraftArgs(target.JobName))
+	if err != nil || json.Unmarshal(argsRaw, &args) != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "发布参数组装失败"})
+		return
+	}
+
+	receipt, err := a.disp.PublishJob(dispatch.PublishJobRequest{
+		Platform: key.Platform, AccountRef: key.AccountRef, JobID: req.JobID, Args: args,
+	})
+	if receipt == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "职位发布未能派发：" + errText(err)})
+		return
+	}
+	// 已经派发出去了：此后无论如何都不能再发一次，只能读账本看它怎么收束。
+	view := jobPublishResultView{
+		JobID: req.JobID, IntentID: receipt.IntentID,
+		Status: receipt.Status, Created: receipt.Created,
+	}
+	logical, waitErr := a.disp.WaitLogical(ctx, receipt.MsgID)
+	if waitErr != nil {
+		view.Diagnostics = map[string]any{
+			"note": "发布命令已派发但未在本次请求内收束；按 intentId 查账本，不要重发",
+		}
+		writeJSON(w, http.StatusAccepted, view)
+		return
+	}
+	report, proofErr := parsePublishDraftProof(receipt.MsgID, logical)
+	if proofErr != nil {
+		view.Diagnostics = prepareDraftFailureDiagnostics(logical)
+		if view.Diagnostics == nil {
+			view.Diagnostics = map[string]any{"note": proofErr.Error()}
+		}
+		if intent, lookupErr := a.disp.PublishJobStatus(receipt.IntentID); lookupErr == nil {
+			view.Status = string(intent.Status)
+		}
+		writeJSON(w, http.StatusConflict, view)
+		return
+	}
+	if intent, lookupErr := a.disp.PublishJobStatus(receipt.IntentID); lookupErr == nil {
+		view.Status = string(intent.Status)
+	}
+	view.Report = &report
+	writeJSON(w, http.StatusOK, view)
+}
+
+func errText(err error) string {
+	if err == nil {
+		return "原因未知"
+	}
+	return err.Error()
+}
+
+func parsePublishDraftProof(
+	msgID string,
+	logical *store.LogicalDispatchState,
+) (protocol.JobPublishDraftData, error) {
+	var zero protocol.JobPublishDraftData
+	if logical == nil || !logical.Settled {
+		return zero, errors.New("发布命令未终局")
+	}
+	leaf := logical.Leaf
+	if leaf.Name != protocol.PrimJobPublishDraft || leaf.Status != store.CmdOk || leaf.ResultBody == "" {
+		return zero, errors.New("发布未取得成功终局")
+	}
+	resultRaw := json.RawMessage(leaf.ResultBody)
+	if err := protocol.ValidatePrimitiveResult(protocol.PrimJobPublishDraft, 1, resultRaw); err != nil {
+		return zero, errors.New("发布结果不符合契约")
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal(resultRaw, &result); err != nil ||
+		result.Ref != msgID || result.Status != protocol.ResultStatusOk {
+		return zero, errors.New("发布结果关联无效")
+	}
+	var data protocol.JobPublishDraftData
+	if err := json.Unmarshal(result.Data, &data); err != nil {
+		return zero, errors.New("发布数据无法解析")
+	}
+	// 契约要求成功必须带平台正证；没有正证的成功不该存在。
+	if !data.PostingVisible {
+		return zero, errors.New("发布结果缺少平台正证")
+	}
+	return data, nil
+}
+
 // prepareDraftFailureDiagnostics 取手侧 failed 结果里的失败现场快照。它是
 // 手写进 error.data 的自由结构，只透给人看，不参与任何判定；读不出来就当没有。
 func prepareDraftFailureDiagnostics(logical *store.LogicalDispatchState) any {
