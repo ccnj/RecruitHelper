@@ -105,7 +105,7 @@ function createWindow(adminToken, uiEntry) {
   win = new BrowserWindow({
     width: 1200,
     height: 840,
-    title: '招聘助手 · 客户端',
+    title: 'AI增员助手 · 客户端',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -151,9 +151,9 @@ function createTray() {
       writeLog('[main] 托盘图标解码为空,托盘将无图标 —— 检查 trayIcon.js 是否是合法 PNG')
     }
     tray = new Tray(icon)
-    tray.setToolTip('招聘助手')
+    tray.setToolTip('AI增员助手')
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: '打开招聘助手', click: showWindow },
+      { label: '打开AI增员助手', click: showWindow },
       { type: 'separator' },
       {
         label: '退出',
@@ -191,7 +191,7 @@ if (!primaryInstance) {
     // 安装包不完整等启动前置失败必须当场可见,不留一个开了窗却没有脑的壳。
     const detail = String(error?.message || error)
     console.error('[main] 启动失败', detail)
-    dialog.showErrorBox('招聘助手无法启动', detail)
+    dialog.showErrorBox('AI增员助手无法启动', detail)
     quitting = true
     app.quit()
   })
