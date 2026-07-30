@@ -246,19 +246,50 @@ func (a *API) suspects(w http.ResponseWriter, _ *http.Request) {
 	type view struct {
 		MsgID                string `json:"msgId"`
 		Name                 string `json:"name"`
+		Action               string `json:"action"`
 		HandID               string `json:"handId"`
 		Reason               string `json:"reason"`
+		ReasonText           string `json:"reasonText"`
 		IdemKey              string `json:"idemKey"`
 		ReviewReady          bool   `json:"reviewReady"`
 		ReviewAfter          *int64 `json:"reviewAfter,omitempty"`
 		VerificationAttempts int    `json:"verificationAttempts"`
+
+		// 裁决现场：谁、什么、何时、卡在哪。
+		Platform        string `json:"platform"`
+		AccountRef      string `json:"accountRef"`
+		IntentID        string `json:"intentId"`
+		ConversationRef string `json:"conversationRef"`
+		PeerDisplayName string `json:"peerDisplayName"`
+		Summary         string `json:"summary"`
+		DispatchedAtMs  int64  `json:"dispatchedAtMs"`
+		DeadlineMs      int64  `json:"deadlineMs"`
+		ErrorCode       string `json:"errorCode"`
+		SideEffect      string `json:"sideEffect"`
+
+		// 原始现场。摘要挑不出来的线索都在这里，前端折叠显示。
+		Args       string `json:"args"`
+		Guards     string `json:"guards"`
+		ResultBody string `json:"resultBody"`
 	}
 	out := make([]view, 0, len(recs))
 	for _, r := range recs {
 		ready, after := a.disp.SuspectReviewState(r)
+		conversationRef, summary := argsFacts(r.Args)
 		out = append(out, view{
-			MsgID: r.MsgID, Name: r.Name, HandID: r.HandID, Reason: r.SuspectReason, IdemKey: r.IdemKey,
-			ReviewReady: ready, ReviewAfter: after, VerificationAttempts: r.VerificationN,
+			MsgID: r.MsgID, Name: r.Name, Action: suspectActionName(r.Name),
+			HandID: r.HandID, Reason: r.SuspectReason, ReasonText: humanizeSuspectReason(r.SuspectReason),
+			IdemKey: r.IdemKey, ReviewReady: ready, ReviewAfter: after, VerificationAttempts: r.VerificationN,
+
+			Platform: r.Platform, AccountRef: r.AccountRef, IntentID: r.IntentID,
+			ConversationRef: conversationRef,
+			PeerDisplayName: a.peerDisplayNameFor(r, conversationRef),
+			Summary:         summary,
+			DispatchedAtMs:  unixMilliOrZero(r.CreatedAt),
+			DeadlineMs:      r.DeadlineMs,
+			ErrorCode:       r.ErrorCode, SideEffect: r.SideEffect,
+
+			Args: r.Args, Guards: r.Guards, ResultBody: r.ResultBody,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"suspects": out})
