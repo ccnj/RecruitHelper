@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -32,10 +33,10 @@ type PublishJobReceipt struct {
 
 // BuildPublishJobIntentID 由职位、本次发布材料与尝试序号派生稳定意图标识。
 //
-// 同一职位 + 同一份发布参数 + 同一序号 → 同一 intentID → 同一 idemKey → 账本闸
-// 只允许发一次；HTTP 重试会收编原意图而不是另铸一个。运营改了发布参数再发是新的
-// intentID，允许发第二次（甲方 2026-07-30 裁决的口径），此时平台侧"同名不重发"
-// 那道闸仍然兜着。
+// 同一职位 + 同一份发布参数 + 同一序号 → 同一 intentID → 同一 idemKey → 同一次
+// 尝试只允许发一次；HTTP 重试会收编原意图而不是另铸一个。运营改了发布参数再发是
+// 新的 intentID，允许发第二次（甲方 2026-07-30 裁决的口径），此时平台侧"同名不
+// 重发"那道闸仍然兜着。
 //
 // attempt 从 1 起。序号 1 不带后缀，好让本裁决之前落下的意图仍然命中同一身份。
 func BuildPublishJobIntentID(jobID, payloadHash string, attempt int) string {
@@ -51,26 +52,25 @@ func BuildPublishJobIntentID(jobID, payloadHash string, attempt int) string {
 // 要人在产品上重新点一次发布。
 const maxPublishJobAttempts = 20
 
-// publishAttemptExhausted 判断某个既有意图是否已被证明"什么都没发出去"，因而
-// 允许运营重新发起一次。
+// publishAttemptSettled 判断某个既有意图是否已经终局，因而运营显式再发时可以
+// 递进尝试序号、铸造新意图（甲方 2026-07-30 裁决）。
 //
-// 只认一种情形：意图终局为 failed，且其根命令记录的副作用标注是 none。按协议
-// 规格，job.publishDraft 点击之前的任何失败一律 sideEffect=none，点击之后一律
-// possible——所以 none 是"未发布"的确证，而不是猜测。其余一切（在途、验证中、
-// ok、suspect、人裁终局，以及 possible/confirmed 或标注缺失的失败）都不得重来：
-// 那些情形下平台上可能已经有这个职位了。
-func (d *Dispatcher) publishAttemptExhausted(intent store.EffectIntent) (bool, error) {
-	if intent.Status != store.EffectIntentFailed {
-		return false, nil
+// 账本闸的本意是防误重发（HTTP 重试、连点两下），不是禁止一次新的业务行为：
+// 发布 → 下架/删除 → 重新发布是正常招聘动作，卡死它等于删过的职位永远发不了。
+// 真正的防重复闸是点击前的 expectAbsentOnPlatform——平台实读，比哈希比对强得多；
+// 职位还在时那道闸会让本次干净失败（sideEffect=none），不会产生重复职位。
+//
+// suspect 例外：它是"结果未知、等人裁决"的未收束态，绝不能被新尝试绕过，否则
+// idemKey 冻结形同虚设。在途（dispatching/reconciling/verifying）同理。
+func publishAttemptSettled(intent store.EffectIntent) bool {
+	switch intent.Status {
+	case store.EffectIntentOk, store.EffectIntentResolvedOk,
+		store.EffectIntentFailed, store.EffectIntentResolvedFailed:
+		return true
+	default:
+		// dispatching / reconciling / verifying / suspect 一律不许重来。
+		return false
 	}
-	root, err := d.st.CmdByMsgID(intent.RootMsgID)
-	if err != nil {
-		return false, err
-	}
-	if root == nil {
-		return false, nil
-	}
-	return root.SideEffect == string(protocol.SideEffectNone), nil
 }
 
 // PublishJob 派发唯一一次职位发布。WAL 与 idemKey 唯一性都在
@@ -106,12 +106,12 @@ func (d *Dispatcher) PublishJob(req PublishJobRequest) (*PublishJobReceipt, erro
 	// 精确重试优先收编原意图。命中后不再重跑准备阶段——那可能在平台上已经
 	// 发出去了，再走一遍就是第二次发布。
 	//
-	// 例外只有一种：上一次尝试已被证明什么都没发出去（终局 failed 且
-	// sideEffect=none，例如守卫没过或表单填不进去）。那种意图是永久终局，
-	// 不能原地复活，否则就是改写业务事实；改由下一个序号铸造新意图，让运营
-	// 能真的重来一次。不加这个出路的话，一次干净失败会把该职位这份参数永久
-	// 锁死在 failed 上。
+	// 例外：既有意图已经终局时，运营显式再发就递进尝试序号铸造新意图。旧意图
+	// 是永久终局、不原地复活，也不改写业务事实。未收束的（在途、suspect）一律
+	// 直接回原收据，绝不绕过。
 	intentID := ""
+	superseded := ""
+	supersededStatus := ""
 	for attempt := 1; attempt <= maxPublishJobAttempts; attempt++ {
 		candidate := BuildPublishJobIntentID(req.JobID, payloadHash, attempt)
 		existing, lookupErr := d.st.EffectIntentByID(candidate)
@@ -127,19 +127,23 @@ func (d *Dispatcher) PublishJob(req PublishJobRequest) (*PublishJobReceipt, erro
 			existing.PayloadHash != payloadHash {
 			return nil, store.ErrEffectIntentConflict
 		}
-		exhausted, exhaustedErr := d.publishAttemptExhausted(*existing)
-		if exhaustedErr != nil {
-			return nil, exhaustedErr
-		}
-		if !exhausted {
+		if !publishAttemptSettled(*existing) {
 			return &PublishJobReceipt{
 				IntentID: existing.IntentID, MsgID: existing.RootMsgID,
 				Created: false, Status: string(existing.Status),
 			}, nil
 		}
+		superseded, supersededStatus = existing.IntentID, string(existing.Status)
 	}
 	if intentID == "" {
-		return nil, errors.New("该职位同一份发布参数的干净失败次数已达上限，先查清失败原因再发")
+		return nil, errors.New("该职位同一份发布参数的尝试次数已达上限，先查清原因再发")
+	}
+	if superseded != "" {
+		// 在既有终局意图之后重新发起必须留痕：这是账本上"同一份参数发第二次"
+		// 的唯一线索，尤其当上一次是 ok/resolvedOk（职位曾经真的上过线）。
+		d.st.Audit("job_publish_reattempt", "", superseded,
+			fmt.Sprintf("jobId=%s 既有意图 %s(%s) 已终局，运营显式再发，新意图 %s",
+				req.JobID, superseded, supersededStatus, intentID))
 	}
 
 	account, err := d.st.AccountByKey(store.AccountKey{Platform: req.Platform, AccountRef: req.AccountRef})

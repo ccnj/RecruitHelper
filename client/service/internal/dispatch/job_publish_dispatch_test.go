@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -58,6 +59,34 @@ func TestBuildEffectIdemKeyDistinguishesPublishTargets(t *testing.T) {
 		if key == same {
 			t.Fatalf("%s 后 idemKey 不应相同", name)
 		}
+	}
+}
+
+// 账本闸放宽到"已终局即可重来"之后，唯一不能松的是未收束态：suspect 是
+// 结果未知等人裁，在途是还没回来，两者被新尝试绕过就等于 idemKey 冻结失效。
+func TestPublishAttemptSettledNeverBypassesUnsettledIntents(t *testing.T) {
+	settled := []store.EffectIntentStatus{
+		store.EffectIntentOk, store.EffectIntentResolvedOk,
+		store.EffectIntentFailed, store.EffectIntentResolvedFailed,
+	}
+	for _, status := range settled {
+		if !publishAttemptSettled(store.EffectIntent{Status: status}) {
+			t.Fatalf("%s 已终局，运营显式再发应允许递进尝试序号", status)
+		}
+	}
+	unsettled := []store.EffectIntentStatus{
+		store.EffectIntentSuspect, store.EffectIntentDispatching,
+		store.EffectIntentReconciling, store.EffectIntentVerifying,
+	}
+	for _, status := range unsettled {
+		if publishAttemptSettled(store.EffectIntent{Status: status}) {
+			t.Fatalf("%s 尚未收束，绝不允许被新尝试绕过", status)
+		}
+	}
+	// 未知/空状态必须落到保守分支，不能因为不在枚举里就被当成可重来。
+	if publishAttemptSettled(store.EffectIntent{Status: ""}) ||
+		publishAttemptSettled(store.EffectIntent{Status: "somethingNew"}) {
+		t.Fatal("未知意图状态必须按未收束处理")
 	}
 }
 
