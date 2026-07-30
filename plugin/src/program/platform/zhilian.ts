@@ -6330,10 +6330,24 @@ async function ensureZhilianJobPublishTab(
   try {
     // 即使当前已在发布页也重新导航一次:表单只活在页面内存里,
     // 上一次的残留会污染这次回读。
-    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL })
+    // active:true 是甲方要求的业务行为(发布过程要肉眼可见),同时它也是这条
+    // 链路的技术前提:后台标签页不跑 CSS 过渡,Vue 的离场过渡起了头就走不完
+    // (transitionend 永不触发),已关闭的下拉面板会永远停在 opacity:1、
+    // height>0,把"等面板收口"这一步逼成死等。真机实测:标签页一回到前台,
+    // 残留节点立刻消失。
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL, active: true })
   } catch (error) {
     commandNavigation.end()
     throw error
+  }
+  // 光把标签页设为 active 还不够:窗口若未聚焦(或被最小化),Chrome 仍可能
+  // 判 hidden。窗口聚焦失败不影响发布本身,不让它掀翻整条链路。
+  if (tab.windowId !== undefined && tab.windowId !== chrome.windows.WINDOW_ID_NONE) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true, drawAttention: true })
+    } catch {
+      // 忽略:窗口聚焦是尽力而为。
+    }
   }
   const tabId = tab.id
   if (tabId === undefined) {
