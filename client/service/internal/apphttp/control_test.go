@@ -208,7 +208,22 @@ func TestStartFailureMapsKnownSentinelsToFixedTextOnly(t *testing.T) {
 		{
 			name: "accountUnavailable",
 			err:  productapp.ErrAccountUnavailable,
-			want: "没有唯一可运行的平台账号",
+			want: "没有可运行的平台账号",
+		},
+		{
+			name: "handUnavailable",
+			err:  fmt.Errorf("start: %w", productapp.ErrHandUnavailable),
+			want: "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试",
+		},
+		{
+			name: "handAmbiguous",
+			err:  productapp.ErrHandAmbiguous,
+			want: "检测到多个在线插件，请只保留一个装有插件的 Chrome",
+		},
+		{
+			name: "loginRequired",
+			err:  productapp.ErrLoginRequired,
+			want: "请先在 Chrome 中登录智联招聘端，再点击开始",
 		},
 		{
 			name: "jobConfigUnavailableKeepsChainDetailInside",

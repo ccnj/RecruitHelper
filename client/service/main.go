@@ -183,6 +183,11 @@ func main() {
 		slog.Error("产品工作流控制面初始化失败", "err", err)
 		os.Exit(1)
 	}
+	// 账号跟随登录:产品页"开始"探测当前 Chrome 登录主体并找回/建档账本根,
+	// 绑定经 actor 与命令派发线性化。
+	productController.SetAccountResolver(appbridge.LoginAccountResolver{
+		Hub: hub, Prober: runner, Binder: actor, Now: time.Now,
+	})
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
 	events := make(chan session.SensorEvent, 128)
