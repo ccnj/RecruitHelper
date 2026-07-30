@@ -155,6 +155,66 @@ func TestDeadFieldNoticesAlwaysSurfaceAndNeverBlock(t *testing.T) {
 	}
 }
 
+func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
+	spec, issues := ParsePublishSpec(validPublishParams)
+	if len(issues) != 0 {
+		t.Fatalf("夹具不应有问题: %s", issueFields(issues))
+	}
+	// 夹具里发布参数的职位名称是"财富传承顾问"，这里刻意传一个不同的后台职位名：
+	// 按裁决必须发后者，前者是死字段。
+	args := spec.DraftArgs("财富传承顾问(法律/财务/税务背景优先)")
+
+	if args["jobName"] != "财富传承顾问(法律/财务/税务背景优先)" {
+		t.Fatalf("职位名未取调用方传入的 job.name: %v", args["jobName"])
+	}
+	// 两个死字段一旦漏进入参，手就会拿它去填表——职位名漂移会让候选人配置错配，
+	// 职位类别根本没有可填的控件。
+	if _, leaked := args["职位名称"]; leaked {
+		t.Fatal("发布参数里的职位名称不得进入试填参数")
+	}
+	for _, key := range []string{"jobClass", "职位类别", "category"} {
+		if _, leaked := args[key]; leaked {
+			t.Fatalf("职位类别不得进入试填参数（平台按描述自动判定）: %s", key)
+		}
+	}
+
+	want := map[string]any{
+		"employmentType": "社招全职",
+		"education":      "大专",
+		"experience":     "3-5年",
+		"salaryMin":      "2万",
+		"salaryMax":      "4万",
+		"salaryMonths":   "12个月",
+		"headcount":      int64(1),
+		"showToSeeker":   false,
+		"syncToMailbox":  false,
+	}
+	for key, expected := range want {
+		if args[key] != expected {
+			t.Fatalf("%s 映射错误: 期望 %v 实得 %v", key, expected, args[key])
+		}
+	}
+	keywords, ok := args["keywords"].([]string)
+	if !ok || len(keywords) != 4 || keywords[0] != "个人客户" {
+		t.Fatalf("关键词映射错误: %v", args["keywords"])
+	}
+	description, ok := args["description"].(string)
+	if !ok || !strings.Contains(description, "【关于团队】") {
+		t.Fatalf("职位描述未原样传递: %q", description)
+	}
+	// 手侧契约的 args 只认这些键；多一个都会被 ValidatePrimitiveArgs 拒。
+	if len(args) != 12 {
+		t.Fatalf("试填参数键数与契约不符: %d 个 %v", len(args), args)
+	}
+}
+
+func TestDraftArgsTrimsCallerJobName(t *testing.T) {
+	spec, _ := ParsePublishSpec(validPublishParams)
+	if got := spec.DraftArgs("  财富传承顾问  ")["jobName"]; got != "财富传承顾问" {
+		t.Fatalf("职位名未去除首尾空白: %q", got)
+	}
+}
+
 func TestSalaryTiersMatchLivePlatformEnumeration(t *testing.T) {
 	// 2026-07-29 真机读到的下拉共 59 档。这条断言锁住枚举面：档位不是连续值，
 	// 放宽成"能被 1000 整除"会放过 3.1万 这种并不存在的档位。
