@@ -243,8 +243,26 @@ func main() {
 		os.Getenv(selfupdate.UpdateDirEnv),
 		selfupdate.DefaultInterval,
 	)
+	var updateInstaller *selfupdate.InstallGate
 	if updateChecker != nil {
 		background.Go(func() { updateChecker.Run(appCtx) })
+		// 上一次交出安装器之后到底装成没有,只能靠"现在跑着的是哪一版"来判断。
+		// 读不动那张字条不拦启动 —— 它只是诊断与防循环的依据。
+		if _, confirmErr := selfupdate.ConfirmPendingInstall(
+			updateChecker.DownloadDir, updateChecker.CurrentVersion,
+		); confirmErr != nil {
+			slog.Warn("核对上次自动安装结果失败", "err", confirmErr)
+		}
+		updateInstaller = &selfupdate.InstallGate{
+			Store: st, Workflow: productController, Checker: updateChecker,
+			StateDir: updateChecker.DownloadDir,
+		}
+	}
+	// 未启用自更新时不要把一个 nil 的具体指针塞进 Option:它会变成"非 nil 的
+	// 接口值",让 apphttp 里的 nil 检查失效。
+	var updateInstallerOption apphttp.Option
+	if updateInstaller != nil {
+		updateInstallerOption = apphttp.WithUpdateInstaller(updateInstaller)
 	}
 	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,
 	// 不受业务运行窗口约束;失败只降级不阻塞业务主线。
@@ -306,6 +324,7 @@ func main() {
 				return snapshot, nil
 			}),
 			apphttp.WithWorkflowControl(productController),
+			updateInstallerOption,
 			apphttp.WithUpdateStatusProvider(func() apphttp.UpdateStatus {
 				status := updateChecker.Status()
 				return apphttp.UpdateStatus{

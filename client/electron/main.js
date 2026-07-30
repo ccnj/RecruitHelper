@@ -1,8 +1,9 @@
 // Electron 主进程(壳):启动脑服务 → 等就绪 → 开窗加载 UI → 显式退出时停服务。
 // 三层职责硬边界:壳只管窗口与进程;逻辑中枢在 Go 服务;UI 只展示与人工回填。
 'use strict'
-const { app, BrowserWindow, Menu, Tray, dialog, nativeImage } = require('electron')
+const { app, BrowserWindow, Menu, Tray, dialog, nativeImage, ipcMain } = require('electron')
 const crypto = require('node:crypto')
+const { spawn } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const { BrainService } = require('./service')
@@ -105,8 +106,53 @@ async function boot() {
   const healthy = await service.waitHealthy(ADMIN_BASE)
   if (!healthy) writeLog('[main] 脑服务未在期限内就绪')
 
+  // 只认本次进程的 token:renderer 不传凭据,主进程用自己手上那份去问脑。
+  ipcMain.handle('recruit-helper:install-update', () => runUpdateInstall(adminToken))
+
   createWindow(adminToken, layout.uiEntry)
   createTray()
+}
+
+/**
+ * 执行一次自动更新:先问脑能不能装,拿到路径后启动安装器并退出。
+ *
+ * 裁决全在脑那边(包重新校验、结束运行中的工作流、等在途命令收敛),这里只做
+ * 它做不了的两件事 —— 脑杀不掉自己,而安装器要覆盖的正是这两个进程。
+ *
+ * @returns {Promise<{ok:boolean, error?:string}>}
+ */
+async function runUpdateInstall(adminToken) {
+  let packagePath = ''
+  try {
+    const response = await fetch(`${ADMIN_BASE}/app/update/install`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    })
+    const body = await response.json().catch(() => ({}))
+    if (!response.ok) return { ok: false, error: body.error || `脑返回 ${response.status}` }
+    packagePath = String(body.packagePath || '')
+  } catch (error) {
+    return { ok: false, error: `无法联系脑服务:${String(error?.message || error)}` }
+  }
+  if (!packagePath) return { ok: false, error: '脑未给出安装包路径' }
+
+  try {
+    // detached 是硬要求:安装器上来就 taskkill 本进程,非 detached 的子进程会被
+    // 一起带走,于是"更新"变成"客户端凭空消失"。unref 让本进程不等它。
+    const child = spawn(packagePath, ['/S'], { detached: true, stdio: 'ignore' })
+    child.unref()
+    writeLog(`[update] 已交出安装器,即将退出:${packagePath}`)
+  } catch (error) {
+    return { ok: false, error: `启动安装器失败:${String(error?.message || error)}` }
+  }
+
+  // 留一点时间让安装器真正起来再退。它随后会 taskkill 我们,这里主动退只是
+  // 为了让脑走正常的关闭路径,少留一份要靠恢复轨收敛的中断。
+  setTimeout(() => {
+    quitting = true
+    app.quit()
+  }, 1000)
+  return { ok: true }
 }
 
 function createWindow(adminToken, uiEntry) {

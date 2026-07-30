@@ -103,12 +103,23 @@ func WithUpdateStatusProvider(provider UpdateStatusProvider) Option {
 	return func(api *API) { api.updates = provider }
 }
 
+// UpdateInstaller 把世界收拾到可以安全重启的状态，返回可执行的安装包路径。
+// 它不执行安装——脑杀不掉自己，执行必须由壳来做。
+type UpdateInstaller interface {
+	Prepare(context.Context) (string, error)
+}
+
+func WithUpdateInstaller(installer UpdateInstaller) Option {
+	return func(api *API) { api.installer = installer }
+}
+
 type API struct {
 	projections ProjectionStore
 	bearer      string
 	runtime     RuntimeSnapshotProvider
 	control     WorkflowControl
 	updates     UpdateStatusProvider
+	installer   UpdateInstaller
 	now         func() time.Time
 }
 
@@ -140,6 +151,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
 	mux.HandleFunc("POST /app/jobs/sync", h(a.syncJobs))
 	mux.HandleFunc("GET /app/update", h(a.updateStatus))
+	mux.HandleFunc("POST /app/update/install", h(a.installUpdate))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
@@ -415,6 +427,24 @@ func (a *API) updateStatus(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, a.updates())
+}
+
+// installUpdate 是产品 UI 上"立即更新"那一下。用户已经在二次确认里知道这会结束
+// 当前运行,所以这里不再劝阻;但判据一条不减 —— 包必须重新校验通过、在途命令必须
+// 收敛,否则宁可不装。
+//
+// 返回的是安装包路径,由壳去执行并退出。脑不自己动手:它马上要被那个安装器杀掉。
+func (a *API) installUpdate(w http.ResponseWriter, r *http.Request) {
+	if a.installer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "自动安装尚未就绪"})
+		return
+	}
+	packagePath, err := a.installer.Prepare(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"packagePath": packagePath})
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {

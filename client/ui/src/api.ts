@@ -6,6 +6,8 @@ declare global {
     recruitHelper?: {
       adminBase?: string
       adminToken?: string
+      // 安装新版必须在主进程做:renderer 起不了进程。这里只发意图,拿回结果。
+      installUpdate?: () => Promise<{ ok: boolean; error?: string }>
     }
   }
 }

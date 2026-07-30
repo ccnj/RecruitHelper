@@ -64,6 +64,22 @@ type Checker struct {
 	status      Status
 	failures    map[string]int
 	lastFailure string // 上次报告过的失败原因，只为日志去重
+	// readySHA256 是已备好那个包的期望哈希。留着是为了安装前再验一次:下载与
+	// 安装之间隔着任意长的时间,磁盘上的东西可能被动过,而那是要执行的文件。
+	readySHA256 string
+}
+
+// ReadyPackage 返回已备好的安装包路径与它的期望哈希。ok 为假表示当前没有可装的。
+func (c *Checker) ReadyPackage() (path, sha256Hex, version string, ok bool) {
+	if c == nil {
+		return "", "", "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.status.Ready || c.status.Version == "" || c.readySHA256 == "" {
+		return "", "", "", false
+	}
+	return c.packagePath(c.status.Version), c.readySHA256, c.status.Version, true
 }
 
 // New 返回一个可用的 Checker;配置不全时返回 nil,调用方据此不启用自更新。
@@ -191,7 +207,7 @@ func (c *Checker) CheckOnce(ctx context.Context) error {
 	// 已经下过就别再下一次 95MB。不信任文件名,重算哈希 —— 磁盘上的东西可能被动过,
 	// 而这是个待执行的文件。
 	if verifyFile(target, feed.SHA256) == nil {
-		c.markReady(feed.Version)
+		c.markReady(feed.Version, feed.SHA256)
 		return nil
 	}
 	if failures >= maxVerifyFailures {
@@ -203,17 +219,18 @@ func (c *Checker) CheckOnce(ctx context.Context) error {
 		c.mu.Unlock()
 		return err
 	}
-	c.markReady(feed.Version)
+	c.markReady(feed.Version, feed.SHA256)
 	slog.Info("新版客户端已下载并校验通过，等待安装时机",
 		"version", feed.Version, "current", c.CurrentVersion)
 	return nil
 }
 
-func (c *Checker) markReady(version string) {
+func (c *Checker) markReady(version, sha256Hex string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.status.Version == version {
 		c.status.Ready = true
+		c.readySHA256 = sha256Hex
 	}
 	delete(c.failures, version)
 }
