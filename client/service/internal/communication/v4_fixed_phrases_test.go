@@ -208,25 +208,64 @@ func TestRenderV4FixedPhraseUsesOnlyApprovedSalutationPlaceholder(t *testing.T) 
 	}
 }
 
-func TestRenderV4FixedPhraseRejectsMissingUnknownAndResidualPlaceholders(t *testing.T) {
+// 2026-07-30 甲方裁决:占位符取不到值、或压根不认识,都删掉花括号继续发,
+// 不再因为配置不完美停下一整条业务线。
+func TestRenderV4FixedPhraseDropsUnresolvedPlaceholders(t *testing.T) {
 	tests := []struct {
-		name       string
-		template   string
-		salutation string
+		name     string
+		template string
+		input    V4FixedPhraseRenderInput
+		want     string
 	}{
-		{name: "missing salutation", template: "{称呼}您好"},
-		{name: "unknown", template: "{姓名}您好", salutation: "候选人女士"},
-		{name: "unclosed", template: "{称呼您好", salutation: "候选人女士"},
-		{name: "stray close", template: "称呼}您好", salutation: "候选人女士"},
-		{name: "placeholder in value", template: "{称呼}您好", salutation: "{姓名}"},
+		{name: "缺称呼", template: "{称呼}您好", want: "您好"},
+		{name: "未知占位符", template: "{姓名}您好",
+			input: V4FixedPhraseRenderInput{Salutation: "候选人女士"}, want: "您好"},
+		{name: "未闭合左括号", template: "{称呼您好",
+			input: V4FixedPhraseRenderInput{Salutation: "候选人女士"}, want: "称呼您好"},
+		{name: "孤立右括号", template: "称呼}您好",
+			input: V4FixedPhraseRenderInput{Salutation: "候选人女士"}, want: "称呼您好"},
+		{name: "缺面试时间", template: "好的，那我们 {面试时间} 线上见。",
+			want: "好的，那我们线上见。"},
+		{name: "有面试时间", template: "好的，那我们 {面试时间} 线上见。",
+			input: V4FixedPhraseRenderInput{InterviewTime: "7月31日 10:00"},
+			want:  "好的，那我们 7月31日 10:00 线上见。"},
+		{name: "删除后行首标点", template: "{称呼}，看您一直没回", want: "看您一直没回"},
+		{name: "两个占位符只有一个有值", template: "{称呼}，我们 {面试时间} 见",
+			input: V4FixedPhraseRenderInput{Salutation: "候选人女士"},
+			want:  "候选人女士，我们见"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rendered, err := RenderV4FixedPhrase(test.template, test.input)
+			if err != nil || rendered != test.want {
+				t.Fatalf("降级渲染结果不符: rendered=%q want=%q err=%v", rendered, test.want, err)
+			}
+		})
+	}
+}
+
+// 内容侧只剩两种仍然停机的情况,两种都不是"配置不好看":删干净后无字可发,
+// 以及取值自身带花括号(那等于让配置注入占位符)。
+func TestRenderV4FixedPhraseStillStopsWhenNothingSurvives(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		input    V4FixedPhraseRenderInput
+	}{
+		{name: "整条被删空", template: "{面试时间}"},
+		{name: "删空后只剩标点", template: "{称呼}，"},
+		{name: "取值自带花括号", template: "{称呼}您好",
+			input: V4FixedPhraseRenderInput{Salutation: "{姓名}"}},
+		{name: "面试时间自带花括号", template: "{面试时间}见",
+			input: V4FixedPhraseRenderInput{InterviewTime: "{时间}"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if rendered, err := RenderV4FixedPhrase(
 				test.template,
-				V4FixedPhraseRenderInput{Salutation: test.salutation},
+				test.input,
 			); !errors.Is(err, ErrInvalidV4FixedPhraseRender) || rendered != "" {
-				t.Fatalf("非法固定话术必须响亮失败: rendered=%q err=%v", rendered, err)
+				t.Fatalf("无字可发时必须停: rendered=%q err=%v", rendered, err)
 			}
 		})
 	}
