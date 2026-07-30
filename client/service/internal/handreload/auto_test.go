@@ -368,6 +368,11 @@ func TestAutoReloadTriggersWhenDiskVersionIsNewerThanRunningPlugin(t *testing.T)
 	if h.dispatcher.calls != 1 {
 		t.Fatalf("应恰好派发一次，实际 %d 次", h.dispatcher.calls)
 	}
+	// 契约明明一致,原因就必须说是版本。2026-07-30 真机首验时日志把这两者报串,
+	// 排查会一开始就朝契约方向走 —— 所以这条断言比"是否触发"更值得盯。
+	if outcome.Reason != "版本落后于磁盘上的插件" {
+		t.Fatalf("触发原因应指向版本，实际 %q", outcome.Reason)
+	}
 }
 
 func TestAutoReloadSkipsWhenRunningPluginMatchesDisk(t *testing.T) {
@@ -436,8 +441,12 @@ func TestAutoReloadStillTriggersOnContractDriftRegardlessOfVersion(t *testing.T)
 		[]string{Capability()}, nil,
 		"sha256:stale-plugin", false, "0.2.2", time.Now(),
 	)
-	if outcome := h.evaluate(); !outcome.Triggered || outcome.Err != nil {
+	outcome := h.evaluate()
+	if !outcome.Triggered || outcome.Err != nil {
 		t.Fatalf("契约漂移应始终触发重载: %+v", outcome)
+	}
+	if outcome.Reason != "契约与当前脑不一致" {
+		t.Fatalf("触发原因应指向契约，实际 %q", outcome.Reason)
 	}
 }
 

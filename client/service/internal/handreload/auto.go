@@ -11,16 +11,23 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-// DefaultInterval:插件版本对不上时业务是停住的(contractMatch 会挡住 effectful
-// 派发),所以评估要够勤;但每轮要读一次库,也没必要更密。
+// DefaultInterval:插件对不上时要么业务停住,要么正带着旧代码跑,所以评估要够勤;
+// 但每轮要读一次库和一次 manifest,也没必要更密。
+//
+// 代价是换代最多要等这么久才被发现:2026-07-30 真机首验里,客户端启动到插件换代
+// 完成隔了 30 秒,其间 chrome://extensions 显示的仍是旧版本号。
 const DefaultInterval = 30 * time.Second
 
 // AutoReloader 在客户端换代之后替人点掉那一下 Chrome 重载。
 //
-// 它解决的是一个具体场景:人工装完新版包、客户端重启、pluginSeed 已经把新插件写
-// 进固定目录,但 Chrome 里跑的还是旧代码。此时 contractMatch 为假,effectful 全部
-// 禁派 —— 系统是安全的,可业务静止,而且现场没人知道要去 chrome://extensions 点
-// 一次刷新。
+// 它解决的是一个具体场景:装完新版包、客户端重启、pluginSeed 已经把新插件写进固定
+// 目录,但 Chrome 里跑的还是旧代码,而现场没人知道要去 chrome://extensions 点一次
+// 刷新。这个场景有两副面孔:
+//
+//   - 改了契约的版本:contractMatch 为假,effectful 全部禁派 —— 安全,但业务静止;
+//   - 没改契约的版本(绝大多数):什么都不挡,业务带着旧插件代码照常跑,更隐蔽。
+//
+// 两者都要认出来,判据见 staleReason。
 //
 // 两道闸决定了它绝不会没完没了地重载:
 //
@@ -81,8 +88,11 @@ type Outcome struct {
 	// Triggered 为真表示这轮真的派发了一次重载。
 	Triggered bool
 	HandID    string
-	Result    Result
-	Err       *Error
+	// Reason 是触发本次重载的信号(契约还是版本)。它同时进日志 —— 两者的排查
+	// 方向完全不同,报串会让排查一开始就走错方向。
+	Reason string
+	Result Result
+	Err    *Error
 	// Skipped 说明这轮为什么没动手(没有目标时为空)。
 	Skipped string
 }
@@ -112,7 +122,7 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 	// 读文件放在锁外。
 	expected := ExpectedPluginVersion(a.pluginDir)
 
-	target, skipped := a.pickTarget(expected)
+	target, reason, skipped := a.pickTarget(expected)
 	if target == nil {
 		return Outcome{Skipped: skipped}
 	}
@@ -121,10 +131,13 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 	a.attempted[target.HandID] = target.BootID
 	a.mu.Unlock()
 
-	slog.Warn("插件契约与当前脑不一致，自动重载插件",
-		"handId", target.HandID, "bootId", target.BootID,
-		"handContract", target.ContractHash, "brainContract", protocol.ContractHash,
-		"extVersion", target.ExtVersion)
+	// 契约与版本是两个独立信号,日志必须说清是哪一个触发的:报串会让排查一开始
+	// 就走错方向 —— 2026-07-30 真机首验时,契约明明一致(两个 hash 一模一样)而
+	// 日志却写着"契约不一致",正是这条的实证。
+	slog.Warn("插件需要换代，自动重载",
+		"reason", reason, "handId", target.HandID, "bootId", target.BootID,
+		"handVersion", target.ExtVersion, "diskVersion", expected,
+		"handContract", target.ContractHash, "brainContract", protocol.ContractHash)
 
 	result, reloadErr := a.orchestrator.Reload(ctx, target.HandID)
 	if reloadErr != nil {
@@ -144,43 +157,53 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 			slog.Info("自动重载本轮未通过前置判据，稍后重试",
 				"handId", target.HandID, "kind", string(reloadErr.Kind), "err", reloadErr.Message)
 		}
-		return Outcome{Triggered: true, HandID: target.HandID, Err: reloadErr}
+		return Outcome{Triggered: true, HandID: target.HandID, Reason: reason, Err: reloadErr}
 	}
 
 	slog.Info("插件已自动换代",
 		"handId", result.HandID, "previousBootId", result.PreviousBootID,
 		"bootId", result.BootID, "extVersion", result.ExtensionVersion)
-	return Outcome{Triggered: true, HandID: target.HandID, Result: result}
+	return Outcome{Triggered: true, HandID: target.HandID, Reason: reason, Result: result}
 }
 
-// staleHand 判断这只手跑的是不是过时的插件。两个独立信号:
+// staleReason 说明这只手为什么算过时,空字符串表示不过时。两个独立信号:
 //
 //  1. 契约对不上。只有改了契约的版本才会让它变,但它是硬信号 —— 此时 effectful
 //     已经被禁派,业务是停住的。
 //  2. 版本对不上。磁盘上已经换成新版而手还报着旧版号。绝大多数更新不动契约,
 //     这一条才是常态;而且此时业务并没有停,是带着旧插件代码照常跑,更隐蔽。
 //
+// 返回的是原因而不是布尔,因为日志必须说清是哪个信号触发的 —— 两者的排查方向
+// 完全不同。
+//
 // 任一方"不知道"就不算过时:磁盘版本读不到(expected 为空)或手根本没报版本,
 // 都是缺证据,不是反证。宁可不重载,也不为一个读不出来的文件去动推荐流。
-func staleHand(state session.HandState, expectedVersion string) bool {
+func staleReason(state session.HandState, expectedVersion string) string {
 	if !state.ContractMatch || state.ContractHash != protocol.ContractHash {
-		return true
+		return "契约与当前脑不一致"
 	}
-	return expectedVersion != "" && state.ExtVersion != "" &&
-		state.ExtVersion != expectedVersion
+	if expectedVersion != "" && state.ExtVersion != "" &&
+		state.ExtVersion != expectedVersion {
+		return "版本落后于磁盘上的插件"
+	}
+	return ""
 }
 
-// pickTarget 找出这轮该重载的手,顺便清理已经恢复正常的手的记录。
-func (a *AutoReloader) pickTarget(expectedVersion string) (*session.HandState, string) {
+// pickTarget 找出这轮该重载的手与原因,顺便清理已经恢复正常的手的记录。
+func (a *AutoReloader) pickTarget(
+	expectedVersion string,
+) (*session.HandState, string, string) {
 	capability := Capability()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.noteExpectedVersion(expectedVersion)
 
 	var target *session.HandState
+	targetReason := ""
 	skipped := ""
 	for _, state := range a.orchestrator.Registry.Snapshot() {
-		if !staleHand(state, expectedVersion) {
+		reason := staleReason(state, expectedVersion)
+		if reason == "" {
 			// 这只手已经跑在对的插件上,不管是自动修好的还是人工重载的,记录都
 			// 该清干净,这样下次换代时它能重新参与。
 			delete(a.attempted, state.HandID)
@@ -195,8 +218,8 @@ func (a *AutoReloader) pickTarget(expectedVersion string) (*session.HandState, s
 			skipped = "目标手不具备一键重载能力"
 			continue
 		}
-		if reason, stopped := a.halted[state.HandID]; stopped {
-			skipped = "该手已停手待人工处理：" + reason
+		if haltReason, stopped := a.halted[state.HandID]; stopped {
+			skipped = "该手已停手待人工处理：" + haltReason
 			continue
 		}
 		if a.attempted[state.HandID] == state.BootID {
@@ -206,9 +229,10 @@ func (a *AutoReloader) pickTarget(expectedVersion string) (*session.HandState, s
 		if target == nil {
 			copied := state
 			target = &copied
+			targetReason = reason
 		}
 	}
-	return target, skipped
+	return target, targetReason, skipped
 }
 
 // noteExpectedVersion 只在磁盘版本读数变化时说一句话 —— 每 30 秒重复同一行
