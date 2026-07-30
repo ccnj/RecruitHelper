@@ -37,3 +37,4 @@ release/
 .idea/
 .vscode/
 *.swp
+.claude/settings.local.json

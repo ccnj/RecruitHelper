@@ -134,6 +134,9 @@ func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jo
 			status: http.StatusBadGateway, message: "旧后台当前职位配置读取失败",
 		}
 	}
+	// provider 凭据刷新与职位配置导入是两条独立的失败面:凭据取不到不该挡住职位
+	// 配置,职位文档不合法也不该让已经拿到的凭据落不了盘。
+	m5ai.RefreshBackendProviderConfig(a.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, syncedAt)
 	if err != nil {
 		return nil, &jobConfigSyncFailure{
