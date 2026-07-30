@@ -68,7 +68,10 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     workflow.canEnd && !pendingEnd && !pendingSourcing,
     pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason,
   )
-  const confirmationCount = overview.funnel.stages.find((stage) => stage.key === 'confirm')?.target ?? 0
+  // 等待确认的人数是 funnel.pending(脑侧 pendingConfirm)。这里一度取
+  // stages.confirm.target，那是本批选中总数：招呼语生成失败、推荐流已变化、
+  // 不再可发送的都算在里面，于是首页说"20 位等待确认"、侧栏徽章说 18。
+  const confirmationCount = overview.funnel.pending ?? 0
   const taskPosition = pendingEnd
     ? '正在结束当前候选人…'
     : pendingSourcing
