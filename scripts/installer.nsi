@@ -77,13 +77,39 @@ UninstPage instfiles
 ; suspect decisions all converge through the existing recovery path on next
 ; start. The installer opens no side channel for that and does not attempt to
 ; "gracefully wind down business" -- that is the brain's own ledger discipline.
+; Appends one line to a log that survives the install, so a failed silent run
+; leaves evidence. It must NOT live under $INSTDIR: that directory gets wiped by
+; RMDir /r a few lines below, which would erase exactly the record needed to
+; explain a failure at that point. The updates directory is the client's own
+; staging area and is never touched by the installer.
+!macro InstallLog Text
+  CreateDirectory "$LOCALAPPDATA\RecruitHelper\updates"
+  FileOpen $8 "$LOCALAPPDATA\RecruitHelper\updates\install.log" a
+  IfErrors +4
+    FileSeek $8 0 END
+    FileWrite $8 "${Text}$\r$\n"
+    FileClose $8
+!macroend
+
 !macro StopRunningApp
   DetailPrint "Stopping running RecruitHelper processes..."
   ; The brain binary is deliberately not named service.exe, so this kill cannot
   ; hit unrelated same-named processes on the system.
   nsExec::Exec 'taskkill /F /IM "${BRAIN_EXE}" /T'
   Pop $0
-  nsExec::Exec 'taskkill /F /IM "${APP_EXE}" /T'
+  ; NO /T on the shell. During an in-app update the client spawns this installer,
+  ; so the installer is a child of ${APP_EXE}; /T walks the process tree by
+  ; ParentProcessId and would kill us mid-run. Node's detached:true does not help
+  ; -- on Windows it only detaches the console, the parent link remains.
+  ;
+  ; 2026-07-30 real-machine failure: the update reached "handed off the
+  ; installer", the brain died with code=1, and the machine came back still on
+  ; the old version with $INSTDIR intact -- the installer never got as far as
+  ; overwriting files because it had terminated itself here.
+  ;
+  ; Dropping /T loses nothing: the only child of the shell that matters is the
+  ; brain, already killed by name above.
+  nsExec::Exec 'taskkill /F /IM "${APP_EXE}"'
   Pop $0
   ; A non-zero result just means the process was not running. Not an error.
   Sleep 800
@@ -97,7 +123,14 @@ Section "Install"
     MessageBox MB_ICONSTOP "LOCALAPPDATA is not set; cannot determine a safe install directory."
     Abort
 
+  ; Four breadcrumbs, placed at the boundaries that actually failed or could
+  ; fail. A silent run shows nothing on screen, so without these a failure is
+  ; only visible as "the version did not change" -- which is what happened on
+  ; 2026-07-30 and had to be diagnosed by inference.
+  !insertmacro InstallLog "[${VERSION}] installer started"
+
   !insertmacro StopRunningApp
+  !insertmacro InstallLog "[${VERSION}] processes stopped, still alive"
 
   ; Clear the old files before overwriting so nothing from the previous version
   ; survives into the new one. Safe: the install directory holds no user data
@@ -147,8 +180,15 @@ Section "Install"
   ;
   ; Exec, not ExecWait: waiting would keep the installer process alive for the
   ; whole session, and the client that spawned us is already gone.
-  IfSilent 0 +2
+  ; A named label, not "+n": relative jumps count *instructions*, and the log
+  ; macro below expands to six of them. Any edit inside it would silently move
+  ; the target -- and the failure mode of an off-by-one here is "silent install
+  ; does not relaunch", i.e. the machine ends up with no client running.
+  !insertmacro InstallLog "[${VERSION}] files written"
+  IfSilent 0 skip_relaunch
+    !insertmacro InstallLog "[${VERSION}] silent install, relaunching client"
     Exec '"$INSTDIR\${APP_EXE}"'
+  skip_relaunch:
 SectionEnd
 
 Section "Uninstall"
