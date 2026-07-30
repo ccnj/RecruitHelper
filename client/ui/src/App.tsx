@@ -2,8 +2,9 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import {
   api, ADMIN_BASE, CANDIDATE_READ_ERROR, CANDIDATE_SELECT_ERROR,
   SendIntentConflictError, SendIntentRejectedError,
-  AccountView, AuditView, BackendJobView, ConversationView, DetailedError, DevSQLResult, FrameEvent, HandHealth, Health,
-  JobConfigSourceView, JobDraftReport, JobPublishPrecheckView, LedgerRow, M5AIContextView,
+  AccountView, AuditView, BackendJobView, ConversationView, DetailedError, DevSQLResult, FrameEvent,
+  HandHealth, Health, JobClassResolveView, JobConfigSourceView, JobDraftReport, JobPublishPrecheckView,
+  JobPublishResult, LedgerRow, M5AIContextView,
   M5ProviderConfigView, MessageView, MutationResult, PublishParamsState, PublishVerdict,
   SendIntentView, Suspect, TimeValue,
 } from './api'
@@ -751,7 +752,8 @@ const DIAG_LABELS: Array<[string, string]> = [
   ['keywordAt', '关键词进度'],
   ['keyword', '当前关键词'],
   ['keywordRoute', '走的路径'],
-  ['autoJobClass', '平台判定类别'],
+  ['jobClass', '选定类别'],
+  ['prefilledClass', '平台预填类别'],
   ['matched', '已命中'],
   ['custom', '已自定义'],
   ['dropped', '已丢弃'],
@@ -790,7 +792,7 @@ function DraftReportBlock({ report }: { report: JobDraftReport }) {
   return (
     <div className="publish-draft-report">
       <p>
-        <span>类别</span><strong>{report.autoJobClass || '平台未判定'}</strong>
+        <span>类别</span><strong>{report.jobClass}</strong>
         <span>薪资</span><strong>{report.salaryMin}-{report.salaryMax} × {report.salaryMonths}</strong>
         <span>学历经验</span><strong>{report.education} · {report.experience}</strong>
       </p>
@@ -816,8 +818,81 @@ function DraftReportBlock({ report }: { report: JobDraftReport }) {
   )
 }
 
-// 预检结论面板。本轮只呈现结论与试填诊断，不提供发布入口——发布是独立的一轮，
-// 需要先在真机确定"发布成功"的可见后置状态才能定义完成信号。
+// 发布结果。postingVisible 是平台正证：没有它就不算成功，界面必须说清"可能已经
+// 发出去了但没验到"，而不是含糊地显示失败——那会诱导人再发一次。
+function PublishResultBlock({ result }: { result: JobPublishResult }) {
+  const confirmed = result.report?.postingVisible === true
+  return (
+    <div className={`publish-draft-report ${confirmed ? '' : 'publish-draft-diag'}`}>
+      <p>
+        <span>发布</span>
+        <strong className={confirmed ? 'ok' : 'bad'}>
+          {confirmed ? '已取得平台正证' : '未确认——请去平台核对，不要重发'}
+        </strong>
+        <span>意图</span><strong>{result.intentId}</strong>
+        <span>账本状态</span><strong>{result.status}</strong>
+      </p>
+      {result.report && (
+        <p>
+          <span>选定类别</span><strong>{result.report.jobClass}</strong>
+          <span>回读轮次</span><strong>{result.report.verifyRounds}</strong>
+        </p>
+      )}
+      {result.report?.platformFeedback && (
+        <p className="publish-draft-sections">平台提示：{result.report.platformFeedback}</p>
+      )}
+    </div>
+  )
+}
+
+// 类别决定面板。候选是平台针对这个职位现给的封闭集合，点一个即可覆盖脑的选择——
+// 大模型只是建议者，最后按哪个发由人定。释义是平台自己的定义，也是判断贴合度的
+// 依据，所以必须显示出来而不是只列名字。
+function JobClassBlock({
+  view, effective, onPick,
+}: { view: JobClassResolveView; effective: string; onPick: (name: string) => void }) {
+  const overridden = effective !== view.jobClass
+  return (
+    <div className="publish-draft-report publish-job-class">
+      <p>
+        <span>将以此类别发布</span><strong className="ok">{effective}</strong>
+        <span>来源</span>
+        <strong>
+          {view.source === 'configuredExactMatch' ? '后台配置值精确命中' : '大模型选定'}
+          {view.confidence !== undefined && ` · 置信度 ${view.confidence.toFixed(2)}`}
+          {overridden && ' · 已被人工改选'}
+        </strong>
+      </p>
+      {view.configuredClass && (
+        <p>
+          <span>后台填的是</span>
+          <strong>
+            {view.configuredClass}
+            {view.source === 'model' && ' —— 不在平台候选里，未生效'}
+          </strong>
+          {view.prefilledClass && <><span>平台预填</span><strong>{view.prefilledClass}</strong></>}
+        </p>
+      )}
+      {view.reason && <p className="publish-draft-sections">选择理由：{view.reason}</p>}
+      <ul className="publish-job-class-list">
+        {view.candidates.map((candidate: JobClassResolveView['candidates'][number]) => (
+          <li key={candidate.name} className={candidate.name === effective ? 'is-picked' : undefined}>
+            <button type="button" onClick={() => onPick(candidate.name)} title="改用这个类别发布">
+              {candidate.name}
+            </button>
+            <small>{candidate.definition}</small>
+          </li>
+        ))}
+      </ul>
+      {view.attempts && view.attempts.length > 1 && (
+        <p className="publish-draft-dropped">大模型尝试：{view.attempts.join('、')}</p>
+      )}
+    </div>
+  )
+}
+
+// 预检结论面板：呈现结论、试填诊断与发布入口。发布按钮需要连点两次，
+// 因为它是这条链上唯一不可逆的动作。
 function PublishPrecheckPanel({
   view, at, account,
 }: { view: JobPublishPrecheckView; at: string; account: AccountView | null }) {
@@ -825,14 +900,74 @@ function PublishPrecheckPanel({
   const [draftBusy, setDraftBusy] = useState('')
   const [draftError, setDraftError] = useState<Record<string, string>>({})
   const [draftDiag, setDraftDiag] = useState<Record<string, Record<string, unknown>>>({})
+  const [publishBusy, setPublishBusy] = useState('')
+  const [publishArmed, setPublishArmed] = useState('')
+  const [publishResult, setPublishResult] = useState<Record<string, JobPublishResult>>({})
+  const [classes, setClasses] = useState<Record<string, JobClassResolveView>>({})
+  const [classPick, setClassPick] = useState<Record<string, string>>({})
+  const [classBusy, setClassBusy] = useState('')
+
+  // 生效类别：默认脑定的那个，人工改选后用改选值。
+  const effectiveClass = (jobId: string): string =>
+    classPick[jobId] || classes[jobId]?.jobClass || ''
+
+  // 第一趟：读平台候选并定类别。零对外副作用，可以随便重跑。
+  const resolveClass = async (jobId: string, jobName: string) => {
+    if (!account) return
+    setClassBusy(jobId)
+    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
+    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
+    try {
+      const view = await api.jobPublishClassCandidates(account.platform, account.accountRef, jobId)
+      setClasses((prev) => ({ ...prev, [jobId]: view }))
+      setClassPick((prev) => ({ ...prev, [jobId]: '' }))
+    } catch (reason) {
+      setDraftError((prev) => ({
+        ...prev, [jobId]: `定「${jobName}」的职位类别未成功：${errorText(reason)}`,
+      }))
+      if (reason instanceof DetailedError && reason.diagnostics) {
+        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
+      }
+    } finally {
+      setClassBusy('')
+    }
+  }
+
+  // 发布是唯一不可逆的动作：第一次点只解锁按钮，第二次点才真发。
+  const publish = async (jobId: string, jobName: string) => {
+    if (!account) return
+    if (publishArmed !== jobId) {
+      setPublishArmed(jobId)
+      return
+    }
+    const jobClass = effectiveClass(jobId)
+    if (!jobClass) return
+    setPublishArmed('')
+    setPublishBusy(jobId)
+    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
+    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
+    try {
+      const result = await api.jobPublishPublish(account.platform, account.accountRef, jobId, jobClass)
+      setPublishResult((prev) => ({ ...prev, [jobId]: result }))
+    } catch (reason) {
+      setDraftError((prev) => ({ ...prev, [jobId]: `发布「${jobName}」未成功：${errorText(reason)}` }))
+      if (reason instanceof DetailedError && reason.diagnostics) {
+        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
+      }
+    } finally {
+      setPublishBusy('')
+    }
+  }
 
   const tryDraft = async (jobId: string) => {
     if (!account) return
+    const jobClass = effectiveClass(jobId)
+    if (!jobClass) return
     setDraftBusy(jobId)
     setDraftError((prev) => ({ ...prev, [jobId]: '' }))
     setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
     try {
-      const result = await api.jobPublishPrepareDraft(account.platform, account.accountRef, jobId)
+      const result = await api.jobPublishPrepareDraft(account.platform, account.accountRef, jobId, jobClass)
       setDrafts((prev) => ({ ...prev, [jobId]: result.report }))
     } catch (reason) {
       setDraftError((prev) => ({ ...prev, [jobId]: errorText(reason) }))
@@ -846,6 +981,8 @@ function PublishPrecheckPanel({
     }
   }
 
+  // 三步共用一条忙碌闸:同一时刻只允许一条链路占用页面。
+  const busy = classBusy !== '' || draftBusy !== '' || publishBusy !== ''
   const ready = view.rows.filter((row) => row.verdict === 'ready')
   const others = view.rows.filter((row) => row.verdict !== 'ready')
   return (
@@ -868,11 +1005,42 @@ function PublishPrecheckPanel({
               {row.verdict === 'ready' && (
                 <button
                   type="button"
-                  disabled={draftBusy !== '' || !account}
-                  title="在发布页试填一次并回读，不会点击发布"
+                  disabled={busy || !account}
+                  title="读平台给这个职位的类别候选并定下用哪个；不会填其余字段、不会发布"
+                  onClick={() => void resolveClass(row.jobId, row.jobName)}
+                >
+                  {classBusy === row.jobId
+                    ? '正在读候选…'
+                    : classes[row.jobId] ? '重新定类别' : '① 定职位类别'}
+                </button>
+              )}
+              {row.verdict === 'ready' && (
+                <button
+                  type="button"
+                  disabled={busy || !account || !effectiveClass(row.jobId)}
+                  title={effectiveClass(row.jobId)
+                    ? '在发布页试填一次并回读，不会点击发布'
+                    : '先定职位类别：关键词弹层要等类别定下才打得开'}
                   onClick={() => void tryDraft(row.jobId)}
                 >
-                  {draftBusy === row.jobId ? '正在试填…' : '试填一次'}
+                  {draftBusy === row.jobId ? '正在试填…' : '② 试填一次'}
+                </button>
+              )}
+              {row.verdict === 'ready' && !publishResult[row.jobId] && (
+                <button
+                  type="button"
+                  className={publishArmed === row.jobId ? 'danger-button' : undefined}
+                  disabled={busy || !account || !effectiveClass(row.jobId)}
+                  title={effectiveClass(row.jobId)
+                    ? '真正发布到平台，求职者立刻可见；不可撤销，只能到平台手动下架'
+                    : '先定职位类别'}
+                  onClick={() => void publish(row.jobId, row.jobName)}
+                >
+                  {publishBusy === row.jobId
+                    ? '正在发布…'
+                    : publishArmed === row.jobId
+                      ? `确认以「${effectiveClass(row.jobId)}」发布？再点一次`
+                      : '③ 发布到平台'}
                 </button>
               )}
             </div>
@@ -882,6 +1050,14 @@ function PublishPrecheckPanel({
             {draftDiag[row.jobId] && Object.keys(draftDiag[row.jobId]).length > 0 && (
               <DraftDiagnosticsBlock diagnostics={draftDiag[row.jobId]} />
             )}
+            {classes[row.jobId] && (
+              <JobClassBlock
+                view={classes[row.jobId]}
+                effective={effectiveClass(row.jobId)}
+                onPick={(name) => setClassPick((prev) => ({ ...prev, [row.jobId]: name }))}
+              />
+            )}
+            {publishResult[row.jobId] && <PublishResultBlock result={publishResult[row.jobId]} />}
             {drafts[row.jobId] && <DraftReportBlock report={drafts[row.jobId]} />}
             {row.issues?.map((issue, index) => (
               <p key={`i-${index}`} className="publish-precheck-issue">

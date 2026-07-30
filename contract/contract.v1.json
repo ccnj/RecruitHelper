@@ -868,11 +868,40 @@
         "type": "object",
         "fields": {}
       },
+      "JobReadClassCandidatesArgs": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 }
+        }
+      },
+      "JobClassCandidate": {
+        "type": "object",
+        "fields": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "definition": { "type": "string", "minLength": 0, "maxLength": 400, "maxBytes": 1600 }
+        }
+      },
+      "JobReadClassCandidatesData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "candidates": {
+            "type": "array", "minItems": 0, "maxItems": 50,
+            "items": { "ref": "JobClassCandidate" }
+          },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "JobPrepareDraftArgs": {
         "type": "object",
         "maxJsonBytes": 65536,
         "fields": {
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
           "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
@@ -887,6 +916,32 @@
           "headcount": { "type": "int64", "minimum": 1, "maximum": 9999 },
           "showToSeeker": { "type": "boolean" },
           "syncToMailbox": { "type": "boolean" }
+        }
+      },
+      "JobPublishDraftGuards": {
+        "type": "object",
+        "fields": {
+          "expectAbsentOnPlatform": { "type": "boolean", "const": true }
+        }
+      },
+      "JobPublishDraftEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.publishDraftEvidenceType" }
+        }
+      },
+      "JobPublishDraftData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "postingVisible": { "type": "boolean" },
+          "verifyRounds": { "type": "int64", "minimum": 0 },
+          "keywords": { "ref": "JobPrepareDraftKeywordOutcome" },
+          "platformFeedback": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 900, "maxBytes": 3600 },
+          "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
       "JobPrepareDraftKeywordOutcome": {
@@ -917,7 +972,8 @@
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "descriptionLength": { "type": "int64", "minimum": 0 },
-          "autoJobClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
           "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "experience": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "salaryMin": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
@@ -1074,6 +1130,7 @@
     "witnessUnavailableReason": ["writeFailed", "capacityExceeded", "storeCorrupt"],
     "sendMessageEvidenceType": ["outboundMessageObserved"],
     "sendGreetingEvidenceType": ["outboundGreetingObserved"],
+    "publishDraftEvidenceType": ["platformPostingObserved"],
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
@@ -1295,12 +1352,28 @@
       "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
       "note": "读取本账号在平台上已存在的职位名全集,供脑侧发布前预检判定同名职位是否已存在。必须遍历平台上全部职位状态分区并合并,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。只返回按平台原样文本去重后的职位名与 observedAt,不返回状态、平台职位 ID、DOM 位置或候选人数据。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
     },
+    "job.readClassCandidates": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "JobReadClassCandidatesArgs", "dataSchema": "JobReadClassCandidatesData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
+      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层并离开发布页,不提交任何东西、不产生候选人可见动作。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别"
+    },
     "job.prepareDraft": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPrepareDraftData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 180000, "deadlineMs": 240000, "leaseMs": 45000,
       "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文"
+    },
+    "job.publishDraft": {
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPublishDraftData",
+      "guardsSchema": "JobPublishDraftGuards", "evidenceSchema": "JobPublishDraftEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
+      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 60000,
+      "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
+      "note": "把一个职位真正发布到平台。真机实测手侧整条执行约 35 秒(读列表 → 填表 → 点击 → 两轮回读);lease 只需容纳最长单步,填同一张表的 job.prepareDraft 用 45 秒已在真机验证够用,本原语只多出点击后的两轮回读,故取 60 秒(CmdBody 的 leaseMs 上限是 120 秒,150 秒会让命令在契约校验就被拒)。首发那次 45 秒 leaseExpired 不是填表太慢:手 35 秒就回了 result,但 result 落不了账(realEffectResultPlan 缺本原语分支),命令一直不收束才反复触发租约到期,根因已单独修掉。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。点击之后平台可能弹出敏感词确认层(列出敏感词与所在字段,给忽略/修改两个出口;弹层开着时职位并未创建),按甲方 2026-07-30 裁决自动点一次「忽略」继续发布——这是同一个不可逆动作的确认续做,不是第二次点击发布;只在「可见弹层唯一 + 文案确属敏感词提示 + 忽略按钮唯一且未禁用」三条同时成立时才点,否则按 possible 转人工,绝不点「修改」。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",

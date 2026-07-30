@@ -174,6 +174,13 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			return
 		}
 		request.GreetingArgs = &greetingArgs
+	case protocol.PrimJobPublishDraft:
+		var args protocol.JobPrepareDraftArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			recordMiss("验证读无法解析职位发布 args: " + err.Error())
+			return
+		}
+		request.PublishDraftArgs = &args
 	default:
 		recordMiss("真实副作用原语没有验证实现")
 		return

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -43,9 +45,72 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 		return v.verifyAcceptWechat(ctx, req)
 	case protocol.PrimChatSendGreeting:
 		return v.verifyGreeting(ctx, req)
+	case protocol.PrimJobPublishDraft:
+		return v.verifyJobPublish(ctx, req)
 	default:
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是已支持的真实副作用意图")
 	}
+}
+
+// verifyJobPublish 用职位管理列表回答"这个职位到底发出去没有"。
+//
+// 与消息类验证读的差别是本质的:它不读会话尾部、不比对发送指纹,只看平台职位名
+// 全集里有没有这个名字。因此 ContentHash 留空——意图侧的 SendFingerprint 对发布
+// 同样是空,两者相等即视为无指纹要求。归一化口径与幂等判定共用一套。
+func (v EffectVerifier) verifyJobPublish(
+	ctx context.Context,
+	req dispatch.VerificationRequest,
+) (dispatch.VerificationObservation, error) {
+	if req.Command.Name != protocol.PrimJobPublishDraft || req.PublishDraftArgs == nil ||
+		strings.TrimSpace(req.PublishDraftArgs.JobName) == "" {
+		return dispatch.VerificationObservation{},
+			errors.New("验证请求不是完整 job.publishDraft 意图")
+	}
+	argsRaw, err := protocol.Encode(protocol.JobReadPublishedListArgs{})
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	state, err := v.Dispatcher.RunVerificationRead(
+		ctx,
+		req.Command.MsgID,
+		dispatch.DispatchRequest{
+			HandID:          req.Command.HandID,
+			ExpectedSession: req.Command.Session,
+			ExpectedBootID:  req.Command.BootIDAtDispatch,
+			Name:            protocol.PrimJobReadPublishedList,
+			Args:            argsRaw,
+			Context: &protocol.CmdContext{
+				Platform:                     req.Command.Platform,
+				AccountRef:                   req.Command.AccountRef,
+				ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
+			},
+		},
+	)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	if state == nil || !state.Settled || state.Leaf.Status != store.CmdOk || state.Leaf.ResultBody == "" {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读未取得成功终局"}, nil
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal([]byte(state.Leaf.ResultBody), &result); err != nil ||
+		result.Status != protocol.ResultStatusOk {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读结果无效"}, nil
+	}
+	var data protocol.JobReadPublishedListData
+	if err := json.Unmarshal(result.Data, &data); err != nil {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读数据无法解析"}, nil
+	}
+	if !jobconfig.MatchesExistingPosting(req.PublishDraftArgs.JobName, data.PostingNames) {
+		return dispatch.VerificationObservation{
+			Reason:     "平台职位列表中仍未出现该职位",
+			ObservedAt: data.ObservedAt,
+		}, nil
+	}
+	return dispatch.VerificationObservation{
+		Confirmed:  true,
+		ObservedAt: data.ObservedAt,
+	}, nil
 }
 
 func (v EffectVerifier) verifyAcceptWechat(

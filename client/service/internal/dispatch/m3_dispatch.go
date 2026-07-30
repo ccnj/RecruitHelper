@@ -703,6 +703,9 @@ type VerificationRequest struct {
 	WechatInviteArgs *protocol.ChatSendWechatInviteArgs
 	InviteCardArgs   *protocol.ChatSendInviteCardArgs
 	AcceptWechatArgs *protocol.ChatAcceptWechatArgs
+	// 职位发布的验证读与消息类不同源:它不读会话尾部、也没有发送指纹,
+	// 只需回答"平台职位列表里有没有这个职位名"。
+	PublishDraftArgs *protocol.JobPrepareDraftArgs
 }
 
 type VerificationObservation struct {

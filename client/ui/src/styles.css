@@ -875,6 +875,20 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-draft-sections { color: var(--txt-faint); }
 .publish-draft-clean { color: var(--live); }
 
+/* 职位类别候选：平台给的封闭集合，点一个即覆盖脑的选择。释义必须看得见，
+   它才是判断贴合度的依据。 */
+.publish-job-class-list { margin: 0.2rem 0 0; padding: 0; list-style: none; }
+.publish-job-class-list li {
+  display: flex; align-items: baseline; gap: 0.35rem;
+  padding: 0.1rem 0; font-size: 0.62rem; line-height: 1.5;
+}
+.publish-job-class-list button {
+  flex: 0 0 auto; min-width: 5.6rem; padding: 0.05rem 0.3rem;
+  font-size: 0.62rem; text-align: left;
+}
+.publish-job-class-list li.is-picked button { border-color: var(--live); color: var(--live); }
+.publish-job-class-list small { color: var(--txt-faint); }
+
 /* M5 遗留：明确降级的视觉，不与在用配置抢注意力 */
 .dc-legacy { border-top: 1px solid var(--rule); background: #0a0e12; }
 .dc-legacy > summary {

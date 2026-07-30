@@ -222,6 +222,13 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 				PreviousIntentID: opts.previousIntentID, SourcingSource: opts.sourcingGreetingSource,
 				Now: time.Now(),
 			})
+		case protocol.PrimJobPublishDraft:
+			// 职位发布有专属账本入口:通用入口把 TargetRef 当会话引用并强制校验
+			// 会话存在与尾序对齐,而发布的目标是职位,那些校验一条都不适用。
+			createdResult, createErr = d.st.CreateJobPublishEffectIntentAndCmd(
+				store.CreateJobPublishEffectIntentRequest{
+					Intent: *opts.effectIntent, Command: *rec, Now: time.Now(),
+				})
 		case protocol.PrimChatSendMessage,
 			protocol.PrimChatSendWechatInvite,
 			protocol.PrimChatSendInviteCard,

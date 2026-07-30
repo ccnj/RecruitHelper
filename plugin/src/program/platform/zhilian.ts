@@ -52,6 +52,10 @@ import type {
   InterviewDetails,
   JobPrepareDraftArgs,
   JobPrepareDraftData,
+  JobPublishDraftData,
+  JobPublishDraftGuards,
+  JobReadClassCandidatesArgs,
+  JobReadClassCandidatesData,
   JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
@@ -683,12 +687,19 @@ async function runMain<A extends unknown[], R>(
   func: (...args: A) => R | Promise<R>,
   args: A,
 ): Promise<R> {
+  // 节奏闸在唯一的注入入口上收口:runStep 与 pollStep 都经过这里,所以发布链路
+  // 不可能有哪个接缝被漏掉。见 zhilianPublishInteractions 的说明。
+  const paced = zhilianPublishInteractions.has(func)
+  if (paced) await paceZhilianInteraction()
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func,
     args,
   })
+  if (paced && zhilianInteractionHappened(func, (result[0] as { result?: unknown } | undefined)?.result)) {
+    lastZhilianPublishInteractionAt = Date.now()
+  }
   const first = result[0] as unknown as { result?: R | null; error?: unknown } | undefined
   if (!first) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本尚未就绪', 'afterRecovery', 'contentScriptDead')
@@ -5110,17 +5121,20 @@ async function ensureZhilianJobListTab(
 ): Promise<chrome.tabs.Tab> {
   const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
     .filter((tab) => tab.id !== undefined && isZhilianJobListURL(tab.url))
-  if (existing.length > 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位页标签无法唯一确定', 'manualOnly')
-  }
-  if (existing.length === 1 && existing[0].status === 'complete') {
-    assertExpectedPrincipal(await probeTab(existing[0]), expectedPrincipalFingerprint)
-    return existing[0]
+  // 多个职位管理页标签之间没有歧义:列表内容与标签无关,读哪个都一样。用户平时
+  // 自己开着一两个是常态,要求唯一只会让预检随机失败。发布页则相反——那里各个
+  // 标签可能各有半填的表单,必须保持唯一要求。
+  const ready = existing.find((tab) => tab.status === 'complete')
+  if (ready) {
+    assertExpectedPrincipal(await probeTab(ready), expectedPrincipalFingerprint)
+    return ready
   }
 
   ctx.checkpoint()
   await ctx.progress('准备智联职位页', 5)
-  let tab = existing.length === 1 ? existing[0] : await canonicalZhilianTab()
+  // 走到这里说明没有已加载完成的职位页:优先复用仍在加载的那个,否则挑一个
+  // 规范智联标签导航过去。
+  let tab = existing[0] ?? await canonicalZhilianTab()
   if (!tab || tab.id === undefined) {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
@@ -5351,12 +5365,111 @@ function mainBlurZhilianDescription(): MainStep {
   return { status: 'ok' }
 }
 
-function mainReadZhilianAutoJobClass(): MainStep {
+function mainReadZhilianJobClassValue(): MainStep {
   const node = document.querySelector('.job-subType-input') as HTMLElement | null
   if (!node) return { status: 'failed', reason: 'job_class_absent' }
   const text = node.innerText.trim().split('\n')[0].trim()
   if (!text || text === '请选择') return { status: 'failed', reason: 'job_class_pending' }
   return { status: 'ok', detail: text.slice(0, 64) }
+}
+
+// 职位类别选择器。真机事实:工作性质/职位名称/职位描述写完并由平台加载完成之前
+// 点入口没有任何反应,所以只能轮询点击直到弹层出现——ok+clicked 表示这一轮点了、
+// 还没开,ok+open 表示已经开着。两者都是 ok,由调用方的 accept 判定何时算成。
+//
+// 下面几个函数都会被序列化注入 MAIN world,**不能引用模块作用域的任何东西**,
+// 查找逻辑只能各自内联一遍,不许抽公共 helper。
+function mainOpenZhilianJobClassPicker(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length > 1) return { status: 'failed', reason: 'job_class_picker_ambiguous' }
+  if (open.length === 1) return { status: 'ok', detail: 'open' }
+  const entry = document.querySelector('.job-subType-input') as HTMLElement | null
+  if (!entry) return { status: 'failed', reason: 'job_class_entry_absent' }
+  entry.click()
+  return { status: 'ok', detail: 'clicked' }
+}
+
+// 读回候选全集。detail 是 JSON:[{name,definition}]。平台释义原样带出来,
+// 它是脑侧让大模型做判断的主要依据,不能截断成半句。
+function mainReadZhilianJobClassCandidates(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length !== 1) {
+    return {
+      status: 'failed',
+      reason: open.length === 0 ? 'job_class_picker_absent' : 'job_class_picker_ambiguous',
+    }
+  }
+  const rows = Array.from(open[0].querySelectorAll('.recommend-jobType-modal__item')) as HTMLElement[]
+  const candidates: { name: string; definition: string }[] = []
+  for (const row of rows) {
+    const nameNode = row.querySelector('.item-text') as HTMLElement | null
+    const defNode = row.querySelector('.item-text-sub') as HTMLElement | null
+    const name = (nameNode?.innerText ?? '').trim()
+    if (!name) continue
+    candidates.push({ name: name.slice(0, 64), definition: (defNode?.innerText ?? '').trim().slice(0, 400) })
+  }
+  return { status: 'ok', detail: JSON.stringify(candidates) }
+}
+
+// 精确选中。名字必须与脑定好的那个逐字相等——绝不模糊匹配、绝不就近取一个:
+// 类别选错会把职位推给错误的人群,而页面看上去一切正常。
+function mainPickZhilianJobClass(wanted: string): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length !== 1) {
+    return {
+      status: 'failed',
+      reason: open.length === 0 ? 'job_class_picker_absent' : 'job_class_picker_ambiguous',
+    }
+  }
+  const rows = Array.from(open[0].querySelectorAll('.recommend-jobType-modal__item')) as HTMLElement[]
+  const hit = rows.filter((row) => {
+    const nameNode = row.querySelector('.item-text') as HTMLElement | null
+    return (nameNode?.innerText ?? '').trim() === wanted
+  })
+  if (hit.length !== 1) {
+    return {
+      status: 'failed',
+      reason: hit.length === 0 ? 'job_class_option_absent' : 'job_class_option_ambiguous',
+    }
+  }
+  hit[0].click()
+  return { status: 'ok', detail: 'picked' }
+}
+
+// 关闭选择器。选中之后平台一般自己关,这里是兜底;ok+closed 表示已经关上、
+// 没点过东西,ok+closing 表示这一轮点了关闭按钮。绝不点「去反馈」——那是
+// 申请新增类别,不是选择。
+function mainCloseZhilianJobClassPicker(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length === 0) return { status: 'ok', detail: 'closed' }
+  const close = open[0].querySelector('button.km-modal__close-btn') as HTMLElement | null
+  if (!close) return { status: 'failed', reason: 'job_class_picker_close_absent' }
+  close.click()
+  return { status: 'ok', detail: 'closing' }
 }
 
 function mainPickZhilianEmployment(label: string): MainStep {
@@ -5388,6 +5501,63 @@ function mainReadZhilianEmployment(): MainStep {
     button.className.split(/\s+/).includes('km-button--primary'))
   if (active.length !== 1) return { status: 'failed', reason: 'employment_state_unreadable' }
   return { status: 'ok', detail: (active[0] as HTMLElement).innerText.trim() }
+}
+
+// 敏感词确认层:km-modal 组件,结构是 .km-modal__wrapper > .km-modal >
+// __header/__body/__footer,动作按钮在 footer 里、header 另有一个 close-btn。
+// 按可见文案匹配(低脆),不认组件内部状态。返回 ok+detail 表示弹层在场,
+// detail 是弹层原话(含敏感词与所在字段),给运营看。
+// 注意:这两个函数会被序列化注入 MAIN world,**不能引用模块作用域的任何东西**,
+// 所以查找逻辑只能在各自函数内联一遍,不许抽公共 helper。
+function mainReadZhilianSensitiveWordDialog(): MainStep {
+  const dialogs = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      if (node.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      const text = node.innerText ?? ''
+      return text.includes('敏感词') && text.includes('忽略')
+    })
+  if (dialogs.length === 0) return { status: 'failed', reason: 'sensitive_dialog_absent' }
+  if (dialogs.length > 1) return { status: 'failed', reason: 'sensitive_dialog_ambiguous' }
+  const text = (dialogs[0].innerText ?? '').trim().replace(/\s*\n\s*/g, ' / ')
+  return { status: 'ok', detail: text.slice(0, 600) }
+}
+
+function mainIgnoreZhilianSensitiveWordDialog(): MainStep {
+  const dialogs = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      if (node.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      const text = node.innerText ?? ''
+      return text.includes('敏感词') && text.includes('忽略')
+    })
+  if (dialogs.length !== 1) {
+    return {
+      status: 'failed',
+      reason: dialogs.length === 0 ? 'sensitive_dialog_absent' : 'sensitive_dialog_ambiguous',
+    }
+  }
+  // 排除 header 上的关闭按钮:它没有文案,但显式排掉更不容易误点。
+  const buttons = (Array.from(dialogs[0].querySelectorAll('button')) as HTMLElement[])
+    .filter((button) => !button.classList.contains('km-modal__close-btn'))
+  const hit = buttons.filter((button) => (button.innerText ?? '').trim() === '忽略')
+  if (hit.length !== 1) {
+    return {
+      status: 'failed',
+      reason: hit.length === 0 ? 'sensitive_ignore_absent' : 'sensitive_ignore_ambiguous',
+    }
+  }
+  if ((hit[0] as HTMLButtonElement).disabled) {
+    return { status: 'failed', reason: 'sensitive_ignore_disabled' }
+  }
+  hit[0].click()
+  return { status: 'ok', detail: 'ignored' }
 }
 
 function mainCloseZhilianPanels(): MainStep {
@@ -5522,13 +5692,33 @@ function mainSnapshotZhilianKeywords(): MainKeywordSnapshot {
   const dialog = nodes.find((node) =>
     node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
   if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
-  const items = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item')) as HTMLElement[]
+  const items = Array.from(dialog.querySelectorAll(
+    'li[class*="s-checkbutton-drilldown-multi"][class*="__item"]:not([class*="__item__add"])',
+  )) as HTMLElement[]
   const selected = items.filter((item) => item.className.includes('--selected'))
     .map((item) => (item.textContent ?? '').trim()).filter(Boolean)
   const available = items.map((item) => (item.textContent ?? '').trim()).filter(Boolean)
-  const sectionTitles = Array.from(
-    dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__list-item'),
-  ).map((group) => (group as HTMLElement).innerText.split('\n')[0].trim()).filter(Boolean)
+  // 分组标题按组件自己的标题类抓。它同时覆盖结构与众不同的兜底组
+  // 「您还有哪些招聘要求？」——真机实测标题数比 __list-item 数多一个,多的就是它。
+  // 另外保留旧的「……？ (已选/上限)」计数启发式作并集:带配额那个组件变体的标题
+  // 类名还没在真机核对过,少一条来源就可能整批读不到分组、整条链路白死。
+  const sectionTitles: string[] = []
+  const pushSectionTitle = (raw: string): void => {
+    const line = raw.split('\n')[0].trim().replace(/\s+/g, ' ')
+    if (!line || line.length > 60 || sectionTitles.length >= 24) return
+    if (!sectionTitles.includes(line)) sectionTitles.push(line)
+  }
+  for (const node of Array.from(dialog.querySelectorAll(
+    '[class*="s-checkbutton-drilldown-multi"][class*="__list-item-title"]',
+  ))) {
+    pushSectionTitle((node as HTMLElement).innerText ?? '')
+  }
+  for (const node of Array.from(dialog.querySelectorAll('div'))) {
+    const firstLine = ((node as HTMLElement).innerText ?? '')
+      .split('\n')[0].trim().replace(/\s+/g, ' ')
+    if (!/？\s*\(\d+\/\d+\)$/.test(firstLine)) continue
+    pushSectionTitle(firstLine)
+  }
   const confirm = Array.from(dialog.querySelectorAll('.s-button')).map((button) =>
     (button as HTMLElement).innerText.trim()).find((text) => /^确定/.test(text)) ?? ''
   return { status: 'ok', selected, sectionTitles, available, confirmLabel: confirm }
@@ -5549,8 +5739,9 @@ function mainClearOneZhilianKeyword(): MainStep {
   const dialog = nodes.find((node) =>
     node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
   if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
-  const selected = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item'))
-    .filter((item) => item.className.includes('--selected')) as HTMLElement[]
+  const selected = Array.from(dialog.querySelectorAll(
+    'li[class*="s-checkbutton-drilldown-multi"][class*="__item"]:not([class*="__item__add"])',
+  )).filter((item) => item.className.includes('--selected')) as HTMLElement[]
   if (selected.length === 0) return { status: 'ok', detail: 'empty' }
   selected[0].click()
   return { status: 'ok', detail: 'cleared' }
@@ -5561,7 +5752,9 @@ function mainPickZhilianKeyword(word: string): MainStep {
   const dialog = nodes.find((node) =>
     node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
   if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
-  const items = Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item')) as HTMLElement[]
+  const items = Array.from(dialog.querySelectorAll(
+    'li[class*="s-checkbutton-drilldown-multi"][class*="__item"]:not([class*="__item__add"])',
+  )) as HTMLElement[]
   const hit = items.filter((item) => (item.textContent ?? '').trim() === word)
   if (hit.length === 0) return { status: 'failed', reason: 'keyword_absent' }
   if (hit[0].className.includes('--selected')) return { status: 'ok', detail: 'already' }
@@ -5584,7 +5777,9 @@ function mainClickZhilianCustomEntry(): MainStep {
   if (visible.length > 0) return { status: 'ok', detail: 'ready' }
   // 只认可见入口:分组多时平台会把靠后的分组折叠起来,折叠区里的入口点了没反应,
   // 会让整个自定义分支静默卡住。可见的最后一个即兜底组「您还有哪些招聘要求？」。
-  const adds = (Array.from(dialog.querySelectorAll('li.s-checkbutton-drilldown-multi-limit__item__add')) as HTMLElement[])
+  const adds = (Array.from(dialog.querySelectorAll(
+    'li[class*="s-checkbutton-drilldown-multi"][class*="__item__add"]',
+  )) as HTMLElement[])
     .filter((node) => node.getBoundingClientRect().height > 0)
   if (adds.length === 0) return { status: 'failed', reason: 'keyword_custom_entry_absent' }
   adds[adds.length - 1].click()
@@ -5678,7 +5873,8 @@ function mainReadZhilianKeywordTags(): MainStep {
 interface DraftProgress {
   step: string
   descriptionLength?: number
-  autoJobClass?: string
+  jobClass?: string
+  prefilledClass?: string | null
   keywordTotal?: number
   keywordIndex?: number
   keyword?: string
@@ -5703,7 +5899,8 @@ function snapshotProgress(progress: DraftProgress, reason: string): Record<strin
     reason,
     step: progress.step,
     descriptionLength: progress.descriptionLength ?? null,
-    autoJobClass: progress.autoJobClass ?? null,
+    jobClass: progress.jobClass ?? null,
+    prefilledClass: progress.prefilledClass ?? null,
     keyword: progress.keyword ?? null,
     keywordRoute: progress.keywordRoute ?? null,
     keywordAt: progress.keywordIndex === undefined
@@ -5742,6 +5939,65 @@ function throwPrepareDraftFailure(reason: string, progress?: DraftProgress): nev
 // 注意:func 会被序列化后注入 MAIN world,**闭包变量到不了那边**。
 // 参数一律经 args 数组传递,绝不能写成 () => mainXxx(param) ——那样 param
 // 在页面里是未定义的,executeScript 会静默返回 undefined。
+// 发布链路里真正会在页面上产生可见交互的 MAIN 函数全集。按 AGENTS.md
+// 「平台交互节奏与条件等待」,相邻可见动作必须至少间隔 1 秒并带小幅有界抖动。
+//
+// 为什么用函数引用而不是名字前缀:esbuild 压缩会改名,靠 mainClick*/mainPick*
+// 之类的命名约定判断会在打包后静默失效——节奏闸消失了却没人发现。按引用比对
+// 打包前后都成立。新增可见动作忘记登记这里,是唯一的漏网口子,所以登记表紧贴
+// 节奏闸放在一起,别拆开。
+//
+// 只登记发布链路的函数:招呼、消息、卡片、采集各有自己已在生产跑着的节奏,
+// 不在本次改动范围内。
+const zhilianPublishInteractions = new Set<unknown>([
+  mainPickZhilianEmployment,
+  mainFillZhilianJobName,
+  mainWriteZhilianDescription,
+  mainBlurZhilianDescription,
+  mainCloseZhilianPanels,
+  mainOpenZhilianJobClassPicker,
+  mainPickZhilianJobClass,
+  mainCloseZhilianJobClassPicker,
+  mainOpenZhilianSelect,
+  mainPickZhilianSelectOption,
+  mainOpenZhilianSalaryMonths,
+  mainOpenZhilianKeywords,
+  mainClearOneZhilianKeyword,
+  mainPickZhilianKeyword,
+  mainClickZhilianCustomEntry,
+  mainSubmitZhilianCustomKeyword,
+  mainDismissZhilianCustomInput,
+  mainConfirmZhilianKeywords,
+  mainFillZhilianHeadcount,
+  mainClickZhilianPublish,
+  mainIgnoreZhilianSensitiveWordDialog,
+])
+
+// 上一次真实可见动作的时刻。0 表示本次运行还没动过页面。
+let lastZhilianPublishInteractionAt = 0
+
+// paceZhilianInteraction 只补足"距上一次真实动作不足下限"的那段时间。
+// 抖动每次重抽,不是固定值。
+async function paceZhilianInteraction(): Promise<void> {
+  const floor = 1_000 + Math.floor(Math.random() * 501)
+  const elapsed = Date.now() - lastZhilianPublishInteractionAt
+  if (elapsed >= floor) return
+  await new Promise<void>((resolve) => setTimeout(resolve, floor - elapsed))
+}
+
+// 判断这一次调用是否真的动了页面。条件轮询里"还没就绪"的那些轮次并没有交互,
+// 不能记时也不该被节奏闸拖慢——否则 40 轮的就绪等待会被拉成 40 秒,那正是
+// 裁决里禁止的"用固定等待取代条件轮询"。
+function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
+  if (!validMainStep(result) || result.status !== 'ok') return false
+  // 几个"看一眼再决定点不点"的例外:ok 里要再看 detail 才知道这一轮到底
+  // 有没有真的点下去。
+  if (func === mainCloseZhilianPanels) return result.detail === 'closing'
+  if (func === mainOpenZhilianJobClassPicker) return result.detail === 'clicked'
+  if (func === mainCloseZhilianJobClassPicker) return result.detail === 'closing'
+  return true
+}
+
 async function runStep<A extends unknown[]>(
   tabId: number,
   func: (...args: A) => MainStep,
@@ -5798,6 +6054,25 @@ async function pace(): Promise<void> {
   })
 }
 
+// selectZhilianJobClass:打开类别选择器 → 精确选中 → 关闭 → 回读确认。
+// 选择器在平台加载完之前打不开,只能轮询点击;25 轮配合 1 秒节奏下限约 30 秒,
+// 与真机上类别加载的耗时量级相当。回读必须等于脑给的那个值,不等就失败。
+async function selectZhilianJobClass(
+  tabId: number,
+  ctx: PrimitiveContext,
+  wanted: string,
+  progress: DraftProgress,
+): Promise<string> {
+  await pollStep(tabId, mainOpenZhilianJobClassPicker, [], ctx, '打开职位类别选择器',
+    (detail) => detail === 'open', 25, progress)
+  await pollStep(tabId, mainPickZhilianJobClass, [wanted], ctx, '选择职位类别',
+    undefined, 20, progress)
+  await pollStep(tabId, mainCloseZhilianJobClassPicker, [], ctx, '关闭职位类别选择器',
+    (detail) => detail === 'closed', 20, progress)
+  return pollStep(tabId, mainReadZhilianJobClassValue, [], ctx, '回读职位类别',
+    (detail) => detail === wanted, 40, progress)
+}
+
 async function pickZhilianSelect(
   tabId: number,
   ctx: PrimitiveContext,
@@ -5808,7 +6083,6 @@ async function pickZhilianSelect(
   // 上一次操作可能留着面板;不先收口,这次点击会把它 toggle 关掉。
   await pollStep(tabId, mainCloseZhilianPanels, [], ctx, '关闭下拉面板',
     (detail) => detail === 'closed', 20, progress)
-  await pace()
   const anchor = Number(await runStep(tabId, mainOpenZhilianSelect, [placeholder], '展开下拉', progress))
   await pollStep(tabId, mainPickZhilianSelectOption, [anchor, wanted], ctx, `选择${placeholder}`,
     undefined, 40, progress)
@@ -5910,7 +6184,6 @@ async function applyZhilianKeywords(
   progress.keywordIndex = undefined
   progress.keyword = undefined
   progress.keywordRoute = undefined
-  await pace()
   // 保险再收一次:任何一处残留的打开态输入框都会让「确定」被拒。
   await pollStep(tabId, mainDismissZhilianCustomInput, [], ctx, '确认前收起自定义输入框',
     (detail) => detail === 'none', 12, progress)
@@ -5966,14 +6239,16 @@ async function pollKeywordSnapshot(
     undefined, 'none', progress ? snapshotProgress(progress, 'keyword_sections_pending') : undefined)
 }
 
-export async function prepareZhilianJobDraft(
+// 填完整张发布表单并逐字段回读。试填与真发共用同一段填充逻辑——两者只在
+// 收尾不同(试填离开表单,真发点一次「发布」),填充过程必须字面同一份代码,
+// 否则"试填通过"就不能证明"真发也填得进去"。
+//
+// 本函数返回时表单已填好且仍在发布页;调用方负责收尾。
+async function fillZhilianJobForm(
   args: JobPrepareDraftArgs,
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
-): Promise<JobPrepareDraftData> {
-  if (validatePrimitiveArgs(PrimitiveName.JobPrepareDraft, 1, args).length !== 0) {
-    throw new ZhilianPlatformError('GUARD_FAILED', '发布试填参数不符合当前契约', 'manualOnly')
-  }
+): Promise<{ tabId: number; progress: DraftProgress; data: JobPrepareDraftData }> {
   ctx.checkpoint()
   const progress = newDraftProgress()
   // 每次都从干净的发布页开始:表单只在页面内存里,残留状态会污染这次回读。
@@ -5989,10 +6264,8 @@ export async function prepareZhilianJobDraft(
   const employment = await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
 
-  await pace()
   await runStep(tabId, mainFillZhilianJobName, [args.jobName], '填入职位名称', progress)
 
-  await pace()
   const lines = args.description.split('\n')
   const expectedHTML = await runStep(tabId, mainWriteZhilianDescription, [lines], '写入职位描述', progress)
   // 富文本到隐藏 textarea 是异步同步的;一致即是这一步的正证。
@@ -6002,29 +6275,16 @@ export async function prepareZhilianJobDraft(
   ))
   progress.descriptionLength = descriptionLength
   await runStep(tabId, mainBlurZhilianDescription, [], '触发职位描述失焦', progress)
-  await ctx.progress('等待平台按职位描述判定类别', 35)
-  // 职位类别是平台自动生成的必填项,不是我们能填的字段;等它出现即可。
-  // 类别由平台按描述判定,长描述明显更慢;60 轮(15 秒)在真机上不够,给到 30 秒。
-  // 平台会因为内容不合规而拒绝判定类别(实测:描述里写了年龄要求就不判)。
-  // 失败时把页面自己给出的提示原话带进诊断,否则只能看到一句"未在期限内判定"。
-  let autoJobClass: string
-  try {
-    autoJobClass = await pollStep(tabId, mainReadZhilianAutoJobClass, [], ctx,
-      '读取自动职位类别', undefined, 120, progress)
-  } catch (error) {
-    if (error instanceof ZhilianPlatformError) {
-      const hints = await runMain(tabId, mainReadZhilianFormHints, [])
-      const detail = validMainStep(hints) && hints.status === 'ok' ? hints.detail ?? '' : ''
-      if (detail) {
-        throw new ZhilianPlatformError(
-          error.code, error.message, error.retryable, error.reason, error.sideEffect,
-          { ...(error.diagnostics ?? {}), platformHints: detail },
-        )
-      }
-    }
-    throw error
-  }
-  progress.autoJobClass = autoJobClass
+  await ctx.progress('选定职位类别', 35)
+  // 职位类别由脑定好后下发,这里只负责精确选中(甲方 2026-07-30 裁决:一律自己选,
+  // 不等平台自动填)。平台只在自己有把握时才预填,不预填时并不代表没有候选——
+  // 先记下预填值作诊断,再照脑给的值选一次。关键词弹层必须在类别定下之后才打得开,
+  // 所以这一步必须排在关键词之前。
+  const prefilled = await runMain(tabId, mainReadZhilianJobClassValue, [])
+  progress.prefilledClass =
+    validMainStep(prefilled) && prefilled.status === 'ok' ? prefilled.detail ?? null : null
+  const jobClass = await selectZhilianJobClass(tabId, ctx, args.jobClass, progress)
+  progress.jobClass = jobClass
 
   const education = await pickZhilianSelect(tabId, ctx, '最低学历', args.education, progress)
   const experience = await pickZhilianSelect(tabId, ctx, '工作经验', args.experience, progress)
@@ -6035,6 +6295,9 @@ export async function prepareZhilianJobDraft(
   const salaryMax = await pickZhilianSelect(tabId, ctx, '最高月薪', args.salaryMax, progress)
   await pollStep(tabId, mainCloseZhilianPanels, [], ctx, '关闭下拉面板',
     (detail) => detail === 'closed', 20, progress)
+  // 这一拍不是交互节奏(节奏闸已在 runMain 统一收口),是等薪资三段联动渲染:
+  // 选完最高月薪之后「薪资月数」才会挂上来。后面的读取本身也在轮询,这里只是
+  // 给联动一个起步的余量。
   await pace()
   let salaryMonths = await pollStep(tabId, mainReadZhilianSalaryMonths, [], ctx, '读取薪资月数',
     undefined, 40, progress)
@@ -6050,7 +6313,6 @@ export async function prepareZhilianJobDraft(
   const keywords = await applyZhilianKeywords(tabId, ctx, args.keywords, progress)
   await ctx.progress('填写职位关键词', 85)
 
-  await pace()
   const headcount = await runStep(tabId, mainFillZhilianHeadcount, [args.headcount], '填写招聘人数', progress)
   const workplace = await pollStep(tabId, mainReadZhilianWorkplace, [], ctx, '回读工作地址',
     undefined, 40, progress)
@@ -6059,7 +6321,8 @@ export async function prepareZhilianJobDraft(
     jobName: args.jobName,
     employmentType: employment,
     descriptionLength: Number.isFinite(descriptionLength) ? descriptionLength : 0,
-    autoJobClass: autoJobClass || null,
+    jobClass,
+    prefilledClass: progress.prefilledClass ?? null,
     education, experience, salaryMin, salaryMax, salaryMonths,
     keywords: {
       matched: keywords.matched, custom: keywords.custom,
@@ -6070,6 +6333,302 @@ export async function prepareZhilianJobDraft(
     discarded: false,
     observedAt: Date.now(),
   }
+
+  return { tabId, progress, data }
+}
+
+// 点击「发布」之前的最后一道 guards:回读表单上几个决定性字段,确认页面里躺着的
+// 就是本次意图。它问的是"世界是否处于脑预期的状态",不审计平台实现。
+function mainReadZhilianPublishGuards(): MainStep {
+  const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
+  if (!name) return { status: 'failed', reason: 'name_input_absent' }
+  const salaryMin = document.querySelector('input[placeholder="最低月薪"]') as HTMLInputElement | null
+  const salaryMax = document.querySelector('input[placeholder="最高月薪"]') as HTMLInputElement | null
+  const months = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[])
+    .filter((input) => /^\d+个月$/.test(input.value.trim()))
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const headcountItem = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '招聘人数'
+  })
+  const headcount = headcountItem?.querySelector('input[type="text"], input:not([type])') as HTMLInputElement | null
+  if (!salaryMin || !salaryMax || months.length !== 1 || !headcount) {
+    return { status: 'failed', reason: 'publish_guard_fields_absent' }
+  }
+  // 用  拼接,避免与字段内容里的任何可见分隔符冲突。
+  return {
+    status: 'ok',
+    detail: [
+      name.value.trim(), salaryMin.value.trim(), salaryMax.value.trim(),
+      months[0].value.trim(), headcount.value.trim(),
+    ].join(''),
+  }
+}
+
+// 唯一一次点击。检查的是按钮自身的标准 DOM 语义(存在、可见、未禁用),
+// 不去核对平台内部实现。
+function mainClickZhilianPublish(): MainStep {
+  const scope = document.querySelector('form.publish-form__inner') ?? document
+  const buttons = (Array.from(scope.querySelectorAll('button')) as HTMLButtonElement[])
+    .filter((button) => button.innerText.trim() === '发布' && button.getBoundingClientRect().height > 0)
+  if (buttons.length !== 1) return { status: 'failed', reason: 'publish_button_unresolved' }
+  if (buttons[0].disabled) return { status: 'failed', reason: 'publish_button_disabled' }
+  if (buttons[0].type === 'reset') return { status: 'failed', reason: 'publish_button_wrong_type' }
+  buttons[0].click()
+  return { status: 'ok' }
+}
+
+// 手侧的同名归一化。必须与脑侧 jobconfig.normalizeJobName 保持同一套规则:
+// 全半角括号与空白折叠。两侧口径都只放宽匹配、不放宽发布。
+function normalizeZhilianPostingName(name: string): string {
+  const folded = name
+    .replace(/（/g, '(').replace(/）/g, ')')
+    .replace(/［/g, '[').replace(/］/g, ']')
+    .replace(/【/g, '[').replace(/】/g, ']')
+    .replace(/　/g, ' ').replace(/／/g, '/')
+    .replace(/，/g, ',').replace(/、/g, ',').replace(/：/g, ':')
+  return folded.split(/\s+/).join('')
+}
+
+export async function publishZhilianJobDraft(
+  args: JobPrepareDraftArgs,
+  guards: JobPublishDraftGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobPublishDraftData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobPublishDraft, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位发布参数不符合当前契约', 'manualOnly')
+  }
+  if (guards?.expectAbsentOnPlatform !== true) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位发布缺少同名不存在的条件写', 'manualOnly')
+  }
+  const target = normalizeZhilianPostingName(args.jobName)
+  if (!target) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位名归一化后为空', 'manualOnly')
+  }
+
+  // ── 点击之前:一切失败都是 sideEffect=none,未发布,可安全重试 ──────────
+  //
+  // 幂等闸:先确认平台上还没有同名职位。这一步必须在填表之前——读列表要离开
+  // 发布页、会丢弃已填表单,所以复核无法挪到点击前的最后一刻。填表期间(数十秒)
+  // 出现同名的 TOCTOU 由甲方 2026-07-30 知情裁决为不予防护。
+  ctx.checkpoint()
+  await ctx.progress('确认平台上尚无同名职位', 5)
+  const before = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
+  if (before.postingNames.some((name) => normalizeZhilianPostingName(name) === target)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '平台上已存在同名职位,不再发布', 'manualOnly')
+  }
+
+  const { tabId, progress, data: filled } = await fillZhilianJobForm(
+    args, ctx, expectedPrincipalFingerprint,
+  )
+  await ctx.progress('表单已填好,复核后发布', 88)
+
+  // 点击前最后一道 guards:页面里躺着的必须就是本次意图。
+  const snapshot = (await runStep(
+    tabId, mainReadZhilianPublishGuards, [], '发布前复核表单', progress,
+  )).split('')
+  const expected = [
+    args.jobName, args.salaryMin, args.salaryMax, args.salaryMonths, String(args.headcount),
+  ]
+  if (snapshot.length !== expected.length ||
+      snapshot.some((value, index) => value !== expected[index])) {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', '发布前复核发现表单与本次意图不一致', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'publish_guard_mismatch'),
+    )
+  }
+  // 身份最后一次复核:此后就是不可逆动作。
+  assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+  await ctx.beforeSideEffect()
+
+  // ── 不可逆点击。此后一律 sideEffect=possible,原语内绝不重试、绝不第二次点击 ──
+  const clicked = await runMain(tabId, mainClickZhilianPublish, [])
+  if (!validMainStep(clicked)) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '发布点击结果结构不符合预期', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (clicked.status === 'failed') {
+    // 按钮不可解析/被禁用都发生在点击之前,未产生副作用。
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', `发布按钮不可点击: ${clicked.reason}`, 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, clicked.reason),
+    )
+  }
+  await ctx.progress('已点击发布,开始回读正证', 92)
+
+  // 敏感词确认层:平台会在点击发布之后弹层拦下,列出敏感词与所在字段,给
+  // 「忽略」与「修改」两个出口;弹层开着时职位并未创建(真机实测)。按甲方
+  // 2026-07-30 裁决自动点「忽略」继续发布。
+  //
+  // 这不是"第二次点击发布",而是同一个动作的确认续做:没有它,任何触发敏感
+  // 词的职位都只会停在弹层上、最后落成 suspect。仍然严格只点一次,且只在
+  // 弹层唯一、文案确属敏感词提示、「忽略」按钮唯一时才点;任何不满足都不猜,
+  // 直接按 possible 交给发后回读与人工。
+  let sensitiveWordNotice: string | null = null
+  for (let round = 0; round < 12; round += 1) {
+    ctx.checkpoint()
+    const found = await runMain(tabId, mainReadZhilianSensitiveWordDialog, [])
+    if (validMainStep(found) && found.status === 'ok' && found.detail) {
+      sensitiveWordNotice = found.detail.slice(0, 900)
+      const ignored = await runMain(tabId, mainIgnoreZhilianSensitiveWordDialog, [])
+      if (!validMainStep(ignored) || ignored.status === 'failed') {
+        const reason = validMainStep(ignored) ? ignored.reason : 'sensitive_dialog_shape'
+        throw new ZhilianPlatformError(
+          'POSTCONDITION_UNCONFIRMED', `敏感词确认层无法继续: ${reason}`, 'manualOnly',
+          undefined, 'possible',
+          { ...snapshotProgress(progress, reason), sensitiveWordNotice },
+        )
+      }
+      await ctx.progress('已在敏感词确认层选择继续发布', 94)
+      break
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+
+  // 平台的即时反馈只作诊断:失败提示能让人一眼看出发不出去的原因,
+  // 但它不参与判定——正证只认职位管理列表里出现同名职位。
+  let platformFeedback: string | null = null
+  try {
+    const hints = await runMain(tabId, mainReadZhilianFormHints, [])
+    if (validMainStep(hints) && hints.status === 'ok' && hints.detail) {
+      platformFeedback = hints.detail.slice(0, 900)
+    }
+  } catch {
+    // 读提示失败不影响正证判定,保持 null。
+  }
+  if (sensitiveWordNotice) {
+    // 敏感词原话必须带进诊断,否则运营不知道是哪个词触发的。
+    platformFeedback = `[敏感词确认层已选择继续] ${sensitiveWordNotice}` +
+      (platformFeedback ? ` || ${platformFeedback}` : '')
+    platformFeedback = platformFeedback.slice(0, 900)
+  }
+
+  // 发后核验:回读列表,读到同名职位即成功。读不到只记未确认,
+  // 绝不推断失败、绝不再次发布。
+  let visible = false
+  let rounds = 0
+  for (let round = 0; round < 2 && !visible; round += 1) {
+    ctx.checkpoint()
+    await new Promise<void>((resolve) => setTimeout(resolve, round === 0 ? 3_000 : 6_000))
+    rounds = round + 1
+    try {
+      const after = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
+      visible = after.postingNames.some((name) => normalizeZhilianPostingName(name) === target)
+    } catch (error) {
+      if (!(error instanceof ZhilianPlatformError)) throw error
+      // 回读失败同样只是"未确认",不改变已经发生的副作用。
+    }
+  }
+
+  const data: JobPublishDraftData = {
+    jobName: args.jobName,
+    jobClass: filled.jobClass,
+    prefilledClass: filled.prefilledClass,
+    postingVisible: visible,
+    verifyRounds: rounds,
+    keywords: filled.keywords,
+    platformFeedback,
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.JobPublishDraft, 1, data).length !== 0) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '发布结果不符合当前契约', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (!visible) {
+    // 副作用可能已经发生,但没有正证:交给脑的验证轮与 suspect,不在原语内重试。
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED', '发布后未在职位列表读到同名职位', 'manualOnly',
+      undefined, 'possible',
+      { ...snapshotProgress(progress, 'posting_not_visible'), platformFeedback, verifyRounds: rounds },
+    )
+  }
+  await ctx.progress('职位发布已取得平台正证', 100)
+  return data
+}
+
+// readZhilianJobClassCandidates:拿回平台针对这个职位给出的类别候选全集。
+//
+// 为什么必须先填表:类别选择器在工作性质/职位名称/职位描述写完并由平台加载完成
+// 之前打不开(真机实测,点了没有任何反应)。候选是平台读了这三项之后现给的,
+// 所以拿候选这件事绕不开填表——但只填这三项,填完读完就离开,不碰其余字段、
+// 不提交任何东西。
+export async function readZhilianJobClassCandidates(
+  args: JobReadClassCandidatesArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobReadClassCandidatesData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobReadClassCandidates, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '类别候选读取参数不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const progress = newDraftProgress()
+  const tab = await ensureZhilianJobPublishTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联发布页与登录身份', 15)
+
+  await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
+  await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
+    (detail) => detail === args.employmentType, 40, progress)
+  await runStep(tabId, mainFillZhilianJobName, [args.jobName], '填入职位名称', progress)
+
+  const lines = args.description.split('\n')
+  const expectedHTML = await runStep(tabId, mainWriteZhilianDescription, [lines], '写入职位描述', progress)
+  progress.descriptionLength = Number(await pollStep(
+    tabId, mainReadZhilianDescriptionSync, [expectedHTML], ctx, '确认职位描述同步',
+    undefined, 40, progress,
+  ))
+  await runStep(tabId, mainBlurZhilianDescription, [], '触发职位描述失焦', progress)
+  await ctx.progress('等待平台给出职位类别候选', 45)
+
+  // 预填值只作诊断:平台只在自己有把握时才预填,不预填不代表没有候选。
+  const prefilled = await runMain(tabId, mainReadZhilianJobClassValue, [])
+  const prefilledClass =
+    validMainStep(prefilled) && prefilled.status === 'ok' ? prefilled.detail ?? null : null
+
+  await pollStep(tabId, mainOpenZhilianJobClassPicker, [], ctx, '打开职位类别选择器',
+    (detail) => detail === 'open', 25, progress)
+  const raw = await runStep(tabId, mainReadZhilianJobClassCandidates, [], '读取职位类别候选', progress)
+  await pollStep(tabId, mainCloseZhilianJobClassPicker, [], ctx, '关闭职位类别选择器',
+    (detail) => detail === 'closed', 20, progress)
+
+  let candidates: { name: string; definition: string }[]
+  try {
+    candidates = JSON.parse(raw) as { name: string; definition: string }[]
+  } catch {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选无法解析', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
+  }
+
+  // 半张填好的表留在页面上等同于给人工误操作递刀,读完必须离开。
+  await discardZhilianJobDraft(tabId, ctx)
+
+  const data: JobReadClassCandidatesData = {
+    candidates, prefilledClass, observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.JobReadClassCandidates, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选回读不符合当前契约', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_contract'))
+  }
+  await ctx.progress('职位类别候选读取完成', 100)
+  return data
+}
+
+export async function prepareZhilianJobDraft(
+  args: JobPrepareDraftArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobPrepareDraftData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobPrepareDraft, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '发布试填参数不符合当前契约', 'manualOnly')
+  }
+  const { tabId, data } = await fillZhilianJobForm(args, ctx, expectedPrincipalFingerprint)
 
   // 试填完成后必须离开:一个填满的发布表单只差一次点击,留在页面上等同于
   // 给人工误操作递刀。离开确认不了就整体失败,不返回"填好了"的成功结论。
@@ -6122,10 +6681,24 @@ async function ensureZhilianJobPublishTab(
   try {
     // 即使当前已在发布页也重新导航一次:表单只活在页面内存里,
     // 上一次的残留会污染这次回读。
-    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL })
+    // active:true 是甲方要求的业务行为(发布过程要肉眼可见),同时它也是这条
+    // 链路的技术前提:后台标签页不跑 CSS 过渡,Vue 的离场过渡起了头就走不完
+    // (transitionend 永不触发),已关闭的下拉面板会永远停在 opacity:1、
+    // height>0,把"等面板收口"这一步逼成死等。真机实测:标签页一回到前台,
+    // 残留节点立刻消失。
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL, active: true })
   } catch (error) {
     commandNavigation.end()
     throw error
+  }
+  // 光把标签页设为 active 还不够:窗口若未聚焦(或被最小化),Chrome 仍可能
+  // 判 hidden。窗口聚焦失败不影响发布本身,不让它掀翻整条链路。
+  if (tab.windowId !== undefined && tab.windowId !== chrome.windows.WINDOW_ID_NONE) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true, drawAttention: true })
+    } catch {
+      // 忽略:窗口聚焦是尽力而为。
+    }
   }
   const tabId = tab.id
   if (tabId === undefined) {

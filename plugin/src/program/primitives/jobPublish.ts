@@ -1,14 +1,25 @@
-// 职位发布前预检原语。分区遍历与职位名提取全部留在智联 program;本模块只把
-// generated 契约接到唯一注册表。本原语只读平台已存在的职位名,不创建、不编辑、
-// 不上下线任何职位,也不产生候选人可见动作。
+// 职位发布四个原语。页面驱动全部留在智联 program;本模块只把 generated 契约接到
+// 唯一注册表。
+//
+//   job.readPublishedList     intrusive  只读平台已存在的职位名,供发布前判同名
+//   job.readClassCandidates   intrusive  填三项后读回平台给的职位类别候选全集
+//   job.prepareDraft          intrusive  试填并回读,填完主动离开表单,绝不提交
+//   job.publishDraft          effectful  真正发布,唯一一次点击 + 平台列表正证
+//
+// 前三个不创建、不编辑、不上下线任何职位;只有 job.publishDraft 产生对外副作用。
 import {
   CmdClass,
   JobPrepareDraftArgs,
+  JobPublishDraftGuards,
+  JobReadClassCandidatesArgs,
   Primitive as PrimitiveName,
+  PublishDraftEvidenceType,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
   prepareZhilianJobDraft,
+  publishZhilianJobDraft,
+  readZhilianJobClassCandidates,
   readZhilianPublishedJobs,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
@@ -52,6 +63,26 @@ const readPublishedList: Primitive = {
   },
 }
 
+const readClassCandidates: Primitive = {
+  name: PrimitiveName.JobReadClassCandidates,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await readZhilianJobClassCandidates(
+        rawArgs as JobReadClassCandidatesArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const prepareDraft: Primitive = {
   name: PrimitiveName.JobPrepareDraft,
   class: CmdClass.Intrusive,
@@ -72,7 +103,53 @@ const prepareDraft: Primitive = {
   },
 }
 
+// effectful 专用:sideEffect 必须如实取平台层的判断,不能像 intrusive 那样一律
+// 报 none。点击之前的失败是 none(未发布、可安全重试),点击之后是 possible
+// (可能已经发布,只能由脑的验证轮与 suspect 收敛,绝不重试)。
+function failPublishOrThrow(error: unknown): PrimitiveOutcome {
+  if (!(error instanceof ZhilianPlatformError)) throw error
+  const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
+  if (error.reason && data.reason === undefined) data.reason = error.reason
+  return {
+    status: 'failed',
+    error: {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+      sideEffect: error.sideEffect,
+      ...(Object.keys(data).length > 0 ? { data } : {}),
+    },
+  }
+}
+
+const publishDraft: Primitive = {
+  name: PrimitiveName.JobPublishDraft,
+  class: CmdClass.Effectful,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await publishZhilianJobDraft(
+        rawArgs as JobPrepareDraftArgs,
+        ctx.guards as unknown as JobPublishDraftGuards,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return {
+        status: 'ok',
+        data,
+        evidence: [{ type: PublishDraftEvidenceType.PlatformPostingObserved }],
+      }
+    } catch (error) {
+      return failPublishOrThrow(error)
+    }
+  },
+}
+
 export function registerJobPublishPrimitives(): void {
   register(readPublishedList)
+  register(readClassCandidates)
   register(prepareDraft)
+  register(publishDraft)
 }
