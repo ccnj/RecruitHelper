@@ -18,7 +18,7 @@ interface NavItem {
 // 自己要进的是只读面还是会动平台的面。
 const navItems: NavItem[] = [
   { key: 'overview', label: '总览', hint: '帧流 · 命令账本 · 快捷派发' },
-  { key: 'account', label: '账号与巡检', hint: '绑定 · 开停巡检 · 人工指定候选人' },
+  { key: 'account', label: '账号与巡检', hint: '绑定 · 开停巡检 · 人工建档' },
   { key: 'conversation', label: '会话与消息', hint: '会话账 · 消息 · 审计证词' },
   { key: 'jobPublish', label: '职位与发布', hint: '预检 · 定类别 · 试填 · 真发' },
   { key: 'modelConfig', label: '模型与配置', hint: '职位同步 · 模型连接' },
@@ -43,6 +43,7 @@ export function ConsoleSidebar({ activePage, onNavigate }: {
             className={`dc-nav-item${activePage === item.key ? ' is-active' : ''}`}
             aria-current={activePage === item.key ? 'page' : undefined}
             onClick={() => onNavigate(item.key)}
+            title={`${item.label} · ${item.hint}`}
           >
             <span className="dc-nav-label">{item.label}</span>
             <small className="dc-nav-hint">{item.hint}</small>
