@@ -94,10 +94,24 @@ func TestM5ProviderConfigAcceptsAnyWellFormedModel(t *testing.T) {
 			t.Fatalf("合法模型 %q 被拒: code=%d", accepted, code)
 		}
 	}
-	// 模型链原样落盘会让 ProviderName/ModelName 与批次一致性校验失去意义,必须挡住。
-	for _, rejected := range []string{"deepseek-v4-pro,deepseek-v4-flash", "deepseek v4", " ", ""} {
+	// 模型链或带空白的值原样落盘,会让 ModelName 与采集批次的模型一致性校验失去
+	// 意义,必须挡住。
+	for _, rejected := range []string{"deepseek-v4-pro,deepseek-v4-flash", "deepseek v4"} {
 		if code := post(rejected); code != http.StatusBadRequest {
 			t.Fatalf("非法模型 %q 未被拒: code=%d", rejected, code)
 		}
+	}
+	// 留空是这个兜底表单的正常用法:保留现值,不打回本地常量,更不该报错。
+	// 上一轮成功的值是 qwen3-max。
+	if code := post(""); code != http.StatusOK {
+		t.Fatalf("留空 model 未被接受: code=%d", code)
+	}
+	stored, err := configStore.Load()
+	if err != nil || stored == nil || stored.Model != "qwen3-max" {
+		t.Fatalf("留空 model 未保留现值: %+v err=%v", stored, err)
+	}
+	// provider 标签一律由 base_url 推导,不采纳请求里的值。
+	if stored.Provider != "provider" {
+		t.Fatalf("provider 标签未由 base_url 推导: %q", stored.Provider)
 	}
 }
