@@ -134,7 +134,13 @@ function createTray() {
     const icon = nativeImage.createFromDataURL(
       `data:image/png;base64,${TRAY_ICON_PNG_BASE64}`,
     )
-    if (icon.isEmpty()) throw new Error('托盘图标解码为空')
+    if (icon.isEmpty()) {
+      // 只记一笔,照样建托盘。图标解码失败不等于托盘不可用——托盘仍然能点、能退出,
+      // 只是没图标。判据是"托盘能不能用",不是"图标好不好看";拿后者去触发下面的
+      // 降级,等于用"关窗即停业务"去换一个美观问题,不划算。托盘真建不起来会自己
+      // 抛错走 catch。
+      writeLog('[main] 托盘图标解码为空,托盘将无图标 —— 检查 trayIcon.js 是否是合法 PNG')
+    }
     tray = new Tray(icon)
     tray.setToolTip('招聘助手')
     tray.setContextMenu(Menu.buildFromTemplate([
