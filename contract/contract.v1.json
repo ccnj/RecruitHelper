@@ -1333,9 +1333,9 @@
       "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPublishDraftData",
       "guardsSchema": "JobPublishDraftGuards", "evidenceSchema": "JobPublishDraftEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
-      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 45000,
+      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 150000,
       "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
-      "note": "把一个职位真正发布到平台。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定"
+      "note": "把一个职位真正发布到平台。真机实测整条链路约 95 秒(读列表 → 填表 → 点击 → 两轮回读),lease 必须容纳最长单步,45 秒会让脑在填表途中因 leaseExpired 取消命令、手来不及回 result 而白落 suspect。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",
