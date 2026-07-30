@@ -67,21 +67,30 @@ async function boot() {
     userDataDir: app.getPath('userData'),
   })
   // 只有打包态才安置插件:开发期插件由开发者自己从 plugin/dist 加载。
-  // 放在起脑之前是因为这一刻还没有任何批次在跑,替换天然安全;失败只降级。
-  if (app.isPackaged) {
+  // 放在起脑之前是因为这一刻还没有任何批次在跑,替换天然安全;失败只降级 ——
+  // 也因为这个顺序,脑一启动就能把固定目录里的 manifest 当作"磁盘上是哪一版"
+  // 的真相。
+  const pluginDir = app.isPackaged
+    ? pluginInstallDir({ userDataDir: app.getPath('userData') })
+    : ''
+  if (pluginDir) {
     ensurePluginInstalled({
       sourceDir: layout.pluginDir,
-      targetDir: pluginInstallDir({ userDataDir: app.getPath('userData') }),
+      targetDir: pluginDir,
       log: writeLog,
     })
   }
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
+  const brainEnv = { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken }
+  // 开发期不传:那时固定目录要么不存在,要么是上次装包留下的陈旧副本,而
+  // Chrome 里加载的是开发者自己的 plugin/dist —— 拿它当基准只会误判。
+  if (pluginDir) brainEnv.RECRUITHELPER_PLUGIN_DIR = pluginDir
   service = new BrainService({
     bin: layout.brainBin,
     args: [...layout.brainArgs, '-port', String(PORT), '-data', dataDir],
     cwd: layout.brainCwd,
-    env: { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken },
+    env: brainEnv,
     onLog: writeLog,
   })
   service.start()
