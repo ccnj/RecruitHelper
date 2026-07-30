@@ -685,12 +685,19 @@ async function runMain<A extends unknown[], R>(
   func: (...args: A) => R | Promise<R>,
   args: A,
 ): Promise<R> {
+  // 节奏闸在唯一的注入入口上收口:runStep 与 pollStep 都经过这里,所以发布链路
+  // 不可能有哪个接缝被漏掉。见 zhilianPublishInteractions 的说明。
+  const paced = zhilianPublishInteractions.has(func)
+  if (paced) await paceZhilianInteraction()
   const result = await chrome.scripting.executeScript({
     target: { tabId },
     world: 'MAIN',
     func,
     args,
   })
+  if (paced && zhilianInteractionHappened(func, (result[0] as { result?: unknown } | undefined)?.result)) {
+    lastZhilianPublishInteractionAt = Date.now()
+  }
   const first = result[0] as unknown as { result?: R | null; error?: unknown } | undefined
   if (!first) {
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本尚未就绪', 'afterRecovery', 'contentScriptDead')
@@ -5815,6 +5822,60 @@ function throwPrepareDraftFailure(reason: string, progress?: DraftProgress): nev
 // 注意:func 会被序列化后注入 MAIN world,**闭包变量到不了那边**。
 // 参数一律经 args 数组传递,绝不能写成 () => mainXxx(param) ——那样 param
 // 在页面里是未定义的,executeScript 会静默返回 undefined。
+// 发布链路里真正会在页面上产生可见交互的 MAIN 函数全集。按 AGENTS.md
+// 「平台交互节奏与条件等待」,相邻可见动作必须至少间隔 1 秒并带小幅有界抖动。
+//
+// 为什么用函数引用而不是名字前缀:esbuild 压缩会改名,靠 mainClick*/mainPick*
+// 之类的命名约定判断会在打包后静默失效——节奏闸消失了却没人发现。按引用比对
+// 打包前后都成立。新增可见动作忘记登记这里,是唯一的漏网口子,所以登记表紧贴
+// 节奏闸放在一起,别拆开。
+//
+// 只登记发布链路的函数:招呼、消息、卡片、采集各有自己已在生产跑着的节奏,
+// 不在本次改动范围内。
+const zhilianPublishInteractions = new Set<unknown>([
+  mainPickZhilianEmployment,
+  mainFillZhilianJobName,
+  mainWriteZhilianDescription,
+  mainBlurZhilianDescription,
+  mainCloseZhilianPanels,
+  mainOpenZhilianSelect,
+  mainPickZhilianSelectOption,
+  mainOpenZhilianSalaryMonths,
+  mainOpenZhilianKeywords,
+  mainClearOneZhilianKeyword,
+  mainPickZhilianKeyword,
+  mainClickZhilianCustomEntry,
+  mainSubmitZhilianCustomKeyword,
+  mainDismissZhilianCustomInput,
+  mainConfirmZhilianKeywords,
+  mainFillZhilianHeadcount,
+  mainClickZhilianPublish,
+  mainIgnoreZhilianSensitiveWordDialog,
+])
+
+// 上一次真实可见动作的时刻。0 表示本次运行还没动过页面。
+let lastZhilianPublishInteractionAt = 0
+
+// paceZhilianInteraction 只补足"距上一次真实动作不足下限"的那段时间。
+// 抖动每次重抽,不是固定值。
+async function paceZhilianInteraction(): Promise<void> {
+  const floor = 1_000 + Math.floor(Math.random() * 501)
+  const elapsed = Date.now() - lastZhilianPublishInteractionAt
+  if (elapsed >= floor) return
+  await new Promise<void>((resolve) => setTimeout(resolve, floor - elapsed))
+}
+
+// 判断这一次调用是否真的动了页面。条件轮询里"还没就绪"的那些轮次并没有交互,
+// 不能记时也不该被节奏闸拖慢——否则 40 轮的就绪等待会被拉成 40 秒,那正是
+// 裁决里禁止的"用固定等待取代条件轮询"。
+function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
+  if (!validMainStep(result) || result.status !== 'ok') return false
+  // 收面板是唯一的例外:ok+closed 表示本来就没开着、没点过 body,
+  // ok+closing 才是真点了一下。
+  if (func === mainCloseZhilianPanels) return result.detail === 'closing'
+  return true
+}
+
 async function runStep<A extends unknown[]>(
   tabId: number,
   func: (...args: A) => MainStep,
@@ -5881,7 +5942,6 @@ async function pickZhilianSelect(
   // 上一次操作可能留着面板;不先收口,这次点击会把它 toggle 关掉。
   await pollStep(tabId, mainCloseZhilianPanels, [], ctx, '关闭下拉面板',
     (detail) => detail === 'closed', 20, progress)
-  await pace()
   const anchor = Number(await runStep(tabId, mainOpenZhilianSelect, [placeholder], '展开下拉', progress))
   await pollStep(tabId, mainPickZhilianSelectOption, [anchor, wanted], ctx, `选择${placeholder}`,
     undefined, 40, progress)
@@ -5983,7 +6043,6 @@ async function applyZhilianKeywords(
   progress.keywordIndex = undefined
   progress.keyword = undefined
   progress.keywordRoute = undefined
-  await pace()
   // 保险再收一次:任何一处残留的打开态输入框都会让「确定」被拒。
   await pollStep(tabId, mainDismissZhilianCustomInput, [], ctx, '确认前收起自定义输入框',
     (detail) => detail === 'none', 12, progress)
@@ -6064,10 +6123,8 @@ async function fillZhilianJobForm(
   const employment = await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
 
-  await pace()
   await runStep(tabId, mainFillZhilianJobName, [args.jobName], '填入职位名称', progress)
 
-  await pace()
   const lines = args.description.split('\n')
   const expectedHTML = await runStep(tabId, mainWriteZhilianDescription, [lines], '写入职位描述', progress)
   // 富文本到隐藏 textarea 是异步同步的;一致即是这一步的正证。
@@ -6110,6 +6167,9 @@ async function fillZhilianJobForm(
   const salaryMax = await pickZhilianSelect(tabId, ctx, '最高月薪', args.salaryMax, progress)
   await pollStep(tabId, mainCloseZhilianPanels, [], ctx, '关闭下拉面板',
     (detail) => detail === 'closed', 20, progress)
+  // 这一拍不是交互节奏(节奏闸已在 runMain 统一收口),是等薪资三段联动渲染:
+  // 选完最高月薪之后「薪资月数」才会挂上来。后面的读取本身也在轮询,这里只是
+  // 给联动一个起步的余量。
   await pace()
   let salaryMonths = await pollStep(tabId, mainReadZhilianSalaryMonths, [], ctx, '读取薪资月数',
     undefined, 40, progress)
@@ -6125,7 +6185,6 @@ async function fillZhilianJobForm(
   const keywords = await applyZhilianKeywords(tabId, ctx, args.keywords, progress)
   await ctx.progress('填写职位关键词', 85)
 
-  await pace()
   const headcount = await runStep(tabId, mainFillZhilianHeadcount, [args.headcount], '填写招聘人数', progress)
   const workplace = await pollStep(tabId, mainReadZhilianWorkplace, [], ctx, '回读工作地址',
     undefined, 40, progress)
@@ -6253,7 +6312,6 @@ export async function publishZhilianJobDraft(
   // 身份最后一次复核:此后就是不可逆动作。
   assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
   await ctx.beforeSideEffect()
-  await pace()
 
   // ── 不可逆点击。此后一律 sideEffect=possible,原语内绝不重试、绝不第二次点击 ──
   const clicked = await runMain(tabId, mainClickZhilianPublish, [])
