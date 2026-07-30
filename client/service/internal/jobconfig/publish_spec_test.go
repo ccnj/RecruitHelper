@@ -150,7 +150,9 @@ func TestDeadFieldNoticesAlwaysSurfaceAndNeverBlock(t *testing.T) {
 	if !strings.Contains(diff[0].Message, "财富传承顾问(法律/财务/税务背景优先)") {
 		t.Fatalf("不一致情形未写明实际发布名: %s", issueFields(diff))
 	}
-	if diff[1].Field != DeadFieldJobClass || !strings.Contains(diff[1].Message, "自动判定") {
+	// 职位类别 2026-07-30 起不再是死字段:它是平台候选精确匹配的首选来源,
+	// 匹配不上才交给大模型。提示必须说清这个条件,否则运营会以为它一定生效。
+	if diff[1].Field != FieldJobClass || !strings.Contains(diff[1].Message, "精确命中") {
 		t.Fatalf("职位类别提示错误: %s", issueFields(diff))
 	}
 }
@@ -162,17 +164,21 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 	}
 	// 夹具里发布参数的职位名称是"财富传承顾问"，这里刻意传一个不同的后台职位名：
 	// 按裁决必须发后者，前者是死字段。
-	args := spec.DraftArgs("财富传承顾问(法律/财务/税务背景优先)")
+	args := spec.DraftArgs("财富传承顾问(法律/财务/税务背景优先)", "理财顾问")
 
 	if args["jobName"] != "财富传承顾问(法律/财务/税务背景优先)" {
 		t.Fatalf("职位名未取调用方传入的 job.name: %v", args["jobName"])
 	}
-	// 两个死字段一旦漏进入参，手就会拿它去填表——职位名漂移会让候选人配置错配，
-	// 职位类别根本没有可填的控件。
+	// 职位类别必须取调用方传入的平台候选原文,绝不能取发布参数里那个值——
+	// 后者未必在平台候选里(真机两例都不在)。
+	if args["jobClass"] != "理财顾问" {
+		t.Fatalf("职位类别未取调用方传入的平台候选原文: %v", args["jobClass"])
+	}
+	// 死字段一旦漏进入参，手就会拿它去填表——职位名漂移会让候选人配置错配。
 	if _, leaked := args["职位名称"]; leaked {
 		t.Fatal("发布参数里的职位名称不得进入试填参数")
 	}
-	for _, key := range []string{"jobClass", "职位类别", "category"} {
+	for _, key := range []string{"职位类别", "category"} {
 		if _, leaked := args[key]; leaked {
 			t.Fatalf("职位类别不得进入试填参数（平台按描述自动判定）: %s", key)
 		}
@@ -203,14 +209,14 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 		t.Fatalf("职位描述未原样传递: %q", description)
 	}
 	// 手侧契约的 args 只认这些键；多一个都会被 ValidatePrimitiveArgs 拒。
-	if len(args) != 12 {
+	if len(args) != 13 {
 		t.Fatalf("试填参数键数与契约不符: %d 个 %v", len(args), args)
 	}
 }
 
 func TestDraftArgsTrimsCallerJobName(t *testing.T) {
 	spec, _ := ParsePublishSpec(validPublishParams)
-	if got := spec.DraftArgs("  财富传承顾问  ")["jobName"]; got != "财富传承顾问" {
+	if got := spec.DraftArgs("  财富传承顾问  ", "  理财顾问  ")["jobName"]; got != "财富传承顾问" {
 		t.Fatalf("职位名未去除首尾空白: %q", got)
 	}
 }

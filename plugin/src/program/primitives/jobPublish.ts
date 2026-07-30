@@ -1,15 +1,17 @@
-// 职位发布三个原语。页面驱动全部留在智联 program;本模块只把 generated 契约接到
+// 职位发布四个原语。页面驱动全部留在智联 program;本模块只把 generated 契约接到
 // 唯一注册表。
 //
-//   job.readPublishedList  intrusive  只读平台已存在的职位名,供发布前判同名
-//   job.prepareDraft       intrusive  试填并回读,填完主动离开表单,绝不提交
-//   job.publishDraft       effectful  真正发布,唯一一次点击 + 平台列表正证
+//   job.readPublishedList     intrusive  只读平台已存在的职位名,供发布前判同名
+//   job.readClassCandidates   intrusive  填三项后读回平台给的职位类别候选全集
+//   job.prepareDraft          intrusive  试填并回读,填完主动离开表单,绝不提交
+//   job.publishDraft          effectful  真正发布,唯一一次点击 + 平台列表正证
 //
-// 前两个不创建、不编辑、不上下线任何职位;只有 job.publishDraft 产生对外副作用。
+// 前三个不创建、不编辑、不上下线任何职位;只有 job.publishDraft 产生对外副作用。
 import {
   CmdClass,
   JobPrepareDraftArgs,
   JobPublishDraftGuards,
+  JobReadClassCandidatesArgs,
   Primitive as PrimitiveName,
   PublishDraftEvidenceType,
 } from '../../base/protocol'
@@ -17,6 +19,7 @@ import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
   prepareZhilianJobDraft,
   publishZhilianJobDraft,
+  readZhilianJobClassCandidates,
   readZhilianPublishedJobs,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
@@ -50,6 +53,26 @@ const readPublishedList: Primitive = {
         throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
       }
       const data = await readZhilianPublishedJobs(
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
+const readClassCandidates: Primitive = {
+  name: PrimitiveName.JobReadClassCandidates,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await readZhilianJobClassCandidates(
+        rawArgs as JobReadClassCandidatesArgs,
         ctx,
         ctx.commandContext.expectedPrincipalFingerprint,
       )
@@ -126,6 +149,7 @@ const publishDraft: Primitive = {
 
 export function registerJobPublishPrimitives(): void {
   register(readPublishedList)
+  register(readClassCandidates)
   register(prepareDraft)
   register(publishDraft)
 }

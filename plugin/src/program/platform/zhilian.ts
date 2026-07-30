@@ -54,6 +54,8 @@ import type {
   JobPrepareDraftData,
   JobPublishDraftData,
   JobPublishDraftGuards,
+  JobReadClassCandidatesArgs,
+  JobReadClassCandidatesData,
   JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
@@ -5363,12 +5365,111 @@ function mainBlurZhilianDescription(): MainStep {
   return { status: 'ok' }
 }
 
-function mainReadZhilianAutoJobClass(): MainStep {
+function mainReadZhilianJobClassValue(): MainStep {
   const node = document.querySelector('.job-subType-input') as HTMLElement | null
   if (!node) return { status: 'failed', reason: 'job_class_absent' }
   const text = node.innerText.trim().split('\n')[0].trim()
   if (!text || text === '请选择') return { status: 'failed', reason: 'job_class_pending' }
   return { status: 'ok', detail: text.slice(0, 64) }
+}
+
+// 职位类别选择器。真机事实:工作性质/职位名称/职位描述写完并由平台加载完成之前
+// 点入口没有任何反应,所以只能轮询点击直到弹层出现——ok+clicked 表示这一轮点了、
+// 还没开,ok+open 表示已经开着。两者都是 ok,由调用方的 accept 判定何时算成。
+//
+// 下面几个函数都会被序列化注入 MAIN world,**不能引用模块作用域的任何东西**,
+// 查找逻辑只能各自内联一遍,不许抽公共 helper。
+function mainOpenZhilianJobClassPicker(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length > 1) return { status: 'failed', reason: 'job_class_picker_ambiguous' }
+  if (open.length === 1) return { status: 'ok', detail: 'open' }
+  const entry = document.querySelector('.job-subType-input') as HTMLElement | null
+  if (!entry) return { status: 'failed', reason: 'job_class_entry_absent' }
+  entry.click()
+  return { status: 'ok', detail: 'clicked' }
+}
+
+// 读回候选全集。detail 是 JSON:[{name,definition}]。平台释义原样带出来,
+// 它是脑侧让大模型做判断的主要依据,不能截断成半句。
+function mainReadZhilianJobClassCandidates(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length !== 1) {
+    return {
+      status: 'failed',
+      reason: open.length === 0 ? 'job_class_picker_absent' : 'job_class_picker_ambiguous',
+    }
+  }
+  const rows = Array.from(open[0].querySelectorAll('.recommend-jobType-modal__item')) as HTMLElement[]
+  const candidates: { name: string; definition: string }[] = []
+  for (const row of rows) {
+    const nameNode = row.querySelector('.item-text') as HTMLElement | null
+    const defNode = row.querySelector('.item-text-sub') as HTMLElement | null
+    const name = (nameNode?.innerText ?? '').trim()
+    if (!name) continue
+    candidates.push({ name: name.slice(0, 64), definition: (defNode?.innerText ?? '').trim().slice(0, 400) })
+  }
+  return { status: 'ok', detail: JSON.stringify(candidates) }
+}
+
+// 精确选中。名字必须与脑定好的那个逐字相等——绝不模糊匹配、绝不就近取一个:
+// 类别选错会把职位推给错误的人群,而页面看上去一切正常。
+function mainPickZhilianJobClass(wanted: string): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length !== 1) {
+    return {
+      status: 'failed',
+      reason: open.length === 0 ? 'job_class_picker_absent' : 'job_class_picker_ambiguous',
+    }
+  }
+  const rows = Array.from(open[0].querySelectorAll('.recommend-jobType-modal__item')) as HTMLElement[]
+  const hit = rows.filter((row) => {
+    const nameNode = row.querySelector('.item-text') as HTMLElement | null
+    return (nameNode?.innerText ?? '').trim() === wanted
+  })
+  if (hit.length !== 1) {
+    return {
+      status: 'failed',
+      reason: hit.length === 0 ? 'job_class_option_absent' : 'job_class_option_ambiguous',
+    }
+  }
+  hit[0].click()
+  return { status: 'ok', detail: 'picked' }
+}
+
+// 关闭选择器。选中之后平台一般自己关,这里是兜底;ok+closed 表示已经关上、
+// 没点过东西,ok+closing 表示这一轮点了关闭按钮。绝不点「去反馈」——那是
+// 申请新增类别,不是选择。
+function mainCloseZhilianJobClassPicker(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('recommend-jobType-modal') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length === 0) return { status: 'ok', detail: 'closed' }
+  const close = open[0].querySelector('button.km-modal__close-btn') as HTMLElement | null
+  if (!close) return { status: 'failed', reason: 'job_class_picker_close_absent' }
+  close.click()
+  return { status: 'ok', detail: 'closing' }
 }
 
 function mainPickZhilianEmployment(label: string): MainStep {
@@ -5758,7 +5859,8 @@ function mainReadZhilianKeywordTags(): MainStep {
 interface DraftProgress {
   step: string
   descriptionLength?: number
-  autoJobClass?: string
+  jobClass?: string
+  prefilledClass?: string | null
   keywordTotal?: number
   keywordIndex?: number
   keyword?: string
@@ -5783,7 +5885,8 @@ function snapshotProgress(progress: DraftProgress, reason: string): Record<strin
     reason,
     step: progress.step,
     descriptionLength: progress.descriptionLength ?? null,
-    autoJobClass: progress.autoJobClass ?? null,
+    jobClass: progress.jobClass ?? null,
+    prefilledClass: progress.prefilledClass ?? null,
     keyword: progress.keyword ?? null,
     keywordRoute: progress.keywordRoute ?? null,
     keywordAt: progress.keywordIndex === undefined
@@ -5838,6 +5941,9 @@ const zhilianPublishInteractions = new Set<unknown>([
   mainWriteZhilianDescription,
   mainBlurZhilianDescription,
   mainCloseZhilianPanels,
+  mainOpenZhilianJobClassPicker,
+  mainPickZhilianJobClass,
+  mainCloseZhilianJobClassPicker,
   mainOpenZhilianSelect,
   mainPickZhilianSelectOption,
   mainOpenZhilianSalaryMonths,
@@ -5870,9 +5976,11 @@ async function paceZhilianInteraction(): Promise<void> {
 // 裁决里禁止的"用固定等待取代条件轮询"。
 function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
   if (!validMainStep(result) || result.status !== 'ok') return false
-  // 收面板是唯一的例外:ok+closed 表示本来就没开着、没点过 body,
-  // ok+closing 才是真点了一下。
+  // 几个"看一眼再决定点不点"的例外:ok 里要再看 detail 才知道这一轮到底
+  // 有没有真的点下去。
   if (func === mainCloseZhilianPanels) return result.detail === 'closing'
+  if (func === mainOpenZhilianJobClassPicker) return result.detail === 'clicked'
+  if (func === mainCloseZhilianJobClassPicker) return result.detail === 'closing'
   return true
 }
 
@@ -5930,6 +6038,25 @@ async function pace(): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
+}
+
+// selectZhilianJobClass:打开类别选择器 → 精确选中 → 关闭 → 回读确认。
+// 选择器在平台加载完之前打不开,只能轮询点击;25 轮配合 1 秒节奏下限约 30 秒,
+// 与真机上类别加载的耗时量级相当。回读必须等于脑给的那个值,不等就失败。
+async function selectZhilianJobClass(
+  tabId: number,
+  ctx: PrimitiveContext,
+  wanted: string,
+  progress: DraftProgress,
+): Promise<string> {
+  await pollStep(tabId, mainOpenZhilianJobClassPicker, [], ctx, '打开职位类别选择器',
+    (detail) => detail === 'open', 25, progress)
+  await pollStep(tabId, mainPickZhilianJobClass, [wanted], ctx, '选择职位类别',
+    undefined, 20, progress)
+  await pollStep(tabId, mainCloseZhilianJobClassPicker, [], ctx, '关闭职位类别选择器',
+    (detail) => detail === 'closed', 20, progress)
+  return pollStep(tabId, mainReadZhilianJobClassValue, [], ctx, '回读职位类别',
+    (detail) => detail === wanted, 40, progress)
 }
 
 async function pickZhilianSelect(
@@ -6134,29 +6261,16 @@ async function fillZhilianJobForm(
   ))
   progress.descriptionLength = descriptionLength
   await runStep(tabId, mainBlurZhilianDescription, [], '触发职位描述失焦', progress)
-  await ctx.progress('等待平台按职位描述判定类别', 35)
-  // 职位类别是平台自动生成的必填项,不是我们能填的字段;等它出现即可。
-  // 类别由平台按描述判定,长描述明显更慢;60 轮(15 秒)在真机上不够,给到 30 秒。
-  // 平台会因为内容不合规而拒绝判定类别(实测:描述里写了年龄要求就不判)。
-  // 失败时把页面自己给出的提示原话带进诊断,否则只能看到一句"未在期限内判定"。
-  let autoJobClass: string
-  try {
-    autoJobClass = await pollStep(tabId, mainReadZhilianAutoJobClass, [], ctx,
-      '读取自动职位类别', undefined, 120, progress)
-  } catch (error) {
-    if (error instanceof ZhilianPlatformError) {
-      const hints = await runMain(tabId, mainReadZhilianFormHints, [])
-      const detail = validMainStep(hints) && hints.status === 'ok' ? hints.detail ?? '' : ''
-      if (detail) {
-        throw new ZhilianPlatformError(
-          error.code, error.message, error.retryable, error.reason, error.sideEffect,
-          { ...(error.diagnostics ?? {}), platformHints: detail },
-        )
-      }
-    }
-    throw error
-  }
-  progress.autoJobClass = autoJobClass
+  await ctx.progress('选定职位类别', 35)
+  // 职位类别由脑定好后下发,这里只负责精确选中(甲方 2026-07-30 裁决:一律自己选,
+  // 不等平台自动填)。平台只在自己有把握时才预填,不预填时并不代表没有候选——
+  // 先记下预填值作诊断,再照脑给的值选一次。关键词弹层必须在类别定下之后才打得开,
+  // 所以这一步必须排在关键词之前。
+  const prefilled = await runMain(tabId, mainReadZhilianJobClassValue, [])
+  progress.prefilledClass =
+    validMainStep(prefilled) && prefilled.status === 'ok' ? prefilled.detail ?? null : null
+  const jobClass = await selectZhilianJobClass(tabId, ctx, args.jobClass, progress)
+  progress.jobClass = jobClass
 
   const education = await pickZhilianSelect(tabId, ctx, '最低学历', args.education, progress)
   const experience = await pickZhilianSelect(tabId, ctx, '工作经验', args.experience, progress)
@@ -6193,7 +6307,8 @@ async function fillZhilianJobForm(
     jobName: args.jobName,
     employmentType: employment,
     descriptionLength: Number.isFinite(descriptionLength) ? descriptionLength : 0,
-    autoJobClass: autoJobClass || null,
+    jobClass,
+    prefilledClass: progress.prefilledClass ?? null,
     education, experience, salaryMin, salaryMax, salaryMonths,
     keywords: {
       matched: keywords.matched, custom: keywords.custom,
@@ -6395,7 +6510,8 @@ export async function publishZhilianJobDraft(
 
   const data: JobPublishDraftData = {
     jobName: args.jobName,
-    autoJobClass: filled.autoJobClass,
+    jobClass: filled.jobClass,
+    prefilledClass: filled.prefilledClass,
     postingVisible: visible,
     verifyRounds: rounds,
     keywords: filled.keywords,
@@ -6416,6 +6532,77 @@ export async function publishZhilianJobDraft(
     )
   }
   await ctx.progress('职位发布已取得平台正证', 100)
+  return data
+}
+
+// readZhilianJobClassCandidates:拿回平台针对这个职位给出的类别候选全集。
+//
+// 为什么必须先填表:类别选择器在工作性质/职位名称/职位描述写完并由平台加载完成
+// 之前打不开(真机实测,点了没有任何反应)。候选是平台读了这三项之后现给的,
+// 所以拿候选这件事绕不开填表——但只填这三项,填完读完就离开,不碰其余字段、
+// 不提交任何东西。
+export async function readZhilianJobClassCandidates(
+  args: JobReadClassCandidatesArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobReadClassCandidatesData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobReadClassCandidates, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '类别候选读取参数不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const progress = newDraftProgress()
+  const tab = await ensureZhilianJobPublishTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联发布页与登录身份', 15)
+
+  await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
+  await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
+    (detail) => detail === args.employmentType, 40, progress)
+  await runStep(tabId, mainFillZhilianJobName, [args.jobName], '填入职位名称', progress)
+
+  const lines = args.description.split('\n')
+  const expectedHTML = await runStep(tabId, mainWriteZhilianDescription, [lines], '写入职位描述', progress)
+  progress.descriptionLength = Number(await pollStep(
+    tabId, mainReadZhilianDescriptionSync, [expectedHTML], ctx, '确认职位描述同步',
+    undefined, 40, progress,
+  ))
+  await runStep(tabId, mainBlurZhilianDescription, [], '触发职位描述失焦', progress)
+  await ctx.progress('等待平台给出职位类别候选', 45)
+
+  // 预填值只作诊断:平台只在自己有把握时才预填,不预填不代表没有候选。
+  const prefilled = await runMain(tabId, mainReadZhilianJobClassValue, [])
+  const prefilledClass =
+    validMainStep(prefilled) && prefilled.status === 'ok' ? prefilled.detail ?? null : null
+
+  await pollStep(tabId, mainOpenZhilianJobClassPicker, [], ctx, '打开职位类别选择器',
+    (detail) => detail === 'open', 25, progress)
+  const raw = await runStep(tabId, mainReadZhilianJobClassCandidates, [], '读取职位类别候选', progress)
+  await pollStep(tabId, mainCloseZhilianJobClassPicker, [], ctx, '关闭职位类别选择器',
+    (detail) => detail === 'closed', 20, progress)
+
+  let candidates: { name: string; definition: string }[]
+  try {
+    candidates = JSON.parse(raw) as { name: string; definition: string }[]
+  } catch {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选无法解析', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
+  }
+
+  // 半张填好的表留在页面上等同于给人工误操作递刀,读完必须离开。
+  await discardZhilianJobDraft(tabId, ctx)
+
+  const data: JobReadClassCandidatesData = {
+    candidates, prefilledClass, observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.JobReadClassCandidates, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选回读不符合当前契约', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_contract'))
+  }
+  await ctx.progress('职位类别候选读取完成', 100)
   return data
 }
 

@@ -112,7 +112,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	}
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply &&
 		request.Purpose != PurposeSilenceFollowup &&
-		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting {
+		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting &&
+		request.Purpose != PurposeJobClass {
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("requestInvalid", FailureStageRequestBuild, "unknownPurpose")
 	}
@@ -127,7 +128,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
 		((request.Purpose == PurposeReply || request.Purpose == PurposeSilenceFollowup ||
-			request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting) &&
+			request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting ||
+			request.Purpose == PurposeJobClass) &&
 			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("budgetBlocked", FailureStageRequestBuild, "outputTokenBudgetExceeded")

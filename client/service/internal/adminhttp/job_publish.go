@@ -152,16 +152,60 @@ type jobPublishDraftView struct {
 	Report protocol.JobPrepareDraftData `json:"report"`
 }
 
+// jobPublishFailure 是一条可以直接写回 HTTP 的失败,供三个入口共用同一套
+// "定位后台职位 + 参数预检"的前置逻辑。
+type jobPublishFailure struct {
+	status  int
+	message string
+}
+
+// resolvePublishTarget 定位后台职位并跑确定性参数预检。三个入口(类别解析、试填、
+// 发布)对这一段的要求完全相同,分别抄一遍只会让它们慢慢长歪。
+func (a *API) resolvePublishTarget(
+	ctx context.Context,
+	jobID string,
+) (*jobconfig.BackendJobPublishSource, jobconfig.PublishSpec, *jobPublishFailure) {
+	raw, err := a.jobConfigSource.FetchAll(ctx)
+	if err != nil {
+		return nil, jobconfig.PublishSpec{},
+			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表读取失败"}
+	}
+	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
+	if err != nil {
+		return nil, jobconfig.PublishSpec{},
+			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表格式不可识别"}
+	}
+	var target *jobconfig.BackendJobPublishSource
+	for i := range sources {
+		if sources[i].JobID == jobID {
+			target = &sources[i]
+			break
+		}
+	}
+	if target == nil {
+		return nil, jobconfig.PublishSpec{},
+			&jobPublishFailure{http.StatusConflict, "该职位当前不在后台启用职位中"}
+	}
+	spec, issues := jobconfig.ParsePublishSpec(target.PublishParams)
+	if len(issues) > 0 {
+		return nil, jobconfig.PublishSpec{},
+			&jobPublishFailure{http.StatusConflict, "该职位发布参数未通过预检，先修参数再操作"}
+	}
+	return target, spec, nil
+}
+
 // jobPublishPrepareDraft 对单个职位在平台发布表单上试填一次并回读。
 //
 // 它**不发布**：手侧原语契约上就不允许点击提交控件，且回读完成后必须主动
 // 离开表单。这一步存在的意义是在承担发布风险之前，先把"填不进去"和平台的
-// 自动行为暴露出来。
+// 自动行为暴露出来。jobClass 必须由调用方给出（先走 class-candidates 定下来），
+// 因为关键词弹层要等类别定了才打得开。
 func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Platform   string `json:"platform"`
 		AccountRef string `json:"accountRef"`
 		JobID      string `json:"jobId"`
+		JobClass   string `json:"jobClass"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
@@ -169,8 +213,15 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
 	req.JobID = strings.TrimSpace(req.JobID)
+	req.JobClass = strings.TrimSpace(req.JobClass)
 	if err != nil || req.JobID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
+		return
+	}
+	if req.JobClass == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "缺少职位类别；请先调用 /admin/job-publish/class-candidates 定下类别",
+		})
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
@@ -196,33 +247,12 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 250*time.Second)
 	defer cancel()
-	raw, err := a.jobConfigSource.FetchAll(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
+	target, spec, failure := a.resolvePublishTarget(ctx, req.JobID)
+	if failure != nil {
+		writeJSON(w, failure.status, map[string]string{"error": failure.message})
 		return
 	}
-	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
-		return
-	}
-	var target *jobconfig.BackendJobPublishSource
-	for i := range sources {
-		if sources[i].JobID == req.JobID {
-			target = &sources[i]
-			break
-		}
-	}
-	if target == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位当前不在后台启用职位中"})
-		return
-	}
-	spec, issues := jobconfig.ParsePublishSpec(target.PublishParams)
-	if len(issues) > 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位发布参数未通过预检，先修参数再试填"})
-		return
-	}
-	args, err := json.Marshal(spec.DraftArgs(target.JobName))
+	args, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "试填命令构造失败"})
 		return
@@ -289,6 +319,7 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 		Platform   string `json:"platform"`
 		AccountRef string `json:"accountRef"`
 		JobID      string `json:"jobId"`
+		JobClass   string `json:"jobClass"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
@@ -296,8 +327,18 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
 	req.JobID = strings.TrimSpace(req.JobID)
+	req.JobClass = strings.TrimSpace(req.JobClass)
 	if err != nil || req.JobID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
+		return
+	}
+	// 类别必须由调用方显式带来:它是 class-candidates 那一趟定下的平台原文,
+	// 运营在确认时看得见、也能改。脑不替它兜一个默认值——猜错类别会把职位
+	// 推给错误的人群,而页面看上去一切正常。
+	if req.JobClass == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "缺少职位类别；请先调用 /admin/job-publish/class-candidates 定下类别再发布",
+		})
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
@@ -319,35 +360,14 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
 	defer cancel()
-	raw, err := a.jobConfigSource.FetchAll(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
-		return
-	}
-	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
-		return
-	}
-	var target *jobconfig.BackendJobPublishSource
-	for i := range sources {
-		if sources[i].JobID == req.JobID {
-			target = &sources[i]
-			break
-		}
-	}
-	if target == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位当前不在后台启用职位中"})
-		return
-	}
 	// 发布前再跑一次确定性参数预检：参数不合格就不该消耗一次不可逆动作。
-	spec, issues := jobconfig.ParsePublishSpec(target.PublishParams)
-	if len(issues) > 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "该职位发布参数未通过预检，先修参数再发布"})
+	target, spec, failure := a.resolvePublishTarget(ctx, req.JobID)
+	if failure != nil {
+		writeJSON(w, failure.status, map[string]string{"error": failure.message})
 		return
 	}
 	var args protocol.JobPrepareDraftArgs
-	argsRaw, err := json.Marshal(spec.DraftArgs(target.JobName))
+	argsRaw, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass))
 	if err != nil || json.Unmarshal(argsRaw, &args) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "发布参数组装失败"})
 		return

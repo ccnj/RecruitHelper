@@ -8,13 +8,16 @@ import (
 	"strings"
 )
 
-// 发布参数文档里"不参与发布"的字段。两者都是 2026-07-29 甲方裁决的死字段：
-// 职位名称改取 job.name（它才是系统的职位身份键）；职位类别由平台按职位描述
-// 自动判定，页面上根本没有人工选择入口。预检必须把它们显式列出来，否则运营
+// 发布参数文档里"不参与发布"的字段。职位名称是 2026-07-29 甲方裁决的死字段：
+// 改取 job.name（它才是系统的职位身份键）。预检必须把它显式列出来，否则运营
 // 会以为自己填的值生效了。
+//
+// 职位类别曾经也在这里，2026-07-30 起不再是死字段：平台只在自己有把握时才自动
+// 填，不填时会给一组候选让人选（详见 docs 的类别选择裁决）。现在它是候选精确
+// 匹配的首选来源，匹配不上才交给大模型。
 const (
-	DeadFieldJobName  = "职位名称"
-	DeadFieldJobClass = "职位类别"
+	DeadFieldJobName = "职位名称"
+	FieldJobClass    = "职位类别"
 )
 
 // 页面下拉的完整取值域，2026-07-29 真机逐项读取所得（见
@@ -77,16 +80,20 @@ type PublishSpec struct {
 	SyncToMailbox bool
 
 	// 死字段的原值，仅用于告诉运营"这一行没有生效"。
-	DeadJobName  string
-	DeadJobClass string
+	DeadJobName string
+
+	// 后台配置的职位类别。它不再是死字段：作为平台候选精确匹配的首选来源。
+	ConfiguredJobClass string
 }
 
 // DraftArgs 把校验通过的 spec 组装成手侧试填参数。jobName 只接受调用方传入的
-// 后台职位名——发布参数里的职位名称是死字段，绝不从 spec 取。职位类别同样不在
-// 参数里：平台按职位描述自动判定。
-func (s PublishSpec) DraftArgs(jobName string) map[string]any {
+// 后台职位名——发布参数里的职位名称是死字段，绝不从 spec 取。jobClass 同样由
+// 调用方传入：它必须是平台候选清单里的原文（精确匹配或大模型选定），不能直接用
+// spec.ConfiguredJobClass，那个值未必在平台候选里。
+func (s PublishSpec) DraftArgs(jobName, jobClass string) map[string]any {
 	return map[string]any{
 		"jobName":        strings.TrimSpace(jobName),
+		"jobClass":       strings.TrimSpace(jobClass),
 		"employmentType": s.EmploymentType,
 		"description":    s.Description,
 		"education":      s.Education,
@@ -144,7 +151,7 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 
 	spec := PublishSpec{
 		DeadJobName:  deref(doc.JobName),
-		DeadJobClass: deref(doc.JobClass),
+		ConfiguredJobClass: deref(doc.JobClass),
 	}
 	var issues []PublishIssue
 	add := func(field, format string, args ...any) {
@@ -193,10 +200,10 @@ func (s PublishSpec) DeadFieldNotices(jobName string) []PublishIssue {
 			})
 		}
 	}
-	if class := strings.TrimSpace(s.DeadJobClass); class != "" {
+	if class := strings.TrimSpace(s.ConfiguredJobClass); class != "" {
 		out = append(out, PublishIssue{
-			Field:   DeadFieldJobClass,
-			Message: "不参与发布，平台按职位描述自动判定类别",
+			Field:   FieldJobClass,
+			Message: "只在平台候选里精确命中时生效；命中不了会由大模型从平台候选中选定",
 		})
 	}
 	return out
@@ -340,6 +347,41 @@ func normalizeJobName(name string) string {
 	)
 	folded := replacer.Replace(name)
 	return strings.Join(strings.Fields(folded), "")
+}
+
+// MatchPlatformJobClass 在平台给出的候选类别里找后台配置的职位类别。
+//
+// 归一化只放宽匹配、不放宽选择:命中后返回的是**平台原文**,因为手侧要按逐字
+// 相等去选中选择器里的那一行。归一化后同时命中多个候选时返回不命中——宁可
+// 交给大模型或人,也不在两个都像的选项里替甲方猜一个。
+func MatchPlatformJobClass(configured string, candidates []string) (string, bool) {
+	target := normalizeJobName(configured)
+	if target == "" {
+		return "", false
+	}
+	matched := ""
+	hits := 0
+	for _, candidate := range candidates {
+		if normalizeJobName(candidate) == target {
+			matched = candidate
+			hits++
+		}
+	}
+	if hits != 1 {
+		return "", false
+	}
+	return matched, true
+}
+
+// ContainsPlatformJobClass 复核某个类别名是否逐字出现在候选清单里。发布前的最后
+// 一道确定性闸:两趟之间平台可能换了候选,定好的类别不在场就必须干净失败。
+func ContainsPlatformJobClass(chosen string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if candidate == chosen {
+			return true
+		}
+	}
+	return false
 }
 
 // MatchesExistingPosting 判断后台职位名是否已经存在于平台职位名清单中。

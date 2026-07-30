@@ -868,11 +868,40 @@
         "type": "object",
         "fields": {}
       },
+      "JobReadClassCandidatesArgs": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 }
+        }
+      },
+      "JobClassCandidate": {
+        "type": "object",
+        "fields": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "definition": { "type": "string", "minLength": 0, "maxLength": 400, "maxBytes": 1600 }
+        }
+      },
+      "JobReadClassCandidatesData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "candidates": {
+            "type": "array", "minItems": 0, "maxItems": 50,
+            "items": { "ref": "JobClassCandidate" }
+          },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "JobPrepareDraftArgs": {
         "type": "object",
         "maxJsonBytes": 65536,
         "fields": {
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
           "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
@@ -906,7 +935,8 @@
         "maxJsonBytes": 65536,
         "fields": {
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
-          "autoJobClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
           "postingVisible": { "type": "boolean" },
           "verifyRounds": { "type": "int64", "minimum": 0 },
           "keywords": { "ref": "JobPrepareDraftKeywordOutcome" },
@@ -942,7 +972,8 @@
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "descriptionLength": { "type": "int64", "minimum": 0 },
-          "autoJobClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
           "education": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "experience": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "salaryMin": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
@@ -1320,6 +1351,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
       "note": "读取本账号在平台上已存在的职位名全集,供脑侧发布前预检判定同名职位是否已存在。必须遍历平台上全部职位状态分区并合并,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。只返回按平台原样文本去重后的职位名与 observedAt,不返回状态、平台职位 ID、DOM 位置或候选人数据。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
+    },
+    "job.readClassCandidates": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "JobReadClassCandidatesArgs", "dataSchema": "JobReadClassCandidatesData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
+      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层并离开发布页,不提交任何东西、不产生候选人可见动作。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别"
     },
     "job.prepareDraft": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",

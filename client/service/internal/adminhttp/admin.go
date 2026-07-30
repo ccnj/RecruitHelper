@@ -27,6 +27,7 @@ type API struct {
 	adminToken      string
 	providerConfig  *m5ai.ProviderConfigStore
 	jobConfigSource *jobconfig.Source
+	advice          JobClassAdvisor
 }
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
@@ -105,6 +106,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
 	mux.HandleFunc("POST /admin/job-publish/precheck", h(a.jobPublishPrecheck))
+	mux.HandleFunc("POST /admin/job-publish/class-candidates", h(a.jobPublishClassCandidates))
 	mux.HandleFunc("POST /admin/job-publish/prepare-draft", h(a.jobPublishPrepareDraft))
 	mux.HandleFunc("POST /admin/job-publish/publish", h(a.jobPublishPublish))
 	mux.HandleFunc("POST /admin/job-config/activate", h(a.activateJobConfigSource))

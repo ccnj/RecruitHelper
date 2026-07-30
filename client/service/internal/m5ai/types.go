@@ -28,6 +28,9 @@ const (
 	SilenceFollowupOutputTokenLimit   = ReplyOutputTokenLimit
 	ScoringOutputTokenLimit           = 512
 	GreetingOutputTokenLimit          = ReplyOutputTokenLimit
+	// 职位类别只回一个类别名、一个置信度和一两句理由,256 足够;给多了只会
+	// 让模型有空间写废话。
+	JobClassOutputTokenLimit = 256
 )
 
 type JobConfigDocument struct {
@@ -119,6 +122,7 @@ const (
 	PurposeSilenceFollowup CompletionPurpose = "silenceFollowup"
 	PurposeScoring         CompletionPurpose = "scoring"
 	PurposeGreeting        CompletionPurpose = "greeting"
+	PurposeJobClass        CompletionPurpose = "jobClass"
 )
 
 type CompletionRequest struct {

@@ -224,8 +224,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
-	adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
-		SetJobConfigSource(jobConfigSource).Routes(mux)
+	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
+		SetJobConfigSource(jobConfigSource)
+	// 职位类别在后台配置值精确匹配不上时改由大模型从平台候选里选,复用同一条
+	// provider 通道。未配置 provider 时只是这条兜底不可用,精确匹配照旧工作。
+	if advice != nil {
+		adminAPI = adminAPI.SetAdvice(advice)
+	}
+	adminAPI.Routes(mux)
 	if *adminToken != "" {
 		productAPI, productErr := apphttp.New(
 			st,
