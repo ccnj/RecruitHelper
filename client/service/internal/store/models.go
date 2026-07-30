@@ -426,10 +426,15 @@ type CandidateProfile struct {
 	MainStatus   CandidateProfileStatus `gorm:"not null;index"`
 	EndReason    *CandidateProfileEndReason
 
-	SuccessfulGreetingIntentID     *string
-	ConversationRef                *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
-	GreetedAt                      *time.Time
-	CommunicatingAt                *time.Time
+	SuccessfulGreetingIntentID *string
+	ConversationRef            *string `gorm:"uniqueIndex:ux_candidate_profile_conversation,priority:3"`
+	GreetedAt                  *time.Time
+	CommunicatingAt            *time.Time
+	// InterviewedAt 是首次进入"已约面"的时刻,与 GreetedAt/CommunicatingAt
+	// 同语义:只在首次写入,不被后续 ended→interviewed 往返覆盖,否则同一人
+	// 会反复计入"今日新约面"。它是"何时被接受"的唯一事实——消息时间戳只能
+	// 算出"何时发卡"。
+	InterviewedAt                  *time.Time
 	FirstRealMessageSeq            *int64
 	ResumeCaptureState             ResumeCaptureState `gorm:"not null;default:unattempted;index"`
 	ResumeCaptureLogicalDispatchID *string            `gorm:"uniqueIndex"`

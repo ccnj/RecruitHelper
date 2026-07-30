@@ -23,9 +23,12 @@ type AppCandidateView string
 
 const (
 	AppCandidateViewCommunicating AppCandidateView = "communicating"
-	AppCandidateViewPending       AppCandidateView = "pending"
-	AppCandidateViewInterviewed   AppCandidateView = "interviewed"
-	AppCandidateViewWechat        AppCandidateView = "wechat"
+	// AppCandidateViewInterviewed 是已约面且面试时间界未过;
+	// AppCandidateViewInterviewElapsed 是已约面且时间界已过。两者同源于
+	// main_status = interviewed,只按时间分流,不对应任何新业务状态。
+	AppCandidateViewInterviewed      AppCandidateView = "interviewed"
+	AppCandidateViewInterviewElapsed AppCandidateView = "interviewElapsed"
+	AppCandidateViewWechat           AppCandidateView = "wechat"
 )
 
 type AppMetric struct {
@@ -44,21 +47,25 @@ type AppJobProjection struct {
 }
 
 type AppFunnelProjection struct {
-	Available         bool       `json:"available"`
-	BatchID           string     `json:"batchId,omitempty"`
-	Stage             string     `json:"stage,omitempty"`
-	TargetCount       int        `json:"targetCount"`
-	CapturedCount     int64      `json:"capturedCount"`
-	ScoredCount       int64      `json:"scoredCount"`
-	SelectedCount     int64      `json:"selectedCount"`
-	GreetingReady     int64      `json:"greetingReady"`
-	PendingConfirm    int64      `json:"pendingConfirm"`
-	SentCount         int64      `json:"sentCount"`
-	FailedCount       int64      `json:"failedCount"`
-	SuspectCount      int64      `json:"suspectCount"`
-	LastFailureReason string     `json:"lastFailureReason,omitempty"`
-	StartedAt         *time.Time `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time `json:"finishedAt,omitempty"`
+	Available      bool   `json:"available"`
+	BatchID        string `json:"batchId,omitempty"`
+	Stage          string `json:"stage,omitempty"`
+	TargetCount    int    `json:"targetCount"`
+	CapturedCount  int64  `json:"capturedCount"`
+	ScoredCount    int64  `json:"scoredCount"`
+	SelectedCount  int64  `json:"selectedCount"`
+	GreetingReady  int64  `json:"greetingReady"`
+	PendingConfirm int64  `json:"pendingConfirm"`
+	SentCount      int64  `json:"sentCount"`
+	// 生成失败与发送失败是两个阶段的两件事,必须分开报。合成一个字段时
+	// 前端在"生成招呼语"和"发送招呼"两格都读它,1 次生成失败 + 2 次发送
+	// 失败会在两格各显示"失败 3",看起来像 6 处失败。
+	GenerationFailedCount int64      `json:"generationFailedCount"`
+	SendFailedCount       int64      `json:"sendFailedCount"`
+	SuspectCount          int64      `json:"suspectCount"`
+	LastFailureReason     string     `json:"lastFailureReason,omitempty"`
+	StartedAt             *time.Time `json:"startedAt,omitempty"`
+	FinishedAt            *time.Time `json:"finishedAt,omitempty"`
 }
 
 type AppOverviewStatistics struct {
@@ -71,9 +78,12 @@ type AppOverviewStatistics struct {
 	TotalInterviewed AppMetric `json:"totalInterviewed"`
 	TotalWechat      AppMetric `json:"totalWechat"`
 
-	TodayNewReplies          AppMetric `json:"todayNewReplies"`
-	TodayNewAppointments     AppMetric `json:"todayNewAppointments"`
-	TodayCompletedInterviews AppMetric `json:"todayCompletedInterviews"`
+	TodayNewReplies      AppMetric `json:"todayNewReplies"`
+	TodayNewAppointments AppMetric `json:"todayNewAppointments"`
+	// TodayElapsedInterviews 是今天已经过去的面试场次(按人计)。它只说明约定
+	// 时间已过,不代表面试确实进行过——系统没有面试完成写入口,原先这里直接
+	// 报不可用,产品端那一行于是永远是"—",用户分不清"今天没有"和"读不出来"。
+	TodayElapsedInterviews AppMetric `json:"todayElapsedInterviews"`
 }
 
 type AppInterviewSummary struct {
@@ -136,6 +146,9 @@ type AppCandidateListQuery struct {
 	Search     string
 	Limit      int
 	Offset     int
+	// Now 是已约面/已面试分流的时间基准,由调用方(产品 API)给出脑侧本机
+	// 时间;零值回落 time.Now()。前端不按渲染进程时钟自行判断。
+	Now time.Time
 }
 
 type AppCandidateDetailQuery struct {
@@ -145,17 +158,21 @@ type AppCandidateDetailQuery struct {
 }
 
 type AppCandidateListItem struct {
-	ProfileID           string  `json:"profileId"`
-	DisplayName         string  `json:"displayName"`
-	JobName             string  `json:"jobName,omitempty"`
-	Status              string  `json:"status"`
-	EndReason           string  `json:"endReason,omitempty"`
-	LastMessagePreview  string  `json:"lastMessagePreview,omitempty"`
-	LastActivityAtMs    *int64  `json:"lastActivityAtMs,omitempty"`
-	UnreadCount         int     `json:"unreadCount"`
-	ManualRequired      bool    `json:"manualRequired"`
-	ManualReason        string  `json:"manualReason,omitempty"`
-	Wechat              *string `json:"wechat,omitempty"`
+	ProfileID          string  `json:"profileId"`
+	DisplayName        string  `json:"displayName"`
+	JobName            string  `json:"jobName,omitempty"`
+	Status             string  `json:"status"`
+	EndReason          string  `json:"endReason,omitempty"`
+	LastMessagePreview string  `json:"lastMessagePreview,omitempty"`
+	LastActivityAtMs   *int64  `json:"lastActivityAtMs,omitempty"`
+	UnreadCount        int     `json:"unreadCount"`
+	ManualRequired     bool    `json:"manualRequired"`
+	ManualReason       string  `json:"manualReason,omitempty"`
+	Wechat             *string `json:"wechat,omitempty"`
+	// WechatObservedAtMs 是该微信资产的收编观测时刻。资产行一直有它(上面那个
+	// 子查询就是按它排序取最新号的),此前没有投影出去,产品端只能常年显示
+	// "时间未知"。
+	WechatObservedAtMs  *int64  `json:"wechatObservedAtMs,omitempty"`
 	InterviewStartsAtMs *int64  `json:"interviewStartsAtMs,omitempty"`
 	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
 	InterviewMethod     *string `json:"interviewMethod,omitempty"`
@@ -265,6 +282,7 @@ func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, err
 		}
 		out.Statistics, err = appOverviewStatisticsTx(
 			tx,
+			req.Now,
 			start,
 			end,
 			req.Platform,
@@ -494,7 +512,7 @@ func appFunnelTx(
 		Count(&generationFailed).Error; err != nil {
 		return AppFunnelProjection{}, err
 	}
-	out.FailedCount = generationFailed
+	out.GenerationFailedCount = generationFailed
 	var intents []EffectIntent
 	if err := tx.Table("effect_intents AS effect").
 		Joins("JOIN sourcing_greeting_invocations AS greeting ON greeting.effect_intent_id = effect.intent_id").
@@ -512,7 +530,7 @@ func appFunnelTx(
 		case EffectIntentOk, EffectIntentResolvedOk:
 			out.SentCount++
 		case EffectIntentFailed, EffectIntentResolvedFailed:
-			out.FailedCount++
+			out.SendFailedCount++
 		case EffectIntentSuspect:
 			out.SuspectCount++
 		}
@@ -552,7 +570,8 @@ func appFunnelTx(
 		out.Stage = "generatingGreetings"
 	case out.PendingConfirm > 0:
 		out.Stage = "awaitingConfirmation"
-	case out.SentCount+out.FailedCount+out.SuspectCount+settledWithoutSend >= out.SelectedCount:
+	case out.SentCount+out.GenerationFailedCount+out.SendFailedCount+
+		out.SuspectCount+settledWithoutSend >= out.SelectedCount:
 		out.Stage = "completed"
 	default:
 		out.Stage = "sendingGreetings"
@@ -562,7 +581,7 @@ func appFunnelTx(
 
 func appOverviewStatisticsTx(
 	tx *gorm.DB,
-	start, end time.Time,
+	now, start, end time.Time,
 	platform, accountRef string,
 ) (AppOverviewStatistics, error) {
 	var out AppOverviewStatistics
@@ -600,19 +619,25 @@ func appOverviewStatisticsTx(
 	}
 	out.TodayGreeted = exactMetric(value)
 
-	todayInvite, inviteExact, err := appTimedMessageProfileCountTx(
+	todayInvite, err := appTimedMessageProfileCountTx(
 		tx, platform, accountRef, "out", "card", "interviewInvite", start, end,
 	)
 	if err != nil {
 		return out, err
 	}
-	if inviteExact {
-		out.TodayInvited = exactMetric(todayInvite)
-		out.TodayNewAppointments = exactMetric(todayInvite)
-	} else {
-		out.TodayInvited = unavailableMetric("存在无平台时间的邀面事实")
-		out.TodayNewAppointments = unavailableMetric("存在无平台时间的邀面事实")
+	out.TodayInvited = exactMetric(todayInvite)
+
+	// 今日新约面数的是"今天有几个人接受了面试邀约",取 interviewed_at。它此前
+	// 直接复制 todayInvited(今天发出邀面卡的人数),两个不同标签共用一个数字。
+	// 发卡与被接受是两件事,消息时间戳只能算出前者。
+	value = 0
+	if err := count(tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("interviewed_at >= ? AND interviewed_at < ?", start, end).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
 	}
+	out.TodayNewAppointments = exactMetric(value)
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
@@ -638,7 +663,7 @@ func appOverviewStatisticsTx(
 	}
 	out.TotalWechat = exactMetric(value)
 
-	todayReply, replyExact, err := appTimedMessageProfileCountTx(
+	todayReply, err := appTimedMessageProfileCountTx(
 		tx,
 		platform,
 		accountRef,
@@ -651,21 +676,41 @@ func appOverviewStatisticsTx(
 	if err != nil {
 		return out, err
 	}
-	if replyExact {
-		out.TodayNewReplies = exactMetric(todayReply)
-	} else {
-		out.TodayNewReplies = unavailableMetric("存在无平台时间的入站消息")
+	out.TodayNewReplies = exactMetric(todayReply)
+
+	// 今天已过去的面试:最新一张邀面卡的时间界落在今天且已经过去。与
+	// AppCandidateViewInterviewElapsed 同判据(结束时间优先、缺则开始时间),
+	// 因此两处口径天然一致。
+	value = 0
+	if err := tx.Table("candidate_profiles AS profile").
+		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
+		Where("profile.main_status = ?", CandidateProfileInterviewed).
+		Where(appLatestInterviewDeadlineMs+" >= ?", start.UnixMilli()).
+		Where(appLatestInterviewDeadlineMs+" < ?", now.UnixMilli()).
+		Distinct("profile.profile_id").Count(&value).Error; err != nil {
+		return out, err
 	}
-	out.TodayCompletedInterviews = unavailableMetric("当前没有面试完成写入口")
+	out.TodayElapsedInterviews = exactMetric(value)
 	return out, nil
 }
 
+// appTimedMessageProfileCountTx 数当天窗口内有过该类消息的候选人数。
+//
+// 读不出平台时间的消息直接不计入(2026-07-30 甲方裁决)。此前的做法是:只要
+// 该账号历史上存在任何一条无平台时间的同类消息,整个指标就标为不可用。判定
+// 范围是全库而不是当天,于是三个月前的一条无时间戳老消息——跟"今天有几个人
+// 回复"毫无关系——会把今天的数字打成"—";业务事实又禁止物理删除,那条消息
+// 永远在库里,指标从此永久哑掉,再也不会出现数字。平台不给消息时间是常态,
+// 这条路径很容易被走到。
+//
+// 代价是少报且不作声:今天真有三人回复、其中一条没有平台时间,就只报两人。
+// 方向是宁可少报,与仓库既有保守取向一致。
 func appTimedMessageProfileCountTx(
 	tx *gorm.DB,
 	platform, accountRef string,
 	direction, kind, cardType string,
 	start, end time.Time,
-) (int64, bool, error) {
+) (int64, error) {
 	base := tx.Table("messages AS message").
 		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
@@ -677,19 +722,14 @@ func appTimedMessageProfileCountTx(
 	if cardType != "" {
 		base = base.Where("message.card_type = ?", cardType)
 	}
-	var missingTime int64
-	if err := base.Session(&gorm.Session{}).Where("message.ts_approx_ms IS NULL").
-		Count(&missingTime).Error; err != nil {
-		return 0, false, err
-	}
-	startMs, endMs := start.UnixMilli(), end.UnixMilli()
 	var value int64
-	if err := base.Session(&gorm.Session{}).
-		Where("message.ts_approx_ms >= ? AND message.ts_approx_ms < ?", startMs, endMs).
+	if err := base.
+		Where("message.ts_approx_ms >= ? AND message.ts_approx_ms < ?",
+			start.UnixMilli(), end.UnixMilli()).
 		Distinct("profile.profile_id").Count(&value).Error; err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	return value, missingTime == 0, nil
+	return value, nil
 }
 
 func appTodayInterviewsTx(
@@ -705,36 +745,40 @@ func appTodayInterviewsTx(
 		EndsAtMs      *int64
 		Method        *string
 		CardState     string
-		Seq           int64
 	}
+	// 每人只看最新一张邀面卡，判定"今天有没有面试"必须先取最新卡、再看它
+	// 落不落在今天，不能在今天的卡里挑最新：候选人要求改期后会重发一张新
+	// 卡，先按日期筛就会把已经作废的旧时段留在今日日程里，改期到明天时更
+	// 是明明今天没有面试却仍在列。候选人列表(appCandidateSelect)一直按
+	// seq DESC 取最新卡，这里同口径，两处不再各说各话。
 	var rows []row
 	if err := tx.Table("messages AS message").
 		Select("profile.profile_id, candidate.display_name, profile.position_title, "+
 			"message.interview_starts_at_ms AS starts_at_ms, message.interview_ends_at_ms AS ends_at_ms, "+
-			"message.interview_method AS method, message.card_state, message.seq").
+			"message.interview_method AS method, message.card_state").
 		Joins("JOIN candidate_profiles AS profile ON profile.platform = message.platform "+
 			"AND profile.account_ref = message.account_ref AND profile.conversation_ref = message.conversation_ref").
 		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
 			"AND candidate.platform_user_ref = profile.platform_user_ref").
 		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
 		Where("message.direction = ? AND message.kind = ? AND message.card_type = ? "+
-			"AND message.retracted_at IS NULL AND message.interview_starts_at_ms >= ? "+
-			"AND message.interview_starts_at_ms < ?",
-			"out", "card", "interviewInvite", start.UnixMilli(), end.UnixMilli()).
-		Order("message.interview_starts_at_ms ASC, message.seq DESC").
+			"AND message.retracted_at IS NULL", "out", "card", "interviewInvite").
+		Where("message.seq = (SELECT MAX(latest.seq) FROM messages AS latest "+
+			"WHERE latest.platform = message.platform AND latest.account_ref = message.account_ref "+
+			"AND latest.conversation_ref = message.conversation_ref AND latest.direction = 'out' "+
+			"AND latest.kind = 'card' AND latest.card_type = 'interviewInvite' "+
+			"AND latest.retracted_at IS NULL)").
+		Where("message.interview_starts_at_ms >= ? AND message.interview_starts_at_ms < ?",
+			start.UnixMilli(), end.UnixMilli()).
+		Order("message.interview_starts_at_ms ASC, profile.profile_id ASC").
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{}, len(rows))
 	out := make([]AppInterviewSummary, 0, len(rows))
 	for _, row := range rows {
 		if row.StartsAtMs == nil {
 			continue
 		}
-		if _, ok := seen[row.ProfileID]; ok {
-			continue
-		}
-		seen[row.ProfileID] = struct{}{}
 		out = append(out, AppInterviewSummary{
 			ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
 			JobName: valueOrEmpty(row.PositionTitle), StartsAtMs: *row.StartsAtMs,
@@ -753,8 +797,8 @@ func valueOrEmpty(value *string) string {
 
 func validAppCandidateView(view AppCandidateView) bool {
 	switch view {
-	case AppCandidateViewCommunicating, AppCandidateViewPending,
-		AppCandidateViewInterviewed, AppCandidateViewWechat:
+	case AppCandidateViewCommunicating, AppCandidateViewInterviewed,
+		AppCandidateViewInterviewElapsed, AppCandidateViewWechat:
 		return true
 	default:
 		return false
@@ -935,6 +979,9 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 	if query.Limit == 0 {
 		query.Limit = 50
 	}
+	if query.Now.IsZero() {
+		query.Now = time.Now()
+	}
 	var out AppCandidateListProjection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		base, err := appCandidateBaseQuery(
@@ -943,6 +990,7 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 			query.AccountRef,
 			query.View,
 			query.Search,
+			query.Now,
 		)
 		if err != nil {
 			return err
@@ -986,6 +1034,7 @@ type appCandidateRow struct {
 	AutomationStatus    *ProfileCommunicationAutomationStatus
 	ManualReason        *string
 	Wechat              *string
+	WechatObservedAtMs  *int64
 	InterviewStartsAtMs *int64
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
@@ -1008,6 +1057,11 @@ aggregate.manual_reason,
  AND asset.platform = profile.platform AND asset.account_ref = profile.account_ref
  AND asset.kind = 'wechat'
  ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat,
+(SELECT asset.observed_at_ms FROM contact_assets AS asset
+ WHERE asset.profile_id = profile.profile_id
+ AND asset.platform = profile.platform AND asset.account_ref = profile.account_ref
+ AND asset.kind = 'wechat'
+ ORDER BY asset.observed_at_ms DESC, asset.asset_id DESC LIMIT 1) AS wechat_observed_at_ms,
 (SELECT message.interview_starts_at_ms FROM messages AS message
  WHERE message.platform = profile.platform AND message.account_ref = profile.account_ref
  AND message.conversation_ref = profile.conversation_ref AND message.direction = 'out'
@@ -1043,8 +1097,9 @@ func (row appCandidateRow) projection() AppCandidateListItem {
 		LastMessagePreview: valueOrEmpty(row.LastMessagePreview),
 		LastActivityAtMs:   row.LastActivityMs, UnreadCount: unread,
 		ManualRequired: manual, ManualReason: valueOrEmpty(row.ManualReason),
-		Wechat: row.Wechat, InterviewStartsAtMs: row.InterviewStartsAtMs,
-		InterviewEndsAtMs: row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
+		Wechat: row.Wechat, WechatObservedAtMs: row.WechatObservedAtMs,
+		InterviewStartsAtMs: row.InterviewStartsAtMs,
+		InterviewEndsAtMs:   row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
 		InterviewCardState: valueOrEmpty(row.InterviewCardState),
 	}
 }
@@ -1056,11 +1111,26 @@ func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {
 	return string(*value)
 }
 
+// appLatestInterviewDeadlineMs 取该档案最新一张未撤回邀面卡的时间界:结束时间
+// 优先、缺失则退到开始时间(2026-07-30 甲方裁决)。用结束时间是为了让进行中的
+// 面试不被提前归为已过去。没有卡、卡的三列全空或档案没有 conversationRef 时
+// 整个表达式为 NULL,按同一裁决归入"已面试"。
+//
+// 取最新卡与 appCandidateSelect、appTodayInterviewsTx 同口径:候选人改期会重发
+// 新卡,只有最新那张才代表当前约定。
+const appLatestInterviewDeadlineMs = `(SELECT COALESCE(deadline.interview_ends_at_ms, deadline.interview_starts_at_ms)
+ FROM messages AS deadline
+ WHERE deadline.platform = profile.platform AND deadline.account_ref = profile.account_ref
+ AND deadline.conversation_ref = profile.conversation_ref AND deadline.direction = 'out'
+ AND deadline.kind = 'card' AND deadline.card_type = 'interviewInvite'
+ AND deadline.retracted_at IS NULL ORDER BY deadline.seq DESC LIMIT 1)`
+
 func appCandidateBaseQuery(
 	tx *gorm.DB,
 	platform, accountRef string,
 	view AppCandidateView,
 	search string,
+	now time.Time,
 ) (*gorm.DB, error) {
 	base := tx.Table("candidate_profiles AS profile").
 		Joins("JOIN candidates AS candidate ON candidate.platform = profile.platform "+
@@ -1072,14 +1142,26 @@ func appCandidateBaseQuery(
 		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef)
 	switch view {
 	case AppCandidateViewCommunicating:
+		// 已邀面(invited)并入沟通中:规格 §51 把它与已招呼、沟通中同列为推进
+		// 态、同在沉默轨上,跟催时钟仍在跑。它没有独立页面,但不能因此从产品
+		// 端消失——发了邀面卡、候选人迟迟不确认的人正是要盯的一批。
 		base = base.Where("profile.main_status IN ?",
 			[]CandidateProfileStatus{
-				CandidateProfileGreeted, CandidateProfileCommunicating, CandidateProfileEnded,
+				CandidateProfileGreeted, CandidateProfileCommunicating,
+				CandidateProfileInvited, CandidateProfileEnded,
 			})
-	case AppCandidateViewPending:
-		base = base.Where("profile.main_status = ?", CandidateProfileInvited)
 	case AppCandidateViewInterviewed:
-		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed)
+		// 已约面且面试时间界尚未过去。时间界读不出来的不留在这里,与
+		// interviewElapsed 互补,两个视图不重不漏。
+		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed).
+			Where(appLatestInterviewDeadlineMs+" >= ?", now.UnixMilli())
+	case AppCandidateViewInterviewElapsed:
+		// "已面试"是读侧派生的展示分类,不是业务事实:它只说明约定的面试时间
+		// 已经过去,不代表面试确实发生过(候选人可能没到场)。系统没有面试
+		// 完成写入口,也不打算按这个分类推进任何业务状态。
+		base = base.Where("profile.main_status = ?", CandidateProfileInterviewed).
+			Where("("+appLatestInterviewDeadlineMs+" IS NULL OR "+
+				appLatestInterviewDeadlineMs+" < ?)", now.UnixMilli())
 	case AppCandidateViewWechat:
 		base = base.Where("EXISTS (SELECT 1 FROM contact_assets AS app_asset "+
 			"WHERE app_asset.profile_id = profile.profile_id AND app_asset.kind = ?)", contactAssetKindWechat)

@@ -25,8 +25,8 @@ export interface ProductAppProps {
 
 const candidatePages = new Set<ProductPage>([
   'communicating',
-  'pendingInterview',
   'interviewed',
+  'interviewElapsed',
   'wechat',
 ])
 
@@ -110,6 +110,7 @@ export function ProductApp({
         globalSearch={globalSearch}
         key={candidateView}
         onOpenCandidate={(candidate) => void openCandidate(candidate)}
+        total={data.candidateTotals[candidateView]}
         view={candidateView}
       />
     )
