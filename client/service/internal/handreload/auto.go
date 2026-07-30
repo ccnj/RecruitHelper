@@ -41,8 +41,10 @@ const DefaultInterval = 30 * time.Second
 type AutoReloader struct {
 	orchestrator *Orchestrator
 	store        Store
-	pluginDir    string
 	interval     time.Duration
+	// wake:手刚 ready 的提醒,缓冲 1。它只说"该看一眼了",不带 handID ——
+	// 每次评估都全量扫描注册表,所以合并或丢弃提醒都不会漏掉任何一只手。
+	wake chan struct{}
 
 	mu           sync.Mutex
 	attempted    map[string]string // handID -> 已经为哪个 bootID 派发过
@@ -51,10 +53,10 @@ type AutoReloader struct {
 	expectedSeen bool
 }
 
-// NewAutoReloader。pluginDir 是 Chrome 实际加载的固定插件目录;传空则退化为
-// 只按契约判断(开发期与任何读不到目录的场合都走这一支)。
+// NewAutoReloader。磁盘上的插件版本由 orchestrator.PluginDir 决定 —— 触发判断与
+// 成功判断因此共用同一个来源,不会各看各的。
 func NewAutoReloader(
-	orchestrator *Orchestrator, st Store, pluginDir string, interval time.Duration,
+	orchestrator *Orchestrator, st Store, interval time.Duration,
 ) *AutoReloader {
 	if interval <= 0 {
 		interval = DefaultInterval
@@ -62,14 +64,32 @@ func NewAutoReloader(
 	return &AutoReloader{
 		orchestrator: orchestrator,
 		store:        st,
-		pluginDir:    pluginDir,
 		interval:     interval,
+		wake:         make(chan struct{}, 1),
 		attempted:    map[string]string{},
 		halted:       map[string]string{},
 	}
 }
 
+// NotifyHandReady 接在 session.Hub 的 ready 钩子上,让换代不必干等下一个 tick。
+//
+// 非阻塞:提醒已在队列里就直接丢掉。它跑在手的读循环上,多花一纳秒都是在拖慢
+// 整条链路;而丢掉是安全的 —— 队列里那个提醒会带来同样的全量扫描。
+func (a *AutoReloader) NotifyHandReady(string) {
+	if a == nil || a.wake == nil {
+		return
+	}
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+}
+
 // Run 周期评估,直到 ctx 取消。
+//
+// 两路触发共用一个 goroutine,因此 EvaluateOnce 永远串行 —— tick 与 wake 撞在
+// 一起只是"先做一个,回来再做另一个"。第二次评估必然空转:该做的第一次已经做完,
+// 再来一次会被 staleReason(已经对上)、halted 或 attempted 挡住。
 func (a *AutoReloader) Run(ctx context.Context) {
 	ticker := time.NewTicker(a.interval)
 	defer ticker.Stop()
@@ -78,6 +98,8 @@ func (a *AutoReloader) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			a.EvaluateOnce(ctx)
+		case <-a.wake:
 			a.EvaluateOnce(ctx)
 		}
 	}
@@ -120,7 +142,7 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 
 	// 磁盘上是哪一版,是壳安置插件之后的既成事实(pluginSeed 在起脑之前就跑完了)。
 	// 读文件放在锁外。
-	expected := ExpectedPluginVersion(a.pluginDir)
+	expected := a.orchestrator.expectedVersion()
 
 	target, reason, skipped := a.pickTarget(expected)
 	if target == nil {
@@ -244,13 +266,13 @@ func (a *AutoReloader) noteExpectedVersion(expected string) {
 	a.lastExpected = expected
 	a.expectedSeen = true
 	if expected == "" {
-		if a.pluginDir != "" {
+		if a.orchestrator.PluginDir != "" {
 			slog.Warn("读不到固定目录里的插件版本，只按契约判断是否需要重载",
-				"pluginDir", a.pluginDir)
+				"pluginDir", a.orchestrator.PluginDir)
 		}
 		return
 	}
-	slog.Info("固定目录里的插件版本", "version", expected, "pluginDir", a.pluginDir)
+	slog.Info("固定目录里的插件版本", "version", expected, "pluginDir", a.orchestrator.PluginDir)
 }
 
 // Halted 报告某只手是否已经停手待人工。诊断用。
