@@ -121,6 +121,151 @@ func TestCommunicationV4EventActionAutoMigrateAndScopedID(t *testing.T) {
 	}
 }
 
+// 丁旺荣现场的完整复现:两气泡的 meetingAccepted 带 {面试时间} 占位符,邀面
+// 卡上有真实时间。改前整条卡在 fixedPhraseUnavailable,改后应逐条渲染、串成
+// 依赖链,最后挂上换微信卡片。
+func TestCommunicationV4EventActionRendersInterviewTimeAcrossBubbles(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-interview-bubbles"
+	fixture := seedResumeStoreFixture(t, s, profileID)
+	at := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+
+	revision := contextRevisionFixture("context-v4-bubbles", "revision-v4-bubbles", at)
+	revision.SourcePackage.Documents = append(
+		revision.SourcePackage.Documents,
+		m5ai.JobConfigDocument{
+			DocType: "固定话术",
+			Content: `{"meetingAccepted":{"messages":[
+				"好的，那我们 {面试时间} 线上见。",
+				"咱们加个微信吧，平台消息不太及时。"
+			],"actions":[],"enabled":true}}`,
+		},
+	)
+	sort.Slice(revision.SourcePackage.Documents, func(left, right int) bool {
+		return revision.SourcePackage.Documents[left].DocType < revision.SourcePackage.Documents[right].DocType
+	})
+	bindCommunicationV4EventActionContext(t, s, profileID, revision, at)
+
+	// 我方发出的邀面卡携带时间事实;候选人的接受卡自己不带时间。
+	startsAt := time.Date(2026, 7, 31, 10, 0, 0, 0, time.Local).UnixMilli()
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef, Seq: 40,
+		Direction: "out", Kind: "card", CardType: "interviewInvite",
+		CardState: "unknown", ContentHash: strings.Repeat("3", 64),
+		InterviewStartsAtMs: &startsAt, Origin: "self", CreatedAt: at,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	acceptedSourceKey := strings.Repeat("4", 64)
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef, Seq: 41,
+		Direction: "in", Kind: "card", CardType: "interviewInvite",
+		CardState: "accepted", ContentHash: strings.Repeat("5", 64),
+		Origin: "external", SourceKey: &acceptedSourceKey, CreatedAt: at,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	source := "message:41"
+	createCommunicationV4BusinessEventApplication(
+		t, s, profileID, source, 1,
+		[]communication.V4EventAction{
+			{ActionKey: source + "|interviewAcceptedReceipt|1", Kind: communication.V4ActionInterviewAcceptedReceipt, CardMessageSeq: 41},
+			{ActionKey: source + "|interviewAcceptedReceipt|2", Kind: communication.V4ActionInterviewAcceptedReceipt, CardMessageSeq: 41},
+			{ActionKey: source + "|notifyInterviewAccepted", Kind: communication.V4ActionNotifyInterviewAccepted, CardMessageSeq: 41},
+			{ActionKey: source + "|inviteWechat", Kind: communication.V4ActionInviteWechat, CardMessageSeq: 41},
+		},
+		at,
+	)
+	result, err := s.MaterializeCommunicationV4EventActions(
+		MaterializeCommunicationV4EventActionsRequest{
+			ProfileID: profileID, SourceInputKey: source, MaterializedAt: at.Add(time.Minute),
+		},
+	)
+	if err != nil || !result.Created || len(result.Actions) != 4 {
+		t.Fatalf("多气泡回执未完整物化: result=%+v err=%v", result, err)
+	}
+
+	first, second, invite := result.Actions[0], result.Actions[1], result.Actions[3]
+	if first.Status != CommunicationV4EventActionPlanned ||
+		first.Text != "好的，那我们 7月31日 10:00 线上见。" ||
+		first.ContentHash != textcanon.Hash(first.Text) {
+		t.Fatalf("首个气泡没有渲染出面试时间: %+v", first)
+	}
+	if second.Status != CommunicationV4EventActionPlanned ||
+		second.Text != "咱们加个微信吧，平台消息不太及时。" {
+		t.Fatalf("第二个气泡内容不对: %+v", second)
+	}
+	if first.DependsOnActionID != nil {
+		t.Fatalf("首个气泡不应有前置依赖: %+v", first)
+	}
+	if second.DependsOnActionID == nil || *second.DependsOnActionID != first.ActionID {
+		t.Fatalf("第二个气泡未挂在首个之后: %+v", second)
+	}
+	if invite.EffectKind != CommunicationV4EventEffectInviteWechat ||
+		invite.DependsOnActionID == nil || *invite.DependsOnActionID != second.ActionID {
+		t.Fatalf("换微信卡片未挂在最后一个气泡之后: %+v", invite)
+	}
+}
+
+// 取不到面试时间不是失败:占位符掉出去,话术照发。
+func TestCommunicationV4EventActionSendsReceiptWithoutInterviewTime(t *testing.T) {
+	s := openTest(t)
+	profileID := "profile-v4-no-interview-time"
+	fixture := seedResumeStoreFixture(t, s, profileID)
+	at := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+
+	revision := contextRevisionFixture("context-v4-no-time", "revision-v4-no-time", at)
+	revision.SourcePackage.Documents = append(
+		revision.SourcePackage.Documents,
+		m5ai.JobConfigDocument{
+			DocType: "固定话术",
+			Content: `{"meetingAccepted":{"messages":["好的，那我们 {面试时间} 线上见。"],"actions":[],"enabled":true}}`,
+		},
+	)
+	sort.Slice(revision.SourcePackage.Documents, func(left, right int) bool {
+		return revision.SourcePackage.Documents[left].DocType < revision.SourcePackage.Documents[right].DocType
+	})
+	bindCommunicationV4EventActionContext(t, s, profileID, revision, at)
+
+	// 只有接受卡,没有任何带时间的邀面卡。
+	acceptedSourceKey := strings.Repeat("6", 64)
+	if err := s.db.Create(&Message{
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		ConversationRef: fixture.ConversationRef, Seq: 50,
+		Direction: "in", Kind: "card", CardType: "interviewInvite",
+		CardState: "accepted", ContentHash: strings.Repeat("7", 64),
+		Origin: "external", SourceKey: &acceptedSourceKey, CreatedAt: at,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	source := "message:50"
+	createCommunicationV4BusinessEventApplication(
+		t, s, profileID, source, 1,
+		[]communication.V4EventAction{
+			{ActionKey: source + "|interviewAcceptedReceipt|1", Kind: communication.V4ActionInterviewAcceptedReceipt, CardMessageSeq: 50},
+		},
+		at,
+	)
+	result, err := s.MaterializeCommunicationV4EventActions(
+		MaterializeCommunicationV4EventActionsRequest{
+			ProfileID: profileID, SourceInputKey: source, MaterializedAt: at.Add(time.Minute),
+		},
+	)
+	if err != nil || len(result.Actions) != 1 {
+		t.Fatalf("缺时间的回执未物化: result=%+v err=%v", result, err)
+	}
+	action := result.Actions[0]
+	if action.Status != CommunicationV4EventActionPlanned ||
+		action.FailureReason != "" ||
+		action.Text != "好的，那我们线上见。" {
+		t.Fatalf("缺面试时间时应降级照发而不是转人工: %+v", action)
+	}
+}
+
 func TestCommunicationV4EventActionMaterializesSixKindsAndFreezesText(t *testing.T) {
 	s := openTest(t)
 	profileID := "profile-v4-event-action-six"

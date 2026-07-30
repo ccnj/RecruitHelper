@@ -181,6 +181,83 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 	})
 }
 
+// 接受回执与拒绝挽留、催2 同构:配了几个气泡就发几条独立消息,末位跟换微信
+// 卡片。拼接后的 Text 永远不是发送载荷。
+func TestV4InboundTurnInterviewAcceptedExpandsOneActionPerBubble(t *testing.T) {
+	phrases := availableV4FixedPhrases()
+	phrases.Phrases[V4PhraseInterviewAccepted] = V4FixedPhrase{
+		Kind: V4PhraseInterviewAccepted, SourceScene: "meetingAccepted",
+		State: V4PhraseAvailable,
+		Messages: []string{
+			"好的，那我们 {面试时间} 线上见。",
+			"咱们加个微信吧，平台消息不太及时。",
+		},
+		Text: "好的，那我们 {面试时间} 线上见。\n咱们加个微信吧，平台消息不太及时。",
+	}
+
+	state := NewV4GreetedState(v4Time(8))
+	expression, err := ApplyV4BusinessEvent(state, BusinessEvent{
+		Key: "message:2", Kind: EventCandidateExpressionReceived,
+		Source: EventSourceMessage, MessageSeq: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invited, err := ApplyV4BusinessEvent(expression.State, BusinessEvent{
+		Key: "message:3", Kind: EventInterviewInvited,
+		Source: EventSourceMessage, MessageSeq: 3, OccurredAt: v4Time(9),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+		State: invited.State, TurnID: "turn-interview-accepted-bubbles",
+		Messages: []LedgerMessageFact{{
+			Seq: 4, Direction: "in", Kind: "card", CardType: "interviewInvite",
+			CardState: "accepted", Origin: "external",
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: phrases,
+	})
+	if err != nil || decision.ManualReason != "" ||
+		decision.Dialogue.Status != V4DialogueNoAction ||
+		len(decision.EventActions) != 4 {
+		t.Fatalf("两气泡回执没有逐条展开: decision=%+v err=%v", decision, err)
+	}
+	if decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+		decision.EventActions[0].ActionKey != "message:4|interviewAcceptedReceipt|1" ||
+		decision.EventActions[1].Kind != V4ActionInterviewAcceptedReceipt ||
+		decision.EventActions[1].ActionKey != "message:4|interviewAcceptedReceipt|2" ||
+		decision.EventActions[2].Kind != V4ActionNotifyInterviewAccepted ||
+		decision.EventActions[3].Kind != V4ActionInviteWechat {
+		t.Fatalf("气泡动作键或顺序不对: actions=%+v", decision.EventActions)
+	}
+	for _, action := range decision.EventActions {
+		if action.CardMessageSeq != 4 {
+			t.Fatalf("气泡动作丢了卡片序号: %+v", action)
+		}
+	}
+}
+
+// 单气泡话术也要拿到 "|1" 后缀:一条话术项恒等于一个稳定键,不因条数而变形。
+func TestV4InboundTurnSingleBubbleReceiptStillCarriesOrdinal(t *testing.T) {
+	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+		State: NewV4GreetedState(v4Time(8)), TurnID: "turn-wechat-receipt-single",
+		Messages: []LedgerMessageFact{{
+			Seq: 2, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "accepted", Origin: "external",
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: availableV4FixedPhrases(),
+	})
+	if err != nil || len(decision.EventActions) != 2 ||
+		decision.EventActions[1].Kind != V4ActionWechatReceipt ||
+		decision.EventActions[1].ActionKey != "message:2|wechatReceipt|1" {
+		t.Fatalf("单气泡回执缺少序号后缀: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestV4InboundTurnAcceptedCardWithoutFixedReceiptStopsAfterStateFact(t *testing.T) {
 	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 		State: NewV4GreetedState(v4Time(8)), TurnID: "turn-wechat-receipt-missing",
