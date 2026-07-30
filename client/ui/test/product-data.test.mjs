@@ -232,6 +232,24 @@ check(
 )
 check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入已邀面列表')
 check(product.candidates.interviewed[0].interviewResult === null, '不从邀面卡状态猜测正式面试结果')
+// 命名必须与脑侧 notify/render.go 的 mainStatusLabels 一致:invited=已邀面
+// (发出邀面卡)、interviewed=已约面(候选人点了接受)。系统没有面试完成事实,
+// 任何"已面试/面试完成"措辞都会让人把已约面读成已经面完。
+check(
+  product.candidates.interviewed[0].statusLabel === '已约面' &&
+    product.candidates.interviewed[0].deterministicState === '候选人已接受面试邀约',
+  'interviewed 视图按已约面表述，不冒充面试完成',
+)
+check(
+  product.overview.ledger.find((item) => item.label === '累计已约面') !== undefined &&
+    product.overview.ledger.every((item) => !item.label.includes('已面试')),
+  '累计账面按已约面表述',
+)
+check(
+  product.overview.todayMetrics.find((item) => item.label === '已邀面') !== undefined &&
+    product.overview.todayMetrics.every((item) => item.label !== '已约面'),
+  '今日邀面卡人数按已邀面表述，不与已约面混名',
+)
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')

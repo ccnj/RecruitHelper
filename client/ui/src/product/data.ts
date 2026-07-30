@@ -305,12 +305,12 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         { label: 'AI 评级人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '候选确认人数', value: metricValue(statistics.todayConfirmation), tone: 'amber' },
         { label: '打招呼', value: metricValue(statistics.todayGreeted), tone: 'green' },
-        { label: '已约面', value: metricValue(statistics.todayInvited), tone: 'red' },
+        { label: '已邀面', value: metricValue(statistics.todayInvited), tone: 'red' },
       ],
       ledgerStartedAt: formatDateOnly(rawOverview.businessSince),
       ledger: [
         { label: '累计招呼', value: metricValue(statistics.totalGreeted) },
-        { label: '累计已面试', value: metricValue(statistics.totalInterviewed) },
+        { label: '累计已约面', value: metricValue(statistics.totalInterviewed) },
         { label: '累计已换微信', value: metricValue(statistics.totalWechat) },
       ],
       todayInterviews: (rawOverview.todayInterviews ?? []).map((interview) => ({
@@ -728,7 +728,7 @@ function candidateStatus(
     }
   }
   if (view === 'interviewed') {
-    return { label: '已面试', tone: 'green', deterministicState: '已进入面试完成阶段' }
+    return { label: '已约面', tone: 'green', deterministicState: '候选人已接受面试邀约' }
   }
   if (raw.status === 'greeted') return { label: '已招呼', tone: 'blue', deterministicState: '已招呼，等待候选人回复' }
   if (raw.status === 'communicating') return { label: '已回复', tone: 'blue', deterministicState: '正在自动沟通' }
