@@ -409,7 +409,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           <dl className="rh-activity-facts">
             <div><dt>新回复</dt><dd>{metricText(overview.todayActivity.newReplies)}</dd></div>
             <div><dt>新邀面</dt><dd>{metricText(overview.todayActivity.newInterviews)}</dd></div>
-            <div><dt>完成面试</dt><dd>{metricText(overview.todayActivity.completedInterviews)}</dd></div>
+            <div><dt>已过面试时间</dt><dd>{metricText(overview.todayActivity.elapsedInterviews)}</dd></div>
           </dl>
         </section>
       </div>

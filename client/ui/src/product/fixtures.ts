@@ -218,7 +218,7 @@ export function createProductFixture(): ProductData {
         greetingDisplayTarget: 100,
         newReplies: 3,
         newInterviews: 2,
-        completedInterviews: 1,
+        elapsedInterviews: 1,
       },
     },
     confirmation: {
@@ -338,7 +338,7 @@ export function createEmptyProductData(): ProductData {
         greetingDisplayTarget: 100,
         newReplies: 0,
         newInterviews: 0,
-        completedInterviews: 0,
+        elapsedInterviews: 0,
       },
     },
     confirmation: {

@@ -104,7 +104,7 @@ export interface TodayActivityView {
   greetingDisplayTarget: number | null
   newReplies: ProductMetric
   newInterviews: ProductMetric
-  completedInterviews: ProductMetric
+  elapsedInterviews: ProductMetric
 }
 
 export interface OverviewView {

@@ -85,7 +85,7 @@ const snapshot = {
         totalWechat: exact(11),
         todayNewReplies: exact(3),
         todayNewAppointments: exact(1),
-        todayCompletedInterviews: exact(0),
+        todayElapsedInterviews: exact(2),
       },
       todayInterviews: [{
         profileId: 'profile-interview',
@@ -307,6 +307,12 @@ check(
   '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
 )
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
+// 这一行原先恒为不可用("没有面试完成写入口")，产品端永远显示"—"，用户分不清
+// "今天没有"和"读不出来"。现在报今天已过面试时间的人数。
+check(
+  product.overview.todayActivity.elapsedInterviews === 2,
+  '今日已过面试时间取脑侧精确值，不再恒为不可用',
+)
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')
 

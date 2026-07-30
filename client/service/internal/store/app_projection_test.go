@@ -349,9 +349,12 @@ func TestAppOverviewMarksUnavailableMetricsInsteadOfGuessing(t *testing.T) {
 		got.Statistics.TodayRated.Value == nil || *got.Statistics.TodayRated.Value != 1 {
 		t.Fatalf("unexpected overview: %+v", got)
 	}
+	// 库里没有已约面档案，今日已过面试时间应是精确 0——不是"不可用"。
 	if !got.Statistics.TotalInterviewed.Exact ||
-		got.Statistics.TodayCompletedInterviews.Exact {
-		t.Fatalf("历史状态可精确计数、缺少跃迁时刻的今日指标不得猜测: %+v", got.Statistics)
+		!got.Statistics.TodayElapsedInterviews.Exact ||
+		got.Statistics.TodayElapsedInterviews.Value == nil ||
+		*got.Statistics.TodayElapsedInterviews.Value != 0 {
+		t.Fatalf("历史状态与今日已过面试时间都应精确计数: %+v", got.Statistics)
 	}
 
 	backendJobID := revision.SourceJobRef
@@ -577,9 +580,11 @@ func TestAppTodayMetricsSkipUntimedMessagesInsteadOfGoingBlind(t *testing.T) {
 			t.Fatalf("%s 应忽略无平台时间的消息并给出精确 1，实得 %+v", name, metric)
 		}
 	}
-	// 没有面试完成写入口的指标仍然如实报不可用，本次不动它。
-	if got.Statistics.TodayCompletedInterviews.Exact {
-		t.Fatalf("无写入口的指标不得改口称精确: %+v", got.Statistics.TodayCompletedInterviews)
+	// 该档案是沟通中、没有邀面卡，今日已过面试时间为精确 0。
+	if !got.Statistics.TodayElapsedInterviews.Exact ||
+		got.Statistics.TodayElapsedInterviews.Value == nil ||
+		*got.Statistics.TodayElapsedInterviews.Value != 0 {
+		t.Fatalf("今日已过面试时间应为精确 0: %+v", got.Statistics.TodayElapsedInterviews)
 	}
 }
 
@@ -707,6 +712,19 @@ func TestAppCandidateViewsSplitInterviewedByDeadline(t *testing.T) {
 		Platform: platform, AccountRef: accountRef, View: "pending", Now: now,
 	}); !errors.Is(err, ErrAppProjectionInvalid) {
 		t.Fatal("已下线的 pending 视图不得继续受理")
+	}
+
+	// 今日已过面试时间与已面试视图同判据,只多"落在今天"这一条:P-done 与
+	// P-started 的时间界都在今天且已过,P-blind 读不到时间不计入。
+	overview, err := s.AppOverview(AppOverviewRequest{
+		Now: now, Platform: platform, AccountRef: accountRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	elapsed := overview.Statistics.TodayElapsedInterviews
+	if !elapsed.Exact || elapsed.Value == nil || *elapsed.Value != 2 {
+		t.Fatalf("今日已过面试时间应为精确 2,实得 %+v", elapsed)
 	}
 }
 

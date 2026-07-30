@@ -60,7 +60,7 @@ export interface AppOverviewStatisticsRaw {
   totalWechat: AppMetricRaw
   todayNewReplies: AppMetricRaw
   todayNewAppointments: AppMetricRaw
-  todayCompletedInterviews: AppMetricRaw
+  todayElapsedInterviews: AppMetricRaw
 }
 
 export interface AppInterviewRaw {
@@ -341,7 +341,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         greetingDisplayTarget: 100,
         newReplies: metricValue(statistics.todayNewReplies),
         newInterviews: metricValue(statistics.todayNewAppointments),
-        completedInterviews: metricValue(statistics.todayCompletedInterviews),
+        elapsedInterviews: metricValue(statistics.todayElapsedInterviews),
       },
     },
     confirmation,

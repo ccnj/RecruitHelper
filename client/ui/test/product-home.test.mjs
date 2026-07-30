@@ -74,7 +74,7 @@ const overview = {
     greetingDisplayTarget: 100,
     newReplies: 0,
     newInterviews: 0,
-    completedInterviews: 0,
+    elapsedInterviews: 0,
   },
 }
 const actions = {

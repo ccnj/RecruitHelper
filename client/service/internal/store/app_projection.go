@@ -78,9 +78,12 @@ type AppOverviewStatistics struct {
 	TotalInterviewed AppMetric `json:"totalInterviewed"`
 	TotalWechat      AppMetric `json:"totalWechat"`
 
-	TodayNewReplies          AppMetric `json:"todayNewReplies"`
-	TodayNewAppointments     AppMetric `json:"todayNewAppointments"`
-	TodayCompletedInterviews AppMetric `json:"todayCompletedInterviews"`
+	TodayNewReplies      AppMetric `json:"todayNewReplies"`
+	TodayNewAppointments AppMetric `json:"todayNewAppointments"`
+	// TodayElapsedInterviews 是今天已经过去的面试场次(按人计)。它只说明约定
+	// 时间已过,不代表面试确实进行过——系统没有面试完成写入口,原先这里直接
+	// 报不可用,产品端那一行于是永远是"—",用户分不清"今天没有"和"读不出来"。
+	TodayElapsedInterviews AppMetric `json:"todayElapsedInterviews"`
 }
 
 type AppInterviewSummary struct {
@@ -279,6 +282,7 @@ func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, err
 		}
 		out.Statistics, err = appOverviewStatisticsTx(
 			tx,
+			req.Now,
 			start,
 			end,
 			req.Platform,
@@ -577,7 +581,7 @@ func appFunnelTx(
 
 func appOverviewStatisticsTx(
 	tx *gorm.DB,
-	start, end time.Time,
+	now, start, end time.Time,
 	platform, accountRef string,
 ) (AppOverviewStatistics, error) {
 	var out AppOverviewStatistics
@@ -662,7 +666,20 @@ func appOverviewStatisticsTx(
 		return out, err
 	}
 	out.TodayNewReplies = exactMetric(todayReply)
-	out.TodayCompletedInterviews = unavailableMetric("当前没有面试完成写入口")
+
+	// 今天已过去的面试:最新一张邀面卡的时间界落在今天且已经过去。与
+	// AppCandidateViewInterviewElapsed 同判据(结束时间优先、缺则开始时间),
+	// 因此两处口径天然一致。
+	value = 0
+	if err := tx.Table("candidate_profiles AS profile").
+		Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
+		Where("profile.main_status = ?", CandidateProfileInterviewed).
+		Where(appLatestInterviewDeadlineMs+" >= ?", start.UnixMilli()).
+		Where(appLatestInterviewDeadlineMs+" < ?", now.UnixMilli()).
+		Distinct("profile.profile_id").Count(&value).Error; err != nil {
+		return out, err
+	}
+	out.TodayElapsedInterviews = exactMetric(value)
 	return out, nil
 }
 
