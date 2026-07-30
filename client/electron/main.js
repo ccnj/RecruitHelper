@@ -7,7 +7,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
-const { pluginInstallDir, ensurePluginInstalled } = require('./pluginSeed')
+const { pluginInstallDir, updateStageDir, ensurePluginInstalled } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64 } = require('./trayIcon')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
@@ -86,6 +86,14 @@ async function boot() {
   // 开发期不传:那时固定目录要么不存在,要么是上次装包留下的陈旧副本,而
   // Chrome 里加载的是开发者自己的 plugin/dist —— 拿它当基准只会误判。
   if (pluginDir) brainEnv.RECRUITHELPER_PLUGIN_DIR = pluginDir
+  // 自更新检查同样只在打包态启用:开发期没有"当前版本"这回事(跑的是工作树),
+  // 拿 package.json 的版本去跟更新源比,只会把开发机也卷进下载。
+  if (app.isPackaged) {
+    brainEnv.RECRUITHELPER_UPDATE_DIR = updateStageDir({
+      userDataDir: app.getPath('userData'),
+    })
+    brainEnv.RECRUITHELPER_APP_VERSION = app.getVersion()
+  }
   service = new BrainService({
     bin: layout.brainBin,
     args: [...layout.brainArgs, '-port', String(PORT), '-data', dataDir],

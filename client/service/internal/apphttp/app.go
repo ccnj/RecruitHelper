@@ -87,11 +87,28 @@ func WithWorkflowControl(control WorkflowControl) Option {
 	return func(api *API) { api.control = control }
 }
 
+// UpdateStatus 是客户端版本更新的只读投影。它只回答"有没有新版、备好了没有" ——
+// 不含更新源地址、哈希或任何可据以动作的东西:装不装是脑的裁决，不是 UI 的。
+type UpdateStatus struct {
+	CurrentVersion string `json:"currentVersion,omitempty"`
+	Available      bool   `json:"available"`
+	Version        string `json:"version,omitempty"`
+	Ready          bool   `json:"ready"`
+	Notes          string `json:"notes,omitempty"`
+}
+
+type UpdateStatusProvider func() UpdateStatus
+
+func WithUpdateStatusProvider(provider UpdateStatusProvider) Option {
+	return func(api *API) { api.updates = provider }
+}
+
 type API struct {
 	projections ProjectionStore
 	bearer      string
 	runtime     RuntimeSnapshotProvider
 	control     WorkflowControl
+	updates     UpdateStatusProvider
 	now         func() time.Time
 }
 
@@ -122,6 +139,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/workflow/end", h(a.endWorkflow))
 	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
 	mux.HandleFunc("POST /app/jobs/sync", h(a.syncJobs))
+	mux.HandleFunc("GET /app/update", h(a.updateStatus))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
@@ -381,6 +399,16 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 	snapshot.WorkflowPendingAction = strings.TrimSpace(snapshot.WorkflowPendingAction)
 	snapshot.CommunicationState = strings.TrimSpace(snapshot.CommunicationState)
 	return snapshot
+}
+
+// updateStatus 把"有没有新版可用"投给产品 UI。未接线时返回一个安静的空状态,
+// 而不是 404 —— 开发期与未配置更新源的安装都走这一支,UI 不必分辨两者。
+func (a *API) updateStatus(w http.ResponseWriter, _ *http.Request) {
+	if a.updates == nil {
+		writeJSON(w, http.StatusOK, UpdateStatus{})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.updates())
 }
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {

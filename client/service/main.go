@@ -29,6 +29,7 @@ import (
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/productworkflow"
+	"recruithelper/client/service/internal/selfupdate"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/workflow"
@@ -228,6 +229,18 @@ func main() {
 	// ticker 仍在,负责兜住提醒被合并或丢弃的场合。
 	hub.SetHandReadyHook(pluginReloader.NotifyHandReady)
 	background.Go(func() { pluginReloader.Run(appCtx) })
+	// 客户端版本更新源(AGENTS.md 全局约定第四项获准云端出站)。这里只负责"发现":
+	// 取清单、下载、校验完整性,到此为止 —— 装不装、什么时候装是下一批的事。
+	// 配置不全(开发期不传那两个环境变量)时 New 返回 nil,整个检查不启用。
+	updateChecker := selfupdate.New(
+		selfupdate.DefaultFeedURL,
+		os.Getenv(selfupdate.AppVersionEnv),
+		os.Getenv(selfupdate.UpdateDirEnv),
+		selfupdate.DefaultInterval,
+	)
+	if updateChecker != nil {
+		background.Go(func() { updateChecker.Run(appCtx) })
+	}
 	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,
 	// 不受业务运行窗口约束;失败只降级不阻塞业务主线。
 	notifyRunner := notify.NewRunner(st, blobStore, func() string {
@@ -288,6 +301,13 @@ func main() {
 				return snapshot, nil
 			}),
 			apphttp.WithWorkflowControl(productController),
+			apphttp.WithUpdateStatusProvider(func() apphttp.UpdateStatus {
+				status := updateChecker.Status()
+				return apphttp.UpdateStatus{
+					CurrentVersion: status.CurrentVersion, Available: status.Available,
+					Version: status.Version, Ready: status.Ready, Notes: status.Notes,
+				}
+			}),
 		)
 		if productErr != nil {
 			slog.Error("产品 UI 投影初始化失败", "err", productErr)
