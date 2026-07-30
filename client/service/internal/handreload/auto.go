@@ -34,20 +34,28 @@ const DefaultInterval = 30 * time.Second
 type AutoReloader struct {
 	orchestrator *Orchestrator
 	store        Store
+	pluginDir    string
 	interval     time.Duration
 
-	mu        sync.Mutex
-	attempted map[string]string // handID -> 已经为哪个 bootID 派发过
-	halted    map[string]string // handID -> 停手原因(等人工处理)
+	mu           sync.Mutex
+	attempted    map[string]string // handID -> 已经为哪个 bootID 派发过
+	halted       map[string]string // handID -> 停手原因(等人工处理)
+	lastExpected string            // 上次读到的磁盘插件版本,只为日志去重
+	expectedSeen bool
 }
 
-func NewAutoReloader(orchestrator *Orchestrator, st Store, interval time.Duration) *AutoReloader {
+// NewAutoReloader。pluginDir 是 Chrome 实际加载的固定插件目录;传空则退化为
+// 只按契约判断(开发期与任何读不到目录的场合都走这一支)。
+func NewAutoReloader(
+	orchestrator *Orchestrator, st Store, pluginDir string, interval time.Duration,
+) *AutoReloader {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
 	return &AutoReloader{
 		orchestrator: orchestrator,
 		store:        st,
+		pluginDir:    pluginDir,
 		interval:     interval,
 		attempted:    map[string]string{},
 		halted:       map[string]string{},
@@ -100,7 +108,11 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 		return Outcome{Skipped: "存在活跃产品工作流"}
 	}
 
-	target, skipped := a.pickTarget()
+	// 磁盘上是哪一版,是壳安置插件之后的既成事实(pluginSeed 在起脑之前就跑完了)。
+	// 读文件放在锁外。
+	expected := ExpectedPluginVersion(a.pluginDir)
+
+	target, skipped := a.pickTarget(expected)
 	if target == nil {
 		return Outcome{Skipped: skipped}
 	}
@@ -141,18 +153,36 @@ func (a *AutoReloader) EvaluateOnce(ctx context.Context) Outcome {
 	return Outcome{Triggered: true, HandID: target.HandID, Result: result}
 }
 
+// staleHand 判断这只手跑的是不是过时的插件。两个独立信号:
+//
+//  1. 契约对不上。只有改了契约的版本才会让它变,但它是硬信号 —— 此时 effectful
+//     已经被禁派,业务是停住的。
+//  2. 版本对不上。磁盘上已经换成新版而手还报着旧版号。绝大多数更新不动契约,
+//     这一条才是常态;而且此时业务并没有停,是带着旧插件代码照常跑,更隐蔽。
+//
+// 任一方"不知道"就不算过时:磁盘版本读不到(expected 为空)或手根本没报版本,
+// 都是缺证据,不是反证。宁可不重载,也不为一个读不出来的文件去动推荐流。
+func staleHand(state session.HandState, expectedVersion string) bool {
+	if !state.ContractMatch || state.ContractHash != protocol.ContractHash {
+		return true
+	}
+	return expectedVersion != "" && state.ExtVersion != "" &&
+		state.ExtVersion != expectedVersion
+}
+
 // pickTarget 找出这轮该重载的手,顺便清理已经恢复正常的手的记录。
-func (a *AutoReloader) pickTarget() (*session.HandState, string) {
+func (a *AutoReloader) pickTarget(expectedVersion string) (*session.HandState, string) {
 	capability := Capability()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.noteExpectedVersion(expectedVersion)
 
 	var target *session.HandState
 	skipped := ""
 	for _, state := range a.orchestrator.Registry.Snapshot() {
-		if state.ContractMatch && state.ContractHash == protocol.ContractHash {
-			// 契约已经对上,不管是自动修好的还是人工重载的,记录都该清干净,
-			// 这样下次换代时这只手能重新参与。
+		if !staleHand(state, expectedVersion) {
+			// 这只手已经跑在对的插件上,不管是自动修好的还是人工重载的,记录都
+			// 该清干净,这样下次换代时它能重新参与。
 			delete(a.attempted, state.HandID)
 			delete(a.halted, state.HandID)
 			continue
@@ -179,6 +209,24 @@ func (a *AutoReloader) pickTarget() (*session.HandState, string) {
 		}
 	}
 	return target, skipped
+}
+
+// noteExpectedVersion 只在磁盘版本读数变化时说一句话 —— 每 30 秒重复同一行
+// 只会把日志刷成噪音。调用方持有 a.mu。
+func (a *AutoReloader) noteExpectedVersion(expected string) {
+	if a.expectedSeen && expected == a.lastExpected {
+		return
+	}
+	a.lastExpected = expected
+	a.expectedSeen = true
+	if expected == "" {
+		if a.pluginDir != "" {
+			slog.Warn("读不到固定目录里的插件版本，只按契约判断是否需要重载",
+				"pluginDir", a.pluginDir)
+		}
+		return
+	}
+	slog.Info("固定目录里的插件版本", "version", expected, "pluginDir", a.pluginDir)
 }
 
 // Halted 报告某只手是否已经停手待人工。诊断用。
