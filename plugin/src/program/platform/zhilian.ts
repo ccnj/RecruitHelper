@@ -5112,17 +5112,20 @@ async function ensureZhilianJobListTab(
 ): Promise<chrome.tabs.Tab> {
   const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
     .filter((tab) => tab.id !== undefined && isZhilianJobListURL(tab.url))
-  if (existing.length > 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位页标签无法唯一确定', 'manualOnly')
-  }
-  if (existing.length === 1 && existing[0].status === 'complete') {
-    assertExpectedPrincipal(await probeTab(existing[0]), expectedPrincipalFingerprint)
-    return existing[0]
+  // 多个职位管理页标签之间没有歧义:列表内容与标签无关,读哪个都一样。用户平时
+  // 自己开着一两个是常态,要求唯一只会让预检随机失败。发布页则相反——那里各个
+  // 标签可能各有半填的表单,必须保持唯一要求。
+  const ready = existing.find((tab) => tab.status === 'complete')
+  if (ready) {
+    assertExpectedPrincipal(await probeTab(ready), expectedPrincipalFingerprint)
+    return ready
   }
 
   ctx.checkpoint()
   await ctx.progress('准备智联职位页', 5)
-  let tab = existing.length === 1 ? existing[0] : await canonicalZhilianTab()
+  // 走到这里说明没有已加载完成的职位页:优先复用仍在加载的那个,否则挑一个
+  // 规范智联标签导航过去。
+  let tab = existing[0] ?? await canonicalZhilianTab()
   if (!tab || tab.id === undefined) {
     throw new ZhilianPlatformError(
       'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
