@@ -10,21 +10,34 @@ import (
 func TestBuildPublishJobIntentIDIsStablePerJobAndPayload(t *testing.T) {
 	// 同职位同参数必须得到同一个意图：这是"同一份发布参数只发一次"的全部依据，
 	// HTTP 重试靠它收编原意图而不是另铸一个。
-	first := BuildPublishJobIntentID("15", "payload-hash-a")
-	if second := BuildPublishJobIntentID("15", "payload-hash-a"); first != second {
+	first := BuildPublishJobIntentID("15", "payload-hash-a", 1)
+	if second := BuildPublishJobIntentID("15", "payload-hash-a", 1); first != second {
 		t.Fatalf("同职位同参数应得到同一意图: %s vs %s", first, second)
 	}
 	// 改了发布参数是新意图（甲方裁决的口径：允许改完再发），平台侧"同名不重发"
 	// 仍兜着。
-	if changed := BuildPublishJobIntentID("15", "payload-hash-b"); changed == first {
+	if changed := BuildPublishJobIntentID("15", "payload-hash-b", 1); changed == first {
 		t.Fatal("发布参数变化后应得到新的意图")
 	}
 	// 不同职位绝不能撞同一个意图，否则第二个职位会被当成重试而静默跳过。
-	if other := BuildPublishJobIntentID("16", "payload-hash-a"); other == first {
+	if other := BuildPublishJobIntentID("16", "payload-hash-a", 1); other == first {
 		t.Fatal("不同职位不得共用意图")
 	}
 	if !strings.HasPrefix(first, "jp-") || len(first) != len("jp-")+24 {
 		t.Fatalf("意图标识形态不符: %s", first)
+	}
+	// 序号 1 不带后缀:本裁决之前落下的意图必须仍然命中同一身份，否则一次
+	// 升级就会把历史发布当成"没发过"。
+	if strings.Contains(first, "-1") && strings.HasSuffix(first, "-1") {
+		t.Fatalf("序号 1 不得带后缀: %s", first)
+	}
+	// 干净失败后重来一次必须是**新**意图:旧意图是永久终局，不能原地复活。
+	retry := BuildPublishJobIntentID("15", "payload-hash-a", 2)
+	if retry == first || !strings.HasSuffix(retry, "-2") {
+		t.Fatalf("第二次尝试应是带序号的新意图: %s（首次 %s）", retry, first)
+	}
+	if third := BuildPublishJobIntentID("15", "payload-hash-a", 3); third == retry {
+		t.Fatal("不同尝试序号不得共用意图")
 	}
 }
 
@@ -32,7 +45,7 @@ func TestBuildEffectIdemKeyDistinguishesPublishTargets(t *testing.T) {
 	const platform, account = "zhilian", "a-1"
 	keyOf := func(jobID, payloadHash string) string {
 		return BuildEffectIdemKey(platform, account, protocol.PrimJobPublishDraft, jobID,
-			BuildPublishJobIntentID(jobID, payloadHash))
+			BuildPublishJobIntentID(jobID, payloadHash, 1))
 	}
 	same := keyOf("15", "hash-a")
 	if again := keyOf("15", "hash-a"); same != again {

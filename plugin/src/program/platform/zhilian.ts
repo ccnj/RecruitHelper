@@ -5395,6 +5395,63 @@ function mainReadZhilianEmployment(): MainStep {
   return { status: 'ok', detail: (active[0] as HTMLElement).innerText.trim() }
 }
 
+// 敏感词确认层:km-modal 组件,结构是 .km-modal__wrapper > .km-modal >
+// __header/__body/__footer,动作按钮在 footer 里、header 另有一个 close-btn。
+// 按可见文案匹配(低脆),不认组件内部状态。返回 ok+detail 表示弹层在场,
+// detail 是弹层原话(含敏感词与所在字段),给运营看。
+// 注意:这两个函数会被序列化注入 MAIN world,**不能引用模块作用域的任何东西**,
+// 所以查找逻辑只能在各自函数内联一遍,不许抽公共 helper。
+function mainReadZhilianSensitiveWordDialog(): MainStep {
+  const dialogs = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      if (node.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      const text = node.innerText ?? ''
+      return text.includes('敏感词') && text.includes('忽略')
+    })
+  if (dialogs.length === 0) return { status: 'failed', reason: 'sensitive_dialog_absent' }
+  if (dialogs.length > 1) return { status: 'failed', reason: 'sensitive_dialog_ambiguous' }
+  const text = (dialogs[0].innerText ?? '').trim().replace(/\s*\n\s*/g, ' / ')
+  return { status: 'ok', detail: text.slice(0, 600) }
+}
+
+function mainIgnoreZhilianSensitiveWordDialog(): MainStep {
+  const dialogs = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      if (node.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      const text = node.innerText ?? ''
+      return text.includes('敏感词') && text.includes('忽略')
+    })
+  if (dialogs.length !== 1) {
+    return {
+      status: 'failed',
+      reason: dialogs.length === 0 ? 'sensitive_dialog_absent' : 'sensitive_dialog_ambiguous',
+    }
+  }
+  // 排除 header 上的关闭按钮:它没有文案,但显式排掉更不容易误点。
+  const buttons = (Array.from(dialogs[0].querySelectorAll('button')) as HTMLElement[])
+    .filter((button) => !button.classList.contains('km-modal__close-btn'))
+  const hit = buttons.filter((button) => (button.innerText ?? '').trim() === '忽略')
+  if (hit.length !== 1) {
+    return {
+      status: 'failed',
+      reason: hit.length === 0 ? 'sensitive_ignore_absent' : 'sensitive_ignore_ambiguous',
+    }
+  }
+  if ((hit[0] as HTMLButtonElement).disabled) {
+    return { status: 'failed', reason: 'sensitive_ignore_disabled' }
+  }
+  hit[0].click()
+  return { status: 'ok', detail: 'ignored' }
+}
+
 function mainCloseZhilianPanels(): MainStep {
   const visible = Array.from(document.querySelectorAll('.km-select__dropdown, .salary-popover')).filter((node) => {
     const style = window.getComputedStyle(node)
@@ -6214,6 +6271,35 @@ export async function publishZhilianJobDraft(
   }
   await ctx.progress('已点击发布,开始回读正证', 92)
 
+  // 敏感词确认层:平台会在点击发布之后弹层拦下,列出敏感词与所在字段,给
+  // 「忽略」与「修改」两个出口;弹层开着时职位并未创建(真机实测)。按甲方
+  // 2026-07-30 裁决自动点「忽略」继续发布。
+  //
+  // 这不是"第二次点击发布",而是同一个动作的确认续做:没有它,任何触发敏感
+  // 词的职位都只会停在弹层上、最后落成 suspect。仍然严格只点一次,且只在
+  // 弹层唯一、文案确属敏感词提示、「忽略」按钮唯一时才点;任何不满足都不猜,
+  // 直接按 possible 交给发后回读与人工。
+  let sensitiveWordNotice: string | null = null
+  for (let round = 0; round < 12; round += 1) {
+    ctx.checkpoint()
+    const found = await runMain(tabId, mainReadZhilianSensitiveWordDialog, [])
+    if (validMainStep(found) && found.status === 'ok' && found.detail) {
+      sensitiveWordNotice = found.detail.slice(0, 900)
+      const ignored = await runMain(tabId, mainIgnoreZhilianSensitiveWordDialog, [])
+      if (!validMainStep(ignored) || ignored.status === 'failed') {
+        const reason = validMainStep(ignored) ? ignored.reason : 'sensitive_dialog_shape'
+        throw new ZhilianPlatformError(
+          'POSTCONDITION_UNCONFIRMED', `敏感词确认层无法继续: ${reason}`, 'manualOnly',
+          undefined, 'possible',
+          { ...snapshotProgress(progress, reason), sensitiveWordNotice },
+        )
+      }
+      await ctx.progress('已在敏感词确认层选择继续发布', 94)
+      break
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+
   // 平台的即时反馈只作诊断:失败提示能让人一眼看出发不出去的原因,
   // 但它不参与判定——正证只认职位管理列表里出现同名职位。
   let platformFeedback: string | null = null
@@ -6224,6 +6310,12 @@ export async function publishZhilianJobDraft(
     }
   } catch {
     // 读提示失败不影响正证判定,保持 null。
+  }
+  if (sensitiveWordNotice) {
+    // 敏感词原话必须带进诊断,否则运营不知道是哪个词触发的。
+    platformFeedback = `[敏感词确认层已选择继续] ${sensitiveWordNotice}` +
+      (platformFeedback ? ` || ${platformFeedback}` : '')
+    platformFeedback = platformFeedback.slice(0, 900)
   }
 
   // 发后核验:回读列表,读到同名职位即成功。读不到只记未确认,

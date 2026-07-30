@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,15 +30,47 @@ type PublishJobReceipt struct {
 	Status   string
 }
 
-// BuildPublishJobIntentID 由职位与本次发布材料派生稳定意图标识。
+// BuildPublishJobIntentID 由职位、本次发布材料与尝试序号派生稳定意图标识。
 //
-// 同一职位 + 同一份发布参数 → 同一 intentID → 同一 idemKey → 账本闸只允许发
-// 一次；HTTP 重试会收编原意图而不是另铸一个。运营改了发布参数再发是新的
+// 同一职位 + 同一份发布参数 + 同一序号 → 同一 intentID → 同一 idemKey → 账本闸
+// 只允许发一次；HTTP 重试会收编原意图而不是另铸一个。运营改了发布参数再发是新的
 // intentID，允许发第二次（甲方 2026-07-30 裁决的口径），此时平台侧"同名不重发"
 // 那道闸仍然兜着。
-func BuildPublishJobIntentID(jobID, payloadHash string) string {
+//
+// attempt 从 1 起。序号 1 不带后缀，好让本裁决之前落下的意图仍然命中同一身份。
+func BuildPublishJobIntentID(jobID, payloadHash string, attempt int) string {
 	sum := sha256.Sum256([]byte("jobPublish\x00" + jobID + "\x00" + payloadHash))
-	return "jp-" + hex.EncodeToString(sum[:12])
+	id := "jp-" + hex.EncodeToString(sum[:12])
+	if attempt > 1 {
+		id += "-" + strconv.Itoa(attempt)
+	}
+	return id
+}
+
+// maxPublishJobAttempts 只是防止派生循环无界，不是业务重试预算：每一次尝试都
+// 要人在产品上重新点一次发布。
+const maxPublishJobAttempts = 20
+
+// publishAttemptExhausted 判断某个既有意图是否已被证明"什么都没发出去"，因而
+// 允许运营重新发起一次。
+//
+// 只认一种情形：意图终局为 failed，且其根命令记录的副作用标注是 none。按协议
+// 规格，job.publishDraft 点击之前的任何失败一律 sideEffect=none，点击之后一律
+// possible——所以 none 是"未发布"的确证，而不是猜测。其余一切（在途、验证中、
+// ok、suspect、人裁终局，以及 possible/confirmed 或标注缺失的失败）都不得重来：
+// 那些情形下平台上可能已经有这个职位了。
+func (d *Dispatcher) publishAttemptExhausted(intent store.EffectIntent) (bool, error) {
+	if intent.Status != store.EffectIntentFailed {
+		return false, nil
+	}
+	root, err := d.st.CmdByMsgID(intent.RootMsgID)
+	if err != nil {
+		return false, err
+	}
+	if root == nil {
+		return false, nil
+	}
+	return root.SideEffect == string(protocol.SideEffectNone), nil
 }
 
 // PublishJob 派发唯一一次职位发布。WAL 与 idemKey 唯一性都在
@@ -69,22 +102,44 @@ func (d *Dispatcher) PublishJob(req PublishJobRequest) (*PublishJobReceipt, erro
 		return nil, err
 	}
 	payloadHash := hashBytes(argsRaw)
-	intentID := BuildPublishJobIntentID(req.JobID, payloadHash)
 
 	// 精确重试优先收编原意图。命中后不再重跑准备阶段——那可能在平台上已经
 	// 发出去了，再走一遍就是第二次发布。
-	if existing, lookupErr := d.st.EffectIntentByID(intentID); lookupErr != nil {
-		return nil, lookupErr
-	} else if existing != nil {
+	//
+	// 例外只有一种：上一次尝试已被证明什么都没发出去（终局 failed 且
+	// sideEffect=none，例如守卫没过或表单填不进去）。那种意图是永久终局，
+	// 不能原地复活，否则就是改写业务事实；改由下一个序号铸造新意图，让运营
+	// 能真的重来一次。不加这个出路的话，一次干净失败会把该职位这份参数永久
+	// 锁死在 failed 上。
+	intentID := ""
+	for attempt := 1; attempt <= maxPublishJobAttempts; attempt++ {
+		candidate := BuildPublishJobIntentID(req.JobID, payloadHash, attempt)
+		existing, lookupErr := d.st.EffectIntentByID(candidate)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existing == nil {
+			intentID = candidate
+			break
+		}
 		if existing.Platform != req.Platform || existing.AccountRef != req.AccountRef ||
 			existing.Primitive != protocol.PrimJobPublishDraft || existing.TargetRef != req.JobID ||
 			existing.PayloadHash != payloadHash {
 			return nil, store.ErrEffectIntentConflict
 		}
-		return &PublishJobReceipt{
-			IntentID: existing.IntentID, MsgID: existing.RootMsgID,
-			Created: false, Status: string(existing.Status),
-		}, nil
+		exhausted, exhaustedErr := d.publishAttemptExhausted(*existing)
+		if exhaustedErr != nil {
+			return nil, exhaustedErr
+		}
+		if !exhausted {
+			return &PublishJobReceipt{
+				IntentID: existing.IntentID, MsgID: existing.RootMsgID,
+				Created: false, Status: string(existing.Status),
+			}, nil
+		}
+	}
+	if intentID == "" {
+		return nil, errors.New("该职位同一份发布参数的干净失败次数已达上限，先查清失败原因再发")
 	}
 
 	account, err := d.st.AccountByKey(store.AccountKey{Platform: req.Platform, AccountRef: req.AccountRef})
