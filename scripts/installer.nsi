@@ -84,7 +84,18 @@ UninstPage instfiles
 ; staging area and is never touched by the installer.
 !macro InstallLog Text
   CreateDirectory "$LOCALAPPDATA\RecruitHelper\updates"
+  ; The NSIS error flag is only ever SET by failing instructions -- successful
+  ; ones never clear it. Without ClearErrors, a stray flag from an unrelated
+  ; earlier failure (RMDir hitting a file the killed process still holds, a
+  ; shortcut that failed to write...) would skip the append below even though
+  ; FileOpen succeeded, and leak the handle. The partial-failure runs that set
+  ; such flags are exactly the runs this log exists to explain.
+  ClearErrors
   FileOpen $8 "$LOCALAPPDATA\RecruitHelper\updates\install.log" a
+  ; "+4" counts instructions: FileSeek, FileWrite, FileClose, then the first
+  ; instruction after the macro. A plain label is not an option here -- the
+  ; macro expands at every insertion point and duplicate labels fail the
+  ; build. Renumber this jump whenever the macro body changes.
   IfErrors +4
     FileSeek $8 0 END
     FileWrite $8 "${Text}$\r$\n"
