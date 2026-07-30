@@ -343,6 +343,66 @@ func TestCheckOnceRejectsMalformedFeedWithoutDownloading(t *testing.T) {
 	}
 }
 
+func TestJitterSpreadsWithoutShiftingTheAverage(t *testing.T) {
+	// 抖动的意义是把同时开机的客户散开;它必须真的散(不是常量),又不能把间隔拉到
+	// 离谱的地方去。
+	const base = time.Hour
+	seen := map[time.Duration]bool{}
+	var sum time.Duration
+	const samples = 500
+	for i := 0; i < samples; i++ {
+		got := jitter(base)
+		if got < base*3/4 || got > base*5/4 {
+			t.Fatalf("抖动越界: %v 不在 [45m, 75m] 内", got)
+		}
+		seen[got] = true
+		sum += got
+	}
+	if len(seen) < samples/2 {
+		t.Fatalf("抖动没有真正散开，%d 次只产生 %d 个不同值", samples, len(seen))
+	}
+	// 期望值应当仍是基数附近，否则等于偷偷改了检查频率。
+	average := sum / samples
+	if average < base*9/10 || average > base*11/10 {
+		t.Fatalf("抖动把平均间隔挪走了: %v", average)
+	}
+}
+
+func TestJitterHandlesNonPositiveInput(t *testing.T) {
+	if got := jitter(0); got != 0 {
+		t.Fatalf("零间隔应原样返回，得到 %v", got)
+	}
+	if got := jitter(-time.Second); got != -time.Second {
+		t.Fatalf("负间隔应原样返回，得到 %v", got)
+	}
+}
+
+func TestRepeatedFailuresAreLoggedOnce(t *testing.T) {
+	// 15 分钟一轮,一台断网的机器一天会走近百轮。同一句话刷上百条,真正的异常反而
+	// 被埋掉。
+	src := newUpdateSource(t)
+	checker := newTestChecker(t, src, "0.2.2")
+	sameError := fmt.Errorf("dial tcp: connection refused")
+
+	if !checker.noteFailure(sameError) {
+		t.Fatal("首次失败必须报告")
+	}
+	for i := 0; i < 10; i++ {
+		if checker.noteFailure(sameError) {
+			t.Fatalf("连续同类失败不该重复报告，第 %d 次又报了", i+2)
+		}
+	}
+	// 换了一种失败,说明情况变了,值得再说一次。
+	if !checker.noteFailure(fmt.Errorf("更新清单响应 500")) {
+		t.Fatal("失败原因变化时应重新报告")
+	}
+	// 恢复正常后再失败，也该重新说一次 —— 那是一次新的中断。
+	checker.noteSuccess()
+	if !checker.noteFailure(sameError) {
+		t.Fatal("恢复后再次失败应重新报告")
+	}
+}
+
 func TestStatusOnNilCheckerIsQuiet(t *testing.T) {
 	var checker *Checker
 	if status := checker.Status(); status.Available || status.Ready {
