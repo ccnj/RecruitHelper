@@ -25,6 +25,10 @@ export function ConsoleApp() {
   const accounts = usePolling(api.accounts, 2400, 'accounts')
   const [selectedAccountKey, setSelectedAccountKey] = useState('')
   const [selectedConversationRef, setSelectedConversationRef] = useState('')
+  // 从别处（目前是 suspect 队列）跳过来时的目标会话。不能直接写
+  // selectedConversationRef：切账号会让 conversations 先归 undefined，
+  // 下面那条兜底 effect 会抢先把选中项顶成 rows[0]。
+  const [pendingConversationRef, setPendingConversationRef] = useState('')
   const [activityTab, setActivityTab] = useState<'messages' | 'audits'>('messages')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null)
@@ -69,6 +73,18 @@ export function ConsoleApp() {
 
   useEffect(() => {
     const rows = conversations.data?.conversations ?? []
+    if (pendingConversationRef) {
+      // 还没读到该账号的会话账，先按兵不动，别让兜底逻辑改掉选择。
+      if (!conversations.data) return
+      if (rows.some((row) => row.conversationRef === pendingConversationRef)) {
+        setSelectedConversationRef(pendingConversationRef)
+        setPendingConversationRef('')
+        return
+      }
+      // 读到了但没有这条（会话尚未投影，或已不在最近窗口）：放弃跳转，
+      // 走常规兜底，不能让 pending 永久卡住自动选中。
+      setPendingConversationRef('')
+    }
     if (rows.length === 0) {
       setSelectedConversationRef('')
       return
@@ -76,7 +92,15 @@ export function ConsoleApp() {
     if (!rows.some((row) => row.conversationRef === selectedConversationRef)) {
       setSelectedConversationRef(rows[0].conversationRef)
     }
-  }, [accountKey, conversations.data, selectedConversationRef])
+  }, [accountKey, conversations.data, selectedConversationRef, pendingConversationRef])
+
+  // suspect 队列跳到会话：裁决唯一正经的依据是看上下文，把两页接起来。
+  const openConversation = (platform: string, accountRef: string, conversationRef: string) => {
+    setSelectedAccountKey(accountIdentity({ platform, accountRef }))
+    setPendingConversationRef(conversationRef)
+    setActivityTab('messages')
+    setActivePage('conversation')
+  }
 
   const runMutation = async (key: string, success: string, operation: () => Promise<MutationResult>) => {
     setBusy(key)
@@ -203,7 +227,7 @@ export function ConsoleApp() {
 
         {/* suspect 队列不属于任何一页：它挡住的是后续所有发送，藏起来就等于
             让人在别的页面上看不见自己被卡住了。 */}
-        <Suspects />
+        <Suspects onOpenConversation={openConversation} />
 
         {page}
       </div>

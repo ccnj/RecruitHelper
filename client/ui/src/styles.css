@@ -460,10 +460,11 @@ h1, h2, h3, p { margin-top: 0; }
    等于"卡住了"这件事把"卡在哪"也一起遮掉。横幅的职责是让人不可能忽略
    有 N 条待裁决，不是一次摊开全部：标题行留在框外始终可见，列表自己滚，
    最多吃掉三成视口高。 */
-.dc-shell .dc-suspects .diagnostic-list {
+.dc-suspect-list {
   max-height: 30vh;
   overflow-y: auto;
   overscroll-behavior: contain;
+  margin-top: 0.35rem;
 }
 
 @keyframes dc-breathe {
@@ -471,15 +472,92 @@ h1, h2, h3, p { margin-top: 0; }
   50% { box-shadow: inset 0 0 26px -14px rgba(255, 95, 86, 0.8); }
 }
 
-.dc-shell .diagnostic-list { list-style: none; margin: 0.35rem 0 0; padding: 0; }
-.dc-shell .diagnostic-list li {
+/* 一条 suspect 默认只占一行：动作、是谁、发的什么、什么时候，够认出
+   "这是哪件事"；裁决要看的现场全部折在里面。展开的是当前这一条，队列
+   整体仍然被上面的 30vh 罩住。 */
+.dc-suspect { border-top: 1px solid rgba(255, 95, 86, 0.22); }
+.dc-suspect:first-child { border-top: 0; }
+
+.dc-suspect > summary {
   display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  flex-wrap: wrap;
-  padding: 0.34rem 0;
-  border-top: 1px solid var(--rule);
-  font-size: var(--fs-base);
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0.1rem 0.3rem 1.1rem;
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.dc-suspect > summary::-webkit-details-marker { display: none; }
+.dc-suspect > summary:hover { background: rgba(255, 95, 86, 0.06); }
+
+/* 展开三角：纯几何，不占字宽 */
+.dc-suspect > summary::before {
+  content: "";
+  position: absolute;
+  left: 0.28rem;
+  top: 0.72em;
+  border-left: 4px solid var(--txt-faint);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transform-origin: 1.5px 50%;
+  transition: transform 140ms ease, border-left-color 140ms ease;
+}
+.dc-suspect[open] > summary::before { transform: rotate(90deg); border-left-color: var(--alarm); }
+
+.dc-suspect-action { color: var(--txt); font-weight: 600; flex: 0 0 auto; }
+.dc-suspect-who { color: var(--beam); flex: 0 0 auto; }
+/* 摘要吃掉剩余宽度并单行截断——它是认人用的线索，不是正文；
+   完整内容在展开后的「内容」一行。 */
+.dc-suspect-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--txt-dim);
+}
+.dc-suspect-when { flex: 0 0 auto; font-size: var(--fs-sm); }
+.dc-suspect-verdicts { display: flex; gap: 0.3rem; flex: 0 0 auto; }
+
+.dc-suspect-facts {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0.16rem 0.6rem;
+  margin: 0.2rem 0 0.35rem 1.1rem;
+}
+.dc-suspect-facts dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-suspect-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.dc-suspect-facts dd code { color: var(--txt-dim); }
+.dc-suspect-facts dd button { margin-left: 0.45rem; }
+.dc-suspect-body { color: var(--txt); white-space: pre-wrap; }
+
+.dc-suspect-caution {
+  margin: 0 0 0.35rem 1.1rem;
+  padding: 0.28rem 0.5rem;
+  border-left: 2px solid var(--warn);
+  background: rgba(245, 167, 66, 0.07);
+  color: var(--txt-dim);
+  font-size: var(--fs-sm);
+}
+.dc-suspect-caution strong { color: var(--warn); }
+
+.dc-suspect-raw { margin: 0 0 0.4rem 1.1rem; }
+.dc-suspect-raw > summary { cursor: pointer; color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-suspect-raw > summary:hover { color: var(--txt-dim); }
+.dc-suspect-raw-field { margin-top: 0.25rem; }
+.dc-suspect-raw-field > span { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-suspect-raw-field pre {
+  margin: 0.1rem 0 0;
+  padding: 0.35rem 0.5rem;
+  max-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: #080b0e;
+  color: var(--txt-dim);
+  font-size: var(--fs-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ── 主面板：账本 / 帧流 ─────────────────────────────── */
