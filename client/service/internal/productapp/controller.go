@@ -43,6 +43,9 @@ type Controller struct {
 	source      JobConfigSource
 	now         func() time.Time
 	dailyWindow workflow.DailyWindowPolicy
+	// providerConfig 可以为 nil(既有测试构造不注入)。凡是本控制器拉过一次
+	// job-config,就顺手刷新 provider 凭据,免得后台换了 key 还要进诊断台。
+	providerConfig *m5ai.ProviderConfigStore
 }
 
 type RuntimeState struct {
@@ -64,17 +67,25 @@ func New(
 	source JobConfigSource,
 	now func() time.Time,
 	dailyWindow workflow.DailyWindowPolicy,
+	providerConfig ...*m5ai.ProviderConfigStore,
 ) (*Controller, error) {
 	if db == nil || productWorkflow == nil || source == nil {
+		return nil, ErrControllerInvalid
+	}
+	if len(providerConfig) > 1 {
 		return nil, ErrControllerInvalid
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &Controller{
+	controller := &Controller{
 		store: db, workflow: productWorkflow, source: source, now: now,
 		dailyWindow: dailyWindow,
-	}, nil
+	}
+	if len(providerConfig) == 1 {
+		controller.providerConfig = providerConfig[0]
+	}
+	return controller, nil
 }
 
 func (c *Controller) Start(
@@ -156,6 +167,7 @@ func (c *Controller) Start(
 	if err != nil {
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
+	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		return errors.Join(ErrJobConfigUnavailable, err)
@@ -191,6 +203,7 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 	if err != nil {
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
+	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		return errors.Join(ErrJobConfigUnavailable, err)

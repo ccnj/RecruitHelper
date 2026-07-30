@@ -44,8 +44,11 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "模型配置请求无效"})
 		return
 	}
+	// request.Provider 刻意忽略:标签一律由 base_url 推导(AGENTS.md 2026-07-30
+	// 裁决),否则手填一次就能让标签与实际端点脱节,而它要进 AI 诊断摘要和采集
+	// 批次的模型一致性校验。
 	config := m5ai.ProviderConfig{
-		Provider: strings.TrimSpace(request.Provider), Model: strings.TrimSpace(request.Model),
+		Model:   strings.TrimSpace(request.Model),
 		BaseURL: strings.TrimSpace(request.BaseURL), APIKey: strings.TrimSpace(request.APIKey),
 		RequestTimeoutMs: request.RequestTimeoutMs, MaxInputTokens: request.MaxInputTokens,
 		MaxIntentOutputTokens: request.MaxIntentOutputTokens,
@@ -58,10 +61,19 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 		if config.BaseURL == "" {
 			config.BaseURL = existing.BaseURL
 		}
+		// model 同样"留空则保留":这个兜底表单只管地址与密钥,不该把后台下发的
+		// 模型打回本地常量。
+		if config.Model == "" {
+			config.Model = existing.Model
+		}
 	} else if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "本地模型配置读取失败"})
 		return
 	}
+	if config.Model == "" {
+		config.Model = m5ai.DefaultProviderConfig().Model
+	}
+	config.Provider = m5ai.DeriveProviderLabel(config.BaseURL)
 	if err := a.providerConfig.Save(config); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "模型配置不符合 M5-A 预算或缺少必填项"})
 		return

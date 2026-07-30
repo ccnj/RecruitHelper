@@ -274,9 +274,10 @@ export interface M5ProviderConfigView {
   max_reply_output_tokens: number
 }
 
+// provider 与 model 不再由本入口指定:标签由脑从 base_url 推导,model 随旧后台
+// job-config 下发(AGENTS.md 2026-07-30 裁决)。这个表单只是后台缺配时的兜底,
+// 留空的字段由脑保留现值。
 export interface M5ProviderConfigInput {
-  provider: 'deepseek'
-  model: 'deepseek-v4-pro'
   base_url: string
   api_key: string
   request_timeout_ms: 30000

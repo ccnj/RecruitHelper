@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,9 +31,13 @@ func DefaultProviderConfig() ProviderConfig {
 	}
 }
 
+// Validate 只校验非空与格式合法,不再校验具体厂商与模型名(AGENTS.md
+// 2026-07-30 甲方裁决):base_url/model 现在都由旧后台下发,日后换用非 deepseek
+// 模型时客户端应当跟着走,不再由本地常量把它钉死。token 预算相反——那是客户端
+// 自己的开销闸,不是模型能力声明,继续精确校验。
 func (c ProviderConfig) Validate() error {
-	if c.Provider != "deepseek" || c.Model != "deepseek-v4-pro" ||
-		strings.TrimSpace(c.APIKey) == "" || validateBaseURL(c.BaseURL) != nil {
+	if strings.TrimSpace(c.Provider) == "" || strings.TrimSpace(c.APIKey) == "" ||
+		validateModel(c.Model) != nil || validateBaseURL(c.BaseURL) != nil {
 		return errors.New("LLM provider 配置不完整")
 	}
 	if c.RequestTimeoutMs < 1000 || c.RequestTimeoutMs > 120000 ||
@@ -42,6 +47,36 @@ func (c ProviderConfig) Validate() error {
 		return errors.New("LLM provider 配置越过 P 档预算")
 	}
 	return nil
+}
+
+// validateModel 要求单个模型 ID:模型链的首项提取在 ExtractProviderCredentials
+// 就完成了,落盘的配置里不该再留分隔符或空白。
+func validateModel(value string) error {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 128 ||
+		strings.ContainsAny(value, ",\n\r\t ") {
+		return errors.New("model 无效")
+	}
+	return nil
+}
+
+// DeriveProviderLabel 从 base_url 推导 provider 标签。旧后台 job-config 不下发厂商
+// 名,而这个标签要进普通日志、AI 调用诊断摘要,以及采集批次的模型一致性校验
+// (patrol 侧 provider+model 变化会拒绝复用同批次的评分/招呼语进度),所以它必须
+// 随实际端点变化,不能恒定写死 "deepseek"——换了厂商还叫 deepseek 会误导排查。
+func DeriveProviderLabel(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" {
+		return ""
+	}
+	host = strings.TrimPrefix(host, "api.")
+	if index := strings.Index(host, "."); index > 0 {
+		host = host[:index]
+	}
+	return host
 }
 
 type ProviderConfigView struct {
@@ -112,4 +147,47 @@ func (s *ProviderConfigStore) Save(config ProviderConfig) error {
 		return errors.New("provider 配置权限设置失败")
 	}
 	return nil
+}
+
+// ApplyBackendCredentials 把旧后台下发的 provider 凭据合并进本机配置(AGENTS.md
+// 2026-07-30 甲方裁决),返回是否实际写盘。
+//
+// 合并规则:后台某项非空即覆盖本机同项,后台该项为空则保留本机原值——后台清空
+// 一个字段不该把已经能用的本机配置打掉。token 预算永不来自后台。
+//
+// 写盘只影响下次脑启动:advice 是启动时一次性注入 patrol.Manager 私有字段的,
+// 这里刻意不做运行期热替换——那要处理轮次执行中换引擎的并发,成本远超收益。
+func (s *ProviderConfigStore) ApplyBackendCredentials(
+	credentials BackendProviderCredentials,
+) (bool, error) {
+	if credentials.empty() {
+		return false, nil
+	}
+	existing, loadErr := s.Load()
+	if loadErr != nil {
+		// 本机文件损坏或不再合法,不该连带把后台凭据也挡在外面:后台是这三个
+		// 字段的单一事实源,按默认预算重建。真正不可写的情况下面 Save 会报。
+		existing = nil
+	}
+	config := DefaultProviderConfig()
+	if existing != nil {
+		config = *existing
+	}
+	if credentials.BaseURL != "" {
+		config.BaseURL = credentials.BaseURL
+	}
+	if credentials.APIKey != "" {
+		config.APIKey = credentials.APIKey
+	}
+	if credentials.Model != "" {
+		config.Model = credentials.Model
+	}
+	config.Provider = DeriveProviderLabel(config.BaseURL)
+	if existing != nil && config == *existing {
+		return false, nil
+	}
+	if err := s.Save(config); err != nil {
+		return false, err
+	}
+	return true, nil
 }

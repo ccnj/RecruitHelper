@@ -8,6 +8,7 @@ const path = require('node:path')
 const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
 const { pluginInstallDir, ensurePluginInstalled } = require('./pluginSeed')
+const { TRAY_ICON_PNG_BASE64 } = require('./trayIcon')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -125,16 +126,15 @@ function createWindow(adminToken, uiEntry) {
 
 function createTray() {
   try {
-    const svg = [
-      '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">',
-      '<rect width="32" height="32" rx="8" fill="#3568e8"/>',
-      '<path d="M9 11h14v12H9z" fill="none" stroke="white" stroke-width="2"/>',
-      '<path d="M12 11V8h8v3M12 16h8M12 20h5" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"/>',
-      '</svg>',
-    ].join('')
+    // 必须是 PNG。此前这里用 SVG data URL,而 nativeImage 只认 PNG/JPEG —— 它对
+    // 解析不了的 data URL 不抛错、返回一个空 image,于是 Tray 构造成功、托盘项出现、
+    // 图标却一片空白,连下面的 catch 都不会触发。这个失败模式在 macOS 开发机上看不见
+    // (那里跑不起 GUI),装到 Windows 才暴露。图标由 scripts/generate-tray-icon.mjs
+    // 生成,不 resize:交给系统按当前 DPI 缩放,比先压到固定像素更清晰。
     const icon = nativeImage.createFromDataURL(
-      `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
-    ).resize({ width: 18, height: 18 })
+      `data:image/png;base64,${TRAY_ICON_PNG_BASE64}`,
+    )
+    if (icon.isEmpty()) throw new Error('托盘图标解码为空')
     tray = new Tray(icon)
     tray.setToolTip('招聘助手')
     tray.setContextMenu(Menu.buildFromTemplate([

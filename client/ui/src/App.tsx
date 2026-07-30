@@ -615,9 +615,9 @@ function candidateContactLabel(state: string): string {
   return '关系状态无法确认，不能继续建档'
 }
 
+// 只剩 token 预算:provider 标签由脑从 base_url 推导,model 随旧后台 job-config
+// 下发,都不再由这个兜底表单指定(AGENTS.md 2026-07-30 裁决)。
 const M5_PROVIDER_BUDGET = {
-  provider: 'deepseek' as const,
-  model: 'deepseek-v4-pro' as const,
   request_timeout_ms: 30000 as const,
   max_input_tokens: 16000 as const,
   max_intent_output_tokens: 64 as const,
@@ -1062,7 +1062,7 @@ function M5AIConfiguration({ account }: { account: AccountView | null }) {
       setProviderConfig(result.config)
       setBaseURL('')
       setAPIKey('')
-      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。本次不会热生效，请等待 M5 验收提示后再重启客户端。' })
+      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。下次同步职位配置时，后台下发的地址与密钥会覆盖这里手填的值。重启客户端后生效。' })
     } catch (reason) {
       setProviderNotice({ kind: 'bad', text: errorText(reason) })
     } finally {
@@ -1105,10 +1105,11 @@ function M5AIConfiguration({ account }: { account: AccountView | null }) {
         </section>
 
         <section className="m5-ai-step" aria-labelledby="m5-provider-title">
-          <header><strong id="m5-provider-title">模型连接</strong><small>DeepSeek V4 Pro · P 档 · 唯一配置入口</small></header>
+          <header><strong id="m5-provider-title">模型连接</strong><small>随旧后台职位配置自动下发 · 此处仅作后台缺配时的兜底</small></header>
           <div className="m5-provider-state">
             <span>服务地址 <strong>{providerConfig?.baseUrlConfigured ? '已配置' : '未配置'}</strong></span>
             <span>API Key <strong>{providerConfig?.keyConfigured ? '已配置' : '未配置'}</strong></span>
+            <span>模型 <strong>{providerConfig?.model || '未配置'}</strong></span>
           </div>
           <label htmlFor="m5-base-url">新的服务地址</label>
           <input
