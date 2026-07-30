@@ -1,6 +1,7 @@
 package communication
 
 import (
+	"fmt"
 	"strings"
 
 	"recruithelper/client/service/internal/m5ai"
@@ -209,11 +210,11 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		eventActions = dedupeV4ReceiptActions(eventActions)
 	}
 	if requirement == V4DialogueNone {
-		if receipt, handled := v4ReceiptDialogue(state, eventActions, input.FixedPhrases); handled {
+		if bubbles, receipt, handled := v4ReceiptDialogue(state, eventActions, input.FixedPhrases); handled {
 			return V4InboundTurnDecision{
 				State: state, Requirement: requirement,
 				DialogueAfterActions: dialogueAfterActions,
-				EventActions:         append([]V4EventAction(nil), eventActions...),
+				EventActions:         append([]V4EventAction(nil), bubbles...),
 				Dialogue:             receipt, ManualReason: receipt.ManualReason,
 			}, nil
 		}
@@ -368,36 +369,64 @@ func dedupeV4ReceiptActions(actions []V4EventAction) []V4EventAction {
 }
 
 // v4ReceiptDialogue closes turns whose only candidate-visible obligation is a
-// fixed receipt carried by event actions. It validates every receipt-class
-// action's fixed phrase; any unavailable phrase turns the whole turn manual.
+// fixed receipt carried by event actions. Each receipt is expanded into one
+// action per configured Messages item — the same bubble boundaries the
+// rejection and cold-followup tracks already honour — so the joined Text never
+// becomes a send payload. Expanding here rather than in the store keeps the
+// bubble count frozen inside the projection outcome, which is what later
+// replays rebuild their skeletons from.
+// The phrase must exist to be sent at all; per-item rendering happens in the
+// store, which owns the salutation and interview facts.
 func v4ReceiptDialogue(
 	state V4State,
 	actions []V4EventAction,
 	phrases V4FixedPhraseView,
-) (V4DialogueDecision, bool) {
+) ([]V4EventAction, V4DialogueDecision, bool) {
 	handled := false
-	for index := range actions {
+	expanded := make([]V4EventAction, 0, len(actions))
+	for _, action := range actions {
 		var phraseKind V4FixedPhraseKind
-		switch actions[index].Kind {
+		switch action.Kind {
 		case V4ActionWechatReceipt:
 			phraseKind = V4PhraseWechatReceipt
 		case V4ActionInterviewAcceptedReceipt:
 			phraseKind = V4PhraseInterviewAccepted
 		default:
+			expanded = append(expanded, action)
 			continue
 		}
 		handled = true
 		phrase := phrases.Phrase(phraseKind)
-		if phrase.State != V4PhraseAvailable || m5ai.ValidateSendText(phrase.Text) != nil {
-			return manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, "", ""), true
+		if phrase.State != V4PhraseAvailable ||
+			len(phrase.Messages) == 0 ||
+			len(phrase.Messages) > m5ai.ReplyPhraseMaxItems {
+			return actions, manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, "", ""), true
+		}
+		for ordinal, message := range phrase.Messages {
+			if strings.TrimSpace(message) != message ||
+				m5ai.ValidateSendText(message) != nil {
+				return actions, manualV4Dialogue(state, V4ManualFixedPhraseUnavailable, "", ""), true
+			}
+			expanded = append(expanded, V4EventAction{
+				ActionKey:      v4ReceiptBubbleActionKey(action.ActionKey, ordinal+1),
+				Kind:           action.Kind,
+				CardMessageSeq: action.CardMessageSeq,
+			})
 		}
 	}
 	if !handled {
-		return V4DialogueDecision{}, false
+		return actions, V4DialogueDecision{}, false
 	}
-	return V4DialogueDecision{
+	return expanded, V4DialogueDecision{
 		State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
 	}, true
+}
+
+// v4ReceiptBubbleActionKey suffixes the reducer's semantic key with the bubble
+// ordinal. A single-bubble phrase still gets its "|1", so one phrase item
+// always maps to exactly one stable key regardless of how many there are.
+func v4ReceiptBubbleActionKey(actionKey string, ordinal int) string {
+	return fmt.Sprintf("%s|%d", actionKey, ordinal)
 }
 
 func applyV4AggregateOrdinaryTurn(state V4State, turnID string, lastMessageSeq int64) (V4State, error) {

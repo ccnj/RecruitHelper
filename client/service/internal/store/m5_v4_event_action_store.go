@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -62,6 +63,9 @@ type communicationV4EventActionSkeleton struct {
 	dependsOnActionID *string
 	dialogueOwned     bool
 	dialogueOwnerID   string
+	// receiptOrdinal 是回执在其固定话术气泡序列中的 1-based 位置,决定这一行
+	// 取 Messages 的哪一项;非回执行为 0。
+	receiptOrdinal int
 }
 
 // CommunicationV4EventActionID scopes the reducer's semantic action key to one
@@ -190,6 +194,10 @@ func materializeCommunicationV4EventActionsTx(
 			return nil, false, err
 		}
 	}
+	interviewTime, err := communicationV4InterviewTimeTextTx(tx, application.ProfileID, skeletons)
+	if err != nil {
+		return nil, false, err
+	}
 	rows := make([]CommunicationV4EventAction, 0, len(skeletons))
 	for _, skeleton := range skeletons {
 		row := CommunicationV4EventAction{
@@ -226,6 +234,8 @@ func materializeCommunicationV4EventActionsTx(
 				fixedPhrases,
 				contextRevisionHash,
 				salutation,
+				interviewTime,
+				skeleton.receiptOrdinal,
 				fixedPhrasesReady,
 			)
 		}
@@ -485,10 +495,15 @@ func communicationV4EventActionSkeletonsTx(
 			action.Kind == communication.V4ActionInterviewAcceptedReceipt {
 			receiptIDs = append(receiptIDs, actionID)
 			receiptIndexes = append(receiptIndexes, index)
+			skeletons[index].receiptOrdinal = len(receiptIDs)
 		}
 	}
-	if len(receiptIDs) > 1 {
-		return nil, ErrCommunicationV4EventActionConflict
+	// 同一轮仍然只允许一种回执:多个回执骨架只能是同一条固定话术展开出来的
+	// 多个气泡。两种不同回执同轮出现是另一个场景,沿用原有的保守拒绝。
+	for _, index := range receiptIndexes {
+		if skeletons[index].v4Kind != skeletons[receiptIndexes[0]].v4Kind {
+			return nil, ErrCommunicationV4EventActionConflict
+		}
 	}
 	if application.InputKind == CommunicationV4InputDialogueTurn &&
 		len(skeletons) > 0 {
@@ -501,10 +516,25 @@ func communicationV4EventActionSkeletonsTx(
 			return nil, err
 		}
 	}
-	if len(receiptIDs) == 1 {
-		dependency := receiptIDs[0]
-		if skeletons[receiptIndexes[0]].dialogueOwned {
-			dependency = skeletons[receiptIndexes[0]].dialogueOwnerID
+	// 一条固定话术可以配成多个气泡,reducer 已按 Messages 展开成多个同类回执。
+	// 它们必须严格逐条推进:第 n 个气泡挂在第 n-1 个之后,换微信卡片挂在最后
+	// 一个气泡之后,任一前项未取得正证时后项都不构造(AGENTS.md 冒烟剖面一)。
+	for position, index := range receiptIndexes {
+		if position == 0 {
+			continue
+		}
+		previous := receiptIndexes[position-1]
+		dependency := receiptIDs[position-1]
+		if skeletons[previous].dialogueOwned {
+			dependency = skeletons[previous].dialogueOwnerID
+		}
+		skeletons[index].dependsOnActionID = &dependency
+	}
+	if len(receiptIDs) > 0 {
+		last := len(receiptIDs) - 1
+		dependency := receiptIDs[last]
+		if skeletons[receiptIndexes[last]].dialogueOwned {
+			dependency = skeletons[receiptIndexes[last]].dialogueOwnerID
 		}
 		for index := range skeletons {
 			if skeletons[index].v4Kind == communication.V4ActionInviteWechat {
@@ -646,6 +676,69 @@ func communicationV4FixedPhrasesForProfileTx(
 	return view, revision.RevisionHash, salutation, true, nil
 }
 
+// communicationV4InterviewTimeTextTx resolves the {面试时间} value for an
+// interview-accepted receipt. The accepted card the reducer fired on carries
+// no schedule of its own — the time lives on the invite card we sent earlier —
+// so this walks back to the newest invite at or before the accepted card.
+// An absent or unreadable time is not a failure: the caller renders an empty
+// value, the placeholder drops out, and the phrase still goes.
+func communicationV4InterviewTimeTextTx(
+	tx *gorm.DB,
+	profileID string,
+	skeletons []communicationV4EventActionSkeleton,
+) (string, error) {
+	cardMessageSeq := int64(0)
+	for _, skeleton := range skeletons {
+		if skeleton.dialogueOwned ||
+			skeleton.v4Kind != communication.V4ActionInterviewAcceptedReceipt {
+			continue
+		}
+		if skeleton.cardMessageSeq > cardMessageSeq {
+			cardMessageSeq = skeleton.cardMessageSeq
+		}
+	}
+	if cardMessageSeq <= 0 {
+		return "", nil
+	}
+	var profile CandidateProfile
+	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if profile.ConversationRef == nil || strings.TrimSpace(*profile.ConversationRef) == "" {
+		return "", nil
+	}
+	var invite Message
+	err := tx.Where(
+		"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq <= ?",
+		profile.Platform, profile.AccountRef, *profile.ConversationRef, cardMessageSeq,
+	).Where(
+		"kind = ? AND card_type = ? AND interview_starts_at_ms IS NOT NULL",
+		"card", "interviewInvite",
+	).Order("seq DESC").First(&invite).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return formatV4InterviewTime(*invite.InterviewStartsAtMs), nil
+}
+
+// formatV4InterviewTime renders the candidate-visible form chosen by 甲方 on
+// 2026-07-30: "7月31日 10:00" in the client's local zone. No year — every
+// interview in scope is days away — and no relative wording, which would go
+// stale between planning and sending.
+func formatV4InterviewTime(startsAtMs int64) string {
+	if startsAtMs <= 0 {
+		return ""
+	}
+	at := time.UnixMilli(startsAtMs).Local()
+	return fmt.Sprintf("%d月%d日 %02d:%02d", int(at.Month()), at.Day(), at.Hour(), at.Minute())
+}
+
 func communicationV4ProfileSalutationTx(
 	tx *gorm.DB,
 	profile CandidateProfile,
@@ -674,6 +767,8 @@ func materializeCommunicationV4EventActionDisposition(
 	fixedPhrases communication.V4FixedPhraseView,
 	contextRevisionHash string,
 	salutation string,
+	interviewTime string,
+	receiptOrdinal int,
 	fixedPhrasesReady bool,
 ) {
 	switch row.V4Kind {
@@ -683,15 +778,21 @@ func materializeCommunicationV4EventActionDisposition(
 			phraseKind = communication.V4PhraseInterviewAccepted
 		}
 		phrase := fixedPhrases.Phrase(phraseKind)
-		if !fixedPhrasesReady || phrase.State != communication.V4PhraseAvailable {
+		// 气泡序号来自 reducer 冻结的展开结果;若当前配置的气泡数比冻结时少,
+		// 这一项就没有内容可发,只能停,不能改发别的气泡。
+		if !fixedPhrasesReady || phrase.State != communication.V4PhraseAvailable ||
+			receiptOrdinal < 1 || receiptOrdinal > len(phrase.Messages) {
 			row.Status = CommunicationV4EventActionManualRequired
 			row.FailureReason = CommunicationV4EventActionFailureFixedPhraseUnavailable
 			row.ContextRevisionHash = contextRevisionHash
 			return
 		}
 		rendered, err := communication.RenderV4FixedPhrase(
-			phrase.Text,
-			communication.V4FixedPhraseRenderInput{Salutation: salutation},
+			phrase.Messages[receiptOrdinal-1],
+			communication.V4FixedPhraseRenderInput{
+				Salutation:    salutation,
+				InterviewTime: interviewTime,
+			},
 		)
 		if err != nil {
 			row.Status = CommunicationV4EventActionManualRequired
