@@ -90,7 +90,11 @@ silenceFollowup
 - `documents`：`Record<string,string>`；
 - `filters`、`candidateSelection` 均为 object。
 
-正式样本中 provider key/model 有值，base URL 是空字符串。M5 不继承三者；本批未记录原值。这里的“整包可填充”不等于“响应每个字节都持久化”：adapter 会读取和校验完整响应，但 `SourcePackage` 的无损保证只覆盖完整文档集合与批准保留的职位/来源元数据，provider 三字段按已批准边界主动丢弃。
+2026-07-21 本批采样时，provider key/model 有值，base URL 是空字符串；M5 不继承三者，本批未记录原值。
+
+> **2026-07-30 复采更正（本段采样事实已过时）。** 同一端点复采：`baseUrl` 已下发且五个 prompt block 同值（非空、https）；`apiKey` 五块全非空且去重后仅 1 个值，证实它在旧后台是**客户级**配置，该客户下所有职位、所有提示词共用同一值；`model` 是**逗号分隔的模型链**（形如主备两个 ID），不是单个模型 ID。据此 AGENTS.md 2026-07-30 甲方裁决改为：`base_url`、key 与 `model` 允许且仅允许来自本响应，`model` 只取首项、其余忽略、不实现降级切换。本文其余采样事实未复核，仍按 2026-07-21 口径阅读。
+
+“整包可填充”不等于“响应每个字节都持久化”：adapter 会读取和校验完整响应，但 `SourcePackage` 的无损保证只覆盖完整文档集合与批准保留的职位/来源元数据。provider 三字段不进入 `SourcePackage`，也不参与 `revisionHash`——2026-07-30 起它们改为落盘同机 `llm-provider.json`，与不可变职位配置版本各走各路。
 
 ### 3.2 多职位端点
 
@@ -226,7 +230,7 @@ silenceFollowup
 - `JobAIContextRevision` 的稳定来源元数据可按已批准计划接收 `job.id/name/environment`，`RevisionHash` 由完整文档包与这些稳定元数据计算；
 - `SourcePackage` **只**逐项无损保存每个 `documents[doc_type]=content`，包括未知或 M5 不消费的类型。
 
-`currentJobId`、单数/复数来源形态与 `missingDocs` 是本次采样和 adapter 校验事实，不属于拟议 `SourcePackage`；若未来要把它们新增为持久领域字段，必须另行修订计划。派生结构化块只能校验或重建文档，不能反向覆盖原包。`apiKey/model/baseUrl` 明确丢弃，这是甲方已批准的本地 provider 配置边界。
+`currentJobId`、单数/复数来源形态与 `missingDocs` 是本次采样和 adapter 校验事实，不属于拟议 `SourcePackage`；若未来要把它们新增为持久领域字段，必须另行修订计划。派生结构化块只能校验或重建文档，不能反向覆盖原包。`apiKey/model/baseUrl` 不进入 `SourcePackage`——2026-07-21 时的边界是「明确丢弃」，2026-07-30 甲方裁决改为「提取后落盘 `llm-provider.json`，仍不进入不可变职位配置版本、不参与 `revisionHash`」。对本节的 `SourcePackage` 口径而言两者一致：它从来不含这三个字段。
 
 批次 2 的 importer 必须对配套 synthetic 集合证明：导入前后的 `docType/content` UTF-8 字节集合完全相等。本批只证明“完整 `job_version_docs` 文档集合可无损收编”以及既定来源元数据字段在形状上可填充；没有宣称 provider secret 或整个 HTTP JSON 字节级保留，也没有授权扩张领域模型或把不可执行 prompt 合法化。
 
