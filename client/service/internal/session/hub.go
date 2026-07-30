@@ -33,10 +33,13 @@ type Hub struct {
 	frames     *FrameBus
 	dispatcher *dispatch.Dispatcher
 	eventSink  EventSink
-	mu         sync.Mutex
-	active     map[string]*Conn // handId → 当前活连接(单活)
-	takeoverMu sync.Mutex
-	takeovers  map[string]*takeoverGate // 仅串行同 handId 的 welcome→接管→收编
+	// handReadyHook:某只手 ready 之后的通知。回调只允许做无阻塞的登记动作,
+	// 详见 SetHandReadyHook。
+	handReadyHook func(handID string)
+	mu            sync.Mutex
+	active        map[string]*Conn // handId → 当前活连接(单活)
+	takeoverMu    sync.Mutex
+	takeovers     map[string]*takeoverGate // 仅串行同 handId 的 welcome→接管→收编
 
 	// blob/1 上行子集(协议规格 §13 激活记录):配置后 welcome 携带 BlobParams。
 	blobIssuer   BlobTokenIssuer
@@ -69,6 +72,14 @@ func (h *Hub) SetDispatcher(d *dispatch.Dispatcher) { h.dispatcher = d }
 
 // SetEventSink 安装传感事件消费者。processed_msgs 的持久去重先于回调发生。
 func (h *Hub) SetEventSink(s EventSink) { h.eventSink = s }
+
+// SetHandReadyHook 安装「某只手已经 ready」的通知(构造后回填,同 SetDispatcher)。
+//
+// 回调在 activate 之外、h.mu 已释放之后触发,那时注册表已经登记新 session/boot。
+// 但它仍然跑在该连接的读循环上,所以**只允许做无阻塞的登记动作**(塞一个 channel、
+// 置一个标志),不得在里面等待任何东西 —— 尤其不得同步发起需要等待下一次 hello
+// 的编排:那会把读循环卡住,而它等的下一个 hello 正需要这个读循环去处理,当场自锁。
+func (h *Hub) SetHandReadyHook(fn func(handID string)) { h.handReadyHook = fn }
 
 // SetBlob 接线 blob/1 上行子集:此后每次 welcome 轮换并下发会话作用域 token。
 func (h *Hub) SetBlob(issuer BlobTokenIssuer, endpoint string, maxBytes int64) {
@@ -466,6 +477,12 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 	// 首次登记无在途命令,天然 no-op。
 	if c.hub.dispatcher != nil {
 		c.hub.dispatcher.OnReconnectWitnessUnderGate(c.handID, c.bootID, c.witnessStoreID, c.outboxPending, c.journalOpen)
+	}
+	// 放在这里而不是 activate 内:那里持着 h.mu,锁序固定为 h.mu → Registry.mu,
+	// 回调进去会把这条纪律撕开。到这一行时锁已释放、注册表已登记新 session/boot,
+	// 观察者读到的就是最终态。
+	if c.hub.handReadyHook != nil {
+		c.hub.handReadyHook(c.handID)
 	}
 	return true
 }

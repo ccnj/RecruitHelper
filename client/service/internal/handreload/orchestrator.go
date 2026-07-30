@@ -36,6 +36,7 @@ const (
 	KindDispatchRejected Kind = "dispatchRejected"
 	KindTimeout          Kind = "timeout"
 	KindContractMismatch Kind = "contractMismatch"
+	KindVersionMismatch  Kind = "versionMismatch"
 	KindCapabilityLost   Kind = "capabilityLost"
 )
 
@@ -43,7 +44,8 @@ const (
 // 决定是「下轮再看」还是「就此停手交人工」。
 func (k Kind) Dispatched() bool {
 	switch k {
-	case KindDispatchRejected, KindTimeout, KindContractMismatch, KindCapabilityLost:
+	case KindDispatchRejected, KindTimeout, KindContractMismatch,
+		KindVersionMismatch, KindCapabilityLost:
 		return true
 	}
 	return false
@@ -107,6 +109,10 @@ type Orchestrator struct {
 	// 各报各的。为空时按人工路径处理。
 	Trigger string
 
+	// PluginDir 是 Chrome 实际加载的固定插件目录,用来回答"磁盘上是哪一版"。
+	// 空则不做版本判断(开发期与读不到目录的场合)。
+	PluginDir string
+
 	// Timeout 为零时用 ReadyTimeout。测试用它把等待压到毫秒级。
 	Timeout time.Duration
 	// Poll 为零时用 100ms。
@@ -131,6 +137,12 @@ func (o *Orchestrator) timeout() time.Duration {
 		return o.Timeout
 	}
 	return ReadyTimeout
+}
+
+// expectedVersion 是磁盘上那一版插件的版本号,空表示不知道。触发判断与成功判断
+// 共用它,两边因此永远看的是同一个事实。
+func (o *Orchestrator) expectedVersion() string {
+	return ExpectedPluginVersion(o.PluginDir)
 }
 
 func (o *Orchestrator) trigger() string {
@@ -232,6 +244,14 @@ func (o *Orchestrator) Reload(ctx context.Context, handID string) (Result, *Erro
 			if !hasString(current.Caps, capability) {
 				return Result{}, fail(KindCapabilityLost, msgID,
 					"插件已经换代，但新手未声明 debug.reload@1", nil)
+			}
+			// 成功判据必须与触发判据对称:触发说"版本对不上就该重载",那么换代
+			// 之后版本仍对不上就不能算成功。否则这里判成功、下一轮又判该重载,
+			// 白白多一次重载和一次推荐流终止,直到防循环闸兜住。
+			if expected := o.expectedVersion(); expected != "" &&
+				current.ExtVersion != "" && current.ExtVersion != expected {
+				return Result{}, fail(KindVersionMismatch, msgID,
+					"插件已经换代，但版本仍与磁盘上的不一致；检查固定插件目录是否真的换代成功", nil)
 			}
 			return Result{
 				HandID: handID, MsgID: msgID,

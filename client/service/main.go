@@ -220,10 +220,13 @@ func main() {
 	pluginReloader := handreload.NewAutoReloader(
 		&handreload.Orchestrator{
 			Store: st, Registry: hub.Registry(), Dispatcher: disp, Feeds: actor,
-			Trigger: handreload.TriggerAuto,
+			Trigger: handreload.TriggerAuto, PluginDir: os.Getenv(handreload.PluginDirEnv),
 		},
-		st, os.Getenv(handreload.PluginDirEnv), handreload.DefaultInterval,
+		st, handreload.DefaultInterval,
 	)
+	// 手一 ready 就评估,不必干等下一个 tick(真机首验里那 30 秒等待正是这么来的)。
+	// ticker 仍在,负责兜住提醒被合并或丢弃的场合。
+	hub.SetHandReadyHook(pluginReloader.NotifyHandReady)
 	background.Go(func() { pluginReloader.Run(appCtx) })
 	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,
 	// 不受业务运行窗口约束;失败只降级不阻塞业务主线。

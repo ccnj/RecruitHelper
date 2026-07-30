@@ -89,12 +89,14 @@ func newHarness(t *testing.T) *harness {
 		feeds:      &fakeFeeds{},
 	}
 	// 默认让派发立刻带出一只契约正确的新手,代表"换代成功"。
-	h.dispatcher.afterDispatch = func() { h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}) }
+	h.dispatcher.afterDispatch = func() {
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}, "0.2.2")
+	}
 	orchestrator := &Orchestrator{
 		Store: h.store, Registry: registry, Dispatcher: h.dispatcher, Feeds: h.feeds,
 		Trigger: TriggerAuto, Timeout: time.Second, Poll: time.Millisecond,
 	}
-	h.auto = NewAutoReloader(orchestrator, h.store, "", time.Hour)
+	h.auto = NewAutoReloader(orchestrator, h.store, time.Hour)
 	return h
 }
 
@@ -110,7 +112,7 @@ func (h *harness) withPluginDir(t *testing.T, manifest string) {
 		}
 	}
 	h.pluginDir = dir
-	h.auto.pluginDir = dir
+	h.auto.orchestrator.PluginDir = dir
 }
 
 // contractIsFine 让手的契约与脑一致,这样触发与否只取决于版本比对。
@@ -122,10 +124,14 @@ func (h *harness) contractIsFine(extVersion string) {
 	)
 }
 
-func (h *harness) arriveNewBoot(contractHash string, match bool, caps []string) {
+// arriveNewBoot 模拟重载之后新一代插件的 hello。extVersion 必须由调用方指定 ——
+// 换代后手报的是哪一版,正是"这次换代到底成没成"的判据。
+func (h *harness) arriveNewBoot(
+	contractHash string, match bool, caps []string, extVersion string,
+) {
 	h.registry.OnlineWithBuild(
 		testHand, "session-new", testNewBoot, caps, nil,
-		contractHash, match, "0.2.2", time.Now(),
+		contractHash, match, extVersion, time.Now(),
 	)
 }
 
@@ -287,7 +293,7 @@ func TestAutoReloadHaltsAfterContractStillMismatchedPostReload(t *testing.T) {
 	// 没换成)。此时必须就此停手交人工,否则每来一个新 bootID 就会再重载一次。
 	h := newHarness(t)
 	h.dispatcher.afterDispatch = func() {
-		h.arriveNewBoot("sha256:still-stale", false, []string{Capability()})
+		h.arriveNewBoot("sha256:still-stale", false, []string{Capability()}, "0.2.2")
 	}
 	first := h.evaluate()
 	if first.Err == nil || first.Err.Kind != KindContractMismatch {
@@ -311,7 +317,7 @@ func TestAutoReloadClearsHaltAfterContractRecovers(t *testing.T) {
 	// 而重启脑才能恢复。
 	h := newHarness(t)
 	h.dispatcher.afterDispatch = func() {
-		h.arriveNewBoot("sha256:still-stale", false, []string{Capability()})
+		h.arriveNewBoot("sha256:still-stale", false, []string{Capability()}, "0.2.2")
 	}
 	if outcome := h.evaluate(); outcome.Err == nil {
 		t.Fatalf("首轮应以契约不一致收场: %+v", outcome)
@@ -358,7 +364,7 @@ func TestAutoReloadTriggersWhenDiskVersionIsNewerThanRunningPlugin(t *testing.T)
 	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
 	h.contractIsFine("0.2.2")
 	h.dispatcher.afterDispatch = func() {
-		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()})
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}, "0.2.3")
 	}
 
 	outcome := h.evaluate()
@@ -447,6 +453,108 @@ func TestAutoReloadStillTriggersOnContractDriftRegardlessOfVersion(t *testing.T)
 	}
 	if outcome.Reason != "契约与当前脑不一致" {
 		t.Fatalf("触发原因应指向契约，实际 %q", outcome.Reason)
+	}
+}
+
+// —— 手就绪即评估:换代不必干等一个 tick ——
+
+func TestAutoReloadEvaluatesOnHandReadyWithoutWaitingForTick(t *testing.T) {
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+
+	dispatched := make(chan struct{}, 1)
+	h.dispatcher.afterDispatch = func() {
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}, "0.2.3")
+		dispatched <- struct{}{}
+	}
+
+	// interval 一小时:这个用例里唯一可能推动评估的就是 ready 提醒本身。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.auto.Run(ctx)
+
+	h.auto.NotifyHandReady(testHand)
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("手就绪后应立即评估并派发重载，而不是等下一个 tick")
+	}
+}
+
+func TestNotifyHandReadyNeverBlocks(t *testing.T) {
+	// 它跑在手的读循环上。一旦阻塞,读循环就停了 —— 而重载编排等的下一次 hello
+	// 正需要这个读循环去处理,当场自锁。这里没有消费者,连续提醒必须照样立刻返回。
+	h := newHarness(t)
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 1000; i++ {
+			h.auto.NotifyHandReady(testHand)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyHandReady 阻塞了")
+	}
+}
+
+func TestNotifyHandReadyToleratesUnwiredReloader(t *testing.T) {
+	var nilReloader *AutoReloader
+	nilReloader.NotifyHandReady(testHand) // 未接线时不得 panic
+	(&AutoReloader{}).NotifyHandReady(testHand)
+}
+
+func TestAutoReloadHaltsWhenVersionStillStaleAfterReload(t *testing.T) {
+	// 成功判据必须与触发判据对称。换代之后手仍报旧版本,说明 Chrome 读到的并不是
+	// 磁盘上那一版 —— 这不能算成功,否则下一轮又判该重载,白白多一次重载和一次
+	// 推荐流终止,直到防循环闸才兜住。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+	h.dispatcher.afterDispatch = func() {
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}, "0.2.2")
+	}
+
+	first := h.evaluate()
+	if first.Err == nil || first.Err.Kind != KindVersionMismatch {
+		t.Fatalf("换代后版本仍落后应如实报告失败: %+v", first)
+	}
+	if _, halted := h.auto.Halted(testHand); !halted {
+		t.Fatal("这属于已派发之后的失败，应就此停手交人工")
+	}
+	for i := 0; i < 3; i++ {
+		if outcome := h.evaluate(); outcome.Triggered {
+			t.Fatalf("停手后不得再自动重载，第 %d 轮又动手了: %+v", i+2, outcome)
+		}
+	}
+	if h.dispatcher.calls != 1 || h.feeds.calls != 1 {
+		t.Fatalf("累计仍应只有一次派发与一次推荐流终止: dispatch=%d feeds=%d",
+			h.dispatcher.calls, h.feeds.calls)
+	}
+}
+
+func TestAutoReloadSecondEvaluationRightAfterSuccessIsNoop(t *testing.T) {
+	// tick 与 ready 提醒撞在一起时,Run 会连着评估两次。第二次必须空转 ——
+	// 否则一次换代会连带作废两次推荐流。
+	h := newHarness(t)
+	h.withPluginDir(t, `{"version":"0.2.3","manifest_version":3}`)
+	h.contractIsFine("0.2.2")
+	h.dispatcher.afterDispatch = func() {
+		h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}, "0.2.3")
+	}
+
+	if outcome := h.evaluate(); !outcome.Triggered || outcome.Err != nil {
+		t.Fatalf("首次评估应完成换代: %+v", outcome)
+	}
+	second := h.evaluate()
+	if second.Triggered {
+		t.Fatalf("紧接着的第二次评估必须空转: %+v", second)
+	}
+	if h.dispatcher.calls != 1 || h.feeds.calls != 1 {
+		t.Fatalf("两次评估合计仍应只有一次派发与一次推荐流终止: dispatch=%d feeds=%d",
+			h.dispatcher.calls, h.feeds.calls)
 	}
 }
 
