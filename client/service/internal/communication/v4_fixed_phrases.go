@@ -19,6 +19,10 @@ const (
 	v4LocalRejectionClosingText  = "好的，理解，感谢您的回复，祝您接下来一切顺利。"
 )
 
+// v4BraceStripper removes braces that never formed a placeholder. A stray "{"
+// or "}" is a typo in the configuration, and a typo must not cost a send.
+var v4BraceStripper = strings.NewReplacer("{", "", "}", "")
+
 type V4FixedPhraseKind string
 
 const (
@@ -56,6 +60,9 @@ type V4FixedPhraseView struct {
 
 type V4FixedPhraseRenderInput struct {
 	Salutation string
+	// InterviewTime 是已按本地时区格式化好的面试开始时间(如"7月31日 10:00")。
+	// 空值不是失败:占位符会被整体删除,话术照发。
+	InterviewTime string
 }
 
 var v4FixedPhraseScenes = []struct {
@@ -117,8 +124,12 @@ func (view V4FixedPhraseView) Phrase(kind V4FixedPhraseKind) V4FixedPhrase {
 }
 
 // RenderV4FixedPhrase is the sole renderer for candidate-visible fixed
-// phrases. The supported placeholder surface stays deliberately closed:
-// configuration mistakes must stop before an action or content hash exists.
+// phrases. Per the 2026-07-30 甲方裁决 it degrades instead of stopping: a
+// placeholder with no value — and any placeholder this renderer does not know
+// — is deleted together with its braces, and the phrase is still sent. Only
+// three outcomes still stop, and none of them is a configuration opinion:
+// nothing survives the substitution, a brace survives it, or the value handed
+// in carries braces of its own (that one would let配置 inject placeholders).
 func RenderV4FixedPhrase(
 	template string,
 	input V4FixedPhraseRenderInput,
@@ -128,39 +139,85 @@ func RenderV4FixedPhrase(
 		return "", ErrInvalidV4FixedPhraseRender
 	}
 
-	usesSalutation := false
-	remaining := template
-	for {
-		open := strings.Index(remaining, "{")
-		close := strings.Index(remaining, "}")
-		switch {
-		case open < 0 && close < 0:
-			remaining = ""
-		case open < 0 || close < 0 || close < open:
+	values := map[string]string{
+		"{称呼}":    strings.TrimSpace(input.Salutation),
+		"{面试时间}": strings.TrimSpace(input.InterviewTime),
+	}
+	for _, value := range values {
+		if strings.ContainsAny(value, "{}") {
 			return "", ErrInvalidV4FixedPhraseRender
-		default:
-			if remaining[open:close+1] != "{称呼}" {
-				return "", ErrInvalidV4FixedPhraseRender
-			}
-			usesSalutation = true
-			remaining = remaining[close+1:]
-		}
-		if remaining == "" {
-			break
 		}
 	}
 
-	salutation := strings.TrimSpace(input.Salutation)
-	if usesSalutation &&
-		(salutation == "" || strings.ContainsAny(salutation, "{}")) {
-		return "", ErrInvalidV4FixedPhraseRender
+	var builder strings.Builder
+	remaining := template
+	for {
+		open := strings.Index(remaining, "{")
+		if open < 0 {
+			builder.WriteString(v4BraceStripper.Replace(remaining))
+			break
+		}
+		builder.WriteString(v4BraceStripper.Replace(remaining[:open]))
+		rest := remaining[open:]
+		end := strings.Index(rest, "}")
+		if end < 0 {
+			// 只有左括号没有右括号:同样按"删掉花括号"处理,不因手滑的配置停机。
+			builder.WriteString(v4BraceStripper.Replace(rest))
+			break
+		}
+		// 已知占位符取值(可能为空),未知占位符取空:两种情况都是整体删除。
+		builder.WriteString(values[rest[:end+1]])
+		remaining = rest[end+1:]
 	}
-	rendered := strings.TrimSpace(strings.ReplaceAll(template, "{称呼}", salutation))
-	if strings.ContainsAny(rendered, "{}") ||
+
+	rendered := tidyV4RenderedPhrase(builder.String())
+	if rendered == "" ||
+		strings.ContainsAny(rendered, "{}") ||
 		m5ai.ValidateSendText(rendered) != nil {
 		return "", ErrInvalidV4FixedPhraseRender
 	}
 	return rendered, nil
+}
+
+// tidyV4RenderedPhrase repairs the seams a deleted placeholder leaves behind.
+// "那我们 {面试时间} 线上见" must not go out as "那我们  线上见", and a phrase
+// that opened with "{称呼}," must not open with a bare comma.
+func tidyV4RenderedPhrase(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	for index, line := range lines {
+		line = strings.Join(strings.Fields(line), " ")
+		line = dropSpacesBetweenCJK(line)
+		lines[index] = strings.TrimLeft(line, "，,、；;：: ")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func dropSpacesBetweenCJK(line string) string {
+	runes := []rune(line)
+	var out []rune
+	for index := 0; index < len(runes); index++ {
+		if runes[index] == ' ' &&
+			len(out) > 0 && isCJK(out[len(out)-1]) &&
+			index+1 < len(runes) && isCJK(runes[index+1]) {
+			continue
+		}
+		out = append(out, runes[index])
+	}
+	return string(out)
+}
+
+// isCJK covers the ranges that make a space between two characters wrong in
+// Chinese copy: CJK punctuation, kana, Han, and the fullwidth forms.
+func isCJK(r rune) bool {
+	switch {
+	case r >= 0x3000 && r <= 0x30FF,
+		r >= 0x3400 && r <= 0x4DBF,
+		r >= 0x4E00 && r <= 0x9FFF,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFF00 && r <= 0xFFEF:
+		return true
+	}
+	return false
 }
 
 func newMissingV4FixedPhraseView() V4FixedPhraseView {

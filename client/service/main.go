@@ -22,12 +22,14 @@ import (
 	"recruithelper/client/service/internal/apphttp"
 	"recruithelper/client/service/internal/blobstore"
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/productworkflow"
+	"recruithelper/client/service/internal/selfupdate"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/workflow"
@@ -181,6 +183,11 @@ func main() {
 		slog.Error("产品工作流控制面初始化失败", "err", err)
 		os.Exit(1)
 	}
+	// 账号跟随登录:产品页"开始"探测当前 Chrome 登录主体并找回/建档账本根,
+	// 绑定经 actor 与命令派发线性化。
+	productController.SetAccountResolver(appbridge.LoginAccountResolver{
+		Hub: hub, Prober: runner, Binder: actor, Now: time.Now,
+	})
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
 	events := make(chan session.SensorEvent, 128)
@@ -211,6 +218,52 @@ func main() {
 	})
 	background.Go(func() { hub.StartHealthLoop(appCtx) })
 	background.Go(func() { disp.RunFaultLoop(appCtx) })
+	// 客户端换代后,pluginSeed 已把新插件写进固定目录,但 Chrome 里跑的还是旧代码。
+	// 改了契约的版本会让 effectful 被禁派——安全,可业务静止;没改契约的版本更隐蔽,
+	// 业务带着旧插件代码照常跑。两种都得认出来,现场也没人知道要去
+	// chrome://extensions 点一次刷新。这个循环替人点那一下,判据与诊断台按钮完全
+	// 相同(handreload 包共用同一条路径),另加"没有活跃产品工作流"一条。
+	pluginReloader := handreload.NewAutoReloader(
+		&handreload.Orchestrator{
+			Store: st, Registry: hub.Registry(), Dispatcher: disp, Feeds: actor,
+			Trigger: handreload.TriggerAuto, PluginDir: os.Getenv(handreload.PluginDirEnv),
+		},
+		st, handreload.DefaultInterval,
+	)
+	// 手一 ready 就评估,不必干等下一个 tick(真机首验里那 30 秒等待正是这么来的)。
+	// ticker 仍在,负责兜住提醒被合并或丢弃的场合。
+	hub.SetHandReadyHook(pluginReloader.NotifyHandReady)
+	background.Go(func() { pluginReloader.Run(appCtx) })
+	// 客户端版本更新源(AGENTS.md 全局约定第四项获准云端出站)。这里只负责"发现":
+	// 取清单、下载、校验完整性,到此为止 —— 装不装、什么时候装是下一批的事。
+	// 配置不全(开发期不传那两个环境变量)时 New 返回 nil,整个检查不启用。
+	updateChecker := selfupdate.New(
+		selfupdate.DefaultFeedURL,
+		os.Getenv(selfupdate.AppVersionEnv),
+		os.Getenv(selfupdate.UpdateDirEnv),
+		selfupdate.DefaultInterval,
+	)
+	var updateInstaller *selfupdate.InstallGate
+	if updateChecker != nil {
+		background.Go(func() { updateChecker.Run(appCtx) })
+		// 上一次交出安装器之后到底装成没有,只能靠"现在跑着的是哪一版"来判断。
+		// 读不动那张字条不拦启动 —— 它只是诊断与防循环的依据。
+		if _, confirmErr := selfupdate.ConfirmPendingInstall(
+			updateChecker.DownloadDir, updateChecker.CurrentVersion,
+		); confirmErr != nil {
+			slog.Warn("核对上次自动安装结果失败", "err", confirmErr)
+		}
+		updateInstaller = &selfupdate.InstallGate{
+			Store: st, Workflow: productController, Checker: updateChecker,
+			StateDir: updateChecker.DownloadDir,
+		}
+	}
+	// 未启用自更新时不要把一个 nil 的具体指针塞进 Option:它会变成"非 nil 的
+	// 接口值",让 apphttp 里的 nil 检查失效。
+	var updateInstallerOption apphttp.Option
+	if updateInstaller != nil {
+		updateInstallerOption = apphttp.WithUpdateInstaller(updateInstaller)
+	}
 	// 运营通知发件箱轮询(AGENTS.md 2026-07-28 裁决):非候选人可见动作,
 	// 不受业务运行窗口约束;失败只降级不阻塞业务主线。
 	notifyRunner := notify.NewRunner(st, blobStore, func() string {
@@ -277,6 +330,14 @@ func main() {
 				return snapshot, nil
 			}),
 			apphttp.WithWorkflowControl(productController),
+			updateInstallerOption,
+			apphttp.WithUpdateStatusProvider(func() apphttp.UpdateStatus {
+				status := updateChecker.Status()
+				return apphttp.UpdateStatus{
+					CurrentVersion: status.CurrentVersion, Available: status.Available,
+					Version: status.Version, Ready: status.Ready, Notes: status.Notes,
+				}
+			}),
 		)
 		if productErr != nil {
 			slog.Error("产品 UI 投影初始化失败", "err", productErr)

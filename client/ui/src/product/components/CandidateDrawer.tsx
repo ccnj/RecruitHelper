@@ -75,12 +75,11 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
             )}
           </DrawerSection>
 
-          {(candidate.interviewAt || candidate.interviewMethod || candidate.interviewResult) && (
+          {(candidate.interviewAt || candidate.interviewMethod) && (
             <DrawerSection title="面试信息">
               <dl className="rh-detail-list">
                 <div><dt>面试时间</dt><dd>{candidate.interviewAt ?? '—'}</dd></div>
                 <div><dt>面试方式</dt><dd>{candidate.interviewMethod ?? '—'}</dd></div>
-                <div><dt>面试结果</dt><dd>{candidate.interviewResult ?? '待回填'}</dd></div>
               </dl>
             </DrawerSection>
           )}

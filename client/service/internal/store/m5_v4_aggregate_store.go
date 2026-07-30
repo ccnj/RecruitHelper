@@ -1277,6 +1277,11 @@ func persistCommunicationV4TransitionTx(
 			profileUpdates["communicating_at"] = application.AppliedAt
 		}
 	}
+	// 首次进入已约面的时刻。只写一次:规格 §45 允许归档后点旧卡再次生效
+	// (ended→interviewed),若每次都覆盖,同一人会反复计入"今日新约面"。
+	if status == CandidateProfileInterviewed && profile.InterviewedAt == nil {
+		profileUpdates["interviewed_at"] = application.AppliedAt
+	}
 	profileUpdated := tx.Model(&CandidateProfile{}).
 		Where("profile_id = ?", current.ProfileID).
 		Updates(profileUpdates)

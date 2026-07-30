@@ -18,10 +18,20 @@ import (
 
 var (
 	ErrControllerInvalid    = errors.New("产品工作流控制器配置无效")
-	ErrAccountUnavailable   = errors.New("没有唯一可运行的平台账号")
+	ErrAccountUnavailable   = errors.New("没有可运行的平台账号")
 	ErrJobConfigUnavailable = errors.New("当前职位配置不可用")
 	ErrJobSelectionChanged  = errors.New("当前职位已变化，请刷新后重试")
+	ErrHandUnavailable      = errors.New("浏览器插件不在线")
+	ErrHandAmbiguous        = errors.New("多个浏览器插件在线")
+	ErrLoginRequired        = errors.New("平台登录不可用")
 )
+
+// AccountResolver 在"开始"时探测当前 Chrome 登录的平台主体,按指纹找回既有
+// 账本根或当场建档(2026-07-30 甲方裁决"账号跟随登录")。它是 effectful 入口的
+// 精确解析;只读投影不探测,用 currentAccount 的最近验证启发式。
+type AccountResolver interface {
+	ResolveCurrent(ctx context.Context) (store.AccountKey, error)
+}
 
 type Workflow interface {
 	StartFull(store.AccountKey, string) (*store.ProductWorkflowRun, error)
@@ -46,6 +56,15 @@ type Controller struct {
 	// providerConfig 可以为 nil(既有测试构造不注入)。凡是本控制器拉过一次
 	// job-config,就顺手刷新 provider 凭据,免得后台换了 key 还要进诊断台。
 	providerConfig *m5ai.ProviderConfigStore
+	// resolver 可以为 nil(既有测试只验证职位配置逻辑):此时 Start 退回
+	// currentAccount 的库内扫描。生产装配始终注入,见 main.go。
+	resolver AccountResolver
+}
+
+// SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
+func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
+	c.resolver = resolver
+	return c
 }
 
 type RuntimeState struct {
@@ -122,7 +141,7 @@ func (c *Controller) Start(
 		return workflow.ErrDailyWindowClosed
 	}
 
-	key, err := c.currentAccount()
+	key, err := c.startAccount(ctx)
 	if err != nil {
 		return err
 	}
@@ -363,6 +382,26 @@ func (c *Controller) accountCommunicationState(key store.AccountKey) (string, er
 	return "idle", nil
 }
 
+// startAccount 是"开始"这一 effectful 入口的账号解析:优先探测当前 Chrome
+// 登录的主体(账号跟随登录,2026-07-30 裁决)。运行中的工作流仍钉住自己的账号,
+// 追加批次不得因用户中途切号而漂移。
+func (c *Controller) startAccount(ctx context.Context) (store.AccountKey, error) {
+	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
+		return store.AccountKey{}, err
+	} else if run != nil {
+		return store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}, nil
+	}
+	if c.resolver != nil {
+		return c.resolver.ResolveCurrent(ctx)
+	}
+	return c.currentAccount()
+}
+
+// currentAccount 是只读投影的账号启发式:不探测页面,取库内最近一次身份验证
+// 通过的账号。巡检每轮成功探测都会刷新 IdentityVerifiedAt,所以多账号来回切换
+// 时它自动收敛到真实登录的那一个;两次开始之间的短暂窗口里可能显示上一个号,
+// 属可接受的展示偏差——所有 effectful 路径都走 startAccount 的精确探测,
+// 不依赖本启发式。旧的"全库恰好一个账号"规则已随账号跟随登录退役。
 func (c *Controller) currentAccount() (store.AccountKey, error) {
 	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
 		return store.AccountKey{}, err
@@ -385,10 +424,9 @@ func (c *Controller) currentAccount() (store.AccountKey, error) {
 			account.IdentityState != store.IdentityUnobservable {
 			continue
 		}
-		if selected != nil {
-			return store.AccountKey{}, ErrAccountUnavailable
+		if selected == nil || accountVerifiedAfter(account, selected) {
+			selected = account
 		}
-		selected = account
 	}
 	if selected == nil {
 		return store.AccountKey{}, ErrAccountUnavailable
@@ -396,6 +434,22 @@ func (c *Controller) currentAccount() (store.AccountKey, error) {
 	return store.AccountKey{
 		Platform: selected.Platform, AccountRef: selected.AccountRef,
 	}, nil
+}
+
+// accountVerifiedAfter 比较两个账号的最近验证时刻,时刻相同或都缺失时按
+// AccountRef 字典序保证确定性。
+func accountVerifiedAfter(candidate, incumbent *store.Account) bool {
+	candidateAt, incumbentAt := time.Time{}, time.Time{}
+	if candidate.IdentityVerifiedAt != nil {
+		candidateAt = *candidate.IdentityVerifiedAt
+	}
+	if incumbent.IdentityVerifiedAt != nil {
+		incumbentAt = *incumbent.IdentityVerifiedAt
+	}
+	if candidateAt.Equal(incumbentAt) {
+		return candidate.AccountRef < incumbent.AccountRef
+	}
+	return candidateAt.After(incumbentAt)
 }
 
 var _ JobConfigSource = (*jobconfig.Source)(nil)

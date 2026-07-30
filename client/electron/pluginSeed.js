@@ -24,6 +24,20 @@ function pluginInstallDir(opts) {
 }
 
 /**
+ * 安装包暂存目录,与插件目录同级。
+ *
+ * 刻意不放安装目录:NSIS 升级会 `RMDir /r` 整个安装目录,下好的包会连同一起没了。
+ * 也不放业务数据目录 —— 那里装的是业务事实,不该混进可执行文件。
+ */
+function updateStageDir(opts) {
+  const { platform = process.platform, env = process.env, userDataDir } = opts
+  if (platform === 'win32' && env.LOCALAPPDATA) {
+    return path.join(env.LOCALAPPDATA, 'RecruitHelper', 'updates')
+  }
+  return path.join(userDataDir, 'updates')
+}
+
+/**
  * 目录内容指纹:按相对路径排序后把路径与内容一起摘要,子目录递归。
  * 只要有一个文件改了名或改了内容,指纹就变。
  */
@@ -115,4 +129,6 @@ function ensurePluginInstalled(opts) {
   }
 }
 
-module.exports = { pluginInstallDir, ensurePluginInstalled, directoryDigest, STAMP_FILE }
+module.exports = {
+  pluginInstallDir, updateStageDir, ensurePluginInstalled, directoryDigest, STAMP_FILE,
+}

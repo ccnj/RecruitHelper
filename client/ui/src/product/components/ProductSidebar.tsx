@@ -1,5 +1,7 @@
+import type { ProductUpdateStatus } from '../api'
 import type { ProductPage } from '../types'
 import { ProductIcon, type ProductIconName } from './ProductIcon'
+import { UpdateBanner } from './UpdateBanner'
 
 interface NavItem {
   key: ProductPage
@@ -11,8 +13,8 @@ const navItems: NavItem[] = [
   { key: 'home', label: '首页', icon: 'home' },
   { key: 'confirmation', label: '候选确认', icon: 'confirmation' },
   { key: 'communicating', label: '沟通中', icon: 'chat' },
-  { key: 'pendingInterview', label: '待面试', icon: 'calendar' },
-  { key: 'interviewed', label: '已面试', icon: 'interviewed' },
+  { key: 'interviewed', label: '已约面', icon: 'calendar' },
+  { key: 'interviewElapsed', label: '已面试', icon: 'interviewed' },
   { key: 'wechat', label: '已换微信', icon: 'wechat' },
   { key: 'settings', label: '配置', icon: 'settings' },
 ]
@@ -25,6 +27,8 @@ interface ProductSidebarProps {
   confirmationBadge: number
   searchValue: string
   version: string
+  updateStatus: ProductUpdateStatus | null
+  workflowActive: boolean
   onNavigate: (page: ProductPage) => void
   onSearch: (value: string) => void
 }
@@ -37,6 +41,8 @@ export function ProductSidebar({
   confirmationBadge,
   searchValue,
   version,
+  updateStatus,
+  workflowActive,
   onNavigate,
   onSearch,
 }: ProductSidebarProps) {
@@ -84,7 +90,8 @@ export function ProductSidebar({
             value={searchValue}
           />
         </label>
-        <div className="rh-sidebar-version">RecruitHelper v{version}</div>
+        <div className="rh-sidebar-version">AI增员助手 v{version}</div>
+        <UpdateBanner status={updateStatus} workflowActive={workflowActive} />
       </div>
     </aside>
   )

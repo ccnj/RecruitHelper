@@ -74,7 +74,7 @@ const overview = {
     greetingDisplayTarget: 100,
     newReplies: 0,
     newInterviews: 0,
-    completedInterviews: 0,
+    elapsedInterviews: 0,
   },
 }
 const actions = {
@@ -84,13 +84,14 @@ const actions = {
   endWorkflow() {},
 }
 
-function render(workflowOverrides = {}) {
+function render(workflowOverrides = {}, overviewOverrides = {}) {
   return renderToStaticMarkup(createElement(HomePage, {
     actions,
     customer,
     onOpenConfirmation() {},
     overview: {
       ...overview,
+      ...overviewOverrides,
       workflow: { ...overview.workflow, ...workflowOverrides },
     },
   }))
@@ -121,11 +122,11 @@ assert.ok(buttons(sourcingPending).find((button) => button.text === '结束本�
 const endPending = render({ canEnd: true, canAddBatch: true, pendingAction: 'end' })
 assert.match(endPending, /正在结束当前候选人…/u)
 const endPendingButtons = buttons(endPending).filter((button) =>
-  button.text === '暂停' || button.text === '再采一批（30 人）' || button.text === '正在结束…'
+  button.text === '暂停' || button.text === '再采一批（150 人）' || button.text === '正在结束…'
 )
 assert.deepEqual(
   endPendingButtons.map((button) => button.text),
-  ['暂停', '再采一批（30 人）', '正在结束…'],
+  ['暂停', '再采一批（150 人）', '正在结束…'],
   '待结束时三个运行控制都应保持可见',
 )
 assert.ok(
@@ -148,6 +149,19 @@ assert.equal(confirmationMessage, END_WORKFLOW_CONFIRMATION,
   '结束操作先展示固定中文确认说明')
 assert.equal(endRequests, 0,
   '用户取消确认时不得调用结束工作流写入口')
+
+// 等待确认的人数取 funnel.pending，不是本批选中总数:生成失败、推荐流已变化、
+// 不再可发送的都算在选中数里，用它会让首页说得比侧栏徽章多。
+const awaitingConfirmation = render({ state: 'awaitingConfirmation' }, {
+  funnel: {
+    stage: 'awaitingConfirmation', stateLabel: '等待候选确认',
+    target: 30, pending: 18, failed: 0, latestFailure: null, stages: [],
+  },
+})
+assert.match(awaitingConfirmation, /18 位候选人的招呼语等待确认/u,
+  '首页等待确认人数取 funnel.pending')
+assert.doesNotMatch(awaitingConfirmation, /30 位候选人的招呼语等待确认/u,
+  '不得把本批选中总数当成等待确认人数')
 
 await confirmEndWorkflow(
   () => true,

@@ -13,8 +13,8 @@ import type { CandidateView, CandidateViewItem, ProductData } from './types'
 
 const candidateViews: CandidateView[] = [
   'communicating',
-  'pendingInterview',
   'interviewed',
+  'interviewElapsed',
   'wechat',
 ]
 
@@ -84,4 +84,32 @@ export async function sendProductConfirmation(
   profileIds: string[],
 ): Promise<void> {
   await appPost<ProductAcceptedResponse>('/app/confirmation/send', { batchId, profileIds })
+}
+
+/** 客户端版本更新状态。只回答"有没有新版、备好了没有"。 */
+export interface ProductUpdateStatus {
+  currentVersion?: string
+  available: boolean
+  version?: string
+  ready: boolean
+  notes?: string
+}
+
+export async function readProductUpdateStatus(): Promise<ProductUpdateStatus> {
+  return appGet<ProductUpdateStatus>('/app/update')
+}
+
+/**
+ * 装新版。走 Electron 主进程 —— renderer 起不了进程，也不该能起。
+ *
+ * 成功意味着安装器已经交出去、客户端马上要退出并被覆盖，所以这个 Promise
+ * resolve 之后不必再更新界面：窗口很快就没了。
+ */
+export async function installProductUpdate(): Promise<void> {
+  const bridge = typeof window !== 'undefined' ? window.recruitHelper : undefined
+  if (!bridge?.installUpdate) {
+    throw new Error('当前环境不支持一键更新，请手动安装')
+  }
+  const result = await bridge.installUpdate()
+  if (!result.ok) throw new Error(result.error || '更新失败')
 }

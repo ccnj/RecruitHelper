@@ -1,6 +1,12 @@
 import * as esbuild from 'esbuild'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+
+// __APP_VERSION__ 由 vite.config.ts 在构建期注入；测试自己走 esbuild，
+// 必须同样注入，否则打包产物一引用它就 ReferenceError。
+const { version } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+)
 
 mkdirSync('test/dist', { recursive: true })
 await esbuild.build({
@@ -9,6 +15,7 @@ await esbuild.build({
   format: 'esm',
   platform: 'neutral',
   outfile: 'test/dist/product-data.mjs',
+  define: { __APP_VERSION__: JSON.stringify(version) },
   logLevel: 'error',
 })
 const moduleUrl = pathToFileURL(process.cwd() + '/test/dist/product-data.mjs').href
@@ -64,7 +71,8 @@ const snapshot = {
         greetingReady: 12,
         pendingConfirm: 12,
         sentCount: 0,
-        failedCount: 0,
+        generationFailedCount: 0,
+        sendFailedCount: 0,
         suspectCount: 0,
       },
       statistics: {
@@ -77,7 +85,7 @@ const snapshot = {
         totalWechat: exact(11),
         todayNewReplies: exact(3),
         todayNewAppointments: exact(1),
-        todayCompletedInterviews: exact(0),
+        todayElapsedInterviews: exact(2),
       },
       todayInterviews: [{
         profileId: 'profile-interview',
@@ -135,9 +143,10 @@ const snapshot = {
     },
   },
   candidates: {
-    communicating: candidateResponse('communicating', [rawCandidate()]),
-    pendingInterview: candidateResponse('pending', [rawCandidate({
-      profileId: 'profile-pending',
+    // 已邀面(invited)并入沟通中:它是推进态、跟催时钟仍在跑,不能因为没有
+    // 独立页面就从产品端消失。
+    communicating: candidateResponse('communicating', [rawCandidate(), rawCandidate({
+      profileId: 'profile-invited',
       status: 'invited',
       interviewStartsAtMs: todayAt(15, 0),
       interviewMethod: '微信视频',
@@ -149,9 +158,17 @@ const snapshot = {
       interviewStartsAtMs: todayAt(10, 0),
       interviewCardState: 'rejected',
     })]),
+    interviewElapsed: candidateResponse('interviewElapsed', [rawCandidate({
+      profileId: 'profile-elapsed',
+      status: 'interviewed',
+      interviewStartsAtMs: todayAt(8, 0),
+      interviewEndsAtMs: todayAt(9, 0),
+      interviewCardState: 'accepted',
+    })]),
     wechat: candidateResponse('wechat', [rawCandidate({
       profileId: 'profile-wechat',
       wechat: 'candidate_wechat',
+      wechatObservedAtMs: todayAt(9, 5),
     })]),
   },
 }
@@ -214,7 +231,34 @@ check(
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
 check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')
+// 生成失败与发送失败分属两格。合成一个字段时两格都读它，1 次生成失败 + 2 次
+// 发送失败会在两格各显示"失败 3"，看起来像 6 处失败。
+const splitFailures = structuredClone(snapshot)
+splitFailures.overview.overview.funnel.generationFailedCount = 1
+splitFailures.overview.overview.funnel.sendFailedCount = 2
+const splitFunnel = adaptProductSnapshot(splitFailures, now).overview.funnel
+check(
+  splitFunnel.stages.find((stage) => stage.key === 'greeting').failed === 1 &&
+    splitFunnel.stages.find((stage) => stage.key === 'send').failed === 2,
+  '生成失败与发送失败各归各阶段，不在两格重复出现',
+)
+check(splitFunnel.failed === 3, '顶部汇总仍是两阶段失败之和')
 check(product.confirmation.candidates[0].sendState === 'ready' && product.confirmationBadge === 1, '候选确认只把可发送成员计入徽章')
+// 招呼语已就绪但最终没发出的，必须与"招呼语根本没生成"分开：他们当初在确认
+// 名单里，被糊成 ineligible 会让发送进度的分母在途中往下走。
+const settledStates = structuredClone(snapshot)
+settledStates.confirmation.confirmation.candidates = [
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-abandoned', status: 'abandoned', selectable: false },
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-unavailable', status: 'unavailable', selectable: false },
+  { ...snapshot.confirmation.confirmation.candidates[0], profileId: 'p-genfailed', status: 'generationFailed', selectable: false },
+]
+const settledView = adaptProductSnapshot(settledStates, now).confirmation.candidates
+check(
+  settledView[0].sendState === 'settledWithoutSend' &&
+    settledView[1].sendState === 'settledWithoutSend' &&
+    settledView[2].sendState === 'ineligible',
+  '已就绪未发出与招呼语未生成映射为不同发送态',
+)
 const generationInProgress = structuredClone(snapshot)
 generationInProgress.confirmation.confirmation.ready = false
 generationInProgress.confirmation.confirmation.reason = 'greetingGenerationPending'
@@ -223,10 +267,67 @@ check(
     adaptProductSnapshot(generationInProgress, now).confirmationBadge === 0,
   '整批未就绪时不提前开放候选确认或侧边栏徽章',
 )
-check(product.candidates.pendingInterview[0].statusLabel === '已确认', '邀面卡确认状态进入待面试列表')
-check(product.candidates.interviewed[0].interviewResult === null, '不从邀面卡状态猜测正式面试结果')
+check(
+  product.candidates.communicating.find((item) => item.profileId === 'profile-invited')
+    ?.statusLabel === '邀面已确认',
+  '已邀面候选人并入沟通中且标签可分辨',
+)
+// "已面试"只表示约定时间已过，不代表候选人到场；系统没有面试结果事实。
+check(
+  product.candidates.interviewElapsed[0].statusLabel === '已面试' &&
+    product.candidates.interviewElapsed[0].deterministicState === '约定的面试时间已过',
+  '已面试分类按时间已过表述，不冒充面试结果',
+)
+check(
+  product.candidates.interviewed[0].statusLabel === '已约面',
+  '面试时间未过的仍留在已约面',
+)
+// 命名必须与脑侧 notify/render.go 的 mainStatusLabels 一致:invited=已邀面
+// (发出邀面卡)、interviewed=已约面(候选人点了接受)。系统没有面试完成事实,
+// 任何"已面试/面试完成"措辞都会让人把已约面读成已经面完。
+check(
+  product.candidates.interviewed[0].statusLabel === '已约面' &&
+    product.candidates.interviewed[0].deterministicState === '候选人已接受面试邀约',
+  'interviewed 视图按已约面表述，不冒充面试完成',
+)
+check(
+  product.overview.ledger.find((item) => item.label === '累计已约面') !== undefined &&
+    product.overview.ledger.every((item) => !item.label.includes('已面试')),
+  '累计账面按已约面表述',
+)
+check(
+  product.overview.todayMetrics.find((item) => item.label === '已邀面') !== undefined &&
+    product.overview.todayMetrics.every((item) => item.label !== '已约面'),
+  '今日邀面卡人数按已邀面表述，不与已约面混名',
+)
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
+// 收编时刻资产行一直有，此前没投影出去，产品端只能常年显示"时间未知"。
+check(
+  product.candidates.wechat[0].wechatExchangedAt === '今天 09:05',
+  '换微信时间取资产的收编观测时刻',
+)
+// 单页读取有上限,items 只是前若干位;人数必须来自脑侧 total,否则超过
+// 上限后计数会永远停在上限值,与首页累计账面互相矛盾。
+const truncatedList = structuredClone(snapshot)
+truncatedList.candidates.communicating.candidates.total = 320
+check(
+  adaptProductSnapshot(truncatedList, now).candidateTotals.communicating === 320,
+  '候选人总数取脑侧 total，不用本页条数代替',
+)
+const brokenTotal = structuredClone(snapshot)
+const loadedCommunicating = snapshot.candidates.communicating.candidates.items.length
+brokenTotal.candidates.communicating.candidates.total = 0
+check(
+  adaptProductSnapshot(brokenTotal, now).candidateTotals.communicating === loadedCommunicating,
+  '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
+)
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
+// 这一行原先恒为不可用("没有面试完成写入口")，产品端永远显示"—"，用户分不清
+// "今天没有"和"读不出来"。现在报今天已过面试时间的人数。
+check(
+  product.overview.todayActivity.elapsedInterviews === 2,
+  '今日已过面试时间取脑侧精确值，不再恒为不可用',
+)
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')
 
@@ -265,7 +366,11 @@ check(
     openedWaiting.overview.communication.stateLabel === '等待手动恢复',
   '开发期开窗后旧 waitingDailyWindow 状态不再误提示等待 08:00',
 )
-check(productCandidatePath('pendingInterview').includes('view=pending'), '产品页名称映射到唯一后端候选视图')
+check(
+  productCandidatePath('interviewed').includes('view=interviewed') &&
+    productCandidatePath('interviewElapsed').includes('view=interviewElapsed'),
+  '产品页名称映射到唯一后端候选视图',
+)
 
 const detail = adaptCandidateDetail({
   candidate: {

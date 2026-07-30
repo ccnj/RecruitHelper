@@ -87,6 +87,10 @@ func Open(dataDir string) (*Store, error) {
 		db.Migrator().HasColumn(&JobAIContextHead{}, "ActivationCurrent")
 	jobInboundEligibleColumnExisted := jobAIContextHeadTableExisted &&
 		db.Migrator().HasColumn(&JobAIContextHead{}, "InboundEligible")
+	// 已约面时刻是新列。只有旧库首次引入它时才允许补记历史档案;列一旦存在,
+	// 空值只能是写入点漏写,重启不得重算并掩盖(同 head 表迁移纪律)。
+	interviewedAtColumnExisted := db.Migrator().HasTable(&CandidateProfile{}) &&
+		db.Migrator().HasColumn(&CandidateProfile{}, "InterviewedAt")
 	if err := db.AutoMigrate(
 		&Hand{},
 		&Account{},
@@ -129,6 +133,16 @@ func Open(dataDir string) (*Store, error) {
 		&CandidateScreenshot{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
+	}
+	interviewedAtBackfilled, err := backfillInterviewedAt(db, interviewedAtColumnExisted)
+	if err != nil {
+		return nil, fmt.Errorf("补记已约面时刻: %w", err)
+	}
+	if interviewedAtBackfilled > 0 {
+		slog.Info("已为历史已约面档案补记时刻",
+			"profiles", interviewedAtBackfilled,
+			"moment", interviewedAtBackfillMoment.Format(time.RFC3339),
+		)
 	}
 	backendJobBackfill, err := backfillBackendJobIDs(db)
 	if err != nil {

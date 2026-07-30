@@ -36,7 +36,6 @@ function candidate(index: number, overrides: Partial<CandidateViewItem> = {}): C
     manualReason: null,
     interviewAt: null,
     interviewMethod: null,
-    interviewResult: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: true,
@@ -70,42 +69,43 @@ const communicating = [
     statusTone: 'slate',
     lastMessage: '已发送岗位介绍，正在等待候选人回复。',
   }),
-]
-
-const pendingInterview = [
-  candidate(4, {
-    displayName: '演示候选人 D',
-    statusLabel: '已确认',
-    statusTone: 'green',
-    lastMessage: '好的，周五下午可以。',
-    interviewAt: '7 月 25 日 14:00',
-    interviewMethod: '微信视频',
-  }),
   candidate(5, {
     displayName: '演示候选人 E',
-    statusLabel: '待候选人确认',
+    statusLabel: '已邀面',
     statusTone: 'amber',
+    lastMessage: '已发出邀面卡，等候候选人确认。',
     interviewAt: '7 月 25 日 16:30',
     interviewMethod: '微信视频',
   }),
 ]
 
+// 已约面 = 面试时间界未过;已面试 = 时间界已过。两者同源于脑侧
+// main_status = interviewed，只按时间分流。
 const interviewed = [
+  candidate(4, {
+    displayName: '演示候选人 D',
+    statusLabel: '已约面',
+    statusTone: 'green',
+    lastMessage: '好的，周五下午可以。',
+    interviewAt: '7 月 25 日 14:00',
+    interviewMethod: '微信视频',
+  }),
+]
+
+const interviewElapsed = [
   candidate(6, {
     displayName: '演示候选人 F',
-    statusLabel: '待回填',
-    statusTone: 'amber',
+    statusLabel: '已面试',
+    statusTone: 'green',
     interviewAt: '7 月 24 日 15:00',
     interviewMethod: '微信视频',
-    interviewResult: null,
   }),
   candidate(7, {
     displayName: '演示候选人 G',
-    statusLabel: '已录用',
+    statusLabel: '已面试',
     statusTone: 'green',
     interviewAt: '7 月 23 日 10:30',
     interviewMethod: '微信视频',
-    interviewResult: '已录用',
   }),
 ]
 
@@ -195,12 +195,12 @@ export function createProductFixture(): ProductData {
         { label: 'AI 评级人数', value: 30, tone: 'blue' },
         { label: '候选确认人数', value: 18, tone: 'amber' },
         { label: '打招呼', value: 6, tone: 'green' },
-        { label: '已约面', value: 2, tone: 'red' },
+        { label: '已邀面', value: 2, tone: 'red' },
       ],
       ledgerStartedAt: '2026-07-20',
       ledger: [
         { label: '累计招呼', value: 126 },
-        { label: '累计已面试', value: 14 },
+        { label: '累计已约面', value: 14 },
         { label: '累计已换微信', value: 31 },
       ],
       todayInterviews: [
@@ -218,7 +218,7 @@ export function createProductFixture(): ProductData {
         greetingDisplayTarget: 100,
         newReplies: 3,
         newInterviews: 2,
-        completedInterviews: 1,
+        elapsedInterviews: 1,
       },
     },
     confirmation: {
@@ -237,9 +237,15 @@ export function createProductFixture(): ProductData {
     },
     candidates: {
       communicating,
-      pendingInterview,
       interviewed,
+      interviewElapsed,
       wechat,
+    },
+    candidateTotals: {
+      communicating: communicating.length,
+      interviewed: interviewed.length,
+      interviewElapsed: interviewElapsed.length,
+      wechat: wechat.length,
     },
     connections: [
       { label: '客户授权', value: '授权有效', tone: 'success', detail: '当前设备已绑定' },
@@ -318,12 +324,12 @@ export function createEmptyProductData(): ProductData {
         { label: 'AI 评级人数', value: 0, tone: 'blue' },
         { label: '候选确认人数', value: 0, tone: 'amber' },
         { label: '打招呼', value: 0, tone: 'green' },
-        { label: '已约面', value: 0, tone: 'red' },
+        { label: '已邀面', value: 0, tone: 'red' },
       ],
       ledgerStartedAt: null,
       ledger: [
         { label: '累计招呼', value: 0 },
-        { label: '累计已面试', value: 0 },
+        { label: '累计已约面', value: 0 },
         { label: '累计已换微信', value: 0 },
       ],
       todayInterviews: [],
@@ -332,7 +338,7 @@ export function createEmptyProductData(): ProductData {
         greetingDisplayTarget: 100,
         newReplies: 0,
         newInterviews: 0,
-        completedInterviews: 0,
+        elapsedInterviews: 0,
       },
     },
     confirmation: {
@@ -351,9 +357,15 @@ export function createEmptyProductData(): ProductData {
     },
     candidates: {
       communicating: [],
-      pendingInterview: [],
       interviewed: [],
+      interviewElapsed: [],
       wechat: [],
+    },
+    candidateTotals: {
+      communicating: 0,
+      interviewed: 0,
+      interviewElapsed: 0,
+      wechat: 0,
     },
     connections: [
       { label: '客户授权', value: '等待激活', tone: 'warning', detail: '激活后会显示正式授权状态' },

@@ -14,23 +14,23 @@ interface StageConfig {
 const stageConfigs: Record<CandidateView, StageConfig> = {
   communicating: {
     title: '沟通中',
-    description: '查看正在沟通、等候回复和需要人工关注的候选人。本页不提供发送入口。',
+    description: '查看正在沟通、等候回复、已发出邀面卡等确认和需要人工关注的候选人。本页不提供发送入口。',
     emptyTitle: '当前没有沟通中的候选人',
     emptyDescription: '取得首次招呼发送正证的候选人会自动进入沟通范围。',
-    filters: ['全部', '已招呼', '已回复', '需要人工', '沟通已结束'],
-  },
-  pendingInterview: {
-    title: '待面试',
-    description: '查看已约面候选人的时间、方式和确认状态。本页只读。',
-    emptyTitle: '当前没有待面试候选人',
-    emptyDescription: '确定性状态机确认约面成功后，候选人会出现在这里。',
-    filters: ['全部', '今天', '待候选人确认', '已确认'],
+    filters: ['全部', '已招呼', '已回复', '已邀面', '需要人工', '沟通已结束'],
   },
   interviewed: {
+    title: '已约面',
+    description: '查看已接受面试邀约、面试时间还没到的候选人。本页只读。',
+    emptyTitle: '当前没有待进行的面试',
+    emptyDescription: '候选人接受面试邀约后，记录会出现在这里；时间过了会自动转入已面试。',
+    filters: ['全部', '今天'],
+  },
+  interviewElapsed: {
     title: '已面试',
-    description: '查看数据库中已有的真实面试结果，不在此处回填或修改。',
-    emptyTitle: '当前没有已面试记录',
-    emptyDescription: '完成面试并形成正式业务事实后，记录会出现在这里。',
+    description: '按约定的面试时间已过自动归类。系统没有面试是否实际进行的事实，本页不代表候选人到场或结果。',
+    emptyTitle: '当前没有已过面试时间的候选人',
+    emptyDescription: '已约面的候选人过了面试时间会自动转入这里。',
     filters: ['全部'],
   },
   wechat: {
@@ -45,6 +45,7 @@ const stageConfigs: Record<CandidateView, StageConfig> = {
 interface CandidateStagePageProps {
   view: CandidateView
   candidates: CandidateViewItem[]
+  total: number
   globalSearch: string
   onOpenCandidate: (candidate: CandidateViewItem) => void
 }
@@ -52,6 +53,7 @@ interface CandidateStagePageProps {
 export function CandidateStagePage({
   view,
   candidates,
+  total,
   globalSearch,
   onOpenCandidate,
 }: CandidateStagePageProps) {
@@ -61,6 +63,11 @@ export function CandidateStagePage({
     () => candidates.filter((candidate) => matchesSearch(candidate, globalSearch) && matchesFilter(view, candidate, filter)),
     [candidates, filter, globalSearch, view],
   )
+  // 单页读取有上限，candidates 可能只是脑侧前若干位。计数必须报 total，
+  // 否则人数会永远停在上限值、看起来像"正好这么多人"，还会跟首页累计
+  // 账面对不上。筛选是在已加载的这些人里做的，所以截断时必须说清楚。
+  const truncated = total > candidates.length
+  const filtering = globalSearch.trim() !== '' || filter !== '全部'
 
   return (
     <div className="rh-page">
@@ -83,8 +90,17 @@ export function CandidateStagePage({
             </button>
           ))}
         </div>
-        <span className="rh-result-count">{filtered.length} 位候选人</span>
+        <span className="rh-result-count">
+          {stageCountLabel(filtered.length, candidates.length, total, filtering, truncated)}
+        </span>
       </div>
+
+      {truncated && (
+        <div className="rh-inline-note">
+          <ProductIcon name="warning" size={15} />
+          共 {total} 位候选人，本页只加载了最近活动的 {candidates.length} 位；更早的暂未显示。
+        </div>
+      )}
 
       <section className="rh-panel rh-candidate-list-panel">
         {filtered.length === 0 ? (
@@ -128,22 +144,25 @@ export function CandidateStagePage({
   )
 }
 
+export function stageCountLabel(
+  filteredCount: number,
+  loadedCount: number,
+  total: number,
+  filtering: boolean,
+  truncated: boolean,
+): string {
+  if (!filtering) return `${total} 位候选人`
+  if (truncated) return `已加载 ${loadedCount} 位中筛出 ${filteredCount} 位`
+  return `${filteredCount} / ${total} 位候选人`
+}
+
 function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidate: CandidateViewItem }) {
-  if (view === 'pendingInterview') {
+  if (view === 'interviewed' || view === 'interviewElapsed') {
     return (
       <div className="rh-candidate-aux">
         <span>面试时间</span>
         <strong>{candidate.interviewAt ?? '—'}</strong>
         <small>{candidate.interviewMethod ?? '方式待确认'}</small>
-      </div>
-    )
-  }
-  if (view === 'interviewed') {
-    return (
-      <div className="rh-candidate-aux">
-        <span>面试结果</span>
-        <strong>{candidate.interviewResult ?? '待回填'}</strong>
-        <small>{candidate.interviewAt ?? '时间未知'}</small>
       </div>
     )
   }
@@ -177,7 +196,7 @@ function matchesFilter(view: CandidateView, candidate: CandidateViewItem, filter
   if (view === 'communicating' && filter === '沟通已结束') {
     return candidate.deterministicState?.startsWith('沟通已结束') ?? false
   }
-  if (view === 'pendingInterview' && filter === '今天') return candidate.interviewAt?.includes('今天') ?? false
+  if (view === 'interviewed' && filter === '今天') return candidate.interviewAt?.includes('今天') ?? false
   if (view === 'wechat' && filter === '仍在自动沟通') return candidate.stillInAutoCommunication === true
   if (view === 'wechat' && filter === '已结束沟通') return candidate.stillInAutoCommunication === false
   return candidate.statusLabel.includes(filter)

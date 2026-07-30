@@ -87,11 +87,39 @@ func WithWorkflowControl(control WorkflowControl) Option {
 	return func(api *API) { api.control = control }
 }
 
+// UpdateStatus 是客户端版本更新的只读投影。它只回答"有没有新版、备好了没有" ——
+// 不含更新源地址、哈希或任何可据以动作的东西:装不装是脑的裁决，不是 UI 的。
+type UpdateStatus struct {
+	CurrentVersion string `json:"currentVersion,omitempty"`
+	Available      bool   `json:"available"`
+	Version        string `json:"version,omitempty"`
+	Ready          bool   `json:"ready"`
+	Notes          string `json:"notes,omitempty"`
+}
+
+type UpdateStatusProvider func() UpdateStatus
+
+func WithUpdateStatusProvider(provider UpdateStatusProvider) Option {
+	return func(api *API) { api.updates = provider }
+}
+
+// UpdateInstaller 把世界收拾到可以安全重启的状态，返回可执行的安装包路径。
+// 它不执行安装——脑杀不掉自己，执行必须由壳来做。
+type UpdateInstaller interface {
+	Prepare(context.Context) (string, error)
+}
+
+func WithUpdateInstaller(installer UpdateInstaller) Option {
+	return func(api *API) { api.installer = installer }
+}
+
 type API struct {
 	projections ProjectionStore
 	bearer      string
 	runtime     RuntimeSnapshotProvider
 	control     WorkflowControl
+	updates     UpdateStatusProvider
+	installer   UpdateInstaller
 	now         func() time.Time
 }
 
@@ -122,6 +150,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/workflow/end", h(a.endWorkflow))
 	mux.HandleFunc("POST /app/confirmation/send", h(a.confirmAll))
 	mux.HandleFunc("POST /app/jobs/sync", h(a.syncJobs))
+	mux.HandleFunc("GET /app/update", h(a.updateStatus))
+	mux.HandleFunc("POST /app/update/install", h(a.installUpdate))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
@@ -210,7 +240,13 @@ func startFailureText(err error) string {
 	case errors.Is(err, workflow.ErrDailyWindowClosed):
 		return "当前不在业务运行窗口内"
 	case errors.Is(err, productapp.ErrAccountUnavailable):
-		return "没有唯一可运行的平台账号"
+		return "没有可运行的平台账号"
+	case errors.Is(err, productapp.ErrHandUnavailable):
+		return "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试"
+	case errors.Is(err, productapp.ErrHandAmbiguous):
+		return "检测到多个在线插件，请只保留一个装有插件的 Chrome"
+	case errors.Is(err, productapp.ErrLoginRequired):
+		return "请先在 Chrome 中登录智联招聘端，再点击开始"
 	case errors.Is(err, productapp.ErrJobConfigUnavailable):
 		return "当前职位配置不可用"
 	}
@@ -383,6 +419,34 @@ func (a *API) runtimeSnapshot(ctx context.Context) RuntimeSnapshot {
 	return snapshot
 }
 
+// updateStatus 把"有没有新版可用"投给产品 UI。未接线时返回一个安静的空状态,
+// 而不是 404 —— 开发期与未配置更新源的安装都走这一支,UI 不必分辨两者。
+func (a *API) updateStatus(w http.ResponseWriter, _ *http.Request) {
+	if a.updates == nil {
+		writeJSON(w, http.StatusOK, UpdateStatus{})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.updates())
+}
+
+// installUpdate 是产品 UI 上"立即更新"那一下。用户已经在二次确认里知道这会结束
+// 当前运行,所以这里不再劝阻;但判据一条不减 —— 包必须重新校验通过、在途命令必须
+// 收敛,否则宁可不装。
+//
+// 返回的是安装包路径,由壳去执行并退出。脑不自己动手:它马上要被那个安装器杀掉。
+func (a *API) installUpdate(w http.ResponseWriter, r *http.Request) {
+	if a.installer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "自动安装尚未就绪"})
+		return
+	}
+	packagePath, err := a.installer.Prepare(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"packagePath": packagePath})
+}
+
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	runtime := a.runtimeSnapshot(r.Context())
 	if runtime.Platform == "" || runtime.AccountRef == "" {
@@ -457,8 +521,8 @@ func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch view {
-	case store.AppCandidateViewCommunicating, store.AppCandidateViewPending,
-		store.AppCandidateViewInterviewed, store.AppCandidateViewWechat:
+	case store.AppCandidateViewCommunicating, store.AppCandidateViewInterviewed,
+		store.AppCandidateViewInterviewElapsed, store.AppCandidateViewWechat:
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "候选人视图无效"})
 		return
@@ -481,6 +545,7 @@ func (a *API) candidates(w http.ResponseWriter, r *http.Request) {
 	projection, err := a.projections.AppCandidates(store.AppCandidateListQuery{
 		Platform: runtime.Platform, AccountRef: runtime.AccountRef,
 		View: view, Search: search, Limit: limit, Offset: offset,
+		Now: a.now(),
 	})
 	if err != nil {
 		status := http.StatusInternalServerError

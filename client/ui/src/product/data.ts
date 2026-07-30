@@ -42,7 +42,8 @@ export interface AppFunnelRaw {
   greetingReady: number
   pendingConfirm: number
   sentCount: number
-  failedCount: number
+  generationFailedCount: number
+  sendFailedCount: number
   suspectCount: number
   lastFailureReason?: string
   startedAt?: string | null
@@ -59,7 +60,7 @@ export interface AppOverviewStatisticsRaw {
   totalWechat: AppMetricRaw
   todayNewReplies: AppMetricRaw
   todayNewAppointments: AppMetricRaw
-  todayCompletedInterviews: AppMetricRaw
+  todayElapsedInterviews: AppMetricRaw
 }
 
 export interface AppInterviewRaw {
@@ -150,6 +151,7 @@ export interface AppCandidateListItemRaw {
   manualRequired: boolean
   manualReason?: string
   wechat?: string | null
+  wechatObservedAtMs?: number | null
   interviewStartsAtMs?: number | null
   interviewEndsAtMs?: number | null
   interviewMethod?: string | null
@@ -157,7 +159,7 @@ export interface AppCandidateListItemRaw {
 }
 
 export interface AppCandidateListRaw {
-  view: 'communicating' | 'pending' | 'interviewed' | 'wechat'
+  view: 'communicating' | 'interviewed' | 'interviewElapsed' | 'wechat'
   total: number
   items: AppCandidateListItemRaw[]
   limit: number
@@ -251,8 +253,8 @@ const funnelStageAliases: Record<string, FunnelStageKey> = {
 
 const candidateViewToAPI: Record<CandidateView, AppCandidateListRaw['view']> = {
   communicating: 'communicating',
-  pendingInterview: 'pending',
   interviewed: 'interviewed',
+  interviewElapsed: 'interviewElapsed',
   wechat: 'wechat',
 }
 
@@ -278,9 +280,22 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
   })
   const candidates = {
     communicating: adaptCandidateList(snapshot.candidates.communicating, 'communicating', now),
-    pendingInterview: adaptCandidateList(snapshot.candidates.pendingInterview, 'pendingInterview', now),
     interviewed: adaptCandidateList(snapshot.candidates.interviewed, 'interviewed', now),
+    interviewElapsed: adaptCandidateList(
+      snapshot.candidates.interviewElapsed,
+      'interviewElapsed',
+      now,
+    ),
     wechat: adaptCandidateList(snapshot.candidates.wechat, 'wechat', now),
+  }
+  const candidateTotals = {
+    communicating: candidateTotal(snapshot.candidates.communicating, candidates.communicating),
+    interviewed: candidateTotal(snapshot.candidates.interviewed, candidates.interviewed),
+    interviewElapsed: candidateTotal(
+      snapshot.candidates.interviewElapsed,
+      candidates.interviewElapsed,
+    ),
+    wechat: candidateTotal(snapshot.candidates.wechat, candidates.wechat),
   }
   const statistics = rawOverview.statistics
 
@@ -305,12 +320,12 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         { label: 'AI 评级人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '候选确认人数', value: metricValue(statistics.todayConfirmation), tone: 'amber' },
         { label: '打招呼', value: metricValue(statistics.todayGreeted), tone: 'green' },
-        { label: '已约面', value: metricValue(statistics.todayInvited), tone: 'red' },
+        { label: '已邀面', value: metricValue(statistics.todayInvited), tone: 'red' },
       ],
       ledgerStartedAt: formatDateOnly(rawOverview.businessSince),
       ledger: [
         { label: '累计招呼', value: metricValue(statistics.totalGreeted) },
-        { label: '累计已面试', value: metricValue(statistics.totalInterviewed) },
+        { label: '累计已约面', value: metricValue(statistics.totalInterviewed) },
         { label: '累计已换微信', value: metricValue(statistics.totalWechat) },
       ],
       todayInterviews: (rawOverview.todayInterviews ?? []).map((interview) => ({
@@ -326,11 +341,12 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         greetingDisplayTarget: 100,
         newReplies: metricValue(statistics.todayNewReplies),
         newInterviews: metricValue(statistics.todayNewAppointments),
-        completedInterviews: metricValue(statistics.todayCompletedInterviews),
+        elapsedInterviews: metricValue(statistics.todayElapsedInterviews),
       },
     },
     confirmation,
     candidates,
+    candidateTotals,
     connections: adaptConnections(runtime, job),
     confirmationBadge: snapshot.confirmation.confirmation.ready
       ? safeCount(snapshot.confirmation.confirmation.selectableCount)
@@ -454,12 +470,17 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     collect: { completed: safeCount(raw.capturedCount), target, failed: 0 },
     score: { completed: safeCount(raw.scoredCount), target, failed: 0 },
     select: { completed: selected, target: safeCount(raw.scoredCount), failed: 0 },
-    greeting: { completed: safeCount(raw.greetingReady), target: selected, failed: safeCount(raw.failedCount) },
+    greeting: {
+      completed: safeCount(raw.greetingReady),
+      target: selected,
+      failed: safeCount(raw.generationFailedCount),
+    },
     confirm: { completed: confirmed, target: selected, failed: 0 },
     send: {
       completed: safeCount(raw.sentCount),
       target: selected,
-      failed: safeCount(raw.failedCount) + safeCount(raw.suspectCount),
+      // suspect 是结果未确认，归到发送阶段的异常里由人工收敛。
+      failed: safeCount(raw.sendFailedCount) + safeCount(raw.suspectCount),
     },
   }
   const stages: FunnelStageView[] = stageOrder.map((key, index) => ({
@@ -479,7 +500,9 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     stateLabel: funnelStateLabel(raw.stage),
     target,
     pending: safeCount(raw.pendingConfirm),
-    failed: safeCount(raw.failedCount) + safeCount(raw.suspectCount),
+    // 顶部汇总是两个阶段的失败之和，明细各归各格。
+    failed: safeCount(raw.generationFailedCount) + safeCount(raw.sendFailedCount) +
+      safeCount(raw.suspectCount),
     latestFailure: clean(raw.lastFailureReason) || null,
     stages,
   }
@@ -586,6 +609,12 @@ function confirmationSendState(status: string): ConfirmationSendState {
   case 'sent': return 'sent'
   case 'failed': return 'failed'
   case 'suspect': return 'suspect'
+  // 招呼语已就绪、但最终没能发出(推荐流已变化、档案不再可发送)。它必须与
+  // "招呼语根本没生成"区分开:这些人当初是在确认名单里的,发送进度的分母得
+  // 一直算上他们,否则分母会在发送途中往下走。
+  case 'abandoned':
+  case 'unavailable':
+    return 'settledWithoutSend'
   default: return 'ineligible'
   }
 }
@@ -623,6 +652,7 @@ function confirmationStatusTone(
     sent: 'green',
     failed: 'red',
     suspect: 'red',
+    settledWithoutSend: 'slate',
     ineligible: 'slate',
   }
   return tones[state]
@@ -634,6 +664,16 @@ export function adaptCandidateList(
   now = new Date(),
 ): CandidateViewItem[] {
   return (response.candidates.items ?? []).map((item) => adaptCandidateListItem(item, view, now))
+}
+
+// candidateTotal 取脑侧 total。脑总是随列表一起给出总数,但它若缺失或比
+// 本页条数还小(只可能是响应损坏),就退回本页条数——宁可少报,不能报出
+// 一个比看得见的人还少的总数。
+function candidateTotal(
+  response: AppCandidateListResponse | undefined,
+  items: CandidateViewItem[],
+): number {
+  return Math.max(safeCount(response?.candidates?.total), items.length)
 }
 
 function adaptCandidateListItem(
@@ -655,10 +695,8 @@ function adaptCandidateListItem(
     manualReason: clean(raw.manualReason) || null,
     interviewAt: formatEpochRelative(raw.interviewStartsAtMs, now),
     interviewMethod: clean(raw.interviewMethod) || null,
-    // 当前投影只有邀面卡状态，没有正式面试结果事实；不得由卡片状态猜录用结果。
-    interviewResult: null,
     wechatAccount: clean(raw.wechat) || null,
-    wechatExchangedAt: null,
+    wechatExchangedAt: formatEpochRelative(raw.wechatObservedAtMs, now),
     stillInAutoCommunication: raw.status
       ? !raw.manualRequired && raw.status !== 'ended'
       : null,
@@ -691,7 +729,6 @@ function emptyCandidate(
     manualReason: null,
     interviewAt: null,
     interviewMethod: null,
-    interviewResult: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: null,
@@ -719,16 +756,24 @@ function candidateStatus(
       deterministicState: raw.status === 'ended' ? '微信已交换，沟通主线已结束' : '微信已交换，仍在沟通主线',
     }
   }
-  if (view === 'pendingInterview') {
+  if (view === 'interviewed') {
+    return { label: '已约面', tone: 'green', deterministicState: '候选人已接受面试邀约' }
+  }
+  if (view === 'interviewElapsed') {
+    return {
+      label: '已面试',
+      tone: 'green',
+      // 只表示约定时间已过，不代表候选人真的到场；系统没有面试结果事实。
+      deterministicState: '约定的面试时间已过',
+    }
+  }
+  if (raw.status === 'invited') {
     const confirmed = cardStateConfirmed(raw.interviewCardState)
     return {
-      label: confirmed ? '已确认' : '待候选人确认',
+      label: confirmed ? '邀面已确认' : '已邀面',
       tone: confirmed ? 'green' : 'amber',
       deterministicState: confirmed ? '候选人已确认面试' : '邀面卡已发送，等待候选人确认',
     }
-  }
-  if (view === 'interviewed') {
-    return { label: '已面试', tone: 'green', deterministicState: '已进入面试完成阶段' }
   }
   if (raw.status === 'greeted') return { label: '已招呼', tone: 'blue', deterministicState: '已招呼，等待候选人回复' }
   if (raw.status === 'communicating') return { label: '已回复', tone: 'blue', deterministicState: '正在自动沟通' }
@@ -749,7 +794,7 @@ export function adaptCandidateDetail(
   now = new Date(),
 ): CandidateViewItem {
   const raw = response.candidate
-  const inferredView = inferCandidateView(raw.candidate)
+  const inferredView = inferCandidateView(raw.candidate, now)
   const item = adaptCandidateListItem(raw.candidate, inferredView, now)
   const resumeFacts = raw.resume.basic ?? []
   const decisions = adaptAIJudgement(raw.latestAi)
@@ -773,11 +818,23 @@ export function adaptCandidateDetail(
   return merged
 }
 
-function inferCandidateView(raw: AppCandidateListItemRaw): CandidateView {
+function inferCandidateView(raw: AppCandidateListItemRaw, now: Date): CandidateView {
   if (clean(raw.wechat)) return 'wechat'
-  if (raw.status === 'interviewed') return 'interviewed'
-  if (raw.status === 'invited') return 'pendingInterview'
+  if (raw.status === 'interviewed') {
+    return interviewDeadlinePassed(raw, now) ? 'interviewElapsed' : 'interviewed'
+  }
   return 'communicating'
+}
+
+// interviewDeadlinePassed 与脑侧 appLatestInterviewDeadlineMs 同判据:结束时间
+// 优先、缺失退到开始时间，两者都读不到即视为已过。只用于详情页在没有列表
+// fallback 时推断展示分类，列表分流始终由脑决定。
+function interviewDeadlinePassed(raw: AppCandidateListItemRaw, now: Date): boolean {
+  const deadline = typeof raw.interviewEndsAtMs === 'number' && raw.interviewEndsAtMs > 0
+    ? raw.interviewEndsAtMs
+    : raw.interviewStartsAtMs
+  if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline <= 0) return true
+  return deadline < now.getTime()
 }
 
 function resumeValue(fields: AppResumeFieldRaw[], labels: string[]): string | null {

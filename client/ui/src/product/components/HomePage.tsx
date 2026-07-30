@@ -68,7 +68,10 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     workflow.canEnd && !pendingEnd && !pendingSourcing,
     pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason,
   )
-  const confirmationCount = overview.funnel.stages.find((stage) => stage.key === 'confirm')?.target ?? 0
+  // 等待确认的人数是 funnel.pending(脑侧 pendingConfirm)。这里一度取
+  // stages.confirm.target，那是本批选中总数：招呼语生成失败、推荐流已变化、
+  // 不再可发送的都算在里面，于是首页说"20 位等待确认"、侧栏徽章说 18。
+  const confirmationCount = overview.funnel.pending ?? 0
   const taskPosition = pendingEnd
     ? '正在结束当前候选人…'
     : pendingSourcing
@@ -83,7 +86,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     <div className="rh-page rh-home-page">
       <section className="rh-home-welcome">
         <div>
-          <span className="rh-kicker">招聘工作台</span>
+          <span className="rh-kicker">增员工作台</span>
           <h1>欢迎回来，{customer.name}</h1>
           <p>{overview.dateLabel}</p>
         </div>
@@ -406,7 +409,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           <dl className="rh-activity-facts">
             <div><dt>新回复</dt><dd>{metricText(overview.todayActivity.newReplies)}</dd></div>
             <div><dt>新约面</dt><dd>{metricText(overview.todayActivity.newInterviews)}</dd></div>
-            <div><dt>完成面试</dt><dd>{metricText(overview.todayActivity.completedInterviews)}</dd></div>
+            <div><dt>已过面试时间</dt><dd>{metricText(overview.todayActivity.elapsedInterviews)}</dd></div>
           </dl>
         </section>
       </div>
