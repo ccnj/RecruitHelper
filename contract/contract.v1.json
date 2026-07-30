@@ -504,7 +504,7 @@
         "type": "object",
         "fields": {
           "startsAt": { "type": "int64", "minimum": 1 },
-          "endsAt": { "type": "int64", "minimum": 1 },
+          "endsAt": { "type": "int64", "minimum": 1, "optional": true },
           "method": { "type": "string", "enumRef": "enums.interviewMethod" }
         }
       },
@@ -1134,7 +1134,7 @@
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
-    "interviewMethod": ["wechatVideo"],
+    "interviewMethod": ["wechatVideo", "onsite"],
     "candidateContactState": ["unestablished", "established", "unknown"],
     "sourcingAgeMode": ["any", "range"],
     "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],

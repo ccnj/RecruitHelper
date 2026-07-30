@@ -7210,14 +7210,21 @@ async function mainReadThreadPage(
     // 2026-07-27 真机：355 卡负载以字符串枚举 interviewType="VIDEO"、
     // interviewPlatform="WECHAT_VIDEO" 表达微信视频；数字形态保留为既有容忍。
     // 其他取值（如 TENCENT）不猜映射。
+    // 2026-07-31 真机：线下(到场)面试卡 interviewType="ATTENDANCE"，平台既不下发
+    // interviewPlatform，endTime 也恒为 "0"（线下面试无固定时长）。故这两项只对
+    // 线上形态强制，onsite 免除；endsAt 缺席按协议规格 §4.5 省略而非合成。
+    const interviewIsOnsite = details.interviewType === 'ATTENDANCE'
     const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
       (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo' as const
-      : null
+      : interviewIsOnsite
+        ? 'onsite' as const
+        : null
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
       from === staffID && Boolean(clean(details.interviewId)) &&
-      interviewStartsAt !== null && interviewEndsAt !== null &&
-      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      interviewStartsAt !== null && (interviewIsOnsite || interviewEndsAt !== null) &&
+      Boolean(clean(details.interviewType)) &&
+      (interviewIsOnsite || Boolean(clean(details.interviewPlatform))) &&
       Object.prototype.hasOwnProperty.call(details, 'state')
     const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
       clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
@@ -7276,23 +7283,27 @@ async function mainReadThreadPage(
       cardType = 'interviewInvite'
       text = '[面试邀请]'
       state = 'unknown'
-      identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-        interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-        ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+      // endsAt 缺席(线下)不参与可靠性判据；有值时仍要求晚于 startsAt。
+      if (interviewMethod !== null && interviewStartsAt !== null &&
+          (interviewEndsAt === null || interviewEndsAt > interviewStartsAt)) {
+        interview = {
+          startsAt: interviewStartsAt,
+          ...(interviewEndsAt !== null ? { endsAt: interviewEndsAt } : {}),
+          method: interviewMethod,
+        }
+      }
+      identity = interview !== null
+        ? [
+            String(interview.startsAt),
+            interview.endsAt === undefined ? '' : String(interview.endsAt),
+            interview.method,
+          ].join('\x1f')
         : [
             stableMessageIdentity(row.idServer),
             String(interviewStartsAt),
             String(interviewEndsAt),
             interviewMethod ?? 'unknown',
           ].join('\x1f')
-      if (interviewMethod !== null && interviewStartsAt !== null && interviewEndsAt !== null &&
-          interviewEndsAt > interviewStartsAt) {
-        interview = {
-          startsAt: interviewStartsAt,
-          endsAt: interviewEndsAt,
-          method: interviewMethod,
-        }
-      }
     } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
       kind = 'card'
       cardType = 'resumeAttachment'
@@ -7334,10 +7345,9 @@ async function mainReadThreadPage(
     const cardProjection = cardType === 'wechatExchange' &&
       (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
-      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
-          interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-        ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+      : cardType === 'interviewInvite' && isStaffInterviewInvite && interview !== null
+        ? `card\x1finterviewInvite\x1f${interview.startsAt}\x1f` +
+          `${interview.endsAt === undefined ? '' : interview.endsAt}\x1f${interview.method}`
         : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || stableMessageID || text)}`
     const contentHash = kind === 'card'
       ? await digest(cardProjection)
@@ -8144,15 +8154,22 @@ async function mainCaptureSendBaseline(
         Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
       const interviewStartsAt = toMillis(details.startTime)
       const interviewEndsAt = toMillis(details.endTime)
+      // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
+      const interviewIsOnsite = details.interviewType === 'ATTENDANCE'
       const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
       (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
         ? 'wechatVideo'
-        : 'unknown'
+        : interviewIsOnsite
+          ? 'onsite'
+          : 'unknown'
       const isStaffInterviewInvite = customSuccess && customType === 355 &&
         from === staffID && Boolean(clean(details.interviewId)) &&
-        interviewStartsAt !== null && interviewEndsAt !== null &&
-        Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+        interviewStartsAt !== null && (interviewIsOnsite || interviewEndsAt !== null) &&
+        Boolean(clean(details.interviewType)) &&
+        (interviewIsOnsite || Boolean(clean(details.interviewPlatform))) &&
         Object.prototype.hasOwnProperty.call(details, 'state')
+      const interviewProjectable = interviewMethod !== 'unknown' && interviewStartsAt !== null &&
+        (interviewEndsAt === null || interviewEndsAt > interviewStartsAt)
       const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
         clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
       const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
@@ -8202,9 +8219,12 @@ async function mainCaptureSendBaseline(
         kind = 'card'
         cardType = 'interviewInvite'
         text = '[面试邀请]'
-        identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-          ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+        identity = interviewProjectable
+          ? [
+              String(interviewStartsAt),
+              interviewEndsAt === null ? '' : String(interviewEndsAt),
+              interviewMethod,
+            ].join('\x1f')
           : [
               row.idServer,
               String(interviewStartsAt),
@@ -8236,10 +8256,9 @@ async function mainCaptureSendBaseline(
       const cardProjection = cardType === 'wechatExchange' &&
         (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
         ? 'card\x1fwechatExchange'
-        : cardType === 'interviewInvite' && isStaffInterviewInvite &&
-            interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-            interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-          ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+        : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
+          ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f` +
+            `${interviewEndsAt === null ? '' : interviewEndsAt}\x1f${interviewMethod}`
           : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`
       const contentHash = kind === 'card'
         ? await digest(cardProjection)
@@ -8816,15 +8835,22 @@ function mainSendMessageOnce(
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
+    // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
+    const interviewIsOnsite = details.interviewType === 'ATTENDANCE'
     const interviewMethod = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
       (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo'
-      : 'unknown'
+      : interviewIsOnsite
+        ? 'onsite'
+        : 'unknown'
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
       from === staffID && Boolean(clean(details.interviewId)) &&
-      interviewStartsAt !== null && interviewEndsAt !== null &&
-      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      interviewStartsAt !== null && (interviewIsOnsite || interviewEndsAt !== null) &&
+      Boolean(clean(details.interviewType)) &&
+      (interviewIsOnsite || Boolean(clean(details.interviewPlatform))) &&
       Object.prototype.hasOwnProperty.call(details, 'state')
+    const interviewProjectable = interviewMethod !== 'unknown' && interviewStartsAt !== null &&
+      (interviewEndsAt === null || interviewEndsAt > interviewStartsAt)
     const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
       clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
     const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
@@ -8874,9 +8900,12 @@ function mainSendMessageOnce(
       kind = 'card'
       cardType = 'interviewInvite'
       normalizedText = '[面试邀请]'
-      identity = interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-        interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-        ? [String(interviewStartsAt), String(interviewEndsAt), interviewMethod].join('\x1f')
+      identity = interviewProjectable
+        ? [
+            String(interviewStartsAt),
+            interviewEndsAt === null ? '' : String(interviewEndsAt),
+            interviewMethod,
+          ].join('\x1f')
         : [
             row.idServer,
             String(interviewStartsAt),
@@ -8907,10 +8936,9 @@ function mainSendMessageOnce(
     const cardProjection = cardType === 'wechatExchange' &&
       (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
-      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
-          interviewMethod === 'wechatVideo' && interviewStartsAt !== null &&
-          interviewEndsAt !== null && interviewEndsAt > interviewStartsAt
-        ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f${interviewEndsAt}\x1fwechatVideo`
+      : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
+        ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f` +
+          `${interviewEndsAt === null ? '' : interviewEndsAt}\x1f${interviewMethod}`
         : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || normalizedText)}`
     const contentHash = kind === 'card'
       ? digest(cardProjection)
@@ -9234,7 +9262,10 @@ async function mainPrepareInterviewEditor(
       }
       return null
     }
-    if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
+    // endsAt 在读取方向 optional(线下卡)，但发送侧仍必填：协议规格 §14.1 的
+    // chat.sendInviteCard 只开放 wechatVideo，缺 endsAt 一律拒绝，不得放宽。
+    if (interview.endsAt === undefined ||
+        !Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
         interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
         interview.method !== 'wechatVideo' ||
         (interview.endsAt - interview.startsAt) % 60_000 !== 0) {
@@ -9913,15 +9944,22 @@ function mainSendCardOnce(
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
     const startsAt = toMillis(details.startTime)
     const endsAt = toMillis(details.endTime)
+    // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
+    const interviewIsOnsite = details.interviewType === 'ATTENDANCE'
     const method = (details.interviewType === 2 || details.interviewType === 'VIDEO') &&
       (details.interviewPlatform === 4 || details.interviewPlatform === 'WECHAT_VIDEO')
       ? 'wechatVideo'
-      : 'unknown'
+      : interviewIsOnsite
+        ? 'onsite'
+        : 'unknown'
     const isStaffInterviewInvite = customSuccess && customType === 355 &&
       from === staffID && Boolean(clean(details.interviewId)) &&
-      startsAt !== null && endsAt !== null &&
-      Boolean(clean(details.interviewType)) && Boolean(clean(details.interviewPlatform)) &&
+      startsAt !== null && (interviewIsOnsite || endsAt !== null) &&
+      Boolean(clean(details.interviewType)) &&
+      (interviewIsOnsite || Boolean(clean(details.interviewPlatform))) &&
       Object.prototype.hasOwnProperty.call(details, 'state')
+    const interviewProjectable = method !== 'unknown' && startsAt !== null &&
+      (endsAt === null || endsAt > startsAt)
     const isCandidateInterviewAcceptedText = rawType === 'text' && from === target &&
       clean(row.text) === '我已接受贵司的面试邀请，将准时参加面试'
     const isCandidateOnlineResume = rawType === 'custom' && row.contentWasString &&
@@ -9967,9 +10005,8 @@ function mainSendCardOnce(
       kind = 'card'
       cardType = 'interviewInvite'
       text = '[面试邀请]'
-      identity = method === 'wechatVideo' && startsAt !== null &&
-        endsAt !== null && endsAt > startsAt
-        ? [String(startsAt), String(endsAt), method].join('\x1f')
+      identity = interviewProjectable
+        ? [String(startsAt), endsAt === null ? '' : String(endsAt), method].join('\x1f')
         : [row.idServer, String(startsAt), String(endsAt), method].join('\x1f')
     } else if (isCandidateOnlineResume || isCandidateAttachmentResume) {
       kind = 'card'
@@ -9995,9 +10032,9 @@ function mainSendCardOnce(
     const cardProjection = cardType === 'wechatExchange' &&
       (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
       ? 'card\x1fwechatExchange'
-      : cardType === 'interviewInvite' && isStaffInterviewInvite &&
-          method === 'wechatVideo' && startsAt !== null && endsAt !== null && endsAt > startsAt
-        ? `card\x1finterviewInvite\x1f${startsAt}\x1f${endsAt}\x1fwechatVideo`
+      : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
+        ? `card\x1finterviewInvite\x1f${startsAt}\x1f` +
+          `${endsAt === null ? '' : endsAt}\x1f${method}`
         : `card\x1f${cardType ?? 'other'}\x1f${clean(identity || row.idServer || text)}`
     const contentHash = kind === 'card'
       ? digest(cardProjection)
@@ -10024,7 +10061,8 @@ function mainSendCardOnce(
     return 'match'
   }
   const validInterviewSurface = (modal: HTMLElement, value: InterviewDetails): boolean => {
-    if (!Number.isSafeInteger(value.startsAt) || !Number.isSafeInteger(value.endsAt) ||
+    if (value.endsAt === undefined ||
+        !Number.isSafeInteger(value.startsAt) || !Number.isSafeInteger(value.endsAt) ||
         value.startsAt <= 0 || value.endsAt <= value.startsAt || value.method !== 'wechatVideo' ||
         value.startsAt % 60_000 !== 0 || (value.endsAt - value.startsAt) % 60_000 !== 0) return false
     const start = new Date(value.startsAt)
@@ -10371,7 +10409,8 @@ async function mainObserveStableOutboundCard(
   try {
     if ((cardKind === 'wechatInvite' && interview !== null) ||
         (cardKind === 'interviewInvite' && (
-          interview === null || !Number.isSafeInteger(interview.startsAt) ||
+          interview === null || interview.endsAt === undefined ||
+          !Number.isSafeInteger(interview.startsAt) ||
           !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
           interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo'
         ))) return failed()
@@ -11299,7 +11338,8 @@ async function sendZhilianCard(
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
   if (cardKind === 'interviewInvite' && (
-    interview === null || !Number.isSafeInteger(interview.startsAt) ||
+    interview === null || interview.endsAt === undefined ||
+    !Number.isSafeInteger(interview.startsAt) ||
     !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
     interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo' ||
     interview.startsAt % 60_000 !== 0 ||
@@ -11770,7 +11810,8 @@ export async function probeZhilianInterviewEditor(
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
   const interview = args.interview
-  if (!Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
+  if (interview.endsAt === undefined ||
+      !Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
       interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
       interview.method !== 'wechatVideo' ||
       interview.startsAt % 60_000 !== 0 ||

@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:ba63438e8e82ae8bceba4932c791d3bbda4ed43c81a198b7cc7d67503b662d3f"
+	ContractHash       = "sha256:09ee3ea4c9bcaaf4dbe2abd010ca1cc9e8bc40f6ff397bc907611d19ef082536"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -159,10 +159,12 @@ type InterviewMethod string
 
 const (
 	InterviewMethodWechatVideo InterviewMethod = "wechatVideo"
+	InterviewMethodOnsite      InterviewMethod = "onsite"
 )
 
 var InterviewMethodValues = []InterviewMethod{
 	InterviewMethodWechatVideo,
+	InterviewMethodOnsite,
 }
 
 type JournalState string
