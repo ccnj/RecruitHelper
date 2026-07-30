@@ -77,6 +77,7 @@ fi
   -DVERSION="$VERSION" \
   -DAPP_EXE="$APP_EXE" \
   -DBRAIN_EXE="$BRAIN_EXE" \
+  -DICON_FILE="$REPO_ROOT/assets/app-icon.ico" \
   "$REPO_ROOT/scripts/installer.nsi"
 
 echo "==> 核对产物完整性"

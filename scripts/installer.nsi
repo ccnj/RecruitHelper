@@ -43,10 +43,19 @@ SetCompressor /SOLID lzma
 !ifndef BRAIN_EXE
   !error "missing -DBRAIN_EXE"
 !endif
+; Path to assets/app-icon.ico, passed in by build-win.sh. Used for the installer's
+; own icon and for the shortcuts. The exe's own icon cannot be set here -- that
+; needs rcedit to rewrite PE resources, and rcedit is a 32-bit Windows binary that
+; Apple Silicon cannot run.
+!ifndef ICON_FILE
+  !error "missing -DICON_FILE"
+!endif
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\RecruitHelper"
 
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
+Icon "${ICON_FILE}"
+UninstallIcon "${ICON_FILE}"
 ; Per-user install: no admin rights, therefore no UAC prompt.
 InstallDir "$LOCALAPPDATA\Programs\RecruitHelper"
 RequestExecutionLevel user
@@ -104,9 +113,15 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  ; Ship the .ico so the shortcuts can point at it. Without an explicit icon the
+  ; shortcuts inherit the exe's, which is still the stock Electron one (see the
+  ; rcedit note above), so this is what actually gives the user a branded icon on
+  ; the desktop and in the start menu.
+  File "${ICON_FILE}"
+
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
 
   ; Per-user install writes HKCU so the entry shows up in Apps & Features.
@@ -114,7 +129,9 @@ Section "Install"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "aliyutaozi"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+  ; Point at the .ico rather than the exe: the exe still carries the stock
+  ; Electron icon, so this is what makes Apps & Features show the real one.
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\app-icon.ico"
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1

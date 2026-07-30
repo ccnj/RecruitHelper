@@ -8,7 +8,7 @@ const path = require('node:path')
 const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
 const { pluginInstallDir, updateStageDir, ensurePluginInstalled } = require('./pluginSeed')
-const { TRAY_ICON_PNG_BASE64 } = require('./trayIcon')
+const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
@@ -114,6 +114,9 @@ function createWindow(adminToken, uiEntry) {
     width: 1200,
     height: 840,
     title: 'AI增员助手 · 客户端',
+    // 标题栏与任务栏图标。给 256 的大图让 Windows 自己按场景降采样,比预先压到
+    // 某个尺寸清楚。不设的话这两处会一直是 Electron 的默认原子图标。
+    icon: nativeImage.createFromDataURL(`data:image/png;base64,${APP_ICON_PNG_BASE64}`),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -146,7 +149,7 @@ function createTray() {
     // 必须是 PNG。此前这里用 SVG data URL,而 nativeImage 只认 PNG/JPEG —— 它对
     // 解析不了的 data URL 不抛错、返回一个空 image,于是 Tray 构造成功、托盘项出现、
     // 图标却一片空白,连下面的 catch 都不会触发。这个失败模式在 macOS 开发机上看不见
-    // (那里跑不起 GUI),装到 Windows 才暴露。图标由 scripts/generate-tray-icon.mjs
+    // (那里跑不起 GUI),装到 Windows 才暴露。图标由 scripts/generate-icons.mjs
     // 生成,不 resize:交给系统按当前 DPI 缩放,比先压到固定像素更清晰。
     const icon = nativeImage.createFromDataURL(
       `data:image/png;base64,${TRAY_ICON_PNG_BASE64}`,
@@ -156,7 +159,7 @@ function createTray() {
       // 只是没图标。判据是"托盘能不能用",不是"图标好不好看";拿后者去触发下面的
       // 降级,等于用"关窗即停业务"去换一个美观问题,不划算。托盘真建不起来会自己
       // 抛错走 catch。
-      writeLog('[main] 托盘图标解码为空,托盘将无图标 —— 检查 trayIcon.js 是否是合法 PNG')
+      writeLog('[main] 托盘图标解码为空,托盘将无图标 —— 检查 icons.js 是否是合法 PNG')
     }
     tray = new Tray(icon)
     tray.setToolTip('AI增员助手')
