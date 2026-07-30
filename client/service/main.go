@@ -219,6 +219,7 @@ func main() {
 	pluginReloader := handreload.NewAutoReloader(
 		&handreload.Orchestrator{
 			Store: st, Registry: hub.Registry(), Dispatcher: disp, Feeds: actor,
+			Trigger: handreload.TriggerAuto,
 		},
 		st, handreload.DefaultInterval,
 	)

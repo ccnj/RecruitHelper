@@ -50,10 +50,14 @@ func (f *fakeDispatcher) Dispatch(handID, name string, args json.RawMessage) (st
 	return "msg-" + name, nil
 }
 
-type fakeFeeds struct{ calls int }
+type fakeFeeds struct {
+	calls    int
+	triggers []string
+}
 
-func (f *fakeFeeds) InvalidateSourcingFeedsForHand(string, string, time.Time) error {
+func (f *fakeFeeds) InvalidateSourcingFeedsForHand(_ string, trigger string, _ time.Time) error {
 	f.calls++
+	f.triggers = append(f.triggers, trigger)
 	return nil
 }
 
@@ -85,7 +89,7 @@ func newHarness(t *testing.T) *harness {
 	h.dispatcher.afterDispatch = func() { h.arriveNewBoot(protocol.ContractHash, true, []string{Capability()}) }
 	orchestrator := &Orchestrator{
 		Store: h.store, Registry: registry, Dispatcher: h.dispatcher, Feeds: h.feeds,
-		Timeout: time.Second, Poll: time.Millisecond,
+		Trigger: TriggerAuto, Timeout: time.Second, Poll: time.Millisecond,
 	}
 	h.auto = NewAutoReloader(orchestrator, h.store, time.Hour)
 	return h
@@ -116,6 +120,10 @@ func TestAutoReloadTriggersWhenPluginContractDrifts(t *testing.T) {
 	}
 	if h.feeds.calls != 1 {
 		t.Fatalf("重载前应终止旧推荐流一次，实际 %d 次", h.feeds.calls)
+	}
+	// 这个标记会落进批次记录。自动路径若冒用人工路径的标记，事后排查会把两者混为一谈。
+	if h.feeds.triggers[0] != TriggerAuto {
+		t.Fatalf("自动路径应报自己的终止原因，实际 %q", h.feeds.triggers[0])
 	}
 }
 

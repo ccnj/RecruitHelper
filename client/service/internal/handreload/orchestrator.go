@@ -102,11 +102,22 @@ type Orchestrator struct {
 	Feeds      FeedInvalidator
 	Now        func() time.Time
 
+	// Trigger 是终止旧推荐流时落进批次记录的原因标记。它是持久化的诊断字段,
+	// 事后排查靠它区分"人点了诊断台按钮"和"换代后自动重载",所以两条路径必须
+	// 各报各的。为空时按人工路径处理。
+	Trigger string
+
 	// Timeout 为零时用 ReadyTimeout。测试用它把等待压到毫秒级。
 	Timeout time.Duration
 	// Poll 为零时用 100ms。
 	Poll time.Duration
 }
+
+// TriggerAdmin / TriggerAuto 是两条路径各自的推荐流终止原因。
+const (
+	TriggerAdmin = "adminPluginReload"
+	TriggerAuto  = "autoPluginReload"
+)
 
 func (o *Orchestrator) now() time.Time {
 	if o.Now != nil {
@@ -120,6 +131,13 @@ func (o *Orchestrator) timeout() time.Duration {
 		return o.Timeout
 	}
 	return ReadyTimeout
+}
+
+func (o *Orchestrator) trigger() string {
+	if o.Trigger != "" {
+		return o.Trigger
+	}
+	return TriggerAdmin
 }
 
 func (o *Orchestrator) poll() time.Duration {
@@ -180,7 +198,7 @@ func (o *Orchestrator) Reload(ctx context.Context, handID string) (Result, *Erro
 			"该手仍有未收束命令，请先暂停派发并等待命令完成", nil)
 	}
 	if o.Feeds != nil {
-		if err := o.Feeds.InvalidateSourcingFeedsForHand(handID, "adminPluginReload", o.now()); err != nil {
+		if err := o.Feeds.InvalidateSourcingFeedsForHand(handID, o.trigger(), o.now()); err != nil {
 			return Result{}, fail(KindInternal, "", "重载前终止旧推荐流失败", err)
 		}
 	}
