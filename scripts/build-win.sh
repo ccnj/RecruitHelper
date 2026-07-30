@@ -114,7 +114,17 @@ if [ "$missing" -ne 0 ]; then
   exit 1
 fi
 
+# 把产物基线写成字条。发布脚本写清单 notes 时读它,而不是发布时现问 git:
+# 本仓库多会话并行,打包到发布之间主线随时可能被推进,现问会把别人的
+# commit 标到自己的包上(0.2.7 首发即中招:包 518089a 被标成 cdd1621)。
+BUILD_COMMIT="$(git rev-parse --short HEAD)"
+if [ -n "$(git status --porcelain)" ]; then
+  BUILD_COMMIT="${BUILD_COMMIT}-dirty"
+fi
+printf '%s\n' "$BUILD_COMMIT" > "$OUT/BUILD_COMMIT"
+
 echo
 echo "完成:"
 echo "  安装器  $SETUP"
 echo "  免安装  $UNPACKED"
+echo "  基线    $BUILD_COMMIT(release/BUILD_COMMIT)"

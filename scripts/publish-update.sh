@@ -3,7 +3,8 @@
 #
 #   ./scripts/publish-update.sh [服务器]
 #
-# 做四件事:算 sha256 → 上传安装包 → 写 latest.json → 回读校验。
+# 先读打包基线字条(release/BUILD_COMMIT,build-win.sh 落笔),再做四件事:
+# 算 sha256 → 上传安装包 → 写 latest.json → 回读校验。
 # 顺序是有意的:**包先上传、清单后写**。反过来的话,清单已经指向一个还没传完的
 # 包,而客户端随时可能来取 —— 它会下到半截、校验失败、退避重试,直到上传结束。
 # 不致命,但是白白制造一段失败窗口。
@@ -26,11 +27,24 @@ if [ ! -f "$PACKAGE" ]; then
   exit 1
 fi
 
-# 发布的是工作树打出来的包,记下它对应哪个 commit;客户端出问题时要靠这个回溯。
-COMMIT="$(git rev-parse --short HEAD)"
-if [ -n "$(git status --porcelain)" ]; then
-  echo "警告:工作区有未提交改动,这个包无法从 commit 追溯它到底装了什么" >&2
+# 清单 notes 必须记**打包时刻**的基线,不是现在的 HEAD:多会话并行下,打包到
+# 发布之间主线可能被推进,现问 git 会错标(0.2.7 首发即中招)。基线由
+# build-win.sh 写在 release/BUILD_COMMIT,这里只读字条。
+STAMP="release/BUILD_COMMIT"
+if [ ! -f "$STAMP" ]; then
+  echo "找不到 $STAMP —— 产物出自没有基线字条的旧构建,先重跑 ./scripts/build-win.sh" >&2
+  exit 1
 fi
+COMMIT="$(cat "$STAMP")"
+HEAD_NOW="$(git rev-parse --short HEAD)"
+if [ "$COMMIT" != "$HEAD_NOW" ]; then
+  echo "注意:包基线 $COMMIT,当前 HEAD $HEAD_NOW —— 打包后主线被推进过;确认要发的就是这个包再回答 y"
+fi
+case "$COMMIT" in
+  *-dirty)
+    echo "警告:这个包出自有未提交改动的工作树,无法从 commit 完整追溯" >&2
+    ;;
+esac
 
 SHA256="$(shasum -a 256 "$PACKAGE" | awk '{print $1}')"
 SIZE="$(wc -c < "$PACKAGE" | tr -d ' ')"
@@ -78,4 +92,4 @@ curl -fsSI "${FEED_URL}/pkg/RecruitHelper-${VERSION}-setup.exe" > /dev/null || {
 
 echo
 echo "已发布 ${VERSION}(commit ${COMMIT})。"
-echo "已装客户端会在下一个检查周期(最长 6 小时)发现并下载,当前不会自动安装。"
+echo "已装客户端约 15 分钟内发现并后台下载校验;安装要等用户在客户端一键确认,确认后自动收束、安装并重启。"
