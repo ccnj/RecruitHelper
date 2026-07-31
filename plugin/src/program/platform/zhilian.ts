@@ -11876,12 +11876,18 @@ export async function probeZhilianInterviewEditor(
   } catch {
     canceled = false
   }
+  // optional 字段必须整键省略：显式赋 undefined 会被生成契约的 result 校验
+  // 判为 "JSON 不允许 undefined"（2026-07-31 真机彩排实测）。
   return {
     conversationRef: args.conversationRef,
     dateValue: preparation.prepared.dateValue,
     timeValue: preparation.prepared.timeValue,
-    durationValue: preparation.prepared.durationValue,
-    methodValue: preparation.prepared.methodValue,
+    ...(preparation.prepared.durationValue === undefined
+      ? {}
+      : { durationValue: preparation.prepared.durationValue }),
+    ...(preparation.prepared.methodValue === undefined
+      ? {}
+      : { methodValue: preparation.prepared.methodValue }),
     canceled,
   }
 }
