@@ -1876,14 +1876,26 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 				}
 				return safeFakeResponse(`{"话术_序列":["可以的，我们继续聊聊岗位细节"],"动作":"无"}`), nil
 			case 3:
-				if request.Purpose != m5ai.PurposeReply {
-					return m5ai.CompletionResponse{}, fmt.Errorf("服务态不得调用 %q", request.Purpose)
+				// 2026-07-31 规格 §七:服务补句用程序内短提示词与独立
+				// provider 用途;不含攻略、简历与可约时段。
+				if request.Purpose != m5ai.PurposeServiceReply {
+					return m5ai.CompletionResponse{}, fmt.Errorf("服务态用途错误: %q", request.Purpose)
 				}
-				if !strings.Contains(request.UserContent, "候选人已经接受面试") ||
-					!strings.Contains(request.UserContent, "不得承诺“帮您反馈”“我去问下”") {
-					return m5ai.CompletionResponse{}, errors.New("服务态规则未进入 provider 请求")
+				if !strings.Contains(request.UserContent, "候选人已经接受了面试邀请") ||
+					!strings.Contains(request.UserContent, `{"回复"`) ||
+					!strings.Contains(request.UserContent, "面试地址在哪里") {
+					return m5ai.CompletionResponse{}, errors.New("服务态短提示词要素缺失")
 				}
-				return safeFakeResponse(`{"话术_序列":["面试地址以邀约信息为准，有其他细节我们微信上聊哈"],"动作":"无"}`), nil
+				if strings.Contains(request.UserContent, "系统刚刚已代表你发出") {
+					// 异轮服务应答没有本轮固定段;该段只出现在接受卡与
+					// 正文同轮的场景。
+					return m5ai.CompletionResponse{}, errors.New("异轮服务应答不应携带固定段")
+				}
+				if strings.Contains(request.UserContent, "可约面时间") ||
+					strings.Contains(request.UserContent, "简历=") {
+					return m5ai.CompletionResponse{}, errors.New("服务态短提示词不得携带攻略输入")
+				}
+				return safeFakeResponse(`{"回复":"关于您问的地址，咱们微信上细聊吧～"}`), nil
 			default:
 				return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次建议调用", call)
 			}
@@ -1999,9 +2011,9 @@ func TestCommunicationV4PatrolServiceReplySkipsIntentAndUsesServicePolicy(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(advice.requests) != 3 || advice.requests[2].Purpose != m5ai.PurposeReply ||
+	if len(advice.requests) != 3 || advice.requests[2].Purpose != m5ai.PurposeServiceReply ||
 		hand.commandCount() != 4 {
-		t.Fatalf("服务态必须新增一次 reply、零 intent、一次发送: advice=%+v sends=%d",
+		t.Fatalf("服务态必须新增一次 serviceReply、零 intent、一次发送: advice=%+v sends=%d",
 			advice.requests, hand.commandCount())
 	}
 	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)

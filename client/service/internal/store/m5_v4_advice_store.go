@@ -111,7 +111,8 @@ func communicationV4TurnReducerInputTx(
 		return communication.V4InboundTurnDecision{}, ErrDialogueTurnBinding
 	}
 	prerequisitesConfirmed := false
-	if requirement == communication.V4DialogueWechatContinuation {
+	switch requirement {
+	case communication.V4DialogueWechatContinuation:
 		head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
 		if err != nil {
 			return communication.V4InboundTurnDecision{}, err
@@ -121,6 +122,16 @@ func communicationV4TurnReducerInputTx(
 			head.Outcome.Dialogue == communication.V4DialogueWechatContinuation &&
 			head.Outcome.DialogueStatus == communication.V4DialogueWaitingAdvice &&
 			head.Outcome.NextAdvice == communication.V4AdviceReply
+	case communication.V4DialogueServiceReply:
+		head, found, err := communicationV4TurnHeadApplicationTx(tx, turn)
+		if err != nil {
+			return communication.V4InboundTurnDecision{}, err
+		}
+		prerequisitesConfirmed = found &&
+			head.InputKind == CommunicationV4InputConfirmedAction &&
+			head.Outcome.Dialogue == communication.V4DialogueServiceReply &&
+			head.Outcome.DialogueStatus == communication.V4DialogueWaitingAdvice &&
+			head.Outcome.NextAdvice == communication.V4AdviceServiceReply
 	}
 	decision, err := communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{
 		State: aggregate.State, TurnID: turn.TurnID, Messages: facts,
@@ -490,9 +501,23 @@ func persistCommunicationV4AdviceTx(
 	if invocation.Purpose == m5ai.PurposeIntent && classifiedAt == nil {
 		classifiedAt = &at
 	}
+	failureReason := manualReason
+	if manualReason == "" &&
+		decision.Dialogue.ServiceVerdict == communication.V4ServiceReplySkipped {
+		// 规格 v4 §七:失败放弃不是人工件,但必须与判定静默可区分——落
+		// failure_reason 供诊断台查询,聚合 automation 状态不动。
+		failureReason = "serviceReplySkipped"
+		if err := tx.Create(&AuditEntry{
+			At: at, Category: "communication_service_reply_skipped",
+			ConversationRef: turn.ConversationRef,
+			Detail:          "turn=" + turn.TurnID,
+		}).Error; err != nil {
+			return nil, err
+		}
+	}
 	updates := map[string]any{
 		"status": status, "intent_label": label, "intent_source": source,
-		"classified_at": classifiedAt, "failure_reason": manualReason, "updated_at": at,
+		"classified_at": classifiedAt, "failure_reason": failureReason, "updated_at": at,
 	}
 	if phrases := communicationV4ReplyPhrases(plans); len(phrases) > 0 {
 		encoded, err := json.Marshal(phrases)
@@ -649,9 +674,17 @@ func completeCommunicationV4ReplyTx(
 	at time.Time,
 ) (*CommunicationAction, error) {
 	if manualReason == "" && invocation.Status == AIInvocationOK {
-		_, text, err := m5ai.CanonicalReplyPhrases(reply)
-		if err != nil || contentHash != textcanon.Hash(text) {
-			return nil, ErrCommunicationActionInvalid
+		if len(reply.Phrases) == 0 && strings.TrimSpace(reply.Text) == "" {
+			// 服务补句的显式静默终局(规格 v4 §七):合法的空建议,重放
+			// 引擎裁决 silent/skipped;contentHash 必须同为空。
+			if contentHash != "" {
+				return nil, ErrCommunicationActionInvalid
+			}
+		} else {
+			_, text, err := m5ai.CanonicalReplyPhrases(reply)
+			if err != nil || contentHash != textcanon.Hash(text) {
+				return nil, ErrCommunicationActionInvalid
+			}
 		}
 	}
 	digest, err := communicationV4AdviceDigest(

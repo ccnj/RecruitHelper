@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -2024,6 +2025,125 @@ func TestFreezeCommunicationV4InterviewAcceptedWithTextServiceReplyReplacesRecei
 	replayed, err := s.FreezeCommunicationV4Turn(req)
 	if err != nil || replayed.Created {
 		t.Fatalf("批C轮重放失败: replayed=%+v err=%v", replayed, err)
+	}
+
+	// 固定段收束链(2026-07-31 规格 §五(三)):回执气泡先终局,turn 仍等
+	// 前置;收尾的换微信邀请终局后,演进投影落在收尾动作上、turn 推进到
+	// 一次 serviceReply 建议。
+	settleServiceSegmentAction := func(index int, seq int64) {
+		t.Helper()
+		target := eventActions[index]
+		text := target.Text
+		draftKind, cardType, cardState := "text", "", ""
+		if target.V4Kind == communication.V4ActionInviteWechat {
+			draftKind, cardType, cardState = "card", "wechatExchange", "pending"
+			text = "换微信邀请"
+		}
+		latest, err := s.MessagesForConversation(ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		})
+		if err != nil || len(latest) == 0 {
+			t.Fatalf("固定段账本不可用: err=%v", err)
+		}
+		intentID, err := M5AutomaticIntentID(target.ActionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		primitive := "chat.sendMessage"
+		if target.V4Kind == communication.V4ActionInviteWechat {
+			primitive = "chat.sendWechatInvite"
+		}
+		changes, err := s.ApplyConversationChanges(ApplyConversationChangesRequest{
+			Key: ConversationKey{
+				Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+				ConversationRef: fixture.ConversationRef,
+			},
+			ExpectedTailSeq: latest[len(latest)-1].Seq,
+			NewMessages: []MessageDraft{{
+				Direction: "out", Kind: draftKind, ContentHash: target.ContentHash,
+				Text: &text, CardType: cardType, CardState: cardState,
+				Origin: "self",
+			}},
+			SyncedAt: at.Add(time.Duration(10+index) * time.Second),
+		})
+		if err != nil || len(changes.Inserted) != 1 || changes.Inserted[0].Seq != seq {
+			t.Fatalf("固定段消息入账失败: changes=%+v err=%v", changes, err)
+		}
+		resultSeq := changes.Inserted[0].Seq
+		if err := s.db.Model(&Message{}).
+			Where(
+				"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ?",
+				fixture.Platform, fixture.AccountRef, fixture.ConversationRef, resultSeq,
+			).
+			Update("outbound_intent_id", intentID).Error; err != nil {
+			t.Fatalf("固定段消息关联发送意图失败: %v", err)
+		}
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			startedAt := at.Add(time.Duration(9+index) * time.Second)
+			if err := tx.Model(&CommunicationV4EventAction{}).
+				Where("action_id = ?", target.ActionID).
+				Updates(map[string]any{
+					"effect_intent_id":  intentID,
+					"effect_started_at": startedAt,
+					"status":            CommunicationV4EventActionEffectPending,
+				}).Error; err != nil {
+				return err
+			}
+			var refreshed CommunicationV4EventAction
+			if err := tx.First(&refreshed, "action_id = ?", target.ActionID).Error; err != nil {
+				return err
+			}
+			intent := EffectIntent{
+				IntentID: intentID, IdemKey: "idem-" + intentID, Platform: fixture.Platform,
+				AccountRef: fixture.AccountRef, Primitive: primitive,
+				TargetRef: fixture.ConversationRef, PayloadHash: strings.Repeat("a", 64),
+				GuardsHash: strings.Repeat("b", 64), RootMsgID: "root-" + intentID,
+				Status: EffectIntentOk, DeadlineMs: 1, ResultMessageSeq: &resultSeq,
+				SendFingerprint: target.ContentHash,
+			}
+			return applyCommunicationV4EventActionEffectStatusTx(
+				tx, refreshed, &intent, at.Add(time.Duration(11+index)*time.Second),
+			)
+		}); err != nil {
+			t.Fatalf("固定段动作[%d]终局失败: %v", index, err)
+		}
+	}
+
+	settleServiceSegmentAction(0, inbound[len(inbound)-1].Seq+1)
+	afterReceipt, err := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if err != nil || afterReceipt == nil || afterReceipt.Status != DialogueTurnCollected {
+		t.Fatalf("回执气泡终局后补句仍须等待收尾动作: turn=%+v err=%v", afterReceipt, err)
+	}
+	settleServiceSegmentAction(2, inbound[len(inbound)-1].Seq+2)
+	afterInvite, err := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if err != nil || afterInvite == nil || afterInvite.Status != DialogueTurnClassified {
+		t.Fatalf("收尾动作终局后应推进到一次补句建议: turn=%+v err=%v", afterInvite, err)
+	}
+	var continuationRow CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&continuationRow,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		profileID,
+		CommunicationV4InputConfirmedAction,
+		eventActions[2].SemanticActionKey,
+	).Error; err != nil ||
+		continuationRow.Outcome.Dialogue != communication.V4DialogueServiceReply ||
+		continuationRow.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+		continuationRow.Outcome.NextAdvice != communication.V4AdviceServiceReply ||
+		continuationRow.Outcome.IntentLabel != "" {
+		t.Fatalf("收尾动作未形成补句授权投影: row=%+v err=%v", continuationRow, err)
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		head, found, err := communicationV4TurnHeadApplicationTx(tx, *afterInvite)
+		if err != nil || !found ||
+			head.InputKind != CommunicationV4InputConfirmedAction ||
+			head.Outcome.NextAdvice != communication.V4AdviceServiceReply {
+			return fmt.Errorf("head 链未演进到补句授权: head=%+v found=%v err=%v", head, found, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
