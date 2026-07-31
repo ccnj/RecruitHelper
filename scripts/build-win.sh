@@ -69,6 +69,20 @@ NSIS_ROOT="$(cd "$(dirname "$MAKENSIS")/.." && pwd)"
 if [ -d "$NSIS_ROOT/Stubs" ]; then
   export NSISDIR="$NSIS_ROOT"
 fi
+# 中文产品名走 GBK 载荷文件,不进 makensis 的字符串处理(它连 -D 传中文都会
+# 崩溃)。File 按字节打包,安装器运行期在 ACP=936 的机器上读回,经 ANSI API
+# 得到正确中文;其余 ACP 落英文兜底。机制详见 installer.nsi 头注释。
+# 文件名(display-name.gbk / uninstall-name.gbk)与 installer.nsi 的 LoadNames
+# 宏约定一致,改名要两处同改。
+NAMES_DIR="$REPO_ROOT/build/installer-names"
+mkdir -p "$NAMES_DIR"
+printf 'AI增员助手' | iconv -f UTF-8 -t GBK > "$NAMES_DIR/display-name.gbk"
+printf '卸载AI增员助手' | iconv -f UTF-8 -t GBK > "$NAMES_DIR/uninstall-name.gbk"
+for f in display-name.gbk uninstall-name.gbk; do
+  # set -e 已挡 iconv 非零退出;这里补"退出 0 但产出空文件"的角落 —— 空载荷
+  # 会让安装器静默落英文名,带病打包必须断在这里而不是客户桌面上。
+  [ -s "$NAMES_DIR/$f" ] || { echo "GBK 载荷生成失败:$f" >&2; exit 1; }
+done
 # installer.nsi 必须是纯 ASCII:macOS 的 makensis 是 ANSI-only 构建,脚本里出现
 # 任何非 ASCII 字节都会 "Bad text encoding",-INPUTCHARSET 与 BOM 都不管用。
 "$MAKENSIS" -V2 \
@@ -78,6 +92,8 @@ fi
   -DAPP_EXE="$APP_EXE" \
   -DBRAIN_EXE="$BRAIN_EXE" \
   -DICON_FILE="$REPO_ROOT/assets/app-icon.ico" \
+  -DDISPLAY_NAME_GBK="$NAMES_DIR/display-name.gbk" \
+  -DUNINSTALL_NAME_GBK="$NAMES_DIR/uninstall-name.gbk" \
   "$REPO_ROOT/scripts/installer.nsi"
 
 echo "==> 核对产物完整性"
