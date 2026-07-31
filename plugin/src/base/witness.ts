@@ -277,14 +277,32 @@ export class WitnessStore {
     })
   }
 
+  // ack 即脑账本已持久该终局，此后脑不再对该命令 query 或重投；outbox 与
+  // 对应 committed journal 在同一次删除中收割，journal 的 TTL 只兜底从未
+  // 获 ack 的条目。删除/计数崩溃缝由下次读取的 required-count 校验判 corrupt。
   async acknowledgeResult(msgId: string): Promise<void> {
     await this.withReady(async () => {
       await this.reloadLocked()
-      if (!this.outbox.has(msgId)) return
-      await this.erase(outboxKey(msgId))
+      const existing = this.outbox.get(msgId)
+      if (!existing) return
+      const ref = existing.message.body.ref
+      let journalIdemKey: string | null = null
+      for (const [idemKey, entry] of this.journals) {
+        if (entry.ref !== ref) continue
+        if (entry.state !== JournalState.Committed) {
+          this.state = 'corrupt'
+          throw this.storeCorrupt(`ack 目标的同 ref journal 仍为 attempting: ${msgId}`)
+        }
+        journalIdemKey = idemKey
+        break
+      }
+      const keys = [outboxKey(msgId)]
+      if (journalIdemKey !== null) keys.push(journalKey(journalIdemKey))
+      await this.erase(keys)
       const meta: WitnessStoreMeta = {
         ...this.requireMeta(),
         outboxCount: this.outbox.size - 1,
+        journalCount: this.journals.size - (journalIdemKey === null ? 0 : 1),
       }
       assertSchema('WitnessStoreMeta', meta)
       try {
@@ -293,10 +311,11 @@ export class WitnessStore {
         // remove 已经成功，此时旧 count 与真实 key 数不一致；继续运行会把丢失
         // 伪装成 unknown，必须立刻熔断为 corrupt。
         this.state = 'corrupt'
-        throw this.storeCorrupt(`outbox 删除后 meta 更新失败: ${message(error)}`)
+        throw this.storeCorrupt(`ack 收割后 meta 更新失败: ${message(error)}`)
       }
       this.meta = meta
       this.outbox.delete(msgId)
+      if (journalIdemKey !== null) this.journals.delete(journalIdemKey)
     })
   }
 
