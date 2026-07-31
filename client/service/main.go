@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
+	"recruithelper/client/service/internal/report"
 	"recruithelper/client/service/internal/productworkflow"
 	"recruithelper/client/service/internal/selfupdate"
 	"recruithelper/client/service/internal/session"
@@ -277,8 +279,53 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
+	// 现场数据上报(2026-07-31 甲方裁决)。日志由 Electron 写在 userData/logs,
+	// 不在脑的数据目录下,所以路径经环境变量传进来 —— 与 PLUGIN_DIR/UPDATE_DIR
+	// 同一套做法。开发期直接跑脑时没有这个变量,那时包里就没有日志。
+	fieldReportDeps := adminhttp.FieldReportDeps{
+		DataDir:    *dataDir,
+		LogDir:     strings.TrimSpace(os.Getenv("RECRUITHELPER_LOG_DIR")),
+		AppVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+	}
+	if traceErr == nil {
+		fieldReportDeps.TraceSnapshot = traceStore.SnapshotTo
+	}
+
 	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
-		SetJobConfigSource(jobConfigSource)
+		SetJobConfigSource(jobConfigSource).
+		SetFieldReportDeps(fieldReportDeps)
+
+	// 每日自动上传(2026-07-31 补充裁决)。开关默认关闭且每轮重读——这个 goroutine
+	// 常驻,但只要没人在诊断台打开开关，它每天到点看一眼就继续睡。
+	go report.RunScheduler(appCtx, report.SchedulerDeps{
+		Enabled: func() (bool, error) {
+			setting, err := st.FieldReportSetting()
+			return setting.AutoUploadEnabled, err
+		},
+		// 静默判定与自动更新、插件重载用同一套账本切面:有活跃工作流或未收束
+		// 命令时不动库——快照要抢 SetMaxOpenConns(1) 那唯一的写连接。
+		Quiet: func() (bool, string) {
+			if run, err := st.ActiveProductWorkflowRun(); err != nil {
+				return false, "读取活跃工作流失败"
+			} else if run != nil {
+				return false, "有活跃工作流"
+			}
+			pending, err := st.NonTerminalCmds()
+			if err != nil {
+				return false, "读取未收束命令失败"
+			}
+			if len(pending) > 0 {
+				return false, fmt.Sprintf("仍有 %d 条未收束命令", len(pending))
+			}
+			return true, ""
+		},
+		RunOnce: adminAPI.RunFieldReportOnce,
+		Record: func(at time.Time, ok bool, reason string) {
+			if err := st.RecordFieldReportAutoRun(at, ok, reason); err != nil {
+				slog.Warn("现场上报:记录自动上传结果失败", "errorCode", "fieldReportRecordFailed")
+			}
+		},
+	})
 	// 职位类别在后台配置值精确匹配不上时改由大模型从平台候选里选,复用同一条
 	// provider 通道。未配置 provider 时只是这条兜底不可用,精确匹配照旧工作。
 	if advice != nil {

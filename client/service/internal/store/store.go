@@ -131,6 +131,7 @@ func Open(dataDir string) (*Store, error) {
 		&AuditEntry{},
 		&NotificationOutbox{},
 		&CandidateScreenshot{},
+		&FieldReportSetting{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}

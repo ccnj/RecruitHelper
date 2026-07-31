@@ -10,14 +10,15 @@ const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
 const { pluginInstallDir, updateStageDir, ensurePluginInstalled } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
+const { RotatingLog } = require('./logRotate')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
 // 仅开发态有意义:打包后主进程在 asar 内,一切资源改由 resources 提供。
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
-// 单代轮转的阈值。只留一份 .old,不做多代归档 —— 这是诊断用的运行日志,
-// 不是需要长期保全的业务事实。
-const LOG_ROTATE_BYTES = 32 * 1024 * 1024
+// 轮转参数见 logRotate.js:运行期按累计写入触发,保留 5 代 × 16MB。
+// 原来是"只在启动时检查一次 + 只留一份 .old",两个毛病都会在最需要日志的时候
+// 反咬一口(2026-07-31 甲方裁决改为方案 A)。
 
 let service = null
 let win = null
@@ -29,31 +30,21 @@ let logStream = null
 // console.log 直接进虚空,所以这里落一份到磁盘,否则现场排查无从下手。
 // 内容边界不变:AGENTS.md 对普通日志的约束照旧(不得出现 key、聊天正文、简历
 // 正文、完整 prompt 或候选人明文身份)——落盘只是把易失变成持久,不放宽任何一条。
+// 日志目录只在这里算一次:脑要按名字取 brain.log 打进诊断包(现场数据上报,
+// 2026-07-31 裁决),两处各写一遍迟早漂移成"传上来的包里永远没有日志"。
+function logDirPath() {
+  return path.join(app.getPath('userData'), 'logs')
+}
+
 function openLogStream() {
-  const logDir = path.join(app.getPath('userData'), 'logs')
-  const logPath = path.join(logDir, 'brain.log')
-  try {
-    fs.mkdirSync(logDir, { recursive: true })
-    if (fs.statSync(logPath).size > LOG_ROTATE_BYTES) {
-      fs.renameSync(logPath, `${logPath}.old`)
-    }
-  } catch {
-    // 首次运行没有该文件是正常的;目录真不可写时下面开流会失败并降级。
-  }
-  try {
-    const stream = fs.createWriteStream(logPath, { flags: 'a' })
-    stream.write(`\n=== 启动 ${new Date().toISOString()} ===\n`)
-    return stream
-  } catch (error) {
-    // 日志写不了不是拦停客户端的理由,退回只有控制台。
-    console.error('[main] 日志文件打开失败,仅输出到控制台', error)
-    return null
-  }
+  const log = new RotatingLog({ dir: logDirPath() }).open()
+  log.write(`\n=== 启动 ${new Date().toISOString()} ===`)
+  return log
 }
 
 function writeLog(line) {
   console.log(line)
-  if (logStream) logStream.write(`${line}\n`)
+  if (logStream) logStream.write(line)
 }
 
 async function boot() {
@@ -83,7 +74,12 @@ async function boot() {
   }
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
-  const brainEnv = { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken }
+  const brainEnv = {
+    ...process.env,
+    RECRUITHELPER_ADMIN_TOKEN: adminToken,
+    // 脑自己的数据目录里没有日志 —— 日志是本进程写的,路径只有这里知道。
+    RECRUITHELPER_LOG_DIR: logDirPath(),
+  }
   // 开发期不传:那时固定目录要么不存在,要么是上次装包留下的陈旧副本,而
   // Chrome 里加载的是开发者自己的 plugin/dist —— 拿它当基准只会误判。
   if (pluginDir) brainEnv.RECRUITHELPER_PLUGIN_DIR = pluginDir
@@ -268,7 +264,7 @@ app.on('before-quit', () => {
   if (service) service.stop()
   if (logStream) {
     // 退出前把缓冲刷干净,否则最后几行(往往正是崩溃现场)会丢。
-    logStream.end()
+    logStream.close()
     logStream = null
   }
 })

@@ -293,6 +293,39 @@ export interface DevSQLResult {
   error?: string
 }
 
+// 现场数据上报的回执(2026-07-31 裁决)。manifest 记录本次实际打进包的文件与
+// 被跳过的项 —— 上报是排障工具,"少了什么"本身就是线索。
+export interface FieldReportFile {
+  name: string
+  bytes: number
+}
+
+export interface FieldReportManifest {
+  appVersion?: string
+  packedAt?: string
+  files?: FieldReportFile[]
+  skipped?: string[]
+}
+
+export interface FieldReportResult {
+  ok?: boolean
+  reportKey?: string
+  sizeBytes?: number
+  sha256?: string
+  manifest?: FieldReportManifest
+  error?: string
+}
+
+// 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
+// 且只有这一个入口能打开它。
+export interface FieldReportSettings {
+  autoUploadEnabled?: boolean
+  lastAutoAt?: string
+  lastAutoOk?: boolean
+  lastAutoError?: string
+  error?: string
+}
+
 export interface MutationResult {
   ok?: boolean
   error?: string
@@ -741,6 +774,10 @@ export const api = {
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
+  devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
+  devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
+  setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
+    post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
