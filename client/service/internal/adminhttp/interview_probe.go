@@ -46,21 +46,16 @@ func (a *API) probeInterviewEditor(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的账号/会话标识"})
 		return
 	}
-	// 彩排虽不出站,但会打开并操作该会话页面上的邀面弹窗;automation active
-	// 的会话随时可能被巡检/回复命令使用同一页面,拒绝彩排避免现场打架。
-	blocked, err := a.st.CommunicationV4DirectSendBlocked(store.ConversationKey{
+	// 2026-07-31 甲方裁决:拆除 automation-active 拒绝闸。彩排本就是有人值守
+	// 工具,会不会与巡检/回复命令抢占同一页面现场改由操作者当场判断;这里只
+	// 查询状态随响应回带供其判断,不再拦截。直发入口的同名闸不受本次影响。
+	automationActive, err := a.st.CommunicationV4DirectSendBlocked(store.ConversationKey{
 		Platform:        body.Platform,
 		AccountRef:      body.AccountRef,
 		ConversationRef: body.ConversationRef,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if blocked {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "该会话档案的 V4 沟通自动化仍为 active，禁止彩排（弹窗操作会与自动化命令抢占同一页面现场）",
-		})
 		return
 	}
 	// 手侧预算 90s + 派发排队余量;超时只表示本次彩排未在窗口内终局。
@@ -103,6 +98,9 @@ func (a *API) probeInterviewEditor(w http.ResponseWriter, r *http.Request) {
 	view := map[string]any{
 		"msgId":  leaf.MsgID,
 		"status": string(leaf.Status),
+		// 拒绝闸已拆,该状态改为纯告知:true 表示该会话自动化仍 active,
+		// 巡检/回复命令可能与彩排弹窗抢占同一页面现场,由操作者判断。
+		"automationActive": automationActive,
 	}
 	if leaf.ErrorCode != "" {
 		view["errorCode"] = leaf.ErrorCode

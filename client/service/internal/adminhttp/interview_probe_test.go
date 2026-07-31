@@ -139,7 +139,10 @@ func TestProbeInterviewEditorAPIDispatchesIntrusiveWithoutIntentAndReturnsHandDa
 	var view struct {
 		MsgID  string `json:"msgId"`
 		Status string `json:"status"`
-		Data   struct {
+		// 2026-07-31 甲方裁决拆除 automation-active 拒绝闸后，该状态改为纯告知，
+		// 随响应回带供有人值守的操作者判断，不再拦截。
+		AutomationActive bool `json:"automationActive"`
+		Data             struct {
 			DateValue string `json:"dateValue"`
 			TimeValue string `json:"timeValue"`
 			Canceled  bool   `json:"canceled"`
