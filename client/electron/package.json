@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
-    "test:node": "node test/service.test.mjs && node test/layout.test.mjs && node test/pluginSeed.test.mjs"
+    "test:node": "node test/service.test.mjs && node test/layout.test.mjs && node test/pluginSeed.test.mjs && node test/logRotate.test.mjs"
   },
   "devDependencies": {
     "electron": "^33.0.0",

@@ -10,14 +10,15 @@ const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
 const { pluginInstallDir, updateStageDir, ensurePluginInstalled } = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
+const { RotatingLog } = require('./logRotate')
 
 const PORT = Number(process.env.BRAIN_PORT || 17872)
 const ADMIN_BASE = `http://127.0.0.1:${PORT}`
 // 仅开发态有意义:打包后主进程在 asar 内,一切资源改由 resources 提供。
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
-// 单代轮转的阈值。只留一份 .old,不做多代归档 —— 这是诊断用的运行日志,
-// 不是需要长期保全的业务事实。
-const LOG_ROTATE_BYTES = 32 * 1024 * 1024
+// 轮转参数见 logRotate.js:运行期按累计写入触发,保留 5 代 × 16MB。
+// 原来是"只在启动时检查一次 + 只留一份 .old",两个毛病都会在最需要日志的时候
+// 反咬一口(2026-07-31 甲方裁决改为方案 A)。
 
 let service = null
 let win = null
@@ -36,30 +37,14 @@ function logDirPath() {
 }
 
 function openLogStream() {
-  const logDir = logDirPath()
-  const logPath = path.join(logDir, 'brain.log')
-  try {
-    fs.mkdirSync(logDir, { recursive: true })
-    if (fs.statSync(logPath).size > LOG_ROTATE_BYTES) {
-      fs.renameSync(logPath, `${logPath}.old`)
-    }
-  } catch {
-    // 首次运行没有该文件是正常的;目录真不可写时下面开流会失败并降级。
-  }
-  try {
-    const stream = fs.createWriteStream(logPath, { flags: 'a' })
-    stream.write(`\n=== 启动 ${new Date().toISOString()} ===\n`)
-    return stream
-  } catch (error) {
-    // 日志写不了不是拦停客户端的理由,退回只有控制台。
-    console.error('[main] 日志文件打开失败,仅输出到控制台', error)
-    return null
-  }
+  const log = new RotatingLog({ dir: logDirPath() }).open()
+  log.write(`\n=== 启动 ${new Date().toISOString()} ===`)
+  return log
 }
 
 function writeLog(line) {
   console.log(line)
-  if (logStream) logStream.write(`${line}\n`)
+  if (logStream) logStream.write(line)
 }
 
 async function boot() {
@@ -279,7 +264,7 @@ app.on('before-quit', () => {
   if (service) service.stop()
   if (logStream) {
     // 退出前把缓冲刷干净,否则最后几行(往往正是崩溃现场)会丢。
-    logStream.end()
+    logStream.close()
     logStream = null
   }
 })
