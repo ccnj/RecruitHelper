@@ -326,6 +326,30 @@ export interface FieldReportSettings {
   error?: string
 }
 
+/** 邀面编辑器彩排的回执。data 只含我方自设的日期/时间/时长/方式回读值，
+ *  现场面试没有时长与方式控件，那两项整键缺席。 */
+export interface InterviewProbeResult {
+  msgId?: string
+  status?: string
+  errorCode?: string
+  /** 拒绝闸已拆，这里只是告知该会话自动化是否仍 active，由使用者判断。 */
+  automationActive?: boolean
+  data?: {
+    conversationRef?: string
+    dateValue?: string
+    timeValue?: string
+    durationValue?: string
+    methodValue?: string
+    canceled?: boolean
+  }
+  error?: {
+    code?: string
+    message?: string
+    retryable?: string
+    sideEffect?: string
+  }
+}
+
 export interface MutationResult {
   ok?: boolean
   error?: string
@@ -778,6 +802,13 @@ export const api = {
   devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
     post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
+  probeInterviewEditor: (body: {
+    platform: string
+    accountRef: string
+    conversationRef: string
+    startsAt: number
+    method: 'wechatVideo' | 'onsite'
+  }) => post<InterviewProbeResult>('/admin/cards/interview/probe', body),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>

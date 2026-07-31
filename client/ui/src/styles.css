@@ -1358,3 +1358,71 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 .sql-table .sql-null { color: var(--txt-faint); font-style: italic; }
+
+/* 插件能力测试：一项能力一个区块，区块内是"填参数 → 跑 → 看回读"三段。 */
+.probe-block { display: flex; flex-direction: column; gap: 0.55rem; }
+.probe-block > p { margin: 0; }
+
+/* 前置条件与"这一步不会发生什么"的说明，压低视觉重量但不可省略。 */
+.probe-note {
+  margin: 0;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.probe-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.probe-field > span:first-child {
+  min-width: 5rem;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+}
+.probe-field select {
+  min-width: 18rem;
+  max-width: 100%;
+}
+.probe-radios { display: flex; gap: 1rem; flex-wrap: wrap; }
+.probe-radios label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--fs-base);
+  /* 不换行：选项文字被压成两三行时，radio 组会看着像坏掉的表格。 */
+  white-space: nowrap;
+}
+/* 全局 input 是 width:100%/min-height:38px（给文本框用的），radio 必须显式
+   收回固有尺寸，否则圆圈会被拉成占满整行的方块。 */
+.dc-shell .probe-radios input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  flex: none;
+  accent-color: var(--beam);
+}
+
+/* 时间输入不必占满整行。 */
+.dc-shell .probe-field input[type="datetime-local"] { width: auto; min-width: 13rem; }
+
+/* 按钮禁用时把"缺什么"说在旁边，省得人对着灰按钮猜。 */
+.probe-blocked { color: var(--txt-faint); font-size: var(--fs-sm); }
+
+/* 回读值两列铺开：左边字段名，右边平台实际回读到的值。 */
+.probe-readback {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.8rem;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+.probe-readback dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.probe-readback dd { margin: 0; font-size: var(--fs-base); }
+.probe-readback .probe-absent { color: var(--txt-faint); font-style: italic; }
+
+.probe-msgid { margin: 0; color: var(--txt-faint); font-size: var(--fs-sm); }
