@@ -99,12 +99,23 @@ export interface TodayInterviewView {
   confirmationLabel: string
 }
 
+// 「已过面试时间」只说明约定时间过了,不代表面试真发生过——系统没有面试完成
+// 写入口。对客户是干扰,2026-07-31 换成今日新换微信;后端统计仍在,诊断台可查。
 export interface TodayActivityView {
   greeted: ProductMetric
   greetingDisplayTarget: number | null
   newReplies: ProductMetric
+  newWechat: ProductMetric
   newInterviews: ProductMetric
-  elapsedInterviews: ProductMetric
+}
+
+// HomeStatusView 是首页那一句话的状态。产品端只讲"现在在干什么、要不要你
+// 动手",不讲阶段机:运行中只有招呼中与沟通中两种说法(2026-07-31 甲方裁决),
+// 其余都是等用户动手的情形。阶段级进度在诊断台看。
+export interface HomeStatusView {
+  label: string
+  hint: string
+  tone: 'running' | 'idle' | 'attention' | 'failed'
 }
 
 export interface OverviewView {
@@ -112,6 +123,7 @@ export interface OverviewView {
   refreshedAt: string | null
   businessWindowLabel: string
   businessWindowOpen: boolean
+  homeStatus: HomeStatusView
   workflow: WorkflowView
   funnel: FunnelView
   communication: CommunicationEngineView

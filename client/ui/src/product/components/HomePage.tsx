@@ -47,46 +47,23 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
     workflow.canStart && !pendingEnd,
     pendingEndReason ?? workflow.unavailableReason,
   )
-  const pauseReason = controlDisabledReason(
-    actions.pauseWorkflow,
-    workflow.canPause && !pendingEnd,
-    pendingEndReason ?? workflow.unavailableReason,
-  )
   const resumeReason = controlDisabledReason(
     actions.resumeWorkflow,
     workflow.canResume && !pendingEnd,
     pendingEndReason ?? workflow.unavailableReason,
   )
-  const additionalBatchReason = controlDisabledReason(
-    actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    workflow.canAddBatch && !pendingSourcing && !pendingEnd && customer.job.backendJobId !== null,
-    pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason ??
-      (customer.job.backendJobId === null ? '同步并绑定职位后可再次采集' : null),
-  )
+  // 暂停与"再采一批"2026-07-31 从客户界面撤下:运行中唯一的刹车是结束(脑侧
+  // 已放开漏斗阶段结束),再采一批结束后重新开始即可。两者的脑侧能力都还在。
   const endReason = controlDisabledReason(
     actions.endWorkflow,
     workflow.canEnd && !pendingEnd && !pendingSourcing,
     pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason,
   )
-  // 等待确认的人数是 funnel.pending(脑侧 pendingConfirm)。这里一度取
-  // stages.confirm.target，那是本批选中总数：招呼语生成失败、推荐流已变化、
-  // 不再可发送的都算在里面，于是首页说"20 位等待确认"、侧栏徽章说 18。
-  const confirmationCount = overview.funnel.pending ?? 0
-  const taskPosition = pendingEnd
-    ? '正在结束当前候选人…'
-    : pendingSourcing
-      ? '当前候选人处理完后开始新一批'
-      : workflow.state === 'running' && overview.funnel.stage === 'completed'
-    ? '本批候选人已经处理完成，正在继续回复候选人消息。'
-    : workflow.state === 'idle'
-      ? '点击开始后，系统会自动采集、评分并生成招呼语。'
-      : workflow.positionLabel ?? workflow.unavailableReason ?? '今日任务准备就绪。'
 
   return (
     <div className="rh-page rh-home-page">
       <section className="rh-home-welcome">
         <div>
-          <span className="rh-kicker">增员工作台</span>
           <h1>欢迎回来，{customer.name}</h1>
           <p>{overview.dateLabel}</p>
         </div>
@@ -128,211 +105,78 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
         </button>
       </section>
 
-      <div className="rh-home-primary-grid">
-        <section className="rh-panel rh-task-card">
-          <div className="rh-panel-heading">
-            <div>
-              <span className="rh-section-label">今日任务</span>
-              <h2>{workflow.stateLabel}</h2>
-            </div>
-            <StatusPill
-              label={workflow.mode === 'full' ? '自动招聘' : workflow.mode === 'replyOnly' ? '只处理消息' : '等待开始'}
-              tone={workflow.state === 'running' || workflow.state === 'awaitingConfirmation' ? 'green' : 'slate'}
-            />
+      <section className="rh-panel rh-status-card">
+        <div className="rh-status-head">
+          <span className={`rh-status-dot is-${overview.homeStatus.tone}`} />
+          <div className="rh-status-copy">
+            <h2>{overview.homeStatus.label}</h2>
+            <p>{overview.homeStatus.hint}</p>
+            {(workflow.state === 'idle' || workflow.state === 'failed') && (
+              <button
+                className="rh-status-alt"
+                disabled={startReplyReason !== null}
+                onClick={() => void actions.startWorkflow?.('replyOnly')}
+                title={startReplyReason ?? undefined}
+                type="button"
+              >
+                只回复消息，不招新人
+              </button>
+            )}
           </div>
-          <p className="rh-task-position">
-            {taskPosition}
-          </p>
           <div className="rh-task-actions">
             {(workflow.state === 'idle' || workflow.state === 'failed') && (
-              <>
-                <button
-                  className="rh-button is-primary"
-                  disabled={startFullReason !== null}
-                  onClick={() => void actions.startWorkflow?.('full')}
-                  title={startFullReason ?? undefined}
-                  type="button"
-                >
-                  <ProductIcon name="play" size={17} />
-                  {workflow.state === 'failed' ? '重新开始今日任务' : '开始今日任务'}
-                </button>
-                <button
-                  className="rh-button is-quiet"
-                  disabled={startReplyReason !== null}
-                  onClick={() => void actions.startWorkflow?.('replyOnly')}
-                  title={startReplyReason ?? undefined}
-                  type="button"
-                >
-                  只处理新消息
-                </button>
-              </>
+              <button
+                className="rh-button is-primary"
+                disabled={startFullReason !== null}
+                onClick={() => void actions.startWorkflow?.('full')}
+                title={startFullReason ?? undefined}
+                type="button"
+              >
+                <ProductIcon name="play" size={17} />
+                {workflow.state === 'failed' ? '重新开始' : '开始今天的招聘'}
+              </button>
             )}
             {(workflow.state === 'paused' || workflow.state === 'waitingDailyWindow') && (
-              <>
-                <button
-                  className="rh-button is-primary"
-                  disabled={resumeReason !== null}
-                  onClick={() => void actions.resumeWorkflow?.()}
-                  title={resumeReason ?? undefined}
-                  type="button"
-                >
-                  <ProductIcon name="play" size={17} />
-                  继续今日任务
-                </button>
-                {workflow.state === 'paused' && (workflow.canAddBatch || pendingSourcing) && (
-                  <button
-                    className="rh-button is-quiet"
-                    disabled={additionalBatchReason !== null}
-                    onClick={() => void actions.startWorkflow?.('full')}
-                    title={additionalBatchReason ?? undefined}
-                    type="button"
-                  >
-                    {pendingSourcing ? '新一批已安排' : '再采一批（150 人）'}
-                  </button>
-                )}
-                {(workflow.canEnd || workflow.pendingAction !== null) && (
-                  <button
-                    className="rh-button is-quiet"
-                    disabled={endReason !== null}
-                    onClick={() => {
-                      if (actions.endWorkflow) {
-                        void confirmEndWorkflow(
-                          (message) => window.confirm(message),
-                          actions.endWorkflow,
-                        )
-                      }
-                    }}
-                    title={endReason ?? undefined}
-                    type="button"
-                  >
-                    {pendingEnd ? '正在结束…' : '结束本次任务'}
-                  </button>
-                )}
-              </>
+              <button
+                className="rh-button is-primary"
+                disabled={resumeReason !== null}
+                onClick={() => void actions.resumeWorkflow?.()}
+                title={resumeReason ?? undefined}
+                type="button"
+              >
+                <ProductIcon name="play" size={17} />
+                继续
+              </button>
             )}
             {workflow.state === 'awaitingConfirmation' && (
-              <>
-                <button className="rh-button is-primary" onClick={onOpenConfirmation} type="button">
-                  去确认候选人
-                  <ProductIcon name="chevron" size={16} />
-                </button>
-                <button
-                  className="rh-button is-quiet"
-                  disabled={pauseReason !== null}
-                  onClick={() => void actions.pauseWorkflow?.()}
-                  title={pauseReason ?? undefined}
-                  type="button"
-                >
-                  暂停
-                </button>
-              </>
+              <button className="rh-button is-primary" onClick={onOpenConfirmation} type="button">
+                去确认候选人
+                <ProductIcon name="chevron" size={16} />
+              </button>
             )}
-            {workflow.state === 'running' && (
-              <>
-                <button
-                  className="rh-button is-primary"
-                  disabled={pauseReason !== null}
-                  onClick={() => void actions.pauseWorkflow?.()}
-                  title={pauseReason ?? undefined}
-                  type="button"
-                >
-                  <ProductIcon name="pause" size={17} />
-                  暂停
-                </button>
-                {(workflow.canAddBatch || pendingSourcing) && (
-                  <button
-                    className="rh-button is-quiet"
-                    disabled={additionalBatchReason !== null}
-                    onClick={() => void actions.startWorkflow?.('full')}
-                    title={additionalBatchReason ?? undefined}
-                    type="button"
-                  >
-                    {pendingSourcing ? '新一批已安排' : '再采一批（150 人）'}
-                  </button>
-                )}
-                {(workflow.canEnd || workflow.pendingAction !== null) && (
-                  <button
-                    className="rh-button is-quiet"
-                    disabled={endReason !== null}
-                    onClick={() => {
-                      if (actions.endWorkflow) {
-                        void confirmEndWorkflow(
-                          (message) => window.confirm(message),
-                          actions.endWorkflow,
-                        )
-                      }
-                    }}
-                    title={endReason ?? undefined}
-                    type="button"
-                  >
-                    {pendingEnd ? '正在结束…' : '结束本次任务'}
-                  </button>
-                )}
-              </>
+            {workflow.state !== 'idle' && workflow.state !== 'failed' &&
+              (workflow.canEnd || workflow.pendingAction !== null) && (
+              <button
+                className="rh-button is-quiet"
+                disabled={endReason !== null}
+                onClick={() => {
+                  if (actions.endWorkflow) {
+                    void confirmEndWorkflow(
+                      (message) => window.confirm(message),
+                      actions.endWorkflow,
+                    )
+                  }
+                }}
+                title={endReason ?? undefined}
+                type="button"
+              >
+                {pendingEnd ? '正在结束…' : '结束本次任务'}
+              </button>
             )}
           </div>
-          {(startFullReason || startReplyReason) &&
-            (workflow.state === 'idle' || workflow.state === 'failed') && (
-            <div className="rh-inline-note"><ProductIcon name="warning" size={15} />{startFullReason}</div>
-          )}
-        </section>
-
-        <section className="rh-panel rh-communication-card">
-          <div className="rh-panel-heading">
-            <div>
-              <span className="rh-section-label">沟通引擎</span>
-              <h2>{overview.communication.stateLabel}</h2>
-            </div>
-            <span className={`rh-engine-pulse is-${overview.communication.state}`} />
-          </div>
-          <p>持续巡检已建立的候选人会话，与候选漏斗相互独立。</p>
-          <dl className="rh-compact-facts">
-            <div><dt>最近巡检</dt><dd>{overview.communication.lastPatrolAt ?? '尚无巡检记录'}</dd></div>
-            <div><dt>运行方式</dt><dd>确定性状态机</dd></div>
-          </dl>
-        </section>
-      </div>
-
-      <section className="rh-panel rh-pipeline-panel">
-        <div className="rh-panel-heading">
-          <div>
-            <span className="rh-section-label">流程进度</span>
-            <h2>{overview.funnel.stateLabel}</h2>
-          </div>
-          <div className="rh-pipeline-summary">
-            <span>目标 <strong>{overview.funnel.target ?? '—'}</strong></span>
-            <span>待处理 <strong>{overview.funnel.pending ?? '—'}</strong></span>
-            <span>失败 <strong>{overview.funnel.failed ?? '—'}</strong></span>
-          </div>
         </div>
-        <div className="rh-pipeline-track">
-          {overview.funnel.stages.map((stage, index) => (
-            <div className={`rh-pipeline-stage is-${stage.state}`} key={stage.key}>
-              <div className="rh-stage-line" />
-              <div className="rh-stage-node">
-                {stage.state === 'complete' ? <ProductIcon name="check" size={14} /> : index + 1}
-              </div>
-              <strong>{stage.label}</strong>
-              <span>
-                {stage.target === null ? '尚未开始' : `${stage.completed} / ${stage.target}`}
-                {stage.failed > 0 ? `，失败 ${stage.failed}` : ''}
-              </span>
-            </div>
-          ))}
-        </div>
-        {overview.funnel.latestFailure && (
-          <div className="rh-inline-note is-danger">
-            <ProductIcon name="warning" size={15} />
-            {overview.funnel.latestFailure}
-          </div>
-        )}
-        {workflow.state === 'awaitingConfirmation' && confirmationCount > 0 && (
-          <div className="rh-confirmation-callout">
-            <div>
-              <strong>{confirmationCount} 位候选人的招呼语等待确认</strong>
-              <span>系统不会自动发送，请在候选确认页全选后发送。</span>
-            </div>
-          </div>
+        {startFullReason && (workflow.state === 'idle' || workflow.state === 'failed') && (
+          <div className="rh-inline-note"><ProductIcon name="warning" size={15} />{startFullReason}</div>
         )}
       </section>
 
@@ -408,8 +252,8 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           )}
           <dl className="rh-activity-facts">
             <div><dt>新回复</dt><dd>{metricText(overview.todayActivity.newReplies)}</dd></div>
+            <div><dt>新换微</dt><dd>{metricText(overview.todayActivity.newWechat)}</dd></div>
             <div><dt>新约面</dt><dd>{metricText(overview.todayActivity.newInterviews)}</dd></div>
-            <div><dt>已过面试时间</dt><dd>{metricText(overview.todayActivity.elapsedInterviews)}</dd></div>
           </dl>
         </section>
       </div>

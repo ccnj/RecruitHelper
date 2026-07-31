@@ -320,10 +320,16 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 		state.CanAddBatch = run.Stage == store.ProductWorkflowStageCommunication &&
 			(run.Status == workflow.StatusRunning || run.Status == workflow.StatusPaused) &&
 			run.PendingAction == ""
-		state.CanEnd = run.Stage == store.ProductWorkflowStageCommunication &&
+		// 结束在漏斗阶段同样可用(2026-07-31 甲方裁决)。此前只认沟通阶段,
+		// 于是漏斗跑着的一两个小时里用户面前一个可点的东西都没有——想停只
+		// 能关客户端。结束本身不是硬杀:它写一个 pendingAction,由编排器在
+		// 候选人/成员边界收束,已铸的 WAL intent 照常走完。
+		state.CanEnd = run.Stage != store.ProductWorkflowStageCompleted &&
+			run.Stage != store.ProductWorkflowStageFailed &&
 			(run.Status == workflow.StatusRunning ||
 				run.Status == workflow.StatusPaused ||
-				run.Status == workflow.StatusWaitingDailyWindow) &&
+				run.Status == workflow.StatusWaitingDailyWindow ||
+				run.Status == workflow.StatusAwaitingConfirmation) &&
 			run.PendingAction == ""
 		if run.SourcingBatchID != nil {
 			state.CurrentBatchID = *run.SourcingBatchID

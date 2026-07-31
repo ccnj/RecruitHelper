@@ -324,6 +324,89 @@ func TestEndCommunicationWaitsForBoundaryThenReleasesActiveSlot(t *testing.T) {
 	}
 }
 
+// 漏斗阶段也能结束(2026-07-31 甲方裁决)。此前 canEnd 只认沟通阶段,漏斗跑
+// 着的一两个小时里用户面前一个可点的东西都没有。这里盯三件事:结束请求在
+// 采集阶段能被受理、成员闸立刻不再放行下一个人、收束后用户还能重新开工——
+// 最后一条是关键,采集半途终止会留下未终局的批次,而未终局批次会让
+// StartReplyOnly 直接报 ErrSourcingBatchActive(见下一个测试)。
+func TestEndDuringSourcingStopsNextMemberAndLeavesUserAbleToStartAgain(t *testing.T) {
+	// 采集阶段直接结束,以及推进到评分阶段后再结束。两者都要走完整条链:
+	// 请求被受理 → 成员闸立刻拦下 → 收束成 completed → 半截批次写成终态 →
+	// 用户还能重新开工。
+	for _, tc := range []struct {
+		name  string
+		stage string
+	}{
+		{name: "sourcing", stage: ""},
+		{name: "scoring", stage: store.ProductWorkflowStageScoring},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, key, revision := productWorkflowFixture(t)
+			location := time.UTC
+			clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+			actor := &fixtureActor{store: db, clock: clock}
+			manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := manager.StartFull(key, revision.RevisionHash)
+			if err != nil || run.SourcingBatchID == nil ||
+				run.Stage == store.ProductWorkflowStageCommunication {
+				t.Fatalf("StartFull() = %+v, err=%v", run, err)
+			}
+			batchID := *run.SourcingBatchID
+			if tc.stage != "" {
+				if _, err := db.AdvanceProductWorkflowStage(
+					store.AdvanceProductWorkflowStageRequest{
+						RunID: run.RunID, ExpectedStage: run.Stage,
+						ExpectedStatus: workflow.StatusRunning,
+						NextStage:      tc.stage, At: clock.Now(),
+					},
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := actor.gate(); err != nil {
+				t.Fatalf("漏斗阶段成员闸本应放行: %v", err)
+			}
+
+			ending, err := manager.End()
+			if err != nil || ending.PendingAction != store.ProductWorkflowPendingActionEnd {
+				t.Fatalf("漏斗阶段 End() = %+v, err=%v", ending, err)
+			}
+			// 点了结束,下一个人就不再开工;这条不成立的话结束要等整批跑完才生效。
+			if err := actor.gate(); !errors.Is(err, ErrMemberStartBlocked) {
+				t.Fatalf("结束请求后成员闸应立即拦下: %v", err)
+			}
+
+			completed, err := manager.AdvanceOnce(context.Background())
+			if err != nil || completed == nil ||
+				completed.Status != workflow.StatusCompleted ||
+				completed.Stage != store.ProductWorkflowStageCompleted ||
+				completed.EndReason != productWorkflowEndReasonUserEnded ||
+				completed.ActiveSlot != nil {
+				t.Fatalf("漏斗阶段收束 = %+v, err=%v", completed, err)
+			}
+			if active, loadErr := db.ActiveProductWorkflowRun(); loadErr != nil || active != nil {
+				t.Fatalf("结束后不得留下活跃工作流: %+v, %v", active, loadErr)
+			}
+
+			// 半截批次要写成不可变终态(不删除批次与成员),原因可追溯。
+			batch, err := db.SourcingBatchByID(batchID)
+			if err != nil || batch == nil || batch.EndedAt == nil ||
+				batch.Status != store.SourcingBatchStopped {
+				t.Fatalf("未终局批次应写成放弃终态: %+v, %v", batch, err)
+			}
+
+			// 用户结束后必须还能开工。只回消息一度会被未终局的采集批次挡住,
+			// 那等于点了结束就再也开不了工。
+			if _, err := manager.StartReplyOnly(key); err != nil {
+				t.Fatalf("结束后 StartReplyOnly 应可开工: %v", err)
+			}
+		})
+	}
+}
+
 func TestReplyOnlyRejectsUnfinishedSourcingBatch(t *testing.T) {
 	db, key, revision := productWorkflowFixture(t)
 	location := time.UTC

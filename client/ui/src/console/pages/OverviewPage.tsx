@@ -2,6 +2,9 @@
 // 三块留在一页，是因为它们本来就是同一个调试闭环。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, FrameEvent, HandHealth, LedgerRow } from '../../api'
+import { PipelinePanel } from '../../product/components/PipelinePanel'
+import { readProductData } from '../../product/api'
+import type { ProductData } from '../../product/types'
 import { elapsed, errorText, shortRef, timeOfDay } from '../format'
 import { DiagnosticCard, RawField } from '../shared/Primitives'
 import { usePolling } from '../usePolling'
@@ -20,12 +23,50 @@ export function OverviewPage({ hands, busy, canProcessCurrent, onProcessCurrent 
         canProcessCurrent={canProcessCurrent}
         onProcessCurrent={onProcessCurrent}
       />
+      <Pipeline />
       <div className="dc-split">
         <Ledger />
         <Frames hands={hands} />
       </div>
     </>
   )
+}
+
+// 流程进度 2026-07-31 从客户首页搬到这里。客户看六段阶段条只会把正常的漏斗
+// 收窄("筛选 18/30")当成故障;排障时它仍是最快看清卡在哪一段的东西。数据走
+// 产品端 /app/overview——诊断台与产品页同在一个渲染进程,两套 API 都能调。
+function Pipeline() {
+  const [funnel, setFunnel] = useState<ProductData['overview']['funnel'] | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let alive = true
+    const read = () => {
+      readProductData()
+        .then((data) => {
+          if (!alive) return
+          setFunnel(data.overview.funnel)
+          setError('')
+        })
+        .catch((cause) => {
+          if (alive) setError(errorText(cause))
+        })
+    }
+    read()
+    const timer = setInterval(read, 4000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [])
+  if (error !== '') {
+    return (
+      <DiagnosticCard title="流程进度">
+        <RawField label="读取失败" value={error} />
+      </DiagnosticCard>
+    )
+  }
+  if (funnel === null) return null
+  return <div className="dc-pipeline-host">{<PipelinePanel funnel={funnel} />}</div>
 }
 
 function QuickActions({ hands, busy, canProcessCurrent, onProcessCurrent }: {

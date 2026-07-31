@@ -24,6 +24,7 @@ var (
 const (
 	productWorkflowEndReasonAdditionalBatch   = "additionalBatch"
 	productWorkflowEndReasonUserEnded         = "userEnded"
+	sourcingBatchStopReasonUserEnded          = "userEndedWorkflow"
 	productWorkflowEndReasonDailyWindowClosed = "dailyWindowClosed"
 )
 
@@ -269,6 +270,40 @@ func (m *Manager) executePendingControl(
 	return resolved, err
 }
 
+// stopUnfinishedSourcingBatch 把用户结束时还没跑完的采集批次写成终态。批次
+// 与其成员都不删除,只落一个不可变的放弃原因(业务事实禁止物理删除)。已经
+// 终局的批次直接跳过,重放安全。
+func (m *Manager) stopUnfinishedSourcingBatch(
+	run *store.ProductWorkflowRun,
+	now time.Time,
+) error {
+	if run.SourcingBatchID == nil {
+		return nil
+	}
+	batch, err := m.store.SourcingBatchByID(*run.SourcingBatchID)
+	if err != nil {
+		if errors.Is(err, store.ErrSourcingBatchNotFound) {
+			return nil
+		}
+		return err
+	}
+	if batch == nil || batch.EndedAt != nil {
+		return nil
+	}
+	if _, err := m.store.StopSourcingBatch(store.StopSourcingBatchRequest{
+		BatchID:   batch.BatchID,
+		Reason:    sourcingBatchStopReasonUserEnded,
+		StoppedAt: now,
+	}); err != nil {
+		// 已经是终态就当作已完成,不要把结束本身卡住。
+		if errors.Is(err, store.ErrSourcingBatchStateConflict) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func (m *Manager) executePendingAtBoundary(
 	fallback *store.ProductWorkflowRun,
 ) (*store.ProductWorkflowRun, error) {
@@ -280,9 +315,15 @@ func (m *Manager) executePendingAtBoundary(
 		return fallback, err
 	}
 	if run == nil || run.RunID != fallback.RunID ||
-		run.Stage != store.ProductWorkflowStageCommunication ||
 		run.PendingAction == "" ||
 		run.PendingAction != fallback.PendingAction {
+		return currentRunOr(fallback, run, nil), store.ErrProductWorkflowConflict
+	}
+	// 阶段限制按动作分开:再采一批的语义就是"这批聊完了再来一批",离开沟通
+	// 阶段没有意义;结束则在任何活跃阶段都成立(2026-07-31 甲方裁决),否则
+	// 漏斗跑着的一两个小时里用户点了结束也不会有任何反应。
+	if run.PendingAction == store.ProductWorkflowPendingActionSourcing &&
+		run.Stage != store.ProductWorkflowStageCommunication {
 		return currentRunOr(fallback, run, nil), store.ErrProductWorkflowConflict
 	}
 
@@ -293,6 +334,12 @@ func (m *Manager) executePendingAtBoundary(
 		// Pause the actor while tickMu is still held. Only after the account
 		// gate is closed do we release the active product slot.
 		if err := m.actor.PauseNow(key); err != nil {
+			return run, err
+		}
+		// 用户主动结束时,半途的采集批次要一并写成"用户放弃"的终态。不写的
+		// 话它一直算未终局,下次 StartReplyOnly 会被 ErrSourcingBatchActive
+		// 挡住——表现就是点完结束,"只回复消息"这条路再也走不通。
+		if err := m.stopUnfinishedSourcingBatch(run, now); err != nil {
 			return run, err
 		}
 		return m.store.TransitionProductWorkflowRun(
