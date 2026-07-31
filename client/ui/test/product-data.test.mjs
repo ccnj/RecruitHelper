@@ -336,11 +336,49 @@ check(
   '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
 )
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
-// 这一行原先恒为不可用("没有面试完成写入口")，产品端永远显示"—"，用户分不清
-// "今天没有"和"读不出来"。现在报今天已过面试时间的人数。
+// 「已过面试时间」只说明约定时间过了，不代表面试真发生过——系统没有面试完成
+// 写入口。对客户是干扰，2026-07-31 换成今日新换微信；后端统计仍在，诊断台可查。
 check(
-  product.overview.todayActivity.elapsedInterviews === 2,
-  '今日已过面试时间取脑侧精确值，不再恒为不可用',
+  product.overview.todayActivity.newWechat === 5 &&
+    product.overview.todayActivity.elapsedInterviews === undefined,
+  '沟通节奏第二项换成今日新换微信',
+)
+
+// 首页运行中只有两种说法：漏斗在跑叫招呼中，回复已有候选人叫沟通中。这两条
+// 一旦分不清，用户会以为系统还在打招呼、其实早就只在回消息了。
+const greetingSnapshot = structuredClone(snapshot)
+greetingSnapshot.overview.runtime.workflowStatus = 'running'
+greetingSnapshot.overview.overview.funnel.stage = 'sendingGreetings'
+const greetingHome = adaptProductSnapshot(greetingSnapshot, now).overview.homeStatus
+check(
+  greetingHome.label === '招呼中' && greetingHome.tone === 'running',
+  '漏斗在跑时首页说招呼中',
+)
+const talkingSnapshot = structuredClone(snapshot)
+talkingSnapshot.overview.runtime.workflowStatus = 'running'
+talkingSnapshot.overview.overview.funnel.stage = 'completed'
+check(
+  adaptProductSnapshot(talkingSnapshot, now).overview.homeStatus.label === '沟通中',
+  '漏斗跑完后首页说沟通中',
+)
+const replyOnlyHome = structuredClone(snapshot)
+replyOnlyHome.overview.runtime.workflowStatus = 'running'
+replyOnlyHome.overview.runtime.workflowMode = 'replyOnly'
+check(
+  adaptProductSnapshot(replyOnlyHome, now).overview.homeStatus.label === '沟通中',
+  '只回消息模式首页说沟通中',
+)
+// 等你确认与等你继续都是"要你动手"，必须和运行中区分开，否则用户会一直等。
+check(
+  product.overview.homeStatus.label === '等你确认' &&
+    product.overview.homeStatus.hint.includes('确认后才会发出去'),
+  '等待确认时首页直说等你确认',
+)
+const pausedHome = structuredClone(snapshot)
+pausedHome.overview.runtime.workflowStatus = 'paused'
+check(
+  adaptProductSnapshot(pausedHome, now).overview.homeStatus.label === '等你继续',
+  '暂停与跨日都收敛成等你继续',
 )
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')

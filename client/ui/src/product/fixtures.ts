@@ -164,6 +164,11 @@ export function createProductFixture(): ProductData {
       refreshedAt: '今天 09:32',
       businessWindowLabel: '运行时间 08:00～24:00',
       businessWindowOpen: true,
+      homeStatus: {
+        label: '等你确认',
+        hint: '18 位候选人的招呼语已经写好，你确认后才会发出去。',
+        tone: 'attention',
+      },
       workflow: {
         mode: 'full',
         state: 'awaitingConfirmation',
@@ -217,8 +222,8 @@ export function createProductFixture(): ProductData {
         greeted: 6,
         greetingDisplayTarget: 100,
         newReplies: 3,
+        newWechat: 2,
         newInterviews: 2,
-        elapsedInterviews: 1,
       },
     },
     confirmation: {
@@ -286,6 +291,11 @@ export function createEmptyProductData(): ProductData {
       refreshedAt: null,
       businessWindowLabel: '运行时间 08:00～24:00',
       businessWindowOpen: false,
+      homeStatus: {
+        label: '未开始',
+        hint: '点开始，系统会自动挑人、打招呼、回消息。',
+        tone: 'idle',
+      },
       workflow: {
         mode: 'none',
         state: 'idle',
@@ -337,8 +347,8 @@ export function createEmptyProductData(): ProductData {
         greeted: 0,
         greetingDisplayTarget: 100,
         newReplies: 0,
+        newWechat: 0,
         newInterviews: 0,
-        elapsedInterviews: 0,
       },
     },
     confirmation: {

@@ -286,7 +286,7 @@ func (s *Store) RequestProductWorkflowPendingAction(
 			}
 			return err
 		}
-		if !productWorkflowAcceptsPendingAction(current) {
+		if !productWorkflowAcceptsPendingAction(current, req.Action) {
 			return ErrProductWorkflowConflict
 		}
 		if current.PendingAction != "" {
@@ -304,7 +304,11 @@ func (s *Store) RequestProductWorkflowPendingAction(
 				"run_id = ? AND active_slot = ? AND stage = ? AND status = ? AND (pending_action = ? OR pending_action IS NULL)",
 				req.RunID,
 				productWorkflowActiveSlot,
-				ProductWorkflowStageCommunication,
+				// 用读到的当前阶段做 CAS 条件,而不是写死沟通阶段:这里要挡的是
+				// "读到之后又被人改了",不是限定动作只能发生在某个阶段——那件事
+				// 由上面的 productWorkflowAcceptsPendingAction 判。写死会让漏斗
+				// 阶段的结束请求永远更新 0 行,表现为点了没反应。
+				current.Stage,
 				current.Status,
 				ProductWorkflowPendingAction(""),
 			).
@@ -347,7 +351,7 @@ func (s *Store) ClearProductWorkflowPendingAction(
 			}
 			return err
 		}
-		if !productWorkflowAcceptsPendingAction(current) {
+		if !productWorkflowAcceptsPendingAction(current, req.ExpectedAction) {
 			return ErrProductWorkflowConflict
 		}
 		if current.PendingAction == "" {
@@ -363,7 +367,9 @@ func (s *Store) ClearProductWorkflowPendingAction(
 				"run_id = ? AND active_slot = ? AND stage = ? AND status = ? AND pending_action = ?",
 				req.RunID,
 				productWorkflowActiveSlot,
-				ProductWorkflowStageCommunication,
+				// 同 Request:CAS 条件用读到的当前阶段,写死会让漏斗阶段撤回请求
+				// 永远更新 0 行。
+				current.Stage,
 				current.Status,
 				req.ExpectedAction,
 			).
@@ -535,13 +541,28 @@ func validProductWorkflowPendingAction(action ProductWorkflowPendingAction) bool
 		action == ProductWorkflowPendingActionEnd
 }
 
-func productWorkflowAcceptsPendingAction(run ProductWorkflowRun) bool {
-	if run.ActiveSlot == nil || run.Stage != ProductWorkflowStageCommunication {
+func productWorkflowAcceptsPendingAction(
+	run ProductWorkflowRun,
+	action ProductWorkflowPendingAction,
+) bool {
+	if run.ActiveSlot == nil {
+		return false
+	}
+	// 阶段限制按动作分开(2026-07-31 甲方裁决)。再采一批的语义是"这批聊完了
+	// 再来一批",离开沟通阶段没有意义;结束则在任何未终局阶段都成立,否则
+	// 漏斗跑着的一两个小时里,用户点结束会被这里直接拒回,界面上就是点了
+	// 没反应。
+	if action == ProductWorkflowPendingActionSourcing &&
+		run.Stage != ProductWorkflowStageCommunication {
 		return false
 	}
 	switch run.Status {
 	case workflow.StatusRunning, workflow.StatusPaused, workflow.StatusWaitingDailyWindow:
 		return true
+	case workflow.StatusAwaitingConfirmation:
+		// 等待人工确认时只允许结束:招呼语已生成但一条都还没发,此时放弃这批
+		// 是用户的正当选择。再采一批在这里仍然无意义。
+		return action == ProductWorkflowPendingActionEnd
 	default:
 		return false
 	}
