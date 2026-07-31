@@ -1163,7 +1163,9 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-precheck-head { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--rule); }
 .publish-precheck-head strong { font-size: var(--fs-base); }
 .publish-precheck-head small { display: block; margin-top: 0.08rem; color: var(--txt-faint); font-size: var(--fs-sm); }
-.publish-precheck-list { max-height: 210px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+/* 二次确认清单是这一页的主工作面：每行要摊开类别候选与关键词落点，210px
+   只够显示一行半。给到近半屏，剩下的交给内部滚动。 */
+.publish-precheck-list { max-height: 46vh; margin: 0; padding: 0; overflow: auto; list-style: none; }
 .publish-precheck-list li { padding: 0.35rem 0.5rem; border-bottom: 1px solid rgba(32, 41, 50, 0.55); border-left: 2px solid transparent; }
 .publish-precheck-list li:last-child { border-bottom: 0; }
 .publish-precheck-list li.is-ready { border-left-color: var(--live); }
@@ -1179,6 +1181,24 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-precheck-issue { color: #ffb3ae; }
 .publish-precheck-notice { color: var(--txt-faint); }
 .dc-shell .publish-precheck-row button { width: auto; margin: 0 0 0 auto; padding: 0.12rem 0.36rem; font-size: var(--fs-sm); }
+.dc-shell .publish-precheck-row button ~ button { margin-left: 0; }
+.publish-precheck-pick { display: inline-flex; align-items: center; }
+.publish-precheck-pick input { margin: 0; }
+/* 一行里的决定摘要：类别 + 那几个关键词。清单要能一眼扫完，不必逐个展开。 */
+.publish-precheck-decided { color: var(--live); font-size: var(--fs-sm); font-style: normal; }
+
+/* 两段式循环的操纵杆。阶段 A 零副作用可以随便重来，阶段 B 不可逆，所以后者
+   要连点两次；停止只影响"要不要开始下一个"。 */
+.publish-loop-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;
+  padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--rule);
+}
+.dc-shell .publish-loop-bar button { width: auto; margin: 0; padding: 0.14rem 0.42rem; font-size: var(--fs-sm); }
+.publish-loop-cursor { margin-left: 0.2rem; color: var(--txt-faint); font-size: var(--fs-sm); }
+
+/* 关键词落点：命中词库的走点选、其余走兜底组自定义，两条路语义不同 */
+.publish-keywords strong.ok { color: var(--live); }
+.publish-keywords strong.bad { color: var(--warn); }
 
 /* 试填回读报告：证明"能填进去"，不是"发布了" */
 .publish-draft-report { margin: 0.3rem 0 0 4.95rem; padding: 0.3rem 0.4rem; border-left: 2px solid var(--rule-hi); background: #0c1116; }
