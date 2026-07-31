@@ -29,8 +29,14 @@ let logStream = null
 // console.log 直接进虚空,所以这里落一份到磁盘,否则现场排查无从下手。
 // 内容边界不变:AGENTS.md 对普通日志的约束照旧(不得出现 key、聊天正文、简历
 // 正文、完整 prompt 或候选人明文身份)——落盘只是把易失变成持久,不放宽任何一条。
+// 日志目录只在这里算一次:脑要按名字取 brain.log 打进诊断包(现场数据上报,
+// 2026-07-31 裁决),两处各写一遍迟早漂移成"传上来的包里永远没有日志"。
+function logDirPath() {
+  return path.join(app.getPath('userData'), 'logs')
+}
+
 function openLogStream() {
-  const logDir = path.join(app.getPath('userData'), 'logs')
+  const logDir = logDirPath()
   const logPath = path.join(logDir, 'brain.log')
   try {
     fs.mkdirSync(logDir, { recursive: true })
@@ -83,7 +89,12 @@ async function boot() {
   }
   // 管理 token 每次进程启动重新生成，只在主进程环境与隔离 preload 内存中流转。
   const adminToken = crypto.randomBytes(32).toString('base64url')
-  const brainEnv = { ...process.env, RECRUITHELPER_ADMIN_TOKEN: adminToken }
+  const brainEnv = {
+    ...process.env,
+    RECRUITHELPER_ADMIN_TOKEN: adminToken,
+    // 脑自己的数据目录里没有日志 —— 日志是本进程写的,路径只有这里知道。
+    RECRUITHELPER_LOG_DIR: logDirPath(),
+  }
   // 开发期不传:那时固定目录要么不存在,要么是上次装包留下的陈旧副本,而
   // Chrome 里加载的是开发者自己的 plugin/dist —— 拿它当基准只会误判。
   if (pluginDir) brainEnv.RECRUITHELPER_PLUGIN_DIR = pluginDir
