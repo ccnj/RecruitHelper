@@ -555,12 +555,13 @@ type MainCardPhase = 'preflight' | 'commit'
 
 interface MainPreparedInterviewEditor {
   startsAt: number
-  endsAt: number
-  method: 'wechatVideo'
+  // 现场面试无时长与方式控件（2026-07-31 真机），三项随形态缺席。
+  endsAt?: number
+  method: 'wechatVideo' | 'onsite'
   dateValue: string
   timeValue: string
-  durationValue: string
-  methodValue: string
+  durationValue?: string
+  methodValue?: string
 }
 
 type MainPrepareInterviewEditorResult =
@@ -9262,13 +9263,20 @@ async function mainPrepareInterviewEditor(
       }
       return null
     }
-    // endsAt 在读取方向 optional(线下卡)，但发送侧仍必填：协议规格 §14.1 的
-    // chat.sendInviteCard 只开放 wechatVideo，缺 endsAt 一律拒绝，不得放宽。
-    if (interview.endsAt === undefined ||
-        !Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
-        interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
-        interview.method !== 'wechatVideo' ||
-        (interview.endsAt - interview.startsAt) % 60_000 !== 0) {
+    // 形态按 method 分支（2026-07-31 甲方裁决）：线上必须带 endsAt 且为分钟整；
+    // 现场面试在平台上没有时长控件，endsAt 必须缺席、不得由 startsAt 合成。
+    // 本函数由 chat.sendInviteCard 与 debug.probeInterviewEditor 共用，这里认得
+    // onsite 只是让准备阶段能走现场形态；发送入口另有一道 wechatVideo 收紧，
+    // 放开发送不在本批范围。
+    const wantsOnsite = interview.method === 'onsite'
+    if (!Number.isSafeInteger(interview.startsAt) || interview.startsAt <= 0 ||
+        (interview.method !== 'wechatVideo' && interview.method !== 'onsite') ||
+        (wantsOnsite
+          ? interview.endsAt !== undefined
+          : interview.endsAt === undefined ||
+            !Number.isSafeInteger(interview.endsAt) ||
+            interview.endsAt <= interview.startsAt ||
+            (interview.endsAt - interview.startsAt) % 60_000 !== 0)) {
       return failed('input_rejected')
     }
     // 平台时间选择器是 5 分钟格（2026-07-28 真机）；脑侧已在时间出生点向上
@@ -9376,27 +9384,32 @@ async function mainPrepareInterviewEditor(
       return failed(reason, detail)
     }
 
-    const onlineItems = Array.from(
+    // 2026-07-31 真机：类型列表恒为「现场面试 / 线上面试」两项，两项的 class、
+    // 边框色与文字色完全相同且无 aria-selected，选中态在 DOM 属性上不可见；
+    // 平台默认类型也不稳定（连续两次打开默认不同）。故无论目标为何都必须先读
+    // 标题回显，不符才点击，再轮询等回显变为目标，不得依赖默认值。
+    const wayLabel = wantsOnsite ? '现场面试' : '线上面试'
+    const wayItems = Array.from(
       modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
-    ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
-    if (onlineItems.length !== 1) return await abort('editor_unavailable', `online n=${onlineItems.length}`)
-    const online = onlineItems[0]
-    const onlineSelected = (): boolean => {
+    ).filter((node) => visible(node) && clean(node.textContent).includes(wayLabel))
+    if (wayItems.length !== 1) return await abort('editor_unavailable', `way n=${wayItems.length} ${wayLabel}`)
+    const wayItem = wayItems[0]
+    const waySelected = (): boolean => {
       // 2026-07-27 真机：弹窗标题是"邀请{候选人姓名}参加 线上面试"并实时跟随类型
       // 切换（现场面试时为"参加 现场面试"），页面上不存在字面恰好"参加 线上面试"
       // 的节点；按包含匹配取叶层节点。
-      const onlineTitle = /参加\s*线上面试/u
+      const wayTitle = new RegExp(`参加\\s*${wayLabel}`, 'u')
       const titleNodes = Array.from(modal.querySelectorAll<HTMLElement>('*'))
-        .filter((node) => visible(node) && onlineTitle.test(clean(node.textContent)))
+        .filter((node) => visible(node) && wayTitle.test(clean(node.textContent)))
         .filter((node) => !Array.from(node.children).some(
-          (child) => visible(child) && onlineTitle.test(clean(child.textContent)),
+          (child) => visible(child) && wayTitle.test(clean(child.textContent)),
         ))
       return titleNodes.length >= 1
     }
-    if (!onlineSelected()) {
-      if (!await interact(online)) return await abort('editor_unavailable', 'online.click')
-      if (!await waitFor(() => onlineSelected() ? true : null)) {
-        return await abort('editor_unavailable', 'online.echo')
+    if (!waySelected()) {
+      if (!await interact(wayItem)) return await abort('editor_unavailable', 'way.click')
+      if (!await waitFor(() => waySelected() ? true : null)) {
+        return await abort('editor_unavailable', 'way.echo')
       }
     }
 
@@ -9410,9 +9423,12 @@ async function mainPrepareInterviewEditor(
     const pad2 = (value: number): string => String(value).padStart(2, '0')
     const expectedDateText = `${year}-${pad2(month)}-${pad2(day)}`
     const expectedTimeText = `${pad2(hour)}:${pad2(minute)}`
-    const durationMinutes = (interview.endsAt - interview.startsAt) / 60_000
+    // 现场面试在平台上没有时长与方式控件，两段整体跳过；线上形态原样保留。
+    const durationMinutes = wantsOnsite
+      ? 0
+      : ((interview.endsAt ?? 0) - interview.startsAt) / 60_000
     const expectedDurationText = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
-    if (![15, 30, 45, 60].includes(durationMinutes)) {
+    if (!wantsOnsite && ![15, 30, 45, 60].includes(durationMinutes)) {
       return await abort('input_rejected', `durationEnum min=${durationMinutes}`)
     }
 
@@ -9550,52 +9566,56 @@ async function mainPrepareInterviewEditor(
     const durationInputs = Array.from(
       modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
     ).filter((node) => visible(node))
-    const durationControl = durationInputs.length === 1
-      ? durationInputs[0].closest<HTMLElement>('.km-select')
-      : null
-    if (!durationControl) return await abort('duration_unavailable', `durCtl n=${durationInputs.length}`)
-    if (!await interact(durationControl)) return await abort('duration_unavailable', 'durCtl.click')
-    const durationOption = await waitFor(() => {
-      const optionMinutes = (text: string): number | null => {
-        const normalized = clean(text)
-        const hours = Number(normalized.match(/(\d+(?:\.\d+)?)\s*小时/u)?.[1] ?? 0)
-        const minutes = Number(normalized.match(/(\d+)\s*分钟/u)?.[1] ?? 0)
-        const total = hours * 60 + minutes
-        return Number.isFinite(total) && total > 0 ? total : null
-      }
-      const options = Array.from(document.querySelectorAll<HTMLElement>(
-        '.km-popover [role="option"], .km-select-dropdown__item, .km-option',
-      )).filter(visible)
-      const matches = options.filter((node) => optionMinutes(node.textContent ?? '') === durationMinutes)
-      return matches.length === 1 ? matches[0] : null
-    })
-    if (!durationOption) return await abort('duration_unavailable', `durOpt min=${durationMinutes}`)
-    if (!await interact(durationOption)) return await abort('duration_unavailable', 'durOpt.click')
-    const exactDuration = await waitFor(() => {
-      const inputs = Array.from(
-        modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
-      ).filter((node) => visible(node) && clean(node.value) === expectedDurationText)
-      return inputs.length === 1 ? inputs[0] : null
-    })
-    if (!exactDuration) return await abort('duration_unavailable', 'durEcho')
-
-    const methodCandidates = Array.from(
-      modal.querySelectorAll<HTMLElement>('.interview-platform__btn'),
-    ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
-    if (methodCandidates.length !== 1) {
-      return await abort('method_unavailable', `method n=${methodCandidates.length}`)
-    }
-    let method = methodCandidates[0]
-    if (!method.classList.contains('is-checked')) {
-      if (!await interact(method)) return await abort('method_unavailable', 'method.click')
-      const exactMethod = await waitFor(() => {
-        const matches = Array.from(
-          modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
-        ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+    let exactDuration: HTMLInputElement | null = null
+    let method: HTMLElement | null = null
+    if (!wantsOnsite) {
+      const durationControl = durationInputs.length === 1
+        ? durationInputs[0].closest<HTMLElement>('.km-select')
+        : null
+      if (!durationControl) return await abort('duration_unavailable', `durCtl n=${durationInputs.length}`)
+      if (!await interact(durationControl)) return await abort('duration_unavailable', 'durCtl.click')
+      const durationOption = await waitFor(() => {
+        const optionMinutes = (text: string): number | null => {
+          const normalized = clean(text)
+          const hours = Number(normalized.match(/(\d+(?:\.\d+)?)\s*小时/u)?.[1] ?? 0)
+          const minutes = Number(normalized.match(/(\d+)\s*分钟/u)?.[1] ?? 0)
+          const total = hours * 60 + minutes
+          return Number.isFinite(total) && total > 0 ? total : null
+        }
+        const options = Array.from(document.querySelectorAll<HTMLElement>(
+          '.km-popover [role="option"], .km-select-dropdown__item, .km-option',
+        )).filter(visible)
+        const matches = options.filter((node) => optionMinutes(node.textContent ?? '') === durationMinutes)
         return matches.length === 1 ? matches[0] : null
       })
-      if (!exactMethod) return await abort('method_unavailable', 'method.echo')
-      method = exactMethod
+      if (!durationOption) return await abort('duration_unavailable', `durOpt min=${durationMinutes}`)
+      if (!await interact(durationOption)) return await abort('duration_unavailable', 'durOpt.click')
+      exactDuration = await waitFor(() => {
+        const inputs = Array.from(
+          modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
+        ).filter((node) => visible(node) && clean(node.value) === expectedDurationText)
+        return inputs.length === 1 ? inputs[0] : null
+      })
+      if (!exactDuration) return await abort('duration_unavailable', 'durEcho')
+
+      const methodCandidates = Array.from(
+        modal.querySelectorAll<HTMLElement>('.interview-platform__btn'),
+      ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+      if (methodCandidates.length !== 1) {
+        return await abort('method_unavailable', `method n=${methodCandidates.length}`)
+      }
+      method = methodCandidates[0]
+      if (!method.classList.contains('is-checked')) {
+        if (!await interact(method)) return await abort('method_unavailable', 'method.click')
+        const exactMethod = await waitFor(() => {
+          const matches = Array.from(
+            modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
+          ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
+          return matches.length === 1 ? matches[0] : null
+        })
+        if (!exactMethod) return await abort('method_unavailable', 'method.echo')
+        method = exactMethod
+      }
     }
 
     // 最后一次编辑器交互与随后可能发生的最终发送之间也必须留出节奏间隔。
@@ -9604,15 +9624,18 @@ async function mainPrepareInterviewEditor(
     if (!routeMatches()) return await abort('route_changed')
     if (!targetResolved()) return await abort('target_changed')
     if (!composerEmpty()) return await abort('composer_nonempty')
-    if (!onlineSelected()) return await abort('input_rejected', 'finalOnline')
+    if (!waySelected()) return await abort('input_rejected', `finalWay ${wayLabel}`)
     const dateValue = clean(exactDate.textContent)
     const timeValue = clean(exactTime.value)
-    const durationValue = clean(exactDuration.value)
-    const methodValue = clean(method.textContent)
-    if (dateValue !== expectedDateText || timeValue !== expectedTimeText ||
-        durationValue !== expectedDurationText || methodValue !== '微信视频' ||
-        !method.classList.contains('is-checked')) {
-      // 四个回读值全部来自我方设定或平台预置枚举，可整体回带。
+    const durationValue = exactDuration === null ? undefined : clean(exactDuration.value)
+    const methodValue = method === null ? undefined : clean(method.textContent)
+    const echoBroken = dateValue !== expectedDateText || timeValue !== expectedTimeText ||
+      (wantsOnsite
+        ? durationValue !== undefined || methodValue !== undefined
+        : durationValue !== expectedDurationText || methodValue !== '微信视频' ||
+          method === null || !method.classList.contains('is-checked'))
+    if (echoBroken) {
+      // 回读值全部来自我方设定或平台预置枚举，可整体回带。
       return await abort(
         'input_rejected',
         `finalEcho d=${dateValue || '-'} t=${timeValue || '-'} u=${durationValue || '-'} m=${methodValue || '-'}`,
@@ -9623,12 +9646,12 @@ async function mainPrepareInterviewEditor(
       status: 'ready',
       prepared: {
         startsAt: interview.startsAt,
-        endsAt: interview.endsAt,
-        method: 'wechatVideo',
+        ...(wantsOnsite ? {} : { endsAt: interview.endsAt }),
+        method: wantsOnsite ? 'onsite' : 'wechatVideo',
         dateValue,
         timeValue,
-        durationValue,
-        methodValue,
+        ...(durationValue === undefined ? {} : { durationValue }),
+        ...(methodValue === undefined ? {} : { methodValue }),
       },
     }
   } catch (error) {
@@ -11810,13 +11833,20 @@ export async function probeZhilianInterviewEditor(
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
   const interview = args.interview
-  if (interview.endsAt === undefined ||
-      !Number.isSafeInteger(interview.startsAt) || !Number.isSafeInteger(interview.endsAt) ||
-      interview.startsAt <= 0 || interview.endsAt <= interview.startsAt ||
-      interview.method !== 'wechatVideo' ||
-      interview.startsAt % 60_000 !== 0 ||
+  // 形态按 method 分支（2026-07-31 甲方裁决）：线上仍要求 15/45/30/60 分钟的
+  // 时长枚举；现场面试平台无时长控件，endsAt 必须缺席而不得由 startsAt 合成。
+  const onsiteProbe = interview.method === 'onsite'
+  const badStart = !Number.isSafeInteger(interview.startsAt) ||
+    interview.startsAt <= 0 || interview.startsAt % 60_000 !== 0
+  const badShape = onsiteProbe
+    ? interview.endsAt !== undefined
+    : interview.endsAt === undefined ||
+      !Number.isSafeInteger(interview.endsAt) ||
+      interview.endsAt <= interview.startsAt ||
       (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
-      ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)) {
+      ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)
+  if (badStart || badShape ||
+      (interview.method !== 'wechatVideo' && interview.method !== 'onsite')) {
     throw new ZhilianPlatformError('GUARD_FAILED', '邀面时间或方式不受当前页面能力支持', 'manualOnly')
   }
   const tab = await sendZhilianTab(args.conversationRef)
