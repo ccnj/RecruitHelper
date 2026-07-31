@@ -26,8 +26,11 @@ func TestBuildOnlyPacksWhitelistedNames(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(dataDir, "blobs", "shot.jpg"), "截图字节")
 
+	// 多代轮转后的现场：当前 + 两代序号 + 单代时期遗留的 .old。
 	writeFile(t, filepath.Join(logDir, "brain.log"), "当期日志")
-	writeFile(t, filepath.Join(logDir, "brain.log.old"), "轮转日志")
+	writeFile(t, filepath.Join(logDir, "brain.log.1"), "上一代")
+	writeFile(t, filepath.Join(logDir, "brain.log.2"), "上上代")
+	writeFile(t, filepath.Join(logDir, "brain.log.old"), "旧格式遗留")
 
 	pack, cleanup, err := Build(Options{
 		DataDir: dataDir,
@@ -46,7 +49,10 @@ func TestBuildOnlyPacksWhitelistedNames(t *testing.T) {
 
 	names, bodies := readPack(t, pack.Path)
 
-	want := []string{brainLogName, brainLogOldName, brainDBName, traceDBName, manifestName}
+	want := []string{
+		brainLogName, brainLogName + ".1", brainLogName + ".2", brainLogName + ".old",
+		brainDBName, traceDBName, manifestName,
+	}
 	for _, name := range want {
 		if _, ok := names[name]; !ok {
 			t.Errorf("包里缺少 %s", name)

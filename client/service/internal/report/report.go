@@ -25,12 +25,29 @@ import (
 
 // 包内文件名。与磁盘上的来源名保持一致,解包的人不需要对照表。
 const (
-	brainLogName    = "brain.log"
-	brainLogOldName = "brain.log.old"
-	brainDBName     = "brain.db"
-	traceDBName     = "ai-traces.db"
-	manifestName    = "manifest.json"
+	brainLogName = "brain.log"
+	brainDBName  = "brain.db"
+	traceDBName  = "ai-traces.db"
+	manifestName = "manifest.json"
+
+	// 日志保留代数,与 client/electron/logRotate.js 的 DEFAULT_KEEP 对齐。
+	// 两边对不上只会导致少带或多找几个不存在的文件,不会出错,但对上更省事。
+	logKeepGenerations = 5
 )
+
+// logSourceNames 列出要取的日志文件:当前 + 5 代轮转 + 旧格式 .old。
+//
+// **仍然是固定枚举,不是扫目录**。多代之后名字有了序号,但白名单的实质是"不遍历
+// 目录",不是"名字写死"——日志目录将来若混进别的东西,这里也不会把它带走。
+// .old 是单代时期的产物,已装机器上还有,留着以免历史断档。
+func logSourceNames() []string {
+	names := make([]string, 0, logKeepGenerations+2)
+	names = append(names, brainLogName)
+	for index := 1; index <= logKeepGenerations; index++ {
+		names = append(names, fmt.Sprintf("%s.%d", brainLogName, index))
+	}
+	return append(names, brainLogName+".old")
+}
 
 // SnapshotFunc 把一个 SQLite 库的一致快照写到 dst。由 store / aitrace 各自提供,
 // 实现是 VACUUM INTO —— 直接拷文件会漏掉未 checkpoint 的 WAL。
@@ -97,10 +114,9 @@ func Build(opts Options) (*Pack, func(), error) {
 	var sources []source
 
 	if opts.LogDir != "" {
-		sources = append(sources,
-			source{brainLogName, filepath.Join(opts.LogDir, brainLogName)},
-			source{brainLogOldName, filepath.Join(opts.LogDir, brainLogOldName)},
-		)
+		for _, name := range logSourceNames() {
+			sources = append(sources, source{name, filepath.Join(opts.LogDir, name)})
+		}
 	} else {
 		manifest.Skipped = append(manifest.Skipped, "日志目录未配置(RECRUITHELPER_LOG_DIR)")
 	}
