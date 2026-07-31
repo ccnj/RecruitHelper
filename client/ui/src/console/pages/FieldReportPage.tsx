@@ -2,11 +2,86 @@
 // 点一下,脑现场打包 brain.log / brain.db / ai-traces.db 传到旧后台,我方在
 // 管理前台的审计页取回。按裁决只由人显式点击触发:这里没有定时、没有自动重试,
 // 传失败就再点一次。
-import { useCallback, useState } from 'react'
-import { api, FieldReportResult } from '../../api'
+import { useCallback, useEffect, useState } from 'react'
+import { api, FieldReportResult, FieldReportSettings } from '../../api'
 import { errorText } from '../format'
 
 export function FieldReportPage() {
+  return (
+    <>
+      <AutoUploadSwitch />
+      <ManualUpload />
+    </>
+  )
+}
+
+// 每日自动上传开关。裁决把这里定成**唯一**的开启路径：安装、升级、迁移、配置
+// 下发都不得把它翻成开启，所以这个勾选框是它能变 true 的全部来源。
+function AutoUploadSwitch() {
+  const [settings, setSettings] = useState<FieldReportSettings | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setSettings(await api.devReportSettings())
+      setError(null)
+    } catch (reason) {
+      setError(errorText(reason))
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+
+  const toggle = useCallback(async (next: boolean) => {
+    if (saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      setSettings(await api.setDevReportAutoUpload(next))
+    } catch (reason) {
+      setError(errorText(reason))
+    } finally {
+      setSaving(false)
+    }
+  }, [saving])
+
+  const enabled = settings?.autoUploadEnabled === true
+  return (
+    <div className="panel">
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={saving || settings === null}
+          onChange={(event) => void toggle(event.target.checked)}
+        />
+        {' '}自动上传数据至服务器
+      </label>
+      <p>
+        勾选后每天凌晨 00:10 自动打包上传。那一刻若还有工作流在跑或有命令没收束，
+        会往后顺延，到 02:00 仍不合适就跳过当天；客户端没开着而错过的当天不补传。
+      </p>
+      {error && <p className="sql-error">{error}</p>}
+      <LastAutoRun settings={settings} />
+    </div>
+  )
+}
+
+function LastAutoRun({ settings }: { settings: FieldReportSettings | null }) {
+  if (!settings?.lastAutoAt) return null
+  const when = new Date(settings.lastAutoAt)
+  const text = Number.isNaN(when.getTime()) ? settings.lastAutoAt : when.toLocaleString('zh-CN')
+  if (settings.lastAutoOk) {
+    return <p className="sql-ok">上次自动上传：{text} 成功</p>
+  }
+  return (
+    <p className="sql-error">
+      上次自动上传：{text} 未成功{settings.lastAutoError ? ` —— ${settings.lastAutoError}` : ''}
+    </p>
+  )
+}
+
+function ManualUpload() {
   const [result, setResult] = useState<FieldReportResult | null>(null)
   const [transportError, setTransportError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)

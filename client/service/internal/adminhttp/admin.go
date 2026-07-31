@@ -106,6 +106,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/m5/contexts/import", h(a.importM5Contexts))
 	mux.HandleFunc("POST /admin/dev/sql", h(a.devSQL))
 	mux.HandleFunc("POST /admin/dev/report", h(a.devReport))
+	mux.HandleFunc("GET /admin/dev/report/settings", h(a.devReportSettings))
+	mux.HandleFunc("POST /admin/dev/report/settings", h(a.setDevReportSettings))
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
 	mux.HandleFunc("POST /admin/job-publish/precheck", h(a.jobPublishPrecheck))
