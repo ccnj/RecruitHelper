@@ -322,7 +322,11 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         { label: 'AI 处理人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '打招呼', value: metricValue(statistics.todayGreeted), tone: 'green' },
         { label: '换微信数', value: metricValue(statistics.todayWechat), tone: 'amber' },
-        { label: '已邀面', value: metricValue(statistics.todayInvited), tone: 'red' },
+        // 数的是"今天有几个人接受了邀约"(todayNewAppointments,取 interviewed_at),
+        // 不是"今天发出去几张邀面卡"(todayInvited)。发卡不等于人家答应,而侧边栏
+        // 「已约面」页与「累计已约面」都是接受口径,这里用发卡数会让用户拿两处
+        // 一对就发现数字对不上(2026-07-31 甲方裁决)。
+        { label: '已约面', value: metricValue(statistics.todayNewAppointments), tone: 'red' },
       ],
       ledgerStartedAt: formatDateOnly(rawOverview.businessSince),
       ledger: [
