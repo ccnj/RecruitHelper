@@ -200,7 +200,7 @@ export function createProductFixture(): ProductData {
         { label: 'AI 处理人数', value: 30, tone: 'blue' },
         { label: '打招呼', value: 6, tone: 'green' },
         { label: '换微信数', value: 3, tone: 'amber' },
-        { label: '已邀面', value: 2, tone: 'red' },
+        { label: '已约面', value: 2, tone: 'red' },
       ],
       ledgerStartedAt: '2026-07-20',
       ledger: [
@@ -334,7 +334,7 @@ export function createEmptyProductData(): ProductData {
         { label: 'AI 处理人数', value: 0, tone: 'blue' },
         { label: '打招呼', value: 0, tone: 'green' },
         { label: '换微信数', value: 0, tone: 'amber' },
-        { label: '已邀面', value: 0, tone: 'red' },
+        { label: '已约面', value: 0, tone: 'red' },
       ],
       ledgerStartedAt: null,
       ledger: [
