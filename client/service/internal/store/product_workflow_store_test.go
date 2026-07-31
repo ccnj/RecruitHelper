@@ -200,7 +200,7 @@ func TestProductWorkflowPendingActionUsesCASAndPreservesTerminalHistory(t *testi
 	}
 }
 
-func TestProductWorkflowPendingActionRequiresEligibleCommunicationRun(t *testing.T) {
+func TestProductWorkflowPendingActionEligibilityByAction(t *testing.T) {
 	now := time.Date(2026, 7, 26, 9, 0, 0, 0, time.UTC)
 	allowed := []workflow.State{
 		{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
@@ -235,32 +235,32 @@ func TestProductWorkflowPendingActionRequiresEligibleCommunicationRun(t *testing
 		})
 	}
 
-	disallowed := []struct {
-		name  string
-		state workflow.State
-		stage string
+	// 结束在漏斗阶段同样受理(2026-07-31 甲方裁决)。此前这两种情形都被拒,
+	// 于是漏斗跑着的一两个小时里用户点结束毫无反应,只能关客户端。
+	endableFunnel := []struct {
+		name   string
+		status workflow.Status
+		stage  string
 	}{
+		{name: "scoring", status: workflow.StatusRunning, stage: ProductWorkflowStageScoring},
 		{
-			name: "wrong stage",
-			state: workflow.State{
-				Mode: workflow.ModeFull, Status: workflow.StatusRunning,
-			},
-			stage: ProductWorkflowStageScoring,
+			name:   "greeting sending",
+			status: workflow.StatusRunning,
+			stage:  ProductWorkflowStageGreetingSending,
 		},
 		{
-			name: "awaiting confirmation",
-			state: workflow.State{
-				Mode: workflow.ModeFull, Status: workflow.StatusAwaitingConfirmation,
-			},
-			stage: ProductWorkflowStageCommunication,
+			name:   "awaiting confirmation",
+			status: workflow.StatusAwaitingConfirmation,
+			stage:  ProductWorkflowStageAwaitingConfirmation,
 		},
 	}
-	for index, tc := range disallowed {
-		t.Run(tc.name, func(t *testing.T) {
+	for index, tc := range endableFunnel {
+		t.Run("end/"+tc.name, func(t *testing.T) {
 			s := openTest(t)
 			run, err := s.CreateProductWorkflowRun(CreateProductWorkflowRunRequest{
-				RunID:    "wf-disallowed-" + string(rune('a'+index)),
-				Platform: "zhilian", AccountRef: "account-one", State: tc.state,
+				RunID:    "wf-funnel-end-" + string(rune('a'+index)),
+				Platform: "zhilian", AccountRef: "account-one",
+				State: workflow.State{Mode: workflow.ModeFull, Status: tc.status},
 				Stage: tc.stage, StartedAt: now,
 			})
 			if err != nil {
@@ -271,8 +271,45 @@ func TestProductWorkflowPendingActionRequiresEligibleCommunicationRun(t *testing
 					RunID: run.RunID, Action: ProductWorkflowPendingActionEnd,
 					RequestedAt: now.Add(time.Minute),
 				},
+			); err != nil {
+				t.Fatalf("漏斗阶段结束请求应被受理: %v", err)
+			}
+		})
+	}
+
+	// 再采一批的语义是"这批聊完了再来一批",离开沟通阶段没有意义,仍然拒绝。
+	// 放开结束时把它一并放开的话,漏斗跑着时还能再排一批,是两批叠着跑。
+	sourcingDisallowed := []struct {
+		name   string
+		status workflow.Status
+		stage  string
+	}{
+		{name: "scoring", status: workflow.StatusRunning, stage: ProductWorkflowStageScoring},
+		{
+			name:   "awaiting confirmation",
+			status: workflow.StatusAwaitingConfirmation,
+			stage:  ProductWorkflowStageAwaitingConfirmation,
+		},
+	}
+	for index, tc := range sourcingDisallowed {
+		t.Run("sourcing/"+tc.name, func(t *testing.T) {
+			s := openTest(t)
+			run, err := s.CreateProductWorkflowRun(CreateProductWorkflowRunRequest{
+				RunID:    "wf-funnel-sourcing-" + string(rune('a'+index)),
+				Platform: "zhilian", AccountRef: "account-one",
+				State: workflow.State{Mode: workflow.ModeFull, Status: tc.status},
+				Stage: tc.stage, StartedAt: now,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RequestProductWorkflowPendingAction(
+				RequestProductWorkflowPendingActionRequest{
+					RunID: run.RunID, Action: ProductWorkflowPendingActionSourcing,
+					ContextRevisionHash: "revision-funnel", RequestedAt: now.Add(time.Minute),
+				},
 			); !errors.Is(err, ErrProductWorkflowConflict) {
-				t.Fatalf("ineligible request error = %v", err)
+				t.Fatalf("再采一批在漏斗阶段应被拒: %v", err)
 			}
 		})
 	}
