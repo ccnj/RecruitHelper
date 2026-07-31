@@ -8,11 +8,12 @@ import (
 	"recruithelper/client/service/internal/store"
 )
 
-// suspect 队列的上下文投影。
+// 命令行的上下文投影，suspect 队列与命令账本共用。
 //
 // 裁决 resolvedOk/resolvedFailed 是替平台事实下结论：判 resolvedFailed 而其实
 // 已经发出去，后续补发就是实打实多发一条给真人。所以裁决的人必须先看清这条
-// 到底是谁、发的什么、卡在哪一步——只给一个原语英文名等于让人靠猜。
+// 到底是谁、发的什么、卡在哪一步——只给一个原语英文名等于让人靠猜。账本同理：
+// 一串 msgId 加原语名，看不出"刚才对谁做了什么、花了多久"。
 //
 // 数据一直在 CmdRecord 那一行里（args/guards/resultBody/平台/账号/意图/时刻），
 // 此前只是没投影出来。按 AGENTS.md「开发者诊断台明文边界」(2026-07-31)，
@@ -58,27 +59,54 @@ func suspectActionName(primitive string) string {
 	return primitive
 }
 
-// argsFacts 从 cmd.args 原文里取出定位与摘要用的两个值。通用解析而非逐原语
-// 分支：新增原语只要沿用同名字段就自动可读，取不到就留空，由前端的"原始现场"
-// 折叠区兜底。
-func argsFacts(argsJSON string) (conversationRef string, summary string) {
+// cmdArgsFacts 是从 cmd.args 里认得出来的几个通用字段。
+type cmdArgsFacts struct {
+	ConversationRef string // 会话类原语的目标
+	Text            string // 发送类原语的正文
+	JobName         string // 职位类原语的目标
+}
+
+// Summary 给人一句话看清"这条在干什么"：会话类看正文，职位类看职位名。
+func (f cmdArgsFacts) Summary() string {
+	if f.Text != "" {
+		return f.Text
+	}
+	return f.JobName
+}
+
+// argsFacts 通用解析而非逐原语分支：新增原语只要沿用同名字段就自动可读，
+// 取不到就留空，由前端的"原始现场"折叠区兜底。
+func argsFacts(argsJSON string) cmdArgsFacts {
+	var facts cmdArgsFacts
 	if strings.TrimSpace(argsJSON) == "" {
-		return "", ""
+		return facts
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return "", ""
+		return facts
 	}
 	if v, ok := args["conversationRef"].(string); ok {
-		conversationRef = v
+		facts.ConversationRef = v
 	}
-	// text 是发送类原语的正文；jobName 是发布职位的目标。两者都不会同时出现。
-	if v, ok := args["text"].(string); ok && v != "" {
-		summary = v
-	} else if v, ok := args["jobName"].(string); ok && v != "" {
-		summary = v
+	if v, ok := args["text"].(string); ok {
+		facts.Text = v
 	}
-	return conversationRef, summary
+	if v, ok := args["jobName"].(string); ok {
+		facts.JobName = v
+	}
+	return facts
+}
+
+// cmdTarget 回答"这条命令作用在谁/什么上"。会话类优先给候选人名字——账本是
+// 用来扫的，一串 conversationRef 认不出人；名字查不到才退回引用本身。
+func (a *API) cmdTarget(rec store.CmdRecord, facts cmdArgsFacts) string {
+	if facts.ConversationRef != "" {
+		if name := a.peerDisplayNameFor(rec, facts.ConversationRef); name != "" {
+			return name
+		}
+		return facts.ConversationRef
+	}
+	return facts.JobName
 }
 
 // unixMilliOrZero：零值时间的 UnixMilli 是个很大的负数，直接送到前端会显示成
@@ -88,6 +116,15 @@ func unixMilliOrZero(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixMilli()
+}
+
+// terminalMillis：命令未终局时 TerminalAt 是 nil，回 0 表示"还没结束"，
+// 前端据此显示"进行中"而不是算出一个荒谬的耗时。
+func terminalMillis(t *time.Time) int64 {
+	if t == nil {
+		return 0
+	}
+	return unixMilliOrZero(*t)
 }
 
 // peerDisplayNameFor 把 conversationRef 换成候选人名字。查不到（会话尚未投影、

@@ -541,12 +541,12 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .dc-suspect-caution strong { color: var(--warn); }
 
-.dc-suspect-raw { margin: 0 0 0.4rem 1.1rem; }
-.dc-suspect-raw > summary { cursor: pointer; color: var(--txt-faint); font-size: var(--fs-sm); }
-.dc-suspect-raw > summary:hover { color: var(--txt-dim); }
-.dc-suspect-raw-field { margin-top: 0.25rem; }
-.dc-suspect-raw-field > span { color: var(--txt-faint); font-size: var(--fs-sm); }
-.dc-suspect-raw-field pre {
+.dc-raw-fold { margin: 0 0 0.4rem 1.1rem; }
+.dc-raw-fold > summary { cursor: pointer; color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-raw-fold > summary:hover { color: var(--txt-dim); }
+.dc-raw-field { margin-top: 0.25rem; }
+.dc-raw-field > span { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-raw-field pre {
   margin: 0.1rem 0 0;
   padding: 0.35rem 0.5rem;
   max-height: 12rem;
@@ -567,7 +567,9 @@ h1, h2, h3, p { margin-top: 0; }
   flex: 1 1 auto;
   min-height: 300px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* 账本一行要塞六列，帧行只有四段且都短（约 270px 就够）——等分会把账本
+     的"目标"压到几十个像素，全是省略号。 */
+  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
   gap: 0.7rem;
   align-items: stretch;
 }
@@ -586,12 +588,99 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 .dc-shell .diagnostic-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
   padding: 0.4rem 0.7rem;
   border-bottom: 1px solid var(--rule);
   background: linear-gradient(180deg, var(--bay-hi), transparent);
   font-size: var(--fs-base);
 }
+
+/* 标题右侧的附注位：计数、单手 id、心跳开关。h3 是大写加宽字距的，
+   附注是数据，得把这两样关掉。 */
+.diagnostic-card-aside {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.dc-frame-toggle { display: flex; align-items: center; gap: 0.25rem; cursor: pointer; }
+.dc-shell .dc-frame-toggle input { width: auto; min-height: 0; margin: 0; accent-color: var(--beam); }
+
+.dc-stream-empty { padding: 0.4rem 0.7rem; color: var(--txt-faint); }
+
+/* ── 命令账本：一行一条，可展开 ─────────────────────── */
+
+.dc-ledger-row { border-bottom: 1px solid rgba(32, 41, 50, 0.55); }
+
+.dc-ledger-row > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.26rem 0.5rem 0.26rem 1.05rem;
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.dc-ledger-row > summary::-webkit-details-marker { display: none; }
+.dc-ledger-row > summary:hover { background: rgba(77, 163, 255, 0.05); }
+.dc-ledger-row > summary::before {
+  content: "";
+  position: absolute;
+  left: 0.26rem;
+  top: 0.7em;
+  border-left: 4px solid var(--txt-faint);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transform-origin: 1.5px 50%;
+  transition: transform 140ms ease, border-left-color 140ms ease;
+}
+.dc-ledger-row[open] > summary::before { transform: rotate(90deg); border-left-color: var(--beam); }
+
+/* 除"目标"外全是固定宽度，六列才竖得齐；状态在行尾，变宽不影响前面。 */
+/* 内容宽会随字形微动，后面所有列跟着漂；钉死才竖得齐。 */
+.dc-ledger-at { flex: 0 0 4.4rem; font-size: var(--fs-mono); }
+.dc-ledger-name { flex: 0 0 9rem; overflow: hidden; text-overflow: ellipsis; color: var(--txt); }
+.dc-ledger-class { flex: 0 0 4.3rem; color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-ledger-class.is-effectful { color: var(--warn); }
+.dc-ledger-target {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--beam);
+}
+.dc-ledger-took { flex: 0 0 3.4rem; text-align: right; font-size: var(--fs-mono); }
+/* 状态也得定宽：内容从 "ok" 到 "failed (ELEMENT_UNRESOLVED)"，让它自适应
+   就等于让"目标"逐行变宽，六列全歪。截断的部分挂在 title 上。 */
+.dc-ledger-status { flex: 0 0 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.dc-ledger-facts {
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr);
+  gap: 0.16rem 0.6rem;
+  margin: 0.2rem 0 0.35rem 1.05rem;
+}
+.dc-ledger-facts dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-ledger-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.dc-ledger-facts dd code { color: var(--txt-dim); }
+.dc-ledger-body { color: var(--txt); white-space: pre-wrap; max-height: 9rem; overflow: auto; }
+
+.dc-ledger-row .dc-raw-fold { margin-left: 1.05rem; }
+
+/* ── 帧行 ───────────────────────────────────────────── */
+
+.frame-at { flex: 0 0 auto; font-size: var(--fs-mono); }
+.frame-ref { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .dc-ledger-scroll,
 .dc-shell .frames {
@@ -619,18 +708,22 @@ h1, h2, h3, p { margin-top: 0; }
 .dc-shell tbody tr:hover td { background: rgba(77, 163, 255, 0.05); }
 
 .dc-shell .frames { padding: 0.4rem 0.15rem; font-size: var(--fs-base); height: auto; }
+/* 一帧一行，绝不换行：帧流是靠"行数"读节奏的，某一帧折成三行就把时间感
+   毁了。放不下的 ref 自己省略。 */
 .dc-shell .frame-line {
   display: flex;
-  gap: 0.6rem;
+  align-items: baseline;
+  gap: 0.5rem;
   padding: 0.09rem 0.55rem;
   border-left: 2px solid transparent;
+  white-space: nowrap;
 }
 .dc-shell .frame-line:hover { background: rgba(77, 163, 255, 0.05); }
-.dc-shell .frame-line .out { min-width: 3.6rem; color: var(--beam); }
-.dc-shell .frame-line .in { min-width: 3.6rem; color: var(--live); }
+.dc-shell .frame-line .out { flex: 0 0 3.2rem; color: var(--beam); }
+.dc-shell .frame-line .in { flex: 0 0 3.2rem; color: var(--live); }
 .dc-shell .frame-line:has(.out) { border-left-color: rgba(77, 163, 255, 0.35); }
 .dc-shell .frame-line:has(.in) { border-left-color: rgba(61, 220, 151, 0.3); }
-.dc-shell .frame-line .kind { min-width: 4.6rem; color: var(--txt); }
+.dc-shell .frame-line .kind { flex: 0 0 4rem; overflow: hidden; text-overflow: ellipsis; color: var(--txt); }
 .dc-shell .frames > .dim,
 .dc-shell .frames > .bad { padding: 0.3rem 0.55rem; }
 

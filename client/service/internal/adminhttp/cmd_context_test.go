@@ -26,9 +26,10 @@ func TestArgsFactsDegradesInsteadOfFailing(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			conv, sum := argsFacts(c.args)
-			if conv != c.wantConv || sum != c.wantSum {
-				t.Fatalf("argsFacts(%q) = (%q,%q), 期望 (%q,%q)", c.args, conv, sum, c.wantConv, c.wantSum)
+			facts := argsFacts(c.args)
+			if facts.ConversationRef != c.wantConv || facts.Summary() != c.wantSum {
+				t.Fatalf("argsFacts(%q) = (%q,%q), 期望 (%q,%q)",
+					c.args, facts.ConversationRef, facts.Summary(), c.wantConv, c.wantSum)
 			}
 		})
 	}

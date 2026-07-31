@@ -8,6 +8,7 @@
 import { useState } from 'react'
 import { api, Suspect } from '../api'
 import { dateTime, errorText, shortRef } from './format'
+import { RawField } from './shared/Primitives'
 import { usePolling } from './usePolling'
 
 export function Suspects({ onOpenConversation }: {
@@ -151,7 +152,7 @@ function SuspectRow({ item, onVerdict, onOpenConversation }: {
 function RawSite({ item }: { item: Suspect }) {
   const [open, setOpen] = useState(false)
   return (
-    <details className="dc-suspect-raw" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details className="dc-raw-fold" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>原始现场</summary>
       {open && <>
         <RawField label="args" value={item.args} />
@@ -159,17 +160,5 @@ function RawSite({ item }: { item: Suspect }) {
         <RawField label="result" value={item.resultBody} />
       </>}
     </details>
-  )
-}
-
-function RawField({ label, value }: { label: string; value: string }) {
-  if (!value) return null
-  let pretty = value
-  try { pretty = JSON.stringify(JSON.parse(value), null, 2) } catch { /* 非 JSON 就原样显示 */ }
-  return (
-    <div className="dc-suspect-raw-field">
-      <span>{label}</span>
-      <pre className="mono">{pretty}</pre>
-    </div>
   )
 }

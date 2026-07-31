@@ -160,6 +160,23 @@ export interface LedgerRow {
   status: string
   attempt: number
   errorCode?: string
+
+  target: string
+  summary: string
+  createdAtMs: number
+  terminalAtMs: number
+
+  handId: string
+  idemKey: string
+  intentId: string
+  platform: string
+  accountRef: string
+  sideEffect: string
+  suspectReason: string
+  deadlineMs: number
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface Suspect {
