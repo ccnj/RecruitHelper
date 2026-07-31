@@ -77,7 +77,11 @@ h1, h2, h3, p { margin-top: 0; }
   overscroll-behavior: none;
 }
 
-.dc-shell {
+/* 调色板与字号档位独立成块：入口锁屏是 .dc-shell 的兄弟节点，取不到它内部
+   的变量。挂到 :root[data-console] 上会更"对"，但那个属性由 effect 在首帧
+   之后才写，进台第一帧会闪一下无样式——宁可让两个消费者共享同一块。 */
+.dc-shell,
+.dc-lock {
   --void: #0a0d10;
   --bay: #10151a;
   --bay-hi: #161d23;
@@ -107,7 +111,9 @@ h1, h2, h3, p { margin-top: 0; }
   --fs-mono: 12px;  /* 显式标 .mono 的机器标识：msgId、哈希、ref。与 --fs-sm
                        同值但分开留口：这些串最难认也最容易抄错，将来要单独
                        放大只动这一个。 */
+}
 
+.dc-shell {
   position: relative;
   /* 固定视口高，滚动交给内容列：侧栏常驻不动，主面板才能真正被约束
      在一屏内。若用 min-height，flex:1 会随内容一起长高，页面又长出
@@ -150,6 +156,77 @@ h1, h2, h3, p { margin-top: 0; }
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
+
+/* ── 入口闸 ─────────────────────────────────────────── */
+
+.dc-lock {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(77, 163, 255, 0.07), transparent 60%),
+    var(--void);
+  color: var(--txt);
+  font: var(--fs-base)/1.55 var(--face);
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dc-lock-panel {
+  width: min(22rem, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.1rem 1.2rem 0.9rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--bay);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.dc-lock-brand { display: flex; align-items: center; gap: 0.5rem; }
+.dc-lock-brand strong { color: var(--txt-dim); font-size: var(--fs-lg); letter-spacing: 0.16em; }
+.dc-lock-note { color: var(--txt-faint); font-size: var(--fs-sm); }
+
+.dc-lock-field { display: flex; flex-direction: column; gap: 0.25rem; }
+.dc-lock-field span { color: var(--txt-dim); font-size: var(--fs-sm); }
+.dc-lock-field input {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--rule-hi);
+  border-radius: 2px;
+  background: #080b0e;
+  color: var(--txt);
+  padding: 0.3rem 0.55rem;
+  font: var(--fs-base)/1.5 var(--face);
+  letter-spacing: 0.24em;
+}
+.dc-lock-field input:focus { outline: none; border-color: var(--beam); }
+
+.dc-lock-actions { display: flex; gap: 0.45rem; }
+.dc-lock-actions button {
+  flex: 1 1 auto;
+  border: 1px solid var(--rule-hi);
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--bay-hi), var(--bay));
+  color: var(--txt);
+  padding: 0.32rem 0.62rem;
+  font: var(--fs-base)/1.5 var(--face);
+  cursor: pointer;
+}
+.dc-lock-actions button:hover:not(:disabled) { border-color: var(--beam); color: #ffffff; }
+.dc-lock-actions button:disabled { opacity: 0.42; cursor: not-allowed; }
+.dc-lock-actions .primary-button {
+  border-color: rgba(61, 220, 151, 0.45);
+  background: linear-gradient(180deg, rgba(61, 220, 151, 0.16), rgba(61, 220, 151, 0.06));
+  color: var(--live);
+  font-weight: 600;
+}
+
+/* 错误行常驻占位（内容是个空格），出错时才上色——否则面板会跳一下高度。 */
+.dc-lock-error { min-height: 1.2em; color: transparent; font-size: var(--fs-sm); }
+.dc-lock-error.is-shown { color: var(--alarm); }
 
 /* ── 侧栏：常驻导航 ─────────────────────────────────── */
 

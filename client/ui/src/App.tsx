@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react'
 import { ConsoleApp } from './console/ConsoleApp'
+import { ConsoleLock } from './console/ConsoleLock'
+import { consoleUnlocked } from './console/lock-state'
 import { ProductConnectedApp } from './product'
 
 export function App() {
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false)
+  // 只在进入那一刻查一次存量：闸的作用是拦住"进来"，把已经在里面干活的人
+  // 在 04:00 踢出去既不增加防护，也只会打断排查。
+  const [unlocked, setUnlocked] = useState(false)
+
   useEffect(() => {
     const toggleDiagnostics = (event: KeyboardEvent) => {
       if (
@@ -12,7 +18,10 @@ export function App() {
         && event.key.toLowerCase() === 'd'
       ) {
         event.preventDefault()
-        setDiagnosticsVisible((visible) => !visible)
+        setDiagnosticsVisible((visible) => {
+          if (!visible) setUnlocked(consoleUnlocked())
+          return !visible
+        })
       }
     }
     window.addEventListener('keydown', toggleDiagnostics)
@@ -29,12 +38,20 @@ export function App() {
   }, [diagnosticsVisible])
 
   if (diagnosticsVisible) {
+    // 锁屏也带"返回客户端"：闸只能挡住进来，不能把人关在里面出不去。
     return (
       <>
         <button className="diagnostics-return" onClick={() => setDiagnosticsVisible(false)}>
           返回客户端
         </button>
-        <ConsoleApp />
+        {unlocked ? (
+          <ConsoleApp />
+        ) : (
+          <ConsoleLock
+            onUnlocked={() => setUnlocked(true)}
+            onCancel={() => setDiagnosticsVisible(false)}
+          />
+        )}
       </>
     )
   }

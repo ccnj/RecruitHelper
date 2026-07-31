@@ -80,6 +80,7 @@ const snapshot = {
         todayConfirmation: exact(12),
         todayGreeted: exact(4),
         todayInvited: unknown('当前口径不可用'),
+        todayWechat: exact(5),
         totalGreeted: exact(83),
         totalInterviewed: exact(7),
         totalWechat: exact(11),
@@ -299,6 +300,19 @@ check(
   product.overview.todayMetrics.find((item) => item.label === '已邀面') !== undefined &&
     product.overview.todayMetrics.every((item) => item.label !== '已约面'),
   '今日邀面卡人数按已邀面表述，不与已约面混名',
+)
+// 首页今日数据只有四格。候选确认人数与打招呼是同一批人的前后脚，两格数字
+// 常年一样，白占一格；换掉它的换微信数必须取今日口径，取累计就会和下面
+// 「总账面·累计已换微信」显示同一个数，重复的毛病原样搬家。
+check(
+  product.overview.todayMetrics.find((item) => item.label === '换微信数').value === 5 &&
+    product.overview.todayMetrics.every((item) => item.label !== '候选确认人数'),
+  '今日数据用今日换微信数替下与打招呼重复的候选确认人数',
+)
+check(
+  product.overview.todayMetrics.find((item) => item.label === 'AI 处理人数') !== undefined &&
+    product.overview.todayMetrics.every((item) => item.label !== 'AI 评级人数'),
+  'AI 那格按处理人数表述',
 )
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
 // 收编时刻资产行一直有，此前没投影出去，产品端只能常年显示"时间未知"。

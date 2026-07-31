@@ -316,6 +316,16 @@ export interface FieldReportResult {
   error?: string
 }
 
+// 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
+// 且只有这一个入口能打开它。
+export interface FieldReportSettings {
+  autoUploadEnabled?: boolean
+  lastAutoAt?: string
+  lastAutoOk?: boolean
+  lastAutoError?: string
+  error?: string
+}
+
 /** 邀面编辑器彩排的回执。data 只含我方自设的日期/时间/时长/方式回读值，
  *  现场面试没有时长与方式控件，那两项整键缺席。 */
 export interface InterviewProbeResult {
@@ -789,6 +799,9 @@ export const api = {
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
   devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
+  devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
+  setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
+    post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
   probeInterviewEditor: (body: {
     platform: string
     accountRef: string
