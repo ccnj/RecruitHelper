@@ -143,7 +143,9 @@ func TestV4DialoguePreservesPhraseOrderAndPutsSuggestedCardLast(t *testing.T) {
 	}
 }
 
-func TestV4DialogueReplyOnlyConvertsEveryPhraseAndKeepsKeysUnique(t *testing.T) {
+func TestV4DialogueServiceReplyAbandonsMultiBubbleSuggestion(t *testing.T) {
+	// 规格 v4 §七(2026-07-31):服务补句只允许一句;多气泡是服务解析器
+	// 合同外形状,放弃补句、正常终局,不发送也不转人工。
 	state := activeV4DialogueState()
 	state.MainStatus = V4StatusInterviewed
 	input := V4DialogueInput{
@@ -161,16 +163,60 @@ func TestV4DialogueReplyOnlyConvertsEveryPhraseAndKeepsKeysUnique(t *testing.T) 
 	}
 
 	planned, err := ReduceV4Dialogue(input)
-	if err != nil || planned.Status != V4DialogueActionsPlanned || len(planned.Actions) != 2 {
-		t.Fatalf("服务态多气泡没有形成两条动作: decision=%+v err=%v", planned, err)
+	if err != nil || planned.Status != V4DialogueNoAction || len(planned.Actions) != 0 ||
+		planned.ManualReason != "" || planned.ServiceVerdict != V4ServiceReplySkipped {
+		t.Fatalf("服务态多气泡建议应放弃补句而非发送或转人工: decision=%+v err=%v", planned, err)
 	}
-	if planned.Actions[0].Kind != V4ActionServiceReply ||
-		planned.Actions[0].ActionKey != "turn-service-multi|serviceReply" ||
-		planned.Actions[1].Kind != V4ActionServiceReply ||
-		planned.Actions[1].ActionKey != "turn-service-multi|serviceReply|bubble:2" ||
-		planned.Actions[0].ActionKey == planned.Actions[1].ActionKey {
-		t.Fatalf("服务态没有转换每条气泡或稳定键不唯一: actions=%+v", planned.Actions)
+}
+
+func TestV4DialogueServiceReplyTerminals(t *testing.T) {
+	base := func() V4DialogueInput {
+		state := activeV4DialogueState()
+		state.MainStatus = V4StatusInterviewed
+		return V4DialogueInput{
+			State:       state,
+			Requirement: V4DialogueServiceReply,
+			Turn:        FrozenTurnFacts{TurnID: "turn-service-terminal"},
+			Intent:      IntentAdvice{State: AdviceAbsent},
+		}
 	}
+
+	t.Run("advice_failed_abandons_without_manual", func(t *testing.T) {
+		input := base()
+		input.Reply = ReplyAdvice{State: AdviceFailed}
+		decision, err := ReduceV4Dialogue(input)
+		if err != nil || decision.Status != V4DialogueNoAction || decision.ManualReason != "" ||
+			decision.ServiceVerdict != V4ServiceReplySkipped {
+			t.Fatalf("补句失败应放弃并正常终局: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("empty_phrases_is_explicit_silence", func(t *testing.T) {
+		input := base()
+		input.Reply = ReplyAdvice{State: AdviceOK, Suggestion: m5ai.ReplySuggestion{}}
+		decision, err := ReduceV4Dialogue(input)
+		if err != nil || decision.Status != V4DialogueNoAction || decision.ManualReason != "" ||
+			decision.ServiceVerdict != V4ServiceReplySilent {
+			t.Fatalf("空建议应判定为显式静默: decision=%+v err=%v", decision, err)
+		}
+	})
+
+	t.Run("pending_event_actions_gate_until_confirmed", func(t *testing.T) {
+		input := base()
+		input.PendingEventActions = true
+		input.Reply = ReplyAdvice{State: AdviceAbsent}
+		waiting, err := ReduceV4Dialogue(input)
+		if err != nil || waiting.Status != V4DialogueWaitingPrerequisite ||
+			waiting.NextAdvice != V4AdviceNone {
+			t.Fatalf("固定段未收束时不得请求补句建议: decision=%+v err=%v", waiting, err)
+		}
+		input.PrerequisitesConfirmed = true
+		advised, err := ReduceV4Dialogue(input)
+		if err != nil || advised.Status != V4DialogueWaitingAdvice ||
+			advised.NextAdvice != V4AdviceServiceReply {
+			t.Fatalf("前置确认后应请求一次补句建议: decision=%+v err=%v", advised, err)
+		}
+	})
 }
 
 func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
@@ -308,6 +354,8 @@ func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
 	})
 
 	t.Run("non ordinary reply purpose rejects AI action", func(t *testing.T) {
+		// 2026-07-31 规格修订:服务轨动作建议仍然一律不执行,但终局从
+		// 转人工改为放弃补句、正常收束。
 		input := base
 		input.State.MainStatus = V4StatusInterviewed
 		input.Requirement = V4DialogueServiceReply
@@ -320,10 +368,10 @@ func TestV4DialogueDeterministicallyClosesReplyActionSuggestions(t *testing.T) {
 			},
 		}
 		decision, err := ReduceV4Dialogue(input)
-		if err != nil || decision.Status != V4DialogueManualRequired ||
-			decision.ManualReason != V4ManualReplyInvalid ||
-			len(decision.Actions) != 0 {
-			t.Fatalf("非普通 reply purpose 执行了模型动作: decision=%+v err=%v", decision, err)
+		if err != nil || decision.Status != V4DialogueNoAction ||
+			decision.ManualReason != "" || len(decision.Actions) != 0 ||
+			decision.ServiceVerdict != V4ServiceReplySkipped {
+			t.Fatalf("服务轨动作建议应放弃补句而非执行或转人工: decision=%+v err=%v", decision, err)
 		}
 	})
 
@@ -554,7 +602,9 @@ func TestV4DialogueKnownInterestWechatAndServiceSkipIntentAI(t *testing.T) {
 				waiting.IntentLabel != tc.label {
 				t.Fatalf("确定性分支不应先调用 intent AI: decision=%+v err=%v", waiting, err)
 			}
-			input.Reply = ReplyAdvice{State: AdviceOK, Suggestion: m5ai.ReplySuggestion{Text: "收到，我们继续沟通。"}}
+			input.Reply = ReplyAdvice{State: AdviceOK, Suggestion: m5ai.ReplySuggestion{
+				Phrases: []string{"收到，我们继续沟通。"}, Text: "收到，我们继续沟通。",
+			}}
 			planned, err := ReduceV4Dialogue(input)
 			if err != nil || planned.Status != V4DialogueActionsPlanned || len(planned.Actions) != 1 ||
 				planned.Actions[0].Kind != tc.action {

@@ -198,16 +198,35 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 			ManualReason: V4ManualUnknownPlatformEvent,
 		}, nil
 	}
-	if requirement != V4DialogueNone {
-		// 规格 §五(三):轮内存在对话承接(文字或简历触发回复、换微信承接、
-		// 服务应答)时,该轮固定回执由这一次 AI 调用替代——候选人可见回复
-		// 单轨,不与固定语叠发。移除回执动作的同时置位对应义务标志:义务
-		// 已改由承接承载,承接失败转人工也不回落固定话术、不补发。
-		eventActions, state = suppressV4ReceiptActions(eventActions, state)
-	} else {
+	switch requirement {
+	case V4DialogueNone:
 		// 无对话轮沿用各单卡既有语义,但同类回执一轮至多一条(多张同类卡
 		// 不叠加候选人可见动作)。
 		eventActions = dedupeV4ReceiptActions(eventActions)
+	case V4DialogueServiceReply:
+		// 规格 §五(三) 2026-07-31 修订:已约面(含本轮迁入)的轮,固定确认
+		// 语与换微信邀请照发、不被补句替代;回执展开与固定语校验沿用纯卡
+		// 轮语义,可见事件动作全部收束后才允许创建 serviceReply 补句。
+		eventActions = dedupeV4ReceiptActions(eventActions)
+		if bubbles, receipt, handled := v4ReceiptDialogue(state, eventActions, input.FixedPhrases); handled {
+			if receipt.Status == V4DialogueManualRequired {
+				return V4InboundTurnDecision{
+					State: state, Requirement: V4DialogueNone,
+					EventActions: append([]V4EventAction(nil), eventActions...),
+					Dialogue:     receipt, ManualReason: receipt.ManualReason,
+				}, nil
+			}
+			eventActions = bubbles
+		}
+		if v4HasCandidateVisibleEventAction(eventActions) {
+			dialogueAfterActions = true
+		}
+	default:
+		// 规格 §五(三):主线未入已约面的对话轮,该轮固定回执由这一次 AI
+		// 承接调用替代——候选人可见回复单轨,不与固定语叠发。移除回执动作
+		// 的同时置位对应义务标志:义务已改由承接承载,承接失败转人工也不
+		// 回落固定话术、不补发。
+		eventActions, state = suppressV4ReceiptActions(eventActions, state)
 	}
 	if requirement == V4DialogueNone {
 		if bubbles, receipt, handled := v4ReceiptDialogue(state, eventActions, input.FixedPhrases); handled {
@@ -224,6 +243,7 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		State: state, Requirement: requirement, Turn: frozen,
 		Intent: input.Intent, Reply: input.Reply, FixedPhrases: input.FixedPhrases,
 		CardMessageSeq: turnTailSeq, PrerequisitesConfirmed: input.PrerequisitesConfirmed,
+		PendingEventActions: dialogueAfterActions && requirement == V4DialogueServiceReply,
 	})
 	if err != nil {
 		return V4InboundTurnDecision{}, err
@@ -420,6 +440,21 @@ func v4ReceiptDialogue(
 	return expanded, V4DialogueDecision{
 		State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
 	}, true
+}
+
+// v4HasCandidateVisibleEventAction reports whether the turn still carries an
+// event action the candidate can see (receipt bubbles, wechat invite, accept):
+// only those must settle before the serviceReply suffix. Operator webhooks are
+// invisible and never gate the dialogue.
+func v4HasCandidateVisibleEventAction(actions []V4EventAction) bool {
+	for index := range actions {
+		switch actions[index].Kind {
+		case V4ActionNotifyWechat, V4ActionNotifyInterviewAccepted:
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // v4ReceiptBubbleActionKey suffixes the reducer's semantic key with the bubble

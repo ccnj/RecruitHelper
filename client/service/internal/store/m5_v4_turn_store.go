@@ -474,8 +474,7 @@ func communicationV4TurnHeadApplicationTx(
 		return head, found, err
 	}
 	if head.Outcome.DialogueAfterActions {
-		if head.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
-			head.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		if head.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
 			head.Outcome.NextAdvice != communication.V4AdviceNone {
 			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
 		}
@@ -488,42 +487,86 @@ func communicationV4TurnHeadApplicationTx(
 		if err != nil {
 			return CommunicationV4ProjectionApplication{}, false, err
 		}
-		var accept *CommunicationV4EventAction
-		for index := range actions {
-			if actions[index].V4Kind != communication.V4ActionAcceptWechat {
-				continue
+		switch head.Outcome.Dialogue {
+		case communication.V4DialogueWechatContinuation:
+			var accept *CommunicationV4EventAction
+			for index := range actions {
+				if actions[index].V4Kind != communication.V4ActionAcceptWechat {
+					continue
+				}
+				if accept != nil {
+					return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+				}
+				copy := actions[index]
+				accept = &copy
 			}
-			if accept != nil {
+			if accept == nil {
 				return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
 			}
-			copy := actions[index]
-			accept = &copy
-		}
-		if accept == nil {
+			if accept.Status == CommunicationV4EventActionSent {
+				continuation, exists, err := communicationV4ApplicationTx(
+					tx,
+					turn.ProfileID,
+					CommunicationV4InputConfirmedAction,
+					accept.SemanticActionKey,
+				)
+				if err != nil {
+					return CommunicationV4ProjectionApplication{}, false, err
+				}
+				if !exists ||
+					continuation.SemanticKind != string(communication.V4ActionAcceptWechat) ||
+					continuation.MessageSeq != 0 ||
+					continuation.FromRevision != head.ToRevision ||
+					continuation.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+					continuation.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+					continuation.Outcome.NextAdvice != communication.V4AdviceReply ||
+					continuation.Outcome.IntentLabel != m5ai.IntentInterested ||
+					continuation.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+					return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+				}
+				head = continuation
+			}
+		case communication.V4DialogueServiceReply:
+			// 已约面固定段(2026-07-31 规格 §五(三)):全部可见动作收束后,
+			// 演进投影挂在收尾动作上;未收束是合法等待,head 停在初始投影。
+			closing := -1
+			settled := true
+			for index := range actions {
+				switch actions[index].V4Kind {
+				case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
+					continue
+				}
+				closing = index
+				if actions[index].Status != CommunicationV4EventActionSent {
+					settled = false
+				}
+			}
+			if closing < 0 {
+				return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+			}
+			if settled {
+				continuation, exists, err := communicationV4ApplicationTx(
+					tx,
+					turn.ProfileID,
+					CommunicationV4InputConfirmedAction,
+					actions[closing].SemanticActionKey,
+				)
+				if err != nil {
+					return CommunicationV4ProjectionApplication{}, false, err
+				}
+				if !exists ||
+					continuation.SemanticKind != string(actions[closing].V4Kind) ||
+					continuation.Outcome.Dialogue != communication.V4DialogueServiceReply ||
+					continuation.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+					continuation.Outcome.NextAdvice != communication.V4AdviceServiceReply ||
+					continuation.Outcome.IntentLabel != "" ||
+					continuation.Outcome.IntentSource != "" {
+					return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
+				}
+				head = continuation
+			}
+		default:
 			return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
-		}
-		if accept.Status == CommunicationV4EventActionSent {
-			continuation, exists, err := communicationV4ApplicationTx(
-				tx,
-				turn.ProfileID,
-				CommunicationV4InputConfirmedAction,
-				accept.SemanticActionKey,
-			)
-			if err != nil {
-				return CommunicationV4ProjectionApplication{}, false, err
-			}
-			if !exists ||
-				continuation.SemanticKind != string(communication.V4ActionAcceptWechat) ||
-				continuation.MessageSeq != 0 ||
-				continuation.FromRevision != head.ToRevision ||
-				continuation.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
-				continuation.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
-				continuation.Outcome.NextAdvice != communication.V4AdviceReply ||
-				continuation.Outcome.IntentLabel != m5ai.IntentInterested ||
-				continuation.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
-				return CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Corrupt
-			}
-			head = continuation
 		}
 	}
 	if unfreeze, exists, err := communicationV4ApplicationTx(
