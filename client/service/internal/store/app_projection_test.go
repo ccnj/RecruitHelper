@@ -595,6 +595,65 @@ func TestAppTodayMetricsSkipUntimedMessagesInsteadOfGoingBlind(t *testing.T) {
 	}
 }
 
+// 今日换微信数按 ContactAsset 创建时刻切当天。它与"总账面·累计已换微信"
+// 同表不同口径,一起显示在首页,算错方向就是把累计当成今天新增,一开工
+// 就显示几十个人今天换了微信。同一人的多条资产行(不同会话各收编一次)
+// 只算一个人,跨账号不串。
+func TestAppTodayWechatCountsOnlyAssetsCreatedToday(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.Local)
+	platform, accountRef := "zhilian", "today-wechat-account"
+	createM4Account(t, s, platform, accountRef)
+	foreignAccountRef := "today-wechat-foreign"
+	createM4Account(t, s, platform, foreignAccountRef)
+
+	// 现网库的 contact_assets 行是 UTC 落盘(同库的 greeted_at 却是本地偏移),
+	// 所以这里一律照抄那个形态写入:切当天的实现若拿本地 time.Time 去比这列
+	// 字符串,本地 00:00-08:00 收编的人会被算到前一天。
+	seed := func(assetID, profileID, account, conversationRef string, at time.Time) {
+		t.Helper()
+		if err := s.db.Create(&ContactAsset{
+			AssetID: assetID, ProfileID: profileID, Platform: platform,
+			AccountRef: account, ConversationRef: conversationRef,
+			Kind: contactAssetKindWechat, SourceKey: assetID + "-source",
+			RequestSourceKey: assetID + "-request", Value: "candidate_wechat",
+			ObservedAtMs: at.UnixMilli(), CreatedAt: at.UTC(), UpdatedAt: at.UTC(),
+		}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 同一人今天在两个会话各收编一次,只能算一个人。
+	seed("asset-today-a", "P-wechat-1", accountRef, "conv-1", now.Add(-2*time.Hour))
+	seed("asset-today-b", "P-wechat-1", accountRef, "conv-2", now.Add(-time.Hour))
+	// 今天收编的第二个人。
+	seed("asset-today-c", "P-wechat-2", accountRef, "conv-3", now.Add(-30*time.Minute))
+	// 今天本地 00:30 收编:UTC 落盘时是昨天 16:30,跨了 UTC 日界,仍算今天。
+	seed("asset-today-early", "P-wechat-early", accountRef, "conv-early",
+		time.Date(2026, 7, 31, 0, 30, 0, 0, time.Local))
+	// 昨天收编:只进累计,不进今日。
+	seed("asset-yesterday", "P-wechat-3", accountRef, "conv-4", now.Add(-24*time.Hour))
+	// 昨天本地 09:00 收编:UTC 落盘仍是昨天,不得漏算成今天。
+	seed("asset-yesterday-mid", "P-wechat-5", accountRef, "conv-6",
+		time.Date(2026, 7, 30, 9, 0, 0, 0, time.Local))
+	// 别的账号今天收编:两个数都不该串。
+	seed("asset-foreign", "P-wechat-4", foreignAccountRef, "conv-5", now.Add(-time.Hour))
+
+	got, err := s.AppOverview(AppOverviewRequest{
+		Now: now, Platform: platform, AccountRef: accountRef,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Statistics.TodayWechat.Exact || got.Statistics.TodayWechat.Value == nil ||
+		*got.Statistics.TodayWechat.Value != 3 {
+		t.Fatalf("今日换微信数应为精确 3: %+v", got.Statistics.TodayWechat)
+	}
+	if !got.Statistics.TotalWechat.Exact || got.Statistics.TotalWechat.Value == nil ||
+		*got.Statistics.TotalWechat.Value != 5 {
+		t.Fatalf("累计已换微信应为精确 5: %+v", got.Statistics.TotalWechat)
+	}
+}
+
 // 已约面/已面试是读侧按时间分流的展示分类,不是业务状态:两者同源于
 // main_status = interviewed,判据是最新邀面卡的结束时间(缺失退到开始时间)
 // 有没有过去。时间读不出来的归"已面试"(2026-07-30 甲方裁决)。

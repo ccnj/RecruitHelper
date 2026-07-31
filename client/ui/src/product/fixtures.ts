@@ -192,9 +192,9 @@ export function createProductFixture(): ProductData {
         lastPatrolAt: '今天 09:31',
       },
       todayMetrics: [
-        { label: 'AI 评级人数', value: 30, tone: 'blue' },
-        { label: '候选确认人数', value: 18, tone: 'amber' },
+        { label: 'AI 处理人数', value: 30, tone: 'blue' },
         { label: '打招呼', value: 6, tone: 'green' },
+        { label: '换微信数', value: 3, tone: 'amber' },
         { label: '已邀面', value: 2, tone: 'red' },
       ],
       ledgerStartedAt: '2026-07-20',
@@ -321,9 +321,9 @@ export function createEmptyProductData(): ProductData {
         lastPatrolAt: null,
       },
       todayMetrics: [
-        { label: 'AI 评级人数', value: 0, tone: 'blue' },
-        { label: '候选确认人数', value: 0, tone: 'amber' },
+        { label: 'AI 处理人数', value: 0, tone: 'blue' },
         { label: '打招呼', value: 0, tone: 'green' },
+        { label: '换微信数', value: 0, tone: 'amber' },
         { label: '已邀面', value: 0, tone: 'red' },
       ],
       ledgerStartedAt: null,
