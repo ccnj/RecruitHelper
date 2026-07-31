@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:8954f32cb0969dd0bb0cbed0a9c1a9c03762a5089a7e7b8cac44e8d235f00348"
+	ContractHash       = "sha256:5d3c0735e97b7bf15396c84b3195db5d8c2bb0943f02d191113a53bd77ac8274"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -810,6 +810,7 @@ const (
 	PrimJobPrepareDraft                   = "job.prepareDraft"
 	PrimJobPublishDraft                   = "job.publishDraft"
 	PrimJobReadClassCandidates            = "job.readClassCandidates"
+	PrimJobReadKeywordVocabulary          = "job.readKeywordVocabulary"
 	PrimJobReadPublishedList              = "job.readPublishedList"
 	PrimNavEnsureSurface                  = "nav.ensureSurface"
 	PrimProbePlatform                     = "probe.platform"
@@ -864,6 +865,7 @@ var Primitives = map[string]PrimitiveMeta{
 	PrimJobPrepareDraft:                   {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 180000, DeadlineMs: 240000, LeaseMs: 45000, ArgsSchema: "JobPrepareDraftArgs", DataSchema: "JobPrepareDraftData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimJobPublishDraft:                   {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 240000, DeadlineMs: 600000, LeaseMs: 60000, ArgsSchema: "JobPrepareDraftArgs", DataSchema: "JobPublishDraftData", GuardsSchema: "JobPublishDraftGuards", EvidenceSchema: "JobPublishDraftEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"}, VerificationPrimitive: "job.readPublishedList", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},
 	PrimJobReadClassCandidates:            {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 150000, DeadlineMs: 240000, LeaseMs: 60000, ArgsSchema: "JobReadClassCandidatesArgs", DataSchema: "JobReadClassCandidatesData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimJobReadKeywordVocabulary:          {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 150000, DeadlineMs: 240000, LeaseMs: 60000, ArgsSchema: "JobReadKeywordVocabularyArgs", DataSchema: "JobReadKeywordVocabularyData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimJobReadPublishedList:              {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 90000, DeadlineMs: 150000, LeaseMs: 30000, ArgsSchema: "JobReadPublishedListArgs", DataSchema: "JobReadPublishedListData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimNavEnsureSurface:                  {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "NavEnsureSurfaceArgs", DataSchema: "NavEnsureSurfaceData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimProbePlatform:                     {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ProbePlatformArgs", DataSchema: "ProbePlatformData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: true},

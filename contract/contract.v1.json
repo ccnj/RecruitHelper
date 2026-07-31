@@ -874,7 +874,8 @@
         "fields": {
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
-          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 }
+          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
+          "keepForm": { "type": "boolean", "optional": true }
         }
       },
       "JobClassCandidate": {
@@ -893,6 +894,42 @@
             "items": { "ref": "JobClassCandidate" }
           },
           "prefilledClass": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
+      "JobReadKeywordVocabularyArgs": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+        }
+      },
+      "JobKeywordSection": {
+        "type": "object",
+        "fields": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "limit": { "type": "int64", "optional": true, "minimum": 0, "maximum": 11 },
+          "selected": { "type": "int64", "optional": true, "minimum": 0, "maximum": 11 },
+          "words": {
+            "type": "array", "minItems": 0, "maxItems": 60,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          }
+        }
+      },
+      "JobReadKeywordVocabularyData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "sections": {
+            "type": "array", "minItems": 0, "maxItems": 24,
+            "items": { "ref": "JobKeywordSection" }
+          },
+          "totalQuota": { "type": "int64", "optional": true, "minimum": 0, "maximum": 99 },
+          "formReused": { "type": "boolean" },
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
@@ -1357,7 +1394,14 @@
       "argsSchema": "JobReadClassCandidatesArgs", "dataSchema": "JobReadClassCandidatesData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
-      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层并离开发布页,不提交任何东西、不产生候选人可见动作。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别"
+      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层,不提交任何东西、不产生候选人可见动作。**args.keepForm 为 true 时读完保留已填表单、不离开发布页**,供紧接着的 job.readKeywordVocabulary 复用,省掉一次填表与描述失焦后的数十秒等待;缺省或 false 时照旧离开发布页。保留下来的表单必填不齐(缺类别、学历、经验、薪资、月数、关键词、人数),误点「发布」平台自己会拒。旧版手不认识该字段时按 must-ignore 丢弃、照常离开页面,下一趟回读发现对不上会整个重填,不会出错。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别"
+    },
+    "job.readKeywordVocabulary": {
+      "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
+      "argsSchema": "JobReadKeywordVocabularyArgs", "dataSchema": "JobReadKeywordVocabularyData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
+      "note": "读取平台针对某个职位、在某个已选定职位类别下给出的关键词分组词库全集。真机事实:关键词弹层必须先填职位描述**且已选定职位类别**才打得开(类别为「请选择」时点入口毫无反应),而分组结构、组内词库与是否自动预选随类别与描述一起变——词库因此只能在类别定下来之后现读,无法离线预知。执行顺序:先回读发布页表单的职位名称、工作性质与描述长度,与 args 一致就复用上一趟(job.readClassCandidates 带 keepForm)留下的半成品表单,不一致或读不到就导航到干净发布页重填这三项——**不假设页面状态**,复用只是省时间,不是正确性依赖;再按 args.jobClass 逐字选中类别(选不中即整体 failed,绝不模糊匹配、绝不就近取一个);再打开关键词弹层、展开「更多」、清空平台预选,按分组读回标题、组内词条与配额;最后取消弹层并离开发布页,**绝不点击弹层的「确定」,绝不点击发布或任何提交控件**。清空预选是必须的:预选一次有一次无,不清就算不准配额。分组不得拍平成一张词表——组内上限是 3,脑要按分组喂给模型才不会让它把词堆在一组里被平台拒掉。formReused 只作诊断,不参与判定。词库为空是如实返回,由脑判定为干净失败并转人工,手不得据此自造关键词"
     },
     "job.prepareDraft": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
