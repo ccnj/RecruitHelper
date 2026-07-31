@@ -607,14 +607,17 @@ func TestAppTodayWechatCountsOnlyAssetsCreatedToday(t *testing.T) {
 	foreignAccountRef := "today-wechat-foreign"
 	createM4Account(t, s, platform, foreignAccountRef)
 
-	seed := func(assetID, profileID, account, conversationRef string, createdAt time.Time) {
+	// 现网库的 contact_assets 行是 UTC 落盘(同库的 greeted_at 却是本地偏移),
+	// 所以这里一律照抄那个形态写入:切当天的实现若拿本地 time.Time 去比这列
+	// 字符串,本地 00:00-08:00 收编的人会被算到前一天。
+	seed := func(assetID, profileID, account, conversationRef string, at time.Time) {
 		t.Helper()
 		if err := s.db.Create(&ContactAsset{
 			AssetID: assetID, ProfileID: profileID, Platform: platform,
 			AccountRef: account, ConversationRef: conversationRef,
 			Kind: contactAssetKindWechat, SourceKey: assetID + "-source",
 			RequestSourceKey: assetID + "-request", Value: "candidate_wechat",
-			ObservedAtMs: createdAt.UnixMilli(), CreatedAt: createdAt, UpdatedAt: createdAt,
+			ObservedAtMs: at.UnixMilli(), CreatedAt: at.UTC(), UpdatedAt: at.UTC(),
 		}).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -624,8 +627,14 @@ func TestAppTodayWechatCountsOnlyAssetsCreatedToday(t *testing.T) {
 	seed("asset-today-b", "P-wechat-1", accountRef, "conv-2", now.Add(-time.Hour))
 	// 今天收编的第二个人。
 	seed("asset-today-c", "P-wechat-2", accountRef, "conv-3", now.Add(-30*time.Minute))
+	// 今天本地 00:30 收编:UTC 落盘时是昨天 16:30,跨了 UTC 日界,仍算今天。
+	seed("asset-today-early", "P-wechat-early", accountRef, "conv-early",
+		time.Date(2026, 7, 31, 0, 30, 0, 0, time.Local))
 	// 昨天收编:只进累计,不进今日。
 	seed("asset-yesterday", "P-wechat-3", accountRef, "conv-4", now.Add(-24*time.Hour))
+	// 昨天本地 09:00 收编:UTC 落盘仍是昨天,不得漏算成今天。
+	seed("asset-yesterday-mid", "P-wechat-5", accountRef, "conv-6",
+		time.Date(2026, 7, 30, 9, 0, 0, 0, time.Local))
 	// 别的账号今天收编:两个数都不该串。
 	seed("asset-foreign", "P-wechat-4", foreignAccountRef, "conv-5", now.Add(-time.Hour))
 
@@ -636,12 +645,12 @@ func TestAppTodayWechatCountsOnlyAssetsCreatedToday(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.Statistics.TodayWechat.Exact || got.Statistics.TodayWechat.Value == nil ||
-		*got.Statistics.TodayWechat.Value != 2 {
-		t.Fatalf("今日换微信数应为精确 2: %+v", got.Statistics.TodayWechat)
+		*got.Statistics.TodayWechat.Value != 3 {
+		t.Fatalf("今日换微信数应为精确 3: %+v", got.Statistics.TodayWechat)
 	}
 	if !got.Statistics.TotalWechat.Exact || got.Statistics.TotalWechat.Value == nil ||
-		*got.Statistics.TotalWechat.Value != 3 {
-		t.Fatalf("累计已换微信应为精确 3: %+v", got.Statistics.TotalWechat)
+		*got.Statistics.TotalWechat.Value != 5 {
+		t.Fatalf("累计已换微信应为精确 5: %+v", got.Statistics.TotalWechat)
 	}
 }
 

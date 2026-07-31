@@ -73,9 +73,15 @@ type AppOverviewStatistics struct {
 	TodayConfirmation AppMetric `json:"todayConfirmation"`
 	TodayGreeted      AppMetric `json:"todayGreeted"`
 	TodayInvited      AppMetric `json:"todayInvited"`
-	// TodayWechat 是今天新换到微信的人数。权威时点取 ContactAsset 的创建时刻,
+	// TodayWechat 是今天新换到微信的人数。权威时点是 ContactAsset 的收编时刻,
 	// 与 contact_asset_store 里"换微信成功的权威时点即 ContactAsset 创建"同源;
 	// 重复收编走 existing 分支不重建行,同一人不会跨天重复计入。
+	//
+	// 切当天用 observed_at_ms 而不是 created_at:两列写的是同一次收编,但
+	// created_at 在现网库里是 UTC 落盘(greeted_at 等列却是本地偏移落盘),拿
+	// 本地 time.Time 去比一列 UTC 字符串,本地 00:00-08:00 收编的人会被算到
+	// 前一天。毫秒整数比较没有格式与时区的歧义,也与产品端"换微信时间"列
+	// 用的 WechatObservedAtMs 同源。
 	TodayWechat AppMetric `json:"todayWechat"`
 
 	TotalGreeted     AppMetric `json:"totalGreeted"`
@@ -635,7 +641,7 @@ func appOverviewStatisticsTx(
 	if err := count(tx.Model(&ContactAsset{}).
 		Where("platform = ? AND account_ref = ?", platform, accountRef).
 		Where("kind = ?", contactAssetKindWechat).
-		Where("created_at >= ? AND created_at < ?", start, end).
+		Where("observed_at_ms >= ? AND observed_at_ms < ?", start.UnixMilli(), end.UnixMilli()).
 		Distinct("profile_id"), &value); err != nil {
 		return out, err
 	}
