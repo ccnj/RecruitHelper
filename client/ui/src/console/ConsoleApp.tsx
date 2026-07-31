@@ -12,6 +12,7 @@ import { accountIdentity, errorText } from './format'
 import { AccountPage } from './pages/AccountPage'
 import { ConversationPage } from './pages/ConversationPage'
 import { DevToolsPage } from './pages/DevToolsPage'
+import { FieldReportPage } from './pages/FieldReportPage'
 import { JobPublishPage } from './pages/JobPublishPage'
 import { ModelConfigPage } from './pages/ModelConfigPage'
 import { OverviewPage } from './pages/OverviewPage'
@@ -170,6 +171,8 @@ export function ConsoleApp() {
     page = <ModelConfigPage />
   } else if (activePage === 'devTools') {
     page = <DevToolsPage />
+  } else if (activePage === 'fieldReport') {
+    page = <FieldReportPage />
   } else {
     page = (
       <OverviewPage
