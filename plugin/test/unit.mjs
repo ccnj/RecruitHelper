@@ -41,6 +41,7 @@ const {
   NavigationTracker,
   navigationTracker,
   normalizeLocalWsUrl,
+  parsedKeywordSections,
   NotReadyReason,
   PageKind,
   Primitive,
@@ -428,6 +429,42 @@ test('options 配置写经后台栅栏保住首次 handId，并拒绝远端 WebS
 
 test('generated contract validation.test.ts 在 Node 门禁中真正执行', async () => {
   assert.equal(GENERATED_CONTRACT_VALIDATION_EXECUTED, true)
+})
+
+test('关键词分组词库解析:空分组当未就绪继续轮询，optional 计数整键省略', async () => {
+  // 读不出分组 ≠ 词库为空。弹层是异步渲染的，此时收工会把"还没画完"当成
+  // "这个职位没有关键词可选"，进而干净失败转人工——所以这几种都必须返回
+  // null 让调用方接着轮询。
+  assert.equal(parsedKeywordSections('不是 JSON'), null)
+  assert.equal(parsedKeywordSections('{"sections":[]}'), null)
+  assert.equal(parsedKeywordSections('{"sections":[{"title":"","words":[]}]}'), null)
+  assert.equal(parsedKeywordSections('{"sections":[{"title":"行业经验"}]}'), null)
+
+  // 不带配额的组件变体读不到 (已选/上限)。契约里 limit/selected 是 optional，
+  // 必须整键省略——显式赋 undefined 会被校验判成 null 而整条命令失败。
+  const plain = parsedKeywordSections(JSON.stringify({
+    sections: [{ title: '财务管理方向', words: ['成本管理', '税务筹划'] }],
+  }))
+  assert.deepEqual(plain, { sections: [{ title: '财务管理方向', words: ['成本管理', '税务筹划'] }] })
+  assert.equal('limit' in plain.sections[0], false)
+  assert.equal('selected' in plain.sections[0], false)
+  assert.equal('totalQuota' in plain, false)
+
+  // 带配额的变体:标题里的 (已选/上限) 与底部总配额都要如实带回，模型靠它们
+  // 才知道每组还能塞几个。
+  const limited = parsedKeywordSections(JSON.stringify({
+    sections: [{ title: '您还有哪些招聘要求？ (0/3)', limit: 3, selected: 0, words: [] }],
+    totalQuota: 11,
+  }))
+  assert.equal(limited.sections[0].limit, 3)
+  assert.equal(limited.sections[0].selected, 0)
+  assert.equal(limited.totalQuota, 11)
+
+  // 词条数组里混进非字符串只丢那一项，不掀翻整次读取。
+  const dirty = parsedKeywordSections(JSON.stringify({
+    sections: [{ title: '证书', words: ['CPA', null, 123, 'ACCA'] }],
+  }))
+  assert.deepEqual(dirty.sections[0].words, ['CPA', 'ACCA'])
 })
 
 test('witness journal/outbox 持久相关性、跨会话补投与 ack 删除', async () => {

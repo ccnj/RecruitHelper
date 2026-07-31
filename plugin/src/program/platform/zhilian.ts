@@ -54,8 +54,11 @@ import type {
   JobPrepareDraftData,
   JobPublishDraftData,
   JobPublishDraftGuards,
+  JobKeywordSection,
   JobReadClassCandidatesArgs,
   JobReadClassCandidatesData,
+  JobReadKeywordVocabularyArgs,
+  JobReadKeywordVocabularyData,
   JobReadPublishedListData,
   MessageAnchor,
   NotReadyReason,
@@ -5869,6 +5872,136 @@ function mainReadZhilianKeywordTags(): MainStep {
   return { status: 'ok', detail: text.slice(0, 512) }
 }
 
+// 回读发布页表单上"这是哪个职位"的三项,供扩展侧判断能不能复用上一趟留下的
+// 半成品表单。三项原样取回,判定在扩展侧做——MAIN world 里没有 args,也不该
+// 在页面里做业务比对。
+function mainReadZhilianFormIdentity(): MainStep {
+  const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
+  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (!name || !editor) return { status: 'failed', reason: 'form_identity_absent' }
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '工作性质'
+  })
+  const active = item
+    ? Array.from(item.querySelectorAll('button')).filter((button) =>
+      button.className.split(/\s+/).includes('km-button--primary'))
+    : []
+  return {
+    status: 'ok',
+    detail: JSON.stringify({
+      jobName: name.value.trim(),
+      employmentType: active.length === 1 ? (active[0] as HTMLElement).innerText.trim() : '',
+      descriptionLength: editor.innerText.trim().length,
+    }),
+  }
+}
+
+// 「更多」折叠区:实测有的职位有、有的没有,所以"没有"是正常结果而不是失败
+// (docs §四 未验证事项 3——该入口尚未在真机逐一核对,故这一步永不掀翻整条链路)。
+// 只点可见的叶子节点里文案以「更多」开头的那个;不唯一就不点,如实报 ambiguous。
+function mainExpandZhilianKeywordMore(): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+  const targets = (Array.from(dialog.querySelectorAll('*')) as HTMLElement[]).filter((node) => {
+    if (node.children.length > 0) return false
+    if (node.getBoundingClientRect().height <= 0) return false
+    return /^更多/.test((node.innerText ?? '').trim())
+  })
+  if (targets.length === 0) return { status: 'ok', detail: 'none' }
+  if (targets.length > 1) return { status: 'ok', detail: 'ambiguous' }
+  targets[0].click()
+  return { status: 'ok', detail: 'expanded' }
+}
+
+// 按分组读回关键词词库。**分组不能拍平成一张词表**:组内上限是 3,脑要按分组
+// 喂给模型,否则模型会把词堆在一组里被平台拒掉。
+//
+// 分组归属不靠 DOM 父子关系——兜底组「您还有哪些招聘要求？」的结构与其他分组
+// 不同(docs §1.4.1 第 3 条),按容器统计会漏掉它并误判成"这个职位没有兜底组"。
+// 这里改按**文档顺序**把每个词条挂到它前面最近的那个标题上,这条对两个组件
+// 变体都成立(块名差在 `-limit`,见 §1.4.3,所以选择器一律用
+// [class*="s-checkbutton-drilldown-multi"] 打底)。
+function mainReadZhilianKeywordSections(): MainStep {
+  const nodes = Array.from(document.querySelectorAll('[class*="dialog"], [class*="modal"]')) as HTMLElement[]
+  const dialog = nodes.find((node) =>
+    node.getBoundingClientRect().height > 200 && /职位关键词/.test(node.innerText)) ?? null
+  if (!dialog) return { status: 'failed', reason: 'keyword_dialog_absent' }
+
+  const firstLine = (node: HTMLElement): string =>
+    (node.innerText ?? '').split('\n')[0].trim().replace(/\s+/g, ' ')
+
+  // 标题两条来源取并集:组件自己的标题类,以及「……？ (已选/上限)」计数形态。
+  // 带配额那个变体的标题类名还没在真机核对过,少一条来源就可能整批读不到分组。
+  // 同一段标题文本会同时命中外层容器与内层标题节点,按文档顺序后者覆盖前者
+  // ——取最内层的那个,它离自己的词条最近,挂靠才不会把后面几组一起吞掉。
+  const titleNodes = new Map<string, HTMLElement>()
+  const remember = (node: HTMLElement): void => {
+    const line = firstLine(node)
+    if (!line || line.length > 60) return
+    titleNodes.set(line, node)
+  }
+  for (const node of Array.from(dialog.querySelectorAll(
+    '[class*="s-checkbutton-drilldown-multi"][class*="__list-item-title"]',
+  ))) {
+    remember(node as HTMLElement)
+  }
+  for (const node of Array.from(dialog.querySelectorAll('div'))) {
+    if (/？\s*\(\d+\/\d+\)$/.test(firstLine(node as HTMLElement))) remember(node as HTMLElement)
+  }
+
+  interface Marker { kind: string; node: HTMLElement; text: string; picked: boolean }
+  const markers: Marker[] = []
+  titleNodes.forEach((node, text) => markers.push({ kind: 'title', node, text, picked: false }))
+  for (const node of Array.from(dialog.querySelectorAll(
+    'li[class*="s-checkbutton-drilldown-multi"][class*="__item"]:not([class*="__item__add"])',
+  )) as HTMLElement[]) {
+    const text = (node.textContent ?? '').trim()
+    if (text) markers.push({ kind: 'item', node, text, picked: node.className.includes('--selected') })
+  }
+  markers.sort((left, right) => {
+    if (left.node === right.node) return 0
+    const relation = left.node.compareDocumentPosition(right.node)
+    if (relation & Node.DOCUMENT_POSITION_FOLLOWING) return -1
+    if (relation & Node.DOCUMENT_POSITION_PRECEDING) return 1
+    return 0
+  })
+
+  interface Section { title: string; limit?: number; selected?: number; words: string[] }
+  const sections: Section[] = []
+  let current: Section | null = null
+  let picked = 0
+  let orphans = 0
+  for (const marker of markers) {
+    if (marker.kind === 'title') {
+      const section: Section = { title: marker.text, words: [] }
+      // optional 字段读不到就整键省略,不能显式赋 undefined(会被契约校验判 null)。
+      const counts = /\((\d+)\/(\d+)\)\s*$/.exec(marker.text)
+      if (counts) {
+        section.selected = Number(counts[1])
+        section.limit = Number(counts[2])
+      }
+      sections.push(section)
+      current = section
+      continue
+    }
+    if (marker.picked) picked += 1
+    // 标题之前的词条无处挂靠。不猜一个组,如实计数交给脑看。
+    if (!current) { orphans += 1; continue }
+    if (current.words.length < 60) current.words.push(marker.text)
+  }
+
+  const payload: Record<string, unknown> = {
+    sections: sections.slice(0, 24), selectedTotal: picked, orphanWords: orphans,
+  }
+  const quota = /已选[:：]?\s*(\d+)\s*\/\s*(\d+)/.exec(dialog.innerText)
+  if (quota) payload.totalQuota = Number(quota[2])
+  return { status: 'ok', detail: JSON.stringify(payload) }
+}
+
 // 试填过程中累积的失败现场。它只用于人读诊断:试填链路长、每步都依赖平台的
 // 异步行为,没有这份快照就只能靠反复重跑猜卡在哪。
 interface DraftProgress {
@@ -5886,6 +6019,9 @@ interface DraftProgress {
   sectionTitles: string[]
   availableSample: string[]
   customInputVisible?: boolean
+  // 词库读取那一趟专有:是否复用了上一趟留下的表单,以及「更多」折叠区点没点开。
+  formReused?: boolean
+  keywordMore?: string
 }
 
 function newDraftProgress(): DraftProgress {
@@ -5914,6 +6050,8 @@ function snapshotProgress(progress: DraftProgress, reason: string): Record<strin
     // 当次实际词库的样本:关键词能否命中全看它,而它随职位类别变化。
     availableSample: progress.availableSample.slice(0, 40),
     customInputVisible: progress.customInputVisible ?? null,
+    formReused: progress.formReused ?? null,
+    keywordMore: progress.keywordMore ?? null,
   }
 }
 
@@ -5969,6 +6107,7 @@ const zhilianPublishInteractions = new Set<unknown>([
   mainSubmitZhilianCustomKeyword,
   mainDismissZhilianCustomInput,
   mainConfirmZhilianKeywords,
+  mainExpandZhilianKeywordMore,
   mainFillZhilianHeadcount,
   mainClickZhilianPublish,
   mainIgnoreZhilianSensitiveWordDialog,
@@ -6607,8 +6746,12 @@ export async function readZhilianJobClassCandidates(
       undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
   }
 
-  // 半张填好的表留在页面上等同于给人工误操作递刀,读完必须离开。
-  await discardZhilianJobDraft(tabId, ctx)
+  // keepForm 为 true 时把这张半成品表单留给紧接着的 job.readKeywordVocabulary
+  // 复用,省掉一次填表与描述失焦后的数十秒等待。留下的表单必填不齐(缺类别、
+  // 学历、经验、薪资、月数、关键词、人数),误点「发布」平台自己会拒——那条
+  // "不把填满的表单留在页面上"针对的是 job.prepareDraft 填满全表的情形。
+  // 缺省或 false 时照旧离开:单独读一次候选的人不该在页面上留半张表。
+  if (!args.keepForm) await discardZhilianJobDraft(tabId, ctx)
 
   const data: JobReadClassCandidatesData = {
     candidates, prefilledClass, observedAt: Date.now(),
@@ -6619,6 +6762,191 @@ export async function readZhilianJobClassCandidates(
   }
   await ctx.progress('职位类别候选读取完成', 100)
   return data
+}
+
+// 判断发布页上现成的那张表能不能直接接着用。
+//
+// **不假设**是这条的全部要点:第一趟与本趟之间隔着一次脑侧的模型调用,期间插件
+// 可能换代、标签页可能被人动过、平台可能把表单清了。所以这里只回答"能不能复用",
+// 答不上来就返回 null,由调用方走完整重填——复用只是省时间,不是正确性依赖。
+//
+// 比对职位名与工作性质,外加描述非空。不逐字比描述:富文本 innerText 与 args
+// 的纯文本换行结构不是一一对应,逐字比会把每次都判成不可复用。职位名是系统的
+// 职位身份键,它对得上就是这个职位的表;而认错的代价也只是多填一次——本趟只读
+// 词库,真发那趟无论如何都从零重填。
+async function findReusableZhilianJobForm(
+  args: JobReadKeywordVocabularyArgs,
+  expectedPrincipalFingerprint: string | undefined,
+  progress: DraftProgress,
+): Promise<number | null> {
+  const onPublish = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => tab.id !== undefined && isZhilianJobPublishURL(tab.url))
+  if (onPublish.length !== 1) return null
+  const tab = onPublish[0]
+  const tabId = tab.id
+  if (tabId === undefined) return null
+  // 身份不符不是"不能复用",是整条命令都不该继续:沿用既有的硬失败,不吞。
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+
+  const probed = await runMain(tabId, mainReadZhilianFormIdentity, [])
+  if (!validMainStep(probed) || probed.status !== 'ok') return null
+  let identity: { jobName?: unknown; employmentType?: unknown; descriptionLength?: unknown }
+  try {
+    identity = JSON.parse(probed.detail ?? '') as typeof identity
+  } catch {
+    return null
+  }
+  const length = typeof identity.descriptionLength === 'number' ? identity.descriptionLength : 0
+  progress.descriptionLength = length
+  if (identity.jobName !== args.jobName) return null
+  if (identity.employmentType !== args.employmentType) return null
+  if (length <= 0) return null
+  return tabId
+}
+
+// 复用或重填:拿到一张确实属于本职位、且已填好工作性质/职位名/描述的发布表单。
+async function reuseOrRefillZhilianJobForm(
+  args: JobReadKeywordVocabularyArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+  progress: DraftProgress,
+): Promise<{ tabId: number; reused: boolean }> {
+  const reusable = await findReusableZhilianJobForm(args, expectedPrincipalFingerprint, progress)
+  if (reusable !== null) return { tabId: reusable, reused: true }
+
+  const tab = await ensureZhilianJobPublishTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联发布页与登录身份', 15)
+
+  await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
+  await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
+    (detail) => detail === args.employmentType, 40, progress)
+  await runStep(tabId, mainFillZhilianJobName, [args.jobName], '填入职位名称', progress)
+
+  const lines = args.description.split('\n')
+  const expectedHTML = await runStep(tabId, mainWriteZhilianDescription, [lines], '写入职位描述', progress)
+  progress.descriptionLength = Number(await pollStep(
+    tabId, mainReadZhilianDescriptionSync, [expectedHTML], ctx, '确认职位描述同步',
+    undefined, 40, progress,
+  ))
+  await runStep(tabId, mainBlurZhilianDescription, [], '触发职位描述失焦', progress)
+  return { tabId, reused: false }
+}
+
+// 读回平台在**已选定的职位类别**下给出的关键词分组词库。
+//
+// 为什么必须单独一趟:关键词弹层要先有描述、且类别已定才打得开(§1.4.1 第 5 条),
+// 而分组结构、组内词库与是否自动预选随类别与描述一起变——词库只能现读。类别又
+// 得由脑先问过模型才定得下来,手不能调大模型,也没法在原语中途回头问脑。
+//
+// 全程只读:开弹层、展开、清预选、按分组读回,**绝不点弹层的「确定」**(那会把
+// 关键词写进表单),读完直接导航离开——导航即销毁弹层,不必也不该去点它上面的
+// 任何按钮。
+export async function readZhilianJobKeywordVocabulary(
+  args: JobReadKeywordVocabularyArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobReadKeywordVocabularyData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobReadKeywordVocabulary, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '关键词词库读取参数不符合当前契约', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const progress = newDraftProgress()
+  const { tabId, reused } = await reuseOrRefillZhilianJobForm(
+    args, ctx, expectedPrincipalFingerprint, progress,
+  )
+  progress.formReused = reused
+
+  await ctx.progress('选定职位类别', 40)
+  const jobClass = await selectZhilianJobClass(tabId, ctx, args.jobClass, progress)
+  progress.jobClass = jobClass
+
+  await ctx.progress('打开关键词弹层', 60)
+  await runStep(tabId, mainOpenZhilianKeywords, [], '打开关键词弹层', progress)
+  let snapshot = await pollKeywordSnapshot(tabId, ctx, progress)
+
+  // 「更多」折叠区点不到不算失败,但要如实记进诊断:读到的词库可能不含折叠区
+  // 里的分组(docs §四 未验证事项 3)。
+  const expanded = await runMain(tabId, mainExpandZhilianKeywordMore, [])
+  const moreRoute = validMainStep(expanded) && expanded.status === 'ok'
+    ? expanded.detail ?? 'none'
+    : 'unreadable'
+  progress.keywordMore = moreRoute
+  if (moreRoute === 'expanded') snapshot = await pollKeywordSnapshot(tabId, ctx, progress)
+
+  // 清空平台预选:预选一次有一次无,不清就算不准配额,模型看到的余量也是错的。
+  for (let guard = 0; guard < 24 && snapshot.selected.length > 0; guard += 1) {
+    await runStep(tabId, mainClearOneZhilianKeyword, [], '清空关键词预选', progress)
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    snapshot = await pollKeywordSnapshot(tabId, ctx, progress)
+  }
+  if (snapshot.selected.length > 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '关键词预选未能清空', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'keyword_preselect_stuck'))
+  }
+  progress.sectionTitles = snapshot.sectionTitles.slice(0, 24)
+  progress.availableSample = snapshot.available.slice(0, 24)
+
+  await ctx.progress('读取关键词分组词库', 80)
+  const raw = await pollStep(tabId, mainReadZhilianKeywordSections, [], ctx, '读取关键词分组词库',
+    (detail) => parsedKeywordSections(detail) !== null, 24, progress)
+  const payload = parsedKeywordSections(raw)
+  if (payload === null) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词分组词库无法解析', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'keyword_sections_shape'))
+  }
+
+  // 读完直接离开:一张半成品表单加一个开着的弹层留在页面上没有任何用处,
+  // 而下一步(二次确认清单)可能隔几分钟也可能隔几小时才有人点。
+  await discardZhilianJobDraft(tabId, ctx)
+
+  const data: JobReadKeywordVocabularyData = {
+    jobClass,
+    sections: payload.sections,
+    formReused: reused,
+    observedAt: Date.now(),
+  }
+  // optional 字段读不到就整键省略。
+  if (payload.totalQuota !== undefined) data.totalQuota = payload.totalQuota
+  if (validatePrimitiveData(PrimitiveName.JobReadKeywordVocabulary, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '关键词词库回读不符合当前契约', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'keyword_vocabulary_contract'))
+  }
+  await ctx.progress('关键词词库读取完成', 100)
+  return data
+}
+
+// 词库为空是如实返回(由脑判干净失败并转人工),但"一个分组都没有"说明弹层还没
+// 渲染完,应该继续轮询而不是当成结论。两者的分界就在 sections 是否非空。
+export function parsedKeywordSections(
+  detail: string,
+): { sections: JobKeywordSection[]; totalQuota?: number } | null {
+  let payload: { sections?: unknown; totalQuota?: unknown }
+  try {
+    payload = JSON.parse(detail) as typeof payload
+  } catch {
+    return null
+  }
+  if (!Array.isArray(payload.sections) || payload.sections.length === 0) return null
+  const sections: JobKeywordSection[] = []
+  for (const raw of payload.sections) {
+    const entry = raw as { title?: unknown; limit?: unknown; selected?: unknown; words?: unknown }
+    if (typeof entry.title !== 'string' || entry.title === '' || !Array.isArray(entry.words)) return null
+    const section: JobKeywordSection = {
+      title: entry.title,
+      words: entry.words.filter((word): word is string => typeof word === 'string' && word !== ''),
+    }
+    if (typeof entry.limit === 'number') section.limit = entry.limit
+    if (typeof entry.selected === 'number') section.selected = entry.selected
+    sections.push(section)
+  }
+  const result: { sections: JobKeywordSection[]; totalQuota?: number } = { sections }
+  if (typeof payload.totalQuota === 'number') result.totalQuota = payload.totalQuota
+  return result
 }
 
 export async function prepareZhilianJobDraft(
