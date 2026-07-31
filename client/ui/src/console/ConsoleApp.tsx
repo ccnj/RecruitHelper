@@ -16,6 +16,7 @@ import { FieldReportPage } from './pages/FieldReportPage'
 import { JobPublishPage } from './pages/JobPublishPage'
 import { ModelConfigPage } from './pages/ModelConfigPage'
 import { OverviewPage } from './pages/OverviewPage'
+import { PluginCapabilityPage } from './pages/PluginCapabilityPage'
 import { HandsBar, ServiceSeal } from './shared/Topbar'
 import { usePolling } from './usePolling'
 
@@ -193,6 +194,15 @@ export function ConsoleApp() {
     page = <JobPublishPage account={selectedAccount} />
   } else if (activePage === 'modelConfig') {
     page = <ModelConfigPage />
+  } else if (activePage === 'pluginCapability') {
+    page = (
+      <PluginCapabilityPage
+        account={selectedAccount}
+        conversations={conversations.data?.conversations ?? []}
+        conversationsLoading={conversations.loading}
+        conversationsError={conversations.error}
+      />
+    )
   } else if (activePage === 'devTools') {
     page = <DevToolsPage />
   } else if (activePage === 'fieldReport') {
