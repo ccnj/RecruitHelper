@@ -80,16 +80,33 @@ type V4DialogueInput struct {
 	FixedPhrases           V4FixedPhraseView
 	CardMessageSeq         int64
 	PrerequisitesConfirmed bool
+	// PendingEventActions marks a turn whose candidate-visible event actions
+	// (receipt bubbles, wechat invite) must settle before the serviceReply
+	// suffix may be advised (spec v4 §5(3), 2026-07-31). The engine computes
+	// it from the surviving event actions; replays rebuild the same value.
+	PendingEventActions bool
 }
 
+// V4ServiceReplyVerdict distinguishes the three service-suffix terminals that
+// look identical to the candidate but must stay distinguishable in the ledger
+// (spec v4 §7): a sent guidance sentence carries no verdict (the action row is
+// the evidence), silence and skip are explicit verdicts on a no-action close.
+type V4ServiceReplyVerdict string
+
+const (
+	V4ServiceReplySilent  V4ServiceReplyVerdict = "silent"
+	V4ServiceReplySkipped V4ServiceReplyVerdict = "skipped"
+)
+
 type V4DialogueDecision struct {
-	State        V4State
-	Status       V4DialogueDecisionStatus
-	IntentLabel  m5ai.IntentLabel
-	IntentSource IntentSource
-	NextAdvice   V4AdvicePurpose
-	Actions      []V4PlannedAction
-	ManualReason V4ManualReason
+	State          V4State
+	Status         V4DialogueDecisionStatus
+	IntentLabel    m5ai.IntentLabel
+	IntentSource   IntentSource
+	NextAdvice     V4AdvicePurpose
+	Actions        []V4PlannedAction
+	ManualReason   V4ManualReason
+	ServiceVerdict V4ServiceReplyVerdict
 }
 
 // ReduceV4Dialogue is the AI permission gate. The deterministic requirement
@@ -134,7 +151,14 @@ func ReduceV4Dialogue(input V4DialogueInput) (V4DialogueDecision, error) {
 		if state.MainStatus != V4StatusInterviewed || input.Intent.State != AdviceAbsent {
 			return V4DialogueDecision{}, ErrInvalidV4StateTransition
 		}
-		return reduceV4ReplyOnly(input, state, V4ActionServiceReply, V4AdviceServiceReply, "", "")
+		if input.PendingEventActions && !input.PrerequisitesConfirmed {
+			// 固定段(回执气泡/换微信邀请)未收束前不得创建补句建议,
+			// 复用换微信承接的"先动作后对话"闸(规格 §五(三) 2026-07-31)。
+			return V4DialogueDecision{
+				State: state, Status: V4DialogueWaitingPrerequisite, NextAdvice: V4AdviceNone,
+			}, nil
+		}
+		return reduceV4ServiceReply(input, state)
 	case V4DialogueInterviewRejectionReceipt:
 		if input.Intent.State != AdviceAbsent || input.CardMessageSeq <= 0 ||
 			(state.MainStatus != V4StatusCommunicating && state.MainStatus != V4StatusInvited) {
@@ -302,6 +326,63 @@ func chooseV4RejectionStage(state V4State) V4RejectionStage {
 		return V4RejectionStageClosing
 	}
 	return V4RejectionStageArchive
+}
+
+// reduceV4ServiceReply is the post-interview suffix terminal (spec v4 §7,
+// 2026-07-31): one guidance sentence, explicit silence, or skip. Failure and
+// out-of-contract shapes abandon the suffix on a normal close — never manual —
+// because the candidate already holds the fixed segment and a lost guidance
+// sentence is cheaper than freezing the whole profile.
+func reduceV4ServiceReply(input V4DialogueInput, state V4State) (V4DialogueDecision, error) {
+	if strings.TrimSpace(input.Turn.TurnID) == "" {
+		return V4DialogueDecision{}, ErrInvalidV4StateTransition
+	}
+	switch input.Reply.State {
+	case AdviceAbsent:
+		return V4DialogueDecision{
+			State: state, Status: V4DialogueWaitingAdvice, NextAdvice: V4AdviceServiceReply,
+		}, nil
+	case AdviceFailed:
+		return V4DialogueDecision{
+			State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
+			ServiceVerdict: V4ServiceReplySkipped,
+		}, nil
+	case AdviceOK:
+		suggestion := input.Reply.Suggestion
+		if suggestion.Action != m5ai.ReplyActionNone || suggestion.MeetingTime != "" ||
+			len(suggestion.Phrases) > 1 {
+			// 合同外形状(动作、会议时间、多气泡)不是服务解析器能产出的;
+			// 保守放弃补句而不是猜测发送或冻结档案。
+			return V4DialogueDecision{
+				State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
+				ServiceVerdict: V4ServiceReplySkipped,
+			}, nil
+		}
+		if len(suggestion.Phrases) == 0 {
+			return V4DialogueDecision{
+				State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
+				ServiceVerdict: V4ServiceReplySilent,
+			}, nil
+		}
+		text := strings.TrimSpace(suggestion.Phrases[0])
+		if m5ai.ValidateSendText(text) != nil {
+			return V4DialogueDecision{
+				State: state, Status: V4DialogueNoAction, NextAdvice: V4AdviceNone,
+				ServiceVerdict: V4ServiceReplySkipped,
+			}, nil
+		}
+		return V4DialogueDecision{
+			State: state, Status: V4DialogueActionsPlanned, NextAdvice: V4AdviceNone,
+			Actions: []V4PlannedAction{{
+				ActionKey: stableV4TurnPhraseActionKey(
+					input.Turn.TurnID, V4ActionServiceReply, input.CardMessageSeq, 1,
+				),
+				Kind: V4ActionServiceReply, Text: text, CardMessageSeq: input.CardMessageSeq,
+			}},
+		}, nil
+	default:
+		return V4DialogueDecision{}, ErrInvalidV4StateTransition
+	}
 }
 
 func reduceV4ReplyOnly(

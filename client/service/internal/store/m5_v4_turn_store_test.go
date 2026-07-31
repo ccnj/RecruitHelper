@@ -1993,25 +1993,29 @@ func TestFreezeCommunicationV4InterviewAcceptedWithTextServiceReplyReplacesRecei
 	}
 	frozen, err := s.FreezeCommunicationV4Turn(req)
 	if err != nil || !frozen.Created ||
-		frozen.Turn.Status != DialogueTurnClassified ||
+		frozen.Turn.Status != DialogueTurnCollected ||
 		frozen.Application.Outcome.Dialogue != communication.V4DialogueServiceReply ||
-		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
-		frozen.Application.Outcome.NextAdvice != communication.V4AdviceServiceReply ||
-		len(frozen.Application.Outcome.Actions) != 1 ||
-		frozen.Application.Outcome.Actions[0].Kind != communication.V4ActionNotifyInterviewAccepted ||
+		frozen.Application.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		frozen.Application.Outcome.NextAdvice != communication.V4AdviceNone ||
+		!frozen.Application.Outcome.DialogueAfterActions ||
+		len(frozen.Application.Outcome.Actions) != 3 ||
+		frozen.Application.Outcome.Actions[0].Kind != communication.V4ActionInterviewAcceptedReceipt ||
+		frozen.Application.Outcome.Actions[1].Kind != communication.V4ActionNotifyInterviewAccepted ||
+		frozen.Application.Outcome.Actions[2].Kind != communication.V4ActionInviteWechat ||
 		frozen.Aggregate.State.MainStatus != communication.V4StatusInterviewed ||
-		!frozen.Aggregate.State.InterviewAcceptedReceiptSent {
-		t.Fatalf("邀面接受+文字轮应由服务应答替代回执并撤下追邀卡: frozen=%+v err=%v", frozen, err)
+		frozen.Aggregate.State.InterviewAcceptedReceiptSent {
+		t.Fatalf("邀面接受+文字轮应保留固定段并等待补句前置(2026-07-31 规格): frozen=%+v err=%v", frozen, err)
 	}
 	eventActions, err := s.CommunicationV4EventActionsBySource(
 		profileID,
 		CommunicationV4InputDialogueTurn,
 		frozen.Turn.TurnID,
 	)
-	if err != nil || len(eventActions) != 1 ||
-		eventActions[0].V4Kind != communication.V4ActionNotifyInterviewAccepted ||
-		eventActions[0].Status != CommunicationV4EventActionDeferred {
-		t.Fatalf("批C轮只应物化约面通知动作: actions=%+v err=%v", eventActions, err)
+	if err != nil || len(eventActions) != 3 ||
+		eventActions[0].V4Kind != communication.V4ActionInterviewAcceptedReceipt ||
+		eventActions[1].V4Kind != communication.V4ActionNotifyInterviewAccepted ||
+		eventActions[2].V4Kind != communication.V4ActionInviteWechat {
+		t.Fatalf("批C轮应物化固定段回执、约面通知与追邀卡: actions=%+v err=%v", eventActions, err)
 	}
 	kind, ok := DialogueTurnInputKindOf(inbound)
 	if !ok || kind != DialogueTurnInputInterviewAccepted {
