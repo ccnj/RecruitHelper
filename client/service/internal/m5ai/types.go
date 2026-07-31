@@ -31,6 +31,8 @@ const (
 	// 职位类别只回一个类别名、一个置信度和一两句理由,256 足够;给多了只会
 	// 让模型有空间写废话。
 	JobClassOutputTokenLimit = 256
+	// 职位关键词最多回 5 个短词加一两句理由,与类别同量级。
+	JobKeywordsOutputTokenLimit = 256
 )
 
 type JobConfigDocument struct {
@@ -123,6 +125,7 @@ const (
 	PurposeScoring         CompletionPurpose = "scoring"
 	PurposeGreeting        CompletionPurpose = "greeting"
 	PurposeJobClass        CompletionPurpose = "jobClass"
+	PurposeJobKeywords     CompletionPurpose = "jobKeywords"
 )
 
 type CompletionRequest struct {
