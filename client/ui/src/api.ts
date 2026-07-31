@@ -160,17 +160,51 @@ export interface LedgerRow {
   status: string
   attempt: number
   errorCode?: string
+
+  target: string
+  summary: string
+  createdAtMs: number
+  terminalAtMs: number
+
+  handId: string
+  idemKey: string
+  intentId: string
+  platform: string
+  accountRef: string
+  sideEffect: string
+  suspectReason: string
+  deadlineMs: number
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface Suspect {
   msgId: string
   name: string
+  action: string
   handId: string
   reason: string
+  reasonText: string
   idemKey: string
   reviewReady: boolean
   reviewAfter?: number
   verificationAttempts: number
+
+  platform: string
+  accountRef: string
+  intentId: string
+  conversationRef: string
+  peerDisplayName: string
+  summary: string
+  dispatchedAtMs: number
+  deadlineMs: number
+  errorCode: string
+  sideEffect: string
+
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface FrameEvent {
