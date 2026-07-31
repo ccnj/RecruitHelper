@@ -171,6 +171,10 @@ func (a *roundActor) processCommunicationV4Target(
 				a.manager.now(),
 			)
 			if err != nil || !current {
+				if err == nil {
+					slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
+						"turnId", latest.TurnID)
+				}
 				return err
 			}
 			if err := a.setStage("advising"); err != nil {
