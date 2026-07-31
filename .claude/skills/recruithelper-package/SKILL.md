@@ -139,7 +139,11 @@ git log --oneline -1 && git status --short
 
 **`scripts/installer.nsi` 必须保持纯 ASCII,注释也是。** macOS 的 makensis 是 ANSI-only
 构建,脚本里出现任何非 ASCII 字节都会 `Bad text encoding: line 1`,`-INPUTCHARSET UTF8`
-和 UTF-8 BOM 都救不了。产品 UI 文案照常中文,只有安装器受限于程序标识 `RecruitHelper`。
+和 UTF-8 BOM 都救不了,经 `-D` 传中文也一样崩。但快捷方式与控制面板的中文名
+(「AI增员助手」)**不受此限**:`build-win.sh` 用 iconv 把名字写成 GBK 载荷文件,
+`File` 按字节打包,安装器运行期读回——仅在系统代码页是 936(中文 Windows)时启用,
+其余系统及任何读取失败都落英文 `AI Recruit Helper` 兜底。想改显示名去 `build-win.sh`
+里改那两行 `printf`,别把中文直接写进 `.nsi`。
 
 **不要走 electron-builder 的 nsis target。** 它编译出 installer 后还要**运行**那个 32 位
 exe 才能提取卸载器,在 Apple Silicon 上需要 wine,而 qemu 跑不了 32 位 Windows 程序

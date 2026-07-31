@@ -155,7 +155,7 @@ function createWindow(adminToken, uiEntry) {
   win = new BrowserWindow({
     width: 1200,
     height: 840,
-    title: 'AI增员助手 · 客户端',
+    title: 'AI增员助手',
     // 标题栏与任务栏图标。给 256 的大图让 Windows 自己按场景降采样,比预先压到
     // 某个尺寸清楚。不设的话这两处会一直是 Electron 的默认原子图标。
     icon: nativeImage.createFromDataURL(`data:image/png;base64,${APP_ICON_PNG_BASE64}`),

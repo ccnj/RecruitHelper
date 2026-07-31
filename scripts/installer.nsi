@@ -3,9 +3,22 @@
 ; THIS FILE MUST STAY PURE ASCII -- comments included.
 ; The macOS build of makensis is an ANSI-only build: a single non-ASCII byte
 ; anywhere in the script aborts with "Bad text encoding: line 1", and neither
-; -INPUTCHARSET UTF8 nor a UTF-8 BOM changes that. Product UI text stays
-; Chinese as usual; only this installer is limited to the program identifier
-; "RecruitHelper". Do not "fix" the comments back to Chinese -- it will not build.
+; -INPUTCHARSET UTF8 nor a UTF-8 BOM changes that. Passing Chinese via -D dies
+; the same way ("Unable to convert processed string to codepage 0").
+; Do not "fix" the comments back to Chinese -- it will not build.
+;
+; The user-visible Chinese product name still gets in, by never letting the
+; compiler see it: build-win.sh writes the GBK bytes of the name into payload
+; files, File packs them verbatim (it ships exes; bytes are bytes), and at
+; RUNTIME on the user's machine FileRead pulls them into a variable. This
+; installer is an ANSI build, so those GBK bytes flow through the ANSI shell
+; APIs (IShellLinkA, RegSetValueExA), which Windows converts via the system
+; code page -- on Chinese Windows (ACP 936) that yields the correct Chinese
+; shortcut names. That is exactly how pre-Unicode Chinese installers always
+; worked. On any other ACP the bytes would be mojibake, so a GetACP()==936
+; guard keeps the ASCII fallback name instead; every failure path (wrong ACP,
+; missing payload, empty read) lands on the fallback, so an entry point always
+; exists -- these customers reach the product through shortcuts alone.
 ;
 ; Why not electron-builder's nsis target: it compiles the installer and then has
 ; to RUN that 32-bit exe to extract the uninstaller. On Apple Silicon that needs
@@ -22,6 +35,13 @@
 ; path like C:\Users\<Chinese name>\ still resolves correctly.
 SetCompressor /SOLID lzma
 
+; For ${If}/${EndIf} in the name-loading macros below. Do NOT replace them with
+; hand-rolled labels: a probe build already caught that the ${__LINE__}
+; unique-label trick miscompiles (its value changes on every line inside a
+; macro body, so the jump and the label disagree), and "+n" relative jumps
+; break silently whenever the macro body changes (see the InstallLog macro).
+!include "LogicLib.nsh"
+
 !ifndef SOURCE_DIR
   !error "missing -DSOURCE_DIR"
 !endif
@@ -32,7 +52,6 @@ SetCompressor /SOLID lzma
   !define VERSION "0.0.0"
 !endif
 
-!define APP_NAME "RecruitHelper"
 ; Executable names come from build-win.sh, which reads them from the single
 ; sources of truth (layout.js for the brain, package.json for the shell).
 ; Hardcoding them here would let a rename drift: the kill below would silently
@@ -50,9 +69,65 @@ SetCompressor /SOLID lzma
 !ifndef ICON_FILE
   !error "missing -DICON_FILE"
 !endif
+; GBK payload files produced by build-win.sh (iconv), holding the Chinese
+; display name and the Chinese uninstall-shortcut name. See the header comment.
+!ifndef DISPLAY_NAME_GBK
+  !error "missing -DDISPLAY_NAME_GBK"
+!endif
+!ifndef UNINSTALL_NAME_GBK
+  !error "missing -DUNINSTALL_NAME_GBK"
+!endif
+; ASCII fallback shown when the runtime ACP is not GBK or a payload read
+; fails. Every name-bearing surface (shortcuts, start menu dir, DisplayName)
+; uses $DisplayNameRT / $UninstallNameRT, never these defines directly.
+!define FALLBACK_NAME "AI Recruit Helper"
+!define FALLBACK_UNINSTALL_NAME "Uninstall AI Recruit Helper"
+; Stays "RecruitHelper" on purpose: this key and $INSTDIR are the upgrade
+; identity. Renaming either would make a new install land beside the old one
+; instead of over it, and Apps & Features would grow a second entry.
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\RecruitHelper"
 
-Name "${APP_NAME}"
+; Runtime product names. Loaded by LoadNames at the top of each section;
+; compile-time strings in this script cannot hold Chinese (see header).
+Var DisplayNameRT
+Var UninstallNameRT
+
+; Reads one GBK payload file into a variable. Any failure -- open error, read
+; error, empty content -- leaves the caller's preloaded fallback untouched.
+; $8/$9 are scratch, same convention as the InstallLog macro.
+!macro ReadNameFile FilePath OutVar
+  ClearErrors
+  FileOpen $9 "${FilePath}" r
+  ${IfNot} ${Errors}
+    FileRead $9 $8
+    FileClose $9
+    ${IfNot} ${Errors}
+      ${If} $8 != ""
+        StrCpy ${OutVar} $8
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; Loads the runtime names, Chinese only when the system code page actually is
+; GBK (936). On any other ACP the GBK bytes would render as mojibake, and a
+; garbled shortcut name is worse than an English one. The payloads are read
+; from ${Prefix} so the install section (fresh $INSTDIR) and the uninstaller
+; (existing $INSTDIR) share one macro.
+!macro LoadNames Prefix
+  StrCpy $DisplayNameRT "${FALLBACK_NAME}"
+  StrCpy $UninstallNameRT "${FALLBACK_UNINSTALL_NAME}"
+  System::Call 'kernel32::GetACP() i .r0'
+  ${If} $0 = 936
+    !insertmacro ReadNameFile "${Prefix}\display-name.gbk" $DisplayNameRT
+    !insertmacro ReadNameFile "${Prefix}\uninstall-name.gbk" $UninstallNameRT
+  ${EndIf}
+!macroend
+
+; Compile-time, so ASCII only: the installer's own window title stays English.
+; Acceptable -- silent upgrades have no UI at all, and interactive installs are
+; done by us over remote assistance, not by the customer.
+Name "${FALLBACK_NAME}"
 OutFile "${OUT_FILE}"
 Icon "${ICON_FILE}"
 UninstallIcon "${ICON_FILE}"
@@ -163,13 +238,19 @@ Section "Install"
   ; the desktop and in the start menu.
   File "${ICON_FILE}"
 
-  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
-  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
+  ; Ship the name payloads into $INSTDIR too: the uninstaller needs them to
+  ; know which Chinese-named .lnk files to delete.
+  File "/oname=display-name.gbk" "${DISPLAY_NAME_GBK}"
+  File "/oname=uninstall-name.gbk" "${UNINSTALL_NAME_GBK}"
+  !insertmacro LoadNames "$INSTDIR"
+
+  CreateShortcut "$DESKTOP\$DisplayNameRT.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
+  CreateDirectory "$SMPROGRAMS\$DisplayNameRT"
+  CreateShortcut "$SMPROGRAMS\$DisplayNameRT\$DisplayNameRT.lnk" "$INSTDIR\${APP_EXE}" "" "$INSTDIR\app-icon.ico"
+  CreateShortcut "$SMPROGRAMS\$DisplayNameRT\$UninstallNameRT.lnk" "$INSTDIR\Uninstall.exe"
 
   ; Per-user install writes HKCU so the entry shows up in Apps & Features.
-  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "$DisplayNameRT"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINST_KEY}" "Publisher" "aliyutaozi"
   WriteRegStr HKCU "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
@@ -205,8 +286,20 @@ SectionEnd
 Section "Uninstall"
   !insertmacro StopRunningApp
 
-  Delete "$DESKTOP\${APP_NAME}.lnk"
-  RMDir /r "$SMPROGRAMS\${APP_NAME}"
+  ; Read the names BEFORE RMDir /r wipes the payload files. If they are gone
+  ; (user hand-deleted $INSTDIR contents), the fallback sweep below still
+  ; removes the English-named shortcuts; a Chinese-named .lnk would then
+  ; linger and need a manual delete -- accepted, recorded-level edge.
+  !insertmacro LoadNames "$INSTDIR"
+
+  Delete "$DESKTOP\$DisplayNameRT.lnk"
+  RMDir /r "$SMPROGRAMS\$DisplayNameRT"
+  ; Also sweep the fallback names, covering an install and an uninstall that
+  ; ran under different ACPs. Delete on a missing file is a no-op. The legacy
+  ; "RecruitHelper"-named shortcuts are deliberately NOT swept -- decided
+  ; 2026-07-29: single legacy machine, cleaned by hand.
+  Delete "$DESKTOP\${FALLBACK_NAME}.lnk"
+  RMDir /r "$SMPROGRAMS\${FALLBACK_NAME}"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "${UNINST_KEY}"
 
