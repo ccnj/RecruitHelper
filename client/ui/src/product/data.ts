@@ -55,6 +55,7 @@ export interface AppOverviewStatisticsRaw {
   todayConfirmation: AppMetricRaw
   todayGreeted: AppMetricRaw
   todayInvited: AppMetricRaw
+  todayWechat: AppMetricRaw
   totalGreeted: AppMetricRaw
   totalInterviewed: AppMetricRaw
   totalWechat: AppMetricRaw
@@ -317,9 +318,9 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
       funnel,
       communication: adaptCommunication(runtime.communicationState, businessWindowOpen),
       todayMetrics: [
-        { label: 'AI 评级人数', value: metricValue(statistics.todayRated), tone: 'blue' },
-        { label: '候选确认人数', value: metricValue(statistics.todayConfirmation), tone: 'amber' },
+        { label: 'AI 处理人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '打招呼', value: metricValue(statistics.todayGreeted), tone: 'green' },
+        { label: '换微信数', value: metricValue(statistics.todayWechat), tone: 'amber' },
         { label: '已邀面', value: metricValue(statistics.todayInvited), tone: 'red' },
       ],
       ledgerStartedAt: formatDateOnly(rawOverview.businessSince),

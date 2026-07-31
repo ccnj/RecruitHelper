@@ -73,6 +73,10 @@ type AppOverviewStatistics struct {
 	TodayConfirmation AppMetric `json:"todayConfirmation"`
 	TodayGreeted      AppMetric `json:"todayGreeted"`
 	TodayInvited      AppMetric `json:"todayInvited"`
+	// TodayWechat 是今天新换到微信的人数。权威时点取 ContactAsset 的创建时刻,
+	// 与 contact_asset_store 里"换微信成功的权威时点即 ContactAsset 创建"同源;
+	// 重复收编走 existing 分支不重建行,同一人不会跨天重复计入。
+	TodayWechat AppMetric `json:"todayWechat"`
 
 	TotalGreeted     AppMetric `json:"totalGreeted"`
 	TotalInterviewed AppMetric `json:"totalInterviewed"`
@@ -626,6 +630,16 @@ func appOverviewStatisticsTx(
 		return out, err
 	}
 	out.TodayInvited = exactMetric(todayInvite)
+
+	value = 0
+	if err := count(tx.Model(&ContactAsset{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("kind = ?", contactAssetKindWechat).
+		Where("created_at >= ? AND created_at < ?", start, end).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TodayWechat = exactMetric(value)
 
 	// 今日新约面数的是"今天有几个人接受了面试邀约",取 interviewed_at。它此前
 	// 直接复制 todayInvited(今天发出邀面卡的人数),两个不同标签共用一个数字。
