@@ -19,6 +19,29 @@ export function EmptyWorkbench({ loading, error }: { loading: boolean; error: st
   )
 }
 
-export function DiagnosticCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return <section className="diagnostic-card"><h3>{title}</h3>{children}</section>
+export function DiagnosticCard({ title, children, aside }: {
+  title: string
+  children: React.ReactNode
+  aside?: React.ReactNode
+}) {
+  return (
+    <section className="diagnostic-card">
+      <h3>{title}{aside && <span className="diagnostic-card-aside">{aside}</span>}</h3>
+      {children}
+    </section>
+  )
+}
+
+// 原语的 args/guards/result 原文。suspect 队列与命令账本共用：摘要挑不出来的
+// 线索都在这里，能读的按 JSON 缩进，读不动的原样显示，绝不因为解析失败就吞掉。
+export function RawField({ label, value }: { label: string; value: string }) {
+  if (!value) return null
+  let pretty = value
+  try { pretty = JSON.stringify(JSON.parse(value), null, 2) } catch { /* 非 JSON 就原样显示 */ }
+  return (
+    <div className="dc-raw-field">
+      <span>{label}</span>
+      <pre className="mono">{pretty}</pre>
+    </div>
+  )
 }

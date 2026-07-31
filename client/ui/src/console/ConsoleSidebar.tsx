@@ -7,6 +7,7 @@ export type ConsolePage =
   | 'jobPublish'
   | 'modelConfig'
   | 'devTools'
+  | 'fieldReport'
 
 interface NavItem {
   key: ConsolePage
@@ -23,6 +24,7 @@ const navItems: NavItem[] = [
   { key: 'jobPublish', label: '职位与发布', hint: '预检 · 定类别 · 试填 · 真发' },
   { key: 'modelConfig', label: '模型与配置', hint: '职位同步 · 模型连接' },
   { key: 'devTools', label: 'SQL 控制台', hint: '直连业务库，无护栏' },
+  { key: 'fieldReport', label: '现场上报', hint: '打包日志与数据库上传我方' },
 ]
 
 export function ConsoleSidebar({ activePage, onNavigate }: {

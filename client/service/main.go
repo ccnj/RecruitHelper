@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -277,8 +278,21 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
+	// 现场数据上报(2026-07-31 甲方裁决)。日志由 Electron 写在 userData/logs,
+	// 不在脑的数据目录下,所以路径经环境变量传进来 —— 与 PLUGIN_DIR/UPDATE_DIR
+	// 同一套做法。开发期直接跑脑时没有这个变量,那时包里就没有日志。
+	fieldReportDeps := adminhttp.FieldReportDeps{
+		DataDir:    *dataDir,
+		LogDir:     strings.TrimSpace(os.Getenv("RECRUITHELPER_LOG_DIR")),
+		AppVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+	}
+	if traceErr == nil {
+		fieldReportDeps.TraceSnapshot = traceStore.SnapshotTo
+	}
+
 	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
-		SetJobConfigSource(jobConfigSource)
+		SetJobConfigSource(jobConfigSource).
+		SetFieldReportDeps(fieldReportDeps)
 	// 职位类别在后台配置值精确匹配不上时改由大模型从平台候选里选,复用同一条
 	// provider 通道。未配置 provider 时只是这条兜底不可用,精确匹配照旧工作。
 	if advice != nil {

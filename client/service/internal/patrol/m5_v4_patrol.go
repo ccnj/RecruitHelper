@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
@@ -90,11 +91,17 @@ func (a *roundActor) processCommunicationV4Profile(
 	target, ready, err := a.manager.store.CommunicationTargetForProfile(profileID)
 	if err != nil {
 		if errors.Is(err, store.ErrCommunicationV4Missing) {
+			// 静默跳过曾两次让甲方误判故障(2026-07-31):跳过是设计内行为,
+			// 但必须在日志留下原因,人不该靠翻库反推。
+			slog.Info("沟通层跳过:候选人尚无沟通根,等简历采集/建根后自动接续",
+				"profileId", profileID)
 			return nil
 		}
 		return err
 	}
 	if !ready || target == nil {
+		slog.Info("沟通层跳过:沟通目标未就绪(已隔离/已淘汰/未绑会话)",
+			"profileId", profileID)
 		return nil
 	}
 	archived, err := a.processCommunicationV4ScheduleArchive(*target, true)
@@ -164,6 +171,10 @@ func (a *roundActor) processCommunicationV4Target(
 				a.manager.now(),
 			)
 			if err != nil || !current {
+				if err == nil {
+					slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
+						"turnId", latest.TurnID)
+				}
 				return err
 			}
 			if err := a.setStage("advising"); err != nil {
@@ -261,6 +272,8 @@ func (a *roundActor) processCommunicationV4Target(
 		return err
 	}
 	if !materialReady {
+		slog.Info("沟通层跳过:AI 材料未就绪(简历快照或职位上下文缺失)",
+			"profileId", target.Profile.ProfileID)
 		return nil
 	}
 	inbound, validBoundary := store.DialogueTurnCandidateMessages(boundary)

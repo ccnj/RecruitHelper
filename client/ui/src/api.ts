@@ -160,6 +160,23 @@ export interface LedgerRow {
   status: string
   attempt: number
   errorCode?: string
+
+  target: string
+  summary: string
+  createdAtMs: number
+  terminalAtMs: number
+
+  handId: string
+  idemKey: string
+  intentId: string
+  platform: string
+  accountRef: string
+  sideEffect: string
+  suspectReason: string
+  deadlineMs: number
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface Suspect {
@@ -273,6 +290,29 @@ export interface DevSQLResult {
   columns?: string[]
   rows?: unknown[][]
   rowsAffected?: number
+  error?: string
+}
+
+// 现场数据上报的回执(2026-07-31 裁决)。manifest 记录本次实际打进包的文件与
+// 被跳过的项 —— 上报是排障工具,"少了什么"本身就是线索。
+export interface FieldReportFile {
+  name: string
+  bytes: number
+}
+
+export interface FieldReportManifest {
+  appVersion?: string
+  packedAt?: string
+  files?: FieldReportFile[]
+  skipped?: string[]
+}
+
+export interface FieldReportResult {
+  ok?: boolean
+  reportKey?: string
+  sizeBytes?: number
+  sha256?: string
+  manifest?: FieldReportManifest
   error?: string
 }
 
@@ -724,6 +764,7 @@ export const api = {
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
+  devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>

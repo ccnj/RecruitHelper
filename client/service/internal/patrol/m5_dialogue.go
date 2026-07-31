@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -88,6 +89,8 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 			return currentErr
 		}
 		if !current {
+			slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
+				"turnId", latest.TurnID)
 			return nil
 		}
 	}
@@ -300,6 +303,8 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			// An event-driven branch is durably waiting for a prerequisite
 			// action. Neither AI material nor provider configuration is part
 			// of that deterministic continuation.
+			slog.Info("对话轮跳过:事件分支在等前置动作正证,本轮不调 AI",
+				"turnId", turn.TurnID)
 			return nil
 		}
 		material, err := a.loadM5TurnMaterial(turn)
