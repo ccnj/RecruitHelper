@@ -44,8 +44,12 @@ func TestParsePublishSpecAcceptsRealBackendDocument(t *testing.T) {
 	if spec.SalaryMin != "2万" || spec.SalaryMax != "4万" || spec.SalaryMonths != "12个月" {
 		t.Fatalf("薪资字段解析错误: %+v", spec)
 	}
-	if len(spec.Keywords) != 4 || spec.Headcount != 1 || spec.Workplace != "默认" {
+	if spec.Headcount != 1 || spec.Workplace != "默认" {
 		t.Fatalf("其余字段解析错误: %+v", spec)
+	}
+	// 关键词是死字段：只解析进 DeadKeywords 供提示，绝不进入填充路径。
+	if len(spec.DeadKeywords) != 4 {
+		t.Fatalf("死字段关键词未解析进提示用字段: %+v", spec.DeadKeywords)
 	}
 }
 
@@ -99,14 +103,21 @@ func TestParsePublishSpecRejectsValuesOutsidePlatformOptions(t *testing.T) {
 	}
 }
 
-func TestParsePublishSpecRejectsKeywordsOverQuota(t *testing.T) {
-	raw := strings.Replace(validPublishParams,
-		`"职位关键词": ["个人客户", "银行", "基金", "投资与资产管理"]`,
-		`"职位关键词": ["a","b","c","d","e","f","g","h","i","j","k","l"]`, 1)
-	_, issues := ParsePublishSpec(raw)
-	if len(issues) != 1 || issues[0].Field != "职位关键词" ||
-		!strings.Contains(issues[0].Message, "11") {
-		t.Fatalf("关键词超总配额未被拦下: %s", issueFields(issues))
+// 关键词 2026-07-31 起是死字段，预检一概不再看它。原来"缺少/重复/超过 11 个"
+// 会判 blocked，现在这些职位都会变成可发——这是裁决的直接后果，本用例把它钉住，
+// 免得日后有人以为是漏检又把校验加回来。
+func TestParsePublishSpecIgnoresBackendKeywordsEntirely(t *testing.T) {
+	for name, replacement := range map[string]string{
+		"超总配额": `"职位关键词": ["a","b","c","d","e","f","g","h","i","j","k","l"]`,
+		"重复":   `"职位关键词": ["银行", "银行"]`,
+		"有空词":  `"职位关键词": ["银行", "  "]`,
+		"整个缺失": `"职位关键词": []`,
+	} {
+		raw := strings.Replace(validPublishParams,
+			`"职位关键词": ["个人客户", "银行", "基金", "投资与资产管理"]`, replacement, 1)
+		if _, issues := ParsePublishSpec(raw); len(issues) != 0 {
+			t.Fatalf("%s 不应再产生预检问题: %s", name, issueFields(issues))
+		}
 	}
 }
 
@@ -139,8 +150,8 @@ func TestDeadFieldNoticesAlwaysSurfaceAndNeverBlock(t *testing.T) {
 	}
 	// 与 job.name 一致时也要提示，否则运营不知道这一行根本没被读。
 	same := spec.DeadFieldNotices("财富传承顾问")
-	if len(same) != 2 {
-		t.Fatalf("死字段提示应有两条: %s", issueFields(same))
+	if len(same) != 3 {
+		t.Fatalf("死字段提示应有三条: %s", issueFields(same))
 	}
 	if !strings.Contains(same[0].Message, "两者一致") {
 		t.Fatalf("一致情形提示错误: %s", issueFields(same))
@@ -150,10 +161,13 @@ func TestDeadFieldNoticesAlwaysSurfaceAndNeverBlock(t *testing.T) {
 	if !strings.Contains(diff[0].Message, "财富传承顾问(法律/财务/税务背景优先)") {
 		t.Fatalf("不一致情形未写明实际发布名: %s", issueFields(diff))
 	}
-	// 职位类别 2026-07-30 起不再是死字段:它是平台候选精确匹配的首选来源,
-	// 匹配不上才交给大模型。提示必须说清这个条件,否则运营会以为它一定生效。
-	if diff[1].Field != FieldJobClass || !strings.Contains(diff[1].Message, "精确命中") {
+	// 类别与关键词 2026-07-31 起都是死字段：一律由大模型看着平台当次给出的
+	// 候选/词库选定。提示必须说清"不参与发布"，否则运营会以为自己填的生效了。
+	if diff[1].Field != DeadFieldJobClass || !strings.Contains(diff[1].Message, "不参与发布") {
 		t.Fatalf("职位类别提示错误: %s", issueFields(diff))
+	}
+	if diff[2].Field != DeadFieldKeywords || !strings.Contains(diff[2].Message, "不参与发布") {
+		t.Fatalf("职位关键词提示错误: %s", issueFields(diff))
 	}
 }
 
@@ -164,7 +178,10 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 	}
 	// 夹具里发布参数的职位名称是"财富传承顾问"，这里刻意传一个不同的后台职位名：
 	// 按裁决必须发后者，前者是死字段。
-	args := spec.DraftArgs("财富传承顾问(法律/财务/税务背景优先)", "理财顾问")
+	args := spec.DraftArgs(
+		"财富传承顾问(法律/财务/税务背景优先)", "理财顾问",
+		[]string{"法律", "税务", "会计"},
+	)
 
 	if args["jobName"] != "财富传承顾问(法律/财务/税务背景优先)" {
 		t.Fatalf("职位名未取调用方传入的 job.name: %v", args["jobName"])
@@ -178,9 +195,9 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 	if _, leaked := args["职位名称"]; leaked {
 		t.Fatal("发布参数里的职位名称不得进入试填参数")
 	}
-	for _, key := range []string{"职位类别", "category"} {
+	for _, key := range []string{"职位类别", "category", "职位关键词"} {
 		if _, leaked := args[key]; leaked {
-			t.Fatalf("职位类别不得进入试填参数（平台按描述自动判定）: %s", key)
+			t.Fatalf("死字段不得进入试填参数: %s", key)
 		}
 	}
 
@@ -200,9 +217,11 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 			t.Fatalf("%s 映射错误: 期望 %v 实得 %v", key, expected, args[key])
 		}
 	}
+	// 关键词必须取调用方传入的那几个（大模型看着平台当次词库选、且经确定性
+	// 复核）。发布参数里的 4 个是死字段，一个都不能漏进来。
 	keywords, ok := args["keywords"].([]string)
-	if !ok || len(keywords) != 4 || keywords[0] != "个人客户" {
-		t.Fatalf("关键词映射错误: %v", args["keywords"])
+	if !ok || strings.Join(keywords, ",") != "法律,税务,会计" {
+		t.Fatalf("关键词未取调用方传入的选定结果: %v", args["keywords"])
 	}
 	description, ok := args["description"].(string)
 	if !ok || !strings.Contains(description, "【关于团队】") {
@@ -216,8 +235,13 @@ func TestDraftArgsTakesJobNameFromCallerAndDropsDeadFields(t *testing.T) {
 
 func TestDraftArgsTrimsCallerJobName(t *testing.T) {
 	spec, _ := ParsePublishSpec(validPublishParams)
-	if got := spec.DraftArgs("  财富传承顾问  ", "  理财顾问  ")["jobName"]; got != "财富传承顾问" {
+	args := spec.DraftArgs("  财富传承顾问  ", "  理财顾问  ", []string{" 法律 ", "", "税务"})
+	if got := args["jobName"]; got != "财富传承顾问" {
 		t.Fatalf("职位名未去除首尾空白: %q", got)
+	}
+	// 关键词同样去空白，空词整项丢弃：手侧按全等去点词条，带空白点不中。
+	if got := strings.Join(args["keywords"].([]string), ","); got != "法律,税务" {
+		t.Fatalf("关键词未去空白或未丢弃空词: %q", got)
 	}
 }
 

@@ -54,18 +54,19 @@ type jobClassResolveView struct {
 	// 定下来的类别,以及它是怎么来的。发布请求要原样带回这个值。
 	JobClass string `json:"jobClass"`
 	Source   string `json:"source"`
-	// 后台配置的职位类别原值,让运营看见"我填的那个有没有被用上"。
-	ConfiguredClass string   `json:"configuredClass,omitempty"`
-	Confidence      *float64 `json:"confidence,omitempty"`
-	Reason          string   `json:"reason,omitempty"`
+	// 后台配置的职位类别原值。它是死字段,列在这里只为让运营看见"我填的那个
+	// 没有参与发布"——不参与任何判定。
+	DeadConfiguredClass string   `json:"deadConfiguredClass,omitempty"`
+	Confidence          *float64 `json:"confidence,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
 	// 模型走了几次尝试、每次为什么失败,失败分类不含任何模型原文。
 	Attempts []string `json:"attempts,omitempty"`
 }
 
-const (
-	jobClassSourceConfigured = "configuredExactMatch"
-	jobClassSourceModel      = "model"
-)
+// 类别只有一个来源。2026-07-31 之前还有一支 configuredExactMatch(后台配置值
+// 与平台候选归一化精确匹配),三例真机的配置值全部不在候选里,三战三败后按甲方
+// 裁决删除——两条并存路径意味着两套失败模式。
+const jobClassSourceModel = "model"
 
 // jobPublishClassCandidates 解析一个职位该用哪个职位类别。
 //
@@ -77,6 +78,10 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 		Platform   string `json:"platform"`
 		AccountRef string `json:"accountRef"`
 		JobID      string `json:"jobId"`
+		// 紧接着还要读关键词词库时置 true:手读完候选把填好三项的表单留在
+		// 发布页,下一趟省掉一次填表与描述失焦后的数十秒等待。单独读一次候选
+		// 的人不该在页面上留半张表,所以默认 false。
+		KeepForm bool `json:"keepForm"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
@@ -122,6 +127,7 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 		JobName:        target.JobName,
 		EmploymentType: spec.EmploymentType,
 		Description:    spec.Description,
+		KeepForm:       req.KeepForm,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "类别候选读取命令构造失败"})
@@ -160,7 +166,7 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 
 	view := jobClassResolveView{
 		JobID: target.JobID, JobName: target.JobName,
-		ConfiguredClass: strings.TrimSpace(spec.ConfiguredJobClass),
+		DeadConfiguredClass: strings.TrimSpace(spec.DeadJobClass),
 	}
 	names := make([]string, 0, len(data.Candidates))
 	for _, candidate := range data.Candidates {
@@ -180,15 +186,9 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 首选后台配置值的精确命中。归一化只放宽匹配,命中后用的是平台原文。
-	if matched, ok := jobconfig.MatchPlatformJobClass(spec.ConfiguredJobClass, names); ok {
-		view.JobClass, view.Source = matched, jobClassSourceConfigured
-		writeJSON(w, http.StatusOK, view)
-		return
-	}
 	if a.advice == nil {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "后台配置的职位类别不在平台候选里，且 LLM 通道未就绪，无法选定",
+			"error": "LLM 通道未就绪，无法选定职位类别",
 			"view":  view,
 		})
 		return
