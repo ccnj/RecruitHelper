@@ -29,7 +29,7 @@
 | 字段 | 类型/约束 | 含义 |
 |---|---|---|
 | `invocation_id` | TEXT PRIMARY KEY | 与 `brain.db` 调用事实关联的随机 ID |
-| `purpose` | TEXT NOT NULL | `intent`、`reply`、`silenceFollowup`、`scoring` 或 `greeting` |
+| `purpose` | TEXT NOT NULL | 调用方自报的 AI 用途标识，任意非空字符串（2026-08-01 甲方裁决，见下） |
 | `provider` | TEXT NOT NULL | provider 类型，不含 base URL 与凭据 |
 | `model` | TEXT NOT NULL | 实际请求模型 |
 | `config_hash` | TEXT NOT NULL | 本次本地模型配置的无密钥摘要 |
@@ -47,6 +47,8 @@
 | `finished_at` | DATETIME NULL | 调用到达本轮终局的时刻 |
 | `created_at` | DATETIME NOT NULL | 行创建时刻 |
 | `updated_at` | DATETIME NOT NULL | 行最后补齐时刻 |
+
+`purpose` 是调用方自报的用途标识，追踪库只要求非空，不校验取值（2026-08-01 甲方裁决）。此前这里是一份 `intent`/`reply`/`silenceFollowup`/`scoring`/`greeting` 白名单，写入前用它校验；它在 `serviceReply`、`jobClass`、`jobKeywords` 三个用途加入后没有同步更新，导致这三类调用的原文一律在写入第一步被拒、100% 不入库，而业务与日志毫无异常——首次暴露是 2026-08-01 一次 `serviceReply` 调用的 `traceBeginFailed`。用途清单的唯一定义处是 `m5ai.CompletionPurpose`；追踪库不再持有第二份，也不得重新引入。
 
 `request_json` 保存的是 adapter 最终构造并准备传输的请求 body，因此包含 model、messages、输出上限、thinking 开关等真实请求参数。禁止把 HTTP headers、API key、`Authorization`、本地凭据对象或带 key 的 provider 配置序列化进表。`response_body` 保存成功和非 2xx HTTP 响应的原始 body；网络层没有收到响应时保持为空。v1 不做压缩、分表、全文索引、自动清理或查看接口。
 
