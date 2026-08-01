@@ -389,12 +389,17 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 		)
 	}
 	if commitErr != nil {
-		if !errors.Is(commitErr, store.ErrRecoveryStateConflict) {
-			d.st.Audit("effect_verification_commit_failed", cmd.HandID, ref, commitErr.Error())
-			if manualGreetingVerdict {
-				d.restoreGreetingManualVerification(*cmd, "招呼正证入账失败: "+commitErr.Error())
-			}
+		if errors.Is(commitErr, store.ErrRecoveryStateConflict) {
+			// 迟到 result 或人工裁决已抢先给出权威终局，本轮验证让位。
+			return
 		}
+		d.st.Audit("effect_verification_commit_failed", cmd.HandID, ref, commitErr.Error())
+		// 正证已经读到，入账失败只是本轮没能落库。必须退避并计入轮次上限：
+		// 裸 return 会让命令留在 verifying 且 nextAt 停在过去，sweep 下一轮
+		// 立刻判到期再验一次，形成每秒一轮、永不收敛也永不转人工的永动机
+		// （2026-08-01 客户机 195 轮 readThread 事故）。轮次耗尽照常转
+		// suspect 交人工，理由写明消息已在页面读到，避免人工把方向判反去补发。
+		recordMiss("验证正证已读到但入账失败(消息已发出，勿重发): " + commitErr.Error())
 		return
 	}
 	d.st.Audit("effect_verification_confirmed", cmd.HandID, ref, observation.Reason)

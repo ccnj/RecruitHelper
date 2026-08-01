@@ -1081,7 +1081,68 @@ func TestCommunicationV4AutomaticSuspectVerdictsPreserveFirstManualReason(t *tes
 	})
 }
 
-func TestCommunicationV4ConfirmedActionRejectsProjectionGap(t *testing.T) {
+// 跨越判据只拦候选人真实输入：我方无主出站行（平台在我方动作后自动留下的
+// 卡片跃迁、真人手打消息）没有任何确认动作会认领，卡住游标会让该档案之后
+// 的每一条出站都撞墙（2026-08-01 客户机验证读死循环事故）。
+func TestCommunicationV4ConfirmedActionSkipPolicy(t *testing.T) {
+	cases := []struct {
+		name      string
+		direction string
+		kind      string
+		cardType  string
+		blocked   bool
+	}{
+		{name: "我方卡片跃迁行放行", direction: "out", kind: "card", cardType: "wechatExchange"},
+		{name: "真人手打出站行放行", direction: "out", kind: "text"},
+		{name: "平台系统行放行", direction: "system", kind: "system"},
+		{name: "候选人系统提示放行", direction: "in", kind: "system"},
+		{name: "候选人真实文字必须拦下", direction: "in", kind: "text", blocked: true},
+		{name: "候选人卡片必须拦下", direction: "in", kind: "card", cardType: "wechatExchange", blocked: true},
+	}
+	for index := range cases {
+		testCase := cases[index]
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTest(t)
+			at := time.Now().UTC().Truncate(time.Millisecond)
+			profileID := "v4-skip-policy"
+			conversationRef := "conversation-v4-skip-policy"
+			fixture, root := seedSuccessfulV4Greeting(t, s, profileID, conversationRef, at)
+			text := "跨越判据样本"
+			message := Message{
+				Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+				ConversationRef: conversationRef, Seq: 2,
+				Direction: testCase.direction, Kind: testCase.kind,
+				CardType:    testCase.cardType,
+				ContentHash: "skip-policy-hash", Text: &text, Origin: "external",
+				CreatedAt: at, UpdatedAt: at,
+			}
+			if err := s.db.Create(&message).Error; err != nil {
+				t.Fatal(err)
+			}
+			err := s.db.Transaction(func(tx *gorm.DB) error {
+				_, _, _, applyErr := applyCommunicationV4ConfirmedActionTx(
+					tx,
+					root.ProfileID,
+					communication.V4ConfirmedAction{
+						ActionKey: "skip-policy-action", Kind: communication.V4ActionReplyText,
+						MessageSeq: 3,
+					},
+					at.Add(time.Minute),
+				)
+				return applyErr
+			})
+			blocked := errors.Is(err, ErrCommunicationV4Conflict)
+			if blocked != testCase.blocked {
+				t.Fatalf("跨越判据与预期不符: blocked=%v want=%v err=%v",
+					blocked, testCase.blocked, err)
+			}
+		})
+	}
+}
+
+// 账本缺行不再拦（2026-08-01 甲方裁决）：它是极小概率事件，为它把跨越判据
+// 收严的代价是整条出站链撞墙，不相称。跨越只对候选人真实输入负责。
+func TestCommunicationV4ConfirmedActionAllowsProjectionGap(t *testing.T) {
 	s := openTest(t)
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	_, root := seedSuccessfulV4Greeting(
@@ -1103,13 +1164,7 @@ func TestCommunicationV4ConfirmedActionRejectsProjectionGap(t *testing.T) {
 		)
 		return err
 	})
-	if err == nil {
-		t.Fatal("跨过未投影 seq 的正证必须拒绝")
-	}
-	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(root.ProfileID)
-	if aggregateErr != nil || aggregate.Revision != 0 ||
-		aggregate.ProjectedThroughSeq != 1 {
-		t.Fatalf("序号缺口失败事务污染聚合: aggregate=%+v err=%v",
-			aggregate, aggregateErr)
+	if errors.Is(err, ErrCommunicationV4Conflict) {
+		t.Fatalf("账本缺行不应被跨越判据拦下: %v", err)
 	}
 }
