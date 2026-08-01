@@ -1089,20 +1089,10 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		return 0, err
 	}
 	if !reserved.Created {
-		if attempt < store.MaxAIInvocationAttempts {
-			// 已完成但 turn 没推进 = 那次没产出可用结论;预留未完成 = 崩在途中。
-			// 两种都按重试纪律换下一次 attempt,后者先补一条 interrupted 事实。
-			if reserved.Invocation.FinishedAt == nil {
-				interrupted := store.AIInvocationCompletion{
-					InvocationID: reserved.Invocation.InvocationID,
-					Status:       store.AIInvocationTransportFailed,
-					ErrorClass:   "processInterrupted",
-					FinishedAt:   a.manager.now(),
-				}
-				if failErr := a.manager.store.FailAIInvocationForRetry(interrupted, m5ai.PurposeReply); failErr != nil {
-					return 0, failErr
-				}
-			}
+		// 已完成但 turn 没推进,只可能是重试链在中途崩溃(FailAIInvocationForRetry
+		// 刻意只落 invocation),接着往下一个 attempt 数即可。预留未完成的遗留
+		// 归脑启动时的 RecoverInterruptedAIInvocations 收敛,这里维持原样。
+		if reserved.Invocation.FinishedAt != nil && attempt < store.MaxAIInvocationAttempts {
 			return attempt + 1, nil
 		}
 		return 0, a.finishInterruptedM5Advice(turn, material, facts, m5ai.PurposeReply,
@@ -1280,20 +1270,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 			attempt = reserved.Invocation.Attempt
 		}
 		if !reserved.Created {
-			// 预留了但没完成:上次进程崩在这次调用途中。先把它落成
-			// processInterrupted 事实,再按重试纪律继续下一次 attempt。
-			if attempt < store.MaxAIInvocationAttempts {
-				interrupted := store.AIInvocationCompletion{
-					InvocationID: reserved.Invocation.InvocationID,
-					Status:       store.AIInvocationTransportFailed,
-					ErrorClass:   "processInterrupted",
-					FinishedAt:   a.manager.now(),
-				}
-				if failErr := a.manager.store.FailAIInvocationForRetry(interrupted, purpose); failErr != nil {
-					return 0, failErr
-				}
-				return attempt + 1, nil
-			}
+			// 预留了但没完成的遗留由脑启动时的 RecoverInterruptedAIInvocations
+			// 统一收敛(main.go),那条路刻意保守终局、不重试;这里维持原样。
 			return 0, a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
 		}
 	}
