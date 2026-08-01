@@ -12,39 +12,38 @@ import (
 
 const ProviderConfigFilename = "llm-provider.json"
 
+// ProviderConfig 落盘的只有身份与连接参数。token 预算刻意不在其中:AGENTS.md
+// 「输入/输出 token 预算由客户端代码固定」,配置文件里另存一份只会与代码常量
+// 漂移——2026-08-01 之前正是这样,Validate 要求两边逐字相等,于是升级客户端改
+// 常量就会让老配置校验失败、AI 建议层静默停摆一整个进程周期。现在预算只有
+// 代码这一个来源,改常量即刻全局生效,客户机不需要任何配置迁移。
+// 老配置文件里残留的 max_*_tokens 字段由 json.Unmarshal 安静忽略。
 type ProviderConfig struct {
-	Provider              string `json:"provider"`
-	Model                 string `json:"model"`
-	BaseURL               string `json:"base_url"`
-	APIKey                string `json:"api_key"`
-	RequestTimeoutMs      int64  `json:"request_timeout_ms"`
-	MaxInputTokens        int    `json:"max_input_tokens"`
-	MaxIntentOutputTokens int    `json:"max_intent_output_tokens"`
-	MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	BaseURL          string `json:"base_url"`
+	APIKey           string `json:"api_key"`
+	RequestTimeoutMs int64  `json:"request_timeout_ms"`
 }
 
 func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
 		Provider: "deepseek", Model: "deepseek-v4-pro",
-		RequestTimeoutMs: 30000, MaxInputTokens: ReplyInputTokenLimit,
-		MaxIntentOutputTokens: IntentOutputTokenLimit, MaxReplyOutputTokens: ReplyOutputTokenLimit,
+		RequestTimeoutMs: 30000,
 	}
 }
 
 // Validate 只校验非空与格式合法,不再校验具体厂商与模型名(AGENTS.md
 // 2026-07-30 甲方裁决):base_url/model 现在都由旧后台下发,日后换用非 deepseek
-// 模型时客户端应当跟着走,不再由本地常量把它钉死。token 预算相反——那是客户端
-// 自己的开销闸,不是模型能力声明,继续精确校验。
+// 模型时客户端应当跟着走,不再由本地常量把它钉死。token 预算不再参与校验:
+// 它已经不落盘,只有代码常量一个来源,没有可校验的第二方。
 func (c ProviderConfig) Validate() error {
 	if strings.TrimSpace(c.Provider) == "" || strings.TrimSpace(c.APIKey) == "" ||
 		validateModel(c.Model) != nil || validateBaseURL(c.BaseURL) != nil {
 		return errors.New("LLM provider 配置不完整")
 	}
-	if c.RequestTimeoutMs < 1000 || c.RequestTimeoutMs > 120000 ||
-		c.MaxInputTokens != ReplyInputTokenLimit ||
-		c.MaxIntentOutputTokens != IntentOutputTokenLimit ||
-		c.MaxReplyOutputTokens != ReplyOutputTokenLimit {
-		return errors.New("LLM provider 配置越过 P 档预算")
+	if c.RequestTimeoutMs < 1000 || c.RequestTimeoutMs > 120000 {
+		return errors.New("LLM provider 请求超时越界")
 	}
 	return nil
 }
@@ -90,12 +89,14 @@ type ProviderConfigView struct {
 	MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
 }
 
+// View 里的 token 预算直接来自代码常量:配置已经不存它们,诊断台看到的就是
+// 本次进程真正生效的值。
 func (c ProviderConfig) View() ProviderConfigView {
 	return ProviderConfigView{
 		Provider: c.Provider, Model: c.Model, BaseURLConfigured: strings.TrimSpace(c.BaseURL) != "",
 		KeyConfigured: strings.TrimSpace(c.APIKey) != "", RequestTimeoutMs: c.RequestTimeoutMs,
-		MaxInputTokens: c.MaxInputTokens, MaxIntentOutputTokens: c.MaxIntentOutputTokens,
-		MaxReplyOutputTokens: c.MaxReplyOutputTokens,
+		MaxInputTokens: ReplyInputTokenLimit, MaxIntentOutputTokens: IntentOutputTokenLimit,
+		MaxReplyOutputTokens: ReplyOutputTokenLimit,
 	}
 }
 

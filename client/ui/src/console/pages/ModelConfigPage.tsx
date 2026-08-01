@@ -4,13 +4,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, JobConfigSourceView, M5AIContextView, M5ProviderConfigView } from '../../api'
 import { errorText } from '../format'
 
-// 只剩 token 预算:provider 标签由脑从 base_url 推导,model 随旧后台 job-config
-// 下发,都不再由这个兜底表单指定(AGENTS.md 2026-07-30 裁决)。
+// 只剩请求超时:provider 标签由脑从 base_url 推导,model 随旧后台 job-config
+// 下发(AGENTS.md 2026-07-30 裁决);token 预算自 2026-08-01 起只由脑的代码常量
+// 固定,前端既不提交也不猜——展示用的实际值从 GET 响应里读。
 const M5_PROVIDER_BUDGET = {
   request_timeout_ms: 30000 as const,
-  max_input_tokens: 16000 as const,
-  max_intent_output_tokens: 64 as const,
-  max_reply_output_tokens: 512 as const,
 }
 
 export function ModelConfigPage() {
