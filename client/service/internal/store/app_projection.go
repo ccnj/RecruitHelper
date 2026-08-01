@@ -257,6 +257,24 @@ func unavailableMetric(reason string) AppMetric {
 	return AppMetric{Exact: false, UnavailableReason: reason}
 }
 
+// AppCurrentJob 是无账号维度的当前职位投影。全新安装在绑定任何平台账号之前,
+// 首页也必须能看见"职位已同步"——职位显示是开始按钮的前置,而点开始才是建立
+// 账号的动作(账号跟随登录,2026-07-30 裁决);overview 曾对零账号整体短路,
+// 职位被硬编码成 missing,同步成功也不可见,构成装机死锁(2026-08-01 真机复现)。
+// 查询与 AppOverview 的零批次分支同源:职位头本就不带账号维度。
+func (s *Store) AppCurrentJob() (AppJobProjection, error) {
+	var out AppJobProjection
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var txErr error
+		out, txErr = appCurrentJobTx(tx, "", "", "")
+		return txErr
+	})
+	if err != nil {
+		return AppJobProjection{}, err
+	}
+	return out, nil
+}
+
 func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, error) {
 	if req.Now.IsZero() {
 		req.Now = time.Now()

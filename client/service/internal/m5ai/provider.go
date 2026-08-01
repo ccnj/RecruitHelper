@@ -111,6 +111,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		preflight.TraceStatus = TraceStatusUnavailable
 	}
 	if request.Purpose != PurposeIntent && request.Purpose != PurposeReply &&
+		request.Purpose != PurposeServiceReply &&
 		request.Purpose != PurposeSilenceFollowup &&
 		request.Purpose != PurposeScoring && request.Purpose != PurposeGreeting &&
 		request.Purpose != PurposeJobClass && request.Purpose != PurposeJobKeywords {
@@ -127,7 +128,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 			newProviderError("requestInvalid", FailureStageRequestBuild, "traceMetadataMissing")
 	}
 	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
-		((request.Purpose == PurposeReply || request.Purpose == PurposeSilenceFollowup ||
+		((request.Purpose == PurposeReply || request.Purpose == PurposeServiceReply ||
+			request.Purpose == PurposeSilenceFollowup ||
 			request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting ||
 			request.Purpose == PurposeJobClass || request.Purpose == PurposeJobKeywords) &&
 			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {

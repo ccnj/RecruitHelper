@@ -57,6 +57,10 @@ func TestClassifyConversationFailure(t *testing.T) {
 		{"store 等值键冲突", store.ErrMessageSourceKeyConflict, failureScopeQuarantine},
 		{"不安全修正", syncledger.ErrUnsafeMessageClassificationCorrection, failureScopeQuarantine},
 		{"V4 投影冲突", store.ErrCommunicationV4Conflict, failureScopeQuarantine},
+		// AI 预留冲突是状态冲突而非确定性业务错误：AI 尚未被调用、无任何外部
+		// 副作用。判成确定性会因为一次正常的职位配置换代冻结整批候选人
+		// （2026-08-01 事故当日 79 人）。
+		{"AI 预留冲突", store.ErrAIInvocationConflict, failureScopeSkipRound},
 		{"未知脑侧错误", errors.New("some brain bug"), failureScopeQuarantine},
 	}
 	for _, testCase := range cases {
@@ -71,6 +75,10 @@ func TestClassifyConversationFailure(t *testing.T) {
 	}
 	if class := conversationFailureClass(syncledger.ErrTrackedSnapshotEmpty); class != "trackedSnapshotEmpty" {
 		t.Fatalf("已收编空快照类别标签错误: %s", class)
+	}
+	// 具名分类：事故当日 79 条隔离审计全部只写着 unclassified，看不出是什么。
+	if class := conversationFailureClass(store.ErrAIInvocationConflict); class != "aiInvocationConflict" {
+		t.Fatalf("AI 预留冲突类别标签错误: %s", class)
 	}
 	if class := conversationFailureClass(store.ErrMessageSourceKeyConflict); class != "sourceIdentityConflict" {
 		t.Fatalf("脑侧类别标签错误: %s", class)

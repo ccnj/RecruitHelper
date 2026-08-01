@@ -1,6 +1,6 @@
 {
   "name": "recruithelper-ui",
-  "version": "1.2.0",
+  "version": "1.4.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "typecheck": "tsc -b",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:node": "node test/console-lock.test.mjs && node test/send-resume.test.mjs && node test/send-intent-state.test.mjs && node test/candidate-workflow.test.mjs && node test/product-data.test.mjs && node test/product-home.test.mjs && node test/product-candidate-stage.test.mjs && node test/product-confirmation.test.mjs && node test/product-activation.test.mjs && node test/product-api.test.mjs && node test/api.test.mjs"
+    "test:node": "node test/console-lock.test.mjs && node test/send-resume.test.mjs && node test/send-intent-state.test.mjs && node test/candidate-workflow.test.mjs && node test/product-data.test.mjs && node test/product-home.test.mjs && node test/product-candidate-stage.test.mjs && node test/product-confirmation.test.mjs && node test/product-activation.test.mjs && node test/product-interview-schedule.test.mjs && node test/product-api.test.mjs && node test/api.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

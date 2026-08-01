@@ -314,6 +314,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
       refreshedAt: formatRelativeDateTime(rawOverview.refreshedAt, now),
       businessWindowLabel: '运行时间 08:00～24:00',
       businessWindowOpen,
+      homeStatus: homeStatus(workflow, funnel, businessWindowOpen),
       workflow,
       funnel,
       communication: adaptCommunication(runtime.communicationState, businessWindowOpen),
@@ -321,7 +322,11 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         { label: 'AI 处理人数', value: metricValue(statistics.todayRated), tone: 'blue' },
         { label: '打招呼', value: metricValue(statistics.todayGreeted), tone: 'green' },
         { label: '换微信数', value: metricValue(statistics.todayWechat), tone: 'amber' },
-        { label: '已邀面', value: metricValue(statistics.todayInvited), tone: 'red' },
+        // 数的是"今天有几个人接受了邀约"(todayNewAppointments,取 interviewed_at),
+        // 不是"今天发出去几张邀面卡"(todayInvited)。发卡不等于人家答应,而侧边栏
+        // 「已约面」页与「累计已约面」都是接受口径,这里用发卡数会让用户拿两处
+        // 一对就发现数字对不上(2026-07-31 甲方裁决)。
+        { label: '已约面', value: metricValue(statistics.todayNewAppointments), tone: 'red' },
       ],
       ledgerStartedAt: formatDateOnly(rawOverview.businessSince),
       ledger: [
@@ -341,8 +346,8 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
         greeted: metricValue(statistics.todayGreeted),
         greetingDisplayTarget: 100,
         newReplies: metricValue(statistics.todayNewReplies),
+        newWechat: metricValue(statistics.todayWechat),
         newInterviews: metricValue(statistics.todayNewAppointments),
-        elapsedInterviews: metricValue(statistics.todayElapsedInterviews),
       },
     },
     confirmation,
@@ -432,6 +437,75 @@ function adaptWorkflow(
       (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
     pendingAction,
     unavailableReason,
+  }
+}
+
+// homeStatus 把六个工作流状态、两种模式和漏斗阶段收成首页那一句话。运行中
+// 只有两种说法(2026-07-31 甲方裁决):漏斗在跑叫"招呼中",回复已有候选人叫
+// "沟通中"。用户面对的是"要不要我动手",不是阶段机;"评分中""筛选中"这类
+// 只在诊断台出现。
+function homeStatus(
+  workflow: WorkflowView,
+  funnel: ProductData['overview']['funnel'],
+  businessWindowOpen: boolean,
+): ProductData['overview']['homeStatus'] {
+  if (workflow.pendingAction === 'end') {
+    return {
+      label: '正在结束',
+      hint: '正在把手上这个候选人处理完，请稍候。',
+      tone: 'attention',
+    }
+  }
+  switch (workflow.state) {
+    case 'failed':
+      return {
+        label: '没能完成',
+        hint: workflow.unavailableReason ?? '可以重新开始今天的招聘。',
+        tone: 'failed',
+      }
+    case 'awaitingConfirmation': {
+      const pending = funnel.pending ?? 0
+      return {
+        label: '等你确认',
+        hint: pending > 0
+          ? `${pending} 位候选人的招呼语已经写好，你确认后才会发出去。`
+          : '招呼语已经写好，你确认后才会发出去。',
+        tone: 'attention',
+      }
+    }
+    case 'paused':
+    case 'waitingDailyWindow':
+      return {
+        label: '等你继续',
+        hint: businessWindowOpen
+          ? '今天的活儿还没干完，点继续接着做。'
+          : '现在是休息时间，明天 8 点以后可以继续。',
+        tone: 'attention',
+      }
+    case 'running': {
+      // 只回消息的模式本来就不招新人;完整模式跑完漏斗后也转入回消息。
+      if (workflow.mode === 'replyOnly' || funnel.stage === 'completed') {
+        return {
+          label: '沟通中',
+          hint: '正在回复候选人的消息，有人想聊会自动接上。',
+          tone: 'running',
+        }
+      }
+      const greeted = funnel.stages.find((stage) => stage.key === 'send')?.completed ?? 0
+      return {
+        label: '招呼中',
+        hint: greeted > 0
+          ? `正在挑人打招呼，已经打了 ${greeted} 位。`
+          : '正在挑人打招呼。',
+        tone: 'running',
+      }
+    }
+    default:
+      return {
+        label: '未开始',
+        hint: workflow.unavailableReason ?? '点开始，系统会自动挑人、打招呼、回消息。',
+        tone: 'idle',
+      }
   }
 }
 

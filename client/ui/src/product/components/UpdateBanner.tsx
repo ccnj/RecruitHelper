@@ -57,7 +57,16 @@ export function UpdateBanner({ status, workflowActive }: UpdateBannerProps) {
               ? '当前有任务正在运行，更新前会先结束它——已采集的候选人和已发出的消息都会保留，但本批剩余进度会丢失。'
               : '当前没有任务在运行。'}
           </p>
-          <p className="rh-update-confirm-hint">更新期间请不要关机。</p>
+          {installing ? (
+            // 结束任务不是一瞬间的事：脑要等当前候选人把已经开始的动作跑完，
+            // 才敢关掉进程，否则一条正在发送的消息会变成需要人工判定的悬案。
+            // 这段等待最长几分钟，界面上不说一声就会被当成卡死。
+            <p className="rh-update-waiting">
+              正在等待当前任务收尾，请稍候，不要关闭窗口。收尾完成后客户端会自动重启。
+            </p>
+          ) : (
+            <p className="rh-update-confirm-hint">更新期间请不要关机。</p>
+          )}
           <div className="rh-update-actions">
             <button
               className="rh-update-primary"
@@ -65,7 +74,7 @@ export function UpdateBanner({ status, workflowActive }: UpdateBannerProps) {
               onClick={() => void start()}
               type="button"
             >
-              {installing ? '正在准备…' : '确认更新'}
+              {installing ? '正在收尾…' : '确认更新'}
             </button>
             <button
               disabled={installing}

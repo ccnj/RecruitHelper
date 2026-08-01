@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 )
 
@@ -17,15 +18,53 @@ const testBearer = "0123456789abcdef0123456789abcdef"
 
 type fakeProjections struct {
 	overviewReq          store.AppOverviewRequest
+	overviewCalls        int
+	currentJob           store.AppJobProjection
+	currentJobErr        error
+	currentJobCalls      int
 	confirmationID       string
 	candidateQuery       store.AppCandidateListQuery
 	candidateQueryDetail store.AppCandidateDetailQuery
 	detailErr            error
+	schedule             m5ai.InterviewSchedule
+	scheduleErr          error
+	savedSchedule        m5ai.InterviewSchedule
+	saveScheduleErr      error
+}
+
+func (f *fakeProjections) InterviewSchedule() (m5ai.InterviewSchedule, error) {
+	if f.scheduleErr != nil {
+		return nil, f.scheduleErr
+	}
+	if f.schedule == nil {
+		return m5ai.DefaultInterviewSchedule(), nil
+	}
+	return f.schedule, nil
+}
+
+func (f *fakeProjections) SetInterviewSchedule(schedule m5ai.InterviewSchedule) error {
+	if f.saveScheduleErr != nil {
+		return f.saveScheduleErr
+	}
+	f.savedSchedule = schedule
+	return nil
 }
 
 func (f *fakeProjections) AppOverview(req store.AppOverviewRequest) (*store.AppOverviewProjection, error) {
 	f.overviewReq = req
+	f.overviewCalls++
 	return &store.AppOverviewProjection{Job: store.AppJobProjection{SyncStatus: "missing"}}, nil
+}
+
+func (f *fakeProjections) AppCurrentJob() (store.AppJobProjection, error) {
+	f.currentJobCalls++
+	if f.currentJobErr != nil {
+		return store.AppJobProjection{}, f.currentJobErr
+	}
+	if f.currentJob.SyncStatus == "" {
+		return store.AppJobProjection{SyncStatus: "missing"}, nil
+	}
+	return f.currentJob, nil
 }
 
 func (f *fakeProjections) AppConfirmation(batchID string) (*store.AppConfirmationProjection, error) {
@@ -272,5 +311,41 @@ func TestProjectionRoutesFailClosedWithoutUniqueAccountScope(t *testing.T) {
 	if fake.overviewReq.Platform != "" || fake.candidateQuery.Platform != "" ||
 		fake.candidateQueryDetail.ProfileID != "" {
 		t.Fatalf("空账号作用域不得进入 Store: %+v", fake)
+	}
+}
+
+// 零账号(全新安装未绑定)时职位投影必须照常返回,否则职位同步成功也不可见,
+// 开始按钮永远不亮,而点开始才是建立账号的动作——装机死锁(2026-08-01 真机复现)。
+func TestOverviewWithoutAccountStillProjectsBoundJob(t *testing.T) {
+	fake := &fakeProjections{currentJob: store.AppJobProjection{
+		Available: true, BackendJobID: "42", Name: "产品经理", SyncStatus: "synced",
+	}}
+	handler := newTestAPI(t, fake,
+		WithRuntimeSnapshotProvider(func(context.Context) (RuntimeSnapshot, error) {
+			return RuntimeSnapshot{Available: true, Authorized: true}, nil
+		}),
+	)
+	res := request(t, handler, http.MethodGet, "/app/overview", "127.0.0.1:43000", testBearer)
+	if res.Code != http.StatusOK || fake.currentJobCalls != 1 || fake.overviewCalls != 0 {
+		t.Fatalf("status=%d currentJobCalls=%d overviewCalls=%d body=%s",
+			res.Code, fake.currentJobCalls, fake.overviewCalls, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"backendJobId":"42"`) ||
+		!strings.Contains(res.Body.String(), `"syncStatus":"synced"`) {
+		t.Fatalf("零账号 overview 未携带职位投影: %s", res.Body.String())
+	}
+}
+
+func TestOverviewWithoutAccountFailsClosedOnProjectionError(t *testing.T) {
+	fake := &fakeProjections{currentJobErr: errors.New("storage failure with internals")}
+	handler := newTestAPI(t, fake,
+		WithRuntimeSnapshotProvider(func(context.Context) (RuntimeSnapshot, error) {
+			return RuntimeSnapshot{Available: true, Authorized: true}, nil
+		}),
+	)
+	res := request(t, handler, http.MethodGet, "/app/overview", "127.0.0.1:43000", testBearer)
+	if res.Code != http.StatusInternalServerError ||
+		strings.Contains(res.Body.String(), "internals") {
+		t.Fatalf("投影失败未安全收口: status=%d body=%s", res.Code, res.Body.String())
 	}
 }

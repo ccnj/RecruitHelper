@@ -20,9 +20,17 @@ type fakeGateStore struct {
 	// settleAfter 次查询之后命令自然收敛,模拟 End 之后在途命令陆续终局。
 	settleAfter int
 	queries     int
+	// runQueries 数工作流状态被问了几次,用来断言"确实在轮询等它停"。
+	runQueries int
+	// onRunQuery 让用例模拟工作流自己往前走:几轮之后执行掉结束请求。
+	onRunQuery func(f *fakeGateStore)
 }
 
 func (f *fakeGateStore) ActiveProductWorkflowRun() (*store.ProductWorkflowRun, error) {
+	f.runQueries++
+	if f.onRunQuery != nil {
+		f.onRunQuery(f)
+	}
 	return f.run, nil
 }
 
@@ -34,10 +42,19 @@ func (f *fakeGateStore) NonTerminalCmds() ([]store.CmdRecord, error) {
 	return f.pending, nil
 }
 
-type fakeEnder struct{ calls int }
+// fakeEnder 模拟 productworkflow.Manager.End() 的真实语义:它只**登记**一个待执行
+// 的结束请求就返回,工作流此刻仍是 running。照搬"调完就当结束了"会让测试永远发现
+// 不了 2026-08-01 那个缺陷。
+type fakeEnder struct {
+	calls int
+	store *fakeGateStore
+}
 
 func (f *fakeEnder) End(context.Context) error {
 	f.calls++
+	if f.store != nil && f.store.run != nil {
+		f.store.run.PendingAction = store.ProductWorkflowPendingActionEnd
+	}
 	return nil
 }
 
@@ -69,6 +86,7 @@ func newInstallHarness(t *testing.T, version string, body []byte) *installHarnes
 	h := &installHarness{
 		dir: dir, store: &fakeGateStore{}, ender: &fakeEnder{}, checker: checker,
 	}
+	h.ender.store = h.store
 	h.gate = &InstallGate{
 		Store: h.store, Workflow: h.ender, Checker: checker, StateDir: dir,
 		Timeout: 300 * time.Millisecond, Poll: 10 * time.Millisecond,
@@ -124,11 +142,25 @@ func TestPrepareChecksPackageBeforeTouchingBusiness(t *testing.T) {
 	}
 }
 
-func TestPrepareEndsRunningWorkflowThenWaits(t *testing.T) {
+func TestPrepareEndsRunningWorkflowThenWaitsForItToActuallyStop(t *testing.T) {
+	// End() 只登记结束请求,真正执行要等下一轮 AdvanceOnce 并经巡检边界。这里让
+	// 工作流被问到第四次时才真的终局,断言 Prepare 一直等到那一刻。
 	h := newInstallHarness(t, "0.2.5", []byte("installer"))
-	h.store.run = &store.ProductWorkflowRun{RunID: "run-1", Status: workflow.StatusRunning}
+	h.store.run = &store.ProductWorkflowRun{
+		RunID: "run-1", Status: workflow.StatusRunning,
+		Stage: store.ProductWorkflowStageCommunication,
+	}
+	// 命令比工作流先收敛,这样"何时放行"只取决于 run 是否终局 —— 否则账本这一条
+	// 会替另外两条把测试撑绿,退回旧逻辑也看不出区别。
 	h.store.pending = []store.CmdRecord{{MsgID: "cmd-1"}}
-	h.store.settleAfter = 3 // 第三次查询时命令收敛
+	h.store.settleAfter = 2
+	// 真终局的形态是 run 消失,不是留一条 Completed 的记录:TransitionProductWorkflowRun
+	// 会把 active_slot 置 nil,ActiveProductWorkflowRun() 随之返回 (nil, nil)。
+	h.store.onRunQuery = func(f *fakeGateStore) {
+		if f.runQueries >= 4 {
+			f.run = nil
+		}
+	}
 
 	if _, err := h.gate.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
@@ -136,8 +168,85 @@ func TestPrepareEndsRunningWorkflowThenWaits(t *testing.T) {
 	if h.ender.calls != 1 {
 		t.Fatalf("运行中的工作流应被结束一次，实际 %d 次", h.ender.calls)
 	}
-	if h.store.queries < 3 {
-		t.Fatalf("应等到命令收敛才返回，只查了 %d 次", h.store.queries)
+	if h.store.runQueries < 4 {
+		t.Fatalf("应轮询到结束请求真正执行完，只查了 %d 次", h.store.runQueries)
+	}
+}
+
+func TestPrepareRefusesWhileWorkflowRunsEvenWithEmptyLedger(t *testing.T) {
+	// 2026-08-01 真机暴露的缺陷:原先只查 NonTerminalCmds,而那看的是**已派发**的
+	// 命令。当前候选人卡在 AI 调用里时命令还没铸出来,账本恰好是空的 —— 于是立刻
+	// 放行,随后派发的那条命令正好被杀成 suspect。
+	//
+	// 这里账本全程为空、工作流一直没停,必须拒绝。
+	h := newInstallHarness(t, "0.2.5", []byte("installer"))
+	h.store.run = &store.ProductWorkflowRun{
+		RunID: "run-1", Status: workflow.StatusRunning,
+		Stage: store.ProductWorkflowStageCommunication,
+	}
+	h.store.pending = nil
+
+	_, err := h.gate.Prepare(context.Background())
+	if !errors.Is(err, ErrBusinessInFlight) {
+		t.Fatalf("工作流还在跑就不能装，哪怕账本是空的，得到 %v", err)
+	}
+	if pending, _ := h.gate.readPending(); pending != nil {
+		t.Fatal("没交出安装器就不该留下安装意图")
+	}
+}
+
+func TestSettleBlockerNamesWhatIsStillInTheWay(t *testing.T) {
+	// 三个条件各挡各的,而且顺序要稳:诊断时"卡在哪一步"就靠这句话。
+	for _, tc := range []struct {
+		name    string
+		run     *store.ProductWorkflowRun
+		pending []store.CmdRecord
+		want    string
+	}{
+		{name: "全静", want: ""},
+		{
+			name: "结束请求未执行",
+			run: &store.ProductWorkflowRun{
+				Status:        workflow.StatusRunning,
+				PendingAction: store.ProductWorkflowPendingActionEnd,
+			},
+			want: "结束请求尚未执行完",
+		},
+		{
+			name: "工作流在跑",
+			run:  &store.ProductWorkflowRun{Status: workflow.StatusRunning},
+			want: "工作流仍在运行",
+		},
+		{
+			name: "等确认也算在跑",
+			run:  &store.ProductWorkflowRun{Status: workflow.StatusAwaitingConfirmation},
+			want: "工作流仍在运行",
+		},
+		{
+			// 终局后 run 就查不到了(active_slot 置 nil),所以这里 run 是 nil ——
+			// 留一条 Completed 的 run 是生产上不会出现的形态,拿它当真值表会误导。
+			name:    "工作流已终局但命令未收束",
+			pending: []store.CmdRecord{{MsgID: "a"}, {MsgID: "b"}},
+			want:    "仍有 2 条未收束命令",
+		},
+		{
+			name: "暂停不算拦路",
+			run:  &store.ProductWorkflowRun{Status: workflow.StatusPaused},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newInstallHarness(t, "0.2.5", []byte("installer"))
+			h.store.run = tc.run
+			h.store.pending = tc.pending
+			got, err := h.gate.settleBlocker()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("阻塞原因应为 %q，得到 %q", tc.want, got)
+			}
+		})
 	}
 }
 
@@ -147,11 +256,61 @@ func TestPrepareRefusesWhenCommandsNeverSettle(t *testing.T) {
 	h.store.pending = []store.CmdRecord{{MsgID: "cmd-stuck"}}
 
 	_, err := h.gate.Prepare(context.Background())
-	if !errors.Is(err, ErrCommandsInFlight) {
+	if !errors.Is(err, ErrBusinessInFlight) {
 		t.Fatalf("命令不收敛时必须放弃本次安装，得到 %v", err)
 	}
 	if pending, _ := h.gate.readPending(); pending != nil {
 		t.Fatal("没交出安装器就不该留下安装意图")
+	}
+}
+
+func TestPrepareRefusesDuringFunnelStagesWithPlainLanguage(t *testing.T) {
+	// 漏斗阶段的工作流结束不了:那条 SQL 的 WHERE 要求 stage=communication,不匹配
+	// 就回滚并返回"产品工作流状态冲突"。那句话会一路透到产品界面上,普通用户看不
+	// 懂,只会以为坏了然后反复点。这里提前挡住并说人话。
+	for _, stage := range []string{
+		store.ProductWorkflowStageSourcing,
+		store.ProductWorkflowStageScoring,
+		store.ProductWorkflowStageSelection,
+		store.ProductWorkflowStageGreetingGeneration,
+		store.ProductWorkflowStageAwaitingConfirmation,
+		store.ProductWorkflowStageGreetingSending,
+	} {
+		t.Run(stage, func(t *testing.T) {
+			h := newInstallHarness(t, "0.2.5", []byte("installer"))
+			h.store.run = &store.ProductWorkflowRun{
+				RunID: "run-1", Status: workflow.StatusRunning, Stage: stage,
+			}
+
+			_, err := h.gate.Prepare(context.Background())
+			if !errors.Is(err, ErrGreetingInProgress) {
+				t.Fatalf("漏斗阶段应给出人话提示，得到 %v", err)
+			}
+			if h.ender.calls != 0 {
+				t.Fatal("既然结束不了，就不该白调一次 End")
+			}
+			// 没交出安装器就不能记安装意图 —— 否则用户多点几次就把
+			// maxInstallAttempts 两次机会耗光，真能装的时候反而被闸挡住。
+			if pending, _ := h.gate.readPending(); pending != nil {
+				t.Fatal("被拒绝时不该留下安装意图")
+			}
+		})
+	}
+}
+
+func TestPrepareAllowsInstallAfterUserPausedFunnel(t *testing.T) {
+	// 漏斗阶段想更新的出路:用户自己先暂停。Pause 没有阶段限制,暂停后 status
+	// 变 paused,安装闸直接放行,进度也不丢。
+	h := newInstallHarness(t, "0.2.5", []byte("installer"))
+	h.store.run = &store.ProductWorkflowRun{
+		RunID: "run-1", Status: workflow.StatusPaused,
+		Stage: store.ProductWorkflowStageScoring,
+	}
+	if _, err := h.gate.Prepare(context.Background()); err != nil {
+		t.Fatalf("暂停后的漏斗应当可以安装: %v", err)
+	}
+	if h.ender.calls != 0 {
+		t.Fatal("已经暂停了就不必再去结束")
 	}
 }
 
