@@ -740,11 +740,17 @@ type ReserveAIInvocationResult struct {
 	Created    bool
 }
 
+// MaxAIInvocationAttempts 是同一个 turn、同一用途允许的 provider 调用总次数
+// (首次 + 4 次重试,2026-08-01 甲方裁决)。AI 调用没有平台副作用,重试只多花
+// token 与时间,因此上限是成本闸而非安全闸;真正的安全边界仍在业务前置裁决。
+const MaxAIInvocationAttempts = 5
+
 // ReserveAIInvocation 是 provider 调用的唯一授权点。Created=false 只表示
 // 既有事实可收编，绝不授权重放网络调用。
 func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAIInvocationResult, error) {
 	if strings.TrimSpace(req.InvocationID) == "" || strings.TrimSpace(req.TurnID) == "" ||
-		(req.Purpose != m5ai.PurposeIntent && req.Purpose != m5ai.PurposeReply) || req.Attempt != 1 ||
+		(req.Purpose != m5ai.PurposeIntent && req.Purpose != m5ai.PurposeReply) ||
+		req.Attempt < 1 || req.Attempt > MaxAIInvocationAttempts ||
 		strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.Model) == "" || strings.TrimSpace(req.InputHash) == "" {
 		return nil, ErrAIInvocationInvalid
 	}
@@ -985,6 +991,26 @@ type CompleteReplyInvocationRequest struct {
 	// planned action (explicit silence or abandoned suffix, spec v4 §7). The
 	// v4 replay derives the exact verdict; non-v4 turns must never set it.
 	ServiceNoAction bool
+}
+
+// FailAIInvocationForRetry 只把本次 attempt 落成失败事实,不碰 turn。它是重试
+// 循环的中间步骤:turn 的终局(planned action 或 manualRequired)只由最后一次
+// attempt 决定,因此这里既不推进状态也不创建动作。turn 仍停在 collected/
+// classified,下一次 attempt 的 ReserveAIInvocation 会重新校验边界与状态。
+func (s *Store) FailAIInvocationForRetry(
+	completion AIInvocationCompletion,
+	purpose m5ai.CompletionPurpose,
+) error {
+	// 不按 completion.Status 判成败:最主要的重试场景恰恰是"调用成功
+	// (Status=OK)但业务前置或输出契约不合法",store 层看不出这层语义,
+	// 由调用方在 reduce 出 manualRequired 后决定是否走本函数。
+	if err := validateInvocationCompletion(completion); err != nil {
+		return err
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		_, err := finishAIInvocationTx(tx, completion, purpose)
+		return err
+	})
 }
 
 // CompleteReplyInvocation 在一个事务内终结 reply invocation，并且只在
