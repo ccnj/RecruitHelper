@@ -220,11 +220,39 @@ function KeywordPlanBlock({ plan, stale }: { plan: JobKeywordPlanView; stale: bo
         <span>自定义</span><strong>{plan.custom.length > 0 ? plan.custom.join('、') : '(无)'}</strong>
       </p>
       {plan.reason && <p className="publish-draft-sections">选择理由：{plan.reason}</p>}
+      {/* 平台这次给出的词库要原样摊开。它是选词的封闭候选集，而且只有这一次
+          机会被看见——弹层关掉就没了，词库又随类别与描述变化、事后无从复原。
+          只列分组标题不够：那样看不出"模型没选到好词"和"平台压根没给"的区别。 */}
       <p className="publish-draft-sections">
-        本次词库：{plan.sections.map((section) => section.title).join(' / ') || '(无分组)'}
+        平台这次给出的词库（选中的标绿）
         {plan.totalQuota ? ` · 平台总配额 ${plan.totalQuota}` : ''}
         {plan.formReused ? ' · 复用了上一趟表单' : ' · 重填了表单'}
       </p>
+      <ul className="publish-vocab">
+        {plan.sections.map((section) => (
+          <li key={section.title}>
+            <em>
+              {section.title}
+              {section.limit ? `（最多 ${section.limit}）` : ''}
+            </em>
+            {section.words.length === 0
+              ? <small className="publish-vocab-empty">平台没给现成词条，只能自定义</small>
+              : (
+                <span className="publish-vocab-words">
+                  {section.words.map((word) => (
+                    <code
+                      key={word}
+                      className={plan.matched.includes(word) ? 'is-picked' : undefined}
+                    >
+                      {word}
+                    </code>
+                  ))}
+                </span>
+              )}
+          </li>
+        ))}
+        {plan.sections.length === 0 && <li><em>平台没有给出任何分组</em></li>}
+      </ul>
       {plan.deadConfiguredKeywords && plan.deadConfiguredKeywords.length > 0 && (
         <p className="publish-draft-sections">
           后台填的是：{plan.deadConfiguredKeywords.join('、')} —— 死字段，不参与发布

@@ -1200,6 +1200,20 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-keywords strong.ok { color: var(--live); }
 .publish-keywords strong.bad { color: var(--warn); }
 
+/* 平台这次给出的词库。它是选词的封闭候选集，只有这一次机会被看见，所以整份
+   摊开而不是折叠——运营要能一眼看出模型是没选到好词，还是平台压根没给。 */
+.publish-vocab { margin: 0.14rem 0 0.14rem 0.6rem; padding: 0; list-style: none; }
+.publish-vocab li { margin-bottom: 0.14rem; font-size: var(--fs-sm); line-height: 1.6; }
+.publish-vocab em { color: var(--txt-dim); font-style: normal; }
+.publish-vocab-words { display: inline; margin-left: 0.3rem; }
+.publish-vocab code {
+  margin: 0 0.22rem 0 0; padding: 0 0.16rem;
+  color: var(--txt-faint); font-family: var(--face); font-size: var(--fs-sm);
+  border: 1px solid transparent;
+}
+.publish-vocab code.is-picked { color: var(--live); border-color: var(--live); }
+.publish-vocab-empty { margin-left: 0.3rem; color: var(--txt-faint); }
+
 /* 试填回读报告：证明"能填进去"，不是"发布了" */
 .publish-draft-report { margin: 0.3rem 0 0 4.95rem; padding: 0.3rem 0.4rem; border-left: 2px solid var(--rule-hi); background: #0c1116; }
 .publish-draft-report p { display: flex; flex-wrap: wrap; gap: 0.2rem 0.5rem; margin: 0 0 0.14rem; font-size: var(--fs-sm); line-height: 1.5; }
