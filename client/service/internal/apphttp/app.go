@@ -25,6 +25,7 @@ var ErrInvalidConfiguration = errors.New("产品 API 配置无效")
 
 type ProjectionStore interface {
 	AppOverview(store.AppOverviewRequest) (*store.AppOverviewProjection, error)
+	AppCurrentJob() (store.AppJobProjection, error)
 	AppConfirmation(string) (*store.AppConfirmationProjection, error)
 	AppCandidates(store.AppCandidateListQuery) (*store.AppCandidateListProjection, error)
 	AppCandidateDetail(store.AppCandidateDetailQuery) (*store.AppCandidateDetailProjection, error)
@@ -450,9 +451,17 @@ func (a *API) installUpdate(w http.ResponseWriter, r *http.Request) {
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	runtime := a.runtimeSnapshot(r.Context())
 	if runtime.Platform == "" || runtime.AccountRef == "" {
+		// 零账号只意味着账号维投影(漏斗/统计/批次)为空,不意味着职位未同步:
+		// 职位头不带账号维度,必须照常投影,否则全新安装会死锁——职位显示是
+		// 开始按钮的前置,而点开始才是建立账号的动作(账号跟随登录)。
+		job, err := a.projections.AppCurrentJob()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "首页数据读取失败"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"overview": store.AppOverviewProjection{
-				Job:             store.AppJobProjection{SyncStatus: "missing"},
+				Job:             job,
 				TodayInterviews: []store.AppInterviewSummary{},
 				RefreshedAt:     a.now(),
 			},
