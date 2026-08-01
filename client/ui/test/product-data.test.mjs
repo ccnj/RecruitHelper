@@ -385,6 +385,14 @@ check(
     product.overview.homeStatus.hint.includes('确认后才会发出去'),
   '等待确认时首页直说等你确认',
 )
+// 人数取 pendingConfirm(12)，不是本批选中总数 targetCount(30):生成失败、推荐流
+// 已变化、不再可发送的都算在选中数里，用它会让首页说得比侧栏徽章多。这条原先
+// 写在 product-home，但那层只渲染算好的 hint、根本算不出人数，等于没测。
+check(
+  product.overview.homeStatus.hint.includes('12 位候选人')
+    && !product.overview.homeStatus.hint.includes('30 位候选人'),
+  '等待确认人数取 pendingConfirm，不取本批选中总数',
+)
 const pausedHome = structuredClone(snapshot)
 pausedHome.overview.runtime.workflowStatus = 'paused'
 check(
