@@ -52,6 +52,11 @@ var (
 	ErrBusinessInFlight = errors.New(
 		"当前任务尚未收尾，本次不安装；等它跑完再试")
 	ErrInstallHalted = errors.New("该版本已连续安装失败，已停止自动安装")
+	// ErrGreetingInProgress:漏斗阶段(采集/评分/筛选/招呼语生成/待确认/招呼发送)
+	// 的工作流根本结束不了 —— RequestProductWorkflowPendingAction 的 WHERE 硬性
+	// 要求 stage=communication,不匹配就整条事务回滚、返回"产品工作流状态冲突"。
+	// 那句话会一路透到产品界面上,普通用户看不懂。在这里提前挡住并说人话。
+	ErrGreetingInProgress = errors.New("当前正在打招呼中，禁止更新")
 )
 
 // GateStore 是安装闸要问账本的两个问题。
@@ -170,6 +175,13 @@ func (g *InstallGate) endActiveWorkflow(ctx context.Context) error {
 	if run == nil || (run.Status != workflow.StatusRunning &&
 		run.Status != workflow.StatusAwaitingConfirmation) {
 		return nil
+	}
+	// 漏斗阶段结束不了(见 ErrGreetingInProgress)。用户想在这时更新,出路是先暂停
+	// 任务 —— Pause 没有阶段限制,暂停后 status 变 paused,上面那一支直接放行,
+	// 进度也不会丢。这里不代劳去暂停:Pause 是先落库再停账号,紧接着查闸会撞上
+	// 两者之间那个窄窗,等于把一条低概率缺陷变成每次必经。
+	if run.Stage != store.ProductWorkflowStageCommunication {
+		return ErrGreetingInProgress
 	}
 	if g.Workflow == nil {
 		return errors.New("当前有运行中的任务，但工作流控制尚未就绪")
