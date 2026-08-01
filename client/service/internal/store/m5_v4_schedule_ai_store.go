@@ -295,23 +295,35 @@ func communicationV4ScheduleAIInvocationID(
 	return hex.EncodeToString(digest[:])
 }
 
+// sameCommunicationV4ScheduleAIReservation 只比较构成预留身份的三项。
+//
+// AdviceKey 已经完整定义了"哪个候选人、什么用途、第几轮、第几阶段"的沉默
+// 追问；ProfileID 与 Purpose 是它的结构性冗余，用来兜住 ID 派生出错或串档。
+// 这三项不等才是真正的账本错乱，值得响亮拒绝。
+//
+// 其余字段——ConversationRef、BasisRevision、BasisProjectedThroughSeq、
+// ContextRevisionHash、ResumeSnapshotID、Provider、Model、InputHash——是这次
+// 调用当时的上下文快照。它们照常写入、照常保留审计价值，但不参与身份判定：
+// 职位配置更新、模型切换、候选人新消息、简历重采都会改动它们，而这些全是
+// 正常业务事件，不该让一条尚未收束的预留变成永久毒药。InvocationID 与
+// Attempt 则是恒等量（前者就是查询键本身，后者在建预留时写死 1），比较它们
+// 是死代码。
+//
+// 复用语义（2026-08-01 甲方裁决）：命中已有预留即直接复用其话术，不再调用
+// AI。因此配置或模型换代后，存量候选人继续沿用旧话术，新的 AdviceKey 才用
+// 新配置/新模型生成——切换是渐进的，不会卡住任何人。若确需让存量重新生成，
+// 显式清理在途预留，不要依赖冲突报错倒逼。
+//
+// 事故记录：2026-08-01 11:04 职位配置换代后，79 个尚未发出沉默追问的候选人
+// 在 12:03 的一分钟内被连续判为 ErrAIInvocationConflict，进而隔离会话并冻结
+// 档案。根因即此处把会变的上下文当成了身份。
 func sameCommunicationV4ScheduleAIReservation(
 	existing CommunicationV4ScheduleAIInvocation,
 	wanted CommunicationV4ScheduleAIInvocation,
 ) bool {
-	return existing.InvocationID == wanted.InvocationID &&
-		existing.AdviceKey == wanted.AdviceKey &&
+	return existing.AdviceKey == wanted.AdviceKey &&
 		existing.ProfileID == wanted.ProfileID &&
-		existing.ConversationRef == wanted.ConversationRef &&
-		existing.BasisRevision == wanted.BasisRevision &&
-		existing.BasisProjectedThroughSeq == wanted.BasisProjectedThroughSeq &&
-		existing.ContextRevisionHash == wanted.ContextRevisionHash &&
-		existing.ResumeSnapshotID == wanted.ResumeSnapshotID &&
 		existing.Purpose == wanted.Purpose &&
-		existing.Attempt == wanted.Attempt &&
-		existing.Provider == wanted.Provider &&
-		existing.Model == wanted.Model &&
-		existing.InputHash == wanted.InputHash &&
 		validCommunicationV4ScheduleAIInvocation(existing)
 }
 

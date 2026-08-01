@@ -738,3 +738,109 @@ func TestCommunicationV4ScheduleAIInvocationPersistsOnceAndReplays(
 			finishedReplay, err)
 	}
 }
+
+// 预留身份只认 AdviceKey/ProfileID/Purpose。职位配置换代、模型切换、聚合推进、
+// 简历重采都会改动上下文列，但它们是记录不是身份——2026-08-01 事故正是因为把
+// 这些会变的上下文当成了身份，配置一换代就把 79 个尚未发出追问的候选人判成
+// 冲突、隔离会话并冻结档案。
+func TestScheduleAIReservationIdentityIgnoresMutableContext(t *testing.T) {
+	profileID := "p-schedule-ai-identity"
+	adviceKey := profileID + "|schedule-advice|silenceFollowup|round:1|stage:0"
+	base := CommunicationV4ScheduleAIInvocation{
+		InvocationID: communicationV4ScheduleAIInvocationID(
+			profileID, adviceKey,
+		),
+		AdviceKey:                adviceKey,
+		ProfileID:                profileID,
+		ConversationRef:          "conv-schedule-ai-identity",
+		BasisRevision:            3,
+		BasisProjectedThroughSeq: 5,
+		ContextRevisionHash:      strings.Repeat("a", 64),
+		ResumeSnapshotID:         "snap-old",
+		EvaluatedAt:              time.Unix(1_700_000_000, 0).UTC(),
+		Purpose:                  m5ai.PurposeSilenceFollowup,
+		Attempt:                  1,
+		Provider:                 "old-provider",
+		Model:                    "old-model",
+		InputHash:                strings.Repeat("b", 64),
+		// 未终局形态：身份判定与完成状态无关，取最简合法记录即可。
+		Status:    AIInvocationTransportFailed,
+		CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}
+	if !sameCommunicationV4ScheduleAIReservation(base, base) {
+		t.Fatal("同一条预留未被判为同一件事")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CommunicationV4ScheduleAIInvocation)
+	}{
+		{"职位配置换代", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.ContextRevisionHash = strings.Repeat("c", 64)
+		}},
+		{"prompt 变化导致输入哈希变化", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.InputHash = strings.Repeat("d", 64)
+		}},
+		{"切换 provider 与 model", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.Provider = "new-provider"
+			v.Model = "new-model"
+		}},
+		{"聚合版本推进", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.BasisRevision = 9
+		}},
+		{"投影游标推进", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.BasisProjectedThroughSeq = 42
+		}},
+		{"简历重采", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.ResumeSnapshotID = "snap-new"
+		}},
+		{"上下文整体换新", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.ContextRevisionHash = strings.Repeat("e", 64)
+			v.InputHash = strings.Repeat("f", 64)
+			v.Provider = "another-provider"
+			v.Model = "another-model"
+			v.BasisRevision = 11
+			v.BasisProjectedThroughSeq = 77
+			v.ResumeSnapshotID = "snap-latest"
+		}},
+	} {
+		t.Run(tc.name+"仍是同一件事", func(t *testing.T) {
+			wanted := base
+			tc.mutate(&wanted)
+			if !sameCommunicationV4ScheduleAIReservation(base, wanted) {
+				t.Fatalf("上下文变化被误判为不同预留: %+v", wanted)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CommunicationV4ScheduleAIInvocation)
+	}{
+		{"AdviceKey 不同", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.AdviceKey = v.AdviceKey + "|round:2"
+		}},
+		{"ProfileID 串档", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.ProfileID = "p-other-candidate"
+		}},
+		{"用途不同", func(v *CommunicationV4ScheduleAIInvocation) {
+			v.Purpose = m5ai.PurposeScoring
+		}},
+	} {
+		t.Run(tc.name+"必须拒绝", func(t *testing.T) {
+			wanted := base
+			tc.mutate(&wanted)
+			if sameCommunicationV4ScheduleAIReservation(base, wanted) {
+				t.Fatalf("身份错乱未被拒绝: %+v", wanted)
+			}
+		})
+	}
+
+	t.Run("既有记录本身不合法必须拒绝", func(t *testing.T) {
+		broken := base
+		broken.InvocationID = "mismatched-id"
+		if sameCommunicationV4ScheduleAIReservation(broken, base) {
+			t.Fatal("非法既有记录被当成可复用预留")
+		}
+	})
+}
