@@ -192,6 +192,20 @@
   background: rgba(255, 255, 255, 0.24);
 }
 
+/* 只读阶段页的存量计数。刻意不给底色、不加粗:它跟上面的红色徽章必须一眼分得开,
+   否则红色就不再意味着"该你动手了"。tabular-nums 让几行数字右边缘对齐。
+   窄屏(900px)下它会被 .rh-nav-item > span:not(.rh-nav-badge) 那条规则一并隐藏,
+   这是要的效果——图标角上糊一串小灰字既读不出也挡图标。 */
+.rh-nav-count {
+  color: var(--rh-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rh-nav-item.is-active .rh-nav-count {
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .rh-sidebar-bottom {
   display: flex;
   flex-direction: column;
@@ -258,76 +272,177 @@
   text-align: center;
 }
 
-/* 侧边栏底部的更新提示。默认不占位——没有新版时整块不渲染。 */
-.rh-update-banner {
+/* 主区顶部的更新提示，与 rh-product-notice 同宽同节奏。默认不占位——
+   没有新版时整块不渲染。 */
+.rh-update-bar {
+  width: min(1240px, 100%);
+  margin: 0 auto 12px;
+  padding: 9px 14px;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 8px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #cbdcf7;
+  border-radius: 7px;
+  background: var(--rh-primary-soft);
+  color: var(--rh-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rh-update-bar > svg {
+  flex: 0 0 auto;
+  color: var(--rh-primary);
+}
+
+.rh-update-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.rh-update-copy strong {
+  font-weight: 650;
+}
+
+.rh-update-install {
+  flex: 0 0 auto;
+  padding: 6px 15px;
+  border: 0;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  font-size: 11px;
-  text-align: center;
+  background: var(--rh-primary);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color 140ms ease;
 }
 
-.rh-update-title {
-  color: #e6ebf2;
-  font-weight: 600;
+.rh-update-install:hover:not(:disabled) {
+  background: var(--rh-primary-dark);
 }
 
-.rh-update-hint {
-  color: #a0a9b6;
-  line-height: 1.5;
+.rh-update-later {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rh-muted);
+  cursor: pointer;
+  font-size: 13px;
 }
 
-.rh-update-error {
-  color: #ff9b9b;
-  line-height: 1.5;
+.rh-update-later:hover {
+  color: var(--rh-copy);
 }
 
-.rh-update-confirm {
+/* 确认弹窗。装新版要中断业务、重启客户端，后果得摊开让人看清再点，
+   一行横幅里塞不下。 */
+.rh-update-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(20, 31, 49, 0.34);
+  cursor: default;
+  animation: rh-fade-in 160ms ease-out;
+}
+
+.rh-update-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 81;
+  width: min(440px, 92vw);
+  padding: 20px 22px;
+  transform: translate(-50%, -50%);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 22px 54px rgba(21, 34, 55, 0.22);
+  animation: rh-fade-in 160ms ease-out;
+}
+
+.rh-update-modal h2 {
+  margin-bottom: 12px;
+  color: var(--rh-ink);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.rh-update-modal p {
+  margin-bottom: 10px;
+  color: var(--rh-copy);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.rh-update-modal .rh-update-notes {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rh-border);
+  color: var(--rh-muted);
+}
+
+.rh-update-modal .rh-update-calm {
+  color: var(--rh-muted);
+}
+
+.rh-update-modal .rh-update-warning,
+.rh-update-modal .rh-update-waiting,
+.rh-update-modal .rh-update-error {
+  padding: 9px 12px;
+}
+
+.rh-update-modal .rh-update-warning {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  color: #c8d0da;
-  line-height: 1.6;
-  text-align: left;
+  align-items: flex-start;
+  gap: 8px;
+  border-left: 3px solid var(--rh-amber);
+  background: #fffbeb;
+  color: #8a5a07;
 }
 
-.rh-update-confirm p {
-  margin: 0;
+.rh-update-modal .rh-update-warning svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
 }
 
-.rh-update-confirm-hint {
-  color: #ffcf8b;
+.rh-update-modal .rh-update-waiting {
+  border-left: 3px solid var(--rh-primary);
+  background: var(--rh-primary-soft);
+  color: #24518f;
+}
+
+.rh-update-modal .rh-update-error {
+  border-left: 3px solid var(--rh-red);
+  background: #fdf0f1;
+  color: #a32d2d;
 }
 
 .rh-update-actions {
   display: flex;
-  gap: 6px;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 
-.rh-update-banner button {
-  flex: 1;
-  padding: 5px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 4px;
-  background: transparent;
-  color: #d7dde5;
+.rh-update-cancel {
+  padding: 6px 15px;
+  border: 1px solid var(--rh-border-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--rh-copy);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
 }
 
-.rh-update-banner button:disabled {
+.rh-update-cancel:hover:not(:disabled) {
+  background: #f5f7fa;
+}
+
+.rh-update-install:disabled,
+.rh-update-cancel:disabled {
   cursor: default;
-  opacity: 0.6;
-}
-
-.rh-update-banner .rh-update-primary {
-  border-color: transparent;
-  background: #2f6fed;
-  color: #fff;
+  opacity: 0.62;
 }
 
 /* 首次激活是七页工作台之前的独立入口，不复用诊断台表单。 */
@@ -2695,6 +2810,21 @@
     padding: 18px 14px 32px;
   }
 
+  /* 一行放不下"图标 + 整句 + 两个按钮"。文案占满首行，按钮掉到下一行右对齐；
+     图标此时只是装饰，让位给字。 */
+  .rh-update-bar {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .rh-update-bar > svg {
+    display: none;
+  }
+
+  .rh-update-copy {
+    flex: 1 1 100%;
+  }
+
   .rh-home-welcome {
     align-items: flex-start;
     flex-direction: column;
@@ -2818,4 +2948,183 @@
   border-color: #39415460;
   background: #1e2432;
   color: #8b94a5;
+}
+
+/* ============ 可面试时段设置 ============ */
+
+.rh-schedule-panel {
+  margin-bottom: 18px;
+}
+
+.rh-schedule-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rh-schedule-state {
+  font-size: 12px;
+  color: var(--rh-muted);
+  min-height: 16px;
+}
+
+.rh-schedule-state.is-saved {
+  color: var(--rh-green);
+}
+
+.rh-schedule-state.is-error {
+  color: var(--rh-red);
+  max-width: 320px;
+  text-align: right;
+}
+
+.rh-schedule-body {
+  padding: 16px 18px 18px;
+}
+
+.rh-schedule-hint {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--rh-copy);
+}
+
+.rh-schedule-loading,
+.rh-schedule-load-error {
+  padding: 24px 18px;
+  font-size: 13px;
+  color: var(--rh-muted);
+}
+
+.rh-schedule-load-error strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--rh-red);
+}
+
+.rh-schedule-load-error p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.rh-schedule-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+/* 窗口窄下来时宁可让网格自己横向滚动，也不能把七列压扁——
+   压到一定程度星期表头就看不见了，用户不知道在点哪一天。 */
+.rh-schedule-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.rh-schedule-grid {
+  display: grid;
+  gap: 3px;
+  min-width: 460px;
+  /* 拖选时不要选中文本，否则整片格子会被高亮成蓝色 */
+  user-select: none;
+}
+
+.rh-schedule-corner,
+.rh-schedule-head,
+.rh-schedule-clock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--rh-muted);
+  min-height: 26px;
+}
+
+.rh-schedule-head {
+  font-weight: 600;
+  color: var(--rh-copy);
+}
+
+.rh-schedule-clock {
+  justify-content: flex-end;
+  padding-right: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rh-schedule-cell {
+  min-height: 26px;
+  border: 1px solid var(--rh-border);
+  border-radius: var(--rh-radius-sm);
+  background: var(--rh-canvas);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.rh-schedule-cell:hover {
+  border-color: var(--rh-border-strong);
+}
+
+.rh-schedule-cell.is-on {
+  border-color: var(--rh-primary);
+  background: var(--rh-primary-soft);
+}
+
+.rh-schedule-cell.is-preview {
+  border-color: var(--rh-primary);
+  box-shadow: inset 0 0 0 1px var(--rh-primary);
+}
+
+.rh-schedule-summary {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--rh-border);
+  border-radius: var(--rh-radius);
+  background: var(--rh-canvas);
+}
+
+.rh-schedule-summary strong {
+  font-size: 13px;
+  color: var(--rh-ink);
+}
+
+.rh-schedule-summary-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rh-schedule-summary-day {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.rh-schedule-summary-label {
+  flex: 0 0 32px;
+  font-size: 12px;
+  color: var(--rh-muted);
+}
+
+.rh-schedule-summary-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.rh-schedule-summary-empty {
+  font-size: 12px;
+  color: var(--rh-muted);
+}
+
+.rh-schedule-chip {
+  padding: 1px 6px;
+  border-radius: var(--rh-radius-sm);
+  background: var(--rh-primary-soft);
+  color: var(--rh-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }

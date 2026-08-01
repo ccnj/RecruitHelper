@@ -86,6 +86,33 @@ export async function sendProductConfirmation(
   await appPost<ProductAcceptedResponse>('/app/confirmation/send', { batchId, profileIds })
 }
 
+/** 一段可面试窗口，起止都是 'HH:MM' 整点，右开区间。 */
+export interface InterviewWindow {
+  start: string
+  end: string
+}
+
+/** 按星期循环的可面试时段周表。key 是中文星期名，脑侧保证七天都在。 */
+export type InterviewSchedule = Record<string, InterviewWindow[]>
+
+export interface InterviewScheduleResponse {
+  schedule: InterviewSchedule
+  /** 星期顺序由脑侧给出，两端不各自硬编码。 */
+  weekdays: string[]
+}
+
+export async function readInterviewSchedule(): Promise<InterviewScheduleResponse> {
+  return appGet<InterviewScheduleResponse>('/app/interview-schedule')
+}
+
+/**
+ * 整表保存。脑侧是唯一校验点——空表会被它拒掉并把原因带回来，这里不复制一份规则。
+ * 抛错即未落库，调用方必须据此提示，不能让界面停在用户刚拖出来的样子。
+ */
+export async function saveInterviewSchedule(schedule: InterviewSchedule): Promise<void> {
+  await appPost<{ saved: boolean }>('/app/interview-schedule', { schedule })
+}
+
 /** 客户端版本更新状态。只回答"有没有新版、备好了没有"。 */
 export interface ProductUpdateStatus {
   currentVersion?: string

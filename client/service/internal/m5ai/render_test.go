@@ -38,7 +38,8 @@ func TestHistoryRendererMatchesFrozenGolden(t *testing.T) {
 func TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden(t *testing.T) {
 	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
 	defaults := GenerateDefaultSlots(now)
-	if len(defaults) != 84 || defaults[0] != "2026-07-10 15:00:00" || defaults[len(defaults)-1] != "2026-07-23 17:00:00" {
+	// 120 = 冻结当天周五剩余 3 个整点 + 其后 13 天各 9 个（含周末，2026-08-01 裁决）。
+	if len(defaults) != 120 || defaults[0] != "2026-07-10 15:00:00" || defaults[len(defaults)-1] != "2026-07-23 17:00:00" {
 		t.Fatalf("默认时段漂移: count=%d first=%s last=%s", len(defaults), defaults[0], defaults[len(defaults)-1])
 	}
 	rendered, err := RenderReplyPrompt(

@@ -447,22 +447,57 @@ export interface JobClassCandidate {
   definition: string
 }
 
-export interface JobClassResolveView {
+export interface JobClassAssignmentView {
   jobId: string
   jobName: string
-  /** 平台针对这个职位给出的全部可选类别，本次决定的封闭候选集。 */
+  /** 平台针对这个职位给出的全部可选类别，该职位本次决定的封闭候选集。 */
   candidates: JobClassCandidate[]
   /** 平台自动预填的类别（若有）。平台只在自己有把握时才填。 */
   prefilledClass?: string
-  /** 定下来的类别。发布时必须原样带回。 */
-  jobClass: string
-  /** configuredExactMatch = 后台配置值精确命中；model = 大模型选定。 */
-  source: 'configuredExactMatch' | 'model'
-  /** 后台配置的职位类别原值，用来让运营看见"我填的那个有没有被用上"。 */
-  configuredClass?: string
+  /** 定下来的类别；为空表示没分到，原因看 problem。发布时必须原样带回。 */
+  jobClass?: string
+  /** 只有 model 一个来源：2026-07-31 起类别一律由大模型从平台候选里选。 */
+  source?: 'model'
+  /** 后台配置的职位类别原值。死字段，列出来只为让运营看见它没有参与发布。 */
+  deadConfiguredClass?: string
   confidence?: number
   reason?: string
-  /** 大模型每次尝试的结果分类，不含模型原文。 */
+  /** 没分到时的原因分类，或读候选阶段的失败说明。 */
+  problem?: string
+}
+
+export interface JobClassPlanView {
+  jobs: JobClassAssignmentView[]
+  /** 被多个职位共用的类别 → 那几个职位。差异化不是闸，撞车放行但要看得见。 */
+  collisions?: Record<string, string[]>
+  /** 大模型每次尝试的结果分类，不含模型原文。分块时带块号。 */
+  attempts?: string[]
+}
+
+export interface JobKeywordSectionView {
+  title: string
+  /** 该组最多能选几个。0 表示这个组件变体没给出上限，不是"上限为 0"。 */
+  limit?: number
+  words: string[]
+}
+
+export interface JobKeywordPlanView {
+  jobId: string
+  jobName: string
+  jobClass: string
+  /** 平台这一次在该类别下给出的分组词库，本次决定的封闭候选集。 */
+  sections: JobKeywordSectionView[]
+  totalQuota?: number
+  /** 手是否复用了上一趟留下的表单，纯诊断。 */
+  formReused: boolean
+  /** 定下来的 3-5 个关键词。发布时必须原样带回。 */
+  keywords: string[]
+  /** 落点：命中词库的走点选，其余走兜底组自定义。 */
+  matched: string[]
+  custom: string[]
+  reason?: string
+  /** 后台配置的关键词原值。死字段，只为让运营看见它没有参与发布。 */
+  deadConfiguredKeywords?: string[]
   attempts?: string[]
 }
 
@@ -813,21 +848,36 @@ export const api = {
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>
     post<JobPublishPrecheckView>('/admin/job-publish/precheck', { platform, accountRef }),
-  // 发布前先定类别：读平台候选，后台配置值精确命中就用它，命中不了由大模型
-  // 从候选里选。零对外副作用——只填三项、读完就离开发布页。
-  jobPublishClassCandidates: (platform: string, accountRef: string, jobId: string) =>
-    postWithDetail<JobClassResolveView>('/admin/job-publish/class-candidates', {
-      platform, accountRef, jobId,
+  // 第一趟：逐个职位读平台候选，再由大模型一次性为整批分配类别。零对外副作用。
+  //
+  // 这一次调用会串行跑完全部职位的填页（每个职位数十秒），十来个职位要跑十来
+  // 分钟，界面上只能给个总进度。occupied 是"已被占用、请避开"的类别，整批分配
+  // 时留空；单独重跑某一个职位时把其余职位已定的类别传进来，差异化才不会退化。
+  jobPublishClassPlan: (
+    platform: string, accountRef: string, jobIds: string[], occupied: string[] = [],
+  ) =>
+    postWithDetail<JobClassPlanView>('/admin/job-publish/class-plan', {
+      platform, accountRef, jobIds, occupied,
     }),
-  // 唯一会产生对外副作用的调用：一次只发一个职位。失败时同样带出现场快照。
-  // jobClass 必须是上一步定下的平台候选原文，缺了后端直接 400。
-  jobPublishPublish: (platform: string, accountRef: string, jobId: string, jobClass: string) =>
+  // 第二趟：在已定类别下读回分组词库，交大模型选 3-5 个。同样零对外副作用——
+  // 绝不点弹层的「确定」，读完就离开发布页。
+  jobPublishKeywordPlan: (platform: string, accountRef: string, jobId: string, jobClass: string) =>
+    postWithDetail<JobKeywordPlanView>('/admin/job-publish/keyword-plan', {
+      platform, accountRef, jobId, jobClass,
+    }),
+  // 第三趟，唯一会产生对外副作用的调用：一次只发一个职位。失败时同样带出现场
+  // 快照。jobClass 与 keywords 必须是前两趟定下的平台原文，缺了后端直接 400。
+  jobPublishPublish: (
+    platform: string, accountRef: string, jobId: string, jobClass: string, keywords: string[],
+  ) =>
     postWithDetail<JobPublishResult>('/admin/job-publish/publish', {
-      platform, accountRef, jobId, jobClass,
+      platform, accountRef, jobId, jobClass, keywords,
     }),
-  jobPublishPrepareDraft: (platform: string, accountRef: string, jobId: string, jobClass: string) =>
+  jobPublishPrepareDraft: (
+    platform: string, accountRef: string, jobId: string, jobClass: string, keywords: string[],
+  ) =>
     postWithDetail<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
-      platform, accountRef, jobId, jobClass,
+      platform, accountRef, jobId, jobClass, keywords,
     }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),
   syncCurrentJobConfig: () => post<{ contexts: M5AIContextView[] }>('/admin/job-config/sync-current', {}),

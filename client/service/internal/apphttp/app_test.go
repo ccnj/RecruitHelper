@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 )
 
@@ -25,6 +26,28 @@ type fakeProjections struct {
 	candidateQuery       store.AppCandidateListQuery
 	candidateQueryDetail store.AppCandidateDetailQuery
 	detailErr            error
+	schedule             m5ai.InterviewSchedule
+	scheduleErr          error
+	savedSchedule        m5ai.InterviewSchedule
+	saveScheduleErr      error
+}
+
+func (f *fakeProjections) InterviewSchedule() (m5ai.InterviewSchedule, error) {
+	if f.scheduleErr != nil {
+		return nil, f.scheduleErr
+	}
+	if f.schedule == nil {
+		return m5ai.DefaultInterviewSchedule(), nil
+	}
+	return f.schedule, nil
+}
+
+func (f *fakeProjections) SetInterviewSchedule(schedule m5ai.InterviewSchedule) error {
+	if f.saveScheduleErr != nil {
+		return f.saveScheduleErr
+	}
+	f.savedSchedule = schedule
+	return nil
 }
 
 func (f *fakeProjections) AppOverview(req store.AppOverviewRequest) (*store.AppOverviewProjection, error) {

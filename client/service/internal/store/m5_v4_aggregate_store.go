@@ -596,10 +596,15 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 		if action.MessageSeq <= aggregate.ProjectedThroughSeq {
 			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 		}
-		// 确认投影不得越过任何候选人输入、另一条我方出站或账本缺行；
-		// 游标与确认消息之间的每个 seq 都必须存在且是平台中性 system 行
-		// （0727当日计划3）。中性行本就是 no-op 事件，被越过与逐条投影
-		// 同终态。
+		// 确认投影不得越过任何候选人真实输入——跨过它等于该回的不回。
+		// 游标与确认消息之间的 system 行与我方出站行则一律放行：前者本就
+		// no-op（0727当日计划3），后者要么已由自己的确认动作推过游标、
+		// 根本走不到这里，要么是没有任何动作会认领的无主行——平台在我方
+		// 动作后自动留下的卡片跃迁（如"[微信交换成功]"）、真人在平台上
+		// 手打的消息。无主行逐条投影永远不会发生，把游标卡在它前面只会让
+		// 该档案之后的每一条出站都撞墙（2026-08-01 客户机验证读死循环
+		// 事故的根因）。判据与建轮侧 unclaimed 检查一致，两条路共用一把
+		// 尺子；被越过的出站行不推出站时钟，与建轮侧一次性跳过游标同义。
 		if action.MessageSeq != aggregate.ProjectedThroughSeq+1 {
 			var profile CandidateProfile
 			if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
@@ -608,24 +613,23 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 			if profile.ConversationRef == nil {
 				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 			}
-			var neutral int64
+			var unclaimed int64
 			if err := tx.Model(&Message{}).
 				Where(
 					"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL "+
-						"AND seq > ? AND seq < ? AND (direction = ? OR (direction = ? AND kind = ?))",
+						"AND seq > ? AND seq < ? AND direction = ? AND kind <> ?",
 					profile.Platform,
 					profile.AccountRef,
 					*profile.ConversationRef,
 					aggregate.ProjectedThroughSeq,
 					action.MessageSeq,
-					"system",
 					"in",
 					"system",
 				).
-				Count(&neutral).Error; err != nil {
+				Count(&unclaimed).Error; err != nil {
 				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
 			}
-			if neutral != action.MessageSeq-aggregate.ProjectedThroughSeq-1 {
+			if unclaimed != 0 {
 				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 			}
 		}

@@ -8,16 +8,18 @@ import (
 	"strings"
 )
 
-// 发布参数文档里"不参与发布"的字段。职位名称是 2026-07-29 甲方裁决的死字段：
-// 改取 job.name（它才是系统的职位身份键）。预检必须把它显式列出来，否则运营
+// 发布参数文档里"不参与发布"的三个死字段。预检必须把它们显式列出来，否则运营
 // 会以为自己填的值生效了。
 //
-// 职位类别曾经也在这里，2026-07-30 起不再是死字段：平台只在自己有把握时才自动
-// 填，不填时会给一组候选让人选（详见 docs 的类别选择裁决）。现在它是候选精确
-// 匹配的首选来源，匹配不上才交给大模型。
+//	职位名称    2026-07-29 裁决改取 job.name——它才是系统的职位身份键
+//	职位类别    2026-07-31 裁决一律由大模型从平台候选里选。它 07-30 曾短暂作为
+//	            "配置值与平台候选精确匹配"的首选来源，三例真机的配置值全部不在
+//	            候选里，三战三败后移回死字段
+//	职位关键词  2026-07-31 裁决一律由大模型看着平台当前分组词库选 3-5 个
 const (
-	DeadFieldJobName = "职位名称"
-	FieldJobClass    = "职位类别"
+	DeadFieldJobName  = "职位名称"
+	DeadFieldJobClass = "职位类别"
+	DeadFieldKeywords = "职位关键词"
 )
 
 // 页面下拉的完整取值域，2026-07-29 真机逐项读取所得（见
@@ -55,10 +57,6 @@ func buildSalaryTiers() map[string]int64 {
 	return tiers
 }
 
-// 关键词弹层的总配额。分组结构、组内词库与是否自动预选都随职位类别变化，
-// 唯独总数 11 在两个样本上稳定，因此它是关键词唯一能离线校验的硬规则。
-const maxPublishKeywords = 11
-
 // 工作地址的约定值：不是地址文本，含义为沿用发布页预填的公司地址。
 const defaultWorkplaceLiteral = "默认"
 
@@ -72,25 +70,35 @@ type PublishSpec struct {
 	SalaryMin      string
 	SalaryMax      string
 	SalaryMonths   string
-	Keywords       []string
 	Workplace      string
 	Headcount      int64
 
 	ShowToSeeker  bool
 	SyncToMailbox bool
 
-	// 死字段的原值，仅用于告诉运营"这一行没有生效"。
-	DeadJobName string
-
-	// 后台配置的职位类别。它不再是死字段：作为平台候选精确匹配的首选来源。
-	ConfiguredJobClass string
+	// 三个死字段的原值，仅用于告诉运营"这几行没有生效"。它们绝不进入任何
+	// 填充路径——留在 spec 里只为生成提示。
+	DeadJobName  string
+	DeadJobClass string
+	DeadKeywords []string
 }
 
-// DraftArgs 把校验通过的 spec 组装成手侧试填参数。jobName 只接受调用方传入的
-// 后台职位名——发布参数里的职位名称是死字段，绝不从 spec 取。jobClass 同样由
-// 调用方传入：它必须是平台候选清单里的原文（精确匹配或大模型选定），不能直接用
-// spec.ConfiguredJobClass，那个值未必在平台候选里。
-func (s PublishSpec) DraftArgs(jobName, jobClass string) map[string]any {
+// DraftArgs 把校验通过的 spec 组装成手侧试填参数。
+//
+// 三个死字段全部由调用方传入，绝不从 spec 取：
+//   - jobName 取后台 job.name，它是系统的职位身份键；
+//   - jobClass 必须是平台候选清单里的原文（大模型选定后逐字核对过）；
+//   - keywords 必须是大模型看着平台当前词库选定、且经确定性复核的那 3-5 个。
+//
+// 后台发布参数里的同名字段都不在候选/词库里，直接拿来填等于把职位推给错误的
+// 人群，而页面看上去一切正常。
+func (s PublishSpec) DraftArgs(jobName, jobClass string, keywords []string) map[string]any {
+	trimmed := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		if word := strings.TrimSpace(keyword); word != "" {
+			trimmed = append(trimmed, word)
+		}
+	}
 	return map[string]any{
 		"jobName":        strings.TrimSpace(jobName),
 		"jobClass":       strings.TrimSpace(jobClass),
@@ -101,7 +109,7 @@ func (s PublishSpec) DraftArgs(jobName, jobClass string) map[string]any {
 		"salaryMin":      s.SalaryMin,
 		"salaryMax":      s.SalaryMax,
 		"salaryMonths":   s.SalaryMonths,
-		"keywords":       s.Keywords,
+		"keywords":       trimmed,
 		"headcount":      s.Headcount,
 		"showToSeeker":   s.ShowToSeeker,
 		"syncToMailbox":  s.SyncToMailbox,
@@ -151,7 +159,8 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 
 	spec := PublishSpec{
 		DeadJobName:  deref(doc.JobName),
-		ConfiguredJobClass: deref(doc.JobClass),
+		DeadJobClass: deref(doc.JobClass),
+		DeadKeywords: doc.Keywords,
 	}
 	var issues []PublishIssue
 	add := func(field, format string, args ...any) {
@@ -165,7 +174,9 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 
 	spec.Description = strings.TrimSpace(deref(doc.Description))
 	if spec.Description == "" {
-		add("职位描述", "缺少职位描述；平台的职位类别正是由它自动判定，缺了会卡在必填")
+		// 描述缺了不只是少填一项：类别选择器与关键词弹层都要等它写完失焦才打得开，
+		// 缺了这两趟读取全都进行不下去。
+		add("职位描述", "缺少职位描述；职位类别与关键词都要等它填完才读得到，缺了整条发布链走不动")
 	} else if len([]rune(spec.Description)) > 10000 {
 		add("职位描述", "职位描述超过平台 10000 字上限")
 	}
@@ -176,7 +187,9 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 	}
 
 	spec.SalaryMin, spec.SalaryMax = checkSalary(add, doc.SalaryMin, doc.SalaryMax)
-	spec.Keywords = checkKeywords(add, doc.Keywords)
+	// 关键词不再校验：它 2026-07-31 起是死字段，由大模型看着平台当前词库选。
+	// 因此原来"缺少职位关键词/重复/超过 11 个"这三类 blocked 从此不再产生，
+	// 那些职位会变成可发——这是裁决的直接后果，不是漏检。
 	spec.Headcount = checkHeadcount(add, doc.Headcount)
 
 	spec.ShowToSeeker = doc.ShowToSeeker != nil && *doc.ShowToSeeker
@@ -200,10 +213,16 @@ func (s PublishSpec) DeadFieldNotices(jobName string) []PublishIssue {
 			})
 		}
 	}
-	if class := strings.TrimSpace(s.ConfiguredJobClass); class != "" {
+	if class := strings.TrimSpace(s.DeadJobClass); class != "" {
 		out = append(out, PublishIssue{
-			Field:   FieldJobClass,
-			Message: "只在平台候选里精确命中时生效；命中不了会由大模型从平台候选中选定",
+			Field:   DeadFieldJobClass,
+			Message: "不参与发布，职位类别由大模型从平台当次给出的候选中选定",
+		})
+	}
+	if len(s.DeadKeywords) > 0 {
+		out = append(out, PublishIssue{
+			Field:   DeadFieldKeywords,
+			Message: "不参与发布，关键词由大模型从平台当次给出的分组词库中选定 3-5 个",
 		})
 	}
 	return out
@@ -289,32 +308,6 @@ func formatSalaryTier(value int64) string {
 	return strconv.FormatInt(value/1000, 10) + "千"
 }
 
-func checkKeywords(add func(string, string, ...any), keywords []string) []string {
-	if len(keywords) == 0 {
-		add("职位关键词", "缺少职位关键词")
-		return nil
-	}
-	seen := make(map[string]struct{}, len(keywords))
-	out := make([]string, 0, len(keywords))
-	for _, keyword := range keywords {
-		trimmed := strings.TrimSpace(keyword)
-		if trimmed == "" {
-			add("职位关键词", "存在空的关键词")
-			continue
-		}
-		if _, duplicated := seen[trimmed]; duplicated {
-			add("职位关键词", "关键词“%s”重复", trimmed)
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		out = append(out, trimmed)
-	}
-	if len(out) > maxPublishKeywords {
-		add("职位关键词", "关键词 %d 个，超过平台总配额 %d 个", len(out), maxPublishKeywords)
-	}
-	return out
-}
-
 func checkHeadcount(add func(string, string, ...any), raw *json.Number) int64 {
 	if raw == nil {
 		add("招聘人数", "缺少招聘人数")
@@ -347,30 +340,6 @@ func normalizeJobName(name string) string {
 	)
 	folded := replacer.Replace(name)
 	return strings.Join(strings.Fields(folded), "")
-}
-
-// MatchPlatformJobClass 在平台给出的候选类别里找后台配置的职位类别。
-//
-// 归一化只放宽匹配、不放宽选择:命中后返回的是**平台原文**,因为手侧要按逐字
-// 相等去选中选择器里的那一行。归一化后同时命中多个候选时返回不命中——宁可
-// 交给大模型或人,也不在两个都像的选项里替甲方猜一个。
-func MatchPlatformJobClass(configured string, candidates []string) (string, bool) {
-	target := normalizeJobName(configured)
-	if target == "" {
-		return "", false
-	}
-	matched := ""
-	hits := 0
-	for _, candidate := range candidates {
-		if normalizeJobName(candidate) == target {
-			matched = candidate
-			hits++
-		}
-	}
-	if hits != 1 {
-		return "", false
-	}
-	return matched, true
 }
 
 // ContainsPlatformJobClass 复核某个类别名是否逐字出现在候选清单里。发布前的最后

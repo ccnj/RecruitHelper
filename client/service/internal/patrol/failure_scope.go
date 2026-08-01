@@ -59,14 +59,21 @@ func classifyConversationFailure(err error) conversationFailureScope {
 		}
 		return failureScopeQuarantine
 	}
-	// 脑侧的三个已知瞬时例外：它们不是稳定账本的纯函数——版本冲突来自与
+	// 脑侧的已知瞬时例外：它们不是稳定账本的纯函数——版本冲突来自与
 	// 事件摄入的良性写竞争（账本已变，下轮重读即收敛）；空收编快照与已
 	// 收编空快照都依赖活页面观察（真机 2026-07-28：IM 页刚导航后的同步
 	// 窗口内平台历史接口可能空成功，下轮重读通常恢复出历史）。跳过即
 	// 保持脏、本轮不消化不派发，无上界（2026-07-28 甲方裁决不加界）。
+	//
+	// AI 预留冲突同属此列（2026-08-01 事故后并入）：它是"同一身份下已有一条
+	// 事实不同的预留"这种状态冲突，不是账本状态的纯函数，也没有任何外部副
+	// 作用发生——AI 尚未被调用。把它判成确定性错误会因为一次正常的职位配置
+	// 换代冻结整批候选人（当日 79 人）。预留身份判定已同步收窄，这里是兜底：
+	// 即使将来又有别的字段跟着业务变，最坏也只是推迟一轮并留下审计。
 	if errors.Is(err, store.ErrConversationVersionConflict) ||
 		errors.Is(err, syncledger.ErrAdoptionSnapshotEmpty) ||
-		errors.Is(err, syncledger.ErrTrackedSnapshotEmpty) {
+		errors.Is(err, syncledger.ErrTrackedSnapshotEmpty) ||
+		errors.Is(err, store.ErrAIInvocationConflict) {
 		return failureScopeSkipRound
 	}
 	return failureScopeQuarantine
@@ -101,6 +108,8 @@ func conversationFailureClass(err error) string {
 		return "adoptionSnapshotEmpty"
 	case errors.Is(err, syncledger.ErrTrackedSnapshotEmpty):
 		return "trackedSnapshotEmpty"
+	case errors.Is(err, store.ErrAIInvocationConflict):
+		return "aiInvocationConflict"
 	}
 	return "unclassified"
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	_ "time/tzdata"
@@ -225,16 +226,134 @@ var shanghai = func() *time.Location {
 	return location
 }()
 
+// InterviewWindow 是周表里的一段可面试窗口，起止都是 'HH:MM' 整点，右开区间。
+// 09:00-18:00 表示 09、10 … 17 九个整点，不含 18:00。
+type InterviewWindow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// InterviewSchedule 是按星期循环的可面试时段周表，key 取 InterviewWeekdays 里的
+// 中文星期名。周表本身不含日期——具体候选时段由 GenerateSlots 在冻结时刻展开。
+type InterviewSchedule map[string][]InterviewWindow
+
+// InterviewWeekdays 是周表的合法 key，顺序即展示顺序。
+var InterviewWeekdays = [...]string{"周一", "周二", "周三", "周四", "周五", "周六", "周日"}
+
+// interviewWeekdayByGoWeekday 把 time.Weekday 映射到周表 key。time.Sunday 是 0，
+// 而周表以周一起头，所以不能直接拿 int 当下标。
+var interviewWeekdayByGoWeekday = map[time.Weekday]string{
+	time.Monday: "周一", time.Tuesday: "周二", time.Wednesday: "周三",
+	time.Thursday: "周四", time.Friday: "周五",
+	time.Saturday: "周六", time.Sunday: "周日",
+}
+
+// DefaultInterviewSchedule 是没有任何本机配置时的内置周表：七天全部
+// [09:00,18:00)（2026-08-01 甲方裁决，此前为周一至周五、周末空）。
+//
+// 招聘沟通里周末本就是可约面的，剔除周末等于默认少给两天可选。改动只影响
+// 未配置的客户端：它们升级后会开始把周末排进推荐时段。已配置的客户端读自己
+// 的周表，不受影响；已冻结的 turn 与已约出去的面试同样不受影响。
+func DefaultInterviewSchedule() InterviewSchedule {
+	schedule := make(InterviewSchedule, len(InterviewWeekdays))
+	for _, day := range InterviewWeekdays {
+		schedule[day] = []InterviewWindow{{Start: "09:00", End: "18:00"}}
+	}
+	return schedule
+}
+
+// ValidateInterviewSchedule 校验周表可用于展开。空表被拒——甲方裁决要求至少保留
+// 一个时段，且该校验必须由脑侧把关，不能只靠 UI。
+func ValidateInterviewSchedule(schedule InterviewSchedule) error {
+	hours := 0
+	for day, windows := range schedule {
+		if _, ok := interviewWeekdayIndex(day); !ok {
+			return fmt.Errorf("非法星期: %q", day)
+		}
+		for _, window := range windows {
+			start, err := parseInterviewClock(window.Start)
+			if err != nil {
+				return err
+			}
+			end, err := parseInterviewClock(window.End)
+			if err != nil {
+				return err
+			}
+			if start >= end {
+				return fmt.Errorf("%s 起止非法: %s >= %s", day, window.Start, window.End)
+			}
+			hours += end - start
+		}
+	}
+	if hours == 0 {
+		return errors.New("可面试时段不得为空")
+	}
+	return nil
+}
+
+func interviewWeekdayIndex(day string) (int, bool) {
+	for index, known := range InterviewWeekdays {
+		if known == day {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+// parseInterviewClock 解析 'HH:MM' 并返回小时数。面试时段一律整点对齐——
+// 下游 MatchFrozenRecommendedMeetingTime 与槽位解析都假定 Minute()==0。
+func parseInterviewClock(value string) (int, error) {
+	if len(value) != 5 || value[2] != ':' {
+		return 0, fmt.Errorf("时间格式必须是 HH:MM: %q", value)
+	}
+	hour, err := strconv.Atoi(value[0:2])
+	if err != nil {
+		return 0, fmt.Errorf("时间格式必须是 HH:MM: %q", value)
+	}
+	minute, err := strconv.Atoi(value[3:5])
+	if err != nil {
+		return 0, fmt.Errorf("时间格式必须是 HH:MM: %q", value)
+	}
+	if hour < 0 || hour > 24 || minute != 0 {
+		return 0, fmt.Errorf("面试时间必须是整点小时: %q", value)
+	}
+	return hour, nil
+}
+
+// GenerateDefaultSlots 按内置默认周表展开，等价于 GenerateSlots(now,
+// DefaultInterviewSchedule())。保留它是为了让既有测试继续钉住"未配置时行为不变"。
 func GenerateDefaultSlots(frozenNow time.Time) []string {
+	return GenerateSlots(frozenNow, DefaultInterviewSchedule())
+}
+
+// GenerateSlots 把周表展开成冻结时刻起 14 个日历日内的候选时段。当天早于冻结时刻
+// 的整点被丢弃；周表非法或全空时返回空列表，下游据此不承诺任何面试时间。
+func GenerateSlots(frozenNow time.Time, schedule InterviewSchedule) []string {
 	now := frozenNow.In(shanghai)
 	startDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, shanghai)
 	var slots []string
 	for offset := 0; offset <= 13; offset++ {
 		day := startDay.AddDate(0, 0, offset)
-		if day.Weekday() == time.Saturday || day.Weekday() == time.Sunday {
-			continue
+		windows := schedule[interviewWeekdayByGoWeekday[day.Weekday()]]
+		hours := make(map[int]struct{}, len(windows)*4)
+		for _, window := range windows {
+			start, err := parseInterviewClock(window.Start)
+			if err != nil {
+				continue
+			}
+			end, err := parseInterviewClock(window.End)
+			if err != nil || start >= end {
+				continue
+			}
+			for hour := start; hour < end && hour < 24; hour++ {
+				hours[hour] = struct{}{}
+			}
 		}
-		for hour := 9; hour < 18; hour++ {
+		// 同一天的窗口允许重叠，展开后按整点去重并升序，保证时段列表本身有序去重。
+		for hour := 0; hour < 24; hour++ {
+			if _, selected := hours[hour]; !selected {
+				continue
+			}
 			slot := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, shanghai)
 			if slot.Before(now) {
 				continue

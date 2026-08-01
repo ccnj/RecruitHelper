@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -147,6 +149,36 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// checkPublishDecisions 复核前两趟定下的两项决定齐备且形状合法，返回空串表示通过。
+//
+// 这里只做形状检查（非空、数量、无重复）：它们是不是平台原文，已由前两趟各自的
+// 逐字核对保证——脑在这一层再核一次也只是把同一份数据拿来比自己，没有新信息。
+func checkPublishDecisions(jobClass string, keywords []string) string {
+	if strings.TrimSpace(jobClass) == "" {
+		return "缺少职位类别；请先调用 /admin/job-publish/class-candidates 定下类别"
+	}
+	seen := make(map[string]struct{}, len(keywords))
+	count := 0
+	for _, keyword := range keywords {
+		word := strings.TrimSpace(keyword)
+		if word == "" {
+			return "职位关键词里有空词"
+		}
+		if _, duplicated := seen[word]; duplicated {
+			return "职位关键词重复：" + word
+		}
+		seen[word] = struct{}{}
+		count++
+	}
+	if count < m5ai.JobKeywordsMin || count > m5ai.JobKeywordsMax {
+		return fmt.Sprintf(
+			"职位关键词必须是 %d-%d 个；请先调用 /admin/job-publish/keyword-plan 选定",
+			m5ai.JobKeywordsMin, m5ai.JobKeywordsMax,
+		)
+	}
+	return ""
+}
+
 type jobPublishDraftView struct {
 	JobID  string                       `json:"jobId"`
 	Report protocol.JobPrepareDraftData `json:"report"`
@@ -202,10 +234,11 @@ func (a *API) resolvePublishTarget(
 // 因为关键词弹层要等类别定了才打得开。
 func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Platform   string `json:"platform"`
-		AccountRef string `json:"accountRef"`
-		JobID      string `json:"jobId"`
-		JobClass   string `json:"jobClass"`
+		Platform   string   `json:"platform"`
+		AccountRef string   `json:"accountRef"`
+		JobID      string   `json:"jobId"`
+		JobClass   string   `json:"jobClass"`
+		Keywords   []string `json:"keywords"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
@@ -218,10 +251,8 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
 		return
 	}
-	if req.JobClass == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "缺少职位类别；请先调用 /admin/job-publish/class-candidates 定下类别",
-		})
+	if message := checkPublishDecisions(req.JobClass, req.Keywords); message != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": message})
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
@@ -252,7 +283,7 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, failure.status, map[string]string{"error": failure.message})
 		return
 	}
-	args, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass))
+	args, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass, req.Keywords))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "试填命令构造失败"})
 		return
@@ -316,10 +347,11 @@ type jobPublishResultView struct {
 // 原意图，不会再发一次。
 func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Platform   string `json:"platform"`
-		AccountRef string `json:"accountRef"`
-		JobID      string `json:"jobId"`
-		JobClass   string `json:"jobClass"`
+		Platform   string   `json:"platform"`
+		AccountRef string   `json:"accountRef"`
+		JobID      string   `json:"jobId"`
+		JobClass   string   `json:"jobClass"`
+		Keywords   []string `json:"keywords"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
@@ -332,13 +364,11 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
 		return
 	}
-	// 类别必须由调用方显式带来:它是 class-candidates 那一趟定下的平台原文,
-	// 运营在确认时看得见、也能改。脑不替它兜一个默认值——猜错类别会把职位
-	// 推给错误的人群,而页面看上去一切正常。
-	if req.JobClass == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "缺少职位类别；请先调用 /admin/job-publish/class-candidates 定下类别再发布",
-		})
+	// 类别与关键词都必须由调用方显式带来:它们是前两趟定下的平台原文,运营在
+	// 二次确认清单上看得见、也能改。脑不替它们兜默认值——猜错会把职位推给
+	// 错误的人群,而页面看上去一切正常。
+	if message := checkPublishDecisions(req.JobClass, req.Keywords); message != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": message})
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
@@ -367,7 +397,7 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var args protocol.JobPrepareDraftArgs
-	argsRaw, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass))
+	argsRaw, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass, req.Keywords))
 	if err != nil || json.Unmarshal(argsRaw, &args) != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "发布参数组装失败"})
 		return

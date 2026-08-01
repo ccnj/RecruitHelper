@@ -29,12 +29,6 @@ const (
 
 	TraceStateRequestCaptured = "requestCaptured"
 	TraceStateCompleted       = "completed"
-
-	PurposeIntent          = "intent"
-	PurposeReply           = "reply"
-	PurposeSilenceFollowup = "silenceFollowup"
-	PurposeScoring         = "scoring"
-	PurposeGreeting        = "greeting"
 )
 
 var (
@@ -63,6 +57,13 @@ const (
 // BeginRecord contains only provider request material and non-secret metadata.
 // Endpoint, base URL, headers, API keys and authorization values deliberately
 // have no representation in this API.
+//
+// Purpose is free text owned by the caller: this package records whatever the
+// caller calls its own AI use, and only requires it to be non-empty. There used
+// to be an enumeration whitelist here, and it silently rejected every trace of
+// the three purposes added after it was written (serviceReply, jobClass,
+// jobKeywords) — a second copy of a list that lives in m5ai has no way to stay
+// in sync. Do not reintroduce one (2026-08-01 甲方裁决).
 type BeginRecord struct {
 	InvocationID        string
 	Purpose             string
@@ -343,8 +344,6 @@ func validateBegin(record BeginRecord) error {
 		return errors.New("AI trace invocationId 为空")
 	case strings.TrimSpace(record.Purpose) == "":
 		return errors.New("AI trace purpose 为空")
-	case !validPurpose(record.Purpose):
-		return errors.New("AI trace purpose 非法")
 	case strings.TrimSpace(record.Provider) == "":
 		return errors.New("AI trace provider 为空")
 	case strings.TrimSpace(record.Model) == "":
@@ -359,15 +358,6 @@ func validateBegin(record BeginRecord) error {
 		return errors.New("AI trace startedAt 为空")
 	default:
 		return nil
-	}
-}
-
-func validPurpose(purpose string) bool {
-	switch purpose {
-	case PurposeIntent, PurposeReply, PurposeSilenceFollowup, PurposeScoring, PurposeGreeting:
-		return true
-	default:
-		return false
 	}
 }
 

@@ -2616,7 +2616,11 @@ func validateCommunicationV4EventActionDependencyTx(
 	validColdTextChild := action.V4Kind == communication.V4ActionColdWechatText &&
 		action.EffectKind == CommunicationV4EventEffectReplyText &&
 		action.SourceInputKind == CommunicationV4InputSchedulePlan
-	if (!validInviteChild && !validColdTextChild) ||
+	// 回执同样可以配成多个气泡,第二个起以前一气泡为父,走的也是这条依赖轨。
+	validReceiptChild := (action.V4Kind == communication.V4ActionWechatReceipt ||
+		action.V4Kind == communication.V4ActionInterviewAcceptedReceipt) &&
+		action.EffectKind == CommunicationV4EventEffectReplyText
+	if (!validInviteChild && !validColdTextChild && !validReceiptChild) ||
 		action.DependsOnActionID == nil ||
 		strings.TrimSpace(*action.DependsOnActionID) == "" ||
 		childIntent == nil {
@@ -2636,21 +2640,44 @@ func validateCommunicationV4EventActionDependencyTx(
 		}
 		expectedParent = &candidate
 	} else {
+		// 与 communicationV4EventActionSkeletons 同一条规则:第 n 个回执气泡挂
+		// 在第 n-1 个之后,换微信卡挂在最后一个气泡之后。夹在其间的运营通知对
+		// 候选人不可见、不进依赖链,所以父只能在回执序列里取,不能取 Actions
+		// 数组的紧邻前一项。
+		receiptOrdinals := make([]int, 0, len(sourceInfo.Actions))
 		for index := range sourceInfo.Actions {
-			candidate := sourceInfo.Actions[index]
-			if candidate.Kind != communication.V4ActionInterviewAcceptedReceipt {
-				continue
+			switch sourceInfo.Actions[index].Kind {
+			case communication.V4ActionWechatReceipt,
+				communication.V4ActionInterviewAcceptedReceipt:
+				receiptOrdinals = append(receiptOrdinals, index)
 			}
-			if expectedParent != nil {
-				return ErrCommunicationActionConflict
-			}
-			copy := candidate
-			expectedParent = &copy
 		}
-		if expectedParent == nil ||
-			expectedParent.CardMessageSeq != action.CardMessageSeq {
+		if len(receiptOrdinals) == 0 {
 			return ErrCommunicationActionConflict
 		}
+		parentOrdinal := receiptOrdinals[len(receiptOrdinals)-1]
+		if validReceiptChild {
+			position := -1
+			for index := range receiptOrdinals {
+				if receiptOrdinals[index] == action.SourceOrdinal {
+					position = index
+					break
+				}
+			}
+			// 链首回执没有父,不该走到依赖轨上来。
+			if position < 1 {
+				return ErrCommunicationActionConflict
+			}
+			parentOrdinal = receiptOrdinals[position-1]
+		}
+		candidate := sourceInfo.Actions[parentOrdinal]
+		if validReceiptChild && candidate.Kind != action.V4Kind {
+			return ErrCommunicationActionConflict
+		}
+		if candidate.CardMessageSeq != action.CardMessageSeq {
+			return ErrCommunicationActionConflict
+		}
+		expectedParent = &candidate
 	}
 	parent, err := communicationV4PositiveActionParentTx(
 		tx,
