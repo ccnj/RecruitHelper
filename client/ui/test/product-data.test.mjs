@@ -80,6 +80,7 @@ const snapshot = {
         todayConfirmation: exact(12),
         todayGreeted: exact(4),
         todayInvited: unknown('当前口径不可用'),
+        todayWechat: exact(5),
         totalGreeted: exact(83),
         totalInterviewed: exact(7),
         totalWechat: exact(11),
@@ -229,7 +230,15 @@ check(
   '待结束时禁用其余运行控制',
 )
 check(product.overview.todayMetrics[0].value === 30, '精确统计值进入首页')
-check(product.overview.todayMetrics[3].value === null, '非精确统计保持不可用，不用列表长度猜值')
+// 按标签取而不是按下标：四格的内容与顺序都被改过几轮，钉死下标只会在下次
+// 调整时静默失效——它原先钉的正是后来换成「已约面」的那一格。
+const unknownWechat = structuredClone(snapshot)
+unknownWechat.overview.overview.statistics.todayWechat = unknown('当前口径不可用')
+check(
+  adaptProductSnapshot(unknownWechat, now).overview.todayMetrics
+    .find((item) => item.label === '换微信数').value === null,
+  '非精确统计保持不可用，不用列表长度猜值',
+)
 check(product.overview.funnel.stages.find((stage) => stage.key === 'confirm').state === 'active', '漏斗正确定位等待确认阶段')
 // 生成失败与发送失败分属两格。合成一个字段时两格都读它，1 次生成失败 + 2 次
 // 发送失败会在两格各显示"失败 3"，看起来像 6 处失败。
@@ -295,10 +304,26 @@ check(
     product.overview.ledger.every((item) => !item.label.includes('已面试')),
   '累计账面按已约面表述',
 )
+// 这一格 2026-07-31 从「已邀面」(发出邀面卡的人数)改成「已约面」(对方接受的
+// 人数)，标签与数据源一起换。只换标签会和侧边栏「已约面」页、「累计已约面」
+// 两处的接受口径对不上——发出去不等于人家答应。
 check(
-  product.overview.todayMetrics.find((item) => item.label === '已邀面') !== undefined &&
-    product.overview.todayMetrics.every((item) => item.label !== '已约面'),
-  '今日邀面卡人数按已邀面表述，不与已约面混名',
+  product.overview.todayMetrics.find((item) => item.label === '已约面')?.value === 1 &&
+    product.overview.todayMetrics.every((item) => item.label !== '已邀面'),
+  '今日数据按接受口径报已约面，不报发卡数',
+)
+// 首页今日数据只有四格。候选确认人数与打招呼是同一批人的前后脚，两格数字
+// 常年一样，白占一格；换掉它的换微信数必须取今日口径，取累计就会和下面
+// 「总账面·累计已换微信」显示同一个数，重复的毛病原样搬家。
+check(
+  product.overview.todayMetrics.find((item) => item.label === '换微信数').value === 5 &&
+    product.overview.todayMetrics.every((item) => item.label !== '候选确认人数'),
+  '今日数据用今日换微信数替下与打招呼重复的候选确认人数',
+)
+check(
+  product.overview.todayMetrics.find((item) => item.label === 'AI 处理人数') !== undefined &&
+    product.overview.todayMetrics.every((item) => item.label !== 'AI 评级人数'),
+  'AI 那格按处理人数表述',
 )
 check(product.candidates.wechat[0].wechatAccount === 'candidate_wechat', '已收编微信资产只留在产品内存模型')
 // 收编时刻资产行一直有，此前没投影出去，产品端只能常年显示"时间未知"。
@@ -322,11 +347,49 @@ check(
   '总数小于本页条数时退回本页条数，不报出比看得见的人还少的数',
 )
 check(product.overview.todayInterviews[0].interviewAt.includes('14:00'), '今日面试时间按本地时区展示')
-// 这一行原先恒为不可用("没有面试完成写入口")，产品端永远显示"—"，用户分不清
-// "今天没有"和"读不出来"。现在报今天已过面试时间的人数。
+// 「已过面试时间」只说明约定时间过了，不代表面试真发生过——系统没有面试完成
+// 写入口。对客户是干扰，2026-07-31 换成今日新换微信；后端统计仍在，诊断台可查。
 check(
-  product.overview.todayActivity.elapsedInterviews === 2,
-  '今日已过面试时间取脑侧精确值，不再恒为不可用',
+  product.overview.todayActivity.newWechat === 5 &&
+    product.overview.todayActivity.elapsedInterviews === undefined,
+  '沟通节奏第二项换成今日新换微信',
+)
+
+// 首页运行中只有两种说法：漏斗在跑叫招呼中，回复已有候选人叫沟通中。这两条
+// 一旦分不清，用户会以为系统还在打招呼、其实早就只在回消息了。
+const greetingSnapshot = structuredClone(snapshot)
+greetingSnapshot.overview.runtime.workflowStatus = 'running'
+greetingSnapshot.overview.overview.funnel.stage = 'sendingGreetings'
+const greetingHome = adaptProductSnapshot(greetingSnapshot, now).overview.homeStatus
+check(
+  greetingHome.label === '招呼中' && greetingHome.tone === 'running',
+  '漏斗在跑时首页说招呼中',
+)
+const talkingSnapshot = structuredClone(snapshot)
+talkingSnapshot.overview.runtime.workflowStatus = 'running'
+talkingSnapshot.overview.overview.funnel.stage = 'completed'
+check(
+  adaptProductSnapshot(talkingSnapshot, now).overview.homeStatus.label === '沟通中',
+  '漏斗跑完后首页说沟通中',
+)
+const replyOnlyHome = structuredClone(snapshot)
+replyOnlyHome.overview.runtime.workflowStatus = 'running'
+replyOnlyHome.overview.runtime.workflowMode = 'replyOnly'
+check(
+  adaptProductSnapshot(replyOnlyHome, now).overview.homeStatus.label === '沟通中',
+  '只回消息模式首页说沟通中',
+)
+// 等你确认与等你继续都是"要你动手"，必须和运行中区分开，否则用户会一直等。
+check(
+  product.overview.homeStatus.label === '等你确认' &&
+    product.overview.homeStatus.hint.includes('确认后才会发出去'),
+  '等待确认时首页直说等你确认',
+)
+const pausedHome = structuredClone(snapshot)
+pausedHome.overview.runtime.workflowStatus = 'paused'
+check(
+  adaptProductSnapshot(pausedHome, now).overview.homeStatus.label === '等你继续',
+  '暂停与跨日都收敛成等你继续',
 )
 check(product.connections.find((item) => item.label === 'AI 模型')?.value === 'deepseek-v4-pro', '普通配置页展示安全模型配置摘要')
 check(product.connections.find((item) => item.label === 'Chrome 插件')?.value === '已连接', '普通配置页展示安全插件连接摘要')

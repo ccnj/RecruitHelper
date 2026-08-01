@@ -77,7 +77,11 @@ h1, h2, h3, p { margin-top: 0; }
   overscroll-behavior: none;
 }
 
-.dc-shell {
+/* 调色板与字号档位独立成块：入口锁屏是 .dc-shell 的兄弟节点，取不到它内部
+   的变量。挂到 :root[data-console] 上会更"对"，但那个属性由 effect 在首帧
+   之后才写，进台第一帧会闪一下无样式——宁可让两个消费者共享同一块。 */
+.dc-shell,
+.dc-lock {
   --void: #0a0d10;
   --bay: #10151a;
   --bay-hi: #161d23;
@@ -107,7 +111,9 @@ h1, h2, h3, p { margin-top: 0; }
   --fs-mono: 12px;  /* 显式标 .mono 的机器标识：msgId、哈希、ref。与 --fs-sm
                        同值但分开留口：这些串最难认也最容易抄错，将来要单独
                        放大只动这一个。 */
+}
 
+.dc-shell {
   position: relative;
   /* 固定视口高，滚动交给内容列：侧栏常驻不动，主面板才能真正被约束
      在一屏内。若用 min-height，flex:1 会随内容一起长高，页面又长出
@@ -150,6 +156,77 @@ h1, h2, h3, p { margin-top: 0; }
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
+
+/* ── 入口闸 ─────────────────────────────────────────── */
+
+.dc-lock {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgba(77, 163, 255, 0.07), transparent 60%),
+    var(--void);
+  color: var(--txt);
+  font: var(--fs-base)/1.55 var(--face);
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dc-lock-panel {
+  width: min(22rem, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.1rem 1.2rem 0.9rem;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: var(--bay);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+.dc-lock-brand { display: flex; align-items: center; gap: 0.5rem; }
+.dc-lock-brand strong { color: var(--txt-dim); font-size: var(--fs-lg); letter-spacing: 0.16em; }
+.dc-lock-note { color: var(--txt-faint); font-size: var(--fs-sm); }
+
+.dc-lock-field { display: flex; flex-direction: column; gap: 0.25rem; }
+.dc-lock-field span { color: var(--txt-dim); font-size: var(--fs-sm); }
+.dc-lock-field input {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--rule-hi);
+  border-radius: 2px;
+  background: #080b0e;
+  color: var(--txt);
+  padding: 0.3rem 0.55rem;
+  font: var(--fs-base)/1.5 var(--face);
+  letter-spacing: 0.24em;
+}
+.dc-lock-field input:focus { outline: none; border-color: var(--beam); }
+
+.dc-lock-actions { display: flex; gap: 0.45rem; }
+.dc-lock-actions button {
+  flex: 1 1 auto;
+  border: 1px solid var(--rule-hi);
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--bay-hi), var(--bay));
+  color: var(--txt);
+  padding: 0.32rem 0.62rem;
+  font: var(--fs-base)/1.5 var(--face);
+  cursor: pointer;
+}
+.dc-lock-actions button:hover:not(:disabled) { border-color: var(--beam); color: #ffffff; }
+.dc-lock-actions button:disabled { opacity: 0.42; cursor: not-allowed; }
+.dc-lock-actions .primary-button {
+  border-color: rgba(61, 220, 151, 0.45);
+  background: linear-gradient(180deg, rgba(61, 220, 151, 0.16), rgba(61, 220, 151, 0.06));
+  color: var(--live);
+  font-weight: 600;
+}
+
+/* 错误行常驻占位（内容是个空格），出错时才上色——否则面板会跳一下高度。 */
+.dc-lock-error { min-height: 1.2em; color: transparent; font-size: var(--fs-sm); }
+.dc-lock-error.is-shown { color: var(--alarm); }
 
 /* ── 侧栏：常驻导航 ─────────────────────────────────── */
 
@@ -456,20 +533,108 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .dc-suspects h3 { color: var(--alarm); letter-spacing: 0.08em; }
 
+/* 队列可以很长——真出现过 50+ 条。整块不封顶就会把下面所有内容顶出视口，
+   等于"卡住了"这件事把"卡在哪"也一起遮掉。横幅的职责是让人不可能忽略
+   有 N 条待裁决，不是一次摊开全部：标题行留在框外始终可见，列表自己滚，
+   最多吃掉三成视口高。 */
+.dc-suspect-list {
+  max-height: 30vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 0.35rem;
+}
+
 @keyframes dc-breathe {
   0%, 100% { box-shadow: inset 0 0 0 0 rgba(255, 95, 86, 0); }
   50% { box-shadow: inset 0 0 26px -14px rgba(255, 95, 86, 0.8); }
 }
 
-.dc-shell .diagnostic-list { list-style: none; margin: 0.35rem 0 0; padding: 0; }
-.dc-shell .diagnostic-list li {
+/* 一条 suspect 默认只占一行：动作、是谁、发的什么、什么时候，够认出
+   "这是哪件事"；裁决要看的现场全部折在里面。展开的是当前这一条，队列
+   整体仍然被上面的 30vh 罩住。 */
+.dc-suspect { border-top: 1px solid rgba(255, 95, 86, 0.22); }
+.dc-suspect:first-child { border-top: 0; }
+
+.dc-suspect > summary {
   display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  flex-wrap: wrap;
-  padding: 0.34rem 0;
-  border-top: 1px solid var(--rule);
-  font-size: var(--fs-base);
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0.1rem 0.3rem 1.1rem;
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.dc-suspect > summary::-webkit-details-marker { display: none; }
+.dc-suspect > summary:hover { background: rgba(255, 95, 86, 0.06); }
+
+/* 展开三角：纯几何，不占字宽 */
+.dc-suspect > summary::before {
+  content: "";
+  position: absolute;
+  left: 0.28rem;
+  top: 0.72em;
+  border-left: 4px solid var(--txt-faint);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transform-origin: 1.5px 50%;
+  transition: transform 140ms ease, border-left-color 140ms ease;
+}
+.dc-suspect[open] > summary::before { transform: rotate(90deg); border-left-color: var(--alarm); }
+
+.dc-suspect-action { color: var(--txt); font-weight: 600; flex: 0 0 auto; }
+.dc-suspect-who { color: var(--beam); flex: 0 0 auto; }
+/* 摘要吃掉剩余宽度并单行截断——它是认人用的线索，不是正文；
+   完整内容在展开后的「内容」一行。 */
+.dc-suspect-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--txt-dim);
+}
+.dc-suspect-when { flex: 0 0 auto; font-size: var(--fs-sm); }
+.dc-suspect-verdicts { display: flex; gap: 0.3rem; flex: 0 0 auto; }
+
+.dc-suspect-facts {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0.16rem 0.6rem;
+  margin: 0.2rem 0 0.35rem 1.1rem;
+}
+.dc-suspect-facts dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-suspect-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.dc-suspect-facts dd code { color: var(--txt-dim); }
+.dc-suspect-facts dd button { margin-left: 0.45rem; }
+.dc-suspect-body { color: var(--txt); white-space: pre-wrap; }
+
+.dc-suspect-caution {
+  margin: 0 0 0.35rem 1.1rem;
+  padding: 0.28rem 0.5rem;
+  border-left: 2px solid var(--warn);
+  background: rgba(245, 167, 66, 0.07);
+  color: var(--txt-dim);
+  font-size: var(--fs-sm);
+}
+.dc-suspect-caution strong { color: var(--warn); }
+
+.dc-raw-fold { margin: 0 0 0.4rem 1.1rem; }
+.dc-raw-fold > summary { cursor: pointer; color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-raw-fold > summary:hover { color: var(--txt-dim); }
+.dc-raw-field { margin-top: 0.25rem; }
+.dc-raw-field > span { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-raw-field pre {
+  margin: 0.1rem 0 0;
+  padding: 0.35rem 0.5rem;
+  max-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: #080b0e;
+  color: var(--txt-dim);
+  font-size: var(--fs-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ── 主面板：账本 / 帧流 ─────────────────────────────── */
@@ -479,7 +644,9 @@ h1, h2, h3, p { margin-top: 0; }
   flex: 1 1 auto;
   min-height: 300px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* 账本一行要塞六列，帧行只有四段且都短（约 270px 就够）——等分会把账本
+     的"目标"压到几十个像素，全是省略号。 */
+  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
   gap: 0.7rem;
   align-items: stretch;
 }
@@ -498,12 +665,99 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 .dc-shell .diagnostic-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   margin: 0;
   padding: 0.4rem 0.7rem;
   border-bottom: 1px solid var(--rule);
   background: linear-gradient(180deg, var(--bay-hi), transparent);
   font-size: var(--fs-base);
 }
+
+/* 标题右侧的附注位：计数、单手 id、心跳开关。h3 是大写加宽字距的，
+   附注是数据，得把这两样关掉。 */
+.diagnostic-card-aside {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.dc-frame-toggle { display: flex; align-items: center; gap: 0.25rem; cursor: pointer; }
+.dc-shell .dc-frame-toggle input { width: auto; min-height: 0; margin: 0; accent-color: var(--beam); }
+
+.dc-stream-empty { padding: 0.4rem 0.7rem; color: var(--txt-faint); }
+
+/* ── 命令账本：一行一条，可展开 ─────────────────────── */
+
+.dc-ledger-row { border-bottom: 1px solid rgba(32, 41, 50, 0.55); }
+
+.dc-ledger-row > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.26rem 0.5rem 0.26rem 1.05rem;
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.dc-ledger-row > summary::-webkit-details-marker { display: none; }
+.dc-ledger-row > summary:hover { background: rgba(77, 163, 255, 0.05); }
+.dc-ledger-row > summary::before {
+  content: "";
+  position: absolute;
+  left: 0.26rem;
+  top: 0.7em;
+  border-left: 4px solid var(--txt-faint);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transform-origin: 1.5px 50%;
+  transition: transform 140ms ease, border-left-color 140ms ease;
+}
+.dc-ledger-row[open] > summary::before { transform: rotate(90deg); border-left-color: var(--beam); }
+
+/* 除"目标"外全是固定宽度，六列才竖得齐；状态在行尾，变宽不影响前面。 */
+/* 内容宽会随字形微动，后面所有列跟着漂；钉死才竖得齐。 */
+.dc-ledger-at { flex: 0 0 4.4rem; font-size: var(--fs-mono); }
+.dc-ledger-name { flex: 0 0 9rem; overflow: hidden; text-overflow: ellipsis; color: var(--txt); }
+.dc-ledger-class { flex: 0 0 4.3rem; color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-ledger-class.is-effectful { color: var(--warn); }
+.dc-ledger-target {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--beam);
+}
+.dc-ledger-took { flex: 0 0 3.4rem; text-align: right; font-size: var(--fs-mono); }
+/* 状态也得定宽：内容从 "ok" 到 "failed (ELEMENT_UNRESOLVED)"，让它自适应
+   就等于让"目标"逐行变宽，六列全歪。截断的部分挂在 title 上。 */
+.dc-ledger-status { flex: 0 0 6rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.dc-ledger-facts {
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr);
+  gap: 0.16rem 0.6rem;
+  margin: 0.2rem 0 0.35rem 1.05rem;
+}
+.dc-ledger-facts dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.dc-ledger-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.dc-ledger-facts dd code { color: var(--txt-dim); }
+.dc-ledger-body { color: var(--txt); white-space: pre-wrap; max-height: 9rem; overflow: auto; }
+
+.dc-ledger-row .dc-raw-fold { margin-left: 1.05rem; }
+
+/* ── 帧行 ───────────────────────────────────────────── */
+
+.frame-at { flex: 0 0 auto; font-size: var(--fs-mono); }
+.frame-ref { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 .dc-ledger-scroll,
 .dc-shell .frames {
@@ -531,18 +785,22 @@ h1, h2, h3, p { margin-top: 0; }
 .dc-shell tbody tr:hover td { background: rgba(77, 163, 255, 0.05); }
 
 .dc-shell .frames { padding: 0.4rem 0.15rem; font-size: var(--fs-base); height: auto; }
+/* 一帧一行，绝不换行：帧流是靠"行数"读节奏的，某一帧折成三行就把时间感
+   毁了。放不下的 ref 自己省略。 */
 .dc-shell .frame-line {
   display: flex;
-  gap: 0.6rem;
+  align-items: baseline;
+  gap: 0.5rem;
   padding: 0.09rem 0.55rem;
   border-left: 2px solid transparent;
+  white-space: nowrap;
 }
 .dc-shell .frame-line:hover { background: rgba(77, 163, 255, 0.05); }
-.dc-shell .frame-line .out { min-width: 3.6rem; color: var(--beam); }
-.dc-shell .frame-line .in { min-width: 3.6rem; color: var(--live); }
+.dc-shell .frame-line .out { flex: 0 0 3.2rem; color: var(--beam); }
+.dc-shell .frame-line .in { flex: 0 0 3.2rem; color: var(--live); }
 .dc-shell .frame-line:has(.out) { border-left-color: rgba(77, 163, 255, 0.35); }
 .dc-shell .frame-line:has(.in) { border-left-color: rgba(61, 220, 151, 0.3); }
-.dc-shell .frame-line .kind { min-width: 4.6rem; color: var(--txt); }
+.dc-shell .frame-line .kind { flex: 0 0 4rem; overflow: hidden; text-overflow: ellipsis; color: var(--txt); }
 .dc-shell .frames > .dim,
 .dc-shell .frames > .bad { padding: 0.3rem 0.55rem; }
 
@@ -1100,3 +1358,71 @@ h1, h2, h3, p { margin-top: 0; }
 }
 
 .sql-table .sql-null { color: var(--txt-faint); font-style: italic; }
+
+/* 插件能力测试：一项能力一个区块，区块内是"填参数 → 跑 → 看回读"三段。 */
+.probe-block { display: flex; flex-direction: column; gap: 0.55rem; }
+.probe-block > p { margin: 0; }
+
+/* 前置条件与"这一步不会发生什么"的说明，压低视觉重量但不可省略。 */
+.probe-note {
+  margin: 0;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.probe-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.probe-field > span:first-child {
+  min-width: 5rem;
+  color: var(--txt-faint);
+  font-size: var(--fs-sm);
+}
+.probe-field select {
+  min-width: 18rem;
+  max-width: 100%;
+}
+.probe-radios { display: flex; gap: 1rem; flex-wrap: wrap; }
+.probe-radios label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--fs-base);
+  /* 不换行：选项文字被压成两三行时，radio 组会看着像坏掉的表格。 */
+  white-space: nowrap;
+}
+/* 全局 input 是 width:100%/min-height:38px（给文本框用的），radio 必须显式
+   收回固有尺寸，否则圆圈会被拉成占满整行的方块。 */
+.dc-shell .probe-radios input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  flex: none;
+  accent-color: var(--beam);
+}
+
+/* 时间输入不必占满整行。 */
+.dc-shell .probe-field input[type="datetime-local"] { width: auto; min-width: 13rem; }
+
+/* 按钮禁用时把"缺什么"说在旁边，省得人对着灰按钮猜。 */
+.probe-blocked { color: var(--txt-faint); font-size: var(--fs-sm); }
+
+/* 回读值两列铺开：左边字段名，右边平台实际回读到的值。 */
+.probe-readback {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.8rem;
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+.probe-readback dt { color: var(--txt-faint); font-size: var(--fs-sm); }
+.probe-readback dd { margin: 0; font-size: var(--fs-base); }
+.probe-readback .probe-absent { color: var(--txt-faint); font-style: italic; }
+
+.probe-msgid { margin: 0; color: var(--txt-faint); font-size: var(--fs-sm); }

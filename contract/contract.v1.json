@@ -359,8 +359,8 @@
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "dateValue": { "type": "string", "minLength": 1, "maxLength": 32 },
           "timeValue": { "type": "string", "minLength": 1, "maxLength": 16 },
-          "durationValue": { "type": "string", "minLength": 1, "maxLength": 16 },
-          "methodValue": { "type": "string", "minLength": 1, "maxLength": 16 },
+          "durationValue": { "type": "string", "minLength": 1, "maxLength": 16, "optional": true },
+          "methodValue": { "type": "string", "minLength": 1, "maxLength": 16, "optional": true },
           "canceled": { "type": "boolean" }
         }
       },
@@ -504,7 +504,7 @@
         "type": "object",
         "fields": {
           "startsAt": { "type": "int64", "minimum": 1 },
-          "endsAt": { "type": "int64", "minimum": 1 },
+          "endsAt": { "type": "int64", "minimum": 1, "optional": true },
           "method": { "type": "string", "enumRef": "enums.interviewMethod" }
         }
       },
@@ -1134,7 +1134,7 @@
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
-    "interviewMethod": ["wechatVideo"],
+    "interviewMethod": ["wechatVideo", "onsite"],
     "candidateContactState": ["unestablished", "established", "unknown"],
     "sourcingAgeMode": ["any", "range"],
     "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],
@@ -1245,7 +1245,7 @@
         "manualQuiet"
       ],
       "execBudgetMs": 90000, "deadlineMs": 120000,
-      "note": "邀面编辑器彩排:与 chat.sendInviteCard 字面共用同一编辑器准备实现,真实完成全部选择(类型/日期/时间/时长/方式)与期望值终核回读,随后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并复核弹窗已关。构造性不包含发送路径:不评估发送守卫、不建立发送基线、不触碰发送控件,不产生候选人可见动作,失败与取消结果只如实上报。data 四个回读值仅含我方自设的日期/时间/时长/方式文本。仅供开发期有人值守验收与回归使用,不得复用为发送授权、发送基线或业务状态依据"
+      "note": "邀面编辑器彩排:与 chat.sendInviteCard 字面共用同一编辑器准备实现,真实完成全部选择与期望值终核回读,随后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并复核弹窗已关。选择集按 args.interview.method 分支:wechatVideo 为类型/日期/时间/时长/方式五项,onsite 为类型/日期/时间三项——现场面试在平台上没有时长与方式控件,durationValue/methodValue 随之省略,不得以占位值冒充。面试类型的当前值只能读弹窗标题回显判定,平台默认类型不稳定(真机观察到连续两次打开默认不同),无论目标为何都必须核对回显、必要时点击切换并轮询等回显变为目标后才可继续。构造性不包含发送路径:不评估发送守卫、不建立发送基线、不触碰发送控件,不产生候选人可见动作,失败与取消结果只如实上报。data 回读值仅含我方自设的日期/时间/时长/方式文本。仅供开发期有人值守验收与回归使用,不得复用为发送授权、发送基线或业务状态依据"
     },
     "debug.slowEcho": {
       "ver": 1, "class": "effectful", "batch": "M1", "note": "无真实副作用,专用于演练 effectful 全轨道(超时/suspect/幂等键冻结)",

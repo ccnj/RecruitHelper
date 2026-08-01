@@ -416,6 +416,14 @@ func (m *Manager) MayStartNextWorkflowMember() error {
 		}
 		return nil
 	}
+	// 用户已经请求结束时,下一个成员不再开工(2026-07-31 甲方裁决)。这是
+	// "点了结束真的会停"的落点:编排器对 pendingAction 的收束发生在 Advance,
+	// 而评分、生成招呼语、发招呼三个阶段各自在成员边界自转,这里不看的话,
+	// 结束要等整批(可能一两个小时)跑完才生效。已铸的 WAL intent 不受影响,
+	// 它们在自己的轨道上收束。
+	if run.PendingAction == store.ProductWorkflowPendingActionEnd {
+		return fmt.Errorf("%w: %s", ErrMemberStartBlocked, run.PendingAction)
+	}
 	from := stateOf(run)
 	decision, err := workflow.MayStartNextWorkflowMember(
 		from, now, m.location, m.dailyWindow,

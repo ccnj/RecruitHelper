@@ -30,6 +30,27 @@ export function dateTime(value: TimeValue, fallback = '—'): string {
   }).format(date)
 }
 
+// 帧和命令都是同一天里挨着发生的事，日期是噪音；毫秒才是信号——
+// 一条命令的 cmd/ack/result 常常落在同一秒里，秒级精度分不出先后。
+export function timeOfDay(ms: number, withMillis = false): string {
+  const date = toDate(ms)
+  if (!date) return '—'
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  const ss = String(date.getSeconds()).padStart(2, '0')
+  if (!withMillis) return `${hh}:${mm}:${ss}`
+  return `${hh}:${mm}:${ss}.${String(date.getMilliseconds()).padStart(3, '0')}`
+}
+
+// 命令耗时。未终局回空串——那是"还在跑"，不是"用了 0 毫秒"。
+export function elapsed(startMs: number, endMs: number): string {
+  if (!startMs || !endMs || endMs < startMs) return ''
+  const span = endMs - startMs
+  if (span < 1000) return `${span}ms`
+  if (span < 60_000) return `${(span / 1000).toFixed(1)}s`
+  return `${Math.floor(span / 60_000)}m${Math.round((span % 60_000) / 1000)}s`
+}
+
 export function approximateTime(ms: number | null): string {
   if (!ms) return '时间未知'
   return dateTime(ms)

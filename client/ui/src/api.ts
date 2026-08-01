@@ -160,17 +160,51 @@ export interface LedgerRow {
   status: string
   attempt: number
   errorCode?: string
+
+  target: string
+  summary: string
+  createdAtMs: number
+  terminalAtMs: number
+
+  handId: string
+  idemKey: string
+  intentId: string
+  platform: string
+  accountRef: string
+  sideEffect: string
+  suspectReason: string
+  deadlineMs: number
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface Suspect {
   msgId: string
   name: string
+  action: string
   handId: string
   reason: string
+  reasonText: string
   idemKey: string
   reviewReady: boolean
   reviewAfter?: number
   verificationAttempts: number
+
+  platform: string
+  accountRef: string
+  intentId: string
+  conversationRef: string
+  peerDisplayName: string
+  summary: string
+  dispatchedAtMs: number
+  deadlineMs: number
+  errorCode: string
+  sideEffect: string
+
+  args: string
+  guards: string
+  resultBody: string
 }
 
 export interface FrameEvent {
@@ -257,6 +291,63 @@ export interface DevSQLResult {
   rows?: unknown[][]
   rowsAffected?: number
   error?: string
+}
+
+// 现场数据上报的回执(2026-07-31 裁决)。manifest 记录本次实际打进包的文件与
+// 被跳过的项 —— 上报是排障工具,"少了什么"本身就是线索。
+export interface FieldReportFile {
+  name: string
+  bytes: number
+}
+
+export interface FieldReportManifest {
+  appVersion?: string
+  packedAt?: string
+  files?: FieldReportFile[]
+  skipped?: string[]
+}
+
+export interface FieldReportResult {
+  ok?: boolean
+  reportKey?: string
+  sizeBytes?: number
+  sha256?: string
+  manifest?: FieldReportManifest
+  error?: string
+}
+
+// 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
+// 且只有这一个入口能打开它。
+export interface FieldReportSettings {
+  autoUploadEnabled?: boolean
+  lastAutoAt?: string
+  lastAutoOk?: boolean
+  lastAutoError?: string
+  error?: string
+}
+
+/** 邀面编辑器彩排的回执。data 只含我方自设的日期/时间/时长/方式回读值，
+ *  现场面试没有时长与方式控件，那两项整键缺席。 */
+export interface InterviewProbeResult {
+  msgId?: string
+  status?: string
+  errorCode?: string
+  /** 拒绝闸已拆，这里只是告知该会话自动化是否仍 active，由使用者判断。 */
+  automationActive?: boolean
+  data?: {
+    conversationRef?: string
+    dateValue?: string
+    timeValue?: string
+    durationValue?: string
+    methodValue?: string
+    canceled?: boolean
+  }
+  error?: {
+    code?: string
+    message?: string
+    retryable?: string
+    sideEffect?: string
+  }
 }
 
 export interface MutationResult {
@@ -707,6 +798,17 @@ export const api = {
   importM5Contexts: (bundle: Record<string, unknown>) => post<unknown>('/admin/m5/contexts/import', { bundle }),
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
+  devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
+  devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
+  setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
+    post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
+  probeInterviewEditor: (body: {
+    platform: string
+    accountRef: string
+    conversationRef: string
+    startsAt: number
+    method: 'wechatVideo' | 'onsite'
+  }) => post<InterviewProbeResult>('/admin/cards/interview/probe', body),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>

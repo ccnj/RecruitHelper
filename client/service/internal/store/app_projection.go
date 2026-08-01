@@ -73,6 +73,16 @@ type AppOverviewStatistics struct {
 	TodayConfirmation AppMetric `json:"todayConfirmation"`
 	TodayGreeted      AppMetric `json:"todayGreeted"`
 	TodayInvited      AppMetric `json:"todayInvited"`
+	// TodayWechat 是今天新换到微信的人数。权威时点是 ContactAsset 的收编时刻,
+	// 与 contact_asset_store 里"换微信成功的权威时点即 ContactAsset 创建"同源;
+	// 重复收编走 existing 分支不重建行,同一人不会跨天重复计入。
+	//
+	// 切当天用 observed_at_ms 而不是 created_at:两列写的是同一次收编,但
+	// created_at 在现网库里是 UTC 落盘(greeted_at 等列却是本地偏移落盘),拿
+	// 本地 time.Time 去比一列 UTC 字符串,本地 00:00-08:00 收编的人会被算到
+	// 前一天。毫秒整数比较没有格式与时区的歧义,也与产品端"换微信时间"列
+	// 用的 WechatObservedAtMs 同源。
+	TodayWechat AppMetric `json:"todayWechat"`
 
 	TotalGreeted     AppMetric `json:"totalGreeted"`
 	TotalInterviewed AppMetric `json:"totalInterviewed"`
@@ -245,6 +255,24 @@ func exactMetric(value int64) AppMetric {
 
 func unavailableMetric(reason string) AppMetric {
 	return AppMetric{Exact: false, UnavailableReason: reason}
+}
+
+// AppCurrentJob 是无账号维度的当前职位投影。全新安装在绑定任何平台账号之前,
+// 首页也必须能看见"职位已同步"——职位显示是开始按钮的前置,而点开始才是建立
+// 账号的动作(账号跟随登录,2026-07-30 裁决);overview 曾对零账号整体短路,
+// 职位被硬编码成 missing,同步成功也不可见,构成装机死锁(2026-08-01 真机复现)。
+// 查询与 AppOverview 的零批次分支同源:职位头本就不带账号维度。
+func (s *Store) AppCurrentJob() (AppJobProjection, error) {
+	var out AppJobProjection
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var txErr error
+		out, txErr = appCurrentJobTx(tx, "", "", "")
+		return txErr
+	})
+	if err != nil {
+		return AppJobProjection{}, err
+	}
+	return out, nil
 }
 
 func (s *Store) AppOverview(req AppOverviewRequest) (*AppOverviewProjection, error) {
@@ -626,6 +654,16 @@ func appOverviewStatisticsTx(
 		return out, err
 	}
 	out.TodayInvited = exactMetric(todayInvite)
+
+	value = 0
+	if err := count(tx.Model(&ContactAsset{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("kind = ?", contactAssetKindWechat).
+		Where("observed_at_ms >= ? AND observed_at_ms < ?", start.UnixMilli(), end.UnixMilli()).
+		Distinct("profile_id"), &value); err != nil {
+		return out, err
+	}
+	out.TodayWechat = exactMetric(value)
 
 	// 今日新约面数的是"今天有几个人接受了面试邀约",取 interviewed_at。它此前
 	// 直接复制 todayInvited(今天发出邀面卡的人数),两个不同标签共用一个数字。

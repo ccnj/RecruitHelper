@@ -400,21 +400,28 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 		return state
 	}
 
-	t.Run("accepted_with_text_service_reply_replaces_receipt_and_invite", func(t *testing.T) {
+	t.Run("accepted_with_text_keeps_fixed_segment_then_waits_service_suffix", func(t *testing.T) {
+		// 规格 §五(三) 2026-07-31 修订:同轮正文不再剥固定段;回执气泡与
+		// 追邀卡照发,可见动作收束后才允许 serviceReply 补句。
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: communicating(), TurnID: "turn-c-accepted-text",
-			Messages: []LedgerMessageFact{acceptedCard(2), v4InboundText(3, "请问要准备什么")},
-			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Messages:     []LedgerMessageFact{acceptedCard(2), v4InboundText(3, "请问要准备什么")},
+			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
 			decision.Requirement != V4DialogueServiceReply ||
+			!decision.DialogueAfterActions ||
 			decision.State.MainStatus != V4StatusInterviewed ||
-			!decision.State.InterviewAcceptedReceiptSent ||
-			len(decision.EventActions) != 1 ||
-			decision.EventActions[0].Kind != V4ActionNotifyInterviewAccepted ||
-			decision.Dialogue.Status != V4DialogueWaitingAdvice ||
-			decision.Dialogue.NextAdvice != V4AdviceServiceReply {
-			t.Fatalf("邀面接受+文字应由一次服务应答替代回执并撤下追邀卡: decision=%+v err=%v", decision, err)
+			decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 3 ||
+			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.EventActions[0].ActionKey != "message:2|interviewAcceptedReceipt|1" ||
+			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.EventActions[2].Kind != V4ActionInviteWechat ||
+			decision.Dialogue.Status != V4DialogueWaitingPrerequisite ||
+			decision.Dialogue.NextAdvice != V4AdviceNone {
+			t.Fatalf("邀面接受+文字应保留固定段并等待补句前置: decision=%+v err=%v", decision, err)
 		}
 	})
 
@@ -434,21 +441,26 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 		}
 	})
 
-	t.Run("accepted_with_resume_service_reply", func(t *testing.T) {
+	t.Run("accepted_with_resume_keeps_fixed_segment", func(t *testing.T) {
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: communicating(), TurnID: "turn-c-accepted-resume",
 			Messages: []LedgerMessageFact{
 				{Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
 				acceptedCard(3),
 			},
-			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
 			decision.Requirement != V4DialogueServiceReply ||
-			!decision.State.InterviewAcceptedReceiptSent ||
-			len(decision.EventActions) != 1 ||
-			decision.EventActions[0].Kind != V4ActionNotifyInterviewAccepted {
-			t.Fatalf("简历+邀面接受轮应走服务应答承接: decision=%+v err=%v", decision, err)
+			!decision.DialogueAfterActions ||
+			decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 3 ||
+			decision.EventActions[0].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.EventActions[2].Kind != V4ActionInviteWechat ||
+			decision.Dialogue.Status != V4DialogueWaitingPrerequisite {
+			t.Fatalf("简历+邀面接受轮应保留固定段并等待补句前置: decision=%+v err=%v", decision, err)
 		}
 	})
 
@@ -460,17 +472,23 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 				acceptedCard(3),
 				v4InboundText(4, "都弄好了"),
 			},
-			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
 			decision.Requirement != V4DialogueServiceReply ||
+			!decision.DialogueAfterActions ||
 			decision.State.WechatState != V4WechatExchanged ||
-			!decision.State.WechatReceiptSent ||
-			!decision.State.InterviewAcceptedReceiptSent ||
-			len(decision.EventActions) != 2 ||
+			decision.State.WechatReceiptSent ||
+			decision.State.InterviewAcceptedReceiptSent ||
+			len(decision.EventActions) != 4 ||
 			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
-			decision.EventActions[1].Kind != V4ActionNotifyInterviewAccepted {
-			t.Fatalf("多类服务卡+文字应动作并集且对话仅一次: decision=%+v err=%v", decision, err)
+			decision.EventActions[1].Kind != V4ActionWechatReceipt ||
+			decision.EventActions[1].ActionKey != "message:2|wechatReceipt|1" ||
+			decision.EventActions[2].Kind != V4ActionInterviewAcceptedReceipt ||
+			decision.EventActions[3].Kind != V4ActionNotifyInterviewAccepted ||
+			decision.Dialogue.Status != V4DialogueWaitingPrerequisite {
+			t.Fatalf("多类服务卡+文字应保留固定段动作并集且对话等前置: decision=%+v err=%v", decision, err)
 		}
 	})
 
@@ -615,23 +633,29 @@ func TestV4InboundTurnWechatMixActivatedByBatchB(t *testing.T) {
 	})
 
 	t.Run("interviewed_accepted_with_text_service_reply", func(t *testing.T) {
+		// 2026-07-31 规格 §五(三):已约面轮固定段照发;收号回执气泡保留并
+		// 展开,补句等固定段收束。
 		state := NewV4GreetedState(v4Time(8))
 		state.MainStatus = V4StatusInterviewed
 		state.RealMessageRound = 3
 		state.LastRealMessageSeq = 5
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: state, TurnID: "turn-b-interviewed-accepted",
-			Messages: []LedgerMessageFact{acceptedCard(6), v4InboundText(7, "加好了")},
-			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Messages:     []LedgerMessageFact{acceptedCard(6), v4InboundText(7, "加好了")},
+			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
 			decision.Requirement != V4DialogueServiceReply ||
-			!decision.State.WechatReceiptSent ||
-			len(decision.EventActions) != 1 ||
+			!decision.DialogueAfterActions ||
+			decision.State.WechatReceiptSent ||
+			len(decision.EventActions) != 2 ||
 			decision.EventActions[0].Kind != V4ActionNotifyWechat ||
-			decision.Dialogue.Status != V4DialogueWaitingAdvice ||
-			decision.Dialogue.NextAdvice != V4AdviceServiceReply {
-			t.Fatalf("服务态交换成功+文字应由一次服务应答承接替代回执: decision=%+v err=%v", decision, err)
+			decision.EventActions[1].Kind != V4ActionWechatReceipt ||
+			decision.EventActions[1].ActionKey != "message:6|wechatReceipt|1" ||
+			decision.Dialogue.Status != V4DialogueWaitingPrerequisite ||
+			decision.Dialogue.NextAdvice != V4AdviceNone {
+			t.Fatalf("服务态交换成功+文字应保留收号回执并等待补句前置: decision=%+v err=%v", decision, err)
 		}
 	})
 

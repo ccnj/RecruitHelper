@@ -28,6 +28,7 @@ type API struct {
 	providerConfig  *m5ai.ProviderConfigStore
 	jobConfigSource *jobconfig.Source
 	advice          JobClassAdvisor
+	fieldReport     FieldReportDeps
 }
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
@@ -104,6 +105,9 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/m5/contexts", h(a.m5Contexts))
 	mux.HandleFunc("POST /admin/m5/contexts/import", h(a.importM5Contexts))
 	mux.HandleFunc("POST /admin/dev/sql", h(a.devSQL))
+	mux.HandleFunc("POST /admin/dev/report", h(a.devReport))
+	mux.HandleFunc("GET /admin/dev/report/settings", h(a.devReportSettings))
+	mux.HandleFunc("POST /admin/dev/report/settings", h(a.setDevReportSettings))
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
 	mux.HandleFunc("POST /admin/job-publish/precheck", h(a.jobPublishPrecheck))
@@ -246,19 +250,50 @@ func (a *API) suspects(w http.ResponseWriter, _ *http.Request) {
 	type view struct {
 		MsgID                string `json:"msgId"`
 		Name                 string `json:"name"`
+		Action               string `json:"action"`
 		HandID               string `json:"handId"`
 		Reason               string `json:"reason"`
+		ReasonText           string `json:"reasonText"`
 		IdemKey              string `json:"idemKey"`
 		ReviewReady          bool   `json:"reviewReady"`
 		ReviewAfter          *int64 `json:"reviewAfter,omitempty"`
 		VerificationAttempts int    `json:"verificationAttempts"`
+
+		// 裁决现场：谁、什么、何时、卡在哪。
+		Platform        string `json:"platform"`
+		AccountRef      string `json:"accountRef"`
+		IntentID        string `json:"intentId"`
+		ConversationRef string `json:"conversationRef"`
+		PeerDisplayName string `json:"peerDisplayName"`
+		Summary         string `json:"summary"`
+		DispatchedAtMs  int64  `json:"dispatchedAtMs"`
+		DeadlineMs      int64  `json:"deadlineMs"`
+		ErrorCode       string `json:"errorCode"`
+		SideEffect      string `json:"sideEffect"`
+
+		// 原始现场。摘要挑不出来的线索都在这里，前端折叠显示。
+		Args       string `json:"args"`
+		Guards     string `json:"guards"`
+		ResultBody string `json:"resultBody"`
 	}
 	out := make([]view, 0, len(recs))
 	for _, r := range recs {
 		ready, after := a.disp.SuspectReviewState(r)
+		facts := argsFacts(r.Args)
 		out = append(out, view{
-			MsgID: r.MsgID, Name: r.Name, HandID: r.HandID, Reason: r.SuspectReason, IdemKey: r.IdemKey,
-			ReviewReady: ready, ReviewAfter: after, VerificationAttempts: r.VerificationN,
+			MsgID: r.MsgID, Name: r.Name, Action: suspectActionName(r.Name),
+			HandID: r.HandID, Reason: r.SuspectReason, ReasonText: humanizeSuspectReason(r.SuspectReason),
+			IdemKey: r.IdemKey, ReviewReady: ready, ReviewAfter: after, VerificationAttempts: r.VerificationN,
+
+			Platform: r.Platform, AccountRef: r.AccountRef, IntentID: r.IntentID,
+			ConversationRef: facts.ConversationRef,
+			PeerDisplayName: a.peerDisplayNameFor(r, facts.ConversationRef),
+			Summary:         facts.Summary(),
+			DispatchedAtMs:  unixMilliOrZero(r.CreatedAt),
+			DeadlineMs:      r.DeadlineMs,
+			ErrorCode:       r.ErrorCode, SideEffect: r.SideEffect,
+
+			Args: r.Args, Guards: r.Guards, ResultBody: r.ResultBody,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"suspects": out})
@@ -324,10 +359,41 @@ func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
 		Status    string `json:"status"`
 		Attempt   int    `json:"attempt"`
 		ErrorCode string `json:"errorCode,omitempty"`
+
+		// 扫读用：什么时候、对谁、花了多久。
+		Target       string `json:"target"`
+		Summary      string `json:"summary"`
+		CreatedAtMs  int64  `json:"createdAtMs"`
+		TerminalAtMs int64  `json:"terminalAtMs"`
+
+		// 展开用：身份与判据。
+		HandID        string `json:"handId"`
+		IdemKey       string `json:"idemKey"`
+		IntentID      string `json:"intentId"`
+		Platform      string `json:"platform"`
+		AccountRef    string `json:"accountRef"`
+		SideEffect    string `json:"sideEffect"`
+		SuspectReason string `json:"suspectReason"`
+		DeadlineMs    int64  `json:"deadlineMs"`
+		Args          string `json:"args"`
+		Guards        string `json:"guards"`
+		ResultBody    string `json:"resultBody"`
 	}
 	out := make([]view, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, view{MsgID: r.MsgID, Name: r.Name, Class: r.Class, Status: string(r.Status), Attempt: r.Attempt, ErrorCode: r.ErrorCode})
+		facts := argsFacts(r.Args)
+		out = append(out, view{
+			MsgID: r.MsgID, Name: r.Name, Class: r.Class, Status: string(r.Status),
+			Attempt: r.Attempt, ErrorCode: r.ErrorCode,
+
+			Target: a.cmdTarget(r, facts), Summary: facts.Summary(),
+			CreatedAtMs: unixMilliOrZero(r.CreatedAt), TerminalAtMs: terminalMillis(r.TerminalAt),
+
+			HandID: r.HandID, IdemKey: r.IdemKey, IntentID: r.IntentID,
+			Platform: r.Platform, AccountRef: r.AccountRef,
+			SideEffect: r.SideEffect, SuspectReason: r.SuspectReason, DeadlineMs: r.DeadlineMs,
+			Args: r.Args, Guards: r.Guards, ResultBody: r.ResultBody,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
 }

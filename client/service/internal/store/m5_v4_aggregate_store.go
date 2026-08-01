@@ -508,9 +508,14 @@ func applyCommunicationV4ConfirmedActionTx(
 	)
 }
 
+// communicationV4WechatContinuation carries the frozen turn a confirmed action
+// re-opens for its follow-up dialogue. Advice selects the shape: V4AdviceReply
+// is the candidate-initiated wechat acceptance (2026-07-26), V4AdviceServiceReply
+// is the post-interview fixed-segment suffix (2026-07-31 spec §5(3)).
 type communicationV4WechatContinuation struct {
 	Turn                 DialogueTurn
 	ExpectedFromRevision uint64
+	Advice               communication.V4AdvicePurpose
 }
 
 func applyCommunicationV4ConfirmedActionWithContinuationTx(
@@ -524,12 +529,23 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 		appliedAt.IsZero() {
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
 	}
-	if continuation != nil &&
-		(action.Kind != communication.V4ActionAcceptWechat ||
-			action.MessageSeq != 0 ||
-			continuation.Turn.ProfileID != profileID ||
-			strings.TrimSpace(continuation.Turn.TurnID) == "") {
-		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+	if continuation != nil {
+		if continuation.Turn.ProfileID != profileID ||
+			strings.TrimSpace(continuation.Turn.TurnID) == "" {
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+		}
+		switch continuation.Advice {
+		case communication.V4AdviceReply:
+			if action.Kind != communication.V4ActionAcceptWechat || action.MessageSeq != 0 {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+			}
+		case communication.V4AdviceServiceReply:
+			if action.MessageSeq <= 0 {
+				return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+			}
+		default:
+			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Invalid
+		}
 	}
 	appliedAt = appliedAt.UTC()
 	digest, err := communicationV4InputDigest(action)
@@ -551,13 +567,25 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 			existing.MessageSeq != action.MessageSeq {
 			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
 		}
-		if continuation != nil &&
-			(existing.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
-				existing.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
-				existing.Outcome.NextAdvice != communication.V4AdviceReply ||
-				existing.Outcome.IntentLabel != m5ai.IntentInterested ||
-				existing.Outcome.IntentSource != communication.IntentSourceBusinessEvent) {
-			return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+		if continuation != nil {
+			switch continuation.Advice {
+			case communication.V4AdviceReply:
+				if existing.Outcome.Dialogue != communication.V4DialogueWechatContinuation ||
+					existing.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+					existing.Outcome.NextAdvice != communication.V4AdviceReply ||
+					existing.Outcome.IntentLabel != m5ai.IntentInterested ||
+					existing.Outcome.IntentSource != communication.IntentSourceBusinessEvent {
+					return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+				}
+			case communication.V4AdviceServiceReply:
+				if existing.Outcome.Dialogue != communication.V4DialogueServiceReply ||
+					existing.Outcome.DialogueStatus != communication.V4DialogueWaitingAdvice ||
+					existing.Outcome.NextAdvice != communication.V4AdviceServiceReply ||
+					existing.Outcome.IntentLabel != "" ||
+					existing.Outcome.IntentSource != "" {
+					return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, ErrCommunicationV4Conflict
+				}
+			}
 		}
 		return aggregate, existing, false, nil
 	}
@@ -624,11 +652,18 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 		ProjectedThroughSeqBefore: &projectedThroughSeqBefore,
 	}
 	if continuation != nil {
-		outcome.Dialogue = communication.V4DialogueWechatContinuation
-		outcome.DialogueStatus = communication.V4DialogueWaitingAdvice
-		outcome.NextAdvice = communication.V4AdviceReply
-		outcome.IntentLabel = m5ai.IntentInterested
-		outcome.IntentSource = communication.IntentSourceBusinessEvent
+		switch continuation.Advice {
+		case communication.V4AdviceReply:
+			outcome.Dialogue = communication.V4DialogueWechatContinuation
+			outcome.DialogueStatus = communication.V4DialogueWaitingAdvice
+			outcome.NextAdvice = communication.V4AdviceReply
+			outcome.IntentLabel = m5ai.IntentInterested
+			outcome.IntentSource = communication.IntentSourceBusinessEvent
+		case communication.V4AdviceServiceReply:
+			outcome.Dialogue = communication.V4DialogueServiceReply
+			outcome.DialogueStatus = communication.V4DialogueWaitingAdvice
+			outcome.NextAdvice = communication.V4AdviceServiceReply
+		}
 	}
 	application := CommunicationV4ProjectionApplication{
 		ProfileID: profileID, InputKind: CommunicationV4InputConfirmedAction, InputKey: action.ActionKey,
@@ -641,14 +676,18 @@ func applyCommunicationV4ConfirmedActionWithContinuationTx(
 		return CommunicationV4Aggregate{}, CommunicationV4ProjectionApplication{}, false, err
 	}
 	if continuation != nil {
+		expectedLabel, expectedSource := m5ai.IntentInterested, DialogueIntentBusinessEvent
+		if continuation.Advice == communication.V4AdviceServiceReply {
+			expectedLabel, expectedSource = "", ""
+		}
 		updated := tx.Model(&DialogueTurn{}).
 			Where(
 				"turn_id = ? AND profile_id = ? AND status = ? AND intent_label = ? AND intent_source = ?",
 				continuation.Turn.TurnID,
 				profileID,
 				DialogueTurnCollected,
-				m5ai.IntentInterested,
-				DialogueIntentBusinessEvent,
+				expectedLabel,
+				expectedSource,
 			).
 			Updates(map[string]any{
 				"status":         DialogueTurnClassified,

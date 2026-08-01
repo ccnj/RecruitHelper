@@ -981,6 +981,10 @@ type CompleteReplyInvocationRequest struct {
 	ContentHash  string
 	ManualReason string
 	PlannedAt    time.Time
+	// ServiceNoAction marks a post-interview suffix that closes without a
+	// planned action (explicit silence or abandoned suffix, spec v4 §7). The
+	// v4 replay derives the exact verdict; non-v4 turns must never set it.
+	ServiceNoAction bool
 }
 
 // CompleteReplyInvocation 在一个事务内终结 reply invocation，并且只在
@@ -991,8 +995,14 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 	}
 	canPlan := req.Completion.Status == AIInvocationOK && req.ManualReason == "" &&
 		reasoningCompletionSafe(req.Completion)
-	if canPlan && (strings.TrimSpace(req.ActionID) == "" || strings.TrimSpace(req.Text) == "" ||
-		strings.TrimSpace(req.ContentHash) == "") {
+	if req.ServiceNoAction &&
+		(req.ManualReason != "" || strings.TrimSpace(req.ActionID) != "" ||
+			strings.TrimSpace(req.Text) != "" || len(req.Phrases) != 0) {
+		return nil, ErrCommunicationActionInvalid
+	}
+	if canPlan && !req.ServiceNoAction &&
+		(strings.TrimSpace(req.ActionID) == "" || strings.TrimSpace(req.Text) == "" ||
+			strings.TrimSpace(req.ContentHash) == "") {
 		return nil, ErrCommunicationActionInvalid
 	}
 	if req.PlannedAt.IsZero() {
@@ -1012,7 +1022,9 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 			return err
 		} else if v4Turn {
 			manualReason := req.ManualReason
-			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
+			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) &&
+				!req.ServiceNoAction {
+				// 服务补句对可疑输出的最保守处置就是不发(放弃),不转人工。
 				manualReason = "reasoningUsageUnsafe"
 			}
 			out, err = completeCommunicationV4ReplyTx(
@@ -1035,6 +1047,10 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 				err,
 				req.Completion.FinishedAt.UTC(),
 			)
+		}
+		if req.ServiceNoAction {
+			// 服务补句只存在于 v4 轮;非 v4 轮出现该形态是编排错误。
+			return ErrDialogueTurnState
 		}
 		if turn.Status != DialogueTurnManualRequired {
 			if err := validateDialogueTurnAIAdviceTx(tx, turn, m5ai.PurposeReply); err != nil {
@@ -3171,7 +3187,85 @@ func communicationV4WechatContinuationForAcceptedActionTx(
 	return &communicationV4WechatContinuation{
 		Turn:                 turn,
 		ExpectedFromRevision: initial.ToRevision,
+		Advice:               communication.V4AdviceReply,
 	}, communicationV4AcceptContinuationReady, nil
+}
+
+// communicationV4ServiceSuffixContinuationTx detects whether the action just
+// settled is the closing member of a post-interview fixed segment (spec v4
+// §5(3) 2026-07-31): the frozen turn scheduled a serviceReply suffix behind
+// its visible event actions, and every visible action has now reached sent.
+// It returns nil when the action belongs to any other shape.
+func communicationV4ServiceSuffixContinuationTx(
+	tx *gorm.DB,
+	action CommunicationV4EventAction,
+) (*communicationV4WechatContinuation, error) {
+	if action.SourceInputKind != CommunicationV4InputDialogueTurn {
+		return nil, nil
+	}
+	initial, found, err := communicationV4ApplicationTx(
+		tx,
+		action.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		action.SourceInputKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if !found || !initial.Outcome.DialogueAfterActions ||
+		initial.Outcome.Dialogue != communication.V4DialogueServiceReply ||
+		initial.Outcome.DialogueStatus != communication.V4DialogueWaitingPrerequisite ||
+		initial.Outcome.NextAdvice != communication.V4AdviceNone {
+		return nil, nil
+	}
+	actions, err := communicationV4EventActionsBySourceTx(
+		tx,
+		action.ProfileID,
+		CommunicationV4InputDialogueTurn,
+		action.SourceInputKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+	closing := -1
+	for index := range actions {
+		switch actions[index].V4Kind {
+		case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
+			continue
+		}
+		closing = index
+	}
+	if closing < 0 || actions[closing].ActionID != action.ActionID {
+		return nil, nil
+	}
+	for index := range actions {
+		switch actions[index].V4Kind {
+		case communication.V4ActionNotifyWechat, communication.V4ActionNotifyInterviewAccepted:
+			continue
+		}
+		if actions[index].ActionID == action.ActionID {
+			continue
+		}
+		if actions[index].Status != CommunicationV4EventActionSent {
+			return nil, nil
+		}
+	}
+	var turn DialogueTurn
+	if err := tx.First(&turn, "turn_id = ?", action.SourceInputKey).Error; err != nil {
+		return nil, err
+	}
+	if turn.ProfileID != action.ProfileID {
+		return nil, ErrCommunicationV4Corrupt
+	}
+	aggregate, err := communicationV4AggregateTx(tx, action.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	return &communicationV4WechatContinuation{
+		Turn:                 turn,
+		ExpectedFromRevision: aggregate.Revision,
+		Advice:               communication.V4AdviceServiceReply,
+	}, nil
 }
 
 func applyCommunicationV4EventActionEffectStatusTx(
@@ -3328,7 +3422,11 @@ func applyCommunicationV4EventActionEffectStatusTx(
 			value := time.UnixMilli(*message.TsApproxMs).UTC()
 			confirmedAt = &value
 		}
-		_, _, _, err = applyCommunicationV4ConfirmedActionTx(
+		serviceSuffix, err := communicationV4ServiceSuffixContinuationTx(tx, action)
+		if err != nil {
+			return err
+		}
+		_, _, _, err = applyCommunicationV4ConfirmedActionWithContinuationTx(
 			tx,
 			action.ProfileID,
 			communication.V4ConfirmedAction{
@@ -3340,6 +3438,7 @@ func applyCommunicationV4EventActionEffectStatusTx(
 				Round:          sourceInfo.Round,
 				Stage:          sourceInfo.Stage,
 			},
+			serviceSuffix,
 			at,
 		)
 		if err != nil {

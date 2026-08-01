@@ -465,11 +465,76 @@ test('witness journal/outbox 持久相关性、跨会话补投与 ack 删除', a
     '补投 session 必须先持久化再发送')
   await witness.acknowledgeResult('result-envelope-1')
   assert.equal(Object.hasOwn(storage.state, 'outbox:result-envelope-1'), false)
+  assert.equal(Object.hasOwn(storage.state, 'journal:idem-witness-1'), false,
+    'ack 必须同批收割对应 committed journal，否则真实吞吐下 journal 只进不出打满容量')
+  const ackRemove = storage.writes.filter((entry) => entry.kind === 'remove').at(-1)
+  assert.deepEqual([...ackRemove.keys].sort(),
+    ['journal:idem-witness-1', 'outbox:result-envelope-1'],
+    'outbox 与 journal 必须在同一次 remove 调用中收割')
   assert.equal(witness.advertisement().outboxPending, 0)
+  assert.equal(storage.state['witness:meta'].outboxCount, 0)
+  assert.equal(storage.state['witness:meta'].journalCount, 0)
   const afterAckRestart = new WitnessStore(storage, () => now, () => 'unused-after-ack')
   await afterAckRestart.initialize()
-  assert.equal((await afterAckRestart.findJournalByIdemKey('idem-witness-1')).state, 'committed',
-    'ack 后 committed journal 无 outbox 是合法稳定态')
+  assert.equal(await afterAckRestart.findJournalByIdemKey('idem-witness-1'), null,
+    'ack 收割后同 storeId 不残留 journal；脑已终局的命令不会再被 query')
+})
+
+test('witness ack 收割:无 journal 的前置失败终局只删 outbox', async () => {
+  const now = 1_700_000_000_000
+  const storage = memoryWitnessStorage()
+  const witness = new WitnessStore(storage, () => now, () => 'witness-ack-prefail')
+  await witness.initialize()
+  await witness.markAttempting('cmd-live-1', 'idem-live-1')
+  await witness.enqueueResult({
+    proto: 1, kind: 'result', msgId: 'envelope-prefail-1', session: 's1', ts: now, attempt: 1,
+    body: {
+      ref: 'cmd-prefail-1', status: 'failed', replayed: false, execMs: 0,
+      error: { code: ErrorCode.CtxNotReady, retryable: Retryable.AfterRecovery, sideEffect: 'none' },
+    },
+  })
+  await witness.acknowledgeResult('envelope-prefail-1')
+  assert.equal(Object.hasOwn(storage.state, 'outbox:envelope-prefail-1'), false)
+  assert.equal(storage.state['witness:meta'].outboxCount, 0)
+  assert.equal(storage.state['witness:meta'].journalCount, 1,
+    'attempting 写点前失败的终局没有 journal，ack 不得误删无关 journal')
+  assert.equal((await witness.findJournalByIdemKey('idem-live-1')).ref, 'cmd-live-1')
+})
+
+test('witness ack 收割 remove 后 meta 更新失败即熔断，重启按 required count 判 corrupt', async () => {
+  const now = 1_700_000_000_000
+  let failMetaWrite = false
+  const storage = memoryWitnessStorage({}, {
+    beforeSet: async (items) => {
+      if (failMetaWrite && Object.hasOwn(items, 'witness:meta')) throw new Error('storage quota')
+    },
+  })
+  const witness = new WitnessStore(storage, () => now, () => 'witness-ack-crashseam')
+  await witness.initialize()
+  await witness.markAttempting('cmd-seam-1', 'idem-seam-1')
+  const body = {
+    ref: 'cmd-seam-1', status: 'ok', replayed: false, execMs: 5,
+    data: { conversationRef: 'c', contentHash: 'a'.repeat(64), observedAt: now },
+    evidence: [{ type: 'outboundMessageObserved' }],
+  }
+  await witness.commitAndEnqueue('idem-seam-1', {
+    proto: 1, kind: 'result', msgId: 'envelope-seam-1', session: 's1', ts: now, attempt: 1, body,
+  })
+  failMetaWrite = true
+  await assert.rejects(
+    () => witness.acknowledgeResult('envelope-seam-1'),
+    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
+    'remove 已成功而 meta 更新失败时不得继续沿用旧计数运行')
+  failMetaWrite = false
+  await assert.rejects(
+    () => witness.acknowledgeResult('envelope-seam-1'),
+    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
+    '熔断后的实例必须保持 corrupt，不得复活')
+  const restarted = new WitnessStore(storage, () => now, () => 'witness-ack-crashseam-2')
+  await assert.rejects(
+    () => restarted.initialize(),
+    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
+    '崩溃缝留下的计数与 key 不一致必须在下次读取判 corrupt，不能伪造同世代 unknown')
 })
 
 test('witness 对 same idem/different ref 与 committed result.ref 错配硬失败', async () => {

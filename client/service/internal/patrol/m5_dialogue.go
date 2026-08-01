@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -88,6 +89,8 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 			return currentErr
 		}
 		if !current {
+			slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
+				"turnId", latest.TurnID)
 			return nil
 		}
 	}
@@ -300,6 +303,8 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 			// An event-driven branch is durably waiting for a prerequisite
 			// action. Neither AI material nor provider configuration is part
 			// of that deterministic continuation.
+			slog.Info("对话轮跳过:事件分支在等前置动作正证,本轮不调 AI",
+				"turnId", turn.TurnID)
 			return nil
 		}
 		material, err := a.loadM5TurnMaterial(turn)
@@ -909,6 +914,9 @@ func (a *roundActor) runM5ReplyAdvice(
 	intent communication.IntentAdvice,
 	v4Purpose communication.V4AdvicePurpose,
 ) error {
+	if v4Purpose == communication.V4AdviceServiceReply {
+		return a.runM5ServiceReplyAdvice(ctx, turn, material, facts)
+	}
 	resumeJSON, err := m5ai.RenderResumeJSON(material.snapshot.ResumeJSON)
 	if err != nil {
 		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "resumeRenderFailed", a.manager.now())
@@ -924,17 +932,149 @@ func (a *roundActor) runM5ReplyAdvice(
 	if err != nil {
 		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyRenderFailed", a.manager.now())
 	}
-	switch v4Purpose {
-	case communication.V4AdviceReply:
-	case communication.V4AdviceServiceReply:
-		content, err = m5ai.AppendServiceReplyPolicy(content)
-	default:
-		err = communication.ErrInvalidV4StateTransition
-	}
-	if err != nil {
+	if v4Purpose != communication.V4AdviceReply {
 		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyRenderFailed", a.manager.now())
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, content, intent)
+}
+
+// runM5ServiceReplyAdvice runs the post-interview suffix (spec v4 §7,
+// 2026-07-31): a fixed in-code prompt over the candidate's texts of this turn
+// plus the fixed segment already sent — no playbook, resume or slots. Render
+// failures abandon the suffix on a normal close instead of going manual.
+func (a *roundActor) runM5ServiceReplyAdvice(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+) error {
+	actions, err := a.manager.store.CommunicationV4EventActionsBySource(
+		turn.ProfileID,
+		store.CommunicationV4InputDialogueTurn,
+		turn.TurnID,
+	)
+	if err != nil {
+		return err
+	}
+	fixedBubbles := make([]string, 0, len(actions))
+	wechatInviteSent := false
+	for index := range actions {
+		if actions[index].Status != store.CommunicationV4EventActionSent {
+			continue
+		}
+		switch actions[index].V4Kind {
+		case communication.V4ActionInviteWechat:
+			wechatInviteSent = true
+		case communication.V4ActionWechatReceipt, communication.V4ActionInterviewAcceptedReceipt:
+			fixedBubbles = append(fixedBubbles, actions[index].Text)
+		}
+	}
+	candidateTexts := make([]string, 0, len(material.current))
+	for _, message := range material.current {
+		if message.Direction == "inbound" && !message.Retracted {
+			candidateTexts = append(candidateTexts, message.Text)
+		}
+	}
+	content, err := m5ai.RenderServiceReplyPrompt(
+		fixedBubbles,
+		wechatInviteSent,
+		candidateTexts,
+	)
+	if err != nil {
+		// 输入构造失败是编排级异常,不属于 §七 的"调用失败/输出不合法";
+		// 沿用普通轨渲染失败纪律。
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "serviceReplyRenderFailed", a.manager.now())
+	}
+	return a.executeM5ServiceAdvice(ctx, turn, material, facts, content)
+}
+
+// executeM5ServiceAdvice mirrors executeM5Advice for the service suffix: the
+// ledger identity stays PurposeReply (one advice per turn, same invocation and
+// advice keys), while the provider request and trace carry PurposeServiceReply.
+// Call failure, parse failure and unsafe reasoning all abandon the suffix on a
+// normal close (ServiceNoAction); only an interrupted prior invocation falls
+// back to the ordinary recovery path, which stays conservative.
+func (a *roundActor) executeM5ServiceAdvice(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	content string,
+) error {
+	inputHash := sha256Hex(content)
+	invocationID := stableM5ID("invocation", turn.TurnID, string(m5ai.PurposeReply), "1")
+	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
+		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: m5ai.PurposeReply,
+		Attempt: m5InvocationAttempt,
+		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
+		InputHash: inputHash, CreatedAt: a.manager.now(),
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrDialogueTurnBinding) {
+			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+		}
+		return err
+	}
+	if !reserved.Created {
+		return a.finishInterruptedM5Advice(turn, material, facts, m5ai.PurposeReply,
+			communication.IntentAdvice{State: communication.AdviceAbsent}, reserved.Invocation)
+	}
+
+	request := m5ai.CompletionRequest{
+		InvocationID:        reserved.Invocation.InvocationID,
+		Purpose:             m5ai.PurposeServiceReply,
+		ContextRevisionHash: turn.ContextRevisionHash,
+		PromptRevision:      turn.RenderFormatVersion,
+		UserContent:         content,
+		MaxOutputTokens:     m5ai.ServiceReplyOutputTokenLimit,
+	}
+	started := time.Now()
+	var response m5ai.CompletionResponse
+	var callErr error
+	func() {
+		a.manager.mu.Unlock()
+		defer a.manager.mu.Lock()
+		response, callErr = a.manager.advice.CompleteJSON(ctx, request)
+	}()
+	completion := m5CompletionFromProvider(reserved.Invocation.InvocationID, response, callErr, time.Since(started), a.manager.now())
+
+	reply := ""
+	sendable := false
+	if callErr == nil {
+		suggestion, parseErr := m5ai.ParseServiceReplySuggestion(response.JSONText)
+		if parseErr == nil {
+			reply = suggestion.Reply
+			sendable = reply != ""
+		} else {
+			markBusinessParseFailure(&completion, parseErr)
+		}
+	}
+	if callErr == nil && !reasoningUsageSafe(completion) {
+		markReasoningUsageUnsafe(&completion)
+		sendable = false
+	}
+	logAIInvocationOutcome(
+		a.manager.advice, m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
+	)
+	request2 := store.CompleteReplyInvocationRequest{
+		Completion: completion, PlannedAt: a.manager.now(),
+	}
+	if sendable {
+		request2.ActionID = stableM5ID("action", turn.TurnID, string(communication.CommunicationActionReplyText))
+		request2.Phrases = []string{reply}
+		request2.Text = reply
+		request2.ContentHash = syncledger.HashText(reply)
+	} else {
+		request2.ServiceNoAction = true
+	}
+	_, err = a.manager.store.CompleteReplyInvocation(request2)
+	if errors.Is(err, store.ErrDialogueTurnBinding) {
+		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+	}
+	if err != nil {
+		logAIInvocationPersistenceFailure(a.manager.advice, m5ai.PurposeServiceReply, completion)
+	}
+	return err
 }
 
 func (a *roundActor) executeM5Advice(

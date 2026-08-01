@@ -25,6 +25,7 @@ const (
 	GreetingInputTokenLimit           = ReplyInputTokenLimit
 	IntentOutputTokenLimit            = 64
 	ReplyOutputTokenLimit             = 512
+	ServiceReplyOutputTokenLimit      = 128
 	SilenceFollowupOutputTokenLimit   = ReplyOutputTokenLimit
 	ScoringOutputTokenLimit           = 512
 	GreetingOutputTokenLimit          = ReplyOutputTokenLimit
@@ -114,11 +115,19 @@ type SilenceFollowupSuggestion struct {
 	Text string
 }
 
+// ServiceReplySuggestion is the two-way verdict of the post-interview service
+// turn: a single guidance sentence, or the explicit silence verdict (empty
+// Reply). It deliberately has no action vocabulary.
+type ServiceReplySuggestion struct {
+	Reply string
+}
+
 type CompletionPurpose string
 
 const (
 	PurposeIntent          CompletionPurpose = "intent"
 	PurposeReply           CompletionPurpose = "reply"
+	PurposeServiceReply    CompletionPurpose = "serviceReply"
 	PurposeSilenceFollowup CompletionPurpose = "silenceFollowup"
 	PurposeScoring         CompletionPurpose = "scoring"
 	PurposeGreeting        CompletionPurpose = "greeting"

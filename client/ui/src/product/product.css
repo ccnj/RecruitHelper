@@ -905,7 +905,6 @@
   gap: 18px;
 }
 
-.rh-home-primary-grid,
 .rh-home-lower-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.75fr);
@@ -937,37 +936,125 @@
   font-weight: 680;
 }
 
-.rh-task-card {
+/* 状态卡:首页唯一讲"现在在干什么"的地方,由今日任务与沟通引擎两张卡合并
+   而来(2026-07-31)。目标用户是电脑基础薄弱的中年人,所以状态是一个大词加
+   一句人话,操作是并排的实体按钮,不用在四个区块之间拼出结论。
+
+   动画只在运行中出现,停着的状态完全静止——"在动"本身就是"在干活"的信号,
+   一眼扫过去动的就是在跑、不动的就是在等人。 */
+.rh-status-card {
   position: relative;
+  margin-bottom: 16px;
+  padding: 20px 22px 20px 26px;
+  border-left: 0;
   overflow: hidden;
 }
 
-.rh-task-card::after {
+/* 左侧色条:整张卡的状态感来源。此前只靠一个 11px 的点,撑不住 25px 的标题。 */
+.rh-status-rail {
   position: absolute;
-  top: -38px;
-  right: -38px;
-  width: 112px;
-  height: 112px;
-  border: 18px solid rgba(51, 112, 246, 0.055);
-  border-radius: 50%;
-  content: "";
-  pointer-events: none;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--rh-border-strong);
 }
 
-.rh-task-position,
-.rh-communication-card > p {
-  min-height: 44px;
-  padding: 14px 18px 0;
+.rh-status-card.is-running .rh-status-rail { background: var(--rh-green); }
+.rh-status-card.is-attention .rh-status-rail { background: var(--rh-amber); }
+.rh-status-card.is-failed .rh-status-rail { background: var(--rh-red); }
+
+/* 运行中色条里有一段亮色缓慢下流,给静态的绿条一个方向感。 */
+.rh-status-card.is-running .rh-status-rail::after {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 40%;
+  background: rgba(255, 255, 255, 0.55);
+  content: "";
+  animation: rh-rail-flow 2.4s linear infinite;
+}
+
+@keyframes rh-rail-flow {
+  from { top: -40%; }
+  to { top: 100%; }
+}
+
+/* 顶端对齐而不是居中:文案列会随状态长短变高,居中会让圆点和按钮跟着上下
+   浮动,同一张卡每次进来位置都不一样。 */
+.rh-status-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.rh-status-dot {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  flex: none;
+  margin-top: 10px;
+  border-radius: 50%;
+  background: var(--rh-border-strong);
+}
+
+.rh-status-card.is-running .rh-status-dot { background: var(--rh-green); }
+.rh-status-card.is-attention .rh-status-dot { background: var(--rh-amber); }
+.rh-status-card.is-failed .rh-status-dot { background: var(--rh-red); }
+
+/* 呼吸环:2 秒一轮,慢到不抢注意力,但足够说明"它还活着"。 */
+.rh-status-card.is-running .rh-status-dot::after {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--rh-green);
+  content: "";
+  animation: rh-status-pulse 2s ease-out infinite;
+}
+
+@keyframes rh-status-pulse {
+  from { transform: scale(1); opacity: 0.55; }
+  70% { transform: scale(2.6); opacity: 0; }
+  to { transform: scale(2.6); opacity: 0; }
+}
+
+/* 系统层面要求减弱动画时全部静止:这两个动画是装饰性的,状态本身靠颜色和
+   文字表达,静止不丢任何信息。 */
+@media (prefers-reduced-motion: reduce) {
+  .rh-status-card.is-running .rh-status-rail::after,
+  .rh-status-card.is-running .rh-status-dot::after {
+    animation: none;
+  }
+
+  .rh-status-card.is-running .rh-status-dot::after {
+    opacity: 0;
+  }
+}
+
+.rh-status-copy {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.rh-status-copy h2 {
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.rh-status-copy p {
+  margin-top: 5px;
   color: var(--rh-copy);
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .rh-task-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 9px;
-  padding: 14px 18px 18px;
 }
 
 .rh-product-app .rh-button {
@@ -1032,6 +1119,31 @@
   font-size: 13px;
 }
 
+/* 状态卡里的次操作必须长得像按钮。全局 is-quiet 是无边框的文字样式(顶部
+   「同步职位」那种),摆在这里没人看得出能点——甲方 2026-08-01 直接点名。
+   描边、同高、不抢主按钮的分量:「结束」不可逆,不该勾着人去点。 */
+.rh-task-actions .rh-button.is-quiet {
+  min-height: 42px;
+  padding-right: 16px;
+  padding-left: 16px;
+  border-color: var(--rh-border-strong);
+  background: var(--rh-panel);
+  color: var(--rh-ink);
+  font-size: 13px;
+}
+
+.rh-task-actions .rh-button.is-quiet:hover:not(:disabled) {
+  border-color: var(--rh-primary);
+  background: var(--rh-primary-soft);
+  color: var(--rh-primary-dark);
+}
+
+.rh-task-actions .rh-button.is-quiet:disabled {
+  border-color: var(--rh-border);
+  background: var(--rh-canvas);
+  color: var(--rh-muted);
+}
+
 .rh-product-app .rh-button.is-compact {
   min-height: 31px;
   padding: 0 10px;
@@ -1058,27 +1170,9 @@
 }
 
 .rh-inline-note.is-danger {
-  margin-top: 14px;
+  margin-top: 9px;
   background: #fff1f2;
   color: #a1323e;
-}
-
-.rh-engine-pulse {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--rh-slate);
-  box-shadow: 0 0 0 5px rgba(117, 129, 149, 0.12);
-}
-
-.rh-engine-pulse.is-running {
-  background: var(--rh-green);
-  box-shadow: 0 0 0 5px rgba(15, 159, 110, 0.12);
-}
-
-.rh-engine-pulse.is-manualRequired {
-  background: var(--rh-red);
-  box-shadow: 0 0 0 5px rgba(220, 76, 91, 0.12);
 }
 
 .rh-compact-facts {
@@ -2376,7 +2470,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-top: 14px;
+  margin-top: 9px;
   padding: 12px 14px;
   border: 1px solid var(--rh-border);
   border-radius: 9px;
@@ -2418,7 +2512,6 @@
     padding-left: 24px;
   }
 
-  .rh-home-primary-grid,
   .rh-home-lower-grid {
     grid-template-columns: 1fr;
   }
@@ -2694,4 +2787,39 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* 流程进度搬进诊断台后仍用产品端的类名,但落在深色仪表舱里。这里只把面板
+   本体的底色与文字反相,不改结构——两边共用同一个组件,改结构会双向牵连。 */
+.dc-pipeline-host {
+  margin-bottom: 14px;
+}
+
+.dc-pipeline-host .rh-panel {
+  border-color: #2b3242;
+  background: #161a24;
+  box-shadow: none;
+  color: #d7dde5;
+}
+
+.dc-pipeline-host .rh-panel-heading {
+  border-bottom-color: #2b3242;
+}
+
+.dc-pipeline-host .rh-section-label,
+.dc-pipeline-host .rh-pipeline-summary,
+.dc-pipeline-host .rh-pipeline-stage span {
+  color: #8b94a5;
+}
+
+.dc-pipeline-host .rh-panel-heading h2,
+.dc-pipeline-host .rh-pipeline-summary strong,
+.dc-pipeline-host .rh-pipeline-stage strong {
+  color: #e6ebf2;
+}
+
+.dc-pipeline-host .rh-stage-node {
+  border-color: #39415460;
+  background: #1e2432;
+  color: #8b94a5;
 }
