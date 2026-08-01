@@ -15,13 +15,21 @@ import (
 )
 
 const (
-	// settleTimeout:结束工作流之后等在途命令收敛的上限。
+	// settleTimeout:请求结束工作流之后,等业务真正停下来的上限。
 	//
-	// 为什么必须等:End 只是把工作流置为终局,立刻就返回,手上可能还有命令在跑。
-	// 这时候杀进程,effectful 命令的 WAL 停在 attempting,下次启动的恢复轨会把它
-	// 收敛成 suspect 转人工 —— 一条本来能正常完成的消息,变成了要人去判定"到底
-	// 发出去没有"。等待是有界的:End 之后不再产生新命令,在途的会自然收敛。
-	settleTimeout = 60 * time.Second
+	// 为什么必须等:杀进程时若还有 effectful 命令在途,它的 WAL 会停在 attempting,
+	// 下次启动的恢复轨把它收敛成 suspect 转人工 —— 一条本来能正常完成的消息,变成
+	// 了要人去判定"到底发出去没有"。
+	//
+	// 为什么等这么久:Manager.End() 只是往库里登记 PendingAction,真正执行要等下一
+	// 轮 AdvanceOnce 并经巡检边界;而且它只关闭**下一个**候选人的边界 —— 当前候选人
+	// 会把已授权的建议、动作和 effect WAL 全部跑完(见 MayStartNextConversation 的
+	// 注释)。那可能是一次 AI 调用加多气泡逐条发送再加验证读,几十秒起步。
+	//
+	// 2026-08-01 的教训:原先只等 NonTerminalCmds 归零、上限 60 秒。那个查询看的是
+	// **已派发**的命令,恰好落在"AI 调用中、命令尚未派发"的空档就会读到空、立刻放行,
+	// 随后派发的那条命令正好被杀。日志上表现为 End 与"准备安装"只隔 2 毫秒。
+	settleTimeout = 5 * time.Minute
 	settlePoll    = 500 * time.Millisecond
 
 	// pendingInstallFile 记录"已经把安装器交出去了,期待重启后变成这一版"。
@@ -35,8 +43,9 @@ const (
 var (
 	ErrNoPackageReady   = errors.New("当前没有已备好的新版安装包")
 	ErrPackageTampered  = errors.New("本地安装包与下载时的校验值不符，已拒绝执行")
-	ErrCommandsInFlight = errors.New("仍有未收束的命令，本次不安装")
-	ErrInstallHalted    = errors.New("该版本已连续安装失败，已停止自动安装")
+	ErrBusinessInFlight = errors.New(
+		"当前任务尚未收尾，本次不安装；等它跑完再试")
+	ErrInstallHalted = errors.New("该版本已连续安装失败，已停止自动安装")
 )
 
 // GateStore 是安装闸要问账本的两个问题。
@@ -128,7 +137,7 @@ func (g *InstallGate) Prepare(ctx context.Context) (string, error) {
 	if err := g.endActiveWorkflow(ctx); err != nil {
 		return "", err
 	}
-	if err := g.waitForCommandsToSettle(ctx); err != nil {
+	if err := g.waitForBusinessToSettle(ctx); err != nil {
 		return "", err
 	}
 
@@ -144,6 +153,9 @@ func (g *InstallGate) Prepare(ctx context.Context) (string, error) {
 	return packagePath, nil
 }
 
+// endActiveWorkflow 只是**请求**结束:Manager.End() 往库里登记 PendingAction 就
+// 返回,真正执行要等下一轮 AdvanceOnce 并经巡检边界。所以调完它业务并没有停,
+// 停没停一律由 settleBlocker 说了算。
 func (g *InstallGate) endActiveWorkflow(ctx context.Context) error {
 	run, err := g.Store.ActiveProductWorkflowRun()
 	if err != nil {
@@ -160,29 +172,65 @@ func (g *InstallGate) endActiveWorkflow(ctx context.Context) error {
 	return g.Workflow.End(ctx)
 }
 
-// waitForCommandsToSettle 等在途命令归零。超时就放弃本次安装 —— 宁可不装,
+// waitForBusinessToSettle 等业务真正停下来。超时就放弃本次安装 —— 宁可不装,
 // 也不把一条正在发送的消息杀成 suspect。
-func (g *InstallGate) waitForCommandsToSettle(ctx context.Context) error {
+func (g *InstallGate) waitForBusinessToSettle(ctx context.Context) error {
 	deadline := time.NewTimer(g.timeout())
 	defer deadline.Stop()
 	ticker := time.NewTicker(g.poll())
 	defer ticker.Stop()
 	for {
-		pending, err := g.Store.NonTerminalCmds()
+		blocker, err := g.settleBlocker()
 		if err != nil {
 			return err
 		}
-		if len(pending) == 0 {
+		if blocker == "" {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("%w（仍有 %d 条）", ErrCommandsInFlight, len(pending))
+			return fmt.Errorf("%w（%s）", ErrBusinessInFlight, blocker)
 		case <-ticker.C:
 		}
 	}
+}
+
+// settleBlocker 返回还拦着安装的那件事,空字符串表示可以动手了。
+//
+// 三个条件缺一不可,而且顺序有讲究:
+//
+//   - PendingAction 非空 —— 结束请求登记了但还没执行。这一条最容易被漏:End()
+//     写完就返回,此刻 Status 仍是 running,只看 Status 会以为还没结束、只看
+//     "结束调用成功了"又会以为已经结束。
+//   - Status 仍在跑 —— 工作流还没走到终局。
+//   - 账本上还有未收束命令 —— 已经派发出去的那些。
+//
+// 只查第三条是不够的:它看的是**已派发**的命令,而当前候选人可能正卡在 AI 调用里,
+// 命令还没铸出来,账本此刻就是空的。前两条挡住的正是这个空档。
+func (g *InstallGate) settleBlocker() (string, error) {
+	run, err := g.Store.ActiveProductWorkflowRun()
+	if err != nil {
+		return "", err
+	}
+	if run != nil {
+		if run.PendingAction != "" {
+			return "结束请求尚未执行完", nil
+		}
+		if run.Status == workflow.StatusRunning ||
+			run.Status == workflow.StatusAwaitingConfirmation {
+			return "工作流仍在运行", nil
+		}
+	}
+	pending, err := g.Store.NonTerminalCmds()
+	if err != nil {
+		return "", err
+	}
+	if len(pending) != 0 {
+		return fmt.Sprintf("仍有 %d 条未收束命令", len(pending)), nil
+	}
+	return "", nil
 }
 
 func (g *InstallGate) readPending() (*PendingInstall, error) {
