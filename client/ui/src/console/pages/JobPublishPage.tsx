@@ -305,10 +305,22 @@ function PublishPrecheckPanel({
   }
 
   // A2 的一个职位：在已定类别下读词库并选关键词。零对外副作用。
-  const planKeywordsFor = async (jobId: string, jobName: string): Promise<void> => {
+  //
+  // jobClass 必须由调用方传进来，**不能在这里从 rows 里取**：A2 紧跟在写入
+  // 分配结果的 setRows 之后，而 React 的状态更新是异步的，同一个闭包里读到的
+  // 还是写之前的 rows——取出来是空串，于是整个 A2 悄无声息地一个都不跑。
+  const planKeywordsFor = async (
+    jobId: string, jobName: string, jobClass: string,
+  ): Promise<void> => {
     if (!account) return
-    const jobClass = effectiveClass(jobId)
-    if (!jobClass) return
+    if (!jobClass) {
+      // 走到这里说明调用方自己就没拿到类别。宁可留一条明账，也不静默跳过。
+      patch(jobId, {
+        error: `「${jobName}」没有可用的职位类别，跳过选关键词`,
+        skipped: true, selected: false,
+      })
+      return
+    }
     try {
       const plan = await api.jobPublishKeywordPlan(
         account.platform, account.accountRef, jobId, jobClass,
@@ -328,6 +340,7 @@ function PublishPrecheckPanel({
       .filter((row) => row.jobId !== jobId)
       .map((row) => effectiveClass(row.jobId))
       .filter(Boolean)
+    let jobClass = ''
     try {
       const result = await api.jobPublishClassPlan(
         account.platform, account.accountRef, [jobId], occupied,
@@ -338,28 +351,23 @@ function PublishPrecheckPanel({
           new Error(assigned?.problem || '模型没有给出分配'), { skipped: true, selected: false })
         return
       }
+      jobClass = assigned.jobClass
       patch(jobId, { classView: assigned, classPick: undefined, plan: undefined })
     } catch (reason) {
       failRow(jobId, `定「${jobName}」的职位类别未成功`, reason, { skipped: true, selected: false })
       return
     }
-    await planKeywordsFor(jobId, jobName)
+    // 用刚拿到的那个值，不回头读 rows——patch 还没生效。
+    await planKeywordsFor(jobId, jobName, jobClass)
   }
 
-  // 类别被人工改选后重选关键词：只跑第二趟，类别不动。
+  // 类别被人工改选后重选关键词：只跑第二趟，类别不动。这里从 rows 取类别是
+  // 安全的——它由人点击触发，状态早已落定，不像 A2 那样紧跟在 setRows 后面。
   const replanKeywords = async (jobId: string, jobName: string): Promise<void> => {
-    if (!account) return
-    const jobClass = effectiveClass(jobId)
-    if (!jobClass) return
     setBusyJob(jobId)
     patch(jobId, { error: undefined, diagnostics: undefined })
     try {
-      const plan = await api.jobPublishKeywordPlan(
-        account.platform, account.accountRef, jobId, jobClass,
-      )
-      patch(jobId, { plan, selected: true, skipped: false })
-    } catch (reason) {
-      failRow(jobId, `给「${jobName}」重选关键词未成功`, reason)
+      await planKeywordsFor(jobId, jobName, effectiveClass(jobId))
     } finally {
       setBusyJob('')
     }
@@ -411,7 +419,7 @@ function PublishPrecheckPanel({
       for (const [index, assigned] of withClass.entries()) {
         if (stopRef.current) break
         setCursor({ done: index, total: withClass.length, jobName: assigned.jobName })
-        await planKeywordsFor(assigned.jobId, assigned.jobName)
+        await planKeywordsFor(assigned.jobId, assigned.jobName, assigned.jobClass ?? '')
       }
     } finally {
       setCursor(null)
