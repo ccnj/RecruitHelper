@@ -32,6 +32,7 @@ export {
   readZhilianSourcingResume,
   readZhilianSourcingTargetResume,
   readZhilianSourcingWindow,
+  parsedKeywordSections,
   readZhilianGreetingOutcome,
   readZhilianWechatExchangeOutcome,
   inspectZhilianSendSurfaceDiagnostic,

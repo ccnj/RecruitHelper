@@ -1,9 +1,14 @@
-// 职位与发布：后台启用职位总览 + 预检 + 三步发布（定类别 / 试填 / 真发）。
+// 职位与发布：后台启用职位总览 + 预检 + 两段式循环发布。
 // 这一页是唯一会对平台产生不可逆副作用的入口，所以从模型配置里单拆出来。
-import { useCallback, useEffect, useState } from 'react'
+//
+// 两段式（甲方 2026-07-31 裁决）：
+//   阶段 A  零副作用，逐个职位跑「定类别 → 读词库 → 选关键词」，失败即跳过
+//   二次确认清单  把两项 AI 决定摊开给人看过，默认全选可发的
+//   阶段 B  逐个真发；单条干净失败或 suspect 跳过当前、继续下一个
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  api, AccountView, BackendJobView, DetailedError, JobClassResolveView, JobDraftReport,
-  JobPublishPrecheckView, JobPublishResult, PublishParamsState, PublishVerdict,
+  api, AccountView, BackendJobView, DetailedError, JobClassAssignmentView, JobDraftReport,
+  JobKeywordPlanView, JobPublishPrecheckView, JobPublishResult, PublishParamsState, PublishVerdict,
 } from '../../api'
 import { errorText } from '../format'
 
@@ -19,13 +24,15 @@ const PUBLISH_VERDICT_LABEL: Record<PublishVerdict, string> = {
   blocked: '参数有问题',
 }
 
-// 试填失败现场。按固定顺序摊平成人读的行，未知键一律兜底显示，
+// 失败现场。按固定顺序摊平成人读的行，未知键一律兜底显示，
 // 避免手侧以后加了字段界面这边静默丢掉。
 const DIAG_LABELS: Array<[string, string]> = [
   ['step', '卡在'],
   ['reason', '原因'],
   ['platformHints', '平台提示'],
   ['descriptionLength', '描述已填字数'],
+  ['formReused', '复用了上一趟表单'],
+  ['keywordMore', '更多折叠区'],
   ['keywordAt', '关键词进度'],
   ['keyword', '当前关键词'],
   ['keywordRoute', '走的路径'],
@@ -39,6 +46,24 @@ const DIAG_LABELS: Array<[string, string]> = [
   ['customInputVisible', '自定义输入框可见'],
   ['handMessage', '手侧报错'],
 ]
+
+// 一个职位在本次循环里的全部状态。
+interface RowState {
+  classView?: JobClassAssignmentView
+  /** 人工改选的类别。改了就得重新选关键词——词库随类别变。 */
+  classPick?: string
+  plan?: JobKeywordPlanView
+  draft?: JobDraftReport
+  publishResult?: JobPublishResult
+  error?: string
+  diagnostics?: Record<string, unknown>
+  /** 阶段 A 失败被跳过。它不阻塞其余职位。 */
+  skipped?: boolean
+  /** 二次确认清单里的勾选。 */
+  selected?: boolean
+}
+
+type LoopPhase = 'idle' | 'planning' | 'publishing'
 
 export function JobPublishPage({ account }: { account: AccountView | null }) {
   return <BackendJobsTable account={account} />
@@ -67,7 +92,7 @@ function DraftDiagnosticsBlock({ diagnostics }: { diagnostics: Record<string, un
 }
 
 // 试填回读报告。它证明的是"能不能填进去"，不是"发布了"——手侧原语不允许
-// 点击提交控件，且回读后必须离开表单。
+// 点击提交控件，且回读后必须离开表单。试填不在循环里，只作单职位排障。
 function DraftReportBlock({ report }: { report: JobDraftReport }) {
   const { keywords } = report
   return (
@@ -88,9 +113,6 @@ function DraftReportBlock({ report }: { report: JobDraftReport }) {
       </p>
       {keywords.dropped.length > 0 && (
         <p className="publish-draft-dropped">未能填入：{keywords.dropped.join('、')}</p>
-      )}
-      {keywords.sectionTitles.length > 0 && (
-        <p className="publish-draft-sections">本次分组：{keywords.sectionTitles.join(' / ')}</p>
       )}
       <p className={report.discarded ? 'publish-draft-clean' : 'publish-draft-dropped'}>
         {report.discarded ? '已离开发布表单，页面未留草稿' : '警告：未确认离开发布表单，请人工检查页面'}
@@ -126,37 +148,47 @@ function PublishResultBlock({ result }: { result: JobPublishResult }) {
   )
 }
 
-// 类别决定面板。候选是平台针对这个职位现给的封闭集合，点一个即可覆盖脑的选择——
-// 大模型只是建议者，最后按哪个发由人定。释义是平台自己的定义，也是判断贴合度的
-// 依据，所以必须显示出来而不是只列名字。
+// 类别决定面板。候选是平台针对这个职位现给的封闭集合，点一个即可覆盖大模型的
+// 选择——模型只是建议者，最后按哪个发由人定。释义是平台自己的定义，也是判断
+// 贴合度的依据，所以必须显示出来而不是只列名字。
 function JobClassBlock({
-  view, effective, onPick,
-}: { view: JobClassResolveView; effective: string; onPick: (name: string) => void }) {
+  view, effective, collidesWith, onPick,
+}: {
+  view: JobClassAssignmentView
+  effective: string
+  collidesWith: string[]
+  onPick: (name: string) => void
+}) {
   const overridden = effective !== view.jobClass
   return (
     <div className="publish-draft-report publish-job-class">
       <p>
-        <span>将以此类别发布</span><strong className="ok">{effective}</strong>
+        <span>将以此类别发布</span>
+        <strong className={collidesWith.length > 0 ? 'bad' : 'ok'}>{effective || '未分配'}</strong>
         <span>来源</span>
         <strong>
-          {view.source === 'configuredExactMatch' ? '后台配置值精确命中' : '大模型选定'}
+          大模型统一分配
           {view.confidence !== undefined && ` · 置信度 ${view.confidence.toFixed(2)}`}
           {overridden && ' · 已被人工改选'}
         </strong>
       </p>
-      {view.configuredClass && (
+      {collidesWith.length > 0 && (
+        <p className="publish-draft-dropped">
+          与 {collidesWith.join('、')} 撞了同一个类别。平台会把它们推给同一批人，
+          多发的那几个等于白发——换一个还没被占用的候选，或者接受。
+        </p>
+      )}
+      {view.problem && <p className="publish-precheck-issue">{view.problem}</p>}
+      {view.deadConfiguredClass && (
         <p>
           <span>后台填的是</span>
-          <strong>
-            {view.configuredClass}
-            {view.source === 'model' && ' —— 不在平台候选里，未生效'}
-          </strong>
+          <strong>{view.deadConfiguredClass} —— 死字段，不参与发布</strong>
           {view.prefilledClass && <><span>平台预填</span><strong>{view.prefilledClass}</strong></>}
         </p>
       )}
       {view.reason && <p className="publish-draft-sections">选择理由：{view.reason}</p>}
       <ul className="publish-job-class-list">
-        {view.candidates.map((candidate: JobClassResolveView['candidates'][number]) => (
+        {view.candidates.map((candidate: JobClassAssignmentView['candidates'][number]) => (
           <li key={candidate.name} className={candidate.name === effective ? 'is-picked' : undefined}>
             <button type="button" onClick={() => onPick(candidate.name)} title="改用这个类别发布">
               {candidate.name}
@@ -165,193 +197,450 @@ function JobClassBlock({
           </li>
         ))}
       </ul>
-      {view.attempts && view.attempts.length > 1 && (
-        <p className="publish-draft-dropped">大模型尝试：{view.attempts.join('、')}</p>
+    </div>
+  )
+}
+
+// 关键词决定面板。词库是平台在这个类别下现给的封闭集合；命中词库的走点选，
+// 其余走兜底组自定义——两条路语义不同，所以分开显示而不是混成一串。
+function KeywordPlanBlock({ plan, stale }: { plan: JobKeywordPlanView; stale: boolean }) {
+  return (
+    <div className={`publish-draft-report publish-keywords ${stale ? 'publish-draft-diag' : ''}`}>
+      <p>
+        <span>将填入这些关键词</span>
+        <strong className={stale ? 'bad' : 'ok'}>{plan.keywords.join(' · ')}</strong>
+      </p>
+      {stale && (
+        <p className="publish-draft-dropped">
+          类别已被改选，这组关键词是按上一个类别的词库选的，必须重新选。
+        </p>
+      )}
+      <p>
+        <span>命中词库</span><strong>{plan.matched.length > 0 ? plan.matched.join('、') : '(无)'}</strong>
+        <span>自定义</span><strong>{plan.custom.length > 0 ? plan.custom.join('、') : '(无)'}</strong>
+      </p>
+      {plan.reason && <p className="publish-draft-sections">选择理由：{plan.reason}</p>}
+      <p className="publish-draft-sections">
+        本次词库：{plan.sections.map((section) => section.title).join(' / ') || '(无分组)'}
+        {plan.totalQuota ? ` · 平台总配额 ${plan.totalQuota}` : ''}
+        {plan.formReused ? ' · 复用了上一趟表单' : ' · 重填了表单'}
+      </p>
+      {plan.deadConfiguredKeywords && plan.deadConfiguredKeywords.length > 0 && (
+        <p className="publish-draft-sections">
+          后台填的是：{plan.deadConfiguredKeywords.join('、')} —— 死字段，不参与发布
+        </p>
+      )}
+      {plan.attempts && plan.attempts.length > 1 && (
+        <p className="publish-draft-dropped">大模型尝试：{plan.attempts.join('、')}</p>
       )}
     </div>
   )
 }
 
-// 预检结论面板：呈现结论、试填诊断与发布入口。发布按钮需要连点两次，
-// 因为它是这条链上唯一不可逆的动作。
+// 预检结论 + 两段式循环。发布按钮需要连点两次，因为它是这条链上唯一不可逆的动作。
 function PublishPrecheckPanel({
   view, at, account,
 }: { view: JobPublishPrecheckView; at: string; account: AccountView | null }) {
-  const [drafts, setDrafts] = useState<Record<string, JobDraftReport>>({})
+  const [rows, setRows] = useState<Record<string, RowState>>({})
+  const [phase, setPhase] = useState<LoopPhase>('idle')
+  const [busyJob, setBusyJob] = useState('')
+  const [cursor, setCursor] = useState<{ done: number; total: number; jobName: string } | null>(null)
+  const [publishArmed, setPublishArmed] = useState(false)
   const [draftBusy, setDraftBusy] = useState('')
-  const [draftError, setDraftError] = useState<Record<string, string>>({})
-  const [draftDiag, setDraftDiag] = useState<Record<string, Record<string, unknown>>>({})
-  const [publishBusy, setPublishBusy] = useState('')
-  const [publishArmed, setPublishArmed] = useState('')
-  const [publishResult, setPublishResult] = useState<Record<string, JobPublishResult>>({})
-  const [classes, setClasses] = useState<Record<string, JobClassResolveView>>({})
-  const [classPick, setClassPick] = useState<Record<string, string>>({})
-  const [classBusy, setClassBusy] = useState('')
+  // 脑侧那次全局分配的尝试记录。撞车不存这里：人工改选类别后原来的撞车可能
+  // 解开、也可能撞上别人，只能按当前生效值实时重算，见 collisionsNow。
+  const [attempts, setAttempts] = useState<string[]>([])
+  const [batchError, setBatchError] = useState('')
+  // 停止只影响"要不要开始下一个职位"。已经派出去的那条命令照常收束——半路
+  // 掐掉一条在途的 effectful 命令只会制造一个结果未知的 suspect。
+  const stopRef = useRef(false)
 
-  // 生效类别：默认脑定的那个，人工改选后用改选值。
-  const effectiveClass = (jobId: string): string =>
-    classPick[jobId] || classes[jobId]?.jobClass || ''
+  const patch = (jobId: string, next: Partial<RowState>) => {
+    setRows((prev) => ({ ...prev, [jobId]: { ...prev[jobId], ...next } }))
+  }
+  const failRow = (jobId: string, prefix: string, reason: unknown, next?: Partial<RowState>) => {
+    patch(jobId, {
+      error: `${prefix}：${errorText(reason)}`,
+      diagnostics: reason instanceof DetailedError && reason.diagnostics
+        ? reason.diagnostics as Record<string, unknown>
+        : undefined,
+      ...next,
+    })
+  }
 
-  // 第一趟：读平台候选并定类别。零对外副作用，可以随便重跑。
-  const resolveClass = async (jobId: string, jobName: string) => {
+  const readyRows = view.rows.filter((row) => row.verdict === 'ready')
+  const otherRows = view.rows.filter((row) => row.verdict !== 'ready')
+  const effectiveClass = (jobId: string): string => {
+    const row = rows[jobId]
+    return row?.classPick || row?.classView?.jobClass || ''
+  }
+  // 关键词是按某个类别的词库选的。类别一改，这组词就过期了——词库随类别变。
+  const planStale = (jobId: string): boolean => {
+    const plan = rows[jobId]?.plan
+    return plan !== undefined && plan.jobClass !== effectiveClass(jobId)
+  }
+  const decided = (jobId: string): boolean => {
+    const row = rows[jobId]
+    return Boolean(row?.plan) && !planStale(jobId) && !row?.publishResult
+  }
+  // 撞车按**当前生效**的类别实时重算,不能直接用脑侧那次返回的那份:人工在
+  // 清单上改选之后,原来的撞车可能解开了、也可能撞上了别人。
+  const collisionsNow = ((): Record<string, string[]> => {
+    const byClass: Record<string, string[]> = {}
+    for (const row of readyRows) {
+      const jobClass = effectiveClass(row.jobId)
+      if (!jobClass) continue
+      byClass[jobClass] = [...(byClass[jobClass] ?? []), row.jobName || row.jobId]
+    }
+    const out: Record<string, string[]> = {}
+    for (const [jobClass, names] of Object.entries(byClass)) {
+      if (names.length > 1) out[jobClass] = names
+    }
+    return out
+  })()
+  const collidesWith = (jobId: string, jobName: string): string[] => {
+    const jobClass = effectiveClass(jobId)
+    if (!jobClass) return []
+    return (collisionsNow[jobClass] ?? []).filter((name) => name !== (jobName || jobId))
+  }
+
+  // A2 的一个职位：在已定类别下读词库并选关键词。零对外副作用。
+  const planKeywordsFor = async (jobId: string, jobName: string): Promise<void> => {
     if (!account) return
-    setClassBusy(jobId)
-    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
-    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
+    const jobClass = effectiveClass(jobId)
+    if (!jobClass) return
     try {
-      const view = await api.jobPublishClassCandidates(account.platform, account.accountRef, jobId)
-      setClasses((prev) => ({ ...prev, [jobId]: view }))
-      setClassPick((prev) => ({ ...prev, [jobId]: '' }))
+      const plan = await api.jobPublishKeywordPlan(
+        account.platform, account.accountRef, jobId, jobClass,
+      )
+      patch(jobId, { plan, selected: true, skipped: false })
     } catch (reason) {
-      setDraftError((prev) => ({
-        ...prev, [jobId]: `定「${jobName}」的职位类别未成功：${errorText(reason)}`,
-      }))
-      if (reason instanceof DetailedError && reason.diagnostics) {
-        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
-      }
-    } finally {
-      setClassBusy('')
+      failRow(jobId, `给「${jobName}」选关键词未成功`, reason, { skipped: true, selected: false })
     }
   }
 
-  // 发布是唯一不可逆的动作：第一次点只解锁按钮，第二次点才真发。
-  const publish = async (jobId: string, jobName: string) => {
+  // 单独重跑一个职位：类别与关键词都重来。把其余职位已定的类别作为"已占用"
+  // 传进去，模型才会主动避开——否则单独重跑必然撞上别人已经占好的位置。
+  const planOne = async (jobId: string, jobName: string): Promise<void> => {
     if (!account) return
-    if (publishArmed !== jobId) {
-      setPublishArmed(jobId)
+    patch(jobId, { error: undefined, diagnostics: undefined, skipped: false })
+    const occupied = readyRows
+      .filter((row) => row.jobId !== jobId)
+      .map((row) => effectiveClass(row.jobId))
+      .filter(Boolean)
+    try {
+      const result = await api.jobPublishClassPlan(
+        account.platform, account.accountRef, [jobId], occupied,
+      )
+      const assigned = result.jobs.find((row) => row.jobId === jobId)
+      if (!assigned || !assigned.jobClass) {
+        failRow(jobId, `定「${jobName}」的职位类别未成功`,
+          new Error(assigned?.problem || '模型没有给出分配'), { skipped: true, selected: false })
+        return
+      }
+      patch(jobId, { classView: assigned, classPick: undefined, plan: undefined })
+    } catch (reason) {
+      failRow(jobId, `定「${jobName}」的职位类别未成功`, reason, { skipped: true, selected: false })
       return
     }
-    const jobClass = effectiveClass(jobId)
-    if (!jobClass) return
-    setPublishArmed('')
-    setPublishBusy(jobId)
-    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
-    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
-    try {
-      const result = await api.jobPublishPublish(account.platform, account.accountRef, jobId, jobClass)
-      setPublishResult((prev) => ({ ...prev, [jobId]: result }))
-    } catch (reason) {
-      setDraftError((prev) => ({ ...prev, [jobId]: `发布「${jobName}」未成功：${errorText(reason)}` }))
-      if (reason instanceof DetailedError && reason.diagnostics) {
-        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
-      }
-    } finally {
-      setPublishBusy('')
-    }
+    await planKeywordsFor(jobId, jobName)
   }
 
-  const tryDraft = async (jobId: string) => {
+  // 类别被人工改选后重选关键词：只跑第二趟，类别不动。
+  const replanKeywords = async (jobId: string, jobName: string): Promise<void> => {
     if (!account) return
     const jobClass = effectiveClass(jobId)
     if (!jobClass) return
-    setDraftBusy(jobId)
-    setDraftError((prev) => ({ ...prev, [jobId]: '' }))
-    setDraftDiag((prev) => ({ ...prev, [jobId]: {} }))
+    setBusyJob(jobId)
+    patch(jobId, { error: undefined, diagnostics: undefined })
     try {
-      const result = await api.jobPublishPrepareDraft(account.platform, account.accountRef, jobId, jobClass)
-      setDrafts((prev) => ({ ...prev, [jobId]: result.report }))
+      const plan = await api.jobPublishKeywordPlan(
+        account.platform, account.accountRef, jobId, jobClass,
+      )
+      patch(jobId, { plan, selected: true, skipped: false })
     } catch (reason) {
-      setDraftError((prev) => ({ ...prev, [jobId]: errorText(reason) }))
-      // 失败现场快照：卡在哪一步、当时的分组与词库长什么样。没有它就只能靠
-      // 反复重跑去猜，而分组和词库每次都随职位类别变化、事后无从复原。
-      if (reason instanceof DetailedError && reason.diagnostics) {
-        setDraftDiag((prev) => ({ ...prev, [jobId]: reason.diagnostics as Record<string, unknown> }))
+      failRow(jobId, `给「${jobName}」重选关键词未成功`, reason)
+    } finally {
+      setBusyJob('')
+    }
+  }
+
+  // 阶段 A 分三段：A1 收齐全部职位的候选 → 一次全局分配 → A2 逐个选关键词。
+  //
+  // A1 与全局分配合在同一次调用里（脑侧串行跑完全部职位的填页再问模型），所以
+  // 那一段只能给总进度：一次要跑十来分钟，中途没有可上报的里程碑。这是"统一
+  // 分配"的必然形态——候选没收齐就没法通盘决定谁该让开谁。
+  const runPhaseA = async (): Promise<void> => {
+    if (!account) return
+    stopRef.current = false
+    setPhase('planning')
+    setPublishArmed(false)
+    const targets = readyRows
+    try {
+      setCursor({ done: 0, total: targets.length, jobName: '正在收齐候选并统一分配类别' })
+      let planned: JobClassAssignmentView[]
+      try {
+        const result = await api.jobPublishClassPlan(
+          account.platform, account.accountRef, targets.map((row) => row.jobId),
+        )
+        planned = result.jobs
+        setAttempts(result.attempts ?? [])
+        setBatchError('')
+      } catch (reason) {
+        setBatchError(`统一分配职位类别未成功：${errorText(reason)}`)
+        return
       }
+      setRows((prev) => {
+        const next = { ...prev }
+        for (const assigned of planned) {
+          next[assigned.jobId] = {
+            ...next[assigned.jobId],
+            classView: assigned,
+            classPick: undefined,
+            plan: undefined,
+            error: assigned.jobClass ? undefined : assigned.problem,
+            skipped: !assigned.jobClass,
+            selected: false,
+          }
+        }
+        return next
+      })
+
+      // A2：只给分到类别的职位选关键词。没分到的已经标记跳过，不占用页面。
+      const withClass = planned.filter((assigned) => Boolean(assigned.jobClass))
+      for (const [index, assigned] of withClass.entries()) {
+        if (stopRef.current) break
+        setCursor({ done: index, total: withClass.length, jobName: assigned.jobName })
+        await planKeywordsFor(assigned.jobId, assigned.jobName)
+      }
+    } finally {
+      setCursor(null)
+      setPhase('idle')
+    }
+  }
+
+  const publishOne = async (jobId: string, jobName: string): Promise<void> => {
+    if (!account) return
+    const jobClass = effectiveClass(jobId)
+    const keywords = rows[jobId]?.plan?.keywords ?? []
+    if (!jobClass || keywords.length === 0) return
+    patch(jobId, { error: undefined, diagnostics: undefined })
+    try {
+      const result = await api.jobPublishPublish(
+        account.platform, account.accountRef, jobId, jobClass, keywords,
+      )
+      patch(jobId, { publishResult: result })
+    } catch (reason) {
+      // 甲方 2026-07-31 裁决：单条干净失败或 suspect 跳过当前、继续下一个。
+      // suspect 的意图按账本纪律永久冻结等人裁决，绝不在本批内重试。
+      failRow(jobId, `发布「${jobName}」未成功`, reason)
+    }
+  }
+
+  const runPhaseB = async (): Promise<void> => {
+    if (!account) return
+    if (!publishArmed) {
+      setPublishArmed(true)
+      return
+    }
+    setPublishArmed(false)
+    stopRef.current = false
+    setPhase('publishing')
+    const targets = readyRows.filter((row) => rows[row.jobId]?.selected && decided(row.jobId))
+    try {
+      for (const [index, row] of targets.entries()) {
+        if (stopRef.current) break
+        setCursor({ done: index, total: targets.length, jobName: row.jobName })
+        await publishOne(row.jobId, row.jobName)
+      }
+    } finally {
+      setCursor(null)
+      setPhase('idle')
+    }
+  }
+
+  const tryDraft = async (jobId: string, jobName: string): Promise<void> => {
+    if (!account) return
+    const jobClass = effectiveClass(jobId)
+    const keywords = rows[jobId]?.plan?.keywords ?? []
+    if (!jobClass || keywords.length === 0) return
+    setDraftBusy(jobId)
+    patch(jobId, { error: undefined, diagnostics: undefined })
+    try {
+      const result = await api.jobPublishPrepareDraft(
+        account.platform, account.accountRef, jobId, jobClass, keywords,
+      )
+      patch(jobId, { draft: result.report })
+    } catch (reason) {
+      failRow(jobId, `试填「${jobName}」未成功`, reason)
     } finally {
       setDraftBusy('')
     }
   }
 
-  // 三步共用一条忙碌闸:同一时刻只允许一条链路占用页面。
-  const busy = classBusy !== '' || draftBusy !== '' || publishBusy !== ''
-  const ready = view.rows.filter((row) => row.verdict === 'ready')
-  const others = view.rows.filter((row) => row.verdict !== 'ready')
+  const running = phase !== 'idle'
+  const busy = running || busyJob !== '' || draftBusy !== ''
+  const selectable = readyRows.filter((row) => decided(row.jobId))
+  const selectedCount = selectable.filter((row) => rows[row.jobId]?.selected).length
+  const skippedCount = readyRows.filter((row) => rows[row.jobId]?.skipped).length
+  const publishedCount = readyRows.filter((row) => rows[row.jobId]?.publishResult).length
+  const collisionCount = Object.keys(collisionsNow).length
+
   return (
     <div className="publish-precheck">
       <div className="publish-precheck-head">
         <strong>预检结论</strong>
         <small>
-          可发布 {ready.length} 个 · 平台现存 {view.platformPostingCount} 个职位
+          可发布 {readyRows.length} 个 · 平台现存 {view.platformPostingCount} 个职位
           {at && ` · 预检于 ${at}`}
         </small>
       </div>
+
+      <div className="publish-loop-bar">
+        <button
+          type="button"
+          disabled={busy || !account || readyRows.length === 0}
+          title="先收齐全部职位的类别候选并统一分配（尽量互不相同），再逐个读词库选关键词。全程零对外副作用，跑砸了随时重来"
+          onClick={() => void runPhaseA()}
+        >
+          {phase === 'planning' ? '正在选…' : `阶段 A：统一定类别与关键词（${readyRows.length} 个）`}
+        </button>
+        <button
+          type="button"
+          className={publishArmed ? 'danger-button' : undefined}
+          disabled={busy || !account || selectedCount === 0}
+          title={selectedCount > 0
+            ? '逐个真正发布到平台，求职者立刻可见；不可撤销，只能到平台手动下架'
+            : '先跑阶段 A，并在下面勾选要发的职位'}
+          onClick={() => void runPhaseB()}
+        >
+          {phase === 'publishing'
+            ? '正在发布…'
+            : publishArmed
+              ? `确认发布这 ${selectedCount} 个？再点一次`
+              : `确认发布（共 ${selectedCount} 个）`}
+        </button>
+        {running && (
+          <button type="button" className="danger-button" onClick={() => { stopRef.current = true }}>
+            跑完当前这个就停
+          </button>
+        )}
+        {cursor && (
+          <small className="publish-loop-cursor">
+            {phase === 'publishing' ? '正在发布' : '正在处理'} {cursor.done + 1}/{cursor.total}：
+            {cursor.jobName}
+          </small>
+        )}
+        {!running && (selectedCount > 0 || skippedCount > 0 || publishedCount > 0) && (
+          <small className="publish-loop-cursor">
+            已选定 {selectable.length} 个 · 勾选 {selectedCount} 个
+            {skippedCount > 0 && ` · 跳过 ${skippedCount} 个`}
+            {publishedCount > 0 && ` · 已发 ${publishedCount} 个`}
+            {collisionCount > 0 && ` · ${collisionCount} 个类别被多个职位共用`}
+          </small>
+        )}
+      </div>
+      {batchError && <p className="publish-precheck-issue">{batchError}</p>}
+      {attempts.length > 1 && (
+        <p className="publish-precheck-notice">大模型分配尝试：{attempts.join('、')}</p>
+      )}
+      {collisionCount > 0 && (
+        <p className="publish-precheck-notice">
+          有 {collisionCount} 个类别被多个职位共用。同类别的职位会被平台推给同一批人，
+          发多个职位的扩池效果会打折——可以在下面逐个改选，也可以就这样发。
+        </p>
+      )}
+
       <ul className="publish-precheck-list">
-        {[...ready, ...others].map((row) => (
-          <li key={row.jobId} className={`is-${row.verdict}`}>
-            <div className="publish-precheck-row">
-              <span className="publish-precheck-verdict">{PUBLISH_VERDICT_LABEL[row.verdict] || row.verdict}</span>
-              <strong>{row.jobName || '未命名职位'}</strong>
-              {row.isCurrent && <em className="backend-jobs-current">当前职位</em>}
-              <code>#{row.jobId}</code>
-              {row.verdict === 'ready' && (
-                <button
-                  type="button"
-                  disabled={busy || !account}
-                  title="读平台给这个职位的类别候选并定下用哪个；不会填其余字段、不会发布"
-                  onClick={() => void resolveClass(row.jobId, row.jobName)}
-                >
-                  {classBusy === row.jobId
-                    ? '正在读候选…'
-                    : classes[row.jobId] ? '重新定类别' : '① 定职位类别'}
-                </button>
+        {[...readyRows, ...otherRows].map((row) => {
+          const state = rows[row.jobId] ?? {}
+          const stale = planStale(row.jobId)
+          return (
+            <li key={row.jobId} className={`is-${row.verdict}`}>
+              <div className="publish-precheck-row">
+                {row.verdict === 'ready' && decided(row.jobId) && (
+                  <label className="publish-precheck-pick" title="不勾选就不发这一个">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(state.selected)}
+                      disabled={running}
+                      onChange={(event) => patch(row.jobId, { selected: event.target.checked })}
+                    />
+                  </label>
+                )}
+                <span className="publish-precheck-verdict">
+                  {PUBLISH_VERDICT_LABEL[row.verdict] || row.verdict}
+                </span>
+                <strong>{row.jobName || '未命名职位'}</strong>
+                {row.isCurrent && <em className="backend-jobs-current">当前职位</em>}
+                <code>#{row.jobId}</code>
+                {state.plan && !stale && (
+                  <em className="publish-precheck-decided">
+                    {effectiveClass(row.jobId)} · {state.plan.keywords.join(' ')}
+                  </em>
+                )}
+                {row.verdict === 'ready' && !state.publishResult && (
+                  <button
+                    type="button"
+                    disabled={busy || !account}
+                    title="只重跑这一个职位的阶段 A"
+                    onClick={() => {
+                      setBusyJob(row.jobId)
+                      void planOne(row.jobId, row.jobName).finally(() => setBusyJob(''))
+                    }}
+                  >
+                    {busyJob === row.jobId ? '正在选…' : state.plan ? '重选' : '单独选一次'}
+                  </button>
+                )}
+                {row.verdict === 'ready' && stale && (
+                  <button
+                    type="button"
+                    disabled={busy || !account}
+                    title="类别改了，词库跟着变，必须按新类别重选关键词"
+                    onClick={() => void replanKeywords(row.jobId, row.jobName)}
+                  >
+                    重选关键词
+                  </button>
+                )}
+                {row.verdict === 'ready' && decided(row.jobId) && (
+                  <button
+                    type="button"
+                    disabled={busy || !account}
+                    title="在发布页试填一次并回读，不会点击发布。排障用，不在循环里"
+                    onClick={() => void tryDraft(row.jobId, row.jobName)}
+                  >
+                    {draftBusy === row.jobId ? '正在试填…' : '试填一次'}
+                  </button>
+                )}
+              </div>
+              {state.error && <p className="publish-precheck-issue">{state.error}</p>}
+              {state.diagnostics && Object.keys(state.diagnostics).length > 0 && (
+                <DraftDiagnosticsBlock diagnostics={state.diagnostics} />
               )}
-              {row.verdict === 'ready' && (
-                <button
-                  type="button"
-                  disabled={busy || !account || !effectiveClass(row.jobId)}
-                  title={effectiveClass(row.jobId)
-                    ? '在发布页试填一次并回读，不会点击发布'
-                    : '先定职位类别：关键词弹层要等类别定下才打得开'}
-                  onClick={() => void tryDraft(row.jobId)}
-                >
-                  {draftBusy === row.jobId ? '正在试填…' : '② 试填一次'}
-                </button>
+              {state.classView && (
+                <JobClassBlock
+                  view={state.classView}
+                  effective={effectiveClass(row.jobId)}
+                  collidesWith={collidesWith(row.jobId, row.jobName)}
+                  onPick={(name) => patch(row.jobId, { classPick: name })}
+                />
               )}
-              {row.verdict === 'ready' && !publishResult[row.jobId] && (
-                <button
-                  type="button"
-                  className={publishArmed === row.jobId ? 'danger-button' : undefined}
-                  disabled={busy || !account || !effectiveClass(row.jobId)}
-                  title={effectiveClass(row.jobId)
-                    ? '真正发布到平台，求职者立刻可见；不可撤销，只能到平台手动下架'
-                    : '先定职位类别'}
-                  onClick={() => void publish(row.jobId, row.jobName)}
-                >
-                  {publishBusy === row.jobId
-                    ? '正在发布…'
-                    : publishArmed === row.jobId
-                      ? `确认以「${effectiveClass(row.jobId)}」发布？再点一次`
-                      : '③ 发布到平台'}
-                </button>
-              )}
-            </div>
-            {draftError[row.jobId] && (
-              <p className="publish-precheck-issue">{draftError[row.jobId]}</p>
-            )}
-            {draftDiag[row.jobId] && Object.keys(draftDiag[row.jobId]).length > 0 && (
-              <DraftDiagnosticsBlock diagnostics={draftDiag[row.jobId]} />
-            )}
-            {classes[row.jobId] && (
-              <JobClassBlock
-                view={classes[row.jobId]}
-                effective={effectiveClass(row.jobId)}
-                onPick={(name) => setClassPick((prev) => ({ ...prev, [row.jobId]: name }))}
-              />
-            )}
-            {publishResult[row.jobId] && <PublishResultBlock result={publishResult[row.jobId]} />}
-            {drafts[row.jobId] && <DraftReportBlock report={drafts[row.jobId]} />}
-            {row.issues?.map((issue, index) => (
-              <p key={`i-${index}`} className="publish-precheck-issue">
-                {issue.field ? `${issue.field}：` : ''}{issue.message}
-              </p>
-            ))}
-            {row.notices?.map((notice, index) => (
-              <p key={`n-${index}`} className="publish-precheck-notice">
-                {notice.field ? `${notice.field}：` : ''}{notice.message}
-              </p>
-            ))}
-          </li>
-        ))}
+              {state.plan && <KeywordPlanBlock plan={state.plan} stale={stale} />}
+              {state.publishResult && <PublishResultBlock result={state.publishResult} />}
+              {state.draft && <DraftReportBlock report={state.draft} />}
+              {row.issues?.map((issue, index) => (
+                <p key={`i-${index}`} className="publish-precheck-issue">
+                  {issue.field ? `${issue.field}：` : ''}{issue.message}
+                </p>
+              ))}
+              {row.notices?.map((notice, index) => (
+                <p key={`n-${index}`} className="publish-precheck-notice">
+                  {notice.field ? `${notice.field}：` : ''}{notice.message}
+                </p>
+              ))}
+            </li>
+          )
+        })}
       </ul>
       {view.rows.length === 0 && <p className="m5-ai-empty">后台没有可预检的启用职位。</p>}
     </div>
@@ -447,7 +736,6 @@ function BackendJobsTable({ account }: { account: AccountView | null }) {
               <th scope="col">环境</th>
               <th scope="col">文档</th>
               <th scope="col">发布参数</th>
-              <th scope="col">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -469,13 +757,6 @@ function BackendJobsTable({ account }: { account: AccountView | null }) {
                 </td>
                 <td className={`backend-jobs-params is-${job.publishParams}`}>
                   {PUBLISH_PARAMS_LABEL[job.publishParams] || job.publishParams}
-                </td>
-                <td>
-                  {job.publishParams === 'present' ? (
-                    <button type="button" disabled title="发布能力尚未实现">发布到智联</button>
-                  ) : (
-                    <span className="backend-jobs-none">—</span>
-                  )}
                 </td>
               </tr>
             ))}
