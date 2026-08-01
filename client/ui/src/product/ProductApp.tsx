@@ -5,6 +5,7 @@ import { ConfirmationPage } from './components/ConfirmationPage'
 import { HomePage } from './components/HomePage'
 import { ProductSidebar } from './components/ProductSidebar'
 import { SettingsPage } from './components/SettingsPage'
+import { UpdateBanner } from './components/UpdateBanner'
 import type { ProductUpdateStatus } from './api'
 import { createEmptyProductData, createProductFixture } from './fixtures'
 import type {
@@ -84,6 +85,9 @@ export function ProductApp({
     setDrawerReadError(null)
   }
 
+  const workflowActive = data.overview.workflow.state === 'running'
+    || data.overview.workflow.state === 'awaitingConfirmation'
+
   let content: JSX.Element
   if (activePage === 'home') {
     content = (
@@ -125,6 +129,7 @@ export function ProductApp({
     <div className="rh-product-app">
       <ProductSidebar
         activePage={activePage}
+        candidateTotals={data.candidateTotals}
         confirmationBadge={data.confirmationBadge}
         customerName={data.customer.name}
         customerShortName={data.customer.shortName}
@@ -132,14 +137,10 @@ export function ProductApp({
         onNavigate={navigate}
         onSearch={setGlobalSearch}
         searchValue={globalSearch}
-        updateStatus={updateStatus ?? null}
         version={data.clientVersion}
-        workflowActive={
-          data.overview.workflow.state === 'running'
-          || data.overview.workflow.state === 'awaitingConfirmation'
-        }
       />
       <main className="rh-product-main">
+        <UpdateBanner status={updateStatus ?? null} workflowActive={workflowActive} />
         {fixtureNotice && <div className="rh-fixture-notice">{fixtureNotice}</div>}
         {statusMessage && (
           <div className="rh-product-notice">

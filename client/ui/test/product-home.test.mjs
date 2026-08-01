@@ -42,6 +42,11 @@ const overview = {
   refreshedAt: null,
   businessWindowLabel: '运行时间 08:00～24:00',
   businessWindowOpen: true,
+  homeStatus: {
+    label: '沟通中',
+    hint: '正在自动回复候选人消息。',
+    tone: 'running',
+  },
   workflow: {
     mode: 'replyOnly',
     state: 'running',
@@ -73,8 +78,8 @@ const overview = {
     greeted: 0,
     greetingDisplayTarget: 100,
     newReplies: 0,
+    newWechat: 0,
     newInterviews: 0,
-    elapsedInterviews: 0,
   },
 }
 const actions = {
@@ -84,14 +89,13 @@ const actions = {
   endWorkflow() {},
 }
 
-function render(workflowOverrides = {}, overviewOverrides = {}) {
+function render(workflowOverrides = {}) {
   return renderToStaticMarkup(createElement(HomePage, {
     actions,
     customer,
     onOpenConfirmation() {},
     overview: {
       ...overview,
-      ...overviewOverrides,
       workflow: { ...overview.workflow, ...workflowOverrides },
     },
   }))
@@ -104,34 +108,38 @@ function buttons(markup) {
   }))
 }
 
+// 运行中的控制 2026-07-31 收成一条:唯一的刹车是「结束」,暂停与「再采一批」已从
+// 客户界面撤下(脑侧能力都还在)。原先针对那两个按钮的断言随之删除——它们测的
+// 是不再存在的 UI,留着只会在下次重构时再红一次。
 const withoutAuthorization = render()
-assert.equal(withoutAuthorization.includes('结束本次任务'), false,
+assert.equal(buttons(withoutAuthorization).some((button) => button.text === '结束'), false,
   '后端未授权 canEnd 时不得显示结束入口')
 
 const authorized = render({ canEnd: true })
-assert.equal(buttons(authorized).find((button) => button.text === '结束本次任务')?.html.includes('disabled'), false,
+assert.equal(buttons(authorized).find((button) => button.text === '结束')?.html.includes('disabled'), false,
   '后端授权后显示可点击的普通用户结束入口')
 
-const sourcingPending = render({ canEnd: true, canAddBatch: true, pendingAction: 'sourcing' })
-assert.match(sourcingPending, /当前候选人处理完后开始新一批/u)
-assert.ok(buttons(sourcingPending).find((button) => button.text === '新一批已安排')?.html.includes('disabled'),
-  '待切换采集时重复追加保持可见但禁用')
-assert.ok(buttons(sourcingPending).find((button) => button.text === '结束本次任务')?.html.includes('disabled'),
+const sourcingPending = render({ canEnd: true, pendingAction: 'sourcing' })
+assert.match(sourcingPending, /当前候选人处理完后会开始新一批/u,
+  '待切换采集时说明为什么结束入口点不动')
+assert.ok(buttons(sourcingPending).find((button) => button.text === '结束')?.html.includes('disabled'),
   '待切换采集时结束入口保持可见但禁用')
 
-const endPending = render({ canEnd: true, canAddBatch: true, pendingAction: 'end' })
-assert.match(endPending, /正在结束当前候选人…/u)
-const endPendingButtons = buttons(endPending).filter((button) =>
-  button.text === '暂停' || button.text === '再采一批（150 人）' || button.text === '正在结束…'
-)
-assert.deepEqual(
-  endPendingButtons.map((button) => button.text),
-  ['暂停', '再采一批（150 人）', '正在结束…'],
-  '待结束时三个运行控制都应保持可见',
-)
+const endPending = render({ canEnd: true, pendingAction: 'end' })
+assert.match(endPending, /正在结束当前候选人，请稍候/u,
+  '待结束时说明为什么结束入口点不动')
+const endPendingButton = buttons(endPending).find((button) => button.text === '正在结束…')
+assert.ok(endPendingButton, '待结束时结束入口改说正在结束')
+assert.ok(endPendingButton.html.includes('disabled'),
+  '待结束时结束入口保持可见但禁用')
+
+// 首页那句话由 data.ts 的 homeStatus 算好后原样渲染,HomePage 不自己拼文案。
+// "等待确认人数取 funnel.pending 而不是本批选中总数"归 product-data 测——那才是
+// 算它的层;放在这里只能断言一个自己编的字符串,证明不了任何事。
+const statusCard = render()
 assert.ok(
-  endPendingButtons.every((button) => button.html.includes('disabled')),
-  '待结束时首页其余运行控制全部禁用',
+  statusCard.includes(overview.homeStatus.label) && statusCard.includes(overview.homeStatus.hint),
+  '状态卡原样显示 homeStatus 的说法与说明',
 )
 
 let endRequests = 0
@@ -149,19 +157,6 @@ assert.equal(confirmationMessage, END_WORKFLOW_CONFIRMATION,
   '结束操作先展示固定中文确认说明')
 assert.equal(endRequests, 0,
   '用户取消确认时不得调用结束工作流写入口')
-
-// 等待确认的人数取 funnel.pending，不是本批选中总数:生成失败、推荐流已变化、
-// 不再可发送的都算在选中数里，用它会让首页说得比侧栏徽章多。
-const awaitingConfirmation = render({ state: 'awaitingConfirmation' }, {
-  funnel: {
-    stage: 'awaitingConfirmation', stateLabel: '等待候选确认',
-    target: 30, pending: 18, failed: 0, latestFailure: null, stages: [],
-  },
-})
-assert.match(awaitingConfirmation, /18 位候选人的招呼语等待确认/u,
-  '首页等待确认人数取 funnel.pending')
-assert.doesNotMatch(awaitingConfirmation, /30 位候选人的招呼语等待确认/u,
-  '不得把本批选中总数当成等待确认人数')
 
 await confirmEndWorkflow(
   () => true,
