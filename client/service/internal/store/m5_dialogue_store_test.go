@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -627,6 +628,47 @@ func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {
 		t.Fatalf("reasoning_content 非空必须阻断: turn=%+v err=%v", result, err)
 	}
 	assertTrialManualRequired(t, s, "reasoningUsageUnsafe")
+}
+
+// FailAIInvocationForRetry 是重试链的中间步骤,它的全部契约就是"只落这一次
+// 失败,不碰 turn"。turn 必须原地不动,否则下一次 attempt 会因状态校验被拒;
+// 同一 attempt 不得再被预留,下一个 attempt 必须能接着开。
+func TestFailAIInvocationForRetryKeepsTurnWaitingAndOpensNextAttempt(t *testing.T) {
+	s := openTest(t)
+	_, turn := seedFrozenDialogueTurn(t, s, "profile-retry-midchain")
+	reserve := func(attempt int) (*ReserveAIInvocationResult, error) {
+		return s.ReserveAIInvocation(ReserveAIInvocationRequest{
+			InvocationID: fmt.Sprintf("invocation-retry-midchain-%d", attempt),
+			TurnID:       turn.TurnID, Purpose: m5ai.PurposeIntent, Attempt: attempt,
+			Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-retry-midchain",
+		})
+	}
+	first, err := reserve(1)
+	if err != nil || !first.Created {
+		t.Fatalf("首次预留失败: first=%+v err=%v", first, err)
+	}
+	if err := s.FailAIInvocationForRetry(AIInvocationCompletion{
+		InvocationID: first.Invocation.InvocationID, Status: AIInvocationProviderRejected,
+		ErrorClass: "rateLimited", FinishedAt: time.Now().UTC().Truncate(time.Millisecond),
+	}, m5ai.PurposeIntent); err != nil {
+		t.Fatalf("落中间失败事实: %v", err)
+	}
+
+	stored, err := s.DialogueTurnByID(turn.TurnID)
+	if err != nil || stored == nil || stored.Status != DialogueTurnCollected || stored.FailureReason != "" {
+		t.Fatalf("中间失败不得推进 turn: turn=%+v err=%v", stored, err)
+	}
+	again, err := reserve(1)
+	if err != nil || again.Created || again.Invocation.FinishedAt == nil {
+		t.Fatalf("同一 attempt 不得再次授权调用: again=%+v err=%v", again, err)
+	}
+	next, err := reserve(2)
+	if err != nil || !next.Created {
+		t.Fatalf("下一个 attempt 必须能接着开: next=%+v err=%v", next, err)
+	}
+	if _, err := reserve(MaxAIInvocationAttempts + 1); !errors.Is(err, ErrAIInvocationInvalid) {
+		t.Fatalf("超出上限的 attempt 必须被拒: err=%v", err)
+	}
 }
 
 func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
