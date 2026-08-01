@@ -345,10 +345,10 @@
           },
           "expected": {
             "status": "ok",
-            "slotCount": 84,
+            "slotCount": 120,
             "firstSlot": "2026-07-10 15:00:00",
             "lastSlot": "2026-07-23 17:00:00",
-            "weekendSlotCount": 0,
+            "weekendSlotCount": 36,
             "dayOffset14Included": false
           }
         },

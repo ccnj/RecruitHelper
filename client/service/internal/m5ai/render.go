@@ -248,12 +248,15 @@ var interviewWeekdayByGoWeekday = map[time.Weekday]string{
 	time.Saturday: "周六", time.Sunday: "周日",
 }
 
-// DefaultInterviewSchedule 是没有任何本机配置时的内置周表：周一至周五
-// [09:00,18:00)、周末空。这个值与可配置化之前硬编码的窗口逐字节等价，
-// 未配置的客户端升级后生成的时段列表不会漂移。
+// DefaultInterviewSchedule 是没有任何本机配置时的内置周表：七天全部
+// [09:00,18:00)（2026-08-01 甲方裁决，此前为周一至周五、周末空）。
+//
+// 招聘沟通里周末本就是可约面的，剔除周末等于默认少给两天可选。改动只影响
+// 未配置的客户端：它们升级后会开始把周末排进推荐时段。已配置的客户端读自己
+// 的周表，不受影响；已冻结的 turn 与已约出去的面试同样不受影响。
 func DefaultInterviewSchedule() InterviewSchedule {
 	schedule := make(InterviewSchedule, len(InterviewWeekdays))
-	for _, day := range InterviewWeekdays[:5] {
+	for _, day := range InterviewWeekdays {
 		schedule[day] = []InterviewWindow{{Start: "09:00", End: "18:00"}}
 	}
 	return schedule

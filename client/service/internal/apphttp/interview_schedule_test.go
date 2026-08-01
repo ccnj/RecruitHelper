@@ -23,8 +23,11 @@ func postSchedule(t *testing.T, handler http.Handler, body string) *httptest.Res
 }
 
 // 读端补齐七天 key：空天返回空数组而不是缺 key，前端不必区分 undefined 与 []。
+// 用只排了周三的表来验——内置默认现在七天全满，拿它测不出补齐行为。
 func TestInterviewScheduleGetReturnsAllSevenDays(t *testing.T) {
-	handler := newTestAPI(t, &fakeProjections{})
+	handler := newTestAPI(t, &fakeProjections{schedule: m5ai.InterviewSchedule{
+		"周三": {{Start: "14:00", End: "16:00"}},
+	}})
 	res := request(t, handler, http.MethodGet, "/app/interview-schedule", "127.0.0.1:5000", testBearer)
 	if res.Code != http.StatusOK {
 		t.Fatalf("状态码=%d body=%s", res.Code, res.Body.String())
@@ -42,11 +45,34 @@ func TestInterviewScheduleGetReturnsAllSevenDays(t *testing.T) {
 	if len(body.Weekdays) != 7 || body.Weekdays[0] != "周一" || body.Weekdays[6] != "周日" {
 		t.Fatalf("星期顺序应由脑侧给出: %v", body.Weekdays)
 	}
-	if windows, ok := body.Schedule["周六"]; !ok || windows == nil || len(windows) != 0 {
-		t.Fatalf("空天应为空数组而非缺 key: %+v", body.Schedule["周六"])
+	for _, day := range []string{"周一", "周二", "周四", "周五", "周六", "周日"} {
+		if windows, ok := body.Schedule[day]; !ok || windows == nil || len(windows) != 0 {
+			t.Fatalf("%s 空天应为空数组而非缺 key: %+v", day, body.Schedule[day])
+		}
 	}
-	if len(body.Schedule["周一"]) != 1 || body.Schedule["周一"][0].Start != "09:00" {
-		t.Fatalf("未配置时应返回内置默认: %+v", body.Schedule["周一"])
+	if len(body.Schedule["周三"]) != 1 || body.Schedule["周三"][0].Start != "14:00" {
+		t.Fatalf("已配置的天应原样返回: %+v", body.Schedule["周三"])
+	}
+}
+
+// 未配置时返回内置默认——七天全 09:00-18:00（2026-08-01 裁决含周末）。
+func TestInterviewScheduleGetFallsBackToBuiltinDefault(t *testing.T) {
+	handler := newTestAPI(t, &fakeProjections{})
+	res := request(t, handler, http.MethodGet, "/app/interview-schedule", "127.0.0.1:5000", testBearer)
+	if res.Code != http.StatusOK {
+		t.Fatalf("状态码=%d body=%s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Schedule map[string][]m5ai.InterviewWindow `json:"schedule"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, day := range []string{"周一", "周五", "周六", "周日"} {
+		windows := body.Schedule[day]
+		if len(windows) != 1 || windows[0].Start != "09:00" || windows[0].End != "18:00" {
+			t.Fatalf("%s 内置默认漂移: %+v", day, windows)
+		}
 	}
 }
 

@@ -62,11 +62,12 @@ export function countHours(schedule: InterviewSchedule, weekdays: string[]): num
   return weekdays.reduce((total, day) => total + expandToCells(schedule[day]).size, 0)
 }
 
+/** 与脑侧 m5ai.DefaultInterviewSchedule 保持一致：七天全 09:00-18:00。 */
 export function defaultSchedule(weekdays: string[]): InterviewSchedule {
   const schedule: InterviewSchedule = {}
-  weekdays.forEach((day, index) => {
-    schedule[day] = index < 5 ? [{ start: '09:00', end: '18:00' }] : []
-  })
+  for (const day of weekdays) {
+    schedule[day] = [{ start: '09:00', end: '18:00' }]
+  }
   return schedule
 }
 
