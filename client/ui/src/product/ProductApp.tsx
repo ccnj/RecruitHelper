@@ -125,6 +125,7 @@ export function ProductApp({
     <div className="rh-product-app">
       <ProductSidebar
         activePage={activePage}
+        candidateTotals={data.candidateTotals}
         confirmationBadge={data.confirmationBadge}
         customerName={data.customer.name}
         customerShortName={data.customer.shortName}

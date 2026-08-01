@@ -192,6 +192,20 @@
   background: rgba(255, 255, 255, 0.24);
 }
 
+/* 只读阶段页的存量计数。刻意不给底色、不加粗:它跟上面的红色徽章必须一眼分得开,
+   否则红色就不再意味着"该你动手了"。tabular-nums 让几行数字右边缘对齐。
+   窄屏(900px)下它会被 .rh-nav-item > span:not(.rh-nav-badge) 那条规则一并隐藏,
+   这是要的效果——图标角上糊一串小灰字既读不出也挡图标。 */
+.rh-nav-count {
+  color: var(--rh-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rh-nav-item.is-active .rh-nav-count {
+  color: rgba(255, 255, 255, 0.78);
+}
+
 .rh-sidebar-bottom {
   display: flex;
   flex-direction: column;
