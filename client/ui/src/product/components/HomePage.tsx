@@ -105,23 +105,13 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
         </button>
       </section>
 
-      <section className="rh-panel rh-status-card">
+      <section className={`rh-panel rh-status-card is-${overview.homeStatus.tone}`}>
+        <span className="rh-status-rail" aria-hidden="true" />
         <div className="rh-status-head">
-          <span className={`rh-status-dot is-${overview.homeStatus.tone}`} />
+          <span className="rh-status-dot" aria-hidden="true" />
           <div className="rh-status-copy">
             <h2>{overview.homeStatus.label}</h2>
             <p>{overview.homeStatus.hint}</p>
-            {(workflow.state === 'idle' || workflow.state === 'failed') && (
-              <button
-                className="rh-status-alt"
-                disabled={startReplyReason !== null}
-                onClick={() => void actions.startWorkflow?.('replyOnly')}
-                title={startReplyReason ?? undefined}
-                type="button"
-              >
-                只回复消息，不招新人
-              </button>
-            )}
           </div>
           <div className="rh-task-actions">
             {(workflow.state === 'idle' || workflow.state === 'failed') && (
@@ -133,7 +123,18 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                 type="button"
               >
                 <ProductIcon name="play" size={17} />
-                {workflow.state === 'failed' ? '重新开始' : '开始今天的招聘'}
+                {workflow.state === 'failed' ? '重新开始' : '开始全流程'}
+              </button>
+            )}
+            {(workflow.state === 'idle' || workflow.state === 'failed') && (
+              <button
+                className="rh-button is-quiet"
+                disabled={startReplyReason !== null}
+                onClick={() => void actions.startWorkflow?.('replyOnly')}
+                title={startReplyReason ?? '不采新人，只回复已经在聊的候选人'}
+                type="button"
+              >
+                只回复消息
               </button>
             )}
             {(workflow.state === 'paused' || workflow.state === 'waitingDailyWindow') && (
@@ -170,7 +171,7 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
                 title={endReason ?? undefined}
                 type="button"
               >
-                {pendingEnd ? '正在结束…' : '结束本次任务'}
+                {pendingEnd ? '正在结束…' : '结束'}
               </button>
             )}
           </div>
