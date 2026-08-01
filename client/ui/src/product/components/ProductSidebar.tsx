@@ -1,7 +1,5 @@
-import type { ProductUpdateStatus } from '../api'
 import type { CandidateView, ProductPage } from '../types'
 import { ProductIcon, type ProductIconName } from './ProductIcon'
-import { UpdateBanner } from './UpdateBanner'
 
 interface NavItem {
   key: ProductPage
@@ -35,8 +33,6 @@ interface ProductSidebarProps {
   candidateTotals: Record<CandidateView, number>
   searchValue: string
   version: string
-  updateStatus: ProductUpdateStatus | null
-  workflowActive: boolean
   onNavigate: (page: ProductPage) => void
   onSearch: (value: string) => void
 }
@@ -50,8 +46,6 @@ export function ProductSidebar({
   candidateTotals,
   searchValue,
   version,
-  updateStatus,
-  workflowActive,
   onNavigate,
   onSearch,
 }: ProductSidebarProps) {
@@ -104,7 +98,6 @@ export function ProductSidebar({
           />
         </label>
         <div className="rh-sidebar-version">AI增员助手 v{version}</div>
-        <UpdateBanner status={updateStatus} workflowActive={workflowActive} />
       </div>
     </aside>
   )
