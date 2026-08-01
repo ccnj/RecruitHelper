@@ -26,14 +26,16 @@ func TestJobClassOutputTokensScalesWithJobsAndStaysInBudget(t *testing.T) {
 		}
 	}
 
-	// 当前上限恰好够 12 个职位；第 13 个开始就要被截断。这个数字是"一批最多
-	// 发几个职位"的实际天花板，改动 ReplyOutputTokenLimit 或每条开销估算时
-	// 必须重新核对它。
-	full := (m5ai.ReplyOutputTokenLimit - jobClassTokensWrapper) / jobClassTokensPerJob
-	if full != 12 {
-		t.Fatalf("输出预算够用的职位数变了: %d（原为 12），请复核规格与提示词开销", full)
+	// 分块大小必须由输出预算推出来，不能是拍的：一块的输出恰好用得满、又不
+	// 越界。改动 ReplyOutputTokenLimit 或每条开销估算时这条会先红。
+	chunk := jobClassChunkSize()
+	if chunk != 12 {
+		t.Fatalf("分块大小变了: %d（原为 12），请复核输出预算与每条开销估算", chunk)
 	}
-	if jobClassOutputTokens(full) != m5ai.ReplyOutputTokenLimit {
-		t.Fatalf("%d 个职位应当刚好用满预算", full)
+	if jobClassOutputTokens(chunk) != m5ai.ReplyOutputTokenLimit {
+		t.Fatalf("一块 %d 个职位应当刚好用满预算，实得 %d", chunk, jobClassOutputTokens(chunk))
+	}
+	if jobClassOutputTokens(chunk+1) != m5ai.ReplyOutputTokenLimit {
+		t.Fatal("越界那一档必须被收回上限，否则 provider 会直接判 budgetBlocked")
 	}
 }

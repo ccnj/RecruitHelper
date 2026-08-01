@@ -48,9 +48,9 @@ const (
 
 // jobClassOutputTokens 按本批职位数申请输出预算,并收在回复输出上限之内。
 //
-// 撑不下时不会给出半个 JSON 就算数:模型被截断 → 解析失败 → 重试 3 次 → 整批
-// A 干净失败(零副作用,可重跑),失败分类会如实报给运营。宁可这样,也不要一个
-// 被截断后侥幸解析成功、少了几个职位的分配表。
+// 撑不下时不会给出半个 JSON 就算数:模型被截断 → 解析失败 → 重试 3 次 → 该块
+// 干净失败(零副作用,可重跑)。宁可这样,也不要一个被截断后侥幸解析成功、少了
+// 几个职位的分配表。真正让它撑不下的情况由 jobClassChunkSize 事先避开。
 func jobClassOutputTokens(jobCount int) int {
 	want := jobClassTokensWrapper + jobClassTokensPerJob*jobCount
 	if want < m5ai.JobClassOutputTokenLimit {
@@ -60,6 +60,21 @@ func jobClassOutputTokens(jobCount int) int {
 		want = m5ai.ReplyOutputTokenLimit
 	}
 	return want
+}
+
+// jobClassChunkSize 是一次模型调用最多带几个职位。它**由输出预算推出来**,
+// 不是拍的:回复输出上限扣掉外层结构,再按每条分配的开销均分。
+//
+// 为什么分块而不是把输出预算也放宽:输入预算放宽已经由甲方 2026-08-01 裁决,
+// 输出没有。而分块根本不需要放宽——把前几块已经占用的类别作为 occupied 传给
+// 后面几块,差异化照样跨块生效。代价是后面的块只能避开前面的、不能反过来影响
+// 它们,这点损失远小于再动一道预算闸。
+func jobClassChunkSize() int {
+	size := (m5ai.ReplyOutputTokenLimit - jobClassTokensWrapper) / jobClassTokensPerJob
+	if size < 1 {
+		return 1
+	}
+	return size
 }
 
 type jobClassCandidateView struct {
@@ -225,7 +240,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accepted, problems, attempts, err := a.assignJobClassesByModel(ctx, inputs, req.Occupied)
+	accepted, problems, attempts, err := a.assignJobClasses(ctx, inputs, req.Occupied)
 	view.Attempts = attempts
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{
@@ -305,7 +320,57 @@ func (a *API) readJobClassCandidates(
 	return data, nil
 }
 
-// assignJobClassesByModel 让大模型一次性为整批职位分配类别。
+// assignJobClasses 为全部职位分配类别,必要时分块调用。
+//
+// 块内是一次通盘决策;跨块靠把前面已占用的类别传给后面的块来延续差异化。一块
+// 整体失败不牵连别的块——那一块的职位标记跳过,继续下一块。
+func (a *API) assignJobClasses(
+	ctx context.Context,
+	jobs []m5ai.JobClassJobInput,
+	occupied []string,
+) (map[string]m5ai.JobClassAssignment, map[string]string, []string, error) {
+	chunk := jobClassChunkSize()
+	if len(jobs) <= chunk {
+		return a.assignJobClassesByModel(ctx, jobs, occupied)
+	}
+
+	accepted := make(map[string]m5ai.JobClassAssignment, len(jobs))
+	problems := make(map[string]string, len(jobs))
+	var attempts []string
+	taken := trimmedUnique(occupied)
+	for start := 0; start < len(jobs); start += chunk {
+		end := start + chunk
+		if end > len(jobs) {
+			end = len(jobs)
+		}
+		label := "chunk" + strconv.Itoa(start/chunk+1) + ":"
+		got, bad, tries, err := a.assignJobClassesByModel(ctx, jobs[start:end], taken)
+		for _, try := range tries {
+			attempts = append(attempts, label+try)
+		}
+		if err != nil {
+			for _, job := range jobs[start:end] {
+				problems[job.JobID] = "assignFailed"
+			}
+			continue
+		}
+		for jobID, assignment := range got {
+			accepted[jobID] = assignment
+			taken = append(taken, assignment.Class)
+		}
+		for jobID, problem := range bad {
+			problems[jobID] = problem
+		}
+		taken = trimmedUnique(taken)
+	}
+	if len(accepted) == 0 {
+		return nil, nil, attempts,
+			fmt.Errorf("分成 %d 块后仍没有任何职位分到类别", (len(jobs)+chunk-1)/chunk)
+	}
+	return accepted, problems, attempts, nil
+}
+
+// assignJobClassesByModel 让大模型一次性为一块职位分配类别。
 //
 // 整批重试:分配相互耦合,只重一个会破坏差异化。3 次之后取**成功最多的那一次**
 // 的合法部分——不跨轮次拼接,拼出来的组合谁也没通盘看过,差异化无从谈起。
