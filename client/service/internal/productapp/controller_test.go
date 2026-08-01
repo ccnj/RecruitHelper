@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -781,5 +783,32 @@ func TestStartPropagatesResolverSentinels(t *testing.T) {
 		if flow.replyKey != (store.AccountKey{}) {
 			t.Fatalf("解析失败仍启动了工作流: %+v", flow.replyKey)
 		}
+	}
+}
+
+// 当前职位导入失败必须在脑日志可定位(2026-08-01 真机装机卡在新客户配置不合格,
+// 而失败原因哪里都没记)。断言日志包含入口/阶段与导入错误里的文档类型名。
+func TestSyncJobsLogsImportFailureReason(t *testing.T) {
+	db, _ := controllerFixture(t)
+	// 缺"多轮沟通"等必需文档的整包:构造真实的导入失败。
+	source := &fakeSource{raw: []byte(`{"job":{"id":9,"name":"职位九","environment":"online"},"documents":{"打分":"p"}}`)}
+	controller, err := New(db, &fakeWorkflow{}, source, time.Now, workflow.DailyWindowPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(previous)
+	if err := controller.SyncJobs(context.Background()); !errors.Is(err, ErrJobConfigUnavailable) {
+		t.Fatalf("导入失败未按不可用返回: %v", err)
+	}
+	logged := buf.String()
+	// 该整包命中的第一条校验是"documents 与结构化区冲突: 打分";断言点在于
+	// 具体文档名到达日志,而不是命中哪条校验。
+	if !strings.Contains(logged, "当前职位同步失败") ||
+		!strings.Contains(logged, "stage=import") ||
+		!strings.Contains(logged, "打分") {
+		t.Fatalf("失败原因未进日志: %s", logged)
 	}
 }

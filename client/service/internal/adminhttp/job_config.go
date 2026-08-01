@@ -3,6 +3,7 @@ package adminhttp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -130,6 +131,7 @@ func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jo
 	syncedAt := time.Now()
 	raw, err := a.jobConfigSource.FetchCurrent(ctx)
 	if err != nil {
+		slog.Warn("当前职位同步失败", "entry", "admin", "stage", "fetch", "error", err.Error())
 		return nil, &jobConfigSyncFailure{
 			status: http.StatusBadGateway, message: "旧后台当前职位配置读取失败",
 		}
@@ -139,6 +141,9 @@ func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jo
 	m5ai.RefreshBackendProviderConfig(a.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, syncedAt)
 	if err != nil {
+		// 导入错误只含文档类型名与占位符名,进日志不碰数据边界;新客户配置不合格
+		// 时必须能从脑日志一眼定位缺什么,不靠人肉对后台。
+		slog.Warn("当前职位同步失败", "entry", "admin", "stage", "import", "error", err.Error())
 		return nil, &jobConfigSyncFailure{
 			status: http.StatusConflict, message: "旧后台当前职位配置与本地执行约束不兼容",
 		}
