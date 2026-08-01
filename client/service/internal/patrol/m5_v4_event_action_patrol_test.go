@@ -5,8 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -139,6 +141,110 @@ func TestCommunicationV4EventActionPatrolSendsReceiptThenWechatInviteOnce(
 	}
 }
 
+// 一条固定话术配成多个气泡时,第二个气泡必然以前一个气泡的正证为父。这条路曾
+// 两层都不通:巡检分派表按 v4Kind 白名单只放行催2正文,记账层的依赖校验又假设
+// 回执有且只有一个气泡,于是接受邀面的第二句永远发不出去,连带把挂在它后面的
+// 换微信卡永久留在 planned、把整个候选人隔离成人工。
+func TestCommunicationV4EventActionPatrolSendsEveryReceiptBubbleThenWechatInvite(
+	t *testing.T,
+) {
+	h := newHarness(t)
+	fixture := seedCommunicationV4InterviewAcceptedInbound(
+		t,
+		h,
+		"receipt-bubbles",
+		`{
+			"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
+			"silence48Wechat":{"enabled":true,"messages":["合成冷催"]},
+			"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
+			"meetingAccepted":{"enabled":true,"messages":[
+				"好的，面试安排已确认",
+				"咱们加个微信吧，平台消息不太及时"
+			]}
+		}`,
+	)
+	hand := &m5PositiveHand{now: h.clock.Now}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := *fixture.actor
+	actor.manager = manager
+
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hand.mu.Lock()
+	commands := append([]protocol.CmdBody(nil), hand.commands...)
+	hand.mu.Unlock()
+	if len(commands) != 3 ||
+		commands[0].Name != protocol.PrimChatSendMessage ||
+		commands[1].Name != protocol.PrimChatSendMessage ||
+		commands[2].Name != protocol.PrimChatSendWechatInvite {
+		t.Fatalf("回执两气泡没有逐条发完再发换微信卡: %+v", commands)
+	}
+
+	actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.target.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipts []store.CommunicationV4EventAction
+	var invite *store.CommunicationV4EventAction
+	for index := range actions {
+		switch actions[index].EffectKind {
+		case store.CommunicationV4EventEffectReplyText:
+			receipts = append(receipts, actions[index])
+		case store.CommunicationV4EventEffectInviteWechat:
+			invite = &actions[index]
+		}
+	}
+	if len(receipts) != 2 || invite == nil {
+		t.Fatalf("回执未展开成两个气泡: actions=%+v", actions)
+	}
+	for index := range receipts {
+		if receipts[index].Status != store.CommunicationV4EventActionSent ||
+			receipts[index].EffectIntentID == nil {
+			t.Fatalf("回执气泡未走正证轨道: ordinal=%d action=%+v",
+				index+1, receipts[index])
+		}
+		intent, intentErr := h.db.EffectIntentByID(*receipts[index].EffectIntentID)
+		if intentErr != nil || intent == nil ||
+			intent.Primitive != protocol.PrimChatSendMessage ||
+			intent.Status != store.EffectIntentOk {
+			t.Fatalf("回执气泡 WAL 未收敛: ordinal=%d intent=%+v err=%v",
+				index+1, intent, intentErr)
+		}
+	}
+	if receipts[0].DependsOnActionID != nil {
+		t.Fatalf("第一个气泡不该有依赖: %+v", receipts[0])
+	}
+	// 中间夹着一条对候选人不可见的运营通知,父仍必须是前一个气泡。
+	if receipts[1].DependsOnActionID == nil ||
+		*receipts[1].DependsOnActionID != receipts[0].ActionID {
+		t.Fatalf("第二个气泡未挂在第一个之后: %+v", receipts[1])
+	}
+	if invite.Status != store.CommunicationV4EventActionSent ||
+		invite.DependsOnActionID == nil ||
+		*invite.DependsOnActionID != receipts[1].ActionID {
+		t.Fatalf("换微信卡未挂在最后一个气泡之后: %+v", invite)
+	}
+
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.target.profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+		t.Fatalf("多气泡回执不得隔离候选人: %+v", aggregate)
+	}
+}
+
 func TestCommunicationV4EventActionPatrolMissingPhraseIsolatesOnlySourceProfile(
 	t *testing.T,
 ) {
@@ -262,5 +368,109 @@ func TestCommunicationV4EventActionPatrolPacingInterruptionKeepsPlan(
 		hand.commandCount() != 0 {
 		t.Fatalf("pre-WAL 中断不得隔离或发送: aggregate=%+v sends=%d err=%v",
 			aggregate, hand.commandCount(), readErr)
+	}
+}
+
+type communicationV4InboundAcceptFixture struct {
+	target communicationV4PatrolFixture
+	actor  *roundActor
+}
+
+// seedCommunicationV4InterviewAcceptedInbound 复刻真机上接受邀面的那条路:候选
+// 人自己发来一条 accepted 的邀面卡消息,由对话轮而不是卡片跃迁对账承接。两条路
+// 的动作展开并不相同,固定话术的多气泡只在这一条上出现。
+func seedCommunicationV4InterviewAcceptedInbound(
+	t *testing.T,
+	h *harness,
+	suffix string,
+	fixedPhrases string,
+) communicationV4InboundAcceptFixture {
+	t.Helper()
+	inboundText := "我想继续了解岗位"
+	target := seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
+		t, h, "inbound-accept-"+suffix,
+		[]store.MessageDraft{{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inboundText),
+			Text: &inboundText, Origin: "external",
+		}},
+		fixedPhrases,
+	)
+	key := store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ConversationRef: target.conversationRef,
+	}
+	project := func(seq int64, label string) {
+		t.Helper()
+		message, err := h.db.MessageBySeq(key, seq)
+		if err != nil || message == nil {
+			t.Fatalf("读取%s: message=%+v err=%v", label, message, err)
+		}
+		event, err := communication.NormalizeLedgerMessage(
+			communication.LedgerMessageFact{
+				Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
+				Text: message.Text, CardType: message.CardType, CardState: message.CardState,
+				Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.db.ApplyCommunicationV4BusinessEvent(
+			store.ApplyCommunicationV4BusinessEventRequest{
+				ProfileID: target.profileID, Event: event, AppliedAt: h.clock.Now(),
+			},
+		); err != nil {
+			t.Fatalf("投影%s: %v", label, err)
+		}
+	}
+	project(target.inboundSeq, "候选人回复")
+
+	inviteText := "合成邀面卡"
+	inviteSourceKey := syncledger.HashText("invite-source-" + suffix)
+	invited, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: target.inboundSeq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "out", Kind: "card",
+			ContentHash: syncledger.HashText("invite-card-" + suffix),
+			Text:        &inviteText, CardType: "interviewInvite", CardState: "pending",
+			Origin: "self", SourceKey: &inviteSourceKey,
+		}},
+		SyncedAt: h.clock.Now(),
+	})
+	if err != nil || len(invited.Inserted) != 1 {
+		t.Fatalf("追加邀面卡: result=%+v err=%v", invited, err)
+	}
+	project(invited.Inserted[0].Seq, "邀面卡")
+
+	acceptText := "我已接受贵司的面试邀请，将准时参加面试"
+	accepted, err := h.db.ApplyConversationChanges(store.ApplyConversationChangesRequest{
+		Key: key, ExpectedTailSeq: invited.Inserted[0].Seq,
+		NewMessages: []store.MessageDraft{{
+			Direction: "in", Kind: "card",
+			ContentHash: syncledger.HashText("accept-card-" + suffix),
+			Text:        &acceptText, CardType: "interviewInvite", CardState: "accepted",
+			Origin: "external",
+		}},
+		SyncedAt: h.clock.Now(),
+	})
+	if err != nil || len(accepted.Inserted) != 1 {
+		t.Fatalf("追加接受卡: result=%+v err=%v", accepted, err)
+	}
+
+	roundID := "round-v4-inbound-accept-" + suffix
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取账号: account=%+v err=%v", account, err)
+	}
+	return communicationV4InboundAcceptFixture{
+		target: target,
+		actor: &roundActor{
+			manager: h.manager,
+			account: account,
+			hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+			roundID: roundID,
+			now:     h.clock.Now(),
+		},
 	}
 }
