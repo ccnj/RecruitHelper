@@ -66,14 +66,14 @@ const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '�
   assert.deepEqual(roundTripped, original)
 }
 
-// 内置默认必须与脑侧一致：周一到周五 09:00-18:00、周末空、共 45 小时。
+// 内置默认必须与脑侧一致：七天全 09:00-18:00、共 63 小时（2026-08-01 裁决，
+// 此前周末为空）。两端各存一份默认值，这条断言是它们唯一的对齐点。
 {
   const schedule = defaultSchedule(WEEKDAYS)
-  assert.deepEqual(schedule['周一'], [{ start: '09:00', end: '18:00' }])
-  assert.deepEqual(schedule['周五'], [{ start: '09:00', end: '18:00' }])
-  assert.deepEqual(schedule['周六'], [])
-  assert.deepEqual(schedule['周日'], [])
-  assert.equal(countHours(schedule, WEEKDAYS), 45)
+  for (const day of WEEKDAYS) {
+    assert.deepEqual(schedule[day], [{ start: '09:00', end: '18:00' }])
+  }
+  assert.equal(countHours(schedule, WEEKDAYS), 63)
 }
 
 // 空表计数必须是 0 —— 组件靠它拦下"拖没了"的那次提交。
