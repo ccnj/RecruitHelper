@@ -26,75 +26,119 @@ type JobClassAdvisor interface {
 	CompleteJSON(context.Context, m5ai.CompletionRequest) (m5ai.CompletionResponse, error)
 }
 
-// SetAdvice 注入 LLM 通道。未注入时类别精确匹配仍可用,只是匹配不上时不能由
-// 大模型兜,只能干净失败。
+// SetAdvice 注入 LLM 通道。未注入时类别一步都走不了——2026-07-31 起没有
+// "后台配置值精确匹配"那条不依赖模型的旁路了。
 func (a *API) SetAdvice(advice JobClassAdvisor) *API {
 	a.advice = advice
 	return a
 }
 
-// jobClassAttempts 是"选不出来"之前允许的尝试次数(甲方 2026-07-30 定为 3)。
-// 它只覆盖 provider 网络失败、返回不是合法 JSON、返回的类别名不在候选清单里
-// 这三种；模型给出的合法选择一律采纳,置信度低也照采纳——真正的闸是发布前
-// 甲方看得见类别再确认。
+// jobClassAttempts 是"分不出来"之前允许的尝试次数(甲方 2026-07-30 定为 3)。
+// 整批重试:分配相互耦合,只重一个会破坏差异化。3 次之后按 2026-08-01 裁决
+// 保留合法的分配、跳过不合法的,不让一个坏职位废掉整批。
 const jobClassAttempts = 3
+
+// 单条分配的输出开销估算,用来按职位数申请输出预算。一条形如
+// {"职位":"16","类别":"理财顾问","置信度":0.8,"理由":"一句话"} 实测约 34 token,
+// 取 40 留余量;外层 {"分配":[...]} 另算 32。
+const (
+	jobClassTokensPerJob  = 40
+	jobClassTokensWrapper = 32
+)
+
+// jobClassOutputTokens 按本批职位数申请输出预算,并收在回复输出上限之内。
+//
+// 撑不下时不会给出半个 JSON 就算数:模型被截断 → 解析失败 → 重试 3 次 → 整批
+// A 干净失败(零副作用,可重跑),失败分类会如实报给运营。宁可这样,也不要一个
+// 被截断后侥幸解析成功、少了几个职位的分配表。
+func jobClassOutputTokens(jobCount int) int {
+	want := jobClassTokensWrapper + jobClassTokensPerJob*jobCount
+	if want < m5ai.JobClassOutputTokenLimit {
+		want = m5ai.JobClassOutputTokenLimit
+	}
+	if want > m5ai.ReplyOutputTokenLimit {
+		want = m5ai.ReplyOutputTokenLimit
+	}
+	return want
+}
 
 type jobClassCandidateView struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"`
 }
 
-type jobClassResolveView struct {
+// jobClassAssignmentView 是一个职位的分配结论。JobClass 为空即表示没分到,
+// 原因看 Problem。
+type jobClassAssignmentView struct {
 	JobID   string `json:"jobId"`
 	JobName string `json:"jobName"`
-	// 平台针对这个职位给出的全部可选类别。它是本次决定的封闭候选集。
+	// 平台针对这个职位给出的全部可选类别。它是该职位这次决定的封闭候选集。
 	Candidates []jobClassCandidateView `json:"candidates"`
 	// 平台自动预填的类别(若有),纯诊断:平台只在自己有把握时才填。
 	PrefilledClass string `json:"prefilledClass,omitempty"`
-	// 定下来的类别,以及它是怎么来的。发布请求要原样带回这个值。
-	JobClass string `json:"jobClass"`
-	Source   string `json:"source"`
-	// 后台配置的职位类别原值。它是死字段,列在这里只为让运营看见"我填的那个
-	// 没有参与发布"——不参与任何判定。
-	DeadConfiguredClass string   `json:"deadConfiguredClass,omitempty"`
-	Confidence          *float64 `json:"confidence,omitempty"`
-	Reason              string   `json:"reason,omitempty"`
+	// 定下来的类别。发布请求要原样带回这个值。
+	JobClass   string   `json:"jobClass,omitempty"`
+	Source     string   `json:"source,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	// 没分到时的原因分类,或读候选阶段的失败说明。
+	Problem string `json:"problem,omitempty"`
+	// 后台配置的职位类别原值。死字段,列在这里只为让运营看见"我填的那个没有
+	// 参与发布"——不参与任何判定。
+	DeadConfiguredClass string `json:"deadConfiguredClass,omitempty"`
+}
+
+type jobClassPlanView struct {
+	Jobs []jobClassAssignmentView `json:"jobs"`
+	// 被多个职位共用的类别 → 那几个职位。差异化不是闸,撞车照常放行,但要让
+	// 运营在二次确认清单上看见。
+	Collisions map[string][]string `json:"collisions,omitempty"`
 	// 模型走了几次尝试、每次为什么失败,失败分类不含任何模型原文。
 	Attempts []string `json:"attempts,omitempty"`
 }
 
-// 类别只有一个来源。2026-07-31 之前还有一支 configuredExactMatch(后台配置值
-// 与平台候选归一化精确匹配),三例真机的配置值全部不在候选里,三战三败后按甲方
-// 裁决删除——两条并存路径意味着两套失败模式。
 const jobClassSourceModel = "model"
 
-// jobPublishClassCandidates 解析一个职位该用哪个职位类别。
+// jobPublishClassPlan 为一批职位统一分配职位类别。
 //
-// 为什么必须先跑一趟手侧:类别候选是平台读了工作性质/职位名称/职位描述之后才给
-// 的,选择器在那之前打不开。而手不能调大模型(插件永远不接触 key),所以只能
-// 两趟——本接口是第一趟,拿候选并定下类别;发布是第二趟,带着定好的精确值去选中。
-func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) {
+// 为什么必须先跑手侧:类别候选是平台读了工作性质/职位名称/职位描述之后才给的,
+// 选择器在那之前打不开。而手不能调大模型(插件永远不接触 key),所以只能两趟——
+// 本接口是第一趟,逐个职位拿候选、再一次性定下全批类别;关键词词库与真发各是
+// 后面的趟次。
+//
+// 为什么统一分配:类别决定平台把职位推给哪一类求职者。发多个职位的核心诉求是
+// 扩充候选人池,若它们全落进同一个类别,平台就把它们推给同一批人,多发的那些
+// 等于白发。逐个决策时模型看不见别的职位在选什么,撞车完全没人管。
+//
+// 全程零对外副作用:只派 intrusive/platformSideEffect=none 的读取原语,不填其余
+// 字段、不提交任何东西。
+func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Platform   string `json:"platform"`
-		AccountRef string `json:"accountRef"`
-		JobID      string `json:"jobId"`
-		// 紧接着还要读关键词词库时置 true:手读完候选把填好三项的表单留在
-		// 发布页,下一趟省掉一次填表与描述失焦后的数十秒等待。单独读一次候选
-		// 的人不该在页面上留半张表,所以默认 false。
-		KeepForm bool `json:"keepForm"`
+		Platform   string   `json:"platform"`
+		AccountRef string   `json:"accountRef"`
+		JobIDs     []string `json:"jobIds"`
+		// 已经被别的职位占用、请模型尽量避开的类别。整批分配时留空;运营单独
+		// 重跑某一个职位时把其余职位已定的类别传进来。
+		Occupied []string `json:"occupied"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
 		return
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
-	req.JobID = strings.TrimSpace(req.JobID)
-	if err != nil || req.JobID == "" {
+	jobIDs := trimmedUnique(req.JobIDs)
+	if err != nil || len(jobIDs) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台、账号或职位标识"})
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "职位类别解析服务尚未就绪"})
+		return
+	}
+	if a.advice == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "LLM 通道未就绪，无法分配职位类别",
+		})
 		return
 	}
 	// 与预检、试填、发布同一道闸:这趟也要占用页面并导航。
@@ -115,27 +159,129 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 250*time.Second)
+	// 每个职位一趟填页(填三项 + 等描述失焦),真机量级是数十秒。整批超时按职位
+	// 数放,单职位仍按原来的 250 秒。
+	budget := time.Duration(len(jobIDs)) * 250 * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), budget)
 	defer cancel()
-	target, spec, failure := a.resolvePublishTarget(ctx, req.JobID)
-	if failure != nil {
-		writeJSON(w, failure.status, map[string]string{"error": failure.message})
+
+	view := jobClassPlanView{Jobs: make([]jobClassAssignmentView, 0, len(jobIDs))}
+	inputs := make([]m5ai.JobClassJobInput, 0, len(jobIDs))
+	byJobID := make(map[string]int, len(jobIDs))
+	for _, jobID := range jobIDs {
+		row := jobClassAssignmentView{JobID: jobID}
+		target, spec, failure := a.resolvePublishTarget(ctx, jobID)
+		if failure != nil {
+			row.Problem = failure.message
+			byJobID[jobID] = len(view.Jobs)
+			view.Jobs = append(view.Jobs, row)
+			continue
+		}
+		row.JobName = target.JobName
+		row.DeadConfiguredClass = strings.TrimSpace(spec.DeadJobClass)
+
+		data, readErr := a.readJobClassCandidates(
+			ctx, key, account, sessionID, bootID, target.JobName, spec,
+		)
+		if readErr != nil {
+			// 单个职位读不到候选就跳过它,继续读其余——一个坏职位不该让整批
+			// 的类别决定都做不成。
+			row.Problem = readErr.Error()
+			byJobID[jobID] = len(view.Jobs)
+			view.Jobs = append(view.Jobs, row)
+			continue
+		}
+		if data.PrefilledClass != nil {
+			row.PrefilledClass = *data.PrefilledClass
+		}
+		candidates := make([]m5ai.JobClassCandidateInput, 0, len(data.Candidates))
+		for _, candidate := range data.Candidates {
+			row.Candidates = append(row.Candidates, jobClassCandidateView{
+				Name: candidate.Name, Definition: candidate.Definition,
+			})
+			candidates = append(candidates, m5ai.JobClassCandidateInput{
+				Name: candidate.Name, Definition: candidate.Definition,
+			})
+		}
+		if len(candidates) == 0 {
+			row.Problem = "平台没有给出任何职位类别候选，请人工到发布页确认"
+			byJobID[jobID] = len(view.Jobs)
+			view.Jobs = append(view.Jobs, row)
+			continue
+		}
+		byJobID[jobID] = len(view.Jobs)
+		view.Jobs = append(view.Jobs, row)
+		inputs = append(inputs, m5ai.JobClassJobInput{
+			JobID: jobID, JobName: target.JobName,
+			Description: spec.Description, Candidates: candidates,
+		})
+	}
+
+	if len(inputs) == 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "没有任何职位取到了类别候选，无法分配",
+			"view":  view,
+		})
 		return
 	}
 
-	args, err := protocol.Encode(protocol.JobReadClassCandidatesArgs{
-		JobName:        target.JobName,
-		EmploymentType: spec.EmploymentType,
-		Description:    spec.Description,
-		KeepForm:       req.KeepForm,
-	})
+	accepted, problems, attempts, err := a.assignJobClassesByModel(ctx, inputs, req.Occupied)
+	view.Attempts = attempts
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "类别候选读取命令构造失败"})
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "职位类别未能分配：" + err.Error(),
+			"view":  view,
+		})
 		return
 	}
+	assigned := make(map[string]string, len(accepted))
+	for jobID, assignment := range accepted {
+		index, known := byJobID[jobID]
+		if !known {
+			continue
+		}
+		confidence := assignment.Confidence
+		view.Jobs[index].JobClass = assignment.Class
+		view.Jobs[index].Source = jobClassSourceModel
+		view.Jobs[index].Confidence = &confidence
+		view.Jobs[index].Reason = assignment.Reason
+		assigned[jobID] = assignment.Class
+	}
+	for jobID, problem := range problems {
+		index, known := byJobID[jobID]
+		if !known {
+			continue
+		}
+		view.Jobs[index].Problem = problem
+	}
+	view.Collisions = m5ai.JobClassCollisions(assigned)
+	writeJSON(w, http.StatusOK, view)
+}
+
+// readJobClassCandidates 为一个职位派一条读取原语并复核证词。
+//
+// keepForm 恒为 false:全批分配时 A1 跑完这个职位就去跑下一个,留下的表单会被
+// 下一个覆盖,等 A2 回来找它时什么都没了(规格 §2.8,2026-08-01 收窄)。
+func (a *API) readJobClassCandidates(
+	ctx context.Context,
+	key store.AccountKey,
+	account *store.Account,
+	sessionID string,
+	bootID string,
+	jobName string,
+	spec jobconfig.PublishSpec,
+) (protocol.JobReadClassCandidatesData, error) {
+	var zero protocol.JobReadClassCandidatesData
+	args, err := protocol.Encode(protocol.JobReadClassCandidatesArgs{
+		JobName:        jobName,
+		EmploymentType: spec.EmploymentType,
+		Description:    spec.Description,
+	})
+	if err != nil {
+		return zero, errors.New("类别候选读取命令构造失败")
+	}
 	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobReadClassCandidates, 1, args); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "类别候选读取参数不符合当前契约"})
-		return
+		return zero, errors.New("类别候选读取参数不符合当前契约")
 	}
 	logicalRef, err := a.disp.DispatchStructured(dispatch.DispatchRequest{
 		HandID: account.BoundHandID, ExpectedSession: sessionID, ExpectedBootID: bootID,
@@ -146,97 +292,38 @@ func (a *API) jobPublishClassCandidates(w http.ResponseWriter, r *http.Request) 
 		},
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "类别候选读取未能派发"})
-		return
+		return zero, errors.New("类别候选读取未能派发")
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "类别候选读取未完成"})
-		return
+		return zero, errors.New("类别候选读取未完成")
 	}
 	data, err := parseClassCandidatesProof(logicalRef, logical)
 	if err != nil {
-		response := map[string]any{"error": "类别候选读取未成功：" + err.Error()}
-		if diagnostics := prepareDraftFailureDiagnostics(logical); diagnostics != nil {
-			response["diagnostics"] = diagnostics
-		}
-		writeJSON(w, http.StatusConflict, response)
-		return
+		return zero, errors.New("类别候选读取未成功：" + err.Error())
 	}
-
-	view := jobClassResolveView{
-		JobID: target.JobID, JobName: target.JobName,
-		DeadConfiguredClass: strings.TrimSpace(spec.DeadJobClass),
-	}
-	names := make([]string, 0, len(data.Candidates))
-	for _, candidate := range data.Candidates {
-		names = append(names, candidate.Name)
-		view.Candidates = append(view.Candidates, jobClassCandidateView{
-			Name: candidate.Name, Definition: candidate.Definition,
-		})
-	}
-	if data.PrefilledClass != nil {
-		view.PrefilledClass = *data.PrefilledClass
-	}
-	if len(names) == 0 {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "平台没有给出任何职位类别候选，无法选定；请人工到发布页确认",
-			"view":  view,
-		})
-		return
-	}
-
-	if a.advice == nil {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "LLM 通道未就绪，无法选定职位类别",
-			"view":  view,
-		})
-		return
-	}
-
-	suggestion, attempts, err := a.chooseJobClassByModel(
-		ctx, target, spec.Description, data.Candidates, names,
-	)
-	view.Attempts = attempts
-	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "职位类别未能选定：" + err.Error(),
-			"view":  view,
-		})
-		return
-	}
-	confidence := suggestion.Confidence
-	view.JobClass, view.Source = suggestion.Class, jobClassSourceModel
-	view.Confidence, view.Reason = &confidence, suggestion.Reason
-	writeJSON(w, http.StatusOK, view)
+	return data, nil
 }
 
-// chooseJobClassByModel 让大模型从平台候选里选一个。
+// assignJobClassesByModel 让大模型一次性为整批职位分配类别。
 //
-// 三种失败都重试:provider 调用失败、返回不是合法 JSON、返回的类别名不在候选
-// 清单里。最后一种是最要紧的——模型改了一个字就绝不放行,更不做模糊匹配:
-// 类别选错会把职位推给错误的人群,而页面看上去一切正常。
-func (a *API) chooseJobClassByModel(
+// 整批重试:分配相互耦合,只重一个会破坏差异化。3 次之后取**成功最多的那一次**
+// 的合法部分——不跨轮次拼接,拼出来的组合谁也没通盘看过,差异化无从谈起。
+func (a *API) assignJobClassesByModel(
 	ctx context.Context,
-	target *jobconfig.BackendJobPublishSource,
-	description string,
-	candidates []protocol.JobClassCandidate,
-	names []string,
-) (m5ai.JobClassSuggestion, []string, error) {
-	inputs := make([]m5ai.JobClassCandidateInput, 0, len(candidates))
-	for _, candidate := range candidates {
-		inputs = append(inputs, m5ai.JobClassCandidateInput{
-			Name: candidate.Name, Definition: candidate.Definition,
-		})
-	}
-	content, err := m5ai.RenderJobClassPrompt(target.JobName, description, inputs)
+	jobs []m5ai.JobClassJobInput,
+	occupied []string,
+) (map[string]m5ai.JobClassAssignment, map[string]string, []string, error) {
+	content, err := m5ai.RenderJobClassPrompt(jobs, trimmedUnique(occupied))
 	if err != nil {
-		return m5ai.JobClassSuggestion{}, nil, err
+		return nil, nil, nil, err
 	}
-	// 同一职位同一批候选下 invocationId 稳定可复算,便于把 ai-traces 里的记录
-	// 与本次决定对上。
-	base := hashJobClassInput(target.JobID, content)
+	// 同一批职位同一批候选下 invocationId 稳定可复算,便于把 ai-traces 里的
+	// 记录与本次决定对上。
+	base := hashJobClassInput(jobs, content)
 	var attempts []string
+	var bestAccepted map[string]m5ai.JobClassAssignment
+	var bestProblems map[string]string
 	for attempt := 1; attempt <= jobClassAttempts; attempt++ {
 		started := time.Now()
 		response, callErr := a.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
@@ -245,38 +332,46 @@ func (a *API) chooseJobClassByModel(
 			ContextRevisionHash: base,
 			PromptRevision:      m5ai.JobClassInputFormatVersion,
 			UserContent:         content,
-			MaxOutputTokens:     m5ai.JobClassOutputTokenLimit,
+			MaxOutputTokens:     jobClassOutputTokens(len(jobs)),
 		})
 		latency := time.Since(started)
+		record := func(outcome string) {
+			attempts = append(attempts, "attempt"+strconv.Itoa(attempt)+":"+outcome)
+			a.auditJobClassCall(len(jobs), attempt, outcome, response, latency)
+		}
 		if callErr != nil {
-			attempts = append(attempts, "attempt"+strconv.Itoa(attempt)+":providerError")
-			a.auditJobClassCall(target, attempt, "providerError", response, latency)
+			record("providerError")
 			continue
 		}
-		suggestion, parseErr := m5ai.ParseJobClassSuggestion(response.JSONText)
+		assignments, parseErr := m5ai.ParseJobClassAssignments(response.JSONText)
 		if parseErr != nil {
-			attempts = append(attempts, "attempt"+strconv.Itoa(attempt)+":"+parseErr.Error())
-			a.auditJobClassCall(target, attempt, parseErr.Error(), response, latency)
+			record(parseErr.Error())
 			continue
 		}
-		if !jobconfig.ContainsPlatformJobClass(suggestion.Class, names) {
-			attempts = append(attempts, "attempt"+strconv.Itoa(attempt)+":classNotInCandidates")
-			a.auditJobClassCall(target, attempt, "classNotInCandidates", response, latency)
-			continue
+		accepted, problems := m5ai.ClassifyJobClassAssignments(assignments, jobs)
+		if len(problems) == 0 {
+			record("ok")
+			return accepted, problems, attempts, nil
 		}
-		attempts = append(attempts, "attempt"+strconv.Itoa(attempt)+":ok")
-		a.auditJobClassCall(target, attempt, "ok", response, latency)
-		return suggestion, attempts, nil
+		record("partial:" + strconv.Itoa(len(accepted)) + "/" + strconv.Itoa(len(jobs)))
+		if len(accepted) > len(bestAccepted) {
+			bestAccepted, bestProblems = accepted, problems
+		}
 	}
-	return m5ai.JobClassSuggestion{}, attempts,
-		fmt.Errorf("大模型 %d 次尝试都没给出候选清单内的合法结果", jobClassAttempts)
+	if len(bestAccepted) > 0 {
+		// 按 2026-08-01 裁决:重试用尽后保留合法的、跳过不合法的,不让一个
+		// 坏职位废掉整批的类别决定。
+		return bestAccepted, bestProblems, attempts, nil
+	}
+	return nil, nil, attempts,
+		fmt.Errorf("大模型 %d 次尝试都没给出可用的分配", jobClassAttempts)
 }
 
 // auditJobClassCall 留一条无正文的诊断痕迹。按 AI provider 数据边界,这里只允许
-// 用途、provider/model、输入输出规模、延迟、状态、错误分类与追踪状态;**不写**
-// 提示词、模型原文、选定的类别名与理由(那些只经 HTTP 响应交给运营看)。
+// 用途、批次规模、尝试、结果分类、延迟、输入输出规模与追踪状态;**不写**提示词、
+// 模型原文、职位名、选定的类别与理由(那些只经 HTTP 响应交给运营看)。
 func (a *API) auditJobClassCall(
-	target *jobconfig.BackendJobPublishSource,
+	jobCount int,
 	attempt int,
 	outcome string,
 	response m5ai.CompletionResponse,
@@ -290,9 +385,9 @@ func (a *API) auditJobClassCall(
 		status = " httpStatus=" + strconv.Itoa(*response.Diagnostics.ProviderHTTPStatus)
 	}
 	detail := fmt.Sprintf(
-		"purpose=jobClass jobId=%s attempt=%d/%d outcome=%s latencyMs=%d "+
+		"purpose=jobClass jobs=%d attempt=%d/%d outcome=%s latencyMs=%d "+
 			"inTokens=%d outTokens=%d reqBytes=%d resBytes=%d traceStatus=%s%s",
-		target.JobID, attempt, jobClassAttempts, outcome, latency.Milliseconds(),
+		jobCount, attempt, jobClassAttempts, outcome, latency.Milliseconds(),
 		response.Usage.InputTokens, response.Usage.OutputTokens,
 		response.Diagnostics.RequestBytes, response.Diagnostics.ResponseBytes,
 		response.Diagnostics.TraceStatus, status,
@@ -302,15 +397,39 @@ func (a *API) auditJobClassCall(
 		response.Diagnostics.TraceStatus != m5ai.TraceStatusComplete {
 		// 追踪写入失败不改变业务裁决,但必须响亮报告。
 		slog.Error("职位类别 AI 调用未能完整落追踪库",
-			"jobId", target.JobID, "attempt", attempt,
+			"jobs", jobCount, "attempt", attempt,
 			"traceStatus", response.Diagnostics.TraceStatus,
 			"traceErrorCode", response.Diagnostics.TraceErrorCode)
 	}
 }
 
-func hashJobClassInput(jobID, content string) string {
-	sum := sha256.Sum256([]byte("jobClass\x00" + jobID + "\x00" + content))
-	return hex.EncodeToString(sum[:12])
+func hashJobClassInput(jobs []m5ai.JobClassJobInput, content string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte("jobClass\x00"))
+	for _, job := range jobs {
+		hasher.Write([]byte(job.JobID))
+		hasher.Write([]byte{0})
+	}
+	hasher.Write([]byte(content))
+	return hex.EncodeToString(hasher.Sum(nil)[:12])
+}
+
+// trimmedUnique 去空白、去空串、去重并保持原顺序。
+func trimmedUnique(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, duplicated := seen[trimmed]; duplicated {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 // parseClassCandidatesProof 只接受叶子命令 ok 且 result 符合契约的结果。
