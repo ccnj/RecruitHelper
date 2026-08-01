@@ -29,8 +29,19 @@ const (
 	SilenceFollowupOutputTokenLimit   = ReplyOutputTokenLimit
 	ScoringOutputTokenLimit           = 512
 	GreetingOutputTokenLimit          = ReplyOutputTokenLimit
-	// 职位类别只回一个类别名、一个置信度和一两句理由,256 足够;给多了只会
-	// 让模型有空间写废话。
+	// 职位类别全批分配一次要带上全部职位的完整描述,远超按单次回复设的
+	// ReplyInputTokenLimit。甲方 2026-08-01 裁决按用途放宽到 64000:按中文约
+	// 0.6 token/字估,12 个职位约 1.4 万、20 个约 2.2 万、40 个约 4.4 万 token;
+	// 再往上会先撞 maxProviderRequestBytes(256 KB,约 45 个职位)那道硬闸,
+	// 那道不动。成本上按冻结价 cache-miss $0.435/M token,一次 2.2 万 token
+	// 约 $0.01,一批发布只调一次。
+	//
+	// 为什么给完整描述而不是摘要:类别选错会把职位长期推给错误的人群,代价
+	// 远高于这点 token;描述又正是平台自己判定候选的输入,截断会让模型看到的
+	// 和平台看到的不是同一份。
+	JobClassInputTokenLimit = 64000
+	// 职位类别只回类别名、置信度和一句理由,256 足够;给多了只会让模型有空间
+	// 写废话。全批分配时按职位数另算,见 JobClassOutputTokens。
 	JobClassOutputTokenLimit = 256
 	// 职位关键词最多回 5 个短词加一两句理由,与类别同量级。
 	JobKeywordsOutputTokenLimit = 256

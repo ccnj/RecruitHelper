@@ -105,6 +105,31 @@ func (p *OpenAICompatibleProvider) ProviderName() string { return p.config.Provi
 
 func (p *OpenAICompatibleProvider) ModelName() string { return p.config.Model }
 
+// purposeInputTokenLimit 给出这一次调用的输入上限。
+//
+// 默认取配置的 MaxInputTokens——它按"一次回复"设定(16000),对绝大多数用途就是
+// 正确的天花板。两个用途另有覆盖,方向相反:
+//
+//	intent    收窄到 8000  —— 意图判断只看会话尾部,给多了是浪费
+//	jobClass  放宽到 64000 —— 全批分配一次要带全部职位的完整描述(甲方
+//	                          2026-08-01 裁决,依据见 JobClassInputTokenLimit)
+//
+// 覆盖只对本用途生效,别的用途一律不受影响;这道闸本身仍在(provider.go 拿响应
+// 里的 promptTokens 事后比对),只是对这一个用途换了个数。
+func purposeInputTokenLimit(purpose CompletionPurpose, configured int) int {
+	switch purpose {
+	case PurposeIntent:
+		if configured > IntentInputTokenLimit {
+			return IntentInputTokenLimit
+		}
+	case PurposeJobClass:
+		if configured < JobClassInputTokenLimit {
+			return JobClassInputTokenLimit
+		}
+	}
+	return configured
+}
+
 func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request CompletionRequest) (CompletionResponse, error) {
 	preflight := CompletionDiagnostics{}
 	if p.traceExpected {
@@ -136,10 +161,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("budgetBlocked", FailureStageRequestBuild, "outputTokenBudgetExceeded")
 	}
-	inputLimit := p.config.MaxInputTokens
-	if request.Purpose == PurposeIntent && inputLimit > IntentInputTokenLimit {
-		inputLimit = IntentInputTokenLimit
-	}
+	inputLimit := purposeInputTokenLimit(request.Purpose, p.config.MaxInputTokens)
 	payload := struct {
 		Model    string `json:"model"`
 		Messages []struct {
