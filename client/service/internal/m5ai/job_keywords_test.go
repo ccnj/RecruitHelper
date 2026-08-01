@@ -33,6 +33,11 @@ func TestRenderJobKeywordsPromptCarriesSectionsAndQuotas(t *testing.T) {
 		"（本组没有现成词条，只能自己写）",
 		"一共只能选 3 到 5 个关键词",
 		"绝不能拆成「税务」单独返回",
+		// 避开保险与类别那条同源：招的是转行的人，打上保险标签等于去保险业内
+		// 捞人。它只是偏好不是闸，所以只能在提示词里钉住。
+		"不要选带「保险」字样的词",
+		"也同样不能带「保险」字样",
+		"即便这个职位的词库大半跟保险有关",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("提示词缺少 %q", want)
