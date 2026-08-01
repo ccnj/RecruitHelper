@@ -110,9 +110,10 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 			action.V4Kind == communication.V4ActionColdPrompt ||
 			action.V4Kind == communication.V4ActionColdWechatText ||
 			action.V4Kind == communication.V4ActionInterviewFollowup) &&
-		// 催2正文自第二个气泡起依赖前一个气泡的正证;其余文本动作仍是链首。
-		(action.DependsOnActionID == nil ||
-			action.V4Kind == communication.V4ActionColdWechatText) &&
+		// 多气泡话术自第二个气泡起依赖前一个气泡的正证,这里不再按 v4Kind 限定谁
+		// 允许带依赖:能否发由下面的 communicationV4EventDependency 统一裁决(前项
+		// 须 sent 且已落 effectIntentID)。在此另立白名单只会让新增的多气泡形态被
+		// 误判为 automaticActionInvalid。
 		strings.TrimSpace(action.Text) != "" &&
 		strings.TrimSpace(action.ContentHash) != "":
 		var ok bool
