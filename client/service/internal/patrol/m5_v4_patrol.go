@@ -333,9 +333,19 @@ func (a *roundActor) processCommunicationV4Target(
 			a.manager.now(),
 		)
 	}
+	// 可面试时段周表在冻结这一刻实时读一次，之后随 turn 固定。读失败不回落默认，
+	// 否则会按用户已经改掉的表承诺时间。
+	schedule, err := a.manager.store.InterviewSchedule()
+	if err != nil {
+		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+			target.Profile.ProfileID,
+			"scheduleRenderFailed",
+			a.manager.now(),
+		)
+	}
 	recommended, err := m5ai.FreezeRecommendedTimeText(
 		a.manager.now(),
-		m5ai.GenerateDefaultSlots(a.manager.now()),
+		m5ai.GenerateSlots(a.manager.now(), schedule),
 	)
 	if err != nil {
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(

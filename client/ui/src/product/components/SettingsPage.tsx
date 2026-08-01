@@ -1,6 +1,7 @@
 import type { ProductConnectionView, ProductData } from '../types'
 import { PageHeader, StatusPill } from './ProductPrimitives'
 import { ProductIcon } from './ProductIcon'
+import { InterviewSchedulePanel } from './InterviewSchedulePanel'
 
 interface SettingsPageProps {
   customer: ProductData['customer']
@@ -12,9 +13,10 @@ export function SettingsPage({ customer, connections }: SettingsPageProps) {
     <div className="rh-page">
       <PageHeader
         title="配置"
-        description="查看客户授权、职位配置和本机连接状态。敏感配置不会在普通页面显示。"
-        meta={<span className="rh-readonly-label">只读配置</span>}
+        description="设置可面试时段,查看客户授权、职位配置和本机连接状态。敏感配置不会在普通页面显示。"
       />
+
+      <InterviewSchedulePanel />
 
       <section className="rh-panel rh-settings-identity">
         <div className="rh-settings-avatar">{customer.shortName || '客'}</div>

@@ -183,8 +183,15 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 		return err
 	}
 	if turn == nil {
+		// 与正式沟通巡检同口径：冻结这一刻实时读周表，读失败转人工不回落默认。
+		schedule, scheduleErr := a.manager.store.InterviewSchedule()
+		if scheduleErr != nil {
+			return a.manager.store.MarkActiveM5TrialManualRequired(
+				target.Profile.ProfileID, "scheduleRenderFailed", a.manager.now(),
+			)
+		}
 		recommended, freezeErr := m5ai.FreezeRecommendedTimeText(
-			a.now, m5ai.GenerateDefaultSlots(a.now),
+			a.now, m5ai.GenerateSlots(a.now, schedule),
 		)
 		if freezeErr != nil {
 			return a.manager.store.MarkActiveM5TrialManualRequired(

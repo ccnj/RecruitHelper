@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/workflow"
@@ -29,6 +30,8 @@ type ProjectionStore interface {
 	AppConfirmation(string) (*store.AppConfirmationProjection, error)
 	AppCandidates(store.AppCandidateListQuery) (*store.AppCandidateListProjection, error)
 	AppCandidateDetail(store.AppCandidateDetailQuery) (*store.AppCandidateDetailProjection, error)
+	InterviewSchedule() (m5ai.InterviewSchedule, error)
+	SetInterviewSchedule(m5ai.InterviewSchedule) error
 }
 
 type RuntimeSnapshot struct {
@@ -155,6 +158,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/update/install", h(a.installUpdate))
 	mux.HandleFunc("GET /app/candidates", h(a.candidates))
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
+	mux.HandleFunc("GET /app/interview-schedule", h(a.interviewSchedule))
+	mux.HandleFunc("POST /app/interview-schedule", h(a.saveInterviewSchedule))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -256,6 +261,52 @@ func startFailureText(err error) string {
 
 // syncJobs 重新拉取旧后台职位配置：刷新有效职位集，并把当前职位重新落库。
 // 它不启动、不恢复工作流，因此不参与业务运行窗口裁决。
+// interviewScheduleBody 是周表的线上形态。字段名用英文而值里的星期用中文，
+// 与 m5ai.InterviewSchedule 的 key 一致，诊断时不必再做一层翻译。
+type interviewScheduleBody struct {
+	Schedule map[string][]m5ai.InterviewWindow `json:"schedule"`
+	// Weekdays 让前端不必自己硬编码星期顺序，也不会与脑侧排序不一致。
+	Weekdays []string `json:"weekdays,omitempty"`
+}
+
+func (a *API) interviewSchedule(w http.ResponseWriter, _ *http.Request) {
+	schedule, err := a.projections.InterviewSchedule()
+	if err != nil {
+		// 配置损坏时不返回内置默认——那会让配置页显示一张库里并不存在的表，
+		// 用户看着"正常"却救不回来。诚实报错，让人去诊断台看。
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "可面试时段配置无法读取"})
+		return
+	}
+	body := interviewScheduleBody{
+		Schedule: make(map[string][]m5ai.InterviewWindow, len(m5ai.InterviewWeekdays)),
+		Weekdays: m5ai.InterviewWeekdays[:],
+	}
+	// 七天的 key 一律补齐，空天给空数组而不是缺 key，前端不必区分两者。
+	for _, day := range m5ai.InterviewWeekdays {
+		windows := schedule[day]
+		if windows == nil {
+			windows = []m5ai.InterviewWindow{}
+		}
+		body.Schedule[day] = windows
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (a *API) saveInterviewSchedule(w http.ResponseWriter, r *http.Request) {
+	var request interviewScheduleBody
+	if decodeProductJSON(r, &request) != nil || request.Schedule == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "可面试时段请求无效"})
+		return
+	}
+	// 校验在 store 里（脑侧唯一把关点），这里只负责把拒绝原因如实带回给用户：
+	// 空表是最常见的一种，UI 需要能把它和"存坏了"区分开。
+	if err := a.projections.SetInterviewSchedule(m5ai.InterviewSchedule(request.Schedule)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})
+}
+
 func (a *API) syncJobs(w http.ResponseWriter, r *http.Request) {
 	if decodeEmptyProductJSON(r) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "同步职位请求无效"})

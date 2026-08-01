@@ -132,6 +132,7 @@ func Open(dataDir string) (*Store, error) {
 		&NotificationOutbox{},
 		&CandidateScreenshot{},
 		&FieldReportSetting{},
+		&InterviewScheduleSetting{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
