@@ -303,6 +303,10 @@
   color: #ffcf8b;
 }
 
+.rh-update-waiting {
+  color: #8bc4ff;
+}
+
 .rh-update-actions {
   display: flex;
   gap: 6px;
