@@ -4,23 +4,18 @@ import (
 	"testing"
 )
 
-// 内置默认周表展开后必须与可配置化之前的硬编码窗口逐字节一致。既有
-// TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden 钉的是具体数值，
-// 这里只补一条口径断言：默认周表就是周一至周五 [09:00,18:00)、周末空。
+// 内置默认周表是七天全 [09:00,18:00)（2026-08-01 甲方裁决）。周末在册是
+// 这条断言的重点——它此前被剔除，回归成周一至周五会让未配置的客户端悄悄
+// 少给两天可选时间。
 func TestDefaultInterviewScheduleShape(t *testing.T) {
 	schedule := DefaultInterviewSchedule()
-	if len(schedule) != 5 {
+	if len(schedule) != 7 {
 		t.Fatalf("默认周表天数漂移: %d", len(schedule))
 	}
-	for _, day := range InterviewWeekdays[:5] {
+	for _, day := range InterviewWeekdays {
 		windows := schedule[day]
 		if len(windows) != 1 || windows[0].Start != "09:00" || windows[0].End != "18:00" {
 			t.Fatalf("%s 默认窗口漂移: %+v", day, windows)
-		}
-	}
-	for _, day := range InterviewWeekdays[5:] {
-		if len(schedule[day]) != 0 {
-			t.Fatalf("%s 默认应为空: %+v", day, schedule[day])
 		}
 	}
 	if err := ValidateInterviewSchedule(schedule); err != nil {
