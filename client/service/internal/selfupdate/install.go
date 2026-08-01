@@ -29,7 +29,13 @@ const (
 	// 2026-08-01 的教训:原先只等 NonTerminalCmds 归零、上限 60 秒。那个查询看的是
 	// **已派发**的命令,恰好落在"AI 调用中、命令尚未派发"的空档就会读到空、立刻放行,
 	// 随后派发的那条命令正好被杀。日志上表现为 End 与"准备安装"只隔 2 毫秒。
-	settleTimeout = 5 * time.Minute
+	//
+	// 为什么是 4 分钟而不是 5:壳那边发起这个请求的 fetch 走 undici,默认
+	// headersTimeout 是 300 秒。真等满 5 分钟会变成壳先放弃,用户看到的是
+	// "Headers Timeout Error"而不是下面那句人话;更糟的是脑随后仍可能写下
+	// pending-install.json,白吃掉 maxInstallAttempts 两次机会里的一次。留 60 秒
+	// 余量让脑稳定先手。
+	settleTimeout = 4 * time.Minute
 	settlePoll    = 500 * time.Millisecond
 
 	// pendingInstallFile 记录"已经把安装器交出去了,期待重启后变成这一版"。

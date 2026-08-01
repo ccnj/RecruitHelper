@@ -147,12 +147,15 @@ func TestPrepareEndsRunningWorkflowThenWaitsForItToActuallyStop(t *testing.T) {
 	// 工作流被问到第四次时才真的终局,断言 Prepare 一直等到那一刻。
 	h := newInstallHarness(t, "0.2.5", []byte("installer"))
 	h.store.run = &store.ProductWorkflowRun{RunID: "run-1", Status: workflow.StatusRunning}
+	// 命令比工作流先收敛,这样"何时放行"只取决于 run 是否终局 —— 否则账本这一条
+	// 会替另外两条把测试撑绿,退回旧逻辑也看不出区别。
 	h.store.pending = []store.CmdRecord{{MsgID: "cmd-1"}}
-	h.store.settleAfter = 3
+	h.store.settleAfter = 2
+	// 真终局的形态是 run 消失,不是留一条 Completed 的记录:TransitionProductWorkflowRun
+	// 会把 active_slot 置 nil,ActiveProductWorkflowRun() 随之返回 (nil, nil)。
 	h.store.onRunQuery = func(f *fakeGateStore) {
-		if f.runQueries >= 4 && f.run != nil {
-			f.run.PendingAction = ""
-			f.run.Status = workflow.StatusCompleted
+		if f.runQueries >= 4 {
+			f.run = nil
 		}
 	}
 
@@ -164,9 +167,6 @@ func TestPrepareEndsRunningWorkflowThenWaitsForItToActuallyStop(t *testing.T) {
 	}
 	if h.store.runQueries < 4 {
 		t.Fatalf("应轮询到结束请求真正执行完，只查了 %d 次", h.store.runQueries)
-	}
-	if h.store.queries < 3 {
-		t.Fatalf("应等到命令收敛才返回，只查了 %d 次", h.store.queries)
 	}
 }
 
@@ -217,8 +217,9 @@ func TestSettleBlockerNamesWhatIsStillInTheWay(t *testing.T) {
 			want: "工作流仍在运行",
 		},
 		{
+			// 终局后 run 就查不到了(active_slot 置 nil),所以这里 run 是 nil ——
+			// 留一条 Completed 的 run 是生产上不会出现的形态,拿它当真值表会误导。
 			name:    "工作流已终局但命令未收束",
-			run:     &store.ProductWorkflowRun{Status: workflow.StatusCompleted},
 			pending: []store.CmdRecord{{MsgID: "a"}, {MsgID: "b"}},
 			want:    "仍有 2 条未收束命令",
 		},
