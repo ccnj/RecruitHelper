@@ -4,12 +4,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, JobConfigSourceView, M5AIContextView, M5ProviderConfigView } from '../../api'
 import { errorText } from '../format'
 
-// 只剩请求超时:provider 标签由脑从 base_url 推导,model 随旧后台 job-config
-// 下发(AGENTS.md 2026-07-30 裁决);token 预算自 2026-08-01 起只由脑的代码常量
-// 固定,前端既不提交也不猜——展示用的实际值从 GET 响应里读。
-const M5_PROVIDER_BUDGET = {
-  request_timeout_ms: 30000 as const,
-}
+// 前端已经不提交任何预算或超时参数了:provider 标签由脑从 base_url 推导，model
+// 随旧后台 job-config 下发(AGENTS.md 2026-07-30 裁决)；token 预算自 2026-08-01、
+// 请求超时自 2026-08-02 起都只由脑的代码常量固定。展示用的实际值一律从 GET
+// 响应里读——前端猜一个写在这里，只会在脑改了常量之后变成假信息。
 
 export function ModelConfigPage() {
   const [contexts, setContexts] = useState<M5AIContextView[]>([])
@@ -138,7 +136,6 @@ export function ModelConfigPage() {
     setProviderNotice(null)
     try {
       const result = await api.saveM5ProviderConfig({
-        ...M5_PROVIDER_BUDGET,
         base_url: baseURL.trim(),
         api_key: apiKey.trim(),
       })

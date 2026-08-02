@@ -17,20 +17,32 @@ const ProviderConfigFilename = "llm-provider.json"
 // 漂移——2026-08-01 之前正是这样,Validate 要求两边逐字相等,于是升级客户端改
 // 常量就会让老配置校验失败、AI 建议层静默停摆一整个进程周期。现在预算只有
 // 代码这一个来源,改常量即刻全局生效,客户机不需要任何配置迁移。
-// 老配置文件里残留的 max_*_tokens 字段由 json.Unmarshal 安静忽略。
+// 请求超时 2026-08-02 起同样只由代码常量固定,理由与预算逐字相同:它此前落盘,
+// 于是改默认值对**已经有配置文件的机器毫无作用**——加载时 config = *existing,
+// 文件里那个 30000 原样盖回来。客户机正是这种机器。
+//
+// 老配置文件里残留的 max_*_tokens 与 request_timeout_ms 字段由 json.Unmarshal
+// 安静忽略。
 type ProviderConfig struct {
-	Provider         string `json:"provider"`
-	Model            string `json:"model"`
-	BaseURL          string `json:"base_url"`
-	APIKey           string `json:"api_key"`
-	RequestTimeoutMs int64  `json:"request_timeout_ms"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`
 }
 
+// ProviderRequestTimeoutMs 是单次 provider 调用的超时。
+//
+// 2026-08-02 甲方裁决 30 秒 → 60 秒。30 秒是按"生成一条回复"定的,而全批职位
+// 类别分配一次要读十几个职位的完整描述再吐一整张分配表:客户机实测 10 个职位
+// 47.9 KB,三次尝试里有一次正好卡在 30000ms 上。输出预算同日抬到 10240 之后
+// 模型不再被截断、会写得更完整,耗时只会更长。
+//
+// 代价:任何一次卡住的调用现在要占 60 秒才放手,巡检里那一轮就多等 30 秒。
+// 相对于"本来能成的调用被判超时、整批作废",这个代价是划算的。
+const ProviderRequestTimeoutMs = 60000
+
 func DefaultProviderConfig() ProviderConfig {
-	return ProviderConfig{
-		Provider: "deepseek", Model: "deepseek-v4-pro",
-		RequestTimeoutMs: 30000,
-	}
+	return ProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro"}
 }
 
 // Validate 只校验非空与格式合法,不再校验具体厂商与模型名(AGENTS.md
@@ -41,9 +53,6 @@ func (c ProviderConfig) Validate() error {
 	if strings.TrimSpace(c.Provider) == "" || strings.TrimSpace(c.APIKey) == "" ||
 		validateModel(c.Model) != nil || validateBaseURL(c.BaseURL) != nil {
 		return errors.New("LLM provider 配置不完整")
-	}
-	if c.RequestTimeoutMs < 1000 || c.RequestTimeoutMs > 120000 {
-		return errors.New("LLM provider 请求超时越界")
 	}
 	return nil
 }
@@ -94,7 +103,7 @@ type ProviderConfigView struct {
 func (c ProviderConfig) View() ProviderConfigView {
 	return ProviderConfigView{
 		Provider: c.Provider, Model: c.Model, BaseURLConfigured: strings.TrimSpace(c.BaseURL) != "",
-		KeyConfigured: strings.TrimSpace(c.APIKey) != "", RequestTimeoutMs: c.RequestTimeoutMs,
+		KeyConfigured: strings.TrimSpace(c.APIKey) != "", RequestTimeoutMs: ProviderRequestTimeoutMs,
 		MaxInputTokens: ReplyInputTokenLimit, MaxIntentOutputTokens: IntentOutputTokenLimit,
 		MaxReplyOutputTokens: ReplyOutputTokenLimit,
 	}

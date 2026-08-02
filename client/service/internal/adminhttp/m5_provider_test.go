@@ -27,9 +27,9 @@ func TestM5ProviderConfigAPIAlwaysMasksSecretAndBaseURL(t *testing.T) {
 	payload := map[string]any{
 		"provider": config.Provider, "model": config.Model,
 		"base_url": "https://provider.fixture/v1", "api_key": "sk-private-fixture",
-		"request_timeout_ms": config.RequestTimeoutMs,
-		// 老前端仍会带上这三个字段,而且可以带任意值;它们必须被彻底忽略,
-		// 实际生效的永远是代码常量。
+		// 老前端仍会带上这四个字段,而且可以带任意值;它们必须被彻底忽略,
+		// 实际生效的永远是代码常量。请求超时 2026-08-02 起加入这一列。
+		"request_timeout_ms":       1234,
 		"max_input_tokens":         999999,
 		"max_intent_output_tokens": 999999,
 		"max_reply_output_tokens":  999999,

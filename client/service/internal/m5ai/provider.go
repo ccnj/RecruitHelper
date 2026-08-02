@@ -17,6 +17,18 @@ import (
 	"recruithelper/client/service/internal/aitrace"
 )
 
+// maxProviderRequestBytes / maxProviderResponseBytes 是**我们自己的**保守自限,
+// 不是任何 provider 公布的限制,查它们的文档也找不到这两个数——256 KB 是从协议层
+// WS 帧上限顺手取的一个"看着够大"的值。别把它们当成平台契约:需要时可以调,只要
+// 有实测依据。
+//
+// provider 真正的限制是按 token 算的上下文窗口,那由 purposeInputTokenLimit 与
+// 拿到响应后的 promptTokens 复核两道守着;字节数只是发请求前的粗糙外围保险。
+// 它咬人的方向也是安全的:超了就在发出去之前干净失败(requestPayloadTooLarge),
+// 不花钱、不产生副作用。
+//
+// 另外别把它绑成别的东西的推导基数——2026-08-02 客户机那次事故,起因正是拿输出
+// 预算去推"一次带几个职位",两个不相干的约束共用一个数。
 const (
 	maxProviderRequestBytes  = 256 << 10
 	maxProviderResponseBytes = 1 << 20
@@ -206,7 +218,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(p.config.RequestTimeoutMs)*time.Millisecond)
+	timeoutCtx, cancel := context.WithTimeout(ctx, ProviderRequestTimeoutMs*time.Millisecond)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(timeoutCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -435,7 +447,7 @@ func providerConfigHash(config ProviderConfig) (string, error) {
 		MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
 	}{
 		Provider: config.Provider, Model: config.Model, BaseURL: config.BaseURL,
-		RequestTimeoutMs: config.RequestTimeoutMs, MaxInputTokens: ReplyInputTokenLimit,
+		RequestTimeoutMs: ProviderRequestTimeoutMs, MaxInputTokens: ReplyInputTokenLimit,
 		MaxIntentOutputTokens: IntentOutputTokenLimit,
 		MaxReplyOutputTokens:  ReplyOutputTokenLimit,
 	}

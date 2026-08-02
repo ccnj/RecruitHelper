@@ -46,7 +46,8 @@ const jobClassAttempts = 3
 // 10 个职位全废,就是每条按 40 token 估、算出 432、被 finish_reason=length
 // 切断)。把这两个约束绑在一个数上正是那次搞混的根源,现在分开。
 //
-// 真正约束一次带几个职位的是两样:maxProviderRequestBytes(256 KB 硬闸)与调用
+// 真正约束一次带几个职位的是两样:maxProviderRequestBytes(256 KB,我们自己的保守
+// 自限、不是平台限制)与调用
 // 延迟。取 12 的依据是实测:客户机 10 个职位的请求是 47.9 KB,attempt 2/3 都在
 // 6~9 秒内正常返回过;12 个约 58 KB,占硬闸 23%,仍在验证过的邻域里。超过 12
 // 个才分块,块间靠 occupied 延续差异化。
