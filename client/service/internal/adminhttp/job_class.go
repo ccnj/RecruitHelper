@@ -38,11 +38,21 @@ func (a *API) SetAdvice(advice JobClassAdvisor) *API {
 // 保留合法的分配、跳过不合法的,不让一个坏职位废掉整批。
 const jobClassAttempts = 3
 
-// 单条分配的输出开销估算,用来按职位数申请输出预算。一条形如
-// {"职位":"16","类别":"理财顾问","置信度":0.8,"理由":"一句话"} 实测约 34 token,
-// 取 40 留余量;外层 {"分配":[...]} 另算 32。
+// 单条分配的输出开销估算,用来按职位数申请输出预算。
+//
+// **72 是真机打出来的,不是估的。** 原值 40 来自一条把"理由"写成三个字的样例;
+// 2026-08-02 在 10 个职位上实测:max_tokens 算出 432,模型写到一半被切断,
+// finish_reason=length,provider 在填 usage 之前就返回错误,审计里表现为
+// outcome=providerError、inTokens/outTokens 全 0、resBytes≈2300。真实一条是
+//
+//	{"职位":"41","类别":"团队管理","置信度":0.85,"理由":"招的是有猎头/招聘经验的人"}
+//
+// 结构约 25 token,中文理由 20~30 字又是 20~30 token,合计 45~55。取 72 留余量:
+// 输出预算撑不下的代价是整批干净失败,而多要一点只是少发几个 token。
+//
+// 外层 {"分配":[...]} 另算 32。
 const (
-	jobClassTokensPerJob  = 40
+	jobClassTokensPerJob  = 72
 	jobClassTokensWrapper = 32
 	// 下面两个此前借用 m5ai.JobClassOutputTokenLimit(256)与
 	// m5ai.ReplyOutputTokenLimit(512)。2026-08-01 甲方把所有输出预算统一抬到
@@ -413,7 +423,7 @@ func (a *API) assignJobClassesByModel(
 			a.auditJobClassCall(len(jobs), attempt, outcome, response, latency)
 		}
 		if callErr != nil {
-			record("providerError")
+			record(providerOutcome(callErr))
 			continue
 		}
 		assignments, parseErr := m5ai.ParseJobClassAssignments(response.JSONText)
@@ -474,6 +484,20 @@ func (a *API) auditJobClassCall(
 			"traceStatus", response.Diagnostics.TraceStatus,
 			"traceErrorCode", response.Diagnostics.TraceErrorCode)
 	}
+}
+
+// providerOutcome 把 provider 的失败分类带进审计。
+//
+// 原来一律记成 "providerError",于是 2026-08-02 那次 10 个职位全失败时,审计上
+// 只看得到"调用失败了",看不出是超时、认证不过、还是模型被 max_tokens 切断
+// (finish_reason=length)——最后靠翻源码加对延迟才定的案。分类是 provider 早就
+// 分好的,不带模型原文,进审计不越数据边界,没有理由丢掉。
+func providerOutcome(err error) string {
+	var providerErr *m5ai.ProviderError
+	if errors.As(err, &providerErr) && providerErr.DetailCode != "" {
+		return "providerError:" + providerErr.DetailCode
+	}
+	return "providerError"
 }
 
 func hashJobClassInput(jobs []m5ai.JobClassJobInput, content string) string {

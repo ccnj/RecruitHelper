@@ -245,7 +245,7 @@ func (a *API) chooseJobKeywordsByModel(
 			a.auditJobKeywordsCall(target, attempt, outcome, response, latency)
 		}
 		if callErr != nil {
-			record("providerError")
+			record(providerOutcome(callErr))
 			continue
 		}
 		suggestion, parseErr := m5ai.ParseJobKeywordsSuggestion(response.JSONText)
