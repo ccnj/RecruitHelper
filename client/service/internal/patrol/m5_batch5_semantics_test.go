@@ -59,6 +59,15 @@ func TestM5IntentPostResponseInputBudgetBlockedKeepsUsageAndStopsBeforeReplyAndA
 	if err != nil || action != nil {
 		t.Fatalf("输入预算阻断不得创建 action: action=%+v err=%v", action, err)
 	}
+	// 2026-08-02 裁决:超预算 turn 停靠,但试运行不冻结;停靠轮再被巡检推进
+	// 也不得产生新的 provider 调用。
+	assertM5TrialStillActive(t, h)
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 1 {
+		t.Fatalf("停靠轮不得再调用 provider: calls=%d err=%v", len(advice.requests), err)
+	}
 }
 
 func TestM5ReplyPostResponseInputBudgetBlockedKeepsUsageAndCreatesNoAction(t *testing.T) {
@@ -118,6 +127,15 @@ func TestM5ReplyPostResponseInputBudgetBlockedKeepsUsageAndCreatesNoAction(t *te
 	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
 	if err != nil || action != nil {
 		t.Fatalf("reply 输入预算阻断不得创建 action: action=%+v err=%v", action, err)
+	}
+	// 2026-08-02 裁决:超预算 turn 停靠,但试运行不冻结;停靠轮再被巡检推进
+	// 也不得产生新的 provider 调用。
+	assertM5TrialStillActive(t, h)
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("停靠轮不得再调用 provider: calls=%d err=%v", len(advice.requests), err)
 	}
 }
 

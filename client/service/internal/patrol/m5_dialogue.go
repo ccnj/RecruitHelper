@@ -38,6 +38,14 @@ var m5RetriableAdviceFailures = map[string]struct{}{
 	"reducerRejected":                        {},
 }
 
+// errM5AdviceRoundSkipped 是包内哨兵:2026-08-02 甲方裁决把"这次没吐好"的
+// 失败从本轮内连打改成跨巡检轮重试,一次 attempt 失败后本轮必须放下该候选人。
+// 用哨兵而不是裸 nil,是因为 advanceM5Turn 的推进循环会在 nil 返回后重读
+// turn 状态再进一步——那会在同一轮里游走到下一个 attempt 再次调用 provider,
+// 恰好绕过"每巡检轮每用途至多一次调用"的节流。哨兵只在 advanceM5Turn 出口
+// 换成 nil,不出本包。
+var errM5AdviceRoundSkipped = errors.New("m5 advice skipped for this patrol round")
+
 func m5AdviceShouldRetry(
 	completion store.AIInvocationCompletion,
 	decision communication.Decision,
@@ -188,10 +196,12 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 		return nil
 	}
 
+	// 配置缺失与快照缺失是"世界干净"的本机短缺(2026-08-02 甲方裁决):不冻结
+	// 候选人,本轮跳过,配置补齐后下一巡检轮自然续跑。
 	if target.Profile.BackendJobID == nil || strings.TrimSpace(*target.Profile.BackendJobID) == "" {
-		return a.manager.store.MarkActiveM5TrialManualRequired(
-			target.Profile.ProfileID, "contextNotBound", a.manager.now(),
-		)
+		slog.Warn("对话轮跳过:候选人未绑定后台职位,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID, "reason", "contextNotBound")
+		return nil
 	}
 	currentContext, err := a.manager.store.CurrentLegacyJobAIContextByBackendJobID(
 		strings.TrimSpace(*target.Profile.BackendJobID),
@@ -200,23 +210,23 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 		return err
 	}
 	if currentContext == nil {
-		return a.manager.store.MarkActiveM5TrialManualRequired(
-			target.Profile.ProfileID, "contextNotBound", a.manager.now(),
-		)
+		slog.Warn("对话轮跳过:后台职位缺少 AI 上下文修订,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID, "reason", "contextNotBound")
+		return nil
 	}
 	if target.Profile.ActiveResumeSnapshotID == nil {
-		return a.manager.store.MarkActiveM5TrialManualRequired(
-			target.Profile.ProfileID, "resumeSnapshotMissing", a.manager.now(),
-		)
+		slog.Warn("对话轮跳过:候选人缺少简历快照,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID, "reason", "resumeSnapshotMissing")
+		return nil
 	}
 	snapshot, err := a.manager.store.CandidateResumeSnapshotByID(target.Profile.ProfileID, *target.Profile.ActiveResumeSnapshotID)
 	if err != nil {
 		return err
 	}
 	if snapshot == nil {
-		return a.manager.store.MarkActiveM5TrialManualRequired(
-			target.Profile.ProfileID, "resumeSnapshotMissing", a.manager.now(),
-		)
+		slog.Warn("对话轮跳过:简历快照不可读,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID, "reason", "resumeSnapshotMissing")
+		return nil
 	}
 
 	digest, turnID, err := m5TurnIdentity(target.Profile.ProfileID, pending)
@@ -228,20 +238,22 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 		return err
 	}
 	if turn == nil {
-		// 与正式沟通巡检同口径：冻结这一刻实时读周表，读失败转人工不回落默认。
+		// 与正式沟通巡检同口径：冻结这一刻实时读周表。读失败仍不回落默认
+		// (否则会按用户已经改掉的表承诺时间),但按 2026-08-02 裁决只跳过
+		// 本轮,不冻结候选人——表能读到的那一轮自然续跑。
 		schedule, scheduleErr := a.manager.store.InterviewSchedule()
 		if scheduleErr != nil {
-			return a.manager.store.MarkActiveM5TrialManualRequired(
-				target.Profile.ProfileID, "scheduleRenderFailed", a.manager.now(),
-			)
+			slog.Warn("对话轮跳过:面试时段周表读取失败,等下轮巡检重试",
+				"profileId", target.Profile.ProfileID, "reason", "scheduleRenderFailed")
+			return nil
 		}
 		recommended, freezeErr := m5ai.FreezeRecommendedTimeText(
 			a.now, m5ai.GenerateSlots(a.now, schedule),
 		)
 		if freezeErr != nil {
-			return a.manager.store.MarkActiveM5TrialManualRequired(
-				target.Profile.ProfileID, "scheduleRenderFailed", a.manager.now(),
-			)
+			slog.Warn("对话轮跳过:推荐时段渲染失败,等下轮巡检重试",
+				"profileId", target.Profile.ProfileID, "reason", "scheduleRenderFailed")
+			return nil
 		}
 		frozen, freezeErr := a.manager.store.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
 			TurnID: turnID, ProfileID: target.Profile.ProfileID, ConversationRef: key.ConversationRef,
@@ -332,7 +344,18 @@ func m5TurnIdentity(profileID string, pending m5PendingTurn) (string, string, er
 	return store.DialogueTurnIdentity(profileID, *pending.lastOutbound, pending.inbound)
 }
 
+// advanceM5Turn 是对话轮推进的唯一入口。它把 advanceM5TurnSteps 冒出的
+// errM5AdviceRoundSkipped 换成 nil:跳过是本轮的正常结论,不是错误,不得
+// 流进上层的账号级失败分流。
 func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTurn) error {
+	err := a.advanceM5TurnSteps(ctx, initial)
+	if errors.Is(err, errM5AdviceRoundSkipped) {
+		return nil
+	}
+	return err
+}
+
+func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.DialogueTurn) error {
 	turn := initial
 	for step := 0; step < 3; step++ {
 		switch turn.Status {
@@ -361,7 +384,12 @@ func (a *roundActor) advanceM5Turn(ctx context.Context, initial store.DialogueTu
 		}
 		material, err := a.loadM5TurnMaterial(turn)
 		if err != nil {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "renderInputUnavailable", a.manager.now())
+			// 材料装配失败多为读取瞬断或档案暂时失配(2026-08-02 裁决):不写
+			// 任何状态,跳过本轮;真正的边界失效由既有 Recheck/预留校验收敛。
+			slog.Warn("对话轮跳过:渲染材料装配失败,等下轮巡检重试",
+				"profileId", turn.ProfileID, "turnId", turn.TurnID,
+				"reason", "renderInputUnavailable")
+			return nil
 		}
 		facts := communication.FrozenTurnFacts{TurnID: turn.TurnID}
 		for _, message := range material.current {
@@ -953,7 +981,12 @@ func (a *roundActor) runM5IntentAdvice(
 		material.history, material.current,
 	)
 	if err != nil {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "intentRenderFailed", a.manager.now())
+		// AI 输入渲染失败是"世界干净"的纯计算失败(2026-08-02 甲方裁决):
+		// 发生在预留任何调用之前,连 turn 停靠都不需要——不写终局、不冻结,
+		// 跳过本轮等模板或快照修复后自然重试。本函数下同。
+		slog.Warn("对话轮跳过:意向提示词渲染失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "intentRenderFailed")
+		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeIntent, content, communication.IntentAdvice{})
 }
@@ -969,23 +1002,36 @@ func (a *roundActor) runM5ReplyAdvice(
 	if v4Purpose == communication.V4AdviceServiceReply {
 		return a.runM5ServiceReplyAdvice(ctx, turn, material, facts)
 	}
+	// 回复输入的渲染失败同 runM5IntentAdvice:纯计算失败,发生在预留任何
+	// 调用之前,不写终局、不冻结,跳过本轮等下轮重试(2026-08-02 甲方裁决)。
 	resumeJSON, err := m5ai.RenderResumeJSON(material.snapshot.ResumeJSON)
 	if err != nil {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "resumeRenderFailed", a.manager.now())
+		slog.Warn("对话轮跳过:简历渲染失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "resumeRenderFailed")
+		return errM5AdviceRoundSkipped
 	}
 	history, err := m5ai.RenderHistory(material.throughTurn)
 	if err != nil {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "historyRenderFailed", a.manager.now())
+		slog.Warn("对话轮跳过:对话历史渲染失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "historyRenderFailed")
+		return errM5AdviceRoundSkipped
 	}
 	content, err := m5ai.RenderReplyPromptFrozen(
 		material.revision.Communication.ReplyPrompt, resumeJSON, history,
 		turn.RecommendedTimeText, material.revision.Communication.CustomerFacts,
 	)
 	if err != nil {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyRenderFailed", a.manager.now())
+		slog.Warn("对话轮跳过:回复提示词渲染失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+		return errM5AdviceRoundSkipped
 	}
 	if v4Purpose != communication.V4AdviceReply {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "replyRenderFailed", a.manager.now())
+		// 编排断言:除函数开头分流的 ServiceReply 外只应收到 Reply。原因串
+		// 与上一分支同为 replyRenderFailed,处置也保持同款,免得同因不同罚。
+		slog.Warn("对话轮跳过:回复建议用途非法,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "replyRenderFailed",
+			"v4Purpose", string(v4Purpose))
+		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, content, intent)
 }
@@ -993,7 +1039,7 @@ func (a *roundActor) runM5ReplyAdvice(
 // runM5ServiceReplyAdvice runs the post-interview suffix (spec v4 §7,
 // 2026-07-31): a fixed in-code prompt over the candidate's texts of this turn
 // plus the fixed segment already sent — no playbook, resume or slots. Render
-// failures abandon the suffix on a normal close instead of going manual.
+// failures skip this patrol round without touching the turn (2026-08-02).
 func (a *roundActor) runM5ServiceReplyAdvice(
 	ctx context.Context,
 	turn store.DialogueTurn,
@@ -1034,8 +1080,11 @@ func (a *roundActor) runM5ServiceReplyAdvice(
 	)
 	if err != nil {
 		// 输入构造失败是编排级异常,不属于 §七 的"调用失败/输出不合法";
-		// 沿用普通轨渲染失败纪律。
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "serviceReplyRenderFailed", a.manager.now())
+		// 沿用普通轨渲染失败纪律:跳过本轮、不写终局、不冻结(2026-08-02
+		// 甲方裁决)。
+		slog.Warn("服务补句跳过:提示词渲染失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "serviceReplyRenderFailed")
+		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5ServiceAdvice(ctx, turn, material, facts, content)
 }
@@ -1146,7 +1195,13 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		if failErr := a.manager.store.FailAIInvocationForRetry(completion, m5ai.PurposeReply); failErr != nil {
 			return 0, failErr
 		}
-		return attempt + 1, nil
+		// 2026-08-02 裁决:失败不在本轮内连打。留下本次失败事实后跳过该
+		// 候选人,下一巡检轮经 attempt 游走走到下一个 attempt 再调用。
+		slog.Warn("服务补句调用失败,本轮跳过等下轮重试",
+			"turnId", turn.TurnID, "purpose", string(m5ai.PurposeServiceReply),
+			"attempt", attempt, "status", string(completion.Status),
+			"errorClass", completion.ErrorClass)
+		return 0, errM5AdviceRoundSkipped
 	}
 	request2 := store.CompleteReplyInvocationRequest{
 		Completion: completion, PlannedAt: a.manager.now(),
@@ -1169,9 +1224,11 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	return 0, err
 }
 
-// executeM5Advice 把一个 turn 的建议获取跑到终局:每次 attempt 拿不到可用建议
-// 就换一次采样重来,直到成功或用满 store.MaxAIInvocationAttempts 次调用。turn
-// 的终局只由最后一次 attempt 写入,中间失败只留下各自的 invocation 事实。
+// executeM5Advice 推进一个 turn 的建议获取。循环体只对已完成的历史 attempt
+// 做无调用的账面游走;真实 provider 调用每巡检轮每用途至多一次——失败留下
+// invocation 事实后以 errM5AdviceRoundSkipped 让出本轮,下一巡检轮从游走处
+// 接着走下一个 attempt(2026-08-02 裁决,总额仍是 store.MaxAIInvocationAttempts
+// 次调用)。turn 的终局只由最后一次 attempt 写入。
 func (a *roundActor) executeM5Advice(
 	ctx context.Context,
 	turn store.DialogueTurn,
@@ -1194,8 +1251,10 @@ func (a *roundActor) executeM5Advice(
 	return nil
 }
 
-// executeM5AdviceAttempt 跑一次 provider 调用。返回 next=0 表示本 turn 已经
-// 终局(拿到建议,或失败且不再重试);next>0 表示应当从该 attempt 号继续重试。
+// executeM5AdviceAttempt 至多跑一次 provider 调用。返回 next>0 表示该 attempt
+// 已有完成事实、应继续游走到下一号(不发生调用);next=0 且 err 为 nil 表示
+// 本 turn 已终局;err 为 errM5AdviceRoundSkipped 表示本次调用失败已入账、本轮
+// 到此为止。
 func (a *roundActor) executeM5AdviceAttempt(
 	ctx context.Context,
 	turn store.DialogueTurn,
@@ -1232,9 +1291,13 @@ func (a *roundActor) executeM5AdviceAttempt(
 				if attempt < store.MaxAIInvocationAttempts {
 					return attempt + 1, nil
 				}
-				return 0, a.manager.store.MarkDialogueTurnManualRequired(
-					turn.TurnID, "invocationStateConflict", a.manager.now(),
-				)
+				// 五次调用账已满而 turn 终局缺失,只是崩溃留下的账面歧义,
+				// 不是候选人的业务终局(2026-08-02 裁决):不押给人工,跳过
+				// 本轮。该轮不会再产生新调用,由输入边界变化或人工处置收敛。
+				slog.Warn("对话轮调用账已满而终局缺失,本轮跳过",
+					"turnId", turn.TurnID, "purpose", string(purpose),
+					"attempt", attempt)
+				return 0, errM5AdviceRoundSkipped
 			}
 			recovery, recoveryErr := a.manager.store.ReserveAuthorizedM5ReplyBudgetRecovery(
 				store.ReserveM5ReplyBudgetRecoveryRequest{
@@ -1329,7 +1392,13 @@ func (a *roundActor) executeM5AdviceAttempt(
 			if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
 				return 0, failErr
 			}
-			return attempt + 1, nil
+			// 2026-08-02 裁决:失败不在本轮内连打。留下本次失败事实后跳过该
+			// 候选人,下一巡检轮经 attempt 游走走到下一个 attempt 再调用。
+			slog.Warn("对话轮 AI 调用未产出可用建议,本轮跳过等下轮重试",
+				"turnId", turn.TurnID, "purpose", string(purpose),
+				"attempt", attempt, "status", string(completion.Status),
+				"errorClass", completion.ErrorClass)
+			return 0, errM5AdviceRoundSkipped
 		}
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
 		if err != nil {
@@ -1365,7 +1434,12 @@ func (a *roundActor) executeM5AdviceAttempt(
 		if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
 			return 0, failErr
 		}
-		return attempt + 1, nil
+		// 同 intent 分支:每巡检轮每用途至多一次真实 provider 调用。
+		slog.Warn("对话轮 AI 调用未产出可用建议,本轮跳过等下轮重试",
+			"turnId", turn.TurnID, "purpose", string(purpose),
+			"attempt", attempt, "status", string(completion.Status),
+			"errorClass", completion.ErrorClass)
+		return 0, errM5AdviceRoundSkipped
 	}
 	err = a.completeM5Reply(
 		turn.TurnID,

@@ -741,17 +741,23 @@ func TestCommunicationV4WechatAcceptAuthorizesOneReplyAndFailureKeepsContact(t *
 	if err != nil || action != nil {
 		t.Fatalf("承接 AI 失败应只转人工且不创建正文: action=%+v err=%v", action, err)
 	}
+	// 2026-08-02 裁决:承接 AI 失败是纯计算失败,turn 停靠 manualRequired,
+	// 但聚合 AutomationStatus 不再连带置 manual;接受/联系方式事实照旧保留。
+	turn, turnErr := s.DialogueTurnByID(fixture.Turn.TurnID)
 	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	assets, assetsErr := s.ContactAssetsByProfile(fixture.ProfileID)
-	if aggregateErr != nil ||
+	if turnErr != nil || turn == nil || turn.Status != DialogueTurnManualRequired ||
+		turn.FailureReason != "replyFailed" ||
+		aggregateErr != nil ||
 		aggregate.State.WechatState != communication.V4WechatExchanged ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" ||
 		assetsErr != nil ||
 		len(assets) != 1 ||
 		assets[0].EffectIntentID == nil ||
 		*assets[0].EffectIntentID != created.Intent.IntentID {
-		t.Fatalf("承接 AI 失败回滚了接受/联系方式事实: aggregate=%+v assets=%+v errs=(%v,%v)",
-			aggregate, assets, aggregateErr, assetsErr)
+		t.Fatalf("承接 AI 失败停靠形态错误: turn=%+v aggregate=%+v assets=%+v errs=(%v,%v,%v)",
+			turn, aggregate, assets, turnErr, aggregateErr, assetsErr)
 	}
 }
 

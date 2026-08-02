@@ -486,7 +486,30 @@ func validateDialogueTurnAIAdviceTx(
 	return validateDialogueTurnCurrentTx(tx, turn)
 }
 
+// dialogueOwnerFreezeExemptReason 圈定 2026-08-02 甲方裁决的"纯计算失败"族:
+// provider 调用失败、输出解析或契约不合法、reasoning 用量可疑、reducer 拒绝
+// 本次建议、输入超预算、崩溃中断的收束终局,以及预算恢复例外的失败腿。这些
+// 原因下 turn 仍停靠 manualRequired——同一份冻结输入重跑只会继续烧钱,必须
+// 挡住;但候选人聚合与试运行不冻结:时刻表照跑、新输入照常开新轮(开轮闸的
+// 放行属停机点战役第 4 族,另行落地)。processInterrupted 族在 turn 上落账的
+// 实际原因串是 replyProcessInterrupted/intentProcessInterrupted,故收录这两个。
+// 世界状态失配(inputBoundaryChanged 等)与业务性转人工(intentRejected、
+// unsupportedMedia 等)不在此列,仍整体隔离候选人。
+func dialogueOwnerFreezeExemptReason(reason string) bool {
+	switch reason {
+	case "replyFailed", "replyInvalid", "reasoningUsageUnsafe", "reducerRejected",
+		"inputBudgetBlocked", "replyProcessInterrupted", "intentProcessInterrupted",
+		"replyBudgetRecoveryUnsafe", "replyBudgetRecoveryAlreadyFinished":
+		return true
+	default:
+		return false
+	}
+}
+
 func markDialogueOwnerManualTx(tx *gorm.DB, turn DialogueTurn, reason string, at time.Time) error {
+	if dialogueOwnerFreezeExemptReason(reason) {
+		return nil
+	}
 	_, v4Turn, err := communicationV4TurnApplicationTx(tx, turn)
 	if err != nil {
 		return err

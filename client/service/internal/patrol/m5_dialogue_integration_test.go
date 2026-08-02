@@ -105,6 +105,39 @@ func setCandidateBackendJobIDForTest(
 	return nil
 }
 
+// setResumeSnapshotJSONForTest 直接改写快照正文,用于构造/修复"简历渲染
+// 失败"的现场;身份与绑定列不动,不会触发边界重验。
+func setResumeSnapshotJSONForTest(
+	h *harness,
+	snapshotID string,
+	resumeJSON string,
+) error {
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(h.dataDir, "brain.db")+"?_pragma=busy_timeout(5000)",
+	)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := db.Exec(
+		"UPDATE candidate_resume_snapshots SET resume_json = ? WHERE snapshot_id = ?",
+		resumeJSON,
+		snapshotID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("测试快照正文更新行数错误: %d", rows)
+	}
+	return nil
+}
+
 func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
 	inboundText := "我想了解一下这个职位"
 	return seedM5AdviceFixtureWithInbound(t, h, store.MessageDraft{
@@ -126,6 +159,24 @@ func seedM5AdviceFixtureWithInbound(
 	inbound store.MessageDraft,
 	moreInbound ...store.MessageDraft,
 ) m5AdviceFixture {
+	t.Helper()
+	fixture, freeze := seedM5AdviceFixtureUnfrozen(t, h, inbound, moreInbound...)
+	frozen, err := h.db.FreezeDialogueTurn(freeze)
+	if err != nil || !frozen.Created {
+		t.Fatalf("冻结合成沟通轮失败: frozen=%+v err=%v", frozen, err)
+	}
+	fixture.turn = frozen.Turn
+	return fixture
+}
+
+// seedM5AdviceFixtureUnfrozen 建到"入站已收、轮未冻结"为止,返回可自行冻结
+// 的请求。用于验证冻结之前的巡检分支(如配置缺失跳过)。
+func seedM5AdviceFixtureUnfrozen(
+	t *testing.T,
+	h *harness,
+	inbound store.MessageDraft,
+	moreInbound ...store.MessageDraft,
+) (m5AdviceFixture, store.FreezeDialogueTurnRequest) {
 	t.Helper()
 	now := h.clock.Now()
 	profileID := "profile-m5-advice"
@@ -309,21 +360,18 @@ func seedM5AdviceFixtureWithInbound(
 	if err != nil {
 		t.Fatal(err)
 	}
-	frozen, err := h.db.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
+	freeze := store.FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: profileID, ConversationRef: conversationRef,
 		InputDigest: digest, HistoryThroughSeq: greetingMessage.Seq,
 		InboundFromSeq: changes.Inserted[0].Seq, InboundThroughSeq: changes.Inserted[len(changes.Inserted)-1].Seq,
 		ContextRevisionHash: revision.RevisionHash, ResumeSnapshotID: snapshot.SnapshotID,
 		RecommendedTimeText: recommended, RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt: now,
-	})
-	if err != nil || !frozen.Created {
-		t.Fatalf("冻结合成沟通轮失败: frozen=%+v err=%v", frozen, err)
 	}
 	return m5AdviceFixture{
-		turn: frozen.Turn, profileID: profileID,
+		profileID:       profileID,
 		conversationRef: conversationRef, greetingIntent: greetingIntent,
-	}
+	}, freeze
 }
 
 func TestAdvanceM5TurnCallsIntentThenReplyOnceAndStopsAtPlannedAction(t *testing.T) {
@@ -545,11 +593,23 @@ func TestM5ResumeLegacyByteBudgetFailureAllowsOnlyAuthorizedAttemptTwo(t *testin
 	if err != nil || len(legacyFailure.requests) != 1 {
 		t.Fatalf("建立旧字节误判事实失败: calls=%d err=%v", len(legacyFailure.requests), err)
 	}
+	// 2026-08-02 裁决后新失败只停靠 turn,不再冻结试运行;旧事故的存量冻结
+	// 事实按当时形状显式落库,继续钉住只服务存量的恢复授权路径。
 	status, err := h.db.M5TrialStatus()
+	if err != nil || status == nil ||
+		status.Selection.Status != store.M5TrialSelectionActive {
+		t.Fatalf("纯计算失败不得再冻结试运行: status=%+v err=%v", status, err)
+	}
+	if err := h.db.MarkActiveM5TrialManualRequired(
+		fixture.profileID, "replyFailed", h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	status, err = h.db.M5TrialStatus()
 	if err != nil || status == nil ||
 		status.Selection.Status != store.M5TrialSelectionManualRequired ||
 		status.Selection.Reason != "replyFailed" {
-		t.Fatalf("旧误判未收敛人工: status=%+v err=%v", status, err)
+		t.Fatalf("存量冻结事实落库失败: status=%+v err=%v", status, err)
 	}
 	if err := h.manager.StopToday(h.key); err != nil {
 		t.Fatal(err)
@@ -623,6 +683,12 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 同上一个测试:新失败不再冻结试运行,存量冻结事实显式落库。
+	if err := h.db.MarkActiveM5TrialManualRequired(
+		fixture.profileID, "replyFailed", h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
 	failed, err := h.db.M5TrialStatus()
 	if err != nil || failed == nil ||
 		failed.Selection.Status != store.M5TrialSelectionManualRequired {
@@ -679,6 +745,121 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 	h.manager.mu.Unlock()
 	if err != nil || len(recoveryFailure.requests) != 1 {
 		t.Fatalf("人工 turn 重放不得调用 provider: calls=%d err=%v", len(recoveryFailure.requests), err)
+	}
+}
+
+// 2026-08-02 裁决回归(第 1 条补齐):轮已冻结后 AI 输入渲染失败
+// (resumeRenderFailed)不写 turn 终局、不冻结候选人,失败发生在预留调用之前
+// 故本轮除 intent 外零 provider 调用;快照修复后下一巡检轮自然续跑到建议与
+// planned 动作。
+func TestAdvanceM5TurnResumeRenderFailureSkipsRoundWithoutFreeze(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	advice := &recordingAdviceExecutor{}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+
+	snapshot, err := h.db.CandidateResumeSnapshotByID(
+		fixture.profileID, fixture.turn.ResumeSnapshotID,
+	)
+	if err != nil || snapshot == nil {
+		t.Fatalf("读取简历快照: snapshot=%+v err=%v", snapshot, err)
+	}
+	if err := setResumeSnapshotJSONForTest(h, fixture.turn.ResumeSnapshotID, "{}"); err != nil {
+		t.Fatal(err)
+	}
+
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	// intent 一次成功后进入 reply 渲染;简历渲染失败即跳过,不再有调用。
+	if err != nil || len(advice.requests) != 1 ||
+		advice.requests[0].Purpose != m5ai.PurposeIntent {
+		t.Fatalf("渲染失败轮应只有一次 intent 调用: calls=%d err=%v", len(advice.requests), err)
+	}
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnClassified ||
+		turn.FailureReason != "" {
+		t.Fatalf("渲染失败不得写 turn 终局: turn=%+v err=%v", turn, err)
+	}
+	assertM5TrialStillActive(t, h)
+
+	if err := setResumeSnapshotJSONForTest(
+		h, fixture.turn.ResumeSnapshotID, snapshot.ResumeJSON,
+	); err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("快照修复后下一巡检轮应自然续跑: calls=%d err=%v", len(advice.requests), err)
+	}
+	turn, err = h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned {
+		t.Fatalf("续跑轮未形成 planned 动作: turn=%+v action=%+v err=%v actionErr=%v",
+			turn, action, err, actionErr)
+	}
+}
+
+// 2026-08-02 裁决回归:配置缺失(contextNotBound)是"世界干净"的本机短缺,
+// 巡检本轮跳过、零调用、不写任何状态、不冻结;配置补齐后下一巡检轮自然续跑
+// 到建议与 planned 动作。现场取"轮尚未冻结"阶段——冻结之后的档案失配另归
+// 边界重验(第 4 族),不在本裁决范围。
+func TestM5TrialContextNotBoundSkipsRoundWithoutFreezeThenRetries(t *testing.T) {
+	h := newHarness(t)
+	inboundText := "我想了解一下这个职位"
+	fixture, _ := seedM5AdviceFixtureUnfrozen(t, h, store.MessageDraft{
+		Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inboundText),
+		Text: &inboundText, Origin: "external",
+	})
+	advice := &recordingAdviceExecutor{}
+	h.manager.advice = advice
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("读取试运行账号: account=%+v err=%v", account, err)
+	}
+	roundID := "round-m5-context-not-bound"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: h.manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+
+	if err := setCandidateBackendJobIDForTest(h, fixture.profileID, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = actor.processM5Trial(context.Background())
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 0 {
+		t.Fatalf("配置缺失轮必须零调用零错误: calls=%d err=%v", len(advice.requests), err)
+	}
+	turn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn != nil {
+		t.Fatalf("配置缺失轮不得冻结轮或写状态: turn=%+v err=%v", turn, err)
+	}
+	assertM5TrialStillActive(t, h)
+
+	if err := setCandidateBackendJobIDForTest(h, fixture.profileID, "job-m5-advice"); err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = actor.processM5Trial(context.Background())
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("配置补齐后下一巡检轮应自然续跑: calls=%d err=%v", len(advice.requests), err)
+	}
+	turn, err = h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady {
+		t.Fatalf("续跑轮未到建议终局: turn=%+v err=%v", turn, err)
+	}
+	action, actionErr := h.db.CommunicationActionByTurn(turn.TurnID)
+	if actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned {
+		t.Fatalf("续跑轮未形成 planned 动作: action=%+v err=%v", action, actionErr)
 	}
 }
 

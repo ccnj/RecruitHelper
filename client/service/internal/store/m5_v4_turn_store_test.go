@@ -1572,6 +1572,13 @@ func TestCommunicationV4ReasoningUsageUnsafeNeverPlansAction(t *testing.T) {
 			Count(&actions).Error; err != nil || actions != 0 {
 			t.Fatalf("不安全 intent 不得形成动作: count=%d err=%v", actions, err)
 		}
+		// 2026-08-02 裁决:纯计算失败只停靠 turn,v4 聚合不连带冻结。
+		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.ManualReason != "" {
+			t.Fatalf("纯计算失败不得冻结 v4 聚合: aggregate=%+v err=%v", aggregate, err)
+		}
 	})
 
 	t.Run("nonempty reasoning content blocks reply action", func(t *testing.T) {
@@ -1639,6 +1646,13 @@ func TestCommunicationV4ReasoningUsageUnsafeNeverPlansAction(t *testing.T) {
 			Where("turn_id = ?", frozen.Turn.TurnID).
 			Count(&actions).Error; err != nil || actions != 0 {
 			t.Fatalf("不安全 reply 不得形成动作: count=%d err=%v", actions, err)
+		}
+		// 2026-08-02 裁决:纯计算失败只停靠 turn,v4 聚合不连带冻结。
+		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.ManualReason != "" {
+			t.Fatalf("纯计算失败不得冻结 v4 聚合: aggregate=%+v err=%v", aggregate, err)
 		}
 	})
 }

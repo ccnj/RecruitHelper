@@ -62,6 +62,13 @@ func seedM5ReplyBudgetRecoveryFixture(t *testing.T, suffix string) m5ReplyBudget
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// 2026-08-02 裁决后新失败只停靠 turn,不再冻结试运行;本恢复路径只服务
+	// 存量事故账面,存量的冻结 selection 形状在此按事故当时的样子显式落库。
+	if err := s.MarkActiveM5TrialManualRequired(
+		dialogue.ProfileID, "replyFailed", classifiedAt.Add(2*time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
 	stoppedAt := classifiedAt.Add(3 * time.Second)
 	if err := s.db.Model(&Account{}).Where(
 		"platform = ? AND account_ref = ?", dialogue.Platform, dialogue.AccountRef,

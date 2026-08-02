@@ -424,6 +424,17 @@ func assertTrialManualRequired(t *testing.T, s *Store, reason string) {
 	}
 }
 
+// assertTrialParkedWithoutFreeze 钉住 2026-08-02 裁决:纯计算失败族只停靠
+// turn,试运行 active slot 原样保留、不连带冻结。
+func assertTrialParkedWithoutFreeze(t *testing.T, s *Store) {
+	t.Helper()
+	status, err := s.M5TrialStatus()
+	if err != nil || status == nil || status.Selection.Status != M5TrialSelectionActive ||
+		status.Selection.ActiveSlot == nil {
+		t.Fatalf("纯计算失败不得冻结试运行: status=%+v err=%v", status, err)
+	}
+}
+
 func successfulInvocationCompletion(invocationID string, at time.Time) AIInvocationCompletion {
 	zero := 0
 	return AIInvocationCompletion{
@@ -627,7 +638,8 @@ func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {
 	if err != nil || result.Status != DialogueTurnManualRequired || result.FailureReason != "reasoningUsageUnsafe" {
 		t.Fatalf("reasoning_content 非空必须阻断: turn=%+v err=%v", result, err)
 	}
-	assertTrialManualRequired(t, s, "reasoningUsageUnsafe")
+	// 2026-08-02 裁决:reasoning 可疑是纯计算失败,turn 停靠但候选人不冻结。
+	assertTrialParkedWithoutFreeze(t, s)
 }
 
 // FailAIInvocationForRetry 是重试链的中间步骤,它的全部契约就是"只落这一次
@@ -759,7 +771,8 @@ func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
 		if stored.Status != DialogueTurnManualRequired || stored.FailureReason != "replyProcessInterrupted" {
 			t.Fatalf("reply 中断未转人工: %+v", stored)
 		}
-		assertTrialManualRequired(t, s, "replyProcessInterrupted")
+		// 2026-08-02 裁决:崩溃收束是纯计算失败,turn 停靠但候选人不冻结。
+		assertTrialParkedWithoutFreeze(t, s)
 		var actions int64
 		if err := s.db.Model(&CommunicationAction{}).Count(&actions).Error; err != nil || actions != 0 {
 			t.Fatalf("reply 中断不得创建 action: count=%d err=%v", actions, err)
