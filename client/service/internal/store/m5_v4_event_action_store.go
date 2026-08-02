@@ -287,11 +287,18 @@ func (s *Store) PlannedCommunicationV4EventActionsForAccount(
 			ProfileCommunicationAutomationActive,
 		).
 		Where(
+			// 自动重试行(§8.4)的 source_input_key 带 |try{n} 后缀,剥后缀
+			// 归位到原计划,保证"计划已被更新 occurrence 取代"的失效判定
+			// 同样覆盖重试行,不给过期计划的重试留旁路。
 			`action.source_input_kind <> ? OR NOT EXISTS (
 				SELECT 1
 				FROM communication_v4_schedule_occurrences AS occurrence
 				JOIN communication_v4_schedule_plans AS schedule_plan
-					ON schedule_plan.plan_id = action.source_input_key
+					ON schedule_plan.plan_id = CASE
+						WHEN instr(action.source_input_key, '|try') > 0
+						THEN substr(action.source_input_key, 1, instr(action.source_input_key, '|try') - 1)
+						ELSE action.source_input_key
+					END
 				WHERE occurrence.profile_id = action.profile_id
 					AND occurrence.status = ?
 					AND occurrence.basis_revision >= schedule_plan.basis_revision
@@ -602,7 +609,10 @@ func validLegacyCommunicationV4DialogueReceiptStatus(
 		CommunicationActionEffectPending,
 		CommunicationActionSent,
 		CommunicationActionManualRequired,
-		CommunicationActionSuperseded:
+		CommunicationActionSuperseded,
+		// retried 是干净失败自动重试(§8.4)后代持方原尝试的留档终态;冻结轮
+		// 重放期间对话侧可能正处重试窗口,回执代持关系本身不变。
+		CommunicationActionRetried:
 		return true
 	default:
 		return false
@@ -1013,6 +1023,14 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 				row.ContextRevisionHash == "" &&
 				row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned &&
 				validCommunicationV4EventActionEffectFields(row)
+		case CommunicationV4EventActionRetried:
+			// 干净失败自动重试(§8.4)的原行留档终态:内容字段原封,effect
+			// 三件套与 manualRequired 同形(绑过 intent、无 sent)。
+			return row.Text != "" &&
+				row.ContentHash == textcanon.Hash(row.Text) &&
+				row.ContextRevisionHash != "" &&
+				row.FailureReason == "effectFailed" &&
+				validCommunicationV4EventActionEffectFields(row)
 		default:
 			return false
 		}
@@ -1024,6 +1042,13 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 			if expectedContextHash == "" {
 				return false
 			}
+		}
+		if row.Status == CommunicationV4EventActionRetried {
+			return row.FailureReason == "effectFailed" &&
+				row.Text == "" &&
+				row.ContentHash == communicationWechatInviteContentHash() &&
+				row.ContextRevisionHash == expectedContextHash &&
+				validCommunicationV4EventActionEffectFields(row)
 		}
 		if row.Status != CommunicationV4EventActionPlanned &&
 			row.Status != CommunicationV4EventActionEffectPending &&
@@ -1064,6 +1089,13 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 				CommunicationV4EventActionFailurePrimitiveUnavailable &&
 				row.Text == "" &&
 				row.ContentHash == "" &&
+				row.ContextRevisionHash == "" &&
+				validCommunicationV4EventActionEffectFields(row)
+		}
+		if row.Status == CommunicationV4EventActionRetried {
+			return row.FailureReason == "effectFailed" &&
+				row.Text == "" &&
+				validMessageSourceKey(row.ContentHash) &&
 				row.ContextRevisionHash == "" &&
 				validCommunicationV4EventActionEffectFields(row)
 		}
@@ -1119,6 +1151,12 @@ func validCommunicationV4EventActionEffectFields(
 			strings.TrimSpace(*row.EffectIntentID) != "" &&
 			row.EffectStartedAt != nil &&
 			row.SentAt == nil
+	case CommunicationV4EventActionRetried:
+		// 原失败尝试留档:绑定过 intent、从未 sent,与 manualRequired 同形。
+		return row.EffectIntentID != nil &&
+			strings.TrimSpace(*row.EffectIntentID) != "" &&
+			row.EffectStartedAt != nil &&
+			row.SentAt == nil
 	default:
 		return false
 	}
@@ -1139,7 +1177,11 @@ func communicationV4EventActionPreWALFailureReason(reason string) bool {
 		CommunicationV4EventActionFailureBindingUnavailable,
 		CommunicationV4EventActionFailureDependencyUnavailable,
 		CommunicationV4EventActionFailureDispatchNotConstructed,
-		CommunicationV4EventActionFailureActionInvalid:
+		CommunicationV4EventActionFailureActionInvalid,
+		// stalePlannedSuperseded 是 Q1/Q2 裁决(2026-08-02)"未派发 planned
+		// 残留一律作废"的显式终局原因;它只落在从未绑定发送意图的行上,
+		// 形状与其余 pre-WAL 终局完全一致。
+		CommunicationStalePlannedSuperseded:
 		return true
 	default:
 		return false
@@ -1149,6 +1191,79 @@ func communicationV4EventActionPreWALFailureReason(reason string) bool {
 func communicationV4EventActionDialogueOwned(row CommunicationV4EventAction) bool {
 	return row.Status == CommunicationV4EventActionDeferred &&
 		row.FailureReason == CommunicationV4EventActionFailureDialogueActionOwned
+}
+
+// communicationV4EventActionRetrySuffixConsistent 要求重试事件动作行的
+// SemanticActionKey 与 SourceInputKey 携带完全相同的 |try{n} 后缀(基础行则
+// 两者都不带)。不一致的行是坏账本,一律拒绝参与任何授权判定。
+func communicationV4EventActionRetrySuffixConsistent(
+	row CommunicationV4EventAction,
+) bool {
+	semanticBase := communicationActionPlanKey(row.SemanticActionKey)
+	sourceBase := communicationActionPlanKey(row.SourceInputKey)
+	return row.SemanticActionKey[len(semanticBase):] ==
+		row.SourceInputKey[len(sourceBase):]
+}
+
+// latestCommunicationV4EventActionAttemptTx 沿 |try{n} 链取同一基础事件动作
+// 的最新一代尝试行。输入可以是任意一代;不存在更晚尝试时返回输入行本身。
+// 链上每一跳都要求 ProfileID 与语义键严格匹配,防止哈希碰撞或脏行冒充。
+func latestCommunicationV4EventActionAttemptTx(
+	tx *gorm.DB,
+	row CommunicationV4EventAction,
+) (CommunicationV4EventAction, error) {
+	current := row
+	for {
+		nextKey := communicationActionNextRetryID(current.SemanticActionKey)
+		nextID, err := CommunicationV4EventActionID(current.ProfileID, nextKey)
+		if err != nil {
+			return CommunicationV4EventAction{}, err
+		}
+		var next CommunicationV4EventAction
+		err = tx.First(&next, "action_id = ?", nextID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return current, nil
+		}
+		if err != nil {
+			return CommunicationV4EventAction{}, err
+		}
+		if next.ProfileID != current.ProfileID ||
+			next.SemanticActionKey != nextKey {
+			return CommunicationV4EventAction{}, ErrCommunicationV4EventActionConflict
+		}
+		current = next
+	}
+}
+
+// CommunicationV4EventActionLatestAttempt 是巡检依赖解析用的只读入口:给定
+// 任意一代事件动作 ID,返回其重试链上的最新一代尝试行。
+func (s *Store) CommunicationV4EventActionLatestAttempt(
+	actionID string,
+) (*CommunicationV4EventAction, error) {
+	actionID = strings.TrimSpace(actionID)
+	if actionID == "" {
+		return nil, ErrCommunicationV4EventActionInvalid
+	}
+	var latest *CommunicationV4EventAction
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var row CommunicationV4EventAction
+		if err := tx.First(&row, "action_id = ?", actionID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrCommunicationV4EventActionMissing
+			}
+			return err
+		}
+		walked, err := latestCommunicationV4EventActionAttemptTx(tx, row)
+		if err != nil {
+			return err
+		}
+		latest = &walked
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return latest, nil
 }
 
 func cloneStringPointer(value *string) *string {

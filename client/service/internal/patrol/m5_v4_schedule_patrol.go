@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"recruithelper/client/service/internal/communication"
@@ -63,11 +64,12 @@ func (a *roundActor) processCommunicationV4Schedule(
 		return err
 	}
 	if !ready {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualScheduleMaterialUnavailable,
-			a.manager.now(),
-		)
+		// 材料未就绪是本机短缺(2026-08-02 甲方裁决):不冻结候选人,本轮
+		// 跳过,材料补齐后下一巡检轮自然续跑。
+		slog.Warn("时刻表轮跳过:AI 材料未就绪,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID,
+			"reason", communicationV4ManualScheduleMaterialUnavailable)
+		return nil
 	}
 	baseRequest := store.FreezeCommunicationV4SchedulePlanRequest{
 		ProfileID:                   target.Profile.ProfileID,
@@ -90,6 +92,15 @@ func (a *roundActor) processCommunicationV4Schedule(
 		communication.V4ScheduleActionsPlanned:
 		return nil
 	case communication.V4ScheduleManualRequired:
+		if result.Decision.ManualReason == communication.V4ManualScheduleClockUnknown {
+			// 预检路径(本函数开头)对同一原因是优雅等待;冻结路径不得同因
+			// 不同罚(2026-08-02 甲方裁决)。平台时钟不确定只说明本轮无法证明
+			// 跟催已到期,等下一次投影即可。
+			slog.Warn("时刻表轮跳过:平台时钟不确定,等下轮巡检重试",
+				"profileId", target.Profile.ProfileID,
+				"reason", string(result.Decision.ManualReason))
+			return nil
+		}
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			target.Profile.ProfileID,
 			string(result.Decision.ManualReason),
@@ -118,11 +129,12 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 	freezeRequest store.FreezeCommunicationV4SchedulePlanRequest,
 ) error {
 	if a.manager.advice == nil {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualScheduleProviderUnavailable,
-			a.manager.now(),
-		)
+		// provider 配置缺失是本机短缺(2026-08-02 甲方裁决):不冻结候选人,
+		// 配置补齐重启后下一巡检轮自然续跑。
+		slog.Warn("沉默追问跳过:AI provider 未配置,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID,
+			"reason", communicationV4ManualScheduleProviderUnavailable)
+		return nil
 	}
 	contextRevision := m5ai.ContextRevision{
 		ContextID:     material.ContextRevision.ContextID,
@@ -135,29 +147,28 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 		Communication: material.ContextRevision.Communication,
 		CreatedAt:     material.ContextRevision.CreatedAt,
 	}
+	// 提示词与简历的渲染失败都是"世界干净"的纯计算失败(2026-08-02 甲方
+	// 裁决):不冻结候选人,本轮跳过,配置或快照修复后下一巡检轮自然重试。
 	prompt, err := m5ai.SilenceFollowupPrompt(contextRevision)
 	if err != nil {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			"silenceFollowupPromptUnavailable",
-			a.manager.now(),
-		)
+		slog.Warn("沉默追问跳过:提示词装配失败,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID,
+			"reason", "silenceFollowupPromptUnavailable")
+		return nil
 	}
 	resumeJSON, err := m5ai.RenderResumeJSON(material.ResumeSnapshot.ResumeJSON)
 	if err != nil {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			"resumeRenderFailed",
-			a.manager.now(),
-		)
+		slog.Warn("沉默追问跳过:简历渲染失败,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID,
+			"reason", "resumeRenderFailed")
+		return nil
 	}
 	content, err := m5ai.RenderSilenceFollowupPrompt(prompt, resumeJSON)
 	if err != nil {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			"silenceFollowupRenderFailed",
-			a.manager.now(),
-		)
+		slog.Warn("沉默追问跳过:提示词渲染失败,等下轮巡检重试",
+			"profileId", target.Profile.ProfileID,
+			"reason", "silenceFollowupRenderFailed")
+		return nil
 	}
 	reserved, err :=
 		a.manager.store.ReserveCommunicationV4ScheduleAIInvocation(
@@ -267,11 +278,12 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 		if !communicationV4ScheduleReasoningSafe(invocation) {
 			reason = "reasoningUsageUnsafe"
 		}
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			reason,
-			a.manager.now(),
-		)
+		// AI 调用失败/输出可疑不再冻结候选人(2026-08-02 甲方裁决)。调用
+		// 记账仍按 AdviceKey 单发即停:同一档期不会再触碰 provider,收敛靠
+		// 候选人回复或时刻表推进到下一档期铸出新 AdviceKey。
+		slog.Warn("沉默追问跳过:AI 调用未产出可用话术,本轮不冻结",
+			"profileId", target.Profile.ProfileID, "reason", reason)
+		return nil
 	}
 	freezeRequest.EvaluatedAt = invocation.EvaluatedAt
 	freezeRequest.FrozenAt = a.manager.now()

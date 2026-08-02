@@ -406,10 +406,10 @@ func TestSourceIdentityConflictDoesNotVerifyListHint(t *testing.T) {
 	}
 
 	result, err := h.manager.Tick(context.Background())
-	// 源身份冲突是确定性错误：隔离该会话（2026-07-27 裁决），轮正常收尾，
-	// 指纹不登记。
+	// 源身份冲突按 2026-08-02 裁决本轮跳过（不再隔离）：轮正常收尾，指纹
+	// 不登记、不消化不派发，下轮重读。
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
-		t.Fatalf("稳定身份冲突只隔离当事人，不得停轮: result=%+v err=%v", result, err)
+		t.Fatalf("稳定身份冲突只跳过当事人，不得停轮: result=%+v err=%v", result, err)
 	}
 	cacheKey := verificationKeyForHarness(t, h, key.ConversationRef)
 	h.manager.mu.Lock()
@@ -419,9 +419,8 @@ func TestSourceIdentityConflictDoesNotVerifyListHint(t *testing.T) {
 		t.Fatal("稳定身份冲突后错误登记了已核对 fingerprint")
 	}
 	conversation, err := h.db.ConversationByKey(key)
-	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
-		conversation.PatrolQuarantineReason != "patrolQuarantine:sourceIdentityConflict" {
-		t.Fatalf("稳定身份冲突必须隔离该会话: conversation=%+v err=%v", conversation, err)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt != nil {
+		t.Fatalf("稳定身份冲突按 2026-08-02 裁决不得隔离: conversation=%+v err=%v", conversation, err)
 	}
 }
 

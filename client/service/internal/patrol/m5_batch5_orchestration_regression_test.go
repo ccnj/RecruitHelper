@@ -154,6 +154,10 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// 第二个 Manager 只是换 InteractionPaceWait 的接线,建模的是同一
+			// 脑进程;继承启动时刻,免得 planned 动作被 Q1/Q2 跨启动陈旧判定
+			// 作废(跨启动作废语义由专门用例覆盖)。
+			manager.startedAt = h.manager.startedAt
 			account, err := h.db.AccountByKey(h.key)
 			if err != nil || account == nil {
 				t.Fatalf("读取试运行账号: account=%+v err=%v", account, err)
@@ -192,6 +196,8 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 
 // 第一次吐了废话、第二次吐对了,turn 就该正常拿到建议:这是重试机制存在的
 // 理由。中间那次失败只留下自己的 invocation 事实,不污染 turn 终局。
+// 2026-08-02 裁决改断言:失败不再在同一巡检轮内连打,失败那轮就地跳过且不
+// 冻结任何状态,下一巡检轮经 attempt 游走走到 attempt 2 再调用。
 func TestM5ReplyRetriesAfterUnparsableOutputThenSucceeds(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
@@ -222,8 +228,22 @@ func TestM5ReplyRetriesAfterUnparsableOutputThenSucceeds(t *testing.T) {
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
 	h.manager.mu.Unlock()
+	// 失败那轮到 reply attempt 1 为止:intent 一次 + reply 一次,随后跳过。
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("失败轮应只调用 intent+reply 各一次后跳过: calls=%d err=%v", len(advice.requests), err)
+	}
+	parked, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || parked == nil || parked.Status != store.DialogueTurnClassified ||
+		parked.FailureReason != "" {
+		t.Fatalf("失败轮不得写 turn 终局: turn=%+v err=%v", parked, err)
+	}
+	assertM5TrialStillActive(t, h)
+
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *parked)
+	h.manager.mu.Unlock()
 	if err != nil || len(advice.requests) != 3 {
-		t.Fatalf("解析失败应重试一次即成功: calls=%d err=%v", len(advice.requests), err)
+		t.Fatalf("下一巡检轮应经游走走到 attempt 2 并成功: calls=%d err=%v", len(advice.requests), err)
 	}
 
 	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
@@ -258,8 +278,10 @@ func TestM5ReplyRetriesAfterUnparsableOutputThenSucceeds(t *testing.T) {
 	}
 }
 
-// provider 调用失败按 2026-08-01 甲方裁决重试到上限,耗尽后仍转人工、零副作用。
-// 上限之内的重试是"重新取建议",终局判定与重试前逐字一致。
+// provider 调用失败按 2026-08-01 甲方裁决重试到上限(终身每 turn 每用途至多
+// 5 次调用),耗尽后 turn 转人工、零副作用。2026-08-02 裁决改断言:重试改为
+// 跨巡检轮进行——每轮至多一次真实调用;耗尽后 turn 停靠 manualRequired,但
+// 试运行不再连带冻结。
 func TestM5ReplyProviderFailureRetriesToLimitThenStopsWithoutEffect(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
@@ -282,18 +304,36 @@ func TestM5ReplyProviderFailureRetriesToLimitThenStopsWithoutEffect(t *testing.T
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
+	// 首轮:intent 一次 + reply attempt 1 一次,失败后本轮跳过、不写终局。
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
 	h.manager.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(advice.requests) != maxCalls {
-		t.Fatalf("reply 失败应重试到上限: calls=%d want=%d", len(advice.requests), maxCalls)
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("首轮应恰好 intent+reply 各一次: calls=%d err=%v", len(advice.requests), err)
 	}
 	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
-	if err != nil || turn == nil {
-		t.Fatalf("读取失败轮: turn=%+v err=%v", turn, err)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnClassified ||
+		turn.FailureReason != "" {
+		t.Fatalf("首轮失败不得写 turn 终局: turn=%+v err=%v", turn, err)
+	}
+	assertM5TrialStillActive(t, h)
+
+	// 后续每一巡检轮恰好一次 reply 调用,直到第 5 次耗尽落终局。
+	for round := 2; round <= store.MaxAIInvocationAttempts; round++ {
+		h.manager.mu.Lock()
+		err = actor.advanceM5Turn(context.Background(), *turn)
+		h.manager.mu.Unlock()
+		if err != nil || len(advice.requests) != round+1 {
+			t.Fatalf("第 %d 轮应只追加一次 reply 调用: calls=%d err=%v",
+				round, len(advice.requests), err)
+		}
+		turn, err = h.db.DialogueTurnByID(fixture.turn.TurnID)
+		if err != nil || turn == nil {
+			t.Fatalf("读取重试轮: turn=%+v err=%v", turn, err)
+		}
+	}
+	if len(advice.requests) != maxCalls {
+		t.Fatalf("reply 失败调用总数应达上限: calls=%d want=%d", len(advice.requests), maxCalls)
 	}
 	// 重复推进同一终局轮，证明重试耗尽后不会再触发 provider 调用。
 	h.manager.mu.Lock()
@@ -315,7 +355,7 @@ func TestM5ReplyProviderFailureRetriesToLimitThenStopsWithoutEffect(t *testing.T
 			t.Fatalf("第 %d 次 reply attempt 事实错误: %+v", i, invocations[i])
 		}
 	}
-	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "replyFailed", false)
+	assertM5OrchestrationParkedWithoutFreeze(t, h, fixture, "replyFailed")
 }
 
 func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) {
@@ -347,12 +387,29 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
-	h.manager.mu.Lock()
-	err := actor.advanceM5Turn(context.Background(), fixture.turn)
-	h.manager.mu.Unlock()
-	// reasoning 用量可疑属于"这次没吐好",重试到上限;每一次都不得派发。
-	if err != nil || len(advice.requests) != maxCalls {
-		t.Fatalf("reasoning 非零轮调用次数错误: calls=%d want=%d err=%v", len(advice.requests), maxCalls, err)
+	// reasoning 用量可疑属于"这次没吐好",总额仍是 5 次调用;2026-08-02 裁决
+	// 后每巡检轮至多一次真实调用,每一次都不得派发。
+	turn := fixture.turn
+	for round := 1; round <= store.MaxAIInvocationAttempts; round++ {
+		h.manager.mu.Lock()
+		err := actor.advanceM5Turn(context.Background(), turn)
+		h.manager.mu.Unlock()
+		wantCalls := round + 1
+		if round == 1 {
+			wantCalls = 2
+		}
+		if err != nil || len(advice.requests) != wantCalls {
+			t.Fatalf("reasoning 非零第 %d 轮调用次数错误: calls=%d want=%d err=%v",
+				round, len(advice.requests), wantCalls, err)
+		}
+		reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+		if reloadErr != nil || reloaded == nil {
+			t.Fatalf("读取重试轮: turn=%+v err=%v", reloaded, reloadErr)
+		}
+		turn = *reloaded
+	}
+	if len(advice.requests) != maxCalls {
+		t.Fatalf("reasoning 非零调用总数错误: calls=%d want=%d", len(advice.requests), maxCalls)
 	}
 	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
 	if err != nil || len(invocations) != maxCalls || invocations[1].Purpose != m5ai.PurposeReply ||
@@ -361,7 +418,7 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 		invocations[1].ReasoningTokens == nil || *invocations[1].ReasoningTokens != 1 {
 		t.Fatalf("reasoning 非零 invocation 事实错误: invocations=%+v err=%v", invocations, err)
 	}
-	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "reasoningUsageUnsafe", false)
+	assertM5OrchestrationParkedWithoutFreeze(t, h, fixture, "reasoningUsageUnsafe")
 }
 
 func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
@@ -383,13 +440,26 @@ func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
-	h.manager.mu.Lock()
-	err := actor.advanceM5Turn(context.Background(), fixture.turn)
-	h.manager.mu.Unlock()
 	// intent 阶段就 reasoning 可疑:重试到上限仍可疑,绝不放行到 reply。
-	if err != nil || len(advice.requests) != store.MaxAIInvocationAttempts {
-		t.Fatalf("reasoning_content 非空必须在 intent 阶段耗尽重试后阻断: calls=%d want=%d err=%v",
-			len(advice.requests), store.MaxAIInvocationAttempts, err)
+	// 2026-08-02 裁决后每巡检轮至多一次 intent 调用,五轮耗尽。
+	turn := fixture.turn
+	for round := 1; round <= store.MaxAIInvocationAttempts; round++ {
+		h.manager.mu.Lock()
+		err := actor.advanceM5Turn(context.Background(), turn)
+		h.manager.mu.Unlock()
+		if err != nil || len(advice.requests) != round {
+			t.Fatalf("reasoning_content 非空第 %d 轮调用次数错误: calls=%d err=%v",
+				round, len(advice.requests), err)
+		}
+		reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+		if reloadErr != nil || reloaded == nil {
+			t.Fatalf("读取重试轮: turn=%+v err=%v", reloaded, reloadErr)
+		}
+		turn = *reloaded
+	}
+	if len(advice.requests) != store.MaxAIInvocationAttempts {
+		t.Fatalf("reasoning_content 非空必须在 intent 阶段耗尽重试后阻断: calls=%d want=%d",
+			len(advice.requests), store.MaxAIInvocationAttempts)
 	}
 	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
 	if err != nil || len(invocations) != store.MaxAIInvocationAttempts ||
@@ -403,7 +473,7 @@ func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
 			t.Fatalf("intent 重试 attempt 记账错误: %+v", invocations[i])
 		}
 	}
-	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "reasoningUsageUnsafe", false)
+	assertM5OrchestrationParkedWithoutFreeze(t, h, fixture, "reasoningUsageUnsafe")
 }
 
 func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
@@ -464,18 +534,101 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 				hand: HandState{Online: true, Session: "session-1", BootID: "boot-1"},
 				now:  h.clock.Now(),
 			}
-			manager.mu.Lock()
-			err = actor.processM5Trial(context.Background())
-			manager.mu.Unlock()
-			if err != nil {
-				t.Fatal(err)
+			// Q5:trial 死入口已删。生产 v4 巡检对 adviceReady 旧轮的门序是
+			// "先 RecheckDialogueTurnCurrent,current 才 advanceM5Turn"(见
+			// processCommunicationV4Target),这里按同一门序复核:世界已变的
+			// 轮必须在派发前被拦下并收敛,不得走到 advance/发送。
+			current, recheckErr := h.db.RecheckDialogueTurnCurrent(fixture.turn.TurnID, h.clock.Now())
+			if recheckErr != nil {
+				t.Fatal(recheckErr)
+			}
+			if current {
+				reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+				if reloadErr != nil || reloaded == nil {
+					t.Fatalf("读取待派发轮失败: turn=%+v err=%v", reloaded, reloadErr)
+				}
+				manager.mu.Lock()
+				err = actor.advanceM5Turn(context.Background(), *reloaded)
+				manager.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if hand.commandCount() != 0 || countM5SendMessageCommands(t, h) != beforeCommands {
 				t.Fatalf("世界状态变化后仍进入 chat.sendMessage: hand=%d before=%d after=%d",
 					hand.commandCount(), beforeCommands, countM5SendMessageCommands(t, h))
 			}
-			assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "inputBoundaryChanged", true)
+			// 2026-08-02 裁决:pre-effect 的旧轮连同 planned 动作作废,不再
+			// 转人工冻结候选人;下轮巡检按最新账本边界重开新轮。
+			assertM5OrchestrationSupersededWithoutEffect(t, h, fixture)
 		})
+	}
+}
+
+// assertM5TrialStillActive 钉住 2026-08-02 裁决的另一半:纯计算失败不冻结
+// 候选人,试运行 active slot 原样保留。
+func assertM5TrialStillActive(t *testing.T, h *harness) {
+	t.Helper()
+	trial, err := h.db.M5TrialStatus()
+	if err != nil || trial == nil || trial.Selection.Status != store.M5TrialSelectionActive ||
+		trial.Selection.ActiveSlot == nil {
+		t.Fatalf("纯计算失败不得冻结试运行: trial=%+v err=%v", trial, err)
+	}
+}
+
+// assertM5OrchestrationParkedWithoutFreeze 断言 2026-08-02 裁决的停靠形态:
+// turn 落 manualRequired 挡住同输入继续烧钱,零 effect;但试运行不连带冻结。
+func assertM5OrchestrationParkedWithoutFreeze(
+	t *testing.T,
+	h *harness,
+	fixture m5AdviceFixture,
+	reason string,
+) {
+	t.Helper()
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnManualRequired || turn.FailureReason != reason {
+		t.Fatalf("turn 未停靠人工: turn=%+v err=%v", turn, err)
+	}
+	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || action != nil {
+		t.Fatalf("停靠前不应创建 action: action=%+v err=%v", action, err)
+	}
+	assertM5TrialStillActive(t, h)
+	intent, err := h.db.LatestEffectIntent(h.key.Platform, h.key.AccountRef, fixture.conversationRef)
+	if err != nil || intent != nil {
+		t.Fatalf("不得产生 chat.sendMessage effect intent: intent=%+v err=%v", intent, err)
+	}
+	if count := countM5SendMessageCommands(t, h); count != 0 {
+		t.Fatalf("不得产生 chat.sendMessage Cmd: %d", count)
+	}
+}
+
+// assertM5OrchestrationSupersededWithoutEffect 钉住 2026-08-02 裁决的边界失配
+// 终局:未派发过的旧轮连同其未发动作显式作废(boundarySuperseded),候选人
+// 与试运行保持 active,零 effect intent、零发送命令。
+func assertM5OrchestrationSupersededWithoutEffect(
+	t *testing.T,
+	h *harness,
+	fixture m5AdviceFixture,
+) {
+	t.Helper()
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnSuperseded ||
+		turn.FailureReason != "boundarySuperseded" {
+		t.Fatalf("turn 未作废: turn=%+v err=%v", turn, err)
+	}
+	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || action == nil || action.Status != store.CommunicationActionSuperseded ||
+		action.FailureReason != "boundarySuperseded" || action.EffectIntentID != nil {
+		t.Fatalf("planned action 未随轮作废: action=%+v err=%v", action, err)
+	}
+	assertM5TrialStillActive(t, h)
+	intent, err := h.db.LatestEffectIntent(h.key.Platform, h.key.AccountRef, fixture.conversationRef)
+	if err != nil || intent != nil {
+		t.Fatalf("不得产生 chat.sendMessage effect intent: intent=%+v err=%v", intent, err)
+	}
+	if count := countM5SendMessageCommands(t, h); count != 0 {
+		t.Fatalf("不得产生 chat.sendMessage Cmd: %d", count)
 	}
 }
 

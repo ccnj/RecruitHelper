@@ -210,14 +210,57 @@ func TestCommunicationV4MultiBubbleFailureDoesNotMaterializeLaterItems(t *testin
 	); err != nil {
 		t.Fatal(err)
 	}
+	// 2026-08-02 §8.4 通则:中间气泡干净失败自动重铸 |try2,原动作标 retried
+	// 留档,链序不破——第三项仍未物化,须等 try2 取得正证。
 	actions, err = s.CommunicationActionsByTurn(fixture.Turn.TurnID)
-	if err != nil || len(actions) != 2 ||
-		actions[1].Status != CommunicationActionManualRequired {
-		t.Fatalf("中间失败后不得物化第三项: actions=%+v err=%v", actions, err)
+	if err != nil || len(actions) != 3 {
+		t.Fatalf("中间干净失败应只多出重试行,不得物化第三项: actions=%+v err=%v", actions, err)
+	}
+	if actions[1].Status != CommunicationActionRetried ||
+		actions[1].FailureReason != "effectFailed" {
+		t.Fatalf("原失败气泡未标 retried 留档: %+v", actions[1])
+	}
+	retry := actions[2]
+	if retry.ActionID != second.ActionID+"|try2" ||
+		retry.Status != CommunicationActionPlanned ||
+		retry.Text != second.Text ||
+		retry.ContentHash != second.ContentHash ||
+		retry.DependsOnActionID == nil ||
+		*retry.DependsOnActionID != actions[0].ActionID {
+		t.Fatalf("重试气泡未按原参数铸造: %+v", retry)
 	}
 	turn, err := s.DialogueTurnByID(fixture.Turn.TurnID)
-	if err != nil || turn == nil || turn.Status != DialogueTurnManualRequired {
-		t.Fatalf("中间失败必须终止本轮: turn=%+v err=%v", turn, err)
+	if err != nil || turn == nil || turn.Status != DialogueTurnAdviceReady {
+		t.Fatalf("干净失败重铸后 turn 应复位 adviceReady: turn=%+v err=%v", turn, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("干净失败不得冻结档案自动化: %+v err=%v", aggregate, err)
+	}
+	// try2 取得正证后,第三项才物化,且其父钉在实际发出的重试代上;链上
+	// 每一项仍是独立 WAL/idemKey/正证。
+	confirmCommunicationV4Bubble(
+		t,
+		s,
+		fixture,
+		retry,
+		fixture.Turn.InboundThroughSeq+1,
+		"multi-bubble-failed-try2",
+	)
+	actions, err = s.CommunicationActionsByTurn(fixture.Turn.TurnID)
+	if err != nil || len(actions) != 4 {
+		t.Fatalf("try2 正证后应物化第三项: actions=%+v err=%v", actions, err)
+	}
+	third := actions[3]
+	if third.Text != "永远不应物化" ||
+		third.Status != CommunicationActionPlanned ||
+		third.DependsOnActionID == nil ||
+		*third.DependsOnActionID != retry.ActionID {
+		t.Fatalf("第三项未钉死重试代正证: %+v", third)
+	}
+	sent, err := s.CommunicationActionByID(retry.ActionID)
+	if err != nil || sent == nil || sent.Status != CommunicationActionSent {
+		t.Fatalf("try2 未按完整成功链收编: %+v err=%v", sent, err)
 	}
 }
 

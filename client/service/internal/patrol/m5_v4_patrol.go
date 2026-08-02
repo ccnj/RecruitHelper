@@ -152,6 +152,13 @@ func (a *roundActor) processCommunicationV4Target(
 	if err != nil {
 		return err
 	}
+	// parkedTurn 非空表示最新轮是 v4 停靠轮(manualRequired 但聚合仍 active,
+	// 即 2026-08-02 第 3 族的纯计算失败停靠):它不再终身挡路,只有账本长出
+	// 新候选人输入并走到下方开轮流程时,才由 FreezeCommunicationV4Turn 在
+	// 冻结事务内作废停靠轮、重开新轮(第 4 族);没有新输入时保持停靠原状,
+	// 不跑时刻表、不投影中性尾巴——作废是新输入到达时刻的事件驱动行为,
+	// 不是扫库。
+	var parkedTurn *store.DialogueTurn
 	if latest != nil {
 		v4Owned, err := a.manager.store.CommunicationV4OwnsTurn(latest.TurnID)
 		if err != nil {
@@ -172,8 +179,10 @@ func (a *roundActor) processCommunicationV4Target(
 			)
 			if err != nil || !current {
 				if err == nil {
-					slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
-						"turnId", latest.TurnID)
+					// Recheck 已在事务内收敛旧轮(2026-08-02 裁决:pre-effect
+					// 作废,effect 案底转人工);下一巡检轮对作废轮按最新账本
+					// 边界重开新轮,这里按真实归宿记日志。
+					a.logM5TurnBoundarySettled(latest.TurnID)
 				}
 				return err
 			}
@@ -185,20 +194,21 @@ func (a *roundActor) processCommunicationV4Target(
 			// A constructed effect is owned by the persistent recovery rail.
 			return nil
 		case store.DialogueTurnManualRequired:
-			if v4Owned {
-				// The aggregate should already be manual and disappear from
-				// the next enumeration.
-				return nil
+			if !v4Owned {
+				reason := latest.FailureReason
+				if reason == "" {
+					reason = "legacyTurnManual"
+				}
+				return a.manager.store.MarkCommunicationV4AutomationManualRequired(
+					target.Profile.ProfileID,
+					reason,
+					a.manager.now(),
+				)
 			}
-			reason := latest.FailureReason
-			if reason == "" {
-				reason = "legacyTurnManual"
-			}
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				reason,
-				a.manager.now(),
-			)
+			// 非停靠的 manualRequired(业务性转人工)会连带把聚合置 manual,
+			// 那类档案在 CommunicationTargetForProfile 就已不 ready,走不到
+			// 这里;能到这里的只有聚合仍 active 的停靠轮。
+			parkedTurn = latest
 		case store.DialogueTurnCompleted, store.DialogueTurnSuperseded:
 			// A later ledger boundary may open the next turn.
 		default:
@@ -216,6 +226,10 @@ func (a *roundActor) processCommunicationV4Target(
 	}
 	if len(messages) == 0 ||
 		messages[len(messages)-1].Seq <= target.Aggregate.ProjectedThroughSeq {
+		if parkedTurn != nil {
+			// 停靠轮且无新账本行:保持停靠,不跑时刻表(与拆腿前行为一致)。
+			return nil
+		}
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
@@ -259,6 +273,10 @@ func (a *roundActor) processCommunicationV4Target(
 		)
 	}
 	if !hasCandidateInput {
+		if parkedTurn != nil {
+			// 停靠轮只被候选人新输入唤醒;中性尾巴不触发投影推进或时刻表。
+			return nil
+		}
 		target, err = a.projectCommunicationV4NonCandidateTail(target, boundary)
 		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
 			return err
@@ -374,6 +392,13 @@ func (a *roundActor) processCommunicationV4Target(
 				"turnBoundaryChanged",
 				a.manager.now(),
 			)
+		}
+		if parkedTurn != nil && errors.Is(err, store.ErrDialogueTurnState) {
+			// 承重墙腿:停靠轮带发送案底(动作绑过 EffectIntentID/已派发),
+			// 开轮闸照旧拒绝。不算错误,等 WAL/suspect 收敛后由人工处置。
+			slog.Info("开轮暂缓:停靠旧轮带发送案底,等 WAL/suspect 收敛",
+				"profileId", target.Profile.ProfileID, "turnId", parkedTurn.TurnID)
+			return nil
 		}
 		return err
 	}

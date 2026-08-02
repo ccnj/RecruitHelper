@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -147,20 +148,36 @@ func (s *Store) FreezeCommunicationV4Turn(
 			material.ResumeSnapshot.SnapshotID != req.ResumeSnapshotID {
 			return ErrDialogueTurnBinding
 		}
-		var unfinished int64
-		if err := tx.Model(&DialogueTurn{}).
-			Where("profile_id = ? AND status IN ?", req.ProfileID, []DialogueTurnStatus{
-				DialogueTurnCollected,
-				DialogueTurnClassified,
-				DialogueTurnAdviceReady,
-				DialogueTurnDispatching,
-				DialogueTurnManualRequired,
-			}).
-			Count(&unfinished).Error; err != nil {
+		// 开轮准入闸拆腿(2026-08-02 甲方裁决,规格 v4 §一"旧轮失效"):候选人
+		// 插话是常态,从未派发过发送意图的旧轮不能终身挡路。
+		// 可作废腿:collected/classified/adviceReady 以及停靠 manualRequired 的
+		// 旧轮,且其全部动作行 EffectIntentID/EffectStartedAt/SentAt 全空(从未
+		// 派发)——在本冻结事务内先作废旧轮,再照常创建新轮;新输入到达并进入
+		// 开轮流程这一刻是唯一触发点,不存在扫库作废。
+		// 承重墙腿(一字不动):dispatching 旧轮,或任何动作行绑过发送意图的
+		// 旧轮,照旧拒绝开轮,等 WAL/suspect 收敛;判据是动作行事实,不看
+		// FailureReason 字符串。
+		var unfinished []DialogueTurn
+		if err := tx.Where("profile_id = ? AND status IN ?", req.ProfileID, []DialogueTurnStatus{
+			DialogueTurnCollected,
+			DialogueTurnClassified,
+			DialogueTurnAdviceReady,
+			DialogueTurnDispatching,
+			DialogueTurnManualRequired,
+		}).Order("created_at, turn_id").Find(&unfinished).Error; err != nil {
 			return err
 		}
-		if unfinished != 0 {
-			return ErrDialogueTurnState
+		for index := range unfinished {
+			stale := unfinished[index]
+			if stale.Status == DialogueTurnDispatching {
+				return ErrDialogueTurnState
+			}
+			if err := supersedeDialogueTurnForBoundaryTx(tx, &stale, req.FrozenAt); err != nil {
+				if errors.Is(err, errDialogueTurnEffectBound) {
+					return ErrDialogueTurnState
+				}
+				return err
+			}
 		}
 
 		lastOutbound, inbound, facts, firstReal, err := reconstructCommunicationV4TurnBoundaryTx(

@@ -25,6 +25,11 @@ type Manager struct {
 	advice AdviceExecutor
 	config Config
 
+	// startedAt 是本次脑进程的启动时刻(取自注入时钟,构造时记录一次)。
+	// 它只服务 Q1/Q2 陈旧 planned 判定(stalePlannedBoundary):崩溃/重启前
+	// 生成、从未绑定发送意图的 planned 残留在派发遭遇时刻一律作废。
+	startedAt time.Time
+
 	mu         sync.Mutex // 短临界区：UI/事件对 actor 状态的修改
 	tickMu     sync.Mutex // 只串行 Tick，不得阻塞传感事件和用户暂停
 	scoreMu    sync.Mutex // 串行统一评分；不占用 hand/巡检锁
@@ -76,6 +81,7 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	}
 	manager := &Manager{
 		store: db, runner: runner, hands: hands, config: config,
+		startedAt:                     config.Clock.Now(),
 		verifiedListHints:             make(map[listHintVerificationKey]string),
 		unreadPassEndTotalByPrincipal: make(map[unreadBaselineKey]int),
 	}
@@ -578,6 +584,29 @@ func (m *Manager) now() time.Time { return m.config.Clock.Now() }
 
 func (m *Manager) localDate(at time.Time) string {
 	return at.In(m.config.Location).Format("2006-01-02")
+}
+
+// stalePlannedBoundary 返回派发遭遇时刻的 Q1/Q2 陈旧判定界(2026-08-02 甲方
+// 裁决,《24点边界裁决》第 4 条修订):当前业务日的本地零点(与统一业务运行
+// 窗口同一 Location 口径)与本次脑进程启动时刻,两者取较晚者。CreatedAt 早于
+// 该界即陈旧;同轮当场创建的动作两个时刻都晚于,正常派发零影响。
+func (m *Manager) stalePlannedBoundary() time.Time {
+	local := m.now().In(m.config.Location)
+	midnight := time.Date(
+		local.Year(), local.Month(), local.Day(),
+		0, 0, 0, 0,
+		m.config.Location,
+	)
+	if m.startedAt.After(midnight) {
+		return m.startedAt
+	}
+	return midnight
+}
+
+// plannedActionStale 只做时刻比较;"从未绑定发送意图"的红线判据由调用方与
+// store 侧的 WHERE 条件双重把守。
+func (m *Manager) plannedActionStale(createdAt time.Time) bool {
+	return createdAt.Before(m.stalePlannedBoundary())
 }
 
 func timePointer(value time.Time) *time.Time {

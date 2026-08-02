@@ -491,6 +491,15 @@ func validateCommunicationV4SchedulePreviousActionTx(
 	if err := tx.First(&row, "action_id = ?", previousID).Error; err != nil {
 		return err
 	}
+	if row.Status == CommunicationV4EventActionRetried {
+		// 前一项经历过干净失败自动重试(§8.4):正证事实在重试链最新一代
+		// 尝试行上,沿链取到后按同一套判据核验。
+		walked, err := latestCommunicationV4EventActionAttemptTx(tx, row)
+		if err != nil {
+			return err
+		}
+		row = walked
+	}
 	if !communicationV4ScheduleEventActionMatches(
 		row,
 		plan,
@@ -526,16 +535,22 @@ func communicationV4ScheduleEventActionMatches(
 	planned communication.V4PlannedAction,
 	ordinal int,
 ) bool {
-	expectedID, err := CommunicationV4EventActionID(plan.ProfileID, planned.ActionKey)
+	// 自动重试行(§8.4)的语义键/来源键带一致的 |try{n} 后缀,与冻结 plan
+	// 对账按剥后缀的基础键进行;行身份(ActionID=hash(profile,语义键))按
+	// 行自身的语义键核验,基础行与重试行都不给伪造键留缝。
+	if !communicationV4EventActionRetrySuffixConsistent(row) {
+		return false
+	}
+	expectedID, err := CommunicationV4EventActionID(plan.ProfileID, row.SemanticActionKey)
 	if err != nil {
 		return false
 	}
 	if row.ActionID != expectedID ||
 		row.ProfileID != plan.ProfileID ||
 		row.SourceInputKind != CommunicationV4InputSchedulePlan ||
-		row.SourceInputKey != plan.PlanID ||
+		communicationActionPlanKey(row.SourceInputKey) != plan.PlanID ||
 		row.SourceOrdinal != ordinal ||
-		row.SemanticActionKey != planned.ActionKey ||
+		communicationActionPlanKey(row.SemanticActionKey) != planned.ActionKey ||
 		row.V4Kind != planned.Kind ||
 		row.CardMessageSeq != planned.CardMessageSeq ||
 		row.Text != planned.Text ||

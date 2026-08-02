@@ -57,6 +57,7 @@ func (a *roundActor) drainCommunicationV4EventActionsForProfile(
 
 	stoppedProfiles := make(map[string]struct{})
 	seenActions := make(map[string]struct{})
+	seenBaseKeys := make(map[string]struct{})
 	for {
 		actions, err :=
 			a.manager.store.PlannedCommunicationV4EventActionsForAccount(a.key())
@@ -77,6 +78,38 @@ func (a *roundActor) drainCommunicationV4EventActionsForProfile(
 			if _, stopped := stoppedProfiles[action.ProfileID]; stopped {
 				continue
 			}
+			// Q1/Q2 裁决(2026-08-02):跨日/跨启动残留的未派发 planned 行在
+			// 派发遭遇时刻一律作废,不再续发;次日按最新世界状态重新规划。
+			// 判据机械——绑过发送意图(EffectIntentID/EffectStartedAt/SentAt
+			// 任一非空)的行永不作废。本枚举只列聚合 active 的候选人,被冻结
+			// 候选人(聚合 manual)的 planned 行不进入枚举、天然不碰;时刻表
+			// 计划物化行同规则,其 plan 失效仍由枚举查询的既有 occurrence
+			// 判定收敛。作废发生在链首定向对账之前,不为死行支付页面成本。
+			if action.EffectIntentID == nil &&
+				action.EffectStartedAt == nil &&
+				action.SentAt == nil &&
+				a.manager.plannedActionStale(action.CreatedAt) {
+				if err := a.manager.store.SupersedeStaleCommunicationV4EventAction(
+					action.ActionID,
+					a.manager.now(),
+				); err != nil {
+					return err
+				}
+				slog.Info("陈旧未派发残留作废:事件动作跨日/跨启动仍 planned,不再续发",
+					"profileId", action.ProfileID,
+					"actionId", action.ActionID,
+					"createdAt", action.CreatedAt)
+				continue
+			}
+			// 干净失败自动重铸(§8.4)必须自然受巡检节奏节流:同一基础动作
+			// 每轮至多推进一次。快失败会在本轮内铸出 |try{n} 新行并被外层
+			// 重查看见,这里按基础语义键折叠,把新尝试留给下一轮。
+			baseKey := action.ProfileID + "\x00" +
+				store.CommunicationActionBasePlanKey(action.SemanticActionKey)
+			if _, dispatched := seenBaseKeys[baseKey]; dispatched {
+				continue
+			}
+			seenBaseKeys[baseKey] = struct{}{}
 			stopProfile, err := a.dispatchCommunicationV4EventAction(ctx, action)
 			if err != nil {
 				return err
@@ -202,6 +235,22 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 			previousIntentID = dependencyIntentID
 		default:
 			return false, store.ErrCommunicationV4EventActionConflict
+		}
+		if store.IsRetryCommunicationActionID(action.SemanticActionKey) {
+			// 干净失败自动重试(§8.4):前次失败尝试是会话最新 intent,WAL
+			// CAS 锚取最新;依赖校验仍以父正证 intent 为语义锚,并由 store
+			// 侧按透明锚判据核验该最新 intent 确为前次零副作用失败尝试。
+			latest, latestErr := a.manager.store.LatestEffectIntent(
+				profile.Platform,
+				profile.AccountRef,
+				*profile.ConversationRef,
+			)
+			if latestErr != nil {
+				return false, latestErr
+			}
+			if latest != nil {
+				previousIntentID = latest.IntentID
+			}
 		}
 	}
 
@@ -329,6 +378,10 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 		return false, nil
 	case store.CommunicationV4EventActionManualRequired:
 		return true, nil
+	case store.CommunicationV4EventActionRetried:
+		// 干净失败已在结算事务内铸出 |try{n} 重试行(§8.4)。档案不停,新
+		// 尝试受同轮基础键节流,自然留给下一轮巡检。
+		return false, nil
 	default:
 		return false, store.ErrCommunicationV4EventActionConflict
 	}
@@ -436,6 +489,21 @@ func (a *roundActor) communicationV4EventDependency(
 			store.ErrCommunicationV4EventActionConflict
 	}
 	if eventAction != nil {
+		if eventAction.Status == store.CommunicationV4EventActionRetried {
+			// 父项经历过干净失败自动重试(§8.4):正证事实在重试链最新一代
+			// 尝试行上,取到后按同一套状态判据裁决。
+			walked, walkErr := a.manager.store.CommunicationV4EventActionLatestAttempt(
+				eventAction.ActionID,
+			)
+			if walkErr != nil {
+				return communicationV4EventDependencyUnavailable, "", walkErr
+			}
+			if walked == nil ||
+				walked.Status == store.CommunicationV4EventActionRetried {
+				return communicationV4EventDependencyUnavailable, "", nil
+			}
+			eventAction = walked
+		}
 		switch eventAction.Status {
 		case store.CommunicationV4EventActionSent:
 			if eventAction.EffectIntentID == nil ||

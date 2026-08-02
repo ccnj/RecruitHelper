@@ -741,17 +741,23 @@ func TestCommunicationV4WechatAcceptAuthorizesOneReplyAndFailureKeepsContact(t *
 	if err != nil || action != nil {
 		t.Fatalf("承接 AI 失败应只转人工且不创建正文: action=%+v err=%v", action, err)
 	}
+	// 2026-08-02 裁决:承接 AI 失败是纯计算失败,turn 停靠 manualRequired,
+	// 但聚合 AutomationStatus 不再连带置 manual;接受/联系方式事实照旧保留。
+	turn, turnErr := s.DialogueTurnByID(fixture.Turn.TurnID)
 	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	assets, assetsErr := s.ContactAssetsByProfile(fixture.ProfileID)
-	if aggregateErr != nil ||
+	if turnErr != nil || turn == nil || turn.Status != DialogueTurnManualRequired ||
+		turn.FailureReason != "replyFailed" ||
+		aggregateErr != nil ||
 		aggregate.State.WechatState != communication.V4WechatExchanged ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" ||
 		assetsErr != nil ||
 		len(assets) != 1 ||
 		assets[0].EffectIntentID == nil ||
 		*assets[0].EffectIntentID != created.Intent.IntentID {
-		t.Fatalf("承接 AI 失败回滚了接受/联系方式事实: aggregate=%+v assets=%+v errs=(%v,%v)",
-			aggregate, assets, aggregateErr, assetsErr)
+		t.Fatalf("承接 AI 失败停靠形态错误: turn=%+v aggregate=%+v assets=%+v errs=(%v,%v,%v)",
+			turn, aggregate, assets, turnErr, aggregateErr, assetsErr)
 	}
 }
 
@@ -1088,34 +1094,264 @@ func TestCommunicationV4EventActionManualStillValidatesIntentReplay(t *testing.T
 	); err != nil {
 		t.Fatal(err)
 	}
+	// 2026-08-02 §8.4 通则推广到事件动作轨:干净失败自动重铸,原行 retried
+	// 留档、档案不冻结;重试行携带带 |try2 后缀的语义键/来源键与全新
+	// intentId/idemKey。
 	var action CommunicationV4EventAction
 	if err := s.db.First(&action, "action_id = ?", fixture.Action.ActionID).Error; err != nil {
 		t.Fatal(err)
 	}
 	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
-	if action.Status != CommunicationV4EventActionManualRequired ||
+	if action.Status != CommunicationV4EventActionRetried ||
 		action.FailureReason != "effectFailed" ||
 		action.EffectIntentID == nil ||
 		aggregateErr != nil ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired {
-		t.Fatalf("失败事件动作未收敛转人工: action=%+v aggregate=%+v err=%v",
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("失败事件动作未按通则重铸: action=%+v aggregate=%+v err=%v",
 			action, aggregate, aggregateErr)
+	}
+	retryKey := fixture.Action.SemanticActionKey + "|try2"
+	retryID, err := CommunicationV4EventActionID(fixture.ProfileID, retryKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retry CommunicationV4EventAction
+	if err := s.db.First(&retry, "action_id = ?", retryID).Error; err != nil {
+		t.Fatalf("重试事件动作未铸造: %v", err)
+	}
+	if retry.Status != CommunicationV4EventActionPlanned ||
+		retry.SemanticActionKey != retryKey ||
+		retry.SourceInputKey != fixture.Action.SourceInputKey+"|try2" ||
+		retry.SourceOrdinal != fixture.Action.SourceOrdinal ||
+		retry.Text != fixture.Action.Text ||
+		retry.ContentHash != fixture.Action.ContentHash ||
+		retry.EffectIntentID != nil {
+		t.Fatalf("重试事件动作未按原参数铸造: %+v", retry)
 	}
 	if err := s.ValidateM5AutomaticIntentLink(
 		action.ActionID,
 		req.Intent.IntentID,
 	); err != nil {
-		t.Fatalf("已绑定 manual 动作不能校验原 intent: %v", err)
+		t.Fatalf("retried 留档行不能校验原 intent: %v", err)
 	}
 	replayed, err := s.CreateEffectIntentAndCmd(req)
 	if err != nil || replayed.Created ||
 		replayed.Intent.IntentID != req.Intent.IntentID {
-		t.Fatalf("manual 后原 WAL 重放未收编: result=%+v err=%v", replayed, err)
+		t.Fatalf("重铸后原 WAL 重放未收编: result=%+v err=%v", replayed, err)
 	}
 	replayedTurn, err := s.FreezeCommunicationV4Turn(fixture.FreezeRequest)
 	if err != nil || replayedTurn.Created {
-		t.Fatalf("manual disposition 未通过来源重放校验: result=%+v err=%v",
+		t.Fatalf("retried disposition 未通过来源重放校验: result=%+v err=%v",
 			replayedTurn, err)
+	}
+	// try2 走完整 WAL 派发并取得正证:全新 intentId/idemKey,确认回执按基础
+	// 语义键落账,同一基础动作终身至多确认一次。
+	retryFixture := fixture
+	retryFixture.Action = retry
+	retryFixture.Now = fixture.Now.Add(2 * time.Minute)
+	retryReq := communicationV4EventEffectRequest(
+		t,
+		s,
+		retryFixture,
+		retry,
+		"manual-replay-try2",
+	)
+	if retryReq.Intent.IntentID == req.Intent.IntentID ||
+		retryReq.Intent.IdemKey == req.Intent.IdemKey {
+		t.Fatal("重试尝试必须持有全新 intentId/idemKey")
+	}
+	retryCreated, err := s.CreateEffectIntentAndCmd(retryReq)
+	if err != nil || !retryCreated.Created {
+		t.Fatalf("try2 WAL 构造失败: result=%+v err=%v", retryCreated, err)
+	}
+	settleCommunicationV4EventTextEffect(
+		t,
+		s,
+		retryFixture,
+		retry,
+		retryCreated,
+		"manual-replay-try2",
+	)
+	var settled CommunicationV4EventAction
+	if err := s.db.First(&settled, "action_id = ?", retryID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if settled.Status != CommunicationV4EventActionSent || settled.SentAt == nil {
+		t.Fatalf("try2 未按完整成功链收编: %+v", settled)
+	}
+	var confirmed CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&confirmed,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputConfirmedAction,
+		fixture.Action.SemanticActionKey,
+	).Error; err != nil {
+		t.Fatalf("try2 正证未按基础语义键确认: %v", err)
+	}
+	if confirmed.SemanticKind != string(communication.V4ActionWechatReceipt) {
+		t.Fatalf("确认回执语义错误: %+v", confirmed)
+	}
+}
+
+// TestCommunicationV4EventActionSuspectFreezesAndVerdictRecovers 钉住两腿:
+// suspect → 动作 manualRequired + 聚合冻结原样(不重试);人工裁决
+// resolvedFailed → 终局原样留档、聚合自动回 active、不自动重发(裁决即恢复,
+// 2026-08-02)。
+func TestCommunicationV4EventActionSuspectFreezesAndVerdictRecovers(t *testing.T) {
+	s := openTest(t)
+	fixture := seedCommunicationV4WechatReceiptEffect(t, s, "suspect-verdict")
+	req := communicationV4EventEffectRequest(
+		t,
+		s,
+		fixture,
+		fixture.Action,
+		"suspect-verdict",
+	)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("事件回执 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	verifyAt := fixture.Now.Add(time.Minute)
+	if err := s.MoveEffectToVerification(
+		created.Command.MsgID,
+		"resultLost",
+		verifyAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkEffectSuspect(
+		created.Command.MsgID,
+		"verificationExhausted",
+		verifyAt.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	var action CommunicationV4EventAction
+	if err := s.db.First(&action, "action_id = ?", fixture.Action.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if action.Status != CommunicationV4EventActionManualRequired ||
+		action.FailureReason != "effectSuspect" ||
+		err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+		aggregate.ManualReason != "effectSuspect" {
+		t.Fatalf("suspect 未按原语义冻结: action=%+v aggregate=%+v err=%v",
+			action, aggregate, err)
+	}
+	retryID, err := CommunicationV4EventActionID(
+		fixture.ProfileID,
+		fixture.Action.SemanticActionKey+"|try2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry, retryErr := s.CommunicationV4EventActionByID(retryID); retryErr != nil || retry != nil {
+		t.Fatalf("suspect 不得铸重试行: %+v err=%v", retry, retryErr)
+	}
+	if err := s.ResolveSuspectVerdict(ResolveSuspectVerdictRequest{
+		Ref: created.Command.MsgID, Verdict: CmdResolvedFailed,
+		ConversationKey: ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		},
+		At: verifyAt.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.First(&action, "action_id = ?", fixture.Action.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err = s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if action.Status != CommunicationV4EventActionManualRequired ||
+		action.FailureReason != "effectResolvedFailed" ||
+		err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("裁决即恢复未按新语义收敛: action=%+v aggregate=%+v err=%v",
+			action, aggregate, err)
+	}
+	intent, err := s.EffectIntentByID(req.Intent.IntentID)
+	if err != nil || intent == nil || intent.Status != EffectIntentResolvedFailed {
+		t.Fatalf("旧 intent 终局必须原样保留: %+v err=%v", intent, err)
+	}
+	// 恢复不自动重发:不得出现重试行或第二个发送 intent。
+	if retry, retryErr := s.CommunicationV4EventActionByID(retryID); retryErr != nil || retry != nil {
+		t.Fatalf("resolvedFailed 不得重放原冻结文案铸重试行: %+v err=%v", retry, retryErr)
+	}
+	var intents int64
+	if err := s.db.Model(&EffectIntent{}).
+		Where("target_ref = ?", fixture.ConversationRef).
+		Count(&intents).Error; err != nil || intents != 1 {
+		t.Fatalf("裁决即恢复不得自动重发: count=%d err=%v", intents, err)
+	}
+}
+
+// TestCommunicationV4EventReceiptWithDependentKeepsManualOnCleanFailure 钉住
+// 2026-08-02 收窄残余:预物化链上存在依赖者的气泡干净失败仍走保守转人工,
+// 不重铸(链序与 head 承接归既有收敛)。
+func TestCommunicationV4EventReceiptWithDependentKeepsManualOnCleanFailure(t *testing.T) {
+	s := openTest(t)
+	fixture, receipt, invite := seedCommunicationV4InterviewEventActions(
+		t,
+		s,
+		"retry-narrow",
+	)
+	req := communicationV4EventEffectRequest(t, s, fixture, receipt, "retry-narrow")
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("回执 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	failedAt := fixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		"result-retry-narrow",
+		"result",
+		fixture.HandID,
+		func(command *CmdRecord) (ResultCommandMutation, error) {
+			command.Status = CmdFailed
+			command.SideEffect = "none"
+			command.TerminalAt = &failedAt
+			return ResultCommandMutation{
+				Save: true,
+				Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentFailed,
+					Reason:       "failedNone",
+				},
+			}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var action CommunicationV4EventAction
+	if err := s.db.First(&action, "action_id = ?", receipt.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if action.Status != CommunicationV4EventActionManualRequired ||
+		action.FailureReason != "effectFailed" ||
+		err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired {
+		t.Fatalf("带依赖者的失败气泡应保守转人工: action=%+v aggregate=%+v err=%v",
+			action, aggregate, err)
+	}
+	retryID, err := CommunicationV4EventActionID(
+		fixture.ProfileID,
+		receipt.SemanticActionKey+"|try2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry, retryErr := s.CommunicationV4EventActionByID(retryID); retryErr != nil || retry != nil {
+		t.Fatalf("收窄准入下不得重铸: %+v err=%v", retry, retryErr)
+	}
+	var card CommunicationV4EventAction
+	if err := s.db.First(&card, "action_id = ?", invite.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if card.Status != CommunicationV4EventActionPlanned {
+		t.Fatalf("依赖卡片不得被顺手改写: %+v", card)
 	}
 }
 
@@ -1263,4 +1499,223 @@ func TestCommunicationV4EventInviteUsesEventReceiptParent(t *testing.T) {
 		t.Fatalf("event parent→invite 未闭合: action=%+v aggregate=%+v err=%v",
 			settled, aggregate, err)
 	}
+}
+
+// seedCommunicationV4EventResolvedFailedVerdict 走完整真实链构造事件动作轨
+// "裁决即恢复"后的终局形状:换微信回执 WAL → 验证穷尽 suspect → 人工裁决
+// resolvedFailed,并自证动作 manualRequired/effectResolvedFailed、聚合已
+// 解冻回 active。
+func seedCommunicationV4EventResolvedFailedVerdict(
+	t *testing.T,
+	s *Store,
+	suffix string,
+) (
+	communicationV4EventEffectFixture,
+	CreateEffectIntentRequest,
+	*CreateEffectIntentResult,
+	time.Time,
+) {
+	t.Helper()
+	fixture := seedCommunicationV4WechatReceiptEffect(t, s, suffix)
+	req := communicationV4EventEffectRequest(t, s, fixture, fixture.Action, suffix)
+	created, err := s.CreateEffectIntentAndCmd(req)
+	if err != nil || !created.Created {
+		t.Fatalf("事件回执 WAL 构造失败: result=%+v err=%v", created, err)
+	}
+	verifyAt := fixture.Now.Add(time.Minute)
+	if err := s.MoveEffectToVerification(
+		created.Command.MsgID,
+		"resultLost",
+		verifyAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkEffectSuspect(
+		created.Command.MsgID,
+		"verificationExhausted",
+		verifyAt.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	resolvedAt := verifyAt.Add(2 * time.Minute)
+	if err := s.ResolveSuspectVerdict(ResolveSuspectVerdictRequest{
+		Ref: created.Command.MsgID, Verdict: CmdResolvedFailed,
+		ConversationKey: ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		},
+		At: resolvedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var action CommunicationV4EventAction
+	if err := s.db.First(&action, "action_id = ?", fixture.Action.ActionID).Error; err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if action.Status != CommunicationV4EventActionManualRequired ||
+		action.FailureReason != "effectResolvedFailed" ||
+		err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("事件轨裁决即恢复前置不成立: action=%+v aggregate=%+v err=%v",
+			action, aggregate, err)
+	}
+	return fixture, req, created, resolvedAt
+}
+
+// TestCommunicationV4EventVerdictThenLateResultKeepsRecovery 钉住 2026-08-03
+// 修复的事件轨两条腿:
+//   - 迟到 failed+none 与裁决同向:修复前失败腿"成功"地把裁决终局改写为
+//     effectFailed 并把刚解冻的聚合静默再冻(裁决效果无声撤销、无 suspect
+//     队列条目指引);现在动作原样、聚合保持 active,只落审计,同一 result
+//     重放照样成功。
+//   - 迟到 durable ok 与裁决反向:动作 CAS 转 sent,出站行经 confirmed-action
+//     应用收编,聚合保持 active,不建承接、不物化后项。
+func TestCommunicationV4EventVerdictThenLateResultKeepsRecovery(t *testing.T) {
+	t.Run("late failed keeps verdict and does not refreeze", func(t *testing.T) {
+		s := openTest(t)
+		fixture, req, created, resolvedAt := seedCommunicationV4EventResolvedFailedVerdict(
+			t, s, "late-failed-verdict",
+		)
+		lateAt := resolvedAt.Add(time.Minute)
+		lateMsgID := "late-failed-verdict-result"
+		result, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			lateMsgID,
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				cmd.Status = CmdFailed
+				cmd.SideEffect = "none"
+				cmd.TerminalAt = &lateAt
+				return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentFailed, Retract: true,
+					Reason: "lateFailedNone",
+				}}, nil
+			},
+		)
+		if err != nil || result == nil || !result.CommandFound || result.AlreadyProcessed {
+			t.Fatalf("裁决后迟到安全终局必须可入账: result=%+v err=%v", result, err)
+		}
+		intent, err := s.EffectIntentByID(req.Intent.IntentID)
+		if err != nil || intent == nil || intent.Status != EffectIntentFailed {
+			t.Fatalf("dispatch 层 intent 覆写必须落地: %+v err=%v", intent, err)
+		}
+		var action CommunicationV4EventAction
+		if err := s.db.First(
+			&action,
+			"action_id = ?",
+			fixture.Action.ActionID,
+		).Error; err != nil {
+			t.Fatal(err)
+		}
+		aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if action.Status != CommunicationV4EventActionManualRequired ||
+			action.FailureReason != "effectResolvedFailed" ||
+			action.SentAt != nil ||
+			aggregateErr != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.ManualReason != "" {
+			t.Fatalf("同向迟到终局不得改写裁决或再冻聚合: action=%+v aggregate=%+v err=%v",
+				action, aggregate, aggregateErr)
+		}
+		var audits int64
+		if err := s.db.Model(&AuditEntry{}).
+			Where(
+				"category = ? AND detail LIKE ?",
+				auditCategoryLateResultAfterVerdict,
+				"%direction=consistent%",
+			).
+			Count(&audits).Error; err != nil || audits != 1 {
+			t.Fatalf("迟到重放必须落审计: count=%d err=%v", audits, err)
+		}
+		replay, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			lateMsgID,
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				t.Fatal("同 msgId 重放不得进入 mutate")
+				return ResultCommandMutation{}, nil
+			},
+		)
+		if err != nil || replay == nil || !replay.AlreadyProcessed {
+			t.Fatalf("迟到 result 重放必须幂等成功: result=%+v err=%v", replay, err)
+		}
+		aggregate, aggregateErr = s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if aggregateErr != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+			t.Fatalf("重放后聚合必须仍为 active: %+v err=%v", aggregate, aggregateErr)
+		}
+	})
+
+	t.Run("late ok corrects to sent and incorporates", func(t *testing.T) {
+		s := openTest(t)
+		fixture, req, created, resolvedAt := seedCommunicationV4EventResolvedFailedVerdict(
+			t, s, "late-ok-verdict",
+		)
+		lateAt := resolvedAt.Add(time.Minute)
+		result, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			"late-ok-verdict-result",
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				cmd.Status = CmdOk
+				cmd.TerminalAt = &lateAt
+				return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk, Append: true,
+					Text:         fixture.Action.Text,
+					ContentHash:  fixture.Action.ContentHash,
+					ObservedAtMs: lateAt.UnixMilli(),
+				}}, nil
+			},
+		)
+		if err != nil || result == nil || !result.CommandFound || result.AlreadyProcessed {
+			t.Fatalf("裁决后迟到正证必须可入账: result=%+v err=%v", result, err)
+		}
+		intent, err := s.EffectIntentByID(req.Intent.IntentID)
+		if err != nil || intent == nil || intent.Status != EffectIntentOk ||
+			intent.ResultMessageSeq == nil {
+			t.Fatalf("迟到正证 intent 纠正未落地: %+v err=%v", intent, err)
+		}
+		var action CommunicationV4EventAction
+		if err := s.db.First(
+			&action,
+			"action_id = ?",
+			fixture.Action.ActionID,
+		).Error; err != nil {
+			t.Fatal(err)
+		}
+		aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if action.Status != CommunicationV4EventActionSent ||
+			action.FailureReason != "" || action.SentAt == nil ||
+			aggregateErr != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			!aggregate.State.WechatReceiptSent ||
+			aggregate.ProjectedThroughSeq != *intent.ResultMessageSeq {
+			t.Fatalf("迟到正证纠正形状不符: action=%+v aggregate=%+v err=%v",
+				action, aggregate, aggregateErr)
+		}
+		baseKey := communicationActionPlanKey(fixture.Action.SemanticActionKey)
+		var confirmations int64
+		if err := s.db.Model(&CommunicationV4ProjectionApplication{}).
+			Where(
+				"profile_id = ? AND input_kind = ? AND input_key = ?",
+				fixture.ProfileID, CommunicationV4InputConfirmedAction, baseKey,
+			).
+			Count(&confirmations).Error; err != nil || confirmations != 1 {
+			t.Fatalf("确认应用必须按基础键恰一条: count=%d err=%v", confirmations, err)
+		}
+		var audits int64
+		if err := s.db.Model(&AuditEntry{}).
+			Where(
+				"category = ? AND detail LIKE ?",
+				auditCategoryLateResultAfterVerdict,
+				"%incorporation=confirmed%",
+			).
+			Count(&audits).Error; err != nil || audits != 1 {
+			t.Fatalf("迟到正证必须落审计: count=%d err=%v", audits, err)
+		}
+	})
 }

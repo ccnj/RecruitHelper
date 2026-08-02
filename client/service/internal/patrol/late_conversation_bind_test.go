@@ -178,17 +178,20 @@ func TestPatrolLateBindsGreetedConversationThenImportsHistoryAsBusinessEvent(t *
 		t.Fatalf("晚到回绑与历史导入未闭合: root=%+v rootErr=%v profile=%+v intent=%+v conversation=%+v tracked=%+v messages=%+v err=%v",
 			v4Root, v4RootErr, profile, intent, conversation, tracked, messages, messagesErr)
 	}
-	pending := inspectM5Pending(messages)
-	if pending.manualReason != "" || pending.lastOutbound == nil || pending.lastOutbound.Seq != 1 ||
-		pending.lastOutbound.OutboundIntentID == nil || *pending.lastOutbound.OutboundIntentID != fixture.intentID ||
-		len(pending.inbound) != 1 || pending.inbound[0].Seq != 2 {
-		t.Fatalf("晚到招呼锚未形成可冻结的 313 强意向轮: %+v", pending)
+	// Q5:trial 死入口的 inspect/identity 辅助已删,改用生产 v4 冻结路径
+	// 同款的账本事实与身份原语断言"晚到导入的历史能形成可冻结的 313 强意向轮"。
+	lastOutbound := messages[0]
+	inboundBoundary := messages[1:]
+	if lastOutbound.Direction != "out" || lastOutbound.Seq != 1 ||
+		lastOutbound.OutboundIntentID == nil || *lastOutbound.OutboundIntentID != fixture.intentID ||
+		len(inboundBoundary) != 1 || inboundBoundary[0].Seq != 2 {
+		t.Fatalf("晚到招呼锚未形成可冻结的 313 强意向轮: outbound=%+v inbound=%+v", lastOutbound, inboundBoundary)
 	}
-	if kind, ok := store.DialogueTurnInputKindOf(pending.inbound); !ok ||
+	if kind, ok := store.DialogueTurnInputKindOf(inboundBoundary); !ok ||
 		kind != store.DialogueTurnInputResumeAttachment {
 		t.Fatalf("313 未归入强意向冻结输入: kind=%q ok=%v", kind, ok)
 	}
-	if digest, turnID, identityErr := m5TurnIdentity(fixture.profileID, pending); identityErr != nil || digest == "" || turnID != "turn-"+digest {
+	if digest, turnID, identityErr := store.DialogueTurnIdentity(fixture.profileID, lastOutbound, inboundBoundary); identityErr != nil || digest == "" || turnID != "turn-"+digest {
 		t.Fatalf("强意向轮无法冻结唯一 identity: digest=%q turn=%q err=%v", digest, turnID, identityErr)
 	}
 	rounds, roundsErr := h.db.RecentPatrolRounds(h.key, 1)

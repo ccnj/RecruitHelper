@@ -469,7 +469,10 @@ func persistCommunicationV4AdviceTx(
 	next.State = decision.State
 	next.Revision++
 	next.UpdatedAt = at
-	if manualReason != "" {
+	// 纯计算失败族只停靠 turn,聚合 AutomationStatus 不置 manual(2026-08-02
+	// 甲方裁决)。Outcome 行的 ManualReason 与 head 重放校验原样保留——豁免的
+	// 只是"聚合冻结"这一个副作用,不是账本形状。
+	if manualReason != "" && !dialogueOwnerFreezeExemptReason(manualReason) {
 		next.AutomationStatus = ProfileCommunicationAutomationManualRequired
 		next.ManualReason = manualReason
 		next.ManualRequiredAt = &at

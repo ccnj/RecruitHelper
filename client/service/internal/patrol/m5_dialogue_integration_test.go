@@ -105,6 +105,39 @@ func setCandidateBackendJobIDForTest(
 	return nil
 }
 
+// setResumeSnapshotJSONForTest 直接改写快照正文,用于构造/修复"简历渲染
+// 失败"的现场;身份与绑定列不动,不会触发边界重验。
+func setResumeSnapshotJSONForTest(
+	h *harness,
+	snapshotID string,
+	resumeJSON string,
+) error {
+	db, err := sql.Open(
+		"sqlite",
+		"file:"+filepath.Join(h.dataDir, "brain.db")+"?_pragma=busy_timeout(5000)",
+	)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := db.Exec(
+		"UPDATE candidate_resume_snapshots SET resume_json = ? WHERE snapshot_id = ?",
+		resumeJSON,
+		snapshotID,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("测试快照正文更新行数错误: %d", rows)
+	}
+	return nil
+}
+
 func seedM5AdviceFixture(t *testing.T, h *harness) m5AdviceFixture {
 	inboundText := "我想了解一下这个职位"
 	return seedM5AdviceFixtureWithInbound(t, h, store.MessageDraft{
@@ -126,6 +159,24 @@ func seedM5AdviceFixtureWithInbound(
 	inbound store.MessageDraft,
 	moreInbound ...store.MessageDraft,
 ) m5AdviceFixture {
+	t.Helper()
+	fixture, freeze := seedM5AdviceFixtureUnfrozen(t, h, inbound, moreInbound...)
+	frozen, err := h.db.FreezeDialogueTurn(freeze)
+	if err != nil || !frozen.Created {
+		t.Fatalf("冻结合成沟通轮失败: frozen=%+v err=%v", frozen, err)
+	}
+	fixture.turn = frozen.Turn
+	return fixture
+}
+
+// seedM5AdviceFixtureUnfrozen 建到"入站已收、轮未冻结"为止,返回可自行冻结
+// 的请求。用于验证冻结之前的巡检分支(如配置缺失跳过)。
+func seedM5AdviceFixtureUnfrozen(
+	t *testing.T,
+	h *harness,
+	inbound store.MessageDraft,
+	moreInbound ...store.MessageDraft,
+) (m5AdviceFixture, store.FreezeDialogueTurnRequest) {
 	t.Helper()
 	now := h.clock.Now()
 	profileID := "profile-m5-advice"
@@ -309,21 +360,18 @@ func seedM5AdviceFixtureWithInbound(
 	if err != nil {
 		t.Fatal(err)
 	}
-	frozen, err := h.db.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
+	freeze := store.FreezeDialogueTurnRequest{
 		TurnID: turnID, ProfileID: profileID, ConversationRef: conversationRef,
 		InputDigest: digest, HistoryThroughSeq: greetingMessage.Seq,
 		InboundFromSeq: changes.Inserted[0].Seq, InboundThroughSeq: changes.Inserted[len(changes.Inserted)-1].Seq,
 		ContextRevisionHash: revision.RevisionHash, ResumeSnapshotID: snapshot.SnapshotID,
 		RecommendedTimeText: recommended, RenderFormatVersion: m5ai.DialogueRenderFormatVersion,
 		FrozenAt: now,
-	})
-	if err != nil || !frozen.Created {
-		t.Fatalf("冻结合成沟通轮失败: frozen=%+v err=%v", frozen, err)
 	}
 	return m5AdviceFixture{
-		turn: frozen.Turn, profileID: profileID,
+		profileID:       profileID,
 		conversationRef: conversationRef, greetingIntent: greetingIntent,
-	}
+	}, freeze
 }
 
 func TestAdvanceM5TurnCallsIntentThenReplyOnceAndStopsAtPlannedAction(t *testing.T) {
@@ -545,11 +593,23 @@ func TestM5ResumeLegacyByteBudgetFailureAllowsOnlyAuthorizedAttemptTwo(t *testin
 	if err != nil || len(legacyFailure.requests) != 1 {
 		t.Fatalf("建立旧字节误判事实失败: calls=%d err=%v", len(legacyFailure.requests), err)
 	}
+	// 2026-08-02 裁决后新失败只停靠 turn,不再冻结试运行;旧事故的存量冻结
+	// 事实按当时形状显式落库,继续钉住只服务存量的恢复授权路径。
 	status, err := h.db.M5TrialStatus()
+	if err != nil || status == nil ||
+		status.Selection.Status != store.M5TrialSelectionActive {
+		t.Fatalf("纯计算失败不得再冻结试运行: status=%+v err=%v", status, err)
+	}
+	if err := h.db.MarkActiveM5TrialManualRequired(
+		fixture.profileID, "replyFailed", h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	status, err = h.db.M5TrialStatus()
 	if err != nil || status == nil ||
 		status.Selection.Status != store.M5TrialSelectionManualRequired ||
 		status.Selection.Reason != "replyFailed" {
-		t.Fatalf("旧误判未收敛人工: status=%+v err=%v", status, err)
+		t.Fatalf("存量冻结事实落库失败: status=%+v err=%v", status, err)
 	}
 	if err := h.manager.StopToday(h.key); err != nil {
 		t.Fatal(err)
@@ -623,6 +683,12 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 同上一个测试:新失败不再冻结试运行,存量冻结事实显式落库。
+	if err := h.db.MarkActiveM5TrialManualRequired(
+		fixture.profileID, "replyFailed", h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
 	failed, err := h.db.M5TrialStatus()
 	if err != nil || failed == nil ||
 		failed.Selection.Status != store.M5TrialSelectionManualRequired {
@@ -682,43 +748,59 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 	}
 }
 
-func TestInspectM5PendingCardShapeEligibility(t *testing.T) {
-	greetingText := "你好"
-	resumeHash := syncledger.HashText("card\x1fresumeAttachment")
-	text := "补充一条普通消息"
-	resume := func(seq int64) store.Message {
-		return store.Message{Seq: seq, Direction: "in", Kind: "card", ContentHash: resumeHash,
-			CardType: "resumeAttachment", CardState: "unknown", Origin: "external"}
+// 2026-08-02 裁决回归(第 1 条补齐):轮已冻结后 AI 输入渲染失败
+// (resumeRenderFailed)不写 turn 终局、不冻结候选人,失败发生在预留调用之前
+// 故本轮除 intent 外零 provider 调用;快照修复后下一巡检轮自然续跑到建议与
+// planned 动作。
+func TestAdvanceM5TurnResumeRenderFailureSkipsRoundWithoutFreeze(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	advice := &recordingAdviceExecutor{}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+
+	snapshot, err := h.db.CandidateResumeSnapshotByID(
+		fixture.profileID, fixture.turn.ResumeSnapshotID,
+	)
+	if err != nil || snapshot == nil {
+		t.Fatalf("读取简历快照: snapshot=%+v err=%v", snapshot, err)
 	}
-	tests := []struct {
-		name         string
-		messages     []store.Message
-		manualReason string
-		pending      int
-	}{
-		{name: "generic_card", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "generic", CardType: "unknown", CardState: "unknown", Origin: "external"}}, manualReason: "unsupportedSemantic"},
-		{name: "wechat_card_with_text_batch_b", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "wx", CardType: "wechatExchange", CardState: "pending", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
-		{name: "interview_accepted_with_text_batch_c", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "iv", CardType: "interviewInvite", CardState: "accepted", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
-		{name: "interview_unknown_state_with_text", messages: []store.Message{{Seq: 2, Direction: "in", Kind: "card", ContentHash: "iv2", CardType: "interviewInvite", CardState: "unknown", Origin: "external"}, {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "unsupportedSemantic"},
-		{name: "mixed_card_and_text", messages: []store.Message{resume(2), {Seq: 3, Direction: "in", Kind: "text", ContentHash: syncledger.HashText(text), Text: &text, Origin: "external"}}, manualReason: "", pending: 2},
-		{name: "multiple_resume_cards", messages: []store.Message{resume(2), resume(3)}, manualReason: "", pending: 2},
+	if err := setResumeSnapshotJSONForTest(h, fixture.turn.ResumeSnapshotID, "{}"); err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			messages := append([]store.Message{{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"}}, test.messages...)
-			pending := inspectM5Pending(messages)
-			if pending.manualReason != test.manualReason || len(pending.inbound) != test.pending {
-				t.Fatalf("卡片形态资格判定不符合混合输入轮规格: pending=%+v", pending)
-			}
-		})
+
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	// intent 一次成功后进入 reply 渲染;简历渲染失败即跳过,不再有调用。
+	if err != nil || len(advice.requests) != 1 ||
+		advice.requests[0].Purpose != m5ai.PurposeIntent {
+		t.Fatalf("渲染失败轮应只有一次 intent 调用: calls=%d err=%v", len(advice.requests), err)
 	}
-	humanText := "真人已经回复"
-	cardThenHuman := inspectM5Pending([]store.Message{
-		{Seq: 1, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(greetingText), Text: &greetingText, Origin: "self"},
-		resume(2), {Seq: 3, Direction: "out", Kind: "text", ContentHash: syncledger.HashText(humanText), Text: &humanText, Origin: "external"},
-	})
-	if cardThenHuman.manualReason != "" || len(cardThenHuman.inbound) != 0 || cardThenHuman.lastOutbound == nil || cardThenHuman.lastOutbound.Seq != 3 {
-		t.Fatalf("卡后真人出站必须让原简历轮失去待处理资格: %+v", cardThenHuman)
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnClassified ||
+		turn.FailureReason != "" {
+		t.Fatalf("渲染失败不得写 turn 终局: turn=%+v err=%v", turn, err)
+	}
+	assertM5TrialStillActive(t, h)
+
+	if err := setResumeSnapshotJSONForTest(
+		h, fixture.turn.ResumeSnapshotID, snapshot.ResumeJSON,
+	); err != nil {
+		t.Fatal(err)
+	}
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 2 {
+		t.Fatalf("快照修复后下一巡检轮应自然续跑: calls=%d err=%v", len(advice.requests), err)
+	}
+	turn, err = h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned {
+		t.Fatalf("续跑轮未形成 planned 动作: turn=%+v action=%+v err=%v actionErr=%v",
+			turn, action, err, actionErr)
 	}
 }
 

@@ -594,6 +594,10 @@ const (
 	CommunicationV4EventActionEffectPending  CommunicationV4EventActionStatus = "effectPending"
 	CommunicationV4EventActionSent           CommunicationV4EventActionStatus = "sent"
 	CommunicationV4EventActionManualRequired CommunicationV4EventActionStatus = "manualRequired"
+	// CommunicationV4EventActionRetried 是干净失败自动重试通则(协议规格 §8.4,
+	// 2026-08-02 推广)下原失败事件动作的留档终态;重试由语义键追加 |try{n}
+	// 后缀的新事件动作行承载,新行自带全新 intentId/idemKey。
+	CommunicationV4EventActionRetried CommunicationV4EventActionStatus = "retried"
 )
 
 type CommunicationV4EventEffectKind string
