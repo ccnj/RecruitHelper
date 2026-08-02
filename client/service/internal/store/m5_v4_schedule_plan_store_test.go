@@ -508,6 +508,90 @@ func TestCommunicationV4SchedulePlanMidChainFailureStopsPosterior(t *testing.T) 
 		settled.Status == CommunicationV4EventActionSent {
 		t.Fatalf("失败气泡不得记为已发送: settled=%+v err=%v", settled, err)
 	}
+	// 2026-08-02 §8.4 通则:链中气泡干净失败自动重铸(时刻表链的后项按正证
+	// 惰性物化,失败时不存在依赖者,收窄准入放行)。原行 retried 留档,档案
+	// 不冻结。
+	if settled.Status != CommunicationV4EventActionRetried ||
+		settled.FailureReason != "effectFailed" {
+		t.Fatalf("链中干净失败未标 retried 留档: %+v", settled)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("链中干净失败不得冻结档案: %+v err=%v", aggregate, err)
+	}
+	retryID, err := CommunicationV4EventActionID(
+		fixture.ProfileID,
+		plans[1].ActionKey+"|try2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := s.CommunicationV4EventActionByID(retryID)
+	if err != nil || retry == nil ||
+		retry.Status != CommunicationV4EventActionPlanned ||
+		retry.Text != second.Text ||
+		retry.SourceOrdinal != second.SourceOrdinal ||
+		retry.DependsOnActionID == nil ||
+		*retry.DependsOnActionID != first.ActionID {
+		t.Fatalf("链中重试行未按原参数铸造: %+v err=%v", retry, err)
+	}
+	// try2 依赖首气泡正证,但 CAS 锚是前次失败尝试(透明锚);正证后按序物化
+	// 第三气泡,其父仍是 plan 记的基础键行(retried),依赖解析沿重试链走到
+	// 实际发出的一代。
+	effectFixture.Action = *retry
+	effectFixture.Now = effectFixture.Now.Add(2 * time.Minute)
+	retryReq := communicationV4EventEffectRequest(
+		t,
+		s,
+		effectFixture,
+		*retry,
+		"cold-midfail-2-try2",
+	)
+	if retryReq.PreviousIntentID != secondReq.Intent.IntentID {
+		t.Fatalf("重试 CAS 锚必须是前次失败 intent: got=%q want=%q",
+			retryReq.PreviousIntentID, secondReq.Intent.IntentID)
+	}
+	retryCreated, err := s.CreateEffectIntentAndCmd(retryReq)
+	if err != nil || !retryCreated.Created {
+		t.Fatalf("链中 try2 WAL 构造失败: result=%+v err=%v", retryCreated, err)
+	}
+	settleCommunicationV4EventTextEffect(
+		t,
+		s,
+		effectFixture,
+		*retry,
+		retryCreated,
+		"cold-midfail-2-try2",
+	)
+	thirdID, err := CommunicationV4EventActionID(fixture.ProfileID, plans[2].ActionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.CommunicationV4EventActionByID(thirdID)
+	if err != nil || third == nil ||
+		third.Status != CommunicationV4EventActionPlanned ||
+		third.DependsOnActionID == nil ||
+		*third.DependsOnActionID != second.ActionID {
+		t.Fatalf("try2 正证后未按序物化第三气泡: third=%+v err=%v", third, err)
+	}
+	effectFixture.Action = *third
+	effectFixture.Now = effectFixture.Now.Add(2 * time.Minute)
+	thirdReq := communicationV4EventEffectRequest(
+		t,
+		s,
+		effectFixture,
+		*third,
+		"cold-midfail-3",
+	)
+	if thirdReq.PreviousIntentID != retryReq.Intent.IntentID {
+		t.Fatalf("第三气泡必须钉住实际发出的重试代 intent: got=%q want=%q",
+			thirdReq.PreviousIntentID, retryReq.Intent.IntentID)
+	}
+	thirdCreated, err := s.CreateEffectIntentAndCmd(thirdReq)
+	if err != nil || !thirdCreated.Created {
+		t.Fatalf("依赖 retried 父项的第三气泡 WAL 未放行: result=%+v err=%v",
+			thirdCreated, err)
+	}
 }
 
 func TestCommunicationV4SchedulePlanRefusesNewPlanWhilePriorPending(t *testing.T) {

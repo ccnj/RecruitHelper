@@ -257,6 +257,13 @@ func IsRetryCommunicationActionID(actionID string) bool {
 	return communicationActionRetrySuffix.MatchString(actionID)
 }
 
+// CommunicationActionBasePlanKey 剥离 |try{n} 自动重试后缀,返回基础语义键;
+// 非重试标识原样返回。巡检用它把同一基础动作的多代尝试折叠成同一个每轮
+// 节流单元(§8.4 重铸每巡检轮至多推进一次)。
+func CommunicationActionBasePlanKey(id string) string {
+	return communicationActionPlanKey(id)
+}
+
 // communicationActionNextRetryID 返回下一次自动重试的动作 ID:基础键追加
 // |try{n},首次重试为 try2。
 func communicationActionNextRetryID(actionID string) string {

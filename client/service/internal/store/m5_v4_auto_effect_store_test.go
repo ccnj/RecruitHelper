@@ -519,10 +519,15 @@ func TestCommunicationV4CombinationTextFailureNeverMaterializesCard(t *testing.T
 	); err != nil {
 		t.Fatal(err)
 	}
+	// 2026-08-02 §8.4 通则:正文干净失败自动重铸 |try2,原动作标 retried;
+	// 卡片仍然只能等实际发出的那一代正文取得正证后物化。
 	actions, err = s.CommunicationActionsByTurn(frozen.Turn.TurnID)
-	if err != nil || len(actions) != 1 ||
-		actions[0].Status != CommunicationActionManualRequired {
-		t.Fatalf("正文失败不得实体化卡片: actions=%+v err=%v", actions, err)
+	if err != nil || len(actions) != 2 ||
+		actions[0].Status != CommunicationActionRetried ||
+		actions[1].ActionID != actions[0].ActionID+"|try2" ||
+		actions[1].Status != CommunicationActionPlanned ||
+		actions[1].Kind != CommunicationActionReplyText {
+		t.Fatalf("正文干净失败应重铸而非物化卡片: actions=%+v err=%v", actions, err)
 	}
 	var cardIntents int64
 	if err := s.db.Model(&EffectIntent{}).
@@ -868,7 +873,10 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 	}
 }
 
-func TestCommunicationV4AutomaticFailureRequiresManualWithoutTrial(t *testing.T) {
+// TestCommunicationV4AutomaticCleanFailureAutoRetriesReplyText 钉住 2026-08-02
+// §8.4 通则在对话轨回复气泡上的推广:干净失败(sideEffect=none)自动铸 |try2、
+// 原动作 retried 留档、无任何冻结;try2 走完整安全轨成功正证后照常收编。
+func TestCommunicationV4AutomaticCleanFailureAutoRetriesReplyText(t *testing.T) {
 	s := openTest(t)
 	fixture, req, created := createCommunicationV4AutomaticEffect(t, s, "failed")
 	resultAt := fixture.Now.Add(time.Minute)
@@ -889,21 +897,28 @@ func TestCommunicationV4AutomaticFailureRequiresManualWithoutTrial(t *testing.T)
 		t.Fatal(err)
 	}
 	assertCommunicationV4HasNoTrial(t, s, fixture.ProfileID)
-	action, err := s.CommunicationActionByTurn(fixture.Turn.TurnID)
-	if err != nil || action == nil ||
-		action.Status != CommunicationActionManualRequired ||
-		action.FailureReason != "effectFailed" || action.SentAt != nil {
-		t.Fatalf("V4 failed action 未转人工: action=%+v err=%v", action, err)
+	original, err := s.CommunicationActionByID(fixture.Action.ActionID)
+	if err != nil || original == nil ||
+		original.Status != CommunicationActionRetried ||
+		original.FailureReason != "effectFailed" || original.SentAt != nil {
+		t.Fatalf("原动作未标 retried 留档: action=%+v err=%v", original, err)
+	}
+	retryID := fixture.Action.ActionID + "|try2"
+	retry, err := s.CommunicationActionByID(retryID)
+	if err != nil || retry == nil ||
+		retry.Status != CommunicationActionPlanned ||
+		retry.Kind != CommunicationActionReplyText ||
+		retry.Text != fixture.Action.Text ||
+		retry.ContentHash != fixture.Action.ContentHash {
+		t.Fatalf("重试动作未按原参数铸造: %+v err=%v", retry, err)
 	}
 	turn, _ := s.DialogueTurnByID(fixture.Turn.TurnID)
 	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
-	if turn == nil || turn.Status != DialogueTurnManualRequired ||
-		turn.FailureReason != "effectFailed" ||
+	if turn == nil || turn.Status != DialogueTurnAdviceReady ||
+		turn.FailureReason != "" ||
 		aggregateErr != nil ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-		aggregate.ManualReason != "effectFailed" ||
-		aggregate.ProjectedThroughSeq != 2 {
-		t.Fatalf("V4 failed 未原子收敛: turn=%+v aggregate=%+v err=%v",
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("干净失败不得冻结轮或档案: turn=%+v aggregate=%+v err=%v",
 			turn, aggregate, aggregateErr)
 	}
 	var messages int64
@@ -912,9 +927,52 @@ func TestCommunicationV4AutomaticFailureRequiresManualWithoutTrial(t *testing.T)
 		Count(&messages).Error; err != nil || messages != 0 {
 		t.Fatalf("V4 failed 不得伪造消息: count=%d err=%v", messages, err)
 	}
+	// try2 走完整 WAL 派发并取得正证:全新 intentId/idemKey,旧 idemKey 不复用。
+	retryFixture := fixture
+	retryFixture.Action = *retry
+	retryFixture.Now = fixture.Now.Add(2 * time.Minute)
+	retryReq := communicationV4AutomaticEffectRequest(t, s, retryFixture, "failed-try2")
+	if retryReq.Intent.IntentID == req.Intent.IntentID ||
+		retryReq.Intent.IdemKey == req.Intent.IdemKey {
+		t.Fatal("重试尝试必须持有全新 intentId/idemKey")
+	}
+	retryCreated, err := s.CreateEffectIntentAndCmd(retryReq)
+	if err != nil || !retryCreated.Created {
+		t.Fatalf("try2 WAL 构造失败: result=%+v err=%v", retryCreated, err)
+	}
+	sentAt := retryFixture.Now.Add(time.Minute)
+	if _, err := s.ApplyResultMessage(
+		retryCreated.Command.MsgID,
+		"result-v4-auto-effect-failed-try2",
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			cmd.Status = CmdOk
+			cmd.TerminalAt = &sentAt
+			return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+				IntentStatus: EffectIntentOk, Append: true,
+				Text:        retry.Text,
+				ContentHash: retry.ContentHash,
+				ObservedAtMs: sentAt.UnixMilli(),
+			}}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := s.CommunicationActionByID(retryID)
+	finalTurn, turnErr := s.DialogueTurnByID(fixture.Turn.TurnID)
+	if err != nil || settled == nil || settled.Status != CommunicationActionSent ||
+		turnErr != nil || finalTurn == nil || finalTurn.Status != DialogueTurnCompleted {
+		t.Fatalf("try2 成功链未完成: action=%+v turn=%+v errs=%v/%v",
+			settled, finalTurn, err, turnErr)
+	}
 }
 
 func TestCommunicationV4AutomaticSuspectVerdictsPreserveFirstManualReason(t *testing.T) {
+	// 裁决即恢复(2026-08-02):resolvedFailed 落账即自动恢复候选人推进——
+	// 旧 intent/动作终局原样留档,轮残留作废(resolvedFailedSuperseded),
+	// 聚合自动回 active,无需第二次人工确认;禁止重放原冻结文案,重新规划
+	// 交给下一个自然触发点。
 	t.Run("resolved failed", func(t *testing.T) {
 		s := openTest(t)
 		fixture, req, created := createCommunicationV4AutomaticEffect(t, s, "resolved-failed")
@@ -933,6 +991,12 @@ func TestCommunicationV4AutomaticSuspectVerdictsPreserveFirstManualReason(t *tes
 		); err != nil {
 			t.Fatal(err)
 		}
+		suspectAggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil ||
+			suspectAggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+			suspectAggregate.ManualReason != "effectSuspect" {
+			t.Fatalf("suspect 未按原语义冻结: %+v err=%v", suspectAggregate, err)
+		}
 		if err := s.ResolveSuspectVerdict(ResolveSuspectVerdictRequest{
 			Ref: created.Command.MsgID, Verdict: CmdResolvedFailed,
 			ConversationKey: ConversationKey{
@@ -944,20 +1008,96 @@ func TestCommunicationV4AutomaticSuspectVerdictsPreserveFirstManualReason(t *tes
 			t.Fatal(err)
 		}
 		action, _ := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+		turn, _ := s.DialogueTurnByID(fixture.Turn.TurnID)
 		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 		if action == nil || action.Status != CommunicationActionManualRequired ||
-			action.FailureReason != "effectResolvedFailed" ||
-			err != nil ||
-			aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-			aggregate.ManualReason != "effectSuspect" {
-			t.Fatalf("resolvedFailed 覆盖了首次人工原因或未终局: action=%+v aggregate=%+v err=%v",
-				action, aggregate, err)
+			action.FailureReason != "effectResolvedFailed" || err != nil {
+			t.Fatalf("resolvedFailed 终局未原样落账: action=%+v err=%v", action, err)
+		}
+		if turn == nil || turn.Status != DialogueTurnSuperseded ||
+			turn.FailureReason != dialogueTurnResolvedFailedSuperseded {
+			t.Fatalf("裁决即恢复未作废轮残留: turn=%+v", turn)
+		}
+		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+			aggregate.ManualReason != "" {
+			t.Fatalf("裁决即恢复未解冻聚合: %+v", aggregate)
+		}
+		intent, err := s.EffectIntentByID(req.Intent.IntentID)
+		if err != nil || intent == nil || intent.Status != EffectIntentResolvedFailed {
+			t.Fatalf("旧 intent 终局必须原样保留: %+v err=%v", intent, err)
 		}
 		var messages int64
 		if err := s.db.Model(&Message{}).
 			Where("outbound_intent_id = ?", req.Intent.IntentID).
 			Count(&messages).Error; err != nil || messages != 0 {
 			t.Fatalf("resolvedFailed 不得追加消息: count=%d err=%v", messages, err)
+		}
+		// 恢复只作废与解冻,不自动重发:不得出现任何新 planned 动作或第二个
+		// 发送 intent(禁止重放原冻结文案)。
+		var planned int64
+		if err := s.db.Model(&CommunicationAction{}).
+			Where("turn_id = ? AND status = ?", fixture.Turn.TurnID, CommunicationActionPlanned).
+			Count(&planned).Error; err != nil || planned != 0 {
+			t.Fatalf("裁决即恢复不得重放文案铸新动作: count=%d err=%v", planned, err)
+		}
+		var intents int64
+		if err := s.db.Model(&EffectIntent{}).
+			Where("target_ref = ?", fixture.ConversationRef).
+			Count(&intents).Error; err != nil || intents != 1 {
+			t.Fatalf("裁决即恢复不得自动重发: count=%d err=%v", intents, err)
+		}
+		var audits int64
+		if err := s.db.Model(&AuditEntry{}).
+			Where("category IN ?", []string{
+				auditCategoryResolvedFailedRecovered,
+				auditCategoryAutomationUnfrozen,
+			}).
+			Count(&audits).Error; err != nil || audits != 2 {
+			t.Fatalf("裁决即恢复必须落审计: count=%d err=%v", audits, err)
+		}
+	})
+
+	// 其他人工原因的聚合不被误解冻:聚合人工原因不属 effectSuspect 族时,
+	// resolvedFailed 照常写终局并作废本链残留,但聚合保持原人工接管状态。
+	t.Run("resolved failed keeps foreign manual reason", func(t *testing.T) {
+		s := openTest(t)
+		fixture, _, created := createCommunicationV4AutomaticEffect(t, s, "resolved-failed-foreign")
+		verifyAt := fixture.Now.Add(time.Minute)
+		if err := s.MoveEffectToVerification(
+			created.Command.MsgID,
+			"resultLost",
+			verifyAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.MarkEffectSuspect(
+			created.Command.MsgID,
+			"verificationExhausted",
+			verifyAt.Add(time.Minute),
+		); err != nil {
+			t.Fatal(err)
+		}
+		// 模拟另一条业务链先以其他原因接管了该候选人。
+		if err := s.db.Model(&CommunicationV4Aggregate{}).
+			Where("profile_id = ?", fixture.ProfileID).
+			Update("manual_reason", "fixedPhraseUnavailable").Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ResolveSuspectVerdict(ResolveSuspectVerdictRequest{
+			Ref: created.Command.MsgID, Verdict: CmdResolvedFailed,
+			ConversationKey: ConversationKey{
+				Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+				ConversationRef: fixture.ConversationRef,
+			},
+			At: verifyAt.Add(2 * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
+			aggregate.ManualReason != "fixedPhraseUnavailable" {
+			t.Fatalf("其他人工原因被误解冻: %+v err=%v", aggregate, err)
 		}
 	})
 

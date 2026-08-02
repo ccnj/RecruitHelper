@@ -797,7 +797,10 @@ func (a *roundActor) dispatchM5Action(
 		return err
 	}
 	if settled == nil || (settled.Status != store.CommunicationActionSent &&
-		settled.Status != store.CommunicationActionManualRequired) {
+		settled.Status != store.CommunicationActionManualRequired &&
+		// 干净失败已在结算事务内标 retried 并铸出 |try{n} 新动作(§8.4);
+		// 本轮不再推进,新尝试留给下一轮巡检,自然满足每轮至多一次。
+		settled.Status != store.CommunicationActionRetried) {
 		return store.ErrCommunicationActionConflict
 	}
 	if settled.Status == store.CommunicationActionSent {

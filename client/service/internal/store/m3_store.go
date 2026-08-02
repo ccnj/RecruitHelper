@@ -1547,6 +1547,16 @@ func sameOptionalString(left, right *string) bool {
 	return *left == *right
 }
 
+// sameOptionalPlanKey 按剥离 |try{n} 自动重试后缀后的基础语义键比较两个可选
+// 动作标识(§8.4):父项经历过自动重试时,依赖指针指向具体尝试代,而冻结
+// plan 只记基础键,两者对同一基础动作负责即视为一致。
+func sameOptionalPlanKey(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return communicationActionPlanKey(*left) == communicationActionPlanKey(*right)
+}
+
 func cloneOptionalInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
