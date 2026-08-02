@@ -38,62 +38,19 @@ func (a *API) SetAdvice(advice JobClassAdvisor) *API {
 // 保留合法的分配、跳过不合法的,不让一个坏职位废掉整批。
 const jobClassAttempts = 3
 
-// 单条分配的输出开销估算,用来按职位数申请输出预算。
+// jobClassChunkSize 是一次模型调用最多带几个职位。
 //
-// **72 是真机打出来的,不是估的。** 原值 40 来自一条把"理由"写成三个字的样例;
-// 2026-08-02 在 10 个职位上实测:max_tokens 算出 432,模型写到一半被切断,
-// finish_reason=length,provider 在填 usage 之前就返回错误,审计里表现为
-// outcome=providerError、inTokens/outTokens 全 0、resBytes≈2300。真实一条是
+// **它守的是输入侧,不是输出侧。** 输出预算 2026-08-01 起全局统一到 10240,
+// 一次要多少上限就报多少上限,不再按职位数估算——max_tokens 是上限不是预付
+// 额度,模型不吐就不计费,而估算一旦估低就是整批干净失败(2026-08-02 客户机
+// 10 个职位全废,就是每条按 40 token 估、算出 432、被 finish_reason=length
+// 切断)。把这两个约束绑在一个数上正是那次搞混的根源,现在分开。
 //
-//	{"职位":"41","类别":"团队管理","置信度":0.85,"理由":"招的是有猎头/招聘经验的人"}
-//
-// 结构约 25 token,中文理由 20~30 字又是 20~30 token,合计 45~55。取 72 留余量:
-// 输出预算撑不下的代价是整批干净失败,而多要一点只是少发几个 token。
-//
-// 外层 {"分配":[...]} 另算 32。
-const (
-	jobClassTokensPerJob  = 72
-	jobClassTokensWrapper = 32
-	// 下面两个此前借用 m5ai.JobClassOutputTokenLimit(256)与
-	// m5ai.ReplyOutputTokenLimit(512)。2026-08-01 甲方把所有输出预算统一抬到
-	// 10240 之后,那两个常量只剩"provider 层的上限"这一个含义,不能再兼作这里的
-	// 下界与分块基数:借用会让每批都按 10240 申请,并把一块的职位数从 12 抬到
-	// 255——远超输入侧 maxProviderRequestBytes(256 KB,约 45 个职位)那道硬闸。
-	// 因此改用本地常量,数值与抬预算之前逐字相同,分块行为不受预算调整影响。
-	jobClassMinOutputTokens = 256
-	jobClassMaxOutputTokens = 512
-)
-
-// jobClassOutputTokens 按本批职位数申请输出预算,并收在回复输出上限之内。
-//
-// 撑不下时不会给出半个 JSON 就算数:模型被截断 → 解析失败 → 重试 3 次 → 该块
-// 干净失败(零副作用,可重跑)。宁可这样,也不要一个被截断后侥幸解析成功、少了
-// 几个职位的分配表。真正让它撑不下的情况由 jobClassChunkSize 事先避开。
-func jobClassOutputTokens(jobCount int) int {
-	want := jobClassTokensWrapper + jobClassTokensPerJob*jobCount
-	if want < jobClassMinOutputTokens {
-		want = jobClassMinOutputTokens
-	}
-	if want > jobClassMaxOutputTokens {
-		want = jobClassMaxOutputTokens
-	}
-	return want
-}
-
-// jobClassChunkSize 是一次模型调用最多带几个职位。它**由输出预算推出来**,
-// 不是拍的:回复输出上限扣掉外层结构,再按每条分配的开销均分。
-//
-// 为什么分块而不是把输出预算也放宽:输入预算放宽已经由甲方 2026-08-01 裁决,
-// 输出没有。而分块根本不需要放宽——把前几块已经占用的类别作为 occupied 传给
-// 后面几块,差异化照样跨块生效。代价是后面的块只能避开前面的、不能反过来影响
-// 它们,这点损失远小于再动一道预算闸。
-func jobClassChunkSize() int {
-	size := (jobClassMaxOutputTokens - jobClassTokensWrapper) / jobClassTokensPerJob
-	if size < 1 {
-		return 1
-	}
-	return size
-}
+// 真正约束一次带几个职位的是两样:maxProviderRequestBytes(256 KB 硬闸)与调用
+// 延迟。取 12 的依据是实测:客户机 10 个职位的请求是 47.9 KB,attempt 2/3 都在
+// 6~9 秒内正常返回过;12 个约 58 KB,占硬闸 23%,仍在验证过的邻域里。超过 12
+// 个才分块,块间靠 occupied 延续差异化。
+const jobClassChunkSize = 12
 
 type jobClassCandidateView struct {
 	Name       string `json:"name"`
@@ -347,7 +304,7 @@ func (a *API) assignJobClasses(
 	jobs []m5ai.JobClassJobInput,
 	occupied []string,
 ) (map[string]m5ai.JobClassAssignment, map[string]string, []string, error) {
-	chunk := jobClassChunkSize()
+	chunk := jobClassChunkSize
 	if len(jobs) <= chunk {
 		return a.assignJobClassesByModel(ctx, jobs, occupied)
 	}
@@ -415,7 +372,7 @@ func (a *API) assignJobClassesByModel(
 			ContextRevisionHash: base,
 			PromptRevision:      m5ai.JobClassInputFormatVersion,
 			UserContent:         content,
-			MaxOutputTokens:     jobClassOutputTokens(len(jobs)),
+			MaxOutputTokens:     m5ai.JobClassOutputTokenLimit,
 		})
 		latency := time.Since(started)
 		record := func(outcome string) {
