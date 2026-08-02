@@ -1460,3 +1460,12 @@ h1, h2, h3, p { margin-top: 0; }
 .probe-readback .probe-absent { color: var(--txt-faint); font-style: italic; }
 
 .probe-msgid { margin: 0; color: var(--txt-faint); font-size: var(--fs-sm); }
+
+/* 页面级错误边界。出事时它是唯一还能读的东西，所以给足对比度、不折叠正文。 */
+.dc-boundary { margin: 0.5rem; padding: 0.6rem 0.7rem; border: 1px solid var(--alarm); background: #150c0e; }
+.dc-boundary strong { display: block; margin-bottom: 0.24rem; color: var(--alarm); font-size: var(--fs-base); }
+.dc-boundary-message { margin: 0 0 0.3rem; color: var(--txt); font-family: var(--face); font-size: var(--fs-sm); line-height: 1.6; }
+.dc-shell .dc-boundary button { width: auto; margin: 0.3rem 0 0; padding: 0.14rem 0.42rem; font-size: var(--fs-sm); }
+.dc-boundary-stack { margin-top: 0.36rem; font-size: var(--fs-sm); }
+.dc-boundary-stack summary { color: var(--txt-faint); cursor: pointer; }
+.dc-boundary-stack pre { max-height: 220px; margin: 0.24rem 0 0; overflow: auto; color: var(--txt-faint); font-size: var(--fs-mono); line-height: 1.5; white-space: pre-wrap; }
