@@ -162,9 +162,14 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 三个非 omitempty 的数组字段先建成空切片。失败分支会带着这个 view 直接
+	// 写回 409,停在 nil 就会序列化成 `null`,而诊断台按数组用它——2026-08-02
+	// 白屏就是这么来的。
 	view := jobKeywordPlanView{
 		JobID: target.JobID, JobName: target.JobName, JobClass: data.JobClass,
 		FormReused: data.FormReused, DeadConfiguredKeywords: spec.DeadKeywords,
+		Sections: []jobKeywordSectionView{},
+		Keywords: []string{}, Matched: []string{}, Custom: []string{},
 	}
 	// 契约里 totalQuota 与 limit 都是 optional：手读不到就整键省略，落到这里
 	// 就是 0。0 表示"这个组件变体没给出上限"，不是"上限为 0"。
@@ -175,8 +180,14 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 			Title: section.Title, Limit: int(section.Limit), Words: section.Words,
 		}
 		inputs = append(inputs, input)
+		words := section.Words
+		if words == nil {
+			// 兜底组没有现成词条,契约允许 words 为空数组;真要是解出 nil,
+			// 序列化成 null 又会把诊断台掀了。
+			words = []string{}
+		}
 		view.Sections = append(view.Sections, jobKeywordSectionView{
-			Title: input.Title, Limit: input.Limit, Words: section.Words,
+			Title: input.Title, Limit: input.Limit, Words: words,
 		})
 	}
 	// 手侧读到的是"这个类别下平台给了什么",一个分组都没有说明弹层没渲染出来,

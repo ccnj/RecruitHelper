@@ -160,7 +160,10 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	inputs := make([]m5ai.JobClassJobInput, 0, len(jobIDs))
 	byJobID := make(map[string]int, len(jobIDs))
 	for _, jobID := range jobIDs {
-		row := jobClassAssignmentView{JobID: jobID}
+		// Candidates 先建成空切片:读候选失败的行会一路走到 append 之前就被
+		// 收进 view,停在 nil 就会序列化成 `null`,而诊断台按数组 .map 它。
+		// 同一个坑 2026-08-02 已经在关键词的 matched/custom 上白过一次屏。
+		row := jobClassAssignmentView{JobID: jobID, Candidates: []jobClassCandidateView{}}
 		target, spec, failure := a.resolvePublishTarget(ctx, jobID)
 		if failure != nil {
 			row.Problem = failure.message

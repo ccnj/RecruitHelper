@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react'
 import { api, Health, MutationResult } from '../api'
 import { ConsoleSidebar, type ConsolePage } from './ConsoleSidebar'
+import { ConsoleErrorBoundary } from './ErrorBoundary'
 import { Suspects } from './Suspects'
 import { accountIdentity, errorText } from './format'
 import { AccountPage } from './pages/AccountPage'
@@ -242,7 +243,9 @@ export function ConsoleApp() {
             让人在别的页面上看不见自己被卡住了。 */}
         <Suspects onOpenConversation={openConversation} />
 
-        {page}
+        {/* 只包住当前页：一处渲染异常不该把侧栏、suspect 队列和整个诊断台
+            一起卸掉（2026-08-02 客户机白屏的教训）。换页时按 activePage 重置。 */}
+        <ConsoleErrorBoundary resetKey={activePage}>{page}</ConsoleErrorBoundary>
       </div>
     </div>
   )
