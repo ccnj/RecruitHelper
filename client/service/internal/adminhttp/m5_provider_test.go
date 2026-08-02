@@ -27,10 +27,12 @@ func TestM5ProviderConfigAPIAlwaysMasksSecretAndBaseURL(t *testing.T) {
 	payload := map[string]any{
 		"provider": config.Provider, "model": config.Model,
 		"base_url": "https://provider.fixture/v1", "api_key": "sk-private-fixture",
-		"request_timeout_ms":       config.RequestTimeoutMs,
-		"max_input_tokens":         config.MaxInputTokens,
-		"max_intent_output_tokens": config.MaxIntentOutputTokens,
-		"max_reply_output_tokens":  config.MaxReplyOutputTokens,
+		"request_timeout_ms": config.RequestTimeoutMs,
+		// 老前端仍会带上这三个字段,而且可以带任意值;它们必须被彻底忽略,
+		// 实际生效的永远是代码常量。
+		"max_input_tokens":         999999,
+		"max_intent_output_tokens": 999999,
+		"max_reply_output_tokens":  999999,
 	}
 	raw, _ := json.Marshal(payload)
 	request := httptest.NewRequest(http.MethodPost, "/admin/m5/provider-config", strings.NewReader(string(raw)))

@@ -54,6 +54,14 @@ const jobClassAttempts = 3
 const (
 	jobClassTokensPerJob  = 72
 	jobClassTokensWrapper = 32
+	// 下面两个此前借用 m5ai.JobClassOutputTokenLimit(256)与
+	// m5ai.ReplyOutputTokenLimit(512)。2026-08-01 甲方把所有输出预算统一抬到
+	// 10240 之后,那两个常量只剩"provider 层的上限"这一个含义,不能再兼作这里的
+	// 下界与分块基数:借用会让每批都按 10240 申请,并把一块的职位数从 12 抬到
+	// 255——远超输入侧 maxProviderRequestBytes(256 KB,约 45 个职位)那道硬闸。
+	// 因此改用本地常量,数值与抬预算之前逐字相同,分块行为不受预算调整影响。
+	jobClassMinOutputTokens = 256
+	jobClassMaxOutputTokens = 512
 )
 
 // jobClassOutputTokens 按本批职位数申请输出预算,并收在回复输出上限之内。
@@ -63,11 +71,11 @@ const (
 // 几个职位的分配表。真正让它撑不下的情况由 jobClassChunkSize 事先避开。
 func jobClassOutputTokens(jobCount int) int {
 	want := jobClassTokensWrapper + jobClassTokensPerJob*jobCount
-	if want < m5ai.JobClassOutputTokenLimit {
-		want = m5ai.JobClassOutputTokenLimit
+	if want < jobClassMinOutputTokens {
+		want = jobClassMinOutputTokens
 	}
-	if want > m5ai.ReplyOutputTokenLimit {
-		want = m5ai.ReplyOutputTokenLimit
+	if want > jobClassMaxOutputTokens {
+		want = jobClassMaxOutputTokens
 	}
 	return want
 }
@@ -80,7 +88,7 @@ func jobClassOutputTokens(jobCount int) int {
 // 后面几块,差异化照样跨块生效。代价是后面的块只能避开前面的、不能反过来影响
 // 它们,这点损失远小于再动一道预算闸。
 func jobClassChunkSize() int {
-	size := (m5ai.ReplyOutputTokenLimit - jobClassTokensWrapper) / jobClassTokensPerJob
+	size := (jobClassMaxOutputTokens - jobClassTokensWrapper) / jobClassTokensPerJob
 	if size < 1 {
 		return 1
 	}

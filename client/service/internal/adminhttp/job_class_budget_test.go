@@ -1,18 +1,14 @@
 package adminhttp
 
-import (
-	"testing"
-
-	"recruithelper/client/service/internal/m5ai"
-)
+import "testing"
 
 // 全批分配的输出预算按职位数申请，但收在回复输出上限之内。这条用例钉住那个
 // 上限对应多少个职位——超过它模型会被截断、解析失败、重试 3 次后整批 A 干净
 // 失败（零副作用，可重跑），而不是给出一份少了几个职位的分配表。
 func TestJobClassOutputTokensScalesWithJobsAndStaysInBudget(t *testing.T) {
 	// 单职位时不低于原来的固定值：少给反而让模型没空间写完一句理由。
-	if got := jobClassOutputTokens(1); got != m5ai.JobClassOutputTokenLimit {
-		t.Fatalf("单职位应取 %d，实得 %d", m5ai.JobClassOutputTokenLimit, got)
+	if got := jobClassOutputTokens(1); got != jobClassMinOutputTokens {
+		t.Fatalf("单职位应取 %d，实得 %d", jobClassMinOutputTokens, got)
 	}
 	// 中间段按职位数线性增长。
 	if got := jobClassOutputTokens(4); got != jobClassTokensWrapper+jobClassTokensPerJob*4 {
@@ -21,7 +17,7 @@ func TestJobClassOutputTokensScalesWithJobsAndStaysInBudget(t *testing.T) {
 	// 永远不越回复输出上限——越了 provider 会直接判 budgetBlocked，
 	// 那样连一次尝试都发不出去，比截断更难排查。
 	for _, jobs := range []int{12, 13, 40, 500} {
-		if got := jobClassOutputTokens(jobs); got > m5ai.ReplyOutputTokenLimit {
+		if got := jobClassOutputTokens(jobs); got > jobClassMaxOutputTokens {
 			t.Fatalf("%d 个职位的预算越界: %d", jobs, got)
 		}
 	}
@@ -37,16 +33,16 @@ func TestJobClassOutputTokensScalesWithJobsAndStaysInBudget(t *testing.T) {
 		t.Fatalf("分块大小变了: %d（原为 6），请复核输出预算与每条开销估算", chunk)
 	}
 	// 一整块要装得进预算，再多一个就装不进——这才是"块大小由预算推出来"的
-	// 真正判据。不要求恰好用满：整除留下的零头是余量，不是缺陷。
-	if jobClassOutputTokens(chunk) > m5ai.ReplyOutputTokenLimit {
+	// 真正判据。**不要求恰好用满**：每条从 40 改成 72 之后 480 不再被整除，
+	// 整除留下的零头是余量，不是缺陷。
+	if jobClassOutputTokens(chunk) > jobClassMaxOutputTokens {
 		t.Fatalf("一块 %d 个职位就越界了: %d", chunk, jobClassOutputTokens(chunk))
 	}
-	if jobClassTokensWrapper+jobClassTokensPerJob*(chunk+1) <= m5ai.ReplyOutputTokenLimit {
+	if jobClassTokensWrapper+jobClassTokensPerJob*(chunk+1) <= jobClassMaxOutputTokens {
 		t.Fatalf("再多一个还装得下，说明块开小了: chunk=%d", chunk)
 	}
-	// 越界那一档会被收回上限，而不是原样递给 provider——递过去会直接判
-	// budgetBlocked，连一次尝试都发不出去，比被截断更难排查。
-	if jobClassOutputTokens(chunk+1) != m5ai.ReplyOutputTokenLimit {
+	// 越界那一档会被收回上限，而不是原样递给 provider。
+	if jobClassOutputTokens(chunk+1) != jobClassMaxOutputTokens {
 		t.Fatal("越界那一档必须被收回上限")
 	}
 }

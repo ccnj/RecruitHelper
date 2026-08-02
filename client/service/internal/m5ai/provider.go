@@ -107,7 +107,7 @@ func (p *OpenAICompatibleProvider) ModelName() string { return p.config.Model }
 
 // purposeInputTokenLimit 给出这一次调用的输入上限。
 //
-// 默认取配置的 MaxInputTokens——它按"一次回复"设定(16000),对绝大多数用途就是
+// 默认取 ReplyInputTokenLimit——它按"一次回复"设定(32000),对绝大多数用途就是
 // 正确的天花板。两个用途另有覆盖,方向相反:
 //
 //	intent    收窄到 8000  —— 意图判断只看会话尾部,给多了是浪费
@@ -152,16 +152,16 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("requestInvalid", FailureStageRequestBuild, "traceMetadataMissing")
 	}
-	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > p.config.MaxIntentOutputTokens) ||
+	if (request.Purpose == PurposeIntent && request.MaxOutputTokens > IntentOutputTokenLimit) ||
 		((request.Purpose == PurposeReply || request.Purpose == PurposeServiceReply ||
 			request.Purpose == PurposeSilenceFollowup ||
 			request.Purpose == PurposeScoring || request.Purpose == PurposeGreeting ||
 			request.Purpose == PurposeJobClass || request.Purpose == PurposeJobKeywords) &&
-			request.MaxOutputTokens > p.config.MaxReplyOutputTokens) {
+			request.MaxOutputTokens > ReplyOutputTokenLimit) {
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("budgetBlocked", FailureStageRequestBuild, "outputTokenBudgetExceeded")
 	}
-	inputLimit := purposeInputTokenLimit(request.Purpose, p.config.MaxInputTokens)
+	inputLimit := purposeInputTokenLimit(request.Purpose, ReplyInputTokenLimit)
 	payload := struct {
 		Model    string `json:"model"`
 		Messages []struct {
@@ -435,9 +435,9 @@ func providerConfigHash(config ProviderConfig) (string, error) {
 		MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
 	}{
 		Provider: config.Provider, Model: config.Model, BaseURL: config.BaseURL,
-		RequestTimeoutMs: config.RequestTimeoutMs, MaxInputTokens: config.MaxInputTokens,
-		MaxIntentOutputTokens: config.MaxIntentOutputTokens,
-		MaxReplyOutputTokens:  config.MaxReplyOutputTokens,
+		RequestTimeoutMs: config.RequestTimeoutMs, MaxInputTokens: ReplyInputTokenLimit,
+		MaxIntentOutputTokens: IntentOutputTokenLimit,
+		MaxReplyOutputTokens:  ReplyOutputTokenLimit,
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {

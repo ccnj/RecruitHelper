@@ -384,9 +384,6 @@ export interface M5ProviderConfigInput {
   base_url: string
   api_key: string
   request_timeout_ms: 30000
-  max_input_tokens: 16000
-  max_intent_output_tokens: 64
-  max_reply_output_tokens: 512
 }
 
 export interface JobConfigSourceView {

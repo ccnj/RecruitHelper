@@ -12,9 +12,51 @@ import (
 	"time"
 )
 
-func TestSilenceFollowupIsAnAcceptedTracePurpose(t *testing.T) {
-	if !validPurpose(PurposeSilenceFollowup) {
-		t.Fatal("沉默追问 trace purpose 未登记")
+// 追踪库不认识用途,只原样收下。这里既覆盖历史白名单曾拒掉的三个真实用途,
+// 也覆盖一个本仓库尚未使用的词——新增 AI 用途不该再需要来这里登记一次。
+func TestStoreAcceptsAnyNonEmptyPurpose(t *testing.T) {
+	dir := t.TempDir()
+	traceStore := openTestStore(t, dir)
+	defer traceStore.Close()
+
+	purposes := []string{
+		"intent", "reply", "silenceFollowup", "scoring", "greeting",
+		"serviceReply", "jobClass", "jobKeywords", "用途尚未存在",
+	}
+	startedAt := time.Date(2026, 8, 1, 12, 33, 1, 0, time.UTC)
+	for _, purpose := range purposes {
+		invocationID := "inv-" + purpose
+		begin := BeginRecord{
+			InvocationID: invocationID, Purpose: purpose, Provider: "fixture",
+			Model: "fixture-v1", ConfigHash: "config-hash", ContextRevisionHash: "context-hash",
+			RequestJSON: []byte(`{"model":"fixture"}`), StartedAt: startedAt,
+		}
+		if err := traceStore.Begin(context.Background(), begin); err != nil {
+			t.Fatalf("Begin(%s): %v", purpose, err)
+		}
+		got, err := traceStore.Get(context.Background(), invocationID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", purpose, err)
+		}
+		if got.Purpose != purpose {
+			t.Fatalf("用途未原样保存: 期望 %q 实得 %q", purpose, got.Purpose)
+		}
+	}
+}
+
+func TestStoreRejectsEmptyPurpose(t *testing.T) {
+	dir := t.TempDir()
+	traceStore := openTestStore(t, dir)
+	defer traceStore.Close()
+
+	begin := BeginRecord{
+		InvocationID: "inv-blank-purpose", Purpose: "   ", Provider: "fixture",
+		Model: "fixture-v1", ConfigHash: "config-hash", ContextRevisionHash: "context-hash",
+		RequestJSON: []byte(`{"model":"fixture"}`),
+		StartedAt:   time.Date(2026, 8, 1, 12, 33, 1, 0, time.UTC),
+	}
+	if err := traceStore.Begin(context.Background(), begin); err == nil {
+		t.Fatal("空用途应被拒:它是缺字段,不是一种用途")
 	}
 }
 
@@ -137,7 +179,7 @@ func TestStoreDistinguishesObservedEmptyHTTPBodyFromNoResponse(t *testing.T) {
 	ctx := context.Background()
 	startedAt := time.Date(2026, 7, 23, 2, 30, 0, 0, time.UTC)
 	if err := traceStore.Begin(ctx, BeginRecord{
-		InvocationID: "inv-empty-body", Purpose: PurposeIntent, Provider: "fixture", Model: "m",
+		InvocationID: "inv-empty-body", Purpose: "intent", Provider: "fixture", Model: "m",
 		ConfigHash: "config", ContextRevisionHash: "context",
 		RequestJSON: []byte(`{}`), StartedAt: startedAt,
 	}); err != nil {
@@ -184,7 +226,7 @@ func TestStoreSurvivesRestartAndDoesNotCreateBrainDatabase(t *testing.T) {
 	second := openTestStore(t, dir)
 	defer second.Close()
 	if err := second.Begin(ctx, BeginRecord{
-		InvocationID: "inv-restart", Purpose: PurposeScoring, Provider: "fixture", Model: "m",
+		InvocationID: "inv-restart", Purpose: "scoring", Provider: "fixture", Model: "m",
 		ConfigHash: "config", ContextRevisionHash: "context",
 		RequestJSON: []byte(`{"persistent":true}`), StartedAt: startedAt,
 	}); err != nil {
@@ -203,7 +245,7 @@ func TestStoreRestrictsDatabaseAndAuxiliaryFilesToCurrentUser(t *testing.T) {
 	traceStore := openTestStore(t, dir)
 	defer traceStore.Close()
 	if err := traceStore.Begin(context.Background(), BeginRecord{
-		InvocationID: "inv-private-mode", Purpose: PurposeReply,
+		InvocationID: "inv-private-mode", Purpose: "reply",
 		Provider: "fixture", Model: "m", ConfigHash: "config",
 		ContextRevisionHash: "context", RequestJSON: []byte(`{"private":true}`),
 		StartedAt: time.Date(2026, 7, 23, 3, 30, 0, 0, time.UTC),
@@ -270,13 +312,6 @@ func TestStoreValidatesJSONAndSafeTransportCode(t *testing.T) {
 	ctx := context.Background()
 	startedAt := time.Date(2026, 7, 23, 5, 0, 0, 0, time.UTC)
 
-	if err := traceStore.Begin(ctx, BeginRecord{
-		InvocationID: "wrong-purpose", Purpose: "score", Provider: "fixture", Model: "m",
-		ConfigHash: "config", ContextRevisionHash: "context",
-		RequestJSON: []byte(`{}`), StartedAt: startedAt,
-	}); err == nil {
-		t.Fatal("错误 purpose=score 未拒绝，应使用 scoring")
-	}
 	if err := traceStore.Begin(ctx, BeginRecord{
 		InvocationID: "invalid-json", Purpose: "reply", Provider: "fixture", Model: "m",
 		ConfigHash: "config", ContextRevisionHash: "context",

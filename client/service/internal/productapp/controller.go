@@ -184,11 +184,13 @@ func (c *Controller) Start(
 
 	raw, err := c.source.FetchCurrent(ctx)
 	if err != nil {
+		logCurrentJobSyncFailure("start", "fetch", err, -1)
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
+		logCurrentJobSyncFailure("start", "import", err, len(revisions))
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	// 先刷有效集再落当前职位:SaveCurrentLegacyJobAIContext 只加不减,这个顺序
@@ -197,6 +199,7 @@ func (c *Controller) Start(
 	c.SyncEffectiveJobs(ctx)
 	stored, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now())
 	if err != nil || len(stored) != 1 {
+		logCurrentJobSyncFailure("start", "persist", err, len(stored))
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	if strings.TrimSpace(stored[0].SourceJobRef) != expectedBackendJobID {
@@ -220,19 +223,37 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 	}
 	raw, err := c.source.FetchCurrent(ctx)
 	if err != nil {
+		logCurrentJobSyncFailure("syncJobs", "fetch", err, -1)
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
+		logCurrentJobSyncFailure("syncJobs", "import", err, len(revisions))
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	// 与 Start 同序:先刷有效集,再落当前职位。
 	c.SyncEffectiveJobs(ctx)
 	if _, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now()); err != nil {
+		logCurrentJobSyncFailure("syncJobs", "persist", err, -1)
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	return nil
+}
+
+// logCurrentJobSyncFailure 让当前职位同步失败在脑日志里可定位。产品面响应按
+// 数据边界只给固定文案,导入失败的具体原因(缺哪个文档、缺哪个占位符)此前哪里
+// 都不记,新客户配置不合格时只能人肉对后台——2026-08-01 真机装机正是这样卡住的。
+// 错误文本只含文档类型名与占位符名,不含 prompt 正文、候选人内容或密钥。
+func logCurrentJobSyncFailure(entry, stage string, err error, count int) {
+	attrs := []any{"entry", entry, "stage", stage}
+	if err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	if count >= 0 {
+		attrs = append(attrs, "revisionCount", count)
+	}
+	slog.Warn("当前职位同步失败", attrs...)
 }
 
 // SyncEffectiveJobs 刷新有效职位集,并刻意不向业务主线返回错误。

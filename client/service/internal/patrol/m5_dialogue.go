@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,51 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-const m5InvocationAttempt = 1
+// m5RetriableAdviceFailures 是允许换一次采样重来的失败原因白名单(2026-08-01
+// 甲方裁决:任何失败都重试,上限 5 次调用)。四项的共同点是"模型这一次没吐出
+// 可用建议",与业务结论无关:provider 调用失败(含超时)、响应解析失败、输出
+// 契约或业务前置不合法、reasoning 用量可疑、reducer 拒绝本次建议。
+//
+// 白名单之外一律不重试,因为它们不是"这次没吐好":
+//   - intentRejected/unsupportedMedia/unsupportedSemantic/wechatContinuationManual
+//     是模型判对了、业务规则要求转人工。重试等于反复摇色子直到摇出另一个
+//     业务结论,会扭曲判断。
+//   - fixedPhraseUnavailable 是话术配置缺失,inputBudgetBlocked 是输入超预算,
+//     inputBoundaryChanged 是世界已经变了——都确定性复现,重试纯粹浪费。
+//
+// 重试只是"重新取建议",不放宽任何业务前置:每次 attempt 都用同一份冻结输入
+// 重新走完整的 planV4ReplyActions 裁决,试到上限仍不合法就照旧转人工。
+var m5RetriableAdviceFailures = map[string]struct{}{
+	string(communication.ManualReplyFailed):  {},
+	string(communication.ManualReplyInvalid): {},
+	"reasoningUsageUnsafe":                   {},
+	"reducerRejected":                        {},
+}
+
+func m5AdviceShouldRetry(
+	completion store.AIInvocationCompletion,
+	decision communication.Decision,
+	manualReason string,
+	attempt int,
+) bool {
+	if attempt >= store.MaxAIInvocationAttempts {
+		return false
+	}
+	if completion.Status == store.AIInvocationBudgetBlocked {
+		// reply 路径上超预算会以 replyFailed 的面目混进白名单,这里统一挡住:
+		// 同一份冻结输入重发多少次都是同样的字节数。
+		return false
+	}
+	reason := manualReason
+	if reason == "" {
+		if decision.TurnStatus != communication.TurnManualRequired {
+			return false
+		}
+		reason = string(decision.ManualReason)
+	}
+	_, ok := m5RetriableAdviceFailures[reason]
+	return ok
+}
 
 const m5ResumeAttachmentHistoryText = "候选人已投递简历"
 
@@ -1001,6 +1046,8 @@ func (a *roundActor) runM5ServiceReplyAdvice(
 // Call failure, parse failure and unsafe reasoning all abandon the suffix on a
 // normal close (ServiceNoAction); only an interrupted prior invocation falls
 // back to the ordinary recovery path, which stays conservative.
+// executeM5ServiceAdvice 与 executeM5Advice 同样把补句获取跑到终局。差别在
+// 失败的归宿:补句失败按规格 v4 §7 放弃补句、本轮正常终局,不转人工。
 func (a *roundActor) executeM5ServiceAdvice(
 	ctx context.Context,
 	turn store.DialogueTurn,
@@ -1009,21 +1056,46 @@ func (a *roundActor) executeM5ServiceAdvice(
 	content string,
 ) error {
 	inputHash := sha256Hex(content)
-	invocationID := stableM5ID("invocation", turn.TurnID, string(m5ai.PurposeReply), "1")
+	for attempt := 1; attempt >= 1 && attempt <= store.MaxAIInvocationAttempts; {
+		next, err := a.executeM5ServiceAdviceAttempt(ctx, turn, material, facts, content, inputHash, attempt)
+		if err != nil || next <= 0 {
+			return err
+		}
+		attempt = next
+	}
+	return nil
+}
+
+func (a *roundActor) executeM5ServiceAdviceAttempt(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	content string,
+	inputHash string,
+	attempt int,
+) (int, error) {
+	invocationID := stableM5ID("invocation", turn.TurnID, string(m5ai.PurposeReply), strconv.Itoa(attempt))
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
 		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: m5ai.PurposeReply,
-		Attempt: m5InvocationAttempt,
+		Attempt: attempt,
 		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+			return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 		}
-		return err
+		return 0, err
 	}
 	if !reserved.Created {
-		return a.finishInterruptedM5Advice(turn, material, facts, m5ai.PurposeReply,
+		// 已完成但 turn 没推进,只可能是重试链在中途崩溃(FailAIInvocationForRetry
+		// 刻意只落 invocation),接着往下一个 attempt 数即可。预留未完成的遗留
+		// 归脑启动时的 RecoverInterruptedAIInvocations 收敛,这里维持原样。
+		if reserved.Invocation.FinishedAt != nil && attempt < store.MaxAIInvocationAttempts {
+			return attempt + 1, nil
+		}
+		return 0, a.finishInterruptedM5Advice(turn, material, facts, m5ai.PurposeReply,
 			communication.IntentAdvice{State: communication.AdviceAbsent}, reserved.Invocation)
 	}
 
@@ -1047,11 +1119,16 @@ func (a *roundActor) executeM5ServiceAdvice(
 
 	reply := ""
 	sendable := false
+	// failed 与 !sendable 不是一回事:解析成功但回复为空是规格 v4 §7 的"显式
+	// 静默"(候选人只说了"嗯嗯""到时见"这类纯确认),那是本次调用的合法结论,
+	// 不得当失败重试——重试只会把该闭嘴的一轮试出一句话来。
+	failed := true
 	if callErr == nil {
 		suggestion, parseErr := m5ai.ParseServiceReplySuggestion(response.JSONText)
 		if parseErr == nil {
 			reply = suggestion.Reply
 			sendable = reply != ""
+			failed = false
 		} else {
 			markBusinessParseFailure(&completion, parseErr)
 		}
@@ -1059,10 +1136,18 @@ func (a *roundActor) executeM5ServiceAdvice(
 	if callErr == nil && !reasoningUsageSafe(completion) {
 		markReasoningUsageUnsafe(&completion)
 		sendable = false
+		failed = true
 	}
 	logAIInvocationOutcome(
 		a.manager.advice, m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
 	)
+	if failed && completion.Status != store.AIInvocationBudgetBlocked &&
+		attempt < store.MaxAIInvocationAttempts {
+		if failErr := a.manager.store.FailAIInvocationForRetry(completion, m5ai.PurposeReply); failErr != nil {
+			return 0, failErr
+		}
+		return attempt + 1, nil
+	}
 	request2 := store.CompleteReplyInvocationRequest{
 		Completion: completion, PlannedAt: a.manager.now(),
 	}
@@ -1076,14 +1161,17 @@ func (a *roundActor) executeM5ServiceAdvice(
 	}
 	_, err = a.manager.store.CompleteReplyInvocation(request2)
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
-		return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+		return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 	}
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, m5ai.PurposeServiceReply, completion)
 	}
-	return err
+	return 0, err
 }
 
+// executeM5Advice 把一个 turn 的建议获取跑到终局:每次 attempt 拿不到可用建议
+// 就换一次采样重来,直到成功或用满 store.MaxAIInvocationAttempts 次调用。turn
+// 的终局只由最后一次 attempt 写入,中间失败只留下各自的 invocation 事实。
 func (a *roundActor) executeM5Advice(
 	ctx context.Context,
 	turn store.DialogueTurn,
@@ -1094,23 +1182,57 @@ func (a *roundActor) executeM5Advice(
 	intent communication.IntentAdvice,
 ) error {
 	inputHash := sha256Hex(content)
-	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), "1")
+	for attempt := 1; attempt >= 1 && attempt <= store.MaxAIInvocationAttempts; {
+		next, err := a.executeM5AdviceAttempt(
+			ctx, turn, material, facts, purpose, content, intent, inputHash, attempt,
+		)
+		if err != nil || next <= 0 {
+			return err
+		}
+		attempt = next
+	}
+	return nil
+}
+
+// executeM5AdviceAttempt 跑一次 provider 调用。返回 next=0 表示本 turn 已经
+// 终局(拿到建议,或失败且不再重试);next>0 表示应当从该 attempt 号继续重试。
+func (a *roundActor) executeM5AdviceAttempt(
+	ctx context.Context,
+	turn store.DialogueTurn,
+	material m5TurnMaterial,
+	facts communication.FrozenTurnFacts,
+	purpose m5ai.CompletionPurpose,
+	content string,
+	intent communication.IntentAdvice,
+	inputHash string,
+	attempt int,
+) (int, error) {
+	// legacy 预算恢复是那次事故的一次性授权,自带"attempt=2 失败即永久停止"
+	// 的边界(见 ReserveAuthorizedM5ReplyBudgetRecovery),不并入通用重试。
+	legacyRecovered := false
+	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), strconv.Itoa(attempt))
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
-		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: m5InvocationAttempt,
+		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: attempt,
 		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
-			return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+			return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
 		}
-		return err
+		return 0, err
 	}
 	if !reserved.Created {
 		if reserved.Invocation.FinishedAt != nil {
 			if purpose != m5ai.PurposeReply ||
 				!isLegacyM5ReplyBudgetFalsePositive(reserved.Invocation) {
-				return a.manager.store.MarkDialogueTurnManualRequired(
+				// 这一次 attempt 已经完成过,而 turn 还停在等建议的状态——说明
+				// 上次进程在它完成后、写入 turn 终局前崩溃,那次没能产出可用
+				// 建议。按重试纪律换下一次 attempt,不再判冲突。
+				if attempt < store.MaxAIInvocationAttempts {
+					return attempt + 1, nil
+				}
+				return 0, a.manager.store.MarkDialogueTurnManualRequired(
 					turn.TurnID, "invocationStateConflict", a.manager.now(),
 				)
 			}
@@ -1127,26 +1249,30 @@ func (a *roundActor) executeM5Advice(
 			if recoveryErr != nil {
 				switch {
 				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
-					return a.manager.store.MarkDialogueTurnManualRequired(
+					return 0, a.manager.store.MarkDialogueTurnManualRequired(
 						turn.TurnID, "inputBoundaryChanged", a.manager.now(),
 					)
 				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
-					return a.manager.store.MarkDialogueTurnManualRequired(
+					return 0, a.manager.store.MarkDialogueTurnManualRequired(
 						turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
 					)
 				default:
-					return recoveryErr
+					return 0, recoveryErr
 				}
 			}
 			reserved = recovery
 			if reserved.Invocation.FinishedAt != nil {
-				return a.manager.store.MarkDialogueTurnManualRequired(
+				return 0, a.manager.store.MarkDialogueTurnManualRequired(
 					turn.TurnID, "replyBudgetRecoveryAlreadyFinished", a.manager.now(),
 				)
 			}
+			legacyRecovered = true
+			attempt = reserved.Invocation.Attempt
 		}
 		if !reserved.Created {
-			return a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
+			// 预留了但没完成的遗留由脑启动时的 RecoverInterruptedAIInvocations
+			// 统一收敛(main.go),那条路刻意保守终局、不重试;这里维持原样。
+			return 0, a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
 		}
 	}
 
@@ -1199,11 +1325,17 @@ func (a *roundActor) executeM5Advice(
 		logAIInvocationOutcome(
 			a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
 		)
+		if !legacyRecovered && m5AdviceShouldRetry(completion, decision, manualReason, attempt) {
+			if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
+				return 0, failErr
+			}
+			return attempt + 1, nil
+		}
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
 		if err != nil {
 			logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 		}
-		return err
+		return 0, err
 	}
 
 	reply := communication.ReplyAdvice{State: communication.AdviceFailed}
@@ -1229,6 +1361,12 @@ func (a *roundActor) executeM5Advice(
 	logAIInvocationOutcome(
 		a.manager.advice, purpose, completion, response.Diagnostics.TraceErrorCode,
 	)
+	if !legacyRecovered && m5AdviceShouldRetry(completion, decision, "", attempt) {
+		if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
+			return 0, failErr
+		}
+		return attempt + 1, nil
+	}
 	err = a.completeM5Reply(
 		turn.TurnID,
 		completion,
@@ -1238,7 +1376,7 @@ func (a *roundActor) executeM5Advice(
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 	}
-	return err
+	return 0, err
 }
 
 func isLegacyM5ReplyBudgetFalsePositive(invocation store.AIInvocation) bool {

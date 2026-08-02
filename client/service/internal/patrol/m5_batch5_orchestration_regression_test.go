@@ -190,7 +190,9 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 	}
 }
 
-func TestM5ReplyProviderFailureStopsAfterTwoInvocationsWithoutEffect(t *testing.T) {
+// 第一次吐了废话、第二次吐对了,turn 就该正常拿到建议:这是重试机制存在的
+// 理由。中间那次失败只留下自己的 invocation 事实,不污染 turn 终局。
+func TestM5ReplyRetriesAfterUnparsableOutputThenSucceeds(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
@@ -204,10 +206,78 @@ func TestM5ReplyProviderFailureStopsAfterTwoInvocationsWithoutEffect(t *testing.
 			if request.Purpose != m5ai.PurposeReply {
 				return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
 			}
-			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "rateLimited"}
+			return safeFakeResponse(`{"话术_序列":`), nil
+		case 3:
+			if request.Purpose != m5ai.PurposeReply {
+				return m5ai.CompletionResponse{}, fmt.Errorf("第三次调用用途错误: %s", request.Purpose)
+			}
+			return safeFakeResponse(`{"话术_序列":["重试之后吐对了的回复"],"动作":"无"}`), nil
 		default:
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
+	}}
+	h.manager.advice = advice
+	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
+
+	h.manager.mu.Lock()
+	err := actor.advanceM5Turn(context.Background(), fixture.turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 3 {
+		t.Fatalf("解析失败应重试一次即成功: calls=%d err=%v", len(advice.requests), err)
+	}
+
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnAdviceReady || turn.FailureReason != "" ||
+		actionErr != nil || action == nil || action.Status != store.CommunicationActionPlanned ||
+		action.Kind != store.CommunicationActionReplyText || action.EffectIntentID != nil {
+		t.Fatalf("重试成功后未产出唯一 planned action: turn=%+v action=%+v err=%v actionErr=%v",
+			turn, action, err, actionErr)
+	}
+
+	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
+	if err != nil || len(invocations) != 3 {
+		t.Fatalf("重试 invocation 条数错误: invocations=%+v err=%v", invocations, err)
+	}
+	// 失败那次与成功那次各自独立留痕,attempt 号连续可追。
+	if invocations[1].Purpose != m5ai.PurposeReply || invocations[1].Attempt != 1 ||
+		invocations[1].Status == store.AIInvocationOK {
+		t.Fatalf("失败 attempt 未如实留痕: %+v", invocations[1])
+	}
+	if invocations[2].Purpose != m5ai.PurposeReply || invocations[2].Attempt != 2 ||
+		invocations[2].Status != store.AIInvocationOK {
+		t.Fatalf("成功 attempt 事实错误: %+v", invocations[2])
+	}
+
+	// 终局后重复推进不得再碰 provider。
+	h.manager.mu.Lock()
+	err = actor.advanceM5Turn(context.Background(), *turn)
+	h.manager.mu.Unlock()
+	if err != nil || len(advice.requests) != 3 {
+		t.Fatalf("重试成功后重复推进不得再调用 provider: calls=%d err=%v", len(advice.requests), err)
+	}
+}
+
+// provider 调用失败按 2026-08-01 甲方裁决重试到上限,耗尽后仍转人工、零副作用。
+// 上限之内的重试是"重新取建议",终局判定与重试前逐字一致。
+func TestM5ReplyProviderFailureRetriesToLimitThenStopsWithoutEffect(t *testing.T) {
+	h := newHarness(t)
+	fixture := seedM5AdviceFixture(t, h)
+	maxCalls := 1 + store.MaxAIInvocationAttempts
+	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+		if call == 1 {
+			if request.Purpose != m5ai.PurposeIntent {
+				return m5ai.CompletionResponse{}, fmt.Errorf("首次调用用途错误: %s", request.Purpose)
+			}
+			return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
+		}
+		if call > maxCalls {
+			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
+		}
+		if request.Purpose != m5ai.PurposeReply {
+			return m5ai.CompletionResponse{}, fmt.Errorf("第 %d 次调用用途错误: %s", call, request.Purpose)
+		}
+		return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "rateLimited"}
 	}}
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
@@ -218,23 +288,32 @@ func TestM5ReplyProviderFailureStopsAfterTwoInvocationsWithoutEffect(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(advice.requests) != maxCalls {
+		t.Fatalf("reply 失败应重试到上限: calls=%d want=%d", len(advice.requests), maxCalls)
+	}
 	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
 	if err != nil || turn == nil {
 		t.Fatalf("读取失败轮: turn=%+v err=%v", turn, err)
 	}
-	// 重复推进同一终局轮，证明失败不会触发第三次 provider 调用。
+	// 重复推进同一终局轮，证明重试耗尽后不会再触发 provider 调用。
 	h.manager.mu.Lock()
 	err = actor.advanceM5Turn(context.Background(), *turn)
 	h.manager.mu.Unlock()
-	if err != nil || len(advice.requests) != 2 {
-		t.Fatalf("reply 失败后不得再调用 provider: calls=%d err=%v", len(advice.requests), err)
+	if err != nil || len(advice.requests) != maxCalls {
+		t.Fatalf("重试耗尽后不得再调用 provider: calls=%d err=%v", len(advice.requests), err)
 	}
 
 	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
-	if err != nil || len(invocations) != 2 || invocations[0].Purpose != m5ai.PurposeIntent ||
-		invocations[0].Status != store.AIInvocationOK || invocations[1].Purpose != m5ai.PurposeReply ||
-		invocations[1].Status != store.AIInvocationProviderRejected || invocations[1].ErrorClass != "rateLimited" {
+	if err != nil || len(invocations) != maxCalls ||
+		invocations[0].Purpose != m5ai.PurposeIntent || invocations[0].Status != store.AIInvocationOK {
 		t.Fatalf("reply 失败 invocation 事实错误: invocations=%+v err=%v", invocations, err)
+	}
+	for i := 1; i < len(invocations); i++ {
+		if invocations[i].Purpose != m5ai.PurposeReply || invocations[i].Attempt != i ||
+			invocations[i].Status != store.AIInvocationProviderRejected ||
+			invocations[i].ErrorClass != "rateLimited" {
+			t.Fatalf("第 %d 次 reply attempt 事实错误: %+v", i, invocations[i])
+		}
 	}
 	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "replyFailed", false)
 }
@@ -242,28 +321,28 @@ func TestM5ReplyProviderFailureStopsAfterTwoInvocationsWithoutEffect(t *testing.
 func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
+	maxCalls := 1 + store.MaxAIInvocationAttempts
 	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-		switch call {
-		case 1:
+		if call == 1 {
 			if request.Purpose != m5ai.PurposeIntent {
 				return m5ai.CompletionResponse{}, fmt.Errorf("首次调用用途错误: %s", request.Purpose)
 			}
 			return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
-		case 2:
-			if request.Purpose != m5ai.PurposeReply {
-				return m5ai.CompletionResponse{}, fmt.Errorf("第二次调用用途错误: %s", request.Purpose)
-			}
-			one := 1
-			return m5ai.CompletionResponse{
-				JSONText: `{"话术_序列":["不得派发的合成回复"],"动作":"无"}`,
-				Usage: m5ai.CompletionUsage{
-					InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &one,
-				},
-				ReasoningContentEmpty: true,
-			}, nil
-		default:
+		}
+		if call > maxCalls {
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
+		if request.Purpose != m5ai.PurposeReply {
+			return m5ai.CompletionResponse{}, fmt.Errorf("第 %d 次调用用途错误: %s", call, request.Purpose)
+		}
+		one := 1
+		return m5ai.CompletionResponse{
+			JSONText: `{"话术_序列":["不得派发的合成回复"],"动作":"无"}`,
+			Usage: m5ai.CompletionUsage{
+				InputTokens: 12, CachedInputTokens: 2, OutputTokens: 4, ReasoningTokens: &one,
+			},
+			ReasoningContentEmpty: true,
+		}, nil
 	}}
 	h.manager.advice = advice
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
@@ -271,11 +350,12 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
 	h.manager.mu.Unlock()
-	if err != nil || len(advice.requests) != 2 {
-		t.Fatalf("reasoning 非零轮调用次数错误: calls=%d err=%v", len(advice.requests), err)
+	// reasoning 用量可疑属于"这次没吐好",重试到上限;每一次都不得派发。
+	if err != nil || len(advice.requests) != maxCalls {
+		t.Fatalf("reasoning 非零轮调用次数错误: calls=%d want=%d err=%v", len(advice.requests), maxCalls, err)
 	}
 	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
-	if err != nil || len(invocations) != 2 || invocations[1].Purpose != m5ai.PurposeReply ||
+	if err != nil || len(invocations) != maxCalls || invocations[1].Purpose != m5ai.PurposeReply ||
 		invocations[1].Status != store.AIInvocationOK ||
 		invocations[1].UsageShape != store.AIInvocationUsageComplete ||
 		invocations[1].ReasoningTokens == nil || *invocations[1].ReasoningTokens != 1 {
@@ -289,7 +369,7 @@ func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
 	fixture := seedM5AdviceFixture(t, h)
 	zero := 0
 	advice := &recordingAdviceExecutor{complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-		if call != 1 || request.Purpose != m5ai.PurposeIntent {
+		if call > store.MaxAIInvocationAttempts || request.Purpose != m5ai.PurposeIntent {
 			return m5ai.CompletionResponse{}, fmt.Errorf("reasoning_content 非空后发生额外调用: call=%d purpose=%s", call, request.Purpose)
 		}
 		return m5ai.CompletionResponse{
@@ -306,14 +386,22 @@ func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
 	h.manager.mu.Unlock()
-	if err != nil || len(advice.requests) != 1 {
-		t.Fatalf("reasoning_content 非空必须在 intent 后阻断: calls=%d err=%v", len(advice.requests), err)
+	// intent 阶段就 reasoning 可疑:重试到上限仍可疑,绝不放行到 reply。
+	if err != nil || len(advice.requests) != store.MaxAIInvocationAttempts {
+		t.Fatalf("reasoning_content 非空必须在 intent 阶段耗尽重试后阻断: calls=%d want=%d err=%v",
+			len(advice.requests), store.MaxAIInvocationAttempts, err)
 	}
 	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
-	if err != nil || len(invocations) != 1 || invocations[0].Status != store.AIInvocationOK ||
+	if err != nil || len(invocations) != store.MaxAIInvocationAttempts ||
+		invocations[0].Status != store.AIInvocationOK ||
 		invocations[0].UsageShape != store.AIInvocationUsageComplete || invocations[0].ReasoningTokens == nil ||
 		*invocations[0].ReasoningTokens != 0 || invocations[0].OutputTokens != 4 || invocations[0].EstimatedCostMicros <= 0 {
 		t.Fatalf("reasoning_content 非空仍须如实记录 usage: invocations=%+v err=%v", invocations, err)
+	}
+	for i := range invocations {
+		if invocations[i].Purpose != m5ai.PurposeIntent || invocations[i].Attempt != i+1 {
+			t.Fatalf("intent 重试 attempt 记账错误: %+v", invocations[i])
+		}
 	}
 	assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "reasoningUsageUnsafe", false)
 }

@@ -121,11 +121,12 @@ func TestApplyBackendCredentialsCreatesConfigWithFixedBudget(t *testing.T) {
 	if config.Provider != "deepseek" || config.Model != "m-pro" || config.APIKey != "sk-fixture" {
 		t.Fatalf("配置落盘错: %+v", config.View())
 	}
-	// token 预算永不来自后台。
-	if config.MaxInputTokens != ReplyInputTokenLimit ||
-		config.MaxIntentOutputTokens != IntentOutputTokenLimit ||
-		config.MaxReplyOutputTokens != ReplyOutputTokenLimit {
-		t.Fatalf("token 预算被后台影响: %+v", config.View())
+	// token 预算永不来自后台,也不再落盘:View 里读到的恒是代码常量。
+	view := config.View()
+	if view.MaxInputTokens != ReplyInputTokenLimit ||
+		view.MaxIntentOutputTokens != IntentOutputTokenLimit ||
+		view.MaxReplyOutputTokens != ReplyOutputTokenLimit {
+		t.Fatalf("token 预算不再由代码常量固定: %+v", view)
 	}
 	// 0600:key 落盘必须是私有文件。
 	info, err := os.Stat(filepath.Join(dir, ProviderConfigFilename))

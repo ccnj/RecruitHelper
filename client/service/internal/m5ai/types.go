@@ -19,16 +19,27 @@ const (
 	SendTextMaxUTF8Bytes              = 2048
 	ReplyPhraseMaxItems               = 5
 	HistoryLimit                      = 20
-	IntentInputTokenLimit             = 8000
-	ReplyInputTokenLimit              = 16000
-	SilenceFollowupInputTokenLimit    = ReplyInputTokenLimit
-	GreetingInputTokenLimit           = ReplyInputTokenLimit
-	IntentOutputTokenLimit            = 64
-	ReplyOutputTokenLimit             = 512
-	ServiceReplyOutputTokenLimit      = 128
-	SilenceFollowupOutputTokenLimit   = ReplyOutputTokenLimit
-	ScoringOutputTokenLimit           = 512
-	GreetingOutputTokenLimit          = ReplyOutputTokenLimit
+	IntentInputTokenLimit = 8000
+	// 2026-08-01 甲方裁决:输入 16000 → 32000。实测单次回复输入最大 10943
+	// (戴相成客户机 68 次调用),已经吃掉 68%,而对话历史随轮次单调增长,聊到
+	// 十轮必然撞线。这两个上限都是"超了就拒绝"的闸而非预付额度,调大本身不
+	// 花钱,只在真用到时才计费。
+	ReplyInputTokenLimit           = 32000
+	SilenceFollowupInputTokenLimit = ReplyInputTokenLimit
+	GreetingInputTokenLimit        = ReplyInputTokenLimit
+	// 2026-08-01 甲方裁决:所有输出预算统一 10240。原值(intent 64、reply 512、
+	// 补句 128、评分 512、职位类别/关键词 256)按"实测用量 + 一点余量"设定,
+	// 但 reply 那档 512 已经装不下业务自己允许的最长话术——规格上限 2048 UTF-8
+	// bytes 约 680 汉字,加 JSON 结构后很可能越过 512 token,那类合法话术会被
+	// 截断成非法 JSON、整轮作废。统一给足余量,也为日后开思考模式留出空间
+	// (实测 512 会被 reasoning 全部吃光,content 直接返回空字符串)。
+	// 话痨风险由业务侧既有校验兜住:话术 1~5 项、每项与整组均不得超 2048 bytes。
+	IntentOutputTokenLimit          = 10240
+	ReplyOutputTokenLimit           = 10240
+	ServiceReplyOutputTokenLimit    = 10240
+	SilenceFollowupOutputTokenLimit = ReplyOutputTokenLimit
+	ScoringOutputTokenLimit         = 10240
+	GreetingOutputTokenLimit        = ReplyOutputTokenLimit
 	// 职位类别全批分配一次要带上全部职位的完整描述,远超按单次回复设的
 	// ReplyInputTokenLimit。甲方 2026-08-01 裁决按用途放宽到 64000:按中文约
 	// 0.6 token/字估,12 个职位约 1.4 万、20 个约 2.2 万、40 个约 4.4 万 token;
@@ -40,11 +51,11 @@ const (
 	// 远高于这点 token;描述又正是平台自己判定候选的输入,截断会让模型看到的
 	// 和平台看到的不是同一份。
 	JobClassInputTokenLimit = 64000
-	// 职位类别只回类别名、置信度和一句理由,256 足够;给多了只会让模型有空间
-	// 写废话。全批分配时按职位数另算,见 JobClassOutputTokens。
-	JobClassOutputTokenLimit = 256
-	// 职位关键词最多回 5 个短词加一两句理由,与类别同量级。
-	JobKeywordsOutputTokenLimit = 256
+	// 职位类别与关键词的实际输出仍是类别名、置信度和一句理由的量级,但按
+	// 2026-08-01 甲方裁决与其余输出预算统一到 10240,不再各档单独掐。上限只
+	// 在模型真吐这么多时才计费,写废话的风险由输出契约校验兜住。
+	JobClassOutputTokenLimit    = 10240
+	JobKeywordsOutputTokenLimit = 10240
 )
 
 type JobConfigDocument struct {
