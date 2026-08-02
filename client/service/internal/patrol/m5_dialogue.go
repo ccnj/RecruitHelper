@@ -99,13 +99,6 @@ func m5AdviceShouldRetry(
 
 const m5ResumeAttachmentHistoryText = "候选人已投递简历"
 
-type m5PendingTurn struct {
-	lastOutbound *store.Message
-	inbound      []store.Message
-	firstReal    *store.Message
-	manualReason string
-}
-
 type m5TurnMaterial struct {
 	profile      store.CandidateProfile
 	revision     store.JobAIContextRevision
@@ -116,259 +109,6 @@ type m5TurnMaterial struct {
 	current      []m5ai.AdviceMessage
 	throughTurn  []m5ai.AdviceMessage
 	sentGreeting string
-}
-
-// processM5Trial runs only after the account's M2 reconciliation has committed.
-// Provider calls and hand waits release the manager's short actor lock; every
-// authorization boundary is rechecked by the Store transaction that follows.
-func (a *roundActor) processM5Trial(ctx context.Context) error {
-	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
-	if err != nil || target == nil {
-		return err
-	}
-	key := store.ConversationKey{
-		Platform: target.Profile.Platform, AccountRef: target.Profile.AccountRef,
-		ConversationRef: target.Conversation.ConversationRef,
-	}
-	messages, err := a.manager.store.MessagesForConversation(key)
-	if err != nil {
-		return err
-	}
-	pending := inspectM5Pending(messages)
-	if pending.firstReal != nil {
-		changed, markErr := a.manager.store.MarkProfileCommunicating(store.MarkProfileCommunicatingRequest{
-			ProfileID: target.Profile.ProfileID, ConversationRef: key.ConversationRef,
-			MessageSeq: pending.firstReal.Seq, ObservedAt: a.manager.now(),
-		})
-		if markErr != nil {
-			return markErr
-		}
-		target.Profile = changed.Profile
-	}
-	if pending.manualReason == "" {
-		cardPending, cardErr := a.manager.store.HasPendingCardTransitionAfter(key, pending.lastOutbound.Seq)
-		if cardErr != nil {
-			return cardErr
-		}
-		if cardPending {
-			pending.manualReason = "unsupportedCardTransition"
-		}
-	}
-
-	latest, err := a.manager.store.LatestDialogueTurnForProfile(target.Profile.ProfileID)
-	if err != nil {
-		return err
-	}
-	if latest != nil && (latest.Status == store.DialogueTurnDispatching || latest.Status == store.DialogueTurnCompleted) {
-		return nil
-	}
-	if latest != nil && dialogueTurnCanBecomeStale(latest.Status) {
-		current, currentErr := a.manager.store.RecheckDialogueTurnCurrent(latest.TurnID, a.manager.now())
-		if currentErr != nil {
-			return currentErr
-		}
-		if !current {
-			// RecheckDialogueTurnCurrent 已在事务内收敛旧轮(2026-08-02 裁决:
-			// pre-effect 作废,effect 案底转人工),按真实归宿记日志后结束本轮。
-			a.logM5TurnBoundarySettled(latest.TurnID)
-			return nil
-		}
-	}
-	if pending.manualReason != "" {
-		if latest != nil && dialogueTurnCanBecomeStale(latest.Status) {
-			return a.manager.store.MarkDialogueTurnManualRequired(latest.TurnID, pending.manualReason, a.manager.now())
-		}
-		return a.manager.store.MarkActiveM5TrialManualRequired(
-			target.Profile.ProfileID, pending.manualReason, a.manager.now(),
-		)
-	}
-
-	// Preserve batch 2A's pre-capture behavior even before a candidate replies.
-	// When a capture succeeds, force a fresh patrol instead of freezing a turn
-	// from the message snapshot read before the intrusive command.
-	if target.Profile.ResumeCaptureState != store.ResumeCaptureCaptured {
-		reused, reuseErr := a.manager.store.ReuseSourcingResumeForActiveM5Trial(
-			target.Profile.ProfileID, a.manager.now(),
-		)
-		if reuseErr != nil {
-			if errors.Is(reuseErr, store.ErrResumeCaptureBinding) {
-				return a.manager.store.MarkActiveM5TrialManualRequired(
-					target.Profile.ProfileID, "sourcingResumeBindingMismatch", a.manager.now(),
-				)
-			}
-			return reuseErr
-		}
-		if reused.Status == store.SourcingResumeReuseAdopted {
-			return a.scheduleM5Continuation()
-		}
-		if err := a.captureTrialResume(ctx); err != nil {
-			return err
-		}
-		after, reloadErr := a.manager.store.ActiveM5TrialForAccount(a.key())
-		if reloadErr != nil {
-			return reloadErr
-		}
-		if after != nil && after.Profile.ResumeCaptureState == store.ResumeCaptureCaptured {
-			return a.scheduleM5Continuation()
-		}
-		return nil
-	}
-	if len(pending.inbound) == 0 {
-		return nil
-	}
-	// A missing local provider configuration is dependency unavailability, not
-	// a test mode. Do not freeze a turn until the next client restart loads a
-	// complete M5-A configuration.
-	if a.manager.advice == nil {
-		return nil
-	}
-
-	// 配置缺失与快照缺失是"世界干净"的本机短缺(2026-08-02 甲方裁决):不冻结
-	// 候选人,本轮跳过,配置补齐后下一巡检轮自然续跑。
-	if target.Profile.BackendJobID == nil || strings.TrimSpace(*target.Profile.BackendJobID) == "" {
-		slog.Warn("对话轮跳过:候选人未绑定后台职位,等下轮巡检重试",
-			"profileId", target.Profile.ProfileID, "reason", "contextNotBound")
-		return nil
-	}
-	currentContext, err := a.manager.store.CurrentLegacyJobAIContextByBackendJobID(
-		strings.TrimSpace(*target.Profile.BackendJobID),
-	)
-	if err != nil {
-		return err
-	}
-	if currentContext == nil {
-		slog.Warn("对话轮跳过:后台职位缺少 AI 上下文修订,等下轮巡检重试",
-			"profileId", target.Profile.ProfileID, "reason", "contextNotBound")
-		return nil
-	}
-	if target.Profile.ActiveResumeSnapshotID == nil {
-		slog.Warn("对话轮跳过:候选人缺少简历快照,等下轮巡检重试",
-			"profileId", target.Profile.ProfileID, "reason", "resumeSnapshotMissing")
-		return nil
-	}
-	snapshot, err := a.manager.store.CandidateResumeSnapshotByID(target.Profile.ProfileID, *target.Profile.ActiveResumeSnapshotID)
-	if err != nil {
-		return err
-	}
-	if snapshot == nil {
-		slog.Warn("对话轮跳过:简历快照不可读,等下轮巡检重试",
-			"profileId", target.Profile.ProfileID, "reason", "resumeSnapshotMissing")
-		return nil
-	}
-
-	digest, turnID, err := m5TurnIdentity(target.Profile.ProfileID, pending)
-	if err != nil {
-		return err
-	}
-	turn, err := a.manager.store.DialogueTurnByID(turnID)
-	if err != nil {
-		return err
-	}
-	if turn == nil {
-		// 与正式沟通巡检同口径：冻结这一刻实时读周表。读失败仍不回落默认
-		// (否则会按用户已经改掉的表承诺时间),但按 2026-08-02 裁决只跳过
-		// 本轮,不冻结候选人——表能读到的那一轮自然续跑。
-		schedule, scheduleErr := a.manager.store.InterviewSchedule()
-		if scheduleErr != nil {
-			slog.Warn("对话轮跳过:面试时段周表读取失败,等下轮巡检重试",
-				"profileId", target.Profile.ProfileID, "reason", "scheduleRenderFailed")
-			return nil
-		}
-		recommended, freezeErr := m5ai.FreezeRecommendedTimeText(
-			a.now, m5ai.GenerateSlots(a.now, schedule),
-		)
-		if freezeErr != nil {
-			slog.Warn("对话轮跳过:推荐时段渲染失败,等下轮巡检重试",
-				"profileId", target.Profile.ProfileID, "reason", "scheduleRenderFailed")
-			return nil
-		}
-		frozen, freezeErr := a.manager.store.FreezeDialogueTurn(store.FreezeDialogueTurnRequest{
-			TurnID: turnID, ProfileID: target.Profile.ProfileID, ConversationRef: key.ConversationRef,
-			InputDigest: digest, HistoryThroughSeq: pending.lastOutbound.Seq,
-			InboundFromSeq:      pending.inbound[0].Seq,
-			InboundThroughSeq:   pending.inbound[len(pending.inbound)-1].Seq,
-			ContextRevisionHash: currentContext.RevisionHash,
-			ResumeSnapshotID:    snapshot.SnapshotID, RecommendedTimeText: recommended,
-			RenderFormatVersion: m5ai.DialogueRenderFormatVersion, FrozenAt: a.now,
-		})
-		if freezeErr != nil {
-			if errors.Is(freezeErr, store.ErrDialogueTurnBinding) {
-				return a.manager.store.MarkActiveM5TrialManualRequired(
-					target.Profile.ProfileID, "turnBoundaryChanged", a.manager.now(),
-				)
-			}
-			return freezeErr
-		}
-		turn = &frozen.Turn
-	}
-	if err := a.setStage("advising"); err != nil {
-		return err
-	}
-	return a.advanceM5Turn(ctx, *turn)
-}
-
-func inspectM5Pending(messages []store.Message) m5PendingTurn {
-	result := m5PendingTurn{}
-	for index := range messages {
-		message := &messages[index]
-		if message.Direction == "out" {
-			result.lastOutbound = message
-		}
-		if store.IsM5RealCandidateMessage(*message) && result.firstReal == nil {
-			copy := *message
-			result.firstReal = &copy
-		}
-	}
-	if result.lastOutbound == nil {
-		result.manualReason = "sentGreetingMissing"
-		return result
-	}
-	for index := range messages {
-		message := messages[index]
-		if message.Seq <= result.lastOutbound.Seq {
-			continue
-		}
-		result.inbound = append(result.inbound, message)
-	}
-	if _, ok := store.DialogueTurnInputKindOf(result.inbound); !ok && len(result.inbound) > 0 {
-		result.manualReason = m5UnsupportedTurnReason(result.inbound)
-	}
-	if result.manualReason != "" {
-		result.inbound = nil
-	}
-	return result
-}
-
-func m5UnsupportedTurnReason(messages []store.Message) string {
-	for i := range messages {
-		if messages[i].Kind == "image" || messages[i].Kind == "voice" || messages[i].Kind == "file" {
-			return "unsupportedMedia"
-		}
-	}
-	return "unsupportedSemantic"
-}
-
-func dialogueTurnCanBecomeStale(status store.DialogueTurnStatus) bool {
-	return status == store.DialogueTurnCollected || status == store.DialogueTurnClassified ||
-		status == store.DialogueTurnAdviceReady
-}
-
-func (a *roundActor) scheduleM5Continuation() error {
-	now := a.manager.now()
-	return a.manager.store.MutateAccount(a.key(), func(account *store.Account) error {
-		account.DirtyHint = true
-		if account.NextPatrolAt == nil || account.NextPatrolAt.After(now) {
-			account.NextPatrolAt = timePointer(now)
-		}
-		return nil
-	})
-}
-
-func m5TurnIdentity(profileID string, pending m5PendingTurn) (string, string, error) {
-	if strings.TrimSpace(profileID) == "" || pending.lastOutbound == nil || len(pending.inbound) == 0 {
-		return "", "", store.ErrDialogueTurnInvalid
-	}
-	return store.DialogueTurnIdentity(profileID, *pending.lastOutbound, pending.inbound)
 }
 
 // advanceM5Turn 是对话轮推进的唯一入口。它把 advanceM5TurnSteps 冒出的
@@ -444,19 +184,22 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 			if reduceErr != nil {
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 			}
-			if decision.NextAdvice == m5ai.PurposeIntent {
-				if a.manager.advice == nil {
-					return nil
-				}
-				if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
-					return err
-				}
-			} else {
-				if _, err := a.manager.store.ApplyCodeClassification(store.CodeClassificationRequest{
-					TurnID: turn.TurnID, Label: decision.IntentLabel, ClassifiedAt: a.manager.now(),
-				}); err != nil {
-					return err
-				}
+			if decision.NextAdvice != m5ai.PurposeIntent {
+				// Q5 死代码删除(2026-08-02):此分支生产不可达。v4 冻结事务
+				// (reduceV4ClassifiedDialogue)已用同一 Reduce 在同一文本集上
+				// 消化过短路分类——凡短路命中,冻结时即落 Classified/终局,
+				// 不会以 Collected 停留;Collected 轮存在本身就证明短路未命中,
+				// 而 Recheck 的 digest 重验加单 actor 串行化保证推进时文本集
+				// 与冻结时逐字相同,纯函数重算只会再次要求意向建议。原先的
+				// ApplyCodeClassification 落账臂已随 trial 轨删除,这里只留
+				// 保守停靠兜底。
+				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
+			}
+			if a.manager.advice == nil {
+				return nil
+			}
+			if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
+				return err
 			}
 		case store.DialogueTurnClassified:
 			if v4Owned && nextV4Advice == communication.V4AdviceServiceReply {

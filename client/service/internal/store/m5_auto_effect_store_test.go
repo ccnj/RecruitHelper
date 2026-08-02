@@ -20,11 +20,16 @@ func seedPlannedM5AutomaticAction(t *testing.T, s *Store, suffix string) m5Autom
 	t.Helper()
 	fixture, turn := seedFrozenDialogueTurn(t, s, "profile-auto-effect-"+suffix)
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	classified, err := s.ApplyCodeClassification(CodeClassificationRequest{
-		TurnID: turn.TurnID, Label: m5ai.IntentInterested, ClassifiedAt: now,
-	})
-	if err != nil || classified.Status != DialogueTurnClassified {
-		t.Fatalf("代码分类未推进到 classified: turn=%+v err=%v", classified, err)
+	// Q5:ApplyCodeClassification 已随死代码删除,直接落 classified 事实行造
+	// 现场;本文件被测对象是活的 WAL/effect 记账,不依赖分类由谁写入。
+	classified := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ? AND status = ?", turn.TurnID, DialogueTurnCollected).
+		Updates(map[string]any{
+			"status": DialogueTurnClassified, "intent_label": m5ai.IntentInterested,
+			"intent_source": DialogueIntentCodeShortCircuit, "classified_at": now,
+		})
+	if classified.Error != nil || classified.RowsAffected != 1 {
+		t.Fatalf("代码分类未推进到 classified: rows=%d err=%v", classified.RowsAffected, classified.Error)
 	}
 	replyID := "invocation-auto-effect-" + suffix
 	if result, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{

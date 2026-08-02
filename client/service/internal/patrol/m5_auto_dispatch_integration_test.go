@@ -437,8 +437,15 @@ func TestM5AutomaticReplyCrossesRealDispatcherOnceAndSurvivesRestart(t *testing.
 		now:  h.clock.Now(),
 	}
 	for attempt := 0; attempt < 2; attempt++ {
+		// Q5:trial 死入口已删,直接以 advanceM5Turn 重复推进同一持久 turn,
+		// 与生产 v4 巡检的推进接缝一致;考察的性质不变——已完成事实必须在
+		// provider、intent 构造与手投递之前短路。
+		reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+		if reloadErr != nil || reloaded == nil {
+			t.Fatalf("重启后第 %d 次读取持久 turn 失败: turn=%+v err=%v", attempt+1, reloaded, reloadErr)
+		}
 		restarted.mu.Lock()
-		err = restartedActor.processM5Trial(context.Background())
+		err = restartedActor.advanceM5Turn(context.Background(), *reloaded)
 		restarted.mu.Unlock()
 		if err != nil {
 			t.Fatalf("重启后第 %d 次重复推进失败: %v", attempt+1, err)
@@ -547,8 +554,14 @@ func TestM5ResumeBusinessEventCrossesExistingWALOnce(t *testing.T) {
 		manager: restarted, account: account,
 		hand: HandState{Online: true, Session: "session-1", BootID: "boot-1"}, now: h.clock.Now(),
 	}
+	// Q5:trial 死入口已删,以 advanceM5Turn 重放同一持久 turn(生产 v4 巡检
+	// 的推进接缝),考察的性质不变——重启重放不得增生调用或命令。
+	reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if reloadErr != nil || reloaded == nil {
+		t.Fatalf("重启后读取持久 turn 失败: turn=%+v err=%v", reloaded, reloadErr)
+	}
 	restarted.mu.Lock()
-	err = restartedActor.processM5Trial(context.Background())
+	err = restartedActor.advanceM5Turn(context.Background(), *reloaded)
 	restarted.mu.Unlock()
 	if err != nil || len(advice.requests) != 1 || hand.commandCount() != 1 {
 		t.Fatalf("简历分支重启重放发生增生: advice=%d commands=%d err=%v", len(advice.requests), hand.commandCount(), err)

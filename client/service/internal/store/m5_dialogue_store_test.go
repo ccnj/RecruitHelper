@@ -296,97 +296,24 @@ func TestFreezeDialogueTurnKeepsPreviousOutboundSeparateFromCurrentInbound(t *te
 	}
 }
 
-func TestRealMediaMessageAdvancesProfileWithoutCreatingTurn(t *testing.T) {
-	for _, kind := range []string{"image", "voice", "file"} {
-		t.Run(kind, func(t *testing.T) {
-			s := openTest(t)
-			fixture := seedDialogueStoreFixture(t, s, "profile-real-"+kind, kind)
-			result, err := s.MarkProfileCommunicating(MarkProfileCommunicatingRequest{
-				ProfileID: fixture.ProfileID, ConversationRef: fixture.ConversationRef, MessageSeq: 2,
-			})
-			if err != nil || !result.Changed || result.Profile.MainStatus != CandidateProfileCommunicating ||
-				result.Profile.FirstRealMessageSeq == nil || *result.Profile.FirstRealMessageSeq != 2 {
-				t.Fatalf("真实媒体消息未推进 communicating: result=%+v err=%v", result, err)
-			}
-			repeated, err := s.MarkProfileCommunicating(MarkProfileCommunicatingRequest{
-				ProfileID: fixture.ProfileID, ConversationRef: fixture.ConversationRef, MessageSeq: 2,
-			})
-			if err != nil || repeated.Changed {
-				t.Fatalf("重复观察必须幂等: result=%+v err=%v", repeated, err)
-			}
-			var turns int64
-			if err := s.db.Model(&DialogueTurn{}).Count(&turns).Error; err != nil || turns != 0 {
-				t.Fatalf("媒体消息不得预造 turn: count=%d err=%v", turns, err)
-			}
-		})
-	}
-}
-
 func TestActiveTrialRemainsEligibleAfterProfileStartsCommunicating(t *testing.T) {
 	s := openTest(t)
 	fixture := seedDialogueStoreFixture(t, s, "profile-active-communicating", "text")
-	if _, err := s.MarkProfileCommunicating(MarkProfileCommunicatingRequest{
-		ProfileID: fixture.ProfileID, ConversationRef: fixture.ConversationRef, MessageSeq: 2,
-	}); err != nil {
+	// Q5:trial 死入口 MarkProfileCommunicating 已删,直接落 greeted→communicating
+	// 事实行造现场;被测对象是活的 ActiveM5TrialForAccount 读语义。
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.db.Model(&CandidateProfile{}).
+		Where("profile_id = ? AND main_status = ?", fixture.ProfileID, CandidateProfileGreeted).
+		Updates(map[string]any{
+			"main_status": CandidateProfileCommunicating, "communicating_at": now,
+			"first_real_message_seq": 2,
+		}).Error; err != nil {
 		t.Fatal(err)
 	}
 	target, err := s.ActiveM5TrialForAccount(AccountKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef})
 	if err != nil || target == nil || target.Profile.MainStatus != CandidateProfileCommunicating {
 		t.Fatalf("既有 active 试运行不得因 communicating 状态丢失补采资格: target=%+v err=%v", target, err)
 	}
-}
-
-func TestPendingCardTransitionReadRespectsHumanOutboundBoundary(t *testing.T) {
-	s := openTest(t)
-	fixture := seedDialogueStoreFixture(t, s, "profile-card-boundary", "text")
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	oldFact := CardTransitionFact{
-		Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: fixture.ConversationRef,
-		MessageSeq: 2, FromState: "pending", ToState: "accepted", RoundID: "round-old",
-		ContentHash: "old-card-hash", CardType: "invite", CreatedAt: now,
-	}
-	newFact := CardTransitionFact{
-		Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: fixture.ConversationRef,
-		MessageSeq: 4, FromState: "pending", ToState: "accepted", RoundID: "round-new",
-		ContentHash: "new-card-hash", CardType: "invite", CreatedAt: now,
-	}
-	if err := s.db.Create(&[]CardTransitionFact{oldFact, newFact}).Error; err != nil {
-		t.Fatal(err)
-	}
-	key := ConversationKey{Platform: fixture.Platform, AccountRef: fixture.AccountRef, ConversationRef: fixture.ConversationRef}
-	pending, err := s.HasPendingCardTransitionAfter(key, 3)
-	if err != nil || !pending {
-		t.Fatalf("当前轮卡片跃迁必须可见: pending=%v err=%v", pending, err)
-	}
-	if err := s.db.Model(&CardTransitionFact{}).Where(
-		"platform = ? AND account_ref = ? AND conversation_ref = ? AND message_seq = ?",
-		fixture.Platform, fixture.AccountRef, fixture.ConversationRef, 4,
-	).Update("acknowledged_at", now).Error; err != nil {
-		t.Fatal(err)
-	}
-	pending, err = s.HasPendingCardTransitionAfter(key, 3)
-	if err != nil || pending {
-		t.Fatalf("真人出站前的旧卡片跃迁不得继续污染新轮: pending=%v err=%v", pending, err)
-	}
-}
-
-func TestCodeRejectedClassificationCreatesNoInvocationOrAction(t *testing.T) {
-	s := openTest(t)
-	_, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-rejected")
-	classified, err := s.ApplyCodeClassification(CodeClassificationRequest{
-		TurnID: turn.TurnID, Label: m5ai.IntentRejected, ClassifiedAt: time.Now(),
-	})
-	if err != nil || classified.Status != DialogueTurnManualRequired ||
-		classified.IntentSource != DialogueIntentCodeShortCircuit || classified.IntentLabel != m5ai.IntentRejected {
-		t.Fatalf("拒绝短路未落正式分类并转人工: turn=%+v err=%v", classified, err)
-	}
-	var invocations, actions int64
-	_ = s.db.Model(&AIInvocation{}).Count(&invocations).Error
-	_ = s.db.Model(&CommunicationAction{}).Count(&actions).Error
-	if invocations != 0 || actions != 0 {
-		t.Fatalf("拒绝短路必须零 provider/零 action: invocations=%d actions=%d", invocations, actions)
-	}
-	assertTrialManualRequired(t, s, "intentRejected")
 }
 
 func TestLLMRejectedClassificationIsPreservedWhenTrialTurnsManual(t *testing.T) {
@@ -756,9 +683,14 @@ func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
 	t.Run("reply manual", func(t *testing.T) {
 		s := openTest(t)
 		_, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-recover-reply")
-		if _, err := s.ApplyCodeClassification(CodeClassificationRequest{
-			TurnID: turn.TurnID, Label: m5ai.IntentInterested, ClassifiedAt: time.Now(),
-		}); err != nil {
+		// Q5:ApplyCodeClassification 已随死代码删除,直接落 classified 事实行
+		// 造现场;被测对象是活的 RecoverInterruptedAIInvocations 收敛语义。
+		if err := s.db.Model(&DialogueTurn{}).
+			Where("turn_id = ? AND status = ?", turn.TurnID, DialogueTurnCollected).
+			Updates(map[string]any{
+				"status": DialogueTurnClassified, "intent_label": m5ai.IntentInterested,
+				"intent_source": DialogueIntentCodeShortCircuit, "classified_at": time.Now(),
+			}).Error; err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{

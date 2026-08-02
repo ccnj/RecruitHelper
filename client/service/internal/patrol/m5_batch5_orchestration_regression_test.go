@@ -534,11 +534,25 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 				hand: HandState{Online: true, Session: "session-1", BootID: "boot-1"},
 				now:  h.clock.Now(),
 			}
-			manager.mu.Lock()
-			err = actor.processM5Trial(context.Background())
-			manager.mu.Unlock()
-			if err != nil {
-				t.Fatal(err)
+			// Q5:trial 死入口已删。生产 v4 巡检对 adviceReady 旧轮的门序是
+			// "先 RecheckDialogueTurnCurrent,current 才 advanceM5Turn"(见
+			// processCommunicationV4Target),这里按同一门序复核:世界已变的
+			// 轮必须在派发前被拦下并收敛,不得走到 advance/发送。
+			current, recheckErr := h.db.RecheckDialogueTurnCurrent(fixture.turn.TurnID, h.clock.Now())
+			if recheckErr != nil {
+				t.Fatal(recheckErr)
+			}
+			if current {
+				reloaded, reloadErr := h.db.DialogueTurnByID(fixture.turn.TurnID)
+				if reloadErr != nil || reloaded == nil {
+					t.Fatalf("读取待派发轮失败: turn=%+v err=%v", reloaded, reloadErr)
+				}
+				manager.mu.Lock()
+				err = actor.advanceM5Turn(context.Background(), *reloaded)
+				manager.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if hand.commandCount() != 0 || countM5SendMessageCommands(t, h) != beforeCommands {
 				t.Fatalf("世界状态变化后仍进入 chat.sendMessage: hand=%d before=%d after=%d",

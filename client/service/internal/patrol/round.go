@@ -1138,14 +1138,6 @@ func sourcingFailureCode(err *RunError) string {
 	return string(err.Code)
 }
 
-func (a *roundActor) captureTrialResume(ctx context.Context) error {
-	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
-	if err != nil || target == nil {
-		return err
-	}
-	return a.captureResumeForProfile(ctx, target.Profile)
-}
-
 func (a *roundActor) captureResumeForProfile(
 	ctx context.Context,
 	profile store.CandidateProfile,
@@ -1501,53 +1493,6 @@ func (a *roundActor) detectDirtySummary(
 		listHintKey:         hintKey,
 		listHintFingerprint: hintFingerprint,
 	}, nil
-}
-
-// M5 的简历读取与自动回复都只作用于已绑定的当前 IM 会话，原语本身按契约
-// 不得搜索会话列表。试运行目标确实需要补采或处理入站时，本轮只对账该目标：
-// 这既完成 M2→M5 的页面所有权交接，也避免无关旧会话的可恢复定位失败阻断
-// 一次性试运行。其他 dirty 会话只延后到试运行释放 active slot 后的下一轮。
-// 已采集且没有待处理入站时不得为维持路由而反复抢页面。
-func (a *roundActor) isolateActiveM5Target(dirty []dirtyConversation) ([]dirtyConversation, error) {
-	target, err := a.manager.store.ActiveM5TrialForAccount(a.key())
-	if err != nil || target == nil {
-		return dirty, err
-	}
-	key := store.ConversationKey{
-		Platform: target.Conversation.Platform, AccountRef: target.Conversation.AccountRef,
-		ConversationRef: target.Conversation.ConversationRef,
-	}
-	ledger, err := a.manager.store.MessagesForConversation(key)
-	if err != nil {
-		return nil, err
-	}
-	targetIndex := -1
-	for i := range dirty {
-		if dirty[i].conversation.ConversationRef == target.Conversation.ConversationRef {
-			targetIndex = i
-			break
-		}
-	}
-	needsHandoff := m5TargetNeedsRouteHandoff(
-		targetIndex >= 0,
-		target.Profile.ResumeCaptureState,
-		ledger,
-	)
-	if !needsHandoff {
-		return dirty, nil
-	}
-	return []dirtyConversation{{conversation: target.Conversation, ledger: ledger}}, nil
-}
-
-func m5TargetNeedsRouteHandoff(
-	alreadyDirty bool,
-	captureState store.ResumeCaptureState,
-	ledger []store.Message,
-) bool {
-	if alreadyDirty || captureState == store.ResumeCaptureUnattempted || captureState == store.ResumeCaptureInFlight {
-		return true
-	}
-	return len(inspectM5Pending(ledger).inbound) > 0
 }
 
 func (a *roundActor) reconcileConversation(ctx context.Context, dirty dirtyConversation) (ConversationProjection, error) {
