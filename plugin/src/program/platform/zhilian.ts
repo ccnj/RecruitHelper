@@ -5624,6 +5624,92 @@ function mainOpenZhilianSalaryMonths(): MainStep {
   return { status: 'ok', detail: String(Math.round(inputs[0].getBoundingClientRect().left)) }
 }
 
+// 薪资有两种表单变体(2026-08-02 真机确认)。销售类职位类别下,平台把薪资三段收进
+// 「薪资福利」弹层,表单上只留一个只读汇总入口;其余类别仍是三段直接躺在表单里。
+// 判据只问"最低月薪这个控件在不在页面上",不去猜是哪一类职位——平台随时可能把
+// 更多类别切过去,按类别名硬编码等于给自己埋下一批同样的静默失败。
+//
+// 弹层里的三段是同一套 km-select 联动渲染,与老变体逐字一致,因此打开之后
+// pickZhilianSelect 与薪资月数那几步原样复用,不另起一套。
+function mainProbeZhilianSalaryVariant(): MainStep {
+  if (document.querySelector('input[placeholder="最低月薪"]')) {
+    return { status: 'ok', detail: 'inline' }
+  }
+  if (document.querySelector('.custom-salary .custom-salary-input input')) {
+    return { status: 'ok', detail: 'modal' }
+  }
+  return { status: 'failed', reason: 'salary_variant_unresolved' }
+}
+
+// 弹层打开时会被挪到 body 下,不再是 .custom-salary 的后代,只能全局找;按可见文本
+// 认自己那一个,与关键词弹层同一套写法。
+function mainOpenZhilianSalaryModal(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.custom-attribute-modal')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.getBoundingClientRect().height > 0 && /薪资/.test(node.innerText) &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length > 1) return { status: 'failed', reason: 'salary_modal_ambiguous' }
+  if (open.length === 1) return { status: 'ok', detail: 'open' }
+  const entry = document.querySelector('.custom-salary .custom-salary-input input') as HTMLElement | null
+  if (!entry) return { status: 'failed', reason: 'salary_modal_entry_absent' }
+  entry.click()
+  return { status: 'ok', detail: 'clicked' }
+}
+
+// 弹层里除最低/最高月薪与薪资月数之外一律不填(甲方 2026-08-02 裁决),而平台会预选
+// 一张福利卡片(真机见「五险一金」),所以预选必须主动点掉,否则等于替甲方承诺了
+// 一项没打算给的福利。再次点击已选卡片即取消,与关键词预选同一套清法。
+function mainClearOneZhilianSalaryBenefit(): MainStep {
+  const dialog = (Array.from(document.querySelectorAll('.custom-attribute-modal')) as HTMLElement[])
+    .find((node) => {
+      const style = window.getComputedStyle(node)
+      return node.getBoundingClientRect().height > 0 && /薪资/.test(node.innerText) &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    }) ?? null
+  if (!dialog) return { status: 'failed', reason: 'salary_modal_absent' }
+  // 平台把 selected 拼成了 slelected。只认这个错拼,平台哪天改回来,这里就会静默
+  // 变成空转、预选原样留着发出去,所以两种拼法都认。按空格切成词逐个全等比对,
+  // 不用 includes——那样 is-slelected 会被任何含该子串的类名蹭中。
+  const selected = (Array.from(dialog.querySelectorAll('div.list-item')) as HTMLElement[])
+    .filter((item) => {
+      const names = item.className.toString().split(/\s+/)
+      return names.includes('is-slelected') || names.includes('is-selected')
+    })
+  if (selected.length === 0) return { status: 'ok', detail: 'empty' }
+  selected[0].click()
+  return { status: 'ok', detail: String(selected.length) }
+}
+
+// 只核对按钮自身的标准 DOM 语义(唯一、可见、未禁用、不是 reset),不审计平台实现。
+function mainConfirmZhilianSalaryModal(): MainStep {
+  const dialog = (Array.from(document.querySelectorAll('.custom-attribute-modal')) as HTMLElement[])
+    .find((node) => {
+      const style = window.getComputedStyle(node)
+      return node.getBoundingClientRect().height > 0 && /薪资/.test(node.innerText) &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    }) ?? null
+  if (!dialog) return { status: 'failed', reason: 'salary_modal_absent' }
+  const buttons = (Array.from(dialog.querySelectorAll('button')) as HTMLButtonElement[])
+    .filter((button) => button.innerText.trim() === '确认' && button.getBoundingClientRect().height > 0)
+  if (buttons.length !== 1) return { status: 'failed', reason: 'salary_confirm_unresolved' }
+  if (buttons[0].disabled) return { status: 'failed', reason: 'salary_confirm_disabled' }
+  if (buttons[0].type === 'reset') return { status: 'failed', reason: 'salary_confirm_wrong_type' }
+  buttons[0].click()
+  return { status: 'ok' }
+}
+
+// 弹层关掉后表单上只剩这一行只读汇总(真机形如「8千-1.2万 12薪」)。它既是本步的
+// 正证,也是发布前复核唯一还能读到的薪资事实。
+function mainReadZhilianSalarySummary(): MainStep {
+  const input = document.querySelector('.custom-salary .custom-salary-input input') as HTMLInputElement | null
+  if (!input) return { status: 'failed', reason: 'salary_summary_absent' }
+  const value = input.value.trim()
+  if (!value) return { status: 'failed', reason: 'salary_summary_empty' }
+  return { status: 'ok', detail: value.slice(0, 120) }
+}
+
 function mainFillZhilianHeadcount(headcount: number): MainStep {
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const item = items.find((node) => {
@@ -6013,6 +6099,10 @@ interface DraftProgress {
   keywordIndex?: number
   keyword?: string
   keywordRoute?: string
+  // 薪资那一段走的是哪种表单变体(inline=三段直填,modal=收进薪资福利弹层),
+  // 以及新变体确认后表单上那行只读汇总。失败时最想知道的就是这两样。
+  salaryVariant?: string
+  salarySummary?: string
   matched: string[]
   custom: string[]
   dropped: string[]
@@ -6100,6 +6190,9 @@ const zhilianPublishInteractions = new Set<unknown>([
   mainOpenZhilianSelect,
   mainPickZhilianSelectOption,
   mainOpenZhilianSalaryMonths,
+  mainOpenZhilianSalaryModal,
+  mainClearOneZhilianSalaryBenefit,
+  mainConfirmZhilianSalaryModal,
   mainOpenZhilianKeywords,
   mainClearOneZhilianKeyword,
   mainPickZhilianKeyword,
@@ -6135,6 +6228,9 @@ function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
   if (func === mainCloseZhilianPanels) return result.detail === 'closing'
   if (func === mainOpenZhilianJobClassPicker) return result.detail === 'clicked'
   if (func === mainCloseZhilianJobClassPicker) return result.detail === 'closing'
+  if (func === mainOpenZhilianSalaryModal) return result.detail === 'clicked'
+  // 'empty' 是"已经没有预选可点",没动过页面;其余返回的是点击前的剩余张数。
+  if (func === mainClearOneZhilianSalaryBenefit) return result.detail !== 'empty'
   return true
 }
 
@@ -6388,7 +6484,13 @@ async function fillZhilianJobForm(
   args: JobPrepareDraftArgs,
   ctx: PrimitiveContext,
   expectedPrincipalFingerprint: string | undefined,
-): Promise<{ tabId: number; progress: DraftProgress; data: JobPrepareDraftData }> {
+): Promise<{
+  tabId: number
+  progress: DraftProgress
+  data: JobPrepareDraftData
+  // 发布前复核用的薪资基线,形态随表单变体而定,只与同一次读取的 guards 对拼。
+  salaryGuard: string
+}> {
   ctx.checkpoint()
   const progress = newDraftProgress()
   // 每次都从干净的发布页开始:表单只在页面内存里,残留状态会污染这次回读。
@@ -6430,6 +6532,26 @@ async function fillZhilianJobForm(
   const experience = await pickZhilianSelect(tabId, ctx, '工作经验', args.experience, progress)
   await ctx.progress('填写学历与经验', 50)
 
+  // 薪资走哪种变体只看页面,不看职位类别。老变体三段直接躺在表单上;新变体收进
+  // 「薪资福利」弹层,得先打开才谈得上填。
+  const salaryVariant = await pollStep(tabId, mainProbeZhilianSalaryVariant, [], ctx, '判定薪资表单变体',
+    undefined, 40, progress)
+  progress.salaryVariant = salaryVariant
+  if (salaryVariant === 'modal') {
+    await pollStep(tabId, mainOpenZhilianSalaryModal, [], ctx, '打开薪资福利弹层',
+      (detail) => detail === 'open', 25, progress)
+    // 先清预选再填三段:清空失败就白填了,而且这一步之前一次页面都没改。
+    // 每次只点一张、读回剩余张数,节奏闸自然把相邻两次点击隔开。
+    let benefits = 'pending'
+    for (let guard = 0; guard < 24 && benefits !== 'empty'; guard += 1) {
+      benefits = await runStep(tabId, mainClearOneZhilianSalaryBenefit, [], '清空薪资福利预选', progress)
+    }
+    if (benefits !== 'empty') {
+      throw new ZhilianPlatformError('GUARD_FAILED', '薪资福利预选未能清空', 'manualOnly',
+        undefined, 'none', snapshotProgress(progress, 'salary_benefit_stuck'))
+    }
+  }
+
   // 薪资三段是联动渲染:最高月薪与薪资月数在选定最低月薪之前根本不存在。
   const salaryMin = await pickZhilianSelect(tabId, ctx, '最低月薪', args.salaryMin, progress)
   const salaryMax = await pickZhilianSelect(tabId, ctx, '最高月薪', args.salaryMax, progress)
@@ -6447,6 +6569,16 @@ async function fillZhilianJobForm(
       undefined, 40, progress)
     salaryMonths = await pollStep(tabId, mainReadZhilianSalaryMonths, [], ctx, '回读薪资月数',
       (detail) => detail === args.salaryMonths, 40, progress)
+  }
+  // 发布前复核要拿的薪资基线。老变体三段还留在表单上,逐段读即可;新变体弹层一关
+  // 三个 select 就从页面上消失,能读到的只剩那行只读汇总,于是改用它作基线——问的
+  // 仍是同一件事:填完之后到点发布之前,页面上的薪资有没有被改过。
+  let salaryGuard = [salaryMin, salaryMax, salaryMonths].join('')
+  if (salaryVariant === 'modal') {
+    await runStep(tabId, mainConfirmZhilianSalaryModal, [], '确认薪资福利', progress)
+    salaryGuard = await pollStep(tabId, mainReadZhilianSalarySummary, [], ctx, '回读薪资汇总',
+      undefined, 40, progress)
+    progress.salarySummary = salaryGuard
   }
   await ctx.progress('填写薪资范围', 65)
 
@@ -6474,7 +6606,7 @@ async function fillZhilianJobForm(
     observedAt: Date.now(),
   }
 
-  return { tabId, progress, data }
+  return { tabId, progress, data, salaryGuard }
 }
 
 // 点击「发布」之前的最后一道 guards:回读表单上几个决定性字段,确认页面里躺着的
@@ -6482,26 +6614,33 @@ async function fillZhilianJobForm(
 function mainReadZhilianPublishGuards(): MainStep {
   const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
   if (!name) return { status: 'failed', reason: 'name_input_absent' }
-  const salaryMin = document.querySelector('input[placeholder="最低月薪"]') as HTMLInputElement | null
-  const salaryMax = document.querySelector('input[placeholder="最高月薪"]') as HTMLInputElement | null
-  const months = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[])
-    .filter((input) => /^\d+个月$/.test(input.value.trim()))
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const headcountItem = items.find((node) => {
     const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
     return label?.innerText.trim() === '招聘人数'
   })
   const headcount = headcountItem?.querySelector('input[type="text"], input:not([type])') as HTMLInputElement | null
-  if (!salaryMin || !salaryMax || months.length !== 1 || !headcount) {
+  if (!headcount) return { status: 'failed', reason: 'publish_guard_fields_absent' }
+  // 薪资两种变体各读各的:三段还躺在表单上就逐段读;收进弹层的那种,弹层一关三个
+  // select 就从页面上消失了,能读到的只剩表单上那一行只读汇总。两种基线都由
+  // 填表那一趟同时产出,形态不同也不会互相错认。
+  const salaryMin = document.querySelector('input[placeholder="最低月薪"]') as HTMLInputElement | null
+  const salaryMax = document.querySelector('input[placeholder="最高月薪"]') as HTMLInputElement | null
+  const months = (Array.from(document.querySelectorAll('input')) as HTMLInputElement[])
+    .filter((input) => /^\d+个月$/.test(input.value.trim()))
+  const summary = document.querySelector('.custom-salary .custom-salary-input input') as HTMLInputElement | null
+  let salary = ''
+  if (salaryMin && salaryMax && months.length === 1) {
+    salary = [salaryMin.value.trim(), salaryMax.value.trim(), months[0].value.trim()].join('')
+  } else if (summary && summary.value.trim()) {
+    salary = summary.value.trim()
+  } else {
     return { status: 'failed', reason: 'publish_guard_fields_absent' }
   }
   // 用  拼接,避免与字段内容里的任何可见分隔符冲突。
   return {
     status: 'ok',
-    detail: [
-      name.value.trim(), salaryMin.value.trim(), salaryMax.value.trim(),
-      months[0].value.trim(), headcount.value.trim(),
-    ].join(''),
+    detail: [name.value.trim(), salary, headcount.value.trim()].join(''),
   }
 }
 
@@ -6559,20 +6698,19 @@ export async function publishZhilianJobDraft(
     throw new ZhilianPlatformError('GUARD_FAILED', '平台上已存在同名职位,不再发布', 'manualOnly')
   }
 
-  const { tabId, progress, data: filled } = await fillZhilianJobForm(
+  const { tabId, progress, data: filled, salaryGuard } = await fillZhilianJobForm(
     args, ctx, expectedPrincipalFingerprint,
   )
   await ctx.progress('表单已填好,复核后发布', 88)
 
-  // 点击前最后一道 guards:页面里躺着的必须就是本次意图。
-  const snapshot = (await runStep(
+  // 点击前最后一道 guards:页面里躺着的必须就是本次意图。整串比对而不是逐段比,
+  // 因为薪资基线自己就可能含分隔符(三段直填那种);分隔符不会出现在任何字段值里,
+  // 整串相等与逐段相等等价。
+  const snapshot = await runStep(
     tabId, mainReadZhilianPublishGuards, [], '发布前复核表单', progress,
-  )).split('')
-  const expected = [
-    args.jobName, args.salaryMin, args.salaryMax, args.salaryMonths, String(args.headcount),
-  ]
-  if (snapshot.length !== expected.length ||
-      snapshot.some((value, index) => value !== expected[index])) {
+  )
+  const expected = [args.jobName, salaryGuard, String(args.headcount)].join('')
+  if (snapshot !== expected) {
     throw new ZhilianPlatformError(
       'GUARD_FAILED', '发布前复核发现表单与本次意图不一致', 'manualOnly',
       undefined, 'none', snapshotProgress(progress, 'publish_guard_mismatch'),
