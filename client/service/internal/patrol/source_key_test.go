@@ -67,8 +67,8 @@ func TestPatrolRoundPersistsThreadMessageSourceKey(t *testing.T) {
 	}
 }
 
-// 2026-07-27 甲方裁决：单人确定性错误只隔离该会话，账号轮继续。
-func TestPatrolRoundSourceKeySemanticConflictQuarantinesConversation(t *testing.T) {
+// 2026-08-02 甲方裁决：账本矛盾本轮跳过、下轮重读，不隔离；账号轮继续。
+func TestPatrolRoundSourceKeySemanticConflictSkipsRound(t *testing.T) {
 	h := newHarness(t)
 	sourceKey := strings.Repeat("3", 64)
 	oldDraft := draftText("old")
@@ -115,9 +115,8 @@ func TestPatrolRoundSourceKeySemanticConflictQuarantinesConversation(t *testing.
 		t.Fatalf("冲突不得再暂停整个账号: account=%+v err=%v", account, err)
 	}
 	conversation, err := h.db.ConversationByKey(conversationKey)
-	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
-		conversation.PatrolQuarantineReason != "patrolQuarantine:sourceIdentityConflict" {
-		t.Fatalf("冲突必须隔离该会话: conversation=%+v err=%v", conversation, err)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt != nil {
+		t.Fatalf("冲突按 2026-08-02 裁决不得隔离该会话: conversation=%+v err=%v", conversation, err)
 	}
 	audits, err := h.db.AuditEntries(20)
 	if err != nil {
@@ -125,27 +124,27 @@ func TestPatrolRoundSourceKeySemanticConflictQuarantinesConversation(t *testing.
 	}
 	foundAudit := false
 	for _, audit := range audits {
-		if audit.Category != patrolQuarantineAuditCategory {
+		if audit.Category != patrolTransientSkipAuditCategory {
 			continue
 		}
 		foundAudit = true
-		if audit.ConversationRef != conversationKey.ConversationRef ||
-			strings.Contains(audit.Detail, sourceKey) ||
+		if strings.Contains(audit.Detail, sourceKey) ||
 			!strings.Contains(audit.Detail, "sourceIdentityConflict") {
-			t.Fatalf("隔离审计作用域错误或泄露等值键: %+v", audit)
+			t.Fatalf("跳过汇总审计作用域错误或泄露等值键: %+v", audit)
 		}
 	}
 	if !foundAudit {
-		t.Fatal("隔离必须留下不含等值键的响亮审计")
+		t.Fatal("跳过必须留下不含等值键的响亮汇总审计")
 	}
 
-	// 人工解除前，后续轮照常运行但不再对该会话做任何自动重读。
+	// 2026-08-02 裁决：不隔离即下轮自然重读——保持脏、每轮重试，平台侧
+	// 自愈（或人工修正）后自动恢复，无需人工解冻。
 	readThreadCount := h.runner.count(protocol.PrimChatReadThread)
 	h.clock.Add(h.config.PatrolInterval + time.Minute)
 	next, err := h.manager.Tick(context.Background())
 	if err != nil || len(next.Rounds) != 1 || next.Rounds[0].Err != nil ||
-		h.runner.count(protocol.PrimChatReadThread) != readThreadCount {
-		t.Fatalf("被隔离会话不得自动重读，轮本身照常运行: next=%+v err=%v calls=%v", next, err, h.runner.names())
+		h.runner.count(protocol.PrimChatReadThread) != readThreadCount+1 {
+		t.Fatalf("跳过的会话下一轮必须自然重读: next=%+v err=%v calls=%v", next, err, h.runner.names())
 	}
 }
 
@@ -270,7 +269,7 @@ func TestPatrolClassificationCorrectionPausesSuccessfullyBeforeM5(t *testing.T) 
 	}
 }
 
-func TestPatrolUnsafeClassificationCorrectionStopsForManualReview(t *testing.T) {
+func TestPatrolUnsafeClassificationCorrectionSkipsRound(t *testing.T) {
 	h := newHarness(t)
 	legacyText := "我暂时不考虑，祝你早日找到合适的人"
 	timestamp := h.clock.Now().UnixMilli()
@@ -320,9 +319,8 @@ func TestPatrolUnsafeClassificationCorrectionStopsForManualReview(t *testing.T) 
 		t.Fatalf("unsafe 修正不得再暂停整个账号: account=%+v err=%v", account, err)
 	}
 	conversation, err := h.db.ConversationByKey(key)
-	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt == nil ||
-		conversation.PatrolQuarantineReason != "patrolQuarantine:classificationCorrectionUnsafe" {
-		t.Fatalf("unsafe 修正必须隔离该会话: conversation=%+v err=%v", conversation, err)
+	if err != nil || conversation == nil || conversation.PatrolQuarantinedAt != nil {
+		t.Fatalf("unsafe 修正按 2026-08-02 裁决不得隔离: conversation=%+v err=%v", conversation, err)
 	}
 	audits, err := h.db.AuditEntries(20)
 	if err != nil {
@@ -330,25 +328,27 @@ func TestPatrolUnsafeClassificationCorrectionStopsForManualReview(t *testing.T) 
 	}
 	found := false
 	for _, audit := range audits {
-		if audit.Category != patrolQuarantineAuditCategory {
+		if audit.Category != patrolTransientSkipAuditCategory {
 			continue
 		}
 		found = true
 		for _, secret := range []string{corrected.SourceKey, legacy.ContentHash, legacyText} {
 			if strings.Contains(audit.Detail, secret) {
-				t.Fatalf("隔离审计泄露等值键/哈希/正文: %+v", audit)
+				t.Fatalf("跳过汇总审计泄露等值键/哈希/正文: %+v", audit)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("unsafe 修正必须留下独立隔离审计")
+		t.Fatal("unsafe 修正必须留下跳过汇总审计")
 	}
+	// 不隔离即下轮自然重读；证据补全（如平台带回 tsApprox）后自动收敛，
+	// "证据不全不修正"的保守语义本身不变。
 	readThreadCount := h.runner.count(protocol.PrimChatReadThread)
 	h.clock.Add(h.config.PatrolInterval + time.Minute)
 	next, err := h.manager.Tick(context.Background())
 	if err != nil || len(next.Rounds) != 1 || next.Rounds[0].Err != nil ||
-		h.runner.count(protocol.PrimChatReadThread) != readThreadCount {
-		t.Fatalf("人工解除前不得自动重试 unsafe 修正: next=%+v err=%v calls=%v", next, err, h.runner.names())
+		h.runner.count(protocol.PrimChatReadThread) != readThreadCount+1 {
+		t.Fatalf("跳过的会话下一轮必须自然重读: next=%+v err=%v calls=%v", next, err, h.runner.names())
 	}
 }
 

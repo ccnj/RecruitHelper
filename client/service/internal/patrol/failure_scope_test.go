@@ -12,8 +12,10 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-// 钉住 2026-07-27 甲方裁决的错误分类表：账号级信号全停；手侧命令按协议
-// retryable 声明分瞬时/确定性；脑侧与未知错误一律确定性隔离。
+// 钉住错误分类表（2026-07-27 立案，2026-08-02 停机点体检战役反转默认方向）：
+// 账号级信号全停；手侧命令按协议 retryable 声明分流，no/manualOnly 保留隔离
+// （可能发生在 effect 派发后，是手的协议级"需要人"证词）；脑侧与未知错误
+// 一律本轮跳过、下轮重读，不再隔离。
 func TestClassifyConversationFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -53,15 +55,16 @@ func TestClassifyConversationFailure(t *testing.T) {
 			Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
 		}, failureScopeQuarantine},
 		{"已收编空快照矛盾", syncledger.ErrTrackedSnapshotEmpty, failureScopeSkipRound},
-		{"源身份冲突", syncledger.ErrSourceKeySemanticConflict, failureScopeQuarantine},
-		{"store 等值键冲突", store.ErrMessageSourceKeyConflict, failureScopeQuarantine},
-		{"不安全修正", syncledger.ErrUnsafeMessageClassificationCorrection, failureScopeQuarantine},
-		{"V4 投影冲突", store.ErrCommunicationV4Conflict, failureScopeQuarantine},
-		// AI 预留冲突是状态冲突而非确定性业务错误：AI 尚未被调用、无任何外部
-		// 副作用。判成确定性会因为一次正常的职位配置换代冻结整批候选人
-		// （2026-08-01 事故当日 79 人）。
+		// 2026-08-02 反转：脑侧与未知错误默认跳过。它们全部发生在世界未被
+		// 改动、或重派已被 WAL/idemKey/动作状态机结构性挡住的位置；隔离换来
+		// 的是"安静但永久"的冻结（08-01 事故一次配置换代冻 79 人是其代表作）。
+		{"源身份冲突", syncledger.ErrSourceKeySemanticConflict, failureScopeSkipRound},
+		{"store 等值键冲突", store.ErrMessageSourceKeyConflict, failureScopeSkipRound},
+		{"不安全修正", syncledger.ErrUnsafeMessageClassificationCorrection, failureScopeSkipRound},
+		{"V4 投影冲突", store.ErrCommunicationV4Conflict, failureScopeSkipRound},
+		{"V4 投影损坏", store.ErrCommunicationV4Corrupt, failureScopeSkipRound},
 		{"AI 预留冲突", store.ErrAIInvocationConflict, failureScopeSkipRound},
-		{"未知脑侧错误", errors.New("some brain bug"), failureScopeQuarantine},
+		{"未知脑侧错误", errors.New("some brain bug"), failureScopeSkipRound},
 	}
 	for _, testCase := range cases {
 		if got := classifyConversationFailure(testCase.err); got != testCase.want {

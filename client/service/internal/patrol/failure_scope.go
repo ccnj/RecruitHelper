@@ -12,14 +12,18 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-// 巡检单人错误隔离（2026-07-27 甲方裁决）：单个候选人处理中的错误不再停掉
-// 整个账号轮。分类只看错误产地与手的协议声明，不做字符串猜测：
+// 巡检单人错误分流（2026-07-27 甲方裁决立案，2026-08-02 停机点体检战役修订
+// 默认方向）：单个候选人处理中的错误不停整个账号轮。分类只看错误产地与手的
+// 协议声明，不做字符串猜测：
 //   - 账号级/轮级控制信号维持全停（登录/身份/窗口/换代/真人让位/进程退出）；
 //   - 手侧命令失败按 retryable 声明分流：yes/afterRecovery 为瞬时（本轮跳过，
-//     下轮自然重试），no/manualOnly 为确定性（隔离该会话）；
-//   - 脑侧错误（store/投影/状态机）与未知错误一律确定性——它们是账本状态的
-//     纯函数，等它自己好等于无限静默重试。误判方向选"可见但要人动一下手"，
-//     不选"安静但永久"。
+//     下轮自然重试），no/manualOnly 保留隔离——这是手的协议级"需要人"证词，
+//     且该失败可能发生在 effect 派发之后（Wait 上抛路径），不随默认反转；
+//   - 脑侧错误与未知错误默认本轮跳过、下轮重读（2026-08-02 反转，废止 07-27
+//     "脑侧一律确定性隔离"）：它们全部发生在世界未被改动、或重派已被
+//     WAL/idemKey/动作状态机结构性挡住的位置，隔离换来的是"安静但永久"的
+//     冻结，与"默认动词是继续"的大方向相反。跳过保持脏、留轮收尾汇总审计；
+//     长期不收敛由人工介入率数据裁决，不由本分类器预防。
 const patrolQuarantineAuditCategory = "patrol_conversation_quarantine"
 const patrolTransientSkipAuditCategory = "patrol_transient_skips"
 
@@ -59,24 +63,10 @@ func classifyConversationFailure(err error) conversationFailureScope {
 		}
 		return failureScopeQuarantine
 	}
-	// 脑侧的已知瞬时例外：它们不是稳定账本的纯函数——版本冲突来自与
-	// 事件摄入的良性写竞争（账本已变，下轮重读即收敛）；空收编快照与已
-	// 收编空快照都依赖活页面观察（真机 2026-07-28：IM 页刚导航后的同步
-	// 窗口内平台历史接口可能空成功，下轮重读通常恢复出历史）。跳过即
-	// 保持脏、本轮不消化不派发，无上界（2026-07-28 甲方裁决不加界）。
-	//
-	// AI 预留冲突同属此列（2026-08-01 事故后并入）：它是"同一身份下已有一条
-	// 事实不同的预留"这种状态冲突，不是账本状态的纯函数，也没有任何外部副
-	// 作用发生——AI 尚未被调用。把它判成确定性错误会因为一次正常的职位配置
-	// 换代冻结整批候选人（当日 79 人）。预留身份判定已同步收窄，这里是兜底：
-	// 即使将来又有别的字段跟着业务变，最坏也只是推迟一轮并留下审计。
-	if errors.Is(err, store.ErrConversationVersionConflict) ||
-		errors.Is(err, syncledger.ErrAdoptionSnapshotEmpty) ||
-		errors.Is(err, syncledger.ErrTrackedSnapshotEmpty) ||
-		errors.Is(err, store.ErrAIInvocationConflict) {
-		return failureScopeSkipRound
-	}
-	return failureScopeQuarantine
+	// 脑侧与未知错误：默认本轮跳过（2026-08-02 甲方裁决反转；07-28 起逐案
+	// 特赦的瞬时白名单——版本冲突、空收编快照、AI 预留冲突等——随默认反转
+	// 整体并入，不再单列）。
+	return failureScopeSkipRound
 }
 
 // conversationFailureClass 产出有界、无 PII 的错误类别标签，用于隔离原因、
