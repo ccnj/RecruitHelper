@@ -46,6 +46,32 @@ var m5RetriableAdviceFailures = map[string]struct{}{
 // 换成 nil,不出本包。
 var errM5AdviceRoundSkipped = errors.New("m5 advice skipped for this patrol round")
 
+// settleM5TurnBoundaryChanged 收敛"AI 边界重验/结果落账时发现输入边界已变"
+// (2026-08-02 甲方裁决,规格 v4 §一"旧轮失效"):store 层多半已在同事务内把
+// 旧轮作废,这里做一次幂等兜底,然后以跳过哨兵结束本轮——新消息属于下一轮,
+// 下轮巡检按最新账本边界重开新轮重新裁决,候选人不冻结。带 effect 案底的轮
+// (多气泡已发前缀后候选人插话)由 store 回落保守 manualRequired,不作废。
+func (a *roundActor) settleM5TurnBoundaryChanged(turnID string) error {
+	if err := a.manager.store.SupersedeDialogueTurnForBoundary(turnID, a.manager.now()); err != nil {
+		return err
+	}
+	a.logM5TurnBoundarySettled(turnID)
+	return errM5AdviceRoundSkipped
+}
+
+// logM5TurnBoundarySettled 按收敛后的真实状态记日志:同一个边界失配事件有
+// 两种合法归宿,不能只按乐观分支写文案。
+func (a *roundActor) logM5TurnBoundarySettled(turnID string) {
+	turn, err := a.manager.store.DialogueTurnByID(turnID)
+	if err == nil && turn != nil && turn.Status == store.DialogueTurnManualRequired {
+		slog.Info("对话轮转人工:输入边界已变且旧轮带发送案底,交人工处置",
+			"turnId", turnID)
+		return
+	}
+	slog.Info("对话轮作废:输入边界已变,旧轮 superseded,下轮巡检按最新账本边界重开新轮",
+		"turnId", turnID)
+}
+
 func m5AdviceShouldRetry(
 	completion store.AIInvocationCompletion,
 	decision communication.Decision,
@@ -142,8 +168,9 @@ func (a *roundActor) processM5Trial(ctx context.Context) error {
 			return currentErr
 		}
 		if !current {
-			slog.Info("对话轮跳过:轮已不新鲜,等下一轮边界重开",
-				"turnId", latest.TurnID)
+			// RecheckDialogueTurnCurrent 已在事务内收敛旧轮(2026-08-02 裁决:
+			// pre-effect 作废,effect 案底转人工),按真实归宿记日志后结束本轮。
+			a.logM5TurnBoundarySettled(latest.TurnID)
 			return nil
 		}
 	}
@@ -1133,7 +1160,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
-			return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+			return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
 		}
 		return 0, err
 	}
@@ -1216,7 +1243,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	}
 	_, err = a.manager.store.CompleteReplyInvocation(request2)
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
-		return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+		return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
 	}
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, m5ai.PurposeServiceReply, completion)
@@ -1277,7 +1304,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
-			return 0, a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "inputBoundaryChanged", a.manager.now())
+			return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
 		}
 		return 0, err
 	}
@@ -1312,9 +1339,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 			if recoveryErr != nil {
 				switch {
 				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
-					return 0, a.manager.store.MarkDialogueTurnManualRequired(
-						turn.TurnID, "inputBoundaryChanged", a.manager.now(),
-					)
+					return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
 				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
 					return 0, a.manager.store.MarkDialogueTurnManualRequired(
 						turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
@@ -1604,7 +1629,7 @@ func (a *roundActor) completeM5Intent(
 		Completion: completion, Label: label, Source: source, ManualReason: manualReason,
 	})
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
-		return a.manager.store.MarkDialogueTurnManualRequired(turnID, "inputBoundaryChanged", a.manager.now())
+		return a.settleM5TurnBoundaryChanged(turnID)
 	}
 	return err
 }
@@ -1631,7 +1656,7 @@ func (a *roundActor) completeM5Reply(
 	}
 	_, err := a.manager.store.CompleteReplyInvocation(request)
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
-		return a.manager.store.MarkDialogueTurnManualRequired(turnID, "inputBoundaryChanged", a.manager.now())
+		return a.settleM5TurnBoundaryChanged(turnID)
 	}
 	return err
 }

@@ -491,10 +491,13 @@ func validateDialogueTurnAIAdviceTx(
 // 本次建议、输入超预算、崩溃中断的收束终局,以及预算恢复例外的失败腿。这些
 // 原因下 turn 仍停靠 manualRequired——同一份冻结输入重跑只会继续烧钱,必须
 // 挡住;但候选人聚合与试运行不冻结:时刻表照跑、新输入照常开新轮(开轮闸的
-// 放行属停机点战役第 4 族,另行落地)。processInterrupted 族在 turn 上落账的
-// 实际原因串是 replyProcessInterrupted/intentProcessInterrupted,故收录这两个。
-// 世界状态失配(inputBoundaryChanged 等)与业务性转人工(intentRejected、
-// unsupportedMedia 等)不在此列,仍整体隔离候选人。
+// 放行已随第 4 族落地:FreezeCommunicationV4Turn 遇新输入会作废未派发过的
+// 停靠轮再开新轮)。processInterrupted 族在 turn 上落账的实际原因串是
+// replyProcessInterrupted/intentProcessInterrupted,故收录这两个。
+// 业务性转人工(intentRejected、unsupportedMedia 等)不在此列,仍整体隔离
+// 候选人;世界状态失配自 2026-08-02 起在 pre-effect 阶段直接作废旧轮
+// (boundarySuperseded),只有带 effect 案底的轮还会以 inputBoundaryChanged
+// 走到这里并隔离候选人。
 func dialogueOwnerFreezeExemptReason(reason string) bool {
 	switch reason {
 	case "replyFailed", "replyInvalid", "reasoningUsageUnsafe", "reducerRejected",
@@ -577,6 +580,132 @@ func markDialogueTurnManualTx(tx *gorm.DB, turn *DialogueTurn, reason string, at
 		return err
 	}
 	return tx.First(turn, "turn_id = ?", turn.TurnID).Error
+}
+
+// dialogueTurnBoundarySuperseded 是边界失配的显式终局原因(2026-08-02 甲方
+// 裁决,规格 v4 §一"旧轮失效"):判定结果落库后、真实 effect intent 构造前又
+// 观察到输入边界变化的旧轮,连同其未发 action 一律作废,不再自动执行,也不
+// 冻结候选人;新消息属于下一轮,下轮巡检按最新账本边界重开新轮重新裁决。
+const dialogueTurnBoundarySuperseded = "boundarySuperseded"
+
+// errDialogueTurnEffectBound 是包内哨兵:轮内已有动作行绑定过发送意图
+// (EffectIntentID/EffectStartedAt/SentAt 任一非空),按承重墙纪律不得作废
+// ——判据是动作行事实,不看 FailureReason 字符串,effectSuspect 族停靠轮
+// 天然带 EffectIntentID,被这里机械挡住。由调用方决定是拒绝开轮(开轮闸)
+// 还是回落保守 manualRequired(多气泡已发前缀后候选人插话的现状,该形态
+// 的取舍另案待甲方裁决)。
+var errDialogueTurnEffectBound = errors.New("dialogue turn has effect-bound actions")
+
+// supersedeDialogueTurnForBoundaryTx 把一个从未派发过发送意图的旧轮连同其
+// 未终局动作显式标记 superseded。形状对齐归档先例
+// supersedeCommunicationV4PreEffectTurnForArchiveTx:只改 turn/action 状态列,
+// 不产生新的投影 application 行,不触碰聚合 AutomationStatus 与已存在的
+// 不可变回执——head 重放校验语义不变。已 superseded 的轮幂等返回。
+func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time.Time) error {
+	if turn.Status == DialogueTurnSuperseded {
+		return nil
+	}
+	switch turn.Status {
+	case DialogueTurnCollected, DialogueTurnClassified, DialogueTurnAdviceReady,
+		DialogueTurnManualRequired:
+	default:
+		return ErrDialogueTurnState
+	}
+	var bound int64
+	if err := tx.Model(&CommunicationAction{}).
+		Where(
+			"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
+			turn.TurnID,
+		).Count(&bound).Error; err != nil {
+		return err
+	}
+	if bound != 0 {
+		return errDialogueTurnEffectBound
+	}
+	// planned 是未发动作,manualRequired 是停靠时被一同标注的未发动作;两者
+	// 都从未派发,随轮一起作废。不物理删除,业务上的"作废"只表达为状态列。
+	if err := tx.Model(&CommunicationAction{}).
+		Where(
+			"turn_id = ? AND status IN ? AND effect_intent_id IS NULL AND effect_started_at IS NULL AND sent_at IS NULL",
+			turn.TurnID,
+			[]CommunicationActionStatus{CommunicationActionPlanned, CommunicationActionManualRequired},
+		).
+		Updates(map[string]any{
+			"status":         CommunicationActionSuperseded,
+			"failure_reason": dialogueTurnBoundarySuperseded,
+			"updated_at":     at,
+		}).Error; err != nil {
+		return err
+	}
+	updated := tx.Model(&DialogueTurn{}).
+		Where("turn_id = ? AND status = ?", turn.TurnID, turn.Status).
+		Updates(map[string]any{
+			"status":         DialogueTurnSuperseded,
+			"failure_reason": dialogueTurnBoundarySuperseded,
+			"updated_at":     at,
+		})
+	if updated.Error != nil {
+		return updated.Error
+	}
+	if updated.RowsAffected != 1 {
+		return ErrDialogueTurnConflict
+	}
+	return tx.First(turn, "turn_id = ?", turn.TurnID).Error
+}
+
+// settleDialogueTurnBoundaryMismatchTx 是 AI 边界重验与结果落账重验发现输入
+// 边界已变时的统一收敛:pre-effect 轮按 2026-08-02 裁决作废(supersede),不
+// 冻结候选人;带 effect 案底的轮(多气泡已发前缀后候选人插话)保持既有保守
+// manualRequired 隔离——那条链已进入发送领域,归 WAL/suspect/人工收敛。
+func settleDialogueTurnBoundaryMismatchTx(tx *gorm.DB, turn *DialogueTurn, at time.Time) error {
+	if turn.Status == DialogueTurnSuperseded {
+		return nil
+	}
+	// binding 失败并不都等于"世界长出了新输入":v4 聚合已被巡检隔离或人工
+	// 接管时,失败源于聚合状态本身,输入可能原封未动——那不是 2026-08-02
+	// 裁决的作废场景,保持既有保守转人工路径(其中 owner 冲突回落编排被
+	// RecoverInterruptedAIInvocations 的隔离现场收束依赖)。
+	_, v4Turn, err := communicationV4TurnApplicationTx(tx, *turn)
+	if err != nil {
+		return err
+	}
+	if v4Turn {
+		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
+		if err != nil {
+			return err
+		}
+		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+			return markDialogueTurnManualTx(tx, turn, "inputBoundaryChanged", at)
+		}
+	}
+	err = supersedeDialogueTurnForBoundaryTx(tx, turn, at)
+	if errors.Is(err, errDialogueTurnEffectBound) {
+		return markDialogueTurnManualTx(tx, turn, "inputBoundaryChanged", at)
+	}
+	return err
+}
+
+// SupersedeDialogueTurnForBoundary 是巡检层在 store 边界重验报告
+// ErrDialogueTurnBinding 后的幂等兜底入口:store 层多半已在同事务内作废旧轮
+// (再进来是 no-op);个别只报错不收敛的路径由这里补收敛。语义与事务内版本
+// 一致:pre-effect 作废,effect 案底回落保守停靠。
+func (s *Store) SupersedeDialogueTurnForBoundary(turnID string, at time.Time) error {
+	if strings.TrimSpace(turnID) == "" {
+		return ErrDialogueTurnInvalid
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var turn DialogueTurn
+		if err := tx.First(&turn, "turn_id = ?", turnID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrDialogueTurnNotFound
+			}
+			return err
+		}
+		return settleDialogueTurnBoundaryMismatchTx(tx, &turn, at)
+	})
 }
 
 func (s *Store) DialogueTurnByID(turnID string) (*DialogueTurn, error) {
@@ -808,7 +937,7 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}
-				if err := markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", req.CreatedAt); err != nil {
+				if err := settleDialogueTurnBoundaryMismatchTx(tx, &turn, req.CreatedAt); err != nil {
 					return err
 				}
 				boundaryChanged = true
@@ -827,7 +956,7 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 			if !errors.Is(err, ErrDialogueTurnBinding) {
 				return err
 			}
-			if err := markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", req.CreatedAt); err != nil {
+			if err := settleDialogueTurnBoundaryMismatchTx(tx, &turn, req.CreatedAt); err != nil {
 				return err
 			}
 			boundaryChanged = true
@@ -942,7 +1071,9 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}
-				return markDialogueTurnManualTx(tx, &out, "inputBoundaryChanged", req.Completion.FinishedAt)
+				// 2026-08-02 裁决:边界失配收 invocation 事实后作废旧轮,不再
+				// 连带冻结候选人;新消息属于下一轮。
+				return settleDialogueTurnBoundaryMismatchTx(tx, &out, req.Completion.FinishedAt)
 			}
 		}
 		wantedStatus := DialogueTurnClassified
@@ -1106,7 +1237,8 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 				if !errors.Is(err, ErrDialogueTurnBinding) {
 					return err
 				}
-				return markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", req.Completion.FinishedAt)
+				// 同 intent 收编:边界失配作废旧轮,不冻结候选人(2026-08-02)。
+				return settleDialogueTurnBoundaryMismatchTx(tx, &turn, req.Completion.FinishedAt)
 			}
 		}
 		if !canPlan {
@@ -1190,7 +1322,8 @@ func settleCommunicationV4AdviceErrorTx(
 	if turn.Status == DialogueTurnManualRequired {
 		return nil
 	}
-	return markDialogueTurnManualTx(tx, turn, "inputBoundaryChanged", at)
+	// 2026-08-02 裁决:v4 结算发现边界失配时作废旧轮,不冻结聚合。
+	return settleDialogueTurnBoundaryMismatchTx(tx, turn, at)
 }
 
 func sameCommunicationAction(existing CommunicationAction, req CompleteReplyInvocationRequest) bool {
@@ -1583,7 +1716,11 @@ func (s *Store) MarkActiveM5TrialManualRequired(profileID, reason string, at tim
 
 // RecheckDialogueTurnCurrent uses the same canonical message evaluator as
 // freeze/reserve. A stale pre-effect turn and its planned action are atomically
-// removed from automatic eligibility; their immutable facts remain queryable.
+// superseded (2026-08-02 decision, spec v4 §一): the candidate stays active and
+// the next patrol round reopens a fresh turn from the latest ledger boundary.
+// Only a turn whose actions already bound an effect intent keeps the
+// conservative manualRequired isolation; their immutable facts remain
+// queryable either way.
 func (s *Store) RecheckDialogueTurnCurrent(turnID string, at time.Time) (bool, error) {
 	if strings.TrimSpace(turnID) == "" {
 		return false, ErrDialogueTurnInvalid
@@ -1628,7 +1765,7 @@ func (s *Store) RecheckDialogueTurnCurrent(turnID string, at time.Time) (bool, e
 				!errors.Is(currentErr, ErrCommunicationActionConflict) {
 				return currentErr
 			}
-			return markDialogueTurnManualTx(tx, &turn, "inputBoundaryChanged", at)
+			return settleDialogueTurnBoundaryMismatchTx(tx, &turn, at)
 		}
 		current = true
 		return nil

@@ -219,9 +219,10 @@ func TestAIReservationRejectsRetractedMiddleMessageWithoutLosingFrozenFacts(t *t
 	if !errors.Is(err, ErrDialogueTurnBinding) {
 		t.Fatalf("中间消息撤回后必须在 provider 前阻断: %v", err)
 	}
+	// 2026-08-02 裁决:边界失配的 pre-effect 轮作废重开,不再转人工冻结候选人。
 	stored, _ := s.DialogueTurnByID(turn.TurnID)
-	if stored == nil || stored.Status != DialogueTurnManualRequired || stored.FailureReason != "inputBoundaryChanged" {
-		t.Fatalf("撤回后的冻结轮未收敛人工: %+v", stored)
+	if stored == nil || stored.Status != DialogueTurnSuperseded || stored.FailureReason != "boundarySuperseded" {
+		t.Fatalf("撤回后的冻结轮未作废: %+v", stored)
 	}
 	var invocations, actions int64
 	_ = s.db.Model(&AIInvocation{}).Count(&invocations).Error
@@ -229,10 +230,10 @@ func TestAIReservationRejectsRetractedMiddleMessageWithoutLosingFrozenFacts(t *t
 	if invocations != 0 || actions != 0 {
 		t.Fatalf("输入失效不得调用 provider 或产生动作: invocations=%d actions=%d", invocations, actions)
 	}
-	assertTrialManualRequired(t, s, "inputBoundaryChanged")
+	assertTrialParkedWithoutFreeze(t, s)
 }
 
-func TestAdviceReadyActionBecomesManualWhenMiddleMessageIsRetracted(t *testing.T) {
+func TestAdviceReadyActionBecomesSupersededWhenMiddleMessageIsRetracted(t *testing.T) {
 	s := openTest(t)
 	fixture, turn := seedMultiMessageDialogueTurn(t, s, "profile-dialogue-action-retracted")
 	intentID := "invocation-action-retracted-intent"
@@ -273,14 +274,16 @@ func TestAdviceReadyActionBecomesManualWhenMiddleMessageIsRetracted(t *testing.T
 	if err != nil || current {
 		t.Fatalf("中间消息撤回后旧 adviceReady 不得保持 current: current=%v err=%v", current, err)
 	}
+	// 2026-08-02 裁决:未派发过的旧轮连同 planned 动作一并作废,候选人不冻结,
+	// 下轮巡检按最新账本边界重开新轮。
 	storedTurn, _ := s.DialogueTurnByID(turn.TurnID)
 	action, actionErr := s.CommunicationActionByTurn(turn.TurnID)
-	if storedTurn == nil || storedTurn.Status != DialogueTurnManualRequired ||
-		storedTurn.FailureReason != "inputBoundaryChanged" || actionErr != nil || action == nil ||
-		action.Status != CommunicationActionManualRequired || action.FailureReason != "inputBoundaryChanged" {
-		t.Fatalf("陈旧 turn/action 未一同收敛人工: turn=%+v action=%+v err=%v", storedTurn, action, actionErr)
+	if storedTurn == nil || storedTurn.Status != DialogueTurnSuperseded ||
+		storedTurn.FailureReason != "boundarySuperseded" || actionErr != nil || action == nil ||
+		action.Status != CommunicationActionSuperseded || action.FailureReason != "boundarySuperseded" {
+		t.Fatalf("陈旧 turn/action 未一同作废: turn=%+v action=%+v err=%v", storedTurn, action, actionErr)
 	}
-	assertTrialManualRequired(t, s, "inputBoundaryChanged")
+	assertTrialParkedWithoutFreeze(t, s)
 }
 
 func TestFreezeDialogueTurnKeepsPreviousOutboundSeparateFromCurrentInbound(t *testing.T) {
@@ -609,14 +612,15 @@ func TestIntentCompletionRechecksBoundaryAndPreservesInvocation(t *testing.T) {
 		Completion: successfulInvocationCompletion("invocation-boundary", completedAt),
 		Label:      m5ai.IntentInterested, Source: DialogueIntentLLM,
 	})
-	if err != nil || result.Status != DialogueTurnManualRequired || result.FailureReason != "inputBoundaryChanged" {
-		t.Fatalf("输入变化后必须收 invocation 并把 turn 转人工: turn=%+v err=%v", result, err)
+	// 2026-08-02 裁决:边界变化收 invocation 事实后作废旧轮,不再冻结候选人。
+	if err != nil || result.Status != DialogueTurnSuperseded || result.FailureReason != "boundarySuperseded" {
+		t.Fatalf("输入变化后必须收 invocation 并作废旧轮: turn=%+v err=%v", result, err)
 	}
 	invocations, err := s.AIInvocationsForTurn(turn.TurnID)
 	if err != nil || len(invocations) != 1 || invocations[0].FinishedAt == nil || invocations[0].Status != AIInvocationOK {
 		t.Fatalf("边界变化不得回滚已发生的 provider 事实: invocations=%+v err=%v", invocations, err)
 	}
-	assertTrialManualRequired(t, s, "inputBoundaryChanged")
+	assertTrialParkedWithoutFreeze(t, s)
 }
 
 func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {

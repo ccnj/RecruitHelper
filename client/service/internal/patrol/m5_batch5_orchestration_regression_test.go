@@ -540,7 +540,9 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 				t.Fatalf("世界状态变化后仍进入 chat.sendMessage: hand=%d before=%d after=%d",
 					hand.commandCount(), beforeCommands, countM5SendMessageCommands(t, h))
 			}
-			assertM5OrchestrationStoppedWithoutEffect(t, h, fixture, "inputBoundaryChanged", true)
+			// 2026-08-02 裁决:pre-effect 的旧轮连同 planned 动作作废,不再
+			// 转人工冻结候选人;下轮巡检按最新账本边界重开新轮。
+			assertM5OrchestrationSupersededWithoutEffect(t, h, fixture)
 		})
 	}
 }
@@ -572,6 +574,35 @@ func assertM5OrchestrationParkedWithoutFreeze(
 	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
 	if err != nil || action != nil {
 		t.Fatalf("停靠前不应创建 action: action=%+v err=%v", action, err)
+	}
+	assertM5TrialStillActive(t, h)
+	intent, err := h.db.LatestEffectIntent(h.key.Platform, h.key.AccountRef, fixture.conversationRef)
+	if err != nil || intent != nil {
+		t.Fatalf("不得产生 chat.sendMessage effect intent: intent=%+v err=%v", intent, err)
+	}
+	if count := countM5SendMessageCommands(t, h); count != 0 {
+		t.Fatalf("不得产生 chat.sendMessage Cmd: %d", count)
+	}
+}
+
+// assertM5OrchestrationSupersededWithoutEffect 钉住 2026-08-02 裁决的边界失配
+// 终局:未派发过的旧轮连同其未发动作显式作废(boundarySuperseded),候选人
+// 与试运行保持 active,零 effect intent、零发送命令。
+func assertM5OrchestrationSupersededWithoutEffect(
+	t *testing.T,
+	h *harness,
+	fixture m5AdviceFixture,
+) {
+	t.Helper()
+	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
+	if err != nil || turn == nil || turn.Status != store.DialogueTurnSuperseded ||
+		turn.FailureReason != "boundarySuperseded" {
+		t.Fatalf("turn 未作废: turn=%+v err=%v", turn, err)
+	}
+	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
+	if err != nil || action == nil || action.Status != store.CommunicationActionSuperseded ||
+		action.FailureReason != "boundarySuperseded" || action.EffectIntentID != nil {
+		t.Fatalf("planned action 未随轮作废: action=%+v err=%v", action, err)
 	}
 	assertM5TrialStillActive(t, h)
 	intent, err := h.db.LatestEffectIntent(h.key.Platform, h.key.AccountRef, fixture.conversationRef)

@@ -1096,11 +1096,18 @@ func TestCommunicationV4AIAdviceRejectsAdvancedRevisionAtSameMessageBoundary(t *
 	if result != nil || !errors.Is(err, ErrDialogueTurnBinding) {
 		t.Fatalf("旧 revision 建议边界必须失效: result=%+v err=%v", result, err)
 	}
+	// 2026-08-02 裁决:边界失配的 pre-effect 轮作废,聚合保持 active,不再
+	// 局部转人工;后续新输入按最新账本边界重开新轮。
+	turn, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if turn == nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != "boundarySuperseded" {
+		t.Fatalf("旧 revision 轮未作废: %+v", turn)
+	}
 	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
 	if err != nil ||
-		aggregate.AutomationStatus != ProfileCommunicationAutomationManualRequired ||
-		aggregate.ManualReason != "inputBoundaryChanged" {
-		t.Fatalf("旧 revision 没有局部转人工: aggregate=%+v err=%v", aggregate, err)
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("边界失配不得冻结聚合: aggregate=%+v err=%v", aggregate, err)
 	}
 }
 
@@ -1692,9 +1699,11 @@ func TestCommunicationV4CompletionSettlesChangedBoundaryWithoutPendingInvocation
 		),
 		Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
 	})
-	if err != nil || turn.Status != DialogueTurnManualRequired ||
-		turn.FailureReason != "inputBoundaryChanged" {
-		t.Fatalf("边界变化后的 completion 未保留终局并转人工: turn=%+v err=%v", turn, err)
+	// 2026-08-02 裁决:边界变化的 completion 保留 invocation 终局并作废旧轮,
+	// 聚合不冻结,新消息属于下一轮。
+	if err != nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != "boundarySuperseded" {
+		t.Fatalf("边界变化后的 completion 未保留终局并作废旧轮: turn=%+v err=%v", turn, err)
 	}
 	invocations, err := s.AIInvocationsForTurn(frozen.Turn.TurnID)
 	if err != nil || len(invocations) != 1 || invocations[0].FinishedAt == nil ||
@@ -1707,6 +1716,12 @@ func TestCommunicationV4CompletionSettlesChangedBoundaryWithoutPendingInvocation
 			fixture.ProfileID, CommunicationV4InputDialogueAdvice).
 		Count(&applications).Error; err != nil || applications != 0 {
 		t.Fatalf("过时模型结果不得成为 V4 continuation: count=%d err=%v", applications, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("边界失配不得冻结聚合: aggregate=%+v err=%v", aggregate, err)
 	}
 }
 
@@ -1756,9 +1771,11 @@ func TestCommunicationV4InterruptedInvocationWithChangedBoundaryRecoversAfterRes
 	if err != nil || recovered != 1 {
 		t.Fatalf("重启恢复不应被预期 stale 阻断: recovered=%d err=%v", recovered, err)
 	}
+	// 2026-08-02 裁决:重启恢复时发现边界已变,同样作废旧轮而不冻结候选人;
+	// 中断的 invocation 仍如实终局。
 	turn, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
-	if turn == nil || turn.Status != DialogueTurnManualRequired ||
-		turn.FailureReason != "inputBoundaryChanged" {
+	if turn == nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != "boundarySuperseded" {
 		t.Fatalf("重启恢复未安全收敛 stale turn: %+v", turn)
 	}
 	invocations, err := s.AIInvocationsForTurn(frozen.Turn.TurnID)
@@ -1810,6 +1827,177 @@ func TestCommunicationV4ConsecutiveTurnsShareAnchorWithoutOutbound(t *testing.T)
 	)
 	if err != nil || !current {
 		t.Fatalf("同锚第二轮未通过统一重验: current=%v err=%v", current, err)
+	}
+}
+
+// 开轮准入闸拆腿回归(2026-08-02 甲方裁决,规格 v4 §一"旧轮失效"):从未派发
+// 过发送意图的停靠旧轮,在候选人新输入进入开轮流程时被同一冻结事务作废,
+// 新轮照常建立;聚合始终不冻结。
+func TestFreezeCommunicationV4TurnSupersedesParkedPreEffectTurn(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-park")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-park-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-park", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "未派发的合成建议",
+		ContentHash: "hash-v4-gate-park", Status: CommunicationActionPlanned,
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 以豁免原因停靠(第 3 族形态):turn manualRequired、动作连带停靠,聚合
+	// 保持 active——这正是拆腿前会把候选人终身卡死的形状。
+	if err := s.MarkDialogueTurnManualRequired(
+		frozen.Turn.TurnID, "inputBudgetBlocked", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	parked, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil || parked.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("停靠前提不成立(聚合应保持 active): aggregate=%+v err=%v", parked, err)
+	}
+
+	later := "候选人再次开口"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-park-3", Text: &later,
+	})
+	reopened, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	)
+	if err != nil || !reopened.Created || reopened.Turn.TurnID == frozen.Turn.TurnID ||
+		reopened.Turn.InboundFromSeq != 3 {
+		t.Fatalf("新输入未重开新轮: result=%+v err=%v", reopened, err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnSuperseded ||
+		stale.FailureReason != "boundarySuperseded" {
+		t.Fatalf("停靠旧轮未在开轮事务内作废: %+v", stale)
+	}
+	var action CommunicationAction
+	if err := s.db.First(&action, "action_id = ?", "action-v4-gate-park").Error; err != nil ||
+		action.Status != CommunicationActionSuperseded ||
+		action.FailureReason != "boundarySuperseded" {
+		t.Fatalf("未派发动作未随轮作废: action=%+v err=%v", action, err)
+	}
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ProjectedThroughSeq != 3 {
+		t.Fatalf("重开后聚合未推进或被冻结: aggregate=%+v err=%v", aggregate, err)
+	}
+}
+
+// 承重墙回归之一(2026-08-02 裁决红线):dispatching 旧轮照旧挡住开轮,等
+// WAL/suspect 收敛,旧轮原样不动。
+func TestFreezeCommunicationV4TurnStillRejectsDispatchingTurn(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-dispatching")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-dispatch-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Update("status", DialogueTurnDispatching).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "派发在途时的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-dispatch-3", Text: &later,
+	})
+	if _, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	); !errors.Is(err, ErrDialogueTurnState) {
+		t.Fatalf("dispatching 旧轮必须照旧拒绝开轮: %v", err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnDispatching || stale.FailureReason != "" {
+		t.Fatalf("被拒绝的开轮不得触碰 dispatching 旧轮: %+v", stale)
+	}
+	var turns int64
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&turns).Error; err != nil || turns != 1 {
+		t.Fatalf("被拒绝的开轮不得留下新轮: count=%d err=%v", turns, err)
+	}
+}
+
+// 承重墙回归之二(2026-08-02 裁决红线):manualRequired 旧轮只要有动作行绑定
+// 过发送意图(EffectIntentID/EffectStartedAt/SentAt 任一非空),开轮照旧拒绝
+// ——判据是动作行事实,不按 FailureReason 字符串判。
+func TestFreezeCommunicationV4TurnStillRejectsEffectBoundParkedTurn(t *testing.T) {
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-suspect")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-suspect-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	intentID := "intent-v4-gate-suspect"
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-suspect", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "已绑定发送意图的合成动作",
+		ContentHash: "hash-v4-gate-suspect", Status: CommunicationActionManualRequired,
+		EffectIntentID: &intentID, FailureReason: "effectSuspect",
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Updates(map[string]any{
+			"status": DialogueTurnManualRequired, "failure_reason": "effectSuspect",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "suspect 未裁决时的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-suspect-3", Text: &later,
+	})
+	if _, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	); !errors.Is(err, ErrDialogueTurnState) {
+		t.Fatalf("带 effect 案底的旧轮必须照旧拒绝开轮: %v", err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnManualRequired ||
+		stale.FailureReason != "effectSuspect" {
+		t.Fatalf("被拒绝的开轮不得触碰带案底旧轮: %+v", stale)
+	}
+	var action CommunicationAction
+	if err := s.db.First(&action, "action_id = ?", "action-v4-gate-suspect").Error; err != nil ||
+		action.Status != CommunicationActionManualRequired ||
+		action.FailureReason != "effectSuspect" ||
+		action.EffectIntentID == nil || *action.EffectIntentID != intentID {
+		t.Fatalf("被拒绝的开轮不得触碰案底动作: action=%+v err=%v", action, err)
+	}
+	var turns int64
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("profile_id = ?", fixture.ProfileID).
+		Count(&turns).Error; err != nil || turns != 1 {
+		t.Fatalf("被拒绝的开轮不得留下新轮: count=%d err=%v", turns, err)
 	}
 }
 
