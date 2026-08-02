@@ -208,7 +208,17 @@ func PlanJobKeywords(
 		}
 	}
 
-	plan := JobKeywordsPlan{Keywords: suggestion.Keywords}
+	// Matched/Custom 必须**先建成空切片再 append**,不能让它们停在 nil。
+	//
+	// nil 切片 json.Marshal 出来是 `null` 而不是 `[]`,而 /admin/* 的消费方是
+	// 诊断台,它按 TS 类型当数组用:2026-08-02 就是这么白屏的——十个职位里有一个
+	// 关键词全部命中词库,Custom 一次没 append、发出去是 null,前端 .length 抛异常,
+	// React 卸掉整棵树,连同跑了十分钟的阶段 A 结果一起没了。
+	plan := JobKeywordsPlan{
+		Keywords: suggestion.Keywords,
+		Matched:  []string{},
+		Custom:   []string{},
+	}
 	perSection := make(map[int]int, len(sections))
 	for _, keyword := range suggestion.Keywords {
 		index, matched := owner[keyword]
