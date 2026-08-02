@@ -138,15 +138,17 @@ func main() {
 	hub.SetDispatcher(disp)
 	disp.SetEffectVerifier(appbridge.EffectVerifier{Dispatcher: disp})
 	disp.Recover() // 脑重启扫描:任何 WS 服务开始前,把在途命令收编(readonly/intrusive 作废,effectful suspect)
+	// 两段启动收束都是记账性善后,失败不再拒绝启动(2026-08-02 甲方裁决,停机点
+	// 体检战役:一次瞬态读库错误不该让脑起不来)。残留的 running 轮行只是审计
+	// 事实,不阻塞新轮;未收束的 AI 调用行由巡检的 attempt 游走在运行期逐个
+	// 收敛。失败响亮留痕,下次启动自然重试。
 	if recovered, recoverErr := st.RecoverRunningPatrolRounds(time.Now()); recoverErr != nil {
-		slog.Error("收束上次中断巡检轮失败", "err", recoverErr)
-		os.Exit(1)
+		slog.Error("收束上次中断巡检轮失败,继续启动,下次启动重试", "err", recoverErr)
 	} else if recovered > 0 {
 		slog.Warn("已收束上次中断的巡检轮", "count", recovered)
 	}
 	if recovered, recoverErr := st.RecoverInterruptedAIInvocations(time.Now()); recoverErr != nil {
-		slog.Error("收束上次中断的 AI 调用失败", "err", recoverErr)
-		os.Exit(1)
+		slog.Error("收束上次中断的 AI 调用失败,继续启动,下次启动重试", "err", recoverErr)
 	} else if recovered > 0 {
 		slog.Warn("已收束上次中断的 AI 调用", "count", recovered)
 	}
