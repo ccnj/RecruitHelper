@@ -78,6 +78,29 @@ func (a *roundActor) drainCommunicationV4EventActionsForProfile(
 			if _, stopped := stoppedProfiles[action.ProfileID]; stopped {
 				continue
 			}
+			// Q1/Q2 裁决(2026-08-02):跨日/跨启动残留的未派发 planned 行在
+			// 派发遭遇时刻一律作废,不再续发;次日按最新世界状态重新规划。
+			// 判据机械——绑过发送意图(EffectIntentID/EffectStartedAt/SentAt
+			// 任一非空)的行永不作废。本枚举只列聚合 active 的候选人,被冻结
+			// 候选人(聚合 manual)的 planned 行不进入枚举、天然不碰;时刻表
+			// 计划物化行同规则,其 plan 失效仍由枚举查询的既有 occurrence
+			// 判定收敛。作废发生在链首定向对账之前,不为死行支付页面成本。
+			if action.EffectIntentID == nil &&
+				action.EffectStartedAt == nil &&
+				action.SentAt == nil &&
+				a.manager.plannedActionStale(action.CreatedAt) {
+				if err := a.manager.store.SupersedeStaleCommunicationV4EventAction(
+					action.ActionID,
+					a.manager.now(),
+				); err != nil {
+					return err
+				}
+				slog.Info("陈旧未派发残留作废:事件动作跨日/跨启动仍 planned,不再续发",
+					"profileId", action.ProfileID,
+					"actionId", action.ActionID,
+					"createdAt", action.CreatedAt)
+				continue
+			}
 			// 干净失败自动重铸(§8.4)必须自然受巡检节奏节流:同一基础动作
 			// 每轮至多推进一次。快失败会在本轮内铸出 |try{n} 新行并被外层
 			// 重查看见,这里按基础语义键折叠,把新尝试留给下一轮。

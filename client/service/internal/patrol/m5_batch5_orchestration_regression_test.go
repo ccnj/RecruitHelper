@@ -154,6 +154,10 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// 第二个 Manager 只是换 InteractionPaceWait 的接线,建模的是同一
+			// 脑进程;继承启动时刻,免得 planned 动作被 Q1/Q2 跨启动陈旧判定
+			// 作废(跨启动作废语义由专门用例覆盖)。
+			manager.startedAt = h.manager.startedAt
 			account, err := h.db.AccountByKey(h.key)
 			if err != nil || account == nil {
 				t.Fatalf("读取试运行账号: account=%+v err=%v", account, err)

@@ -625,6 +625,30 @@ func (a *roundActor) dispatchM5Action(
 			turn.TurnID, "automaticActionUnavailable", a.manager.now(),
 		)
 	}
+	// Q1/Q2 裁决(2026-08-02):链首/恢复遭遇的陈旧 planned 残留一律作废并
+	// 收束轮终局(已发前缀照常保留),不再续发;次日按最新账本边界重新规划。
+	// 链内推进(withinChain)是《24点边界裁决》批准跨过 24:00 收束的同进程
+	// 自然延续,不适用陈旧判定。绑过发送意图的行由上方守卫与 store 侧 WHERE
+	// 双重排除,永不作废。
+	if !withinChain &&
+		action.EffectStartedAt == nil &&
+		action.SentAt == nil &&
+		a.manager.plannedActionStale(action.CreatedAt) {
+		result, err := a.manager.store.SupersedeStaleDialoguePlannedAction(
+			turn.TurnID,
+			action.ActionID,
+			a.manager.now(),
+		)
+		if err != nil {
+			return err
+		}
+		slog.Info("陈旧未派发残留作废:对话轮 planned 动作跨日/跨启动未发,轮已收束",
+			"turnId", turn.TurnID,
+			"actionId", action.ActionID,
+			"createdAt", action.CreatedAt,
+			"turnStatus", string(result.TurnStatus))
+		return nil
+	}
 	switch action.Kind {
 	case store.CommunicationActionReplyText:
 		if _, ok := a.manager.runner.(AutomaticReplyRunner); !ok {

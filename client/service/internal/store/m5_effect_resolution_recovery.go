@@ -119,6 +119,7 @@ func recoverCommunicationV4LegacyAfterResolvedFailedTx(
 		tx,
 		turn.ProfileID,
 		[]string{action.ActionID, communicationActionPlanKey(action.ActionID)},
+		CommunicationV4EventActionFailureDependencyUnavailable,
 		at,
 	); err != nil {
 		return err
@@ -155,6 +156,7 @@ func recoverCommunicationV4EventAfterResolvedFailedTx(
 		tx,
 		action.ProfileID,
 		roots,
+		CommunicationV4EventActionFailureDependencyUnavailable,
 		at,
 	); err != nil {
 		return err
@@ -171,12 +173,14 @@ func recoverCommunicationV4EventAfterResolvedFailedTx(
 }
 
 // closeCommunicationV4PlannedDependentsTx 沿依赖边把仍处 planned、从未绑定
-// intent 的事件动作行闭包式收编为 manualRequired/automaticDependencyUnavailable
-// (既有 pre-WAL 终局词汇)。已绑 intent 的行归 WAL 恢复轨,这里不碰。
+// intent 的事件动作行闭包式收编为 manualRequired + reason(既有 pre-WAL 终局
+// 词汇;reason 标注收编所属机制族,如 automaticDependencyUnavailable 或
+// stalePlannedSuperseded)。已绑 intent 的行归 WAL 恢复轨,这里不碰。
 func closeCommunicationV4PlannedDependentsTx(
 	tx *gorm.DB,
 	profileID string,
 	roots []string,
+	reason string,
 	at time.Time,
 ) error {
 	visited := make(map[string]struct{}, len(roots))
@@ -210,7 +214,7 @@ func closeCommunicationV4PlannedDependentsTx(
 				).
 				Updates(map[string]any{
 					"status":         CommunicationV4EventActionManualRequired,
-					"failure_reason": CommunicationV4EventActionFailureDependencyUnavailable,
+					"failure_reason": reason,
 					"updated_at":     at,
 				})
 			if updated.Error != nil {

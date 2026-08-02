@@ -4182,6 +4182,14 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 				return ErrDialogueTurnState
 			}
 		}
+		if v4Turn && action.Status == CommunicationActionSent &&
+			turn.Status == DialogueTurnCompleted {
+			// 结果重放:动作只在本腿首次结算时转 sent,故 sent+completed 组合
+			// 必然是重放。轮的 completed 既可能来自链走完,也可能来自 Q1/Q2
+			// 陈旧作废的轮收束(残留后项已 superseded);重放不得把已终局的轮
+			// 回写为 adviceReady 或重开后项。
+			return nil
+		}
 		sentAt := action.SentAt
 		if sentAt == nil {
 			sentAt = &at

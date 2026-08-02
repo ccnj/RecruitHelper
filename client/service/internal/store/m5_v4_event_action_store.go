@@ -1177,7 +1177,11 @@ func communicationV4EventActionPreWALFailureReason(reason string) bool {
 		CommunicationV4EventActionFailureBindingUnavailable,
 		CommunicationV4EventActionFailureDependencyUnavailable,
 		CommunicationV4EventActionFailureDispatchNotConstructed,
-		CommunicationV4EventActionFailureActionInvalid:
+		CommunicationV4EventActionFailureActionInvalid,
+		// stalePlannedSuperseded 是 Q1/Q2 裁决(2026-08-02)"未派发 planned
+		// 残留一律作废"的显式终局原因;它只落在从未绑定发送意图的行上,
+		// 形状与其余 pre-WAL 终局完全一致。
+		CommunicationStalePlannedSuperseded:
 		return true
 	default:
 		return false
