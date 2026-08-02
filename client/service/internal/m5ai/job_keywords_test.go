@@ -155,3 +155,34 @@ func TestPlanJobKeywordsSplitsMatchedAndCustom(t *testing.T) {
 		t.Fatalf("三个词全在第一组、上限 2，必须判溢出，实得 %v", err)
 	}
 }
+
+// 全部命中词库时 Custom 一次都不会被 append。它必须是空切片而不是 nil：
+// nil 序列化成 null，诊断台按数组读 .length 就抛异常、整棵树卸掉（2026-08-02
+// 客户机白屏两次的根因）。
+func TestPlanJobKeywordsNeverLeavesNilSlices(t *testing.T) {
+	sections := []JobKeywordSectionInput{
+		{Title: "行业经验", Limit: 3, Words: []string{"银行", "基金", "证券"}},
+	}
+
+	allMatched, err := PlanJobKeywords(
+		JobKeywordsSuggestion{Keywords: []string{"银行", "基金", "证券"}}, sections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allMatched.Custom == nil {
+		t.Fatal("全部命中词库时 Custom 是 nil，会序列化成 null")
+	}
+
+	// 两个词都不在词库里（自定义上限是 2，再多会先被 tooManyCustom 拦掉，
+	// 就验不到 Matched 了）。
+	allCustom, err := PlanJobKeywords(
+		JobKeywordsSuggestion{Keywords: []string{"家族信托", "跨境税务"}},
+		[]JobKeywordSectionInput{{Title: "兜底", Limit: 3}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allCustom.Matched == nil {
+		t.Fatal("一个都没命中时 Matched 是 nil，会序列化成 null")
+	}
+}
