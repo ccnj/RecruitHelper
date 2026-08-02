@@ -44,7 +44,8 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 		MaxIntentOutputTokens int    `json:"max_intent_output_tokens"`
 		MaxReplyOutputTokens  int    `json:"max_reply_output_tokens"`
 	}
-	_, _, _ = request.MaxInputTokens, request.MaxIntentOutputTokens, request.MaxReplyOutputTokens
+	_, _, _, _ = request.RequestTimeoutMs, request.MaxInputTokens,
+		request.MaxIntentOutputTokens, request.MaxReplyOutputTokens
 	if decodeJSON(r, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "模型配置请求无效"})
 		return
@@ -55,7 +56,6 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 	config := m5ai.ProviderConfig{
 		Model:   strings.TrimSpace(request.Model),
 		BaseURL: strings.TrimSpace(request.BaseURL), APIKey: strings.TrimSpace(request.APIKey),
-		RequestTimeoutMs: request.RequestTimeoutMs,
 	}
 	if existing, err := a.providerConfig.Load(); err == nil && existing != nil {
 		if config.APIKey == "" {

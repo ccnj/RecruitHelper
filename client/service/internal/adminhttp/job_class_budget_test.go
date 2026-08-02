@@ -7,21 +7,22 @@ import (
 )
 
 // 全批分配一次带几个职位，守的是**输入侧**：maxProviderRequestBytes 那道 256 KB
-// 硬闸与调用延迟。它不再从输出预算推——2026-08-02 客户机 10 个职位全废，正是
+// 自限与调用延迟。它不再从输出预算推——2026-08-02 客户机 10 个职位全废，正是
 // 因为把这两个不同的约束绑在了一个数上：每条按 40 token 估、算出 max_tokens=432、
 // 模型写到一半被 finish_reason=length 切断。
 func TestJobClassChunkSizeStaysInsideTheRequestByteGate(t *testing.T) {
 	// 客户机实测：10 个职位的请求 47.9 KB，即每个职位约 4.8 KB。
 	const observedBytesPerJob = 4800
+	// 我们自己的保守自限，不是 provider 公布的限制（见 provider.go）。
 	const requestByteGate = 256 << 10
 
 	if jobClassChunkSize < 1 {
 		t.Fatalf("一块至少要装一个职位: %d", jobClassChunkSize)
 	}
-	// 一整块必须离硬闸有明显余量。职位描述长短差异很大，贴着闸走会在描述偏长的
+	// 一整块必须离那道自限有明显余量。职位描述长短差异很大，贴着闸走会在描述偏长的
 	// 客户那里直接撞 requestPayloadTooLarge。
 	if used := jobClassChunkSize * observedBytesPerJob; used*4 > requestByteGate {
-		t.Fatalf("一块 %d 个职位约 %d 字节，超过硬闸的四分之一，余量不够",
+		t.Fatalf("一块 %d 个职位约 %d 字节，超过那道自限的四分之一，余量不够",
 			jobClassChunkSize, used)
 	}
 	// 客户机那 10 个职位要能一次决策完——分成两块的话，后一块只能避开前一块

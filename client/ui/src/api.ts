@@ -383,7 +383,6 @@ export interface M5ProviderConfigView {
 export interface M5ProviderConfigInput {
   base_url: string
   api_key: string
-  request_timeout_ms: 30000
 }
 
 export interface JobConfigSourceView {
