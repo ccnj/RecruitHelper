@@ -1308,3 +1308,296 @@ func TestCommunicationV4ConfirmedActionAllowsProjectionGap(t *testing.T) {
 		t.Fatalf("账本缺行不应被跨越判据拦下: %v", err)
 	}
 }
+
+// seedCommunicationV4ResolvedFailedVerdict 走完整真实链构造"裁决即恢复"后
+// 的终局形状:V4 自动回复 WAL → 验证穷尽 suspect → 人工裁决 resolvedFailed,
+// 并自证恢复已生效(轮 superseded/resolvedFailedSuperseded、聚合 active)。
+func seedCommunicationV4ResolvedFailedVerdict(
+	t *testing.T,
+	s *Store,
+	suffix string,
+) (
+	communicationV4AutomaticEffectFixture,
+	CreateEffectIntentRequest,
+	*CreateEffectIntentResult,
+	time.Time,
+) {
+	t.Helper()
+	fixture, req, created := createCommunicationV4AutomaticEffect(t, s, suffix)
+	verifyAt := fixture.Now.Add(time.Minute)
+	if err := s.MoveEffectToVerification(
+		created.Command.MsgID,
+		"resultLost",
+		verifyAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkEffectSuspect(
+		created.Command.MsgID,
+		"verificationExhausted",
+		verifyAt.Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	resolvedAt := verifyAt.Add(2 * time.Minute)
+	if err := s.ResolveSuspectVerdict(ResolveSuspectVerdictRequest{
+		Ref: created.Command.MsgID, Verdict: CmdResolvedFailed,
+		ConversationKey: ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		},
+		At: resolvedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	turn, _ := s.DialogueTurnByID(fixture.Turn.TurnID)
+	action, _ := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+	aggregate, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if turn == nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != dialogueTurnResolvedFailedSuperseded ||
+		action == nil || action.Status != CommunicationActionManualRequired ||
+		action.FailureReason != "effectResolvedFailed" ||
+		err != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+		t.Fatalf("裁决即恢复前置不成立: turn=%+v action=%+v aggregate=%+v err=%v",
+			turn, action, aggregate, err)
+	}
+	return fixture, req, created, resolvedAt
+}
+
+func countLateVerdictAudits(t *testing.T, s *Store, detailFragment string) int64 {
+	t.Helper()
+	var audits int64
+	if err := s.db.Model(&AuditEntry{}).
+		Where(
+			"category = ? AND detail LIKE ?",
+			auditCategoryLateResultAfterVerdict,
+			"%"+detailFragment+"%",
+		).
+		Count(&audits).Error; err != nil {
+		t.Fatal(err)
+	}
+	return audits
+}
+
+// TestCommunicationV4VerdictThenLateSafeTerminalSettlesWithoutRewrite 钉住
+// 2026-08-03 修复:resolvedFailed 裁决(裁决即恢复,轮已 superseded)之后,
+// 手重连补投的迟到 failed+none 必须能整事务入账(ProcessedMsg 落、ack 路径
+// 无错),且与裁决同向——动作/轮/聚合原样,只落审计;同一 result 再放一次
+// 照样成功短路。修复前该重放撞轮状态白名单整事务回滚,手每次重连重放失败
+// 直到 outbox TTL。
+func TestCommunicationV4VerdictThenLateSafeTerminalSettlesWithoutRewrite(t *testing.T) {
+	s := openTest(t)
+	fixture, req, created, resolvedAt := seedCommunicationV4ResolvedFailedVerdict(
+		t, s, "late-failed-after-verdict",
+	)
+	lateAt := resolvedAt.Add(time.Minute)
+	lateMsgID := "late-failed-after-verdict-result"
+	result, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		lateMsgID,
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			// 镜像 dispatch 层 wasHumanResolved 纠正:failed+none 覆写人裁。
+			cmd.Status = CmdFailed
+			cmd.SideEffect = "none"
+			cmd.TerminalAt = &lateAt
+			return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+				IntentStatus: EffectIntentFailed, Retract: true,
+				Reason: "lateFailedNone",
+			}}, nil
+		},
+	)
+	if err != nil || result == nil || !result.CommandFound || result.AlreadyProcessed {
+		t.Fatalf("裁决后迟到安全终局必须可入账: result=%+v err=%v", result, err)
+	}
+	var processed int64
+	if err := s.db.Model(&ProcessedMsg{}).
+		Where("msg_id = ?", lateMsgID).
+		Count(&processed).Error; err != nil || processed != 1 {
+		t.Fatalf("ProcessedMsg 必须落库(ack 前提): count=%d err=%v", processed, err)
+	}
+	intent, err := s.EffectIntentByID(req.Intent.IntentID)
+	if err != nil || intent == nil || intent.Status != EffectIntentFailed {
+		t.Fatalf("dispatch 层 intent 覆写必须落地: %+v err=%v", intent, err)
+	}
+	action, _ := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+	turn, _ := s.DialogueTurnByID(fixture.Turn.TurnID)
+	aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+	if action == nil || action.Status != CommunicationActionManualRequired ||
+		action.FailureReason != "effectResolvedFailed" || action.SentAt != nil ||
+		turn == nil || turn.Status != DialogueTurnSuperseded ||
+		turn.FailureReason != dialogueTurnResolvedFailedSuperseded ||
+		aggregateErr != nil ||
+		aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("同向迟到终局不得改写裁决账本或再冻聚合: action=%+v turn=%+v aggregate=%+v err=%v",
+			action, turn, aggregate, aggregateErr)
+	}
+	var messages int64
+	if err := s.db.Model(&Message{}).
+		Where("outbound_intent_id = ?", req.Intent.IntentID).
+		Count(&messages).Error; err != nil || messages != 0 {
+		t.Fatalf("迟到安全终局不得伪造消息: count=%d err=%v", messages, err)
+	}
+	if audits := countLateVerdictAudits(t, s, "direction=consistent"); audits != 1 {
+		t.Fatalf("迟到重放必须落审计: count=%d", audits)
+	}
+	// 同一 result 重放:ProcessedMsg 挡在 mutate 之前,第二次照样成功。
+	replay, err := s.ApplyResultMessage(
+		created.Command.MsgID,
+		lateMsgID,
+		"result",
+		fixture.HandID,
+		func(cmd *CmdRecord) (ResultCommandMutation, error) {
+			t.Fatal("同 msgId 重放不得进入 mutate")
+			return ResultCommandMutation{}, nil
+		},
+	)
+	if err != nil || replay == nil || !replay.AlreadyProcessed {
+		t.Fatalf("迟到 result 重放必须幂等成功: result=%+v err=%v", replay, err)
+	}
+	if audits := countLateVerdictAudits(t, s, "direction=consistent"); audits != 1 {
+		t.Fatalf("重放不得增生审计: count=%d", audits)
+	}
+}
+
+// TestCommunicationV4VerdictThenLatePositiveCorrectsToSent 钉住 2026-08-03
+// 修复的反向腿:裁决判"未发"而迟到 durable ok 证明实则已发(历史最贵教训
+// 方向)。intent 保留 dispatch 层覆写的 ok,动作 CAS 转 sent,轮保持
+// superseded 终局不回写;干净尾部时出站行经既有 confirmed-action 应用收编
+// 进 V4 投影,游标间存在未投影候选人输入时按形状拒绝回落"仅动作入账+
+// 响亮审计",整事务照样成功、ack 照发。
+func TestCommunicationV4VerdictThenLatePositiveCorrectsToSent(t *testing.T) {
+	t.Run("clean tail incorporates", func(t *testing.T) {
+		s := openTest(t)
+		fixture, req, created, resolvedAt := seedCommunicationV4ResolvedFailedVerdict(
+			t, s, "late-ok-after-verdict",
+		)
+		lateAt := resolvedAt.Add(time.Minute)
+		result, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			"late-ok-after-verdict-result",
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				cmd.Status = CmdOk
+				cmd.TerminalAt = &lateAt
+				return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk, Append: true,
+					Text:         fixture.Action.Text,
+					ContentHash:  fixture.Action.ContentHash,
+					ObservedAtMs: lateAt.UnixMilli(),
+				}}, nil
+			},
+		)
+		if err != nil || result == nil || !result.CommandFound || result.AlreadyProcessed {
+			t.Fatalf("裁决后迟到正证必须可入账: result=%+v err=%v", result, err)
+		}
+		intent, err := s.EffectIntentByID(req.Intent.IntentID)
+		if err != nil || intent == nil || intent.Status != EffectIntentOk ||
+			intent.ResultMessageSeq == nil {
+			t.Fatalf("迟到正证 intent 纠正未落地: %+v err=%v", intent, err)
+		}
+		action, _ := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+		turn, _ := s.DialogueTurnByID(fixture.Turn.TurnID)
+		aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if action == nil || action.Status != CommunicationActionSent ||
+			action.FailureReason != "" || action.SentAt == nil ||
+			turn == nil || turn.Status != DialogueTurnSuperseded ||
+			turn.FailureReason != dialogueTurnResolvedFailedSuperseded ||
+			aggregateErr != nil ||
+			aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
+			t.Fatalf("迟到正证纠正形状不符: action=%+v turn=%+v aggregate=%+v err=%v",
+				action, turn, aggregate, aggregateErr)
+		}
+		if aggregate.ProjectedThroughSeq != *intent.ResultMessageSeq ||
+			aggregate.State.LastOutboundMessageSeq != *intent.ResultMessageSeq {
+			t.Fatalf("干净尾部必须收编出站行: aggregate=%+v seq=%d",
+				aggregate, *intent.ResultMessageSeq)
+		}
+		var confirmations int64
+		if err := s.db.Model(&CommunicationV4ProjectionApplication{}).
+			Where("profile_id = ? AND input_kind = ?",
+				fixture.ProfileID, CommunicationV4InputConfirmedAction).
+			Count(&confirmations).Error; err != nil || confirmations != 1 {
+			t.Fatalf("确认应用必须恰一条: count=%d err=%v", confirmations, err)
+		}
+		if audits := countLateVerdictAudits(t, s, "incorporation=confirmed"); audits != 1 {
+			t.Fatalf("迟到正证必须落审计: count=%d", audits)
+		}
+		replay, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			"late-ok-after-verdict-result",
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				t.Fatal("同 msgId 重放不得进入 mutate")
+				return ResultCommandMutation{}, nil
+			},
+		)
+		if err != nil || replay == nil || !replay.AlreadyProcessed {
+			t.Fatalf("迟到正证重放必须幂等成功: result=%+v err=%v", replay, err)
+		}
+	})
+
+	t.Run("unprojected candidate input falls back to action-only", func(t *testing.T) {
+		s := openTest(t)
+		fixture, req, created, resolvedAt := seedCommunicationV4ResolvedFailedVerdict(
+			t, s, "late-ok-gap",
+		)
+		// 候选人在裁决后、手重连前又发了一条(夜间常态):它尚未投影,
+		// 确认应用的 unclaimed 闸必须拒绝跨越,纠正回落"仅动作入账"。
+		interleaved := "裁决后候选人插话"
+		appendCommunicationV4Inbound(t, s, fixture.resumeStoreFixture, Message{
+			Seq: 3, Direction: "in", Kind: "text",
+			ContentHash: textcanon.Hash(interleaved), Text: &interleaved,
+		})
+		aggregateBefore, err := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lateAt := resolvedAt.Add(time.Minute)
+		result, err := s.ApplyResultMessage(
+			created.Command.MsgID,
+			"late-ok-gap-result",
+			"result",
+			fixture.HandID,
+			func(cmd *CmdRecord) (ResultCommandMutation, error) {
+				cmd.Status = CmdOk
+				cmd.TerminalAt = &lateAt
+				return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
+					IntentStatus: EffectIntentOk, Append: true,
+					Text:         fixture.Action.Text,
+					ContentHash:  fixture.Action.ContentHash,
+					ObservedAtMs: lateAt.UnixMilli(),
+				}}, nil
+			},
+		)
+		if err != nil || result == nil || !result.CommandFound || result.AlreadyProcessed {
+			t.Fatalf("形状拒绝不得打回整事务: result=%+v err=%v", result, err)
+		}
+		intent, err := s.EffectIntentByID(req.Intent.IntentID)
+		action, _ := s.CommunicationActionByTurn(fixture.Turn.TurnID)
+		aggregate, aggregateErr := s.CommunicationV4AggregateByProfile(fixture.ProfileID)
+		if err != nil || intent == nil || intent.Status != EffectIntentOk ||
+			action == nil || action.Status != CommunicationActionSent ||
+			aggregateErr != nil ||
+			aggregate.Revision != aggregateBefore.Revision ||
+			aggregate.ProjectedThroughSeq != aggregateBefore.ProjectedThroughSeq {
+			t.Fatalf("回落腿必须仅动作入账、不动投影: intent=%+v action=%+v aggregate=%+v errs=%v/%v",
+				intent, action, aggregate, err, aggregateErr)
+		}
+		var confirmations int64
+		if err := s.db.Model(&CommunicationV4ProjectionApplication{}).
+			Where("profile_id = ? AND input_kind = ?",
+				fixture.ProfileID, CommunicationV4InputConfirmedAction).
+			Count(&confirmations).Error; err != nil || confirmations != 0 {
+			t.Fatalf("形状拒绝时不得落确认应用: count=%d err=%v", confirmations, err)
+		}
+		if audits := countLateVerdictAudits(t, s, "incorporation=actionOnly"); audits != 1 {
+			t.Fatalf("回落腿必须响亮审计: count=%d", audits)
+		}
+	})
+}

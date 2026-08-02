@@ -3424,6 +3424,17 @@ func applyCommunicationV4EventActionEffectStatusTx(
 	case EffectIntentDispatching, EffectIntentReconciling, EffectIntentVerifying:
 		return nil
 	case EffectIntentOk, EffectIntentResolvedOk:
+		// 裁决已终局的迟到正证(2026-08-03,详见
+		// m5_late_result_after_verdict.go):动作带 resolvedFailed 裁决终局
+		// 时,迟到 durable ok 是"判未发实则已发"的权威纠正。走最小纠正
+		// 路径(动作转 sent+尝试确认收编),不走下方通用腿——通用腿会在
+		// 取号缺席时报冲突整事务回滚,或在裁决后建承接/物化时刻表后项。
+		if action.Status == CommunicationV4EventActionManualRequired &&
+			action.FailureReason == "effectResolvedFailed" {
+			return applyCommunicationV4EventLateVerdictPositiveTx(
+				tx, action, intent, sourceInfo, at,
+			)
+		}
 		if action.EffectKind == CommunicationV4EventEffectAcceptWechat {
 			if action.V4Kind != communication.V4ActionAcceptWechat ||
 				intent.ResultMessageSeq != nil {
@@ -3621,6 +3632,21 @@ func applyCommunicationV4EventActionEffectStatusTx(
 		// 不得把留档终态改写回 manualRequired 或再次冻结档案。
 		if action.Status == CommunicationV4EventActionRetried {
 			return nil
+		}
+		// 裁决已终局的迟到安全终局(2026-08-03,详见
+		// m5_late_result_after_verdict.go):动作已带 resolvedFailed 裁决
+		// 终局,迟到 failed/canceled/expired 与裁决同向。修复前这里会把
+		// 裁决终局改写为 effectFailed,并把刚被"裁决即恢复"解冻的聚合
+		// 静默再冻;现在不改写任何状态、绝不触碰聚合,落审计后放行 ack。
+		if action.Status == CommunicationV4EventActionManualRequired &&
+			action.FailureReason == "effectResolvedFailed" {
+			return lateResultAfterVerdictAuditTx(
+				tx,
+				intent.TargetRef,
+				"eventAction="+action.ActionID+
+					" intent="+string(intent.Status)+" direction=consistent",
+				at,
+			)
 		}
 		// 干净失败自动重试通则(协议规格 §8.4,2026-08-02 推广):failed 终局
 		// 构造性蕴含副作用未发生,且动作仍处派发中(排除 sent 后被撤回的
@@ -4017,6 +4043,26 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 			!communicationActionMatchesMessage(action, message) {
 			return ErrCommunicationActionConflict
 		}
+		// 裁决已终局的迟到正证(2026-08-03,详见 m5_late_result_after_verdict.go):
+		// "裁决即恢复"把轮置 superseded 后,下方白名单会把手重连补投的
+		// durable 纠正整事务打回,result 永不 ack、纠正永久丢失。该轮形状
+		// 只有裁决即恢复一个生产者(其余 supersede 入口均拒绝 effect-bound
+		// 行),在此先行短路。
+		if v4Turn && turn.Status == DialogueTurnSuperseded &&
+			turn.FailureReason == dialogueTurnResolvedFailedSuperseded {
+			if action.Status == CommunicationActionSent {
+				// 迟到正证纠正的重放:首次纠正已把动作转 sent、轮保持
+				// superseded,与下方 sent+completed 重放短路同形。
+				return nil
+			}
+			if action.Status == CommunicationActionManualRequired &&
+				action.FailureReason == "effectResolvedFailed" {
+				return applyCommunicationV4LegacyLateVerdictPositiveTx(
+					tx, turn, action, v4Plan, message, at,
+				)
+			}
+			return ErrDialogueTurnState
+		}
 		switch turn.Status {
 		case DialogueTurnDispatching, DialogueTurnManualRequired, DialogueTurnCompleted:
 		default:
@@ -4140,6 +4186,22 @@ func applyM5AutomaticEffectStatusTx(tx *gorm.DB, intent *EffectIntent, at time.T
 		// 不得把留档终态改写回 manualRequired 或再次冻结档案/轮。
 		if action.Status == CommunicationActionRetried {
 			return nil
+		}
+		// 裁决已终局的迟到安全终局(2026-08-03,详见
+		// m5_late_result_after_verdict.go):resolvedFailed 裁决与迟到的
+		// failed/canceled/expired 同向,账本已是"未发生"终局。不改写动作/
+		// 轮/聚合任何状态,落审计后放行,让外层 ProcessedMsg 与 ack 正常
+		// 落地——修复前这里撞轮状态白名单整事务回滚,手每次重连重放失败。
+		if v4Turn && turn.Status == DialogueTurnSuperseded &&
+			turn.FailureReason == dialogueTurnResolvedFailedSuperseded &&
+			action.Status == CommunicationActionManualRequired {
+			return lateResultAfterVerdictAuditTx(
+				tx,
+				turn.ConversationRef,
+				"turn="+turn.TurnID+" action="+action.ActionID+
+					" intent="+string(intent.Status)+" direction=consistent",
+				at,
+			)
 		}
 		switch turn.Status {
 		case DialogueTurnDispatching, DialogueTurnManualRequired, DialogueTurnCompleted:
