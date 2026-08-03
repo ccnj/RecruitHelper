@@ -11106,6 +11106,91 @@ test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒
   }
 })
 
+// 真机 2026-08-03：平台偶发给某一行 lastSentence 字符串 "null"（该会话摘要
+// 未被填充，打开会话后才补上，纯等待 18 秒读 12 次一动不动）。此前整窗抛错，
+// 一个坏行让 32 行全读不出来，还借 readThread 升成 manualOnly 隔离了两个无辜
+// 候选人。现在跳过坏行、整窗照常返回，并把跳过的身份留在 skippedRefs 里。
+test('readList MAIN 单行摘要坏数据只跳过该行，整窗照常返回且跳过留痕', async () => {
+  const original = {
+    document: globalThis.document,
+    window: globalThis.window,
+    getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+  }
+  const marker = {}
+  const makeRow = () => ({
+    getClientRects: () => [{}],
+    contains: (element) => element === marker,
+    querySelector(selector) {
+      return selector === '.im-session-item__box, .im-session-item' ? marker : null
+    },
+    querySelectorAll() { return [] },
+  })
+  const rows = [makeRow(), makeRow(), makeRow(), makeRow()]
+  const sources = [
+    {
+      sessionId: 'session-ok-head', peerPartnerId: 'peer-ok-head', unreadCount: 0,
+      name: '候选人甲', sortTime: 4_000,
+      lastSentence: { senderType: 'USER', text: '你好', sendTime: 4_000 },
+    },
+    {
+      // 真机原样形态：JSON 序列化的 null 落成字符串
+      sessionId: 'session-null-sentence', peerPartnerId: 'peer-null-sentence', unreadCount: 0,
+      name: '候选人乙', sortTime: 3_000, lastSentence: 'null',
+    },
+    {
+      // 非法 JSON 同样只跳过该行，不炸整窗
+      sessionId: 'session-broken-json', peerPartnerId: 'peer-broken-json', unreadCount: 0,
+      name: '候选人丙', sortTime: 2_000, lastSentence: '{"senderType"',
+    },
+    {
+      sessionId: 'session-ok-tail', peerPartnerId: 'peer-ok-tail', unreadCount: 2,
+      name: '候选人丁', sortTime: 1_000,
+      lastSentence: { senderType: 'STAFF', text: '稍后联系', sendTime: 1_000 },
+    },
+  ]
+  const virtual = {
+    scrollTop: 0, scrollHeight: 600, clientHeight: 300,
+    parentElement: null, querySelectorAll() { return [] }, dispatchEvent() {},
+  }
+  try {
+    globalThis.setTimeout = (callback) => { callback(); return 0 }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    globalThis.document = {
+      querySelector(selector) {
+        return selector === '.im-session-list .im-session-list__virtual' ? virtual : null
+      },
+      querySelectorAll(selector) {
+        return selector.includes('div[role="listitem"]') ? rows : []
+      },
+    }
+    globalThis.window = {
+      $nuxt: {
+        $children: rows.map((row, index) => ({ $el: row, _props: { source: sources[index] }, $children: [] })),
+      },
+    }
+    const result = await zhilianTestHooks.mainReadListDOMWindow(false, false)
+    assert.equal(result.__recruitHelperMainError, undefined,
+      '单行摘要坏数据不得让整窗读取失败')
+    assert.deepEqual(
+      result.sessions.map((item) => item.conversationRef),
+      ['session-ok-head', 'session-ok-tail'],
+      '坏行被跳过，其余行必须原样保留且保持页面顺序',
+    )
+    assert.deepEqual(
+      result.skippedRefs,
+      ['session-null-sentence', 'session-broken-json'],
+      '跳过必须留痕：不得由手静默过滤',
+    )
+    assert.equal(result.unstable, false, '坏行占位参与稳定判定，不得误判为窗口抖动')
+    const advanced = await zhilianTestHooks.mainReadListDOMWindow(true, false)
+    assert.equal(advanced.__recruitHelperMainError, undefined)
+    assert.equal(advanced.moved, true, '坏行不得影响 next 的推进判定')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
   // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
   // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的

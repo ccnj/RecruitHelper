@@ -423,6 +423,9 @@ interface MainListDOMWindowResult {
   scrollHeight: number
   scrollTop: number
   unstable: boolean
+  // 本窗内摘要字段解析不出对象、因而未纳入 sessions 的行。整窗照常返回，
+  // 不因单行坏数据失败；跳过必须留痕，不做静默过滤。
+  skippedRefs: string[]
 }
 
 type MainChatListFilterResult =
@@ -4045,6 +4048,8 @@ async function mainReadListDOMWindow(
   }
   const collect = (): {
     sessions: ZhilianConversationSummary[]
+    allRefs: string[]
+    skippedRefs: string[]
     scrollTop: number
     scrollHeight: number
     clientHeight: number
@@ -4058,6 +4063,11 @@ async function mainReadListDOMWindow(
     const sourcePairs = nodes.map((node) => ({ source: rowSource(node), node }))
     const seen = new Set<string>()
     const sessions: ZhilianConversationSummary[] = []
+    // allRefs 按行序记录本窗全部身份（含被跳过的行）。窗口稳定判定与 moved
+    // 判定都用它：跳过的行仍然占位，否则坏行被补齐的瞬间会让窗口身份突变，
+    // 把一次正常读取误判成 USER_ACTIVE。
+    const allRefs: string[] = []
+    const skippedRefs: string[] = []
     for (const { source, node } of sourcePairs) {
       const conversationRef = clean(source.sessionId)
       const platformUserRef = clean(source.peerPartnerId)
@@ -4065,9 +4075,22 @@ async function mainReadListDOMWindow(
         throw new Error('dom_list_identity_invalid')
       }
       seen.add(conversationRef)
+      allRefs.push(conversationRef)
       const unreadCount = Number(source.unreadCount)
       if (!Number.isInteger(unreadCount) || unreadCount < 0) throw new Error('dom_list_unread_invalid')
-      const last = parseObject(source.lastSentence)
+      // 真机 2026-08-03：平台偶发给某一行 lastSentence 字符串 "null"（该会话
+      // 消息摘要未被填充，打开会话后才补上）。此前这里抛错，一行坏数据让整窗
+      // 32 行全部读不出来；更贵的是 readThread 借用本窗定位时会升成
+      // ELEMENT_UNRESOLVED/manualOnly，把无辜候选人永久隔离。现在改为跳过该行、
+      // 整窗照常返回：目标恰好是坏行时，上层自然落到既有的 TARGET_NOT_FOUND
+      // “本轮跳过、下轮重读”语义，不隔离任何人。
+      let last: AnyRecord
+      try {
+        last = parseObject(source.lastSentence)
+      } catch {
+        skippedRefs.push(conversationRef)
+        continue
+      }
       const senderType = clean(last.senderType).toUpperCase()
       const direction: 'in' | 'out' | 'system' =
         senderType === 'STAFF' || senderType === 'SALES'
@@ -4101,6 +4124,8 @@ async function mainReadListDOMWindow(
     const clientHeight = scrollElement.clientHeight
     return {
       sessions,
+      allRefs,
+      skippedRefs,
       scrollTop,
       scrollHeight,
       clientHeight,
@@ -4110,7 +4135,7 @@ async function mainReadListDOMWindow(
   // 稳定判定只看窗口身份与几何。未读数、预览正文和活动时间会被实时新消息
   // 合法改写，不能因为这些业务字段变化把整个可定位窗口误判为 USER_ACTIVE。
   const projection = (snapshot: ReturnType<typeof collect>): string => JSON.stringify({
-    conversationRefs: snapshot.sessions.map((session) => session.conversationRef),
+    conversationRefs: snapshot.allRefs,
     scrollTop: Math.round(snapshot.scrollTop),
     scrollHeight: snapshot.scrollHeight,
     clientHeight: snapshot.clientHeight,
@@ -4152,8 +4177,8 @@ async function mainReadListDOMWindow(
     stableRounds = projection(next) === projection(latest) ? stableRounds + 1 : 0
     latest = next
   }
-  const beforeRefs = before.sessions.map((session) => session.conversationRef).join('|')
-  const afterRefs = latest.sessions.map((session) => session.conversationRef).join('|')
+  const beforeRefs = before.allRefs.join('|')
+  const afterRefs = latest.allRefs.join('|')
   diagnosticStage = 'return_result'
   return {
     sessions: latest.sessions,
@@ -4162,6 +4187,7 @@ async function mainReadListDOMWindow(
     scrollHeight: latest.scrollHeight,
     scrollTop: latest.scrollTop,
     unstable: stableRounds < 2,
+    skippedRefs: latest.skippedRefs,
   }
   }
 
@@ -4183,6 +4209,18 @@ async function mainReadListDOMWindow(
       __recruitHelperMainError: `read_list_main_failed:${diagnosticStage}:${known}`,
     } as unknown as MainListDOMWindowResult
   }
+}
+
+// 坏行跳过必须留痕。协议规格对同层的 unreadCount 已明文禁止"由手静默过滤"，
+// lastSentence 只是当初没写同款条款；这里过滤了，但不瞒着：同一会话若被连续
+// 多轮跳过（洞一直没被补上），日志里一眼可见，届时再决定要不要另立机制。
+function noteSkippedListRows(where: string, result: MainListDOMWindowResult): void {
+  const refs = result.skippedRefs
+  if (!Array.isArray(refs) || refs.length === 0) return
+  console.warn(
+    `[zhilian] ${where}：本窗 ${refs.length} 行摘要解析失败已跳过，其余行照常返回`,
+    refs,
+  )
 }
 
 async function verifiedIMTab(expected: string | undefined): Promise<chrome.tabs.Tab> {
@@ -4346,6 +4384,7 @@ export async function openZhilianConversation(
       'manualOnly',
     )
   }
+  noteSkippedListRows('未读 fresh 窗口', currentWindow)
   if (currentWindow.unstable) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
@@ -7312,6 +7351,7 @@ async function readZhilianListFromDOM(
       `智联会话列表页面读取失败：${asError(error).message}`,
     )
   }
+  noteSkippedListRows(`chat.readList(filter=${args.filter})`, page)
   if (page.unstable) {
     throw new ZhilianPlatformError('USER_ACTIVE', 'DOM 虚拟列表未稳定，交由下一轮巡检重算')
   }
@@ -11488,6 +11528,7 @@ async function ensureThreadRoute(
       'manualOnly',
     )
   }
+  noteSkippedListRows('readThread 定位窗口', currentWindow)
   const matches = currentWindow.sessions
     .filter((session) => session.conversationRef === conversationRef)
   if (currentWindow.unstable || matches.length === 0) {
