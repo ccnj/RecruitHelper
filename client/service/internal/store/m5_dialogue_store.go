@@ -2317,9 +2317,29 @@ func bindCommunicationV4EventActionTx(
 	if err != nil {
 		return err
 	}
-	if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
-		aggregate.ProjectedThroughSeq != conversation.LastMessageSeq {
+	if aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
 		return ErrDialogueTurnBinding
+	}
+	// 链首平价闸:投影游标必须追平账本尾。唯一容忍(Q7,2026-08-03 甲方
+	// 裁决):(游标, 尾] 全是无主 system 家具行/已撤回行时放行——它们没有
+	// 业务认领人,游标永远追不上,卡在这里只会把候选人冻死;in/out 行仍
+	// 一律拒绝。谓词单点见 m5_dispatch_transparent_suffix.go。
+	if aggregate.ProjectedThroughSeq != conversation.LastMessageSeq {
+		transparent, err := communicationDispatchTransparentSuffixTx(
+			tx,
+			"链首平价闸",
+			profile.Platform,
+			profile.AccountRef,
+			conversation.ConversationRef,
+			aggregate.ProjectedThroughSeq,
+			conversation.LastMessageSeq,
+		)
+		if err != nil {
+			return err
+		}
+		if !transparent {
+			return ErrDialogueTurnBinding
+		}
 	}
 	if action.SourceInputKind == CommunicationV4InputSchedulePlan &&
 		sourceInfo.ConversationRef != conversation.ConversationRef {
@@ -2777,10 +2797,30 @@ func validateCommunicationV4EventActionDependencyTx(
 		message.Direction != "out" ||
 		message.Kind != "text" ||
 		message.ContentHash != parent.contentHash ||
-		conversation.LastMessageSeq != message.Seq ||
 		aggregate.ProjectedThroughSeq != message.Seq ||
 		aggregate.AutomationStatus != ProfileCommunicationAutomationActive {
 		return ErrDialogueTurnBinding
+	}
+	// 链中父对齐闸:父正证消息必须仍是账本尾。唯一容忍(Q7,2026-08-03
+	// 甲方裁决):(父seq, 尾] 全是无主 system 家具行/已撤回行时放行;上面
+	// 其余判据(retracted/seq/direction/kind/contentHash 与游标==父seq)
+	// 一字不动。谓词单点见 m5_dispatch_transparent_suffix.go。
+	if conversation.LastMessageSeq != message.Seq {
+		transparent, err := communicationDispatchTransparentSuffixTx(
+			tx,
+			"链中父对齐闸",
+			profile.Platform,
+			profile.AccountRef,
+			conversation.ConversationRef,
+			message.Seq,
+			conversation.LastMessageSeq,
+		)
+		if err != nil {
+			return err
+		}
+		if !transparent {
+			return ErrDialogueTurnBinding
+		}
 	}
 	confirmed, found, err := communicationV4ApplicationTx(
 		tx,
@@ -3151,8 +3191,26 @@ func validateM5DependentActionCurrentTx(
 		Scan(&activeTail).Error; err != nil {
 		return out, err
 	}
+	// 文→卡组合的父对齐闸,与 v4 事件链的链中父对齐同族:父正文正证消息
+	// 必须仍是活动账本尾。唯一容忍(Q7,2026-08-03 甲方裁决,同一助手):
+	// (父seq, 活动尾] 全是无主 system 家具行/已撤回行时放行;in/out 行仍
+	// 一律拒绝。谓词单点见 m5_dispatch_transparent_suffix.go。
 	if activeTail != message.Seq {
-		return out, ErrDialogueTurnBinding
+		transparent, err := communicationDispatchTransparentSuffixTx(
+			tx,
+			"文卡组合父对齐闸",
+			profile.Platform,
+			profile.AccountRef,
+			turn.ConversationRef,
+			message.Seq,
+			activeTail,
+		)
+		if err != nil {
+			return out, err
+		}
+		if !transparent {
+			return out, ErrDialogueTurnBinding
+		}
 	}
 	confirmed, found, err := communicationV4ApplicationTx(
 		tx,
