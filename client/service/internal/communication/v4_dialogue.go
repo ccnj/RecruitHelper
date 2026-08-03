@@ -442,6 +442,40 @@ func reduceV4ReplyOnly(
 	}
 }
 
+// V4ReplyActionMenu 是本轮 `动作` 字段合法取值的唯一实现。planV4ReplyActions
+// 的事后裁决与【本轮可选动作】块的渲染都从这里取,不得各写一份(规格 v4 §五
+// 「客户端渲染期追加块」同源要求)。
+//
+// 它是纯函数,不读时钟、不读库:调用方给什么状态就按什么状态算。渲染发生在
+// 调用 provider 之前,裁决发生在拿到建议之后,两个时点的状态可能不同——那不
+// 是本函数要解决的问题,一律以裁决时为准,方向只会更严。
+func V4ReplyActionMenu(
+	state V4State,
+	turn FrozenTurnFacts,
+	allowSuggestedAction bool,
+) m5ai.ReplyActionMenu {
+	menu := m5ai.ReplyActionMenu{WechatLine: v4ReplyMenuWechatLine(state.WechatState)}
+	if !allowSuggestedAction || !v4ReplyActionEligible(state, turn) {
+		return menu
+	}
+	// 时段列表为空时任何 `会议时间` 都不可能命中(见
+	// MatchFrozenRecommendedMeetingTime),等价于本轮不允许建议线上会议。
+	menu.AllowStartMeeting = len(turn.RecommendedSlots) > 0
+	menu.AllowInviteWechat = state.WechatState == V4WechatNotInvited
+	return menu
+}
+
+func v4ReplyMenuWechatLine(status V4WechatStatus) m5ai.ReplyMenuWechatLine {
+	switch status {
+	case V4WechatInvited:
+		return m5ai.ReplyMenuWechatInvited
+	case V4WechatExchanged:
+		return m5ai.ReplyMenuWechatExchanged
+	default:
+		return m5ai.ReplyMenuWechatNotInvited
+	}
+}
+
 func planV4ReplyActions(
 	state V4State,
 	turn FrozenTurnFacts,
@@ -452,6 +486,7 @@ func planV4ReplyActions(
 	if err != nil {
 		return nil, false
 	}
+	menu := V4ReplyActionMenu(state, turn, allowSuggestedAction)
 	plans := make([]V4PlannedAction, 0, len(phrases)+1)
 	for index, phrase := range phrases {
 		plans = append(plans, V4PlannedAction{
@@ -472,9 +507,7 @@ func planV4ReplyActions(
 		}
 		return plans, true
 	case m5ai.ReplyActionInviteWechat:
-		if !allowSuggestedAction || suggestion.MeetingTime != "" ||
-			!v4ReplyActionEligible(state, turn) ||
-			state.WechatState != V4WechatNotInvited {
+		if !menu.AllowInviteWechat || suggestion.MeetingTime != "" {
 			return nil, false
 		}
 		return append(plans, V4PlannedAction{
@@ -482,7 +515,7 @@ func planV4ReplyActions(
 			Kind:      V4ActionInviteWechat,
 		}), true
 	case m5ai.ReplyActionStartOnlineMeeting:
-		if !allowSuggestedAction || !v4ReplyActionEligible(state, turn) {
+		if !menu.AllowStartMeeting {
 			return nil, false
 		}
 		startsAt, matched := m5ai.MatchFrozenRecommendedMeetingTime(

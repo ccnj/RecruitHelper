@@ -155,7 +155,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 			// 任何状态,跳过本轮;真正的边界失效由既有 Recheck/预留校验收敛。
 			slog.Warn("对话轮跳过:渲染材料装配失败,等下轮巡检重试",
 				"profileId", turn.ProfileID, "turnId", turn.TurnID,
-				"reason", "renderInputUnavailable")
+				"reason", "renderInputUnavailable", "err", err)
 			return nil
 		}
 		facts := communication.FrozenTurnFacts{TurnID: turn.TurnID}
@@ -830,6 +830,7 @@ func (a *roundActor) runM5ReplyAdvice(
 			"v4Purpose", string(v4Purpose))
 		return errM5AdviceRoundSkipped
 	}
+	content = a.appendM5ReplyActionMenu(turn, facts, content)
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, content, intent)
 }
 
@@ -1513,4 +1514,35 @@ func sha256Hex(value string) string {
 
 func stableM5ID(kind string, parts ...string) string {
 	return kind + "-" + sha256Hex(strings.Join(parts, "\x00"))
+}
+
+// appendM5ReplyActionMenu 追加【本轮可选动作】块(规格 v4 §五)。菜单与
+// settle 侧 planV4ReplyActions 同源;这里读到的是渲染时刻的状态,裁决时刻
+// 可能已经变了,一律以裁决为准——那个方向只会更严(模型少建议),不放宽。
+//
+// 聚合读不到、缺失或损坏时省略该块、照常调用 AI:省略只是回到"模型自己猜、
+// 脑事后照拒"的既有行为,不放宽任何裁决;而为一个提示增强停掉整轮,损失的
+// 正是这个块本来要挽回的那一次回复。
+func (a *roundActor) appendM5ReplyActionMenu(
+	turn store.DialogueTurn,
+	facts communication.FrozenTurnFacts,
+	content string,
+) string {
+	aggregate, err := a.manager.store.CommunicationV4AggregateByProfile(turn.ProfileID)
+	if err != nil || aggregate == nil {
+		slog.Info("对话轮省略可选动作块:聚合不可用,本轮照常调用 AI",
+			"turnId", turn.TurnID, "err", err)
+		return content
+	}
+	facts.RecommendedSlots, _ = m5ai.FrozenRecommendedSlots(turn.RecommendedTimeText)
+	withMenu, err := m5ai.AppendReplyActionMenu(
+		content,
+		communication.V4ReplyActionMenu(aggregate.State, facts, true),
+	)
+	if err != nil {
+		slog.Info("对话轮省略可选动作块:块渲染失败,本轮照常调用 AI",
+			"turnId", turn.TurnID, "err", err)
+		return content
+	}
+	return withMenu
 }

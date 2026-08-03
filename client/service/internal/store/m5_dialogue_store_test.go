@@ -715,3 +715,47 @@ func TestInterruptedInvocationRecoveryNeverRecallsProvider(t *testing.T) {
 		}
 	})
 }
+
+// 预留比对只认编号原料(2026-08-03 甲方裁决)。跨轮重试每次都从 attempt=1
+// 重新登记、逐个路过已完成的行,而 provider/model/输入指纹会在两轮之间自己
+// 变(换 model、微信线推进改写【本轮可选动作】块)。旧实现把它们也纳入比对,
+// 一变就永远对不上,于是每轮在同一处报冲突、同一处跳过,静默把这一轮永久
+// 卡死。两条路径都不取既有行的结果,比对防不住任何误用,只剩误伤。
+func TestAIInvocationReservationIgnoresCallShapeButGuardsIDCollision(t *testing.T) {
+	s := openTest(t)
+	_, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-shape")
+	first := ReserveAIInvocationRequest{
+		InvocationID: "invocation-shape", TurnID: turn.TurnID, Purpose: m5ai.PurposeIntent,
+		Attempt: 1, Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-before",
+	}
+	reserved, err := s.ReserveAIInvocation(first)
+	if err != nil || !reserved.Created {
+		t.Fatalf("首次预留失败: result=%+v err=%v", reserved, err)
+	}
+
+	// 换 model + 微信线推进改写了块 => provider/model/指纹三项全变,同一个
+	// attempt 号重新登记必须照常收编既有行,不得报冲突。
+	reshaped := first
+	reshaped.Provider = "openai"
+	reshaped.Model = "gpt-4o-mini"
+	reshaped.InputHash = "input-after-wechat-exchanged"
+	replayed, err := s.ReserveAIInvocation(reshaped)
+	if err != nil {
+		t.Fatalf("调用形态变化不得报冲突: err=%v", err)
+	}
+	if replayed.Created {
+		t.Fatalf("既有 attempt 行必须收编而不是新建: %+v", replayed.Invocation)
+	}
+	if replayed.Invocation.InputHash != "input-before" ||
+		replayed.Invocation.Model != "deepseek-v4-pro" {
+		t.Fatalf("收编的必须是既有事实原样,不得被新形态改写: %+v", replayed.Invocation)
+	}
+
+	// 编号三项仍是硬闸:同一个 invocationID 落到不同用途,只可能是 ID 生成
+	// 撞车,继续走会把两件事记在一个编号底下。
+	collided := first
+	collided.Purpose = m5ai.PurposeReply
+	if _, err := s.ReserveAIInvocation(collided); !errors.Is(err, ErrAIInvocationConflict) {
+		t.Fatalf("编号原料对不上必须报冲突: %v", err)
+	}
+}

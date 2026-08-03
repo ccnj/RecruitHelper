@@ -631,6 +631,52 @@ func RenderReplyPromptFrozen(prompt, resumeJSON, history, recommendedTimeText, c
 	return rendered, nil
 }
 
+const replyActionMenuHeading = "【本轮可选动作】"
+
+// AppendReplyActionMenu 追加【本轮可选动作】块(规格 v4 §五「客户端渲染期
+// 追加块」)。菜单由 communication.V4ReplyActionMenu 算出,与事后裁决同源。
+//
+// 块只做减法:只列本轮合法的枚举并给出禁止事项,不鼓励、不暗示模型去选任何
+// 具体动作。这条不是洁癖——30 次真实样本实验里唯一那次整轮作废,正是被
+// "发起线上会议(必须同时填会议时间)"这句写法诱导去选了邀面卡,而邀面卡是
+// 候选人可见、不可逆的。措辞往"什么时候不该填"偏,不往"填这个"偏。
+func AppendReplyActionMenu(rendered string, menu ReplyActionMenu) (string, error) {
+	return appendV4ReplyPolicy(rendered, replyActionMenuBlock(menu))
+}
+
+func replyActionMenuBlock(menu ReplyActionMenu) string {
+	lines := []string{
+		replyActionMenuHeading,
+		"「动作」字段本轮只允许填：",
+		"· 无 —— 默认就填这个。抛出时段让他挑、他还没答应时，也填「无」。",
+	}
+	if menu.AllowStartMeeting {
+		// 点名三种"不该填",但压到一行:实测块越长,后面的禁止句越压不住
+		// (换微信误填随块长度 0→1→2 单调上升)。只说正面条件时又有 2/30 在
+		// 对方尚未挑定时就发卡,而邀面卡是候选人可见、不可逆的。
+		lines = append(lines,
+			"· 发起线上会议 —— 只有他自己说定了具体时间才填；你在问、他没答、时间是你提的，都填「无」。")
+	}
+	if menu.AllowInviteWechat {
+		lines = append(lines,
+			"· 发起换微信邀请 —— 一生一次，用掉就没有了；约面还推得动时不要动用它，也不要开场就要。")
+	}
+	// 同样是"本轮不能再邀请"，已经发出邀请与已经换到号是两件不同的事实。
+	switch menu.WechatLine {
+	case ReplyMenuWechatInvited:
+		lines = append(lines,
+			"本轮微信邀请已经发出、正等对方通过。不得填「发起换微信邀请」，话术里也不要再说「我把微信发你」这类话。")
+	case ReplyMenuWechatExchanged:
+		lines = append(lines,
+			"本轮微信已经交换成功。不得填「发起换微信邀请」，话术里也不要出现「加个微信」「通过一下」这类说法。")
+	}
+	if menu.AllowStartMeeting {
+		lines = append(lines,
+			"话术里的时间一律写成「8月3日10:00」这种具体日期，不要用「明天」「后天」；【可约面时间】以外的时间一律不得出现。")
+	}
+	return strings.Join(lines, "\n")
+}
+
 const serviceReplyPolicy = `【当前服务阶段规则】
 候选人已经接受面试，本轮目标是服务，不再推销职位或重新邀约。能直接回答的问题简短回答；涉及改期、取消、薪资细节或任何拿不准的信息，只引导候选人改到微信继续沟通。不得声称“已加上”“已通过”，也不得承诺“帮您反馈”“我去问下”或任何系统不会执行的后续动作。`
 

@@ -201,3 +201,96 @@ func TestResumeRendererUsesOwnedFiveSectionShape(t *testing.T) {
 		t.Fatalf("简历 renderer 漂移: got=%q want=%q err=%v", got, want, err)
 	}
 }
+
+func TestReplyActionMenuBlockOnlySubtracts(t *testing.T) {
+	t.Run("wechat still open lists all three", func(t *testing.T) {
+		block := replyActionMenuBlock(ReplyActionMenu{
+			AllowStartMeeting: true, AllowInviteWechat: true,
+			WechatLine: ReplyMenuWechatNotInvited,
+		})
+		for _, want := range []string{"· 无", "· 发起线上会议", "· 发起换微信邀请"} {
+			if !strings.Contains(block, want) {
+				t.Fatalf("微信线未推进时应列出 %q: %s", want, block)
+			}
+		}
+		if strings.Contains(block, "不得填") {
+			t.Fatalf("尚可邀请时不应出现微信禁止句: %s", block)
+		}
+	})
+
+	t.Run("exchanged forbids invite and the phrasing that implies it", func(t *testing.T) {
+		block := replyActionMenuBlock(ReplyActionMenu{
+			AllowStartMeeting: true, WechatLine: ReplyMenuWechatExchanged,
+		})
+		if strings.Contains(block, "· 发起换微信邀请") {
+			t.Fatalf("已换号不得把换微信列为可选项: %s", block)
+		}
+		for _, want := range []string{"已经交换成功", "不得填「发起换微信邀请」", "加个微信"} {
+			if !strings.Contains(block, want) {
+				t.Fatalf("已换号应含 %q: %s", want, block)
+			}
+		}
+	})
+
+	t.Run("invited says awaiting, not exchanged", func(t *testing.T) {
+		block := replyActionMenuBlock(ReplyActionMenu{
+			AllowStartMeeting: true, WechatLine: ReplyMenuWechatInvited,
+		})
+		// 已邀请说成"已经交换成功"就是拿假事实喂模型。
+		if strings.Contains(block, "已经交换成功") {
+			t.Fatalf("已邀请未换号不得声称交换成功: %s", block)
+		}
+		if !strings.Contains(block, "正等对方通过") ||
+			!strings.Contains(block, "不得填「发起换微信邀请」") {
+			t.Fatalf("已邀请应说明正在等待且禁止重复邀请: %s", block)
+		}
+	})
+
+	t.Run("nothing allowed leaves only 无", func(t *testing.T) {
+		block := replyActionMenuBlock(ReplyActionMenu{WechatLine: ReplyMenuWechatNotInvited})
+		if strings.Contains(block, "· 发起线上会议") || strings.Contains(block, "· 发起换微信邀请") {
+			t.Fatalf("无可用动作时只能留「无」: %s", block)
+		}
+		if !strings.Contains(block, "· 无") {
+			t.Fatalf("「无」必须始终可填: %s", block)
+		}
+		// 没有可约时段时不谈时间格式,免得凭空引出"可以约时间"的暗示。
+		if strings.Contains(block, "8月3日10:00") {
+			t.Fatalf("不能约面时不应出现时间格式指引: %s", block)
+		}
+	})
+
+	t.Run("block never encourages an action", func(t *testing.T) {
+		block := replyActionMenuBlock(ReplyActionMenu{
+			AllowStartMeeting: true, AllowInviteWechat: true,
+			WechatLine: ReplyMenuWechatNotInvited,
+		})
+		// 30 次实验里唯一那次作废,是块把"发起线上会议"说成必选项诱导出来的。
+		for _, banned := range []string{"请填", "应当填", "优先填", "尽量填"} {
+			if strings.Contains(block, banned) {
+				t.Fatalf("块只做减法,不得鼓励选择动作(命中 %q): %s", banned, block)
+			}
+		}
+		if !strings.Contains(block, "默认就填这个") {
+			t.Fatalf("「无」必须有明确的默认地位: %s", block)
+		}
+	})
+}
+
+func TestAppendReplyActionMenuKeepsRenderedPromptAndAppendsOnce(t *testing.T) {
+	rendered, err := AppendReplyActionMenu("已渲染的回复提示词", ReplyActionMenu{
+		AllowStartMeeting: true, WechatLine: ReplyMenuWechatExchanged,
+	})
+	if err != nil {
+		t.Fatalf("追加失败: %v", err)
+	}
+	if !strings.HasPrefix(rendered, "已渲染的回复提示词") {
+		t.Fatalf("原提示词必须原样保留: %s", rendered)
+	}
+	if strings.Count(rendered, replyActionMenuHeading) != 1 {
+		t.Fatalf("块只能出现一次: %s", rendered)
+	}
+	if _, err := AppendReplyActionMenu("   ", ReplyActionMenu{}); err == nil {
+		t.Fatal("空提示词必须响亮失败")
+	}
+}
