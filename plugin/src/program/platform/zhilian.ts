@@ -3915,7 +3915,19 @@ async function mainReadListDOMWindow(
   const execute = async (): Promise<MainListDOMWindowResult> => {
   type AnyRecord = Record<string, unknown>
   diagnosticStage = 'resolve_surface'
-  const virtual = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
+  // 切换会话列表筛选会把虚拟列表整体卸载重建,实测空窗 0.3~0.9 秒(首次切换最慢)。
+  // 外层 .im-session-list 全程都在,imListVisible 探针因此看不见这段空窗,拦不住这里;
+  // 固定等待又只能靠猜,所以按条件轮询等它回来:命中即继续,超时才判缺失。
+  const resolveVirtual = async (): Promise<HTMLElement | null> => {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const found = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
+      if (found) return found
+      if (Date.now() >= deadline) return null
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+  const virtual = await resolveVirtual()
   if (!virtual) throw new Error('dom_list_virtual_missing')
   const itemSelector =
     '.im-session-list .im-session-list__virtual .im-session-list__virtual--box div[role="listitem"]'
