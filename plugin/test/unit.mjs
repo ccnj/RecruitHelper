@@ -11107,13 +11107,26 @@ test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒
 })
 
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
+  // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
+  // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的
+  // 零形态一起判成缺失，快照塌成 null，未读子轮清完未读后回读不到收尾数，
+  // 基线永久写不进——插队因此长期失效。三态改由文本承担：节点缺失才是
+  // 读不到，空文本是零，非空非数字向多算。
   const selectors = []
   assert.equal(readZhilianUnreadTotal({ querySelector(selector) { selectors.push(selector); return null } }), null,
-    '徽章缺失不能猜成零')
+    '节点整体缺失才是读不到：页面结构已变，不猜测数值')
   assert.deepEqual(selectors, [ZHILIAN_UNREAD_BADGE_SELECTOR])
+  assert.equal(ZHILIAN_UNREAD_BADGE_SELECTOR, '.app-menu-item__im-unread',
+    '只认常驻单类；带 app-im-unread 的双类选择器在零未读时不命中')
+  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '' } } }), 0,
+    '空文本是页面表达无未读的正式形态，必须读成零')
+  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '   ' } } }), 0,
+    '全空白同样是零，不得判成读不到')
   assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: ' 12 ' } } }), 12)
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '消息 12' } } }), null,
-    '禁止模糊扫描全页数字')
+  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '99+' } } }), 99,
+    '截断展示取前导数字，绝不能落回零')
+  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '消息 12' } } }), 1,
+    '节点在且非空即至少一条；仍禁止模糊扫描全页数字')
 
   const harness = contentSensorHarness()
   const sensor = new ContentSensor(harness.env)
