@@ -507,18 +507,34 @@ func FrozenRecommendedSlots(raw string) ([]string, bool) {
 	return append([]string(nil), frozen.Slots...), true
 }
 
+// 模型只会写 X月X日HH:mm 这一族。真机 2026-08-04 观察到两种自然变体：小时不补
+// 前导零（8月5日9:00），以及日期与时间之间带一个半角空格（8月5日 9:00）。两者与
+// 规范写法语义完全相同，此前却被正则挡在门外——而提示词自己就把月、日渲染成一位
+// 数（%d月%d日），只有小时用 Format("15:04") 出两位，模型照着类推写出一位小时是
+// 必然的。格式不自洽是我们这边的问题，不该由候选人承担代价。
+// 放宽的只有写法：时刻仍须精确命中本轮冻结时段，且必须唯一。全角空格、多个空格、
+// 月份补零、带年份、自然语言一律仍然拒绝——只认已有真实证据的两种变体。
 var meetingTimePattern = regexp.MustCompile(
-	`^(?:[1-9]|1[0-2])月(?:[1-9]|[12][0-9]|3[01])日(?:[01][0-9]|2[0-3]):[0-5][0-9]$`,
+	`^([1-9]|1[0-2])月([1-9]|[12][0-9]|3[01])日[ ]?([01]?[0-9]|2[0-3]):([0-5][0-9])$`,
 )
 
 // MatchFrozenRecommendedMeetingTime applies the deliberately narrow reply
-// contract: trim the model value, require M月D日HH:mm, and accept it only when
-// exactly one canonical Shanghai slot renders to the same value.
+// contract: trim the model value, require M月D日HH:mm (optionally without an
+// hour-leading zero and with one separating space), and accept it only when
+// exactly one canonical Shanghai slot denotes the same instant.
+//
+// 返回的时间戳恒取自命中的 slot，模型给的字符串只用于"挑中哪一个"，一个字符都
+// 不参与算值；因此写法放宽不会影响下发给手的 startsAt。
 func MatchFrozenRecommendedMeetingTime(slots []string, raw string) (int64, bool) {
-	meetingTime := strings.TrimSpace(raw)
-	if len(slots) == 0 || !meetingTimePattern.MatchString(meetingTime) {
+	groups := meetingTimePattern.FindStringSubmatch(strings.TrimSpace(raw))
+	if len(slots) == 0 || groups == nil {
 		return 0, false
 	}
+	// 四段都已由正则约束为合法区间内的纯数字，转换不会失败。
+	month, _ := strconv.Atoi(groups[1])
+	day, _ := strconv.Atoi(groups[2])
+	hour, _ := strconv.Atoi(groups[3])
+	minute, _ := strconv.Atoi(groups[4])
 	matchedAt := int64(0)
 	matches := 0
 	for _, rawSlot := range slots {
@@ -527,13 +543,9 @@ func MatchFrozenRecommendedMeetingTime(slots []string, raw string) (int64, bool)
 			slot.Minute() != 0 || slot.Second() != 0 {
 			return 0, false
 		}
-		rendered := fmt.Sprintf(
-			"%d月%d日%s",
-			slot.Month(),
-			slot.Day(),
-			slot.Format("15:04"),
-		)
-		if rendered == meetingTime {
+		// 比时刻而不是比拼法：写法差异不得冒充语义越界，语义仍须逐字段精确命中。
+		if int(slot.Month()) == month && slot.Day() == day &&
+			slot.Hour() == hour && slot.Minute() == minute {
 			matches++
 			matchedAt = slot.UnixMilli()
 		}

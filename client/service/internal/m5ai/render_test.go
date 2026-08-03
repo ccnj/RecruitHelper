@@ -124,10 +124,30 @@ func TestMatchFrozenRecommendedMeetingTimeIsStrictAndUnique(t *testing.T) {
 	if got, ok := MatchFrozenRecommendedMeetingTime(slots, " \n7月14日14:00\t"); !ok || got != want {
 		t.Fatalf("合法时间未唯一命中: got=%d want=%d ok=%v", got, want, ok)
 	}
+	// 真机 2026-08-04：模型自然写出的两种变体——小时不补前导零、日期与时间之间
+	// 一个半角空格——语义与规范写法完全相同。此前 "7月14日 14:00" 被本测试断言
+	// 为非法格式，那条判断随本批推翻：拦下它没有任何安全收益，代价却是整轮回复
+	// 作废、真实候选人收不到约面。放宽的只是写法，时刻仍须逐字段精确命中。
+	earlier := frozenShanghai(t, "2026-07-14T09:00:00+08:00").UnixMilli()
+	for _, accepted := range []struct {
+		value string
+		want  int64
+	}{
+		{"7月14日9:00", earlier},  // 小时无前导零
+		{"7月14日09:00", earlier}, // 规范写法仍然成立
+		{"7月14日 14:00", want},   // 分隔空格
+		{"7月14日 9:00", earlier}, // 两种变体叠加
+	} {
+		if got, ok := MatchFrozenRecommendedMeetingTime(slots, accepted.value); !ok || got != accepted.want {
+			t.Fatalf("等价写法未命中: value=%q got=%d want=%d ok=%v",
+				accepted.value, got, accepted.want, ok)
+		}
+	}
 	for _, invalid := range []string{
-		"07月14日14:00",
-		"7月14日 14:00",
-		"7月14日2:00",
+		"07月14日14:00",  // 月份补零：无实际证据，不放宽
+		"7月14日　14:00",  // 全角空格：同上
+		"7月14日  14:00", // 两个空格：只放行单个半角空格
+		"7月14日2:00",    // 写法合法但 02:00 不在冻结时段——语义一步没松
 		"2026年7月14日14:00",
 		"明天下午两点",
 	} {
