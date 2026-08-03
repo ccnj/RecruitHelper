@@ -253,6 +253,7 @@ class FakeSensorConnection {
     this.snapshots = []
     this.commandListeners = []
     this.configListeners = []
+    this.heartbeatListeners = []
   }
   currentCommandContext(platform) {
     return this.context?.platform === platform ? this.context : undefined
@@ -263,12 +264,17 @@ class FakeSensorConnection {
   }
   onCommandContext(listener) { this.commandListeners.push(listener); return () => {} }
   onSensorConfig(listener) { this.configListeners.push(listener); return () => {} }
+  onHeartbeat(listener) { this.heartbeatListeners.push(listener); return () => {} }
   sensorConfig() { return this.config }
   setContextHealth(contexts) { this.contextHealth = contexts }
   setSensorSnapshot(snapshot) { this.snapshots.push(snapshot) }
   setContext(context) {
     this.context = context
     for (const listener of this.commandListeners) listener(context)
+  }
+  // 驱动一次心跳节奏，供重新同步用例使用
+  tickHeartbeat() {
+    for (const listener of this.heartbeatListeners) listener()
   }
 }
 
@@ -11106,6 +11112,91 @@ test('readList MAIN 从同一行 Nuxt 组件读取稳定身份且私有时间倒
   }
 })
 
+// 真机 2026-08-03：平台偶发给某一行 lastSentence 字符串 "null"（该会话摘要
+// 未被填充，打开会话后才补上，纯等待 18 秒读 12 次一动不动）。此前整窗抛错，
+// 一个坏行让 32 行全读不出来，还借 readThread 升成 manualOnly 隔离了两个无辜
+// 候选人。现在跳过坏行、整窗照常返回，并把跳过的身份留在 skippedRefs 里。
+test('readList MAIN 单行摘要坏数据只跳过该行，整窗照常返回且跳过留痕', async () => {
+  const original = {
+    document: globalThis.document,
+    window: globalThis.window,
+    getComputedStyle: globalThis.getComputedStyle,
+    setTimeout: globalThis.setTimeout,
+  }
+  const marker = {}
+  const makeRow = () => ({
+    getClientRects: () => [{}],
+    contains: (element) => element === marker,
+    querySelector(selector) {
+      return selector === '.im-session-item__box, .im-session-item' ? marker : null
+    },
+    querySelectorAll() { return [] },
+  })
+  const rows = [makeRow(), makeRow(), makeRow(), makeRow()]
+  const sources = [
+    {
+      sessionId: 'session-ok-head', peerPartnerId: 'peer-ok-head', unreadCount: 0,
+      name: '候选人甲', sortTime: 4_000,
+      lastSentence: { senderType: 'USER', text: '你好', sendTime: 4_000 },
+    },
+    {
+      // 真机原样形态：JSON 序列化的 null 落成字符串
+      sessionId: 'session-null-sentence', peerPartnerId: 'peer-null-sentence', unreadCount: 0,
+      name: '候选人乙', sortTime: 3_000, lastSentence: 'null',
+    },
+    {
+      // 非法 JSON 同样只跳过该行，不炸整窗
+      sessionId: 'session-broken-json', peerPartnerId: 'peer-broken-json', unreadCount: 0,
+      name: '候选人丙', sortTime: 2_000, lastSentence: '{"senderType"',
+    },
+    {
+      sessionId: 'session-ok-tail', peerPartnerId: 'peer-ok-tail', unreadCount: 2,
+      name: '候选人丁', sortTime: 1_000,
+      lastSentence: { senderType: 'STAFF', text: '稍后联系', sendTime: 1_000 },
+    },
+  ]
+  const virtual = {
+    scrollTop: 0, scrollHeight: 600, clientHeight: 300,
+    parentElement: null, querySelectorAll() { return [] }, dispatchEvent() {},
+  }
+  try {
+    globalThis.setTimeout = (callback) => { callback(); return 0 }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    globalThis.document = {
+      querySelector(selector) {
+        return selector === '.im-session-list .im-session-list__virtual' ? virtual : null
+      },
+      querySelectorAll(selector) {
+        return selector.includes('div[role="listitem"]') ? rows : []
+      },
+    }
+    globalThis.window = {
+      $nuxt: {
+        $children: rows.map((row, index) => ({ $el: row, _props: { source: sources[index] }, $children: [] })),
+      },
+    }
+    const result = await zhilianTestHooks.mainReadListDOMWindow(false, false)
+    assert.equal(result.__recruitHelperMainError, undefined,
+      '单行摘要坏数据不得让整窗读取失败')
+    assert.deepEqual(
+      result.sessions.map((item) => item.conversationRef),
+      ['session-ok-head', 'session-ok-tail'],
+      '坏行被跳过，其余行必须原样保留且保持页面顺序',
+    )
+    assert.deepEqual(
+      result.skippedRefs,
+      ['session-null-sentence', 'session-broken-json'],
+      '跳过必须留痕：不得由手静默过滤',
+    )
+    assert.equal(result.unstable, false, '坏行占位参与稳定判定，不得误判为窗口抖动')
+    const advanced = await zhilianTestHooks.mainReadListDOMWindow(true, false)
+    assert.equal(advanced.__recruitHelperMainError, undefined)
+    assert.equal(advanced.moved, true, '坏行不得影响 next 的推进判定')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
   // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
   // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的
@@ -11414,6 +11505,61 @@ test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome se
   for (const listener of connection.configListeners) listener(connection.config)
   await eventually(() => sent.some((item) => item.message.sensors?.badgeDebounceMs === 1_200),
     'welcome 更新后未动态推送 content')
+})
+
+// 真机 2026-08-03：SW 未重启、只有一个平台标签页，SW 侧传感缓存仍然空着，而
+// 页面侧"值没变就不报"于是永不补发。未读靠一条新消息才解锁，登录态几乎从不
+// 变化，pageHealth 一直停在 degraded。增量上报的接收方必须自带重新同步路径。
+test('SensorBridge 心跳自查：传感缓存缺失时索要重新同步，齐全后不再打扰', async () => {
+  const runtimeMessage = chromeEvent()
+  const sent = []
+  globalThis.chrome = {
+    runtime: { onMessage: runtimeMessage },
+    tabs: {
+      onActivated: chromeEvent(), onUpdated: chromeEvent(), onRemoved: chromeEvent(),
+      async query() { return [] },
+      async sendMessage(tabId, message) { sent.push({ tabId, message }); return { ok: true } },
+    },
+    windows: { WINDOW_ID_NONE: -1, onFocusChanged: chromeEvent() },
+    webNavigation: {
+      onCommitted: chromeEvent(), onHistoryStateUpdated: chromeEvent(),
+      onReferenceFragmentUpdated: chromeEvent(),
+    },
+  }
+  const connection = new FakeSensorConnection()
+  const bridge = new SensorBridge(connection)
+  bridge.start()
+  const tab = { tabId: 7, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
+
+  // 还没有任何 content 状态：心跳不得凭空向不存在的页面索要
+  connection.tickHeartbeat()
+  await eventually(() => true, '')
+  assert.equal(sent.length, 0, '没有 canonical 页面时心跳不得发起重新同步')
+
+  // Ready 建起缓存：unread 为 null、登录态为 Unknown，正是失联形态
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.Ready, at: 0, pageKind: PageKind.Im, url: tab.url }, tab,
+  )
+  await eventually(() => sent.length > 0, 'Ready 握手未下发配置')
+  const 握手后 = sent.length
+
+  connection.tickHeartbeat()
+  await eventually(() => sent.length > 握手后, '传感缓存缺失时心跳未索要重新同步')
+  assert.equal(sent.at(-1).message.requestSnapshot, true,
+    '重新同步必须带 requestSnapshot，否则页面侧仍会因值未变而沉默')
+
+  // 补齐两项读数
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.UnreadStable, emitEvent: false, observedAt: 1, prev: null, value: 3 }, tab,
+  )
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.LoginStable, observedAt: 1, state: LoginState.In }, tab,
+  )
+  const 齐全后 = sent.length
+  connection.tickHeartbeat()
+  connection.tickHeartbeat()
+  await eventually(() => true, '')
+  assert.equal(sent.length, 齐全后, '传感齐全后心跳必须零打扰，不得每拍骚扰页面')
 })
 
 test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随后重复 manual', async () => {

@@ -29,7 +29,14 @@ export class ContentSensor {
   private badgeTimer: unknown = null
   private loginTimer: unknown = null
   private navigationTimer: unknown = null
+  // 重新同步票据。传感是增量上报（值没变就不报），而 SW 侧那份缓存可能单边
+  // 丢失；没有这两张票，接收方一旦丢了状态就只能等值本身变化——未读还能靠新
+  // 消息解锁，登录态几乎从不变化，等于永久失联。票由 configure(requestSnapshot)
+  // 发放，各自在成功上报后消费一次。
+  // 导航刻意不发票：pageKind 在 Ready 握手里已带初值不会缺失，且 PageNavigated
+  // 在脑侧会拉前巡检、还可能被归因成真人操作，强制重发等于伪造用户行为。
   private forceUnreadSnapshot = false
+  private forceLoginSnapshot = false
   private lastStableUnread: number | null = null
   private lastEmittedUnread: number | null = null
   private lastUnreadEmitAt = Number.NEGATIVE_INFINITY
@@ -53,7 +60,9 @@ export class ContentSensor {
 
   configure(config: SensorParams | null, requestSnapshot = false): void {
     this.config = config ? Object.freeze({ ...config }) : null
-    this.forceUnreadSnapshot = this.config !== null && requestSnapshot
+    const force = this.config !== null && requestSnapshot
+    this.forceUnreadSnapshot = force
+    this.forceLoginSnapshot = force
     this.clearSamplingTimers()
     this.armAll()
   }
@@ -148,7 +157,11 @@ export class ContentSensor {
     this.loginTimer = this.env.setTimer(() => {
       this.loginTimer = null
       const second = this.env.readLoginState()
-      if (second !== first || second === this.lastStableLogin) return
+      // 双读不一致不产生事实；值未变化时，仅在持票（SW 侧缺登录态、刚索要过
+      // 重新同步）的情况下才补报一次。
+      if (second !== first) return
+      if (second === this.lastStableLogin && !this.forceLoginSnapshot) return
+      this.forceLoginSnapshot = false
       this.lastStableLogin = second
       this.env.emit({
         type: CONTENT_MESSAGE.LoginStable,

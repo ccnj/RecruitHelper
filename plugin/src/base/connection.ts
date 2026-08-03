@@ -104,6 +104,9 @@ export class Connection {
   private commandContexts = new Map<string, Readonly<CmdContext>>()
   private commandContextListeners = new Set<(context: Readonly<CmdContext>) => void>()
   private sensorConfigListeners = new Set<(config: Readonly<Partial<SensorParams>>) => void>()
+  // 心跳订阅只提供既有的周期节奏，不新增定时器：传感层借它周期自查缓存是否
+  // 单边丢失，避免"增量上报 + 接收方丢状态"永久失联。
+  private heartbeatListeners = new Set<() => void>()
   private readonly witness = new WitnessStore(chrome.storage.local as unknown as WitnessStorage)
   private witnessEnabledForSession = false
   private dispatcher: Dispatcher
@@ -167,6 +170,11 @@ export class Connection {
   onSensorConfig(listener: (config: Readonly<Partial<SensorParams>>) => void): () => void {
     this.sensorConfigListeners.add(listener)
     return () => this.sensorConfigListeners.delete(listener)
+  }
+
+  onHeartbeat(listener: () => void): () => void {
+    this.heartbeatListeners.add(listener)
+    return () => this.heartbeatListeners.delete(listener)
   }
 
   currentCommandContext(platform: string): Readonly<CmdContext> | undefined {
@@ -519,6 +527,12 @@ export class Connection {
     const body: PingBody = {
       queueDepth: execution.queueDepth,
       inFlight: execution.inFlight,
+    }
+    // 先给传感层一次自查机会：它可能就地补发重新同步请求。本次心跳仍带旧值，
+    // 补发的读数由下一次心跳送达，这个一拍延迟换来的是"永不自愈"变成"最多一
+    // 个心跳周期"。监听器异常绝不能影响心跳本身。
+    for (const listener of this.heartbeatListeners) {
+      try { listener() } catch (error) { console.warn('[hand] 心跳订阅者异常', error) }
     }
     body.contexts = this.contexts
     body.sensors = this.currentPingSensors()
