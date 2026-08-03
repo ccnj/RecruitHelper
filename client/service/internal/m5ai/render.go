@@ -651,8 +651,11 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 		"· 无 —— 默认就填这个。抛出时段让他挑、他还没答应时，也填「无」。",
 	}
 	if menu.AllowStartMeeting {
+		// 点名三种"不该填",但压到一行:实测块越长,后面的禁止句越压不住
+		// (换微信误填随块长度 0→1→2 单调上升)。只说正面条件时又有 2/30 在
+		// 对方尚未挑定时就发卡,而邀面卡是候选人可见、不可逆的。
 		lines = append(lines,
-			"· 发起线上会议 —— 仅当他已经明确挑定了某个时间才填，并把定下的那一格填进「会议时间」。")
+			"· 发起线上会议 —— 只有他自己说定了具体时间才填；你在问、他没答、时间是你提的，都填「无」。")
 	}
 	if menu.AllowInviteWechat {
 		lines = append(lines,
