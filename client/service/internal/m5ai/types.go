@@ -127,6 +127,30 @@ type ReplySuggestion struct {
 	MeetingTime string
 }
 
+// ReplyMenuWechatLine 只服务【本轮可选动作】块的措辞。同样是"本轮不能再
+// 邀请",已经发出邀请与已经换到号该说的话不一样;说错就是拿假事实喂模型。
+type ReplyMenuWechatLine string
+
+const (
+	ReplyMenuWechatNotInvited ReplyMenuWechatLine = "notInvited"
+	ReplyMenuWechatInvited    ReplyMenuWechatLine = "invited"
+	ReplyMenuWechatExchanged  ReplyMenuWechatLine = "exchanged"
+)
+
+// ReplyActionMenu 是脑在调用 provider 之前算出的、本轮 `动作` 字段的合法
+// 取值范围,由 communication 侧按已冻结状态与本轮事实计算。
+//
+// 它必须与事后业务前置裁决共用同一份判据(沟通逻辑规格 v4 §五「客户端渲染
+// 期追加块」的同源要求):提示词侧另抄一份规则省事,但两边总有一天走岔,
+// 那时症状是"模型照块填了、脑还是拒",极难查。
+//
+// 它不构成授权:模型照它给的建议仍要过完整的业务前置裁决。
+type ReplyActionMenu struct {
+	AllowStartMeeting bool
+	AllowInviteWechat bool
+	WechatLine        ReplyMenuWechatLine
+}
+
 type ScoringSuggestion struct {
 	Score int
 }

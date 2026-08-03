@@ -727,3 +727,90 @@ func TestRoundUpToInterviewTimeGrid(t *testing.T) {
 		t.Fatalf("面试时长必须落在平台时间格上: duration=%d grid=%d", V4InterviewDurationMs, V4InterviewTimeGridMs)
 	}
 }
+
+// 菜单与事后裁决必须同源(规格 v4 §五「客户端渲染期追加块」)。【本轮可选
+// 动作】块照 V4ReplyActionMenu 渲染,而 planV4ReplyActions 是真正说了算的
+// 那一道;两边一旦走岔,症状是"模型照块填了、脑还是拒",在生产里极难查。
+// 这个对拍遍历状态空间,断言"菜单说能填" 恰好等价于 "裁决接受该动作"。
+func TestV4ReplyActionMenuMatchesPlanDecision(t *testing.T) {
+	const hitMeetingTime = "7月14日09:00"
+	slots := []string{"2026-07-14 09:00:00", "2026-07-14 14:00:00"}
+
+	wechatLines := []V4WechatStatus{
+		V4WechatNotInvited, V4WechatInvited, V4WechatExchanged,
+	}
+	mainStatuses := []V4MainStatus{
+		V4StatusGreeted, V4StatusCommunicating, V4StatusInvited,
+		V4StatusInterviewed, V4StatusEnded, V4StatusEliminated,
+	}
+
+	for _, allowSuggested := range []bool{true, false} {
+		for _, wechat := range wechatLines {
+			for _, mainStatus := range mainStatuses {
+				for _, withSlots := range []bool{true, false} {
+					for _, withMessages := range []bool{true, false} {
+						state := activeV4DialogueState()
+						state.MainStatus = mainStatus
+						state.WechatState = wechat
+
+						turn := ordinaryTurn()
+						if !withMessages {
+							turn.Messages = nil
+						}
+						if withSlots {
+							turn.RecommendedSlots = slots
+						}
+
+						menu := V4ReplyActionMenu(state, turn, allowSuggested)
+
+						_, wechatAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
+							Phrases: []string{"那咱们加个微信细聊。"},
+							Text:    "那咱们加个微信细聊。",
+							Action:  m5ai.ReplyActionInviteWechat,
+						}, allowSuggested)
+						if wechatAccepted != menu.AllowInviteWechat {
+							t.Fatalf(
+								"换微信判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t)",
+								menu.AllowInviteWechat, wechatAccepted,
+								allowSuggested, wechat, mainStatus, withSlots, withMessages,
+							)
+						}
+
+						_, meetingAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
+							Phrases:     []string{"那就约这个时间。"},
+							Text:        "那就约这个时间。",
+							Action:      m5ai.ReplyActionStartOnlineMeeting,
+							MeetingTime: hitMeetingTime,
+						}, allowSuggested)
+						if meetingAccepted != menu.AllowStartMeeting {
+							t.Fatalf(
+								"线上会议判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t)",
+								menu.AllowStartMeeting, meetingAccepted,
+								allowSuggested, wechat, mainStatus, withSlots, withMessages,
+							)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// 微信线三态各自有独立措辞,不得合并:"已经发出邀请"和"已经换到号"对模型
+// 是两件不同的事实,说错就是拿假事实喂它。
+func TestV4ReplyActionMenuReportsWechatLineVerbatim(t *testing.T) {
+	for _, testCase := range []struct {
+		state V4WechatStatus
+		want  m5ai.ReplyMenuWechatLine
+	}{
+		{V4WechatNotInvited, m5ai.ReplyMenuWechatNotInvited},
+		{V4WechatInvited, m5ai.ReplyMenuWechatInvited},
+		{V4WechatExchanged, m5ai.ReplyMenuWechatExchanged},
+	} {
+		state := activeV4DialogueState()
+		state.WechatState = testCase.state
+		if got := V4ReplyActionMenu(state, ordinaryTurn(), true).WechatLine; got != testCase.want {
+			t.Fatalf("微信线措辞映射错误: state=%s got=%s want=%s", testCase.state, got, testCase.want)
+		}
+	}
+}
