@@ -825,11 +825,25 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 	return out, nil
 }
 
+// sameInvocationReservation 只核对编号本身的原料。invocationID 是从
+// (turnID, purpose, attempt) 哈希出来的,这三项对不上说明两组不同原料算出了
+// 同一个编号——那是 ID 生成的 bug,继续走会把两件不同的事记在一个编号底下,
+// 必须停下。ContextRevisionHash 随 turnID 固有,一并核对不增成本。
+//
+// 刻意不核对 Provider/Model/InputHash(2026-08-03 甲方裁决)。它们描述的是
+// "这次调用长什么样",而本预留点的两条实际路径都不取既有行的结果:
+//   - 已完成的行只被 attempt 游走路过,随即换下一号重新调用;
+//   - 未完成的行(脑崩溃留下)由 finishInterruptedM5Advice 一律写成
+//     processInterrupted 失败,provider 响应只活在内存里,崩了就没了,
+//     没有任何"复用旧答案"的路径存在。
+// 既然两边都不用结果,比对就防不住"拿旧答案回答新问题"——那条路本来就
+// 不通。它反倒会误伤:这三项会在两轮巡检之间自己变(换 model、微信线推进
+// 改写【本轮可选动作】块),一变就永远对不上,于是每轮在同一处失败、同一
+// 处跳过,静默把这一轮永久卡死,直到候选人再说话才重开新轮。
 func sameInvocationReservation(existing, wanted AIInvocation) bool {
 	return existing.TurnID == wanted.TurnID && existing.Purpose == wanted.Purpose &&
-		existing.Attempt == wanted.Attempt && existing.Provider == wanted.Provider &&
-		existing.Model == wanted.Model && existing.ContextRevisionHash == wanted.ContextRevisionHash &&
-		existing.InputHash == wanted.InputHash
+		existing.Attempt == wanted.Attempt &&
+		existing.ContextRevisionHash == wanted.ContextRevisionHash
 }
 
 type AIInvocationCompletion struct {
