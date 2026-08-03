@@ -9020,10 +9020,14 @@ async function mainObserveStableOutbound(
   }
 }
 
-// 最终消息副作用只在这一段同步 MAIN task 中发生。函数内没有 Promise/await、网络读取、
-// 定时器或第二次 click；即使 SW 在注入排队期间失联，过期 action window 也会在页面内
-// 阻止迟到点击。
-function mainSendMessageOnce(
+// 最终消息副作用只在这一段 MAIN task 中发生。函数内没有网络读取、没有第二次 click；
+// 即使 SW 在注入排队期间失联，过期 action window 也会在页面内阻止迟到点击。
+//
+// 2026-08-03:写入正文与 final evaluator 之间插入一次人类量级停顿(见下),函数因此
+// 变为 async。契约要求的"final evaluator 通过后不得再读取可变页面状态、必须立即
+// 调用一次"未被削弱——停顿在 evaluator 之前,evaluator 之后到 click 之间仍无任何
+// await 或页面读取。动作窗口检查因为发生在停顿之后,反而比原来更晚更准。
+async function mainSendMessageOnce(
   conversationRef: string,
   text: string,
   expectedTail: ZhilianMessageAnchor[],
@@ -9032,7 +9036,7 @@ function mainSendMessageOnce(
   expectedBaselineServerSourceKeys: string[],
   expectedTargetBindingToken: string,
   phase: MainSendPhase,
-): MainSendOnceResult {
+): Promise<MainSendOnceResult> {
   type AnyRecord = Record<string, unknown>
   const w = window as unknown as AnyRecord
   const clean = (value: unknown): string => String(value ?? '')
@@ -9575,10 +9579,28 @@ function mainSendMessageOnce(
   }
   try {
     prepared.state.setter.call(prepared.state.surface.composer, text)
+    // 输入事件序列与旧产品 dispatchTextInputEvents 逐项一致:beforeinput 先于 input
+    // 一对一配对是 Chrome 里真人输入的固有形状,keyup key='Process' 是中文输入法提交
+    // 时的真实取值。2026-08-03 真机实测:补这两个事件不产生任何网络请求、不触发
+    // "正在输入"提示,对候选人完全不可见。
+    prepared.state.surface.composer.dispatchEvent(new InputEvent('beforeinput', {
+      bubbles: true, cancelable: true, inputType: 'insertText', data: text,
+    }))
     prepared.state.surface.composer.dispatchEvent(new InputEvent('input', {
       bubbles: true, inputType: 'insertText', data: text,
     }))
     prepared.state.surface.composer.dispatchEvent(new Event('change', { bubbles: true }))
+    prepared.state.surface.composer.dispatchEvent(new KeyboardEvent('keyup', {
+      bubbles: true, key: 'Process',
+    }))
+    // 写入到点击之间的人类量级停顿。旧产品此处是 sleep(100)+sleep(500),下限约 600ms;
+    // 新产品此前为 0ms——输入框由空变为整段正文与点击发生在同一个 event loop task 内,
+    // 两个时间戳相减恒为 0。取随机区间而非固定值:固定值本身就是可被直方图识别的特征。
+    // 停顿吃掉的是 execBudget(60s)的 1~2.5%,余量充足。
+    await new Promise((resolve) => setTimeout(resolve, 600 + Math.floor(Math.random() * 901)))
+    // 停顿期间世界可能已变(候选人插话、会话切走、身份变化、动作窗口过期)。下面这次
+    // evaluator 是唯一裁决点:它在停顿之后才核对账号、目标、动作窗口、编辑器期望值与
+    // expectedTail,任何不一致都走 failAfterInput 还原草稿并失败,不重试。
     const finalEvaluation = evaluate(text)
     if (finalEvaluation.status === 'failed') return failAfterInput(finalEvaluation.reason)
     const invokeClick = Function.prototype.call.bind(
