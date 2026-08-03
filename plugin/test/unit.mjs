@@ -10913,8 +10913,19 @@ test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', asy
   const original = {
     chrome: globalThis.chrome,
     document: globalThis.document,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
   }
   try {
+    // 虚拟列表缺失时 resolve_surface 会按条件轮询等满上限。这条用例是纯阴性,
+    // 用虚拟时钟推进,免得真等两轮 10 秒。
+    let virtualNow = 1_780_000_000_000
+    Date.now = () => virtualNow
+    globalThis.setTimeout = (callback, delay = 0, ...args) => {
+      virtualNow += Math.max(0, Number(delay) || 0)
+      queueMicrotask(() => callback(...args))
+      return 1
+    }
     globalThis.document = {
       querySelector() { return null },
     }
@@ -10945,6 +10956,56 @@ test('readList MAIN 内部异常保留脱敏阶段且不退化为空结果', asy
     )
   } finally {
     Object.assign(globalThis, original)
+    Date.now = original.dateNow
+  }
+})
+
+test('readList MAIN 在虚拟列表重建空窗内按条件轮询等它回来', async () => {
+  const original = {
+    document: globalThis.document,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+  }
+  try {
+    let virtualNow = 1_780_000_000_000
+    Date.now = () => virtualNow
+    const delays = []
+    globalThis.setTimeout = (callback, delay = 0, ...args) => {
+      delays.push(delay)
+      virtualNow += Math.max(0, Number(delay) || 0)
+      queueMicrotask(() => callback(...args))
+      return 1
+    }
+    // 切换会话列表筛选时智联会整体卸载重建虚拟列表,真机实测空窗 0.3~0.9 秒。
+    // 外层 .im-session-list 全程都在,imListVisible 探针看不见这段空窗,所以
+    // 这里必须自己等:前三次查不到,第四次回来就得接着往下读。
+    let lookups = 0
+    const virtual = {
+      querySelectorAll: () => [],
+      parentElement: null,
+      scrollHeight: 0,
+      clientHeight: 0,
+    }
+    globalThis.document = {
+      querySelector(selector) {
+        if (!String(selector).includes('__virtual')) return null
+        lookups += 1
+        return lookups < 4 ? null : virtual
+      },
+    }
+
+    const sentinel = await zhilianTestHooks.mainReadListDOMWindow(false, false)
+    assert.equal(lookups, 4, '虚拟列表未就绪时必须继续轮询,不能查一次就判缺失')
+    assert.doesNotMatch(
+      sentinel.__recruitHelperMainError,
+      /dom_list_virtual_missing/u,
+      '列表已经回来就不得再判缺失',
+    )
+    assert.match(sentinel.__recruitHelperMainError, /dom_list_scroll_surface_missing/u)
+    assert.deepEqual(delays, [100, 100, 100], '轮询间隔固定 100ms,不做退避')
+  } finally {
+    Object.assign(globalThis, original)
+    Date.now = original.dateNow
   }
 })
 
