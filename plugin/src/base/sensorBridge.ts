@@ -34,6 +34,7 @@ export interface SensorConnectionPort {
     observedAt?: number,
   ): SendOutcome
   onCommandContext(listener: (context: Readonly<CmdContext>) => void): () => void
+  onHeartbeat(listener: () => void): () => void
   onSensorConfig(listener: (config: Readonly<Partial<SensorParams>>) => void): () => void
   sensorConfig(): Readonly<Partial<SensorParams>>
   setContextHealth(contexts: readonly PingContext[]): void
@@ -82,6 +83,7 @@ export class SensorBridge {
     this.started = true
 
     this.connection.onSensorConfig(() => { void this.broadcastConfiguration(true) })
+    this.connection.onHeartbeat(() => { this.resyncStaleSensors() })
     this.connection.onCommandContext((context) => {
       if (context.platform === PLATFORM) this.refreshCachedState()
     })
@@ -341,6 +343,19 @@ export class SensorBridge {
     }
     this.tabStates.set(source.tabId, state)
     return state
+  }
+
+  // 增量上报的接收方必须自带一条重新同步路径。页面侧"值没变就不报"是对的，
+  // 但本地这份缓存会单边丢失（真机 2026-08-03：SW 未重启、只有一个平台标签页，
+  // 缓存仍然空着），此时干等值本身变化就是死锁——未读还能被一条新消息解锁，
+  // 登录态几乎从不变化，等于永久失联，pageHealth 会一直停在 degraded。
+  // 只在确实缺失时索要，齐全时零开销；借既有心跳节奏，不新增定时器。
+  private resyncStaleSensors(): void {
+    if (!this.started) return
+    const canonical = this.canonicalTab()
+    if (!canonical) return
+    if (canonical.unread !== null && canonical.loginState !== LoginState.Unknown) return
+    void this.sendConfiguration(canonical.tabId, true)
   }
 
   private canonicalTab(): ContentTabState | null {

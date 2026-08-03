@@ -253,6 +253,7 @@ class FakeSensorConnection {
     this.snapshots = []
     this.commandListeners = []
     this.configListeners = []
+    this.heartbeatListeners = []
   }
   currentCommandContext(platform) {
     return this.context?.platform === platform ? this.context : undefined
@@ -263,12 +264,17 @@ class FakeSensorConnection {
   }
   onCommandContext(listener) { this.commandListeners.push(listener); return () => {} }
   onSensorConfig(listener) { this.configListeners.push(listener); return () => {} }
+  onHeartbeat(listener) { this.heartbeatListeners.push(listener); return () => {} }
   sensorConfig() { return this.config }
   setContextHealth(contexts) { this.contextHealth = contexts }
   setSensorSnapshot(snapshot) { this.snapshots.push(snapshot) }
   setContext(context) {
     this.context = context
     for (const listener of this.commandListeners) listener(context)
+  }
+  // 驱动一次心跳节奏，供重新同步用例使用
+  tickHeartbeat() {
+    for (const listener of this.heartbeatListeners) listener()
   }
 }
 
@@ -11499,6 +11505,61 @@ test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome se
   for (const listener of connection.configListeners) listener(connection.config)
   await eventually(() => sent.some((item) => item.message.sensors?.badgeDebounceMs === 1_200),
     'welcome 更新后未动态推送 content')
+})
+
+// 真机 2026-08-03：SW 未重启、只有一个平台标签页，SW 侧传感缓存仍然空着，而
+// 页面侧"值没变就不报"于是永不补发。未读靠一条新消息才解锁，登录态几乎从不
+// 变化，pageHealth 一直停在 degraded。增量上报的接收方必须自带重新同步路径。
+test('SensorBridge 心跳自查：传感缓存缺失时索要重新同步，齐全后不再打扰', async () => {
+  const runtimeMessage = chromeEvent()
+  const sent = []
+  globalThis.chrome = {
+    runtime: { onMessage: runtimeMessage },
+    tabs: {
+      onActivated: chromeEvent(), onUpdated: chromeEvent(), onRemoved: chromeEvent(),
+      async query() { return [] },
+      async sendMessage(tabId, message) { sent.push({ tabId, message }); return { ok: true } },
+    },
+    windows: { WINDOW_ID_NONE: -1, onFocusChanged: chromeEvent() },
+    webNavigation: {
+      onCommitted: chromeEvent(), onHistoryStateUpdated: chromeEvent(),
+      onReferenceFragmentUpdated: chromeEvent(),
+    },
+  }
+  const connection = new FakeSensorConnection()
+  const bridge = new SensorBridge(connection)
+  bridge.start()
+  const tab = { tabId: 7, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
+
+  // 还没有任何 content 状态：心跳不得凭空向不存在的页面索要
+  connection.tickHeartbeat()
+  await eventually(() => true, '')
+  assert.equal(sent.length, 0, '没有 canonical 页面时心跳不得发起重新同步')
+
+  // Ready 建起缓存：unread 为 null、登录态为 Unknown，正是失联形态
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.Ready, at: 0, pageKind: PageKind.Im, url: tab.url }, tab,
+  )
+  await eventually(() => sent.length > 0, 'Ready 握手未下发配置')
+  const 握手后 = sent.length
+
+  connection.tickHeartbeat()
+  await eventually(() => sent.length > 握手后, '传感缓存缺失时心跳未索要重新同步')
+  assert.equal(sent.at(-1).message.requestSnapshot, true,
+    '重新同步必须带 requestSnapshot，否则页面侧仍会因值未变而沉默')
+
+  // 补齐两项读数
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.UnreadStable, emitEvent: false, observedAt: 1, prev: null, value: 3 }, tab,
+  )
+  bridge.acceptContentMessage(
+    { type: CONTENT_MESSAGE.LoginStable, observedAt: 1, state: LoginState.In }, tab,
+  )
+  const 齐全后 = sent.length
+  connection.tickHeartbeat()
+  connection.tickHeartbeat()
+  await eventually(() => true, '')
+  assert.equal(sent.length, 齐全后, '传感齐全后心跳必须零打扰，不得每拍骚扰页面')
 })
 
 test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随后重复 manual', async () => {
