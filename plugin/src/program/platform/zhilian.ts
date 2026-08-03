@@ -7452,15 +7452,9 @@ async function mainReadThreadPage(
     const im = readInitialState().im as AnyRecord | undefined
     return Array.isArray(im?.sessions) ? im.sessions as AnyRecord[] : []
   }
-  const readInitialTimeline = (): unknown[] => {
-    const im = readInitialState().im as AnyRecord | undefined
-    const timelineMap = im?.timelineMap
-    if (!timelineMap || typeof timelineMap !== 'object' || Array.isArray(timelineMap)) return []
-    const timelineEntry = (timelineMap as AnyRecord)[conversationRef]
-    if (!timelineEntry || typeof timelineEntry !== 'object' || Array.isArray(timelineEntry)) return []
-    const timeline = (timelineEntry as AnyRecord).timeline
-    return Array.isArray(timeline) ? [...timeline] : []
-  }
+  // 2026-08-03:原 readInitialTimeline(SSR __INITIAL_STATE__.im.timelineMap)已移除。
+  // 它是页面加载时刻的静态快照、不随新消息更新,用作发后验证读会系统性误判;
+  // 巡检路径另有平台接口兜底,不需要它。readInitialState 仍为 readInitialSessions 服务。
   diagnosticStage = 'resolve_session_runtime'
   let sessions = (engine && Array.isArray(engine.sessions) ? engine.sessions : []) as AnyRecord[]
   let session = sessions.find((item) => String(item.sessionId ?? '') === conversationRef)
@@ -7475,9 +7469,17 @@ async function mainReadThreadPage(
 
   const target = String(session.peerPartnerId ?? '')
   if (!target) throw new Error('conversation_target_missing')
+  // 2026-08-03:页面数据优先,平台历史接口降为兜底。真机实测每调用一次
+  // getHistoryMsgs 就被平台埋点 1:1 记录一条上报,而页面消息数组是同一份数据的
+  // 本地读、零网络零上报。会话已打开时(发后验证读的常态)一律走页面;接口只在
+  // 会话未打开(巡检)或页面通道失效时兜底。
+  diagnosticStage = 'probe_page_source'
+  const pageSourceReady = selectedConversationRef === conversationRef &&
+    (document.querySelector<HTMLElement>('.im-timeline__wrapper .km-list') ??
+      document.querySelector<HTMLElement>('.im-timeline__wrapper .im-timeline')) !== null
   let history: unknown = null
   let historyFailure: 'unavailable' | 'rejected' | 'shape' | null = null
-  if (engine && typeof engine.getHistoryMsgs === 'function' && target) {
+  if (!pageSourceReady && engine && typeof engine.getHistoryMsgs === 'function' && target) {
     diagnosticStage = 'read_history_api'
     const request: AnyRecord = { to: target, limit, asc: true }
     // 真机 2026-07-28:现网 session.scene 为 undefined,而 sessionType 不是
@@ -7536,25 +7538,47 @@ async function mainReadThreadPage(
       return /(?:以下是\s*90\s*天内(?:的)?聊天消息|(?:仅展示|只展示)(?:近)?\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息|近\s*90\s*天(?:内)?(?:的)?(?:聊天)?消息)/u
         .test(boundaryText)
     }
-    const readRows = (): unknown[] => {
+    // 两级页面取数(2026-08-03 真机验证)。一级读 timeline 组件的 props,二级扫描
+    // 任意暴露 __vue__ 的组件取 Vuex getter。二者实测是同一个数组对象(引用相等),
+    // 但访问路径独立:一级要求 timeline 元素自身暴露 __vue__,二级只要页面上任意
+    // 一个组件暴露即可。真机观测 __vue__ 暴露性会随渲染时机剧烈变化(同一批会话行
+    // 两次观测为 0/20 与 24/24),故两级都保留。
+    //
+    // 返回 null 表示"取不到数据"(通道失效),与"读到空数组"(可信的空会话)严格区分。
+    // 旧产品在此处混同:MAIN world 取不到值仍返回 success,调用侧 Array.isArray(x)?x:[]
+    // 把失败当成空数组,最终判 not_sent 并重发。此处不得复用该写法。
+    const readRowsOrNull = (): unknown[] | null => {
       const vue = (timeline as HTMLElement & { __vue__?: AnyRecord }).__vue__
       const props = vue?._props as AnyRecord | undefined
-      if (Array.isArray(props?.data) && props.data.length > 0) return [...props.data]
-      // 生产页面不暴露 Vue2 __vue__；SSR 注入的 timelineMap 是同一路由的稳定消息证词。
-      return readInitialTimeline()
+      if (Array.isArray(props?.data)) return [...(props.data as unknown[])]
+      const nodes = document.querySelectorAll('*')
+      for (let index = 0; index < nodes.length; index += 1) {
+        const owner = (nodes[index] as HTMLElement & { __vue__?: AnyRecord }).__vue__
+        const store = owner?.$store as AnyRecord | undefined
+        if (!store) continue
+        // store 是单例:找到第一个即为全部,取不到 getter 就是取不到,不再扫描。
+        const fromStore = (store.getters as AnyRecord | undefined)?.['im/timeline']
+        return Array.isArray(fromStore) ? [...(fromStore as unknown[])] : null
+      }
+      return null
     }
-    let rawRows = readRows()
-    if (rawRows.length === 0) {
+    let settling = readRowsOrNull()
+    if (settling === null || settling.length === 0) {
       // 真机 2026-07-28:打开会话后"90 天"边界条先于消息约 150~300ms 渲染,
       // 立即读取会把仍在渲染的会话误判成"合法空"。0 条不立刻下结论:按
       // 条件轮询纪律每 150ms 复读,读出消息即继续,至多等 2 秒。
+      // 通道尚未就绪(null)同样在此窗口内重试,与"读到 0 条"共用同一条轮询。
       diagnosticStage = 'read_history_dom_empty_settle'
       const emptyDeadline = performance.now() + 2_000
-      while (rawRows.length === 0 && performance.now() < emptyDeadline) {
+      while ((settling === null || settling.length === 0) && performance.now() < emptyDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 150))
-        rawRows = readRows()
+        settling = readRowsOrNull()
       }
     }
+    // 两级页面通道均取不到数据。此处必须与"读到空数组"分道:后者继续走下面的
+    // 空会话判定,前者是通道失效,交由脑侧按 2026-08-03 裁决处理。
+    if (settling === null) throw new Error('thread_page_source_unavailable')
+    let rawRows = settling
     const hasExplicitNinetyDayBoundary = readNinetyDayBoundary()
     if (rawRows.length === 0 && !hasExplicitNinetyDayBoundary) {
       throw new Error('dom_thread_data_unavailable')
@@ -7569,9 +7593,10 @@ async function mainReadThreadPage(
       scrollElement.scrollTop = 0
       scrollElement.dispatchEvent(new Event('scroll', { bubbles: true }))
       await new Promise((resolve) => setTimeout(resolve, 500))
-      const afterLoad = readRows()
+      const afterLoad = readRowsOrNull()
       await new Promise((resolve) => setTimeout(resolve, 250))
-      const stable = readRows()
+      const stable = readRowsOrNull()
+      if (afterLoad === null || stable === null) throw new Error('thread_page_source_unavailable')
       const projection = (rows: unknown[]): string => JSON.stringify(rows.map((row) => {
         if (!row || typeof row !== 'object' || Array.isArray(row)) return null
         const record = row as AnyRecord
@@ -7877,6 +7902,7 @@ async function mainReadThreadPage(
       'dom_thread_data_unavailable',
       'dom_thread_unstable',
       'dom_thread_cursor_anchor_missing',
+      'thread_page_source_unavailable',
       'thread_history_unavailable',
       'getHistoryMsgs row shape invalid',
       'staff_identity_missing',

@@ -21,6 +21,16 @@ const (
 	// 在途标记：它区分真人触发的单次正证读取与最多三轮自动验证。
 	// 不新增协议/表字段，脑重启后 sweep 仍只恢复这一次读取。
 	manualGreetingVerdictVerificationReason = "人工 resolvedOk 触发一次招呼正证读取"
+
+	// handThreadPageSourceUnavailable 必须与手侧 zhilian.ts 抛出的错误名逐字一致：
+	// 页面两级取数通道(timeline 组件 props 与任意组件的 Vuex getter)都拿不到数据时
+	// 抛出它。手侧错误名进 result.Error.Message(前 500 字符原样保留)，经 RunError
+	// 包装后仍在 verifyErr.Error() 内，故此处用子串匹配。
+	//
+	// 用字符串而非 ErrorCode 是知情的折衷：新增 code 会再次改动契约与 contractHash。
+	// 匹配失败(错误名漂移、消息被改写)的后果是退回 recordMiss 转人工，即恢复原有的
+	// 保守行为，不会造成多发，故该脆弱性方向安全。改手侧错误名时必须同步此处。
+	handThreadPageSourceUnavailable = "thread_page_source_unavailable"
 )
 
 // sweepEffectRecovery 同时保证 query/report 阶段与验证阶段有活性。
@@ -200,8 +210,27 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				}
 			}
 		}
-		recordMiss("验证读失败: " + verifyErr.Error())
-		return
+		// 2026-08-03 甲方裁决:chat.sendMessage 的验证读,当页面两级取数通道整体
+		// 失效、拿不到任何数据时判成功并收编,不重发、不转人工。
+		//
+		// 判据严格限定为"数据源不可用"这一种错误:能读到数据而不满足判据的一律
+		// 走下面的 recordMiss 转人工——两者的差别是通道好不好,不是结论对不对。
+		// 本例外只适用 chat.sendMessage,不扩及招呼语与其他原语。已知代价
+		// (多气泡链、账本污染、无人工信号)与被否决的替代方案见
+		// docs/验证读数据源失效判成功裁决-2026-08-03.md。
+		if cmd.Name == protocol.PrimChatSendMessage &&
+			strings.Contains(verifyErr.Error(), handThreadPageSourceUnavailable) {
+			d.st.Audit("effect_verification_optimistic_ok", cmd.HandID, ref, "")
+			observation = VerificationObservation{
+				Confirmed:   true,
+				ContentHash: intent.SendFingerprint,
+				ObservedAt:  time.Now().UnixMilli(),
+				Reason:      "验证读数据源整体失效,按 2026-08-03 裁决乐观判定为已发送",
+			}
+		} else {
+			recordMiss("验证读失败: " + verifyErr.Error())
+			return
+		}
 	}
 	if !observation.Confirmed || observation.ContentHash != intent.SendFingerprint {
 		reason := observation.Reason
