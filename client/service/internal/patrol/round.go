@@ -646,8 +646,9 @@ func (a *roundActor) openUnreadConversationWithoutAutomation(
 	if err := a.setStage("openingUnreadConversation"); err != nil {
 		return err
 	}
-	// 打开会话是候选人可见的页面切换，与发送共享脑侧拟人节奏。
-	if err := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); err != nil {
+	// 打开会话是"切到下一个人"，与批采换人同档(4～8 秒)，比页面内的
+	// 翻窗滚动慢一档。
+	if err := a.waitSourcingDelay(ctx, a.manager.config.SourcingPaceWait); err != nil {
 		return err
 	}
 	data, err := invokePrimitive[protocol.ChatOpenConversationData](
@@ -1588,10 +1589,10 @@ func (a *roundActor) readThread(ctx context.Context, conversationRef string, anc
 			data protocol.ChatReadThreadData
 			err  error
 		)
-		// 深读首页会把页面切到目标会话，按候选人切换节奏停顿；
+		// 深读首页会把页面切到目标会话，按候选人切换节奏(4～8 秒)停顿；
 		// 同会话内的分页滚动不再叠加大停顿。
 		if cursor == "" {
-			if paceErr := a.waitSourcingDelay(ctx, a.manager.config.InteractionPaceWait); paceErr != nil {
+			if paceErr := a.waitSourcingDelay(ctx, a.manager.config.SourcingPaceWait); paceErr != nil {
 				return threadSnapshot{}, paceErr
 			}
 		}

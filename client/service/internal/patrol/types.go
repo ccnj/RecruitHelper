@@ -301,10 +301,12 @@ type Config struct {
 	// 与 Location 推导。
 	InboundHandoverCutoff time.Time
 	NewRoundID            func() string
-	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
-	// 生产默认使用 2～4 秒随机等待；测试可注入无等待实现，手端
-	// 仍无业务定时器。
-	SourcingPaceWait    func(context.Context) error
+	// SourcingPaceWait 是"换一个人"的节奏：批采、全新自动招呼，以及沟通
+	// 巡检里打开会话与深读会话首页。生产默认 4～8 秒随机等待；测试可注入
+	// 无等待实现，手端仍无业务定时器。
+	SourcingPaceWait func(context.Context) error
+	// InteractionPaceWait 是"同一个页面里再动一下"的节奏：列表翻窗、推荐
+	// 流滚动、筛选切换、发送前停顿。生产默认 2.5～5 秒随机等待。
 	InteractionPaceWait func(context.Context) error
 	// SourcingAIRetryWait 控制评分/招呼语生成失败后的重试退避。生产默认
 	// 指数退避加抖动：非 429 封顶 4 秒，429（unlimited=true）封顶 60 秒；

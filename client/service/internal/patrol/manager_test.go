@@ -165,7 +165,12 @@ func newHarness(t *testing.T) *harness {
 			sequence++
 			return fmt.Sprintf("round-%03d", sequence)
 		},
+		// 两档拟人节奏都注入无等待实现：用例验证的是脑侧的裁决与顺序，
+		// 不是等待时长本身。漏掉任何一档都会让整包退化成按真实秒数空转。
 		InteractionPaceWait: func(ctx context.Context) error {
+			return ctx.Err()
+		},
+		SourcingPaceWait: func(ctx context.Context) error {
 			return ctx.Err()
 		},
 	}
