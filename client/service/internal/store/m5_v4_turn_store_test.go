@@ -556,7 +556,10 @@ func TestCommunicationV4ReplyActionPersistsMeetingPlanAndReplaysWithoutGrowth(t 
 	}
 }
 
-func TestCommunicationV4MeetingActionOnLegacyTurnGoesManualWithZeroAction(t *testing.T) {
+// 旧 turn(仅保存旧渲染文本、无 canonical 时段)上的邀面建议按规格 §五属
+// "本次建议整体无效":2026-08-02 裁决后不再第 1 次尝试即停靠,而是零动作、
+// 样本作废、安排下轮重采;5 次梯子耗尽后的停靠形态由重采测试族另行覆盖。
+func TestCommunicationV4MeetingActionOnLegacyTurnSchedulesResampleWithZeroAction(t *testing.T) {
 	s := openTest(t)
 	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-legacy-meeting")
 	text := "合成普通回复"
@@ -607,14 +610,17 @@ func TestCommunicationV4MeetingActionOnLegacyTurnGoesManualWithZeroAction(t *tes
 		Text:     replyText, Action: m5ai.ReplyActionStartOnlineMeeting,
 		MeetingTime: "7月14日14:00", ContentHash: textcanon.Hash(replyText),
 	})
-	if err != nil || action != nil {
-		t.Fatalf("旧 turn 邀面建议必须零动作收敛: action=%+v err=%v", action, err)
+	var resample *AIAdviceResampleScheduledError
+	if action != nil || !errors.As(err, &resample) ||
+		resample.Reason != string(communication.V4ManualReplyInvalid) ||
+		resample.Attempt != 1 {
+		t.Fatalf("旧 turn 邀面建议必须零动作并安排重采: action=%+v err=%v", action, err)
 	}
 	turn, err := s.DialogueTurnByID(frozen.Turn.TurnID)
 	if err != nil || turn == nil ||
-		turn.Status != DialogueTurnManualRequired ||
-		turn.FailureReason != string(communication.V4ManualReplyInvalid) {
-		t.Fatalf("旧 turn 邀面建议未转人工: turn=%+v err=%v", turn, err)
+		turn.Status != DialogueTurnClassified ||
+		turn.FailureReason != "" {
+		t.Fatalf("重采样本不得留下轮终局: turn=%+v err=%v", turn, err)
 	}
 	actions, err := s.CommunicationActionsByTurn(frozen.Turn.TurnID)
 	if err != nil || len(actions) != 0 {

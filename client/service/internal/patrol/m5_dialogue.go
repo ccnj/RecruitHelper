@@ -1016,6 +1016,15 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
 		return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
 	}
+	var resample *store.AIAdviceResampleScheduledError
+	if errors.As(err, &resample) {
+		// 服务补句的形状(单文本、无动作)按 reduceV4ServiceReply 语义不会
+		// 产出可重采停靠,此分支理论不可达;拦住是防结算面漂移时把信号误当
+		// 落账失败上抛。
+		slog.Warn("服务补句结算判非法,本样本作废等下轮重采",
+			"turnId", turn.TurnID, "reason", resample.Reason, "attempt", resample.Attempt)
+		return 0, errM5AdviceRoundSkipped
+	}
 	if err != nil {
 		logAIInvocationPersistenceFailure(a.manager.advice, m5ai.PurposeServiceReply, completion)
 	}
@@ -1197,7 +1206,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 			return 0, errM5AdviceRoundSkipped
 		}
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
-		if err != nil {
+		if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
+			// 跳过哨兵是本轮的正常结论(边界收敛/结算重采),不是落账失败。
 			logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 		}
 		return 0, err
@@ -1243,7 +1253,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 		decision,
 		reply.Suggestion,
 	)
-	if err != nil {
+	if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
+		// 同 intent 分支:跳过哨兵不是落账失败,不记持久化失败日志。
 		logAIInvocationPersistenceFailure(a.manager.advice, purpose, completion)
 	}
 	return 0, err
@@ -1428,6 +1439,15 @@ func (a *roundActor) completeM5Reply(
 	_, err := a.manager.store.CompleteReplyInvocation(request)
 	if errors.Is(err, store.ErrDialogueTurnBinding) {
 		return a.settleM5TurnBoundaryChanged(turnID)
+	}
+	var resample *store.AIAdviceResampleScheduledError
+	if errors.As(err, &resample) {
+		// 结算层重放判本次建议非法(规格 §五):巡检层的 reduce 只能看到解析
+		// 与文本长度,planV4ReplyActions/建议应用策略的裁决在这里才浮出。样本
+		// 已按失败待重采形态落账,本轮放下该候选人,下轮经 attempt 游走重采。
+		slog.Warn("对话轮回复建议结算判非法,本样本作废等下轮重采",
+			"turnId", turnID, "reason", resample.Reason, "attempt", resample.Attempt)
+		return errM5AdviceRoundSkipped
 	}
 	return err
 }

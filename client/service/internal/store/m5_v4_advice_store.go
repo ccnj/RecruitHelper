@@ -307,6 +307,33 @@ func communicationV4AdvicePolicy(
 	return decision, plans, ""
 }
 
+// communicationV4ReplyAdviceResampleReason 判定结算层重放出的回复决策是否落入
+// 规格 v4 §五的"本轮不创建任何动作、跳过该候选人,下轮巡检重试"族(2026-08-02
+// 甲方裁决,此前为整 turn 转人工):
+//   - replyInvalid:planV4ReplyActions 拒绝——字段非法、命中零或多项、未知
+//     动作、动作与时间组合非法、越界话术,以及动作业务前置不满足(如换微信
+//     邀请在线已推进、线上会议无冻结时段);
+//   - unsupportedV4ActionKind / multiVisibleActionPolicyConflict:建议应用
+//     策略拒绝计划形状(空计划、越界文本、未批组合)。
+//
+// 三者的共同点是"这一次采样没吐出可接受的建议",与业务结论无关,换一次采样
+// 可能变好。业务或配置确定性的停靠原因不在此列——fixedPhraseUnavailable(话术
+// 配置缺失)、intentRejected(业务分支)、unsupportedMedia/unsupportedSemantic、
+// unknownPlatformEvent、wechatContinuationManual、invalidTransition 等重采不能
+// 改变,照旧按现状停靠。
+func communicationV4ReplyAdviceResampleReason(
+	decision communication.V4InboundTurnDecision,
+) (string, bool) {
+	_, _, manualReason := communicationV4AdvicePolicy(decision)
+	switch manualReason {
+	case string(communication.V4ManualReplyInvalid),
+		communicationV4ManualUnsupportedAction,
+		communicationV4ManualMultiVisibleAction:
+		return manualReason, true
+	}
+	return "", false
+}
+
 func communicationV4ReplyPhrases(
 	plans []communication.V4PlannedAction,
 ) []string {
@@ -762,6 +789,20 @@ func completeCommunicationV4ReplyTx(
 		)
 		if err != nil {
 			return nil, err
+		}
+		if reason, resample := communicationV4ReplyAdviceResampleReason(decision); resample &&
+			invocation.Attempt < MaxAIInvocationAttempts {
+			// 规格 v4 §五:输出契约非法或业务前置不满足使本次回复建议整体
+			// 无效——本轮不创建任何动作、跳过该候选人,下轮巡检重试;§一的
+			// 同轮 5 次梯子未耗尽前不停靠。刻意不落建议回执与轮终局,使世界
+			// 形状与巡检层 FailAIInvocationForRetry 之后完全同形:head 重放
+			// 看不到被作废的样本,下一巡检轮经 attempt 游走走到下一号重新
+			// 采样。attempt 已到上限则落下方 persist 按现状停靠(replyInvalid
+			// 属聚合冻结豁免族,时刻表照跑)。caller 显式传入 manualReason 的
+			// 停靠(巡检层梯子已耗尽、预算类、崩溃恢复类)不进本分支。
+			return nil, &AIAdviceResampleScheduledError{
+				TurnID: turn.TurnID, Reason: reason, Attempt: invocation.Attempt,
+			}
 		}
 	}
 	return persistCommunicationV4AdviceTx(tx, turn, invocation, digest, decision, at)
