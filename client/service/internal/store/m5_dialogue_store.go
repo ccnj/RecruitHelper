@@ -406,7 +406,11 @@ func dialogueOwnerFreezeExemptReason(reason string) bool {
 	switch reason {
 	case "replyFailed", "replyInvalid", "reasoningUsageUnsafe", "reducerRejected",
 		"inputBudgetBlocked", "replyProcessInterrupted", "intentProcessInterrupted",
-		"replyBudgetRecoveryUnsafe", "replyBudgetRecoveryAlreadyFinished":
+		"replyBudgetRecoveryUnsafe", "replyBudgetRecoveryAlreadyFinished",
+		// 建议应用策略族与 replyInvalid 同性质("这次采样没吐出可接受的
+		// 建议"),重采梯子耗尽后同样只停靠轮,不冻结候选人(规格 v4 §一:
+		// 耗尽后该轮停靠、候选人不冻结、时刻表照跑)。
+		communicationV4ManualUnsupportedAction, communicationV4ManualMultiVisibleAction:
 		return true
 	default:
 		return false
