@@ -1,6 +1,8 @@
 package session
 
 import (
+	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -124,6 +126,11 @@ func (r *Registry) HeartbeatReport(handID, sessionID, bootID string, ping protoc
 	s.LastHbAt = now
 	s.Health = HealthReady
 	s.Contexts = append([]protocol.PingContext(nil), ping.Contexts...)
+	// 未读读数是插队判定的唯一输入，而它走"手主动推送、脑不得反向拉取"的提示
+	// 通道：采样触发、双读一致、值必须变化、SW 缓存、心跳周期，任何一环断掉都
+	// 表现为同一句"读不到"。这里只记变化沿——读数何时塌、塌成什么、何时恢复
+	// ——是事后判断"插队为何没发生"的第一手证据。不变则不打，稳态近乎零噪音。
+	prevUnread, prevSensor, prevPage := unreadReadingText(s.Sensors), s.SensorHealth, s.PageHealth
 	s.PageHealth = capabilityPageHealth(s.Contexts)
 	if ping.Sensors != nil {
 		cp := *ping.Sensors
@@ -147,7 +154,27 @@ func (r *Registry) HeartbeatReport(handID, sessionID, bootID string, ping protoc
 			s.SensorHealth = CapabilityUnknown
 		}
 	}
+	if next := unreadReadingText(s.Sensors); next != prevUnread ||
+		s.SensorHealth != prevSensor || s.PageHealth != prevPage {
+		slog.Info("未读读数变化",
+			"handId", handID,
+			"from", prevUnread, "to", next,
+			"sensorHealth", string(s.SensorHealth), "pageHealth", string(s.PageHealth),
+			"contexts", len(s.Contexts))
+	}
 	return true
+}
+
+// unreadReadingText 把读数渲染成可 grep 的短文本；缺席与零是两件事，必须
+// 分得开——"读不到"会让插队判定直接放弃，"零"则是有效的清空信号。
+func unreadReadingText(sensors *protocol.PingSensors) string {
+	if sensors == nil {
+		return "无传感"
+	}
+	if sensors.UnreadTotal == nil {
+		return "读不到"
+	}
+	return strconv.Itoa(sensors.UnreadTotal.Value)
 }
 
 func capabilityPageHealth(contexts []protocol.PingContext) CapabilityHealth {

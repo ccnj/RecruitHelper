@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,8 +32,10 @@ type roundActor struct {
 	checkedListFingerprints map[string]string
 	unreadRetryDeferred     bool
 	unreadAttemptedRefs     map[string]struct{}
-	projection              []ConversationProjection
-	transientSkips          []conversationSkipNote
+	// 上次插队判定的结论，用于把会话边界上的重复判定压成变化沿日志。
+	lastUnreadDecision string
+	projection         []ConversationProjection
+	transientSkips     []conversationSkipNote
 	// 本轮取得正证的接受微信动作所属档案：接受是唯一"我方先于账本知情"的
 	// 动作，需要在同一轮定向重对账把 259 结果补进账本（立案 4.3）。
 	wechatAcceptedProfiles map[string]struct{}
@@ -184,7 +188,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if a.manager.config.MaxPages >= 2 && a.beginUnreadPass() {
+	if a.manager.config.MaxPages >= 2 && a.beginUnreadPass(unreadDecisionAtRoundStart) {
 		filter = protocol.ListFilterUnread
 	}
 	windowsRead := 0
@@ -355,7 +359,7 @@ func (a *roundActor) processConversationListPage(
 			if stateErr != nil {
 				return conversationListPageContinue, stateErr
 			}
-			if a.beginUnreadPass() {
+			if a.beginUnreadPass(unreadDecisionAtBoundary) {
 				return conversationListPageSwitchUnread, nil
 			}
 		}
@@ -1970,13 +1974,52 @@ func (a *roundActor) key() store.AccountKey {
 // candidate boundary. A completed pass records its end total, so an unchanged
 // residual badge will not re-enter. An incomplete pass defers retry until the
 // next ordinary scan instead of spinning inside this actor.
-func (a *roundActor) beginUnreadPass() bool {
-	if a.unreadRetryDeferred ||
-		!a.manager.unreadPassNeeded(a.account, a.hand.UnreadTotal) {
+func (a *roundActor) beginUnreadPass(at string) bool {
+	if a.unreadRetryDeferred {
+		a.noteUnreadDecision(at, "本轮已延后", nil, false)
+		return false
+	}
+	needed, reason, baseline := a.manager.unreadPassDecision(a.account, a.hand.UnreadTotal)
+	a.noteUnreadDecision(at, reason, baseline, needed)
+	if !needed {
 		return false
 	}
 	a.unreadAttemptedRefs = make(map[string]struct{})
 	return true
+}
+
+// noteUnreadDecision 记录插队判定的输入与结论。四种不插队成因（读不到 / 与基线
+// 同值 / 零未读 / 本轮已延后）在外部表现一模一样，但要修的地方完全不同，不落
+// 日志就只能靠事后轮询碰运气。轮首必记；其后一轮几十个会话边界，只记结论变化
+// 沿，否则真正的转折会被淹没。
+func (a *roundActor) noteUnreadDecision(at, reason string, baseline *int, needed bool) {
+	if at != unreadDecisionAtRoundStart && a.lastUnreadDecision == reason {
+		return
+	}
+	a.lastUnreadDecision = reason
+	slog.Info("未读插队判定",
+		"platform", a.account.Platform,
+		"accountRef", a.account.AccountRef,
+		"roundId", a.roundID,
+		"at", at,
+		"current", optionalIntText(a.hand.UnreadTotal),
+		"baseline", optionalIntText(baseline),
+		"decision", reason,
+		"enter", needed)
+}
+
+const (
+	unreadDecisionAtRoundStart = "轮首"
+	unreadDecisionAtBoundary   = "会话边界"
+)
+
+// optionalIntText 让"缺席"与"零"在日志里一眼可分：前者是传感通道断了，后者是
+// 有效的清空信号，两者导致的后续动作完全不同。
+func optionalIntText(value *int) string {
+	if value == nil {
+		return "读不到"
+	}
+	return strconv.Itoa(*value)
 }
 
 func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {

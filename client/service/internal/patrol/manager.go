@@ -445,16 +445,44 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 //
 // Caller must hold Manager.mu.
 func (m *Manager) unreadPassNeeded(account *store.Account, unread *int) bool {
+	needed, _, _ := m.unreadPassDecision(account, unread)
+	return needed
+}
+
+// unreadPassDecision 在给出结论的同时交出它依据的两个输入与拒绝原因，供诊断
+// 日志还原"插队为何没发生"。四种不插队的成因后果完全不同——读不到是传感通道
+// 断了（要修通道）、同值是基线卡住（要看子轮为何没收尾）、零值是真的没未读
+// （正常）、身份缺失是账号未就绪——但它们在外部表现上一模一样，不区分就只能
+// 靠猜。副作用（稳定零清基线）仍只在此发生一次。
+//
+// Caller must hold Manager.mu.
+func (m *Manager) unreadPassDecision(
+	account *store.Account,
+	unread *int,
+) (needed bool, reason string, baseline *int) {
 	key, ok := unreadBaselineKeyForAccount(account)
-	if !ok || unread == nil || *unread < 0 {
-		return false
+	if !ok {
+		return false, "身份未就绪", nil
+	}
+	last, exists := m.unreadPassEndTotalByPrincipal[key]
+	if exists {
+		value := last
+		baseline = &value
+	}
+	if unread == nil {
+		return false, "读不到", baseline
+	}
+	if *unread < 0 {
+		return false, "读数非法", baseline
 	}
 	if *unread == 0 {
 		delete(m.unreadPassEndTotalByPrincipal, key)
-		return false
+		return false, "零未读", baseline
 	}
-	last, exists := m.unreadPassEndTotalByPrincipal[key]
-	return !exists || last != *unread
+	if exists && last == *unread {
+		return false, "与基线同值", baseline
+	}
+	return true, "进入未读子轮", baseline
 }
 
 // recordUnreadPassEnd records only the stable total observed after a complete
