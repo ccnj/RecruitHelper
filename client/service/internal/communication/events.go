@@ -58,21 +58,27 @@ type BusinessEvent struct {
 	IsBody           bool                `json:"isBody,omitempty"`
 	BodyKindKnown    bool                `json:"bodyKindKnown,omitempty"`
 	ConservativeCode string              `json:"conservativeCode,omitempty"`
+	// InterviewMethod 只在我方邀面卡事件上有值,取账本里那张卡的平台无关
+	// method 投影。它是"本次面试是线上还是线下"的唯一事实来源。
+	InterviewMethod string `json:"interviewMethod,omitempty"`
 }
 
 // LedgerMessageFact deliberately mirrors only the platform-neutral message
 // ledger. Text is local business data; callers must not put it in logs or
 // reports. CardType is the public contract enum, never a platform contentType.
 type LedgerMessageFact struct {
-	Seq        int64
-	Direction  string
-	Kind       string
-	Text       *string
-	CardType   string
-	CardState  string
-	Origin     string
-	ActionKind V4ActionKind
-	TsApproxMs *int64
+	Seq       int64
+	Direction string
+	Kind      string
+	Text      *string
+	CardType  string
+	CardState string
+	// InterviewMethod 直接取消息行的同名列(邀面卡的平台无关身份投影之一),
+	// 非邀面卡恒为 nil。
+	InterviewMethod *string
+	Origin          string
+	ActionKind      V4ActionKind
+	TsApproxMs      *int64
 }
 
 type LedgerCardTransitionFact struct {
@@ -171,6 +177,9 @@ func normalizeOutboundMessage(event BusinessEvent, fact LedgerMessageFact) Busin
 		switch fact.CardType {
 		case "interviewInvite":
 			event.Kind = EventInterviewInvited
+			if fact.InterviewMethod != nil {
+				event.InterviewMethod = *fact.InterviewMethod
+			}
 			return event
 		case "wechatExchange":
 			// 与入站分支同构：pending 只证明"请求已存在"，accepted 只证明

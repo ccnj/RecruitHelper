@@ -410,7 +410,7 @@ func v4ReceiptDialogue(
 		case V4ActionWechatReceipt:
 			phraseKind = V4PhraseWechatReceipt
 		case V4ActionInterviewAcceptedReceipt:
-			phraseKind = V4PhraseInterviewAccepted
+			phraseKind = V4InterviewAcceptedPhraseKind(state.InterviewMethod)
 		default:
 			expanded = append(expanded, action)
 			continue

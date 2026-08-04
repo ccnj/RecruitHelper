@@ -129,7 +129,8 @@ func (a *roundActor) processCommunicationV4CardTransition(
 				Seq: cardBeforeTransition.Seq, Direction: cardBeforeTransition.Direction,
 				Kind: cardBeforeTransition.Kind, Text: cardBeforeTransition.Text,
 				CardType: cardBeforeTransition.CardType, CardState: cardBeforeTransition.CardState,
-				Origin: cardBeforeTransition.Origin, TsApproxMs: cardBeforeTransition.TsApproxMs,
+				InterviewMethod: cardBeforeTransition.InterviewMethod,
+				Origin:          cardBeforeTransition.Origin, TsApproxMs: cardBeforeTransition.TsApproxMs,
 			},
 		)
 		if err != nil {

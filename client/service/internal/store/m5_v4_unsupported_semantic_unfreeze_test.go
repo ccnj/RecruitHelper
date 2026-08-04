@@ -33,11 +33,11 @@ func seedFrozenUnsupportedSemanticResumeMix(t *testing.T, s *Store) (string, str
 	if err := s.db.Create(&CandidateProfile{
 		ProfileID: profileID, Platform: platform, AccountRef: accountRef,
 		PlatformUserRef: platformUserRef, PositionRef: "position-unfreeze",
-		MainStatus:                 CandidateProfileCommunicating,
-		SuccessfulGreetingIntentID: &greetingIntentID,
-		ConversationRef:            &conversationRef,
-		BackendJobID:               &backendJobID,
-		ResumeCaptureState:         ResumeCaptureCaptured,
+		MainStatus:                     CandidateProfileCommunicating,
+		SuccessfulGreetingIntentID:     &greetingIntentID,
+		ConversationRef:                &conversationRef,
+		BackendJobID:                   &backendJobID,
+		ResumeCaptureState:             ResumeCaptureCaptured,
 		ResumeCaptureLogicalDispatchID: &logicalID,
 		ActiveResumeSnapshotID:         &snapshotID,
 	}).Error; err != nil {
@@ -115,8 +115,8 @@ func seedFrozenUnsupportedSemanticResumeMix(t *testing.T, s *Store) (string, str
 	}
 	outboundAt := at.Add(-5 * time.Minute)
 	frozenState := communication.V4State{
-		MainStatus: communication.V4StatusCommunicating,
-		WechatState: communication.V4WechatNotInvited,
+		MainStatus:          communication.V4StatusCommunicating,
+		WechatState:         communication.V4WechatNotInvited,
 		ColdPromptRemaining: 2, ColdWechatRemaining: 1,
 		RealMessageRound: 2, LastRealMessageSeq: 4, LastOutboundMessageSeq: 1,
 		LastOutboundAt: &outboundAt, LastBodyAt: &outboundAt,
@@ -124,7 +124,7 @@ func seedFrozenUnsupportedSemanticResumeMix(t *testing.T, s *Store) (string, str
 	if err := s.db.Create(&CommunicationV4Aggregate{
 		ProfileID: profileID, RootGreetingIntentID: "intent-unfreeze-root",
 		StateSchemaVersion: communicationV4StateSchemaVersion,
-		Revision: 1, ProjectedThroughSeq: 4, State: frozenState,
+		Revision:           1, ProjectedThroughSeq: 4, State: frozenState,
 		AutomationStatus: ProfileCommunicationAutomationManualRequired,
 		ManualReason:     v4UnsupportedSemanticReason, ManualRequiredAt: &at,
 	}).Error; err != nil {

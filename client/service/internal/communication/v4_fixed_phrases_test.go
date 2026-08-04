@@ -21,6 +21,7 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
   "candidateAskWechat": {"message":"暂不启用","messages":["暂不启用"],"actions":[],"enabled":true},
   "meetingAccepted": {"message":"确认一","messages":["确认一","确认二"],"actions":["legacy-action"],"enabled":true},
   "meetingInvitePending": {"message":"不能当三档","messages":["不能当三档"],"actions":[],"enabled":true},
+  "offlineMeetingAccepted": {"message":"到场确认一","messages":["到场确认一","到场确认二"],"actions":["legacy-action"],"enabled":true},
   "rejectWechat": {"message":" 挽留一 ","messages":[" 挽留一 ","挽留二","  "],"actions":["invite-wechat"],"enabled":true},
   "silence48Wechat": {"message":"冷催二","messages":["冷催二"],"actions":[],"enabled":true},
   "wechatAccepted": {"message":"收到","messages":["收到"],"actions":[],"enabled":true}
@@ -29,18 +30,20 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 		t.Fatal(err)
 	}
 	want := map[V4FixedPhraseKind]string{
-		V4PhraseRejectionRetention: "挽留一\n挽留二",
-		V4PhraseRejectionClosing:   v4LocalRejectionClosingText,
-		V4PhraseColdWechat:         "冷催二",
-		V4PhraseWechatReceipt:      "收到",
-		V4PhraseInterviewAccepted:  "确认一\n确认二",
+		V4PhraseRejectionRetention:      "挽留一\n挽留二",
+		V4PhraseRejectionClosing:        v4LocalRejectionClosingText,
+		V4PhraseColdWechat:              "冷催二",
+		V4PhraseWechatReceipt:           "收到",
+		V4PhraseInterviewAccepted:       "确认一\n确认二",
+		V4PhraseOnsiteInterviewAccepted: "到场确认一\n到场确认二",
 	}
 	wantMessages := map[V4FixedPhraseKind][]string{
-		V4PhraseRejectionRetention: {"挽留一", "挽留二"},
-		V4PhraseRejectionClosing:   {v4LocalRejectionClosingText},
-		V4PhraseColdWechat:         {"冷催二"},
-		V4PhraseWechatReceipt:      {"收到"},
-		V4PhraseInterviewAccepted:  {"确认一", "确认二"},
+		V4PhraseRejectionRetention:      {"挽留一", "挽留二"},
+		V4PhraseRejectionClosing:        {v4LocalRejectionClosingText},
+		V4PhraseColdWechat:              {"冷催二"},
+		V4PhraseWechatReceipt:           {"收到"},
+		V4PhraseInterviewAccepted:       {"确认一", "确认二"},
+		V4PhraseOnsiteInterviewAccepted: {"到场确认一", "到场确认二"},
 	}
 	for kind, text := range want {
 		phrase := view.Phrase(kind)
@@ -50,7 +53,7 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 			t.Fatalf("场景映射错误 kind=%s phrase=%+v", kind, phrase)
 		}
 	}
-	if len(view.Phrases) != 5 {
+	if len(view.Phrases) != 6 {
 		t.Fatalf("未批准场景不应进入可执行视图: %+v", view.Phrases)
 	}
 }

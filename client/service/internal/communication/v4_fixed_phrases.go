@@ -26,11 +26,12 @@ var v4BraceStripper = strings.NewReplacer("{", "", "}", "")
 type V4FixedPhraseKind string
 
 const (
-	V4PhraseRejectionRetention V4FixedPhraseKind = "rejectionRetention"
-	V4PhraseRejectionClosing   V4FixedPhraseKind = "rejectionClosing"
-	V4PhraseColdWechat         V4FixedPhraseKind = "coldWechat"
-	V4PhraseWechatReceipt      V4FixedPhraseKind = "wechatReceipt"
-	V4PhraseInterviewAccepted  V4FixedPhraseKind = "interviewAccepted"
+	V4PhraseRejectionRetention      V4FixedPhraseKind = "rejectionRetention"
+	V4PhraseRejectionClosing        V4FixedPhraseKind = "rejectionClosing"
+	V4PhraseColdWechat              V4FixedPhraseKind = "coldWechat"
+	V4PhraseWechatReceipt           V4FixedPhraseKind = "wechatReceipt"
+	V4PhraseInterviewAccepted       V4FixedPhraseKind = "interviewAccepted"
+	V4PhraseOnsiteInterviewAccepted V4FixedPhraseKind = "onsiteInterviewAccepted"
 )
 
 type V4FixedPhraseState string
@@ -73,6 +74,7 @@ var v4FixedPhraseScenes = []struct {
 	{kind: V4PhraseColdWechat, scene: "silence48Wechat"},
 	{kind: V4PhraseWechatReceipt, scene: "wechatAccepted"},
 	{kind: V4PhraseInterviewAccepted, scene: "meetingAccepted"},
+	{kind: V4PhraseOnsiteInterviewAccepted, scene: "offlineMeetingAccepted"},
 }
 
 // BuildV4FixedPhraseView parses only the four approved legacy scene mappings
@@ -115,6 +117,17 @@ func BuildV4FixedPhraseView(source m5ai.JobConfigDocumentPackage) (V4FixedPhrase
 	return view, nil
 }
 
+// V4InterviewAcceptedPhraseKind 按本次面试类型选接受回执话术。类型缺失时
+// 按线上处理:线下卡在该能力上线前不可能存在,这是事实推论而不是猜测,比
+// 转人工更少把存量候选人无谓堆给人(《沟通逻辑规格-v4》事件表,2026-08-04
+// 甲方裁决)。只有明确读到 onsite 才走线下话术。
+func V4InterviewAcceptedPhraseKind(interviewMethod string) V4FixedPhraseKind {
+	if strings.TrimSpace(interviewMethod) == "onsite" {
+		return V4PhraseOnsiteInterviewAccepted
+	}
+	return V4PhraseInterviewAccepted
+}
+
 func (view V4FixedPhraseView) Phrase(kind V4FixedPhraseKind) V4FixedPhrase {
 	phrase, ok := view.Phrases[kind]
 	if !ok {
@@ -140,7 +153,7 @@ func RenderV4FixedPhrase(
 	}
 
 	values := map[string]string{
-		"{称呼}":    strings.TrimSpace(input.Salutation),
+		"{称呼}":   strings.TrimSpace(input.Salutation),
 		"{面试时间}": strings.TrimSpace(input.InterviewTime),
 	}
 	for _, value := range values {

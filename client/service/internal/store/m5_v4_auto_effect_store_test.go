@@ -951,8 +951,8 @@ func TestCommunicationV4AutomaticCleanFailureAutoRetriesReplyText(t *testing.T) 
 			cmd.TerminalAt = &sentAt
 			return ResultCommandMutation{Save: true, Effect: &EffectResultMutation{
 				IntentStatus: EffectIntentOk, Append: true,
-				Text:        retry.Text,
-				ContentHash: retry.ContentHash,
+				Text:         retry.Text,
+				ContentHash:  retry.ContentHash,
 				ObservedAtMs: sentAt.UnixMilli(),
 			}}, nil
 		},

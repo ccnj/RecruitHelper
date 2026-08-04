@@ -120,6 +120,7 @@ func unfreezeV4UnsupportedSemanticProfileTx(
 			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
 			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
 			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+			InterviewMethod: message.InterviewMethod,
 		})
 	}
 	replayed, err := communication.ReduceV4InboundTurn(communication.V4InboundTurnInput{

@@ -447,8 +447,8 @@ func TestAppTodayInterviewsFollowsLatestInviteCard(t *testing.T) {
 		if err := s.db.Create(&Message{
 			Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef,
 			Seq: seq, Direction: "out", Kind: "card", CardType: "interviewInvite",
-			CardState:   "accepted",
-			ContentHash: strings.Repeat("a", 62) + string(rune('0'+seq)) + conversationRef[len(conversationRef)-1:],
+			CardState:           "accepted",
+			ContentHash:         strings.Repeat("a", 62) + string(rune('0'+seq)) + conversationRef[len(conversationRef)-1:],
 			InterviewStartsAtMs: &starts, TsApproxMs: &tsApprox, Origin: "self",
 		}).Error; err != nil {
 			t.Fatal(err)

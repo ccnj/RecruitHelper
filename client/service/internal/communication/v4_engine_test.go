@@ -181,6 +181,84 @@ func TestV4InboundTurnAcceptedCardsAdvanceStateWithoutAI(t *testing.T) {
 	})
 }
 
+// 面试类型锚在"我方邀面卡进账本"这个事实上:卡带 onsite 进来,接受回执就
+// 走线下话术;卡没有类型投影(线下能力上线前发出的卡、历史未映射数据)按
+// 线上处理,而不是转人工。
+func TestV4InterviewAcceptedReceiptSplitsByInterviewMethod(t *testing.T) {
+	// 两个场景给不同的气泡数:engine 层按气泡数逐条展开动作(正文要到 store
+	// 物化时才取),所以展开出几条 receipt 就是"用了哪份话术"的直接证据。
+	onlineText := "好的，那我们 {面试时间} 线上见。"
+	phrases := availableV4FixedPhrases()
+	phrases.Phrases[V4PhraseInterviewAccepted] = V4FixedPhrase{
+		Kind: V4PhraseInterviewAccepted, SourceScene: "meetingAccepted",
+		State: V4PhraseAvailable, Messages: []string{onlineText}, Text: onlineText,
+	}
+	onsiteMessages := []string{"好的，那我们 {面试时间} 在公司见。", "地址稍后发您。"}
+	phrases.Phrases[V4PhraseOnsiteInterviewAccepted] = V4FixedPhrase{
+		Kind: V4PhraseOnsiteInterviewAccepted, SourceScene: "offlineMeetingAccepted",
+		State: V4PhraseAvailable, Messages: onsiteMessages,
+		Text: onsiteMessages[0] + "\n" + onsiteMessages[1],
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		method   string
+		want     V4FixedPhraseKind
+		wantSent int
+	}{
+		{name: "线下卡走线下话术", method: "onsite", want: V4PhraseOnsiteInterviewAccepted, wantSent: 2},
+		{name: "线上卡走线上话术", method: "wechatVideo", want: V4PhraseInterviewAccepted, wantSent: 1},
+		{name: "类型缺失按线上处理", method: "", want: V4PhraseInterviewAccepted, wantSent: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			expression, err := ApplyV4BusinessEvent(NewV4GreetedState(v4Time(8)), BusinessEvent{
+				Key: "message:2", Kind: EventCandidateExpressionReceived,
+				Source: EventSourceMessage, MessageSeq: 2,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			invited, err := ApplyV4BusinessEvent(expression.State, BusinessEvent{
+				Key: "message:3", Kind: EventInterviewInvited,
+				Source: EventSourceMessage, MessageSeq: 3, OccurredAt: v4Time(9),
+				InterviewMethod: testCase.method,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if invited.State.InterviewMethod != testCase.method {
+				t.Fatalf("面试类型未随邀面卡落账: state=%+v", invited.State)
+			}
+			if got := V4InterviewAcceptedPhraseKind(invited.State.InterviewMethod); got != testCase.want {
+				t.Fatalf("回执话术选错: got=%s want=%s", got, testCase.want)
+			}
+
+			decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+				State: invited.State, TurnID: "turn-" + testCase.name,
+				Messages: []LedgerMessageFact{{
+					Seq: 4, Direction: "in", Kind: "card", CardType: "interviewInvite",
+					CardState: "accepted", Origin: "external",
+				}},
+				Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+				FixedPhrases: phrases,
+			})
+			if err != nil || decision.ManualReason != "" || len(decision.EventActions) == 0 {
+				t.Fatalf("接受回执未成立: decision=%+v err=%v", decision, err)
+			}
+			receipts := 0
+			for _, action := range decision.EventActions {
+				if action.Kind == V4ActionInterviewAcceptedReceipt {
+					receipts++
+				}
+			}
+			if receipts != testCase.wantSent {
+				t.Fatalf("展开的回执气泡数=%d want=%d,说明选错了话术: actions=%+v",
+					receipts, testCase.wantSent, decision.EventActions)
+			}
+		})
+	}
+}
+
 // 接受回执与拒绝挽留、催2 同构:配了几个气泡就发几条独立消息,末位跟换微信
 // 卡片。拼接后的 Text 永远不是发送载荷。
 func TestV4InboundTurnInterviewAcceptedExpandsOneActionPerBubble(t *testing.T) {
@@ -405,8 +483,8 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 		// 追邀卡照发,可见动作收束后才允许 serviceReply 补句。
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: communicating(), TurnID: "turn-c-accepted-text",
-			Messages:     []LedgerMessageFact{acceptedCard(2), v4InboundText(3, "请问要准备什么")},
-			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Messages: []LedgerMessageFact{acceptedCard(2), v4InboundText(3, "请问要准备什么")},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
@@ -448,7 +526,7 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 				{Seq: 2, Direction: "in", Kind: "card", CardType: "resumeAttachment", CardState: "unknown", Origin: "external"},
 				acceptedCard(3),
 			},
-			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
@@ -472,7 +550,7 @@ func TestV4InboundTurnInterviewAcceptedMixActivatedByBatchC(t *testing.T) {
 				acceptedCard(3),
 				v4InboundText(4, "都弄好了"),
 			},
-			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
@@ -539,8 +617,8 @@ func TestV4InboundTurnWechatMixActivatedByBatchB(t *testing.T) {
 	t.Run("pending_with_text_prerequisites_confirmed_continues_reply", func(t *testing.T) {
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: NewV4GreetedState(v4Time(8)), TurnID: "turn-b-pending-confirmed",
-			Messages:               []LedgerMessageFact{pendingCard(2), v4InboundText(3, "加个微信细聊")},
-			Intent:                 IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Messages: []LedgerMessageFact{pendingCard(2), v4InboundText(3, "加个微信细聊")},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 			PrerequisitesConfirmed: true,
 		})
 		if err != nil || decision.ManualReason != "" ||
@@ -641,8 +719,8 @@ func TestV4InboundTurnWechatMixActivatedByBatchB(t *testing.T) {
 		state.LastRealMessageSeq = 5
 		decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
 			State: state, TurnID: "turn-b-interviewed-accepted",
-			Messages:     []LedgerMessageFact{acceptedCard(6), v4InboundText(7, "加好了")},
-			Intent:       IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+			Messages: []LedgerMessageFact{acceptedCard(6), v4InboundText(7, "加好了")},
+			Intent:   IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
 			FixedPhrases: availableV4FixedPhrases(),
 		})
 		if err != nil || decision.ManualReason != "" ||
