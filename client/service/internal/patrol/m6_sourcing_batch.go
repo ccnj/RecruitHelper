@@ -235,7 +235,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		}
 		window = next
 		// 滚动本身是一次平台交互。即使当前窗全部是旧批次成员、此前没有
-		// 尝试候选人，下一窗首人也必须走候选人级 2–4 秒节奏，不能紧跟滚动打开。
+		// 尝试候选人，下一窗首人也必须走候选人级 4～8 秒节奏，不能紧跟滚动打开。
 		attemptedTarget = true
 	}
 }

@@ -301,10 +301,12 @@ type Config struct {
 	// 与 Location 推导。
 	InboundHandoverCutoff time.Time
 	NewRoundID            func() string
-	// SourcingPaceWait 控制脑侧批采与全新自动招呼候选人动作的节奏。
-	// 生产默认使用 2～4 秒随机等待；测试可注入无等待实现，手端
-	// 仍无业务定时器。
-	SourcingPaceWait    func(context.Context) error
+	// SourcingPaceWait 是"换一个人"的节奏：批采、全新自动招呼，以及沟通
+	// 巡检里打开会话与深读会话首页。生产默认 4～8 秒随机等待；测试可注入
+	// 无等待实现，手端仍无业务定时器。
+	SourcingPaceWait func(context.Context) error
+	// InteractionPaceWait 是"同一个页面里再动一下"的节奏：列表翻窗、推荐
+	// 流滚动、筛选切换、发送前停顿。生产默认 2.5～5 秒随机等待。
 	InteractionPaceWait func(context.Context) error
 	// SourcingAIRetryWait 控制评分/招呼语生成失败后的重试退避。生产默认
 	// 指数退避加抖动：非 429 封顶 4 秒，429（unlimited=true）封顶 60 秒；
@@ -322,7 +324,10 @@ func (c Config) withDefaults() Config {
 		c.Location = time.Local
 	}
 	if c.PatrolInterval <= 0 {
-		c.PatrolInterval = 5 * time.Minute
+		// 2026-08-04 甲方调快：一轮收尾到下一轮的正常间隔从 5 分钟改为 2 分
+		// 钟。它只决定"没有事件催的时候多久回头看一眼"，MinimumRoundGap 的
+		// 60 秒硬下限不随之变动，空闲账号仍不会进紧循环。
+		c.PatrolInterval = 2 * time.Minute
 	}
 	if c.IdentityFreshFor <= 0 {
 		c.IdentityFreshFor = 10 * time.Minute

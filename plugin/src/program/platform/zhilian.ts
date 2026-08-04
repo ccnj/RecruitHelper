@@ -1106,6 +1106,23 @@ async function mainReadCurrentResume(
   const randomDelayMs = (minimumMs: number, maximumMs: number): number =>
     minimumMs + Math.floor(Math.random() * (maximumMs - minimumMs + 1))
   const sleep = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  // 与批采读简历同因:平台折叠靠后的工作经历且不渲染,这里逐 item 取文又
+  // 只收可见项,折叠时同样只拿到前几段。展开是标准 DOM 点击、可逆、候选人
+  // 不可见;找不到按钮或等不到收起态就照读已渲染的部分,不阻断本次读取。
+  const expandAllWorkExperiences = async (openedModal: HTMLElement): Promise<void> => {
+    const trigger = visibleAll(openedModal, '.new-work-experiences__expand')
+      .find((element) => clean(element.textContent) === '展开全部')
+    if (!trigger) return
+    await sleep(randomDelayMs(1_000, 1_500))
+    trigger.click()
+    const expandUntil = Date.now() + 5_000
+    while (Date.now() < expandUntil) {
+      const triggers = visibleAll(openedModal, '.new-work-experiences__expand')
+      if (triggers.length === 0) return
+      if (triggers.some((element) => clean(element.textContent) === '收起全部')) return
+      await sleep(120)
+    }
+  }
   const closeOpenedModal = async (
     ownedModal: HTMLElement,
     closeNotBefore: number,
@@ -1183,6 +1200,7 @@ async function mainReadCurrentResume(
     ownedModal = modals[0]
     closeNotBefore = Date.now() + randomDelayMs(2_000, 2_500)
     const modal = ownedModal
+    await expandAllWorkExperiences(modal)
     const readResult = (() : MainResumeResult => {
       const roots = visibleAll(modal, '.resume-detail')
       if (roots.length !== 1) return failed('modal_cardinality')
@@ -2532,6 +2550,49 @@ async function mainReadSourcingResume(
     element.click()
     nextInteractionNotBefore = Date.now() + randomDelayMs(1_000, 1_500)
   }
+  // 平台把靠后的工作经历折叠起来且根本不渲染,而取文走的是 innerText,
+  // 读不到没渲染的部分。真机实测:9 段经历折叠时只渲染前 4 段,正文少一半,
+  // 且被折叠的恰好是经历最丰富的候选人。展开是标准 DOM 点击、可逆、候选人
+  // 不可见;找不到按钮或等不到收起态就照读已渲染的部分,不阻断采集。
+  const expandAllWorkExperiences = async (openedModal: HTMLElement): Promise<void> => {
+    const trigger = visibleAll(openedModal, '.new-work-experiences__expand')
+      .find((element) => clean(element.textContent) === '展开全部')
+    if (!trigger) return
+    await clickInteraction(trigger)
+    const expandUntil = Date.now() + 5_000
+    while (Date.now() < expandUntil) {
+      const triggers = visibleAll(openedModal, '.new-work-experiences__expand')
+      if (triggers.length === 0) return
+      if (triggers.some((element) => clean(element.textContent) === '收起全部')) return
+      await sleep(120)
+    }
+  }
+  // 读完不立刻关,按人的节奏把简历翻看一会儿:5～12 秒内滚动一到两次,
+  // 落点随机(与旧产品同形)。只写滚动容器的 scrollTop,不发合成点击、不向
+  // 页面派 wheel/scroll 事件——弹窗里就有"打招呼"一类控件,翻看绝不能演变
+  // 成误触。可滚容器不唯一或简历短到不足一屏时,纯等待把时长走完。
+  const browseOpenedDetail = async (openedModal: HTMLElement): Promise<void> => {
+    const totalMs = randomDelayMs(5_000, 12_000)
+    const steps = totalMs >= 8_000 ? 2 : 1
+    const stepDelayMs = Math.floor(totalMs / (steps + 1))
+    const scrollers = visibleAll(openedModal, '*').filter((element) => {
+      const style = window.getComputedStyle(element)
+      return /(auto|scroll)/u.test(`${style.overflowY} ${style.overflow}`) &&
+        element.scrollHeight > element.clientHeight + 20
+    })
+    if (scrollers.length !== 1) {
+      await sleep(totalMs)
+      return
+    }
+    const scroller = scrollers[0]
+    for (let step = 0; step < steps; step += 1) {
+      await sleep(stepDelayMs)
+      const maxTop = Math.max(scroller.scrollHeight - scroller.clientHeight, 0)
+      if (maxTop <= 0) break
+      scroller.scrollTo({ top: Math.floor(Math.random() * (maxTop + 1)), behavior: 'smooth' })
+    }
+    await sleep(stepDelayMs)
+  }
   const closeOpenedDetail = async (): Promise<MainSourcingResumeFailed | null> => {
     let opened = visibleAll(document, '.new-shortcut-resume__modal')
     if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
@@ -2637,6 +2698,7 @@ async function mainReadSourcingResume(
     if (modals.length !== 1) return failed('modal_cardinality')
     let modal = modals[0]
     const expectedTarget = target
+    await expandAllWorkExperiences(modal)
 
     const evaluateOpenedDetail = (): MainSourcingResumeResult => {
       const currentModals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -2698,7 +2760,9 @@ async function mainReadSourcingResume(
 
       const workSections = visibleAll(modal, '.new-work-experiences')
       if (workSections.length !== 1) return failed('work_unresolved', target.platformUserRef)
-      const workExperiences = blockText(workSections[0])
+      // 展开/收起按钮就长在这个容器里,整块取文会把它连同正文一起读走。
+      const workExperiences = blockText(workSections[0]).split('\n')
+        .filter((line) => line !== '展开全部' && line !== '收起全部').join('\n')
       if (!workExperiences) return failed('work_unresolved', target.platformUserRef)
       const educationSections = visibleAll(modal, '.new-education-experiences')
       if (educationSections.length !== 1) return failed('education_unresolved', target.platformUserRef)
@@ -2769,6 +2833,7 @@ async function mainReadSourcingResume(
       }
       await new Promise((resolve) => setTimeout(resolve, 120))
     }
+    if (evaluated.status === 'ready') await browseOpenedDetail(modal)
     const closeFailure = await closeOpenedDetail()
     return closeFailure ?? evaluated
   } catch {

@@ -321,9 +321,10 @@ func TestCommunicationV4SchedulePatrolRechecksFallbackBetweenColdTextAndInvite(
 	config := h.config
 	config.InteractionPaceWait = func(ctx context.Context) error {
 		paceCalls++
-		// 第二轮的节奏序列:链首对账读(1)→冷催正文发送(2)→换微信卡发送(3)。
+		// 第二轮走本档的节奏序列:冷催正文发送(1)→换微信卡发送(2)。链首
+		// 对账读会切会话,走的是换人档(SourcingPaceWait),不计入本探针。
 		// 在卡片自己的节奏等待里跨过七天边界,由 WAL 前复核把卡拦下。
-		if !crossAt.IsZero() && paceCalls == 3 {
+		if !crossAt.IsZero() && paceCalls == 2 {
 			h.clock.Add(crossAt.Sub(h.clock.Now()))
 		}
 		return ctx.Err()
