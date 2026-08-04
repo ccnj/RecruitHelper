@@ -522,6 +522,10 @@ interface MainSendBaselineReady {
   stage: 'ready'
   serverSourceKeys: string[]
   targetBindingToken: string
+  // 消息基线降为观测模式后（2026-08-04 甲方裁决），尾部对不上不再拒发，只把
+  // 事实带回 isolated world 记一笔日志。tailDirections 只含方向，不含正文。
+  tailDrifted?: boolean
+  tailDirections?: string[]
 }
 
 interface MainSendBaselineFailed {
@@ -548,6 +552,22 @@ function validatedMainSendBaseline(value: unknown): MainSendBaselineResult | nul
       record.serverSourceKeys.some((key) => typeof key !== 'string' || !hashPattern.test(key)) ||
       new Set(record.serverSourceKeys).size !== record.serverSourceKeys.length) return null
   return record as unknown as MainSendBaselineReady
+}
+
+// 消息基线降观测后（2026-08-04 甲方裁决）唯一的现场记录：不进契约、不进
+// result、不改错误码，只在插件 service worker 控制台留一行。日后要还原某次
+// 漂移到底是谁插了话，靠脑侧账本的消息序列——页面当时多出来的行会被下一次
+// 读取收进账本。会话引用只取前 8 位，够关联、不必完整落进日志。
+function reportBaselineDrift(
+  primitive: string,
+  conversationRef: string,
+  baseline: MainSendBaselineReady,
+): void {
+  if (!baseline.tailDrifted) return
+  console.warn(
+    `[zhilian] 发送基线已漂移，按 2026-08-04 裁决照常发送 primitive=${primitive} ` +
+      `conv=${conversationRef.slice(0, 8)} tail=${(baseline.tailDirections ?? []).join(',') || 'short'}`,
+  )
 }
 
 interface MainObserveStableOutboundResult {
@@ -8961,18 +8981,28 @@ async function mainCaptureSendBaseline(
         : await digest(canonicalContent)
       return { direction, contentHash }
     }
-    const tailMatches = async (rows: SnapshotRow[], staffID: string): Promise<boolean> => {
-      if (expectedTail.length === 0) return true
-      if (rows.length < expectedTail.length) return false
+    // 降观测后仍要说清"当时尾部到底是什么样"，所以不再短路返回：遍历完整段
+    // 尾部，顺带收集每行的方向（只有方向，绝不带正文）。
+    const tailReport = async (
+      rows: SnapshotRow[],
+      staffID: string,
+    ): Promise<{ matched: boolean; directions: string[] }> => {
+      if (expectedTail.length === 0) return { matched: true, directions: [] }
+      if (rows.length < expectedTail.length) {
+        return { matched: false, directions: [] }
+      }
       const tail = rows.slice(-expectedTail.length)
+      const directions: string[] = []
+      let matched = true
       for (let index = 0; index < tail.length; index += 1) {
         const actual = await anchorFor(tail[index], staffID)
         const expected = expectedTail[index]
+        directions.push(actual ? actual.direction : 'unresolved')
         if (!actual || actual.direction !== expected.direction || actual.contentHash !== expected.contentHash) {
-          return false
+          matched = false
         }
       }
-      return true
+      return { matched, directions }
     }
     const runtimeSession = asRecord(w.$session)
     const runtimeStaff = asRecord(runtimeSession?.staff)
@@ -8988,14 +9018,16 @@ async function mainCaptureSendBaseline(
     const complete = projectRows(source)
     if (!complete) return failed('history_first_unavailable')
     const snapshot = stableWindow(complete)
-    let snapshotTailMatches: boolean
+    let tail: { matched: boolean; directions: string[] }
     try {
-      snapshotTailMatches = await tailMatches(snapshot, staffID)
+      tail = await tailReport(snapshot, staffID)
     } catch {
       return failed('hash_unavailable')
     }
-    if (!snapshotTailMatches) return failed('guard_snapshot_uncovered')
-
+    // 2026-08-04 甲方裁决：消息基线降为观测模式。尾部对不上不再返回
+    // guard_snapshot_uncovered，而是照常算出基线并把漂移事实带回去。真机
+    // 数据是 314 次成功发送中它只拦下 2 次，其中一次纯属平台自行插了一行
+    // 引导消息。身份、路由与目标绑定仍在下面按原样硬拒。
     const keys: string[] = []
     try {
       for (const row of snapshot) keys.push(await digest(`source-v1|${row.idServer}`))
@@ -9014,6 +9046,7 @@ async function mainCaptureSendBaseline(
       stage: 'ready',
       serverSourceKeys: keys,
       targetBindingToken,
+      ...(tail.matched ? {} : { tailDrifted: true, tailDirections: tail.directions }),
     }
   } catch {
     return failed('unexpected')
@@ -9741,8 +9774,13 @@ async function mainSendMessageOnce(
     if (!currentSurface) return failedEvaluation(surfaceFailure)
     if (currentSurface.composer.value !== expectedComposerValue) return failedEvaluation(valueFailure)
     const currentBaselineState = baselineState(binding.target)
-    if (currentBaselineState !== 'match') {
-      return failedEvaluation(currentBaselineState === 'changed' ? 'baseline_changed' : 'guard_unresolved')
+    // 2026-08-04 甲方裁决：消息基线降为观测模式，'changed' 只记不停手；
+    // 'unresolved'（读不到）仍然拒绝——那是"读不到→不确认"的失效方向。
+    if (currentBaselineState === 'changed') {
+      console.warn('[zhilian] 动作前消息基线已漂移，按 2026-08-04 裁决照常发送')
+    }
+    if (currentBaselineState === 'unresolved') {
+      return failedEvaluation('guard_unresolved')
     }
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
       TextareaValueSetter
@@ -10867,7 +10905,11 @@ function mainSendCardOnce(
   if (!binding) return failed('guard_unresolved')
   if (binding.token !== expectedTargetBindingToken) return failed('target_changed')
   const baseline = baselineMatches(binding.target)
-  if (baseline !== 'match') return failed(baseline === 'changed' ? 'baseline_changed' : 'guard_unresolved')
+  // 同上：消息基线漂移只记不停手，读不到仍拒（2026-08-04 甲方裁决）。
+  if (baseline === 'changed') {
+    console.warn('[zhilian] 卡片动作前消息基线已漂移，按 2026-08-04 裁决照常发送')
+  }
+  if (baseline === 'unresolved') return failed('guard_unresolved')
   const details = Array.from(document.querySelectorAll<HTMLElement>('.im-session-detail')).filter(visible)
   if (details.length !== 1) return failed('surface_unavailable')
   const composers = Array.from(document.querySelectorAll<HTMLTextAreaElement>(
@@ -11925,7 +11967,7 @@ export async function sendZhilianMessage(
     )
   }
   if (sendBaseline.status === 'failed') {
-    if (sendBaseline.stage === 'route_changed' || sendBaseline.stage === 'guard_snapshot_uncovered') {
+    if (sendBaseline.stage === 'route_changed') {
       throw new ZhilianPlatformError('GUARD_FAILED', '发送基线在复核期间发生变化，拒绝发送', 'manualOnly')
     }
     throw new ZhilianPlatformError(
@@ -11935,6 +11977,7 @@ export async function sendZhilianMessage(
       'pageBroken',
     )
   }
+  reportBaselineDrift('chat.sendMessage', args.conversationRef, sendBaseline)
 
   const throwEvaluationFailure = (evaluation: MainSendOnceResult): never => {
     if (evaluation.reason === 'composer_nonempty') {
@@ -12223,11 +12266,12 @@ async function sendZhilianCard(
     throw new ZhilianPlatformError('CTX_NOT_READY', '卡片发送基线返回结构无效', 'afterRecovery', 'pageBroken')
   }
   if (baseline.status === 'failed') {
-    if (baseline.stage === 'route_changed' || baseline.stage === 'guard_snapshot_uncovered') {
+    if (baseline.stage === 'route_changed') {
       throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送基线在复核期间发生变化', 'manualOnly')
     }
     throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信卡片发送基线', 'afterRecovery', 'pageBroken')
   }
+  reportBaselineDrift(`card:${cardKind}`, conversationRef, baseline)
 
   let editorPrepared = false
   let finalActionStarted = false
