@@ -2567,6 +2567,32 @@ async function mainReadSourcingResume(
       await sleep(120)
     }
   }
+  // 读完不立刻关,按人的节奏把简历翻看一会儿:5～12 秒内滚动一到两次,
+  // 落点随机(与旧产品同形)。只写滚动容器的 scrollTop,不发合成点击、不向
+  // 页面派 wheel/scroll 事件——弹窗里就有"打招呼"一类控件,翻看绝不能演变
+  // 成误触。可滚容器不唯一或简历短到不足一屏时,纯等待把时长走完。
+  const browseOpenedDetail = async (openedModal: HTMLElement): Promise<void> => {
+    const totalMs = randomDelayMs(5_000, 12_000)
+    const steps = totalMs >= 8_000 ? 2 : 1
+    const stepDelayMs = Math.floor(totalMs / (steps + 1))
+    const scrollers = visibleAll(openedModal, '*').filter((element) => {
+      const style = window.getComputedStyle(element)
+      return /(auto|scroll)/u.test(`${style.overflowY} ${style.overflow}`) &&
+        element.scrollHeight > element.clientHeight + 20
+    })
+    if (scrollers.length !== 1) {
+      await sleep(totalMs)
+      return
+    }
+    const scroller = scrollers[0]
+    for (let step = 0; step < steps; step += 1) {
+      await sleep(stepDelayMs)
+      const maxTop = Math.max(scroller.scrollHeight - scroller.clientHeight, 0)
+      if (maxTop <= 0) break
+      scroller.scrollTo({ top: Math.floor(Math.random() * (maxTop + 1)), behavior: 'smooth' })
+    }
+    await sleep(stepDelayMs)
+  }
   const closeOpenedDetail = async (): Promise<MainSourcingResumeFailed | null> => {
     let opened = visibleAll(document, '.new-shortcut-resume__modal')
     if (opened.length !== 1) return failed(opened.length === 0 ? 'close_unavailable' : 'modal_cardinality')
@@ -2807,6 +2833,7 @@ async function mainReadSourcingResume(
       }
       await new Promise((resolve) => setTimeout(resolve, 120))
     }
+    if (evaluated.status === 'ready') await browseOpenedDetail(modal)
     const closeFailure = await closeOpenedDetail()
     return closeFailure ?? evaluated
   } catch {
