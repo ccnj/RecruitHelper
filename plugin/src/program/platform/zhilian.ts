@@ -12301,6 +12301,24 @@ async function sendZhilianCard(
       await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
     }
 
+    // 观测基线在编辑器准备完之后重抓一次。现场面试编辑器真机实测要十几秒
+    // （开弹窗、翻日历、选时间、核对回显），而平台在我方上一条消息后 5 秒
+    // 内就可能自行插入引导行；沿用发送前那份旧基线，会把那行一起算成"新增"，
+    // 发后正证要求"相对基线恰好新增一条"就此落空，卡明明发出去了却判未确认。
+    // 重抓失败不阻断发送——它只让观测基准贴近点击时刻，把关的仍是下面的
+    // evaluator（路由、身份、目标绑定在 preflight 与 commit 各查一次）。
+    const rawFreshBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
+      conversationRef,
+      guards.expectedTail,
+    ])
+    const freshBaseline = validatedMainSendBaseline(rawFreshBaseline)
+    const observeBaseline = freshBaseline !== null && freshBaseline.status === 'ready'
+      ? freshBaseline
+      : baseline
+    if (freshBaseline !== null && freshBaseline.status === 'ready') {
+      reportBaselineDrift(`card:${cardKind}:refresh`, conversationRef, freshBaseline)
+    }
+
     const evaluatorArgs = [
       conversationRef,
       cardKind,
@@ -12309,8 +12327,8 @@ async function sendZhilianCard(
       guards.expectedTail,
       expectedPrincipalFingerprint,
       ctx.irreversibleNotAfterMs,
-      baseline.serverSourceKeys,
-      baseline.targetBindingToken,
+      observeBaseline.serverSourceKeys,
+      observeBaseline.targetBindingToken,
     ] as const
     ctx.checkpoint()
     const preflight = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'preflight'])
@@ -12342,8 +12360,8 @@ async function sendZhilianCard(
           conversationRef,
           cardKind,
           interview,
-          baseline.serverSourceKeys,
-          baseline.targetBindingToken,
+          observeBaseline.serverSourceKeys,
+          observeBaseline.targetBindingToken,
         ])
         if (!observed.selected) {
           throw new ZhilianPlatformError(
