@@ -323,3 +323,85 @@ func TestProbeInterviewEditorAPIRejectsUnknownMethod(t *testing.T) {
 		t.Fatal("非法 method 不得派发任何命令")
 	}
 }
+
+// 会话不在脑账本里也必须能彩排(2026-08-04)。目标页面由手侧按 conversationRef
+// ——平台 URL 的 sessionId——匹配人工已打开的标签页,库里有没有这条会话对定位
+// 毫无帮助;彩排因此不再借道发送轨 PrepareSend 的"已入库 / 已收编 / 有账本尾"
+// 三道门槛。本用例是那次拆除的回归闸:谁把 PrepareSend 加回来,这里就红。
+func TestProbeInterviewEditorAPIAcceptsConversationAbsentFromLedger(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	accountKey := store.AccountKey{Platform: "zhilian", AccountRef: "account-api"}
+	if err := st.CreateAccount(&store.Account{
+		Platform: accountKey.Platform, AccountRef: accountKey.AccountRef,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.BindAccountPrincipal(
+		accountKey, "hand-api", "fingerprint-api", "session-api", "boot-api", time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	// 从未巡检、从未收编，账本里没有这条会话，只有浏览器地址栏里有。
+	const conversationRef = "session-id-only-in-the-address-bar"
+	sender := &probeAPISender{}
+	dispatcher := dispatch.New(st, sender)
+	api := New(st, newFakeAdminHub(), dispatcher, nil, nil, "")
+	mux := http.NewServeMux()
+	api.Routes(mux)
+
+	startsAt := time.Now().AddDate(0, 1, 0).Truncate(time.Hour).UnixMilli()
+	raw, _ := json.Marshal(map[string]any{
+		"platform": accountKey.Platform, "accountRef": accountKey.AccountRef,
+		"conversationRef": conversationRef, "startsAt": startsAt, "method": "onsite",
+	})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/admin/cards/interview/probe", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, req)
+		done <- response
+	}()
+
+	var cmdMsgID string
+	var cmdBody protocol.CmdBody
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if envelopes := sender.take(); len(envelopes) > 0 {
+			cmdMsgID = envelopes[0].MsgID
+			_ = json.Unmarshal(envelopes[0].Body, &cmdBody)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if cmdMsgID == "" {
+		t.Fatal("账本里没有该会话，仍应派发彩排命令")
+	}
+	// 身份三项校验一条不放：命令必须照旧携带已绑定账号的指纹上下文。
+	if cmdBody.Context == nil || cmdBody.Context.ExpectedPrincipalFingerprint != "fingerprint-api" {
+		t.Fatalf("命令必须携带账号指纹上下文: %+v", cmdBody.Context)
+	}
+	var sentArgs protocol.DebugProbeInterviewEditorArgs
+	if err := json.Unmarshal(cmdBody.Args, &sentArgs); err != nil ||
+		sentArgs.ConversationRef != conversationRef {
+		t.Fatalf("彩排 args 必须原样透传 sessionId: %+v err=%v", sentArgs, err)
+	}
+
+	dispatcher.OnAck("hand-api", protocol.AckBody{Ref: cmdMsgID, Status: protocol.AckStatusAccepted})
+	data, _ := protocol.Encode(protocol.DebugProbeInterviewEditorData{
+		ConversationRef: conversationRef,
+		DateValue:       "2026-09-05", TimeValue: "14:00", Canceled: true,
+	})
+	dispatcher.OnResult("hand-api", "result-probe-unlisted", protocol.ResultBody{
+		Ref: cmdMsgID, Status: protocol.ResultStatusOk, Data: data,
+	})
+
+	response := <-done
+	if response.Code != http.StatusOK {
+		t.Fatalf("终局后应 200: code=%d body=%s", response.Code, response.Body.String())
+	}
+}
