@@ -7964,6 +7964,63 @@ test('M5-B 卡片 observer 只接受 baseline 后严格 +1，并返回规范 has
   }
 })
 
+test('M5-B 卡片 observer 接受现场面试形态并把缺席 endsAt 投影为空串', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const baselineRows = structuredClone(fixture.rows)
+    const baseline = await fixture.capture()
+    assert.equal(baseline.status, 'ready')
+    // 现场面试：平台 interviewType="ATTENDANCE"，不下发 interviewPlatform，
+    // endTime 恒为 "0"（2026-07-31 真机）；命令侧 endsAt 必须缺席。
+    const onsite = { startsAt: 1_800_000_000_000, method: 'onsite' }
+    const observeOnsite = () => zhilianTestHooks.mainObserveStableOutboundCard(
+      fixture.conversationRef,
+      'interviewInvite',
+      onsite,
+      baseline.serverSourceKeys,
+      baseline.targetBindingToken,
+    )
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-onsite-1',
+      cardKind: 'interviewInvite',
+      overrides: {
+        interviewType: 'ATTENDANCE',
+        interviewPlatform: undefined,
+        endTime: '0',
+        staffTitle: '现场面试邀请',
+      },
+    })
+    const invite = await observeOnsite()
+    assert.equal(invite.selected, true)
+    assert.equal(invite.matchingNewServerMessages, 1)
+    assert.deepEqual(invite.interview, { startsAt: onsite.startsAt, method: 'onsite' })
+    assert.equal(
+      invite.sourceKey,
+      m3Hash('source-v1|server-m5b-onsite-1'),
+      '现场面试卡同样必须返回稳定服务端消息身份的 sourceKey',
+    )
+    assert.equal(
+      invite.contentHash,
+      m3Hash(['card', 'interviewInvite', String(onsite.startsAt), '', 'onsite'].join('\x1f')),
+      '缺席 endsAt 必须投影为空串,分隔符位数不变,method 取实际归一化值',
+    )
+
+    // 形态错配不得成立：命令要现场，页面来的却是线上卡。
+    fixture.rows.splice(0, fixture.rows.length, ...structuredClone(baselineRows))
+    appendM3CardRow(fixture, {
+      idServer: 'server-m5b-onsite-2',
+      cardKind: 'interviewInvite',
+    })
+    assert.equal(
+      (await observeOnsite()).matchingNewServerMessages,
+      0,
+      '命令为 onsite 时线上形态的 355 不得形成正证',
+    )
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('M5-B 卡片 observer 对错形态、缺服务端 id、错误时间与目标变化保持阴性', async () => {
   const fixture = installM3SendFixture()
   try {
