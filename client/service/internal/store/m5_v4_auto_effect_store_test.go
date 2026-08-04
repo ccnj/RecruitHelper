@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -582,7 +583,13 @@ func TestCommunicationV4OnsiteInterviewCardMaterializesWithoutEndsAt(t *testing.
 		card.InterviewMethod == nil || *card.InterviewMethod != "onsite" {
 		t.Fatalf("现场邀面 action 形态错误(endsAt 必须缺席): %+v", card)
 	}
-	if want := communicationInterviewInviteContentHash(startsAt, 0, "onsite"); card.ContentHash != want {
+	// 期望值按《协议规格-v1》§4.5 的配方在这里独立拼一遍，不调被测函数——
+	// 拿被测函数自己算期望值是同义反复，恒真，正好测不出配方走样。缺席的
+	// endsAt 投影为空串，分隔符位数不变（所以是连着两个 \x1f）。
+	want := textcanon.Hash(
+		"card\x1finterviewInvite\x1f" + strconv.FormatInt(startsAt, 10) + "\x1f\x1fonsite",
+	)
+	if card.ContentHash != want {
 		t.Fatalf("缺席 endsAt 必须按空串投影 contentHash: got=%s want=%s", card.ContentHash, want)
 	}
 }

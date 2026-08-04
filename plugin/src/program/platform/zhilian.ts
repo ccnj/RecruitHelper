@@ -12312,11 +12312,26 @@ async function sendZhilianCard(
       guards.expectedTail,
     ])
     const freshBaseline = validatedMainSendBaseline(rawFreshBaseline)
+    // 只换观测用的 serverSourceKeys。targetBindingToken 必须保留首抓那份：
+    // 它是"整个原语期间这个会话绑定的对端不许变"的反错靶硬闸，跟着重抓一起
+    // 换会把覆盖窗口缩成最后几毫秒——平台若在编辑器准备的十几秒里把同一
+    // sessionId 重映射到别人，就会重新派生出新 token 比对通过，卡发给另一个人。
+    // AGENTS.md 第 9 条 2026-08-04 那段写明目标绑定仍是硬前置，本次降级只降
+    // 消息基线。
     const observeBaseline = freshBaseline !== null && freshBaseline.status === 'ready'
-      ? freshBaseline
+      ? { ...freshBaseline, targetBindingToken: baseline.targetBindingToken }
       : baseline
     if (freshBaseline !== null && freshBaseline.status === 'ready') {
       reportBaselineDrift(`card:${cardKind}:refresh`, conversationRef, freshBaseline)
+    } else {
+      // 回退不阻断发送(把关交给 preflight/commit 的 evaluator)，但要留痕：
+      // 否则真机上"经常回退旧基线"这件事没有任何地方看得出来。
+      console.warn(
+        `[zhilian] 卡片观测基线重抓未成功，回退首抓基线 cardKind=${cardKind} ` +
+          `conv=${conversationRef.slice(0, 8)} stage=${
+            freshBaseline === null ? 'invalid' : freshBaseline.stage
+          }`,
+      )
     }
 
     const evaluatorArgs = [

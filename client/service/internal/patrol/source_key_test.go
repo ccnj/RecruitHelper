@@ -156,6 +156,34 @@ func TestSnapshotMessagesCarriesMissingSourceKeyAsMissing(t *testing.T) {
 	}
 }
 
+// 现场面试没有结束时间：手侧对 onsite 显式省略 endsAt，Go 解出 0。若在这里
+// 直接取地址，快照就变成"有 endsAt 且等于 0"，归一化随即判 endsAt<=startsAt
+// 非法，整条会话被隔离、档案被冻结，每轮复现且不自愈。这条不依赖我方发不发
+// 线下卡——招聘方自己在平台手发一张到场面试卡就会踩上。
+func TestSnapshotMessagesOmitsOnsiteEndsAt(t *testing.T) {
+	startsAt := int64(1_722_000_000_000)
+	cardType := protocol.CardTypeInterviewInvite
+	cardState := protocol.CardStateUnknown
+	message := protocol.ThreadMessage{
+		Idx: 0, Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindCard,
+		ContentHash: syncledger.InterviewInviteContentHash(startsAt, 0, "onsite"),
+		CardType:    &cardType, CardState: &cardState,
+		Interview: &protocol.InterviewDetails{
+			StartsAt: startsAt, Method: protocol.InterviewMethodOnsite,
+		},
+	}
+	snapshot := snapshotMessages([]protocol.ThreadMessage{message})
+	if len(snapshot) != 1 ||
+		snapshot[0].InterviewStartsAtMs == nil || *snapshot[0].InterviewStartsAtMs != startsAt ||
+		snapshot[0].InterviewEndsAtMs != nil ||
+		snapshot[0].InterviewMethod == nil || *snapshot[0].InterviewMethod != "onsite" {
+		t.Fatalf("现场面试的 endsAt 必须缺席而不是 0: %+v", snapshot[0])
+	}
+	if _, err := syncledger.NormalizeMessage(snapshot[0]); err != nil {
+		t.Fatalf("现场面试快照必须能通过归一化: %v", err)
+	}
+}
+
 func TestSnapshotMessagesCarriesInterviewProjection(t *testing.T) {
 	startsAt, endsAt := int64(1_722_000_000_000), int64(1_722_001_800_000)
 	cardType := protocol.CardTypeInterviewInvite
