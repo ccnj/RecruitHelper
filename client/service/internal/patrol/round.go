@@ -1490,7 +1490,22 @@ func (a *roundActor) detectDirtySummary(
 		hintDirty = true
 	}
 	if !forceUnread && !forceReconcile && (!hintDirty || hintAlreadyVerified) {
-		return nil, nil
+		// 上面四条都不成立时的最后一条读取理由(2026-08-04 真机立案,推导与
+		// 收窄见 store/pending_visible_dispatch.go):发送系原语只认已经打开
+		// 的会话页,而页面导航只发生在判脏之后的 reconcileConversation 里。
+		// 候选人安静下来之后才要发的回复因此必然撞 pageAbsent,真机两例各自
+		// 连续 20 代重试全败、回复迟了 3~4 小时。
+		//
+		// 注意本判据必须落在 forceReconcile 一侧,不能并入 hintDirty:这类会话
+		// 的列表指纹恰恰是"已验证且没变过",hintAlreadyVerified 会把它重新
+		// 挡回 return nil。
+		pendingDispatch, pendingErr := a.manager.store.ConversationHasPlannedVisibleDispatch(key)
+		if pendingErr != nil {
+			return nil, pendingErr
+		}
+		if !pendingDispatch {
+			return nil, nil
+		}
 	}
 	return &dirtyConversation{
 		conversation:        conversation,
