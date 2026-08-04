@@ -1823,22 +1823,21 @@ func communicationActionMatchesV4Plan(
 			expectedText == "" &&
 			expectedParent != nil &&
 			sameOptionalPlanKey(action.DependsOnActionID, expectedParent) &&
-			action.InterviewStartsAtMs != nil &&
-			action.InterviewEndsAtMs != nil &&
-			action.InterviewMethod != nil &&
-			plan.InterviewStartsAtMs != nil &&
-			plan.InterviewEndsAtMs != nil &&
-			plan.InterviewMethod != nil &&
+			communication.ValidV4InterviewShape(
+				action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+			) &&
+			communication.ValidV4InterviewShape(
+				plan.InterviewStartsAtMs, plan.InterviewEndsAtMs, plan.InterviewMethod,
+			) &&
 			*action.InterviewStartsAtMs == *plan.InterviewStartsAtMs &&
-			*action.InterviewEndsAtMs == *plan.InterviewEndsAtMs &&
+			sameOptionalInt64(action.InterviewEndsAtMs, plan.InterviewEndsAtMs) &&
 			*action.InterviewMethod == *plan.InterviewMethod &&
-			*action.InterviewStartsAtMs > 0 &&
-			*action.InterviewEndsAtMs ==
-				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs &&
-			*action.InterviewMethod == "wechatVideo" &&
+			(action.InterviewEndsAtMs == nil ||
+				*action.InterviewEndsAtMs ==
+					*action.InterviewStartsAtMs+communication.V4InterviewDurationMs) &&
 			action.ContentHash == communicationInterviewInviteContentHash(
 				*action.InterviewStartsAtMs,
-				*action.InterviewEndsAtMs,
+				optionalInt64Value(action.InterviewEndsAtMs),
 				*action.InterviewMethod,
 			)
 	default:
@@ -2088,6 +2087,15 @@ func sameOptionalTime(left, right *time.Time) bool {
 
 func communicationWechatInviteContentHash() string {
 	return textcanon.Hash("card\x1fwechatExchange")
+}
+
+// optionalInt64Value 把缺席的 endsAt 折成 0,交给 contentHash 配方按空串投影
+// (《协议规格-v1》§4.5)。现场面试没有结束时间,这里不能解引用空指针。
+func optionalInt64Value(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func communicationInterviewInviteContentHash(
