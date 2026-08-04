@@ -12074,6 +12074,172 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
   assert.ok(socket.closeCalls.length > 0, '连续两次 pong 缺失未主动关链')
 })
 
+// 平台阻塞弹窗。最危险的一条路是 body 里堆着的隐藏残留:真机实测同一页面 7 个,
+// 每个都还带着 disabled=false 的「删除对话」。全局 querySelector 会命中最老那个,
+// 点下去删的是别人的会话——下面的用例把这条路钉死。
+function installBlockedDialogFixture(specs) {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    window: globalThis.window,
+  }
+  const wrappers = specs.map((spec) => {
+    const buttons = (spec.buttons ?? ['知道了', '删除对话']).map((text) => {
+      const button = { innerText: text, disabled: spec.disabled === text, clicks: 0 }
+      button.click = () => { button.clicks += 1 }
+      return button
+    })
+    // 真机事实:关闭后的残留只是 display:none，modal 上的 km-modal--open 被摘掉。
+    const modal = { classList: { contains: (name) => spec.open === true && name === 'km-modal--open' } }
+    const title = spec.title === undefined ? null : { innerText: spec.title }
+    return {
+      buttons,
+      hidden: spec.hidden === true,
+      getBoundingClientRect: () => ({ height: spec.hidden === true ? 0 : 200 }),
+      querySelector(selector) {
+        if (selector === '.km-modal') return modal
+        if (selector === '.km-modal__title-inner') return title
+        return null
+      },
+      querySelectorAll(selector) {
+        return selector === '.km-modal__footer button' ? buttons : []
+      },
+    }
+  })
+  const computeStyle = (node) => ({
+    display: node.hidden ? 'none' : 'flex',
+    visibility: 'visible',
+  })
+  globalThis.getComputedStyle = computeStyle
+  // 生产代码按本文件惯例走 window.getComputedStyle，Node 里没有 window。
+  globalThis.window = { getComputedStyle: computeStyle }
+  globalThis.document = {
+    querySelectorAll(selector) {
+      return selector === 'body > .km-modal__wrapper' ? wrappers : []
+    },
+  }
+  return {
+    wrappers,
+    live: wrappers[wrappers.length - 1],
+    restore() {
+      globalThis.document = original.document
+      globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.window = original.window
+    },
+  }
+}
+
+const BLOCKED_DIALOG_STALE = Object.freeze({
+  hidden: true, open: false, title: '求职者存在违规行为，系统已为您自动屏蔽',
+})
+
+test('平台阻塞弹窗只认当前可见的 open 弹层，7 个隐藏残留一个都不碰', () => {
+  const fixture = installBlockedDialogFixture([
+    ...Array.from({ length: 7 }, () => BLOCKED_DIALOG_STALE),
+    { open: true, title: '\n      求职者存在违规行为，系统已为您自动屏蔽\n    ' },
+  ])
+  try {
+    const probe = zhilianTestHooks.mainProbeZhilianBlockedDialog()
+    assert.equal(probe.status, 'present')
+    assert.equal(probe.title, '求职者存在违规行为，系统已为您自动屏蔽', '标题需去掉平台的换行缩进')
+    assert.equal(probe.known, true)
+    assert.equal(probe.dismissible, true)
+
+    const step = zhilianTestHooks.mainClickZhilianBlockedDialogButton('删除对话')
+    assert.deepEqual(step, { status: 'ok', detail: '删除对话' })
+    assert.equal(fixture.live.buttons.find((b) => b.innerText === '删除对话').clicks, 1)
+    assert.equal(fixture.live.buttons.find((b) => b.innerText === '知道了').clicks, 0)
+    for (const stale of fixture.wrappers.slice(0, 7)) {
+      for (const button of stale.buttons) {
+        assert.equal(button.clicks, 0, '隐藏残留弹层的按钮一次都不得被点击')
+      }
+    }
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('平台阻塞弹窗两种文案同构，只有白名单命中才算已知', () => {
+  const cases = [
+    ['求职者存在违规行为，系统已为您自动屏蔽', true],
+    ['对方已关闭求职，无法继续进行沟通', true],
+    ['确定要清空聊天记录吗', false],
+  ]
+  for (const [title, known] of cases) {
+    const fixture = installBlockedDialogFixture([{ open: true, title }])
+    try {
+      const probe = zhilianTestHooks.mainProbeZhilianBlockedDialog()
+      assert.equal(probe.status, 'present')
+      assert.equal(probe.known, known, `文案「${title}」的白名单判定`)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
+test('平台阻塞弹窗:只有残留、非本类弹层或多个候选时都不动手', () => {
+  const onlyStale = installBlockedDialogFixture([BLOCKED_DIALOG_STALE, BLOCKED_DIALOG_STALE])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainProbeZhilianBlockedDialog(), { status: 'absent' })
+    assert.deepEqual(zhilianTestHooks.mainClickZhilianBlockedDialogButton('删除对话'),
+      { status: 'failed', reason: 'dialog_absent' })
+  } finally {
+    onlyStale.restore()
+  }
+
+  // 可见 open 弹层，但不带「删除对话」:巡检期间撞上的任何别的确认框都走这里。
+  const otherModal = installBlockedDialogFixture([
+    { open: true, title: '确认发送', buttons: ['取消', '确定'] },
+  ])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainProbeZhilianBlockedDialog(), { status: 'absent' })
+    assert.equal(otherModal.live.buttons.every((b) => b.clicks === 0), true)
+  } finally {
+    otherModal.restore()
+  }
+
+  const twoLive = installBlockedDialogFixture([
+    { open: true, title: '求职者存在违规行为，系统已为您自动屏蔽' },
+    { open: true, title: '对方已关闭求职，无法继续进行沟通' },
+  ])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainProbeZhilianBlockedDialog(), { status: 'ambiguous', count: 2 })
+    assert.deepEqual(zhilianTestHooks.mainClickZhilianBlockedDialogButton('删除对话'),
+      { status: 'failed', reason: 'dialog_ambiguous' })
+    for (const wrapper of twoLive.wrappers) {
+      assert.equal(wrapper.buttons.every((b) => b.clicks === 0), true, '歧义时一个都不许点')
+    }
+  } finally {
+    twoLive.restore()
+  }
+})
+
+test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其次点别的', () => {
+  const noDismiss = installBlockedDialogFixture([
+    { open: true, title: '求职者存在违规行为，系统已为您自动屏蔽', buttons: ['删除对话'] },
+  ])
+  try {
+    assert.equal(zhilianTestHooks.mainProbeZhilianBlockedDialog().dismissible, false)
+    assert.deepEqual(zhilianTestHooks.mainClickZhilianBlockedDialogButton('知道了'),
+      { status: 'failed', reason: 'button_absent' })
+    assert.equal(noDismiss.live.buttons[0].clicks, 0, '找不到目标按钮时不得改点「删除对话」')
+  } finally {
+    noDismiss.restore()
+  }
+
+  const disabled = installBlockedDialogFixture([
+    { open: true, title: '对方已关闭求职，无法继续进行沟通', disabled: '删除对话' },
+  ])
+  try {
+    assert.equal(zhilianTestHooks.mainProbeZhilianBlockedDialog().known, true)
+    assert.deepEqual(zhilianTestHooks.mainClickZhilianBlockedDialogButton('删除对话'),
+      { status: 'failed', reason: 'button_disabled' })
+    assert.equal(disabled.live.buttons.find((b) => b.innerText === '删除对话').clicks, 0)
+  } finally {
+    disabled.restore()
+  }
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {

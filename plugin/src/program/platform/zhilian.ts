@@ -5684,6 +5684,88 @@ function mainIgnoreZhilianSensitiveWordDialog(): MainStep {
   return { status: 'ok', detail: 'ignored' }
 }
 
+// 平台阻塞弹窗:切到"已被系统屏蔽"或"已关闭求职"的候选人时,平台弹一个
+// message-box。它带全屏 backdrop 并给 body 上锁,不处理掉的话后续每一次点击
+// 都打在遮罩上——卡住的不只是这个人,是整轮巡检。
+//
+// 真机与考古事实(2026-08-04):
+//   1. 每弹一次就新建一个 body > .km-modal__wrapper;关掉只加 display:none、
+//      **不从 DOM 移除**。实测同一页面堆了 7 个残留,每个都还带着 disabled=false
+//      的「删除对话」。定位因此必须锚 .km-modal--open + 可见性:全局
+//      querySelector 命中的是最老那个残留,点下去删的是别人的会话。
+//   2. .km-modal__wrapper 是全站通用容器(z-index 计数器全站共享、序号有跳号),
+//      不是本弹窗专属,所以判据落在文案与按钮上,不能只看容器类名。
+//   3. 两种文案(违规屏蔽 / 已关闭求职)的 DOM 逐字节同构,只有 title-inner
+//      那一行字不同,因此只有一套判定。
+//   4. button 的 type 属性不可作判据:平台拿它当样式槽用(「知道了」写的是
+//      type="light",非法值被浏览器 fallback 成 submit)。
+//   5. innerText 对未渲染元素退化为 textContent,隐藏残留照样读得出按钮文案,
+//      所以可见性必须显式过滤,不能指望文本为空。
+//
+// 注意:下面两个函数会被序列化注入 MAIN world,**不能引用模块作用域的任何东西**,
+// 所以定位逻辑只能在各自函数内联一遍,不许抽公共 helper。
+type MainBlockedDialogProbe =
+  | { status: 'absent' }
+  | { status: 'ambiguous'; count: number }
+  | { status: 'present'; title: string; known: boolean; dismissible: boolean }
+
+function mainProbeZhilianBlockedDialog(): MainBlockedDialogProbe {
+  const hits = (Array.from(document.querySelectorAll('body > .km-modal__wrapper')) as HTMLElement[])
+    .filter((wrapper) => {
+      const modal = wrapper.querySelector('.km-modal')
+      if (!modal || !modal.classList.contains('km-modal--open')) return false
+      const style = window.getComputedStyle(wrapper)
+      if (wrapper.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      return (Array.from(wrapper.querySelectorAll('.km-modal__footer button')) as HTMLElement[])
+        .some((button) => (button.innerText ?? '').trim() === '删除对话')
+    })
+  if (hits.length === 0) return { status: 'absent' }
+  if (hits.length > 1) return { status: 'ambiguous', count: hits.length }
+  const title = hits[0].querySelector('.km-modal__title-inner') as HTMLElement | null
+  const text = (title?.innerText ?? '').trim()
+  const dismissible = (Array.from(
+    hits[0].querySelectorAll('.km-modal__footer button'),
+  ) as HTMLButtonElement[])
+    .some((button) => (button.innerText ?? '').trim() === '知道了' && !button.disabled)
+  return {
+    status: 'present',
+    title: text.slice(0, 200),
+    known: text.includes('存在违规行为') || text.includes('已关闭求职'),
+    dismissible,
+  }
+}
+
+function mainClickZhilianBlockedDialogButton(label: string): MainStep {
+  const hits = (Array.from(document.querySelectorAll('body > .km-modal__wrapper')) as HTMLElement[])
+    .filter((wrapper) => {
+      const modal = wrapper.querySelector('.km-modal')
+      if (!modal || !modal.classList.contains('km-modal--open')) return false
+      const style = window.getComputedStyle(wrapper)
+      if (wrapper.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      return (Array.from(wrapper.querySelectorAll('.km-modal__footer button')) as HTMLElement[])
+        .some((button) => (button.innerText ?? '').trim() === '删除对话')
+    })
+  if (hits.length !== 1) {
+    return { status: 'failed', reason: hits.length === 0 ? 'dialog_absent' : 'dialog_ambiguous' }
+  }
+  const buttons = (Array.from(
+    hits[0].querySelectorAll('.km-modal__footer button'),
+  ) as HTMLButtonElement[])
+    .filter((button) => (button.innerText ?? '').trim() === label)
+  if (buttons.length !== 1) {
+    return { status: 'failed', reason: buttons.length === 0 ? 'button_absent' : 'button_ambiguous' }
+  }
+  if (buttons[0].disabled) return { status: 'failed', reason: 'button_disabled' }
+  buttons[0].click()
+  return { status: 'ok', detail: label }
+}
+
 function mainCloseZhilianPanels(): MainStep {
   const visible = Array.from(document.querySelectorAll('.km-select__dropdown, .salary-popover')).filter((node) => {
     const style = window.getComputedStyle(node)
@@ -11571,6 +11653,87 @@ function nextAnchorPrefixMask(
   return mask
 }
 
+// 条件轮询(就绪即走、封顶 1s),不是死等满 1s。实测弹窗在会话切换后 140ms
+// 插入 DOM,1s 上限留了七倍余量。
+async function pollZhilianBlockedDialog(
+  tabId: number,
+  ctx: PrimitiveContext,
+  done: (probe: MainBlockedDialogProbe) => boolean,
+): Promise<MainBlockedDialogProbe> {
+  const deadline = Date.now() + 1_000
+  for (;;) {
+    ctx.checkpoint()
+    const probe = await runMain(tabId, mainProbeZhilianBlockedDialog, [])
+    if (done(probe) || Date.now() >= deadline) return probe
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+// 切换会话后就地处置平台阻塞弹窗;事实与定位依据见 mainProbeZhilianBlockedDialog。
+// 命中即删,不做"这个人值不值得删"的业务判断(2026-08-04 甲方裁决):会弹这个窗
+// 的候选人都已经无法继续沟通。所有出路都以 TARGET_NOT_FOUND + afterRecovery
+// 收束——错误码让巡检本轮跳过此人,可重试让下一轮还会重新来看,两道各自独立地
+// 把"冻结错人"挡在外面(见 patrol/failure_scope.go 的分流)。删成功的人下一轮
+// 不会再出现在未读列表里,自然收敛;没删成的下一轮再撞见、再删一次。
+async function settleZhilianBlockedDialog(
+  tabId: number,
+  ctx: PrimitiveContext,
+  lastInteractionAt: number,
+): Promise<void> {
+  const found = await pollZhilianBlockedDialog(tabId, ctx, (probe) => probe.status !== 'absent')
+  if (found.status === 'absent') return
+  if (found.status === 'ambiguous') {
+    // 同时有多个带「删除对话」的可见弹窗:没见过,也无从判断该点哪一个。不猜、
+    // 不点,留日志让人看见。
+    console.warn(`[zhilian] 切换会话后出现 ${found.count} 个平台阻塞弹窗,已放弃自动处置`)
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND', '切换会话后出现多个平台阻塞弹窗,未自动处置',
+      'afterRecovery', undefined, 'none', { blockedDialogs: found.count },
+    )
+  }
+  // 与前一次可见交互(会话行点击)保持 1s+抖动的下限,不贴连。
+  const pace = lastInteractionAt + 1_000 + Math.floor(Math.random() * 401) - Date.now()
+  if (pace > 0) await new Promise((resolve) => setTimeout(resolve, pace))
+  ctx.checkpoint()
+  if (!found.known) {
+    // 形态吻合(可见 open 弹窗 + 「删除对话」)但文案不在白名单:不删。能关就点
+    // 「知道了」解锁页面——遮罩留着会把整轮巡检一起卡住,而「知道了」可逆、不动
+    // 平台数据。标题原文进日志与 diagnostics,新文案因此是"看得见的漏",不是
+    // 静默漏判;两条已知文案都是不含候选人身份的平台通知语,新文案按同类推定。
+    console.warn(`[zhilian] 平台阻塞弹窗文案不在白名单,未删除对话：${found.title}`)
+    let dismissed = 'skipped'
+    if (found.dismissible) {
+      const step = await runMain(tabId, mainClickZhilianBlockedDialogButton, ['知道了'])
+      dismissed = validMainStep(step) && step.status === 'ok' ? 'ok' : 'failed'
+    }
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND', '切换会话后出现未知平台阻塞弹窗,未删除对话',
+      'afterRecovery', undefined, 'none',
+      { blockedDialogTitle: found.title, dismissed },
+    )
+  }
+  const clicked = await runMain(tabId, mainClickZhilianBlockedDialogButton, ['删除对话'])
+  if (!validMainStep(clicked) || clicked.status !== 'ok') {
+    throw new ZhilianPlatformError(
+      'TARGET_NOT_FOUND', '平台阻塞弹窗的删除对话按钮无法点击',
+      'afterRecovery', undefined, 'none',
+      {
+        blockedDialogTitle: found.title,
+        click: validMainStep(clicked) && clicked.status === 'failed' ? clicked.reason : 'shape',
+      },
+    )
+  }
+  // 后置条件是弹窗消失。读不到消失并不能反推没删,所以照样按"本会话已不可用"
+  // 收束:不重试、不再点第二次,把结果留进 diagnostics 供人复核。
+  const gone = await pollZhilianBlockedDialog(tabId, ctx, (probe) => probe.status === 'absent')
+  throw new ZhilianPlatformError(
+    'TARGET_NOT_FOUND',
+    gone.status === 'absent' ? '会话因平台阻塞弹窗已删除' : '已点击删除对话,但弹窗未在期限内消失',
+    'afterRecovery', undefined, 'none',
+    { blockedDialogTitle: found.title, dialogGone: gone.status === 'absent' },
+  )
+}
+
 async function ensureThreadRoute(
   tab: chrome.tabs.Tab,
   conversationRef: string,
@@ -11667,18 +11830,25 @@ async function ensureThreadRoute(
         'manualOnly',
       )
     }
+    const clickedAt = Date.now()
     ctx.checkpoint()
     for (let attempt = 0; attempt < 40; attempt += 1) {
       ctx.checkpoint()
       const latest = await chrome.tabs.get(tab.id)
+      let routeReady = false
       try {
         const url = new URL(latest.url ?? '')
-        if (latest.status === 'complete' && url.pathname === '/app/im' &&
-            url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)) {
-          return true
-        }
+        routeReady = latest.status === 'complete' && url.pathname === '/app/im' &&
+          url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)
       } catch {
         // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
+      }
+      if (routeReady) {
+        // 路由已绑定目标:平台此刻可能已经弹出阻塞弹窗(实测 140ms)。必须在本
+        // 原语内就地处置,否则全屏遮罩会挡住后续每一次点击,卡住的不只是这个
+        // 人。处置抛出的错误要绕开上面那个 catch,所以调用放在 try 外面。
+        await settleZhilianBlockedDialog(tab.id, ctx, clickedAt)
+        return true
       }
       if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
       await new Promise((resolve) => setTimeout(resolve, 250))
@@ -13594,6 +13764,8 @@ export const zhilianTestHooks = Object.freeze({
   mainReadThreadPage,
   mainSendCardOnce,
   mainSendMessageOnce,
+  mainProbeZhilianBlockedDialog,
+  mainClickZhilianBlockedDialogButton,
   selectZhilianSourcingPosition,
   applyZhilianSourcingFilters,
   ensureThreadRoute,
