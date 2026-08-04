@@ -312,7 +312,31 @@ func (d *Dispatcher) OnResult(handID, resultMsgID string, res protocol.ResultBod
 		d.st.Audit("late_possible_after_verdict", handID, res.Ref,
 			"人工终局后迟到 possible，保留裁决且不重开已解锁旧意图")
 	default:
-		slog.Info("命令终局", "handId", handID, "ref", res.Ref, "status", res.Status)
+		if res.Status == protocol.ResultStatusFailed && res.Error != nil {
+			// 失败终局此前与成功共用这一行、只有 status=failed:错误码、原语名
+			// 与失败原因都不进日志。2026-08-04 真机 40 次连续 pageAbsent 因此
+			// 在 3MB brain.log 里 grep 不到一条,甲方只能靠翻命令账本发现。
+			//
+			// 边界:本分支只覆盖走到 default 的失败。进入重试/suspect 等 case
+			// 的失败仍只有 Audit 行,本次不扩。
+			attrs := []any{
+				"handId", handID, "ref", res.Ref, "status", res.Status,
+				"errorCode", res.Error.Code,
+				"retryable", res.Error.Retryable,
+				"sideEffect", res.Error.SideEffect,
+			}
+			if len(res.Error.Data) != 0 {
+				// 契约规定 error.data 只放结构化诊断枚举(如 notReadyReason),
+				// 不含候选人明文身份,可以进普通日志。
+				attrs = append(attrs, "errorData", string(res.Error.Data))
+			}
+			if rec, _ := d.st.CmdByMsgID(res.Ref); rec != nil {
+				attrs = append(attrs, "name", rec.Name, "class", rec.Class)
+			}
+			slog.Warn("命令失败终局", attrs...)
+		} else {
+			slog.Info("命令终局", "handId", handID, "ref", res.Ref, "status", res.Status)
+		}
 	}
 }
 
