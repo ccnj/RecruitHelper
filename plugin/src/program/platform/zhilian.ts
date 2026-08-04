@@ -2677,9 +2677,13 @@ async function mainReadSourcingResume(
       } else {
         targetCloseNotBefore = initiallyCloseNotBefore
       }
-    } else if (openedResumeNumber) {
-      return failed('stale_detail_ambiguous')
     }
+    // 弹窗不在时,URL 上残留的 resumeNumber 不代表任何页面状态:平台不会
+    // 据它恢复详情,正常关闭时平台会自己清掉它,只有手动刷新等异常路径才
+    // 留得下来。此前这里直接拒绝,而残留没有任何自愈路径,一次刷新就能让
+    // 采集无限失败(2026-08-04 真机:挂十分钟、失败 68 次、59 人被跳过)。
+    // 改为以 DOM 为准继续:点开新目标时平台会把 URL 覆盖成新的人,打开后的
+    // detail_binding_ambiguous 核对读的正是覆盖后的值,错靶仍然拦得住。
 
     if (!targetAlreadyOpen) {
       const entries = visibleAll(target.item, '.resume-item__content')
