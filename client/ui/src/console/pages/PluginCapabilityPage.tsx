@@ -59,7 +59,7 @@ function InterviewEditorProbe({ account, conversations, conversationsLoading, co
     : !account.handOnline
       ? '该账号绑定的手不在线'
       : !conversationRef
-        ? '先选一个会话'
+        ? '先选一个会话，或粘贴 sessionId'
         : timeProblem
 
   const run = useCallback(async () => {
@@ -99,9 +99,25 @@ function InterviewEditorProbe({ account, conversations, conversationsLoading, co
       </p>
 
       <label className="probe-field">
-        <span>会话</span>
-        <select
+        <span>会话 sessionId</span>
+        <input
+          className="sql-input"
           value={conversationRef}
+          onChange={(event) => setConversationRef(normalizeConversationRef(event.target.value))}
+          placeholder="从聊天页地址栏复制，整条 URL 粘进来也行"
+          disabled={running}
+        />
+      </label>
+      <p className="probe-note">
+        会话就是平台聊天页地址栏 <code>?sessionId=</code> 后面那串。手侧拿它去匹配
+        你已经打开的标签页，所以<strong>不需要这条会话在脑的库里</strong>——没巡检过、
+        没收编过都能彩排。填错或页面没开只会报「目标页面不存在」，不会跑到别人身上。
+      </p>
+
+      <label className="probe-field">
+        <span>或从库里选</span>
+        <select
+          value={conversations.some((row) => row.conversationRef === conversationRef) ? conversationRef : ''}
           onChange={(event) => setConversationRef(event.target.value)}
           disabled={running || !account}
         >
@@ -110,7 +126,7 @@ function InterviewEditorProbe({ account, conversations, conversationsLoading, co
               ? '先选账号'
               : conversationsLoading
                 ? '读取中…'
-                : conversations.length ? '请选择' : '该账号下没有会话'}
+                : conversations.length ? '请选择' : '该账号下没有巡检过的会话'}
           </option>
           {conversations.map((row) => (
             <option key={row.conversationRef} value={row.conversationRef}>
@@ -226,6 +242,19 @@ function ReadbackItem({ label, value, absent }: { label: string; value?: string;
       </dd>
     </>
   )
+}
+
+// 会话就是平台 URL 上的 sessionId。人多半直接复制整条地址栏，这里宽容地把它
+// 抠出来；抠不到就按裸 id 原样收下，真假由手侧匹配标签页时裁决。
+function normalizeConversationRef(input: string): string {
+  const text = input.trim()
+  const matched = /[?&#]sessionId=([^&#\s]+)/u.exec(text)
+  if (!matched) return text
+  try {
+    return decodeURIComponent(matched[1])
+  } catch {
+    return matched[1]
+  }
 }
 
 // datetime-local 给的是本地时区的「年-月-日T时:分」，按本地时区解析成毫秒。

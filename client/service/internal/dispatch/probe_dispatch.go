@@ -12,7 +12,8 @@ import (
 
 // ProbeInterviewEditorRequest 是邀面编辑器彩排(2026-07-29 甲方裁决)的派发
 // 请求。它是 intrusive 命令:不铸 effect intent、不建消息基线、不取
-// expectedTail;账号身份反查与直发同款,携带账号上下文进账号串行域,与该
+// expectedTail;账号身份三项校验(绑定手在线、指纹、session/bootId 当前性)
+// 与直发同款,但不要求会话已入库或已收编,携带账号上下文进账号串行域,与该
 // 账号的巡检/发送命令互斥,彩排弹窗不会与其他命令并发操作同一页面。
 type ProbeInterviewEditorRequest struct {
 	Platform        string
@@ -65,27 +66,34 @@ func (d *Dispatcher) ProbeInterviewEditor(
 		return nil, err
 	}
 
-	preparation, err := d.st.PrepareSend(store.ConversationKey{
-		Platform: req.Platform, AccountRef: req.AccountRef, ConversationRef: req.ConversationRef,
-	}, 1)
+	// 彩排只要账号身份,不要会话账本(2026-08-04)。目标页面由手侧按
+	// conversationRef——即平台 URL 的 sessionId——匹配人工已打开的标签页,
+	// 命不中即 pageAbsent 失败,库里有没有这条会话对定位毫无帮助。此处因此
+	// 不再借道发送轨的 PrepareSend:它附带的"会话已入库 / 已收编 / 有账本尾"
+	// 三道门槛是发送准备的前提,与构造性不含发送路径的彩排无关,却让诊断台
+	// 只能对已收编会话彩排。发送轨的同名调用与其门槛不受本改动影响。
+	account, err := d.st.AccountByKey(store.AccountKey{Platform: req.Platform, AccountRef: req.AccountRef})
 	if err != nil {
 		return nil, err
 	}
-	if preparation.Account.BoundHandID == "" || preparation.Account.PrincipalFingerprint == nil {
+	if account == nil {
+		return nil, store.ErrAccountNotFound
+	}
+	if account.BoundHandID == "" || account.PrincipalFingerprint == nil {
 		return nil, store.ErrAccountIdentityNotCurrent
 	}
-	session, bootID, online := d.sender.HandSession(preparation.Account.BoundHandID)
+	session, bootID, online := d.sender.HandSession(account.BoundHandID)
 	if !online {
 		return nil, ErrHandOffline
 	}
-	if preparation.Account.IdentityState != store.IdentityVerified ||
-		preparation.Account.IdentitySession != session ||
-		preparation.Account.IdentityBootID != bootID {
+	if account.IdentityState != store.IdentityVerified ||
+		account.IdentitySession != session ||
+		account.IdentityBootID != bootID {
 		return nil, store.ErrAccountIdentityNotCurrent
 	}
 
 	return d.Run(ctx, DispatchRequest{
-		HandID:          preparation.Account.BoundHandID,
+		HandID:          account.BoundHandID,
 		ExpectedSession: session,
 		ExpectedBootID:  bootID,
 		Name:            protocol.PrimDebugProbeInterviewEditor,
@@ -93,7 +101,7 @@ func (d *Dispatcher) ProbeInterviewEditor(
 		Context: &protocol.CmdContext{
 			Platform:                     req.Platform,
 			AccountRef:                   req.AccountRef,
-			ExpectedPrincipalFingerprint: *preparation.Account.PrincipalFingerprint,
+			ExpectedPrincipalFingerprint: *account.PrincipalFingerprint,
 		},
 	})
 }
