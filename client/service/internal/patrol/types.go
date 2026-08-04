@@ -322,7 +322,10 @@ func (c Config) withDefaults() Config {
 		c.Location = time.Local
 	}
 	if c.PatrolInterval <= 0 {
-		c.PatrolInterval = 5 * time.Minute
+		// 2026-08-04 甲方调快：一轮收尾到下一轮的正常间隔从 5 分钟改为 2 分
+		// 钟。它只决定"没有事件催的时候多久回头看一眼"，MinimumRoundGap 的
+		// 60 秒硬下限不随之变动，空闲账号仍不会进紧循环。
+		c.PatrolInterval = 2 * time.Minute
 	}
 	if c.IdentityFreshFor <= 0 {
 		c.IdentityFreshFor = 10 * time.Minute
