@@ -1028,6 +1028,22 @@ func (s *Store) FailAIInvocationForRetry(
 	})
 }
 
+// AIAdviceResampleScheduledError 是 CompleteReplyInvocation 的显式信号：结算层
+// 重放判本次回复建议非法（输出契约非法或业务前置不满足，规格 v4 §五）且同轮
+// 尝试余额未尽（§一 的 5 次梯子）。携带它返回时事务已提交：本次 invocation 按
+// "失败待重采"形态落账（与 FailAIInvocationForRetry 之后的世界同形），建议回执、
+// 轮状态与聚合均未触碰；下一巡检轮经 attempt 游走走到下一号重新采样。
+type AIAdviceResampleScheduledError struct {
+	TurnID  string
+	Reason  string
+	Attempt int
+}
+
+func (e *AIAdviceResampleScheduledError) Error() string {
+	return "回复建议结算判非法,已安排下轮重采: turn=" + e.TurnID +
+		" reason=" + e.Reason + " attempt=" + strconv.Itoa(e.Attempt)
+}
+
 // CompleteReplyInvocation 在一个事务内终结 reply invocation，并且只在
 // reasoning 用量通过非思考闸时创建唯一 planned action；否则显式转人工。
 func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*CommunicationAction, error) {
@@ -1050,6 +1066,7 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 		req.PlannedAt = req.Completion.FinishedAt
 	}
 	var out *CommunicationAction
+	var resampleScheduled *AIAdviceResampleScheduledError
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		invocation, err := finishAIInvocationTx(tx, req.Completion, m5ai.PurposeReply)
 		if err != nil {
@@ -1082,6 +1099,13 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 				manualReason,
 				req.PlannedAt.UTC(),
 			)
+			var resample *AIAdviceResampleScheduledError
+			if errors.As(err, &resample) {
+				// 结算判本次建议非法且尝试余额未尽:提交事务(只含 invocation
+				// 终局),信号在事务外返回给巡检层安排下轮重采。
+				resampleScheduled = resample
+				return nil
+			}
 			return settleCommunicationV4AdviceErrorTx(
 				tx,
 				&turn,
@@ -1155,7 +1179,13 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 		out = &action
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	if resampleScheduled != nil {
+		return nil, resampleScheduled
+	}
+	return out, nil
 }
 
 func reasoningCompletionSafe(completion AIInvocationCompletion) bool {
