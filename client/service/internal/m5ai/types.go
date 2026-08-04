@@ -19,7 +19,7 @@ const (
 	SendTextMaxUTF8Bytes              = 2048
 	ReplyPhraseMaxItems               = 5
 	HistoryLimit                      = 20
-	IntentInputTokenLimit = 8000
+	IntentInputTokenLimit             = 8000
 	// 2026-08-01 甲方裁决:输入 16000 → 32000。实测单次回复输入最大 10943
 	// (戴相成客户机 68 次调用),已经吃掉 68%,而对话历史随轮次单调增长,聊到
 	// 十轮必然撞线。这两个上限都是"超了就拒绝"的闸而非预付额度,调大本身不
@@ -112,18 +112,31 @@ type IntentSuggestion struct {
 type ReplyAction string
 
 const (
-	ReplyActionNone               ReplyAction = ""
-	ReplyActionStartOnlineMeeting ReplyAction = "startOnlineMeeting"
-	ReplyActionInviteWechat       ReplyAction = "inviteWechat"
+	ReplyActionNone                 ReplyAction = ""
+	ReplyActionStartOnlineMeeting   ReplyAction = "startOnlineMeeting"
+	ReplyActionStartOnsiteInterview ReplyAction = "startOnsiteInterview"
+	ReplyActionInviteWechat         ReplyAction = "inviteWechat"
 )
+
+// IsInterviewInvite 把两种邀面动作收成一个谓词。它们共用同一道业务前置、
+// 同一份冻结推荐时段和同一个 MeetingTime 承载位，只在派生的 method 与
+// endsAt 上分叉。
+func (action ReplyAction) IsInterviewInvite() bool {
+	return action == ReplyActionStartOnlineMeeting ||
+		action == ReplyActionStartOnsiteInterview
+}
 
 type ReplySuggestion struct {
 	// Phrases preserves the provider's 话术_序列 item boundaries. Text remains
 	// the canonical newline-joined compatibility summary; dispatch planners
 	// must use Phrases instead of splitting Text.
-	Phrases     []string
-	Text        string
-	Action      ReplyAction
+	Phrases []string
+	Text    string
+	Action  ReplyAction
+	// MeetingTime 承载"本次动作绑定的那个时间字段"的原文,两种邀面动作共用
+	// 这一个位置:`发起线上会议` 取自输出里的 `会议时间`,`发起线下面试` 取自
+	// `面试时间`。非邀面动作恒为空——不是"模型没填",是解析器按 2026-08-04
+	// 甲方裁决把与本次动作无关的时间字段整个忽略掉了。
 	MeetingTime string
 }
 

@@ -418,6 +418,7 @@ func (a *roundActor) projectCommunicationV4NonCandidateTail(
 			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
 			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
 			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+			InterviewMethod: message.InterviewMethod,
 		})
 		if err != nil {
 			return target, err

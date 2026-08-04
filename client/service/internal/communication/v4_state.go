@@ -130,6 +130,12 @@ type V4State struct {
 	BodyClockUncertain bool       `json:"bodyClockUncertain"`
 
 	InterviewGroups []V4InterviewFollowupGroup `json:"interviewGroups"`
+
+	// InterviewMethod 是本次面试的类型,取我方邀面卡进账本时那张卡的 method。
+	// 平台一个候选人终身只有一张邀面卡,改面试尚未开发,所以它一旦写下就不再
+	// 变动。空值表示"这张卡没有类型投影"——线下能力上线前发出的卡与历史未
+	// 映射数据都是空,按线上处理(《沟通逻辑规格-v4》事件表,2026-08-04 裁决)。
+	InterviewMethod string `json:"interviewMethod,omitempty"`
 }
 
 type V4EventAction struct {
@@ -257,6 +263,9 @@ func ApplyV4BusinessEvent(input V4State, event BusinessEvent) (V4EventDecision, 
 			return V4EventDecision{}, ErrInvalidV4StateTransition
 		}
 		decision.State.MainStatus = V4StatusInvited
+		// 面试类型锚在"卡已进账本"这个事实上,不锚 AI 建议:建议到卡真正躺进
+		// 会话之间还隔着时段命中、业务前置与发后正证。
+		decision.State.InterviewMethod = event.InterviewMethod
 		addV4InterviewGroup(&decision.State, event.MessageSeq)
 		advanceV4OutboundClock(&decision.State, event.MessageSeq, event.OccurredAt, false)
 		return decision, nil

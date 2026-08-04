@@ -202,8 +202,8 @@ func (m *Manager) driveSourcingScoreMember(
 
 		started := time.Now()
 		response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-			InvocationID: sourcingAIAttemptID(invocationID, invocation.AttemptCount),
-			Purpose:      m5ai.PurposeScoring,
+			InvocationID:        sourcingAIAttemptID(invocationID, invocation.AttemptCount),
+			Purpose:             m5ai.PurposeScoring,
 			ContextRevisionHash: contextRevisionHash,
 			PromptRevision:      m5ai.ScoringInputFormatVersion,
 			UserContent:         content,

@@ -96,10 +96,28 @@ func WechatExchangeContentHash() string {
 
 // InterviewInviteContentHash is the frozen identity projection for a reliably
 // normalized interview invitation card.
+// InterviewInviteContentHash 按《协议规格-v1》§4.5 的配方投影邀面卡身份。
+// endsAt 缺席(现场面试,平台不提供结束时间)时投影为空串而不是 "0",分隔符
+// 位数不变;wechatVideo 卡的结果与本条改写前逐字节相同。配方与 identityFor
+// 的指针版本、手侧 observer 三处必须逐字对齐——错一处就是卡片发出去了却永远
+// 配不上正证,每张线下卡都卡人工。
 func InterviewInviteContentHash(startsAtMs, endsAtMs int64, method string) string {
+	ends := ""
+	if endsAtMs > 0 {
+		ends = strconv.FormatInt(endsAtMs, 10)
+	}
 	return hashCanonical("card\x1finterviewInvite\x1f" +
-		strconv.FormatInt(startsAtMs, 10) + "\x1f" +
-		strconv.FormatInt(endsAtMs, 10) + "\x1f" + method)
+		strconv.FormatInt(startsAtMs, 10) + "\x1f" + ends + "\x1f" + method)
+}
+
+// OptionalEndsAt 把契约的值语义 endsAt 折回缺席语义。契约里 endsAt 是
+// optional 且 minimum=1,所以 0 只可能是"这次没有结束时间"(现场面试),
+// 不是一个合法时刻;直接取地址会把缺席写成 0 落进账本。
+func OptionalEndsAt(endsAtMs int64) *int64 {
+	if endsAtMs <= 0 {
+		return nil
+	}
+	return &endsAtMs
 }
 
 // NormalizeMessage verifies/derives identity and produces a store-safe message.

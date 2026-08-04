@@ -314,8 +314,8 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 				PreviousIntentID: previousIntentID,
 				ExpectedSession:  a.hand.Session, ExpectedBootID: a.hand.BootID,
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
-				ConversationRef:   *profile.ConversationRef,
-				Kind:              store.CommunicationActionInviteWechat,
+				ConversationRef: *profile.ConversationRef,
+				Kind:            store.CommunicationActionInviteWechat,
 			},
 		)
 	case store.CommunicationV4EventEffectAcceptWechat:
@@ -332,9 +332,9 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 				PreviousIntentID: previousIntentID,
 				ExpectedSession:  a.hand.Session, ExpectedBootID: a.hand.BootID,
 				Platform: profile.Platform, AccountRef: profile.AccountRef,
-				ConversationRef:   *profile.ConversationRef,
-				Kind:              store.CommunicationActionAcceptWechat,
-				RequestSourceKey:  requestSourceKey,
+				ConversationRef:  *profile.ConversationRef,
+				Kind:             store.CommunicationActionAcceptWechat,
+				RequestSourceKey: requestSourceKey,
 			},
 		)
 	}

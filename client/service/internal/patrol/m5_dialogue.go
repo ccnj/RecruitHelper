@@ -753,7 +753,8 @@ func (a *roundActor) loadM5TurnMaterial(turn store.DialogueTurn) (m5TurnMaterial
 		material.currentFacts = append(material.currentFacts, communication.LedgerMessageFact{
 			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind, Text: message.Text,
 			CardType: message.CardType, CardState: message.CardState, Origin: message.Origin,
-			TsApproxMs: message.TsApproxMs,
+			InterviewMethod: message.InterviewMethod,
+			TsApproxMs:      message.TsApproxMs,
 		})
 	}
 	inputKind, ok := store.DialogueTurnInputKindOf(currentMessages)
@@ -925,7 +926,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	invocationID := stableM5ID("invocation", turn.TurnID, string(m5ai.PurposeReply), strconv.Itoa(attempt))
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
 		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: m5ai.PurposeReply,
-		Attempt: attempt,
+		Attempt:  attempt,
 		Provider: a.manager.advice.ProviderName(), Model: a.manager.advice.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})

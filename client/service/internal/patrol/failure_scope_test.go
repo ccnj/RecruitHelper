@@ -317,7 +317,7 @@ func seedGreetedProfileWithV4Root(
 		Command: store.CmdRecord{
 			MsgID: "msg-" + conversationRef, Name: protocol.PrimChatSendGreeting,
 			Class: string(protocol.ClassEffectful), IdemKey: "idem-" + conversationRef,
-			Domain: h.key.Platform + ":" + h.key.AccountRef,
+			Domain:   h.key.Platform + ":" + h.key.AccountRef,
 			Platform: h.key.Platform, AccountRef: h.key.AccountRef,
 			ExpectedPrincipalFingerprint: "principal-1", IntentID: greetingIntent,
 			HandID: "hand-1", Session: "session-1", BootIDAtDispatch: "boot-1",

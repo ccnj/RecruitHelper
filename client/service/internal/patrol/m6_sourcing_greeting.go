@@ -203,8 +203,8 @@ func (m *Manager) driveSourcingGreetingMember(
 
 		started := time.Now()
 		response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
-			InvocationID: sourcingAIAttemptID(invocationID, invocation.AttemptCount),
-			Purpose:      m5ai.PurposeGreeting,
+			InvocationID:        sourcingAIAttemptID(invocationID, invocation.AttemptCount),
+			Purpose:             m5ai.PurposeGreeting,
 			ContextRevisionHash: material.ContextRevisionHash,
 			PromptRevision:      m5ai.GreetingInputFormatVersion,
 			UserContent:         content,

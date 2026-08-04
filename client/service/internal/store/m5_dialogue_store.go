@@ -840,6 +840,7 @@ func (s *Store) ReserveAIInvocation(req ReserveAIInvocationRequest) (*ReserveAII
 //   - 未完成的行(脑崩溃留下)由 finishInterruptedM5Advice 一律写成
 //     processInterrupted 失败,provider 响应只活在内存里,崩了就没了,
 //     没有任何"复用旧答案"的路径存在。
+//
 // 既然两边都不用结果,比对就防不住"拿旧答案回答新问题"——那条路本来就
 // 不通。它反倒会误伤:这三项会在两轮巡检之间自己变(换 model、微信线推进
 // 改写【本轮可选动作】块),一变就永远对不上,于是每轮在同一处失败、同一
@@ -3916,8 +3917,8 @@ func retryCommunicationV4EventActionTx(
 		return false, ErrCommunicationV4EventActionConflict
 	}
 	retry := CommunicationV4EventAction{
-		ActionID:  retryID,
-		ProfileID: action.ProfileID,
+		ActionID:        retryID,
+		ProfileID:       action.ProfileID,
 		SourceInputKind: action.SourceInputKind,
 		// 来源键与语义键携带同一 |try{n} 后缀,躲开来源序号唯一索引,同时
 		// 保证重放校验/来源检索只见基础行。

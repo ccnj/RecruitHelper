@@ -147,15 +147,15 @@ type AutomaticGreetingRunner interface {
 // chat.sendMessage safety rail. IntentID is deterministically derived from
 // ActionID; PreviousIntentID preserves the conversation-head CAS.
 type AutomaticReplyRequest struct {
-	ActionID          string
-	IntentID          string
-	PreviousIntentID  string
-	ExpectedSession   string
-	ExpectedBootID    string
-	Platform          string
-	AccountRef        string
-	ConversationRef   string
-	Text              string
+	ActionID         string
+	IntentID         string
+	PreviousIntentID string
+	ExpectedSession  string
+	ExpectedBootID   string
+	Platform         string
+	AccountRef       string
+	ConversationRef  string
+	Text             string
 }
 
 type AutomaticReplyHandle interface {
@@ -167,17 +167,17 @@ type AutomaticReplyRunner interface {
 }
 
 type AutomaticCardRequest struct {
-	ActionID          string
-	IntentID          string
-	PreviousIntentID  string
-	ExpectedSession   string
-	ExpectedBootID    string
-	Platform          string
-	AccountRef        string
-	ConversationRef   string
-	Kind              store.CommunicationActionKind
-	Interview         *protocol.InterviewDetails
-	RequestSourceKey  string
+	ActionID         string
+	IntentID         string
+	PreviousIntentID string
+	ExpectedSession  string
+	ExpectedBootID   string
+	Platform         string
+	AccountRef       string
+	ConversationRef  string
+	Kind             store.CommunicationActionKind
+	Interview        *protocol.InterviewDetails
+	RequestSourceKey string
 }
 
 type AutomaticCardHandle interface {

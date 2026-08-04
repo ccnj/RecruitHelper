@@ -1460,7 +1460,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"],
       "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
-      "note": "只向既有 tracked 会话发送一次线上邀面卡,当前 method 仅支持 wechatVideo,且 endsAt 必须大于 startsAt。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与 startsAt/endsAt/method 全部精确相等;平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
+      "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite:wechatVideo 必须带 endsAt 且大于 startsAt,onsite 必须缺席 endsAt(平台对现场面试不提供结束时间,不得由 startsAt 合成或以占位值冒充)。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与该形态下的邀面参数全部精确相等(onsite 的 sourceKey 按配方把缺席的 endsAt 投影为空串);平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
     "chat.acceptWechat": {
       "ver": 1, "class": "effectful", "batch": "X",

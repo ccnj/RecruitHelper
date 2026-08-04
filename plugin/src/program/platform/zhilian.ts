@@ -9982,9 +9982,8 @@ async function mainPrepareInterviewEditor(
     }
     // 形态按 method 分支（2026-07-31 甲方裁决）：线上必须带 endsAt 且为分钟整；
     // 现场面试在平台上没有时长控件，endsAt 必须缺席、不得由 startsAt 合成。
-    // 本函数由 chat.sendInviteCard 与 debug.probeInterviewEditor 共用，这里认得
-    // onsite 只是让准备阶段能走现场形态；发送入口另有一道 wechatVideo 收紧，
-    // 放开发送不在本批范围。
+    // 本函数由 chat.sendInviteCard 与 debug.probeInterviewEditor 共用；发送入口
+    // 原有的那道 wechatVideo 收紧已按 2026-08-04 甲方裁决拆除，两种形态都可发送。
     const wantsOnsite = interview.method === 'onsite'
     if (!Number.isSafeInteger(interview.startsAt) || interview.startsAt <= 0 ||
         (interview.method !== 'wechatVideo' && interview.method !== 'onsite') ||
@@ -10801,44 +10800,54 @@ function mainSendCardOnce(
     return 'match'
   }
   const validInterviewSurface = (modal: HTMLElement, value: InterviewDetails): boolean => {
-    if (value.endsAt === undefined ||
-        !Number.isSafeInteger(value.startsAt) || !Number.isSafeInteger(value.endsAt) ||
-        value.startsAt <= 0 || value.endsAt <= value.startsAt || value.method !== 'wechatVideo' ||
-        value.startsAt % 60_000 !== 0 || (value.endsAt - value.startsAt) % 60_000 !== 0) return false
+    // 形态按 method 分支（2026-08-04 甲方裁决开放 onsite）：线上核对日期/时间/
+    // 时长/方式四项；现场面试在平台上没有时长与方式控件（2026-07-31 真机），
+    // 只核对日期/时间，endsAt 必须缺席而不得由 startsAt 合成或以占位值冒充。
+    const wantsOnsite = value.method === 'onsite'
+    if ((value.method !== 'wechatVideo' && value.method !== 'onsite') ||
+        !Number.isSafeInteger(value.startsAt) || value.startsAt <= 0 ||
+        value.startsAt % 60_000 !== 0) return false
+    if (wantsOnsite
+      ? value.endsAt !== undefined
+      : value.endsAt === undefined || !Number.isSafeInteger(value.endsAt) ||
+        value.endsAt <= value.startsAt ||
+        (value.endsAt - value.startsAt) % 60_000 !== 0) return false
     const start = new Date(value.startsAt)
     if (!Number.isFinite(start.getTime())) return false
     const pad2 = (part: number): string => String(part).padStart(2, '0')
     const expectedDate = `${start.getFullYear()}-${pad2(start.getMonth() + 1)}-${pad2(start.getDate())}`
     const expectedTime = `${pad2(start.getHours())}:${pad2(start.getMinutes())}`
-    const durationMinutes = (value.endsAt - value.startsAt) / 60_000
-    if (![15, 30, 45, 60].includes(durationMinutes)) return false
-    const expectedDuration = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
     const dateMatches = Array.from(
       modal.querySelectorAll<HTMLElement>('.km-date-picker__label'),
     ).filter((node) => visible(node) && clean(node.textContent) === expectedDate)
     const timeMatches = Array.from(
       modal.querySelectorAll<HTMLInputElement>('input[placeholder="请选择时间"]'),
     ).filter((node) => visible(node) && clean(node.value) === expectedTime)
+    const wayLabel = wantsOnsite ? '现场面试' : '线上面试'
+    const wayItems = Array.from(
+      modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
+    ).filter((node) => visible(node) && clean(node.textContent).includes(wayLabel))
+    if (wayItems.length !== 1) return false
+    // 2026-07-27 真机：标题为"邀请{候选人姓名}参加 线上面试"，按包含匹配取叶层
+    // 节点；现场面试同位置为"参加 现场面试"（2026-07-31 真机）。
+    const wayTitle = wantsOnsite ? /参加\s*现场面试/u : /参加\s*线上面试/u
+    const titleMatches = Array.from(modal.querySelectorAll<HTMLElement>('*'))
+      .filter((node) => visible(node) && wayTitle.test(clean(node.textContent)))
+      .filter((node) => !Array.from(node.children).some(
+        (child) => visible(child) && wayTitle.test(clean(child.textContent)),
+      ))
+    if (dateMatches.length !== 1 || timeMatches.length !== 1 || titleMatches.length < 1) return false
+    if (wantsOnsite) return true
+    const durationMinutes = ((value.endsAt as number) - value.startsAt) / 60_000
+    if (![15, 30, 45, 60].includes(durationMinutes)) return false
+    const expectedDuration = durationMinutes === 60 ? '1小时' : `${durationMinutes}分钟`
     const durationMatches = Array.from(
       modal.querySelectorAll<HTMLInputElement>('input[placeholder="面试时长"]'),
     ).filter((node) => visible(node) && clean(node.value) === expectedDuration)
     const methodMatches = Array.from(
       modal.querySelectorAll<HTMLElement>('.interview-platform__btn.is-checked'),
     ).filter((node) => visible(node) && clean(node.textContent) === '微信视频')
-    const onlineItems = Array.from(
-      modal.querySelectorAll<HTMLElement>('.interview-form-way-list-item'),
-    ).filter((node) => visible(node) && clean(node.textContent).includes('线上面试'))
-    if (onlineItems.length !== 1) return false
-    // 2026-07-27 真机：标题为"邀请{候选人姓名}参加 线上面试"，按包含匹配取叶层节点。
-    const onlineTitle = /参加\s*线上面试/u
-    const titleMatches = Array.from(modal.querySelectorAll<HTMLElement>('*'))
-      .filter((node) => visible(node) && onlineTitle.test(clean(node.textContent)))
-      .filter((node) => !Array.from(node.children).some(
-        (child) => visible(child) && onlineTitle.test(clean(child.textContent)),
-      ))
-    return dateMatches.length === 1 && timeMatches.length === 1 &&
-      durationMatches.length === 1 && methodMatches.length === 1 &&
-      titleMatches.length >= 1
+    return durationMatches.length === 1 && methodMatches.length === 1
   }
 
   if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
@@ -11149,10 +11158,14 @@ async function mainObserveStableOutboundCard(
   try {
     if ((cardKind === 'wechatInvite' && interview !== null) ||
         (cardKind === 'interviewInvite' && (
-          interview === null || interview.endsAt === undefined ||
-          !Number.isSafeInteger(interview.startsAt) ||
-          !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
-          interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo'
+          interview === null ||
+          !Number.isSafeInteger(interview.startsAt) || interview.startsAt <= 0 ||
+          (interview.method !== 'wechatVideo' && interview.method !== 'onsite') ||
+          (interview.method === 'onsite'
+            ? interview.endsAt !== undefined
+            : interview.endsAt === undefined ||
+              !Number.isSafeInteger(interview.endsAt) ||
+              interview.endsAt <= interview.startsAt)
         ))) return failed()
     if (!routeMatches() || !/^[0-9a-f]{64}$/u.test(expectedTargetBindingToken)) return failed()
     const target = resolveTarget()
@@ -11225,17 +11238,30 @@ async function mainObserveStableOutboundCard(
       contentHash = await digest('card\x1fwechatExchange')
     } else {
       const expected = interview as InterviewDetails
+      const wantsOnsite = expected.method === 'onsite'
       const startsAt = toMillis(inner.startTime)
       const endsAt = toMillis(inner.endTime)
+      // 形态判据与 chat.readThread 的归一化读取方向同源（2026-07-31 真机）：
+      // 线下卡 interviewType="ATTENDANCE"，平台既不下发 interviewPlatform，
+      // endTime 也恒为 "0"，故这两项只对线上形态强制。
+      const typeMatches = wantsOnsite
+        ? inner.interviewType === 'ATTENDANCE'
+        : (inner.interviewType === 2 || inner.interviewType === 'VIDEO') &&
+          (inner.interviewPlatform === 4 || inner.interviewPlatform === 'WECHAT_VIDEO')
       if (Number(envelope.type) !== 355 || !clean(inner.interviewId) ||
-          !Object.prototype.hasOwnProperty.call(inner, 'state') ||
-          !(inner.interviewType === 2 || inner.interviewType === 'VIDEO') ||
-          !(inner.interviewPlatform === 4 || inner.interviewPlatform === 'WECHAT_VIDEO') ||
-          startsAt !== expected.startsAt || endsAt !== expected.endsAt ||
-          startsAt === null || endsAt === null || endsAt <= startsAt) return failed()
-      confirmedInterview = { startsAt, endsAt, method: 'wechatVideo' }
+          !Object.prototype.hasOwnProperty.call(inner, 'state') || !typeMatches ||
+          startsAt === null || startsAt !== expected.startsAt ||
+          (wantsOnsite
+            ? expected.endsAt !== undefined
+            : endsAt === null || endsAt !== expected.endsAt || endsAt <= startsAt)) return failed()
+      confirmedInterview = wantsOnsite
+        ? { startsAt, method: 'onsite' }
+        : { startsAt, endsAt: endsAt as number, method: 'wechatVideo' }
+      // sourceKey/contentHash 配方见《协议规格-v1》§4.5：endsAt 缺席投影为空串，
+      // 分隔符位数不变，method 取实际归一化值。
       contentHash = await digest(
-        `card\x1finterviewInvite\x1f${startsAt}\x1f${endsAt}\x1fwechatVideo`,
+        `card\x1finterviewInvite\x1f${startsAt}\x1f${wantsOnsite ? '' : endsAt}` +
+        `\x1f${wantsOnsite ? 'onsite' : 'wechatVideo'}`,
       )
     }
 
@@ -12167,13 +12193,17 @@ async function sendZhilianCard(
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
   if (cardKind === 'interviewInvite' && (
-    interview === null || interview.endsAt === undefined ||
-    !Number.isSafeInteger(interview.startsAt) ||
-    !Number.isSafeInteger(interview.endsAt) || interview.startsAt <= 0 ||
-    interview.endsAt <= interview.startsAt || interview.method !== 'wechatVideo' ||
+    interview === null ||
+    !Number.isSafeInteger(interview.startsAt) || interview.startsAt <= 0 ||
+    (interview.method !== 'wechatVideo' && interview.method !== 'onsite') ||
     interview.startsAt % 60_000 !== 0 ||
-    (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
-    ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000)
+    (interview.method === 'onsite'
+      ? interview.endsAt !== undefined
+      : interview.endsAt === undefined ||
+        !Number.isSafeInteger(interview.endsAt) ||
+        interview.endsAt <= interview.startsAt ||
+        (interview.endsAt - interview.startsAt) % 60_000 !== 0 ||
+        ![15, 30, 45, 60].includes((interview.endsAt - interview.startsAt) / 60_000))
   )) {
     throw new ZhilianPlatformError('GUARD_FAILED', '邀面时间或方式不受当前页面能力支持', 'manualOnly')
   }
@@ -12254,10 +12284,12 @@ async function sendZhilianCard(
       throwCardEvaluationFailure(action)
     }
 
+    // onsite 的 endsAt 缺席，按《协议规格-v1》§4.5 投影为空串而不是 "undefined"。
     const expectedHash = cardKind === 'wechatInvite'
       ? await sha256Hex('card\x1fwechatExchange')
       : await sha256Hex(
-          `card\x1finterviewInvite\x1f${interview?.startsAt}\x1f${interview?.endsAt}\x1fwechatVideo`,
+          `card\x1finterviewInvite\x1f${interview?.startsAt}\x1f` +
+          `${interview?.method === 'onsite' ? '' : interview?.endsAt}\x1f${interview?.method}`,
         )
     for (let attempt = 0; attempt < 40; attempt += 1) {
       ctx.checkpoint()

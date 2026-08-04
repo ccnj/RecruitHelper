@@ -789,6 +789,7 @@ func reconstructCommunicationV4TurnBoundaryTx(
 			Seq: message.Seq, Direction: message.Direction, Kind: message.Kind,
 			Text: message.Text, CardType: message.CardType, CardState: message.CardState,
 			Origin: message.Origin, TsApproxMs: message.TsApproxMs,
+			InterviewMethod: message.InterviewMethod,
 		})
 		if firstReal == nil && message.Direction == "in" && message.Kind != "system" &&
 			IsM5RealCandidateMessage(message) {

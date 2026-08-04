@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -368,7 +369,9 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				ConversationRef: request.InviteCardArgs.ConversationRef,
 				CardType:        "interviewInvite", CardState: "unknown",
 				ContentHash: observation.ContentHash, SourceKey: observation.SourceKey,
-				InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+				InterviewStartsAtMs: &startsAt,
+				InterviewEndsAtMs:   syncledger.OptionalEndsAt(endsAt),
+				InterviewMethod:     &method,
 			},
 			ResultBody: string(resultRaw), ResolutionReason: "verification interview card uniquely matched",
 			At: time.Now(),

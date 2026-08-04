@@ -194,7 +194,9 @@ func materializeCommunicationV4EventActionsTx(
 			return nil, false, err
 		}
 	}
-	interviewTime, err := communicationV4InterviewTimeTextTx(tx, application.ProfileID, skeletons)
+	interviewTime, interviewMethod, err := communicationV4InterviewTimeTextTx(
+		tx, application.ProfileID, skeletons,
+	)
 	if err != nil {
 		return nil, false, err
 	}
@@ -235,6 +237,7 @@ func materializeCommunicationV4EventActionsTx(
 				contextRevisionHash,
 				salutation,
 				interviewTime,
+				interviewMethod,
 				skeleton.receiptOrdinal,
 				fixedPhrasesReady,
 			)
@@ -692,11 +695,15 @@ func communicationV4FixedPhrasesForProfileTx(
 // so this walks back to the newest invite at or before the accepted card.
 // An absent or unreadable time is not a failure: the caller renders an empty
 // value, the placeholder drops out, and the phrase still goes.
+// communicationV4InterviewTimeTextTx 返回本次面试的候选人可见时间文本与
+// 平台无关的面试类型。两者取自同一张邀面卡:平台一个候选人终身只有一张,
+// 所以不存在"时间取这张、类型取那张"的错配。类型为空表示该卡没有类型
+// 投影(线下能力上线前发出的卡与历史未映射数据),由调用方按线上处理。
 func communicationV4InterviewTimeTextTx(
 	tx *gorm.DB,
 	profileID string,
 	skeletons []communicationV4EventActionSkeleton,
-) (string, error) {
+) (string, string, error) {
 	cardMessageSeq := int64(0)
 	for _, skeleton := range skeletons {
 		if skeleton.dialogueOwned ||
@@ -708,17 +715,17 @@ func communicationV4InterviewTimeTextTx(
 		}
 	}
 	if cardMessageSeq <= 0 {
-		return "", nil
+		return "", "", nil
 	}
 	var profile CandidateProfile
 	if err := tx.First(&profile, "profile_id = ?", profileID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", nil
+			return "", "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 	if profile.ConversationRef == nil || strings.TrimSpace(*profile.ConversationRef) == "" {
-		return "", nil
+		return "", "", nil
 	}
 	var invite Message
 	err := tx.Where(
@@ -729,12 +736,16 @@ func communicationV4InterviewTimeTextTx(
 		"card", "interviewInvite",
 	).Order("seq DESC").First(&invite).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return formatV4InterviewTime(*invite.InterviewStartsAtMs), nil
+	method := ""
+	if invite.InterviewMethod != nil {
+		method = strings.TrimSpace(*invite.InterviewMethod)
+	}
+	return formatV4InterviewTime(*invite.InterviewStartsAtMs), method, nil
 }
 
 // formatV4InterviewTime renders the candidate-visible form chosen by 甲方 on
@@ -778,6 +789,7 @@ func materializeCommunicationV4EventActionDisposition(
 	contextRevisionHash string,
 	salutation string,
 	interviewTime string,
+	interviewMethod string,
 	receiptOrdinal int,
 	fixedPhrasesReady bool,
 ) {
@@ -785,7 +797,7 @@ func materializeCommunicationV4EventActionDisposition(
 	case communication.V4ActionWechatReceipt, communication.V4ActionInterviewAcceptedReceipt:
 		phraseKind := communication.V4PhraseWechatReceipt
 		if row.V4Kind == communication.V4ActionInterviewAcceptedReceipt {
-			phraseKind = communication.V4PhraseInterviewAccepted
+			phraseKind = communication.V4InterviewAcceptedPhraseKind(interviewMethod)
 		}
 		phrase := fixedPhrases.Phrase(phraseKind)
 		// 气泡序号来自 reducer 冻结的展开结果;若当前配置的气泡数比冻结时少,

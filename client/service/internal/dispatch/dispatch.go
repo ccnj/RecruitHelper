@@ -931,7 +931,9 @@ func (d *Dispatcher) realCardResultPlan(
 			ConversationRef: args.ConversationRef,
 			CardType:        "interviewInvite", CardState: "unknown",
 			ContentHash:         syncledger.InterviewInviteContentHash(startsAt, endsAt, method),
-			InterviewStartsAtMs: &startsAt, InterviewEndsAtMs: &endsAt, InterviewMethod: &method,
+			InterviewStartsAtMs: &startsAt,
+			InterviewEndsAtMs:   syncledger.OptionalEndsAt(endsAt),
+			InterviewMethod:     &method,
 		}
 	default:
 		return store.ResultCommandMutation{}, fmt.Errorf("未知卡片原语 %q", r.Name)

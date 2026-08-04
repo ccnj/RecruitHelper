@@ -514,7 +514,9 @@ func planV4ReplyActions(
 			ActionKey: stableV4TurnActionKey(turn.TurnID, V4ActionInviteWechat, 0),
 			Kind:      V4ActionInviteWechat,
 		}), true
-	case m5ai.ReplyActionStartOnlineMeeting:
+	case m5ai.ReplyActionStartOnlineMeeting, m5ai.ReplyActionStartOnsiteInterview:
+		// 两种邀面动作共用同一道业务前置与同一份冻结推荐时段,只在派生的
+		// method 与 endsAt 上分叉(《沟通逻辑规格-v4》§五,2026-08-04 裁决)。
 		if !menu.AllowStartMeeting {
 			return nil, false
 		}
@@ -528,15 +530,23 @@ func planV4ReplyActions(
 		// 当前冻结时段恒为整点（槽位解析强制 Minute()==0），本行为未来时段
 		// 策略放开时的保险，今天恒为 no-op。
 		startsAt = roundUpToInterviewTimeGrid(startsAt)
-		endsAt := startsAt + V4InterviewDurationMs
-		method := "wechatVideo"
-		return append(plans, V4PlannedAction{
+		planned := V4PlannedAction{
 			ActionKey:           stableV4TurnActionKey(turn.TurnID, V4ActionInterviewInvite, 0),
 			Kind:                V4ActionInterviewInvite,
 			InterviewStartsAtMs: &startsAt,
-			InterviewEndsAtMs:   &endsAt,
-			InterviewMethod:     &method,
-		}), true
+		}
+		if suggestion.Action == m5ai.ReplyActionStartOnsiteInterview {
+			// 现场面试在平台上没有时长控件,endsAt 必须缺席而不得由 startsAt
+			// 合成——手侧与协议规格 §4.5 都按缺席校验并投影 sourceKey。
+			method := "onsite"
+			planned.InterviewMethod = &method
+		} else {
+			endsAt := startsAt + V4InterviewDurationMs
+			method := "wechatVideo"
+			planned.InterviewEndsAtMs = &endsAt
+			planned.InterviewMethod = &method
+		}
+		return append(plans, planned), true
 	default:
 		return nil, false
 	}
