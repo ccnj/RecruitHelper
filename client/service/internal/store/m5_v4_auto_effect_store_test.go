@@ -540,6 +540,53 @@ func TestCommunicationV4CombinationTextFailureNeverMaterializesCard(t *testing.T
 	}
 }
 
+// 2026-08-04 审查发现的回归：onsite 计划物化时解 endsAt 空指针当场 panic。
+// 这条路径跑在 WS result 处理的事务里，全仓 Go 生产代码没有 recover，崩的是
+// 整个脑进程，且 result 未入账、重启后重放会再走一遍。
+func TestCommunicationV4OnsiteInterviewCardMaterializesWithoutEndsAt(t *testing.T) {
+	s := openTest(t)
+	fixture := seedPlannedCommunicationV4AutomaticAction(t, s, "interview-onsite")
+	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
+	method := "onsite"
+	var advice CommunicationV4ProjectionApplication
+	if err := s.db.First(
+		&advice,
+		"profile_id = ? AND input_kind = ? AND input_key = ?",
+		fixture.ProfileID,
+		CommunicationV4InputDialogueAdvice,
+		communicationV4DialogueAdviceKey(fixture.Turn.TurnID, m5ai.PurposeReply),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	advice.Outcome.PlannedActions = append(
+		advice.Outcome.PlannedActions,
+		communication.V4PlannedAction{
+			ActionKey:           fixture.Turn.TurnID + "|interviewInvite",
+			Kind:                communication.V4ActionInterviewInvite,
+			InterviewStartsAtMs: &startsAt,
+			InterviewMethod:     &method,
+		},
+	)
+	if err := s.db.Save(&advice).Error; err != nil {
+		t.Fatal(err)
+	}
+	confirmCommunicationV4TextEffect(t, s, fixture, "interview-onsite-text")
+	actions, err := s.CommunicationActionsByTurn(fixture.Turn.TurnID)
+	if err != nil || len(actions) != 2 {
+		t.Fatalf("正文正证未实体化现场邀面 action: actions=%+v err=%v", actions, err)
+	}
+	card := actions[1]
+	if card.Kind != CommunicationActionInterviewInvite ||
+		card.InterviewStartsAtMs == nil || *card.InterviewStartsAtMs != startsAt ||
+		card.InterviewEndsAtMs != nil ||
+		card.InterviewMethod == nil || *card.InterviewMethod != "onsite" {
+		t.Fatalf("现场邀面 action 形态错误(endsAt 必须缺席): %+v", card)
+	}
+	if want := communicationInterviewInviteContentHash(startsAt, 0, "onsite"); card.ContentHash != want {
+		t.Fatalf("缺席 endsAt 必须按空串投影 contentHash: got=%s want=%s", card.ContentHash, want)
+	}
+}
+
 func TestCommunicationV4InterviewCardActionBindsAndCompletesAfterTextEvidence(t *testing.T) {
 	s := openTest(t)
 	fixture := seedPlannedCommunicationV4AutomaticAction(t, s, "interview-combo")

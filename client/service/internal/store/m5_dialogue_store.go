@@ -2038,9 +2038,17 @@ func materializeDependentCommunicationActionTx(
 		action.InterviewStartsAtMs = cloneOptionalInt64(plan.InterviewStartsAtMs)
 		action.InterviewEndsAtMs = cloneOptionalInt64(plan.InterviewEndsAtMs)
 		action.InterviewMethod = cloneOptionalString(plan.InterviewMethod)
+		// 现场面试没有 endsAt，这里必须走 optionalInt64Value 而不是解引用：
+		// 直接解会在物化第一张 onsite 卡时 panic，而这条路径在 WS 结果处理的
+		// 事务里，全仓没有 recover，崩的是整个脑进程。
+		if !communication.ValidV4PlannedInterview(
+			action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+		) {
+			return ErrCommunicationActionConflict
+		}
 		action.ContentHash = communicationInterviewInviteContentHash(
 			*action.InterviewStartsAtMs,
-			*action.InterviewEndsAtMs,
+			optionalInt64Value(action.InterviewEndsAtMs),
 			*action.InterviewMethod,
 		)
 	default:
@@ -3076,13 +3084,11 @@ func validateM5AutomaticCommand(
 		var args protocol.ChatSendInviteCardArgs
 		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
 			args.ConversationRef != conversationRef ||
-			action.InterviewStartsAtMs == nil ||
-			action.InterviewEndsAtMs == nil ||
-			action.InterviewMethod == nil ||
-			*action.InterviewEndsAtMs !=
-				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs ||
+			!communication.ValidV4PlannedInterview(
+				action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+			) ||
 			args.Interview.StartsAt != *action.InterviewStartsAtMs ||
-			args.Interview.EndsAt != *action.InterviewEndsAtMs ||
+			args.Interview.EndsAt != optionalInt64Value(action.InterviewEndsAtMs) ||
 			string(args.Interview.Method) != *action.InterviewMethod {
 			return ErrCommunicationActionConflict
 		}

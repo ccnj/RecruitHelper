@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -615,10 +616,12 @@ func validLowerHex64(value string) bool {
 	return true
 }
 
+// validInterviewDetails 只核形态与 method 自洽（现场面试的 endsAt 必须缺席），
+// 不要求标准时长——这里校的是手侧回传的 result 与命令一致，时长约束属于计划侧。
 func validInterviewDetails(details protocol.InterviewDetails) bool {
-	return details.StartsAt > 0 &&
-		details.EndsAt > details.StartsAt &&
-		details.Method == protocol.InterviewMethodWechatVideo
+	return communication.ValidV4InterviewDetailsShape(
+		details.StartsAt, details.EndsAt, string(details.Method),
+	)
 }
 
 func validateSingleEvidence(evidence []protocol.Evidence, expectedType string) error {

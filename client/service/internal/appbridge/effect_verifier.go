@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/store"
@@ -250,9 +251,11 @@ func (v EffectVerifier) verifyCard(
 		targetHash = syncledger.WechatExchangeContentHash()
 	case protocol.PrimChatSendInviteCard:
 		if req.InviteCardArgs == nil || req.InviteCardArgs.ConversationRef == "" ||
-			req.InviteCardArgs.Interview.StartsAt <= 0 ||
-			req.InviteCardArgs.Interview.EndsAt <= req.InviteCardArgs.Interview.StartsAt ||
-			req.InviteCardArgs.Interview.Method != protocol.InterviewMethodWechatVideo {
+			!communication.ValidV4InterviewDetailsShape(
+				req.InviteCardArgs.Interview.StartsAt,
+				req.InviteCardArgs.Interview.EndsAt,
+				string(req.InviteCardArgs.Interview.Method),
+			) {
 			return dispatch.VerificationObservation{}, errors.New("验证请求不是完整 chat.sendInviteCard 意图")
 		}
 		conversationRef = req.InviteCardArgs.ConversationRef
