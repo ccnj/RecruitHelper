@@ -7129,8 +7129,18 @@ test('M3 baseline 单次取样且只冻结 server source keys 与目标绑定 to
       'serverSourceKeys', 'stage', 'status', 'targetBindingToken',
     ])
 
+    // 2026-08-04 甲方裁决：消息基线降为观测模式。尾部对不上不再拒绝发送，
+    // 而是照常算出基线并带回漂移事实（只有方向，不含正文）供日志留痕。
+    // 路由变化、会话不可用等"读不到/错靶"方向仍然照旧硬拒。
     const wrongTail = await fixture.capture([{ direction: 'in', contentHash: 'f'.repeat(64) }])
-    assert.deepEqual(wrongTail, { status: 'failed', stage: 'guard_snapshot_uncovered' })
+    assert.equal(wrongTail.status, 'ready')
+    assert.equal(wrongTail.tailDrifted, true)
+    assert.ok(Array.isArray(wrongTail.tailDirections))
+    assert.deepEqual(
+      wrongTail.serverSourceKeys,
+      [m3Hash('source-v1|server-m3-baseline-1')],
+      '漂移不得影响发后正证要用的基线 source keys',
+    )
 
     globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other'
     assert.deepEqual(await fixture.capture(), { status: 'failed', stage: 'route_changed' })
