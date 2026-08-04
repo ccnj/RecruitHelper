@@ -476,6 +476,29 @@ func v4ReplyMenuWechatLine(status V4WechatStatus) m5ai.ReplyMenuWechatLine {
 	}
 }
 
+// ValidV4InterviewShape 是邀面参数形态的唯一判据:线上会议必须带晚于开始的
+// endsAt,现场面试必须缺席 endsAt——平台对现场面试不提供结束时间,合成或以
+// 占位值冒充都会让发后正证配不上。
+//
+// 它只管"形态与 method 是否自洽",不管时长是否恰好是我方标准值,那是计划侧
+// 的额外要求。三处闸(建议应用策略、消息落库校验、动作与计划配对)都必须经
+// 由它分支:2026-08-04 真机首验就是因为其中一处仍写死 wechatVideo 与"endsAt
+// 必须非空",线下卡到了发送前一步被判 multiVisibleActionPolicyConflict、
+// 整轮作废重采。
+func ValidV4InterviewShape(startsAtMs, endsAtMs *int64, method *string) bool {
+	if startsAtMs == nil || method == nil || *startsAtMs <= 0 {
+		return false
+	}
+	switch *method {
+	case "wechatVideo":
+		return endsAtMs != nil && *endsAtMs > *startsAtMs
+	case "onsite":
+		return endsAtMs == nil
+	default:
+		return false
+	}
+}
+
 func planV4ReplyActions(
 	state V4State,
 	turn FrozenTurnFacts,

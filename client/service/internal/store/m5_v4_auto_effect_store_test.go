@@ -722,6 +722,38 @@ func TestCommunicationV4InterviewCardPlanRequiresThirtyMinutes(t *testing.T) {
 	}
 }
 
+// 2026-08-04 真机首验的回归:线下邀面计划曾在这道闸上被判不支持,连带整轮
+// 建议按 multiVisibleActionPolicyConflict 作废重采,候选人那边表现为"临近发
+// 面试卡片就没动作了"。三处闸(本闸、消息落库、动作与计划配对)现在共用
+// communication.ValidV4InterviewShape,形态与 method 必须自洽。
+func TestCommunicationV4InterviewCardPlanAcceptsOnsiteWithoutEndsAt(t *testing.T) {
+	startsAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute).UnixMilli()
+	endsAt := startsAt + communication.V4InterviewDurationMs
+	onsite := "onsite"
+	online := "wechatVideo"
+	plan := func(method *string, ends *int64) communication.V4PlannedAction {
+		return communication.V4PlannedAction{
+			ActionKey:           "turn|interviewInvite",
+			Kind:                communication.V4ActionInterviewInvite,
+			InterviewStartsAtMs: &startsAt,
+			InterviewEndsAtMs:   ends,
+			InterviewMethod:     method,
+		}
+	}
+	if !supportedCommunicationV4CardPlan(plan(&onsite, nil)) {
+		t.Fatal("缺席 endsAt 的现场面试计划必须获批")
+	}
+	if supportedCommunicationV4CardPlan(plan(&onsite, &endsAt)) {
+		t.Fatal("现场面试带 endsAt 不得获批:平台不提供结束时间,不得合成")
+	}
+	if supportedCommunicationV4CardPlan(plan(&online, nil)) {
+		t.Fatal("线上会议缺 endsAt 不得获批")
+	}
+	if !supportedCommunicationV4CardPlan(plan(&online, &endsAt)) {
+		t.Fatal("标准时长的线上会议计划必须获批")
+	}
+}
+
 func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn(t *testing.T) {
 	s := openTest(t)
 	fixture, req, created := createCommunicationV4AutomaticEffect(t, s, "positive")

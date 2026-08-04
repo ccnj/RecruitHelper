@@ -7,6 +7,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"recruithelper/client/service/internal/communication"
 )
 
 var (
@@ -1122,16 +1124,14 @@ func validateMessageInterview(
 	startsAtMs, endsAtMs *int64,
 	method *string,
 ) error {
-	hasStarts := startsAtMs != nil
-	hasEnds := endsAtMs != nil
-	hasMethod := method != nil
-	if !hasStarts && !hasEnds && !hasMethod {
+	if startsAtMs == nil && endsAtMs == nil && method == nil {
 		return nil
 	}
 	if kind != "card" || cardType != "interviewInvite" ||
-		!hasStarts || !hasEnds || !hasMethod ||
-		*startsAtMs <= 0 || *endsAtMs <= *startsAtMs || *method != "wechatVideo" {
-		return errors.New("邀面卡参数必须完整且满足 endsAt>startsAt、method=wechatVideo")
+		!communication.ValidV4InterviewShape(startsAtMs, endsAtMs, method) {
+		return errors.New(
+			"邀面卡参数形态与 method 不自洽:wechatVideo 必须带晚于开始的 endsAt,onsite 必须缺席 endsAt",
+		)
 	}
 	return nil
 }

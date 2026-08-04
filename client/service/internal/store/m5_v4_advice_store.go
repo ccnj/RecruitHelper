@@ -358,13 +358,15 @@ func supportedCommunicationV4CardPlan(plan communication.V4PlannedAction) bool {
 			plan.InterviewEndsAtMs == nil &&
 			plan.InterviewMethod == nil
 	case communication.V4ActionInterviewInvite:
-		return plan.InterviewStartsAtMs != nil &&
-			plan.InterviewEndsAtMs != nil &&
-			plan.InterviewMethod != nil &&
-			*plan.InterviewStartsAtMs > 0 &&
+		if !communication.ValidV4InterviewShape(
+			plan.InterviewStartsAtMs, plan.InterviewEndsAtMs, plan.InterviewMethod,
+		) {
+			return false
+		}
+		// 线上会议的时长由我方派生,必须恰好是标准值;现场面试没有时长可言。
+		return plan.InterviewEndsAtMs == nil ||
 			*plan.InterviewEndsAtMs ==
-				*plan.InterviewStartsAtMs+communication.V4InterviewDurationMs &&
-			*plan.InterviewMethod == "wechatVideo"
+				*plan.InterviewStartsAtMs+communication.V4InterviewDurationMs
 	default:
 		return false
 	}
