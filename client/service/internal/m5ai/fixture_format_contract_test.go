@@ -671,9 +671,18 @@ func TestFormatFixtureDrivesEveryReplyParserGolden(t *testing.T) {
 				requireFixtureError(t, err, "invalidReplyAction")
 				return
 			}
-			if testCase.ID == "nonempty_meeting_time_ignored" {
-				_, err := ParseReplySuggestion(replyParserRaw(t, testCase.Input))
-				requireFixtureError(t, err, "unexpectedMeetingTime")
+			// 2026-08-04 甲方裁决把"与本次动作无关的时间字段"整个忽略回来了:这些
+			// 输入都没有动作字段,`会议时间` 因而不是绑定字段,连类型都不再校验。
+			// batch-0B 记录的 M5-B 拒绝口径就此作废,回到 M5-A 的"解析成功并忽略"。
+			// nonempty_meeting_time_ignored 的 fixture 原值本就是 ok,不再需要覆盖。
+			switch testCase.ID {
+			case "numeric_meeting_time_invalid", "object_meeting_time_invalid",
+				"null_meeting_time_invalid":
+				got, err := ParseReplySuggestion(replyParserRaw(t, testCase.Input))
+				if err != nil || got.Text != "你好" || got.MeetingTime != "" ||
+					got.Action != ReplyActionNone {
+					t.Fatalf("无关时间字段必须被整个忽略: got=%+v err=%v", got, err)
+				}
 				return
 			}
 			expected := decodeFormatFixture[struct {

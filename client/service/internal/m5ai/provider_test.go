@@ -820,6 +820,34 @@ func TestParseReplySuggestionClosedActionVocabulary(t *testing.T) {
 			raw:        `{"话术_序列":["也可以加微信沟通"],"动作":"发起换微信邀请","会议时间":""}`,
 			wantAction: ReplyActionInviteWechat,
 		},
+		{
+			name:        "线下面试携带面试时间",
+			raw:         `{"话术_序列":["那咱们到公司当面聊"],"动作":"发起线下面试","面试时间":"8月6日14:00"}`,
+			wantAction:  ReplyActionStartOnsiteInterview,
+			wantMeeting: "8月6日14:00",
+		},
+		{
+			name:        "线下面试忽略无关的会议时间",
+			raw:         `{"话术_序列":["那咱们到公司当面聊"],"动作":"发起线下面试","面试时间":"8月6日14:00","会议时间":123}`,
+			wantAction:  ReplyActionStartOnsiteInterview,
+			wantMeeting: "8月6日14:00",
+		},
+		{
+			name:        "线上会议忽略无关的面试时间",
+			raw:         `{"话术_序列":["那咱们视频聊"],"动作":"发起线上会议","会议时间":"8月6日14:00","面试时间":null}`,
+			wantAction:  ReplyActionStartOnlineMeeting,
+			wantMeeting: "8月6日14:00",
+		},
+		{
+			name:       "无动作时两个时间字段都被忽略",
+			raw:        `{"话术_序列":["你好"],"动作":"无","会议时间":"明天","面试时间":{"开始":"后天"}}`,
+			wantAction: ReplyActionNone,
+		},
+		{
+			name:       "换微信忽略空值时间字段",
+			raw:        `{"话术_序列":["你好"],"动作":"发起换微信邀请","会议时间":null}`,
+			wantAction: ReplyActionInviteWechat,
+		},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -843,10 +871,11 @@ func TestParseReplySuggestionRejectsInvalidActionPayloadAsAWhole(t *testing.T) {
 		{name: "动作带空白不是别名", raw: `{"话术_序列":["你好"],"动作":" 发起线上会议 ","会议时间":"明天"}`},
 		{name: "线上会议缺时间", raw: `{"话术_序列":["你好"],"动作":"发起线上会议"}`},
 		{name: "线上会议空时间", raw: `{"话术_序列":["你好"],"动作":"发起线上会议","会议时间":"  "}`},
-		{name: "无动作却有时间", raw: `{"话术_序列":["你好"],"动作":"无","会议时间":"明天"}`},
-		{name: "换微信却有时间", raw: `{"话术_序列":["你好"],"动作":"发起换微信邀请","会议时间":"明天"}`},
 		{name: "会议时间非字符串", raw: `{"话术_序列":["你好"],"动作":"发起线上会议","会议时间":123}`},
-		{name: "会议时间为空值", raw: `{"话术_序列":["你好"],"动作":"发起换微信邀请","会议时间":null}`},
+		{name: "线下面试缺时间", raw: `{"话术_序列":["你好"],"动作":"发起线下面试"}`},
+		{name: "线下面试空时间", raw: `{"话术_序列":["你好"],"动作":"发起线下面试","面试时间":"  "}`},
+		{name: "线下面试只给了会议时间", raw: `{"话术_序列":["你好"],"动作":"发起线下面试","会议时间":"8月6日14:00"}`},
+		{name: "面试时间非字符串", raw: `{"话术_序列":["你好"],"动作":"发起线下面试","面试时间":123}`},
 		{name: "未知顶层字段", raw: `{"话术_序列":["你好"],"动作":"无","额外字段":true}`},
 		{name: "非法话术", raw: `{"话术_序列":[1],"动作":"无"}`},
 	}

@@ -90,6 +90,19 @@ func ParseIntentSuggestion(raw string) (IntentSuggestion, error) {
 	return IntentSuggestion{Label: label}, nil
 }
 
+// boundTimeFieldKey 给出该动作在模型输出里绑定的时间字段名。两种邀面动作
+// 各绑定一个,其余动作没有绑定字段——此时两个时间字段都与本次动作无关。
+func boundTimeFieldKey(action ReplyAction) string {
+	switch action {
+	case ReplyActionStartOnlineMeeting:
+		return "会议时间"
+	case ReplyActionStartOnsiteInterview:
+		return "面试时间"
+	default:
+		return ""
+	}
+}
+
 func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 	object, err := decodeUniqueObject(raw)
 	if err != nil {
@@ -100,7 +113,7 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 		return ReplySuggestion{}, errors.New("missingPhraseSequence")
 	}
 	for key := range object {
-		if key != "话术_序列" && key != "动作" && key != "会议时间" {
+		if key != "话术_序列" && key != "动作" && key != "会议时间" && key != "面试时间" {
 			return ReplySuggestion{}, errors.New("unknownOutputKey")
 		}
 	}
@@ -119,29 +132,36 @@ func ParseReplySuggestion(raw string) (ReplySuggestion, error) {
 			action = ReplyActionNone
 		case "发起线上会议":
 			action = ReplyActionStartOnlineMeeting
+		case "发起线下面试":
+			action = ReplyActionStartOnsiteInterview
 		case "发起换微信邀请":
 			action = ReplyActionInviteWechat
 		default:
 			return ReplySuggestion{}, errors.New("invalidReplyAction")
 		}
 	}
+	// 每种邀面动作只绑定一个时间字段;另一个时间字段无论缺席、空值还是携带
+	// 任意内容都整个忽略,连类型都不校验(2026-08-04 甲方裁决:模型多填一个与
+	// 本次动作无关的已知字段不构成语义跑偏,不值得让整轮回复作废)。白名单外
+	// 的顶层字段仍整体拒绝。
 	meetingTime := ""
-	if meetingTimeRaw, exists := object["会议时间"]; exists {
+	if boundKey := boundTimeFieldKey(action); boundKey != "" {
+		timeRaw, exists := object[boundKey]
+		if !exists {
+			return ReplySuggestion{}, errors.New("missingMeetingTime")
+		}
 		var decoded any
-		if json.Unmarshal(meetingTimeRaw, &decoded) != nil {
+		if json.Unmarshal(timeRaw, &decoded) != nil {
 			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
 		}
 		value, ok := decoded.(string)
 		if !ok {
 			return ReplySuggestion{}, errors.New("invalidMeetingTimeType")
 		}
+		if strings.TrimSpace(value) == "" {
+			return ReplySuggestion{}, errors.New("missingMeetingTime")
+		}
 		meetingTime = value
-	}
-	if action == ReplyActionStartOnlineMeeting && strings.TrimSpace(meetingTime) == "" {
-		return ReplySuggestion{}, errors.New("missingMeetingTime")
-	}
-	if action != ReplyActionStartOnlineMeeting && meetingTime != "" {
-		return ReplySuggestion{}, errors.New("unexpectedMeetingTime")
 	}
 	var phrases []string
 	if err := json.Unmarshal(phrasesRaw, &phrases); err != nil || phrases == nil {
