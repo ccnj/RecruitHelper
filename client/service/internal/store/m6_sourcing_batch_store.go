@@ -24,6 +24,10 @@ var (
 const (
 	SourcingFeedChangedReason        = "recommendationFeedChanged"
 	SourcingTargetReachedPauseReason = "sourcingTargetReached"
+	// SourcingNoNewCandidatesReason 是批次侧的收口原因。账号暂停仍复用
+	// SourcingTargetReachedPauseReason：那是漏斗识别采集内部 hold 的精确
+	// 键，两种收口对下游是同一件事——采集结束、推荐页交还给后续阶段。
+	SourcingNoNewCandidatesReason = "noNewCandidates"
 )
 
 type InvalidateSourcingFeedRequest struct {
@@ -71,6 +75,11 @@ type StopSourcingBatchRequest struct {
 	BatchID   string
 	Reason    string
 	StoppedAt time.Time
+}
+
+type SettleSourcingBatchRequest struct {
+	BatchID  string
+	SettleAt time.Time
 }
 
 type SourcingBatchProgress struct {
@@ -615,6 +624,81 @@ func (s *Store) StopSourcingBatch(req StopSourcingBatchRequest) (*SourcingBatch,
 		}
 		out = batch
 		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SettleSourcingBatch 按脑侧扫描预算把一个还没采满的批次收成终态，让漏斗
+// 用已经采到的候选人走完后续流程。它按规格《里程碑6 正式采集批次》§二.2 的
+// 唯一例外把 targetCount 下调为实到成员数：收口后的批次自述“本批就是这些
+// 人”，评分、筛选与招呼语生成的覆盖不变量因此不需要第二个计数。原目标数写
+// 进 reason，事实不丢。
+//
+// 成员为零不是“没有更多候选人”，而是职位、筛选或页面有问题，此时返回状态
+// 冲突让调用方改走 blocked 转人工。账号暂停逐字复用达标路径，包括暂停原因：
+// 产品漏斗按该原因精确识别“这是采集内部 hold，不是用户暂停”。
+func (s *Store) SettleSourcingBatch(req SettleSourcingBatchRequest) (*SourcingBatch, error) {
+	req.BatchID = strings.TrimSpace(req.BatchID)
+	if req.BatchID == "" {
+		return nil, ErrSourcingBatchInvalid
+	}
+	if req.SettleAt.IsZero() {
+		req.SettleAt = time.Now()
+	}
+
+	var out SourcingBatch
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := sourcingBatchByIDTx(tx, req.BatchID)
+		if err != nil {
+			return err
+		}
+		if batch.Status == SourcingBatchCompleted && batch.EndedAt != nil {
+			out = batch
+			return nil
+		}
+		if batch.Status != SourcingBatchCollecting || batch.EndedAt != nil {
+			return ErrSourcingBatchStateConflict
+		}
+		captured, err := sourcingBatchCapturedCountTx(tx, batch.BatchID)
+		if err != nil {
+			return err
+		}
+		// 达标那条路由成员事务自己收口，不该绕到这里来。
+		if captured <= 0 || captured >= int64(batch.TargetCount) {
+			return ErrSourcingBatchStateConflict
+		}
+		updatedBatch := tx.Model(&SourcingBatch{}).
+			Where("batch_id = ? AND status = ? AND ended_at IS NULL", batch.BatchID, SourcingBatchCollecting).
+			Updates(map[string]any{
+				"status":       SourcingBatchCompleted,
+				"reason":       fmt.Sprintf("%s:target=%d", SourcingNoNewCandidatesReason, batch.TargetCount),
+				"target_count": captured,
+				"ended_at":     req.SettleAt,
+			})
+		if updatedBatch.Error != nil {
+			return updatedBatch.Error
+		}
+		if updatedBatch.RowsAffected != 1 {
+			return ErrSourcingBatchStateConflict
+		}
+		updatedAccount := tx.Model(&Account{}).
+			Where("platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef).
+			Updates(map[string]any{
+				"stopped_at":    req.SettleAt,
+				"paused_reason": SourcingTargetReachedPauseReason,
+				"dirty_hint":    true,
+			})
+		if updatedAccount.Error != nil {
+			return updatedAccount.Error
+		}
+		if updatedAccount.RowsAffected != 1 {
+			return ErrSourcingBinding
+		}
+		out, err = sourcingBatchByIDTx(tx, batch.BatchID)
+		return err
 	})
 	if err != nil {
 		return nil, err

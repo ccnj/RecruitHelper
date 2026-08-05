@@ -24,7 +24,11 @@
     "resumeDataMaxUtf8BytesInclusive": 65536,
     "slotPointerText": "可约面时间(见【可约面时间】)",
     "slotFormatGuard": "话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。",
-    "customerFactsHeading": "【客户事实库】",
+    "resumePointerText": "简历(见【简历】)",
+    "resumeHeading": "【简历】",
+    "historyPointerText": "完整对话(见【完整对话】)",
+    "historyHeading": "【完整对话】",
+    "historyGuard": "以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。",
     "intentEnvelopeHeading": "【对话数据信封/v1】",
     "providerRoles": [
       "user"
@@ -436,7 +440,7 @@
       },
       "cases": [
         {
-          "id": "reply_all_values_and_customer_facts_once",
+          "id": "reply_all_values_render_as_pointers_with_trailing_blocks",
           "input": {
             "purpose": "reply",
             "frozenNow": "2026-07-10T14:23:00+08:00",
@@ -448,18 +452,17 @@
             "selectedSlots": [
               "2026-07-13 09:00:00",
               "2026-07-13 10:00:00"
-            ],
-            "customerFacts": "仅供测试的客户事实"
+            ]
           },
           "expected": {
             "status": "ok",
             "providerMessages": [
               {
                 "role": "user",
-                "content": "简历={\"basic\":[]}\n历史=候选人(消息):你好\n时段=可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n\n【客户事实库】\n仅供测试的客户事实"
+                "content": "简历=简历(见【简历】)\n历史=完整对话(见【完整对话】)\n时段=可约面时间(见【可约面时间】)\n\n【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n7月13日(周一) 09:00-10:00 的整点\n\n【简历】\n{\"basic\":[]}\n\n【完整对话】\n以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。\n候选人(消息):你好"
               }
             ],
-            "customerFactsBlockCount": 1,
+            "dataBlockCount": 3,
             "extraLocalInstructionCount": 0
           }
         },
