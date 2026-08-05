@@ -4624,7 +4624,17 @@ function throwResumeFailure(result: MainResumeFailed): never {
       result.reason === 'session_unavailable') {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '简历读取期间目标会话绑定无法确证', 'manualOnly')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前简历详情无法完整且唯一读取', 'manualOnly')
+  // 把具体是哪一步读不出来带进 error.data。11 种原因原本全压成同一句话，
+  // 账本、日志与诊断包里都看不出是弹窗没打开、还是某个区块缺内容——2026-08-05
+  // 一个真实候选人卡在这里，只能靠猜。diagnostics 只给人读，不参与任何判定。
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    '当前简历详情无法完整且唯一读取',
+    'manualOnly',
+    undefined,
+    'none',
+    { resumeReason: result.reason },
+  )
 }
 
 export async function readZhilianResume(
@@ -4824,7 +4834,16 @@ function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
   if (result.reason === 'route_changed' || result.reason === 'target_changed') {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '采集期间当前推荐页或候选人发生变化', 'manualOnly')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐候选人无法完整且唯一读取', 'manualOnly')
+  // 同上：采集阶段这条在客户机上累计失败 97 次(占 14% 且在上升)，原因同样
+  // 被压平。带出 reason 才能判断是该放宽读取要求还是页面结构真变了。
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    '当前推荐候选人无法完整且唯一读取',
+    'manualOnly',
+    undefined,
+    'none',
+    { resumeReason: result.reason },
+  )
 }
 
 function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
