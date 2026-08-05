@@ -816,7 +816,7 @@ func (a *roundActor) runM5ReplyAdvice(
 	}
 	content, err := m5ai.RenderReplyPromptFrozen(
 		material.revision.Communication.ReplyPrompt, resumeJSON, history,
-		turn.RecommendedTimeText, material.revision.Communication.CustomerFacts,
+		turn.RecommendedTimeText,
 	)
 	if err != nil {
 		slog.Warn("对话轮跳过:回复提示词渲染失败,等下轮巡检重试",

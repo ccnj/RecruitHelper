@@ -530,14 +530,14 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 	fixture := loadFormatGoldenFixture(t)
 	section := fixture.Sections["providerAssembly"]
 	replyReference := decodeFormatFixture[providerAssemblyFixtureInput](t,
-		formatCaseByID(t, section, "reply_all_values_and_customer_facts_once").Input)
+		formatCaseByID(t, section, "reply_all_values_render_as_pointers_with_trailing_blocks").Input)
 	intentReference := decodeFormatFixture[providerAssemblyFixtureInput](t,
 		formatCaseByID(t, section, "intent_prompt_and_envelope").Input)
 
 	for _, testCase := range section.Cases {
 		t.Run(testCase.ID, func(t *testing.T) {
 			switch testCase.ID {
-			case "reply_all_values_and_customer_facts_once":
+			case "reply_all_values_render_as_pointers_with_trailing_blocks":
 				input := decodeFormatFixture[providerAssemblyFixtureInput](t, testCase.Input)
 				expected := decodeFormatFixture[struct {
 					ProviderMessages []struct {
@@ -550,7 +550,7 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 					t.Fatal(err)
 				}
 				content, err := RenderReplyPrompt(input.SourcePrompt, input.TemplateValues.Resume,
-					input.TemplateValues.History, now, input.SelectedSlots, input.CustomerFacts)
+					input.TemplateValues.History, now, input.SelectedSlots)
 				if err != nil || len(expected.ProviderMessages) != 1 || expected.ProviderMessages[0].Role != "user" || content != expected.ProviderMessages[0].Content {
 					t.Fatalf("reply provider assembly 漂移: content=%q err=%v", content, err)
 				}
@@ -584,7 +584,7 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, err = RenderReplyPrompt(replyReference.SourcePrompt, "", replyReference.TemplateValues.History,
-					now, replyReference.SelectedSlots, replyReference.CustomerFacts)
+					now, replyReference.SelectedSlots)
 				requireFixtureError(t, err, expected.ErrorClass)
 			case "assembly_unknown_token_fails":
 				input := decodeFormatFixture[providerAssemblyFixtureInput](t, testCase.Input)
@@ -596,7 +596,7 @@ func TestFormatFixtureDrivesEveryProviderAssemblyGolden(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, err = RenderReplyPrompt(input.SourcePrompt, replyReference.TemplateValues.Resume,
-					replyReference.TemplateValues.History, now, replyReference.SelectedSlots, replyReference.CustomerFacts)
+					replyReference.TemplateValues.History, now, replyReference.SelectedSlots)
 				requireFixtureError(t, err, expected.ErrorClass)
 			case "canonical_assembly_bytes":
 				input := decodeFormatFixture[providerAssemblyFixtureInput](t, testCase.Input)
