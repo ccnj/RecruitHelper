@@ -12307,11 +12307,13 @@ async function sendZhilianCard(
     // 发后正证要求"相对基线恰好新增一条"就此落空，卡明明发出去了却判未确认。
     // 重抓失败不阻断发送——它只让观测基准贴近点击时刻，把关的仍是下面的
     // evaluator（路由、身份、目标绑定在 preflight 与 commit 各查一次）。
-    const rawFreshBaseline = await runMain(tab.id, mainCaptureSendBaseline, [
-      conversationRef,
-      guards.expectedTail,
-    ])
-    const freshBaseline = validatedMainSendBaseline(rawFreshBaseline)
+    // 只有开过编辑器的那条路才需要重抓：换微信卡从抓基线到点发送只隔一次
+    // 节奏等待(1~1.5 秒)，平台来不及在中间插行，多抓一次纯属噪音。
+    const freshBaseline = editorPrepared
+      ? validatedMainSendBaseline(
+          await runMain(tab.id, mainCaptureSendBaseline, [conversationRef, guards.expectedTail]),
+        )
+      : null
     // 只换观测用的 serverSourceKeys。targetBindingToken 必须保留首抓那份：
     // 它是"整个原语期间这个会话绑定的对端不许变"的反错靶硬闸，跟着重抓一起
     // 换会把覆盖窗口缩成最后几毫秒——平台若在编辑器准备的十几秒里把同一
@@ -12323,7 +12325,7 @@ async function sendZhilianCard(
       : baseline
     if (freshBaseline !== null && freshBaseline.status === 'ready') {
       reportBaselineDrift(`card:${cardKind}:refresh`, conversationRef, freshBaseline)
-    } else {
+    } else if (editorPrepared) {
       // 回退不阻断发送(把关交给 preflight/commit 的 evaluator)，但要留痕：
       // 否则真机上"经常回退旧基线"这件事没有任何地方看得出来。
       console.warn(
