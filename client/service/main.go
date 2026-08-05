@@ -209,15 +209,31 @@ func main() {
 	var background backgroundGroup
 	background.Go(func() { consumeSensorEvents(appCtx, st, actor, events) })
 	background.Go(func() { runPatrolLoop(appCtx, actor) })
+	// 按"错误码 + 时间窗"节流，不按错误码永久去重。旧写法只在错误码变化时
+	// 打印一次：2026-08-05 那次证词库熔断后，同一个 workflowAdvanceFailed
+	// 每秒都在发生，日志里却只有开头一行，31 分钟的停摆看上去风平浪静。
+	// 现场是靠"怎么半天没动静"察觉的，不是靠告警。
+	const workflowWarnInterval = 2 * time.Minute
 	lastWorkflowErrorCode := ""
+	lastWorkflowWarnAt := time.Time{}
+	workflowWarnSuppressed := 0
 	background.Go(func() {
 		productWorkflow.Run(appCtx, time.Second, func(runErr error) {
 			code := productWorkflowErrorCode(runErr)
-			if code == lastWorkflowErrorCode {
+			now := time.Now()
+			if code == lastWorkflowErrorCode && now.Sub(lastWorkflowWarnAt) < workflowWarnInterval {
+				workflowWarnSuppressed++
 				return
 			}
+			if code == lastWorkflowErrorCode {
+				slog.Warn("产品工作流推进仍在暂停", "errorCode", code,
+					"suppressed", workflowWarnSuppressed, "since", lastWorkflowWarnAt.Format(time.RFC3339))
+			} else {
+				slog.Warn("产品工作流推进暂停", "errorCode", code)
+			}
 			lastWorkflowErrorCode = code
-			slog.Warn("产品工作流推进暂停", "errorCode", code)
+			lastWorkflowWarnAt = now
+			workflowWarnSuppressed = 0
 		})
 	})
 	background.Go(func() { hub.StartHealthLoop(appCtx) })
