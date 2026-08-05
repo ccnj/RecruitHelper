@@ -54,7 +54,7 @@ func TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden(t *testing.T) {
 		"话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n" +
 		"7月13日(周一) 09:00-10:00 的整点\n\n" +
 		"【简历】\n{\"basic\":[]}\n\n" +
-		"【完整对话】\n候选人(消息):你好"
+		"【完整对话】\n" + historyGuard + "\n候选人(消息):你好"
 	if err != nil || rendered != want {
 		t.Fatalf("reply 组装 golden 漂移:\n got=%q\nwant=%q err=%v", rendered, want, err)
 	}

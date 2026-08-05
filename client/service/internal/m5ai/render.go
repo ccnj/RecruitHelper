@@ -23,6 +23,19 @@ const (
 	resumeHeading         = "【简历】"
 	historyPointerText    = "完整对话(见【完整对话】)"
 	historyHeading        = "【完整对话】"
+	// historyGuard 压的是模型复读自己上一轮话术的倾向:候选人只回"好的""我尽量快"
+	// 这类没有新信息的短句时,历史末尾就摆着我方刚发的几句,模型顺手照抄一遍——
+	// 2026-08-05 真机上侯先生就连收了两条一字不差的消息。
+	//
+	// 措辞经 100 次 × 3 组实测选定:"不许和历史相似度过高"这类说法基本无效(9→6,
+	// 在 ±4 的噪声里),因为模型没有相似度的尺子;认准 RenderHistory 渲染出来的
+	// "我(消息)" 前缀、要求逐句不得重出,才把复读压到 0/100。
+	//
+	// 注意耦合:这句话依赖 RenderHistory 的出站标签字面量。改那边的标签写法,这道
+	// 软约束会静默失效且没有任何报错。它也只是软约束——0/100 不等于永不发生,发送
+	// 前的确定性去重闸另案。
+	historyGuard = `以下是已经发生的对话，只供你了解上下文。你这一轮要写的是新的话——` +
+		`凡是“我(消息)”开头的句子都已经发过了，一句都不许再发一遍。`
 	intentEnvelopeHeading = "【对话数据信封/v1】"
 	historyTruncateSuffix = "…(超长消息已截断)"
 )
@@ -582,8 +595,10 @@ func replyDataBlocks(resumeJSON, history string, frozen frozenRecommendedTimeTex
 			inline: frozen.Inline, block: frozen.Block},
 		{token: "简历", heading: resumeHeading, pointer: resumePointerText,
 			inline: resumeJSON, block: resumeHeading + "\n" + resumeJSON},
+		// 与推荐时段同构:inline 与 block 都是"说明 + 数据",说明恒在数据之前。
 		{token: "对话历史", heading: historyHeading, pointer: historyPointerText,
-			inline: history, block: historyHeading + "\n" + history},
+			inline: historyGuard + "\n" + history,
+			block:  historyHeading + "\n" + historyGuard + "\n" + history},
 	}
 }
 
