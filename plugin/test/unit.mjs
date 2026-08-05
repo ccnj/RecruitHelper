@@ -544,15 +544,20 @@ test('witness ack 收割:无 journal 的前置失败终局只删 outbox', async 
   assert.equal((await witness.findJournalByIdemKey('idem-live-1')).ref, 'cmd-live-1')
 })
 
-test('witness ack 收割 remove 后 meta 更新失败即熔断，重启按 required count 判 corrupt', async () => {
+test('witness ack 收割 remove 后 meta 更新失败改为换代继续，重启仍不得在旧 storeId 下答 unknown', async () => {
   const now = 1_700_000_000_000
   let failMetaWrite = false
   const storage = memoryWitnessStorage({}, {
     beforeSet: async (items) => {
-      if (failMetaWrite && Object.hasOwn(items, 'witness:meta')) throw new Error('storage quota')
+      // 换代写的也是 witness:meta，但它必须能落盘——否则无从安全继续，只能升 A 档。
+      // 这里只让"计数更新"那一次失败，模拟真实的删除/计数崩溃缝。
+      if (failMetaWrite && items['witness:meta']?.storeId === 'witness-ack-crashseam-1') {
+        throw new Error('storage quota')
+      }
     },
   })
-  const witness = new WitnessStore(storage, () => now, () => 'witness-ack-crashseam')
+  let seq = 0
+  const witness = new WitnessStore(storage, () => now, () => `witness-ack-crashseam-${++seq}`)
   await witness.initialize()
   await witness.markAttempting('cmd-seam-1', 'idem-seam-1')
   const body = {
@@ -564,20 +569,23 @@ test('witness ack 收割 remove 后 meta 更新失败即熔断，重启按 requi
     proto: 1, kind: 'result', msgId: 'envelope-seam-1', session: 's1', ts: now, attempt: 1, body,
   })
   failMetaWrite = true
-  await assert.rejects(
-    () => witness.acknowledgeResult('envelope-seam-1'),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-    'remove 已成功而 meta 更新失败时不得继续沿用旧计数运行')
+  // remove 已成功而计数没落盘。B 档:换代后继续服务,不熔断整库(§9.5 B 档第 5 条)。
+  await witness.acknowledgeResult('envelope-seam-1')
+  assert.notEqual(storage.state['witness:meta'].storeId, 'witness-ack-crashseam-1',
+    'remove 已成功而 meta 更新失败时必须换代，不得继续沿用旧 storeId')
+  const rotated = storage.state['witness:meta'].storeId
   failMetaWrite = false
-  await assert.rejects(
-    () => witness.acknowledgeResult('envelope-seam-1'),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-    '熔断后的实例必须保持 corrupt，不得复活')
-  const restarted = new WitnessStore(storage, () => now, () => 'witness-ack-crashseam-2')
-  await assert.rejects(
-    () => restarted.initialize(),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-    '崩溃缝留下的计数与 key 不一致必须在下次读取判 corrupt，不能伪造同世代 unknown')
+  // 换代后库仍然可用——这正是本次裁决要的:一条崩溃缝不该让整机停发。
+  await witness.markAttempting('cmd-seam-2', 'idem-seam-2')
+  assert.equal(witness.advertisement().witnessStoreId, rotated)
+  // 换代与计数修正写在同一次 set 里,所以重启时已无差额、无须再换一次代。
+  // "记录真的丢了"那条路径由「单 journal 丢失换代后继续服务」单独覆盖。
+  const restarted = new WitnessStore(storage, () => now, () => 'witness-ack-restarted')
+  await restarted.initialize()
+  assert.equal(storage.state['witness:meta'].storeId, rotated,
+    '换代已同时修正计数，重启不应再产生一次多余换代')
+  assert.equal(storage.state['witness:meta'].journalCount, 1, '换代必须带着修正后的计数落盘')
+  assert.equal(storage.state['witness:meta'].outboxCount, 0)
 })
 
 test('witness 对 same idem/different ref 与 committed result.ref 错配硬失败', async () => {
@@ -625,7 +633,7 @@ test('witness 对 same idem/different ref 与 committed result.ref 错配硬失�
   )
 })
 
-test('witness required count 阻断 same-store 单 journal 丢失，SW 重生也不能伪造 unknown', async () => {
+test('witness 单 journal 丢失换代后继续服务，绝不在旧 storeId 下伪造 unknown', async () => {
   const storage = memoryWitnessStorage()
   const first = new WitnessStore(storage, () => 1_700_000_000_000, () => 'witness-continuity')
   await first.initialize()
@@ -633,15 +641,19 @@ test('witness required count 阻断 same-store 单 journal 丢失，SW 重生也
   assert.equal(storage.state['witness:meta'].journalCount, 1)
 
   delete storage.state['journal:idem-continuity']
-  const afterRestart = new WitnessStore(storage, () => 1_700_000_000_100, () => 'unused-store-id')
-  await assert.rejects(
-    afterRestart.initialize(),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-    '同 storeId 下 meta.count=1 但 key=0 必须熔断，不能返回 unknown',
-  )
+  const afterRestart = new WitnessStore(storage, () => 1_700_000_000_100, () => 'witness-rotated')
+  // 账面有、实物没有 = 可能有记录悄悄消失。B 档:不熔断,但必须换代——脑比较
+  // WitnessStoreIDAtDispatch 后走验证/人工,绝不会把 report=unknown 当成
+  // 零副作用证明并安全重投(§9.5 B 档第 3 条)。
+  await afterRestart.initialize()
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-rotated',
+    '账面 count=1 而 key=0 时必须换代，不得在旧 storeId 下继续')
+  assert.equal(afterRestart.advertisement().witnessStoreId, 'witness-rotated',
+    '换代必须对外宣告，否则脑仍会按旧世代授权安全重投')
+  assert.equal(storage.state['witness:meta'].journalCount, 0, '计数须按实际 key 集修正')
 })
 
-test('witness 拒绝 meta+成功 outbox 已落但 journal 仍 attempting 的 partial write', async () => {
+test('witness 对 meta+成功 outbox 已落但 journal 仍 attempting 的 partial write 换代后继续', async () => {
   const now = 1_700_000_000_000
   const body = {
     ref: 'cmd-partial-write', status: 'ok', replayed: false, execMs: 10,
@@ -666,11 +678,49 @@ test('witness 拒绝 meta+成功 outbox 已落但 journal 仍 attempting 的 par
       expiresAt: now + 1 + DEFAULTS.outboxTtlDays * 24 * 60 * 60 * 1000,
     },
   })
-  const witness = new WitnessStore(storage, () => now + 2, () => 'unused-partial-write')
-  await assert.rejects(
-    witness.initialize(),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-  )
+  const witness = new WitnessStore(storage, () => now + 2, () => 'witness-partial-rotated')
+  // 终局 outbox 找不到对应的 committed journal,最可能的成因就是那条 journal
+  // 已经不在了。B 档:换代后继续服务,不整库熔断(§9.5 B 档第 4 条)。
+  await witness.initialize()
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-partial-rotated',
+    'outbox 终局与 journal 关联破裂时必须换代，不得在旧 storeId 下继续')
+  assert.equal(witness.advertisement().witnessStoreId, 'witness-partial-rotated')
+})
+
+test('witness B 档闩锁按触发身份记账：持久触发只换一次代，新触发各换一次', async () => {
+  const now = 1_700_000_000_000
+  let seq = 0
+  const storage = memoryWitnessStorage({
+    'witness:meta': {
+      storeId: 'witness-latch-base', createdAt: now, schemaVersion: 1,
+      journalCount: 1, outboxCount: 0,
+    },
+    // state=committed 却缺 committedAt/result：违反 schema，读不懂。它会一直
+    // 留在 storage 里，因此每次 loadValidated 都会再次命中同一个 B 档触发。
+    'journal:idem-latch': { ref: 'cmd-latch', idemKey: 'idem-latch', state: 'committed', startedAt: now },
+  })
+  const witness = new WitnessStore(storage, () => now, () => `witness-latch-${++seq}`)
+  await witness.initialize()
+  const first = storage.state['witness:meta'].storeId
+  assert.equal(first, 'witness-latch-1', '首次读到读不懂的条目必须换代')
+
+  // 反复触发 reload。若闩锁失效而每读一换，脑侧 WitnessStoreIDAtDispatch 会在
+  // 每条命令的 report 回来前就失效，全部 effectful 转验证/人工——人工介入率被
+  // 顶满，比原来的熔断更难诊断。
+  await witness.findJournalByIdemKey('idem-other')
+  await witness.findJournalByRef('cmd-other')
+  await witness.markAttempting('cmd-latch-2', 'idem-latch-2')
+  assert.equal(storage.state['witness:meta'].storeId, first, '同一持久触发只换一次代')
+  assert.ok(storage.state['journal:idem-latch'], '隔离不等于删除：读不懂的条目必须留在 storage')
+
+  // 新触发必须各自再换一次代，闩锁绝不能退化成“我已降级故不再换代”——那样
+  // 此后每一次真实的记录丢失都会停在旧 storeId 下，接上脑的安全重投闸。
+  storage.state['journal:idem-latch-3'] = {
+    ref: 'cmd-latch-3', idemKey: 'idem-latch-3', state: 'committed', startedAt: now,
+  }
+  storage.state['witness:meta'].journalCount = 3
+  await witness.findJournalByIdemKey('idem-other')
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-latch-2', '新出现的触发必须再换一次代')
 })
 
 test('witness 同一 SW 生命周期检测 key 集缩小，即使 count 被同步篡改也硬失败', async () => {
@@ -706,12 +756,15 @@ test('expired attempting 先持久换 witnessStoreId 再删并更新 count，不
     'unknown 只允许出现在已换代的新 storeId')
 })
 
-test('TTL 删除后 count 更新失败会熔断，重生按 count mismatch 继续拒绝 unknown', async () => {
+test('TTL 删除后 count 更新失败改为再换一次代继续，换代自身写不进去才升 A 档', async () => {
   let now = 1_700_000_000_000
   let failCountUpdate = false
   const storage = memoryWitnessStorage({}, {
     beforeSet(items) {
-      if (failCountUpdate && items['witness:meta']?.journalCount === 0) {
+      // 只拦"本轮清理世代下的计数更新"这一次。换代写的是下一个 storeId，
+      // 必须放行——否则测的就成了"storage 整体不可写"，那是 A 档。
+      if (failCountUpdate && items['witness:meta']?.storeId === 'witness-ttl-crash-new-1' &&
+          items['witness:meta']?.journalCount === 0) {
         throw new Error('fixture crash after ttl remove')
       }
     },
@@ -721,16 +774,39 @@ test('TTL 删除后 count 更新失败会熔断，重生按 count mismatch 继�
   await first.markAttempting('cmd-ttl-crash', 'idem-ttl-crash')
   now += DEFAULTS.journalTtlDays * 24 * 60 * 60 * 1000 + 1
   failCountUpdate = true
-  const pruning = new WitnessStore(storage, () => now, () => 'witness-ttl-crash-new')
-  await assert.rejects(
-    pruning.initialize(),
-    (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
-  )
+  // TTL 清理开头已换过一次代;删除生效而计数没落盘是本次新出现的事实,
+  // 按新触发再换一次代(§9.5 处置纪律第 9 条),不因"本世代已换过"而豁免。
+  let ttlSeq = 0
+  const pruning = new WitnessStore(storage, () => now, () => `witness-ttl-crash-new-${++ttlSeq}`)
+  await pruning.initialize()
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-ttl-crash-new-2',
+    'TTL 删除已生效而计数未落盘时必须再次换代，不得停留在本轮清理的世代上')
   failCountUpdate = false
-  const afterCrash = new WitnessStore(storage, () => now, () => 'unused-after-crash')
+  // 换代与计数修正同在一次 set 里落盘,重启已无差额,不该再多换一次代。
+  const afterCrash = new WitnessStore(storage, () => now, () => 'witness-after-crash')
+  await afterCrash.initialize()
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-ttl-crash-new-2',
+    '换代已带着修正后的计数落盘，重启不应再产生一次多余换代')
+  assert.equal(storage.state['witness:meta'].journalCount, 0)
+
+  // 换代自身也写不进去时没有安全的继续方式,只能升 A 档(§9.5 处置纪律第 2 条)。
+  let hardSeq = 0
+  const hardStorage = memoryWitnessStorage({}, {
+    beforeSet(items) {
+      if (items['witness:meta']?.journalCount === 0 && items['witness:meta']?.storeId !== 'witness-hard-0') {
+        throw new Error('fixture storage unwritable')
+      }
+    },
+  })
+  const hardFirst = new WitnessStore(hardStorage, () => now, () => `witness-hard-${hardSeq++}`)
+  await hardFirst.initialize()
+  await hardFirst.markAttempting('cmd-ttl-hard', 'idem-ttl-hard')
+  const hardNow = now + DEFAULTS.journalTtlDays * 24 * 60 * 60 * 1000 + 1
+  const hardPruning = new WitnessStore(hardStorage, () => hardNow, () => `witness-hard-${hardSeq++}`)
   await assert.rejects(
-    afterCrash.initialize(),
+    hardPruning.initialize(),
     (error) => error instanceof WitnessStoreError && error.reason === WitnessUnavailableReason.StoreCorrupt,
+    '换代写不进去时不得在旧 storeId 下继续服务',
   )
 })
 

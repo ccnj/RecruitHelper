@@ -872,6 +872,49 @@ func TestConfirmAllRequiresExactSelectableSetAndOpenWindow(t *testing.T) {
 	}
 }
 
+// 一个成员 suspect 不得挡住同批其余成员(AGENTS「防护成本预算」第 11 条)。
+// 2026-08-05 客户机上,一条招呼 suspect 把同批其余 32 人冻结了 72 分钟,而那
+// 32 人与该 suspect 无任何共享状态——防多发靠的是成员级的 idemKey 闸与手证词
+// 闸,停整批不增加任何保证。
+func TestSuspectMemberNeverBlocksRestOfBatch(t *testing.T) {
+	manager, actor, _, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{Completed: true}
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
+	if _, err := manager.ConfirmAll(batchID, []string{"profile-b", "profile-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 批次尚未走完:1 人已发、1 人 suspect、1 人还没轮到。旧实现在这里返回
+	// ErrGreetingSendingRequiresManual 让整个工作流报错暂停,那个还没轮到的
+	// 成员就此被冻住——客户机上被冻住的是 32 个。
+	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{
+		SelectedCount: 3, SentCount: 1, SuspectCount: 1, PendingCount: 1, Completed: false,
+	}
+	pending, err := manager.AdvanceOnce(context.Background())
+	if err != nil {
+		t.Fatalf("suspect 成员不应阻断整批推进: %v", err)
+	}
+	if pending.Stage != store.ProductWorkflowStageGreetingSending {
+		t.Fatalf("未完成的批次应停在发送阶段等下一轮, stage = %v", pending.Stage)
+	}
+
+	// suspect 成员计入"已处理"一侧,整批照常走到完并进入沟通阶段。
+	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{
+		SelectedCount: 3, SentCount: 2, SuspectCount: 1, Completed: true,
+	}
+	communication, err := manager.AdvanceOnce(context.Background())
+	if err != nil {
+		t.Fatalf("带 suspect 的已完成批次不应报错: %v", err)
+	}
+	if communication.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("带 suspect 的已完成批次未进入沟通阶段, stage = %v", communication.Stage)
+	}
+}
+
 func TestRepeatedConfirmationNeverRepeatsBatchSender(t *testing.T) {
 	manager, actor, _, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
