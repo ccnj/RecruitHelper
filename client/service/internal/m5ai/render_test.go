@@ -45,12 +45,16 @@ func TestDefaultScheduleAndReplyAssemblyMatchFrozenGolden(t *testing.T) {
 	rendered, err := RenderReplyPrompt(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
 		`{"basic":[]}`, "候选人(消息):你好", now,
-		[]string{"2026-07-13 09:00:00", "2026-07-13 10:00:00"}, "仅供测试的客户事实",
+		[]string{"2026-07-13 09:00:00", "2026-07-13 10:00:00"},
 	)
-	want := "简历={\"basic\":[]}\n历史=候选人(消息):你好\n时段=可约面时间(见【可约面时间】)\n\n" +
+	// 模板不带任何块标题:三个 token 全渲染成指针,数据按 replyDataBlocks 的顺序
+	// 追加到正文末尾(可约面时间 → 简历 → 完整对话)。
+	want := "简历=简历(见【简历】)\n历史=完整对话(见【完整对话】)\n时段=可约面时间(见【可约面时间】)\n\n" +
 		"【可约面时间】\n现在是2026年7月10日(周五)14:23。约面话术只能使用下列时间，不要编造其它面试时间；正文未规定怎么选时，优先最早的时段。\n" +
 		"话术中最多写出1-2个具体时段，严禁罗列时段列表；写具体时间用「7月14日14:00」这种「X月X日+24小时制」格式。\n" +
-		"7月13日(周一) 09:00-10:00 的整点\n\n【客户事实库】\n仅供测试的客户事实"
+		"7月13日(周一) 09:00-10:00 的整点\n\n" +
+		"【简历】\n{\"basic\":[]}\n\n" +
+		"【完整对话】\n候选人(消息):你好"
 	if err != nil || rendered != want {
 		t.Fatalf("reply 组装 golden 漂移:\n got=%q\nwant=%q err=%v", rendered, want, err)
 	}
@@ -64,7 +68,7 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 	rendered, err := RenderReplyPromptFrozen(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
-		`{"基本":[]}`, "候选人(消息):你好", frozen, "事实",
+		`{"基本":[]}`, "候选人(消息):你好", frozen,
 	)
 	if err != nil || !strings.Contains(rendered, "现在是2026年7月10日(周五)14:23。") ||
 		strings.Contains(rendered, "2026年7月11日") {
@@ -72,7 +76,7 @@ func TestPersistedRecommendedTimeTextNeverMovesWithWallClock(t *testing.T) {
 	}
 	if _, err := RenderReplyPromptFrozen(
 		"简历={简历}\n历史={对话历史}\n时段={推荐时段}",
-		`{"基本":[]}`, "", frozen+`{"候选人正文":"不得回显"}`, "事实",
+		`{"基本":[]}`, "", frozen+`{"候选人正文":"不得回显"}`,
 	); err == nil || strings.Contains(err.Error(), "候选人正文") {
 		t.Fatalf("损坏的冻结文本必须固定分类拒绝且不回显内容: %v", err)
 	}
@@ -108,7 +112,6 @@ func TestFrozenRecommendedTimeCarriesCanonicalSlotsWithoutBreakingLegacyRender(t
 		`{"基本":[]}`,
 		"候选人(消息):你好",
 		legacy,
-		"事实",
 	)
 	if err != nil || !strings.Contains(rendered, "旧时段块") {
 		t.Fatalf("旧 turn 必须仍可按原冻结文本渲染: rendered=%q err=%v", rendered, err)
@@ -202,7 +205,7 @@ func TestTemplateValuesAreNeverReinterpretedAsTemplateSyntax(t *testing.T) {
 	now := frozenShanghai(t, "2026-07-10T14:23:00+08:00")
 	resume := `{"自评":"候选人原文 {推荐时段} {对话历史}"}`
 	rendered, err := RenderReplyPrompt("简历={简历}\n历史={对话历史}\n时段={推荐时段}", resume,
-		"候选人(消息):原文 {简历}", now, nil, "facts")
+		"候选人(消息):原文 {简历}", now, nil)
 	if err != nil || !strings.Contains(rendered, "候选人原文 {推荐时段} {对话历史}") ||
 		!strings.Contains(rendered, "候选人(消息):原文 {简历}") {
 		t.Fatalf("注入值被二次解释: rendered=%q err=%v", rendered, err)
