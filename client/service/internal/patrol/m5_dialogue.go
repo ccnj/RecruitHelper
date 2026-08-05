@@ -514,22 +514,22 @@ func (a *roundActor) dispatchM5Action(
 			},
 		)
 	case store.CommunicationActionInterviewInvite:
-		if action.InterviewStartsAtMs == nil ||
-			action.InterviewEndsAtMs == nil ||
-			action.InterviewMethod == nil ||
-			*action.InterviewEndsAtMs !=
-				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs ||
-			*action.InterviewMethod != string(protocol.InterviewMethodWechatVideo) {
+		if !communication.ValidV4PlannedInterview(
+			action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+		) {
 			return a.manager.store.MarkM5AutomaticActionManualRequired(
 				action.ActionID,
 				"automaticActionInvalid",
 				a.manager.now(),
 			)
 		}
+		// 现场面试没有 endsAt：契约里它是 omitempty，留 0 即缺席，不得合成。
 		interview := &protocol.InterviewDetails{
 			StartsAt: *action.InterviewStartsAtMs,
-			EndsAt:   *action.InterviewEndsAtMs,
 			Method:   protocol.InterviewMethod(*action.InterviewMethod),
+		}
+		if action.InterviewEndsAtMs != nil {
+			interview.EndsAt = *action.InterviewEndsAtMs
 		}
 		handle, err = a.manager.runner.(AutomaticCardRunner).StartAutomaticCard(
 			ctx,

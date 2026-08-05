@@ -12301,6 +12301,41 @@ async function sendZhilianCard(
       await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
     }
 
+    // 观测基线在编辑器准备完之后重抓一次。现场面试编辑器真机实测要十几秒
+    // （开弹窗、翻日历、选时间、核对回显），而平台在我方上一条消息后 5 秒
+    // 内就可能自行插入引导行；沿用发送前那份旧基线，会把那行一起算成"新增"，
+    // 发后正证要求"相对基线恰好新增一条"就此落空，卡明明发出去了却判未确认。
+    // 重抓失败不阻断发送——它只让观测基准贴近点击时刻，把关的仍是下面的
+    // evaluator（路由、身份、目标绑定在 preflight 与 commit 各查一次）。
+    // 只有开过编辑器的那条路才需要重抓：换微信卡从抓基线到点发送只隔一次
+    // 节奏等待(1~1.5 秒)，平台来不及在中间插行，多抓一次纯属噪音。
+    const freshBaseline = editorPrepared
+      ? validatedMainSendBaseline(
+          await runMain(tab.id, mainCaptureSendBaseline, [conversationRef, guards.expectedTail]),
+        )
+      : null
+    // 只换观测用的 serverSourceKeys。targetBindingToken 必须保留首抓那份：
+    // 它是"整个原语期间这个会话绑定的对端不许变"的反错靶硬闸，跟着重抓一起
+    // 换会把覆盖窗口缩成最后几毫秒——平台若在编辑器准备的十几秒里把同一
+    // sessionId 重映射到别人，就会重新派生出新 token 比对通过，卡发给另一个人。
+    // AGENTS.md 第 9 条 2026-08-04 那段写明目标绑定仍是硬前置，本次降级只降
+    // 消息基线。
+    const observeBaseline = freshBaseline !== null && freshBaseline.status === 'ready'
+      ? { ...freshBaseline, targetBindingToken: baseline.targetBindingToken }
+      : baseline
+    if (freshBaseline !== null && freshBaseline.status === 'ready') {
+      reportBaselineDrift(`card:${cardKind}:refresh`, conversationRef, freshBaseline)
+    } else if (editorPrepared) {
+      // 回退不阻断发送(把关交给 preflight/commit 的 evaluator)，但要留痕：
+      // 否则真机上"经常回退旧基线"这件事没有任何地方看得出来。
+      console.warn(
+        `[zhilian] 卡片观测基线重抓未成功，回退首抓基线 cardKind=${cardKind} ` +
+          `conv=${conversationRef.slice(0, 8)} stage=${
+            freshBaseline === null ? 'invalid' : freshBaseline.stage
+          }`,
+      )
+    }
+
     const evaluatorArgs = [
       conversationRef,
       cardKind,
@@ -12309,8 +12344,8 @@ async function sendZhilianCard(
       guards.expectedTail,
       expectedPrincipalFingerprint,
       ctx.irreversibleNotAfterMs,
-      baseline.serverSourceKeys,
-      baseline.targetBindingToken,
+      observeBaseline.serverSourceKeys,
+      observeBaseline.targetBindingToken,
     ] as const
     ctx.checkpoint()
     const preflight = await runMain(tab.id, mainSendCardOnce, [...evaluatorArgs, 'preflight'])
@@ -12342,8 +12377,8 @@ async function sendZhilianCard(
           conversationRef,
           cardKind,
           interview,
-          baseline.serverSourceKeys,
-          baseline.targetBindingToken,
+          observeBaseline.serverSourceKeys,
+          observeBaseline.targetBindingToken,
         ])
         if (!observed.selected) {
           throw new ZhilianPlatformError(

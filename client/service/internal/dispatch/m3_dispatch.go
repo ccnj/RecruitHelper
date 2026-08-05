@@ -263,10 +263,9 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 	case protocol.PrimChatSendInviteCard:
 		if req.Interview == nil ||
 			req.RequestSourceKey != "" ||
-			req.Interview.StartsAt <= 0 ||
-			req.Interview.EndsAt !=
-				req.Interview.StartsAt+communication.V4InterviewDurationMs ||
-			req.Interview.Method != protocol.InterviewMethodWechatVideo {
+			!communication.ValidV4PlannedInterviewDetails(
+				req.Interview.StartsAt, req.Interview.EndsAt, string(req.Interview.Method),
+			) {
 			return nil, store.ErrCommunicationActionInvalid
 		}
 		argsRaw, err = protocol.Encode(protocol.ChatSendInviteCardArgs{

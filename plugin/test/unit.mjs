@@ -8614,7 +8614,11 @@ test('M5-B 两类卡片外层流程各只过一次 barrier、一次 commit，阴
     assert.match(invite.contentHash, /^[0-9a-f]{64}$/u)
     assert.match(invite.sourceKey, /^[0-9a-f]{64}$/u)
     assert.equal(inviteContext.state.barriers, 1)
-    assert.equal(baselineCalls - inviteBaselineStart, 1)
+    // 邀面卡抓两次基线：首抓给 evaluator，编辑器准备完之后再抓一次作为观测
+    // 基准。准备现场面试编辑器真机要十几秒，平台可能在这期间自行插入引导行，
+    // 沿用首抓基线会让"相对基线恰好新增一条"落空。抓基线是纯只读，多抓一次
+    // 不产生任何副作用；真正约束副作用的是下面的 barriers/commitCalls。
+    assert.equal(baselineCalls - inviteBaselineStart, 2)
     assert.equal(prepareCalls, 1, '邀面编辑器只允许准备一次')
     assert.equal(closeModalCalls, 1, '邀面卡确认成功后必须尝试关闭成功弹窗一次')
     assert.equal(preflightCalls, 2)

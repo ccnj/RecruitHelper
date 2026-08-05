@@ -2038,9 +2038,17 @@ func materializeDependentCommunicationActionTx(
 		action.InterviewStartsAtMs = cloneOptionalInt64(plan.InterviewStartsAtMs)
 		action.InterviewEndsAtMs = cloneOptionalInt64(plan.InterviewEndsAtMs)
 		action.InterviewMethod = cloneOptionalString(plan.InterviewMethod)
+		// 现场面试没有 endsAt，这里必须走 optionalInt64Value 而不是解引用：
+		// 直接解会在物化第一张 onsite 卡时 panic，而这条路径在 WS 结果处理的
+		// 事务里，全仓没有 recover，崩的是整个脑进程。
+		if !communication.ValidV4PlannedInterview(
+			action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+		) {
+			return ErrCommunicationActionConflict
+		}
 		action.ContentHash = communicationInterviewInviteContentHash(
 			*action.InterviewStartsAtMs,
-			*action.InterviewEndsAtMs,
+			optionalInt64Value(action.InterviewEndsAtMs),
 			*action.InterviewMethod,
 		)
 	default:
@@ -2098,16 +2106,28 @@ func optionalInt64Value(value *int64) int64 {
 	return *value
 }
 
+// communicationInterviewInviteContentHash 必须与《协议规格-v1》§4.5 的配方
+// 逐字一致：endsAt 缺席（现场面试）投影为空串，不是 "0"。
+//
+// 这是全仓第四处算这个 hash 的地方，前三处（syncledger 的两处与手侧 observer）
+// 早就按空串投影，只有这里在 2026-08-04 之前一直无条件 FormatInt。它的后果
+// 不是拒绝而是静默错配：动作行存着 "…\x1f0\x1fonsite"，而消息行按正确配方
+// 存 "…\x1f\x1fonsite"，结果落账时两者一比即冲突，事务回滚、result 永不 ack、
+// 手侧反复重传——卡已经发到候选人手里，脑却永远收不下这个结果。
 func communicationInterviewInviteContentHash(
 	startsAtMs int64,
 	endsAtMs int64,
 	method string,
 ) string {
+	ends := ""
+	if endsAtMs > 0 {
+		ends = strconv.FormatInt(endsAtMs, 10)
+	}
 	return textcanon.Hash(
 		"card\x1finterviewInvite\x1f" +
 			strconv.FormatInt(startsAtMs, 10) +
 			"\x1f" +
-			strconv.FormatInt(endsAtMs, 10) +
+			ends +
 			"\x1f" +
 			method,
 	)
@@ -3076,13 +3096,11 @@ func validateM5AutomaticCommand(
 		var args protocol.ChatSendInviteCardArgs
 		if err := json.Unmarshal([]byte(command.Args), &args); err != nil ||
 			args.ConversationRef != conversationRef ||
-			action.InterviewStartsAtMs == nil ||
-			action.InterviewEndsAtMs == nil ||
-			action.InterviewMethod == nil ||
-			*action.InterviewEndsAtMs !=
-				*action.InterviewStartsAtMs+communication.V4InterviewDurationMs ||
+			!communication.ValidV4PlannedInterview(
+				action.InterviewStartsAtMs, action.InterviewEndsAtMs, action.InterviewMethod,
+			) ||
 			args.Interview.StartsAt != *action.InterviewStartsAtMs ||
-			args.Interview.EndsAt != *action.InterviewEndsAtMs ||
+			args.Interview.EndsAt != optionalInt64Value(action.InterviewEndsAtMs) ||
 			string(args.Interview.Method) != *action.InterviewMethod {
 			return ErrCommunicationActionConflict
 		}

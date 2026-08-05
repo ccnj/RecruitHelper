@@ -1717,10 +1717,13 @@ func snapshotMessages(messages []protocol.ThreadMessage) []syncledger.SnapshotMe
 		var interviewMethod *string
 		if message.Interview != nil {
 			startsAt := message.Interview.StartsAt
-			endsAt := message.Interview.EndsAt
 			method := string(message.Interview.Method)
 			interviewStartsAtMs = &startsAt
-			interviewEndsAtMs = &endsAt
+			// 现场面试没有结束时间：契约里 endsAt 是 omitempty，手侧对 onsite
+			// 显式省略，解出来就是 0。直接取地址会变成"有 endsAt 且等于 0"，
+			// 归一化随即判 endsAt<=startsAt 非法 → 会话被隔离、档案被冻结。
+			// 这条不依赖我方发不发线下卡：招聘方自己在平台手发一张就会踩上。
+			interviewEndsAtMs = syncledger.OptionalEndsAt(message.Interview.EndsAt)
 			interviewMethod = &method
 		}
 		out[i] = syncledger.SnapshotMessage{

@@ -499,6 +499,41 @@ func ValidV4InterviewShape(startsAtMs, endsAtMs *int64, method *string) bool {
 	}
 }
 
+// ValidV4PlannedInterview 在形态自洽之外，另外要求线上会议的时长恰好是我方
+// 派生的标准值；现场面试在平台上没有时长可言，endsAt 缺席即合法。
+//
+// 计划、派发、命令核对、args 构造、result 校验与验证读六处必须共用它。
+// 2026-08-04 的教训是分两次交的学费：第一次只放开了发送路径，第二次只放开了
+// 三处闸，剩下的照样把线下卡挡在半路——其中一处还会解空指针崩掉整个脑进程。
+func ValidV4PlannedInterview(startsAtMs, endsAtMs *int64, method *string) bool {
+	if !ValidV4InterviewShape(startsAtMs, endsAtMs, method) {
+		return false
+	}
+	return endsAtMs == nil || *endsAtMs == *startsAtMs+V4InterviewDurationMs
+}
+
+// ValidV4PlannedInterviewDetails 是上面那个的值语义版本，服务契约类型
+// protocol.InterviewDetails：那里 endsAt 是 int64+omitempty，0 即缺席
+// （契约的 minimum 是 1，0 不是合法时刻）。
+func ValidV4PlannedInterviewDetails(startsAtMs, endsAtMs int64, method string) bool {
+	var ends *int64
+	if endsAtMs > 0 {
+		ends = &endsAtMs
+	}
+	return ValidV4PlannedInterview(&startsAtMs, ends, &method)
+}
+
+// ValidV4InterviewDetailsShape 只核形态与 method 自洽，不要求标准时长。
+// 用在核对手侧回传参数与命令一致的地方：那里校的是"这次动作的形态对不对"，
+// 时长是计划侧的约束，不该在结果校验里重复一遍。
+func ValidV4InterviewDetailsShape(startsAtMs, endsAtMs int64, method string) bool {
+	var ends *int64
+	if endsAtMs > 0 {
+		ends = &endsAtMs
+	}
+	return ValidV4InterviewShape(&startsAtMs, ends, &method)
+}
+
 func planV4ReplyActions(
 	state V4State,
 	turn FrozenTurnFacts,
