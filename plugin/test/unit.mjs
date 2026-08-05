@@ -687,6 +687,42 @@ test('witness 对 meta+成功 outbox 已落但 journal 仍 attempting 的 partia
   assert.equal(witness.advertisement().witnessStoreId, 'witness-partial-rotated')
 })
 
+test('witness B 档闩锁按触发身份记账：持久触发只换一次代，新触发各换一次', async () => {
+  const now = 1_700_000_000_000
+  let seq = 0
+  const storage = memoryWitnessStorage({
+    'witness:meta': {
+      storeId: 'witness-latch-base', createdAt: now, schemaVersion: 1,
+      journalCount: 1, outboxCount: 0,
+    },
+    // state=committed 却缺 committedAt/result：违反 schema，读不懂。它会一直
+    // 留在 storage 里，因此每次 loadValidated 都会再次命中同一个 B 档触发。
+    'journal:idem-latch': { ref: 'cmd-latch', idemKey: 'idem-latch', state: 'committed', startedAt: now },
+  })
+  const witness = new WitnessStore(storage, () => now, () => `witness-latch-${++seq}`)
+  await witness.initialize()
+  const first = storage.state['witness:meta'].storeId
+  assert.equal(first, 'witness-latch-1', '首次读到读不懂的条目必须换代')
+
+  // 反复触发 reload。若闩锁失效而每读一换，脑侧 WitnessStoreIDAtDispatch 会在
+  // 每条命令的 report 回来前就失效，全部 effectful 转验证/人工——人工介入率被
+  // 顶满，比原来的熔断更难诊断。
+  await witness.findJournalByIdemKey('idem-other')
+  await witness.findJournalByRef('cmd-other')
+  await witness.markAttempting('cmd-latch-2', 'idem-latch-2')
+  assert.equal(storage.state['witness:meta'].storeId, first, '同一持久触发只换一次代')
+  assert.ok(storage.state['journal:idem-latch'], '隔离不等于删除：读不懂的条目必须留在 storage')
+
+  // 新触发必须各自再换一次代，闩锁绝不能退化成“我已降级故不再换代”——那样
+  // 此后每一次真实的记录丢失都会停在旧 storeId 下，接上脑的安全重投闸。
+  storage.state['journal:idem-latch-3'] = {
+    ref: 'cmd-latch-3', idemKey: 'idem-latch-3', state: 'committed', startedAt: now,
+  }
+  storage.state['witness:meta'].journalCount = 3
+  await witness.findJournalByIdemKey('idem-other')
+  assert.equal(storage.state['witness:meta'].storeId, 'witness-latch-2', '新出现的触发必须再换一次代')
+})
+
 test('witness 同一 SW 生命周期检测 key 集缩小，即使 count 被同步篡改也硬失败', async () => {
   const storage = memoryWitnessStorage()
   const witness = new WitnessStore(storage, () => 1_700_000_000_000, () => 'witness-live-continuity')
