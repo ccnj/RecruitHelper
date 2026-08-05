@@ -51,7 +51,11 @@ func (m *Manager) SendSelectedSourcingGreetings(
 			if err != nil {
 				return nil, err
 			}
-			if progress.Completed || progress.SuspectCount > 0 {
+			// 只在整批终局时收手。某个成员 suspect 不再停掉其余成员
+			// (AGENTS「防护成本预算」第 11 条):防多发的是成员级的
+			// idemKey 闸与手证词闸,停整批不增加任何保证。suspect 成员
+			// 已被 SourcingGreetingSendScanPlan 排除出 target,不会重发。
+			if progress.Completed {
 				return progress, nil
 			}
 			plan, err := m.store.SourcingGreetingSendScanPlan(batchID)
@@ -87,7 +91,7 @@ func (m *Manager) SendSelectedSourcingGreetings(
 		if err != nil {
 			return nil, err
 		}
-		if progress.Completed || progress.SuspectCount > 0 {
+		if progress.Completed {
 			return progress, nil
 		}
 		plan, err := m.store.SourcingGreetingSendScanPlan(batchID)
@@ -137,7 +141,7 @@ func (m *Manager) SendSelectedSourcingGreetings(
 	if err != nil {
 		return nil, err
 	}
-	if progress.Completed || progress.SuspectCount > 0 {
+	if progress.Completed {
 		return progress, nil
 	}
 	return progress, ErrSourcingGreetingTargetNotFound
