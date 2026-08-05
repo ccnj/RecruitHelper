@@ -707,8 +707,12 @@ func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T
 	}
 }
 
+// 首轮零成员进入 blocked，真人恢复后换到新窗口继续采。滚动本身是一次平台
+// 交互，因此下一窗首个候选人仍须走候选人级节奏——等待前的派发授权不能带到
+// 等待后，跨轮次恢复也不例外。
 func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
 	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -721,9 +725,10 @@ func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
 	}
 	blocked, err := h.store.SourcingBatchByID(started.BatchID)
 	if err != nil || blocked == nil || blocked.Status != store.SourcingBatchBlocked {
-		t.Fatalf("单窗耗尽后未进入可恢复 blocked: batch=%+v err=%v", blocked, err)
+		t.Fatalf("零成员耗尽后未进入可恢复 blocked: batch=%+v err=%v", blocked, err)
 	}
 
+	h.sender.unreadableTargets = nil
 	h.sender.windows = [][]string{{"candidate-a"}, {"candidate-b"}}
 	h.sender.window = 0
 	h.sender.candidates["candidate-b"] = sourcingCandidate("candidate-b", h.position, h.clock.Now())
@@ -741,7 +746,8 @@ func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
 	if got := *h.paceWaits - beforeWaits; got != 1 {
 		t.Fatalf("滚动后首个新候选人必须等待一次候选人节奏: got=%d want=1", got)
 	}
-	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b"}; fmt.Sprint(got) != fmt.Sprint(want) {
+	// 首轮 candidate-a 读失败只存在于当轮内存，恢复后允许再读一次。
+	if got, want := h.sender.targets, []string{"candidate-a", "candidate-a", "candidate-b"}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("恢复后目标顺序错误: got=%v want=%v", got, want)
 	}
 }
@@ -969,5 +975,90 @@ func TestFormalSourcingActorBlocksOnTargetPositionMismatch(t *testing.T) {
 	}
 	if len(h.sender.targets) != 1 || len(h.sender.moves) != 1 {
 		t.Fatalf("职位错绑后仍继续读取: moves=%v targets=%v", h.sender.moves, h.sender.targets)
+	}
+}
+
+// 候选池不足是真机常态：目标 150、推荐流 80 人就到底。此时滚动不再确认推进，
+// 窗口反复交回同一批已处理身份。批次应当以实到人数收口，让漏斗拿这些人走完
+// 后续流程，而不是阻塞停工等真人。
+func TestFormalSourcingSettlesWithFewerMembersWhenWindowGoesDry(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}})
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
+	}
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("池子见底应安静收口而非报错: result=%+v err=%v", result, err)
+	}
+	batch, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchCompleted || batch.EndedAt == nil {
+		t.Fatalf("池子见底未收成终态: batch=%+v err=%v", batch, err)
+	}
+	// targetCount 下调为实到人数，评分、筛选与招呼语生成的覆盖闸因此自动对齐。
+	if batch.TargetCount != 2 {
+		t.Fatalf("收口未把目标数下调为实到人数: got=%d want=2", batch.TargetCount)
+	}
+	if want := store.SourcingNoNewCandidatesReason + ":target=5"; batch.Reason != want {
+		t.Fatalf("收口原因未留下原始目标数: got=%q want=%q", batch.Reason, want)
+	}
+	progress, err := h.store.SourcingBatchProgressByID(started.BatchID)
+	if err != nil || progress.CapturedCount != 2 || progress.RemainingCount != 0 {
+		t.Fatalf("收口后计数不自洽: progress=%+v err=%v", progress, err)
+	}
+	// 暂停原因必须与达标路径逐字相同，产品漏斗按它识别“采集内部 hold”。
+	account, err := h.store.AccountByKey(h.key)
+	if err != nil || account == nil || account.StoppedAt == nil ||
+		account.PausedReason != patrol.PauseSourcingTargetReached {
+		t.Fatalf("收口后账号未按达标路径暂停: account=%+v err=%v", account, err)
+	}
+	if got, want := h.sender.targets, []string{"candidate-a", "candidate-b"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("收口前应把见到的候选人都采下来: got=%v want=%v", got, want)
+	}
+	// current 之后连续三轮拿不到未处理身份才收口，不是滚不动就立刻放弃。
+	if got, want := h.sender.moves, []protocol.SourcingWindowMove{
+		protocol.SourcingWindowMoveCurrent,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveNext,
+		protocol.SourcingWindowMoveNext,
+	}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("窗口推进预算错误: got=%v want=%v", got, want)
+	}
+	before := len(h.sender.order)
+	if second, err := h.manager.Tick(context.Background()); err != nil ||
+		len(second.Rounds) != 0 || len(h.sender.order) != before {
+		t.Fatalf("收口后仍继续读取: result=%+v err=%v order=%v", second, err, h.sender.order)
+	}
+}
+
+// 一个人都没采到不是“没有更多候选人”，而是职位、筛选或页面出了问题。此时
+// 收口没有意义，还会把真实故障伪装成“今天没人”，所以仍旧阻塞转人工。
+func TestFormalSourcingBlocksWhenWindowGoesDryWithoutAnyMember(t *testing.T) {
+	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
+	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5); err != nil {
+		t.Fatal(err)
+	}
+	started, err := h.store.ActiveSourcingBatch(h.key)
+	if err != nil || started == nil {
+		t.Fatalf("启动后缺少正式批次: batch=%+v err=%v", started, err)
+	}
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := h.store.SourcingBatchByID(started.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked ||
+		batch.Reason != "windowNoProgress" {
+		t.Fatalf("零成员应阻塞转人工而非收口: batch=%+v err=%v", batch, err)
+	}
+	if batch.TargetCount != 5 || batch.EndedAt != nil {
+		t.Fatalf("阻塞不得改写目标数或终局批次: batch=%+v", batch)
+	}
+	account, err := h.store.AccountByKey(h.key)
+	if err != nil || account == nil || account.PausedReason != patrol.PauseSourcingBlocked {
+		t.Fatalf("零成员阻塞未按 blocked 暂停: account=%+v err=%v", account, err)
 	}
 }
