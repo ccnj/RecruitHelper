@@ -22,6 +22,12 @@ import {
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
   if (!(error instanceof ZhilianPlatformError)) throw error
+  // 失败现场快照与 notReady 原因合并进 error.data(只给人读，不参与任何业务
+  // 判定)。简历读取的十余种失败原因原本全被压成同一句话，账本、日志与诊断包
+  // 里都看不出是弹窗没打开还是某个区块缺内容——2026-08-05 一个真实候选人卡在
+  // 这里、采集侧累计 97 次同码失败，都只能靠猜。
+  const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
+  if (error.reason) data.reason = error.reason
   return {
     status: 'failed',
     error: {
@@ -30,7 +36,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
       retryable: error.retryable,
       // intrusive 原语没有资格用 effectful 的 possible/confirmed 语义。
       sideEffect: 'none',
-      ...(error.reason ? { data: { reason: error.reason } } : {}),
+      ...(Object.keys(data).length > 0 ? { data } : {}),
     },
   }
 }
