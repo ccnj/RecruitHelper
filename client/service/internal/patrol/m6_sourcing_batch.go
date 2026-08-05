@@ -26,8 +26,10 @@ const (
 	sourcingBlockTargetReadFailed   = "targetReadFailed"
 	sourcingBlockTargetMismatch     = "targetResultMismatch"
 	sourcingBlockTargetCommitFailed = "targetCommitFailed"
-	sourcingBlockMoveUnconfirmed    = "windowMoveUnconfirmed"
-	sourcingBlockNoProgress         = "windowNoProgress"
+	// sourcingBlockMoveUnconfirmed 自 2026-08-05 起不再产生：滚不动已并入
+	// windowNoProgress 计数。常量保留，存量 blocked 行仍带这个原因。
+	sourcingBlockMoveUnconfirmed = "windowMoveUnconfirmed"
+	sourcingBlockNoProgress      = "windowNoProgress"
 )
 
 // runSourcingBatch 是正式批采的唯一生产 actor。窗口引用只在当前调用栈内
@@ -214,10 +216,10 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if next.PositionRef != *batch.PositionRef {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionChanged, store.ErrSourcingBinding)
 		}
-		if !next.Moved {
-			return a.blockAndPauseSourcingBatch(batch.BatchID, sourcingBlockMoveUnconfirmed)
-		}
 
+		// moved=false 与“确认推进了但全是已处理身份”对脑是同一件事：本轮
+		// 没有取得新候选人。手侧的 next 已经等到窗口连续稳定才敢报 moved
+		// =false，那一次读取返回的身份仍然有效，因此先消费身份、再判进展。
 		hasNewIdentity := false
 		for _, ref := range next.PlatformUserRefs {
 			if !handledInRound(ref) {
@@ -230,7 +232,7 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		} else {
 			noProgressMoves++
 			if noProgressMoves >= sourcingWindowNoProgressLimit {
-				return a.blockAndPauseSourcingBatch(batch.BatchID, sourcingBlockNoProgress)
+				return a.settleOrBlockSourcingBatch(batch.BatchID)
 			}
 		}
 		window = next
@@ -279,6 +281,24 @@ func (a *roundActor) readSourcingWindow(
 		protocol.CandidateReadSourcingWindowArgs{Move: move},
 	)
 	return data, err
+}
+
+// settleOrBlockSourcingBatch 处理“采不下去了”。已经采到人就按脑侧扫描预算
+// 收口，让漏斗拿现有候选人走完后续流程；一个人都没采到时不谎称采完，仍旧
+// 阻塞转人工——那种情形通常是职位、筛选或页面有问题，继续往下走没有意义。
+// 收口事务自己暂停账号，这里不再二次暂停。
+func (a *roundActor) settleOrBlockSourcingBatch(batchID string) error {
+	_, err := a.manager.store.SettleSourcingBatch(store.SettleSourcingBatchRequest{
+		BatchID: batchID, SettleAt: a.manager.now(),
+	})
+	if err == nil {
+		return nil
+	}
+	blockErr := a.blockAndPauseSourcingBatch(batchID, sourcingBlockNoProgress)
+	if errors.Is(err, store.ErrSourcingBatchStateConflict) {
+		return blockErr
+	}
+	return errors.Join(err, blockErr)
 }
 
 func (a *roundActor) blockAndPauseSourcingBatch(batchID, reason string) error {
