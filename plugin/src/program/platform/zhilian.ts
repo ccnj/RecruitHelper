@@ -5635,6 +5635,29 @@ function mainCloseZhilianJobClassPicker(): MainStep {
   return { status: 'ok', detail: 'closing' }
 }
 
+// 职位性质(代招岗位/劳务派遣/自招职位)。只有部分账号的发布表单会出现这一组,
+// 排在工作性质之前,出现时是必填项——不选后面会被平台判形式不符。按业务口径
+// 一律选"自招职位",不读取当前状态(未选中是唯一真实场景)。不存在时按"这个
+// 账号没有这个字段"处理,是正常路径,不是失败。
+function mainPickZhilianJobNature(): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '职位性质'
+  })
+  if (!item) return { status: 'ok', detail: 'absent' }
+  const buttons = Array.from(item.querySelectorAll('button')) as HTMLElement[]
+  const hit = buttons.filter((button) => button.innerText.trim() === '自招职位')
+  if (hit.length !== 1) {
+    return {
+      status: 'failed',
+      reason: hit.length === 0 ? 'job_nature_option_absent' : 'job_nature_option_ambiguous',
+    }
+  }
+  hit[0].click()
+  return { status: 'ok', detail: 'picked' }
+}
+
 function mainPickZhilianEmployment(label: string): MainStep {
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const item = items.find((node) => {
@@ -6420,6 +6443,7 @@ function throwPrepareDraftFailure(reason: string, progress?: DraftProgress): nev
 // 只登记发布链路的函数:招呼、消息、卡片、采集各有自己已在生产跑着的节奏,
 // 不在本次改动范围内。
 const zhilianPublishInteractions = new Set<unknown>([
+  mainPickZhilianJobNature,
   mainPickZhilianEmployment,
   mainFillZhilianJobName,
   mainWriteZhilianDescription,
@@ -6466,6 +6490,7 @@ function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
   if (!validMainStep(result) || result.status !== 'ok') return false
   // 几个"看一眼再决定点不点"的例外:ok 里要再看 detail 才知道这一轮到底
   // 有没有真的点下去。
+  if (func === mainPickZhilianJobNature) return result.detail === 'picked'
   if (func === mainCloseZhilianPanels) return result.detail === 'closing'
   if (func === mainOpenZhilianJobClassPicker) return result.detail === 'clicked'
   if (func === mainCloseZhilianJobClassPicker) return result.detail === 'closing'
@@ -6743,6 +6768,7 @@ async function fillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 10)
 
+  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   const employment = await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -7092,6 +7118,7 @@ export async function readZhilianJobClassCandidates(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
+  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -7201,6 +7228,7 @@ async function reuseOrRefillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
+  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
