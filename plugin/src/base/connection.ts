@@ -624,8 +624,12 @@ export class Connection {
       if (commitIdemKey) await this.witness.commitAndEnqueue(commitIdemKey, envelope)
       else await this.witness.enqueueResult(envelope)
     } catch (error) {
+      // 存储失败不得改用断链表达(§9.6 第 1 条)。断链会把存储问题伪装成网络
+      // 问题,脑只看得见症状,还会白白走完重连收编→query→租约超时→cancel→
+      // 配套验证读→suspect 的全链路——2026-08-05 的整机停发正是这样来的。
+      // 收敛留在本连接内:返回 dropped 后由 dispatcher 的 fuse 保持 attempting、
+      // 停止继续投递,连接保持打开正是 §9.2 第 5 条所需(query/report 要走它)。
       console.error('[hand] result 无法先入持久 outbox，拒绝发送', error)
-      try { this.ws?.close() } catch { /* onclose 统一重连 */ }
       return 'dropped'
     }
     return this.sendEncoded(encoded.text) ? 'sent' : 'queued'
@@ -695,9 +699,11 @@ export class Connection {
         this.sendEncoded(encoded.text)
       }
     } catch (error) {
-      // 补投失败时不进入 query 的伪完成路径；断链后由退避重连再次尝试阶段 1。
-      console.error('[hand] 持久 outbox 补投失败', error)
-      try { this.ws?.close() } catch { /* onclose 统一重连 */ }
+      // 补投失败时不进入 query 的伪完成路径,但也不断链(§9.6 第 1 条)。
+      // 补投不是 result 到达脑的唯一通路:脑侧恢复闸收不齐就不会解除,随后发
+      // 来的 query 由 handleQuery 从 committed journal 回 done+result 入账。
+      // 断链换来的"退避重连再试一次"并不值当——它同时把脑推进整条 suspect 链。
+      console.error('[hand] 持久 outbox 补投失败，保持连接由 query/report 收敛', error)
     }
   }
 

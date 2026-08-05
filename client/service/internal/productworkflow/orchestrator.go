@@ -17,7 +17,6 @@ var (
 	ErrWorkflowPipelineInvalid       = errors.New("产品工作流批次推进状态无效")
 	ErrConfirmationNotReady          = errors.New("候选确认批次尚未就绪")
 	ErrConfirmationSelectionMismatch = errors.New("候选确认必须精确全选当前可发送候选人")
-	ErrGreetingSendingRequiresManual = errors.New("招呼发送存在待人工收敛成员")
 	ErrPatrolBoundaryUnavailable     = errors.New("沟通候选人收束边界尚未接线")
 )
 
@@ -232,9 +231,9 @@ func (m *Manager) AdvanceOnce(
 		if progress == nil {
 			return run, nil
 		}
-		if progress.SuspectCount > 0 && !progress.Completed {
-			return run, ErrGreetingSendingRequiresManual
-		}
+		// 某个成员 suspect 不再阻断整批推进(AGENTS「防护成本预算」第 11 条)。
+		// 它已被计入 Completed 的"已处理"一侧,批次照常走到完，其余成员不受
+		// 牵连；那条 suspect 仍在人工队列里等裁决，裁决前后都不影响别人。
 		if !progress.Completed {
 			return run, nil
 		}

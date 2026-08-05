@@ -66,6 +66,13 @@ func (d *Dispatcher) onReconnectWitness(
 	// M1/S 命令仍遵循原 bootId 收编规则，但必须跳过已进入
 	// pendingReconcile/verifying 的真实 SX。
 	d.reconnectLegacy(handID, newBootID)
+	// 手未声明 witness 三字段 = "我没有可用证词库"，不是"证词库正常且
+	// outboxPending=0"。Go 零值会把两者混成同一个 0，据此进入 outbox 补投
+	// 判定并发出 query，而对面根本没有能回答的证词库(协议规格 §9.6 第 3 条)。
+	// 2026-08-05 客户机就是这样白等满 29.5 秒租约的。
+	if witnessStoreID == "" {
+		return
+	}
 	if outboxPending == 0 {
 		d.sendRecoveryQueries(handID, session, newBootID, witnessStoreID)
 	}

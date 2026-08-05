@@ -37,6 +37,32 @@ export class WitnessStoreError extends Error {
   }
 }
 
+// 读回校验的降级档位(协议规格 §9.5)。A 档不在此列——它直接抛 storeCorrupt。
+// B = 无法排除"有记录已消失",旋转 witnessStoreId 后继续服务;
+// C = 记录都在、身份都对,只是附属字段不自洽,原样继续。
+type DegradeTier = 'B' | 'C'
+
+interface WitnessDegrade {
+  tier: DegradeTier
+  // 触发身份 = 键名 + 判据。换代闩锁按它记账并跨世代保留(§9.5 处置纪律第 9 条):
+  // 按世代记账会让持久触发在换代产生的新世代里重新算作新触发,永不收敛。
+  trigger: string
+  detail: string
+}
+
+interface WitnessLoad {
+  meta: WitnessStoreMeta
+  journals: Map<string, JournalEntry>
+  outbox: Map<string, OutboxEntry>
+  // storage 中实际存在的键,含因 B 档而未装进内存视图的条目。key 集缩小
+  // 必须以它为准,否则"隔离不装载"会立刻被误判成"记录消失"(§9.5 B 档第 6 条)。
+  storageJournalKeys: Set<string>
+  storageOutboxKeys: Set<string>
+  // C 档就地修正后待回写的条目,键为完整 storage key。
+  repairs: Record<string, unknown>
+  degrades: WitnessDegrade[]
+}
+
 export class WitnessStore {
   private meta: WitnessStoreMeta | null = null
   private journals = new Map<string, JournalEntry>()
@@ -44,6 +70,10 @@ export class WitnessStore {
   private state: 'new' | 'ready' | 'corrupt' = 'new'
   private initialization: Promise<void> | null = null
   private serial: Promise<void> = Promise.resolve()
+  // 换代闩锁:已经为某个触发换过代就不再重复换。跨世代保留,只随 SW 生命周期
+  // 重置(§9.5 处置纪律第 9 条)。它绝不能退化成"我已降级故不再换代"——那样
+  // 此后每一次真实的记录丢失都会停在旧 storeId 下,脑随即安全重投,直接多发。
+  private rotatedFor = new Set<string>()
 
   constructor(
     private readonly storage: WitnessStorage,
@@ -299,7 +329,7 @@ export class WitnessStore {
       const keys = [outboxKey(msgId)]
       if (journalIdemKey !== null) keys.push(journalKey(journalIdemKey))
       await this.erase(keys)
-      const meta: WitnessStoreMeta = {
+      let meta: WitnessStoreMeta = {
         ...this.requireMeta(),
         outboxCount: this.outbox.size - 1,
         journalCount: this.journals.size - (journalIdemKey === null ? 0 : 1),
@@ -308,10 +338,13 @@ export class WitnessStore {
       try {
         await this.write({ [META_KEY]: meta })
       } catch (error) {
-        // remove 已经成功，此时旧 count 与真实 key 数不一致；继续运行会把丢失
-        // 伪装成 unknown，必须立刻熔断为 corrupt。
-        this.state = 'corrupt'
-        throw this.storeCorrupt(`ack 收割后 meta 更新失败: ${message(error)}`)
+        // remove 已经成功、旧 count 与真实 key 数不再一致。留在同一 storeId 下
+        // 继续运行会把这份差额伪装成 unknown,但整库其余条目仍可解释——按 B 档
+        // 换代后继续服务(§9.5 B 档第 5 条),不必熔断。换代自身失败才升 A 档。
+        meta = await this.rotateLocked(meta, [`ack-meta-write:${msgId}`])
+        console.warn(
+          `[witness] B 档降级 trigger=ack-meta-write:${msgId} ack 收割后 meta 更新失败: ${message(error)}`,
+        )
       }
       this.meta = meta
       this.outbox.delete(msgId)
@@ -367,7 +400,7 @@ export class WitnessStore {
       this.state = 'ready'
       return
     }
-    this.loadValidated(all, rawMeta)
+    await this.applyLoad(this.loadValidated(all, rawMeta))
     await this.pruneExpiredLocked()
     this.state = 'ready'
   }
@@ -382,15 +415,22 @@ export class WitnessStore {
       throw this.storeCorrupt('运行中证词 meta 消失，连续性已断')
     }
     const previousStoreId = this.meta?.storeId
-    this.loadValidated(all, rawMeta)
-    if (previousStoreId && this.meta?.storeId !== previousStoreId) {
+    const load = this.loadValidated(all, rawMeta)
+    // A 档:出现既非旧值、也非手自己刚写入之值的第三个 storeId。自检必须排在
+    // applyLoad 之前——手自己的 B 档换代发生在其后,不能把自己烧成 A 档
+    // (§9.5 处置纪律第 2 条;现有 TTL 换代能过关也正因为它排在自检之后)。
+    if (previousStoreId && load.meta.storeId !== previousStoreId) {
       this.state = 'corrupt'
       throw this.storeCorrupt('运行中 witnessStoreId 发生变化')
     }
+    await this.applyLoad(load)
     await this.pruneExpiredLocked()
   }
 
-  private loadValidated(all: Record<string, unknown>, rawMeta: unknown): void {
+  // 读回校验只负责"解释 + 定档",不再自己熔断 B/C 档。A 档(去重信息本身
+  // 不可用)仍就地抛 storeCorrupt;其余归入 WitnessLoad.degrades,由 applyLoad
+  // 按 §9.5 处置纪律收束。
+  private loadValidated(all: Record<string, unknown>, rawMeta: unknown): WitnessLoad {
     if (validateSchema('WitnessStoreMeta', rawMeta).length > 0) {
       this.state = 'corrupt'
       throw this.storeCorrupt('证词 meta 违反协议 schema')
@@ -400,20 +440,39 @@ export class WitnessStore {
       this.state = 'corrupt'
       throw this.storeCorrupt(`不支持证词 schemaVersion=${meta.schemaVersion}`)
     }
+    const now = this.now()
     const journals = new Map<string, JournalEntry>()
     const outbox = new Map<string, OutboxEntry>()
+    const storageJournalKeys = new Set<string>()
+    const storageOutboxKeys = new Set<string>()
+    const repairs: Record<string, unknown> = {}
+    const degrades: WitnessDegrade[] = []
     const refs = new Set<string>()
     for (const [key, value] of Object.entries(all)) {
       if (key.startsWith(JOURNAL_PREFIX)) {
-        if (validateSchema('JournalEntry', value).length > 0) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`journal 条目损坏: ${key}`)
+        // 键仍在 = 记录仍在 storage,与内容能否读懂无关。key 集缩小以此为准。
+        storageJournalKeys.add(key.slice(JOURNAL_PREFIX.length))
+        const issues = validateSchema('JournalEntry', value)
+        if (issues.length > 0) {
+          // A 档优先:生成的 validator 里混着身份关联判据(当前唯一一条是
+          // "result.ref 必须等于 journal.ref")。它命中说明这条 journal 的终局
+          // 挂在别的命令身上,是身份被篡改,不是"这条读不懂"(§9.5 B 档第 1 条)。
+          const correlation = issues.find((issue) => issue.rule === 'correlation')
+          if (correlation) {
+            this.state = 'corrupt'
+            throw this.storeCorrupt(`journal 身份关联损坏: ${key} (${correlation.message})`)
+          }
+          // B 档:这一条读不懂,但全库其余条目仍可解释。就地留在 storage,
+          // 不装进内存视图——它因此不再参与去重,安全性由本档换代承担。
+          degrades.push({ tier: 'B', trigger: `journal-schema:${key}`, detail: 'journal 条目违反 schema' })
+          continue
         }
         const entry = value as JournalEntry
         if (key !== journalKey(entry.idemKey) || journals.has(entry.idemKey)) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`journal 键与内容不一致: ${key}`)
+          degrades.push({ tier: 'B', trigger: `journal-key:${key}`, detail: 'journal 键与内容不一致' })
+          continue
         }
+        // A 档:committed 的终局挂在别的命令身上,是身份被篡改,继续服务等于蒙眼作答。
         if (entry.state === JournalState.Committed && entry.result?.ref !== entry.ref) {
           this.state = 'corrupt'
           throw this.storeCorrupt(`committed journal 的 result.ref 不相关: ${key}`)
@@ -422,44 +481,77 @@ export class WitnessStore {
           this.state = 'corrupt'
           throw this.storeCorrupt(`多个 journal 复用了同一命令 ref: ${key}`)
         }
-        if (entry.expiresAt <= entry.startedAt ||
-            (entry.committedAt !== undefined &&
-              (entry.committedAt < entry.startedAt || entry.committedAt >= entry.expiresAt))) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`journal 时间关系损坏: ${key}`)
+        // C 档:时间字段只服务 TTL 清理,不参与去重。就地修正后照常装载。
+        const repairedJournal = repairJournalTime(entry, now)
+        if (repairedJournal) {
+          degrades.push({
+            tier: 'C',
+            trigger: `journal-time:${key}`,
+            detail: `startedAt=${entry.startedAt} committedAt=${entry.committedAt ?? '-'} ` +
+              `expiresAt=${entry.expiresAt} → startedAt=${repairedJournal.startedAt} ` +
+              `expiresAt=${repairedJournal.expiresAt}`,
+          })
+          repairs[key] = repairedJournal
         }
-        refs.add(entry.ref)
-        journals.set(entry.idemKey, clone(entry))
+        const loaded = repairedJournal ?? entry
+        refs.add(loaded.ref)
+        journals.set(loaded.idemKey, clone(loaded))
       } else if (key.startsWith(OUTBOX_PREFIX)) {
+        storageOutboxKeys.add(key.slice(OUTBOX_PREFIX.length))
         if (validateSchema('OutboxEntry', value).length > 0) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`outbox 条目损坏: ${key}`)
+          degrades.push({ tier: 'B', trigger: `outbox-schema:${key}`, detail: 'outbox 条目违反 schema' })
+          continue
         }
         const entry = value as OutboxEntry
         if (key !== outboxKey(entry.message.msgId) || outbox.has(entry.message.msgId)) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`outbox 键与内容不一致: ${key}`)
+          degrades.push({ tier: 'B', trigger: `outbox-key:${key}`, detail: 'outbox 键与内容不一致' })
+          continue
         }
-        if (entry.expiresAt <= entry.createdAt) {
-          this.state = 'corrupt'
-          throw this.storeCorrupt(`outbox 时间关系损坏: ${key}`)
+        const repairedOutbox = repairOutboxTime(entry, now)
+        if (repairedOutbox) {
+          degrades.push({
+            tier: 'C',
+            trigger: `outbox-time:${key}`,
+            detail: `createdAt=${entry.createdAt} expiresAt=${entry.expiresAt} → ` +
+              `expiresAt=${repairedOutbox.expiresAt}`,
+          })
+          repairs[key] = repairedOutbox
         }
-        outbox.set(entry.message.msgId, clone(entry))
+        outbox.set(entry.message.msgId, clone(repairedOutbox ?? entry))
       } else if (key.startsWith('witness:') && key !== META_KEY) {
-        this.state = 'corrupt'
-        throw this.storeCorrupt(`未知证词键: ${key}`)
+        // C 档:陌生键不读、不写、不删、不计入容量。它不影响任何已知记录。
+        degrades.push({ tier: 'C', trigger: `unknown-key:${key}`, detail: '未知证词键,已忽略' })
       }
     }
+    // C 档:条目过多只让去重更保守。新写入仍由 markAttempting/enqueueResult
+    // 的 capacityExceeded 闸拦住(§9.1 第 3 条不变),已有记录照常服务。
     if (journals.size > DEFAULTS.witnessCapacity || outbox.size > DEFAULTS.witnessCapacity) {
-      this.state = 'corrupt'
-      throw this.storeCorrupt('证词条目数量超过协议容量')
+      degrades.push({
+        tier: 'C',
+        trigger: `capacity:${journals.size}:${outbox.size}`,
+        detail: `条目数量超过容量上限 ${DEFAULTS.witnessCapacity}`,
+      })
     }
-    if (meta.journalCount !== journals.size || meta.outboxCount !== outbox.size) {
-      this.state = 'corrupt'
-      throw this.storeCorrupt(
-        `证词计数与真实 key 不一致: journal=${meta.journalCount}/${journals.size}, ` +
-        `outbox=${meta.outboxCount}/${outbox.size}`,
-      )
+    const journalShortfall = meta.journalCount - storageJournalKeys.size
+    const outboxShortfall = meta.outboxCount - storageOutboxKeys.size
+    if (journalShortfall > 0 || outboxShortfall > 0) {
+      // B 档:账面有、实物没有。SW 重启后已无内存证据区分"我按计划删的"与
+      // "记录悄悄丢了",一律按后者保守处理。差额数值参与触发身份,差额每
+      // 扩大一次都是一次新触发,必须各自再换一次代。
+      degrades.push({
+        tier: 'B',
+        trigger: `count-shortfall:${journalShortfall}:${outboxShortfall}`,
+        detail: `计数大于实际 key 数: journal=${meta.journalCount}/${storageJournalKeys.size}, ` +
+          `outbox=${meta.outboxCount}/${storageOutboxKeys.size}`,
+      })
+    } else if (meta.journalCount !== storageJournalKeys.size || meta.outboxCount !== storageOutboxKeys.size) {
+      // C 档:实物比账面多,只会让去重更保守。以实际 key 集为准改写 meta。
+      degrades.push({
+        tier: 'C',
+        trigger: `count-surplus:${storageJournalKeys.size}:${storageOutboxKeys.size}`,
+        detail: `计数小于实际 key 数: journal=${meta.journalCount}/${storageJournalKeys.size}, ` +
+          `outbox=${meta.outboxCount}/${storageOutboxKeys.size}`,
+      })
     }
     for (const [msgId, entry] of outbox) {
       const correlatedJournals = [...journals.values()]
@@ -468,9 +560,14 @@ export class WitnessStore {
       // barrier 前的非 ok 终局没有 journal，是合法的零副作用路径；ok 或任何
       // 已有关联 journal 的终局都必须证明 atomic committed 相关性。
       if (entry.message.body.status !== ResultStatus.Ok && correlatedJournals.length === 0) continue
+      // B 档:关联破裂最可能的成因就是那条 journal 已经不在了。
       if (correlatedJournals.length !== 1 || journal.state !== JournalState.Committed || !journal.result) {
-        this.state = 'corrupt'
-        throw this.storeCorrupt(`终局 outbox 缺少唯一 committed journal: ${msgId}`)
+        degrades.push({
+          tier: 'B',
+          trigger: `outbox-link:${msgId}`,
+          detail: '终局 outbox 缺少唯一 committed journal',
+        })
+        continue
       }
       // 原始终局必须逐字段完全一致。协议要求的 dedup 重放只允许把
       // replayed 从 false 改为 true，其余字段仍必须与同一 committed 事实一致。
@@ -478,23 +575,100 @@ export class WitnessStore {
         ? { ...entry.message.body, replayed: false }
         : entry.message.body
       if (JSON.stringify(journal.result) !== JSON.stringify(correlatedBody)) {
-        this.state = 'corrupt'
-        throw this.storeCorrupt(`outbox 与 committed journal 终局不一致: ${msgId}`)
+        degrades.push({
+          tier: 'B',
+          trigger: `outbox-terminal:${msgId}`,
+          detail: 'outbox 与 committed journal 终局不一致',
+        })
       }
     }
-    // 同一 SW 生命周期内，即使有人同时改小 meta.count，既有 key 的消失仍不可
-    // 被解释为合法清理；合法删除路径会先更新内存视图，再允许下一次 reload。
+    // 同一 SW 生命周期内 key 集缩小 = 记录可能已消失,走 B 档换代(§9.5 B 档
+    // 第 6 条)。判据以 storage 实际 key 为准:因 B 档隔离而未装进内存视图的
+    // 条目仍在 storage 里,不算缩小,否则"隔离不装载"会立刻自升 A 档。
     if (this.state === 'ready') {
-      const missingJournal = [...this.journals.keys()].find((key) => !journals.has(key))
-      const missingOutbox = [...this.outbox.keys()].find((key) => !outbox.has(key))
+      const missingJournal = [...this.journals.keys()].find((key) => !storageJournalKeys.has(key))
+      const missingOutbox = [...this.outbox.keys()].find((key) => !storageOutboxKeys.has(key))
       if (missingJournal || missingOutbox) {
-        this.state = 'corrupt'
-        throw this.storeCorrupt('运行中证词 key 集缩小，连续性已断')
+        degrades.push({
+          tier: 'B',
+          trigger: `keyset-shrunk:${missingJournal ?? ''}:${missingOutbox ?? ''}`,
+          detail: '运行中证词 key 集缩小',
+        })
       }
     }
-    this.meta = clone(meta)
-    this.journals = journals
-    this.outbox = outbox
+    return {
+      meta: clone(meta),
+      journals,
+      outbox,
+      storageJournalKeys,
+      storageOutboxKeys,
+      repairs,
+      degrades,
+    }
+  }
+
+  // B 档换代:旋转 witnessStoreId 并落盘。脑看到换代只会增加验证/人工,绝不会
+  // 把 report=unknown 当零副作用证明,所以换代本身就是一道完备的防多发闸
+  // (§9.5 判据)。闩锁按触发身份记账并跨世代保留——按世代记账会让持久触发在
+  // 新世代里重新算作新触发,永不收敛(§9.5 处置纪律第 9 条)。
+  private async rotateLocked(base: WitnessStoreMeta, triggers: string[]): Promise<WitnessStoreMeta> {
+    const nextStoreId = this.newStoreId()
+    if (!nextStoreId || nextStoreId === base.storeId) {
+      this.state = 'corrupt'
+      throw this.storeCorrupt('B 档换代未生成新的 witnessStoreId')
+    }
+    const rotated: WitnessStoreMeta = { ...base, storeId: nextStoreId, createdAt: this.now() }
+    assertSchema('WitnessStoreMeta', rotated)
+    try {
+      await this.write({ [META_KEY]: rotated })
+    } catch (error) {
+      // 换代自身写不进去时没有任何安全的继续方式:留在旧 storeId 下,脑会把
+      // 后续的 report=unknown 当成零副作用证明并安全重投。只能升 A 档。
+      this.state = 'corrupt'
+      throw this.storeCorrupt(`B 档换代写入失败: ${message(error)}`)
+    }
+    this.meta = rotated
+    for (const trigger of triggers) this.rotatedFor.add(trigger)
+    return rotated
+  }
+
+  // applyLoad 按 §9.5 处置纪律第 2 条的顺序收束一次读回:先换代并落盘,再
+  // 修正计数与 C 档条目,最后才装载内存视图、恢复服务。
+  private async applyLoad(load: WitnessLoad): Promise<void> {
+    let meta = load.meta
+    const fresh = load.degrades.filter(
+      (degrade) => degrade.tier === 'B' && !this.rotatedFor.has(degrade.trigger),
+    )
+    if (fresh.length > 0) {
+      meta = await this.rotateLocked(meta, fresh.map((degrade) => degrade.trigger))
+    }
+    const counted: WitnessStoreMeta = {
+      ...meta,
+      journalCount: load.storageJournalKeys.size,
+      outboxCount: load.storageOutboxKeys.size,
+    }
+    const pending: Record<string, unknown> = { ...load.repairs }
+    if (counted.journalCount !== meta.journalCount || counted.outboxCount !== meta.outboxCount) {
+      assertSchema('WitnessStoreMeta', counted)
+      pending[META_KEY] = counted
+    }
+    if (Object.keys(pending).length > 0) {
+      // 修正写失败不升档:内存视图已是修正后的值,下次读回会重新命中同一
+      // 判据并再修一次。C 档的全部作用只是让 TTL 与计数自洽。
+      try {
+        await this.write(pending)
+      } catch (error) {
+        console.warn('[witness] 降级修正回写失败,将在下次读取重试', message(error))
+      }
+    }
+    this.meta = counted
+    this.journals = load.journals
+    this.outbox = load.outbox
+    for (const degrade of load.degrades) {
+      console.warn(
+        `[witness] ${degrade.tier} 档降级 trigger=${degrade.trigger} ${degrade.detail}`,
+      )
+    }
   }
 
   private async pruneExpiredLocked(): Promise<void> {
@@ -529,7 +703,7 @@ export class WitnessStore {
     this.meta = rotated
 
     await this.erase(expired)
-    const updated: WitnessStoreMeta = {
+    let updated: WitnessStoreMeta = {
       ...rotated,
       journalCount: this.journals.size - expiredJournals.length,
       outboxCount: this.outbox.size - expiredOutbox.length,
@@ -538,8 +712,13 @@ export class WitnessStore {
     try {
       await this.write({ [META_KEY]: updated })
     } catch (error) {
-      this.state = 'corrupt'
-      throw this.storeCorrupt(`TTL 删除后 meta 更新失败: ${message(error)}`)
+      // 删除已生效、计数没落盘。本轮清理开头已经换过一次代,但那次换代的
+      // storeId 已经对外宣告过;差额是本次新出现的事实,按 §9.5 处置纪律第 9 条
+      // 属新触发,必须再换一次代,不能因"本世代已换过"而豁免。
+      updated = await this.rotateLocked(updated, [`ttl-meta-write:${expired.length}`])
+      console.warn(
+        `[witness] B 档降级 trigger=ttl-meta-write:${expired.length} TTL 删除后 meta 更新失败: ${message(error)}`,
+      )
     }
     this.meta = updated
     for (const key of expired) {
@@ -583,6 +762,30 @@ export class WitnessStore {
   private storeCorrupt(detail: string): WitnessStoreError {
     return new WitnessStoreError(WitnessUnavailableReason.StoreCorrupt, detail)
   }
+}
+
+// 时间字段只服务 TTL 清理,不参与去重,因此不自洽时就地修正、照常装载
+// (§9.5 C 档第 1 条)。只动时间字段:ref/idemKey/state/result 一律不碰。
+function repairJournalTime(entry: JournalEntry, now: number): JournalEntry | null {
+  const broken = entry.expiresAt <= entry.startedAt ||
+    (entry.committedAt !== undefined &&
+      (entry.committedAt < entry.startedAt || entry.committedAt >= entry.expiresAt))
+  if (!broken) return null
+  // 哪个才是真正的开始时刻无从判断,取较早者最保守——它只会让 TTL 更早到期,
+  // 不会延长记录寿命。
+  const startedAt = entry.committedAt !== undefined
+    ? Math.min(entry.startedAt, entry.committedAt)
+    : entry.startedAt
+  // expiresAt 必须同时晚于 committedAt 与当前时刻:否则紧随其后的
+  // pruneExpired 会立刻删掉它,把隔离变成删除(§9.5 处置纪律第 3 条)。
+  const base = Math.max(now, entry.committedAt ?? startedAt)
+  return { ...entry, startedAt, expiresAt: base + DEFAULTS.journalTtlDays * DAY_MS }
+}
+
+function repairOutboxTime(entry: OutboxEntry, now: number): OutboxEntry | null {
+  if (entry.expiresAt > entry.createdAt) return null
+  const base = Math.max(now, entry.createdAt)
+  return { ...entry, expiresAt: base + DEFAULTS.outboxTtlDays * DAY_MS }
 }
 
 function journalKey(idemKey: string): string {
