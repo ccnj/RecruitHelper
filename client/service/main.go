@@ -26,6 +26,7 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobconfig"
+	"recruithelper/client/service/internal/logcontext"
 	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/notify"
@@ -92,6 +93,13 @@ func main() {
 		Enabled: func() bool { return logReportEnabled(logReportStore.Load()) },
 		Target:  func() (logreport.Target, bool) { return logReportTarget(logReportConfig.Load()) },
 		Upload:  logreport.Upload,
+		Enrich: func(items []logreport.Item) {
+			// 姓名、职位名与该会话最近若干条聊天正文只在这里补,且只进上报载荷 ——
+			// brain.log 的日志行不因此多出一个候选人姓名。
+			if current := logReportStore.Load(); current != nil {
+				logcontext.New(current).Enrich(items)
+			}
+		},
 		Record: func(at time.Time, ok bool, reason string, sent, dropped int64) {
 			if current := logReportStore.Load(); current != nil {
 				_ = current.RecordLogReportRun(at, ok, reason, sent, dropped)

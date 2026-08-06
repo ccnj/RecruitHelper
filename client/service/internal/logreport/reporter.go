@@ -34,6 +34,10 @@ type Deps struct {
 	Upload func(context.Context, Target, []Item) error
 	// Record 落一次上报结果与计数,供诊断台显示。可为 nil。
 	Record func(at time.Time, ok bool, reason string, sent, dropped int64)
+	// Enrich 在发送前给一批事件补上下文(姓名、职位名、最近若干条聊天正文)。
+	// 放在发送前而不是入队时,是因为入队发生在 slog 的写路径上,那里不能查库。
+	// 可为 nil(不补,只发日志行本身)。
+	Enrich func([]Item)
 	Now    func() time.Time
 
 	QueueLimit int
@@ -215,6 +219,11 @@ func (r *Reporter) flush(ctx context.Context) {
 	}
 	if len(batch) == 0 {
 		return
+	}
+
+	if r.deps.Enrich != nil {
+		// 补上下文放在锁外:它要查库,持锁查库会把 slog 写路径一起卡住。
+		r.deps.Enrich(batch)
 	}
 
 	err := r.deps.Upload(ctx, target, batch)
