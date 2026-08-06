@@ -43,6 +43,7 @@ function candidate(index: number, overrides: Partial<CandidateViewItem> = {}): C
     latestAiDecision: '候选人有明确了解意愿，建议先回答团队问题，再邀请线上沟通。',
     interviewAt: null,
     interviewMethod: null,
+    appointedAt: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: true,
@@ -94,6 +95,7 @@ const interviewed = [
     lastMessage: '好的，周五下午可以。',
     interviewAt: '7 月 25 日 14:00',
     interviewMethod: '微信视频',
+    appointedAt: '昨天 16:40',
   }),
 ]
 
