@@ -477,6 +477,8 @@ type CardResultMutation struct {
 	InterviewStartsAtMs *int64
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
+	// PlatformTsMs 语义同 EffectResultMutation.PlatformTsMs。
+	PlatformTsMs *int64
 }
 
 type WechatContactResultMutation struct {

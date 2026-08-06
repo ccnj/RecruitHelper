@@ -964,12 +964,14 @@ func (d *Dispatcher) realCardResultPlan(
 				return store.ResultCommandMutation{}, err
 			}
 			card.SourceKey = data.SourceKey
+			card.PlatformTsMs = data.TsApprox
 		case protocol.PrimChatSendInviteCard:
 			var data protocol.ChatSendInviteCardData
 			if err := json.Unmarshal(res.Data, &data); err != nil {
 				return store.ResultCommandMutation{}, err
 			}
 			card.SourceKey = data.SourceKey
+			card.PlatformTsMs = data.TsApprox
 		}
 		r.Status = store.CmdOk
 		r.TerminalAt = &now

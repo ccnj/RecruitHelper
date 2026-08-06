@@ -1519,6 +1519,7 @@ func applyCardResultTx(
 		InterviewStartsAtMs: cloneOptionalInt64(card.InterviewStartsAtMs),
 		InterviewEndsAtMs:   cloneOptionalInt64(card.InterviewEndsAtMs),
 		InterviewMethod:     cloneOptionalString(card.InterviewMethod),
+		TsApproxMs:          cloneOptionalInt64(card.PlatformTsMs),
 		Origin:              "self", SourceKey: &sourceKey, OutboundIntentID: &intentID,
 	}
 	if err := tx.Create(message).Error; err != nil {

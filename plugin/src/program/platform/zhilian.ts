@@ -627,6 +627,8 @@ interface MainObserveStableOutboundCardResult {
   contentHash?: string
   sourceKey?: string
   interview?: InterviewDetails
+  // 语义同 MainObserveStableOutboundResult.matchedTimeMs。
+  matchedTimeMs?: number
 }
 
 interface MainWechatExchangeOutcomeResult {
@@ -11364,12 +11366,16 @@ async function mainObserveStableOutboundCard(
 
     // digest 会让出事件循环；阳性返回前再次核对 route 与同一目标绑定。
     if (!routeMatches() || resolveTarget() !== target) return failed()
+    const matchedTimeMs = row.time < 1_000_000_000_000
+      ? Math.trunc(row.time * 1000)
+      : Math.trunc(row.time)
     return {
       selected: true,
       matchingNewServerMessages: 1,
       contentHash,
       sourceKey,
       ...(confirmedInterview ? { interview: confirmedInterview } : {}),
+      ...(matchedTimeMs > 0 ? { matchedTimeMs } : {}),
     }
   } catch {
     return failed()
@@ -12512,6 +12518,10 @@ async function sendZhilianCard(
             sourceKey: observed.sourceKey,
             ...(observed.interview ? { interview: observed.interview } : {}),
             observedAt,
+            // 平台不提供可解析时间时字段缺席;禁止以本机时钟合成(契约 §4.5)。
+            ...(typeof observed.matchedTimeMs === 'number' && observed.matchedTimeMs > 0
+              ? { tsApprox: observed.matchedTimeMs }
+              : {}),
           }
         }
       } catch (error) {

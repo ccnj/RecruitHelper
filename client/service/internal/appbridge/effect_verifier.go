@@ -425,6 +425,7 @@ func classifyVerifiedCard(
 	return dispatch.VerificationObservation{
 		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
 		Interview: interview, ObservedAt: observedAt(*matched),
+		PlatformTsMs: platformTs(*matched),
 		Reason: "最近窗口命中严格卡片正证(同类取最新)",
 	}, nil
 }

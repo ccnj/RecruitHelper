@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,52 @@ func TestAppendOutboundMessageProjectsOnlyPlatformEvidenceTime(t *testing.T) {
 	if err != nil || conversation.LastMessageSeq != withTs.Seq || conversation.LastMessageDirection != "out" ||
 		conversation.LastMessageKind != "text" || conversation.LastMessagePreview != "timed message" {
 		t.Fatalf("时间收编不得改变会话摘要: conversation=%+v err=%v", conversation, err)
+	}
+}
+
+// 卡片 self 行与文本同一纪律:只收平台证据,无证据保持未知,重复幂等。
+func TestApplyCardResultProjectsOnlyPlatformEvidenceTime(t *testing.T) {
+	s := openTest(t)
+	key := seedEffectHeadTarget(t, s)
+	at := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	contentHash := "c0ffee" + strings.Repeat("0", 58)
+	sourceKey := "ab" + strings.Repeat("1", 62)
+	intent := EffectIntent{
+		IntentID: "intent-card-platform-time", Platform: key.Platform, AccountRef: key.AccountRef,
+		Primitive: primitiveChatSendWechatInvite, TargetRef: key.ConversationRef,
+		SendFingerprint: contentHash,
+	}
+	platformTs := at.Add(2 * time.Second).UnixMilli()
+	applyOnce := func(platformTsMs *int64) *Message {
+		t.Helper()
+		var message *Message
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			var err error
+			message, err = applyCardResultTx(tx, &intent, CardResultMutation{
+				ConversationRef: key.ConversationRef,
+				CardType:        "wechatExchange", CardState: "pending",
+				ContentHash: contentHash, SourceKey: sourceKey,
+				PlatformTsMs: platformTsMs,
+			}, at)
+			return err
+		}); err != nil {
+			t.Fatalf("applyCardResultTx: %v", err)
+		}
+		return message
+	}
+
+	first := applyOnce(&platformTs)
+	if first.TsApproxMs == nil || *first.TsApproxMs != platformTs ||
+		first.Kind != "card" || first.Origin != "self" {
+		t.Fatalf("卡片平台时间证据未如实收编: %+v", first)
+	}
+	replayed := applyOnce(nil)
+	if replayed.Seq != first.Seq || replayed.TsApproxMs == nil || *replayed.TsApproxMs != platformTs {
+		t.Fatalf("卡片重复收编必须返回同一事实: first=%+v replayed=%+v", first, replayed)
+	}
+	var count int64
+	if err := s.db.Model(&Message{}).Where("outbound_intent_id = ?", intent.IntentID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("卡片重复收编不得增生消息: count=%d err=%v", count, err)
 	}
 }
 
