@@ -26,8 +26,6 @@ const (
 // Deps 是 Reporter 的外部依赖。全部用函数注入,这样本包不认识 store、
 // jobconfig 这些业务类型(与 report 包同一取舍)。
 type Deps struct {
-	// Enabled 读开关。默认关闭是硬约束,读失败一律当关 —— 出错时的安全方向是不传。
-	Enabled func() bool
 	// Target 取上报去处与身份。授权未就绪时返回 false,本轮整批留在队列里等下一次。
 	Target func() (Target, bool)
 	// Upload 真正发出去。抽成字段是为了测试能注入假的,不必起 HTTP 服务。
@@ -171,11 +169,8 @@ func (r *Reporter) Run(ctx context.Context) {
 // flush 发出当前队列。失败即丢弃并计数,不重试、不建发件箱 —— 事件上报只负责
 // "快"不负责"全",漏掉的由每日整包上报兜底(立法四问第四问的取舍)。
 func (r *Reporter) flush(ctx context.Context) {
-	if !r.enabled() {
-		// 开关关着时不积压:留着也发不出去,只会把真正需要时的队列位置占满。
-		r.drainQuietly()
-		return
-	}
+	// 没有开关可判:上报常开(2026-08-06 甲方裁决当日修订)。唯一会让它不发的
+	// 是授权未就绪,那是"还没准备好",不是"被关掉了"。
 	target, ok := r.deps.Target()
 	if !ok {
 		// 授权未就绪(全新安装到激活之间)不是故障,原样留队等下一轮。
@@ -257,22 +252,6 @@ func (r *Reporter) dropNotice(dropped int64) Item {
 		MergedCount: int(dropped),
 		Context:     map[string]any{"droppedCount": dropped},
 	}
-}
-
-// drainQuietly 在开关关闭时清空队列。这里不计入 dropped:开关关着是人的选择,
-// 不是故障,把它算成"丢弃"会让开启后的第一批上报挂着一个莫名其妙的大数字。
-func (r *Reporter) drainQuietly() {
-	r.mu.Lock()
-	r.queue = nil
-	r.dropped = 0
-	r.mu.Unlock()
-}
-
-func (r *Reporter) enabled() bool {
-	if r.deps.Enabled == nil {
-		return false
-	}
-	return r.deps.Enabled()
 }
 
 // EventQueueDropped 是队列溢出丢弃的事件类型。

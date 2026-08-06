@@ -3,15 +3,69 @@
 // 管理前台的审计页取回。按裁决只由人显式点击触发:这里没有定时、没有自动重试,
 // 传失败就再点一次。
 import { useCallback, useEffect, useState } from 'react'
-import { api, FieldReportResult, FieldReportSettings } from '../../api'
+import { api, FieldReportResult, FieldReportSettings, LogReportSettings } from '../../api'
 import { errorText } from '../format'
 
 export function FieldReportPage() {
   return (
     <>
+      <LogReportSwitch />
       <AutoUploadSwitch />
       <ManualUpload />
     </>
+  )
+}
+
+// 日志上报状态(AGENTS.md「全局约定·日志上报」,2026-08-06 甲方裁决)。
+//
+// **这里没有开关。** 甲方当日修订:上报常开、不设开关,理由是"只是上报日志,
+// 不干过分的事"。本面板只回答"到底传没传出去、发了多少、丢了多少" ——
+// 上报是后台静默进行的,没有这一栏就无从知道。
+function LogReportSwitch() {
+  const [settings, setSettings] = useState<LogReportSettings | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setSettings(await api.devLogReportSettings())
+      setError(null)
+    } catch (reason) {
+      setError(errorText(reason))
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+
+  return (
+    <div className="panel">
+      <h3>出事时即时上报日志（常开）</h3>
+      <p>
+        脑遇到已登记的事件（如产生一条待人工裁决的 suspect）或任何 Error 级日志，
+        会在半分钟内把那一行连同定位信息推给我方，管理前台能立刻看到。同类错误
+        五分钟内只报一条、之后补一条合并计数，不会刷屏。
+      </p>
+      <p>
+        推送内容里有候选人姓名、职位名和出事那个会话最近二十条聊天记录；不含简历、
+        微信号与模型原文。传不出去就丢，不重试，由每日整包上传兜底。
+      </p>
+      {error && <p className="sql-error">{error}</p>}
+      <LogReportStatus settings={settings} />
+    </div>
+  )
+}
+
+function LogReportStatus({ settings }: { settings: LogReportSettings | null }) {
+  if (settings === null) return null
+  const counts = `累计已发 ${settings.sentCount} 条，丢弃 ${settings.droppedCount} 条`
+  if (!settings.lastAt) return <p>{counts}</p>
+  const when = new Date(settings.lastAt)
+  const text = Number.isNaN(when.getTime()) ? settings.lastAt : when.toLocaleString('zh-CN')
+  if (settings.lastOk) {
+    return <p className="sql-ok">上次上报：{text} 成功。{counts}</p>
+  }
+  return (
+    <p className="sql-error">
+      上次上报：{text} 未成功{settings.lastError ? ` —— ${settings.lastError}` : ''}。{counts}
+    </p>
   )
 }
 

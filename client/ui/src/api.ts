@@ -318,6 +318,14 @@ export interface FieldReportResult {
 
 // 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
 // 且只有这一个入口能打开它。
+export interface LogReportSettings {
+  lastAt?: string
+  lastOk: boolean
+  lastError?: string
+  sentCount: number
+  droppedCount: number
+}
+
 export interface FieldReportSettings {
   autoUploadEnabled?: boolean
   lastAutoAt?: string
@@ -830,6 +838,7 @@ export const api = {
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
   devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
+  devLogReportSettings: () => get<LogReportSettings>('/admin/dev/log-report/settings'),
   devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
     post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),

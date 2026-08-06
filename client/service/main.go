@@ -50,16 +50,6 @@ var (
 	logReportConfig atomic.Pointer[jobconfig.Source]
 )
 
-// logReportEnabled 读开关。**读不到一律当关** —— 出错时的安全方向是不传,
-// 而不是"默认开着传传看"。默认关闭是裁决写死的硬约束。
-func logReportEnabled(st *store.Store) bool {
-	if st == nil {
-		return false
-	}
-	setting, err := st.LogReportSetting()
-	return err == nil && setting.Enabled
-}
-
 // logReportTarget 取上报去处与身份,复用已获准的旧后台配置,不新增配置面。
 // 授权未就绪时返回 false:全新安装到激活之间那段时间不是故障,事件留队等下一轮。
 func logReportTarget(source *jobconfig.Source) (logreport.Target, bool) {
@@ -87,12 +77,13 @@ func main() {
 	// 日志上报(AGENTS.md「全局约定·日志上报」)。这里就把 handler 包上,是为了
 	// 捕获"存储初始化失败""交接日配置无效"这类启动期错误 —— 它们发生时脑直接
 	// 退出,恰恰是最需要报出去的。此刻 store 与旧后台配置都还没有,但那不影响:
-	// Report 只入队,判开关和取身份都在 flush 里,而 flush 由下面 store 就绪后
-	// 启动的 Run 驱动。启动期的事件因此躺在队列里,等第一次 flush 一起发走。
+	// Report 只入队,取身份在 flush 里,而 flush 由下面 store 就绪后启动的 Run
+	// 驱动。启动期的事件因此躺在队列里,等第一次 flush 一起发走。
+	//
+	// 常开、无开关(2026-08-06 甲方裁决当日修订)。
 	logReporter := logreport.New(logreport.Deps{
-		Enabled: func() bool { return logReportEnabled(logReportStore.Load()) },
-		Target:  func() (logreport.Target, bool) { return logReportTarget(logReportConfig.Load()) },
-		Upload:  logreport.Upload,
+		Target: func() (logreport.Target, bool) { return logReportTarget(logReportConfig.Load()) },
+		Upload: logreport.Upload,
 		Enrich: func(items []logreport.Item) {
 			// 姓名、职位名与该会话最近若干条聊天正文只在这里补,且只进上报载荷 ——
 			// brain.log 的日志行不因此多出一个候选人姓名。
@@ -139,7 +130,7 @@ func main() {
 			slog.Error("关闭存储失败", "err", err)
 		}
 	}()
-	// 开关这时才可读。在此之前打的日志已经进了队列,只是还发不出去。
+	// 上报的结果与计数这时才落得下。在此之前打的日志已经进了队列。
 	logReportStore.Store(st)
 	var traceRecorder m5ai.TraceRecorder
 	traceStore, traceErr := aitrace.Open(*dataDir)

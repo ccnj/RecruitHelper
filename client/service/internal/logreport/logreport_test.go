@@ -42,9 +42,6 @@ func (f *fakeUploader) all() []Item {
 
 func newTestReporter(deps Deps) (*Reporter, *fakeUploader) {
 	uploader := &fakeUploader{}
-	if deps.Enabled == nil {
-		deps.Enabled = func() bool { return true }
-	}
 	if deps.Target == nil {
 		deps.Target = func() (Target, bool) {
 			return Target{BaseURL: "http://x", MachineID: "M1", LicenseToken: "T1"}, true
@@ -248,27 +245,6 @@ func TestReporterSplitsOversizedQueue(t *testing.T) {
 	reporter.flush(context.Background())
 	if total := len(uploader.all()); total != 250 {
 		t.Fatalf("三轮应发完 250 条，实得 %d", total)
-	}
-}
-
-func TestReporterStaysQuietWhenDisabled(t *testing.T) {
-	// 默认关闭是硬约束。关着时也不积压：留着也发不出去，只会把真正需要时的位置占满。
-	reporter, uploader := newTestReporter(Deps{
-		Enabled:   func() bool { return false },
-		BatchSize: 100, FlushWait: time.Hour,
-	})
-	reporter.Report(Item{Message: "一条"})
-	reporter.flush(context.Background())
-
-	if len(uploader.all()) != 0 {
-		t.Fatal("开关关闭时不得上报")
-	}
-	// 关闭期间清掉的不算丢弃：那是人的选择，不是故障。
-	reporter.mu.Lock()
-	dropped := reporter.dropped
-	reporter.mu.Unlock()
-	if dropped != 0 {
-		t.Fatalf("关闭期间清空不该计入丢弃，实得 %d", dropped)
 	}
 }
 
