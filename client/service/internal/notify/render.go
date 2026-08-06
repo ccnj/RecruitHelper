@@ -2,7 +2,6 @@ package notify
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -14,8 +13,6 @@ import (
 // 画像行(年龄/学历/城市/期望薪资)按计划列为后置项,当前字段面不含。
 
 var weekdayCN = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
-
-var mobileRe = regexp.MustCompile(`^1[3-9]\d{9}$`)
 
 var mainStatusLabels = map[store.CandidateProfileStatus]string{
 	store.CandidateProfileSelected:      "已选中",
@@ -45,24 +42,30 @@ func formatInterviewTime(startsAtMs *int64) string {
 	)
 }
 
-func formatContact(snapshot *store.NotificationRenderSnapshot) string {
+// contactLines 渲染联系方式(2026-08-06 甲方裁决改为两行):
+//
+//	微信: <换到的号>(<微信线状态>)   —— 恒出,没换到写"未获取"
+//	手机号: <侧栏采到的手机号>       —— 只在电话观察事实存在时出
+func contactLines(snapshot *store.NotificationRenderSnapshot) []string {
 	status := wechatStateLabels[snapshot.WechatState]
 	wechatID := strings.TrimSpace(snapshot.WechatID)
+	wechatLine := "微信: "
 	if wechatID == "" {
 		if status == "" {
 			status = "待跟进"
 		}
-		return "未获取(" + status + ")"
+		wechatLine += "未获取(" + status + ")"
+	} else {
+		wechatLine += wechatID
+		if status != "" {
+			wechatLine += "(" + status + ")"
+		}
 	}
-	kind := "微信"
-	if mobileRe.MatchString(wechatID) {
-		kind = "手机"
+	lines := []string{wechatLine}
+	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" {
+		lines = append(lines, "手机号: "+phone)
 	}
-	line := kind + " " + wechatID
-	if status != "" {
-		line += "(" + status + ")"
-	}
-	return line
+	return lines
 }
 
 func candidateTitle(prefix string, snapshot *store.NotificationRenderSnapshot, customerName string) string {
@@ -123,7 +126,7 @@ func screenshotHintLine(snapshot *store.NotificationRenderSnapshot) string {
 func renderInterviewAccepted(snapshot *store.NotificationRenderSnapshot, customerName string) string {
 	lines := []string{candidateTitle("面试确认", snapshot, customerName)}
 	lines = append(lines, "面试时间:"+formatInterviewTime(snapshot.InterviewStartsAtMs))
-	lines = append(lines, "联系方式:"+formatContact(snapshot))
+	lines = append(lines, contactLines(snapshot)...)
 	if snapshot.PositionTitle != "" {
 		lines = append(lines, "职位:"+snapshot.PositionTitle)
 	}
@@ -147,7 +150,7 @@ func renderWechatAdded(
 		prefix = "面试确认--补微信号"
 	}
 	lines := []string{candidateTitle(prefix, snapshot, customerName)}
-	lines = append(lines, "联系方式:"+formatContact(snapshot))
+	lines = append(lines, contactLines(snapshot)...)
 	statusLine := "当前状态:" + mainStatusLabel(snapshot.MainStatus)
 	if snapshot.MainStatus == store.CandidateProfileInterviewed && snapshot.InterviewStartsAtMs != nil {
 		statusLine += " · 面试 " + formatInterviewTime(snapshot.InterviewStartsAtMs)

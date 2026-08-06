@@ -247,6 +247,67 @@ func TestWechatAddedPayloadRecordsInitiator(t *testing.T) {
 	}
 }
 
+// 电话观察收编判定:手机格式 + 面板姓名与会话对方首字符核对(2026-08-06 裁决,
+// 真名/「X先生」两形态只核第一个字)。任何锚点缺失都拒收,方向是通知少一行。
+func TestAcceptCandidatePhoneObservation(t *testing.T) {
+	cases := []struct {
+		name  string
+		phone string
+		panel string
+		peer  string
+		want  bool
+	}{
+		{"真名对真名", "13801995730", "洪建辉", "洪建辉", true},
+		{"真名对X先生", "13801995730", "洪建辉", "洪先生", true},
+		{"首字不符", "13801995730", "洪建辉", "王李", false},
+		{"显示文本带空格不收", "138 0199 5730", "洪建辉", "洪建辉", false},
+		{"非手机格式不收", "02112345678", "洪建辉", "洪建辉", false},
+		{"面板姓名缺失不收", "13801995730", "", "洪建辉", false},
+		{"会话对方缺失不收", "13801995730", "洪建辉", "  ", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := AcceptCandidatePhoneObservation(testCase.phone, testCase.panel, testCase.peer)
+			if got != testCase.want {
+				t.Fatalf("判定不符: got=%v want=%v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// 电话观察事实行:追加不覆盖、取最新;快照按最新观察带出手机号。
+func TestCandidatePhoneObservationLifecycleAndSnapshot(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
+	fixture, _ := seedSuccessfulV4Greeting(t, s, "notify-phone", "conversation-notify-phone", at)
+
+	if phone, err := s.LatestCandidatePhone(fixture.ProfileID); err != nil || phone != "" {
+		t.Fatalf("无观察时应为空: phone=%q err=%v", phone, err)
+	}
+	snapshot, err := s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "" {
+		t.Fatalf("无观察时快照不应带号: %+v err=%v", snapshot, err)
+	}
+
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, "13800000001", at.UnixMilli(), at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveCandidatePhoneObservation(fixture.ProfileID, "13800000002", at.UnixMilli()+1, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if phone, err := s.LatestCandidatePhone(fixture.ProfileID); err != nil || phone != "13800000002" {
+		t.Fatalf("应取最新观察: phone=%q err=%v", phone, err)
+	}
+	snapshot, err = s.NotificationRenderSnapshotForProfile(fixture.ProfileID)
+	if err != nil || snapshot == nil || snapshot.PhoneNumber != "13800000002" {
+		t.Fatalf("快照未带最新号: %+v err=%v", snapshot, err)
+	}
+	var total int64
+	if err := s.db.Model(&CandidatePhoneObservation{}).Count(&total).Error; err != nil || total != 2 {
+		t.Fatalf("观察行应追加保留: %d err=%v", total, err)
+	}
+}
+
 func enqueueForTest(t *testing.T, s *Store, notifyType, eventKey, profileID string, at time.Time) uint64 {
 	t.Helper()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {

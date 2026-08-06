@@ -31,17 +31,24 @@ func fullSnapshot() *store.NotificationRenderSnapshot {
 }
 
 func TestRenderInterviewAccepted(t *testing.T) {
-	text := renderInterviewAccepted(fullSnapshot(), "客户甲")
+	// 联系方式 2026-08-06 起为两行:微信恒出、手机号只在电话观察事实存在时出。
+	withPhone := fullSnapshot()
+	withPhone.PhoneNumber = "13901234567"
+	text := renderInterviewAccepted(withPhone, "客户甲")
 	for _, want := range []string{
 		"【面试确认】测试候选(客户甲)",
 		"面试时间:07-30(周四) 12:30",
-		"联系方式:微信 wx-demo-88(已成功交换微信)",
+		"微信: wx-demo-88(已成功交换微信)",
+		"手机号: 13901234567",
 		"职位:资深销售",
 		"聊天记录、简历见下图",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("约面文案缺少 %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "联系方式") {
+		t.Fatalf("旧的联系方式单行不应再出现:\n%s", text)
 	}
 
 	bare := fullSnapshot()
@@ -54,17 +61,16 @@ func TestRenderInterviewAccepted(t *testing.T) {
 	for _, want := range []string{
 		"【面试确认】测试候选",
 		"面试时间:未获取到,请在客户端核对",
-		"联系方式:未获取(已邀微信)",
+		"微信: 未获取(已邀微信)",
 		"(本次未附截图)",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("降级约面文案缺少 %q:\n%s", want, text)
 		}
 	}
-	mobile := fullSnapshot()
-	mobile.WechatID = "13800138000"
-	if text := renderInterviewAccepted(mobile, ""); !strings.Contains(text, "手机 13800138000") {
-		t.Fatalf("手机号应标手机: %s", text)
+	// 没有电话观察事实时,手机号整行省略,不出现"手机号: "残句。
+	if strings.Contains(text, "手机号:") {
+		t.Fatalf("缺号时不得渲染手机号行:\n%s", text)
 	}
 }
 
@@ -72,7 +78,7 @@ func TestRenderWechatAdded(t *testing.T) {
 	text := renderWechatAdded(fullSnapshot(), "客户乙", false)
 	for _, want := range []string{
 		"【微信互加】测试候选(客户乙)",
-		"联系方式:微信 wx-demo-88(已成功交换微信)",
+		"微信: wx-demo-88(已成功交换微信)",
 		"当前状态:已约面 · 面试 07-30(周四) 12:30",
 		"职位:资深销售",
 	} {
@@ -125,7 +131,7 @@ func TestProfileLineDegradesPerField(t *testing.T) {
 	if strings.Contains(text, "候选人:") || strings.Contains(text, "期望 ") {
 		t.Fatalf("四项全缺不得留下画像残句:\n%s", text)
 	}
-	if !strings.Contains(text, "联系方式:") || !strings.Contains(text, "当前状态:") {
+	if !strings.Contains(text, "微信: ") || !strings.Contains(text, "当前状态:") {
 		t.Fatalf("画像缺失影响了其它行:\n%s", text)
 	}
 }
@@ -466,7 +472,7 @@ func TestTickRendersInterviewSupplementTitle(t *testing.T) {
 	if !strings.HasPrefix(capture.texts[0], "【面试确认--补微信号】") {
 		t.Fatalf("补号标题未改写:\n%s", capture.texts[0])
 	}
-	if !strings.Contains(capture.texts[0], "微信 wx-demo-88") {
+	if !strings.Contains(capture.texts[0], "微信: wx-demo-88") {
 		t.Fatalf("补号正文必须带上号:\n%s", capture.texts[0])
 	}
 }

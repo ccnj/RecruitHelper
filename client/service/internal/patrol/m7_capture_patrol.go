@@ -9,6 +9,7 @@ package patrol
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -100,5 +101,53 @@ func (a *roundActor) captureNotificationEvidence(
 	); err != nil {
 		return err
 	}
-	return nil
+	return a.collectPeerPhoneObservation(ctx, profile, conversationRef)
+}
+
+// collectPeerPhoneObservation 取证顺访读侧栏电话(2026-08-06 甲方裁决):与
+// 截图同一趟到访,失败只产生「缺号」。收编判定(手机格式 + 面板姓名与会话
+// 对方首字核对)在脑侧;日志不携带号码与姓名(普通日志边界)。
+func (a *roundActor) collectPeerPhoneObservation(
+	ctx context.Context,
+	profile *store.CandidateProfile,
+	conversationRef string,
+) error {
+	phoneData, phoneErr := invokePrimitiveDirect[protocol.ChatReadPeerPhoneData](
+		ctx,
+		a,
+		protocol.PrimChatReadPeerPhone,
+		protocol.ChatReadPeerPhoneArgs{ConversationRef: conversationRef},
+	)
+	if phoneErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		slog.Warn("电话侧栏读取失败,缺号降级", "profileId", profile.ProfileID, "err", phoneErr)
+		return nil
+	}
+	if strings.TrimSpace(phoneData.Phone) == "" {
+		return nil // 无号或虚拟号形态:本轮无观察,通知照常少一行
+	}
+	conversation, err := a.manager.store.ConversationByKey(store.ConversationKey{
+		Platform:        profile.Platform,
+		AccountRef:      profile.AccountRef,
+		ConversationRef: conversationRef,
+	})
+	if err != nil {
+		return err
+	}
+	peerDisplayName := ""
+	if conversation != nil {
+		peerDisplayName = conversation.PeerDisplayName
+	}
+	if !store.AcceptCandidatePhoneObservation(phoneData.Phone, phoneData.PanelName, peerDisplayName) {
+		slog.Info("电话观察未通过收编判定,按缺号处理", "profileId", profile.ProfileID)
+		return nil
+	}
+	return a.manager.store.SaveCandidatePhoneObservation(
+		profile.ProfileID,
+		strings.TrimSpace(phoneData.Phone),
+		phoneData.ObservedAt,
+		a.manager.now(),
+	)
 }
