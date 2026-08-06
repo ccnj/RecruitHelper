@@ -342,29 +342,48 @@ func TestTickGateHoldsThenFallsBack(t *testing.T) {
 	}
 }
 
-// 微信互加去重矩阵(照抄旧项目 _decide_wechat_added)。
+// 微信互加去重矩阵(照抄旧项目 _decide_wechat_added,叠加 2026-08-06 裁决的
+// 候选人主动 2 小时并发窗口)。历史行与非候选人主动的行必须保持旧行为不变。
 func TestWechatAddedDedupMatrix(t *testing.T) {
 	now := time.Date(2026, 7, 28, 16, 0, 0, 0, time.Local)
+	peerPayload := `{"exchangeInitiator":"peer"}`
+	selfPayload := `{"exchangeInitiator":"self"}`
 	baseRow := store.NotificationOutbox{
 		ID: 10, NotifyType: store.NotificationTypeWechatAdded,
 		ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
 	}
 	cases := []struct {
 		name       string
+		payload    string
+		createdAt  time.Time
 		meeting    *store.NotificationOutbox
-		rowID      uint64
 		want       decision
 		supplement bool
 	}{
-		{"无约面通知", nil, 10, decisionSend, false},
-		{"约面前换到", &store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionSend, false},
-		{"约面仍pending", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusPending}, 10, decisionHold, false},
-		{"已随约面带出", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: true}, 10, decisionDrop, false},
+		// 旧行为:发起方未知(历史行 "{}")一律立即判,不进并发窗口。
+		{"无约面通知", "", baseRow.CreatedAt, nil, decisionSend, false},
+		{"约面前换到", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true}, decisionSend, false},
+		{"约面仍pending", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusPending}, decisionHold, false},
+		{"已随约面带出", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: true}, decisionDrop, false},
 		// 唯一的补号形态:约面通知确实发到运营手上了,但当时没号。
-		{"约面发出未带号", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: false}, 10, decisionSend, true},
+		{"约面发出未带号", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusSent, SentWithWechat: false}, decisionSend, true},
 		// 运营从没收到过面试确认,不能叫"补微信号"。
-		{"约面终败", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusFailed}, 10, decisionSend, false},
-		{"约面过期", &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusExpired}, 10, decisionSend, false},
+		{"约面终败", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusFailed}, decisionSend, false},
+		{"约面过期", "", baseRow.CreatedAt, &store.NotificationOutbox{ID: 5, Status: store.NotificationStatusExpired}, decisionSend, false},
+		// 2 小时并发窗口:只对候选人主动的行生效。
+		{"候选人主动·无约面·窗口内", peerPayload, now.Add(-time.Hour), nil, decisionHold, false},
+		{"候选人主动·无约面·窗口过", peerPayload, now.Add(-2*time.Hour - time.Minute), nil, decisionSend, false},
+		{"我方发起·无约面·立即发", selfPayload, now.Add(-time.Minute), nil, decisionSend, false},
+		{"候选人主动·窗口内约面pending", peerPayload, now.Add(-time.Hour),
+			&store.NotificationOutbox{ID: 99, Status: store.NotificationStatusPending, CreatedAt: now.Add(-30 * time.Minute)}, decisionHold, false},
+		{"候选人主动·窗口内约面带号发出", peerPayload, now.Add(-time.Hour),
+			&store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true, CreatedAt: now.Add(-30 * time.Minute)}, decisionDrop, false},
+		// 约面终败时运营没收到过面试确认,并入失败,恢复单独发出。
+		{"候选人主动·窗口内约面终败", peerPayload, now.Add(-time.Hour),
+			&store.NotificationOutbox{ID: 99, Status: store.NotificationStatusFailed, CreatedAt: now.Add(-30 * time.Minute)}, decisionSend, false},
+		// 约面落在窗口之外:微信互加已(应)单独发过,维持独立发送。
+		{"候选人主动·约面在窗口外", peerPayload, now.Add(-3 * time.Hour),
+			&store.NotificationOutbox{ID: 99, Status: store.NotificationStatusSent, SentWithWechat: true, CreatedAt: now.Add(-10 * time.Minute)}, decisionSend, false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -374,13 +393,50 @@ func TestWechatAddedDedupMatrix(t *testing.T) {
 			}
 			runner := newTestRunner(ledger, &fakeBlobs{}, "http://127.0.0.1:1", now)
 			row := baseRow
-			row.ID = testCase.rowID
-			got, supplement := runner.decideWechatAdded(row)
+			row.PayloadJSON = testCase.payload
+			row.CreatedAt = testCase.createdAt
+			got, supplement := runner.decideWechatAdded(row, now)
 			if got != testCase.want || supplement != testCase.supplement {
 				t.Fatalf("判定不符: got=(%v,%v) want=(%v,%v)",
 					got, supplement, testCase.want, testCase.supplement)
 			}
 		})
+	}
+}
+
+// 并发窗口在 tick 级生效:候选人主动、资产齐全也要按住;到点无约面则单独发出。
+func TestTickHoldsPeerInitiatedWechatThenSendsAlone(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 8, 6, 14, 0, 0, 0, time.Local)
+	snapshot := fullSnapshot()
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{{
+			ID: 40, NotifyType: store.NotificationTypeWechatAdded,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			PayloadJSON: `{"exchangeInitiator":"peer"}`, CreatedAt: now.Add(-time.Hour),
+		}},
+		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting:  map[string]*store.NotificationOutbox{},
+	}
+	blobs := &fakeBlobs{data: map[string][]byte{
+		snapshot.ChatShot.BlobRef:   jpegBytes(),
+		snapshot.ResumeShot.BlobRef: jpegBytes(),
+	}}
+	runner := newTestRunner(ledger, blobs, server.URL, now)
+	if summary := runner.Tick(); summary.Held != 1 || summary.Sent != 0 {
+		t.Fatalf("窗口内未按住: %+v", summary)
+	}
+	if len(capture.kinds) != 0 {
+		t.Fatalf("按住期间不得发送: %+v", capture.kinds)
+	}
+	runner.now = func() time.Time { return now.Add(90 * time.Minute) } // 入队起 2.5 小时
+	if summary := runner.Tick(); summary.Sent != 1 || summary.Held != 0 {
+		t.Fatalf("窗口到点未单独发出: %+v", summary)
+	}
+	if len(capture.texts) != 1 || !strings.HasPrefix(capture.texts[0], "【微信互加】") {
+		t.Fatalf("到点应按独立微信互加发出: %+v", capture.texts)
 	}
 }
 

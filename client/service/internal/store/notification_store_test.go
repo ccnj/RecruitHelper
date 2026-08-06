@@ -180,6 +180,10 @@ func TestWechatAdoptionEnqueuesNotificationExactlyOnce(t *testing.T) {
 	if len(rows) != 1 || rows[0].EventKey != "wechatAdded:"+fixture.ProfileID {
 		t.Fatalf("微信互加通知入队不符: %+v", rows)
 	}
+	// 账本里没有这把请求键对应的消息:发起方判不出,必须落 unknown(立即发)。
+	if got := WechatAddedExchangeInitiator(rows[0].PayloadJSON); got != WechatExchangeInitiatorUnknown {
+		t.Fatalf("请求卡缺失应记 unknown: got=%q payload=%s", got, rows[0].PayloadJSON)
+	}
 
 	_, created, err = s.RecordObservedWechatContact(request)
 	if err != nil || created {
@@ -190,10 +194,63 @@ func TestWechatAdoptionEnqueuesNotificationExactlyOnce(t *testing.T) {
 	}
 }
 
+// 入队时按请求卡方向记发起方元数据:in=候选人主动(peer)、out=我方邀请(self)。
+// 2 小时并发窗口只对 peer 的行生效(2026-08-06 裁决),发送时刻不再回查请求卡。
+func TestWechatAddedPayloadRecordsInitiator(t *testing.T) {
+	at := time.Date(2026, 8, 6, 11, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		direction string
+		want      string
+	}{
+		{"候选人主动", "in", WechatExchangeInitiatorPeer},
+		{"我方邀请", "out", WechatExchangeInitiatorSelf},
+	}
+	for index, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			s := openTest(t)
+			suffix := string(rune('a' + index))
+			profileID := "notify-initiator-" + suffix
+			conversationRef := "conversation-notify-initiator-" + suffix
+			fixture, _ := seedSuccessfulV4Greeting(t, s, profileID, conversationRef, at)
+			requestSourceKey := strings.Repeat(string(rune('c'+index)), 64)
+			sourceKey := requestSourceKey
+			if err := s.db.Create(&Message{
+				Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+				ConversationRef: conversationRef, Seq: 40,
+				Direction: testCase.direction, Kind: "card",
+				ContentHash: "initiator-req-" + suffix,
+				CardType:    "wechatExchange", CardState: "pending",
+				Origin: "external", SourceKey: &sourceKey,
+			}).Error; err != nil {
+				t.Fatal(err)
+			}
+			_, created, err := s.RecordObservedWechatContact(WechatContactAssetRequest{
+				ProfileID: profileID, Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+				ConversationRef:   conversationRef,
+				RequestSourceKey:  requestSourceKey,
+				ExchangeSourceKey: strings.Repeat(string(rune('e'+index)), 64),
+				PeerWechat:        "wx-initiator-" + suffix,
+				ObservedAtMs:      at.UnixMilli(), RecordedAt: at,
+			})
+			if err != nil || !created {
+				t.Fatalf("收编失败: created=%v err=%v", created, err)
+			}
+			var row NotificationOutbox
+			if err := s.db.First(&row, "event_key = ?", "wechatAdded:"+profileID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if got := WechatAddedExchangeInitiator(row.PayloadJSON); got != testCase.want {
+				t.Fatalf("发起方不符: got=%q payload=%s", got, row.PayloadJSON)
+			}
+		})
+	}
+}
+
 func enqueueForTest(t *testing.T, s *Store, notifyType, eventKey, profileID string, at time.Time) uint64 {
 	t.Helper()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		return enqueueNotificationTx(tx, notifyType, eventKey, profileID, at)
+		return enqueueNotificationTx(tx, notifyType, eventKey, profileID, "", at)
 	}); err != nil {
 		t.Fatal(err)
 	}
