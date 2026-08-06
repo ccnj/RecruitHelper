@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { CandidateViewItem, ProductActions } from '../types'
+import type { CandidateViewItem, ProductActions, ResumeSectionView } from '../types'
 import { CandidateAvatar, StatusPill } from './ProductPrimitives'
 import { ProductIcon } from './ProductIcon'
 
@@ -68,10 +68,14 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
           </section>
 
           <DrawerSection title="候选人画像">
-            {candidate.resumeSummary ? (
-              <p className="rh-resume-summary">{candidate.resumeSummary}</p>
-            ) : (
+            {candidate.resumeSections.length === 0 ? (
               <p className="rh-drawer-empty-copy">当前没有可展示的简历摘要。</p>
+            ) : (
+              <div className="rh-resume-sections">
+                {candidate.resumeSections.map((section) => (
+                  <ResumeSection key={section.title} section={section} />
+                ))}
+              </div>
             )}
           </DrawerSection>
 
@@ -124,7 +128,6 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
             <dl className="rh-detail-list">
               <div><dt>当前状态</dt><dd>{candidate.deterministicState ?? '—'}</dd></div>
               <div><dt>自动沟通范围</dt><dd>{candidate.stillInAutoCommunication === null ? '—' : candidate.stillInAutoCommunication ? '仍在范围内' : '已退出'}</dd></div>
-              <div><dt>转人工原因</dt><dd>{candidate.manualReason ?? '无'}</dd></div>
             </dl>
           </DrawerSection>
 
@@ -162,6 +165,29 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
         </div>
       </aside>
     </>
+  )
+}
+
+// 工作经历实测中位 29 行、最长 113 行,整段铺开会把抽屉里其余各节全部挤到
+// 屏幕外。折叠按逻辑行数判定而不是量 DOM: 判据确定、不受抽屉宽度影响,代价
+// 是长行较多时会略早一点出现"展开全部"。
+const RESUME_CLAMP_LINES = 12
+
+function ResumeSection({ section }: { section: ResumeSectionView }) {
+  const [expanded, setExpanded] = useState(false)
+  const lineCount = section.body.split('\n').length
+  const clampable = lineCount > RESUME_CLAMP_LINES
+
+  return (
+    <section className="rh-resume-section">
+      <h5>{section.title}</h5>
+      <p className={clampable && !expanded ? 'is-clamped' : ''}>{section.body}</p>
+      {clampable && (
+        <button className="rh-text-button" onClick={() => setExpanded(!expanded)} type="button">
+          {expanded ? '收起' : `展开全部 ${lineCount} 行`}
+        </button>
+      )}
+    </section>
   )
 }
 

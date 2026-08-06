@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:5770308edac50da2ab92356fc2afbc85dc6cc42615d56edd0410a7f60d79d647"
+	ContractHash       = "sha256:de3ac1bce50760d63e4517864801c23eb408e392ae13927d0502da3e144fc6df"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -153,6 +153,20 @@ const (
 var ErrorPhaseValues = []ErrorPhase{
 	ErrorPhaseReceipt,
 	ErrorPhaseExecution,
+}
+
+type HandLogLevel string
+
+const (
+	HandLogLevelWarn  HandLogLevel = "warn"
+	HandLogLevelError HandLogLevel = "error"
+	HandLogLevelFatal HandLogLevel = "fatal"
+)
+
+var HandLogLevelValues = []HandLogLevel{
+	HandLogLevelWarn,
+	HandLogLevelError,
+	HandLogLevelFatal,
 }
 
 type InterviewMethod string
@@ -874,6 +888,7 @@ var Primitives = map[string]PrimitiveMeta{
 type EventName string
 
 const (
+	EventHandLog           EventName = "handLog"
 	EventLoginStateChanged EventName = "loginStateChanged"
 	EventManualInteraction EventName = "manualInteraction"
 	EventPageNavigated     EventName = "pageNavigated"
@@ -881,6 +896,7 @@ const (
 )
 
 var Events = map[EventName]Batch{
+	EventHandLog:           BatchS,
 	EventLoginStateChanged: BatchS,
 	EventManualInteraction: BatchS,
 	EventPageNavigated:     BatchS,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -328,11 +329,48 @@ func (m *Manager) RequestImmediate(key store.AccountKey) error {
 	})
 }
 
+// handleHandLog 收下手侧自身的故障日志。它不查账号、不过 boundHandId 门禁、
+// 不改任何账号状态 —— 唯一去处是脑侧日志,以及后续接上的日志上报队列。
+// 按契约与 AGENTS.md「日志上报」,手侧不携带任何候选人明文,因此正文可直接进普通日志。
+func (m *Manager) handleHandLog(handID string, event protocol.EventBody) error {
+	var data protocol.HandLogEventData
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		return err
+	}
+	platform, accountRef := "", ""
+	if event.Context != nil {
+		platform, accountRef = event.Context.Platform, event.Context.AccountRef
+	}
+	attrs := []any{
+		"handId", handID, "code", data.Code, "handAt", data.At,
+		"platform", platform, "accountRef", accountRef,
+	}
+	if data.Detail != "" {
+		attrs = append(attrs, "detail", data.Detail)
+	}
+	if data.Level == protocol.HandLogLevelWarn {
+		slog.Warn("手侧日志: "+data.Message, attrs...)
+	} else {
+		slog.Error("手侧日志: "+data.Message, attrs...)
+	}
+	return nil
+}
+
 // HandleEvent validates and decodes generated protocol event types. QoS0
 // observations are hints only; no event handler invokes Runner.
 func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 	if err := protocol.ValidateEventData(string(event.Name), event.Data); err != nil {
 		return err
+	}
+	// handLog 必须在账号解析之前分流:手侧故障恰恰常发生在账号未绑定、掉登录或
+	// 状态不正常的时候,按账号门禁拒收等于丢掉最该看的那一条。它也不改任何账号状态。
+	if event.Name == protocol.EventHandLog {
+		return m.handleHandLog(handID, event)
+	}
+	// context 自 handLog 起在 schema 层是可选的,拦截责任因此落到这里:
+	// 除 handLog 外的事件缺 context 一律拒收,否则下面解引用会让脑 panic。
+	if event.Context == nil {
+		return ErrEventContextMissing
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

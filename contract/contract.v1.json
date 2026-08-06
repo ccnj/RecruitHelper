@@ -45,7 +45,7 @@
     "ping":     { "dir": "H2B", "ackBy": "pong", "batch": "M1" },
     "pong":     { "dir": "B2H", "ackBy": null, "batch": "M1" },
     "progress": { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S" },
-    "event":    { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S", "note": "QoS0 提示;唯一权力=调整巡检开跑时刻/静默窗/健康档" },
+    "event":    { "dir": "H2B", "ackBy": null, "lossy": true, "batch": "S", "note": "QoS0 提示;权力限于调整巡检开跑时刻/静默窗/健康档,以及 handLog 进入日志上报队列;任何事件均不得直接触发业务命令" },
     "query":    { "dir": "B2H", "ackBy": "report", "batch": "X" },
     "report":   { "dir": "H2B", "ackBy": null, "batch": "X", "states": ["unknown", "queued", "executing", "attempting", "done"] },
     "cancel":   { "dir": "B2H", "ackBy": "ack", "batch": "S", "note": "尽力而为;ack.ref 指向 cancel 帧,body.ref 指向目标 cmd;与 result 赛跑时 result 赢" }
@@ -276,7 +276,7 @@
         "type": "object",
         "fields": {
           "name": { "type": "string", "enumRef": "events" },
-          "context": { "ref": "EventContext" },
+          "context": { "ref": "EventContext", "optional": true },
           "observedAt": { "type": "int64", "minimum": 0 },
           "data": { "type": "object", "raw": true }
         }
@@ -1144,6 +1144,17 @@
           "pageKind": { "type": "string", "enumRef": "enums.pageKind" },
           "at": { "type": "int64", "minimum": 0 }
         }
+      },
+      "HandLogEventData": {
+        "type": "object",
+        "note": "手侧自身故障的上报载荷。code 刻意不做封闭枚举:手侧故障分类不可预知,每加一种都要改契约并让客户机换代插件,代价与收益不相称。message/detail 禁止携带任何候选人明文(姓名、聊天正文、简历、微信号)与页面文本:手不该知道也不需要知道,脑按引用自行补齐。",
+        "fields": {
+          "level": { "type": "string", "enumRef": "enums.handLogLevel" },
+          "code": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "at": { "type": "int64", "minimum": 0 },
+          "detail": { "type": "string", "optional": true, "maxLength": 4096 }
+        }
       }
     }
   },
@@ -1206,7 +1217,8 @@
     "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
     "cardState": ["pending", "accepted", "rejected", "expired", "unknown"],
     "unreadScope": ["total"],
-    "manualInteractionKind": ["pointer", "keyboard", "navigation"]
+    "manualInteractionKind": ["pointer", "keyboard", "navigation"],
+    "handLogLevel": ["warn", "error", "fatal"]
   },
   "byeCodes": ["PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN"],
   "errorCodes": {
@@ -1497,7 +1509,8 @@
     "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "正数拉前巡检并锁存非持久页面对账待办;减小/清零仅记录,不清待办" },
     "pageNavigated":     { "batch": "S", "dataSchema": "PageNavigatedEventData", "brainMay": "更新页面健康;不得直接触发业务命令" },
     "loginStateChanged": { "batch": "S", "dataSchema": "LoginStateChangedEventData", "brainMay": "out=暂停该账号+告警;logout→login 使身份绑定失效,须真人重确认" },
-    "manualInteraction": { "batch": "S", "dataSchema": "ManualInteractionEventData", "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" }
+    "manualInteraction": { "batch": "S", "dataSchema": "ManualInteractionEventData", "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" },
+    "handLog":           { "batch": "S", "dataSchema": "HandLogEventData", "throttle": "同 code >=1/60s", "brainMay": "只记录与外发日志上报;不得触发任何业务命令、不得据此改账号状态", "note": "脑对本事件不解析 context 查账号、不过 boundHandId 门禁 —— 手侧故障恰恰常发生在账号未绑定或状态不正常时,按账号门禁拒收等于丢掉最该看的那条。手无账号上下文时 context.platform/accountRef 填 \"unknown\"。" }
   },
   "defaults": {
     "hbIntervalMs": 20000,

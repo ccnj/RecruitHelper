@@ -92,6 +92,22 @@ func (s *Store) ActiveProductWorkflowRun() (*ProductWorkflowRun, error) {
 	return &run, nil
 }
 
+// LatestProductWorkflowRun returns the newest run by start time, terminal
+// history included. The status report uses it to answer "why did this machine
+// stop"—an active run alone cannot: once a run ends it releases ActiveSlot,
+// and the end reason lives only on that terminal row.
+func (s *Store) LatestProductWorkflowRun() (*ProductWorkflowRun, error) {
+	var run ProductWorkflowRun
+	err := s.db.Order("started_at DESC").First(&run).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 func (s *Store) ProductWorkflowRunByID(runID string) (*ProductWorkflowRun, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
