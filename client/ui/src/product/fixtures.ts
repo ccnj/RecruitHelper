@@ -28,7 +28,17 @@ function candidate(index: number, overrides: Partial<CandidateViewItem> = {}): C
     statusTone: 'blue',
     lastMessage: '您好，我想进一步了解岗位的团队情况。',
     lastActiveAt: `今天 ${9 + index}:20`,
-    resumeSummary: '具备招聘全流程经验，熟悉中高端岗位交付和候选人关系维护。',
+    resumeSections: [
+      { title: '自我评价', body: '具备招聘全流程经验，熟悉中高端岗位交付和候选人关系维护。' },
+      {
+        title: '教育经历',
+        body: '示例大学\n2015.09 - 2019.06\n工商管理\n本科\n统招',
+      },
+      {
+        title: '工作经历',
+        body: Array.from({ length: 14 }, (_, line) => `示例工作经历第 ${line + 1} 行`).join('\n'),
+      },
+    ],
     deterministicState: '已回复，等待我方处理',
     latestAiDecision: '候选人有明确了解意愿，建议先回答团队问题，再邀请线上沟通。',
     interviewAt: null,

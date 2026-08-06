@@ -149,6 +149,14 @@ export interface CandidateDecisionView {
   occurredAt: string
 }
 
+// 简历画像按节呈现,而不是拼成一整块。平台把整段经历放在同一个区块里,
+// 采集只能拿到一坨单换行文本(实测 300 份快照里带段落分隔的教育经历 0 份、
+// 工作经历 3 份), 节标题因此是这段文本里唯一还能立住的层级。
+export interface ResumeSectionView {
+  title: string
+  body: string
+}
+
 export interface CandidateActionView {
   id: string
   label: string
@@ -170,7 +178,7 @@ export interface CandidateViewItem {
   statusTone: 'blue' | 'amber' | 'green' | 'red' | 'slate'
   lastMessage: string | null
   lastActiveAt: string | null
-  resumeSummary: string | null
+  resumeSections: ResumeSectionView[]
   deterministicState: string | null
   latestAiDecision: string | null
   interviewAt: string | null
