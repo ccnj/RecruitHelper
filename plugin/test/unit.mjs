@@ -7120,6 +7120,12 @@ function installM3SendFixture() {
   globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
   globalThis.document = {
     scripts: [],
+    // 页面数据优先探测(probe_page_source)会查复合选择器;本 fixture 不建
+    // 页面时间线通道,统一返回"查无"让读取走平台接口兜底。
+    querySelector(selector) {
+      const matches = this.querySelectorAll(selector)
+      return matches.length > 0 ? matches[0] : null
+    },
     querySelectorAll(selector) {
       if (state.throwOnReadAfterClick && state.intrinsicClicks > 0) {
         throw new Error('click 后不得再查询页面')
@@ -9460,6 +9466,7 @@ test('智联 MAIN 线程解析：runtime $session 缺失时复用 initial state 
       scriptsReadCount += 1
       return [{ textContent: `globalThis.__INITIAL_STATE__=${JSON.stringify(initial)};` }]
     },
+    querySelector: () => null,
   }
   globalThis.window = {
     $session: null,
@@ -9639,7 +9646,7 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
 test('智联线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
   const conversationRef = 'conversation-history-timeout'
   globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
-  globalThis.document = { scripts: [] }
+  globalThis.document = { scripts: [], querySelector: () => null }
   globalThis.window = {
     $session: { staff: { staffId: 'staff-timeout' } },
     imEngine: {
@@ -9742,7 +9749,11 @@ test('智联线程 API 不可用时只接受目标路由上的稳定 Vue 时间�
   assert.equal(page.messages[0].direction, 'out')
 })
 
-test('智联线程 DOM 回退：无 Vue 且 runtime session 为空时复用 initial timeline 与真实 90 天边界', async () => {
+test('智联线程 DOM 回退：无 Vue 数据时不回退 initial timeline，响亮报通道失效', async () => {
+  // 2026-08-03 起 initial timeline(SSR 静态快照)不再作为消息回退:它不随
+  // 新消息更新,用作发后验证读会系统性误判。两级页面通道(timeline props 与
+  // Vuex getter)都取不到时,必须以 thread_page_source_unavailable 响亮失败
+  // 交脑侧处理,不得把静态快照或"取不到"当成可信读数。
   const conversationRef = 'conversation-initial-timeline'
   const initial = {
     im: {
@@ -9774,13 +9785,13 @@ test('智联线程 DOM 回退：无 Vue 且 runtime session 为空时复用 init
       if (selector === '.im-timeline-ending') return { textContent: '以下是90天内的聊天消息' }
       return null
     },
+    querySelectorAll: () => [],
   }
   globalThis.window = { $session: null }
 
   const page = await zhilianTestHooks.mainReadThreadPage(conversationRef, 8, null)
-  assert.equal(page.reachedTop, true)
-  assert.equal(page.cursor, null)
-  assert.deepEqual(page.messages.map((message) => message.direction), ['out', 'in'])
+  assert.match(page.__recruitHelperMainError, /thread_page_source_unavailable/u,
+    '页面通道取不到数据必须响亮失败,不得回退 SSR 静态快照')
 })
 
 function threadFixtureMessage(key, hash, text = key, tsApprox = 100) {
