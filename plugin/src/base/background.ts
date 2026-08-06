@@ -11,6 +11,7 @@ import { registerM6Primitives } from '../program/primitives/m6'
 import { registerM7Primitives } from '../program/primitives/m7'
 import { registerJobPublishPrimitives } from '../program/primitives/jobPublish'
 import { refreshPagesAfterRuntimeReload } from './reload'
+import { installHandLogSink } from './handLog'
 
 // program 原语注册(program 不注册任何 chrome 监听,只填这张表)。
 registerDebugPrimitives()
@@ -24,6 +25,10 @@ registerJobPublishPrimitives()
 
 const conn = new Connection()
 registerSensorBridge(conn)
+// 手侧故障日志经既有 WS 报给脑,由脑统一出站。插件自己不连任何云端。
+installHandLogSink((data) => {
+  conn.emitHandLog(data)
+})
 const reloadStartup = refreshPagesAfterRuntimeReload()
   .then((count) => {
     if (count > 0) console.log('[hand] 自重载后已刷新平台页', count)

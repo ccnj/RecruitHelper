@@ -26,7 +26,7 @@ const navItems: NavItem[] = [
   { key: 'modelConfig', label: '模型与配置', hint: '职位同步 · 模型连接' },
   { key: 'pluginCapability', label: '插件能力测试', hint: '真机彩排原语，不发候选人可见动作' },
   { key: 'devTools', label: 'SQL 控制台', hint: '直连业务库，无护栏' },
-  { key: 'fieldReport', label: '现场上报', hint: '打包日志与数据库上传我方' },
+  { key: 'fieldReport', label: '数据上报', hint: '整包上传与出事即报的开关' },
 ]
 
 export function ConsoleSidebar({ activePage, onNavigate }: {

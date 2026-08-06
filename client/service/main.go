@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobconfig"
+	"recruithelper/client/service/internal/logcontext"
+	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
@@ -39,13 +42,65 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
+// 日志上报的两个惰性依赖(AGENTS.md「全局约定·日志上报」)。slog handler 必须在
+// store 与旧后台配置就绪之前就挂上,才能捕获启动期错误,所以这两样用原子指针后填。
+// 原子而不是裸指针:Report 挂在 slog 写路径上,任何 goroutine 打日志都会碰它。
+var (
+	logReportStore  atomic.Pointer[store.Store]
+	logReportConfig atomic.Pointer[jobconfig.Source]
+)
+
+// logReportTarget 取上报去处与身份,复用已获准的旧后台配置,不新增配置面。
+// 授权未就绪时返回 false:全新安装到激活之间那段时间不是故障,事件留队等下一轮。
+func logReportTarget(source *jobconfig.Source) (logreport.Target, bool) {
+	if source == nil {
+		return logreport.Target{}, false
+	}
+	config, err := source.LoadConfig()
+	if err != nil || config == nil {
+		return logreport.Target{}, false
+	}
+	return logreport.Target{
+		BaseURL:      config.BaseURL,
+		MachineID:    config.MachineID,
+		LicenseToken: config.LicenseToken,
+		AppVersion:   strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+	}, true
+}
+
 func main() {
 	port := flag.Int("port", protocol.DefaultPort, "WS 监听端口")
 	dataDir := flag.String("data", "data", "数据目录(SQLite 落盘处)")
 	adminToken := flag.String("admin-token", os.Getenv("RECRUITHELPER_ADMIN_TOKEN"), "本地管理面 bearer token")
 	flag.Parse()
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	// 日志上报(AGENTS.md「全局约定·日志上报」)。这里就把 handler 包上,是为了
+	// 捕获"存储初始化失败""交接日配置无效"这类启动期错误 —— 它们发生时脑直接
+	// 退出,恰恰是最需要报出去的。此刻 store 与旧后台配置都还没有,但那不影响:
+	// Report 只入队,取身份在 flush 里,而 flush 由下面 store 就绪后启动的 Run
+	// 驱动。启动期的事件因此躺在队列里,等第一次 flush 一起发走。
+	//
+	// 常开、无开关(2026-08-06 甲方裁决当日修订)。
+	logReporter := logreport.New(logreport.Deps{
+		Target: func() (logreport.Target, bool) { return logReportTarget(logReportConfig.Load()) },
+		Upload: logreport.Upload,
+		Enrich: func(items []logreport.Item) {
+			// 姓名、职位名与该会话最近若干条聊天正文只在这里补,且只进上报载荷 ——
+			// brain.log 的日志行不因此多出一个候选人姓名。
+			if current := logReportStore.Load(); current != nil {
+				logcontext.New(current).Enrich(items)
+			}
+		},
+		Record: func(at time.Time, ok bool, reason string, sent, dropped int64) {
+			if current := logReportStore.Load(); current != nil {
+				_ = current.RecordLogReportRun(at, ok, reason, sent, dropped)
+			}
+		},
+	})
+	slog.SetDefault(slog.New(logreport.NewHandler(
+		slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		logReporter.Report,
+	)))
 	dailyWindow := workflow.DailyWindowPolicy{
 		AllowOutOfWindow: workflow.ParseDevelopmentAllowOutOfWindow(
 			os.Getenv(workflow.DevelopmentAllowOutOfWindowEnv),
@@ -75,6 +130,8 @@ func main() {
 			slog.Error("关闭存储失败", "err", err)
 		}
 	}()
+	// 上报的结果与计数这时才落得下。在此之前打的日志已经进了队列。
+	logReportStore.Store(st)
 	var traceRecorder m5ai.TraceRecorder
 	traceStore, traceErr := aitrace.Open(*dataDir)
 	if traceErr != nil {
@@ -98,6 +155,8 @@ func main() {
 		os.Exit(1)
 	}
 	jobConfigSource := jobconfig.NewSource(jobConfigStore, nil)
+	// 上报身份复用旧后台配置。填上它,队列里攒的启动期事件就有地方去了。
+	logReportConfig.Store(jobConfigSource)
 	var advice patrol.AdviceExecutor
 	if configured, loadErr := providerConfig.Load(); loadErr != nil {
 		slog.Warn("本地模型配置不可用，M5 建议层保持停用", "err", loadErr)
@@ -352,6 +411,9 @@ func main() {
 	// 凌晨照常报;客户机静默本身就是运营要看的信号。
 	// 授权未就绪时静默跳过:全新安装到激活之间那段时间不是故障。
 	brainStartedAt := time.Now()
+	// 日志上报的攒批循环。到这里 store 与旧后台配置都已就位,启动期攒在队列里的
+	// 事件会在第一次 flush 一起发走。
+	background.Go(func() { logReporter.Run(appCtx) })
 	background.Go(func() {
 		statusreport.Run(appCtx, statusreport.RunnerDeps{
 			Deps: statusreport.Deps{
