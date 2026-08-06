@@ -6060,7 +6060,7 @@ test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严�
       }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 投影必须与 readThread 一致`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 投影必须与 readThread/baseline 一致`)
     }
   } finally {
@@ -6159,7 +6159,7 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
 
@@ -6175,12 +6175,12 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
       '313 缺少 idServer 时 readThread 必须响亮失败')
     const missingBaseline = await fixture.capture([])
     assert.equal(missingBaseline.status, 'failed', '313 缺少 idServer 时不得建立发送基线')
-    assert.equal(fixture.invoke({
+    assert.equal((await fixture.invoke({
       status: 'ready',
       stage: 'ready',
       serverSourceKeys: [],
       targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
-    }, 'preflight', { expectedTail: [] }).status, 'failed',
+    }, 'preflight', { expectedTail: [] })).status, 'failed',
     '313 缺少 idServer 时最终 evaluator 必须停止')
   } finally {
     fixture.restore()
@@ -6317,7 +6317,7 @@ test('智联 177 附件简历按窄类型归一化在四路提升为同一简历
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: 正文 evaluator 与 readThread/baseline 必须同义`)
       assert.deepEqual(
         zhilianTestHooks.mainSendCardOnce(
@@ -6366,7 +6366,7 @@ test('智联 177 附件简历按窄类型归一化在四路提升为同一简历
       targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
     }
     assert.equal(
-      fixture.invoke(nominalBaseline, 'preflight', { expectedTail: [] }).status,
+      (await fixture.invoke(nominalBaseline, 'preflight', { expectedTail: [] })).status,
       'failed',
       '177 缺少 idServer 时正文 evaluator 必须停止',
     )
@@ -6495,7 +6495,7 @@ test('智联 105 只在当前真机发起方形状成立时三路提升为请求
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
     assert.equal(stateEndpointCalls, 0, '未验证的状态接口不得覆盖候选人请求的 pending 语义')
@@ -6591,7 +6591,7 @@ test('智联 259 只在当前真机交换结果形状成立时三路提升为已
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6702,7 +6702,7 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6744,7 +6744,7 @@ test('智联面试接受固定回执三路归一化为接受卡事件而不是�
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6983,6 +6983,7 @@ function installM3SendFixture() {
     HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
     InputEvent: globalThis.InputEvent,
     Event: globalThis.Event,
+    KeyboardEvent: globalThis.KeyboardEvent,
     chrome: globalThis.chrome,
   }
   const conversationRef = 'conversation-m3-public-boundary'
@@ -7058,6 +7059,7 @@ function installM3SendFixture() {
   globalThis.HTMLTextAreaElement = FixtureTextArea
   globalThis.InputEvent = FixtureEvent
   globalThis.Event = FixtureEvent
+  globalThis.KeyboardEvent = FixtureEvent
 
   const detail = new FixtureHTMLElement()
   const wrapper = new FixtureHTMLElement()
@@ -7118,6 +7120,12 @@ function installM3SendFixture() {
   globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
   globalThis.document = {
     scripts: [],
+    // 页面数据优先探测(probe_page_source)会查复合选择器;本 fixture 不建
+    // 页面时间线通道,统一返回"查无"让读取走平台接口兜底。
+    querySelector(selector) {
+      const matches = this.querySelectorAll(selector)
+      return matches.length > 0 ? matches[0] : null
+    },
     querySelectorAll(selector) {
       if (state.throwOnReadAfterClick && state.intrinsicClicks > 0) {
         throw new Error('click 后不得再查询页面')
@@ -7246,41 +7254,48 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
     fixture.session.lastSentence = '展示字段变化'
     fixture.button.disabled = true
     fixture.state.ariaDisabled = 'true'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' },
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'ready' },
       '私有对象变化与 disabled/aria-disabled 不得阻断 evaluator')
 
     fixture.button.form = {}
     for (const type of ['', 'submit', 'reset']) {
       fixture.button.type = type
-      const rejected = fixture.invoke(baseline)
+      const rejected = await fixture.invoke(baseline)
       assert.equal(rejected.status, 'failed', `关联 form 的 ${type || '缺省'} type 必须拒绝`)
       assert.equal(fixture.state.intrinsicClicks, 0)
     }
     fixture.button.type = 'button'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'ready' })
     fixture.button.form = null
 
     const cases = [
       ['route', () => { globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other' }, {}, 'route_changed'],
       ['identity', () => {}, { fingerprint: 'f'.repeat(64) }, 'identity_changed'],
-      ['source keys', () => {}, { baselineKeys: ['e'.repeat(64)] }, 'baseline_changed'],
-      ['expected tail', () => {}, {
-        expectedTail: [{ direction: 'in', contentHash: 'd'.repeat(64) }],
-      }, 'baseline_changed'],
       ['target token', () => {}, { targetToken: 'c'.repeat(64) }, 'target_changed'],
       ['deadline', () => {}, { deadline: Date.now() - 1 }, 'action_window_elapsed'],
     ]
     for (const [name, mutate, overrides, reason] of cases) {
       const currentHref = globalThis.location.href
       mutate()
-      const result = fixture.invoke(baseline, 'preflight', overrides)
+      const result = await fixture.invoke(baseline, 'preflight', overrides)
       assert.deepEqual(result, { status: 'failed', reason }, `${name} 必须闭锁`)
       globalThis.location.href = currentHref
     }
 
+    // 2026-08-04 甲方裁决：消息基线降为观测模式。source keys 与 expectedTail
+    // 漂移只记日志、照常放行；"读不到"方向（guard_unresolved）仍照旧硬拒。
+    for (const [name, overrides] of [
+      ['source keys 漂移', { baselineKeys: ['e'.repeat(64)] }],
+      ['expected tail 漂移', { expectedTail: [{ direction: 'in', contentHash: 'd'.repeat(64) }] }],
+    ]) {
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', overrides), { status: 'ready' },
+        `${name} 按观测模式放行`)
+      assert.equal(fixture.state.intrinsicClicks, 0)
+    }
+
     const extraDetail = { getClientRects() { return [{}] } }
     fixture.state.details = [fixture.detail, extraDetail]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.details = [fixture.detail]
 
     const extraComposer = Object.create(Object.getPrototypeOf(fixture.composer))
@@ -7289,7 +7304,7 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
     extraComposer.closest = fixture.composer.closest.bind(fixture.composer)
     extraComposer.getClientRects = () => [{}]
     fixture.state.composers = [fixture.composer, extraComposer]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.composers = [fixture.composer]
 
     const extraButton = Object.assign(Object.create(Object.getPrototypeOf(fixture.button)), {
@@ -7298,16 +7313,16 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
       closest: fixture.button.closest,
     })
     fixture.state.buttons = [fixture.button, extraButton]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.buttons = [fixture.button]
 
     const originalButtonClosest = fixture.button.closest
     fixture.button.closest = (selector) => selector === '.im-session-detail' ? fixture.detail : null
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.button.closest = originalButtonClosest
 
     fixture.composer.value = '人工草稿'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
     fixture.composer.value = ''
     assert.equal(fixture.state.intrinsicClicks, 0)
   } finally {
@@ -7319,7 +7334,7 @@ test('M3 preflight 与 commit 复用 evaluator，最终绿色后只走一次 int
   const fixture = installM3SendFixture()
   try {
     const baseline = await fixture.capture()
-    assert.deepEqual(fixture.invoke(baseline, 'preflight'), { status: 'ready' })
+    assert.deepEqual(await fixture.invoke(baseline, 'preflight'), { status: 'ready' })
     assert.equal(fixture.composer.value, '')
     assert.equal(fixture.state.intrinsicClicks, 0)
 
@@ -7334,11 +7349,14 @@ test('M3 preflight 与 commit 复用 evaluator，最终绿色后只走一次 int
     fixture.button.type = 'button'
     fixture.state.throwOnReadAfterClick = true
 
-    assert.deepEqual(fixture.invoke(baseline, 'commit'), { status: 'clicked' })
+    assert.deepEqual(await fixture.invoke(baseline, 'commit'), { status: 'clicked' })
     assert.equal(fixture.state.intrinsicClicks, 1)
     assert.equal(fixture.state.instanceClicks, 0, '不得调用页面替换过的 instance click')
     assert.equal(fixture.state.valueAtClick, fixture.text)
-    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), ['input', 'change'])
+    // 970d443 起写入事件序列对齐旧产品：beforeinput/input 配对，keyup 收尾。
+    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), [
+      'beforeinput', 'input', 'change', 'keyup',
+    ])
   } finally {
     fixture.restore()
   }
@@ -7349,12 +7367,13 @@ test('M3 写后正文被页面改写时清空草稿且零 click', async () => {
   try {
     const baseline = await fixture.capture()
     fixture.state.rewriteInsertedText = true
-    const result = fixture.invoke(baseline, 'commit')
+    const result = await fixture.invoke(baseline, 'commit')
     assert.deepEqual(result, { status: 'failed', reason: 'input_rejected' })
     assert.equal(fixture.composer.value, '')
     assert.equal(fixture.state.intrinsicClicks, 0)
+    // 前四项是写入序列（970d443 对齐旧产品），后两项是 restoreDraft 清草稿。
     assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), [
-      'input', 'change', 'input', 'change',
+      'beforeinput', 'input', 'change', 'keyup', 'input', 'change',
     ])
   } finally {
     fixture.restore()
@@ -7685,9 +7704,11 @@ test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最�
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       fingerprint: '0'.repeat(64),
     }), { status: 'failed', reason: 'identity_changed' })
+    // 2026-08-04 甲方裁决:消息基线漂移只记不停手,统一适用于全部复用该
+    // guards 的发送原语,卡片路径同样放行;身份/目标漂移仍硬拒。
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       baselineKeys: ['1'.repeat(64)],
-    }), { status: 'failed', reason: 'baseline_changed' })
+    }), { status: 'ready' })
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       targetToken: '2'.repeat(64),
     }), { status: 'failed', reason: 'target_changed' })
@@ -7765,9 +7786,10 @@ test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 
       detail: 'wxaccept:all_done cards=1',
     })
     surface.state.done = false
+    // 2026-08-04 甲方裁决:消息基线漂移只记不停手,微信接受路径同样放行。
     assert.deepEqual(invoke('preflight', { baselineKeys: ['f'.repeat(64)] }), {
-      status: 'failed',
-      reason: 'baseline_changed',
+      status: 'ready',
+      wechatCopyCards: 0,
     })
     assert.deepEqual(invoke('preflight', { requestSourceKey: 'e'.repeat(64) }), {
       status: 'failed',
@@ -8541,6 +8563,9 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
       'history_first_unavailable',
       'hash_unavailable',
       'unexpected',
+      // 2026-08-04 消息基线降观测后 capture 不再产出该阶段(改为 ready +
+      // tailDrifted);若从陈旧 MAIN world 传来,按"无法建立可信基线"兜底。
+      'guard_snapshot_uncovered',
     ]) {
       sendBaselineResult = { status: 'failed', stage }
       const failedBaseline = context()
@@ -8562,7 +8587,6 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
 
     for (const stage of [
       'route_changed',
-      'guard_snapshot_uncovered',
     ]) {
       sendBaselineResult = { status: 'failed', stage }
       const failedBaseline = context()
@@ -9447,6 +9471,7 @@ test('智联 MAIN 线程解析：runtime $session 缺失时复用 initial state 
       scriptsReadCount += 1
       return [{ textContent: `globalThis.__INITIAL_STATE__=${JSON.stringify(initial)};` }]
     },
+    querySelector: () => null,
   }
   globalThis.window = {
     $session: null,
@@ -9626,7 +9651,7 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
 test('智联线程页面 API 不响应时由 MAIN 本地截止响亮释放', async () => {
   const conversationRef = 'conversation-history-timeout'
   globalThis.location = { href: `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}` }
-  globalThis.document = { scripts: [] }
+  globalThis.document = { scripts: [], querySelector: () => null }
   globalThis.window = {
     $session: { staff: { staffId: 'staff-timeout' } },
     imEngine: {
@@ -9729,7 +9754,11 @@ test('智联线程 API 不可用时只接受目标路由上的稳定 Vue 时间�
   assert.equal(page.messages[0].direction, 'out')
 })
 
-test('智联线程 DOM 回退：无 Vue 且 runtime session 为空时复用 initial timeline 与真实 90 天边界', async () => {
+test('智联线程 DOM 回退：无 Vue 数据时不回退 initial timeline，响亮报通道失效', async () => {
+  // 2026-08-03 起 initial timeline(SSR 静态快照)不再作为消息回退:它不随
+  // 新消息更新,用作发后验证读会系统性误判。两级页面通道(timeline props 与
+  // Vuex getter)都取不到时,必须以 thread_page_source_unavailable 响亮失败
+  // 交脑侧处理,不得把静态快照或"取不到"当成可信读数。
   const conversationRef = 'conversation-initial-timeline'
   const initial = {
     im: {
@@ -9761,13 +9790,13 @@ test('智联线程 DOM 回退：无 Vue 且 runtime session 为空时复用 init
       if (selector === '.im-timeline-ending') return { textContent: '以下是90天内的聊天消息' }
       return null
     },
+    querySelectorAll: () => [],
   }
   globalThis.window = { $session: null }
 
   const page = await zhilianTestHooks.mainReadThreadPage(conversationRef, 8, null)
-  assert.equal(page.reachedTop, true)
-  assert.equal(page.cursor, null)
-  assert.deepEqual(page.messages.map((message) => message.direction), ['out', 'in'])
+  assert.match(page.__recruitHelperMainError, /thread_page_source_unavailable/u,
+    '页面通道取不到数据必须响亮失败,不得回退 SSR 静态快照')
 })
 
 function threadFixtureMessage(key, hash, text = key, tsApprox = 100) {
@@ -10218,6 +10247,9 @@ function installThreadRouteHarness(conversationRef, {
             currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
           }
           return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
         }
         if (func.name === 'mainReadThreadPage') {
           state.reads += 1
@@ -11049,6 +11081,9 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
           currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
           return [{ result: { status: 'clicked' } }]
         }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
+        }
         if (func.name === 'mainFindConversation') {
           findCalls += 1
           return [{ result: { status: 'failed', reason: 'target_not_found' } }]
@@ -11124,6 +11159,9 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
           clickCalls += 1
           currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
           return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
         }
         if (func.name === 'mainFindConversation') {
           return [{ result: { status: 'found', unreadMarkerCleared: false } }]
