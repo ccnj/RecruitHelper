@@ -103,6 +103,51 @@ func TestHandlerReportsErrorLevelWithoutMarker(t *testing.T) {
 	}
 }
 
+func TestHandlerLiftsSourceAndCodeOutOfContext(t *testing.T) {
+	// 手侧转发上来的日志要标成 hand，否则前台会把插件的故障当成脑自己的。
+	// 这两个键有结构含义，进 Item 的对应字段而不是 context —— 重复放两份，
+	// 前台的上下文栏里就挂着几个已经单独成列的值。
+	var got []Item
+	logger := slog.New(NewHandler(
+		slog.NewTextHandler(&bytes.Buffer{}, nil),
+		func(item Item) { got = append(got, item) },
+	))
+
+	logger.Error("手侧日志: 证词库不可用",
+		Source(SourceHand), CodeKey, "witnessUnavailable", "handId", "hand-1")
+
+	if len(got) != 1 {
+		t.Fatalf("应上报 1 条，实得 %d", len(got))
+	}
+	if got[0].Source != SourceHand {
+		t.Fatalf("来源应是 hand: %+v", got[0])
+	}
+	if got[0].Code != "witnessUnavailable" {
+		t.Fatalf("错误分类没提出来: %+v", got[0])
+	}
+	if _, exists := got[0].Context[SourceKey]; exists {
+		t.Fatalf("来源标记不该留在 context 里: %+v", got[0].Context)
+	}
+	if _, exists := got[0].Context[CodeKey]; exists {
+		t.Fatalf("错误分类不该留在 context 里: %+v", got[0].Context)
+	}
+	if got[0].Context["handId"] != "hand-1" {
+		t.Fatalf("普通 attr 该留在 context 里: %+v", got[0].Context)
+	}
+}
+
+func TestHandlerDefaultsToBrainSource(t *testing.T) {
+	var got []Item
+	slog.New(NewHandler(
+		slog.NewTextHandler(&bytes.Buffer{}, nil),
+		func(item Item) { got = append(got, item) },
+	)).Error("脑自己的错误")
+
+	if got[0].Source != SourceBrain {
+		t.Fatalf("没标来源时应算脑: %+v", got[0])
+	}
+}
+
 func TestHandlerKeepsWithAttrs(t *testing.T) {
 	// slog.With 之后的日志行,上报也必须带上那些字段 —— 缺的往往正是 profileId。
 	var got []Item

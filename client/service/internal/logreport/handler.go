@@ -57,14 +57,21 @@ func (h *Handler) Handle(ctx context.Context, record slog.Record) error {
 // 两个来源:带 Event(...) 标记的命名事件(任何级别),以及级别 ≥ Error 的兜底行。
 // 兜底是必要的 —— 排障最需要的恰恰是没预料到、因而没登记成命名事件的那些故障。
 func (h *Handler) itemFor(record slog.Record) (Item, bool) {
-	eventType := ""
+	eventType, source, code := "", SourceBrain, ""
 	fields := make(map[string]any, record.NumAttrs()+len(h.attrs))
+	// 三个 attr 键有结构含义,它们进 Item 的对应字段而不是 context:重复放两份
+	// 只会让前台的上下文栏里挂着几个已经单独成列的值。
 	collect := func(attr slog.Attr) bool {
-		if attr.Key == EventKey {
+		switch attr.Key {
+		case EventKey:
 			eventType = attr.Value.String()
-			return true
+		case SourceKey:
+			source = attr.Value.String()
+		case CodeKey:
+			code = attr.Value.String()
+		default:
+			fields[attr.Key] = attr.Value.Any()
 		}
-		fields[attr.Key] = attr.Value.Any()
 		return true
 	}
 	for _, attr := range h.attrs {
@@ -86,9 +93,10 @@ func (h *Handler) itemFor(record slog.Record) (Item, bool) {
 	}
 	return Item{
 		OccurredAt:  at,
-		Source:      SourceBrain,
+		Source:      source,
 		Level:       levelName(record.Level),
 		EventType:   eventType,
+		Code:        code,
 		Message:     record.Message,
 		MergedCount: 1,
 		Context:     fields,

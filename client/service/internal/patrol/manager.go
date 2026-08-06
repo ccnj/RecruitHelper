@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -341,8 +342,12 @@ func (m *Manager) handleHandLog(handID string, event protocol.EventBody) error {
 	if event.Context != nil {
 		platform, accountRef = event.Context.Platform, event.Context.AccountRef
 	}
+	// 显式标成 hand,否则前台会把插件的故障当成脑自己的。errorCode 走约定键,
+	// 直接成为上报事件的分类字段。
 	attrs := []any{
-		"handId", handID, "code", data.Code, "handAt", data.At,
+		logreport.Source(logreport.SourceHand),
+		logreport.CodeKey, data.Code,
+		"handId", handID, "handAt", data.At,
 		"platform", platform, "accountRef", accountRef,
 	}
 	if data.Detail != "" {

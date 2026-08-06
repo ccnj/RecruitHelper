@@ -28,6 +28,17 @@ import (
 // 同一个标记既让上报器认出这条要发,也让翻日志的人一眼看出这是登记在册的事件。
 const EventKey = "event"
 
+// SourceKey 标记这条日志的来源。缺省是脑;手侧经 handLog 转发上来的日志由
+// 转发处显式标成 hand,否则前台会把插件的故障当成脑自己的。
+const SourceKey = "logSource"
+
+// CodeKey 是错误分类的 attr 键。取现成的 "errorCode" 而不另起一个:仓库里已经
+// 有十几处在用它打日志,直接复用等于这些行白得一个分类字段,不必逐个改。
+const CodeKey = "errorCode"
+
+// Source 返回一个标记来源的 attr(SourceBrain / SourceHand)。
+func Source(name string) slog.Attr { return slog.String(SourceKey, name) }
+
 // Event 返回一个把当前日志行标记为「命名事件」的 attr。
 //
 //	slog.Warn("命令转 suspect", logreport.Event(EventSuspectCreated), "msgId", id)

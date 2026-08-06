@@ -51,6 +51,7 @@ import { setSessionBlobParams } from './capture'
 import { Dispatcher, SendOutcome } from './dispatcher'
 import { acknowledgeRuntimeReloadResult } from './reload'
 import { WitnessAdvertisement, WitnessStore, WitnessStorage } from './witness'
+import { HandLogCode, describeError, reportHandLog } from './handLog'
 
 type Phase = 'connecting' | 'preSession' | 'session' | 'closed'
 
@@ -200,10 +201,19 @@ export class Connection {
     }, data, observedAt)
   }
 
+  // 手侧故障日志:经 handLog 事件报给脑,由脑统一出站(插件自己不连云端)。
+  //
+  // **不带 context**。契约允许 handLog 省略它,理由就在这里:手侧故障恰恰常发生
+  // 在账号还没绑定、掉登录或状态不正常的时候,那时 commandContexts 是空的。
+  // 若照传感事件那样"取不到 context 就 dropped",最该看到的那几条永远发不出去。
+  emitHandLog(data: EventDataByName[typeof EventName.HandLog]): SendOutcome {
+    return this.emitSensorEvent(EventName.HandLog, undefined, data)
+  }
+
   // QoS0 传感提示：不 ack、不重发、不持久化，也不在手侧据此做业务决策。
   emitSensorEvent<N extends keyof EventDataByName>(
     name: N,
-    context: EventContext,
+    context: EventContext | undefined,
     data: EventDataByName[N],
     observedAt = Date.now(),
   ): SendOutcome {
@@ -281,6 +291,8 @@ export class Connection {
     } catch (error) {
       // 仍允许只读/无外部副作用能力上线；未声明 witness/1 时真实 SX cap 一并剔除。
       console.error('[hand] 证词库不可用，真实外部副作用能力停用', error)
+      reportHandLog('fatal', HandLogCode.WitnessUnavailable,
+        '证词库不可用，真实外部副作用能力停用', describeError(error))
     }
     const sessionCaps = capabilities().filter((capability) =>
       witnessAdvertisement !== null || !isWitnessedCapability(capability),
@@ -556,6 +568,8 @@ export class Connection {
     const bodyIssues = validateKindBody(kind, body)
     if (bodyIssues.length > 0) {
       console.error('[hand] 拒发违反生成契约的 body', kind, formatIssues(bodyIssues))
+      reportHandLog('error', HandLogCode.OutboundBodyInvalid,
+        `拒发违反生成契约的 body: ${kind}`, formatIssues(bodyIssues))
       return 'dropped'
     }
     const envelope: Envelope = {
@@ -630,6 +644,8 @@ export class Connection {
       // 收敛留在本连接内:返回 dropped 后由 dispatcher 的 fuse 保持 attempting、
       // 停止继续投递,连接保持打开正是 §9.2 第 5 条所需(query/report 要走它)。
       console.error('[hand] result 无法先入持久 outbox，拒绝发送', error)
+      reportHandLog('error', HandLogCode.OutboxWriteFailed,
+        'result 无法先入持久 outbox，拒绝发送', describeError(error))
       return 'dropped'
     }
     return this.sendEncoded(encoded.text) ? 'sent' : 'queued'
@@ -704,6 +720,8 @@ export class Connection {
       // 来的 query 由 handleQuery 从 committed journal 回 done+result 入账。
       // 断链换来的"退避重连再试一次"并不值当——它同时把脑推进整条 suspect 链。
       console.error('[hand] 持久 outbox 补投失败，保持连接由 query/report 收敛', error)
+      reportHandLog('error', HandLogCode.OutboxReplayFailed,
+        '持久 outbox 补投失败，等 query/report 收敛', describeError(error))
     }
   }
 

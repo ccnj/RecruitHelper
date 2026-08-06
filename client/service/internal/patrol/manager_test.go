@@ -551,6 +551,48 @@ func seedTracked(t *testing.T, h *harness, conversationRef, peerRef string, adop
 	return key
 }
 
+func TestHandLogBypassesAccountGateAndRunsNoCommand(t *testing.T) {
+	// handLog 必须在账号解析之前分流。手侧故障恰恰常发生在账号未绑定、掉登录或
+	// 状态不正常的时候 —— 按账号门禁拒收,等于丢掉最该看的那一条。
+	h := newHarness(t)
+	raw, err := protocol.Encode(protocol.HandLogEventData{
+		Level: protocol.HandLogLevelFatal, Code: "witnessUnavailable",
+		Message: "证词库不可用，真实外部副作用能力停用", At: h.clock.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 既没有 context,handId 也不是绑定的那只手 —— 两道门禁都该被绕过。
+	body := protocol.EventBody{
+		Name: protocol.EventHandLog, ObservedAt: h.clock.Now().UnixMilli(), Data: raw,
+	}
+	if err := h.manager.HandleEvent("某个没绑定的手", body); err != nil {
+		t.Fatalf("handLog 不该被账号门禁拒收: %v", err)
+	}
+	if len(h.runner.names()) != 0 {
+		t.Fatal("handLog 不得触发任何业务命令")
+	}
+}
+
+func TestNonHandLogEventStillRequiresContext(t *testing.T) {
+	// context 自 handLog 起在 schema 层是可选的,拦截责任因此落到分流处:
+	// 除 handLog 外缺 context 一律拒收,否则下游解引用会让脑 panic。
+	h := newHarness(t)
+	raw, err := protocol.Encode(protocol.PageNavigatedEventData{
+		At: h.clock.Now().UnixMilli(), PageKind: protocol.PageKindIm,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.manager.HandleEvent("hand-1", protocol.EventBody{
+		Name: protocol.EventPageNavigated, ObservedAt: h.clock.Now().UnixMilli(), Data: raw,
+	})
+	if !errors.Is(err, ErrEventContextMissing) {
+		t.Fatalf("缺 context 的传感事件应被拒收,实得: %v", err)
+	}
+}
+
 func eventBody(t *testing.T, h *harness, name protocol.EventName, data any) protocol.EventBody {
 	t.Helper()
 	raw, err := protocol.Encode(data)
