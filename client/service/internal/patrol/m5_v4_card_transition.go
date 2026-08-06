@@ -198,10 +198,7 @@ func (a *roundActor) collectWechatContactBeforeTransition(
 		strings.TrimSpace(*message.SourceKey) == "" {
 		return false, store.ErrCardTransitionCorrupt
 	}
-	hasAsset, err := a.manager.store.HasWechatContactAssetForRequest(
-		profile.ProfileID,
-		*message.SourceKey,
-	)
+	hasAsset, err := a.manager.store.HasWechatContactAsset(profile.ProfileID)
 	if err != nil || hasAsset {
 		return false, err
 	}
@@ -227,9 +224,10 @@ func (a *roundActor) collectWechatContactBeforeTransition(
 		ctx,
 		a,
 		protocol.PrimChatReadWechatExchangeOutcome,
+		// 不传请求锚:页面首屏窗口未必还挂着这张请求卡(2026-08-06 甲方裁决)。
+		// 留档仍记 *message.SourceKey——这条路本来就由该请求卡的跃迁事实驱动。
 		protocol.ChatReadWechatExchangeOutcomeArgs{
-			ConversationRef:  transition.ConversationRef,
-			RequestSourceKey: *message.SourceKey,
+			ConversationRef: transition.ConversationRef,
 		},
 	)
 	if err != nil {
