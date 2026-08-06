@@ -123,8 +123,9 @@ export function CandidateStagePage({
                   <div>
                     <strong>{candidate.displayName}</strong>
                     {candidate.age !== null && <span>{candidate.age} 岁</span>}
+                    {/* 转人工没有独立徽标: candidateStatus 已经把状态标签本身
+                        换成"需要人工", 再挂一个同文徽标只会并排显示两遍。 */}
                     <StatusPill label={candidate.statusLabel} tone={candidate.statusTone} />
-                    {candidate.manualRequired && <span className="rh-manual-badge">需要人工</span>}
                   </div>
                   <p>{candidate.lastMessage ?? '暂无对话内容'}</p>
                 </div>
