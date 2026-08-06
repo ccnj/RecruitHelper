@@ -7704,9 +7704,11 @@ test('M5-B 卡片 evaluator 以同一冻结输入做 preflight/commit，且最�
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       fingerprint: '0'.repeat(64),
     }), { status: 'failed', reason: 'identity_changed' })
+    // 2026-08-04 甲方裁决:消息基线漂移只记不停手,统一适用于全部复用该
+    // guards 的发送原语,卡片路径同样放行;身份/目标漂移仍硬拒。
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       baselineKeys: ['1'.repeat(64)],
-    }), { status: 'failed', reason: 'baseline_changed' })
+    }), { status: 'ready' })
     assert.deepEqual(invoke('wechatInvite', null, 'preflight', {
       targetToken: '2'.repeat(64),
     }), { status: 'failed', reason: 'target_changed' })
@@ -7784,9 +7786,10 @@ test('M5-B 微信接受复用同一 evaluator 精确锚定 pending 请求且只 
       detail: 'wxaccept:all_done cards=1',
     })
     surface.state.done = false
+    // 2026-08-04 甲方裁决:消息基线漂移只记不停手,微信接受路径同样放行。
     assert.deepEqual(invoke('preflight', { baselineKeys: ['f'.repeat(64)] }), {
-      status: 'failed',
-      reason: 'baseline_changed',
+      status: 'ready',
+      wechatCopyCards: 0,
     })
     assert.deepEqual(invoke('preflight', { requestSourceKey: 'e'.repeat(64) }), {
       status: 'failed',
@@ -8560,6 +8563,9 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
       'history_first_unavailable',
       'hash_unavailable',
       'unexpected',
+      // 2026-08-04 消息基线降观测后 capture 不再产出该阶段(改为 ready +
+      // tailDrifted);若从陈旧 MAIN world 传来,按"无法建立可信基线"兜底。
+      'guard_snapshot_uncovered',
     ]) {
       sendBaselineResult = { status: 'failed', stage }
       const failedBaseline = context()
@@ -8581,7 +8587,6 @@ test('sendZhilianMessage 后置条件阴性只读轮询，绝不重试 click', a
 
     for (const stage of [
       'route_changed',
-      'guard_snapshot_uncovered',
     ]) {
       sendBaselineResult = { status: 'failed', stage }
       const failedBaseline = context()
