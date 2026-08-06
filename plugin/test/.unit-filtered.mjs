@@ -12499,7 +12499,9 @@ test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其�
 })
 
 let failures = 0
+const only = process.env.ONLY || ''
 for (const { name, fn } of tests) {
+  if (only && !name.includes(only)) continue
   try {
     await fn()
     console.log('PASS', name)
