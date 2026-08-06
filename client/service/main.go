@@ -372,7 +372,10 @@ func main() {
 
 	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
 		SetJobConfigSource(jobConfigSource).
-		SetFieldReportDeps(fieldReportDeps)
+		SetFieldReportDeps(fieldReportDeps).
+		// 运营通知彩排(2026-08-06 增补的第三类触发)复用常驻 runner 的 webhook
+		// 与客户名闭包,不另建第二个出站配置面;它只借 runner 发送,不经发件箱。
+		SetNotifyProbeDeps(adminhttp.NotifyProbeDeps{Blobs: blobStore, Sender: notifyRunner})
 
 	// 每日自动上传(2026-07-31 补充裁决)。开关默认关闭且每轮重读——这个 goroutine
 	// 常驻,但只要没人在诊断台打开开关，它每天到点看一眼就继续睡。
