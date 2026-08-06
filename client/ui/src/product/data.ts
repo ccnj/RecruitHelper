@@ -158,6 +158,7 @@ export interface AppCandidateListItemRaw {
   interviewEndsAtMs?: number | null
   interviewMethod?: string | null
   interviewCardState?: string
+  appointedAtMs?: number | null
 }
 
 export interface AppCandidateListRaw {
@@ -765,6 +766,7 @@ function adaptCandidateListItem(
     deterministicState: status.deterministicState,
     interviewAt: formatEpochRelative(raw.interviewStartsAtMs, now),
     interviewMethod: clean(raw.interviewMethod) || null,
+    appointedAt: formatEpochRelative(raw.appointedAtMs, now),
     wechatAccount: clean(raw.wechat) || null,
     wechatExchangedAt: formatEpochRelative(raw.wechatObservedAtMs, now),
     stillInAutoCommunication: raw.status
@@ -796,6 +798,7 @@ function emptyCandidate(
     latestAiDecision: null,
     interviewAt: null,
     interviewMethod: null,
+    appointedAt: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: null,

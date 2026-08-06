@@ -183,6 +183,10 @@ export interface CandidateViewItem {
   latestAiDecision: string | null
   interviewAt: string | null
   interviewMethod: string | null
+  // appointedAt 是候选人答应邀约的时刻,interviewAt 是约定的面试时刻,两者不是
+  // 一回事:首页「已约面」数的是当天有几个人答应,已约面页列的是面试还没到的
+  // 存量,只有把答应时刻摆出来,两个数字对不上时才看得懂。
+  appointedAt: string | null
   wechatAccount: string | null
   wechatExchangedAt: string | null
   stillInAutoCommunication: boolean | null

@@ -1974,8 +1974,8 @@
 }
 
 /* 列数必须跟实际渲染的格子数一致:多一列会在最右侧留下等宽白板,而不是
-   被自动折叠。沟通中页面没有辅助信息格(见 CandidateAuxiliary),所以单列
-   一套 is-no-aux 列宽,让职位名那一格吃掉空出来的宽度。 */
+   被自动折叠。辅助信息格的个数随页面变(见 rowLayout):沟通中没有,已约面
+   有两个,其余一个,所以三种形态各配一套列宽。 */
 .rh-product-app .rh-candidate-row {
   width: 100%;
   min-height: 76px;
@@ -1996,6 +1996,10 @@
 
 .rh-product-app .rh-candidate-row.is-no-aux {
   grid-template-columns: 40px minmax(230px, 1.4fr) minmax(150px, 0.75fr) auto;
+}
+
+.rh-product-app .rh-candidate-row.is-two-aux {
+  grid-template-columns: 40px minmax(200px, 1.2fr) minmax(120px, 0.6fr) minmax(120px, 0.6fr) 145px auto;
 }
 
 .rh-product-app .rh-candidate-row:last-child {
@@ -2652,6 +2656,10 @@
   .rh-product-app .rh-candidate-row.is-no-aux {
     grid-template-columns: 38px minmax(220px, 1fr) minmax(140px, 0.7fr) auto;
   }
+
+  .rh-product-app .rh-candidate-row.is-two-aux {
+    grid-template-columns: 38px minmax(170px, 1fr) minmax(105px, 0.55fr) minmax(105px, 0.55fr) 110px auto;
+  }
 }
 
 @media (max-width: 900px) {
@@ -2701,6 +2709,10 @@
 
   .rh-product-app .rh-candidate-row.is-no-aux {
     grid-template-columns: 38px minmax(0, 1fr) auto;
+  }
+
+  .rh-product-app .rh-candidate-row.is-two-aux {
+    grid-template-columns: 38px minmax(150px, 1fr) minmax(105px, 0.6fr) minmax(105px, 0.6fr) auto;
   }
 
   .rh-candidate-side {
@@ -2894,9 +2906,10 @@
     flex-direction: column;
   }
 
-  /* 辅助信息也隐藏后,两种行的格子数一致,列宽随之统一。 */
+  /* 辅助信息也隐藏后,三种行的格子数一致,列宽随之统一。 */
   .rh-product-app .rh-candidate-row,
-  .rh-product-app .rh-candidate-row.is-no-aux {
+  .rh-product-app .rh-candidate-row.is-no-aux,
+  .rh-product-app .rh-candidate-row.is-two-aux {
     grid-template-columns: 38px minmax(0, 1fr) auto;
   }
 
