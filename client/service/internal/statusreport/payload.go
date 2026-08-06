@@ -14,12 +14,17 @@ import "time"
 
 // SchemaVersion 是载荷版本。服务端按它宽容解析。
 //
-// 加字段时注意顺序:服务端 Pydantic 是 extra="forbid",新字段必须**先发后台、
-// 再发客户端**,否则新客户端会被老后台整份 422 拒掉。
+// 服务端是 extra="ignore"(2026-08-06 甲方裁决),所以加字段**没有部署顺序要求**:
+// 新客户端遇上老后台时,新字段被安静丢掉,其余照常落库。选它而不是 forbid 是因为
+// forbid 下这种版本错配会让每份上报都 422,而本包按裁决不重试,现象是所有客户机
+// 在管理前台集体显示离线,很容易误判成网络或服务器故障。
 const SchemaVersion = 1
 
 // Payload 的 json tag 必须与旧后台 app/api/client_status.py 的 alias 逐字对齐。
-// 对不上的字段会被 forbid 挡成 422,而不是被忽略。
+//
+// **对不上不会报错** —— 那个字段会被服务端丢掉,管理前台上显示成 0,比报错难
+// 发现得多。后台 tests/test_client_status_reports.py 里贴着一份本结构体的真实
+// 输出作为契约锚点,两侧任一边改歪,那条测试会先红。
 type Payload struct {
 	MachineID     string `json:"machineId"`
 	LicenseToken  string `json:"licenseToken"`
