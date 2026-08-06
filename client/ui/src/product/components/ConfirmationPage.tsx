@@ -60,7 +60,7 @@ export function ConfirmationPage({
     <div className="rh-page">
       <PageHeader
         title="候选确认"
-        description="核对本批 AI 招呼语。只有全选并明确点击发送后，系统才会开始逐人发送。"
+        description="核对本批招呼语。只有全选并明确点击发送后，系统才会开始逐人发送。"
         meta={<StatusPill label={customer.job.name ?? '尚未绑定职位'} tone={customer.job.name ? 'blue' : 'slate'} />}
       />
 
@@ -175,12 +175,8 @@ export function ConfirmationPage({
                       </span>
                       <span>{candidate.currentRole ?? '当前职位待补充'}</span>
                     </div>
-                    <div className="rh-confirmation-score">
-                      <span>AI 评分</span>
-                      <strong>{candidate.aiScore ?? '—'}</strong>
-                    </div>
                     <div className="rh-greeting-copy">
-                      <span>AI 招呼语</span>
+                      <span>招呼语</span>
                       <p>{candidate.greeting ?? '招呼语生成失败，本候选人不可发送。'}</p>
                     </div>
                     <div className="rh-confirmation-state">

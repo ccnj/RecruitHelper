@@ -134,7 +134,6 @@ const confirmationCandidates: ConfirmationCandidateView[] = Array.from({ length:
     decisions: [],
     actions: [],
   }),
-  aiScore: 86 - index * 2,
   greeting: '您好，看到您的经历与我们正在招聘的高级招聘顾问岗位比较匹配，想和您简单沟通一下。',
   generationStateLabel: '已生成',
   sendState: 'ready',

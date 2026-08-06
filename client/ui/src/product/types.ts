@@ -198,7 +198,6 @@ export type ConfirmationSendState =
   | 'ineligible'
 
 export interface ConfirmationCandidateView extends CandidateViewItem {
-  aiScore: number | null
   greeting: string | null
   generationStateLabel: string
   sendState: ConfirmationSendState
