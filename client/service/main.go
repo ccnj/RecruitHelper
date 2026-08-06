@@ -29,10 +29,11 @@ import (
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
-	"recruithelper/client/service/internal/report"
 	"recruithelper/client/service/internal/productworkflow"
+	"recruithelper/client/service/internal/report"
 	"recruithelper/client/service/internal/selfupdate"
 	"recruithelper/client/service/internal/session"
+	"recruithelper/client/service/internal/statusreport"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/workflow"
 	"recruithelper/contract/gen/go/protocol"
@@ -345,6 +346,50 @@ func main() {
 			}
 		},
 	})
+	// 工作状态上报(AGENTS.md「全局约定·工作状态上报」,2026-08-06 甲方裁决)。
+	// 与上面那个每日诊断包上传是两回事:这里报的是计数与枚举,不含候选人明文,
+	// 所以常开、没有开关。不受统一业务运行窗口约束 —— 它不是候选人可见动作,
+	// 凌晨照常报;客户机静默本身就是运营要看的信号。
+	// 授权未就绪时静默跳过:全新安装到激活之间那段时间不是故障。
+	brainStartedAt := time.Now()
+	background.Go(func() {
+		statusreport.Run(appCtx, statusreport.RunnerDeps{
+			Deps: statusreport.Deps{
+				Store: st,
+				Runtime: func() (statusreport.Runtime, error) {
+					state, stateErr := productController.RuntimeState()
+					if stateErr != nil {
+						return statusreport.Runtime{}, stateErr
+					}
+					return statusreport.Runtime{
+						Platform:       state.Platform,
+						AccountRef:     state.AccountRef,
+						CurrentBatchID: state.CurrentBatchID,
+					}, nil
+				},
+				Hand: func() statusreport.HandHealth {
+					return statusReportHandHealth(hub.Registry().Snapshot(), hub.HandWitness)
+				},
+				ProviderConfigured: func() bool {
+					configured, loadErr := providerConfig.Load()
+					return loadErr == nil && configured != nil
+				},
+				AppVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+				StartedAt:  brainStartedAt,
+			},
+			Target: func() (statusreport.Target, bool) {
+				config, configErr := jobConfigSource.LoadConfig()
+				if configErr != nil || config == nil {
+					return statusreport.Target{}, false
+				}
+				return statusreport.Target{
+					BaseURL:      config.BaseURL,
+					MachineID:    config.MachineID,
+					LicenseToken: config.LicenseToken,
+				}, true
+			},
+		})
+	})
 	// 职位类别在后台配置值精确匹配不上时改由大模型从平台候选里选,复用同一条
 	// provider 通道。未配置 provider 时只是这条兜底不可用,精确匹配照旧工作。
 	if advice != nil {
@@ -466,6 +511,18 @@ func productWorkflowErrorCode(err error) string {
 // productPluginRuntime 把手注册表收窄成普通用户配置页所需的四项状态。
 // 它有意不返回 handId、bootId、contractHash、caps 或协商细节。
 func productPluginRuntime(states []session.HandState) (online bool, health, version string, contractMatch bool) {
+	current, ok := selectHandState(states)
+	if !ok {
+		return false, string(session.HealthOffline), "", false
+	}
+	return current.Online && current.Health == session.HealthReady,
+		string(current.Health), current.ExtVersion, current.ContractMatch
+}
+
+// selectHandState 挑出"代表这台机器"的那个手:优先在线的,同为在线取会话最新的。
+// 产品页与工作状态上报共用它 —— 两处若各挑各的，运营看到的在线状态会和用户
+// 自己看到的对不上。
+func selectHandState(states []session.HandState) (session.HandState, bool) {
 	selected := -1
 	for i := range states {
 		if selected < 0 ||
@@ -476,11 +533,35 @@ func productPluginRuntime(states []session.HandState) (online bool, health, vers
 		}
 	}
 	if selected < 0 {
-		return false, string(session.HealthOffline), "", false
+		return session.HandState{}, false
 	}
-	current := states[selected]
-	return current.Online && current.Health == session.HealthReady,
-		string(current.Health), current.ExtVersion, current.ContractMatch
+	return states[selected], true
+}
+
+// statusReportHandHealth 把手注册表收窄成上报要的健康项。
+// 证词 journal/outbox 积压值得单列:journal 打满曾经直接把发送打瘫,而那次是
+// 事后翻库才知道的。
+func statusReportHandHealth(
+	states []session.HandState,
+	witnessOf func(string) (dispatch.HandWitness, bool),
+) statusreport.HandHealth {
+	current, ok := selectHandState(states)
+	if !ok {
+		return statusreport.HandHealth{}
+	}
+	health := statusreport.HandHealth{
+		Online:             current.Online && current.Health == session.HealthReady,
+		ContractMatch:      current.ContractMatch,
+		ExtensionVersion:   current.ExtVersion,
+		LastHeartbeatAgoMs: time.Since(current.LastHbAt).Milliseconds(),
+	}
+	if witnessOf != nil {
+		if witness, found := witnessOf(current.HandID); found {
+			health.JournalOpen = int64(witness.JournalOpen)
+			health.OutboxPending = int64(witness.OutboxPending)
+		}
+	}
+	return health
 }
 
 // backgroundGroup 只管理进程级长生命周期循环。所有 Go 调用必须先于 Wait；

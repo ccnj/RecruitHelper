@@ -671,8 +671,6 @@ function adaptConfirmationCandidate(raw: AppConfirmationCandidateRaw): Confirmat
     sendState,
     sendStateLabel: confirmationStatusLabel(raw.status),
     selectable: raw.selectable,
-    manualRequired: raw.status === 'suspect',
-    manualReason: clean(raw.failure) ? '本条招呼语未能生成，请人工复核' : null,
   }
 }
 
@@ -763,10 +761,7 @@ function adaptCandidateListItem(
     statusTone: status.tone,
     lastMessage: clean(raw.lastMessagePreview) || null,
     lastActiveAt: formatEpochRelative(raw.lastActivityAtMs, now),
-    unreadCount: safeCount(raw.unreadCount),
-    manualRequired: Boolean(raw.manualRequired),
     deterministicState: status.deterministicState,
-    manualReason: clean(raw.manualReason) || null,
     interviewAt: formatEpochRelative(raw.interviewStartsAtMs, now),
     interviewMethod: clean(raw.interviewMethod) || null,
     wechatAccount: clean(raw.wechat) || null,
@@ -795,12 +790,9 @@ function emptyCandidate(
     statusTone: 'slate',
     lastMessage: null,
     lastActiveAt: null,
-    unreadCount: 0,
-    manualRequired: false,
     resumeSummary: null,
     deterministicState: null,
     latestAiDecision: null,
-    manualReason: null,
     interviewAt: null,
     interviewMethod: null,
     wechatAccount: null,
@@ -820,9 +812,10 @@ function candidateStatus(
   tone: CandidateViewItem['statusTone']
   deterministicState: string
 } {
-  if (raw.manualRequired) {
-    return { label: '需要人工', tone: 'red', deterministicState: '自动沟通已转人工' }
-  }
+  // 转人工不进产品端状态面(2026-08-06 甲方裁决):它对客户没有可操作性,
+  // 却是一个红色告警,还会盖掉候选人真正的业务状态——转人工的人只剩
+  // "需要人工"四个字,看不出他卡在已换微信还是已邀面。转人工事实照旧
+  // 由脑裁决,诊断台可查。raw.manualRequired 在下面仍决定自动沟通范围。
   if (view === 'wechat') {
     return {
       label: clean(raw.wechat) ? '已换微信' : '账号待收编',
