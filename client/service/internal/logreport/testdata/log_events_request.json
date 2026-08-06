@@ -1,0 +1,33 @@
+{
+  "appVersion": "1.9.1",
+  "events": [
+    {
+      "code": "deadlineExceeded",
+      "context": {
+        "handId": "hand-1",
+        "idemKey": "greet:p-1:r1",
+        "msgId": "cmd-1",
+        "name": "chat.sendGreeting"
+      },
+      "eventType": "suspect.created",
+      "level": "warn",
+      "mergedCount": 1,
+      "message": "命令转 suspect(永不自动重试,待人工裁决)",
+      "occurredAt": 1786012200000,
+      "source": "brain"
+    },
+    {
+      "eventType": "log.error",
+      "fingerprint": "fp-1",
+      "firstAt": 1786012080000,
+      "lastAt": 1786012200000,
+      "level": "error",
+      "mergedCount": 7,
+      "message": "手侧日志: WS 重连失败",
+      "occurredAt": 1786012200000,
+      "source": "hand"
+    }
+  ],
+  "licenseToken": "T1",
+  "machineId": "M1"
+}

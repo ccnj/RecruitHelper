@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 	"recruithelper/internal/ids"
@@ -134,7 +135,14 @@ func (d *Dispatcher) markSuspect(cmd store.CmdRecord, reason string) {
 	d.st.Audit("suspect", cmd.HandID, cmd.MsgID, reason)
 	d.clearLease(cmd.MsgID)
 	d.notifyByMsgID(cmd.MsgID)
-	slog.Warn("命令转 suspect(永不自动重试,待人工裁决)", "handId", cmd.HandID, "msgId", cmd.MsgID, "reason", reason)
+	// 带 logreport.Event 标记的日志行会进日志上报队列(开关默认关,人在诊断台开)。
+	// 这是本功能最初的立案理由:2026-08-05 客户机一条招呼 suspect 把同批其余 32 人
+	// 冻结了 72 分钟,而我方是事后翻包才知道的。attrs 里的 msgId 同时是脑侧回查
+	// 候选人与会话上下文的入口。
+	slog.Warn("命令转 suspect(永不自动重试,待人工裁决)",
+		logreport.Event(logreport.EventSuspectCreated),
+		"handId", cmd.HandID, "msgId", cmd.MsgID, "name", cmd.Name,
+		"idemKey", cmd.IdemKey, "reason", reason)
 }
 
 // voidAndRedispatch:readonly/intrusive 命令作废并重派。存在 child 时必须走 Store.ReplaceCmd，
