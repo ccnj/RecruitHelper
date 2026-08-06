@@ -113,7 +113,7 @@ export function CandidateStagePage({
           <div className="rh-candidate-list">
             {filtered.map((candidate) => (
               <button
-                className="rh-candidate-row"
+                className={hasAuxiliary(view) ? 'rh-candidate-row' : 'rh-candidate-row is-no-aux'}
                 key={candidate.profileId}
                 onClick={() => onOpenCandidate(candidate)}
                 type="button"
@@ -154,16 +154,15 @@ export function stageCountLabel(
   return `${filteredCount} / ${total} 位候选人`
 }
 
+// 行是 grid,列数写死在 CSS 里,所以"这个视图有没有辅助信息格"必须在渲染前
+// 问得出来——沟通中没有这一格,少一列。这里是唯一真源,CandidateAuxiliary 也
+// 从它取;两边一旦各说各话,行的最右侧就会空出一整列。
+function hasAuxiliary(view: CandidateView): boolean {
+  return view === 'interviewed' || view === 'interviewElapsed' || view === 'wechat'
+}
+
 function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidate: CandidateViewItem }) {
-  if (view === 'interviewed' || view === 'interviewElapsed') {
-    return (
-      <div className="rh-candidate-aux">
-        <span>面试时间</span>
-        <strong>{candidate.interviewAt ?? '—'}</strong>
-        <small>{candidate.interviewMethod ?? '方式待确认'}</small>
-      </div>
-    )
-  }
+  if (!hasAuxiliary(view)) return null
   if (view === 'wechat') {
     return (
       <div className="rh-candidate-aux">
@@ -173,7 +172,13 @@ function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidat
       </div>
     )
   }
-  return null
+  return (
+    <div className="rh-candidate-aux">
+      <span>面试时间</span>
+      <strong>{candidate.interviewAt ?? '—'}</strong>
+      <small>{candidate.interviewMethod ?? '方式待确认'}</small>
+    </div>
+  )
 }
 
 function matchesSearch(candidate: CandidateViewItem, rawQuery: string): boolean {
