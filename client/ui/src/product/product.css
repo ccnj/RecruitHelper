@@ -2096,7 +2096,13 @@
   text-align: right;
 }
 
+/* justify-self 不是微调:候选人行的栅格是固定 6 列,但子元素数量随条件渲染
+   浮动——CandidateAuxiliary 只在已面试/已换微信视图渲染,沟通中与已约面
+   返回 null。少一个子元素,后面的元素就整体前移一格,未读徽标于是落进
+   "职位/时间"那一列的 145px 固定槽位,被默认的 stretch 拉成一条大红横杠。
+   锚到列尾后它只占自己的内容宽度,回到紧贴箭头的小胶囊。 */
 .rh-unread-badge {
+  justify-self: end;
   min-width: 20px;
   padding: 2px 6px;
   border-radius: 999px;
