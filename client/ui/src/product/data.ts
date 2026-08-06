@@ -12,6 +12,7 @@ import type {
   ProductConnectionView,
   ProductData,
   ProductMetric,
+  ResumeSectionView,
   WorkflowView,
 } from './types'
 import { createEmptyProductData } from './fixtures'
@@ -790,7 +791,7 @@ function emptyCandidate(
     statusTone: 'slate',
     lastMessage: null,
     lastActiveAt: null,
-    resumeSummary: null,
+    resumeSections: [],
     deterministicState: null,
     latestAiDecision: null,
     interviewAt: null,
@@ -876,7 +877,7 @@ export function adaptCandidateDetail(
     experience: resumeValue(resumeFacts, ['经验', '工作年限', '工作经验']) || fallback?.experience || null,
     city: resumeValue(resumeFacts, ['城市', '现居住地', '所在地']) || fallback?.city || null,
     currentRole: resumeValue(resumeFacts, ['当前职位', '职位', '现任职位']) || fallback?.currentRole || null,
-    resumeSummary: resumeSummary(raw.resume),
+    resumeSections: resumeSections(raw.resume),
     latestAiDecision: decisions[0]?.summary ?? null,
     messages: (raw.messages ?? []).map((message) => adaptMessage(message, now)),
     decisions,
@@ -917,22 +918,26 @@ function numberFromResume(fields: AppResumeFieldRaw[], labels: string[]): number
   return Number.isFinite(parsed) && parsed > 0 && parsed < 120 ? parsed : null
 }
 
-function resumeSummary(raw: AppResumeRaw): string | null {
-  if (!raw.available) return null
+function resumeSections(raw: AppResumeRaw): ResumeSectionView[] {
+  if (!raw.available) return []
+  // 空节直接不给,不留一个只有标题的壳:实测 300 份快照里自我评价空的占三成。
   const sections = [
-    clean(raw.selfEvaluation) ? `自我评价：${clean(raw.selfEvaluation)}` : '',
-    clean(raw.education) ? `教育经历：${clean(raw.education)}` : '',
-    clean(raw.workExperiences) ? `工作经历：${clean(raw.workExperiences)}` : '',
-  ].filter(Boolean)
-  if (sections.length > 0) return sections.join('\n\n')
+    { title: '自我评价', body: clean(raw.selfEvaluation) },
+    { title: '教育经历', body: clean(raw.education) },
+    { title: '工作经历', body: clean(raw.workExperiences) },
+  ].filter((section) => section.body !== '')
+  if (sections.length > 0) return sections
   const expectations = (raw.expectations ?? [])
     .map((field) => `${clean(field.label)}：${clean(field.value)}`)
     .filter((value) => !value.endsWith('：'))
   const basics = (raw.basic ?? [])
     .map((field) => `${clean(field.label)}：${clean(field.value)}`)
     .filter((value) => !value.endsWith('：'))
-  const fallback = [...expectations, ...basics]
-  return fallback.length > 0 ? fallback.join('；') : null
+  if (expectations.length === 0 && basics.length === 0) return []
+  return [
+    ...(expectations.length > 0 ? [{ title: '求职期望', body: expectations.join('\n') }] : []),
+    ...(basics.length > 0 ? [{ title: '基本信息', body: basics.join('\n') }] : []),
+  ]
 }
 
 function adaptMessage(raw: AppMessageRaw, now: Date): CandidateMessageView {
