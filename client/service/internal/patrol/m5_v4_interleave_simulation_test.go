@@ -23,7 +23,10 @@ import (
 // 幕一,AI 回复拆三条气泡,链内无重读,整链发完;
 // 幕二,页面实序 [气泡1, 插话, 气泡2, 气泡3] 进入到期对账,插话落在对齐
 // 丢弃前缀,永不进账本、不开新轮,只留 context_discarded 审计;
-// 幕三,24 小时后冷催排程照常触发,对已插话"算了"的候选人再次发送。
+// 幕三,24 小时后冷催排程照常触发,对已插话"算了"的候选人再次发送;
+// 幕四,候选人在链尾之后再发新消息,新消息正常收编、正常开新轮回复——
+// 丢失只限"夹在我方气泡中间"的那句,后续沟通不因此瘫痪,但 AI 的对话
+// 历史里永远缺着被丢的那句。
 // 断言描述的是现状,不是背书;改变这些行为需另行立案。
 func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	h := newHarness(t)
@@ -42,13 +45,15 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	}
 	interjection := "待遇太低了,算了不考虑了"
 
+	// 幕四把回复话术换成单气泡,便于按发送序列区分各幕产物。
+	replyBubbles := bubbles
 	advice := &recordingAdviceExecutor{
 		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
 			switch request.Purpose {
 			case m5ai.PurposeIntent:
 				return safeFakeResponse(`{"信号":"有意向","理由":"fixture"}`), nil
 			case m5ai.PurposeReply:
-				raw, err := json.Marshal(bubbles)
+				raw, err := json.Marshal(replyBubbles)
 				if err != nil {
 					return m5ai.CompletionResponse{}, err
 				}
@@ -116,10 +121,17 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	}
 
 	// 页面实序:插话夹在气泡 1 与气泡 2 之间。每次调用现读账本再插入,
-	// 保证幕二/幕三拿到的都是"账本内容 + 一条从未收编的插话"。
-	interleavedPage := func() []protocol.ThreadMessage {
+	// 保证各幕拿到的都是"账本内容 + 一条从未收编的插话";extraTail 模拟
+	// 候选人后来追加的链尾消息,已收编过的不重复附加。
+	interleavedPage := func(extraTail ...string) []protocol.ThreadMessage {
 		rows := echoLedgerAsThread(t, h, key)
-		out := make([]protocol.ThreadMessage, 0, len(rows)+1)
+		inLedger := map[string]bool{}
+		for _, row := range rows {
+			if row.Text != nil {
+				inLedger[*row.Text] = true
+			}
+		}
+		out := make([]protocol.ThreadMessage, 0, len(rows)+1+len(extraTail))
 		for _, row := range rows {
 			out = append(out, row)
 			if row.Text != nil && *row.Text == bubbles[0] {
@@ -129,6 +141,16 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 					Text: &text, ContentHash: syncledger.HashText(interjection),
 				})
 			}
+		}
+		for _, tail := range extraTail {
+			if inLedger[tail] {
+				continue
+			}
+			text := tail
+			out = append(out, protocol.ThreadMessage{
+				Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
+				Text: &text, ContentHash: syncledger.HashText(text),
+			})
 		}
 		for i := range out {
 			out[i].Idx = i
@@ -228,20 +250,96 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 		t.Fatalf("冷催一应照常发出(插话已丢,系统认为候选人一直沉默): actions=%+v err=%v",
 			actions, err)
 	}
+	coldSends := recordedSendTexts(t, hand)
+	if len(coldSends) != len(bubbles)+1 || coldSends[len(coldSends)-1] != "合成冷催一" {
+		t.Fatalf("冷催正文未发出: sends=%v", coldSends)
+	}
+	// —— 幕四:候选人在链尾之后又发新消息,应正常收编、正常开新轮 ——
+	followupInbound := "那你再具体说说岗位内容吧"
+	followupReply := "好的,我再详细介绍一下"
+	replyBubbles = []string{followupReply}
+	ledgerBeforeFollowup, err := h.db.MessagesForConversation(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adviceBeforeFollowup := len(advice.requests)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{{
+					ConversationRef: fixture.conversationRef,
+					Peer: protocol.PeerSummary{
+						DisplayName: "合成候选人-interleave-sim", PlatformUserRef: peerRef,
+					},
+					UnreadCount: 1,
+					LastMessage: protocol.LastMessageSummary{
+						Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
+						TextPreview: followupInbound,
+					},
+				}},
+				Complete: true,
+			}, nil
+		case protocol.PrimChatReadThread:
+			return protocol.ChatReadThreadData{
+				Messages: interleavedPage(followupInbound),
+				Peer: ptr(protocol.PeerSummary{
+					DisplayName: "合成候选人-interleave-sim", PlatformUserRef: peerRef,
+				}),
+				Complete: true, ReachedTop: true, AnchorMatched: false,
+			}, nil
+		default:
+			return defaultHandler(request)
+		}
+	}
+	h.clock.Add(5 * time.Minute)
+	result, tickErr = manager.Tick(context.Background())
+	if tickErr != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("幕四 Tick 失败: result=%+v err=%v", result, tickErr)
+	}
+	followupTurn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	if err != nil || followupTurn == nil ||
+		followupTurn.TurnID == chainTurn.TurnID ||
+		followupTurn.Status != store.DialogueTurnCompleted {
+		t.Fatalf("链尾新消息应正常开新轮并完成: turn=%+v err=%v", followupTurn, err)
+	}
+	if len(advice.requests) != adviceBeforeFollowup+2 {
+		t.Fatalf("新轮应恰好一次意向、一次回复: before=%d now=%d",
+			adviceBeforeFollowup, len(advice.requests))
+	}
 	finalSends := recordedSendTexts(t, hand)
-	if len(finalSends) != len(bubbles)+1 || finalSends[len(finalSends)-1] != "合成冷催一" {
-		t.Fatalf("冷催正文未发出: sends=%v", finalSends)
+	if finalSends[len(finalSends)-1] != followupReply {
+		t.Fatalf("新轮回复未发出: sends=%v", finalSends)
 	}
 	finalLedger, err := h.db.MessagesForConversation(key)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(finalLedger) != len(ledgerBeforeFollowup)+2 {
+		t.Fatalf("幕四应恰好收编新消息与我方回复两行: before=%d after=%d",
+			len(ledgerBeforeFollowup), len(finalLedger))
+	}
+	if finalLedger[len(finalLedger)-2].Text == nil ||
+		*finalLedger[len(finalLedger)-2].Text != followupInbound ||
+		finalLedger[len(finalLedger)-1].Text == nil ||
+		*finalLedger[len(finalLedger)-1].Text != followupReply {
+		t.Fatalf("幕四账本尾部不符: %+v", finalLedger[len(finalLedger)-2:])
 	}
 	for _, row := range finalLedger {
 		if row.Text != nil && *row.Text == interjection {
 			t.Fatalf("插话在任何阶段都不应进入账本: row=%+v", row)
 		}
 	}
-	t.Logf("模拟结论: 三气泡全发; 插话被丢弃(context_discarded 审计 %d 条); 24h 后冷催照发",
+	ledgerDump := make([]string, 0, len(finalLedger))
+	for _, row := range finalLedger {
+		text := "<无正文>"
+		if row.Text != nil {
+			text = *row.Text
+		}
+		ledgerDump = append(ledgerDump, fmt.Sprintf("%s:%s", row.Direction, text))
+	}
+	t.Logf("最终账本(插话不存在): %v", ledgerDump)
+	t.Logf("模拟结论: 三气泡全发; 插话被丢弃(context_discarded 审计 %d 条); 24h 后冷催照发; 链尾新消息正常开新轮",
 		countContextDiscardAudits(t, h, fixture.conversationRef))
 }
 
