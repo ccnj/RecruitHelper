@@ -615,7 +615,8 @@
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
-          "observedAt": { "type": "int64", "minimum": 0 }
+          "observedAt": { "type": "int64", "minimum": 0 },
+          "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
         }
       },
       "ChatSendMessageEvidence": {
@@ -636,7 +637,8 @@
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
           "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
           "sourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
-          "observedAt": { "type": "int64", "minimum": 0 }
+          "observedAt": { "type": "int64", "minimum": 0 },
+          "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
         }
       },
       "ChatSendWechatInviteEvidence": {
@@ -726,7 +728,8 @@
           "contentHash": { "type": "string", "minLength": 64, "maxLength": 64 },
           "sourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 },
           "interview": { "ref": "InterviewDetails" },
-          "observedAt": { "type": "int64", "minimum": 0 }
+          "observedAt": { "type": "int64", "minimum": 0 },
+          "tsApprox": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
         }
       },
       "ChatSendInviteCardEvidence": {

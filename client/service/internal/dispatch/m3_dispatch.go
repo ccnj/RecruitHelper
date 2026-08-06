@@ -715,7 +715,10 @@ type VerificationObservation struct {
 	ConversationRef string
 	PeerWechat      string
 	ObservedAt      int64
-	Reason          string
+	// PlatformTsMs 只可来自命中消息自带的 tsApprox(平台消息视图时间);
+	// ObservedAt 在没有平台时间时以本机时钟兜底,本字段则保持 nil。
+	PlatformTsMs *int64
+	Reason       string
 }
 
 type EffectVerifier interface {

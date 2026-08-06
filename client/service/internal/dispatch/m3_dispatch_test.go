@@ -117,6 +117,46 @@ func TestSendMessageHTTPRetryReusesIntentAfterSuccessAndPreservesExactText(t *te
 	}
 }
 
+// result data 带 tsApprox 时账本行如实收编平台时间;不带时保持未知。
+// 端到端走 OnResult → 结果计划 → appendOutboundMessageTx 全链。
+func TestSendMessageOkResultProjectsPlatformTsIntoLedger(t *testing.T) {
+	d, st, m := newDisp(t)
+	key := seedSendTarget(t, st, m, "acct-send-ts", "conv-send-ts")
+
+	withTs := sendRequest("intent-ts-evidence", key, "带平台时间")
+	first, err := d.SendMessage(withTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.OnAck("hand-send", protocol.AckBody{Ref: first.MsgID, Status: protocol.AckStatusAccepted})
+	platformTs := time.Now().Add(-3 * time.Second).UnixMilli()
+	result := validSendResult(first.MsgID, key.ConversationRef, "带平台时间")
+	var data protocol.ChatSendMessageData
+	_ = json.Unmarshal(result.Data, &data)
+	data.TsApprox = &platformTs
+	result.Data, _ = protocol.Encode(data)
+	d.OnResult("hand-send", "result-ts-evidence", result)
+
+	messages, _ := st.MessagesForConversation(key)
+	if len(messages) != 2 || messages[1].Origin != "self" ||
+		messages[1].TsApproxMs == nil || *messages[1].TsApproxMs != platformTs {
+		t.Fatalf("带 tsApprox 的 ok 结果未把平台时间收进账本: %+v", messages)
+	}
+
+	noTs := sendRequest("intent-ts-absent", key, "无平台时间")
+	noTs.PreviousIntentID = "intent-ts-evidence"
+	second, err := d.SendMessage(noTs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.OnAck("hand-send", protocol.AckBody{Ref: second.MsgID, Status: protocol.AckStatusAccepted})
+	d.OnResult("hand-send", "result-ts-absent", validSendResult(second.MsgID, key.ConversationRef, "无平台时间"))
+	messages, _ = st.MessagesForConversation(key)
+	if len(messages) != 3 || messages[2].TsApproxMs != nil {
+		t.Fatalf("不带 tsApprox 的 ok 结果必须保持时间未知: %+v", messages)
+	}
+}
+
 func TestMalformedOKAndRetryHintsNeverCreateRealEffectReplacement(t *testing.T) {
 	t.Run("malformed ok becomes possible", func(t *testing.T) {
 		d, st, m := newDisp(t)
