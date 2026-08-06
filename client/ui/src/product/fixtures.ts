@@ -28,7 +28,6 @@ function candidate(index: number, overrides: Partial<CandidateViewItem> = {}): C
     statusTone: 'blue',
     lastMessage: '您好，我想进一步了解岗位的团队情况。',
     lastActiveAt: `今天 ${9 + index}:20`,
-    unreadCount: index === 1 ? 2 : 0,
     manualRequired: false,
     resumeSummary: '具备招聘全流程经验，熟悉中高端岗位交付和候选人关系维护。',
     deterministicState: '已回复，等待我方处理',
