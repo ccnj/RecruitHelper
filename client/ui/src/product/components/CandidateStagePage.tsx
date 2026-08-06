@@ -14,10 +14,10 @@ interface StageConfig {
 const stageConfigs: Record<CandidateView, StageConfig> = {
   communicating: {
     title: '沟通中',
-    description: '查看正在沟通、等候回复、已发出邀面卡等确认和需要人工关注的候选人。本页不提供发送入口。',
+    description: '查看正在沟通、等候回复、已发出邀面卡等确认的候选人。本页不提供发送入口。',
     emptyTitle: '当前没有沟通中的候选人',
     emptyDescription: '取得首次招呼发送正证的候选人会自动进入沟通范围。',
-    filters: ['全部', '已招呼', '已回复', '已邀面', '需要人工', '沟通已结束'],
+    filters: ['全部', '已招呼', '已回复', '已邀面', '沟通已结束'],
   },
   interviewed: {
     title: '已约面',
@@ -124,7 +124,6 @@ export function CandidateStagePage({
                     <strong>{candidate.displayName}</strong>
                     {candidate.age !== null && <span>{candidate.age} 岁</span>}
                     <StatusPill label={candidate.statusLabel} tone={candidate.statusTone} />
-                    {candidate.manualRequired && <span className="rh-manual-badge">需要人工</span>}
                   </div>
                   <p>{candidate.lastMessage ?? '暂无对话内容'}</p>
                 </div>
@@ -133,7 +132,6 @@ export function CandidateStagePage({
                   <span>{candidate.jobName}</span>
                   <time>{candidate.lastActiveAt ?? '时间未知'}</time>
                 </div>
-                {candidate.unreadCount > 0 && <span className="rh-unread-badge">{candidate.unreadCount}</span>}
                 <ProductIcon className="rh-row-chevron" name="chevron" size={17} />
               </button>
             ))}
@@ -192,7 +190,6 @@ function matchesSearch(candidate: CandidateViewItem, rawQuery: string): boolean 
 
 function matchesFilter(view: CandidateView, candidate: CandidateViewItem, filter: string): boolean {
   if (filter === '全部') return true
-  if (filter === '需要人工') return candidate.manualRequired
   if (view === 'communicating' && filter === '沟通已结束') {
     return candidate.deterministicState?.startsWith('沟通已结束') ?? false
   }

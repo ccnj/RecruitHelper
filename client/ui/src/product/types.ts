@@ -170,12 +170,9 @@ export interface CandidateViewItem {
   statusTone: 'blue' | 'amber' | 'green' | 'red' | 'slate'
   lastMessage: string | null
   lastActiveAt: string | null
-  unreadCount: number
-  manualRequired: boolean
   resumeSummary: string | null
   deterministicState: string | null
   latestAiDecision: string | null
-  manualReason: string | null
   interviewAt: string | null
   interviewMethod: string | null
   wechatAccount: string | null

@@ -124,7 +124,6 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
             <dl className="rh-detail-list">
               <div><dt>当前状态</dt><dd>{candidate.deterministicState ?? '—'}</dd></div>
               <div><dt>自动沟通范围</dt><dd>{candidate.stillInAutoCommunication === null ? '—' : candidate.stillInAutoCommunication ? '仍在范围内' : '已退出'}</dd></div>
-              <div><dt>转人工原因</dt><dd>{candidate.manualReason ?? '无'}</dd></div>
             </dl>
           </DrawerSection>
 
