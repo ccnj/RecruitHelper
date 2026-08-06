@@ -6060,7 +6060,7 @@ test('智联 148 拒绝模板在读取、发送基线与最终 evaluator 中严�
       }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 投影必须与 readThread 一致`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 投影必须与 readThread/baseline 一致`)
     }
   } finally {
@@ -6159,7 +6159,7 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
 
@@ -6175,12 +6175,12 @@ test('智联 313 在线简历只在真机严格形状成立时三路提升为简
       '313 缺少 idServer 时 readThread 必须响亮失败')
     const missingBaseline = await fixture.capture([])
     assert.equal(missingBaseline.status, 'failed', '313 缺少 idServer 时不得建立发送基线')
-    assert.equal(fixture.invoke({
+    assert.equal((await fixture.invoke({
       status: 'ready',
       stage: 'ready',
       serverSourceKeys: [],
       targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
-    }, 'preflight', { expectedTail: [] }).status, 'failed',
+    }, 'preflight', { expectedTail: [] })).status, 'failed',
     '313 缺少 idServer 时最终 evaluator 必须停止')
   } finally {
     fixture.restore()
@@ -6317,7 +6317,7 @@ test('智联 177 附件简历按窄类型归一化在四路提升为同一简历
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: 正文 evaluator 与 readThread/baseline 必须同义`)
       assert.deepEqual(
         zhilianTestHooks.mainSendCardOnce(
@@ -6366,7 +6366,7 @@ test('智联 177 附件简历按窄类型归一化在四路提升为同一简历
       targetBindingToken: m3Hash(JSON.stringify([fixture.conversationRef, fixture.peerRef])),
     }
     assert.equal(
-      fixture.invoke(nominalBaseline, 'preflight', { expectedTail: [] }).status,
+      (await fixture.invoke(nominalBaseline, 'preflight', { expectedTail: [] })).status,
       'failed',
       '177 缺少 idServer 时正文 evaluator 必须停止',
     )
@@ -6495,7 +6495,7 @@ test('智联 105 只在当前真机发起方形状成立时三路提升为请求
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
     assert.equal(stateEndpointCalls, 0, '未验证的状态接口不得覆盖候选人请求的 pending 语义')
@@ -6591,7 +6591,7 @@ test('智联 259 只在当前真机交换结果形状成立时三路提升为已
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6702,7 +6702,7 @@ test('智联 355 只在当前真机新版邀面形状成立时三路提升为状
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6744,7 +6744,7 @@ test('智联面试接受固定回执三路归一化为接受卡事件而不是�
       const expectedTail = [{ direction: message.direction, contentHash: message.contentHash }]
       const baseline = await fixture.capture(expectedTail)
       assert.equal(baseline.status, 'ready', `${variant.name}: baseline 与 readThread 必须同义`)
-      assert.deepEqual(fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', { expectedTail }), { status: 'ready' },
         `${variant.name}: final evaluator 与 readThread/baseline 必须同义`)
     }
   } finally {
@@ -6983,6 +6983,7 @@ function installM3SendFixture() {
     HTMLTextAreaElement: globalThis.HTMLTextAreaElement,
     InputEvent: globalThis.InputEvent,
     Event: globalThis.Event,
+    KeyboardEvent: globalThis.KeyboardEvent,
     chrome: globalThis.chrome,
   }
   const conversationRef = 'conversation-m3-public-boundary'
@@ -7058,6 +7059,7 @@ function installM3SendFixture() {
   globalThis.HTMLTextAreaElement = FixtureTextArea
   globalThis.InputEvent = FixtureEvent
   globalThis.Event = FixtureEvent
+  globalThis.KeyboardEvent = FixtureEvent
 
   const detail = new FixtureHTMLElement()
   const wrapper = new FixtureHTMLElement()
@@ -7246,41 +7248,48 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
     fixture.session.lastSentence = '展示字段变化'
     fixture.button.disabled = true
     fixture.state.ariaDisabled = 'true'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' },
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'ready' },
       '私有对象变化与 disabled/aria-disabled 不得阻断 evaluator')
 
     fixture.button.form = {}
     for (const type of ['', 'submit', 'reset']) {
       fixture.button.type = type
-      const rejected = fixture.invoke(baseline)
+      const rejected = await fixture.invoke(baseline)
       assert.equal(rejected.status, 'failed', `关联 form 的 ${type || '缺省'} type 必须拒绝`)
       assert.equal(fixture.state.intrinsicClicks, 0)
     }
     fixture.button.type = 'button'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'ready' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'ready' })
     fixture.button.form = null
 
     const cases = [
       ['route', () => { globalThis.location.href = 'https://rd6.zhaopin.com/app/im?sessionId=other' }, {}, 'route_changed'],
       ['identity', () => {}, { fingerprint: 'f'.repeat(64) }, 'identity_changed'],
-      ['source keys', () => {}, { baselineKeys: ['e'.repeat(64)] }, 'baseline_changed'],
-      ['expected tail', () => {}, {
-        expectedTail: [{ direction: 'in', contentHash: 'd'.repeat(64) }],
-      }, 'baseline_changed'],
       ['target token', () => {}, { targetToken: 'c'.repeat(64) }, 'target_changed'],
       ['deadline', () => {}, { deadline: Date.now() - 1 }, 'action_window_elapsed'],
     ]
     for (const [name, mutate, overrides, reason] of cases) {
       const currentHref = globalThis.location.href
       mutate()
-      const result = fixture.invoke(baseline, 'preflight', overrides)
+      const result = await fixture.invoke(baseline, 'preflight', overrides)
       assert.deepEqual(result, { status: 'failed', reason }, `${name} 必须闭锁`)
       globalThis.location.href = currentHref
     }
 
+    // 2026-08-04 甲方裁决：消息基线降为观测模式。source keys 与 expectedTail
+    // 漂移只记日志、照常放行；"读不到"方向（guard_unresolved）仍照旧硬拒。
+    for (const [name, overrides] of [
+      ['source keys 漂移', { baselineKeys: ['e'.repeat(64)] }],
+      ['expected tail 漂移', { expectedTail: [{ direction: 'in', contentHash: 'd'.repeat(64) }] }],
+    ]) {
+      assert.deepEqual(await fixture.invoke(baseline, 'preflight', overrides), { status: 'ready' },
+        `${name} 按观测模式放行`)
+      assert.equal(fixture.state.intrinsicClicks, 0)
+    }
+
     const extraDetail = { getClientRects() { return [{}] } }
     fixture.state.details = [fixture.detail, extraDetail]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.details = [fixture.detail]
 
     const extraComposer = Object.create(Object.getPrototypeOf(fixture.composer))
@@ -7289,7 +7298,7 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
     extraComposer.closest = fixture.composer.closest.bind(fixture.composer)
     extraComposer.getClientRects = () => [{}]
     fixture.state.composers = [fixture.composer, extraComposer]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.composers = [fixture.composer]
 
     const extraButton = Object.assign(Object.create(Object.getPrototypeOf(fixture.button)), {
@@ -7298,16 +7307,16 @@ test('M3 evaluator 只守世界状态、目标 token 与公开 DOM 语义', asyn
       closest: fixture.button.closest,
     })
     fixture.state.buttons = [fixture.button, extraButton]
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.state.buttons = [fixture.button]
 
     const originalButtonClosest = fixture.button.closest
     fixture.button.closest = (selector) => selector === '.im-session-detail' ? fixture.detail : null
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_missing' })
     fixture.button.closest = originalButtonClosest
 
     fixture.composer.value = '人工草稿'
-    assert.deepEqual(fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
+    assert.deepEqual(await fixture.invoke(baseline), { status: 'failed', reason: 'composer_nonempty' })
     fixture.composer.value = ''
     assert.equal(fixture.state.intrinsicClicks, 0)
   } finally {
@@ -7319,7 +7328,7 @@ test('M3 preflight 与 commit 复用 evaluator，最终绿色后只走一次 int
   const fixture = installM3SendFixture()
   try {
     const baseline = await fixture.capture()
-    assert.deepEqual(fixture.invoke(baseline, 'preflight'), { status: 'ready' })
+    assert.deepEqual(await fixture.invoke(baseline, 'preflight'), { status: 'ready' })
     assert.equal(fixture.composer.value, '')
     assert.equal(fixture.state.intrinsicClicks, 0)
 
@@ -7334,11 +7343,14 @@ test('M3 preflight 与 commit 复用 evaluator，最终绿色后只走一次 int
     fixture.button.type = 'button'
     fixture.state.throwOnReadAfterClick = true
 
-    assert.deepEqual(fixture.invoke(baseline, 'commit'), { status: 'clicked' })
+    assert.deepEqual(await fixture.invoke(baseline, 'commit'), { status: 'clicked' })
     assert.equal(fixture.state.intrinsicClicks, 1)
     assert.equal(fixture.state.instanceClicks, 0, '不得调用页面替换过的 instance click')
     assert.equal(fixture.state.valueAtClick, fixture.text)
-    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), ['input', 'change'])
+    // 970d443 起写入事件序列对齐旧产品：beforeinput/input 配对，keyup 收尾。
+    assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), [
+      'beforeinput', 'input', 'change', 'keyup',
+    ])
   } finally {
     fixture.restore()
   }
@@ -7349,12 +7361,13 @@ test('M3 写后正文被页面改写时清空草稿且零 click', async () => {
   try {
     const baseline = await fixture.capture()
     fixture.state.rewriteInsertedText = true
-    const result = fixture.invoke(baseline, 'commit')
+    const result = await fixture.invoke(baseline, 'commit')
     assert.deepEqual(result, { status: 'failed', reason: 'input_rejected' })
     assert.equal(fixture.composer.value, '')
     assert.equal(fixture.state.intrinsicClicks, 0)
+    // 前四项是写入序列（970d443 对齐旧产品），后两项是 restoreDraft 清草稿。
     assert.deepEqual(fixture.state.inputEvents.map(({ type }) => type), [
-      'input', 'change', 'input', 'change',
+      'beforeinput', 'input', 'change', 'keyup', 'input', 'change',
     ])
   } finally {
     fixture.restore()
