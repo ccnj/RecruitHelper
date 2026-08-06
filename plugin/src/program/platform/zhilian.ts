@@ -11373,7 +11373,7 @@ async function mainObserveStableOutboundCard(
 // 布尔正证，永不返回。
 async function mainReadWechatExchangeOutcome(
   conversationRef: string,
-  requestSourceKey: string,
+  requestSourceKey: string | null,
   baselineServerSourceKeys: string[] | null,
   expectedTargetBindingToken: string | null,
 ): Promise<MainWechatExchangeOutcomeResult> {
@@ -11527,7 +11527,8 @@ async function mainReadWechatExchangeOutcome(
   }
 
   try {
-    if (!routeMatches() || !/^[0-9a-f]{64}$/u.test(requestSourceKey)) return failed()
+    if (!routeMatches()) return failed()
+    if (requestSourceKey !== null && !/^[0-9a-f]{64}$/u.test(requestSourceKey)) return failed()
     const target = targetForCurrentRoute()
     const staffID = clean(asRecord(asRecord(w.$session)?.staff)?.staffId) || readInitialStaffID()
     if (!target || !staffID) return failed()
@@ -11600,15 +11601,23 @@ async function mainReadWechatExchangeOutcome(
     } else if (expectedTargetBindingToken !== null) {
       return failed()
     }
-    const requestIndexes = sourceKeys
-      .map((sourceKey, index) => sourceKey === requestSourceKey ? index : -1)
-      .filter((index) => index >= 0)
-    if (requestIndexes.length !== 1) return failed()
-    const requestIndex = requestIndexes[0]
-    const candidateRequest = rowShape(rows[requestIndex], 105, 2, target).matches
-    const staffRequest = rowShape(rows[requestIndex], 105, 1, staffID).matches
-    if (candidateRequest === staffRequest) return failed()
-    const origin: 1 | 2 = candidateRequest ? 2 : 1
+    // 带锚形态(acceptWechat 配套验证读):锚定请求卡、推出发起方、划请求窗口。
+    // 无锚形态(独立 ContactAsset 收编,协议规格 §4.3):请求卡随对话变长会滚出
+    // 平台会话首屏窗口,而带号的结果消息始终在尾部,故不锚请求卡、不划窗口,
+    // 在全部可见消息里取满足同一判据的最新一条。
+    let requestIndex = -1
+    let origin: 1 | 2 | null = null
+    if (requestSourceKey !== null) {
+      const requestIndexes = sourceKeys
+        .map((sourceKey, index) => sourceKey === requestSourceKey ? index : -1)
+        .filter((index) => index >= 0)
+      if (requestIndexes.length !== 1) return failed()
+      requestIndex = requestIndexes[0]
+      const candidateRequest = rowShape(rows[requestIndex], 105, 2, target).matches
+      const staffRequest = rowShape(rows[requestIndex], 105, 1, staffID).matches
+      if (candidateRequest === staffRequest) return failed()
+      origin = candidateRequest ? 2 : 1
+    }
     // 路由、目标绑定与请求锚都已复核通过，此处才允许带出请求卡的可见后置状态。
     // 判据全部按可见文本：仍可点的“同意”动作 vs 已转入的“复制微信号”形态；
     // .imc-wx-request 只作卡片定位。计数不携带任何页面文本。
@@ -11634,36 +11643,49 @@ async function mainReadWechatExchangeOutcome(
       routeMatches() && targetForCurrentRoute() === target && surface !== undefined
         ? { confirmed: false, surface }
         : failed()
+    // 请求窗口只在带锚形态下划：从请求锚到下一条 105 之前。
     let end = rows.length
-    for (let index = requestIndex + 1; index < rows.length; index += 1) {
-      const envelope = parseObject(rows[index].content)
-      const type = Number(
-        typeof rows[index].type === 'number' || /^\d+$/u.test(String(rows[index].type))
-          ? rows[index].type
-          : envelope.type,
-      )
-      if (type === 105) {
-        end = index
-        break
+    if (requestIndex >= 0) {
+      for (let index = requestIndex + 1; index < rows.length; index += 1) {
+        const envelope = parseObject(rows[index].content)
+        const type = Number(
+          typeof rows[index].type === 'number' || /^\d+$/u.test(String(rows[index].type))
+            ? rows[index].type
+            : envelope.type,
+        )
+        if (type === 105) {
+          end = index
+          break
+        }
       }
     }
     // 结果消息恒归属点同意的一方：候选人发起(origin=2)时是我方点同意，259
     // 归我方(out)；我方发起(origin=1)时是候选人点同意，259 归对方(in)。
     // 2026-07-28 生产页面双样本直读，见协议规格 §9.3。
-    const outcomeFrom = origin === 2 ? staffID : target
+    // 无锚形态不经请求卡推发起方，两种已证实配对都试；判据本身仍逐条核对
+    // from 与 originType 是否成对，配不上的行不是结果消息。
+    const shapes: Array<readonly [1 | 2, string]> = origin === null
+      ? [[1, target], [2, staffID]]
+      : [[origin, origin === 2 ? staffID : target]]
     const matches: Array<{ index: number; peerWechat: string }> = []
     for (let index = requestIndex + 1; index < end; index += 1) {
-      const outcome = rowShape(rows[index], 259, origin, outcomeFrom)
-      const peerWechat = clean(outcome.details.userWeChat)
-      const ownWechat = clean(outcome.details.staffWeChat)
-      if (outcome.matches && peerWechat && ownWechat &&
-          peerWechat.length <= 256 &&
-          new TextEncoder().encode(peerWechat).length <= 1024) {
-        matches.push({ index, peerWechat })
+      for (const [expectedOrigin, expectedFrom] of shapes) {
+        const outcome = rowShape(rows[index], 259, expectedOrigin, expectedFrom)
+        const peerWechat = clean(outcome.details.userWeChat)
+        const ownWechat = clean(outcome.details.staffWeChat)
+        if (outcome.matches && peerWechat && ownWechat &&
+            peerWechat.length <= 256 &&
+            new TextEncoder().encode(peerWechat).length <= 1024) {
+          matches.push({ index, peerWechat })
+          break
+        }
       }
     }
-    if (matches.length !== 1) return unconfirmed()
-    const match = matches[0]
+    // 带锚形态要求请求窗口内恰好一条（多条即歧义，阴性）；无锚形态按
+    // 「满足条件的最新一条即本次」取末条——rows 已按 time 升序去重排列。
+    if (matches.length === 0) return unconfirmed()
+    if (requestSourceKey !== null && matches.length !== 1) return unconfirmed()
+    const match = matches[matches.length - 1]
     // 接受流程里 259 必须严格晚于基线，即确由本次动作产生；基线之前的
     // 已有交换在 evaluator 阶段就已拒绝派发。
     if (baselineServerSourceKeys !== null && match.index <= baselineEnd) return unconfirmed()
@@ -12702,8 +12724,11 @@ export async function readZhilianWechatExchangeOutcome(
   if (!expectedPrincipalFingerprint) {
     throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
   }
-  if (!/^[0-9a-f]{64}$/u.test(args.requestSourceKey)) {
-    throw new ZhilianPlatformError('GUARD_FAILED', '微信结果读取缺少稳定请求锚', 'manualOnly')
+  // 请求锚可缺省：带锚是 acceptWechat 的配套验证读形态，无锚是独立 ContactAsset
+  // 收编形态（协议规格 §4.3）。带锚时锚本身仍必须是合法稳定键。
+  if (args.requestSourceKey !== undefined &&
+      !/^[0-9a-f]{64}$/u.test(args.requestSourceKey)) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '微信结果读取的请求锚不是稳定键', 'manualOnly')
   }
   ctx.checkpoint()
   const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
@@ -12718,7 +12743,7 @@ export async function readZhilianWechatExchangeOutcome(
   )
   const observed = await runMain(tab.id, mainReadWechatExchangeOutcome, [
     args.conversationRef,
-    args.requestSourceKey,
+    args.requestSourceKey ?? null,
     null,
     null,
   ])

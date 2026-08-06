@@ -672,7 +672,7 @@
         "type": "object",
         "fields": {
           "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
-          "requestSourceKey": { "type": "string", "minLength": 64, "maxLength": 64, "maxBytes": 64 }
+          "requestSourceKey": { "type": "string", "optional": true, "minLength": 64, "maxLength": 64, "maxBytes": 64 }
         }
       },
       "ChatReadWechatExchangeOutcomeData": {
@@ -1488,7 +1488,7 @@
       "argsSchema": "ChatReadWechatExchangeOutcomeArgs", "dataSchema": "ChatReadWechatExchangeOutcomeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 30000, "deadlineMs": 300000,
-      "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。requestSourceKey 只允许锚定已证实的两种请求:105/in/originType=2/success 后唯一 259/out/originType=2/success,或 105/out/originType=1/success 后唯一 259/in/originType=1/success;结果消息恒归属点同意的一方,originType 恒等于发起方(2026-07-28 生产页面双样本直读)。匹配结果必须位于下一条 105 之前且双方微信字段齐全,才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
+      "note": "微信交换结果专门只读面,也是 chat.acceptWechat 的唯一配套验证读;只读真人当前已打开且公开路由精确匹配的会话实时消息源,不定位、不点击、不滚动、不发送。两形态共用同一条结果消息判据:259/success、from 与 originType 构成已证实配对之一(from=候选人+originType=1,或 from=招聘方+originType=2)、且双方微信字段齐全;即结果消息恒归属点同意的一方,originType 恒等于发起方(2026-07-28 生产页面双样本直读)。带锚形态(requestSourceKey 存在)是 chat.acceptWechat 的配套验证读专用形态:锚定已证实的两种请求之一(105/in/originType=2/success 或 105/out/originType=1/success),匹配结果必须位于下一条 105 之前且窗口内恰好一条。无锚形态(requestSourceKey 缺省)是独立 ContactAsset 收编读面:不锚请求卡、不划请求窗口,取当前会话可见消息中满足同一判据的最新一条;它不得用于任何 effectful 动作的成功判定或补记,只服务 ContactAsset 收编(2026-08-06 甲方裁决:请求卡随对话变长滚出平台会话首屏窗口,而结果消息始终在尾部,锚请求卡使收号随对话增长而必然失败)。两形态匹配成立才 confirmed=true 并只返回候选人 peerWechat。false 仅表示本轮正证不足,不得证明未接受或授权任何动作"
     },
     "chat.captureThreadScreenshot": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
