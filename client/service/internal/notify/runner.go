@@ -30,8 +30,11 @@ const (
 	maxAttempts          = 5
 	takeBatchLimit       = 10
 	tickInterval         = 30 * time.Second
-	screenshotGateWindow = 15 * time.Minute   // 三资产闸门:齐即发,否则最多等 15 分钟兜底
-	staleAfter           = 7 * 24 * time.Hour // 超龄未发出标 expired,留表可查
+	screenshotGateWindow = 15 * time.Minute // 三资产闸门:齐即发,否则最多等 15 分钟兜底
+	// 候选人主动换微信后的并发窗口:窗口内约到面则并入面试确认,到点仍无约面
+	// 才单独发出(2026-08-06 甲方裁决)。
+	wechatMergeWindow = 2 * time.Hour
+	staleAfter        = 7 * 24 * time.Hour // 超龄未发出标 expired,留表可查
 )
 
 // Runner 是发件箱后台轮询器。webhook 发送不属于候选人可见动作,不受统一
@@ -188,7 +191,7 @@ const (
 
 // decide 照抄旧项目:两类通知都走三资产 15 分钟闸门;微信互加通知先过
 // 与约面通知的去重判定(约面后换到且号已随约面带出→drop;约面仍 pending→hold;
-// 约面前换到→永远独立发)。
+// 约面前换到→独立发,唯候选人主动的行在 2 小时并发窗口内并入约面通知)。
 func (r *Runner) decide(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
@@ -196,7 +199,7 @@ func (r *Runner) decide(
 ) (decision, bool) {
 	supplement := false
 	if row.NotifyType == store.NotificationTypeWechatAdded {
-		verdict, isSupplement := r.decideWechatAdded(row)
+		verdict, isSupplement := r.decideWechatAdded(row, now)
 		if verdict != decisionSend {
 			return verdict, false
 		}
@@ -209,17 +212,31 @@ func (r *Runner) decide(
 // 确实已经发到运营手上、却因当时还没收到号而写了"联系方式:未获取"时为真。
 // 此时运营视角里它不是新事件,而是刚才那条面试确认的补丁,标题据此改写。
 // 约面通知终败/过期时运营根本没收到过面试确认,仍按独立的微信互加渲染。
-func (r *Runner) decideWechatAdded(row store.NotificationOutbox) (decision, bool) {
+//
+// 2026-08-06 甲方裁决新增 2 小时并发窗口:候选人主动换到微信、且尚无约面通知
+// 时,本通知从入队起最多按住 2 小时;窗口内约面成功则不再单发,号随面试确认
+// 一并带出(本行走下方状态机落 drop);到点仍无约面才单独发出。我方发起邀请
+// 与发起方判不出的行维持立即发送的旧行为。
+func (r *Runner) decideWechatAdded(row store.NotificationOutbox, now time.Time) (decision, bool) {
 	meeting, err := r.store.InterviewNotificationForProfile(row.ProfileID)
 	if err != nil {
 		slog.Warn("微信互加去重查询失败,按独立发送处理", "notifyId", row.ID, "err", err)
 		return decisionSend, false
 	}
+	peerInitiated := store.WechatAddedExchangeInitiator(row.PayloadJSON) == store.WechatExchangeInitiatorPeer
 	if meeting == nil {
+		if peerInitiated && now.Sub(row.CreatedAt) < wechatMergeWindow {
+			return decisionHold, false // 并发窗口内:等约面一起走
+		}
 		return decisionSend, false // 无约面通知:独立事件
 	}
 	if row.ID < meeting.ID {
-		return decisionSend, false // 微信在约面之前就换到:独立事件,始终发
+		// 微信在约面之前就换到。候选人主动且约面落在并发窗口内→并入约面通知
+		// (走下方状态机,由约面通知的结局决定 drop/补号/独立发);否则维持
+		// 独立发送的旧行为。
+		if !peerInitiated || !meeting.CreatedAt.Before(row.CreatedAt.Add(wechatMergeWindow)) {
+			return decisionSend, false
+		}
 	}
 	switch meeting.Status {
 	case store.NotificationStatusPending:

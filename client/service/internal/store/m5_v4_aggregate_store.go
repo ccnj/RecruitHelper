@@ -1346,6 +1346,7 @@ func persistCommunicationV4TransitionTx(
 			NotificationTypeInterviewAccepted,
 			"interviewAccepted:"+next.ProfileID,
 			next.ProfileID,
+			"",
 			application.AppliedAt,
 		); err != nil {
 			return err
