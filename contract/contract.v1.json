@@ -714,6 +714,20 @@
           "capturedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "ChatReadPeerPhoneArgs": {
+        "type": "object",
+        "fields": {
+          "conversationRef": { "type": "string", "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+        }
+      },
+      "ChatReadPeerPhoneData": {
+        "type": "object",
+        "fields": {
+          "phone": { "type": "string", "optional": true, "minLength": 1, "maxLength": 32, "maxBytes": 64 },
+          "panelName": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128, "maxBytes": 512 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "ChatSendInviteCardArgs": {
         "type": "object",
         "fields": {
@@ -1506,6 +1520,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"],
       "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "只对脑已绑定 tracked 会话中同一 platformUserRef 的简历详情面,按 candidate.readResume 同款打开方式截取真实渲染像素并顶部锚定滚动拼接为单张 JPEG;打开后满足最短停留才允许收口,逐帧滚动同守交互节奏下限。图像字节先经 blob/1 PUT,data 只携带 imageBlobRef 引用与元数据;帧预算内截断须 truncated=true。未协商 blob、非前台、面板打不开或换绑、容器无法归一或拼接/上传异常均响亮失败,不返回部分图像。不搜索、不按姓名/职位/DOM 位置兜底"
+    },
+    "chat.readPeerPhone": {
+      "ver": 1, "class": "readonly", "batch": "X",
+      "argsSchema": "ChatReadPeerPhoneArgs", "dataSchema": "ChatReadPeerPhoneData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
+      "execBudgetMs": 5000, "deadlineMs": 30000,
+      "note": "只读真人当前已打开且公开路由精确匹配的会话右侧简历侧栏的候选人电话,不定位、不点击、不滚动、不发送。只认「复制」按钮的 data-clipboard-text 标准属性并原样返回;显示文本不作数据源,虚拟号形态天然无该属性因而不返回号码(2026-08-06 生产页面三形态直读:真实号有复制按钮、无号整段空缺、虚拟号有号无复制按钮)。panelName 为侧栏面板姓名,供脑侧与会话对方核对后决定是否收编;接受判定(号码格式、姓名核对)全在脑侧,手不裁决。phone 缺省仅表示本轮未读到,不证明候选人无电话,不授权任何动作。尽力而为的降级型感知:任何失败只产生「缺号」,不推进业务状态、不进入验证链、不授权重试 effectful"
     }
   },
   "events": {
