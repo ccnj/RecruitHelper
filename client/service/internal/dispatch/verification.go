@@ -251,6 +251,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
 			Data: mustEncode(protocol.ChatSendMessageData{
 				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint, ObservedAt: observation.ObservedAt,
+				TsApprox: observation.PlatformTsMs,
 			}),
 			Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
 		}
@@ -265,6 +266,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 			},
 			Text: request.Args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
+			PlatformTsMs: observation.PlatformTsMs,
 			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
 		})
 	case protocol.PrimChatSendGreeting:
@@ -307,6 +309,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			ContentHash:     observation.ContentHash,
 			SourceKey:       observation.SourceKey,
 			ObservedAt:      observation.ObservedAt,
+			TsApprox:        observation.PlatformTsMs,
 		}
 		result := protocol.ResultBody{
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
@@ -329,6 +332,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				ConversationRef: request.WechatInviteArgs.ConversationRef,
 				CardType:        "wechatExchange", CardState: "pending",
 				ContentHash: observation.ContentHash, SourceKey: observation.SourceKey,
+				PlatformTsMs: observation.PlatformTsMs,
 			},
 			ResultBody: string(resultRaw), ResolutionReason: "verification wechat card uniquely matched",
 			At: time.Now(),
@@ -346,6 +350,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			SourceKey:       observation.SourceKey,
 			Interview:       interview,
 			ObservedAt:      observation.ObservedAt,
+			TsApprox:        observation.PlatformTsMs,
 		}
 		result := protocol.ResultBody{
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
@@ -372,6 +377,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				InterviewStartsAtMs: &startsAt,
 				InterviewEndsAtMs:   syncledger.OptionalEndsAt(endsAt),
 				InterviewMethod:     &method,
+				PlatformTsMs:        observation.PlatformTsMs,
 			},
 			ResultBody: string(resultRaw), ResolutionReason: "verification interview card uniquely matched",
 			At: time.Now(),

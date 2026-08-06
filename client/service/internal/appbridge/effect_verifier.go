@@ -366,6 +366,7 @@ func classifyVerifiedSend(
 	}
 	return dispatch.VerificationObservation{
 		Confirmed: true, ContentHash: matched.ContentHash, ObservedAt: observedAt(*matched),
+		PlatformTsMs: platformTs(*matched),
 		Reason: "最近窗口命中目标 out/text 指纹(同文取最新)",
 	}, nil
 }
@@ -424,6 +425,7 @@ func classifyVerifiedCard(
 	return dispatch.VerificationObservation{
 		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
 		Interview: interview, ObservedAt: observedAt(*matched),
+		PlatformTsMs: platformTs(*matched),
 		Reason: "最近窗口命中严格卡片正证(同类取最新)",
 	}, nil
 }
@@ -446,4 +448,15 @@ func observedAt(message protocol.ThreadMessage) int64 {
 		return *message.TsApprox
 	}
 	return time.Now().UnixMilli()
+}
+
+// platformTs 与 observedAt 的区别是失败方向:observedAt 兜底到本机时钟,
+// 本函数在消息不带平台时间时返回 nil——它的消费方(账本 ts_approx_ms)
+// 只收平台证据,不收本机时钟。
+func platformTs(message protocol.ThreadMessage) *int64 {
+	if message.TsApprox != nil && *message.TsApprox > 0 {
+		value := *message.TsApprox
+		return &value
+	}
+	return nil
 }

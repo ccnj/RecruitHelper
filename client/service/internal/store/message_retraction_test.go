@@ -54,7 +54,7 @@ func appendTestOutbound(
 	var message *Message
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
-		message, err = appendOutboundMessageTx(tx, intent, text, "hash-"+intent.IntentID, at.UnixMilli(), at)
+		message, err = appendOutboundMessageTx(tx, intent, text, "hash-"+intent.IntentID, nil, at)
 		return err
 	})
 	if err != nil {
@@ -138,7 +138,7 @@ func TestRetractedOutboundFactStaysAuditableAndOutsideActiveReads(t *testing.T) 
 
 	// 唯一 outboundIntentId 仍占位，既不复活标记行，也不创建第二条。
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		_, err := appendOutboundMessageTx(tx, &intent, "mistaken self", "hash-"+intent.IntentID, 0, firstAt)
+		_, err := appendOutboundMessageTx(tx, &intent, "mistaken self", "hash-"+intent.IntentID, nil, firstAt)
 		return err
 	})
 	if !errors.Is(err, ErrRecoveryStateConflict) {

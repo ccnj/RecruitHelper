@@ -460,7 +460,12 @@ type EffectResultMutation struct {
 	Text          string
 	ContentHash   string
 	ObservedAtMs  int64
-	Reason        string
+	// PlatformTsMs 是唯一命中的出站消息在平台消息视图中的时间戳,
+	// 与 ObservedAtMs(手完成观察的本机时刻)不同源:它只可来自 result
+	// data 的 tsApprox 字段,平台不提供可解析时间时保持 nil,任何一层
+	// 都不得用本机时钟填充。
+	PlatformTsMs *int64
+	Reason       string
 }
 
 type CardResultMutation struct {
@@ -472,6 +477,8 @@ type CardResultMutation struct {
 	InterviewStartsAtMs *int64
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
+	// PlatformTsMs 语义同 EffectResultMutation.PlatformTsMs。
+	PlatformTsMs *int64
 }
 
 type WechatContactResultMutation struct {
@@ -600,7 +607,7 @@ func (s *Store) ApplyResultMessage(
 			}
 			if plan.Effect.Append {
 				message, err := appendOutboundMessageTx(tx, &intent, plan.Effect.Text,
-					plan.Effect.ContentHash, plan.Effect.ObservedAtMs, effectAt)
+					plan.Effect.ContentHash, plan.Effect.PlatformTsMs, effectAt)
 				if err != nil {
 					return err
 				}

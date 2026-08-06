@@ -1030,6 +1030,9 @@ type VerifiedEffectSuccess struct {
 	Text             string
 	ContentHash      string
 	ObservedAtMs     int64
+	// PlatformTsMs 语义同 EffectResultMutation.PlatformTsMs:只可来自
+	// 验证读命中消息自带的 tsApprox,缺失保持 nil。
+	PlatformTsMs     *int64
 	ResultBody       string
 	ResolutionReason string
 	At               time.Time
@@ -1076,7 +1079,7 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 			intent.TargetRef != req.ConversationKey.ConversationRef || intent.SendFingerprint != req.ContentHash {
 			return ErrEffectIntentConflict
 		}
-		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.ObservedAtMs, req.At)
+		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, req.At)
 		if err != nil {
 			return err
 		}
@@ -1326,7 +1329,8 @@ func (s *Store) ResolveSuspectVerdict(req ResolveSuspectVerdictRequest) error {
 				intent.TargetRef != req.ConversationKey.ConversationRef {
 				return ErrEffectIntentConflict
 			}
-			message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.At.UnixMilli(), req.At)
+			// 人工裁决 resolvedOk 没有平台时间证据,时间保持未知。
+			message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, nil, req.At)
 			if err != nil {
 				return err
 			}
@@ -1355,7 +1359,7 @@ func appendOutboundMessageTx(
 	tx *gorm.DB,
 	intent *EffectIntent,
 	text, contentHash string,
-	observedAtMs int64,
+	platformTsMs *int64,
 	at time.Time,
 ) (*Message, error) {
 	if intent == nil {
@@ -1383,14 +1387,13 @@ func appendOutboundMessageTx(
 	}
 	textCopy := text
 	intentID := intent.IntentID
-	// observedAtMs 是脑确认副作用已发生的观察时刻，不是平台消息的
-	// 发送时刻。self 事实没有平台时间证据时必须保持未知，不能把
-	// result/验证读完成时间投影成消息时间。
-	_ = observedAtMs
+	// platformTsMs 只可携带平台消息视图展示的时间戳(result data 的
+	// tsApprox / 验证读命中消息的 tsApprox)。self 事实没有平台时间
+	// 证据时保持未知,不得把 result/验证读完成时刻投影成消息时间。
 	message := &Message{
 		Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 		Seq: seq, Direction: "out", Kind: "text", ContentHash: contentHash, Text: &textCopy,
-		TsApproxMs: nil, Origin: "self", OutboundIntentID: &intentID,
+		TsApproxMs: cloneOptionalInt64(platformTsMs), Origin: "self", OutboundIntentID: &intentID,
 	}
 	if err := tx.Create(message).Error; err != nil {
 		return nil, err
@@ -1516,6 +1519,7 @@ func applyCardResultTx(
 		InterviewStartsAtMs: cloneOptionalInt64(card.InterviewStartsAtMs),
 		InterviewEndsAtMs:   cloneOptionalInt64(card.InterviewEndsAtMs),
 		InterviewMethod:     cloneOptionalString(card.InterviewMethod),
+		TsApproxMs:          cloneOptionalInt64(card.PlatformTsMs),
 		Origin:              "self", SourceKey: &sourceKey, OutboundIntentID: &intentID,
 	}
 	if err := tx.Create(message).Error; err != nil {
