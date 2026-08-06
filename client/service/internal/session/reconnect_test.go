@@ -215,7 +215,7 @@ func TestSameBootTakeoverAcceptsHistoricalProgressAndResultOnlyFromActiveSocket(
 	if err := writeMsgWithID(newClient, "event-with-old-session", protocol.KindEvent, &oldSession,
 		protocol.EventBody{
 			Name:       protocol.EventPageNavigated,
-			Context:    protocol.EventContext{Platform: "zhilian", AccountRef: "acct-historical"},
+			Context:    &protocol.EventContext{Platform: "zhilian", AccountRef: "acct-historical"},
 			ObservedAt: time.Now().UnixMilli(), Data: eventData,
 		}); err != nil {
 		t.Fatal(err)

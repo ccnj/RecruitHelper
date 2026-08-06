@@ -32,7 +32,7 @@ func TestEventPersistentDedupBeforeSink(t *testing.T) {
 	}))
 	data, _ := protocol.Encode(protocol.UnreadBadgeEventData{Scope: protocol.UnreadScopeTotal, Stable: true, Value: 3})
 	body := protocol.EventBody{
-		Name: protocol.EventUnreadBadge, Context: protocol.EventContext{Platform: "zhilian", AccountRef: "acct-1"},
+		Name: protocol.EventUnreadBadge, Context: &protocol.EventContext{Platform: "zhilian", AccountRef: "acct-1"},
 		ObservedAt: time.Now().UnixMilli(), Data: data,
 	}
 	raw, _ := protocol.Encode(body)

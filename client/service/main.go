@@ -200,10 +200,11 @@ func main() {
 		select {
 		case events <- event:
 		default:
+			platform, accountRef := eventContextFields(event.Body)
 			_ = st.AppendAudit(&store.AuditEntry{
 				At: time.Now(), Category: "sensor_event_queue_full", HandID: event.HandID,
-				RefMsgID: event.MsgID, Platform: event.Body.Context.Platform,
-				AccountRef: event.Body.Context.AccountRef, Detail: "QoS0 事件队列已满，提示被丢弃",
+				RefMsgID: event.MsgID, Platform: platform,
+				AccountRef: accountRef, Detail: "QoS0 事件队列已满，提示被丢弃",
 			})
 		}
 	}))
@@ -598,15 +599,25 @@ func consumeSensorEvents(ctx context.Context, st *store.Store, actor *patrol.Man
 			return
 		case event := <-events:
 			if err := actor.HandleEvent(event.HandID, event.Body); err != nil {
+				platform, accountRef := eventContextFields(event.Body)
 				_ = st.AppendAudit(&store.AuditEntry{
 					At: time.Now(), Category: "sensor_event_rejected", HandID: event.HandID,
-					RefMsgID: event.MsgID, Platform: event.Body.Context.Platform,
-					AccountRef: event.Body.Context.AccountRef, Detail: err.Error(),
+					RefMsgID: event.MsgID, Platform: platform,
+					AccountRef: accountRef, Detail: err.Error(),
 				})
 				slog.Warn("传感事件未被账号 actor 接受", "handId", event.HandID, "name", event.Body.Name, "err", err)
 			}
 		}
 	}
+}
+
+// eventContextFields 取事件的账号上下文用于留痕。context 自 handLog 起是可选的
+// (手侧故障常发生在还没有 accountRef 的时刻),审计留痕不能因此 panic。
+func eventContextFields(body protocol.EventBody) (platform string, accountRef string) {
+	if body.Context == nil {
+		return "", ""
+	}
+	return body.Context.Platform, body.Context.AccountRef
 }
 
 func runPatrolLoop(ctx context.Context, actor *patrol.Manager) {

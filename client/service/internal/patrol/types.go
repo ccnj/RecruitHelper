@@ -52,6 +52,7 @@ var (
 	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
 	ErrRoundSupersededBySourcingBatch    = errors.New("活动采集批次已换代，旧巡检轮不得继续派发命令")
 	ErrEventHandMismatch                 = errors.New("传感事件来自非绑定手")
+	ErrEventContextMissing               = errors.New("传感事件缺少账号上下文")
 	ErrEnsureNotReady                    = errors.New("恢复 IM 页面后仍未就绪")
 	ErrPaginationLoop                    = errors.New("分页 cursor 循环")
 	ErrPaginationLimit                   = errors.New("分页超过脑侧安全上限")
