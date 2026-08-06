@@ -558,7 +558,7 @@ func eventBody(t *testing.T, h *harness, name protocol.EventName, data any) prot
 		t.Fatal(err)
 	}
 	return protocol.EventBody{
-		Context: protocol.EventContext{Platform: h.key.Platform, AccountRef: h.key.AccountRef},
+		Context: &protocol.EventContext{Platform: h.key.Platform, AccountRef: h.key.AccountRef},
 		Name:    name, ObservedAt: h.clock.Now().UnixMilli(), Data: raw,
 	}
 }
