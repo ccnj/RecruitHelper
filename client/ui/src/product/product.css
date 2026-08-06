@@ -61,8 +61,14 @@
   font-family: inherit;
 }
 
+/* top/left 不是装饰：不写定位偏移时，absolute 落在静态位置，包含块是初始包含块
+   而非 .rh-product-app，于是逃出后者的 overflow: hidden。列表滚到视口下方时，
+   这些 1px 盒子把文档整体撑高，页面右侧就会在 main 的滚动条之外再长出一条文档
+   滚动条。锚到 (0,0) 后文档不再溢出，clip 仍保证它不可见。 */
 .rh-sr-only {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 1px;
   height: 1px;
   padding: 0;
@@ -1835,7 +1841,7 @@
 
 .rh-confirmation-row {
   display: grid;
-  grid-template-columns: 28px 40px minmax(150px, 0.8fr) 70px minmax(260px, 1.8fr) 92px;
+  grid-template-columns: 28px 40px minmax(150px, 0.8fr) minmax(260px, 1.8fr) 92px;
   align-items: center;
   gap: 12px;
   min-height: 100px;
@@ -1896,22 +1902,10 @@
   text-overflow: ellipsis;
 }
 
-.rh-confirmation-score {
-  display: flex;
-  flex-direction: column;
-  text-align: center;
-}
-
-.rh-confirmation-score span,
 .rh-greeting-copy > span,
 .rh-confirmation-state > span {
   color: var(--rh-muted);
   font-size: 9px;
-}
-
-.rh-confirmation-score strong {
-  color: var(--rh-primary);
-  font-size: 19px;
 }
 
 .rh-greeting-copy {
@@ -2632,7 +2626,7 @@
   }
 
   .rh-confirmation-row {
-    grid-template-columns: 26px 38px minmax(130px, 0.8fr) 62px minmax(210px, 1.5fr) 84px;
+    grid-template-columns: 26px 38px minmax(130px, 0.8fr) minmax(210px, 1.5fr) 84px;
     gap: 9px;
   }
 
@@ -2690,7 +2684,7 @@
   }
 
   .rh-confirmation-row {
-    grid-template-columns: 26px 38px minmax(130px, 0.8fr) 54px minmax(190px, 1.3fr);
+    grid-template-columns: 26px 38px minmax(130px, 0.8fr) minmax(190px, 1.3fr);
   }
 
   .rh-confirmation-state {
@@ -2864,7 +2858,7 @@
   }
 
   .rh-confirmation-row {
-    grid-template-columns: 24px 36px minmax(0, 1fr) 48px;
+    grid-template-columns: 24px 36px minmax(0, 1fr);
   }
 
   .rh-greeting-copy {

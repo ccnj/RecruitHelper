@@ -666,7 +666,6 @@ function adaptConfirmationCandidate(raw: AppConfirmationCandidateRaw): Confirmat
     ...emptyCandidate(raw.profileId, raw.displayName, raw.jobName),
     statusLabel: confirmationStatusLabel(raw.status),
     statusTone: confirmationStatusTone(sendState),
-    aiScore: raw.score,
     greeting: clean(raw.greetingText) || null,
     generationStateLabel: generationStateLabel(raw),
     sendState,
