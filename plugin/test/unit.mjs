@@ -10243,6 +10243,9 @@ function installThreadRouteHarness(conversationRef, {
           }
           return [{ result: { status: 'clicked' } }]
         }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
+        }
         if (func.name === 'mainReadThreadPage') {
           state.reads += 1
           state.events.push('read')
@@ -11073,6 +11076,9 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
           currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
           return [{ result: { status: 'clicked' } }]
         }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
+        }
         if (func.name === 'mainFindConversation') {
           findCalls += 1
           return [{ result: { status: 'failed', reason: 'target_not_found' } }]
@@ -11148,6 +11154,9 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
           clickCalls += 1
           currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
           return [{ result: { status: 'clicked' } }]
+        }
+        if (func.name === 'mainProbeZhilianBlockedDialog') {
+          return [{ result: { status: 'absent' } }]
         }
         if (func.name === 'mainFindConversation') {
           return [{ result: { status: 'found', unreadMarkerCleared: false } }]
