@@ -115,22 +115,24 @@ func (s *Store) LatestWechatExchangeRequestSourceKey(
 	return sourceKey, true, nil
 }
 
-func (s *Store) HasWechatContactAssetForRequest(
-	profileID string,
-	requestSourceKey string,
-) (bool, error) {
+// HasWechatContactAsset 判断该档案是否已经收编过微信资产。
+//
+// 2026-08-06 甲方裁决前它按「请求锚」分档（HasWechatContactAssetForRequest）：
+// 收号必须先在账本里翻出请求卡、再拿这个锚去页面里定位。裁决取消了页面侧的
+// 请求锚定后，收号不再以某一次请求为单位，幂等相应上收到档案级——平台一个
+// 会话只发得出一张交换卡（235 个真实会话零反例），档案级与请求级在可达范围
+// 内等价，而档案级在账本缺请求卡时仍然可用。
+func (s *Store) HasWechatContactAsset(profileID string) (bool, error) {
 	profileID = strings.TrimSpace(profileID)
-	requestSourceKey = strings.TrimSpace(requestSourceKey)
-	if profileID == "" || !validMessageSourceKey(requestSourceKey) {
+	if profileID == "" {
 		return false, ErrContactAssetConflict
 	}
 	var count int64
 	err := s.db.Model(&ContactAsset{}).
 		Where(
-			"profile_id = ? AND kind = ? AND request_source_key = ?",
+			"profile_id = ? AND kind = ?",
 			profileID,
 			contactAssetKindWechat,
-			requestSourceKey,
 		).
 		Count(&count).Error
 	return count != 0, err

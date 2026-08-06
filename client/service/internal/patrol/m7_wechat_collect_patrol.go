@@ -64,11 +64,11 @@ func (a *roundActor) collectExchangedWechatContact(
 	if err != nil {
 		return err
 	}
-	if !found {
-		// 账本里没有任何换微信请求卡,无锚可用:本轮无从收号。
-		return nil
-	}
-	hasAsset, err := a.manager.store.HasWechatContactAssetForRequest(profileID, requestSourceKey)
+	// 账本里的请求锚只用于给资产留档,不再作为页面读取的锚(2026-08-06 甲方裁决):
+	// 请求卡随对话变长必然滚出平台会话首屏窗口,而带号的结果消息始终在尾部,
+	// 拿请求锚去页面里定位会让收号从延迟恶化为永久失败。账本里没有请求卡时也
+	// 照常收号,留档锚退化为结果消息自身。
+	hasAsset, err := a.manager.store.HasWechatContactAsset(profileID)
 	if err != nil || hasAsset {
 		return err
 	}
@@ -93,8 +93,7 @@ func (a *roundActor) collectExchangedWechatContact(
 		a,
 		protocol.PrimChatReadWechatExchangeOutcome,
 		protocol.ChatReadWechatExchangeOutcomeArgs{
-			ConversationRef:  conversationRef,
-			RequestSourceKey: requestSourceKey,
+			ConversationRef: conversationRef,
 		},
 	)
 	if err != nil {
@@ -122,13 +121,20 @@ func (a *roundActor) collectExchangedWechatContact(
 		)
 		return nil
 	}
+	// 留档锚:账本里有请求卡就记它(与 acceptWechat 落账口径一致,两条路写同一
+	// 条资产时不会互相冲突);没有就退化为结果消息自身,资产的唯一性与幂等本
+	// 来就由结果锚 source_key 保证。
+	recordRequestSourceKey := requestSourceKey
+	if !found {
+		recordRequestSourceKey = data.ExchangeSourceKey
+	}
 	_, created, err := a.manager.store.RecordObservedWechatContact(
 		store.WechatContactAssetRequest{
 			ProfileID:         profileID,
 			Platform:          profile.Platform,
 			AccountRef:        profile.AccountRef,
 			ConversationRef:   conversationRef,
-			RequestSourceKey:  requestSourceKey,
+			RequestSourceKey:  recordRequestSourceKey,
 			ExchangeSourceKey: data.ExchangeSourceKey,
 			PeerWechat:        data.PeerWechat,
 			ObservedAtMs:      data.ObservedAt,

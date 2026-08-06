@@ -7946,6 +7946,117 @@ test('M5-B 微信结果只读面区分两种 105→259 origin，并在歧义或�
   }
 })
 
+// 2026-08-06 甲方裁决:收号改认结果消息自身。真机故障(客户机 2026-08-06)是我方
+// 那张请求卡早已滚出平台会话首屏窗口,数组里只剩带号的结果消息,旧实现锚不到卡
+// 即阴性,收号从延迟恶化为永久失败。带锚形态(acceptWechat 配套验证读)必须逐字
+// 照旧,故每段都同时回归带锚行为。
+test('M5-B 微信结果只读面无锚形态:请求卡不在窗口内仍收号,带锚形态照旧要求锚', async () => {
+  const fixture = installM3SendFixture()
+  try {
+    const reset = () => fixture.rows.splice(0, fixture.rows.length)
+    const readNoAnchor = () => zhilianTestHooks.mainReadWechatExchangeOutcome(
+      fixture.conversationRef,
+      null,
+      null,
+      null,
+    )
+    const readAnchored = (requestID) => zhilianTestHooks.mainReadWechatExchangeOutcome(
+      fixture.conversationRef,
+      m3Hash(`source-v1|${requestID}`),
+      null,
+      null,
+    )
+
+    // 我方发起(originType=1):候选人点同意,259 归对方(in)。数组里没有请求卡。
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'origin-one-result',
+      type: 259,
+      originType: 1,
+      from: fixture.peerRef,
+      userWeChat: 'peer_no_anchor',
+      staffWeChat: 'staff_no_anchor',
+    })
+    assert.deepEqual(await readNoAnchor(), {
+      confirmed: true,
+      exchangeSourceKey: m3Hash('source-v1|origin-one-result'),
+      peerWechat: 'peer_no_anchor',
+    })
+    // 同一份数据带锚时照旧阴性——带锚路径没有被放宽。
+    assert.deepEqual(await readAnchored('absent-request'), { confirmed: false })
+
+    // 形态 A(候选人发起 originType=2,259 归我方 out)无锚同样认。
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'origin-two-result',
+      type: 259,
+      originType: 2,
+      from: fixture.staffId,
+      userWeChat: 'peer_form_a',
+      staffWeChat: 'staff_form_a',
+    })
+    assert.deepEqual(await readNoAnchor(), {
+      confirmed: true,
+      exchangeSourceKey: m3Hash('source-v1|origin-two-result'),
+      peerWechat: 'peer_form_a',
+    })
+
+    // 多条结果消息:带锚形态判歧义阴性,无锚形态按"满足条件的最新一条即本次"取末条。
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'older-result',
+      type: 259,
+      originType: 1,
+      from: fixture.peerRef,
+      userWeChat: 'peer_older',
+      staffWeChat: 'staff_older',
+    })
+    appendM5BWechatRow(fixture, {
+      idServer: 'newer-result',
+      type: 259,
+      originType: 1,
+      from: fixture.peerRef,
+      userWeChat: 'peer_newer',
+      staffWeChat: 'staff_newer',
+    })
+    assert.deepEqual(await readNoAnchor(), {
+      confirmed: true,
+      exchangeSourceKey: m3Hash('source-v1|newer-result'),
+      peerWechat: 'peer_newer',
+    })
+
+    // 判据本身一条都不放宽:方向与 originType 配不上即不是结果消息。
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'mismatched-pair',
+      type: 259,
+      originType: 1,
+      from: fixture.staffId,
+      userWeChat: 'peer_mismatch',
+      staffWeChat: 'staff_mismatch',
+    })
+    assert.deepEqual(await readNoAnchor(), { confirmed: false })
+
+    // 双微信字段必须齐全。
+    reset()
+    appendM5BWechatRow(fixture, {
+      idServer: 'missing-staff-field',
+      type: 259,
+      originType: 1,
+      from: fixture.peerRef,
+      userWeChat: 'peer_only',
+    })
+    assert.deepEqual(await readNoAnchor(), { confirmed: false })
+
+    // 只有请求卡、没有结果消息:无号可收,阴性。
+    reset()
+    appendM5BWechatRow(fixture, { idServer: 'only-a-request' })
+    assert.deepEqual(await readNoAnchor(), { confirmed: false })
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('M5-B 卡片 observer 只接受 baseline 后严格 +1，并返回规范 hash 与 sourceKey', async () => {
   const fixture = installM3SendFixture()
   try {

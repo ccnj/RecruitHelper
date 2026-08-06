@@ -310,8 +310,14 @@ func TestCommunicationV4EventActionPatrolMissingPhraseIsolatesOnlySourceProfile(
 		t.Fatalf("缺话术隔离误伤其他档案: aggregate=%+v err=%v",
 			healthyAggregate, err)
 	}
-	if len(h.runner.names()) != 0 {
-		t.Fatalf("缺话术不得构造任何 effect: %+v", h.runner.names())
+	// 缺话术隔离的是 effectful 动作。2026-08-06 甲方裁决取消收号的请求锚定后,
+	// 账本里没有请求卡的档案也会被派 readonly 收号读——它无副作用、不推进任何
+	// 业务状态,收到的号留待人工解除隔离后使用,不属于本用例要防的 effect。
+	for _, name := range h.runner.names() {
+		if name != protocol.PrimChatReadThread &&
+			name != protocol.PrimChatReadWechatExchangeOutcome {
+			t.Fatalf("缺话术不得构造任何 effect: %+v", h.runner.names())
+		}
 	}
 }
 

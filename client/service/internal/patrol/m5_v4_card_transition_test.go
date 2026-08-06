@@ -344,9 +344,11 @@ func TestCommunicationV4WechatAcceptedCollectsContactBeforeEventProjection(t *te
 		switch request.Name {
 		case protocol.PrimChatReadWechatExchangeOutcome:
 			args := decodeArgs[protocol.ChatReadWechatExchangeOutcomeArgs](t, request)
+			// 2026-08-06 甲方裁决:收号读不再携带请求锚(页面首屏窗口未必还挂着
+			// 那张请求卡);会话仍必须精确锚定。
 			if args.ConversationRef != fixture.key.ConversationRef ||
-				args.RequestSourceKey != fixture.sourceKey {
-				t.Fatalf("微信结果回读未锚定原卡片: %+v", args)
+				args.RequestSourceKey != "" {
+				t.Fatalf("微信结果回读参数不符: %+v", args)
 			}
 			return protocol.ChatReadWechatExchangeOutcomeData{
 				Confirmed:         true,

@@ -282,7 +282,9 @@ func TestCollectExchangedWechatContactRecordsAssetAndEnqueues(t *testing.T) {
 	}
 }
 
-// 形态 A 兜底:接受动作当场没取到号(259 晚到)时,本触发器按 in 请求卡为锚补收。
+// 形态 A 兜底:接受动作当场没取到号(259 晚到)时,本触发器补收。
+// 2026-08-06 甲方裁决后不再把请求锚传给手(页面首屏窗口未必还挂着那张卡),
+// 但账本里有请求卡时,资产留档仍记它——与 acceptWechat 落账口径一致。
 func TestCollectExchangedWechatContactCollectsCandidateInitiatedForm(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedCandidateInitiatedWechatConversation(t, h, "candidate-initiated")
@@ -306,9 +308,8 @@ func TestCollectExchangedWechatContactCollectsCandidateInitiatedForm(t *testing.
 	if err := runCollect(t, h, fixture); err != nil {
 		t.Fatal(err)
 	}
-	if anchored != fixture.inviteSourceKey {
-		t.Fatalf("形态 A 必须锚在候选人那张 in 请求卡: got=%q want=%q",
-			anchored, fixture.inviteSourceKey)
+	if anchored != "" {
+		t.Fatalf("收号读不得再携带请求锚: got=%q", anchored)
 	}
 	assets, err := h.db.ContactAssetsByProfile(fixture.profileID)
 	if err != nil || len(assets) != 1 ||
@@ -323,14 +324,27 @@ func TestCollectExchangedWechatContactCollectsCandidateInitiatedForm(t *testing.
 	}
 }
 
-// 账本里没有任何请求卡时无锚可用:本触发器必须完全不介入,不拿结果卡凑数。
-func TestCollectExchangedWechatContactWithoutRequestCardStaysSilent(t *testing.T) {
+// 账本里没有任何请求卡时照常收号(2026-08-06 甲方裁决):号的载体是结果消息,
+// 请求卡只用于资产留档;拿不到留档锚就退化为结果消息自身,不因此放弃收号。
+// 旧行为(无锚即完全不介入)会让这类会话永远收不到号。
+func TestCollectExchangedWechatContactWithoutRequestCardStillCollects(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedExchangedWechatConversation(t, h, "no-request-card", false)
+	exchangeSourceKey := strings.Repeat("e", 64)
 	h.runner.handler = func(request RunRequest) (any, error) {
 		if request.Name == protocol.PrimChatReadWechatExchangeOutcome {
-			t.Errorf("无请求卡锚时不得派发收号读")
-			return nil, errors.New("unexpected dispatch")
+			var args protocol.ChatReadWechatExchangeOutcomeArgs
+			if err := json.Unmarshal(request.Args, &args); err != nil {
+				t.Errorf("收号读参数解析失败: %v", err)
+				return nil, errors.New("bad args")
+			}
+			if args.RequestSourceKey != "" {
+				t.Errorf("收号读不得携带请求锚: %q", args.RequestSourceKey)
+			}
+			return protocol.ChatReadWechatExchangeOutcomeData{
+				Confirmed: true, ExchangeSourceKey: exchangeSourceKey,
+				PeerWechat: "synthetic-peer-wechat-b", ObservedAt: h.clock.Now().UnixMilli(),
+			}, nil
 		}
 		return defaultHandler(request)
 	}
@@ -338,11 +352,13 @@ func TestCollectExchangedWechatContactWithoutRequestCardStaysSilent(t *testing.T
 		t.Fatal(err)
 	}
 	assets, err := h.db.ContactAssetsByProfile(fixture.profileID)
-	if err != nil || len(assets) != 0 {
-		t.Fatalf("无锚时不得建资产: assets=%+v err=%v", assets, err)
+	if err != nil || len(assets) != 1 ||
+		assets[0].Value != "synthetic-peer-wechat-b" {
+		t.Fatalf("无请求卡时仍应收编资产: assets=%+v err=%v", assets, err)
 	}
-	if h.runner.count(protocol.PrimChatReadWechatExchangeOutcome) != 0 {
-		t.Fatalf("无锚时被误派发: %v", h.runner.names())
+	if assets[0].RequestSourceKey != exchangeSourceKey {
+		t.Fatalf("无请求卡时留档锚应退化为结果锚: got=%q want=%q",
+			assets[0].RequestSourceKey, exchangeSourceKey)
 	}
 }
 
