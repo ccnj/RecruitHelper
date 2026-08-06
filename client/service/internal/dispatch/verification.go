@@ -251,6 +251,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
 			Data: mustEncode(protocol.ChatSendMessageData{
 				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint, ObservedAt: observation.ObservedAt,
+				TsApprox: observation.PlatformTsMs,
 			}),
 			Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
 		}
@@ -265,6 +266,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 			},
 			Text: request.Args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
+			PlatformTsMs: observation.PlatformTsMs,
 			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
 		})
 	case protocol.PrimChatSendGreeting:

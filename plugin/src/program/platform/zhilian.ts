@@ -573,6 +573,9 @@ function reportBaselineDrift(
 interface MainObserveStableOutboundResult {
   selected: boolean
   matchingNewServerMessages: number
+  // 唯一命中的新出站消息在平台消息视图中的时间戳(毫秒),仅在
+  // matchingNewServerMessages === 1 且平台数据可解析时携带。
+  matchedTimeMs?: number
 }
 
 type MainCardAction = 'wechatInvite' | 'interviewInvite'
@@ -9294,9 +9297,14 @@ async function mainObserveStableOutbound(
     const finalSessions = (Array.isArray(engine?.sessions) ? engine.sessions : []) as AnyRecord[]
     const finalMatches = finalSessions.filter((item) => clean(item.sessionId) === conversationRef)
     if (finalMatches.length !== 1 || clean(finalMatches[0].peerPartnerId) !== target) return failed()
+    // 与 readThread 的 tsApprox 同一换算:平台偶见秒级时间戳,毫秒阈值以下按秒放大。
+    const matchedTimeMs = newRow.time < 1_000_000_000_000
+      ? Math.trunc(newRow.time * 1000)
+      : Math.trunc(newRow.time)
     return {
       selected: true,
       matchingNewServerMessages: matched ? 1 : 0,
+      ...(matched && matchedTimeMs > 0 ? { matchedTimeMs } : {}),
     }
   } catch {
     return failed()
@@ -12129,7 +12137,15 @@ export async function sendZhilianMessage(
         }
         const observedAt = Date.now()
         await ctx.progress('已从当前实时消息时间线确认唯一新已发文本', 100)
-        return { conversationRef: args.conversationRef, contentHash, observedAt }
+        return {
+          conversationRef: args.conversationRef,
+          contentHash,
+          observedAt,
+          // 平台不提供可解析时间时字段缺席;禁止以本机时钟合成(契约 §4.5)。
+          ...(typeof observed.matchedTimeMs === 'number' && observed.matchedTimeMs > 0
+            ? { tsApprox: observed.matchedTimeMs }
+            : {}),
+        }
       }
     } catch (error) {
       if (error instanceof ZhilianPlatformError && error.sideEffect === 'possible') throw error
