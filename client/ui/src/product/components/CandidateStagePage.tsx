@@ -133,7 +133,6 @@ export function CandidateStagePage({
                   <span>{candidate.jobName}</span>
                   <time>{candidate.lastActiveAt ?? '时间未知'}</time>
                 </div>
-                {candidate.unreadCount > 0 && <span className="rh-unread-badge">{candidate.unreadCount}</span>}
                 <ProductIcon className="rh-row-chevron" name="chevron" size={17} />
               </button>
             ))}
