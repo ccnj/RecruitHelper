@@ -29,22 +29,62 @@ const (
 	CandidateScreenshotKindResume = "resume"
 )
 
+// WechatExchangeInitiator* 是微信互加通知行事件元数据里的发起方枚举:入队时按
+// 请求卡方向判定一次,供 runner 裁决 2 小时并发窗口(2026-08-06 甲方裁决)。
+const (
+	WechatExchangeInitiatorPeer    = "peer"    // 候选人主动发起换微信
+	WechatExchangeInitiatorSelf    = "self"    // 我方发起邀请被接受
+	WechatExchangeInitiatorUnknown = "unknown" // 判不出,行为等同我方发起(立即发)
+)
+
+type wechatAddedPayload struct {
+	ExchangeInitiator string `json:"exchangeInitiator"`
+}
+
+func encodeWechatAddedPayload(initiator string) string {
+	body, err := json.Marshal(wechatAddedPayload{ExchangeInitiator: initiator})
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
+// WechatAddedExchangeInitiator 解析微信互加通知行的发起方;历史行("{}")、解析
+// 失败或值越界一律 unknown——unknown 的行为方向是立即发送,不会押住通知。
+func WechatAddedExchangeInitiator(payloadJSON string) string {
+	var payload wechatAddedPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return WechatExchangeInitiatorUnknown
+	}
+	switch payload.ExchangeInitiator {
+	case WechatExchangeInitiatorPeer, WechatExchangeInitiatorSelf:
+		return payload.ExchangeInitiator
+	default:
+		return WechatExchangeInitiatorUnknown
+	}
+}
+
 // enqueueNotificationTx 在业务事务内幂等入队;已存在同 EventKey 时静默忽略。
+// payloadJSON 是该行的事件元数据(空串按 "{}" 落库),不得携带候选人明文。
 func enqueueNotificationTx(
 	tx *gorm.DB,
 	notifyType string,
 	eventKey string,
 	profileID string,
+	payloadJSON string,
 	at time.Time,
 ) error {
 	if tx == nil || strings.TrimSpace(eventKey) == "" || strings.TrimSpace(profileID) == "" {
 		return errors.New("通知入队参数不完整")
 	}
+	if strings.TrimSpace(payloadJSON) == "" {
+		payloadJSON = "{}"
+	}
 	row := NotificationOutbox{
 		NotifyType:  notifyType,
 		EventKey:    eventKey,
 		ProfileID:   profileID,
-		PayloadJSON: "{}",
+		PayloadJSON: payloadJSON,
 		Status:      NotificationStatusPending,
 		CreatedAt:   at,
 		UpdatedAt:   at,

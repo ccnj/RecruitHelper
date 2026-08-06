@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
+
+	"recruithelper/contract/gen/go/protocol"
 )
 
 const (
@@ -250,16 +253,50 @@ func upsertWechatContactAssetTx(
 	}
 	// 换微信成功的权威时点即 ContactAsset 创建;两条收编路径(候选人主动接受
 	// 与我方邀请被接受)在此汇合,运营通知同事务幂等入队(每候选人终身一次)。
+	// 发起方在此一次性判定入元数据:2 小时并发窗口只对候选人主动的行生效
+	// (2026-08-06 甲方裁决),发送时刻不再回查请求卡。
 	if err := enqueueNotificationTx(
 		tx,
 		NotificationTypeWechatAdded,
 		"wechatAdded:"+req.ProfileID,
 		req.ProfileID,
+		encodeWechatAddedPayload(wechatExchangeInitiatorTx(tx, req)),
 		req.RecordedAt,
 	); err != nil {
 		return nil, false, err
 	}
 	return asset, true, nil
+}
+
+// wechatExchangeInitiatorTx 按请求卡方向判定这次换微信由谁发起:in=候选人主动、
+// out=我方邀请。请求卡查不到或方向异常一律 unknown,行为上等同我方发起(立即
+// 发送)——宁可提早通知,不押错。m7 收号兜底把 RequestSourceKey 记成结果卡时
+// (形态 A 的结果卡投影为 out 方向),同样落回立即发送,属已接受的降级。
+func wechatExchangeInitiatorTx(tx *gorm.DB, req WechatContactAssetRequest) string {
+	var message Message
+	err := tx.
+		Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND source_key = ?",
+			req.Platform,
+			req.AccountRef,
+			req.ConversationRef,
+			req.RequestSourceKey,
+		).
+		First(&message).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("换微信发起方判定查询失败,按 unknown 入队", "profileId", req.ProfileID, "err", err)
+		}
+		return WechatExchangeInitiatorUnknown
+	}
+	switch message.Direction {
+	case string(protocol.MessageDirectionIn):
+		return WechatExchangeInitiatorPeer
+	case string(protocol.MessageDirectionOut):
+		return WechatExchangeInitiatorSelf
+	default:
+		return WechatExchangeInitiatorUnknown
+	}
 }
 
 func contactAssetByEffectIntentTx(
