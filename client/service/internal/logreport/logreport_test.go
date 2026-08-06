@@ -3,6 +3,7 @@ package logreport
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -182,9 +183,12 @@ func TestReporterReaddsDropCountWhenUploadFails(t *testing.T) {
 func TestReporterSplitsOversizedQueue(t *testing.T) {
 	// 后台限批 100 条。整队一次性送过去会被整批 422 拒，那是把"后台暂时连不上"
 	// 变成"恢复后一条也传不上"。
-	reporter, uploader := newTestReporter(Deps{QueueLimit: 300, BatchSize: 1000, FlushWait: time.Hour})
+	reporter, uploader := newTestReporter(Deps{
+		QueueLimit: 300, BatchSize: 1000, FlushWait: time.Hour, RateLimitPerMinute: 1000,
+	})
+	// 每条 message 不同,好绕开指纹合并 —— 这条测试要验的是切批,不是节流。
 	for index := 0; index < 250; index++ {
-		reporter.Report(Item{Message: "x"})
+		reporter.Report(Item{Message: fmt.Sprintf("第 %d 条", index)})
 	}
 
 	reporter.flush(context.Background())

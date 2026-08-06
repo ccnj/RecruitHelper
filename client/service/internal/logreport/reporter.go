@@ -39,6 +39,10 @@ type Deps struct {
 	QueueLimit int
 	BatchSize  int
 	FlushWait  time.Duration
+	// MergeWindow / RateLimitPerMinute 是两道节流的参数,零值取默认。
+	// 只有测试会设它们 —— 生产上没有配置面,裁决要求的是"必须节流",不是"可调"。
+	MergeWindow        time.Duration
+	RateLimitPerMinute int
 }
 
 // Reporter 收事件、攒批、上传。
@@ -51,6 +55,13 @@ type Reporter struct {
 	// wake 让"攒够一批"能立刻触发发送,不必干等到下一个 flush 周期。
 	// 容量 1 的缓冲 channel:通知的语义是"有活干",多次通知合并成一次即可。
 	wake chan struct{}
+
+	// 节流状态(见 throttle.go)。windows 按指纹合并同类事件;rate* 是全局速率闸。
+	mergeWindow  time.Duration
+	windows      map[string]*mergeWindow
+	rateLimit    int
+	rateCount    int
+	rateWindowAt time.Time
 }
 
 func New(deps Deps) *Reporter {
@@ -66,22 +77,51 @@ func New(deps Deps) *Reporter {
 	if deps.FlushWait <= 0 {
 		deps.FlushWait = defaultFlushWait
 	}
-	return &Reporter{deps: deps, wake: make(chan struct{}, 1)}
+	if deps.MergeWindow <= 0 {
+		deps.MergeWindow = defaultMergeWindow
+	}
+	if deps.RateLimitPerMinute <= 0 {
+		deps.RateLimitPerMinute = defaultRateLimitPerMinute
+	}
+	return &Reporter{
+		deps:        deps,
+		wake:        make(chan struct{}, 1),
+		mergeWindow: deps.MergeWindow,
+		windows:     make(map[string]*mergeWindow),
+		rateLimit:   deps.RateLimitPerMinute,
+	}
 }
 
 // Report 入队一条事件。**绝不阻塞、绝不返回错误、绝不 panic** —— 它挂在 slog
 // 的写路径上,任何一处阻塞都会顺着日志调用蔓延到业务链路里去。
+//
+// 两道节流在这里生效(见 throttle.go):同指纹窗口内只放行第一条,其余计数、
+// 窗口末补一条汇总;全局每分钟额度用完后一律丢弃并计数。
 func (r *Reporter) Report(item Item) {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	if len(r.queue) >= r.deps.QueueLimit {
-		// 丢最旧的:上报的价值随时间衰减,新的故障比半小时前那条更值得看。
-		r.queue = r.queue[1:]
-		r.dropped++
+	// 规范化两个字段:调用方(尤其是将来接进来的手侧转发)未必填。零值 MergedCount
+	// 会撞上后台模型的 ge=1 校验,零值时刻会让前台看到 1970 年。
+	if item.MergedCount <= 0 {
+		item.MergedCount = 1
 	}
-	r.queue = append(r.queue, item)
+	now := r.deps.Now()
+	if item.OccurredAt.IsZero() {
+		item.OccurredAt = now
+	}
+	r.mu.Lock()
+	if !r.admit(item, now) {
+		r.mu.Unlock()
+		return
+	}
+	if !r.allowByRate(now) {
+		// 速率闸挡下的照样计入丢弃 —— 裁决要求丢弃量如实告知。
+		r.dropped++
+		r.mu.Unlock()
+		return
+	}
+	r.pushLocked(item)
 	full := len(r.queue) >= r.deps.BatchSize
 	r.mu.Unlock()
 
@@ -91,6 +131,16 @@ func (r *Reporter) Report(item Item) {
 		default: // 已经有一个待处理的通知了,合并掉
 		}
 	}
+}
+
+// pushLocked 把一条事件放进队列。队列满时丢最旧的:上报的价值随时间衰减,
+// 新的故障比半小时前那条更值得看。调用方必须持有 r.mu。
+func (r *Reporter) pushLocked(item Item) {
+	if len(r.queue) >= r.deps.QueueLimit {
+		r.queue = r.queue[1:]
+		r.dropped++
+	}
+	r.queue = append(r.queue, item)
 }
 
 // Run 跑攒批循环,直到 ctx 结束。
@@ -129,6 +179,9 @@ func (r *Reporter) flush(ctx context.Context) {
 	}
 
 	r.mu.Lock()
+	// 先收走过期的合并窗口:它们的汇总条要跟这一批一起走,不然"这 5 分钟又发生了
+	// N 次"会一直拖到下次有新事件时才发出去。
+	r.sweepWindows(r.deps.Now())
 	if len(r.queue) == 0 && r.dropped == 0 {
 		r.mu.Unlock()
 		return
