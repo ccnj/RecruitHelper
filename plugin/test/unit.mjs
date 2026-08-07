@@ -12537,6 +12537,53 @@ test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其�
   }
 })
 
+// chat.readPeerPhone MAIN:三形态 2026-08-06 真机踩点回归。
+// 真实号=复制按钮带 data-clipboard-text;无号=电话容器整段空缺;虚拟号=有显示
+// 文本但无复制按钮。后两者都必须落 phone=null,显示文本永远不作数据源。
+function installPeerPhonePanelFixture(variant) {
+  const original = { document: globalThis.document }
+  const copyNode = {
+    getAttribute: (name) => (name === 'data-clipboard-text' ? '13801995730' : null),
+  }
+  const nameNode = { textContent: ' 洪建辉 ' }
+  const panelRoot = {
+    querySelector(selector) {
+      if (selector === '.new-resume-basic__name-wrapper') return nameNode
+      if (selector === '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy') {
+        return variant === 'real' ? copyNode : null
+      }
+      return null
+    },
+  }
+  globalThis.document = {
+    querySelector(selector) {
+      if (variant === 'noPanel') return null
+      return selector === '.new-resume-basic' ? panelRoot : null
+    },
+  }
+  return {
+    restore() {
+      globalThis.document = original.document
+    },
+  }
+}
+
+test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,虚拟号与缺号都返回 null', () => {
+  for (const [variant, want] of [
+    ['real', { phone: '13801995730', panelName: '洪建辉' }],
+    // 无号(容器空)与虚拟号(有显示文本无复制按钮)在选择器层同构:都查不到复制按钮。
+    ['absentOrVirtual', { phone: null, panelName: '洪建辉' }],
+    ['noPanel', { phone: null, panelName: null }],
+  ]) {
+    const fixture = installPeerPhonePanelFixture(variant)
+    try {
+      assert.deepEqual(zhilianTestHooks.mainReadPeerPhone(), want)
+    } finally {
+      fixture.restore()
+    }
+  }
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {

@@ -25,46 +25,72 @@ func fullSnapshot() *store.NotificationRenderSnapshot {
 		WechatState:         "exchanged",
 		WechatID:            "wx-demo-88",
 		InterviewStartsAtMs: int64Ptr(starts),
+		InterviewMethod:     "wechatVideo",
 		ChatShot:            &store.CandidateScreenshot{BlobRef: "sha256:" + strings.Repeat("a", 64)},
 		ResumeShot:          &store.CandidateScreenshot{BlobRef: "sha256:" + strings.Repeat("b", 64)},
 	}
 }
 
 func TestRenderInterviewAccepted(t *testing.T) {
-	text := renderInterviewAccepted(fullSnapshot(), "客户甲")
+	// 联系方式 2026-08-06 起为两行、2026-08-07 修订:有号不再跟状态废话,
+	// 字段统一"字段: 值",面试时间下带方式行。
+	withPhone := fullSnapshot()
+	withPhone.PhoneNumber = "13901234567"
+	text := renderInterviewAccepted(withPhone, "客户甲")
 	for _, want := range []string{
 		"【面试确认】测试候选(客户甲)",
-		"面试时间:07-30(周四) 12:30",
-		"联系方式:微信 wx-demo-88(已成功交换微信)",
-		"职位:资深销售",
+		"面试时间: 07-30(周四) 12:30",
+		"方式: 微信视频",
+		"微信: wx-demo-88",
+		"手机号: 13901234567",
+		"职位: 资深销售",
 		"聊天记录、简历见下图",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("约面文案缺少 %q:\n%s", want, text)
 		}
 	}
+	if strings.Contains(text, "联系方式") || strings.Contains(text, "已成功交换微信") {
+		t.Fatalf("旧的联系方式单行/状态废话不应再出现:\n%s", text)
+	}
+
+	// 手机号与换到的微信号同串时去重,只留微信行。
+	sameNumber := fullSnapshot()
+	sameNumber.WechatID = "13801995730"
+	sameNumber.PhoneNumber = "13801995730"
+	text = renderInterviewAccepted(sameNumber, "")
+	if !strings.Contains(text, "微信: 13801995730") || strings.Contains(text, "手机号:") {
+		t.Fatalf("同号未去重:\n%s", text)
+	}
+
+	// 线下面试方式文案。
+	onsite := fullSnapshot()
+	onsite.InterviewMethod = "onsite"
+	if text := renderInterviewAccepted(onsite, ""); !strings.Contains(text, "方式: 线下面试") {
+		t.Fatalf("线下面试方式行缺失:\n%s", text)
+	}
 
 	bare := fullSnapshot()
 	bare.WechatID = ""
 	bare.WechatState = "invited"
 	bare.InterviewStartsAtMs = nil
+	bare.InterviewMethod = ""
 	bare.ChatShot = nil
 	bare.ResumeShot = nil
 	text = renderInterviewAccepted(bare, "")
 	for _, want := range []string{
 		"【面试确认】测试候选",
-		"面试时间:未获取到,请在客户端核对",
-		"联系方式:未获取(已邀微信)",
+		"面试时间: 未获取到,请在客户端核对",
+		"微信: 未获取(已邀微信)",
 		"(本次未附截图)",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("降级约面文案缺少 %q:\n%s", want, text)
 		}
 	}
-	mobile := fullSnapshot()
-	mobile.WechatID = "13800138000"
-	if text := renderInterviewAccepted(mobile, ""); !strings.Contains(text, "手机 13800138000") {
-		t.Fatalf("手机号应标手机: %s", text)
+	// 缺号/方式未知时对应行整行省略,不出现残句。
+	if strings.Contains(text, "手机号:") || strings.Contains(text, "方式:") {
+		t.Fatalf("缺失项不得渲染残行:\n%s", text)
 	}
 }
 
@@ -72,19 +98,22 @@ func TestRenderWechatAdded(t *testing.T) {
 	text := renderWechatAdded(fullSnapshot(), "客户乙", false)
 	for _, want := range []string{
 		"【微信互加】测试候选(客户乙)",
-		"联系方式:微信 wx-demo-88(已成功交换微信)",
-		"当前状态:已约面 · 面试 07-30(周四) 12:30",
-		"职位:资深销售",
+		"微信: wx-demo-88",
+		"当前状态: 已约面 · 面试 07-30(周四) 12:30",
+		"职位: 资深销售",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("互加文案缺少 %q:\n%s", want, text)
 		}
 	}
+	if strings.Contains(text, "已成功交换微信") {
+		t.Fatalf("有号时不得再跟状态废话:\n%s", text)
+	}
 	onlyChat := fullSnapshot()
 	onlyChat.MainStatus = store.CandidateProfileCommunicating
 	onlyChat.ResumeShot = nil
 	text = renderWechatAdded(onlyChat, "", false)
-	if !strings.Contains(text, "当前状态:沟通中") || !strings.Contains(text, "聊天记录见下图") ||
+	if !strings.Contains(text, "当前状态: 沟通中") || !strings.Contains(text, "聊天记录见下图") ||
 		strings.Contains(text, "简历见下图") && strings.Contains(text, "、简历") {
 		t.Fatalf("仅聊天图提示不符: %s", text)
 	}
@@ -97,17 +126,17 @@ func TestProfileLineDegradesPerField(t *testing.T) {
 		s.Age, s.Education, s.City, s.DesiredSalary = "35岁", "本科", "上海", "20-30k"
 		return s
 	}
-	if got := profileLine(base()); got != "候选人:35岁/本科/上海 · 期望 20-30k" {
+	if got := profileLine(base()); got != "候选人: 35岁/本科/上海 · 期望 20-30k" {
 		t.Fatalf("完整画像行不符: %q", got)
 	}
 	only := base()
 	only.Education, only.City = "", ""
-	if got := profileLine(only); got != "候选人:35岁 · 期望 20-30k" {
+	if got := profileLine(only); got != "候选人: 35岁 · 期望 20-30k" {
 		t.Fatalf("缺学历/城市未逐项省略: %q", got)
 	}
 	noSalary := base()
 	noSalary.DesiredSalary = "  "
-	if got := profileLine(noSalary); got != "候选人:35岁/本科/上海" {
+	if got := profileLine(noSalary); got != "候选人: 35岁/本科/上海" {
 		t.Fatalf("缺薪资未省略后缀: %q", got)
 	}
 	salaryOnly := base()
@@ -125,7 +154,7 @@ func TestProfileLineDegradesPerField(t *testing.T) {
 	if strings.Contains(text, "候选人:") || strings.Contains(text, "期望 ") {
 		t.Fatalf("四项全缺不得留下画像残句:\n%s", text)
 	}
-	if !strings.Contains(text, "联系方式:") || !strings.Contains(text, "当前状态:") {
+	if !strings.Contains(text, "微信: ") || !strings.Contains(text, "当前状态:") {
 		t.Fatalf("画像缺失影响了其它行:\n%s", text)
 	}
 }
@@ -466,7 +495,7 @@ func TestTickRendersInterviewSupplementTitle(t *testing.T) {
 	if !strings.HasPrefix(capture.texts[0], "【面试确认--补微信号】") {
 		t.Fatalf("补号标题未改写:\n%s", capture.texts[0])
 	}
-	if !strings.Contains(capture.texts[0], "微信 wx-demo-88") {
+	if !strings.Contains(capture.texts[0], "微信: wx-demo-88") {
 		t.Fatalf("补号正文必须带上号:\n%s", capture.texts[0])
 	}
 }

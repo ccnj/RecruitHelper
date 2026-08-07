@@ -506,6 +506,18 @@ type CandidateScreenshot struct {
 	CreatedAt    time.Time
 }
 
+// CandidatePhoneObservation 是取证顺访经 chat.readPeerPhone 读到并通过收编
+// 判定的候选人电话观察事实行(2026-08-06 甲方裁决)。追加行、消费方取最新、
+// 不物理删除。Phone 去处比照微信号收口:只进运营通知 webhook 正文与 /admin
+// 诊断面,json:"-" 防止被投影误序列化;不进普通日志、审计 detail、AI 请求。
+type CandidatePhoneObservation struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID    string `gorm:"not null;index"`
+	Phone        string `json:"-" gorm:"not null"`
+	ObservedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
 type ProfileCommunicationAutomationStatus string
 
 const (

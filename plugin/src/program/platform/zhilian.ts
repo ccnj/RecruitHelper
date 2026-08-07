@@ -32,6 +32,8 @@ import type {
   ChatReadListData,
   ChatReadThreadArgs,
   ChatReadThreadData,
+  ChatReadPeerPhoneArgs,
+  ChatReadPeerPhoneData,
   ChatReadWechatExchangeOutcomeArgs,
   ChatReadWechatExchangeOutcomeData,
   ChatSendGreetingArgs,
@@ -147,6 +149,8 @@ export type ZhilianReadWechatExchangeOutcomeArgs = ChatReadWechatExchangeOutcome
 export type ZhilianReadWechatExchangeOutcomeData = ChatReadWechatExchangeOutcomeData
 export type ZhilianSendInviteCardArgs = ChatSendInviteCardArgs
 export type ZhilianSendInviteCardData = ChatSendInviteCardData
+export type ZhilianReadPeerPhoneArgs = ChatReadPeerPhoneArgs
+export type ZhilianReadPeerPhoneData = ChatReadPeerPhoneData
 
 interface MainProbeResult {
   pageKind: 'im' | 'recommend' | 'other'
@@ -12796,6 +12800,66 @@ export async function readZhilianWechatExchangeOutcome(
   return data
 }
 
+interface MainPeerPhonePanelResult {
+  phone: string | null
+  panelName: string | null
+}
+
+// chat.readPeerPhone@1 的页面读取:右侧简历侧栏的候选人电话与面板姓名。
+// 只认「复制」按钮的 data-clipboard-text 标准属性——虚拟号形态有号无复制按钮、
+// 无号形态整段空缺,都自然落到 phone=null(2026-08-06 生产页面三形态直读)。
+function mainReadPeerPhone(): MainPeerPhonePanelResult {
+  const root = document.querySelector('.new-resume-basic')
+  if (!root) return { phone: null, panelName: null }
+  const nameText = root.querySelector('.new-resume-basic__name-wrapper')?.textContent?.trim()
+  const copyNode = root.querySelector(
+    '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy',
+  )
+  const raw = copyNode?.getAttribute('data-clipboard-text')?.trim()
+  return { phone: raw || null, panelName: nameText || null }
+}
+
+// chat.readPeerPhone@1:只服务运营通知取证顺访的降级型感知,任何失败只产生
+// 「缺号」。号码与面板姓名原样返回,接受判定(格式、姓名首字核对)全在脑侧。
+export async function readZhilianPeerPhone(
+  args: ZhilianReadPeerPhoneArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianReadPeerPhoneData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  await assertCurrentThreadRoute(
+    tab.id,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    'none',
+  )
+  const observed = await runMain(tab.id, mainReadPeerPhone, [])
+  ctx.checkpoint()
+  await assertCurrentThreadRoute(
+    tab.id,
+    args.conversationRef,
+    expectedPrincipalFingerprint,
+    'none',
+  )
+  const data: ZhilianReadPeerPhoneData = {
+    ...(observed.phone ? { phone: observed.phone } : {}),
+    ...(observed.panelName ? { panelName: observed.panelName } : {}),
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.ChatReadPeerPhone, 1, data).length !== 0) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '电话侧栏读取结果不符合当前契约', 'manualOnly')
+  }
+  await ctx.progress(data.phone ? '已读取候选人电话' : '本轮未读到候选人电话', 100)
+  return data
+}
+
 export async function sendZhilianInviteCard(
   args: ZhilianSendInviteCardArgs,
   guards: ZhilianSendGuards,
@@ -13968,6 +14032,7 @@ export const zhilianTestHooks = Object.freeze({
   mainObserveStableOutbound,
   mainObserveStableOutboundCard,
   mainReadWechatExchangeOutcome,
+  mainReadPeerPhone,
   mainPrepareInterviewEditor,
   mainCloseInterviewSuccessModal,
   mainReadThreadPage,

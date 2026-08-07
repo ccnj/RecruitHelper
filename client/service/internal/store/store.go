@@ -100,6 +100,7 @@ func Open(dataDir string) (*Store, error) {
 		&Candidate{},
 		&CandidateProfile{},
 		&ContactAsset{},
+		&CandidatePhoneObservation{},
 		&CommunicationV4Aggregate{},
 		&CommunicationV4ProjectionApplication{},
 		&CommunicationV4EventAction{},
