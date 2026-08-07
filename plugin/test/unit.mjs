@@ -12796,6 +12796,191 @@ test('chat.revealPeerPhone MAIN 点击步只在查看按钮在场时点一次', 
   }
 })
 
+// 邀面成功弹窗清理。2026-08-07 甲方现场:连发两次后页面上叠着两个没关掉的弹窗,
+// 「关注服务号 / 转给同事」——这两个按钮一个都不许碰,点错了就是我方擅自外发。
+// 下面的 fixture 只造出生产代码真正用到的那点 DOM 能力,不引 jsdom(与本文件其余
+// fixture 同一路子)。
+function installInterviewSuccessModalFixture(specs) {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    window: globalThis.window,
+    HTMLElement: globalThis.HTMLElement,
+    KeyboardEvent: globalThis.KeyboardEvent,
+    NodeFilter: globalThis.NodeFilter,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+  }
+  // 虚拟时钟:生产代码的节奏等待是真的 1 秒起步、等弹窗出现是真的 10 秒轮询。
+  // 每次 setTimeout 把时钟推进它请求的那么多毫秒,再立刻执行 —— 生产逻辑一行不改,
+  // 测试不空转。
+  let clock = original.dateNow()
+  Date.now = () => clock
+  const el = (tag, attrs, children = []) => {
+    const node = {
+      tagName: tag.toUpperCase(),
+      attrs,
+      childNodes: [],
+      parentElement: null,
+      isConnected: true,
+      clicks: 0,
+      style: attrs.style ?? {},
+      getAttribute(name) { return this.attrs[name] ?? null },
+      get textContent() {
+        return this.childNodes
+          .map((child) => (child.nodeType === 3 ? child.nodeValue : child.textContent))
+          .join('')
+      },
+      descendants() {
+        const out = []
+        for (const child of this.childNodes) {
+          if (child.nodeType === 3) continue
+          out.push(child, ...child.descendants())
+        }
+        return out
+      },
+      querySelectorAll(selector) {
+        const attr = (node2, name) => node2.getAttribute(name) ?? ''
+        const match = {
+          '.km-modal__close-btn': (n) => attr(n, 'class').split(/\s+/).includes('km-modal__close-btn'),
+          '[class*="close" i]': (n) => /close/i.test(attr(n, 'class')),
+          '[aria-label*="关闭"]': (n) => attr(n, 'aria-label').includes('关闭'),
+          '[aria-label*="close" i]': (n) => /close/i.test(attr(n, 'aria-label')),
+          '[title*="关闭"]': (n) => attr(n, 'title').includes('关闭'),
+        }[selector]
+        if (match === undefined) throw new Error(`fixture 未覆盖选择器 ${selector}`)
+        return this.descendants().filter(match)
+      },
+    }
+    for (const child of children) {
+      if (typeof child === 'string') node.childNodes.push({ nodeType: 3, nodeValue: child, parentElement: node })
+      else { child.parentElement = node; node.childNodes.push(child) }
+    }
+    return node
+  }
+  const wrappers = specs.map((spec) => {
+    const card = el('DIV', { class: 'interview-service-account-modal' }, [
+      ...(spec.closeAttrs === undefined ? [] : [el('IMG', spec.closeAttrs)]),
+      el('DIV', { class: 'title' }, ['面试邀请已发出']),
+      el('DIV', { class: 'sub' }, ['关注服务号接收实时通知']),
+      el('DIV', { class: 'btns' }, [
+        el('BUTTON', { class: 'follow-btn' }, ['关注服务号']),
+        el('BUTTON', { class: 'forward-btn' }, ['转给同事']),
+      ]),
+    ])
+    return el('DIV', {
+      class: 'km-modal__wrapper',
+      style: { position: 'fixed', zIndex: '2000' },
+    }, [card])
+  })
+  const body = el('BODY', {}, wrappers)
+  body.parentElement = null
+  const computeStyle = (node) => ({
+    display: node.removed === true ? 'none' : 'block',
+    visibility: 'visible',
+    position: node.style?.position ?? 'static',
+    zIndex: node.style?.zIndex ?? 'auto',
+  })
+  for (const node of [body, ...body.descendants()]) {
+    node.getClientRects = () => (node.removed === true ? [] : [{ width: 10, height: 10 }])
+  }
+  globalThis.getComputedStyle = computeStyle
+  globalThis.window = { getComputedStyle: computeStyle }
+  globalThis.NodeFilter = { SHOW_TEXT: 4 }
+  globalThis.HTMLElement = { prototype: { click() { this.clicks += 1; this.onClick?.() } } }
+  globalThis.KeyboardEvent = class { constructor(type, init) { Object.assign(this, init, { type }) } }
+  globalThis.setTimeout = (fn, delay) => {
+    clock += typeof delay === 'number' ? delay : 0
+    return original.setTimeout(fn, 0)
+  }
+  const escapes = []
+  globalThis.document = {
+    body,
+    dispatchEvent(event) { escapes.push(event.key); return true },
+    createTreeWalker(root) {
+      const texts = []
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) texts.push(child)
+          else walk(child)
+        }
+      }
+      walk(root)
+      let index = -1
+      return {
+        get currentNode() { return texts[index] },
+        nextNode() { index += 1; return index < texts.length ? texts[index] : null },
+      }
+    },
+  }
+  return {
+    wrappers,
+    escapes,
+    buttons: wrappers.flatMap((wrapper) => wrapper.descendants().filter((n) => n.tagName === 'BUTTON')),
+    closeIcons: wrappers.flatMap((wrapper) => wrapper.descendants().filter((n) => n.tagName === 'IMG')),
+    restore() {
+      globalThis.document = original.document
+      globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.window = original.window
+      globalThis.HTMLElement = original.HTMLElement
+      globalThis.KeyboardEvent = original.KeyboardEvent
+      globalThis.NodeFilter = original.NodeFilter
+      globalThis.setTimeout = original.setTimeout
+      Date.now = original.dateNow
+    },
+  }
+}
+
+test('邀面成功弹窗:两个堆叠的都关掉,「关注服务号」「转给同事」一次都不碰', async () => {
+  // 关闭钮按旧项目考古的类名造:img.interview-service-account-modal__top-close-icon。
+  const closeAttrs = { class: 'interview-service-account-modal__top-close-icon' }
+  const fixture = installInterviewSuccessModalFixture([{ closeAttrs }, { closeAttrs }])
+  try {
+    for (const icon of fixture.closeIcons) {
+      // 平台真实行为:点关闭后弹窗整体消失。
+      icon.onClick = () => { icon.parentElement.parentElement.removed = true }
+    }
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, true, '两个弹窗都该被关掉')
+    assert.equal(outcome.remaining, 0)
+    assert.equal(fixture.closeIcons.every((icon) => icon.clicks === 1), true, '每个弹窗的关闭钮各点一次')
+    assert.equal(fixture.buttons.every((button) => button.clicks === 0), true,
+      '关注服务号/转给同事一个都不许点')
+    assert.deepEqual(fixture.escapes, [], '关闭钮生效时不必再补 Escape')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('邀面成功弹窗:没有关闭钮时补 Escape,仍然一个业务按钮都不点', async () => {
+  const fixture = installInterviewSuccessModalFixture([{}])
+  try {
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, false, '关不掉就得如实说关不掉')
+    assert.equal(outcome.remaining, 1)
+    assert.deepEqual(fixture.escapes, ['Escape', 'Escape'], 'keydown + keyup 各一次')
+    assert.equal(fixture.buttons.every((button) => button.clicks === 0), true)
+    // scene 供 handLog 带回结构:只有标签名与类名,没有任何页面文本。
+    assert.match(outcome.scene, /^DIV\.km-modal__wrapper>noCloseBtn$/)
+    assert.equal(/面试邀请|关注|同事/u.test(outcome.scene), false, 'scene 不得带页面文本')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('邀面成功弹窗:页面上没有弹窗时不空等、不误报', async () => {
+  const fixture = installInterviewSuccessModalFixture([])
+  try {
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.deepEqual(outcome, { found: false, closed: false, remaining: 0, scene: '' })
+    assert.deepEqual(fixture.escapes, [])
+  } finally {
+    fixture.restore()
+  }
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {
