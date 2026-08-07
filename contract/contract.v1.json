@@ -337,6 +337,7 @@
         }
       },
       "DebugInspectSendSurfaceArgs": { "type": "object", "fields": {} },
+      "DebugCapturePageArgs": { "type": "object", "fields": {} },
       "DebugInspectSendSurfaceData": {
         "type": "object",
         "fields": {
@@ -1298,6 +1299,13 @@
       "preconditions": [],
       "execBudgetMs": 10000, "deadlineMs": 30000,
       "note": "激活当前窗口的下一个标签页,肉眼可见;tab 细节只进 evidence/日志"
+    },
+    "debug.capturePage": {
+      "ver": 1, "class": "readonly", "batch": "X",
+      "argsSchema": "DebugCapturePageArgs", "dataSchema": "CaptureScreenshotData",
+      "preconditions": ["blob/1"],
+      "execBudgetMs": 15000, "deadlineMs": 30000,
+      "note": "suspect 现场取证专用(2026-08-07 甲方裁决立案):对平台标签所在窗口的当前可见标签截一帧 JPEG,不滚动、不拼接、不点击、不导航。仅当该窗口活动标签是平台页时才截,否则响亮失败——不得截到使用者的无关页面。图像字节先经 blob/1 PUT 成功,data 只携带 imageBlobRef 引用与元数据,truncated 恒为 false。截图字节是本地业务证据资产,只落同机 blobs,不出站;失败即弃,脑侧不得自动重试,不得因取证失败改变任何业务判定"
     },
     "debug.probeInterviewEditor": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
