@@ -54,13 +54,14 @@ func TestRenderInterviewAccepted(t *testing.T) {
 		t.Fatalf("旧的联系方式单行/状态废话不应再出现:\n%s", text)
 	}
 
-	// 手机号与换到的微信号同串时去重,只留微信行。
+	// 手机号与换到的微信号同串也照出两行:同号去重曾上线又被撤回(2026-08-07
+	// 甲方裁决),"有时有有时没有"比重复更困扰,行的有无只反映采没采到。
 	sameNumber := fullSnapshot()
 	sameNumber.WechatID = "13801995730"
 	sameNumber.PhoneNumber = "13801995730"
 	text = renderInterviewAccepted(sameNumber, "")
-	if !strings.Contains(text, "微信: 13801995730") || strings.Contains(text, "手机号:") {
-		t.Fatalf("同号未去重:\n%s", text)
+	if !strings.Contains(text, "微信: 13801995730") || !strings.Contains(text, "手机号: 13801995730") {
+		t.Fatalf("同号也必须两行齐出:\n%s", text)
 	}
 
 	// 线下面试方式文案。

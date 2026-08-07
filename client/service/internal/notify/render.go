@@ -46,8 +46,9 @@ func formatInterviewTime(startsAtMs *int64) string {
 //
 //	微信: <换到的号>            —— 恒出;号在即换到,不再跟"已成功交换微信"废话,
 //	                              没换到写"未获取(<微信线状态>)",状态此时才有信息量
-//	手机号: <侧栏采到的手机号>  —— 只在电话观察事实存在、且与微信号不同串时出
-//	                              (真机见过换的微信号就是手机号,两行同号很傻)
+//	手机号: <侧栏采到的手机号>  —— 只在电话观察事实存在时出,与微信号同串也照出:
+//	                              同号去重曾上过线又被 2026-08-07 甲方撤回,"有时有
+//	                              有时没有"比重复一行更困扰运营,行的有无只反映采没采到
 func contactLines(snapshot *store.NotificationRenderSnapshot) []string {
 	wechatID := strings.TrimSpace(snapshot.WechatID)
 	wechatLine := "微信: "
@@ -61,7 +62,7 @@ func contactLines(snapshot *store.NotificationRenderSnapshot) []string {
 		wechatLine += wechatID
 	}
 	lines := []string{wechatLine}
-	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" && phone != wechatID {
+	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" {
 		lines = append(lines, "手机号: "+phone)
 	}
 	return lines
