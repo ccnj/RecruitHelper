@@ -506,6 +506,21 @@ type CandidateScreenshot struct {
 	CreatedAt    time.Time
 }
 
+// SuspectSceneShot 是 effectful 命令转 suspect 后的现场截图事实行(2026-08-07
+// 甲方裁决)。图像字节在 blob 内容寻址存储,此处只登记引用与元数据;追加行、
+// 不覆盖更新、不物理删除,保留语义比照运营取证截图。截图只落同机——诊断包
+// 白名单硬排除 blobs/,不出站、不进普通日志、审计 detail 与管理 API 响应正文。
+type SuspectSceneShot struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	MsgID        string `gorm:"not null;index"` // 转 suspect 的那条命令
+	IntentID     string `gorm:"index"`
+	Primitive    string `gorm:"not null"`
+	BlobRef      string `gorm:"not null"`
+	ByteSize     int64  `gorm:"not null"`
+	CapturedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
 // CandidatePhoneObservation 是取证顺访经 chat.readPeerPhone 读到并通过收编
 // 判定的候选人电话观察事实行(2026-08-06 甲方裁决)。追加行、消费方取最新、
 // 不物理删除。Phone 去处比照微信号收口:只进运营通知 webhook 正文与 /admin

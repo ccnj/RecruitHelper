@@ -505,6 +505,11 @@ func (d *Dispatcher) recordVerificationMiss(cmd store.CmdRecord, reason string) 
 			attrs = append(attrs, "handError", msg)
 		}
 		slog.Warn("命令转 suspect(验证耗尽,永不自动重试,待人工裁决)", attrs...)
+		if suspectSceneCaptureWanted(cmd.Name) {
+			// 现场截图取证(2026-08-07 甲方裁决):异步、独立超时、失败即弃;
+			// 不阻塞批次、不重试、不影响任何业务判定。
+			go d.captureSuspectScene(cmd)
+		}
 	}
 }
 
