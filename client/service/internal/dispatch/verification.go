@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
@@ -489,7 +491,38 @@ func (d *Dispatcher) recordVerificationMiss(cmd store.CmdRecord, reason string) 
 		d.clearLease(cmd.MsgID)
 		d.notifyByMsgID(cmd.MsgID)
 		d.releaseSafeRecoveries(cmd.HandID)
+		// 与 fault.go markSuspect 的 suspect.created 同一命名事件:验证耗尽转
+		// suspect 此前只有 Audit 行,日志上报看不见。handError 随行手侧终局的
+		// error.message——招呼 suspect 的现场纪要(平台浮层原话、弹窗状态)就在
+		// 这里。页面文本可进普通日志与日志上报,偶发夹带候选人信息不扫描
+		// 不过滤(2026-08-07 甲方裁决)。
+		attrs := []any{
+			logreport.Event(logreport.EventSuspectCreated),
+			"handId", cmd.HandID, "msgId", cmd.MsgID, "name", cmd.Name,
+			"idemKey", cmd.IdemKey, "reason", "verification exhausted: " + reason,
+		}
+		if msg := handResultErrorMessage(cmd.ResultBody); msg != "" {
+			attrs = append(attrs, "handError", msg)
+		}
+		slog.Warn("命令转 suspect(验证耗尽,永不自动重试,待人工裁决)", attrs...)
 	}
+}
+
+// handResultErrorMessage 从命令终局 result 的审计 JSON 里取手侧 error.message。
+// 解析失败或字段缺失都返回空串:它只服务日志随行,不参与任何裁决。
+func handResultErrorMessage(resultBody string) string {
+	if resultBody == "" {
+		return ""
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(resultBody), &body); err != nil {
+		return ""
+	}
+	return body.Error.Message
 }
 
 func mustEncode(value any) json.RawMessage {
