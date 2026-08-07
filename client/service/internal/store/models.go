@@ -539,6 +539,15 @@ type CandidatePhoneObservation struct {
 	CreatedAt    time.Time
 }
 
+// PhoneRevealAttempt 是「查看电话」揭示的标记先行事实行(2026-08-07 甲方裁决):
+// 派发 chat.revealPeerPhone 前先落行,ProfileID 唯一索引保证每候选人终身至多
+// 消耗一次平台查看权益;不管命令结局如何不删除、不重派。行内无号码。
+type PhoneRevealAttempt struct {
+	ID        uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID string `gorm:"not null;uniqueIndex"`
+	CreatedAt time.Time
+}
+
 type ProfileCommunicationAutomationStatus string
 
 const (

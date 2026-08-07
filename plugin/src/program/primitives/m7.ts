@@ -14,6 +14,7 @@ import {
   captureZhilianResumeScreenshot,
   captureZhilianThreadScreenshot,
   readZhilianPeerPhone,
+  revealZhilianPeerPhone,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
 } from '../platform/zhilian'
@@ -92,8 +93,29 @@ const readPeerPhone: Primitive = {
   },
 }
 
+const revealPeerPhone: Primitive = {
+  name: PrimitiveName.ChatRevealPeerPhone,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await revealZhilianPeerPhone(
+        rawArgs as ChatReadPeerPhoneArgs,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 export function registerM7Primitives(): void {
   register(captureThreadScreenshot)
   register(captureResumeScreenshot)
   register(readPeerPhone)
+  register(revealPeerPhone)
 }

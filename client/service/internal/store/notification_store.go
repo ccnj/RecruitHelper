@@ -303,6 +303,22 @@ func (s *Store) SaveCandidatePhoneObservation(
 	}).Error
 }
 
+// TryMarkPhoneRevealAttempt 标记先行:首次落行返回 true(允许派发揭示),
+// 已存在返回 false(终身不再派发)。行不删除、不更新。
+func (s *Store) TryMarkPhoneRevealAttempt(profileID string, at time.Time) (bool, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return false, errors.New("揭示标记参数不完整")
+	}
+	result := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "profile_id"}},
+		DoNothing: true,
+	}).Create(&PhoneRevealAttempt{ProfileID: profileID, CreatedAt: at})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
 // LatestCandidatePhone 返回该候选人最新一行电话观察事实的号码;无则空串。
 func (s *Store) LatestCandidatePhone(profileID string) (string, error) {
 	var row CandidatePhoneObservation

@@ -3,6 +3,7 @@
 
 import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
+import { reportHandLog } from '../../base/handLog'
 import type {
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
@@ -371,6 +372,9 @@ interface MainApplySourcingFiltersReady {
 interface MainApplySourcingFiltersFailed {
   status: 'failed'
   reason: MainApplySourcingFiltersFailureReason
+  /** 失败现场,纯诊断自由文本(不进契约,按 AGENTS.md「诊断辅助默认不进契约」)。
+   *  只写筛选枚举标签与节点计数,不含任何候选人明文或页面业务文本。 */
+  scene?: string
 }
 
 type MainApplySourcingFiltersResult =
@@ -1634,7 +1638,12 @@ async function mainApplySourcingFilters(
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const failed = (
     reason: MainApplySourcingFiltersFailureReason,
-  ): MainApplySourcingFiltersFailed => ({ status: 'failed', reason })
+    scene?: string,
+  ): MainApplySourcingFiltersFailed => ({
+    status: 'failed',
+    reason,
+    ...(scene === undefined ? {} : { scene }),
+  })
   const sleep = (delayMs: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, delayMs))
   const randomInteractionGapMs = (): number =>
@@ -2002,11 +2011,31 @@ async function mainApplySourcingFilters(
     await interact(() => cancel.click())
     return await waitFor(() => drawerNodes().length === 0 ? true : null) === true
   }
-  const clickOption = async (group: GroupState, label: string): Promise<boolean> => {
-    const matches = group.options.filter((option) => option.label === label)
-    if (matches.length !== 1) return false
-    await interact(() => matches[0].node.click())
-    return true
+  // 当场按 selector 取组,不吃初读时存下的节点引用。
+  const liveGroup = (key: FilterKey): HTMLElement | null => {
+    const drawers = drawerNodes()
+    if (drawers.length !== 1) return null
+    const groups = visibleAll(drawers[0], schemas[key].selector)
+    return groups.length === 1 ? groups[0] : null
+  }
+  // 定位与 click 必须待在同一个同步块里。interact 会先睡满平台节奏下限(1 秒以上)
+  // 再执行回调,若在睡之前就把节点取出来,这一秒足够 Vue 把整组重渲染一遍——旧节点
+  // 脱离文档后 click() 既不抛异常也不生效,页面上就是"点了没反应",而代码毫不知情。
+  // 年龄组尤其危险:它是唯一带 config 的独立子组件(.filter-group-age),会自己重建,
+  // 又恰好是循环里第一个被点的,紧贴抽屉刚弹出这个最不稳的时刻。
+  // 2026-08-07 客户机 custom_selector_unavailable 现场即为此形态。
+  const clickOption = async (key: FilterKey, label: string): Promise<boolean> => {
+    let clicked = false
+    await interact(() => {
+      const group = liveGroup(key)
+      if (!group) return
+      const matches = visibleAll(group, schemas[key].optionSelector)
+        .filter((node) => optionLabel(node) === label)
+      if (matches.length !== 1) return
+      matches[0].click()
+      clicked = true
+    })
+    return clicked
   }
   const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
     const careerLabels: Record<string, string> = {
@@ -2109,27 +2138,27 @@ async function mainApplySourcingFilters(
       const targetLabels = targets[key]
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
-            !await clickOption(group, targetLabels[0])) {
+            !await clickOption(key, targetLabels[0])) {
           return failed('option_set_mismatch')
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
-            !await clickOption(group, '不限')) {
+            !await clickOption(key, '不限')) {
           return failed('option_set_mismatch')
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
-            !await clickOption(group, selected)) {
+            !await clickOption(key, selected)) {
           return failed('option_set_mismatch')
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
-            !await clickOption(group, desired)) {
+            !await clickOption(key, desired)) {
           return failed('option_set_mismatch')
         }
       }
@@ -2137,10 +2166,27 @@ async function mainApplySourcingFilters(
 
     if (targetFilters.age.mode === 'range' && targets.age[0] === '自定义') {
       const selector = await waitFor(() => {
-        const matches = visibleAll(initialSnapshot.groups.age.node, '.recommend-checkbox-group__selector')
+        const group = liveGroup('age')
+        if (!group) return null
+        const matches = visibleAll(group, '.recommend-checkbox-group__selector')
         return matches.length === 1 ? matches[0] : null
       })
-      if (!selector) return failed('custom_selector_unavailable')
+      // 这三项把肉眼分不开的三种成因分开:点击压根没生效(年龄格仍是「不限」)、
+      // 我方节点被换掉(旧节点已脱离)、下拉纯粹没渲染出来(已是「自定义」但零个下拉)。
+      if (!selector) {
+        const group = liveGroup('age')
+        const selectedNow = group === null
+          ? '年龄格不可见'
+          : visibleAll(group, schemas.age.optionSelector)
+              .filter((node) => node.classList.contains('recommend-checkbox-group__active'))
+              .map((node) => optionLabel(node)).join('/') || '无'
+        return failed(
+          'custom_selector_unavailable',
+          `年龄格当前=${selectedNow}，旧节点${initialSnapshot.groups.age.node.isConnected ? '仍在' : '已脱离'}页面，` +
+            `下拉组内${group === null ? -1 : visibleAll(group, '.recommend-checkbox-group__selector').length}个/` +
+            `全页${visibleAll(document, '.recommend-checkbox-group__selector').length}个`,
+        )
+      }
       const starts = visibleAll(selector, '.filter-select-two__start .km-select')
       const ends = visibleAll(selector, '.filter-select-two__end .km-select')
       if (starts.length !== 1 || ends.length !== 1) return failed('range_select_unavailable')
@@ -5102,7 +5148,9 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    `智联筛选条件无法完整覆盖并回读确认（${result.reason}）`,
+    `智联筛选条件无法完整覆盖并回读确认（${result.reason}${
+      result.scene === undefined ? '' : `；${result.scene}`
+    }）`,
     'manualOnly',
   )
 }
@@ -12390,12 +12438,26 @@ async function mainCancelPreparedInterviewEditor(): Promise<void> {
   }
 }
 
-// 2026-07-27 真机：邀面卡发出后平台弹出含"面试邀请已发出"的成功弹窗
-// （本次观察为 interview-success-modal + 右上 .km-modal__close-btn），带全屏
-// 遮罩、会拦截后续页面操作；老项目另记录过 2026-07 改版的服务号推广弹窗形态
-// （真机未见，不实现类名依赖）。按文本锚 best-effort 关闭：找不到、关不掉都
-// 只如实返回，不重试发送、不改变已取得的发送结果。
-async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; closed: boolean }> {
+// 2026-07-27 真机：邀面卡发出后平台弹出含"面试邀请已发出"的成功弹窗，带全屏
+// 遮罩；2026-08-07 甲方现场：连发两次后页面上叠着两个未关闭的弹窗（服务号推广
+// 形态，「关注服务号 / 转给同事」），把聊天截图盖掉两块——运营通知带的就是这种
+// 截图。按文本锚 best-effort 关闭：找不到、关不掉都只如实返回，不重试发送、
+// 不改变已取得的发送结果。
+//
+// 三处与初版的差别，都是那次现场逼出来的：
+//  1. **等弹窗出现**。卡片消息落到时间线通常比弹窗弹出更早，初版"查一次就走"
+//     十有八九扑空。改条件轮询，出现即继续，上限 10 秒（AGENTS.md 平台交互节奏）。
+//  2. **弹窗根不认类名**。从"直接写着这句话的那个元素"往上找最外层浮层祖先
+//     （fixed，或高 z-index 的 absolute），平台再改版块名也认得出。
+//  3. **全部关掉，不是第一个**。关不掉会堆积，下一次发送时旧的还在页面上。
+// 关闭钮点不动时补一发 Escape（多数弹窗组件监听 document keydown），这是旧项目
+// 有、重构时丢掉的兜底。scene 只带标签名与类名，供关不掉时报回脑侧照着改选择器。
+async function mainCloseInterviewSuccessModal(): Promise<{
+  found: boolean
+  closed: boolean
+  remaining: number
+  scene: string
+}> {
   const clean = (value: unknown): string => String(value ?? '')
     .normalize('NFC')
     .replace(/\u00a0/gu, ' ')
@@ -12407,35 +12469,125 @@ async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; close
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
   const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
-  const findModals = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>(
-    '.km-modal__wrapper, .km-modal, [class*="modal"], [role="dialog"]',
-  )).filter((node) => visible(node) && /面试邀请已发出/u.test(clean(node.textContent)))
+  // 关闭钮之外的按钮一个都不许碰：「关注服务号」会跳转、「转给同事」会外发。
+  // 容器类元素的 textContent 会把这些字带上，于是同一条正则顺带把它们排掉。
+  const forbidden = /关注|转给|同事|服务号|分享|查看|详情|邀请|接受/u
+  const sig = (node: Element): string =>
+    `${node.tagName}.${clean(node.getAttribute('class')).replace(/ /gu, '.')}`.slice(0, 96)
+  const findRoots = (): HTMLElement[] => {
+    const hosts: HTMLElement[] = []
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+    while (walker.nextNode()) {
+      if (!/面试邀请已发出/u.test(clean(walker.currentNode.nodeValue))) continue
+      const host = walker.currentNode.parentElement
+      if (host !== null && visible(host)) hosts.push(host)
+    }
+    const roots: HTMLElement[] = []
+    for (const host of hosts) {
+      let picked: HTMLElement | null = null
+      let cursor: HTMLElement | null = host
+      for (let depth = 0; cursor !== null && cursor !== document.body && depth < 16; depth += 1) {
+        const style = getComputedStyle(cursor)
+        const zIndex = Number.parseInt(style.zIndex, 10)
+        if (style.position === 'fixed' ||
+            (style.position === 'absolute' && Number.isFinite(zIndex) && zIndex >= 100)) {
+          picked = cursor
+        }
+        cursor = cursor.parentElement
+      }
+      const root = picked ?? host
+      if (!roots.includes(root)) roots.push(root)
+    }
+    return roots.filter(visible)
+  }
+  const findCloseButton = (root: HTMLElement): HTMLElement | null => {
+    // 旧版是 .km-modal__close-btn；服务号形态旧项目记过
+    // img.interview-service-account-modal__top-close-icon，同样被 close 子串捞住。
+    const selectors = [
+      '.km-modal__close-btn',
+      '[class*="close" i]',
+      '[aria-label*="关闭"]',
+      '[aria-label*="close" i]',
+      '[title*="关闭"]',
+    ]
+    for (const selector of selectors) {
+      const hit = Array.from(root.querySelectorAll<HTMLElement>(selector))
+        .find((node) => visible(node) && !forbidden.test(clean(node.textContent)))
+      if (hit !== undefined) return hit
+    }
+    return null
+  }
+  const scene: string[] = []
   try {
-    const modals = findModals()
-    if (modals.length === 0) return { found: false, closed: false }
-    let closeButton: HTMLElement | null = null
-    for (const modal of modals) {
-      closeButton =
-        Array.from(modal.querySelectorAll<HTMLElement>('.km-modal__close-btn')).find(visible) ??
-        Array.from(modal.querySelectorAll<HTMLElement>('[class*="close"]')).find(visible) ?? null
-      if (closeButton) break
+    let roots = findRoots()
+    const appearDeadline = Date.now() + 10_000
+    while (roots.length === 0 && Date.now() < appearDeadline) {
+      await wait(200)
+      roots = findRoots()
     }
-    if (!closeButton) return { found: true, closed: false }
-    await wait(1_000 + Math.floor(Math.random() * 501))
-    if (!closeButton.isConnected || !visible(closeButton)) {
-      return { found: true, closed: findModals().length === 0 }
-    }
+    if (roots.length === 0) return { found: false, closed: false, remaining: 0, scene: '' }
+
     const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
-    const invokeClick = Function.prototype.call.bind(intrinsicClick, closeButton)
-    invokeClick()
-    const deadline = Date.now() + 3_000
-    while (Date.now() <= deadline) {
-      if (findModals().length === 0) return { found: true, closed: true }
-      await wait(120)
+    const invokeClick = Function.prototype.call.bind(intrinsicClick) as (node: HTMLElement) => void
+    for (const root of roots) {
+      if (!root.isConnected || !visible(root)) continue
+      const button = findCloseButton(root)
+      scene.push(`${sig(root)}>${button === null ? 'noCloseBtn' : sig(button)}`)
+      if (button !== null) {
+        await wait(1_000 + Math.floor(Math.random() * 501))
+        if (button.isConnected && visible(button)) invokeClick(button)
+        await wait(400)
+      }
+      if (!root.isConnected || !visible(root)) continue
+      await wait(1_000 + Math.floor(Math.random() * 501))
+      for (const type of ['keydown', 'keyup']) {
+        document.dispatchEvent(new KeyboardEvent(type, {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        } as KeyboardEventInit))
+      }
+      await wait(400)
     }
-    return { found: true, closed: false }
+
+    const remaining = findRoots()
+    return {
+      found: true,
+      closed: remaining.length === 0,
+      remaining: remaining.length,
+      scene: scene.join(' | ').slice(0, 400),
+    }
   } catch {
-    return { found: false, closed: false }
+    return { found: false, closed: false, remaining: 0, scene: scene.join(' | ').slice(0, 400) }
+  }
+}
+
+// 弹窗清理的调用侧收口：成功路径与失败路径共用同一份，省得两处各写一遍上报。
+// 关不掉时报一条 handLog —— 只有标签名与类名，没有任何页面文本（手侧日志纪律见
+// base/handLog.ts），够我们下次照着改选择器，不必再等甲方蹲现场。
+async function closeInterviewSuccessModalBestEffort(tabId: number): Promise<void> {
+  try {
+    const outcome = await runMain(tabId, mainCloseInterviewSuccessModal, [])
+    console.info(
+      '[RecruitHelper] interview_success_modal_close',
+      outcome.found,
+      outcome.closed,
+      outcome.remaining,
+      outcome.scene,
+    )
+    if (outcome.found && !outcome.closed) {
+      reportHandLog(
+        'error',
+        'interviewSuccessModalCloseFailed',
+        `邀面成功弹窗未关闭,页面仍有 ${outcome.remaining} 个遮挡`,
+        outcome.scene,
+      )
+    }
+  } catch {
+    // 清理只尽力而为，不影响已取得的发送正证。
   }
 }
 
@@ -12687,16 +12839,7 @@ async function sendZhilianCard(
           }
           const observedAt = Date.now()
           if (cardKind === 'interviewInvite') {
-            try {
-              const closeOutcome = await runMain(tab.id, mainCloseInterviewSuccessModal, [])
-              console.info(
-                '[RecruitHelper] interview_success_modal_close',
-                closeOutcome.found,
-                closeOutcome.closed,
-              )
-            } catch {
-              // 弹窗清理只尽力而为，不影响已取得的发送正证。
-            }
+            await closeInterviewSuccessModalBestEffort(tab.id)
           }
           await ctx.progress('已从实时消息时间线确认唯一新已发卡片', 100)
           return {
@@ -12729,11 +12872,7 @@ async function sendZhilianCard(
     if (finalActionStarted && cardKind === 'interviewInvite') {
       // commit 已发生：无论确认结果如何，成功弹窗都可能已弹出并遮挡页面，
       // 尽力关闭以免拖垮同页后续操作；失败不改变原始错误。
-      try {
-        await runMain(tab.id, mainCloseInterviewSuccessModal, [])
-      } catch {
-        // best effort
-      }
+      await closeInterviewSuccessModalBestEffort(tab.id)
     }
     throw error
   }
@@ -12986,20 +13125,37 @@ export async function readZhilianWechatExchangeOutcome(
 interface MainPeerPhonePanelResult {
   phone: string | null
   panelName: string | null
+  masked: boolean
 }
 
 // chat.readPeerPhone@1 的页面读取:右侧简历侧栏的候选人电话与面板姓名。
 // 只认「复制」按钮的 data-clipboard-text 标准属性——虚拟号形态有号无复制按钮、
 // 无号形态整段空缺,都自然落到 phone=null(2026-08-06 生产页面三形态直读)。
+// masked 是第四形态观察信号(2026-08-07 真机):中四位遮挡 + 「查看电话」按钮,
+// 完整号不在 DOM 中,只能经 chat.revealPeerPhone 点击揭示。
 function mainReadPeerPhone(): MainPeerPhonePanelResult {
   const root = document.querySelector('.new-resume-basic')
-  if (!root) return { phone: null, panelName: null }
+  if (!root) return { phone: null, panelName: null, masked: false }
   const nameText = root.querySelector('.new-resume-basic__name-wrapper')?.textContent?.trim()
   const copyNode = root.querySelector(
     '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy',
   )
   const raw = copyNode?.getAttribute('data-clipboard-text')?.trim()
-  return { phone: raw || null, panelName: nameText || null }
+  const masked = !!root.querySelector(
+    '.new-resume-basic__contact--phone--box .resume-button.get-phone',
+  )
+  return { phone: raw || null, panelName: nameText || null, masked }
+}
+
+// chat.revealPeerPhone@1 的点击步:找到侧栏「查看电话」按钮并点一次。
+// clicked=false 表示按钮此刻不在场(可能刚被真人点过),由扩展侧重读裁决。
+function mainClickRevealPeerPhone(): { clicked: boolean } {
+  const button = document.querySelector<HTMLButtonElement>(
+    '.new-resume-basic .new-resume-basic__contact--phone--box .resume-button.get-phone button',
+  )
+  if (!button || button.disabled) return { clicked: false }
+  button.click()
+  return { clicked: true }
 }
 
 // chat.readPeerPhone@1:只服务运营通知取证顺访的降级型感知,任何失败只产生
@@ -13034,6 +13190,7 @@ export async function readZhilianPeerPhone(
   const data: ZhilianReadPeerPhoneData = {
     ...(observed.phone ? { phone: observed.phone } : {}),
     ...(observed.panelName ? { panelName: observed.panelName } : {}),
+    ...(observed.masked ? { masked: true } : {}),
     observedAt: Date.now(),
   }
   if (validatePrimitiveData(PrimitiveName.ChatReadPeerPhone, 1, data).length !== 0) {
@@ -13041,6 +13198,80 @@ export async function readZhilianPeerPhone(
   }
   await ctx.progress(data.phone ? '已读取候选人电话' : '本轮未读到候选人电话', 100)
   return data
+}
+
+// chat.revealPeerPhone@1:对当前会话点一次「查看电话」并等号码揭示,揭示后
+// 形态与真实号同构(复制按钮带 data 属性),按 readPeerPhone 同款判据读回。
+// 原语内不重试点击;每候选人终身至多一次由脑侧标记先行保证,这里不再兜底。
+export async function revealZhilianPeerPhone(
+  args: ZhilianReadPeerPhoneArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianReadPeerPhoneData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const tabId = tab.id
+  await assertCurrentThreadRoute(tabId, args.conversationRef, expectedPrincipalFingerprint, 'none')
+
+  const finish = async (
+    observed: MainPeerPhonePanelResult,
+    note: string,
+  ): Promise<ZhilianReadPeerPhoneData> => {
+    ctx.checkpoint()
+    await assertCurrentThreadRoute(tabId, args.conversationRef, expectedPrincipalFingerprint, 'none')
+    const data: ZhilianReadPeerPhoneData = {
+      ...(observed.phone ? { phone: observed.phone } : {}),
+      ...(observed.panelName ? { panelName: observed.panelName } : {}),
+      observedAt: Date.now(),
+    }
+    if (validatePrimitiveData(PrimitiveName.ChatRevealPeerPhone, 1, data).length !== 0) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '电话揭示结果不符合当前契约', 'manualOnly')
+    }
+    await ctx.progress(note, 100)
+    return data
+  }
+
+  const before = await runMain(tabId, mainReadPeerPhone, [])
+  if (before.phone) {
+    // 已是揭示/真实号形态:不点击、不消耗,直接读回。
+    return finish(before, '电话已是揭示形态,直接读回')
+  }
+  if (!before.masked) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '侧栏没有可揭示的电话(无查看按钮也无复制按钮)',
+      'manualOnly',
+    )
+  }
+  // 平台交互节奏下限:本原语唯一一次可见交互,点击前补足 1 秒 + 抖动。
+  await new Promise<void>((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 500)))
+  ctx.checkpoint()
+  const clickStep = await runMain(tabId, mainClickRevealPeerPhone, [])
+  if (!clickStep.clicked) {
+    // 点击前一瞬按钮消失(如真人刚点过):重读一次,有号即收,仍无号则失败。
+    const after = await runMain(tabId, mainReadPeerPhone, [])
+    if (after.phone) return finish(after, '按钮已被揭示,直接读回')
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '查看电话按钮不可点击', 'manualOnly')
+  }
+  await ctx.progress('已点击查看电话,等待号码揭示', 50)
+  // 条件轮询等揭示,最长 10 秒;轮询本身是纯读取,不受交互节奏下限约束。
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    const observed = await runMain(tabId, mainReadPeerPhone, [])
+    if (observed.phone) {
+      return finish(observed, '已揭示并读取候选人电话')
+    }
+    if (Date.now() >= deadline) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '点击后号码未在时限内揭示', 'manualOnly')
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 400))
+  }
 }
 
 export async function sendZhilianInviteCard(
@@ -14271,6 +14502,7 @@ export const zhilianTestHooks = Object.freeze({
   mainObserveStableOutboundCard,
   mainReadWechatExchangeOutcome,
   mainReadPeerPhone,
+  mainClickRevealPeerPhone,
   mainPrepareInterviewEditor,
   mainCloseInterviewSuccessModal,
   mainReadThreadPage,

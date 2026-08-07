@@ -3455,6 +3455,8 @@ function installM6SourcingFilterFixture(options = {}) {
     styleVersion: 0,
     interactions: [],
     groupReads: new Map(),
+    titleReads: new Map(),
+    staleClicks: 0,
   }
   const classList = (...initial) => {
     const values = new Set(initial)
@@ -3478,6 +3480,7 @@ function installM6SourcingFilterFixture(options = {}) {
     querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null },
     getAttribute(name) { return this.attrs.get(name) ?? null },
     hasAttribute(name) { return this.attrs.has(name) },
+    isConnected: true,
     click() {},
   })
   const interact = (name) => {
@@ -3583,7 +3586,7 @@ function installM6SourcingFilterFixture(options = {}) {
   selector.query.set('.filter-select-two__start .km-select', [startSelect])
   selector.query.set('.filter-select-two__end .km-select', [endSelect])
 
-  for (const [key, spec] of Object.entries(groupSpecs)) {
+  const buildGroup = (key, spec) => {
     const group = node()
     const title = node(spec.title)
     const optionNodes = spec.labels.map((label) => {
@@ -3629,6 +3632,9 @@ function installM6SourcingFilterFixture(options = {}) {
     group.optionNodes = optionNodes
     group.querySelectorAll = (query) => {
       if (query === '.tr-talent-filter-item__title, .filter-group-major__title, .filter-item__title') {
+        // 只有 readFilters 查标题;点击前的当场定位不查,所以这个计数专门用来数
+        // readFilters 跑了几轮,不受定位次数干扰。年龄组重建后两个对象共用同一 key。
+        state.titleReads.set(key, (state.titleReads.get(key) ?? 0) + 1)
         return [title]
       }
       if (query === (spec.control === 'radio'
@@ -3643,7 +3649,26 @@ function installM6SourcingFilterFixture(options = {}) {
       }
       return []
     }
-    groups[key] = group
+    return group
+  }
+  for (const [key, spec] of Object.entries(groupSpecs)) {
+    groups[key] = buildGroup(key, spec)
+  }
+
+  // 模拟真实平台上的年龄组重建:初读之后 Vue 换掉整组 DOM,旧节点脱离文档 ——
+  // 对它 click() 既不抛异常也不生效。取组必须当场重取才点得中。
+  let ageReplacement = null
+  const currentAgeGroup = () => {
+    if (options.replaceAgeGroupAfterRead !== true) return groups.age
+    if ((state.groupReads.get('age') ?? 0) < 2) return groups.age
+    if (ageReplacement === null) {
+      ageReplacement = buildGroup('age', groupSpecs.age)
+      groups.age.isConnected = false
+      for (const option of groups.age.optionNodes) {
+        option.click = () => { state.staleClicks += 1 }
+      }
+    }
+    return ageReplacement
   }
 
   const cancel = node('取消')
@@ -3670,7 +3695,7 @@ function installM6SourcingFilterFixture(options = {}) {
         state.groupReads.set(key, (state.groupReads.get(key) ?? 0) + 1)
         if (options.missingGroup === key) return []
         if (options.duplicateGroup === key) return [groups[key], groups[key]]
-        return [groups[key]]
+        return [key === 'age' ? currentAgeGroup() : groups[key]]
       }
     }
     if (query === 'button[zp-stat-id="rsmlist-confirm"]') return [confirm]
@@ -3771,7 +3796,7 @@ test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并�
     assert.equal(fixture.state.drawerOpen, false)
     assert.equal(fixture.state.openCount, 2)
     for (const key of Object.keys(fixture.groups)) {
-      assert.equal(fixture.state.groupReads.get(key), 3,
+      assert.equal(fixture.state.titleReads.get(key), 3,
         `${key} 必须由字面同一 readFilters 完成初读、提交前回读和二次回读`)
     }
     const names = fixture.state.interactions.map(([name]) => name)
@@ -3786,6 +3811,29 @@ test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并�
         fixture.state.interactions[index][1] - fixture.state.interactions[index - 1][1]
       assert.ok(elapsed >= 1_000, `第 ${index + 1} 个页面动作与前一动作须至少间隔一秒`)
     }
+  } finally {
+    fixture.restore()
+  }
+})
+
+// 2026-08-07 客户机现场:年龄格肉眼没反应、其余五组正常选中,20 秒后
+// custom_selector_unavailable。成因是取节点与 click 之间隔着一秒的平台节奏等待,
+// Vue 在这一秒里重建了年龄组,click() 打在脱离文档的旧节点上——不报错也不生效。
+test('candidate.applySourcingFilters MAIN 年龄组初读后被重建仍点得中并完成自定义', async () => {
+  const fixture = installM6SourcingFilterFixture({ replaceAgeGroupAfterRead: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready', '组被重建不该让筛选失败')
+    assert.equal(fixture.state.staleClicks, 0, '不得再对脱离文档的旧节点派点击')
+    const names = fixture.state.interactions.map(([name]) => name)
+    assert.ok(names.includes('click-age-自定义'), '必须点中重建后的自定义')
+    assert.ok(names.includes('choose-range-start-25'))
+    assert.ok(names.includes('choose-range-end-45'))
+    assert.equal(fixture.state.confirms, 1, '筛选命令仍只点一次确定')
   } finally {
     fixture.restore()
   }
@@ -12829,20 +12877,26 @@ test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其�
   }
 })
 
-// chat.readPeerPhone MAIN:三形态 2026-08-06 真机踩点回归。
+// chat.readPeerPhone MAIN:四形态真机踩点回归(2026-08-06 三形态 + 08-07 遮挡)。
 // 真实号=复制按钮带 data-clipboard-text;无号=电话容器整段空缺;虚拟号=有显示
-// 文本但无复制按钮。后两者都必须落 phone=null,显示文本永远不作数据源。
+// 文本但无复制按钮;遮挡=「查看电话」按钮在场(masked=true,完整号不在 DOM)。
+// 除真实号外都必须落 phone=null,显示文本永远不作数据源。
 function installPeerPhonePanelFixture(variant) {
   const original = { document: globalThis.document }
   const copyNode = {
     getAttribute: (name) => (name === 'data-clipboard-text' ? '13801995730' : null),
   }
   const nameNode = { textContent: ' 洪建辉 ' }
+  const clicks = []
+  const revealButton = { disabled: false, click: () => clicks.push('reveal') }
   const panelRoot = {
     querySelector(selector) {
       if (selector === '.new-resume-basic__name-wrapper') return nameNode
       if (selector === '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy') {
         return variant === 'real' ? copyNode : null
+      }
+      if (selector === '.new-resume-basic__contact--phone--box .resume-button.get-phone') {
+        return variant === 'masked' ? {} : null
       }
       return null
     },
@@ -12850,22 +12904,31 @@ function installPeerPhonePanelFixture(variant) {
   globalThis.document = {
     querySelector(selector) {
       if (variant === 'noPanel') return null
-      return selector === '.new-resume-basic' ? panelRoot : null
+      if (selector === '.new-resume-basic') return panelRoot
+      if (
+        selector ===
+        '.new-resume-basic .new-resume-basic__contact--phone--box .resume-button.get-phone button'
+      ) {
+        return variant === 'masked' ? revealButton : null
+      }
+      return null
     },
   }
   return {
+    clicks,
     restore() {
       globalThis.document = original.document
     },
   }
 }
 
-test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,虚拟号与缺号都返回 null', () => {
+test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,遮挡形态只报 masked', () => {
   for (const [variant, want] of [
-    ['real', { phone: '13801995730', panelName: '洪建辉' }],
+    ['real', { phone: '13801995730', panelName: '洪建辉', masked: false }],
     // 无号(容器空)与虚拟号(有显示文本无复制按钮)在选择器层同构:都查不到复制按钮。
-    ['absentOrVirtual', { phone: null, panelName: '洪建辉' }],
-    ['noPanel', { phone: null, panelName: null }],
+    ['absentOrVirtual', { phone: null, panelName: '洪建辉', masked: false }],
+    ['masked', { phone: null, panelName: '洪建辉', masked: true }],
+    ['noPanel', { phone: null, panelName: null, masked: false }],
   ]) {
     const fixture = installPeerPhonePanelFixture(variant)
     try {
@@ -12873,6 +12936,209 @@ test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,虚拟号与缺号�
     } finally {
       fixture.restore()
     }
+  }
+})
+
+test('chat.revealPeerPhone MAIN 点击步只在查看按钮在场时点一次', () => {
+  const masked = installPeerPhonePanelFixture('masked')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainClickRevealPeerPhone(), { clicked: true })
+    assert.equal(masked.clicks.length, 1)
+  } finally {
+    masked.restore()
+  }
+  // 真实号形态没有查看按钮:绝不点击,由扩展侧改走直接读回。
+  const real = installPeerPhonePanelFixture('real')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainClickRevealPeerPhone(), { clicked: false })
+    assert.equal(real.clicks.length, 0)
+  } finally {
+    real.restore()
+  }
+})
+
+// 邀面成功弹窗清理。2026-08-07 甲方现场:连发两次后页面上叠着两个没关掉的弹窗,
+// 「关注服务号 / 转给同事」——这两个按钮一个都不许碰,点错了就是我方擅自外发。
+// 下面的 fixture 只造出生产代码真正用到的那点 DOM 能力,不引 jsdom(与本文件其余
+// fixture 同一路子)。
+function installInterviewSuccessModalFixture(specs) {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    window: globalThis.window,
+    HTMLElement: globalThis.HTMLElement,
+    KeyboardEvent: globalThis.KeyboardEvent,
+    NodeFilter: globalThis.NodeFilter,
+    setTimeout: globalThis.setTimeout,
+    dateNow: Date.now,
+  }
+  // 虚拟时钟:生产代码的节奏等待是真的 1 秒起步、等弹窗出现是真的 10 秒轮询。
+  // 每次 setTimeout 把时钟推进它请求的那么多毫秒,再立刻执行 —— 生产逻辑一行不改,
+  // 测试不空转。
+  let clock = original.dateNow()
+  Date.now = () => clock
+  const el = (tag, attrs, children = []) => {
+    const node = {
+      tagName: tag.toUpperCase(),
+      attrs,
+      childNodes: [],
+      parentElement: null,
+      isConnected: true,
+      clicks: 0,
+      style: attrs.style ?? {},
+      getAttribute(name) { return this.attrs[name] ?? null },
+      get textContent() {
+        return this.childNodes
+          .map((child) => (child.nodeType === 3 ? child.nodeValue : child.textContent))
+          .join('')
+      },
+      descendants() {
+        const out = []
+        for (const child of this.childNodes) {
+          if (child.nodeType === 3) continue
+          out.push(child, ...child.descendants())
+        }
+        return out
+      },
+      querySelectorAll(selector) {
+        const attr = (node2, name) => node2.getAttribute(name) ?? ''
+        const match = {
+          '.km-modal__close-btn': (n) => attr(n, 'class').split(/\s+/).includes('km-modal__close-btn'),
+          '[class*="close" i]': (n) => /close/i.test(attr(n, 'class')),
+          '[aria-label*="关闭"]': (n) => attr(n, 'aria-label').includes('关闭'),
+          '[aria-label*="close" i]': (n) => /close/i.test(attr(n, 'aria-label')),
+          '[title*="关闭"]': (n) => attr(n, 'title').includes('关闭'),
+        }[selector]
+        if (match === undefined) throw new Error(`fixture 未覆盖选择器 ${selector}`)
+        return this.descendants().filter(match)
+      },
+    }
+    for (const child of children) {
+      if (typeof child === 'string') node.childNodes.push({ nodeType: 3, nodeValue: child, parentElement: node })
+      else { child.parentElement = node; node.childNodes.push(child) }
+    }
+    return node
+  }
+  const wrappers = specs.map((spec) => {
+    const card = el('DIV', { class: 'interview-service-account-modal' }, [
+      ...(spec.closeAttrs === undefined ? [] : [el('IMG', spec.closeAttrs)]),
+      el('DIV', { class: 'title' }, ['面试邀请已发出']),
+      el('DIV', { class: 'sub' }, ['关注服务号接收实时通知']),
+      el('DIV', { class: 'btns' }, [
+        el('BUTTON', { class: 'follow-btn' }, ['关注服务号']),
+        el('BUTTON', { class: 'forward-btn' }, ['转给同事']),
+      ]),
+    ])
+    return el('DIV', {
+      class: 'km-modal__wrapper',
+      style: { position: 'fixed', zIndex: '2000' },
+    }, [card])
+  })
+  const body = el('BODY', {}, wrappers)
+  body.parentElement = null
+  const computeStyle = (node) => ({
+    display: node.removed === true ? 'none' : 'block',
+    visibility: 'visible',
+    position: node.style?.position ?? 'static',
+    zIndex: node.style?.zIndex ?? 'auto',
+  })
+  for (const node of [body, ...body.descendants()]) {
+    node.getClientRects = () => (node.removed === true ? [] : [{ width: 10, height: 10 }])
+  }
+  globalThis.getComputedStyle = computeStyle
+  globalThis.window = { getComputedStyle: computeStyle }
+  globalThis.NodeFilter = { SHOW_TEXT: 4 }
+  globalThis.HTMLElement = { prototype: { click() { this.clicks += 1; this.onClick?.() } } }
+  globalThis.KeyboardEvent = class { constructor(type, init) { Object.assign(this, init, { type }) } }
+  globalThis.setTimeout = (fn, delay) => {
+    clock += typeof delay === 'number' ? delay : 0
+    return original.setTimeout(fn, 0)
+  }
+  const escapes = []
+  globalThis.document = {
+    body,
+    dispatchEvent(event) { escapes.push(event.key); return true },
+    createTreeWalker(root) {
+      const texts = []
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) texts.push(child)
+          else walk(child)
+        }
+      }
+      walk(root)
+      let index = -1
+      return {
+        get currentNode() { return texts[index] },
+        nextNode() { index += 1; return index < texts.length ? texts[index] : null },
+      }
+    },
+  }
+  return {
+    wrappers,
+    escapes,
+    buttons: wrappers.flatMap((wrapper) => wrapper.descendants().filter((n) => n.tagName === 'BUTTON')),
+    closeIcons: wrappers.flatMap((wrapper) => wrapper.descendants().filter((n) => n.tagName === 'IMG')),
+    restore() {
+      globalThis.document = original.document
+      globalThis.getComputedStyle = original.getComputedStyle
+      globalThis.window = original.window
+      globalThis.HTMLElement = original.HTMLElement
+      globalThis.KeyboardEvent = original.KeyboardEvent
+      globalThis.NodeFilter = original.NodeFilter
+      globalThis.setTimeout = original.setTimeout
+      Date.now = original.dateNow
+    },
+  }
+}
+
+test('邀面成功弹窗:两个堆叠的都关掉,「关注服务号」「转给同事」一次都不碰', async () => {
+  // 关闭钮按旧项目考古的类名造:img.interview-service-account-modal__top-close-icon。
+  const closeAttrs = { class: 'interview-service-account-modal__top-close-icon' }
+  const fixture = installInterviewSuccessModalFixture([{ closeAttrs }, { closeAttrs }])
+  try {
+    for (const icon of fixture.closeIcons) {
+      // 平台真实行为:点关闭后弹窗整体消失。
+      icon.onClick = () => { icon.parentElement.parentElement.removed = true }
+    }
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, true, '两个弹窗都该被关掉')
+    assert.equal(outcome.remaining, 0)
+    assert.equal(fixture.closeIcons.every((icon) => icon.clicks === 1), true, '每个弹窗的关闭钮各点一次')
+    assert.equal(fixture.buttons.every((button) => button.clicks === 0), true,
+      '关注服务号/转给同事一个都不许点')
+    assert.deepEqual(fixture.escapes, [], '关闭钮生效时不必再补 Escape')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('邀面成功弹窗:没有关闭钮时补 Escape,仍然一个业务按钮都不点', async () => {
+  const fixture = installInterviewSuccessModalFixture([{}])
+  try {
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, false, '关不掉就得如实说关不掉')
+    assert.equal(outcome.remaining, 1)
+    assert.deepEqual(fixture.escapes, ['Escape', 'Escape'], 'keydown + keyup 各一次')
+    assert.equal(fixture.buttons.every((button) => button.clicks === 0), true)
+    // scene 供 handLog 带回结构:只有标签名与类名,没有任何页面文本。
+    assert.match(outcome.scene, /^DIV\.km-modal__wrapper>noCloseBtn$/)
+    assert.equal(/面试邀请|关注|同事/u.test(outcome.scene), false, 'scene 不得带页面文本')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('邀面成功弹窗:页面上没有弹窗时不空等、不误报', async () => {
+  const fixture = installInterviewSuccessModalFixture([])
+  try {
+    const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
+    assert.deepEqual(outcome, { found: false, closed: false, remaining: 0, scene: '' })
+    assert.deepEqual(fixture.escapes, [])
+  } finally {
+    fixture.restore()
   }
 })
 

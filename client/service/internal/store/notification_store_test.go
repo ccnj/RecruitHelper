@@ -308,6 +308,29 @@ func TestCandidatePhoneObservationLifecycleAndSnapshot(t *testing.T) {
 	}
 }
 
+// 揭示标记先行:首次落行放行、之后终身拒绝,行不删除——每候选人至多消耗
+// 一次平台查看权益的唯一保证就在这一行(2026-08-07 裁决)。
+func TestTryMarkPhoneRevealAttemptAtMostOnce(t *testing.T) {
+	s := openTest(t)
+	at := time.Date(2026, 8, 7, 10, 0, 0, 0, time.UTC)
+	first, err := s.TryMarkPhoneRevealAttempt("reveal-p1", at)
+	if err != nil || !first {
+		t.Fatalf("首次标记应放行: first=%v err=%v", first, err)
+	}
+	again, err := s.TryMarkPhoneRevealAttempt("reveal-p1", at.Add(time.Hour))
+	if err != nil || again {
+		t.Fatalf("重复标记必须拒绝: again=%v err=%v", again, err)
+	}
+	other, err := s.TryMarkPhoneRevealAttempt("reveal-p2", at)
+	if err != nil || !other {
+		t.Fatalf("不同候选人互不影响: other=%v err=%v", other, err)
+	}
+	var total int64
+	if err := s.db.Model(&PhoneRevealAttempt{}).Count(&total).Error; err != nil || total != 2 {
+		t.Fatalf("标记行数不符: %d err=%v", total, err)
+	}
+}
+
 func enqueueForTest(t *testing.T, s *Store, notifyType, eventKey, profileID string, at time.Time) uint64 {
 	t.Helper()
 	if err := s.db.Transaction(func(tx *gorm.DB) error {

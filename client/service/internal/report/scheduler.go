@@ -6,22 +6,30 @@ import (
 	"time"
 )
 
-// 每日自动上传的时刻与顺延窗口(2026-07-31 补充裁决)。
+// 每日任务的时刻与顺延窗口(2026-07-31 补充裁决)。
 //
-// 00:10 落在统一业务运行窗口 [08:00,24:00) 之外,不跟业务抢。但 24 点边界裁决
-// 允许"已发出首条可见动作的链自然收束到终局",所以这时可能还有收尾在写库,而
-// 快照要抢 SetMaxOpenConns(1) 那唯一的写连接 —— 因此不是到点就传,先看静默。
+// 凌晨这几分钟落在统一业务运行窗口 [08:00,24:00) 之外,不跟业务抢。但 24 点边界
+// 裁决允许"已发出首条可见动作的链自然收束到终局",所以这时可能还有收尾在写库,
+// 而快照与 VACUUM 都要抢 SetMaxOpenConns(1) 那唯一的写连接 —— 因此不是到点就干,
+// 先看静默。
+//
+// 具体时刻由调用方传入(SchedulerDeps.Hour/Minute):现场上报是 00:10,命令审计
+// 留存清理是 00:05。清理排在上报前面,好让当天上传的包已经是瘦身后的。
 const (
-	dailyHour       = 0
-	dailyMinute     = 10
-	deferUntilHour  = 2 // 顺延到 02:00 仍不静默就放弃,当日不补传
+	deferUntilHour  = 2 // 顺延到 02:00 仍不静默就放弃,当日不补做
 	deferRetryEvery = 10 * time.Minute
 )
 
-// SchedulerDeps 用函数注入而不是接口,与本包既有的 SnapshotFunc 一致:report 包
-// 只管打包上传,不认识 store、workflow 这些业务类型。
+// SchedulerDeps 用函数注入而不是接口,与本包既有的 SnapshotFunc 一致:调度器
+// 只管"每天到点、等静默、干一次",不认识 store、workflow 这些业务类型。
 type SchedulerDeps struct {
-	// Enabled 读开关。默认关闭是硬约束,读失败一律当关。
+	// Hour/Minute 是每日触发时刻(客户端本地时间)。必须显式传 —— 不给零值兜底,
+	// 否则漏传会静默变成 00:00 跑,而这种错误在日志里看不出来。
+	Hour   int
+	Minute int
+	// Label 是日志里的任务名,例如"现场上报""命令审计留存"。
+	Label string
+	// Enabled 读开关。默认关闭是硬约束,读失败一律当关。常开任务传 nil。
 	Enabled func() (bool, error)
 	// Quiet 判断此刻能不能动库:无活跃工作流、无未收束命令。
 	// 返回 false 时 reason 说明卡在哪,进日志与诊断台。
@@ -58,17 +66,17 @@ func deferDeadline(runAt time.Time) time.Time {
 	return time.Date(runAt.Year(), runAt.Month(), runAt.Day(), deferUntilHour, 0, 0, 0, runAt.Location())
 }
 
-// RunScheduler 阻塞运行每日自动上传循环，直到 ctx 结束。
+// RunScheduler 阻塞运行每日任务循环，直到 ctx 结束。
 //
-// 纪律(全部来自裁决,不要"顺手优化"掉):开关默认关且每轮都重读——人在诊断台
-// 关掉之后,下一轮就不该再传;不静默就顺延,过 02:00 放弃且当日不补传;客户端
-// 没运行而错过的那天不补传——所以这里没有"上次跑到哪天"的追赶逻辑;失败不重试。
+// 纪律(全部来自裁决,不要"顺手优化"掉):有开关的任务每轮都重读——人在诊断台
+// 关掉之后,下一轮就不该再干;不静默就顺延,过 02:00 放弃且当日不补做;客户端
+// 没运行而错过的那天不补做——所以这里没有"上次跑到哪天"的追赶逻辑;失败不重试。
 func RunScheduler(ctx context.Context, deps SchedulerDeps) {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
 	for {
-		runAt := nextDailyRun(deps.Now(), dailyHour, dailyMinute)
+		runAt := nextDailyRun(deps.Now(), deps.Hour, deps.Minute)
 		if !sleepUntil(ctx, deps.Now, runAt) {
 			return
 		}
@@ -77,14 +85,16 @@ func RunScheduler(ctx context.Context, deps SchedulerDeps) {
 }
 
 func runDailyOnce(ctx context.Context, deps SchedulerDeps, runAt time.Time) {
-	enabled, err := deps.Enabled()
-	if err != nil {
-		// 读不出开关就当关着。宁可不传,也不能因为读库出错就把候选人明文发出去。
-		slog.Warn("现场上报:读取自动上传开关失败，本轮跳过", "errorCode", "fieldReportSettingUnavailable")
-		return
-	}
-	if !enabled {
-		return
+	if deps.Enabled != nil {
+		enabled, err := deps.Enabled()
+		if err != nil {
+			// 读不出开关就当关着。宁可不干,也不能因为读库出错就把候选人明文发出去。
+			slog.Warn(deps.Label+":读取开关失败，本轮跳过", "errorCode", "dailyTaskSettingUnavailable")
+			return
+		}
+		if !enabled {
+			return
+		}
 	}
 
 	deadline := deferDeadline(runAt)
@@ -96,7 +106,7 @@ func runDailyOnce(ctx context.Context, deps SchedulerDeps, runAt time.Time) {
 		next := deps.Now().Add(deps.retryEvery())
 		if !next.Before(deadline) {
 			// 顺延到头。这不是失败,是"今天不合适",但仍要让人看得见。
-			slog.Warn("现场上报:自动上传顺延超时，当日放弃", "reason", reason)
+			slog.Warn(deps.Label+":顺延超时，当日放弃", "reason", reason)
 			record(deps, deps.Now(), false, "顺延超时："+reason)
 			return
 		}
@@ -107,11 +117,11 @@ func runDailyOnce(ctx context.Context, deps SchedulerDeps, runAt time.Time) {
 
 	if err := deps.RunOnce(ctx); err != nil {
 		// 失败不重试(裁决)。响亮报一笔:无人值守时这是唯一会被看到的地方。
-		slog.Error("现场上报:自动上传失败", "errorCode", "fieldReportAutoUploadFailed", "err", err.Error())
+		slog.Error(deps.Label+":执行失败", "errorCode", "dailyTaskFailed", "err", err.Error())
 		record(deps, deps.Now(), false, err.Error())
 		return
 	}
-	slog.Info("现场上报:自动上传完成")
+	slog.Info(deps.Label + ":完成")
 	record(deps, deps.Now(), true, "")
 }
 
