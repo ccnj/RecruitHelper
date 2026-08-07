@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,5 +167,65 @@ func TestTodayNewAppointmentsCountsInterviewedAtNotInviteCards(t *testing.T) {
 	invited := got.Statistics.TodayInvited
 	if !invited.Exact || invited.Value == nil || *invited.Value != 0 {
 		t.Fatalf("今日已邀面与今日新约面不得共用一个数字: %+v", invited)
+	}
+}
+
+// 已约面页要在候选人行上直接显示"这个人什么时候答应的"，所以 interviewed_at
+// 必须投影进列表项。它是 time.Time 列而列表里其余时间都是毫秒，换算若没接上
+// 只会静默变成"—"，页面看不出是没约成还是没读出来。
+func TestAppCandidatesProjectsAppointedAt(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 8, 6, 12, 0, 0, 0, time.Local)
+	platform, accountRef := "zhilian", "appointed-at-account"
+	createM4Account(t, s, platform, accountRef)
+
+	appointedAt := now.Add(-26 * time.Hour)
+	userRef, profileID, conversationRef := "U-appointed", "P-appointed", "C-appointed"
+	displayName := "候选人 A"
+	if err := s.db.Create(&Candidate{
+		Platform: platform, PlatformUserRef: userRef, DisplayName: &displayName,
+		FirstSeenAt: now.Add(-72 * time.Hour), LastSeenAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CandidateProfile{
+		ProfileID: profileID, Platform: platform, AccountRef: accountRef,
+		PlatformUserRef: userRef, PositionRef: "position-appointed",
+		MainStatus: CandidateProfileInterviewed, InterviewedAt: appPtrTime(appointedAt),
+		ConversationRef: &conversationRef, ResumeCaptureState: ResumeCaptureUnattempted,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 面试时间还没到，这一位才会落在已约面视图里。
+	startsMs := now.Add(20 * time.Hour).UnixMilli()
+	if err := s.db.Create(&Message{
+		Platform: platform, AccountRef: accountRef, ConversationRef: conversationRef,
+		Seq: 1, Direction: "out", Kind: "card", CardType: "interviewInvite",
+		CardState: "accepted", ContentHash: strings.Repeat("a", 64),
+		InterviewStartsAtMs: &startsMs, Origin: "self",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.AppCandidates(AppCandidateListQuery{
+		Platform: platform, AccountRef: accountRef,
+		View: AppCandidateViewInterviewed, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("已约面视图应有 1 位候选人，实得 %d", len(list.Items))
+	}
+	got := list.Items[0].AppointedAtMs
+	if got == nil {
+		t.Fatal("约面时刻没有投影出去，页面上会永远显示为空")
+	}
+	if *got != appointedAt.UnixMilli() {
+		t.Fatalf("约面时刻不是接受邀约那一刻: 期望 %d，实得 %d", appointedAt.UnixMilli(), *got)
+	}
+	// 面试时刻是另一件事，两者不得互相顶替。
+	if list.Items[0].InterviewStartsAtMs == nil || *list.Items[0].InterviewStartsAtMs != startsMs {
+		t.Fatalf("面试开始时刻被约面时刻污染: %+v", list.Items[0].InterviewStartsAtMs)
 	}
 }

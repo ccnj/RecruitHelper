@@ -24,7 +24,7 @@ const stageConfigs: Record<CandidateView, StageConfig> = {
     description: '查看已接受面试邀约、面试时间还没到的候选人。本页只读。',
     emptyTitle: '当前没有待进行的面试',
     emptyDescription: '候选人接受面试邀约后，记录会出现在这里；时间过了会自动转入已面试。',
-    filters: ['全部', '今天'],
+    filters: ['全部'],
   },
   interviewElapsed: {
     title: '已面试',
@@ -113,7 +113,7 @@ export function CandidateStagePage({
           <div className="rh-candidate-list">
             {filtered.map((candidate) => (
               <button
-                className="rh-candidate-row"
+                className={`rh-candidate-row ${rowLayout(view)}`}
                 key={candidate.profileId}
                 onClick={() => onOpenCandidate(candidate)}
                 type="button"
@@ -130,7 +130,9 @@ export function CandidateStagePage({
                 <CandidateAuxiliary view={view} candidate={candidate} />
                 <div className="rh-candidate-side">
                   <span>{candidate.jobName}</span>
-                  <time>{candidate.lastActiveAt ?? '时间未知'}</time>
+                  {/* 已约面页有面试时间与约面时间两格,再摆一个没有标题的最后
+                      活动时间只会跟它们串在一起读(2026-08-06 甲方要求删除)。 */}
+                  {view !== 'interviewed' && <time>{candidate.lastActiveAt ?? '时间未知'}</time>}
                 </div>
                 <ProductIcon className="rh-row-chevron" name="chevron" size={17} />
               </button>
@@ -154,16 +156,19 @@ export function stageCountLabel(
   return `${filteredCount} / ${total} 位候选人`
 }
 
+// 行是 grid,列数写死在 CSS 里,所以"这个视图有几个辅助信息格"必须在渲染前
+// 问得出来:沟通中一个都没有,已约面有两个(面试时间 + 约面时间),其余一个。
+// 这里是唯一真源,CandidateAuxiliary 也从它取;两边一旦各说各话,行的最右侧
+// 就会空出一整列。
+function rowLayout(view: CandidateView): string {
+  if (view === 'interviewed') return 'is-two-aux'
+  if (view === 'interviewElapsed' || view === 'wechat') return ''
+  return 'is-no-aux'
+}
+
 function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidate: CandidateViewItem }) {
-  if (view === 'interviewed' || view === 'interviewElapsed') {
-    return (
-      <div className="rh-candidate-aux">
-        <span>面试时间</span>
-        <strong>{candidate.interviewAt ?? '—'}</strong>
-        <small>{candidate.interviewMethod ?? '方式待确认'}</small>
-      </div>
-    )
-  }
+  const layout = rowLayout(view)
+  if (layout === 'is-no-aux') return null
   if (view === 'wechat') {
     return (
       <div className="rh-candidate-aux">
@@ -173,7 +178,27 @@ function CandidateAuxiliary({ view, candidate }: { view: CandidateView; candidat
       </div>
     )
   }
-  return null
+  const interview = (
+    <div className="rh-candidate-aux">
+      <span>面试时间</span>
+      <strong>{candidate.interviewAt ?? '—'}</strong>
+      <small>{candidate.interviewMethod ?? '方式待确认'}</small>
+    </div>
+  )
+  if (layout !== 'is-two-aux') return interview
+  // 约面时间答的是"这个人什么时候答应的",跟上一格的面试时间是两件事。首页
+  // 「已约面」数的是当天有几个人答应,本页列的是面试还没到的存量,两个数字
+  // 对不上时,只有摆出答应时刻才看得出差在哪(2026-08-06 甲方要求新增)。
+  return (
+    <>
+      {interview}
+      <div className="rh-candidate-aux">
+        <span>约面时间</span>
+        <strong>{candidate.appointedAt ?? '—'}</strong>
+        <small>接受邀约</small>
+      </div>
+    </>
+  )
 }
 
 function matchesSearch(candidate: CandidateViewItem, rawQuery: string): boolean {
@@ -193,7 +218,6 @@ function matchesFilter(view: CandidateView, candidate: CandidateViewItem, filter
   if (view === 'communicating' && filter === '沟通已结束') {
     return candidate.deterministicState?.startsWith('沟通已结束') ?? false
   }
-  if (view === 'interviewed' && filter === '今天') return candidate.interviewAt?.includes('今天') ?? false
   if (view === 'wechat' && filter === '仍在自动沟通') return candidate.stillInAutoCommunication === true
   if (view === 'wechat' && filter === '已结束沟通') return candidate.stillInAutoCommunication === false
   return candidate.statusLabel.includes(filter)

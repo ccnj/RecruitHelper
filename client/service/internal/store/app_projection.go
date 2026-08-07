@@ -187,6 +187,12 @@ type AppCandidateListItem struct {
 	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
 	InterviewMethod     *string `json:"interviewMethod,omitempty"`
 	InterviewCardState  string  `json:"interviewCardState,omitempty"`
+	// AppointedAtMs 是候选人接受面试邀约的时刻(档案的 interviewed_at),与
+	// InterviewStartsAtMs(约定的面试何时开始)是两回事。首页「已约面」数的是
+	// 当天有几个人在这个时刻上答应,已约面页数的是当前还没到面试时间的存量,
+	// 两个数字对不上时用户只能靠猜——把它投影出去,页面上就能直接看出谁是
+	// 今天答应的。
+	AppointedAtMs *int64 `json:"appointedAtMs,omitempty"`
 }
 
 type AppCandidateListProjection struct {
@@ -1077,6 +1083,7 @@ type appCandidateRow struct {
 	InterviewEndsAtMs   *int64
 	InterviewMethod     *string
 	InterviewCardState  *string
+	InterviewedAt       *time.Time
 }
 
 const appCandidateSelect = `
@@ -1085,6 +1092,7 @@ candidate.display_name,
 profile.position_title,
 profile.main_status,
 profile.end_reason,
+profile.interviewed_at,
 conversation.last_message_preview,
 conversation.last_activity_ms,
 conversation.unread_count,
@@ -1139,7 +1147,18 @@ func (row appCandidateRow) projection() AppCandidateListItem {
 		InterviewStartsAtMs: row.InterviewStartsAtMs,
 		InterviewEndsAtMs:   row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
 		InterviewCardState: valueOrEmpty(row.InterviewCardState),
+		AppointedAtMs:      epochMillisOrNil(row.InterviewedAt),
 	}
+}
+
+// epochMillisOrNil 把时间列换算成毫秒。零值当没有:这一列对没约成的档案本来
+// 就是 NULL,而历史迁移过的行可能落成零值,两者在页面上是同一件事——不显示。
+func epochMillisOrNil(value *time.Time) *int64 {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	millis := value.UnixMilli()
+	return &millis
 }
 
 func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {
