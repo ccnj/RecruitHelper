@@ -42,30 +42,36 @@ func formatInterviewTime(startsAtMs *int64) string {
 	)
 }
 
-// contactLines 渲染联系方式(2026-08-06 甲方裁决改为两行):
+// contactLines 渲染联系方式(2026-08-06 甲方裁决改为两行,2026-08-07 修订):
 //
-//	微信: <换到的号>(<微信线状态>)   —— 恒出,没换到写"未获取"
-//	手机号: <侧栏采到的手机号>       —— 只在电话观察事实存在时出
+//	微信: <换到的号>            —— 恒出;号在即换到,不再跟"已成功交换微信"废话,
+//	                              没换到写"未获取(<微信线状态>)",状态此时才有信息量
+//	手机号: <侧栏采到的手机号>  —— 只在电话观察事实存在、且与微信号不同串时出
+//	                              (真机见过换的微信号就是手机号,两行同号很傻)
 func contactLines(snapshot *store.NotificationRenderSnapshot) []string {
-	status := wechatStateLabels[snapshot.WechatState]
 	wechatID := strings.TrimSpace(snapshot.WechatID)
 	wechatLine := "微信: "
 	if wechatID == "" {
+		status := wechatStateLabels[snapshot.WechatState]
 		if status == "" {
 			status = "待跟进"
 		}
 		wechatLine += "未获取(" + status + ")"
 	} else {
 		wechatLine += wechatID
-		if status != "" {
-			wechatLine += "(" + status + ")"
-		}
 	}
 	lines := []string{wechatLine}
-	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" {
+	if phone := strings.TrimSpace(snapshot.PhoneNumber); phone != "" && phone != wechatID {
 		lines = append(lines, "手机号: "+phone)
 	}
 	return lines
+}
+
+// interviewMethodLabels 是契约封闭枚举 enums.interviewMethod 的展示文案;
+// 枚举外的值不猜测,整行省略。
+var interviewMethodLabels = map[string]string{
+	"wechatVideo": "微信视频",
+	"onsite":      "线下面试",
 }
 
 func candidateTitle(prefix string, snapshot *store.NotificationRenderSnapshot, customerName string) string {
@@ -96,7 +102,7 @@ func profileLine(snapshot *store.NotificationRenderSnapshot) string {
 	}
 	line := ""
 	if len(parts) > 0 {
-		line = "候选人:" + strings.Join(parts, "/")
+		line = "候选人: " + strings.Join(parts, "/")
 	}
 	if salary := strings.TrimSpace(snapshot.DesiredSalary); salary != "" {
 		if line != "" {
@@ -125,10 +131,13 @@ func screenshotHintLine(snapshot *store.NotificationRenderSnapshot) string {
 // renderInterviewAccepted 渲染「面试确认」通知(约面成功)。
 func renderInterviewAccepted(snapshot *store.NotificationRenderSnapshot, customerName string) string {
 	lines := []string{candidateTitle("面试确认", snapshot, customerName)}
-	lines = append(lines, "面试时间:"+formatInterviewTime(snapshot.InterviewStartsAtMs))
+	lines = append(lines, "面试时间: "+formatInterviewTime(snapshot.InterviewStartsAtMs))
+	if method, ok := interviewMethodLabels[snapshot.InterviewMethod]; ok {
+		lines = append(lines, "方式: "+method)
+	}
 	lines = append(lines, contactLines(snapshot)...)
 	if snapshot.PositionTitle != "" {
-		lines = append(lines, "职位:"+snapshot.PositionTitle)
+		lines = append(lines, "职位: "+snapshot.PositionTitle)
 	}
 	if profile := profileLine(snapshot); profile != "" {
 		lines = append(lines, profile)
@@ -151,13 +160,13 @@ func renderWechatAdded(
 	}
 	lines := []string{candidateTitle(prefix, snapshot, customerName)}
 	lines = append(lines, contactLines(snapshot)...)
-	statusLine := "当前状态:" + mainStatusLabel(snapshot.MainStatus)
+	statusLine := "当前状态: " + mainStatusLabel(snapshot.MainStatus)
 	if snapshot.MainStatus == store.CandidateProfileInterviewed && snapshot.InterviewStartsAtMs != nil {
 		statusLine += " · 面试 " + formatInterviewTime(snapshot.InterviewStartsAtMs)
 	}
 	lines = append(lines, statusLine)
 	if snapshot.PositionTitle != "" {
-		lines = append(lines, "职位:"+snapshot.PositionTitle)
+		lines = append(lines, "职位: "+snapshot.PositionTitle)
 	}
 	if profile := profileLine(snapshot); profile != "" {
 		lines = append(lines, profile)

@@ -324,8 +324,11 @@ type NotificationRenderSnapshot struct {
 	// 整行省略;与 WechatID 同受"不回流进日志/审计/管理 API"边界约束。
 	PhoneNumber         string
 	InterviewStartsAtMs *int64
-	ChatShot            *CandidateScreenshot
-	ResumeShot          *CandidateScreenshot
+	// InterviewMethod 取自同一张邀面卡(契约封闭枚举 wechatVideo/onsite,
+	// 2026-08-07 甲方裁决进通知),空串=未知,渲染侧整行省略。
+	InterviewMethod string
+	ChatShot        *CandidateScreenshot
+	ResumeShot      *CandidateScreenshot
 	// 画像摘要:AGENTS.md 2026-07-28 补充裁决允许的封闭四项,逐项可空。
 	// 简历未采到、快照结构异常或标签缺失时留空,渲染侧逐项省略,绝不阻断通知。
 	Age           string
@@ -501,6 +504,9 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 			First(&card).Error
 		if err == nil {
 			snapshot.InterviewStartsAtMs = card.InterviewStartsAtMs
+			if card.InterviewMethod != nil {
+				snapshot.InterviewMethod = strings.TrimSpace(*card.InterviewMethod)
+			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
