@@ -5155,6 +5155,8 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     removedIMTabs: 0,
     listTargetReads: 0,
     interactionPaceWaits: 0,
+    sceneReads: 0,
+    sceneBaselines: [],
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -5244,6 +5246,14 @@ function installM4GreetingOrchestrationFixture(options = {}) {
           const result = phaseResult(phase)
           if (phase === 'commit' && result.status === 'clicked') state.finalClicks += 1
           return [{ result }]
+        }
+        if (func.name === 'mainReadGreetingScene') {
+          state.sceneReads += 1
+          state.sceneBaselines.push(structuredClone(args[0]))
+          if (options.sceneMode === 'throw') throw new Error('fixture-scene-death')
+          return [{ result: structuredClone(
+            options.sceneResult ?? { status: 'ready', modalCount: 0, newTexts: [] },
+          ) }]
         }
         throw new Error(`unexpected MAIN ${func.name}`)
       },
@@ -5815,6 +5825,127 @@ test('M4 招呼 attempting 前后与动作后故障均由原 witness 内核收�
     } finally {
       fixture.restore()
     }
+  }
+})
+
+test('M4 招呼阴性验证的 suspect 取证:浮层原话与未关弹窗进错误 message,基线内文本不报', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: ['今日沟通人数已达上限'] },
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.ok(error instanceof ZhilianPlatformError)
+        assert.equal(error.code, 'POSTCONDITION_UNCONFIRMED')
+        assert.equal(error.sideEffect, 'possible')
+        assert.ok(error.message.includes('今日沟通人数已达上限'), '浮层原话必须进错误 message')
+        assert.ok(error.message.includes('招呼弹窗仍未关闭'), '弹窗未关必须进错误 message')
+        assert.ok(error.message.length <= 500, 'ErrorBody.message 上限 500 字符')
+        return true
+      },
+    )
+    assert.equal(fixture.state.finalClicks, 1, '取证不得改变唯一发送')
+    assert.ok(fixture.state.sceneReads >= 2, '基线一次+轮询至少一次')
+    assert.deepEqual(fixture.state.sceneBaselines[0], [], '基线读取用空基线拿全量')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼 suspect 取证读挂掉时判定与 message 不变', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    sceneMode: 'throw',
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.ok(error instanceof ZhilianPlatformError)
+        assert.equal(error.code, 'POSTCONDITION_UNCONFIRMED')
+        assert.equal(
+          error.message,
+          '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立',
+          '取证失败必须空手:message 保持原文',
+        )
+        return true
+      },
+    )
+    assert.equal(fixture.state.finalClicks, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('mainReadGreetingScene 只报基线外的可见浮层并统计招呼弹窗', () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+  }
+  class FakeElement {
+    constructor(props = {}) {
+      this.className = props.className ?? ''
+      this.innerText = props.innerText ?? ''
+      this.children = props.children ?? []
+      this.visible = props.visible !== false
+      this.position = props.position ?? 'static'
+      this.insideModal = props.insideModal === true
+      this.containsModal = props.containsModal === true
+    }
+    getClientRects() { return this.visible ? [{}] : [] }
+    closest(selector) {
+      return selector === '.ai-greeting-modal' && this.insideModal ? this : null
+    }
+    querySelector(selector) {
+      return selector === '.ai-greeting-modal' && this.containsModal ? this : null
+    }
+  }
+  const kmOld = new FakeElement({ className: 'km-message km-message--success', innerText: '消息已发送' })
+  const kmNew = new FakeElement({ className: 'km-message km-message--error', innerText: '今日沟通人数已达上限' })
+  const kmHidden = new FakeElement({ className: 'km-message', innerText: '隐藏提示', visible: false })
+  const fixedPortal = new FakeElement({ position: 'fixed', innerText: '操作频繁，请稍后再试' })
+  const staticRoot = new FakeElement({ position: 'static', innerText: '应用根很长的内容'.repeat(40), children: [fixedPortal] })
+  const modal = new FakeElement({ className: 'ai-greeting-modal', position: 'fixed', innerText: '打招呼弹窗正文', containsModal: true })
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = (node) => ({
+    display: 'block', visibility: 'visible', position: node.position ?? 'static',
+  })
+  globalThis.document = {
+    body: { children: [staticRoot, modal] },
+    querySelectorAll(selector) {
+      if (selector === '[class*="km-message"], [class*="km-toast"]') return [kmOld, kmNew, kmHidden]
+      if (selector === '.ai-greeting-modal') return [modal]
+      return []
+    },
+  }
+  try {
+    const result = zhilianTestHooks.mainReadGreetingScene(['消息已发送'])
+    assert.equal(result.status, 'ready')
+    assert.equal(result.modalCount, 1, '可见招呼弹窗必须计数')
+    assert.deepEqual(
+      result.newTexts,
+      ['今日沟通人数已达上限', '操作频繁，请稍后再试'],
+      '基线内文本与不可见提示不报;弹窗自身不算浮层;fixed portal 由兜底捕获',
+    )
+    const baseline = zhilianTestHooks.mainReadGreetingScene([])
+    assert.ok(baseline.newTexts.includes('消息已发送'), '空基线返回全量作为基线')
+  } finally {
+    Object.assign(globalThis, original)
   }
 })
 

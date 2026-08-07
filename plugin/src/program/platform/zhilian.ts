@@ -420,6 +420,12 @@ type MainGreetingListTargetResult =
   }
   | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
 
+// suspect 取证(2026-08-07 甲方裁决立案):招呼发送后的轮询里顺带观察页面浮层
+// 与招呼弹窗开合。纯只读扫描,不参与任何发送判定;失败方向永远是"少一条现场"。
+type MainGreetingSceneResult =
+  | { status: 'ready'; modalCount: number; newTexts: string[] }
+  | { status: 'failed' }
+
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
   atBottom: boolean
@@ -3124,6 +3130,73 @@ function validGreetingListTargetResult(value: unknown): value is MainGreetingLis
   return contactState === 'unestablished' || contactState === 'established' || contactState === 'unknown'
 }
 
+// suspect 取证专用只读扫描:报出基线之外的新浮层文本与招呼弹窗开合状态。
+// 它不是守卫——不问"能不能发",只记"平台当时说了什么";任何异常都以 failed
+// 收场,由调用方空手继续,绝不影响发送判定(2026-08-07 甲方裁决立案)。
+function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  try {
+    const seen = new Set(Array.isArray(baselineTexts) ? baselineTexts : [])
+    const newTexts: string[] = []
+    const push = (raw: string): void => {
+      const text = raw.slice(0, 160)
+      if (text !== '' && !seen.has(text) && !newTexts.includes(text) && newTexts.length < 5) {
+        newTexts.push(text)
+      }
+    }
+    // 一级:智联站内提示组件。选择器考古自旧项目(km-message--success「消息已发送」),
+    // 高脆、真机对不上就空手,由二级兜底;取证通道脆断代价为零。
+    for (const node of Array.from(document.querySelectorAll<HTMLElement>(
+      '[class*="km-message"], [class*="km-toast"]',
+    ))) {
+      if (visible(node)) push(clean(node.innerText))
+    }
+    // 二级兜底:body 两层子树里 fixed 定位、短文本的可见浮层(portal 挂载的提示)。
+    // 招呼弹窗自身不算浮层,它的开合另由 modalCount 记录。
+    const candidates: HTMLElement[] = []
+    for (const child of Array.from(document.body.children)) {
+      if (!(child instanceof HTMLElement)) continue
+      candidates.push(child)
+      for (const grand of Array.from(child.children)) {
+        if (grand instanceof HTMLElement) candidates.push(grand)
+      }
+    }
+    for (const node of candidates) {
+      if (node.closest('.ai-greeting-modal') !== null || node.querySelector('.ai-greeting-modal') !== null) {
+        continue
+      }
+      if (!visible(node)) continue
+      if (getComputedStyle(node).position !== 'fixed') continue
+      const text = clean(node.innerText)
+      if (text.length === 0 || text.length > 120) continue
+      push(text)
+    }
+    const modalCount = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal'))
+      .filter(visible).length
+    return { status: 'ready', modalCount, newTexts }
+  } catch {
+    return { status: 'failed' }
+  }
+}
+
+function validGreetingSceneResult(value: unknown): value is MainGreetingSceneResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') return true
+  return record.status === 'ready' && typeof record.modalCount === 'number' &&
+    Array.isArray(record.newTexts) &&
+    (record.newTexts as unknown[]).every((item) => typeof item === 'string')
+}
+
 interface GreetingListTargetSnapshot {
   tab: chrome.tabs.Tab
   result: Extract<MainGreetingListTargetResult, { status: 'ready' }>
@@ -3707,6 +3780,18 @@ export async function sendZhilianGreeting(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼预检返回结构无效', 'manualOnly')
   }
   if (preflight.status !== 'ready') throwGreetingActionFailure(preflight)
+  // suspect 取证基线:点击前页面上已有的浮层文本,轮询时只报基线外的新浮层。
+  // 只读、失败即空基线;最终发送前的 commit 会字面重跑同一 evaluator,
+  // 这里的读取不构成对最终动作表面的授权(2026-08-07 甲方裁决立案)。
+  let sceneBaseline: string[] = []
+  try {
+    const baseline = await runMain(tabId, mainReadGreetingScene, [[]])
+    if (validGreetingSceneResult(baseline) && baseline.status === 'ready') {
+      sceneBaseline = baseline.newTexts
+    }
+  } catch {
+    // 基线读不到就当空基线,新浮层照样能捕,顶多多报一条本就在页面上的文本。
+  }
   ctx.checkpoint()
   await ctx.beforeSideEffect()
 
@@ -3722,6 +3807,8 @@ export async function sendZhilianGreeting(
   }
   if (action.status !== 'clicked') throwGreetingActionFailure(action)
 
+  let capturedOverlay: { text: string; round: number } | null = null
+  let lastModalCount: number | null = null
   for (let round = 0; round < 20; round += 1) {
     ctx.checkpoint()
     try {
@@ -3746,15 +3833,39 @@ export async function sendZhilianGreeting(
             observedAt: Date.now(),
           }
         }
+        // 未确认的轮次顺带看一眼现场:新浮层文本与弹窗开合。纯读、不点、不等,
+        // 自身失败空手继续,不影响判定(2026-08-07 甲方裁决立案的 suspect 取证)。
+        try {
+          const scene = await runMain(tabId, mainReadGreetingScene, [sceneBaseline])
+          if (validGreetingSceneResult(scene) && scene.status === 'ready') {
+            lastModalCount = scene.modalCount
+            if (capturedOverlay === null && scene.newTexts.length > 0) {
+              capturedOverlay = { text: scene.newTexts.join(' ¦ ').slice(0, 200), round }
+            }
+          }
+        } catch {
+          // 取证读失败即空手,原判定不变。
+        }
       }
     } catch {
       // 目标消失、读取异常或身份无法复核都只是未确认，不证明未发送。
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
+  // 现场纪要拼进错误 message:随 result 进命令审计快照与诊断包,并经 suspect
+  // 日志行进日志上报。平台浮层文本可进普通日志与上报,偶发夹带候选人信息
+  // 不扫描不过滤(2026-08-07 甲方裁决)。ErrorBody.message 上限 500 字符,
+  // 浮层已截 200,总长有余量。
+  let sceneNote = ''
+  if (capturedOverlay !== null) {
+    sceneNote = `；发送后第${capturedOverlay.round + 1}轮观察到新浮层「${capturedOverlay.text}」`
+  }
+  if (lastModalCount !== null && lastModalCount > 0) {
+    sceneNote += '；验证结束时招呼弹窗仍未关闭'
+  }
   throw new ZhilianPlatformError(
     'POSTCONDITION_UNCONFIRMED',
-    '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立',
+    '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立' + sceneNote,
     'manualOnly',
     undefined,
     'possible',
@@ -14015,6 +14126,7 @@ export const zhilianTestHooks = Object.freeze({
   identifyZhilianCurrentConversation,
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
+  mainReadGreetingScene,
   mainReadCurrentResume,
   mainChatCaptureStep,
   mainResumeCaptureStep,
