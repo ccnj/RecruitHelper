@@ -152,6 +152,15 @@ const snapshot = {
       interviewStartsAtMs: todayAt(15, 0),
       interviewMethod: '微信视频',
       interviewCardState: 'confirmed',
+    }), rawCandidate({
+      profileId: 'profile-rejected-greeting',
+      status: 'ended',
+      endReason: 'greetingFailed',
+      greetingRejectReason: '平台明确拒绝本次招呼:内容中涉及敏感词，请修改',
+    }), rawCandidate({
+      profileId: 'profile-ended-plain',
+      status: 'ended',
+      endReason: 'greetingFailed',
     })]),
     interviewed: candidateResponse('interviewed', [rawCandidate({
       profileId: 'profile-interviewed',
@@ -280,6 +289,18 @@ check(
   product.candidates.communicating.find((item) => item.profileId === 'profile-invited')
     ?.statusLabel === '邀面已确认',
   '已邀面候选人并入沟通中且标签可分辨',
+)
+// 平台拒绝招呼时把原话带到客户端(2026-08-07 甲方裁决):光一句"招呼失败"
+// 分不清敏感词、平台上限还是技术故障,用户没法据此改招呼语。
+check(
+  product.candidates.communicating.find((item) => item.profileId === 'profile-rejected-greeting')
+    ?.deterministicState === '沟通已结束：招呼失败——平台明确拒绝本次招呼:内容中涉及敏感词，请修改',
+  '平台拒绝原话跟在招呼失败之后显示',
+)
+check(
+  product.candidates.communicating.find((item) => item.profileId === 'profile-ended-plain')
+    ?.deterministicState === '沟通已结束：招呼失败',
+  '没有平台原话时保持原有笼统表述,不留空破折号',
 )
 // "已面试"只表示约定时间已过，不代表候选人到场；系统没有面试结果事实。
 check(

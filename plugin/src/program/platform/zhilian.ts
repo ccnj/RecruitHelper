@@ -425,9 +425,14 @@ type MainGreetingListTargetResult =
   | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
 
 // suspect 取证(2026-08-07 甲方裁决立案):招呼发送后的轮询里顺带观察页面浮层
-// 与招呼弹窗开合。纯只读扫描,不参与任何发送判定;失败方向永远是"少一条现场"。
+// 与招呼弹窗开合。纯只读扫描;失败方向永远是"少一条现场"。
+//
+// editError 是例外——它不是诊断,是判据:2026-08-07 真机考古确认平台把
+// "内容中涉及敏感词,请修改"写在弹窗内 `.ai-greeting-modal__edit-error`,
+// 点发送时才校验,发送按钮不置灰,弹窗保持打开。读到它即平台明确业务拒绝
+// (详见 docs/招呼suspect取证立案-2026-08-07.md)。
 type MainGreetingSceneResult =
-  | { status: 'ready'; modalCount: number; newTexts: string[] }
+  | { status: 'ready'; modalCount: number; newTexts: string[]; editError: string }
   | { status: 'failed' }
 
 interface MainListDOMWindowResult {
@@ -3226,11 +3231,48 @@ function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult
       if (text.length === 0 || text.length > 120) continue
       push(text)
     }
-    const modalCount = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal'))
-      .filter(visible).length
-    return { status: 'ready', modalCount, newTexts }
+    const modals = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+    // 弹窗内的编辑区错误位。该节点常驻 DOM、无错时是纯空白,所以判据是
+    // "可见且 trim 后非空",绝不能判节点是否存在——判错方向会把成功当拒绝。
+    const editError = modals.length === 0 ? '' : (() => {
+      for (const node of Array.from(modals[0].querySelectorAll<HTMLElement>(
+        '.ai-greeting-modal__edit-error',
+      ))) {
+        if (!visible(node)) continue
+        const text = clean(node.innerText)
+        if (text !== '') return text.slice(0, 160)
+      }
+      return ''
+    })()
+    return { status: 'ready', modalCount: modals.length, newTexts, editError }
   } catch {
     return { status: 'failed' }
+  }
+}
+
+// 关闭仍开着的招呼弹窗。平台拒绝后弹窗不会自己关,不关就会把后续候选人
+// 全部挡在 USER_ACTIVE(2026-08-06 真机:三次拒绝连累 11 人被跳过)。
+// 只点弹窗自己的关闭控件,等价于"取消",零候选人可见副作用。
+function mainCloseGreetingModal(): { closed: boolean } {
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  try {
+    const modals = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+    if (modals.length !== 1) return { closed: false }
+    const buttons = Array.from(modals[0].querySelectorAll<HTMLButtonElement>('.km-modal__close-btn'))
+      .filter(visible)
+    if (buttons.length !== 1) return { closed: false }
+    const button = buttons[0]
+    if (button.form !== null && button.type !== 'button') return { closed: false }
+    const intrinsicClick = HTMLElement.prototype.click as ((this: HTMLElement) => void) | undefined
+    if (typeof intrinsicClick !== 'function') return { closed: false }
+    Function.prototype.call.bind(intrinsicClick, button)()
+    return { closed: true }
+  } catch {
+    return { closed: false }
   }
 }
 
@@ -3239,6 +3281,7 @@ function validGreetingSceneResult(value: unknown): value is MainGreetingSceneRes
   const record = value as Record<string, unknown>
   if (record.status === 'failed') return true
   return record.status === 'ready' && typeof record.modalCount === 'number' &&
+    typeof record.editError === 'string' &&
     Array.isArray(record.newTexts) &&
     (record.newTexts as unknown[]).every((item) => typeof item === 'string')
 }
@@ -3855,6 +3898,7 @@ export async function sendZhilianGreeting(
 
   let capturedOverlay: { text: string; round: number } | null = null
   let lastModalCount: number | null = null
+  let rejected: string | null = null
   for (let round = 0; round < 20; round += 1) {
     ctx.checkpoint()
     try {
@@ -3879,14 +3923,22 @@ export async function sendZhilianGreeting(
             observedAt: Date.now(),
           }
         }
-        // 未确认的轮次顺带看一眼现场:新浮层文本与弹窗开合。纯读、不点、不等,
-        // 自身失败空手继续,不影响判定(2026-08-07 甲方裁决立案的 suspect 取证)。
+        // 未确认的轮次顺带看一眼现场:弹窗内错误位、新浮层文本与弹窗开合。
+        // 纯读、不点、不等,自身失败空手继续(2026-08-07 甲方裁决立案的取证)。
         try {
           const scene = await runMain(tabId, mainReadGreetingScene, [sceneBaseline])
           if (validGreetingSceneResult(scene) && scene.status === 'ready') {
             lastModalCount = scene.modalCount
             if (capturedOverlay === null && scene.newTexts.length > 0) {
               capturedOverlay = { text: scene.newTexts.join(' ¦ ').slice(0, 200), round }
+            }
+            if (scene.editError !== '') {
+              // 平台明确业务拒绝:错误位有话、目标关系仍未建立(上面刚读过,
+              // 不是 established)。两者同时成立即"平台明确呈现的可信失败
+              // 结果",按 AGENTS.md 可见后置状态原则判失败,不再猜。
+              // GREETING_REJECTED/none:脑侧据此终结档案、不重试、不转人工。
+              rejected = scene.editError
+              break
             }
           }
         } catch {
@@ -3898,6 +3950,26 @@ export async function sendZhilianGreeting(
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
+  // 平台明确业务拒绝:关掉不会自己关的弹窗,再以 GREETING_REJECTED/none 收场。
+  // 关弹窗只点弹窗自身的关闭控件(等价取消),零候选人可见副作用;点不动就
+  // 算了——它是止损不是判据,不改变本次结论,也不允许失败反过来推翻拒绝。
+  if (rejected !== null) {
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
+      ctx.checkpoint()
+      await runMain(tabId, mainCloseGreetingModal, [])
+    } catch {
+      // 关不掉只影响后续候选人的接管,由它们各自的 USER_ACTIVE 诚实上报。
+    }
+    throw new ZhilianPlatformError(
+      'GREETING_REJECTED',
+      `平台明确拒绝本次招呼:${rejected}`,
+      'no',
+      undefined,
+      'none',
+    )
+  }
+
   // 现场纪要拼进错误 message:随 result 进命令审计快照与诊断包,并经 suspect
   // 日志行进日志上报。平台浮层文本可进普通日志与上报,偶发夹带候选人信息
   // 不扫描不过滤(2026-08-07 甲方裁决)。ErrorBody.message 上限 500 字符,
@@ -14411,6 +14483,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
   mainReadGreetingScene,
+  mainCloseGreetingModal,
   mainReadCurrentResume,
   mainChatCaptureStep,
   mainResumeCaptureStep,

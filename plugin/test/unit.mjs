@@ -5205,6 +5205,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     interactionPaceWaits: 0,
     sceneReads: 0,
     sceneBaselines: [],
+    modalCloseCalls: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -5300,8 +5301,13 @@ function installM4GreetingOrchestrationFixture(options = {}) {
           state.sceneBaselines.push(structuredClone(args[0]))
           if (options.sceneMode === 'throw') throw new Error('fixture-scene-death')
           return [{ result: structuredClone(
-            options.sceneResult ?? { status: 'ready', modalCount: 0, newTexts: [] },
+            options.sceneResult ?? { status: 'ready', modalCount: 0, newTexts: [], editError: '' },
           ) }]
+        }
+        if (func.name === 'mainCloseGreetingModal') {
+          state.modalCloseCalls += 1
+          if (options.closeMode === 'throw') throw new Error('fixture-close-death')
+          return [{ result: { closed: options.closeMode !== 'stuck' } }]
         }
         throw new Error(`unexpected MAIN ${func.name}`)
       },
@@ -5879,7 +5885,7 @@ test('M4 招呼 attempting 前后与动作后故障均由原 witness 内核收�
 test('M4 招呼阴性验证的 suspect 取证:浮层原话与未关弹窗进错误 message,基线内文本不报', async () => {
   const fixture = installM4GreetingOrchestrationFixture({
     proofMode: 'negative',
-    sceneResult: { status: 'ready', modalCount: 1, newTexts: ['今日沟通人数已达上限'] },
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: ['今日沟通人数已达上限'], editError: '' },
   })
   const context = fixture.context()
   try {
@@ -5939,6 +5945,159 @@ test('M4 招呼 suspect 取证读挂掉时判定与 message 不变', async () =>
   }
 })
 
+test('M4 招呼:弹窗内错误位有话即判 GREETING_REJECTED,关弹窗后不再补动作', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    sceneResult: {
+      status: 'ready', modalCount: 1, newTexts: [],
+      editError: '内容中涉及敏感词，请修改',
+    },
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.ok(error instanceof ZhilianPlatformError)
+        assert.equal(error.code, 'GREETING_REJECTED', '平台明确拒绝必须判 GREETING_REJECTED')
+        assert.equal(error.sideEffect, 'none', '契约要求零候选人可见副作用')
+        assert.equal(error.retryable, 'no')
+        assert.ok(error.message.includes('内容中涉及敏感词'), '平台原话必须随行,供客户端显示')
+        return true
+      },
+    )
+    assert.equal(fixture.state.finalClicks, 1, '拒绝判定不得补第二次发送')
+    assert.equal(fixture.state.modalCloseCalls, 1, '拒绝后必须关掉不会自己关的弹窗')
+    assert.ok(fixture.state.proofCalls <= 2, '读到拒绝必须立即收场,不空转满 20 轮')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼:关弹窗失败不推翻拒绝判定', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '内容中涉及敏感词，请修改' },
+    closeMode: 'throw',
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.equal(error.code, 'GREETING_REJECTED')
+        assert.equal(error.sideEffect, 'none')
+        return true
+      },
+    )
+    assert.equal(fixture.state.finalClicks, 1)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M4 招呼:错误位空白不得被当成拒绝,仍走原 suspect 轨', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '' },
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.equal(error.code, 'POSTCONDITION_UNCONFIRMED', '空错误位必须保持不确认,不得判失败')
+        assert.equal(error.sideEffect, 'possible')
+        return true
+      },
+    )
+    assert.equal(fixture.state.modalCloseCalls, 0, '未判拒绝就不该动弹窗')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('mainReadGreetingScene 读出弹窗内错误位,空白节点不算拒绝(2026-08-07 真机结构)', () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+  }
+  class FakeElement {
+    constructor(props = {}) {
+      this.className = props.className ?? ''
+      this.innerText = props.innerText ?? ''
+      this.children = props.children ?? []
+      this.visible = props.visible !== false
+      this.position = props.position ?? 'static'
+      this.descendants = props.descendants ?? []
+    }
+    getClientRects() { return this.visible ? [{}] : [] }
+    closest() { return null }
+    querySelector() { return null }
+    querySelectorAll(selector) {
+      return selector === '.ai-greeting-modal__edit-error'
+        ? this.descendants.filter((d) => String(d.className).includes('edit-error'))
+        : []
+    }
+  }
+  const run = (errorNode) => {
+    const modal = new FakeElement({
+      className: 'ai-greeting-modal', position: 'fixed', descendants: errorNode ? [errorNode] : [],
+    })
+    globalThis.HTMLElement = FakeElement
+    globalThis.getComputedStyle = (node) => ({
+      display: 'block', visibility: 'visible', position: node.position ?? 'static',
+    })
+    globalThis.document = {
+      body: { children: [] },
+      querySelectorAll(selector) {
+        if (selector === '.ai-greeting-modal') return [modal]
+        return []
+      },
+    }
+    return zhilianTestHooks.mainReadGreetingScene([])
+  }
+  try {
+    // 真机实测:无错时节点仍在,innerText 是 "\n          \n        " 这样的纯空白。
+    const blank = run(new FakeElement({
+      className: 'ai-greeting-modal__edit-error', innerText: '\n          \n        ',
+    }))
+    assert.equal(blank.status, 'ready')
+    assert.equal(blank.editError, '', '常驻空白节点必须读成空串,否则成功会被误判成拒绝')
+    assert.equal(blank.modalCount, 1)
+
+    const errored = run(new FakeElement({
+      className: 'ai-greeting-modal__edit-error', innerText: '内容中涉及敏感词，请修改',
+    }))
+    assert.equal(errored.editError, '内容中涉及敏感词，请修改')
+
+    const hidden = run(new FakeElement({
+      className: 'ai-greeting-modal__edit-error', innerText: '内容中涉及敏感词，请修改', visible: false,
+    }))
+    assert.equal(hidden.editError, '', '不可见的错误位不算拒绝')
+
+    assert.equal(run(null).editError, '', '没有错误位节点时为空串')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('mainReadGreetingScene 只报基线外的可见浮层并统计招呼弹窗', () => {
   const original = {
     document: globalThis.document,
@@ -5962,6 +6121,8 @@ test('mainReadGreetingScene 只报基线外的可见浮层并统计招呼弹窗'
     querySelector(selector) {
       return selector === '.ai-greeting-modal' && this.containsModal ? this : null
     }
+    // 本例的弹窗里没有错误位:浮层扫描与 editError 判据互不干扰。
+    querySelectorAll() { return [] }
   }
   const kmOld = new FakeElement({ className: 'km-message km-message--success', innerText: '消息已发送' })
   const kmNew = new FakeElement({ className: 'km-message km-message--error', innerText: '今日沟通人数已达上限' })

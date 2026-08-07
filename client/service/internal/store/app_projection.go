@@ -168,17 +168,20 @@ type AppCandidateDetailQuery struct {
 }
 
 type AppCandidateListItem struct {
-	ProfileID          string  `json:"profileId"`
-	DisplayName        string  `json:"displayName"`
-	JobName            string  `json:"jobName,omitempty"`
-	Status             string  `json:"status"`
-	EndReason          string  `json:"endReason,omitempty"`
-	LastMessagePreview string  `json:"lastMessagePreview,omitempty"`
-	LastActivityAtMs   *int64  `json:"lastActivityAtMs,omitempty"`
-	UnreadCount        int     `json:"unreadCount"`
-	ManualRequired     bool    `json:"manualRequired"`
-	ManualReason       string  `json:"manualReason,omitempty"`
-	Wechat             *string `json:"wechat,omitempty"`
+	ProfileID   string `json:"profileId"`
+	DisplayName string `json:"displayName"`
+	JobName     string `json:"jobName,omitempty"`
+	Status      string `json:"status"`
+	EndReason   string `json:"endReason,omitempty"`
+	// GreetingRejectReason 是平台拒绝招呼时的原话,让客户端不再只看到笼统的
+	// 「招呼失败」(2026-08-07 甲方裁决)。平台文案,不是候选人明文。
+	GreetingRejectReason string  `json:"greetingRejectReason,omitempty"`
+	LastMessagePreview   string  `json:"lastMessagePreview,omitempty"`
+	LastActivityAtMs     *int64  `json:"lastActivityAtMs,omitempty"`
+	UnreadCount          int     `json:"unreadCount"`
+	ManualRequired       bool    `json:"manualRequired"`
+	ManualReason         string  `json:"manualReason,omitempty"`
+	Wechat               *string `json:"wechat,omitempty"`
 	// WechatObservedAtMs 是该微信资产的收编观测时刻。资产行一直有它(上面那个
 	// 子查询就是按它排序取最新号的),此前没有投影出去,产品端只能常年显示
 	// "时间未知"。
@@ -1067,23 +1070,24 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 }
 
 type appCandidateRow struct {
-	ProfileID           string
-	DisplayName         *string
-	PositionTitle       *string
-	MainStatus          CandidateProfileStatus
-	EndReason           *CandidateProfileEndReason
-	LastMessagePreview  *string
-	LastActivityMs      *int64
-	UnreadCount         *int
-	AutomationStatus    *ProfileCommunicationAutomationStatus
-	ManualReason        *string
-	Wechat              *string
-	WechatObservedAtMs  *int64
-	InterviewStartsAtMs *int64
-	InterviewEndsAtMs   *int64
-	InterviewMethod     *string
-	InterviewCardState  *string
-	InterviewedAt       *time.Time
+	ProfileID            string
+	DisplayName          *string
+	PositionTitle        *string
+	MainStatus           CandidateProfileStatus
+	EndReason            *CandidateProfileEndReason
+	GreetingRejectReason *string
+	LastMessagePreview   *string
+	LastActivityMs       *int64
+	UnreadCount          *int
+	AutomationStatus     *ProfileCommunicationAutomationStatus
+	ManualReason         *string
+	Wechat               *string
+	WechatObservedAtMs   *int64
+	InterviewStartsAtMs  *int64
+	InterviewEndsAtMs    *int64
+	InterviewMethod      *string
+	InterviewCardState   *string
+	InterviewedAt        *time.Time
 }
 
 const appCandidateSelect = `
@@ -1092,6 +1096,7 @@ candidate.display_name,
 profile.position_title,
 profile.main_status,
 profile.end_reason,
+profile.greeting_reject_reason,
 profile.interviewed_at,
 conversation.last_message_preview,
 conversation.last_activity_ms,
@@ -1139,9 +1144,10 @@ func (row appCandidateRow) projection() AppCandidateListItem {
 	return AppCandidateListItem{
 		ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
 		JobName: valueOrEmpty(row.PositionTitle), Status: string(row.MainStatus),
-		EndReason:          valueOrEmptyCandidateEndReason(row.EndReason),
-		LastMessagePreview: valueOrEmpty(row.LastMessagePreview),
-		LastActivityAtMs:   row.LastActivityMs, UnreadCount: unread,
+		EndReason:            valueOrEmptyCandidateEndReason(row.EndReason),
+		GreetingRejectReason: valueOrEmpty(row.GreetingRejectReason),
+		LastMessagePreview:   valueOrEmpty(row.LastMessagePreview),
+		LastActivityAtMs:     row.LastActivityMs, UnreadCount: unread,
 		ManualRequired: manual, ManualReason: valueOrEmpty(row.ManualReason),
 		Wechat: row.Wechat, WechatObservedAtMs: row.WechatObservedAtMs,
 		InterviewStartsAtMs: row.InterviewStartsAtMs,
