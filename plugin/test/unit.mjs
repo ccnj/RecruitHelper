@@ -7392,7 +7392,8 @@ test('M3 post 只接受 baseline 后严格追加一条 server success，同文�
     )
     assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 })
     fixture.appendOutbound()
-    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1 })
+    // matchedTimeMs = 夹具行 time(秒值 2)按生产同一换算放大为毫秒。
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1, matchedTimeMs: 2000 })
     fixture.appendOutbound(fixture.text, 'server-m3-out-extra')
     assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 0 },
       '严格 +2 即使同文也必须保持阴性')
@@ -7443,7 +7444,7 @@ test('M3 post 的 64 行滑窗严格左移一格，新增行四类语义不符�
     })
 
     append({ id: 'ok' })
-    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1 },
+    assert.deepEqual(await observe(), { selected: true, matchingNewServerMessages: 1, matchedTimeMs: 65000 },
       'baseline=64 时只允许窗口左移一格并追加唯一成功文本')
 
     for (const [name, overrides] of [
