@@ -144,4 +144,5 @@
   - 人眼验收操作:见 `scripts/dev-run.md`;§16 验收对照见 `docs/里程碑1-验收报告.md`。
 - Go 侧 SQLite 走 glebarez/sqlite(纯 Go);**禁止引入 cgo 依赖**,`CGO_ENABLED=0 GOOS=windows go build ./client/service` 必须常年通过(Windows 交叉编译是发布路径)。
 - SQLite 写靠 `SetMaxOpenConns(1)` 串行化(SQLite 单写;红队复现过并发 BUSY 静默丢结果→双发的致命链)。
+- **`brain.db` 的时间列混着 UTC 与本地偏移两种落盘格式,比较时一律当心。** 这不是设计,是历史写入路径差异,且**同名列在不同表里格式不同**:`contact_assets.created_at`、`notification_outboxes.created_at` 落 UTC(`...+00:00`),而 `candidate_profiles.greeted_at`、`cmd_records.created_at` 落本地偏移(`...+08:00`)。SQLite 按**字符串**比较这些值,格式不一致时既不报错也不转换,只会静默偏 8 小时——在 UTC+8 下拿本地 `time.Time` 比 UTC 列,本机 00:00–08:00 的行会被算到前一天(2026-07-31 实测:「今日换微信数」应数 2 只数出 1)。**做法**:新写按天或按时段切范围的查询,一律用毫秒整数列(`observed_at_ms`、`ts_approx_ms`)比 `start.UnixMilli()`,不要比 `created_at`;现成范例见 `app_projection.go` 的 `TodayWechat`。写回归用例时要照抄现网落盘形态,否则新建测试库写出来全是本地偏移,跨界 bug 测不出来。经 GORM 用 `time.Time` 读写同一列不受影响(写入与查询同一套序列化),风险集中在手写 SQL 与跨列比较——诊断台 SQL 控制台尤其容易中招。
 - 协议实现:唯一规范源 `contract/协议规格-v1.md`;里程碑 1 验收记录见 `docs/里程碑1-验收报告.md`。
