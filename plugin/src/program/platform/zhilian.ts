@@ -371,6 +371,9 @@ interface MainApplySourcingFiltersReady {
 interface MainApplySourcingFiltersFailed {
   status: 'failed'
   reason: MainApplySourcingFiltersFailureReason
+  /** 失败现场,纯诊断自由文本(不进契约,按 AGENTS.md「诊断辅助默认不进契约」)。
+   *  只写筛选枚举标签与节点计数,不含任何候选人明文或页面业务文本。 */
+  scene?: string
 }
 
 type MainApplySourcingFiltersResult =
@@ -419,6 +422,12 @@ type MainGreetingListTargetResult =
     data: { contactState: ZhilianCurrentCandidate['contactState'] }
   }
   | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
+
+// suspect 取证(2026-08-07 甲方裁决立案):招呼发送后的轮询里顺带观察页面浮层
+// 与招呼弹窗开合。纯只读扫描,不参与任何发送判定;失败方向永远是"少一条现场"。
+type MainGreetingSceneResult =
+  | { status: 'ready'; modalCount: number; newTexts: string[] }
+  | { status: 'failed' }
 
 interface MainListDOMWindowResult {
   sessions: ZhilianConversationSummary[]
@@ -1623,7 +1632,12 @@ async function mainApplySourcingFilters(
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const failed = (
     reason: MainApplySourcingFiltersFailureReason,
-  ): MainApplySourcingFiltersFailed => ({ status: 'failed', reason })
+    scene?: string,
+  ): MainApplySourcingFiltersFailed => ({
+    status: 'failed',
+    reason,
+    ...(scene === undefined ? {} : { scene }),
+  })
   const sleep = (delayMs: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, delayMs))
   const randomInteractionGapMs = (): number =>
@@ -1991,11 +2005,31 @@ async function mainApplySourcingFilters(
     await interact(() => cancel.click())
     return await waitFor(() => drawerNodes().length === 0 ? true : null) === true
   }
-  const clickOption = async (group: GroupState, label: string): Promise<boolean> => {
-    const matches = group.options.filter((option) => option.label === label)
-    if (matches.length !== 1) return false
-    await interact(() => matches[0].node.click())
-    return true
+  // 当场按 selector 取组,不吃初读时存下的节点引用。
+  const liveGroup = (key: FilterKey): HTMLElement | null => {
+    const drawers = drawerNodes()
+    if (drawers.length !== 1) return null
+    const groups = visibleAll(drawers[0], schemas[key].selector)
+    return groups.length === 1 ? groups[0] : null
+  }
+  // 定位与 click 必须待在同一个同步块里。interact 会先睡满平台节奏下限(1 秒以上)
+  // 再执行回调,若在睡之前就把节点取出来,这一秒足够 Vue 把整组重渲染一遍——旧节点
+  // 脱离文档后 click() 既不抛异常也不生效,页面上就是"点了没反应",而代码毫不知情。
+  // 年龄组尤其危险:它是唯一带 config 的独立子组件(.filter-group-age),会自己重建,
+  // 又恰好是循环里第一个被点的,紧贴抽屉刚弹出这个最不稳的时刻。
+  // 2026-08-07 客户机 custom_selector_unavailable 现场即为此形态。
+  const clickOption = async (key: FilterKey, label: string): Promise<boolean> => {
+    let clicked = false
+    await interact(() => {
+      const group = liveGroup(key)
+      if (!group) return
+      const matches = visibleAll(group, schemas[key].optionSelector)
+        .filter((node) => optionLabel(node) === label)
+      if (matches.length !== 1) return
+      matches[0].click()
+      clicked = true
+    })
+    return clicked
   }
   const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
     const careerLabels: Record<string, string> = {
@@ -2098,27 +2132,27 @@ async function mainApplySourcingFilters(
       const targetLabels = targets[key]
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
-            !await clickOption(group, targetLabels[0])) {
+            !await clickOption(key, targetLabels[0])) {
           return failed('option_set_mismatch')
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
-            !await clickOption(group, '不限')) {
+            !await clickOption(key, '不限')) {
           return failed('option_set_mismatch')
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
-            !await clickOption(group, selected)) {
+            !await clickOption(key, selected)) {
           return failed('option_set_mismatch')
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
-            !await clickOption(group, desired)) {
+            !await clickOption(key, desired)) {
           return failed('option_set_mismatch')
         }
       }
@@ -2126,10 +2160,27 @@ async function mainApplySourcingFilters(
 
     if (targetFilters.age.mode === 'range' && targets.age[0] === '自定义') {
       const selector = await waitFor(() => {
-        const matches = visibleAll(initialSnapshot.groups.age.node, '.recommend-checkbox-group__selector')
+        const group = liveGroup('age')
+        if (!group) return null
+        const matches = visibleAll(group, '.recommend-checkbox-group__selector')
         return matches.length === 1 ? matches[0] : null
       })
-      if (!selector) return failed('custom_selector_unavailable')
+      // 这三项把肉眼分不开的三种成因分开:点击压根没生效(年龄格仍是「不限」)、
+      // 我方节点被换掉(旧节点已脱离)、下拉纯粹没渲染出来(已是「自定义」但零个下拉)。
+      if (!selector) {
+        const group = liveGroup('age')
+        const selectedNow = group === null
+          ? '年龄格不可见'
+          : visibleAll(group, schemas.age.optionSelector)
+              .filter((node) => node.classList.contains('recommend-checkbox-group__active'))
+              .map((node) => optionLabel(node)).join('/') || '无'
+        return failed(
+          'custom_selector_unavailable',
+          `年龄格当前=${selectedNow}，旧节点${initialSnapshot.groups.age.node.isConnected ? '仍在' : '已脱离'}页面，` +
+            `下拉组内${group === null ? -1 : visibleAll(group, '.recommend-checkbox-group__selector').length}个/` +
+            `全页${visibleAll(document, '.recommend-checkbox-group__selector').length}个`,
+        )
+      }
       const starts = visibleAll(selector, '.filter-select-two__start .km-select')
       const ends = visibleAll(selector, '.filter-select-two__end .km-select')
       if (starts.length !== 1 || ends.length !== 1) return failed('range_select_unavailable')
@@ -3124,6 +3175,73 @@ function validGreetingListTargetResult(value: unknown): value is MainGreetingLis
   return contactState === 'unestablished' || contactState === 'established' || contactState === 'unknown'
 }
 
+// suspect 取证专用只读扫描:报出基线之外的新浮层文本与招呼弹窗开合状态。
+// 它不是守卫——不问"能不能发",只记"平台当时说了什么";任何异常都以 failed
+// 收场,由调用方空手继续,绝不影响发送判定(2026-08-07 甲方裁决立案)。
+function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  try {
+    const seen = new Set(Array.isArray(baselineTexts) ? baselineTexts : [])
+    const newTexts: string[] = []
+    const push = (raw: string): void => {
+      const text = raw.slice(0, 160)
+      if (text !== '' && !seen.has(text) && !newTexts.includes(text) && newTexts.length < 5) {
+        newTexts.push(text)
+      }
+    }
+    // 一级:智联站内提示组件。选择器考古自旧项目(km-message--success「消息已发送」),
+    // 高脆、真机对不上就空手,由二级兜底;取证通道脆断代价为零。
+    for (const node of Array.from(document.querySelectorAll<HTMLElement>(
+      '[class*="km-message"], [class*="km-toast"]',
+    ))) {
+      if (visible(node)) push(clean(node.innerText))
+    }
+    // 二级兜底:body 两层子树里 fixed 定位、短文本的可见浮层(portal 挂载的提示)。
+    // 招呼弹窗自身不算浮层,它的开合另由 modalCount 记录。
+    const candidates: HTMLElement[] = []
+    for (const child of Array.from(document.body.children)) {
+      if (!(child instanceof HTMLElement)) continue
+      candidates.push(child)
+      for (const grand of Array.from(child.children)) {
+        if (grand instanceof HTMLElement) candidates.push(grand)
+      }
+    }
+    for (const node of candidates) {
+      if (node.closest('.ai-greeting-modal') !== null || node.querySelector('.ai-greeting-modal') !== null) {
+        continue
+      }
+      if (!visible(node)) continue
+      if (getComputedStyle(node).position !== 'fixed') continue
+      const text = clean(node.innerText)
+      if (text.length === 0 || text.length > 120) continue
+      push(text)
+    }
+    const modalCount = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal'))
+      .filter(visible).length
+    return { status: 'ready', modalCount, newTexts }
+  } catch {
+    return { status: 'failed' }
+  }
+}
+
+function validGreetingSceneResult(value: unknown): value is MainGreetingSceneResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.status === 'failed') return true
+  return record.status === 'ready' && typeof record.modalCount === 'number' &&
+    Array.isArray(record.newTexts) &&
+    (record.newTexts as unknown[]).every((item) => typeof item === 'string')
+}
+
 interface GreetingListTargetSnapshot {
   tab: chrome.tabs.Tab
   result: Extract<MainGreetingListTargetResult, { status: 'ready' }>
@@ -3707,6 +3825,18 @@ export async function sendZhilianGreeting(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼预检返回结构无效', 'manualOnly')
   }
   if (preflight.status !== 'ready') throwGreetingActionFailure(preflight)
+  // suspect 取证基线:点击前页面上已有的浮层文本,轮询时只报基线外的新浮层。
+  // 只读、失败即空基线;最终发送前的 commit 会字面重跑同一 evaluator,
+  // 这里的读取不构成对最终动作表面的授权(2026-08-07 甲方裁决立案)。
+  let sceneBaseline: string[] = []
+  try {
+    const baseline = await runMain(tabId, mainReadGreetingScene, [[]])
+    if (validGreetingSceneResult(baseline) && baseline.status === 'ready') {
+      sceneBaseline = baseline.newTexts
+    }
+  } catch {
+    // 基线读不到就当空基线,新浮层照样能捕,顶多多报一条本就在页面上的文本。
+  }
   ctx.checkpoint()
   await ctx.beforeSideEffect()
 
@@ -3722,6 +3852,8 @@ export async function sendZhilianGreeting(
   }
   if (action.status !== 'clicked') throwGreetingActionFailure(action)
 
+  let capturedOverlay: { text: string; round: number } | null = null
+  let lastModalCount: number | null = null
   for (let round = 0; round < 20; round += 1) {
     ctx.checkpoint()
     try {
@@ -3746,15 +3878,39 @@ export async function sendZhilianGreeting(
             observedAt: Date.now(),
           }
         }
+        // 未确认的轮次顺带看一眼现场:新浮层文本与弹窗开合。纯读、不点、不等,
+        // 自身失败空手继续,不影响判定(2026-08-07 甲方裁决立案的 suspect 取证)。
+        try {
+          const scene = await runMain(tabId, mainReadGreetingScene, [sceneBaseline])
+          if (validGreetingSceneResult(scene) && scene.status === 'ready') {
+            lastModalCount = scene.modalCount
+            if (capturedOverlay === null && scene.newTexts.length > 0) {
+              capturedOverlay = { text: scene.newTexts.join(' ¦ ').slice(0, 200), round }
+            }
+          }
+        } catch {
+          // 取证读失败即空手,原判定不变。
+        }
       }
     } catch {
       // 目标消失、读取异常或身份无法复核都只是未确认，不证明未发送。
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
+  // 现场纪要拼进错误 message:随 result 进命令审计快照与诊断包,并经 suspect
+  // 日志行进日志上报。平台浮层文本可进普通日志与上报,偶发夹带候选人信息
+  // 不扫描不过滤(2026-08-07 甲方裁决)。ErrorBody.message 上限 500 字符,
+  // 浮层已截 200,总长有余量。
+  let sceneNote = ''
+  if (capturedOverlay !== null) {
+    sceneNote = `；发送后第${capturedOverlay.round + 1}轮观察到新浮层「${capturedOverlay.text}」`
+  }
+  if (lastModalCount !== null && lastModalCount > 0) {
+    sceneNote += '；验证结束时招呼弹窗仍未关闭'
+  }
   throw new ZhilianPlatformError(
     'POSTCONDITION_UNCONFIRMED',
-    '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立',
+    '最终发送只调用一次，但未确认同一候选人的关系状态变为已建立' + sceneNote,
     'manualOnly',
     undefined,
     'possible',
@@ -4919,7 +5075,9 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    `智联筛选条件无法完整覆盖并回读确认（${result.reason}）`,
+    `智联筛选条件无法完整覆盖并回读确认（${result.reason}${
+      result.scene === undefined ? '' : `；${result.scene}`
+    }）`,
     'manualOnly',
   )
 }
@@ -13667,6 +13825,59 @@ async function uploadCaptureJpeg(outcome: StitchOutcome): Promise<CaptureScreens
   }
 }
 
+// suspect 现场单帧截图(2026-08-07 契约增量 debug.capturePage@1):对平台标签
+// 所在窗口的当前可见标签截一帧 JPEG。不滚动、不拼接、不点击、不导航;
+// 刻意不核对账号身份与登录态——掉登录、页面破损恰是最值得留档的现场。
+// captureVisibleTab 截的是窗口当前活动标签,活动标签不是平台页时响亮失败,
+// 不得把使用者的无关页面拍进证据资产。
+export async function captureZhilianPageSnapshot(ctx: PrimitiveContext): Promise<CaptureScreenshotData> {
+  ctx.checkpoint()
+  const tab = await canonicalZhilianTab()
+  if (!tab || tab.windowId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '找不到智联平台标签', 'afterRecovery', 'pageAbsent')
+  }
+  const [activeTab] = await chrome.tabs.query({ windowId: tab.windowId, active: true })
+  let activeHost = ''
+  try {
+    activeHost = activeTab?.url ? new URL(activeTab.url).hostname : ''
+  } catch {
+    activeHost = ''
+  }
+  if (activeHost !== ZHILIAN_HOST) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '平台窗口当前活动标签不是平台页,拒绝截图',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  let dataUrl: string
+  try {
+    dataUrl = await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY)
+  } catch {
+    // 可能是 captureVisibleTab 配额限速(约 1 次/秒),等一轮再试一次;仍失败就
+    // 诚实上报缺图,脑侧不再重试。
+    await swSleep(1_200)
+    try {
+      dataUrl = await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY)
+    } catch (secondError) {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY',
+        `现场截图一帧未得:${secondError instanceof Error ? secondError.message : String(secondError)}`,
+        'afterRecovery',
+      )
+    }
+  }
+  const jpeg = await (await fetch(dataUrl)).blob()
+  return await uploadCaptureJpeg({
+    jpeg,
+    width: 0,
+    height: 0,
+    frames: 1,
+    truncated: false,
+  })
+}
+
 interface MainResumeCaptureFailed {
   status: 'failed'
   reason:
@@ -14015,6 +14226,7 @@ export const zhilianTestHooks = Object.freeze({
   identifyZhilianCurrentConversation,
   mainReadCurrentCandidate,
   mainReadGreetingListTarget,
+  mainReadGreetingScene,
   mainReadCurrentResume,
   mainChatCaptureStep,
   mainResumeCaptureStep,
