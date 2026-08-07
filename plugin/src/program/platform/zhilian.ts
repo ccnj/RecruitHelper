@@ -371,6 +371,9 @@ interface MainApplySourcingFiltersReady {
 interface MainApplySourcingFiltersFailed {
   status: 'failed'
   reason: MainApplySourcingFiltersFailureReason
+  /** 失败现场,纯诊断自由文本(不进契约,按 AGENTS.md「诊断辅助默认不进契约」)。
+   *  只写筛选枚举标签与节点计数,不含任何候选人明文或页面业务文本。 */
+  scene?: string
 }
 
 type MainApplySourcingFiltersResult =
@@ -1629,7 +1632,12 @@ async function mainApplySourcingFilters(
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const failed = (
     reason: MainApplySourcingFiltersFailureReason,
-  ): MainApplySourcingFiltersFailed => ({ status: 'failed', reason })
+    scene?: string,
+  ): MainApplySourcingFiltersFailed => ({
+    status: 'failed',
+    reason,
+    ...(scene === undefined ? {} : { scene }),
+  })
   const sleep = (delayMs: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, delayMs))
   const randomInteractionGapMs = (): number =>
@@ -1997,11 +2005,31 @@ async function mainApplySourcingFilters(
     await interact(() => cancel.click())
     return await waitFor(() => drawerNodes().length === 0 ? true : null) === true
   }
-  const clickOption = async (group: GroupState, label: string): Promise<boolean> => {
-    const matches = group.options.filter((option) => option.label === label)
-    if (matches.length !== 1) return false
-    await interact(() => matches[0].node.click())
-    return true
+  // 当场按 selector 取组,不吃初读时存下的节点引用。
+  const liveGroup = (key: FilterKey): HTMLElement | null => {
+    const drawers = drawerNodes()
+    if (drawers.length !== 1) return null
+    const groups = visibleAll(drawers[0], schemas[key].selector)
+    return groups.length === 1 ? groups[0] : null
+  }
+  // 定位与 click 必须待在同一个同步块里。interact 会先睡满平台节奏下限(1 秒以上)
+  // 再执行回调,若在睡之前就把节点取出来,这一秒足够 Vue 把整组重渲染一遍——旧节点
+  // 脱离文档后 click() 既不抛异常也不生效,页面上就是"点了没反应",而代码毫不知情。
+  // 年龄组尤其危险:它是唯一带 config 的独立子组件(.filter-group-age),会自己重建,
+  // 又恰好是循环里第一个被点的,紧贴抽屉刚弹出这个最不稳的时刻。
+  // 2026-08-07 客户机 custom_selector_unavailable 现场即为此形态。
+  const clickOption = async (key: FilterKey, label: string): Promise<boolean> => {
+    let clicked = false
+    await interact(() => {
+      const group = liveGroup(key)
+      if (!group) return
+      const matches = visibleAll(group, schemas[key].optionSelector)
+        .filter((node) => optionLabel(node) === label)
+      if (matches.length !== 1) return
+      matches[0].click()
+      clicked = true
+    })
+    return clicked
   }
   const desiredLabels = (filters: CandidateSourcingFilters): Record<FilterKey, string[]> => {
     const careerLabels: Record<string, string> = {
@@ -2104,27 +2132,27 @@ async function mainApplySourcingFilters(
       const targetLabels = targets[key]
       if (key === 'age' || key === 'activeTime' || key === 'gender') {
         if (group.selectedLabels[0] !== targetLabels[0] &&
-            !await clickOption(group, targetLabels[0])) {
+            !await clickOption(key, targetLabels[0])) {
           return failed('option_set_mismatch')
         }
         continue
       }
       if (targetLabels.length === 1 && targetLabels[0] === '不限') {
         if (!(group.selectedLabels.length === 1 && group.selectedLabels[0] === '不限') &&
-            !await clickOption(group, '不限')) {
+            !await clickOption(key, '不限')) {
           return failed('option_set_mismatch')
         }
         continue
       }
       for (const selected of group.selectedLabels) {
         if (selected !== '不限' && !targetLabels.includes(selected) &&
-            !await clickOption(group, selected)) {
+            !await clickOption(key, selected)) {
           return failed('option_set_mismatch')
         }
       }
       for (const desired of targetLabels) {
         if (!group.selectedLabels.includes(desired) &&
-            !await clickOption(group, desired)) {
+            !await clickOption(key, desired)) {
           return failed('option_set_mismatch')
         }
       }
@@ -2132,10 +2160,27 @@ async function mainApplySourcingFilters(
 
     if (targetFilters.age.mode === 'range' && targets.age[0] === '自定义') {
       const selector = await waitFor(() => {
-        const matches = visibleAll(initialSnapshot.groups.age.node, '.recommend-checkbox-group__selector')
+        const group = liveGroup('age')
+        if (!group) return null
+        const matches = visibleAll(group, '.recommend-checkbox-group__selector')
         return matches.length === 1 ? matches[0] : null
       })
-      if (!selector) return failed('custom_selector_unavailable')
+      // 这三项把肉眼分不开的三种成因分开:点击压根没生效(年龄格仍是「不限」)、
+      // 我方节点被换掉(旧节点已脱离)、下拉纯粹没渲染出来(已是「自定义」但零个下拉)。
+      if (!selector) {
+        const group = liveGroup('age')
+        const selectedNow = group === null
+          ? '年龄格不可见'
+          : visibleAll(group, schemas.age.optionSelector)
+              .filter((node) => node.classList.contains('recommend-checkbox-group__active'))
+              .map((node) => optionLabel(node)).join('/') || '无'
+        return failed(
+          'custom_selector_unavailable',
+          `年龄格当前=${selectedNow}，旧节点${initialSnapshot.groups.age.node.isConnected ? '仍在' : '已脱离'}页面，` +
+            `下拉组内${group === null ? -1 : visibleAll(group, '.recommend-checkbox-group__selector').length}个/` +
+            `全页${visibleAll(document, '.recommend-checkbox-group__selector').length}个`,
+        )
+      }
       const starts = visibleAll(selector, '.filter-select-two__start .km-select')
       const ends = visibleAll(selector, '.filter-select-two__end .km-select')
       if (starts.length !== 1 || ends.length !== 1) return failed('range_select_unavailable')
@@ -5030,7 +5075,9 @@ function throwApplySourcingFiltersFailure(result: MainApplySourcingFiltersFailed
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    `智联筛选条件无法完整覆盖并回读确认（${result.reason}）`,
+    `智联筛选条件无法完整覆盖并回读确认（${result.reason}${
+      result.scene === undefined ? '' : `；${result.scene}`
+    }）`,
     'manualOnly',
   )
 }

@@ -3455,6 +3455,8 @@ function installM6SourcingFilterFixture(options = {}) {
     styleVersion: 0,
     interactions: [],
     groupReads: new Map(),
+    titleReads: new Map(),
+    staleClicks: 0,
   }
   const classList = (...initial) => {
     const values = new Set(initial)
@@ -3478,6 +3480,7 @@ function installM6SourcingFilterFixture(options = {}) {
     querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null },
     getAttribute(name) { return this.attrs.get(name) ?? null },
     hasAttribute(name) { return this.attrs.has(name) },
+    isConnected: true,
     click() {},
   })
   const interact = (name) => {
@@ -3583,7 +3586,7 @@ function installM6SourcingFilterFixture(options = {}) {
   selector.query.set('.filter-select-two__start .km-select', [startSelect])
   selector.query.set('.filter-select-two__end .km-select', [endSelect])
 
-  for (const [key, spec] of Object.entries(groupSpecs)) {
+  const buildGroup = (key, spec) => {
     const group = node()
     const title = node(spec.title)
     const optionNodes = spec.labels.map((label) => {
@@ -3629,6 +3632,9 @@ function installM6SourcingFilterFixture(options = {}) {
     group.optionNodes = optionNodes
     group.querySelectorAll = (query) => {
       if (query === '.tr-talent-filter-item__title, .filter-group-major__title, .filter-item__title') {
+        // 只有 readFilters 查标题;点击前的当场定位不查,所以这个计数专门用来数
+        // readFilters 跑了几轮,不受定位次数干扰。年龄组重建后两个对象共用同一 key。
+        state.titleReads.set(key, (state.titleReads.get(key) ?? 0) + 1)
         return [title]
       }
       if (query === (spec.control === 'radio'
@@ -3643,7 +3649,26 @@ function installM6SourcingFilterFixture(options = {}) {
       }
       return []
     }
-    groups[key] = group
+    return group
+  }
+  for (const [key, spec] of Object.entries(groupSpecs)) {
+    groups[key] = buildGroup(key, spec)
+  }
+
+  // 模拟真实平台上的年龄组重建:初读之后 Vue 换掉整组 DOM,旧节点脱离文档 ——
+  // 对它 click() 既不抛异常也不生效。取组必须当场重取才点得中。
+  let ageReplacement = null
+  const currentAgeGroup = () => {
+    if (options.replaceAgeGroupAfterRead !== true) return groups.age
+    if ((state.groupReads.get('age') ?? 0) < 2) return groups.age
+    if (ageReplacement === null) {
+      ageReplacement = buildGroup('age', groupSpecs.age)
+      groups.age.isConnected = false
+      for (const option of groups.age.optionNodes) {
+        option.click = () => { state.staleClicks += 1 }
+      }
+    }
+    return ageReplacement
   }
 
   const cancel = node('取消')
@@ -3670,7 +3695,7 @@ function installM6SourcingFilterFixture(options = {}) {
         state.groupReads.set(key, (state.groupReads.get(key) ?? 0) + 1)
         if (options.missingGroup === key) return []
         if (options.duplicateGroup === key) return [groups[key], groups[key]]
-        return [groups[key]]
+        return [key === 'age' ? currentAgeGroup() : groups[key]]
       }
     }
     if (query === 'button[zp-stat-id="rsmlist-confirm"]') return [confirm]
@@ -3771,7 +3796,7 @@ test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并�
     assert.equal(fixture.state.drawerOpen, false)
     assert.equal(fixture.state.openCount, 2)
     for (const key of Object.keys(fixture.groups)) {
-      assert.equal(fixture.state.groupReads.get(key), 3,
+      assert.equal(fixture.state.titleReads.get(key), 3,
         `${key} 必须由字面同一 readFilters 完成初读、提交前回读和二次回读`)
     }
     const names = fixture.state.interactions.map(([name]) => name)
@@ -3786,6 +3811,29 @@ test('candidate.applySourcingFilters MAIN 只点差异、年龄精确覆盖并�
         fixture.state.interactions[index][1] - fixture.state.interactions[index - 1][1]
       assert.ok(elapsed >= 1_000, `第 ${index + 1} 个页面动作与前一动作须至少间隔一秒`)
     }
+  } finally {
+    fixture.restore()
+  }
+})
+
+// 2026-08-07 客户机现场:年龄格肉眼没反应、其余五组正常选中,20 秒后
+// custom_selector_unavailable。成因是取节点与 click 之间隔着一秒的平台节奏等待,
+// Vue 在这一秒里重建了年龄组,click() 打在脱离文档的旧节点上——不报错也不生效。
+test('candidate.applySourcingFilters MAIN 年龄组初读后被重建仍点得中并完成自定义', async () => {
+  const fixture = installM6SourcingFilterFixture({ replaceAgeGroupAfterRead: true })
+  try {
+    const result = await zhilianTestHooks.mainApplySourcingFilters(
+      fixture.refs.job,
+      fixture.refs.title,
+      structuredClone(m6SourcingFilterTarget),
+    )
+    assert.equal(result.status, 'ready', '组被重建不该让筛选失败')
+    assert.equal(fixture.state.staleClicks, 0, '不得再对脱离文档的旧节点派点击')
+    const names = fixture.state.interactions.map(([name]) => name)
+    assert.ok(names.includes('click-age-自定义'), '必须点中重建后的自定义')
+    assert.ok(names.includes('choose-range-start-25'))
+    assert.ok(names.includes('choose-range-end-45'))
+    assert.equal(fixture.state.confirms, 1, '筛选命令仍只点一次确定')
   } finally {
     fixture.restore()
   }
