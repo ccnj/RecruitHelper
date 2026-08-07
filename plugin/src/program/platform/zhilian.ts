@@ -3,6 +3,7 @@
 
 import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
+import { reportHandLog } from '../../base/handLog'
 import type {
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
@@ -12365,12 +12366,26 @@ async function mainCancelPreparedInterviewEditor(): Promise<void> {
   }
 }
 
-// 2026-07-27 真机：邀面卡发出后平台弹出含"面试邀请已发出"的成功弹窗
-// （本次观察为 interview-success-modal + 右上 .km-modal__close-btn），带全屏
-// 遮罩、会拦截后续页面操作；老项目另记录过 2026-07 改版的服务号推广弹窗形态
-// （真机未见，不实现类名依赖）。按文本锚 best-effort 关闭：找不到、关不掉都
-// 只如实返回，不重试发送、不改变已取得的发送结果。
-async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; closed: boolean }> {
+// 2026-07-27 真机：邀面卡发出后平台弹出含"面试邀请已发出"的成功弹窗，带全屏
+// 遮罩；2026-08-07 甲方现场：连发两次后页面上叠着两个未关闭的弹窗（服务号推广
+// 形态，「关注服务号 / 转给同事」），把聊天截图盖掉两块——运营通知带的就是这种
+// 截图。按文本锚 best-effort 关闭：找不到、关不掉都只如实返回，不重试发送、
+// 不改变已取得的发送结果。
+//
+// 三处与初版的差别，都是那次现场逼出来的：
+//  1. **等弹窗出现**。卡片消息落到时间线通常比弹窗弹出更早，初版"查一次就走"
+//     十有八九扑空。改条件轮询，出现即继续，上限 10 秒（AGENTS.md 平台交互节奏）。
+//  2. **弹窗根不认类名**。从"直接写着这句话的那个元素"往上找最外层浮层祖先
+//     （fixed，或高 z-index 的 absolute），平台再改版块名也认得出。
+//  3. **全部关掉，不是第一个**。关不掉会堆积，下一次发送时旧的还在页面上。
+// 关闭钮点不动时补一发 Escape（多数弹窗组件监听 document keydown），这是旧项目
+// 有、重构时丢掉的兜底。scene 只带标签名与类名，供关不掉时报回脑侧照着改选择器。
+async function mainCloseInterviewSuccessModal(): Promise<{
+  found: boolean
+  closed: boolean
+  remaining: number
+  scene: string
+}> {
   const clean = (value: unknown): string => String(value ?? '')
     .normalize('NFC')
     .replace(/\u00a0/gu, ' ')
@@ -12382,35 +12397,125 @@ async function mainCloseInterviewSuccessModal(): Promise<{ found: boolean; close
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
   const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
-  const findModals = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>(
-    '.km-modal__wrapper, .km-modal, [class*="modal"], [role="dialog"]',
-  )).filter((node) => visible(node) && /面试邀请已发出/u.test(clean(node.textContent)))
+  // 关闭钮之外的按钮一个都不许碰：「关注服务号」会跳转、「转给同事」会外发。
+  // 容器类元素的 textContent 会把这些字带上，于是同一条正则顺带把它们排掉。
+  const forbidden = /关注|转给|同事|服务号|分享|查看|详情|邀请|接受/u
+  const sig = (node: Element): string =>
+    `${node.tagName}.${clean(node.getAttribute('class')).replace(/ /gu, '.')}`.slice(0, 96)
+  const findRoots = (): HTMLElement[] => {
+    const hosts: HTMLElement[] = []
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+    while (walker.nextNode()) {
+      if (!/面试邀请已发出/u.test(clean(walker.currentNode.nodeValue))) continue
+      const host = walker.currentNode.parentElement
+      if (host !== null && visible(host)) hosts.push(host)
+    }
+    const roots: HTMLElement[] = []
+    for (const host of hosts) {
+      let picked: HTMLElement | null = null
+      let cursor: HTMLElement | null = host
+      for (let depth = 0; cursor !== null && cursor !== document.body && depth < 16; depth += 1) {
+        const style = getComputedStyle(cursor)
+        const zIndex = Number.parseInt(style.zIndex, 10)
+        if (style.position === 'fixed' ||
+            (style.position === 'absolute' && Number.isFinite(zIndex) && zIndex >= 100)) {
+          picked = cursor
+        }
+        cursor = cursor.parentElement
+      }
+      const root = picked ?? host
+      if (!roots.includes(root)) roots.push(root)
+    }
+    return roots.filter(visible)
+  }
+  const findCloseButton = (root: HTMLElement): HTMLElement | null => {
+    // 旧版是 .km-modal__close-btn；服务号形态旧项目记过
+    // img.interview-service-account-modal__top-close-icon，同样被 close 子串捞住。
+    const selectors = [
+      '.km-modal__close-btn',
+      '[class*="close" i]',
+      '[aria-label*="关闭"]',
+      '[aria-label*="close" i]',
+      '[title*="关闭"]',
+    ]
+    for (const selector of selectors) {
+      const hit = Array.from(root.querySelectorAll<HTMLElement>(selector))
+        .find((node) => visible(node) && !forbidden.test(clean(node.textContent)))
+      if (hit !== undefined) return hit
+    }
+    return null
+  }
+  const scene: string[] = []
   try {
-    const modals = findModals()
-    if (modals.length === 0) return { found: false, closed: false }
-    let closeButton: HTMLElement | null = null
-    for (const modal of modals) {
-      closeButton =
-        Array.from(modal.querySelectorAll<HTMLElement>('.km-modal__close-btn')).find(visible) ??
-        Array.from(modal.querySelectorAll<HTMLElement>('[class*="close"]')).find(visible) ?? null
-      if (closeButton) break
+    let roots = findRoots()
+    const appearDeadline = Date.now() + 10_000
+    while (roots.length === 0 && Date.now() < appearDeadline) {
+      await wait(200)
+      roots = findRoots()
     }
-    if (!closeButton) return { found: true, closed: false }
-    await wait(1_000 + Math.floor(Math.random() * 501))
-    if (!closeButton.isConnected || !visible(closeButton)) {
-      return { found: true, closed: findModals().length === 0 }
-    }
+    if (roots.length === 0) return { found: false, closed: false, remaining: 0, scene: '' }
+
     const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
-    const invokeClick = Function.prototype.call.bind(intrinsicClick, closeButton)
-    invokeClick()
-    const deadline = Date.now() + 3_000
-    while (Date.now() <= deadline) {
-      if (findModals().length === 0) return { found: true, closed: true }
-      await wait(120)
+    const invokeClick = Function.prototype.call.bind(intrinsicClick) as (node: HTMLElement) => void
+    for (const root of roots) {
+      if (!root.isConnected || !visible(root)) continue
+      const button = findCloseButton(root)
+      scene.push(`${sig(root)}>${button === null ? 'noCloseBtn' : sig(button)}`)
+      if (button !== null) {
+        await wait(1_000 + Math.floor(Math.random() * 501))
+        if (button.isConnected && visible(button)) invokeClick(button)
+        await wait(400)
+      }
+      if (!root.isConnected || !visible(root)) continue
+      await wait(1_000 + Math.floor(Math.random() * 501))
+      for (const type of ['keydown', 'keyup']) {
+        document.dispatchEvent(new KeyboardEvent(type, {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        } as KeyboardEventInit))
+      }
+      await wait(400)
     }
-    return { found: true, closed: false }
+
+    const remaining = findRoots()
+    return {
+      found: true,
+      closed: remaining.length === 0,
+      remaining: remaining.length,
+      scene: scene.join(' | ').slice(0, 400),
+    }
   } catch {
-    return { found: false, closed: false }
+    return { found: false, closed: false, remaining: 0, scene: scene.join(' | ').slice(0, 400) }
+  }
+}
+
+// 弹窗清理的调用侧收口：成功路径与失败路径共用同一份，省得两处各写一遍上报。
+// 关不掉时报一条 handLog —— 只有标签名与类名，没有任何页面文本（手侧日志纪律见
+// base/handLog.ts），够我们下次照着改选择器，不必再等甲方蹲现场。
+async function closeInterviewSuccessModalBestEffort(tabId: number): Promise<void> {
+  try {
+    const outcome = await runMain(tabId, mainCloseInterviewSuccessModal, [])
+    console.info(
+      '[RecruitHelper] interview_success_modal_close',
+      outcome.found,
+      outcome.closed,
+      outcome.remaining,
+      outcome.scene,
+    )
+    if (outcome.found && !outcome.closed) {
+      reportHandLog(
+        'error',
+        'interviewSuccessModalCloseFailed',
+        `邀面成功弹窗未关闭,页面仍有 ${outcome.remaining} 个遮挡`,
+        outcome.scene,
+      )
+    }
+  } catch {
+    // 清理只尽力而为，不影响已取得的发送正证。
   }
 }
 
@@ -12662,16 +12767,7 @@ async function sendZhilianCard(
           }
           const observedAt = Date.now()
           if (cardKind === 'interviewInvite') {
-            try {
-              const closeOutcome = await runMain(tab.id, mainCloseInterviewSuccessModal, [])
-              console.info(
-                '[RecruitHelper] interview_success_modal_close',
-                closeOutcome.found,
-                closeOutcome.closed,
-              )
-            } catch {
-              // 弹窗清理只尽力而为，不影响已取得的发送正证。
-            }
+            await closeInterviewSuccessModalBestEffort(tab.id)
           }
           await ctx.progress('已从实时消息时间线确认唯一新已发卡片', 100)
           return {
@@ -12704,11 +12800,7 @@ async function sendZhilianCard(
     if (finalActionStarted && cardKind === 'interviewInvite') {
       // commit 已发生：无论确认结果如何，成功弹窗都可能已弹出并遮挡页面，
       // 尽力关闭以免拖垮同页后续操作；失败不改变原始错误。
-      try {
-        await runMain(tab.id, mainCloseInterviewSuccessModal, [])
-      } catch {
-        // best effort
-      }
+      await closeInterviewSuccessModalBestEffort(tab.id)
     }
     throw error
   }
