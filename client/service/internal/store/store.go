@@ -132,6 +132,7 @@ func Open(dataDir string) (*Store, error) {
 		&AuditEntry{},
 		&NotificationOutbox{},
 		&CandidateScreenshot{},
+		&SuspectSceneShot{},
 		&FieldReportSetting{},
 		&LogReportSetting{},
 		&InterviewScheduleSetting{},

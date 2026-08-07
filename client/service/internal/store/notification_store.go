@@ -234,6 +234,39 @@ func (s *Store) SaveCandidateScreenshot(
 	}).Error
 }
 
+// SaveSuspectSceneShot 追加一行 suspect 现场截图事实(2026-08-07 甲方裁决)。
+// 不覆盖旧行、不物理删除;失败由调用方以审计记录,不重试。
+func (s *Store) SaveSuspectSceneShot(
+	msgID string,
+	intentID string,
+	primitive string,
+	blobRef string,
+	byteSize int64,
+	capturedAtMs int64,
+	at time.Time,
+) error {
+	if strings.TrimSpace(msgID) == "" || strings.TrimSpace(blobRef) == "" ||
+		strings.TrimSpace(primitive) == "" {
+		return errors.New("suspect 现场截图事实参数不完整")
+	}
+	return s.db.Create(&SuspectSceneShot{
+		MsgID:        msgID,
+		IntentID:     intentID,
+		Primitive:    primitive,
+		BlobRef:      blobRef,
+		ByteSize:     byteSize,
+		CapturedAtMs: capturedAtMs,
+		CreatedAt:    at,
+	}).Error
+}
+
+// SuspectSceneShotsByMsgID 取某条 suspect 命令的现场截图事实(诊断台用)。
+func (s *Store) SuspectSceneShotsByMsgID(msgID string) ([]SuspectSceneShot, error) {
+	var rows []SuspectSceneShot
+	err := s.db.Where("msg_id = ?", msgID).Order("id ASC").Find(&rows).Error
+	return rows, err
+}
+
 var candidateMobileRe = regexp.MustCompile(`^1[3-9]\d{9}$`)
 
 // AcceptCandidatePhoneObservation 判定取证顺访读到的电话能否收编为观察事实:
