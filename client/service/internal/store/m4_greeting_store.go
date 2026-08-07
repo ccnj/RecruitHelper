@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -315,7 +316,10 @@ const greetingTrackedRequestedBy = "system:greeting"
 // 只用于 GREETING_REJECTED/none；成功允许先由可见关系正证推进 greeted，
 // ConversationRef 仅在同次已取得稳定会话引用时携带。
 type GreetingResultMutation struct {
-	Rejected        bool
+	Rejected bool
+	// RejectReason 是平台拒绝原话,只在 Rejected 时有意义;空串表示手侧没能
+	// 给出原话,档案仍按 greetingFailed 收场,只是客户端少一句说明。
+	RejectReason    string
 	PlatformUserRef string
 	PositionRef     string
 	ConversationRef string
@@ -356,10 +360,16 @@ func applyGreetingResultTx(
 			return nil, ErrCandidateProfileState
 		}
 		reason := CandidateProfileEndGreetingFailed
+		changes := map[string]any{"main_status": CandidateProfileEnded, "end_reason": reason}
+		if rejectReason := strings.TrimSpace(mutation.RejectReason); rejectReason != "" {
+			// 平台原话给客户端看,截断防止异常长文案撑爆投影。
+			truncated, _ := truncateRunesForApp(rejectReason, 200)
+			changes["greeting_reject_reason"] = truncated
+		}
 		updated := tx.Model(&CandidateProfile{}).
 			Where("profile_id = ? AND main_status = ? AND end_reason IS NULL AND successful_greeting_intent_id IS NULL AND conversation_ref IS NULL AND greeted_at IS NULL",
 				profile.ProfileID, CandidateProfileSelected).
-			Updates(map[string]any{"main_status": CandidateProfileEnded, "end_reason": reason})
+			Updates(changes)
 		if updated.Error != nil {
 			return nil, updated.Error
 		}

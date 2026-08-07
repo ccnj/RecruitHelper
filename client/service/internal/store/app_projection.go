@@ -168,17 +168,20 @@ type AppCandidateDetailQuery struct {
 }
 
 type AppCandidateListItem struct {
-	ProfileID          string  `json:"profileId"`
-	DisplayName        string  `json:"displayName"`
-	JobName            string  `json:"jobName,omitempty"`
-	Status             string  `json:"status"`
-	EndReason          string  `json:"endReason,omitempty"`
-	LastMessagePreview string  `json:"lastMessagePreview,omitempty"`
-	LastActivityAtMs   *int64  `json:"lastActivityAtMs,omitempty"`
-	UnreadCount        int     `json:"unreadCount"`
-	ManualRequired     bool    `json:"manualRequired"`
-	ManualReason       string  `json:"manualReason,omitempty"`
-	Wechat             *string `json:"wechat,omitempty"`
+	ProfileID   string `json:"profileId"`
+	DisplayName string `json:"displayName"`
+	JobName     string `json:"jobName,omitempty"`
+	Status      string `json:"status"`
+	EndReason   string `json:"endReason,omitempty"`
+	// GreetingRejectReason 是平台拒绝招呼时的原话,让客户端不再只看到笼统的
+	// 「招呼失败」(2026-08-07 甲方裁决)。平台文案,不是候选人明文。
+	GreetingRejectReason string  `json:"greetingRejectReason,omitempty"`
+	LastMessagePreview   string  `json:"lastMessagePreview,omitempty"`
+	LastActivityAtMs     *int64  `json:"lastActivityAtMs,omitempty"`
+	UnreadCount          int     `json:"unreadCount"`
+	ManualRequired       bool    `json:"manualRequired"`
+	ManualReason         string  `json:"manualReason,omitempty"`
+	Wechat               *string `json:"wechat,omitempty"`
 	// WechatObservedAtMs 是该微信资产的收编观测时刻。资产行一直有它(上面那个
 	// 子查询就是按它排序取最新号的),此前没有投影出去,产品端只能常年显示
 	// "时间未知"。
@@ -187,6 +190,12 @@ type AppCandidateListItem struct {
 	InterviewEndsAtMs   *int64  `json:"interviewEndsAtMs,omitempty"`
 	InterviewMethod     *string `json:"interviewMethod,omitempty"`
 	InterviewCardState  string  `json:"interviewCardState,omitempty"`
+	// AppointedAtMs 是候选人接受面试邀约的时刻(档案的 interviewed_at),与
+	// InterviewStartsAtMs(约定的面试何时开始)是两回事。首页「已约面」数的是
+	// 当天有几个人在这个时刻上答应,已约面页数的是当前还没到面试时间的存量,
+	// 两个数字对不上时用户只能靠猜——把它投影出去,页面上就能直接看出谁是
+	// 今天答应的。
+	AppointedAtMs *int64 `json:"appointedAtMs,omitempty"`
 }
 
 type AppCandidateListProjection struct {
@@ -1061,22 +1070,24 @@ func (s *Store) AppCandidates(query AppCandidateListQuery) (*AppCandidateListPro
 }
 
 type appCandidateRow struct {
-	ProfileID           string
-	DisplayName         *string
-	PositionTitle       *string
-	MainStatus          CandidateProfileStatus
-	EndReason           *CandidateProfileEndReason
-	LastMessagePreview  *string
-	LastActivityMs      *int64
-	UnreadCount         *int
-	AutomationStatus    *ProfileCommunicationAutomationStatus
-	ManualReason        *string
-	Wechat              *string
-	WechatObservedAtMs  *int64
-	InterviewStartsAtMs *int64
-	InterviewEndsAtMs   *int64
-	InterviewMethod     *string
-	InterviewCardState  *string
+	ProfileID            string
+	DisplayName          *string
+	PositionTitle        *string
+	MainStatus           CandidateProfileStatus
+	EndReason            *CandidateProfileEndReason
+	GreetingRejectReason *string
+	LastMessagePreview   *string
+	LastActivityMs       *int64
+	UnreadCount          *int
+	AutomationStatus     *ProfileCommunicationAutomationStatus
+	ManualReason         *string
+	Wechat               *string
+	WechatObservedAtMs   *int64
+	InterviewStartsAtMs  *int64
+	InterviewEndsAtMs    *int64
+	InterviewMethod      *string
+	InterviewCardState   *string
+	InterviewedAt        *time.Time
 }
 
 const appCandidateSelect = `
@@ -1085,6 +1096,8 @@ candidate.display_name,
 profile.position_title,
 profile.main_status,
 profile.end_reason,
+profile.greeting_reject_reason,
+profile.interviewed_at,
 conversation.last_message_preview,
 conversation.last_activity_ms,
 conversation.unread_count,
@@ -1131,15 +1144,27 @@ func (row appCandidateRow) projection() AppCandidateListItem {
 	return AppCandidateListItem{
 		ProfileID: row.ProfileID, DisplayName: valueOrEmpty(row.DisplayName),
 		JobName: valueOrEmpty(row.PositionTitle), Status: string(row.MainStatus),
-		EndReason:          valueOrEmptyCandidateEndReason(row.EndReason),
-		LastMessagePreview: valueOrEmpty(row.LastMessagePreview),
-		LastActivityAtMs:   row.LastActivityMs, UnreadCount: unread,
+		EndReason:            valueOrEmptyCandidateEndReason(row.EndReason),
+		GreetingRejectReason: valueOrEmpty(row.GreetingRejectReason),
+		LastMessagePreview:   valueOrEmpty(row.LastMessagePreview),
+		LastActivityAtMs:     row.LastActivityMs, UnreadCount: unread,
 		ManualRequired: manual, ManualReason: valueOrEmpty(row.ManualReason),
 		Wechat: row.Wechat, WechatObservedAtMs: row.WechatObservedAtMs,
 		InterviewStartsAtMs: row.InterviewStartsAtMs,
 		InterviewEndsAtMs:   row.InterviewEndsAtMs, InterviewMethod: row.InterviewMethod,
 		InterviewCardState: valueOrEmpty(row.InterviewCardState),
+		AppointedAtMs:      epochMillisOrNil(row.InterviewedAt),
 	}
+}
+
+// epochMillisOrNil 把时间列换算成毫秒。零值当没有:这一列对没约成的档案本来
+// 就是 NULL,而历史迁移过的行可能落成零值,两者在页面上是同一件事——不显示。
+func epochMillisOrNil(value *time.Time) *int64 {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	millis := value.UnixMilli()
+	return &millis
 }
 
 func valueOrEmptyCandidateEndReason(value *CandidateProfileEndReason) string {

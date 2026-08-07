@@ -464,6 +464,21 @@ func (d *Dispatcher) Verdict(msgID string, verdict store.CmdStatus) error {
 			d.notifyByMsgID(msgID)
 			slog.Info("suspect 招呼人工裁决", "handId", cmd.HandID, "msgId", msgID, "verdict", verdict)
 			return nil
+		case protocol.PrimJobPublishDraft:
+			// 职位发布没有会话，两个方向都只写终局、不铸消息事实；理由与
+			// resolvedFailed 之后的重发口径见 store.ResolveJobPublishSuspectVerdict。
+			err := d.st.ResolveJobPublishSuspectVerdict(msgID, verdict, time.Now())
+			if err != nil {
+				if errors.Is(err, store.ErrRecoveryStateConflict) {
+					return ErrNotSuspect
+				}
+				return err
+			}
+			d.st.Audit("suspect_verdict", cmd.HandID, msgID, string(verdict))
+			d.clearLease(msgID)
+			d.notifyByMsgID(msgID)
+			slog.Info("suspect 职位发布人工裁决", "handId", cmd.HandID, "msgId", msgID, "verdict", verdict)
+			return nil
 		default:
 			return errors.New("真实副作用原语没有人工裁决实现")
 		}

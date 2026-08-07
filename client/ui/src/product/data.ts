@@ -147,6 +147,7 @@ export interface AppCandidateListItemRaw {
   jobName?: string
   status: string
   endReason?: string
+  greetingRejectReason?: string
   lastMessagePreview?: string
   lastActivityAtMs?: number | null
   unreadCount: number
@@ -158,6 +159,7 @@ export interface AppCandidateListItemRaw {
   interviewEndsAtMs?: number | null
   interviewMethod?: string | null
   interviewCardState?: string
+  appointedAtMs?: number | null
 }
 
 export interface AppCandidateListRaw {
@@ -765,6 +767,7 @@ function adaptCandidateListItem(
     deterministicState: status.deterministicState,
     interviewAt: formatEpochRelative(raw.interviewStartsAtMs, now),
     interviewMethod: clean(raw.interviewMethod) || null,
+    appointedAt: formatEpochRelative(raw.appointedAtMs, now),
     wechatAccount: clean(raw.wechat) || null,
     wechatExchangedAt: formatEpochRelative(raw.wechatObservedAtMs, now),
     stillInAutoCommunication: raw.status
@@ -796,6 +799,7 @@ function emptyCandidate(
     latestAiDecision: null,
     interviewAt: null,
     interviewMethod: null,
+    appointedAt: null,
     wechatAccount: null,
     wechatExchangedAt: null,
     stillInAutoCommunication: null,
@@ -847,10 +851,15 @@ function candidateStatus(
   if (raw.status === 'communicating') return { label: '已回复', tone: 'blue', deterministicState: '正在自动沟通' }
   if (raw.status === 'ended') {
     const rejected = raw.endReason === 'rejected' || raw.endReason === 'blacklisted'
+    const label = endReasonLabel(raw.endReason)
+    // 平台拒绝招呼时把原话跟在后面：光一句“招呼失败”分不清是敏感词、平台
+    // 上限还是技术故障，用户没法据此改招呼语（2026-08-07 甲方裁决）。
+    const platformSays = clean(raw.greetingRejectReason)
+    const detail = [label, platformSays].filter((part) => part !== '').join('——')
     return {
       label: rejected ? '候选人已拒绝' : '沟通已结束',
       tone: rejected ? 'red' : 'slate',
-      deterministicState: `沟通已结束${endReasonLabel(raw.endReason) ? `：${endReasonLabel(raw.endReason)}` : ''}`,
+      deterministicState: `沟通已结束${detail ? `：${detail}` : ''}`,
     }
   }
   return { label: '状态待确认', tone: 'slate', deterministicState: '状态待确认' }

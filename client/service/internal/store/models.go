@@ -441,8 +441,14 @@ type CandidateProfile struct {
 	ActiveResumeSnapshotID         *string            `gorm:"uniqueIndex"`
 	ResumeCaptureAttemptedAt       *time.Time
 	ResumeCaptureFailureReason     string
-	CreatedAt                      time.Time
-	UpdatedAt                      time.Time
+	// GreetingRejectReason 是平台拒绝本次招呼时给出的原话(2026-08-07 甲方
+	// 裁决:错误原因要传到客户端)。EndReason=greetingFailed 太笼统,敏感词、
+	// 上限、技术失败在客户端上长得一样。这里刻意存自由文本而不新增枚举:
+	// 平台拒绝理由不可枚举,自由文本能原样透传,平台改文案我方零改动。
+	// 它是平台文案不是候选人明文,允许经 /app/* 产品 API 投影给客户端。
+	GreetingRejectReason string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 
 	GreetingHead             *CandidateGreetingHead    `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	CommunicationV4Aggregate *CommunicationV4Aggregate `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
@@ -504,6 +510,42 @@ type CandidateScreenshot struct {
 	Truncated    bool   `gorm:"not null"`
 	CapturedAtMs int64  `gorm:"not null"`
 	CreatedAt    time.Time
+}
+
+// SuspectSceneShot 是 effectful 命令转 suspect 后的现场截图事实行(2026-08-07
+// 甲方裁决)。图像字节在 blob 内容寻址存储,此处只登记引用与元数据;追加行、
+// 不覆盖更新、不物理删除,保留语义比照运营取证截图。截图只落同机——诊断包
+// 白名单硬排除 blobs/,不出站、不进普通日志、审计 detail 与管理 API 响应正文。
+type SuspectSceneShot struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	MsgID        string `gorm:"not null;index"` // 转 suspect 的那条命令
+	IntentID     string `gorm:"index"`
+	Primitive    string `gorm:"not null"`
+	BlobRef      string `gorm:"not null"`
+	ByteSize     int64  `gorm:"not null"`
+	CapturedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
+// CandidatePhoneObservation 是取证顺访经 chat.readPeerPhone 读到并通过收编
+// 判定的候选人电话观察事实行(2026-08-06 甲方裁决)。追加行、消费方取最新、
+// 不物理删除。Phone 去处比照微信号收口:只进运营通知 webhook 正文与 /admin
+// 诊断面,json:"-" 防止被投影误序列化;不进普通日志、审计 detail、AI 请求。
+type CandidatePhoneObservation struct {
+	ID           uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID    string `gorm:"not null;index"`
+	Phone        string `json:"-" gorm:"not null"`
+	ObservedAtMs int64  `gorm:"not null"`
+	CreatedAt    time.Time
+}
+
+// PhoneRevealAttempt 是「查看电话」揭示的标记先行事实行(2026-08-07 甲方裁决):
+// 派发 chat.revealPeerPhone 前先落行,ProfileID 唯一索引保证每候选人终身至多
+// 消耗一次平台查看权益;不管命令结局如何不删除、不重派。行内无号码。
+type PhoneRevealAttempt struct {
+	ID        uint64 `gorm:"primaryKey;autoIncrement"`
+	ProfileID string `gorm:"not null;uniqueIndex"`
+	CreatedAt time.Time
 }
 
 type ProfileCommunicationAutomationStatus string

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -233,6 +234,107 @@ func (s *Store) SaveCandidateScreenshot(
 	}).Error
 }
 
+// SaveSuspectSceneShot 追加一行 suspect 现场截图事实(2026-08-07 甲方裁决)。
+// 不覆盖旧行、不物理删除;失败由调用方以审计记录,不重试。
+func (s *Store) SaveSuspectSceneShot(
+	msgID string,
+	intentID string,
+	primitive string,
+	blobRef string,
+	byteSize int64,
+	capturedAtMs int64,
+	at time.Time,
+) error {
+	if strings.TrimSpace(msgID) == "" || strings.TrimSpace(blobRef) == "" ||
+		strings.TrimSpace(primitive) == "" {
+		return errors.New("suspect 现场截图事实参数不完整")
+	}
+	return s.db.Create(&SuspectSceneShot{
+		MsgID:        msgID,
+		IntentID:     intentID,
+		Primitive:    primitive,
+		BlobRef:      blobRef,
+		ByteSize:     byteSize,
+		CapturedAtMs: capturedAtMs,
+		CreatedAt:    at,
+	}).Error
+}
+
+// SuspectSceneShotsByMsgID 取某条 suspect 命令的现场截图事实(诊断台用)。
+func (s *Store) SuspectSceneShotsByMsgID(msgID string) ([]SuspectSceneShot, error) {
+	var rows []SuspectSceneShot
+	err := s.db.Where("msg_id = ?", msgID).Order("id ASC").Find(&rows).Error
+	return rows, err
+}
+
+var candidateMobileRe = regexp.MustCompile(`^1[3-9]\d{9}$`)
+
+// AcceptCandidatePhoneObservation 判定取证顺访读到的电话能否收编为观察事实:
+// 号码须是 11 位手机格式;面板姓名与会话对方展示名按**首字符**核对——同一
+// 候选人可能一处真名一处「X先生」(2026-08-06 甲方裁决只核第一个字)。任一
+// 不满足或锚点缺失都不收编,方向是通知少一行手机号,绝不冒认。
+func AcceptCandidatePhoneObservation(phone, panelName, peerDisplayName string) bool {
+	if !candidateMobileRe.MatchString(strings.TrimSpace(phone)) {
+		return false
+	}
+	panel := []rune(strings.TrimSpace(panelName))
+	peer := []rune(strings.TrimSpace(peerDisplayName))
+	if len(panel) == 0 || len(peer) == 0 {
+		return false
+	}
+	return panel[0] == peer[0]
+}
+
+// SaveCandidatePhoneObservation 追加一行电话观察事实(不覆盖旧行,消费方取最新)。
+func (s *Store) SaveCandidatePhoneObservation(
+	profileID string,
+	phone string,
+	observedAtMs int64,
+	at time.Time,
+) error {
+	if strings.TrimSpace(profileID) == "" || strings.TrimSpace(phone) == "" {
+		return errors.New("电话观察事实参数不完整")
+	}
+	return s.db.Create(&CandidatePhoneObservation{
+		ProfileID:    profileID,
+		Phone:        phone,
+		ObservedAtMs: observedAtMs,
+		CreatedAt:    at,
+	}).Error
+}
+
+// TryMarkPhoneRevealAttempt 标记先行:首次落行返回 true(允许派发揭示),
+// 已存在返回 false(终身不再派发)。行不删除、不更新。
+func (s *Store) TryMarkPhoneRevealAttempt(profileID string, at time.Time) (bool, error) {
+	if strings.TrimSpace(profileID) == "" {
+		return false, errors.New("揭示标记参数不完整")
+	}
+	result := s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "profile_id"}},
+		DoNothing: true,
+	}).Create(&PhoneRevealAttempt{ProfileID: profileID, CreatedAt: at})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// LatestCandidatePhone 返回该候选人最新一行电话观察事实的号码;无则空串。
+func (s *Store) LatestCandidatePhone(profileID string) (string, error) {
+	var row CandidatePhoneObservation
+	err := s.db.
+		Where("profile_id = ?", profileID).
+		Order("id DESC").
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return row.Phone, nil
+}
+
 // LatestCandidateScreenshots 返回该候选人各 kind 的最新截图行。
 func (s *Store) LatestCandidateScreenshots(profileID string) (map[string]CandidateScreenshot, error) {
 	var rows []CandidateScreenshot
@@ -261,15 +363,21 @@ func truncateErrorText(text string) string {
 // WechatID 来自权威 ContactAsset;运营通知 webhook 正文是其获准位置之一
 // (AGENTS.md 2026-07-28 裁决),本快照不得回流进日志、审计或管理 API。
 type NotificationRenderSnapshot struct {
-	ProfileID           string
-	DisplayName         string
-	PositionTitle       string
-	MainStatus          CandidateProfileStatus
-	WechatState         string
-	WechatID            string
+	ProfileID     string
+	DisplayName   string
+	PositionTitle string
+	MainStatus    CandidateProfileStatus
+	WechatState   string
+	WechatID      string
+	// PhoneNumber 来自取证顺访的电话观察事实(2026-08-06 裁决),缺失渲染侧
+	// 整行省略;与 WechatID 同受"不回流进日志/审计/管理 API"边界约束。
+	PhoneNumber         string
 	InterviewStartsAtMs *int64
-	ChatShot            *CandidateScreenshot
-	ResumeShot          *CandidateScreenshot
+	// InterviewMethod 取自同一张邀面卡(契约封闭枚举 wechatVideo/onsite,
+	// 2026-08-07 甲方裁决进通知),空串=未知,渲染侧整行省略。
+	InterviewMethod string
+	ChatShot        *CandidateScreenshot
+	ResumeShot      *CandidateScreenshot
 	// 画像摘要:AGENTS.md 2026-07-28 补充裁决允许的封闭四项,逐项可空。
 	// 简历未采到、快照结构异常或标签缺失时留空,渲染侧逐项省略,绝不阻断通知。
 	Age           string
@@ -400,6 +508,11 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 			break
 		}
 	}
+	phone, err := s.LatestCandidatePhone(profileID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.PhoneNumber = phone
 	// 画像摘要:没有活动快照就整行不出,读取失败也只当没有,绝不阻断通知。
 	if profile.ActiveResumeSnapshotID != nil {
 		var resume CandidateResumeSnapshot
@@ -440,6 +553,9 @@ func (s *Store) NotificationRenderSnapshotForProfile(profileID string) (*Notific
 			First(&card).Error
 		if err == nil {
 			snapshot.InterviewStartsAtMs = card.InterviewStartsAtMs
+			if card.InterviewMethod != nil {
+				snapshot.InterviewMethod = strings.TrimSpace(*card.InterviewMethod)
+			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}

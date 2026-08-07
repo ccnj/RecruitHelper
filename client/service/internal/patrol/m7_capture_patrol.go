@@ -9,6 +9,7 @@ package patrol
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
@@ -100,5 +101,110 @@ func (a *roundActor) captureNotificationEvidence(
 	); err != nil {
 		return err
 	}
-	return nil
+	return a.collectPeerPhoneObservation(ctx, profile, conversationRef)
+}
+
+// collectPeerPhoneObservation 取证顺访读侧栏电话(2026-08-06 甲方裁决):与
+// 截图同一趟到访,失败只产生「缺号」。收编判定(手机格式 + 面板姓名与会话
+// 对方首字核对)在脑侧;日志不携带号码与姓名(普通日志边界)。
+func (a *roundActor) collectPeerPhoneObservation(
+	ctx context.Context,
+	profile *store.CandidateProfile,
+	conversationRef string,
+) error {
+	phoneData, phoneErr := invokePrimitiveDirect[protocol.ChatReadPeerPhoneData](
+		ctx,
+		a,
+		protocol.PrimChatReadPeerPhone,
+		protocol.ChatReadPeerPhoneArgs{ConversationRef: conversationRef},
+	)
+	if phoneErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		slog.Warn("电话侧栏读取失败,缺号降级", "profileId", profile.ProfileID, "err", phoneErr)
+		return nil
+	}
+	if strings.TrimSpace(phoneData.Phone) == "" {
+		if !phoneData.Masked {
+			return nil // 无号或虚拟号形态:本轮无观察,通知照常少一行
+		}
+		revealed, err := a.maybeRevealPeerPhone(ctx, profile, conversationRef)
+		if err != nil || revealed == nil {
+			return err
+		}
+		phoneData = *revealed
+		if strings.TrimSpace(phoneData.Phone) == "" {
+			return nil
+		}
+	}
+	conversation, err := a.manager.store.ConversationByKey(store.ConversationKey{
+		Platform:        profile.Platform,
+		AccountRef:      profile.AccountRef,
+		ConversationRef: conversationRef,
+	})
+	if err != nil {
+		return err
+	}
+	peerDisplayName := ""
+	if conversation != nil {
+		peerDisplayName = conversation.PeerDisplayName
+	}
+	if !store.AcceptCandidatePhoneObservation(phoneData.Phone, phoneData.PanelName, peerDisplayName) {
+		slog.Info("电话观察未通过收编判定,按缺号处理", "profileId", profile.ProfileID)
+		return nil
+	}
+	return a.manager.store.SaveCandidatePhoneObservation(
+		profile.ProfileID,
+		strings.TrimSpace(phoneData.Phone),
+		phoneData.ObservedAt,
+		a.manager.now(),
+	)
+}
+
+// maybeRevealPeerPhone 对遮挡形态按 2026-08-07 裁决的收窄条件点一次「查看电话」:
+// 该候选人有约面成功通知、尚无权威微信资产、且从未尝试过。标记先行——落行成功
+// 才派发,不管命令结局如何终身不再点,每候选人至多消耗一次平台查看权益。
+// 返回 nil 表示本轮无揭示结果(条件不满足或揭示失败),一律「缺号」收场。
+func (a *roundActor) maybeRevealPeerPhone(
+	ctx context.Context,
+	profile *store.CandidateProfile,
+	conversationRef string,
+) (*protocol.ChatReadPeerPhoneData, error) {
+	meeting, err := a.manager.store.InterviewNotificationForProfile(profile.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	if meeting == nil {
+		return nil, nil // 还没约面:不值得消耗查看权益
+	}
+	hasWechat, err := a.manager.store.HasWechatContactAsset(profile.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	if hasWechat {
+		return nil, nil // 微信已到手:不消耗
+	}
+	first, err := a.manager.store.TryMarkPhoneRevealAttempt(profile.ProfileID, a.manager.now())
+	if err != nil {
+		return nil, err
+	}
+	if !first {
+		return nil, nil // 唯一一次机会已用过,终身不再点
+	}
+	slog.Info("遮挡手机号满足揭示条件,派发查看电话", "profileId", profile.ProfileID)
+	revealed, revealErr := invokePrimitiveDirect[protocol.ChatReadPeerPhoneData](
+		ctx,
+		a,
+		protocol.PrimChatRevealPeerPhone,
+		protocol.ChatReadPeerPhoneArgs{ConversationRef: conversationRef},
+	)
+	if revealErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		slog.Warn("查看电话揭示失败,缺号降级", "profileId", profile.ProfileID, "err", revealErr)
+		return nil, nil
+	}
+	return &revealed, nil
 }

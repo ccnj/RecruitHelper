@@ -107,3 +107,64 @@ func (s *Store) CreateJobPublishEffectIntentAndCmd(
 	}
 	return out, nil
 }
+
+// ResolveJobPublishSuspectVerdict 把职位发布 suspect 的人工裁决落成终局。
+//
+// 为什么不能复用 ResolveSuspectVerdict：那个入口同样把 TargetRef 当会话引用，
+// resolvedOk 要往会话里追加一条我方消息、resolvedFailed 要撤回它。职位发布的
+// 目标是职位不是会话，两条腿都无处落笔——没有这条路径时，人在诊断台点任一个
+// 按钮都只会撞回"真实副作用原语没有人工裁决实现"，suspect 永远清不掉。
+//
+// 两个方向都只写终局、不铸任何业务消息事实：发布成不成功就是平台上"同名职位
+// 在不在"这一个布尔（契约 JobPublishDraftData 里也只有 postingVisible），脑没有
+// 别的东西要收编，因而也不必像招呼那样把 resolvedOk 降解成一次正证读取授权——
+// 招呼那样做是因为成功必须收编 conversationRef，布尔裁决补不出会话引用。
+//
+// resolvedFailed 之后该职位的同一份发布参数可以重发：publishAttemptSettled 认这
+// 个终局，运营再点发布会递进尝试序号铸新意图；真正防重复发布的仍是点击前的
+// expectAbsentOnPlatform 平台实读——判错方向（其实已发布却判未发生）由它兜住，
+// 那一次会干净失败，不会在平台上留下第二个同名职位。
+func (s *Store) ResolveJobPublishSuspectVerdict(ref string, verdict CmdStatus, at time.Time) error {
+	if ref == "" || (verdict != CmdResolvedOk && verdict != CmdResolvedFailed) {
+		return ErrRecoveryStateConflict
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
+			return err
+		}
+		if cmd.Name != primitiveJobPublishDraft || cmd.IntentID == "" || cmd.Status != CmdSuspect {
+			return ErrRecoveryStateConflict
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.Primitive != primitiveJobPublishDraft || intent.Status != EffectIntentSuspect ||
+			intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
+			return ErrEffectIntentConflict
+		}
+
+		cmd.Status = verdict
+		cmd.RecoveryAuthorized = false
+		cmd.VerificationNextAt = nil
+		cmd.VerificationChildMsgID = ""
+		cmd.ReviewReady = false
+		cmd.ReviewAfterMs = 0
+		cmd.TerminalAt = &at
+		if err := tx.Save(&cmd).Error; err != nil {
+			return err
+		}
+		if verdict == CmdResolvedOk {
+			intent.Status = EffectIntentResolvedOk
+		} else {
+			intent.Status = EffectIntentResolvedFailed
+		}
+		intent.SuspectReason = cmd.SuspectReason
+		intent.ResolvedAt = &at
+		return tx.Save(&intent).Error
+	})
+}
