@@ -24,7 +24,7 @@ func TestNextDailyRun(t *testing.T) {
 		{"深夜", at(23, 59), at(0, 10).AddDate(0, 0, 1)},
 	}
 	for _, item := range cases {
-		got := nextDailyRun(item.now, dailyHour, dailyMinute)
+		got := nextDailyRun(item.now, 0, 10)
 		if !got.Equal(item.want) {
 			t.Errorf("%s: 期望 %v，得到 %v", item.name, item.want, got)
 		}

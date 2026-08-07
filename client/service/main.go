@@ -374,30 +374,65 @@ func main() {
 		SetJobConfigSource(jobConfigSource).
 		SetFieldReportDeps(fieldReportDeps)
 
+	// 静默判定与自动更新、插件重载用同一套账本切面:有活跃工作流或未收束命令时
+	// 不动库——快照与 VACUUM 都要抢 SetMaxOpenConns(1) 那唯一的写连接。
+	dbQuiet := func() (bool, string) {
+		if run, err := st.ActiveProductWorkflowRun(); err != nil {
+			return false, "读取活跃工作流失败"
+		} else if run != nil {
+			return false, "有活跃工作流"
+		}
+		pending, err := st.NonTerminalCmds()
+		if err != nil {
+			return false, "读取未收束命令失败"
+		}
+		if len(pending) > 0 {
+			return false, fmt.Sprintf("仍有 %d 条未收束命令", len(pending))
+		}
+		return true, ""
+	}
+
+	// 命令审计留存(AGENTS.md「全局约定·命令审计留存」,2026-08-07 甲方裁决)。
+	// 排在 00:05 而非上报的 00:10:清理先跑完,当天上传的诊断包就已经是瘦身后的,
+	// 一次凌晨把本地与服务器两头的膨胀一起收掉。常开无开关——它不外发任何东西。
+	go report.RunScheduler(appCtx, report.SchedulerDeps{
+		Hour: 0, Minute: 5,
+		Label: "命令审计留存",
+		Quiet: dbQuiet,
+		RunOnce: func(context.Context) error {
+			cutoff := time.Now().Add(-store.CmdResultRetention)
+			cleared, err := st.PurgeCmdResultBodies(cutoff)
+			if err != nil {
+				return err
+			}
+			if cleared == 0 {
+				// 没有可清的就不 VACUUM。重写整个库是有代价的动作,不能因为
+				// "反正到点了"就每天空跑一次。
+				slog.Info("命令审计留存:无超期返回正文，跳过 VACUUM")
+				return nil
+			}
+			if err := st.VacuumDB(); err != nil {
+				// 置空已经落库了,VACUUM 失败只是没把文件缩回去 —— 下次清理时
+				// cleared 为 0 会跳过,所以这里要说清楚,否则文件会一直不缩。
+				slog.Error("命令审计留存:VACUUM 失败，文件未收缩",
+					"errorCode", "cmdRetentionVacuumFailed", "cleared", cleared, "err", err.Error())
+				return err
+			}
+			slog.Info("命令审计留存:已清理", "cleared", cleared, "cutoff", cutoff.Format(time.RFC3339))
+			return nil
+		},
+	})
+
 	// 每日自动上传(2026-07-31 补充裁决)。开关默认关闭且每轮重读——这个 goroutine
 	// 常驻,但只要没人在诊断台打开开关，它每天到点看一眼就继续睡。
 	go report.RunScheduler(appCtx, report.SchedulerDeps{
+		Hour: 0, Minute: 10,
+		Label: "现场上报",
 		Enabled: func() (bool, error) {
 			setting, err := st.FieldReportSetting()
 			return setting.AutoUploadEnabled, err
 		},
-		// 静默判定与自动更新、插件重载用同一套账本切面:有活跃工作流或未收束
-		// 命令时不动库——快照要抢 SetMaxOpenConns(1) 那唯一的写连接。
-		Quiet: func() (bool, string) {
-			if run, err := st.ActiveProductWorkflowRun(); err != nil {
-				return false, "读取活跃工作流失败"
-			} else if run != nil {
-				return false, "有活跃工作流"
-			}
-			pending, err := st.NonTerminalCmds()
-			if err != nil {
-				return false, "读取未收束命令失败"
-			}
-			if len(pending) > 0 {
-				return false, fmt.Sprintf("仍有 %d 条未收束命令", len(pending))
-			}
-			return true, ""
-		},
+		Quiet:   dbQuiet,
 		RunOnce: adminAPI.RunFieldReportOnce,
 		Record: func(at time.Time, ok bool, reason string) {
 			if err := st.RecordFieldReportAutoRun(at, ok, reason); err != nil {
