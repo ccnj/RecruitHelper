@@ -372,7 +372,10 @@ func main() {
 
 	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
 		SetJobConfigSource(jobConfigSource).
-		SetFieldReportDeps(fieldReportDeps)
+		SetFieldReportDeps(fieldReportDeps).
+		// 运营通知彩排(2026-08-06 增补的第三类触发)复用常驻 runner 的 webhook
+		// 与客户名闭包,不另建第二个出站配置面;它只借 runner 发送,不经发件箱。
+		SetNotifyProbeDeps(adminhttp.NotifyProbeDeps{Blobs: blobStore, Sender: notifyRunner})
 
 	// 静默判定与自动更新、插件重载用同一套账本切面:有活跃工作流或未收束命令时
 	// 不动库——快照与 VACUUM 都要抢 SetMaxOpenConns(1) 那唯一的写连接。

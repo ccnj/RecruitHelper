@@ -29,6 +29,7 @@ type API struct {
 	jobConfigSource *jobconfig.Source
 	advice          JobClassAdvisor
 	fieldReport     FieldReportDeps
+	notifyProbe     NotifyProbeDeps
 }
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
@@ -81,6 +82,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/messages/send", h(a.sendMessage))
 	mux.HandleFunc("POST /admin/cards/interview", h(a.sendInterviewCard))
 	mux.HandleFunc("POST /admin/cards/interview/probe", h(a.probeInterviewEditor))
+	mux.HandleFunc("POST /admin/notify/probe", h(a.notifyProbeSend))
 	mux.HandleFunc("GET /admin/messages/send", h(a.sendMessageStatus))
 	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
 	mux.HandleFunc("GET /admin/suspects", h(a.suspects))

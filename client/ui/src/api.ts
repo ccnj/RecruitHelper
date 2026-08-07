@@ -358,6 +358,28 @@ export interface InterviewProbeResult {
   }
 }
 
+/** 运营通知彩排里单张追发图的结局。 */
+export interface NotifyProbeImage {
+  present: boolean
+  byteSize?: number
+  sent: boolean
+  /** 企微主动跳过（格式不符 / 超 2MB），属预期降级。 */
+  skipped?: string
+  error?: string
+}
+
+/** 运营通知彩排的回执。content 是真正发到运营群里的那段正文原文。 */
+export interface NotifyProbeResult {
+  notifyType: string
+  profileId: string
+  content: string
+  chat: NotifyProbeImage
+  resume: NotifyProbeImage
+  /** 截图没拍成或被截断时的人话原因；空串表示这一张一切正常。 */
+  chatNote?: string
+  resumeNote?: string
+}
+
 export interface MutationResult {
   ok?: boolean
   error?: string
@@ -849,6 +871,14 @@ export const api = {
     startsAt: number
     method: 'wechatVideo' | 'onsite'
   }) => post<InterviewProbeResult>('/admin/cards/interview/probe', body),
+  // 运营通知彩排：现场截图 + 按当前事实现算正文 + 直发运营群。不入发件箱、
+  // 不写 event_key、不落截图事实行，构造性动不了线上那条真通知。
+  probeNotify: (body: {
+    platform: string
+    accountRef: string
+    conversationRef: string
+    notifyType?: 'wecomInterviewAccepted' | 'wecomWechatAdded'
+  }) => post<NotifyProbeResult>('/admin/notify/probe', body),
   jobConfigSource: () => get<{ config: JobConfigSourceView }>('/admin/job-config/source'),
   backendJobs: () => get<{ jobs: BackendJobView[] }>('/admin/job-config/backend-jobs'),
   jobPublishPrecheck: (platform: string, accountRef: string) =>

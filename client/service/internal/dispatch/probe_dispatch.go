@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -72,36 +73,69 @@ func (d *Dispatcher) ProbeInterviewEditor(
 	// 不再借道发送轨的 PrepareSend:它附带的"会话已入库 / 已收编 / 有账本尾"
 	// 三道门槛是发送准备的前提,与构造性不含发送路径的彩排无关,却让诊断台
 	// 只能对已收编会话彩排。发送轨的同名调用与其门槛不受本改动影响。
-	account, err := d.st.AccountByKey(store.AccountKey{Platform: req.Platform, AccountRef: req.AccountRef})
+	bound, err := d.currentBoundHand(req.Platform, req.AccountRef)
 	if err != nil {
 		return nil, err
 	}
+
+	return d.Run(ctx, bound.request(protocol.PrimDebugProbeInterviewEditor, argsRaw))
+}
+
+// boundHand 是一次诊断台直调所需的账号身份代际快照。
+type boundHand struct {
+	platform    string
+	accountRef  string
+	handID      string
+	session     string
+	bootID      string
+	fingerprint string
+}
+
+func (b boundHand) request(name string, argsRaw json.RawMessage) DispatchRequest {
+	return DispatchRequest{
+		HandID:          b.handID,
+		ExpectedSession: b.session,
+		ExpectedBootID:  b.bootID,
+		Name:            name,
+		Args:            argsRaw,
+		Context: &protocol.CmdContext{
+			Platform:                     b.platform,
+			AccountRef:                   b.accountRef,
+			ExpectedPrincipalFingerprint: b.fingerprint,
+		},
+	}
+}
+
+// currentBoundHand 做账号身份三项校验(绑定手在线、指纹已定、session/bootId
+// 仍是当前代际)并返回该代际快照。诊断台直调类命令共用:它们不铸 effect
+// intent、不建消息基线、不取 expectedTail,要的只是"此刻这只手确实是这个
+// 账号的手"。发送轨的 PrepareSend 另有会话账本门槛,不走这里。
+func (d *Dispatcher) currentBoundHand(platform, accountRef string) (boundHand, error) {
+	account, err := d.st.AccountByKey(store.AccountKey{Platform: platform, AccountRef: accountRef})
+	if err != nil {
+		return boundHand{}, err
+	}
 	if account == nil {
-		return nil, store.ErrAccountNotFound
+		return boundHand{}, store.ErrAccountNotFound
 	}
 	if account.BoundHandID == "" || account.PrincipalFingerprint == nil {
-		return nil, store.ErrAccountIdentityNotCurrent
+		return boundHand{}, store.ErrAccountIdentityNotCurrent
 	}
 	session, bootID, online := d.sender.HandSession(account.BoundHandID)
 	if !online {
-		return nil, ErrHandOffline
+		return boundHand{}, ErrHandOffline
 	}
 	if account.IdentityState != store.IdentityVerified ||
 		account.IdentitySession != session ||
 		account.IdentityBootID != bootID {
-		return nil, store.ErrAccountIdentityNotCurrent
+		return boundHand{}, store.ErrAccountIdentityNotCurrent
 	}
-
-	return d.Run(ctx, DispatchRequest{
-		HandID:          account.BoundHandID,
-		ExpectedSession: session,
-		ExpectedBootID:  bootID,
-		Name:            protocol.PrimDebugProbeInterviewEditor,
-		Args:            argsRaw,
-		Context: &protocol.CmdContext{
-			Platform:                     req.Platform,
-			AccountRef:                   req.AccountRef,
-			ExpectedPrincipalFingerprint: *account.PrincipalFingerprint,
-		},
-	})
+	return boundHand{
+		platform:    platform,
+		accountRef:  accountRef,
+		handID:      account.BoundHandID,
+		session:     session,
+		bootID:      bootID,
+		fingerprint: *account.PrincipalFingerprint,
+	}, nil
 }

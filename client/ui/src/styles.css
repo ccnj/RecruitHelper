@@ -1461,6 +1461,18 @@ h1, h2, h3, p { margin-top: 0; }
 
 .probe-msgid { margin: 0; color: var(--txt-faint); font-size: var(--fs-sm); }
 
+/* 真发出去的通知正文原文：保留换行，运营在群里看到的就是这几行。 */
+.probe-content {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-size: var(--fs-base);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 页面级错误边界。出事时它是唯一还能读的东西，所以给足对比度、不折叠正文。 */
 .dc-boundary { margin: 0.5rem; padding: 0.6rem 0.7rem; border: 1px solid var(--alarm); background: #150c0e; }
 .dc-boundary strong { display: block; margin-bottom: 0.24rem; color: var(--alarm); font-size: var(--fs-base); }
