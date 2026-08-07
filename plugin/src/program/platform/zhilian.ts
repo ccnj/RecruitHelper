@@ -13778,6 +13778,59 @@ async function uploadCaptureJpeg(outcome: StitchOutcome): Promise<CaptureScreens
   }
 }
 
+// suspect 现场单帧截图(2026-08-07 契约增量 debug.capturePage@1):对平台标签
+// 所在窗口的当前可见标签截一帧 JPEG。不滚动、不拼接、不点击、不导航;
+// 刻意不核对账号身份与登录态——掉登录、页面破损恰是最值得留档的现场。
+// captureVisibleTab 截的是窗口当前活动标签,活动标签不是平台页时响亮失败,
+// 不得把使用者的无关页面拍进证据资产。
+export async function captureZhilianPageSnapshot(ctx: PrimitiveContext): Promise<CaptureScreenshotData> {
+  ctx.checkpoint()
+  const tab = await canonicalZhilianTab()
+  if (!tab || tab.windowId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '找不到智联平台标签', 'afterRecovery', 'pageAbsent')
+  }
+  const [activeTab] = await chrome.tabs.query({ windowId: tab.windowId, active: true })
+  let activeHost = ''
+  try {
+    activeHost = activeTab?.url ? new URL(activeTab.url).hostname : ''
+  } catch {
+    activeHost = ''
+  }
+  if (activeHost !== ZHILIAN_HOST) {
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      '平台窗口当前活动标签不是平台页,拒绝截图',
+      'afterRecovery',
+      'pageAbsent',
+    )
+  }
+  let dataUrl: string
+  try {
+    dataUrl = await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY)
+  } catch {
+    // 可能是 captureVisibleTab 配额限速(约 1 次/秒),等一轮再试一次;仍失败就
+    // 诚实上报缺图,脑侧不再重试。
+    await swSleep(1_200)
+    try {
+      dataUrl = await captureVisibleTabJpegDataUrl(tab.windowId, CAPTURE_FRAME_QUALITY)
+    } catch (secondError) {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY',
+        `现场截图一帧未得:${secondError instanceof Error ? secondError.message : String(secondError)}`,
+        'afterRecovery',
+      )
+    }
+  }
+  const jpeg = await (await fetch(dataUrl)).blob()
+  return await uploadCaptureJpeg({
+    jpeg,
+    width: 0,
+    height: 0,
+    frames: 1,
+    truncated: false,
+  })
+}
+
 interface MainResumeCaptureFailed {
   status: 'failed'
   reason:

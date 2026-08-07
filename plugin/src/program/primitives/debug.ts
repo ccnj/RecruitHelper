@@ -5,6 +5,7 @@ import { CmdClass, DebugProbeInterviewEditorArgs, Primitive as PrimName } from '
 import { SW_STARTED_AT } from '../../base/config'
 import { armRuntimeReload } from '../../base/reload'
 import {
+  captureZhilianPageSnapshot,
   inspectZhilianSendSurfaceDiagnostic,
   probeZhilianInterviewEditor,
   ZHILIAN_PLATFORM,
@@ -112,6 +113,32 @@ const probeInterviewEditorPrim: Primitive = {
   },
 }
 
+// debug.capturePage:suspect 现场单帧截图取证(2026-08-07 契约增量)。readonly、
+// 不滚动不点击;活动标签不是平台页时响亮失败,不得截到使用者的无关页面。
+// 降级型感知:失败只产生缺图,脑侧不重试、不因此改变任何业务判定。
+const capturePagePrim: Primitive = {
+  name: PrimName.DebugCapturePage,
+  class: CmdClass.Readonly,
+  async handler(_args, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await captureZhilianPageSnapshot(ctx)
+      return { status: 'ok', data }
+    } catch (error) {
+      if (!(error instanceof ZhilianPlatformError)) throw error
+      return {
+        status: 'failed',
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          sideEffect: 'none',
+          ...(error.reason ? { data: { reason: error.reason } } : {}),
+        },
+      }
+    }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
@@ -119,4 +146,5 @@ export function registerDebugPrimitives(): void {
   register(switchWindowPrim)
   register(slowEchoPrim)
   register(probeInterviewEditorPrim)
+  register(capturePagePrim)
 }
