@@ -13053,20 +13053,37 @@ export async function readZhilianWechatExchangeOutcome(
 interface MainPeerPhonePanelResult {
   phone: string | null
   panelName: string | null
+  masked: boolean
 }
 
 // chat.readPeerPhone@1 的页面读取:右侧简历侧栏的候选人电话与面板姓名。
 // 只认「复制」按钮的 data-clipboard-text 标准属性——虚拟号形态有号无复制按钮、
 // 无号形态整段空缺,都自然落到 phone=null(2026-08-06 生产页面三形态直读)。
+// masked 是第四形态观察信号(2026-08-07 真机):中四位遮挡 + 「查看电话」按钮,
+// 完整号不在 DOM 中,只能经 chat.revealPeerPhone 点击揭示。
 function mainReadPeerPhone(): MainPeerPhonePanelResult {
   const root = document.querySelector('.new-resume-basic')
-  if (!root) return { phone: null, panelName: null }
+  if (!root) return { phone: null, panelName: null, masked: false }
   const nameText = root.querySelector('.new-resume-basic__name-wrapper')?.textContent?.trim()
   const copyNode = root.querySelector(
     '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy',
   )
   const raw = copyNode?.getAttribute('data-clipboard-text')?.trim()
-  return { phone: raw || null, panelName: nameText || null }
+  const masked = !!root.querySelector(
+    '.new-resume-basic__contact--phone--box .resume-button.get-phone',
+  )
+  return { phone: raw || null, panelName: nameText || null, masked }
+}
+
+// chat.revealPeerPhone@1 的点击步:找到侧栏「查看电话」按钮并点一次。
+// clicked=false 表示按钮此刻不在场(可能刚被真人点过),由扩展侧重读裁决。
+function mainClickRevealPeerPhone(): { clicked: boolean } {
+  const button = document.querySelector<HTMLButtonElement>(
+    '.new-resume-basic .new-resume-basic__contact--phone--box .resume-button.get-phone button',
+  )
+  if (!button || button.disabled) return { clicked: false }
+  button.click()
+  return { clicked: true }
 }
 
 // chat.readPeerPhone@1:只服务运营通知取证顺访的降级型感知,任何失败只产生
@@ -13101,6 +13118,7 @@ export async function readZhilianPeerPhone(
   const data: ZhilianReadPeerPhoneData = {
     ...(observed.phone ? { phone: observed.phone } : {}),
     ...(observed.panelName ? { panelName: observed.panelName } : {}),
+    ...(observed.masked ? { masked: true } : {}),
     observedAt: Date.now(),
   }
   if (validatePrimitiveData(PrimitiveName.ChatReadPeerPhone, 1, data).length !== 0) {
@@ -13108,6 +13126,80 @@ export async function readZhilianPeerPhone(
   }
   await ctx.progress(data.phone ? '已读取候选人电话' : '本轮未读到候选人电话', 100)
   return data
+}
+
+// chat.revealPeerPhone@1:对当前会话点一次「查看电话」并等号码揭示,揭示后
+// 形态与真实号同构(复制按钮带 data 属性),按 readPeerPhone 同款判据读回。
+// 原语内不重试点击;每候选人终身至多一次由脑侧标记先行保证,这里不再兜底。
+export async function revealZhilianPeerPhone(
+  args: ZhilianReadPeerPhoneArgs,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ZhilianReadPeerPhoneData> {
+  if (!expectedPrincipalFingerprint) {
+    throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '命令未携带已绑定账号指纹', 'manualOnly')
+  }
+  ctx.checkpoint()
+  const tab = await uniqueVerifiedIMTab(expectedPrincipalFingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const tabId = tab.id
+  await assertCurrentThreadRoute(tabId, args.conversationRef, expectedPrincipalFingerprint, 'none')
+
+  const finish = async (
+    observed: MainPeerPhonePanelResult,
+    note: string,
+  ): Promise<ZhilianReadPeerPhoneData> => {
+    ctx.checkpoint()
+    await assertCurrentThreadRoute(tabId, args.conversationRef, expectedPrincipalFingerprint, 'none')
+    const data: ZhilianReadPeerPhoneData = {
+      ...(observed.phone ? { phone: observed.phone } : {}),
+      ...(observed.panelName ? { panelName: observed.panelName } : {}),
+      observedAt: Date.now(),
+    }
+    if (validatePrimitiveData(PrimitiveName.ChatRevealPeerPhone, 1, data).length !== 0) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '电话揭示结果不符合当前契约', 'manualOnly')
+    }
+    await ctx.progress(note, 100)
+    return data
+  }
+
+  const before = await runMain(tabId, mainReadPeerPhone, [])
+  if (before.phone) {
+    // 已是揭示/真实号形态:不点击、不消耗,直接读回。
+    return finish(before, '电话已是揭示形态,直接读回')
+  }
+  if (!before.masked) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED',
+      '侧栏没有可揭示的电话(无查看按钮也无复制按钮)',
+      'manualOnly',
+    )
+  }
+  // 平台交互节奏下限:本原语唯一一次可见交互,点击前补足 1 秒 + 抖动。
+  await new Promise<void>((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 500)))
+  ctx.checkpoint()
+  const clickStep = await runMain(tabId, mainClickRevealPeerPhone, [])
+  if (!clickStep.clicked) {
+    // 点击前一瞬按钮消失(如真人刚点过):重读一次,有号即收,仍无号则失败。
+    const after = await runMain(tabId, mainReadPeerPhone, [])
+    if (after.phone) return finish(after, '按钮已被揭示,直接读回')
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '查看电话按钮不可点击', 'manualOnly')
+  }
+  await ctx.progress('已点击查看电话,等待号码揭示', 50)
+  // 条件轮询等揭示,最长 10 秒;轮询本身是纯读取,不受交互节奏下限约束。
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    const observed = await runMain(tabId, mainReadPeerPhone, [])
+    if (observed.phone) {
+      return finish(observed, '已揭示并读取候选人电话')
+    }
+    if (Date.now() >= deadline) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '点击后号码未在时限内揭示', 'manualOnly')
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 400))
+  }
 }
 
 export async function sendZhilianInviteCard(
@@ -14337,6 +14429,7 @@ export const zhilianTestHooks = Object.freeze({
   mainObserveStableOutboundCard,
   mainReadWechatExchangeOutcome,
   mainReadPeerPhone,
+  mainClickRevealPeerPhone,
   mainPrepareInterviewEditor,
   mainCloseInterviewSuccessModal,
   mainReadThreadPage,

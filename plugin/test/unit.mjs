@@ -12716,20 +12716,26 @@ test('平台阻塞弹窗:按钮缺失或禁用时诚实失败，不退而求其�
   }
 })
 
-// chat.readPeerPhone MAIN:三形态 2026-08-06 真机踩点回归。
+// chat.readPeerPhone MAIN:四形态真机踩点回归(2026-08-06 三形态 + 08-07 遮挡)。
 // 真实号=复制按钮带 data-clipboard-text;无号=电话容器整段空缺;虚拟号=有显示
-// 文本但无复制按钮。后两者都必须落 phone=null,显示文本永远不作数据源。
+// 文本但无复制按钮;遮挡=「查看电话」按钮在场(masked=true,完整号不在 DOM)。
+// 除真实号外都必须落 phone=null,显示文本永远不作数据源。
 function installPeerPhonePanelFixture(variant) {
   const original = { document: globalThis.document }
   const copyNode = {
     getAttribute: (name) => (name === 'data-clipboard-text' ? '13801995730' : null),
   }
   const nameNode = { textContent: ' 洪建辉 ' }
+  const clicks = []
+  const revealButton = { disabled: false, click: () => clicks.push('reveal') }
   const panelRoot = {
     querySelector(selector) {
       if (selector === '.new-resume-basic__name-wrapper') return nameNode
       if (selector === '.new-resume-basic__contact--phone--box .im-resume-basic__phone--copy') {
         return variant === 'real' ? copyNode : null
+      }
+      if (selector === '.new-resume-basic__contact--phone--box .resume-button.get-phone') {
+        return variant === 'masked' ? {} : null
       }
       return null
     },
@@ -12737,22 +12743,31 @@ function installPeerPhonePanelFixture(variant) {
   globalThis.document = {
     querySelector(selector) {
       if (variant === 'noPanel') return null
-      return selector === '.new-resume-basic' ? panelRoot : null
+      if (selector === '.new-resume-basic') return panelRoot
+      if (
+        selector ===
+        '.new-resume-basic .new-resume-basic__contact--phone--box .resume-button.get-phone button'
+      ) {
+        return variant === 'masked' ? revealButton : null
+      }
+      return null
     },
   }
   return {
+    clicks,
     restore() {
       globalThis.document = original.document
     },
   }
 }
 
-test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,虚拟号与缺号都返回 null', () => {
+test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,遮挡形态只报 masked', () => {
   for (const [variant, want] of [
-    ['real', { phone: '13801995730', panelName: '洪建辉' }],
+    ['real', { phone: '13801995730', panelName: '洪建辉', masked: false }],
     // 无号(容器空)与虚拟号(有显示文本无复制按钮)在选择器层同构:都查不到复制按钮。
-    ['absentOrVirtual', { phone: null, panelName: '洪建辉' }],
-    ['noPanel', { phone: null, panelName: null }],
+    ['absentOrVirtual', { phone: null, panelName: '洪建辉', masked: false }],
+    ['masked', { phone: null, panelName: '洪建辉', masked: true }],
+    ['noPanel', { phone: null, panelName: null, masked: false }],
   ]) {
     const fixture = installPeerPhonePanelFixture(variant)
     try {
@@ -12760,6 +12775,24 @@ test('chat.readPeerPhone MAIN 只认复制按钮 data 属性,虚拟号与缺号�
     } finally {
       fixture.restore()
     }
+  }
+})
+
+test('chat.revealPeerPhone MAIN 点击步只在查看按钮在场时点一次', () => {
+  const masked = installPeerPhonePanelFixture('masked')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainClickRevealPeerPhone(), { clicked: true })
+    assert.equal(masked.clicks.length, 1)
+  } finally {
+    masked.restore()
+  }
+  // 真实号形态没有查看按钮:绝不点击,由扩展侧改走直接读回。
+  const real = installPeerPhonePanelFixture('real')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainClickRevealPeerPhone(), { clicked: false })
+    assert.equal(real.clicks.length, 0)
+  } finally {
+    real.restore()
   }
 })
 

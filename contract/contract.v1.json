@@ -726,6 +726,7 @@
         "fields": {
           "phone": { "type": "string", "optional": true, "minLength": 1, "maxLength": 32, "maxBytes": 64 },
           "panelName": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128, "maxBytes": 512 },
+          "masked": { "type": "boolean", "optional": true },
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
@@ -1178,7 +1179,7 @@
   },
   "classes": {
     "readonly":  { "redispatch": "free(封顶 2)", "serialDomain": false, "idemKey": "forbidden", "evidence": "none" },
-    "intrusive": { "redispatch": "free(封顶 3)", "serialDomain": true, "idemKey": "forbidden", "evidence": "none", "declare": { "platformSideEffect": "none | idempotentReadReceipt" } },
+    "intrusive": { "redispatch": "free(封顶 3)", "serialDomain": true, "idemKey": "forbidden", "evidence": "none", "declare": { "platformSideEffect": "none | idempotentReadReceipt | idempotentPhoneReveal" } },
     "effectful": { "redispatch": "never;唯一自动恢复=同 witnessStoreId 且 report=unknown 时重投原 msgId;failed/sideEffect=none 与任何 receipt rejected 均终局化意图,人确认后另铸新意图", "serialDomain": true, "idemKey": "required", "evidence": "required(X 起强制)" },
     "litmus": "执行两次与一次对候选人可感知世界无额外差别且不发业务内容 -> 驱动页面=intrusive 否则=readonly;否则=effectful;拿不准=effectful",
     "serialDomainKey": "intrusive/effectful 的串行域键=context.accountRef;debug.* 命令=debug:{handId}(每手一个 debug 域,规则与账号域同款,suspect 冻结域亦同)"
@@ -1534,7 +1535,14 @@
       "argsSchema": "ChatReadPeerPhoneArgs", "dataSchema": "ChatReadPeerPhoneData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 5000, "deadlineMs": 30000,
-      "note": "只读真人当前已打开且公开路由精确匹配的会话右侧简历侧栏的候选人电话,不定位、不点击、不滚动、不发送。只认「复制」按钮的 data-clipboard-text 标准属性并原样返回;显示文本不作数据源,虚拟号形态天然无该属性因而不返回号码(2026-08-06 生产页面三形态直读:真实号有复制按钮、无号整段空缺、虚拟号有号无复制按钮)。panelName 为侧栏面板姓名,供脑侧与会话对方核对后决定是否收编;接受判定(号码格式、姓名核对)全在脑侧,手不裁决。phone 缺省仅表示本轮未读到,不证明候选人无电话,不授权任何动作。尽力而为的降级型感知:任何失败只产生「缺号」,不推进业务状态、不进入验证链、不授权重试 effectful"
+      "note": "只读真人当前已打开且公开路由精确匹配的会话右侧简历侧栏的候选人电话,不定位、不点击、不滚动、不发送。只认「复制」按钮的 data-clipboard-text 标准属性并原样返回;显示文本不作数据源,虚拟号形态天然无该属性因而不返回号码(2026-08-06 生产页面三形态直读:真实号有复制按钮、无号整段空缺、虚拟号有号无复制按钮)。masked=true 表示读到了第四形态(2026-08-07 真机):号码中四位遮挡且带「查看电话」按钮,此形态完整号不在 DOM 中,只能经 chat.revealPeerPhone 揭示;masked 只是观察信号,不授权任何动作。panelName 为侧栏面板姓名,供脑侧与会话对方核对后决定是否收编;接受判定(号码格式、姓名核对)全在脑侧,手不裁决。phone 缺省仅表示本轮未读到,不证明候选人无电话,不授权任何动作。尽力而为的降级型感知:任何失败只产生「缺号」,不推进业务状态、不进入验证链、不授权重试 effectful"
+    },
+    "chat.revealPeerPhone": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentPhoneReveal",
+      "argsSchema": "ChatReadPeerPhoneArgs", "dataSchema": "ChatReadPeerPhoneData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"],
+      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 15000,
+      "note": "对真人当前已打开且公开路由精确匹配的会话,点一次右侧简历侧栏的「查看电话」按钮并条件轮询(≤10 秒)等号码揭示,揭示后的形态与真实号形态同构(复制按钮带 data-clipboard-text,2026-08-07 授权点击直读固化),按 readPeerPhone 同款判据读回。平台副作用 idempotentPhoneReveal:首次点击消耗账号一次查看权益并把候选人迁入平台「已获取电话」状态,揭示后按钮消失、重复执行找不到按钮只会读到已揭示号码,不二次消耗;点击对候选人不可感知、不发送任何业务内容(2026-08-07 授权点击实测无确认弹窗、直接出号)。按钮缺失但复制按钮在场视为已揭示,直接读回;两者都缺失或点击后超时未揭示均响亮失败,不返回部分结果。原语内不重试点击;脑侧每候选人终身至多派发一次(标记先行),任何失败只产生「缺号」,不转人工、不授权重试"
     }
   },
   "events": {
