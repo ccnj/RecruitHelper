@@ -441,8 +441,14 @@ type CandidateProfile struct {
 	ActiveResumeSnapshotID         *string            `gorm:"uniqueIndex"`
 	ResumeCaptureAttemptedAt       *time.Time
 	ResumeCaptureFailureReason     string
-	CreatedAt                      time.Time
-	UpdatedAt                      time.Time
+	// GreetingRejectReason 是平台拒绝本次招呼时给出的原话(2026-08-07 甲方
+	// 裁决:错误原因要传到客户端)。EndReason=greetingFailed 太笼统,敏感词、
+	// 上限、技术失败在客户端上长得一样。这里刻意存自由文本而不新增枚举:
+	// 平台拒绝理由不可枚举,自由文本能原样透传,平台改文案我方零改动。
+	// 它是平台文案不是候选人明文,允许经 /app/* 产品 API 投影给客户端。
+	GreetingRejectReason string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 
 	GreetingHead             *CandidateGreetingHead    `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`
 	CommunicationV4Aggregate *CommunicationV4Aggregate `gorm:"foreignKey:ProfileID;references:ProfileID;constraint:OnUpdate:RESTRICT,OnDelete:RESTRICT"`

@@ -1228,7 +1228,11 @@ func (d *Dispatcher) realGreetingResultPlan(
 			r.SuspectReason = ""
 			plan.Effect = resultEffect(store.EffectIntentFailed, "")
 			if res.Error.Code == protocol.ErrCodeGreetingRejected {
-				plan.Effect.Greeting = &store.GreetingResultMutation{Rejected: true}
+				// 平台拒绝原话随手侧 message 上来,落进档案给客户端看
+				// (2026-08-07 甲方裁决)。取不到就只留笼统的 greetingFailed。
+				plan.Effect.Greeting = &store.GreetingResultMutation{
+					Rejected: true, RejectReason: res.Error.Message,
+				}
 			}
 			if wasHumanResolved || wasSuspect {
 				*oc = ocSuspectCleared
