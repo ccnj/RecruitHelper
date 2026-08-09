@@ -136,7 +136,7 @@ func (a *sourcingBatchGreetingAllSuccessAdvice) requestCount() int {
 
 func prepareSelectedSourcingBatch(t *testing.T, h *sourcingActorHarness, targetCount int) string {
 	t.Helper()
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, targetCount); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, targetCount, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)

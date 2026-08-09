@@ -514,7 +514,7 @@ func newSourcingActorHarness(t *testing.T, windows [][]string) *sourcingActorHar
 
 func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}, {"candidate-b", "candidate-c"}})
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -600,7 +600,7 @@ func TestFormalSourcingActorCompletesWholeBatchInOneRound(t *testing.T) {
 func TestFormalSourcingFilterFailureStaysUnboundAndResumeRepeatsPreparation(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.sender.filterFailures = 1
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -659,7 +659,7 @@ func TestFormalSourcingFilterFailureStaysUnboundAndResumeRepeatsPreparation(t *t
 func TestFormalSourcingManualStartRespectsUnifiedBusinessWindow(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.clock.now = time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); !errors.Is(err, patrol.ErrDailyWindowNotOpen) {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); !errors.Is(err, patrol.ErrDailyWindowNotOpen) {
 		t.Fatalf("08:00 前正式采集必须被统一业务窗口拒绝: %v", err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
@@ -674,7 +674,7 @@ func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T
 		{"candidate-a", "candidate-c"},
 	})
 	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -713,7 +713,7 @@ func TestFormalSourcingActorSkipsUnreadableTargetWithinCurrentRound(t *testing.T
 func TestResumedSourcingWaitsBeforeFirstNewTargetAfterWindowMove(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -761,7 +761,7 @@ func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T
 		candidate.SelfEvaluation = marker
 		h.sender.candidates[ref] = candidate
 	}
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
@@ -865,7 +865,7 @@ func TestCompletedSourcingBatchScoresEveryMemberWithoutTouchingHand(t *testing.T
 
 func TestCompletedSourcingBatchPostResponseTokenBudgetKeepsUsageWithoutScore(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
@@ -924,7 +924,7 @@ func TestCompletedSourcingBatchPostResponseTokenBudgetKeepsUsageWithoutScore(t *
 
 func TestCompletedSourcingBatchWithoutProviderCreatesNoReservation(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
@@ -954,7 +954,7 @@ func TestCompletedSourcingBatchWithoutProviderCreatesNoReservation(t *testing.T)
 func TestFormalSourcingActorBlocksOnTargetPositionMismatch(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.sender.targetPositionOverride = "other-position"
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -983,7 +983,7 @@ func TestFormalSourcingActorBlocksOnTargetPositionMismatch(t *testing.T) {
 // 后续流程，而不是阻塞停工等真人。
 func TestFormalSourcingSettlesWithFewerMembersWhenWindowGoesDry(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}})
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)
@@ -1039,7 +1039,7 @@ func TestFormalSourcingSettlesWithFewerMembersWhenWindowGoesDry(t *testing.T) {
 func TestFormalSourcingBlocksWhenWindowGoesDryWithoutAnyMember(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.sender.unreadableTargets = map[string]bool{"candidate-a": true}
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 5, 0); err != nil {
 		t.Fatal(err)
 	}
 	started, err := h.store.ActiveSourcingBatch(h.key)

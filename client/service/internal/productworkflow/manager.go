@@ -14,7 +14,16 @@ import (
 	"recruithelper/client/service/internal/workflow"
 )
 
-const NewFullWorkflowTargetCount = 150
+// NewFullWorkflowTargetCount 是新建完整流程批次第一轮的采集人数。
+// NewFullWorkflowCaptureLimit 是整批累计可采上限,NewFullWorkflowCaptureStep
+// 是第二轮起每轮的增量:150 / 50 / 50 / 50,最多四轮。首轮开大是因为过线率
+// 事先不可知,先用一轮取到足够样本;后续小步是为了少采一点算一点——每轮都
+// 要采满才评分,超采只能压到一轮 50 人以内,压不到零。
+const (
+	NewFullWorkflowTargetCount  = 150
+	NewFullWorkflowCaptureStep  = 50
+	NewFullWorkflowCaptureLimit = 300
+)
 
 var (
 	ErrNilStore              = errors.New("产品工作流 store 不能为空")
@@ -31,7 +40,7 @@ type Clock interface {
 }
 
 type Actor interface {
-	StartSourcing(store.AccountKey, string, int) error
+	StartSourcing(key store.AccountKey, revisionHash string, targetCount, captureLimit int) error
 	EnableToday(store.AccountKey) error
 	HoldAfterSourcing(store.AccountKey) error
 	PauseNow(store.AccountKey) error
@@ -140,9 +149,13 @@ func (m *Manager) startFullLocked(
 	}
 	revisionHash := contextRevisionHash
 	targetCount := NewFullWorkflowTargetCount
+	captureLimit := NewFullWorkflowCaptureLimit
 	if activeBatch != nil {
+		// 复用未终局批次时一律沿用它自己的额度,包括分轮前建立、CaptureLimit
+		// 为 0 的存量批次:它们继续按单轮语义走完,不被新版改成分轮。
 		revisionHash = activeBatch.ContextRevisionHash
 		targetCount = activeBatch.TargetCount
+		captureLimit = activeBatch.CaptureLimit
 	}
 	if revisionHash == "" {
 		return nil, store.ErrJobAIContextRevisionInvalid
@@ -169,7 +182,7 @@ func (m *Manager) startFullLocked(
 			return nil, m.failStart(run, key, err)
 		}
 	}
-	if err := m.actor.StartSourcing(key, revisionHash, targetCount); err != nil {
+	if err := m.actor.StartSourcing(key, revisionHash, targetCount, captureLimit); err != nil {
 		return nil, m.failStart(run, key, err)
 	}
 	activeBatch, err = m.store.ActiveSourcingBatch(key)
@@ -177,6 +190,7 @@ func (m *Manager) startFullLocked(
 		return nil, m.failStart(run, key, err)
 	}
 	if activeBatch == nil || activeBatch.TargetCount != targetCount ||
+		activeBatch.CaptureLimit != captureLimit ||
 		activeBatch.ContextRevisionHash != revisionHash {
 		return nil, m.failStart(run, key, store.ErrSourcingBatchConflict)
 	}

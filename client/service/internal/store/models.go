@@ -316,8 +316,13 @@ type SourcingBatch struct {
 	ContextRevisionHash string `gorm:"not null;index"`
 	// BackendJobID 是旧后台 Job.ID。历史孤儿允许为空；所有新批次必须由
 	// ContextRevisionHash 对应 revision 的 SourceJobRef 原子派生并写入。
-	BackendJobID    *string `gorm:"index"`
-	TargetCount     int     `gorm:"not null;check:ck_sourcing_batch_target_count,target_count > 0"`
+	BackendJobID *string `gorm:"index"`
+	// TargetCount 是本轮采集到多少人为止,同时是"批内成员数"的断言:评分与
+	// 筛选都要求 run 数精确等于它。分轮采集只在轮次之间抬高它,单轮语义不变。
+	TargetCount int `gorm:"not null;check:ck_sourcing_batch_target_count,target_count > 0"`
+	// CaptureLimit 是整批累计可采人数的上限。TargetCount 抬档不得越过它;
+	// 0 表示不分轮(管理面显式启动的批次与分轮前建立的存量批次)。
+	CaptureLimit    int `gorm:"not null;default:0"`
 	PositionRef     *string
 	PositionTitle   *string
 	PositionBoundAt *time.Time

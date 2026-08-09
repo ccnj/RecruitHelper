@@ -48,7 +48,10 @@ type StartSourcingBatchRequest struct {
 	AccountRef          string
 	ContextRevisionHash string
 	TargetCount         int
-	StartedAt           time.Time
+	// CaptureLimit 为 0 表示本批不分轮:采到 TargetCount 即终局。大于 0 时
+	// 必须不小于 TargetCount,轮次之间由 ReopenSourcingBatchForCapture 抬档。
+	CaptureLimit int
+	StartedAt    time.Time
 }
 
 type StartSourcingBatchResult struct {
@@ -230,6 +233,9 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 	if req.Platform == "" || req.AccountRef == "" || req.ContextRevisionHash == "" || req.TargetCount <= 0 {
 		return nil, ErrSourcingBatchInvalid
 	}
+	if req.CaptureLimit != 0 && req.CaptureLimit < req.TargetCount {
+		return nil, ErrSourcingBatchInvalid
+	}
 	if req.BatchID == "" {
 		req.BatchID = ids.NewSourcingBatchID()
 	}
@@ -287,8 +293,8 @@ func (s *Store) StartSourcingBatch(req StartSourcingBatchRequest) (*StartSourcin
 		batch := SourcingBatch{
 			BatchID: req.BatchID, Platform: req.Platform, AccountRef: req.AccountRef,
 			ContextRevisionHash: req.ContextRevisionHash, BackendJobID: &backendJobID,
-			TargetCount: req.TargetCount,
-			Status:      SourcingBatchPreparing, StartedAt: req.StartedAt,
+			TargetCount: req.TargetCount, CaptureLimit: req.CaptureLimit,
+			Status: SourcingBatchPreparing, StartedAt: req.StartedAt,
 		}
 		if err := tx.Create(&batch).Error; err != nil {
 			return err
@@ -311,7 +317,8 @@ func sameSourcingBatchStartMaterial(
 	return batch.Platform == req.Platform && batch.AccountRef == req.AccountRef &&
 		batch.ContextRevisionHash == req.ContextRevisionHash &&
 		batch.BackendJobID != nil && *batch.BackendJobID == backendJobID &&
-		batch.TargetCount == req.TargetCount
+		batch.TargetCount == req.TargetCount &&
+		batch.CaptureLimit == req.CaptureLimit
 }
 
 // BindSourcingBatchPosition 只从首个 candidate.readSourcingWindow 的持久
@@ -624,6 +631,120 @@ func (s *Store) StopSourcingBatch(req StopSourcingBatchRequest) (*SourcingBatch,
 		}
 		out = batch
 		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+type ReopenSourcingBatchForCaptureRequest struct {
+	BatchID string
+	// Step 是本轮采集额度的增量。抬档后的 TargetCount 不得越过 CaptureLimit,
+	// 越过就截到上限。
+	Step     int
+	ReopenAt time.Time
+}
+
+// ReopenSourcingBatchForCapture 把一个刚采满、但选中人数还没够选中目标的批次
+// 退回 collecting 再采一轮。它与 ResumeSourcingBatch 是两件事：那个是人工把
+// blocked 的故障批次救回来，这个是分轮采集的正常推进，只认 completed。
+//
+// 三种批次拒绝回退，各有各的道理：
+//   - 撞底收口的（reason 前缀 noNewCandidates）：SettleSourcingBatch 已经把
+//     TargetCount 改写成实到人数，说明推荐流里已经没有新人，再采一轮只空转。
+//   - CaptureLimit 为 0 或已经采到上限的：分轮额度用完，该收口了。
+//   - 成员数与 TargetCount 对不上的：那道“run 数精确等于 TargetCount”的不变
+//     式是评分与筛选的共同前置，对不上说明批次本身已经不自洽，不能再往上抬。
+//
+// 账号只解除采集内部的 hold，不碰 EnabledDate：跨日之后能不能接着跑，仍由既
+// 有的每日门禁和业务窗口裁决，本入口不代替用户做“今天继续”的决定。
+func (s *Store) ReopenSourcingBatchForCapture(
+	req ReopenSourcingBatchForCaptureRequest,
+) (*SourcingBatch, error) {
+	req.BatchID = strings.TrimSpace(req.BatchID)
+	if req.BatchID == "" || req.Step <= 0 {
+		return nil, ErrSourcingBatchInvalid
+	}
+	if req.ReopenAt.IsZero() {
+		req.ReopenAt = time.Now()
+	}
+
+	var out SourcingBatch
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		batch, err := sourcingBatchByIDTx(tx, req.BatchID)
+		if err != nil {
+			return err
+		}
+		// 已经回到采集态就是本入口的幂等重放,原样返回。
+		if batch.Status == SourcingBatchCollecting && batch.EndedAt == nil {
+			out = batch
+			return nil
+		}
+		if batch.Status != SourcingBatchCompleted || batch.EndedAt == nil {
+			return ErrSourcingBatchStateConflict
+		}
+		if batch.CaptureLimit <= 0 || batch.TargetCount >= batch.CaptureLimit {
+			return ErrSourcingBatchStateConflict
+		}
+		if strings.HasPrefix(batch.Reason, SourcingNoNewCandidatesReason) {
+			return ErrSourcingBatchStateConflict
+		}
+		captured, err := sourcingBatchCapturedCountTx(tx, batch.BatchID)
+		if err != nil {
+			return err
+		}
+		if captured != int64(batch.TargetCount) {
+			return ErrSourcingBatchConflict
+		}
+		// ended_at 置空会让本批重新占用“同账号唯一未终局批次”的位置,先确认
+		// 没有别的批次已经占着,否则唯一索引会在提交时才炸。
+		var openCount int64
+		if err := tx.Model(&SourcingBatch{}).
+			Where("platform = ? AND account_ref = ? AND ended_at IS NULL AND batch_id <> ?",
+				batch.Platform, batch.AccountRef, batch.BatchID).
+			Count(&openCount).Error; err != nil {
+			return err
+		}
+		if openCount != 0 {
+			return ErrSourcingBatchStateConflict
+		}
+
+		nextTarget := batch.TargetCount + req.Step
+		if nextTarget > batch.CaptureLimit {
+			nextTarget = batch.CaptureLimit
+		}
+		updated := tx.Model(&SourcingBatch{}).
+			Where("batch_id = ? AND status = ? AND ended_at IS NOT NULL",
+				batch.BatchID, SourcingBatchCompleted).
+			Updates(map[string]any{
+				"status":       SourcingBatchCollecting,
+				"reason":       "",
+				"target_count": nextTarget,
+				"ended_at":     nil,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrSourcingBatchStateConflict
+		}
+		updatedAccount := tx.Model(&Account{}).
+			Where("platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef).
+			Updates(map[string]any{
+				"stopped_at":     nil,
+				"paused_reason":  "",
+				"next_patrol_at": req.ReopenAt,
+				"dirty_hint":     true,
+			})
+		if updatedAccount.Error != nil {
+			return updatedAccount.Error
+		}
+		if updatedAccount.RowsAffected != 1 {
+			return ErrSourcingBinding
+		}
+		out, err = sourcingBatchByIDTx(tx, batch.BatchID)
+		return err
 	})
 	if err != nil {
 		return nil, err

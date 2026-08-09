@@ -32,7 +32,7 @@ func newScoringRetryScorer(
 
 func scoredSourcingBatch(t *testing.T, h *sourcingActorHarness, members int) (string, []store.SourcingScoreWorkItem) {
 	t.Helper()
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, members); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, members, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)

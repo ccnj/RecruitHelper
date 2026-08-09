@@ -11,7 +11,7 @@ import (
 
 func TestScoringCallsSharedWorkflowGateBeforeEachNewCandidate(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a", "candidate-b"}})
-	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2); err != nil {
+	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 2, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)

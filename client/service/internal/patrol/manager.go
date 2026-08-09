@@ -188,7 +188,12 @@ func (m *Manager) EnableToday(key store.AccountKey) error {
 // StartSourcing 创建或复用唯一 preparing 正式批次，并开启账号 actor。
 // SourcingBatch 是采集运行的唯一事实；Account 上的旧 sourcing_enabled
 // 不再授权正式采集，只保留 schema 兼容。
-func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targetCount int) error {
+// captureLimit 为 0 表示本批不分轮;大于 0 时是整批累计可采人数的上限。
+func (m *Manager) StartSourcing(
+	key store.AccountKey,
+	revisionHash string,
+	targetCount, captureLimit int,
+) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	revisionHash = strings.TrimSpace(revisionHash)
@@ -196,6 +201,9 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targe
 		return store.ErrJobAIContextRevisionInvalid
 	}
 	if targetCount <= 0 {
+		return store.ErrSourcingBatchInvalid
+	}
+	if captureLimit != 0 && captureLimit < targetCount {
 		return store.ErrSourcingBatchInvalid
 	}
 	now := m.now()
@@ -232,7 +240,8 @@ func (m *Manager) StartSourcing(key store.AccountKey, revisionHash string, targe
 	}
 	started, err := m.store.StartSourcingBatch(store.StartSourcingBatchRequest{
 		Platform: key.Platform, AccountRef: key.AccountRef,
-		ContextRevisionHash: revisionHash, TargetCount: targetCount, StartedAt: now,
+		ContextRevisionHash: revisionHash, TargetCount: targetCount,
+		CaptureLimit: captureLimit, StartedAt: now,
 	})
 	if err != nil {
 		return err
