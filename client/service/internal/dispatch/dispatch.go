@@ -446,6 +446,8 @@ func validatePrimitiveResult(cmd store.CmdRecord, res protocol.ResultBody) (prot
 			validationErr = fmt.Errorf("解析发送 data: %w", err)
 		} else if data.ConversationRef != args.ConversationRef || data.ContentHash != syncledger.HashText(args.Text) {
 			validationErr = errors.New("发送 result 的 conversationRef/contentHash 与原始意图不一致")
+		} else if data.SourceKey != "" && !validLowerHex64(data.SourceKey) {
+			validationErr = errors.New("发送 result 的 sourceKey 非法")
 		}
 	}
 	if validationErr == nil && cmd.Name == protocol.PrimChatSendGreeting && res.Status == protocol.ResultStatusOk {
@@ -1049,10 +1051,11 @@ func (d *Dispatcher) realSendMessageResultPlan(
 		return store.ResultCommandMutation{}, err
 	}
 	fingerprint := syncledger.HashText(args.Text)
-	resultEffect := func(status store.EffectIntentStatus, appendMessage bool, observedAt int64, platformTs *int64, reason string) *store.EffectResultMutation {
+	resultEffect := func(status store.EffectIntentStatus, appendMessage bool, observedAt int64, platformTs *int64, sourceKey, reason string) *store.EffectResultMutation {
 		return &store.EffectResultMutation{
 			IntentStatus: status, Append: appendMessage, Text: args.Text,
-			ContentHash: fingerprint, ObservedAtMs: observedAt, PlatformTsMs: platformTs, Reason: reason,
+			ContentHash: fingerprint, ObservedAtMs: observedAt, PlatformTsMs: platformTs,
+			SourceKey: sourceKey, Reason: reason,
 		}
 	}
 
@@ -1077,7 +1080,7 @@ func (d *Dispatcher) realSendMessageResultPlan(
 		r.ResultBody = string(body)
 		r.SuspectReason = ""
 		applyResultError(r, res)
-		plan.Effect = resultEffect(store.EffectIntentOk, true, data.ObservedAt, data.TsApprox, "")
+		plan.Effect = resultEffect(store.EffectIntentOk, true, data.ObservedAt, data.TsApprox, data.SourceKey, "")
 		if wasHumanResolved || wasSuspect {
 			*oc = ocSuspectCleared
 		}
@@ -1093,8 +1096,8 @@ func (d *Dispatcher) realSendMessageResultPlan(
 			r.Status = store.CmdFailed
 			r.TerminalAt = &now
 			r.SuspectReason = "result 失败但已确认发生副作用"
-			// failed+confirmed 没有命中消息可采,平台时间保持未知。
-			plan.Effect = resultEffect(store.EffectIntentOk, true, now.UnixMilli(), nil, r.SuspectReason)
+			// failed+confirmed 没有命中消息可采,平台时间与消息身份都保持未知。
+			plan.Effect = resultEffect(store.EffectIntentOk, true, now.UnixMilli(), nil, "", r.SuspectReason)
 			*oc = ocSuspectCleared
 			return plan, nil
 		case protocol.SideEffectPossible:
@@ -1113,14 +1116,14 @@ func (d *Dispatcher) realSendMessageResultPlan(
 			r.ReviewReady = false
 			r.ReviewAfterMs = 0
 			plan.KeepCommandOpen = true
-			plan.Effect = resultEffect(store.EffectIntentVerifying, false, 0, nil, r.VerificationReason)
+			plan.Effect = resultEffect(store.EffectIntentVerifying, false, 0, nil, "", r.VerificationReason)
 			*oc = ocEffSuspect
 			return plan, nil
 		case protocol.SideEffectNone:
 			r.Status = store.CmdFailed
 			r.TerminalAt = &now
 			r.SuspectReason = ""
-			plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, nil, "")
+			plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, nil, "", "")
 			plan.Effect.Retract = wasHumanResolved
 			// 真实 SX 不接受手侧 retryable 授权，也绝不铸造 replacement
 			// msgId。唯一自动恢复是 witness 同库 unknown 后重投原 msgId。
@@ -1136,7 +1139,7 @@ func (d *Dispatcher) realSendMessageResultPlan(
 		r.TerminalAt = &now
 		r.ResultBody = string(body)
 		applyResultError(r, res)
-		plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, nil, string(res.Status))
+		plan.Effect = resultEffect(store.EffectIntentFailed, false, 0, nil, "", string(res.Status))
 		// canceled/expired 与 failed+none 一样是推翻“已经发出”的
 		// 权威安全终局。若先前人工 resolvedOk 铸造了 self 消息，必须
 		// 与 Cmd+Intent 纠正同事务撤回，不能留下错误沉默锚。

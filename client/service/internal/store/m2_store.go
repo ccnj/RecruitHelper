@@ -465,7 +465,11 @@ type EffectResultMutation struct {
 	// data 的 tsApprox 字段,平台不提供可解析时间时保持 nil,任何一层
 	// 都不得用本机时钟填充。
 	PlatformTsMs *int64
-	Reason       string
+	// SourceKey 是唯一命中的出站消息按契约 §4.5 配方派生的等值键,
+	// 只可来自 result data 的 sourceKey 字段;无页面观察的路径(乐观
+	// 判定、failed+confirmed、人工裁决)保持空串,落账即 NULL。
+	SourceKey string
+	Reason    string
 }
 
 type CardResultMutation struct {
@@ -607,7 +611,7 @@ func (s *Store) ApplyResultMessage(
 			}
 			if plan.Effect.Append {
 				message, err := appendOutboundMessageTx(tx, &intent, plan.Effect.Text,
-					plan.Effect.ContentHash, plan.Effect.PlatformTsMs, effectAt)
+					plan.Effect.ContentHash, plan.Effect.PlatformTsMs, plan.Effect.SourceKey, effectAt)
 				if err != nil {
 					return err
 				}

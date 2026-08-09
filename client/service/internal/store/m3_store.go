@@ -1080,7 +1080,7 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 			intent.TargetRef != req.ConversationKey.ConversationRef || intent.SendFingerprint != req.ContentHash {
 			return ErrEffectIntentConflict
 		}
-		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, req.At)
+		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, "", req.At)
 		if err != nil {
 			return err
 		}
@@ -1330,8 +1330,8 @@ func (s *Store) ResolveSuspectVerdict(req ResolveSuspectVerdictRequest) error {
 				intent.TargetRef != req.ConversationKey.ConversationRef {
 				return ErrEffectIntentConflict
 			}
-			// 人工裁决 resolvedOk 没有平台时间证据,时间保持未知。
-			message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, nil, req.At)
+			// 人工裁决 resolvedOk 没有平台时间证据,时间与消息身份都保持未知。
+			message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, nil, "", req.At)
 			if err != nil {
 				return err
 			}
@@ -1361,10 +1361,14 @@ func appendOutboundMessageTx(
 	intent *EffectIntent,
 	text, contentHash string,
 	platformTsMs *int64,
+	sourceKey string,
 	at time.Time,
 ) (*Message, error) {
 	if intent == nil {
 		return nil, ErrEffectIntentNotFound
+	}
+	if sourceKey != "" && !validMessageSourceKey(sourceKey) {
+		return nil, ErrEffectIntentConflict
 	}
 	var existing Message
 	err := tx.First(&existing, "outbound_intent_id = ?", intent.IntentID).Error
@@ -1378,6 +1382,47 @@ func appendOutboundMessageTx(
 		return nil, err
 	}
 	key := ConversationKey{Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef}
+	if sourceKey != "" {
+		// 巡检可能已先把同一条服务端消息收进账本;回执带身份时必须认领
+		// 该行而不是追加,否则撞 (platform,account,conversation,source_key)
+		// 唯一索引。语义比对与认领规则与 applyCardResultTx 的 bySource 同款;
+		// 同 key 异语义维持报错(战役出口阻断项)。
+		var bySource Message
+		err = tx.Where(
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND source_key = ?",
+			key.Platform, key.AccountRef, key.ConversationRef, sourceKey,
+		).First(&bySource).Error
+		if err == nil {
+			if bySource.RetractedAt != nil || bySource.Direction != "out" || bySource.Kind != "text" ||
+				bySource.ContentHash != contentHash {
+				return nil, ErrMessageSourceKeyConflict
+			}
+			if bySource.OutboundIntentID != nil && *bySource.OutboundIntentID != intent.IntentID {
+				return nil, ErrMessageSourceKeyConflict
+			}
+			if bySource.OutboundIntentID == nil || bySource.Origin != "self" {
+				intentID := intent.IntentID
+				updated := tx.Model(&Message{}).
+					Where(
+						"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND "+activeMessageCondition,
+						key.Platform, key.AccountRef, key.ConversationRef, bySource.Seq,
+					).
+					Updates(map[string]any{"outbound_intent_id": intentID, "origin": "self"})
+				if updated.Error != nil {
+					return nil, updated.Error
+				}
+				if updated.RowsAffected != 1 {
+					return nil, ErrRecoveryStateConflict
+				}
+				bySource.OutboundIntentID = &intentID
+				bySource.Origin = "self"
+			}
+			return &bySource, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+	}
 	var conversation Conversation
 	if err := tx.Where(conversationWhere(key), conversationArgs(key)...).First(&conversation).Error; err != nil {
 		return nil, err
@@ -1395,6 +1440,10 @@ func appendOutboundMessageTx(
 		Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 		Seq: seq, Direction: "out", Kind: "text", ContentHash: contentHash, Text: &textCopy,
 		TsApproxMs: cloneOptionalInt64(platformTsMs), Origin: "self", OutboundIntentID: &intentID,
+	}
+	if sourceKey != "" {
+		sourceKeyCopy := sourceKey
+		message.SourceKey = &sourceKeyCopy
 	}
 	if err := tx.Create(message).Error; err != nil {
 		return nil, err
