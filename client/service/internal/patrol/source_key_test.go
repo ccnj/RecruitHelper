@@ -2,6 +2,7 @@ package patrol
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -149,7 +150,11 @@ func TestPatrolRoundSourceKeySemanticConflictSkipsRound(t *testing.T) {
 }
 
 func TestSnapshotMessagesCarriesMissingSourceKeyAsMissing(t *testing.T) {
-	message := threadText(0, "legacy")
+	legacy := "legacy"
+	message := protocol.ThreadMessage{
+		Idx: 0, Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
+		Text: &legacy, ContentHash: syncledger.HashText(legacy),
+	}
 	snapshot := snapshotMessages([]protocol.ThreadMessage{message})
 	if len(snapshot) != 1 || snapshot[0].SourceKey != "" {
 		t.Fatalf("无 sourceKey 的旧快照不得伪造等值键: %+v", snapshot)
@@ -384,6 +389,10 @@ func protocolThreadMessageFromLedger(message store.Message, index int) protocol.
 	sourceKey := ""
 	if message.SourceKey != nil {
 		sourceKey = *message.SourceKey
+	} else {
+		// 页面行必有服务端身份;无身份账本行按 seq 合成稳定键(同 echoLedgerAsThread)。
+		sourceKey = syncledger.HashText(
+			"echo-source|" + message.ConversationRef + "|" + strconv.FormatInt(message.Seq, 10))
 	}
 	return protocol.ThreadMessage{
 		Idx: index, Direction: protocol.MessageDirection(message.Direction),

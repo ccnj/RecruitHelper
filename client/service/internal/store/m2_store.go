@@ -1103,8 +1103,16 @@ type ApplyConversationChangesRequest struct {
 	PlatformUserRef string
 	NewMessages     []MessageDraft
 	CardChanges     []CardStateChange
-	Adopt           bool
-	SyncedAt        time.Time
+	// SourceKeyReclaims 把页面读回的服务端身份回配给账本里语义相符的无身份
+	// 自家行(乐观判定、人工裁决产物),防止身份判新把它们当新消息重复收编。
+	SourceKeyReclaims []SourceKeyReclaim
+	Adopt             bool
+	SyncedAt          time.Time
+}
+
+type SourceKeyReclaim struct {
+	Seq       int64
+	SourceKey string
 }
 
 type ApplyConversationChangesResult struct {
@@ -1177,6 +1185,11 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 			return nil, errors.New("卡片状态更新 seq/contentHash/fromState/cardState 非法")
 		}
 	}
+	for _, reclaim := range req.SourceKeyReclaims {
+		if reclaim.Seq <= 0 || !validMessageSourceKey(reclaim.SourceKey) {
+			return nil, errors.New("身份回配 seq/sourceKey 非法")
+		}
+	}
 
 	result := &ApplyConversationChangesResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -1227,6 +1240,22 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 		if req.RoundID != "" {
 			if err := requirePatrolRound(tx, req.Key.Platform, req.Key.AccountRef, req.RoundID); err != nil {
 				return err
+			}
+		}
+
+		for _, reclaim := range req.SourceKeyReclaims {
+			// 回配目标必须仍是无身份的活动行。任何并发变化——已被回配、被撤回、
+			// 同 key 已存在于其他行(含撤回行,撞唯一索引)——都让本轮整体失败,
+			// 下一轮按最新账本重算;绝不静默改判。
+			updated := tx.Model(&Message{}).
+				Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND source_key IS NULL AND "+activeMessageCondition,
+					req.Key.Platform, req.Key.AccountRef, req.Key.ConversationRef, reclaim.Seq).
+				Update("source_key", reclaim.SourceKey)
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return fmt.Errorf("%w: reclaim seq=%d", ErrConversationVersionConflict, reclaim.Seq)
 			}
 		}
 

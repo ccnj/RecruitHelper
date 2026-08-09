@@ -18,6 +18,7 @@ var (
 	ErrAnchorContractMismatch                = errors.New("手报告 anchorMatched 但快照中找不到完整账本锚尾")
 	ErrSourceKeySemanticConflict             = errors.New("相同 sourceKey 的消息语义冲突")
 	ErrUnsafeMessageClassificationCorrection = errors.New("发现可能的消息分类修正，但缺少完整唯一证据")
+	ErrSnapshotIdentityMissing               = errors.New("快照消息缺少服务端稳定身份")
 )
 
 type Decision string
@@ -78,6 +79,11 @@ func (p *Plan) NeedsDeep() bool { return p != nil && p.Decision == DecisionNeedD
 
 // Reconcile computes a deterministic store plan. It never reads or writes the
 // database; optimistic concurrency is carried by Apply.ExpectedTailSeq.
+//
+// 2026-08-09 身份判新换根(战役 S2):判新的唯一机制是服务端消息身份集合——
+// 快照行的 sourceKey 不在账本即为新,按页面顺序追加尾部;无身份的自家账本行
+// (乐观判定、人工裁决产物)按语义相符、发生顺序回配身份,不重复收编。旧的
+// 位置对齐机器降为影子引擎 reconcilePositional,只作对拍留痕,段末拆除。
 func Reconcile(in ReconcileInput) (*Plan, error) {
 	if in.Key.Platform == "" || in.Key.AccountRef == "" || in.Key.ConversationRef == "" {
 		return nil, ErrInvalidConversationKey
@@ -102,6 +108,318 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 	if in.Adopt && len(normalized) == 0 {
 		// 列表索引已证明该会话有 lastMessage；空 thread 与之矛盾。若把它
 		// 收编为 boundary=0，下一轮恢复出的全部历史会被误投影成新增。
+		return nil, ErrAdoptionSnapshotEmpty
+	}
+	// 能力门槛(2026-08-09 甲方确认):每行必须携带服务端消息身份,取不到即
+	// 整读失败。失效方向是"读不到→不确认→转人工",不是退回位置猜测。
+	for i := range normalized {
+		if normalized[i].SourceKey == "" {
+			return nil, fmt.Errorf("%w: 快照第 %d 行", ErrSnapshotIdentityMissing, i)
+		}
+	}
+
+	ledgerKeys := keysFromLedger(in.Ledger)
+	snapshotKeys := keysFromNormalized(normalized)
+	if err := validateSourceKeySemantics(ledgerKeys, snapshotKeys); err != nil {
+		return nil, err
+	}
+	if correction, detected, err := classificationCorrectionPlan(in, normalized, ledgerKeys, snapshotKeys); err != nil {
+		return nil, err
+	} else if detected {
+		return correction, nil
+	}
+
+	tail := ledgerTail(in.Ledger)
+	baseApply := func(adopt bool, drafts []store.MessageDraft, changes []store.CardStateChange, reclaims []store.SourceKeyReclaim) *store.ApplyConversationChangesRequest {
+		return &store.ApplyConversationChangesRequest{
+			Key: in.Key, RoundID: in.RoundID, ExpectedTailSeq: tail,
+			PlatformUserRef: in.PlatformUserRef, NewMessages: drafts,
+			CardChanges: changes, SourceKeyReclaims: reclaims, Adopt: adopt, SyncedAt: in.SyncedAt,
+		}
+	}
+
+	if len(in.Ledger) == 0 {
+		drafts := draftsFrom(normalized)
+		decision := DecisionAppend
+		projection := append([]store.MessageDraft(nil), drafts...)
+		historicalThrough := int64(0)
+		if in.Adopt {
+			decision = DecisionFirstAdoption
+			projection = nil
+			historicalThrough = int64(len(drafts))
+		}
+		return &Plan{
+			Decision: decision, Apply: baseApply(in.Adopt, drafts, nil, nil),
+			EventProjection: projection, HistoricalThroughSeq: historicalThrough,
+		}, nil
+	}
+
+	if len(normalized) == 0 {
+		// 消息不会从平台消失:账本非空的已收编会话读回整窗空快照,只能是
+		// 感知通道退化(真机 2026-07-28:IM 页刚导航出来的同步窗口内,平台
+		// 历史接口对明明有消息的会话返回空成功)。健康的"无新增"读取至少
+		// 包含锚点前缀,不会为空;消化成 NoChange 会把陈旧基线放行给排程。
+		return nil, ErrTrackedSnapshotEmpty
+	}
+
+	// 身份集合:账本已知身份的索引 + 无身份行按语义分桶的回配池(发生顺序)。
+	ledgerBySource := make(map[string]int, len(in.Ledger))
+	nullPool := make(map[messageKey][]int)
+	for i := range in.Ledger {
+		if in.Ledger[i].SourceKey != nil {
+			ledgerBySource[*in.Ledger[i].SourceKey] = i
+			continue
+		}
+		semantic := ledgerKeys[i]
+		semantic.sourceKey = ""
+		nullPool[semantic] = append(nullPool[semantic], i)
+	}
+
+	var drafts []store.MessageDraft
+	var reclaims []store.SourceKeyReclaim
+	var changes []store.CardStateChange
+	var transitions []CardTransition
+	var audits []store.AuditEntry
+	seen := make(map[string]struct{}, len(normalized))
+	linked := 0
+	for i := range normalized {
+		key := snapshotKeys[i]
+		if _, duplicate := seen[key.sourceKey]; duplicate {
+			// 跨页聚合可能重复呈现同一条服务端消息;同一身份只处理一次。
+			continue
+		}
+		seen[key.sourceKey] = struct{}{}
+		if ledgerIdx, ok := ledgerBySource[key.sourceKey]; ok {
+			linked++
+			collectCardChangeByIdentity(in, in.Ledger[ledgerIdx], normalized[i], &changes, &transitions, &audits)
+			continue
+		}
+		semantic := key
+		semantic.sourceKey = ""
+		// 回配限定在首个身份关联之后(或账本本就没有任何已知身份,如仅有
+		// 招呼自家行的会话):窗口外的更老历史里可能有与自家行同文的旧消息,
+		// 不设此限会让它抢走 NULL 行的身份、再把真正的自家行错判为新。
+		if pool := nullPool[semantic]; len(pool) > 0 && (linked > 0 || len(ledgerBySource) == 0) {
+			ledgerIdx := pool[0]
+			nullPool[semantic] = pool[1:]
+			reclaims = append(reclaims, store.SourceKeyReclaim{
+				Seq: in.Ledger[ledgerIdx].Seq, SourceKey: key.sourceKey,
+			})
+			linked++
+			collectCardChangeByIdentity(in, in.Ledger[ledgerIdx], normalized[i], &changes, &transitions, &audits)
+			continue
+		}
+		if linked == 0 {
+			// 窗口定界(保留项):首个身份关联之前的未知行,是手合法携带的
+			// 锚点之前更老历史,不是"自上次观察以来的新消息"——不收编、
+			// 不投影,每轮原样跳过。导入更老历史的唯一通道是审计重建梯。
+			continue
+		}
+		drafts = append(drafts, normalized[i].draft())
+	}
+
+	if linked == 0 {
+		// 窗口与账本零身份关联。anchorMatched 声称手在窗口内看到了脑下发的
+		// 锚尾,与零关联矛盾,双方证词冲突必须响亮停住;其余情况按浅读→深读→
+		// 审计重建梯收敛(平台异常重建梯,保留项)。
+		if in.AnchorMatched {
+			return nil, ErrAnchorContractMismatch
+		}
+		if !in.Deep {
+			return &Plan{Decision: DecisionNeedDeep}, nil
+		}
+		if in.RoundID == "" {
+			return nil, store.ErrHistoricalBaselineNoRound
+		}
+		historicalDrafts := draftsFrom(normalized)
+		historicalThrough := tail + int64(len(historicalDrafts))
+		auditDetail := fmt.Sprintf("reachedTop=%t anchorMatched=%t", in.ReachedTop, in.AnchorMatched)
+		plan := &Plan{
+			Decision: DecisionAuditedRebaseline,
+			Rebaseline: &store.RebuildConversationBaselineRequest{
+				Key: in.Key, RoundID: in.RoundID, ExpectedTailSeq: tail,
+				PlatformUserRef: in.PlatformUserRef, Historical: historicalDrafts,
+				SyncedAt: in.SyncedAt, AuditDetail: auditDetail,
+			},
+			Audits: []store.AuditEntry{audit(in, "conversation_zero_overlap_rebaseline",
+				fmt.Sprintf("oldTail=%d imported=%d historicalThrough=%d reachedTop=%t anchorMatched=%t",
+					tail, len(historicalDrafts), historicalThrough, in.ReachedTop, in.AnchorMatched))},
+			HistoricalThroughSeq: historicalThrough,
+		}
+		// round.go 对 AuditedRebaseline 跳过 Plan.Audits 追加,影子分歧并进
+		// 重建事务自带的审计 detail。
+		if divergence := shadowDivergence(in, plan); divergence != "" {
+			plan.Rebaseline.AuditDetail += " shadow=" + divergence
+		}
+		return plan, nil
+	}
+
+	decision := DecisionAppend
+	if len(drafts) == 0 && len(changes) == 0 {
+		decision = DecisionNoChange
+	}
+	plan := &Plan{
+		Decision: decision, Apply: baseApply(false, drafts, changes, reclaims),
+		EventProjection: append([]store.MessageDraft(nil), drafts...),
+		CardTransitions: transitions, Audits: audits,
+	}
+	if len(reclaims) > 0 {
+		seqs := make([]int64, len(reclaims))
+		for i := range reclaims {
+			seqs[i] = reclaims[i].Seq
+		}
+		plan.Audits = append(plan.Audits, audit(in, "message_source_key_reclaimed",
+			fmt.Sprintf("seqs=%v", seqs)))
+	}
+	if divergence := shadowDivergence(in, plan); divergence != "" {
+		plan.Audits = append(plan.Audits, audit(in, "identity_shadow_divergence", divergence))
+	}
+	return plan, nil
+}
+
+// collectCardChangeByIdentity 按身份配对后的卡片状态跃迁(战役拍板 4:配对
+// 不再依赖位置偏移)。同 key 的 hash/cardType 相等已由 validateSourceKeySemantics
+// 保证,这里的守卫只是防御。
+func collectCardChangeByIdentity(
+	in ReconcileInput,
+	old store.Message,
+	observed NormalizedMessage,
+	changes *[]store.CardStateChange,
+	transitions *[]CardTransition,
+	audits *[]store.AuditEntry,
+) {
+	if old.Kind != "card" || observed.Kind != "card" || old.ContentHash != observed.ContentHash {
+		return
+	}
+	from := normalizedCardState(old.CardState)
+	to := normalizedCardState(observed.CardState)
+	if from == to {
+		return
+	}
+	if !forwardCardTransition(from, to) {
+		*audits = append(*audits, audit(in, "card_state_regression_ignored",
+			fmt.Sprintf("seq=%d hash=%s from=%s to=%s", old.Seq, old.ContentHash, from, to)))
+		return
+	}
+	*changes = append(*changes, store.CardStateChange{
+		Seq: old.Seq, ContentHash: old.ContentHash, FromState: from, CardState: to,
+	})
+	*transitions = append(*transitions, CardTransition{
+		Seq: old.Seq, ContentHash: old.ContentHash, CardType: old.CardType, From: from, To: to,
+	})
+}
+
+// shadowDivergence 用旧位置引擎对拍(S2 影子,段末拆除)。只比业务效果——
+// 新增行序列、卡片跃迁、历史导入量;决策标签不同但效果相同不算分歧(旧引擎的
+// staleSnapshot 对应新引擎的 noChange)。分歧 detail 不携带 sourceKey(§4.5)。
+func shadowDivergence(in ReconcileInput, identity *Plan) string {
+	positional, err := reconcilePositional(in)
+	if err != nil {
+		return "positionalErr=" + err.Error()
+	}
+	if planEffectsEqual(identity, positional) {
+		return ""
+	}
+	return "identity{" + planEffectSignature(identity) + "} positional{" + planEffectSignature(positional) + "}"
+}
+
+func planEffectsEqual(a, b *Plan) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if (b.Decision == DecisionNeedDeep) != (a.Decision == DecisionNeedDeep) {
+		return false
+	}
+	if (a.Rebaseline != nil) != (b.Rebaseline != nil) {
+		return false
+	}
+	if a.Rebaseline != nil {
+		return len(a.Rebaseline.Historical) == len(b.Rebaseline.Historical)
+	}
+	if len(a.EventProjection) != len(b.EventProjection) {
+		return false
+	}
+	for i := range a.EventProjection {
+		if !sameDraftIdentity(a.EventProjection[i], b.EventProjection[i]) {
+			return false
+		}
+	}
+	aChanges, bChanges := applyCardChanges(a), applyCardChanges(b)
+	if len(aChanges) != len(bChanges) {
+		return false
+	}
+	for i := range aChanges {
+		if aChanges[i] != bChanges[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func applyCardChanges(plan *Plan) []store.CardStateChange {
+	if plan.Apply == nil {
+		return nil
+	}
+	return plan.Apply.CardChanges
+}
+
+func sameDraftIdentity(a, b store.MessageDraft) bool {
+	aKey, bKey := "", ""
+	if a.SourceKey != nil {
+		aKey = *a.SourceKey
+	}
+	if b.SourceKey != nil {
+		bKey = *b.SourceKey
+	}
+	return a.Direction == b.Direction && a.Kind == b.Kind && a.ContentHash == b.ContentHash && aKey == bKey
+}
+
+func planEffectSignature(plan *Plan) string {
+	if plan == nil {
+		return "<nil>"
+	}
+	detail := "decision=" + string(plan.Decision)
+	if plan.Apply != nil {
+		detail += fmt.Sprintf(" drafts=%d reclaims=%d cards=%d",
+			len(plan.Apply.NewMessages), len(plan.Apply.SourceKeyReclaims), len(plan.Apply.CardChanges))
+		for _, draft := range plan.Apply.NewMessages {
+			hash := draft.ContentHash
+			if len(hash) > 8 {
+				hash = hash[:8]
+			}
+			detail += " +" + draft.Direction + "/" + draft.Kind + "/" + hash
+		}
+	}
+	if plan.Rebaseline != nil {
+		detail += fmt.Sprintf(" historical=%d", len(plan.Rebaseline.Historical))
+	}
+	return detail
+}
+
+// reconcilePositional 是换根前的位置对齐引擎全文,S2 期间只作影子对拍,
+// 不再裁决任何业务;S3 连同其测试矩阵一并拆除。除函数名外未做改动。
+func reconcilePositional(in ReconcileInput) (*Plan, error) {
+	if in.Key.Platform == "" || in.Key.AccountRef == "" || in.Key.ConversationRef == "" {
+		return nil, ErrInvalidConversationKey
+	}
+	if err := validateLedger(in.Key, in.Ledger); err != nil {
+		return nil, err
+	}
+	if in.Adopt && len(in.Ledger) != 0 {
+		return nil, ErrAdoptionHasLedger
+	}
+	if in.Adopt && in.PlatformUserRef == "" {
+		return nil, store.ErrPeerIdentityRequired
+	}
+	normalized := make([]NormalizedMessage, len(in.Snapshot))
+	for i := range in.Snapshot {
+		message, err := NormalizeMessage(in.Snapshot[i])
+		if err != nil {
+			return nil, fmt.Errorf("规范化快照消息[%d]: %w", i, err)
+		}
+		normalized[i] = message
+	}
+	if in.Adopt && len(normalized) == 0 {
 		return nil, ErrAdoptionSnapshotEmpty
 	}
 

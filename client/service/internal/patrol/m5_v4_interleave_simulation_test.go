@@ -18,16 +18,17 @@ import (
 )
 
 // TestSimulationCandidateInterjectsDuringMultiBubbleChain 是行为模拟:钉住
-// "多气泡链中途候选人插话"在当前实现下的真实走向,供 expectedTail 降观测
-// (2026-08-04)后的存废复核引用。三幕:
+// "多气泡链中途候选人插话"在身份判新(2026-08-09 战役 S2 换根)下的终态走向。
+// 换根前它钉的是丢插话的旧现状(dcc9d5c);换根使行为反转,断言随生产同批翻转。
+// 四幕:
 // 幕一,AI 回复拆三条气泡,链内无重读,整链发完;
-// 幕二,页面实序 [气泡1, 插话, 气泡2, 气泡3] 进入到期对账,插话落在对齐
-// 丢弃前缀,永不进账本、不开新轮,只留 context_discarded 审计;
-// 幕三,24 小时后冷催排程照常触发,对已插话"算了"的候选人再次发送;
-// 幕四,候选人在链尾之后再发新消息,新消息正常收编、正常开新轮回复——
-// 丢失只限"夹在我方气泡中间"的那句,后续沟通不因此瘫痪,但 AI 的对话
-// 历史里永远缺着被丢的那句。
-// 断言描述的是现状,不是背书;改变这些行为需另行立案。
+// 幕二,页面实序 [气泡1, 插话, 气泡2, 气泡3] 进入到期对账,插话按服务端
+// 身份判新捞回进账本、开新一轮;"算了不考虑了"命中拒绝正则族短路(零 AI
+// 调用),就地转挽留——挽留话术与换微信卡发出,不再有 context_discarded;
+// 幕三,24 小时后排程巡检,对已说"算了"的候选人零动作——旧世界在这里
+// 会发出冷催,正是本战役根治的误催;
+// 幕四,候选人(挽留后)再发新消息,正常收编、正常开新轮回复;插话永久
+// 存在于账本与 AI 可见的对话历史中。
 func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	h := newHarness(t)
 	// 时间钉到 schedule 锚点前 25 小时,给幕三留出冷催 24h 门槛。
@@ -132,13 +133,16 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 			}
 		}
 		out := make([]protocol.ThreadMessage, 0, len(rows)+1+len(extraTail))
+		interjectionInserted := false
 		for _, row := range rows {
 			out = append(out, row)
-			if row.Text != nil && *row.Text == bubbles[0] {
+			if !interjectionInserted && row.Text != nil && *row.Text == bubbles[0] {
+				interjectionInserted = true
 				text := interjection
 				out = append(out, protocol.ThreadMessage{
 					Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
 					Text: &text, ContentHash: syncledger.HashText(interjection),
+					SourceKey: fixtureSourceKey(interjection),
 				})
 			}
 		}
@@ -150,6 +154,7 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 			out = append(out, protocol.ThreadMessage{
 				Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
 				Text: &text, ContentHash: syncledger.HashText(text),
+				SourceKey: fixtureSourceKey(text),
 			})
 		}
 		for i := range out {
@@ -204,37 +209,44 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ledgerAfterReconcile) != len(ledgerAfterChain) {
-		t.Fatalf("对齐后账本行数变化: before=%d after=%d",
+	// 身份判新捞回:插话按身份收编进账本,拒绝正则族短路命中(零新增 AI
+	// 调用),就地转挽留——挽留话术 + 换微信卡两行出站。5 + 插话 + 挽留 + 卡 = 8。
+	if len(ledgerAfterReconcile) != len(ledgerAfterChain)+3 {
+		t.Fatalf("幕二后账本应为 捞回插话+挽留+卡 三行新增: before=%d after=%d",
 			len(ledgerAfterChain), len(ledgerAfterReconcile))
 	}
+	interjectionAdopted := false
 	for _, row := range ledgerAfterReconcile {
 		if row.Text != nil && *row.Text == interjection {
-			t.Fatalf("插话不应被收编进账本(当前实现会丢弃它): row=%+v", row)
+			interjectionAdopted = true
+			if row.Direction != "in" || row.SourceKey == nil {
+				t.Fatalf("捞回的插话必须是带身份的入站行: row=%+v", row)
+			}
 		}
 	}
-	discards := countContextDiscardAudits(t, h, fixture.conversationRef)
-	if discards == 0 {
-		t.Fatal("缺少 conversation_alignment_context_discarded 审计,丢弃没有留痕")
+	if !interjectionAdopted {
+		t.Fatal("插话必须被身份判新捞回进账本")
+	}
+	if discards := countContextDiscardAudits(t, h, fixture.conversationRef); discards != 0 {
+		t.Fatalf("身份判新不再裁弃上下文,不应有 context_discarded 审计: %d", discards)
 	}
 	afterTurn, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
-	if err != nil || afterTurn == nil || afterTurn.TurnID != chainTurn.TurnID {
-		t.Fatalf("插话不应开启新 turn(它已被丢弃): turn=%+v err=%v", afterTurn, err)
+	if err != nil || afterTurn == nil || afterTurn.TurnID == chainTurn.TurnID {
+		t.Fatalf("捞回的插话必须开启新一轮处理: turn=%+v err=%v", afterTurn, err)
 	}
 	if len(advice.requests) != 2 {
-		t.Fatalf("插话不应触发任何 AI 调用: advice=%d", len(advice.requests))
+		t.Fatalf("拒绝语走确定性正则短路,不应新增 AI 调用: advice=%d", len(advice.requests))
 	}
-	if got := len(recordedSendTexts(t, hand)); got != len(bubbles) {
-		t.Fatalf("幕二不应有新发送: sends=%d", got)
+	retentionSends := recordedSendTexts(t, hand)
+	if len(retentionSends) != len(bubbles)+1 || retentionSends[len(retentionSends)-1] != "合成挽留" {
+		t.Fatalf("拒绝分支应发出挽留话术: sends=%v", retentionSends)
 	}
 	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
-	if err != nil || aggregate == nil ||
-		aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive ||
-		aggregate.State.LastOutboundAt == nil {
-		t.Fatalf("幕二后自动化不应停止(插话已不可见): aggregate=%+v err=%v", aggregate, err)
+	if err != nil || aggregate == nil || aggregate.State.LastOutboundAt == nil {
+		t.Fatalf("幕二后聚合缺失: aggregate=%+v err=%v", aggregate, err)
 	}
 
-	// —— 幕三:候选人(账面上)持续沉默 24 小时,冷催照常发出 ——
+	// —— 幕三:24 小时后排程巡检,对已说"算了"的候选人不再冷催 ——
 	h.clock.Add(nextScheduleTestBusinessTime(
 		aggregate.State.LastOutboundAt.Add(24 * time.Hour),
 	).Sub(h.clock.Now()))
@@ -244,15 +256,16 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 	runCommunicationV4ScheduleRound(t, h, manager, "round-sim-cold")
 
 	actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
-	if err != nil || len(actions) != 1 ||
-		actions[0].V4Kind != communication.V4ActionColdPrompt ||
-		actions[0].Status != store.CommunicationV4EventActionSent {
-		t.Fatalf("冷催一应照常发出(插话已丢,系统认为候选人一直沉默): actions=%+v err=%v",
-			actions, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	coldSends := recordedSendTexts(t, hand)
-	if len(coldSends) != len(bubbles)+1 || coldSends[len(coldSends)-1] != "合成冷催一" {
-		t.Fatalf("冷催正文未发出: sends=%v", coldSends)
+	for _, action := range actions {
+		if action.V4Kind == communication.V4ActionColdPrompt {
+			t.Fatalf("对已说\"算了\"的候选人不得再冷催: %+v", action)
+		}
+	}
+	if got := recordedSendTexts(t, hand); len(got) != len(bubbles)+1 {
+		t.Fatalf("幕三不应有任何新发送: sends=%v", got)
 	}
 	// —— 幕四:候选人在链尾之后又发新消息,应正常收编、正常开新轮 ——
 	followupInbound := "那你再具体说说岗位内容吧"
@@ -325,10 +338,14 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 		*finalLedger[len(finalLedger)-1].Text != followupReply {
 		t.Fatalf("幕四账本尾部不符: %+v", finalLedger[len(finalLedger)-2:])
 	}
+	interjectionPersisted := false
 	for _, row := range finalLedger {
 		if row.Text != nil && *row.Text == interjection {
-			t.Fatalf("插话在任何阶段都不应进入账本: row=%+v", row)
+			interjectionPersisted = true
 		}
+	}
+	if !interjectionPersisted {
+		t.Fatal("捞回的插话必须永久存在于账本")
 	}
 	ledgerDump := make([]string, 0, len(finalLedger))
 	for _, row := range finalLedger {
@@ -338,8 +355,8 @@ func TestSimulationCandidateInterjectsDuringMultiBubbleChain(t *testing.T) {
 		}
 		ledgerDump = append(ledgerDump, fmt.Sprintf("%s:%s", row.Direction, text))
 	}
-	t.Logf("最终账本(插话不存在): %v", ledgerDump)
-	t.Logf("模拟结论: 三气泡全发; 插话被丢弃(context_discarded 审计 %d 条); 24h 后冷催照发; 链尾新消息正常开新轮",
+	t.Logf("最终账本(插话在场): %v", ledgerDump)
+	t.Logf("模拟结论: 三气泡全发; 插话被身份判新捞回并触发拒绝短路转挽留(context_discarded %d 条); 24h 后零冷催; 挽留后新消息正常开新轮",
 		countContextDiscardAudits(t, h, fixture.conversationRef))
 }
 

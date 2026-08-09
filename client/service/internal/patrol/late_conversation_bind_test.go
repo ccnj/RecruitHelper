@@ -121,6 +121,7 @@ func TestPatrolLateBindsGreetedConversationThenImportsHistoryAsBusinessEvent(t *
 					{
 						Idx: 0, Direction: protocol.MessageDirectionOut, Kind: protocol.MessageKindText,
 						Text: &outGreeting, ContentHash: greetingHash,
+						SourceKey: fixtureSourceKey(greetingText),
 					},
 					{
 						Idx: 1, Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindCard,
