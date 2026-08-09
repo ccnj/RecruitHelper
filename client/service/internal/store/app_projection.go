@@ -47,11 +47,16 @@ type AppJobProjection struct {
 }
 
 type AppFunnelProjection struct {
-	Available      bool   `json:"available"`
-	BatchID        string `json:"batchId,omitempty"`
-	Stage          string `json:"stage,omitempty"`
-	TargetCount    int    `json:"targetCount"`
-	CapturedCount  int64  `json:"capturedCount"`
+	Available bool   `json:"available"`
+	BatchID   string `json:"batchId,omitempty"`
+	Stage     string `json:"stage,omitempty"`
+	// TargetCount 是本轮的采集额度,分轮时会从 150 逐轮抬到 CaptureLimit。
+	// CaptureLimit 为 0 表示本批不分轮。SelectionTarget 是真正要凑够的选中
+	// 人数,来自首轮筛选;还没筛过时为 0——那时目标是多少尚未算出。
+	TargetCount     int   `json:"targetCount"`
+	CaptureLimit    int   `json:"captureLimit"`
+	SelectionTarget int   `json:"selectionTarget"`
+	CapturedCount   int64 `json:"capturedCount"`
 	ScoredCount    int64  `json:"scoredCount"`
 	SelectedCount  int64  `json:"selectedCount"`
 	GreetingReady  int64  `json:"greetingReady"`
@@ -485,7 +490,16 @@ func appFunnelTx(
 	}
 	out := AppFunnelProjection{
 		Available: true, BatchID: batch.BatchID, TargetCount: batch.TargetCount,
+		CaptureLimit:      batch.CaptureLimit,
 		LastFailureReason: batch.Reason, StartedAt: &batch.StartedAt, FinishedAt: batch.EndedAt,
+	}
+	var selectionSummary SourcingBatchSelection
+	switch err := tx.First(&selectionSummary, "batch_id = ?", batch.BatchID).Error; {
+	case err == nil:
+		out.SelectionTarget = selectionSummary.TargetCount
+	case errors.Is(err, gorm.ErrRecordNotFound):
+	default:
+		return AppFunnelProjection{}, err
 	}
 	if err := tx.Model(&SourcingCandidateRun{}).
 		Where(
