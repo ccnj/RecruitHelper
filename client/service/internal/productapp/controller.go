@@ -202,9 +202,18 @@ func (c *Controller) Start(
 		logCurrentJobSyncFailure("start", "persist", err, len(stored))
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
-	if strings.TrimSpace(stored[0].SourceJobRef) != expectedBackendJobID {
-		return ErrJobSelectionChanged
-	}
+	// 全新开始一律跑后台此刻选中的职位,即使它与页面上显示的那个已经不是同一个
+	// (2026-08-10 甲方裁决)。此处原先拿页面带上来的职位 ID 与刚拉到的后台职位
+	// 比对,不一致就拒绝,要人先点"同步职位"再点一次开始。甲方的心智是"跑后台
+	// 选的那个职位",这道拦截对他只是一次多余往返。
+	//
+	// 页面不会因此显示错的职位:开始成功后前端立即重拉全量数据,首页职位随之
+	// 变成实际执行的那个。刚落库的 stored[0] 就是这次要跑的 revision,页面读到
+	// 的与脑执行的是同一份事实。
+	//
+	// 有未终局批次的那条路不适用本裁决,仍在上面按批次锚定的职位拦截:那批人
+	// 已经采下来、可能已经建档,换职位会让他们用一个职位的话术挂在另一个职位
+	// 名下。要换职位得先把旧批次结束掉。
 	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
 	return err
 }

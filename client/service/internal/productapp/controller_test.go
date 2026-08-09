@@ -231,8 +231,12 @@ func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.
 	}
 }
 
-func TestFullStartRejectsChangedBackendJobAfterSavingLatestHead(t *testing.T) {
-	db, _ := controllerFixture(t)
+// TestFullStartFollowsChangedBackendJobWithoutExtraSync 锁住 2026-08-10 甲方
+// 裁决:全新开始跑后台此刻选中的职位,页面上显示的那个已经换掉也照跑,不再要求
+// 先点一次"同步职位"。页面不会因此显示错职位——开始成功后前端重拉全量数据,
+// 读到的正是这里刚落库的这一份。
+func TestFullStartFollowsChangedBackendJobWithoutExtraSync(t *testing.T) {
+	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: syntheticCurrentJob(t, 99, "新职位")}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
@@ -242,18 +246,22 @@ func TestFullStartRejectsChangedBackendJobAfterSavingLatestHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(
-		err,
-		ErrJobSelectionChanged,
-	) {
+	// 页面带上来的还是旧职位 42,后台此刻选的是 99。
+	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatalf("Start() error = %v", err)
-	}
-	if flow.fullRevision != "" {
-		t.Fatalf("职位变化不得创建工作流: %+v", flow)
 	}
 	current, err := db.CurrentLegacyJobAIContextByBackendJobID("99")
 	if err != nil || current == nil || current.DisplayName != "新职位" {
-		t.Fatalf("最新职位仍应保存供页面下一轮刷新: current=%+v err=%v", current, err)
+		t.Fatalf("最新职位应已落库: current=%+v err=%v", current, err)
+	}
+	if flow.fullKey != key || flow.fullRevision != current.RevisionHash {
+		t.Fatalf("工作流应按后台最新职位启动: key=%+v revision=%q want=%q",
+			flow.fullKey, flow.fullRevision, current.RevisionHash)
+	}
+	// 旧职位不得被拿去启动:它既不是后台选的,也不该再产生任何新链。
+	if stale, staleErr := db.CurrentLegacyJobAIContextByBackendJobID("42"); staleErr == nil &&
+		stale != nil && flow.fullRevision == stale.RevisionHash {
+		t.Fatal("工作流误用了页面上的旧职位")
 	}
 }
 
