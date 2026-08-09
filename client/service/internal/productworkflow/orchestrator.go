@@ -159,6 +159,17 @@ func (m *Manager) AdvanceOnce(
 		if blocked := m.requireOpenMemberBoundary(run); blocked != nil {
 			return blocked.run, blocked.err
 		}
+		// 回退与阶段回退是两个事务。批次已经退回采集态、阶段却还停在 selection,
+		// 说明上一次推进在两者之间断了(脑被关掉,或真人的暂停让阶段 CAS 落空)。
+		// 这个中间态自己出不来:selection 没有回到 scoring 的路,而筛选又要求批次
+		// 是 completed。补齐后半步即可,不重跑筛选。
+		reopened, reopenedErr := m.sourcingBatchReopenedForCapture(batchID)
+		if reopenedErr != nil {
+			return run, reopenedErr
+		}
+		if reopened {
+			return m.advanceStage(run, store.ProductWorkflowStageSourcing)
+		}
 		selection, selectErr := m.store.SelectCompletedSourcingBatch(batchID, m.clock.Now())
 		if selectErr != nil {
 			return run, selectErr
@@ -791,6 +802,19 @@ func (m *Manager) ConfirmAll(
 		RunID: run.RunID, From: from, To: to, At: now,
 		Stage: store.ProductWorkflowStageGreetingSending,
 	})
+}
+
+// sourcingBatchReopenedForCapture 判断批次是否已经被退回采集态。它只用于识别
+// “回退已提交、阶段还没跟上”的中间态,不做任何写入。
+func (m *Manager) sourcingBatchReopenedForCapture(batchID string) (bool, error) {
+	batch, err := m.store.SourcingBatchByID(batchID)
+	if err != nil {
+		return false, err
+	}
+	if batch == nil {
+		return false, store.ErrSourcingBatchNotFound
+	}
+	return batch.Status == store.SourcingBatchCollecting && batch.EndedAt == nil, nil
 }
 
 // reopenSourcingForMoreCapture 在一轮筛选之后裁决“够了没有”。返回 true 表示

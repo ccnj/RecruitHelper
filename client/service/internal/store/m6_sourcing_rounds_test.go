@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -214,6 +215,75 @@ func TestSelectCompletedSourcingBatchAcrossRoundsDecidesEachRunOnce(t *testing.T
 	}
 }
 
+// TestSelectCompletedSourcingBatchContinuesAcrossJobConfigHeadChange 锁住续裁
+// 钉在首轮 revision 上。第二轮采集要跑几十分钟到几小时,这期间甲方改一次职位
+// 配置再点同步职位是常规动作;若续裁去读当前 head,它会与首轮汇总对不上,整批
+// 永久卡在 selection,首轮已建的档案既发不出招呼、又会被后续批次当成"已占用"
+// 静默消耗掉。评分与招呼语生成一直是钉住的,这里与它们对齐。
+func TestSelectCompletedSourcingBatchContinuesAcrossJobConfigHeadChange(t *testing.T) {
+	base := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	revisionHash := "rounds-head-a"
+	s, key := prepareSourcingSelectionStore(t, revisionHash, 5, 3, 3, 50, base)
+	batchID := "batch-rounds-head"
+
+	insertCompletedSelectionBatch(t, s, key, batchID, revisionHash, base,
+		[]selectionRunFixture{
+			{RunID: "h1", Score: intPointer(8)},
+			{RunID: "h2", Score: intPointer(7)},
+			{RunID: "h3", Score: intPointer(2)},
+			{RunID: "h4", Score: intPointer(1)},
+		})
+	setSourcingBatchCaptureLimit(t, s, batchID, 8)
+	first, err := s.SelectCompletedSourcingBatch(batchID, base.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SelectedCount != 2 || first.MinScore != 5 {
+		t.Fatalf("首轮应按 minScore=5 选中 2 人,实际 selected=%d minScore=%d",
+			first.SelectedCount, first.MinScore)
+	}
+
+	if _, err := s.ReopenSourcingBatchForCapture(ReopenSourcingBatchForCaptureRequest{
+		BatchID: batchID, Step: 4, ReopenAt: base.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 第二轮采集期间甲方改配置并同步职位:head 换代,分数线从 5 提到 9。
+	nextHead := sourcingSelectionRevision(base.Add(4*time.Hour), "rounds-head-b", 9, 3, 3, 50)
+	if _, err := s.SaveCurrentLegacyJobAIContext(
+		[]m5ai.ContextRevision{nextHead}, base.Add(4*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	secondRound := []selectionRunFixture{
+		{RunID: "h5", Score: intPointer(6)},
+		{RunID: "h6", Score: intPointer(4)},
+		{RunID: "h7", Score: intPointer(3)},
+		{RunID: "h8", Score: intPointer(1)},
+	}
+	appendSelectionRoundMembers(t, s, key, batchID, revisionHash, base.Add(5*time.Hour), secondRound)
+	completeSourcingBatchAfterRound(t, s, batchID, base.Add(6*time.Hour))
+	scoreSelectionRoundMembers(t, s, batchID, base.Add(5*time.Hour), secondRound)
+
+	second, err := s.SelectCompletedSourcingBatch(batchID, base.Add(7*time.Hour))
+	if err != nil {
+		t.Fatalf("head 换代后续裁应照常进行,实际 %v", err)
+	}
+	if second.ContextRevisionHash != revisionHash || second.MinScore != 5 {
+		t.Fatalf("续裁应沿用首轮 revision 与分数线,实际 hash=%s minScore=%d",
+			second.ContextRevisionHash, second.MinScore)
+	}
+	// 6 分按首轮的 minScore=5 过线补进名单;若误用新 head 的 9 分线会落选。
+	if second.SelectedCount != 3 {
+		t.Fatalf("续裁应按首轮标准补到 3 人,实际 %d", second.SelectedCount)
+	}
+	if got := sourcingSelectionOutcomes(t, s, batchID)["h5"].Outcome; got != SourcingSelectionSelected {
+		t.Fatalf("h5(6 分)应按首轮分数线入选,实际 %s", got)
+	}
+}
+
 // TestReopenSourcingBatchForCaptureRejectsIneligibleBatches 锁住回退入口的四道
 // 拒绝:撞底、不分轮、额度用尽、成员数与额度对不上。它们各自防的是一种“再采
 // 一轮没有意义或不安全”的局面。
@@ -285,6 +355,37 @@ func TestReopenSourcingBatchForCaptureRejectsIneligibleBatches(t *testing.T) {
 		})
 		if !errors.Is(err, ErrSourcingBatchConflict) {
 			t.Fatalf("成员数对不上应拒绝回退,实际 %v", err)
+		}
+	})
+
+	t.Run("真人暂停不被回退抹掉", func(t *testing.T) {
+		revisionHash := "rounds-userpause"
+		s, key := prepareSourcingSelectionStore(t, revisionHash, 5, 3, 3, 50, base)
+		batchID := "batch-userpause"
+		insertCompletedSelectionBatch(t, s, key, batchID, revisionHash, base,
+			[]selectionRunFixture{{RunID: "u1", Score: intPointer(8)}})
+		setSourcingBatchCaptureLimit(t, s, batchID, 8)
+		stoppedAt := base.Add(30 * time.Minute)
+		if err := s.db.Model(&Account{}).
+			Where("platform = ? AND account_ref = ?", key.Platform, key.AccountRef).
+			Updates(map[string]any{
+				"stopped_at": stoppedAt, "paused_reason": "userRequested",
+			}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReopenSourcingBatchForCapture(ReopenSourcingBatchForCaptureRequest{
+			BatchID: batchID, Step: 4, ReopenAt: base.Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var account Account
+		if err := s.db.First(&account, "platform = ? AND account_ref = ?",
+			key.Platform, key.AccountRef).Error; err != nil {
+			t.Fatal(err)
+		}
+		if account.StoppedAt == nil || account.PausedReason != "userRequested" {
+			t.Fatalf("真人暂停被回退抹掉:stoppedAt=%v reason=%q",
+				account.StoppedAt, account.PausedReason)
 		}
 	})
 

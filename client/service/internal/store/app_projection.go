@@ -57,11 +57,11 @@ type AppFunnelProjection struct {
 	CaptureLimit    int   `json:"captureLimit"`
 	SelectionTarget int   `json:"selectionTarget"`
 	CapturedCount   int64 `json:"capturedCount"`
-	ScoredCount    int64  `json:"scoredCount"`
-	SelectedCount  int64  `json:"selectedCount"`
-	GreetingReady  int64  `json:"greetingReady"`
-	PendingConfirm int64  `json:"pendingConfirm"`
-	SentCount      int64  `json:"sentCount"`
+	ScoredCount     int64 `json:"scoredCount"`
+	SelectedCount   int64 `json:"selectedCount"`
+	GreetingReady   int64 `json:"greetingReady"`
+	PendingConfirm  int64 `json:"pendingConfirm"`
+	SentCount       int64 `json:"sentCount"`
 	// 生成失败与发送失败是两个阶段的两件事,必须分开报。合成一个字段时
 	// 前端在"生成招呼语"和"发送招呼"两格都读它,1 次生成失败 + 2 次发送
 	// 失败会在两格各显示"失败 3",看起来像 6 处失败。

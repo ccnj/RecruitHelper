@@ -143,7 +143,18 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 		if !hasExisting && len(decided) != 0 {
 			return ErrSourcingSelectionConflict
 		}
-		revision, err := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+		// 首轮按当前 head 定下这一批的裁决参数;续裁一律钉回首轮那个 revision,
+		// 与评分、招呼语生成的做法一致(它们走 sourcingStageRevisionTx)。若这里
+		// 也读 head,第二轮采集期间任何一次"改配置 + 同步职位"都会让续裁与首轮
+		// 汇总对不上,整批永久卡在 selection,首轮已建的档案随之搁浅。
+		var revision *JobAIContextRevision
+		if hasExisting {
+			revision, err = requireLegacyRevisionForSourcingBatchTx(
+				tx, batch, existing.ContextRevisionHash,
+			)
+		} else {
+			revision, err = currentLegacyRevisionForSourcingBatchTx(tx, batch)
+		}
 		if err != nil {
 			return err
 		}
@@ -172,11 +183,10 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 			PoolCount: 0, CompletedAt: decidedAt, CreatedAt: decidedAt,
 		}
 		if hasExisting {
-			// 续裁必须建立在同一套裁决参数上。职位配置改过导致分数线、配额或
-			// 男性上限变了,就不能把新一轮的人接在旧名单后面——那会得到一份
-			// 前后按两套标准选出来的名单。
-			if existing.ContextRevisionHash != revision.RevisionHash ||
-				existing.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
+			// 续裁必须建立在同一套裁决参数上。revision 已经钉回首轮那一版,所以
+			// 这里真正能拦到的是跨版本升级——算法版本变了,分数线、配额与男性
+			// 上限的推导都可能变,不能把新一轮的人接在按旧标准选出的名单后面。
+			if existing.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
 				existing.MinScore != selectionView.MinScore ||
 				existing.TargetMin != selectionView.TargetMin ||
 				existing.TargetMax != selectionView.TargetMax ||

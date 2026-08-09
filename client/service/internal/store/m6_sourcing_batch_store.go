@@ -729,19 +729,34 @@ func (s *Store) ReopenSourcingBatchForCapture(
 		if updated.RowsAffected != 1 {
 			return ErrSourcingBatchStateConflict
 		}
-		updatedAccount := tx.Model(&Account{}).
-			Where("platform = ? AND account_ref = ?", batch.Platform, batch.AccountRef).
-			Updates(map[string]any{
-				"stopped_at":     nil,
-				"paused_reason":  "",
-				"next_patrol_at": req.ReopenAt,
-				"dirty_hint":     true,
-			})
-		if updatedAccount.Error != nil {
-			return updatedAccount.Error
+		var account Account
+		if err := tx.First(&account, "platform = ? AND account_ref = ?",
+			batch.Platform, batch.AccountRef).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrAccountNotFound
+			}
+			return err
 		}
-		if updatedAccount.RowsAffected != 1 {
-			return ErrSourcingBinding
+		// 只解除采集自己挂上的那一种暂停。真人点的暂停、掉登录、跨日过期等
+		// 一律原样保留:筛选事务要跑几百毫秒,真人的暂停完全可能落在那期间,
+		// 无条件清空会让"UI 显示已暂停、浏览器却继续采下一轮"成为可达状态。
+		// 被真人停住时批次照样退回采集态,等他恢复即可,不需要在此重试。
+		if account.PausedReason == SourcingTargetReachedPauseReason {
+			updatedAccount := tx.Model(&Account{}).
+				Where("platform = ? AND account_ref = ? AND paused_reason = ?",
+					batch.Platform, batch.AccountRef, SourcingTargetReachedPauseReason).
+				Updates(map[string]any{
+					"stopped_at":     nil,
+					"paused_reason":  "",
+					"next_patrol_at": req.ReopenAt,
+					"dirty_hint":     true,
+				})
+			if updatedAccount.Error != nil {
+				return updatedAccount.Error
+			}
+			if updatedAccount.RowsAffected != 1 {
+				return ErrSourcingBinding
+			}
 		}
 		out, err = sourcingBatchByIDTx(tx, batch.BatchID)
 		return err
