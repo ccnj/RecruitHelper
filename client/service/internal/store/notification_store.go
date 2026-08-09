@@ -199,6 +199,25 @@ func (s *Store) NotificationsNeedingCapture(profileID string) ([]NotificationOut
 	return rows, nil
 }
 
+// HasNotificationsNeedingCapture 报告该候选人名下是否还有等着取证的通知。
+// 发件箱闸门据此判断"新一轮截图正在路上":二合一场景里,收编微信号与入队
+// 微信互加通知同事务发生,而那一轮新截图要十几秒才落库,闸门若只问"图存
+// 不存在",约面通知会抢在新图之前带着上一轮的旧图发出(2026-08-09 实测)。
+func (s *Store) HasNotificationsNeedingCapture(profileID string) (bool, error) {
+	var count int64
+	err := s.db.Model(&NotificationOutbox{}).
+		Where(
+			"profile_id = ? AND status = ? AND assets_requested_at IS NULL",
+			profileID,
+			NotificationStatusPending,
+		).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // MarkNotificationsAssetsRequested 记录取证已派发(每通知至多一轮,失败不重拍)。
 func (s *Store) MarkNotificationsAssetsRequested(ids []uint64, at time.Time) error {
 	if len(ids) == 0 {

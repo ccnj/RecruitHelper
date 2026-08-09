@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,11 @@ import (
 )
 
 func int64Ptr(v int64) *int64 { return &v }
+
+// timePtr 给发件箱行填 AssetsRequestedAt:非空=取证已为该行派发过。除了专测
+// 「等新图」闸门的用例,其余用例都该填上——不填的话它们测的就不再是自己那条
+// 路径,而是 15 分钟兜底。
+func timePtr(v time.Time) *time.Time { return &v }
 
 func fullSnapshot() *store.NotificationRenderSnapshot {
 	// 2026-07-30 12:30 本地时间
@@ -228,9 +234,10 @@ func TestSendWecomImageValidation(t *testing.T) {
 }
 
 type fakeLedger struct {
-	rows     []store.NotificationOutbox
-	snapshot map[string]*store.NotificationRenderSnapshot
-	meeting  map[string]*store.NotificationOutbox
+	rows       []store.NotificationOutbox
+	snapshot   map[string]*store.NotificationRenderSnapshot
+	meeting    map[string]*store.NotificationOutbox
+	captureErr error
 
 	sent    []uint64
 	sentWx  []bool
@@ -258,6 +265,21 @@ func (f *fakeLedger) NotificationRenderSnapshotForProfile(profileID string) (*st
 
 func (f *fakeLedger) InterviewNotificationForProfile(profileID string) (*store.NotificationOutbox, error) {
 	return f.meeting[profileID], nil
+}
+
+// 照抄 store 的判据:同候选人名下仍 pending 且没派过取证的行 = 新图在路上。
+func (f *fakeLedger) HasNotificationsNeedingCapture(profileID string) (bool, error) {
+	if f.captureErr != nil {
+		return false, f.captureErr
+	}
+	for _, row := range f.rows {
+		if row.ProfileID == profileID &&
+			row.Status == store.NotificationStatusPending &&
+			row.AssetsRequestedAt == nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeLedger) MarkNotificationSent(id uint64, sentWithWechat bool, _ time.Time) error {
@@ -315,6 +337,7 @@ func TestTickSendsTextThenScreenshots(t *testing.T) {
 		rows: []store.NotificationOutbox{{
 			ID: 1, NotifyType: store.NotificationTypeInterviewAccepted,
 			ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Minute),
+			AssetsRequestedAt: timePtr(now.Add(-50 * time.Second)),
 		}},
 		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
 		meeting:  map[string]*store.NotificationOutbox{},
@@ -350,6 +373,7 @@ func TestTickGateHoldsThenFallsBack(t *testing.T) {
 		rows: []store.NotificationOutbox{{
 			ID: 2, NotifyType: store.NotificationTypeWechatAdded,
 			ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Minute),
+			AssetsRequestedAt: timePtr(now.Add(-50 * time.Second)),
 		}},
 		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
 		meeting:  map[string]*store.NotificationOutbox{},
@@ -369,6 +393,125 @@ func TestTickGateHoldsThenFallsBack(t *testing.T) {
 	}
 	if want := []string{"text", "image"}; strings.Join(capture.kinds, ",") != strings.Join(want, ",") {
 		t.Fatalf("兜底发送只应带就绪的聊天图: %+v", capture.kinds)
+	}
+}
+
+// 二合一场景实测复现(2026-08-09 客户机通知 21):约面通知在闸门里等微信号,
+// 号一收编就同事务入队了微信互加通知,而那条通知触发的新一轮取证要十几秒才
+// 落库。闸门若只问"图存不存在",约面通知会带着八分钟前的旧图发出。
+func TestTickWaitsForInFlightCapture(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 8, 9, 23, 7, 50, 0, time.Local)
+	oldChat, newChat := append(jpegBytes(), "-old"...), append(jpegBytes(), "-new"...)
+	snapshot := fullSnapshot()
+	snapshot.ChatShot = &store.CandidateScreenshot{BlobRef: "sha256:old-chat"}
+	snapshot.ResumeShot = &store.CandidateScreenshot{BlobRef: "sha256:old-resume"}
+	interview := store.NotificationOutbox{
+		ID: 50, NotifyType: store.NotificationTypeInterviewAccepted,
+		ProfileID: "p1", Status: store.NotificationStatusPending,
+		CreatedAt:         now.Add(-8*time.Minute - 33*time.Second),
+		AssetsRequestedAt: timePtr(now.Add(-8 * time.Minute)),
+	}
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{interview, {
+			// 收编微信号的同事务入队,取证尚未派发。
+			ID: 51, NotifyType: store.NotificationTypeWechatAdded,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			PayloadJSON: `{"exchangeInitiator":"peer"}`, CreatedAt: now,
+		}},
+		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting:  map[string]*store.NotificationOutbox{"p1": &interview},
+	}
+	blobs := &fakeBlobs{data: map[string][]byte{
+		"sha256:old-chat":   oldChat,
+		"sha256:old-resume": jpegBytes(),
+		"sha256:new-chat":   newChat,
+		"sha256:new-resume": jpegBytes(),
+	}}
+	runner := newTestRunner(ledger, blobs, server.URL, now)
+	if summary := runner.Tick(); summary.Sent != 0 || summary.Held != 2 {
+		t.Fatalf("新图在路上时约面通知不得发出: %+v", summary)
+	}
+	if len(capture.kinds) != 0 {
+		t.Fatalf("等待期不得发送: %+v", capture.kinds)
+	}
+
+	// 取证那一轮跑完:标记落行、新图入库。
+	ledger.rows[1].AssetsRequestedAt = timePtr(now.Add(12 * time.Second))
+	snapshot.ChatShot = &store.CandidateScreenshot{BlobRef: "sha256:new-chat"}
+	snapshot.ResumeShot = &store.CandidateScreenshot{BlobRef: "sha256:new-resume"}
+	runner.now = func() time.Time { return now.Add(30 * time.Second) }
+	if summary := runner.Tick(); summary.Sent != 1 {
+		t.Fatalf("取证落地后约面通知未发出: %+v", summary)
+	}
+	if len(ledger.sent) != 1 || ledger.sent[0] != 50 || !ledger.sentWx[0] {
+		t.Fatalf("发出的应是带号的约面通知: %+v %+v", ledger.sent, ledger.sentWx)
+	}
+	want := base64.StdEncoding.EncodeToString(newChat)
+	if len(capture.images) == 0 || string(capture.images[0]) != want {
+		t.Fatalf("追发的聊天图不是新拍那张(旧图=%q)",
+			base64.StdEncoding.EncodeToString(oldChat))
+	}
+}
+
+// 等待没有自己的驱动力:取证那轮若始终没跑成,15 分钟兜底照常放行,只是图旧。
+func TestTickFallsBackWhenCaptureNeverLands(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 8, 9, 23, 30, 0, 0, time.Local)
+	snapshot := fullSnapshot()
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{{
+			ID: 60, NotifyType: store.NotificationTypeInterviewAccepted,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			CreatedAt:         now.Add(-16 * time.Minute),
+			AssetsRequestedAt: timePtr(now.Add(-15 * time.Minute)),
+		}, {
+			ID: 61, NotifyType: store.NotificationTypeWechatAdded,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			CreatedAt: now.Add(-time.Minute), // 取证一直没派发
+		}},
+		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting:  map[string]*store.NotificationOutbox{},
+	}
+	blobs := &fakeBlobs{data: map[string][]byte{
+		snapshot.ChatShot.BlobRef:   jpegBytes(),
+		snapshot.ResumeShot.BlobRef: jpegBytes(),
+	}}
+	if summary := newTestRunner(ledger, blobs, server.URL, now).Tick(); summary.Sent != 1 {
+		t.Fatalf("到点未兜底发送: %+v", summary)
+	}
+	if len(ledger.sent) != 1 || ledger.sent[0] != 60 {
+		t.Fatalf("兜底发出的应是约面通知: %+v", ledger.sent)
+	}
+}
+
+// 待取证查询本身失败:退回只看资产有无的旧行为,不许把通知卡住。
+func TestTickSendsWhenCaptureLookupFails(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 8, 9, 23, 40, 0, 0, time.Local)
+	snapshot := fullSnapshot()
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{{
+			ID: 70, NotifyType: store.NotificationTypeInterviewAccepted,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			CreatedAt: now.Add(-time.Minute),
+		}},
+		snapshot:   map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting:    map[string]*store.NotificationOutbox{},
+		captureErr: io.ErrUnexpectedEOF,
+	}
+	blobs := &fakeBlobs{data: map[string][]byte{
+		snapshot.ChatShot.BlobRef:   jpegBytes(),
+		snapshot.ResumeShot.BlobRef: jpegBytes(),
+	}}
+	if summary := newTestRunner(ledger, blobs, server.URL, now).Tick(); summary.Sent != 1 {
+		t.Fatalf("查询失败必须退回旧行为发出: %+v", summary)
 	}
 }
 
@@ -446,6 +589,7 @@ func TestTickHoldsPeerInitiatedWechatThenSendsAlone(t *testing.T) {
 			ID: 40, NotifyType: store.NotificationTypeWechatAdded,
 			ProfileID: "p1", Status: store.NotificationStatusPending,
 			PayloadJSON: `{"exchangeInitiator":"peer"}`, CreatedAt: now.Add(-time.Hour),
+			AssetsRequestedAt: timePtr(now.Add(-59 * time.Minute)),
 		}},
 		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
 		meeting:  map[string]*store.NotificationOutbox{},
@@ -483,6 +627,7 @@ func TestTickRendersInterviewSupplementTitle(t *testing.T) {
 		rows: []store.NotificationOutbox{{
 			ID: 30, NotifyType: store.NotificationTypeWechatAdded,
 			ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
+			AssetsRequestedAt: timePtr(now.Add(-59 * time.Minute)),
 		}},
 		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
 		meeting: map[string]*store.NotificationOutbox{
@@ -513,10 +658,12 @@ func TestTickDropAndFailurePaths(t *testing.T) {
 			{
 				ID: 20, NotifyType: store.NotificationTypeWechatAdded,
 				ProfileID: "p1", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
+				AssetsRequestedAt: timePtr(now.Add(-59 * time.Minute)),
 			},
 			{
 				ID: 21, NotifyType: store.NotificationTypeInterviewAccepted,
 				ProfileID: "p2", Status: store.NotificationStatusPending, CreatedAt: now.Add(-time.Hour),
+				AssetsRequestedAt: timePtr(now.Add(-59 * time.Minute)),
 			},
 		},
 		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot, "p2": fullSnapshot()},

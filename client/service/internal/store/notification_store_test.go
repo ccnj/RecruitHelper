@@ -515,11 +515,21 @@ func TestNotificationCaptureMarkingAndScreenshots(t *testing.T) {
 	if err != nil || len(needing) != 1 {
 		t.Fatalf("待取证查询不符: %+v err=%v", needing, err)
 	}
+	// 发件箱闸门用的是同一判据的存在性形态,两者必须同进同退。
+	if has, err := s.HasNotificationsNeedingCapture("cap"); err != nil || !has {
+		t.Fatalf("待取证存在性判定不符: has=%v err=%v", has, err)
+	}
+	if has, err := s.HasNotificationsNeedingCapture("别人"); err != nil || has {
+		t.Fatalf("待取证判定不得越过候选人: has=%v err=%v", has, err)
+	}
 	if err := s.MarkNotificationsAssetsRequested([]uint64{id}, at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if needing, _ := s.NotificationsNeedingCapture("cap"); len(needing) != 0 {
 		t.Fatalf("标记后仍报待取证: %+v", needing)
+	}
+	if has, err := s.HasNotificationsNeedingCapture("cap"); err != nil || has {
+		t.Fatalf("标记后存在性仍报待取证: has=%v err=%v", has, err)
 	}
 
 	ref1 := "sha256:" + strings.Repeat("1", 64)
