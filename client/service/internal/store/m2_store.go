@@ -1168,6 +1168,24 @@ func validMessageSourceKey(sourceKey string) bool {
 	return true
 }
 
+// ensureSourceKeyFreeTx 预查会话内(含撤回行)是否已有持相同 sourceKey 的行。
+// 对齐引擎只看活动账本,撤回行占用的键它看不见;放行到 INSERT 只会撞唯一索引
+// 变成不可分类的约束错误,让会话每轮静默失败。这里升为身份冲突哨兵错误,
+// 经 failure 分类走隔离+人工,失效方向从"安静永久"变"响亮可裁"。
+func ensureSourceKeyFreeTx(tx *gorm.DB, key ConversationKey, sourceKey string) error {
+	var count int64
+	if err := tx.Model(&Message{}).
+		Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND source_key = ?",
+			key.Platform, key.AccountRef, key.ConversationRef, sourceKey).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("%w: 会话内既有行(含撤回)已持有该键", ErrMessageSourceKeyConflict)
+	}
+	return nil
+}
+
 // ApplyConversationChanges 原子应用对齐算法的输出。对齐本身在上层纯函数完成;
 // store 负责乐观尾校验、卡片状态与跃迁事实、消息 append、收编边界和 round 计数不可分割。
 func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*ApplyConversationChangesResult, error) {
@@ -1243,10 +1261,19 @@ func (s *Store) ApplyConversationChanges(req ApplyConversationChangesRequest) (*
 			}
 		}
 
+		for _, draft := range req.NewMessages {
+			if draft.SourceKey != nil {
+				if err := ensureSourceKeyFreeTx(tx, req.Key, *draft.SourceKey); err != nil {
+					return err
+				}
+			}
+		}
 		for _, reclaim := range req.SourceKeyReclaims {
-			// 回配目标必须仍是无身份的活动行。任何并发变化——已被回配、被撤回、
-			// 同 key 已存在于其他行(含撤回行,撞唯一索引)——都让本轮整体失败,
-			// 下一轮按最新账本重算;绝不静默改判。
+			if err := ensureSourceKeyFreeTx(tx, req.Key, reclaim.SourceKey); err != nil {
+				return err
+			}
+			// 回配目标必须仍是无身份的活动行。任何并发变化——已被回配、被撤回——
+			// 都让本轮整体失败,下一轮按最新账本重算;绝不静默改判。
 			updated := tx.Model(&Message{}).
 				Where("platform = ? AND account_ref = ? AND conversation_ref = ? AND seq = ? AND source_key IS NULL AND "+activeMessageCondition,
 					req.Key.Platform, req.Key.AccountRef, req.Key.ConversationRef, reclaim.Seq).
@@ -1604,6 +1631,13 @@ func (s *Store) RebuildConversationBaseline(req RebuildConversationBaselineReque
 		}
 
 		oldTail := c.LastMessageSeq
+		for _, draft := range req.Historical {
+			if draft.SourceKey != nil {
+				if err := ensureSourceKeyFreeTx(tx, req.Key, *draft.SourceKey); err != nil {
+					return err
+				}
+			}
+		}
 		firstSeq, err := nextPhysicalMessageSeqTx(tx, req.Key)
 		if err != nil {
 			return err

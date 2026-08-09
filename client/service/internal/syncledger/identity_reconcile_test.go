@@ -222,6 +222,84 @@ func TestIdentityReconcileAllNullLedgerAllowsLeadingReclaim(t *testing.T) {
 	}
 }
 
+// S2 审查阻断项回归:全 NULL 账本自举必须右端优先对齐整个账本,窗口外同文
+// 历史抢不走身份,也解锁不了"把陈年历史当新消息"的门;对齐绑不满则不豁免。
+func TestIdentityReconcileBootstrapRightmostAlignmentDefeatsHistoryTheft(t *testing.T) {
+	ledger := []store.Message{
+		idLedgerText(1, "out", "招呼语", ""),
+		idLedgerText(2, "in", "好的", ""),
+	}
+	snapshot := []SnapshotMessage{
+		idSnapText("in", "好的", idKey("hist-same")),
+		idSnapText("in", "陈年历史", idKey("hist-old")),
+		idSnapText("out", "招呼语", idKey("greet")),
+		idSnapText("in", "好的", idKey("real")),
+	}
+	plan, err := Reconcile(idInput(ledger, snapshot))
+	if err != nil || plan.Decision != DecisionNoChange {
+		t.Fatalf("自举对齐应全额回配且不投影: plan=%+v err=%v", plan, err)
+	}
+	if len(plan.Apply.SourceKeyReclaims) != 2 ||
+		plan.Apply.SourceKeyReclaims[0].Seq != 1 || plan.Apply.SourceKeyReclaims[0].SourceKey != idKey("greet") ||
+		plan.Apply.SourceKeyReclaims[1].Seq != 2 || plan.Apply.SourceKeyReclaims[1].SourceKey != idKey("real") {
+		t.Fatalf("右端优先必须绑真身而非历史同文: %+v", plan.Apply.SourceKeyReclaims)
+	}
+	if len(plan.Apply.NewMessages) != 0 || len(plan.EventProjection) != 0 {
+		t.Fatalf("窗口外历史不得被收编或投影: %+v", plan.Apply.NewMessages)
+	}
+
+	// 自举窗口内的插话(对齐起点之后)仍要捞回。
+	withInterject := []SnapshotMessage{
+		idSnapText("out", "招呼语", idKey("greet")),
+		idSnapText("in", "插话一句", idKey("interject")),
+		idSnapText("in", "好的", idKey("real")),
+	}
+	plan, err = Reconcile(idInput(ledger, withInterject))
+	if err != nil || len(plan.Apply.NewMessages) != 1 || *plan.Apply.NewMessages[0].Text != "插话一句" ||
+		len(plan.Apply.SourceKeyReclaims) != 2 {
+		t.Fatalf("自举窗口内插话应捞回: plan=%+v err=%v", plan, err)
+	}
+
+	// 对齐绑不满整个账本→不豁免,走浅读→深读梯。
+	partial := []SnapshotMessage{idSnapText("in", "好的", idKey("real"))}
+	plan, err = Reconcile(idInput(ledger, partial))
+	if err != nil || plan.Decision != DecisionNeedDeep {
+		t.Fatalf("不完整自举对齐必须走深读梯: plan=%+v err=%v", plan, err)
+	}
+}
+
+// S2 审查优化项回归:账本锚尾全是无身份自家行时,anchorMatched 与零身份
+// 关联不构成证词矛盾——按普通零关联走深读梯,深读触及更早带身份行即收敛。
+func TestIdentityReconcileNullAnchorTailFallsToDeepLadder(t *testing.T) {
+	ledger := []store.Message{idLedgerText(1, "in", "早先消息", idKey("early"))}
+	bubbles := []string{"气泡一", "气泡二", "气泡三", "催一", "催二"}
+	for i, text := range bubbles {
+		ledger = append(ledger, idLedgerText(int64(i+2), "out", text, ""))
+	}
+
+	shallow := make([]SnapshotMessage, 0, len(bubbles)+1)
+	for _, text := range bubbles {
+		shallow = append(shallow, idSnapText("out", text, idKey("server-"+text)))
+	}
+	shallow = append(shallow, idSnapText("in", "新回复", idKey("fresh")))
+	in := idInput(ledger, shallow)
+	in.AnchorMatched = true
+	plan, err := Reconcile(in)
+	if err != nil || plan.Decision != DecisionNeedDeep {
+		t.Fatalf("全 NULL 锚尾不得判证词矛盾,应走深读梯: plan=%+v err=%v", plan, err)
+	}
+
+	deep := append([]SnapshotMessage{idSnapText("in", "早先消息", idKey("early"))}, shallow...)
+	deepIn := idInput(ledger, deep)
+	deepIn.AnchorMatched = true
+	deepIn.Deep = true
+	plan, err = Reconcile(deepIn)
+	if err != nil || len(plan.Apply.SourceKeyReclaims) != len(bubbles) ||
+		len(plan.Apply.NewMessages) != 1 || *plan.Apply.NewMessages[0].Text != "新回复" {
+		t.Fatalf("深读触及带身份行后应回配 NULL 尾并收编新回复: plan=%+v err=%v", plan, err)
+	}
+}
+
 func TestIdentityReconcileZeroLinkageLadder(t *testing.T) {
 	ledger := []store.Message{idLedgerText(1, "in", "已知", idKey("known"))}
 	snapshot := []SnapshotMessage{idSnapText("in", "全新窗口", idKey("unrelated"))}

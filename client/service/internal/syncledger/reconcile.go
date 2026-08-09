@@ -175,31 +175,85 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 		nullPool[semantic] = append(nullPool[semantic], i)
 	}
 
+	// 同窗身份去重,保序取首现。
+	order := make([]int, 0, len(normalized))
+	seen := make(map[string]struct{}, len(normalized))
+	for i := range normalized {
+		if _, duplicate := seen[snapshotKeys[i].sourceKey]; duplicate {
+			// 跨页聚合可能重复呈现同一条服务端消息;同一身份只处理一次。
+			continue
+		}
+		seen[snapshotKeys[i].sourceKey] = struct{}{}
+		order = append(order, i)
+	}
+
+	// 全 NULL 账本(存量升级、仅招呼的会话)的身份自举:把整个账本按语义
+	// 右端优先对齐到窗口——末行绑窗口中最靠后的同语义行,依次向前;绑不满
+	// 整个账本就不豁免,走浅读→深读梯。右端优先防止窗口带出的更老同文历史
+	// 抢走 NULL 行身份、再把陈年历史解锁成"新消息"(S2 审查实证的阻断路径:
+	// 一旦历史行抢先入桶,linked>0 会解除窗口定界,已收编消息的真身随后被
+	// 二次收编并投影)。
+	var bootstrapBinding map[int]int
+	bootstrapFirst := -1
+	if len(ledgerBySource) == 0 && len(in.Ledger) > 0 {
+		binding := make(map[int]int, len(in.Ledger))
+		ledgerIdx := len(in.Ledger) - 1
+		for pos := len(order) - 1; pos >= 0 && ledgerIdx >= 0; pos-- {
+			semantic := snapshotKeys[order[pos]]
+			semantic.sourceKey = ""
+			ledgerSemantic := ledgerKeys[ledgerIdx]
+			ledgerSemantic.sourceKey = ""
+			if semantic == ledgerSemantic {
+				binding[pos] = ledgerIdx
+				ledgerIdx--
+			}
+		}
+		if ledgerIdx < 0 {
+			bootstrapBinding = binding
+			for pos := range binding {
+				if bootstrapFirst == -1 || pos < bootstrapFirst {
+					bootstrapFirst = pos
+				}
+			}
+		}
+	}
+
 	var drafts []store.MessageDraft
 	var reclaims []store.SourceKeyReclaim
 	var changes []store.CardStateChange
 	var transitions []CardTransition
 	var audits []store.AuditEntry
-	seen := make(map[string]struct{}, len(normalized))
 	linked := 0
-	for i := range normalized {
+	for pos, i := range order {
 		key := snapshotKeys[i]
-		if _, duplicate := seen[key.sourceKey]; duplicate {
-			// 跨页聚合可能重复呈现同一条服务端消息;同一身份只处理一次。
-			continue
-		}
-		seen[key.sourceKey] = struct{}{}
 		if ledgerIdx, ok := ledgerBySource[key.sourceKey]; ok {
 			linked++
 			collectCardChangeByIdentity(in, in.Ledger[ledgerIdx], normalized[i], &changes, &transitions, &audits)
 			continue
 		}
+		if bootstrapBinding != nil {
+			if ledgerIdx, ok := bootstrapBinding[pos]; ok {
+				reclaims = append(reclaims, store.SourceKeyReclaim{
+					Seq: in.Ledger[ledgerIdx].Seq, SourceKey: key.sourceKey,
+				})
+				linked++
+				collectCardChangeByIdentity(in, in.Ledger[ledgerIdx], normalized[i], &changes, &transitions, &audits)
+				continue
+			}
+			if pos < bootstrapFirst {
+				// 自举对齐起点之前的未知行是窗口外历史,与混合账本的窗口
+				// 定界同款,不收编、不投影。
+				continue
+			}
+			drafts = append(drafts, normalized[i].draft())
+			continue
+		}
 		semantic := key
 		semantic.sourceKey = ""
-		// 回配限定在首个身份关联之后(或账本本就没有任何已知身份,如仅有
-		// 招呼自家行的会话):窗口外的更老历史里可能有与自家行同文的旧消息,
-		// 不设此限会让它抢走 NULL 行的身份、再把真正的自家行错判为新。
-		if pool := nullPool[semantic]; len(pool) > 0 && (linked > 0 || len(ledgerBySource) == 0) {
+		// 回配限定在首个身份关联之后:窗口外的更老历史里可能有与自家行
+		// 同文的旧消息,不设此限会让它抢走 NULL 行的身份、再把真正的自家行
+		// 错判为新。
+		if pool := nullPool[semantic]; len(pool) > 0 && linked > 0 {
 			ledgerIdx := pool[0]
 			nullPool[semantic] = pool[1:]
 			reclaims = append(reclaims, store.SourceKeyReclaim{
@@ -220,9 +274,11 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 
 	if linked == 0 {
 		// 窗口与账本零身份关联。anchorMatched 声称手在窗口内看到了脑下发的
-		// 锚尾,与零关联矛盾,双方证词冲突必须响亮停住;其余情况按浅读→深读→
-		// 审计重建梯收敛(平台异常重建梯,保留项)。
-		if in.AnchorMatched {
+		// 锚尾——但锚尾只有 direction+hash,账本锚尾若全是无身份自家行,
+		// 手按同文命中并不与零身份关联矛盾(NULL 行的真身本就配不上身份),
+		// 此时按普通零关联走浅读→深读梯,深读窗口触及更早带身份行即收敛。
+		// 只有锚尾至少一行带身份时,零关联才是真正的证词冲突,必须响亮停住。
+		if in.AnchorMatched && anchorTailCarriesIdentity(in.Ledger) {
 			return nil, ErrAnchorContractMismatch
 		}
 		if !in.Deep {
@@ -275,6 +331,21 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 		plan.Audits = append(plan.Audits, audit(in, "identity_shadow_divergence", divergence))
 	}
 	return plan, nil
+}
+
+// anchorTailCarriesIdentity 判定账本锚尾(最近 ≤5 行,与 AnchorTail 同窗)
+// 是否至少一行携带服务端身份。零身份关联下只有这种锚尾才构成证词矛盾。
+func anchorTailCarriesIdentity(ledger []store.Message) bool {
+	start := len(ledger) - 5
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(ledger); i++ {
+		if ledger[i].SourceKey != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // dedupeByIdentity 按身份去掉跨页聚合的重复行,保留首次出现的页面顺序。
