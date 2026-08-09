@@ -159,8 +159,30 @@ func (m *Manager) AdvanceOnce(
 		if blocked := m.requireOpenMemberBoundary(run); blocked != nil {
 			return blocked.run, blocked.err
 		}
-		if _, selectErr := m.store.SelectCompletedSourcingBatch(batchID, m.clock.Now()); selectErr != nil {
+		// 回退与阶段回退是两个事务。批次已经退回采集态、阶段却还停在 selection,
+		// 说明上一次推进在两者之间断了(脑被关掉,或真人的暂停让阶段 CAS 落空)。
+		// 这个中间态自己出不来:selection 没有回到 scoring 的路,而筛选又要求批次
+		// 是 completed。补齐后半步即可,不重跑筛选。
+		reopened, reopenedErr := m.sourcingBatchReopenedForCapture(batchID)
+		if reopenedErr != nil {
+			return run, reopenedErr
+		}
+		if reopened {
+			return m.advanceStage(run, store.ProductWorkflowStageSourcing)
+		}
+		selection, selectErr := m.store.SelectCompletedSourcingBatch(batchID, m.clock.Now())
+		if selectErr != nil {
 			return run, selectErr
+		}
+		// 选中人数没够目标就再采一轮。够不够看的是 selection.TargetCount,那是
+		// 后台 [targetMin,targetMax] 里取的选中目标;batch.TargetCount 是采集
+		// 人数,两个同名字段不是一回事。
+		enough, reopenErr := m.reopenSourcingForMoreCapture(batchID, selection)
+		if reopenErr != nil {
+			return run, reopenErr
+		}
+		if !enough {
+			return m.advanceStage(run, store.ProductWorkflowStageSourcing)
 		}
 		return m.advanceStage(run, store.ProductWorkflowStageGreetingGeneration)
 
@@ -780,6 +802,57 @@ func (m *Manager) ConfirmAll(
 		RunID: run.RunID, From: from, To: to, At: now,
 		Stage: store.ProductWorkflowStageGreetingSending,
 	})
+}
+
+// sourcingBatchReopenedForCapture 判断批次是否已经被退回采集态。它只用于识别
+// “回退已提交、阶段还没跟上”的中间态,不做任何写入。
+func (m *Manager) sourcingBatchReopenedForCapture(batchID string) (bool, error) {
+	batch, err := m.store.SourcingBatchByID(batchID)
+	if err != nil {
+		return false, err
+	}
+	if batch == nil {
+		return false, store.ErrSourcingBatchNotFound
+	}
+	return batch.Status == store.SourcingBatchCollecting && batch.EndedAt == nil, nil
+}
+
+// reopenSourcingForMoreCapture 在一轮筛选之后裁决“够了没有”。返回 true 表示
+// 本批就此收口、可以往招呼语生成走;返回 false 表示已经把批次退回采集态,漏斗
+// 该回到 sourcing 阶段再采一轮。
+//
+// 收口的三种理由都不产生错误:选中人数已达目标、批次不分轮(管理面显式启动或
+// 分轮前的存量批次)、采集额度已经用尽。真正采不到人的那种收口由采集侧的撞底
+// 路径处理,它会把批次标成 noNewCandidates,回退入口据此拒绝,本函数照常收口。
+func (m *Manager) reopenSourcingForMoreCapture(
+	batchID string,
+	selection *store.SourcingBatchSelection,
+) (bool, error) {
+	if selection == nil {
+		return false, store.ErrSourcingSelectionConflict
+	}
+	if selection.SelectedCount >= selection.TargetCount {
+		return true, nil
+	}
+	batch, err := m.store.SourcingBatchByID(batchID)
+	if err != nil {
+		return false, err
+	}
+	if batch == nil {
+		return false, store.ErrSourcingBatchNotFound
+	}
+	if batch.CaptureLimit <= 0 || batch.TargetCount >= batch.CaptureLimit {
+		return true, nil
+	}
+	if strings.HasPrefix(batch.Reason, store.SourcingNoNewCandidatesReason) {
+		return true, nil
+	}
+	if _, err := m.store.ReopenSourcingBatchForCapture(store.ReopenSourcingBatchForCaptureRequest{
+		BatchID: batchID, Step: NewFullWorkflowCaptureStep, ReopenAt: m.clock.Now(),
+	}); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (m *Manager) advanceStage(

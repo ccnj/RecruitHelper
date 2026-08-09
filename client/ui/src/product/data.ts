@@ -37,6 +37,8 @@ export interface AppFunnelRaw {
   batchId?: string
   stage?: string
   targetCount: number
+  captureLimit: number
+  selectionTarget: number
   capturedCount: number
   scoredCount: number
   selectedCount: number
@@ -539,6 +541,9 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
   const failed = raw.stage === 'failed'
   const target = safeCount(raw.targetCount)
   const selected = safeCount(raw.selectedCount)
+  // 分轮采集下筛选格的分母是"要凑够多少人",不是"筛了多少人"。首轮筛选之前
+  // 这个目标还没算出来,退回按已评分人数显示。
+  const selectionTarget = safeCount(raw.selectionTarget)
   const confirmed = raw.stage === 'awaitingConfirmation'
     ? Math.max(0, selected - safeCount(raw.pendingConfirm))
     : activeIndex > stageOrder.indexOf('confirm') || completedAll
@@ -547,7 +552,11 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
   const values: Record<FunnelStageKey, { completed: number; target: number | null; failed: number }> = {
     collect: { completed: safeCount(raw.capturedCount), target, failed: 0 },
     score: { completed: safeCount(raw.scoredCount), target, failed: 0 },
-    select: { completed: selected, target: safeCount(raw.scoredCount), failed: 0 },
+    select: {
+      completed: selected,
+      target: selectionTarget > 0 ? selectionTarget : safeCount(raw.scoredCount),
+      failed: 0,
+    },
     greeting: {
       completed: safeCount(raw.greetingReady),
       target: selected,

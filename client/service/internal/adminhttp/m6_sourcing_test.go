@@ -360,7 +360,7 @@ func TestSourcingGreetingSendStatusReturnsNormalSafeAggregate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.StartSourcing(key, revision.RevisionHash, 1); err != nil {
+	if err := manager.StartSourcing(key, revision.RevisionHash, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := st.ActiveSourcingBatch(key)

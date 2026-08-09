@@ -18,28 +18,35 @@ type fixtureClock struct{ now time.Time }
 func (c *fixtureClock) Now() time.Time { return c.now }
 
 type fixtureActor struct {
-	store            *store.Store
-	clock            *fixtureClock
-	startTargets     []int
-	enableCalls      int
-	pauseCalls       int
-	gate             func() error
-	conversationGate func() (bool, error)
-	boundaryCalls    int
-	startErr         error
-	enableErr        error
-	holdErr          error
-	holdCalls        int
+	store              *store.Store
+	clock              *fixtureClock
+	startTargets       []int
+	startCaptureLimits []int
+	enableCalls        int
+	pauseCalls         int
+	gate               func() error
+	conversationGate   func() (bool, error)
+	boundaryCalls      int
+	startErr           error
+	enableErr          error
+	holdErr            error
+	holdCalls          int
 }
 
-func (a *fixtureActor) StartSourcing(key store.AccountKey, revision string, target int) error {
+func (a *fixtureActor) StartSourcing(
+	key store.AccountKey,
+	revision string,
+	target, captureLimit int,
+) error {
 	a.startTargets = append(a.startTargets, target)
+	a.startCaptureLimits = append(a.startCaptureLimits, captureLimit)
 	if a.startErr != nil {
 		return a.startErr
 	}
 	_, err := a.store.StartSourcingBatch(store.StartSourcingBatchRequest{
 		Platform: key.Platform, AccountRef: key.AccountRef,
-		ContextRevisionHash: revision, TargetCount: target, StartedAt: a.clock.Now(),
+		ContextRevisionHash: revision, TargetCount: target,
+		CaptureLimit: captureLimit, StartedAt: a.clock.Now(),
 	})
 	return err
 }

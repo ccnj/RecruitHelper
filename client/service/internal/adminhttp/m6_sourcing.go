@@ -120,7 +120,8 @@ func (a *API) startSourcing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "旧后台当前职位配置不是唯一可执行职位"})
 		return
 	}
-	if err := a.actor.StartSourcing(key, contexts[0].RevisionHash, req.TargetCount); err != nil {
+	// 管理面显式启动的批次不分轮:采到显式 targetCount 即终局,与分轮前语义一致。
+	if err := a.actor.StartSourcing(key, contexts[0].RevisionHash, req.TargetCount, 0); err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, store.ErrJobAIContextRevisionNotFound) || errors.Is(err, store.ErrAccountNotFound) {
 			status = http.StatusNotFound

@@ -90,33 +90,71 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 
 		var existing SourcingBatchSelection
 		err = tx.First(&existing, "batch_id = ?", batch.BatchID).Error
-		if err == nil {
-			if err := validatePersistedSourcingBatchSelectionTx(tx, batch, existing); err != nil {
-				return err
-			}
-			out = existing
-			return nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+		hasExisting := err == nil
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
-		}
-
-		var preexistingDecisions int64
-		if err := tx.Table("sourcing_selection_decisions AS decision").
-			Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
-			Where("run.batch_id = ?", batch.BatchID).
-			Count(&preexistingDecisions).Error; err != nil {
-			return err
-		}
-		if preexistingDecisions != 0 {
-			return ErrSourcingSelectionConflict
 		}
 
 		rows, err := loadCompleteSourcingSelectionRowsTx(tx, batch)
 		if err != nil {
 			return err
 		}
-		revision, err := currentLegacyRevisionForSourcingBatchTx(tx, batch)
+
+		// 分轮采集下同一批次会筛选多次,每次只裁决这一轮新采到的人。防重复
+		// 建档靠的是 SourcingSelectionDecision 的 RunID 主键——一个候选人终身
+		// 只有一条裁决、至多建一次档,那是数据库层面的硬约束,增量裁决不碰它。
+		// 这里读出已裁决的 run 只为跳过它们,不重开任何已经落定的裁决。
+		var decidedRunIDs []string
+		if err := tx.Table("sourcing_selection_decisions AS decision").
+			Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = decision.run_id").
+			Where("run.batch_id = ?", batch.BatchID).
+			Pluck("decision.run_id", &decidedRunIDs).Error; err != nil {
+			return err
+		}
+		decided := make(map[string]struct{}, len(decidedRunIDs))
+		for _, runID := range decidedRunIDs {
+			decided[runID] = struct{}{}
+		}
+		pending := make([]sourcingSelectionRow, 0, len(rows))
+		for i := range rows {
+			if _, done := decided[rows[i].Run.RunID]; done {
+				continue
+			}
+			pending = append(pending, rows[i])
+		}
+
+		if len(pending) == 0 {
+			// 没有新人可裁决就是本轮的幂等重放。汇总行必须已经在,且与全部
+			// 裁决自洽——这条路径的校验强度与分轮前完全一致。
+			if !hasExisting {
+				return ErrSourcingSelectionConflict
+			}
+			if err := validatePersistedSourcingBatchSelectionTx(tx, batch, existing); err != nil {
+				return err
+			}
+			out = existing
+			return nil
+		}
+		// 有新人要裁决时,已有汇总必须恰好覆盖已有裁决;对不上说明上一轮的
+		// 汇总与裁决之间已经不自洽,不能在此之上继续累加。
+		if hasExisting && existing.PoolCount != len(decided) {
+			return ErrSourcingSelectionConflict
+		}
+		if !hasExisting && len(decided) != 0 {
+			return ErrSourcingSelectionConflict
+		}
+		// 首轮按当前 head 定下这一批的裁决参数;续裁一律钉回首轮那个 revision,
+		// 与评分、招呼语生成的做法一致(它们走 sourcingStageRevisionTx)。若这里
+		// 也读 head,第二轮采集期间任何一次"改配置 + 同步职位"都会让续裁与首轮
+		// 汇总对不上,整批永久卡在 selection,首轮已建的档案随之搁浅。
+		var revision *JobAIContextRevision
+		if hasExisting {
+			revision, err = requireLegacyRevisionForSourcingBatchTx(
+				tx, batch, existing.ContextRevisionHash,
+			)
+		} else {
+			revision, err = currentLegacyRevisionForSourcingBatchTx(tx, batch)
+		}
 		if err != nil {
 			return err
 		}
@@ -142,11 +180,27 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 			MinScore:         selectionView.MinScore, TargetMin: selectionView.TargetMin,
 			TargetMax: selectionView.TargetMax, TargetCount: targetCount,
 			MaleRatioLimit: selectionView.MaleRatioLimit, MaleLimit: maleLimit,
-			PoolCount: len(rows), CompletedAt: decidedAt, CreatedAt: decidedAt,
+			PoolCount: 0, CompletedAt: decidedAt, CreatedAt: decidedAt,
+		}
+		if hasExisting {
+			// 续裁必须建立在同一套裁决参数上。revision 已经钉回首轮那一版,所以
+			// 这里真正能拦到的是跨版本升级——算法版本变了,分数线、配额与男性
+			// 上限的推导都可能变,不能把新一轮的人接在按旧标准选出的名单后面。
+			if existing.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
+				existing.MinScore != selectionView.MinScore ||
+				existing.TargetMin != selectionView.TargetMin ||
+				existing.TargetMax != selectionView.TargetMax ||
+				existing.TargetCount != targetCount ||
+				existing.MaleRatioLimit != selectionView.MaleRatioLimit ||
+				existing.MaleLimit != maleLimit {
+				return ErrSourcingSelectionConflict
+			}
+			summary = existing
+			summary.CompletedAt = decidedAt
 		}
 
-		for i := range rows {
-			row := rows[i]
+		for i := range pending {
+			row := pending[i]
 			if row.Gender == sourcingGenderUnknown {
 				summary.UnknownGenderCount++
 			}
@@ -205,8 +259,26 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 			if err := tx.Create(&decision).Error; err != nil {
 				return err
 			}
+			summary.PoolCount++
 		}
-		if err := tx.Create(&summary).Error; err != nil {
+		if hasExisting {
+			updated := tx.Model(&SourcingBatchSelection{}).
+				Where("batch_id = ? AND pool_count = ?", batch.BatchID, existing.PoolCount).
+				Updates(map[string]any{
+					"pool_count":           summary.PoolCount,
+					"eligible_count":       summary.EligibleCount,
+					"selected_count":       summary.SelectedCount,
+					"male_selected_count":  summary.MaleSelectedCount,
+					"unknown_gender_count": summary.UnknownGenderCount,
+					"completed_at":         summary.CompletedAt,
+				})
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return ErrSourcingSelectionConflict
+			}
+		} else if err := tx.Create(&summary).Error; err != nil {
 			return err
 		}
 		out = summary

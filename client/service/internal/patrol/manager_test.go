@@ -1602,7 +1602,7 @@ func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *t
 	beforeStart := h.clock.Now()
 	startDone := make(chan error, 1)
 	go func() {
-		startDone <- h.manager.StartSourcing(h.key, revisionHash, 30)
+		startDone <- h.manager.StartSourcing(h.key, revisionHash, 30, 0)
 	}()
 	select {
 	case err := <-startDone:
@@ -1709,7 +1709,7 @@ func TestSourcingGenerationHandoffPreservesGlobalAccountFailure(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("旧巡检未进入 readThread Wait")
 			}
-			if err := h.manager.StartSourcing(h.key, revisionHash, 30); err != nil {
+			if err := h.manager.StartSourcing(h.key, revisionHash, 30, 0); err != nil {
 				t.Fatal(err)
 			}
 			close(releaseWait)
@@ -1791,7 +1791,7 @@ func TestSourcingGenerationHandoffStopsBeforeNextCommandAfterLateSuccess(t *test
 	case <-time.After(time.Second):
 		t.Fatal("旧巡检未进入 readThread Wait")
 	}
-	if err := h.manager.StartSourcing(h.key, revisionHash, 30); err != nil {
+	if err := h.manager.StartSourcing(h.key, revisionHash, 30, 0); err != nil {
 		t.Fatal(err)
 	}
 	close(releaseWait)
