@@ -1033,7 +1033,10 @@ type VerifiedEffectSuccess struct {
 	ObservedAtMs     int64
 	// PlatformTsMs 语义同 EffectResultMutation.PlatformTsMs:只可来自
 	// 验证读命中消息自带的 tsApprox,缺失保持 nil。
-	PlatformTsMs     *int64
+	PlatformTsMs *int64
+	// SourceKey 语义同 EffectResultMutation.SourceKey:只可来自验证读
+	// 命中消息自带的 sourceKey,缺失保持空串、落账 NULL。
+	SourceKey        string
 	ResultBody       string
 	ResolutionReason string
 	At               time.Time
@@ -1080,7 +1083,7 @@ func (s *Store) ResolveEffectVerified(req VerifiedEffectSuccess) (*Message, erro
 			intent.TargetRef != req.ConversationKey.ConversationRef || intent.SendFingerprint != req.ContentHash {
 			return ErrEffectIntentConflict
 		}
-		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, "", req.At)
+		message, err := appendOutboundMessageTx(tx, &intent, req.Text, req.ContentHash, req.PlatformTsMs, req.SourceKey, req.At)
 		if err != nil {
 			return err
 		}

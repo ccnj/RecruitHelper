@@ -249,10 +249,17 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 	var commitErr error
 	switch cmd.Name {
 	case protocol.PrimChatSendMessage:
+		// 命中行的 sourceKey(契约 §4.5)随正证收编;乐观判定路径的观察没有
+		// 页面数据,这里保持空、落账 NULL。字段是 optional,非法值只弃不阻断。
+		sendSourceKey := ""
+		if validLowerHex64(observation.SourceKey) {
+			sendSourceKey = observation.SourceKey
+		}
 		result := protocol.ResultBody{
 			Ref: ref, Status: protocol.ResultStatusOk, ExecMs: 0,
 			Data: mustEncode(protocol.ChatSendMessageData{
-				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint, ObservedAt: observation.ObservedAt,
+				ConversationRef: intent.TargetRef, ContentHash: intent.SendFingerprint,
+				SourceKey: sendSourceKey, ObservedAt: observation.ObservedAt,
 				TsApprox: observation.PlatformTsMs,
 			}),
 			Evidence: []protocol.Evidence{{Type: string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)}},
@@ -268,7 +275,7 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 				Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
 			},
 			Text: request.Args.Text, ContentHash: intent.SendFingerprint, ObservedAtMs: observation.ObservedAt,
-			PlatformTsMs: observation.PlatformTsMs,
+			PlatformTsMs: observation.PlatformTsMs, SourceKey: sendSourceKey,
 			ResultBody: string(resultRaw), ResolutionReason: "verification fingerprint uniquely matched", At: time.Now(),
 		})
 	case protocol.PrimChatSendGreeting:

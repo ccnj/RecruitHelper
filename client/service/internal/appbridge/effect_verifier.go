@@ -365,7 +365,8 @@ func classifyVerifiedSend(
 		}, nil
 	}
 	return dispatch.VerificationObservation{
-		Confirmed: true, ContentHash: matched.ContentHash, ObservedAt: observedAt(*matched),
+		Confirmed: true, ContentHash: matched.ContentHash, SourceKey: matched.SourceKey,
+		ObservedAt: observedAt(*matched),
 		PlatformTsMs: platformTs(*matched),
 		Reason: "最近窗口命中目标 out/text 指纹(同文取最新)",
 	}, nil

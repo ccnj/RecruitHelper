@@ -1,6 +1,7 @@
 package appbridge
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -29,10 +30,12 @@ func TestClassifyVerifiedSendConfirmsPageVisibleTarget(t *testing.T) {
 		timedThreadMessage(protocol.MessageDirectionIn, "other", dispatchedAt-300_000),
 		timedThreadMessage(protocol.MessageDirectionOut, "target", fresh),
 	}
+	window[1].SourceKey = strings.Repeat("1", 64)
+	window[3].SourceKey = strings.Repeat("2", 64)
 	observation, err := classifyVerifiedSend(window, "target", dispatchedAt)
 	if err != nil || !observation.Confirmed || observation.ContentHash != "target" ||
-		observation.ObservedAt != fresh {
-		t.Fatalf("容差内页面可见目标应确认且取新: observation=%+v err=%v", observation, err)
+		observation.ObservedAt != fresh || observation.SourceKey != strings.Repeat("2", 64) {
+		t.Fatalf("容差内页面可见目标应确认且取新、并采其 sourceKey: observation=%+v err=%v", observation, err)
 	}
 }
 
@@ -44,9 +47,13 @@ func TestClassifyVerifiedSendSameTextTakesNewest(t *testing.T) {
 		timedThreadMessage(protocol.MessageDirectionOut, "target", older),
 		timedThreadMessage(protocol.MessageDirectionOut, "target", newest),
 	}
+	window[0].SourceKey = strings.Repeat("3", 64)
+	window[1].SourceKey = strings.Repeat("4", 64)
 	observation, err := classifyVerifiedSend(window, "target", dispatchedAt)
-	if err != nil || !observation.Confirmed || observation.ObservedAt != newest {
-		t.Fatalf("同文多条应取满足条件的最新一条: observation=%+v err=%v", observation, err)
+	if err != nil || !observation.Confirmed || observation.ObservedAt != newest ||
+		observation.SourceKey != strings.Repeat("4", 64) {
+		// 同文歧义挂最新行的身份是战役出口第 3 项知情接受的兜底,这里钉住现状。
+		t.Fatalf("同文多条应取满足条件的最新一条并采其 sourceKey: observation=%+v err=%v", observation, err)
 	}
 }
 
