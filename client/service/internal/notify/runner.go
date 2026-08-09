@@ -16,6 +16,7 @@ type Ledger interface {
 	TakePendingNotifications(limit int, maxAttempts int) ([]store.NotificationOutbox, error)
 	NotificationRenderSnapshotForProfile(profileID string) (*store.NotificationRenderSnapshot, error)
 	InterviewNotificationForProfile(profileID string) (*store.NotificationOutbox, error)
+	HasNotificationsNeedingCapture(profileID string) (bool, error)
 	MarkNotificationSent(id uint64, sentWithWechat bool, at time.Time) error
 	MarkNotificationFailed(id uint64, lastError string, maxAttempts int, at time.Time) error
 	MarkNotificationSkipped(id uint64, reason string, at time.Time) error
@@ -111,7 +112,14 @@ func (r *Runner) Tick() tickSummary {
 			}
 			continue
 		}
-		verdict, supplement := r.decide(row, snapshot, now)
+		// 待取证判定在取件时点一次性取,hold 日志与闸门用同一份事实:查询
+		// 失败按"没有待取证"处理,退回只看资产有无的旧行为,不阻塞发送。
+		pendingCapture, capErr := r.store.HasNotificationsNeedingCapture(row.ProfileID)
+		if capErr != nil {
+			slog.Warn("待取证通知查询失败,按无待取证处理", "notifyId", row.ID, "err", capErr)
+			pendingCapture = false
+		}
+		verdict, supplement := r.decide(row, snapshot, pendingCapture, now)
 		switch verdict {
 		case decisionHold:
 			summary.Held++
@@ -123,6 +131,7 @@ func (r *Runner) Tick() tickSummary {
 					"type", row.NotifyType,
 					"profileId", row.ProfileID,
 					"missing", missingAssets(snapshot),
+					"pendingCapture", pendingCapture,
 				)
 			}
 			continue
@@ -195,6 +204,7 @@ const (
 func (r *Runner) decide(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
+	pendingCapture bool,
 	now time.Time,
 ) (decision, bool) {
 	supplement := false
@@ -205,7 +215,7 @@ func (r *Runner) decide(
 		}
 		supplement = isSupplement
 	}
-	return r.gateReady(row, snapshot, now), supplement
+	return r.gateReady(row, snapshot, pendingCapture, now), supplement
 }
 
 // decideWechatAdded 第二个返回值表示"这条是约面通知的补号"——只在约面通知
@@ -265,14 +275,20 @@ func missingAssets(snapshot *store.NotificationRenderSnapshot) []string {
 	return missing
 }
 
+// gateReady 三样齐且没有待取证的通知才放行。pendingCapture 那一问是为了让
+// 图与事件对得上:通知入队后的取证只跑一轮,发件箱又是 30 秒轮询,只看"图
+// 存不存在"会让一条通知挑到上一次事件拍的旧图(二合一场景实测如此)。等的
+// 那轮取证若始终没跑成(会话未绑定、重开失败),15 分钟兜底照常放行,代价是
+// 图旧、通知晚,不影响正文完整。
 func (r *Runner) gateReady(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
+	pendingCapture bool,
 	now time.Time,
 ) decision {
 	missing := missingAssets(snapshot)
-	if len(missing) == 0 {
-		return decisionSend // 三样齐立即发
+	if len(missing) == 0 && !pendingCapture {
+		return decisionSend // 三样齐、新图不在路上:立即发
 	}
 	if now.Sub(row.CreatedAt) >= screenshotGateWindow {
 		slog.Warn(
@@ -281,6 +297,7 @@ func (r *Runner) gateReady(
 			"type", row.NotifyType,
 			"profileId", row.ProfileID,
 			"missing", missing,
+			"pendingCapture", pendingCapture,
 		)
 		return decisionSend
 	}
