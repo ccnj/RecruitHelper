@@ -139,7 +139,7 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 	}
 
 	if len(in.Ledger) == 0 {
-		drafts := draftsFrom(normalized)
+		drafts := draftsFrom(dedupeByIdentity(normalized, snapshotKeys))
 		decision := DecisionAppend
 		projection := append([]store.MessageDraft(nil), drafts...)
 		historicalThrough := int64(0)
@@ -231,7 +231,7 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 		if in.RoundID == "" {
 			return nil, store.ErrHistoricalBaselineNoRound
 		}
-		historicalDrafts := draftsFrom(normalized)
+		historicalDrafts := draftsFrom(dedupeByIdentity(normalized, snapshotKeys))
 		historicalThrough := tail + int64(len(historicalDrafts))
 		auditDetail := fmt.Sprintf("reachedTop=%t anchorMatched=%t", in.ReachedTop, in.AnchorMatched)
 		plan := &Plan{
@@ -275,6 +275,22 @@ func Reconcile(in ReconcileInput) (*Plan, error) {
 		plan.Audits = append(plan.Audits, audit(in, "identity_shadow_divergence", divergence))
 	}
 	return plan, nil
+}
+
+// dedupeByIdentity 按身份去掉跨页聚合的重复行,保留首次出现的页面顺序。
+// 能力门槛保证每行有身份;首收编与重建梯不经主循环的 seen 去重,必须在
+// 这里补同一保证,否则跨页重复行会被双收编(性质测试实证)。
+func dedupeByIdentity(normalized []NormalizedMessage, keys []messageKey) []NormalizedMessage {
+	seen := make(map[string]struct{}, len(normalized))
+	out := make([]NormalizedMessage, 0, len(normalized))
+	for i := range normalized {
+		if _, duplicate := seen[keys[i].sourceKey]; duplicate {
+			continue
+		}
+		seen[keys[i].sourceKey] = struct{}{}
+		out = append(out, normalized[i])
+	}
+	return out
 }
 
 // collectCardChangeByIdentity 按身份配对后的卡片状态跃迁(战役拍板 4:配对
