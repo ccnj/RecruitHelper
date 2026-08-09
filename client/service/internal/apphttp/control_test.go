@@ -198,7 +198,7 @@ func TestStartFailureMapsKnownSentinelsToFixedTextOnly(t *testing.T) {
 		{
 			name: "jobSelectionChanged",
 			err:  fmt.Errorf("start: %w", productapp.ErrJobSelectionChanged),
-			want: "当前职位已变化，请刷新后重试",
+			want: "当前有未完成的任务，它绑定的职位与后台当前职位不同；要换职位请先结束本次任务",
 		},
 		{
 			name: "dailyWindowClosed",

@@ -241,8 +241,12 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 // 笼统提示，底层错误链的细节不得进入产品面响应。
 func startFailureText(err error) string {
 	switch {
+	// 全新开始已经改为跟随后台当前职位,不再因职位变化拒绝。这个哨兵此后只剩
+	// 一种可达来路:有未完成的任务,而它锚定的职位与后台当前职位不是同一个。
+	// 原文案"请刷新后重试"对这种情形是条死路——刷新只会把页面职位更新成后台
+	// 那个,再点开始仍被同一道闸拦下。真正的出路是先结束本次任务。
 	case errors.Is(err, productapp.ErrJobSelectionChanged):
-		return "当前职位已变化，请刷新后重试"
+		return "当前有未完成的任务，它绑定的职位与后台当前职位不同；要换职位请先结束本次任务"
 	case errors.Is(err, workflow.ErrDailyWindowClosed):
 		return "当前不在业务运行窗口内"
 	case errors.Is(err, productapp.ErrAccountUnavailable):
