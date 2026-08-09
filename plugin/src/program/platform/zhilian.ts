@@ -595,6 +595,9 @@ interface MainObserveStableOutboundResult {
   // 唯一命中的新出站消息在平台消息视图中的时间戳(毫秒),仅在
   // matchingNewServerMessages === 1 且平台数据可解析时携带。
   matchedTimeMs?: number
+  // 唯一命中的新出站消息按契约 §4.5 配方派生的 sourceKey,
+  // 仅在 matchingNewServerMessages === 1 时携带。
+  matchedSourceKey?: string
 }
 
 type MainCardAction = 'wechatInvite' | 'interviewInvite'
@@ -9541,6 +9544,7 @@ async function mainObserveStableOutbound(
     return {
       selected: true,
       matchingNewServerMessages: matched ? 1 : 0,
+      ...(matched ? { matchedSourceKey: newSourceKey } : {}),
       ...(matched && matchedTimeMs > 0 ? { matchedTimeMs } : {}),
     }
   } catch {
@@ -12364,7 +12368,9 @@ export async function sendZhilianMessage(
           'possible',
         )
       }
-      if (observed.matchingNewServerMessages === 1) {
+      // 即时观察路径必须携带命中行 sourceKey(契约 §4.5);缺失只算本轮未确认,绝不作成功。
+      if (observed.matchingNewServerMessages === 1 &&
+          typeof observed.matchedSourceKey === 'string' && SHA256_HEX.test(observed.matchedSourceKey)) {
         try {
           assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
         } catch (error) {
@@ -12381,6 +12387,7 @@ export async function sendZhilianMessage(
         return {
           conversationRef: args.conversationRef,
           contentHash,
+          sourceKey: observed.matchedSourceKey,
           observedAt,
           // 平台不提供可解析时间时字段缺席;禁止以本机时钟合成(契约 §4.5)。
           ...(typeof observed.matchedTimeMs === 'number' && observed.matchedTimeMs > 0

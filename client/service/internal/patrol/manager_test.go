@@ -493,16 +493,25 @@ func summary(ref, peer, preview string, unread int) protocol.ConversationSummary
 	}
 }
 
+// fixtureSourceKey 是测试夹具的确定性消息身份:同文即同一条消息(回显/重读
+// 恒等),模拟真机每行必有的 idServer 派生键。要在同一会话造"同文的两条不同
+// 消息",必须显式给行赋不同 SourceKey,不得复用本助手。
+func fixtureSourceKey(text string) string {
+	return syncledger.HashText("fixture-source|" + text)
+}
+
 func threadText(index int, text string) protocol.ThreadMessage {
 	return protocol.ThreadMessage{
 		Idx: index, Direction: protocol.MessageDirectionIn, Kind: protocol.MessageKindText,
 		Text: ptr(text), BlobRef: nil, ContentHash: syncledger.HashText(text),
+		SourceKey: fixtureSourceKey(text),
 	}
 }
 
 func draftText(text string) store.MessageDraft {
 	return store.MessageDraft{
 		Direction: "in", Kind: "text", Text: ptr(text), ContentHash: syncledger.HashText(text), Origin: "external",
+		SourceKey: ptr(fixtureSourceKey(text)),
 	}
 }
 
@@ -946,10 +955,15 @@ func TestEventFromNonBoundHandCannotInvalidateAccount(t *testing.T) {
 	}
 }
 
-func TestTrackedExpirySamePreviewAmbiguityDoesNotCreateFalseNew(t *testing.T) {
+// 2026-08-09 身份判新换根:同文两行在身份世界不再是歧义——同 key 是同一条
+// 消息(去重),异 key 是两条消息(第二条如实收编)。本测试从"宁可少投影"
+// 翻转为"身份消解歧义",原同文歧义审计随位置机器退役。
+func TestTrackedExpirySamePreviewDistinctIdentityAdoptsNew(t *testing.T) {
 	h := newHarness(t)
 	key := seedTracked(t, h, "same-preview", "peer-same", []store.MessageDraft{draftText("收到")})
 	h.clock.Add(31 * time.Minute)
+	repeated := threadText(1, "收到")
+	repeated.SourceKey = syncledger.HashText("fixture-source|收到|第二条")
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
@@ -959,7 +973,7 @@ func TestTrackedExpirySamePreviewAmbiguityDoesNotCreateFalseNew(t *testing.T) {
 			}, nil
 		case protocol.PrimChatReadThread:
 			return protocol.ChatReadThreadData{
-				Messages: []protocol.ThreadMessage{threadText(0, "收到"), threadText(1, "收到")},
+				Messages: []protocol.ThreadMessage{threadText(0, "收到"), repeated},
 				Complete: true, AnchorMatched: true,
 			}, nil
 		default:
@@ -971,20 +985,16 @@ func TestTrackedExpirySamePreviewAmbiguityDoesNotCreateFalseNew(t *testing.T) {
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
 		t.Fatalf("expiry reconciliation failed: %+v err=%v", result, err)
 	}
-	if h.runner.count(protocol.PrimChatReadThread) != 1 || result.ProjectionCount() != 0 {
-		t.Fatalf("同文边界歧义必须宁可少投影: calls=%v projection=%d", h.runner.names(), result.ProjectionCount())
+	if h.runner.count(protocol.PrimChatReadThread) != 1 || result.ProjectionCount() != 1 {
+		t.Fatalf("异 key 同文必须如实收编为新消息: calls=%v projection=%d", h.runner.names(), result.ProjectionCount())
 	}
 	messages, err := h.db.MessagesForConversation(key)
-	if err != nil || len(messages) != 1 {
+	if err != nil || len(messages) != 2 {
 		t.Fatalf("ledger = %+v err=%v", messages, err)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
-	if err != nil || len(rounds) != 1 || rounds[0].NewMessageCount != 0 {
-		t.Fatalf("同文歧义不得增加轮次消息计数: %+v err=%v", rounds, err)
-	}
-	audits, err := h.db.AuditEntries(20)
-	if err != nil || countAudit(audits, "conversation_alignment_ambiguous") == 0 {
-		t.Fatalf("同文歧义必须留审计: %+v err=%v", audits, err)
+	if err != nil || len(rounds) != 1 || rounds[0].NewMessageCount != 1 {
+		t.Fatalf("第二条同文是真实新消息,必须计数: %+v err=%v", rounds, err)
 	}
 }
 

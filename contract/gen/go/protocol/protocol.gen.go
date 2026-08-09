@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:9f1b9d52e279d0d679f842cce771f18cdc1a6a1551f19e3e3a940700f3720ebe"
+	ContractHash       = "sha256:f6afe9906eaaa7a546639ddbf864fea5eaf2ced681e8d589bee7242368237596"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"

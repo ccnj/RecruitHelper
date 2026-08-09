@@ -21,7 +21,7 @@ func TestAppendOutboundMessageProjectsOnlyPlatformEvidenceTime(t *testing.T) {
 		var message *Message
 		if err := s.db.Transaction(func(tx *gorm.DB) error {
 			var err error
-			message, err = appendOutboundMessageTx(tx, intent, text, contentHash, platformTsMs, at)
+			message, err = appendOutboundMessageTx(tx, intent, text, contentHash, platformTsMs, "", at)
 			return err
 		}); err != nil {
 			t.Fatalf("appendOutboundMessageTx: %v", err)

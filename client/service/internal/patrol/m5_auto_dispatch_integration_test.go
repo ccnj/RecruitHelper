@@ -225,7 +225,10 @@ func (h *m5PositiveHand) SendEnvelope(handID string, env protocol.Envelope) erro
 		data, err = protocol.Encode(protocol.ChatSendMessageData{
 			ConversationRef: args.ConversationRef,
 			ContentHash:     syncledger.HashText(args.Text),
-			ObservedAt:      h.observedAtMilli(),
+			// 每个 intent 一个唯一身份,模拟真手从命中行 idServer 派生;
+			// 同 intent 重放保持同 key,走 byIntent 幂等。
+			SourceKey:  syncledger.HashText("fake-source|" + body.IdemKey),
+			ObservedAt: h.observedAtMilli(),
 		})
 		evidenceType = string(protocol.SendMessageEvidenceTypeOutboundMessageObserved)
 	case protocol.PrimChatSendWechatInvite:

@@ -3,6 +3,7 @@ package patrol
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -136,6 +137,12 @@ func echoLedgerAsThread(
 		}
 		if row.SourceKey != nil {
 			out[index].SourceKey = *row.SourceKey
+		} else {
+			// 真实页面每行必有服务端身份;无身份的账本行(乐观判定、人工裁决
+			// 产物)在页面上对应一条有身份的行。按 seq 合成稳定键模拟它,
+			// 身份判新会经回配把这个键写回账本行。
+			out[index].SourceKey = syncledger.HashText(
+				"echo-source|" + key.ConversationRef + "|" + strconv.FormatInt(row.Seq, 10))
 		}
 		if row.TsApproxMs != nil {
 			value := *row.TsApproxMs

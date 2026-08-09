@@ -3,12 +3,14 @@ package patrol
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/store"
+	"recruithelper/client/service/internal/syncledger"
 	"recruithelper/contract/gen/go/protocol"
 )
 
@@ -35,6 +37,11 @@ func currentConversationThreadMessages(
 		}
 		if row.SourceKey != nil {
 			out[index].SourceKey = *row.SourceKey
+		} else {
+			// 同 echoLedgerAsThread:页面行必有身份,无身份账本行按 seq 合成
+			// 稳定键,身份判新经回配写回。
+			out[index].SourceKey = syncledger.HashText(
+				"echo-source|" + conversationRef + "|" + strconv.FormatInt(row.Seq, 10))
 		}
 		if row.TsApproxMs != nil {
 			value := *row.TsApproxMs
