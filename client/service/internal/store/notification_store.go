@@ -199,23 +199,42 @@ func (s *Store) NotificationsNeedingCapture(profileID string) ([]NotificationOut
 	return rows, nil
 }
 
-// HasNotificationsNeedingCapture 报告该候选人名下是否还有等着取证的通知。
-// 发件箱闸门据此判断"新一轮截图正在路上":二合一场景里,收编微信号与入队
-// 微信互加通知同事务发生,而那一轮新截图要十几秒才落库,闸门若只问"图存
-// 不存在",约面通知会抢在新图之前带着上一轮的旧图发出(2026-08-09 实测)。
-func (s *Store) HasNotificationsNeedingCapture(profileID string) (bool, error) {
-	var count int64
-	err := s.db.Model(&NotificationOutbox{}).
-		Where(
-			"profile_id = ? AND status = ? AND assets_requested_at IS NULL",
-			profileID,
-			NotificationStatusPending,
-		).
-		Count(&count).Error
-	if err != nil {
-		return false, err
+// NotificationCaptureGate 是发件箱闸门要的取证事实,回答"新一轮截图是不是
+// 还在路上"。一次事件到新图落库要经两段,闸门两段都得挡住(2026-08-09/10
+// 客户机实测):
+//
+//	事实入队 → 取证派发   Pending 挡:通知已入队,取证轮还没到访
+//	取证派发 → 新图落库   LastDispatchAt 挡:标记是先行的(防进程中断重复
+//	                      平台交互),落在拍图之前十几秒,只看标记会在新图
+//	                      落库前放行,发出上一次事件拍的旧图
+type NotificationCaptureGate struct {
+	Pending        bool
+	LastDispatchAt *time.Time
+}
+
+// NotificationCaptureGateForProfile 汇总该候选人的取证事实。每候选人的通知
+// 行至多两条,整取整扫比两条聚合查询更省事也更好读。
+func (s *Store) NotificationCaptureGateForProfile(profileID string) (NotificationCaptureGate, error) {
+	var rows []NotificationOutbox
+	if err := s.db.
+		Where("profile_id = ?", profileID).
+		Find(&rows).Error; err != nil {
+		return NotificationCaptureGate{}, err
 	}
-	return count > 0, nil
+	gate := NotificationCaptureGate{}
+	for _, row := range rows {
+		if row.Status == NotificationStatusPending && row.AssetsRequestedAt == nil {
+			gate.Pending = true
+		}
+		if row.AssetsRequestedAt == nil {
+			continue
+		}
+		if gate.LastDispatchAt == nil || row.AssetsRequestedAt.After(*gate.LastDispatchAt) {
+			dispatchedAt := *row.AssetsRequestedAt
+			gate.LastDispatchAt = &dispatchedAt
+		}
+	}
+	return gate, nil
 }
 
 // MarkNotificationsAssetsRequested 记录取证已派发(每通知至多一轮,失败不重拍)。

@@ -16,7 +16,7 @@ type Ledger interface {
 	TakePendingNotifications(limit int, maxAttempts int) ([]store.NotificationOutbox, error)
 	NotificationRenderSnapshotForProfile(profileID string) (*store.NotificationRenderSnapshot, error)
 	InterviewNotificationForProfile(profileID string) (*store.NotificationOutbox, error)
-	HasNotificationsNeedingCapture(profileID string) (bool, error)
+	NotificationCaptureGateForProfile(profileID string) (store.NotificationCaptureGate, error)
 	MarkNotificationSent(id uint64, sentWithWechat bool, at time.Time) error
 	MarkNotificationFailed(id uint64, lastError string, maxAttempts int, at time.Time) error
 	MarkNotificationSkipped(id uint64, reason string, at time.Time) error
@@ -112,14 +112,14 @@ func (r *Runner) Tick() tickSummary {
 			}
 			continue
 		}
-		// 待取证判定在取件时点一次性取,hold 日志与闸门用同一份事实:查询
-		// 失败按"没有待取证"处理,退回只看资产有无的旧行为,不阻塞发送。
-		pendingCapture, capErr := r.store.HasNotificationsNeedingCapture(row.ProfileID)
+		// 取证事实在取件时点一次性取,hold 日志与闸门用同一份:查询失败按
+		// "取证无事在身"处理,退回只看资产有无的旧行为,不阻塞发送。
+		gate, capErr := r.store.NotificationCaptureGateForProfile(row.ProfileID)
 		if capErr != nil {
-			slog.Warn("待取证通知查询失败,按无待取证处理", "notifyId", row.ID, "err", capErr)
-			pendingCapture = false
+			slog.Warn("取证事实查询失败,按无待取证处理", "notifyId", row.ID, "err", capErr)
+			gate = store.NotificationCaptureGate{}
 		}
-		verdict, supplement := r.decide(row, snapshot, pendingCapture, now)
+		verdict, supplement := r.decide(row, snapshot, gate, now)
 		switch verdict {
 		case decisionHold:
 			summary.Held++
@@ -131,7 +131,8 @@ func (r *Runner) Tick() tickSummary {
 					"type", row.NotifyType,
 					"profileId", row.ProfileID,
 					"missing", missingAssets(snapshot),
-					"pendingCapture", pendingCapture,
+					"pendingCapture", gate.Pending,
+					"stale", staleAssets(snapshot, gate.LastDispatchAt),
 				)
 			}
 			continue
@@ -204,7 +205,7 @@ const (
 func (r *Runner) decide(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
-	pendingCapture bool,
+	gate store.NotificationCaptureGate,
 	now time.Time,
 ) (decision, bool) {
 	supplement := false
@@ -215,7 +216,7 @@ func (r *Runner) decide(
 		}
 		supplement = isSupplement
 	}
-	return r.gateReady(row, snapshot, pendingCapture, now), supplement
+	return r.gateReady(row, snapshot, gate, now), supplement
 }
 
 // decideWechatAdded 第二个返回值表示"这条是约面通知的补号"——只在约面通知
@@ -275,20 +276,40 @@ func missingAssets(snapshot *store.NotificationRenderSnapshot) []string {
 	return missing
 }
 
-// gateReady 三样齐且没有待取证的通知才放行。pendingCapture 那一问是为了让
-// 图与事件对得上:通知入队后的取证只跑一轮,发件箱又是 30 秒轮询,只看"图
-// 存不存在"会让一条通知挑到上一次事件拍的旧图(二合一场景实测如此)。等的
-// 那轮取证若始终没跑成(会话未绑定、重开失败),15 分钟兜底照常放行,代价是
-// 图旧、通知晚,不影响正文完整。
+// staleAssets 报告哪几张图早于最近一次取证派发——那一轮的新图还没落库,此刻
+// 发出去带的是上一次事件拍的旧图。图缺失不算 stale(那归 missingAssets 管)。
+func staleAssets(
+	snapshot *store.NotificationRenderSnapshot,
+	dispatchedAt *time.Time,
+) []string {
+	if dispatchedAt == nil {
+		return nil
+	}
+	stale := []string{}
+	if snapshot.ChatShot != nil && snapshot.ChatShot.CreatedAt.Before(*dispatchedAt) {
+		stale = append(stale, "chat")
+	}
+	if snapshot.ResumeShot != nil && snapshot.ResumeShot.CreatedAt.Before(*dispatchedAt) {
+		stale = append(stale, "resume")
+	}
+	return stale
+}
+
+// gateReady 三样齐、且这一轮的新图确实已经落库,才放行。两道取证闸各挡一段
+// (见 store.NotificationCaptureGate):少挡任何一段,通知都会带着上一次事件拍
+// 的旧图发出——2026-08-10 客户机补号行 19 发的是前一天晚上那张。取证那轮若
+// 始终没跑成(会话未绑定、重开失败、截图命令本身失败),15 分钟兜底照常放行,
+// 代价是图旧、通知晚,不影响正文完整。
 func (r *Runner) gateReady(
 	row store.NotificationOutbox,
 	snapshot *store.NotificationRenderSnapshot,
-	pendingCapture bool,
+	gate store.NotificationCaptureGate,
 	now time.Time,
 ) decision {
 	missing := missingAssets(snapshot)
-	if len(missing) == 0 && !pendingCapture {
-		return decisionSend // 三样齐、新图不在路上:立即发
+	stale := staleAssets(snapshot, gate.LastDispatchAt)
+	if len(missing) == 0 && !gate.Pending && len(stale) == 0 {
+		return decisionSend // 三样齐、新图已就位:立即发
 	}
 	if now.Sub(row.CreatedAt) >= screenshotGateWindow {
 		slog.Warn(
@@ -297,7 +318,8 @@ func (r *Runner) gateReady(
 			"type", row.NotifyType,
 			"profileId", row.ProfileID,
 			"missing", missing,
-			"pendingCapture", pendingCapture,
+			"pendingCapture", gate.Pending,
+			"stale", stale,
 		)
 		return decisionSend
 	}
