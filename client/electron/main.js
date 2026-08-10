@@ -97,9 +97,12 @@ async function boot() {
     cwd: layout.brainCwd,
     env: brainEnv,
     onLog: writeLog,
+    onSpawnError: brainSpawnFailed,
   })
   service.start()
   const healthy = await service.waitHealthy(ADMIN_BASE)
+  // spawn 失败会在上面的等待期间弹窗并发起退出;这时不能再开一个没有脑的窗。
+  if (quitting) return
   if (!healthy) writeLog('[main] 脑服务未在期限内就绪')
 
   // 只认本次进程的 token:renderer 不传凭据,主进程用自己手上那份去问脑。
@@ -107,6 +110,31 @@ async function boot() {
 
   createWindow(adminToken, layout.uiEntry)
   createTray()
+}
+
+/**
+ * 脑进程本身拉不起来时的硬失败出口。
+ *
+ * 与"二进制缺失"同款处置:弹中文提示后整体退出,不留一个开了窗却没有脑的壳。
+ * 2026-08-10 客户机真机现场:升级后 Windows Defender 误报隔离脑二进制,先拦
+ * 执行(spawn UNKNOWN)再删文件 —— 拦执行这一步以前没人接住,用户看到的是
+ * Electron 的英文原始异常框。文件明明在却拒绝运行,最常见的原因就是杀软拦截,
+ * 提示必须直接把这个原因和处置路径说出来。
+ */
+function brainSpawnFailed(error) {
+  const detail = String(error?.message || error)
+  writeLog(`[main] 脑服务进程启动失败:${detail}`)
+  // 正常退出路径上的进程错误不值得弹窗吓人,记日志就够。
+  if (quitting) return
+  quitting = true
+  dialog.showErrorBox(
+    'AI增员助手无法启动',
+    `脑服务无法启动(${detail})。\n\n` +
+      '程序文件在,但系统拒绝运行它,最常见的原因是被杀毒软件拦截或误报。\n' +
+      '请检查杀毒软件的拦截记录(Windows 安全中心 → 病毒和威胁防护 → ' +
+      '保护历史记录):将安装目录加入排除项,还原被隔离的文件,再重新打开本程序。',
+  )
+  app.quit()
 }
 
 /**

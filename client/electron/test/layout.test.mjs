@@ -82,6 +82,13 @@ check(
   threw !== null && /安装包不完整/.test(String(threw.message)),
   '错误信息指出安装包不完整',
 )
+// 2026-08-10 真机现场:文件缺失的实际成因是杀毒软件隔离删除。提示必须点名
+// 这个原因并给出处置路径,否则现场只会反复重装、反复被隔离。
+check(
+  threw !== null && /杀毒软件/.test(String(threw.message)) &&
+    /排除项/.test(String(threw.message)),
+  '错误信息点名杀毒软件误报并给出排除项指引',
+)
 
 // 打包态即使带着 BRAIND_BIN 也不得改用它:包只信自己携带的二进制。
 let threwWithOverride = null
