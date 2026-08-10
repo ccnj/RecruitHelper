@@ -1024,6 +1024,35 @@ func TestUnreadBadgeReadFailureFallsBackToAllPass(t *testing.T) {
 	}
 }
 
+// 角标读是本轮第一条命令:它带回的掉登录信号必须与 readList 失败同款当轮
+// 暂停账号并置身份失效,不能只失败轮、等 probe 到期才暂停。
+func TestUnreadBadgeReadLoginRequiredPausesAccount(t *testing.T) {
+	h := newHarness(t)
+	h.runner.mu.Lock()
+	h.runner.unreadBadgeServed = false
+	h.runner.mu.Unlock()
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadUnreadTotal {
+			return nil, &RunError{
+				Code: protocol.ErrCodeCtxNotReady, Reason: protocol.NotReadyReasonLoginRequired,
+				Retryable: protocol.RetryableManualOnly, SideEffect: protocol.SideEffectNone,
+				Cause: errors.New("智联账号已退出登录"),
+			}
+		}
+		return defaultHandler(request)
+	}
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
+		t.Fatalf("掉登录应失败本轮: result=%+v err=%v", result, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.StoppedAt == nil ||
+		account.PausedReason != PauseLoginRequired ||
+		account.IdentityState != store.IdentityInvalid {
+		t.Fatalf("掉登录未当轮暂停并置身份失效: account=%+v err=%v", account, err)
+	}
+}
+
 func TestUnreadChangedTotalCanReenterWithinSameActor(t *testing.T) {
 	h := newHarness(t)
 	setUnreadHintForTest(h, ptr(1))

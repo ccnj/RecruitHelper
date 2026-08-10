@@ -1913,6 +1913,9 @@ func (a *roundActor) beginUnreadPass(ctx context.Context, at string) (bool, erro
 		// 真人活跃不终止本轮:紧随其后的列表读会得到同一信号并走既有收束。
 		if classifyConversationFailure(err) == failureScopeRoundFatal &&
 			!isRunError(err, protocol.ErrCodeUserActive) {
+			// 角标读是本轮第一条命令,掉登录/身份不符等账号级信号必须与
+			// readList 失败同款落 pause/身份置位,不能只失败轮等 probe 到期。
+			a.handleCommandFailure(err)
 			return false, err
 		}
 		a.noteUnreadDecision(at, "读数命令失败:"+conversationFailureClass(err), nil, false)
