@@ -10,7 +10,6 @@ import (
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/patrol"
-	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -394,12 +393,12 @@ func resultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	}
 }
 
-// HandAvailability deliberately exposes only the active hand generation and
-// its stable unread sensor. Actor policy cannot reach tabs, selectors or other
-// hand internals.
+// HandAvailability deliberately exposes only the active hand generation.
+// Actor policy cannot reach tabs, selectors or other hand internals; unread
+// awareness now flows through the chat.readUnreadTotal command path
+// (2026-08-10), not this sensor projection.
 type handAvailabilityHub interface {
 	HandSession(string) (string, string, bool)
-	Registry() *session.Registry
 }
 
 type HandAvailability struct {
@@ -411,17 +410,5 @@ func (h HandAvailability) State(_ context.Context, handID string) (patrol.HandSt
 		return patrol.HandState{}, errors.New("hub 不能为空")
 	}
 	sessionID, bootID, online := h.Hub.HandSession(handID)
-	state := patrol.HandState{Online: online, Session: sessionID, BootID: bootID}
-	if !online {
-		return state, nil
-	}
-	registered, ok := h.Hub.Registry().Get(handID)
-	if !ok || !registered.Online ||
-		registered.SessionID != sessionID || registered.BootID != bootID ||
-		registered.Sensors == nil || registered.Sensors.UnreadTotal == nil {
-		return state, nil
-	}
-	value := registered.Sensors.UnreadTotal.Value
-	state.UnreadTotal = &value
-	return state, nil
+	return patrol.HandState{Online: online, Session: sessionID, BootID: bootID}, nil
 }

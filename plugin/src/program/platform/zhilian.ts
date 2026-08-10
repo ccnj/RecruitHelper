@@ -4,6 +4,7 @@
 import type { PrimitiveContext } from '../registry'
 import { beginCommandNavigation } from '../../base/navigation'
 import { reportHandLog } from '../../base/handLog'
+import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
@@ -31,6 +32,7 @@ import type {
   ChatIdentifyCurrentConversationData,
   ChatReadListArgs,
   ChatReadListData,
+  ChatReadUnreadTotalData,
   ChatReadThreadArgs,
   ChatReadThreadData,
   ChatReadPeerPhoneArgs,
@@ -4636,6 +4638,33 @@ async function assertCurrentThreadRoute(
   }
   assertExpectedPrincipal(await probeTab(current), expectedPrincipalFingerprint)
   return current
+}
+
+// mainReadZhilianUnreadBadge 只把角标节点的在场与原始文本带回；解析统一走
+// parseZhilianUnreadBadgeText,与被动传感共用同一口径。注入函数必须自包含,
+// 选择器经参数传入。
+function mainReadZhilianUnreadBadge(selector: string): { found: boolean; text: string } {
+  const element = document.querySelector(selector)
+  if (!element) return { found: false, text: '' }
+  return { found: true, text: element.textContent ?? '' }
+}
+
+export async function readZhilianUnreadTotalNow(
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<ChatReadUnreadTotalData> {
+  const tab = await canonicalZhilianTab()
+  if (!tab) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '没有已打开的智联页面', 'afterRecovery', 'pageAbsent')
+  }
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', 'canonical 标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  const badge = await runMain(tab.id, mainReadZhilianUnreadBadge, [ZHILIAN_UNREAD_BADGE_SELECTOR])
+  return {
+    total: badge.found ? parseZhilianUnreadBadgeText(badge.text) : null,
+    observedAt: Date.now(),
+  }
 }
 
 export async function identifyZhilianCurrentConversation(

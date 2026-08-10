@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
-	"time"
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/patrol"
-	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/contract/gen/go/protocol"
 )
@@ -149,65 +147,31 @@ func TestResultDataRejectsTerminalWithoutResult(t *testing.T) {
 }
 
 type handAvailabilityTestHub struct {
-	registry *session.Registry
-	session  string
-	bootID   string
-	online   bool
+	session string
+	bootID  string
+	online  bool
 }
 
 func (h *handAvailabilityTestHub) HandSession(string) (string, string, bool) {
 	return h.session, h.bootID, h.online
 }
 
-func (h *handAvailabilityTestHub) Registry() *session.Registry {
-	return h.registry
-}
-
-func TestHandAvailabilityOnlyPassesUnreadForActiveGeneration(t *testing.T) {
-	registry := session.NewRegistry(protocol.DefaultHbGraceMs)
-	registry.Online(
-		"hand-availability",
-		"session-availability",
-		"boot-availability",
-		nil,
-		nil,
-		time.Now(),
-	)
-	if ok := registry.HeartbeatReport(
-		"hand-availability",
-		"session-availability",
-		"boot-availability",
-		protocol.PingBody{
-			Sensors: &protocol.PingSensors{
-				UnreadTotal: &protocol.SensorReading{Value: 7},
-			},
-		},
-		time.Now(),
-	); !ok {
-		t.Fatal("同代心跳未被注册表接受")
-	}
+func TestHandAvailabilityProjectsGenerationOnly(t *testing.T) {
 	hub := &handAvailabilityTestHub{
-		registry: registry,
-		session:  "session-availability",
-		bootID:   "boot-availability",
-		online:   true,
+		session: "session-availability",
+		bootID:  "boot-availability",
+		online:  true,
 	}
 	availability := HandAvailability{Hub: hub}
 	got, err := availability.State(context.Background(), "hand-availability")
-	if err != nil || !got.Online || got.UnreadTotal == nil || *got.UnreadTotal != 7 {
-		t.Fatalf("同代未读传感未透传: state=%+v err=%v", got, err)
+	if err != nil || !got.Online ||
+		got.Session != "session-availability" || got.BootID != "boot-availability" {
+		t.Fatalf("手代际投影错误: state=%+v err=%v", got, err)
 	}
 
-	registry.Online(
-		"hand-availability",
-		"different-session",
-		"different-boot",
-		nil,
-		nil,
-		time.Now(),
-	)
+	hub.online = false
 	got, err = availability.State(context.Background(), "hand-availability")
-	if err != nil || !got.Online || got.UnreadTotal != nil {
-		t.Fatalf("注册表代际错配时仍透传传感: state=%+v err=%v", got, err)
+	if err != nil || got.Online {
+		t.Fatalf("离线状态未透传: state=%+v err=%v", got, err)
 	}
 }

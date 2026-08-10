@@ -296,7 +296,7 @@ func TestPatrolClassificationCorrectionPausesSuccessfullyBeforeM5(t *testing.T) 
 	if len(h.manager.advice.(*recordingAdviceExecutor).requests) != 0 {
 		t.Fatal("成功修正后不得调用 AI 建议层")
 	}
-	if names := h.runner.names(); len(names) != 2 || names[0] != protocol.PrimChatReadList ||
+	if names := h.runner.businessNames(); len(names) != 2 || names[0] != protocol.PrimChatReadList ||
 		names[1] != protocol.PrimChatReadThread {
 		t.Fatalf("成功修正后不得继续派发其他原语: %v", names)
 	}

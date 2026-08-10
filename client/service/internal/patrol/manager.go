@@ -49,19 +49,6 @@ type Manager struct {
 	// conversation-list hints. It is accessed only while mu is held and is
 	// intentionally absent from persistence, diagnostics and product APIs.
 	verifiedListHints map[listHintVerificationKey]string
-	// unreadPassEndTotalByPrincipal remembers the stable sidebar unread total
-	// observed after the last complete unread pass. It is process-local
-	// scheduling memory only. A missing value means the next positive total may
-	// enter once; zero removes the baseline.
-	//
-	// The map is accessed only while mu is held. Principal is part of the key so
-	// an account rebind can never inherit the previous recruiter's unread work.
-	unreadPassEndTotalByPrincipal map[unreadBaselineKey]int
-}
-
-type unreadBaselineKey struct {
-	Account   store.AccountKey
-	Principal string
 }
 
 func NewManager(db *store.Store, runner Runner, hands HandAvailability, config Config, advice ...AdviceExecutor) (*Manager, error) {
@@ -83,9 +70,8 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 	}
 	manager := &Manager{
 		store: db, runner: runner, hands: hands, config: config,
-		startedAt:                     config.Clock.Now(),
-		verifiedListHints:             make(map[listHintVerificationKey]string),
-		unreadPassEndTotalByPrincipal: make(map[unreadBaselineKey]int),
+		startedAt:         config.Clock.Now(),
+		verifiedListHints: make(map[listHintVerificationKey]string),
 	}
 	if len(advice) > 0 {
 		manager.advice = advice[0]
@@ -412,13 +398,12 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return err
 		}
-		// The stable total is a scheduling hint only. A positive value pulls the
-		// patrol forward exactly when it differs from the last complete unread
-		// pass; a stable zero clears that process-local baseline.
-		pullForward := m.unreadPassNeeded(account, &data.Value)
+		// 角标事件只剩一个用途:正数拉前下一轮巡检(2026-08-10 甲方裁决,插队
+		// 判定改由 chat.readUnreadTotal 现场读承担)。事件是提示不是账本,重复
+		// 拉前由 CoalesceWindow 吸收。
 		if err := m.store.MutateAccount(key, func(account *store.Account) error {
 			account.DirtyHint = true
-			if pullForward {
+			if data.Value > 0 {
 				m.pullForward(account, now, m.config.CoalesceWindow)
 			}
 			return nil
@@ -489,84 +474,6 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 	}
 }
 
-// unreadPassNeeded compares the current stable sidebar total with the total
-// observed after the last complete unread pass. It owns no business decision:
-// true only authorizes entering the unread page at the next safe candidate
-// boundary. A stable zero clears the old baseline; a missing value leaves it
-// unchanged.
-//
-// Caller must hold Manager.mu.
-func (m *Manager) unreadPassNeeded(account *store.Account, unread *int) bool {
-	needed, _, _ := m.unreadPassDecision(account, unread)
-	return needed
-}
-
-// unreadPassDecision 在给出结论的同时交出它依据的两个输入与拒绝原因，供诊断
-// 日志还原"插队为何没发生"。四种不插队的成因后果完全不同——读不到是传感通道
-// 断了（要修通道）、同值是基线卡住（要看子轮为何没收尾）、零值是真的没未读
-// （正常）、身份缺失是账号未就绪——但它们在外部表现上一模一样，不区分就只能
-// 靠猜。副作用（稳定零清基线）仍只在此发生一次。
-//
-// Caller must hold Manager.mu.
-func (m *Manager) unreadPassDecision(
-	account *store.Account,
-	unread *int,
-) (needed bool, reason string, baseline *int) {
-	key, ok := unreadBaselineKeyForAccount(account)
-	if !ok {
-		return false, "身份未就绪", nil
-	}
-	last, exists := m.unreadPassEndTotalByPrincipal[key]
-	if exists {
-		value := last
-		baseline = &value
-	}
-	if unread == nil {
-		return false, "读不到", baseline
-	}
-	if *unread < 0 {
-		return false, "读数非法", baseline
-	}
-	if *unread == 0 {
-		delete(m.unreadPassEndTotalByPrincipal, key)
-		return false, "零未读", baseline
-	}
-	if exists && last == *unread {
-		return false, "与基线同值", baseline
-	}
-	return true, "进入未读子轮", baseline
-}
-
-// recordUnreadPassEnd records only the stable total observed after a complete
-// unread pass. A stable zero removes the baseline so a later positive total is
-// treated as new work. Missing or invalid values cannot fabricate completion.
-//
-// Caller must hold Manager.mu.
-func (m *Manager) recordUnreadPassEnd(account *store.Account, unread *int) bool {
-	key, ok := unreadBaselineKeyForAccount(account)
-	if !ok || unread == nil || *unread < 0 {
-		return false
-	}
-	if *unread == 0 {
-		delete(m.unreadPassEndTotalByPrincipal, key)
-		return true
-	}
-	m.unreadPassEndTotalByPrincipal[key] = *unread
-	return true
-}
-
-func unreadBaselineKeyForAccount(account *store.Account) (unreadBaselineKey, bool) {
-	if account == nil || account.Platform == "" || account.AccountRef == "" ||
-		account.PrincipalFingerprint == nil || *account.PrincipalFingerprint == "" {
-		return unreadBaselineKey{}, false
-	}
-	return unreadBaselineKey{
-		Account: store.AccountKey{
-			Platform: account.Platform, AccountRef: account.AccountRef,
-		},
-		Principal: *account.PrincipalFingerprint,
-	}, true
-}
 
 // Tick runs every due online account synchronously. An offline account creates
 // no PatrolRound and therefore cannot leave queued business work behind.

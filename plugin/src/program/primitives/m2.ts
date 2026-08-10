@@ -8,6 +8,7 @@ import {
   ChatReadListData,
   ChatReadThreadArgs,
   ChatReadThreadData,
+  ChatReadUnreadTotalData,
   CmdClass,
   NavEnsureSurfaceArgs,
   NavEnsureSurfaceData,
@@ -22,6 +23,7 @@ import {
   probeZhilian,
   readZhilianList,
   readZhilianThread,
+  readZhilianUnreadTotalNow,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
 } from '../platform/zhilian'
@@ -146,6 +148,22 @@ const openConversation: Primitive = {
   },
 }
 
+const readUnreadTotal: Primitive = {
+  name: PrimitiveName.ChatReadUnreadTotal,
+  class: CmdClass.Readonly,
+  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      assertZhilianContext(ctx.commandContext)
+      const data: ChatReadUnreadTotalData = await readZhilianUnreadTotalNow(
+        ctx.commandContext?.expectedPrincipalFingerprint,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 const readThread: Primitive = {
   name: PrimitiveName.ChatReadThread,
   class: CmdClass.Intrusive,
@@ -173,6 +191,7 @@ export function registerM2Primitives(): void {
   register(ensureSurface)
   register(readList)
   register(identifyCurrentConversation)
+  register(readUnreadTotal)
   register(openConversation)
   register(readThread)
 }
