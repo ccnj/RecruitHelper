@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:f6afe9906eaaa7a546639ddbf864fea5eaf2ced681e8d589bee7242368237596"
+	ContractHash       = "sha256:e753018f86b9a35ac42ea75ae547c85f5fa918ad517f365909bda97ba7c2e242"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -811,6 +811,7 @@ const (
 	PrimChatReadList                      = "chat.readList"
 	PrimChatReadPeerPhone                 = "chat.readPeerPhone"
 	PrimChatReadThread                    = "chat.readThread"
+	PrimChatReadUnreadTotal               = "chat.readUnreadTotal"
 	PrimChatReadWechatExchangeOutcome     = "chat.readWechatExchangeOutcome"
 	PrimChatRevealPeerPhone               = "chat.revealPeerPhone"
 	PrimChatSendGreeting                  = "chat.sendGreeting"
@@ -869,6 +870,7 @@ var Primitives = map[string]PrimitiveMeta{
 	PrimChatReadList:                      {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 60000, ArgsSchema: "ChatReadListArgs", DataSchema: "ChatReadListData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatReadPeerPhone:                 {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ChatReadPeerPhoneArgs", DataSchema: "ChatReadPeerPhoneData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatReadThread:                    {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "idempotentReadReceipt", ExecBudgetMs: 240000, DeadlineMs: 300000, LeaseMs: 30000, ArgsSchema: "ChatReadThreadArgs", DataSchema: "ChatReadThreadData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
+	PrimChatReadUnreadTotal:               {Ver: 1, Class: ClassReadonly, Batch: BatchS, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "ChatReadUnreadTotalArgs", DataSchema: "ChatReadUnreadTotalData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatReadWechatExchangeOutcome:     {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 30000, DeadlineMs: 300000, LeaseMs: 0, ArgsSchema: "ChatReadWechatExchangeOutcomeArgs", DataSchema: "ChatReadWechatExchangeOutcomeData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatRevealPeerPhone:               {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "idempotentPhoneReveal", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 15000, ArgsSchema: "ChatReadPeerPhoneArgs", DataSchema: "ChatReadPeerPhoneData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimChatSendGreeting:                  {Ver: 1, Class: ClassEffectful, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 60000, DeadlineMs: 600000, LeaseMs: 30000, ArgsSchema: "ChatSendGreetingArgs", DataSchema: "ChatSendGreetingData", GuardsSchema: "ChatSendGreetingGuards", EvidenceSchema: "ChatSendGreetingEvidence", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "candidate.selected", "relationship.unestablished", "witness/1"}, VerificationPrimitive: "chat.readGreetingOutcome", VerificationVer: 1, VerificationMaxRounds: 3, ContextOptionalBeforeBinding: false},

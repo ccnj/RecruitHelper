@@ -479,6 +479,17 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "ChatReadUnreadTotalArgs": {
+        "type": "object",
+        "fields": {}
+      },
+      "ChatReadUnreadTotalData": {
+        "type": "object",
+        "fields": {
+          "total": { "type": "int", "nullable": true, "minimum": 0, "maximum": 1000000 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "ChatOpenConversationArgs": {
         "type": "object",
         "fields": {
@@ -1357,6 +1368,13 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in"],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "只从唯一已打开且身份匹配的 IM 标签页公开 URL 读取当前 conversationRef;不搜索、不滚动、不点击、不切换会话。零个或多个 IM 标签页、URL 无当前会话或读取前后路由漂移均失败"
+    },
+    "chat.readUnreadTotal": {
+      "ver": 1, "class": "readonly", "batch": "S",
+      "argsSchema": "ChatReadUnreadTotalArgs", "dataSchema": "ChatReadUnreadTotalData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"],
+      "execBudgetMs": 5000, "deadlineMs": 30000,
+      "note": "当场读取平台侧边菜单的 IM 未读总角标并原样返回:total=null 仅表示角标节点缺席(读不到),0 是页面明确呈现的零未读,截断展示(如 99+)按前导数字保守向多取。不点击、不滚动、不切换页面。该读数是低保真调度提示,只授权脑决定是否进入未读筛选对账;不得作为任何 effectful 动作的前置正证、消息账本事实或验证读替代。读不到与命令失败的失效方向一律是不进入未读筛选。不要求 surface.im:菜单总角标在平台各页面常驻"
     },
     "chat.openConversation": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
