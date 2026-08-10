@@ -47,6 +47,20 @@ check(!svc.running(), 'stop 后进程已停')
 const afterStop = await fetch(adminBase + '/admin/health').then(() => true).catch(() => false)
 check(afterStop === false, 'stop 后服务不再响应')
 
+// spawn 本身失败(二进制被杀毒软件拦截/不存在)必须走 onSpawnError 回调,
+// 而不是未捕获异常 —— 2026-08-10 客户机现场,用户看到的是 Electron 英文
+// 异常框 "Error: spawn UNKNOWN"。回调没接住的话本测试进程会直接崩掉。
+const spawnErrors = []
+const bad = new BrainService({
+  bin: join(tmpdir(), `no-such-brain-${process.pid}`),
+  onLog: () => {},
+  onSpawnError: (e) => spawnErrors.push(e),
+})
+bad.start()
+await new Promise((res) => setTimeout(res, 300))
+check(spawnErrors.length === 1, 'spawn 失败触发一次 onSpawnError')
+check(!bad.running(), 'spawn 失败后 running() 为假')
+
 console.log(fail === 0 ? '\nALL PASS' : `\n${fail} FAIL`)
 if (ownedDir) rmSync(ownedDir, { recursive: true, force: true })
 process.exit(fail === 0 ? 0 : 1)
