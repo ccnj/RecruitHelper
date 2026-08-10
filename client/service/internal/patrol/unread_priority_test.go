@@ -16,15 +16,10 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
+// setUnreadHintForTest 声明模拟页面的角标读数:chat.readUnreadTotal 现场读
+// 会读到它。nil 模拟角标节点缺席(读不到)。
 func setUnreadHintForTest(h *harness, unread *int) {
-	state := HandState{
-		Online: true, Session: "session-1", BootID: "boot-1",
-	}
-	if unread != nil {
-		value := *unread
-		state.UnreadTotal = &value
-	}
-	h.hands.set(state)
+	h.runner.setUnreadBadge(unread)
 }
 
 func unreadListFilters(t *testing.T, h *harness) []protocol.ChatReadListArgs {
@@ -868,7 +863,6 @@ func TestUnreadPriorityGenerationChangeStops(t *testing.T) {
 		if request.Name == protocol.PrimChatReadList {
 			h.hands.set(HandState{
 				Online: true, Session: "replacement-session", BootID: "replacement-boot",
-				UnreadTotal: ptr(1),
 			})
 			return protocol.ChatReadListData{
 				Sessions: []protocol.ConversationSummary{
@@ -887,7 +881,10 @@ func TestUnreadPriorityGenerationChangeStops(t *testing.T) {
 	}
 }
 
-func TestUnreadCompletePassWithRetainedRowsRecordsBaseline(t *testing.T) {
+// 角标一直停在 3、打开也不清行的病态残留:同一轮内该行只开一次(指纹认领),
+// 紧随其后的白跑把轮内重入封死(白跑记号),不会每个边界都钻一趟。下一轮记号
+// 归零,固定打开再来一次——按 2026-08-10 设计,残留行的代价上限是每轮一开。
+func TestUnreadRetainedRowFruitlessPassSealsReentry(t *testing.T) {
 	h := newHarness(t)
 	setUnreadHintForTest(h, ptr(3))
 	retained := summary("unread-retained", "peer-unread-retained", "旧未读", 1)
@@ -901,9 +898,6 @@ func TestUnreadCompletePassWithRetainedRowsRecordsBaseline(t *testing.T) {
 		case protocol.PrimChatReadList:
 			args := decodeArgs[protocol.ChatReadListArgs](t, request)
 			if args.Filter == protocol.ListFilterUnread {
-				// Opening the target does not remove its row. The second fresh
-				// read sees the same retained row and completes by attempted-ref,
-				// not by waiting for an empty list.
 				return protocol.ChatReadListData{
 					Sessions: []protocol.ConversationSummary{retained},
 					Complete: true,
@@ -925,25 +919,108 @@ func TestUnreadCompletePassWithRetainedRowsRecordsBaseline(t *testing.T) {
 
 	requireUnreadRoundOK(t, h)
 	if h.runner.count(protocol.PrimChatOpenConversation) != 1 {
-		t.Fatalf("保留行在同一未读子轮被重复打开: %v", h.runner.names())
+		t.Fatalf("保留行在同一轮被重复打开: %v", h.runner.names())
 	}
 	first := unreadListFilters(t, h)
-	if countListFilter(first, protocol.ListFilterUnread) != 1 ||
+	// 轮首有认领的一趟 + 首个边界的白跑一趟 = 恰好两次未读读取;白跑记号
+	// 生效后,其余边界(普通行还剩两个)不再产生第三趟。
+	if countListFilter(first, protocol.ListFilterUnread) != 2 ||
 		first[len(first)-1].Filter != protocol.ListFilterAll {
-		t.Fatalf("未读保留行没有完整遍历并切回全部列表: %+v", first)
+		t.Fatalf("白跑一趟后没有封死轮内重入: %+v", first)
 	}
 
 	h.clock.Add(h.config.PatrolInterval)
 	before := len(first)
 	requireUnreadRoundOK(t, h)
 	after := unreadListFilters(t, h)
-	for _, args := range after[before:] {
-		if args.Filter == protocol.ListFilterUnread {
-			t.Fatalf("结束气泡数仍为 3 时重复插队: %+v", after[before:])
+	if countListFilter(after[before:], protocol.ListFilterUnread) != 2 {
+		t.Fatalf("下一轮应重新一开一封: %+v", after[before:])
+	}
+	if h.runner.count(protocol.PrimChatOpenConversation) != 2 {
+		t.Fatalf("残留行的固定打开应每轮至多一次: %v", h.runner.names())
+	}
+}
+
+// 连环回复同轮再插队(2026-08-10 甲方裁决的核心诉求):同一候选人第二次回复
+// 使行指纹变化,"已试过"不再挡道,下一个边界照常再进再处理。
+func TestUnreadRepeatReplySameRoundIsPreemptedAgain(t *testing.T) {
+	h := newHarness(t)
+	seedTracked(t, h, "unread-repeat", "peer-unread-repeat", []store.MessageDraft{
+		draftText("老话"),
+	})
+	setUnreadHintForTest(h, ptr(1))
+	unreadReads := 0
+	ordinary := summary("ordinary-idle", "peer-ordinary-idle", "闲聊", 0)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		switch request.Name {
+		case protocol.PrimChatReadList:
+			args := decodeArgs[protocol.ChatReadListArgs](t, request)
+			if args.Filter == protocol.ListFilterUnread {
+				unreadReads++
+				preview := "回复一"
+				if unreadReads >= 2 {
+					preview = "回复二"
+				}
+				return protocol.ChatReadListData{
+					Sessions: []protocol.ConversationSummary{
+						summary("unread-repeat", "peer-unread-repeat", preview, 1),
+					},
+					Complete: true,
+				}, nil
+			}
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{ordinary}, Complete: true,
+			}, nil
+		case protocol.PrimChatOpenConversation:
+			args := decodeArgs[protocol.ChatOpenConversationArgs](t, request)
+			return protocol.ChatOpenConversationData{
+				ConversationRef: args.ConversationRef, ObservedAt: h.clock.Now().UnixMilli(),
+			}, nil
+		case protocol.PrimChatReadThread:
+			messages := []protocol.ThreadMessage{threadText(0, "老话"), threadText(1, "回复一")}
+			if unreadReads >= 2 {
+				messages = append(messages, threadText(2, "回复二"))
+			}
+			return protocol.ChatReadThreadData{
+				Messages: messages, Complete: true, ReachedTop: true,
+			}, nil
+		default:
+			return defaultHandler(request)
 		}
 	}
-	if h.runner.count(protocol.PrimChatOpenConversation) != 1 {
-		t.Fatalf("同值基线下残留行被再次打开: %v", h.runner.names())
+
+	requireUnreadRoundOK(t, h)
+	if got := h.runner.count(protocol.PrimChatOpenConversation); got != 2 {
+		t.Fatalf("第二次回复没有在同轮再次插队处理: opens=%d calls=%v", got, h.runner.names())
+	}
+	messages, err := h.db.MessagesForConversation(store.ConversationKey{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef, ConversationRef: "unread-repeat",
+	})
+	if err != nil || len(messages) != 3 {
+		t.Fatalf("两次回复没有都进账本: n=%d err=%v", len(messages), err)
+	}
+}
+
+// 读数命令失败(含旧插件不认识该原语的场景)一律"不进",全量轮照常兜底,
+// 轮不失败——插队失灵的方向只许是慢,不许是停。
+func TestUnreadBadgeReadFailureFallsBackToAllPass(t *testing.T) {
+	h := newHarness(t)
+	h.runner.mu.Lock()
+	h.runner.unreadBadgeServed = false
+	h.runner.mu.Unlock()
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadUnreadTotal {
+			return nil, &RunError{
+				Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableYes,
+				SideEffect: protocol.SideEffectNone, Cause: errors.New("旧插件不认识该原语"),
+			}
+		}
+		return defaultHandler(request)
+	}
+	requireUnreadRoundOK(t, h)
+	got := unreadListFilters(t, h)
+	if len(got) != 1 || got[0].Filter != protocol.ListFilterAll {
+		t.Fatalf("读数失败应退化为纯全量轮: %+v", got)
 	}
 }
 
@@ -1202,28 +1279,21 @@ func TestUnreadFirstPositiveEventPullsForwardAndStartsUnreadPass(t *testing.T) {
 	if err := h.manager.HandleEvent(
 		"hand-1",
 		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
-			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
-		}),
-	); err != nil {
-		t.Fatalf("同值事件失败: %v", err)
-	}
-	account, err = h.db.AccountByKey(h.key)
-	if err != nil || account == nil || account.NextPatrolAt == nil {
-		t.Fatalf("读取同值事件后状态失败: account=%+v err=%v", account, err)
-	}
-	if !account.NextPatrolAt.Equal(regularNext) {
-		t.Fatalf("与结束基线相同的事件错误拉前: got=%v want=%v",
-			account.NextPatrolAt, regularNext)
-	}
-
-	if err := h.manager.HandleEvent(
-		"hand-1",
-		eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
 			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 0,
 		}),
 	); err != nil {
 		t.Fatalf("零值事件失败: %v", err)
 	}
+	account, err = h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.NextPatrolAt == nil {
+		t.Fatalf("读取零值事件后状态失败: account=%+v err=%v", account, err)
+	}
+	if !account.NextPatrolAt.Equal(regularNext) {
+		t.Fatalf("零值事件不该拉前: got=%v want=%v", account.NextPatrolAt, regularNext)
+	}
+
+	// 任何正数事件都拉前(2026-08-10):插队判定改由现场读命令承担,事件不再
+	// 与基线比对,同值正数照样是"有动静"的提示。
 	prev = 0
 	if err := h.manager.HandleEvent(
 		"hand-1",
@@ -1231,7 +1301,7 @@ func TestUnreadFirstPositiveEventPullsForwardAndStartsUnreadPass(t *testing.T) {
 			Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
 		}),
 	); err != nil {
-		t.Fatalf("零值后正数事件失败: %v", err)
+		t.Fatalf("正数事件失败: %v", err)
 	}
 	account, err = h.db.AccountByKey(h.key)
 	if err != nil || account == nil || account.LastPatrolAt == nil ||
@@ -1240,7 +1310,7 @@ func TestUnreadFirstPositiveEventPullsForwardAndStartsUnreadPass(t *testing.T) {
 	}
 	wantNext = account.LastPatrolAt.Add(h.config.MinimumRoundGap)
 	if !account.NextPatrolAt.Equal(wantNext) {
-		t.Fatalf("零值清基线后同一正数没有重新拉前: got=%v want=%v",
+		t.Fatalf("正数事件没有重新拉前: got=%v want=%v",
 			account.NextPatrolAt, wantNext)
 	}
 }
@@ -1422,10 +1492,11 @@ func TestUnreadClassificationCorrectionStopsInPlace(t *testing.T) {
 	if err != nil || account.StoppedAt == nil || account.PausedReason != PauseUserRequested {
 		t.Fatalf("成功修正后必须 userPaused 等待人工继续: account=%+v err=%v", account, err)
 	}
-	if names := h.runner.names(); len(names) != 3 ||
-		names[0] != protocol.PrimChatReadList ||
-		names[1] != protocol.PrimChatOpenConversation ||
-		names[2] != protocol.PrimChatReadThread {
+	if names := h.runner.names(); len(names) != 4 ||
+		names[0] != protocol.PrimChatReadUnreadTotal ||
+		names[1] != protocol.PrimChatReadList ||
+		names[2] != protocol.PrimChatOpenConversation ||
+		names[3] != protocol.PrimChatReadThread {
 		t.Fatalf("修正后不得继续派发其他原语(尤其收口全量读): %v", names)
 	}
 	if got := unreadListFilters(t, h); countListFilter(got, protocol.ListFilterAll) != 0 {

@@ -64,6 +64,24 @@ type fakeRunner struct {
 	calls     []RunRequest
 	handler   func(RunRequest) (any, error)
 	startHook func(RunRequest)
+	// unreadBadge 是模拟页面角标的世界模型:served 为真时 chat.readUnreadTotal
+	// 一律由 value 作答、绕过 handler,让既有用例继续以 setUnreadHintForTest
+	// 为唯一旋钮。value=nil 模拟角标节点缺席(读不到)。要为该原语定制失败,
+	// 把 served 置假后在自己的 handler 里接管。
+	unreadBadgeServed bool
+	unreadBadgeValue  *int
+}
+
+func (r *fakeRunner) setUnreadBadge(value *int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unreadBadgeServed = true
+	if value == nil {
+		r.unreadBadgeValue = nil
+		return
+	}
+	v := *value
+	r.unreadBadgeValue = &v
 }
 
 type fakeRunHandle struct {
@@ -78,6 +96,16 @@ func (r *fakeRunner) Start(_ context.Context, request RunRequest) (RunHandle, er
 	r.calls = append(r.calls, request)
 	handler := r.handler
 	hook := r.startHook
+	if request.Name == protocol.PrimChatReadUnreadTotal && r.unreadBadgeServed {
+		var value *int
+		if r.unreadBadgeValue != nil {
+			v := *r.unreadBadgeValue
+			value = &v
+		}
+		handler = func(RunRequest) (any, error) {
+			return protocol.ChatReadUnreadTotalData{Total: value, ObservedAt: 1}, nil
+		}
+	}
 	r.mu.Unlock()
 	if hook != nil {
 		hook(request)
@@ -102,6 +130,20 @@ func (r *fakeRunner) names() []string {
 	out := make([]string, len(r.calls))
 	for i := range r.calls {
 		out[i] = r.calls[i].Name
+	}
+	return out
+}
+
+// businessNames 滤掉未读角标现场读:它在轮首与每个会话边界例行出现,数量随
+// 边界数波动。主题无关的命令序列断言用它,免得每个用例都背着这层噪音;未读
+// 判定本身的用例仍用 names() 显式断言读角标的时机。
+func (r *fakeRunner) businessNames() []string {
+	out := make([]string, 0)
+	for _, name := range r.names() {
+		if name == protocol.PrimChatReadUnreadTotal {
+			continue
+		}
+		out = append(out, name)
 	}
 	return out
 }
@@ -142,6 +184,9 @@ func newHarness(t *testing.T) *harness {
 	hands := &fakeHands{state: HandState{Online: true, Session: "session-1", BootID: "boot-1"}}
 	runner := &fakeRunner{}
 	runner.handler = defaultHandler
+	// 默认世界:角标读不到(与旧默认"传感缺席"同向,不插队)。用例经
+	// setUnreadHintForTest 声明页面角标后才会进未读子轮。
+	runner.unreadBadgeServed = true
 	key := store.AccountKey{Platform: "zhilian", AccountRef: "account-1"}
 	if err := db.CreateAccount(&store.Account{Platform: key.Platform, AccountRef: key.AccountRef}); err != nil {
 		t.Fatalf("CreateAccount: %v", err)
@@ -764,7 +809,7 @@ func TestFirstAdoptionPaginatesAndProjectsNoHistory(t *testing.T) {
 		protocol.PrimChatReadThread,
 		protocol.PrimChatReadThread,
 	}
-	if got := h.runner.names(); fmt.Sprint(got) != fmt.Sprint(wantNames) {
+	if got := h.runner.businessNames(); fmt.Sprint(got) != fmt.Sprint(wantNames) {
 		t.Fatalf("command order = %v, want %v", got, wantNames)
 	}
 }
@@ -917,7 +962,7 @@ func TestLoginInitialInPreservesBindingThenProbeOnSessionChange(t *testing.T) {
 		t.Fatalf("Tick after session change: %+v, %v", result, err)
 	}
 	want := []string{protocol.PrimProbePlatform, protocol.PrimChatReadList}
-	if got := h.runner.names(); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := h.runner.businessNames(); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("probe order = %v, want %v", got, want)
 	}
 	account, _ = h.db.AccountByKey(h.key)
@@ -1506,7 +1551,7 @@ func TestPageDrivenStaleThreadTargetContinuesVisibleWindow(t *testing.T) {
 		protocol.PrimChatReadThread,
 		protocol.PrimChatReadThread,
 	}
-	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("陈旧目标后没有继续当前窗口后续会话: got=%v want=%v", got, wantCalls)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
@@ -1639,7 +1684,7 @@ func TestSourcingGenerationHandoffDropsLateManualOnlyWithoutPausingNewBatch(t *t
 		t.Fatalf("旧巡检覆盖了新批次 Account 调度: %+v", account)
 	}
 	wantCalls := []string{protocol.PrimChatReadList, protocol.PrimChatReadThread}
-	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("换代后仍派发旧命令: got=%v want=%v", got, wantCalls)
 	}
 }
@@ -1801,7 +1846,7 @@ func TestSourcingGenerationHandoffStopsBeforeNextCommandAfterLateSuccess(t *test
 		t.Fatalf("迟到成功未在下一命令前停止: %+v", result)
 	}
 	wantCalls := []string{protocol.PrimChatReadList, protocol.PrimChatReadThread}
-	if got := h.runner.names(); !reflect.DeepEqual(got, wantCalls) {
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("迟到成功后仍派发旧任务命令: got=%v want=%v", got, wantCalls)
 	}
 }
@@ -2206,7 +2251,7 @@ func TestConversationListOverlappingWindowsUseLatestFingerprint(t *testing.T) {
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
 	}
-	if got := h.runner.names(); !reflect.DeepEqual(got, want) {
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("窗口重叠/变化处理顺序错误: got=%v want=%v", got, want)
 	}
 	if wantMoves := []protocol.ListWindowMove{
@@ -2335,7 +2380,7 @@ func TestWorkflowConversationGateStopsWithoutFreshRestart(t *testing.T) {
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
 		t.Fatalf("工作流 gate 停止应成功收束: result=%+v err=%v", result, err)
 	}
-	if got := h.runner.names(); !reflect.DeepEqual(got, []string{protocol.PrimChatReadList}) {
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, []string{protocol.PrimChatReadList}) {
 		t.Fatalf("工作流 gate 被误重开为 fresh 扫描: %v", got)
 	}
 	rounds, err := h.db.RecentPatrolRounds(h.key, 1)

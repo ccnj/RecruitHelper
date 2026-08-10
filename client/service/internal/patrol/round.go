@@ -30,8 +30,17 @@ type roundActor struct {
 	superseded              bool
 	listTraversalIncomplete bool
 	checkedListFingerprints map[string]string
-	unreadRetryDeferred     bool
-	unreadAttemptedRefs     map[string]struct{}
+	// unreadClosedForRound 表示本轮不再进入未读筛选：页数预算触及收口保留页、
+	// 未读列表元素不可解析等结构性受阻场景置位，轮结束即消失。
+	unreadClosedForRound bool
+	// lastFruitlessUnreadTotal 是白跑记号：某次未读子轮零认领收尾时记下入口
+	// 角标读数,后续边界读到同值不再进——残留角标(隔离会话、打开失败行)不
+	// 变就不反复钻。任何一次有认领的子轮清空它。只活在本轮内。
+	lastFruitlessUnreadTotal *int
+	// unreadEntryTotal/unreadPassClaims 是当前未读子轮的入口读数与认领计数,
+	// 由 beginUnreadPass 复位、收尾时折算成白跑记号。
+	unreadEntryTotal int
+	unreadPassClaims int
 	// 上次插队判定的结论，用于把会话边界上的重复判定压成变化沿日志。
 	lastUnreadDecision string
 	projection         []ConversationProjection
@@ -188,8 +197,14 @@ func (a *roundActor) execute(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if a.manager.config.MaxPages >= 2 && a.beginUnreadPass(unreadDecisionAtRoundStart) {
-		filter = protocol.ListFilterUnread
+	if a.manager.config.MaxPages >= 2 {
+		enter, unreadErr := a.beginUnreadPass(ctx, unreadDecisionAtRoundStart)
+		if unreadErr != nil {
+			return unreadErr
+		}
+		if enter {
+			filter = protocol.ListFilterUnread
+		}
 	}
 	windowsRead := 0
 	startAllScan := func() {
@@ -205,7 +220,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 		// platform filter. The reserve is part of the same MaxPages budget.
 		if filter == protocol.ListFilterUnread &&
 			windowsRead >= a.manager.config.MaxPages-1 {
-			a.unreadRetryDeferred = true
+			a.unreadClosedForRound = true
 			startAllScan()
 			continue
 		}
@@ -222,7 +237,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 				); auditErr != nil {
 					return auditErr
 				}
-				a.unreadRetryDeferred = true
+				a.unreadClosedForRound = true
 				startAllScan()
 				continue
 			}
@@ -270,7 +285,7 @@ func (a *roundActor) execute(ctx context.Context) error {
 				// The unread page processor normally returns SwitchAll here.
 				// Keep a defensive close so no future branch can leave the
 				// platform filter active at round completion.
-				a.unreadRetryDeferred = true
+				a.unreadClosedForRound = true
 				startAllScan()
 				continue
 			}
@@ -354,15 +369,9 @@ func (a *roundActor) processConversationListPage(
 			a.checkedListFingerprints[summary.ConversationRef] = fingerprint
 			continue
 		}
-		if canEnterUnread {
-			_, stateErr := a.refreshHandState(ctx)
-			if stateErr != nil {
-				return conversationListPageContinue, stateErr
-			}
-			if a.beginUnreadPass(unreadDecisionAtBoundary) {
-				return conversationListPageSwitchUnread, nil
-			}
-		}
+		// 工作流闸先于角标读:闸要停就不再花一条命令,也保住"闸停之后零
+		// 派发"的既有性质。未读插队领取候选人同样要过这道闸(未读子轮内
+		// 逐行复核),先问闸不会漏掉任何插队机会。
 		allowed, gateErr := a.mayStartNextConversation(ctx)
 		if gateErr != nil {
 			return conversationListPageContinue, gateErr
@@ -372,6 +381,15 @@ func (a *roundActor) processConversationListPage(
 			// 只是不再领取下一位；外层随后释放 tickMu，让工作流编排器
 			// 在线性化边界切换页面或结束任务。
 			return conversationListPageStop, nil
+		}
+		if canEnterUnread {
+			enter, unreadErr := a.beginUnreadPass(ctx, unreadDecisionAtBoundary)
+			if unreadErr != nil {
+				return conversationListPageContinue, unreadErr
+			}
+			if enter {
+				return conversationListPageSwitchUnread, nil
+			}
 		}
 		// Mark only after the unread and workflow gates. If unread preempts
 		// this candidate, returning to all/reset must still be allowed to
@@ -479,15 +497,33 @@ func (a *roundActor) processUnreadConversationListPage(
 	tracked map[string]store.Conversation,
 ) (conversationListPageOutcome, error) {
 	for _, summary := range page.sessions {
-		if _, attempted := a.unreadAttemptedRefs[summary.ConversationRef]; attempted {
+		// 与全量轮共用同一张指纹认领表:同一行同一指纹本轮只尝试一次。行有
+		// 新内容(候选人再次回复)指纹必变,照常重新认领处理——插队判据是
+		// "有没有新话",不是"试没试过这个人"(2026-08-10 甲方裁决)。
+		fingerprint := a.listFingerprint(summary)
+		if checked, exists := a.checkedListFingerprints[summary.ConversationRef]; exists && checked == fingerprint {
 			continue
 		}
 		// 已被巡检隔离的会话在人工解除前不再自动打开或对账（2026-07-27
-		// 甲方裁决）；其未读气泡由 pass 收尾基线吸收。本检查必须先于固定
-		// 打开。
-		if conversation, exists := tracked[summary.ConversationRef]; exists &&
-			conversation.PatrolQuarantinedAt != nil {
-			a.unreadAttemptedRefs[summary.ConversationRef] = struct{}{}
+		// 甲方裁决）；其残留角标由白跑记号吸收。本检查必须先于固定打开,
+		// 认领口径与全量轮一致。tracked 映射只含 pending/adopted 会话,隔离
+		// 时未收编的行(如打开即失败被隔离)不在其中,必须再查会话行本身,
+		// 否则每轮都会对同一隔离行白开一次(旧跨轮基线掩盖过这个缺口)。
+		quarantined := false
+		if conversation, exists := tracked[summary.ConversationRef]; exists {
+			quarantined = conversation.PatrolQuarantinedAt != nil
+		} else {
+			row, rowErr := a.manager.store.ConversationByKey(store.ConversationKey{
+				Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+				ConversationRef: summary.ConversationRef,
+			})
+			if rowErr != nil {
+				return conversationListPageContinue, rowErr
+			}
+			quarantined = row != nil && row.PatrolQuarantinedAt != nil
+		}
+		if quarantined {
+			a.checkedListFingerprints[summary.ConversationRef] = fingerprint
 			continue
 		}
 		allowed, gateErr := a.mayStartNextConversation(ctx)
@@ -498,10 +534,10 @@ func (a *roundActor) processUnreadConversationListPage(
 			return conversationListPageStop, nil
 		}
 
-		// The attempt marker precedes the intrusive open. A locally failed
-		// open/read therefore cannot spin on the same residual unread row in
-		// this complete scan.
-		a.unreadAttemptedRefs[summary.ConversationRef] = struct{}{}
+		// 认领先于 intrusive 打开:本轮内打开或处理失败都不会围绕同一未变
+		// 行打转,行变化(指纹变)才有资格再来一次。
+		a.checkedListFingerprints[summary.ConversationRef] = fingerprint
+		a.unreadPassClaims++
 		// 固定打开只负责清未读角标；其后的判脏→对账→档案推进与全量轮共用
 		// 同一处理块，不再按档案就绪度分叉（2026-08-10 甲方裁决）。无档案
 		// 或未就绪的行经共享块自然收敛为只对账或跳过；打开失败与处理失败
@@ -531,31 +567,18 @@ func (a *roundActor) processUnreadConversationListPage(
 	if !page.complete {
 		return conversationListPageContinue, nil
 	}
-	hand, err := a.refreshHandState(ctx)
-	if err != nil {
-		return conversationListPageContinue, err
+	// 收尾不再读角标:跨轮基线已废,子轮完成与否不依赖收尾读数。零认领的
+	// 白跑把入口读数记成白跑记号,后续边界同值不再进;有认领即清记号,下个
+	// 边界现场读到的新读数自行裁决。
+	if a.unreadPassClaims == 0 {
+		total := a.unreadEntryTotal
+		a.lastFruitlessUnreadTotal = &total
+	} else {
+		a.lastFruitlessUnreadTotal = nil
 	}
-	if hand.UnreadTotal == nil {
-		a.unreadRetryDeferred = true
-		if err := a.appendUnreadPatrolAudit(
-			"status=incomplete reason=unreadPassEndTotalUnknown",
-		); err != nil {
-			return conversationListPageContinue, err
-		}
-		return conversationListPageSwitchAll, nil
-	}
-	if !a.manager.recordUnreadPassEnd(a.account, hand.UnreadTotal) {
-		a.unreadRetryDeferred = true
-		if err := a.appendUnreadPatrolAudit(
-			"status=incomplete reason=unreadPassEndTotalInvalid",
-		); err != nil {
-			return conversationListPageContinue, err
-		}
-		return conversationListPageSwitchAll, nil
-	}
-	if err := a.appendUnreadPatrolAudit(
-		fmt.Sprintf("status=completed endUnreadTotal=%d", *hand.UnreadTotal),
-	); err != nil {
+	if err := a.appendUnreadPatrolAudit(fmt.Sprintf(
+		"status=completed claimed=%d entryTotal=%d", a.unreadPassClaims, a.unreadEntryTotal,
+	)); err != nil {
 		return conversationListPageContinue, err
 	}
 	return conversationListPageSwitchAll, nil
@@ -1870,29 +1893,60 @@ func (a *roundActor) key() store.AccountKey {
 	return store.AccountKey{Platform: a.account.Platform, AccountRef: a.account.AccountRef}
 }
 
-// beginUnreadPass uses the same baseline comparison at every ordinary
-// candidate boundary. A completed pass records its end total, so an unchanged
-// residual badge will not re-enter. An incomplete pass defers retry until the
-// next ordinary scan instead of spinning inside this actor.
-func (a *roundActor) beginUnreadPass(at string) bool {
-	if a.unreadRetryDeferred {
-		a.noteUnreadDecision(at, "本轮已延后", nil, false)
-		return false
+// beginUnreadPass 在轮首与每个会话边界当场派发 chat.readUnreadTotal 读一次
+// 角标(2026-08-10 甲方裁决,替代被动传感基线判定):读到正数且不等于白跑记号
+// 才进未读筛选。命令失败与读不到的失效方向一律是不进——插队失灵最多是慢,
+// 绝不多做;真正的轮级控制信号(取消、暂停、代际变化)照常上抛终止本轮。
+func (a *roundActor) beginUnreadPass(ctx context.Context, at string) (bool, error) {
+	if a.unreadClosedForRound {
+		a.noteUnreadDecision(at, "本轮已关闭", nil, false)
+		return false, nil
 	}
-	needed, reason, baseline := a.manager.unreadPassDecision(a.account, a.hand.UnreadTotal)
-	a.noteUnreadDecision(at, reason, baseline, needed)
-	if !needed {
-		return false
+	if a.account.PrincipalFingerprint == nil || *a.account.PrincipalFingerprint == "" {
+		a.noteUnreadDecision(at, "身份未就绪", nil, false)
+		return false, nil
 	}
-	a.unreadAttemptedRefs = make(map[string]struct{})
-	return true
+	data, err := invokePrimitive[protocol.ChatReadUnreadTotalData](
+		ctx, a, protocol.PrimChatReadUnreadTotal, protocol.ChatReadUnreadTotalArgs{},
+	)
+	if err != nil {
+		// 真人活跃不终止本轮:紧随其后的列表读会得到同一信号并走既有收束。
+		if classifyConversationFailure(err) == failureScopeRoundFatal &&
+			!isRunError(err, protocol.ErrCodeUserActive) {
+			return false, err
+		}
+		a.noteUnreadDecision(at, "读数命令失败:"+conversationFailureClass(err), nil, false)
+		return false, nil
+	}
+	if data.Total == nil {
+		a.noteUnreadDecision(at, "读不到", nil, false)
+		return false, nil
+	}
+	total := *data.Total
+	if total <= 0 {
+		a.lastFruitlessUnreadTotal = nil
+		a.noteUnreadDecisionTotal(at, "零未读", &total, nil, false)
+		return false, nil
+	}
+	if a.lastFruitlessUnreadTotal != nil && *a.lastFruitlessUnreadTotal == total {
+		a.noteUnreadDecisionTotal(at, "与白跑记号同值", &total, a.lastFruitlessUnreadTotal, false)
+		return false, nil
+	}
+	a.unreadEntryTotal = total
+	a.unreadPassClaims = 0
+	a.noteUnreadDecisionTotal(at, "进入未读子轮", &total, a.lastFruitlessUnreadTotal, true)
+	return true, nil
 }
 
-// noteUnreadDecision 记录插队判定的输入与结论。四种不插队成因（读不到 / 与基线
-// 同值 / 零未读 / 本轮已延后）在外部表现一模一样，但要修的地方完全不同，不落
-// 日志就只能靠事后轮询碰运气。轮首必记；其后一轮几十个会话边界，只记结论变化
-// 沿，否则真正的转折会被淹没。
-func (a *roundActor) noteUnreadDecision(at, reason string, baseline *int, needed bool) {
+// noteUnreadDecision 记录插队判定的输入与结论。各种不插队成因（读不到 / 命令
+// 失败 / 与白跑记号同值 / 零未读 / 本轮已关闭）在外部表现一模一样，但要修的
+// 地方完全不同，不落日志就只能靠事后轮询碰运气。轮首必记；其后一轮几十个会话
+// 边界，只记结论变化沿，否则真正的转折会被淹没。
+func (a *roundActor) noteUnreadDecision(at, reason string, memo *int, needed bool) {
+	a.noteUnreadDecisionTotal(at, reason, nil, memo, needed)
+}
+
+func (a *roundActor) noteUnreadDecisionTotal(at, reason string, total, memo *int, needed bool) {
 	if at != unreadDecisionAtRoundStart && a.lastUnreadDecision == reason {
 		return
 	}
@@ -1902,8 +1956,8 @@ func (a *roundActor) noteUnreadDecision(at, reason string, baseline *int, needed
 		"accountRef", a.account.AccountRef,
 		"roundId", a.roundID,
 		"at", at,
-		"current", optionalIntText(a.hand.UnreadTotal),
-		"baseline", optionalIntText(baseline),
+		"current", optionalIntText(total),
+		"fruitlessMemo", optionalIntText(memo),
 		"decision", reason,
 		"enter", needed)
 }
@@ -1913,11 +1967,11 @@ const (
 	unreadDecisionAtBoundary   = "会话边界"
 )
 
-// optionalIntText 让"缺席"与"零"在日志里一眼可分：前者是传感通道断了，后者是
-// 有效的清空信号，两者导致的后续动作完全不同。
+// optionalIntText 让"值缺席"与"零"在日志里一眼可分:判定未走到读取、或角标
+// 节点缺席时是前者,页面明确呈现清零是后者,两者导致的后续动作完全不同。
 func optionalIntText(value *int) string {
 	if value == nil {
-		return "读不到"
+		return "-"
 	}
 	return strconv.Itoa(*value)
 }
@@ -1934,12 +1988,6 @@ func (a *roundActor) refreshHandState(ctx context.Context) (HandState, error) {
 		state.Session != a.hand.Session ||
 		state.BootID != a.hand.BootID {
 		return HandState{}, ErrActorGenerationChanged
-	}
-	a.hand.UnreadTotal = nil
-	if state.UnreadTotal != nil {
-		value := *state.UnreadTotal
-		a.hand.UnreadTotal = &value
-		state.UnreadTotal = &value
 	}
 	return state, nil
 }
