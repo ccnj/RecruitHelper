@@ -48,4 +48,9 @@ for file in "${FILES[@]}"; do
 done
 
 echo
-echo "已全部改为 $VERSION。检查 git diff 后提交,再跑 ./scripts/build-win.sh 打包。"
+# 花括号在这里不是可有可无:macOS 自带的 bash 3.2 在 UTF-8 locale 下,会把紧跟
+# 变量名的中文首字节吞进变量名(去找 VERSION\xe3),set -u 随即以 unbound variable
+# 退出。五处版本号那时已经全改完,只有这句提示没打出来,却留下一个非零退出码——
+# 单独跑看不出异常,用 && 串联后续构建时才会被挡住。凡变量后面紧跟中文,都要
+# 加花括号。
+echo "已全部改为 ${VERSION}。检查 git diff 后提交,再跑 ./scripts/build-win.sh 打包。"
