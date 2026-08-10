@@ -13,7 +13,13 @@ export function readZhilianUnreadTotal(root: Pick<ParentNode, 'querySelector'>):
   const element = root.querySelector(ZHILIAN_UNREAD_BADGE_SELECTOR)
   // 节点缺失才是真的读不到：页面结构已变，按既有失效方向不猜测数值。
   if (!element) return null
-  const text = (element.textContent ?? '').trim()
+  return parseZhilianUnreadBadgeText(element.textContent ?? '')
+}
+
+// parseZhilianUnreadBadgeText 是角标文本的唯一解析口径，被动传感与
+// chat.readUnreadTotal 原语共用，防止两条通道对同一文本各解各的。
+export function parseZhilianUnreadBadgeText(raw: string): number | null {
+  const text = raw.trim()
   // 空文本是页面表达“无未读”的正式形态，不是缺失。
   if (text === '') return 0
   if (/^\d+$/u.test(text)) {
