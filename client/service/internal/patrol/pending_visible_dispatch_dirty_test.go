@@ -165,7 +165,7 @@ func detectQuietConversationDirty(
 	if _, listed := tracked[current.ConversationRef]; !listed {
 		t.Fatalf("用例前提不成立:会话未收编 ref=%s", current.ConversationRef)
 	}
-	dirty, err := actor.detectDirtySummary(current, false, tracked)
+	dirty, err := actor.detectDirtySummary(current, tracked)
 	if err != nil {
 		t.Fatalf("判脏失败: %v", err)
 	}
