@@ -515,21 +515,29 @@ func TestNotificationCaptureMarkingAndScreenshots(t *testing.T) {
 	if err != nil || len(needing) != 1 {
 		t.Fatalf("待取证查询不符: %+v err=%v", needing, err)
 	}
-	// 发件箱闸门用的是同一判据的存在性形态,两者必须同进同退。
-	if has, err := s.HasNotificationsNeedingCapture("cap"); err != nil || !has {
-		t.Fatalf("待取证存在性判定不符: has=%v err=%v", has, err)
+	// 发件箱闸门读的是同一批行的两个侧面,必须与上面的查询同进同退。
+	gate, err := s.NotificationCaptureGateForProfile("cap")
+	if err != nil || !gate.Pending || gate.LastDispatchAt != nil {
+		t.Fatalf("取证事实不符: %+v err=%v", gate, err)
 	}
-	if has, err := s.HasNotificationsNeedingCapture("别人"); err != nil || has {
-		t.Fatalf("待取证判定不得越过候选人: has=%v err=%v", has, err)
+	if gate, err := s.NotificationCaptureGateForProfile("别人"); err != nil || gate.Pending {
+		t.Fatalf("取证事实不得越过候选人: %+v err=%v", gate, err)
 	}
-	if err := s.MarkNotificationsAssetsRequested([]uint64{id}, at.Add(time.Minute)); err != nil {
+	dispatchedAt := at.Add(time.Minute)
+	if err := s.MarkNotificationsAssetsRequested([]uint64{id}, dispatchedAt); err != nil {
 		t.Fatal(err)
 	}
 	if needing, _ := s.NotificationsNeedingCapture("cap"); len(needing) != 0 {
 		t.Fatalf("标记后仍报待取证: %+v", needing)
 	}
-	if has, err := s.HasNotificationsNeedingCapture("cap"); err != nil || has {
-		t.Fatalf("标记后存在性仍报待取证: has=%v err=%v", has, err)
+	// 标记先行:派发时刻落库了,但那一轮的图还没拍。闸门要靠 LastDispatchAt
+	// 把这十几秒挡住,只看 Pending 会在新图落库前放行(2026-08-10 实测)。
+	gate, err = s.NotificationCaptureGateForProfile("cap")
+	if err != nil || gate.Pending {
+		t.Fatalf("标记后仍报待取证: %+v err=%v", gate, err)
+	}
+	if gate.LastDispatchAt == nil || !gate.LastDispatchAt.Equal(dispatchedAt) {
+		t.Fatalf("最近取证派发时刻不符: %+v", gate.LastDispatchAt)
 	}
 
 	ref1 := "sha256:" + strings.Repeat("1", 64)

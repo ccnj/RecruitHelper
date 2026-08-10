@@ -20,6 +20,21 @@ func int64Ptr(v int64) *int64 { return &v }
 // 路径,而是 15 分钟兜底。
 func timePtr(v time.Time) *time.Time { return &v }
 
+// shotsTakenAt 标注两张图的落库时刻。闸门要拿它和最近一次取证派发比,零值
+// 会被判成"上一轮的旧图",所以凡是走 tick 的用例都得显式给。
+func shotsTakenAt(
+	snapshot *store.NotificationRenderSnapshot,
+	at time.Time,
+) *store.NotificationRenderSnapshot {
+	if snapshot.ChatShot != nil {
+		snapshot.ChatShot.CreatedAt = at
+	}
+	if snapshot.ResumeShot != nil {
+		snapshot.ResumeShot.CreatedAt = at
+	}
+	return snapshot
+}
+
 func fullSnapshot() *store.NotificationRenderSnapshot {
 	// 2026-07-30 12:30 本地时间
 	starts := time.Date(2026, 7, 30, 12, 30, 0, 0, time.Local).UnixMilli()
@@ -267,19 +282,31 @@ func (f *fakeLedger) InterviewNotificationForProfile(profileID string) (*store.N
 	return f.meeting[profileID], nil
 }
 
-// 照抄 store 的判据:同候选人名下仍 pending 且没派过取证的行 = 新图在路上。
-func (f *fakeLedger) HasNotificationsNeedingCapture(profileID string) (bool, error) {
+// 照抄 store 的判据:仍 pending 且没派过取证的行 = 取证轮还没来;最近一次
+// 派发时刻则用来判断那一轮拍的图落库没有。
+func (f *fakeLedger) NotificationCaptureGateForProfile(
+	profileID string,
+) (store.NotificationCaptureGate, error) {
 	if f.captureErr != nil {
-		return false, f.captureErr
+		return store.NotificationCaptureGate{}, f.captureErr
 	}
+	gate := store.NotificationCaptureGate{}
 	for _, row := range f.rows {
-		if row.ProfileID == profileID &&
-			row.Status == store.NotificationStatusPending &&
-			row.AssetsRequestedAt == nil {
-			return true, nil
+		if row.ProfileID != profileID {
+			continue
+		}
+		if row.Status == store.NotificationStatusPending && row.AssetsRequestedAt == nil {
+			gate.Pending = true
+		}
+		if row.AssetsRequestedAt == nil {
+			continue
+		}
+		if gate.LastDispatchAt == nil || row.AssetsRequestedAt.After(*gate.LastDispatchAt) {
+			dispatchedAt := *row.AssetsRequestedAt
+			gate.LastDispatchAt = &dispatchedAt
 		}
 	}
-	return false, nil
+	return gate, nil
 }
 
 func (f *fakeLedger) MarkNotificationSent(id uint64, sentWithWechat bool, _ time.Time) error {
@@ -332,7 +359,7 @@ func TestTickSendsTextThenScreenshots(t *testing.T) {
 	server := newWecomServer(t, capture)
 	defer server.Close()
 	now := time.Date(2026, 7, 28, 15, 0, 0, 0, time.Local)
-	snapshot := fullSnapshot()
+	snapshot := shotsTakenAt(fullSnapshot(), now.Add(-40*time.Second))
 	ledger := &fakeLedger{
 		rows: []store.NotificationOutbox{{
 			ID: 1, NotifyType: store.NotificationTypeInterviewAccepted,
@@ -367,7 +394,7 @@ func TestTickGateHoldsThenFallsBack(t *testing.T) {
 	server := newWecomServer(t, capture)
 	defer server.Close()
 	now := time.Date(2026, 7, 28, 15, 0, 0, 0, time.Local)
-	snapshot := fullSnapshot()
+	snapshot := shotsTakenAt(fullSnapshot(), now.Add(-40*time.Second))
 	snapshot.ResumeShot = nil
 	ledger := &fakeLedger{
 		rows: []store.NotificationOutbox{{
@@ -406,8 +433,13 @@ func TestTickWaitsForInFlightCapture(t *testing.T) {
 	now := time.Date(2026, 8, 9, 23, 7, 50, 0, time.Local)
 	oldChat, newChat := append(jpegBytes(), "-old"...), append(jpegBytes(), "-new"...)
 	snapshot := fullSnapshot()
-	snapshot.ChatShot = &store.CandidateScreenshot{BlobRef: "sha256:old-chat"}
-	snapshot.ResumeShot = &store.CandidateScreenshot{BlobRef: "sha256:old-resume"}
+	oldShotAt := now.Add(-8 * time.Minute) // 约面那一轮拍的
+	snapshot.ChatShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:old-chat", CreatedAt: oldShotAt,
+	}
+	snapshot.ResumeShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:old-resume", CreatedAt: oldShotAt,
+	}
 	interview := store.NotificationOutbox{
 		ID: 50, NotifyType: store.NotificationTypeInterviewAccepted,
 		ProfileID: "p1", Status: store.NotificationStatusPending,
@@ -431,17 +463,32 @@ func TestTickWaitsForInFlightCapture(t *testing.T) {
 		"sha256:new-resume": jpegBytes(),
 	}}
 	runner := newTestRunner(ledger, blobs, server.URL, now)
+	// 一、取证轮还没到访这个候选人。
 	if summary := runner.Tick(); summary.Sent != 0 || summary.Held != 2 {
-		t.Fatalf("新图在路上时约面通知不得发出: %+v", summary)
+		t.Fatalf("取证未派发时约面通知不得发出: %+v", summary)
 	}
 	if len(capture.kinds) != 0 {
 		t.Fatalf("等待期不得发送: %+v", capture.kinds)
 	}
 
-	// 取证那一轮跑完:标记落行、新图入库。
+	// 二、取证轮到了,标记先落(防进程中断重复平台交互),图还在拍。这一步是
+	// 客户机真实翻车点:只看标记会在此放行,发出去的是八分钟前那张。
 	ledger.rows[1].AssetsRequestedAt = timePtr(now.Add(12 * time.Second))
-	snapshot.ChatShot = &store.CandidateScreenshot{BlobRef: "sha256:new-chat"}
-	snapshot.ResumeShot = &store.CandidateScreenshot{BlobRef: "sha256:new-resume"}
+	runner.now = func() time.Time { return now.Add(15 * time.Second) }
+	if summary := runner.Tick(); summary.Sent != 0 || summary.Held != 2 {
+		t.Fatalf("新图未落库时约面通知不得发出: %+v", summary)
+	}
+	if len(capture.kinds) != 0 {
+		t.Fatalf("新图未落库不得发送: %+v", capture.kinds)
+	}
+
+	// 三、新图落库。
+	snapshot.ChatShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:new-chat", CreatedAt: now.Add(20 * time.Second),
+	}
+	snapshot.ResumeShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:new-resume", CreatedAt: now.Add(27 * time.Second),
+	}
 	runner.now = func() time.Time { return now.Add(30 * time.Second) }
 	if summary := runner.Tick(); summary.Sent != 1 {
 		t.Fatalf("取证落地后约面通知未发出: %+v", summary)
@@ -452,6 +499,76 @@ func TestTickWaitsForInFlightCapture(t *testing.T) {
 	want := base64.StdEncoding.EncodeToString(newChat)
 	if len(capture.images) == 0 || string(capture.images[0]) != want {
 		t.Fatalf("追发的聊天图不是新拍那张(旧图=%q)",
+			base64.StdEncoding.EncodeToString(oldChat))
+	}
+}
+
+// 补号形态实测复现(2026-08-10 客户机补号行 27):约面通知 15 分钟兜底先发且
+// 没带号,后来才换到微信。这条补号通知的取证派发到发出只隔 5 秒,而新图 14 秒
+// 后才落库——发出去的是两小时前那张(19 号更甚,发的是前一天晚上的)。
+func TestTickSupplementWaitsForFreshCapture(t *testing.T) {
+	capture := &wecomCapture{}
+	server := newWecomServer(t, capture)
+	defer server.Close()
+	now := time.Date(2026, 8, 10, 16, 27, 55, 0, time.Local)
+	oldShotAt := time.Date(2026, 8, 10, 14, 34, 38, 0, time.Local)
+	oldChat, newChat := append(jpegBytes(), "-old"...), append(jpegBytes(), "-new"...)
+	snapshot := fullSnapshot()
+	snapshot.ChatShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:old-chat", CreatedAt: oldShotAt,
+	}
+	snapshot.ResumeShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:old-resume", CreatedAt: oldShotAt,
+	}
+	meeting := store.NotificationOutbox{
+		ID: 26, NotifyType: store.NotificationTypeInterviewAccepted,
+		ProfileID: "p1", Status: store.NotificationStatusSent, SentWithWechat: false,
+		CreatedAt:         oldShotAt.Add(-time.Minute),
+		AssetsRequestedAt: timePtr(oldShotAt.Add(-8 * time.Second)),
+	}
+	ledger := &fakeLedger{
+		rows: []store.NotificationOutbox{meeting, {
+			ID: 27, NotifyType: store.NotificationTypeWechatAdded,
+			ProfileID: "p1", Status: store.NotificationStatusPending,
+			CreatedAt: now.Add(-3 * time.Second),
+		}},
+		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot},
+		meeting:  map[string]*store.NotificationOutbox{"p1": &meeting},
+	}
+	blobs := &fakeBlobs{data: map[string][]byte{
+		"sha256:old-chat":   oldChat,
+		"sha256:old-resume": jpegBytes(),
+		"sha256:new-chat":   newChat,
+		"sha256:new-resume": jpegBytes(),
+	}}
+	runner := newTestRunner(ledger, blobs, server.URL, now)
+	if summary := runner.Tick(); summary.Sent != 0 || summary.Held != 1 {
+		t.Fatalf("取证未派发时补号通知不得发出: %+v", summary)
+	}
+
+	// 标记先行、图还在拍:客户机就是在这 5 秒里把两小时前的图发了出去。
+	ledger.rows[1].AssetsRequestedAt = timePtr(now.Add(6 * time.Second))
+	runner.now = func() time.Time { return now.Add(11 * time.Second) }
+	if summary := runner.Tick(); summary.Sent != 0 || summary.Held != 1 {
+		t.Fatalf("新图未落库时补号通知不得发出: %+v", summary)
+	}
+
+	snapshot.ChatShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:new-chat", CreatedAt: now.Add(20 * time.Second),
+	}
+	snapshot.ResumeShot = &store.CandidateScreenshot{
+		BlobRef: "sha256:new-resume", CreatedAt: now.Add(28 * time.Second),
+	}
+	runner.now = func() time.Time { return now.Add(35 * time.Second) }
+	if summary := runner.Tick(); summary.Sent != 1 {
+		t.Fatalf("取证落地后补号通知未发出: %+v", summary)
+	}
+	if len(capture.texts) != 1 || !strings.HasPrefix(capture.texts[0], "【面试确认--补微信号】") {
+		t.Fatalf("应按补号标题发出: %+v", capture.texts)
+	}
+	want := base64.StdEncoding.EncodeToString(newChat)
+	if len(capture.images) == 0 || string(capture.images[0]) != want {
+		t.Fatalf("补号追发的聊天图不是新拍那张(旧图=%q)",
 			base64.StdEncoding.EncodeToString(oldChat))
 	}
 }
@@ -583,7 +700,7 @@ func TestTickHoldsPeerInitiatedWechatThenSendsAlone(t *testing.T) {
 	server := newWecomServer(t, capture)
 	defer server.Close()
 	now := time.Date(2026, 8, 6, 14, 0, 0, 0, time.Local)
-	snapshot := fullSnapshot()
+	snapshot := shotsTakenAt(fullSnapshot(), now.Add(-58*time.Minute))
 	ledger := &fakeLedger{
 		rows: []store.NotificationOutbox{{
 			ID: 40, NotifyType: store.NotificationTypeWechatAdded,
@@ -652,7 +769,7 @@ func TestTickDropAndFailurePaths(t *testing.T) {
 	server := newWecomServer(t, capture)
 	defer server.Close()
 	now := time.Date(2026, 7, 28, 17, 0, 0, 0, time.Local)
-	snapshot := fullSnapshot()
+	snapshot := shotsTakenAt(fullSnapshot(), now.Add(-58*time.Minute))
 	ledger := &fakeLedger{
 		rows: []store.NotificationOutbox{
 			{
@@ -666,7 +783,10 @@ func TestTickDropAndFailurePaths(t *testing.T) {
 				AssetsRequestedAt: timePtr(now.Add(-59 * time.Minute)),
 			},
 		},
-		snapshot: map[string]*store.NotificationRenderSnapshot{"p1": snapshot, "p2": fullSnapshot()},
+		snapshot: map[string]*store.NotificationRenderSnapshot{
+			"p1": snapshot,
+			"p2": shotsTakenAt(fullSnapshot(), now.Add(-58*time.Minute)),
+		},
 		meeting: map[string]*store.NotificationOutbox{
 			"p1": {ID: 3, Status: store.NotificationStatusSent, SentWithWechat: true},
 		},
