@@ -379,83 +379,100 @@ func (a *roundActor) processConversationListPage(
 		// the same unchanged row in an overlapping window.
 		a.checkedListFingerprints[summary.ConversationRef] = fingerprint
 
-		key := store.ConversationKey{
-			Platform: a.account.Platform, AccountRef: a.account.AccountRef,
-			ConversationRef: summary.ConversationRef,
-		}
-		dirty, err := a.detectDirtySummary(
-			summary,
-			false,
-			tracked,
-		)
+		stop, err := a.processConversationRow(ctx, summary, tracked)
 		if err != nil {
-			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
-			if !handled {
-				return conversationListPageContinue, fatalErr
-			}
-			continue
+			return conversationListPageContinue, err
 		}
-		readCurrent := dirty != nil
-		if readCurrent {
-			dirtyConversation := *dirty
-			if err := a.setStage("readingThread"); err != nil {
-				return conversationListPageContinue, err
-			}
-			projection, err := a.reconcileConversation(ctx, dirtyConversation)
-			if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
-				a.projection = append(a.projection, projection)
-			}
-			if err != nil {
-				// 目标暂离窗口等瞬时错误只本轮跳过；确定性错误隔离该会话；
-				// 账号级信号仍全停（2026-07-27 甲方裁决）。当前 fingerprint
-				// 已尝试，重叠窗口不会围绕它打转。
-				handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
-				if !handled {
-					return conversationListPageContinue, fatalErr
-				}
-				continue
-			}
-			a.manager.markListHintVerified(
-				dirtyConversation.listHintKey,
-				dirtyConversation.listHintFingerprint,
-			)
-			if a.classificationCorrected {
-				return conversationListPageStop, nil
-			}
-		}
-		profile, err := a.manager.store.CandidateProfileByConversation(key)
-		if err != nil {
-			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
-			if !handled {
-				return conversationListPageContinue, fatalErr
-			}
-			continue
-		}
-		if profile == nil {
-			continue
-		}
-		if err := a.prepareInboundConversationProfile(
-			ctx,
-			*profile,
-		); err != nil {
-			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
-			if !handled {
-				return conversationListPageContinue, fatalErr
-			}
-			continue
-		}
-		if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
-			handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
-			if !handled {
-				return conversationListPageContinue, fatalErr
-			}
-			continue
-		}
-		if a.classificationCorrected {
+		if stop {
 			return conversationListPageStop, nil
 		}
 	}
 	return conversationListPageContinue, nil
+}
+
+// processConversationRow 是列表遍历的单会话处理块：判脏 → 权威对账 → 档案
+// 推进。单人失败经 settleConversationFailure 就地分流后返回 (false, nil) 继续
+// 下一行；返回 stop=true 表示撞上分类修正停止边界，收口方式由调用方决定。
+func (a *roundActor) processConversationRow(
+	ctx context.Context,
+	summary protocol.ConversationSummary,
+	tracked map[string]store.Conversation,
+) (bool, error) {
+	key := store.ConversationKey{
+		Platform: a.account.Platform, AccountRef: a.account.AccountRef,
+		ConversationRef: summary.ConversationRef,
+	}
+	dirty, err := a.detectDirtySummary(
+		summary,
+		false,
+		tracked,
+	)
+	if err != nil {
+		handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+		if !handled {
+			return false, fatalErr
+		}
+		return false, nil
+	}
+	if dirty != nil {
+		dirtyConversation := *dirty
+		if err := a.setStage("readingThread"); err != nil {
+			return false, err
+		}
+		projection, err := a.reconcileConversation(ctx, dirtyConversation)
+		if len(projection.Messages) != 0 || len(projection.CardTransitions) != 0 {
+			a.projection = append(a.projection, projection)
+		}
+		if err != nil {
+			// 目标暂离窗口等瞬时错误只本轮跳过；确定性错误隔离该会话；
+			// 账号级信号仍全停（2026-07-27 甲方裁决）。当前 fingerprint
+			// 已尝试，重叠窗口不会围绕它打转。
+			handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+			if !handled {
+				return false, fatalErr
+			}
+			return false, nil
+		}
+		a.manager.markListHintVerified(
+			dirtyConversation.listHintKey,
+			dirtyConversation.listHintFingerprint,
+		)
+		if a.classificationCorrected {
+			return true, nil
+		}
+	}
+	profile, err := a.manager.store.CandidateProfileByConversation(key)
+	if err != nil {
+		handled, fatalErr := a.settleConversationFailure(ctx, key, "", err)
+		if !handled {
+			return false, fatalErr
+		}
+		return false, nil
+	}
+	if profile == nil {
+		return false, nil
+	}
+	if err := a.prepareInboundConversationProfile(
+		ctx,
+		*profile,
+	); err != nil {
+		handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+		if !handled {
+			return false, fatalErr
+		}
+		return false, nil
+	}
+	if err := a.processCommunicationV4Profile(ctx, profile.ProfileID); err != nil {
+		handled, fatalErr := a.settleConversationFailure(ctx, key, profile.ProfileID, err)
+		if !handled {
+			return false, fatalErr
+		}
+		return false, nil
+	}
+	if a.classificationCorrected {
+		return true, nil
+	}
+	return false, nil
 }
 
 const unreadPatrolAuditCategory = "unread_patrol"
