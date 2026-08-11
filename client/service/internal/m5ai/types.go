@@ -147,6 +147,7 @@ type ReplyMenuWechatLine string
 const (
 	ReplyMenuWechatNotInvited ReplyMenuWechatLine = "notInvited"
 	ReplyMenuWechatInvited    ReplyMenuWechatLine = "invited"
+	ReplyMenuWechatRejected   ReplyMenuWechatLine = "rejected"
 	ReplyMenuWechatExchanged  ReplyMenuWechatLine = "exchanged"
 )
 

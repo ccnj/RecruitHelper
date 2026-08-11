@@ -471,6 +471,8 @@ func v4ReplyMenuWechatLine(status V4WechatStatus) m5ai.ReplyMenuWechatLine {
 	switch status {
 	case V4WechatInvited:
 		return m5ai.ReplyMenuWechatInvited
+	case V4WechatRejected:
+		return m5ai.ReplyMenuWechatRejected
 	case V4WechatExchanged:
 		return m5ai.ReplyMenuWechatExchanged
 	default:

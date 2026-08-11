@@ -762,6 +762,9 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 	case ReplyMenuWechatInvited:
 		lines = append(lines,
 			"本轮微信邀请已经发出、正等对方通过。不得填「发起换微信邀请」，话术里也不要再说「我把微信发你」这类话。")
+	case ReplyMenuWechatRejected:
+		lines = append(lines,
+			"对方已经拒绝了换微信邀请。不得填「发起换微信邀请」，话术里也绝对不要再提加微信、发号、通过这类话；他若自己主动提出换微信，按他的原话正常回应即可。")
 	case ReplyMenuWechatExchanged:
 		lines = append(lines,
 			"本轮微信已经交换成功。不得填「发起换微信邀请」，话术里也不要出现「加个微信」「通过一下」这类说法。")

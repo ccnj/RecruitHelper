@@ -29,6 +29,7 @@ const (
 	V4EndFallback              V4EndReason = "fallbackArchive"
 	V4EndSilentInterview       V4EndReason = "silentInterviewPending"
 	V4EndSilentWechatInvited   V4EndReason = "silentWechatInvited"
+	V4EndSilentWechatRejected  V4EndReason = "silentWechatRejected"
 	V4EndSilentWechatExchanged V4EndReason = "silentWechatExchanged"
 	V4EndSilent                V4EndReason = "silent"
 )
@@ -38,6 +39,7 @@ type V4WechatStatus string
 const (
 	V4WechatNotInvited V4WechatStatus = "notInvited"
 	V4WechatInvited    V4WechatStatus = "invited"
+	V4WechatRejected   V4WechatStatus = "rejected"
 	V4WechatExchanged  V4WechatStatus = "exchanged"
 )
 
@@ -253,6 +255,14 @@ func ApplyV4BusinessEvent(input V4State, event BusinessEvent) (V4EventDecision, 
 		decision.Actions = append(decision.Actions, eventAction(event, V4ActionNotifyWechat))
 		if !decision.State.WechatReceiptSent {
 			decision.Actions = append(decision.Actions, eventAction(event, V4ActionWechatReceipt))
+		}
+		return decision, nil
+	case EventWechatRejected:
+		// 点拒绝换微信卡(规格事件表,2026-08-11 甲方裁决):仅推进态且线为
+		// 已邀请时降「已拒」,其余无操作(服务态按 §七 只保留收号+回执)。
+		// 不判意向、不开计数轮、不动预算、不回执、不滑锚;事件行自身留痕。
+		if isV4ProgressStatus(decision.State.MainStatus) && decision.State.WechatState == V4WechatInvited {
+			advanceV4Wechat(&decision.State, V4WechatRejected)
 		}
 		return decision, nil
 	case EventInterviewInvited:
@@ -535,8 +545,12 @@ func v4WechatRank(status V4WechatStatus) int {
 		return 0
 	case V4WechatInvited:
 		return 1
-	case V4WechatExchanged:
+	case V4WechatRejected:
+		// 已拒排在已邀请之上、已换号之下:拒后对方自发起交换仍可推进
+		// 「已换号」,反向永不回退(规格事件表,2026-08-11)。
 		return 2
+	case V4WechatExchanged:
+		return 3
 	default:
 		return -1
 	}
@@ -699,7 +713,7 @@ func validV4RejectionStage(stage V4RejectionStage) bool {
 func validV4EndReason(reason V4EndReason) bool {
 	switch reason {
 	case V4EndRejected, V4EndBlacklisted, V4EndFallback, V4EndSilentInterview,
-		V4EndSilentWechatInvited, V4EndSilentWechatExchanged, V4EndSilent:
+		V4EndSilentWechatInvited, V4EndSilentWechatRejected, V4EndSilentWechatExchanged, V4EndSilent:
 		return true
 	default:
 		return false
