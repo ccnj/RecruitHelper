@@ -28,6 +28,7 @@ var mainStatusLabels = map[store.CandidateProfileStatus]string{
 var wechatStateLabels = map[string]string{
 	"notInvited": "未邀微信",
 	"invited":    "已邀微信",
+	"rejected":   "对方已拒绝换微信",
 	"exchanged":  "已成功交换微信",
 }
 

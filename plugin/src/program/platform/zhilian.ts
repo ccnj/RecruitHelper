@@ -8182,6 +8182,11 @@ async function mainReadThreadPage(
     const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
       ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    // 99 族 type=2:候选人在换微信邀请卡上点拒绝。判别子只认结构
+    // (customType=99 + inner.type=2 + 候选人侧),msgb 文案会改版、不作判别;
+    // 形态考古见 docs/智联负反馈形态考古-2026-08-11.md。
+    const isWechatExchangeRejected = customSuccess && customType === 99 &&
+      Number(details.type) === 2 && from === target
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
     // 2026-07-27 真机：355 卡负载以字符串枚举 interviewType="VIDEO"、
@@ -8255,6 +8260,12 @@ async function mainReadThreadPage(
       text = '[微信交换成功]'
       state = 'accepted'
       identity = stableMessageIdentity(row.idServer)
+    } else if (isWechatExchangeRejected) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[微信交换被拒]'
+      state = 'rejected'
+      identity = stableMessageIdentity(row.idServer)
     } else if (isStaffInterviewInvite) {
       kind = 'card'
       cardType = 'interviewInvite'
@@ -8320,7 +8331,8 @@ async function mainReadThreadPage(
     // 方向在 anchor 中另列，不能再次混入 hash。
     const canonicalContent = clean(text)
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
+      (isCandidateWechatRequest || isStaffWechatRequest ||
+        isWechatExchangeSucceeded || isWechatExchangeRejected)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite && interview !== null
         ? `card\x1finterviewInvite\x1f${interview.startsAt}\x1f` +
@@ -9130,6 +9142,11 @@ async function mainCaptureSendBaseline(
       const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
         ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
         Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+      // 99 族 type=2:候选人在换微信邀请卡上点拒绝。判别子只认结构
+      // (customType=99 + inner.type=2 + 候选人侧),msgb 文案会改版、不作判别;
+      // 形态考古见 docs/智联负反馈形态考古-2026-08-11.md。
+      const isWechatExchangeRejected = customSuccess && customType === 99 &&
+        Number(details.type) === 2 && from === target
       const interviewStartsAt = toMillis(details.startTime)
       const interviewEndsAt = toMillis(details.endTime)
       // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
@@ -9193,6 +9210,11 @@ async function mainCaptureSendBaseline(
         cardType = 'wechatExchange'
         text = '[微信交换成功]'
         identity = row.idServer
+      } else if (isWechatExchangeRejected) {
+        kind = 'card'
+        cardType = 'wechatExchange'
+        text = '[微信交换被拒]'
+        identity = row.idServer
       } else if (isStaffInterviewInvite) {
         kind = 'card'
         cardType = 'interviewInvite'
@@ -9232,7 +9254,8 @@ async function mainCaptureSendBaseline(
       if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
       const canonicalContent = clean(text)
       const cardProjection = cardType === 'wechatExchange' &&
-        (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
+        (isCandidateWechatRequest || isStaffWechatRequest ||
+        isWechatExchangeSucceeded || isWechatExchangeRejected)
         ? 'card\x1fwechatExchange'
         : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
           ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f` +
@@ -9834,6 +9857,11 @@ async function mainSendMessageOnce(
     const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
       ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    // 99 族 type=2:候选人在换微信邀请卡上点拒绝。判别子只认结构
+    // (customType=99 + inner.type=2 + 候选人侧),msgb 文案会改版、不作判别;
+    // 形态考古见 docs/智联负反馈形态考古-2026-08-11.md。
+    const isWechatExchangeRejected = customSuccess && customType === 99 &&
+      Number(details.type) === 2 && from === target
     const interviewStartsAt = toMillis(details.startTime)
     const interviewEndsAt = toMillis(details.endTime)
     // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
@@ -9897,6 +9925,11 @@ async function mainSendMessageOnce(
       cardType = 'wechatExchange'
       normalizedText = '[微信交换成功]'
       identity = row.idServer
+    } else if (isWechatExchangeRejected) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      normalizedText = '[微信交换被拒]'
+      identity = row.idServer
     } else if (isStaffInterviewInvite) {
       kind = 'card'
       cardType = 'interviewInvite'
@@ -9935,7 +9968,8 @@ async function mainSendMessageOnce(
     }
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
+      (isCandidateWechatRequest || isStaffWechatRequest ||
+        isWechatExchangeSucceeded || isWechatExchangeRejected)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
         ? `card\x1finterviewInvite\x1f${interviewStartsAt}\x1f` +
@@ -10987,6 +11021,11 @@ function mainSendCardOnce(
     const isWechatExchangeSucceeded = customSuccess && customType === 259 &&
       ((from === target && originTypeIsStaff) || (from === staffID && originTypeIsCandidate)) &&
       Boolean(clean(details.userWeChat)) && Boolean(clean(details.staffWeChat))
+    // 99 族 type=2:候选人在换微信邀请卡上点拒绝。判别子只认结构
+    // (customType=99 + inner.type=2 + 候选人侧),msgb 文案会改版、不作判别;
+    // 形态考古见 docs/智联负反馈形态考古-2026-08-11.md。
+    const isWechatExchangeRejected = customSuccess && customType === 99 &&
+      Number(details.type) === 2 && from === target
     const startsAt = toMillis(details.startTime)
     const endsAt = toMillis(details.endTime)
     // 线下(到场)卡无 interviewPlatform 且 endTime 恒为 "0"，见主归一化同处注释。
@@ -11046,6 +11085,11 @@ function mainSendCardOnce(
       cardType = 'wechatExchange'
       text = '[微信交换成功]'
       identity = row.idServer
+    } else if (isWechatExchangeRejected) {
+      kind = 'card'
+      cardType = 'wechatExchange'
+      text = '[微信交换被拒]'
+      identity = row.idServer
     } else if (isStaffInterviewInvite) {
       kind = 'card'
       cardType = 'interviewInvite'
@@ -11075,7 +11119,8 @@ function mainSendCardOnce(
     }
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') return null
     const cardProjection = cardType === 'wechatExchange' &&
-      (isCandidateWechatRequest || isStaffWechatRequest || isWechatExchangeSucceeded)
+      (isCandidateWechatRequest || isStaffWechatRequest ||
+        isWechatExchangeSucceeded || isWechatExchangeRejected)
       ? 'card\x1fwechatExchange'
       : cardType === 'interviewInvite' && isStaffInterviewInvite && interviewProjectable
         ? `card\x1finterviewInvite\x1f${startsAt}\x1f` +

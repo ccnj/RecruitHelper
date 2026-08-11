@@ -813,3 +813,51 @@ func TestV4InboundTurnRejectsBrokenLedgerBoundary(t *testing.T) {
 		}
 	}
 }
+
+// 修复遗漏回归:拒收换微信卡进入入站轮成形。修复前该事件掉进轮 switch 的
+// default 分支,整轮 ErrInvalidV4StateTransition,会话每轮冻结。
+func TestV4InboundTurnWechatRejectedCardOnlyDowngradesLine(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.WechatState = V4WechatInvited
+	state.RealMessageRound = 2
+	state.LastRealMessageSeq = 3
+	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+		State: state, TurnID: "turn-wechat-rejected-only",
+		Messages: []LedgerMessageFact{{
+			Seq: 9, Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardState: "rejected", Origin: "external",
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+	})
+	if err != nil || decision.State.WechatState != V4WechatRejected ||
+		decision.Requirement != V4DialogueNone || len(decision.EventActions) != 0 ||
+		decision.ManualReason != "" || decision.State.RealMessageRound != 2 {
+		t.Fatalf("拒收卡单独成轮应只降微信线、零动作零对话零推轮: decision=%+v err=%v", decision, err)
+	}
+}
+
+// 拒收卡与文字同轮:文字照常驱动对话(意向权限先行),微信线同轮降已拒。
+func TestV4InboundTurnWechatRejectedWithTextKeepsDialogue(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.WechatState = V4WechatInvited
+	state.RealMessageRound = 2
+	state.LastRealMessageSeq = 3
+	decision, err := ReduceV4InboundTurn(V4InboundTurnInput{
+		State: state, TurnID: "turn-wechat-rejected-with-text",
+		Messages: []LedgerMessageFact{
+			{
+				Seq: 9, Direction: "in", Kind: "card", CardType: "wechatExchange",
+				CardState: "rejected", Origin: "external",
+			},
+			v4InboundText(10, "在这里聊就行"),
+		},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+	})
+	if err != nil || decision.State.WechatState != V4WechatRejected ||
+		decision.State.RealMessageRound != 3 ||
+		decision.Dialogue.Status != V4DialogueWaitingAdvice {
+		t.Fatalf("拒收卡+文字同轮应降线且文字照常开轮进对话: decision=%+v err=%v", decision, err)
+	}
+}

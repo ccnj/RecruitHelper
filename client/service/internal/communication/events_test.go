@@ -41,6 +41,11 @@ func TestNormalizeLedgerMessagePromotesOnlyStableBusinessSemantics(t *testing.T)
 			want: BusinessEvent{Key: "message:10", Kind: EventWechatExchanged, Source: EventSourceMessage, MessageSeq: 10},
 		},
 		{
+			name: "candidate rejected wechat invite",
+			fact: LedgerMessageFact{Seq: 12, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "rejected", Origin: "external"},
+			want: BusinessEvent{Key: "message:12", Kind: EventWechatRejected, Source: EventSourceMessage, MessageSeq: 12},
+		},
+		{
 			name: "candidate accepted interview",
 			fact: LedgerMessageFact{Seq: 11, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted", Origin: "external"},
 			want: BusinessEvent{Key: "message:11", Kind: EventInterviewAccepted, Source: EventSourceMessage, MessageSeq: 11},
@@ -129,7 +134,6 @@ func TestNormalizeLedgerMessageKeepsUnsupportedShapesConservative(t *testing.T) 
 	}{
 		{name: "system", fact: LedgerMessageFact{Seq: 1, Direction: "in", Kind: "system", Origin: "external"}},
 		{name: "other card", fact: LedgerMessageFact{Seq: 2, Direction: "in", Kind: "card", CardType: "other", CardState: "unknown", Origin: "external"}, code: "unsupportedInboundCard"},
-		{name: "rejected inbound wechat card is unproven", fact: LedgerMessageFact{Seq: 3, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "rejected", Origin: "external"}, code: "inboundWechatCardState"},
 		{name: "unknown inbound card is not a request", fact: LedgerMessageFact{Seq: 5, Direction: "in", Kind: "card", CardType: "wechatExchange", CardState: "unknown", Origin: "external"}, code: "inboundWechatCardState"},
 		{name: "pending interview card is not acceptance", fact: LedgerMessageFact{Seq: 6, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "pending", Origin: "external"}, code: "inboundInterviewCardState"},
 		{name: "unknown interview card is not acceptance", fact: LedgerMessageFact{Seq: 7, Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "unknown", Origin: "external"}, code: "inboundInterviewCardState"},
