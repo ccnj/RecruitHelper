@@ -34,6 +34,9 @@ let lastBlockedAt = 0
 let dispatchedSinceProbe = 0
 let lastProbeAt = 0
 let probing = false
+/** 能不能观测到规则命中。观测不到就整体关闭自检 —— 判据的前提是"零命中可信",
+ *  前提不成立时再去探测,只会每隔一段时间报一次假的"规则失效"。 */
+let feedbackAvailable = false
 
 export interface NetGuardStats {
   /** 自 SW 启动以来拦下的上报次数。SW 重启即归零 —— 这是观测量,不是账本。 */
@@ -53,6 +56,7 @@ export function resetNetGuardForTest(): void {
   dispatchedSinceProbe = 0
   lastProbeAt = 0
   probing = false
+  feedbackAvailable = false
 }
 
 interface RuleMatchedDebugEvent {
@@ -84,11 +88,15 @@ export function registerNetGuard(): void {
     lastBlockedAt = Date.now()
     dispatchedSinceProbe = 0
   })
+  feedbackAvailable = true
 }
 
 /** 每收到一条 cmd 调一次。**永远不抛异常** —— 它挂在命令派发的主路上。 */
 export function noteCommandDispatched(): void {
   try {
+    // 观测不到命中时,"零命中"不是证据,整条判据失去意义。已经报过一条
+    // EnvReportGuardBlind 说明这个事实,不再反复探测与误报。
+    if (!feedbackAvailable) return
     dispatchedSinceProbe += 1
     const now = Date.now()
     if (now - lastBlockedAt < HEALTHY_WINDOW_MS) return

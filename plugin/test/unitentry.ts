@@ -43,6 +43,13 @@ export {
   zhilianTestHooks,
   ZhilianPlatformError,
 } from '../src/program/platform/zhilian'
+export { HandLogCode, installHandLogSink } from '../src/base/handLog'
+export {
+  netGuardStats,
+  noteCommandDispatched,
+  registerNetGuard,
+  resetNetGuardForTest,
+} from '../src/base/netGuard'
 export {
   AckStatus,
   ErrorCode,
