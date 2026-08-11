@@ -18,7 +18,6 @@ export const CONTENT_MESSAGE = {
 
 export const ZHILIAN_CONTENT_ORIGIN = 'https://rd6.zhaopin.com'
 export const ZHILIAN_CONTENT_MATCH = `${ZHILIAN_CONTENT_ORIGIN}/*`
-export const MANUAL_EMIT_MIN_MS = 5_000
 
 export interface ContentReadyMessage {
   type: typeof CONTENT_MESSAGE.Ready

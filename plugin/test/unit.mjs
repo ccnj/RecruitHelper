@@ -37,8 +37,6 @@ const {
   Kind,
   LoginState,
   ManualInteractionKind,
-  NavigationTracker,
-  navigationTracker,
   normalizeLocalWsUrl,
   parsedKeywordSections,
   NotReadyReason,
@@ -9441,7 +9439,7 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
   }
 })
 
-test('会话切换等待异常时 commandNavigation 必经 finally 清理', async () => {
+test('会话切换的 click task 排在 cancellation barrier 之后，等待异常照实抛出', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = '9'.repeat(64)
   const conversationRef = 'conversation-navigation-finally'
@@ -9490,17 +9488,7 @@ test('会话切换等待异常时 commandNavigation 必经 finally 清理', asyn
       ),
       /tabs-get-after-click/u,
     )
-    assert.equal(
-      navigationTracker.noteChromeNavigation(
-        93,
-        `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
-        Date.now(),
-      ),
-      'unknown',
-      '异常路径若泄漏 command window，这里会被误判为 command',
-    )
   } finally {
-    navigationTracker.removeTab(93)
     globalThis.chrome = originalChrome
   }
 })
@@ -11903,8 +11891,7 @@ test('content 传感器：精确双读、5s 节流与动态参数', async () => 
 test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页面导航只报 pageNavigated', async () => {
   let now = 0
   const connection = new FakeSensorConnection()
-  const navigation = new NavigationTracker(() => now)
-  const bridge = new SensorBridge(connection, navigation, () => now)
+  const bridge = new SensorBridge(connection, () => now)
   const tab1 = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
   const tab2 = { tabId: 2, active: true, url: 'https://rd6.zhaopin.com/app/recommend', windowId: 1 }
 
@@ -11946,19 +11933,17 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页�
   assert.equal(connection.snapshots.at(-1).unreadTotal.value, 2, '非 canonical 读数不得喂 ping')
 
   now = 18_000
-  const commandWindow = navigation.beginCommandNavigation(1, now + 1_000)
   const commandURL = 'https://rd6.zhaopin.com/app/im?sessionId=command'
-  bridge.noteChromeNavigation(1, commandURL, now)
+  bridge.noteChromeNavigation(1, commandURL)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.PageNavigated, at: now + 500, pageKind: PageKind.Im, url: commandURL }, {
     ...tab1,
     url: commandURL,
   })
-  commandWindow.end()
   assert.equal(connection.events.at(-1).name, EventName.PageNavigated)
 
   now = 24_000
   const manualURL = 'https://rd6.zhaopin.com/app/im?sessionId=manual'
-  bridge.noteChromeNavigation(1, manualURL, now + 1)
+  bridge.noteChromeNavigation(1, manualURL)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.PageNavigated, at: now + 500, pageKind: PageKind.Im, url: manualURL }, {
     ...tab1,
     url: manualURL,
@@ -11977,51 +11962,6 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页�
   assert.equal(connection.events.at(-1).name, EventName.LoginStateChanged)
   assert.equal(connection.events.at(-1).data.state, LoginState.Out)
   assert.equal(connection.contextHealth[0].reason, NotReadyReason.LoginRequired)
-})
-
-test('导航归因：命令窗口内出现新鲜真人意图时真人优先且窗口立即失效', () => {
-  let now = 10_000
-  const navigation = new NavigationTracker(() => now)
-  const commandWindow = navigation.beginCommandNavigation(7, now + 1_000)
-  navigation.noteTrustedNavigationIntent(7, now)
-  assert.equal(
-    navigation.noteChromeNavigation(7, 'https://rd6.zhaopin.com/app/im?sessionId=manual', now + 1),
-    'manual',
-  )
-  now += 2
-  assert.equal(
-    navigation.noteChromeNavigation(7, 'https://rd6.zhaopin.com/app/im?sessionId=next', now),
-    'unknown',
-    '真人抢占后旧 command window 不得继续吞下一次导航',
-  )
-  commandWindow.end()
-})
-
-test('导航归因：乱序旧事件不消费命令窗口，窗口严格服从动作截止时间', () => {
-  let now = 20_000
-  const navigation = new NavigationTracker(() => now)
-  navigation.noteTrustedNavigationIntent(9, now - 5)
-  const commandWindow = navigation.beginCommandNavigation(9, now + 50)
-
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=old', now - 1),
-    'unknown',
-    '早于窗口创建时间的迟到旧事件不得归因为本命令或借旧真人意图撤销窗口',
-  )
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=command', now + 1),
-    'command',
-    '旧事件不得消费仍有效的命令窗口',
-  )
-  commandWindow.end()
-
-  now = 30_000
-  navigation.beginCommandNavigation(9, now + 10)
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=late', now + 11),
-    'unknown',
-    '动作截止时间之后的事件不得沿用默认 intrusive 总预算伪装成命令导航',
-  )
 })
 
 test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome sensors', async () => {
@@ -12155,7 +12095,7 @@ test('SensorBridge 只把推荐页 committed reload 上报为换代', async () =
       },
     }
     const connection = new FakeSensorConnection()
-    const bridge = new SensorBridge(connection, new NavigationTracker(() => now), () => now)
+    const bridge = new SensorBridge(connection, () => now)
     bridge.start()
     const listener = tabUpdated.listeners[0]
     const recommendURL = 'https://rd6.zhaopin.com/app/recommend'

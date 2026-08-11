@@ -19,7 +19,6 @@ import {
   ZHILIAN_CONTENT_MATCH,
   isZhilianURL,
 } from './contentMessages'
-import { NavigationTracker, navigationTracker } from './navigation'
 import type { SendOutcome } from './dispatcher'
 
 const PLATFORM = 'zhilian'
@@ -72,7 +71,6 @@ export class SensorBridge {
 
   constructor(
     private readonly connection: SensorConnectionPort,
-    private readonly navigation: NavigationTracker = navigationTracker,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -122,7 +120,6 @@ export class SensorBridge {
     const onNavigation = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => {
       if (details.frameId !== 0 || !isZhilianURL(details.url)) return
       this.platformTabs.add(details.tabId)
-      this.navigation.noteChromeNavigation(details.tabId, details.url, Math.trunc(details.timeStamp))
       void chrome.tabs.sendMessage(details.tabId, { type: CONTENT_MESSAGE.NavigationObserved }).catch(() => undefined)
     }
     chrome.webNavigation.onCommitted.addListener((details) => {
@@ -206,16 +203,14 @@ export class SensorBridge {
     this.refreshCachedState()
   }
 
-  noteChromeNavigation(tabId: number, url: string, at: number): void {
+  noteChromeNavigation(tabId: number, url: string): void {
     if (!isZhilianURL(url)) return
     this.platformTabs.add(tabId)
-    this.navigation.noteChromeNavigation(tabId, url, at)
   }
 
   removeTab(tabId: number): void {
     this.platformTabs.delete(tabId)
     this.tabStates.delete(tabId)
-    this.navigation.removeTab(tabId)
     this.refreshCachedState()
   }
 
