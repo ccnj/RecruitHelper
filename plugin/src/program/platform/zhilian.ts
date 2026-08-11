@@ -3565,18 +3565,13 @@ async function mainSendGreetingOnce(
     const delayMs = nextInteractionNotBefore - Date.now()
     if (delayMs > 0) await sleep(delayMs)
   }
-  const performInteraction = async (
-    interaction: () => void,
-    allowed: () => boolean = () => true,
-  ): Promise<boolean> => {
+  const performInteraction = async (interaction: () => void): Promise<void> => {
     await waitInteractionGap()
-    if (!allowed()) return false
     try {
       interaction()
     } finally {
       nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
     }
-    return true
   }
   const waitFor = async (predicate: () => boolean): Promise<boolean> => {
     for (let round = 0; round < 200; round += 1) {
@@ -3605,122 +3600,108 @@ async function mainSendGreetingOnce(
     )
     // 这里之后才允许观察弹层；本轮不再调用“打招呼”入口。
     await performInteraction(invokeOpen)
-    let humanTouched = false
-    const observeTrustedInput = (event: Event): void => {
-      if (event.isTrusted) humanTouched = true
+    // 本段不监听真人操作(2026-08-11 甲方裁决,见协议规格 chat.sendGreeting@1
+    // “编辑器准备阶段不监听真人操作”):写入正文直接覆盖编辑器当前内容。
+    // 真人输入所有权由写入后至发送前的 evaluateFinal 以正文精确相等核对承担,
+    // 打开前的既有弹窗由本段之前的弹窗计数闸拒绝。
+    if (!await waitFor(() => greetingModals().length === 1)) return failed('editor_not_opened')
+    if (!principalMatches() || !targetSurface()) return failed('target_changed')
+    let modal = greetingModals()[0]
+    let custom = customOptionOf(modal)
+    if (!custom) return failed('custom_option_unavailable')
+    if (!customSelected(custom)) {
+      const invokeOption = Function.prototype.call.bind(
+        HTMLElement.prototype.click as IntrinsicClick,
+        custom,
+      )
+      await performInteraction(invokeOption)
+      const selected = await waitFor(() => {
+        const currentModal = greetingModals()[0]
+        const currentCustom = currentModal ? customOptionOf(currentModal) : null
+        return currentCustom !== null && customSelected(currentCustom)
+      })
+      if (!selected) return failed('custom_option_unavailable')
     }
-    for (const eventName of ['pointerdown', 'keydown', 'input'] as const) {
-      document.addEventListener(eventName, observeTrustedInput, true)
+    modal = greetingModals()[0]
+    custom = modal ? customOptionOf(modal) : null
+    if (!modal || !custom || !customSelected(custom)) return failed('custom_option_unavailable')
+    let textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
+      '.ai-greeting-modal__edit-area textarea',
+    )).filter(visible)
+    if (textareas.length === 0) {
+      const editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
+      if (editIcons.length !== 1) return failed('editor_unavailable')
+      const invokeEdit = Function.prototype.call.bind(
+        HTMLElement.prototype.click as IntrinsicClick,
+        editIcons[0],
+      )
+      await performInteraction(invokeEdit)
+      await waitFor(() => {
+        const currentModal = greetingModals()[0]
+        const currentCustom = currentModal ? customOptionOf(currentModal) : null
+        return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
+          '.ai-greeting-modal__edit-area textarea',
+        )).filter(visible).length === 1
+      })
     }
-    try {
-      if (!await waitFor(() => greetingModals().length === 1)) return failed('editor_not_opened')
-      if (humanTouched) return failed('existing_editor')
-      if (!principalMatches() || !targetSurface()) return failed('target_changed')
-      let modal = greetingModals()[0]
-      let custom = customOptionOf(modal)
-      if (!custom) return failed('custom_option_unavailable')
-      if (!customSelected(custom)) {
-        const invokeOption = Function.prototype.call.bind(
-          HTMLElement.prototype.click as IntrinsicClick,
-          custom,
-        )
-        if (!await performInteraction(invokeOption, () => !humanTouched)) return failed('existing_editor')
-        const selected = await waitFor(() => {
-          if (humanTouched) return true
-          const currentModal = greetingModals()[0]
-          const currentCustom = currentModal ? customOptionOf(currentModal) : null
-          return currentCustom !== null && customSelected(currentCustom)
-        })
-        if (humanTouched) return failed('existing_editor')
-        if (!selected) return failed('custom_option_unavailable')
-      }
-      modal = greetingModals()[0]
-      custom = modal ? customOptionOf(modal) : null
-      if (!modal || !custom || !customSelected(custom)) return failed('custom_option_unavailable')
-      let textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
-        '.ai-greeting-modal__edit-area textarea',
-      )).filter(visible)
-      if (textareas.length === 0) {
-        const editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
-        if (editIcons.length !== 1) return failed('editor_unavailable')
-        const invokeEdit = Function.prototype.call.bind(
-          HTMLElement.prototype.click as IntrinsicClick,
-          editIcons[0],
-        )
-        if (!await performInteraction(invokeEdit, () => !humanTouched)) return failed('existing_editor')
-        await waitFor(() => {
-          const currentModal = greetingModals()[0]
-          const currentCustom = currentModal ? customOptionOf(currentModal) : null
-          return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
-            '.ai-greeting-modal__edit-area textarea',
-          )).filter(visible).length === 1
-        })
-        if (humanTouched) return failed('existing_editor')
-      }
-      modal = greetingModals()[0]
-      custom = modal ? customOptionOf(modal) : null
-      textareas = custom
-        ? Array.from(custom.querySelectorAll<HTMLTextAreaElement>('.ai-greeting-modal__edit-area textarea')).filter(visible)
-        : []
-      if (!modal || !custom || !customSelected(custom) || textareas.length !== 1) {
-        return failed('editor_unavailable')
-      }
-      const defaultState = defaultSettingState(modal)
-      if (defaultState === 'unresolved') return failed('default_setting_unresolved')
-      if (defaultState === 'checked') return failed('default_setting_selected')
-      if (!principalMatches() || !targetSurface()) return failed('target_changed')
-      if (humanTouched) return failed('existing_editor')
-      const ownedDraft = textareas[0].value
-      if (new TextEncoder().encode(ownedDraft).length > 2048) return failed('editor_unavailable')
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
-        TextareaValueSetter | undefined
-      if (typeof setter !== 'function') return failed('editor_unavailable')
-      const restoreOwnedDraft = async (): Promise<boolean> =>
-        performInteraction(() => {
-          try { setter.call(textareas[0], ownedDraft) } catch { return }
-          try {
-            textareas[0].dispatchEvent(new InputEvent('input', {
-              bubbles: true,
-              inputType: 'insertText',
-              data: ownedDraft,
-            }))
-            textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
-          } catch {
-            // prepare 仍在 attempting 前；恢复 DOM 值后由人工处理页面事件异常。
-          }
-        }, () => !humanTouched)
-      try {
-        if (!await performInteraction(() => {
-          setter.call(textareas[0], text)
+    modal = greetingModals()[0]
+    custom = modal ? customOptionOf(modal) : null
+    textareas = custom
+      ? Array.from(custom.querySelectorAll<HTMLTextAreaElement>('.ai-greeting-modal__edit-area textarea')).filter(visible)
+      : []
+    if (!modal || !custom || !customSelected(custom) || textareas.length !== 1) {
+      return failed('editor_unavailable')
+    }
+    const defaultState = defaultSettingState(modal)
+    if (defaultState === 'unresolved') return failed('default_setting_unresolved')
+    if (defaultState === 'checked') return failed('default_setting_selected')
+    if (!principalMatches() || !targetSurface()) return failed('target_changed')
+    const ownedDraft = textareas[0].value
+    if (new TextEncoder().encode(ownedDraft).length > 2048) return failed('editor_unavailable')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
+      TextareaValueSetter | undefined
+    if (typeof setter !== 'function') return failed('editor_unavailable')
+    const restoreOwnedDraft = async (): Promise<void> =>
+      performInteraction(() => {
+        try { setter.call(textareas[0], ownedDraft) } catch { return }
+        try {
           textareas[0].dispatchEvent(new InputEvent('input', {
             bubbles: true,
             inputType: 'insertText',
-            data: text,
+            data: ownedDraft,
           }))
           textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
-        }, () => !humanTouched)) return failed('existing_editor')
-        const latestModal = greetingModals()[0]
-        const latestCustom = latestModal ? customOptionOf(latestModal) : null
-        const latestTextareas = latestCustom
-          ? Array.from(latestCustom.querySelectorAll<HTMLTextAreaElement>(
-              '.ai-greeting-modal__edit-area textarea',
-            )).filter(visible)
-          : []
-        if (!latestModal || !latestCustom || !customSelected(latestCustom) || latestTextareas.length !== 1 ||
-            latestTextareas[0].value !== text || defaultSettingState(latestModal) !== 'unchecked' ||
-            !principalMatches() || !targetSurface()) {
-          if (!await restoreOwnedDraft()) return failed('existing_editor')
-          return failed('input_rejected')
+        } catch {
+          // prepare 仍在 attempting 前；恢复 DOM 值后由人工处理页面事件异常。
         }
-        return { status: 'prepared' }
-      } catch {
-        if (!await restoreOwnedDraft()) return failed('existing_editor')
+      })
+    try {
+      await performInteraction(() => {
+        setter.call(textareas[0], text)
+        textareas[0].dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: text,
+        }))
+        textareas[0].dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      const latestModal = greetingModals()[0]
+      const latestCustom = latestModal ? customOptionOf(latestModal) : null
+      const latestTextareas = latestCustom
+        ? Array.from(latestCustom.querySelectorAll<HTMLTextAreaElement>(
+            '.ai-greeting-modal__edit-area textarea',
+          )).filter(visible)
+        : []
+      if (!latestModal || !latestCustom || !customSelected(latestCustom) || latestTextareas.length !== 1 ||
+          latestTextareas[0].value !== text || defaultSettingState(latestModal) !== 'unchecked' ||
+          !principalMatches() || !targetSurface()) {
+        await restoreOwnedDraft()
         return failed('input_rejected')
       }
-    } finally {
-      for (const eventName of ['pointerdown', 'keydown', 'input'] as const) {
-        document.removeEventListener(eventName, observeTrustedInput, true)
-      }
+      return { status: 'prepared' }
+    } catch {
+      await restoreOwnedDraft()
+      return failed('input_rejected')
     }
   }
 
