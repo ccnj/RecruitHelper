@@ -13005,6 +13005,8 @@ test('邀面成功弹窗:页面上没有弹窗时不空等、不误报', async (
 // 上报,所以自检必须能区分两种沉默:检测脚本还在=失效了,脚本没了=平台不查了。
 function installNetGuardFixture({
   hasFeedback = true,
+  enabledRulesets = ['zhilian_env_report'],
+  rulesetsThrow = false,
   tabs = [{ id: 7 }],
   probeResult = true,
   probeThrows = false,
@@ -13015,10 +13017,17 @@ function installNetGuardFixture({
   const logs = []
   resetNetGuardForTest()
   installHandLogSink((data) => logs.push(data))
+  const dnr = {
+    async getEnabledRulesets() {
+      if (rulesetsThrow) throw new Error('api unavailable')
+      return enabledRulesets
+    },
+  }
+  if (hasFeedback) {
+    dnr.onRuleMatchedDebug = { addListener(cb) { matchListeners.push(cb) } }
+  }
   globalThis.chrome = {
-    declarativeNetRequest: hasFeedback
-      ? { onRuleMatchedDebug: { addListener(cb) { matchListeners.push(cb) } } }
-      : {},
+    declarativeNetRequest: dnr,
     tabs: { async query() { return tabs } },
     scripting: {
       async executeScript(args) {
@@ -13033,6 +13042,7 @@ function installNetGuardFixture({
     executed,
     logs,
     staleLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardStale),
+    offLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardOff),
     restore() {
       globalThis.chrome = originalChrome
       installHandLogSink(null)
@@ -13052,6 +13062,44 @@ test('埋点上报自检:onRuleMatchedDebug 不可用时明说失明,且不拖�
     for (let i = 0; i < 30; i += 1) noteCommandDispatched()
     await sleep(10)
     assert.equal(fixture.executed.length, 0)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:规则集已启用时不报警', async () => {
+  const fixture = installNetGuardFixture()
+  try {
+    registerNetGuard()
+    await sleep(10)
+    assert.equal(fixture.offLog(), undefined)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:规则集没被启用时当场报出,不绕道等零命中', async () => {
+  const fixture = installNetGuardFixture({ enabledRulesets: [] })
+  try {
+    registerNetGuard()
+    await sleep(10)
+    const off = fixture.offLog()
+    assert.ok(off, '规则集未启用必须当场报 envReportGuardOff')
+    assert.equal(off.level, 'error')
+    assert.match(off.message, /未启用/)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:查不到规则集状态时只降级报 warn,不当作未启用', async () => {
+  const fixture = installNetGuardFixture({ rulesetsThrow: true })
+  try {
+    registerNetGuard()
+    await sleep(10)
+    const off = fixture.offLog()
+    assert.ok(off)
+    assert.equal(off.level, 'warn', '问不到不等于没启用,不能报成 error')
   } finally {
     fixture.restore()
   }

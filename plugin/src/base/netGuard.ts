@@ -15,7 +15,10 @@
 // (点击在 MAIN world 的注入函数里,SW 数不着),而只要巡检在跑就必然点过东西。粗一点
 // 无妨 —— 这道自检的失效方向是"漏报一次失效",不是"误停业务"。它只观测、只上报,
 // 任何一步出问题都不得影响命令派发。
-import { HandLogCode, reportHandLog } from './handLog'
+import { HandLogCode, describeError, reportHandLog } from './handLog'
+
+/** manifest 里声明的静态规则集 id。改名必须同步改 manifest,否则启用核对会误报。 */
+const RULESET_ID = 'zhilian_env_report'
 
 /** 检测脚本执行后在页面 window 上留下的键(2026-08-11 真机实测存在;值为 undefined,故用 in 判)。 */
 const ENV_CHECK_MARKER = 'ada:extension:shared-module:rd6.zhaopin.com:.:environment-check:default'
@@ -89,6 +92,35 @@ export function registerNetGuard(): void {
     dispatchedSinceProbe = 0
   })
   feedbackAvailable = true
+  void verifyRulesetEnabled()
+}
+
+/**
+ * 规则集有没有被 Chrome 真正启用 —— 规则文件路径写错、JSON 语法有问题、或者当前
+ * Chrome 版本不认某个字段时,规则集会静默不启用。这种情形靠"零命中探测"要绕一大圈
+ * 才发现且原因不明,而启动时一查就知道,所以单独核对一次。
+ *
+ * 只报告,不尝试补救:动态规则是另一套 API 与另一套失效模式,为一个配置错误再引一套
+ * 机制不划算 —— 报出来让人改文件即可。
+ */
+async function verifyRulesetEnabled(): Promise<void> {
+  try {
+    const enabled = await chrome.declarativeNetRequest.getEnabledRulesets()
+    if (enabled.includes(RULESET_ID)) return
+    reportHandLog(
+      'error',
+      HandLogCode.EnvReportGuardOff,
+      `埋点上报拦截规则集未启用:${RULESET_ID} 不在已启用列表内,上报未被拦截`,
+      `enabled=${enabled.join(',')}`,
+    )
+  } catch (error) {
+    reportHandLog(
+      'warn',
+      HandLogCode.EnvReportGuardOff,
+      '无法确认埋点上报拦截规则集是否已启用',
+      describeError(error),
+    )
+  }
 }
 
 /** 每收到一条 cmd 调一次。**永远不抛异常** —— 它挂在命令派发的主路上。 */

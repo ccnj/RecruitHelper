@@ -29,6 +29,8 @@ export const HandLogCode = {
   EnvReportGuardStale: 'envReportGuardStale',
   /** 拦截规则装上了,但没法自检(onRuleMatchedDebug 不可用)。 */
   EnvReportGuardBlind: 'envReportGuardBlind',
+  /** 拦截规则集压根没被启用 —— 规则文件路径/语法有问题,或当前 Chrome 不认某字段。 */
+  EnvReportGuardOff: 'envReportGuardOff',
 } as const
 
 /** 同 code 的最小上报间隔。与契约里 handLog 的 throttle 标注一致。
