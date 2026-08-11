@@ -28,10 +28,12 @@ const contentOptions = {
 
 mkdirSync('dist', { recursive: true })
 
-// 静态资源(manifest、options)拷进 dist,dist/ 即可直接作为 unpacked 扩展加载。
+// 静态资源(manifest、options、declarativeNetRequest 规则)拷进 dist,
+// dist/ 即可直接作为 unpacked 扩展加载。
 function copyStatic() {
   cpSync('manifest.json', 'dist/manifest.json')
   cpSync('src/options', 'dist/options', { recursive: true })
+  cpSync('src/rules', 'dist/rules', { recursive: true })
 }
 
 if (watch) {

@@ -33,7 +33,13 @@ const {
   Feature,
   GENERATED_CONTRACT_VALIDATION_EXECUTED,
   handleInfrastructureMessage,
+  HandLogCode,
   heartbeatDelayMs,
+  installHandLogSink,
+  netGuardStats,
+  noteCommandDispatched,
+  registerNetGuard,
+  resetNetGuardForTest,
   Kind,
   LoginState,
   ManualInteractionKind,
@@ -12988,6 +12994,185 @@ test('邀面成功弹窗:页面上没有弹窗时不空等、不误报', async (
     const outcome = await zhilianTestHooks.mainCloseInterviewSuccessModal()
     assert.deepEqual(outcome, { found: false, closed: false, remaining: 0, scene: '' })
     assert.deepEqual(fixture.escapes, [])
+  } finally {
+    fixture.restore()
+  }
+})
+
+// ---- 埋点上报拦截规则的在线自检 ----
+// 拦的是智联 environment-check 对"isTrusted 为假的合成点击"所做的实名上报。
+// 规则静默失效(平台改端点、改路径、挪进反爬 VMP)不会有任何报错,只会安静恢复
+// 上报,所以自检必须能区分两种沉默:检测脚本还在=失效了,脚本没了=平台不查了。
+function installNetGuardFixture({
+  hasFeedback = true,
+  enabledRulesets = ['zhilian_env_report'],
+  rulesetsThrow = false,
+  tabs = [{ id: 7 }],
+  probeResult = true,
+  probeThrows = false,
+} = {}) {
+  const originalChrome = globalThis.chrome
+  const matchListeners = []
+  const executed = []
+  const logs = []
+  resetNetGuardForTest()
+  installHandLogSink((data) => logs.push(data))
+  const dnr = {
+    async getEnabledRulesets() {
+      if (rulesetsThrow) throw new Error('api unavailable')
+      return enabledRulesets
+    },
+  }
+  if (hasFeedback) {
+    dnr.onRuleMatchedDebug = { addListener(cb) { matchListeners.push(cb) } }
+  }
+  globalThis.chrome = {
+    declarativeNetRequest: dnr,
+    tabs: { async query() { return tabs } },
+    scripting: {
+      async executeScript(args) {
+        executed.push(args)
+        if (probeThrows) throw new Error('injection refused')
+        return [{ result: probeResult }]
+      },
+    },
+  }
+  return {
+    matchListeners,
+    executed,
+    logs,
+    staleLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardStale),
+    offLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardOff),
+    restore() {
+      globalThis.chrome = originalChrome
+      installHandLogSink(null)
+      resetNetGuardForTest()
+    },
+  }
+}
+
+test('埋点上报自检:onRuleMatchedDebug 不可用时明说失明,且不拖累命令派发', async () => {
+  const fixture = installNetGuardFixture({ hasFeedback: false })
+  try {
+    registerNetGuard()
+    assert.equal(fixture.logs.length, 1)
+    assert.equal(fixture.logs[0].code, HandLogCode.EnvReportGuardBlind)
+    assert.equal(fixture.logs[0].level, 'warn')
+    // 自检失明不等于停工:派发计数照跑、不抛、也不去注入探测。
+    for (let i = 0; i < 30; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 0)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:规则集已启用时不报警', async () => {
+  const fixture = installNetGuardFixture()
+  try {
+    registerNetGuard()
+    await sleep(10)
+    assert.equal(fixture.offLog(), undefined)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:规则集没被启用时当场报出,不绕道等零命中', async () => {
+  const fixture = installNetGuardFixture({ enabledRulesets: [] })
+  try {
+    registerNetGuard()
+    await sleep(10)
+    const off = fixture.offLog()
+    assert.ok(off, '规则集未启用必须当场报 envReportGuardOff')
+    assert.equal(off.level, 'error')
+    assert.match(off.message, /未启用/)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:查不到规则集状态时只降级报 warn,不当作未启用', async () => {
+  const fixture = installNetGuardFixture({ rulesetsThrow: true })
+  try {
+    registerNetGuard()
+    await sleep(10)
+    const off = fixture.offLog()
+    assert.ok(off)
+    assert.equal(off.level, 'warn', '问不到不等于没启用,不能报成 error')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:规则命中即计数,健康窗口内不去探测页面', async () => {
+  const fixture = installNetGuardFixture()
+  try {
+    registerNetGuard()
+    fixture.matchListeners[0]()
+    assert.equal(netGuardStats().blockedCount, 1)
+    assert.ok(netGuardStats().lastBlockedAt > 0)
+    for (let i = 0; i < 30; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 0, '最近命中过就不该再注入探测')
+    assert.equal(fixture.staleLog(), undefined)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:零命中且检测脚本仍在页面上,判失效并报给脑', async () => {
+  const fixture = installNetGuardFixture({ probeResult: true })
+  try {
+    registerNetGuard()
+    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 1, '攒够派发数才探一次')
+    assert.equal(fixture.executed[0].world, 'MAIN')
+    const stale = fixture.staleLog()
+    assert.ok(stale, '检测脚本还在而规则零命中,必须报 envReportGuardStale')
+    assert.equal(stale.level, 'error')
+    // handLog 纪律:不得携带任何候选人明文。detail 只允许是计数与时间戳。
+    assert.match(stale.detail, /^dispatched=\d+ blocked=\d+ lastBlockedAt=\d+$/)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:检测脚本已不在页面上时属正常,不判失效', async () => {
+  const fixture = installNetGuardFixture({ probeResult: false })
+  try {
+    registerNetGuard()
+    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 1)
+    assert.equal(fixture.staleLog(), undefined, '平台不查了不等于我方失效')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:没有平台页时不下结论', async () => {
+  const fixture = installNetGuardFixture({ tabs: [] })
+  try {
+    registerNetGuard()
+    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 0, '没有平台页就无从探测')
+    assert.equal(fixture.staleLog(), undefined)
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:探测注入失败不判失效、不抛异常', async () => {
+  const fixture = installNetGuardFixture({ probeThrows: true })
+  try {
+    registerNetGuard()
+    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
+    await sleep(10)
+    assert.equal(fixture.executed.length, 1)
+    assert.equal(fixture.staleLog(), undefined, '注入失败只是没问到,不构成失效结论')
   } finally {
     fixture.restore()
   }

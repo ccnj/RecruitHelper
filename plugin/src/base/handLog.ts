@@ -25,6 +25,12 @@ export const HandLogCode = {
   OutboxReplayFailed: 'outboxReplayFailed',
   /** 要发的 body 不符合生成契约。通常意味着两端版本对不上。 */
   OutboundBodyInvalid: 'outboundBodyInvalid',
+  /** 平台埋点上报的拦截规则疑似失效:检测脚本还在,规则却长期零命中。 */
+  EnvReportGuardStale: 'envReportGuardStale',
+  /** 拦截规则装上了,但没法自检(onRuleMatchedDebug 不可用)。 */
+  EnvReportGuardBlind: 'envReportGuardBlind',
+  /** 拦截规则集压根没被启用 —— 规则文件路径/语法有问题,或当前 Chrome 不认某字段。 */
+  EnvReportGuardOff: 'envReportGuardOff',
 } as const
 
 /** 同 code 的最小上报间隔。与契约里 handLog 的 throttle 标注一致。
