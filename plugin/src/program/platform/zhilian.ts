@@ -465,6 +465,7 @@ interface MainThreadPageResult {
   reachedTop: boolean
   cursor: { endTime: number; lastMsgId: string } | null
   peer: { displayName: string; platformUserRef?: string } | null
+  rejectNoticeTs: number | null
 }
 
 const MAIN_SEND_SURFACE_STAGES = [
@@ -8194,6 +8195,7 @@ async function mainReadThreadPage(
   diagnosticStage = 'normalize_messages'
   const output: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
   const unrecognizedTypeCodes = new Set<string>()
+  let rejectNoticeTs: number | null = null
   const sorted = [...rows].sort((a, b) => Number(a.time ?? 0) - Number(b.time ?? 0))
   for (const row of sorted) {
     const envelope = parseObject(row.content)
@@ -8356,7 +8358,27 @@ async function mainReadThreadPage(
       ) || `[系统消息:${Number.isFinite(customType) ? customType : clean(rawType) || 'unknown'}]`
     }
 
+    // 99 族 type=34:平台拒收通知(候选人已拉黑,发送失败),服务端持久化行。
+    // 只认结构负载 + idServer + 数值时间;row.text 新鲜/刷新两态不一致,不参与。
+    // 该行本身照旧按上方 system 兜底进账本,这里只提取时间戳供发后验证读消费
+    // (拉黑感知契约增量 2026-08-11)。
+    if (customSuccess && customType === 99 && Number(details.type) === 34 &&
+        stableMessageIdentity(row.idServer)) {
+      const noticeTs = toMillis(row.time)
+      if (noticeTs !== null) {
+        rejectNoticeTs = rejectNoticeTs === null ? noticeTs : Math.max(rejectNoticeTs, noticeTs)
+      }
+    }
+
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') {
+      // 拉黑后的发送在本地留下"status=fail、无 idServer、time 空"的乐观渲染残影:
+      // 服务端从未持久化,刷新即消失,滞留期间整读拒绝会把该会话冻结到页面重载。
+      // 跨行容忍只限这一个窄形状(拉黑感知契约增量 2026-08-11),它不进账本、
+      // 不构成任何判据;其余非 success 出站行(如仍在途的 sending)照旧整读拒绝。
+      if (clean(row.status).toLowerCase() === 'fail' &&
+          !stableMessageIdentity(row.idServer) && toMillis(row.time) === null) {
+        continue
+      }
       throw new Error('outbound_delivery_unconfirmed')
     }
 
@@ -8412,6 +8434,7 @@ async function mainReadThreadPage(
       ? { endTime, lastMsgId }
       : null,
     peer: platformUserRef ? { displayName, platformUserRef } : { displayName },
+    rejectNoticeTs,
   }
   }
 
@@ -13519,6 +13542,7 @@ export async function readZhilianThread(
     : null
   let reachedTop = false
   let peer: MainThreadPageResult['peer'] = null
+  let rejectNoticeTs: number | null = null
   const collected: Array<Omit<ZhilianThreadMessage, 'idx'> & { sourceKey: string }> = []
   const sourceSemantics = new Map<string, { direction: ZhilianThreadMessage['direction']; contentHash: string }>()
   let platformReadStarted = routeConsumedBarrier
@@ -13582,6 +13606,11 @@ export async function readZhilianThread(
       throw new ZhilianPlatformError('CURSOR_INVALID', '会话历史平台游标没有向前推进')
     }
     peer = page.peer ?? peer
+    if (typeof page.rejectNoticeTs === 'number') {
+      rejectNoticeTs = rejectNoticeTs === null
+        ? page.rejectNoticeTs
+        : Math.max(rejectNoticeTs, page.rejectNoticeTs)
+    }
     const pageSeen = new Map(sourceSemantics)
     const unseen = page.messages.filter((message) => {
       const seen = pageSeen.get(message.sourceKey)
@@ -13707,6 +13736,7 @@ export async function readZhilianThread(
     complete,
     nextCursor,
     peer,
+    ...(rejectNoticeTs !== null ? { rejectNoticeTs } : {}),
   }
   if (jsonBytes(result) > RESULT_DATA_BUDGET) {
     throw new ZhilianPlatformError('PAYLOAD_LIMIT', '会话读取结果超过内联载荷上限')
