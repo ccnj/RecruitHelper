@@ -8333,12 +8333,15 @@ async function mainReadThreadPage(
     }
 
     if (direction === 'out' && clean(row.status).toLowerCase() !== 'success') {
-      // 拉黑后的发送在本地留下"status=fail、无 idServer、time 空"的乐观渲染残影:
-      // 服务端从未持久化,刷新即消失,滞留期间整读拒绝会把该会话冻结到页面重载。
+      // 拉黑后的发送在本地留下"status=fail、无 idServer"的乐观渲染残影:服务端
+      // 从未持久化,刷新即消失,滞留期间整读拒绝会把该会话冻结到页面重载。
       // 跨行容忍只限这一个窄形状(拉黑感知契约增量 2026-08-11),它不进账本、
       // 不构成任何判据;其余非 success 出站行(如仍在途的 sending)照旧整读拒绝。
+      // 判据刻意不看 time:2026-08-11 真机实测新鲜 fail 行的 time 是可数值化的
+      // Date 对象,陈化后才退成空对象——易变渲染细节,不作判据;"无 idServer"
+      // 才是"服务端从未持久化"的铁证。
       if (clean(row.status).toLowerCase() === 'fail' &&
-          !stableMessageIdentity(row.idServer) && toMillis(row.time) === null) {
+          !stableMessageIdentity(row.idServer)) {
         continue
       }
       throw new Error('outbound_delivery_unconfirmed')
