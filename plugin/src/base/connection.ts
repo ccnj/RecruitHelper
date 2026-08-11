@@ -52,6 +52,7 @@ import { Dispatcher, SendOutcome } from './dispatcher'
 import { acknowledgeRuntimeReloadResult } from './reload'
 import { WitnessAdvertisement, WitnessStore, WitnessStorage } from './witness'
 import { HandLogCode, describeError, reportHandLog } from './handLog'
+import { noteCommandDispatched } from './netGuard'
 
 type Phase = 'connecting' | 'preSession' | 'session' | 'closed'
 
@@ -383,6 +384,8 @@ export class Connection {
         this.onPong(env.session)
         break
       case Kind.Cmd:
+        // 埋点上报拦截规则自检的"近期有命令派发"信号。只计数、不阻塞、不抛。
+        noteCommandDispatched()
         await this.dispatcher.handleCmd(env.msgId, env.session, this.session, env.body)
         break
       case Kind.Cancel:

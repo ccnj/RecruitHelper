@@ -8,7 +8,15 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "alarms", "tabs", "scripting", "webNavigation"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "declarativeNetRequest",
+    "declarativeNetRequestFeedback"
+  ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "https://127.0.0.1/*",
@@ -22,5 +30,14 @@
       "run_at": "document_idle"
     }
   ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "zhilian_env_report",
+        "enabled": true,
+        "path": "rules/zhilian-env-report.json"
+      }
+    ]
+  },
   "options_page": "options/options.html"
 }

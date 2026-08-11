@@ -12,6 +12,7 @@ import { registerM7Primitives } from '../program/primitives/m7'
 import { registerJobPublishPrimitives } from '../program/primitives/jobPublish'
 import { refreshPagesAfterRuntimeReload } from './reload'
 import { installHandLogSink } from './handLog'
+import { registerNetGuard } from './netGuard'
 
 // program 原语注册(program 不注册任何 chrome 监听,只填这张表)。
 registerDebugPrimitives()
@@ -29,6 +30,9 @@ registerSensorBridge(conn)
 installHandLogSink((data) => {
   conn.emitHandLog(data)
 })
+// 平台埋点上报拦截规则的自检。必须排在 installHandLogSink 之后 —— 它可能立刻
+// 报一条"无法自检",sink 还没装上就报会被丢掉。
+registerNetGuard()
 const reloadStartup = refreshPagesAfterRuntimeReload()
   .then((count) => {
     if (count > 0) console.log('[hand] 自重载后已刷新平台页', count)
