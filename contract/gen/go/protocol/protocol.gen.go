@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:76c2ba6366fb99c84e420180847ec02f87c8dedb9bd339435b89f11cfeb9e8f6"
+	ContractHash       = "sha256:c1d61df87a76f866b1685a86983701284c94cdb63293419ff1701fa8a944601a"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -246,14 +246,10 @@ var LoginStateValues = []LoginState{
 type ManualInteractionKind string
 
 const (
-	ManualInteractionKindPointer    ManualInteractionKind = "pointer"
-	ManualInteractionKindKeyboard   ManualInteractionKind = "keyboard"
 	ManualInteractionKindNavigation ManualInteractionKind = "navigation"
 )
 
 var ManualInteractionKindValues = []ManualInteractionKind{
-	ManualInteractionKindPointer,
-	ManualInteractionKindKeyboard,
 	ManualInteractionKindNavigation,
 }
 

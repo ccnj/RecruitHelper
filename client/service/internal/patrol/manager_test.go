@@ -1128,7 +1128,7 @@ func TestLongRoundDoesNotBlockManualInteractionEvent(t *testing.T) {
 	go func() {
 		eventDone <- h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction,
 			protocol.ManualInteractionEventData{
-				At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindPointer, PageKind: protocol.PageKindIm,
+				At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindNavigation, PageKind: protocol.PageKindIm,
 			}))
 	}()
 	select {
@@ -1236,7 +1236,7 @@ func TestEventCannotSlipBetweenGenerationGateAndCommandStart(t *testing.T) {
 	go func() {
 		eventDone <- h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction,
 			protocol.ManualInteractionEventData{
-				At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindPointer, PageKind: protocol.PageKindIm,
+				At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindNavigation, PageKind: protocol.PageKindIm,
 			}))
 	}()
 	select {
@@ -1883,10 +1883,12 @@ func TestPageAbsentRecoveryFailureKeepsOpaqueBindingUnobservable(t *testing.T) {
 }
 
 // 2026-07-27 甲方裁决废除静默窗：manualInteraction 只催巡检，不再压制派发。
+// 2026-08-11 起该事件 kind 只剩 navigation；此处与另两处并发用例刻意用 im 页
+// 构造，避开 recommend 页会触发的推荐流作废，专注测调度语义。
 func TestManualQuietAndEventCoalescingRespectMinimumGap(t *testing.T) {
 	h := newHarness(t)
 	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventManualInteraction, protocol.ManualInteractionEventData{
-		At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindPointer, PageKind: protocol.PageKindIm,
+		At: h.clock.Now().UnixMilli(), Kind: protocol.ManualInteractionKindNavigation, PageKind: protocol.PageKindIm,
 	})); err != nil {
 		t.Fatal(err)
 	}
