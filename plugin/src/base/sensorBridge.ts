@@ -1,5 +1,5 @@
 // SW 侧页面桥：只把 content 的稳定现货变成 QoS0 提示/心跳缓存。
-// 这里没有巡检、业务判断或持久化；canonical 外传感静音，manual 例外。
+// 这里没有巡检、业务判断或持久化；canonical 外传感静音，推荐页 reload 换代例外。
 import {
   EventDataByName,
   EventName,
@@ -16,7 +16,6 @@ import {
   CONTENT_MESSAGE,
   ContentReadyResponse,
   ContentUpMessage,
-  MANUAL_EMIT_MIN_MS,
   ZHILIAN_CONTENT_MATCH,
   isZhilianURL,
 } from './contentMessages'
@@ -70,7 +69,6 @@ export class SensorBridge {
   private activeSequence = 0
   private started = false
   private lastCanonicalLogin: LoginState | null = null
-  private lastManualEmitAt = Number.NEGATIVE_INFINITY
 
   constructor(
     private readonly connection: SensorConnectionPort,
@@ -196,21 +194,8 @@ export class SensorBridge {
             pageKind: state.pageKind,
           }, message.at)
         }
-        const origin = this.navigation.resolveContentNavigation(source.tabId, source.url, message.at)
-        if (origin === 'manual') {
-          this.emitManual(ManualInteractionKind.Navigation, state.pageKind, message.at)
-        }
         return null
       }
-
-      case CONTENT_MESSAGE.ManualInteraction:
-        // manual 是 canonical 静音规则的唯一例外；用户在哪个智联页操作都应开静默窗。
-        this.emitManual(message.kind, pageKindFromURL(source.url), message.at)
-        return null
-
-      case CONTENT_MESSAGE.TrustedNavigationIntent:
-        this.navigation.noteTrustedNavigationIntent(source.tabId, message.at)
-        return null
     }
   }
 
@@ -293,18 +278,10 @@ export class SensorBridge {
     return { platform: context.platform, accountRef: context.accountRef, ready: true }
   }
 
-  private emitManual(kind: ManualInteractionKind, pageKind: PageKind, at: number): void {
-    if (!this.connection.currentCommandContext(PLATFORM)) return
-    if (at - this.lastManualEmitAt < MANUAL_EMIT_MIN_MS) return
-    this.lastManualEmitAt = at
-    this.emitIfContext(EventName.ManualInteraction, { at, kind, pageKind }, at)
-  }
-
   private emitRecommendationFeedReload(at: number): void {
     if (!this.connection.currentCommandContext(PLATFORM)) return
     // 只把 Chrome 公开确认的主框架 reload 当作整页换代；智联打开/关闭
     // 简历详情同样可能令 tab 短暂 loading，不能据此终止批次。
-    this.lastManualEmitAt = at
     this.emitIfContext(EventName.ManualInteraction, {
       at,
       kind: ManualInteractionKind.Navigation,
@@ -467,18 +444,6 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
         pageKind: pageKindFromURL(message.url),
         url: message.url,
       }
-    case CONTENT_MESSAGE.ManualInteraction:
-      if (!safeTime(message.at) ||
-          (message.kind !== ManualInteractionKind.Pointer && message.kind !== ManualInteractionKind.Keyboard)) return null
-      return {
-        type: CONTENT_MESSAGE.ManualInteraction,
-        at: message.at,
-        kind: message.kind,
-        pageKind: PageKind.Other,
-      }
-    case CONTENT_MESSAGE.TrustedNavigationIntent:
-      if (!safeTime(message.at)) return null
-      return { type: CONTENT_MESSAGE.TrustedNavigationIntent, at: message.at }
     default:
       return null
   }

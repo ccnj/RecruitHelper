@@ -2,7 +2,6 @@
 // 猜测脑侧账号，SW 只能从已 accepted 命令的内存 CmdContext 补齐协议 EventContext。
 import type {
   LoginState,
-  ManualInteractionKind,
   PageKind,
   SensorParams,
 } from './protocol'
@@ -12,8 +11,6 @@ export const CONTENT_MESSAGE = {
   UnreadStable: 'recruithelper.content.unreadStable',
   LoginStable: 'recruithelper.content.loginStable',
   PageNavigated: 'recruithelper.content.pageNavigated',
-  ManualInteraction: 'recruithelper.content.manualInteraction',
-  TrustedNavigationIntent: 'recruithelper.content.trustedNavigationIntent',
   Configure: 'recruithelper.content.configure',
   NavigationObserved: 'recruithelper.content.navigationObserved',
   Probe: 'recruithelper.content.probe',
@@ -51,25 +48,11 @@ export interface ContentPageNavigatedMessage {
   url: string
 }
 
-export interface ContentManualInteractionMessage {
-  type: typeof CONTENT_MESSAGE.ManualInteraction
-  at: number
-  kind: Exclude<ManualInteractionKind, 'navigation'>
-  pageKind: PageKind
-}
-
-export interface ContentTrustedNavigationIntentMessage {
-  type: typeof CONTENT_MESSAGE.TrustedNavigationIntent
-  at: number
-}
-
 export type ContentUpMessage =
   | ContentReadyMessage
   | ContentUnreadStableMessage
   | ContentLoginStableMessage
   | ContentPageNavigatedMessage
-  | ContentManualInteractionMessage
-  | ContentTrustedNavigationIntentMessage
 
 export interface ContentConfigureMessage {
   type: typeof CONTENT_MESSAGE.Configure
