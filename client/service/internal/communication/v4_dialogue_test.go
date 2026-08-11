@@ -814,3 +814,74 @@ func TestV4ReplyActionMenuReportsWechatLineVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// 催2 已发视同挽留已发(规格 §135,2026-08-11 甲方裁决):其后的文字拒绝
+// 跳过挽留,直接收场;收场也发过则静默归档。挽留档仅限催2 未发出时。
+func TestV4DialogueRejectedAfterColdWechatSkipsRetention(t *testing.T) {
+	state := activeV4DialogueState()
+	state.ColdWechatTextSent = true
+	state.ColdWechatRemaining = 0
+	state.WechatState = V4WechatInvited
+	phrases := availableV4FixedPhrases()
+	phrases.Phrases[V4PhraseRejectionClosing] = V4FixedPhrase{
+		Kind: V4PhraseRejectionClosing, State: V4PhraseAvailable,
+		Messages: []string{"好的，理解，祝顺利。"}, Text: "好的，理解，祝顺利。",
+	}
+	input := V4DialogueInput{
+		State: state, Requirement: V4DialogueClassifyAndReply,
+		Turn: FrozenTurnFacts{TurnID: "turn-rejected-after-cold2", Messages: []FrozenInboundMessage{
+			{Seq: 6, Kind: FrozenMessageText, Text: "暂时不考虑，谢谢"},
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: phrases,
+	}
+	decision, err := ReduceV4Dialogue(input)
+	if err != nil || decision.Status != V4DialogueActionsPlanned ||
+		decision.IntentLabel != m5ai.IntentRejected ||
+		decision.State.RejectionStage != V4RejectionStageClosing ||
+		decision.State.RetentionSent || len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != V4ActionRejectionClosing {
+		t.Fatalf("催2 后的文字拒绝应跳过挽留直接收场: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4DialogueRejectedAfterColdWechatAndClosingArchivesSilently(t *testing.T) {
+	state := activeV4DialogueState()
+	state.ColdWechatTextSent = true
+	state.ColdWechatRemaining = 0
+	state.WechatState = V4WechatInvited
+	state.ClosingSent = true
+	input := V4DialogueInput{
+		State: state, Requirement: V4DialogueClassifyAndReply,
+		Turn: FrozenTurnFacts{TurnID: "turn-rejected-after-closing", Messages: []FrozenInboundMessage{
+			{Seq: 8, Kind: FrozenMessageText, Text: "说了不考虑"},
+		}},
+		Intent: IntentAdvice{State: AdviceAbsent}, Reply: ReplyAdvice{State: AdviceAbsent},
+		FixedPhrases: availableV4FixedPhrases(),
+	}
+	decision, err := ReduceV4Dialogue(input)
+	if err != nil || decision.Status != V4DialogueNoAction || len(decision.Actions) != 0 ||
+		decision.State.MainStatus != V4StatusEnded || decision.State.EndReason != V4EndRejected ||
+		decision.State.RejectionStage != V4RejectionStageArchive {
+		t.Fatalf("催2+收场都发过后的再拒应静默归档: decision=%+v err=%v", decision, err)
+	}
+}
+
+// 无催2 的既有两档语义不变由既有用例钉住;这里只补收场动作收编在
+// "挽留未发但催2已发"下合法(v4_state.go 收编断言与不变量同批放宽)。
+func TestV4CollectRejectionClosingLegalWhenColdWechatSentWithoutRetention(t *testing.T) {
+	state := activeV4DialogueState()
+	state.ColdWechatTextSent = true
+	state.ColdWechatRemaining = 0
+	state.WechatState = V4WechatInvited
+	state.RejectionTurnMessageSeq = 6
+	state.RejectionTurnID = "turn-rejected-after-cold2"
+	state.RejectionStage = V4RejectionStageClosing
+	next, err := ApplyV4ConfirmedAction(state, V4ConfirmedAction{
+		ActionKey: "turn-rejected-after-cold2|closing|0", Kind: V4ActionRejectionClosing,
+		MessageSeq: 7, SentAt: v4Time(9),
+	})
+	if err != nil || !next.ClosingSent || next.RetentionSent {
+		t.Fatalf("催2 已发时收场动作收编应合法且不虚置挽留标记: next=%+v err=%v", next, err)
+	}
+}

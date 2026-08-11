@@ -319,7 +319,9 @@ func planV4FixedPhraseActions(
 }
 
 func chooseV4RejectionStage(state V4State) V4RejectionStage {
-	if !state.RetentionSent {
+	// 催2 已发视同挽留已发(规格 §135,2026-08-11 甲方裁决):催2 正文即
+	// 行业话术+换微信邀请,其后再挽留是重复推销,直接收场或静默归档。
+	if !state.RetentionSent && !state.ColdWechatTextSent {
 		return V4RejectionStageRetention
 	}
 	if !state.ClosingSent {
