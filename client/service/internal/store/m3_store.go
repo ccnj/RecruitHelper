@@ -31,6 +31,7 @@ const (
 
 	messageRetractionReasonAuthoritativeSafeTerminal = "authoritative_safe_terminal"
 	messageRetractionReasonManualResolvedFailed      = "manual_resolved_failed"
+	messageRetractionReasonDeliveryRejected          = "delivery_rejected"
 )
 
 // SQLite INTEGER 是有符号 64 位。Generation 在 Go 中用 uint64
@@ -1353,6 +1354,58 @@ func (s *Store) ResolveSuspectVerdict(req ResolveSuspectVerdictRequest) error {
 			return err
 		}
 		if err := applyM5AutomaticEffectStatusTx(tx, &intent, req.At); err != nil {
+			return err
+		}
+		return tx.Save(&cmd).Error
+	})
+}
+
+// ResolveEffectDeliveryRejected 把"验证读窗口出现不早于派发的平台拒收通知"落为
+// 确定性失败终局(AGENTS 防护成本预算第 9 条「拒收通知判失败」,2026-08-11 甲方
+// 裁决):命令与意图按 resolvedFailed 收场,不产生 suspect 人工票。判据是平台
+// 明确呈现的可信失败,不是"结果未确认";本收场不授权任何自动重发。「被拉黑」
+// 业务事件由调用方在本事务之外应用——中间崩溃只丢事件不丢终局,下一次对该
+// 候选人发送会再次判拒收并补上事件,方向是少做。
+func (s *Store) ResolveEffectDeliveryRejected(ref, reason string, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if ref == "" || reason == "" {
+		return ErrRecoveryStateConflict
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var cmd CmdRecord
+		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
+			return err
+		}
+		if cmd.Status != CmdVerifying || cmd.IntentID == "" {
+			return ErrRecoveryStateConflict
+		}
+		cmd.Status = CmdResolvedFailed
+		cmd.SuspectReason = reason
+		cmd.RecoveryAuthorized = false
+		cmd.VerificationNextAt = nil
+		cmd.ReviewAfterMs = 0
+		cmd.VerificationChildMsgID = ""
+		cmd.TerminalAt = &at
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
+			return err
+		}
+		if intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
+			return ErrEffectIntentConflict
+		}
+		if err := retractOutboundMessageTx(tx, &intent, at, messageRetractionReasonDeliveryRejected); err != nil {
+			return err
+		}
+		intent.Status = EffectIntentResolvedFailed
+		intent.ResultMessageSeq = nil
+		intent.SuspectReason = reason
+		intent.ResolvedAt = &at
+		if err := tx.Save(&intent).Error; err != nil {
+			return err
+		}
+		if err := applyM5AutomaticEffectStatusTx(tx, &intent, at); err != nil {
 			return err
 		}
 		return tx.Save(&cmd).Error

@@ -193,7 +193,10 @@ func (v EffectVerifier) verifySendMessage(ctx context.Context, req dispatch.Veri
 	if err != nil {
 		return dispatch.VerificationObservation{}, err
 	}
-	return classifyVerifiedSend(window, req.Intent.SendFingerprint, dispatchedAtMs)
+	if rejected := deliveryRejectedObservation(window, dispatchedAtMs); rejected != nil {
+		return *rejected, nil
+	}
+	return classifyVerifiedSend(window.Messages, req.Intent.SendFingerprint, dispatchedAtMs)
 }
 
 // readRecentWindow 浅读一页最近消息。不携带 anchorTail、不开 deep、不消费
@@ -203,14 +206,14 @@ func (v EffectVerifier) readRecentWindow(
 	ctx context.Context,
 	req dispatch.VerificationRequest,
 	conversationRef string,
-) ([]protocol.ThreadMessage, error) {
+) (protocol.ChatReadThreadData, error) {
 	args := protocol.ChatReadThreadArgs{
 		ConversationRef: conversationRef,
 		Window:          protocol.ThreadWindow{MaxMessages: verificationRecentWindow},
 	}
 	argsRaw, err := protocol.Encode(args)
 	if err != nil {
-		return nil, err
+		return protocol.ChatReadThreadData{}, err
 	}
 	state, err := v.Dispatcher.RunVerificationRead(ctx, req.Command.MsgID, dispatch.DispatchRequest{
 		HandID: req.Command.HandID, Name: protocol.PrimChatReadThread, Args: argsRaw,
@@ -220,17 +223,39 @@ func (v EffectVerifier) readRecentWindow(
 		},
 	})
 	if err != nil {
-		return nil, err
+		return protocol.ChatReadThreadData{}, err
 	}
 	dataRaw, err := resultData(state.Leaf)
 	if err != nil {
-		return nil, err
+		return protocol.ChatReadThreadData{}, err
 	}
 	var data protocol.ChatReadThreadData
 	if err := json.Unmarshal(dataRaw, &data); err != nil {
-		return nil, fmt.Errorf("解析验证 readThread: %w", err)
+		return protocol.ChatReadThreadData{}, fmt.Errorf("解析验证 readThread: %w", err)
 	}
-	return data.Messages, nil
+	return data, nil
+}
+
+// deliveryRejectedObservation 实现「拒收通知判失败」(AGENTS 防护成本预算第 9 条,
+// 2026-08-11 甲方裁决):验证窗口带回不早于本次派发(减既有 5 秒时钟容差)的平台
+// 拒收通知服务端时间戳时,本次发送判确定性失败,且优先于成功匹配——同窗并存
+// 成功匹配与新鲜拒收通知的秒级竞态按拒收收场,甲方知情接受账面误差(方向少做,
+// 归档使其不产生任何后续动作)。化石通知(时间早于窗口)返回 nil,走原有
+// 匹配/miss 路径;字段缺失(含手侧 DOM 降级取数)同样返回 nil。
+func deliveryRejectedObservation(
+	data protocol.ChatReadThreadData,
+	dispatchedAtMs int64,
+) *dispatch.VerificationObservation {
+	if data.RejectNoticeTs == nil || *data.RejectNoticeTs <= 0 ||
+		*data.RejectNoticeTs < dispatchedAtMs-verificationClockToleranceMs {
+		return nil
+	}
+	ts := *data.RejectNoticeTs
+	return &dispatch.VerificationObservation{
+		DeliveryRejectedTs: &ts,
+		ObservedAt:         ts,
+		Reason:             "验证窗口出现不早于派发的平台拒收通知(候选人已拉黑),判确定性失败",
+	}
 }
 
 func (v EffectVerifier) verifyCard(
@@ -275,7 +300,10 @@ func (v EffectVerifier) verifyCard(
 	if err != nil {
 		return dispatch.VerificationObservation{}, err
 	}
-	return classifyVerifiedCard(window, req.Command.Name, targetHash, interview, dispatchedAtMs)
+	if rejected := deliveryRejectedObservation(window, dispatchedAtMs); rejected != nil {
+		return *rejected, nil
+	}
+	return classifyVerifiedCard(window.Messages, req.Command.Name, targetHash, interview, dispatchedAtMs)
 }
 
 func (v EffectVerifier) verifyGreeting(ctx context.Context, req dispatch.VerificationRequest) (dispatch.VerificationObservation, error) {

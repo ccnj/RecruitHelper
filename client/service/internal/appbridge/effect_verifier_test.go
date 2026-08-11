@@ -104,3 +104,33 @@ func TestClassifyVerifiedSendNegativesStayUnconfirmed(t *testing.T) {
 		})
 	}
 }
+
+// 拒收通知判失败(2026-08-11 甲方裁决)的时钟判据:不早于派发减 5 秒容差才算
+// 新鲜;化石通知与字段缺失(含手侧 DOM 降级)一律返回 nil,走原有匹配/miss 路径。
+func TestDeliveryRejectedObservationFreshnessQuadrants(t *testing.T) {
+	const dispatched = int64(1_700_000_000_000)
+	ptr := func(v int64) *int64 { return &v }
+	cases := []struct {
+		name     string
+		ts       *int64
+		rejected bool
+	}{
+		{"字段缺失", nil, false},
+		{"零值", ptr(0), false},
+		{"化石(容差外)", ptr(dispatched - verificationClockToleranceMs - 1), false},
+		{"容差边界内", ptr(dispatched - verificationClockToleranceMs), true},
+		{"派发后", ptr(dispatched + 1), true},
+	}
+	for _, tc := range cases {
+		observation := deliveryRejectedObservation(
+			protocol.ChatReadThreadData{RejectNoticeTs: tc.ts}, dispatched,
+		)
+		if (observation != nil) != tc.rejected {
+			t.Fatalf("%s: rejected=%v 期望 %v", tc.name, observation != nil, tc.rejected)
+		}
+		if observation != nil &&
+			(*observation.DeliveryRejectedTs != *tc.ts || observation.ObservedAt != *tc.ts) {
+			t.Fatalf("%s: 时间戳未原样携带: %+v", tc.name, observation)
+		}
+	}
+}

@@ -718,7 +718,13 @@ type VerificationObservation struct {
 	// PlatformTsMs 只可来自命中消息自带的 tsApprox(平台消息视图时间);
 	// ObservedAt 在没有平台时间时以本机时钟兜底,本字段则保持 nil。
 	PlatformTsMs *int64
-	Reason       string
+	// DeliveryRejectedTs 非 nil 时本次发送按「拒收通知判失败」(AGENTS 防护成本
+	// 预算第 9 条,2026-08-11)判确定性失败:验证窗口带回了不早于本次派发的平台
+	// 拒收通知(候选人已拉黑)服务端时间戳。该判定优先于成功匹配,由 verifier
+	// 在时钟容差内裁定后置位;消费方走 resolvedFailed 终局并触发被拉黑事件,
+	// 不产生 suspect、不授权重发。
+	DeliveryRejectedTs *int64
+	Reason             string
 }
 
 type EffectVerifier interface {
