@@ -315,7 +315,7 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		state.RetentionSent = true
 		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, isV4BodyAction(action.Kind))
 	case V4ActionRejectionClosing:
-		if action.MessageSeq <= 0 || !state.RetentionSent {
+		if action.MessageSeq <= 0 || !(state.RetentionSent || state.ColdWechatTextSent) {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
 		state.ClosingSent = true
@@ -657,14 +657,16 @@ func validateV4State(state V4State) error {
 		return ErrInvalidV4StateTransition
 	}
 	if (state.MainStatus == V4StatusEnded) != (state.EndReason != "") ||
-		(state.EndReason != "" && !validV4EndReason(state.EndReason)) || (state.ClosingSent && !state.RetentionSent) {
+		(state.EndReason != "" && !validV4EndReason(state.EndReason)) ||
+		(state.ClosingSent && !state.RetentionSent && !state.ColdWechatTextSent) {
 		return ErrInvalidV4StateTransition
 	}
 	if (state.RejectionTurnMessageSeq == 0) != (state.RejectionStage == "") ||
 		(state.RejectionTurnMessageSeq == 0) != (state.RejectionTurnID == "") ||
 		state.RejectionTurnMessageSeq < 0 || !validV4RejectionStage(state.RejectionStage) ||
-		(state.RejectionStage == V4RejectionStageClosing && !state.RetentionSent) ||
-		(state.RejectionStage == V4RejectionStageArchive && (!state.RetentionSent || !state.ClosingSent)) {
+		(state.RejectionStage == V4RejectionStageClosing && !state.RetentionSent && !state.ColdWechatTextSent) ||
+		(state.RejectionStage == V4RejectionStageArchive &&
+			((!state.RetentionSent && !state.ColdWechatTextSent) || !state.ClosingSent)) {
 		return ErrInvalidV4StateTransition
 	}
 	previousSeq := int64(0)
