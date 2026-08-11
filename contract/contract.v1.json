@@ -1499,7 +1499,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "candidate.selected", "relationship.unestablished", "witness/1"],
       "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readGreetingOutcome", "ver": 1, "maxRounds": 3 },
-      "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有输入或弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。成功接受同一目标从关系未建立变为已建立的可见业务状态;conversationRef 只作可选丰富正证。无变化、目标消失或读失败只算未确认并进入验证或 suspect,不得推断失败或第二次动作"
+      "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。编辑器准备阶段不监听真人操作(2026-08-11 甲方裁决),直接以本命令正文覆盖编辑器当前内容;写入后至发送前的正文所有权仍由同一 evaluator 以精确相等核对承担。成功接受同一目标从关系未建立变为已建立的可见业务状态;conversationRef 只作可选丰富正证。无变化、目标消失或读失败只算未确认并进入验证或 suspect,不得推断失败或第二次动作"
     },
     "chat.sendWechatInvite": {
       "ver": 1, "class": "effectful", "batch": "X",
