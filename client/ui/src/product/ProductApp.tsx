@@ -122,7 +122,7 @@ export function ProductApp({
       />
     )
   } else {
-    content = <SettingsPage connections={data.connections} customer={data.customer} />
+    content = <SettingsPage customer={data.customer} />
   }
 
   return (
