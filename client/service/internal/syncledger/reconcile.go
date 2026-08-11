@@ -856,6 +856,14 @@ func validateSourceKeySemantics(groups ...[]messageKey) error {
 			if key.sourceKey == "" {
 				continue
 			}
+			// system 行不作语义证词(§4.5,2026-08-11 甲方裁决):其
+			// text/contentHash 由手侧兜底拼装,随解析实现演进而变化属
+			// 预期,不构成平台事实变化的证据。跳过登记即达成"任一侧为
+			// system 的同 key 行对不参与冲突判定";该行仍凭 sourceKey
+			// 参与去重与已知身份判定(引擎主体不经本表)。
+			if key.kind == "system" {
+				continue
+			}
 			current := semantic{
 				direction: key.direction, kind: key.kind, hash: key.hash,
 				cardType: key.cardType,

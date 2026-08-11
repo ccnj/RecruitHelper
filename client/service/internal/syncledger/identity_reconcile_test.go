@@ -407,3 +407,102 @@ func TestIdentityReconcileEmptyLedgerAndAdoption(t *testing.T) {
 		t.Fatalf("空账本非收编读取应全量判新: plan=%+v err=%v", plan, err)
 	}
 }
+
+// system 行不作语义证词(§4.5,2026-08-11 甲方裁决)的回归套件。夹具直造
+// system 账本行/快照行:兜底文本随解析实现演进属预期,不得触发语义冲突。
+func idLedgerSystem(seq int64, text, sourceKey string) store.Message {
+	textCopy := text
+	m := store.Message{
+		Platform: idTestKey.Platform, AccountRef: idTestKey.AccountRef, ConversationRef: idTestKey.ConversationRef,
+		Seq: seq, Direction: "system", Kind: "system", ContentHash: HashText(text), Text: &textCopy,
+		Origin: "external",
+	}
+	if sourceKey != "" {
+		key := sourceKey
+		m.SourceKey = &key
+	}
+	return m
+}
+
+func idSnapSystem(text, sourceKey string) SnapshotMessage {
+	textCopy := text
+	return SnapshotMessage{
+		Direction: "system", Kind: "system", Text: &textCopy, ContentHash: HashText(text),
+		Origin: "external", SourceKey: sourceKey,
+	}
+}
+
+// 真机形态复现(2026-08-10 会话 c1532d3c…):插件换代把同一条系统消息的兜底
+// 文本从"抄邻行"改为"[系统消息:99]",同 key 异 hash。修复前整读报
+// ErrSourceKeySemanticConflict,新入站行永不入账;修复后 system 行豁免,
+// 化石原样保留,仅新行追加。
+func TestIdentityReconcileSystemRowFallbackDriftIsNotConflict(t *testing.T) {
+	ledger := []store.Message{
+		idLedgerText(1, "in", "我想找养老加科技的行业", idKey("in-1")),
+		idLedgerSystem(2, "我想找养老加科技的行业", idKey("sys")),
+		idLedgerText(3, "out", "明天上午10点方便吗", idKey("out-1")),
+	}
+	snapshot := []SnapshotMessage{
+		idSnapText("in", "我想找养老加科技的行业", idKey("in-1")),
+		idSnapSystem("[系统消息:99]", idKey("sys")),
+		idSnapText("out", "明天上午10点方便吗", idKey("out-1")),
+		idSnapText("in", "不好意思谢谢", idKey("in-2")),
+	}
+	plan, err := Reconcile(idInput(ledger, snapshot))
+	if err != nil {
+		t.Fatalf("system 行兜底口径漂移不得判语义冲突: %v", err)
+	}
+	if plan.Decision != DecisionAppend || len(plan.EventProjection) != 1 {
+		t.Fatalf("应只追加新入站行: plan=%+v", plan)
+	}
+	if got := plan.EventProjection[0].Text; got == nil || *got != "不好意思谢谢" {
+		t.Fatalf("追加的应是新入站行: %+v", plan.EventProjection[0])
+	}
+	if len(plan.Apply.CardChanges) != 0 || len(plan.Apply.SourceKeyReclaims) != 0 {
+		t.Fatalf("化石行不得被改写或回配: %+v", plan.Apply)
+	}
+}
+
+// 前瞻:拒收换微信形态实现后,账本里的 system 化石对上同 key 的 card 观察。
+// 闸豁免放行;卡片配对的防御守卫忽略该行对(账本侧不是 card),既不追加、
+// 不跃迁,也不报错——存量化石的历史拒绝事实保持不可见(甲方已豁免)。
+func TestIdentityReconcileSystemRowLaterParsedAsCardIsNotConflict(t *testing.T) {
+	ledger := []store.Message{
+		idLedgerCard(1, "wechatExchange", "pending", idKey("card")),
+		idLedgerSystem(2, "[系统消息:99]", idKey("sys")),
+	}
+	snapshot := []SnapshotMessage{
+		idSnapCard("pending", idKey("card")),
+		{
+			Direction: "in", Kind: "card", CardType: "wechatExchange",
+			CardIdentity: "identity-test", CardState: "rejected",
+			Origin: "external", SourceKey: idKey("sys"),
+		},
+		idSnapText("in", "换个方式聊吧", idKey("in-1")),
+	}
+	plan, err := Reconcile(idInput(ledger, snapshot))
+	if err != nil {
+		t.Fatalf("system 化石对 card 观察不得判语义冲突: %v", err)
+	}
+	if len(plan.EventProjection) != 1 || len(plan.Apply.CardChanges) != 0 {
+		t.Fatalf("应只追加文本行、不产生卡片跃迁: plan=%+v", plan)
+	}
+}
+
+// 反向:解析回归把既有 card 行读成 system 兜底。闸同样豁免,身份已知不追加,
+// 卡片事实原样保留——最坏丢一次观察,业务惰性。
+func TestIdentityReconcileCardRowRegressedToSystemIsNotConflict(t *testing.T) {
+	ledger := []store.Message{
+		idLedgerCard(1, "wechatExchange", "pending", idKey("card")),
+	}
+	snapshot := []SnapshotMessage{
+		idSnapSystem("[系统消息:99]", idKey("card")),
+	}
+	plan, err := Reconcile(idInput(ledger, snapshot))
+	if err != nil {
+		t.Fatalf("card 行被回归解析成 system 不得判语义冲突: %v", err)
+	}
+	if len(plan.EventProjection) != 0 || len(plan.Apply.CardChanges) != 0 {
+		t.Fatalf("身份已知不追加、不跃迁: plan=%+v", plan)
+	}
+}
