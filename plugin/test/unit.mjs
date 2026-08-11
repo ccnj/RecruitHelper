@@ -13000,15 +13000,16 @@ test('邀面成功弹窗:页面上没有弹窗时不空等、不误报', async (
 })
 
 // ---- 埋点上报拦截规则的在线自检 ----
-// 拦的是智联 environment-check 对"isTrusted 为假的合成点击"所做的实名上报。
-// 规则静默失效(平台改端点、改路径、挪进反爬 VMP)不会有任何报错,只会安静恢复
-// 上报,所以自检必须能区分两种沉默:检测脚本还在=失效了,脚本没了=平台不查了。
+// 拦的是智联 environment-check 脚本本身,不是它的上报端点:拦端点时请求照常发起并
+// 失败,而平台会把这次失败连同 staffId 与路径报进自己的异常通道,比不拦更糟。
+// 判据单向且不依赖旁证 —— 规则若生效该脚本永不执行,它留在页面上的 window 标记就
+// 永不存在;标记存在即规则失效。
 function installNetGuardFixture({
   hasFeedback = true,
   enabledRulesets = ['zhilian_env_report'],
   rulesetsThrow = false,
   tabs = [{ id: 7 }],
-  probeResult = true,
+  markerPresent = false,
   probeThrows = false,
 } = {}) {
   const originalChrome = globalThis.chrome
@@ -13033,16 +13034,22 @@ function installNetGuardFixture({
       async executeScript(args) {
         executed.push(args)
         if (probeThrows) throw new Error('injection refused')
-        return [{ result: probeResult }]
+        return [{ result: markerPresent }]
       },
     },
+  }
+  const pump = async () => {
+    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
+    await sleep(10)
   }
   return {
     matchListeners,
     executed,
     logs,
+    pump,
     staleLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardStale),
     offLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardOff),
+    blindLog: () => logs.find((d) => d.code === HandLogCode.EnvReportGuardBlind),
     restore() {
       globalThis.chrome = originalChrome
       installHandLogSink(null)
@@ -13051,17 +13058,17 @@ function installNetGuardFixture({
   }
 }
 
-test('埋点上报自检:onRuleMatchedDebug 不可用时明说失明,且不拖累命令派发', async () => {
-  const fixture = installNetGuardFixture({ hasFeedback: false })
+test('埋点上报自检:命中数不可观测时说明原因,但自检照常工作', async () => {
+  const fixture = installNetGuardFixture({ hasFeedback: false, markerPresent: true })
   try {
     registerNetGuard()
-    assert.equal(fixture.logs.length, 1)
-    assert.equal(fixture.logs[0].code, HandLogCode.EnvReportGuardBlind)
-    assert.equal(fixture.logs[0].level, 'warn')
-    // 自检失明不等于停工:派发计数照跑、不抛、也不去注入探测。
-    for (let i = 0; i < 30; i += 1) noteCommandDispatched()
-    await sleep(10)
-    assert.equal(fixture.executed.length, 0)
+    const blind = fixture.blindLog()
+    assert.ok(blind, '应说明命中数失去观测')
+    assert.equal(blind.level, 'warn')
+    await fixture.pump()
+    // 关键:判据是"脚本有没有执行",与能否观测命中无关,所以照样查得出失效
+    assert.equal(fixture.executed.length, 1)
+    assert.ok(fixture.staleLog(), '观测不到命中不等于自检失效')
   } finally {
     fixture.restore()
   }
@@ -13078,7 +13085,7 @@ test('埋点上报自检:规则集已启用时不报警', async () => {
   }
 })
 
-test('埋点上报自检:规则集没被启用时当场报出,不绕道等零命中', async () => {
+test('埋点上报自检:规则集没被启用时当场报出,不等探测', async () => {
   const fixture = installNetGuardFixture({ enabledRulesets: [] })
   try {
     registerNetGuard()
@@ -13105,59 +13112,54 @@ test('埋点上报自检:查不到规则集状态时只降级报 warn,不当作�
   }
 })
 
-test('埋点上报自检:规则命中即计数,健康窗口内不去探测页面', async () => {
-  const fixture = installNetGuardFixture()
+test('埋点上报自检:检测脚本仍在执行即判失效并报给脑', async () => {
+  const fixture = installNetGuardFixture({ markerPresent: true })
   try {
     registerNetGuard()
-    fixture.matchListeners[0]()
-    assert.equal(netGuardStats().blockedCount, 1)
-    assert.ok(netGuardStats().lastBlockedAt > 0)
-    for (let i = 0; i < 30; i += 1) noteCommandDispatched()
-    await sleep(10)
-    assert.equal(fixture.executed.length, 0, '最近命中过就不该再注入探测')
-    assert.equal(fixture.staleLog(), undefined)
-  } finally {
-    fixture.restore()
-  }
-})
-
-test('埋点上报自检:零命中且检测脚本仍在页面上,判失效并报给脑', async () => {
-  const fixture = installNetGuardFixture({ probeResult: true })
-  try {
-    registerNetGuard()
-    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
-    await sleep(10)
+    await fixture.pump()
     assert.equal(fixture.executed.length, 1, '攒够派发数才探一次')
     assert.equal(fixture.executed[0].world, 'MAIN')
     const stale = fixture.staleLog()
-    assert.ok(stale, '检测脚本还在而规则零命中,必须报 envReportGuardStale')
+    assert.ok(stale, '脚本在执行说明没拦住,必须报')
     assert.equal(stale.level, 'error')
     // handLog 纪律:不得携带任何候选人明文。detail 只允许是计数与时间戳。
-    assert.match(stale.detail, /^dispatched=\d+ blocked=\d+ lastBlockedAt=\d+$/)
+    assert.match(stale.detail, /^blocked=\d+ lastBlockedAt=\d+$/)
   } finally {
     fixture.restore()
   }
 })
 
-test('埋点上报自检:检测脚本已不在页面上时属正常,不判失效', async () => {
-  const fixture = installNetGuardFixture({ probeResult: false })
+test('埋点上报自检:检测脚本未执行属正常,不判失效', async () => {
+  const fixture = installNetGuardFixture({ markerPresent: false })
   try {
     registerNetGuard()
-    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
-    await sleep(10)
+    await fixture.pump()
     assert.equal(fixture.executed.length, 1)
-    assert.equal(fixture.staleLog(), undefined, '平台不查了不等于我方失效')
+    assert.equal(fixture.staleLog(), undefined, '标记不存在正是规则生效的样子')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('埋点上报自检:命中计数只作观测,盖不住脚本已执行的事实', async () => {
+  const fixture = installNetGuardFixture({ markerPresent: true })
+  try {
+    registerNetGuard()
+    fixture.matchListeners[0]()
+    fixture.matchListeners[0]()
+    assert.equal(netGuardStats().blockedCount, 2)
+    await fixture.pump()
+    assert.ok(fixture.staleLog(), '拦下过若干次不代表现在还拦得住')
   } finally {
     fixture.restore()
   }
 })
 
 test('埋点上报自检:没有平台页时不下结论', async () => {
-  const fixture = installNetGuardFixture({ tabs: [] })
+  const fixture = installNetGuardFixture({ tabs: [], markerPresent: true })
   try {
     registerNetGuard()
-    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
-    await sleep(10)
+    await fixture.pump()
     assert.equal(fixture.executed.length, 0, '没有平台页就无从探测')
     assert.equal(fixture.staleLog(), undefined)
   } finally {
@@ -13166,11 +13168,10 @@ test('埋点上报自检:没有平台页时不下结论', async () => {
 })
 
 test('埋点上报自检:探测注入失败不判失效、不抛异常', async () => {
-  const fixture = installNetGuardFixture({ probeThrows: true })
+  const fixture = installNetGuardFixture({ probeThrows: true, markerPresent: true })
   try {
     registerNetGuard()
-    for (let i = 0; i < 20; i += 1) noteCommandDispatched()
-    await sleep(10)
+    await fixture.pump()
     assert.equal(fixture.executed.length, 1)
     assert.equal(fixture.staleLog(), undefined, '注入失败只是没问到,不构成失效结论')
   } finally {

@@ -4,9 +4,9 @@
     "priority": 1,
     "action": { "type": "block" },
     "condition": {
-      "urlFilter": "/security/environment",
-      "requestDomains": ["zhaopin.com"],
-      "resourceTypes": ["xmlhttprequest"]
+      "urlFilter": "environment-check",
+      "requestDomains": ["zhaopin.cn", "zhaopin.com"],
+      "resourceTypes": ["script"]
     }
   }
 ]
