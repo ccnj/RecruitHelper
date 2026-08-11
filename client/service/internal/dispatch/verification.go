@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/syncledger"
@@ -234,6 +235,12 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			recordMiss("验证读失败: " + verifyErr.Error())
 			return
 		}
+	}
+	if observation.DeliveryRejectedTs != nil {
+		// 「拒收通知判失败」(AGENTS 防护成本预算第 9 条,2026-08-11 甲方裁决):
+		// 平台明确呈现的可信失败,确定性收场,不走 miss→suspect。
+		d.resolveDeliveryRejected(*cmd, *intent, *observation.DeliveryRejectedTs, observation.Reason)
+		return
 	}
 	if !observation.Confirmed || observation.ContentHash != intent.SendFingerprint {
 		reason := observation.Reason
@@ -518,6 +525,60 @@ func (d *Dispatcher) recordVerificationMiss(cmd store.CmdRecord, reason string) 
 			go d.captureSuspectScene(cmd)
 		}
 	}
+}
+
+// resolveDeliveryRejected 把「拒收通知判失败」(AGENTS 防护成本预算第 9 条,
+// 2026-08-11 甲方裁决)落为确定性失败终局,并触发「被拉黑」业务事件(推进态
+// 就地归档「拉黑」,服务态与归档态无操作,见沟通逻辑规格 v4 事件表)。事件
+// 应用在终局事务之外:中间崩溃只丢事件不丢终局,该候选人下一次发送会再次
+// 判拒收并补上事件,方向是少做。
+func (d *Dispatcher) resolveDeliveryRejected(
+	cmd store.CmdRecord,
+	intent store.EffectIntent,
+	noticeTs int64,
+	reason string,
+) {
+	if err := d.st.ResolveEffectDeliveryRejected(cmd.MsgID, reason, time.Now()); err != nil {
+		// 终局落不下就退回原路径按 miss 记账:耗尽后 suspect 转人工,不多发。
+		d.recordVerificationMiss(cmd, "拒收终局落账失败: "+err.Error())
+		return
+	}
+	d.st.Audit("effect_delivery_rejected", cmd.HandID, cmd.MsgID,
+		fmt.Sprintf("idemKey=%s noticeTs=%d", cmd.IdemKey, noticeTs))
+	slog.Warn("发送被平台拒收(候选人已拉黑),确定性失败收场,不产生 suspect",
+		"handId", cmd.HandID, "msgId", cmd.MsgID, "name", cmd.Name,
+		"idemKey", cmd.IdemKey, "noticeTs", noticeTs)
+	d.clearLease(cmd.MsgID)
+	d.notifyByMsgID(cmd.MsgID)
+	d.releaseSafeRecoveries(cmd.HandID)
+
+	key := store.ConversationKey{
+		Platform: intent.Platform, AccountRef: intent.AccountRef, ConversationRef: intent.TargetRef,
+	}
+	profile, err := d.st.CandidateProfileByConversation(key)
+	if err != nil || profile == nil {
+		detail := "会话无对应档案"
+		if err != nil {
+			detail = "档案查询失败: " + err.Error()
+		}
+		d.st.Audit("candidate_blacklisted_event_skipped", cmd.HandID, cmd.MsgID, detail)
+		return
+	}
+	occurred := time.UnixMilli(noticeTs)
+	if _, err := d.st.ApplyCommunicationV4BusinessEvent(store.ApplyCommunicationV4BusinessEventRequest{
+		ProfileID: profile.ProfileID,
+		Event: communication.BusinessEvent{
+			Key:        "blacklisted:" + intent.IdemKey,
+			Kind:       communication.EventCandidateBlacklisted,
+			Source:     communication.EventSourcePlatformStatus,
+			OccurredAt: &occurred,
+		},
+		AppliedAt: time.Now(),
+	}); err != nil {
+		d.st.Audit("candidate_blacklisted_event_failed", cmd.HandID, cmd.MsgID, err.Error())
+		return
+	}
+	d.st.Audit("candidate_blacklisted", cmd.HandID, cmd.MsgID, "profileId="+profile.ProfileID)
 }
 
 // handResultErrorMessage 从命令终局 result 的审计 JSON 里取手侧 error.message。

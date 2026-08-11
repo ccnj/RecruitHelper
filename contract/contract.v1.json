@@ -545,7 +545,8 @@
           "anchorMatched": { "type": "boolean" },
           "peer": { "ref": "PeerSummary", "nullable": true },
           "complete": { "type": "boolean" },
-          "nextCursor": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 }
+          "nextCursor": { "type": "string", "optional": true, "nullable": true, "minLength": 1, "maxLength": 512, "maxBytes": 2048 },
+          "rejectNoticeTs": { "type": "int64", "optional": true, "nullable": true, "minimum": 0 }
         },
         "rules": [
           { "kind": "requiredWhen", "field": "nextCursor", "whenField": "complete", "equals": [false] },
