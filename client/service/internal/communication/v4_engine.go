@@ -39,6 +39,7 @@ type v4TurnShape struct {
 	hasResume            bool
 	hasWechatRequested   bool
 	hasWechatExchanged   bool
+	hasWechatRejected    bool
 	hasInterviewAccepted bool
 	wechatRequestedCount int
 }
@@ -50,7 +51,8 @@ func (s v4TurnShape) hasExpressive() bool {
 }
 
 func (s v4TurnShape) hasSpecial() bool {
-	return s.hasResume || s.hasWechatRequested || s.hasWechatExchanged || s.hasInterviewAccepted
+	return s.hasResume || s.hasWechatRequested || s.hasWechatExchanged ||
+		s.hasWechatRejected || s.hasInterviewAccepted
 }
 
 // ReduceV4InboundTurn closes the pure vertical slice:
@@ -100,6 +102,14 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 			shape.hasWechatExchanged = true
 			memberEvents = append(memberEvents, event)
 			frozen.Messages = append(frozen.Messages, FrozenInboundMessage{Seq: event.MessageSeq, Kind: FrozenMessageCard})
+		case EventWechatRejected:
+			// 点拒绝换微信卡:按钮不算说话,不推真实消息轮,也不进冻结轮
+			// (对话归约把卡成员判 unsupportedSemantic,该保护规则不动;
+			// 拒收卡对对话完全隐形,同 system 行)。状态效果(微信线降已拒)
+			// 走成员动作模式按 seq 序应用,零动作零回执(规格事件表,
+			// 2026-08-11 甲方裁决)。
+			shape.hasWechatRejected = true
+			memberEvents = append(memberEvents, event)
 		case EventInterviewAccepted:
 			shape.hasInterviewAccepted = true
 			memberEvents = append(memberEvents, event)
@@ -131,7 +141,12 @@ func ReduceV4InboundTurn(input V4InboundTurnInput) (V4InboundTurnDecision, error
 		}, nil
 	}
 
-	turnTailSeq := frozen.Messages[len(frozen.Messages)-1].Seq
+	// 拒收卡不进冻结轮:纯拒收轮的 frozen 可为空,此时不存在表达成员,
+	// turnTailSeq 也不会被锚使用(hasExpressive 的成员必然进 frozen)。
+	turnTailSeq := int64(0)
+	if len(frozen.Messages) > 0 {
+		turnTailSeq = frozen.Messages[len(frozen.Messages)-1].Seq
+	}
 	state := cloneV4State(input.State)
 
 	// 轮级表达推进:整轮至多开一个真实消息轮,沉默锚点滑到整轮尾以覆盖
@@ -282,6 +297,13 @@ func applyV4TurnMemberEvent(state V4State, event BusinessEvent) (V4EventDecision
 		decision.Actions = append(decision.Actions, eventAction(event, V4ActionNotifyWechat))
 		if !decision.State.WechatReceiptSent {
 			decision.Actions = append(decision.Actions, eventAction(event, V4ActionWechatReceipt))
+		}
+		return decision, nil
+	case EventWechatRejected:
+		// 点拒绝换微信卡(规格事件表,2026-08-11 甲方裁决):仅推进态且线为
+		// 已邀请时降已拒,服务态按 §七 无操作;零动作、零回执、不推轮。
+		if isV4ProgressStatus(decision.State.MainStatus) && decision.State.WechatState == V4WechatInvited {
+			advanceV4Wechat(&decision.State, V4WechatRejected)
 		}
 		return decision, nil
 	case EventInterviewAccepted:
