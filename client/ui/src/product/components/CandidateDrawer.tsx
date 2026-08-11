@@ -124,44 +124,6 @@ export function CandidateDrawer({ candidate, actions, onClose }: CandidateDrawer
             )}
           </DrawerSection>
 
-          <DrawerSection title="确定性状态">
-            <dl className="rh-detail-list">
-              <div><dt>当前状态</dt><dd>{candidate.deterministicState ?? '—'}</dd></div>
-              <div><dt>自动沟通范围</dt><dd>{candidate.stillInAutoCommunication === null ? '—' : candidate.stillInAutoCommunication ? '仍在范围内' : '已退出'}</dd></div>
-            </dl>
-          </DrawerSection>
-
-          <DrawerSection title="最近 AI 判断">
-            {candidate.decisions.length === 0 && !candidate.latestAiDecision ? (
-              <p className="rh-drawer-empty-copy">当前没有 AI 判断记录。</p>
-            ) : (
-              <div className="rh-decision-list">
-                {candidate.decisions.map((decision) => (
-                  <article key={decision.id}>
-                    <div><strong>{decision.label}</strong><time>{decision.occurredAt}</time></div>
-                    <p>{decision.summary}</p>
-                  </article>
-                ))}
-                {candidate.decisions.length === 0 && candidate.latestAiDecision && <p>{candidate.latestAiDecision}</p>}
-              </div>
-            )}
-          </DrawerSection>
-
-          <DrawerSection title="动作结果">
-            {candidate.actions.length === 0 ? (
-              <p className="rh-drawer-empty-copy">当前没有动作结果。</p>
-            ) : (
-              <div className="rh-action-list">
-                {candidate.actions.map((action) => (
-                  <div key={action.id}>
-                    <span className={`rh-action-dot is-${action.tone}`} />
-                    <div><strong>{action.label}</strong><span>{action.resultLabel}</span></div>
-                    <time>{action.occurredAt}</time>
-                  </div>
-                ))}
-              </div>
-            )}
-          </DrawerSection>
         </div>
       </aside>
     </>

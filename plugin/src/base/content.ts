@@ -55,11 +55,6 @@ const environment: ContentSensorEnvironment = {
   setTimer(callback, delayMs) { return setTimeout(callback, delayMs) },
 }
 
-function isNavigationTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false
-  return target.closest('a[href],area[href]') !== null
-}
-
 function applyConfig(sensor: ContentSensor, message: ContentConfigureMessage): void {
   sensor.configure(message.sensors, message.requestSnapshot === true)
 }
@@ -83,24 +78,11 @@ if (isZhilianURL(location.href)) {
     subtree: true,
   })
 
-  document.addEventListener('pointerdown', (event) => sensor.onTrustedPointer(event.isTrusted), true)
-  document.addEventListener('keydown', (event) => {
-    sensor.onTrustedKeyboard(event.isTrusted)
-    if (event.isTrusted && event.key === 'Enter' && isNavigationTarget(event.target)) {
-      sensor.onTrustedNavigationIntent(true)
-    }
-  }, true)
-  document.addEventListener('click', (event) => {
-    if (event.isTrusted && isNavigationTarget(event.target)) sensor.onTrustedNavigationIntent(true)
-  }, true)
-  window.addEventListener('popstate', (event) => {
-    sensor.onTrustedNavigationIntent(event.isTrusted)
-    sensor.onNavigationSignal()
-  })
-  window.addEventListener('hashchange', (event) => {
-    sensor.onTrustedNavigationIntent(event.isTrusted)
-    sensor.onNavigationSignal()
-  })
+  // 真人 DOM 输入不再上报(2026-08-11 甲方裁决):manualInteraction 收窄为
+  // 推荐页 reload 换代信号,由 SW 侧 webNavigation 直接发射。此处只保留导航
+  // 信号本身,它驱动 pageNavigated,与 isTrusted 无关。
+  window.addEventListener('popstate', () => sensor.onNavigationSignal())
+  window.addEventListener('hashchange', () => sensor.onNavigationSignal())
   window.addEventListener('pagehide', () => {
     observer.disconnect()
     sensor.dispose()

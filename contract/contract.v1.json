@@ -1249,7 +1249,7 @@
     "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
     "cardState": ["pending", "accepted", "rejected", "expired", "unknown"],
     "unreadScope": ["total"],
-    "manualInteractionKind": ["pointer", "keyboard", "navigation"],
+    "manualInteractionKind": ["navigation"],
     "handLogLevel": ["warn", "error", "fatal"]
   },
   "byeCodes": ["PROTO_INCOMPATIBLE", "SUPERSEDED", "SHUTTING_DOWN"],

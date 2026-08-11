@@ -2,7 +2,6 @@
 // base、脑端与协议只看平台无关的原语结果。
 
 import type { PrimitiveContext } from '../registry'
-import { beginCommandNavigation } from '../../base/navigation'
 import { reportHandLog } from '../../base/handLog'
 import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
@@ -4046,28 +4045,15 @@ export async function ensureZhilianIM(
     if (tab.id === undefined) throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
     // 产品工作流只会在推荐批次已经终局后恢复 IM。复用同一 canonical
     // 智联工作页，避免为两个互斥业务阶段长期保留第二张后台标签。
-    const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
-    try {
-      tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL, active: true })
-    } catch (error) {
-      // update 未产生导航时不会有 webNavigation 来消费窗口，必须显式撤销。
-      commandNavigation.end()
-      throw error
-    }
+    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_IM_URL, active: true })
   } else {
     const existingProbe = await probeTab(tab)
     if (!existingProbe.contentScriptOk) {
       if (tab.id === undefined) {
         throw new ZhilianPlatformError('CTX_NOT_READY', '标签页缺少 id', 'afterRecovery', 'pageBroken')
       }
-      const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
-      try {
-        await chrome.tabs.reload(tab.id)
-        tab = await chrome.tabs.get(tab.id)
-      } catch (error) {
-        commandNavigation.end()
-        throw error
-      }
+      await chrome.tabs.reload(tab.id)
+      tab = await chrome.tabs.get(tab.id)
     }
   }
 
@@ -5066,13 +5052,7 @@ async function ensureZhilianSourcingTab(
   }
   // 复用其他智联路由前先核对账号；不能先切页再发现切动了错误账号。
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
-  try {
-    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_RECOMMEND_URL })
-  } catch (error) {
-    commandNavigation.end()
-    throw error
-  }
+  tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_RECOMMEND_URL })
   return waitForSourcingReady(tab, ctx)
 }
 
@@ -5559,13 +5539,7 @@ async function ensureZhilianJobListTab(
   }
   // 复用其他智联路由前先核对账号;不能先切页再发现切动了错误账号。
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
-  try {
-    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_LIST_URL })
-  } catch (error) {
-    commandNavigation.end()
-    throw error
-  }
+  tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_LIST_URL })
   return waitForZhilianJobListReady(tab, ctx)
 }
 
@@ -7633,13 +7607,7 @@ export async function prepareZhilianJobDraft(
 }
 
 async function discardZhilianJobDraft(tabId: number, ctx: PrimitiveContext): Promise<void> {
-  const commandNavigation = beginCommandNavigation(tabId, ctx.irreversibleNotAfterMs)
-  try {
-    await chrome.tabs.update(tabId, { url: ZHILIAN_JOB_LIST_URL })
-  } catch (error) {
-    commandNavigation.end()
-    throw error
-  }
+  await chrome.tabs.update(tabId, { url: ZHILIAN_JOB_LIST_URL })
   for (let attempt = 0; attempt < 40; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tabId)
@@ -7667,20 +7635,14 @@ async function ensureZhilianJobPublishTab(
     )
   }
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
-  const commandNavigation = beginCommandNavigation(tab.id, ctx.irreversibleNotAfterMs)
-  try {
-    // 即使当前已在发布页也重新导航一次:表单只活在页面内存里,
-    // 上一次的残留会污染这次回读。
-    // active:true 是甲方要求的业务行为(发布过程要肉眼可见),同时它也是这条
-    // 链路的技术前提:后台标签页不跑 CSS 过渡,Vue 的离场过渡起了头就走不完
-    // (transitionend 永不触发),已关闭的下拉面板会永远停在 opacity:1、
-    // height>0,把"等面板收口"这一步逼成死等。真机实测:标签页一回到前台,
-    // 残留节点立刻消失。
-    tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL, active: true })
-  } catch (error) {
-    commandNavigation.end()
-    throw error
-  }
+  // 即使当前已在发布页也重新导航一次:表单只活在页面内存里,
+  // 上一次的残留会污染这次回读。
+  // active:true 是甲方要求的业务行为(发布过程要肉眼可见),同时它也是这条
+  // 链路的技术前提:后台标签页不跑 CSS 过渡,Vue 的离场过渡起了头就走不完
+  // (transitionend 永不触发),已关闭的下拉面板会永远停在 opacity:1、
+  // height>0,把"等面板收口"这一步逼成死等。真机实测:标签页一回到前台,
+  // 残留节点立刻消失。
+  tab = await chrome.tabs.update(tab.id, { url: ZHILIAN_JOB_PUBLISH_URL, active: true })
   // 光把标签页设为 active 还不够:窗口若未聚焦(或被最小化),Chrome 仍可能
   // 判 hidden。窗口聚焦失败不影响发布本身,不让它掀翻整条链路。
   if (tab.windowId !== undefined && tab.windowId !== chrome.windows.WINDOW_ID_NONE) {
@@ -12271,66 +12233,61 @@ async function ensureThreadRoute(
   // cancellation barrier。barrier 后 cancel 不再产生“终局已取消但迟到点击”。
   await ctx.beforeSideEffect()
   const clickNotAfterMs = Math.min(ctx.irreversibleNotAfterMs, Date.now() + 1_500)
-  const commandNavigation = beginCommandNavigation(tab.id, clickNotAfterMs)
-  try {
-    const click = await runMain(tab.id, mainClickConversationOnce, [
-      conversationRef,
-      selected,
-      expectedPrincipalFingerprint,
-      clickNotAfterMs,
-    ])
-    if (click.status === 'failed') {
-      if (click.reason === 'composer_nonempty') {
-        throw new ZhilianPlatformError('USER_ACTIVE', '当前会话存在人工草稿，拒绝自动切换', 'afterRecovery')
-      }
-      if (click.reason === 'identity_changed') {
-        throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '切换会话前登录身份发生变化', 'manualOnly')
-      }
-      if (click.reason === 'action_window_elapsed') {
-        throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '会话切换动作窗口已过，未点击', 'manualOnly')
-      }
-      if (click.reason === 'route_changed') {
-        throw new ZhilianPlatformError('USER_ACTIVE', '点击前当前会话被切换，已取消自动点击', 'afterRecovery')
-      }
-      throw new ZhilianPlatformError(
-        'ELEMENT_UNRESOLVED',
-        `会话行在点击前无法再次确证：${click.reason ?? 'unknown'}`,
-        'manualOnly',
-      )
+  const click = await runMain(tab.id, mainClickConversationOnce, [
+    conversationRef,
+    selected,
+    expectedPrincipalFingerprint,
+    clickNotAfterMs,
+  ])
+  if (click.status === 'failed') {
+    if (click.reason === 'composer_nonempty') {
+      throw new ZhilianPlatformError('USER_ACTIVE', '当前会话存在人工草稿，拒绝自动切换', 'afterRecovery')
     }
-    const clickedAt = Date.now()
-    ctx.checkpoint()
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      ctx.checkpoint()
-      const latest = await chrome.tabs.get(tab.id)
-      let routeReady = false
-      try {
-        const url = new URL(latest.url ?? '')
-        routeReady = latest.status === 'complete' && url.pathname === '/app/im' &&
-          url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)
-      } catch {
-        // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
-      }
-      if (routeReady) {
-        // 路由已绑定目标:平台此刻可能已经弹出阻塞弹窗(实测 140ms)。必须在本
-        // 原语内就地处置,否则全屏遮罩会挡住后续每一次点击,卡住的不只是这个
-        // 人。处置抛出的错误要绕开上面那个 catch,所以调用放在 try 外面。
-        await settleZhilianBlockedDialog(tab.id, ctx, clickedAt)
-        return true
-      }
-      if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
-      await new Promise((resolve) => setTimeout(resolve, 250))
+    if (click.reason === 'identity_changed') {
+      throw new ZhilianPlatformError('ACCOUNT_MISMATCH', '切换会话前登录身份发生变化', 'manualOnly')
+    }
+    if (click.reason === 'action_window_elapsed') {
+      throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '会话切换动作窗口已过，未点击', 'manualOnly')
+    }
+    if (click.reason === 'route_changed') {
+      throw new ZhilianPlatformError('USER_ACTIVE', '点击前当前会话被切换，已取消自动点击', 'afterRecovery')
     }
     throw new ZhilianPlatformError(
-      'CTX_LOST_DURING_EXEC',
-      '目标智联会话在期限内未就绪',
+      'ELEMENT_UNRESOLVED',
+      `会话行在点击前无法再次确证：${click.reason ?? 'unknown'}`,
       'manualOnly',
-      undefined,
-      'possible',
     )
-  } finally {
-    commandNavigation.end()
   }
+  const clickedAt = Date.now()
+  ctx.checkpoint()
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tab.id)
+    let routeReady = false
+    try {
+      const url = new URL(latest.url ?? '')
+      routeReady = latest.status === 'complete' && url.pathname === '/app/im' &&
+        url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)
+    } catch {
+      // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
+    }
+    if (routeReady) {
+      // 路由已绑定目标:平台此刻可能已经弹出阻塞弹窗(实测 140ms)。必须在本
+      // 原语内就地处置,否则全屏遮罩会挡住后续每一次点击,卡住的不只是这个
+      // 人。处置抛出的错误要绕开上面那个 catch,所以调用放在 try 外面。
+      await settleZhilianBlockedDialog(tab.id, ctx, clickedAt)
+      return true
+    }
+    if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new ZhilianPlatformError(
+    'CTX_LOST_DURING_EXEC',
+    '目标智联会话在期限内未就绪',
+    'manualOnly',
+    undefined,
+    'possible',
+  )
 }
 
 export async function sendZhilianMessage(

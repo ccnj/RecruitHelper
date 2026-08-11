@@ -2,14 +2,12 @@
 // 去抖、节流和稳定导航收敛，便于用确定性假时钟测试生产同一代码。
 import {
   LoginState,
-  ManualInteractionKind,
   PageKind,
   SensorParams,
 } from './protocol'
 import {
   CONTENT_MESSAGE,
   ContentUpMessage,
-  MANUAL_EMIT_MIN_MS,
 } from './contentMessages'
 
 export interface ContentSensorEnvironment {
@@ -34,7 +32,7 @@ export class ContentSensor {
   // 消息解锁，登录态几乎从不变化，等于永久失联。票由 configure(requestSnapshot)
   // 发放，各自在成功上报后消费一次。
   // 导航刻意不发票：pageKind 在 Ready 握手里已带初值不会缺失，且 PageNavigated
-  // 在脑侧会拉前巡检、还可能被归因成真人操作，强制重发等于伪造用户行为。
+  // 在脑侧会拉前巡检，强制重发等于伪造用户行为。
   private forceUnreadSnapshot = false
   private forceLoginSnapshot = false
   private lastStableUnread: number | null = null
@@ -42,7 +40,6 @@ export class ContentSensor {
   private lastUnreadEmitAt = Number.NEGATIVE_INFINITY
   private lastStableLogin: LoginState | null = null
   private lastReportedURL: string | null = null
-  private lastManualEmitAt = Number.NEGATIVE_INFINITY
 
   constructor(private readonly env: ContentSensorEnvironment) {}
 
@@ -82,21 +79,6 @@ export class ContentSensor {
   onNavigationSignal(): void {
     if (!this.started || !this.config) return
     this.armNavigation()
-  }
-
-  onTrustedPointer(isTrusted: boolean): void {
-    if (!isTrusted) return
-    this.emitManual(ManualInteractionKind.Pointer)
-  }
-
-  onTrustedKeyboard(isTrusted: boolean): void {
-    if (!isTrusted) return
-    this.emitManual(ManualInteractionKind.Keyboard)
-  }
-
-  onTrustedNavigationIntent(isTrusted: boolean): void {
-    if (!isTrusted || !this.started) return
-    this.env.emit({ type: CONTENT_MESSAGE.TrustedNavigationIntent, at: this.env.now() })
   }
 
   private armAll(): void {
@@ -195,18 +177,6 @@ export class ContentSensor {
     }, config.navSettleMs)
   }
 
-  private emitManual(kind: Exclude<ManualInteractionKind, 'navigation'>): void {
-    if (!this.started) return
-    const at = this.env.now()
-    if (at - this.lastManualEmitAt < MANUAL_EMIT_MIN_MS) return
-    this.lastManualEmitAt = at
-    this.env.emit({
-      type: CONTENT_MESSAGE.ManualInteraction,
-      at,
-      kind,
-      pageKind: this.env.pageKind(),
-    })
-  }
 
   private clearSamplingTimers(): void {
     for (const handle of [this.badgeTimer, this.loginTimer, this.navigationTimer]) {

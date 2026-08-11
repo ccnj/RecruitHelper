@@ -36,10 +36,7 @@ const {
   heartbeatDelayMs,
   Kind,
   LoginState,
-  MANUAL_EMIT_MIN_MS,
   ManualInteractionKind,
-  NavigationTracker,
-  navigationTracker,
   normalizeLocalWsUrl,
   parsedKeywordSections,
   NotReadyReason,
@@ -9442,7 +9439,7 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
   }
 })
 
-test('会话切换等待异常时 commandNavigation 必经 finally 清理', async () => {
+test('会话切换的 click task 排在 cancellation barrier 之后，等待异常照实抛出', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = '9'.repeat(64)
   const conversationRef = 'conversation-navigation-finally'
@@ -9491,17 +9488,7 @@ test('会话切换等待异常时 commandNavigation 必经 finally 清理', asyn
       ),
       /tabs-get-after-click/u,
     )
-    assert.equal(
-      navigationTracker.noteChromeNavigation(
-        93,
-        `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`,
-        Date.now(),
-      ),
-      'unknown',
-      '异常路径若泄漏 command window，这里会被误判为 command',
-    )
   } finally {
-    navigationTracker.removeTab(93)
     globalThis.chrome = originalChrome
   }
 })
@@ -11779,7 +11766,7 @@ test('readList MAIN 单行摘要坏数据只跳过该行，整窗照常返回且
   }
 })
 
-test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数', async () => {
+test('content 传感器：精确双读、5s 节流与动态参数', async () => {
   // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
   // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的
   // 零形态一起判成缺失，快照塌成 null，未读子轮清完未读后回读不到收尾数，
@@ -11893,26 +11880,18 @@ test('content 传感器：精确双读、5s 节流、isTrusted 与动态参数',
     '持续渲染期间既有采样窗仍必须按期完成',
   )
 
-  const manualBefore = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.ManualInteraction).length
-  sensor.onTrustedPointer(false)
-  assert.equal(harness.messages.filter((message) => message.type === CONTENT_MESSAGE.ManualInteraction).length, manualBefore)
-  sensor.onTrustedPointer(true)
-  harness.state.now += MANUAL_EMIT_MIN_MS - 1
-  sensor.onTrustedKeyboard(true)
-  assert.equal(harness.messages.filter((message) => message.type === CONTENT_MESSAGE.ManualInteraction).length, manualBefore + 1)
-  harness.state.now += 1
-  sensor.onTrustedKeyboard(true)
-  assert.equal(harness.messages.filter((message) => message.type === CONTENT_MESSAGE.ManualInteraction).length, manualBefore + 2)
-  sensor.onTrustedNavigationIntent(false)
-  sensor.onTrustedNavigationIntent(true)
-  assert.equal(harness.messages.filter((message) => message.type === CONTENT_MESSAGE.TrustedNavigationIntent).length, 1)
+  // 真人 DOM 输入不再上报(2026-08-11 甲方裁决):ContentSensor 不再有
+  // onTrustedPointer/onTrustedKeyboard/onTrustedNavigationIntent,
+  // manualInteraction 只剩 SW 侧的推荐页 reload 换代信号。
+  assert.equal(typeof sensor.onTrustedPointer, 'undefined')
+  assert.equal(typeof sensor.onTrustedKeyboard, 'undefined')
+  assert.equal(typeof sensor.onTrustedNavigationIntent, 'undefined')
 })
 
-test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且命令导航不伪装人工', async () => {
+test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页面导航只报 pageNavigated', async () => {
   let now = 0
   const connection = new FakeSensorConnection()
-  const navigation = new NavigationTracker(() => now)
-  const bridge = new SensorBridge(connection, navigation, () => now)
+  const bridge = new SensorBridge(connection, () => now)
   const tab1 = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
   const tab2 = { tabId: 2, active: true, url: 'https://rd6.zhaopin.com/app/recommend', windowId: 1 }
 
@@ -11953,38 +11932,26 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且命�
   }, tab2)
   assert.equal(connection.snapshots.at(-1).unreadTotal.value, 2, '非 canonical 读数不得喂 ping')
 
-  now = 12_000
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.ManualInteraction,
-    at: now,
-    kind: ManualInteractionKind.Pointer,
-    pageKind: PageKind.Recommend,
-  }, tab2)
-  assert.equal(connection.events.at(-1).name, EventName.ManualInteraction, 'manual 必须跨 canonical 上报')
-
   now = 18_000
-  const commandWindow = navigation.beginCommandNavigation(1, now + 1_000)
   const commandURL = 'https://rd6.zhaopin.com/app/im?sessionId=command'
-  bridge.noteChromeNavigation(1, commandURL, now)
+  bridge.noteChromeNavigation(1, commandURL)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.PageNavigated, at: now + 500, pageKind: PageKind.Im, url: commandURL }, {
     ...tab1,
     url: commandURL,
   })
-  commandWindow.end()
   assert.equal(connection.events.at(-1).name, EventName.PageNavigated)
-  const manualAfterCommand = connection.events.filter((event) => event.name === EventName.ManualInteraction).length
 
   now = 24_000
-  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.TrustedNavigationIntent, at: now }, { ...tab1, url: commandURL })
   const manualURL = 'https://rd6.zhaopin.com/app/im?sessionId=manual'
-  bridge.noteChromeNavigation(1, manualURL, now + 1)
+  bridge.noteChromeNavigation(1, manualURL)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.PageNavigated, at: now + 500, pageKind: PageKind.Im, url: manualURL }, {
     ...tab1,
     url: manualURL,
   })
-  const manualEvents = connection.events.filter((event) => event.name === EventName.ManualInteraction)
-  assert.equal(manualEvents.length, manualAfterCommand + 1)
-  assert.equal(manualEvents.at(-1).data.kind, ManualInteractionKind.Navigation)
+  assert.equal(connection.events.at(-1).name, EventName.PageNavigated,
+    '真人导航与命令导航一样，只报 pageNavigated')
+  assert.equal(connection.events.filter((event) => event.name === EventName.ManualInteraction).length, 0,
+    '真人 DOM 输入不再上报：页面桥只在推荐页 reload 换代时产生 manualInteraction')
 
   now = 30_000
   bridge.acceptContentMessage({
@@ -11995,51 +11962,6 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且命�
   assert.equal(connection.events.at(-1).name, EventName.LoginStateChanged)
   assert.equal(connection.events.at(-1).data.state, LoginState.Out)
   assert.equal(connection.contextHealth[0].reason, NotReadyReason.LoginRequired)
-})
-
-test('导航归因：命令窗口内出现新鲜真人意图时真人优先且窗口立即失效', () => {
-  let now = 10_000
-  const navigation = new NavigationTracker(() => now)
-  const commandWindow = navigation.beginCommandNavigation(7, now + 1_000)
-  navigation.noteTrustedNavigationIntent(7, now)
-  assert.equal(
-    navigation.noteChromeNavigation(7, 'https://rd6.zhaopin.com/app/im?sessionId=manual', now + 1),
-    'manual',
-  )
-  now += 2
-  assert.equal(
-    navigation.noteChromeNavigation(7, 'https://rd6.zhaopin.com/app/im?sessionId=next', now),
-    'unknown',
-    '真人抢占后旧 command window 不得继续吞下一次导航',
-  )
-  commandWindow.end()
-})
-
-test('导航归因：乱序旧事件不消费命令窗口，窗口严格服从动作截止时间', () => {
-  let now = 20_000
-  const navigation = new NavigationTracker(() => now)
-  navigation.noteTrustedNavigationIntent(9, now - 5)
-  const commandWindow = navigation.beginCommandNavigation(9, now + 50)
-
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=old', now - 1),
-    'unknown',
-    '早于窗口创建时间的迟到旧事件不得归因为本命令或借旧真人意图撤销窗口',
-  )
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=command', now + 1),
-    'command',
-    '旧事件不得消费仍有效的命令窗口',
-  )
-  commandWindow.end()
-
-  now = 30_000
-  navigation.beginCommandNavigation(9, now + 10)
-  assert.equal(
-    navigation.noteChromeNavigation(9, 'https://rd6.zhaopin.com/app/im?sessionId=late', now + 11),
-    'unknown',
-    '动作截止时间之后的事件不得沿用默认 intrusive 总预算伪装成命令导航',
-  )
 })
 
 test('SensorBridge 只在 base 注册 Chrome 监听，并动态下发 welcome sensors', async () => {
@@ -12144,7 +12066,7 @@ test('SensorBridge 心跳自查：传感缓存缺失时索要重新同步，齐�
   assert.equal(sent.length, 齐全后, '传感齐全后心跳必须零打扰，不得每拍骚扰页面')
 })
 
-test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随后重复 manual', async () => {
+test('SensorBridge 只把推荐页 committed reload 上报为换代', async () => {
   const originalChrome = globalThis.chrome
   const runtimeMessage = chromeEvent()
   const tabActivated = chromeEvent()
@@ -12173,7 +12095,7 @@ test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随�
       },
     }
     const connection = new FakeSensorConnection()
-    const bridge = new SensorBridge(connection, new NavigationTracker(() => now), () => now)
+    const bridge = new SensorBridge(connection, () => now)
     bridge.start()
     const listener = tabUpdated.listeners[0]
     const recommendURL = 'https://rd6.zhaopin.com/app/recommend'
@@ -12184,21 +12106,14 @@ test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随�
     assert.equal(connection.events.length, 0, '无 CmdContext 时推荐页 reload 不得上报')
 
     connection.setContext({ platform: 'zhilian', accountRef: 'account-1', expectedPrincipalFingerprint: 'fp' })
-    bridge.acceptContentMessage({
-      type: CONTENT_MESSAGE.ManualInteraction,
-      at: now,
-      kind: ManualInteractionKind.Pointer,
-      pageKind: PageKind.Recommend,
-    }, { tabId: 7, active: true, url: recommendURL, windowId: 1 })
-    assert.equal(connection.events.length, 1)
 
     now += 1_000
     listener(7, { status: 'loading' }, { url: recommendURL })
-    assert.equal(connection.events.length, 1, '简历详情也会令 tab loading，不能据此判定推荐流换代')
+    assert.equal(connection.events.length, 0, '简历详情也会令 tab loading，不能据此判定推荐流换代')
     committed.listeners[0]({
       tabId: 7, frameId: 0, url: recommendURL, timeStamp: now, transitionType: 'reload',
     })
-    assert.equal(connection.events.length, 2, '公开确认的整页 reload 不得被普通 5s manual 节流吞掉')
+    assert.equal(connection.events.length, 1, '公开确认的整页 reload 必须上报换代')
     assert.deepEqual(connection.events.at(-1), {
       name: EventName.ManualInteraction,
       platform: 'zhilian',
@@ -12211,16 +12126,7 @@ test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随�
       },
     })
 
-    now += 1
-    bridge.acceptContentMessage({
-      type: CONTENT_MESSAGE.ManualInteraction,
-      at: now,
-      kind: ManualInteractionKind.Pointer,
-      pageKind: PageKind.Recommend,
-    }, { tabId: 7, active: true, url: recommendURL, windowId: 1 })
-    assert.equal(connection.events.length, 2, 'reload 必须更新 manual 节流时刻，压住紧随其后的重复上报')
-
-    now += MANUAL_EMIT_MIN_MS
+    now += 1_000
     listener(7, { status: 'complete' }, { url: recommendURL })
     listener(7, { status: 'loading' }, { url: 'https://rd6.zhaopin.com/app/im' })
     listener(7, { status: 'loading' }, { url: 'https://example.com/app/recommend' })
@@ -12234,7 +12140,7 @@ test('SensorBridge 只把推荐页 committed reload 上报为换代并压住随�
     committed.listeners[0]({
       tabId: 7, frameId: 1, url: recommendURL, timeStamp: now, transitionType: 'reload',
     })
-    assert.equal(connection.events.length, 2, '非 reload、非推荐页或非主框架均不得上报换代')
+    assert.equal(connection.events.length, 1, '非 reload、非推荐页或非主框架均不得上报换代')
   } finally {
     globalThis.chrome = originalChrome
   }
