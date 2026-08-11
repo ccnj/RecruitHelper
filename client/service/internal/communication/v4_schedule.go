@@ -263,6 +263,8 @@ func v4SilenceEndReason(state V4State) V4EndReason {
 	switch state.WechatState {
 	case V4WechatInvited:
 		return V4EndSilentWechatInvited
+	case V4WechatRejected:
+		return V4EndSilentWechatRejected
 	case V4WechatExchanged:
 		return V4EndSilentWechatExchanged
 	default:

@@ -451,3 +451,53 @@ func TestV4StateRejectsBrokenAggregateAndEventFacts(t *testing.T) {
 		}
 	}
 }
+
+// 点拒绝换微信卡(规格事件表,2026-08-11 甲方裁决):仅推进态且线为已邀请时
+// 降「已拒」,其余无操作;不产动作、不滑锚。已拒后交换成功仍可推进已换号。
+func TestV4WechatRejectedEventOnlyDowngradesInvitedProgressState(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.WechatState = V4WechatInvited
+	decision, err := ApplyV4BusinessEvent(state, v4MessageEvent("message:9", 9, EventWechatRejected))
+	if err != nil || decision.State.WechatState != V4WechatRejected || len(decision.Actions) != 0 ||
+		decision.Dialogue != V4DialogueNone || decision.State.LastOutboundMessageSeq != 0 {
+		t.Fatalf("已邀请+推进态应降已拒且零动作零滑锚: decision=%+v err=%v", decision, err)
+	}
+
+	notInvited := NewV4GreetedState(v4Time(8))
+	notInvited.MainStatus = V4StatusCommunicating
+	decision, err = ApplyV4BusinessEvent(notInvited, v4MessageEvent("message:9", 9, EventWechatRejected))
+	if err != nil || decision.State.WechatState != V4WechatNotInvited {
+		t.Fatalf("未邀请不得凭拒收事件推进微信线: decision=%+v err=%v", decision, err)
+	}
+
+	interviewed := NewV4GreetedState(v4Time(8))
+	interviewed.MainStatus = V4StatusInterviewed
+	interviewed.WechatState = V4WechatInvited
+	decision, err = ApplyV4BusinessEvent(interviewed, v4MessageEvent("message:9", 9, EventWechatRejected))
+	if err != nil || decision.State.WechatState != V4WechatInvited {
+		t.Fatalf("服务态按 §七 无操作: decision=%+v err=%v", decision, err)
+	}
+
+	rejected := NewV4GreetedState(v4Time(8))
+	rejected.MainStatus = V4StatusCommunicating
+	rejected.WechatState = V4WechatRejected
+	decision, err = ApplyV4BusinessEvent(rejected, v4MessageEvent("message:10", 10, EventWechatExchanged))
+	if err != nil || decision.State.WechatState != V4WechatExchanged {
+		t.Fatalf("已拒后对方自发起交换成功仍应推进已换号: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4SilenceEndReasonWechatRejected(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	state.MainStatus = V4StatusCommunicating
+	state.WechatState = V4WechatRejected
+	if got := v4SilenceEndReason(state); got != V4EndSilentWechatRejected {
+		t.Fatalf("已拒线的沉默归档原因应为 silentWechatRejected: %s", got)
+	}
+	archived := state
+	archiveV4State(&archived, V4EndSilentWechatRejected)
+	if err := validateV4State(archived); err != nil {
+		t.Fatalf("沉默-邀微已拒归档态必须通过校验: %v", err)
+	}
+}

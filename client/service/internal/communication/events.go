@@ -20,6 +20,7 @@ const (
 	EventWechatRequested             BusinessEventKind = "wechatRequested"
 	EventWechatInvited               BusinessEventKind = "wechatInvited"
 	EventWechatExchanged             BusinessEventKind = "wechatExchanged"
+	EventWechatRejected              BusinessEventKind = "wechatRejected"
 	EventInterviewInvited            BusinessEventKind = "interviewInvited"
 	EventInterviewAccepted           BusinessEventKind = "interviewAccepted"
 	EventInterviewRejected           BusinessEventKind = "interviewRejected"
@@ -152,6 +153,11 @@ func normalizeInboundMessage(event BusinessEvent, fact LedgerMessageFact) Busine
 				return event
 			case "accepted":
 				event.Kind = EventWechatExchanged
+				return event
+			case "rejected":
+				// 候选人在换微信邀请卡上点拒绝(平台以独立 99/type=2 通知行
+				// 表达,手侧已按考古判别子归一化,见负反馈形态考古 2026-08-11)。
+				event.Kind = EventWechatRejected
 				return event
 			}
 			return unknownEvent(event, "inboundWechatCardState")
