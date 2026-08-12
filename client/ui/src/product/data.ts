@@ -465,7 +465,8 @@ function homeStatus(
     case 'failed':
       return {
         label: '没能完成',
-        hint: workflow.unavailableReason ?? '可以重新开始今天的招聘。',
+        hint: batchFailureHomeHint(funnel.latestFailureCode) ??
+          workflow.unavailableReason ?? '可以重新开始今天的招聘。',
         tone: 'failed',
       }
     case 'awaitingConfirmation': {
@@ -505,12 +506,22 @@ function homeStatus(
         tone: 'running',
       }
     }
-    default:
+    default: {
+      // 运行失败后 run 立即终局、状态回落 idle,但被拦的批次还挂着失败原因。
+      // 客户要在首页看到"为什么停了"(2026-08-12 甲方要求,起因是职位下线拦截
+      // 只在开发者页可见);只显示映射过的中文原因,没映射的码不吓客户。
+      const failureHint = funnel.stage === 'failed'
+        ? batchFailureHomeHint(funnel.latestFailureCode)
+        : null
+      if (failureHint !== null) {
+        return { label: '没能完成', hint: failureHint, tone: 'failed' }
+      }
       return {
         label: '未开始',
         hint: workflow.unavailableReason ?? '点开始，系统会自动挑人、打招呼、回消息。',
         tone: 'idle',
       }
+    }
   }
 }
 
@@ -591,19 +602,27 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     failed: safeCount(raw.generationFailedCount) + safeCount(raw.sendFailedCount) +
       safeCount(raw.suspectCount),
     latestFailure: batchFailureLabel(raw.lastFailureReason),
+    latestFailureCode: clean(raw.lastFailureReason) || null,
     stages,
   }
 }
 
-// 采集批次阻塞原因码翻译成用户可读文案;未映射的原因码原样显示(开发者可读)。
+// 采集批次阻塞原因码 → 用户可读文案。首页状态卡只显示映射过的中文;
+// 没映射的原因码只在开发者页的流程进度原样显示,不拿英文码吓客户。
+const batchFailureFriendlyLabels: Record<string, string> = {
+  jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止采集;请在智联恢复职位上线后重新点击开始',
+  jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止采集;请稍后重新点击开始',
+}
+
 function batchFailureLabel(reason: string | undefined): string | null {
   const code = clean(reason)
   if (!code) return null
-  const labels: Record<string, string> = {
-    jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止采集;请在智联恢复职位上线后重新点击开始',
-    jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止采集;请稍后重新点击开始',
-  }
-  return labels[code] ?? code
+  return batchFailureFriendlyLabels[code] ?? code
+}
+
+// 首页状态卡用:只认映射过的中文,未映射返回 null 由调用方给通用文案。
+function batchFailureHomeHint(reason: string | null | undefined): string | null {
+  return batchFailureFriendlyLabels[clean(reason ?? '')] ?? null
 }
 
 function failureStage(raw: AppFunnelRaw): FunnelStageKey | null {
