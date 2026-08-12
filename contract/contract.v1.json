@@ -1055,13 +1055,23 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "JobPostingSection": {
+        "type": "object",
+        "fields": {
+          "label": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "names": {
+            "type": "array", "minItems": 0, "maxItems": 200,
+            "items": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+          }
+        }
+      },
       "JobReadPublishedListData": {
         "type": "object",
         "maxJsonBytes": 65536,
         "fields": {
-          "postingNames": {
-            "type": "array", "minItems": 0, "maxItems": 200,
-            "items": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+          "sections": {
+            "type": "array", "minItems": 1, "maxItems": 16,
+            "items": { "ref": "JobPostingSection" }
           },
           "observedAt": { "type": "int64", "minimum": 0 }
         }
@@ -1445,7 +1455,7 @@
       "argsSchema": "JobReadPublishedListArgs", "dataSchema": "JobReadPublishedListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
-      "note": "读取本账号在平台上已存在的职位名全集,供脑侧发布前预检判定同名职位是否已存在。必须遍历平台上全部职位状态分区并合并,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。只返回按平台原样文本去重后的职位名与 observedAt,不返回状态、平台职位 ID、DOM 位置或候选人数据。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
+      "note": "读取本账号在平台上已存在职位的分区清单,供脑侧发布前预检判定同名职位是否已存在,以及采集开启前判定职位是否在线。必须遍历平台上全部职位状态分区,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。按分区返回:每个分区带页签原样文案 label(如在线中/未上线/审核中/未过审)与该分区内平台原样职位名;不返回平台职位 ID、DOM 位置或候选人数据。存在性判定取各分区并集。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
     },
     "job.readClassCandidates": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",

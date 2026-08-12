@@ -3,9 +3,11 @@ package patrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
+	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/textcanon"
@@ -30,6 +32,8 @@ const (
 	// windowNoProgress 计数。常量保留，存量 blocked 行仍带这个原因。
 	sourcingBlockMoveUnconfirmed = "windowMoveUnconfirmed"
 	sourcingBlockNoProgress      = "windowNoProgress"
+	sourcingBlockJobStatusRead   = "jobStatusReadFailed"
+	sourcingBlockJobNotOnline    = "jobNotOnline"
 )
 
 // runSourcingBatch 是正式批采的唯一生产 actor。窗口引用只在当前调用栈内
@@ -81,6 +85,33 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockFiltersApply, viewErr)
 		}
 		positionTitle := textcanon.Normalize(revision.DisplayName)
+
+		// 采集开启闸(2026-08-12 甲方裁决,AGENTS.md「职位平台状态上报」):批次
+		// 首读推荐窗口之前——也只有这个时点,读职位管理页不会打断推荐流——先读
+		// 平台职位状态分区,当前职位不在「在线中」分区就不开采集;读不到同样不开,
+		// 不确认就不开工。阻塞发生在 PositionRef 绑定之前,批次停在 preparing,
+		// 用户重新点开始会回到本闸重查。
+		if err := a.setStage("checkingJobPostingStatus"); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+		}
+		published, err := invokePrimitive[protocol.JobReadPublishedListData](
+			ctx, a, protocol.PrimJobReadPublishedList, protocol.JobReadPublishedListArgs{},
+		)
+		if err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+		}
+		if report := a.manager.config.ReportJobStatus; report != nil {
+			// 观察用上报,fire-and-forget:成败都不改变下面的采集裁决。
+			report(published)
+		}
+		if status := jobconfig.FindPostingStatus(positionTitle, published.Sections); status != jobconfig.PostingStatusLabelOnline {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobNotOnline,
+				fmt.Errorf("职位「%s」当前平台状态为「%s」,未在线,不开始采集", positionTitle, status))
+		}
+		if err := a.waitSourcingInteractionPace(ctx); err != nil {
+			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+		}
+
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
 		}

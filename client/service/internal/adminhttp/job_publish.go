@@ -592,5 +592,11 @@ func parsePublishedListProof(
 		cmdContext.ExpectedPrincipalFingerprint != *account.PrincipalFingerprint {
 		return nil, 0, errors.New("职位清单上下文与当前账号不符")
 	}
-	return data.PostingNames, data.ObservedAt, nil
+	// 同名预检只关心"名字是否存在于任一分区",取并集,与 2026-08-12 之前的
+	// 去重平铺语义一致;分区归属另由采集开启闸与状态上报消费。
+	names := make([]string, 0, 8)
+	for _, section := range data.Sections {
+		names = append(names, section.Names...)
+	}
+	return names, data.ObservedAt, nil
 }

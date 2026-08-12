@@ -165,6 +165,13 @@ func (s *sourcingGreetingSendAdminSender) SendEnvelope(handID string, env protoc
 			ContentScriptOk: true, LoginState: protocol.LoginStateIn,
 			PageKind: protocol.PageKindRecommend, PrincipalFingerprint: &fingerprint,
 		}
+	case protocol.PrimJobReadPublishedList:
+		data = protocol.JobReadPublishedListData{
+			Sections: []protocol.JobPostingSection{
+				{Label: "在线中", Names: []string{"admin-position-secret"}},
+			},
+			ObservedAt: time.Now().UnixMilli(),
+		}
 	case protocol.PrimCandidateSelectSourcingPosition:
 		var args protocol.CandidateSelectSourcingPositionArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -243,6 +250,7 @@ func (*sourcingGreetingSendAdminSender) HandContractMatch(string) (bool, bool) {
 func (*sourcingGreetingSendAdminSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
+			protocol.PrimJobReadPublishedList + "@1",
 			protocol.PrimCandidateSelectSourcingPosition + "@1",
 			protocol.PrimCandidateApplySourcingFilters + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",

@@ -5434,9 +5434,11 @@ export async function readZhilianSourcingTargetResume(
 
 // ── 职位发布前预检:读取本账号在平台上已存在的职位名全集 ──────────────
 //
-// 只服务发布前的"同名是否已存在"判定。分区(在线中/未上线/审核中/未过审)
-// 必须全部读到并合并:少读一个分区会把"已存在"误判成"可发",方向即多发。
-// 分区按 DOM 顺序整体遍历而不按文案匹配,平台改文案或新增分区时仍然全覆盖。
+// 服务两件事:发布前的"同名是否已存在"判定(取各分区并集),以及采集开启前的
+// "职位是否在线"判定(看名字落在哪个分区)。分区(在线中/未上线/审核中/未过审)
+// 必须全部读到:少读一个分区会把"已存在"误判成"可发",方向即多发。
+// 分区按 DOM 顺序整体遍历而不按文案匹配,平台改文案或新增分区时仍然全覆盖;
+// 分区归属按页签原样文案带回,判定语义全部留在脑侧。
 
 const ZHILIAN_JOB_LIST_URL = `https://${ZHILIAN_HOST}/app/job`
 
@@ -5456,6 +5458,8 @@ type MainJobSectionResult =
     status: 'ok'
     sectionCount: number
     activeIndex: number
+    // 各分区页签的原样文本(含「· N」计数后缀),与分区一一对应。
+    labels: string[]
     names: string[]
     // null = 页面未渲染分页统计,此时 names 必须为空(空分区)。
     total: number | null
@@ -5469,6 +5473,15 @@ function mainReadZhilianJobSection(): MainJobSectionResult {
   if (items.length === 0) return { status: 'failed', reason: 'section_bar_absent' }
   const activeIndex = items.findIndex((node) => node.className.split(/\s+/).includes('is-active'))
   if (activeIndex < 0) return { status: 'failed', reason: 'section_not_active' }
+
+  const labels: string[] = []
+  for (const item of items) {
+    const text = ((item as HTMLElement).innerText || '')
+      .normalize('NFC').replace(/[\s ]+/gu, ' ').trim()
+    // 页签文案读不到就整体失败:分区归属是本原语的返回义务,缺一个就不完整。
+    if (!text || text.length > 64) return { status: 'failed', reason: 'section_label_unreadable' }
+    labels.push(text)
+  }
 
   const names: string[] = []
   for (const anchor of Array.from(document.querySelectorAll('a.job-item__title--jobname'))) {
@@ -5489,7 +5502,7 @@ function mainReadZhilianJobSection(): MainJobSectionResult {
       return { status: 'failed', reason: 'total_unreadable' }
     }
   }
-  return { status: 'ok', sectionCount: items.length, activeIndex, names, total }
+  return { status: 'ok', sectionCount: items.length, activeIndex, labels, names, total }
 }
 
 function mainClickZhilianJobSection(index: number): { status: 'ok' } | { status: 'failed'; reason: string } {
@@ -5509,8 +5522,17 @@ function validJobSectionResult(value: unknown): value is MainJobSectionResult {
   if (record.status === 'failed') return typeof record.reason === 'string'
   if (record.status !== 'ok') return false
   return typeof record.sectionCount === 'number' && typeof record.activeIndex === 'number' &&
+    Array.isArray(record.labels) && record.labels.every((label) => typeof label === 'string') &&
     Array.isArray(record.names) && record.names.every((name) => typeof name === 'string') &&
     (record.total === null || typeof record.total === 'number')
+}
+
+// 页签原样文本形如「在线中 · 2」(无数字即纯文案);分区归属只要「·」前的状态文案。
+// 已知全集:在线中/未上线/审核中/未过审(docs/智联职位发布页事实与发布裁决-2026-07-29.md)。
+function parseZhilianSectionLabel(raw: string): string {
+  const separator = raw.indexOf('·')
+  const label = (separator >= 0 ? raw.slice(0, separator) : raw).trim()
+  return label
 }
 
 async function ensureZhilianJobListTab(
@@ -5590,7 +5612,7 @@ async function readZhilianJobSection(
   tabId: number,
   index: number,
   ctx: PrimitiveContext,
-): Promise<{ names: string[]; sectionCount: number }> {
+): Promise<{ label: string; names: string[]; sectionCount: number }> {
   const clicked = await runMain(tabId, mainClickZhilianJobSection, [index])
   if (typeof clicked !== 'object' || clicked === null || (clicked as { status?: string }).status !== 'ok') {
     const reason = (clicked as { reason?: string } | null)?.reason ?? 'section_click_failed'
@@ -5607,7 +5629,11 @@ async function readZhilianJobSection(
     // 数量对不上意味着还在渲染,或者存在未读到的分页——两种都不能当作读全。
     if (result.activeIndex === index) {
       const expected = result.total ?? 0
-      if (result.names.length === expected) return { names: result.names, sectionCount: result.sectionCount }
+      if (result.names.length === expected) {
+        const label = parseZhilianSectionLabel(result.labels[index] ?? '')
+        if (!label) throwJobSectionFailure('section_label_unreadable')
+        return { label, names: result.names, sectionCount: result.sectionCount }
+      }
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 250))
   }
@@ -5640,7 +5666,7 @@ export async function readZhilianPublishedJobs(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位分区数量超出已知范围', 'manualOnly')
   }
 
-  const collected = new Set<string>()
+  const sections: JobReadPublishedListData['sections'] = []
   for (let index = 0; index < sectionCount; index += 1) {
     ctx.checkpoint()
     // 相邻平台可见交互至少间隔一秒并带随机抖动。
@@ -5651,7 +5677,7 @@ export async function readZhilianPublishedJobs(
     if (section.sectionCount !== sectionCount) {
       throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '读取期间智联职位分区结构发生变化', 'manualOnly')
     }
-    for (const name of section.names) collected.add(name)
+    sections.push({ label: section.label, names: section.names })
     await ctx.progress(`已读取第 ${index + 1}/${sectionCount} 个职位分区`, 15 + Math.floor((index + 1) * 70 / sectionCount))
   }
 
@@ -5662,16 +5688,20 @@ export async function readZhilianPublishedJobs(
   }
   assertExpectedPrincipal(await probeTab(latest), expectedPrincipalFingerprint)
 
-  const postingNames = Array.from(collected)
-  if (postingNames.length > 200) {
+  if (sections.reduce((count, section) => count + section.names.length, 0) > 200) {
     throw new ZhilianPlatformError('PAYLOAD_LIMIT', '平台职位数量超过当前契约上限', 'manualOnly')
   }
-  const data: JobReadPublishedListData = { postingNames, observedAt: Date.now() }
+  const data: JobReadPublishedListData = { sections, observedAt: Date.now() }
   if (validatePrimitiveData(PrimitiveName.JobReadPublishedList, 1, data).length !== 0) {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位名清单不符合当前契约', 'manualOnly')
   }
   await ctx.progress('智联职位名清单读取完成', 100)
   return data
+}
+
+// 发布守卫与发后正证只关心"名字是否存在于任一分区",与旧版去重平铺语义一致。
+function zhilianPostingNamesUnion(data: JobReadPublishedListData): string[] {
+  return data.sections.flatMap((section) => section.names)
 }
 
 // ── 职位发布表单试填与回读 ────────────────────────────────────────────
@@ -7190,7 +7220,7 @@ export async function publishZhilianJobDraft(
   ctx.checkpoint()
   await ctx.progress('确认平台上尚无同名职位', 5)
   const before = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
-  if (before.postingNames.some((name) => normalizeZhilianPostingName(name) === target)) {
+  if (zhilianPostingNamesUnion(before).some((name) => normalizeZhilianPostingName(name) === target)) {
     throw new ZhilianPlatformError('GUARD_FAILED', '平台上已存在同名职位,不再发布', 'manualOnly')
   }
 
@@ -7289,7 +7319,7 @@ export async function publishZhilianJobDraft(
     rounds = round + 1
     try {
       const after = await readZhilianPublishedJobs(ctx, expectedPrincipalFingerprint)
-      visible = after.postingNames.some((name) => normalizeZhilianPostingName(name) === target)
+      visible = zhilianPostingNamesUnion(after).some((name) => normalizeZhilianPostingName(name) === target)
     } catch (error) {
       if (!(error instanceof ZhilianPlatformError)) throw error
       // 回读失败同样只是"未确认",不改变已经发生的副作用。

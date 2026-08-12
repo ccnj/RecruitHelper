@@ -590,9 +590,20 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     // 顶部汇总是两个阶段的失败之和，明细各归各格。
     failed: safeCount(raw.generationFailedCount) + safeCount(raw.sendFailedCount) +
       safeCount(raw.suspectCount),
-    latestFailure: clean(raw.lastFailureReason) || null,
+    latestFailure: batchFailureLabel(raw.lastFailureReason),
     stages,
   }
+}
+
+// 采集批次阻塞原因码翻译成用户可读文案;未映射的原因码原样显示(开发者可读)。
+function batchFailureLabel(reason: string | undefined): string | null {
+  const code = clean(reason)
+  if (!code) return null
+  const labels: Record<string, string> = {
+    jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止采集;请在智联恢复职位上线后重新点击开始',
+    jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止采集;请稍后重新点击开始',
+  }
+  return labels[code] ?? code
 }
 
 function failureStage(raw: AppFunnelRaw): FunnelStageKey | null {
