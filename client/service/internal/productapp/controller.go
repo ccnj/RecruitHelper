@@ -87,6 +87,10 @@ type RuntimeState struct {
 	CanAddBatch           bool
 	CanEnd                bool
 	CommunicationState    string
+	// LastRunFailureReason 只在没有活跃运行、且最近一次运行以失败终局时携带
+	// 该次的失败原因原文。运行失败即终局,首页否则永远看不到"为什么停了"
+	// (2026-08-12 甲方要求,起因是推荐流被刷新后批次静默作废)。
+	LastRunFailureReason string
 }
 
 func New(
@@ -387,6 +391,12 @@ func (c *Controller) RuntimeState() (RuntimeState, error) {
 			}
 		}
 		return state, nil
+	}
+
+	if latest, latestErr := c.store.LatestProductWorkflowRun(); latestErr != nil {
+		return RuntimeState{}, latestErr
+	} else if latest != nil && latest.Status == workflow.StatusFailed {
+		state.LastRunFailureReason = latest.FailureReason
 	}
 
 	key, err := c.currentAccount()

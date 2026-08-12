@@ -105,6 +105,7 @@ export interface AppRuntimeRaw {
   canEnd: boolean
   workflowPendingAction?: 'sourcing' | 'end'
   communicationState?: string
+  lastRunFailureReason?: string
 }
 
 export interface AppOverviewResponse {
@@ -442,6 +443,7 @@ function adaptWorkflow(
       (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
     pendingAction,
     unavailableReason,
+    lastRunFailure: clean(runtime.lastRunFailureReason) || null,
   }
 }
 
@@ -465,7 +467,8 @@ function homeStatus(
     case 'failed':
       return {
         label: '没能完成',
-        hint: workflow.unavailableReason ?? '可以重新开始今天的招聘。',
+        hint: batchFailureHomeHint(funnel.latestFailureCode) ??
+          workflow.unavailableReason ?? '可以重新开始今天的招聘。',
         tone: 'failed',
       }
     case 'awaitingConfirmation': {
@@ -505,13 +508,35 @@ function homeStatus(
         tone: 'running',
       }
     }
-    default:
+    default: {
+      // 运行失败后 run 立即终局、状态回落 idle,但客户要在首页看到"为什么停了"
+      // (2026-08-12 甲方要求)。两条数据通道:被拦未终局的批次挂着失败原因
+      // (职位下线闸),批次已终局的看最近一次运行的失败原因(推荐流被刷新)。
+      // 都只显示映射过的中文,没映射的码不吓客户。
+      const failureHint = (funnel.stage === 'failed'
+        ? batchFailureHomeHint(funnel.latestFailureCode)
+        : null) ?? lastRunFailureHomeHint(workflow.lastRunFailure)
+      if (failureHint !== null) {
+        return { label: '没能完成', hint: failureHint, tone: 'failed' }
+      }
       return {
         label: '未开始',
         hint: workflow.unavailableReason ?? '点开始，系统会自动挑人、打招呼、回消息。',
         tone: 'idle',
       }
+    }
   }
+}
+
+// 最近一次运行的失败原因是包了前缀的错误文本(如"产品工作流批次推进状态无效:
+// recommendationFeedChanged"),按包含匹配认码。想让新的中止原因上首页,在这里
+// 加一行映射即可;不映射的照旧不显示。
+function lastRunFailureHomeHint(reason: string | null): string | null {
+  if (!reason) return null
+  if (reason.includes('recommendationFeedChanged')) {
+    return '推荐页被刷新,本批已作废;请重新点击开始'
+  }
+  return null
 }
 
 function workflowPositionLabel(
@@ -590,9 +615,28 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
     // 顶部汇总是两个阶段的失败之和，明细各归各格。
     failed: safeCount(raw.generationFailedCount) + safeCount(raw.sendFailedCount) +
       safeCount(raw.suspectCount),
-    latestFailure: clean(raw.lastFailureReason) || null,
+    latestFailure: batchFailureLabel(raw.lastFailureReason),
+    latestFailureCode: clean(raw.lastFailureReason) || null,
     stages,
   }
+}
+
+// 采集批次阻塞原因码 → 用户可读文案。首页状态卡只显示映射过的中文;
+// 没映射的原因码只在开发者页的流程进度原样显示,不拿英文码吓客户。
+const batchFailureFriendlyLabels: Record<string, string> = {
+  jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止工作;请在智联恢复职位上线后重新点击开始',
+  jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止工作;请稍后重新点击开始',
+}
+
+function batchFailureLabel(reason: string | undefined): string | null {
+  const code = clean(reason)
+  if (!code) return null
+  return batchFailureFriendlyLabels[code] ?? code
+}
+
+// 首页状态卡用:只认映射过的中文,未映射返回 null 由调用方给通用文案。
+function batchFailureHomeHint(reason: string | null | undefined): string | null {
+  return batchFailureFriendlyLabels[clean(reason ?? '')] ?? null
 }
 
 function failureStage(raw: AppFunnelRaw): FunnelStageKey | null {

@@ -187,6 +187,7 @@ export function createProductFixture(): ProductData {
         canResume: false,
         pendingAction: null,
         unavailableReason: null,
+        lastRunFailure: null,
       },
       funnel: {
         stage: 'awaitingConfirmation',
@@ -195,6 +196,7 @@ export function createProductFixture(): ProductData {
         pending: 18,
         failed: 0,
         latestFailure: null,
+        latestFailureCode: null,
         stages: funnelStages,
       },
       communication: {
@@ -314,6 +316,7 @@ export function createEmptyProductData(): ProductData {
         canResume: false,
         pendingAction: null,
         unavailableReason: '完成激活并绑定职位后可开始',
+        lastRunFailure: null,
       },
       funnel: {
         stage: null,
@@ -322,6 +325,7 @@ export function createEmptyProductData(): ProductData {
         pending: null,
         failed: null,
         latestFailure: null,
+        latestFailureCode: null,
         stages: [
           { key: 'collect', label: '采集', state: 'pending', completed: 0, target: null, failed: 0 },
           { key: 'score', label: '评分', state: 'pending', completed: 0, target: null, failed: 0 },

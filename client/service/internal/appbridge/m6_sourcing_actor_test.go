@@ -182,6 +182,14 @@ func (s *sourcingActorSender) SendEnvelope(handID string, env protocol.Envelope)
 			ContentScriptOk: true, LoginState: protocol.LoginStateIn, PageKind: protocol.PageKindRecommend,
 			PrincipalFingerprint: &fingerprint,
 		}
+	case protocol.PrimJobReadPublishedList:
+		// 采集开启闸的默认世界:夹具职位在线。
+		data = protocol.JobReadPublishedListData{
+			Sections: []protocol.JobPostingSection{
+				{Label: "在线中", Names: []string{"合成职位"}},
+			},
+			ObservedAt: time.Now().UnixMilli(),
+		}
 	case protocol.PrimCandidateSelectSourcingPosition:
 		var args protocol.CandidateSelectSourcingPositionArgs
 		if err := json.Unmarshal(body.Args, &args); err != nil {
@@ -328,6 +336,7 @@ func (s *sourcingActorSender) HandSession(string) (string, string, bool) {
 func (*sourcingActorSender) HandNegotiation(string) ([]string, []string, bool) {
 	return []string{
 			protocol.PrimProbePlatform + "@1",
+			protocol.PrimJobReadPublishedList + "@1",
 			protocol.PrimCandidateSelectSourcingPosition + "@1",
 			protocol.PrimCandidateApplySourcingFilters + "@1",
 			protocol.PrimCandidateReadSourcingWindow + "@1",
@@ -641,8 +650,10 @@ func TestFormalSourcingFilterFailureStaysUnboundAndResumeRepeatsPreparation(t *t
 	}
 	if got, want := h.sender.order, []string{
 		protocol.PrimProbePlatform,
+		protocol.PrimJobReadPublishedList,
 		protocol.PrimCandidateSelectSourcingPosition,
 		protocol.PrimCandidateApplySourcingFilters,
+		protocol.PrimJobReadPublishedList,
 		protocol.PrimCandidateSelectSourcingPosition,
 		protocol.PrimCandidateApplySourcingFilters,
 		protocol.PrimCandidateReadSourcingWindow,

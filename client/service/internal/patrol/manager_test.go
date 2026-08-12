@@ -399,6 +399,86 @@ func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 	}
 }
 
+// 采集开启闸(2026-08-12 甲方裁决):职位不在「在线中」分区就不开批次,
+// 且一条平台命令都不该再往下派;批次阻塞在 preparing、原因可读,重新
+// 开始会回到闸重查。
+func TestSourcingBlockedWhenJobNotOnline(t *testing.T) {
+	h := newHarness(t)
+	revisionHash := seedStartableSourcingRevision(t, h, "job-not-online")
+	started, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: 1, StartedAt: h.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimJobReadPublishedList {
+			return protocol.JobReadPublishedListData{
+				Sections: []protocol.JobPostingSection{
+					{Label: "在线中", Names: []string{"另一个职位"}},
+					{Label: "未上线", Names: []string{"synthetic-position"}},
+				},
+				ObservedAt: time.Now().UnixMilli(),
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+
+	result, tickErr := h.manager.Tick(context.Background())
+	if tickErr != nil {
+		t.Fatalf("Tick: %v", tickErr)
+	}
+	if len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
+		t.Fatalf("职位未在线应以错误收束: %+v", result.Rounds)
+	}
+	if h.runner.count(protocol.PrimCandidateSelectSourcingPosition) != 0 {
+		t.Fatalf("职位未在线不得继续选择职位: %v", h.runner.names())
+	}
+	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked ||
+		batch.Reason != "jobNotOnline" || batch.EndedAt != nil {
+		t.Fatalf("职位未在线应阻塞批次并记录原因: batch=%+v err=%v", batch, err)
+	}
+}
+
+// 状态读取失败同样不开工:不确认就不开,方向是少做。
+func TestSourcingBlockedWhenJobStatusReadFails(t *testing.T) {
+	h := newHarness(t)
+	revisionHash := seedStartableSourcingRevision(t, h, "job-status-read-failed")
+	started, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revisionHash, TargetCount: 1, StartedAt: h.clock.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimJobReadPublishedList {
+			return nil, wrapRunError(
+				protocol.ErrCodeElementUnresolved, "", errors.New("职位分区读取失败"),
+			)
+		}
+		return defaultHandler(request)
+	}
+
+	result, tickErr := h.manager.Tick(context.Background())
+	if tickErr != nil {
+		t.Fatalf("Tick: %v", tickErr)
+	}
+	if len(result.Rounds) != 1 || result.Rounds[0].Err == nil {
+		t.Fatalf("状态读取失败应以错误收束: %+v", result.Rounds)
+	}
+	if h.runner.count(protocol.PrimCandidateSelectSourcingPosition) != 0 {
+		t.Fatalf("状态读取失败不得继续选择职位: %v", h.runner.names())
+	}
+	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked ||
+		batch.Reason != "jobStatusReadFailed" || batch.EndedAt != nil {
+		t.Fatalf("状态读取失败应阻塞批次并记录原因: batch=%+v err=%v", batch, err)
+	}
+}
+
 func TestSourcingPositionSelectUsesExistingSurfaceRecoveryWithoutAnotherUserStart(t *testing.T) {
 	h := newHarness(t)
 	documents := []m5ai.JobConfigDocument{
@@ -466,6 +546,7 @@ func TestSourcingPositionSelectUsesExistingSurfaceRecoveryWithoutAnotherUserStar
 		t.Fatalf("页面恢复链不符: %v", h.runner.names())
 	}
 	wantPrefix := []string{
+		protocol.PrimJobReadPublishedList,
 		protocol.PrimCandidateSelectSourcingPosition,
 		protocol.PrimNavEnsureSurface,
 		protocol.PrimProbePlatform,
@@ -473,7 +554,7 @@ func TestSourcingPositionSelectUsesExistingSurfaceRecoveryWithoutAnotherUserStar
 		protocol.PrimCandidateApplySourcingFilters,
 	}
 	if got := h.runner.names(); !reflect.DeepEqual(got, wantPrefix) {
-		t.Fatalf("同一次开始未按 select→ensure→probe→select 继续: got=%v", got)
+		t.Fatalf("同一次开始未按 状态闸→select→ensure→probe→select 继续: got=%v", got)
 	}
 	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
 	if err != nil || batch == nil || batch.Status != store.SourcingBatchPreparing ||
@@ -484,6 +565,15 @@ func TestSourcingPositionSelectUsesExistingSurfaceRecoveryWithoutAnotherUserStar
 
 func defaultHandler(request RunRequest) (any, error) {
 	switch request.Name {
+	case protocol.PrimJobReadPublishedList:
+		// 采集开启闸的默认世界:夹具职位在线。闸本身的行为由专门用例覆盖。
+		return protocol.JobReadPublishedListData{
+			Sections: []protocol.JobPostingSection{
+				{Label: "在线中", Names: []string{"synthetic-position"}},
+				{Label: "未上线", Names: []string{}},
+			},
+			ObservedAt: time.Now().UnixMilli(),
+		}, nil
 	case protocol.PrimProbePlatform:
 		fingerprint := "principal-1"
 		return protocol.ProbePlatformData{

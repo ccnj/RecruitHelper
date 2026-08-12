@@ -102,7 +102,11 @@ func (v EffectVerifier) verifyJobPublish(
 	if err := json.Unmarshal(result.Data, &data); err != nil {
 		return dispatch.VerificationObservation{Reason: "职位清单验证读数据无法解析"}, nil
 	}
-	if !jobconfig.MatchesExistingPosting(req.PublishDraftArgs.JobName, data.PostingNames) {
+	postingNames := make([]string, 0, 8)
+	for _, section := range data.Sections {
+		postingNames = append(postingNames, section.Names...)
+	}
+	if !jobconfig.MatchesExistingPosting(req.PublishDraftArgs.JobName, postingNames) {
 		return dispatch.VerificationObservation{
 			Reason:     "平台职位列表中仍未出现该职位",
 			ObservedAt: data.ObservedAt,
