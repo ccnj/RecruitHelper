@@ -187,6 +187,7 @@ export function createProductFixture(): ProductData {
         canResume: false,
         pendingAction: null,
         unavailableReason: null,
+        lastRunFailure: null,
       },
       funnel: {
         stage: 'awaitingConfirmation',
@@ -315,6 +316,7 @@ export function createEmptyProductData(): ProductData {
         canResume: false,
         pendingAction: null,
         unavailableReason: '完成激活并绑定职位后可开始',
+        lastRunFailure: null,
       },
       funnel: {
         stage: null,

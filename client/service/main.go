@@ -572,6 +572,7 @@ func main() {
 				snapshot.CanAddBatch = productState.CanAddBatch
 				snapshot.CanEnd = productState.CanEnd
 				snapshot.CommunicationState = productState.CommunicationState
+				snapshot.LastRunFailureReason = productState.LastRunFailureReason
 				return snapshot, nil
 			}),
 			apphttp.WithWorkflowControl(productController),
