@@ -251,14 +251,22 @@ func TestReserveSourcingScoreRechecksBatchRevisionAndRunMaterial(t *testing.T) {
 	if _, err := s.ReserveSourcingScore(request); err != nil {
 		t.Fatal(err)
 	}
+	// provider/model 不参与预留同一性(2026-08-12 甲方裁决):换引擎后按原身份
+	// 重放原行,行上保留预留时刻的 provider 事实。
+	adopted := request
+	adopted.Provider = "other-provider"
+	if result, err := s.ReserveSourcingScore(adopted); err != nil || result == nil ||
+		result.Created || result.Invocation.Provider != request.Provider {
+		t.Fatalf("换 provider 后未重放原预留: result=%+v err=%v", result, err)
+	}
 	conflict := request
-	conflict.Provider = "other-provider"
+	conflict.InputHash = "different-input"
 	if result, err := s.ReserveSourcingScore(conflict); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
 		t.Fatalf("既有预留材料冲突未拒绝: result=%+v err=%v", result, err)
 	}
 }
 
-func TestSourcingBatchScoringProgressAndProviderModelFreeze(t *testing.T) {
+func TestSourcingBatchScoringProgressLifecycleAllowsMixedModels(t *testing.T) {
 	s := openTest(t)
 	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-progress"}
@@ -281,10 +289,12 @@ func TestSourcingBatchScoringProgressAndProviderModelFreeze(t *testing.T) {
 		t.Fatalf("预留后的进度错误: progress=%+v err=%v", progress, err)
 	}
 
+	// 混模型批次合法(2026-08-12 甲方裁决):换引擎后照常预留推进,不再拒绝。
 	mixed := sourcingScoreReservation(runs[1], "invocation-progress-b", base.Add(4*time.Minute))
 	mixed.Model = "other-model"
-	if result, err := s.ReserveSourcingScore(mixed); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
-		t.Fatalf("批内 provider/model 混用未拒绝: result=%+v err=%v", result, err)
+	if result, err := s.ReserveSourcingScore(mixed); err != nil || result == nil || !result.Created ||
+		result.Invocation.Model != "other-model" {
+		t.Fatalf("批内混模型预留被拒绝: result=%+v err=%v", result, err)
 	}
 	zero := 0
 	if _, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
@@ -337,7 +347,7 @@ func TestSourcingBatchScoringProgressAndProviderModelFreeze(t *testing.T) {
 	}
 }
 
-func TestSourcingBatchScoringProgressRejectsPersistedProviderMix(t *testing.T) {
+func TestSourcingBatchScoringProgressToleratesPersistedProviderMix(t *testing.T) {
 	s := openTest(t)
 	base := time.Date(2026, 7, 22, 13, 0, 0, 0, time.UTC)
 	key := AccountKey{Platform: "zhilian", AccountRef: "account-score-mixed"}
@@ -357,12 +367,16 @@ func TestSourcingBatchScoringProgressRejectsPersistedProviderMix(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	// 已有混用事实不再阻塞后续预留与进度聚合(2026-08-12 甲方裁决):卡死批次
+	// 的代价高于混模型分数,进度上的 Provider/Model 取首行只作展示参考。
 	third := sourcingScoreReservation(runs[2], "invocation-mixed-c", base.Add(4*time.Minute))
-	if result, err := s.ReserveSourcingScore(third); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
-		t.Fatalf("已有混用事实时不得继续授权 provider: result=%+v err=%v", result, err)
+	if result, err := s.ReserveSourcingScore(third); err != nil || result == nil || !result.Created {
+		t.Fatalf("已有混用事实时预留被拒绝: result=%+v err=%v", result, err)
 	}
-	if progress, err := s.SourcingBatchScoringProgress("batch-score-mixed"); progress != nil || !errors.Is(err, ErrAIInvocationConflict) {
-		t.Fatalf("持久 provider/model 混用未响亮冲突: progress=%+v err=%v", progress, err)
+	progress, err := s.SourcingBatchScoringProgress("batch-score-mixed")
+	if err != nil || progress == nil || progress.InFlightCount != 3 || progress.PendingCount != 0 ||
+		progress.Provider != first.Provider || progress.Model != first.Model {
+		t.Fatalf("持久混用批次未按混模型聚合: progress=%+v err=%v", progress, err)
 	}
 }
 

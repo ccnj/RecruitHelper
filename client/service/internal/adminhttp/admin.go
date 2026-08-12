@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"mime"
 	"net/http"
+	"sync"
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
@@ -27,9 +28,27 @@ type API struct {
 	adminToken      string
 	providerConfig  *m5ai.ProviderConfigStore
 	jobConfigSource *jobconfig.Source
-	advice          JobClassAdvisor
 	fieldReport     FieldReportDeps
 	notifyProbe     NotifyProbeDeps
+
+	// adviceEngine 可运行期换代(模型配置落盘即生效,2026-08-12 甲方裁决),
+	// 只经 SetAdvice/currentAdvice 访问。providerApplied 在模型配置任一落盘
+	// 成功后被调用,由 main 装配为"重建引擎并换代"。
+	adviceMu        sync.RWMutex
+	adviceEngine    JobClassAdvisor
+	providerApplied func()
+}
+
+// SetProviderApplied 注入模型配置落盘后的引擎换代回调(装配期一次)。
+func (a *API) SetProviderApplied(fn func()) *API {
+	a.providerApplied = fn
+	return a
+}
+
+func (a *API) notifyProviderApplied() {
+	if a.providerApplied != nil {
+		a.providerApplied()
+	}
 }
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {

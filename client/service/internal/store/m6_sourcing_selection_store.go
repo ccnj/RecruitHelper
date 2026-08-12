@@ -325,7 +325,6 @@ func loadCompleteSourcingSelectionRowsTx(
 		return nil, ErrSourcingSelectionNotReady
 	}
 	byRun := make(map[string]SourcingScoreInvocation, len(invocations))
-	provider, model := "", ""
 	scoringRevisionHash := ""
 	for _, invocation := range invocations {
 		if _, exists := byRun[invocation.RunID]; exists {
@@ -334,11 +333,8 @@ func loadCompleteSourcingSelectionRowsTx(
 		if strings.TrimSpace(invocation.Provider) == "" || strings.TrimSpace(invocation.Model) == "" {
 			return nil, ErrSourcingSelectionConflict
 		}
-		if provider == "" {
-			provider, model = invocation.Provider, invocation.Model
-		} else if provider != invocation.Provider || model != invocation.Model {
-			return nil, ErrSourcingSelectionConflict
-		}
+		// 批内 provider/model 不再要求一致(2026-08-12 甲方裁决):混模型分数
+		// 照常进入筛选,可比性损失甲方明示接受,卡死批次的代价更高。
 		if _, err := requireLegacyRevisionForSourcingBatchTx(
 			tx, batch, invocation.ContextRevisionHash,
 		); err != nil {

@@ -248,7 +248,7 @@ func TestPatrolClassificationCorrectionPausesSuccessfullyBeforeM5(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.manager.advice = &recordingAdviceExecutor{}
+	h.manager.SetAdvice(&recordingAdviceExecutor{})
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:
@@ -293,7 +293,7 @@ func TestPatrolClassificationCorrectionPausesSuccessfullyBeforeM5(t *testing.T) 
 	if err != nil || turn == nil || turn.Status != store.DialogueTurnCollected {
 		t.Fatalf("成功修正后不得进入同轮 M5: turn=%+v err=%v", turn, err)
 	}
-	if len(h.manager.advice.(*recordingAdviceExecutor).requests) != 0 {
+	if len(h.manager.currentAdvice().(*recordingAdviceExecutor).requests) != 0 {
 		t.Fatal("成功修正后不得调用 AI 建议层")
 	}
 	if names := h.runner.businessNames(); len(names) != 2 || names[0] != protocol.PrimChatReadList ||

@@ -101,9 +101,12 @@ func ExtractProviderCredentials(raw []byte) (BackendProviderCredentials, error) 
 // 配置,由既有的"模型连接尚未配齐 + 手工配置入口"兜底。
 //
 // 日志只出现 model、刷新了哪些字段与错误分类。base_url 原值与 API key 一概不记
-// (AGENTS.md「AI provider 数据边界」)。实际生效的 provider/model 由脑启动时的
-// "M5 建议层已就绪"负责记录,这里不重复。
-func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte) {
+// (AGENTS.md「AI provider 数据边界」)。实际生效的 provider/model 由引擎装配方
+// (脑启动的"M5 建议层已就绪"或换代回调的"模型引擎已换代生效")负责记录。
+//
+// onApplied 在配置实际落盘后被调用(2026-08-12 甲方裁决"落盘即生效"):由 main
+// 装配为"重建引擎并换代"。传 nil 则退回只落盘的旧行为。
+func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte, onApplied func()) {
 	if store == nil {
 		return
 	}
@@ -123,10 +126,13 @@ func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte) {
 		return
 	}
 	if applied {
-		slog.Info("已按旧后台下发刷新模型配置，生效于下次启动",
+		slog.Info("已按旧后台下发刷新模型配置",
 			"model", credentials.Model,
 			"baseUrlRefreshed", credentials.BaseURL != "",
 			"keyRefreshed", credentials.APIKey != "")
+		if onApplied != nil {
+			onApplied()
+		}
 	}
 }
 

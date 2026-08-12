@@ -1477,7 +1477,7 @@ func TestUnreadClassificationCorrectionStopsInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	setUnreadHintForTest(h, ptr(1))
-	h.manager.advice = &recordingAdviceExecutor{}
+	h.manager.SetAdvice(&recordingAdviceExecutor{})
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
 		case protocol.PrimChatReadList:

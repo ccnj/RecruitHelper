@@ -501,6 +501,27 @@ func main() {
 	if advice != nil {
 		adminAPI = adminAPI.SetAdvice(advice)
 	}
+	// 模型配置落盘即换代生效(2026-08-12 甲方裁决):后台下发、诊断台手填任一
+	// 落盘成功都当场重建引擎并换进 patrol 与诊断面。重建失败只告警、沿用当前
+	// 引擎(失效方向朝"少做"),绝不换成 nil——外层判空因此不会回退。
+	rebuildAdvice := func() {
+		configured, loadErr := providerConfig.Load()
+		if loadErr != nil || configured == nil {
+			slog.Warn("模型配置刷新后不可读，沿用当前引擎", "err", loadErr)
+			return
+		}
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
+		if providerErr != nil {
+			slog.Warn("模型配置刷新后未能装配，沿用当前引擎", "err", providerErr)
+			return
+		}
+		actor.SetAdvice(provider)
+		adminAPI.SetAdvice(provider)
+		slog.Info("模型引擎已换代生效",
+			"provider", provider.ProviderName(), "model", provider.ModelName())
+	}
+	adminAPI.SetProviderApplied(rebuildAdvice)
+	productController.SetProviderApplied(rebuildAdvice)
 	adminAPI.Routes(mux)
 	if *adminToken != "" {
 		productAPI, productErr := apphttp.New(

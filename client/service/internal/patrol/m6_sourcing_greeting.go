@@ -42,17 +42,16 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 	if progress.Completed {
 		return progress, nil
 	}
-	if m.advice == nil {
+	advice := m.currentAdvice()
+	if advice == nil {
 		return progress, ErrSourcingGreetingProviderUnavailable
 	}
-	provider, model := m.advice.ProviderName(), m.advice.ModelName()
+	provider, model := advice.ProviderName(), advice.ModelName()
 	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
 		return progress, ErrSourcingGreetingProviderUnavailable
 	}
-	if (progress.Provider != "" && progress.Provider != provider) ||
-		(progress.Model != "" && progress.Model != model) {
-		return progress, store.ErrAIInvocationConflict
-	}
+	// 刻意不比对 progress.Provider/Model:与评分同理(2026-08-12 甲方裁决),
+	// 半批换模型继续推进,不许卡成停摆。
 
 	revision, err := m.store.SourcingGreetingRevision(batchID)
 	if err != nil {
@@ -75,7 +74,7 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 	}
 	poolErr := m.runSourcingAIMemberPool(ctx, len(items), func(index int) error {
 		return m.driveSourcingGreetingMember(
-			ctx, view.GreetingPrompt, items[index], provider, model,
+			ctx, advice, view.GreetingPrompt, items[index], provider, model,
 		)
 	})
 
@@ -99,6 +98,7 @@ func (m *Manager) GenerateSelectedSourcingGreetings(
 // single terminal fact, mirroring driveSourcingScoreMember's retry contract.
 func (m *Manager) driveSourcingGreetingMember(
 	ctx context.Context,
+	advice AdviceExecutor,
 	prompt string,
 	item store.SourcingGreetingWorkItem,
 	provider, model string,
@@ -135,13 +135,13 @@ func (m *Manager) driveSourcingGreetingMember(
 		}
 		invocation = &reservation
 	} else {
-		// 接手 inFlight 行前核对调用身份；漂移必须响亮冲突。
+		// 接手 inFlight 行前核对调用身份；漂移必须响亮冲突。provider/model
+		// 刻意不参与身份：引擎运行期可换代，旧引擎预留的行由新引擎接手收尾。
 		if invocation.InvocationID != invocationID ||
 			invocation.BatchID != material.BatchID ||
 			invocation.ProfileID != material.ProfileID ||
 			invocation.ContextRevisionHash != material.ContextRevisionHash ||
 			invocation.RunContentHash != material.RunContentHash ||
-			invocation.Provider != provider || invocation.Model != model ||
 			invocation.InputHash != inputHash {
 			return store.ErrAIInvocationConflict
 		}
@@ -157,12 +157,12 @@ func (m *Manager) driveSourcingGreetingMember(
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
 			ErrorDetailCode: errorClass, FinishedAt: m.now(),
 		}
-		logAIInvocationOutcome(m.advice, m5ai.PurposeGreeting, completion, "")
+		logAIInvocationOutcome(advice, m5ai.PurposeGreeting, completion, "")
 		_, err := m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
 		}
 		return err
 	}
@@ -186,12 +186,12 @@ func (m *Manager) driveSourcingGreetingMember(
 				completion = *lastFailedCompletion
 				completion.FinishedAt = m.now()
 			}
-			logAIInvocationOutcome(m.advice, m5ai.PurposeGreeting, completion, "")
+			logAIInvocationOutcome(advice, m5ai.PurposeGreeting, completion, "")
 			_, err := m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
 			}
 			return err
 		}
@@ -202,7 +202,7 @@ func (m *Manager) driveSourcingGreetingMember(
 		invocation = updated
 
 		started := time.Now()
-		response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+		response, callErr := advice.CompleteJSON(ctx, m5ai.CompletionRequest{
 			InvocationID:        sourcingAIAttemptID(invocationID, invocation.AttemptCount),
 			Purpose:             m5ai.PurposeGreeting,
 			ContextRevisionHash: material.ContextRevisionHash,
@@ -238,14 +238,14 @@ func (m *Manager) driveSourcingGreetingMember(
 			retryClass = classifySourcingAIFailure(callErr)
 		}
 		logAIInvocationOutcome(
-			m.advice, m5ai.PurposeGreeting, completion, response.Diagnostics.TraceErrorCode,
+			advice, m5ai.PurposeGreeting, completion, response.Diagnostics.TraceErrorCode,
 		)
 		if terminalOK || retryClass == sourcingAIRetryNone {
 			_, err = m.store.CompleteSourcingGreeting(store.CompleteSourcingGreetingRequest{
 				Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
 			}
 			return err
 		}

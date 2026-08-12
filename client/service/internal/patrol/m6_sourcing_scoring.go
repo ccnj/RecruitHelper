@@ -41,17 +41,17 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 	if progress.Completed {
 		return progress, nil
 	}
-	if m.advice == nil {
+	advice := m.currentAdvice()
+	if advice == nil {
 		return progress, ErrSourcingScoringProviderUnavailable
 	}
-	provider, model := m.advice.ProviderName(), m.advice.ModelName()
+	provider, model := advice.ProviderName(), advice.ModelName()
 	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
 		return progress, ErrSourcingScoringProviderUnavailable
 	}
-	if (progress.Provider != "" && progress.Provider != provider) ||
-		(progress.Model != "" && progress.Model != model) {
-		return progress, store.ErrAIInvocationConflict
-	}
+	// 刻意不比对 progress.Provider/Model:引擎运行期可换代(2026-08-12 甲方
+	// 裁决),半批换模型按混模型批次继续推进,每次调用用了哪个模型各自如实记账。
+	// 比对并拒绝只会把批次卡成每秒重试的停摆,而混模型分数已被甲方明示接受。
 
 	revision, err := m.store.SourcingScoringRevision(batchID)
 	if err != nil {
@@ -71,7 +71,7 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 	}
 	poolErr := m.runSourcingAIMemberPool(ctx, len(items), func(index int) error {
 		return m.driveSourcingScoreMember(
-			ctx, batchID, view.ScoringPrompt, revision.RevisionHash,
+			ctx, advice, batchID, view.ScoringPrompt, revision.RevisionHash,
 			items[index], provider, model,
 		)
 	})
@@ -98,6 +98,7 @@ func (m *Manager) ScoreCompletedSourcingBatch(
 // without completing so the reservation stays resumable.
 func (m *Manager) driveSourcingScoreMember(
 	ctx context.Context,
+	advice AdviceExecutor,
 	batchID, prompt, contextRevisionHash string,
 	item store.SourcingScoreWorkItem,
 	provider, model string,
@@ -134,11 +135,12 @@ func (m *Manager) driveSourcingScoreMember(
 		invocation = &reservation
 	} else {
 		// 接手 inFlight 行前核对调用身份；漂移说明预留与当前批次事实
-		// 不再一致，必须响亮冲突而不是按新身份重调。
+		// 不再一致，必须响亮冲突而不是按新身份重调。provider/model 刻意不参与
+		// 身份：引擎运行期可换代，旧引擎预留的行由新引擎接手收尾，行上的
+		// provider/model 保留预留时刻的事实。
 		if invocation.InvocationID != invocationID ||
 			invocation.ContextRevisionHash != contextRevisionHash ||
 			invocation.RunContentHash != run.ContentHash ||
-			invocation.Provider != provider || invocation.Model != model ||
 			invocation.InputHash != inputHash {
 			return store.ErrAIInvocationConflict
 		}
@@ -154,12 +156,12 @@ func (m *Manager) driveSourcingScoreMember(
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
 			ErrorDetailCode: errorClass, FinishedAt: m.now(),
 		}
-		logAIInvocationOutcome(m.advice, m5ai.PurposeScoring, completion, "")
+		logAIInvocationOutcome(advice, m5ai.PurposeScoring, completion, "")
 		_, err := m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeScoring, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
 		}
 		return err
 	}
@@ -185,12 +187,12 @@ func (m *Manager) driveSourcingScoreMember(
 				completion = *lastFailedCompletion
 				completion.FinishedAt = m.now()
 			}
-			logAIInvocationOutcome(m.advice, m5ai.PurposeScoring, completion, "")
+			logAIInvocationOutcome(advice, m5ai.PurposeScoring, completion, "")
 			_, err := m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
 			}
 			return err
 		}
@@ -201,7 +203,7 @@ func (m *Manager) driveSourcingScoreMember(
 		invocation = updated
 
 		started := time.Now()
-		response, callErr := m.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+		response, callErr := advice.CompleteJSON(ctx, m5ai.CompletionRequest{
 			InvocationID:        sourcingAIAttemptID(invocationID, invocation.AttemptCount),
 			Purpose:             m5ai.PurposeScoring,
 			ContextRevisionHash: contextRevisionHash,
@@ -235,14 +237,14 @@ func (m *Manager) driveSourcingScoreMember(
 			retryClass = classifySourcingAIFailure(callErr)
 		}
 		logAIInvocationOutcome(
-			m.advice, m5ai.PurposeScoring, completion, response.Diagnostics.TraceErrorCode,
+			advice, m5ai.PurposeScoring, completion, response.Diagnostics.TraceErrorCode,
 		)
 		if score != nil || retryClass == sourcingAIRetryNone {
 			_, err = m.store.CompleteSourcingScore(store.CompleteSourcingScoreRequest{
 				Completion: completion, Score: score,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(m.advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
 			}
 			return err
 		}

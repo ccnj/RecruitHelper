@@ -24,8 +24,13 @@ type Manager struct {
 	store  *store.Store
 	runner Runner
 	hands  HandAvailability
-	advice AdviceExecutor
 	config Config
+
+	// adviceEngine 是可运行期换代的 AI 引擎(模型配置落盘即生效,2026-08-12
+	// 甲方裁决)。只经 currentAdvice/SetAdvice 访问;业务函数在入口取一次快照、
+	// 函数内从头用到尾,在途调用拿旧引擎自然收尾,新调用拿新引擎。
+	adviceMu     sync.RWMutex
+	adviceEngine AdviceExecutor
 
 	// startedAt 是本次脑进程的启动时刻(取自注入时钟,构造时记录一次)。
 	// 它只服务 Q1/Q2 陈旧 planned 判定(stalePlannedBoundary):崩溃/重启前
@@ -74,9 +79,24 @@ func NewManager(db *store.Store, runner Runner, hands HandAvailability, config C
 		verifiedListHints: make(map[listHintVerificationKey]string),
 	}
 	if len(advice) > 0 {
-		manager.advice = advice[0]
+		manager.adviceEngine = advice[0]
 	}
 	return manager, nil
+}
+
+// currentAdvice 取当前 AI 引擎快照;nil 表示引擎尚未装配(模型配置缺失)。
+func (m *Manager) currentAdvice() AdviceExecutor {
+	m.adviceMu.RLock()
+	defer m.adviceMu.RUnlock()
+	return m.adviceEngine
+}
+
+// SetAdvice 运行期换代 AI 引擎(含从 nil 首次装配)。不做任何静默点等待:
+// 甲方 2026-08-12 明示接受在途调用链新旧引擎混用与混模型批次。
+func (m *Manager) SetAdvice(advice AdviceExecutor) {
+	m.adviceMu.Lock()
+	defer m.adviceMu.Unlock()
+	m.adviceEngine = advice
 }
 
 // SetWorkflowMemberGate installs the single product-workflow member boundary.

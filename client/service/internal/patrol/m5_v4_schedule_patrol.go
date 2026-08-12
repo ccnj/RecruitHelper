@@ -128,7 +128,7 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 	material store.CommunicationAIMaterial,
 	freezeRequest store.FreezeCommunicationV4SchedulePlanRequest,
 ) error {
-	if a.manager.advice == nil {
+	if a.manager.currentAdvice() == nil {
 		// provider 配置缺失是本机短缺(2026-08-02 甲方裁决):不冻结候选人,
 		// 配置补齐重启后下一巡检轮自然续跑。
 		slog.Warn("沉默追问跳过:AI provider 未配置,等下轮巡检重试",
@@ -180,8 +180,8 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 				ContextRevisionHash:         material.ContextRevision.RevisionHash,
 				ResumeSnapshotID:            material.ResumeSnapshot.SnapshotID,
 				EvaluatedAt:                 freezeRequest.EvaluatedAt,
-				Provider:                    a.manager.advice.ProviderName(),
-				Model:                       a.manager.advice.ModelName(),
+				Provider:                    a.manager.currentAdvice().ProviderName(),
+				Model:                       a.manager.currentAdvice().ModelName(),
 				InputHash:                   sha256Hex(content),
 				CreatedAt:                   a.manager.now(),
 			},
@@ -208,7 +208,7 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 		func() {
 			a.manager.mu.Unlock()
 			defer a.manager.mu.Lock()
-			response, callErr = a.manager.advice.CompleteJSON(ctx, request)
+			response, callErr = a.manager.currentAdvice().CompleteJSON(ctx, request)
 		}()
 		completion := m5CompletionFromProvider(
 			invocation.InvocationID,
@@ -233,7 +233,7 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 			suggestionText = ""
 		}
 		logAIInvocationOutcome(
-			a.manager.advice,
+			a.manager.currentAdvice(),
 			m5ai.PurposeSilenceFollowup,
 			completion,
 			response.Diagnostics.TraceErrorCode,
@@ -247,7 +247,7 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 			)
 		if completeErr != nil {
 			logAIInvocationPersistenceFailure(
-				a.manager.advice,
+				a.manager.currentAdvice(),
 				m5ai.PurposeSilenceFollowup,
 				completion,
 			)
