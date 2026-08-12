@@ -610,8 +610,8 @@ function adaptFunnel(raw: AppFunnelRaw): ProductData['overview']['funnel'] {
 // 采集批次阻塞原因码 → 用户可读文案。首页状态卡只显示映射过的中文;
 // 没映射的原因码只在开发者页的流程进度原样显示,不拿英文码吓客户。
 const batchFailureFriendlyLabels: Record<string, string> = {
-  jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止采集;请在智联恢复职位上线后重新点击开始',
-  jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止采集;请稍后重新点击开始',
+  jobNotOnline: '当前职位未在智联上线(可能已下线或正在审核),已停止工作;请在智联恢复职位上线后重新点击开始',
+  jobStatusReadFailed: '开始采集前未能确认智联职位在线状态,已停止工作;请稍后重新点击开始',
 }
 
 function batchFailureLabel(reason: string | undefined): string | null {
