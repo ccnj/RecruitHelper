@@ -614,7 +614,7 @@ func (s *Store) ReserveSourcingGreeting(req ReserveSourcingGreetingRequest) (*Re
 	}
 	out := &ReserveSourcingGreetingResult{}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		_, materials, invocations, err := loadSourcingGreetingScopeTx(
+		_, materials, _, err := loadSourcingGreetingScopeTx(
 			tx, req.BatchID, true, req.ContextRevisionHash,
 		)
 		if err != nil {
@@ -632,11 +632,8 @@ func (s *Store) ReserveSourcingGreeting(req ReserveSourcingGreetingRequest) (*Re
 			material.RunContentHash != req.RunContentHash {
 			return ErrSourcingBinding
 		}
-		for _, invocation := range invocations {
-			if invocation.Provider != req.Provider || invocation.Model != req.Model {
-				return ErrAIInvocationConflict
-			}
-		}
+		// 同批不再冻结单一 provider/model:引擎运行期可换代(2026-08-12 甲方
+		// 裁决),混模型批次照常预留推进。
 		wanted := SourcingGreetingInvocation{
 			InvocationID: req.InvocationID, BatchID: req.BatchID, RunID: req.RunID,
 			ProfileID: req.ProfileID, ContextRevisionHash: req.ContextRevisionHash,
@@ -761,11 +758,13 @@ func (s *Store) SourcingBatchGreetingProgress(batchID string) (*SourcingBatchGre
 				progress.PendingCount++
 				continue
 			}
+			// 混模型批次合法(2026-08-12 甲方裁决):Provider/Model 取首行、只作
+			// 展示参考,不再要求全批一致;revision 一致性照旧硬校验。
 			if progress.Provider == "" {
 				progress.Provider, progress.Model = invocation.Provider, invocation.Model
+			}
+			if progress.ContextRevisionHash == "" {
 				progress.ContextRevisionHash = invocation.ContextRevisionHash
-			} else if progress.Provider != invocation.Provider || progress.Model != invocation.Model {
-				return ErrAIInvocationConflict
 			} else if progress.ContextRevisionHash != invocation.ContextRevisionHash {
 				return ErrAIInvocationConflict
 			}
@@ -909,7 +908,7 @@ func loadSourcingGreetingScopeTx(
 	}
 	seenRuns := make(map[string]struct{}, len(invocations))
 	seenInvocationProfiles := make(map[string]struct{}, len(invocations))
-	provider, model, stageRevisionHash := "", "", ""
+	stageRevisionHash := ""
 	for _, invocation := range invocations {
 		material, exists := materialByRun[invocation.RunID]
 		if !exists || invocation.BatchID != batch.BatchID || invocation.ProfileID != material.ProfileID ||
@@ -925,11 +924,8 @@ func loadSourcingGreetingScopeTx(
 		}
 		seenRuns[invocation.RunID] = struct{}{}
 		seenInvocationProfiles[invocation.ProfileID] = struct{}{}
-		if provider == "" {
-			provider, model = invocation.Provider, invocation.Model
-		} else if provider != invocation.Provider || model != invocation.Model {
-			return SourcingBatchSelection{}, nil, nil, ErrAIInvocationConflict
-		}
+		// 批内 provider/model 不再要求一致(2026-08-12 甲方裁决):引擎运行期
+		// 可换代,混模型批次照常加载推进。
 		if _, err := requireLegacyRevisionForSourcingBatchTx(
 			tx, batch, invocation.ContextRevisionHash,
 		); err != nil {
@@ -1351,11 +1347,12 @@ func validateSourcingGreetingIntentCommand(
 	return nil
 }
 
+// provider/model 刻意不参与预留同一性:引擎运行期可换代,旧引擎预留的行由
+// 新引擎按原身份接手,行上保留预留时刻的 provider/model 事实。
 func sameSourcingGreetingReservation(existing, wanted SourcingGreetingInvocation) bool {
 	return existing.BatchID == wanted.BatchID && existing.RunID == wanted.RunID &&
 		existing.ProfileID == wanted.ProfileID && existing.ContextRevisionHash == wanted.ContextRevisionHash &&
-		existing.RunContentHash == wanted.RunContentHash && existing.Provider == wanted.Provider &&
-		existing.Model == wanted.Model && existing.InputHash == wanted.InputHash
+		existing.RunContentHash == wanted.RunContentHash && existing.InputHash == wanted.InputHash
 }
 
 func sameSourcingGreetingCompletion(existing SourcingGreetingInvocation, req CompleteSourcingGreetingRequest) bool {

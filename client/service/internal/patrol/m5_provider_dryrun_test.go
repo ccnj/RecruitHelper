@@ -74,7 +74,7 @@ func TestM5RealProviderDryRun(t *testing.T) {
 	// intent/reply advice, but the turn must stop before any Chrome command.
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
-	h.manager.advice = executor
+	h.manager.SetAdvice(executor)
 	beforeCommands, err := h.db.RecentCmds(100)
 	if err != nil {
 		t.Fatal("读取 dry-run 前命令计数失败")

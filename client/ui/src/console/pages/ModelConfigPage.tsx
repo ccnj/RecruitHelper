@@ -142,7 +142,7 @@ export function ModelConfigPage() {
       setProviderConfig(result.config)
       setBaseURL('')
       setAPIKey('')
-      setProviderNotice({ kind: 'ok', text: '模型连接已保存在本机；页面不会回显地址或密钥。下次同步职位配置时，后台下发的地址与密钥会覆盖这里手填的值。重启客户端后生效。' })
+      setProviderNotice({ kind: 'ok', text: '模型连接已保存并立即生效；页面不会回显地址或密钥。下次同步职位配置时，后台下发的地址与密钥会覆盖这里手填的值。' })
     } catch (reason) {
       setProviderNotice({ kind: 'bad', text: errorText(reason) })
     } finally {

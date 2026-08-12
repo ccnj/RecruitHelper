@@ -43,7 +43,7 @@ func TestM5PauseDuringAdviceStopsNextStageAndResumesSameTurn(t *testing.T) {
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	h.manager.SetWorkflowMemberGate(func() error {
 		gateCalls++
 		if !gateOpen {
@@ -127,7 +127,7 @@ func TestM5PreWALPauseAndDailyBoundaryKeepPlannedActionRecoverable(t *testing.T)
 			h := newHarness(t)
 			fixture := seedM5AdviceFixture(t, h)
 			advice := &recordingAdviceExecutor{}
-			h.manager.advice = advice
+			h.manager.SetAdvice(advice)
 			planningActor := &roundActor{manager: h.manager, now: h.clock.Now()}
 			h.manager.mu.Lock()
 			err := planningActor.advanceM5Turn(context.Background(), fixture.turn)
@@ -222,7 +222,7 @@ func TestM5ReplyRetriesAfterUnparsableOutputThenSucceeds(t *testing.T) {
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
 	h.manager.mu.Lock()
@@ -301,7 +301,7 @@ func TestM5ReplyProviderFailureRetriesToLimitThenStopsWithoutEffect(t *testing.T
 		}
 		return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "rateLimited"}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
 	// 首轮:intent 一次 + reply attempt 1 一次,失败后本轮跳过、不写终局。
@@ -384,7 +384,7 @@ func TestM5ReplyReasoningTokensNonzeroRequiresManualWithoutEffect(t *testing.T) 
 			ReasoningContentEmpty: true,
 		}, nil
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
 	// reasoning 用量可疑属于"这次没吐好",总额仍是 5 次调用;2026-08-02 裁决
@@ -437,7 +437,7 @@ func TestM5NonemptyReasoningContentRequiresManualWithoutEffect(t *testing.T) {
 			ReasoningContentEmpty: false,
 		}, nil
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
 	// intent 阶段就 reasoning 可疑:重试到上限仍可疑,绝不放行到 reply。
@@ -502,7 +502,7 @@ func TestM5PlannedActionRecheckStopsChangedWorldBeforeDispatch(t *testing.T) {
 			h := newHarness(t)
 			fixture := seedM5AdviceFixture(t, h)
 			advice := &recordingAdviceExecutor{}
-			h.manager.advice = advice
+			h.manager.SetAdvice(advice)
 			planningActor := &roundActor{manager: h.manager, now: h.clock.Now()}
 			h.manager.mu.Lock()
 			err := planningActor.advanceM5Turn(context.Background(), fixture.turn)

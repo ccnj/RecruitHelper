@@ -165,8 +165,9 @@ func (s *ProviderConfigStore) Save(config ProviderConfig) error {
 // 合并规则:后台某项非空即覆盖本机同项,后台该项为空则保留本机原值——后台清空
 // 一个字段不该把已经能用的本机配置打掉。token 预算永不来自后台。
 //
-// 写盘只影响下次脑启动:advice 是启动时一次性注入 patrol.Manager 私有字段的,
-// 这里刻意不做运行期热替换——那要处理轮次执行中换引擎的并发,成本远超收益。
+// 写盘本身只管持久化;运行期生效由调用方的 onApplied 回调负责(2026-08-12 甲方
+// 裁决"落盘即生效",撤销此前"生效于下次启动"的取舍):patrol.Manager 的引擎经
+// SetAdvice 原子换代,在途调用拿旧引擎收尾,混模型批次甲方明示接受。
 func (s *ProviderConfigStore) ApplyBackendCredentials(
 	credentials BackendProviderCredentials,
 ) (bool, error) {

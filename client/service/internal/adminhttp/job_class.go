@@ -27,10 +27,19 @@ type JobClassAdvisor interface {
 }
 
 // SetAdvice 注入 LLM 通道。未注入时类别一步都走不了——2026-07-31 起没有
-// "后台配置值精确匹配"那条不依赖模型的旁路了。
+// "后台配置值精确匹配"那条不依赖模型的旁路了。运行期可再次调用换代引擎。
 func (a *API) SetAdvice(advice JobClassAdvisor) *API {
-	a.advice = advice
+	a.adviceMu.Lock()
+	a.adviceEngine = advice
+	a.adviceMu.Unlock()
 	return a
+}
+
+// currentAdvice 取当前引擎快照;nil 表示尚未装配。
+func (a *API) currentAdvice() JobClassAdvisor {
+	a.adviceMu.RLock()
+	defer a.adviceMu.RUnlock()
+	return a.adviceEngine
 }
 
 // jobClassAttempts 是"分不出来"之前允许的尝试次数(甲方 2026-07-30 定为 3)。
@@ -126,7 +135,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "职位类别解析服务尚未就绪"})
 		return
 	}
-	if a.advice == nil {
+	if a.currentAdvice() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "LLM 通道未就绪，无法分配职位类别",
 		})
@@ -370,7 +379,7 @@ func (a *API) assignJobClassesByModel(
 	var bestProblems map[string]string
 	for attempt := 1; attempt <= jobClassAttempts; attempt++ {
 		started := time.Now()
-		response, callErr := a.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+		response, callErr := a.currentAdvice().CompleteJSON(ctx, m5ai.CompletionRequest{
 			InvocationID:        "jc-" + base + "-" + strconv.Itoa(attempt),
 			Purpose:             m5ai.PurposeJobClass,
 			ContextRevisionHash: base,

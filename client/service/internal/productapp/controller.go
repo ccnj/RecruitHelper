@@ -59,11 +59,20 @@ type Controller struct {
 	// resolver 可以为 nil(既有测试只验证职位配置逻辑):此时 Start 退回
 	// currentAccount 的库内扫描。生产装配始终注入,见 main.go。
 	resolver AccountResolver
+	// providerApplied 在模型配置落盘成功后被调用(可为 nil),由 main 装配为
+	// "重建引擎并换代",落盘即生效(2026-08-12 甲方裁决)。
+	providerApplied func()
 }
 
 // SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
 func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
 	c.resolver = resolver
+	return c
+}
+
+// SetProviderApplied 注入模型配置落盘后的引擎换代回调(装配期一次,非并发安全)。
+func (c *Controller) SetProviderApplied(fn func()) *Controller {
+	c.providerApplied = fn
 	return c
 }
 
@@ -191,7 +200,7 @@ func (c *Controller) Start(
 		logCurrentJobSyncFailure("start", "fetch", err, -1)
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
-	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
+	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("start", "import", err, len(revisions))
@@ -239,7 +248,7 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 		logCurrentJobSyncFailure("syncJobs", "fetch", err, -1)
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
-	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw)
+	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("syncJobs", "import", err, len(revisions))

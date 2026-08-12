@@ -378,7 +378,7 @@ func TestAdvanceM5TurnCallsIntentThenReplyOnceAndStopsAtPlannedAction(t *testing
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	beforeCommands, err := h.db.RecentCmds(100)
 	if err != nil {
 		t.Fatal(err)
@@ -447,7 +447,7 @@ func TestAdvanceM5ResumeCardSkipsIntentAndPlansExactlyOneReply(t *testing.T) {
 		}
 		return safeFakeResponse(`{"话术_序列":["已收到您的简历，我们继续沟通一下岗位细节。"],"动作":"无"}`), nil
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -506,7 +506,7 @@ func TestAdvanceM5MixedResumeTurnSkipsIntentAndPlansExactlyOneReply(t *testing.T
 		}
 		return safeFakeResponse(`{"话术_序列":["简历收到了，工作时间我们详细说下。"],"动作":"无"}`), nil
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -585,7 +585,7 @@ func TestM5ResumeLegacyByteBudgetFailureAllowsOnlyAuthorizedAttemptTwo(t *testin
 			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "budgetBlocked"}
 		},
 	}
-	h.manager.advice = legacyFailure
+	h.manager.SetAdvice(legacyFailure)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -635,7 +635,7 @@ func TestM5ResumeLegacyByteBudgetFailureAllowsOnlyAuthorizedAttemptTwo(t *testin
 			return safeFakeResponse(`{"话术_序列":["合成恢复回复"]}`), nil
 		},
 	}
-	h.manager.advice = recoveryAdvice
+	h.manager.SetAdvice(recoveryAdvice)
 	h.manager.mu.Lock()
 	err = actor.advanceM5Turn(context.Background(), authorized.Turn)
 	h.manager.mu.Unlock()
@@ -675,7 +675,7 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "budgetBlocked"}
 		},
 	}
-	h.manager.advice = legacyFailure
+	h.manager.SetAdvice(legacyFailure)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -712,7 +712,7 @@ func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
 			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "providerUnavailable"}
 		},
 	}
-	h.manager.advice = recoveryFailure
+	h.manager.SetAdvice(recoveryFailure)
 	h.manager.mu.Lock()
 	err = actor.advanceM5Turn(context.Background(), authorized.Turn)
 	h.manager.mu.Unlock()
@@ -756,7 +756,7 @@ func TestAdvanceM5TurnResumeRenderFailureSkipsRoundWithoutFreeze(t *testing.T) {
 	h := newHarness(t)
 	fixture := seedM5AdviceFixture(t, h)
 	advice := &recordingAdviceExecutor{}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 
 	snapshot, err := h.db.CandidateResumeSnapshotByID(
@@ -823,7 +823,7 @@ func TestAdvanceM5TurnIntentFailureFallsBackOnceThenReplies(t *testing.T) {
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -849,7 +849,7 @@ func TestAdvanceM5TurnLLMRejectedStopsBeforeReplyAndKeepsClassification(t *testi
 		}
 		return safeFakeResponse(`{"信号":"拒绝","理由":"fixture"}`), nil
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -893,7 +893,7 @@ func TestAdvanceM5TurnMissingReasoningUsageWithEmptyContentCanPlan(t *testing.T)
 			return m5ai.CompletionResponse{}, fmt.Errorf("发生未授权的第 %d 次调用", call)
 		}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)

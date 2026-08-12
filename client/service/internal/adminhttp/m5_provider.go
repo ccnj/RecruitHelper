@@ -81,5 +81,7 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "模型配置不符合 M5-A 预算或缺少必填项"})
 		return
 	}
+	// 手填与后台下发同权:落盘即换代生效,不再等下次脑启动。
+	a.notifyProviderApplied()
 	writeJSON(w, http.StatusOK, map[string]any{"config": config.View()})
 }

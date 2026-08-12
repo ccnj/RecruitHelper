@@ -206,7 +206,7 @@ func TestGreetingStageKeepsFirstInvocationRevisionAfterHeadAdvances(t *testing.T
 	}
 }
 
-func TestReserveSourcingGreetingChecksCrossBatchMaterialUniquenessAndProviderFreeze(t *testing.T) {
+func TestReserveSourcingGreetingChecksCrossBatchMaterialUniquenessAndMixedModels(t *testing.T) {
 	base := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
 	fixtures := []selectionRunFixture{
 		{RunID: "run-reserve-a", Score: intPointer(10)},
@@ -273,18 +273,18 @@ func TestReserveSourcingGreetingChecksCrossBatchMaterialUniquenessAndProviderFre
 		t.Fatalf("同 run/profile 未重放原预留: result=%+v err=%v", replayed, err)
 	}
 
+	// 混模型批次合法(2026-08-12 甲方裁决):换引擎后照常预留,不再拒绝。
 	second := greetingReservation("batch-greeting-reserve", secondRun, decisions[secondRun.RunID], "greeting-invocation-b", base.Add(time.Hour+time.Minute))
 	mixed := second
 	mixed.Model = "other-model"
-	if result, err := s.ReserveSourcingGreeting(mixed); result != nil || !errors.Is(err, ErrAIInvocationConflict) {
-		t.Fatalf("批内 provider/model 混用未拒绝: result=%+v err=%v", result, err)
+	if result, err := s.ReserveSourcingGreeting(mixed); err != nil || result == nil || !result.Created ||
+		result.Invocation.Model != "other-model" {
+		t.Fatalf("批内混模型预留被拒绝: result=%+v err=%v", result, err)
 	}
-	var count int64
-	if err := s.db.Model(&SourcingGreetingInvocation{}).Count(&count).Error; err != nil || count != 1 {
-		t.Fatalf("失败预留未回滚: count=%d err=%v", count, err)
-	}
-	if _, err := s.ReserveSourcingGreeting(second); err != nil {
-		t.Fatal(err)
+	// 引擎换回后按原身份重放混模型行,不新建、不冲突,行上保留预留时刻的 model。
+	if result, err := s.ReserveSourcingGreeting(second); err != nil || result == nil ||
+		result.Created || result.Invocation.Model != "other-model" {
+		t.Fatalf("混模型行未被原样重放: result=%+v err=%v", result, err)
 	}
 	if next, err := s.NextSelectedSourcingGreetingMaterial(
 		first.BatchID, first.ContextRevisionHash,

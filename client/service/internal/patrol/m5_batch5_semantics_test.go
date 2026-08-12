@@ -30,7 +30,7 @@ func TestM5IntentPostResponseInputBudgetBlockedKeepsUsageAndStopsBeforeReplyAndA
 			ReasoningContentEmpty: true,
 		}, &m5ai.ProviderError{Class: "inputTokenBudgetExceeded"}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -96,7 +96,7 @@ func TestM5ReplyPostResponseInputBudgetBlockedKeepsUsageAndCreatesNoAction(t *te
 			return m5ai.CompletionResponse{}, fmt.Errorf("超预算后发生额外调用: %d", call)
 		}
 	}}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err := actor.advanceM5Turn(context.Background(), fixture.turn)
@@ -177,7 +177,7 @@ func TestM5ImportedRevisionWithoutRebindLeavesFrozenTurnExecutable(t *testing.T)
 	}
 
 	advice := &recordingAdviceExecutor{}
-	h.manager.advice = advice
+	h.manager.SetAdvice(advice)
 	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
 	h.manager.mu.Lock()
 	err = actor.advanceM5Turn(context.Background(), fixture.turn)

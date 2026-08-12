@@ -262,23 +262,8 @@ func (s *Store) ReserveSourcingScore(req ReserveSourcingScoreRequest) (*ReserveS
 		} else if stageRevision.RevisionHash != req.ContextRevisionHash {
 			return ErrAIInvocationConflict
 		}
-		type providerModel struct {
-			Provider string
-			Model    string
-		}
-		var frozen []providerModel
-		err = tx.Table("sourcing_score_invocations AS invocation").
-			Select("DISTINCT invocation.provider AS provider, invocation.model AS model").
-			Joins("JOIN sourcing_candidate_runs AS run ON run.run_id = invocation.run_id").
-			Where("run.batch_id = ?", batch.BatchID).
-			Scan(&frozen).Error
-		if err != nil {
-			return err
-		}
-		if len(frozen) > 1 || (len(frozen) == 1 &&
-			(frozen[0].Provider != req.Provider || frozen[0].Model != req.Model)) {
-			return ErrAIInvocationConflict
-		}
+		// 同批不再冻结单一 provider/model:引擎运行期可换代(2026-08-12 甲方
+		// 裁决),混模型批次照常预留推进,每行各自记下自己的调用事实。
 		wanted := SourcingScoreInvocation{
 			InvocationID: req.InvocationID, RunID: req.RunID,
 			ContextRevisionHash: req.ContextRevisionHash, RunContentHash: req.RunContentHash,
@@ -379,10 +364,11 @@ func (s *Store) SourcingBatchScoringProgress(batchID string) (*SourcingBatchScor
 			} else if progress.ContextRevisionHash != row.InvocationContextRevisionHash {
 				return ErrAIInvocationConflict
 			}
+			// 混模型批次合法(2026-08-12 甲方裁决):进度上的 Provider/Model 取
+			// 首行,只作展示参考,不再要求全批一致;行级 provider/model 为空
+			// 仍是不可能形态,照旧响亮冲突。
 			if progress.Provider == "" {
 				progress.Provider, progress.Model = row.Provider, row.Model
-			} else if progress.Provider != row.Provider || progress.Model != row.Model {
-				return ErrAIInvocationConflict
 			}
 			if strings.TrimSpace(row.Provider) == "" || strings.TrimSpace(row.Model) == "" {
 				return ErrAIInvocationConflict
@@ -565,10 +551,11 @@ func sourcingStageRevisionTx(
 	return nil, nil
 }
 
+// provider/model 刻意不参与预留同一性:引擎运行期可换代,旧引擎预留的行由
+// 新引擎按原身份接手,行上保留预留时刻的 provider/model 事实。
 func sameSourcingScoreReservation(existing, wanted SourcingScoreInvocation) bool {
 	return existing.RunID == wanted.RunID && existing.ContextRevisionHash == wanted.ContextRevisionHash &&
-		existing.RunContentHash == wanted.RunContentHash && existing.Provider == wanted.Provider &&
-		existing.Model == wanted.Model && existing.InputHash == wanted.InputHash
+		existing.RunContentHash == wanted.RunContentHash && existing.InputHash == wanted.InputHash
 }
 
 type CompleteSourcingScoreRequest struct {

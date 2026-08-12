@@ -203,15 +203,39 @@ func TestRefreshBackendProviderConfigNeverPanicsOrBlocks(t *testing.T) {
 	// 凭据刷新是职位配置同步旁边的一条独立失败面,任何输入都不该让调用方崩掉。
 	dir := t.TempDir()
 	store, _ := NewProviderConfigStore(dir)
-	RefreshBackendProviderConfig(nil, []byte(singleJobResponse))
-	RefreshBackendProviderConfig(store, []byte(`{`))
-	RefreshBackendProviderConfig(store, []byte(`{"job":{"id":1}}`))
+	RefreshBackendProviderConfig(nil, []byte(singleJobResponse), nil)
+	RefreshBackendProviderConfig(store, []byte(`{`), nil)
+	RefreshBackendProviderConfig(store, []byte(`{"job":{"id":1}}`), nil)
 	if config, err := store.Load(); err != nil || config != nil {
 		t.Fatalf("坏输入却写了配置: %+v err=%v", config, err)
 	}
-	RefreshBackendProviderConfig(store, []byte(singleJobResponse))
+	RefreshBackendProviderConfig(store, []byte(singleJobResponse), nil)
 	config, err := store.Load()
 	if err != nil || config == nil || config.APIKey != "sk-fixture" || config.Model != "m-pro" {
 		t.Fatalf("正常响应未刷新配置: %+v err=%v", config, err)
+	}
+}
+
+// onApplied 只在配置实际落盘后触发(2026-08-12 甲方裁决"落盘即生效"):
+// 坏输入、无凭据、值未变化都不得触发换代。
+func TestRefreshBackendProviderConfigInvokesOnAppliedOnlyWhenStored(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewProviderConfigStore(dir)
+	applied := 0
+	onApplied := func() { applied++ }
+	RefreshBackendProviderConfig(nil, []byte(singleJobResponse), onApplied)
+	RefreshBackendProviderConfig(store, []byte(`{`), onApplied)
+	RefreshBackendProviderConfig(store, []byte(`{"job":{"id":1}}`), onApplied)
+	if applied != 0 {
+		t.Fatalf("未落盘却触发了换代: applied=%d", applied)
+	}
+	RefreshBackendProviderConfig(store, []byte(singleJobResponse), onApplied)
+	if applied != 1 {
+		t.Fatalf("落盘成功未触发换代: applied=%d", applied)
+	}
+	// 同一响应重放:值未变化不落盘,也就不触发换代。
+	RefreshBackendProviderConfig(store, []byte(singleJobResponse), onApplied)
+	if applied != 1 {
+		t.Fatalf("值未变化却重复触发换代: applied=%d", applied)
 	}
 }

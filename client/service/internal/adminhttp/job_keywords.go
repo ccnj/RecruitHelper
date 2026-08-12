@@ -89,7 +89,7 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "关键词词库读取服务尚未就绪"})
 		return
 	}
-	if a.advice == nil {
+	if a.currentAdvice() == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "LLM 通道未就绪，无法选定关键词",
 		})
@@ -242,7 +242,7 @@ func (a *API) chooseJobKeywordsByModel(
 	var attempts []string
 	for attempt := 1; attempt <= jobKeywordAttempts; attempt++ {
 		started := time.Now()
-		response, callErr := a.advice.CompleteJSON(ctx, m5ai.CompletionRequest{
+		response, callErr := a.currentAdvice().CompleteJSON(ctx, m5ai.CompletionRequest{
 			InvocationID:        "jk-" + base + "-" + strconv.Itoa(attempt),
 			Purpose:             m5ai.PurposeJobKeywords,
 			ContextRevisionHash: base,
