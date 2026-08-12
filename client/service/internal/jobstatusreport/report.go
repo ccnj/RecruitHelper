@@ -26,8 +26,10 @@ import (
 const UploadTimeout = 15 * time.Second
 
 // Target 是上报去处与身份,取自已获准的旧后台配置,不新增配置面。
+// machineId 与 licenseToken 是旧后台 verify_client 的鉴权对,缺一即 401。
 type Target struct {
 	BaseURL      string
+	MachineID    string
 	LicenseToken string
 }
 
@@ -35,8 +37,8 @@ func (t Target) valid() error {
 	if strings.TrimSpace(t.BaseURL) == "" {
 		return errors.New("旧后台地址未配置")
 	}
-	if strings.TrimSpace(t.LicenseToken) == "" {
-		return errors.New("授权未就绪(缺 licenseToken)")
+	if strings.TrimSpace(t.MachineID) == "" || strings.TrimSpace(t.LicenseToken) == "" {
+		return errors.New("授权未就绪(缺 machineId 或 licenseToken)")
 	}
 	return nil
 }
@@ -57,6 +59,7 @@ type Reporter struct {
 
 // Payload 是上报正文。字段面是白名单,新增字段须先修 AGENTS.md 条款。
 type Payload struct {
+	MachineID    string      `json:"machineId"`
 	LicenseToken string      `json:"licenseToken"`
 	ObservedAt   int64       `json:"observedAt"`
 	Jobs         []JobStatus `json:"jobs"`
@@ -116,6 +119,7 @@ func (r *Reporter) Report(ctx context.Context, data protocol.JobReadPublishedLis
 // Upload 把一份状态观察 POST 到旧后台。失败只返回错误,不重试。
 // 回执只看 HTTP 状态码——只上行,不给回执留可读出的地方。
 func Upload(ctx context.Context, target Target, payload Payload) error {
+	payload.MachineID = target.MachineID
 	payload.LicenseToken = target.LicenseToken
 	encoded, err := json.Marshal(payload)
 	if err != nil {

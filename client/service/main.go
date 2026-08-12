@@ -226,7 +226,8 @@ func main() {
 				return jobstatusreport.Target{}, false
 			}
 			return jobstatusreport.Target{
-				BaseURL: config.BaseURL, LicenseToken: config.LicenseToken,
+				BaseURL: config.BaseURL, MachineID: config.MachineID,
+				LicenseToken: config.LicenseToken,
 			}, true
 		},
 	}

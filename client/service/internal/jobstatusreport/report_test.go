@@ -37,10 +37,10 @@ func TestReportBuildsWhitelistPayload(t *testing.T) {
 	reporter := &Reporter{
 		Source: fakeSource{raw: []byte(backendJobsRaw)},
 		Target: func() (Target, bool) {
-			return Target{BaseURL: "http://backend", LicenseToken: "token-1"}, true
+			return Target{BaseURL: "http://backend", MachineID: "M1", LicenseToken: "token-1"}, true
 		},
 		Upload: func(_ context.Context, target Target, payload Payload) error {
-			if target.LicenseToken != "token-1" {
+			if target.LicenseToken != "token-1" || target.MachineID != "M1" {
 				t.Fatalf("target 不符: %+v", target)
 			}
 			got = payload
@@ -79,7 +79,7 @@ func TestReportSurfacesSourceFailure(t *testing.T) {
 	reporter := &Reporter{
 		Source: fakeSource{err: errors.New("backend down")},
 		Target: func() (Target, bool) {
-			return Target{BaseURL: "http://backend", LicenseToken: "token-1"}, true
+			return Target{BaseURL: "http://backend", MachineID: "M1", LicenseToken: "token-1"}, true
 		},
 		Upload: func(context.Context, Target, Payload) error { return nil },
 	}
