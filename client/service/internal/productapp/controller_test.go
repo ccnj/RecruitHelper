@@ -565,6 +565,42 @@ func TestRuntimeStateKeepsAccountAndUnfinishedBatchWithoutWorkflowRun(t *testing
 	}
 }
 
+// 运行失败即终局、不再是活跃运行,首页否则永远看不到"为什么停了"。投影在无
+// 活跃运行时带出最近一次失败运行的原因(2026-08-12 甲方要求,起因是推荐流被
+// 刷新后批次静默作废)。
+func TestRuntimeStateCarriesLastFailedRunReason(t *testing.T) {
+	db, key := controllerFixture(t)
+	now := time.Date(2026, 8, 12, 10, 0, 0, 0, time.Local)
+	running := workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning}
+	run, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+		Platform: key.Platform, AccountRef: key.AccountRef,
+		State: running, Stage: store.ProductWorkflowStageSourcing, StartedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: run.RunID, From: running,
+		To: workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At: now.Add(time.Minute), Stage: store.ProductWorkflowStageFailed,
+		Failure: "产品工作流批次推进状态无效: recommendationFeedChanged",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller, err := New(
+		db, &fakeWorkflow{}, &fakeSource{}, func() time.Time { return now },
+		workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := controller.RuntimeState()
+	if err != nil || state.WorkflowStatus != "" ||
+		!strings.Contains(state.LastRunFailureReason, "recommendationFeedChanged") {
+		t.Fatalf("失败运行原因未带出: state=%+v err=%v", state, err)
+	}
+}
+
 // 多账号是受支持的形态(账号跟随登录,2026-07-30 裁决):只读投影不再因为库里
 // 有两个账号而失明,而是取最近一次身份验证通过的那个。巡检每轮成功探测都会
 // 刷新 IdentityVerifiedAt,启发式因此自动收敛到当前真实登录的账号。

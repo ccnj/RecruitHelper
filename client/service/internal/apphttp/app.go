@@ -57,6 +57,9 @@ type RuntimeSnapshot struct {
 	CanAddBatch           bool   `json:"canAddBatch"`
 	CanEnd                bool   `json:"canEnd"`
 	CommunicationState    string `json:"communicationState,omitempty"`
+	// 最近一次运行以失败终局时的原因原文;只在没有活跃运行时携带,
+	// 供首页把"为什么停了"翻成客户可读文案。
+	LastRunFailureReason string `json:"lastRunFailureReason,omitempty"`
 }
 
 type RuntimeSnapshotProvider func(context.Context) (RuntimeSnapshot, error)

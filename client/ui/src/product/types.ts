@@ -44,6 +44,8 @@ export interface WorkflowView {
   canResume: boolean
   pendingAction: 'sourcing' | 'end' | null
   unavailableReason: string | null
+  // 最近一次运行失败终局的原因原文(仅在无活跃运行时有值),供首页翻译显示。
+  lastRunFailure: string | null
 }
 
 export type FunnelStageKey =

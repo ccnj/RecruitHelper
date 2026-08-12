@@ -105,6 +105,7 @@ export interface AppRuntimeRaw {
   canEnd: boolean
   workflowPendingAction?: 'sourcing' | 'end'
   communicationState?: string
+  lastRunFailureReason?: string
 }
 
 export interface AppOverviewResponse {
@@ -442,6 +443,7 @@ function adaptWorkflow(
       (state === 'paused' || state === 'waitingDailyWindow') && unavailableReason === null,
     pendingAction,
     unavailableReason,
+    lastRunFailure: clean(runtime.lastRunFailureReason) || null,
   }
 }
 
@@ -507,12 +509,13 @@ function homeStatus(
       }
     }
     default: {
-      // 运行失败后 run 立即终局、状态回落 idle,但被拦的批次还挂着失败原因。
-      // 客户要在首页看到"为什么停了"(2026-08-12 甲方要求,起因是职位下线拦截
-      // 只在开发者页可见);只显示映射过的中文原因,没映射的码不吓客户。
-      const failureHint = funnel.stage === 'failed'
+      // 运行失败后 run 立即终局、状态回落 idle,但客户要在首页看到"为什么停了"
+      // (2026-08-12 甲方要求)。两条数据通道:被拦未终局的批次挂着失败原因
+      // (职位下线闸),批次已终局的看最近一次运行的失败原因(推荐流被刷新)。
+      // 都只显示映射过的中文,没映射的码不吓客户。
+      const failureHint = (funnel.stage === 'failed'
         ? batchFailureHomeHint(funnel.latestFailureCode)
-        : null
+        : null) ?? lastRunFailureHomeHint(workflow.lastRunFailure)
       if (failureHint !== null) {
         return { label: '没能完成', hint: failureHint, tone: 'failed' }
       }
@@ -523,6 +526,17 @@ function homeStatus(
       }
     }
   }
+}
+
+// 最近一次运行的失败原因是包了前缀的错误文本(如"产品工作流批次推进状态无效:
+// recommendationFeedChanged"),按包含匹配认码。想让新的中止原因上首页,在这里
+// 加一行映射即可;不映射的照旧不显示。
+function lastRunFailureHomeHint(reason: string | null): string | null {
+  if (!reason) return null
+  if (reason.includes('recommendationFeedChanged')) {
+    return '推荐页被刷新,本批已作废;请重新点击开始'
+  }
+  return null
 }
 
 function workflowPositionLabel(
