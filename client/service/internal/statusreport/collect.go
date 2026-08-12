@@ -3,6 +3,7 @@ package statusreport
 import (
 	"time"
 
+	"recruithelper/client/service/internal/secposture"
 	"recruithelper/client/service/internal/store"
 )
 
@@ -37,7 +38,10 @@ type Deps struct {
 	Runtime            func() (Runtime, error)
 	Hand               func() HandHealth
 	ProviderConfigured func() bool
-	AppVersion         string
+	// Security 给出最近一次安全姿态采集(可能为 nil:非 Windows、或后台采集
+	// 还没跑完第一轮)。缓存读取,零阻塞;nil 时载荷里没有 security 块。
+	Security   func() *secposture.Posture
+	AppVersion string
 	// StartedAt 是脑的启动时刻,用来算 uptime。频繁重启本身是一种故障信号。
 	StartedAt time.Time
 	Now       func() time.Time
@@ -72,6 +76,9 @@ func Collect(deps Deps) (*Payload, error) {
 	}
 	if deps.ProviderConfigured != nil {
 		payload.Health.LLMProviderConfigured = deps.ProviderConfigured()
+	}
+	if deps.Security != nil {
+		payload.Security = deps.Security()
 	}
 	if deps.Hand != nil {
 		hand := deps.Hand()

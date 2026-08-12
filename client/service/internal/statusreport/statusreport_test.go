@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"recruithelper/client/service/internal/secposture"
 	"recruithelper/client/service/internal/store"
 )
 
@@ -50,6 +51,11 @@ var allowedPayloadKeys = map[string]bool{
 	"witnessOutboxPending": true, "pendingManualVerdicts": true,
 	"manualRequiredProfiles": true, "llmProviderConfigured": true,
 	"brainUptimeSec": true,
+	// security(本机安全姿态,2026-08-12 裁决增补;全部布尔/枚举/短字符串)
+	"security": true, "collectedAt": true, "mrtPolicy": true,
+	"defenderService": true, "defenderExclusions": true, "avProducts": true,
+	"msrt": true, "lastRunAt": true, "version": true,
+	"detectedUs": true, "removedUs": true,
 }
 
 func TestPayloadKeysStayInsideWhitelist(t *testing.T) {
@@ -313,6 +319,24 @@ func fullDeps() Deps {
 		},
 		Runtime: func() (Runtime, error) {
 			return Runtime{Platform: "zhilian", AccountRef: "acc-1", CurrentBatchID: "batch-1"}, nil
+		},
+		// Security 填满整块:白名单测试要把 security 的每个键都实际走一遍,
+		// 只给 nil 的话新键永远不出现在序列化结果里,白名单等于没验。
+		Security: func() *secposture.Posture {
+			return &secposture.Posture{
+				CollectedAt:        now,
+				MrtPolicy:          secposture.MrtPolicySet,
+				DefenderService:    secposture.DefenderRunning,
+				DefenderExclusions: secposture.ExclusionsOK,
+				AvProducts:         []string{"Windows Defender", "Huorong"},
+				Msrt: secposture.MsrtRun{
+					Status:     secposture.MsrtScanned,
+					LastRunAt:  "Wed Aug 12 08:12:08 2026",
+					Version:    "v5.144",
+					DetectedUs: true,
+					RemovedUs:  true,
+				},
+			}
 		},
 		Hand: func() HandHealth {
 			return HandHealth{Online: true, ContractMatch: true, ExtensionVersion: "1.9.1", JournalOpen: 3}

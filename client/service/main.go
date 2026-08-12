@@ -34,6 +34,7 @@ import (
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/productworkflow"
 	"recruithelper/client/service/internal/report"
+	"recruithelper/client/service/internal/secposture"
 	"recruithelper/client/service/internal/selfupdate"
 	"recruithelper/client/service/internal/session"
 	"recruithelper/client/service/internal/statusreport"
@@ -452,6 +453,10 @@ func main() {
 	// 日志上报的攒批循环。到这里 store 与旧后台配置都已就位,启动期攒在队列里的
 	// 事件会在第一次 flush 一起发走。
 	background.Go(func() { logReporter.Run(appCtx) })
+	// 本机安全姿态采集(AGENTS.md 2026-08-12 增补):Windows 上启动采一次、每日
+	// 刷新;非 Windows 下 Run 立即返回、Cached 恒 nil。上报侧拿缓存,零阻塞。
+	securityPosture := secposture.NewCollector()
+	background.Go(func() { securityPosture.Run(appCtx) })
 	background.Go(func() {
 		statusreport.Run(appCtx, statusreport.RunnerDeps{
 			Deps: statusreport.Deps{
@@ -474,6 +479,7 @@ func main() {
 					configured, loadErr := providerConfig.Load()
 					return loadErr == nil && configured != nil
 				},
+				Security:   securityPosture.Cached,
 				AppVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
 				StartedAt:  brainStartedAt,
 			},

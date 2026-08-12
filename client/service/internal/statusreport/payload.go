@@ -10,7 +10,11 @@
 // 没有重试、没有发件箱、没有游标,也不补报客户端没运行的那段时间。
 package statusreport
 
-import "time"
+import (
+	"time"
+
+	"recruithelper/client/service/internal/secposture"
+)
 
 // SchemaVersion 是载荷版本。服务端按它宽容解析。
 //
@@ -43,6 +47,10 @@ type Payload struct {
 	Today    Today    `json:"today"`
 	Total    Total    `json:"total"`
 	Health   Health   `json:"health"`
+	// Security 是本机安全姿态(AGENTS.md 2026-08-12 增补):MRT 免疫键、
+	// Defender 排除项与服务状态、杀软名单、mrt.log 摘要。全部布尔/枚举/短
+	// 字符串,只读采集。非 Windows 或尚未采到时为 nil,块整体不出现。
+	Security *secposture.Posture `json:"security,omitempty"`
 }
 
 // Account 只说"有没有账号在跑"。accountRef 原文不报 —— 报了对运营没用。
