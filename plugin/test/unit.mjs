@@ -11396,7 +11396,7 @@ test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离
   }
 })
 
-test('chat.openConversation 筛选未就绪时零 click，点击后未读不收敛只报 possible', async () => {
+test('chat.openConversation 筛选未就绪时零 click，未读不收敛按是否点击如实报 possible/none', async () => {
   const originalChrome = globalThis.chrome
   const originalSetTimeout = globalThis.setTimeout
   const fingerprint = '4'.repeat(64)
@@ -11469,10 +11469,9 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
     await assert.rejects(
       openZhilianConversation({ conversationRef }, context, fingerprint),
       (error) => error instanceof ZhilianPlatformError &&
-        error.code === ErrorCode.TargetNotFound &&
-        error.retryable === 'no' &&
+        error.code === ErrorCode.PostconditionUnconfirmed &&
         error.sideEffect === 'none',
-      '已经打开的目标不能伪造成 ok，也不能升级为账号级人工停机',
+      '目标已是当前路由但未读未收敛：零点击直进后置核验，不得伪造成 ok，sideEffect 如实为 none',
     )
     assert.equal(clickCalls, 0)
 
@@ -11484,6 +11483,100 @@ test('chat.openConversation 筛选未就绪时零 click，点击后未读不收�
         error.sideEffect === 'possible',
     )
     assert.equal(clickCalls, 1, '未读结果阴性也不得补第二次 click')
+  } finally {
+    globalThis.chrome = originalChrome
+    globalThis.setTimeout = originalSetTimeout
+  }
+})
+
+test('chat.openConversation 目标态已达成时零点击直进后置核验并按幂等判成功', async () => {
+  const originalChrome = globalThis.chrome
+  const originalSetTimeout = globalThis.setTimeout
+  const fingerprint = '6'.repeat(64)
+  const conversationRef = 'conversation-already-open'
+  let barriers = 0
+  let findCalls = 0
+  let windowReads = 0
+  let currentURL = ''
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback)
+    return 1
+  }
+  const makeContext = (label) => ({
+    cmdMsgId: label, deadlineMs: Date.now() + 60_000,
+    irreversibleNotAfterMs: Date.now() + 60_000,
+    commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, async beforeSideEffect() { barriers += 1 },
+  })
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 111, url: currentURL, status: 'complete', active: true }] },
+      async get() { return { id: 111, url: currentURL, status: 'complete', active: true } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') return [{ result: {
+          pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+        } }]
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
+        }
+        if (func.name === 'mainReadListDOMWindow') {
+          windowReads += 1
+          const result = {
+            sessions: [{
+              conversationRef,
+              peer: { displayName: '候选人丙', platformUserRef: 'peer-already-open' },
+              unreadCount: 1,
+              lastMessage: { direction: 'in', kind: 'text', textPreview: '未读消息' },
+              lastActivityTs: Date.now(),
+            }],
+            atBottom: false, moved: true, scrollHeight: 1_000, scrollTop: 0, unstable: false,
+          }
+          // 第二次窗口读取发生在 ensureThreadRoute 内、点击前：模拟真人此刻
+          // 抢先点开了目标会话。
+          if (windowReads === 2) {
+            currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+          }
+          return [{ result }]
+        }
+        if (func.name === 'mainClickConversationOnce') {
+          throw new Error('目标态已达成时不得产生任何点击')
+        }
+        if (func.name === 'mainFindConversation') {
+          findCalls += 1
+          return [{ result: { status: 'failed', reason: 'target_not_found' } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  try {
+    // 场景一：命令抵达时目标已是当前路由（真人正停在该会话）。
+    currentURL = `https://rd6.zhaopin.com/app/im?sessionId=${conversationRef}`
+    const already = await openZhilianConversation(
+      { conversationRef }, makeContext('open-already-current'), fingerprint,
+    )
+    assert.equal(already.conversationRef, conversationRef)
+    assert.ok(already.observedAt > 0)
+    assert.equal(barriers, 0, '零点击路径不得消费取消安全点')
+    assert.equal(windowReads, 0, '已是当前路由时不再要求 fresh 窗口定位')
+    assert.ok(findCalls >= 2, '零点击路径仍必须连续双读正证')
+
+    // 场景二：fresh 定位后、点击前真人抢先打开目标（ensureThreadRoute 返回
+    // !changed），同样零点击、直进后置核验并判成功。
+    findCalls = 0
+    windowReads = 0
+    currentURL = 'https://rd6.zhaopin.com/app/im?sessionId=previous-conversation'
+    const helped = await openZhilianConversation(
+      { conversationRef }, makeContext('open-human-helped'), fingerprint,
+    )
+    assert.equal(helped.conversationRef, conversationRef)
+    assert.equal(barriers, 0, '点击前让位的路径同样不得消费取消安全点')
+    assert.equal(windowReads, 2, '定位读照常发生，仅点击被跳过')
+    assert.ok(findCalls >= 2)
   } finally {
     globalThis.chrome = originalChrome
     globalThis.setTimeout = originalSetTimeout

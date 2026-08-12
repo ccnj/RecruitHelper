@@ -4693,57 +4693,58 @@ export async function openZhilianConversation(
   } catch {
     throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '打开会话前页面离开智联沟通页', 'manualOnly')
   }
+  // 后置核验共用于点击后与零点击两条路径；sideEffect 证词必须如实区分。
+  let performedClick = false
   if (selected === args.conversationRef) {
-    throw new ZhilianPlatformError(
-      'TARGET_NOT_FOUND',
-      '目标未读会话已经是当前路由，本原语没有新的打开动作可执行',
-      'no',
-    )
-  }
+    // 目标已是当前路由（通常是真人正停在该会话）：目标态已达成，幂等原语没有
+    // 点击可执行也不需要点击。跳过定位与点击，直接进入下方后置核验；核验不
+    // 通过照常响亮失败，不因“已经打开”放宽任何 ok 判据。
+    console.warn('[zhilian] 打开会话：目标已是当前路由，未执行点击，直接后置核验', args.conversationRef)
+  } else {
+    let currentWindow: MainListDOMWindowResult
+    try {
+      currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
+    } catch (error) {
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        `当前未读列表无法建立 fresh 可见窗口：${asError(error).message}`,
+        'manualOnly',
+      )
+    }
+    noteSkippedListRows('未读 fresh 窗口', currentWindow)
+    if (currentWindow.unstable) {
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        '当前未读列表尚未稳定',
+        'manualOnly',
+      )
+    }
+    const targetMatches = currentWindow.sessions
+      .filter((session) => session.conversationRef === args.conversationRef)
+    if (targetMatches.length === 0) {
+      throw new ZhilianPlatformError('TARGET_NOT_FOUND', '目标已离开本轮 fresh 未读列表', 'no')
+    }
+    if (targetMatches.length !== 1) {
+      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '目标在当前未读窗口内身份不唯一', 'manualOnly')
+    }
 
-  let currentWindow: MainListDOMWindowResult
-  try {
-    currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
-  } catch (error) {
-    throw new ZhilianPlatformError(
-      'ELEMENT_UNRESOLVED',
-      `当前未读列表无法建立 fresh 可见窗口：${asError(error).message}`,
-      'manualOnly',
+    // 上一条列表命令可能刚刚滚动或切换筛选；无论实际间隔多少，本命令在唯一 click
+    // 前都再留出 1s+抖动，保证跨命令相邻可见交互也不贴连。
+    await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 401)))
+    ctx.checkpoint()
+    const changed = await ensureThreadRoute(
+      tab,
+      args.conversationRef,
+      expectedPrincipalFingerprint,
+      ctx,
     )
-  }
-  noteSkippedListRows('未读 fresh 窗口', currentWindow)
-  if (currentWindow.unstable) {
-    throw new ZhilianPlatformError(
-      'ELEMENT_UNRESOLVED',
-      '当前未读列表尚未稳定',
-      'manualOnly',
-    )
-  }
-  const targetMatches = currentWindow.sessions
-    .filter((session) => session.conversationRef === args.conversationRef)
-  if (targetMatches.length === 0) {
-    throw new ZhilianPlatformError('TARGET_NOT_FOUND', '目标已离开本轮 fresh 未读列表', 'no')
-  }
-  if (targetMatches.length !== 1) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '目标在当前未读窗口内身份不唯一', 'manualOnly')
-  }
-
-  // 上一条列表命令可能刚刚滚动或切换筛选；无论实际间隔多少，本命令在唯一 click
-  // 前都再留出 1s+抖动，保证跨命令相邻可见交互也不贴连。
-  await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 401)))
-  ctx.checkpoint()
-  const changed = await ensureThreadRoute(
-    tab,
-    args.conversationRef,
-    expectedPrincipalFingerprint,
-    ctx,
-  )
-  if (!changed) {
-    throw new ZhilianPlatformError(
-      'GUARD_FAILED',
-      '目标会话没有产生本原语要求的唯一打开动作',
-      'manualOnly',
-    )
+    performedClick = changed
+    if (!changed) {
+      // ensureThreadRoute 在点击前发现路由已绑定目标（真人在等待窗口内自行
+      // 打开）：与上面“已是当前路由”同态——未产生点击但目标态已达成，同样
+      // 进入后置核验，而不是把真人的帮忙当成失败。
+      console.warn('[zhilian] 打开会话：目标在点击前已成为当前路由，未执行点击，直接后置核验', args.conversationRef)
+    }
   }
 
   let positiveRounds = 0
@@ -4764,7 +4765,7 @@ export async function openZhilianConversation(
         '打开会话后公开路由未保持目标绑定',
         'manualOnly',
         undefined,
-        'possible',
+        performedClick ? 'possible' : 'none',
       )
     }
     const latestFilter = await runMain(tab.id, mainEnsureChatListFilter, [true, false])
@@ -4774,7 +4775,7 @@ export async function openZhilianConversation(
         '打开会话后全部职位未读筛选状态发生变化',
         'manualOnly',
         undefined,
-        'possible',
+        performedClick ? 'possible' : 'none',
       )
     }
     const observed = await runMain(tab.id, mainFindConversation, [
@@ -4797,7 +4798,7 @@ export async function openZhilianConversation(
           '打开会话结果不符合当前契约',
           'manualOnly',
           undefined,
-          'possible',
+          performedClick ? 'possible' : 'none',
         )
       }
       await ctx.progress('目标未读会话已打开并确认已读收敛', 100)
@@ -4809,7 +4810,7 @@ export async function openZhilianConversation(
         `打开会话后未读行无法复核：${observed.reason ?? 'unknown'}`,
         'manualOnly',
         undefined,
-        'possible',
+        performedClick ? 'possible' : 'none',
       )
     }
     if (attempt % 8 === 0) {
@@ -4822,7 +4823,7 @@ export async function openZhilianConversation(
     '目标只打开一次，但未确认未读标记清除或会话行离开未读列表',
     'manualOnly',
     undefined,
-    'possible',
+    performedClick ? 'possible' : 'none',
   )
 }
 
