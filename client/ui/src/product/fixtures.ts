@@ -195,6 +195,7 @@ export function createProductFixture(): ProductData {
         pending: 18,
         failed: 0,
         latestFailure: null,
+        latestFailureCode: null,
         stages: funnelStages,
       },
       communication: {
@@ -322,6 +323,7 @@ export function createEmptyProductData(): ProductData {
         pending: null,
         failed: null,
         latestFailure: null,
+        latestFailureCode: null,
         stages: [
           { key: 'collect', label: '采集', state: 'pending', completed: 0, target: null, failed: 0 },
           { key: 'score', label: '评分', state: 'pending', completed: 0, target: null, failed: 0 },

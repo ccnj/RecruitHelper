@@ -70,6 +70,8 @@ export interface FunnelView {
   pending: number | null
   failed: number | null
   latestFailure: string | null
+  // 原样原因码,供首页状态卡判断有没有对应的客户可读文案。
+  latestFailureCode: string | null
   stages: FunnelStageView[]
 }
 
