@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,6 +121,56 @@ func TestBindUsesOneApprovedRequestAndPersistsCredentialWithoutInviteCode(t *tes
 		if strings.Contains(string(viewRaw), secret) {
 			t.Fatalf("激活状态泄漏秘密: %s", viewRaw)
 		}
+	}
+}
+
+// stubBindTransport 在内存里应答激活请求,不触真实网络——DefaultBaseURL 指向
+// 生产服务器,回退语义只能这样验证。
+type stubBindTransport struct{ gotURL string }
+
+func (s *stubBindTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.gotURL = r.URL.String()
+	body := `{"authorized":true,"status":"bound","licenseToken":"token-new","customer":{"customerId":7,"customerName":"合成客户","status":"active","subscriptionEndsAt":""}}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}, nil
+}
+
+func TestBindFallsBackToBuiltinDefaultBaseURLOnFreshMachine(t *testing.T) {
+	transport := &stubBindTransport{}
+	store, _ := NewConfigStore(t.TempDir())
+	source := NewSource(store, &http.Client{Transport: transport}, fixedMachineID)
+	result, err := source.Bind(context.Background(), "", "invite-private")
+	if err != nil || result.Status != "bound" {
+		t.Fatalf("全新机器空地址激活失败: result=%+v err=%v", result, err)
+	}
+	if transport.gotURL != DefaultBaseURL+bindPath {
+		t.Fatalf("空地址未回退到内置默认后台: %s", transport.gotURL)
+	}
+	loaded, loadErr := store.Load()
+	if loadErr != nil || loaded == nil || loaded.BaseURL != DefaultBaseURL {
+		t.Fatalf("内置地址未落盘: loaded=%+v err=%v", loaded, loadErr)
+	}
+}
+
+func TestBindPrefersStoredBaseURLOverBuiltinDefault(t *testing.T) {
+	var calls int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"token-new","customer":{"customerId":7,"customerName":"合成客户","status":"active","subscriptionEndsAt":""}}`))
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	if err := store.Save(Config{BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-old"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSource(store, backend.Client(), fixedMachineID).
+		Bind(context.Background(), "", "invite-private"); err != nil || calls != 1 {
+		t.Fatalf("已存地址未被沿用: calls=%d err=%v", calls, err)
 	}
 }
 

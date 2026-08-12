@@ -27,6 +27,12 @@ const (
 	allJobsPath      = "/api/v1/client/job-configs"
 	maxResponseBytes = 4 << 20
 	requestTimeout   = 8 * time.Second
+
+	// DefaultBaseURL 是内置的旧后台地址,与更新源(selfupdate.DefaultFeedURL)同一台
+	// 机器、同一先例:写死在代码里,不经旧后台、插件或 AI 下发。激活不再要求人填
+	// 地址;显式传入(仅 /admin/job-config/activate 的 API 层)仍以传入值为准,
+	// 开发与冒烟据此指向假后台。
+	DefaultBaseURL = "http://8.153.161.25"
 )
 
 var (
@@ -241,6 +247,8 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 			return BindResult{}, loadErr
 		} else if existing != nil {
 			rawBaseURL = existing.BaseURL
+		} else {
+			rawBaseURL = DefaultBaseURL
 		}
 	}
 	baseURL, err := normalizeBaseURL(rawBaseURL)
