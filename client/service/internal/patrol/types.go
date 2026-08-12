@@ -314,6 +314,10 @@ type Config struct {
 	// nil（ctx 取消）时调用方停止驱动并保留 inFlight。测试可注入无等待
 	// 实现。
 	SourcingAIRetryWait func(ctx context.Context, unlimited bool, retrySequence int) error
+	// ReportJobStatus 把采集开启闸读到的平台职位状态分区交给观察用上报
+	// (AGENTS.md「职位平台状态上报」)。可为空;实现必须自带超时且不阻塞
+	// 调用方——它的成败不得影响采集裁决。
+	ReportJobStatus func(protocol.JobReadPublishedListData)
 }
 
 func (c Config) withDefaults() Config {
