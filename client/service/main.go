@@ -26,6 +26,7 @@ import (
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobconfig"
+	"recruithelper/client/service/internal/jobstatusreport"
 	"recruithelper/client/service/internal/logcontext"
 	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/m5ai"
@@ -215,9 +216,35 @@ func main() {
 	}
 	runner := &appbridge.PatrolRunner{Dispatcher: disp}
 	var actor *patrol.Manager
+	// 职位平台状态上报(AGENTS.md 第八项出站):采集开启闸每读一次分区清单就
+	// 观察用上报一次。fire-and-forget,自带超时;成败只记日志,不影响采集裁决。
+	jobStatusReporter := &jobstatusreport.Reporter{
+		Source: jobConfigSource,
+		Target: func() (jobstatusreport.Target, bool) {
+			config, configErr := jobConfigSource.LoadConfig()
+			if configErr != nil || config == nil {
+				return jobstatusreport.Target{}, false
+			}
+			return jobstatusreport.Target{
+				BaseURL: config.BaseURL, LicenseToken: config.LicenseToken,
+			}, true
+		},
+	}
 	patrolConfig := patrol.Config{
 		DailyWindow:           dailyWindow,
 		InboundHandoverCutoff: inboundHandoverCutoff,
+		ReportJobStatus: func(data protocol.JobReadPublishedListData) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*jobstatusreport.UploadTimeout)
+				defer cancel()
+				if reportErr := jobStatusReporter.Report(ctx, data); reportErr != nil {
+					slog.Warn("职位平台状态上报失败(不影响采集)",
+						"errorCode", "jobStatusReportFailed", "err", reportErr)
+				} else {
+					slog.Info("职位平台状态已上报旧后台")
+				}
+			}()
+		},
 	}
 	if advice == nil {
 		actor, err = patrol.NewManager(
