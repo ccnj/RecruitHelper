@@ -10,27 +10,14 @@ export function shouldShowActivation(
   return readState === 'ready' && !customer.authorized && customer.activationRequired
 }
 
+// 后台地址已内置于脑(jobconfig.DefaultBaseURL),激活页只收激活码;
+// /admin/job-config/activate 的 API 层仍接受显式 base_url 供开发指向假后台。
 export function activationInputError(
   source: JobConfigSourceView | null,
-  baseURL: string,
   inviteCode: string,
 ): string | null {
   if (source && !source.machineIdentityReady) {
     return '当前机器身份暂不可用，请重启客户端后再试。'
-  }
-  const normalizedBaseURL = baseURL.trim()
-  if (!source?.baseUrlConfigured && !normalizedBaseURL) {
-    return '请输入管理员提供的后台地址。'
-  }
-  if (normalizedBaseURL) {
-    try {
-      const parsed = new URL(normalizedBaseURL)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        return '后台地址必须以 http:// 或 https:// 开头。'
-      }
-    } catch {
-      return '请输入完整的后台地址。'
-    }
   }
   if (!inviteCode.trim()) {
     return '请输入激活码。'
@@ -38,12 +25,8 @@ export function activationInputError(
   return null
 }
 
-export function buildActivationInput(
-  baseURL: string,
-  inviteCode: string,
-): JobConfigActivationInput {
+export function buildActivationInput(inviteCode: string): JobConfigActivationInput {
   return {
-    base_url: baseURL.trim(),
     invite_code: inviteCode.trim(),
   }
 }

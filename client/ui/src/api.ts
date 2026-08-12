@@ -426,8 +426,9 @@ export interface JobConfigSourceView {
   customerStatus?: string
 }
 
+// 后台地址不再由产品 UI 收集:脑内置默认地址,API 层的 base_url 仅供开发覆盖。
 export interface JobConfigActivationInput {
-  base_url: string
+  base_url?: string
   invite_code: string
 }
 
