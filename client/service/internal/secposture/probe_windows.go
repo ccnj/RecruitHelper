@@ -55,9 +55,11 @@ func collectOnce(parent context.Context) *Posture {
 	report, ok := runPSProbe(ctx)
 	if ok {
 		posture.DefenderService = defenderServiceState(report.WinDefend)
+		paths, hidden := sanitizeExclusions(report.Exclusions)
 		posture.DefenderExclusions = evaluateExclusions(
 			report.ExclusionsReadable,
-			report.Exclusions,
+			hidden,
+			paths,
 			probePolicyExclusions(),
 			wantedExclusionPaths(),
 		)

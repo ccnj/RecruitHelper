@@ -35,6 +35,13 @@ const (
 	ExclusionsOK      = "ok"      // 两条目录排除都在
 	ExclusionsPartial = "partial" // 只有一条
 	ExclusionsMissing = "missing" // 可读且确认两条都不在
+	// hidden:Get-MpPreference 命令成功,但返回的是哨兵文本
+	// "N/A: Must be an administrator to view exclusions"——2021 年起 Defender
+	// 对非提权进程隐藏排除项(反侦察加固),脑恰是普通权限进程。这不是"没有",
+	// 是"不让看";3.0.1 首上真机(杨小七01)就把这形态误判成了 missing 亮红灯。
+	// 想在这形态下得到确定答案,出路是把排除同时写进策略键(Policies 键普通
+	// 权限可读,见 probePolicyExclusions),不是提权。
+	ExclusionsHidden = "hidden"
 	// unknown:Get-MpPreference 读不到(服务死/权限不足)且策略键里也没有 ——
 	// 此时无法证明"没有",按不确认处理,不冒充 missing。
 
@@ -174,13 +181,31 @@ func defenderServiceState(winDefend string) string {
 	}
 }
 
+// sanitizeExclusions 把 Get-MpPreference 的返回拆成"真路径"与"被隐藏"两个
+// 事实。非提权进程拿到的不是空列表,而是一条 "N/A: Must be an administrator
+// to view exclusions" 哨兵文本 —— 它必须被识别为"看不见",绝不能混进路径
+// 匹配里坐实成"缺失"。
+func sanitizeExclusions(entries []string) (paths []string, hidden bool) {
+	for _, entry := range entries {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(entry)), "n/a") {
+			hidden = true
+			continue
+		}
+		if strings.TrimSpace(entry) != "" {
+			paths = append(paths, entry)
+		}
+	}
+	return paths, hidden
+}
+
 // evaluateExclusions 判定两条目录排除是否齐全。
 //
-// psReadable 为真时 Get-MpPreference 是全量权威,可以下 missing 的结论;
-// 只有策略键可看时,它只是排除项的一个子集 —— 在里面找到算数,找不到不能
-// 证明整体没有,只能 unknown(火绒机就是这个形态:服务死、策略键空,而 8/10
-// 经界面加的排除写在读不到的常规位置)。
-func evaluateExclusions(psReadable bool, psPaths, policyPaths, wanted []string) string {
+// psReadable 为真且未被隐藏时,Get-MpPreference 是全量权威,可以下 missing
+// 的结论;被隐藏时它一条真路径都不给,只能报 hidden;只有策略键可看时,它是
+// 排除项的一个子集 —— 在里面找到算数,找不到不能证明整体没有,只能 unknown
+// (火绒机就是这个形态:服务死、策略键空,而 8/10 经界面加的排除写在读不到的
+// 常规位置)。
+func evaluateExclusions(psReadable, psHidden bool, psPaths, policyPaths, wanted []string) string {
 	found := 0
 	for _, want := range wanted {
 		if containsPath(psPaths, want) || containsPath(policyPaths, want) {
@@ -192,6 +217,8 @@ func evaluateExclusions(psReadable bool, psPaths, policyPaths, wanted []string) 
 		return ExclusionsOK
 	case found > 0:
 		return ExclusionsPartial
+	case psHidden:
+		return ExclusionsHidden
 	case psReadable:
 		return ExclusionsMissing
 	default:

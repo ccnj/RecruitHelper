@@ -144,6 +144,8 @@ func TestParsePSReportGarbage(t *testing.T) {
 }
 
 // 三台真值机(2026-08-12 人工核对)构成的判定矩阵,前台验收按同一口径对照。
+// 注意"杨小七01(提权视角两条都在)"只在提权进程里成立;脑是普通权限进程,
+// 真机上它拿到的是哨兵文本 —— 见下一条测试。
 func TestEvaluateExclusionsGroundTruth(t *testing.T) {
 	wanted := []string{
 		`C:\Users\1\AppData\Local\Programs\RecruitHelper`,
@@ -152,23 +154,48 @@ func TestEvaluateExclusionsGroundTruth(t *testing.T) {
 	cases := []struct {
 		name       string
 		psReadable bool
+		psHidden   bool
 		psPaths    []string
 		policy     []string
 		want       string
 	}{
-		{"杨小七01:两条都在", true, wanted, nil, ExclusionsOK},
-		{"只加了一条", true, wanted[:1], nil, ExclusionsPartial},
-		{"可读且确认没有", true, nil, nil, ExclusionsMissing},
-		{"火绒机:服务死且无策略键", false, nil, nil, StateUnknown},
-		{"火绒机+预埋策略键", false, nil, wanted, ExclusionsOK},
-		{"大小写与尾反斜杠差异", true,
+		{"杨小七01(提权视角):两条都在", true, false, wanted, nil, ExclusionsOK},
+		{"只加了一条", true, false, wanted[:1], nil, ExclusionsPartial},
+		{"可读且确认没有", true, false, nil, nil, ExclusionsMissing},
+		{"非提权:被隐藏不得判缺失", true, true, nil, nil, ExclusionsHidden},
+		{"被隐藏但策略键预埋齐全", true, true, nil, wanted, ExclusionsOK},
+		{"火绒机:服务死且无策略键", false, false, nil, nil, StateUnknown},
+		{"火绒机+预埋策略键", false, false, nil, wanted, ExclusionsOK},
+		{"大小写与尾反斜杠差异", true, false,
 			[]string{`c:\users\1\appdata\local\programs\recruithelper\`,
 				`C:\USERS\1\AppData\Local\RecruitHelper`}, nil, ExclusionsOK},
 	}
 	for _, c := range cases {
-		if got := evaluateExclusions(c.psReadable, c.psPaths, c.policy, wanted); got != c.want {
+		got := evaluateExclusions(c.psReadable, c.psHidden, c.psPaths, c.policy, wanted)
+		if got != c.want {
 			t.Fatalf("%s: got %q want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// 3.0.1 首上真机的事故复盘用例:杨小七01 排除项明明齐全,脑(非提权)拿到的
+// 却是哨兵文本,当时被当成"可读且没找到"误判成 missing 亮了红灯。
+func TestSanitizeExclusionsRecognizesAdminOnlySentinel(t *testing.T) {
+	paths, hidden := sanitizeExclusions([]string{
+		"N/A: Must be an administrator to view exclusions",
+	})
+	if !hidden {
+		t.Fatal("哨兵文本必须识别为 hidden")
+	}
+	if len(paths) != 0 {
+		t.Fatalf("哨兵文本不得混入路径: %v", paths)
+	}
+
+	paths, hidden = sanitizeExclusions([]string{
+		`C:\Users\1\AppData\Local\RecruitHelper`, " ",
+	})
+	if hidden || len(paths) != 1 {
+		t.Fatalf("真路径不受影响: hidden=%v paths=%v", hidden, paths)
 	}
 }
 
