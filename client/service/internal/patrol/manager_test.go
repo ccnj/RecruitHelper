@@ -134,13 +134,15 @@ func (r *fakeRunner) names() []string {
 	return out
 }
 
-// businessNames 滤掉未读角标现场读:它在轮首与每个会话边界例行出现,数量随
+// businessNames 滤掉两类例行边界读:未读角标现场读(轮首与每个会话边界例行
+// 出现)与临走看一眼的当前会话识别(每次切换到脏会话前例行出现),数量都随
 // 边界数波动。主题无关的命令序列断言用它,免得每个用例都背着这层噪音;未读
-// 判定本身的用例仍用 names() 显式断言读角标的时机。
+// 判定与临走检查本身的用例仍用 names() 或自记序列显式断言时机。
 func (r *fakeRunner) businessNames() []string {
 	out := make([]string, 0)
 	for _, name := range r.names() {
-		if name == protocol.PrimChatReadUnreadTotal {
+		if name == protocol.PrimChatReadUnreadTotal ||
+			name == protocol.PrimChatIdentifyCurrentConversation {
 			continue
 		}
 		out = append(out, name)
@@ -601,6 +603,13 @@ func defaultHandler(request RunRequest) (any, error) {
 			PositionRef: args.PositionRef, PositionTitle: args.PositionTitle,
 			Filters: args.Filters, ObservedAt: time.Now().UnixMilli(),
 		}, nil
+	case protocol.PrimChatIdentifyCurrentConversation:
+		// 默认世界:页面未打开任何会话。契约规定此时识别就是失败("URL 无
+		// 当前会话……均失败"),临走检查据此零动作放行。
+		return nil, &RunError{
+			Code: protocol.ErrCodeTargetNotFound, Retryable: protocol.RetryableYes,
+			SideEffect: protocol.SideEffectNone, Cause: errors.New("默认世界:页面未打开会话"),
+		}
 	case protocol.PrimChatReadList:
 		return protocol.ChatReadListData{Sessions: []protocol.ConversationSummary{}, Complete: true}, nil
 	case protocol.PrimChatReadThread:
@@ -2422,7 +2431,7 @@ func TestConversationListWindowBudgetProcessesWholeVisibleWindow(t *testing.T) {
 	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
 		t.Fatalf("预算耗尽应作为部分完成收束: result=%+v err=%v", result, err)
 	}
-	if got := h.runner.names(); !reflect.DeepEqual(got, []string{
+	if got := h.runner.businessNames(); !reflect.DeepEqual(got, []string{
 		protocol.PrimChatReadList,
 		protocol.PrimChatReadThread,
 		protocol.PrimChatReadThread,
