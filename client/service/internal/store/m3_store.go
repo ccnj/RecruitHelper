@@ -28,6 +28,7 @@ const (
 	primitiveChatSendInviteCard   = "chat.sendInviteCard"
 	primitiveChatAcceptWechat     = "chat.acceptWechat"
 	primitiveJobPublishDraft      = "job.publishDraft"
+	primitiveJobTakeOffline       = "job.takeOffline"
 
 	messageRetractionReasonAuthoritativeSafeTerminal = "authoritative_safe_terminal"
 	messageRetractionReasonManualResolvedFailed      = "manual_resolved_failed"

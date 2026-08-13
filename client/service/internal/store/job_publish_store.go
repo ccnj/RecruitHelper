@@ -15,8 +15,9 @@ type CreateJobPublishEffectIntentRequest struct {
 	Now     time.Time
 }
 
-// CreateJobPublishEffectIntentAndCmd 为职位发布在同一事务内写入 effect intent
-// 与根命令。
+// CreateJobPublishEffectIntentAndCmd 为职位类 effectful 原语在同一事务内写入
+// effect intent 与根命令。job.publishDraft 与 job.takeOffline 共用本入口——两者
+// 的账本形态完全相同:目标是职位不是会话,不铸消息、不接尾序。
 //
 // 为什么不能复用 CreateEffectIntentAndCmd：那个入口把 TargetRef 当会话引用，
 // 会强制校验会话存在、被跟踪、以及 expectedTailSeq 对齐尾序。职位发布的目标是
@@ -124,6 +125,14 @@ func (s *Store) CreateJobPublishEffectIntentAndCmd(
 // 个终局，运营再点发布会递进尝试序号铸新意图；真正防重复发布的仍是点击前的
 // expectAbsentOnPlatform 平台实读——判错方向（其实已发布却判未发生）由它兜住，
 // 那一次会干净失败，不会在平台上留下第二个同名职位。
+//
+// job.takeOffline 共用本入口,但走的不是人工:甲方 2026-08-13 裁决下线失败只记
+// 一笔、不产人工票据,验证耗尽后由脑自动判 resolvedFailed(见 dispatch 侧
+// autoResolveTakeOfflineUnconfirmed)。落账形态与发布完全一致,所以复用而不另写。
+func isJobEffectPrimitive(name string) bool {
+	return name == primitiveJobPublishDraft || name == primitiveJobTakeOffline
+}
+
 func (s *Store) ResolveJobPublishSuspectVerdict(ref string, verdict CmdStatus, at time.Time) error {
 	if ref == "" || (verdict != CmdResolvedOk && verdict != CmdResolvedFailed) {
 		return ErrRecoveryStateConflict
@@ -136,14 +145,14 @@ func (s *Store) ResolveJobPublishSuspectVerdict(ref string, verdict CmdStatus, a
 		if err := tx.First(&cmd, "msg_id = ?", ref).Error; err != nil {
 			return err
 		}
-		if cmd.Name != primitiveJobPublishDraft || cmd.IntentID == "" || cmd.Status != CmdSuspect {
+		if !isJobEffectPrimitive(cmd.Name) || cmd.IntentID == "" || cmd.Status != CmdSuspect {
 			return ErrRecoveryStateConflict
 		}
 		var intent EffectIntent
 		if err := tx.First(&intent, "intent_id = ?", cmd.IntentID).Error; err != nil {
 			return err
 		}
-		if intent.Primitive != primitiveJobPublishDraft || intent.Status != EffectIntentSuspect ||
+		if intent.Primitive != cmd.Name || intent.Status != EffectIntentSuspect ||
 			intent.IdemKey != cmd.IdemKey || intent.RootMsgID != cmd.LogicalDispatchID {
 			return ErrEffectIntentConflict
 		}

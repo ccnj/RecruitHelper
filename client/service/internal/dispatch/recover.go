@@ -464,9 +464,13 @@ func (d *Dispatcher) Verdict(msgID string, verdict store.CmdStatus) error {
 			d.notifyByMsgID(msgID)
 			slog.Info("suspect 招呼人工裁决", "handId", cmd.HandID, "msgId", msgID, "verdict", verdict)
 			return nil
-		case protocol.PrimJobPublishDraft:
-			// 职位发布没有会话，两个方向都只写终局、不铸消息事实；理由与
+		case protocol.PrimJobPublishDraft, protocol.PrimJobTakeOffline:
+			// 职位类原语没有会话，两个方向都只写终局、不铸消息事实；理由与
 			// resolvedFailed 之后的重发口径见 store.ResolveJobPublishSuspectVerdict。
+			//
+			// job.takeOffline 正常不会走到这里：验证耗尽由脑自动判 resolvedFailed
+			// （甲方 2026-08-13 裁决，不产人工票据）。留这条路是为了自动裁决本身
+			// 落账失败的那种情况——那时它会留在 suspect，人得有办法清掉。
 			err := d.st.ResolveJobPublishSuspectVerdict(msgID, verdict, time.Now())
 			if err != nil {
 				if errors.Is(err, store.ErrRecoveryStateConflict) {

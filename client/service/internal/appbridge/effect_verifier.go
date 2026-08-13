@@ -48,6 +48,8 @@ func (v EffectVerifier) Verify(ctx context.Context, req dispatch.VerificationReq
 		return v.verifyGreeting(ctx, req)
 	case protocol.PrimJobPublishDraft:
 		return v.verifyJobPublish(ctx, req)
+	case protocol.PrimJobTakeOffline:
+		return v.verifyJobTakeOffline(ctx, req)
 	default:
 		return dispatch.VerificationObservation{}, errors.New("验证请求不是已支持的真实副作用意图")
 	}
@@ -109,6 +111,71 @@ func (v EffectVerifier) verifyJobPublish(
 	if !jobconfig.MatchesExistingPosting(req.PublishDraftArgs.JobName, postingNames) {
 		return dispatch.VerificationObservation{
 			Reason:     "平台职位列表中仍未出现该职位",
+			ObservedAt: data.ObservedAt,
+		}, nil
+	}
+	return dispatch.VerificationObservation{
+		Confirmed:  true,
+		ObservedAt: data.ObservedAt,
+	}, nil
+}
+
+// verifyJobTakeOffline 用职位管理列表回答"这个职位到底下线了没有"。
+//
+// 判据是**它已不在「在线中」分区**——不要求它出现在「未上线」:下线后落哪个
+// 分区是平台的事,不在线才是本原语的目标。整个平台都找不到同名职位(平台未见)
+// 同样算达成:职位都不在了,它当然不在线。
+//
+// 与发布验证一样不读会话尾部、不比对发送指纹,因此 ContentHash 留空——意图侧
+// 的 SendFingerprint 对下线同为空,两者相等即视为无指纹要求。
+func (v EffectVerifier) verifyJobTakeOffline(
+	ctx context.Context,
+	req dispatch.VerificationRequest,
+) (dispatch.VerificationObservation, error) {
+	if req.Command.Name != protocol.PrimJobTakeOffline || req.TakeOfflineArgs == nil ||
+		strings.TrimSpace(req.TakeOfflineArgs.JobName) == "" {
+		return dispatch.VerificationObservation{},
+			errors.New("验证请求不是完整 job.takeOffline 意图")
+	}
+	argsRaw, err := protocol.Encode(protocol.JobReadPublishedListArgs{})
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	state, err := v.Dispatcher.RunVerificationRead(
+		ctx,
+		req.Command.MsgID,
+		dispatch.DispatchRequest{
+			HandID:          req.Command.HandID,
+			ExpectedSession: req.Command.Session,
+			ExpectedBootID:  req.Command.BootIDAtDispatch,
+			Name:            protocol.PrimJobReadPublishedList,
+			Args:            argsRaw,
+			Context: &protocol.CmdContext{
+				Platform:                     req.Command.Platform,
+				AccountRef:                   req.Command.AccountRef,
+				ExpectedPrincipalFingerprint: req.Command.ExpectedPrincipalFingerprint,
+			},
+		},
+	)
+	if err != nil {
+		return dispatch.VerificationObservation{}, err
+	}
+	if state == nil || !state.Settled || state.Leaf.Status != store.CmdOk || state.Leaf.ResultBody == "" {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读未取得成功终局"}, nil
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal([]byte(state.Leaf.ResultBody), &result); err != nil ||
+		result.Status != protocol.ResultStatusOk {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读结果无效"}, nil
+	}
+	var data protocol.JobReadPublishedListData
+	if err := json.Unmarshal(result.Data, &data); err != nil {
+		return dispatch.VerificationObservation{Reason: "职位清单验证读数据无法解析"}, nil
+	}
+	if jobconfig.FindPostingStatus(req.TakeOfflineArgs.JobName, data.Sections) ==
+		jobconfig.PostingStatusLabelOnline {
+		return dispatch.VerificationObservation{
+			Reason:     "该职位仍在「在线中」分区",
 			ObservedAt: data.ObservedAt,
 		}, nil
 	}

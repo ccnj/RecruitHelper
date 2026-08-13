@@ -657,6 +657,8 @@ func (d *Dispatcher) realEffectResultPlan(
 		return d.realAcceptWechatResultPlan(r, res, body, now, plan, oc)
 	case protocol.PrimJobPublishDraft:
 		return d.realJobPublishResultPlan(r, res, body, now, plan, oc)
+	case protocol.PrimJobTakeOffline:
+		return d.realJobTakeOfflineResultPlan(r, res, body, now, plan, oc)
 	default:
 		return store.ResultCommandMutation{}, fmt.Errorf("未知真实副作用原语 %q", r.Name)
 	}
@@ -844,6 +846,119 @@ func (d *Dispatcher) realJobPublishResultPlan(
 				string(protocol.PublishDraftEvidenceTypePlatformPostingObserved),
 			) != nil {
 			return store.ResultCommandMutation{}, errors.New("职位发布正证与原始意图不一致")
+		}
+		r.Status = store.CmdOk
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		r.SuspectReason = ""
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentOk, "")
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	case protocol.ResultStatusFailed:
+		if res.Error == nil {
+			return store.ResultCommandMutation{}, errors.New("effectful failed 缺少 error")
+		}
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		switch res.Error.SideEffect {
+		case protocol.SideEffectPossible, protocol.SideEffectConfirmed:
+			if wasHumanResolved {
+				plan.Save = false
+				*oc = ocHumanVerdictKept
+				return plan, nil
+			}
+			r.Status = store.CmdVerifying
+			r.TerminalAt = nil
+			r.VerificationReason = "result.sideEffect=" + string(res.Error.SideEffect)
+			r.VerificationNextAt = &now
+			r.ReviewReady = false
+			r.ReviewAfterMs = 0
+			plan.KeepCommandOpen = true
+			plan.Effect = resultEffect(store.EffectIntentVerifying, r.VerificationReason)
+			*oc = ocEffSuspect
+			return plan, nil
+		case protocol.SideEffectNone:
+			r.Status = store.CmdFailed
+			r.TerminalAt = &now
+			r.SuspectReason = ""
+			plan.Effect = resultEffect(store.EffectIntentFailed, "")
+			if wasHumanResolved || wasSuspect {
+				*oc = ocSuspectCleared
+			}
+			return plan, nil
+		default:
+			return store.ResultCommandMutation{},
+				errors.New("effectful result 缺少 sideEffect")
+		}
+	case protocol.ResultStatusCanceled, protocol.ResultStatusExpired:
+		r.Status = mapResultStatus(res.Status)
+		r.TerminalAt = &now
+		r.ResultBody = string(body)
+		applyResultError(r, res)
+		plan.Effect = resultEffect(store.EffectIntentFailed, string(res.Status))
+		if wasHumanResolved || wasSuspect {
+			*oc = ocSuspectCleared
+		}
+		return plan, nil
+	default:
+		return store.ResultCommandMutation{}, errors.New("未知 result status")
+	}
+}
+
+// realJobTakeOfflineResultPlan 收束 job.takeOffline 的 result。
+//
+// 形态与 realJobPublishResultPlan 相同——下线同样不产生会话消息,intent 只推
+// 状态、不铸消息,ContentHash 留空以与意图同样为空的 SendFingerprint 相等。
+//
+// 唯一的差别在链路末端而不在这里:possible 照常进验证轮(自动收敛是免费的),
+// 但验证耗尽后不转 suspect,由 recordVerificationMiss 的本原语分支自动判
+// resolvedFailed。甲方 2026-08-13 裁决:下线只是锦上添花,失败记一笔即可。
+func (d *Dispatcher) realJobTakeOfflineResultPlan(
+	r *store.CmdRecord,
+	res protocol.ResultBody,
+	body []byte,
+	now time.Time,
+	plan store.ResultCommandMutation,
+	oc *resultOutcome,
+) (store.ResultCommandMutation, error) {
+	var args protocol.JobTakeOfflineArgs
+	if err := json.Unmarshal([]byte(r.Args), &args); err != nil {
+		return store.ResultCommandMutation{}, err
+	}
+	resultEffect := func(
+		status store.EffectIntentStatus,
+		reason string,
+	) *store.EffectResultMutation {
+		return &store.EffectResultMutation{IntentStatus: status, Reason: reason}
+	}
+
+	wasHumanResolved := r.Status == store.CmdResolvedOk ||
+		r.Status == store.CmdResolvedFailed
+	wasSuspect := r.Status == store.CmdSuspect
+	if r.Status.Terminal() && !wasHumanResolved && !wasSuspect {
+		*oc = ocLate
+		plan.Save = false
+		return plan, nil
+	}
+
+	switch res.Status {
+	case protocol.ResultStatusOk:
+		var data protocol.JobTakeOfflineData
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			return store.ResultCommandMutation{}, err
+		}
+		// 手回不出"没有正证的成功":回读时目标仍在「在线中」分区,它抛
+		// POSTCONDITION_UNCONFIRMED 且 sideEffect=possible。这三项都是契约
+		// 一致性断言——职位名必须还是本次意图那一个,正证必须在场。
+		if data.JobName != args.JobName || !data.OfflineVisible ||
+			validateSingleEvidence(
+				res.Evidence,
+				string(protocol.TakeOfflineEvidenceTypePlatformPostingOffline),
+			) != nil {
+			return store.ResultCommandMutation{}, errors.New("职位下线正证与原始意图不一致")
 		}
 		r.Status = store.CmdOk
 		r.TerminalAt = &now
