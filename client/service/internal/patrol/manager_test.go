@@ -400,8 +400,8 @@ func TestSourcingUserPauseInFlightPreservesPreparingBatch(t *testing.T) {
 }
 
 // 采集开启闸(2026-08-12 甲方裁决):职位不在「在线中」分区就不开批次,
-// 且一条平台命令都不该再往下派;批次阻塞在 preparing、原因可读,重新
-// 开始会回到闸重查。
+// 且一条平台命令都不该再往下派;批次直接写成终局、原因可读,重新点
+// 开始会新开一批重新过闸。
 func TestSourcingBlockedWhenJobNotOnline(t *testing.T) {
 	h := newHarness(t)
 	revisionHash := seedStartableSourcingRevision(t, h, "job-not-online")
@@ -436,9 +436,14 @@ func TestSourcingBlockedWhenJobNotOnline(t *testing.T) {
 		t.Fatalf("职位未在线不得继续选择职位: %v", h.runner.names())
 	}
 	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
-	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked ||
-		batch.Reason != "jobNotOnline" || batch.EndedAt != nil {
-		t.Fatalf("职位未在线应阻塞批次并记录原因: batch=%+v err=%v", batch, err)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchStopped ||
+		batch.Reason != "jobNotOnline" || batch.EndedAt == nil {
+		t.Fatalf("职位未在线应把批次写成终局并记录原因: batch=%+v err=%v", batch, err)
+	}
+	// 终局而不是 blocked:闸拦下的批次零成员,留成未终局只会把「只回复消息」
+	// 一起挡住(2026-08-13 真机暴露)。
+	if active, err := h.db.ActiveSourcingBatch(h.key); err != nil || active != nil {
+		t.Fatalf("闸拦下后不应残留未终局批次: active=%+v err=%v", active, err)
 	}
 }
 
@@ -473,9 +478,9 @@ func TestSourcingBlockedWhenJobStatusReadFails(t *testing.T) {
 		t.Fatalf("状态读取失败不得继续选择职位: %v", h.runner.names())
 	}
 	batch, err := h.db.SourcingBatchByID(started.Batch.BatchID)
-	if err != nil || batch == nil || batch.Status != store.SourcingBatchBlocked ||
-		batch.Reason != "jobStatusReadFailed" || batch.EndedAt != nil {
-		t.Fatalf("状态读取失败应阻塞批次并记录原因: batch=%+v err=%v", batch, err)
+	if err != nil || batch == nil || batch.Status != store.SourcingBatchStopped ||
+		batch.Reason != "jobStatusReadFailed" || batch.EndedAt == nil {
+		t.Fatalf("状态读取失败应把批次写成终局并记录原因: batch=%+v err=%v", batch, err)
 	}
 }
 

@@ -89,27 +89,27 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		// 采集开启闸(2026-08-12 甲方裁决,AGENTS.md「职位平台状态上报」):批次
 		// 首读推荐窗口之前——也只有这个时点,读职位管理页不会打断推荐流——先读
 		// 平台职位状态分区,当前职位不在「在线中」分区就不开采集;读不到同样不开,
-		// 不确认就不开工。阻塞发生在 PositionRef 绑定之前,批次停在 preparing,
-		// 用户重新点开始会回到本闸重查。
+		// 不确认就不开工。拦下即写成终局(见 stopSourcingBatchAtGate),用户重新
+		// 点开始会新开一批、重新过本闸。
 		if err := a.setStage("checkingJobPostingStatus"); err != nil {
-			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockJobStatusRead, err)
 		}
 		published, err := invokePrimitive[protocol.JobReadPublishedListData](
 			ctx, a, protocol.PrimJobReadPublishedList, protocol.JobReadPublishedListArgs{},
 		)
 		if err != nil {
-			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockJobStatusRead, err)
 		}
 		if report := a.manager.config.ReportJobStatus; report != nil {
 			// 观察用上报,fire-and-forget:成败都不改变下面的采集裁决。
 			report(published)
 		}
 		if status := jobconfig.FindPostingStatus(positionTitle, published.Sections); status != jobconfig.PostingStatusLabelOnline {
-			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobNotOnline,
+			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockJobNotOnline,
 				fmt.Errorf("职位「%s」当前平台状态为「%s」,未在线,不开始采集", positionTitle, status))
 		}
 		if err := a.waitSourcingInteractionPace(ctx); err != nil {
-			return a.failSourcingBatch(batch.BatchID, sourcingBlockJobStatusRead, err)
+			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockJobStatusRead, err)
 		}
 
 		if err := a.setStage("selectingSourcingPosition"); err != nil {
@@ -338,6 +338,22 @@ func (a *roundActor) blockAndPauseSourcingBatch(batchID, reason string) error {
 	})
 	pauseErr := a.manager.pauseAccount(a.key(), PauseSourcingBlocked, a.manager.now())
 	return errors.Join(blockErr, pauseErr)
+}
+
+// stopSourcingBatchAtGate 把采集开启闸拦下的批次直接写成终局,而不是可恢复
+// 阻塞。此时批次尚未绑定推荐流、零成员,留成 blocked 毫无可保之物,反而让
+// 「只回复消息」被"存在未终局采集批次"闸挡住——2026-08-13 真机暴露:职位
+// 不上线期间客户连回消息都用不了。终局化后回消息立刻可用;重新点开始会新开
+// 一批、重新过闸,用户可见的循环不变。
+func (a *roundActor) stopSourcingBatchAtGate(batchID, reason string, cause error) error {
+	if preservesSourcingBatch(cause) {
+		return cause
+	}
+	_, stopErr := a.manager.store.StopSourcingBatch(store.StopSourcingBatchRequest{
+		BatchID: batchID, Reason: reason, StoppedAt: a.manager.now(),
+	})
+	pauseErr := a.manager.pauseAccount(a.key(), PauseSourcingBlocked, a.manager.now())
+	return errors.Join(cause, stopErr, pauseErr)
 }
 
 func (a *roundActor) failSourcingBatch(batchID, reason string, cause error) error {
