@@ -530,9 +530,13 @@ function homeStatus(
 
 // 最近一次运行的失败原因是包了前缀的错误文本(如"产品工作流批次推进状态无效:
 // recommendationFeedChanged"),按包含匹配认码。想让新的中止原因上首页,在这里
-// 加一行映射即可;不映射的照旧不显示。
+// 或 batchFailureFriendlyLabels 加一行映射即可;不映射的照旧不显示。
+// 职位状态闸的两个码自 2026-08-13 起把批次直接写成终局,原因也走这条通道。
 function lastRunFailureHomeHint(reason: string | null): string | null {
   if (!reason) return null
+  for (const [code, label] of Object.entries(batchFailureFriendlyLabels)) {
+    if (reason.includes(code)) return label
+  }
   if (reason.includes('recommendationFeedChanged')) {
     return '推荐页被刷新,本批已作废;请重新点击开始'
   }
