@@ -429,6 +429,14 @@ func (a *roundActor) processConversationRow(
 		return false, nil
 	}
 	if dirty != nil {
+		// 打开脏会话会顶掉页面上还开着的窗口:切换前先临走看一眼当前会话,
+		// 刚处理完就秒回的候选人不必等下一轮巡检(2026-08-13 甲方立案)。
+		if err := a.lastLookBeforeSwitch(ctx, summary.ConversationRef); err != nil {
+			return false, err
+		}
+		if a.classificationCorrected {
+			return true, nil
+		}
 		dirtyConversation := *dirty
 		if err := a.setStage("readingThread"); err != nil {
 			return false, err
@@ -538,6 +546,15 @@ func (a *roundActor) processUnreadConversationListPage(
 		// 行打转,行变化(指纹变)才有资格再来一次。
 		a.checkedListFingerprints[summary.ConversationRef] = fingerprint
 		a.unreadPassClaims++
+		// 固定打开会顶掉页面上还开着的窗口:打开前先临走看一眼当前会话
+		// (2026-08-13 甲方立案;打开后共享处理块内的第二次检查会因当前会话
+		// 即目标会话而零动作跳过)。
+		if err := a.lastLookBeforeSwitch(ctx, summary.ConversationRef); err != nil {
+			return conversationListPageContinue, err
+		}
+		if a.classificationCorrected {
+			return conversationListPageStop, nil
+		}
 		// 固定打开只负责清未读角标；其后的判脏→对账→档案推进与全量轮共用
 		// 同一处理块，不再按档案就绪度分叉（2026-08-10 甲方裁决）。无档案
 		// 或未就绪的行经共享块自然收敛为只对账或跳过；打开失败与处理失败
