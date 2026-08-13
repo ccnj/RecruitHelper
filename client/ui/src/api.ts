@@ -559,6 +559,23 @@ export interface JobPublishResult {
   diagnostics?: Record<string, unknown>
 }
 
+export interface JobTakeOfflineResult {
+  jobId: string
+  jobName: string
+  intentId: string
+  status: string
+  created: boolean
+  /** 取得平台正证时才有；未确认时看 diagnostics。 */
+  report?: {
+    jobName: string
+    offlineVisible: boolean
+    verifyRounds: number
+    platformFeedback: string | null
+    observedAt: number
+  }
+  diagnostics?: Record<string, unknown>
+}
+
 export interface BackendJobView {
   jobId: string
   jobName: string
@@ -908,6 +925,12 @@ export const api = {
   ) =>
     postWithDetail<JobPublishResult>('/admin/job-publish/publish', {
       platform, accountRef, jobId, jobClass, keywords,
+    }),
+  // 发布之后紧跟的一步：把刚发上线的职位立刻下线（甲方 2026-08-13 裁决）。
+  // 它是独立的一条意图，失败**不回改发布结论**——下线只是锦上添花，失败记一笔。
+  jobTakeOffline: (platform: string, accountRef: string, jobId: string) =>
+    postWithDetail<JobTakeOfflineResult>('/admin/job-publish/take-offline', {
+      platform, accountRef, jobId,
     }),
   jobPublishPrepareDraft: (
     platform: string, accountRef: string, jobId: string, jobClass: string, keywords: string[],
