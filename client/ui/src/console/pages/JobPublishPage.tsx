@@ -71,8 +71,19 @@ interface RowState {
 
 type LoopPhase = 'idle' | 'planning' | 'publishing'
 
+// 循环进度分两种形态:收齐候选加统一分配是一整段、没有中途里程碑,显示 1/N
+// 会被读成"第 1 个职位卡住了",只能给耗时;逐个跑的段落才有 1/N 与职位名。
+type LoopCursor =
+  | { kind: 'gather' }
+  | { kind: 'step'; done: number; total: number; jobName: string }
+
 export function JobPublishPage({ account }: { account: AccountView | null }) {
   return <BackendJobsTable account={account} />
+}
+
+function formatClock(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  return minutes > 0 ? `${minutes} 分 ${String(seconds % 60).padStart(2, '0')} 秒` : `${seconds} 秒`
 }
 
 function formatDiagValue(value: unknown): string {
@@ -303,7 +314,8 @@ function PublishPrecheckPanel({
   const [rows, setRows] = useState<Record<string, RowState>>({})
   const [phase, setPhase] = useState<LoopPhase>('idle')
   const [busyJob, setBusyJob] = useState('')
-  const [cursor, setCursor] = useState<{ done: number; total: number; jobName: string } | null>(null)
+  const [cursor, setCursor] = useState<LoopCursor | null>(null)
+  const [gatherSeconds, setGatherSeconds] = useState(0)
   const [publishArmed, setPublishArmed] = useState(false)
   const [draftBusy, setDraftBusy] = useState('')
   // 脑侧那次全局分配的尝试记录。撞车不存这里：人工改选类别后原来的撞车可能
@@ -321,6 +333,14 @@ function PublishPrecheckPanel({
     const timer = setTimeout(() => setPublishArmed(false), 8000)
     return () => clearTimeout(timer)
   }, [publishArmed])
+
+  // 收齐候选段的走表。这一段十来分钟没有别的可动的数字,表不走会被当成卡死。
+  useEffect(() => {
+    if (cursor?.kind !== 'gather') return
+    setGatherSeconds(0)
+    const timer = setInterval(() => setGatherSeconds((prev) => prev + 1), 1000)
+    return () => clearInterval(timer)
+  }, [cursor?.kind])
 
   const patch = (jobId: string, next: Partial<RowState>) => {
     setPublishArmed(false)
@@ -444,8 +464,8 @@ function PublishPrecheckPanel({
   // 阶段 A 分三段：A1 收齐全部职位的候选 → 一次全局分配 → A2 逐个选关键词。
   //
   // A1 与全局分配合在同一次调用里（脑侧串行跑完全部职位的填页再问模型），所以
-  // 那一段只能给总进度：一次要跑十来分钟，中途没有可上报的里程碑。这是"统一
-  // 分配"的必然形态——候选没收齐就没法通盘决定谁该让开谁。
+  // 那一段没有可上报的里程碑，只能给一句说明加耗时走表。这是"统一分配"的
+  // 必然形态——候选没收齐就没法通盘决定谁该让开谁。
   const runPhaseA = async (): Promise<void> => {
     if (!account) return
     stopRef.current = false
@@ -453,7 +473,7 @@ function PublishPrecheckPanel({
     setPublishArmed(false)
     const targets = readyRows
     try {
-      setCursor({ done: 0, total: targets.length, jobName: '正在收齐候选并统一分配类别' })
+      setCursor({ kind: 'gather' })
       let planned: JobClassAssignmentView[]
       try {
         const result = await api.jobPublishClassPlan(
@@ -486,7 +506,7 @@ function PublishPrecheckPanel({
       const withClass = planned.filter((assigned) => Boolean(assigned.jobClass))
       for (const [index, assigned] of withClass.entries()) {
         if (stopRef.current) break
-        setCursor({ done: index, total: withClass.length, jobName: assigned.jobName })
+        setCursor({ kind: 'step', done: index, total: withClass.length, jobName: assigned.jobName })
         await planKeywordsFor(assigned.jobId, assigned.jobName, assigned.jobClass ?? '')
       }
     } finally {
@@ -548,7 +568,7 @@ function PublishPrecheckPanel({
     try {
       for (const [index, row] of targets.entries()) {
         if (stopRef.current) break
-        setCursor({ done: index, total: targets.length, jobName: row.jobName })
+        setCursor({ kind: 'step', done: index, total: targets.length, jobName: row.jobName })
         await publishOne(row.jobId, row.jobName)
       }
     } finally {
@@ -625,8 +645,9 @@ function PublishPrecheckPanel({
         )}
         {cursor && (
           <small className="publish-loop-cursor">
-            {phase === 'publishing' ? '正在发布' : '正在处理'} {cursor.done + 1}/{cursor.total}：
-            {cursor.jobName}
+            {cursor.kind === 'gather'
+              ? `正在收齐全部职位的类别候选并统一分配。这一段没有中途进度,通常要十来分钟 · 已等 ${formatClock(gatherSeconds)}`
+              : `${phase === 'publishing' ? '正在发布' : '正在选关键词'} ${cursor.done + 1}/${cursor.total}：${cursor.jobName}`}
           </small>
         )}
         {!running && (selectedCount > 0 || skippedCount > 0 || publishedCount > 0) && (
