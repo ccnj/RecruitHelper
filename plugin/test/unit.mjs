@@ -13272,6 +13272,260 @@ test('埋点上报自检:探测注入失败不判失效、不抛异常', async (
   }
 })
 
+// 职位性质 + 代招公司(2026-08-14 甲方裁决:一律选「代招岗位」,并在弹窗里
+// 选最后一家代招公司)。DOM 形态照抄甲方当日从真实发布页取的三段快照:
+// 未选态、弹窗、已选态。
+function partnerNode({ className = '', innerText = '', attrs = {}, sel = {}, selAll = {}, clicks, id }) {
+  return {
+    className,
+    innerText,
+    getAttribute: (name) => (name in attrs ? attrs[name] : null),
+    getBoundingClientRect: () => ({ height: 40 }),
+    querySelector: (selector) => sel[selector] ?? null,
+    querySelectorAll: (selector) => selAll[selector] ?? [],
+    click: () => clicks.push(id),
+  }
+}
+
+const LABEL_SELECTOR = ':scope > label, :scope > [class*="label"]'
+
+// variant: 'absent'(没有职位性质这一组) | 'present'(三个选项齐全) | 'valueDrift'(文案在、value 变了)
+function installJobNatureFixture(variant) {
+  const original = { document: globalThis.document }
+  const clicks = []
+  const natureButtons = [
+    ['代招岗位', variant === 'valueDrift' ? 'AGENT_RECRUIT' : 'AGENT_RECRUITMENT'],
+    ['劳务派遣', 'LABOR_DISPATCH'],
+    ['自招职位', 'NORMAL'],
+  ].map(([text, value]) => partnerNode({
+    innerText: text, attrs: { value }, clicks, id: `nature:${text}`,
+  }))
+  const natureItem = partnerNode({
+    className: 'publish-form__jobNature km-form-item',
+    sel: { [LABEL_SELECTOR]: { innerText: '职位性质' } },
+    selAll: { button: natureButtons },
+    clicks,
+    id: 'natureItem',
+  })
+  const employmentItem = partnerNode({
+    className: 'publish-form__employment km-form-item',
+    sel: { [LABEL_SELECTOR]: { innerText: '工作性质' } },
+    selAll: { button: [] },
+    clicks,
+    id: 'employmentItem',
+  })
+  globalThis.document = {
+    querySelectorAll: (selector) => {
+      if (selector === '.km-form-item') {
+        return variant === 'absent' ? [employmentItem] : [natureItem, employmentItem]
+      }
+      return []
+    },
+  }
+  return {
+    clicks,
+    restore() {
+      globalThis.document = original.document
+    },
+  }
+}
+
+test('职位性质 MAIN:文案与 value 双核对后点「代招岗位」,字段缺席是正常路径', () => {
+  const present = installJobNatureFixture('present')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianJobNature(), { status: 'ok', detail: 'picked' })
+    // 只点代招岗位那一颗;劳务派遣与自招职位一次都不许碰。
+    assert.deepEqual(present.clicks, ['nature:代招岗位'])
+  } finally {
+    present.restore()
+  }
+
+  const absent = installJobNatureFixture('absent')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianJobNature(), { status: 'ok', detail: 'absent' })
+    assert.deepEqual(absent.clicks, [])
+  } finally {
+    absent.restore()
+  }
+
+  // 文案还在但 value 对不上:宁可停下转人工,也不能把职位挂成别的性质发出去。
+  const drift = installJobNatureFixture('valueDrift')
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianJobNature(),
+      { status: 'failed', reason: 'job_nature_option_absent' })
+    assert.deepEqual(drift.clicks, [])
+  } finally {
+    drift.restore()
+  }
+})
+
+// rows: 每家公司的名字;'' 表示这一行读不出名字。modal=false 表示弹窗没开。
+// picked 是「代招公司」框里已经显示的名字(未选时为空串)。
+function installPartnerPickerFixture({ rows = [], modal = true, formRow = true, picked = '' } = {}) {
+  const original = { document: globalThis.document, getComputedStyle: globalThis.window?.getComputedStyle }
+  const clicks = []
+  const items = rows.map((name, index) => {
+    const info = partnerNode({
+      className: 'partnership-organization-list__item-info',
+      sel: { '.info-name': name === '' ? null : { innerText: ` ${name} ` } },
+      clicks,
+      id: `info:${index}`,
+    })
+    return partnerNode({
+      className: 'partnership-organization-list__item',
+      sel: {
+        '.partnership-organization-list__item-info': info,
+        // 编辑与删除就贴在同一行里:测试要能证明它们从没被点过。
+        'a.action-edit': partnerNode({ clicks, id: `edit:${index}` }),
+        'a.action-delete': partnerNode({ clicks, id: `delete:${index}` }),
+      },
+      clicks,
+      id: `row:${index}`,
+    })
+  })
+  const listModal = partnerNode({
+    className: 'km-modal__wrapper partnership-organization-list',
+    selAll: { '.partnership-organization-list__item': items },
+    clicks,
+    id: 'listModal',
+  })
+  // 真实页面里同时挂着一个 display:none 的「创建合作公司」弹层,可见性过滤必须挡住它。
+  const hiddenModal = {
+    className: 'km-modal__wrapper hr-recruitment-modal',
+    getBoundingClientRect: () => ({ height: 0 }),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    click: () => clicks.push('hiddenModal'),
+  }
+  const entry = partnerNode({
+    className: 'partnership-organization-input__content',
+    clicks,
+    id: 'entry',
+  })
+  const partnerItem = partnerNode({
+    className: 'km-form-item',
+    sel: {
+      [LABEL_SELECTOR]: { innerText: '代招公司' },
+      '.partnership-organization-input__content': entry,
+      '.partnership-organization-input__name': { innerText: picked },
+    },
+    clicks,
+    id: 'partnerItem',
+  })
+  globalThis.window = globalThis.window ?? {}
+  globalThis.window.getComputedStyle = (node) => (
+    node === hiddenModal ? { display: 'none', visibility: 'visible' }
+      : { display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll: (selector) => {
+      if (selector === '.km-modal__wrapper') return modal ? [listModal, hiddenModal] : [hiddenModal]
+      if (selector === '.km-form-item') return formRow ? [partnerItem] : []
+      return []
+    },
+  }
+  return {
+    clicks,
+    restore() {
+      globalThis.document = original.document
+      globalThis.window.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('代招公司选择器 MAIN:已开就不再点,未开点内容区,行没渲染出来时诚实失败', () => {
+  const open = installPartnerPickerFixture({ rows: ['阿狸与桃子（上海）信息咨询有限公司'] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainOpenZhilianPartnerPicker(), { status: 'ok', detail: 'open' })
+    // 弹窗已开还去点框,会把它 toggle 关掉。
+    assert.deepEqual(open.clicks, [])
+  } finally {
+    open.restore()
+  }
+
+  const closed = installPartnerPickerFixture({ modal: false })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainOpenZhilianPartnerPicker(), { status: 'ok', detail: 'clicked' })
+    assert.deepEqual(closed.clicks, ['entry'])
+  } finally {
+    closed.restore()
+  }
+
+  // 点完职位性质到这一行渲染出来有间隙:失败让轮询继续等,不是终局。
+  const pending = installPartnerPickerFixture({ modal: false, formRow: false })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainOpenZhilianPartnerPicker(),
+      { status: 'failed', reason: 'partner_company_group_absent' })
+    assert.deepEqual(pending.clicks, [])
+  } finally {
+    pending.restore()
+  }
+})
+
+test('代招公司选择 MAIN:只点最后一家的 info 区,编辑与删除绝不触碰', () => {
+  const many = installPartnerPickerFixture({ rows: ['第一家有限公司', '第二家有限公司', '最后一家有限公司'] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(),
+      { status: 'ok', detail: '最后一家有限公司' })
+    // 落点必须是 info 区:同一行紧挨着的 action-delete 点一下就把客户的代招公司删了。
+    assert.deepEqual(many.clicks, ['info:2'])
+  } finally {
+    many.restore()
+  }
+
+  const empty = installPartnerPickerFixture({ rows: [] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(),
+      { status: 'failed', reason: 'partner_company_option_absent' })
+    assert.deepEqual(empty.clicks, [])
+  } finally {
+    empty.restore()
+  }
+
+  // 名字读不到 => 这一行不是预期结构,"最后一行是公司行"本身就不可信了。
+  const nameless = installPartnerPickerFixture({ rows: ['有名字的公司', ''] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(),
+      { status: 'failed', reason: 'partner_company_name_unresolved' })
+    assert.deepEqual(nameless.clicks, [])
+  } finally {
+    nameless.restore()
+  }
+
+  const noModal = installPartnerPickerFixture({ modal: false })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(),
+      { status: 'failed', reason: 'partner_company_picker_absent' })
+    assert.deepEqual(noModal.clicks, [])
+  } finally {
+    noModal.restore()
+  }
+})
+
+test('代招公司回读 MAIN:框里有名字才算数,空着交给轮询继续等', () => {
+  const filled = installPartnerPickerFixture({ picked: ' 阿狸与桃子（上海）信息咨询有限公司 ' })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPartnerCompany(),
+      { status: 'ok', detail: '阿狸与桃子（上海）信息咨询有限公司' })
+  } finally {
+    filled.restore()
+  }
+
+  const blank = installPartnerPickerFixture({ picked: '' })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPartnerCompany(), { status: 'ok', detail: '' })
+  } finally {
+    blank.restore()
+  }
+
+  const gone = installPartnerPickerFixture({ formRow: false })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPartnerCompany(),
+      { status: 'failed', reason: 'partner_company_group_absent' })
+  } finally {
+    gone.restore()
+  }
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {

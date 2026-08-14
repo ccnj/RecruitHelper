@@ -5900,8 +5900,13 @@ function mainCloseZhilianJobClassPicker(): MainStep {
 
 // 职位性质(代招岗位/劳务派遣/自招职位)。只有部分账号的发布表单会出现这一组,
 // 排在工作性质之前,出现时是必填项——不选后面会被平台判形式不符。按业务口径
-// 一律选"自招职位",不读取当前状态(未选中是唯一真实场景)。不存在时按"这个
-// 账号没有这个字段"处理,是正常路径,不是失败。
+// 一律选"代招岗位"(2026-08-14 甲方裁决改定,原为"自招职位"),不读取当前状态:
+// 甲方当日真机确认这组按钮点已选中项不会取消选择。不存在时按"这个账号没有
+// 这个字段"处理,是正常路径,不是失败。
+//
+// 文案与 value 双核对:三个选项各带标准 value 属性(AGENT_RECRUITMENT /
+// LABOR_DISPATCH / NORMAL),比可见文案更硬。平台哪天把文案与 value 的对应
+// 关系改了,这里宁可判不出来转人工,也不能把职位挂成劳务派遣或自招发出去。
 function mainPickZhilianJobNature(): MainStep {
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const item = items.find((node) => {
@@ -5910,7 +5915,8 @@ function mainPickZhilianJobNature(): MainStep {
   })
   if (!item) return { status: 'ok', detail: 'absent' }
   const buttons = Array.from(item.querySelectorAll('button')) as HTMLElement[]
-  const hit = buttons.filter((button) => button.innerText.trim() === '自招职位')
+  const hit = buttons.filter((button) =>
+    button.innerText.trim() === '代招岗位' && button.getAttribute('value') === 'AGENT_RECRUITMENT')
   if (hit.length !== 1) {
     return {
       status: 'failed',
@@ -5919,6 +5925,87 @@ function mainPickZhilianJobNature(): MainStep {
   }
   hit[0].click()
   return { status: 'ok', detail: 'picked' }
+}
+
+// 代招公司。选了「代招岗位」之后表单会多出这一行,是必填项;职位性质那一组
+// 不存在的账号也不会有它,所以整段只在 mainPickZhilianJobNature 真的点下去
+// 之后才走。
+//
+// 未选态:占位 span 在场、name span 为空;选好后平台把占位整个 v-if 掉,
+// name span 里是公司全称。三个函数各自内联查找,不抽公共 helper——它们要被
+// 序列化注入 MAIN world,到不了模块作用域。
+//
+// 打开选择器。点击落点取最内层的内容区(2026-08-14 甲方真机确认点文字区域
+// 能唤起弹窗),不点右侧箭头。已经开着就不再点,免得把它 toggle 关掉。
+function mainOpenZhilianPartnerPicker(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('partnership-organization-list') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length > 0) return { status: 'ok', detail: 'open' }
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '代招公司'
+  })
+  // 点完职位性质到这一行渲染出来有个间隙,失败让轮询继续等。
+  if (!item) return { status: 'failed', reason: 'partner_company_group_absent' }
+  const entry = item.querySelector('.partnership-organization-input__content') as HTMLElement | null
+  if (!entry) return { status: 'failed', reason: 'partner_company_entry_absent' }
+  entry.click()
+  return { status: 'ok', detail: 'clicked' }
+}
+
+// 选列表里的最后一家(2026-08-14 甲方裁决:一般只有一家,多家取最后一家;
+// 甲方同日确认列表一次性全渲染,没有滚动懒加载,DOM 顺序即全序)。
+//
+// 落点写死在 .partnership-organization-list__item-info,**绝不点整行**:
+// 同一行里紧挨着 a.action-edit 与 a.action-delete,点偏一格就把客户的代招
+// 公司删了。这是本段唯一有真实破坏力的地方,不留任何模糊匹配或备用落点。
+// footer 的「添加公司」同理绝不碰——那是新建公司,不是选择。
+function mainPickZhilianPartnerCompany(): MainStep {
+  const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      return node.className.includes('partnership-organization-list') &&
+        node.getBoundingClientRect().height > 0 &&
+        style.display !== 'none' && style.visibility !== 'hidden'
+    })
+  if (open.length !== 1) {
+    return {
+      status: 'failed',
+      reason: open.length === 0 ? 'partner_company_picker_absent' : 'partner_company_picker_ambiguous',
+    }
+  }
+  const rows = Array.from(open[0].querySelectorAll('.partnership-organization-list__item')) as HTMLElement[]
+  if (rows.length === 0) return { status: 'failed', reason: 'partner_company_option_absent' }
+  const row = rows[rows.length - 1]
+  const info = row.querySelector('.partnership-organization-list__item-info') as HTMLElement | null
+  if (!info) return { status: 'failed', reason: 'partner_company_row_unresolved' }
+  // 名字只做诊断与日志用;读不到说明这一行不是预期结构,那"最后一行是公司行"
+  // 本身也就不可信了,宁可停在这里。
+  const nameNode = info.querySelector('.info-name') as HTMLElement | null
+  const name = (nameNode?.innerText ?? '').trim()
+  if (!name) return { status: 'failed', reason: 'partner_company_name_unresolved' }
+  info.click()
+  return { status: 'ok', detail: name.slice(0, 120) }
+}
+
+// 回读代招公司。正证按 2026-08-14 甲方裁决放松到"框里有名字",不与弹窗里
+// 点的那家逐字对拼。detail 为空串表示还没选上,由轮询侧的 accept 判。
+function mainReadZhilianPartnerCompany(): MainStep {
+  const items = Array.from(document.querySelectorAll('.km-form-item'))
+  const item = items.find((node) => {
+    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+    return label?.innerText.trim() === '代招公司'
+  })
+  if (!item) return { status: 'failed', reason: 'partner_company_group_absent' }
+  const nameNode = item.querySelector('.partnership-organization-input__name') as HTMLElement | null
+  if (!nameNode) return { status: 'failed', reason: 'partner_company_value_unreadable' }
+  return { status: 'ok', detail: (nameNode.innerText ?? '').trim().slice(0, 120) }
 }
 
 function mainPickZhilianEmployment(label: string): MainStep {
@@ -6630,6 +6717,9 @@ interface DraftProgress {
   // 以及新变体确认后表单上那行只读汇总。失败时最想知道的就是这两样。
   salaryVariant?: string
   salarySummary?: string
+  // 代招公司那一段:职位性质是否在场(在场才有这一行),以及弹窗里点中的那家。
+  jobNature?: string
+  partnerCompany?: string
   matched: string[]
   custom: string[]
   dropped: string[]
@@ -6655,6 +6745,8 @@ function snapshotProgress(progress: DraftProgress, reason: string): Record<strin
     descriptionLength: progress.descriptionLength ?? null,
     jobClass: progress.jobClass ?? null,
     prefilledClass: progress.prefilledClass ?? null,
+    jobNature: progress.jobNature ?? null,
+    partnerCompany: progress.partnerCompany ?? null,
     keyword: progress.keyword ?? null,
     keywordRoute: progress.keywordRoute ?? null,
     keywordAt: progress.keywordIndex === undefined
@@ -6707,6 +6799,8 @@ function throwPrepareDraftFailure(reason: string, progress?: DraftProgress): nev
 // 不在本次改动范围内。
 const zhilianPublishInteractions = new Set<unknown>([
   mainPickZhilianJobNature,
+  mainOpenZhilianPartnerPicker,
+  mainPickZhilianPartnerCompany,
   mainPickZhilianEmployment,
   mainFillZhilianJobName,
   mainWriteZhilianDescription,
@@ -6754,6 +6848,7 @@ function zhilianInteractionHappened(func: unknown, result: unknown): boolean {
   // 几个"看一眼再决定点不点"的例外:ok 里要再看 detail 才知道这一轮到底
   // 有没有真的点下去。
   if (func === mainPickZhilianJobNature) return result.detail === 'picked'
+  if (func === mainOpenZhilianPartnerPicker) return result.detail === 'clicked'
   if (func === mainCloseZhilianPanels) return result.detail === 'closing'
   if (func === mainOpenZhilianJobClassPicker) return result.detail === 'clicked'
   if (func === mainCloseZhilianJobClassPicker) return result.detail === 'closing'
@@ -6817,6 +6912,31 @@ async function pace(): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
+}
+
+// pickZhilianJobNatureAndPartner:职位性质 → 代招公司,一整段。
+//
+// 整段由「职位性质」这一组是否在场把关(2026-08-14 甲方确认:没有职位性质
+// 字段的账号也不会有代招公司字段)。不在场就整段跳过,是正常路径;在场就必须
+// 一路走到代招公司回读出名字为止,中途任何一步不成都转人工——代招公司是必填,
+// 空着提交会被平台判形式不符,那时候错误离现场已经很远了。
+//
+// 打开选择器用轮询点:点完职位性质到这一行渲染出来有间隙,弹窗自己也要等平台
+// 拉完公司列表。25 轮配合 1 秒节奏下限约 30 秒,与类别选择器同量级。
+async function pickZhilianJobNatureAndPartner(
+  tabId: number,
+  ctx: PrimitiveContext,
+  progress: DraftProgress,
+): Promise<void> {
+  const nature = await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
+  progress.jobNature = nature
+  if (nature !== 'picked') return
+  await pollStep(tabId, mainOpenZhilianPartnerPicker, [], ctx, '打开代招公司选择器',
+    (detail) => detail === 'open', 25, progress)
+  progress.partnerCompany = await pollStep(tabId, mainPickZhilianPartnerCompany, [], ctx,
+    '选择代招公司', undefined, 20, progress)
+  await pollStep(tabId, mainReadZhilianPartnerCompany, [], ctx, '回读代招公司',
+    (detail) => detail.length > 0, 40, progress)
 }
 
 // selectZhilianJobClass:打开类别选择器 → 精确选中 → 关闭 → 回读确认。
@@ -7031,7 +7151,7 @@ async function fillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 10)
 
-  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   const employment = await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -7695,7 +7815,7 @@ export async function readZhilianJobClassCandidates(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -7805,7 +7925,7 @@ async function reuseOrRefillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -14960,6 +15080,10 @@ export const zhilianTestHooks = Object.freeze({
   mainReadThreadPage,
   mainSendCardOnce,
   mainSendMessageOnce,
+  mainPickZhilianJobNature,
+  mainOpenZhilianPartnerPicker,
+  mainPickZhilianPartnerCompany,
+  mainReadZhilianPartnerCompany,
   mainProbeZhilianBlockedDialog,
   mainClickZhilianBlockedDialogButton,
   selectZhilianSourcingPosition,
