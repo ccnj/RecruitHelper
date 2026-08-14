@@ -705,6 +705,7 @@ type VerificationRequest struct {
 	// 职位发布的验证读与消息类不同源:它不读会话尾部、也没有发送指纹,
 	// 只需回答"平台职位列表里有没有这个职位名"。
 	PublishDraftArgs *protocol.JobPrepareDraftArgs
+	TakeOfflineArgs  *protocol.JobTakeOfflineArgs
 }
 
 type VerificationObservation struct {

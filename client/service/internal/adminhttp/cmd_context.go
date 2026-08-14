@@ -28,6 +28,7 @@ var suspectActionNames = map[string]string{
 	"chat.sendInviteCard":   "发邀面卡",
 	"chat.acceptWechat":     "接受换微信",
 	"job.publishDraft":      "发布职位",
+	"job.takeOffline":       "下线职位",
 	"debug.slowEcho":        "调试回声",
 }
 

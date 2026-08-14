@@ -64,6 +64,9 @@ import type {
   JobReadKeywordVocabularyArgs,
   JobReadKeywordVocabularyData,
   JobReadPublishedListData,
+  JobTakeOfflineArgs,
+  JobTakeOfflineData,
+  JobTakeOfflineGuards,
   MessageAnchor,
   NotReadyReason,
   ProbePlatformData,
@@ -7350,6 +7353,320 @@ export async function publishZhilianJobDraft(
     )
   }
   await ctx.progress('职位发布已取得平台正证', 100)
+  return data
+}
+
+// ── 职位下线 ──────────────────────────────────────────────────────────
+//
+// 与发布相对的动作,机制上简单得多:不填表、不离页,只在职位管理页的「在线中」
+// 分区里找到那一行,点下线入口,再在二次确认弹层上点一次确认。
+//
+// 唯一的难点是目标绑定。确认弹层的文案是「确定要下线该职位吗?」——**不含职位
+// 名**,所以点确认那一刻,页面上没有任何证据能再核一次"我要下的是不是这个职位"。
+// 应对是两条:一是定位与点击在同一次 MAIN world 执行里一次做完,中间不留任何
+// 异步间隙;二是"在线中分区内同名唯一"这条硬前置在点之前就把歧义挡掉。
+
+// 「在线中」分区的页签文案。已知全集见 job.readPublishedList 的分区语义。
+const ZHILIAN_ONLINE_SECTION_LABEL = '在线中'
+
+// 按行序与原样职位名双重绑定,点下线入口。
+//
+// 传索引而不传名字规则,是为了让归一化只有扩展侧一份实现;这里只做原样字符串
+// 比较,不重写归一化。两道校验各挡一件事:名字不符挡"读列表与点击之间页面重排、
+// 索引指向了别人",同名不唯一挡"确认弹层分不出下的是哪一个"。
+//
+// 点这个入口只打开弹层,不产生任何副作用(真机实测),所以它仍在 sideEffect=none
+// 的区间里。
+function mainClickZhilianJobOffline(index: number, expectedName: string): MainStep {
+  const rows = Array.from(document.querySelectorAll('div.job-list > div.job-item'))
+  if (rows.length === 0) return { status: 'failed', reason: 'job_rows_absent' }
+  if (index < 0 || index >= rows.length) {
+    return { status: 'failed', reason: 'job_row_index_out_of_range' }
+  }
+  const nameOf = (row: Element): string => {
+    const anchor = row.querySelector('a.job-item__title--jobname') as HTMLElement | null
+    if (!anchor) return ''
+    return ((anchor as HTMLElement).innerText || '')
+      .normalize('NFC').replace(/[\s ]+/gu, ' ').trim()
+  }
+  if (nameOf(rows[index]) !== expectedName) {
+    return { status: 'failed', reason: 'job_row_name_mismatch' }
+  }
+  if (rows.filter((row) => nameOf(row) === expectedName).length !== 1) {
+    return { status: 'failed', reason: 'job_row_name_ambiguous' }
+  }
+  const entry = rows[index].querySelector('a[zp-stat-id="job-action-offline"]') as HTMLElement | null
+  if (!entry) return { status: 'failed', reason: 'offline_entry_absent' }
+  if (typeof entry.click !== 'function') {
+    return { status: 'failed', reason: 'offline_entry_not_clickable' }
+  }
+  entry.click()
+  return { status: 'ok' }
+}
+
+// 读当前打开的确认弹层。
+//
+// 页面里同时躺着数十个 .km-modal 且数量随操作增减(真机实测:下线前 31 个、
+// 下线后 28 个),所以判别只认 km-modal--open 且实际可见,绝不能靠存在性或计数。
+function mainReadZhilianOfflineDialog(): MainStep {
+  const open = Array.from(document.querySelectorAll('.km-modal.km-modal--open'))
+    .filter((node) => (node as HTMLElement).getBoundingClientRect().width > 0)
+  if (open.length === 0) return { status: 'failed', reason: 'offline_dialog_absent' }
+  if (open.length > 1) return { status: 'failed', reason: 'offline_dialog_ambiguous' }
+  const text = ((open[0] as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim()
+  if (!text) return { status: 'failed', reason: 'offline_dialog_text_unreadable' }
+  return { status: 'ok', detail: text.slice(0, 300) }
+}
+
+// 点确认。这是不可逆的那一次点击。
+//
+// 只认弹层里唯一的 primary 按钮,且文案必须仍是「下线」:平台把取消做成了
+// light/outlined,两者形态不同。按钮不唯一、被禁用或文案变了一律不点。
+function mainConfirmZhilianJobOffline(): MainStep {
+  const open = Array.from(document.querySelectorAll('.km-modal.km-modal--open'))
+    .filter((node) => (node as HTMLElement).getBoundingClientRect().width > 0)
+  if (open.length !== 1) return { status: 'failed', reason: 'offline_dialog_not_unique' }
+  const buttons = Array.from(open[0].querySelectorAll('button')) as HTMLButtonElement[]
+  const confirms = buttons.filter((button) =>
+    button.className.split(/\s+/).includes('km-button--primary') &&
+    (button.innerText || '').trim() === '下线')
+  if (confirms.length !== 1) return { status: 'failed', reason: 'offline_confirm_not_unique' }
+  if (confirms[0].disabled) return { status: 'failed', reason: 'offline_confirm_disabled' }
+  if (typeof confirms[0].click !== 'function') {
+    return { status: 'failed', reason: 'offline_confirm_not_clickable' }
+  }
+  confirms[0].click()
+  return { status: 'ok' }
+}
+
+// 尽力关掉自己打开的确认弹层。
+//
+// 只在"入口已点开、确认还没点"的失败路径上调用:一个开着的下线确认框跟一张
+// 填满的发布表单一样,只差一次点击,留在页面上等于给人工误操作递刀。它是清理
+// 动作,失败不改变任何判定,所以调用方一律吞掉异常。
+function mainCancelZhilianOfflineDialog(): MainStep {
+  const open = Array.from(document.querySelectorAll('.km-modal.km-modal--open'))
+    .filter((node) => (node as HTMLElement).getBoundingClientRect().width > 0)
+  if (open.length !== 1) return { status: 'failed', reason: 'offline_dialog_not_unique' }
+  const buttons = Array.from(open[0].querySelectorAll('button')) as HTMLButtonElement[]
+  const cancels = buttons.filter((button) => (button.innerText || '').trim() === '取消')
+  if (cancels.length !== 1) return { status: 'failed', reason: 'offline_cancel_not_unique' }
+  cancels[0].click()
+  return { status: 'ok' }
+}
+
+// 读页面上可见的提示原话,纯诊断。
+function mainReadZhilianOfflineFeedback(): MainStep {
+  const nodes = Array.from(document.querySelectorAll('.km-message, .km-toast, [class*="km-message__"]'))
+    .filter((node) => (node as HTMLElement).getBoundingClientRect().width > 0)
+  const text = nodes
+    .map((node) => ((node as HTMLElement).innerText || '').replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 0)
+    .join(' || ')
+  if (!text) return { status: 'failed', reason: 'offline_feedback_absent' }
+  return { status: 'ok', detail: text.slice(0, 300) }
+}
+
+export async function takeZhilianJobOffline(
+  args: JobTakeOfflineArgs,
+  guards: JobTakeOfflineGuards,
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<JobTakeOfflineData> {
+  if (validatePrimitiveArgs(PrimitiveName.JobTakeOffline, 1, args).length !== 0) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位下线参数不符合当前契约', 'manualOnly')
+  }
+  if (guards?.expectOnlineOnPlatform !== true) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位下线缺少在线条件写', 'manualOnly')
+  }
+  const target = normalizeZhilianPostingName(args.jobName)
+  if (!target) {
+    throw new ZhilianPlatformError('GUARD_FAILED', '职位名归一化后为空', 'manualOnly')
+  }
+
+  // ── 点确认之前:一切失败都是 sideEffect=none,职位仍在线,可安全重来 ──────
+  ctx.checkpoint()
+  const tab = await ensureZhilianJobListTab(ctx, expectedPrincipalFingerprint)
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  await ctx.progress('核对智联职位页与登录身份', 10)
+
+  const first = await runMain(tabId, mainReadZhilianJobSection, [])
+  if (!validJobSectionResult(first)) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '智联职位分区结果结构不符合预期', 'manualOnly')
+  }
+  if (first.status === 'failed') throwJobSectionFailure(first.reason)
+  const onlineIndex = first.labels.findIndex(
+    (label) => parseZhilianSectionLabel(label) === ZHILIAN_ONLINE_SECTION_LABEL,
+  )
+  if (onlineIndex < 0) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '智联职位页没有「在线中」分区', 'manualOnly',
+    )
+  }
+
+  // 切到「在线中」并等它渲染完整(条目数与「共 N 条」对齐才算读全)。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  const online = await readZhilianJobSection(tabId, onlineIndex, ctx)
+  await ctx.progress('已读取在线中分区', 35)
+
+  // 硬前置:目标必须在「在线中」且同名唯一。弹层不含职位名,歧义只能在这里挡。
+  const matched: number[] = []
+  online.names.forEach((name, index) => {
+    if (normalizeZhilianPostingName(name) === target) matched.push(index)
+  })
+  if (matched.length === 0) {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', '该职位不在「在线中」分区,无需下线', 'manualOnly',
+      undefined, 'none', { reason: 'job_not_online', jobName: args.jobName },
+    )
+  }
+  if (matched.length > 1) {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', '「在线中」分区存在同名职位,无法确定下线目标', 'manualOnly',
+      undefined, 'none', { reason: 'job_name_ambiguous', jobName: args.jobName, count: matched.length },
+    )
+  }
+  const rowIndex = matched[0]
+  const expectedName = online.names[rowIndex]
+
+  // 点下线入口。只打开弹层,不产生副作用。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  ctx.checkpoint()
+  const opened = await runMain(tabId, mainClickZhilianJobOffline, [rowIndex, expectedName])
+  if (!validMainStep(opened)) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '下线入口点击结果结构不符合预期', 'manualOnly',
+      undefined, 'none',
+    )
+  }
+  if (opened.status === 'failed') {
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', `下线入口不可点击: ${opened.reason}`, 'manualOnly',
+      undefined, 'none', { reason: opened.reason, jobName: args.jobName },
+    )
+  }
+  await ctx.progress('已打开下线确认层', 55)
+
+  // 条件轮询等弹层,最长约 10 秒。失败路径上要把弹层收掉,不留半开的确认框。
+  const abandonDialog = async (): Promise<void> => {
+    try {
+      await runMain(tabId, mainCancelZhilianOfflineDialog, [])
+    } catch {
+      // 清理失败不改变任何判定。
+    }
+  }
+  let dialogText = ''
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const seen = await runMain(tabId, mainReadZhilianOfflineDialog, [])
+    if (validMainStep(seen) && seen.status === 'ok') {
+      dialogText = seen.detail ?? ''
+      break
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  if (!dialogText) {
+    // 弹层没按预期出现:什么都没发生过,干净失败。
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '下线确认层未在期限内出现', 'manualOnly',
+      undefined, 'none', { reason: 'offline_dialog_absent', jobName: args.jobName },
+    )
+  }
+  // 文案只作"这确实是下线确认层"的粗判:平台改标点、改语气都不该拦住动作,
+  // 但整段文案里连「下线」两个字都没有,就说明点开的根本不是这个东西。
+  if (!dialogText.includes('下线')) {
+    await abandonDialog()
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', '打开的确认层文案不像下线确认', 'manualOnly',
+      undefined, 'none', { reason: 'offline_dialog_text_unexpected', dialogText },
+    )
+  }
+
+  // 身份最后一次复核:此后就是不可逆动作。
+  try {
+    assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tabId)), expectedPrincipalFingerprint)
+  } catch (error) {
+    await abandonDialog()
+    throw error
+  }
+  await ctx.beforeSideEffect()
+
+  // ── 不可逆点击。此后一律 sideEffect=possible,原语内绝不重试、绝不第二次点击 ──
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  const confirmed = await runMain(tabId, mainConfirmZhilianJobOffline, [])
+  if (!validMainStep(confirmed)) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '下线确认结果结构不符合预期', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (confirmed.status === 'failed') {
+    // 确认按钮不可解析/被禁用都发生在点击之前,未产生副作用。
+    await abandonDialog()
+    throw new ZhilianPlatformError(
+      'GUARD_FAILED', `下线确认按钮不可点击: ${confirmed.reason}`, 'manualOnly',
+      undefined, 'none', { reason: confirmed.reason, jobName: args.jobName },
+    )
+  }
+  await ctx.progress('已确认下线,开始回读正证', 75)
+
+  let platformFeedback: string | null = null
+  try {
+    const hints = await runMain(tabId, mainReadZhilianOfflineFeedback, [])
+    if (validMainStep(hints) && hints.status === 'ok' && hints.detail) {
+      platformFeedback = hints.detail.slice(0, 900)
+    }
+  } catch {
+    // 读提示失败不影响正证判定,保持 null。
+  }
+
+  // 发后核验:回读「在线中」分区,目标名字不在了即成功。读不到只记未确认,
+  // 绝不推断失败、绝不再点一次。
+  let offline = false
+  let rounds = 0
+  for (let round = 0; round < 2 && !offline; round += 1) {
+    ctx.checkpoint()
+    await new Promise<void>((resolve) => setTimeout(resolve, round === 0 ? 2_000 : 4_000))
+    rounds = round + 1
+    try {
+      const after = await readZhilianJobSection(tabId, onlineIndex, ctx)
+      offline = !after.names.some((name) => normalizeZhilianPostingName(name) === target)
+    } catch (error) {
+      if (!(error instanceof ZhilianPlatformError)) throw error
+      // 回读失败同样只是"未确认",不改变已经发生的副作用。
+    }
+  }
+
+  const data: JobTakeOfflineData = {
+    jobName: args.jobName,
+    offlineVisible: offline,
+    verifyRounds: rounds,
+    platformFeedback,
+    observedAt: Date.now(),
+  }
+  if (validatePrimitiveData(PrimitiveName.JobTakeOffline, 1, data).length !== 0) {
+    throw new ZhilianPlatformError(
+      'ELEMENT_UNRESOLVED', '下线结果不符合当前契约', 'manualOnly', undefined, 'possible',
+    )
+  }
+  if (!offline) {
+    // 副作用可能已经发生,但没有正证:交给脑的验证轮,不在原语内重试。
+    throw new ZhilianPlatformError(
+      'POSTCONDITION_UNCONFIRMED', '下线后该职位仍出现在「在线中」分区', 'manualOnly',
+      undefined, 'possible',
+      { reason: 'posting_still_online', jobName: args.jobName, platformFeedback, verifyRounds: rounds },
+    )
+  }
+  await ctx.progress('职位下线已取得平台正证', 100)
   return data
 }
 

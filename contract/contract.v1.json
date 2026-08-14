@@ -1076,6 +1076,36 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "JobTakeOfflineArgs": {
+        "type": "object",
+        "maxJsonBytes": 4096,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
+        }
+      },
+      "JobTakeOfflineGuards": {
+        "type": "object",
+        "fields": {
+          "expectOnlineOnPlatform": { "type": "boolean", "const": true }
+        }
+      },
+      "JobTakeOfflineEvidence": {
+        "type": "object",
+        "fields": {
+          "type": { "type": "string", "enumRef": "enums.takeOfflineEvidenceType" }
+        }
+      },
+      "JobTakeOfflineData": {
+        "type": "object",
+        "maxJsonBytes": 65536,
+        "fields": {
+          "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
+          "offlineVisible": { "type": "boolean" },
+          "verifyRounds": { "type": "int64", "minimum": 0 },
+          "platformFeedback": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 900, "maxBytes": 3600 },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "CandidateReadSourcingResumeArgs": {
         "type": "object",
         "fields": {
@@ -1221,6 +1251,7 @@
     "sendMessageEvidenceType": ["outboundMessageObserved"],
     "sendGreetingEvidenceType": ["outboundGreetingObserved"],
     "publishDraftEvidenceType": ["platformPostingObserved"],
+    "takeOfflineEvidenceType": ["platformPostingOffline"],
     "sendWechatInviteEvidenceType": ["outboundWechatInviteObserved"],
     "acceptWechatEvidenceType": ["candidateWechatRequestAcceptedObserved"],
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
@@ -1486,6 +1517,15 @@
       "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 60000,
       "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
       "note": "把一个职位真正发布到平台。真机实测手侧整条执行约 35 秒(读列表 → 填表 → 点击 → 两轮回读);lease 只需容纳最长单步,填同一张表的 job.prepareDraft 用 45 秒已在真机验证够用,本原语只多出点击后的两轮回读,故取 60 秒(CmdBody 的 leaseMs 上限是 120 秒,150 秒会让命令在契约校验就被拒)。首发那次 45 秒 leaseExpired 不是填表太慢:手 35 秒就回了 result,但 result 落不了账(realEffectResultPlan 缺本原语分支),命令一直不收束才反复触发租约到期,根因已单独修掉。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。点击之后平台可能弹出敏感词确认层(列出敏感词与所在字段,给忽略/修改两个出口;弹层开着时职位并未创建),按甲方 2026-07-30 裁决自动点一次「忽略」继续发布——这是同一个不可逆动作的确认续做,不是第二次点击发布;只在「可见弹层唯一 + 文案确属敏感词提示 + 忽略按钮唯一且未禁用」三条同时成立时才点,否则按 possible 转人工,绝不点「修改」。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定"
+    },
+    "job.takeOffline": {
+      "ver": 1, "class": "effectful", "batch": "X",
+      "argsSchema": "JobTakeOfflineArgs", "dataSchema": "JobTakeOfflineData",
+      "guardsSchema": "JobTakeOfflineGuards", "evidenceSchema": "JobTakeOfflineEvidence",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
+      "execBudgetMs": 120000, "deadlineMs": 300000, "leaseMs": 60000,
+      "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
+      "note": "把一个已在线的职位下线。立案于甲方 2026-08-13 裁决「发布完之后立刻下线」,与 job.publishDraft 是两条独立原语、两条独立意图:发布成功而下线失败时,已发布那笔账原样成立,不受下线结果影响。甲方同日明确本动作**只是锦上添花,失败记一笔即可**,因此它是全部 effectful 原语里唯一不产人工票据的一个——脑侧收束见 realJobTakeOfflineResultPlan 与 recordVerificationMiss 的本原语分支,不进 suspect 队列、不冻结人工裁决。这不放宽任何其他原语的失效方向:下线失败的后果是职位仍在线,方向是「少做了下线」而非多做副作用,且平台上重复下线不可能发生(已下线的行根本没有下线入口),与消息类原语的多发风险不是一类。执行顺序固定:导航到职位管理页 → 切到「在线中」分区并等其渲染完整 → 按 args.jobName 在该分区内找唯一匹配行(归一化口径与发布幂等共用一套) → 点该行的下线入口 → 等二次确认弹层出现 → 点弹层的确认 → 回读列表取正证。真机事实(2026-08-13 GPT Chrome 只读考古 + 一次真实下线,测试职位):行是 div.job-list > div.job-item,职位名在 a.job-item__title--jobname(与 job.readPublishedList 同一套选择器),下线入口是行内 a[zp-stat-id=job-action-offline];点它只打开弹层、**不产生任何副作用**,弹层是全局单例 .km-modal.km-modal--open.km-modal--message-box,文案「确定要下线该职位吗?」**不含职位名**,确认按钮是 button.km-button--primary(文案「下线」)、取消是 .km-button--light.default-button,两个按钮都没有 zp-stat-id。页面里同时存在数十个 .km-modal 且数量随操作增减,判别弹层是否打开只能靠 km-modal--open 且可见,绝不能靠存在性或计数。**弹层不含职位名意味着确认层做不了目标绑定**:绑定必须在点下线入口那一刻就凭同一个 DOM 行锁死,点开弹层到点确认之间不得重读列表、不得重新定位;这道口子由「在线中分区内同名职位唯一」这条硬前置封住——匹配到两条同名一律干净失败,绝不猜。副作用边界:点确认按钮**之前**的任何失败一律 sideEffect=none(职位仍在线,可安全重来),点确认之后一律 possible。原语内绝不重试、绝不第二次点击、绝不点「取消」以外的其他控件,弹层不按预期出现即按 none 干净失败。成功正证是点击后回读职位管理页,args.jobName **不再出现在「在线中」分区**(不要求它出现在「未上线」——下线后落哪个分区是平台的事,不在线才是本原语的目标);真机实测下线后在线中计数减一、未上线计数加一、该行带「手动下线」标签,标签纯诊断不作判据。读不到正证只记未确认,不得推断失败、不得再次点击。platformFeedback 只收录下线后页面可见的提示原话,纯诊断,不参与判定"
     },
     "chat.readGreetingOutcome": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentReadReceipt",

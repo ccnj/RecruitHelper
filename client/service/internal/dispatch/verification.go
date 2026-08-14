@@ -195,6 +195,13 @@ func (d *Dispatcher) verifyEffect(ctx context.Context, ref string) {
 			return
 		}
 		request.PublishDraftArgs = &args
+	case protocol.PrimJobTakeOffline:
+		var args protocol.JobTakeOfflineArgs
+		if err := json.Unmarshal([]byte(cmd.Args), &args); err != nil {
+			recordMiss("验证读无法解析职位下线 args: " + err.Error())
+			return
+		}
+		request.TakeOfflineArgs = &args
 	default:
 		recordMiss("真实副作用原语没有验证实现")
 		return
@@ -501,6 +508,14 @@ func (d *Dispatcher) recordVerificationMiss(cmd store.CmdRecord, reason string) 
 	}
 	d.st.Audit("effect_verification_miss", cmd.HandID, cmd.MsgID,
 		fmt.Sprintf("attempt=%d/%d reason=%s", cmd.VerificationN+1, maxAttempts, reason))
+	if suspect && cmd.Name == protocol.PrimJobTakeOffline {
+		// 甲方 2026-08-13 裁决:下线只是锦上添花,失败记一笔即可。它是唯一不产
+		// 人工票据的 effectful 原语——失效方向是"职位仍在线",少做而非多做副作用,
+		// 且平台上重复下线不可能发生(已下线的行没有下线入口)。这里把刚落成的
+		// suspect 就地自动裁决为 resolvedFailed,不留待人裁。
+		d.autoResolveTakeOfflineUnconfirmed(cmd, reason)
+		return
+	}
 	if suspect {
 		d.clearLease(cmd.MsgID)
 		d.notifyByMsgID(cmd.MsgID)
@@ -525,6 +540,35 @@ func (d *Dispatcher) recordVerificationMiss(cmd store.CmdRecord, reason string) 
 			go d.captureSuspectScene(cmd)
 		}
 	}
+}
+
+// autoResolveTakeOfflineUnconfirmed 把下线的"结果未确认"就地收成终局失败。
+//
+// 它走的是与人工裁决同一个 store 入口,只是裁决者是脑而不是人:落账形态、
+// idemKey 解冻与审计口径都与人点一次「判失败」完全一致,不新增第二套状态。
+//
+// 判 failed 而实际已下线的账面误差,甲方 2026-08-13 知情接受:下线是幂等的,
+// 判错也不触发任何后续动作——本原语没有任何自动重试路径,而人若照账去手动
+// 下线,平台上那一行早已没有下线入口。
+func (d *Dispatcher) autoResolveTakeOfflineUnconfirmed(cmd store.CmdRecord, reason string) {
+	now := time.Now()
+	if err := d.st.ResolveJobPublishSuspectVerdict(cmd.MsgID, store.CmdResolvedFailed, now); err != nil {
+		// 自动裁决没落上就让它留在 suspect:那是安全的一侧(有人能看见),
+		// 但必须响亮报出来,否则队列里会悄悄多一条没人认领的票。
+		d.st.Audit("job_offline_auto_resolve_failed", cmd.HandID, cmd.MsgID, err.Error())
+		slog.Warn("职位下线自动收束失败,该条留在 suspect 待人工",
+			"handId", cmd.HandID, "msgId", cmd.MsgID, "err", err)
+		d.clearLease(cmd.MsgID)
+		d.notifyByMsgID(cmd.MsgID)
+		d.releaseSafeRecoveries(cmd.HandID)
+		return
+	}
+	d.st.Audit("job_offline_unconfirmed", cmd.HandID, cmd.MsgID, reason)
+	d.clearLease(cmd.MsgID)
+	d.notifyByMsgID(cmd.MsgID)
+	d.releaseSafeRecoveries(cmd.HandID)
+	slog.Warn("职位下线未取得正证,按裁决记一笔终局失败(不转人工)",
+		"handId", cmd.HandID, "msgId", cmd.MsgID, "idemKey", cmd.IdemKey, "reason", reason)
 }
 
 // resolveDeliveryRejected 把「拒收通知判失败」(AGENTS 防护成本预算第 9 条,

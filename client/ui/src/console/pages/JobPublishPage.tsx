@@ -4,11 +4,13 @@
 // 两段式（甲方 2026-07-31 裁决）：
 //   阶段 A  零副作用，逐个职位跑「定类别 → 读词库 → 选关键词」，失败即跳过
 //   二次确认清单  把两项 AI 决定摊开给人看过，默认全选可发的
-//   阶段 B  逐个真发；单条干净失败或 suspect 跳过当前、继续下一个
+//   阶段 B  逐个真发，每个发成之后紧接着把它下线；单条干净失败或 suspect
+//           跳过当前、继续下一个
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   api, AccountView, BackendJobView, DetailedError, JobClassAssignmentView, JobDraftReport,
-  JobKeywordPlanView, JobPublishPrecheckView, JobPublishResult, PublishParamsState, PublishVerdict,
+  JobKeywordPlanView, JobPublishPrecheckView, JobPublishResult, JobTakeOfflineResult,
+  PublishParamsState, PublishVerdict,
 } from '../../api'
 import { errorText } from '../format'
 
@@ -55,6 +57,10 @@ interface RowState {
   plan?: JobKeywordPlanView
   draft?: JobDraftReport
   publishResult?: JobPublishResult
+  /** 发布成功后紧跟的下线结果。它独立于 publishResult——下线没成不改发布结论。 */
+  offlineResult?: JobTakeOfflineResult
+  /** 下线整个没跑成（派发失败、超时）时的人读原因。同样不影响发布结论。 */
+  offlineError?: string
   error?: string
   diagnostics?: Record<string, unknown>
   /** 阶段 A 失败被跳过。它不阻塞其余职位。 */
@@ -142,6 +148,31 @@ function PublishResultBlock({ result }: { result: JobPublishResult }) {
         </p>
       )}
       {result.report?.platformFeedback && (
+        <p className="publish-draft-sections">平台提示：{result.report.platformFeedback}</p>
+      )}
+    </div>
+  )
+}
+
+// 下线结果。刻意与发布结果分开渲染，也刻意不用 bad 配色：甲方 2026-08-13 裁决
+// 下线只是锦上添花，没成就是一行记录，不是要人去处理的故障。
+function OfflineResultBlock(
+  { result, error }: { result?: JobTakeOfflineResult; error?: string },
+) {
+  if (!result && !error) return null
+  const confirmed = result?.report?.offlineVisible === true
+  return (
+    <div className="publish-draft-report">
+      <p>
+        <span>下线</span>
+        <strong className={confirmed ? 'ok' : ''}>
+          {confirmed ? '已取得平台正证' : '未确认——已记一笔，不影响上面的发布结论'}
+        </strong>
+        {result && <><span>意图</span><strong>{result.intentId}</strong></>}
+        {result && <><span>账本状态</span><strong>{result.status}</strong></>}
+      </p>
+      {error && <p className="publish-draft-sections">{error}</p>}
+      {result?.report?.platformFeedback && (
         <p className="publish-draft-sections">平台提示：{result.report.platformFeedback}</p>
       )}
     </div>
@@ -455,21 +486,43 @@ function PublishPrecheckPanel({
     }
   }
 
+  // 发布成功后紧接着把它下线（甲方 2026-08-13 裁决）。
+  //
+  // 它是独立的一条意图，所以这里独立 try/catch，且**任何失败都不走 failRow**：
+  // failRow 会给这一行挂上 error，看起来像发布出了问题，而发布那笔账已经成立。
+  // 下线只是锦上添花，没成就记一笔，人不必处理。
+  const takeOfflineAfterPublish = async (jobId: string, jobName: string): Promise<void> => {
+    if (!account) return
+    try {
+      const result = await api.jobTakeOffline(account.platform, account.accountRef, jobId)
+      patch(jobId, { offlineResult: result })
+    } catch (reason) {
+      patch(jobId, { offlineError: `下线「${jobName}」未成功：${errorText(reason)}` })
+    }
+  }
+
   const publishOne = async (jobId: string, jobName: string): Promise<void> => {
     if (!account) return
     const jobClass = effectiveClass(jobId)
     const keywords = rows[jobId]?.plan?.keywords ?? []
     if (!jobClass || keywords.length === 0) return
-    patch(jobId, { error: undefined, diagnostics: undefined })
+    patch(jobId, { error: undefined, diagnostics: undefined, offlineResult: undefined, offlineError: undefined })
+    let published = false
     try {
       const result = await api.jobPublishPublish(
         account.platform, account.accountRef, jobId, jobClass, keywords,
       )
       patch(jobId, { publishResult: result })
+      // 只有拿到平台正证才下线。没拿到正证的那些，职位到底在不在线本身就不确定，
+      // 再去点一次下线只会把一个不确定的现场搅得更乱——留给人去平台核对。
+      published = result.report?.postingVisible === true
     } catch (reason) {
       // 甲方 2026-07-31 裁决：单条干净失败或 suspect 跳过当前、继续下一个。
       // suspect 的意图按账本纪律永久冻结等人裁决，绝不在本批内重试。
       failRow(jobId, `发布「${jobName}」未成功`, reason)
+    }
+    if (published && !stopRef.current) {
+      await takeOfflineAfterPublish(jobId, jobName)
     }
   }
 
@@ -663,6 +716,7 @@ function PublishPrecheckPanel({
               )}
               {state.plan && <KeywordPlanBlock plan={state.plan} stale={stale} />}
               {state.publishResult && <PublishResultBlock result={state.publishResult} />}
+              <OfflineResultBlock result={state.offlineResult} error={state.offlineError} />
               {state.draft && <DraftReportBlock report={state.draft} />}
               {row.issues?.map((issue, index) => (
                 <p key={`i-${index}`} className="publish-precheck-issue">

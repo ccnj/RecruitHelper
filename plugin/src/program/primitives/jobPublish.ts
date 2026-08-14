@@ -6,16 +6,20 @@
 //   job.readKeywordVocabulary  intrusive  定完类别后读回关键词弹层的分组词库
 //   job.prepareDraft           intrusive  试填并回读,填完主动离开表单,绝不提交
 //   job.publishDraft           effectful  真正发布,唯一一次点击 + 平台列表正证
+//   job.takeOffline            effectful  把已在线职位下线,入口 + 二次确认各一次点击
 //
-// 前四个不创建、不编辑、不上下线任何职位;只有 job.publishDraft 产生对外副作用。
+// 前四个不创建、不编辑、不上下线任何职位;只有后两个产生对外副作用。
 import {
   CmdClass,
   JobPrepareDraftArgs,
   JobPublishDraftGuards,
   JobReadClassCandidatesArgs,
   JobReadKeywordVocabularyArgs,
+  JobTakeOfflineArgs,
+  JobTakeOfflineGuards,
   Primitive as PrimitiveName,
   PublishDraftEvidenceType,
+  TakeOfflineEvidenceType,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
 import {
@@ -24,6 +28,7 @@ import {
   readZhilianJobClassCandidates,
   readZhilianJobKeywordVocabulary,
   readZhilianPublishedJobs,
+  takeZhilianJobOffline,
   ZHILIAN_PLATFORM,
   ZhilianPlatformError,
 } from '../platform/zhilian'
@@ -170,10 +175,37 @@ const publishDraft: Primitive = {
   },
 }
 
+const takeOffline: Primitive = {
+  name: PrimitiveName.JobTakeOffline,
+  class: CmdClass.Effectful,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
+        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
+      }
+      const data = await takeZhilianJobOffline(
+        rawArgs as JobTakeOfflineArgs,
+        ctx.guards as unknown as JobTakeOfflineGuards,
+        ctx,
+        ctx.commandContext.expectedPrincipalFingerprint,
+      )
+      return {
+        status: 'ok',
+        data,
+        evidence: [{ type: TakeOfflineEvidenceType.PlatformPostingOffline }],
+      }
+    } catch (error) {
+      // 与发布共用同一套 sideEffect 口径:点确认之前 none,之后 possible。
+      return failPublishOrThrow(error)
+    }
+  },
+}
+
 export function registerJobPublishPrimitives(): void {
   register(readPublishedList)
   register(readClassCandidates)
   register(readKeywordVocabulary)
   register(prepareDraft)
   register(publishDraft)
+  register(takeOffline)
 }
