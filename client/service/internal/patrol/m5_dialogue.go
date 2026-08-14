@@ -832,7 +832,15 @@ func (a *roundActor) runM5ReplyAdvice(
 		return errM5AdviceRoundSkipped
 	}
 	content = a.appendM5ReplyActionMenu(turn, facts, content)
-	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, content, intent)
+	// 现实边界块必须成功追加:它只在 content 为空时失败,而空 content 在上面
+	// 的渲染闸后不可达;真失败说明渲染链已破,按渲染失败同款跳过本轮。
+	withBoundary, err := m5ai.AppendRealityBoundary(content)
+	if err != nil {
+		slog.Warn("对话轮跳过:现实边界块追加失败,等下轮巡检重试",
+			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+		return errM5AdviceRoundSkipped
+	}
+	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, withBoundary, intent)
 }
 
 // runM5ServiceReplyAdvice runs the post-interview suffix (spec v4 §7,

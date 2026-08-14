@@ -39,7 +39,7 @@ func TestRenderSilenceFollowupPromptUsesNeutralNameAndCanonicalResumeFacts(t *te
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(rendered, "姓名=候选人\n年龄=30岁\n性别=女\n简历=") ||
-		!strings.HasSuffix(rendered, resume) {
+		!strings.HasSuffix(rendered, resume+"\n\n"+realityBoundaryCompactPolicy) {
 		t.Fatalf("沉默追问渲染错误: %s", rendered)
 	}
 }
