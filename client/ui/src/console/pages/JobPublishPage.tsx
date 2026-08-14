@@ -314,7 +314,16 @@ function PublishPrecheckPanel({
   // 掐掉一条在途的 effectful 命令只会制造一个结果未知的 suspect。
   const stopRef = useRef(false)
 
+  // "再点一次"的确认针对的是确认那一刻看到的集合。行状态一变(勾选、改类别、
+  // 重选词)旧确认就作废,不允许拿旧确认发新集合;放几秒不点也自动解除。
+  useEffect(() => {
+    if (!publishArmed) return
+    const timer = setTimeout(() => setPublishArmed(false), 8000)
+    return () => clearTimeout(timer)
+  }, [publishArmed])
+
   const patch = (jobId: string, next: Partial<RowState>) => {
+    setPublishArmed(false)
     setRows((prev) => ({ ...prev, [jobId]: { ...prev[jobId], ...next } }))
   }
   const failRow = (jobId: string, prefix: string, reason: unknown, next?: Partial<RowState>) => {
