@@ -216,6 +216,29 @@ func (a *roundActor) execute(ctx context.Context) error {
 		// for another authoritative read.
 	}
 	for windowsRead < a.manager.config.MaxPages {
+		// 继续翻页也要过工作流闸。闸原本只挂在"领取下一个候选人"处,于是
+		// 整页会话都无变化的纯翻页轮里它一次都问不到:用户点的结束只写一
+		// 个 pendingAction,真正收束要等编排器拿到整轮锁,而这一轮最多还要
+		// 翻 256 页、每页 2.5~5 秒拟人间隔,期间账号照常一条条发 readList,
+		// 界面停在"正在结束"十几分钟。这里不新增闸,只是把同一道闸也问在
+		// 翻下一页之前——继续翻页的唯一目的就是找下一个候选人,闸已经说
+		// 不许领人时再翻下去没有意义。
+		//
+		// 本轮首次读列表不问闸:那一页是既有的感知承诺(会话索引投影、迟到
+		// 招呼观察都靠它),闸拒绝时的收口仍由行遍历里那道原有的闸负责。
+		if windowsRead > 0 {
+			allowed, gateErr := a.mayStartNextConversation(ctx)
+			if gateErr != nil {
+				return gateErr
+			}
+			if !allowed {
+				// 与候选人边界的 stop 同款收口:本轮就此结束,已完成的会话
+				// 事实照常保留。不置 listTraversalIncomplete——那个标记的
+				// 意思是"页面窗口被截断、要尽快补扫",会把账号标脏并把下
+				// 一轮提前,与"别再扫了"正好相反。
+				return nil
+			}
+		}
 		// Entering unread reserves one actual all-list read to close the
 		// platform filter. The reserve is part of the same MaxPages budget.
 		if filter == protocol.ListFilterUnread &&

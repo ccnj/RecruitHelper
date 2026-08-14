@@ -2539,3 +2539,46 @@ func TestDatabaseConversationAbsentFromObservedWindowCannotDriveThreadRead(t *te
 		t.Fatalf("只应读取页面观察到的一个会话，实际 %d", got)
 	}
 }
+
+// 纯翻页轮里,工作流闸必须能在读下一页之前截住本轮。闸原本只挂在"领取下
+// 一个候选人"处,于是整页无人可领的轮一次都问不到它:用户点的结束要等这
+// 一轮把 MaxPages 页翻完(生产上 256 页、每页 2.5~5 秒)才可能生效,期间账
+// 号还在一条条发 readList。
+func TestConversationGateStopsListPagingWithoutClaimableRow(t *testing.T) {
+	h := newHarness(t)
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimChatReadList {
+			// 页里没有任何可领的行,平台也还没到底:旧实现会一路翻到预算耗尽。
+			return protocol.ChatReadListData{
+				Sessions: []protocol.ConversationSummary{}, Complete: false,
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+	gateCalls := 0
+	h.manager.SetWorkflowConversationGate(func() (bool, error) {
+		gateCalls++
+		// 首页不问闸,第二页放行,随后用户点了结束。
+		return gateCalls == 1, nil
+	})
+
+	result, err := h.manager.Tick(context.Background())
+	if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err != nil {
+		t.Fatalf("闸拒绝应安全收束本轮: result=%+v err=%v", result, err)
+	}
+	// 首页(免闸)+ 闸放行的第二页 = 2;旧实现会一路翻到 MaxPages。
+	if got := h.runner.count(protocol.PrimChatReadList); got != 2 {
+		t.Fatalf("闸拒绝后仍在翻页: chat.readList 次数 = %d, want 2", got)
+	}
+	// 提前收束不是"页面窗口被截断",不得据此标脏账号或把下一轮提前——那
+	// 个方向与"别再扫了"正好相反。
+	rounds, err := h.db.RecentPatrolRounds(h.key, 1)
+	if err != nil || len(rounds) != 1 || rounds[0].Status != "ok" ||
+		rounds[0].Stage != "finished" {
+		t.Fatalf("闸拒绝后的轮状态错误: rounds=%+v err=%v", rounds, err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil || account.DirtyHint {
+		t.Fatalf("闸拒绝不得标脏账号: account=%+v err=%v", account, err)
+	}
+}
