@@ -106,6 +106,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/ledger", h(a.ledger))
 	mux.HandleFunc("GET /admin/suspects", h(a.suspects))
 	mux.HandleFunc("POST /admin/suspects/verdict", h(a.verdict))
+	mux.HandleFunc("GET /admin/patrol/quarantines", h(a.patrolQuarantines))
+	mux.HandleFunc("POST /admin/patrol/quarantines/clear", h(a.patrolQuarantineClear))
 	mux.HandleFunc("GET /admin/frames", h(a.frames))
 	mux.HandleFunc("GET /admin/accounts", h(a.accounts))
 	mux.HandleFunc("POST /admin/accounts/bind", h(a.bindAccount))
