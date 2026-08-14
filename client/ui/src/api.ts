@@ -179,6 +179,17 @@ export interface LedgerRow {
   resultBody: string
 }
 
+export interface PatrolQuarantineRow {
+  platform: string
+  accountRef: string
+  conversationRef: string
+  peerDisplayName: string
+  reason: string
+  quarantinedAt: string
+  profileId?: string
+  profileFrozen: boolean
+}
+
 export interface Suspect {
   msgId: string
   name: string
@@ -848,6 +859,11 @@ export const api = {
   dispatch: (handId: string, name: string, args: unknown) => post<{ msgId?: string; error?: string }>('/admin/cmd', { handId, name, args }),
   ledger: () => get<{ ledger: LedgerRow[] }>('/admin/ledger'),
   suspects: () => get<{ suspects: Suspect[] }>('/admin/suspects'),
+  patrolQuarantines: () => get<{ quarantines: PatrolQuarantineRow[] }>('/admin/patrol/quarantines'),
+  patrolQuarantineClear: (platform: string, accountRef: string, conversationRef: string) =>
+    post<{ released: boolean; profileResumed: boolean; error?: string }>(
+      '/admin/patrol/quarantines/clear', { platform, accountRef, conversationRef },
+    ),
   verdict: (msgId: string, verdict: 'resolvedOk' | 'resolvedFailed') => post<{ error?: string }>('/admin/suspects/verdict', { msgId, verdict }),
   subscribeFrames,
 

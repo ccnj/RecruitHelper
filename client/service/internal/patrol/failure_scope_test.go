@@ -12,10 +12,11 @@ import (
 	"recruithelper/contract/gen/go/protocol"
 )
 
-// 钉住错误分类表（2026-07-27 立案，2026-08-02 停机点体检战役反转默认方向）：
-// 账号级信号全停；手侧命令按协议 retryable 声明分流，no/manualOnly 保留隔离
-// （可能发生在 effect 派发后，是手的协议级"需要人"证词）；脑侧与未知错误
-// 一律本轮跳过、下轮重读，不再隔离。
+// 钉住错误分类表（2026-07-27 立案，2026-08-02 反转默认方向，2026-08-14 补全
+// 证词缺席语义）：账号级信号全停；手侧命令按协议 retryable 声明分流，隔离
+// 必须有正面证词——显式 no/manualOnly 才隔离（可能发生在 effect 派发后，是
+// 手的协议级"需要人"证词）；证词缺席是未知，与脑侧、未知错误同走默认方向：
+// 本轮跳过、下轮重读；脑侧取消（CANCELED_BY_BRAIN）是环境事件，特判跳过。
 func TestClassifyConversationFailure(t *testing.T) {
 	cases := []struct {
 		name string
@@ -54,6 +55,25 @@ func TestClassifyConversationFailure(t *testing.T) {
 		{"手声明只准人工", &RunError{
 			Code: protocol.ErrCodeInternalHand, Retryable: protocol.RetryableManualOnly,
 		}, failureScopeQuarantine},
+		// 2026-08-14 甲方裁决:隔离必须有正面证词。证词缺席(retryable 空)是
+		// 未知,走未知的默认——本轮跳过。此前空串落进隔离默认分支,2026-08-13
+		// 一次 4 分钟页面卡顿(openConversation expired)把候选人永久冻结。
+		{"证词缺席的手侧错误", &RunError{
+			Code: protocol.ErrCodeElementUnresolved,
+		}, failureScopeSkipRound},
+		{"证词缺席的超时", &RunError{
+			Code: protocol.ErrCodeExecTimeoutHand,
+		}, failureScopeSkipRound},
+		// 合成层按契约把 effectful 超时解析成 manualOnly,隔离经证词达成,
+		// 不依赖默认分支——这条钉住危险方向没有随反转放松。
+		{"effectful 超时带契约证词", &RunError{
+			Code: protocol.ErrCodeExecTimeoutHand, Retryable: protocol.RetryableManualOnly,
+		}, failureScopeQuarantine},
+		// 脑取消自己的命令是环境事件;契约 retryable=no 是命令级语义,不构成
+		// 人级隔离证词。
+		{"脑侧取消特判跳过", &RunError{
+			Code: protocol.ErrCodeCanceledByBrain, Retryable: protocol.RetryableNo,
+		}, failureScopeSkipRound},
 		{"已收编空快照矛盾", syncledger.ErrTrackedSnapshotEmpty, failureScopeSkipRound},
 		// 2026-08-02 反转：脑侧与未知错误默认跳过。它们全部发生在世界未被
 		// 改动、或重派已被 WAL/idemKey/动作状态机结构性挡住的位置；隔离换来

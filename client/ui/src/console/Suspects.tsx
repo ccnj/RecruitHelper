@@ -6,7 +6,7 @@
 // 下结论，判 resolvedFailed 而其实已经发出去，后续补发就是多发一条给真人，
 // 所以现场必须给全，但不能把队列撑成一堵墙。
 import { useState } from 'react'
-import { api, Suspect } from '../api'
+import { api, PatrolQuarantineRow, Suspect } from '../api'
 import { dateTime, errorText, shortRef } from './format'
 import { RawField } from './shared/Primitives'
 import { usePolling } from './usePolling'
@@ -26,23 +26,69 @@ export function Suspects({ onOpenConversation }: {
   const rows = suspects.data?.suspects ?? []
   if (rows.length === 0) {
     return (
-      <div className="dc-suspect-clear">
-        <span>suspect 队列为空</span>
-        {message && <span className="dim">{message}</span>}
-      </div>
+      <>
+        <div className="dc-suspect-clear">
+          <span>suspect 队列为空</span>
+          {message && <span className="dim">{message}</span>}
+        </div>
+        <PatrolQuarantines />
+      </>
     )
   }
   return (
-    <section className="dc-suspects" aria-label="suspect 队列">
-      <h3>suspect 队列 · 待人工裁决 {rows.length}</h3>
+    <>
+      <section className="dc-suspects" aria-label="suspect 队列">
+        <h3>suspect 队列 · 待人工裁决 {rows.length}</h3>
+        <div className="dc-suspect-list">
+          {rows.map((item: Suspect) => (
+            <SuspectRow
+              key={item.msgId}
+              item={item}
+              onVerdict={verdict}
+              onOpenConversation={onOpenConversation}
+            />
+          ))}
+        </div>
+        {message && <div className="hint">{message}</div>}
+      </section>
+      <PatrolQuarantines />
+    </>
+  )
+}
+
+// 巡检隔离列表（2026-08-14 甲方裁决）。隔离此前出不来也看不见——被冻的
+// 候选人每轮被安静跳过，人只有盯着巡检看才会发现。这里补可见性与出口。
+// 解除限单条：误放会让被正当隔离（手明确说 manualOnly）的人恢复自动化。
+function PatrolQuarantines() {
+  const list = usePolling(api.patrolQuarantines, 5000, 'diagnostic-patrol-quarantines')
+  const [message, setMessage] = useState('')
+  const rows = list.data?.quarantines ?? []
+  if (rows.length === 0) return null
+  const release = async (row: PatrolQuarantineRow) => {
+    try {
+      const result = await api.patrolQuarantineClear(row.platform, row.accountRef, row.conversationRef)
+      if (result.error) {
+        setMessage(`拒绝：${result.error}`)
+      } else if (!result.released) {
+        setMessage('该会话已不在隔离中')
+      } else {
+        setMessage(`已解除隔离${result.profileResumed ? '，档案已解冻' : '（档案冻结另有原因，未动）'}`)
+      }
+      list.refresh()
+    } catch (reason) { setMessage(errorText(reason)) }
+  }
+  return (
+    <section className="dc-suspects" aria-label="巡检隔离">
+      <h3>巡检隔离 · {rows.length} 个会话被跳过</h3>
       <div className="dc-suspect-list">
-        {rows.map((item: Suspect) => (
-          <SuspectRow
-            key={item.msgId}
-            item={item}
-            onVerdict={verdict}
-            onOpenConversation={onOpenConversation}
-          />
+        {rows.map((row) => (
+          <div key={`${row.platform}:${row.accountRef}:${row.conversationRef}`} className="dc-suspect-clear">
+            <strong>{row.peerDisplayName || shortRef(row.conversationRef)}</strong>
+            <span className="dim">{row.reason}</span>
+            <span className="dim">{dateTime(row.quarantinedAt)}</span>
+            {row.profileFrozen && <span className="dim">档案已冻结</span>}
+            <button className="compact-button" onClick={() => { void release(row) }}>解除隔离</button>
+          </div>
         ))}
       </div>
       {message && <div className="hint">{message}</div>}
