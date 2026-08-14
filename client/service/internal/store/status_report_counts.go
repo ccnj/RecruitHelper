@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"recruithelper/client/service/internal/m5ai"
 )
 
 // 工作状态上报要的两个数,现有投影都算不出来(AGENTS.md「全局约定·工作状态上报」,
@@ -28,6 +30,16 @@ type StatusReportCounts struct {
 	TodayCaptured          int64
 	TodayCapturedByJob     []StatusReportJobCount
 	ManualRequiredProfiles int64
+	// 拒绝按「最近一轮意向」口径(2026-08-14 甲方裁决,AGENTS.md 工作状态上报
+	// 条目):候选人最新的已分类轮 intent_label=rejected 即计入。这是状态口径:
+	// 挽留阶梯在途的、拒一次就沉默的都算;拒后改口的自动移出,所以 Current
+	// 会回落,不是只增不减的流水数。归档口径不能用 —— 拒绝要爬完挽留/收尾
+	// 阶梯才归档 rejected,拒一次就沉默的人最终归档在沉默族,会把拒绝数数漏。
+	CurrentRejected int64
+	TodayRejected   int64 // 末轮是拒绝,且该轮在 [start, end) 内判定
+	// 拉黑按归档原因数:拉黑经平台拒收通知判定,不产生拒绝轮,上面的口径抓不到。
+	TotalBlacklisted int64
+	TodayBlacklisted int64
 }
 
 // StatusReportCounts 统计 [start, end) 内该账号采集到的人数与当前转人工人数。
@@ -71,11 +83,56 @@ func (s *Store) StatusReportCounts(
 		out.TodayCapturedByJob = rows
 
 		// 转人工是当前状态而非当日事件,所以不切时间窗:关心的是"此刻积压多少"。
-		return tx.Table("communication_v4_aggregates AS agg").
+		if err := tx.Table("communication_v4_aggregates AS agg").
 			Joins("JOIN candidate_profiles AS profile ON profile.profile_id = agg.profile_id").
 			Where("agg.automation_status = ?", ProfileCommunicationAutomationManualRequired).
 			Where("profile.platform = ? AND profile.account_ref = ?", platform, accountRef).
-			Count(&out.ManualRequiredProfiles).Error
+			Count(&out.ManualRequiredProfiles).Error; err != nil {
+			return err
+		}
+
+		// 每人取最新已分类轮:先按 inbound_through_seq(输入边界推进),再按
+		// created_at 破平(同边界重铸的轮)。最新一轮还没分类完时取上一轮,
+		// 统计接受这点分钟级滞后。classified_at 与 start/end 都经 GORM 同一套
+		// time.Time 序列化,不踩本库"时间列两种落盘格式"的字符串比较坑。
+		var rejected struct {
+			CurrentRejected int64
+			TodayRejected   int64
+		}
+		if err := tx.Raw(`
+			SELECT
+			  COUNT(*) AS current_rejected,
+			  COALESCE(SUM(CASE WHEN latest.classified_at >= ? AND latest.classified_at < ? THEN 1 ELSE 0 END), 0) AS today_rejected
+			FROM candidate_profiles AS profile
+			JOIN dialogue_turns AS latest ON latest.turn_id = (
+			  SELECT turn.turn_id FROM dialogue_turns AS turn
+			  WHERE turn.profile_id = profile.profile_id AND turn.intent_label <> ''
+			  ORDER BY turn.inbound_through_seq DESC, turn.created_at DESC
+			  LIMIT 1
+			)
+			WHERE profile.platform = ? AND profile.account_ref = ?
+			  AND latest.intent_label = ?`,
+			start, end, platform, accountRef, string(m5ai.IntentRejected),
+		).Scan(&rejected).Error; err != nil {
+			return err
+		}
+		out.CurrentRejected = rejected.CurrentRejected
+		out.TodayRejected = rejected.TodayRejected
+
+		if err := tx.Model(&CandidateProfile{}).
+			Where("platform = ? AND account_ref = ?", platform, accountRef).
+			Where("end_reason = ?", CandidateProfileEndBlacklisted).
+			Count(&out.TotalBlacklisted).Error; err != nil {
+			return err
+		}
+		// 今日拉黑用 updated_at 锚:档案没有归档时刻列,而拉黑归档是终态、行
+		// 不再被业务写,updated_at 即归档时刻。弱点是将来若有迁移类批量回写会
+		// 污染当日数一天;它只是显示数字,不进任何业务裁决,接受这个精度。
+		return tx.Model(&CandidateProfile{}).
+			Where("platform = ? AND account_ref = ?", platform, accountRef).
+			Where("end_reason = ?", CandidateProfileEndBlacklisted).
+			Where("updated_at >= ? AND updated_at < ?", start, end).
+			Count(&out.TodayBlacklisted).Error
 	})
 	if err != nil {
 		return StatusReportCounts{}, err

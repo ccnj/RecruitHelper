@@ -43,6 +43,9 @@ var allowedPayloadKeys = map[string]bool{
 	"captured": true, "rated": true, "confirmed": true, "greeted": true,
 	"replies": true, "wechat": true, "interviewInvites": true,
 	"appointments": true, "elapsedInterviews": true, "byJob": true,
+	// today/total 共用:拒绝(最近一轮意向口径)与拉黑(归档原因)计数,
+	// 2026-08-14 甲方裁决增补。纯计数,不带候选人身份。
+	"rejected": true, "blacklisted": true,
 	// total
 	"interviewed": true,
 	// health
@@ -115,6 +118,14 @@ func TestCollectMapsTodayAndHealthFields(t *testing.T) {
 	}
 	if payload.Total.Greeted != 1200 {
 		t.Fatalf("累计计数错: %+v", payload.Total)
+	}
+	// 拒绝/拉黑来自 StatusReportCounts,且必须活过 applyOverview 对 Total 的
+	// 赋值 —— 那里若回退成结构体字面量整体覆盖,这两个数会被清零。
+	if payload.Today.Rejected != 4 || payload.Today.Blacklisted != 1 {
+		t.Fatalf("今日拒绝/拉黑错: %+v", payload.Today)
+	}
+	if payload.Total.Rejected != 9 || payload.Total.Blacklisted != 2 {
+		t.Fatalf("累计拒绝/拉黑错: %+v", payload.Total)
 	}
 	if payload.Health.PendingManualVerdicts != 2 {
 		t.Fatalf("待裁决条数错: %d", payload.Health.PendingManualVerdicts)
@@ -300,6 +311,10 @@ func fullDeps() Deps {
 			counts: store.StatusReportCounts{
 				TodayCaptured:          71,
 				ManualRequiredProfiles: 5,
+				CurrentRejected:        9,
+				TodayRejected:          4,
+				TotalBlacklisted:       2,
+				TodayBlacklisted:       1,
 				TodayCapturedByJob: []store.StatusReportJobCount{
 					{BackendJobID: "16", Name: "平安健康保障顾问", Captured: 71},
 				},

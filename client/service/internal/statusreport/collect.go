@@ -152,6 +152,10 @@ func Collect(deps Deps) (*Payload, error) {
 		return nil, err
 	}
 	payload.Today.Captured = counts.TodayCaptured
+	payload.Today.Rejected = counts.TodayRejected
+	payload.Today.Blacklisted = counts.TodayBlacklisted
+	payload.Total.Rejected = counts.CurrentRejected
+	payload.Total.Blacklisted = counts.TotalBlacklisted
 	payload.Health.ManualRequiredProfiles = counts.ManualRequiredProfiles
 	for _, row := range counts.TodayCapturedByJob {
 		payload.Today.ByJob = append(payload.Today.ByJob, TodayJob{
@@ -207,11 +211,11 @@ func applyOverview(payload *Payload, overview *store.AppOverviewProjection) {
 	payload.Today.Appointments = metricValue(statistics.TodayNewAppointments)
 	payload.Today.ElapsedInterviews = metricValue(statistics.TodayElapsedInterviews)
 
-	payload.Total = Total{
-		Greeted:     metricValue(statistics.TotalGreeted),
-		Wechat:      metricValue(statistics.TotalWechat),
-		Interviewed: metricValue(statistics.TotalInterviewed),
-	}
+	// 逐字段赋值,不整体覆盖:Total.Rejected/Blacklisted 在进本函数前已由
+	// StatusReportCounts 填好,结构体字面量会把它们清零。
+	payload.Total.Greeted = metricValue(statistics.TotalGreeted)
+	payload.Total.Wechat = metricValue(statistics.TotalWechat)
+	payload.Total.Interviewed = metricValue(statistics.TotalInterviewed)
 }
 
 // metricValue 把"可能读不出来"的指标压成一个数。不可用与 0 在这里合并 —— 载荷
