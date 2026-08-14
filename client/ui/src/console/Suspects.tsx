@@ -82,14 +82,12 @@ function PatrolQuarantines() {
       <h3>巡检隔离 · {rows.length} 个会话被跳过</h3>
       <div className="dc-suspect-list">
         {rows.map((row) => (
-          <div key={`${row.platform}:${row.accountRef}:${row.conversationRef}`} className="dc-suspect-row">
-            <div className="dc-suspect-line">
-              <strong>{row.peerDisplayName || shortRef(row.conversationRef)}</strong>
-              <span className="dim">{row.reason}</span>
-              <span className="dim">{dateTime(row.quarantinedAt)}</span>
-              {row.profileFrozen && <span className="dim">档案已冻结</span>}
-              <button onClick={() => { void release(row) }}>解除隔离</button>
-            </div>
+          <div key={`${row.platform}:${row.accountRef}:${row.conversationRef}`} className="dc-suspect-clear">
+            <strong>{row.peerDisplayName || shortRef(row.conversationRef)}</strong>
+            <span className="dim">{row.reason}</span>
+            <span className="dim">{dateTime(row.quarantinedAt)}</span>
+            {row.profileFrozen && <span className="dim">档案已冻结</span>}
+            <button className="compact-button" onClick={() => { void release(row) }}>解除隔离</button>
           </div>
         ))}
       </div>
