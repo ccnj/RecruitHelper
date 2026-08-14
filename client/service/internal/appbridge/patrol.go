@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/patrol"
@@ -259,31 +260,88 @@ func (r PatrolRunner) StartAutomaticCard(
 	}, nil
 }
 
-func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
-	if leaf.ResultBody == "" {
-		code := protocol.ErrCodeCtxLostDuringExec
+// ── RunError 合成的唯一出口 ────────────────────────────────────────────
+//
+// 手侧显式 error 里的 retryable/sideEffect 原样保留——那是手的协议级证词。
+// 手根本没回 result 的终局(expired/canceled/空 ResultBody)由脑合成 code,
+// 此时 retryable 必须从契约表按命令 class 解析出来,不得留空:留空的
+// retryable 曾被巡检失败分流当成最重的证词,一次 4 分钟的页面卡顿把候选人
+// 永久隔离(2026-08-13 真机现场,2026-08-14 甲方裁决修正)。
+// 新增合成路径一律经 runErrorFromLeaf,不得再手写 &patrol.RunError{Code: ...}。
+
+// parseRetryableDefault 解析契约 errorCodes 表的 retryable 声明。
+// 已知形态(contract.v1.json):单值 "yes";类键控 "yes|manualOnly(SX)",竖线
+// 后带 (SX) 限定的分支只适用 effectful;其他限定(如 witness 的
+// capacity/corrupt)依赖手侧数据,脑合成时无从判断,只取基础分支。
+func parseRetryableDefault(raw string) (base, sx protocol.Retryable, ok bool) {
+	valid := func(r protocol.Retryable) bool {
+		switch r {
+		case protocol.RetryableYes, protocol.RetryableNo,
+			protocol.RetryableAfterRecovery, protocol.RetryableManualOnly:
+			return true
+		}
+		return false
+	}
+	parts := strings.SplitN(raw, "|", 2)
+	base = protocol.Retryable(parts[0])
+	if !valid(base) {
+		return "", "", false
+	}
+	if len(parts) == 1 {
+		return base, "", true
+	}
+	if alt, found := strings.CutSuffix(parts[1], "(SX)"); found {
+		sx = protocol.Retryable(alt)
+		if !valid(sx) {
+			return "", "", false
+		}
+		return base, sx, true
+	}
+	return base, "", true
+}
+
+// synthesizedRetryable 按契约表把错误码解析成该命令 class 下的 retryable。
+// 表中缺该码或格式不识别时返回空串,由失败分流的默认方向兜底(2026-08-14
+// 裁决:证词缺席=未知=本轮跳过)。
+func synthesizedRetryable(code protocol.ErrorCode, class string) protocol.Retryable {
+	meta, ok := protocol.ErrorCodes[code]
+	if !ok {
+		return ""
+	}
+	base, sx, ok := parseRetryableDefault(meta.RetryableDefault)
+	if !ok {
+		return ""
+	}
+	if class == string(protocol.ClassEffectful) && sx != "" {
+		return sx
+	}
+	return base
+}
+
+// runErrorFromLeaf 把一条没有成功 data 的持久命令终局翻成 RunError。
+// result 传 nil 表示 ResultBody 为空(命令从未产生 result)。
+func runErrorFromLeaf(leaf store.CmdRecord, result *protocol.ResultBody) *patrol.RunError {
+	code := protocol.ErrCodeCtxLostDuringExec
+	if result == nil {
 		if leaf.ErrorCode != "" {
 			code = protocol.ErrorCode(leaf.ErrorCode)
 		}
-		return nil, &patrol.RunError{Code: code}
-	}
-	var result protocol.ResultBody
-	if err := json.Unmarshal([]byte(leaf.ResultBody), &result); err != nil {
-		return nil, errors.New("简历补采持久结果无法解析")
-	}
-	if result.Status == protocol.ResultStatusOk {
-		if len(result.Data) == 0 || string(result.Data) == "null" {
-			return nil, errors.New("简历补采成功结果缺少 data")
+		return &patrol.RunError{
+			Code:      code,
+			Retryable: synthesizedRetryable(code, leaf.Class),
+			Cause:     fmt.Errorf("逻辑命令终局 %s，未产生 result data", leaf.Status),
 		}
-		return append(json.RawMessage(nil), result.Data...), nil
 	}
-	code := protocol.ErrCodeCtxLostDuringExec
 	var reason protocol.NotReadyReason
 	var retryable protocol.Retryable
 	var sideEffect protocol.SideEffect
+	message := string(result.Status)
 	if result.Error != nil {
 		if result.Error.Code != "" {
 			code = result.Error.Code
+		}
+		if result.Error.Message != "" {
+			message = result.Error.Message
 		}
 		retryable = result.Error.Retryable
 		sideEffect = result.Error.SideEffect
@@ -300,7 +358,32 @@ func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	} else if result.Status == protocol.ResultStatusExpired {
 		code = protocol.ErrCodeExecTimeoutHand
 	}
-	return nil, &patrol.RunError{Code: code, Reason: reason, Retryable: retryable, SideEffect: sideEffect}
+	if retryable == "" {
+		// 覆盖两种缺席:脑合成的 code(手没回 result),以及手回了 error
+		// 却漏填 retryable 的畸形结果。两者都按契约默认补齐。
+		retryable = synthesizedRetryable(code, leaf.Class)
+	}
+	return &patrol.RunError{
+		Code: code, Reason: reason, Retryable: retryable, SideEffect: sideEffect,
+		Cause: errors.New(message),
+	}
+}
+
+func resumeCaptureResultData(leaf store.CmdRecord) (json.RawMessage, error) {
+	if leaf.ResultBody == "" {
+		return nil, runErrorFromLeaf(leaf, nil)
+	}
+	var result protocol.ResultBody
+	if err := json.Unmarshal([]byte(leaf.ResultBody), &result); err != nil {
+		return nil, errors.New("简历补采持久结果无法解析")
+	}
+	if result.Status == protocol.ResultStatusOk {
+		if len(result.Data) == 0 || string(result.Data) == "null" {
+			return nil, errors.New("简历补采成功结果缺少 data")
+		}
+		return append(json.RawMessage(nil), result.Data...), nil
+	}
+	return nil, runErrorFromLeaf(leaf, &result)
 }
 
 // Run 保留给 appbridge 的窄集成测试和非 actor 调用；生产巡检只走 Start/Wait。
@@ -338,14 +421,7 @@ func (r PatrolRunner) Probe(ctx context.Context, handID string) (protocol.ProbeP
 
 func resultData(leaf store.CmdRecord) (json.RawMessage, error) {
 	if leaf.ResultBody == "" {
-		code := protocol.ErrCodeCtxLostDuringExec
-		if leaf.ErrorCode != "" {
-			code = protocol.ErrorCode(leaf.ErrorCode)
-		}
-		return nil, &patrol.RunError{
-			Code:  code,
-			Cause: fmt.Errorf("逻辑命令终局 %s，未产生 result data", leaf.Status),
-		}
+		return nil, runErrorFromLeaf(leaf, nil)
 	}
 	var result protocol.ResultBody
 	if err := json.Unmarshal([]byte(leaf.ResultBody), &result); err != nil {
@@ -357,40 +433,7 @@ func resultData(leaf store.CmdRecord) (json.RawMessage, error) {
 		}
 		return append(json.RawMessage(nil), result.Data...), nil
 	}
-
-	code := protocol.ErrCodeCtxLostDuringExec
-	var reason protocol.NotReadyReason
-	message := string(result.Status)
-	if result.Error != nil {
-		if result.Error.Code != "" {
-			code = result.Error.Code
-		}
-		if result.Error.Message != "" {
-			message = result.Error.Message
-		}
-		if len(result.Error.Data) > 0 {
-			var detail struct {
-				Reason protocol.NotReadyReason `json:"reason"`
-			}
-			if json.Unmarshal(result.Error.Data, &detail) == nil {
-				reason = detail.Reason
-			}
-		}
-	} else if result.Status == protocol.ResultStatusCanceled {
-		code = protocol.ErrCodeCanceledByBrain
-	} else if result.Status == protocol.ResultStatusExpired {
-		code = protocol.ErrCodeExecTimeoutHand
-	}
-	var retryable protocol.Retryable
-	var sideEffect protocol.SideEffect
-	if result.Error != nil {
-		retryable = result.Error.Retryable
-		sideEffect = result.Error.SideEffect
-	}
-	return nil, &patrol.RunError{
-		Code: code, Reason: reason, Retryable: retryable, SideEffect: sideEffect,
-		Cause: errors.New(message),
-	}
+	return nil, runErrorFromLeaf(leaf, &result)
 }
 
 // HandAvailability deliberately exposes only the active hand generation.
