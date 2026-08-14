@@ -1238,6 +1238,36 @@ h1, h2, h3, p { margin-top: 0; }
 .publish-job-class-list li.is-picked button { border-color: var(--live); color: var(--live); }
 .publish-job-class-list small { color: var(--txt-faint); }
 
+/* 行首状态锚点与"要人看"汇总条。全页字色语义:绿=定案的好结果,黄=要人
+   拿主意,红=要人善后,灰=依据与中间态。 */
+.publish-precheck-verdict.st-ok { color: var(--live); }
+.publish-precheck-verdict.st-warn { color: var(--warn); }
+.publish-precheck-verdict.st-bad { color: var(--alarm); }
+.publish-precheck-verdict.st-dim { color: var(--txt-faint); }
+.publish-attention {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem;
+  margin: 0; padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--rule);
+  font-size: var(--fs-sm);
+}
+.publish-attention > strong { color: var(--txt-dim); font-weight: 600; }
+.dc-shell .publish-attention button { width: auto; margin: 0; padding: 0.05rem 0.32rem; font-size: var(--fs-sm); }
+.dc-shell .publish-attention button.st-bad { color: var(--alarm); border-color: rgba(255, 95, 86, 0.45); }
+.dc-shell .publish-attention button.st-warn { color: var(--warn); border-color: rgba(245, 167, 66, 0.45); }
+.publish-precheck-warn { margin: 0.16rem 0 0 4.95rem; color: var(--warn); font-size: var(--fs-sm); line-height: 1.5; }
+
+/* 依据折叠:结论常驻在行上,依据点开才见。标题自带一眼结论(词库几组几词、
+   还是平台压根没给),保住原先整份摊开要保的判断。 */
+.publish-evidence { margin: 0.2rem 0 0 4.95rem; }
+.publish-evidence > summary {
+  cursor: pointer; color: var(--txt-faint); font-size: var(--fs-sm);
+  line-height: 1.5; list-style: none;
+}
+.publish-evidence > summary::-webkit-details-marker { display: none; }
+.publish-evidence > summary::before { content: '▸ '; }
+.publish-evidence[open] > summary::before { content: '▾ '; }
+.publish-evidence > summary:hover { color: var(--txt-dim); }
+.publish-evidence .publish-draft-report { margin-left: 0; }
+
 /* M5 遗留：明确降级的视觉，不与在用配置抢注意力 */
 .dc-legacy { border-top: 1px solid var(--rule); background: #0a0e12; }
 .dc-legacy > summary {
