@@ -172,6 +172,47 @@ func TestMatchFrozenRecommendedMeetingTimeIsStrictAndUnique(t *testing.T) {
 	}
 }
 
+func TestAppendRealityBoundaryPlacesBlockLastAndRejectsEmptyPrompt(t *testing.T) {
+	rendered, err := AppendRealityBoundary("已渲染的回复提示词\n\n【本轮可选动作】\n· 无")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(rendered, realityBoundaryPolicy) {
+		t.Fatalf("现实边界块必须在提示词最末: rendered=%q", rendered)
+	}
+	for _, anchor := range []string{
+		"人不在任何现场",
+		"“下来接你”“我在前台”“我马上到”“在公司等你”这类话一个字不许出现",
+		"只许逐字照抄【事实库】写了的",
+		"没发生过的见面不许说成发生过",
+		"他定下具体时间才填「发起线下面试」",
+		"错认在自己身上，不许暗示他记错",
+	} {
+		if !strings.Contains(rendered, anchor) {
+			t.Fatalf("现实边界块缺失条款 %q", anchor)
+		}
+	}
+	if _, err := AppendRealityBoundary(" \n\t "); err == nil {
+		t.Fatal("空基础 prompt 不得被现实边界文本伪装成合法请求")
+	}
+}
+
+func TestServiceReplyPromptForbidsPresenceClaims(t *testing.T) {
+	rendered, err := RenderServiceReplyPrompt(nil, false, []string{"我到楼下了"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, anchor := range []string{
+		"人不在任何现场",
+		`不得出现"下来接你""我在前台""我马上到"这类话`,
+		"不得给出或编造任何地址、楼层",
+	} {
+		if !strings.Contains(rendered, anchor) {
+			t.Fatalf("服务阶段提示词缺失到场禁令 %q: rendered=%q", anchor, rendered)
+		}
+	}
+}
+
 func TestServiceReplyPolicyAppendsDeterministicBoundaries(t *testing.T) {
 	service, err := AppendServiceReplyPolicy("原职位话术")
 	if err != nil ||

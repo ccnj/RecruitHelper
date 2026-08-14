@@ -49,7 +49,9 @@ func RenderGreetingPrompt(prompt string, input GreetingInputV1) (string, error) 
 	if counts[greetingCareerStateToken] != 1 || counts[greetingResumeSummaryToken] != 1 {
 		return "", errors.New("invalidGreetingPrompt")
 	}
-	return builder.String(), nil
+	// 现实边界紧凑版(2026-08-14 甲方裁决,详见 render.go 完整版注释):招呼语
+	// 同样是候选人可见正文,不许承诺到场或编造地址。
+	return builder.String() + "\n\n" + realityBoundaryCompactPolicy, nil
 }
 
 // ParseGreetingSuggestion consumes only the prompt's canonical Chinese body

@@ -87,7 +87,9 @@ func RenderSilenceFollowupPrompt(prompt, canonicalResumeJSON string) (string, er
 	if strings.TrimSpace(rendered) == "" {
 		return "", errors.New("missingRenderedSilenceFollowupPrompt")
 	}
-	return rendered, nil
+	// 现实边界紧凑版(2026-08-14 甲方裁决,详见 render.go 完整版注释):追问
+	// 话术同样是候选人可见正文,不许承诺到场或编造地址。
+	return rendered + "\n\n" + realityBoundaryCompactPolicy, nil
 }
 
 func silenceResumeBasicFact(basic []resumeLabelValue, wanted string) (string, error) {

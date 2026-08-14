@@ -19,7 +19,8 @@ func TestRenderGreetingPromptReplacesOnlyOriginalTokensOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "状态=状态含{resume_summary_json};简历=" + input.ResumeSummaryJSON
+	want := "状态=状态含{resume_summary_json};简历=" + input.ResumeSummaryJSON +
+		"\n\n" + realityBoundaryCompactPolicy
 	if rendered != want {
 		t.Fatalf("招呼模板发生递归替换: got=%q want=%q", rendered, want)
 	}
@@ -47,7 +48,8 @@ func TestRenderGreetingPromptPreservesInputLargerThanTokenLimitInBytes(t *testin
 	careerState := strings.Repeat("界", GreetingInputTokenLimit)
 	input := GreetingInputV1{CareerState: careerState, ResumeSummaryJSON: `{}`}
 	rendered, err := RenderGreetingPrompt("{career_state}{resume_summary_json}", input)
-	if err != nil || rendered != careerState+"{}" || len([]byte(rendered)) <= GreetingInputTokenLimit {
+	if err != nil || rendered != careerState+"{}"+"\n\n"+realityBoundaryCompactPolicy ||
+		len([]byte(rendered)) <= GreetingInputTokenLimit {
 		t.Fatalf("招呼渲染不应以 UTF-8 字节冒充 token: bytes=%d err=%v", len([]byte(rendered)), err)
 	}
 }
