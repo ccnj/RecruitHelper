@@ -71,8 +71,19 @@ interface RowState {
 
 type LoopPhase = 'idle' | 'planning' | 'publishing'
 
+// 循环进度分两种形态:收齐候选加统一分配是一整段、没有中途里程碑,显示 1/N
+// 会被读成"第 1 个职位卡住了",只能给耗时;逐个跑的段落才有 1/N 与职位名。
+type LoopCursor =
+  | { kind: 'gather' }
+  | { kind: 'step'; done: number; total: number; jobName: string }
+
 export function JobPublishPage({ account }: { account: AccountView | null }) {
   return <BackendJobsTable account={account} />
+}
+
+function formatClock(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  return minutes > 0 ? `${minutes} 分 ${String(seconds % 60).padStart(2, '0')} 秒` : `${seconds} 秒`
 }
 
 function formatDiagValue(value: unknown): string {
@@ -80,6 +91,41 @@ function formatDiagValue(value: unknown): string {
   if (Array.isArray(value)) return value.length === 0 ? '(空)' : value.join('、')
   if (typeof value === 'boolean') return value ? '是' : '否'
   return String(value)
+}
+
+// 行首状态锚点。它回答的是"这一行现在处于什么阶段、要不要人管",细节都在
+// 折叠块与结果块里;没有任何运行期状态时返回 null,行首回落到预检结论。
+// 色彩语义全页统一:绿=定案的好结果,黄=要人拿主意,红=要人善后,灰=中间态。
+function rowRuntimeStatus(
+  state: RowState, stale: boolean,
+): { label: string; tone: 'ok' | 'warn' | 'bad' | 'dim' } | null {
+  if (state.publishResult) {
+    return state.publishResult.report?.postingVisible === true
+      ? { label: '已发成', tone: 'ok' }
+      : { label: '发布未确认', tone: 'bad' }
+  }
+  if (state.skipped) return { label: '已跳过', tone: 'warn' }
+  if (state.error) return { label: '出错', tone: 'bad' }
+  if (stale) return { label: '待重选词', tone: 'warn' }
+  if (state.plan) return { label: '已选定', tone: 'ok' }
+  if (state.classView) return { label: '已定类别', tone: 'dim' }
+  return null
+}
+
+// 依据折叠块的标题。必须自带一眼结论:词库是"模型没选到好词"还是"平台压根
+// 没给",不点开也分得清——这是词库此前整份摊开想保住的判断,折叠后由标题接棒。
+function evidenceSummary(state: RowState): string {
+  const parts: string[] = []
+  if (state.classView) parts.push(`类别候选 ${state.classView.candidates.length} 个`)
+  const plan = state.plan
+  if (plan) {
+    const wordCount = plan.sections.reduce((sum, section) => sum + section.words.length, 0)
+    parts.push(wordCount === 0
+      ? '平台没给现成词条'
+      : `词库 ${plan.sections.length} 组 ${wordCount} 词`)
+    parts.push(`命中 ${plan.matched.length} · 自定义 ${plan.custom.length}`)
+  }
+  return parts.join(' · ')
 }
 
 function DraftDiagnosticsBlock({ diagnostics }: { diagnostics: Record<string, unknown> }) {
@@ -303,7 +349,8 @@ function PublishPrecheckPanel({
   const [rows, setRows] = useState<Record<string, RowState>>({})
   const [phase, setPhase] = useState<LoopPhase>('idle')
   const [busyJob, setBusyJob] = useState('')
-  const [cursor, setCursor] = useState<{ done: number; total: number; jobName: string } | null>(null)
+  const [cursor, setCursor] = useState<LoopCursor | null>(null)
+  const [gatherSeconds, setGatherSeconds] = useState(0)
   const [publishArmed, setPublishArmed] = useState(false)
   const [draftBusy, setDraftBusy] = useState('')
   // 脑侧那次全局分配的尝试记录。撞车不存这里：人工改选类别后原来的撞车可能
@@ -312,9 +359,28 @@ function PublishPrecheckPanel({
   const [batchError, setBatchError] = useState('')
   // 停止只影响"要不要开始下一个职位"。已经派出去的那条命令照常收束——半路
   // 掐掉一条在途的 effectful 命令只会制造一个结果未知的 suspect。
+  // stopRequested 是它的显示镜像:ref 变了不重渲染,没有镜像人看不出点没点上。
   const stopRef = useRef(false)
+  const [stopRequested, setStopRequested] = useState(false)
+
+  // "再点一次"的确认针对的是确认那一刻看到的集合。行状态一变(勾选、改类别、
+  // 重选词)旧确认就作废,不允许拿旧确认发新集合;放几秒不点也自动解除。
+  useEffect(() => {
+    if (!publishArmed) return
+    const timer = setTimeout(() => setPublishArmed(false), 8000)
+    return () => clearTimeout(timer)
+  }, [publishArmed])
+
+  // 收齐候选段的走表。这一段十来分钟没有别的可动的数字,表不走会被当成卡死。
+  useEffect(() => {
+    if (cursor?.kind !== 'gather') return
+    setGatherSeconds(0)
+    const timer = setInterval(() => setGatherSeconds((prev) => prev + 1), 1000)
+    return () => clearInterval(timer)
+  }, [cursor?.kind])
 
   const patch = (jobId: string, next: Partial<RowState>) => {
+    setPublishArmed(false)
     setRows((prev) => ({ ...prev, [jobId]: { ...prev[jobId], ...next } }))
   }
   const failRow = (jobId: string, prefix: string, reason: unknown, next?: Partial<RowState>) => {
@@ -435,16 +501,17 @@ function PublishPrecheckPanel({
   // 阶段 A 分三段：A1 收齐全部职位的候选 → 一次全局分配 → A2 逐个选关键词。
   //
   // A1 与全局分配合在同一次调用里（脑侧串行跑完全部职位的填页再问模型），所以
-  // 那一段只能给总进度：一次要跑十来分钟，中途没有可上报的里程碑。这是"统一
-  // 分配"的必然形态——候选没收齐就没法通盘决定谁该让开谁。
+  // 那一段没有可上报的里程碑，只能给一句说明加耗时走表。这是"统一分配"的
+  // 必然形态——候选没收齐就没法通盘决定谁该让开谁。
   const runPhaseA = async (): Promise<void> => {
     if (!account) return
     stopRef.current = false
+    setStopRequested(false)
     setPhase('planning')
     setPublishArmed(false)
     const targets = readyRows
     try {
-      setCursor({ done: 0, total: targets.length, jobName: '正在收齐候选并统一分配类别' })
+      setCursor({ kind: 'gather' })
       let planned: JobClassAssignmentView[]
       try {
         const result = await api.jobPublishClassPlan(
@@ -477,7 +544,7 @@ function PublishPrecheckPanel({
       const withClass = planned.filter((assigned) => Boolean(assigned.jobClass))
       for (const [index, assigned] of withClass.entries()) {
         if (stopRef.current) break
-        setCursor({ done: index, total: withClass.length, jobName: assigned.jobName })
+        setCursor({ kind: 'step', done: index, total: withClass.length, jobName: assigned.jobName })
         await planKeywordsFor(assigned.jobId, assigned.jobName, assigned.jobClass ?? '')
       }
     } finally {
@@ -534,12 +601,13 @@ function PublishPrecheckPanel({
     }
     setPublishArmed(false)
     stopRef.current = false
+    setStopRequested(false)
     setPhase('publishing')
     const targets = readyRows.filter((row) => rows[row.jobId]?.selected && decided(row.jobId))
     try {
       for (const [index, row] of targets.entries()) {
         if (stopRef.current) break
-        setCursor({ done: index, total: targets.length, jobName: row.jobName })
+        setCursor({ kind: 'step', done: index, total: targets.length, jobName: row.jobName })
         await publishOne(row.jobId, row.jobName)
       }
     } finally {
@@ -571,9 +639,25 @@ function PublishPrecheckPanel({
   const busy = running || busyJob !== '' || draftBusy !== ''
   const selectable = readyRows.filter((row) => decided(row.jobId))
   const selectedCount = selectable.filter((row) => rows[row.jobId]?.selected).length
-  const skippedCount = readyRows.filter((row) => rows[row.jobId]?.skipped).length
   const publishedCount = readyRows.filter((row) => rows[row.jobId]?.publishResult).length
   const collisionCount = Object.keys(collisionsNow).length
+
+  // "要人看"汇总条的四类。发布未确认排最前——它是全页最不该被淹没的信息。
+  const unconfirmedRows = readyRows.filter((row) => {
+    const result = rows[row.jobId]?.publishResult
+    return result !== undefined && result.report?.postingVisible !== true
+  })
+  const erroredRows = readyRows.filter((row) => {
+    const state = rows[row.jobId]
+    return Boolean(state?.error) && !state?.skipped && !state?.publishResult
+  })
+  const skippedRows = readyRows.filter((row) => rows[row.jobId]?.skipped)
+  const collisionFirstRow = readyRows.find((row) => collidesWith(row.jobId, row.jobName).length > 0)
+
+  // 点汇总条跳到第一个该类的行。开发台够用,不做逐个循环跳。
+  const jumpTo = (jobId: string) => {
+    document.getElementById(`publish-row-${jobId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
 
   return (
     <div className="publish-precheck">
@@ -610,42 +694,84 @@ function PublishPrecheckPanel({
               : `确认发布（共 ${selectedCount} 个）`}
         </button>
         {running && (
-          <button type="button" className="danger-button" onClick={() => { stopRef.current = true }}>
-            跑完当前这个就停
+          <button
+            type="button"
+            className="danger-button"
+            disabled={stopRequested}
+            onClick={() => { stopRef.current = true; setStopRequested(true) }}
+          >
+            {stopRequested ? '将在当前这个收尾后停止' : '跑完当前这个就停'}
           </button>
         )}
         {cursor && (
           <small className="publish-loop-cursor">
-            {phase === 'publishing' ? '正在发布' : '正在处理'} {cursor.done + 1}/{cursor.total}：
-            {cursor.jobName}
+            {cursor.kind === 'gather'
+              ? `正在收齐全部职位的类别候选并统一分配。这一段没有中途进度,通常要十来分钟 · 已等 ${formatClock(gatherSeconds)}`
+              : `${phase === 'publishing' ? '正在发布' : '正在选关键词'} ${cursor.done + 1}/${cursor.total}：${cursor.jobName}`}
           </small>
         )}
-        {!running && (selectedCount > 0 || skippedCount > 0 || publishedCount > 0) && (
+        {!running && (selectedCount > 0 || publishedCount > 0) && (
           <small className="publish-loop-cursor">
             已选定 {selectable.length} 个 · 勾选 {selectedCount} 个
-            {skippedCount > 0 && ` · 跳过 ${skippedCount} 个`}
             {publishedCount > 0 && ` · 已发 ${publishedCount} 个`}
-            {collisionCount > 0 && ` · ${collisionCount} 个类别被多个职位共用`}
           </small>
         )}
       </div>
+      {(unconfirmedRows.length > 0 || erroredRows.length > 0 || collisionFirstRow !== undefined
+        || skippedRows.length > 0) && (
+        <p className="publish-attention">
+          <strong>要人看</strong>
+          {unconfirmedRows.length > 0 && (
+            <button
+              type="button" className="st-bad"
+              title="发出去了但没拿到平台正证。去平台核对，不要重发"
+              onClick={() => jumpTo(unconfirmedRows[0].jobId)}
+            >
+              发布未确认 {unconfirmedRows.length}
+            </button>
+          )}
+          {erroredRows.length > 0 && (
+            <button
+              type="button" className="st-bad"
+              title="发布或准备阶段出了错，点过去看失败现场"
+              onClick={() => jumpTo(erroredRows[0].jobId)}
+            >
+              出错 {erroredRows.length}
+            </button>
+          )}
+          {collisionFirstRow && (
+            <button
+              type="button" className="st-warn"
+              title="多个职位撞了同一类别，平台会推给同一批人，扩池打折。可逐个改选，也可以接受"
+              onClick={() => jumpTo(collisionFirstRow.jobId)}
+            >
+              类别撞车 {collisionCount}
+            </button>
+          )}
+          {skippedRows.length > 0 && (
+            <button
+              type="button" className="st-warn"
+              title="阶段 A 没跑成被跳过的职位，不阻塞其余。可单独重跑"
+              onClick={() => jumpTo(skippedRows[0].jobId)}
+            >
+              跳过 {skippedRows.length}
+            </button>
+          )}
+        </p>
+      )}
       {batchError && <p className="publish-precheck-issue">{batchError}</p>}
       {attempts.length > 1 && (
         <p className="publish-precheck-notice">大模型分配尝试：{attempts.join('、')}</p>
-      )}
-      {collisionCount > 0 && (
-        <p className="publish-precheck-notice">
-          有 {collisionCount} 个类别被多个职位共用。同类别的职位会被平台推给同一批人，
-          发多个职位的扩池效果会打折——可以在下面逐个改选，也可以就这样发。
-        </p>
       )}
 
       <ul className="publish-precheck-list">
         {[...readyRows, ...otherRows].map((row) => {
           const state = rows[row.jobId] ?? {}
           const stale = planStale(row.jobId)
+          const status = row.verdict === 'ready' ? rowRuntimeStatus(state, stale) : null
+          const rowCollisions = row.verdict === 'ready' ? collidesWith(row.jobId, row.jobName) : []
           return (
-            <li key={row.jobId} className={`is-${row.verdict}`}>
+            <li key={row.jobId} id={`publish-row-${row.jobId}`} className={`is-${row.verdict}`}>
               <div className="publish-precheck-row">
                 {row.verdict === 'ready' && decided(row.jobId) && (
                   <label className="publish-precheck-pick" title="不勾选就不发这一个">
@@ -657,8 +783,8 @@ function PublishPrecheckPanel({
                     />
                   </label>
                 )}
-                <span className="publish-precheck-verdict">
-                  {PUBLISH_VERDICT_LABEL[row.verdict] || row.verdict}
+                <span className={`publish-precheck-verdict${status ? ` st-${status.tone}` : ''}`}>
+                  {status ? status.label : (PUBLISH_VERDICT_LABEL[row.verdict] || row.verdict)}
                 </span>
                 <strong>{row.jobName || '未命名职位'}</strong>
                 {row.isCurrent && <em className="backend-jobs-current">当前职位</em>}
@@ -704,17 +830,31 @@ function PublishPrecheckPanel({
               </div>
               {state.error && <p className="publish-precheck-issue">{state.error}</p>}
               {state.diagnostics && Object.keys(state.diagnostics).length > 0 && (
-                <DraftDiagnosticsBlock diagnostics={state.diagnostics} />
+                <details className="publish-evidence">
+                  <summary>失败现场（{Object.keys(state.diagnostics).length} 项）</summary>
+                  <DraftDiagnosticsBlock diagnostics={state.diagnostics} />
+                </details>
               )}
-              {state.classView && (
-                <JobClassBlock
-                  view={state.classView}
-                  effective={effectiveClass(row.jobId)}
-                  collidesWith={collidesWith(row.jobId, row.jobName)}
-                  onPick={(name) => patch(row.jobId, { classPick: name })}
-                />
+              {rowCollisions.length > 0 && (
+                <p className="publish-precheck-warn">
+                  与 {rowCollisions.join('、')} 撞了同一类别——平台会推给同一批人，扩池打折。
+                  点开下面的依据可改选，也可以接受。
+                </p>
               )}
-              {state.plan && <KeywordPlanBlock plan={state.plan} stale={stale} />}
+              {(state.classView || state.plan) && (
+                <details className="publish-evidence">
+                  <summary>依据 · {evidenceSummary(state)}</summary>
+                  {state.classView && (
+                    <JobClassBlock
+                      view={state.classView}
+                      effective={effectiveClass(row.jobId)}
+                      collidesWith={rowCollisions}
+                      onPick={(name) => patch(row.jobId, { classPick: name })}
+                    />
+                  )}
+                  {state.plan && <KeywordPlanBlock plan={state.plan} stale={stale} />}
+                </details>
+              )}
               {state.publishResult && <PublishResultBlock result={state.publishResult} />}
               <OfflineResultBlock result={state.offlineResult} error={state.offlineError} />
               {state.draft && <DraftReportBlock report={state.draft} />}
