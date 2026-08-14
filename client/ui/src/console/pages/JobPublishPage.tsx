@@ -324,7 +324,9 @@ function PublishPrecheckPanel({
   const [batchError, setBatchError] = useState('')
   // 停止只影响"要不要开始下一个职位"。已经派出去的那条命令照常收束——半路
   // 掐掉一条在途的 effectful 命令只会制造一个结果未知的 suspect。
+  // stopRequested 是它的显示镜像:ref 变了不重渲染,没有镜像人看不出点没点上。
   const stopRef = useRef(false)
+  const [stopRequested, setStopRequested] = useState(false)
 
   // "再点一次"的确认针对的是确认那一刻看到的集合。行状态一变(勾选、改类别、
   // 重选词)旧确认就作废,不允许拿旧确认发新集合;放几秒不点也自动解除。
@@ -469,6 +471,7 @@ function PublishPrecheckPanel({
   const runPhaseA = async (): Promise<void> => {
     if (!account) return
     stopRef.current = false
+    setStopRequested(false)
     setPhase('planning')
     setPublishArmed(false)
     const targets = readyRows
@@ -563,6 +566,7 @@ function PublishPrecheckPanel({
     }
     setPublishArmed(false)
     stopRef.current = false
+    setStopRequested(false)
     setPhase('publishing')
     const targets = readyRows.filter((row) => rows[row.jobId]?.selected && decided(row.jobId))
     try {
@@ -639,8 +643,13 @@ function PublishPrecheckPanel({
               : `确认发布（共 ${selectedCount} 个）`}
         </button>
         {running && (
-          <button type="button" className="danger-button" onClick={() => { stopRef.current = true }}>
-            跑完当前这个就停
+          <button
+            type="button"
+            className="danger-button"
+            disabled={stopRequested}
+            onClick={() => { stopRef.current = true; setStopRequested(true) }}
+          >
+            {stopRequested ? '将在当前这个收尾后停止' : '跑完当前这个就停'}
           </button>
         )}
         {cursor && (
