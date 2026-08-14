@@ -21,6 +21,10 @@ import {
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
   if (!(error instanceof ZhilianPlatformError)) throw error
+  // 失败现场快照与 notReady 原因合并进 error.data(只给人读,不参与任何业务
+  // 判定),同 m6:随失败 result 落进脑侧账本与日志,页面刷新也不丢。
+  const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
+  if (error.reason) data.reason = error.reason
   return {
     status: 'failed',
     error: {
@@ -28,7 +32,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
       message: error.message,
       retryable: error.retryable,
       sideEffect: 'none',
-      ...(error.reason ? { data: { reason: error.reason } } : {}),
+      ...(Object.keys(data).length > 0 ? { data } : {}),
     },
   }
 }
