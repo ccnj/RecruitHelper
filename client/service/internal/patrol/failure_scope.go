@@ -16,9 +16,16 @@ import (
 // 默认方向）：单个候选人处理中的错误不停整个账号轮。分类只看错误产地与手的
 // 协议声明，不做字符串猜测：
 //   - 账号级/轮级控制信号维持全停（登录/身份/窗口/换代/真人让位/进程退出）；
-//   - 手侧命令失败按 retryable 声明分流：yes/afterRecovery 为瞬时（本轮跳过，
-//     下轮自然重试），no/manualOnly 保留隔离——这是手的协议级"需要人"证词，
-//     且该失败可能发生在 effect 派发之后（Wait 上抛路径），不随默认反转；
+//   - 手侧命令失败按 retryable 声明分流：隔离必须有正面证词——显式
+//     no/manualOnly 才隔离（这是手的协议级"需要人"证词，且该失败可能发生在
+//     effect 派发之后，不随默认反转）；yes/afterRecovery 为瞬时（本轮跳过，
+//     下轮自然重试）；**证词缺席（retryable 为空）是未知，走未知的默认：本轮
+//     跳过**（2026-08-14 甲方裁决补全:此前证词缺席落进隔离默认分支,一次瞬时
+//     超时把候选人永久冻结;脑合成的错误现已由 appbridge runErrorFromLeaf 按
+//     契约表补齐 retryable,effectful 超时仍解析为 manualOnly、隔离不放松）；
+//   - 脑主动取消自己的命令（CANCELED_BY_BRAIN:租约到期/换代/停机）是环境
+//     事件,不是这个人的状态坏了;契约给它的 retryable=no 说的是"别重发这条
+//     命令",不是"这个人需要人工",特判本轮跳过；
 //   - 脑侧错误与未知错误默认本轮跳过、下轮重读（2026-08-02 反转，废止 07-27
 //     "脑侧一律确定性隔离"）：它们全部发生在世界未被改动、或重派已被
 //     WAL/idemKey/动作状态机结构性挡住的位置，隔离换来的是"安静但永久"的
@@ -57,11 +64,20 @@ func classifyConversationFailure(err error) conversationFailureScope {
 			typed.Code == protocol.ErrCodePostconditionUnconfirmed {
 			return failureScopeSkipRound
 		}
-		switch typed.Retryable {
-		case protocol.RetryableYes, protocol.RetryableAfterRecovery:
+		// 脑取消自己的命令是环境事件（租约到期/换代/停机），不是这个人的
+		// 状态坏了。契约 retryable=no 描述命令级重试，不构成人级隔离证词。
+		if typed.Code == protocol.ErrCodeCanceledByBrain {
 			return failureScopeSkipRound
 		}
-		return failureScopeQuarantine
+		// 隔离必须有正面证词（2026-08-14 甲方裁决）：显式 no/manualOnly 才
+		// 隔离；证词缺席是未知，未知走 2026-08-02 的默认方向——本轮跳过。
+		// 真正防多发的是账本/idemKey/手证词（全是成员级闸），本分类器只是
+		// 毯子；effectful 超时经契约解析仍带 manualOnly，不依赖默认分支。
+		switch typed.Retryable {
+		case protocol.RetryableNo, protocol.RetryableManualOnly:
+			return failureScopeQuarantine
+		}
+		return failureScopeSkipRound
 	}
 	// 脑侧与未知错误：默认本轮跳过（2026-08-02 甲方裁决反转；07-28 起逐案
 	// 特赦的瞬时白名单——版本冲突、空收编快照、AI 预留冲突等——随默认反转
