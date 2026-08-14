@@ -1242,7 +1242,8 @@ async function mainReadCurrentResume(
     if (currentEntries.length !== 1 || currentEntries[0] !== entries[0]) return failed('target_changed')
     currentEntries[0].click()
     let modals: HTMLElement[] = []
-    const waitUntil = Date.now() + 6_000
+    // 打开等待与条件等待规格上限对齐(10 秒;原 6 秒),同 capture 侧。
+    const waitUntil = Date.now() + 10_000
     while (Date.now() < waitUntil) {
       modals = visibleAll(document, '.new-shortcut-resume__modal')
       if (modals.length !== 0) break
@@ -14545,6 +14546,11 @@ interface MainResumeCaptureFailed {
     | 'modal_cardinality'
     | 'open_failed'
     | 'close_failed'
+  // open_failed 的失败现场(2026-08-14 立):只给人读的结构化事实,经
+  // diagnostics 进 error.data。真机已出现"点击落在唯一命中的入口上、弹窗
+  // 6 秒不出现"的失败(2026-08-13 客户机),单凭超时分不清"数据慢"与
+  // "点击被吞",此快照即裁决数据源。只计数、不取页面文本。
+  scene?: Record<string, unknown>
 }
 type MainResumeCaptureStepResult = MainCaptureStepReady | MainResumeCaptureFailed
 
@@ -14675,15 +14681,58 @@ async function mainResumeCaptureStep(
       .filter((element) => clean(element.textContent) === '查看详情' &&
         element.closest('.im-session-detail') === detail)
     if (entries.length !== 1) return failed('entry_unresolved')
-    entries[0].click()
-    const waitUntil = Date.now() + 6_000
+    const clickedEntry = entries[0]
+    const clickedAt = Date.now()
+    clickedEntry.click()
+    // 打开等待与同原语的关窗等待、条件等待规格上限对齐(10 秒;原 6 秒)。
+    const waitUntil = clickedAt + 10_000
     let modals: HTMLElement[] = []
     while (Date.now() < waitUntil) {
       modals = visibleAll(document, '.new-shortcut-resume__modal')
       if (modals.length !== 0) break
       await sleep(120)
     }
-    if (modals.length !== 1) return failed(modals.length === 0 ? 'open_failed' : 'modal_cardinality')
+    if (modals.length === 0) {
+      // 失败现场取证:超时只证明"上限内没等到",分不清数据慢与点击被吞。
+      // 结构化事实随失败上行;此外再只读观察一段,记录弹窗是否迟到出现——
+      // 迟到不救本次(条件等待上限已过),但顺手关掉,不留孤儿弹窗盖住 IM 页
+      // (原实现在这条路径上会把迟到弹窗永久留在页面上)。
+      const countVisible = (selector: string): number => visibleAll(document, selector).length
+      const scene: Record<string, unknown> = {
+        step: 'open',
+        openWaitMs: Date.now() - clickedAt,
+        onLine: navigator.onLine,
+        docVisible: document.visibilityState,
+        clickedEntryConnected: clickedEntry.isConnected,
+        detailCount: countVisible('.im-session-detail'),
+        loadingLikeCount: countVisible('[class*="loading" i], [class*="spinner" i]'),
+        toastLikeCount: countVisible('[class*="toast" i]'),
+        lateModalMs: -1,
+      }
+      const lateUntil = Date.now() + 10_000
+      while (Date.now() < lateUntil) {
+        const late = visibleAll(document, '.new-shortcut-resume__modal')
+        if (late.length !== 0) {
+          scene.lateModalMs = Date.now() - clickedAt
+          const closers = visibleAll(late[0], '.new-shortcut-resume__close')
+          if (closers.length === 1) closers[0].click()
+          const goneUntil = Date.now() + 10_000
+          let lateModalClosed = false
+          while (Date.now() < goneUntil) {
+            if (visibleAll(document, '.new-shortcut-resume__modal').length === 0) {
+              lateModalClosed = true
+              break
+            }
+            await sleep(120)
+          }
+          scene.lateModalClosed = lateModalClosed
+          break
+        }
+        await sleep(250)
+      }
+      return { status: 'failed', reason: 'open_failed', scene }
+    }
+    if (modals.length !== 1) return failed('modal_cardinality')
     return metricsOf(resolveScrollContainer(modals[0]))
   }
 
@@ -14726,7 +14775,10 @@ function resumeCaptureStepFailure(result: MainResumeCaptureFailed): never {
   if (result.reason === 'close_failed') {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '简历弹窗未能关闭还原', 'manualOnly')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `简历截图目标无法解析(${result.reason})`, 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED', `简历截图目标无法解析(${result.reason})`, 'manualOnly',
+    undefined, 'none', result.scene,
+  )
 }
 
 // candidate.captureResumeScreenshot@1:打开与 candidate.readResume 同款的简历
