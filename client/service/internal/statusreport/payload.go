@@ -114,6 +114,11 @@ type Today struct {
 	InterviewInvites  int64 `json:"interviewInvites"`
 	Appointments      int64 `json:"appointments"`
 	ElapsedInterviews int64 `json:"elapsedInterviews"`
+	// Rejected/Blacklisted 是 2026-08-14 甲方裁决增补的两项计数(AGENTS.md
+	// 工作状态上报条目)。拒绝按「最近一轮意向」口径,今日=末轮拒绝且当日判定;
+	// 拉黑按归档原因。仍是纯计数,不带任何候选人身份。
+	Rejected    int64 `json:"rejected"`
+	Blacklisted int64 `json:"blacklisted"`
 	// ByJob 回答「今天采集了什么职位」。职位是客户自己的,不是候选人信息。
 	ByJob []TodayJob `json:"byJob"`
 }
@@ -122,6 +127,10 @@ type Total struct {
 	Greeted     int64 `json:"greeted"`
 	Wechat      int64 `json:"wechat"`
 	Interviewed int64 `json:"interviewed"`
+	// Rejected 是状态口径:当前处于「末轮拒绝」的人数,有人改口会回落,
+	// 不是只增不减的流水数。Blacklisted 是累计归档拉黑数。
+	Rejected    int64 `json:"rejected"`
+	Blacklisted int64 `json:"blacklisted"`
 }
 
 type Health struct {
