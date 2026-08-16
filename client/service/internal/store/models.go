@@ -118,7 +118,10 @@ type CmdRecord struct {
 	VerificationChildMsgID   string     `gorm:"index"` // 仅 parent SX：当前尚未消费的验证读 logical root
 	ReviewReady              bool       // 真实 SX 已完成 outbox/query/验证收束，在线也可人裁
 	ReviewAfterMs            int64      // 不可早于原命令 deadline+grace，防页面僵尸迟到 click
-	CreatedAt                time.Time
+	// created_at 带索引:诊断台 RecentCmds 按它倒序取 50 条,客户机 13.9 万行
+	// 无索引时每次全表扫描约 900ms,单写连接上其余查询全部排队(2026-08-16
+	// 客户机实测;建索引后同查询毫秒级,存量库由 AutoMigrate 启动时一次性补建)。
+	CreatedAt                time.Time `gorm:"index"`
 	UpdatedAt                time.Time
 	TerminalAt               *time.Time // 进入终局的时刻
 }
