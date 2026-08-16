@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -499,6 +500,10 @@ func (m *Manager) syncAccountPause(
 	if err != nil {
 		return run, false, err
 	}
+	slog.Warn("产品工作流已投影账号暂停",
+		"runId", run.RunID,
+		"stage", run.Stage,
+		"pausedReason", strings.TrimSpace(account.PausedReason))
 	return paused, true, nil
 }
 
@@ -513,11 +518,30 @@ func isExpectedSourcingTargetPause(
 			store.SourcingTargetReachedPauseReason {
 		return false
 	}
-	return usesSourcingTargetHold(run) ||
-		(run.Mode == workflow.ModeFull &&
-			run.Stage == store.ProductWorkflowStageCommunication &&
-			run.SourcingBatchID != nil &&
-			strings.TrimSpace(*run.SourcingBatchID) != "")
+	if usesSourcingTargetHold(run) {
+		return true
+	}
+	if run.Mode != workflow.ModeFull ||
+		run.SourcingBatchID == nil ||
+		strings.TrimSpace(*run.SourcingBatchID) == "" {
+		return false
+	}
+	switch run.Stage {
+	case store.ProductWorkflowStageCommunication:
+		return true
+	case store.ProductWorkflowStageSourcing:
+		// stage 仍在 sourcing 时也可能观察到这个 hold：达标与撞底收口把
+		// "批次 completed + 账号 hold"写在同一事务里，而 syncAccountPause
+		// 的批次读与账号读是两次查询，收口提交可以插在两读之间，造成
+		// "批次还在采、账号已带 hold"的陈旧快照(2026-08-16 客户机实录：
+		// 慢库把两读间隔拉到近一秒，误投影成 workflow pause 后停摆 53
+		// 分钟)。该原因码只有采集收口两条内部路径会写，用户暂停与掉登录
+		// 等真实停摆各有专属原因码，放行它不会掩盖任何真实暂停；下一轮
+		// 重读批次即见 completed，经既有 sourcing 分支正常推进到 scoring。
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) recoverInterruptedFullStart(
