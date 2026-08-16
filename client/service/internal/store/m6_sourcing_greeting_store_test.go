@@ -454,20 +454,14 @@ func TestCompleteSourcingGreetingRejectsUnsafeOrUnnormalizedSuccess(t *testing.T
 	if _, err := s.ReserveSourcingGreeting(reservation); err != nil {
 		t.Fatal(err)
 	}
-	one := 1
+	// 2026-08-16 甲方裁决开启思考模式:正 reasoning token 不再阻断,本段原有的
+	// "正 reasoning token 未阻断" 断言随非思考闸一并撤销;正文规范化校验照旧。
+	zero := 0
 	completion := AIInvocationCompletion{
 		InvocationID: reservation.InvocationID, Status: AIInvocationOK, OutputHash: "output-validation",
-		ReasoningTokens: &one, UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
+		ReasoningTokens: &zero, UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
 		FinishedAt: base.Add(2 * time.Hour),
 	}
-	text := "合法正文"
-	if result, err := s.CompleteSourcingGreeting(CompleteSourcingGreetingRequest{
-		Completion: completion, GreetingText: text, ContentHash: sourcingGreetingContentHash(text),
-	}); result != nil || !errors.Is(err, ErrAIInvocationInvalid) {
-		t.Fatalf("正 reasoning token 未阻断: result=%+v err=%v", result, err)
-	}
-	zero := 0
-	completion.ReasoningTokens = &zero
 	for _, invalidText := range []string{" 前后空白", strings.Repeat("中", 683)} {
 		if result, err := s.CompleteSourcingGreeting(CompleteSourcingGreetingRequest{
 			Completion: completion, GreetingText: invalidText, ContentHash: sourcingGreetingContentHash(invalidText),

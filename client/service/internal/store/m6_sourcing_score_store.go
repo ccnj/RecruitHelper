@@ -570,7 +570,7 @@ func (s *Store) CompleteSourcingScore(req CompleteSourcingScoreRequest) (*Sourci
 		return nil, err
 	}
 	if req.Completion.Status == AIInvocationOK {
-		if req.Score == nil || *req.Score < 1 || *req.Score > 10 || !reasoningCompletionSafe(req.Completion) {
+		if req.Score == nil || *req.Score < 1 || *req.Score > 10 {
 			return nil, ErrAIInvocationInvalid
 		}
 	} else if req.Score != nil {

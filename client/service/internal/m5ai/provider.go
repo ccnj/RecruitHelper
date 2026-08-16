@@ -193,7 +193,10 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		Content string `json:"content"`
 	}{Role: "user", Content: request.UserContent})
 	payload.ResponseFormat.Type = "json_object"
-	payload.Thinking.Type = "disabled"
+	// 2026-08-16 甲方裁决:全部用途开启思考模式。真机 21 张邀面卡里 2 张把
+	// 候选人说的日期算错一天(候选人都点了接受),33 个真实 case × 1320 次
+	// 对照显示日期错只在关思考档出现(4/330),开思考档 660 次零错。
+	payload.Thinking.Type = "enabled"
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return CompletionResponse{Diagnostics: preflight},

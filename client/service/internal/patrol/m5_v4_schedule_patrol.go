@@ -228,10 +228,6 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 				suggestionText = suggestion.Text
 			}
 		}
-		if callErr == nil && !reasoningUsageSafe(completion) {
-			markReasoningUsageInvalidOutput(&completion)
-			suggestionText = ""
-		}
 		logAIInvocationOutcome(
 			a.manager.currentAdvice(),
 			m5ai.PurposeSilenceFollowup,
@@ -272,12 +268,8 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 		invocation = *completed
 	}
 	if invocation.Status != store.AIInvocationOK ||
-		!communicationV4ScheduleReasoningSafe(invocation) ||
 		invocation.SuggestionText == "" {
 		reason := "silenceFollowupFailed"
-		if !communicationV4ScheduleReasoningSafe(invocation) {
-			reason = "reasoningUsageUnsafe"
-		}
 		// AI 调用失败/输出可疑不再冻结候选人(2026-08-02 甲方裁决)。调用
 		// 记账仍按 AdviceKey 单发即停:同一档期不会再触碰 provider,收敛靠
 		// 候选人回复或时刻表推进到下一档期铸出新 AdviceKey。
@@ -303,15 +295,4 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 		return store.ErrCommunicationV4Conflict
 	}
 	return nil
-}
-
-func communicationV4ScheduleReasoningSafe(
-	invocation store.CommunicationV4ScheduleAIInvocation,
-) bool {
-	completion := store.AIInvocationCompletion{
-		UsageShape:            invocation.UsageShape,
-		ReasoningTokens:       invocation.ReasoningTokens,
-		ReasoningContentEmpty: invocation.ReasoningContentEmpty,
-	}
-	return reasoningUsageSafe(completion)
 }
