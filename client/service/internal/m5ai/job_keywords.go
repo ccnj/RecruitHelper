@@ -12,14 +12,21 @@ import (
 //
 // v2 = 2026-08-01 增补"避开保险"那条规则。
 // v3 = 同日改判据:面向候选人而不是面向岗位。
-const JobKeywordsInputFormatVersion = "jobKeywords/3"
+// v4 = 2026-08-16 甲方裁决:去掉自定义词数量上限。
+const JobKeywordsInputFormatVersion = "jobKeywords/4"
 
-// 甲方 2026-07-31 裁决的两个硬数字:总数 3-5,其中词库外的自定义至多 2 个。
-// 兜底组的硬上限是 3,留一格余量,免得平台那边刚好卡满。
+// 甲方 2026-07-31 裁决的硬数字:总数 3-5。
+//
+// 原先还有一条"词库外的自定义至多 2 个",2026-08-16 甲方裁决去掉。它当时是
+// 兜底组容量的唯一守卫——自定义词全部落进「您还有哪些招聘要求？」那一组,
+// 而组内配额复核只对词库里的词生效(自定义词不属于任何分组,不计入
+// perSection),兜底组的 limit 因此永远不会在这里被触发。去掉之后最多可能
+// 有 5 个自定义词挤同一组,超出容量的由手侧如实记 dropped 继续下一个词
+// ——平台不再给出输入框时那是"装不下了",不是故障。失效方向是关键词少几个,
+// 不是发错,所以不为它补新的守卫。
 const (
-	JobKeywordsMin       = 3
-	JobKeywordsMax       = 5
-	JobKeywordsMaxCustom = 2
+	JobKeywordsMin = 3
+	JobKeywordsMax = 5
 )
 
 // JobKeywordSectionInput 是给模型看的一个分组:标题、组内上限与组内词条。
@@ -34,7 +41,7 @@ type JobKeywordSectionInput struct {
 }
 
 // JobKeywordsSuggestion 是模型的建议。它只是建议:每个词都要由确定性代码回到
-// 词库里逐字核对,并复核总数、重复、自定义数量与组内配额。
+// 词库里逐字核对,并复核总数、重复与组内配额。
 type JobKeywordsSuggestion struct {
 	Keywords []string
 	Reason   string
@@ -77,7 +84,7 @@ const jobKeywordsInstruction = `你在为一个招聘职位挑选招聘平台上
 1. 一共只能选 3 到 5 个关键词，不能多也不能少。
 2. 优先从词库里选。词库里的词必须原样返回，一个字都不能改——包括「财务/审计/税务」这种用斜杠合并的词条：要选就整条选，绝不能拆成「税务」单独返回。
 3. 不要选带「保险」字样的词，也不要选以保险从业为核心的词（例如「保险」「保险销售」「保险经纪」「保险代理」）。这些岗位面向的是从其他行业转行而来的人；打上保险标签会把职位匹配给已在保险业内的人，与招聘意图相反，也会显著缩小候选人池。宁可从别的分组里选，或者自己写一个。
-4. 词库里确实没有合适的，才可以自己写，但最多 2 个。自己写的必须是招聘者用来筛人的短词（技能、行业、背景、证书），不能是句子或短语，也同样不能带「保险」字样。
+4. 词库里确实没有合适的，才可以自己写。自己写的必须是招聘者用来筛人的短词（技能、行业、背景、证书），不能是句子或短语，也同样不能带「保险」字样。
 5. 同一个分组里选的词，不能超过该组标明的上限。
 6. 人群画像必须出自职位描述，不能凭空想象一批人。描述里找不到依据的词不要选，宁可少选一个也不要硬凑。
 7. 必须做出选择。不允许弃选，不允许返回空数组，不允许返回「无法判断」。即便这个职位的词库大半跟保险有关，也要按上面的优先级挑出 3 到 5 个来。
@@ -184,7 +191,7 @@ func ParseJobKeywordsSuggestion(raw string) (JobKeywordsSuggestion, error) {
 }
 
 // PlanJobKeywords 把模型选定的词逐字放回词库核对,分出"点选"与"自定义"两个
-// 落点,并复核自定义数量与组内配额。
+// 落点,并复核组内配额。
 //
 // **逐字相等,绝不模糊匹配**:手侧要按全等去点中词条,差一个字就点不中;而
 // "差不多的那个"点下去就是给职位打上另一个标签。词库里没有的一律归自定义,
@@ -228,9 +235,6 @@ func PlanJobKeywords(
 		}
 		plan.Matched = append(plan.Matched, keyword)
 		perSection[index]++
-	}
-	if len(plan.Custom) > JobKeywordsMaxCustom {
-		return JobKeywordsPlan{}, errors.New("tooManyCustom")
 	}
 	for index, count := range perSection {
 		// Limit 为 0 表示这个组件变体没给出上限,不是"上限为 0"——没有上限
