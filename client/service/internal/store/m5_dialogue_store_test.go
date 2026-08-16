@@ -550,7 +550,10 @@ func TestIntentCompletionRechecksBoundaryAndPreservesInvocation(t *testing.T) {
 	assertTrialParkedWithoutFreeze(t, s)
 }
 
-func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {
+// 2026-08-16 甲方裁决开启思考模式后,reasoning_content 非空是预期形态:intent
+// 必须照常落定分类,不再阻断。本用例替代旧的
+// TestIntentNonemptyReasoningContentTurnsManual。
+func TestIntentNonemptyReasoningContentStillClassifies(t *testing.T) {
 	s := openTest(t)
 	_, turn := seedFrozenDialogueTurn(t, s, "profile-dialogue-reasoning")
 	if _, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
@@ -560,22 +563,20 @@ func TestIntentNonemptyReasoningContentTurnsManual(t *testing.T) {
 		t.Fatal(err)
 	}
 	completion := successfulInvocationCompletion("invocation-reasoning", time.Now().UTC().Truncate(time.Millisecond))
-	completion.UsageShape = AIInvocationReasoningFieldAbsent
-	completion.ReasoningTokens = nil
+	some := 9
+	completion.UsageShape = AIInvocationUsageComplete
+	completion.ReasoningTokens = &some
 	completion.ReasoningContentEmpty = false
 	result, err := s.CompleteIntentInvocation(CompleteIntentInvocationRequest{
 		Completion: completion, Label: m5ai.IntentInterested, Source: DialogueIntentLLM,
 	})
-	if err != nil || result.Status != DialogueTurnManualRequired || result.FailureReason != "reasoningUsageUnsafe" {
-		t.Fatalf("reasoning_content 非空必须阻断: turn=%+v err=%v", result, err)
+	if err != nil || result.Status == DialogueTurnManualRequired ||
+		result.FailureReason == "reasoningUsageUnsafe" ||
+		result.IntentLabel != m5ai.IntentInterested || result.IntentSource != DialogueIntentLLM {
+		t.Fatalf("思考模式下 intent 须照常落定分类: turn=%+v err=%v", result, err)
 	}
-	// 2026-08-02 裁决:reasoning 可疑是纯计算失败,turn 停靠但候选人不冻结。
-	assertTrialParkedWithoutFreeze(t, s)
 }
 
-// FailAIInvocationForRetry 是重试链的中间步骤,它的全部契约就是"只落这一次
-// 失败,不碰 turn"。turn 必须原地不动,否则下一次 attempt 会因状态校验被拒;
-// 同一 attempt 不得再被预留,下一个 attempt 必须能接着开。
 func TestFailAIInvocationForRetryKeepsTurnWaitingAndOpensNextAttempt(t *testing.T) {
 	s := openTest(t)
 	_, turn := seedFrozenDialogueTurn(t, s, "profile-retry-midchain")

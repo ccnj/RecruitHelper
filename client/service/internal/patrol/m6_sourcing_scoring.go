@@ -222,9 +222,6 @@ func (m *Manager) driveSourcingScoreMember(
 			case parseErr != nil:
 				markBusinessParseFailure(&completion, parseErr)
 				retryClass = sourcingAIRetryBudgeted
-			case !reasoningUsageSafe(completion):
-				markReasoningUsageInvalidOutput(&completion)
-				retryClass = sourcingAIRetryBudgeted
 			default:
 				value := suggestion.Score
 				score = &value

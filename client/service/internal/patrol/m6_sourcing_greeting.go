@@ -223,9 +223,6 @@ func (m *Manager) driveSourcingGreetingMember(
 			case parseErr != nil:
 				markBusinessParseFailure(&completion, parseErr)
 				retryClass = sourcingAIRetryBudgeted
-			case !reasoningUsageSafe(completion):
-				markReasoningUsageInvalidOutput(&completion)
-				retryClass = sourcingAIRetryBudgeted
 			default:
 				greetingText = suggestion.Text
 				contentHash = sha256Hex(greetingText)

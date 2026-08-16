@@ -676,8 +676,7 @@ func (s *Store) CompleteSourcingGreeting(req CompleteSourcingGreetingRequest) (*
 	}
 	if req.Completion.Status == AIInvocationOK {
 		if !validPersistedGreetingText(req.GreetingText) || strings.TrimSpace(req.ContentHash) == "" ||
-			req.ContentHash != sourcingGreetingContentHash(req.GreetingText) ||
-			!reasoningCompletionSafe(req.Completion) {
+			req.ContentHash != sourcingGreetingContentHash(req.GreetingText) {
 			return nil, ErrAIInvocationInvalid
 		}
 	} else if req.GreetingText != "" || req.ContentHash != "" {

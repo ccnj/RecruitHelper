@@ -25,7 +25,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
-func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *testing.T) {
+func TestOpenAICompatibleProviderUsesOneThinkingJSONRequestAndNoRetry(t *testing.T) {
 	calls := 0
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -39,7 +39,7 @@ func TestOpenAICompatibleProviderUsesOneNonThinkingJSONRequestAndNoRetry(t *test
 		messages, _ := body["messages"].([]any)
 		thinking, _ := body["thinking"].(map[string]any)
 		format, _ := body["response_format"].(map[string]any)
-		if len(messages) != 1 || thinking["type"] != "disabled" || format["type"] != "json_object" {
+		if len(messages) != 1 || thinking["type"] != "enabled" || format["type"] != "json_object" {
 			t.Fatalf("provider 请求形状错误: %#v", body)
 		}
 		return &http.Response{
@@ -257,7 +257,7 @@ func TestOpenAICompatibleProviderAcceptsScoringWithReplyBudget(t *testing.T) {
 		thinking, _ := body["thinking"].(map[string]any)
 		format, _ := body["response_format"].(map[string]any)
 		if len(messages) != 1 || body["max_tokens"] != float64(ScoringOutputTokenLimit) ||
-			thinking["type"] != "disabled" || format["type"] != "json_object" {
+			thinking["type"] != "enabled" || format["type"] != "json_object" {
 			t.Fatalf("评分 provider 请求形状错误: %#v", body)
 		}
 		return &http.Response{

@@ -34,7 +34,6 @@ import (
 var m5RetriableAdviceFailures = map[string]struct{}{
 	string(communication.ManualReplyFailed):  {},
 	string(communication.ManualReplyInvalid): {},
-	"reasoningUsageUnsafe":                   {},
 	"reducerRejected":                        {},
 }
 
@@ -989,11 +988,6 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 			markBusinessParseFailure(&completion, parseErr)
 		}
 	}
-	if callErr == nil && !reasoningUsageSafe(completion) {
-		markReasoningUsageUnsafe(&completion)
-		sendable = false
-		failed = true
-	}
 	logAIInvocationOutcome(
 		a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
 	)
@@ -1186,10 +1180,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 				markBusinessParseFailure(&completion, parseErr)
 			}
 		}
-		if callErr == nil && !reasoningUsageSafe(completion) {
-			markReasoningUsageUnsafe(&completion)
-			manualReason = "reasoningUsageUnsafe"
-		} else if completion.Status == store.AIInvocationBudgetBlocked {
+		if completion.Status == store.AIInvocationBudgetBlocked {
 			manualReason = "inputBudgetBlocked"
 		}
 		decision, reduceErr := communication.Reduce(communication.ReduceInput{
@@ -1235,12 +1226,6 @@ func (a *roundActor) executeM5AdviceAttempt(
 	if reduceErr != nil {
 		markReducerRejected(&completion)
 		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
-	} else if callErr == nil && !reasoningUsageSafe(completion) {
-		markReasoningUsageUnsafe(&completion)
-		decision = communication.Decision{
-			TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired,
-			ManualReason: "reasoningUsageUnsafe",
-		}
 	}
 	logAIInvocationOutcome(
 		a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
@@ -1524,16 +1509,6 @@ func m5ProviderFailure(err error) (store.AIInvocationStatus, string) {
 	default:
 		return store.AIInvocationTransportFailed, "providerFailure"
 	}
-}
-
-func reasoningUsageSafe(completion store.AIInvocationCompletion) bool {
-	if !completion.ReasoningContentEmpty {
-		return false
-	}
-	if completion.UsageShape == store.AIInvocationUsageComplete {
-		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
-	}
-	return completion.UsageShape == store.AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
 }
 
 func sha256Hex(value string) string {
