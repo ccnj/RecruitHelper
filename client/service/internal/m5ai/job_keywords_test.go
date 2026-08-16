@@ -118,16 +118,22 @@ func TestPlanJobKeywordsSplitsMatchedAndCustom(t *testing.T) {
 		t.Fatalf("「税务」不与「财务/审计/税务」全等，必须落自定义，实得 %v", near.Custom)
 	}
 
-	// 自定义词不再有数量上限(2026-08-16 甲方裁决)。全都不在词库里也照样放行,
-	// 兜底组装不下的由手侧记 dropped——失效方向是关键词少几个,不是发错。
-	allCustom, err := PlanJobKeywords(
-		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙", "丁", "戊"}}, sections)
+	// 自定义上限 3(2026-08-16 甲方裁决由 2 改为 3),贴齐兜底组容量。
+	// 三个放行,第四个拦下——多出来的那个到了页面上也没地方放。
+	threeCustom, err := PlanJobKeywords(
+		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙"}}, sections)
 	if err != nil {
-		t.Fatalf("自定义词不该再被数量上限拦下，实得 %v", err)
+		t.Fatalf("三个自定义词应当放行，实得 %v", err)
 	}
-	if len(allCustom.Custom) != 5 || len(allCustom.Matched) != 0 {
-		t.Fatalf("五个词都该落自定义，实得 custom=%v matched=%v",
-			allCustom.Custom, allCustom.Matched)
+	if len(threeCustom.Custom) != 3 || len(threeCustom.Matched) != 0 {
+		t.Fatalf("三个词都该落自定义，实得 custom=%v matched=%v",
+			threeCustom.Custom, threeCustom.Matched)
+	}
+
+	if _, err := PlanJobKeywords(
+		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙", "丁"}}, sections,
+	); err == nil || err.Error() != "tooManyCustom" {
+		t.Fatalf("自定义超过 3 个必须被拒，实得 %v", err)
 	}
 
 	if _, err := PlanJobKeywords(
