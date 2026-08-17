@@ -5750,37 +5750,66 @@ function mainFillZhilianJobName(name: string): MainStep {
   return input.value === name ? { status: 'ok' } : { status: 'failed', reason: 'name_not_applied' }
 }
 
-// 职位描述:jqte 富文本。按行包 div 与真实键盘输入产生的结构一致;
-// 隐藏 textarea 是异步同步的,所以这里只写入,由调用方轮询确认同步完成。
+// 职位描述编辑器有两代形态,平台按账号灰度下发(2026-08-17 客户A 真机考古;
+// 禁用缓存强刷不变,新旧与本机缓存无关):
+// 老形态 jqte:.jqte_editor,真实键盘输入按行包 div,隐藏 textarea 异步同步;
+// 新形态 Vue 组件:.editor-content__input,真实键盘输入以 <br> 分行,没有隐藏
+// textarea,计数器 .description-count 显示的是平台模型里原始 HTML 字符串的
+// 长度(真机实测 33 = innerHTML.length,含 <br> 与 &amp; 等实体的原文长度)。
+// 作用域锚 .publish-form__detail 只在职位描述这一项上;职位亮点那项同样带
+// publish-form__description,不能用它区分。
 function mainWriteZhilianDescription(lines: string[]): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
-  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
   const escape = (text: string): string =>
     text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const html = lines.length === 0
-    ? ''
-    : escape(lines[0]) + lines.slice(1).map((line) => `<div>${escape(line)}</div>`).join('')
+  const jqte = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (jqte) {
+    const html = lines.length === 0
+      ? ''
+      : escape(lines[0]) + lines.slice(1).map((line) => `<div>${escape(line)}</div>`).join('')
+    jqte.innerHTML = html
+    jqte.dispatchEvent(new Event('input', { bubbles: true }))
+    return { status: 'ok', detail: html }
+  }
+  const editor = document.querySelector('.publish-form__detail .editor-content__input') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  const html = lines.map(escape).join('<br>')
   editor.innerHTML = html
   editor.dispatchEvent(new Event('input', { bubbles: true }))
   return { status: 'ok', detail: html }
 }
 
 function mainReadZhilianDescriptionSync(expectedHTML: string): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
-  const items = Array.from(document.querySelectorAll('.km-form-item'))
-  const item = items.find((node) => {
-    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
-    return label?.innerText.trim() === '职位描述'
-  })
-  const area = item?.querySelector('textarea') as HTMLTextAreaElement | null
-  if (!editor || !area) return { status: 'failed', reason: 'description_editor_absent' }
-  if (area.value !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+  const jqte = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (jqte) {
+    const items = Array.from(document.querySelectorAll('.km-form-item'))
+    const item = items.find((node) => {
+      const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+      return label?.innerText.trim() === '职位描述'
+    })
+    const area = item?.querySelector('textarea') as HTMLTextAreaElement | null
+    if (!area) return { status: 'failed', reason: 'description_editor_absent' }
+    if (area.value !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+    return { status: 'ok', detail: String(jqte.innerText.trim().length) }
+  }
+  const editor = document.querySelector('.publish-form__detail .editor-content__input') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  if (editor.innerHTML !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+  // 新形态没有隐藏 textarea;计数器追平预期 HTML 长度即平台模型已收到写入,
+  // 这是与老形态 textarea.value 等值判定同强度的正证。读不到计数器或数字
+  // 不符都按未同步处理,由调用方轮询,超时即整步失败——方向是不发布。
+  const count = document.querySelector('.publish-form__detail .description-count span') as HTMLElement | null
+  if (!count) return { status: 'failed', reason: 'description_count_absent' }
+  if (count.innerText.trim() !== String(expectedHTML.length)) {
+    return { status: 'failed', reason: 'description_not_synced' }
+  }
   return { status: 'ok', detail: String(editor.innerText.trim().length) }
 }
 
-// 平台只在描述失焦后才判定职位类别;这一串事件是真机验证过的最小触发集。
+// 平台只在描述失焦后才判定职位类别;这一串事件是老形态真机验证过的最小触发集,
+// 新形态复用同一串(真人失焦已证明会触发判定,合成序列待客户A真机首验)。
 function mainBlurZhilianDescription(): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  const editor = (document.querySelector('.jqte_editor')
+    ?? document.querySelector('.publish-form__detail .editor-content__input')) as HTMLElement | null
   if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
   editor.focus()
   editor.dispatchEvent(new Event('input', { bubbles: true }))
@@ -6577,7 +6606,8 @@ function mainReadZhilianKeywordTags(): MainStep {
 // 在页面里做业务比对。
 function mainReadZhilianFormIdentity(): MainStep {
   const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  const editor = (document.querySelector('.jqte_editor')
+    ?? document.querySelector('.publish-form__detail .editor-content__input')) as HTMLElement | null
   if (!name || !editor) return { status: 'failed', reason: 'form_identity_absent' }
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const item = items.find((node) => {
