@@ -315,11 +315,14 @@ func main() {
 				workflowWarnSuppressed++
 				return
 			}
+			// err 文本必须带上:workflowAdvanceFailed 是默认兜底码,2026-08-17
+			// 客户机整批招呼卡死时日志只有裸码,底层"来源冲突"被吞,定位只能
+			// 靠取回库副本重放。
 			if code == lastWorkflowErrorCode {
-				slog.Warn("产品工作流推进仍在暂停", "errorCode", code,
+				slog.Warn("产品工作流推进仍在暂停", "errorCode", code, "err", runErr,
 					"suppressed", workflowWarnSuppressed, "since", lastWorkflowWarnAt.Format(time.RFC3339))
 			} else {
-				slog.Warn("产品工作流推进暂停", "errorCode", code)
+				slog.Warn("产品工作流推进暂停", "errorCode", code, "err", runErr)
 			}
 			lastWorkflowErrorCode = code
 			lastWorkflowWarnAt = now
