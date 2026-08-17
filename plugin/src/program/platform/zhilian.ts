@@ -8298,14 +8298,30 @@ async function readZhilianListFromDOM(
     throw new ZhilianPlatformError('PAYLOAD_LIMIT', '当前 DOM 会话窗口超过 32 条上限')
   }
 
-  let crossedCutoff = false
+  // 年龄截止的命中判据是"整窗全部行都已过线",不是"窗内出现任意一行过线":
+  // "撞到过线行即到达陈旧区"依赖列表严格按最后活动倒序,而置顶把陈旧会话钉在
+  // 第一屏,单行判据会让全量扫描永久停在第一屏(2026-08-17 客户机真机事故)。
+  // 时间缺失的行不算过线,失效方向是多读窗口,由 atBottom 与脑侧窗口预算兜底;
+  // 过线行照旧滤出返回集,不交给脑处理。
+  let staleRows = 0
   const sessions = page.sessions.filter((item) => {
     if (cutoffMs !== null && item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
-      crossedCutoff = true
+      staleRows += 1
       return false
     }
     return true
   })
+  const crossedCutoff = staleRows > 0 && sessions.length === 0
+  if (staleRows > 0 && !crossedCutoff) {
+    // 乱序观测:窗内新旧行并存,说明有行不在活动倒序位置(置顶或平台排序异常)。
+    // 这是本类事故唯一的提前信号,报脑侧日志;整窗过线是全量扫描的自然结尾,不报。
+    reportHandLog(
+      'warn',
+      'listCutoffRowOutOfOrder',
+      `chat.readList(filter=${args.filter}) 窗内 ${staleRows}/${page.sessions.length} 行早于年龄截止但未整窗过线,已过滤并继续遍历`,
+      `cutoffMs=${cutoffMs} bottomTs=${page.sessions[page.sessions.length - 1]?.lastActivityTs ?? 'null'}`,
+    )
+  }
   const result: ZhilianListPage = {
     sessions,
     complete: page.atBottom || crossedCutoff,
