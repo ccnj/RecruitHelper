@@ -34,11 +34,15 @@ const (
 	// 截断成非法 JSON、整轮作废。统一给足余量,也为日后开思考模式留出空间
 	// (实测 512 会被 reasoning 全部吃光,content 直接返回空字符串)。
 	// 话痨风险由业务侧既有校验兜住:话术 1~5 项、每项与整组均不得超 2048 bytes。
-	IntentOutputTokenLimit          = 10240
-	ReplyOutputTokenLimit           = 10240
-	ServiceReplyOutputTokenLimit    = 10240
+	// 2026-08-17 甲方裁决翻倍到 20480:开思考(2026-08-16)后 10240 不够用——
+	// deepseek-v4-flash 生成招呼语时单次思考即烧满全额,content 零字、
+	// finish_reason=length(ai-traces 实证 reasoning_tokens=10240);v4-pro
+	// 真机思考最高 9573,加正文同样贴顶。上限仍只在模型真吐这么多时才计费。
+	IntentOutputTokenLimit          = 20480
+	ReplyOutputTokenLimit           = 20480
+	ServiceReplyOutputTokenLimit    = 20480
 	SilenceFollowupOutputTokenLimit = ReplyOutputTokenLimit
-	ScoringOutputTokenLimit         = 10240
+	ScoringOutputTokenLimit         = 20480
 	GreetingOutputTokenLimit        = ReplyOutputTokenLimit
 	// 职位类别全批分配一次要带上全部职位的完整描述,远超按单次回复设的
 	// ReplyInputTokenLimit。甲方 2026-08-01 裁决按用途放宽到 64000:按中文约
@@ -52,10 +56,11 @@ const (
 	// 和平台看到的不是同一份。
 	JobClassInputTokenLimit = 64000
 	// 职位类别与关键词的实际输出仍是类别名、置信度和一句理由的量级,但按
-	// 2026-08-01 甲方裁决与其余输出预算统一到 10240,不再各档单独掐。上限只
-	// 在模型真吐这么多时才计费,写废话的风险由输出契约校验兜住。
-	JobClassOutputTokenLimit    = 10240
-	JobKeywordsOutputTokenLimit = 10240
+	// 2026-08-01 甲方裁决与其余输出预算统一,不再各档单独掐(2026-08-17 随
+	// 统一值翻倍到 20480)。上限只在模型真吐这么多时才计费,写废话的风险由
+	// 输出契约校验兜住。
+	JobClassOutputTokenLimit    = 20480
+	JobKeywordsOutputTokenLimit = 20480
 )
 
 type JobConfigDocument struct {
