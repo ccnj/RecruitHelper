@@ -558,15 +558,18 @@ function PublishPrecheckPanel({
   // 它是独立的一条意图，所以这里独立 try/catch，且**任何失败都不走 failRow**：
   // failRow 会给这一行挂上 error，看起来像发布出了问题，而发布那笔账已经成立。
   // 下线只是锦上添花，没成就记一笔，人不必处理。
-  const takeOfflineAfterPublish = async (jobId: string, jobName: string): Promise<void> => {
-    if (!account) return
-    try {
-      const result = await api.jobTakeOffline(account.platform, account.accountRef, jobId)
-      patch(jobId, { offlineResult: result })
-    } catch (reason) {
-      patch(jobId, { offlineError: `下线「${jobName}」未成功：${errorText(reason)}` })
-    }
-  }
+  //
+  // 2026-08-17 甲方指示：暂时取消发布后自动下线，整条链注释保留待恢复
+  // （连同 publishOne 里的 published 正证跟踪与调用块）。
+  // const takeOfflineAfterPublish = async (jobId: string, jobName: string): Promise<void> => {
+  //   if (!account) return
+  //   try {
+  //     const result = await api.jobTakeOffline(account.platform, account.accountRef, jobId)
+  //     patch(jobId, { offlineResult: result })
+  //   } catch (reason) {
+  //     patch(jobId, { offlineError: `下线「${jobName}」未成功：${errorText(reason)}` })
+  //   }
+  // }
 
   const publishOne = async (jobId: string, jobName: string): Promise<void> => {
     if (!account) return
@@ -574,7 +577,8 @@ function PublishPrecheckPanel({
     const keywords = rows[jobId]?.plan?.keywords ?? []
     if (!jobClass || keywords.length === 0) return
     patch(jobId, { error: undefined, diagnostics: undefined, offlineResult: undefined, offlineError: undefined })
-    let published = false
+    // 2026-08-17 甲方指示：暂时取消发布后自动下线，published 正证跟踪随之一并注释。
+    // let published = false
     try {
       const result = await api.jobPublishPublish(
         account.platform, account.accountRef, jobId, jobClass, keywords,
@@ -582,15 +586,15 @@ function PublishPrecheckPanel({
       patch(jobId, { publishResult: result })
       // 只有拿到平台正证才下线。没拿到正证的那些，职位到底在不在线本身就不确定，
       // 再去点一次下线只会把一个不确定的现场搅得更乱——留给人去平台核对。
-      published = result.report?.postingVisible === true
+      // published = result.report?.postingVisible === true
     } catch (reason) {
       // 甲方 2026-07-31 裁决：单条干净失败或 suspect 跳过当前、继续下一个。
       // suspect 的意图按账本纪律永久冻结等人裁决，绝不在本批内重试。
       failRow(jobId, `发布「${jobName}」未成功`, reason)
     }
-    if (published && !stopRef.current) {
-      await takeOfflineAfterPublish(jobId, jobName)
-    }
+    // if (published && !stopRef.current) {
+    //   await takeOfflineAfterPublish(jobId, jobName)
+    // }
   }
 
   const runPhaseB = async (): Promise<void> => {
