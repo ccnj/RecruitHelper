@@ -11099,6 +11099,95 @@ test('readList 走无游标 DOM 窗口，reset 回顶且 next 原样交付跨窗
   assert.deepEqual(domCalls.at(-1), [true, false], 'next 只向下移动，不复位顶部')
 })
 
+test('readList 年龄截止只在整窗过线时命中，置顶陈旧行不得截断遍历', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = 'f'.repeat(64)
+  const now = Date.now()
+  const pinnedStale = {
+    conversationRef: 'pinned-stale',
+    peer: { displayName: '候选人甲', platformUserRef: 'peer-pinned' },
+    unreadCount: 0,
+    lastMessage: { direction: 'out', kind: 'text', textPreview: '九天前' },
+    lastActivityTs: now - 9 * 86_400_000,
+  }
+  const freshTop = {
+    conversationRef: 'fresh-top',
+    peer: { displayName: '候选人乙', platformUserRef: 'peer-fresh-top' },
+    unreadCount: 0,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '今天' },
+    lastActivityTs: now,
+  }
+  const noTs = {
+    conversationRef: 'no-activity-ts',
+    peer: { displayName: '候选人丙', platformUserRef: 'peer-no-ts' },
+    unreadCount: 0,
+    lastMessage: { direction: 'in', kind: 'text', textPreview: '时间缺失' },
+    lastActivityTs: null,
+  }
+  const staleA = {
+    ...pinnedStale,
+    conversationRef: 'stale-a',
+    peer: { displayName: '候选人丁', platformUserRef: 'peer-stale-a' },
+  }
+  const staleB = {
+    ...pinnedStale,
+    conversationRef: 'stale-b',
+    peer: { displayName: '候选人戊', platformUserRef: 'peer-stale-b' },
+    lastActivityTs: now - 10 * 86_400_000,
+  }
+  const basePage = { atBottom: false, moved: true, scrollHeight: 4_000, scrollTop: 0, unstable: false }
+  let domWindow = { ...basePage, sessions: [pinnedStale, freshTop, noTs] }
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 9, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }] },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainEnsureChatListFilter') {
+          return [{ result: { status: 'ready', changed: false } }]
+        }
+        if (func.name === 'mainReadListDOMWindow') {
+          return [{ result: domWindow }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'list-pinned', deadlineMs: now + 10_000, commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, beforeSideEffect() {},
+  }
+  try {
+    const mixed = await readZhilianList(
+      { filter: 'all', move: 'reset', stopOlderThanDays: 8 },
+      context,
+      fingerprint,
+    )
+    assert.equal(mixed.complete, false,
+      '置顶陈旧行不能证明已扫到陈旧区，窗内仍有未过线行时禁止判 complete')
+    assert.deepEqual(mixed.sessions.map((item) => item.conversationRef), ['fresh-top', 'no-activity-ts'],
+      '过线行滤出返回集，时间缺失行不算过线、照常交付')
+
+    domWindow = { ...basePage, sessions: [staleA, staleB], scrollTop: 700 }
+    const terminal = await readZhilianList(
+      { filter: 'all', move: 'next', stopOlderThanDays: 8 },
+      context,
+      fingerprint,
+    )
+    assert.equal(terminal.complete, true, '整窗全部行过线才命中年龄截止')
+    assert.deepEqual(terminal.sessions, [])
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('chat.readList 真实覆盖全部职位与未读开关，未读轮不套年龄截止', async () => {
   const originalChrome = globalThis.chrome
   const fingerprint = '6'.repeat(64)
