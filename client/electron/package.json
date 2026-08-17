@@ -1,6 +1,6 @@
 {
   "name": "recruithelper-client",
-  "version": "3.6.1",
+  "version": "3.6.3",
   "private": true,
   "author": "aliyutaozi",
   "description": "AI增员助手客户端外壳(Electron):启停 Go 脑服务 + 加载 UI。",

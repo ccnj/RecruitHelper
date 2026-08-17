@@ -52,7 +52,10 @@ func seedSourcingGreetingEffectFixture(
 	); err != nil {
 		t.Fatal(err)
 	}
-	zero := 0
+	// 开思考模式(2026-08-16 甲方裁决)后正 reasoning token 是 OK 记录的常态形态。
+	// fixture 特意用正值:2026-08-17 客户机整批发送曾被两处漏拆的内联"必须为 0"
+	// 闸卡死,这里钉住扫描计划/进度/Prepare/意图创建/上下文绑定整个发送面不复发。
+	reasoningTokens := 6233
 	for i := range runs {
 		reservation := greetingReservation(
 			batchID, runs[i], decisions[runs[i].RunID],
@@ -66,8 +69,8 @@ func seedSourcingGreetingEffectFixture(
 			Completion: AIInvocationCompletion{
 				InvocationID: reservation.InvocationID, Status: AIInvocationOK,
 				OutputHash:  "output-effect-" + slug + "-" + string(rune('a'+i)),
-				InputTokens: 10, OutputTokens: 5, ReasoningTokens: &zero,
-				UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: true,
+				InputTokens: 10, OutputTokens: 5, ReasoningTokens: &reasoningTokens,
+				UsageShape: AIInvocationUsageComplete, ReasoningContentEmpty: false,
 				FinishedAt: base.Add(2*time.Hour + 30*time.Minute + time.Duration(i)*time.Minute),
 			},
 			GreetingText: text, ContentHash: sourcingGreetingContentHash(text),
