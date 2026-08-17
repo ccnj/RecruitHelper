@@ -5846,6 +5846,10 @@ function mainOpenZhilianJobClassPicker(): MainStep {
   if (open.length === 1) return { status: 'ok', detail: 'open' }
   const entry = document.querySelector('.job-subType-input') as HTMLElement | null
   if (!entry) return { status: 'failed', reason: 'job_class_entry_absent' }
+  // 2026-08-17 客户A 真机事实:视口外的懒加载组件点了没反应。点之前把入口滚进
+  // 视口;首轮点击若落在组件初始化完成之前,外层的轮询会在下一轮补上。
+  // block:'center' 滚不到正中时被浏览器钳制在滚动边界,元素仍完整可见,无副作用。
+  entry.scrollIntoView({ block: 'center', inline: 'nearest' })
   entry.click()
   return { status: 'ok', detail: 'clicked' }
 }
@@ -6415,7 +6419,13 @@ function mainOpenZhilianKeywords(): MainStep {
     return label?.innerText.trim() === '职位关键词'
   })
   const button = item?.querySelector('button') as HTMLElement | null
-  if (!button) return { status: 'failed', reason: 'keyword_entry_absent' }
+  if (!item || !button) return { status: 'failed', reason: 'keyword_entry_absent' }
+  // 2026-08-17 客户A 真机事实:关键词弹窗由 s- 族 SDK 懒挂载,入口区不进视口
+  // 弹窗永不出现(人工预滚后整条发布链通过)。滚表单项而不滚 button:这个
+  // button 可能是 display:none 提示层里的「去完善」,没有几何盒子,滚它是
+  // 空操作;要唤醒的 .s-skill 容器是表单项的紧邻兄弟,表单项居中即一并入
+  // 视口。首轮点击若早于组件初始化,外层轮询下一轮补上。
+  item.scrollIntoView({ block: 'center', inline: 'nearest' })
   button.click()
   return { status: 'ok' }
 }
