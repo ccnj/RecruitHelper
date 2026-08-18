@@ -141,11 +141,11 @@ func (s *ConfigStore) Load() (*Config, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, errors.New("旧后台职位配置源读取失败")
+		return nil, fmt.Errorf("旧后台职位配置源读取失败: %v", err)
 	}
 	var config Config
-	if json.Unmarshal(raw, &config) != nil {
-		return nil, ErrConfigInvalid
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	normalized, err := normalizeConfig(config)
 	if err != nil {
@@ -162,18 +162,18 @@ func (s *ConfigStore) Save(config Config) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return errors.New("旧后台职位配置源目录不可写")
+		return fmt.Errorf("旧后台职位配置源目录不可写: %v", err)
 	}
 	raw, err := json.MarshalIndent(normalized, "", "  ")
 	if err != nil {
-		return ErrConfigInvalid
+		return fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	raw = append(raw, '\n')
 	if err := os.WriteFile(s.path, raw, 0o600); err != nil {
-		return errors.New("旧后台职位配置源写入失败")
+		return fmt.Errorf("旧后台职位配置源写入失败: %v", err)
 	}
 	if err := os.Chmod(s.path, 0o600); err != nil {
-		return errors.New("旧后台职位配置源权限设置失败")
+		return fmt.Errorf("旧后台职位配置源权限设置失败: %v", err)
 	}
 	return nil
 }
@@ -268,7 +268,7 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+bindPath, bytes.NewReader(payload))
 	if err != nil {
-		return BindResult{}, ErrConfigInvalid
+		return BindResult{}, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	raw, err := s.do(request, ErrUpstreamRejected)
@@ -356,7 +356,7 @@ func (s *Source) postConfigPlane(ctx context.Context, path string, extra map[str
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, config.BaseURL+path, bytes.NewReader(payload))
 	if err != nil {
-		return nil, ErrConfigInvalid
+		return nil, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	return s.do(request, ErrUpstreamRejected)

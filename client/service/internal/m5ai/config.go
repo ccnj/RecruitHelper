@@ -134,11 +134,13 @@ func (s *ProviderConfigStore) Load() (*ProviderConfig, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("读取 provider 配置失败")
+		return nil, fmt.Errorf("读取 provider 配置失败: %v", err)
 	}
 	var config ProviderConfig
-	if json.Unmarshal(raw, &config) != nil || config.Validate() != nil {
-		return nil, errors.New("provider 配置文件无效")
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, fmt.Errorf("provider 配置文件无效: %v", err)
+	} else if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("provider 配置文件无效: %v", err)
 	}
 	return &config, nil
 }
@@ -151,11 +153,11 @@ func (s *ProviderConfigStore) Save(config ProviderConfig) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return errors.New("provider 配置目录不可写")
+		return fmt.Errorf("provider 配置目录不可写: %v", err)
 	}
 	raw, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return errors.New("provider 配置编码失败")
+		return fmt.Errorf("provider 配置编码失败: %v", err)
 	}
 	raw = append(raw, '\n')
 	if err := os.WriteFile(s.path, raw, 0o600); err != nil {
