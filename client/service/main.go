@@ -391,6 +391,25 @@ func main() {
 		}
 		return view.CustomerName
 	})
+	// 每日日报(AGENTS.md「运营通知 webhook·每日日报」,2026-08-18 甲方裁决):
+	// 槽位 = 本地 08:30 + 客户id 分钟,客户 id 即 bind 响应存下的旧后台自增主键。
+	notifyRunner.SetDailyReportDeps(notify.DailyReportDeps{
+		Ledger: st,
+		CustomerID: func() int {
+			config, loadErr := jobConfigSource.LoadConfig()
+			if loadErr != nil || config == nil {
+				return 0
+			}
+			return config.Customer.ID
+		},
+		Runtime: func() (string, string) {
+			state, stateErr := productController.RuntimeState()
+			if stateErr != nil {
+				return "", ""
+			}
+			return state.Platform, state.AccountRef
+		},
+	})
 	background.Go(func() { notifyRunner.Run(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)

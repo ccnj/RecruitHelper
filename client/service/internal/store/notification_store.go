@@ -19,6 +19,9 @@ import (
 const (
 	NotificationTypeInterviewAccepted = "wecomInterviewAccepted"
 	NotificationTypeWechatAdded       = "wecomWechatAdded"
+	// NotificationTypeDailyReport 是每日日报(2026-08-18 甲方裁决):非候选人级
+	// 事件,ProfileID 恒空串,账本操作在 daily_report_store.go。
+	NotificationTypeDailyReport = "wecomDailyReport"
 
 	NotificationStatusPending = "pending"
 	NotificationStatusSent    = "sent"

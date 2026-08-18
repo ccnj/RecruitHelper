@@ -678,27 +678,17 @@ func appOverviewStatisticsTx(
 	}
 	out.TodayInvited = exactMetric(todayInvite)
 
-	value = 0
-	if err := count(tx.Model(&ContactAsset{}).
-		Where("platform = ? AND account_ref = ?", platform, accountRef).
-		Where("kind = ?", contactAssetKindWechat).
-		Where("observed_at_ms >= ? AND observed_at_ms < ?", start.UnixMilli(), end.UnixMilli()).
-		Distinct("profile_id"), &value); err != nil {
+	todayWechat, err := appWechatProfileCountTx(tx, platform, accountRef, start, end)
+	if err != nil {
 		return out, err
 	}
-	out.TodayWechat = exactMetric(value)
+	out.TodayWechat = exactMetric(todayWechat)
 
-	// 今日新约面数的是"今天有几个人接受了面试邀约",取 interviewed_at。它此前
-	// 直接复制 todayInvited(今天发出邀面卡的人数),两个不同标签共用一个数字。
-	// 发卡与被接受是两件事,消息时间戳只能算出前者。
-	value = 0
-	if err := count(tx.Model(&CandidateProfile{}).
-		Where("platform = ? AND account_ref = ?", platform, accountRef).
-		Where("interviewed_at >= ? AND interviewed_at < ?", start, end).
-		Distinct("profile_id"), &value); err != nil {
+	todayAppointments, err := appNewAppointmentsCountTx(tx, platform, accountRef, start, end)
+	if err != nil {
 		return out, err
 	}
-	out.TodayNewAppointments = exactMetric(value)
+	out.TodayNewAppointments = exactMetric(todayAppointments)
 
 	value = 0
 	if err := count(tx.Model(&CandidateProfile{}).
@@ -793,10 +783,57 @@ func appTimedMessageProfileCountTx(
 	return value, nil
 }
 
+// appWechatProfileCountTx 数窗口内换到微信的人数(ContactAsset 毫秒观察时刻切窗,
+// 避开 created_at 的 UTC/本地混格式雷区)。工作状态上报的「今日换微信」与日报的
+// 「昨日换微信」共用本查询——条款要求两处同源,不许各写一份。
+func appWechatProfileCountTx(
+	tx *gorm.DB,
+	platform, accountRef string,
+	start, end time.Time,
+) (int64, error) {
+	var value int64
+	err := tx.Model(&ContactAsset{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("kind = ?", contactAssetKindWechat).
+		Where("observed_at_ms >= ? AND observed_at_ms < ?", start.UnixMilli(), end.UnixMilli()).
+		Distinct("profile_id").Count(&value).Error
+	return value, err
+}
+
+// appNewAppointmentsCountTx 数窗口内接受面试邀约的人数,取 interviewed_at。它
+// 此前曾直接复制"今天发出邀面卡的人数"——发卡与被接受是两件事,消息时间戳只能
+// 算出前者。经 GORM time.Time 读写同列,序列化一致,不踩混格式雷区。与上面同理,
+// 状态上报与日报共用。
+func appNewAppointmentsCountTx(
+	tx *gorm.DB,
+	platform, accountRef string,
+	start, end time.Time,
+) (int64, error) {
+	var value int64
+	err := tx.Model(&CandidateProfile{}).
+		Where("platform = ? AND account_ref = ?", platform, accountRef).
+		Where("interviewed_at >= ? AND interviewed_at < ?", start, end).
+		Distinct("profile_id").Count(&value).Error
+	return value, err
+}
+
 func appTodayInterviewsTx(
 	tx *gorm.DB,
 	start, end time.Time,
 	platform, accountRef string,
+) ([]AppInterviewSummary, error) {
+	endMs := end.UnixMilli()
+	return appInterviewCardRowsTx(tx, platform, accountRef, start.UnixMilli(), &endMs, false)
+}
+
+// appInterviewCardRowsTx 列开始时间落在 [startMs, endMs) 的邀面卡(endMs 为 nil
+// 表示无上界);onlyInterviewed 再按主线已约面过滤(日报待面试名单的口径)。
+func appInterviewCardRowsTx(
+	tx *gorm.DB,
+	platform, accountRef string,
+	startMs int64,
+	endMs *int64,
+	onlyInterviewed bool,
 ) ([]AppInterviewSummary, error) {
 	type row struct {
 		ProfileID     string
@@ -812,8 +849,7 @@ func appTodayInterviewsTx(
 	// 卡，先按日期筛就会把已经作废的旧时段留在今日日程里，改期到明天时更
 	// 是明明今天没有面试却仍在列。候选人列表(appCandidateSelect)一直按
 	// seq DESC 取最新卡，这里同口径，两处不再各说各话。
-	var rows []row
-	if err := tx.Table("messages AS message").
+	query := tx.Table("messages AS message").
 		Select("profile.profile_id, candidate.display_name, profile.position_title, "+
 			"message.interview_starts_at_ms AS starts_at_ms, message.interview_ends_at_ms AS ends_at_ms, "+
 			"message.interview_method AS method, message.card_state").
@@ -829,8 +865,15 @@ func appTodayInterviewsTx(
 			"AND latest.conversation_ref = message.conversation_ref AND latest.direction = 'out' "+
 			"AND latest.kind = 'card' AND latest.card_type = 'interviewInvite' "+
 			"AND latest.retracted_at IS NULL)").
-		Where("message.interview_starts_at_ms >= ? AND message.interview_starts_at_ms < ?",
-			start.UnixMilli(), end.UnixMilli()).
+		Where("message.interview_starts_at_ms >= ?", startMs)
+	if endMs != nil {
+		query = query.Where("message.interview_starts_at_ms < ?", *endMs)
+	}
+	if onlyInterviewed {
+		query = query.Where("profile.main_status = ?", CandidateProfileInterviewed)
+	}
+	var rows []row
+	if err := query.
 		Order("message.interview_starts_at_ms ASC, profile.profile_id ASC").
 		Scan(&rows).Error; err != nil {
 		return nil, err
