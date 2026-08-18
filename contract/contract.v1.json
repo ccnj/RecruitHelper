@@ -396,6 +396,14 @@
           "surface": { "ref": "PlatformSurface", "nullable": true }
         }
       },
+      "AccountReadWechatSettingArgs": { "type": "object", "fields": {} },
+      "AccountReadWechatSettingData": {
+        "type": "object",
+        "fields": {
+          "configured": { "type": "boolean" },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "NavEnsureSurfaceArgs": {
         "type": "object",
         "fields": { "surface": { "type": "string", "enumRef": "enums.surfaceName" } }
@@ -1389,6 +1397,13 @@
       "preconditions": [],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "首次真人绑定前尚无 accountRef,仅该绑定探测允许省略 context;已绑定 actor 仍携带完整 context。principalFingerprint 是不透明相等比较值;脑不得解析或把平台 userId 当指纹"
+    },
+    "account.readWechatSetting": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "AccountReadWechatSettingArgs", "dataSchema": "AccountReadWechatSettingData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
+      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 30000,
+      "note": "读取招聘方账号在平台上的微信号联系配置是否已填(2026-08-18 甲方裁决立案),供脑在用户显式开始工作流前裁决放行——该配置空着时换微信链路无号可给。智联实现:导航平台页到个人中心,条件轮询等「微信号」栏渲染(最长约 10 秒),按可见文本判定:值非空且非「暂未添加」占位即 configured=true,占位/为空/存在可见「去添加」动作即 false;判据必须读文本——真机实测未配置时值元素照样存在,只显示占位,「元素出现」不构成判据。栏等不到、路由不可达、读取异常一律整体 failed,不返回猜测;脑侧对 failed 与 configured=false 同向处理(拒绝开始),失效方向永远朝少做。data 刻意只含布尔,绝不携带微信号本身(招聘方自己的微信号不进契约的既有禁令原样适用)。唯一页面动作是导航,不点击、不滚动、不打开弹层、不修改任何配置;读完不负责导航回原页面,后续页面需要由既有恢复路径重建。读数只授权本次开始请求放行与否,不得复用为任何 effectful 动作的前置正证或验证读"
     },
     "nav.ensureSurface": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
