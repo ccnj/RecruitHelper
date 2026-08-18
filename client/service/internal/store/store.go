@@ -190,6 +190,16 @@ func Open(dataDir string) (*Store, error) {
 			return nil, fmt.Errorf("回填入站可建档职位资格: %w", err)
 		}
 	}
+	// 无 sqlite_stat1 时规划器会高估全空列索引的区分度:RecoveryQueriesReady
+	// 按 query_msg_id='' 走该列索引等于全表扫(真机 62k 行实测热缓存 300ms、
+	// 冷缓存 11s,走 status 索引仅 4ms)。analysis_limit 限制每索引采样行数,
+	// 大库上 ANALYZE 也能亚秒完成;统计随库持久化,每次启动刷新一遍。
+	if err := db.Exec("PRAGMA analysis_limit=400").Error; err != nil {
+		return nil, fmt.Errorf("设置统计采样上限: %w", err)
+	}
+	if err := db.Exec("ANALYZE").Error; err != nil {
+		return nil, fmt.Errorf("收集查询规划统计: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
