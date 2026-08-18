@@ -24,6 +24,8 @@ var (
 	ErrHandUnavailable      = errors.New("浏览器插件不在线")
 	ErrHandAmbiguous        = errors.New("多个浏览器插件在线")
 	ErrLoginRequired        = errors.New("平台登录不可用")
+	ErrWechatNotConfigured  = errors.New("平台个人中心尚未配置微信号")
+	ErrWechatCheckFailed    = errors.New("微信号配置检查未完成")
 )
 
 // AccountResolver 在"开始"时探测当前 Chrome 登录的平台主体,按指纹找回既有
@@ -31,6 +33,13 @@ var (
 // 精确解析;只读投影不探测,用 currentAccount 的最近验证启发式。
 type AccountResolver interface {
 	ResolveCurrent(ctx context.Context) (store.AccountKey, error)
+}
+
+// WechatSettingReader 在"开始"时经手读取平台个人中心的微信号配置是否已填
+// (2026-08-18 甲方裁决,微信配置开工闸)。换微信链路把该配置发给同意交换的
+// 候选人;配置空着时邀请发出后无号可给,所以开始前先查、没配就不放行。
+type WechatSettingReader interface {
+	ReadWechatConfigured(ctx context.Context, key store.AccountKey) (bool, error)
 }
 
 type Workflow interface {
@@ -62,11 +71,20 @@ type Controller struct {
 	// providerApplied 在模型配置落盘成功后被调用(可为 nil),由 main 装配为
 	// "重建引擎并换代",落盘即生效(2026-08-12 甲方裁决)。
 	providerApplied func()
+	// wechatReader 可以为 nil(既有测试不注入,行为同闸引入前)。生产装配始终
+	// 注入,见 main.go。
+	wechatReader WechatSettingReader
 }
 
 // SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
 func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
 	c.resolver = resolver
+	return c
+}
+
+// SetWechatSettingReader 注入微信配置开工闸的读取器(装配期一次,非并发安全)。
+func (c *Controller) SetWechatSettingReader(reader WechatSettingReader) *Controller {
+	c.wechatReader = reader
 	return c
 }
 
@@ -158,6 +176,9 @@ func (c *Controller) Start(
 	if err != nil {
 		return err
 	}
+	if err := c.gateWechatConfigured(ctx, key); err != nil {
+		return err
+	}
 	if mode == string(workflow.ModeReplyOnly) {
 		_, err = c.workflow.StartReplyOnly(key)
 		return err
@@ -229,6 +250,44 @@ func (c *Controller) Start(
 	// 名下。要换职位得先把旧批次结束掉。
 	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
 	return err
+}
+
+// gateWechatConfigured 是微信配置开工闸(2026-08-18 甲方裁决):平台个人中心
+// 没填微信号时换微信链路无号可给,开始一律拦下。只在"这次点击会开启新工作"
+// 时检查——存在活跃工作流或未终局采集批次说明创建那份工作的点击已过闸,且
+// 此时导航去个人中心会打扰运行现场(推荐页运行连续性禁止批次运行期导航走)。
+// 读不到与未配置同向处理(不放行);误拦由用户补配置后重试收敛,检查本身
+// 不自动重试。
+func (c *Controller) gateWechatConfigured(ctx context.Context, key store.AccountKey) error {
+	if c.wechatReader == nil {
+		return nil
+	}
+	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
+		return err
+	} else if run != nil {
+		return nil
+	}
+	if batch, err := c.store.ActiveSourcingBatch(key); err != nil {
+		return err
+	} else if batch != nil {
+		return nil
+	}
+	configured, err := c.wechatReader.ReadWechatConfigured(ctx, key)
+	if err != nil {
+		// 手离线/多手是既有哨兵,保持原文案;其余失败统一归"检查未完成"。
+		if errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrHandAmbiguous) {
+			return err
+		}
+		slog.Warn("微信配置检查失败，拒绝开始",
+			"errorCode", "wechatGateReadFailed", "err", err)
+		return errors.Join(ErrWechatCheckFailed, err)
+	}
+	if !configured {
+		slog.Info("平台个人中心未配置微信号，拒绝开始",
+			"errorCode", "wechatGateNotConfigured")
+		return ErrWechatNotConfigured
+	}
+	return nil
 }
 
 // SyncJobs 是产品面"同步职位"的入口:刷新有效职位集,并把旧后台当前职位重新

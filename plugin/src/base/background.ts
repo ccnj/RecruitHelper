@@ -10,6 +10,7 @@ import { registerM5Primitives } from '../program/primitives/m5'
 import { registerM6Primitives } from '../program/primitives/m6'
 import { registerM7Primitives } from '../program/primitives/m7'
 import { registerJobPublishPrimitives } from '../program/primitives/jobPublish'
+import { registerAccountPrimitives } from '../program/primitives/account'
 import { refreshPagesAfterRuntimeReload } from './reload'
 import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
@@ -23,6 +24,7 @@ registerM5Primitives()
 registerM6Primitives()
 registerM7Primitives()
 registerJobPublishPrimitives()
+registerAccountPrimitives()
 
 const conn = new Connection()
 registerSensorBridge(conn)

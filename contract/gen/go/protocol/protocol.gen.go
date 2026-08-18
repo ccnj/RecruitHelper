@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:6d2a708bd2b03bb8f1026681451b0a466bfde0322bb182f8a3f2d0250ad96479"
+	ContractHash       = "sha256:1d99d42292ddffec5fa197c9ed25152a17254354c1c9fb992280162254a2646c"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -801,6 +801,7 @@ const (
 )
 
 const (
+	PrimAccountReadWechatSetting          = "account.readWechatSetting"
 	PrimCandidateApplySourcingFilters     = "candidate.applySourcingFilters"
 	PrimCandidateCaptureResumeScreenshot  = "candidate.captureResumeScreenshot"
 	PrimCandidateReadCurrent              = "candidate.readCurrent"
@@ -861,6 +862,7 @@ type PrimitiveMeta struct {
 }
 
 var Primitives = map[string]PrimitiveMeta{
+	PrimAccountReadWechatSetting:          {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 30000, DeadlineMs: 60000, LeaseMs: 30000, ArgsSchema: "AccountReadWechatSettingArgs", DataSchema: "AccountReadWechatSettingData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateApplySourcingFilters:     {Ver: 1, Class: ClassIntrusive, Batch: BatchS, PlatformSideEffect: "none", ExecBudgetMs: 120000, DeadlineMs: 180000, LeaseMs: 30000, ArgsSchema: "CandidateApplySourcingFiltersArgs", DataSchema: "CandidateApplySourcingFiltersData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateCaptureResumeScreenshot:  {Ver: 1, Class: ClassIntrusive, Batch: BatchX, PlatformSideEffect: "none", ExecBudgetMs: 60000, DeadlineMs: 120000, LeaseMs: 30000, ArgsSchema: "CandidateCaptureResumeScreenshotArgs", DataSchema: "CaptureScreenshotData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},
 	PrimCandidateReadCurrent:              {Ver: 1, Class: ClassReadonly, Batch: BatchX, PlatformSideEffect: "", ExecBudgetMs: 5000, DeadlineMs: 30000, LeaseMs: 0, ArgsSchema: "CandidateReadCurrentArgs", DataSchema: "CandidateReadCurrentData", GuardsSchema: "", EvidenceSchema: "", Preconditions: []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in"}, VerificationPrimitive: "", VerificationVer: 0, VerificationMaxRounds: 0, ContextOptionalBeforeBinding: false},

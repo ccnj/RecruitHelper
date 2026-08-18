@@ -281,6 +281,11 @@ func main() {
 	productController.SetAccountResolver(appbridge.LoginAccountResolver{
 		Hub: hub, Prober: runner, Binder: actor, Now: time.Now,
 	})
+	// 微信配置开工闸(2026-08-18 甲方裁决):开始前经手读平台个人中心,未配置
+	// 或读不到一律不放行;有活跃工作流/未终局批次时跳过、不导航。
+	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
+		Hub: hub, Runner: runner, Store: st,
+	})
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
 	events := make(chan session.SensorEvent, 128)
