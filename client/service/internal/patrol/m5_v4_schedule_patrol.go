@@ -153,21 +153,21 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 	if err != nil {
 		slog.Warn("沉默追问跳过:提示词装配失败,等下轮巡检重试",
 			"profileId", target.Profile.ProfileID,
-			"reason", "silenceFollowupPromptUnavailable")
+			"reason", "silenceFollowupPromptUnavailable", "err", err)
 		return nil
 	}
 	resumeJSON, err := m5ai.RenderResumeJSON(material.ResumeSnapshot.ResumeJSON)
 	if err != nil {
 		slog.Warn("沉默追问跳过:简历渲染失败,等下轮巡检重试",
 			"profileId", target.Profile.ProfileID,
-			"reason", "resumeRenderFailed")
+			"reason", "resumeRenderFailed", "err", err)
 		return nil
 	}
 	content, err := m5ai.RenderSilenceFollowupPrompt(prompt, resumeJSON)
 	if err != nil {
 		slog.Warn("沉默追问跳过:提示词渲染失败,等下轮巡检重试",
 			"profileId", target.Profile.ProfileID,
-			"reason", "silenceFollowupRenderFailed")
+			"reason", "silenceFollowupRenderFailed", "err", err)
 		return nil
 	}
 	reserved, err :=

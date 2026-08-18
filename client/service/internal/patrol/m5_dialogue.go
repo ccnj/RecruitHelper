@@ -782,7 +782,7 @@ func (a *roundActor) runM5IntentAdvice(
 		// 发生在预留任何调用之前,连 turn 停靠都不需要——不写终局、不冻结,
 		// 跳过本轮等模板或快照修复后自然重试。本函数下同。
 		slog.Warn("对话轮跳过:意向提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "intentRenderFailed")
+			"turnId", turn.TurnID, "reason", "intentRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeIntent, content, communication.IntentAdvice{})
@@ -804,13 +804,13 @@ func (a *roundActor) runM5ReplyAdvice(
 	resumeJSON, err := m5ai.RenderResumeJSON(material.snapshot.ResumeJSON)
 	if err != nil {
 		slog.Warn("对话轮跳过:简历渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "resumeRenderFailed")
+			"turnId", turn.TurnID, "reason", "resumeRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	history, err := m5ai.RenderHistory(material.throughTurn)
 	if err != nil {
 		slog.Warn("对话轮跳过:对话历史渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "historyRenderFailed")
+			"turnId", turn.TurnID, "reason", "historyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	content, err := m5ai.RenderReplyPromptFrozen(
@@ -819,7 +819,7 @@ func (a *roundActor) runM5ReplyAdvice(
 	)
 	if err != nil {
 		slog.Warn("对话轮跳过:回复提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+			"turnId", turn.TurnID, "reason", "replyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	if v4Purpose != communication.V4AdviceReply {
@@ -836,7 +836,7 @@ func (a *roundActor) runM5ReplyAdvice(
 	withBoundary, err := m5ai.AppendRealityBoundary(content)
 	if err != nil {
 		slog.Warn("对话轮跳过:现实边界块追加失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+			"turnId", turn.TurnID, "reason", "replyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, withBoundary, intent)
@@ -889,7 +889,7 @@ func (a *roundActor) runM5ServiceReplyAdvice(
 		// 沿用普通轨渲染失败纪律:跳过本轮、不写终局、不冻结(2026-08-02
 		// 甲方裁决)。
 		slog.Warn("服务补句跳过:提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "serviceReplyRenderFailed")
+			"turnId", turn.TurnID, "reason", "serviceReplyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5ServiceAdvice(ctx, turn, material, facts, content)
