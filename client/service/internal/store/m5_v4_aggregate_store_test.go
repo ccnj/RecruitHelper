@@ -736,3 +736,37 @@ func TestCommunicationV4RootAnchorsOutboundSeq(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCandidateProfileProjectionSilentWechatRejectedArchive(t *testing.T) {
+	at := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+	state := communication.NewV4GreetedState(&at)
+	state.MainStatus = communication.V4StatusCommunicating
+	state.WechatState = communication.V4WechatRejected
+	state.ColdPromptRemaining = 0
+	state.ColdPromptSentCount = 2
+	state.ColdWechatRemaining = 0
+	decision, err := communication.EvaluateV4Schedule(communication.V4ScheduleInput{
+		ProfileKey: "profile-silent-wechat-rejected",
+		State:      state,
+		Now:        at.Add(48 * time.Hour),
+		Reply:      communication.ReplyAdvice{State: communication.AdviceAbsent},
+	})
+	if err != nil || decision.Status != communication.V4ScheduleActionsPlanned ||
+		len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != communication.V4ActionArchive ||
+		decision.Actions[0].EndReason != communication.V4EndSilentWechatRejected {
+		t.Fatalf("换微信被拒后沉默应规划 silentWechatRejected 归档: decision=%+v err=%v", decision, err)
+	}
+	archived, err := communication.ApplyV4ArchiveAction(decision.State, decision.Actions[0])
+	if err != nil {
+		t.Fatalf("沉默归档动作完成失败: %v", err)
+	}
+	status, endReason, err := candidateProfileProjection(archived)
+	if err != nil {
+		t.Fatalf("silentWechatRejected 归档态的档案投影不得拒绝: %v", err)
+	}
+	if status != CandidateProfileEnded || endReason == nil ||
+		*endReason != CandidateProfileEndSilentWechatRejected {
+		t.Fatalf("投影应为 ended/silentWechatRejected: status=%s reason=%v", status, endReason)
+	}
+}

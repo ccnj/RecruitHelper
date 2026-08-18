@@ -404,6 +404,7 @@ const (
 	CandidateProfileEndFallbackArchive        CandidateProfileEndReason = "fallbackArchive"
 	CandidateProfileEndSilentInterviewPending CandidateProfileEndReason = "silentInterviewPending"
 	CandidateProfileEndSilentWechatInvited    CandidateProfileEndReason = "silentWechatInvited"
+	CandidateProfileEndSilentWechatRejected   CandidateProfileEndReason = "silentWechatRejected"
 	CandidateProfileEndSilentWechatExchanged  CandidateProfileEndReason = "silentWechatExchanged"
 	CandidateProfileEndSilent                 CandidateProfileEndReason = "silent"
 )

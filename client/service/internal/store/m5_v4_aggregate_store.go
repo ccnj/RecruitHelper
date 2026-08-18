@@ -1424,6 +1424,8 @@ func candidateProfileProjection(
 		reason = CandidateProfileEndSilentInterviewPending
 	case communication.V4EndSilentWechatInvited:
 		reason = CandidateProfileEndSilentWechatInvited
+	case communication.V4EndSilentWechatRejected:
+		reason = CandidateProfileEndSilentWechatRejected
 	case communication.V4EndSilentWechatExchanged:
 		reason = CandidateProfileEndSilentWechatExchanged
 	case communication.V4EndSilent:
