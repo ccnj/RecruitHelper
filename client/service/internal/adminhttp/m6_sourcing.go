@@ -169,7 +169,7 @@ func (a *API) sourcingStatus(w http.ResponseWriter, r *http.Request) {
 func (a *API) writeSourcingStatus(w http.ResponseWriter, key store.AccountKey) {
 	progress, err := a.st.LatestSourcingBatchProgress(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集状态读取失败"})
+		writeError(w, http.StatusInternalServerError, "采集状态读取失败", err)
 		return
 	}
 	if progress == nil {
@@ -287,7 +287,7 @@ func (a *API) sourcingSelectionStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	selection, err := a.st.SourcingBatchSelectionByBatchID(batchID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "筛选状态读取失败"})
+		writeError(w, http.StatusInternalServerError, "筛选状态读取失败", err)
 		return
 	}
 	if selection == nil {

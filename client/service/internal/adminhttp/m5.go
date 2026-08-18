@@ -53,7 +53,7 @@ func (a *API) selectM5Trial(w http.ResponseWriter, r *http.Request) {
 		Platform: key.Platform, AccountRef: key.AccountRef, ConversationRef: req.ConversationRef,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "试运行档案查询失败"})
+		writeError(w, http.StatusConflict, "试运行档案查询失败", err)
 		return
 	}
 	if profile == nil {
@@ -97,7 +97,7 @@ func (a *API) recoverM5ReplyBudget(w http.ResponseWriter, r *http.Request) {
 		AuthorizedAt:      time.Now(),
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前失败轮次不允许预算恢复"})
+		writeError(w, http.StatusConflict, "当前失败轮次不允许预算恢复", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -110,7 +110,7 @@ func (a *API) recoverM5ReplyBudget(w http.ResponseWriter, r *http.Request) {
 func (a *API) writeM5TrialStatus(w http.ResponseWriter) {
 	status, err := a.st.M5TrialStatus()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "M5 试运行状态读取失败"})
+		writeError(w, http.StatusInternalServerError, "M5 试运行状态读取失败", err)
 		return
 	}
 	if status == nil {
