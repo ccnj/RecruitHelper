@@ -21,7 +21,7 @@ import (
 )
 
 // jobKeywordAttempts 是"选不出来"之前允许的尝试次数,与职位类别同为 3。它覆盖
-// provider 调用失败、返回不是合法 JSON、数量越界、词重复、自定义超 2、单组超
+// provider 调用失败、返回不是合法 JSON、数量越界、词重复、自定义超 3、单组超
 // 配额这几种;模型给出的合法选择一律采纳——真正的闸是发布前运营在二次确认清单
 // 上看得见这几个词再确认。
 const jobKeywordAttempts = 3
@@ -223,7 +223,7 @@ type keywordPlanResult struct {
 // chooseJobKeywordsByModel 让大模型从平台当次词库里选 3-5 个词。
 //
 // 六种失败都重试:provider 调用失败、返回不是合法 JSON、数量越界、词重复、
-// 自定义超 2、单组超配额。复核一步都不放宽——关键词决定平台把职位匹配给谁,
+// 自定义超 3、单组超配额。复核一步都不放宽——关键词决定平台把职位匹配给谁,
 // 选错的页面看上去一切正常。
 func (a *API) chooseJobKeywordsByModel(
 	ctx context.Context,
