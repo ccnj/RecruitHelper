@@ -411,6 +411,9 @@ func TestCompleteSourcingScoreCASValidationAndIdempotency(t *testing.T) {
 	}
 
 	unsafeRun := seedSourcingScoreRun(t, s, "run-score-unsafe", key, run.ContextRevisionHash, base.Add(time.Minute))
+	// 2026-08-16 甲方裁决开启思考模式:正 reasoning token 不再让成功评分被拒,
+	// 原 "reasoning 不安全的成功评分未拒绝" 断言随非思考闸一并撤销。分数越界与
+	// CAS 幂等的校验照旧,由本用例其余各段覆盖。
 	unsafeReservation := sourcingScoreReservation(unsafeRun, "score-invocation-unsafe", base.Add(3*time.Minute))
 	if _, err := s.ReserveSourcingScore(unsafeReservation); err != nil {
 		t.Fatal(err)
@@ -421,9 +424,9 @@ func TestCompleteSourcingScoreCASValidationAndIdempotency(t *testing.T) {
 	unsafe.ReasoningTokens = &one
 	unsafe.FinishedAt = base.Add(4 * time.Minute)
 	if result, err := s.CompleteSourcingScore(CompleteSourcingScoreRequest{
-		Completion: unsafe, Score: scorePointer(6),
+		Completion: unsafe, Score: scorePointer(11),
 	}); result != nil || !errors.Is(err, ErrAIInvocationInvalid) {
-		t.Fatalf("reasoning 不安全的成功评分未拒绝: result=%+v err=%v", result, err)
+		t.Fatalf("越界评分未拒绝: result=%+v err=%v", result, err)
 	}
 
 	failedRun := seedSourcingScoreRun(t, s, "run-score-failed", key, run.ContextRevisionHash, base.Add(2*time.Minute))

@@ -69,6 +69,7 @@ const (
 	V4ActionRejectionClosing         V4ActionKind = "rejectionClosing"
 	V4ActionInterviewRejectionReply  V4ActionKind = "interviewRejectionReply"
 	V4ActionColdPrompt               V4ActionKind = "coldPrompt"
+	V4ActionColdPromptFixed          V4ActionKind = "coldPromptFixed"
 	V4ActionColdWechatText           V4ActionKind = "coldWechatText"
 	V4ActionColdWechatInvite         V4ActionKind = "coldWechatInvite"
 	V4ActionInterviewFollowup        V4ActionKind = "interviewFollowup"
@@ -117,8 +118,12 @@ type V4State struct {
 	LastRealMessageSeq     int64  `json:"lastRealMessageSeq"`
 	LastOutboundMessageSeq int64  `json:"lastOutboundMessageSeq"`
 
-	RetentionSent                bool             `json:"retentionSent"`
-	ClosingSent                  bool             `json:"closingSent"`
+	RetentionSent bool `json:"retentionSent"`
+	ClosingSent   bool `json:"closingSent"`
+	// ColdPromptFixedTextSent 是催1 固定话术的公理4 标记:固定文本对同一档案
+	// 至多发一次,置位后催1 档位永久不可用(含配置切回 AI 模式后),阶梯直接
+	// 落催2/归档。历史状态缺此键按 false 解码,语义不变。
+	ColdPromptFixedTextSent      bool             `json:"coldPromptFixedTextSent"`
 	ColdWechatTextSent           bool             `json:"coldWechatTextSent"`
 	WechatReceiptSent            bool             `json:"wechatReceiptSent"`
 	InterviewAcceptedReceiptSent bool             `json:"interviewAcceptedReceiptSent"`
@@ -368,7 +373,7 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		state.MainStatus = V4StatusInvited
 		addV4InterviewGroup(&state, action.MessageSeq)
 		advanceV4OutboundClock(&state, action.MessageSeq, action.SentAt, false)
-	case V4ActionColdPrompt:
+	case V4ActionColdPrompt, V4ActionColdPromptFixed:
 		if action.MessageSeq <= 0 || action.Round == 0 || action.Round > state.RealMessageRound || action.Stage < 1 || action.Stage > 2 {
 			return V4State{}, ErrInvalidV4StateTransition
 		}
@@ -377,6 +382,14 @@ func ApplyV4ConfirmedAction(input V4State, action V4ConfirmedAction) (V4State, e
 		}
 		if action.Stage != state.ColdPromptSentCount+1 {
 			return V4State{}, ErrInvalidV4StateTransition
+		}
+		if action.Kind == V4ActionColdPromptFixed {
+			// 公理4:固定催1 对同一档案至多一次。二次新发只可能是规划层缺陷,
+			// 响亮拒绝;同动作重放已被上面的 Stage 幂等分支放行。
+			if state.ColdPromptFixedTextSent {
+				return V4State{}, ErrInvalidV4StateTransition
+			}
+			state.ColdPromptFixedTextSent = true
 		}
 		state.ColdPromptSentCount++
 		if state.ColdPromptRemaining > 0 {
@@ -635,8 +648,8 @@ func classifyV4OutboundActionBody(kind V4ActionKind) (isBody bool, known bool) {
 	case V4ActionReplyText, V4ActionServiceReply, V4ActionRejectionRetention, V4ActionRejectionClosing:
 		return true, true
 	case V4ActionWechatReceipt, V4ActionInterviewAcceptedReceipt, V4ActionInterviewRejectionReply,
-		V4ActionInviteWechat, V4ActionAcceptWechat, V4ActionColdPrompt, V4ActionColdWechatText,
-		V4ActionColdWechatInvite, V4ActionInterviewFollowup, V4ActionInterviewInvite:
+		V4ActionInviteWechat, V4ActionAcceptWechat, V4ActionColdPrompt, V4ActionColdPromptFixed,
+		V4ActionColdWechatText, V4ActionColdWechatInvite, V4ActionInterviewFollowup, V4ActionInterviewInvite:
 		return false, true
 	default:
 		return false, false
@@ -667,6 +680,7 @@ func validateV4State(state V4State) error {
 	}
 	if v4WechatRank(state.WechatState) < 0 || state.ColdPromptRemaining > 2 || state.ColdWechatRemaining > 1 ||
 		state.ColdPromptSentCount > 2 || state.ColdPromptRemaining+state.ColdPromptSentCount > 2 ||
+		(state.ColdPromptFixedTextSent && state.ColdPromptSentCount == 0) ||
 		state.LastColdPromptRound > state.RealMessageRound || state.LastRealMessageSeq < 0 || state.LastOutboundMessageSeq < 0 {
 		return ErrInvalidV4StateTransition
 	}

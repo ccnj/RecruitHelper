@@ -34,7 +34,6 @@ import (
 var m5RetriableAdviceFailures = map[string]struct{}{
 	string(communication.ManualReplyFailed):  {},
 	string(communication.ManualReplyInvalid): {},
-	"reasoningUsageUnsafe":                   {},
 	"reducerRejected":                        {},
 }
 
@@ -182,6 +181,8 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
 			})
 			if reduceErr != nil {
+				slog.Warn("对话轮转人工:缺席收敛被 reducer 拒绝",
+					"turnId", turn.TurnID, "reason", "reducerRejected", "err", reduceErr)
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 			}
 			if decision.NextAdvice != m5ai.PurposeIntent {
@@ -419,6 +420,8 @@ func (a *roundActor) dispatchM5Action(
 	}
 	intentID, err := store.M5AutomaticIntentID(action.ActionID)
 	if err != nil {
+		slog.Warn("自动动作转人工:意图标识计算失败",
+			"actionId", action.ActionID, "reason", "automaticIntentInvalid", "err", err)
 		return a.manager.store.MarkM5AutomaticActionManualRequired(
 			action.ActionID, "automaticIntentInvalid", a.manager.now(),
 		)
@@ -783,7 +786,7 @@ func (a *roundActor) runM5IntentAdvice(
 		// 发生在预留任何调用之前,连 turn 停靠都不需要——不写终局、不冻结,
 		// 跳过本轮等模板或快照修复后自然重试。本函数下同。
 		slog.Warn("对话轮跳过:意向提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "intentRenderFailed")
+			"turnId", turn.TurnID, "reason", "intentRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeIntent, content, communication.IntentAdvice{})
@@ -805,13 +808,13 @@ func (a *roundActor) runM5ReplyAdvice(
 	resumeJSON, err := m5ai.RenderResumeJSON(material.snapshot.ResumeJSON)
 	if err != nil {
 		slog.Warn("对话轮跳过:简历渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "resumeRenderFailed")
+			"turnId", turn.TurnID, "reason", "resumeRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	history, err := m5ai.RenderHistory(material.throughTurn)
 	if err != nil {
 		slog.Warn("对话轮跳过:对话历史渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "historyRenderFailed")
+			"turnId", turn.TurnID, "reason", "historyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	content, err := m5ai.RenderReplyPromptFrozen(
@@ -820,7 +823,7 @@ func (a *roundActor) runM5ReplyAdvice(
 	)
 	if err != nil {
 		slog.Warn("对话轮跳过:回复提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+			"turnId", turn.TurnID, "reason", "replyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	if v4Purpose != communication.V4AdviceReply {
@@ -837,7 +840,7 @@ func (a *roundActor) runM5ReplyAdvice(
 	withBoundary, err := m5ai.AppendRealityBoundary(content)
 	if err != nil {
 		slog.Warn("对话轮跳过:现实边界块追加失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "replyRenderFailed")
+			"turnId", turn.TurnID, "reason", "replyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5Advice(ctx, turn, material, facts, m5ai.PurposeReply, withBoundary, intent)
@@ -890,7 +893,7 @@ func (a *roundActor) runM5ServiceReplyAdvice(
 		// 沿用普通轨渲染失败纪律:跳过本轮、不写终局、不冻结(2026-08-02
 		// 甲方裁决)。
 		slog.Warn("服务补句跳过:提示词渲染失败,等下轮巡检重试",
-			"turnId", turn.TurnID, "reason", "serviceReplyRenderFailed")
+			"turnId", turn.TurnID, "reason", "serviceReplyRenderFailed", "err", err)
 		return errM5AdviceRoundSkipped
 	}
 	return a.executeM5ServiceAdvice(ctx, turn, material, facts, content)
@@ -989,11 +992,6 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 			markBusinessParseFailure(&completion, parseErr)
 		}
 	}
-	if callErr == nil && !reasoningUsageSafe(completion) {
-		markReasoningUsageUnsafe(&completion)
-		sendable = false
-		failed = true
-	}
 	logAIInvocationOutcome(
 		a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
 	)
@@ -1035,7 +1033,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		return 0, errM5AdviceRoundSkipped
 	}
 	if err != nil {
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion)
+		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, err)
 	}
 	return 0, err
 }
@@ -1186,10 +1184,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 				markBusinessParseFailure(&completion, parseErr)
 			}
 		}
-		if callErr == nil && !reasoningUsageSafe(completion) {
-			markReasoningUsageUnsafe(&completion)
-			manualReason = "reasoningUsageUnsafe"
-		} else if completion.Status == store.AIInvocationBudgetBlocked {
+		if completion.Status == store.AIInvocationBudgetBlocked {
 			manualReason = "inputBudgetBlocked"
 		}
 		decision, reduceErr := communication.Reduce(communication.ReduceInput{
@@ -1198,6 +1193,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 		if reduceErr != nil {
 			markReducerRejected(&completion)
 			manualReason = "reducerRejected"
+			slog.Warn("对话轮转人工:意向决策被 reducer 拒绝",
+				"turnId", turn.TurnID, "err", reduceErr)
 		}
 		logAIInvocationOutcome(
 			a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
@@ -1217,7 +1214,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
 		if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 			// 跳过哨兵是本轮的正常结论(边界收敛/结算重采),不是落账失败。
-			logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion)
+			logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
 		}
 		return 0, err
 	}
@@ -1235,12 +1232,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 	if reduceErr != nil {
 		markReducerRejected(&completion)
 		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
-	} else if callErr == nil && !reasoningUsageSafe(completion) {
-		markReasoningUsageUnsafe(&completion)
-		decision = communication.Decision{
-			TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired,
-			ManualReason: "reasoningUsageUnsafe",
-		}
+		slog.Warn("对话轮转人工:回复决策被 reducer 拒绝",
+			"turnId", turn.TurnID, "err", reduceErr)
 	}
 	logAIInvocationOutcome(
 		a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
@@ -1264,7 +1257,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	)
 	if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 		// 同 intent 分支:跳过哨兵不是落账失败,不记持久化失败日志。
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion)
+		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
 	}
 	return 0, err
 }
@@ -1524,16 +1517,6 @@ func m5ProviderFailure(err error) (store.AIInvocationStatus, string) {
 	default:
 		return store.AIInvocationTransportFailed, "providerFailure"
 	}
-}
-
-func reasoningUsageSafe(completion store.AIInvocationCompletion) bool {
-	if !completion.ReasoningContentEmpty {
-		return false
-	}
-	if completion.UsageShape == store.AIInvocationUsageComplete {
-		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
-	}
-	return completion.UsageShape == store.AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
 }
 
 func sha256Hex(value string) string {

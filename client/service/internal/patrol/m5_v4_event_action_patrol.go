@@ -141,6 +141,7 @@ func (a *roundActor) dispatchCommunicationV4EventAction(
 		(action.V4Kind == communication.V4ActionWechatReceipt ||
 			action.V4Kind == communication.V4ActionInterviewAcceptedReceipt ||
 			action.V4Kind == communication.V4ActionColdPrompt ||
+			action.V4Kind == communication.V4ActionColdPromptFixed ||
 			action.V4Kind == communication.V4ActionColdWechatText ||
 			action.V4Kind == communication.V4ActionInterviewFollowup) &&
 		// 多气泡话术自第二个气泡起依赖前一个气泡的正证,这里不再按 v4Kind 限定谁

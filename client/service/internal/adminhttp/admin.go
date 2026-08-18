@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"log/slog"
 	"mime"
 	"net/http"
 	"sync"
@@ -422,6 +423,15 @@ func (a *API) ledger(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
+}
+
+// writeError:诊断台错误响应统一收口——固定人话进 error,底层原因进 detail
+// 并落一条日志。此前 err 既不进响应也不进日志,诊断台只见一句"不可读"。
+// /admin 响应带明文已由「开发者诊断台明文边界」授权;这里记的是错误原因,
+// 不是数据端点的响应正文。
+func writeError(w http.ResponseWriter, code int, message string, err error) {
+	slog.Warn("诊断台请求失败", "status", code, "msg", message, "err", err)
+	writeJSON(w, code, map[string]string{"error": message, "detail": err.Error()})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

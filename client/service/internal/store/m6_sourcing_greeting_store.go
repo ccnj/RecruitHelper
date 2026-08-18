@@ -676,8 +676,7 @@ func (s *Store) CompleteSourcingGreeting(req CompleteSourcingGreetingRequest) (*
 	}
 	if req.Completion.Status == AIInvocationOK {
 		if !validPersistedGreetingText(req.GreetingText) || strings.TrimSpace(req.ContentHash) == "" ||
-			req.ContentHash != sourcingGreetingContentHash(req.GreetingText) ||
-			!reasoningCompletionSafe(req.Completion) {
+			req.ContentHash != sourcingGreetingContentHash(req.GreetingText) {
 			return nil, ErrAIInvocationInvalid
 		}
 	} else if req.GreetingText != "" || req.ContentHash != "" {
@@ -1164,8 +1163,7 @@ func validateSourcingGreetingGenerationMaterial(
 	invocation := material.Invocation
 	if invocation.Status != AIInvocationOK || invocation.FinishedAt == nil ||
 		!validPersistedGreetingText(invocation.GreetingText) ||
-		invocation.ContentHash != sourcingGreetingContentHash(invocation.GreetingText) ||
-		(invocation.ReasoningTokens != nil && *invocation.ReasoningTokens != 0) {
+		invocation.ContentHash != sourcingGreetingContentHash(invocation.GreetingText) {
 		return ErrSourcingGreetingEffectConflict
 	}
 	return nil
@@ -1196,8 +1194,7 @@ func validateSourcingGreetingInvocationBinding(
 	}
 	if invocation.Status == AIInvocationOK {
 		if !validPersistedGreetingText(invocation.GreetingText) ||
-			invocation.ContentHash != sourcingGreetingContentHash(invocation.GreetingText) ||
-			(invocation.ReasoningTokens != nil && *invocation.ReasoningTokens != 0) {
+			invocation.ContentHash != sourcingGreetingContentHash(invocation.GreetingText) {
 			return ErrSourcingGreetingEffectConflict
 		}
 		return nil

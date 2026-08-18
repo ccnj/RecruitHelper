@@ -913,9 +913,6 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 			return err
 		} else if v4Turn {
 			label, source, manualReason := req.Label, req.Source, req.ManualReason
-			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
-				label, source, manualReason = "", "", "reasoningUsageUnsafe"
-			}
 			err := completeCommunicationV4IntentTx(
 				tx,
 				&out,
@@ -949,8 +946,6 @@ func (s *Store) CompleteIntentInvocation(req CompleteIntentInvocationRequest) (*
 			if !preserveRejectedClassification {
 				label, source = "", ""
 			}
-		} else if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) {
-			wantedStatus, label, source, reason = DialogueTurnManualRequired, "", "", "reasoningUsageUnsafe"
 		}
 		if out.Status != DialogueTurnCollected {
 			if out.Status == wantedStatus && out.IntentLabel == label && out.IntentSource == source && out.FailureReason == reason {
@@ -1055,8 +1050,7 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 	if err := validateInvocationCompletion(req.Completion); err != nil {
 		return nil, err
 	}
-	canPlan := req.Completion.Status == AIInvocationOK && req.ManualReason == "" &&
-		reasoningCompletionSafe(req.Completion)
+	canPlan := req.Completion.Status == AIInvocationOK && req.ManualReason == ""
 	if req.ServiceNoAction &&
 		(req.ManualReason != "" || strings.TrimSpace(req.ActionID) != "" ||
 			strings.TrimSpace(req.Text) != "" || len(req.Phrases) != 0) {
@@ -1085,11 +1079,6 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 			return err
 		} else if v4Turn {
 			manualReason := req.ManualReason
-			if req.Completion.Status == AIInvocationOK && !reasoningCompletionSafe(req.Completion) &&
-				!req.ServiceNoAction {
-				// 服务补句对可疑输出的最保守处置就是不发(放弃),不转人工。
-				manualReason = "reasoningUsageUnsafe"
-			}
 			out, err = completeCommunicationV4ReplyTx(
 				tx,
 				&turn,
@@ -1191,16 +1180,6 @@ func (s *Store) CompleteReplyInvocation(req CompleteReplyInvocationRequest) (*Co
 		return nil, resampleScheduled
 	}
 	return out, nil
-}
-
-func reasoningCompletionSafe(completion AIInvocationCompletion) bool {
-	if !completion.ReasoningContentEmpty {
-		return false
-	}
-	if completion.UsageShape == AIInvocationUsageComplete {
-		return completion.ReasoningTokens != nil && *completion.ReasoningTokens == 0
-	}
-	return completion.UsageShape == AIInvocationReasoningFieldAbsent && completion.ReasoningTokens == nil
 }
 
 func settleCommunicationV4AdviceErrorTx(
@@ -2635,6 +2614,7 @@ func communicationV4EventActionPrimitive(
 		case communication.V4ActionWechatReceipt,
 			communication.V4ActionInterviewAcceptedReceipt,
 			communication.V4ActionColdPrompt,
+			communication.V4ActionColdPromptFixed,
 			communication.V4ActionColdWechatText,
 			communication.V4ActionInterviewFollowup:
 			return primitiveChatSendMessage

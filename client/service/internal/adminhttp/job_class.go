@@ -49,7 +49,8 @@ const jobClassAttempts = 3
 
 // jobClassChunkSize 是一次模型调用最多带几个职位。
 //
-// **它守的是输入侧,不是输出侧。** 输出预算 2026-08-01 起全局统一到 10240,
+// **它守的是输入侧,不是输出侧。** 输出预算 2026-08-01 起全局统一(现值见
+// m5ai.ReplyOutputTokenLimit,2026-08-17 翻倍到 20480),
 // 一次要多少上限就报多少上限,不再按职位数估算——max_tokens 是上限不是预付
 // 额度,模型不吐就不计费,而估算一旦估低就是整批干净失败(2026-08-02 客户机
 // 10 个职位全废,就是每条按 40 token 估、算出 432、被 finish_reason=length
@@ -144,7 +145,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	// 与预检、试填、发布同一道闸:这趟也要占用页面并导航。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -155,7 +156,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 
@@ -281,7 +282,7 @@ func (a *API) readJobClassCandidates(
 		Description:    spec.Description,
 	})
 	if err != nil {
-		return zero, errors.New("类别候选读取命令构造失败")
+		return zero, fmt.Errorf("类别候选读取命令构造失败: %v", err)
 	}
 	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobReadClassCandidates, 1, args); err != nil {
 		return zero, errors.New("类别候选读取参数不符合当前契约")
@@ -295,11 +296,11 @@ func (a *API) readJobClassCandidates(
 		},
 	})
 	if err != nil {
-		return zero, errors.New("类别候选读取未能派发")
+		return zero, fmt.Errorf("类别候选读取未能派发: %v", err)
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		return zero, errors.New("类别候选读取未完成")
+		return zero, fmt.Errorf("类别候选读取未完成: %v", err)
 	}
 	data, err := parseClassCandidatesProof(logicalRef, logical)
 	if err != nil {
@@ -337,6 +338,7 @@ func (a *API) assignJobClasses(
 			attempts = append(attempts, label+try)
 		}
 		if err != nil {
+			slog.Warn("职位类别批量指派失败", "err", err)
 			for _, job := range jobs[start:end] {
 				problems[job.JobID] = "assignFailed"
 			}

@@ -153,6 +153,21 @@ func EvaluateV4Schedule(input V4ScheduleInput) (V4ScheduleDecision, error) {
 func evaluateV4ColdPrompt(input V4ScheduleInput, state V4State) (V4ScheduleDecision, error) {
 	switch input.Reply.State {
 	case AdviceAbsent:
+		// 催1 固定话术模式(2026-08-18 甲方裁决):场景可用即直接以固定文本
+		// 排动作,不申请 AI。已冻结的 AI 建议(下方 AdviceOK 分支)不受影响,
+		// 按原样收束。
+		if text, ok := v4FixedColdPromptText(input.FixedPhrases); ok {
+			stage := state.ColdPromptSentCount + 1
+			dueAt := state.LastOutboundAt.Add(v4ColdDelay)
+			return V4ScheduleDecision{
+				State: state, Status: V4ScheduleActionsPlanned, NextAdvice: V4AdviceNone,
+				Actions: []V4PlannedAction{{
+					ActionKey: stableV4ScheduleKey(input.ProfileKey, V4ActionColdPromptFixed, 0, state.RealMessageRound, stage),
+					Kind:      V4ActionColdPromptFixed, Text: text,
+					Round: state.RealMessageRound, Stage: stage, DueAt: &dueAt,
+				}},
+			}, nil
+		}
 		return V4ScheduleDecision{
 			State: state, Status: V4ScheduleWaitingAdvice, NextAdvice: V4AdviceSilenceFollowup,
 			AdviceKey: stableV4ScheduleAdviceKey(
@@ -248,8 +263,32 @@ func v4FollowupDelay(stage uint8) (time.Duration, bool) {
 	}
 }
 
+// v4ColdPromptAvailable 只看持久化状态,不看话术配置:归档档位与预检在不带
+// 固定话术视图的评估点上也必须与冻结事务得出同一可用性,否则固定模式档案会
+// 卡在"该归档但归档路径看不见"的冲突循环里。固定催1 至多一次的语义因此由
+// ColdPromptFixedTextSent 状态位承载(2026-08-18 甲方裁决)。
 func v4ColdPromptAvailable(state V4State) bool {
-	return state.ColdPromptRemaining > 0 && state.LastColdPromptRound != state.RealMessageRound
+	return state.ColdPromptRemaining > 0 && state.LastColdPromptRound != state.RealMessageRound &&
+		!state.ColdPromptFixedTextSent
+}
+
+// v4FixedColdPromptText returns the single candidate-visible fixed 催1 text.
+// Any other shape — scene missing, disabled, empty, invalid, multi-bubble —
+// yields false and the tier falls back to AI advice(配置不完美回落 AI,不转
+// 人工,2026-08-18 甲方裁决)。渲染失败在上游把 phrase 置为 invalid,同样落
+// 到 false。
+func v4FixedColdPromptText(view V4FixedPhraseView) (string, bool) {
+	phrase := view.Phrase(V4PhraseColdPrompt)
+	if phrase.State != V4PhraseAvailable ||
+		len(phrase.Messages) != 1 ||
+		strings.Join(phrase.Messages, "\n") != phrase.Text {
+		return "", false
+	}
+	text := phrase.Messages[0]
+	if strings.TrimSpace(text) != text || m5ai.ValidateSendText(text) != nil {
+		return "", false
+	}
+	return text, true
 }
 
 func v4ColdWechatAvailable(state V4State) bool {

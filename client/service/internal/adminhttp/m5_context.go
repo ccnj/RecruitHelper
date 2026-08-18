@@ -37,7 +37,7 @@ type m5ContextBindingView struct {
 func (a *API) m5Contexts(w http.ResponseWriter, _ *http.Request) {
 	summaries, err := a.st.JobAIContextRevisionSummaries()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "职位 AI 上下文读取失败"})
+		writeError(w, http.StatusInternalServerError, "职位 AI 上下文读取失败", err)
 		return
 	}
 	views := make([]m5ContextView, 0, len(summaries))
@@ -68,12 +68,12 @@ func (a *API) importM5Contexts(w http.ResponseWriter, r *http.Request) {
 	}
 	revisions, err := m5ai.ImportLegacyJobConfig(request.Bundle, time.Now())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "职位配置整包与 M5-A 兼容约束不一致"})
+		writeError(w, http.StatusBadRequest, "职位配置整包与 M5-A 兼容约束不一致", err)
 		return
 	}
 	stored, err := a.st.SaveJobAIContextRevisions(revisions)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "职位 AI 上下文未能原子导入"})
+		writeError(w, http.StatusConflict, "职位 AI 上下文未能原子导入", err)
 		return
 	}
 	views := make([]m5ContextView, 0, len(stored))
@@ -101,7 +101,7 @@ func (a *API) bindM5Context(w http.ResponseWriter, r *http.Request) {
 	request.RevisionHash = strings.TrimSpace(request.RevisionHash)
 	status, err := a.st.M5TrialStatus()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "M5 试运行状态读取失败"})
+		writeError(w, http.StatusInternalServerError, "M5 试运行状态读取失败", err)
 		return
 	}
 	if status == nil || status.Selection.Status != store.M5TrialSelectionActive {
@@ -114,7 +114,7 @@ func (a *API) bindM5Context(w http.ResponseWriter, r *http.Request) {
 		Reason: "userBound", BoundBy: "user", BoundAt: time.Now(),
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "职位上下文绑定失败"})
+		writeError(w, http.StatusConflict, "职位上下文绑定失败", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"binding": contextBindingView(*binding)})
@@ -123,7 +123,7 @@ func (a *API) bindM5Context(w http.ResponseWriter, r *http.Request) {
 func (a *API) m5ContextBinding(w http.ResponseWriter, _ *http.Request) {
 	status, err := a.st.M5TrialStatus()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "M5 试运行状态读取失败"})
+		writeError(w, http.StatusInternalServerError, "M5 试运行状态读取失败", err)
 		return
 	}
 	if status == nil || status.Selection.Status != store.M5TrialSelectionActive {
@@ -132,7 +132,7 @@ func (a *API) m5ContextBinding(w http.ResponseWriter, _ *http.Request) {
 	}
 	active, err := a.st.ActiveProfileAIContext(status.Profile.ProfileID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "职位上下文绑定读取失败"})
+		writeError(w, http.StatusInternalServerError, "职位上下文绑定读取失败", err)
 		return
 	}
 	if active == nil {

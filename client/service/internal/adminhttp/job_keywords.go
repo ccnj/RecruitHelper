@@ -98,7 +98,7 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 	// 与预检、类别、试填、发布同一道闸:这趟也要占用页面并导航。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -109,7 +109,7 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 
@@ -128,7 +128,7 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 		JobClass:       req.JobClass,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "词库读取命令构造失败"})
+		writeError(w, http.StatusInternalServerError, "词库读取命令构造失败", err)
 		return
 	}
 	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobReadKeywordVocabulary, 1, args); err != nil {
@@ -144,12 +144,12 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "词库读取未能派发"})
+		writeError(w, http.StatusConflict, "词库读取未能派发", err)
 		return
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "词库读取未完成"})
+		writeError(w, http.StatusConflict, "词库读取未完成", err)
 		return
 	}
 	data, err := parseKeywordVocabularyProof(logicalRef, logical)

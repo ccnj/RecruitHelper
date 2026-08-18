@@ -151,6 +151,8 @@ func (m *Manager) driveSourcingScoreMember(
 		if inputErr != nil {
 			errorClass = "scoringInputInvalid"
 		}
+		slog.Warn("评分输入渲染失败", "runId", run.RunID,
+			"errorClass", errorClass, "err", renderErr)
 		completion := store.AIInvocationCompletion{
 			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
@@ -161,7 +163,7 @@ func (m *Manager) driveSourcingScoreMember(
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 		}
 		return err
 	}
@@ -192,7 +194,7 @@ func (m *Manager) driveSourcingScoreMember(
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 			}
 			return err
 		}
@@ -222,9 +224,6 @@ func (m *Manager) driveSourcingScoreMember(
 			case parseErr != nil:
 				markBusinessParseFailure(&completion, parseErr)
 				retryClass = sourcingAIRetryBudgeted
-			case !reasoningUsageSafe(completion):
-				markReasoningUsageInvalidOutput(&completion)
-				retryClass = sourcingAIRetryBudgeted
 			default:
 				value := suggestion.Score
 				score = &value
@@ -244,7 +243,7 @@ func (m *Manager) driveSourcingScoreMember(
 				Completion: completion, Score: score,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 			}
 			return err
 		}

@@ -152,6 +152,8 @@ func (m *Manager) driveSourcingGreetingMember(
 		if inputErr != nil {
 			errorClass = "greetingInputInvalid"
 		}
+		slog.Warn("招呼语输入渲染失败", "profileId", material.ProfileID,
+			"errorClass", errorClass, "err", renderErr)
 		completion := store.AIInvocationCompletion{
 			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
@@ -162,7 +164,7 @@ func (m *Manager) driveSourcingGreetingMember(
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 		}
 		return err
 	}
@@ -191,7 +193,7 @@ func (m *Manager) driveSourcingGreetingMember(
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 			}
 			return err
 		}
@@ -223,9 +225,6 @@ func (m *Manager) driveSourcingGreetingMember(
 			case parseErr != nil:
 				markBusinessParseFailure(&completion, parseErr)
 				retryClass = sourcingAIRetryBudgeted
-			case !reasoningUsageSafe(completion):
-				markReasoningUsageInvalidOutput(&completion)
-				retryClass = sourcingAIRetryBudgeted
 			default:
 				greetingText = suggestion.Text
 				contentHash = sha256Hex(greetingText)
@@ -245,7 +244,7 @@ func (m *Manager) driveSourcingGreetingMember(
 				Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 			}
 			return err
 		}

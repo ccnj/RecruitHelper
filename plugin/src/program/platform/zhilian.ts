@@ -2,9 +2,10 @@
 // base、脑端与协议只看平台无关的原语结果。
 
 import type { PrimitiveContext } from '../registry'
-import { reportHandLog } from '../../base/handLog'
+import { describeError, reportHandLog } from '../../base/handLog'
 import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
+  AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
   CandidateCaptureResumeScreenshotArgs,
@@ -114,6 +115,16 @@ export class ZhilianPlatformError extends Error {
   }
 }
 
+// 手侧失败的异常原文后缀(2026-08-18 甲方裁决:可排查性优先——异常 message
+// 一并携带,不再只留裸 reason;结构化微信号/手机号仍不得主动装配进错误详情)。
+// 契约 ErrorBody.message 上限 500 字符/2000 字节,按追加后缀的份额防御截断。
+function failureDetailSuffix(detail: string | undefined): string {
+  if (!detail) return ''
+  let out = `（${detail.slice(0, 220)}）`
+  while (new TextEncoder().encode(out).length > 900) out = out.slice(0, -8)
+  return out
+}
+
 // 平台实现只给生成类型起本地别名，不再手写一份协议 DTO。
 export type ZhilianProbe = ProbePlatformData
 export type ZhilianCurrentCandidate = CandidateReadCurrentData
@@ -189,6 +200,8 @@ interface MainCurrentCandidateReady {
 interface MainCurrentCandidateFailed {
   status: 'failed'
   reason: MainCurrentCandidateFailureReason
+  // 捕获到的异常原文(截断),只进 error.message 供人排查,不参与任何判定。
+  detail?: string
 }
 
 type MainCurrentCandidateResult = MainCurrentCandidateReady | MainCurrentCandidateFailed
@@ -221,6 +234,7 @@ interface MainResumeReady {
 interface MainResumeFailed {
   status: 'failed'
   reason: MainResumeFailureReason
+  detail?: string
 }
 
 type MainResumeResult = MainResumeReady | MainResumeFailed
@@ -269,6 +283,7 @@ interface MainSourcingResumeReady {
 interface MainSourcingResumeFailed {
   status: 'failed'
   reason: MainSourcingResumeFailureReason
+  detail?: string
   // 只在稳定身份已确定、失败又仅属于该候选人简历内容时携带。它只在
   // 同一条手侧命令内扩充临时排除集，不进入协议 result、日志或脑账本。
   failedPlatformUserRef?: string
@@ -300,6 +315,7 @@ interface MainSourcingWindowReady {
 interface MainSourcingWindowFailed {
   status: 'failed'
   reason: MainSourcingWindowFailureReason
+  detail?: string
 }
 
 type MainSourcingWindowResult = MainSourcingWindowReady | MainSourcingWindowFailed
@@ -334,6 +350,7 @@ interface MainSelectSourcingPositionReady {
 interface MainSelectSourcingPositionFailed {
   status: 'failed'
   reason: MainSelectSourcingPositionFailureReason
+  detail?: string
 }
 
 type MainSelectSourcingPositionResult =
@@ -408,7 +425,7 @@ type MainGreetingActionResult =
   | { status: 'prepared' }
   | { status: 'ready' }
   | { status: 'clicked' }
-  | { status: 'failed'; reason: MainGreetingFailureReason }
+  | { status: 'failed'; reason: MainGreetingFailureReason; detail?: string }
 
 const MAIN_GREETING_LIST_TARGET_FAILURE_REASONS = [
   'route_mismatch',
@@ -426,7 +443,7 @@ type MainGreetingListTargetResult =
     status: 'ready'
     data: { contactState: ZhilianCurrentCandidate['contactState'] }
   }
-  | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
+  | { status: 'failed'; reason: MainGreetingListTargetFailureReason; detail?: string }
 
 // suspect 取证(2026-08-07 甲方裁决立案):招呼发送后的轮询里顺带观察页面浮层
 // 与招呼弹窗开合。纯只读扫描;失败方向永远是"少一条现场"。
@@ -460,6 +477,7 @@ type MainChatListFilterResult =
       'job_option_cardinality' | 'job_selection_unconfirmed' |
       'unread_control_cardinality' | 'unread_control_unsafe' |
       'unread_selection_unconfirmed' | 'unexpected'
+    detail?: string
   }
 
 interface MainThreadPageResult {
@@ -555,6 +573,7 @@ interface MainSendBaselineReady {
 interface MainSendBaselineFailed {
   status: 'failed'
   stage: MainSendBaselineFailureStage
+  detail?: string
 }
 
 type MainSendBaselineResult = MainSendBaselineReady | MainSendBaselineFailed
@@ -728,8 +747,8 @@ function decodeCursor(value: string | null | undefined): ThreadCursor | null {
       throw new Error('cursor version or shape invalid')
     }
     return parsed as ThreadCursor
-  } catch {
-    throw new ZhilianPlatformError('CURSOR_INVALID', '分页游标无效')
+  } catch (error) {
+    throw new ZhilianPlatformError('CURSOR_INVALID', `分页游标无效：${describeError(error).slice(0, 300)}`)
   }
 }
 
@@ -975,9 +994,10 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainCurrentCandidateFailureReason): MainCurrentCandidateFailed => ({
+  const failed = (reason: MainCurrentCandidateFailureReason, detail?: string): MainCurrentCandidateFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
 
   try {
@@ -1072,8 +1092,8 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
         contactState,
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -1101,7 +1121,8 @@ async function mainReadCurrentResume(
     return raw.normalize('NFC').replace(/\u00a0/gu, ' ').split(/\n+/u)
       .map((line) => line.replace(/[\t ]+/gu, ' ').trim()).filter(Boolean).join('\n')
   }
-  const failed = (reason: MainResumeFailureReason): MainResumeFailed => ({ status: 'failed', reason })
+  const failed = (reason: MainResumeFailureReason, detail?: string): MainResumeFailed =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const routeMatches = (): boolean => {
@@ -1201,8 +1222,8 @@ async function mainReadCurrentResume(
         if (remainingMs <= 0) return failed('close_unavailable')
         await sleep(Math.min(120, remainingMs))
       }
-    } catch {
-      return failed('close_unavailable')
+    } catch (error) {
+      return failed('close_unavailable', String(error))
     }
   }
   let ownedModal: HTMLElement | null = null
@@ -1354,9 +1375,9 @@ async function mainReadCurrentResume(
     })()
     const cleanupFailure = await cleanupOpenedModal()
     return cleanupFailure ?? readResult
-  } catch {
+  } catch (error) {
     const cleanupFailure = await cleanupOpenedModal()
-    return cleanupFailure ?? failed('unexpected')
+    return cleanupFailure ?? failed('unexpected', String(error))
   }
 }
 
@@ -1392,7 +1413,9 @@ async function mainSelectSourcingPosition(
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const failed = (
     reason: MainSelectSourcingPositionFailureReason,
-  ): MainSelectSourcingPositionFailed => ({ status: 'failed', reason })
+    detail?: string,
+  ): MainSelectSourcingPositionFailed =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const sleep = (delayMs: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, delayMs))
   const randomInteractionGapMs = (): number =>
@@ -1574,7 +1597,7 @@ async function mainSelectSourcingPosition(
       await sleep(120)
     }
     return failed(latestFailure === 'page_unstable' ? 'page_unstable' : latestFailure)
-  } catch {
+  } catch (error) {
     if (ownsDrawer) {
       try {
         await closeOwnedDrawer()
@@ -1582,7 +1605,7 @@ async function mainSelectSourcingPosition(
         // 主失败保持 unexpected；清理失败只意味着页面仍需人工收口。
       }
     }
-    return failed('unexpected')
+    return failed('unexpected', String(error))
   }
 }
 
@@ -2265,8 +2288,8 @@ async function mainApplySourcingFilters(
         observedAt: Date.now(),
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   } finally {
     if (ownedDrawer) {
       try {
@@ -2315,9 +2338,10 @@ async function mainReadSourcingWindow(
   }
   const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
-  const failed = (reason: MainSourcingWindowFailureReason): MainSourcingWindowFailed => ({
+  const failed = (reason: MainSourcingWindowFailureReason, detail?: string): MainSourcingWindowFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
   const route = (): URL | null => {
     try {
@@ -2503,8 +2527,8 @@ async function mainReadSourcingWindow(
         observedAt: Date.now(),
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -2554,9 +2578,11 @@ async function mainReadSourcingResume(
   const failed = (
     reason: MainSourcingResumeFailureReason,
     failedPlatformUserRef?: string,
+    detail?: string,
   ): MainSourcingResumeFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
     ...(failedPlatformUserRef ? { failedPlatformUserRef } : {}),
   })
   const route = (): URL | null => {
@@ -2915,8 +2941,8 @@ async function mainReadSourcingResume(
     while (true) {
       try {
         evaluated = evaluateOpenedDetail()
-      } catch {
-        evaluated = failed('unexpected')
+      } catch (error) {
+        evaluated = failed('unexpected', undefined, String(error))
       }
       if (evaluated.status === 'ready') {
         const nextProjection = stableProjection(evaluated.data)
@@ -2935,8 +2961,8 @@ async function mainReadSourcingResume(
     if (evaluated.status === 'ready') await browseOpenedDetail(modal)
     const closeFailure = await closeOpenedDetail()
     return closeFailure ?? evaluated
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', undefined, String(error))
   }
 }
 
@@ -3043,7 +3069,7 @@ async function uniqueCurrentCandidate(
     } else if (result.reason !== 'detail_absent') {
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '当前候选人或职位无法唯一确证',
+        `当前候选人或职位无法唯一确证：${result.reason}${failureDetailSuffix(result.detail)}`,
         'manualOnly',
       )
     }
@@ -3128,9 +3154,10 @@ function mainReadGreetingListTarget(
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainGreetingListTargetFailureReason): MainGreetingListTargetResult => ({
+  const failed = (reason: MainGreetingListTargetFailureReason, detail?: string): MainGreetingListTargetResult => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
 
   try {
@@ -3172,8 +3199,8 @@ function mainReadGreetingListTarget(
           ? 'established'
           : 'unknown'
     return { status: 'ready', data: { contactState } }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -3339,7 +3366,11 @@ async function uniqueGreetingListTarget(
     }
     if (result.status === 'ready') ready.push({ tab, result })
     else if (result.reason !== 'target_absent') {
-      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐列表目标无法唯一确证', 'manualOnly')
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        `推荐列表目标无法唯一确证：${result.reason}${failureDetailSuffix(result.detail)}`,
+        'manualOnly',
+      )
     }
   }
   if (ready.length !== 1) {
@@ -3381,7 +3412,8 @@ async function mainSendGreetingOnce(
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainGreetingFailureReason): MainGreetingActionResult => ({ status: 'failed', reason })
+  const failed = (reason: MainGreetingFailureReason, detail?: string): MainGreetingActionResult =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const rotateRight = (value: number, count: number): number =>
     (value >>> count) | (value << (32 - count))
   const digest = (value: string): string => {
@@ -3703,9 +3735,9 @@ async function mainSendGreetingOnce(
         return failed('input_rejected')
       }
       return { status: 'prepared' }
-    } catch {
+    } catch (error) {
       await restoreOwnedDraft()
-      return failed('input_rejected')
+      return failed('input_rejected', String(error))
     }
   }
 
@@ -3803,7 +3835,11 @@ function throwGreetingActionFailure(result: MainGreetingActionResult): never {
   if (result.reason === 'two_step_surface_unavailable') {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前页面不满足已验证的两步招呼动作表面', 'manualOnly')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼编辑器或发送表面无法唯一确认', 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    `招呼编辑器或发送表面无法唯一确认：${result.reason}${failureDetailSuffix(result.detail)}`,
+    'manualOnly',
+  )
 }
 
 export async function sendZhilianGreeting(
@@ -4082,8 +4118,9 @@ async function mainEnsureChatListFilter(
   unread: boolean,
   apply: boolean,
 ): Promise<MainChatListFilterResult> {
-  const failed = (reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason']):
-  MainChatListFilterResult => ({ status: 'failed', reason })
+  const failed = (reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason'], detail?: string):
+  MainChatListFilterResult =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   try {
     const clean = (value: unknown): string => String(value ?? '')
       .normalize('NFC')
@@ -4202,8 +4239,8 @@ async function mainEnsureChatListFilter(
     if (!finalState.allJobs) return failed('job_selection_unconfirmed')
     if (finalState.unread !== unread) return failed('unread_selection_unconfirmed')
     return { status: 'ready', changed }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -4583,10 +4620,10 @@ function currentConversationRefFromTab(tab: chrome.tabs.Tab): string {
       throw new Error('conversation missing')
     }
     return conversationRef
-  } catch {
+  } catch (error) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      '当前智联 IM 标签页 URL 没有可确认的会话标识',
+      `当前智联 IM 标签页 URL 没有可确认的会话标识：${describeError(error).slice(0, 300)}`,
       'manualOnly',
     )
   }
@@ -4639,6 +4676,110 @@ export async function readZhilianUnreadTotalNow(
   }
 }
 
+const ZHILIAN_PERSONAL_URL = `https://${ZHILIAN_HOST}/app/personal`
+
+function isZhilianPersonalURL(url: string | undefined): boolean {
+  if (!url) return false
+  try {
+    const path = new URL(url).pathname
+    return path === '/app/personal' || path.startsWith('/app/personal/')
+  } catch {
+    // URL 来自 chrome.tabs,解析失败即按"不是个人中心"响亮降级,不猜。
+    return false
+  }
+}
+
+// 个人中心「微信号」栏的单次读取结果。pending 表示页面还没呈现可判定形态,
+// 由外层条件轮询继续等;判据只认可见文本——2026-08-18 真机考古证实未配置时
+// 值元素照样存在、只显示「暂未添加」占位,元素出现与否不构成判据。
+type MainWechatSettingResult =
+  | { status: 'ok'; configured: boolean }
+  | { status: 'pending'; reason: string }
+
+function mainReadZhilianWechatSetting(): MainWechatSettingResult {
+  const items = Array.from(document.querySelectorAll('.contact-item'))
+  for (const item of items) {
+    const label = ((item.querySelector('.contact-item__label') as HTMLElement | null)?.innerText || '')
+      .normalize('NFC').trim()
+    if (!label.startsWith('微信号')) continue
+    const valueElement = item.querySelector('.contact-item__value') as HTMLElement | null
+    if (!valueElement) return { status: 'pending', reason: 'value_absent' }
+    const value = (valueElement.innerText || '').normalize('NFC').replace(/[\s ]+/gu, ' ').trim()
+    // 未配置的可见形态任一命中即判未配置,方向只朝"不放行":占位文本,或该栏
+    // 常驻可见的「去添加」入口(已配置栏的操作入口带 --hidden、悬停才现形)。
+    const addActionVisible = Array.from(item.querySelectorAll('.contact-item__action'))
+      .some((node) => {
+        const action = node as HTMLElement
+        if (action.className.includes('--hidden')) return false
+        return (action.innerText || '').includes('去添加')
+      })
+    if (value.includes('暂未添加') || addActionVisible) return { status: 'ok', configured: false }
+    // 栏在、值区却是空白且无未配置标记:多半是渲染中间态,交给外层继续轮询,
+    // 不把中间态误读成未配置。
+    if (!value) return { status: 'pending', reason: 'value_empty' }
+    return { status: 'ok', configured: true }
+  }
+  return { status: 'pending', reason: 'wechat_item_absent' }
+}
+
+// account.readWechatSetting@1:读取招聘方账号的微信号配置是否已填。唯一页面
+// 动作是导航到个人中心;不点击、不滚动、不打开弹层、不修改任何配置。返回
+// 只有布尔——招聘方自己的微信号不进契约,这里连读都不往外带。
+export async function readZhilianWechatSetting(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<AccountReadWechatSettingData> {
+  ctx.checkpoint()
+  const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => tab.id !== undefined && isZhilianPersonalURL(tab.url))
+  let tab = existing.find((candidate) => candidate.status === 'complete') ?? existing[0]
+  if (tab) {
+    assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  } else {
+    const canonical = await canonicalZhilianTab()
+    if (!canonical || canonical.id === undefined) {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
+      )
+    }
+    // 复用其他智联路由前先核对账号;不能先切页再发现切动了错误账号。
+    assertExpectedPrincipal(await probeTab(canonical), expectedPrincipalFingerprint)
+    await ctx.progress('准备智联个人中心', 5)
+    tab = await chrome.tabs.update(canonical.id, { url: ZHILIAN_PERSONAL_URL })
+  }
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  // 页面导航也是一次交互;即使 Chrome 很快返回 complete,也给页面至少一秒完成初始化。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  // 条件轮询:呈现可判定形态即返回,最长约 10 秒,不做固定等待。
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tabId)
+    if (latest.status === 'complete' && isZhilianPersonalURL(latest.url)) {
+      try {
+        const read = await runMain(tabId, mainReadZhilianWechatSetting, [])
+        if (read.status === 'ok') {
+          return { configured: read.configured, observedAt: Date.now() }
+        }
+      } catch (error) {
+        if (!(error instanceof ZhilianPlatformError)) throw error
+      }
+    }
+    if (attempt % 10 === 0) {
+      await ctx.progress('等待智联个人中心就绪', Math.min(20, 5 + attempt))
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  // 等不到可判定形态只报失败,不返回猜测;脑侧把失败与未配置同向处理(不放行)。
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY', '智联个人中心「微信号」栏在期限内未呈现可判定形态', 'afterRecovery', 'pageBroken',
+  )
+}
+
 export async function identifyZhilianCurrentConversation(
   expectedPrincipalFingerprint: string | undefined,
 ): Promise<ZhilianCurrentConversation> {
@@ -4683,9 +4824,10 @@ export async function openZhilianConversation(
   const filterState = await runMain(tab.id, mainEnsureChatListFilter, [true, false])
   if (filterState.status !== 'ready') {
     const reason = filterState.status === 'failed' ? filterState.reason : 'not_unread'
+    const filterDetail = filterState.status === 'failed' ? filterState.detail : undefined
     throw new ZhilianPlatformError(
       'GUARD_FAILED',
-      `当前聊天列表尚未确认为全部职位未读列表：${reason}`,
+      `当前聊天列表尚未确认为全部职位未读列表：${reason}${failureDetailSuffix(filterDetail)}`,
       'manualOnly',
     )
   }
@@ -4694,8 +4836,9 @@ export async function openZhilianConversation(
     const route = new URL((await chrome.tabs.get(tab.id)).url ?? '')
     if (route.pathname !== '/app/im') throw new Error('not im')
     selected = route.searchParams.get('sessionId') ?? ''
-  } catch {
-    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '打开会话前页面离开智联沟通页', 'manualOnly')
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC', `打开会话前页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   // 后置核验共用于点击后与零点击两条路径；sideEffect 证词必须如实区分。
   let performedClick = false
@@ -4872,7 +5015,7 @@ function throwResumeFailure(result: MainResumeFailed): never {
   // 一个真实候选人卡在这里，只能靠猜。diagnostics 只给人读，不参与任何判定。
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '当前简历详情无法完整且唯一读取',
+    `当前简历详情无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
     'manualOnly',
     undefined,
     'none',
@@ -5075,7 +5218,7 @@ function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
   // 被压平。带出 reason 才能判断是该放宽读取要求还是页面结构真变了。
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '当前推荐候选人无法完整且唯一读取',
+    `当前推荐候选人无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
     'manualOnly',
     undefined,
     'none',
@@ -5098,7 +5241,11 @@ function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
       'pageBroken',
     )
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐窗口身份或职位无法完整且唯一读取', 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    `当前推荐窗口身份或职位无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
+    'manualOnly',
+  )
 }
 
 function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFailed): never {
@@ -5113,7 +5260,7 @@ function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFa
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    `智联职位无法唯一选择并确认（${result.reason}）`,
+    `智联职位无法唯一选择并确认（${result.reason}）${failureDetailSuffix(result.detail)}`,
     'manualOnly',
   )
 }
@@ -5750,37 +5897,66 @@ function mainFillZhilianJobName(name: string): MainStep {
   return input.value === name ? { status: 'ok' } : { status: 'failed', reason: 'name_not_applied' }
 }
 
-// 职位描述:jqte 富文本。按行包 div 与真实键盘输入产生的结构一致;
-// 隐藏 textarea 是异步同步的,所以这里只写入,由调用方轮询确认同步完成。
+// 职位描述编辑器有两代形态,平台按账号灰度下发(2026-08-17 客户A 真机考古;
+// 禁用缓存强刷不变,新旧与本机缓存无关):
+// 老形态 jqte:.jqte_editor,真实键盘输入按行包 div,隐藏 textarea 异步同步;
+// 新形态 Vue 组件:.editor-content__input,真实键盘输入以 <br> 分行,没有隐藏
+// textarea,计数器 .description-count 显示的是平台模型里原始 HTML 字符串的
+// 长度(真机实测 33 = innerHTML.length,含 <br> 与 &amp; 等实体的原文长度)。
+// 作用域锚 .publish-form__detail 只在职位描述这一项上;职位亮点那项同样带
+// publish-form__description,不能用它区分。
 function mainWriteZhilianDescription(lines: string[]): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
-  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
   const escape = (text: string): string =>
     text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const html = lines.length === 0
-    ? ''
-    : escape(lines[0]) + lines.slice(1).map((line) => `<div>${escape(line)}</div>`).join('')
+  const jqte = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (jqte) {
+    const html = lines.length === 0
+      ? ''
+      : escape(lines[0]) + lines.slice(1).map((line) => `<div>${escape(line)}</div>`).join('')
+    jqte.innerHTML = html
+    jqte.dispatchEvent(new Event('input', { bubbles: true }))
+    return { status: 'ok', detail: html }
+  }
+  const editor = document.querySelector('.publish-form__detail .editor-content__input') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  const html = lines.map(escape).join('<br>')
   editor.innerHTML = html
   editor.dispatchEvent(new Event('input', { bubbles: true }))
   return { status: 'ok', detail: html }
 }
 
 function mainReadZhilianDescriptionSync(expectedHTML: string): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
-  const items = Array.from(document.querySelectorAll('.km-form-item'))
-  const item = items.find((node) => {
-    const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
-    return label?.innerText.trim() === '职位描述'
-  })
-  const area = item?.querySelector('textarea') as HTMLTextAreaElement | null
-  if (!editor || !area) return { status: 'failed', reason: 'description_editor_absent' }
-  if (area.value !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+  const jqte = document.querySelector('.jqte_editor') as HTMLElement | null
+  if (jqte) {
+    const items = Array.from(document.querySelectorAll('.km-form-item'))
+    const item = items.find((node) => {
+      const label = node.querySelector(':scope > label, :scope > [class*="label"]') as HTMLElement | null
+      return label?.innerText.trim() === '职位描述'
+    })
+    const area = item?.querySelector('textarea') as HTMLTextAreaElement | null
+    if (!area) return { status: 'failed', reason: 'description_editor_absent' }
+    if (area.value !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+    return { status: 'ok', detail: String(jqte.innerText.trim().length) }
+  }
+  const editor = document.querySelector('.publish-form__detail .editor-content__input') as HTMLElement | null
+  if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
+  if (editor.innerHTML !== expectedHTML) return { status: 'failed', reason: 'description_not_synced' }
+  // 新形态没有隐藏 textarea;计数器追平预期 HTML 长度即平台模型已收到写入,
+  // 这是与老形态 textarea.value 等值判定同强度的正证。读不到计数器或数字
+  // 不符都按未同步处理,由调用方轮询,超时即整步失败——方向是不发布。
+  const count = document.querySelector('.publish-form__detail .description-count span') as HTMLElement | null
+  if (!count) return { status: 'failed', reason: 'description_count_absent' }
+  if (count.innerText.trim() !== String(expectedHTML.length)) {
+    return { status: 'failed', reason: 'description_not_synced' }
+  }
   return { status: 'ok', detail: String(editor.innerText.trim().length) }
 }
 
-// 平台只在描述失焦后才判定职位类别;这一串事件是真机验证过的最小触发集。
+// 平台只在描述失焦后才判定职位类别;这一串事件是老形态真机验证过的最小触发集,
+// 新形态复用同一串(真人失焦已证明会触发判定,合成序列待客户A真机首验)。
 function mainBlurZhilianDescription(): MainStep {
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  const editor = (document.querySelector('.jqte_editor')
+    ?? document.querySelector('.publish-form__detail .editor-content__input')) as HTMLElement | null
   if (!editor) return { status: 'failed', reason: 'description_editor_absent' }
   editor.focus()
   editor.dispatchEvent(new Event('input', { bubbles: true }))
@@ -5817,6 +5993,10 @@ function mainOpenZhilianJobClassPicker(): MainStep {
   if (open.length === 1) return { status: 'ok', detail: 'open' }
   const entry = document.querySelector('.job-subType-input') as HTMLElement | null
   if (!entry) return { status: 'failed', reason: 'job_class_entry_absent' }
+  // 2026-08-17 客户A 真机事实:视口外的懒加载组件点了没反应。点之前把入口滚进
+  // 视口;首轮点击若落在组件初始化完成之前,外层的轮询会在下一轮补上。
+  // block:'center' 滚不到正中时被浏览器钳制在滚动边界,元素仍完整可见,无副作用。
+  entry.scrollIntoView({ block: 'center', inline: 'nearest' })
   entry.click()
   return { status: 'ok', detail: 'clicked' }
 }
@@ -6386,7 +6566,13 @@ function mainOpenZhilianKeywords(): MainStep {
     return label?.innerText.trim() === '职位关键词'
   })
   const button = item?.querySelector('button') as HTMLElement | null
-  if (!button) return { status: 'failed', reason: 'keyword_entry_absent' }
+  if (!item || !button) return { status: 'failed', reason: 'keyword_entry_absent' }
+  // 2026-08-17 客户A 真机事实:关键词弹窗由 s- 族 SDK 懒挂载,入口区不进视口
+  // 弹窗永不出现(人工预滚后整条发布链通过)。滚表单项而不滚 button:这个
+  // button 可能是 display:none 提示层里的「去完善」,没有几何盒子,滚它是
+  // 空操作;要唤醒的 .s-skill 容器是表单项的紧邻兄弟,表单项居中即一并入
+  // 视口。首轮点击若早于组件初始化,外层轮询下一轮补上。
+  item.scrollIntoView({ block: 'center', inline: 'nearest' })
   button.click()
   return { status: 'ok' }
 }
@@ -6577,7 +6763,8 @@ function mainReadZhilianKeywordTags(): MainStep {
 // 在页面里做业务比对。
 function mainReadZhilianFormIdentity(): MainStep {
   const name = document.querySelector('.publish-form__name input') as HTMLInputElement | null
-  const editor = document.querySelector('.jqte_editor') as HTMLElement | null
+  const editor = (document.querySelector('.jqte_editor')
+    ?? document.querySelector('.publish-form__detail .editor-content__input')) as HTMLElement | null
   if (!name || !editor) return { status: 'failed', reason: 'form_identity_absent' }
   const items = Array.from(document.querySelectorAll('.km-form-item'))
   const item = items.find((node) => {
@@ -7844,9 +8031,9 @@ export async function readZhilianJobClassCandidates(
   let candidates: { name: string; definition: string }[]
   try {
     candidates = JSON.parse(raw) as { name: string; definition: string }[]
-  } catch {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选无法解析', 'manualOnly',
-      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
+  } catch (error) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `职位类别候选无法解析：${describeError(error).slice(0, 300)}`,
+      'manualOnly', undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
   }
 
   // keepForm 为 true 时把这张半成品表单留给紧接着的 job.readKeywordVocabulary
@@ -8268,14 +8455,30 @@ async function readZhilianListFromDOM(
     throw new ZhilianPlatformError('PAYLOAD_LIMIT', '当前 DOM 会话窗口超过 32 条上限')
   }
 
-  let crossedCutoff = false
+  // 年龄截止的命中判据是"整窗全部行都已过线",不是"窗内出现任意一行过线":
+  // "撞到过线行即到达陈旧区"依赖列表严格按最后活动倒序,而置顶把陈旧会话钉在
+  // 第一屏,单行判据会让全量扫描永久停在第一屏(2026-08-17 客户机真机事故)。
+  // 时间缺失的行不算过线,失效方向是多读窗口,由 atBottom 与脑侧窗口预算兜底;
+  // 过线行照旧滤出返回集,不交给脑处理。
+  let staleRows = 0
   const sessions = page.sessions.filter((item) => {
     if (cutoffMs !== null && item.lastActivityTs !== null && item.lastActivityTs < cutoffMs) {
-      crossedCutoff = true
+      staleRows += 1
       return false
     }
     return true
   })
+  const crossedCutoff = staleRows > 0 && sessions.length === 0
+  if (staleRows > 0 && !crossedCutoff) {
+    // 乱序观测:窗内新旧行并存,说明有行不在活动倒序位置(置顶或平台排序异常)。
+    // 这是本类事故唯一的提前信号,报脑侧日志;整窗过线是全量扫描的自然结尾,不报。
+    reportHandLog(
+      'warn',
+      'listCutoffRowOutOfOrder',
+      `chat.readList(filter=${args.filter}) 窗内 ${staleRows}/${page.sessions.length} 行早于年龄截止但未整窗过线,已过滤并继续遍历`,
+      `cutoffMs=${cutoffMs} bottomTs=${page.sessions[page.sessions.length - 1]?.lastActivityTs ?? 'null'}`,
+    )
+  }
   const result: ZhilianListPage = {
     sessions,
     complete: page.atBottom || crossedCutoff,
@@ -9438,7 +9641,8 @@ async function mainCaptureSendBaseline(
     time: number
     sourceIndex: number
   }
-  const failed = (stage: MainSendBaselineFailureStage): MainSendBaselineFailed => ({ status: 'failed', stage })
+  const failed = (stage: MainSendBaselineFailureStage, detail?: string): MainSendBaselineFailed =>
+    ({ status: 'failed', stage, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   try {
     const w = window as unknown as AnyRecord
     const asRecord = (value: unknown): AnyRecord | null =>
@@ -9801,8 +10005,8 @@ async function mainCaptureSendBaseline(
     let tail: { matched: boolean; directions: string[] }
     try {
       tail = await tailReport(snapshot, staffID)
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
     // 2026-08-04 甲方裁决：消息基线降为观测模式。尾部对不上不再返回
     // guard_snapshot_uncovered，而是照常算出基线并把漂移事实带回去。真机
@@ -9811,15 +10015,15 @@ async function mainCaptureSendBaseline(
     const keys: string[] = []
     try {
       for (const row of snapshot) keys.push(await digest(`source-v1|${row.idServer}`))
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
 
     let targetBindingToken: string
     try {
       targetBindingToken = await digest(JSON.stringify([conversationRef, target]))
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
     return {
       status: 'ready',
@@ -9828,8 +10032,8 @@ async function mainCaptureSendBaseline(
       targetBindingToken,
       ...(tail.matched ? {} : { tailDrifted: true, tailDirections: tail.directions }),
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -11209,8 +11413,9 @@ async function mainPrepareInterviewEditor(
     if (emergencyCleanup) {
       try { await emergencyCleanup() } catch { /* best effort */ }
     }
-    // 只带异常类名（TypeError 等语言级标识），不带异常消息——消息可能含页面内容。
-    return failed('unexpected', `exc=${error instanceof Error ? error.name : typeof error}`)
+    // 异常 message 一并携带(2026-08-18 甲方裁决:可排查性优先于隐私;此前只带
+    // 类名,客户机上的 unexpected 无从定位)。
+    return failed('unexpected', `exc=${error instanceof Error ? `${error.name}: ${error.message}` : typeof error}`)
   }
 }
 
@@ -12693,8 +12898,9 @@ async function ensureThreadRoute(
       throw new Error('not im')
     }
     beforeClickSelected = beforeClickURL.searchParams.get('sessionId') ?? ''
-  } catch {
-    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定位会话期间页面离开智联沟通页', 'manualOnly')
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC', `定位会话期间页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   if (beforeClickSelected === conversationRef) return false
   if (beforeClickSelected !== selected) {
@@ -12801,7 +13007,7 @@ export async function sendZhilianMessage(
     }
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '当前无法建立可信发送基线，拒绝进入不可逆动作',
+      `当前无法建立可信发送基线，拒绝进入不可逆动作：${sendBaseline.stage}${failureDetailSuffix(sendBaseline.detail)}`,
       'afterRecovery',
       'pageBroken',
     )
@@ -13213,7 +13419,12 @@ async function sendZhilianCard(
     if (baseline.stage === 'route_changed') {
       throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送基线在复核期间发生变化', 'manualOnly')
     }
-    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信卡片发送基线', 'afterRecovery', 'pageBroken')
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      `当前无法建立可信卡片发送基线：${baseline.stage}${failureDetailSuffix(baseline.detail)}`,
+      'afterRecovery',
+      'pageBroken',
+    )
   }
   reportBaselineDrift(`card:${cardKind}`, conversationRef, baseline)
 
@@ -13465,7 +13676,12 @@ export async function acceptZhilianWechatRequest(
     if (baseline.stage === 'route_changed' || baseline.stage === 'guard_snapshot_uncovered') {
       throw new ZhilianPlatformError('GUARD_FAILED', '微信接受基线在复核期间发生变化', 'manualOnly')
     }
-    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信微信接受基线', 'afterRecovery', 'pageBroken')
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      `当前无法建立可信微信接受基线：${baseline.stage}${failureDetailSuffix(baseline.detail)}`,
+      'afterRecovery',
+      'pageBroken',
+    )
   }
 
   // 与此前可能的真人交互留出全局约定的最小随机节奏；此等待发生在
@@ -14678,6 +14894,11 @@ type MainResumeCaptureStepResult = MainCaptureStepReady | MainResumeCaptureFaile
 // 共享同一批页面事实:入口「查看详情」、弹窗 .new-shortcut-resume__modal、
 // 关闭 .new-shortcut-resume__close;滚动容器经 resolveScrollContainer 归一
 // (简历:根 overflow:hidden,真滚动层是内层 .km-scrollbar__wrap)。
+// 归一必须以 .resume-detail 为根,不得从弹窗根出发:弹窗内简历主体与右侧栏
+// (人才处理记录)是两个兄弟 km-scrollbar__wrap,一屏放得下的短简历纵向零余量,
+// 从弹窗根兜底"选滚动空间最大的后代"会确定性选中侧栏,拼出只有侧栏、没有简历
+// 主体的坏图(2026-08-18 线上事故)。限定在简历主体内后,短简历无可滚层即回落
+// 主体自身,单帧收口。
 // op: open(点入口等弹窗) | measure | pinTop | scrollTo | readback | close
 async function mainResumeCaptureStep(
   conversationRef: string,
@@ -14853,7 +15074,13 @@ async function mainResumeCaptureStep(
       return { status: 'failed', reason: 'open_failed', scene }
     }
     if (modals.length !== 1) return failed('modal_cardinality')
-    return metricsOf(resolveScrollContainer(modals[0]))
+    let openRoots = visibleAll(modals[0], '.resume-detail')
+    while (openRoots.length === 0 && Date.now() < waitUntil) {
+      await sleep(120)
+      openRoots = visibleAll(modals[0], '.resume-detail')
+    }
+    if (openRoots.length !== 1) return failed('container_unresolved')
+    return metricsOf(resolveScrollContainer(openRoots[0]))
   }
 
   const modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -14877,7 +15104,7 @@ async function mainResumeCaptureStep(
 
   const roots = visibleAll(modal, '.resume-detail')
   if (roots.length !== 1) return failed('container_unresolved')
-  const scrollEl = resolveScrollContainer(modal)
+  const scrollEl = resolveScrollContainer(roots[0])
   if (op === 'measure') {
     // 弹窗自身固定居中,无需 scrollIntoView;仅量测。
   } else if (op === 'pinTop') {

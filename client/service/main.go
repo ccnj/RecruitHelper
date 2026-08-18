@@ -137,12 +137,12 @@ func main() {
 	var traceRecorder m5ai.TraceRecorder
 	traceStore, traceErr := aitrace.Open(*dataDir)
 	if traceErr != nil {
-		slog.Warn("AI 原文追踪库不可用，业务调用将继续", "errorCode", "traceStoreUnavailable")
+		slog.Warn("AI 原文追踪库不可用，业务调用将继续", "errorCode", "traceStoreUnavailable", "err", traceErr)
 	} else {
 		traceRecorder = traceStore
 		defer func() {
 			if err := traceStore.Close(); err != nil {
-				slog.Warn("关闭 AI 原文追踪库失败", "errorCode", "traceStoreCloseFailed")
+				slog.Warn("关闭 AI 原文追踪库失败", "errorCode", "traceStoreCloseFailed", "err", err)
 			}
 		}()
 	}
@@ -281,6 +281,11 @@ func main() {
 	productController.SetAccountResolver(appbridge.LoginAccountResolver{
 		Hub: hub, Prober: runner, Binder: actor, Now: time.Now,
 	})
+	// 微信配置开工闸(2026-08-18 甲方裁决):开始前经手读平台个人中心,未配置
+	// 或读不到一律不放行;有活跃工作流/未终局批次时跳过、不导航。
+	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
+		Hub: hub, Runner: runner, Store: st,
+	})
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
 	events := make(chan session.SensorEvent, 128)
@@ -315,11 +320,14 @@ func main() {
 				workflowWarnSuppressed++
 				return
 			}
+			// err 文本必须带上:workflowAdvanceFailed 是默认兜底码,2026-08-17
+			// 客户机整批招呼卡死时日志只有裸码,底层"来源冲突"被吞,定位只能
+			// 靠取回库副本重放。
 			if code == lastWorkflowErrorCode {
-				slog.Warn("产品工作流推进仍在暂停", "errorCode", code,
+				slog.Warn("产品工作流推进仍在暂停", "errorCode", code, "err", runErr,
 					"suppressed", workflowWarnSuppressed, "since", lastWorkflowWarnAt.Format(time.RFC3339))
 			} else {
-				slog.Warn("产品工作流推进暂停", "errorCode", code)
+				slog.Warn("产品工作流推进暂停", "errorCode", code, "err", runErr)
 			}
 			lastWorkflowErrorCode = code
 			lastWorkflowWarnAt = now
@@ -410,13 +418,13 @@ func main() {
 	// 不动库——快照与 VACUUM 都要抢 SetMaxOpenConns(1) 那唯一的写连接。
 	dbQuiet := func() (bool, string) {
 		if run, err := st.ActiveProductWorkflowRun(); err != nil {
-			return false, "读取活跃工作流失败"
+			return false, fmt.Sprintf("读取活跃工作流失败: %v", err)
 		} else if run != nil {
 			return false, "有活跃工作流"
 		}
 		pending, err := st.NonTerminalCmds()
 		if err != nil {
-			return false, "读取未收束命令失败"
+			return false, fmt.Sprintf("读取未收束命令失败: %v", err)
 		}
 		if len(pending) > 0 {
 			return false, fmt.Sprintf("仍有 %d 条未收束命令", len(pending))
@@ -468,7 +476,7 @@ func main() {
 		RunOnce: adminAPI.RunFieldReportOnce,
 		Record: func(at time.Time, ok bool, reason string) {
 			if err := st.RecordFieldReportAutoRun(at, ok, reason); err != nil {
-				slog.Warn("现场上报:记录自动上传结果失败", "errorCode", "fieldReportRecordFailed")
+				slog.Warn("现场上报:记录自动上传结果失败", "errorCode", "fieldReportRecordFailed", "err", err)
 			}
 		},
 	})

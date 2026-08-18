@@ -39,7 +39,15 @@ type ProviderConfig struct {
 //
 // 代价:任何一次卡住的调用现在要占 60 秒才放手,巡检里那一轮就多等 30 秒。
 // 相对于"本来能成的调用被判超时、整批作废",这个代价是划算的。
-const ProviderRequestTimeoutMs = 60000
+//
+// 2026-08-16 甲方裁决 60 秒 → 120 秒,随思考模式开启同批落地。思考把回复
+// 用途的延迟中位从 4.5 秒抬到 15.8 秒,p95 抬到 55.5 秒:60 秒这道线离 p95
+// 只剩 4.5 秒余量,实测 330 次里有 11 次超 60 秒、2 次超 90 秒(最长 113 秒)。
+// 按旧值,每 30 次调用就有 1 次本来能成的被判超时,而超时按既有路径跳过本轮、
+// 下轮换 attempt 重试,等于白烧一次调用还拖慢收敛。
+//
+// 代价:卡住的调用占用时间翻倍;巡检是账号串行域,该账号那一轮多等 60 秒。
+const ProviderRequestTimeoutMs = 120000
 
 func DefaultProviderConfig() ProviderConfig {
 	return ProviderConfig{Provider: "deepseek", Model: "deepseek-v4-pro"}
@@ -126,11 +134,13 @@ func (s *ProviderConfigStore) Load() (*ProviderConfig, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("读取 provider 配置失败")
+		return nil, fmt.Errorf("读取 provider 配置失败: %v", err)
 	}
 	var config ProviderConfig
-	if json.Unmarshal(raw, &config) != nil || config.Validate() != nil {
-		return nil, errors.New("provider 配置文件无效")
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, fmt.Errorf("provider 配置文件无效: %v", err)
+	} else if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("provider 配置文件无效: %v", err)
 	}
 	return &config, nil
 }
@@ -143,11 +153,11 @@ func (s *ProviderConfigStore) Save(config ProviderConfig) error {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return errors.New("provider 配置目录不可写")
+		return fmt.Errorf("provider 配置目录不可写: %v", err)
 	}
 	raw, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return errors.New("provider 配置编码失败")
+		return fmt.Errorf("provider 配置编码失败: %v", err)
 	}
 	raw = append(raw, '\n')
 	if err := os.WriteFile(s.path, raw, 0o600); err != nil {

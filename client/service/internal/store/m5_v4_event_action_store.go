@@ -644,6 +644,7 @@ func communicationV4EventEffectKind(
 	case communication.V4ActionWechatReceipt,
 		communication.V4ActionInterviewAcceptedReceipt,
 		communication.V4ActionColdPrompt,
+		communication.V4ActionColdPromptFixed,
 		communication.V4ActionColdWechatText,
 		communication.V4ActionInterviewFollowup:
 		return CommunicationV4EventEffectReplyText, nil
@@ -992,6 +993,7 @@ func validCommunicationV4EventActionDisposition(row CommunicationV4EventAction) 
 	case communication.V4ActionWechatReceipt,
 		communication.V4ActionInterviewAcceptedReceipt,
 		communication.V4ActionColdPrompt,
+		communication.V4ActionColdPromptFixed,
 		communication.V4ActionColdWechatText,
 		communication.V4ActionInterviewFollowup:
 		switch row.Status {

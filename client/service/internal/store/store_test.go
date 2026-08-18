@@ -108,6 +108,14 @@ func TestOpenMigrateAndWAL(t *testing.T) {
 	if mode != "wal" {
 		t.Fatalf("journal_mode = %q, 期望 wal", mode)
 	}
+	// Open 必须留下查询规划统计,否则规划器会把全空列索引跑成全表扫。
+	var statTables int64
+	if err := s.db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE name = 'sqlite_stat1'").Scan(&statTables).Error; err != nil {
+		t.Fatalf("查 sqlite_stat1: %v", err)
+	}
+	if statTables != 1 {
+		t.Fatalf("sqlite_stat1 表不存在,ANALYZE 未生效")
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

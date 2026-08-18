@@ -47,17 +47,6 @@ func markBusinessParseFailure(completion *store.AIInvocationCompletion, err erro
 	completion.ErrorDetailCode = safeBusinessParseCode(err)
 }
 
-func markReasoningUsageUnsafe(completion *store.AIInvocationCompletion) {
-	completion.FailureStage = m5ai.FailureStageResponseDecode
-	completion.ErrorDetailCode = "reasoningUsageUnsafe"
-}
-
-func markReasoningUsageInvalidOutput(completion *store.AIInvocationCompletion) {
-	completion.Status = store.AIInvocationInvalidOutput
-	completion.ErrorClass = "reasoningUsageUnsafe"
-	markReasoningUsageUnsafe(completion)
-}
-
 func markReducerRejected(completion *store.AIInvocationCompletion) {
 	if completion.Status != store.AIInvocationOK ||
 		(completion.FailureStage != "" && completion.FailureStage != m5ai.FailureStagePersistence) {
@@ -145,11 +134,13 @@ func logAIInvocationPersistenceFailure(
 	advice AdviceExecutor,
 	purpose m5ai.CompletionPurpose,
 	completion store.AIInvocationCompletion,
+	err error,
 ) {
 	failed := completion
 	failed.FailureStage = m5ai.FailureStagePersistence
 	failed.ErrorDetailCode = "brainPersistenceFailed"
-	slog.Error("AI 调用终局持久化失败", aiInvocationLogAttrs(advice, purpose, failed)...)
+	attrs := append(aiInvocationLogAttrs(advice, purpose, failed), "err", err)
+	slog.Error("AI 调用终局持久化失败", attrs...)
 }
 
 func aiInvocationLogAttrs(

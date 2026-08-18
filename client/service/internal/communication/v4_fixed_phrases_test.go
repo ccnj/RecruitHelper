@@ -53,8 +53,36 @@ func TestBuildV4FixedPhraseViewMapsOnlyApprovedScenesAndPreservesOrder(t *testin
 			t.Fatalf("场景映射错误 kind=%s phrase=%+v", kind, phrase)
 		}
 	}
-	if len(view.Phrases) != 6 {
+	if coldPrompt := view.Phrase(V4PhraseColdPrompt); coldPrompt.State != V4PhraseMissing {
+		t.Fatalf("催1 固定话术未配置时必须是 missing: %+v", coldPrompt)
+	}
+	if len(view.Phrases) != 7 {
 		t.Fatalf("未批准场景不应进入可执行视图: %+v", view.Phrases)
+	}
+}
+
+func TestBuildV4FixedPhraseViewMapsColdPromptScene(t *testing.T) {
+	view, err := BuildV4FixedPhraseView(fixedPhrasePackage(`{
+  "silence24Followup": {"message":"您好，看到消息了吗？","messages":["您好，看到消息了吗？"],"actions":[],"enabled":true}
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phrase := view.Phrase(V4PhraseColdPrompt)
+	if phrase.State != V4PhraseAvailable || phrase.SourceScene != "silence24Followup" ||
+		!reflect.DeepEqual(phrase.Messages, []string{"您好，看到消息了吗？"}) ||
+		phrase.Text != "您好，看到消息了吗？" {
+		t.Fatalf("silence24Followup 没有映射为催1 固定话术: %+v", phrase)
+	}
+
+	disabled, err := BuildV4FixedPhraseView(fixedPhrasePackage(`{
+  "silence24Followup": {"message":"停用","messages":["停用"],"actions":[],"enabled":false}
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Phrase(V4PhraseColdPrompt).State != V4PhraseDisabled {
+		t.Fatalf("显式停用必须是 disabled: %+v", disabled.Phrase(V4PhraseColdPrompt))
 	}
 }
 

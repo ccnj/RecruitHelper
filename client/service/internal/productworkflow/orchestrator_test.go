@@ -307,6 +307,55 @@ func TestAdvanceOnceProjectsAccountPauseAndResumesSameFullRunAndBatch(t *testing
 	}
 }
 
+// 回归 2026-08-16 客户机停摆:达标/撞底收口把"批次 completed + 账号
+// sourcingTargetReached"原子双写,但 syncAccountPause 的批次读与账号读是
+// 两次查询,慢库上收口提交可以插在两读之间,造成"批次还在采、账号已带
+// hold"的陈旧快照。该快照不得被投影成 workflow pause。
+func TestAdvanceOnceIgnoresStaleSourcingTargetHoldDuringSourcing(t *testing.T) {
+	db, key, revision := productWorkflowFixture(t)
+	location := time.FixedZone("CST", 8*60*60)
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 9, 0, 0, 0, location)}
+	actor := &fixturePipelineActor{
+		fixtureActor:  &fixtureActor{store: db, clock: clock},
+		scoreProgress: &store.SourcingBatchScoringProgress{},
+	}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := manager.StartFull(key, revision.RevisionHash)
+	if err != nil || started.SourcingBatchID == nil {
+		t.Fatalf("StartFull() = %+v, %v", started, err)
+	}
+	batchID := *started.SourcingBatchID
+	// 直接构造陈旧快照观察到的中间态:批次未收口,账号已带内部 hold。
+	if err := db.MutateAccount(key, func(account *store.Account) error {
+		account.StoppedAt = &clock.now
+		account.PausedReason = store.SourcingTargetReachedPauseReason
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	advanced, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		advanced == nil ||
+		advanced.RunID != started.RunID ||
+		advanced.Status != workflow.StatusRunning ||
+		advanced.Stage != store.ProductWorkflowStageSourcing ||
+		advanced.SourcingBatchID == nil ||
+		*advanced.SourcingBatchID != batchID {
+		t.Fatalf("stale sourcing hold must not pause the workflow: %+v, %v", advanced, err)
+	}
+	account, err := db.AccountByKey(key)
+	if err != nil ||
+		account == nil ||
+		account.StoppedAt == nil ||
+		account.PausedReason != store.SourcingTargetReachedPauseReason {
+		t.Fatalf("internal actor hold must survive untouched: %+v, %v", account, err)
+	}
+}
+
 func TestAdvanceOnceKeepsSourcingTargetPauseInsidePostSourcingFunnel(t *testing.T) {
 	db, key, revision := productWorkflowFixture(t)
 	location := time.FixedZone("CST", 8*60*60)

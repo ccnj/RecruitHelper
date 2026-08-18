@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -193,9 +194,13 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		Content string `json:"content"`
 	}{Role: "user", Content: request.UserContent})
 	payload.ResponseFormat.Type = "json_object"
-	payload.Thinking.Type = "disabled"
+	// 2026-08-16 甲方裁决:全部用途开启思考模式。真机 21 张邀面卡里 2 张把
+	// 候选人说的日期算错一天(候选人都点了接受),33 个真实 case × 1320 次
+	// 对照显示日期错只在关思考档出现(4/330),开思考档 660 次零错。
+	payload.Thinking.Type = "enabled"
 	body, err := json.Marshal(payload)
 	if err != nil {
+		slog.Warn("AI provider 请求编码失败", "err", err)
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("requestInvalid", FailureStageRequestBuild, "requestMarshalFailed")
 	}
@@ -222,6 +227,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(timeoutCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		slog.Warn("AI provider 请求构造失败", "err", err)
 		p.finishTrace(
 			&result.Diagnostics,
 			aitrace.FinishRecord{
@@ -242,6 +248,9 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		} else if errors.Is(err, context.Canceled) || errors.Is(timeoutCtx.Err(), context.Canceled) {
 			transportCode = aitrace.TransportCanceled
 		}
+		// err 原文必须留痕:传输失败没有响应可存,追踪库只有枚举码,这里是
+		// DNS/拒连/TLS/代理这类底层原因在全系统唯一的出口。
+		slog.Warn("AI provider 传输失败", "transportCode", string(transportCode), "err", err)
 		p.finishTrace(
 			&result.Diagnostics,
 			aitrace.FinishRecord{
@@ -278,6 +287,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		if readErr == nil {
 			detailCode = "responseTooLarge"
 		}
+		slog.Warn("AI provider 响应读取失败", "detail", detailCode,
+			"httpStatus", response.StatusCode, "bytes", len(raw), "err", readErr)
 		return result, newProviderError("responseInvalid", FailureStageResponseDecode, detailCode)
 	}
 	p.finishTrace(
@@ -453,7 +464,7 @@ func providerConfigHash(config ProviderConfig) (string, error) {
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return "", errors.New("LLM provider 配置摘要失败")
+		return "", fmt.Errorf("LLM provider 配置摘要失败: %v", err)
 	}
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:]), nil
