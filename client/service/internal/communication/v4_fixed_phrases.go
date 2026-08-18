@@ -28,6 +28,7 @@ type V4FixedPhraseKind string
 const (
 	V4PhraseRejectionRetention      V4FixedPhraseKind = "rejectionRetention"
 	V4PhraseRejectionClosing        V4FixedPhraseKind = "rejectionClosing"
+	V4PhraseColdPrompt              V4FixedPhraseKind = "coldPrompt"
 	V4PhraseColdWechat              V4FixedPhraseKind = "coldWechat"
 	V4PhraseWechatReceipt           V4FixedPhraseKind = "wechatReceipt"
 	V4PhraseInterviewAccepted       V4FixedPhraseKind = "interviewAccepted"
@@ -71,13 +72,16 @@ var v4FixedPhraseScenes = []struct {
 	scene string
 }{
 	{kind: V4PhraseRejectionRetention, scene: "rejectWechat"},
+	// 催1 固定话术(2026-08-18 甲方裁决):可选场景,单条文本;缺失/停用/不合法
+	// 一律回落 AI 沉默追问,该场景不参与职位配置完整性判定。
+	{kind: V4PhraseColdPrompt, scene: "silence24Followup"},
 	{kind: V4PhraseColdWechat, scene: "silence48Wechat"},
 	{kind: V4PhraseWechatReceipt, scene: "wechatAccepted"},
 	{kind: V4PhraseInterviewAccepted, scene: "meetingAccepted"},
 	{kind: V4PhraseOnsiteInterviewAccepted, scene: "offlineMeetingAccepted"},
 }
 
-// BuildV4FixedPhraseView parses only the four approved legacy scene mappings
+// BuildV4FixedPhraseView parses only the approved legacy scene mappings above
 // and adds the locally approved rejection-closing default.
 // The old actions array is shape-checked and then discarded: all action and
 // state authority remains in the deterministic v4 reducer. A broken, disabled

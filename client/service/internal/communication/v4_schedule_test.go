@@ -289,6 +289,172 @@ func TestV4ScheduleNewRealRoundUnlocksOnlySecondColdPrompt(t *testing.T) {
 	}
 }
 
+func v4FixedColdPromptPhrase(text string) V4FixedPhrase {
+	return V4FixedPhrase{
+		Kind: V4PhraseColdPrompt, SourceScene: "silence24Followup",
+		State: V4PhraseAvailable, Messages: []string{text}, Text: text,
+	}
+}
+
+func TestV4ScheduleFixedColdPromptPlansWithoutAdviceAndMarksAxiomFour(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	input := v4ScheduleInput(state, scheduleAt(state, 24*time.Hour))
+	input.FixedPhrases.Phrases[V4PhraseColdPrompt] = v4FixedColdPromptPhrase("您好，前面发您的职位看到了吗？")
+	decision, err := EvaluateV4Schedule(input)
+	if err != nil || decision.Status != V4ScheduleActionsPlanned || decision.NextAdvice != V4AdviceNone ||
+		len(decision.Actions) != 1 || decision.Actions[0].Kind != V4ActionColdPromptFixed ||
+		decision.Actions[0].Text != "您好，前面发您的职位看到了吗？" ||
+		decision.Actions[0].Round != 1 || decision.Actions[0].Stage != 1 ||
+		decision.Actions[0].DueAt == nil ||
+		!decision.Actions[0].DueAt.Equal(state.LastOutboundAt.Add(24*time.Hour)) {
+		t.Fatalf("固定催1 没有免 AI 直接排单一动作: decision=%+v err=%v", decision, err)
+	}
+	if decision.State.ColdPromptRemaining != 2 || decision.State.ColdPromptFixedTextSent {
+		t.Fatalf("计划阶段不得提前扣预算或置固定标记: %+v", decision.State)
+	}
+
+	confirmed, err := ApplyV4ConfirmedAction(decision.State, V4ConfirmedAction{
+		ActionKey: decision.Actions[0].ActionKey, Kind: V4ActionColdPromptFixed,
+		MessageSeq: 2, SentAt: &input.Now, Round: 1, Stage: 1,
+	})
+	if err != nil || confirmed.ColdPromptRemaining != 1 || confirmed.ColdPromptSentCount != 1 ||
+		confirmed.LastColdPromptRound != 1 || !confirmed.ColdPromptFixedTextSent {
+		t.Fatalf("固定催1 正证没有扣预算并置公理4 标记: state=%+v err=%v", confirmed, err)
+	}
+	replayed, err := ApplyV4ConfirmedAction(confirmed, V4ConfirmedAction{
+		ActionKey: decision.Actions[0].ActionKey, Kind: V4ActionColdPromptFixed,
+		MessageSeq: 2, SentAt: &input.Now, Round: 1, Stage: 1,
+	})
+	if err != nil || !reflect.DeepEqual(replayed, confirmed) {
+		t.Fatalf("固定催1 正证重放不幂等: first=%+v replayed=%+v err=%v", confirmed, replayed, err)
+	}
+}
+
+func TestV4ScheduleFixedColdPromptIsForLifeEvenAfterNewRound(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	firstDue := state.LastOutboundAt.Add(24 * time.Hour)
+	first, err := ApplyV4ConfirmedAction(state, V4ConfirmedAction{
+		ActionKey: "profile|coldFixed|1", Kind: V4ActionColdPromptFixed, MessageSeq: 2,
+		SentAt: &firstDue, Round: 1, Stage: 1,
+	})
+	if err != nil || !first.ColdPromptFixedTextSent {
+		t.Fatalf("固定催1 正证没有置标记: state=%+v err=%v", first, err)
+	}
+	real, err := ApplyV4BusinessEvent(first, v4MessageEvent("message:3", 3, EventCandidateExpressionReceived))
+	if err != nil || real.State.RealMessageRound != 2 {
+		t.Fatalf("真实表达没有开新计数轮: decision=%+v err=%v", real, err)
+	}
+	replyAt := firstDue.Add(time.Minute)
+	withReply, err := ApplyV4ConfirmedAction(real.State, V4ConfirmedAction{
+		ActionKey: "turn:2|reply", Kind: V4ActionReplyText, MessageSeq: 4, SentAt: &replyAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 评估输入刻意用默认夹具(催1 固定话术缺失):跳过语义由状态位承载,
+	// 不带话术视图的评估点(归档档位、预检)也必须得出同一结论。
+	input := v4ScheduleInput(withReply, withReply.LastOutboundAt.Add(24*time.Hour))
+	decision, err := EvaluateV4Schedule(input)
+	if err != nil || decision.Status != V4ScheduleActionsPlanned ||
+		len(decision.Actions) != 2 || decision.Actions[0].Kind != V4ActionColdWechatText ||
+		decision.Actions[1].Kind != V4ActionColdWechatInvite {
+		t.Fatalf("发过固定催1 后新轮没有跳过催1② 直落催2: decision=%+v err=%v", decision, err)
+	}
+
+	// 催2 也用完后,36 小时按归档收场,催1② 永不复活。
+	textAt := withReply.LastOutboundAt.Add(24 * time.Hour)
+	textState, err := ApplyV4ConfirmedAction(decision.State, V4ConfirmedAction{
+		ActionKey: decision.Actions[0].ActionKey, Kind: V4ActionColdWechatText,
+		MessageSeq: 5, SentAt: &textAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inviteAt := textAt.Add(time.Second)
+	invited, err := ApplyV4ConfirmedAction(textState, V4ConfirmedAction{
+		ActionKey: decision.Actions[1].ActionKey, Kind: V4ActionColdWechatInvite,
+		MessageSeq: 6, SentAt: &inviteAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := EvaluateV4Schedule(v4ScheduleInput(invited, invited.LastOutboundAt.Add(36*time.Hour)))
+	if err != nil || len(archive.Actions) != 1 || archive.Actions[0].Kind != V4ActionArchive ||
+		archive.Actions[0].EndReason != V4EndSilentWechatInvited {
+		t.Fatalf("固定催1 档案无可用催后没有归档: decision=%+v err=%v", archive, err)
+	}
+}
+
+func TestV4ScheduleFixedColdPromptBadShapesFallBackToAdvice(t *testing.T) {
+	multi := V4FixedPhrase{
+		Kind: V4PhraseColdPrompt, SourceScene: "silence24Followup",
+		State: V4PhraseAvailable, Messages: []string{"第一句", "第二句"},
+		Text: "第一句\n第二句",
+	}
+	cases := []struct {
+		name   string
+		phrase V4FixedPhrase
+	}{
+		{name: "multi bubble", phrase: multi},
+		{name: "disabled", phrase: V4FixedPhrase{Kind: V4PhraseColdPrompt, State: V4PhraseDisabled}},
+		{name: "empty", phrase: V4FixedPhrase{Kind: V4PhraseColdPrompt, State: V4PhraseEmpty}},
+		{name: "invalid", phrase: V4FixedPhrase{Kind: V4PhraseColdPrompt, State: V4PhraseInvalid}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := NewV4GreetedState(v4Time(8))
+			input := v4ScheduleInput(state, scheduleAt(state, 24*time.Hour))
+			input.FixedPhrases.Phrases[V4PhraseColdPrompt] = tc.phrase
+			decision, err := EvaluateV4Schedule(input)
+			if err != nil || decision.Status != V4ScheduleWaitingAdvice ||
+				decision.NextAdvice != V4AdviceSilenceFollowup || len(decision.Actions) != 0 {
+				t.Fatalf("固定话术形态不合法没有回落 AI 沉默追问: decision=%+v err=%v", decision, err)
+			}
+		})
+	}
+}
+
+func TestV4ScheduleFixedColdPromptHonorsFrozenAdvice(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	input := v4ScheduleInput(state, scheduleAt(state, 24*time.Hour))
+	input.FixedPhrases.Phrases[V4PhraseColdPrompt] = v4FixedColdPromptPhrase("固定话术")
+	input.Reply = ReplyAdvice{State: AdviceOK, Suggestion: m5ai.ReplySuggestion{Text: "已冻结的 AI 话术"}}
+	decision, err := EvaluateV4Schedule(input)
+	if err != nil || decision.Status != V4ScheduleActionsPlanned || len(decision.Actions) != 1 ||
+		decision.Actions[0].Kind != V4ActionColdPrompt || decision.Actions[0].Text != "已冻结的 AI 话术" {
+		t.Fatalf("配置翻转后已冻结建议没有按原样收束: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestV4StateRejectsSecondFreshFixedColdPromptAndOrphanFlag(t *testing.T) {
+	state := NewV4GreetedState(v4Time(8))
+	firstDue := state.LastOutboundAt.Add(24 * time.Hour)
+	first, err := ApplyV4ConfirmedAction(state, V4ConfirmedAction{
+		ActionKey: "profile|coldFixed|1", Kind: V4ActionColdPromptFixed, MessageSeq: 2,
+		SentAt: &firstDue, Round: 1, Stage: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err := ApplyV4BusinessEvent(first, v4MessageEvent("message:3", 3, EventCandidateExpressionReceived))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDue := firstDue.Add(24 * time.Hour)
+	if _, err := ApplyV4ConfirmedAction(real.State, V4ConfirmedAction{
+		ActionKey: "profile|coldFixed|2", Kind: V4ActionColdPromptFixed, MessageSeq: 4,
+		SentAt: &secondDue, Round: 2, Stage: 2,
+	}); !errors.Is(err, ErrInvalidV4StateTransition) {
+		t.Fatalf("第二条新发固定催1 必须被归约器拒绝: err=%v", err)
+	}
+
+	orphan := NewV4GreetedState(v4Time(8))
+	orphan.ColdPromptFixedTextSent = true
+	if err := ValidateV4State(orphan); !errors.Is(err, ErrInvalidV4StateTransition) {
+		t.Fatalf("固定标记没有伴随已发计数必须非法: err=%v", err)
+	}
+}
+
 func TestV4ScheduleArchiveReasonPriorityFollowsV4(t *testing.T) {
 	cases := []struct {
 		name   string

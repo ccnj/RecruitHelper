@@ -334,7 +334,8 @@ func validateCommunicationV4ScheduleActions(
 			return time.Time{}, ErrCommunicationV4Invalid
 		}
 		switch action.Kind {
-		case communication.V4ActionColdPrompt:
+		case communication.V4ActionColdPrompt,
+			communication.V4ActionColdPromptFixed:
 			if index != 0 || strings.TrimSpace(action.Text) == "" ||
 				action.Round == 0 || action.Stage < 1 || action.Stage > 2 ||
 				m5ai.ValidateSendText(action.Text) != nil {
@@ -364,6 +365,7 @@ func validateCommunicationV4ScheduleActions(
 	// 正文气泡必须连续从 0 开始,邀请只能是最后一项。
 	switch actions[0].Kind {
 	case communication.V4ActionColdPrompt,
+		communication.V4ActionColdPromptFixed,
 		communication.V4ActionInterviewFollowup:
 		if len(actions) != 1 {
 			return time.Time{}, ErrCommunicationV4Invalid
@@ -617,34 +619,41 @@ func renderCommunicationV4ScheduleFixedPhrases(
 	view communication.V4FixedPhraseView,
 	salutation string,
 ) communication.V4FixedPhraseView {
-	phrase := view.Phrase(communication.V4PhraseColdWechat)
-	if phrase.State != communication.V4PhraseAvailable {
-		return view
-	}
-	// 逐项渲染:Messages 是候选人可见的气泡边界,Text 只是由渲染结果重建
-	// 的兼容摘要;任一项渲染失败即整体降级,不发半截序列。
-	messages := make([]string, 0, len(phrase.Messages))
-	valid := len(phrase.Messages) > 0
-	for _, template := range phrase.Messages {
-		rendered, err := communication.RenderV4FixedPhrase(
-			template,
-			communication.V4FixedPhraseRenderInput{Salutation: salutation},
-		)
-		if err != nil {
-			valid = false
-			break
+	// 时刻表消费的两种固定话术:催2(coldWechat)与催1 固定文本(coldPrompt)。
+	// 催1 渲染失败降级为 invalid 后,时刻表按"未配置"回落 AI 沉默追问。
+	for _, kind := range []communication.V4FixedPhraseKind{
+		communication.V4PhraseColdWechat,
+		communication.V4PhraseColdPrompt,
+	} {
+		phrase := view.Phrase(kind)
+		if phrase.State != communication.V4PhraseAvailable {
+			continue
 		}
-		messages = append(messages, rendered)
+		// 逐项渲染:Messages 是候选人可见的气泡边界,Text 只是由渲染结果重建
+		// 的兼容摘要;任一项渲染失败即整体降级,不发半截序列。
+		messages := make([]string, 0, len(phrase.Messages))
+		valid := len(phrase.Messages) > 0
+		for _, template := range phrase.Messages {
+			rendered, err := communication.RenderV4FixedPhrase(
+				template,
+				communication.V4FixedPhraseRenderInput{Salutation: salutation},
+			)
+			if err != nil {
+				valid = false
+				break
+			}
+			messages = append(messages, rendered)
+		}
+		if !valid {
+			phrase.State = communication.V4PhraseInvalid
+			phrase.Text = ""
+			phrase.Messages = nil
+		} else {
+			phrase.Messages = messages
+			phrase.Text = strings.Join(messages, "\n")
+		}
+		view.Phrases[kind] = phrase
 	}
-	if !valid {
-		phrase.State = communication.V4PhraseInvalid
-		phrase.Text = ""
-		phrase.Messages = nil
-	} else {
-		phrase.Messages = messages
-		phrase.Text = strings.Join(messages, "\n")
-	}
-	view.Phrases[communication.V4PhraseColdWechat] = phrase
 	return view
 }
 
