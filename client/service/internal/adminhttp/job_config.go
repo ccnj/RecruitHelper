@@ -19,7 +19,7 @@ func (a *API) jobConfigSourceConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := a.jobConfigSource.Status(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "旧后台职位配置源读取失败"})
+		writeError(w, http.StatusInternalServerError, "旧后台职位配置源读取失败", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"config": view})
@@ -98,7 +98,7 @@ func (a *API) backendJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	jobs, err := jobconfig.ParseBackendJobs(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
+		writeError(w, http.StatusBadGateway, "旧后台职位列表格式不可识别", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
@@ -151,7 +151,7 @@ func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jo
 	stored, err := a.st.SaveCurrentLegacyJobAIContext(revisions, syncedAt)
 	if err != nil {
 		return nil, &jobConfigSyncFailure{
-			status: http.StatusConflict, message: "职位 AI 上下文未能原子导入",
+			status: http.StatusConflict, message: "职位 AI 上下文未能原子导入: " + err.Error(),
 		}
 	}
 	views := make([]m5ContextView, 0, len(stored))

@@ -113,7 +113,7 @@ func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte, onAppl
 	credentials, err := ExtractProviderCredentials(raw)
 	if err != nil {
 		slog.Warn("旧后台 provider 凭据无法解析，沿用本机模型配置",
-			"errorCode", "providerCredentialsUnparsable")
+			"errorCode", "providerCredentialsUnparsable", "err", err)
 		return
 	}
 	if credentials.empty() {
@@ -122,7 +122,7 @@ func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte, onAppl
 	applied, err := store.ApplyBackendCredentials(credentials)
 	if err != nil {
 		slog.Warn("旧后台 provider 凭据未能落盘，沿用本机模型配置",
-			"errorCode", "providerCredentialsNotStored")
+			"errorCode", "providerCredentialsNotStored", "err", err)
 		return
 	}
 	if applied {

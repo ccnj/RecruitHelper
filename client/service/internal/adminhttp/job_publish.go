@@ -52,7 +52,7 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台或账号标识"})
+		writeError(w, http.StatusBadRequest, "缺少有效的平台或账号标识", err)
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil || a.jobConfigSource == nil {
@@ -64,7 +64,7 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 	// 批次运行期间宁可拒绝预检，也不新增标签页管理能力去绕开这条约束。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -76,12 +76,12 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 	args, err := protocol.Encode(protocol.JobReadPublishedListArgs{})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "职位清单读取命令构造失败"})
+		writeError(w, http.StatusInternalServerError, "职位清单读取命令构造失败", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 160*time.Second)
@@ -95,28 +95,28 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "平台职位清单读取未能派发"})
+		writeError(w, http.StatusConflict, "平台职位清单读取未能派发", err)
 		return
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "平台职位清单读取未完成"})
+		writeError(w, http.StatusConflict, "平台职位清单读取未完成", err)
 		return
 	}
 	postings, observedAt, err := parsePublishedListProof(logicalRef, logical, account, key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "平台职位清单证词无效"})
+		writeError(w, http.StatusConflict, "平台职位清单证词无效", err)
 		return
 	}
 
 	raw, err := a.jobConfigSource.FetchAll(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表读取失败"})
+		writeError(w, http.StatusBadGateway, "旧后台职位列表读取失败", err)
 		return
 	}
 	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "旧后台职位列表格式不可识别"})
+		writeError(w, http.StatusBadGateway, "旧后台职位列表格式不可识别", err)
 		return
 	}
 
@@ -200,12 +200,12 @@ func (a *API) resolvePublishTarget(
 	raw, err := a.jobConfigSource.FetchAll(ctx)
 	if err != nil {
 		return nil, jobconfig.PublishSpec{},
-			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表读取失败"}
+			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表读取失败: " + err.Error()}
 	}
 	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
 	if err != nil {
 		return nil, jobconfig.PublishSpec{},
-			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表格式不可识别"}
+			&jobPublishFailure{http.StatusBadGateway, "旧后台职位列表格式不可识别: " + err.Error()}
 	}
 	var target *jobconfig.BackendJobPublishSource
 	for i := range sources {
@@ -261,7 +261,7 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -272,7 +272,7 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 
@@ -285,7 +285,7 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	args, err := json.Marshal(spec.DraftArgs(target.JobName, req.JobClass, req.Keywords))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "试填命令构造失败"})
+		writeError(w, http.StatusInternalServerError, "试填命令构造失败", err)
 		return
 	}
 	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobPrepareDraft, 1, args); err != nil {
@@ -302,12 +302,12 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填未能派发"})
+		writeError(w, http.StatusConflict, "发布试填未能派发", err)
 		return
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "发布试填未完成"})
+		writeError(w, http.StatusConflict, "发布试填未完成", err)
 		return
 	}
 	report, err := parsePrepareDraftProof(logicalRef, logical, account, key)
@@ -378,7 +378,7 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 	// 与预检同一道闸：发布要占用页面并导航，批次在跑时一律拒绝。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -461,11 +461,11 @@ type jobTakeOfflineResultView struct {
 func (a *API) resolveJobNameOnly(ctx context.Context, jobID string) (string, *jobPublishFailure) {
 	raw, err := a.jobConfigSource.FetchAll(ctx)
 	if err != nil {
-		return "", &jobPublishFailure{http.StatusBadGateway, "旧后台职位列表读取失败"}
+		return "", &jobPublishFailure{http.StatusBadGateway, "旧后台职位列表读取失败: " + err.Error()}
 	}
 	sources, err := jobconfig.ParseBackendJobPublishSources(raw)
 	if err != nil {
-		return "", &jobPublishFailure{http.StatusBadGateway, "旧后台职位列表格式不可识别"}
+		return "", &jobPublishFailure{http.StatusBadGateway, "旧后台职位列表格式不可识别: " + err.Error()}
 	}
 	for i := range sources {
 		if sources[i].JobID == jobID {
@@ -506,7 +506,7 @@ func (a *API) jobTakeOffline(w http.ResponseWriter, r *http.Request) {
 	// 与发布同一道闸：下线要占用页面并导航到职位管理页，批次在跑时一律拒绝。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {

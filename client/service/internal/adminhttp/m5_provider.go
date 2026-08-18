@@ -14,7 +14,7 @@ func (a *API) m5ProviderConfig(w http.ResponseWriter, _ *http.Request) {
 	}
 	config, err := a.providerConfig.Load()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "本地模型配置读取失败"})
+		writeError(w, http.StatusInternalServerError, "本地模型配置读取失败", err)
 		return
 	}
 	if config == nil {
@@ -70,7 +70,7 @@ func (a *API) saveM5ProviderConfig(w http.ResponseWriter, r *http.Request) {
 			config.Model = existing.Model
 		}
 	} else if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "本地模型配置读取失败"})
+		writeError(w, http.StatusInternalServerError, "本地模型配置读取失败", err)
 		return
 	}
 	if config.Model == "" {

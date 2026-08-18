@@ -2,7 +2,7 @@
 // base、脑端与协议只看平台无关的原语结果。
 
 import type { PrimitiveContext } from '../registry'
-import { reportHandLog } from '../../base/handLog'
+import { describeError, reportHandLog } from '../../base/handLog'
 import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
   AccountReadWechatSettingData,
@@ -115,6 +115,16 @@ export class ZhilianPlatformError extends Error {
   }
 }
 
+// 手侧失败的异常原文后缀(2026-08-18 甲方裁决:可排查性优先——异常 message
+// 一并携带,不再只留裸 reason;结构化微信号/手机号仍不得主动装配进错误详情)。
+// 契约 ErrorBody.message 上限 500 字符/2000 字节,按追加后缀的份额防御截断。
+function failureDetailSuffix(detail: string | undefined): string {
+  if (!detail) return ''
+  let out = `（${detail.slice(0, 220)}）`
+  while (new TextEncoder().encode(out).length > 900) out = out.slice(0, -8)
+  return out
+}
+
 // 平台实现只给生成类型起本地别名，不再手写一份协议 DTO。
 export type ZhilianProbe = ProbePlatformData
 export type ZhilianCurrentCandidate = CandidateReadCurrentData
@@ -190,6 +200,8 @@ interface MainCurrentCandidateReady {
 interface MainCurrentCandidateFailed {
   status: 'failed'
   reason: MainCurrentCandidateFailureReason
+  // 捕获到的异常原文(截断),只进 error.message 供人排查,不参与任何判定。
+  detail?: string
 }
 
 type MainCurrentCandidateResult = MainCurrentCandidateReady | MainCurrentCandidateFailed
@@ -222,6 +234,7 @@ interface MainResumeReady {
 interface MainResumeFailed {
   status: 'failed'
   reason: MainResumeFailureReason
+  detail?: string
 }
 
 type MainResumeResult = MainResumeReady | MainResumeFailed
@@ -270,6 +283,7 @@ interface MainSourcingResumeReady {
 interface MainSourcingResumeFailed {
   status: 'failed'
   reason: MainSourcingResumeFailureReason
+  detail?: string
   // 只在稳定身份已确定、失败又仅属于该候选人简历内容时携带。它只在
   // 同一条手侧命令内扩充临时排除集，不进入协议 result、日志或脑账本。
   failedPlatformUserRef?: string
@@ -301,6 +315,7 @@ interface MainSourcingWindowReady {
 interface MainSourcingWindowFailed {
   status: 'failed'
   reason: MainSourcingWindowFailureReason
+  detail?: string
 }
 
 type MainSourcingWindowResult = MainSourcingWindowReady | MainSourcingWindowFailed
@@ -335,6 +350,7 @@ interface MainSelectSourcingPositionReady {
 interface MainSelectSourcingPositionFailed {
   status: 'failed'
   reason: MainSelectSourcingPositionFailureReason
+  detail?: string
 }
 
 type MainSelectSourcingPositionResult =
@@ -409,7 +425,7 @@ type MainGreetingActionResult =
   | { status: 'prepared' }
   | { status: 'ready' }
   | { status: 'clicked' }
-  | { status: 'failed'; reason: MainGreetingFailureReason }
+  | { status: 'failed'; reason: MainGreetingFailureReason; detail?: string }
 
 const MAIN_GREETING_LIST_TARGET_FAILURE_REASONS = [
   'route_mismatch',
@@ -427,7 +443,7 @@ type MainGreetingListTargetResult =
     status: 'ready'
     data: { contactState: ZhilianCurrentCandidate['contactState'] }
   }
-  | { status: 'failed'; reason: MainGreetingListTargetFailureReason }
+  | { status: 'failed'; reason: MainGreetingListTargetFailureReason; detail?: string }
 
 // suspect 取证(2026-08-07 甲方裁决立案):招呼发送后的轮询里顺带观察页面浮层
 // 与招呼弹窗开合。纯只读扫描;失败方向永远是"少一条现场"。
@@ -461,6 +477,7 @@ type MainChatListFilterResult =
       'job_option_cardinality' | 'job_selection_unconfirmed' |
       'unread_control_cardinality' | 'unread_control_unsafe' |
       'unread_selection_unconfirmed' | 'unexpected'
+    detail?: string
   }
 
 interface MainThreadPageResult {
@@ -556,6 +573,7 @@ interface MainSendBaselineReady {
 interface MainSendBaselineFailed {
   status: 'failed'
   stage: MainSendBaselineFailureStage
+  detail?: string
 }
 
 type MainSendBaselineResult = MainSendBaselineReady | MainSendBaselineFailed
@@ -729,8 +747,8 @@ function decodeCursor(value: string | null | undefined): ThreadCursor | null {
       throw new Error('cursor version or shape invalid')
     }
     return parsed as ThreadCursor
-  } catch {
-    throw new ZhilianPlatformError('CURSOR_INVALID', '分页游标无效')
+  } catch (error) {
+    throw new ZhilianPlatformError('CURSOR_INVALID', `分页游标无效：${describeError(error).slice(0, 300)}`)
   }
 }
 
@@ -976,9 +994,10 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainCurrentCandidateFailureReason): MainCurrentCandidateFailed => ({
+  const failed = (reason: MainCurrentCandidateFailureReason, detail?: string): MainCurrentCandidateFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
 
   try {
@@ -1073,8 +1092,8 @@ function mainReadCurrentCandidate(): MainCurrentCandidateResult {
         contactState,
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -1102,7 +1121,8 @@ async function mainReadCurrentResume(
     return raw.normalize('NFC').replace(/\u00a0/gu, ' ').split(/\n+/u)
       .map((line) => line.replace(/[\t ]+/gu, ' ').trim()).filter(Boolean).join('\n')
   }
-  const failed = (reason: MainResumeFailureReason): MainResumeFailed => ({ status: 'failed', reason })
+  const failed = (reason: MainResumeFailureReason, detail?: string): MainResumeFailed =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const routeMatches = (): boolean => {
@@ -1202,8 +1222,8 @@ async function mainReadCurrentResume(
         if (remainingMs <= 0) return failed('close_unavailable')
         await sleep(Math.min(120, remainingMs))
       }
-    } catch {
-      return failed('close_unavailable')
+    } catch (error) {
+      return failed('close_unavailable', String(error))
     }
   }
   let ownedModal: HTMLElement | null = null
@@ -1355,9 +1375,9 @@ async function mainReadCurrentResume(
     })()
     const cleanupFailure = await cleanupOpenedModal()
     return cleanupFailure ?? readResult
-  } catch {
+  } catch (error) {
     const cleanupFailure = await cleanupOpenedModal()
-    return cleanupFailure ?? failed('unexpected')
+    return cleanupFailure ?? failed('unexpected', String(error))
   }
 }
 
@@ -1393,7 +1413,9 @@ async function mainSelectSourcingPosition(
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
   const failed = (
     reason: MainSelectSourcingPositionFailureReason,
-  ): MainSelectSourcingPositionFailed => ({ status: 'failed', reason })
+    detail?: string,
+  ): MainSelectSourcingPositionFailed =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const sleep = (delayMs: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, delayMs))
   const randomInteractionGapMs = (): number =>
@@ -1575,7 +1597,7 @@ async function mainSelectSourcingPosition(
       await sleep(120)
     }
     return failed(latestFailure === 'page_unstable' ? 'page_unstable' : latestFailure)
-  } catch {
+  } catch (error) {
     if (ownsDrawer) {
       try {
         await closeOwnedDrawer()
@@ -1583,7 +1605,7 @@ async function mainSelectSourcingPosition(
         // 主失败保持 unexpected；清理失败只意味着页面仍需人工收口。
       }
     }
-    return failed('unexpected')
+    return failed('unexpected', String(error))
   }
 }
 
@@ -2266,8 +2288,8 @@ async function mainApplySourcingFilters(
         observedAt: Date.now(),
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   } finally {
     if (ownedDrawer) {
       try {
@@ -2316,9 +2338,10 @@ async function mainReadSourcingWindow(
   }
   const visibleAll = (root: ParentNode, selector: string): HTMLElement[] =>
     Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(visible)
-  const failed = (reason: MainSourcingWindowFailureReason): MainSourcingWindowFailed => ({
+  const failed = (reason: MainSourcingWindowFailureReason, detail?: string): MainSourcingWindowFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
   const route = (): URL | null => {
     try {
@@ -2504,8 +2527,8 @@ async function mainReadSourcingWindow(
         observedAt: Date.now(),
       },
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -2555,9 +2578,11 @@ async function mainReadSourcingResume(
   const failed = (
     reason: MainSourcingResumeFailureReason,
     failedPlatformUserRef?: string,
+    detail?: string,
   ): MainSourcingResumeFailed => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
     ...(failedPlatformUserRef ? { failedPlatformUserRef } : {}),
   })
   const route = (): URL | null => {
@@ -2916,8 +2941,8 @@ async function mainReadSourcingResume(
     while (true) {
       try {
         evaluated = evaluateOpenedDetail()
-      } catch {
-        evaluated = failed('unexpected')
+      } catch (error) {
+        evaluated = failed('unexpected', undefined, String(error))
       }
       if (evaluated.status === 'ready') {
         const nextProjection = stableProjection(evaluated.data)
@@ -2936,8 +2961,8 @@ async function mainReadSourcingResume(
     if (evaluated.status === 'ready') await browseOpenedDetail(modal)
     const closeFailure = await closeOpenedDetail()
     return closeFailure ?? evaluated
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', undefined, String(error))
   }
 }
 
@@ -3044,7 +3069,7 @@ async function uniqueCurrentCandidate(
     } else if (result.reason !== 'detail_absent') {
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '当前候选人或职位无法唯一确证',
+        `当前候选人或职位无法唯一确证：${result.reason}${failureDetailSuffix(result.detail)}`,
         'manualOnly',
       )
     }
@@ -3129,9 +3154,10 @@ function mainReadGreetingListTarget(
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainGreetingListTargetFailureReason): MainGreetingListTargetResult => ({
+  const failed = (reason: MainGreetingListTargetFailureReason, detail?: string): MainGreetingListTargetResult => ({
     status: 'failed',
     reason,
+    ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }),
   })
 
   try {
@@ -3173,8 +3199,8 @@ function mainReadGreetingListTarget(
           ? 'established'
           : 'unknown'
     return { status: 'ready', data: { contactState } }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -3340,7 +3366,11 @@ async function uniqueGreetingListTarget(
     }
     if (result.status === 'ready') ready.push({ tab, result })
     else if (result.reason !== 'target_absent') {
-      throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '推荐列表目标无法唯一确证', 'manualOnly')
+      throw new ZhilianPlatformError(
+        'ELEMENT_UNRESOLVED',
+        `推荐列表目标无法唯一确证：${result.reason}${failureDetailSuffix(result.detail)}`,
+        'manualOnly',
+      )
     }
   }
   if (ready.length !== 1) {
@@ -3382,7 +3412,8 @@ async function mainSendGreetingOnce(
     const style = getComputedStyle(node)
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
-  const failed = (reason: MainGreetingFailureReason): MainGreetingActionResult => ({ status: 'failed', reason })
+  const failed = (reason: MainGreetingFailureReason, detail?: string): MainGreetingActionResult =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   const rotateRight = (value: number, count: number): number =>
     (value >>> count) | (value << (32 - count))
   const digest = (value: string): string => {
@@ -3704,9 +3735,9 @@ async function mainSendGreetingOnce(
         return failed('input_rejected')
       }
       return { status: 'prepared' }
-    } catch {
+    } catch (error) {
       await restoreOwnedDraft()
-      return failed('input_rejected')
+      return failed('input_rejected', String(error))
     }
   }
 
@@ -3804,7 +3835,11 @@ function throwGreetingActionFailure(result: MainGreetingActionResult): never {
   if (result.reason === 'two_step_surface_unavailable') {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前页面不满足已验证的两步招呼动作表面', 'manualOnly')
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼编辑器或发送表面无法唯一确认', 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    `招呼编辑器或发送表面无法唯一确认：${result.reason}${failureDetailSuffix(result.detail)}`,
+    'manualOnly',
+  )
 }
 
 export async function sendZhilianGreeting(
@@ -4083,8 +4118,9 @@ async function mainEnsureChatListFilter(
   unread: boolean,
   apply: boolean,
 ): Promise<MainChatListFilterResult> {
-  const failed = (reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason']):
-  MainChatListFilterResult => ({ status: 'failed', reason })
+  const failed = (reason: Extract<MainChatListFilterResult, { status: 'failed' }>['reason'], detail?: string):
+  MainChatListFilterResult =>
+    ({ status: 'failed', reason, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   try {
     const clean = (value: unknown): string => String(value ?? '')
       .normalize('NFC')
@@ -4203,8 +4239,8 @@ async function mainEnsureChatListFilter(
     if (!finalState.allJobs) return failed('job_selection_unconfirmed')
     if (finalState.unread !== unread) return failed('unread_selection_unconfirmed')
     return { status: 'ready', changed }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -4584,10 +4620,10 @@ function currentConversationRefFromTab(tab: chrome.tabs.Tab): string {
       throw new Error('conversation missing')
     }
     return conversationRef
-  } catch {
+  } catch (error) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      '当前智联 IM 标签页 URL 没有可确认的会话标识',
+      `当前智联 IM 标签页 URL 没有可确认的会话标识：${describeError(error).slice(0, 300)}`,
       'manualOnly',
     )
   }
@@ -4788,9 +4824,10 @@ export async function openZhilianConversation(
   const filterState = await runMain(tab.id, mainEnsureChatListFilter, [true, false])
   if (filterState.status !== 'ready') {
     const reason = filterState.status === 'failed' ? filterState.reason : 'not_unread'
+    const filterDetail = filterState.status === 'failed' ? filterState.detail : undefined
     throw new ZhilianPlatformError(
       'GUARD_FAILED',
-      `当前聊天列表尚未确认为全部职位未读列表：${reason}`,
+      `当前聊天列表尚未确认为全部职位未读列表：${reason}${failureDetailSuffix(filterDetail)}`,
       'manualOnly',
     )
   }
@@ -4799,8 +4836,9 @@ export async function openZhilianConversation(
     const route = new URL((await chrome.tabs.get(tab.id)).url ?? '')
     if (route.pathname !== '/app/im') throw new Error('not im')
     selected = route.searchParams.get('sessionId') ?? ''
-  } catch {
-    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '打开会话前页面离开智联沟通页', 'manualOnly')
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC', `打开会话前页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   // 后置核验共用于点击后与零点击两条路径；sideEffect 证词必须如实区分。
   let performedClick = false
@@ -4977,7 +5015,7 @@ function throwResumeFailure(result: MainResumeFailed): never {
   // 一个真实候选人卡在这里，只能靠猜。diagnostics 只给人读，不参与任何判定。
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '当前简历详情无法完整且唯一读取',
+    `当前简历详情无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
     'manualOnly',
     undefined,
     'none',
@@ -5180,7 +5218,7 @@ function throwSourcingResumeFailure(result: MainSourcingResumeFailed): never {
   // 被压平。带出 reason 才能判断是该放宽读取要求还是页面结构真变了。
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    '当前推荐候选人无法完整且唯一读取',
+    `当前推荐候选人无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
     'manualOnly',
     undefined,
     'none',
@@ -5203,7 +5241,11 @@ function throwSourcingWindowFailure(result: MainSourcingWindowFailed): never {
       'pageBroken',
     )
   }
-  throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '当前推荐窗口身份或职位无法完整且唯一读取', 'manualOnly')
+  throw new ZhilianPlatformError(
+    'ELEMENT_UNRESOLVED',
+    `当前推荐窗口身份或职位无法完整且唯一读取：${result.reason}${failureDetailSuffix(result.detail)}`,
+    'manualOnly',
+  )
 }
 
 function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFailed): never {
@@ -5218,7 +5260,7 @@ function throwSelectSourcingPositionFailure(result: MainSelectSourcingPositionFa
   }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
-    `智联职位无法唯一选择并确认（${result.reason}）`,
+    `智联职位无法唯一选择并确认（${result.reason}）${failureDetailSuffix(result.detail)}`,
     'manualOnly',
   )
 }
@@ -7989,9 +8031,9 @@ export async function readZhilianJobClassCandidates(
   let candidates: { name: string; definition: string }[]
   try {
     candidates = JSON.parse(raw) as { name: string; definition: string }[]
-  } catch {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '职位类别候选无法解析', 'manualOnly',
-      undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
+  } catch (error) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `职位类别候选无法解析：${describeError(error).slice(0, 300)}`,
+      'manualOnly', undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
   }
 
   // keepForm 为 true 时把这张半成品表单留给紧接着的 job.readKeywordVocabulary
@@ -9599,7 +9641,8 @@ async function mainCaptureSendBaseline(
     time: number
     sourceIndex: number
   }
-  const failed = (stage: MainSendBaselineFailureStage): MainSendBaselineFailed => ({ status: 'failed', stage })
+  const failed = (stage: MainSendBaselineFailureStage, detail?: string): MainSendBaselineFailed =>
+    ({ status: 'failed', stage, ...(detail === undefined ? {} : { detail: String(detail).slice(0, 220) }) })
   try {
     const w = window as unknown as AnyRecord
     const asRecord = (value: unknown): AnyRecord | null =>
@@ -9962,8 +10005,8 @@ async function mainCaptureSendBaseline(
     let tail: { matched: boolean; directions: string[] }
     try {
       tail = await tailReport(snapshot, staffID)
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
     // 2026-08-04 甲方裁决：消息基线降为观测模式。尾部对不上不再返回
     // guard_snapshot_uncovered，而是照常算出基线并把漂移事实带回去。真机
@@ -9972,15 +10015,15 @@ async function mainCaptureSendBaseline(
     const keys: string[] = []
     try {
       for (const row of snapshot) keys.push(await digest(`source-v1|${row.idServer}`))
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
 
     let targetBindingToken: string
     try {
       targetBindingToken = await digest(JSON.stringify([conversationRef, target]))
-    } catch {
-      return failed('hash_unavailable')
+    } catch (error) {
+      return failed('hash_unavailable', String(error))
     }
     return {
       status: 'ready',
@@ -9989,8 +10032,8 @@ async function mainCaptureSendBaseline(
       targetBindingToken,
       ...(tail.matched ? {} : { tailDrifted: true, tailDirections: tail.directions }),
     }
-  } catch {
-    return failed('unexpected')
+  } catch (error) {
+    return failed('unexpected', String(error))
   }
 }
 
@@ -11370,8 +11413,9 @@ async function mainPrepareInterviewEditor(
     if (emergencyCleanup) {
       try { await emergencyCleanup() } catch { /* best effort */ }
     }
-    // 只带异常类名（TypeError 等语言级标识），不带异常消息——消息可能含页面内容。
-    return failed('unexpected', `exc=${error instanceof Error ? error.name : typeof error}`)
+    // 异常 message 一并携带(2026-08-18 甲方裁决:可排查性优先于隐私;此前只带
+    // 类名,客户机上的 unexpected 无从定位)。
+    return failed('unexpected', `exc=${error instanceof Error ? `${error.name}: ${error.message}` : typeof error}`)
   }
 }
 
@@ -12854,8 +12898,9 @@ async function ensureThreadRoute(
       throw new Error('not im')
     }
     beforeClickSelected = beforeClickURL.searchParams.get('sessionId') ?? ''
-  } catch {
-    throw new ZhilianPlatformError('CTX_LOST_DURING_EXEC', '定位会话期间页面离开智联沟通页', 'manualOnly')
+  } catch (error) {
+    throw new ZhilianPlatformError(
+      'CTX_LOST_DURING_EXEC', `定位会话期间页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   if (beforeClickSelected === conversationRef) return false
   if (beforeClickSelected !== selected) {
@@ -12962,7 +13007,7 @@ export async function sendZhilianMessage(
     }
     throw new ZhilianPlatformError(
       'CTX_NOT_READY',
-      '当前无法建立可信发送基线，拒绝进入不可逆动作',
+      `当前无法建立可信发送基线，拒绝进入不可逆动作：${sendBaseline.stage}${failureDetailSuffix(sendBaseline.detail)}`,
       'afterRecovery',
       'pageBroken',
     )
@@ -13374,7 +13419,12 @@ async function sendZhilianCard(
     if (baseline.stage === 'route_changed') {
       throw new ZhilianPlatformError('GUARD_FAILED', '卡片发送基线在复核期间发生变化', 'manualOnly')
     }
-    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信卡片发送基线', 'afterRecovery', 'pageBroken')
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      `当前无法建立可信卡片发送基线：${baseline.stage}${failureDetailSuffix(baseline.detail)}`,
+      'afterRecovery',
+      'pageBroken',
+    )
   }
   reportBaselineDrift(`card:${cardKind}`, conversationRef, baseline)
 
@@ -13626,7 +13676,12 @@ export async function acceptZhilianWechatRequest(
     if (baseline.stage === 'route_changed' || baseline.stage === 'guard_snapshot_uncovered') {
       throw new ZhilianPlatformError('GUARD_FAILED', '微信接受基线在复核期间发生变化', 'manualOnly')
     }
-    throw new ZhilianPlatformError('CTX_NOT_READY', '当前无法建立可信微信接受基线', 'afterRecovery', 'pageBroken')
+    throw new ZhilianPlatformError(
+      'CTX_NOT_READY',
+      `当前无法建立可信微信接受基线：${baseline.stage}${failureDetailSuffix(baseline.detail)}`,
+      'afterRecovery',
+      'pageBroken',
+    )
   }
 
   // 与此前可能的真人交互留出全局约定的最小随机节奏；此等待发生在

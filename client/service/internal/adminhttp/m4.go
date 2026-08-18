@@ -41,7 +41,7 @@ func (a *API) readCurrentCandidate(w http.ResponseWriter, r *http.Request) {
 	}
 	key, err := validateAccountKey(req.Platform, req.AccountRef)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的平台或账号标识"})
+		writeError(w, http.StatusBadRequest, "缺少有效的平台或账号标识", err)
 		return
 	}
 	if a.st == nil || a.hub == nil || a.disp == nil {
@@ -51,12 +51,12 @@ func (a *API) readCurrentCandidate(w http.ResponseWriter, r *http.Request) {
 
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 	args, err := protocol.Encode(protocol.CandidateReadCurrentArgs{})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "候选人读取命令构造失败"})
+		writeError(w, http.StatusInternalServerError, "候选人读取命令构造失败", err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
@@ -70,12 +70,12 @@ func (a *API) readCurrentCandidate(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前候选人读取未能派发"})
+		writeError(w, http.StatusConflict, "当前候选人读取未能派发", err)
 		return
 	}
 	logical, err := a.disp.WaitLogical(ctx, selectionRef)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前候选人读取未完成"})
+		writeError(w, http.StatusConflict, "当前候选人读取未完成", err)
 		return
 	}
 	proof, err := parseCandidateReadProof(selectionRef, logical)
@@ -123,7 +123,7 @@ func (a *API) selectCurrentCandidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "候选人读取凭据不可用"})
+		writeError(w, http.StatusConflict, "候选人读取凭据不可用", err)
 		return
 	}
 	proof, err := parseCandidateReadProof(req.SelectionRef, logical)
@@ -152,7 +152,7 @@ func (a *API) selectCurrentCandidate(w http.ResponseWriter, r *http.Request) {
 		ObservedAt: *proof.Leaf.TerminalAt,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "当前候选人无法收编"})
+		writeError(w, http.StatusConflict, "当前候选人无法收编", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, selectedCandidateView{

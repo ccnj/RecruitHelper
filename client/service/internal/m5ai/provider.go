@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -199,6 +200,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	payload.Thinking.Type = "enabled"
 	body, err := json.Marshal(payload)
 	if err != nil {
+		slog.Warn("AI provider 请求编码失败", "err", err)
 		return CompletionResponse{Diagnostics: preflight},
 			newProviderError("requestInvalid", FailureStageRequestBuild, "requestMarshalFailed")
 	}
@@ -225,6 +227,7 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(timeoutCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		slog.Warn("AI provider 请求构造失败", "err", err)
 		p.finishTrace(
 			&result.Diagnostics,
 			aitrace.FinishRecord{
@@ -245,6 +248,9 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		} else if errors.Is(err, context.Canceled) || errors.Is(timeoutCtx.Err(), context.Canceled) {
 			transportCode = aitrace.TransportCanceled
 		}
+		// err 原文必须留痕:传输失败没有响应可存,追踪库只有枚举码,这里是
+		// DNS/拒连/TLS/代理这类底层原因在全系统唯一的出口。
+		slog.Warn("AI provider 传输失败", "transportCode", string(transportCode), "err", err)
 		p.finishTrace(
 			&result.Diagnostics,
 			aitrace.FinishRecord{
@@ -281,6 +287,8 @@ func (p *OpenAICompatibleProvider) CompleteJSON(ctx context.Context, request Com
 		if readErr == nil {
 			detailCode = "responseTooLarge"
 		}
+		slog.Warn("AI provider 响应读取失败", "detail", detailCode,
+			"httpStatus", response.StatusCode, "bytes", len(raw), "err", readErr)
 		return result, newProviderError("responseInvalid", FailureStageResponseDecode, detailCode)
 	}
 	p.finishTrace(
@@ -456,7 +464,7 @@ func providerConfigHash(config ProviderConfig) (string, error) {
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return "", errors.New("LLM provider 配置摘要失败")
+		return "", fmt.Errorf("LLM provider 配置摘要失败: %v", err)
 	}
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:]), nil

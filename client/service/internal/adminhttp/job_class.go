@@ -145,7 +145,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	// 与预检、试填、发布同一道闸:这趟也要占用页面并导航。
 	batch, err := a.st.ActiveSourcingBatch(key)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "采集批次状态不可读"})
+		writeError(w, http.StatusInternalServerError, "采集批次状态不可读", err)
 		return
 	}
 	if batch != nil {
@@ -156,7 +156,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	account, sessionID, bootID, err := a.currentCandidateAccount(key)
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "账号身份或手会话当前不可用"})
+		writeError(w, http.StatusConflict, "账号身份或手会话当前不可用", err)
 		return
 	}
 
@@ -282,7 +282,7 @@ func (a *API) readJobClassCandidates(
 		Description:    spec.Description,
 	})
 	if err != nil {
-		return zero, errors.New("类别候选读取命令构造失败")
+		return zero, fmt.Errorf("类别候选读取命令构造失败: %v", err)
 	}
 	if err := protocol.ValidatePrimitiveArgs(protocol.PrimJobReadClassCandidates, 1, args); err != nil {
 		return zero, errors.New("类别候选读取参数不符合当前契约")
@@ -296,11 +296,11 @@ func (a *API) readJobClassCandidates(
 		},
 	})
 	if err != nil {
-		return zero, errors.New("类别候选读取未能派发")
+		return zero, fmt.Errorf("类别候选读取未能派发: %v", err)
 	}
 	logical, err := a.disp.WaitLogical(ctx, logicalRef)
 	if err != nil {
-		return zero, errors.New("类别候选读取未完成")
+		return zero, fmt.Errorf("类别候选读取未完成: %v", err)
 	}
 	data, err := parseClassCandidatesProof(logicalRef, logical)
 	if err != nil {
@@ -338,6 +338,7 @@ func (a *API) assignJobClasses(
 			attempts = append(attempts, label+try)
 		}
 		if err != nil {
+			slog.Warn("职位类别批量指派失败", "err", err)
 			for _, job := range jobs[start:end] {
 				problems[job.JobID] = "assignFailed"
 			}
