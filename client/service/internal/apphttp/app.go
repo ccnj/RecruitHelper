@@ -262,6 +262,10 @@ func startFailureText(err error) string {
 		return "请先在 Chrome 中登录智联招聘端，再点击开始"
 	case errors.Is(err, productapp.ErrJobConfigUnavailable):
 		return "当前职位配置不可用"
+	case errors.Is(err, productapp.ErrWechatNotConfigured):
+		return "尚未在智联个人中心配置微信号，请到智联招聘端「个人中心」填写微信号后再开始"
+	case errors.Is(err, productapp.ErrWechatCheckFailed):
+		return "微信号配置检查未完成，请稍后重试"
 	}
 	return "当前状态无法启动工作流"
 }

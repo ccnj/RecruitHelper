@@ -634,6 +634,162 @@ func TestRuntimeStatePicksMostRecentlyVerifiedAccount(t *testing.T) {
 	}
 }
 
+type fakeWechatReader struct {
+	configured bool
+	err        error
+	calls      int
+}
+
+func (f *fakeWechatReader) ReadWechatConfigured(
+	context.Context,
+	store.AccountKey,
+) (bool, error) {
+	f.calls++
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.configured, nil
+}
+
+// 微信配置开工闸(2026-08-18 甲方裁决):未配置或读不到都不放行,已有活跃
+// 工作时跳过检查(创建那次点击已过闸,且运行期不得导航去个人中心)。
+func TestStartGatedOnWechatConfiguration(t *testing.T) {
+	now := time.Date(2026, 8, 18, 9, 0, 0, 0, time.Local)
+
+	t.Run("not configured blocks both modes before any backend fetch", func(t *testing.T) {
+		db, _ := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		source := &fakeSource{raw: []byte("must not fetch")}
+		reader := &fakeWechatReader{configured: false}
+		controller, err := New(
+			db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatNotConfigured) {
+			t.Fatalf("replyOnly 未被微信配置闸拦下: %v", err)
+		}
+		if err := controller.Start(context.Background(), "full", "42"); !errors.Is(err, ErrWechatNotConfigured) {
+			t.Fatalf("full 未被微信配置闸拦下: %v", err)
+		}
+		if source.calls != 0 || flow.replyKey != (store.AccountKey{}) || len(flow.callOrder) != 0 {
+			t.Fatalf("被拦下的开始不得触达后台或工作流: source=%d flow=%+v", source.calls, flow)
+		}
+		if reader.calls != 2 {
+			t.Fatalf("每次点击都应现查一次: %d", reader.calls)
+		}
+	})
+
+	t.Run("read failure blocks with its own sentinel, hand sentinels pass through", func(t *testing.T) {
+		db, _ := controllerFixture(t)
+		reader := &fakeWechatReader{err: errors.New("个人中心读不到")}
+		controller, err := New(
+			db, &fakeWorkflow{}, &fakeSource{},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatCheckFailed) {
+			t.Fatalf("读取失败应按检查未完成拒绝: %v", err)
+		}
+		reader.err = ErrHandUnavailable
+		err = controller.Start(context.Background(), "replyOnly", "")
+		if !errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrWechatCheckFailed) {
+			t.Fatalf("手侧哨兵应原样透传: %v", err)
+		}
+	})
+
+	t.Run("configured lets start proceed", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		reader := &fakeWechatReader{configured: true}
+		controller, err := New(
+			db, flow, &fakeSource{},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+			t.Fatal(err)
+		}
+		if flow.replyKey != key || reader.calls != 1 {
+			t.Fatalf("已配置应放行且只查一次: key=%+v calls=%d", flow.replyKey, reader.calls)
+		}
+	})
+
+	t.Run("unfinished batch skips the check", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		revisions, err := m5ai.ImportLegacyJobConfigFromBackend(
+			syntheticCurrentJob(t, 42, "产品经理"), now,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := db.SaveCurrentLegacyJobAIContext(revisions, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.StartSourcingBatch(store.StartSourcingBatchRequest{
+			BatchID: "batch-wechat-skip", Platform: key.Platform, AccountRef: key.AccountRef,
+			ContextRevisionHash: stored[0].RevisionHash, TargetCount: 30, StartedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// 即便现在没配,恢复既有批次也不重查:批次创建那次点击已过闸,运行期
+		// 导航去个人中心会打断推荐流。
+		reader := &fakeWechatReader{configured: false}
+		controller, err := New(
+			db, &fakeWorkflow{}, &fakeSource{},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+			t.Fatal(err)
+		}
+		if reader.calls != 0 {
+			t.Fatalf("恢复既有批次不得触发微信检查: %d", reader.calls)
+		}
+	})
+
+	t.Run("active workflow run skips the check", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
+			RunID: "wf-wechat-skip", Platform: key.Platform, AccountRef: key.AccountRef,
+			State: workflow.State{
+				Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning,
+			},
+			Stage:     store.ProductWorkflowStageCommunication,
+			StartedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reader := &fakeWechatReader{configured: false}
+		controller, err := New(
+			db, &fakeWorkflow{}, &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+			t.Fatal(err)
+		}
+		if reader.calls != 0 {
+			t.Fatalf("活跃工作流追加批次不得触发微信检查: %d", reader.calls)
+		}
+	})
+}
+
 func controllerFixture(t *testing.T) (*store.Store, store.AccountKey) {
 	t.Helper()
 	db, err := store.Open(t.TempDir())

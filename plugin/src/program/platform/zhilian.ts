@@ -5,6 +5,7 @@ import type { PrimitiveContext } from '../registry'
 import { reportHandLog } from '../../base/handLog'
 import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
+  AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
   CandidateCaptureResumeScreenshotArgs,
@@ -4637,6 +4638,110 @@ export async function readZhilianUnreadTotalNow(
     total: badge.found ? parseZhilianUnreadBadgeText(badge.text) : null,
     observedAt: Date.now(),
   }
+}
+
+const ZHILIAN_PERSONAL_URL = `https://${ZHILIAN_HOST}/app/personal`
+
+function isZhilianPersonalURL(url: string | undefined): boolean {
+  if (!url) return false
+  try {
+    const path = new URL(url).pathname
+    return path === '/app/personal' || path.startsWith('/app/personal/')
+  } catch {
+    // URL 来自 chrome.tabs,解析失败即按"不是个人中心"响亮降级,不猜。
+    return false
+  }
+}
+
+// 个人中心「微信号」栏的单次读取结果。pending 表示页面还没呈现可判定形态,
+// 由外层条件轮询继续等;判据只认可见文本——2026-08-18 真机考古证实未配置时
+// 值元素照样存在、只显示「暂未添加」占位,元素出现与否不构成判据。
+type MainWechatSettingResult =
+  | { status: 'ok'; configured: boolean }
+  | { status: 'pending'; reason: string }
+
+function mainReadZhilianWechatSetting(): MainWechatSettingResult {
+  const items = Array.from(document.querySelectorAll('.contact-item'))
+  for (const item of items) {
+    const label = ((item.querySelector('.contact-item__label') as HTMLElement | null)?.innerText || '')
+      .normalize('NFC').trim()
+    if (!label.startsWith('微信号')) continue
+    const valueElement = item.querySelector('.contact-item__value') as HTMLElement | null
+    if (!valueElement) return { status: 'pending', reason: 'value_absent' }
+    const value = (valueElement.innerText || '').normalize('NFC').replace(/[\s ]+/gu, ' ').trim()
+    // 未配置的可见形态任一命中即判未配置,方向只朝"不放行":占位文本,或该栏
+    // 常驻可见的「去添加」入口(已配置栏的操作入口带 --hidden、悬停才现形)。
+    const addActionVisible = Array.from(item.querySelectorAll('.contact-item__action'))
+      .some((node) => {
+        const action = node as HTMLElement
+        if (action.className.includes('--hidden')) return false
+        return (action.innerText || '').includes('去添加')
+      })
+    if (value.includes('暂未添加') || addActionVisible) return { status: 'ok', configured: false }
+    // 栏在、值区却是空白且无未配置标记:多半是渲染中间态,交给外层继续轮询,
+    // 不把中间态误读成未配置。
+    if (!value) return { status: 'pending', reason: 'value_empty' }
+    return { status: 'ok', configured: true }
+  }
+  return { status: 'pending', reason: 'wechat_item_absent' }
+}
+
+// account.readWechatSetting@1:读取招聘方账号的微信号配置是否已填。唯一页面
+// 动作是导航到个人中心;不点击、不滚动、不打开弹层、不修改任何配置。返回
+// 只有布尔——招聘方自己的微信号不进契约,这里连读都不往外带。
+export async function readZhilianWechatSetting(
+  ctx: PrimitiveContext,
+  expectedPrincipalFingerprint: string | undefined,
+): Promise<AccountReadWechatSettingData> {
+  ctx.checkpoint()
+  const existing = (await chrome.tabs.query({ url: TAB_QUERY }))
+    .filter((tab) => tab.id !== undefined && isZhilianPersonalURL(tab.url))
+  let tab = existing.find((candidate) => candidate.status === 'complete') ?? existing[0]
+  if (tab) {
+    assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
+  } else {
+    const canonical = await canonicalZhilianTab()
+    if (!canonical || canonical.id === undefined) {
+      throw new ZhilianPlatformError(
+        'CTX_NOT_READY', 'Chrome 中没有可复用的智联页面', 'afterRecovery', 'pageAbsent',
+      )
+    }
+    // 复用其他智联路由前先核对账号;不能先切页再发现切动了错误账号。
+    assertExpectedPrincipal(await probeTab(canonical), expectedPrincipalFingerprint)
+    await ctx.progress('准备智联个人中心', 5)
+    tab = await chrome.tabs.update(canonical.id, { url: ZHILIAN_PERSONAL_URL })
+  }
+  const tabId = tab.id
+  if (tabId === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  // 页面导航也是一次交互;即使 Chrome 很快返回 complete,也给页面至少一秒完成初始化。
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
+  })
+  // 条件轮询:呈现可判定形态即返回,最长约 10 秒,不做固定等待。
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    ctx.checkpoint()
+    const latest = await chrome.tabs.get(tabId)
+    if (latest.status === 'complete' && isZhilianPersonalURL(latest.url)) {
+      try {
+        const read = await runMain(tabId, mainReadZhilianWechatSetting, [])
+        if (read.status === 'ok') {
+          return { configured: read.configured, observedAt: Date.now() }
+        }
+      } catch (error) {
+        if (!(error instanceof ZhilianPlatformError)) throw error
+      }
+    }
+    if (attempt % 10 === 0) {
+      await ctx.progress('等待智联个人中心就绪', Math.min(20, 5 + attempt))
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 250))
+  }
+  // 等不到可判定形态只报失败,不返回猜测;脑侧把失败与未配置同向处理(不放行)。
+  throw new ZhilianPlatformError(
+    'CTX_NOT_READY', '智联个人中心「微信号」栏在期限内未呈现可判定形态', 'afterRecovery', 'pageBroken',
+  )
 }
 
 export async function identifyZhilianCurrentConversation(
