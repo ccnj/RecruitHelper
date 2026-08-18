@@ -2614,6 +2614,7 @@ func communicationV4EventActionPrimitive(
 		case communication.V4ActionWechatReceipt,
 			communication.V4ActionInterviewAcceptedReceipt,
 			communication.V4ActionColdPrompt,
+			communication.V4ActionColdPromptFixed,
 			communication.V4ActionColdWechatText,
 			communication.V4ActionInterviewFollowup:
 			return primitiveChatSendMessage

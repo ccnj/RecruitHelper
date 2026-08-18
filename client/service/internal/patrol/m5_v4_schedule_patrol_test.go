@@ -187,6 +187,117 @@ func TestCommunicationV4SchedulePatrolSendsColdPromptThenWechatSequence(
 	})
 }
 
+func TestCommunicationV4SchedulePatrolSendsFixedColdPromptWithoutAI(
+	t *testing.T,
+) {
+	h := newHarness(t)
+	h.clock.Add(scheduleTestBusinessNow().Sub(h.clock.Now()))
+	h.clock.Add(-25 * time.Hour)
+	// 催1 配置了固定话术:到期直接以固定文本冻结计划,一次 provider 都不许调。
+	fixture := seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(
+		t,
+		h,
+		"schedule-cold-fixed",
+		nil,
+		`{
+			"silence24Followup":{"enabled":true,"messages":["前面的消息看到了吗？方便回个话。"]},
+			"silence48Wechat":{"enabled":true,"messages":["合成冷催二"]}
+		}`,
+	)
+	h.clock.Add(25 * time.Hour)
+	h.runner.handler = scheduleThreadEchoHandler(t, h, fixture.conversationRef)
+
+	advice := &recordingAdviceExecutor{
+		complete: func(_ int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
+			return m5ai.CompletionResponse{}, fmt.Errorf(
+				"固定催1 不得发起 provider 调用: purpose=%q",
+				request.Purpose,
+			)
+		},
+	}
+	hand := &m5PositiveHand{now: h.clock.Now}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config, advice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	runCommunicationV4ScheduleRound(
+		t,
+		h,
+		manager,
+		"round-v4-schedule-cold-fixed",
+	)
+	if len(advice.requests) != 0 || hand.commandCount() != 1 {
+		t.Fatalf(
+			"固定催1 必须零 provider、一次正文发送: advice=%d sends=%d",
+			len(advice.requests),
+			hand.commandCount(),
+		)
+	}
+	actions, err := h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
+	if err != nil || len(actions) != 1 ||
+		actions[0].V4Kind != communication.V4ActionColdPromptFixed ||
+		actions[0].Status != store.CommunicationV4EventActionSent ||
+		actions[0].Text != "前面的消息看到了吗？方便回个话。" ||
+		actions[0].EffectIntentID == nil {
+		t.Fatalf("固定催1 没有走 EventAction/WAL 正证轨: actions=%+v err=%v", actions, err)
+	}
+	afterFixed, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil || afterFixed == nil ||
+		!afterFixed.State.ColdPromptFixedTextSent ||
+		afterFixed.State.ColdPromptSentCount != 1 ||
+		afterFixed.State.ColdPromptRemaining != 1 ||
+		afterFixed.State.LastOutboundAt == nil {
+		t.Fatalf("固定催1 正证没有置公理4 标记并扣预算: aggregate=%+v err=%v", afterFixed, err)
+	}
+
+	// 下一次 24h 档位:催1 已发固定文本,阶梯落到固定催2+换微信卡,仍零 AI。
+	h.clock.Add(
+		nextScheduleTestBusinessTime(
+			afterFixed.State.LastOutboundAt.Add(24 * time.Hour),
+		).Sub(h.clock.Now()),
+	)
+	if err := manager.EnableToday(h.key); err != nil {
+		t.Fatal(err)
+	}
+	runCommunicationV4ScheduleRound(
+		t,
+		h,
+		manager,
+		"round-v4-schedule-cold-fixed-two",
+	)
+	if len(advice.requests) != 0 || hand.commandCount() != 3 {
+		aggregate, _ := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+		t.Fatalf(
+			"固定催1 后的催2 必须零 AI 且按正文→卡片各发一次: advice=%d sends=%d aggregate=%+v",
+			len(advice.requests),
+			hand.commandCount(),
+			aggregate,
+		)
+	}
+	actions, err = h.db.CommunicationV4EventActionsByProfile(fixture.profileID)
+	if err != nil || len(actions) != 3 {
+		t.Fatalf("固定催1+催2 动作事实数量错误: actions=%+v err=%v", actions, err)
+	}
+	kinds := map[communication.V4ActionKind]int{}
+	for _, action := range actions {
+		if action.Status != store.CommunicationV4EventActionSent {
+			t.Fatalf("存在未正证收编的冷催动作: %+v", action)
+		}
+		kinds[action.V4Kind]++
+	}
+	if kinds[communication.V4ActionColdPromptFixed] != 1 ||
+		kinds[communication.V4ActionColdWechatText] != 1 ||
+		kinds[communication.V4ActionColdWechatInvite] != 1 {
+		t.Fatalf("冷催阶梯形态错误: kinds=%+v", kinds)
+	}
+}
+
 func TestCommunicationV4SchedulePatrolArchivesBeforeOldPlannedAction(
 	t *testing.T,
 ) {
