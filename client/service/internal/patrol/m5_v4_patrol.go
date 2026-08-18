@@ -345,6 +345,9 @@ func (a *roundActor) processCommunicationV4Target(
 		)
 	}
 	if err != nil {
+		slog.Warn("V4 冻结转人工:回合身份计算失败",
+			"profileId", target.Profile.ProfileID,
+			"reason", communicationV4ManualInterleavedOutbound, "err", err)
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			target.Profile.ProfileID,
 			communicationV4ManualInterleavedOutbound,
@@ -355,6 +358,9 @@ func (a *roundActor) processCommunicationV4Target(
 	// 否则会按用户已经改掉的表承诺时间。
 	schedule, err := a.manager.store.InterviewSchedule()
 	if err != nil {
+		slog.Warn("V4 冻结转人工:可面试时段周表读取失败",
+			"profileId", target.Profile.ProfileID,
+			"reason", "scheduleRenderFailed", "err", err)
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			target.Profile.ProfileID,
 			"scheduleRenderFailed",
@@ -366,6 +372,9 @@ func (a *roundActor) processCommunicationV4Target(
 		m5ai.GenerateSlots(a.manager.now(), schedule),
 	)
 	if err != nil {
+		slog.Warn("V4 冻结转人工:推荐时段文本冻结失败",
+			"profileId", target.Profile.ProfileID,
+			"reason", "scheduleRenderFailed", "err", err)
 		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
 			target.Profile.ProfileID,
 			"scheduleRenderFailed",

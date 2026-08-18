@@ -181,6 +181,8 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				Reply: communication.ReplyAdvice{State: communication.AdviceAbsent},
 			})
 			if reduceErr != nil {
+				slog.Warn("对话轮转人工:缺席收敛被 reducer 拒绝",
+					"turnId", turn.TurnID, "reason", "reducerRejected", "err", reduceErr)
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerRejected", a.manager.now())
 			}
 			if decision.NextAdvice != m5ai.PurposeIntent {
@@ -418,6 +420,8 @@ func (a *roundActor) dispatchM5Action(
 	}
 	intentID, err := store.M5AutomaticIntentID(action.ActionID)
 	if err != nil {
+		slog.Warn("自动动作转人工:意图标识计算失败",
+			"actionId", action.ActionID, "reason", "automaticIntentInvalid", "err", err)
 		return a.manager.store.MarkM5AutomaticActionManualRequired(
 			action.ActionID, "automaticIntentInvalid", a.manager.now(),
 		)
@@ -1189,6 +1193,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 		if reduceErr != nil {
 			markReducerRejected(&completion)
 			manualReason = "reducerRejected"
+			slog.Warn("对话轮转人工:意向决策被 reducer 拒绝",
+				"turnId", turn.TurnID, "err", reduceErr)
 		}
 		logAIInvocationOutcome(
 			a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
@@ -1226,6 +1232,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 	if reduceErr != nil {
 		markReducerRejected(&completion)
 		decision = communication.Decision{TurnID: turn.TurnID, TurnStatus: communication.TurnManualRequired, ManualReason: "reducerRejected"}
+		slog.Warn("对话轮转人工:回复决策被 reducer 拒绝",
+			"turnId", turn.TurnID, "err", reduceErr)
 	}
 	logAIInvocationOutcome(
 		a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
