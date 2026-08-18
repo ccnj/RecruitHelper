@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -130,6 +131,12 @@ func (d *Dispatcher) markSuspect(cmd store.CmdRecord, reason string) {
 		return nil
 	})
 	if err != nil {
+		// "对方已终局"是与 OnResult 的预期竞争,静默合理;其余错误意味着一条
+		// 本该转 suspect 的命令没落上账,不留痕就彻底无迹可查。
+		if !errors.Is(err, errAlreadyTerminal) {
+			slog.Error("suspect 状态落账失败", "handId", cmd.HandID, "msgId", cmd.MsgID,
+				"name", cmd.Name, "idemKey", cmd.IdemKey, "reason", reason, "err", err)
+		}
 		return
 	}
 	d.st.Audit("suspect", cmd.HandID, cmd.MsgID, reason)
@@ -232,6 +239,11 @@ func (d *Dispatcher) terminalizeVoid(cmd store.CmdRecord, reason string) {
 		return nil
 	})
 	if err != nil {
+		// 同 markSuspect:已终局竞争静默,真实落账失败必须留痕。
+		if !errors.Is(err, errAlreadyTerminal) {
+			slog.Error("void 终局落账失败", "handId", cmd.HandID, "msgId", cmd.MsgID,
+				"name", cmd.Name, "reason", reason, "err", err)
+		}
 		return
 	}
 	d.clearLease(cmd.MsgID)
