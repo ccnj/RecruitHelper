@@ -89,7 +89,7 @@ func runDailyOnce(ctx context.Context, deps SchedulerDeps, runAt time.Time) {
 		enabled, err := deps.Enabled()
 		if err != nil {
 			// 读不出开关就当关着。宁可不干,也不能因为读库出错就把候选人明文发出去。
-			slog.Warn(deps.Label+":读取开关失败，本轮跳过", "errorCode", "dailyTaskSettingUnavailable")
+			slog.Warn(deps.Label+":读取开关失败，本轮跳过", "errorCode", "dailyTaskSettingUnavailable", "err", err)
 			return
 		}
 		if !enabled {
