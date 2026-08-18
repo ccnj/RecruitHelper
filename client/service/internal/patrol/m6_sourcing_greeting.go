@@ -152,6 +152,8 @@ func (m *Manager) driveSourcingGreetingMember(
 		if inputErr != nil {
 			errorClass = "greetingInputInvalid"
 		}
+		slog.Warn("招呼语输入渲染失败", "profileId", material.ProfileID,
+			"errorClass", errorClass, "err", renderErr)
 		completion := store.AIInvocationCompletion{
 			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,

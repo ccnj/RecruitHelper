@@ -151,6 +151,8 @@ func (m *Manager) driveSourcingScoreMember(
 		if inputErr != nil {
 			errorClass = "scoringInputInvalid"
 		}
+		slog.Warn("评分输入渲染失败", "runId", run.RunID,
+			"errorClass", errorClass, "err", renderErr)
 		completion := store.AIInvocationCompletion{
 			InvocationID: invocationID, Status: store.AIInvocationBudgetBlocked,
 			ErrorClass: errorClass, FailureStage: m5ai.FailureStageRequestBuild,
