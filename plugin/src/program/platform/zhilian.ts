@@ -14839,6 +14839,11 @@ type MainResumeCaptureStepResult = MainCaptureStepReady | MainResumeCaptureFaile
 // 共享同一批页面事实:入口「查看详情」、弹窗 .new-shortcut-resume__modal、
 // 关闭 .new-shortcut-resume__close;滚动容器经 resolveScrollContainer 归一
 // (简历:根 overflow:hidden,真滚动层是内层 .km-scrollbar__wrap)。
+// 归一必须以 .resume-detail 为根,不得从弹窗根出发:弹窗内简历主体与右侧栏
+// (人才处理记录)是两个兄弟 km-scrollbar__wrap,一屏放得下的短简历纵向零余量,
+// 从弹窗根兜底"选滚动空间最大的后代"会确定性选中侧栏,拼出只有侧栏、没有简历
+// 主体的坏图(2026-08-18 线上事故)。限定在简历主体内后,短简历无可滚层即回落
+// 主体自身,单帧收口。
 // op: open(点入口等弹窗) | measure | pinTop | scrollTo | readback | close
 async function mainResumeCaptureStep(
   conversationRef: string,
@@ -15014,7 +15019,13 @@ async function mainResumeCaptureStep(
       return { status: 'failed', reason: 'open_failed', scene }
     }
     if (modals.length !== 1) return failed('modal_cardinality')
-    return metricsOf(resolveScrollContainer(modals[0]))
+    let openRoots = visibleAll(modals[0], '.resume-detail')
+    while (openRoots.length === 0 && Date.now() < waitUntil) {
+      await sleep(120)
+      openRoots = visibleAll(modals[0], '.resume-detail')
+    }
+    if (openRoots.length !== 1) return failed('container_unresolved')
+    return metricsOf(resolveScrollContainer(openRoots[0]))
   }
 
   const modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -15038,7 +15049,7 @@ async function mainResumeCaptureStep(
 
   const roots = visibleAll(modal, '.resume-detail')
   if (roots.length !== 1) return failed('container_unresolved')
-  const scrollEl = resolveScrollContainer(modal)
+  const scrollEl = resolveScrollContainer(roots[0])
   if (op === 'measure') {
     // 弹窗自身固定居中,无需 scrollIntoView;仅量测。
   } else if (op === 'pinTop') {
