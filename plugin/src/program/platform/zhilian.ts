@@ -748,7 +748,7 @@ function decodeCursor(value: string | null | undefined): ThreadCursor | null {
     }
     return parsed as ThreadCursor
   } catch (error) {
-    throw new ZhilianPlatformError('CURSOR_INVALID', `分页游标无效：${describeError(error)}`)
+    throw new ZhilianPlatformError('CURSOR_INVALID', `分页游标无效：${describeError(error).slice(0, 300)}`)
   }
 }
 
@@ -4623,7 +4623,7 @@ function currentConversationRefFromTab(tab: chrome.tabs.Tab): string {
   } catch (error) {
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      `当前智联 IM 标签页 URL 没有可确认的会话标识：${describeError(error)}`,
+      `当前智联 IM 标签页 URL 没有可确认的会话标识：${describeError(error).slice(0, 300)}`,
       'manualOnly',
     )
   }
@@ -4838,7 +4838,7 @@ export async function openZhilianConversation(
     selected = route.searchParams.get('sessionId') ?? ''
   } catch (error) {
     throw new ZhilianPlatformError(
-      'CTX_LOST_DURING_EXEC', `打开会话前页面离开智联沟通页：${describeError(error)}`, 'manualOnly')
+      'CTX_LOST_DURING_EXEC', `打开会话前页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   // 后置核验共用于点击后与零点击两条路径；sideEffect 证词必须如实区分。
   let performedClick = false
@@ -8032,7 +8032,7 @@ export async function readZhilianJobClassCandidates(
   try {
     candidates = JSON.parse(raw) as { name: string; definition: string }[]
   } catch (error) {
-    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `职位类别候选无法解析：${describeError(error)}`,
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', `职位类别候选无法解析：${describeError(error).slice(0, 300)}`,
       'manualOnly', undefined, 'none', snapshotProgress(progress, 'job_class_candidates_shape'))
   }
 
@@ -12900,7 +12900,7 @@ async function ensureThreadRoute(
     beforeClickSelected = beforeClickURL.searchParams.get('sessionId') ?? ''
   } catch (error) {
     throw new ZhilianPlatformError(
-      'CTX_LOST_DURING_EXEC', `定位会话期间页面离开智联沟通页：${describeError(error)}`, 'manualOnly')
+      'CTX_LOST_DURING_EXEC', `定位会话期间页面离开智联沟通页：${describeError(error).slice(0, 300)}`, 'manualOnly')
   }
   if (beforeClickSelected === conversationRef) return false
   if (beforeClickSelected !== selected) {
