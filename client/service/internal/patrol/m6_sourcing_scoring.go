@@ -161,7 +161,7 @@ func (m *Manager) driveSourcingScoreMember(
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 		}
 		return err
 	}
@@ -192,7 +192,7 @@ func (m *Manager) driveSourcingScoreMember(
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 			}
 			return err
 		}
@@ -241,7 +241,7 @@ func (m *Manager) driveSourcingScoreMember(
 				Completion: completion, Score: score,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeScoring, completion, err)
 			}
 			return err
 		}

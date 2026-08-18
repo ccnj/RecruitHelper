@@ -134,11 +134,13 @@ func logAIInvocationPersistenceFailure(
 	advice AdviceExecutor,
 	purpose m5ai.CompletionPurpose,
 	completion store.AIInvocationCompletion,
+	err error,
 ) {
 	failed := completion
 	failed.FailureStage = m5ai.FailureStagePersistence
 	failed.ErrorDetailCode = "brainPersistenceFailed"
-	slog.Error("AI 调用终局持久化失败", aiInvocationLogAttrs(advice, purpose, failed)...)
+	attrs := append(aiInvocationLogAttrs(advice, purpose, failed), "err", err)
+	slog.Error("AI 调用终局持久化失败", attrs...)
 }
 
 func aiInvocationLogAttrs(

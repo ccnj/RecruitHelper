@@ -162,7 +162,7 @@ func (m *Manager) driveSourcingGreetingMember(
 			Completion: completion,
 		})
 		if err != nil {
-			logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+			logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 		}
 		return err
 	}
@@ -191,7 +191,7 @@ func (m *Manager) driveSourcingGreetingMember(
 				Completion: completion,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 			}
 			return err
 		}
@@ -242,7 +242,7 @@ func (m *Manager) driveSourcingGreetingMember(
 				Completion: completion, GreetingText: greetingText, ContentHash: contentHash,
 			})
 			if err != nil {
-				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion)
+				logAIInvocationPersistenceFailure(advice, m5ai.PurposeGreeting, completion, err)
 			}
 			return err
 		}

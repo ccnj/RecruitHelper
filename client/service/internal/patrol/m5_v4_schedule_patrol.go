@@ -246,6 +246,7 @@ func (a *roundActor) processCommunicationV4SilenceAdvice(
 				a.manager.currentAdvice(),
 				m5ai.PurposeSilenceFollowup,
 				completion,
+				completeErr,
 			)
 			return completeErr
 		}

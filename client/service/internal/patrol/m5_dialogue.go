@@ -1029,7 +1029,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		return 0, errM5AdviceRoundSkipped
 	}
 	if err != nil {
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion)
+		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, err)
 	}
 	return 0, err
 }
@@ -1208,7 +1208,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
 		if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 			// 跳过哨兵是本轮的正常结论(边界收敛/结算重采),不是落账失败。
-			logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion)
+			logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
 		}
 		return 0, err
 	}
@@ -1249,7 +1249,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	)
 	if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 		// 同 intent 分支:跳过哨兵不是落账失败,不记持久化失败日志。
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion)
+		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
 	}
 	return 0, err
 }
