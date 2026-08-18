@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAodspHi/BuQnWcfqFAgKmrdZt1Ti3PPLgtplQLM5RakFGcoUNTtSr/WDjNKz6Xh1Hd0gGIpFNBWYG49Icdd/37Cg31jz5FJVukIkjR52ggpBKwQpFdnpMtVwrW32wlXJWrnFWRH46p2nTeXS/cXgxyjozlBrKLlvoawllU+ce/sPBXnLZdZhi+xqhxjWBxblUgflYsJ1hn1bJe7F2Yxu6MjggverLdDMKLsCjOqfwLiqCTNis8UVyLm4chvZNS4pUgcsmmT8kPgvE6thziTYVqr7k5K+TdIG3qmz+9r7tQHhibzzLEdcqjGN+MqA6vb4+7ELTqXksoABgcIhzWpv9sQIDAQAB",
   "name": "AI增员助手 · 手端",
-  "version": "3.6.5",
+  "version": "3.6.6",
   "description": "脑手协议手端骨架:连接本地脑服务,执行受控原语。全新扩展,可与旧插件并存。",
   "background": {
     "service_worker": "background.js",
