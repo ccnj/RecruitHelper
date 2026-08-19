@@ -1223,6 +1223,7 @@ function endReasonLabel(reason: string | undefined): string {
     fallbackArchive: '兜底归档',
     silentInterviewPending: '邀面后沉默归档',
     silentWechatInvited: '换微信邀请后沉默归档',
+    silentWechatRejected: '换微信被拒后沉默归档',
     silentWechatExchanged: '换微信后沉默归档',
     silent: '长期无回复归档',
   }

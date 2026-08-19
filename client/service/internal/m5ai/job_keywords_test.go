@@ -118,10 +118,22 @@ func TestPlanJobKeywordsSplitsMatchedAndCustom(t *testing.T) {
 		t.Fatalf("「税务」不与「财务/审计/税务」全等，必须落自定义，实得 %v", near.Custom)
 	}
 
+	// 自定义上限 3(2026-08-16 甲方裁决由 2 改为 3),贴齐兜底组容量。
+	// 三个放行,第四个拦下——多出来的那个到了页面上也没地方放。
+	threeCustom, err := PlanJobKeywords(
+		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙"}}, sections)
+	if err != nil {
+		t.Fatalf("三个自定义词应当放行，实得 %v", err)
+	}
+	if len(threeCustom.Custom) != 3 || len(threeCustom.Matched) != 0 {
+		t.Fatalf("三个词都该落自定义，实得 custom=%v matched=%v",
+			threeCustom.Custom, threeCustom.Matched)
+	}
+
 	if _, err := PlanJobKeywords(
-		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙"}}, sections,
+		JobKeywordsSuggestion{Keywords: []string{"甲", "乙", "丙", "丁"}}, sections,
 	); err == nil || err.Error() != "tooManyCustom" {
-		t.Fatalf("自定义超过 2 个必须被拒，实得 %v", err)
+		t.Fatalf("自定义超过 3 个必须被拒，实得 %v", err)
 	}
 
 	if _, err := PlanJobKeywords(
@@ -173,16 +185,15 @@ func TestPlanJobKeywordsNeverLeavesNilSlices(t *testing.T) {
 		t.Fatal("全部命中词库时 Custom 是 nil，会序列化成 null")
 	}
 
-	// 两个词都不在词库里（自定义上限是 2，再多会先被 tooManyCustom 拦掉，
-	// 就验不到 Matched 了）。
-	allCustom, err := PlanJobKeywords(
+	// 两个词都不在词库里。
+	allNonMatched, err := PlanJobKeywords(
 		JobKeywordsSuggestion{Keywords: []string{"家族信托", "跨境税务"}},
 		[]JobKeywordSectionInput{{Title: "兜底", Limit: 3}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if allCustom.Matched == nil {
+	if allNonMatched.Matched == nil {
 		t.Fatal("一个都没命中时 Matched 是 nil，会序列化成 null")
 	}
 }
