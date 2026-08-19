@@ -485,7 +485,7 @@ function homeStatus(
         label: '等你继续',
         hint: businessWindowOpen
           ? '今天的活儿还没干完，点继续接着做。'
-          : '现在是休息时间，明天 8 点以后可以继续。',
+          : '现在是休息时间，明天 7 点以后可以继续。',
         tone: 'attention',
       }
     case 'running': {
@@ -550,7 +550,7 @@ function workflowPositionLabel(
   if (state === 'waitingDailyWindow') {
     return businessWindowOpen
       ? '业务运行已停在成员边界，等待手动恢复'
-      : '业务运行已停在成员边界，07:00 后需手动恢复'
+      : '业务运行已停在成员边界，07:00 后可恢复'
   }
   if (state === 'paused') return mode === 'replyOnly' ? '消息处理已暂停' : '今日任务已暂停'
   if (state === 'running') return mode === 'replyOnly' ? '正在处理候选人消息' : '今日任务正在运行'

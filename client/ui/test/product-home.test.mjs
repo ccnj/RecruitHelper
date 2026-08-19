@@ -40,7 +40,7 @@ const customer = {
 const overview = {
   dateLabel: '2026 年 7 月 26 日',
   refreshedAt: null,
-  businessWindowLabel: '运行时间 08:00～24:00',
+  businessWindowLabel: '运行时间 07:00～24:00',
   businessWindowOpen: true,
   homeStatus: {
     label: '沟通中',

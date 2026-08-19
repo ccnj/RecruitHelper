@@ -109,7 +109,7 @@ export function ConfirmationPage({
                 <span>
                   {batch.workflowPaused
                     ? '仍可核对和选择候选人；恢复运行后才能发送。'
-                    : '当前只允许查看；07:00 后仍需手动恢复或开始。'}
+                    : '当前只允许查看；07:00 后可恢复或开始。'}
                 </span>
               </div>
             </div>
