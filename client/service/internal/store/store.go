@@ -138,6 +138,7 @@ func Open(dataDir string) (*Store, error) {
 		&LogReportSetting{},
 		&InterviewScheduleSetting{},
 		&AutoStartSetting{},
+		&ChatReportCursor{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}
