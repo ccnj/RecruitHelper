@@ -109,7 +109,7 @@ export function ConfirmationPage({
                 <span>
                   {batch.workflowPaused
                     ? '仍可核对和选择候选人；恢复运行后才能发送。'
-                    : '当前只允许查看；08:00 后仍需手动恢复或开始。'}
+                    : '当前只允许查看；07:00 后可恢复或开始。'}
                 </span>
               </div>
             </div>
@@ -223,7 +223,7 @@ function confirmationSendUnavailableReason(
   actions: ProductActions,
 ): string | null {
   if (batch.workflowPaused) return '工作流暂停期间不能发送，请先在首页恢复'
-  if (!batch.businessWindowOpen) return '运行时间为 08:00～24:00'
+  if (!batch.businessWindowOpen) return '运行时间为 07:00～24:00'
   if (!batch.ready) return batch.readinessReason ?? '当前批次尚未完成'
   if (!allSelected) return '请先全选本批所有可发送候选人'
   if (!batch.batchId) return '当前没有等待发送的批次'

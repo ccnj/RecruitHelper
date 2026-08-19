@@ -137,6 +137,7 @@ func Open(dataDir string) (*Store, error) {
 		&FieldReportSetting{},
 		&LogReportSetting{},
 		&InterviewScheduleSetting{},
+		&AutoStartSetting{},
 	); err != nil {
 		return nil, fmt.Errorf("建表: %w", err)
 	}

@@ -144,9 +144,9 @@ func TestFullWorkflowPersistsPauseResumeAndExplicitDailyWindowRecovery(t *testin
 		waiting.ResumeStatus != workflow.StatusRunning {
 		t.Fatalf("midnight state = %+v, %v", waiting, err)
 	}
-	clock.now = time.Date(2026, 7, 26, 8, 0, 0, 0, location)
+	clock.now = time.Date(2026, 7, 26, 7, 0, 0, 0, location)
 	if err := actor.gate(); !errors.Is(err, ErrMemberStartBlocked) {
-		t.Fatalf("08:00 must not auto-resume: %v", err)
+		t.Fatalf("07:00 must not auto-resume: %v", err)
 	}
 	resumed, err = manager.Resume()
 	if err != nil || resumed.Status != workflow.StatusRunning || actor.enableCalls != 2 {
@@ -184,7 +184,7 @@ func TestFullWorkflowAdoptsUnfinishedBatchTargetInsteadOfCreatingThirty(t *testi
 func TestReplyOnlyAndClosedWindowNeverCreateSourcingBatchOrReservation(t *testing.T) {
 	db, key, _ := productWorkflowFixture(t)
 	location := time.UTC
-	clock := &fixtureClock{now: time.Date(2026, 7, 25, 7, 59, 59, 0, location)}
+	clock := &fixtureClock{now: time.Date(2026, 7, 25, 6, 59, 59, 0, location)}
 	actor := &fixtureActor{store: db, clock: clock}
 	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
 	if err != nil {
@@ -198,7 +198,7 @@ func TestReplyOnlyAndClosedWindowNeverCreateSourcingBatchOrReservation(t *testin
 		t.Fatalf("closed click persisted reservation: %+v, %v", active, err)
 	}
 
-	clock.now = time.Date(2026, 7, 25, 8, 0, 0, 0, location)
+	clock.now = time.Date(2026, 7, 25, 7, 0, 0, 0, location)
 	run, err := manager.StartReplyOnly(key)
 	if err != nil || run.Mode != workflow.ModeReplyOnly ||
 		run.Stage != store.ProductWorkflowStageCommunication || actor.enableCalls != 1 {

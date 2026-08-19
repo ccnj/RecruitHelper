@@ -45,7 +45,7 @@ func (d RunnerDeps) upload(ctx context.Context, payload *Payload, target Target)
 //
 // 纪律(来自裁决,不要"顺手优化"掉):不重试 —— 失败就等下一轮,反正报的是当前
 // 累计快照,丢一次由下一次自愈;不受统一业务运行窗口约束 —— 上报不是候选人可见
-// 动作,[00:00,08:00) 照常报;不设开关 —— 没有可以关掉它的地方。
+// 动作,[00:00,07:00) 照常报;不设开关 —— 没有可以关掉它的地方。
 func Run(ctx context.Context, deps RunnerDeps) {
 	gate := &noiseGate{digestEvery: failureDigestEvery}
 	ticker := time.NewTicker(deps.interval())

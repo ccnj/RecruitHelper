@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const DailyStartHour = 8
+const DailyStartHour = 7
 
 const DevelopmentAllowOutOfWindowEnv = "RECRUITHELPER_DEV_ALLOW_OUT_OF_WINDOW"
 
@@ -82,7 +82,7 @@ func ParseDevelopmentAllowOutOfWindow(value string) bool {
 }
 
 // EvaluateDailyWindow is the sole civil-time evaluator for workflow start,
-// resume and per-member dispatch. The open interval is [08:00, 24:00) in the
+// resume and per-member dispatch. The open interval is [07:00, 24:00) in the
 // supplied client-local location.
 func EvaluateDailyWindow(now time.Time, location *time.Location) (bool, error) {
 	return (DailyWindowPolicy{}).Evaluate(now, location)

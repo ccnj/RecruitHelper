@@ -161,7 +161,7 @@ func (c *Controller) Start(
 	}
 	// Capture the user's click-time window before any backend request or
 	// durable write. The workflow manager performs the second check at actual
-	// start, so a 07:59 click cannot become an implicit 08:00 reservation and
+	// start, so a 06:59 click cannot become an implicit 07:00 reservation and
 	// a 23:59 click cannot cross midnight into a new run.
 	requestedAt := c.now()
 	open, err := c.dailyWindow.Evaluate(requestedAt, time.Local)

@@ -908,7 +908,7 @@ func TestConfirmAllRequiresExactSelectableSetAndOpenWindow(t *testing.T) {
 	}
 
 	manager.clock.(*fixtureClock).now = time.Date(
-		2026, 7, 26, 7, 30, 0, 0, manager.location,
+		2026, 7, 26, 6, 30, 0, 0, manager.location,
 	)
 	waiting, err := manager.ConfirmAll(batchID, []string{"profile-b", "profile-a"})
 	if !errors.Is(err, workflow.ErrDailyWindowClosed) ||
