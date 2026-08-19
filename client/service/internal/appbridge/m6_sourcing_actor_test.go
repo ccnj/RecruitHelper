@@ -671,7 +671,7 @@ func TestFormalSourcingManualStartRespectsUnifiedBusinessWindow(t *testing.T) {
 	h := newSourcingActorHarness(t, [][]string{{"candidate-a"}})
 	h.clock.now = time.Date(2026, 7, 23, 1, 0, 0, 0, time.UTC)
 	if err := h.manager.StartSourcing(h.key, h.revision.RevisionHash, 1, 0); !errors.Is(err, patrol.ErrDailyWindowNotOpen) {
-		t.Fatalf("08:00 前正式采集必须被统一业务窗口拒绝: %v", err)
+		t.Fatalf("07:00 前正式采集必须被统一业务窗口拒绝: %v", err)
 	}
 	batch, err := h.store.ActiveSourcingBatch(h.key)
 	if err != nil || batch != nil {

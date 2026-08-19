@@ -317,7 +317,7 @@ export function adaptProductSnapshot(snapshot: AppReadSnapshot, now = new Date()
     overview: {
       dateLabel: formatDateHeading(now),
       refreshedAt: formatRelativeDateTime(rawOverview.refreshedAt, now),
-      businessWindowLabel: '运行时间 08:00～24:00',
+      businessWindowLabel: '运行时间 07:00～24:00',
       businessWindowOpen,
       homeStatus: homeStatus(workflow, funnel, businessWindowOpen),
       workflow,
@@ -417,13 +417,13 @@ function adaptWorkflow(
   let unavailableReason: string | null = null
   if (!runtime.available) unavailableReason = '授权状态暂不可读取'
   else if (!runtime.authorized) unavailableReason = '完成激活后可开始'
-  else if (!businessWindowOpen) unavailableReason = '运行时间为 08:00～24:00'
+  else if (!businessWindowOpen) unavailableReason = '运行时间为 07:00～24:00'
 
   const labels: Record<WorkflowView['state'], string> = {
     idle: '尚未开始',
     running: '运行中',
     paused: '已暂停',
-    waitingDailyWindow: businessWindowOpen ? '等待手动恢复' : '等待 08:00 开启',
+    waitingDailyWindow: businessWindowOpen ? '等待手动恢复' : '等待 07:00 开启',
     awaitingConfirmation: '等待人工确认',
     failed: '运行失败',
   }
@@ -550,7 +550,7 @@ function workflowPositionLabel(
   if (state === 'waitingDailyWindow') {
     return businessWindowOpen
       ? '业务运行已停在成员边界，等待手动恢复'
-      : '业务运行已停在成员边界，08:00 后需手动恢复'
+      : '业务运行已停在成员边界，07:00 后需手动恢复'
   }
   if (state === 'paused') return mode === 'replyOnly' ? '消息处理已暂停' : '今日任务已暂停'
   if (state === 'running') return mode === 'replyOnly' ? '正在处理候选人消息' : '今日任务正在运行'
@@ -678,7 +678,7 @@ function adaptCommunication(
   if (state === 'waitingDailyWindow') {
     return {
       state: 'waitingDailyWindow',
-      stateLabel: businessWindowOpen ? '等待手动恢复' : '等待 08:00 开启',
+      stateLabel: businessWindowOpen ? '等待手动恢复' : '等待 07:00 开启',
       lastPatrolAt: null,
     }
   }

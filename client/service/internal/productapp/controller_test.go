@@ -178,10 +178,10 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 	db, _ := controllerFixture(t)
 	flow := &fakeWorkflow{}
 	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
-	now := time.Date(2026, 7, 25, 7, 59, 59, 0, time.Local)
+	now := time.Date(2026, 7, 25, 6, 59, 59, 0, time.Local)
 	controller, err := New(db, flow, source, func() time.Time {
 		captured := now
-		now = time.Date(2026, 7, 25, 8, 0, 1, 0, time.Local)
+		now = time.Date(2026, 7, 25, 7, 0, 1, 0, time.Local)
 		return captured
 	}, workflow.DailyWindowPolicy{})
 	if err != nil {

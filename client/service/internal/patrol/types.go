@@ -46,7 +46,7 @@ var (
 	ErrIdentityInvalid                   = errors.New("账号身份绑定已失效，必须真人重新确认")
 	ErrIdentityUnobservable              = errors.New("当前页面无法确证账号主体")
 	ErrLoginRequired                     = errors.New("招聘平台未登录")
-	ErrDailyWindowNotOpen                = errors.New("今日巡检需在本地时间 08:00 后由真人开启")
+	ErrDailyWindowNotOpen                = errors.New("今日巡检需在本地时间 07:00 后由真人开启")
 	ErrDailyWindowExpired                = errors.New("巡检跨过本地日边界，已在 24:00 停止")
 	ErrActorPaused                       = errors.New("账号 actor 已停止或暂停，不得派发新命令")
 	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")

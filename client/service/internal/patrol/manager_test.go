@@ -1149,9 +1149,9 @@ func TestTrackedExpirySamePreviewDistinctIdentityAdoptsNew(t *testing.T) {
 
 func TestEnableTodayRequiresConfiguredStartHour(t *testing.T) {
 	h := newHarness(t)
-	h.clock.Add(-2 * time.Hour) // 07:00
+	h.clock.Add(-3 * time.Hour) // 06:00
 	if err := h.manager.EnableToday(h.key); !errors.Is(err, ErrDailyWindowNotOpen) {
-		t.Fatalf("08:00 前不得开启巡检: %v", err)
+		t.Fatalf("07:00 前不得开启巡检: %v", err)
 	}
 }
 

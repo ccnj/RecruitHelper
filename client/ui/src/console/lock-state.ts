@@ -8,7 +8,7 @@
 export const CONSOLE_PASSPHRASE = 'ls'
 const STORAGE_KEY = 'recruithelper.console.v1.unlockUntil'
 
-// 过期点取每天 04:00 而不是午夜：业务窗口是 [08:00, 24:00)，按 24 点边界
+// 过期点取每天 04:00 而不是午夜：业务窗口是 [07:00, 24:00)，按 24 点边界
 // 裁决回复链允许跨点收尾几十秒，卡在午夜重置会正好在那条尾巴上弹密码框。
 // 04:00 在任何尾巴之后、开窗之前。
 const RESET_HOUR = 4
