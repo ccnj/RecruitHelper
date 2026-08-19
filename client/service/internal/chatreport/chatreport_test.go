@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,4 +243,46 @@ func jsonKeysOf(t *testing.T, value any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func TestUploadPostsToChatReportEndpoint(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true,"profiles":0,"messages":1}`))
+	}))
+	defer server.Close()
+
+	payload := &Payload{ReportedAt: time.Now(), Messages: []MessageRow{{
+		Platform: "zhilian", AccountRef: "acc-1", ConversationRef: "conv-1",
+		Seq: 1, Direction: "in", Kind: "text",
+	}}}
+	target := Target{BaseURL: server.URL, MachineID: "M1", LicenseToken: "T1", AppVersion: "3.9.0"}
+	if err := Upload(context.Background(), payload, target); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if gotPath != "/api/v1/client/chat-report" {
+		t.Fatalf("端点路径错误: %q", gotPath)
+	}
+	body := string(gotBody)
+	for _, want := range []string{`"machineId":"M1"`, `"licenseToken":"T1"`, `"schemaVersion":1`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("载荷缺少 %s: %s", want, body)
+		}
+	}
+}
+
+func TestUploadTreatsNon2xxAsFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"detail":"401"}`, http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	payload := &Payload{ReportedAt: time.Now()}
+	target := Target{BaseURL: server.URL, MachineID: "M1", LicenseToken: "T1"}
+	if err := Upload(context.Background(), payload, target); err == nil {
+		t.Fatal("非 2xx 必须判失败——水位只认成功")
+	}
 }
