@@ -19,7 +19,6 @@ export interface BoundJobView {
   name: string | null
   syncState: 'synced' | 'syncing' | 'stale' | 'unavailable'
   syncStateLabel: string
-  environment: string
   lastSyncedAt: string | null
 }
 

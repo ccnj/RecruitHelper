@@ -27,7 +27,6 @@ export interface AppJobRaw {
   available: boolean
   backendJobId?: string
   name?: string
-  environment?: string
   syncStatus: string
   lastSyncedAt?: string | null
 }
@@ -390,7 +389,6 @@ function adaptJob(raw: AppJobRaw): ProductData['customer']['job'] {
     name: raw.available ? clean(raw.name) || null : null,
     syncState,
     syncStateLabel,
-    environment: clean(raw.environment) || '智联招聘',
     lastSyncedAt: formatRelativeDateTime(raw.lastSyncedAt),
   }
 }
