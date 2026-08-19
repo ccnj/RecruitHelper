@@ -49,6 +49,9 @@ type Runner struct {
 	now          func() time.Time
 
 	heldNotified map[uint64]bool // 已记过「进入等待」INFO 的通知,状态变化才再打
+
+	daily            DailyReportDeps // 日报依赖;零值时不产生日报(见 daily_report.go)
+	dailyEnqueuedFor string          // 进程内已入队的本地日期,挡每 tick 重复插入
 }
 
 func NewRunner(
@@ -91,6 +94,7 @@ type tickSummary struct {
 func (r *Runner) Tick() tickSummary {
 	summary := tickSummary{}
 	now := r.now()
+	r.maybeEnqueueDailyReport(now)
 	if expired, err := r.store.ExpireStaleNotifications(staleAfter, now); err != nil {
 		slog.Warn("运营通知过期清点失败", "err", err)
 	} else if expired > 0 {
@@ -102,6 +106,12 @@ func (r *Runner) Tick() tickSummary {
 		return summary
 	}
 	for _, row := range rows {
+		// 日报行没有候选人,走独立分叉;不得进入下方按 ProfileID 取快照的路径,
+		// 否则会被记成 profile_missing 失败。
+		if row.NotifyType == store.NotificationTypeDailyReport {
+			r.handleDailyReport(row, now, &summary)
+			continue
+		}
 		snapshot, err := r.store.NotificationRenderSnapshotForProfile(row.ProfileID)
 		if err != nil || snapshot == nil {
 			slog.Warn("运营通知快照缺失", "notifyId", row.ID, "type", row.NotifyType, "err", err)
