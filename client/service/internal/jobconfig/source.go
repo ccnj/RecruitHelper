@@ -359,7 +359,46 @@ func (s *Source) postConfigPlane(ctx context.Context, path string, extra map[str
 		return nil, fmt.Errorf("%w: %v", ErrConfigInvalid, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	return s.do(request, ErrUpstreamRejected)
+	raw, err := s.do(request, ErrUpstreamRejected)
+	if err != nil {
+		return nil, err
+	}
+	s.refreshCustomerSnapshot(raw)
+	return raw, nil
+}
+
+// refreshCustomerSnapshot 把职位配置响应顶层的 customer 快照(与 bind 响应同形)
+// 回写进本地配置,让后台改客户名后无需重新激活即可跟上。只动 customer 段;
+// 保存前重读本地配置,避免覆盖并发 bind 刚写入的凭据。响应缺块、名字为空、
+// 解析或回写失败都安静放过 —— 失效方向是"名字不更新",不影响配置拉取主流程。
+func (s *Source) refreshCustomerSnapshot(raw []byte) {
+	var response struct {
+		Customer *struct {
+			CustomerID         int    `json:"customerId"`
+			CustomerName       string `json:"customerName"`
+			Status             string `json:"status"`
+			SubscriptionEndsAt string `json:"subscriptionEndsAt"`
+		} `json:"customer"`
+	}
+	if json.Unmarshal(raw, &response) != nil || response.Customer == nil {
+		return
+	}
+	customer := Customer{
+		ID:                 response.Customer.CustomerID,
+		Name:               strings.TrimSpace(response.Customer.CustomerName),
+		Status:             strings.TrimSpace(response.Customer.Status),
+		SubscriptionEndsAt: strings.TrimSpace(response.Customer.SubscriptionEndsAt),
+	}
+	if customer.Name == "" {
+		return
+	}
+	current, err := s.config.Load()
+	if err != nil || current == nil || current.Customer == customer {
+		return
+	}
+	updated := *current
+	updated.Customer = customer
+	_ = s.config.Save(updated)
 }
 
 func (s *Source) currentMachineID(ctx context.Context) (string, error) {
