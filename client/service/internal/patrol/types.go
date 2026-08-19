@@ -364,7 +364,10 @@ func (c Config) withDefaults() Config {
 		c.TrackedReconcileInterval = 365 * 24 * time.Hour
 	}
 	if c.MaxPages <= 0 {
-		c.MaxPages = 256
+		// 每次未读插队都会把全量遍历重置回列表顶部重翻,预算按"多次重扫仍
+		// 够到 8 天线"取值:256 在日发百余招呼的现网被重扫吃光,轮轮止于最
+		// 近两天,深处的沉默会话永远巡不到(2026-08-19 甲方裁决调至 1024)。
+		c.MaxPages = 1024
 	}
 	if c.InboundHandoverCutoff.IsZero() {
 		// 默认常量恒合法；万一被改坏，validateConfig 会拦下零值，不静默放行。
