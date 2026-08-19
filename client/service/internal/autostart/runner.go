@@ -22,10 +22,16 @@ import (
 
 const (
 	defaultTickInterval = 30 * time.Second
-	// 触发时刻的随机范围 [07:05:00, 07:30:00],裁决写死,不设配置面。
-	slotBaseHour      = 7
+	// 触发时刻的随机范围 [窗口开点+5 分钟, +30 分钟],即当前 [07:05, 07:30]。
+	// 基点从 DailyStartHour 推导:窗口起点若再修宪,触发带自动跟随,
+	// 不会留下"每天在窗口外发起、每天被拦"的暗账。
+	slotBaseHour      = workflow.DailyStartHour
 	slotBaseMinute    = 5
 	slotSpreadSeconds = 25 * 60
+	// 相邻检查点的最大可信间隔。超过它说明进程刚经历睡眠/挂起补拍,
+	// "运行中跨过该时刻"不成立——睡过触发时刻的一律按晚启动对待,
+	// 否则下午唤醒会在计划外时刻无人在场开工(方向朝多做)。
+	staleTickGap = 2 * time.Minute
 	// 一次完整发起的兜底上限。控制面内部的探测与页面读取各有自己的超时,
 	// 这里只防整条链悬死把检查点循环卡住,不是节奏参数。
 	attemptTimeout = 5 * time.Minute
@@ -121,9 +127,13 @@ func (r *Runner) TickOnce(ctx context.Context) {
 	prev := r.lastTick
 	r.lastTick = now
 	r.ensureSlot(now)
-	if prev.IsZero() {
-		// 进程首个检查点只建立基线。脑晚于抽取时刻启动时,下一拍的
-		// prev 已在 slot 之后,跨点条件永远不成立 —— 当日自然跳过。
+	if prev.IsZero() || now.Sub(prev) > staleTickGap {
+		// 基线缺失(进程首拍)或检查点断流(睡眠/挂起后补拍):本拍只重建
+		// 基线,"运行中跨过该时刻"不成立。若时刻已被错过,当日跳过,但要
+		// 把"为什么没开"落库 —— 设置页对无人值守早晨的唯一交代在这里。
+		if !now.Before(r.slot) {
+			r.recordMissedSlot(now)
+		}
 		return
 	}
 	if !prev.Before(r.slot) || now.Before(r.slot) {
@@ -151,6 +161,30 @@ func (r *Runner) ensureSlot(now time.Time) {
 	).Add(offset)
 }
 
+// recordMissedSlot 给"到点时脑没在运行"的当日跳过留痕。只在开关开、当日
+// 尚无尝试记录时写一次;它消耗当日(与真实尝试同款按日幂等),不触发任何发起。
+func (r *Runner) recordMissedSlot(now time.Time) {
+	today := localDateOf(now)
+	if r.firedDate == today {
+		return
+	}
+	r.firedDate = today
+	setting, err := r.store.AutoStartSetting()
+	if err != nil || !setting.Enabled {
+		return
+	}
+	if setting.LastAttemptAt != nil &&
+		localDateOf(setting.LastAttemptAt.In(r.location)) == today {
+		return
+	}
+	slog.Info("每日自动开始:错过当日触发时刻,已跳过", "slot", r.slot.Format("15:04:05"))
+	if err := r.store.RecordAutoStartAttempt(
+		now, store.AutoStartOutcomeMissedSlot, "到点时客户端未在运行",
+	); err != nil {
+		slog.Warn("每日自动开始:跳过记录落库失败", "err", err)
+	}
+}
+
 func (r *Runner) fire(ctx context.Context, now time.Time) {
 	setting, err := r.store.AutoStartSetting()
 	if err != nil {
@@ -160,9 +194,16 @@ func (r *Runner) fire(ctx context.Context, now time.Time) {
 	if !setting.Enabled {
 		return
 	}
+	if setting.LastAttemptAt != nil &&
+		localDateOf(setting.LastAttemptAt.In(r.location)) == localDateOf(now) {
+		// 进程外已消耗过当日尝试:脑在触发带内重启会重抽时刻,若只靠
+		// 进程内状态,失败的尝试会被重启变成重试。"每日至多尝试一次,
+		// 成败皆止"以落库记录为准。
+		return
+	}
 	attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
-	outcome, detail := r.attempt(attemptCtx)
+	outcome, detail := r.attempt(attemptCtx, now)
 	slog.Info("每日自动开始:当日尝试已收场",
 		"outcome", outcome, "detail", detail, "slot", r.slot.Format("15:04:05"))
 	if err := r.store.RecordAutoStartAttempt(now, outcome, detail); err != nil {
@@ -171,9 +212,11 @@ func (r *Runner) fire(ctx context.Context, now time.Time) {
 }
 
 // attempt 做当日唯一一次完整发起,返回封闭结果码与给设置页看的中文原因。
-func (r *Runner) attempt(ctx context.Context) (string, string) {
+// 原因文案与人工路径同一张映射表,底层错误链只进日志、不进产品面。
+func (r *Runner) attempt(ctx context.Context, now time.Time) (string, string) {
 	active, err := r.store.ActiveProductWorkflowRun()
 	if err != nil {
+		slog.Warn("每日自动开始:读取当前运行状态失败", "err", err)
 		return store.AutoStartOutcomeError, "读取当前运行状态失败"
 	}
 	if active != nil {
@@ -181,27 +224,45 @@ func (r *Runner) attempt(ctx context.Context) (string, string) {
 		// 沟通阶段的活跃 run,对它调 Start 会被记成「追加采集」而不是开始。
 		if active.Status == workflow.StatusWaitingDailyWindow {
 			if err := r.control.Resume(ctx); err != nil {
-				return store.AutoStartOutcomeResumeFailed, "恢复失败:" + err.Error()
+				slog.Warn("每日自动开始:自动恢复失败", "err", err)
+				return store.AutoStartOutcomeResumeFailed, "当前状态无法恢复工作流"
 			}
 			return store.AutoStartOutcomeResumed, ""
 		}
-		return store.AutoStartOutcomeSkippedRun, "当前已有运行中的任务"
+		return store.AutoStartOutcomeSkippedRun, "当前已有未完成的任务"
 	}
 	latest, err := r.store.LatestProductWorkflowRun()
 	if err != nil {
+		slog.Warn("每日自动开始:读取运行历史失败", "err", err)
 		return store.AutoStartOutcomeError, "读取运行历史失败"
 	}
-	if latest != nil && localDateOf(latest.StartedAt.In(r.location)) == localDateOf(r.now().In(r.location)) {
+	if latest != nil && runTouchedDay(latest, now, r.location) {
 		return store.AutoStartOutcomeSkippedToday, "今天已经运行过"
 	}
 	job, err := r.store.AppCurrentJob()
-	if err != nil || !job.Available || job.BackendJobID == "" {
+	if err != nil {
+		slog.Warn("每日自动开始:读取当前职位失败", "err", err)
+		return store.AutoStartOutcomeError, "读取当前职位失败"
+	}
+	if !job.Available || job.BackendJobID == "" {
 		return store.AutoStartOutcomeStartFailed, "当前没有已绑定职位"
 	}
-	if err := r.control.Start(ctx, "full", job.BackendJobID); err != nil {
+	if err := r.control.Start(ctx, string(workflow.ModeFull), job.BackendJobID); err != nil {
+		slog.Warn("每日自动开始:开始被拒", "err", err)
 		return store.AutoStartOutcomeStartFailed, productapp.StartFailureText(err)
 	}
 	return store.AutoStartOutcomeStarted, ""
+}
+
+// runTouchedDay 判定一条运行是否属于 now 所在的本地日:当天开始的算,
+// 更早开始、当天才终局的也算 —— 用户今晨手动收掉昨日挂起的运行后,
+// 机器不该再替他开一轮(条款「当日尚无任何运行」的完整语义)。
+func runTouchedDay(run *store.ProductWorkflowRun, now time.Time, location *time.Location) bool {
+	today := localDateOf(now)
+	if localDateOf(run.StartedAt.In(location)) == today {
+		return true
+	}
+	return run.EndedAt != nil && localDateOf(run.EndedAt.In(location)) == today
 }
 
 func localDateOf(now time.Time) string {

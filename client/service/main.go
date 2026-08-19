@@ -412,13 +412,6 @@ func main() {
 		},
 	})
 	background.Go(func() { notifyRunner.Run(appCtx) })
-	// 每日自动开始(AGENTS.md 统一业务运行窗口条款,2026-08-19 甲方裁决):
-	// 开关默认关,每日 07:05~07:30 随机时刻替人点一次「开始」,复用产品
-	// 控制面同一入口,全部前置闸自动继承。
-	autoStartRunner := autostart.NewRunner(autostart.Config{
-		Store: st, Control: productController, Location: time.Local,
-	})
-	background.Go(func() { autoStartRunner.Run(appCtx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
@@ -585,6 +578,14 @@ func main() {
 	}
 	adminAPI.SetProviderApplied(rebuildAdvice)
 	productController.SetProviderApplied(rebuildAdvice)
+	// 每日自动开始(AGENTS.md 统一业务运行窗口条款,2026-08-19 甲方裁决):
+	// 开关默认关,每日 07:05~07:30 随机时刻替人点一次「开始」,复用产品
+	// 控制面同一入口,全部前置闸自动继承。goroutine 必须在 controller 的
+	// 全部装配期 Set* 之后再起,避免与装配写并发。
+	autoStartRunner := autostart.NewRunner(autostart.Config{
+		Store: st, Control: productController, Location: time.Local,
+	})
+	background.Go(func() { autoStartRunner.Run(appCtx) })
 	adminAPI.Routes(mux)
 	if *adminToken != "" {
 		productAPI, productErr := apphttp.New(

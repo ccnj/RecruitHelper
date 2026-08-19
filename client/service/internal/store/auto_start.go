@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // AutoStartSetting 是「每日自动开始」的本机开关与上次尝试结果(2026-08-19 甲方
@@ -25,7 +26,8 @@ type AutoStartSetting struct {
 }
 
 // 上次尝试结果的封闭码。started/resumed 是成功;skipped 族当天什么都没做;
-// failed 族是完整尝试被前置闸拒绝 —— 按裁决当日不重试。
+// failed 族是完整尝试被前置闸拒绝 —— 按裁决当日不重试;missedSlot 是
+// 到点时脑没在运行(晚开机/睡眠错过),当日跳过的落库痕迹。
 const (
 	AutoStartOutcomeStarted      = "started"
 	AutoStartOutcomeResumed      = "resumed"
@@ -33,6 +35,7 @@ const (
 	AutoStartOutcomeResumeFailed = "resumeFailed"
 	AutoStartOutcomeSkippedRun   = "skippedActiveRun"
 	AutoStartOutcomeSkippedToday = "skippedAlreadyRanToday"
+	AutoStartOutcomeMissedSlot   = "missedSlot"
 	AutoStartOutcomeError        = "error"
 )
 
@@ -53,25 +56,36 @@ func (s *Store) AutoStartSetting() (AutoStartSetting, error) {
 
 // SetAutoStartEnabled 落开关。只应由产品设置页的人工点击调用。
 func (s *Store) SetAutoStartEnabled(enabled bool) error {
-	setting, err := s.AutoStartSetting()
-	if err != nil {
-		return err
-	}
-	setting.ID = autoStartSettingID
-	setting.Enabled = enabled
-	return s.db.Save(&setting).Error
+	return s.updateAutoStartColumns(map[string]any{"enabled": enabled})
 }
 
 // RecordAutoStartAttempt 记一次当日尝试的结果,覆盖上一次 —— 设置页只需要
 // 回答"最近一次怎么样",历史由普通日志承担。
 func (s *Store) RecordAutoStartAttempt(at time.Time, outcome, detail string) error {
-	setting, err := s.AutoStartSetting()
-	if err != nil {
+	return s.updateAutoStartColumns(map[string]any{
+		"last_attempt_at": at,
+		"last_outcome":    outcome,
+		"last_detail":     detail,
+	})
+}
+
+// updateAutoStartColumns 只写指定列,不做整行读-改-写:开关(HTTP goroutine)
+// 与尝试记录(触发器 goroutine)并发落库时,整行 Save 会把对方刚写的列用
+// 陈旧读回盖掉 —— 最贵的形态是"落账把用户刚关掉的开关写回开"。
+func (s *Store) updateAutoStartColumns(values map[string]any) error {
+	res := s.db.Model(&AutoStartSetting{}).
+		Where("id = ?", autoStartSettingID).Updates(values)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	row := AutoStartSetting{ID: autoStartSettingID}
+	if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&row).Error; err != nil {
 		return err
 	}
-	setting.ID = autoStartSettingID
-	setting.LastAttemptAt = &at
-	setting.LastOutcome = outcome
-	setting.LastDetail = detail
-	return s.db.Save(&setting).Error
+	return s.db.Model(&AutoStartSetting{}).
+		Where("id = ?", autoStartSettingID).Updates(values).Error
 }

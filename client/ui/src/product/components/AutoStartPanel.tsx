@@ -10,6 +10,7 @@ const OUTCOME_LABELS: Record<string, string> = {
   resumeFailed: '继续失败',
   skippedActiveRun: '已跳过',
   skippedAlreadyRanToday: '已跳过',
+  missedSlot: '已跳过',
   error: '检查失败',
 }
 
