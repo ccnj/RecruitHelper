@@ -3039,6 +3039,43 @@
   line-height: 1.6;
 }
 
+.rh-autostart-panel {
+  padding: 16px 18px 18px;
+}
+
+.rh-autostart-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 14px;
+  color: var(--rh-ink);
+  cursor: pointer;
+}
+
+.rh-autostart-toggle input {
+  margin-top: 3px;
+}
+
+.rh-autostart-hint {
+  margin: 10px 0 0 26px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--rh-muted);
+}
+
+.rh-autostart-error {
+  margin: 10px 0 0 26px;
+  font-size: 13px;
+  color: var(--rh-red);
+}
+
+.rh-autostart-last {
+  margin: 10px 0 0 26px;
+  font-size: 13px;
+  color: var(--rh-copy);
+}
+
 .rh-schedule-layout {
   display: flex;
   align-items: flex-start;
