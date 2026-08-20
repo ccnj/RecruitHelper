@@ -113,6 +113,26 @@ export async function saveInterviewSchedule(schedule: InterviewSchedule): Promis
   await appPost<{ saved: boolean }>('/app/interview-schedule', { schedule })
 }
 
+/**
+ * 「每日自动开始」设置。触发时刻由脑每日在 07:05～07:30 内随机抽取,不可配置;
+ * lastOutcome 是脑侧封闭结果码,lastDetail 是已翻好的中文原因。
+ */
+export interface AutoStartSetting {
+  enabled: boolean
+  lastAttemptAt?: string
+  lastOutcome?: string
+  lastDetail?: string
+}
+
+export async function readAutoStartSetting(): Promise<AutoStartSetting> {
+  return appGet<AutoStartSetting>('/app/auto-start')
+}
+
+/** 抛错即未落库，调用方必须把界面退回改动前的样子。 */
+export async function saveAutoStartSetting(enabled: boolean): Promise<void> {
+  await appPost<{ saved: boolean }>('/app/auto-start', { enabled })
+}
+
 /** 客户端版本更新状态。只回答"有没有新版、备好了没有"。 */
 export interface ProductUpdateStatus {
   currentVersion?: string

@@ -1149,9 +1149,9 @@ func TestTrackedExpirySamePreviewDistinctIdentityAdoptsNew(t *testing.T) {
 
 func TestEnableTodayRequiresConfiguredStartHour(t *testing.T) {
 	h := newHarness(t)
-	h.clock.Add(-2 * time.Hour) // 07:00
+	h.clock.Add(-3 * time.Hour) // 06:00
 	if err := h.manager.EnableToday(h.key); !errors.Is(err, ErrDailyWindowNotOpen) {
-		t.Fatalf("08:00 前不得开启巡检: %v", err)
+		t.Fatalf("07:00 前不得开启巡检: %v", err)
 	}
 }
 
@@ -2542,7 +2542,7 @@ func TestDatabaseConversationAbsentFromObservedWindowCannotDriveThreadRead(t *te
 
 // 纯翻页轮里,工作流闸必须能在读下一页之前截住本轮。闸原本只挂在"领取下
 // 一个候选人"处,于是整页无人可领的轮一次都问不到它:用户点的结束要等这
-// 一轮把 MaxPages 页翻完(生产上 256 页、每页 2.5~5 秒)才可能生效,期间账
+// 一轮把 MaxPages 页翻完(生产上 1024 页、每页 2.5~5 秒)才可能生效,期间账
 // 号还在一条条发 readList。
 func TestConversationGateStopsListPagingWithoutClaimableRow(t *testing.T) {
 	h := newHarness(t)

@@ -15,11 +15,11 @@ func TestEvaluateDailyWindowUsesSuppliedLocalTimeAndExactBoundaries(t *testing.T
 	}{
 		{
 			name: "one second before opening",
-			now:  time.Date(2026, 7, 25, 7, 59, 59, 0, shanghai),
+			now:  time.Date(2026, 7, 25, 6, 59, 59, 0, shanghai),
 		},
 		{
-			name: "exactly 08:00",
-			now:  time.Date(2026, 7, 25, 8, 0, 0, 0, shanghai),
+			name: "exactly 07:00",
+			now:  time.Date(2026, 7, 25, 7, 0, 0, 0, shanghai),
 			open: true,
 		},
 		{
@@ -125,7 +125,7 @@ func TestStartCreatesOnceAndDoesNotChangeAnActiveWorkflow(t *testing.T) {
 
 func TestStartRejectsClosedWindowWithoutCreatingReservation(t *testing.T) {
 	location := mustLocation(t, "Asia/Shanghai")
-	closed := time.Date(2026, 7, 25, 7, 59, 59, 0, location)
+	closed := time.Date(2026, 7, 25, 6, 59, 59, 0, location)
 	decision, err := Start(nil, ModeFull, closed, location, DailyWindowPolicy{})
 	if !errors.Is(err, ErrDailyWindowClosed) || decision.Created || decision.State != (State{}) {
 		t.Fatalf("closed Start = %+v, %v", decision, err)
@@ -183,7 +183,7 @@ func TestPauseIsIdempotentAndPreservesResumeTarget(t *testing.T) {
 
 func TestResumeRequiresOpenWindowAndRestoresExactStatus(t *testing.T) {
 	location := mustLocation(t, "Asia/Shanghai")
-	open := time.Date(2026, 7, 25, 8, 0, 0, 0, location)
+	open := time.Date(2026, 7, 25, 7, 0, 0, 0, location)
 	closed := open.Add(-time.Nanosecond)
 
 	cases := []struct {
@@ -275,7 +275,7 @@ func TestMayStartNextWorkflowMemberIsTheSharedMemberBoundaryGate(t *testing.T) {
 		t.Fatalf("closed running gate = %+v, %v, want %+v", decision, err, wantWaiting)
 	}
 
-	// Reaching 08:00 is not authority to resume.
+	// Reaching 07:00 is not authority to resume.
 	decision, err = MayStartNextWorkflowMember(
 		wantWaiting, open, location, DailyWindowPolicy{},
 	)

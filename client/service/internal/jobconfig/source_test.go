@@ -68,6 +68,65 @@ func TestFetchCurrentUsesOnlyApprovedEndpointAndCredentialShape(t *testing.T) {
 	}
 }
 
+func TestFetchRefreshesCustomerSnapshotFromResponse(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"job":{"id":1},"customer":{"customerId":7,"customerName":"新客户名","status":"active","subscriptionEndsAt":"2027-01-01T00:00:00"}}`))
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	if err := store.Save(Config{
+		BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-private",
+		Customer: Customer{ID: 7, Name: "旧客户名", Status: "active"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := NewSource(store, backend.Client(), fixedMachineID)
+	if _, err := source.FetchCurrent(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded == nil {
+		t.Fatalf("配置读回失败: %v", err)
+	}
+	if loaded.Customer.Name != "新客户名" || loaded.Customer.SubscriptionEndsAt != "2027-01-01T00:00:00" {
+		t.Fatalf("customer 段未刷新: %+v", loaded.Customer)
+	}
+	if loaded.LicenseToken != "token-private" || loaded.MachineID != testMachineID || loaded.BaseURL != backend.URL {
+		t.Fatalf("凭据段被误改: %+v", loaded)
+	}
+}
+
+func TestFetchWithoutCustomerBlockKeepsLocalSnapshot(t *testing.T) {
+	responses := []string{
+		`{"job":{"id":1}}`,
+		`{"job":{"id":1},"customer":{"customerId":7,"customerName":"","status":"active"}}`,
+		`not-json`,
+	}
+	var call int
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responses[call]))
+		call++
+	}))
+	defer backend.Close()
+	store, _ := NewConfigStore(t.TempDir())
+	if err := store.Save(Config{
+		BaseURL: backend.URL, MachineID: testMachineID, LicenseToken: "token-private",
+		Customer: Customer{ID: 7, Name: "旧客户名", Status: "active"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := NewSource(store, backend.Client(), fixedMachineID)
+	for range responses {
+		_, _ = source.FetchCurrent(context.Background())
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded == nil || loaded.Customer.Name != "旧客户名" {
+		t.Fatalf("缺块/空名/坏响应不该动本地 customer 段: loaded=%+v err=%v", loaded, err)
+	}
+}
+
 func TestFetchCurrentDoesNotRetryRejectedRequest(t *testing.T) {
 	var calls int
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

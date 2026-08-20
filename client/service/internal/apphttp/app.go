@@ -20,7 +20,6 @@ import (
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/productapp"
 	"recruithelper/client/service/internal/store"
-	"recruithelper/client/service/internal/workflow"
 )
 
 var ErrInvalidConfiguration = errors.New("产品 API 配置无效")
@@ -33,6 +32,8 @@ type ProjectionStore interface {
 	AppCandidateDetail(store.AppCandidateDetailQuery) (*store.AppCandidateDetailProjection, error)
 	InterviewSchedule() (m5ai.InterviewSchedule, error)
 	SetInterviewSchedule(m5ai.InterviewSchedule) error
+	AutoStartSetting() (store.AutoStartSetting, error)
+	SetAutoStartEnabled(bool) error
 }
 
 type RuntimeSnapshot struct {
@@ -164,6 +165,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /app/candidates/{profileId}", h(a.candidateDetail))
 	mux.HandleFunc("GET /app/interview-schedule", h(a.interviewSchedule))
 	mux.HandleFunc("POST /app/interview-schedule", h(a.saveInterviewSchedule))
+	mux.HandleFunc("GET /app/auto-start", h(a.autoStart))
+	mux.HandleFunc("POST /app/auto-start", h(a.saveAutoStart))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -241,34 +244,10 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]bool{"accepted": true})
 }
 
-// startFailureText 只把已知业务哨兵映射为固定文案；未匹配的错误一律保持
-// 笼统提示，底层错误链的细节不得进入产品面响应。
+// startFailureText 的映射表已下沉到 productapp.StartFailureText,与每日自动
+// 开始共用;此处只保留转调,产品面响应的边界(不泄底层错误链)不变。
 func startFailureText(err error) string {
-	switch {
-	// 全新开始已经改为跟随后台当前职位,不再因职位变化拒绝。这个哨兵此后只剩
-	// 一种可达来路:有未完成的任务,而它锚定的职位与后台当前职位不是同一个。
-	// 原文案"请刷新后重试"对这种情形是条死路——刷新只会把页面职位更新成后台
-	// 那个,再点开始仍被同一道闸拦下。真正的出路是先结束本次任务。
-	case errors.Is(err, productapp.ErrJobSelectionChanged):
-		return "当前有未完成的任务，它绑定的职位与后台当前职位不同；要换职位请先结束本次任务"
-	case errors.Is(err, workflow.ErrDailyWindowClosed):
-		return "当前不在业务运行窗口内"
-	case errors.Is(err, productapp.ErrAccountUnavailable):
-		return "没有可运行的平台账号"
-	case errors.Is(err, productapp.ErrHandUnavailable):
-		return "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试"
-	case errors.Is(err, productapp.ErrHandAmbiguous):
-		return "检测到多个在线插件，请只保留一个装有插件的 Chrome"
-	case errors.Is(err, productapp.ErrLoginRequired):
-		return "请先在 Chrome 中登录智联招聘端，再点击开始"
-	case errors.Is(err, productapp.ErrJobConfigUnavailable):
-		return "当前职位配置不可用"
-	case errors.Is(err, productapp.ErrWechatNotConfigured):
-		return "尚未在智联个人中心配置微信号，请到智联招聘端「个人中心」填写微信号后再开始"
-	case errors.Is(err, productapp.ErrWechatCheckFailed):
-		return "微信号配置检查未完成，请稍后重试"
-	}
-	return "当前状态无法启动工作流"
+	return productapp.StartFailureText(err)
 }
 
 // syncJobs 重新拉取旧后台职位配置：刷新有效职位集，并把当前职位重新落库。
@@ -315,6 +294,47 @@ func (a *API) saveInterviewSchedule(w http.ResponseWriter, r *http.Request) {
 	// 空表是最常见的一种，UI 需要能把它和"存坏了"区分开。
 	if err := a.projections.SetInterviewSchedule(m5ai.InterviewSchedule(request.Schedule)); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})
+}
+
+// autoStartBody 是「每日自动开始」的线上形态。lastOutcome 是脑侧封闭码,
+// lastDetail 是已映射好的中文原因;触发时刻由脑每日随机抽取,不在此配置。
+type autoStartBody struct {
+	Enabled       bool       `json:"enabled"`
+	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
+	LastOutcome   string     `json:"lastOutcome,omitempty"`
+	LastDetail    string     `json:"lastDetail,omitempty"`
+}
+
+func (a *API) autoStart(w http.ResponseWriter, _ *http.Request) {
+	setting, err := a.projections.AutoStartSetting()
+	if err != nil {
+		slog.Warn("产品接口:每日自动开始配置无法读取", "err", err)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "每日自动开始配置无法读取"})
+		return
+	}
+	writeJSON(w, http.StatusOK, autoStartBody{
+		Enabled:       setting.Enabled,
+		LastAttemptAt: setting.LastAttemptAt,
+		LastOutcome:   setting.LastOutcome,
+		LastDetail:    setting.LastDetail,
+	})
+}
+
+func (a *API) saveAutoStart(w http.ResponseWriter, r *http.Request) {
+	// enabled 用指针区分"显式传了 false"与"根本没传":开关授权必须是显式的。
+	var request struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if decodeProductJSON(r, &request) != nil || request.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "每日自动开始请求无效"})
+		return
+	}
+	if err := a.projections.SetAutoStartEnabled(*request.Enabled); err != nil {
+		slog.Warn("产品接口:每日自动开始配置保存失败", "err", err)
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "每日自动开始配置保存失败"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})

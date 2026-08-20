@@ -87,7 +87,6 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           tone={customer.job.syncState === 'synced' ? 'green' : customer.job.syncState === 'stale' ? 'amber' : 'slate'}
         />
         <div className="rh-job-meta">
-          <span>{customer.job.environment}</span>
           <span>{customer.job.lastSyncedAt ? `同步于 ${customer.job.lastSyncedAt}` : '尚无同步记录'}</span>
         </div>
         <button

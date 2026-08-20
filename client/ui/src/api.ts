@@ -327,6 +327,15 @@ export interface FieldReportResult {
   error?: string
 }
 
+// 聊天记录上报的人工即时触发结果(2026-08-20 甲方裁决增补)。失败也带计数：
+// 分批上传走一批推一批水位，报错前传出去的部分已在服务器上。
+export interface ChatReportRunResult {
+  ok?: boolean
+  profiles: number
+  messages: number
+  error?: string
+}
+
 // 每日自动上传的开关与上次执行结果(2026-07-31 补充裁决)。开关默认关闭，
 // 且只有这一个入口能打开它。
 export interface LogReportSettings {
@@ -894,6 +903,7 @@ export const api = {
   m5Contexts: () => get<{ contexts: M5AIContextView[] }>('/admin/m5/contexts'),
   devSQL: (sql: string) => post<DevSQLResult>('/admin/dev/sql', { sql }),
   devReport: () => post<FieldReportResult>('/admin/dev/report', {}),
+  devChatReportRun: () => post<ChatReportRunResult>('/admin/dev/chat-report/run', {}),
   devLogReportSettings: () => get<LogReportSettings>('/admin/dev/log-report/settings'),
   devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>

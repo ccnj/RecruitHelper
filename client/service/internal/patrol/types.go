@@ -46,7 +46,7 @@ var (
 	ErrIdentityInvalid                   = errors.New("账号身份绑定已失效，必须真人重新确认")
 	ErrIdentityUnobservable              = errors.New("当前页面无法确证账号主体")
 	ErrLoginRequired                     = errors.New("招聘平台未登录")
-	ErrDailyWindowNotOpen                = errors.New("今日巡检需在本地时间 08:00 后由真人开启")
+	ErrDailyWindowNotOpen                = errors.New("今日巡检需在本地时间 07:00 后开启")
 	ErrDailyWindowExpired                = errors.New("巡检跨过本地日边界，已在 24:00 停止")
 	ErrActorPaused                       = errors.New("账号 actor 已停止或暂停，不得派发新命令")
 	ErrActorGenerationChanged            = errors.New("账号绑定或手会话已变化，本轮必须停止并由下轮重新探测")
@@ -364,7 +364,10 @@ func (c Config) withDefaults() Config {
 		c.TrackedReconcileInterval = 365 * 24 * time.Hour
 	}
 	if c.MaxPages <= 0 {
-		c.MaxPages = 256
+		// 每次未读插队都会把全量遍历重置回列表顶部重翻,预算按"多次重扫仍
+		// 够到 8 天线"取值:256 在日发百余招呼的现网被重扫吃光,轮轮止于最
+		// 近两天,深处的沉默会话永远巡不到(2026-08-19 甲方裁决调至 1024)。
+		c.MaxPages = 1024
 	}
 	if c.InboundHandoverCutoff.IsZero() {
 		// 默认常量恒合法；万一被改坏，validateConfig 会拦下零值，不静默放行。

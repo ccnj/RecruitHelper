@@ -3,16 +3,83 @@
 // 管理前台的审计页取回。按裁决只由人显式点击触发:这里没有定时、没有自动重试,
 // 传失败就再点一次。
 import { useCallback, useEffect, useState } from 'react'
-import { api, FieldReportResult, FieldReportSettings, LogReportSettings } from '../../api'
+import { api, ChatReportRunResult, FieldReportResult, FieldReportSettings, LogReportSettings } from '../../api'
 import { errorText } from '../format'
 
 export function FieldReportPage() {
   return (
     <>
+      <ChatReportUpload />
       <LogReportSwitch />
       <AutoUploadSwitch />
       <ManualUpload />
     </>
+  )
+}
+
+// 聊天记录上报的人工即时触发(AGENTS.md「全局约定·聊天记录上报」,2026-08-20
+// 甲方裁决增补)。与每晚 00:20 那轮完全同款:同一游标水位、同一幂等语义,
+// 传完当晚那轮自然没剩多少。巡检跑着也能点——上报对业务账本只读,唯一的写
+// 是自己的水位表;正在上传时(含定时那轮)脑侧直接拒绝,这里如实提示。
+function ChatReportUpload() {
+  const [result, setResult] = useState<ChatReportRunResult | null>(null)
+  const [transportError, setTransportError] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null)
+
+  const run = useCallback(async () => {
+    if (running) return
+    setRunning(true)
+    setTransportError(null)
+    setResult(null)
+    const startedAt = performance.now()
+    try {
+      setResult(await api.devChatReportRun())
+    } catch (reason) {
+      setTransportError(errorText(reason))
+    } finally {
+      setElapsedMs(Math.round(performance.now() - startedAt))
+      setRunning(false)
+    }
+  }, [running])
+
+  return (
+    <div className="panel">
+      <h3>聊天记录上报（每晚 00:20 自动增量）</h3>
+      <p>
+        候选人档案与聊天记录每晚自动增量上传，在管理后台「聊天记录」页查看。
+        不想等到夜里就点这里，立即把新增的部分传上去；巡检跑着也可以点。
+      </p>
+      <div className="sql-bar">
+        <button onClick={() => void run()} disabled={running}>
+          {running ? '上传中…' : '立即上传'}
+        </button>
+        {elapsedMs !== null && !running && <small className="mono">{elapsedMs} ms</small>}
+      </div>
+      <ChatReportOutcome result={result} transportError={transportError} />
+    </div>
+  )
+}
+
+function ChatReportOutcome({ result, transportError }: {
+  result: ChatReportRunResult | null
+  transportError: string | null
+}) {
+  if (transportError) return <p className="sql-error">连不上脑：{transportError}</p>
+  if (!result) return null
+  if (result.error) {
+    const partial = result.messages > 0 || result.profiles > 0
+      ? `（中断前已传：档案 ${result.profiles} 人、消息 ${result.messages} 条，再点一次续传剩余）`
+      : ''
+    return <p className="sql-error">上传失败：{result.error}{partial}</p>
+  }
+  if (result.messages === 0) {
+    return <p className="sql-ok">已同步：档案 {result.profiles} 人已刷新，没有新增消息要传。</p>
+  }
+  return (
+    <p className="sql-ok">
+      已上传：档案 {result.profiles} 人 · 新增消息 {result.messages} 条
+    </p>
   )
 }
 
@@ -102,15 +169,18 @@ function AutoUploadSwitch() {
   const enabled = settings?.autoUploadEnabled === true
   return (
     <div className="panel">
-      <label>
-        <input
-          type="checkbox"
-          checked={enabled}
+      <div className="dc-switch-row">
+        <button
+          aria-checked={enabled}
+          aria-label="自动上传数据至服务器"
+          className={`dc-switch${enabled ? ' is-on' : ''}`}
           disabled={saving || settings === null}
-          onChange={(event) => void toggle(event.target.checked)}
+          onClick={() => void toggle(!enabled)}
+          role="switch"
+          type="button"
         />
-        {' '}自动上传数据至服务器
-      </label>
+        <span>自动上传数据至服务器</span>
+      </div>
       <p>
         勾选后每天凌晨 00:10 自动打包上传。那一刻若还有工作流在跑或有命令没收束，
         会往后顺延，到 02:00 仍不合适就跳过当天；客户端没开着而错过的当天不补传。

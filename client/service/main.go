@@ -21,8 +21,10 @@ import (
 	"recruithelper/client/service/internal/adminhttp"
 	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/appbridge"
+	"recruithelper/client/service/internal/autostart"
 	"recruithelper/client/service/internal/apphttp"
 	"recruithelper/client/service/internal/blobstore"
+	"recruithelper/client/service/internal/chatreport"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobconfig"
@@ -499,6 +501,38 @@ func main() {
 			}
 		},
 	})
+	// 聊天记录上报(AGENTS.md「全局约定·聊天记录上报」,2026-08-19 甲方裁决)。
+	// 排在 00:20:审计清理(00:05)与诊断包上传(00:10)之后,不跟它们抢静默窗口。
+	// 常开无开关;游标增量,失败当日放弃,水位不推进由次日自愈。
+	chatReportDeps := chatreport.Deps{
+		Store: st,
+		Target: func() (chatreport.Target, bool) {
+			config, configErr := jobConfigSource.LoadConfig()
+			if configErr != nil || config == nil {
+				return chatreport.Target{}, false
+			}
+			return chatreport.Target{
+				BaseURL:      config.BaseURL,
+				MachineID:    config.MachineID,
+				LicenseToken: config.LicenseToken,
+				AppVersion:   strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+			}, true
+		},
+	}
+	// 诊断台人工即时触发(2026-08-20 甲方裁决增补):同一 RunOnce、同一游标,
+	// 进行中互斥在 chatreport 包内,两条触发路径不会同时跑。
+	adminAPI.SetChatReportRunner(func(ctx context.Context) (chatreport.Summary, error) {
+		return chatreport.RunOnce(ctx, chatReportDeps)
+	})
+	go report.RunScheduler(appCtx, report.SchedulerDeps{
+		Hour: 0, Minute: 20,
+		Label: "聊天记录上报",
+		Quiet: dbQuiet,
+		RunOnce: func(ctx context.Context) error {
+			_, err := chatreport.RunOnce(ctx, chatReportDeps)
+			return err
+		},
+	})
 	// 工作状态上报(AGENTS.md「全局约定·工作状态上报」,2026-08-06 甲方裁决)。
 	// 与上面那个每日诊断包上传是两回事:这里报的是计数与枚举,不含候选人明文,
 	// 所以常开、没有开关。不受统一业务运行窗口约束 —— 它不是候选人可见动作,
@@ -577,6 +611,14 @@ func main() {
 	}
 	adminAPI.SetProviderApplied(rebuildAdvice)
 	productController.SetProviderApplied(rebuildAdvice)
+	// 每日自动开始(AGENTS.md 统一业务运行窗口条款,2026-08-19 甲方裁决):
+	// 开关默认关,每日 07:05~07:30 随机时刻替人点一次「开始」,复用产品
+	// 控制面同一入口,全部前置闸自动继承。goroutine 必须在 controller 的
+	// 全部装配期 Set* 之后再起,避免与装配写并发。
+	autoStartRunner := autostart.NewRunner(autostart.Config{
+		Store: st, Control: productController, Location: time.Local,
+	})
+	background.Go(func() { autoStartRunner.Run(appCtx) })
 	adminAPI.Routes(mux)
 	if *adminToken != "" {
 		productAPI, productErr := apphttp.New(

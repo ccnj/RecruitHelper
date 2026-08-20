@@ -161,14 +161,13 @@ export function createProductFixture(): ProductData {
         name: '高级招聘顾问',
         syncState: 'synced',
         syncStateLabel: '配置已同步',
-        environment: '智联招聘',
         lastSyncedAt: '今天 07:58',
       },
     },
     overview: {
       dateLabel: '2026 年 7 月 25 日 星期六',
       refreshedAt: '今天 09:32',
-      businessWindowLabel: '运行时间 08:00～24:00',
+      businessWindowLabel: '运行时间 07:00～24:00',
       businessWindowOpen: true,
       homeStatus: {
         label: '等你确认',
@@ -285,7 +284,6 @@ export function createEmptyProductData(): ProductData {
         name: null,
         syncState: 'unavailable',
         syncStateLabel: '尚未同步职位',
-        environment: '智联招聘',
         lastSyncedAt: null,
       },
     },
@@ -297,7 +295,7 @@ export function createEmptyProductData(): ProductData {
         weekday: 'long',
       }).format(new Date()),
       refreshedAt: null,
-      businessWindowLabel: '运行时间 08:00～24:00',
+      businessWindowLabel: '运行时间 07:00～24:00',
       businessWindowOpen: false,
       homeStatus: {
         label: '未开始',

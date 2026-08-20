@@ -1607,7 +1607,7 @@ func TestCommunicationV4PatrolArchivesAfterThirtySixSilentHoursWithoutAvailableC
 	}
 	makeCommunicationV4AIMaterialUnavailable(t, h, fixture.profileID)
 
-	// 保持在与最后出站相同的日内时刻，避免跨日推进恰好落到 08:00
+	// 保持在与最后出站相同的日内时刻，避免跨日推进恰好落到 07:00
 	// 开跑窗口之前，让沉默归档断言受测试实际执行时刻影响。
 	archiveAt := prepared.State.LastOutboundAt.Add(48 * time.Hour)
 	h.clock.Add(archiveAt.Sub(h.clock.Now()))

@@ -2,6 +2,7 @@ import type { ProductData } from '../types'
 import { PageHeader, StatusPill } from './ProductPrimitives'
 import { ProductIcon } from './ProductIcon'
 import { InterviewSchedulePanel } from './InterviewSchedulePanel'
+import { AutoStartPanel } from './AutoStartPanel'
 
 interface SettingsPageProps {
   customer: ProductData['customer']
@@ -12,8 +13,10 @@ export function SettingsPage({ customer }: SettingsPageProps) {
     <div className="rh-page">
       <PageHeader
         title="配置"
-        description="设置可面试时段,查看客户授权与职位配置。敏感配置不会在普通页面显示。"
+        description="设置每日自动开始与可面试时段,查看客户授权与职位配置。敏感配置不会在普通页面显示。"
       />
+
+      <AutoStartPanel />
 
       <InterviewSchedulePanel />
 

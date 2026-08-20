@@ -30,6 +30,10 @@ type fakeProjections struct {
 	scheduleErr          error
 	savedSchedule        m5ai.InterviewSchedule
 	saveScheduleErr      error
+	autoStart            store.AutoStartSetting
+	autoStartErr         error
+	savedAutoStart       *bool
+	saveAutoStartErr     error
 }
 
 func (f *fakeProjections) InterviewSchedule() (m5ai.InterviewSchedule, error) {
@@ -47,6 +51,21 @@ func (f *fakeProjections) SetInterviewSchedule(schedule m5ai.InterviewSchedule) 
 		return f.saveScheduleErr
 	}
 	f.savedSchedule = schedule
+	return nil
+}
+
+func (f *fakeProjections) AutoStartSetting() (store.AutoStartSetting, error) {
+	if f.autoStartErr != nil {
+		return store.AutoStartSetting{}, f.autoStartErr
+	}
+	return f.autoStart, nil
+}
+
+func (f *fakeProjections) SetAutoStartEnabled(enabled bool) error {
+	if f.saveAutoStartErr != nil {
+		return f.saveAutoStartErr
+	}
+	f.savedAutoStart = &enabled
 	return nil
 }
 
