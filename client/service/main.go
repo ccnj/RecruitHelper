@@ -504,26 +504,33 @@ func main() {
 	// 聊天记录上报(AGENTS.md「全局约定·聊天记录上报」,2026-08-19 甲方裁决)。
 	// 排在 00:20:审计清理(00:05)与诊断包上传(00:10)之后,不跟它们抢静默窗口。
 	// 常开无开关;游标增量,失败当日放弃,水位不推进由次日自愈。
+	chatReportDeps := chatreport.Deps{
+		Store: st,
+		Target: func() (chatreport.Target, bool) {
+			config, configErr := jobConfigSource.LoadConfig()
+			if configErr != nil || config == nil {
+				return chatreport.Target{}, false
+			}
+			return chatreport.Target{
+				BaseURL:      config.BaseURL,
+				MachineID:    config.MachineID,
+				LicenseToken: config.LicenseToken,
+				AppVersion:   strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+			}, true
+		},
+	}
+	// 诊断台人工即时触发(2026-08-20 甲方裁决增补):同一 RunOnce、同一游标,
+	// 进行中互斥在 chatreport 包内,两条触发路径不会同时跑。
+	adminAPI.SetChatReportRunner(func(ctx context.Context) (chatreport.Summary, error) {
+		return chatreport.RunOnce(ctx, chatReportDeps)
+	})
 	go report.RunScheduler(appCtx, report.SchedulerDeps{
 		Hour: 0, Minute: 20,
 		Label: "聊天记录上报",
 		Quiet: dbQuiet,
 		RunOnce: func(ctx context.Context) error {
-			return chatreport.RunOnce(ctx, chatreport.Deps{
-				Store: st,
-				Target: func() (chatreport.Target, bool) {
-					config, configErr := jobConfigSource.LoadConfig()
-					if configErr != nil || config == nil {
-						return chatreport.Target{}, false
-					}
-					return chatreport.Target{
-						BaseURL:      config.BaseURL,
-						MachineID:    config.MachineID,
-						LicenseToken: config.LicenseToken,
-						AppVersion:   strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
-					}, true
-				},
-			})
+			_, err := chatreport.RunOnce(ctx, chatReportDeps)
+			return err
 		},
 	})
 	// 工作状态上报(AGENTS.md「全局约定·工作状态上报」,2026-08-06 甲方裁决)。

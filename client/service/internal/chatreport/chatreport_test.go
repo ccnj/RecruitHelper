@@ -158,8 +158,12 @@ func TestRunOnceUploadsProfilesThenMessagesAndAdvancesCursor(t *testing.T) {
 			return nil
 		},
 	}
-	if err := RunOnce(context.Background(), deps); err != nil {
+	summary, err := RunOnce(context.Background(), deps)
+	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
+	}
+	if summary.Profiles != 1 || summary.Messages != 3 {
+		t.Fatalf("结果计数错误: %+v", summary)
 	}
 	if len(uploads) != 2 {
 		t.Fatalf("想要 2 次上传(档案批+消息批)，得 %d", len(uploads))
@@ -188,7 +192,7 @@ func TestRunOnceStopsOnUploadFailureWithoutAdvancing(t *testing.T) {
 			return errors.New("网络断了")
 		},
 	}
-	if err := RunOnce(context.Background(), deps); err == nil {
+	if _, err := RunOnce(context.Background(), deps); err == nil {
 		t.Fatal("上传失败必须让整轮失败(次日自愈)，不能吞掉")
 	}
 	if len(st.advanced) != 0 {
@@ -205,8 +209,45 @@ func TestRunOnceRefusesWhenTargetNotReady(t *testing.T) {
 			return nil
 		},
 	}
-	if err := RunOnce(context.Background(), deps); err == nil {
+	if _, err := RunOnce(context.Background(), deps); err == nil {
 		t.Fatal("授权未就绪应返回错误让调度器记录，而不是静默成功")
+	}
+}
+
+func TestRunOnceRejectsConcurrentRun(t *testing.T) {
+	// 进行中互斥：定时触发与诊断台人工触发不同时跑，手抖连点被拒。
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	st := &fakeStore{
+		pendingBatches: [][]store.ChatReportMessageRow{
+			{{Platform: "zhilian", AccountRef: "acc-1", ConversationRef: "conv-1", Seq: 1, Direction: "in", Kind: "text"}},
+		},
+	}
+	deps := Deps{
+		Store:  st,
+		Target: readyTarget,
+		Upload: func(context.Context, *Payload, Target) error {
+			close(entered)
+			<-release
+			return nil
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunOnce(context.Background(), deps)
+		done <- err
+	}()
+	<-entered
+	if _, err := RunOnce(context.Background(), Deps{Store: &fakeStore{}, Target: readyTarget}); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("并发第二次应拒绝: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("第一次应正常完成: %v", err)
+	}
+	// 互斥释放后可再跑。
+	if _, err := RunOnce(context.Background(), Deps{Store: &fakeStore{}, Target: readyTarget}); err != nil {
+		t.Fatalf("释放后应可再跑: %v", err)
 	}
 }
 
