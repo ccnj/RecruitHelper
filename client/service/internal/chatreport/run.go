@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -25,6 +26,20 @@ type Store interface {
 	ChatReportProfileRows() ([]store.ChatReportProfileRow, error)
 	ChatReportPendingMessages(limit int) ([]store.ChatReportMessageRow, error)
 	AdvanceChatReportCursor(platform, accountRef, conversationRef string, throughSeq int64) error
+}
+
+// ErrAlreadyRunning 表示已有一次上报在进行。定时触发与诊断台人工触发共用
+// 进行中互斥（条款：与定时触发互斥执行，正在上传时拒绝并提示）。
+var ErrAlreadyRunning = errors.New("聊天记录上报正在进行中，稍后再试")
+
+// inFlight 是进程级进行中标记。水位与服务端幂等本身扛得住并发重传，这道闸
+// 防的是白传与诊断台手抖连点，不承担正确性。
+var inFlight atomic.Bool
+
+// Summary 是一次上报的结果计数，回显给诊断台。
+type Summary struct {
+	Profiles int
+	Messages int
 }
 
 // Deps 是一次上报的依赖。Upload 默认走 HTTP，测试替换。
@@ -55,20 +70,25 @@ func (d Deps) now() time.Time {
 //
 // 授权未就绪（没绑定、没 licenseToken）返回错误让调度器记录：与工作状态上报的
 // 静默跳过不同，这条通道一天只有一次机会，悄悄跳过会让"数据一直没到"难排查。
-func RunOnce(ctx context.Context, deps Deps) error {
+func RunOnce(ctx context.Context, deps Deps) (Summary, error) {
+	if !inFlight.CompareAndSwap(false, true) {
+		return Summary{}, ErrAlreadyRunning
+	}
+	defer inFlight.Store(false)
+
 	if deps.Store == nil || deps.Target == nil {
-		return errors.New("chatreport 依赖未装配")
+		return Summary{}, errors.New("chatreport 依赖未装配")
 	}
 	target, ready := deps.Target()
 	if !ready {
-		return errors.New("授权未就绪，本轮不上报")
+		return Summary{}, errors.New("授权未就绪，本轮不上报")
 	}
 
 	reportedAt := deps.now()
 
 	profiles, err := deps.Store.ChatReportProfileRows()
 	if err != nil {
-		return fmt.Errorf("读取档案投影: %w", err)
+		return Summary{}, fmt.Errorf("读取档案投影: %w", err)
 	}
 	for start := 0; start < len(profiles); start += profileBatchSize {
 		end := min(start+profileBatchSize, len(profiles))
@@ -78,7 +98,7 @@ func RunOnce(ctx context.Context, deps Deps) error {
 			Messages:   []MessageRow{},
 		}
 		if err := deps.upload(ctx, payload, target); err != nil {
-			return fmt.Errorf("档案批 %d-%d: %w", start, end, err)
+			return Summary{}, fmt.Errorf("档案批 %d-%d: %w", start, end, err)
 		}
 	}
 	slog.Info("聊天记录上报:档案行已刷新", "profiles", len(profiles))
@@ -95,7 +115,7 @@ func RunOnce(ctx context.Context, deps Deps) error {
 		}
 		rows, err := deps.Store.ChatReportPendingMessages(messageBatchSize)
 		if err != nil {
-			return fmt.Errorf("读取待传消息: %w", err)
+			return Summary{Profiles: len(profiles)}, fmt.Errorf("读取待传消息: %w", err)
 		}
 		if len(rows) == 0 {
 			break
@@ -106,7 +126,8 @@ func RunOnce(ctx context.Context, deps Deps) error {
 			Messages:   messageRowsOf(rows),
 		}
 		if err := deps.upload(ctx, payload, target); err != nil {
-			return fmt.Errorf("消息批(已传 %d 条): %w", totalMessages, err)
+			return Summary{Profiles: len(profiles), Messages: totalMessages},
+				fmt.Errorf("消息批(已传 %d 条): %w", totalMessages, err)
 		}
 		totalMessages += len(rows)
 		// 2xx 已落定，推进该批覆盖到的各会话水位。行按会话与 seq 升序取出，
@@ -122,12 +143,13 @@ func RunOnce(ctx context.Context, deps Deps) error {
 		}
 		for key, seq := range maxSeq {
 			if err := deps.Store.AdvanceChatReportCursor(key.platform, key.account, key.conversation, seq); err != nil {
-				return fmt.Errorf("推进水位 %s: %w", key.conversation, err)
+				return Summary{Profiles: len(profiles), Messages: totalMessages},
+					fmt.Errorf("推进水位 %s: %w", key.conversation, err)
 			}
 		}
 	}
 	slog.Info("聊天记录上报:完成", "messages", totalMessages)
-	return nil
+	return Summary{Profiles: len(profiles), Messages: totalMessages}, nil
 }
 
 func profileRowsOf(rows []store.ChatReportProfileRow) []ProfileRow {

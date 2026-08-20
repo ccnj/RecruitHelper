@@ -31,6 +31,7 @@ type API struct {
 	jobConfigSource *jobconfig.Source
 	fieldReport     FieldReportDeps
 	notifyProbe     NotifyProbeDeps
+	chatReportRun   ChatReportRunner
 
 	// adviceEngine 可运行期换代(模型配置落盘即生效,2026-08-12 甲方裁决),
 	// 只经 SetAdvice/currentAdvice 访问。providerApplied 在模型配置任一落盘
@@ -133,6 +134,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/dev/report/settings", h(a.devReportSettings))
 	mux.HandleFunc("POST /admin/dev/report/settings", h(a.setDevReportSettings))
 	mux.HandleFunc("GET /admin/dev/log-report/settings", h(a.devLogReportSettings))
+	mux.HandleFunc("POST /admin/dev/chat-report/run", h(a.devChatReportRun))
 	mux.HandleFunc("GET /admin/job-config/source", h(a.jobConfigSourceConfig))
 	mux.HandleFunc("GET /admin/job-config/backend-jobs", h(a.backendJobs))
 	mux.HandleFunc("POST /admin/job-publish/precheck", h(a.jobPublishPrecheck))
