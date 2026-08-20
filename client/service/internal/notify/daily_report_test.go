@@ -51,12 +51,14 @@ func dailyRow(id uint64, localDate string) store.NotificationOutbox {
 	}
 }
 
-// 台账原则:零也照发、格式与非零完全一致;名单空固定「暂无」;不含日期行。
+// 台账原则:零也照发、格式与非零完全一致;名单空固定「暂无」;不含独立日期行,
+// 段头括注数据所属的昨日日期(2026-08-19 甲方修订)。
 func TestRenderDailyReport(t *testing.T) {
-	zero := renderDailyReport("客户丁", store.DailyReportCounts{}, nil)
+	yesterday := time.Date(2026, 8, 17, 0, 0, 0, 0, time.Local)
+	zero := renderDailyReport("客户丁", yesterday, store.DailyReportCounts{}, nil)
 	for _, want := range []string{
 		"【工作日报】客户丁",
-		"昨日成果",
+		"昨日成果(08-17)",
 		"换到微信:0 人",
 		"约成面试:0 人",
 		"待面试安排",
@@ -70,7 +72,7 @@ func TestRenderDailyReport(t *testing.T) {
 	// 2026-08-18 是周二。方式文案复用约面通知标签表;枚举外省略该段;
 	// 姓名缺失兜底「候选人」;职位缺失省略括号。
 	starts := time.Date(2026, 8, 18, 14, 0, 0, 0, time.Local)
-	text := renderDailyReport("客户丁", store.DailyReportCounts{Wechat: 3, Appointments: 1},
+	text := renderDailyReport("客户丁", yesterday, store.DailyReportCounts{Wechat: 3, Appointments: 1},
 		[]store.DailyReportInterview{
 			{DisplayName: "张三", PositionTitle: "保障顾问", StartsAtMs: starts.UnixMilli(), Method: "wechatVideo"},
 			{DisplayName: "李四", PositionTitle: "销售专员", StartsAtMs: starts.Add(24 * time.Hour).UnixMilli(), Method: "mystery"},
@@ -118,7 +120,8 @@ func TestTickDailyReportSendsAndMarks(t *testing.T) {
 	if summary.Sent != 1 || len(ledger.sent) != 1 || ledger.sent[0] != 9 {
 		t.Fatalf("日报应发送并落 sent: summary=%+v sent=%v", summary, ledger.sent)
 	}
-	if len(capture.texts) != 1 || !strings.Contains(capture.texts[0], "换到微信:2 人") ||
+	if len(capture.texts) != 1 || !strings.Contains(capture.texts[0], "昨日成果(08-17)") ||
+		!strings.Contains(capture.texts[0], "换到微信:2 人") ||
 		!strings.Contains(capture.texts[0], "张三(保障顾问)") {
 		t.Fatalf("发出的正文不对: %v", capture.texts)
 	}
