@@ -120,7 +120,7 @@ func (r *Runner) handleDailyReport(row store.NotificationOutbox, now time.Time, 
 	if r.customerName != nil {
 		customer = strings.TrimSpace(r.customerName())
 	}
-	content := renderDailyReport(customer, counts, interviews)
+	content := renderDailyReport(customer, todayStart.AddDate(0, 0, -1), counts, interviews)
 	if err := sendWecomText(r.client, r.webhookURL, content); err != nil {
 		slog.Warn("日报发送失败", "notifyId", row.ID, "attempt", row.Attempts+1, "err", err)
 		if markErr := r.store.MarkNotificationFailed(row.ID, err.Error(), maxAttempts, now); markErr != nil {
@@ -143,9 +143,11 @@ func (r *Runner) handleDailyReport(row store.NotificationOutbox, now time.Time, 
 }
 
 // renderDailyReport 渲染日报正文。台账原则(2026-08-18 甲方裁决):零也照发、
-// 格式与非零完全一致;不含日期行、环比、过程量与负向指标。
+// 格式与非零完全一致;不含独立日期行、环比、过程量与负向指标。段头括注的是
+// 数据所属的昨日日期(2026-08-19 甲方修订)——日报到达时间浮动,括注钉死数字归属。
 func renderDailyReport(
 	customerName string,
+	yesterday time.Time,
 	counts store.DailyReportCounts,
 	interviews []store.DailyReportInterview,
 ) string {
@@ -153,7 +155,7 @@ func renderDailyReport(
 	lines := []string{
 		title,
 		"",
-		"昨日成果",
+		fmt.Sprintf("昨日成果(%02d-%02d)", yesterday.Month(), yesterday.Day()),
 		fmt.Sprintf("换到微信:%d 人", counts.Wechat),
 		fmt.Sprintf("约成面试:%d 人", counts.Appointments),
 		"",
