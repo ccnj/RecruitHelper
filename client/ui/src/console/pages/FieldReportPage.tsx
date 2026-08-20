@@ -102,15 +102,18 @@ function AutoUploadSwitch() {
   const enabled = settings?.autoUploadEnabled === true
   return (
     <div className="panel">
-      <label>
-        <input
-          type="checkbox"
-          checked={enabled}
+      <div className="dc-switch-row">
+        <button
+          aria-checked={enabled}
+          aria-label="自动上传数据至服务器"
+          className={`dc-switch${enabled ? ' is-on' : ''}`}
           disabled={saving || settings === null}
-          onChange={(event) => void toggle(event.target.checked)}
+          onClick={() => void toggle(!enabled)}
+          role="switch"
+          type="button"
         />
-        {' '}自动上传数据至服务器
-      </label>
+        <span>自动上传数据至服务器</span>
+      </div>
       <p>
         勾选后每天凌晨 00:10 自动打包上传。那一刻若还有工作流在跑或有命令没收束，
         会往后顺延，到 02:00 仍不合适就跳过当天；客户端没开着而错过的当天不补传。

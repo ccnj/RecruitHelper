@@ -91,21 +91,26 @@ export function AutoStartPanel() {
       ) : !setting ? (
         <div className="rh-schedule-loading">读取中…</div>
       ) : (
-        <>
-          <label className="rh-autostart-toggle">
-            <input
-              type="checkbox"
-              checked={setting.enabled}
+        <div className="rh-autostart-body">
+          <div className="rh-autostart-row">
+            <div className="rh-autostart-copy">
+              <strong>每天早上 07:05～07:30 之间(随机时刻)自动开始全流程</strong>
+              <p>
+                需要电脑与 Chrome 保持开启并已登录智联。每天只自动尝试一次:
+                当天已运行过、或到点时客户端没在运行,则跳过;失败当天不重试,
+                随时可以手动开始。
+              </p>
+            </div>
+            <button
+              aria-checked={setting.enabled}
+              aria-label="每日自动开始"
+              className={`rh-autostart-switch${setting.enabled ? ' is-on' : ''}`}
               disabled={saveState.kind === 'saving'}
-              onChange={(event) => void toggle(event.target.checked)}
+              onClick={() => void toggle(!setting.enabled)}
+              role="switch"
+              type="button"
             />
-            <span>每天早上 07:05～07:30 之间(随机时刻)自动开始全流程</span>
-          </label>
-          <p className="rh-autostart-hint">
-            需要电脑与 Chrome 保持开启并已登录智联。每天只自动尝试一次:
-            当天已运行过、或到点时客户端没在运行,则跳过;失败当天不重试,
-            随时可以手动开始。
-          </p>
+          </div>
           {saveState.kind === 'error' ? (
             <p className="rh-autostart-error">{saveState.message}</p>
           ) : null}
@@ -115,7 +120,7 @@ export function AutoStartPanel() {
               {setting.lastDetail ? `(${setting.lastDetail})` : ''}
             </p>
           ) : null}
-        </>
+        </div>
       )}
     </section>
   )
