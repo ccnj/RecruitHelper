@@ -358,3 +358,30 @@ func TestAppendReplyActionMenuKeepsRenderedPromptAndAppendsOnce(t *testing.T) {
 		t.Fatal("空提示词必须响亮失败")
 	}
 }
+
+// 已发出过邀面卡(2026-08-21 甲方裁决):块不再列两项邀面动作,改为一句事实与
+// 禁止;措辞不得说"正等对方确认"——那张卡也可能已被拒,拿假事实喂模型是禁区。
+func TestReplyActionMenuBlockAfterInterviewCardSent(t *testing.T) {
+	block := replyActionMenuBlock(ReplyActionMenu{
+		InterviewCardSent: true, AllowInviteWechat: true, WechatLine: ReplyMenuWechatNotInvited,
+	})
+	if strings.Contains(block, "· 发起线上会议") || strings.Contains(block, "· 发起线下面试") {
+		t.Fatalf("已发卡不得把邀面列为可选项: %s", block)
+	}
+	for _, want := range []string{"邀面卡已经发出过", "不得填「发起线上会议」「发起线下面试」", "不要另约时间"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("已发卡应含 %q: %s", want, block)
+		}
+	}
+	if strings.Contains(block, "正等对方确认") || strings.Contains(block, "8月3日10:00") {
+		t.Fatalf("已发卡不得声称待答或给出时间格式指引: %s", block)
+	}
+	if !strings.Contains(block, "· 发起换微信邀请") {
+		t.Fatalf("邀面闸不得波及换微信选项: %s", block)
+	}
+	for _, banned := range []string{"请填", "应当填", "优先填", "尽量填"} {
+		if strings.Contains(block, banned) {
+			t.Fatalf("块只做减法(命中 %q): %s", banned, block)
+		}
+	}
+}
