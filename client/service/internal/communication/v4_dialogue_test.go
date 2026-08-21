@@ -749,45 +749,56 @@ func TestV4ReplyActionMenuMatchesPlanDecision(t *testing.T) {
 			for _, mainStatus := range mainStatuses {
 				for _, withSlots := range []bool{true, false} {
 					for _, withMessages := range []bool{true, false} {
-						state := activeV4DialogueState()
-						state.MainStatus = mainStatus
-						state.WechatState = wechat
+						for _, withCard := range []bool{true, false} {
+							state := activeV4DialogueState()
+							state.MainStatus = mainStatus
+							state.WechatState = wechat
+							if withCard {
+								state.InterviewGroups = []V4InterviewFollowupGroup{{MessageSeq: 9, NextStage: 1}}
+							}
 
-						turn := ordinaryTurn()
-						if !withMessages {
-							turn.Messages = nil
-						}
-						if withSlots {
-							turn.RecommendedSlots = slots
-						}
+							turn := ordinaryTurn()
+							if !withMessages {
+								turn.Messages = nil
+							}
+							if withSlots {
+								turn.RecommendedSlots = slots
+							}
 
-						menu := V4ReplyActionMenu(state, turn, allowSuggested)
+							menu := V4ReplyActionMenu(state, turn, allowSuggested)
 
-						_, wechatAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
-							Phrases: []string{"那咱们加个微信细聊。"},
-							Text:    "那咱们加个微信细聊。",
-							Action:  m5ai.ReplyActionInviteWechat,
-						}, allowSuggested)
-						if wechatAccepted != menu.AllowInviteWechat {
-							t.Fatalf(
-								"换微信判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t)",
-								menu.AllowInviteWechat, wechatAccepted,
-								allowSuggested, wechat, mainStatus, withSlots, withMessages,
-							)
-						}
+							_, wechatAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
+								Phrases: []string{"那咱们加个微信细聊。"},
+								Text:    "那咱们加个微信细聊。",
+								Action:  m5ai.ReplyActionInviteWechat,
+							}, allowSuggested)
+							if wechatAccepted != menu.AllowInviteWechat {
+								t.Fatalf(
+									"换微信判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t card=%t)",
+									menu.AllowInviteWechat, wechatAccepted,
+									allowSuggested, wechat, mainStatus, withSlots, withMessages, withCard,
+								)
+							}
 
-						_, meetingAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
-							Phrases:     []string{"那就约这个时间。"},
-							Text:        "那就约这个时间。",
-							Action:      m5ai.ReplyActionStartOnlineMeeting,
-							MeetingTime: hitMeetingTime,
-						}, allowSuggested)
-						if meetingAccepted != menu.AllowStartMeeting {
-							t.Fatalf(
-								"线上会议判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t)",
-								menu.AllowStartMeeting, meetingAccepted,
-								allowSuggested, wechat, mainStatus, withSlots, withMessages,
-							)
+							_, meetingAccepted := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
+								Phrases:     []string{"那就约这个时间。"},
+								Text:        "那就约这个时间。",
+								Action:      m5ai.ReplyActionStartOnlineMeeting,
+								MeetingTime: hitMeetingTime,
+							}, allowSuggested)
+							if meetingAccepted != menu.AllowStartMeeting {
+								t.Fatalf(
+									"线上会议判据漂移: menu=%t plan=%t (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t card=%t)",
+									menu.AllowStartMeeting, meetingAccepted,
+									allowSuggested, wechat, mainStatus, withSlots, withMessages, withCard,
+								)
+							}
+							if withCard && (menu.AllowStartMeeting || !menu.InterviewCardSent) {
+								t.Fatalf(
+									"已发卡仍开放邀面或事实句为假: %+v (allowSuggested=%t wechat=%s main=%s slots=%t msgs=%t)",
+									menu, allowSuggested, wechat, mainStatus, withSlots, withMessages,
+								)
+							}
 						}
 					}
 				}
@@ -883,5 +894,58 @@ func TestV4CollectRejectionClosingLegalWhenColdWechatSentWithoutRetention(t *tes
 	})
 	if err != nil || !next.ClosingSent || next.RetentionSent {
 		t.Fatalf("催2 已发时收场动作收编应合法且不虚置挽留标记: next=%+v err=%v", next, err)
+	}
+}
+
+// 已发出过邀面卡的候选人不再发起任何约面动作(2026-08-21 甲方裁决,规格 v4
+// §五「AI 权限边界」)。三个形态各验一遍:待答(组仍激活)、候选人开口后组失活
+// (周女士 08-21 现场——她回"好的"后 AI 又建议了一张同时段卡,二次卡 5 连败,
+// 她点接受时整体转人工)、已拒(例6)。菜单关掉、裁决拒绝、事实句置真,且换微信
+// 不受波及;没发过卡的基线照旧开放,证明闸只认"已发卡"这一个账本事实。
+func TestV4ReplyActionMenuRefusesSecondInterviewCard(t *testing.T) {
+	const hitMeetingTime = "7月14日09:00"
+	slots := []string{"2026-07-14 09:00:00", "2026-07-14 14:00:00"}
+	groups := map[string]V4InterviewFollowupGroup{
+		"待答":    {MessageSeq: 9, NextStage: 1, Active: true},
+		"开口后失活": {MessageSeq: 9, NextStage: 1, Active: false},
+		"已拒":    {MessageSeq: 9, NextStage: 1, Active: false, Rejected: true},
+	}
+	for name, group := range groups {
+		for _, mainStatus := range []V4MainStatus{V4StatusCommunicating, V4StatusInvited} {
+			state := activeV4DialogueState()
+			state.MainStatus = mainStatus
+			state.InterviewGroups = []V4InterviewFollowupGroup{group}
+			turn := ordinaryTurn()
+			turn.RecommendedSlots = slots
+
+			menu := V4ReplyActionMenu(state, turn, true)
+			if menu.AllowStartMeeting || !menu.InterviewCardSent {
+				t.Fatalf("%s/%s: 已发卡仍开放邀面: %+v", name, mainStatus, menu)
+			}
+			if !menu.AllowInviteWechat {
+				t.Fatalf("%s/%s: 邀面闸不得波及换微信: %+v", name, mainStatus, menu)
+			}
+			for _, action := range []m5ai.ReplyAction{
+				m5ai.ReplyActionStartOnlineMeeting, m5ai.ReplyActionStartOnsiteInterview,
+			} {
+				if _, ok := planV4ReplyActions(state, turn, m5ai.ReplySuggestion{
+					Phrases: []string{"那就约这个时间。"}, Text: "那就约这个时间。",
+					Action: action, MeetingTime: hitMeetingTime,
+				}, true); ok {
+					t.Fatalf("%s/%s: 已发卡仍能规划第二张卡(%s)", name, mainStatus, action)
+				}
+			}
+			// 事实句不随可用性关闭:本轮不允许建议动作时也要如实告知已发过卡。
+			if off := V4ReplyActionMenu(state, turn, false); !off.InterviewCardSent || off.AllowStartMeeting {
+				t.Fatalf("%s/%s: 不允许建议动作时事实句应仍为真: %+v", name, mainStatus, off)
+			}
+		}
+	}
+	state := activeV4DialogueState()
+	state.MainStatus = V4StatusInvited
+	turn := ordinaryTurn()
+	turn.RecommendedSlots = slots
+	if menu := V4ReplyActionMenu(state, turn, true); !menu.AllowStartMeeting || menu.InterviewCardSent {
+		t.Fatalf("无卡基线被误关: %+v", menu)
 	}
 }

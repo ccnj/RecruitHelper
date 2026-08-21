@@ -757,6 +757,13 @@ func replyActionMenuBlock(menu ReplyActionMenu) string {
 		lines = append(lines,
 			"· 发起换微信邀请 —— 一生一次，用掉就没有了；约面还推得动时不要动用它，也不要开场就要。")
 	}
+	if menu.InterviewCardSent {
+		// 已发出过邀面卡(2026-08-21 甲方裁决):两项邀面动作已从上面的可选列表
+		// 拿掉,这里只补一句事实与禁止,压到一行(块越长,禁止句越压不住)。
+		// 措辞不说"正等对方确认"——那张卡也可能已被拒,拿假事实喂模型是禁区。
+		lines = append(lines,
+			"邀面卡已经发出过。不得填「发起线上会议」「发起线下面试」，话术里也不要另约时间或说再发一次邀请；他若要改期，只回「好的，我这边记下了，稍后跟您确认」这类话，不许自己定新时间。")
+	}
 	// 同样是"本轮不能再邀请"，已经发出邀请与已经换到号是两件不同的事实。
 	switch menu.WechatLine {
 	case ReplyMenuWechatInvited:

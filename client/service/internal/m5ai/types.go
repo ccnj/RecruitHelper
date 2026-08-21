@@ -168,6 +168,10 @@ type ReplyActionMenu struct {
 	AllowStartMeeting bool
 	AllowInviteWechat bool
 	WechatLine        ReplyMenuWechatLine
+	// InterviewCardSent 是"该候选人已有一张实际发出的邀面卡"这一账本事实。
+	// 它为真时 AllowStartMeeting 必为假(2026-08-21 甲方裁决),块据此告知模型
+	// 卡已发出、不得再约;它是事实陈述不是授权,与 WechatLine 同性质。
+	InterviewCardSent bool
 }
 
 type ScoringSuggestion struct {

@@ -456,13 +456,24 @@ func V4ReplyActionMenu(
 	turn FrozenTurnFacts,
 	allowSuggestedAction bool,
 ) m5ai.ReplyActionMenu {
-	menu := m5ai.ReplyActionMenu{WechatLine: v4ReplyMenuWechatLine(state.WechatState)}
+	menu := m5ai.ReplyActionMenu{
+		WechatLine: v4ReplyMenuWechatLine(state.WechatState),
+		// 邀面组只在邀面卡取得唯一发送正证后才加入(addV4InterviewGroup),所以
+		// "组非空"就是"已有一张实际发出的卡"这一账本事实;发失败的卡不进组,
+		// 首张卡的同动作重试不受影响。事实句与微信线一样先于可用性算出:即便
+		// 本轮不允许任何建议动作,提示词也不得拿"还没发过卡"的假事实喂模型。
+		InterviewCardSent: len(state.InterviewGroups) > 0,
+	}
 	if !allowSuggestedAction || !v4ReplyActionEligible(state, turn) {
 		return menu
 	}
 	// 时段列表为空时任何 `会议时间` 都不可能命中(见
 	// MatchFrozenRecommendedMeetingTime),等价于本轮不允许建议线上会议。
-	menu.AllowStartMeeting = len(turn.RecommendedSlots) > 0
+	// 已发出过邀面卡的候选人不再发起任何约面动作,不论那张卡待答、已接受还是
+	// 已拒绝(2026-08-21 甲方裁决,规格 v4 §五「AI 权限边界」):二次卡在现网从未
+	// 成功发出过(智联在卡片待答期间不露出邀面入口),只会让该轮挂在重试里,
+	// 候选人一开口或点接受即整体转人工、约面成功漏记。
+	menu.AllowStartMeeting = len(turn.RecommendedSlots) > 0 && !menu.InterviewCardSent
 	menu.AllowInviteWechat = state.WechatState == V4WechatNotInvited
 	return menu
 }
