@@ -236,7 +236,13 @@ func (r *Runner) attempt(ctx context.Context, now time.Time) (string, string) {
 		slog.Warn("每日自动开始:读取运行历史失败", "err", err)
 		return store.AutoStartOutcomeError, "读取运行历史失败"
 	}
-	if latest != nil && runTouchedDay(latest, now, r.location) {
+	// 「当日已运行」只认开始时刻(2026-08-21 甲方裁决)。曾按审查意见把
+	// "终局时刻在今天"也算作今天运行过,真机首日即翻车:跨日沟通运行永远
+	// 在午夜后零点几秒被收编(dailyWindowClosed),终局必然落在"今天",
+	// 于是每个正常干满到 24 点的工作日,次日早晨都被跳过。甲方裁决砍掉
+	// 该概念,接受它曾保护的窄场景(清晨人工恢复又收场后机器再开一轮 ——
+	// 发送仍卡在候选确认等人,人在场随手可停)。
+	if latest != nil && localDateOf(latest.StartedAt.In(r.location)) == localDateOf(now) {
 		return store.AutoStartOutcomeSkippedToday, "今天已经运行过"
 	}
 	job, err := r.store.AppCurrentJob()
@@ -252,17 +258,6 @@ func (r *Runner) attempt(ctx context.Context, now time.Time) (string, string) {
 		return store.AutoStartOutcomeStartFailed, productapp.StartFailureText(err)
 	}
 	return store.AutoStartOutcomeStarted, ""
-}
-
-// runTouchedDay 判定一条运行是否属于 now 所在的本地日:当天开始的算,
-// 更早开始、当天才终局的也算 —— 用户今晨手动收掉昨日挂起的运行后,
-// 机器不该再替他开一轮(条款「当日尚无任何运行」的完整语义)。
-func runTouchedDay(run *store.ProductWorkflowRun, now time.Time, location *time.Location) bool {
-	today := localDateOf(now)
-	if localDateOf(run.StartedAt.In(location)) == today {
-		return true
-	}
-	return run.EndedAt != nil && localDateOf(run.EndedAt.In(location)) == today
 }
 
 func localDateOf(now time.Time) string {

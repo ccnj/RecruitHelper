@@ -304,15 +304,16 @@ func TestYesterdayTerminalRunDoesNotBlockToday(t *testing.T) {
 	}
 }
 
-// 昨日开始、今晨才终局的运行也算"今天已经运行过"——用户刚收掉昨日挂起的
-// 运行,机器不该再替他开一轮(条款「当日尚无任何运行」的完整语义)。
-func TestRunEndedTodaySkips(t *testing.T) {
-	endedToday := day(t, 7, 3)
+// 2026-08-21 真机首日事故回归:昨日的沟通运行在午夜后 0.7 秒被收编
+// (dailyWindowClosed),终局时刻落在"今天"。它不算今天运行过 —— 判据只认
+// 开始时刻,否则每个干满到 24 点的工作日,次日早晨都会被跳过。
+func TestMidnightClosedYesterdayRunDoesNotBlockToday(t *testing.T) {
+	endedJustPastMidnight := day(t, 0, 0).Add(700 * time.Millisecond)
 	st := &fakeStore{
 		enabled: true,
 		latest: &store.ProductWorkflowRun{
-			RunID: "wf-1", StartedAt: day(t, 9, 0).AddDate(0, 0, -1),
-			EndedAt: &endedToday,
+			RunID: "wf-1", StartedAt: day(t, 18, 11).AddDate(0, 0, -1),
+			EndedAt: &endedJustPastMidnight, EndReason: "dailyWindowClosed",
 		},
 		job: store.AppJobProjection{Available: true, BackendJobID: "42"},
 	}
@@ -322,10 +323,10 @@ func TestRunEndedTodaySkips(t *testing.T) {
 
 	tickThrough(runner, clock, day(t, 6, 50), day(t, 7, 35))
 
-	if control.startCalls != 0 {
-		t.Fatalf("run ended today must skip start: %d", control.startCalls)
+	if control.startCalls != 1 {
+		t.Fatalf("midnight-closed yesterday run must not block today: %d", control.startCalls)
 	}
-	if len(st.attempts) != 1 || st.attempts[0].outcome != store.AutoStartOutcomeSkippedToday {
+	if len(st.attempts) != 1 || st.attempts[0].outcome != store.AutoStartOutcomeStarted {
 		t.Fatalf("attempts = %+v", st.attempts)
 	}
 }
