@@ -56,6 +56,8 @@ interface RowState {
   classPick?: string
   plan?: JobKeywordPlanView
   draft?: JobDraftReport
+  /** 试填时代招公司实际选中情况与后台配置的比对提示，随 draft 一起来。 */
+  draftHint?: string
   publishResult?: JobPublishResult
   /** 发布成功后紧跟的下线结果。它独立于 publishResult——下线没成不改发布结论。 */
   offlineResult?: JobTakeOfflineResult
@@ -145,7 +147,7 @@ function DraftDiagnosticsBlock({ diagnostics }: { diagnostics: Record<string, un
 
 // 试填回读报告。它证明的是"能不能填进去"，不是"发布了"——手侧原语不允许
 // 点击提交控件，且回读后必须离开表单。试填不在循环里，只作单职位排障。
-function DraftReportBlock({ report }: { report: JobDraftReport }) {
+function DraftReportBlock({ report, hint }: { report: JobDraftReport; hint?: string }) {
   const { keywords } = report
   return (
     <div className="publish-draft-report">
@@ -165,6 +167,9 @@ function DraftReportBlock({ report }: { report: JobDraftReport }) {
       </p>
       {keywords.dropped.length > 0 && (
         <p className="publish-draft-dropped">未能填入：{keywords.dropped.join('、')}</p>
+      )}
+      {hint && (
+        <p className="publish-draft-sections">代招公司：{hint}</p>
       )}
       <p className={report.discarded ? 'publish-draft-clean' : 'publish-draft-dropped'}>
         {report.discarded ? '已离开发布表单，页面未留草稿' : '警告：未确认离开发布表单，请人工检查页面'}
@@ -195,6 +200,9 @@ function PublishResultBlock({ result }: { result: JobPublishResult }) {
       )}
       {result.report?.platformFeedback && (
         <p className="publish-draft-sections">平台提示：{result.report.platformFeedback}</p>
+      )}
+      {result.partnerCompanyHint && (
+        <p className="publish-draft-sections">代招公司：{result.partnerCompanyHint}</p>
       )}
     </div>
   )
@@ -631,7 +639,7 @@ function PublishPrecheckPanel({
       const result = await api.jobPublishPrepareDraft(
         account.platform, account.accountRef, jobId, jobClass, keywords,
       )
-      patch(jobId, { draft: result.report })
+      patch(jobId, { draft: result.report, draftHint: result.partnerCompanyHint })
     } catch (reason) {
       failRow(jobId, `试填「${jobName}」未成功`, reason)
     } finally {
@@ -861,7 +869,7 @@ function PublishPrecheckPanel({
               )}
               {state.publishResult && <PublishResultBlock result={state.publishResult} />}
               <OfflineResultBlock result={state.offlineResult} error={state.offlineError} />
-              {state.draft && <DraftReportBlock report={state.draft} />}
+              {state.draft && <DraftReportBlock report={state.draft} hint={state.draftHint} />}
               {row.issues?.map((issue, index) => (
                 <p key={`i-${index}`} className="publish-precheck-issue">
                   {issue.field ? `${issue.field}：` : ''}{issue.message}

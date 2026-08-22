@@ -566,6 +566,8 @@ export interface JobDraftReport {
   headcount: number
   /** 手是否已确认离开发布表单。false 意味着页面上留着一个填满的表单。 */
   discarded: boolean
+  /** 手在代招公司弹窗里实际选中的公司；账号没有代招公司一栏时为 null/缺省。 */
+  partnerCompany?: string | null
   observedAt: number
 }
 
@@ -576,6 +578,8 @@ export interface JobPublishResult {
   created: boolean
   /** 取得平台正证时才有；未确认时看 diagnostics。 */
   report?: JobDraftReport & { postingVisible: boolean; verifyRounds: number; platformFeedback: string | null }
+  /** 代招公司实际选中情况与后台配置的比对提示（脑侧现算）；没配置也没走到那段时缺省。 */
+  partnerCompanyHint?: string
   diagnostics?: Record<string, unknown>
 }
 
@@ -961,7 +965,7 @@ export const api = {
   jobPublishPrepareDraft: (
     platform: string, accountRef: string, jobId: string, jobClass: string, keywords: string[],
   ) =>
-    postWithDetail<{ jobId: string; report: JobDraftReport }>('/admin/job-publish/prepare-draft', {
+    postWithDetail<{ jobId: string; report: JobDraftReport; partnerCompanyHint?: string }>('/admin/job-publish/prepare-draft', {
       platform, accountRef, jobId, jobClass, keywords,
     }),
   activateJobConfigSource: (input: JobConfigActivationInput) => post<JobConfigActivationResult>('/admin/job-config/activate', input),

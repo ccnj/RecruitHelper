@@ -141,6 +141,9 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 		}
 		row.Verdict = publishVerdictReady
 		row.Notices = spec.DeadFieldNotices(source.JobName)
+		if notice := spec.PartnerCompanyNotice(); notice != nil {
+			row.Notices = append(row.Notices, *notice)
+		}
 		rows = append(rows, row)
 	}
 
@@ -182,6 +185,8 @@ func checkPublishDecisions(jobClass string, keywords []string) string {
 type jobPublishDraftView struct {
 	JobID  string                       `json:"jobId"`
 	Report protocol.JobPrepareDraftData `json:"report"`
+	// 代招公司实际选中情况与后台配置的比对提示；没配置也没走到那段时为空。
+	PartnerCompanyHint string `json:"partnerCompanyHint,omitempty"`
 }
 
 // jobPublishFailure 是一条可以直接写回 HTTP 的失败,供三个入口共用同一套
@@ -327,7 +332,10 @@ func (a *API) jobPublishPrepareDraft(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "试填后未确认离开发布表单，请人工检查页面"})
 		return
 	}
-	writeJSON(w, http.StatusOK, jobPublishDraftView{JobID: target.JobID, Report: report})
+	writeJSON(w, http.StatusOK, jobPublishDraftView{
+		JobID: target.JobID, Report: report,
+		PartnerCompanyHint: spec.PartnerCompanyHint(report.PartnerCompany),
+	})
 }
 
 type jobPublishResultView struct {
@@ -338,6 +346,9 @@ type jobPublishResultView struct {
 	// 取得平台正证时才有；未确认时为空，由 diagnostics 说明现场。
 	Report      *protocol.JobPublishDraftData `json:"report,omitempty"`
 	Diagnostics any                           `json:"diagnostics,omitempty"`
+	// 代招公司实际选中情况与后台配置的比对提示；随 Report 一起给，没配置也没
+	// 走到那段时为空。
+	PartnerCompanyHint string `json:"partnerCompanyHint,omitempty"`
 }
 
 // jobPublishPublish 真正把一个职位发布到平台。
@@ -439,6 +450,7 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 		view.Status = string(intent.Status)
 	}
 	view.Report = &report
+	view.PartnerCompanyHint = spec.PartnerCompanyHint(report.PartnerCompany)
 	writeJSON(w, http.StatusOK, view)
 }
 

@@ -76,6 +76,12 @@ type PublishSpec struct {
 	ShowToSeeker  bool
 	SyncToMailbox bool
 
+	// 代招公司（选填键「代招公司」，2026-08-22 甲方裁决）。只在平台发布表单出现
+	// 「职位性质」一组的账号上用得到：手在代招公司弹窗里先逐字相等、再唯一子串
+	// 地找它，两档都不中或没配置时取列表最后一家照常填——它是提高选对概率的
+	// 提示，不是闸，预检不因它产生任何 issue，空白视同未配置。
+	PartnerCompany string
+
 	// 三个死字段的原值，仅用于告诉运营"这几行没有生效"。它们绝不进入任何
 	// 填充路径——留在 spec 里只为生成提示。
 	DeadJobName  string
@@ -99,7 +105,7 @@ func (s PublishSpec) DraftArgs(jobName, jobClass string, keywords []string) map[
 			trimmed = append(trimmed, word)
 		}
 	}
-	return map[string]any{
+	args := map[string]any{
 		"jobName":        strings.TrimSpace(jobName),
 		"jobClass":       strings.TrimSpace(jobClass),
 		"employmentType": s.EmploymentType,
@@ -113,6 +119,53 @@ func (s PublishSpec) DraftArgs(jobName, jobClass string, keywords []string) map[
 		"headcount":      s.Headcount,
 		"showToSeeker":   s.ShowToSeeker,
 		"syncToMailbox":  s.SyncToMailbox,
+	}
+	// 选填：没配置就不带键，手侧按最后一家；带了空串会被契约 minLength 拒。
+	if s.PartnerCompany != "" {
+		args["partnerCompany"] = s.PartnerCompany
+	}
+	return args
+}
+
+// PartnerCompanyNotice 是预检给运营看的一行提示：配置了代招公司就把将要按
+// 它选择这件事亮出来。它不阻塞发布，没配置时返回 nil。
+func (s PublishSpec) PartnerCompanyNotice() *PublishIssue {
+	if s.PartnerCompany == "" {
+		return nil
+	}
+	return &PublishIssue{
+		Field: "代招公司",
+		Message: fmt.Sprintf(
+			"将按配置「%s」选择代招公司；发布表单没有代招公司一栏的账号不涉及，平台列表里匹配不到时按最后一家填写并在结果里提示",
+			s.PartnerCompany),
+	}
+}
+
+// PartnerCompanyHint 把手侧实际选中的代招公司（成功 data 的 partnerCompany，
+// 该段未走时为 nil）与后台配置比对，生成一句给运营看的结果提示。比对口径与
+// 手侧两档匹配同向：相等=按配置选中，包含=按配置子串匹配到，其余=没找到、
+// 已按最后一家填写。返回空串表示没什么可提示（没配置、也没走到这一段）。
+func (s PublishSpec) PartnerCompanyHint(actual *string) string {
+	chosen := ""
+	if actual != nil {
+		chosen = strings.TrimSpace(*actual)
+	}
+	configured := s.PartnerCompany
+	switch {
+	case chosen == "" && configured == "":
+		return ""
+	case chosen == "":
+		return fmt.Sprintf("该账号的发布表单没有代招公司一栏，配置的代招公司「%s」未使用", configured)
+	case configured == "":
+		return fmt.Sprintf("未配置代招公司，已按平台列表最后一家填写「%s」", chosen)
+	case chosen == configured:
+		return fmt.Sprintf("代招公司已按配置选中「%s」", chosen)
+	case strings.Contains(chosen, configured):
+		return fmt.Sprintf("代招公司按配置「%s」匹配到「%s」", configured, chosen)
+	default:
+		return fmt.Sprintf(
+			"配置的代招公司「%s」未在平台列表中找到，已按最后一家填写「%s」；如需更换请核对后台发布参数里的公司全称",
+			configured, chosen)
 	}
 }
 
@@ -138,6 +191,7 @@ type publishParamsDoc struct {
 	ShowToSeeker   *bool            `json:"对求职者展示"`
 	SyncToMailbox  *bool            `json:"同步至我的邮箱"`
 	SyncColleagues *json.RawMessage `json:"简历同步至同事"`
+	PartnerCompany *string          `json:"代招公司"`
 }
 
 // ParsePublishSpec 解析发布参数文档并做确定性预检。
@@ -194,6 +248,8 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 
 	spec.ShowToSeeker = doc.ShowToSeeker != nil && *doc.ShowToSeeker
 	spec.SyncToMailbox = doc.SyncToMailbox != nil && *doc.SyncToMailbox
+	// 代招公司是选填的提示项：只去首尾空白，不校验、不产生 issue。
+	spec.PartnerCompany = strings.TrimSpace(deref(doc.PartnerCompany))
 	return spec, issues
 }
 
