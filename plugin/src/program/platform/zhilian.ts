@@ -6139,14 +6139,21 @@ function mainOpenZhilianPartnerPicker(): MainStep {
   return { status: 'ok', detail: 'clicked' }
 }
 
-// 选列表里的最后一家(2026-08-14 甲方裁决:一般只有一家,多家取最后一家;
-// 甲方同日确认列表一次性全渲染,没有滚动懒加载,DOM 顺序即全序)。
+// 按后台配置的代招公司名在列表里选一家(2026-08-22 甲方裁决):先找去首尾空白后
+// **逐字相等**的(多家同名取其中最后一家),再找"配置名是某一家全称的子串且唯一
+// 命中"的,两档都不中或根本没配置时取**最后一家**(2026-08-14 裁决的原行为:
+// 一般只有一家,多家取最后一家;甲方同日确认列表一次性全渲染,没有滚动懒加载,
+// DOM 顺序即全序)。配置名是提高选对概率的提示,不是闸——匹配不上不失败、
+// 不转人工,蒙一个也比停下好;由脑拿 detail 里的实际选中名与配置比对后提示。
+//
+// detail 是 JSON 文本 {name, match}:name 是点中那家的全称,match 记录走的是
+// 哪一档(exact / contains / last / fallback,其中 fallback 特指"配置了但没命中")。
 //
 // 落点写死在 .partnership-organization-list__item-info,**绝不点整行**:
 // 同一行里紧挨着 a.action-edit 与 a.action-delete,点偏一格就把客户的代招
-// 公司删了。这是本段唯一有真实破坏力的地方,不留任何模糊匹配或备用落点。
-// footer 的「添加公司」同理绝不碰——那是新建公司,不是选择。
-function mainPickZhilianPartnerCompany(): MainStep {
+// 公司删了。这是本段唯一有真实破坏力的地方,匹配档位只决定点哪一行,不改
+// 落点。footer 的「添加公司」同理绝不碰——那是新建公司,不是选择。
+function mainPickZhilianPartnerCompany(wanted: string): MainStep {
   const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
     .filter((node) => {
       const style = window.getComputedStyle(node)
@@ -6162,16 +6169,37 @@ function mainPickZhilianPartnerCompany(): MainStep {
   }
   const rows = Array.from(open[0].querySelectorAll('.partnership-organization-list__item')) as HTMLElement[]
   if (rows.length === 0) return { status: 'failed', reason: 'partner_company_option_absent' }
-  const row = rows[rows.length - 1]
-  const info = row.querySelector('.partnership-organization-list__item-info') as HTMLElement | null
-  if (!info) return { status: 'failed', reason: 'partner_company_row_unresolved' }
-  // 名字只做诊断与日志用;读不到说明这一行不是预期结构,那"最后一行是公司行"
-  // 本身也就不可信了,宁可停在这里。
-  const nameNode = info.querySelector('.info-name') as HTMLElement | null
-  const name = (nameNode?.innerText ?? '').trim()
-  if (!name) return { status: 'failed', reason: 'partner_company_name_unresolved' }
-  info.click()
-  return { status: 'ok', detail: name.slice(0, 120) }
+  const entries = rows.map((row) => {
+    const info = row.querySelector('.partnership-organization-list__item-info') as HTMLElement | null
+    const nameNode = info?.querySelector('.info-name') as HTMLElement | null
+    return { info, name: (nameNode?.innerText ?? '').trim() }
+  })
+  const target = (typeof wanted === 'string' ? wanted : '').trim()
+  let picked = -1
+  let match = target === '' ? 'last' : 'fallback'
+  if (target !== '') {
+    const exact = entries.map((entry, index) => (entry.name === target ? index : -1)).filter((index) => index >= 0)
+    if (exact.length > 0) {
+      picked = exact[exact.length - 1]
+      match = 'exact'
+    } else {
+      const contains = entries
+        .map((entry, index) => (entry.name !== '' && entry.name.includes(target) ? index : -1))
+        .filter((index) => index >= 0)
+      if (contains.length === 1) {
+        picked = contains[0]
+        match = 'contains'
+      }
+    }
+  }
+  if (picked < 0) picked = entries.length - 1
+  const chosen = entries[picked]
+  if (!chosen.info) return { status: 'failed', reason: 'partner_company_row_unresolved' }
+  // 名字读不到说明这一行不是预期结构,那"这一行是公司行"本身也就不可信了,
+  // 宁可停在这里——这是结构失配,不是匹配失败。
+  if (!chosen.name) return { status: 'failed', reason: 'partner_company_name_unresolved' }
+  chosen.info.click()
+  return { status: 'ok', detail: JSON.stringify({ name: chosen.name.slice(0, 120), match }) }
 }
 
 // 回读代招公司。正证按 2026-08-14 甲方裁决放松到"框里有名字",不与弹窗里
@@ -6904,9 +6932,11 @@ interface DraftProgress {
   // 以及新变体确认后表单上那行只读汇总。失败时最想知道的就是这两样。
   salaryVariant?: string
   salarySummary?: string
-  // 代招公司那一段:职位性质是否在场(在场才有这一行),以及弹窗里点中的那家。
+  // 代招公司那一段:职位性质是否在场(在场才有这一行)、弹窗里点中的那家,
+  // 以及点中它走的是哪一档匹配(exact/contains/last/fallback)。
   jobNature?: string
   partnerCompany?: string
+  partnerMatch?: string
   matched: string[]
   custom: string[]
   dropped: string[]
@@ -6934,6 +6964,7 @@ function snapshotProgress(progress: DraftProgress, reason: string): Record<strin
     prefilledClass: progress.prefilledClass ?? null,
     jobNature: progress.jobNature ?? null,
     partnerCompany: progress.partnerCompany ?? null,
+    partnerMatch: progress.partnerMatch ?? null,
     keyword: progress.keyword ?? null,
     keywordRoute: progress.keywordRoute ?? null,
     keywordAt: progress.keywordIndex === undefined
@@ -7104,9 +7135,15 @@ async function pace(): Promise<void> {
 // pickZhilianJobNatureAndPartner:职位性质 → 代招公司,一整段。
 //
 // 整段由「职位性质」这一组是否在场把关(2026-08-14 甲方确认:没有职位性质
-// 字段的账号也不会有代招公司字段)。不在场就整段跳过,是正常路径;在场就必须
-// 一路走到代招公司回读出名字为止,中途任何一步不成都转人工——代招公司是必填,
-// 空着提交会被平台判形式不符,那时候错误离现场已经很远了。
+// 字段的账号也不会有代招公司字段)。不在场就整段跳过,是正常路径,返回 null;
+// 在场就必须一路走到代招公司回读出名字为止,中途任何一步不成都转人工——代招
+// 公司是必填,空着提交会被平台判形式不符,那时候错误离现场已经很远了。
+//
+// wanted 是后台配置的代招公司名(job.prepareDraft / job.publishDraft 的选填
+// args.partnerCompany;两趟只读原语不带,传空串即按最后一家)。匹配档位与回落
+// 见 mainPickZhilianPartnerCompany;这里只把实际选中的名字带回去——它进成功
+// data 的 partnerCompany,由脑与配置比对后在客户端提示。配置了但没命中时另记
+// 一条手侧日志,把弹窗里实际有哪些公司带上,方便运营对着改配置。
 //
 // 打开选择器用轮询点:点完职位性质到这一行渲染出来有间隙,弹窗自己也要等平台
 // 拉完公司列表。25 轮配合 1 秒节奏下限约 30 秒,与类别选择器同量级。
@@ -7114,16 +7151,42 @@ async function pickZhilianJobNatureAndPartner(
   tabId: number,
   ctx: PrimitiveContext,
   progress: DraftProgress,
-): Promise<void> {
+  wanted: string | undefined,
+): Promise<string | null> {
   const nature = await runStep(tabId, mainPickZhilianJobNature, [], '选择职位性质(若存在)', progress)
   progress.jobNature = nature
-  if (nature !== 'picked') return
+  if (nature !== 'picked') return null
   await pollStep(tabId, mainOpenZhilianPartnerPicker, [], ctx, '打开代招公司选择器',
     (detail) => detail === 'open', 25, progress)
-  progress.partnerCompany = await pollStep(tabId, mainPickZhilianPartnerCompany, [], ctx,
+  const target = (wanted ?? '').trim()
+  const pickedRaw = await pollStep(tabId, mainPickZhilianPartnerCompany, [target], ctx,
     '选择代招公司', undefined, 20, progress)
+  let picked: { name: string; match: string } | null = null
+  try {
+    const parsed = JSON.parse(pickedRaw) as { name?: unknown; match?: unknown }
+    if (typeof parsed.name === 'string' && parsed.name !== '' && typeof parsed.match === 'string') {
+      picked = { name: parsed.name, match: parsed.match }
+    }
+  } catch {
+    picked = null
+  }
+  if (picked === null) {
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '选择代招公司结果结构不符合预期', 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, 'main_step_shape'))
+  }
+  progress.partnerCompany = picked.name
+  progress.partnerMatch = picked.match
+  if (picked.match === 'fallback') {
+    reportHandLog(
+      'warn',
+      'partnerCompanyFallback',
+      `代招公司「${target}」未在弹窗列表中命中,已按最后一家「${picked.name}」填写`,
+      `match=${picked.match}`,
+    )
+  }
   await pollStep(tabId, mainReadZhilianPartnerCompany, [], ctx, '回读代招公司',
     (detail) => detail.length > 0, 40, progress)
+  return picked.name
 }
 
 // selectZhilianJobClass:打开类别选择器 → 精确选中 → 关闭 → 回读确认。
@@ -7338,7 +7401,7 @@ async function fillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 10)
 
-  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
+  const partnerCompany = await pickZhilianJobNatureAndPartner(tabId, ctx, progress, args.partnerCompany)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   const employment = await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -7440,6 +7503,7 @@ async function fillZhilianJobForm(
     workplace,
     headcount: Number(headcount) || 0,
     discarded: false,
+    partnerCompany,
     observedAt: Date.now(),
   }
 
@@ -7645,6 +7709,7 @@ export async function publishZhilianJobDraft(
     verifyRounds: rounds,
     keywords: filled.keywords,
     platformFeedback,
+    partnerCompany: filled.partnerCompany ?? null,
     observedAt: Date.now(),
   }
   if (validatePrimitiveData(PrimitiveName.JobPublishDraft, 1, data).length !== 0) {
@@ -8002,7 +8067,7 @@ export async function readZhilianJobClassCandidates(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, undefined)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -8112,7 +8177,7 @@ async function reuseOrRefillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await pickZhilianJobNatureAndPartner(tabId, ctx, progress)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, undefined)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)

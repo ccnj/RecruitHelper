@@ -291,3 +291,78 @@ func TestMatchesExistingPostingFoldsBracketsAndSpaces(t *testing.T) {
 		}
 	}
 }
+
+// 代招公司（2026-08-22 甲方裁决）：选填键，只去首尾空白、不校验、不产生 issue；
+// 配置了才进入 args，没配置不带键（键数与契约旧形态一致，手侧按最后一家）。
+func TestParsePublishSpecReadsOptionalPartnerCompany(t *testing.T) {
+	raw := strings.Replace(validPublishParams, `"招聘人数": 1,`, `"招聘人数": 1,
+  "代招公司": "  桃子科技有限公司  ",`, 1)
+	spec, issues := ParsePublishSpec(raw)
+	if len(issues) != 0 {
+		t.Fatalf("代招公司不应产生任何预检问题: %s", issueFields(issues))
+	}
+	if spec.PartnerCompany != "桃子科技有限公司" {
+		t.Fatalf("代招公司未去首尾空白解析: %q", spec.PartnerCompany)
+	}
+	args := spec.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
+	if args["partnerCompany"] != "桃子科技有限公司" {
+		t.Fatalf("代招公司未进入试填参数: %v", args["partnerCompany"])
+	}
+	if len(args) != 14 {
+		t.Fatalf("配置代招公司后试填参数键数应为 14: %d 个 %v", len(args), args)
+	}
+	if notice := spec.PartnerCompanyNotice(); notice == nil || notice.Field != "代招公司" ||
+		!strings.Contains(notice.Message, "桃子科技有限公司") {
+		t.Fatalf("配置了代招公司预检应给出提示: %+v", notice)
+	}
+
+	// 没配置 / 空白：视同未配置，不带键、不提示、不报错。
+	for _, variant := range []string{
+		validPublishParams,
+		strings.Replace(validPublishParams, `"招聘人数": 1,`, `"招聘人数": 1,
+  "代招公司": "   ",`, 1),
+	} {
+		spec, issues := ParsePublishSpec(variant)
+		if len(issues) != 0 {
+			t.Fatalf("未配置代招公司不应有预检问题: %s", issueFields(issues))
+		}
+		if spec.PartnerCompany != "" {
+			t.Fatalf("空白代招公司应视同未配置: %q", spec.PartnerCompany)
+		}
+		args := spec.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
+		if _, present := args["partnerCompany"]; present {
+			t.Fatalf("未配置时不得带 partnerCompany 键: %v", args)
+		}
+		if len(args) != 13 {
+			t.Fatalf("未配置时试填参数键数应为 13: %d", len(args))
+		}
+		if spec.PartnerCompanyNotice() != nil {
+			t.Fatal("未配置代招公司不应有预检提示")
+		}
+	}
+}
+
+// 结果提示与手侧两档匹配同向：相等=按配置选中，包含=按配置子串匹配到，其余=
+// 没找到已按最后一家；该段没走到（账号没有代招公司一栏）时单独说明。
+func TestPartnerCompanyHintMirrorsHandMatching(t *testing.T) {
+	ptr := func(value string) *string { return &value }
+	cases := []struct {
+		name       string
+		configured string
+		actual     *string
+		want       string
+	}{
+		{"未配置且未涉及", "", nil, ""},
+		{"未配置但选了最后一家", "", ptr("最后一家有限公司"), "未配置代招公司，已按平台列表最后一家填写「最后一家有限公司」"},
+		{"配置了但账号没有这一栏", "桃子科技有限公司", nil, "该账号的发布表单没有代招公司一栏，配置的代招公司「桃子科技有限公司」未使用"},
+		{"逐字命中", "桃子科技有限公司", ptr(" 桃子科技有限公司 "), "代招公司已按配置选中「桃子科技有限公司」"},
+		{"子串命中", "阿狸与桃子", ptr("阿狸与桃子（上海）信息咨询有限公司"), "代招公司按配置「阿狸与桃子」匹配到「阿狸与桃子（上海）信息咨询有限公司」"},
+		{"没找到回落", "不存在的公司", ptr("最后一家有限公司"), "配置的代招公司「不存在的公司」未在平台列表中找到，已按最后一家填写「最后一家有限公司」；如需更换请核对后台发布参数里的公司全称"},
+	}
+	for _, tc := range cases {
+		spec := PublishSpec{PartnerCompany: tc.configured}
+		if got := spec.PartnerCompanyHint(tc.actual); got != tc.want {
+			t.Fatalf("%s: 期望 %q 实得 %q", tc.name, tc.want, got)
+		}
+	}
+}
