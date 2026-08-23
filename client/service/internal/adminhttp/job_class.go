@@ -280,6 +280,9 @@ func (a *API) readJobClassCandidates(
 		JobName:        jobName,
 		EmploymentType: spec.EmploymentType,
 		Description:    spec.Description,
+		// 选填：有「职位性质」组的账号在本趟就按配置逐字选代招公司，配置错误在
+		// 这一趟零副作用阶段暴露（2026-08-23 甲方裁决）；空串因 omitempty 不带键。
+		PartnerCompany: spec.PartnerCompany,
 	})
 	if err != nil {
 		return zero, fmt.Errorf("类别候选读取命令构造失败: %v", err)

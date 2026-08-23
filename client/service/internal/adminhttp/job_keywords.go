@@ -126,6 +126,9 @@ func (a *API) jobPublishKeywordPlan(w http.ResponseWriter, r *http.Request) {
 		EmploymentType: spec.EmploymentType,
 		Description:    spec.Description,
 		JobClass:       req.JobClass,
+		// 选填：同 job.readClassCandidates，重填表单时按配置逐字选代招公司；复用上
+		// 一趟表单时手侧不重选。空串因 omitempty 不带键。
+		PartnerCompany: spec.PartnerCompany,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "词库读取命令构造失败", err)

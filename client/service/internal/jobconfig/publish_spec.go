@@ -76,10 +76,12 @@ type PublishSpec struct {
 	ShowToSeeker  bool
 	SyncToMailbox bool
 
-	// 代招公司（选填键「代招公司」，2026-08-22 甲方裁决）。只在平台发布表单出现
-	// 「职位性质」一组的账号上用得到：手在代招公司弹窗里先逐字相等、再唯一子串
-	// 地找它，两档都不中或没配置时取列表最后一家照常填——它是提高选对概率的
-	// 提示，不是闸，预检不因它产生任何 issue，空白视同未配置。
+	// 代招公司（选填键「代招公司」，2026-08-22 立案、2026-08-23 甲方裁决改为硬闸）。
+	// 只在平台发布表单出现「职位性质」一组的账号上用得到：手在代招公司弹窗里
+	// 按去首尾空白后逐字相等找它，恰好命中一行才选；命中零行、多行或该组在场却
+	// 未配置，手侧整体 failed（点发布之前、零副作用），失败原文带平台实际的公司
+	// 名清单。脑侧只负责把它原样带给三趟填表原语（读候选、词库、试填/发布），
+	// 预检不因它产生 issue——后台不知道哪些账号有这一组，空白视同未配置。
 	PartnerCompany string
 
 	// 三个死字段的原值，仅用于告诉运营"这几行没有生效"。它们绝不进入任何
@@ -120,7 +122,8 @@ func (s PublishSpec) DraftArgs(jobName, jobClass string, keywords []string) map[
 		"showToSeeker":   s.ShowToSeeker,
 		"syncToMailbox":  s.SyncToMailbox,
 	}
-	// 选填：没配置就不带键，手侧按最后一家；带了空串会被契约 minLength 拒。
+	// 选填：没配置就不带键（手侧在有「职位性质」组的账号上会以未配置失败）；
+	// 带了空串会被契约 minLength 拒。
 	if s.PartnerCompany != "" {
 		args["partnerCompany"] = s.PartnerCompany
 	}
@@ -128,7 +131,10 @@ func (s PublishSpec) DraftArgs(jobName, jobClass string, keywords []string) map[
 }
 
 // PartnerCompanyNotice 是预检给运营看的一行提示：配置了代招公司就把将要按
-// 它选择这件事亮出来。它不阻塞发布，没配置时返回 nil。
+// 它逐字选择、不中即失败这件事亮出来。它不阻塞发布，没配置时返回 nil——
+// 后台不知道这个账号的发布表单有没有「职位性质」组，没配置未必是问题；真有
+// 这一组而没配置时，读候选那一趟（零副作用）会以带平台公司名清单的失败原文
+// 把问题暴露出来，比预检里一条人人可见的噪音提示更准。
 func (s PublishSpec) PartnerCompanyNotice() *PublishIssue {
 	if s.PartnerCompany == "" {
 		return nil
@@ -136,15 +142,16 @@ func (s PublishSpec) PartnerCompanyNotice() *PublishIssue {
 	return &PublishIssue{
 		Field: "代招公司",
 		Message: fmt.Sprintf(
-			"将按配置「%s」选择代招公司；发布表单没有代招公司一栏的账号不涉及，平台列表里匹配不到时按最后一家填写并在结果里提示",
+			"将按配置「%s」逐字选择代招公司；发布表单没有代招公司一栏的账号不涉及，平台列表里逐字匹配不到或同名多家时该职位失败、不发布，请核对公司全称",
 			s.PartnerCompany),
 	}
 }
 
 // PartnerCompanyHint 把手侧实际选中的代招公司（成功 data 的 partnerCompany，
-// 该段未走时为 nil）与后台配置比对，生成一句给运营看的结果提示。比对口径与
-// 手侧两档匹配同向：相等=按配置选中，包含=按配置子串匹配到，其余=没找到、
-// 已按最后一家填写。返回空串表示没什么可提示（没配置、也没走到这一段）。
+// 该段未走时为 nil）与后台配置比对，生成一句给运营看的结果提示。2026-08-23
+// 起手侧只认逐字相等，所以成功回来的名字应恒等于配置；后两个分支按理到不了，
+// 留着是为了手脑版本错位时不静默——看见就该查。返回空串表示没什么可提示
+// （没配置、也没走到这一段）。
 func (s PublishSpec) PartnerCompanyHint(actual *string) string {
 	chosen := ""
 	if actual != nil {
@@ -156,16 +163,14 @@ func (s PublishSpec) PartnerCompanyHint(actual *string) string {
 		return ""
 	case chosen == "":
 		return fmt.Sprintf("该账号的发布表单没有代招公司一栏，配置的代招公司「%s」未使用", configured)
-	case configured == "":
-		return fmt.Sprintf("未配置代招公司，已按平台列表最后一家填写「%s」", chosen)
 	case chosen == configured:
 		return fmt.Sprintf("代招公司已按配置选中「%s」", chosen)
-	case strings.Contains(chosen, configured):
-		return fmt.Sprintf("代招公司按配置「%s」匹配到「%s」", configured, chosen)
+	case configured == "":
+		return fmt.Sprintf("后台未配置代招公司，但手侧选中了「%s」——当前版本应以未配置失败，请确认插件已随客户端一并更新", chosen)
 	default:
 		return fmt.Sprintf(
-			"配置的代招公司「%s」未在平台列表中找到，已按最后一家填写「%s」；如需更换请核对后台发布参数里的公司全称",
-			configured, chosen)
+			"手侧选中的代招公司「%s」与配置「%s」不一致——当前版本只认逐字相等，请确认插件已随客户端一并更新",
+			chosen, configured)
 	}
 }
 
