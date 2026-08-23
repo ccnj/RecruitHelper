@@ -21,12 +21,13 @@ import (
 	"recruithelper/client/service/internal/adminhttp"
 	"recruithelper/client/service/internal/aitrace"
 	"recruithelper/client/service/internal/appbridge"
-	"recruithelper/client/service/internal/autostart"
 	"recruithelper/client/service/internal/apphttp"
+	"recruithelper/client/service/internal/autostart"
 	"recruithelper/client/service/internal/blobstore"
 	"recruithelper/client/service/internal/chatreport"
 	"recruithelper/client/service/internal/dispatch"
 	"recruithelper/client/service/internal/handreload"
+	"recruithelper/client/service/internal/jobclassreport"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/jobstatusreport"
 	"recruithelper/client/service/internal/logcontext"
@@ -428,8 +429,24 @@ func main() {
 		fieldReportDeps.TraceSnapshot = traceStore.SnapshotTo
 	}
 
+	// 职位类别审计上报(AGENTS.md 第十项出站,2026-08-23):阶段 A 分配完成与发布
+	// 取得正证时 fire-and-forget 上报,鉴权对与第八项同源。
+	jobClassReporter := &jobclassreport.Reporter{
+		ClientVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+		Target: func() (jobclassreport.Target, bool) {
+			config, configErr := jobConfigSource.LoadConfig()
+			if configErr != nil || config == nil {
+				return jobclassreport.Target{}, false
+			}
+			return jobclassreport.Target{
+				BaseURL: config.BaseURL, MachineID: config.MachineID,
+				LicenseToken: config.LicenseToken,
+			}, true
+		},
+	}
 	adminAPI := adminhttp.New(st, hub, disp, actor, runner, *adminToken, providerConfig).
 		SetJobConfigSource(jobConfigSource).
+		SetJobClassReporter(jobClassReporter).
 		SetFieldReportDeps(fieldReportDeps).
 		// 运营通知彩排(2026-08-06 增补的第三类触发)复用常驻 runner 的 webhook
 		// 与客户名闭包,不另建第二个出站配置面;它只借 runner 发送,不经发件箱。

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobclassreport"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/patrol"
@@ -29,9 +30,12 @@ type API struct {
 	adminToken      string
 	providerConfig  *m5ai.ProviderConfigStore
 	jobConfigSource *jobconfig.Source
-	fieldReport     FieldReportDeps
-	notifyProbe     NotifyProbeDeps
-	chatReportRun   ChatReportRunner
+	// jobClassReporter 是第十项出站(职位类别审计上报)的 fire-and-forget 上报器;
+	// nil 即不上报(测试/未接线),两个调用点都以 nil 安全。
+	jobClassReporter *jobclassreport.Reporter
+	fieldReport      FieldReportDeps
+	notifyProbe      NotifyProbeDeps
+	chatReportRun    ChatReportRunner
 
 	// adviceEngine 可运行期换代(模型配置落盘即生效,2026-08-12 甲方裁决),
 	// 只经 SetAdvice/currentAdvice 访问。providerApplied 在模型配置任一落盘
@@ -55,6 +59,12 @@ func (a *API) notifyProviderApplied() {
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
 	a.jobConfigSource = source
+	return a
+}
+
+// SetJobClassReporter 注入职位类别审计上报器(AGENTS.md 第十项出站,2026-08-23)。
+func (a *API) SetJobClassReporter(reporter *jobclassreport.Reporter) *API {
+	a.jobClassReporter = reporter
 	return a
 }
 
