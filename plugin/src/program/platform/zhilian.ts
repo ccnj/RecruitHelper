@@ -6295,6 +6295,40 @@ function mainIgnoreZhilianSensitiveWordDialog(): MainStep {
   return { status: 'ok', detail: 'ignored' }
 }
 
+// 发布后的 message-box 弹窗(2026-08-23 甲方裁决,事实见发布页文档 §1.7.1)。
+// 点击「发布」后平台对已知的业务拒绝会立刻弹一个标准 message-box:标题「提示」、
+// 正文一句话、唯一按钮「我知道了」。已知族目前只有一条——可见文案同时含「职位
+// 类别」与「不匹配」(原话「所选职位类别与职位描述不匹配,请重新选择职位类别」),
+// 它意味着职位未创建。同库还有「热门职位可免费发布」「剩余职位数」等同样带
+// 「我知道了」却不是失败的弹层,所以绝不能见 message-box 就判失败,只认文案族。
+//
+// 返回 ok+JSON {known, texts}:known 表示命中已知拒绝族;texts 是所有可见
+// message-box 的正文(取 __body,取不到退回整层),已知族之外的只进诊断(观测,
+// 攒真机样本再扩族)。failed 只表示"此刻没有可见 message-box",交给轮询继续看。
+// 本函数只读不点:「我知道了」由随后的列表回读导航离页顺带销毁,与关键词弹层
+// 先例一致——不必也不该点弹层上的按钮。会被序列化注入 MAIN world,不引用模块
+// 作用域。
+function mainReadZhilianPublishMessageBox(): MainStep {
+  const boxes = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
+    .filter((node) => {
+      const style = window.getComputedStyle(node)
+      if (node.getBoundingClientRect().height <= 0 || style.display === 'none' ||
+          style.visibility === 'hidden') {
+        return false
+      }
+      return node.querySelector('.km-modal--message-box') !== null
+    })
+  if (boxes.length === 0) return { status: 'failed', reason: 'publish_message_box_absent' }
+  const texts = boxes.map((box) => {
+    const body = box.querySelector('.km-modal__body') as HTMLElement | null
+    const raw = (body?.innerText ?? '').trim() || (box.innerText ?? '').trim()
+    return raw.replace(/\s*\n\s*/g, ' / ').slice(0, 300)
+  }).filter((text) => text !== '')
+  if (texts.length === 0) return { status: 'failed', reason: 'publish_message_box_unreadable' }
+  const known = texts.some((text) => text.includes('职位类别') && text.includes('不匹配'))
+  return { status: 'ok', detail: JSON.stringify({ known, texts }) }
+}
+
 // 平台阻塞弹窗:切到"已被系统屏蔽"或"已关闭求职"的候选人时,平台弹一个
 // message-box。它带全屏 backdrop 并给 body 上锁,不处理掉的话后续每一次点击
 // 都打在遮罩上——卡住的不只是这个人,是整轮巡检。
@@ -7644,23 +7678,51 @@ export async function publishZhilianJobDraft(
   // 词的职位都只会停在弹层上、最后落成 suspect。仍然严格只点一次,且只在
   // 弹层唯一、文案确属敏感词提示、「忽略」按钮唯一时才点;任何不满足都不猜,
   // 直接按 possible 交给发后回读与人工。
+  //
+  // 同一个轮询窗口里还盯「平台拒绝弹窗」(2026-08-23 甲方裁决,§1.7.1 / §2.4.2):
+  // 已知族(职位类别与描述不匹配)命中即记下原话并停止等待;它本身不改变任何
+  // 动作——不点「我知道了」、不重试——只在发后列表回读也读不到该职位时,把
+  // 结局从 possible 改判为干净失败(见本函数末尾)。已知族之外的 message-box
+  // 只记原话进诊断,继续照旧。敏感词层点过「忽略」之后不再 break,因为平台在
+  // 继续发布时仍可能弹出拒绝弹窗。
   let sensitiveWordNotice: string | null = null
-  for (let round = 0; round < 12; round += 1) {
+  let rejectNotice: string | null = null
+  let messageBoxNotice: string | null = null
+  let sensitiveHandled = false
+  for (let round = 0; round < 16 && rejectNotice === null; round += 1) {
     ctx.checkpoint()
-    const found = await runMain(tabId, mainReadZhilianSensitiveWordDialog, [])
-    if (validMainStep(found) && found.status === 'ok' && found.detail) {
-      sensitiveWordNotice = found.detail.slice(0, 900)
-      const ignored = await runMain(tabId, mainIgnoreZhilianSensitiveWordDialog, [])
-      if (!validMainStep(ignored) || ignored.status === 'failed') {
-        const reason = validMainStep(ignored) ? ignored.reason : 'sensitive_dialog_shape'
-        throw new ZhilianPlatformError(
-          'POSTCONDITION_UNCONFIRMED', `敏感词确认层无法继续: ${reason}`, 'manualOnly',
-          undefined, 'possible',
-          { ...snapshotProgress(progress, reason), sensitiveWordNotice },
-        )
+    if (!sensitiveHandled) {
+      const found = await runMain(tabId, mainReadZhilianSensitiveWordDialog, [])
+      if (validMainStep(found) && found.status === 'ok' && found.detail) {
+        sensitiveWordNotice = found.detail.slice(0, 900)
+        const ignored = await runMain(tabId, mainIgnoreZhilianSensitiveWordDialog, [])
+        if (!validMainStep(ignored) || ignored.status === 'failed') {
+          const reason = validMainStep(ignored) ? ignored.reason : 'sensitive_dialog_shape'
+          throw new ZhilianPlatformError(
+            'POSTCONDITION_UNCONFIRMED', `敏感词确认层无法继续: ${reason}`, 'manualOnly',
+            undefined, 'possible',
+            { ...snapshotProgress(progress, reason), sensitiveWordNotice },
+          )
+        }
+        sensitiveHandled = true
+        await ctx.progress('已在敏感词确认层选择继续发布', 94)
       }
-      await ctx.progress('已在敏感词确认层选择继续发布', 94)
-      break
+    }
+    const box = await runMain(tabId, mainReadZhilianPublishMessageBox, [])
+    if (validMainStep(box) && box.status === 'ok' && box.detail) {
+      try {
+        const parsed = JSON.parse(box.detail) as { known?: unknown; texts?: unknown }
+        const texts = Array.isArray(parsed.texts)
+          ? parsed.texts.filter((item): item is string => typeof item === 'string')
+          : []
+        if (texts.length > 0) {
+          const joined = texts.join(' || ').slice(0, 600)
+          if (parsed.known === true) rejectNotice = joined
+          else messageBoxNotice = joined
+        }
+      } catch {
+        // 结构读不懂只当没看见:拒绝弹窗是失败方向的例外,读不到就回落原路径。
+      }
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 250))
   }
@@ -7680,6 +7742,14 @@ export async function publishZhilianJobDraft(
     // 敏感词原话必须带进诊断,否则运营不知道是哪个词触发的。
     platformFeedback = `[敏感词确认层已选择继续] ${sensitiveWordNotice}` +
       (platformFeedback ? ` || ${platformFeedback}` : '')
+    platformFeedback = platformFeedback.slice(0, 900)
+  }
+  if (rejectNotice) {
+    platformFeedback = `[平台拒绝弹窗] ${rejectNotice}` + (platformFeedback ? ` || ${platformFeedback}` : '')
+    platformFeedback = platformFeedback.slice(0, 900)
+  } else if (messageBoxNotice) {
+    // 已知族之外的弹窗只作观测:原话带给人看,不参与判定。
+    platformFeedback = `[发布后弹窗] ${messageBoxNotice}` + (platformFeedback ? ` || ${platformFeedback}` : '')
     platformFeedback = platformFeedback.slice(0, 900)
   }
 
@@ -7717,6 +7787,17 @@ export async function publishZhilianJobDraft(
     )
   }
   if (!visible) {
+    if (rejectNotice) {
+      // 平台明确呈现的可信失败 + 发后列表回读也没有它:判干净失败(sideEffect=none),
+      // 不进 suspect。错误码复用 GUARD_FAILED——平台自己的前置"类别须与描述匹配"
+      // 不成立(2026-08-23 甲方裁决不加新码)。注意顺序:列表里有它时上面已经按
+      // 成功返回,弹窗不可能把已发出的职位记成失败。不授权任何自动换类别重发。
+      throw new ZhilianPlatformError(
+        'GUARD_FAILED', `平台拒绝发布: ${rejectNotice}`, 'manualOnly',
+        undefined, 'none',
+        { ...snapshotProgress(progress, 'platform_rejected'), platformFeedback, verifyRounds: rounds },
+      )
+    }
     // 副作用可能已经发生,但没有正证:交给脑的验证轮与 suspect,不在原语内重试。
     throw new ZhilianPlatformError(
       'POSTCONDITION_UNCONFIRMED', '发布后未在职位列表读到同名职位', 'manualOnly',
@@ -15375,6 +15456,7 @@ export const zhilianTestHooks = Object.freeze({
   mainOpenZhilianPartnerPicker,
   mainPickZhilianPartnerCompany,
   mainReadZhilianPartnerCompany,
+  mainReadZhilianPublishMessageBox,
   mainProbeZhilianBlockedDialog,
   mainClickZhilianBlockedDialogButton,
   selectZhilianSourcingPosition,

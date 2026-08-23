@@ -13659,6 +13659,98 @@ test('代招公司选择 MAIN:逐字相等恰好一行才点 info 区,编辑与�
   }
 })
 
+// 发布后的 message-box 弹窗(2026-08-23 甲方裁决)。DOM 形态照抄甲方当日从自动发布
+// 现场取的真机快照:.km-modal__wrapper > .km-modal--message-box,标题「提示」、正文
+// 一个 span、唯一按钮「我知道了」。boxes 每项是 {body, visible?, messageBox?}。
+function installPublishMessageBoxFixture(boxes) {
+  const original = { document: globalThis.document, getComputedStyle: globalThis.window?.getComputedStyle }
+  const clicks = []
+  const hidden = new Set()
+  const wrappers = boxes.map((box, index) => {
+    const body = partnerNode({ className: 'km-modal__body', innerText: `\n  ${box.body}\n`, clicks, id: `body:${index}` })
+    const modal = partnerNode({
+      className: box.messageBox === false
+        ? 'km-modal km-modal--open km-modal--normal'
+        : 'km-modal km-modal--open km-modal--v-centered km-modal--message-box km-modal--normal',
+      clicks,
+      id: `modal:${index}`,
+    })
+    const wrapper = partnerNode({
+      className: 'km-modal__wrapper',
+      innerText: `提示\n${box.body}\n我知道了`,
+      sel: {
+        '.km-modal--message-box': box.messageBox === false ? null : modal,
+        '.km-modal__body': body,
+      },
+      clicks,
+      id: `wrapper:${index}`,
+    })
+    if (box.visible === false) {
+      hidden.add(wrapper)
+      wrapper.getBoundingClientRect = () => ({ height: 0 })
+    }
+    return wrapper
+  })
+  globalThis.window = globalThis.window ?? {}
+  globalThis.window.getComputedStyle = (node) => (
+    hidden.has(node) ? { display: 'none', visibility: 'visible' } : { display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector === '.km-modal__wrapper' ? wrappers : []),
+  }
+  return {
+    clicks,
+    restore() {
+      globalThis.document = original.document
+      globalThis.window.getComputedStyle = original.getComputedStyle
+    },
+  }
+}
+
+test('发布后弹窗 MAIN:只认「职位类别+不匹配」族为拒绝,其它 message-box 只记原话,全程不点任何按钮', () => {
+  const reject = '所选职位类别与职位描述不匹配，请重新选择职位类别'
+
+  // 已知族:known=true,正文取 __body、去首尾空白。
+  const hit = installPublishMessageBoxFixture([{ body: reject }])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPublishMessageBox(),
+      { status: 'ok', detail: JSON.stringify({ known: true, texts: [reject] }) })
+    assert.deepEqual(hit.clicks, [])
+  } finally {
+    hit.restore()
+  }
+
+  // 同库「我知道了」但不是失败的弹层(热门职位可免费发布):known=false,只记原话。
+  const other = installPublishMessageBoxFixture([{ body: '该职位为热门职位，可免费发布' }])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPublishMessageBox(),
+      { status: 'ok', detail: JSON.stringify({ known: false, texts: ['该职位为热门职位，可免费发布'] }) })
+    assert.deepEqual(other.clicks, [])
+  } finally {
+    other.restore()
+  }
+
+  // 两个弹层并存、其中一个命中:known=true,两段原话都带上。
+  const both = installPublishMessageBoxFixture([{ body: '该职位为热门职位，可免费发布' }, { body: reject }])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPublishMessageBox(),
+      { status: 'ok', detail: JSON.stringify({ known: true, texts: ['该职位为热门职位，可免费发布', reject] }) })
+  } finally {
+    both.restore()
+  }
+
+  // 隐藏的 / 不是 message-box 的 km-modal(如敏感词确认层、弹窗已关)一律不算。
+  const none = installPublishMessageBoxFixture([
+    { body: reject, visible: false },
+    { body: '发布信息中包含敏感词', messageBox: false },
+  ])
+  try {
+    assert.deepEqual(zhilianTestHooks.mainReadZhilianPublishMessageBox(),
+      { status: 'failed', reason: 'publish_message_box_absent' })
+  } finally {
+    none.restore()
+  }
+})
+
 test('代招公司回读 MAIN:框里有名字才算数,空着交给轮询继续等', () => {
   const filled = installPartnerPickerFixture({ picked: ' 阿狸与桃子（上海）信息咨询有限公司 ' })
   try {
