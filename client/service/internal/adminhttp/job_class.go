@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobclassreport"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
@@ -222,6 +223,7 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(inputs) == 0 {
+		a.reportJobClassPlan(key.Platform, view)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "没有任何职位取到了类别候选，无法分配",
 			"view":  view,
@@ -232,6 +234,12 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 	accepted, problems, attempts, err := a.assignJobClasses(ctx, inputs, req.Occupied)
 	view.Attempts = attempts
 	if err != nil {
+		for index := range view.Jobs {
+			if view.Jobs[index].Problem == "" && len(view.Jobs[index].Candidates) > 0 {
+				view.Jobs[index].Problem = "assignFailed"
+			}
+		}
+		a.reportJobClassPlan(key.Platform, view)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": "职位类别未能分配：" + err.Error(),
 			"view":  view,
@@ -259,7 +267,36 @@ func (a *API) jobPublishClassPlan(w http.ResponseWriter, r *http.Request) {
 		view.Jobs[index].Problem = problem
 	}
 	view.Collisions = m5ai.JobClassCollisions(assigned)
+	a.reportJobClassPlan(key.Platform, view)
 	writeJSON(w, http.StatusOK, view)
+}
+
+// reportJobClassPlan 把阶段 A 的分配结论按职位逐条上报旧后台(AGENTS.md 第十项
+// 出站「职位类别审计上报」,stage=planned)。fire-and-forget:不阻塞响应、失败只记
+// 日志、不改变 view。没分到的职位也报(带 problem),审计要看得到失败;读候选失败
+// 的职位 problem 是失败文案,由上报包按服务端上限截断。
+func (a *API) reportJobClassPlan(platform string, view jobClassPlanView) {
+	if a.jobClassReporter == nil || len(view.Jobs) == 0 {
+		return
+	}
+	now := time.Now().UnixMilli()
+	records := make([]jobclassreport.Record, 0, len(view.Jobs))
+	for _, job := range view.Jobs {
+		record := jobclassreport.Record{
+			JobID: job.JobID, JobName: job.JobName, Platform: platform,
+			Stage: jobclassreport.StagePlanned, ObservedAt: now,
+			Candidates:     make([]jobclassreport.Candidate, 0, len(job.Candidates)),
+			PrefilledClass: job.PrefilledClass, ChosenClass: job.JobClass,
+			Source: job.Source, Confidence: job.Confidence, Reason: job.Reason, Problem: job.Problem,
+		}
+		for _, candidate := range job.Candidates {
+			record.Candidates = append(record.Candidates, jobclassreport.Candidate{
+				Name: candidate.Name, Definition: candidate.Definition,
+			})
+		}
+		records = append(records, record)
+	}
+	a.jobClassReporter.ReportAsync(records)
 }
 
 // readJobClassCandidates 为一个职位派一条读取原语并复核证词。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/jobclassreport"
 	"recruithelper/client/service/internal/jobconfig"
 	"recruithelper/client/service/internal/m5ai"
 	"recruithelper/client/service/internal/store"
@@ -451,6 +452,19 @@ func (a *API) jobPublishPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	view.Report = &report
 	view.PartnerCompanyHint = spec.PartnerCompanyHint(report.PartnerCompany)
+	// 职位类别审计上报(AGENTS.md 第十项出站,stage=published):实际发出的类别。
+	// fire-and-forget,不影响发布结果。
+	if a.jobClassReporter != nil {
+		prefilled := ""
+		if report.PrefilledClass != nil {
+			prefilled = *report.PrefilledClass
+		}
+		a.jobClassReporter.ReportAsync([]jobclassreport.Record{{
+			JobID: req.JobID, JobName: target.JobName, Platform: key.Platform,
+			Stage: jobclassreport.StagePublished, ObservedAt: report.ObservedAt,
+			Candidates: []jobclassreport.Candidate{}, PrefilledClass: prefilled, ChosenClass: report.JobClass,
+		}})
+	}
 	writeJSON(w, http.StatusOK, view)
 }
 
