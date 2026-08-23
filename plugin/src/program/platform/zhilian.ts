@@ -6139,20 +6139,25 @@ function mainOpenZhilianPartnerPicker(): MainStep {
   return { status: 'ok', detail: 'clicked' }
 }
 
-// 按后台配置的代招公司名在列表里选一家(2026-08-22 甲方裁决):先找去首尾空白后
-// **逐字相等**的(多家同名取其中最后一家),再找"配置名是某一家全称的子串且唯一
-// 命中"的,两档都不中或根本没配置时取**最后一家**(2026-08-14 裁决的原行为:
-// 一般只有一家,多家取最后一家;甲方同日确认列表一次性全渲染,没有滚动懒加载,
-// DOM 顺序即全序)。配置名是提高选对概率的提示,不是闸——匹配不上不失败、
-// 不转人工,蒙一个也比停下好;由脑拿 detail 里的实际选中名与配置比对后提示。
+// 按后台配置的代招公司名在列表里选一家(2026-08-23 甲方裁决,收回 08-22「提示不是
+// 闸」口径):只认去首尾空白后**逐字相等**,且恰好命中一行才点;命中零行、命中多行
+// (同名歧义,名字分不出是哪家)、或根本没配置,都不点、不猜、不取最后一家。起因是
+// 当日真机弹窗证实同一账号可挂多家代招公司(5 家、目标排第 3),旧口径会把职位
+// 挂到最后一家(别家)名下发出去,候选人看到的雇主是别家。
 //
-// detail 是 JSON 文本 {name, match}:name 是点中那家的全称,match 记录走的是
-// 哪一档(exact / contains / last / fallback,其中 fallback 特指"配置了但没命中")。
+// 返回值分两层:
+// - status=failed 只表示"还没就绪或结构失配",交给轮询继续等——弹窗没开、列表
+//   还没渲染、命中那一行读不到 info、或所有行名字都读不出来。
+// - 列表已经在、名字也读得出,就一律 status=ok 并把结论写进 detail 的 JSON
+//   {outcome, name?, names}:outcome=picked 才真的点了;absent/ambiguous/unconfigured
+//   是明确的不中,**由调用方立刻以失败收场**(不让轮询白等 20 轮),names 是弹窗里
+//   实际的公司全称清单,进失败原文供运营对照改配置。
 //
 // 落点写死在 .partnership-organization-list__item-info,**绝不点整行**:
 // 同一行里紧挨着 a.action-edit 与 a.action-delete,点偏一格就把客户的代招
-// 公司删了。这是本段唯一有真实破坏力的地方,匹配档位只决定点哪一行,不改
-// 落点。footer 的「添加公司」同理绝不碰——那是新建公司,不是选择。
+// 公司删了。这是本段唯一有真实破坏力的地方。footer 的「添加公司」同理绝不碰——
+// 那是新建公司,不是选择。甲方 08-14 确认列表一次性全渲染、无滚动懒加载,DOM
+// 顺序即全序,所以"有行但没命中"是确定性结论,不是还没加载完。
 function mainPickZhilianPartnerCompany(wanted: string): MainStep {
   const open = (Array.from(document.querySelectorAll('.km-modal__wrapper')) as HTMLElement[])
     .filter((node) => {
@@ -6174,32 +6179,18 @@ function mainPickZhilianPartnerCompany(wanted: string): MainStep {
     const nameNode = info?.querySelector('.info-name') as HTMLElement | null
     return { info, name: (nameNode?.innerText ?? '').trim() }
   })
+  // 一行名字都读不出来,说明整张列表不是预期结构——那是结构失配,不是"没命中"。
+  const names = entries.map((entry) => entry.name.slice(0, 120)).filter((name) => name !== '')
+  if (names.length === 0) return { status: 'failed', reason: 'partner_company_name_unresolved' }
   const target = (typeof wanted === 'string' ? wanted : '').trim()
-  let picked = -1
-  let match = target === '' ? 'last' : 'fallback'
-  if (target !== '') {
-    const exact = entries.map((entry, index) => (entry.name === target ? index : -1)).filter((index) => index >= 0)
-    if (exact.length > 0) {
-      picked = exact[exact.length - 1]
-      match = 'exact'
-    } else {
-      const contains = entries
-        .map((entry, index) => (entry.name !== '' && entry.name.includes(target) ? index : -1))
-        .filter((index) => index >= 0)
-      if (contains.length === 1) {
-        picked = contains[0]
-        match = 'contains'
-      }
-    }
-  }
-  if (picked < 0) picked = entries.length - 1
-  const chosen = entries[picked]
+  if (target === '') return { status: 'ok', detail: JSON.stringify({ outcome: 'unconfigured', names }) }
+  const exact = entries.map((entry, index) => (entry.name === target ? index : -1)).filter((index) => index >= 0)
+  if (exact.length === 0) return { status: 'ok', detail: JSON.stringify({ outcome: 'absent', names }) }
+  if (exact.length > 1) return { status: 'ok', detail: JSON.stringify({ outcome: 'ambiguous', names }) }
+  const chosen = entries[exact[0]]
   if (!chosen.info) return { status: 'failed', reason: 'partner_company_row_unresolved' }
-  // 名字读不到说明这一行不是预期结构,那"这一行是公司行"本身也就不可信了,
-  // 宁可停在这里——这是结构失配,不是匹配失败。
-  if (!chosen.name) return { status: 'failed', reason: 'partner_company_name_unresolved' }
   chosen.info.click()
-  return { status: 'ok', detail: JSON.stringify({ name: chosen.name.slice(0, 120), match }) }
+  return { status: 'ok', detail: JSON.stringify({ outcome: 'picked', name: chosen.name.slice(0, 120), names }) }
 }
 
 // 回读代招公司。正证按 2026-08-14 甲方裁决放松到"框里有名字",不与弹窗里
@@ -6933,7 +6924,7 @@ interface DraftProgress {
   salaryVariant?: string
   salarySummary?: string
   // 代招公司那一段:职位性质是否在场(在场才有这一行)、弹窗里点中的那家,
-  // 以及点中它走的是哪一档匹配(exact/contains/last/fallback)。
+  // 以及选择结论(picked / absent / ambiguous / unconfigured,后三种即失败)。
   jobNature?: string
   partnerCompany?: string
   partnerMatch?: string
@@ -7139,14 +7130,15 @@ async function pace(): Promise<void> {
 // 在场就必须一路走到代招公司回读出名字为止,中途任何一步不成都转人工——代招
 // 公司是必填,空着提交会被平台判形式不符,那时候错误离现场已经很远了。
 //
-// wanted 是后台配置的代招公司名(job.prepareDraft / job.publishDraft 的选填
-// args.partnerCompany;两趟只读原语不带,传空串即按最后一家)。匹配档位与回落
-// 见 mainPickZhilianPartnerCompany;这里只把实际选中的名字带回去——它进成功
-// data 的 partnerCompany,由脑与配置比对后在客户端提示。配置了但没命中时另记
-// 一条手侧日志,把弹窗里实际有哪些公司带上,方便运营对着改配置。
+// wanted 是后台配置的代招公司名(四个填表原语的选填 args.partnerCompany,三趟
+// 填表同一规则,2026-08-23 起两趟只读原语也带)。按 mainPickZhilianPartnerCompany
+// 的结论:picked 才继续;absent / ambiguous / unconfigured 立刻以失败收场,失败
+// 原文带上配置名与弹窗里实际的公司名清单,运营对着改配置后重跑即可。这一步在
+// 点发布之前,sideEffect=none;批量发布按 08-05 裁决跳过该职位继续下一个。
 //
 // 打开选择器用轮询点:点完职位性质到这一行渲染出来有间隙,弹窗自己也要等平台
-// 拉完公司列表。25 轮配合 1 秒节奏下限约 30 秒,与类别选择器同量级。
+// 拉完公司列表。25 轮配合 1 秒节奏下限约 30 秒,与类别选择器同量级。没配置时
+// 也照常打开弹窗——为的是把平台上实际有哪些公司带进失败原文,运营照着填。
 async function pickZhilianJobNatureAndPartner(
   tabId: number,
   ctx: PrimitiveContext,
@@ -7161,11 +7153,16 @@ async function pickZhilianJobNatureAndPartner(
   const target = (wanted ?? '').trim()
   const pickedRaw = await pollStep(tabId, mainPickZhilianPartnerCompany, [target], ctx,
     '选择代招公司', undefined, 20, progress)
-  let picked: { name: string; match: string } | null = null
+  let picked: { outcome: string; name: string; names: string[] } | null = null
   try {
-    const parsed = JSON.parse(pickedRaw) as { name?: unknown; match?: unknown }
-    if (typeof parsed.name === 'string' && parsed.name !== '' && typeof parsed.match === 'string') {
-      picked = { name: parsed.name, match: parsed.match }
+    const parsed = JSON.parse(pickedRaw) as { outcome?: unknown; name?: unknown; names?: unknown }
+    const names = Array.isArray(parsed.names)
+      ? parsed.names.filter((item): item is string => typeof item === 'string')
+      : []
+    if (parsed.outcome === 'picked' && typeof parsed.name === 'string' && parsed.name !== '') {
+      picked = { outcome: 'picked', name: parsed.name, names }
+    } else if (parsed.outcome === 'absent' || parsed.outcome === 'ambiguous' || parsed.outcome === 'unconfigured') {
+      picked = { outcome: parsed.outcome, name: '', names }
     }
   } catch {
     picked = null
@@ -7174,16 +7171,18 @@ async function pickZhilianJobNatureAndPartner(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '选择代招公司结果结构不符合预期', 'manualOnly',
       undefined, 'none', snapshotProgress(progress, 'main_step_shape'))
   }
-  progress.partnerCompany = picked.name
-  progress.partnerMatch = picked.match
-  if (picked.match === 'fallback') {
-    reportHandLog(
-      'warn',
-      'partnerCompanyFallback',
-      `代招公司「${target}」未在弹窗列表中命中,已按最后一家「${picked.name}」填写`,
-      `match=${picked.match}`,
-    )
+  progress.partnerMatch = picked.outcome
+  if (picked.outcome !== 'picked') {
+    const listed = picked.names.length > 0 ? picked.names.join('、') : '(弹窗列表为空)'
+    const message = picked.outcome === 'unconfigured'
+      ? `发布表单有「职位性质」一组,但后台发布参数未配置「代招公司」;平台代招公司列表:${listed}`
+      : picked.outcome === 'ambiguous'
+        ? `配置的代招公司「${target}」在平台列表中命中多行,无法分辨是哪家;平台代招公司列表:${listed}`
+        : `配置的代招公司「${target}」未在平台列表中逐字命中;平台代招公司列表:${listed}`
+    throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', message, 'manualOnly',
+      undefined, 'none', snapshotProgress(progress, `partner_company_${picked.outcome}`))
   }
+  progress.partnerCompany = picked.name
   await pollStep(tabId, mainReadZhilianPartnerCompany, [], ctx, '回读代招公司',
     (detail) => detail.length > 0, 40, progress)
   return picked.name
@@ -8067,7 +8066,7 @@ export async function readZhilianJobClassCandidates(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, undefined)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, args.partnerCompany)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
@@ -8177,7 +8176,7 @@ async function reuseOrRefillZhilianJobForm(
   assertExpectedPrincipal(await probeTab(tab), expectedPrincipalFingerprint)
   await ctx.progress('核对智联发布页与登录身份', 15)
 
-  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, undefined)
+  await pickZhilianJobNatureAndPartner(tabId, ctx, progress, args.partnerCompany)
   await runStep(tabId, mainPickZhilianEmployment, [args.employmentType], '选择工作性质', progress)
   await pollStep(tabId, mainReadZhilianEmployment, [], ctx, '回读工作性质',
     (detail) => detail === args.employmentType, 40, progress)
