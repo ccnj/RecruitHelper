@@ -13550,124 +13550,112 @@ test('代招公司选择器 MAIN:已开就不再点,未开点内容区,行没渲
   }
 })
 
-// detail 是 JSON {name, match}:name 为点中那家的全称,match 为命中的档位。
-function partnerPick(name, match) {
-  return { status: 'ok', detail: JSON.stringify({ name, match }) }
+// detail 是 JSON {outcome, name?, names}:outcome=picked 才真点了;absent / ambiguous /
+// unconfigured 是明确不中、由调用方以失败收场;names 是弹窗里实际的公司全称清单。
+function partnerPicked(name, names) {
+  return { status: 'ok', detail: JSON.stringify({ outcome: 'picked', name, names }) }
+}
+function partnerMiss(outcome, names) {
+  return { status: 'ok', detail: JSON.stringify({ outcome, names }) }
 }
 
-test('代招公司选择 MAIN:未配置时只点最后一家的 info 区,编辑与删除绝不触碰', () => {
-  const many = installPartnerPickerFixture({ rows: ['第一家有限公司', '第二家有限公司', '最后一家有限公司'] })
+// 2026-08-23 甲方裁决(收回 08-22「提示不是闸」):只认去首尾空白后逐字相等且恰好
+// 一行;零行/多行/未配置一律不点、不猜、不取最后一家。起因是真机弹窗证实同一账号
+// 挂着 5 家代招公司、目标排第 3,旧口径会把职位挂到最后一家(别家)名下发出去。
+test('代招公司选择 MAIN:逐字相等恰好一行才点 info 区,编辑与删除绝不触碰', () => {
+  const rows = ['青岛厚优企业信息咨询有限公司', '上海卓曜引智商务咨询有限公司', '上海云砚禾信息咨询有限公司',
+    '湖北临朔创科技有限公司', '阿狸与桃子（上海）信息咨询有限公司']
+
+  // 逐字相等:选中排第 3 的那家,不是最后一家;首尾空白不影响。
+  const exact = installPartnerPickerFixture({ rows })
   try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(''),
-      partnerPick('最后一家有限公司', 'last'))
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(' 上海云砚禾信息咨询有限公司 '),
+      partnerPicked('上海云砚禾信息咨询有限公司', rows))
     // 落点必须是 info 区:同一行紧挨着的 action-delete 点一下就把客户的代招公司删了。
-    assert.deepEqual(many.clicks, ['info:2'])
+    assert.deepEqual(exact.clicks, ['info:2'])
   } finally {
-    many.restore()
+    exact.restore()
   }
 
-  const empty = installPartnerPickerFixture({ rows: [] })
+  // 子串不算命中:运营只填了短名,不点、不猜,把清单带回去让人改配置。
+  const contains = installPartnerPickerFixture({ rows })
   try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(''),
-      { status: 'failed', reason: 'partner_company_option_absent' })
-    assert.deepEqual(empty.clicks, [])
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('上海云砚禾'),
+      partnerMiss('absent', rows))
+    assert.deepEqual(contains.clicks, [])
   } finally {
-    empty.restore()
+    contains.restore()
   }
 
-  // 名字读不到 => 这一行不是预期结构,"最后一行是公司行"本身就不可信了。
-  const nameless = installPartnerPickerFixture({ rows: ['有名字的公司', ''] })
+  // 完全没命中:同样不点,绝不回落最后一家。
+  const missing = installPartnerPickerFixture({ rows })
   try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(''),
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('不存在的公司'),
+      partnerMiss('absent', rows))
+    assert.deepEqual(missing.clicks, [])
+  } finally {
+    missing.restore()
+  }
+
+  // 同名多行:名字分不出是哪家,按歧义不点。
+  const dupRows = ['桃子科技有限公司分公司', '桃子科技有限公司', '桃子科技有限公司']
+  const dup = installPartnerPickerFixture({ rows: dupRows })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('桃子科技有限公司'),
+      partnerMiss('ambiguous', dupRows))
+    assert.deepEqual(dup.clicks, [])
+  } finally {
+    dup.restore()
+  }
+
+  // 未配置(空串/未传):不点,把清单带回去;与旧版"取最后一家"彻底分手。
+  for (const wanted of ['', '   ', undefined]) {
+    const unconfigured = installPartnerPickerFixture({ rows })
+    try {
+      assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(wanted),
+        partnerMiss('unconfigured', rows))
+      assert.deepEqual(unconfigured.clicks, [])
+    } finally {
+      unconfigured.restore()
+    }
+  }
+
+  // 别的行名字读不到,但配置名逐字命中了有名字的那行:照常选中;清单只含读得出的名字。
+  const namelessTail = installPartnerPickerFixture({ rows: ['有名字的公司', ''] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('有名字的公司'),
+      partnerPicked('有名字的公司', ['有名字的公司']))
+    assert.deepEqual(namelessTail.clicks, ['info:0'])
+  } finally {
+    namelessTail.restore()
+  }
+
+  // 一行名字都读不出 => 整张列表不是预期结构,是结构失配(交给轮询/转人工),不是"没命中"。
+  const nameless = installPartnerPickerFixture({ rows: ['', ''] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('有名字的公司'),
       { status: 'failed', reason: 'partner_company_name_unresolved' })
     assert.deepEqual(nameless.clicks, [])
   } finally {
     nameless.restore()
   }
 
+  // 列表还没渲染出来 / 弹窗没开:未就绪,交给轮询继续等。
+  const empty = installPartnerPickerFixture({ rows: [] })
+  try {
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('上海云砚禾信息咨询有限公司'),
+      { status: 'failed', reason: 'partner_company_option_absent' })
+    assert.deepEqual(empty.clicks, [])
+  } finally {
+    empty.restore()
+  }
   const noModal = installPartnerPickerFixture({ modal: false })
   try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(''),
+    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('上海云砚禾信息咨询有限公司'),
       { status: 'failed', reason: 'partner_company_picker_absent' })
     assert.deepEqual(noModal.clicks, [])
   } finally {
     noModal.restore()
-  }
-})
-
-// 2026-08-22 甲方裁决:后台配置了代招公司名时先逐字相等、再唯一子串,两档都不中
-// 回落最后一家照常填——配置名是提高选对概率的提示,不是闸;匹配不上不失败。
-test('代招公司选择 MAIN:按配置名两档匹配,不中回落最后一家,落点始终是 info 区', () => {
-  const rows = ['阿狸与桃子（上海）信息咨询有限公司', '桃子科技有限公司', '最后一家有限公司']
-
-  // 逐字相等:选中那一家,不再是最后一家;首尾空白不影响。
-  const exact = installPartnerPickerFixture({ rows })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(' 桃子科技有限公司 '),
-      partnerPick('桃子科技有限公司', 'exact'))
-    assert.deepEqual(exact.clicks, ['info:1'])
-  } finally {
-    exact.restore()
-  }
-
-  // 唯一子串:运营只填了短名也能命中。
-  const contains = installPartnerPickerFixture({ rows })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('阿狸与桃子'),
-      partnerPick('阿狸与桃子（上海）信息咨询有限公司', 'contains'))
-    assert.deepEqual(contains.clicks, ['info:0'])
-  } finally {
-    contains.restore()
-  }
-
-  // 子串命中多家 => 不猜哪一家,回落最后一家,match 记 fallback。
-  const ambiguous = installPartnerPickerFixture({ rows })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('桃子'),
-      partnerPick('最后一家有限公司', 'fallback'))
-    assert.deepEqual(ambiguous.clicks, ['info:2'])
-  } finally {
-    ambiguous.restore()
-  }
-
-  // 完全没命中 => 回落最后一家照常填,绝不失败。
-  const missing = installPartnerPickerFixture({ rows })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('不存在的公司'),
-      partnerPick('最后一家有限公司', 'fallback'))
-    assert.deepEqual(missing.clicks, ['info:2'])
-  } finally {
-    missing.restore()
-  }
-
-  // 同名多家取其中最后一家;逐字相等优先于子串(前一家是它的超集串也不抢)。
-  const dup = installPartnerPickerFixture({ rows: ['桃子科技有限公司分公司', '桃子科技有限公司', '桃子科技有限公司'] })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('桃子科技有限公司'),
-      partnerPick('桃子科技有限公司', 'exact'))
-    assert.deepEqual(dup.clicks, ['info:2'])
-  } finally {
-    dup.restore()
-  }
-
-  // 最后一行名字读不到,但配置名逐字命中了前面一行:照常选中,不因末行结构失配停下。
-  const namelessTail = installPartnerPickerFixture({ rows: ['有名字的公司', ''] })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany('有名字的公司'),
-      partnerPick('有名字的公司', 'exact'))
-    assert.deepEqual(namelessTail.clicks, ['info:0'])
-  } finally {
-    namelessTail.restore()
-  }
-
-  // 未传配置(旧调用形态/只读两趟)等同未配置:最后一家。
-  const untyped = installPartnerPickerFixture({ rows })
-  try {
-    assert.deepEqual(zhilianTestHooks.mainPickZhilianPartnerCompany(undefined),
-      partnerPick('最后一家有限公司', 'last'))
-    assert.deepEqual(untyped.clicks, ['info:2'])
-  } finally {
-    untyped.restore()
   }
 })
 

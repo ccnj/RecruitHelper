@@ -915,7 +915,8 @@
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
-          "keepForm": { "type": "boolean", "optional": true }
+          "keepForm": { "type": "boolean", "optional": true },
+          "partnerCompany": { "type": "string", "optional": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
         }
       },
       "JobClassCandidate": {
@@ -944,7 +945,8 @@
           "jobName": { "type": "string", "minLength": 1, "maxLength": 256, "maxBytes": 1024 },
           "employmentType": { "type": "string", "minLength": 1, "maxLength": 32, "maxBytes": 128 },
           "description": { "type": "string", "minLength": 1, "maxLength": 10000, "maxBytes": 40000 },
-          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 }
+          "jobClass": { "type": "string", "minLength": 1, "maxLength": 64, "maxBytes": 256 },
+          "partnerCompany": { "type": "string", "optional": true, "minLength": 1, "maxLength": 256, "maxBytes": 1024 }
         }
       },
       "JobKeywordSection": {
@@ -1511,21 +1513,21 @@
       "argsSchema": "JobReadClassCandidatesArgs", "dataSchema": "JobReadClassCandidatesData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
-      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层,不提交任何东西、不产生候选人可见动作。**args.keepForm 为 true 时读完保留已填表单、不离开发布页**,供紧接着的 job.readKeywordVocabulary 复用,省掉一次填表与描述失焦后的数十秒等待;缺省或 false 时照旧离开发布页。保留下来的表单必填不齐(缺类别、学历、经验、薪资、月数、关键词、人数),误点「发布」平台自己会拒。旧版手不认识该字段时按 must-ignore 丢弃、照常离开页面,下一趟回读发现对不上会整个重填,不会出错。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别"
+      "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层,不提交任何东西、不产生候选人可见动作。**args.keepForm 为 true 时读完保留已填表单、不离开发布页**,供紧接着的 job.readKeywordVocabulary 复用,省掉一次填表与描述失焦后的数十秒等待;缺省或 false 时照旧离开发布页。保留下来的表单必填不齐(缺类别、学历、经验、薪资、月数、关键词、人数),误点「发布」平台自己会拒。旧版手不认识该字段时按 must-ignore 丢弃、照常离开页面,下一趟回读发现对不上会整个重填,不会出错。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别。args.partnerCompany(选填)语义同 job.prepareDraft:发布表单出现「职位性质」一组时,手一律选「代招岗位」并按该配置名在代招公司弹窗里逐字相等选中恰好一行,零行/多行/未配置即整体 failed(2026-08-23 甲方裁决,三趟填表同一规则,配置错误在本趟零副作用阶段就暴露);该组不在场时不涉及。旧版手不认识该字段时按 must-ignore 丢弃"
     },
     "job.readKeywordVocabulary": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobReadKeywordVocabularyArgs", "dataSchema": "JobReadKeywordVocabularyData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
-      "note": "读取平台针对某个职位、在某个已选定职位类别下给出的关键词分组词库全集。真机事实:关键词弹层必须先填职位描述**且已选定职位类别**才打得开(类别为「请选择」时点入口毫无反应),而分组结构、组内词库与是否自动预选随类别与描述一起变——词库因此只能在类别定下来之后现读,无法离线预知。执行顺序:先回读发布页表单的职位名称、工作性质与描述长度,与 args 一致就复用上一趟(job.readClassCandidates 带 keepForm)留下的半成品表单,不一致或读不到就导航到干净发布页重填这三项——**不假设页面状态**,复用只是省时间,不是正确性依赖;再按 args.jobClass 逐字选中类别(选不中即整体 failed,绝不模糊匹配、绝不就近取一个);再打开关键词弹层、展开「更多」、清空平台预选,按分组读回标题、组内词条与配额;最后直接导航离开发布页(导航即销毁弹层,不必也不该去点弹层上的任何按钮),**绝不点击弹层的「确定」——那会把关键词写进表单,而本原语只读不写——也绝不点击发布或任何提交控件**。清空预选是必须的:预选一次有一次无,不清就算不准配额。分组不得拍平成一张词表——组内上限是 3,脑要按分组喂给模型才不会让它把词堆在一组里被平台拒掉。formReused 只作诊断,不参与判定。词库为空是如实返回,由脑判定为干净失败并转人工,手不得据此自造关键词"
+      "note": "读取平台针对某个职位、在某个已选定职位类别下给出的关键词分组词库全集。真机事实:关键词弹层必须先填职位描述**且已选定职位类别**才打得开(类别为「请选择」时点入口毫无反应),而分组结构、组内词库与是否自动预选随类别与描述一起变——词库因此只能在类别定下来之后现读,无法离线预知。执行顺序:先回读发布页表单的职位名称、工作性质与描述长度,与 args 一致就复用上一趟(job.readClassCandidates 带 keepForm)留下的半成品表单,不一致或读不到就导航到干净发布页重填这三项——**不假设页面状态**,复用只是省时间,不是正确性依赖;再按 args.jobClass 逐字选中类别(选不中即整体 failed,绝不模糊匹配、绝不就近取一个);再打开关键词弹层、展开「更多」、清空平台预选,按分组读回标题、组内词条与配额;最后直接导航离开发布页(导航即销毁弹层,不必也不该去点弹层上的任何按钮),**绝不点击弹层的「确定」——那会把关键词写进表单,而本原语只读不写——也绝不点击发布或任何提交控件**。清空预选是必须的:预选一次有一次无,不清就算不准配额。分组不得拍平成一张词表——组内上限是 3,脑要按分组喂给模型才不会让它把词堆在一组里被平台拒掉。formReused 只作诊断,不参与判定。词库为空是如实返回,由脑判定为干净失败并转人工,手不得据此自造关键词。args.partnerCompany(选填)语义同 job.readClassCandidates:发布表单出现「职位性质」一组时按该配置名逐字相等选中恰好一行代招公司,零行/多行/未配置即整体 failed(2026-08-23 甲方裁决);复用上一趟留下的表单时该段已在上一趟完成,不重选"
     },
     "job.prepareDraft": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPrepareDraftData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
       "execBudgetMs": 180000, "deadlineMs": 240000, "leaseMs": 45000,
-      "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文。args.partnerCompany(选填)是后台配置的代招公司名,只在发布表单出现「职位性质」一组时使用:手一律选「代招岗位」,再在代招公司弹窗里按「去首尾空白后逐字相等 → 配置名是某一家全称的子串且唯一命中」两档找它,两档都不中或未配置时取列表最后一家照常填写——代招公司名是提高选对概率的提示,不是闸,匹配不上不得失败、不得转人工(2026-08-22 甲方裁决);回读正证仍是框内出现公司名,不与配置名对拼。data.partnerCompany 回传实际选中的公司名,该段未走(账号没有职位性质字段)时为 null,由脑与配置比对生成用户可见提示"
+      "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文。args.partnerCompany(选填)是后台配置的代招公司名,只在发布表单出现「职位性质」一组时使用:手一律选「代招岗位」,再在代招公司弹窗里按去首尾空白后**逐字相等**找它,恰好命中一行才点选;命中零行、命中多行(同名歧义)、或该组在场却未配置,一律整体 failed(sideEffect=none,失败原文带配置名与弹窗里实际的公司名列表,供运营对照改配置)——绝不模糊匹配、绝不取最后一家、绝不猜(2026-08-23 甲方裁决,收回 2026-08-22「提示不是闸、蒙一个也比停下好」口径:真机证实同一账号可挂多家代招公司,猜错即把职位挂到别家名下发出去);回读正证仍是框内出现公司名。data.partnerCompany 回传实际选中的公司名,该段未走(账号没有职位性质字段)时为 null,由脑与配置比对生成用户可见提示"
     },
     "job.publishDraft": {
       "ver": 1, "class": "effectful", "batch": "X",
@@ -1534,7 +1536,7 @@
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
       "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 60000,
       "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
-      "note": "把一个职位真正发布到平台。真机实测手侧整条执行约 35 秒(读列表 → 填表 → 点击 → 两轮回读);lease 只需容纳最长单步,填同一张表的 job.prepareDraft 用 45 秒已在真机验证够用,本原语只多出点击后的两轮回读,故取 60 秒(CmdBody 的 leaseMs 上限是 120 秒,150 秒会让命令在契约校验就被拒)。首发那次 45 秒 leaseExpired 不是填表太慢:手 35 秒就回了 result,但 result 落不了账(realEffectResultPlan 缺本原语分支),命令一直不收束才反复触发租约到期,根因已单独修掉。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。点击之后平台可能弹出敏感词确认层(列出敏感词与所在字段,给忽略/修改两个出口;弹层开着时职位并未创建),按甲方 2026-07-30 裁决自动点一次「忽略」继续发布——这是同一个不可逆动作的确认续做,不是第二次点击发布;只在「可见弹层唯一 + 文案确属敏感词提示 + 忽略按钮唯一且未禁用」三条同时成立时才点,否则按 possible 转人工,绝不点「修改」。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定。args.partnerCompany 与 data.partnerCompany 的语义同 job.prepareDraft:代招公司按配置名两档匹配、不中取最后一家照常发布,不因匹配不上失败或转人工;data 回传实际选中的公司名,未涉及时为 null"
+      "note": "把一个职位真正发布到平台。真机实测手侧整条执行约 35 秒(读列表 → 填表 → 点击 → 两轮回读);lease 只需容纳最长单步,填同一张表的 job.prepareDraft 用 45 秒已在真机验证够用,本原语只多出点击后的两轮回读,故取 60 秒(CmdBody 的 leaseMs 上限是 120 秒,150 秒会让命令在契约校验就被拒)。首发那次 45 秒 leaseExpired 不是填表太慢:手 35 秒就回了 result,但 result 落不了账(realEffectResultPlan 缺本原语分支),命令一直不收束才反复触发租约到期,根因已单独修掉。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后一律 possible。原语内绝不重试、绝不第二次点击。点击之后平台可能弹出敏感词确认层(列出敏感词与所在字段,给忽略/修改两个出口;弹层开着时职位并未创建),按甲方 2026-07-30 裁决自动点一次「忽略」继续发布——这是同一个不可逆动作的确认续做,不是第二次点击发布;只在「可见弹层唯一 + 文案确属敏感词提示 + 忽略按钮唯一且未禁用」三条同时成立时才点,否则按 possible 转人工,绝不点「修改」。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定。args.partnerCompany 与 data.partnerCompany 的语义同 job.prepareDraft:代招公司按配置名逐字相等恰好命中一行才选,零行/多行/未配置即整体 failed(发生在点击发布之前,sideEffect=none),不取最后一家、不模糊匹配(2026-08-23 甲方裁决);data 回传实际选中的公司名,未涉及时为 null"
     },
     "job.takeOffline": {
       "ver": 1, "class": "effectful", "batch": "X",
