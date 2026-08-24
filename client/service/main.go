@@ -159,6 +159,11 @@ func main() {
 		slog.Error("聪明ai模型配置初始化失败", "err", err)
 		os.Exit(1)
 	}
+	subSmartProviderConfig, err := m5ai.NewSubSmartProviderConfigStore(*dataDir)
+	if err != nil {
+		slog.Error("次聪明ai模型配置初始化失败", "err", err)
+		os.Exit(1)
+	}
 	jobConfigStore, err := jobconfig.NewConfigStore(*dataDir)
 	if err != nil {
 		slog.Error("旧后台职位配置源初始化失败", "err", err)
@@ -192,6 +197,21 @@ func main() {
 		} else {
 			publishAdvice = provider
 			slog.Info("发布模型引擎已就绪(聪明ai)",
+				"provider", provider.ProviderName(), "model", provider.ModelName())
+		}
+	}
+	// 回复族(reply/serviceReply/silenceFollowup)在次聪明已配置时只走次聪明;
+	// 未配置=特性关闭,回复族沿用客户级引擎(同条款,回落在 patrol.adviceFor)。
+	var replyAdvice *m5ai.OpenAICompatibleProvider
+	if configured, loadErr := subSmartProviderConfig.Load(); loadErr != nil {
+		slog.Warn("次聪明ai配置不可用，回复族沿用客户级引擎", "err", loadErr)
+	} else if configured != nil {
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
+		if providerErr != nil {
+			slog.Warn("次聪明ai配置未能激活，回复族沿用客户级引擎", "err", providerErr)
+		} else {
+			replyAdvice = provider
+			slog.Info("回复模型引擎已就绪(次聪明ai)",
 				"provider", provider.ProviderName(), "model", provider.ModelName())
 		}
 	}
@@ -283,6 +303,9 @@ func main() {
 	if err != nil {
 		slog.Error("账号 actor 初始化失败", "err", err)
 		os.Exit(1)
+	}
+	if replyAdvice != nil {
+		actor.SetReplyAdvice(replyAdvice)
 	}
 	productWorkflow, err := productworkflow.NewManager(
 		st, actor, productworkflow.Config{
@@ -667,6 +690,24 @@ func main() {
 	}
 	adminAPI.SetSmartProviderStore(smartProviderConfig, rebuildSmartAdvice)
 	productController.SetSmartProviderStore(smartProviderConfig, rebuildSmartAdvice)
+	// 次聪明ai同款落盘即生效,只换回复族引擎,不碰客户级引擎与发布面。
+	rebuildSubSmartAdvice := func() {
+		configured, loadErr := subSmartProviderConfig.Load()
+		if loadErr != nil || configured == nil {
+			slog.Warn("次聪明ai配置刷新后不可读，沿用当前回复引擎", "err", loadErr)
+			return
+		}
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
+		if providerErr != nil {
+			slog.Warn("次聪明ai配置刷新后未能装配，沿用当前回复引擎", "err", providerErr)
+			return
+		}
+		actor.SetReplyAdvice(provider)
+		slog.Info("回复模型引擎已换代生效(次聪明ai)",
+			"provider", provider.ProviderName(), "model", provider.ModelName())
+	}
+	adminAPI.SetSubSmartProviderStore(subSmartProviderConfig, rebuildSubSmartAdvice)
+	productController.SetSubSmartProviderStore(subSmartProviderConfig, rebuildSubSmartAdvice)
 	// 每日自动开始(AGENTS.md 统一业务运行窗口条款,2026-08-19 甲方裁决):
 	// 开关默认关,每日 07:05~07:30 随机时刻替人点一次「开始」,复用产品
 	// 控制面同一入口,全部前置闸自动继承。goroutine 必须在 controller 的

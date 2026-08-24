@@ -141,19 +141,37 @@ func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte, onAppl
 // 形态后台都放在顶层,所以这里不需要区分两种形状。块缺失不是错误:那是"后台
 // 尚未配置聪明ai"的正常状态,返回空凭据由调用方按兜底停用路径处理。
 func ExtractSmartProviderCredentials(raw []byte) (BackendProviderCredentials, error) {
-	var payload struct {
-		SmartAi *credentialBlock `json:"smartAi"`
+	return extractTopLevelProviderCredentials(raw, "smartAi", "聪明ai")
+}
+
+// ExtractSubSmartProviderCredentials 提取回复族专用「次聪明ai」凭据(同条款
+// 2026-08-24 增补),顶层 subSmartAi 块,语义与聪明ai逐字同构。
+func ExtractSubSmartProviderCredentials(raw []byte) (BackendProviderCredentials, error) {
+	return extractTopLevelProviderCredentials(raw, "subSmartAi", "次聪明ai")
+}
+
+func extractTopLevelProviderCredentials(
+	raw []byte, key string, label string,
+) (BackendProviderCredentials, error) {
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		return BackendProviderCredentials{}, errors.New("job-config 响应无法解析" + label + "凭据")
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return BackendProviderCredentials{}, errors.New("job-config 响应无法解析聪明ai凭据")
+	blockRaw, ok := shape[key]
+	if !ok {
+		return BackendProviderCredentials{}, nil
 	}
-	if payload.SmartAi == nil {
+	var block *credentialBlock
+	if err := json.Unmarshal(blockRaw, &block); err != nil {
+		return BackendProviderCredentials{}, errors.New("job-config 响应无法解析" + label + "凭据")
+	}
+	if block == nil {
 		return BackendProviderCredentials{}, nil
 	}
 	return BackendProviderCredentials{
-		BaseURL: trimPointer(payload.SmartAi.BaseURL),
-		APIKey:  trimPointer(payload.SmartAi.APIKey),
-		Model:   firstModelInChain(trimPointer(payload.SmartAi.Model)),
+		BaseURL: trimPointer(block.BaseURL),
+		APIKey:  trimPointer(block.APIKey),
+		Model:   firstModelInChain(trimPointer(block.Model)),
 	}, nil
 }
 
@@ -182,6 +200,39 @@ func RefreshSmartProviderConfig(store *ProviderConfigStore, raw []byte, onApplie
 	}
 	if applied {
 		slog.Info("已按旧后台下发刷新发布模型配置(聪明ai)",
+			"model", credentials.Model,
+			"baseUrlRefreshed", credentials.BaseURL != "",
+			"keyRefreshed", credentials.APIKey != "")
+		if onApplied != nil {
+			onApplied()
+		}
+	}
+}
+
+// RefreshSubSmartProviderConfig 与 RefreshSmartProviderConfig 逐字同构,只是
+// 数据源换成 subSmartAi 块、日志措辞指明回复模型——排查"回复为什么还在用
+// 旧凭据"时要与另外两条刷新日志一眼区分。
+func RefreshSubSmartProviderConfig(store *ProviderConfigStore, raw []byte, onApplied func()) {
+	if store == nil {
+		return
+	}
+	credentials, err := ExtractSubSmartProviderCredentials(raw)
+	if err != nil {
+		slog.Warn("旧后台次聪明ai凭据无法解析，沿用本机回复模型配置",
+			"errorCode", "subSmartProviderCredentialsUnparsable", "err", err)
+		return
+	}
+	if credentials.empty() {
+		return
+	}
+	applied, err := store.ApplyBackendCredentials(credentials)
+	if err != nil {
+		slog.Warn("旧后台次聪明ai凭据未能落盘，沿用本机回复模型配置",
+			"errorCode", "subSmartProviderCredentialsNotStored", "err", err)
+		return
+	}
+	if applied {
+		slog.Info("已按旧后台下发刷新回复模型配置(次聪明ai)",
 			"model", credentials.Model,
 			"baseUrlRefreshed", credentials.BaseURL != "",
 			"keyRefreshed", credentials.APIKey != "")

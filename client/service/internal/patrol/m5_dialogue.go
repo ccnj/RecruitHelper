@@ -196,7 +196,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				// 保守停靠兜底。
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 			}
-			if a.manager.currentAdvice() == nil {
+			if a.manager.adviceFor(m5ai.PurposeIntent) == nil {
 				return nil
 			}
 			if err := a.runM5IntentAdvice(ctx, turn, material, facts); err != nil {
@@ -204,7 +204,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 			}
 		case store.DialogueTurnClassified:
 			if v4Owned && nextV4Advice == communication.V4AdviceServiceReply {
-				if a.manager.currentAdvice() == nil {
+				if a.manager.adviceFor(m5ai.PurposeServiceReply) == nil {
 					return nil
 				}
 				if err := a.runM5ReplyAdvice(
@@ -228,7 +228,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				if turn.IntentLabel != m5ai.IntentInterested || turn.IntentSource != store.DialogueIntentBusinessEvent {
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 				}
-				if a.manager.currentAdvice() == nil {
+				if a.manager.adviceFor(m5ai.PurposeReply) == nil {
 					return nil
 				}
 				if err := a.runM5ReplyAdvice(
@@ -251,7 +251,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 				if reduceErr != nil || !m5ResumeReplyAdviceAuthorized(decision) {
 					return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 				}
-				if a.manager.currentAdvice() == nil {
+				if a.manager.adviceFor(m5ai.PurposeReply) == nil {
 					return nil
 				}
 				if err := a.runM5ReplyAdvice(
@@ -274,7 +274,7 @@ func (a *roundActor) advanceM5TurnSteps(ctx context.Context, initial store.Dialo
 			if reduceErr != nil || decision.NextAdvice != m5ai.PurposeReply {
 				return a.manager.store.MarkDialogueTurnManualRequired(turn.TurnID, "reducerStateConflict", a.manager.now())
 			}
-			if a.manager.currentAdvice() == nil {
+			if a.manager.adviceFor(m5ai.PurposeReply) == nil {
 				return nil
 			}
 			if err := a.runM5ReplyAdvice(
@@ -934,11 +934,15 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	inputHash string,
 	attempt int,
 ) (int, error) {
+	// 补句与回复正文同族同引擎:账本身份仍是 PurposeReply,provider 请求与
+	// 追踪走 PurposeServiceReply,两个用途在 adviceFor 里映射到同一个引擎,
+	// 身份记账因此无歧义。
+	engine := a.manager.adviceFor(m5ai.PurposeServiceReply)
 	invocationID := stableM5ID("invocation", turn.TurnID, string(m5ai.PurposeReply), strconv.Itoa(attempt))
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
 		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: m5ai.PurposeReply,
 		Attempt:  attempt,
-		Provider: a.manager.currentAdvice().ProviderName(), Model: a.manager.currentAdvice().ModelName(),
+		Provider: engine.ProviderName(), Model: engine.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})
 	if err != nil {
@@ -972,7 +976,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 	func() {
 		a.manager.mu.Unlock()
 		defer a.manager.mu.Lock()
-		response, callErr = a.manager.currentAdvice().CompleteJSON(ctx, request)
+		response, callErr = engine.CompleteJSON(ctx, request)
 	}()
 	completion := m5CompletionFromProvider(reserved.Invocation.InvocationID, response, callErr, time.Since(started), a.manager.now())
 
@@ -993,7 +997,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		}
 	}
 	logAIInvocationOutcome(
-		a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
+		engine, m5ai.PurposeServiceReply, completion, response.Diagnostics.TraceErrorCode,
 	)
 	if failed && completion.Status != store.AIInvocationBudgetBlocked &&
 		attempt < store.MaxAIInvocationAttempts {
@@ -1033,7 +1037,7 @@ func (a *roundActor) executeM5ServiceAdviceAttempt(
 		return 0, errM5AdviceRoundSkipped
 	}
 	if err != nil {
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), m5ai.PurposeServiceReply, completion, err)
+		logAIInvocationPersistenceFailure(engine, m5ai.PurposeServiceReply, completion, err)
 	}
 	return 0, err
 }
@@ -1083,10 +1087,14 @@ func (a *roundActor) executeM5AdviceAttempt(
 	// legacy 预算恢复是那次事故的一次性授权,自带"attempt=2 失败即永久停止"
 	// 的边界(见 ReserveAuthorizedM5ReplyBudgetRecovery),不并入通用重试。
 	legacyRecovered := false
+	// 引擎按用途取一次快照,身份、调用与日志从头用到尾同一个:账本记的
+	// provider/model 必须是实际调用的引擎(AGENTS.md 次聪明段)。命名用 engine
+	// 是因为意向分支里已有叫 advice 的 IntentAdvice 局部变量,不遮蔽。
+	engine := a.manager.adviceFor(purpose)
 	invocationID := stableM5ID("invocation", turn.TurnID, string(purpose), strconv.Itoa(attempt))
 	reserved, err := a.manager.store.ReserveAIInvocation(store.ReserveAIInvocationRequest{
 		InvocationID: invocationID, TurnID: turn.TurnID, Purpose: purpose, Attempt: attempt,
-		Provider: a.manager.currentAdvice().ProviderName(), Model: a.manager.currentAdvice().ModelName(),
+		Provider: engine.ProviderName(), Model: engine.ModelName(),
 		InputHash: inputHash, CreatedAt: a.manager.now(),
 	})
 	if err != nil {
@@ -1118,8 +1126,8 @@ func (a *roundActor) executeM5AdviceAttempt(
 					InvocationID: stableM5ID(
 						"invocation", turn.TurnID, string(m5ai.PurposeReply), "2",
 					),
-					TurnID: turn.TurnID, Provider: a.manager.currentAdvice().ProviderName(),
-					Model: a.manager.currentAdvice().ModelName(), InputHash: inputHash,
+					TurnID: turn.TurnID, Provider: engine.ProviderName(),
+					Model: engine.ModelName(), InputHash: inputHash,
 					CreatedAt: a.manager.now(),
 				},
 			)
@@ -1169,7 +1177,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	func() {
 		a.manager.mu.Unlock()
 		defer a.manager.mu.Lock()
-		response, callErr = a.manager.currentAdvice().CompleteJSON(ctx, request)
+		response, callErr = engine.CompleteJSON(ctx, request)
 	}()
 	completion := m5CompletionFromProvider(reserved.Invocation.InvocationID, response, callErr, time.Since(started), a.manager.now())
 
@@ -1197,7 +1205,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 				"turnId", turn.TurnID, "err", reduceErr)
 		}
 		logAIInvocationOutcome(
-			a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
+			engine, purpose, completion, response.Diagnostics.TraceErrorCode,
 		)
 		if !legacyRecovered && m5AdviceShouldRetry(completion, decision, manualReason, attempt) {
 			if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
@@ -1214,7 +1222,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 		err := a.completeM5Intent(turn.TurnID, completion, decision, manualReason)
 		if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 			// 跳过哨兵是本轮的正常结论(边界收敛/结算重采),不是落账失败。
-			logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
+			logAIInvocationPersistenceFailure(engine, purpose, completion, err)
 		}
 		return 0, err
 	}
@@ -1236,7 +1244,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 			"turnId", turn.TurnID, "err", reduceErr)
 	}
 	logAIInvocationOutcome(
-		a.manager.currentAdvice(), purpose, completion, response.Diagnostics.TraceErrorCode,
+		engine, purpose, completion, response.Diagnostics.TraceErrorCode,
 	)
 	if !legacyRecovered && m5AdviceShouldRetry(completion, decision, "", attempt) {
 		if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
@@ -1257,7 +1265,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	)
 	if err != nil && !errors.Is(err, errM5AdviceRoundSkipped) {
 		// 同 intent 分支:跳过哨兵不是落账失败,不记持久化失败日志。
-		logAIInvocationPersistenceFailure(a.manager.currentAdvice(), purpose, completion, err)
+		logAIInvocationPersistenceFailure(engine, purpose, completion, err)
 	}
 	return 0, err
 }

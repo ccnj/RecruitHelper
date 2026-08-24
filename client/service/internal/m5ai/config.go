@@ -19,6 +19,12 @@ const ProviderConfigFilename = "llm-provider.json"
 // 块;损坏或缺失由下一次职位配置同步自愈。
 const SmartProviderConfigFilename = "llm-provider-smart.json"
 
+// SubSmartProviderConfigFilename 是回复族专用「次聪明ai」全局凭据的落盘位置
+// (同条款 2026-08-24 增补)。与聪明ai同构:无手工入口,唯一来源是响应顶层
+// subSmartAi 块。失效方向与聪明ai刻意不同——次聪明未配置时回复族回落客户级
+// 引擎(特性关闭,配置级默认),该回落在 patrol 的 adviceFor 实现,不在本层。
+const SubSmartProviderConfigFilename = "llm-provider-sub-smart.json"
+
 // ProviderConfig 落盘的只有身份与连接参数。token 预算刻意不在其中:AGENTS.md
 // 「输入/输出 token 预算由客户端代码固定」,配置文件里另存一份只会与代码常量
 // 漂移——2026-08-01 之前正是这样,Validate 要求两边逐字相等,于是升级客户端改
@@ -142,6 +148,14 @@ func NewSmartProviderConfigStore(dataDir string) (*ProviderConfigStore, error) {
 		return nil, errors.New("provider 配置缺少 data 目录")
 	}
 	return &ProviderConfigStore{path: filepath.Join(dataDir, SmartProviderConfigFilename)}, nil
+}
+
+// NewSubSmartProviderConfigStore 同上,落到次聪明ai自己的文件。
+func NewSubSmartProviderConfigStore(dataDir string) (*ProviderConfigStore, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return nil, errors.New("provider 配置缺少 data 目录")
+	}
+	return &ProviderConfigStore{path: filepath.Join(dataDir, SubSmartProviderConfigFilename)}, nil
 }
 
 func (s *ProviderConfigStore) Load() (*ProviderConfig, error) {

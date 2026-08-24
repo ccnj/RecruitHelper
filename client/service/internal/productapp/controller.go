@@ -76,6 +76,10 @@ type Controller struct {
 	// 拉取从响应顶层 smartAi 块刷新;可为 nil,刷新函数对 nil 安全。
 	smartProviderConfig  *m5ai.ProviderConfigStore
 	smartProviderApplied func()
+	// subSmartProviderConfig/subSmartProviderApplied 是回复族专用「次聪明ai」
+	// 的对应一对(同条款 2026-08-24 增补),来自响应顶层 subSmartAi 块。
+	subSmartProviderConfig  *m5ai.ProviderConfigStore
+	subSmartProviderApplied func()
 	// wechatReader 可以为 nil(既有测试不注入,行为同闸引入前)。生产装配始终
 	// 注入,见 main.go。
 	wechatReader WechatSettingReader
@@ -103,6 +107,13 @@ func (c *Controller) SetProviderApplied(fn func()) *Controller {
 func (c *Controller) SetSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *Controller {
 	c.smartProviderConfig = store
 	c.smartProviderApplied = onApplied
+	return c
+}
+
+// SetSubSmartProviderStore 注入次聪明ai配置落盘与其换代回调(装配期一次,非并发安全)。
+func (c *Controller) SetSubSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *Controller {
+	c.subSmartProviderConfig = store
+	c.subSmartProviderApplied = onApplied
 	return c
 }
 
@@ -235,6 +246,7 @@ func (c *Controller) Start(
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
 	m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
+	m5ai.RefreshSubSmartProviderConfig(c.subSmartProviderConfig, raw, c.subSmartProviderApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("start", "import", err, len(revisions))
@@ -322,6 +334,7 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
 	m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
+	m5ai.RefreshSubSmartProviderConfig(c.subSmartProviderConfig, raw, c.subSmartProviderApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("syncJobs", "import", err, len(revisions))
