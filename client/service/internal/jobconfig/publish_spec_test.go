@@ -292,53 +292,61 @@ func TestMatchesExistingPostingFoldsBracketsAndSpaces(t *testing.T) {
 	}
 }
 
-// 代招公司（2026-08-22 甲方裁决）：选填键，只去首尾空白、不校验、不产生 issue；
-// 配置了才进入 args，没配置不带键（键数与契约旧形态一致，手侧按最后一家）。
-func TestParsePublishSpecReadsOptionalPartnerCompany(t *testing.T) {
+// 代招公司 2026-08-24 起是职位级字段：由调用方在 ParsePublishSpec 后注入,
+// 注入了才进 args;JSON 里残留的旧「代招公司」键是死键,只进提示、绝不进填充。
+func TestPartnerCompanyComesFromJobFieldNotFromJSON(t *testing.T) {
+	// JSON 里的旧键:进 DeadPartnerCompany 与死字段提示,不进 PartnerCompany/args。
 	raw := strings.Replace(validPublishParams, `"招聘人数": 1,`, `"招聘人数": 1,
   "代招公司": "  桃子科技有限公司  ",`, 1)
 	spec, issues := ParsePublishSpec(raw)
 	if len(issues) != 0 {
-		t.Fatalf("代招公司不应产生任何预检问题: %s", issueFields(issues))
+		t.Fatalf("旧键不应产生预检问题(拦截在后台保存侧): %s", issueFields(issues))
 	}
-	if spec.PartnerCompany != "桃子科技有限公司" {
-		t.Fatalf("代招公司未去首尾空白解析: %q", spec.PartnerCompany)
+	if spec.PartnerCompany != "" || spec.DeadPartnerCompany != "桃子科技有限公司" {
+		t.Fatalf("旧键应只进 DeadPartnerCompany: %+v", spec)
 	}
 	args := spec.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
-	if args["partnerCompany"] != "桃子科技有限公司" {
-		t.Fatalf("代招公司未进入试填参数: %v", args["partnerCompany"])
+	if _, present := args["partnerCompany"]; present || len(args) != 13 {
+		t.Fatalf("旧键不得进入试填参数: %v", args)
 	}
-	if len(args) != 14 {
-		t.Fatalf("配置代招公司后试填参数键数应为 14: %d 个 %v", len(args), args)
+	found := false
+	for _, notice := range spec.DeadFieldNotices("财富传承顾问") {
+		if notice.Field == "代招公司" && strings.Contains(notice.Message, "独立输入框") {
+			found = true
+		}
 	}
-	if notice := spec.PartnerCompanyNotice(); notice == nil || notice.Field != "代招公司" ||
-		!strings.Contains(notice.Message, "桃子科技有限公司") {
-		t.Fatalf("配置了代招公司预检应给出提示: %+v", notice)
+	if !found {
+		t.Fatalf("残留旧键必须有死字段提示: %+v", spec.DeadFieldNotices("财富传承顾问"))
+	}
+	if spec.PartnerCompanyNotice() != nil {
+		t.Fatal("未注入职位级字段时不应有代招公司预检提示")
 	}
 
-	// 没配置 / 空白：视同未配置，不带键、不提示、不报错。
-	for _, variant := range []string{
-		validPublishParams,
-		strings.Replace(validPublishParams, `"招聘人数": 1,`, `"招聘人数": 1,
-  "代招公司": "   ",`, 1),
-	} {
-		spec, issues := ParsePublishSpec(variant)
-		if len(issues) != 0 {
-			t.Fatalf("未配置代招公司不应有预检问题: %s", issueFields(issues))
-		}
-		if spec.PartnerCompany != "" {
-			t.Fatalf("空白代招公司应视同未配置: %q", spec.PartnerCompany)
-		}
-		args := spec.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
-		if _, present := args["partnerCompany"]; present {
-			t.Fatalf("未配置时不得带 partnerCompany 键: %v", args)
-		}
-		if len(args) != 13 {
-			t.Fatalf("未配置时试填参数键数应为 13: %d", len(args))
-		}
-		if spec.PartnerCompanyNotice() != nil {
-			t.Fatal("未配置代招公司不应有预检提示")
-		}
+	// 注入职位级字段:进 args、出预检提示。
+	spec.PartnerCompany = "上海云砚禾信息咨询有限公司"
+	args = spec.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
+	if args["partnerCompany"] != "上海云砚禾信息咨询有限公司" || len(args) != 14 {
+		t.Fatalf("注入职位级字段后应进入试填参数: %v", args)
+	}
+	if notice := spec.PartnerCompanyNotice(); notice == nil ||
+		!strings.Contains(notice.Message, "上海云砚禾信息咨询有限公司") {
+		t.Fatalf("注入后预检应给出提示: %+v", notice)
+	}
+
+	// 未注入且 JSON 也没旧键:不带键、不提示。
+	clean, issues := ParsePublishSpec(validPublishParams)
+	if len(issues) != 0 {
+		t.Fatalf("夹具不应有问题: %s", issueFields(issues))
+	}
+	if clean.PartnerCompany != "" || clean.DeadPartnerCompany != "" {
+		t.Fatalf("干净夹具不应有代招公司痕迹: %+v", clean)
+	}
+	cleanArgs := clean.DraftArgs("财富传承顾问", "理财顾问", []string{"法律"})
+	if _, present := cleanArgs["partnerCompany"]; present || len(cleanArgs) != 13 {
+		t.Fatalf("未配置时不得带 partnerCompany 键: %v", cleanArgs)
+	}
+	if clean.PartnerCompanyNotice() != nil {
+		t.Fatal("未配置代招公司不应有预检提示")
 	}
 }
 

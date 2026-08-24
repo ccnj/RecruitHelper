@@ -16,7 +16,7 @@ const backendJobsFixture = `{
   "currentJobId": 42,
   "jobs": [
     {
-      "job": {"id": 42, "name": "大客户经理", "environment": "production"},
+      "job": {"id": 42, "name": "大客户经理", "environment": "production", "partnerCompany": " 上海云砚禾信息咨询有限公司 "},
       "scoring": {"prompt": "p", "apiKey": "sk-must-not-leak", "model": "deepseek-chat", "baseUrl": "https://provider.fixture"},
       "documents": {"打分": "p", "发布参数": "{\"职位名称\":\"大客户经理\"}"},
       "missingDocs": []
@@ -143,5 +143,23 @@ func TestFetchAllRejectsMachineMismatchBeforeNetwork(t *testing.T) {
 	_, err := NewSource(store, backend.Client(), fixedMachineID).FetchAll(context.Background())
 	if !errors.Is(err, ErrMachineMismatch) || calls != 0 {
 		t.Fatalf("机器不匹配未在网络前拦截: calls=%d err=%v", calls, err)
+	}
+}
+
+// 代招公司(2026-08-24 职位级字段):从 job.partnerCompany 去空白带出;旧后台
+// 未升级时字段缺席,落成空串=未配置,方向是干净失败不乱选。
+func TestParseBackendJobPublishSourcesCarriesPartnerCompany(t *testing.T) {
+	sources, err := ParseBackendJobPublishSources([]byte(backendJobsFixture))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(sources) != 3 {
+		t.Fatalf("条数错误: %d", len(sources))
+	}
+	if sources[0].PartnerCompany != "上海云砚禾信息咨询有限公司" {
+		t.Fatalf("代招公司未去空白带出: %q", sources[0].PartnerCompany)
+	}
+	if sources[1].PartnerCompany != "" || sources[2].PartnerCompany != "" {
+		t.Fatalf("字段缺席应落成空串: %+v", sources[1:])
 	}
 }
