@@ -154,6 +154,11 @@ func main() {
 		slog.Error("本地模型配置初始化失败", "err", err)
 		os.Exit(1)
 	}
+	smartProviderConfig, err := m5ai.NewSmartProviderConfigStore(*dataDir)
+	if err != nil {
+		slog.Error("聪明ai模型配置初始化失败", "err", err)
+		os.Exit(1)
+	}
 	jobConfigStore, err := jobconfig.NewConfigStore(*dataDir)
 	if err != nil {
 		slog.Error("旧后台职位配置源初始化失败", "err", err)
@@ -172,6 +177,22 @@ func main() {
 		} else {
 			advice = provider
 			slog.Info("M5 建议层已就绪", "provider", provider.ProviderName(), "model", provider.ModelName())
+		}
+	}
+	// 发布链路(职位类别/关键词)只用聪明ai引擎,与客户级引擎互不回落(AGENTS.md
+	// 「LLM provider 直连」2026-08-24 增补)。未配置时发布 AI 兜底保持停用,精确
+	// 匹配照旧;不得把客户级 advice 喂给发布面。
+	var publishAdvice *m5ai.OpenAICompatibleProvider
+	if configured, loadErr := smartProviderConfig.Load(); loadErr != nil {
+		slog.Warn("聪明ai配置不可用，发布 AI 兜底保持停用", "err", loadErr)
+	} else if configured != nil {
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
+		if providerErr != nil {
+			slog.Warn("聪明ai配置未能激活，发布 AI 兜底保持停用", "err", providerErr)
+		} else {
+			publishAdvice = provider
+			slog.Info("发布模型引擎已就绪(聪明ai)",
+				"provider", provider.ProviderName(), "model", provider.ModelName())
 		}
 	}
 
@@ -602,10 +623,11 @@ func main() {
 			},
 		})
 	})
-	// 职位类别在后台配置值精确匹配不上时改由大模型从平台候选里选,复用同一条
-	// provider 通道。未配置 provider 时只是这条兜底不可用,精确匹配照旧工作。
-	if advice != nil {
-		adminAPI = adminAPI.SetAdvice(advice)
+	// 职位类别与关键词在后台配置值精确匹配不上时改由大模型从平台候选里选,
+	// 走发布专用聪明ai引擎(不与沟通/评分共用客户级引擎)。未配置聪明ai时只是
+	// 这条兜底不可用,精确匹配照旧工作。
+	if publishAdvice != nil {
+		adminAPI = adminAPI.SetAdvice(publishAdvice)
 	}
 	// 模型配置落盘即换代生效(2026-08-12 甲方裁决):后台下发、诊断台手填任一
 	// 落盘成功都当场重建引擎并换进 patrol 与诊断面。重建失败只告警、沿用当前
@@ -622,12 +644,29 @@ func main() {
 			return
 		}
 		actor.SetAdvice(provider)
-		adminAPI.SetAdvice(provider)
 		slog.Info("模型引擎已换代生效",
 			"provider", provider.ProviderName(), "model", provider.ModelName())
 	}
 	adminAPI.SetProviderApplied(rebuildAdvice)
 	productController.SetProviderApplied(rebuildAdvice)
+	// 聪明ai同款落盘即生效,只换发布面的引擎,不碰 patrol。
+	rebuildSmartAdvice := func() {
+		configured, loadErr := smartProviderConfig.Load()
+		if loadErr != nil || configured == nil {
+			slog.Warn("聪明ai配置刷新后不可读，沿用当前发布引擎", "err", loadErr)
+			return
+		}
+		provider, providerErr := m5ai.NewOpenAICompatibleProvider(*configured, nil, traceRecorder)
+		if providerErr != nil {
+			slog.Warn("聪明ai配置刷新后未能装配，沿用当前发布引擎", "err", providerErr)
+			return
+		}
+		adminAPI.SetAdvice(provider)
+		slog.Info("发布模型引擎已换代生效(聪明ai)",
+			"provider", provider.ProviderName(), "model", provider.ModelName())
+	}
+	adminAPI.SetSmartProviderStore(smartProviderConfig, rebuildSmartAdvice)
+	productController.SetSmartProviderStore(smartProviderConfig, rebuildSmartAdvice)
 	// 每日自动开始(AGENTS.md 统一业务运行窗口条款,2026-08-19 甲方裁决):
 	// 开关默认关,每日 07:05~07:30 随机时刻替人点一次「开始」,复用产品
 	// 控制面同一入口,全部前置闸自动继承。goroutine 必须在 controller 的

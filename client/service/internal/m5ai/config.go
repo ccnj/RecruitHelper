@@ -12,6 +12,13 @@ import (
 
 const ProviderConfigFilename = "llm-provider.json"
 
+// SmartProviderConfigFilename 是发布专用「聪明ai」全局凭据的落盘位置(AGENTS.md
+// 「LLM provider 直连」2026-08-24 增补)。它与客户级配置是两份独立文件、两个
+// 独立引擎:发布链路(jobClass/jobKeywords)只用这一份,其余用途只用客户级那份,
+// 互不回落。本文件没有手工配置入口,唯一来源是旧后台 job-config 响应的 smartAi
+// 块;损坏或缺失由下一次职位配置同步自愈。
+const SmartProviderConfigFilename = "llm-provider-smart.json"
+
 // ProviderConfig 落盘的只有身份与连接参数。token 预算刻意不在其中:AGENTS.md
 // 「输入/输出 token 预算由客户端代码固定」,配置文件里另存一份只会与代码常量
 // 漂移——2026-08-01 之前正是这样,Validate 要求两边逐字相等,于是升级客户端改
@@ -126,6 +133,15 @@ func NewProviderConfigStore(dataDir string) (*ProviderConfigStore, error) {
 		return nil, errors.New("provider 配置缺少 data 目录")
 	}
 	return &ProviderConfigStore{path: filepath.Join(dataDir, ProviderConfigFilename)}, nil
+}
+
+// NewSmartProviderConfigStore 与 NewProviderConfigStore 同构,只是落到聪明ai
+// 自己的文件;加载、校验、合并语义完全复用。
+func NewSmartProviderConfigStore(dataDir string) (*ProviderConfigStore, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return nil, errors.New("provider 配置缺少 data 目录")
+	}
+	return &ProviderConfigStore{path: filepath.Join(dataDir, SmartProviderConfigFilename)}, nil
 }
 
 func (s *ProviderConfigStore) Load() (*ProviderConfig, error) {

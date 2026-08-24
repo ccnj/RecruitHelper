@@ -71,6 +71,11 @@ type Controller struct {
 	// providerApplied 在模型配置落盘成功后被调用(可为 nil),由 main 装配为
 	// "重建引擎并换代",落盘即生效(2026-08-12 甲方裁决)。
 	providerApplied func()
+	// smartProviderConfig/smartProviderApplied 是发布专用「聪明ai」凭据的对应
+	// 一对(AGENTS.md「LLM provider 直连」2026-08-24 增补),随同一次 job-config
+	// 拉取从响应顶层 smartAi 块刷新;可为 nil,刷新函数对 nil 安全。
+	smartProviderConfig  *m5ai.ProviderConfigStore
+	smartProviderApplied func()
 	// wechatReader 可以为 nil(既有测试不注入,行为同闸引入前)。生产装配始终
 	// 注入,见 main.go。
 	wechatReader WechatSettingReader
@@ -91,6 +96,13 @@ func (c *Controller) SetWechatSettingReader(reader WechatSettingReader) *Control
 // SetProviderApplied 注入模型配置落盘后的引擎换代回调(装配期一次,非并发安全)。
 func (c *Controller) SetProviderApplied(fn func()) *Controller {
 	c.providerApplied = fn
+	return c
+}
+
+// SetSmartProviderStore 注入聪明ai配置落盘与其换代回调(装配期一次,非并发安全)。
+func (c *Controller) SetSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *Controller {
+	c.smartProviderConfig = store
+	c.smartProviderApplied = onApplied
 	return c
 }
 
@@ -222,6 +234,7 @@ func (c *Controller) Start(
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
+	m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("start", "import", err, len(revisions))
@@ -308,6 +321,7 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
+	m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
 	if err != nil || len(revisions) != 1 {
 		logCurrentJobSyncFailure("syncJobs", "import", err, len(revisions))
