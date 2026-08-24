@@ -416,6 +416,10 @@ const MAIN_GREETING_FAILURE_REASONS = [
   'default_setting_selected',
   'send_surface_unavailable',
   'input_rejected',
+  // 平台在发送前就明确拒绝了招呼内容(新版弹窗把敏感词拒绝写在自定义项下的
+  // 校验槽,同时发送键回到原生禁用;2026-08-24 甲方提供真机 DOM)。它不是
+  // 技术失败:脑侧按 GREETING_REJECTED/none 收场,零点击可证明零副作用。
+  'content_rejected',
 ] as const
 
 type MainGreetingFailureReason = typeof MAIN_GREETING_FAILURE_REASONS[number]
@@ -449,11 +453,12 @@ type MainGreetingListTargetResult =
 // 与招呼弹窗开合。纯只读扫描;失败方向永远是"少一条现场"。
 //
 // editError 是例外——它不是诊断,是判据:2026-08-07 真机考古确认平台把
-// "内容中涉及敏感词,请修改"写在弹窗内 `.ai-greeting-modal__edit-error`,
+// "内容中涉及敏感词,请修改"写在旧版弹窗内 `.ai-greeting-modal__edit-error`,
 // 点发送时才校验,发送按钮不置灰,弹窗保持打开。读到它即平台明确业务拒绝
-// (详见 docs/招呼suspect取证立案-2026-08-07.md)。该判据仅覆盖旧版
-// `.ai-greeting-modal` 形态;新版 `.chat-set-greet` 弹窗(2026-08-24)的业务
-// 拒绝落点尚无真机事实,被拒时按既有阴性 suspect 转人工轨收场,不猜判据。
+// (详见 docs/招呼suspect取证立案-2026-08-07.md)。新版 `.chat-set-greet`
+// 弹窗的对应落点是自定义项下的 `.km-form-item__invalid`(2026-08-24 甲方
+// 提供真机 DOM);新版通常在点发送前就校验并禁用发送键,发前拒绝走
+// mainSendGreetingOnce 的 content_rejected,本通道兜发后才呈现的形态。
 type MainGreetingSceneResult =
   | { status: 'ready'; modalCount: number; newTexts: string[]; editError: string }
   | { status: 'failed' }
@@ -3277,20 +3282,24 @@ function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult
       .filter(visible)
     // 弹窗内的编辑区错误位。该节点常驻 DOM、无错时是纯空白,所以判据是
     // "可见且 trim 后非空",绝不能判节点是否存在——判错方向会把成功当拒绝。
-    // 判据只覆盖旧版弹窗:敏感词拒绝写在 .ai-greeting-modal__edit-error 是
-    // 2026-08-07 真机考古事实;新版 .chat-set-greet 弹窗的业务拒绝落点尚无
-    // 真机事实,不凭猜测接判据——新版被拒时走既有阴性 suspect 转人工轨,
-    // 现场由浮层扫描与 modalCount 留痕,攒到真机样本再立案扩展。
-    const editError = legacyModals.length === 0 ? '' : (() => {
-      for (const node of Array.from(legacyModals[0].querySelectorAll<HTMLElement>(
-        '.ai-greeting-modal__edit-error',
-      ))) {
+    // 旧版落点 .ai-greeting-modal__edit-error 是 2026-08-07 真机考古事实;
+    // 新版 .chat-set-greet 落点 .km-form-item__invalid 是 2026-08-24 甲方
+    // 提供的真机 DOM(原话「内容中涉及联系方式等敏感词，请修改后保存」)。
+    // 新版通常在点发送前就校验并禁用发送键(那条路走 content_rejected),
+    // 本通道兜的是点击后才呈现拒绝的形态。
+    const readErrorSlot = (root: HTMLElement, selector: string): string => {
+      for (const node of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
         if (!visible(node)) continue
         const text = clean(node.innerText)
         if (text !== '') return text.slice(0, 160)
       }
       return ''
-    })()
+    }
+    const editError = legacyModals.length > 0
+      ? readErrorSlot(legacyModals[0], '.ai-greeting-modal__edit-error')
+      : kmGreetModals.length > 0
+        ? readErrorSlot(kmGreetModals[0], '.km-form-item__invalid')
+        : ''
     return { status: 'ready', modalCount: legacyModals.length + kmGreetModals.length, newTexts, editError }
   } catch {
     return { status: 'failed' }
@@ -3802,7 +3811,7 @@ async function mainSendGreetingOnce(
     intrinsicClick: IntrinsicClick
   }
   type FinalEvaluation = { status: 'ready'; surface: FinalSurface } |
-    { status: 'failed'; reason: MainGreetingFailureReason }
+    { status: 'failed'; reason: MainGreetingFailureReason; detail?: string }
   const evaluateFinal = (expectedValue: string): FinalEvaluation => {
     if (Date.now() > irreversibleNotAfterMs) return { status: 'failed', reason: 'action_window_elapsed' }
     if (!principalMatches()) return { status: 'failed', reason: 'identity_changed' }
@@ -3819,6 +3828,21 @@ async function mainSendGreetingOnce(
     const defaultState = defaultSettingState(modal.root)
     if (defaultState === 'unresolved') return { status: 'failed', reason: 'default_setting_unresolved' }
     if (defaultState === 'checked') return { status: 'failed', reason: 'default_setting_selected' }
+    // 新版弹窗在发送前就校验正文:平台拒绝(敏感词等)写在自定义项下的
+    // `.km-form-item__invalid`,同时发送键回到原生禁用(2026-08-24 甲方提供
+    // 真机 DOM,原话「内容中涉及联系方式等敏感词，请修改后保存」)。该槽
+    // 常驻 DOM、无错时是纯空白,判据与旧版错误位同款:可见且 trim 后非空,
+    // 绝不判节点存在性。此处尚未点击发送,零副作用可证明,按平台明确业务
+    // 拒绝收场。旧版真机事实是点发送后才校验,发前槽位恒空,不查。
+    if (modal.kind === 'kmGreet') {
+      for (const node of Array.from(custom.querySelectorAll<HTMLElement>('.km-form-item__invalid'))) {
+        if (!visible(node)) continue
+        const message = clean(node.innerText)
+        if (message !== '') {
+          return { status: 'failed', reason: 'content_rejected', detail: message.slice(0, 220) }
+        }
+      }
+    }
     const footers = Array.from(modal.root.querySelectorAll<HTMLElement>(
       modal.kind === 'legacy' ? '.ai-greeting-modal__footer' : '.km-modal__footer',
     )).filter(visible)
@@ -3894,6 +3918,18 @@ function throwGreetingActionFailure(result: MainGreetingActionResult): never {
   if (result.reason === 'two_step_surface_unavailable') {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前页面不满足已验证的两步招呼动作表面', 'manualOnly')
   }
+  if (result.reason === 'content_rejected') {
+    // 发送前平台已明确拒绝招呼内容且发送键禁用:未发生任何点击,零副作用
+    // 可证明。与发后轮询拒绝同一收场:GREETING_REJECTED/no/none,脑侧终结
+    // 档案、不重试、不转人工。
+    throw new ZhilianPlatformError(
+      'GREETING_REJECTED',
+      `平台明确拒绝本次招呼:${result.detail ?? '平台标记招呼内容不可发送'}`,
+      'no',
+      undefined,
+      'none',
+    )
+  }
   throw new ZhilianPlatformError(
     'ELEMENT_UNRESOLVED',
     `招呼编辑器或发送表面无法唯一确认：${result.reason}${failureDetailSuffix(result.detail)}`,
@@ -3928,6 +3964,20 @@ export async function sendZhilianGreeting(
   if (current.result.data.contactState !== 'unestablished') {
     throw new ZhilianPlatformError('GUARD_FAILED', '当前候选人、职位或关系状态与招呼意图不一致', 'manualOnly')
   }
+  // 发送前平台明确拒绝(content_rejected,新版弹窗在点击前校验正文)时弹窗
+  // 不会自己关,不关会把后续候选人全部挡在 USER_ACTIVE(2026-08-06 真机:
+  // 三次拒绝连累 11 人被跳过)。与发后拒绝同款止损:只点弹窗自身的关闭
+  // 控件,关不掉不推翻拒绝判定,也不改变本次结论。
+  const closeModalOnContentRejection = async (result: MainGreetingActionResult): Promise<void> => {
+    if (result.status !== 'failed' || result.reason !== 'content_rejected') return
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
+      ctx.checkpoint()
+      await runMain(tabId, mainCloseGreetingModal, [])
+    } catch {
+      // 关不掉只影响后续候选人的接管,由它们各自的 USER_ACTIVE 诚实上报。
+    }
+  }
   const evaluatorBase = [
     args.platformUserRef,
     args.positionRef,
@@ -3953,7 +4003,10 @@ export async function sendZhilianGreeting(
   if (!validMainGreetingActionResult(preflight)) {
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '招呼预检返回结构无效', 'manualOnly')
   }
-  if (preflight.status !== 'ready') throwGreetingActionFailure(preflight)
+  if (preflight.status !== 'ready') {
+    await closeModalOnContentRejection(preflight)
+    throwGreetingActionFailure(preflight)
+  }
   // suspect 取证基线:点击前页面上已有的浮层文本,轮询时只报基线外的新浮层。
   // 只读、失败即空基线;最终发送前的 commit 会字面重跑同一 evaluator,
   // 这里的读取不构成对最终动作表面的授权(2026-08-07 甲方裁决立案)。
@@ -3979,7 +4032,10 @@ export async function sendZhilianGreeting(
       'possible',
     )
   }
-  if (action.status !== 'clicked') throwGreetingActionFailure(action)
+  if (action.status !== 'clicked') {
+    await closeModalOnContentRejection(action)
+    throwGreetingActionFailure(action)
+  }
 
   let capturedOverlay: { text: string; round: number } | null = null
   let lastModalCount: number | null = null
