@@ -47,6 +47,10 @@ type backendJob struct {
 	ID          json.Number `json:"id"`
 	Name        string      `json:"name"`
 	Environment string      `json:"environment"`
+	// 代招公司(旧后台 jobs.partner_company,2026-08-24 起职位级字段)。
+	// 旧后台未升级时字段缺席、未配置时为 null,两者都落成空串=未配置,
+	// 失效方向一致:有「职位性质」组的账号会以未配置干净失败,不会乱选。
+	PartnerCompany string `json:"partnerCompany"`
 }
 
 type backendJobEntry struct {
@@ -116,11 +120,12 @@ func ParseBackendJobs(raw []byte) ([]BackendJob, error) {
 // 任何读 API 响应。类型分离让"正文漏进 UI"成为编译期就写不出来的事，而不是
 // 靠每个 handler 记得挑字段。
 type BackendJobPublishSource struct {
-	JobID         string
-	JobName       string
-	Environment   string
-	IsCurrent     bool
-	PublishParams string
+	JobID          string
+	JobName        string
+	Environment    string
+	IsCurrent      bool
+	PublishParams  string
+	PartnerCompany string
 }
 
 // ParseBackendJobPublishSources 与 ParseBackendJobs 同源，只是多带出发布参数
@@ -138,11 +143,12 @@ func ParseBackendJobPublishSources(raw []byte) ([]BackendJobPublishSource, error
 			return nil, err
 		}
 		out = append(out, BackendJobPublishSource{
-			JobID:         jobID,
-			JobName:       strings.TrimSpace(entry.Job.Name),
-			Environment:   strings.TrimSpace(entry.Job.Environment),
-			IsCurrent:     currentJobID != "" && jobID == currentJobID,
-			PublishParams: entry.Documents[PublishParamsDocType],
+			JobID:          jobID,
+			JobName:        strings.TrimSpace(entry.Job.Name),
+			Environment:    strings.TrimSpace(entry.Job.Environment),
+			IsCurrent:      currentJobID != "" && jobID == currentJobID,
+			PublishParams:  entry.Documents[PublishParamsDocType],
+			PartnerCompany: strings.TrimSpace(entry.Job.PartnerCompany),
 		})
 	}
 	return out, nil

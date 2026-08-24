@@ -76,19 +76,21 @@ type PublishSpec struct {
 	ShowToSeeker  bool
 	SyncToMailbox bool
 
-	// 代招公司（选填键「代招公司」，2026-08-22 立案、2026-08-23 甲方裁决改为硬闸）。
-	// 只在平台发布表单出现「职位性质」一组的账号上用得到：手在代招公司弹窗里
-	// 按去首尾空白后逐字相等找它，恰好命中一行才选；命中零行、多行或该组在场却
-	// 未配置，手侧整体 failed（点发布之前、零副作用），失败原文带平台实际的公司
-	// 名清单。脑侧只负责把它原样带给三趟填表原语（读候选、词库、试填/发布），
-	// 预检不因它产生 issue——后台不知道哪些账号有这一组，空白视同未配置。
+	// 代招公司（2026-08-22 立案、2026-08-23 改硬闸、2026-08-24 甲方裁决从发布
+	// 参数 JSON 抽离为职位级字段 jobs.partner_company）。**不再来自本 JSON**：
+	// ParsePublishSpec 不填它，由调用方在解析后从旧后台 job.partnerCompany
+	// （BackendJobPublishSource.PartnerCompany）注入。硬闸语义不变：手在代招
+	// 公司弹窗里按去首尾空白后逐字相等找它，恰好命中一行才选；零行、多行或
+	// 该组在场却未配置，手侧整体 failed（点发布之前、零副作用）。空串=未配置。
 	PartnerCompany string
 
-	// 三个死字段的原值，仅用于告诉运营"这几行没有生效"。它们绝不进入任何
-	// 填充路径——留在 spec 里只为生成提示。
-	DeadJobName  string
-	DeadJobClass string
-	DeadKeywords []string
+	// 死字段的原值，仅用于告诉运营"这几行没有生效"。它们绝不进入任何
+	// 填充路径——留在 spec 里只为生成提示。DeadPartnerCompany 是 2026-08-24
+	// 抽离后仍残留在 JSON 里的旧「代招公司」键。
+	DeadJobName        string
+	DeadJobClass       string
+	DeadKeywords       []string
+	DeadPartnerCompany string
 }
 
 // DraftArgs 把校验通过的 spec 组装成手侧试填参数。
@@ -253,8 +255,9 @@ func ParsePublishSpec(raw string) (PublishSpec, []PublishIssue) {
 
 	spec.ShowToSeeker = doc.ShowToSeeker != nil && *doc.ShowToSeeker
 	spec.SyncToMailbox = doc.SyncToMailbox != nil && *doc.SyncToMailbox
-	// 代招公司是选填的提示项：只去首尾空白，不校验、不产生 issue。
-	spec.PartnerCompany = strings.TrimSpace(deref(doc.PartnerCompany))
+	// 旧「代招公司」键 2026-08-24 起是死键：只收进提示，不进任何填充路径。
+	// 生效值由调用方从职位级字段注入 PartnerCompany。
+	spec.DeadPartnerCompany = strings.TrimSpace(deref(doc.PartnerCompany))
 	return spec, issues
 }
 
@@ -284,6 +287,12 @@ func (s PublishSpec) DeadFieldNotices(jobName string) []PublishIssue {
 		out = append(out, PublishIssue{
 			Field:   DeadFieldKeywords,
 			Message: "不参与发布，关键词由大模型从平台当次给出的分组词库中选定 3-5 个",
+		})
+	}
+	if strings.TrimSpace(s.DeadPartnerCompany) != "" {
+		out = append(out, PublishIssue{
+			Field:   "代招公司",
+			Message: "不参与发布，代招公司已迁至职位页的独立输入框（发布以输入框里的值为准），请把该键从发布参数 JSON 中删除",
 		})
 	}
 	return out

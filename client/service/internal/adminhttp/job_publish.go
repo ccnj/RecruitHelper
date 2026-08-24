@@ -140,6 +140,8 @@ func (a *API) jobPublishPrecheck(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, row)
 			continue
 		}
+		// 代招公司 2026-08-24 起来自职位级字段,不再来自发布参数 JSON。
+		spec.PartnerCompany = source.PartnerCompany
 		row.Verdict = publishVerdictReady
 		row.Notices = spec.DeadFieldNotices(source.JobName)
 		if notice := spec.PartnerCompanyNotice(); notice != nil {
@@ -229,6 +231,8 @@ func (a *API) resolvePublishTarget(
 		return nil, jobconfig.PublishSpec{},
 			&jobPublishFailure{http.StatusConflict, "该职位发布参数未通过预检，先修参数再操作"}
 	}
+	// 代招公司 2026-08-24 起来自职位级字段,不再来自发布参数 JSON。
+	spec.PartnerCompany = target.PartnerCompany
 	return target, spec, nil
 }
 
