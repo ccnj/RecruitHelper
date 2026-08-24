@@ -428,7 +428,9 @@ type MainGreetingPhase = 'prepare' | 'preflight' | 'commit'
 type MainGreetingActionResult =
   | { status: 'prepared' }
   | { status: 'ready' }
-  | { status: 'clicked' }
+  // modalKind 由 commit 捎回:发后的成功弹窗清场只在新版形态启用,旧版没有
+  // 该弹窗,零新增等待。缺失时按 legacy 处理(方向是不动作)。
+  | { status: 'clicked'; modalKind?: 'legacy' | 'kmGreet' }
   | { status: 'failed'; reason: MainGreetingFailureReason; detail?: string }
 
 const MAIN_GREETING_LIST_TARGET_FAILURE_REASONS = [
@@ -459,8 +461,18 @@ type MainGreetingListTargetResult =
 // 弹窗的对应落点是自定义项下的 `.km-form-item__invalid`(2026-08-24 甲方
 // 提供真机 DOM);新版通常在点发送前就校验并禁用发送键,发前拒绝走
 // mainSendGreetingOnce 的 content_rejected,本通道兜发后才呈现的形态。
+// successModalCount 是纯观察位:新版弹窗发送后平台必弹「招呼语已发送」成功
+// 弹窗(.set-greet-success-modal,2026-08-24 甲方真机确认每次都弹、不会自己
+// 关)。观察归本扫描,关闭归 mainDismissGreetingSuccessModals,由编排层在
+// 观察到时发起至多一趟清场;它不是成功判据,成功仍只认关系翻转。
 type MainGreetingSceneResult =
-  | { status: 'ready'; modalCount: number; newTexts: string[]; editError: string }
+  | {
+    status: 'ready'
+    modalCount: number
+    newTexts: string[]
+    editError: string
+    successModalCount: number
+  }
   | { status: 'failed' }
 
 interface MainListDOMWindowResult {
@@ -3300,7 +3312,16 @@ function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult
       : kmGreetModals.length > 0
         ? readErrorSlot(kmGreetModals[0], '.km-form-item__invalid')
         : ''
-    return { status: 'ready', modalCount: legacyModals.length + kmGreetModals.length, newTexts, editError }
+    const successModals = Array.from(document.querySelectorAll<HTMLElement>(
+      '.set-greet-success-modal .km-modal',
+    )).filter(visible)
+    return {
+      status: 'ready',
+      modalCount: legacyModals.length + kmGreetModals.length,
+      newTexts,
+      editError,
+      successModalCount: successModals.length,
+    }
   } catch {
     return { status: 'failed' }
   }
@@ -3336,12 +3357,109 @@ function mainCloseGreetingModal(): { closed: boolean } {
   }
 }
 
+// 新版招呼发送后的「招呼语已发送」成功弹窗清场(2026-08-24 甲方真机:每次
+// 都弹、不会自己关、「我知道了」只关弹窗不跳转;旧版形态没有该弹窗)。
+// 一趟把当前可见的全关掉——残骸会盖住推荐页,也顺手清掉上一趟失败的遗留。
+// 每个弹窗只碰两个控件:首选它自己唯一且未禁用的「我知道了」,没有才点它
+// 自己唯一的 .km-modal__close-btn;其余一律不碰。多个弹窗之间保持交互节奏。
+// 它是清场不是判据:任何失败都不影响发送判定,也不在函数内重试。
+// scene 只带标签名与类名(手侧日志纪律,不携带页面文本)。
+async function mainDismissGreetingSuccessModals(): Promise<{
+  found: boolean
+  closed: boolean
+  remaining: number
+  scene: string
+}> {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const sig = (node: Element): string =>
+    `${node.tagName}.${clean(node.getAttribute('class')).replace(/ /gu, '.')}`.slice(0, 96)
+  const roots = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('.set-greet-success-modal .km-modal'))
+      .filter(visible)
+  const dismissTarget = (root: HTMLElement): HTMLElement | null => {
+    const acks = Array.from(root.querySelectorAll<HTMLButtonElement>('button[type="button"]'))
+      .filter((node) => visible(node) && !node.disabled && clean(node.textContent) === '我知道了')
+    if (acks.length === 1 && (acks[0].form === null || acks[0].type === 'button')) return acks[0]
+    const closes = Array.from(root.querySelectorAll<HTMLButtonElement>('.km-modal__close-btn'))
+      .filter((node) => visible(node) && !node.disabled)
+    if (closes.length === 1 && (closes[0].form === null || closes[0].type === 'button')) {
+      return closes[0]
+    }
+    return null
+  }
+  const scene: string[] = []
+  try {
+    const initial = roots()
+    if (initial.length === 0) return { found: false, closed: false, remaining: 0, scene: '' }
+    const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+    const invokeClick = Function.prototype.call.bind(intrinsicClick) as (node: HTMLElement) => void
+    let clicked = 0
+    for (const root of initial) {
+      if (!root.isConnected || !visible(root)) continue
+      const target = dismissTarget(root)
+      scene.push(`${sig(root)}>${target === null ? 'noDismissBtn' : sig(target)}`)
+      if (target === null) continue
+      // 调用方在本趟开始前已等过一次交互节奏;趟内从第二击起再各等一次。
+      if (clicked > 0) await wait(1_000 + Math.floor(Math.random() * 501))
+      if (!target.isConnected || !visible(target)) continue
+      invokeClick(target)
+      clicked += 1
+      await wait(400)
+    }
+    const remaining = roots()
+    return {
+      found: true,
+      closed: remaining.length === 0,
+      remaining: remaining.length,
+      scene: scene.join(' | ').slice(0, 400),
+    }
+  } catch {
+    return { found: false, closed: false, remaining: 0, scene: scene.join(' | ').slice(0, 400) }
+  }
+}
+
+// 清场的调用侧收口,照邀面成功弹窗同款:关不掉报一条 handLog(只有标签名与
+// 类名),够下次照着改选择器;任何失败都不影响已取得的发送判定。
+async function dismissGreetingSuccessModalsBestEffort(tabId: number): Promise<void> {
+  try {
+    const outcome = await runMain(tabId, mainDismissGreetingSuccessModals, [])
+    console.info(
+      '[RecruitHelper] greeting_success_modal_dismiss',
+      outcome.found,
+      outcome.closed,
+      outcome.remaining,
+      outcome.scene,
+    )
+    if (outcome.found && !outcome.closed) {
+      reportHandLog(
+        'error',
+        'greetingSuccessModalDismissFailed',
+        `招呼成功弹窗未关闭,页面仍有 ${outcome.remaining} 个遮挡`,
+        outcome.scene,
+      )
+    }
+  } catch {
+    // 清场只尽力而为,不影响已取得的发送判定。
+  }
+}
+
 function validGreetingSceneResult(value: unknown): value is MainGreetingSceneResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   if (record.status === 'failed') return true
   return record.status === 'ready' && typeof record.modalCount === 'number' &&
     typeof record.editError === 'string' &&
+    typeof record.successModalCount === 'number' &&
     Array.isArray(record.newTexts) &&
     (record.newTexts as unknown[]).every((item) => typeof item === 'string')
 }
@@ -3809,6 +3927,7 @@ async function mainSendGreetingOnce(
     sendButton: HTMLButtonElement
     setter: TextareaValueSetter
     intrinsicClick: IntrinsicClick
+    modalKind: 'legacy' | 'kmGreet'
   }
   type FinalEvaluation = { status: 'ready'; surface: FinalSurface } |
     { status: 'failed'; reason: MainGreetingFailureReason; detail?: string }
@@ -3865,7 +3984,10 @@ async function mainSendGreetingOnce(
     if (typeof setter !== 'function' || typeof intrinsicClick !== 'function') {
       return { status: 'failed', reason: 'send_surface_unavailable' }
     }
-    return { status: 'ready', surface: { textarea: textareas[0], sendButton, setter, intrinsicClick } }
+    return {
+      status: 'ready',
+      surface: { textarea: textareas[0], sendButton, setter, intrinsicClick, modalKind: modal.kind },
+    }
   }
 
   const prepared = evaluateFinal(expectedOwnedDraft)
@@ -3877,7 +3999,7 @@ async function mainSendGreetingOnce(
   )
   // attempting 后不再写/恢复输入；最终绿色后立即唯一 click，且不再读取页面。
   invokeSend()
-  return { status: 'clicked' }
+  return { status: 'clicked', modalKind: prepared.surface.modalKind }
 }
 
 function validMainGreetingActionResult(value: unknown): value is MainGreetingActionResult {
@@ -4036,6 +4158,19 @@ export async function sendZhilianGreeting(
     await closeModalOnContentRejection(action)
     throwGreetingActionFailure(action)
   }
+  // 新版发送后平台必弹「招呼语已发送」成功弹窗且不会自己关(2026-08-24 甲方
+  // 确认每次都弹、「我知道了」只关不跳转);旧版没有该弹窗,kind 门控保证旧版
+  // 零新增动作与等待。见到就做一趟清场,整个发送生命周期**至多一趟**——一趟
+  // 关全部在场的,趟后仍关不掉的由收口函数记 handLog,留给有人值守或下一次
+  // 发送的清场趟,不原地重复点击(那是手侧自作主张的重试)。
+  const commitModalKind: 'legacy' | 'kmGreet' = action.modalKind === 'kmGreet' ? 'kmGreet' : 'legacy'
+  let successModalSwept = false
+  const sweepSuccessModals = async (): Promise<void> => {
+    if (successModalSwept) return
+    successModalSwept = true
+    await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501)))
+    await dismissGreetingSuccessModalsBestEffort(tabId)
+  }
 
   let capturedOverlay: { text: string; round: number } | null = null
   let lastModalCount: number | null = null
@@ -4053,6 +4188,33 @@ export async function sendZhilianGreeting(
         if (validGreetingListTargetResult(observed) && observed.status === 'ready' &&
             observed.data.contactState === 'established') {
           await ctx.progress('已确认同一候选人关系状态变为已建立', 100)
+          if (commitModalKind === 'kmGreet' && !successModalSwept) {
+            // 成功确认可能先于成功弹窗的处理甚至出现。条件轮询等它出现,出现
+            // 即清场;上限 10 秒,等不到记一条 handLog 照常成功收场——它是
+            // 清场不是判据,弹窗残留由浮层取证与下一次发送的清场趟兜底。
+            let seen = false
+            for (let waitRound = 0; waitRound < 40; waitRound += 1) {
+              try {
+                const probe = await runMain(tabId, mainReadGreetingScene, [sceneBaseline])
+                if (validGreetingSceneResult(probe) && probe.status === 'ready' &&
+                    probe.successModalCount > 0) {
+                  seen = true
+                  await sweepSuccessModals()
+                  break
+                }
+              } catch {
+                // 探测读失败不影响成功判定,下一轮再探。
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250))
+            }
+            if (!seen) {
+              reportHandLog(
+                'warn',
+                'greetingSuccessModalMissing',
+                '新版招呼发送成功,但 10 秒内未观察到「招呼语已发送」成功弹窗',
+              )
+            }
+          }
           // 正证已经成立；这里只给列表卡片的关系态重渲染一个短收敛窗口，
           // 避免批次编排在下一候选人 reset 时撞上临时缺少 Vue owner 的 DOM。
           // 不追加成功判据，也不在此期间重读或重试任何平台动作。
@@ -4080,6 +4242,9 @@ export async function sendZhilianGreeting(
               // GREETING_REJECTED/none:脑侧据此终结档案、不重试、不转人工。
               rejected = scene.editError
               break
+            }
+            if (commitModalKind === 'kmGreet' && scene.successModalCount > 0) {
+              await sweepSuccessModals()
             }
           }
         } catch {
@@ -15543,6 +15708,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadGreetingListTarget,
   mainReadGreetingScene,
   mainCloseGreetingModal,
+  mainDismissGreetingSuccessModals,
   mainReadCurrentResume,
   mainChatCaptureStep,
   mainResumeCaptureStep,

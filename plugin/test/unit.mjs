@@ -5233,6 +5233,7 @@ function installM4GreetingOrchestrationFixture(options = {}) {
     sceneReads: 0,
     sceneBaselines: [],
     modalCloseCalls: 0,
+    successDismissCalls: 0,
   }
   const tabCount = options.tabCount ?? 1
   const tabs = Array.from({ length: tabCount }, (_, index) => ({
@@ -5328,13 +5329,18 @@ function installM4GreetingOrchestrationFixture(options = {}) {
           state.sceneBaselines.push(structuredClone(args[0]))
           if (options.sceneMode === 'throw') throw new Error('fixture-scene-death')
           return [{ result: structuredClone(
-            options.sceneResult ?? { status: 'ready', modalCount: 0, newTexts: [], editError: '' },
+            options.sceneResult ?? { status: 'ready', modalCount: 0, newTexts: [], editError: '', successModalCount: 0 },
           ) }]
         }
         if (func.name === 'mainCloseGreetingModal') {
           state.modalCloseCalls += 1
           if (options.closeMode === 'throw') throw new Error('fixture-close-death')
           return [{ result: { closed: options.closeMode !== 'stuck' } }]
+        }
+        if (func.name === 'mainDismissGreetingSuccessModals') {
+          state.successDismissCalls += 1
+          if (options.dismissMode === 'throw') throw new Error('fixture-dismiss-death')
+          return [{ result: { found: true, closed: true, remaining: 0, scene: '' } }]
         }
         throw new Error(`unexpected MAIN ${func.name}`)
       },
@@ -5375,7 +5381,7 @@ test('M6 列表招呼 prepare 完成全部编辑，attempting 后同一 evaluato
     assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'])
     assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
     fixture.state.throwOnReadAfterFinal = true
-    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked' })
+    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked', modalKind: 'legacy' })
     assert.equal(fixture.state.openClicks, 1)
     assert.equal(fixture.state.optionClicks, 1)
     assert.equal(fixture.state.editClicks, 1)
@@ -5492,7 +5498,7 @@ test('M6 列表招呼新版弹窗:选中自带输入框的 km-radio 项、直写
     assert.equal(fixture.state.editClicks, 0, '新版输入框常驻,不存在编辑图标步骤')
     assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
     fixture.state.throwOnReadAfterFinal = true
-    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked' })
+    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked', modalKind: 'kmGreet' })
     assert.equal(fixture.state.openClicks, 1)
     assert.equal(fixture.state.finalClicks, 1)
     assert.equal(fixture.state.instanceClicks, 0, '最终动作必须绕过页面替换过的 instance click')
@@ -5978,7 +5984,7 @@ test('M4 招呼 attempting 前后与动作后故障均由原 witness 内核收�
 test('M4 招呼阴性验证的 suspect 取证:浮层原话与未关弹窗进错误 message,基线内文本不报', async () => {
   const fixture = installM4GreetingOrchestrationFixture({
     proofMode: 'negative',
-    sceneResult: { status: 'ready', modalCount: 1, newTexts: ['今日沟通人数已达上限'], editError: '' },
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: ['今日沟通人数已达上限'], editError: '', successModalCount: 0 },
   })
   const context = fixture.context()
   try {
@@ -6043,7 +6049,7 @@ test('M4 招呼:弹窗内错误位有话即判 GREETING_REJECTED,关弹窗后不
     proofMode: 'negative',
     sceneResult: {
       status: 'ready', modalCount: 1, newTexts: [],
-      editError: '内容中涉及敏感词，请修改',
+      editError: '内容中涉及敏感词，请修改', successModalCount: 0,
     },
   })
   const context = fixture.context()
@@ -6141,10 +6147,99 @@ test('M4 招呼:新版弹窗发送前平台拒绝即 GREETING_REJECTED,零点击
   }
 })
 
+test('M4 招呼:新版发送成功后等到「招呼语已发送」弹窗并清一趟,失败或缺席都不动摇成功', async () => {
+  const args = (fixture) => [
+    { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+    { expectUnestablished: true },
+    fixture.context(),
+    fixture.fingerprint,
+  ]
+
+  // 弹窗在场:成功出场前探测到并清一趟。
+  const swept = installM4GreetingOrchestrationFixture({
+    commitResult: { status: 'clicked', modalKind: 'kmGreet' },
+    sceneResult: { status: 'ready', modalCount: 0, newTexts: [], editError: '', successModalCount: 1 },
+  })
+  try {
+    const data = await sendZhilianGreeting(...args(swept))
+    assert.equal(data.contentHash, swept.contentHash, '清场不改变成功返回')
+    assert.equal(swept.state.successDismissCalls, 1, '成功出场前必须清一趟成功弹窗')
+  } finally {
+    swept.restore()
+  }
+
+  // 弹窗一直不出现:有界等待后照常成功,零清场动作。
+  const absent = installM4GreetingOrchestrationFixture({
+    commitResult: { status: 'clicked', modalKind: 'kmGreet' },
+    sceneResult: { status: 'ready', modalCount: 0, newTexts: [], editError: '', successModalCount: 0 },
+  })
+  try {
+    const data = await sendZhilianGreeting(...args(absent))
+    assert.equal(data.contentHash, absent.contentHash, '弹窗缺席不影响成功收场')
+    assert.equal(absent.state.successDismissCalls, 0)
+  } finally {
+    absent.restore()
+  }
+
+  // 清场自身炸掉:成功判定不变。
+  const broken = installM4GreetingOrchestrationFixture({
+    commitResult: { status: 'clicked', modalKind: 'kmGreet' },
+    sceneResult: { status: 'ready', modalCount: 0, newTexts: [], editError: '', successModalCount: 1 },
+    dismissMode: 'throw',
+  })
+  try {
+    const data = await sendZhilianGreeting(...args(broken))
+    assert.equal(data.contentHash, broken.contentHash, '清场失败只留日志,不改变成功判定')
+    assert.equal(broken.state.successDismissCalls, 1)
+  } finally {
+    broken.restore()
+  }
+
+  // 旧版形态:零探测零清场,成功路径一次页面扫描都不多做。
+  const legacy = installM4GreetingOrchestrationFixture({})
+  try {
+    const data = await sendZhilianGreeting(...args(legacy))
+    assert.equal(data.contentHash, legacy.contentHash)
+    assert.equal(legacy.state.successDismissCalls, 0, '旧版没有成功弹窗,不得清场')
+    assert.equal(legacy.state.sceneReads, 1,
+      '旧版只保留既有的发送前取证基线读,成功路径零新增扫描与等待')
+  } finally {
+    legacy.restore()
+  }
+})
+
+test('M4 招呼:新版阴性轮询里见到成功弹窗只清一趟,suspect 判定照旧', async () => {
+  const fixture = installM4GreetingOrchestrationFixture({
+    proofMode: 'negative',
+    commitResult: { status: 'clicked', modalKind: 'kmGreet' },
+    sceneResult: { status: 'ready', modalCount: 0, newTexts: [], editError: '', successModalCount: 1 },
+  })
+  const context = fixture.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        { platformUserRef: fixture.refs.user, positionRef: fixture.refs.job, text: fixture.text },
+        { expectUnestablished: true },
+        context,
+        fixture.fingerprint,
+      ),
+      (error) => {
+        assert.ok(error instanceof ZhilianPlatformError)
+        assert.equal(error.code, 'POSTCONDITION_UNCONFIRMED', '弹窗不是成功判据,阴性仍走 suspect')
+        return true
+      },
+    )
+    assert.equal(fixture.state.successDismissCalls, 1, '二十轮阴性轮询里至多清一趟')
+    assert.equal(fixture.state.finalClicks, 1, '清场不补发送')
+  } finally {
+    fixture.restore()
+  }
+})
+
 test('M4 招呼:关弹窗失败不推翻拒绝判定', async () => {
   const fixture = installM4GreetingOrchestrationFixture({
     proofMode: 'negative',
-    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '内容中涉及敏感词，请修改' },
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '内容中涉及敏感词，请修改', successModalCount: 0 },
     closeMode: 'throw',
   })
   const context = fixture.context()
@@ -6171,7 +6266,7 @@ test('M4 招呼:关弹窗失败不推翻拒绝判定', async () => {
 test('M4 招呼:错误位空白不得被当成拒绝,仍走原 suspect 轨', async () => {
   const fixture = installM4GreetingOrchestrationFixture({
     proofMode: 'negative',
-    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '' },
+    sceneResult: { status: 'ready', modalCount: 1, newTexts: [], editError: '', successModalCount: 0 },
   })
   const context = fixture.context()
   try {
@@ -6355,6 +6450,7 @@ test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮
   kmWrapper.closestKm = kmWrapper
   kmModal.closestKm = kmWrapper
   const toast = new FakeElement({ position: 'fixed', innerText: '操作频繁，请稍后再试' })
+  const successModal = new FakeElement({ className: 'km-modal', position: 'fixed', innerText: '招呼语已发送' })
   globalThis.HTMLElement = FakeElement
   globalThis.getComputedStyle = (node) => ({
     display: 'block', visibility: 'visible', position: node.position ?? 'static',
@@ -6363,6 +6459,7 @@ test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮
     body: { children: [kmWrapper, toast] },
     querySelectorAll(selector) {
       if (selector === '.chat-set-greet .km-modal') return [kmModal]
+      if (selector === '.set-greet-success-modal .km-modal') return [successModal]
       return []
     },
   }
@@ -6370,6 +6467,7 @@ test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮
     const blank = zhilianTestHooks.mainReadGreetingScene([])
     assert.equal(blank.status, 'ready')
     assert.equal(blank.modalCount, 1, '可见的新版招呼弹窗必须计数')
+    assert.equal(blank.successModalCount, 1, '「招呼语已发送」成功弹窗单独计数')
     assert.equal(blank.editError, '', '常驻空白校验槽必须读成空串,否则成功会被误判成拒绝')
     assert.deepEqual(blank.newTexts, ['操作频繁，请稍后再试'],
       '新版弹窗自身不算浮层;fixed portal 照常由兜底捕获')
@@ -6413,6 +6511,141 @@ test('mainCloseGreetingModal 对新版 chat-set-greet 弹窗同样只点标准�
   try {
     assert.deepEqual(zhilianTestHooks.mainCloseGreetingModal(), { closed: true })
     assert.equal(closeClicks, 1, '只点弹窗自身的关闭控件一次')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('mainDismissGreetingSuccessModals 一趟全关:首选「我知道了」,缺了才点 X,别的不碰', async () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+    setTimeout: globalThis.setTimeout,
+  }
+  globalThis.setTimeout = (callback, _delay, ...args) => {
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  class FakeElement {
+    constructor(text = '', props = {}) {
+      this.textContent = text
+      this.isConnected = true
+      this.form = null
+      this.type = 'button'
+      this.disabled = props.disabled === true
+      this.visible = props.visible !== false
+      this.clicks = 0
+      this.tagName = props.tagName ?? 'BUTTON'
+      this._onIntrinsicClick = null
+    }
+    getAttribute() { return '' }
+    getClientRects() { return this.visible ? [{}] : [] }
+    click() {
+      this.clicks += 1
+      if (typeof this._onIntrinsicClick === 'function') this._onIntrinsicClick()
+    }
+    querySelectorAll() { return [] }
+  }
+  const makeModal = ({ ack, close, extra }) => {
+    const modal = new FakeElement('', { tagName: 'DIV' })
+    modal.querySelectorAll = (selector) => {
+      if (selector === 'button[type="button"]') return [ack, extra].filter(Boolean)
+      if (selector === '.km-modal__close-btn') return close ? [close] : []
+      return []
+    }
+    // 任一控件被点即视为该弹窗已关闭(从 roots 复查中消失)。
+    for (const node of [ack, close]) {
+      if (node) node._onIntrinsicClick = () => { modal.visible = false }
+    }
+    return modal
+  }
+  const ackA = new FakeElement('我知道了')
+  const closeA = new FakeElement('')
+  const extraA = new FakeElement('查看设置')
+  const modalA = makeModal({ ack: ackA, close: closeA, extra: extraA })
+  const closeB = new FakeElement('')
+  const modalB = makeModal({ ack: null, close: closeB })
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector === '.set-greet-success-modal .km-modal') {
+        return [modalA, modalB].filter((modal) => modal.visible)
+      }
+      return []
+    },
+  }
+  try {
+    const outcome = await zhilianTestHooks.mainDismissGreetingSuccessModals()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, true, '两个弹窗都点掉后 closed 为真')
+    assert.equal(outcome.remaining, 0)
+    assert.equal(ackA.clicks, 1, '有唯一「我知道了」时点它')
+    assert.equal(closeA.clicks, 0, '「我知道了」在场时不再碰 X')
+    assert.equal(closeB.clicks, 1, '没有「我知道了」的弹窗点它自己的 X')
+    assert.equal(extraA.clicks, 0, '其它按钮一个不碰')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('mainDismissGreetingSuccessModals:禁用的「我知道了」退到 X,零弹窗零动作,关不掉如实报', async () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+    setTimeout: globalThis.setTimeout,
+  }
+  globalThis.setTimeout = (callback, _delay, ...args) => {
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  class FakeElement {
+    constructor(text = '', props = {}) {
+      this.textContent = text
+      this.isConnected = true
+      this.form = null
+      this.type = 'button'
+      this.disabled = props.disabled === true
+      this.visible = props.visible !== false
+      this.clicks = 0
+      this.tagName = props.tagName ?? 'BUTTON'
+    }
+    getAttribute() { return '' }
+    getClientRects() { return this.visible ? [{}] : [] }
+    click() { this.clicks += 1 }
+    querySelectorAll() { return [] }
+  }
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+
+  const disabledAck = new FakeElement('我知道了', { disabled: true })
+  const closeBtn = new FakeElement('')
+  const stuckModal = new FakeElement('', { tagName: 'DIV' })
+  stuckModal.querySelectorAll = (selector) => {
+    if (selector === 'button[type="button"]') return [disabledAck]
+    if (selector === '.km-modal__close-btn') return [closeBtn]
+    return []
+  }
+  globalThis.document = {
+    querySelectorAll(selector) {
+      return selector === '.set-greet-success-modal .km-modal' ? [stuckModal] : []
+    },
+  }
+  try {
+    // 点了 X 但弹窗纹丝不动:如实报 remaining,绝不重复点。
+    const stuck = await zhilianTestHooks.mainDismissGreetingSuccessModals()
+    assert.equal(disabledAck.clicks, 0, '禁用的「我知道了」不点')
+    assert.equal(closeBtn.clicks, 1, '退到弹窗自己的 X')
+    assert.equal(stuck.found, true)
+    assert.equal(stuck.closed, false, '关不掉必须如实报,不装成功')
+    assert.equal(stuck.remaining, 1)
+
+    globalThis.document = { querySelectorAll() { return [] } }
+    assert.deepEqual(await zhilianTestHooks.mainDismissGreetingSuccessModals(), {
+      found: false, closed: false, remaining: 0, scene: '',
+    }, '零弹窗零动作')
   } finally {
     Object.assign(globalThis, original)
   }
