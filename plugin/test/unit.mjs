@@ -4930,10 +4930,14 @@ function installM4GreetingFixture(options = {}) {
     job: 'fixture-job-greeting',
   }
   const text = '你好'
+  // modalKind: 'legacy' 是旧版 .ai-greeting-modal;'km' 是新版 .chat-set-greet
+  // (2026-08-24 真机形态:km-radio 选项组、常驻输入框、原生禁用发送键)。
+  const modalKind = options.modalKind === 'km' ? 'km' : 'legacy'
   const state = {
     modalVisible: options.existingModal === true,
     customSelected: options.existingModal === true || options.customInitiallySelected === true,
     textareaVisible: options.existingModal === true,
+    sendDisabled: modalKind === 'km' && String(options.existingDraft ?? '').trim() === '',
     editIconStyleHidden: options.editIconStyleHidden === true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
@@ -4985,6 +4989,9 @@ function installM4GreetingFixture(options = {}) {
       state.textareaSets += 1
       state.interactions.push({ kind: 'input', at: Date.now() })
       this._value = String(value)
+      if (modalKind === 'km' && options.sendStaysDisabled !== true) {
+        state.sendDisabled = this._value.trim() === ''
+      }
     }
     dispatchEvent(event) {
       state.textareaEvents.push(event.type)
@@ -5032,7 +5039,7 @@ function installM4GreetingFixture(options = {}) {
       state.customSelected = true
     }
   }
-  const textarea = new FixtureTextArea(options.existingDraft ?? '平台原始招呼')
+  const textarea = new FixtureTextArea(options.existingDraft ?? (modalKind === 'km' ? '' : '平台原始招呼'))
   const editIcon = new FixtureHTMLElement()
   editIcon._onIntrinsicClick = () => {
     state.editClicks += 1
@@ -5068,6 +5075,47 @@ function installM4GreetingFixture(options = {}) {
     if (selector === '.ai-greeting-modal__option') return [aiOption, customOption]
     if (selector === '.km-checkbox') return [defaultControl]
     if (selector === '.ai-greeting-modal__footer') return [footer]
+    return []
+  }
+
+  // 新版 .chat-set-greet 弹窗形态:预设 km-radio 两项 + 自带输入框的自定义项,
+  // 发送键在正文为空时原生 disabled,页脚另有「选择其他招呼语」按钮。
+  const kmRadioLabel = new FixtureHTMLElement()
+  kmRadioLabel.classList = { contains: (name) => name === 'km-radio--checked' && state.customSelected }
+  kmRadioLabel._onIntrinsicClick = () => {
+    state.optionClicks += 1
+    state.interactions.push({ kind: 'option', at: Date.now() })
+    if (Number.isInteger(options.customSelectedAfterTimerCalls)) {
+      delayedCustomSelectionPending = true
+    } else {
+      state.customSelected = true
+    }
+  }
+  const kmCustomItem = new FixtureHTMLElement()
+  kmCustomItem.classList = { contains: (name) => name === 'chat-set-greet__content-textarea' }
+  kmCustomItem.querySelectorAll = (selector) => {
+    if (selector === '.km-radio') return [kmRadioLabel]
+    if (selector === 'textarea') return [textarea]
+    return []
+  }
+  const kmPresetItemA = new FixtureHTMLElement('你好，请问现在还在看机会吗？')
+  const kmPresetItemB = new FixtureHTMLElement('Hi，方便聊一聊吗？')
+  const kmOtherButton = new FixtureHTMLElement('选择其他招呼语')
+  const kmSendButton = new FixtureHTMLElement('发送')
+  Object.defineProperty(kmSendButton, 'disabled', { get: () => state.sendDisabled })
+  kmSendButton._onIntrinsicClick = () => {
+    state.finalClicks += 1
+    state.interactions.push({ kind: 'send', at: Date.now() })
+  }
+  kmSendButton.click = () => { state.instanceClicks += 1 }
+  const kmFooter = new FixtureHTMLElement()
+  kmFooter.querySelectorAll = (selector) =>
+    selector === 'button[type="button"]' ? [kmOtherButton, kmSendButton] : []
+  const kmModal = new FixtureHTMLElement()
+  kmModal.querySelectorAll = (selector) => {
+    if (selector === '.chat-set-greet__content-form-item') return [kmPresetItemA, kmPresetItemB, kmCustomItem]
+    if (selector === '.km-checkbox') return [defaultControl]
+    if (selector === '.km-modal__footer') return [kmFooter]
     return []
   }
 
@@ -5117,7 +5165,12 @@ function installM4GreetingFixture(options = {}) {
       if (selector === '.recommend-list__left div[role="listitem"]') {
         return [listItem, secondListItem].slice(0, state.listItemCount)
       }
-      if (selector === '.ai-greeting-modal') return state.modalVisible ? [modal] : []
+      if (selector === '.ai-greeting-modal') {
+        return modalKind === 'legacy' && state.modalVisible ? [modal] : []
+      }
+      if (selector === '.chat-set-greet .km-modal') {
+        return modalKind === 'km' && state.modalVisible ? [kmModal] : []
+      }
       return []
     },
   }
@@ -5421,6 +5474,76 @@ test('M6 列表招呼不接管既有编辑器，不改默认项，公开两步�
       '第一击可能直接发送的公开拓扑不得试点动作')
   } finally {
     direct.restore()
+  }
+})
+
+test('M6 列表招呼新版弹窗:选中自带输入框的 km-radio 项、直写正文,commit 只做最终 intrinsic click', async () => {
+  const fixture = installM4GreetingFixture({ modalKind: 'km' })
+  try {
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.textarea.value, fixture.text)
+    assert.deepEqual(fixture.state.textareaEvents, ['input', 'change'])
+    assert.equal(fixture.state.optionClicks, 1, '未选中时点唯一 km-radio 标签选中自定义项')
+    assert.equal(fixture.state.editClicks, 0, '新版输入框常驻,不存在编辑图标步骤')
+    assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
+    fixture.state.throwOnReadAfterFinal = true
+    assert.deepEqual(await fixture.invoke('commit'), { status: 'clicked' })
+    assert.equal(fixture.state.openClicks, 1)
+    assert.equal(fixture.state.finalClicks, 1)
+    assert.equal(fixture.state.instanceClicks, 0, '最终动作必须绕过页面替换过的 instance click')
+    assert.equal(fixture.state.checkboxClicks, 0, '「设置为默认发送」复选框一次都不得触碰')
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M6 列表招呼新版弹窗:已选中的自定义项不再点选,发送键解禁跟随正文', async () => {
+  const fixture = installM4GreetingFixture({ modalKind: 'km', customInitiallySelected: true })
+  try {
+    assert.equal(fixture.state.sendDisabled, true, '正文为空时发送键原生禁用')
+    assert.deepEqual(await fixture.invoke('prepare'), { status: 'prepared' })
+    assert.equal(fixture.state.optionClicks, 0, '已选中的自定义项不得再 click')
+    assert.equal(fixture.state.sendDisabled, false)
+    assert.deepEqual(await fixture.invoke('preflight'), { status: 'ready' })
+  } finally {
+    fixture.restore()
+  }
+})
+
+test('M6 列表招呼新版弹窗:默认勾选被勾、发送键未解禁或既有弹窗时零最终动作', async () => {
+  const checked = installM4GreetingFixture({ modalKind: 'km', defaultChecked: true })
+  try {
+    assert.deepEqual(await checked.invoke('prepare'), {
+      status: 'failed', reason: 'default_setting_selected',
+    })
+    assert.equal(checked.state.checkboxClicks, 0, '不得替真人取消平台默认招呼设置')
+    assert.equal(checked.textarea.value, '', '默认项被勾选时不得写正文')
+    assert.deepEqual(checked.state.textareaEvents, [])
+  } finally {
+    checked.restore()
+  }
+
+  const disabled = installM4GreetingFixture({ modalKind: 'km', sendStaysDisabled: true })
+  try {
+    assert.deepEqual(await disabled.invoke('prepare'), { status: 'prepared' })
+    assert.deepEqual(await disabled.invoke('preflight'), {
+      status: 'failed', reason: 'send_surface_unavailable',
+    })
+    assert.deepEqual(await disabled.invoke('commit'), {
+      status: 'failed', reason: 'send_surface_unavailable',
+    })
+    assert.equal(disabled.state.finalClicks, 0, '原生禁用的发送键绝不点击')
+    assert.equal(disabled.state.instanceClicks, 0)
+  } finally {
+    disabled.restore()
+  }
+
+  const existing = installM4GreetingFixture({ modalKind: 'km', existingModal: true })
+  try {
+    assert.deepEqual(await existing.invoke('prepare'), { status: 'failed', reason: 'existing_editor' })
+    assert.equal(existing.state.openClicks, 0, '既有新版弹窗同样挡住接管')
+  } finally {
+    existing.restore()
   }
 })
 
@@ -6088,6 +6211,94 @@ test('mainReadGreetingScene 只报基线外的可见浮层并统计招呼弹窗'
     )
     const baseline = zhilianTestHooks.mainReadGreetingScene([])
     assert.ok(baseline.newTexts.includes('消息已发送'), '空基线返回全量作为基线')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮层,editError 不从新版取', () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+  }
+  class FakeElement {
+    constructor(props = {}) {
+      this.className = props.className ?? ''
+      this.innerText = props.innerText ?? ''
+      this.children = props.children ?? []
+      this.visible = props.visible !== false
+      this.position = props.position ?? 'static'
+      this.closestKm = null
+    }
+    getClientRects() { return this.visible ? [{}] : [] }
+    closest(selector) {
+      return selector === '.chat-set-greet' ? this.closestKm : null
+    }
+    querySelector() { return null }
+    querySelectorAll() { return [] }
+  }
+  const kmModal = new FakeElement({ className: 'km-modal', position: 'fixed', innerText: '选择打招呼语' })
+  const kmWrapper = new FakeElement({
+    className: 'km-modal__wrapper chat-set-greet', position: 'fixed',
+    innerText: '选择打招呼语', children: [kmModal],
+  })
+  kmWrapper.closestKm = kmWrapper
+  kmModal.closestKm = kmWrapper
+  const toast = new FakeElement({ position: 'fixed', innerText: '操作频繁，请稍后再试' })
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = (node) => ({
+    display: 'block', visibility: 'visible', position: node.position ?? 'static',
+  })
+  globalThis.document = {
+    body: { children: [kmWrapper, toast] },
+    querySelectorAll(selector) {
+      if (selector === '.chat-set-greet .km-modal') return [kmModal]
+      return []
+    },
+  }
+  try {
+    const result = zhilianTestHooks.mainReadGreetingScene([])
+    assert.equal(result.status, 'ready')
+    assert.equal(result.modalCount, 1, '可见的新版招呼弹窗必须计数')
+    assert.equal(result.editError, '', 'editError 判据只覆盖旧版弹窗,新版无真机事实不接')
+    assert.deepEqual(result.newTexts, ['操作频繁，请稍后再试'],
+      '新版弹窗自身不算浮层;fixed portal 照常由兜底捕获')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('mainCloseGreetingModal 对新版 chat-set-greet 弹窗同样只点标准关闭键', () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+  }
+  let closeClicks = 0
+  class FakeElement {
+    constructor() {
+      this.form = null
+      this.type = 'button'
+    }
+    getClientRects() { return [{}] }
+    click() { closeClicks += 1 }
+    querySelectorAll() { return [] }
+  }
+  const closeButton = new FakeElement()
+  const kmModal = new FakeElement()
+  kmModal.querySelectorAll = (selector) => selector === '.km-modal__close-btn' ? [closeButton] : []
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      if (selector === '.chat-set-greet .km-modal') return [kmModal]
+      return []
+    },
+  }
+  try {
+    assert.deepEqual(zhilianTestHooks.mainCloseGreetingModal(), { closed: true })
+    assert.equal(closeClicks, 1, '只点弹窗自身的关闭控件一次')
   } finally {
     Object.assign(globalThis, original)
   }
