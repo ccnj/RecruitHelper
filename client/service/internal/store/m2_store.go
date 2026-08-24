@@ -822,7 +822,7 @@ func (s *Store) RunningPatrolRounds() ([]PatrolRound, error) {
 	return rounds, err
 }
 
-// RecentPatrolRounds 只为账号 actor 恢复少量跨重启安全计数提供最近轮次。
+// RecentPatrolRounds 只为诊断面展示提供最近轮次。
 // limit 被刻意限制为很小的窗口，避免这个接口演变成另一套巡检查询面。
 func (s *Store) RecentPatrolRounds(key AccountKey, limit int) ([]PatrolRound, error) {
 	if limit <= 0 || limit > 10 {

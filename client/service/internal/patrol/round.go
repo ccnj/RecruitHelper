@@ -1871,7 +1871,7 @@ func (a *roundActor) finish(runErr error) error {
 	}
 	// StartSourcing 已在与本函数相同的 Manager.mu 下建立新批次并写好
 	// Enabled/Dirty/Next。换代后的旧轮只终局化自己的 PatrolRound，不能再
-	// 用旧 LastPatrolAt、NextPatrolAt 或 surfaceRecovery 计数覆盖新任务。
+	// 用旧 LastPatrolAt、NextPatrolAt 覆盖新任务。
 	if a.superseded {
 		return nil
 	}
@@ -1900,25 +1900,11 @@ func (a *roundActor) finish(runErr error) error {
 	}); err != nil {
 		return err
 	}
-	if a.ensureUsed {
-		rounds, err := a.manager.store.RecentPatrolRounds(a.key(), 3)
-		if err != nil {
-			return err
-		}
-		consecutive := 0
-		for _, round := range rounds {
-			if a.manager.localDate(round.StartedAt) != a.account.EnabledDate ||
-				!strings.HasSuffix(round.Trigger, surfaceRecoverySuffix) {
-				break
-			}
-			consecutive++
-		}
-		if consecutive >= 3 {
-			if err := a.manager.pauseAccount(a.key(), PauseSurfaceDrivenAway, a.now); err != nil {
-				return err
-			}
-		}
-	}
+	// 救场(ensureSurface)只保留观测:轮 trigger 带 +surfaceRecovery 后缀落库
+	// 与日志,供事后统计。原"当天连续 3 轮救场即判 surfaceDrivenAway 暂停"
+	// 已删(2026-08-24 甲方裁决):真机仅有的两次触发全是客户端自动更新换代
+	// 插件刷新页面造成的假阳性,而它防的"真人反复要用页面"场景已有真人活跃
+	// 让位与用户手动暂停覆盖。
 	return nil
 }
 

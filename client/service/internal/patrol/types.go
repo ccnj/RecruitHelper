@@ -32,7 +32,6 @@ const (
 	PauseLoginRequired         = "loginRequired"
 	PauseAccountMismatch       = "accountMismatch"
 	PauseIdentityInvalid       = "identityInvalid"
-	PauseSurfaceDrivenAway     = "surfaceDrivenAway"
 	PauseHandManualReview      = "handManualReview"
 	PauseSourcingBlocked       = "sourcingBlocked"
 	PauseSourcingTargetReached = store.SourcingTargetReachedPauseReason

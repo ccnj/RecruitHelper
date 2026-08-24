@@ -2120,7 +2120,7 @@ func TestPeriodicRoundFindsChangeWhenAllEventsAreLost(t *testing.T) {
 	}
 }
 
-func TestEnsureOncePerRoundAndThreeRoundsPauseAcrossManagerRestart(t *testing.T) {
+func TestEnsureOncePerRoundAndRepeatedRecoveryNeverPauses(t *testing.T) {
 	h := newHarness(t)
 	h.runner.handler = func(request RunRequest) (any, error) {
 		switch request.Name {
@@ -2136,15 +2136,13 @@ func TestEnsureOncePerRoundAndThreeRoundsPauseAcrossManagerRestart(t *testing.T)
 		}
 	}
 
-	for round := 1; round <= 3; round++ {
+	for round := 1; round <= 4; round++ {
 		result, err := h.manager.Tick(context.Background())
 		if err != nil || len(result.Rounds) != 1 || result.Rounds[0].Err == nil || !result.Rounds[0].EnsureUsed {
 			t.Fatalf("round %d = %+v, %v", round, result, err)
 		}
-		if round < 3 {
+		if round < 4 {
 			h.clock.Add(h.config.PatrolInterval)
-			// Recreate the manager to prove the safety count comes from SQLite,
-			// not process memory.
 			manager, managerErr := NewManager(h.db, h.runner, h.hands, h.config)
 			if managerErr != nil {
 				t.Fatal(managerErr)
@@ -2152,15 +2150,17 @@ func TestEnsureOncePerRoundAndThreeRoundsPauseAcrossManagerRestart(t *testing.T)
 			h.manager = manager
 		}
 	}
-	if got := h.runner.count(protocol.PrimNavEnsureSurface); got != 3 {
+	if got := h.runner.count(protocol.PrimNavEnsureSurface); got != 4 {
 		t.Fatalf("ensure count = %d, want one per round", got)
 	}
-	if got := h.runner.count(protocol.PrimChatReadList); got != 6 {
+	if got := h.runner.count(protocol.PrimChatReadList); got != 8 {
 		t.Fatalf("readList count = %d, want original+single retry per round", got)
 	}
+	// 连续救场只观测不暂停(2026-08-24 甲方裁决删除 surfaceDrivenAway 闸):
+	// 真机仅有的触发全是插件换代刷新页面的假阳性,巡检必须继续。
 	account, _ := h.db.AccountByKey(h.key)
-	if account.PausedReason != PauseSurfaceDrivenAway || account.StoppedAt == nil {
-		t.Fatalf("third driven-away round did not pause: %+v", account)
+	if account.PausedReason != "" || account.StoppedAt != nil {
+		t.Fatalf("repeated recovery must not pause the account: %+v", account)
 	}
 }
 
