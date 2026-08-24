@@ -29,8 +29,14 @@ type Manager struct {
 	// adviceEngine 是可运行期换代的 AI 引擎(模型配置落盘即生效,2026-08-12
 	// 甲方裁决)。只经 currentAdvice/SetAdvice 访问;业务函数在入口取一次快照、
 	// 函数内从头用到尾,在途调用拿旧引擎自然收尾,新调用拿新引擎。
-	adviceMu     sync.RWMutex
-	adviceEngine AdviceExecutor
+	// replyAdviceEngine 是回复族三用途(reply/serviceReply/silenceFollowup)的
+	// 专用「次聪明ai」引擎(AGENTS.md「LLM provider 直连」2026-08-24 增补)。
+	// nil = 未配置 = 特性关闭,回复族沿用 adviceEngine(配置级默认,非运行期
+	// 主备切换);非 nil 时回复族只走它。取用一律经 adviceFor,保证账本记的
+	// provider/model 就是实际调用的引擎。
+	adviceMu          sync.RWMutex
+	adviceEngine      AdviceExecutor
+	replyAdviceEngine AdviceExecutor
 
 	// startedAt 是本次脑进程的启动时刻(取自注入时钟,构造时记录一次)。
 	// 它只服务 Q1/Q2 陈旧 planned 判定(stalePlannedBoundary):崩溃/重启前
@@ -97,6 +103,34 @@ func (m *Manager) SetAdvice(advice AdviceExecutor) {
 	m.adviceMu.Lock()
 	defer m.adviceMu.Unlock()
 	m.adviceEngine = advice
+}
+
+// SetReplyAdvice 运行期换代回复族专用引擎(含从 nil 首次装配),换代语义与
+// SetAdvice 同款:在途调用拿旧引擎收尾,不等静默点。
+func (m *Manager) SetReplyAdvice(advice AdviceExecutor) {
+	m.adviceMu.Lock()
+	defer m.adviceMu.Unlock()
+	m.replyAdviceEngine = advice
+}
+
+// adviceFor 按用途取引擎:回复族三用途在次聪明已装配时走次聪明,其余用途
+// 与"次聪明未配置"一律回到客户级引擎。调用方必须用它的返回值同时取身份
+// (ProviderName/ModelName)与发起调用,不得一半问它、一半问 currentAdvice——
+// 那会让账本记下没被调用的模型。
+func (m *Manager) adviceFor(purpose m5ai.CompletionPurpose) AdviceExecutor {
+	m.adviceMu.RLock()
+	defer m.adviceMu.RUnlock()
+	if m.replyAdviceEngine != nil && isReplyFamilyPurpose(purpose) {
+		return m.replyAdviceEngine
+	}
+	return m.adviceEngine
+}
+
+// isReplyFamilyPurpose 是次聪明的封闭用途清单(AGENTS.md 次聪明段):往会话里
+// 对候选人说话的三类生成。意向判断是分类不是说话,刻意不在其中。
+func isReplyFamilyPurpose(purpose m5ai.CompletionPurpose) bool {
+	return purpose == m5ai.PurposeReply || purpose == m5ai.PurposeServiceReply ||
+		purpose == m5ai.PurposeSilenceFollowup
 }
 
 // SetWorkflowMemberGate installs the single product-workflow member boundary.

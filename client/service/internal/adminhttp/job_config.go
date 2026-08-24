@@ -140,6 +140,7 @@ func (a *API) syncCurrentJobConfigNow(ctx context.Context) ([]m5ContextView, *jo
 	// 配置,职位文档不合法也不该让已经拿到的凭据落不了盘。
 	m5ai.RefreshBackendProviderConfig(a.providerConfig, raw, a.notifyProviderApplied)
 	m5ai.RefreshSmartProviderConfig(a.smartProviderConfig, raw, a.smartProviderApplied)
+	m5ai.RefreshSubSmartProviderConfig(a.subSmartProviderConfig, raw, a.subSmartProviderApplied)
 	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, syncedAt)
 	if err != nil {
 		// 导入错误只含文档类型名与占位符名,进日志不碰数据边界;新客户配置不合格

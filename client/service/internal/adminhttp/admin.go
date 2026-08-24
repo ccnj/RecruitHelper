@@ -50,6 +50,12 @@ type API struct {
 	// 两者可为 nil(测试构造不注入),刷新函数对 nil 安全。
 	smartProviderConfig  *m5ai.ProviderConfigStore
 	smartProviderApplied func()
+
+	// subSmartProviderConfig/subSmartProviderApplied 是回复族专用「次聪明ai」
+	// 的对应一对(同条款 2026-08-24 增补),来自响应顶层 subSmartAi 块;回调由
+	// main 装配为"重建回复引擎并换进 patrol.SetReplyAdvice"。同样 nil 安全。
+	subSmartProviderConfig  *m5ai.ProviderConfigStore
+	subSmartProviderApplied func()
 }
 
 // SetProviderApplied 注入模型配置落盘后的引擎换代回调(装配期一次)。
@@ -68,6 +74,13 @@ func (a *API) notifyProviderApplied() {
 func (a *API) SetSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *API {
 	a.smartProviderConfig = store
 	a.smartProviderApplied = onApplied
+	return a
+}
+
+// SetSubSmartProviderStore 注入次聪明ai配置落盘与其换代回调(装配期一次)。
+func (a *API) SetSubSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *API {
+	a.subSmartProviderConfig = store
+	a.subSmartProviderApplied = onApplied
 	return a
 }
 
