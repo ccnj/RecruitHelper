@@ -451,7 +451,9 @@ type MainGreetingListTargetResult =
 // editError 是例外——它不是诊断,是判据:2026-08-07 真机考古确认平台把
 // "内容中涉及敏感词,请修改"写在弹窗内 `.ai-greeting-modal__edit-error`,
 // 点发送时才校验,发送按钮不置灰,弹窗保持打开。读到它即平台明确业务拒绝
-// (详见 docs/招呼suspect取证立案-2026-08-07.md)。
+// (详见 docs/招呼suspect取证立案-2026-08-07.md)。该判据仅覆盖旧版
+// `.ai-greeting-modal` 形态;新版 `.chat-set-greet` 弹窗(2026-08-24)的业务
+// 拒绝落点尚无真机事实,被拒时按既有阴性 suspect 转人工轨收场,不猜判据。
 type MainGreetingSceneResult =
   | { status: 'ready'; modalCount: number; newTexts: string[]; editError: string }
   | { status: 'failed' }
@@ -3261,17 +3263,26 @@ function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult
       if (node.closest('.ai-greeting-modal') !== null || node.querySelector('.ai-greeting-modal') !== null) {
         continue
       }
+      if (node.closest('.chat-set-greet') !== null || node.querySelector('.chat-set-greet') !== null) {
+        continue
+      }
       if (!visible(node)) continue
       if (getComputedStyle(node).position !== 'fixed') continue
       const text = clean(node.innerText)
       if (text.length === 0 || text.length > 120) continue
       push(text)
     }
-    const modals = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+    const legacyModals = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+    const kmGreetModals = Array.from(document.querySelectorAll<HTMLElement>('.chat-set-greet .km-modal'))
+      .filter(visible)
     // 弹窗内的编辑区错误位。该节点常驻 DOM、无错时是纯空白,所以判据是
     // "可见且 trim 后非空",绝不能判节点是否存在——判错方向会把成功当拒绝。
-    const editError = modals.length === 0 ? '' : (() => {
-      for (const node of Array.from(modals[0].querySelectorAll<HTMLElement>(
+    // 判据只覆盖旧版弹窗:敏感词拒绝写在 .ai-greeting-modal__edit-error 是
+    // 2026-08-07 真机考古事实;新版 .chat-set-greet 弹窗的业务拒绝落点尚无
+    // 真机事实,不凭猜测接判据——新版被拒时走既有阴性 suspect 转人工轨,
+    // 现场由浮层扫描与 modalCount 留痕,攒到真机样本再立案扩展。
+    const editError = legacyModals.length === 0 ? '' : (() => {
+      for (const node of Array.from(legacyModals[0].querySelectorAll<HTMLElement>(
         '.ai-greeting-modal__edit-error',
       ))) {
         if (!visible(node)) continue
@@ -3280,7 +3291,7 @@ function mainReadGreetingScene(baselineTexts: string[]): MainGreetingSceneResult
       }
       return ''
     })()
-    return { status: 'ready', modalCount: modals.length, newTexts, editError }
+    return { status: 'ready', modalCount: legacyModals.length + kmGreetModals.length, newTexts, editError }
   } catch {
     return { status: 'failed' }
   }
@@ -3296,7 +3307,11 @@ function mainCloseGreetingModal(): { closed: boolean } {
     return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
   }
   try {
-    const modals = Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
+    // 新旧两种招呼弹窗形态都收:关闭控件同为 km-modal 标准关闭键。
+    const modals = [
+      ...Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')),
+      ...Array.from(document.querySelectorAll<HTMLElement>('.chat-set-greet .km-modal')),
+    ].filter(visible)
     if (modals.length !== 1) return { closed: false }
     const buttons = Array.from(modals[0].querySelectorAll<HTMLButtonElement>('.km-modal__close-btn'))
       .filter(visible)
@@ -3569,17 +3584,55 @@ async function mainSendGreetingOnce(
     if (openButton.form !== null && openButton.type !== 'button') return null
     return { card: matches[0].item, openButton }
   }
-  const greetingModals = (): HTMLElement[] =>
-    Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal')).filter(visible)
-  const customOptionOf = (modal: HTMLElement): HTMLElement | null => {
-    const options = Array.from(modal.querySelectorAll<HTMLElement>('.ai-greeting-modal__option')).filter(visible)
-    if (options.length !== 2) return null
-    const custom = options.filter((option) => option.querySelector('.ai-greeting-modal__ai-icon') === null)
+  // 招呼弹窗有两种真机形态:旧版 `.ai-greeting-modal`(两选项,自定义项需点
+  // 编辑图标展开输入框)与新版 `.chat-set-greet`(2026-08-24 真机 DOM:标题
+  // "选择打招呼语",若干 km-radio 预设项加一个自带输入框的自定义项,发送键在
+  // 平台自身校验通过前原生 disabled)。两种形态共用同一套闸语义——自定义项
+  // 唯一且选中、默认勾选必须为未勾、正文精确相等、发送键唯一——只有定位
+  // 选择器按形态分家。
+  interface GreetingModalSurface {
+    root: HTMLElement
+    kind: 'legacy' | 'kmGreet'
+  }
+  const greetingModals = (): GreetingModalSurface[] => [
+    ...Array.from(document.querySelectorAll<HTMLElement>('.ai-greeting-modal'))
+      .map((root): GreetingModalSurface => ({ root, kind: 'legacy' })),
+    ...Array.from(document.querySelectorAll<HTMLElement>('.chat-set-greet .km-modal'))
+      .map((root): GreetingModalSurface => ({ root, kind: 'kmGreet' })),
+  ].filter((surface) => visible(surface.root))
+  const customOptionOf = (surface: GreetingModalSurface): HTMLElement | null => {
+    if (surface.kind === 'legacy') {
+      const options = Array.from(surface.root.querySelectorAll<HTMLElement>('.ai-greeting-modal__option'))
+        .filter(visible)
+      if (options.length !== 2) return null
+      const custom = options.filter((option) => option.querySelector('.ai-greeting-modal__ai-icon') === null)
+      return custom.length === 1 ? custom[0] : null
+    }
+    const items = Array.from(surface.root.querySelectorAll<HTMLElement>('.chat-set-greet__content-form-item'))
+      .filter(visible)
+    const custom = items.filter((item) => item.classList.contains('chat-set-greet__content-textarea'))
     return custom.length === 1 ? custom[0] : null
   }
-  const customSelected = (option: HTMLElement): boolean =>
-    option.classList.contains('is-selected') ||
-    option.querySelector('.ai-greeting-modal__radio.is-checked') !== null
+  const kmCustomRadio = (option: HTMLElement): HTMLElement | null => {
+    const radios = Array.from(option.querySelectorAll<HTMLElement>('.km-radio')).filter(visible)
+    return radios.length === 1 ? radios[0] : null
+  }
+  const customSelected = (surface: GreetingModalSurface, option: HTMLElement): boolean => {
+    if (surface.kind === 'legacy') {
+      return option.classList.contains('is-selected') ||
+        option.querySelector('.ai-greeting-modal__radio.is-checked') !== null
+    }
+    const radio = kmCustomRadio(option)
+    if (!radio) return false
+    if (radio.classList.contains('km-radio--checked')) return true
+    if (radio.querySelector('.km-radio__icon--checked') !== null) return true
+    const inputs = Array.from(radio.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+    return inputs.length === 1 && inputs[0].checked === true
+  }
+  const customTextareasOf = (surface: GreetingModalSurface, option: HTMLElement): HTMLTextAreaElement[] =>
+    Array.from(option.querySelectorAll<HTMLTextAreaElement>(
+      surface.kind === 'legacy' ? '.ai-greeting-modal__edit-area textarea' : 'textarea',
+    )).filter(visible)
   const defaultSettingState = (modal: HTMLElement): 'unchecked' | 'checked' | 'unresolved' => {
     const controls = Array.from(modal.querySelectorAll<HTMLElement>('.km-checkbox')).filter((control) => {
       const label = clean(control.textContent)
@@ -3643,28 +3696,33 @@ async function mainSendGreetingOnce(
     if (!await waitFor(() => greetingModals().length === 1)) return failed('editor_not_opened')
     if (!principalMatches() || !targetSurface()) return failed('target_changed')
     let modal = greetingModals()[0]
-    let custom = customOptionOf(modal)
-    if (!custom) return failed('custom_option_unavailable')
-    if (!customSelected(custom)) {
+    let custom = modal ? customOptionOf(modal) : null
+    if (!modal || !custom) return failed('custom_option_unavailable')
+    if (!customSelected(modal, custom)) {
+      // 旧版点选项整块;新版选项块里含输入框,点唯一的 km-radio 标签选中。
+      const selectTarget = modal.kind === 'legacy' ? custom : kmCustomRadio(custom)
+      if (!selectTarget) return failed('custom_option_unavailable')
       const invokeOption = Function.prototype.call.bind(
         HTMLElement.prototype.click as IntrinsicClick,
-        custom,
+        selectTarget,
       )
       await performInteraction(invokeOption)
       const selected = await waitFor(() => {
         const currentModal = greetingModals()[0]
         const currentCustom = currentModal ? customOptionOf(currentModal) : null
-        return currentCustom !== null && customSelected(currentCustom)
+        return currentModal !== undefined && currentCustom !== null &&
+          customSelected(currentModal, currentCustom)
       })
       if (!selected) return failed('custom_option_unavailable')
     }
     modal = greetingModals()[0]
     custom = modal ? customOptionOf(modal) : null
-    if (!modal || !custom || !customSelected(custom)) return failed('custom_option_unavailable')
-    let textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
-      '.ai-greeting-modal__edit-area textarea',
-    )).filter(visible)
+    if (!modal || !custom || !customSelected(modal, custom)) return failed('custom_option_unavailable')
+    let textareas = customTextareasOf(modal, custom)
     if (textareas.length === 0) {
+      // 只有旧版弹窗需要点编辑图标展开输入框;新版输入框常驻,拿不到就是
+      // 形态不符,零动作失败转人工。
+      if (modal.kind !== 'legacy') return failed('editor_unavailable')
       const editIcons = Array.from(custom.querySelectorAll<HTMLElement>('.ai-greeting-modal__edit-icon'))
       if (editIcons.length !== 1) return failed('editor_unavailable')
       const invokeEdit = Function.prototype.call.bind(
@@ -3675,20 +3733,17 @@ async function mainSendGreetingOnce(
       await waitFor(() => {
         const currentModal = greetingModals()[0]
         const currentCustom = currentModal ? customOptionOf(currentModal) : null
-        return currentCustom !== null && Array.from(currentCustom.querySelectorAll<HTMLTextAreaElement>(
-          '.ai-greeting-modal__edit-area textarea',
-        )).filter(visible).length === 1
+        return currentModal !== undefined && currentCustom !== null &&
+          customTextareasOf(currentModal, currentCustom).length === 1
       })
     }
     modal = greetingModals()[0]
     custom = modal ? customOptionOf(modal) : null
-    textareas = custom
-      ? Array.from(custom.querySelectorAll<HTMLTextAreaElement>('.ai-greeting-modal__edit-area textarea')).filter(visible)
-      : []
-    if (!modal || !custom || !customSelected(custom) || textareas.length !== 1) {
+    textareas = modal && custom ? customTextareasOf(modal, custom) : []
+    if (!modal || !custom || !customSelected(modal, custom) || textareas.length !== 1) {
       return failed('editor_unavailable')
     }
-    const defaultState = defaultSettingState(modal)
+    const defaultState = defaultSettingState(modal.root)
     if (defaultState === 'unresolved') return failed('default_setting_unresolved')
     if (defaultState === 'checked') return failed('default_setting_selected')
     if (!principalMatches() || !targetSurface()) return failed('target_changed')
@@ -3723,13 +3778,12 @@ async function mainSendGreetingOnce(
       })
       const latestModal = greetingModals()[0]
       const latestCustom = latestModal ? customOptionOf(latestModal) : null
-      const latestTextareas = latestCustom
-        ? Array.from(latestCustom.querySelectorAll<HTMLTextAreaElement>(
-            '.ai-greeting-modal__edit-area textarea',
-          )).filter(visible)
+      const latestTextareas = latestModal && latestCustom
+        ? customTextareasOf(latestModal, latestCustom)
         : []
-      if (!latestModal || !latestCustom || !customSelected(latestCustom) || latestTextareas.length !== 1 ||
-          latestTextareas[0].value !== text || defaultSettingState(latestModal) !== 'unchecked' ||
+      if (!latestModal || !latestCustom || !customSelected(latestModal, latestCustom) ||
+          latestTextareas.length !== 1 ||
+          latestTextareas[0].value !== text || defaultSettingState(latestModal.root) !== 'unchecked' ||
           !principalMatches() || !targetSurface()) {
         await restoreOwnedDraft()
         return failed('input_rejected')
@@ -3757,17 +3811,17 @@ async function mainSendGreetingOnce(
     if (modals.length !== 1) return { status: 'failed', reason: 'editor_changed' }
     const modal = modals[0]
     const custom = customOptionOf(modal)
-    if (!custom || !customSelected(custom)) return { status: 'failed', reason: 'editor_changed' }
-    const textareas = Array.from(custom.querySelectorAll<HTMLTextAreaElement>(
-      '.ai-greeting-modal__edit-area textarea',
-    )).filter(visible)
+    if (!custom || !customSelected(modal, custom)) return { status: 'failed', reason: 'editor_changed' }
+    const textareas = customTextareasOf(modal, custom)
     if (textareas.length !== 1 || textareas[0].value !== expectedValue) {
       return { status: 'failed', reason: 'editor_changed' }
     }
-    const defaultState = defaultSettingState(modal)
+    const defaultState = defaultSettingState(modal.root)
     if (defaultState === 'unresolved') return { status: 'failed', reason: 'default_setting_unresolved' }
     if (defaultState === 'checked') return { status: 'failed', reason: 'default_setting_selected' }
-    const footers = Array.from(modal.querySelectorAll<HTMLElement>('.ai-greeting-modal__footer')).filter(visible)
+    const footers = Array.from(modal.root.querySelectorAll<HTMLElement>(
+      modal.kind === 'legacy' ? '.ai-greeting-modal__footer' : '.km-modal__footer',
+    )).filter(visible)
     if (footers.length !== 1) return { status: 'failed', reason: 'send_surface_unavailable' }
     const sendButtons = Array.from(footers[0].querySelectorAll<HTMLButtonElement>('button[type="button"]'))
       .filter((button) => visible(button) && clean(button.textContent) === '发送')
@@ -3776,6 +3830,11 @@ async function mainSendGreetingOnce(
     if (sendButton.form !== null && sendButton.type !== 'button') {
       return { status: 'failed', reason: 'send_surface_unavailable' }
     }
+    // 新版弹窗的发送键在正文未过平台自身校验前是原生 disabled;对禁用键的
+    // click 是空操作,点了发不出去,只会把本次意图烧成 suspect 人工票。按钮
+    // disabled 是被直接调用动作接口的公开标准语义,属守卫合法对象(AGENTS.md
+    // 防护成本预算第 9 条),对旧版弹窗同样成立(旧版未见禁用态,恒过)。
+    if (sendButton.disabled === true) return { status: 'failed', reason: 'send_surface_unavailable' }
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set as
       TextareaValueSetter | undefined
     const intrinsicClick = HTMLElement.prototype.click as IntrinsicClick | undefined
