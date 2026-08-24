@@ -136,6 +136,61 @@ func RefreshBackendProviderConfig(store *ProviderConfigStore, raw []byte, onAppl
 	}
 }
 
+// ExtractSmartProviderCredentials 提取发布专用「聪明ai」凭据(AGENTS.md「LLM
+// provider 直连」2026-08-24 增补)。它只认响应顶层的 smartAi 块——单职位与多职位
+// 形态后台都放在顶层,所以这里不需要区分两种形状。块缺失不是错误:那是"后台
+// 尚未配置聪明ai"的正常状态,返回空凭据由调用方按兜底停用路径处理。
+func ExtractSmartProviderCredentials(raw []byte) (BackendProviderCredentials, error) {
+	var payload struct {
+		SmartAi *credentialBlock `json:"smartAi"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return BackendProviderCredentials{}, errors.New("job-config 响应无法解析聪明ai凭据")
+	}
+	if payload.SmartAi == nil {
+		return BackendProviderCredentials{}, nil
+	}
+	return BackendProviderCredentials{
+		BaseURL: trimPointer(payload.SmartAi.BaseURL),
+		APIKey:  trimPointer(payload.SmartAi.APIKey),
+		Model:   firstModelInChain(trimPointer(payload.SmartAi.Model)),
+	}, nil
+}
+
+// RefreshSmartProviderConfig 与 RefreshBackendProviderConfig 同构:不返回错误、
+// 取不到只记日志沿用本机既有文件、落盘成功才触发 onApplied 换代。差异只有两处:
+// 数据源是顶层 smartAi 块,以及日志措辞指明是发布模型——排查"发布为什么还在用
+// 旧凭据"时要能与客户级配置的刷新日志一眼区分。
+func RefreshSmartProviderConfig(store *ProviderConfigStore, raw []byte, onApplied func()) {
+	if store == nil {
+		return
+	}
+	credentials, err := ExtractSmartProviderCredentials(raw)
+	if err != nil {
+		slog.Warn("旧后台聪明ai凭据无法解析，沿用本机发布模型配置",
+			"errorCode", "smartProviderCredentialsUnparsable", "err", err)
+		return
+	}
+	if credentials.empty() {
+		return
+	}
+	applied, err := store.ApplyBackendCredentials(credentials)
+	if err != nil {
+		slog.Warn("旧后台聪明ai凭据未能落盘，沿用本机发布模型配置",
+			"errorCode", "smartProviderCredentialsNotStored", "err", err)
+		return
+	}
+	if applied {
+		slog.Info("已按旧后台下发刷新发布模型配置(聪明ai)",
+			"model", credentials.Model,
+			"baseUrlRefreshed", credentials.BaseURL != "",
+			"keyRefreshed", credentials.APIKey != "")
+		if onApplied != nil {
+			onApplied()
+		}
+	}
+}
+
 func trimPointer(value *string) string {
 	if value == nil {
 		return ""

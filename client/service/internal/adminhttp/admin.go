@@ -43,6 +43,13 @@ type API struct {
 	adviceMu        sync.RWMutex
 	adviceEngine    JobClassAdvisor
 	providerApplied func()
+
+	// smartProviderConfig 是发布专用「聪明ai」凭据的落盘(AGENTS.md「LLM provider
+	// 直连」2026-08-24 增补),随职位配置同步从响应顶层 smartAi 块刷新;
+	// smartProviderApplied 由 main 装配为"重建发布引擎并换代 adviceEngine"。
+	// 两者可为 nil(测试构造不注入),刷新函数对 nil 安全。
+	smartProviderConfig  *m5ai.ProviderConfigStore
+	smartProviderApplied func()
 }
 
 // SetProviderApplied 注入模型配置落盘后的引擎换代回调(装配期一次)。
@@ -55,6 +62,13 @@ func (a *API) notifyProviderApplied() {
 	if a.providerApplied != nil {
 		a.providerApplied()
 	}
+}
+
+// SetSmartProviderStore 注入聪明ai配置落盘与其换代回调(装配期一次)。
+func (a *API) SetSmartProviderStore(store *m5ai.ProviderConfigStore, onApplied func()) *API {
+	a.smartProviderConfig = store
+	a.smartProviderApplied = onApplied
+	return a
 }
 
 func (a *API) SetJobConfigSource(source *jobconfig.Source) *API {
