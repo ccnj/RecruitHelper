@@ -4938,6 +4938,7 @@ function installM4GreetingFixture(options = {}) {
     customSelected: options.existingModal === true || options.customInitiallySelected === true,
     textareaVisible: options.existingModal === true,
     sendDisabled: modalKind === 'km' && String(options.existingDraft ?? '').trim() === '',
+    invalidText: options.invalidText ?? '',
     editIconStyleHidden: options.editIconStyleHidden === true,
     defaultChecked: options.defaultChecked === true,
     directUnsafe: options.directUnsafe === true,
@@ -5093,9 +5094,13 @@ function installM4GreetingFixture(options = {}) {
   }
   const kmCustomItem = new FixtureHTMLElement()
   kmCustomItem.classList = { contains: (name) => name === 'chat-set-greet__content-textarea' }
+  // 校验槽常驻 DOM,无错时是纯空白;有错时平台写入拒绝原话并把发送键置回禁用。
+  const kmInvalidNode = new FixtureHTMLElement()
+  Object.defineProperty(kmInvalidNode, 'innerText', { get: () => state.invalidText })
   kmCustomItem.querySelectorAll = (selector) => {
     if (selector === '.km-radio') return [kmRadioLabel]
     if (selector === 'textarea') return [textarea]
+    if (selector === '.km-form-item__invalid') return [kmInvalidNode]
     return []
   }
   const kmPresetItemA = new FixtureHTMLElement('你好，请问现在还在看机会吗？')
@@ -5544,6 +5549,36 @@ test('M6 列表招呼新版弹窗:默认勾选被勾、发送键未解禁或既�
     assert.equal(existing.state.openClicks, 0, '既有新版弹窗同样挡住接管')
   } finally {
     existing.restore()
+  }
+})
+
+test('M6 列表招呼新版弹窗:发送前平台校验拒绝即 content_rejected,空白校验槽不算拒绝', async () => {
+  const rejected = installM4GreetingFixture({ modalKind: 'km' })
+  try {
+    assert.deepEqual(await rejected.invoke('prepare'), { status: 'prepared' })
+    // 平台异步校验命中敏感词:校验槽出话,发送键回到禁用(2026-08-24 真机 DOM)。
+    rejected.state.invalidText = '内容中涉及联系方式等敏感词，请修改后保存'
+    rejected.state.sendDisabled = true
+    assert.deepEqual(await rejected.invoke('preflight'), {
+      status: 'failed', reason: 'content_rejected',
+      detail: '内容中涉及联系方式等敏感词，请修改后保存',
+    })
+    assert.deepEqual(await rejected.invoke('commit'), {
+      status: 'failed', reason: 'content_rejected',
+      detail: '内容中涉及联系方式等敏感词，请修改后保存',
+    })
+    assert.equal(rejected.state.finalClicks, 0, '平台拒绝后绝不点击发送')
+    assert.equal(rejected.state.instanceClicks, 0)
+  } finally {
+    rejected.restore()
+  }
+
+  const blank = installM4GreetingFixture({ modalKind: 'km', invalidText: '\n          \n        ' })
+  try {
+    assert.deepEqual(await blank.invoke('prepare'), { status: 'prepared' })
+    assert.deepEqual(await blank.invoke('preflight'), { status: 'ready' })
+  } finally {
+    blank.restore()
   }
 })
 
@@ -6037,6 +6072,75 @@ test('M4 招呼:弹窗内错误位有话即判 GREETING_REJECTED,关弹窗后不
   }
 })
 
+test('M4 招呼:新版弹窗发送前平台拒绝即 GREETING_REJECTED,零点击并关弹窗', async () => {
+  const preflightRejected = installM4GreetingOrchestrationFixture({
+    preflightResult: {
+      status: 'failed', reason: 'content_rejected',
+      detail: '内容中涉及联系方式等敏感词，请修改后保存',
+    },
+  })
+  const context = preflightRejected.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        {
+          platformUserRef: preflightRejected.refs.user,
+          positionRef: preflightRejected.refs.job,
+          text: preflightRejected.text,
+        },
+        { expectUnestablished: true },
+        context,
+        preflightRejected.fingerprint,
+      ),
+      (error) => {
+        assert.ok(error instanceof ZhilianPlatformError)
+        assert.equal(error.code, 'GREETING_REJECTED', '发送前的平台拒绝必须判 GREETING_REJECTED')
+        assert.equal(error.sideEffect, 'none', '未发生任何点击,副作用确定为无')
+        assert.equal(error.retryable, 'no')
+        assert.ok(error.message.includes('内容中涉及联系方式等敏感词'), '平台原话必须随行')
+        return true
+      },
+    )
+    assert.deepEqual(preflightRejected.state.phases, ['prepare', 'preflight'], '拒绝后不得进入 commit')
+    assert.equal(preflightRejected.state.finalClicks, 0)
+    assert.equal(preflightRejected.state.barriers, 0, '证词 barrier 之前就收场')
+    assert.equal(preflightRejected.state.modalCloseCalls, 1, '发前拒绝同样要关掉不会自己关的弹窗')
+  } finally {
+    preflightRejected.restore()
+  }
+
+  const commitRejected = installM4GreetingOrchestrationFixture({
+    commitResult: {
+      status: 'failed', reason: 'content_rejected',
+      detail: '内容中涉及联系方式等敏感词，请修改后保存',
+    },
+  })
+  const commitContext = commitRejected.context()
+  try {
+    await assert.rejects(
+      sendZhilianGreeting(
+        {
+          platformUserRef: commitRejected.refs.user,
+          positionRef: commitRejected.refs.job,
+          text: commitRejected.text,
+        },
+        { expectUnestablished: true },
+        commitContext,
+        commitRejected.fingerprint,
+      ),
+      (error) => {
+        assert.equal(error.code, 'GREETING_REJECTED')
+        assert.equal(error.sideEffect, 'none', 'commit 阶段的发前拒绝同样零点击')
+        return true
+      },
+    )
+    assert.equal(commitRejected.state.finalClicks, 0, '拒绝判定不得补发送')
+    assert.equal(commitRejected.state.modalCloseCalls, 1)
+  } finally {
+    commitRejected.restore()
+  }
+})
+
 test('M4 招呼:关弹窗失败不推翻拒绝判定', async () => {
   const fixture = installM4GreetingOrchestrationFixture({
     proofMode: 'negative',
@@ -6239,6 +6343,11 @@ test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮
     querySelectorAll() { return [] }
   }
   const kmModal = new FakeElement({ className: 'km-modal', position: 'fixed', innerText: '选择打招呼语' })
+  // 校验槽常驻:无错时纯空白,有错时是平台拒绝原话(2026-08-24 真机 DOM)。
+  const invalidSlot = new FakeElement({
+    className: 'km-form-item__invalid', innerText: '\n          \n        ',
+  })
+  kmModal.querySelectorAll = (selector) => selector === '.km-form-item__invalid' ? [invalidSlot] : []
   const kmWrapper = new FakeElement({
     className: 'km-modal__wrapper chat-set-greet', position: 'fixed',
     innerText: '选择打招呼语', children: [kmModal],
@@ -6258,12 +6367,17 @@ test('mainReadGreetingScene 统计新版 chat-set-greet 弹窗且不把它当浮
     },
   }
   try {
-    const result = zhilianTestHooks.mainReadGreetingScene([])
-    assert.equal(result.status, 'ready')
-    assert.equal(result.modalCount, 1, '可见的新版招呼弹窗必须计数')
-    assert.equal(result.editError, '', 'editError 判据只覆盖旧版弹窗,新版无真机事实不接')
-    assert.deepEqual(result.newTexts, ['操作频繁，请稍后再试'],
+    const blank = zhilianTestHooks.mainReadGreetingScene([])
+    assert.equal(blank.status, 'ready')
+    assert.equal(blank.modalCount, 1, '可见的新版招呼弹窗必须计数')
+    assert.equal(blank.editError, '', '常驻空白校验槽必须读成空串,否则成功会被误判成拒绝')
+    assert.deepEqual(blank.newTexts, ['操作频繁，请稍后再试'],
       '新版弹窗自身不算浮层;fixed portal 照常由兜底捕获')
+
+    invalidSlot.innerText = '内容中涉及联系方式等敏感词，请修改后保存'
+    const errored = zhilianTestHooks.mainReadGreetingScene([])
+    assert.equal(errored.editError, '内容中涉及联系方式等敏感词，请修改后保存',
+      '新版校验槽有话即平台明确业务拒绝')
   } finally {
     Object.assign(globalThis, original)
   }
