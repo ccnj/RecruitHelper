@@ -11,10 +11,10 @@ import (
 	"recruithelper/client/service/internal/store"
 )
 
-const (
-	communicationV4ManualInterleavedOutbound = "interleavedOutboundBoundary"
-	communicationV4ManualMissingOutbound     = "outboundBoundaryMissing"
-)
+// interleavedOutboundBoundary 与 outboundBoundaryMissing 两个挂人工原因自
+// 2026-08-27 停机点第二步起停产(边界现算使真人插话自动接上、锚不再需要
+// 认领);存量行照旧按原原因解读,离线解锁 CLI(m5_v4_boundary_recovery)
+// 继续认识 outboundBoundaryMissing 字面量。
 
 // processCommunicationV4Targets is the production successor to the single
 // M5TrialSelection slot. Targets are durable profile roots, so one account
@@ -234,55 +234,61 @@ func (a *roundActor) processCommunicationV4Target(
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
-	// 投影游标只表示顺序进度，可停在 in/out/system 任意行；边界一律取
-	// 游标之后的全部账本行，轮身份锚另由聚合 state/招呼链接解析
-	// （0727当日计划3）。
+	// 边界现算(2026-08-27 停机点第二步,替代 0727 游标边界):锚 = 账本内
+	// 最后一条未撤回出站,不问认领、不分真人/系统来源;本轮输入 = 锚之后、
+	// 游标之后的连续候选人消息。真人手发的出站行按构造就是新锚,天然免疫;
+	// 无主行不再需要认领,interleavedOutboundBoundary 挂人工机制随之拆除
+	// (0727 计划 §2.1 第 6/回归 9 条已废,立案 §五-2)。
 	cursor := target.Aggregate.ProjectedThroughSeq
-	var boundary []store.Message
+	var lastOut int64
 	for index := range messages {
-		if messages[index].Seq > cursor {
-			boundary = append(boundary, messages[index])
+		if messages[index].Direction == "out" && messages[index].Seq > lastOut {
+			lastOut = messages[index].Seq
 		}
 	}
-	if len(boundary) == 0 {
-		return nil
+	answeredThrough := lastOut
+	if cursor > answeredThrough {
+		answeredThrough = cursor
 	}
-	hasCandidateInput := false
-	hasOutbound := false
-	for index := range boundary {
-		message := boundary[index]
-		switch {
-		case message.Direction == "system":
-		case message.Direction == "in" && message.Kind == "system":
-		case message.Direction == "in":
-			hasCandidateInput = true
-		case message.Direction == "out":
-			hasOutbound = true
-		default:
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				communicationV4ManualInterleavedOutbound,
-				a.manager.now(),
-			)
+	var prefix, boundary []store.Message
+	pendingInput := false
+	for index := range messages {
+		message := messages[index]
+		if message.Seq <= cursor {
+			continue
+		}
+		if message.Seq <= answeredThrough {
+			prefix = append(prefix, message)
+			continue
+		}
+		boundary = append(boundary, message)
+		if message.Direction == "in" && message.Kind != "system" {
+			pendingInput = true
 		}
 	}
-	if hasCandidateInput && hasOutbound {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualInterleavedOutbound,
-			a.manager.now(),
-		)
-	}
-	if !hasCandidateInput {
+	if !pendingInput {
 		if parkedTurn != nil {
-			// 停靠轮只被候选人新输入唤醒;中性尾巴不触发投影推进或时刻表。
+			// 停靠轮只被候选人新输入唤醒;已回应段与中性尾巴不触发投影
+			// 推进或时刻表。
 			return nil
 		}
-		target, err = a.projectCommunicationV4NonCandidateTail(target, boundary)
+		target, err = a.projectCommunicationV4AnsweredSegment(
+			target, append(prefix, boundary...),
+		)
 		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
 			return err
 		}
 		return a.processCommunicationV4Schedule(ctx, target)
+	}
+	// 先把锚之前的已回应段逐行投影:真人手发的邀面/换微信卡照样归一化为
+	// 业务事件推进主线,被回答的候选人输入滑动真实消息轮与沉默锚、不再
+	// 要求对话回应。投影失败方向是跳过本轮,不冻结候选人。
+	if len(prefix) > 0 {
+		target, err = a.projectCommunicationV4AnsweredSegment(target, prefix)
+		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+			return err
+		}
+		cursor = target.Aggregate.ProjectedThroughSeq
 	}
 	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
 		target.Profile.ProfileID,
@@ -297,26 +303,15 @@ func (a *roundActor) processCommunicationV4Target(
 	}
 	inbound, validBoundary := store.DialogueTurnCandidateMessages(boundary)
 	if !validBoundary {
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualInterleavedOutbound,
-			a.manager.now(),
-		)
+		// 边界按构造只含 in/system 行;走到这里是账本形状异常。跳过本轮、
+		// 下轮按最新账本重算,不冻结候选人(2026-08-27 停机点第二步,原
+		// interleavedOutboundBoundary 挂人工已拆除)。
+		slog.Warn("沟通层跳过:边界候选行形状异常,等下轮巡检重算",
+			"profileId", target.Profile.ProfileID)
+		return nil
 	}
 
-	anchorSeq, err := a.manager.store.CommunicationV4OutboundAnchorSeq(
-		target.Profile.ProfileID,
-	)
-	if err != nil {
-		if errors.Is(err, store.ErrCommunicationV4AnchorUnresolvable) {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				communicationV4ManualMissingOutbound,
-				a.manager.now(),
-			)
-		}
-		return err
-	}
+	anchorSeq := lastOut
 	var digest, turnID string
 	if tail := inbound[len(inbound)-1]; tail.SourceKey == nil ||
 		strings.TrimSpace(*tail.SourceKey) == "" {
@@ -341,11 +336,11 @@ func (a *roundActor) processCommunicationV4Target(
 			}
 		}
 		if anchorMessage == nil || anchorMessage.Direction != "out" {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				communicationV4ManualMissingOutbound,
-				a.manager.now(),
-			)
+			// 锚按构造取自本列表内最新出站行;走到这里是并发变化或形状
+			// 异常,跳过本轮、下轮重算(不再挂 outboundBoundaryMissing)。
+			slog.Warn("沟通层跳过:出站锚行不可复取,等下轮巡检重算",
+				"profileId", target.Profile.ProfileID, "anchorSeq", anchorSeq)
+			return nil
 		}
 		digest, turnID, err = store.DialogueTurnIdentity(
 			target.Profile.ProfileID,
@@ -355,14 +350,11 @@ func (a *roundActor) processCommunicationV4Target(
 		)
 	}
 	if err != nil {
-		slog.Warn("V4 冻结转人工:回合身份计算失败",
-			"profileId", target.Profile.ProfileID,
-			"reason", communicationV4ManualInterleavedOutbound, "err", err)
-		return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-			target.Profile.ProfileID,
-			communicationV4ManualInterleavedOutbound,
-			a.manager.now(),
-		)
+		// 身份计算失败是形状/数据问题,不是发送危险:跳过本轮,不冻结
+		// 候选人(2026-08-27 停机点第二步,原挂人工路径拆除)。
+		slog.Warn("沟通层跳过:回合身份计算失败,等下轮巡检重算",
+			"profileId", target.Profile.ProfileID, "err", err)
+		return nil
 	}
 	// 可面试时段周表在冻结这一刻实时读一次，之后随 turn 固定。读失败不回落默认，
 	// 否则会按用户已经改掉的表承诺时间。
@@ -406,17 +398,24 @@ func (a *roundActor) processCommunicationV4Target(
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrDialogueTurnBinding) {
-			return a.manager.store.MarkCommunicationV4AutomationManualRequired(
-				target.Profile.ProfileID,
-				"turnBoundaryChanged",
-				a.manager.now(),
-			)
+			// 世界在本轮读取与冻结之间又动了(2026-08-27 停机点第二步:
+			// 失败方向从挂人工改为作废本批下轮重开——下一巡检轮按最新
+			// 账本重算边界,自然覆盖本次变化)。
+			slog.Info("开轮跳过:边界在冻结前又发生变化,下轮按最新账本重开",
+				"profileId", target.Profile.ProfileID)
+			return nil
 		}
-		if parkedTurn != nil && errors.Is(err, store.ErrDialogueTurnState) {
-			// 承重墙腿:停靠轮带发送案底(动作绑过 EffectIntentID/已派发),
-			// 开轮闸照旧拒绝。不算错误,等 WAL/suspect 收敛后由人工处置。
-			slog.Info("开轮暂缓:停靠旧轮带发送案底,等 WAL/suspect 收敛",
-				"profileId", target.Profile.ProfileID, "turnId", parkedTurn.TurnID)
+		if errors.Is(err, store.ErrDialogueTurnState) {
+			// 承重墙腿:旧轮带未收束发送案底(在途/suspect,Q6 放宽后纯
+			// failed/resolvedFailed 案底已不在此列),开轮闸照旧拒绝。
+			// 不算错误,等 WAL/suspect 收敛。
+			slog.Info("开轮暂缓:旧轮带未收束发送案底,等 WAL/suspect 收敛",
+				"profileId", target.Profile.ProfileID)
+			return nil
+		}
+		if errors.Is(err, store.ErrCommunicationV4Conflict) {
+			slog.Info("开轮跳过:冻结遇并发写或回执重放漂移,下轮按最新账本重算",
+				"profileId", target.Profile.ProfileID)
 			return nil
 		}
 		return err
@@ -427,7 +426,14 @@ func (a *roundActor) processCommunicationV4Target(
 	return a.advanceM5Turn(ctx, frozen.Turn)
 }
 
-func (a *roundActor) projectCommunicationV4NonCandidateTail(
+// projectCommunicationV4AnsweredSegment 把一段不需要新对话回应的账本行按
+// 序投影为业务事件(2026-08-27 停机点第二步,替代原 NonCandidateTail):
+// system 家具行、我方/真人出站(含真人手发卡片的邀面/换微信事件),以及
+// 已被后续出站回应过的候选人行。被回应的候选人表达与简历卡以 answered
+// 标记应用——状态推进(真实消息轮、沉默锚、简历事件)照旧,不再产生对话
+// 回应要求;换微信请求卡与邀面接受卡保留完整语义(无条件接受与已约面
+// 推进不因真人插话而豁免)。
+func (a *roundActor) projectCommunicationV4AnsweredSegment(
 	target store.CommunicationTarget,
 	messages []store.Message,
 ) (store.CommunicationTarget, error) {
@@ -441,6 +447,10 @@ func (a *roundActor) projectCommunicationV4NonCandidateTail(
 		})
 		if err != nil {
 			return target, err
+		}
+		switch event.Kind {
+		case communication.EventCandidateExpressionReceived, communication.EventResumeSubmitted:
+			event.Answered = true
 		}
 		result, err := a.manager.store.ApplyCommunicationV4BusinessEvent(
 			store.ApplyCommunicationV4BusinessEventRequest{

@@ -224,8 +224,18 @@ func ApplyV4BusinessEvent(input V4State, event BusinessEvent) (V4EventDecision, 
 
 	switch event.Kind {
 	case EventCandidateExpressionReceived:
+		if event.Answered {
+			// 已被出站回应的表达(2026-08-27 停机点第二步):真实消息轮、
+			// 沉默锚照常推进,不再要求对话回应。
+			decision, _, err := applyV4RealExpressionDecision(decision, event)
+			return decision, err
+		}
 		return applyV4RealExpression(decision, event, V4DialogueClassifyAndReply)
 	case EventResumeSubmitted:
+		if event.Answered {
+			decision, _, err := applyV4RealExpressionDecision(decision, event)
+			return decision, err
+		}
 		return applyV4RealExpression(decision, event, V4DialogueReplyKnownInterested)
 	case EventWechatRequested:
 		decision, disposition, err := applyV4RealExpressionDecision(decision, event)

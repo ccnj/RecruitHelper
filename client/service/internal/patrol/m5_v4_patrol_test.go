@@ -1724,10 +1724,14 @@ func TestCommunicationV4PatrolProjectsHumanOutboundTailAndSlidesClocks(t *testin
 	}
 }
 
-func TestCommunicationV4PatrolStillStopsInterleavedCandidateAndHumanOutbound(t *testing.T) {
+func TestCommunicationV4PatrolAutoAdoptsInterleavedCandidateAndHumanOutbound(t *testing.T) {
+	// 2026-08-27 停机点第二步(立案 §五-2;0727 计划 §2.1 第 6/回归 9 条已
+	// 废):候选人消息与真人回复交错不再挂人工——真人出站行按构造就是新
+	// 边界锚,被回应的候选人输入滑动真实消息轮与沉默锚后整段收编;没有
+	// 待回应输入时不触发任何浏览器命令。
 	h := newHarness(t)
 	inbound, outbound := "候选人先发来消息", "真人随后已经回复"
-	manualAtMs := h.clock.Now().Add(time.Hour).UnixMilli()
+	repliedAtMs := h.clock.Now().Add(-time.Minute).UnixMilli()
 	fixture := seedCommunicationV4PatrolTargetWithBoundary(t, h, "human-interleaved", []store.MessageDraft{
 		{
 			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(inbound),
@@ -1735,7 +1739,7 @@ func TestCommunicationV4PatrolStillStopsInterleavedCandidateAndHumanOutbound(t *
 		},
 		{
 			Direction: "out", Kind: "text", ContentHash: syncledger.HashText(outbound),
-			Text: &outbound, Origin: "external", TsApproxMs: &manualAtMs,
+			Text: &outbound, Origin: "external", TsApproxMs: &repliedAtMs,
 		},
 	})
 	account, err := h.db.AccountByKey(h.key)
@@ -1755,12 +1759,18 @@ func TestCommunicationV4PatrolStillStopsInterleavedCandidateAndHumanOutbound(t *
 	}
 	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
 	if err != nil ||
-		aggregate.AutomationStatus != store.ProfileCommunicationAutomationManualRequired ||
-		aggregate.ManualReason != communicationV4ManualInterleavedOutbound {
-		t.Fatalf("候选人消息与真人回复交错仍应保守停止: aggregate=%+v err=%v", aggregate, err)
+		aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("真人插话不得再挂人工: aggregate=%+v err=%v", aggregate, err)
+	}
+	if aggregate.State.LastOutboundMessageSeq == 0 ||
+		aggregate.State.RealMessageRound == 0 ||
+		aggregate.ProjectedThroughSeq < aggregate.State.LastOutboundMessageSeq {
+		t.Fatalf("已回应段未完成状态推进: state=%+v cursor=%d",
+			aggregate.State, aggregate.ProjectedThroughSeq)
 	}
 	if len(h.runner.names()) != 0 {
-		t.Fatalf("交错边界不得触发浏览器命令: calls=%+v", h.runner.names())
+		t.Fatalf("无待回应输入不得触发浏览器命令: calls=%+v", h.runner.names())
 	}
 }
 

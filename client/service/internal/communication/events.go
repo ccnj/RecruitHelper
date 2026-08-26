@@ -62,6 +62,11 @@ type BusinessEvent struct {
 	// InterviewMethod 只在我方邀面卡事件上有值,取账本里那张卡的平台无关
 	// method 投影。它是"本次面试是线上还是线下"的唯一事实来源。
 	InterviewMethod string `json:"interviewMethod,omitempty"`
+	// Answered 标记该候选人行已被账本内更靠后的出站行回应(2026-08-27
+	// 停机点第二步,真人插话自动接上):状态推进照旧,但不再产生对话回应
+	// 要求。只对候选人表达与简历卡有意义;换微信请求/邀面接受等确定性
+	// 事件不使用此标记。参与回执 digest(同一行以同一标记重放恒同)。
+	Answered bool `json:"answered,omitempty"`
 }
 
 // LedgerMessageFact deliberately mirrors only the platform-neutral message

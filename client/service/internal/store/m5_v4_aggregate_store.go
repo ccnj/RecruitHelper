@@ -410,6 +410,35 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 		if err := validateNewCommunicationV4EventBoundary(aggregate, req.Event); err != nil {
 			return err
 		}
+		if req.Event.Source == communication.EventSourceMessage &&
+			req.Event.MessageSeq != aggregate.ProjectedThroughSeq+1 {
+			// 跨过的编号必须全是撤回行:投影按活动行顺序走,活动行不得被
+			// 静默跳过(2026-08-27 停机点第二步,撤回空洞容忍)。
+			var profile CandidateProfile
+			if err := tx.First(&profile, "profile_id = ?", req.ProfileID).Error; err != nil {
+				return err
+			}
+			if profile.ConversationRef == nil {
+				return ErrCommunicationV4Conflict
+			}
+			var skipped int64
+			if err := tx.Model(&Message{}).
+				Where(
+					"platform = ? AND account_ref = ? AND conversation_ref = ? AND seq > ? AND seq < ?",
+					profile.Platform,
+					profile.AccountRef,
+					*profile.ConversationRef,
+					aggregate.ProjectedThroughSeq,
+					req.Event.MessageSeq,
+				).
+				Where(activeMessageCondition).
+				Count(&skipped).Error; err != nil {
+				return err
+			}
+			if skipped != 0 {
+				return ErrCommunicationV4Conflict
+			}
+		}
 		if aggregate.Revision == ^uint64(0) {
 			return ErrCommunicationV4Conflict
 		}
@@ -1248,8 +1277,10 @@ func validateNewCommunicationV4EventBoundary(
 ) error {
 	switch event.Source {
 	case communication.EventSourceMessage:
+		// 顺序性只要求"向前":撤回行留下的编号空洞由事务内的活动行空洞
+		// 核查放行(2026-08-27 停机点第二步),任何活动行都不得被静默跳过。
 		if event.MessageSeq <= 0 || event.Key != fmt.Sprintf("message:%d", event.MessageSeq) ||
-			event.MessageSeq != aggregate.ProjectedThroughSeq+1 {
+			event.MessageSeq <= aggregate.ProjectedThroughSeq {
 			return ErrCommunicationV4Conflict
 		}
 	case communication.EventSourceCardTransition:
