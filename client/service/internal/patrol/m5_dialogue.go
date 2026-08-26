@@ -1091,9 +1091,6 @@ func (a *roundActor) executeM5AdviceAttempt(
 	inputHash string,
 	attempt int,
 ) (int, error) {
-	// legacy 预算恢复是那次事故的一次性授权,自带"attempt=2 失败即永久停止"
-	// 的边界(见 ReserveAuthorizedM5ReplyBudgetRecovery),不并入通用重试。
-	legacyRecovered := false
 	// 引擎按用途取一次快照,身份、调用与日志从头用到尾同一个:账本记的
 	// provider/model 必须是实际调用的引擎(AGENTS.md 次聪明段)。命名用 engine
 	// 是因为意向分支里已有叫 advice 的 IntentAdvice 局部变量,不遮蔽。
@@ -1112,58 +1109,25 @@ func (a *roundActor) executeM5AdviceAttempt(
 	}
 	if !reserved.Created {
 		if reserved.Invocation.FinishedAt != nil {
-			if purpose != m5ai.PurposeReply ||
-				!isLegacyM5ReplyBudgetFalsePositive(reserved.Invocation) {
-				// 这一次 attempt 已经完成过,而 turn 还停在等建议的状态——说明
-				// 上次进程在它完成后、写入 turn 终局前崩溃,那次没能产出可用
-				// 建议。按重试纪律换下一次 attempt,不再判冲突。
-				if attempt < store.MaxAIInvocationAttempts {
-					return attempt + 1, nil
-				}
-				// 五次调用账已满而 turn 终局缺失,只是崩溃留下的账面歧义,
-				// 不是候选人的业务终局(2026-08-02 裁决):不押给人工,跳过
-				// 本轮。该轮不会再产生新调用,由输入边界变化或人工处置收敛。
-				slog.Warn("对话轮调用账已满而终局缺失,本轮跳过",
-					"turnId", turn.TurnID, "purpose", string(purpose),
-					"attempt", attempt)
-				return 0, errM5AdviceRoundSkipped
+			// 这一次 attempt 已经完成过,而 turn 还停在等建议的状态——说明
+			// 上次进程在它完成后、写入 turn 终局前崩溃,那次没能产出可用
+			// 建议。按重试纪律换下一次 attempt,不再判冲突。(2026-08-01
+			// 预算误判事故的一次性恢复通道已于 2026-08-27 停机点第二步随
+			// C6 退役——其历史使命完成,协议 §8.1 对应条款已声明死文。)
+			if attempt < store.MaxAIInvocationAttempts {
+				return attempt + 1, nil
 			}
-			recovery, recoveryErr := a.manager.store.ReserveAuthorizedM5ReplyBudgetRecovery(
-				store.ReserveM5ReplyBudgetRecoveryRequest{
-					InvocationID: stableM5ID(
-						"invocation", turn.TurnID, string(m5ai.PurposeReply), "2",
-					),
-					TurnID: turn.TurnID, Provider: engine.ProviderName(),
-					Model: engine.ModelName(), InputHash: inputHash,
-					CreatedAt: a.manager.now(),
-				},
-			)
-			if recoveryErr != nil {
-				switch {
-				case errors.Is(recoveryErr, store.ErrDialogueTurnBinding):
-					return 0, a.settleM5TurnBoundaryChanged(turn.TurnID)
-				case errors.Is(recoveryErr, store.ErrM5ReplyBudgetRecoveryUnsafe):
-					return 0, a.manager.store.MarkDialogueTurnManualRequired(
-						turn.TurnID, "replyBudgetRecoveryUnsafe", a.manager.now(),
-					)
-				default:
-					return 0, recoveryErr
-				}
-			}
-			reserved = recovery
-			if reserved.Invocation.FinishedAt != nil {
-				return 0, a.manager.store.MarkDialogueTurnManualRequired(
-					turn.TurnID, "replyBudgetRecoveryAlreadyFinished", a.manager.now(),
-				)
-			}
-			legacyRecovered = true
-			attempt = reserved.Invocation.Attempt
+			// 五次调用账已满而 turn 终局缺失,只是崩溃留下的账面歧义,
+			// 不是候选人的业务终局(2026-08-02 裁决):不押给人工,跳过
+			// 本轮。该轮不会再产生新调用,由输入边界变化或人工处置收敛。
+			slog.Warn("对话轮调用账已满而终局缺失,本轮跳过",
+				"turnId", turn.TurnID, "purpose", string(purpose),
+				"attempt", attempt)
+			return 0, errM5AdviceRoundSkipped
 		}
-		if !reserved.Created {
-			// 预留了但没完成的遗留由脑启动时的 RecoverInterruptedAIInvocations
-			// 统一收敛(main.go),那条路刻意保守终局、不重试;这里维持原样。
-			return 0, a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
-		}
+		// 预留了但没完成的遗留由脑启动时的 RecoverInterruptedAIInvocations
+		// 统一收敛(main.go),那条路刻意保守终局、不重试;这里维持原样。
+		return 0, a.finishInterruptedM5Advice(turn, material, facts, purpose, intent, reserved.Invocation)
 	}
 
 	request := m5ai.CompletionRequest{
@@ -1214,7 +1178,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 		logAIInvocationOutcome(
 			engine, purpose, completion, response.Diagnostics.TraceErrorCode,
 		)
-		if !legacyRecovered && m5AdviceShouldRetry(completion, decision, manualReason, attempt) {
+		if m5AdviceShouldRetry(completion, decision, manualReason, attempt) {
 			if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
 				return 0, failErr
 			}
@@ -1253,7 +1217,7 @@ func (a *roundActor) executeM5AdviceAttempt(
 	logAIInvocationOutcome(
 		engine, purpose, completion, response.Diagnostics.TraceErrorCode,
 	)
-	if !legacyRecovered && m5AdviceShouldRetry(completion, decision, "", attempt) {
+	if m5AdviceShouldRetry(completion, decision, "", attempt) {
 		if failErr := a.manager.store.FailAIInvocationForRetry(completion, purpose); failErr != nil {
 			return 0, failErr
 		}
@@ -1275,22 +1239,6 @@ func (a *roundActor) executeM5AdviceAttempt(
 		logAIInvocationPersistenceFailure(engine, purpose, completion, err)
 	}
 	return 0, err
-}
-
-func isLegacyM5ReplyBudgetFalsePositive(invocation store.AIInvocation) bool {
-	return invocation.Purpose == m5ai.PurposeReply &&
-		invocation.Attempt == 1 &&
-		invocation.Status == store.AIInvocationBudgetBlocked &&
-		invocation.ErrorClass == "budgetBlocked" &&
-		invocation.FinishedAt != nil &&
-		invocation.OutputHash == "" &&
-		invocation.InputTokens == 0 &&
-		invocation.CachedInputTokens == 0 &&
-		invocation.OutputTokens == 0 &&
-		invocation.ReasoningTokens == nil &&
-		invocation.UsageShape == "" &&
-		invocation.LatencyMs == 0 &&
-		invocation.EstimatedCostMicros == 0
 }
 
 func (a *roundActor) finishInterruptedM5Advice(

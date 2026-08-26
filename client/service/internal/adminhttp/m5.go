@@ -78,35 +78,6 @@ func (a *API) m5TrialStatus(w http.ResponseWriter, _ *http.Request) {
 	a.writeM5TrialStatus(w)
 }
 
-func (a *API) recoverM5ReplyBudget(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		SelectionID string `json:"selectionId"`
-	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "非法请求体"})
-		return
-	}
-	req.SelectionID = strings.TrimSpace(req.SelectionID)
-	if req.SelectionID == "" || len(req.SelectionID) > 512 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少有效的试运行选择标识"})
-		return
-	}
-	result, err := a.st.AuthorizeM5ReplyBudgetRecovery(store.AuthorizeM5ReplyBudgetRecoveryRequest{
-		FailedSelectionID: req.SelectionID,
-		NewSelectionID:    ids.NewTrialSelectionID(),
-		AuthorizedAt:      time.Now(),
-	})
-	if err != nil {
-		writeError(w, http.StatusConflict, "当前失败轮次不允许预算恢复", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                true,
-		"selectionId":       result.Selection.SelectionID,
-		"alreadyAuthorized": result.AlreadyAuthorized,
-	})
-}
-
 func (a *API) writeM5TrialStatus(w http.ResponseWriter) {
 	status, err := a.st.M5TrialStatus()
 	if err != nil {
