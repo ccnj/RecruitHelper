@@ -3453,6 +3453,116 @@ async function dismissGreetingSuccessModalsBestEffort(tabId: number): Promise<vo
   }
 }
 
+// 全局营销弹窗清场(2026-08-26 甲方裁决)。智联在页面跳转/刷新后会弹全站运营位
+// 弹窗(优惠券 coupons-auto-modal、图片广告 image-popup-modal,可叠弹),盖住
+// 截图取证并挡有人值守视线;关一次当日不再弹。判据是 2026-08-26 真机考察事实:
+// 营销弹窗是 body 直挂的 .km-modal__wrapper[scene="GLOBAL"],而全部已验业务
+// 弹窗(邀面/删除确认/排序管理/旧版招呼/职位页各族/组件内确认族)一律无 scene
+// 属性——挂载位置与 z-index 都区分不开(旧版招呼弹窗与优惠券同为 1060,删除
+// 确认是无附加类名的光板 wrapper),scene 是唯一可用锚点。甲方知情接受:平台
+// 日后若把 scene="GLOBAL" 用在业务/警告弹窗上,该弹窗会被静默关掉(方向是
+// 少看见,不产生副作用);属性漂移则清不掉,回到现状。
+// 每个弹窗只碰它自己内部的关闭控件:首选唯一且未禁用的标准 km-modal__close-btn,
+// 没有才找唯一的 *__close 类图标(优惠券形态);其余控件(「去使用」「前往
+// 卡券包」等会跳转/消耗权益)一律不碰,找不到唯一关闭控件就不动。
+// 它是清场不是判据:任何失败都不影响调用方业务,不在函数内重试。
+// scene 只带标签名与类名(手侧日志纪律,不携带页面文本)。
+async function mainDismissGlobalSceneModals(): Promise<{
+  found: boolean
+  closed: boolean
+  remaining: number
+  scene: string
+}> {
+  const clean = (value: unknown): string => String(value ?? '')
+    .normalize('NFC')
+    .replace(/\u00a0/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const visible = (element: Element): boolean => {
+    const node = element as HTMLElement
+    const style = getComputedStyle(node)
+    return style.display !== 'none' && style.visibility !== 'hidden' && node.getClientRects().length > 0
+  }
+  const wait = (delayMs: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, delayMs))
+  const sig = (node: Element): string =>
+    `${node.tagName}.${clean(node.getAttribute('class')).replace(/ /gu, '.')}`.slice(0, 96)
+  const roots = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('body > .km-modal__wrapper[scene="GLOBAL"]'))
+      .filter(visible)
+  const dismissTarget = (root: HTMLElement): HTMLElement | null => {
+    const stdCloses = Array.from(root.querySelectorAll<HTMLButtonElement>('button.km-modal__close-btn'))
+      .filter((node) => visible(node) && !node.disabled)
+    if (stdCloses.length === 1 && (stdCloses[0].form === null || stdCloses[0].type === 'button')) {
+      return stdCloses[0]
+    }
+    if (stdCloses.length > 1) return null
+    // 优惠券形态没有标准关闭钮,关闭控件是它自己的 *__close 图标(<i>)。
+    // 「__close」双下划线后缀是 BEM 元素名,不会命中 close-btn 内部的 icon 类。
+    const iconCloses = Array.from(root.querySelectorAll<HTMLElement>('[class*="__close"]'))
+      .filter((node) => visible(node) &&
+        clean(node.getAttribute('class')).split(' ').some((cls) => cls.endsWith('__close')))
+    if (iconCloses.length === 1) return iconCloses[0]
+    return null
+  }
+  const scene: string[] = []
+  try {
+    const initial = roots()
+    if (initial.length === 0) return { found: false, closed: false, remaining: 0, scene: '' }
+    const intrinsicClick = HTMLElement.prototype.click as (this: HTMLElement) => void
+    const invokeClick = Function.prototype.call.bind(intrinsicClick) as (node: HTMLElement) => void
+    let clicked = 0
+    for (const root of initial) {
+      if (!root.isConnected || !visible(root)) continue
+      const target = dismissTarget(root)
+      scene.push(`${sig(root)}>${target === null ? 'noDismissBtn' : sig(target)}`)
+      if (target === null) continue
+      // 调用方挂在页面就绪之后,距上一次交互已隔过节奏;趟内从第二击起再各等一次。
+      if (clicked > 0) await wait(1_000 + Math.floor(Math.random() * 501))
+      if (!target.isConnected || !visible(target)) continue
+      invokeClick(target)
+      clicked += 1
+      await wait(400)
+    }
+    const remaining = roots()
+    return {
+      found: true,
+      closed: remaining.length === 0,
+      remaining: remaining.length,
+      scene: scene.join(' | ').slice(0, 400),
+    }
+  } catch {
+    return { found: false, closed: false, remaining: 0, scene: scene.join(' | ').slice(0, 400) }
+  }
+}
+
+// 调用侧收口,照招呼成功弹窗清场同款:关掉了什么记 warn(类名级,供事后核对
+// 关的都是营销位),关不掉记 error(带签名,够下次照着改选择器);任何失败都
+// 不影响调用方业务。挂点是各页面导航就绪之后与两个取证截图开拍之前。
+async function dismissGlobalPromoModalsBestEffort(tabId: number): Promise<void> {
+  try {
+    const outcome = await runMain(tabId, mainDismissGlobalSceneModals, [])
+    if (!outcome.found) return
+    console.info(
+      '[RecruitHelper] global_promo_modal_dismiss',
+      outcome.closed,
+      outcome.remaining,
+      outcome.scene,
+    )
+    if (outcome.closed) {
+      reportHandLog('warn', 'promoModalDismissed', '已关闭全局营销弹窗', outcome.scene)
+    } else {
+      reportHandLog(
+        'error',
+        'promoModalDismissFailed',
+        `全局营销弹窗未关闭,页面仍有 ${outcome.remaining} 个遮挡`,
+        outcome.scene,
+      )
+    }
+  } catch {
+    // 清场只尽力而为,失败不影响调用方业务。
+  }
+}
+
 function validGreetingSceneResult(value: unknown): value is MainGreetingSceneResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
@@ -4383,6 +4493,9 @@ export async function ensureZhilianIM(
   }
   // nav.ensureSurface 是 pageAbsent 恢复例外；身份一旦可观测，返回前仍必须复核。
   assertExpectedPrincipal(probe, expectedPrincipalFingerprint)
+  if (probe.contentScriptOk && tab.id !== undefined) {
+    await dismissGlobalPromoModalsBestEffort(tab.id)
+  }
   await ctx.progress('智联 IM 页面已就绪', 100)
   return {
     ready: probe.contentScriptOk && probe.surface?.imListVisible === true,
@@ -5431,6 +5544,9 @@ async function waitForSourcingReady(
       try {
         const probe = await probeTab(latest)
         if (probe.loginState === 'out' || probe.contentScriptOk) {
+          if (probe.contentScriptOk && latest.id !== undefined) {
+            await dismissGlobalPromoModalsBestEffort(latest.id)
+          }
           return { tab: latest, probe }
         }
       } catch (error) {
@@ -6016,7 +6132,10 @@ async function waitForZhilianJobListReady(
       // 同上：complete 不代表 SPA 已经渲染完，注入可能拿不到返回值。
       try {
         const probed = await runMain(latest.id as number, mainReadZhilianJobSection, [])
-        if (validJobSectionResult(probed) && probed.status === 'ok') return latest
+        if (validJobSectionResult(probed) && probed.status === 'ok') {
+          await dismissGlobalPromoModalsBestEffort(latest.id as number)
+          return latest
+        }
       } catch (error) {
         if (!(error instanceof ZhilianPlatformError)) throw error
       }
@@ -8748,7 +8867,10 @@ async function ensureZhilianJobPublishTab(
       // 就绪探测允许失败，继续轮询即可；只有轮完仍不就绪才算真的没起来。
       try {
         const probed = await runMain(tabId, mainReadZhilianWorkplace, [])
-        if (validMainStep(probed) && probed.status === 'ok') return latest
+        if (validMainStep(probed) && probed.status === 'ok') {
+          await dismissGlobalPromoModalsBestEffort(tabId)
+          return latest
+        }
       } catch (error) {
         if (!(error instanceof ZhilianPlatformError)) throw error
       }
@@ -15584,6 +15706,8 @@ export async function captureZhilianResumeScreenshot(
   await ctx.progress('简历截图准备', 10)
 
   const tabId = tab.id
+  // 开拍前清一次全局营销弹窗:它盖在页面上会被拍进取证长图。
+  await dismissGlobalPromoModalsBestEffort(tabId)
   const step: CaptureStepRunner = async (op, requestedTop = 0) => {
     const result = await runMain(tabId, mainResumeCaptureStep, [
       args.conversationRef,
@@ -15676,6 +15800,8 @@ export async function captureZhilianThreadScreenshot(
   await ctx.progress('聊天截图准备', 10)
 
   const tabId = tab.id
+  // 开拍前清一次全局营销弹窗:它盖在页面上会被拍进取证长图。
+  await dismissGlobalPromoModalsBestEffort(tabId)
   const step: CaptureStepRunner = async (op, requestedTop = 0) => {
     const result = await runMain(tabId, mainChatCaptureStep, [args.conversationRef, op, requestedTop])
     if (result.status === 'failed') captureStepFailure(result)
@@ -15709,6 +15835,7 @@ export const zhilianTestHooks = Object.freeze({
   mainReadGreetingScene,
   mainCloseGreetingModal,
   mainDismissGreetingSuccessModals,
+  mainDismissGlobalSceneModals,
   mainReadCurrentResume,
   mainChatCaptureStep,
   mainResumeCaptureStep,
