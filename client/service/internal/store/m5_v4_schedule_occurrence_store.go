@@ -100,7 +100,8 @@ func (s *Store) ApplyCommunicationV4ArchiveAction(
 			profile.AccountRef != conversation.AccountRef ||
 			profile.ConversationRef == nil ||
 			*profile.ConversationRef != conversation.ConversationRef ||
-			conversation.LastMessageSeq != activeTail ||
+			// 会话尾计数与活动尾的差(已撤回尾行)交由下方按档归档校验的
+			// C5 新鲜度判定统一处置,这里只守方向性不变量。
 			activeTail < aggregate.ProjectedThroughSeq {
 			return ErrCommunicationV4Conflict
 		}
@@ -343,7 +344,17 @@ func validateCommunicationV4ArchiveTailTx(
 	if reason != communication.V4EndFallback {
 		// Ordinary 36-hour archive is the last schedule tier and must be
 		// evaluated only after the whole active ledger tail was projected.
-		if activeTail != aggregate.ProjectedThroughSeq {
+		// 无主 system/已撤回后缀按 C5(2026-08-27 甲方裁决)放行,与派发闸
+		// 的 Q7 容忍同一把尺子。
+		fresh, err := communicationV4ScheduleTailFreshTx(
+			tx, "36小时归档", profile.Platform, profile.AccountRef,
+			conversation.ConversationRef,
+			aggregate.ProjectedThroughSeq, activeTail, conversation.LastMessageSeq,
+		)
+		if err != nil {
+			return err
+		}
+		if !fresh {
 			return ErrCommunicationV4Conflict
 		}
 		return nil
