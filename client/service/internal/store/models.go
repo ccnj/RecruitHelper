@@ -1211,7 +1211,14 @@ type Conversation struct {
 
 	TrackingState      TrackingState `gorm:"not null;index"`
 	AdoptedBoundarySeq int64
-	LastMessageSeq     int64
+	// RespondedThroughSeq 是「已回应至」水位(2026-08-02 甲方裁决决策 3,
+	// 2026-08-27 随停机点第二步固化落地):巡检静默收尾已处理到的消息位置,
+	// 只作加速下界,供后续现算裁决压掉静默尾巴的每轮重判。三条纪律(v4
+	// 规格 §一同名条目):只做下界、永不做闸——不许相等比对、不许 CAS、
+	// 不许作停机条件,数值异常即当不存在、按锚重算;单写单向只增,唯一
+	// 写入点是巡检静默收尾;水位实际压掉消息时记日志。
+	RespondedThroughSeq int64 `gorm:"not null;default:0"`
+	LastMessageSeq      int64
 	LastSyncedRoundID  string
 	LastSyncedAt       *time.Time
 

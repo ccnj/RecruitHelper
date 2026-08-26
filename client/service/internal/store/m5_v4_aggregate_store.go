@@ -493,6 +493,20 @@ func (s *Store) ApplyCommunicationV4BusinessEvent(
 	return out, nil
 }
 
+// AdvanceConversationRespondedThrough 是「已回应至」水位的唯一写入点
+// (2026-08-02 决策 3,2026-08-27 停机点第二步落地):巡检对一个会话得出
+// 「没有需要回应的输入」结论时推进,单调只增。它永远只是加速下界,不是闸:
+// 调用方对失败只记日志——水位丢失或落后的代价只是多一次重判,绝不停机。
+func (s *Store) AdvanceConversationRespondedThrough(key ConversationKey, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	return s.db.Model(&Conversation{}).
+		Where(conversationWhere(key), conversationArgs(key)...).
+		Where("responded_through_seq < ?", seq).
+		UpdateColumn("responded_through_seq", seq).Error
+}
+
 // MarkCommunicationV4AutomationManualRequired isolates one profile without
 // stopping the account worker. It exposes the existing aggregate gate to the
 // production orchestrator; it does not create a second manual-state mechanism.

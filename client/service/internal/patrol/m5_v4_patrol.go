@@ -231,6 +231,9 @@ func (a *roundActor) processCommunicationV4Target(
 			// 停靠轮且无新账本行:保持停靠,不跑时刻表(与拆腿前行为一致)。
 			return nil
 		}
+		if len(messages) > 0 {
+			a.advanceRespondedThroughWatermark(key, messages[len(messages)-1].Seq)
+		}
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 
@@ -278,6 +281,7 @@ func (a *roundActor) processCommunicationV4Target(
 		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
 			return err
 		}
+		a.advanceRespondedThroughWatermark(key, target.Aggregate.ProjectedThroughSeq)
 		return a.processCommunicationV4Schedule(ctx, target)
 	}
 	// 先把锚之前的已回应段逐行投影:真人手发的邀面/换微信卡照样归一化为
@@ -424,6 +428,16 @@ func (a *roundActor) processCommunicationV4Target(
 		return err
 	}
 	return a.advanceM5Turn(ctx, frozen.Turn)
+}
+
+// advanceRespondedThroughWatermark 推进「已回应至」水位(决策 3):巡检对
+// 该会话得出"没有需要回应的输入"结论的静默收尾时点。失败只记日志——水位
+// 永远只是加速下界,不是闸,落后的代价只是多一次重判。
+func (a *roundActor) advanceRespondedThroughWatermark(key store.ConversationKey, seq int64) {
+	if err := a.manager.store.AdvanceConversationRespondedThrough(key, seq); err != nil {
+		slog.Warn("已回应至水位推进失败(仅加速下界,忽略)",
+			"conversationRef", key.ConversationRef, "seq", seq, "err", err)
+	}
 }
 
 // projectCommunicationV4AnsweredSegment 把一段不需要新对话回应的账本行按
