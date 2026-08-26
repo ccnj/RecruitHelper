@@ -3,7 +3,6 @@
 
 import type { PrimitiveContext } from '../registry'
 import { describeError, reportHandLog } from '../../base/handLog'
-import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
   AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
@@ -53,7 +52,6 @@ import type {
   DebugInspectSendSurfaceData,
   DebugProbeInterviewEditorArgs,
   DebugProbeInterviewEditorData,
-  ErrorCode,
   InterviewDetails,
   JobPrepareDraftArgs,
   JobPrepareDraftData,
@@ -69,9 +67,7 @@ import type {
   JobTakeOfflineData,
   JobTakeOfflineGuards,
   MessageAnchor,
-  NotReadyReason,
   ProbePlatformData,
-  Retryable,
   SideEffect,
   ThreadMessage,
 } from '../../base/protocol'
@@ -87,30 +83,35 @@ import {
   putSessionBlob,
   sessionBlobParams,
 } from '../../base/capture'
+import { PlatformError } from './types'
+import type { ExecutionWorld, PlatformAdapter } from './types'
+import { runInPage } from './inject'
+import type { InjectOptions } from './inject'
+// 域名与 URL 形状的唯一出处是站点身份模块 —— 它同时被 content script 那个
+// bundle 用(见 zhilianSite.ts 开头);在这里另写一份就会有两个「智联是谁」。
+import {
+  ZHILIAN_HOST,
+  ZHILIAN_IM_URL,
+  ZHILIAN_MATCH,
+  ZHILIAN_PLATFORM,
+  ZHILIAN_RECOMMEND_URL,
+} from './zhilianSite'
 
-export const ZHILIAN_PLATFORM = 'zhilian'
-export const ZHILIAN_HOST = 'rd6.zhaopin.com'
-export const ZHILIAN_IM_URL = `https://${ZHILIAN_HOST}/app/im`
-export const ZHILIAN_RECOMMEND_URL = `https://${ZHILIAN_HOST}/app/recommend`
+export { ZHILIAN_HOST, ZHILIAN_IM_URL, ZHILIAN_PLATFORM, ZHILIAN_RECOMMEND_URL }
 
-const TAB_QUERY = `https://${ZHILIAN_HOST}/*`
+const TAB_QUERY = ZHILIAN_MATCH
 // 历史消息每次只取 8 条，保证单页即便字段接近 schema 上限也不会顶穿 64KiB data 门禁。
 const THREAD_PAGE_SIZE = 8
 const LIST_WINDOW_MAX_SESSIONS = 32
 const RESULT_DATA_BUDGET = 60 * 1024
 
-export class ZhilianPlatformError extends Error {
-  constructor(
-    readonly code: ErrorCode,
-    message: string,
-    readonly retryable: Retryable = 'afterRecovery',
-    readonly reason?: NotReadyReason,
-    readonly sideEffect: SideEffect = 'none',
-    // 失败现场快照,只给人读:哪一步、当时页面处于什么状态。它进 error.data
-    // (契约里是 raw 对象),不参与任何业务判定,也不进 evidence。
-    readonly diagnostics?: Record<string, unknown>,
-  ) {
-    super(message)
+// 字段与语义整体上移到平台无关的 PlatformError(见 ./types.ts):code、
+// retryable、reason、sideEffect、失败现场快照 diagnostics 一项没变。这里只保留
+// 一个空子类,让本文件既有的 378 处构造点一个字都不用改;**捕获一律用
+// PlatformError**,否则第二个平台抛的错会漏网。
+export class ZhilianPlatformError extends PlatformError {
+  constructor(...args: ConstructorParameters<typeof PlatformError>) {
+    super(...args)
     this.name = 'ZhilianPlatformError'
   }
 }
@@ -779,6 +780,12 @@ function sameThreadPosition(
     left.endTime === right.endTime && left.lastMsgId === right.lastMsgId
 }
 
+// 智联的执行世界。**必须是 MAIN,原因是感知不是动作**:会话消息数组只能经页面
+// Vue 实例的 Vuex getter 拿到,那个属性在 isolated world 不可见。适配器声明的
+// world 与本常量同源,改一处必须两处一致。
+const ZHILIAN_WORLD: ExecutionWorld = 'MAIN'
+const ZHILIAN_INJECT: InjectOptions = { world: ZHILIAN_WORLD, label: '智联' }
+
 async function runMain<A extends unknown[], R>(
   tabId: number,
   func: (...args: A) => R | Promise<R>,
@@ -788,49 +795,16 @@ async function runMain<A extends unknown[], R>(
   // 不可能有哪个接缝被漏掉。见 zhilianPublishInteractions 的说明。
   const paced = zhilianPublishInteractions.has(func)
   if (paced) await paceZhilianInteraction()
-  const result = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func,
-    args,
-  })
-  if (paced && zhilianInteractionHappened(func, (result[0] as { result?: unknown } | undefined)?.result)) {
+  // 注入机制(executeScript + InjectionResult 拆包 + 页面哨兵还原)已上移到
+  // platform/inject.ts;这里只剩智联自己的节奏与记时。
+  //
+  // 记时挪到拆包之后是等价的:拆包会抛的每一条路径上,原先那个记时条件都必然
+  // 为假——validMainStep 对 undefined、对哨兵对象、对 error 形态一律返回 false。
+  const value = await runInPage(ZHILIAN_INJECT, tabId, func, args)
+  if (paced && zhilianInteractionHappened(func, value)) {
     lastZhilianPublishInteractionAt = Date.now()
   }
-  const first = result[0] as unknown as { result?: R | null; error?: unknown } | undefined
-  if (!first) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本尚未就绪', 'afterRecovery', 'contentScriptDead')
-  }
-  if (first.error !== undefined && first.error !== null) {
-    let detail = ''
-    if (typeof first.error === 'string') {
-      detail = first.error.trim()
-    } else if (typeof first.error === 'object') {
-      try {
-        const message = (first.error as { message?: unknown }).message
-        if (typeof message === 'string') detail = message.trim()
-      } catch {
-        // Chrome 的 InjectionResult.error 形态尚未在所有版本稳定；不读取其他字段。
-      }
-    }
-    const suffix = detail ? `：${detail.slice(0, 300)}` : ''
-    throw new ZhilianPlatformError(
-      'CTX_NOT_READY',
-      `智联页面脚本执行失败${suffix}`,
-      'afterRecovery',
-      'contentScriptDead',
-    )
-  }
-  if (first.result === undefined || first.result === null) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本未返回结果', 'afterRecovery', 'contentScriptDead')
-  }
-  const mainError = typeof first.result === 'object' && !Array.isArray(first.result)
-    ? (first.result as Record<string, unknown>).__recruitHelperMainError
-    : undefined
-  if (typeof mainError === 'string' && mainError.length > 0) {
-    throw new Error(mainError.slice(0, 300))
-  }
-  return first.result
+  return value
 }
 
 function pageKindFromURL(url: string | undefined): MainProbeResult['pageKind'] {
@@ -5057,9 +5031,40 @@ async function assertCurrentThreadRoute(
   return current
 }
 
+// 经真实 rd6 页面确认的唯一总未读观察点。DOM 事实只留在平台层,不进协议语义;
+// 页面改版后在这里重新核对,不做模糊数字回退。
+//
+// 2026-08-03 真机订正(教训保留):本节点常驻聊天菜单项,未读清零时不消失,只是
+// 页面摘掉 `app-im-unread` 这个类并清空文本。此前选择器同时要求两个类,于是
+// "零未读"被读成"读不到",快照塌成 null——未读子轮把未读清干净后回读必然读不到
+// 收尾数,基线永远写不进去,插队随即被锁死。**干得越干净越判定为没跑完。**
+// 故选择器收回常驻单类,由文本承担三态。清零态下全页只此一处命中,无歧义风险。
+//
+// 2026-08-26:被动传感链删除后,本文件是这两个符号唯一的家(原在 base/contentDom.ts,
+// 与被动链共用;那一路已废,base 层不再持有平台 DOM 知识)。解析口径逐字未改。
+export const ZHILIAN_UNREAD_BADGE_SELECTOR = '.app-menu-item__im-unread'
+
+// parseZhilianUnreadBadgeText 是角标文本的唯一解析口径。
+export function parseZhilianUnreadBadgeText(raw: string): number | null {
+  const text = raw.trim()
+  // 空文本是页面表达"无未读"的正式形态,不是缺失。
+  if (text === '') return 0
+  if (/^\d+$/u.test(text)) {
+    const value = Number(text)
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : null
+  }
+  // "99+" 一类截断展示：取前导数字，取不到按 1。此处只能向多算，绝不能
+  // 落回 0——把满格未读读成零未读会让插队彻底静默。
+  const leading = /^(\d+)/u.exec(text)
+  if (leading) {
+    const value = Number(leading[1])
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 1
+  }
+  return 1
+}
+
 // mainReadZhilianUnreadBadge 只把角标节点的在场与原始文本带回；解析统一走
-// parseZhilianUnreadBadgeText,与被动传感共用同一口径。注入函数必须自包含,
-// 选择器经参数传入。
+// parseZhilianUnreadBadgeText。注入函数必须自包含,选择器经参数传入。
 function mainReadZhilianUnreadBadge(selector: string): { found: boolean; text: string } {
   const element = document.querySelector(selector)
   if (!element) return { found: false, text: '' }
@@ -15913,3 +15918,108 @@ export const zhilianTestHooks = Object.freeze({
   ensureThreadRoute,
   runMain,
 })
+
+// ---------------------------------------------------------------------------
+// 智联适配器
+//
+// 本对象是智联与原语层之间**唯一**的接缝。上面一万五千行页面对抗代码一行没动:
+// 每个方法体只是把统一入参拆回既有函数的位置参数。
+//
+// 为什么在这里包一层箭头函数是安全的:发布链路的节奏闸按**函数引用**比对
+// (见 zhilianPublishInteractions),它认的是传进 runMain 的那些 `main*` 函数,
+// 而这里包的是 `prepareZhilianJobDraft` 这类顶层入口——两者不在同一层,包装
+// 不会让任何一个 `main*` 引用失配。改动这里之前请先确认这句仍然成立:引用一旦
+// 失配,闸会静默消失(不报错、不打日志、测试不红),页面上就是机器速度连点。
+//
+// 用 `satisfies` 而不是 `: PlatformAdapter`:签名写错、方法名拼错照样编译期红,
+// 但**不要求写全**。这一点是刻意的——平台之间相交而互不包含,各家都有对方没有
+// 的能力;若在这里断言全量实现,第二个平台带来一条智联根本没有的能力时,会把
+// 智联一起搞到编译不过。「智联该有哪 35 条」是智联自己的事实,由 test/unit.mjs
+// 里那份清单断言,不靠类型系统跨平台强加。
+export const zhilianAdapter = {
+  id: ZHILIAN_PLATFORM,
+  hostMatch: TAB_QUERY,
+  // 与注入入口同源(见 ZHILIAN_WORLD)。必须是 MAIN:会话消息数组只能经页面
+  // Vue 实例的 Vuex getter 拿到,那个属性在 isolated world 不可见。
+  world: ZHILIAN_WORLD,
+  // 页面内合成事件。isTrusted 为假,靠 declarativeNetRequest 拦掉平台的
+  // environment-check 脚本兜住(见下面的 envReportGuard 与 base/netGuard.ts)。
+  input: 'intrinsic',
+
+  // 埋点上报拦截。规则文件是 src/rules/zhilian-env-report.json,由 manifest 静态
+  // 声明;这里两个值只是让 base 能自检「规则还在不在生效」。marker 是 2026-08-11
+  // 真机实测的:未拦时这个键在 window 上存在,拦住后不存在。
+  envReportGuard: {
+    rulesetId: 'zhilian_env_report',
+    marker: 'ada:extension:shared-module:rd6.zhaopin.com:.:environment-check:default',
+  },
+
+  probePlatform: () => probeZhilian(),
+  ensureSurface: ({ args, ctx, fingerprint }) => {
+    if (args.surface !== 'im') {
+      throw new ZhilianPlatformError('TARGET_NOT_FOUND', '当前手不支持该页面 surface', 'no')
+    }
+    return ensureZhilianIM(ctx, fingerprint)
+  },
+
+  readWechatSetting: ({ ctx, fingerprint }) => readZhilianWechatSetting(ctx, fingerprint),
+
+  readList: ({ args, ctx, fingerprint }) => readZhilianList(args, ctx, fingerprint),
+  readThread: ({ args, ctx, fingerprint }) => readZhilianThread(args, ctx, fingerprint),
+  readUnreadTotal: ({ fingerprint }) => readZhilianUnreadTotalNow(fingerprint),
+  identifyCurrentConversation: ({ fingerprint }) => identifyZhilianCurrentConversation(fingerprint),
+  openConversation: ({ args, ctx, fingerprint }) => openZhilianConversation(args, ctx, fingerprint),
+
+  readCurrentCandidate: ({ ctx, fingerprint }) => readZhilianCurrentCandidate(ctx, fingerprint),
+  readResume: ({ args, ctx, fingerprint }) => readZhilianResume(args, ctx, fingerprint),
+
+  selectSourcingPosition: ({ args, ctx, fingerprint }) =>
+    selectZhilianSourcingPosition(args, ctx, fingerprint),
+  applySourcingFilters: ({ args, ctx, fingerprint }) =>
+    applyZhilianSourcingFilters(args, ctx, fingerprint),
+  readSourcingWindow: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingWindow(args, ctx, fingerprint),
+  readSourcingResume: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingResume(args, ctx, fingerprint),
+  readSourcingTargetResume: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingTargetResume(args, ctx, fingerprint),
+
+  sendGreeting: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianGreeting(args, guards, ctx, fingerprint),
+  sendMessage: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianMessage(args, guards, ctx, fingerprint),
+  sendWechatInvite: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianWechatInvite(args, guards, ctx, fingerprint),
+  acceptWechat: ({ args, guards, ctx, fingerprint }) =>
+    acceptZhilianWechatRequest(args, guards, ctx, fingerprint),
+  sendInviteCard: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianInviteCard(args, guards, ctx, fingerprint),
+
+  readGreetingOutcome: ({ args, ctx, fingerprint }) =>
+    readZhilianGreetingOutcome(args, ctx, fingerprint),
+  readWechatExchangeOutcome: ({ args, ctx, fingerprint }) =>
+    readZhilianWechatExchangeOutcome(args, ctx, fingerprint),
+
+  captureThreadScreenshot: ({ args, ctx, fingerprint }) =>
+    captureZhilianThreadScreenshot(args, ctx, fingerprint),
+  captureResumeScreenshot: ({ args, ctx, fingerprint }) =>
+    captureZhilianResumeScreenshot(args, ctx, fingerprint),
+  readPeerPhone: ({ args, ctx, fingerprint }) => readZhilianPeerPhone(args, ctx, fingerprint),
+  revealPeerPhone: ({ args, ctx, fingerprint }) => revealZhilianPeerPhone(args, ctx, fingerprint),
+
+  readPublishedJobs: ({ ctx, fingerprint }) => readZhilianPublishedJobs(ctx, fingerprint),
+  readJobClassCandidates: ({ args, ctx, fingerprint }) =>
+    readZhilianJobClassCandidates(args, ctx, fingerprint),
+  readJobKeywordVocabulary: ({ args, ctx, fingerprint }) =>
+    readZhilianJobKeywordVocabulary(args, ctx, fingerprint),
+  prepareJobDraft: ({ args, ctx, fingerprint }) => prepareZhilianJobDraft(args, ctx, fingerprint),
+  publishJobDraft: ({ args, guards, ctx, fingerprint }) =>
+    publishZhilianJobDraft(args, guards, ctx, fingerprint),
+  takeJobOffline: ({ args, guards, ctx, fingerprint }) =>
+    takeZhilianJobOffline(args, guards, ctx, fingerprint),
+
+  inspectSendSurface: () => inspectZhilianSendSurfaceDiagnostic(),
+  probeInterviewEditor: ({ args, ctx, fingerprint }) =>
+    probeZhilianInterviewEditor(args, ctx, fingerprint),
+  capturePageSnapshot: ({ ctx }) => captureZhilianPageSnapshot(ctx),
+} satisfies PlatformAdapter

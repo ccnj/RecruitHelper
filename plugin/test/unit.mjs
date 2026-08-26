@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mock } from 'node:test'
 import * as esbuild from 'esbuild'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 mkdirSync('test/dist', { recursive: true })
@@ -42,18 +42,26 @@ const {
   resetNetGuardForTest,
   Kind,
   LoginState,
+  MAIN_ERROR_SENTINEL,
   ManualInteractionKind,
+  runInPage,
   normalizeLocalWsUrl,
   parsedKeywordSections,
   NotReadyReason,
   PageKind,
+  PlatformError,
   Primitive,
   PROTO_VERSION,
   RECONNECT_STABLE_MS,
   Retryable,
   ResultStatus,
   SensorBridge,
+  allSites,
+  resetSitesForTest,
+  setSitesForTest,
+  zhilianSite,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
+  parseZhilianUnreadBadgeText,
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
   canonicalZhilianTab,
@@ -61,7 +69,6 @@ const {
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   openZhilianConversation,
-  readZhilianUnreadTotal,
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,
@@ -71,8 +78,13 @@ const {
   readZhilianGreetingOutcome,
   readZhilianWechatExchangeOutcome,
   refreshPagesAfterRuntimeReload,
+  registerM2Primitives,
   registerM3Primitives,
   registerM6Primitives,
+  registerPlatform,
+  registeredPlatforms,
+  resetPlatformsForTest,
+  zhilianAdapter,
   sendZhilianGreeting,
   sendZhilianInviteCard,
   sendZhilianMessage,
@@ -215,11 +227,7 @@ function contentSensorHarness() {
     currentURL() { return state.url },
     emit(message) { messages.push(message) },
     now() { return state.now },
-    pageKind() {
-      return new URL(state.url).pathname.startsWith('/app/im') ? PageKind.Im : PageKind.Other
-    },
     readLoginState() { return state.loginReads.length > 0 ? state.loginReads.shift() : state.login },
-    readUnreadTotal() { return state.unreadReads.length > 0 ? state.unreadReads.shift() : state.unread },
     setTimer(callback, delayMs) {
       const id = ++timerID
       timers.set(id, { callback, delayMs })
@@ -246,23 +254,25 @@ class FakeSensorConnection {
   constructor() {
     this.config = {
       badgeDebounceMs: 800,
-      badgeMinEmitIntervalMs: 5_000,
       navSettleMs: 500,
       manualQuietMs: 45_000,
     }
-    this.context = undefined
+    // 按平台各存一份 —— 生产的 currentCommandContext(platform) 就是这个形状。
+    this.contexts = new Map()
     this.events = []
     this.contextHealth = []
-    this.snapshots = []
     this.commandListeners = []
     this.configListeners = []
     this.heartbeatListeners = []
   }
   currentCommandContext(platform) {
-    return this.context?.platform === platform ? this.context : undefined
+    return this.contexts.get(platform)
   }
   emitPlatformSensorEvent(name, platform, data, observedAt) {
-    this.events.push({ name, platform, data, observedAt, accountRef: this.context?.accountRef })
+    this.events.push({
+      name, platform, data, observedAt,
+      accountRef: this.contexts.get(platform)?.accountRef,
+    })
     return 'sent'
   }
   onCommandContext(listener) { this.commandListeners.push(listener); return () => {} }
@@ -270,9 +280,8 @@ class FakeSensorConnection {
   onHeartbeat(listener) { this.heartbeatListeners.push(listener); return () => {} }
   sensorConfig() { return this.config }
   setContextHealth(contexts) { this.contextHealth = contexts }
-  setSensorSnapshot(snapshot) { this.snapshots.push(snapshot) }
   setContext(context) {
-    this.context = context
+    this.contexts.set(context.platform, context)
     for (const listener of this.commandListeners) listener(context)
   }
   // 驱动一次心跳节奏，供重新同步用例使用
@@ -10611,7 +10620,10 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
     await assert.rejects(
       zhilianTestHooks.runMain(7, fixtureMain, []),
       (error) => {
-        assert.ok(error instanceof ZhilianPlatformError)
+        // 注入机制已上移到 platform/inject.ts,抛的是平台无关的 PlatformError。
+        // 判据(已知平台失败 + CTX_NOT_READY + contentScriptDead)一个没动;
+        // ZhilianPlatformError 是它的子类,原语层捕获 PlatformError 两者通吃。
+        assert.ok(error instanceof PlatformError)
         assert.equal(error.code, 'CTX_NOT_READY')
         assert.notEqual(error.code, 'INTERNAL_HAND')
         assert.equal(error.reason, 'contentScriptDead')
@@ -10628,8 +10640,10 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
   await assert.rejects(
     zhilianTestHooks.runMain(7, fixtureMain, []),
     (error) => {
-      assert.ok(error instanceof ZhilianPlatformError)
+      assert.ok(error instanceof PlatformError)
       assert.equal(error.code, 'CTX_NOT_READY')
+      // 平台名仍进消息,好让日志一眼看出是哪个平台的页面没就绪。
+      assert.match(error.message, /智联/u)
       assert.match(error.message, /页面上下文已销毁/u)
       return true
     },
@@ -12764,119 +12778,84 @@ test('readList MAIN 单行摘要坏数据只跳过该行，整窗照常返回且
   }
 })
 
-test('content 传感器：精确双读、5s 节流与动态参数', async () => {
+test('智联未读角标：解析口径逐字未变(2026-08-03 事故判据)', () => {
   // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
   // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的
   // 零形态一起判成缺失，快照塌成 null，未读子轮清完未读后回读不到收尾数，
-  // 基线永久写不进——插队因此长期失效。三态改由文本承担：节点缺失才是
-  // 读不到，空文本是零，非空非数字向多算。
-  const selectors = []
-  assert.equal(readZhilianUnreadTotal({ querySelector(selector) { selectors.push(selector); return null } }), null,
-    '节点整体缺失才是读不到：页面结构已变，不猜测数值')
-  assert.deepEqual(selectors, [ZHILIAN_UNREAD_BADGE_SELECTOR])
+  // 基线永久写不进——插队因此长期失效。**干得越干净越判定为没跑完。**
+  // 三态改由文本承担：节点缺失才是读不到，空文本是零，非空非数字向多算。
+  //
+  // 2026-08-26：被动传感链删除后，读取节点那一步随之消失（角标改由
+  // chat.readUnreadTotal 现场读，见 zhilian.ts 的 mainReadZhilianUnreadBadge），
+  // 但**解析口径一个字节没改**，仍在主动路径上服役。本用例因此从"读 DOM"
+  // 改为直接断言解析函数；判据一条不减。
   assert.equal(ZHILIAN_UNREAD_BADGE_SELECTOR, '.app-menu-item__im-unread',
     '只认常驻单类；带 app-im-unread 的双类选择器在零未读时不命中')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '' } } }), 0,
+  assert.equal(parseZhilianUnreadBadgeText(''), 0,
     '空文本是页面表达无未读的正式形态，必须读成零')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '   ' } } }), 0,
+  assert.equal(parseZhilianUnreadBadgeText('   '), 0,
     '全空白同样是零，不得判成读不到')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: ' 12 ' } } }), 12)
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '99+' } } }), 99,
+  assert.equal(parseZhilianUnreadBadgeText(' 12 '), 12)
+  assert.equal(parseZhilianUnreadBadgeText('99+'), 99,
     '截断展示取前导数字，绝不能落回零')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '消息 12' } } }), 1,
+  assert.equal(parseZhilianUnreadBadgeText('消息 12'), 1,
     '节点在且非空即至少一条；仍禁止模糊扫描全页数字')
+  // "节点整体缺失=读不到" 的语义现在由调用方承担：mainReadZhilianUnreadBadge
+  // 返回 found=false 时，readZhilianUnreadTotalNow 直接给 total=null，不进解析。
+})
 
+test('content 传感器：精确双读、强制快照与采样窗不被高频渲染重启', async () => {
+  // 2026-08-26：本用例原以未读角标承载这三条机制,角标被动传感已随裁决删除
+  // (现改由 chat.readUnreadTotal 现场读)。三条机制在登录态采样上逐字相同,
+  // 故改用登录态承载——覆盖一条不减。
+  const config = { badgeDebounceMs: 800, navSettleMs: 500, manualQuietMs: 45_000 }
   const harness = contentSensorHarness()
   const sensor = new ContentSensor(harness.env)
   sensor.start()
   assert.equal(harness.messages[0].type, CONTENT_MESSAGE.Ready)
+  assert.equal(harness.messages[0].pageKind, undefined,
+    'Ready 不再携带 pageKind——SW 侧一律自行按 URL 重算')
   assert.equal(harness.timers.size, 0, 'welcome 参数到达前不得自带传感节奏')
 
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  })
-  assert.deepEqual([...harness.timers.values()].map((timer) => timer.delayMs).sort((a, b) => a - b), [500, 800, 800])
+  sensor.configure(config)
+  assert.deepEqual([...harness.timers.values()].map((timer) => timer.delayMs).sort((a, b) => a - b), [500, 800])
   harness.runTimers()
-  const firstUnread = harness.messages.find((message) => message.type === CONTENT_MESSAGE.UnreadStable)
-  assert.deepEqual(firstUnread, {
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: 0,
-    prev: null,
-    value: 0,
-  })
+  const loginMessages = () => harness.messages.filter((message) => message.type === CONTENT_MESSAGE.LoginStable)
+  assert.equal(loginMessages().length, 1, '首个稳定登录态必须上报')
+  assert.equal(loginMessages().at(-1).state, LoginState.In)
 
-  const unreadCount = () => harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).length
-  const beforeMismatch = unreadCount()
-  harness.state.unreadReads = [0, 2, 3]
+  // 双读不一致不产生事实。
+  const beforeMismatch = loginMessages().length
+  harness.state.loginReads = [LoginState.Out, LoginState.In]
   sensor.onDOMMutation()
   harness.runTimers()
-  assert.equal(unreadCount(), beforeMismatch, '两次读数不一致不得上报')
+  assert.equal(loginMessages().length, beforeMismatch, '两次读数不一致不得上报')
 
+  // 值未变化时不重复上报。
   harness.state.now = 1_000
-  harness.state.unreadReads = [3]
   sensor.onDOMMutation()
   harness.runTimers()
-  const throttled = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
-  assert.equal(throttled.value, 3)
-  assert.equal(throttled.emitEvent, false, '5s 内变化只更新 ping 现货，不发 event')
+  assert.equal(loginMessages().length, beforeMismatch, '稳定值未变化不得重复上报')
 
-  harness.state.now = 6_000
-  harness.state.unreadReads = [4, 4]
-  sensor.onDOMMutation()
+  // 强制快照:新 SW 索要时,同一个稳定值也必须重新交付一次。
+  sensor.configure(config, true)
   harness.runTimers()
-  const emitted = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
-  assert.equal(emitted.emitEvent, true)
-  assert.equal(emitted.prev, 0)
-
-  const stableSnapshotBefore = unreadCount()
-  const businessEventsBefore = harness.messages.filter((message) =>
-    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length
-  harness.state.unreadReads = [4, 4]
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  }, true)
-  harness.runTimers()
-  assert.equal(unreadCount(), stableSnapshotBefore + 1,
+  assert.equal(loginMessages().length, beforeMismatch + 1,
     '新 SW 请求快照时，同一个稳定值也必须重新交付')
-  const repeatedSnapshot = harness.messages
-    .filter((message) => message.type === CONTENT_MESSAGE.UnreadStable)
-    .at(-1)
-  assert.deepEqual(repeatedSnapshot, {
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: false,
-    observedAt: 6_000,
-    prev: 4,
-    value: 4,
+  assert.deepEqual(loginMessages().at(-1), {
+    type: CONTENT_MESSAGE.LoginStable,
+    observedAt: 1_000,
+    state: LoginState.In,
   })
-  assert.equal(harness.messages.filter((message) =>
-    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length, businessEventsBefore,
-  '强制快照只能回补 SW 现货，不能制造重复业务事件')
 
-  harness.state.unreadReads = [5, 5]
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  })
-  const unreadReadsBeforeMutations = harness.state.unreadReads.length
-  for (let index = 0; index < 20; index += 1) sensor.onDOMMutation()
-  assert.equal(harness.state.unreadReads.length, unreadReadsBeforeMutations,
-    '采样窗已经在路上时，高频 DOM mutation 不得重启双读首样本')
+  // 注:"采样窗已在路上时高频 mutation 不得重启双读首样本"这条性质是
+  // armBadge 特有的(它见到在途计时器就早退),armLogin 每次 mutation 都清掉
+  // 重建。角标采样器随被动未读传感删除,该性质一并消失,不搬到登录态上——
+  // 硬搬会断言一个从来不成立的行为。
+  harness.state.loginReads = [LoginState.Out, LoginState.Out]
+  sensor.configure(config)
   harness.runTimers()
-  assert.equal(
-    harness.messages.filter((message) =>
-      message.type === CONTENT_MESSAGE.UnreadStable && message.value === 5).length,
-    1,
-    '持续渲染期间既有采样窗仍必须按期完成',
-  )
+  assert.equal(loginMessages().at(-1).state, LoginState.Out, '登录态变化必须如实上报')
 
   // 真人 DOM 输入不再上报(2026-08-11 甲方裁决):ContentSensor 不再有
   // onTrustedPointer/onTrustedKeyboard/onTrustedNavigationIntent,
@@ -12893,42 +12872,26 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页�
   const tab1 = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
   const tab2 = { tabId: 2, active: true, url: 'https://rd6.zhaopin.com/app/recommend', windowId: 1 }
 
-  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, pageKind: PageKind.Im, url: tab1.url }, tab1)
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, url: tab1.url }, tab1)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 0, state: LoginState.In }, tab1)
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: 0,
-    prev: null,
-    value: 1,
-  }, tab1)
   assert.equal(connection.events.length, 0, '未学到脑侧 accountRef 时必须静默')
-  assert.equal(connection.snapshots.at(-1).unreadTotal.value, 1)
 
   connection.setContext({ platform: 'zhilian', accountRef: 'account-1', expectedPrincipalFingerprint: 'fp' })
   bridge.refreshCachedState()
   assert.deepEqual(connection.contextHealth, [{ platform: 'zhilian', accountRef: 'account-1', ready: true }])
 
   now = 6_000
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: now,
-    prev: 1,
-    value: 2,
-  }, tab1)
-  assert.equal(connection.events.at(-1).name, EventName.UnreadBadge)
+  // 登录态变化事件带上脑侧 accountRef——它是掉登录即时停机通道的入口。
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.Out }, tab1)
+  assert.equal(connection.events.at(-1).name, EventName.LoginStateChanged)
   assert.equal(connection.events.at(-1).accountRef, 'account-1')
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.In }, tab1)
 
-  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: now, pageKind: PageKind.Recommend, url: tab2.url }, tab2)
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: now,
-    prev: null,
-    value: 99,
-  }, tab2)
-  assert.equal(connection.snapshots.at(-1).unreadTotal.value, 2, '非 canonical 读数不得喂 ping')
+  // 非 canonical 标签页的传感一律静音。
+  const eventsBeforeNonCanonical = connection.events.length
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: now, url: tab2.url }, tab2)
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.Out }, tab2)
+  assert.equal(connection.events.length, eventsBeforeNonCanonical, '非 canonical 传感不得发事件')
 
   now = 18_000
   const commandURL = 'https://rd6.zhaopin.com/app/im?sessionId=command'
@@ -13050,10 +13013,8 @@ test('SensorBridge 心跳自查：传感缓存缺失时索要重新同步，齐�
   assert.equal(sent.at(-1).message.requestSnapshot, true,
     '重新同步必须带 requestSnapshot，否则页面侧仍会因值未变而沉默')
 
-  // 补齐两项读数
-  bridge.acceptContentMessage(
-    { type: CONTENT_MESSAGE.UnreadStable, emitEvent: false, observedAt: 1, prev: null, value: 3 }, tab,
-  )
+  // 补齐登录态。2026-08-26 未读那一半判据随被动传感删除,登录态这一半必须留:
+  // 它是 lastCanonicalLogin 拿到第一个非 unknown 采样的唯一路径。
   bridge.acceptContentMessage(
     { type: CONTENT_MESSAGE.LoginStable, observedAt: 1, state: LoginState.In }, tab,
   )
@@ -13453,7 +13414,6 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
     now: Date.now(),
     sensors: {
       badgeDebounceMs: 1,
-      badgeMinEmitIntervalMs: 5_000,
       navSettleMs: 1,
       manualQuietMs: 45_000,
     },
@@ -13464,13 +13424,13 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
   assert.equal(connection.status().heartbeatIntervalMs, 12_345, 'session 心跳必须服从 welcome.hb')
 
   const beforeEvent = socket.sent.length
-  assert.equal(connection.emitSensorEvent(EventName.UnreadBadge, {
+  assert.equal(connection.emitSensorEvent(EventName.PageNavigated, {
     platform: 'zhilian', accountRef: 'acc',
-  }, { scope: 'total', value: 1, prev: 0, stable: true }), 'sent')
+  }, { at: 1 }), 'sent')
   assert.equal(socket.sent.length, beforeEvent + 1)
   const event = JSON.parse(socket.sent.at(-1))
   assert.equal(event.kind, Kind.Event)
-  assert.equal(event.body.name, EventName.UnreadBadge)
+  assert.equal(event.body.name, EventName.PageNavigated)
 
   socket.receive(envelope(Kind.Cmd, 'wire-cmd-1', 's', command(Primitive.DebugPing, { via: 'wire' })))
   await eventually(() => socket.sent.some((raw) => {
@@ -14583,6 +14543,458 @@ test('代招公司回读 MAIN:框里有名字才算数,空着交给轮询继续�
       { status: 'failed', reason: 'partner_company_group_absent' })
   } finally {
     gone.restore()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 平台适配层的接缝验收。
+//
+// 这三条是「多平台抽象层」这一批的**交付判据本身**:如果加一个平台还得改
+// base、改分发器或改契约,那抽象就没成立。用假平台验,不实现任何真实第二平台
+// (BOSS 的页面事实还没做真机考古,按「平台枚举面事实门」不得凭空实现)。
+
+/** 造一个只实现给定能力的假平台。没给的能力就是「这个平台没有」。 */
+function fakePlatform(id, capabilities = {}) {
+  return {
+    id,
+    hostMatch: `https://${id}.example.com/*`,
+    // 故意与智联不同:第二平台只能用 ISOLATED、只能走 OS 级注入,
+    // 声明面必须容得下这两种取值,否则抽象对它无效。
+    world: 'ISOLATED',
+    input: 'os',
+    ...capabilities,
+  }
+}
+
+/** 换一套平台跑,跑完把原来的装回去(测试之间共用同一张注册表)。 */
+async function withPlatforms(adapters, run) {
+  const saved = registeredPlatforms()
+  resetPlatformsForTest()
+  for (const adapter of adapters) registerPlatform(adapter)
+  try {
+    return await run()
+  } finally {
+    resetPlatformsForTest()
+    for (const adapter of saved) registerPlatform(adapter)
+  }
+}
+
+function identifyCommand(ref, platform) {
+  return command(Primitive.ChatIdentifyCurrentConversation, {}, {
+    context: { platform, accountRef: 'account-seam-fixture' },
+  })
+}
+
+test('加一个平台只需注册适配器:base、命令分发器与契约一律不动', async () => {
+  const seen = []
+  const fake = fakePlatform('fake-platform', {
+    identifyCurrentConversation({ args, ctx, fingerprint }) {
+      seen.push({ args, hasCtx: typeof ctx?.checkpoint === 'function', fingerprint })
+      return Promise.resolve({ conversationRef: 'fake-conversation', observedAt: 1_700_000_000_000 })
+    },
+  })
+  await withPlatforms([fake], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    // 生产分发器,原封不动——本批一行都没改它。
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('seam-1', 's', 's', identifyCommand('seam-1', 'fake-platform'))
+    await eventually(() => results(out.frames, 'seam-1').length === 1, '假平台命令未收束')
+
+    const [result] = results(out.frames, 'seam-1')
+    assert.equal(result.body.status, 'ok')
+    assert.equal(result.body.data.conversationRef, 'fake-conversation')
+    assert.equal(seen.length, 1, '必须恰好路由到假平台一次')
+    assert.equal(seen[0].hasCtx, true, '适配器必须拿到真实 PrimitiveContext(合作式钩子)')
+  })
+})
+
+test('平台没注册、或平台没实现这条能力,都显式拒绝,绝不默认回成功', async () => {
+  const bare = fakePlatform('bare-platform')
+  await withPlatforms([bare], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 一、平台压根没注册:CTX_NOT_READY,且 retryable=no ——
+    // 「本手没有这个平台」不是等一等就会变的事。
+    await dispatcher.handleCmd('seam-2', 's', 's', identifyCommand('seam-2', 'never-registered'))
+    await eventually(() => results(out.frames, 'seam-2').length === 1, '未注册平台的命令未收束')
+    const [missing] = results(out.frames, 'seam-2')
+    assert.equal(missing.body.status, 'failed')
+    assert.equal(missing.body.error.code, ErrorCode.CtxNotReady)
+    assert.equal(missing.body.error.retryable, Retryable.No)
+    assert.equal(missing.body.error.sideEffect, 'none')
+
+    // 二、平台注册了但没实现这条能力:显式拒绝(反模式 18)。
+    await dispatcher.handleCmd('seam-3', 's', 's', identifyCommand('seam-3', 'bare-platform'))
+    await eventually(() => results(out.frames, 'seam-3').length === 1, '缺能力的命令未收束')
+    const [unsupported] = results(out.frames, 'seam-3')
+    assert.equal(unsupported.body.status, 'failed')
+    assert.equal(unsupported.body.error.code, ErrorCode.ProtoUnsupportedCmd)
+    assert.equal(unsupported.body.error.retryable, Retryable.No)
+  })
+})
+
+test('两个平台并存时命令按 context.platform 各走各的,不串线', async () => {
+  const hits = []
+  const makeAdapter = (id) => fakePlatform(id, {
+    identifyCurrentConversation() {
+      hits.push(id)
+      return Promise.resolve({ conversationRef: `${id}-conversation`, observedAt: 1_700_000_000_000 })
+    },
+  })
+  await withPlatforms([makeAdapter('platform-a'), makeAdapter('platform-b')], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    await dispatcher.handleCmd('seam-4', 's', 's', identifyCommand('seam-4', 'platform-b'))
+    await eventually(() => results(out.frames, 'seam-4').length === 1, 'b 平台命令未收束')
+    await dispatcher.handleCmd('seam-5', 's', 's', identifyCommand('seam-5', 'platform-a'))
+    await eventually(() => results(out.frames, 'seam-5').length === 1, 'a 平台命令未收束')
+
+    assert.deepEqual(hits, ['platform-b', 'platform-a'], '命令必须落到各自声明的平台上')
+    assert.equal(results(out.frames, 'seam-4')[0].body.data.conversationRef, 'platform-b-conversation')
+    assert.equal(results(out.frames, 'seam-5')[0].body.data.conversationRef, 'platform-a-conversation')
+  })
+})
+
+test('平台之间相交而互不包含:各有对方没有的能力,各自照跑、越界即拒', async () => {
+  // 这条是抽象层的核心假设本身。若按「谁是谁的子集」建模,能力多的那个平台
+  // 会被迫替另一个实现它根本没有的东西;反过来也一样。
+  const onlyIdentify = fakePlatform('platform-x', {
+    identifyCurrentConversation: () =>
+      Promise.resolve({ conversationRef: 'x-conversation', observedAt: 1_700_000_000_000 }),
+  })
+  const onlyUnread = fakePlatform('platform-y', {
+    readUnreadTotal: () => Promise.resolve({ total: 7, observedAt: 1_700_000_000_000 }),
+  })
+  const unreadCommand = (platform) => command(Primitive.ChatReadUnreadTotal, {}, {
+    context: { platform, accountRef: 'account-seam-fixture' },
+  })
+
+  await withPlatforms([onlyIdentify, onlyUnread], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 各自有的那条:照跑。
+    await dispatcher.handleCmd('seam-6', 's', 's', identifyCommand('seam-6', 'platform-x'))
+    await eventually(() => results(out.frames, 'seam-6').length === 1, 'x 的自有能力未收束')
+    assert.equal(results(out.frames, 'seam-6')[0].body.status, 'ok')
+
+    await dispatcher.handleCmd('seam-7', 's', 's', unreadCommand('platform-y'))
+    await eventually(() => results(out.frames, 'seam-7').length === 1, 'y 的自有能力未收束')
+    assert.equal(results(out.frames, 'seam-7')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'seam-7')[0].body.data.total, 7)
+
+    // 交叉那条:显式拒绝,不借道另一个平台的实现。
+    await dispatcher.handleCmd('seam-8', 's', 's', unreadCommand('platform-x'))
+    await eventually(() => results(out.frames, 'seam-8').length === 1, 'x 的越界命令未收束')
+    assert.equal(results(out.frames, 'seam-8')[0].body.status, 'failed')
+    assert.equal(results(out.frames, 'seam-8')[0].body.error.code, ErrorCode.ProtoUnsupportedCmd)
+
+    await dispatcher.handleCmd('seam-9', 's', 's', identifyCommand('seam-9', 'platform-y'))
+    await eventually(() => results(out.frames, 'seam-9').length === 1, 'y 的越界命令未收束')
+    assert.equal(results(out.frames, 'seam-9')[0].body.status, 'failed')
+    assert.equal(results(out.frames, 'seam-9')[0].body.error.code, ErrorCode.ProtoUnsupportedCmd)
+  })
+})
+
+// 节奏登记表之外**另有**节奏来源的页面变更函数。每一条都要注明归谁管——
+// 空着不许进这张表。
+//
+// 为什么需要这张表:节奏闸按函数引用比对,而登记表在文件里离那些函数六千多行远;
+// 「新增一个可见动作、忘了登记」是它唯一的漏网口子,而漏了之后**没有任何症状**
+// (不报错、不打日志、测试不红),页面上就是机器速度连点。下面那条用例把这个
+// 口子堵在构建期:含点击/派发事件的 main* 函数,不在登记表就必须在这张表里,
+// 两张表都没有 = 门禁红。
+const KNOWN_OTHER_PACING = {
+  // —— 已核实:各自路径里有行内 setTimeout(1_000 + 抖动),点击前都会等 ——
+  mainClickZhilianJobSection: '职位管理页分区切换,调用点前有行内节奏',
+  mainClickZhilianJobOffline: '下线入口,调用点前有行内节奏',
+  mainConfirmZhilianJobOffline: '下线二次确认,调用点前有行内节奏',
+  mainCancelZhilianOfflineDialog: '下线取消,调用点前有行内节奏',
+  mainClickRevealPeerPhone: '查看电话,调用点前有行内节奏',
+  mainSendGreetingOnce: '招呼发送,三个调用点前均有行内节奏',
+
+  // —— 未确认:2026-08-26 静态核查时,调用点前 45 行内没找到节奏构造。
+  //    这**不等于**没有节奏(可能在更上层、或在调用者里),只是本次没能从源码
+  //    确认。它们全在发布链路之外,是本批之前就有的既有状态,不是本批引入;
+  //    按记录级登记,不在本批顺手改。真要收口需要一次独立审计。 ——
+  mainApplySourcingFilters: '采集筛选;节奏来源未确认',
+  mainSelectSourcingPosition: '采集选职位;节奏来源未确认',
+  mainReadSourcingResume: '采集读简历(内含开关弹窗的点击);节奏来源未确认',
+  mainReadCurrentResume: 'IM 读简历(内含开关弹窗的点击);节奏来源未确认',
+  mainResumeCaptureStep: '简历截图分步;节奏来源未确认',
+  mainClickConversationOnce: '点开会话;节奏来源未确认',
+  mainEnsureChatListFilter: '会话列表筛选;节奏来源未确认',
+  mainClickZhilianBlockedDialogButton: '平台阻塞弹窗处置;节奏来源未确认',
+  mainSendMessageOnce: '消息发送;节奏来源未确认(命令间节奏另由脑侧保证)',
+  mainPrepareInterviewEditor: '邀面编辑器填充;节奏来源未确认',
+  mainCloseInterviewSuccessModal: '邀面成功弹窗清场;节奏来源未确认',
+  mainReadListDOMWindow: '会话列表窗口读取(含滚动派发);节奏来源未确认',
+  mainReadThreadPage: '会话历史分页(含滚动派发);节奏来源未确认',
+}
+
+test('每一次页面点击都有节奏机制认领:新增可见动作忘了登记,门禁当场红', () => {
+  const source = readFileSync('src/program/platform/zhilian.ts', 'utf8')
+  const sourceLines = source.split('\n')
+
+  const registryBlock = /const zhilianPublishInteractions = new Set<unknown>\(\[([\s\S]*?)\]\)/u.exec(source)
+  assert.ok(registryBlock, '节奏登记表不见了——它是发布链路唯一的节奏判据')
+  const registered = new Set(
+    registryBlock[1].split('\n')
+      .map((line) => line.trim().replace(/,$/u, ''))
+      .filter((line) => line.length > 0 && !line.startsWith('//')),
+  )
+
+  // 每个顶层函数的起始行,用来把「哪一行有点击」归给「哪个函数」。
+  const starts = []
+  sourceLines.forEach((line, index) => {
+    const declared = /^(?:export )?(?:async )?function (\w+)/u.exec(line)
+    if (declared) starts.push({ line: index + 1, name: declared[1] })
+  })
+  const ownerOf = (lineNumber) => {
+    let owner = null
+    for (const entry of starts) {
+      if (entry.line <= lineNumber && (!owner || entry.line > owner.line)) owner = entry
+    }
+    return owner?.name ?? null
+  }
+
+  // 会在页面上产生可见变化的两种调用:点击,以及往输入框派发事件(打字)。
+  const mutating = new Set()
+  sourceLines.forEach((line, index) => {
+    if (line.includes('.click()') || line.includes('.dispatchEvent(')) {
+      const owner = ownerOf(index + 1)
+      if (owner && owner.startsWith('main')) mutating.add(owner)
+    }
+  })
+  assert.ok(mutating.size > 30, `页面变更函数只扫出 ${mutating.size} 个,扫描口径多半失效了`)
+
+  const unclaimed = [...mutating].filter(
+    (name) => !registered.has(name) && !Object.hasOwn(KNOWN_OTHER_PACING, name),
+  ).sort()
+  assert.deepEqual(unclaimed, [],
+    `这些函数会动页面,却既不在节奏登记表、也没在 KNOWN_OTHER_PACING 里认领:` +
+    `${unclaimed.join('、')}。要么登记进节奏闸,要么写明归哪套节奏管——` +
+    `不许两处都不写,那等于把它变成机器速度连点且无人知晓。`)
+
+  // 反向:登记表里的名字必须在源码里真存在。改名后表里留下化石,闸对那个函数
+  // 就永远不生效,而且同样没有症状。
+  const defined = new Set(starts.map((entry) => entry.name))
+  const fossils = [...registered].filter((name) => !defined.has(name)).sort()
+  assert.deepEqual(fossils, [], `节奏登记表里有源码中已不存在的名字: ${fossils.join('、')}`)
+
+  // KNOWN_OTHER_PACING 同样不许留化石,且不许与登记表重叠(两处都写=谁管的说不清)。
+  const staleKnown = Object.keys(KNOWN_OTHER_PACING).filter((name) => !defined.has(name)).sort()
+  assert.deepEqual(staleKnown, [], `KNOWN_OTHER_PACING 里有源码中已不存在的名字: ${staleKnown.join('、')}`)
+  const both = Object.keys(KNOWN_OTHER_PACING).filter((name) => registered.has(name)).sort()
+  assert.deepEqual(both, [], `这些函数同时出现在两张表里,归谁管说不清: ${both.join('、')}`)
+  for (const [name, note] of Object.entries(KNOWN_OTHER_PACING)) {
+    assert.ok(note.trim().length > 0, `${name} 必须注明节奏归谁管`)
+  }
+})
+
+test('注入接缝:执行世界由适配器声明,不在调用点写死', async () => {
+  const originalChrome = globalThis.chrome
+  const calls = []
+  try {
+    globalThis.chrome = {
+      scripting: {
+        async executeScript(options) {
+          calls.push(options)
+          return [{ result: { ok: true } }]
+        },
+      },
+    }
+
+    // 只能用 ISOLATED 的平台:声明什么就注入到什么世界。
+    const value = await runInPage({ world: 'ISOLATED', label: '某平台' }, 11, () => ({ ok: true }), [])
+    assert.deepEqual(value, { ok: true })
+    assert.equal(calls[0].world, 'ISOLATED')
+    assert.equal(calls[0].target.tabId, 11)
+
+    // 智联仍是 MAIN——它读消息数组要页面 Vue 实例,换 ISOLATED 会瞎。
+    await zhilianTestHooks.runMain(12, async () => ({ ok: true }), [])
+    assert.equal(calls[1].world, 'MAIN')
+    assert.equal(zhilianAdapter.world, 'MAIN')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('注入接缝:页面内抛出的异常经哨兵还原成真异常,不被当成正常返回值', async () => {
+  const originalChrome = globalThis.chrome
+  try {
+    globalThis.chrome = {
+      scripting: {
+        async executeScript() {
+          return [{ result: { [MAIN_ERROR_SENTINEL]: '页面里炸了' } }]
+        },
+      },
+    }
+    await assert.rejects(
+      runInPage({ world: 'ISOLATED', label: '某平台' }, 13, () => ({}), []),
+      (error) => {
+        // 刻意是裸 Error 不是 PlatformError:页面代码自己出错 ≠ 页面没就绪,
+        // 两者的处置完全不同,不能混成同一个失败码。
+        assert.ok(error instanceof Error)
+        assert.ok(!(error instanceof PlatformError))
+        assert.match(error.message, /页面里炸了/u)
+        return true
+      },
+    )
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
+  // 少一条能力,对应原语在真机上会以 PROTO_UNSUPPORTED_CMD 静默退化;
+  // 这条用例让它在门禁上就红。
+  const required = [
+    'probePlatform', 'ensureSurface', 'readWechatSetting',
+    'readList', 'readThread', 'readUnreadTotal', 'identifyCurrentConversation', 'openConversation',
+    'readCurrentCandidate', 'readResume',
+    'selectSourcingPosition', 'applySourcingFilters', 'readSourcingWindow',
+    'readSourcingResume', 'readSourcingTargetResume',
+    'sendGreeting', 'sendMessage', 'sendWechatInvite', 'acceptWechat', 'sendInviteCard',
+    'readGreetingOutcome', 'readWechatExchangeOutcome',
+    'captureThreadScreenshot', 'captureResumeScreenshot', 'readPeerPhone', 'revealPeerPhone',
+    'readPublishedJobs', 'readJobClassCandidates', 'readJobKeywordVocabulary',
+    'prepareJobDraft', 'publishJobDraft', 'takeJobOffline',
+    'inspectSendSurface', 'probeInterviewEditor', 'capturePageSnapshot',
+  ]
+  assert.equal(required.length, 35)
+  for (const name of required) {
+    assert.equal(typeof zhilianAdapter[name], 'function', `智联适配器缺能力 ${name}`)
+  }
+  assert.equal(zhilianAdapter.id, 'zhilian')
+  // MAIN 是感知逼出来的(消息数组只能经页面 Vue 实例拿),不是动作需要。
+  assert.equal(zhilianAdapter.world, 'MAIN')
+  assert.equal(zhilianAdapter.input, 'intrinsic')
+})
+
+// ——— 批 B:base 层平台知识搬迁 ———
+
+test('站点登记表与 manifest 必须对得上:漏一条,那个平台的 content script 永远不注入且无任何症状', () => {
+  const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'))
+  const contentMatches = new Set((manifest.content_scripts ?? []).flatMap((entry) => entry.matches ?? []))
+  const hostPermissions = new Set(manifest.host_permissions ?? [])
+  const rulesetIds = new Set((manifest.declarative_net_request?.rule_resources ?? []).map((r) => r.id))
+  const sites = allSites()
+  assert.ok(sites.length > 0, '站点登记表不能是空的')
+
+  for (const site of sites) {
+    // 这条才是本用例存在的理由:manifest 少一行,Chrome 不会报错、测试不会红、
+    // 日志里什么都没有 —— 页面上就是"传感器永远不上线",查起来毫无线索。
+    assert.ok(contentMatches.has(site.match),
+      `manifest content_scripts.matches 缺 ${site.match},${site.id} 的 content script 永不注入`)
+    assert.ok(hostPermissions.has(site.match) || hostPermissions.has('<all_urls>'),
+      `manifest host_permissions 覆盖不到 ${site.match},注入与 tabs.query 都会被拒`)
+  }
+  for (const match of contentMatches) {
+    assert.ok(sites.some((site) => site.match === match),
+      `manifest 注入了 ${match},但站点表不认它 —— 那里的 content script 认不出自己在哪,白装一个`)
+  }
+  for (const adapter of registeredPlatforms()) {
+    const guard = adapter.envReportGuard
+    if (!guard) continue
+    assert.ok(rulesetIds.has(guard.rulesetId),
+      `${adapter.id} 声明了埋点守卫 ${guard.rulesetId},但 manifest 没静态声明这个规则集`)
+  }
+})
+
+test('base 不许引入任何具体平台的模块:平台知识只经 sites/registry/types 三张平台无关的表进来', () => {
+  // 组合根豁免 —— 「加一个平台 = background.ts 多一行」正是这套抽象的出口。
+  const COMPOSITION_ROOT = 'background.ts'
+  const PLATFORM_AGNOSTIC = new Set(['sites', 'registry', 'types', 'inject'])
+  const files = readdirSync('src/base').filter((name) => name.endsWith('.ts'))
+  assert.ok(files.includes(COMPOSITION_ROOT), 'base 目录形状变了,本门禁需要复核')
+
+  const offenders = []
+  for (const file of files) {
+    if (file === COMPOSITION_ROOT) continue
+    const source = readFileSync(`src/base/${file}`, 'utf8')
+    for (const match of source.matchAll(/from '\.\.\/program\/platform\/([\w./-]+)'/gu)) {
+      if (!PLATFORM_AGNOSTIC.has(match[1])) offenders.push(`${file} -> ${match[1]}`)
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `base 里出现了具体平台的依赖:${offenders.join('、')}。平台事实要么进适配器,要么进站点表`)
+})
+
+test('传感桥按平台分区:canonical、登录基线与上下文健康各算各的,一个平台的掉登录不得记到另一个头上', () => {
+  // 刻意不叫 boss —— BOSS 的页面事实尚未考古,这里只验分区的形状。
+  const other = {
+    id: 'demo2',
+    origin: 'https://demo2.example.com',
+    match: 'https://demo2.example.com/*',
+    matches: (url) => typeof url === 'string' && url.startsWith('https://demo2.example.com/'),
+    pageKind: (url) => (url.includes('/im') ? PageKind.Im : PageKind.Other),
+    // 拿不到就 unknown:某个平台无法被动感知登录态是允许的,方向仍是"不确认"。
+    readLoginState: () => LoginState.Unknown,
+  }
+  setSitesForTest([zhilianSite, other])
+  try {
+    const connection = new FakeSensorConnection()
+    const bridge = new SensorBridge(connection, () => 1_000)
+    connection.setContext({ platform: 'zhilian', accountRef: 'account-z', expectedPrincipalFingerprint: 'fp-z' })
+    connection.setContext({ platform: 'demo2', accountRef: 'account-d', expectedPrincipalFingerprint: 'fp-d' })
+
+    const zTab = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
+    const dTab = { tabId: 2, active: true, url: 'https://demo2.example.com/im', windowId: 1 }
+    for (const tab of [zTab, dTab]) {
+      bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, url: tab.url }, tab)
+      bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 0, state: LoginState.In }, tab)
+    }
+
+    const byPlatform = () => Object.fromEntries(connection.contextHealth.map((c) => [c.platform, c]))
+    assert.deepEqual(Object.keys(byPlatform()).sort(), ['demo2', 'zhilian'], '两个平台各报一条')
+    assert.equal(byPlatform().zhilian.ready, true)
+    assert.equal(byPlatform().demo2.ready, true)
+
+    // demo2 掉登录:事件必须姓 demo2、带 demo2 的 accountRef。
+    // 分区没做对时,这一条会以 zhilian/account-z 的名义发出去 —— 脑随即停掉一个
+    // 根本没掉线的账号,真掉线的那个继续跑。这是错靶,不是显示问题。
+    bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 2_000, state: LoginState.Out }, dTab)
+    const dropped = connection.events.at(-1)
+    assert.equal(dropped.name, EventName.LoginStateChanged)
+    assert.equal(dropped.platform, 'demo2')
+    assert.equal(dropped.accountRef, 'account-d')
+    assert.equal(byPlatform().zhilian.ready, true, '别人掉登录不得污染智联的健康')
+    assert.equal(byPlatform().demo2.reason, NotReadyReason.LoginRequired)
+
+    // 「有页但脚本死了」也只能看自己平台的标签页:demo2 有页无传感,
+    // 智联连页都没有,两者的 reason 必须不同。
+    bridge.removeTab(1)
+    bridge.removeTab(2)
+    bridge.noteChromeNavigation(9, 'https://demo2.example.com/im')
+    bridge.refreshCachedState()
+    assert.equal(byPlatform().demo2.reason, NotReadyReason.ContentScriptDead)
+    assert.equal(byPlatform().zhilian.reason, NotReadyReason.PageAbsent,
+      '别的平台开着页,不能替智联作证「页在、只是脚本死了」')
+  } finally {
+    resetSitesForTest()
+  }
+})
+
+test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探测,也不伪造一条结论', async () => {
+  const fixture = installNetGuardFixture({ markerPresent: true })
+  try {
+    await withPlatforms([fakePlatform('no-guard')], async () => {
+      registerNetGuard()
+      await fixture.pump()
+      assert.equal(fixture.executed.length, 0, '没声明守卫就不该去页面上探测')
+      assert.equal(fixture.staleLog(), undefined, '没有守卫可谈失效')
+      assert.equal(fixture.offLog(), undefined, '不得对着一个不存在的规则集报未启用')
+      assert.equal(fixture.blindLog(), undefined, '连自检都不做,不必解释命中数观测不到')
+    })
+  } finally {
+    fixture.restore()
   }
 })
 

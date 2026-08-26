@@ -20,7 +20,6 @@ import {
   Limits,
   PingBody,
   PingContext,
-  PingSensors,
   PRIMITIVE_META,
   PROTO_VERSION,
   QueryBody,
@@ -71,10 +70,6 @@ interface PendingResult {
   sent: boolean
 }
 
-interface CachedSensorSnapshot {
-  unreadTotal: { observedAt: number; value: number } | null
-}
-
 export type ContextHealth = PingContext
 
 const BASE_FEATURES = [Feature.Progress1, Feature.Lease1, Feature.Cancel1] as const
@@ -101,7 +96,6 @@ export class Connection {
   private inlineBytes: number = DEFAULTS.inlineBytes
   private pendingResults = new Map<string, PendingResult>()
   private contexts: PingContext[] = []
-  private sensorSnapshot: CachedSensorSnapshot | null = null
   private currentSensorConfig: Readonly<Partial<SensorParams>> = Object.freeze({})
   private commandContexts = new Map<string, Readonly<CmdContext>>()
   private commandContextListeners = new Set<(context: Readonly<CmdContext>) => void>()
@@ -148,21 +142,6 @@ export class Connection {
   // base 监听器只缓存已经观测到的现货；心跳到点绝不反向采集 DOM。
   setContextHealth(contexts: readonly ContextHealth[]): void {
     this.contexts = contexts.map((context) => ({ ...context }))
-  }
-
-  setSensorSnapshot(snapshot: PingSensors | null): void {
-    const probe: PingBody = { queueDepth: 0, inFlight: null, sensors: snapshot }
-    if (validateKindBody(Kind.Ping, probe).length > 0) return
-    this.sensorSnapshot = snapshot === null
-      ? null
-      : {
-          unreadTotal: snapshot.unreadTotal === null
-            ? null
-            : {
-                value: snapshot.unreadTotal.value,
-                observedAt: Date.now() - snapshot.unreadTotal.observedAgoMs,
-              },
-        }
   }
 
   sensorConfig(): Readonly<Partial<SensorParams>> {
@@ -550,7 +529,6 @@ export class Connection {
       try { listener() } catch (error) { console.warn('[hand] 心跳订阅者异常', error) }
     }
     body.contexts = this.contexts
-    body.sensors = this.currentPingSensors()
     const witness = this.witnessEnabledForSession ? this.witness.advertisement() : null
     if (witness) Object.assign(body, witness)
     if (this.rawSend(Kind.Ping, this.session, body) === 'sent') this.awaitingPong = true
@@ -751,21 +729,6 @@ export class Connection {
     const frozen = Object.freeze({ ...context })
     this.commandContexts.set(frozen.platform, frozen)
     for (const listener of this.commandContextListeners) listener(frozen)
-  }
-
-  private currentPingSensors(): PingSensors | null {
-    if (this.sensorSnapshot === null) return null
-    const reading = this.sensorSnapshot.unreadTotal
-    return {
-      unreadTotal: reading === null
-        ? null
-        : {
-            value: reading.value,
-            // generated SensorReading 上限为 24h；更老仍表示“至少一天前”，不能让陈旧
-            // 缓存把整个基础设施 ping 校验掉。
-            observedAgoMs: Math.min(86_400_000, Math.max(0, Date.now() - reading.observedAt)),
-          },
-    }
   }
 
   private closeProtocol(code: number, reason: string): void {

@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:c07db5586c8fff034ec3e6718353897f58068ec93e8dd4ab8aebd1c6ce00b6cb"
+	ContractHash       = "sha256:65fb98533aa0fbe1c67e5a73bd8b45d47741baafde977d792402e65cb4c88a67"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -595,16 +595,6 @@ var TakeOfflineEvidenceTypeValues = []TakeOfflineEvidenceType{
 	TakeOfflineEvidenceTypePlatformPostingOffline,
 }
 
-type UnreadScope string
-
-const (
-	UnreadScopeTotal UnreadScope = "total"
-)
-
-var UnreadScopeValues = []UnreadScope{
-	UnreadScopeTotal,
-}
-
 type WitnessUnavailableReason string
 
 const (
@@ -910,7 +900,6 @@ const (
 	EventLoginStateChanged EventName = "loginStateChanged"
 	EventManualInteraction EventName = "manualInteraction"
 	EventPageNavigated     EventName = "pageNavigated"
-	EventUnreadBadge       EventName = "unreadBadge"
 )
 
 var Events = map[EventName]Batch{
@@ -918,7 +907,6 @@ var Events = map[EventName]Batch{
 	EventLoginStateChanged: BatchS,
 	EventManualInteraction: BatchS,
 	EventPageNavigated:     BatchS,
-	EventUnreadBadge:       BatchS,
 }
 
 // 默认参数(契约 defaults 展平;嵌套层级用驼峰连接)。welcome 可下发覆盖。
@@ -958,7 +946,6 @@ const (
 	DefaultRedispatchCapIntrusive           = 3
 	DefaultRedispatchCapReadonly            = 2
 	DefaultSensorsBadgeDebounceMs           = 800
-	DefaultSensorsBadgeMinEmitIntervalMs    = 5000
 	DefaultSensorsManualQuietMs             = 45000
 	DefaultSensorsNavSettleMs               = 500
 	DefaultSensorsPatrolPullForwardMergeMs  = 25000
@@ -981,7 +968,7 @@ var KindBodyFields = map[Kind][]string{
 	KindCmd:      {"args", "context", "deadline", "execBudgetMs", "guards", "idemKey", "leaseMs", "name", "ver"},
 	KindEvent:    {"context", "data", "name", "observedAt"},
 	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "journalOpen", "outboxPending", "protoSupported", "witnessStoreId"},
-	KindPing:     {"contexts", "inFlight", "journalOpen", "outboxPending", "queueDepth", "sensors", "witnessStoreId"},
+	KindPing:     {"contexts", "inFlight", "journalOpen", "outboxPending", "queueDepth", "witnessStoreId"},
 	KindPong:     {"now"},
 	KindProgress: {"pct", "ref", "stage"},
 	KindQuery:    {"ref"},

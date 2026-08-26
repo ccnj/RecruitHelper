@@ -1,5 +1,9 @@
 // 里程碑 3 首个真实外部副作用原语。program 只操作页面；attempting/outbox
 // 的持久顺序由 base Dispatcher 构造性保证，本模块不可访问 chrome.storage。
+//
+// 平台实现由 callPlatform 按 cmd.context.platform 路由(见 ../platform/registry)。
+// guards 原样透传给平台层——动作前的账号身份、路由与目标绑定核对在那里执行,
+// 本文件不解读、不放宽其中任何一条。
 import {
   AcceptWechatEvidenceType,
   ChatAcceptWechatArgs,
@@ -15,18 +19,11 @@ import {
   SendWechatInviteEvidenceType,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import {
-  acceptZhilianWechatRequest,
-  readZhilianWechatExchangeOutcome,
-  sendZhilianInviteCard,
-  sendZhilianMessage,
-  sendZhilianWechatInvite,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
-  if (!(error instanceof ZhilianPlatformError)) throw error
+  if (!(error instanceof PlatformError)) throw error
   return {
     status: 'failed',
     error: {
@@ -44,14 +41,10 @@ const sendMessage: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await sendZhilianMessage(
+      const data = await callPlatform(
+        ctx, 'sendMessage',
         rawArgs as ChatSendMessageArgs,
         ctx.guards as unknown as ChatSendMessageGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',
@@ -69,14 +62,10 @@ const sendWechatInvite: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await sendZhilianWechatInvite(
+      const data = await callPlatform(
+        ctx, 'sendWechatInvite',
         rawArgs as ChatSendWechatInviteArgs,
         ctx.guards as unknown as ChatSendMessageGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',
@@ -94,14 +83,10 @@ const acceptWechat: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await acceptZhilianWechatRequest(
+      const data = await callPlatform(
+        ctx, 'acceptWechat',
         rawArgs as ChatAcceptWechatArgs,
         ctx.guards as unknown as ChatSendMessageGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',
@@ -119,13 +104,8 @@ const readWechatExchangeOutcome: Primitive = {
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianWechatExchangeOutcome(
-        rawArgs as ChatReadWechatExchangeOutcomeArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readWechatExchangeOutcome', rawArgs as ChatReadWechatExchangeOutcomeArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -139,14 +119,10 @@ const sendInviteCard: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await sendZhilianInviteCard(
+      const data = await callPlatform(
+        ctx, 'sendInviteCard',
         rawArgs as ChatSendInviteCardArgs,
         ctx.guards as unknown as ChatSendMessageGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',

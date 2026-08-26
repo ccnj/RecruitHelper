@@ -738,7 +738,7 @@ func TestNonHandLogEventStillRequiresContext(t *testing.T) {
 	// 除 handLog 外缺 context 一律拒收,否则下游解引用会让脑 panic。
 	h := newHarness(t)
 	raw, err := protocol.Encode(protocol.PageNavigatedEventData{
-		At: h.clock.Now().UnixMilli(), PageKind: protocol.PageKindIm,
+		At: h.clock.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2001,21 +2001,21 @@ func TestManualQuietAndEventCoalescingRespectMinimumGap(t *testing.T) {
 		t.Fatalf("废除静默窗后事件不得压制派发: %+v %v", after, err)
 	}
 
-	// Two unread increases inside the 25s merge window do not slide the
-	// schedule, and the previous round imposes the 60s lower bound.
+	// 25 秒合并窗内的两次拉前提示不得滑动目标,上一轮又压着 60 秒下限。
+	// 2026-08-26:原用 unreadBadge 事件驱动,该事件随被动未读传感删除;
+	// 改用 pageNavigated——同一套 CoalesceWindow + MinimumRoundGap 机制,
+	// 覆盖不减。
 	h.clock.Add(5 * time.Second)
-	prev := 0
-	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
-		Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 1,
+	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventPageNavigated, protocol.PageNavigatedEventData{
+		At: h.clock.Now().UnixMilli(),
 	})); err != nil {
 		t.Fatal(err)
 	}
 	account, _ := h.db.AccountByKey(h.key)
 	firstTarget := *account.NextPatrolAt
 	h.clock.Add(5 * time.Second)
-	prev = 1
-	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventUnreadBadge, protocol.UnreadBadgeEventData{
-		Prev: &prev, Scope: protocol.UnreadScopeTotal, Stable: true, Value: 2,
+	if err := h.manager.HandleEvent("hand-1", eventBody(t, h, protocol.EventPageNavigated, protocol.PageNavigatedEventData{
+		At: h.clock.Now().UnixMilli(),
 	})); err != nil {
 		t.Fatal(err)
 	}

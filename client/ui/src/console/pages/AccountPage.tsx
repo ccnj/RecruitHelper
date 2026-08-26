@@ -112,7 +112,6 @@ function AccountRail({
               <small className="mono">{shortRef(account.accountRef)}</small>
               <em>{account.pausedReason ? pauseReasonLabel(account.pausedReason) : account.enabledToday ? '今天巡检中' : '今天未开启'}</em>
             </span>
-            {(account.unreadTotal ?? 0) > 0 && <span className="unread-stamp">{account.unreadTotal}</span>}
           </button>
         ))}
         {accounts.length === 0 && !accountsError && (
@@ -215,12 +214,7 @@ function AccountOverview({
         <div>
           <span>手与页面</span>
           <strong>{account.handOnline ? '手在线' : '手离线'} · {account.pageHealth || '页面未知'}</strong>
-          <small>传感 {account.sensorHealth || '未知'}{account.dirtyHint ? ' · 有待对账提示' : ''}</small>
-        </div>
-        <div>
-          <span>平台未读</span>
-          <strong className={(account.unreadTotal ?? 0) > 0 ? 'ink-amber' : ''}>{account.unreadTotal ?? 0}</strong>
-          <small>提示只催促对账，不直接推进业务</small>
+          <small>{account.dirtyHint ? '有待对账提示' : '无待对账提示'}</small>
         </div>
         <div>
           <span>最近一轮</span>

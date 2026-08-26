@@ -1,4 +1,4 @@
-// 职位发布四个原语。页面驱动全部留在智联 program;本模块只把 generated 契约接到
+// 职位发布六个原语。页面驱动全部留在平台适配器;本模块只把 generated 契约接到
 // 唯一注册表。
 //
 //   job.readPublishedList      intrusive  只读平台已存在的职位名,供发布前判同名
@@ -15,6 +15,7 @@ import {
   JobPublishDraftGuards,
   JobReadClassCandidatesArgs,
   JobReadKeywordVocabularyArgs,
+  JobReadPublishedListArgs,
   JobTakeOfflineArgs,
   JobTakeOfflineGuards,
   Primitive as PrimitiveName,
@@ -22,19 +23,11 @@ import {
   TakeOfflineEvidenceType,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import {
-  prepareZhilianJobDraft,
-  publishZhilianJobDraft,
-  readZhilianJobClassCandidates,
-  readZhilianJobKeywordVocabulary,
-  readZhilianPublishedJobs,
-  takeZhilianJobOffline,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
-  if (!(error instanceof ZhilianPlatformError)) throw error
+  if (!(error instanceof PlatformError)) throw error
   // 试填链路长且每步都依赖平台的异步行为,失败现场快照直接进 error.data
   // (契约里是 raw 对象)。它只给人读,不参与任何业务判定。
   const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
@@ -55,14 +48,10 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 const readPublishedList: Primitive = {
   name: PrimitiveName.JobReadPublishedList,
   class: CmdClass.Intrusive,
-  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianPublishedJobs(
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readPublishedJobs', rawArgs as JobReadPublishedListArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -76,13 +65,8 @@ const readClassCandidates: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianJobClassCandidates(
-        rawArgs as JobReadClassCandidatesArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readJobClassCandidates', rawArgs as JobReadClassCandidatesArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -96,13 +80,8 @@ const readKeywordVocabulary: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianJobKeywordVocabulary(
-        rawArgs as JobReadKeywordVocabularyArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readJobKeywordVocabulary', rawArgs as JobReadKeywordVocabularyArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -116,14 +95,7 @@ const prepareDraft: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await prepareZhilianJobDraft(
-        rawArgs as JobPrepareDraftArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
-      )
+      const data = await callPlatform(ctx, 'prepareJobDraft', rawArgs as JobPrepareDraftArgs)
       return { status: 'ok', data }
     } catch (error) {
       return failKnownOrThrow(error)
@@ -135,7 +107,7 @@ const prepareDraft: Primitive = {
 // 报 none。点击之前的失败是 none(未发布、可安全重试),点击之后是 possible
 // (可能已经发布,只能由脑的验证轮与 suspect 收敛,绝不重试)。
 function failPublishOrThrow(error: unknown): PrimitiveOutcome {
-  if (!(error instanceof ZhilianPlatformError)) throw error
+  if (!(error instanceof PlatformError)) throw error
   const data: Record<string, unknown> = { ...(error.diagnostics ?? {}) }
   if (error.reason && data.reason === undefined) data.reason = error.reason
   return {
@@ -155,14 +127,10 @@ const publishDraft: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await publishZhilianJobDraft(
+      const data = await callPlatform(
+        ctx, 'publishJobDraft',
         rawArgs as JobPrepareDraftArgs,
         ctx.guards as unknown as JobPublishDraftGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',
@@ -180,14 +148,10 @@ const takeOffline: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await takeZhilianJobOffline(
+      const data = await callPlatform(
+        ctx, 'takeJobOffline',
         rawArgs as JobTakeOfflineArgs,
         ctx.guards as unknown as JobTakeOfflineGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',

@@ -447,24 +447,6 @@ func (m *Manager) HandleEvent(handID string, event protocol.EventBody) error {
 	}
 	now := m.now()
 	switch event.Name {
-	case protocol.EventUnreadBadge:
-		var data protocol.UnreadBadgeEventData
-		if err := json.Unmarshal(event.Data, &data); err != nil {
-			return err
-		}
-		// 角标事件只剩一个用途:正数拉前下一轮巡检(2026-08-10 甲方裁决,插队
-		// 判定改由 chat.readUnreadTotal 现场读承担)。事件是提示不是账本,重复
-		// 拉前由 CoalesceWindow 吸收。
-		if err := m.store.MutateAccount(key, func(account *store.Account) error {
-			account.DirtyHint = true
-			if data.Value > 0 {
-				m.pullForward(account, now, m.config.CoalesceWindow)
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-		return nil
 	case protocol.EventPageNavigated:
 		var data protocol.PageNavigatedEventData
 		if err := json.Unmarshal(event.Data, &data); err != nil {

@@ -1,16 +1,17 @@
 // debug 原语归 debug.* 命名空间,不占平台无关业务词汇表。
 // 平台无关纪律:tabId 之类只进 evidence/日志,不进 result 的语义字段。
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import { CmdClass, DebugProbeInterviewEditorArgs, Primitive as PrimName } from '../../base/protocol'
+import {
+  CmdClass,
+  DebugCapturePageArgs,
+  DebugInspectSendSurfaceArgs,
+  DebugProbeInterviewEditorArgs,
+  Primitive as PrimName,
+} from '../../base/protocol'
 import { SW_STARTED_AT } from '../../base/config'
 import { armRuntimeReload } from '../../base/reload'
-import {
-  captureZhilianPageSnapshot,
-  inspectZhilianSendSurfaceDiagnostic,
-  probeZhilianInterviewEditor,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform, callPlatformUnbound } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
 const pingPrim: Primitive = {
   name: PrimName.DebugPing,
@@ -25,8 +26,12 @@ const pingPrim: Primitive = {
 const inspectSendSurfacePrim: Primitive = {
   name: PrimName.DebugInspectSendSurface,
   class: CmdClass.Readonly,
-  async handler(): Promise<PrimitiveOutcome> {
-    return { status: 'ok', data: await inspectZhilianSendSurfaceDiagnostic() }
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    // 契约 preconditions 为空,命令可能不带 context,故走 unbound 入口。
+    const data = await callPlatformUnbound(
+      ctx, 'inspectSendSurface', rawArgs as DebugInspectSendSurfaceArgs,
+    )
+    return { status: 'ok', data }
   },
 }
 
@@ -88,17 +93,12 @@ const probeInterviewEditorPrim: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await probeZhilianInterviewEditor(
-        rawArgs as DebugProbeInterviewEditorArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'probeInterviewEditor', rawArgs as DebugProbeInterviewEditorArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
-      if (!(error instanceof ZhilianPlatformError)) throw error
+      if (!(error instanceof PlatformError)) throw error
       return {
         status: 'failed',
         error: {
@@ -119,12 +119,16 @@ const probeInterviewEditorPrim: Primitive = {
 const capturePagePrim: Primitive = {
   name: PrimName.DebugCapturePage,
   class: CmdClass.Readonly,
-  async handler(_args, ctx): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      const data = await captureZhilianPageSnapshot(ctx)
+      // suspect 现场取证不带 context 派发(脑侧 dispatch/suspect_scene.go),
+      // 故走 unbound 入口;改成 callPlatform 会让招呼 suspect 的现场截图整条失效。
+      const data = await callPlatformUnbound(
+        ctx, 'capturePageSnapshot', rawArgs as DebugCapturePageArgs,
+      )
       return { status: 'ok', data }
     } catch (error) {
-      if (!(error instanceof ZhilianPlatformError)) throw error
+      if (!(error instanceof PlatformError)) throw error
       return {
         status: 'failed',
         error: {

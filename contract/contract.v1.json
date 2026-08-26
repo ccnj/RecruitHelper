@@ -107,7 +107,6 @@
         "type": "object",
         "fields": {
           "badgeDebounceMs": { "type": "int64", "minimum": 0, "maximum": 3000 },
-          "badgeMinEmitIntervalMs": { "type": "int64", "minimum": 1000, "maximum": 60000 },
           "navSettleMs": { "type": "int64", "minimum": 0, "maximum": 3000 },
           "manualQuietMs": { "type": "int64", "minimum": 0, "maximum": 600000 }
         }
@@ -226,26 +225,12 @@
           { "kind": "forbiddenWhen", "field": "reason", "whenField": "ready", "equals": [true] }
         ]
       },
-      "SensorReading": {
-        "type": "object",
-        "fields": {
-          "value": { "type": "int", "minimum": 0, "maximum": 1000000 },
-          "observedAgoMs": { "type": "int64", "minimum": 0, "maximum": 86400000 }
-        }
-      },
-      "PingSensors": {
-        "type": "object",
-        "fields": {
-          "unreadTotal": { "ref": "SensorReading", "nullable": true }
-        }
-      },
       "PingBody": {
         "type": "object",
         "fields": {
           "queueDepth": { "type": "int", "minimum": 0, "maximum": 16 },
           "inFlight": { "type": "string", "nullable": true, "minLength": 1, "maxLength": 128 },
           "contexts": { "type": "array", "optional": true, "maxItems": 64, "items": { "ref": "PingContext" } },
-          "sensors": { "ref": "PingSensors", "optional": true, "nullable": true },
           "witnessStoreId": { "type": "string", "optional": true, "minLength": 1, "maxLength": 128 },
           "outboxPending": { "type": "int", "optional": true, "minimum": 0, "maximum": 512 },
           "journalOpen": { "type": "int", "optional": true, "minimum": 0, "maximum": 512 }
@@ -1198,19 +1183,9 @@
         ]
       },
 
-      "UnreadBadgeEventData": {
-        "type": "object",
-        "fields": {
-          "scope": { "type": "string", "enumRef": "enums.unreadScope" },
-          "value": { "type": "int", "minimum": 0, "maximum": 1000000 },
-          "prev": { "type": "int", "nullable": true, "minimum": 0, "maximum": 1000000 },
-          "stable": { "type": "boolean", "const": true }
-        }
-      },
       "PageNavigatedEventData": {
         "type": "object",
         "fields": {
-          "pageKind": { "type": "string", "enumRef": "enums.pageKind" },
           "at": { "type": "int64", "minimum": 0 }
         }
       },
@@ -1302,7 +1277,6 @@
     "messageKind": ["text", "image", "voice", "file", "card", "system"],
     "cardType": ["interviewInvite", "wechatExchange", "resumeAttachment", "other"],
     "cardState": ["pending", "accepted", "rejected", "expired", "unknown"],
-    "unreadScope": ["total"],
     "manualInteractionKind": ["navigation"],
     "handLogLevel": ["warn", "error", "fatal"]
   },
@@ -1636,7 +1610,6 @@
     }
   },
   "events": {
-    "unreadBadge":       { "batch": "S", "dataSchema": "UnreadBadgeEventData", "brainMay": "正数拉前巡检并锁存非持久页面对账待办;减小/清零仅记录,不清待办" },
     "pageNavigated":     { "batch": "S", "dataSchema": "PageNavigatedEventData", "brainMay": "更新页面健康;不得直接触发业务命令" },
     "loginStateChanged": { "batch": "S", "dataSchema": "LoginStateChangedEventData", "brainMay": "out=暂停该账号+告警;logout→login 使身份绑定失效,须真人重确认" },
     "manualInteraction": { "batch": "S", "dataSchema": "ManualInteractionEventData", "throttle": ">=1/5s", "brainMay": "开/续手动静默窗(在途不撤销)" },
@@ -1668,6 +1641,6 @@
     "witnessCapacity": 512,
     "witnessSchemaVersion": 1,
     "verificationMaxRounds": 3,
-    "sensors": { "badgeDebounceMs": 800, "badgeMinEmitIntervalMs": 5000, "navSettleMs": 500, "manualQuietMs": 45000, "patrolPullForwardMergeMs": 25000, "patrolPullForwardMinGapMs": 60000 }
+    "sensors": { "badgeDebounceMs": 800, "navSettleMs": 500, "manualQuietMs": 45000, "patrolPullForwardMergeMs": 25000, "patrolPullForwardMinGapMs": 60000 }
   }
 }

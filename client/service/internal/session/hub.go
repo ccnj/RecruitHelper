@@ -446,7 +446,6 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 		Now:           time.Now().UnixMilli(),
 		Sensors: &protocol.SensorParams{
 			BadgeDebounceMs:        protocol.DefaultSensorsBadgeDebounceMs,
-			BadgeMinEmitIntervalMs: protocol.DefaultSensorsBadgeMinEmitIntervalMs,
 			ManualQuietMs:          protocol.DefaultSensorsManualQuietMs,
 			NavSettleMs:            protocol.DefaultSensorsNavSettleMs,
 		},

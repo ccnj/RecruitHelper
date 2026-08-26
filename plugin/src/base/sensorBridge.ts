@@ -1,5 +1,13 @@
 // SW 侧页面桥：只把 content 的稳定现货变成 QoS0 提示/心跳缓存。
 // 这里没有巡检、业务判断或持久化；canonical 外传感静音，推荐页 reload 换代例外。
+//
+// **按平台分区**：每个标签页属于某个已登记站点（program/platform/sites.ts），
+// canonical 标签页、登录态基线、上下文健康都是**每平台各一份**。本文件不知道
+// 任何具体平台的名字。
+//
+// 为什么必须分区：传感事件带的 platform 决定脑把它记到谁头上。一份共用的
+// canonical 会让 B 平台的掉登录以 A 平台的名义发出去 —— 脑随即停掉一个根本
+// 没掉线的账号，而真掉线的那个继续跑。这是错靶，不是显示问题。
 import {
   EventDataByName,
   EventName,
@@ -8,7 +16,6 @@ import {
   NotReadyReason,
   PageKind,
   PingContext,
-  PingSensors,
   SensorParams,
 } from './protocol'
 import type { CmdContext } from './protocol'
@@ -16,12 +23,10 @@ import {
   CONTENT_MESSAGE,
   ContentReadyResponse,
   ContentUpMessage,
-  ZHILIAN_CONTENT_MATCH,
-  isZhilianURL,
 } from './contentMessages'
+import { allSites, siteById, siteForURL } from '../program/platform/sites'
+import type { PlatformSite } from '../program/platform/sites'
 import type { SendOutcome } from './dispatcher'
-
-const PLATFORM = 'zhilian'
 
 export interface SensorConnectionPort {
   currentCommandContext(platform: string): Readonly<CmdContext> | undefined
@@ -36,7 +41,6 @@ export interface SensorConnectionPort {
   onSensorConfig(listener: (config: Readonly<Partial<SensorParams>>) => void): () => void
   sensorConfig(): Readonly<Partial<SensorParams>>
   setContextHealth(contexts: readonly PingContext[]): void
-  setSensorSnapshot(snapshot: PingSensors | null): void
 }
 
 export interface ContentSource {
@@ -46,28 +50,24 @@ export interface ContentSource {
   windowId?: number
 }
 
-interface CachedUnread {
-  observedAt: number
-  value: number
-}
-
 interface ContentTabState {
   activeRank: number
   lastSeenAt: number
   loginState: LoginState
   pageKind: PageKind
+  platformId: string
   tabId: number
-  unread: CachedUnread | null
   url: string
   windowId?: number
 }
 
 export class SensorBridge {
   private readonly tabStates = new Map<number, ContentTabState>()
-  private readonly platformTabs = new Set<number>()
+  /** tabId → platformId。用于区分「这个平台有页但脚本死了」与「这个平台没页」。 */
+  private readonly platformTabs = new Map<number, string>()
   private activeSequence = 0
   private started = false
-  private lastCanonicalLogin: LoginState | null = null
+  private readonly lastCanonicalLogin = new Map<string, LoginState>()
 
   constructor(
     private readonly connection: SensorConnectionPort,
@@ -81,7 +81,7 @@ export class SensorBridge {
     this.connection.onSensorConfig(() => { void this.broadcastConfiguration(true) })
     this.connection.onHeartbeat(() => { this.resyncStaleSensors() })
     this.connection.onCommandContext((context) => {
-      if (context.platform === PLATFORM) this.refreshCachedState()
+      if (siteById(context.platform)) this.refreshCachedState()
     })
 
     chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
@@ -97,12 +97,12 @@ export class SensorBridge {
 
     chrome.tabs.onActivated.addListener((activeInfo) => this.noteTabActivated(activeInfo.tabId))
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-      const url = changeInfo.url ?? tab.url
-      if (!isZhilianURL(url)) {
+      const site = siteForURL(changeInfo.url ?? tab.url)
+      if (!site) {
         if (changeInfo.url) this.removeTab(tabId)
         return
       }
-      this.platformTabs.add(tabId)
+      this.platformTabs.set(tabId, site.id)
       if (changeInfo.status === 'loading') {
         this.tabStates.delete(tabId)
         this.refreshCachedState()
@@ -118,16 +118,18 @@ export class SensorBridge {
     })
 
     const onNavigation = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => {
-      if (details.frameId !== 0 || !isZhilianURL(details.url)) return
-      this.platformTabs.add(details.tabId)
+      if (details.frameId !== 0) return
+      const site = siteForURL(details.url)
+      if (!site) return
+      this.platformTabs.set(details.tabId, site.id)
       void chrome.tabs.sendMessage(details.tabId, { type: CONTENT_MESSAGE.NavigationObserved }).catch(() => undefined)
     }
     chrome.webNavigation.onCommitted.addListener((details) => {
       onNavigation(details)
-      if (details.frameId === 0 && details.transitionType === 'reload' &&
-          pageKindFromURL(details.url) === PageKind.Recommend) {
-        this.emitRecommendationFeedReload(Math.trunc(details.timeStamp))
-      }
+      if (details.frameId !== 0 || details.transitionType !== 'reload') return
+      const site = siteForURL(details.url)
+      if (!site || site.pageKind(details.url) !== PageKind.Recommend) return
+      this.emitRecommendationFeedReload(site.id, Math.trunc(details.timeStamp))
     })
     chrome.webNavigation.onHistoryStateUpdated.addListener(onNavigation)
     chrome.webNavigation.onReferenceFragmentUpdated.addListener(onNavigation)
@@ -136,42 +138,30 @@ export class SensorBridge {
   }
 
   acceptContentMessage(raw: unknown, source: ContentSource): ContentReadyResponse | null {
-    if (!isZhilianURL(source.url)) return null
+    const site = siteForURL(source.url)
+    if (!site) return null
     const message = parseContentMessage(raw)
     if (!message) return null
-    this.platformTabs.add(source.tabId)
-    const state = this.upsertState(source)
+    this.platformTabs.set(source.tabId, site.id)
+    const state = this.upsertState(source, site)
     state.lastSeenAt = this.now()
 
     switch (message.type) {
       case CONTENT_MESSAGE.Ready:
         state.url = source.url
-        state.pageKind = pageKindFromURL(source.url)
+        state.pageKind = site.pageKind(source.url)
         this.refreshCachedState()
         void this.sendConfiguration(source.tabId, true)
         return { ok: true, sensors: completeSensorConfig(this.connection.sensorConfig()) }
 
-      case CONTENT_MESSAGE.UnreadStable:
-        state.unread = { observedAt: message.observedAt, value: message.value }
-        this.refreshCachedState()
-        if (message.emitEvent && this.canonicalTab()?.tabId === source.tabId) {
-          this.emitIfContext(EventName.UnreadBadge, {
-            scope: 'total',
-            value: message.value,
-            prev: message.prev,
-            stable: true,
-          }, message.observedAt)
-        }
-        return null
-
       case CONTENT_MESSAGE.LoginStable: {
         state.loginState = message.state
         this.refreshCachedState()
-        if (this.canonicalTab()?.tabId === source.tabId && message.state !== LoginState.Unknown) {
-          const previous = this.lastCanonicalLogin
-          this.lastCanonicalLogin = message.state
+        if (this.canonicalTab(site.id)?.tabId === source.tabId && message.state !== LoginState.Unknown) {
+          const previous = this.lastCanonicalLogin.get(site.id) ?? null
+          this.lastCanonicalLogin.set(site.id, message.state)
           if (previous !== null && previous !== LoginState.Unknown && previous !== message.state) {
-            this.emitIfContext(EventName.LoginStateChanged, {
+            this.emitIfContext(site.id, EventName.LoginStateChanged, {
               at: message.observedAt,
               stable: true,
               state: message.state,
@@ -183,13 +173,10 @@ export class SensorBridge {
 
       case CONTENT_MESSAGE.PageNavigated: {
         state.url = source.url
-        state.pageKind = pageKindFromURL(source.url)
+        state.pageKind = site.pageKind(source.url)
         this.refreshCachedState()
-        if (this.canonicalTab()?.tabId === source.tabId) {
-          this.emitIfContext(EventName.PageNavigated, {
-            at: message.at,
-            pageKind: state.pageKind,
-          }, message.at)
+        if (this.canonicalTab(site.id)?.tabId === source.tabId) {
+          this.emitIfContext(site.id, EventName.PageNavigated, { at: message.at }, message.at)
         }
         return null
       }
@@ -204,8 +191,9 @@ export class SensorBridge {
   }
 
   noteChromeNavigation(tabId: number, url: string): void {
-    if (!isZhilianURL(url)) return
-    this.platformTabs.add(tabId)
+    const site = siteForURL(url)
+    if (!site) return
+    this.platformTabs.set(tabId, site.id)
   }
 
   removeTab(tabId: number): void {
@@ -214,27 +202,16 @@ export class SensorBridge {
     this.refreshCachedState()
   }
 
+  // 每个已登记平台各报一条；脑没下发过命令上下文的平台不出现在数组里 ——
+  // 没有 accountRef 就没有可归属的对象，不得用平台名占位。
   refreshCachedState(): void {
-    const canonical = this.canonicalTab()
-    if (!canonical) {
-      this.connection.setSensorSnapshot(null)
-    } else if (canonical.unread) {
-      this.connection.setSensorSnapshot({
-        unreadTotal: {
-          value: canonical.unread.value,
-          observedAgoMs: Math.min(86_400_000, Math.max(0, this.now() - canonical.unread.observedAt)),
-        },
-      })
-    } else {
-      this.connection.setSensorSnapshot({ unreadTotal: null })
+    const contexts: PingContext[] = []
+    for (const site of allSites()) {
+      const context = this.connection.currentCommandContext(site.id)
+      if (!context) continue
+      contexts.push(this.contextHealth(context, this.canonicalTab(site.id)))
     }
-
-    const context = this.connection.currentCommandContext(PLATFORM)
-    if (!context) {
-      this.connection.setContextHealth([])
-      return
-    }
-    this.connection.setContextHealth([this.contextHealth(context, canonical)])
+    this.connection.setContextHealth(contexts)
   }
 
   private contextHealth(context: Readonly<CmdContext>, canonical: ContentTabState | null): PingContext {
@@ -242,8 +219,9 @@ export class SensorBridge {
       return {
         platform: context.platform,
         accountRef: context.accountRef,
+        // 「有页但脚本死了」只看本平台自己的标签页；别的平台开着页不能替它作证。
         ready: false,
-        reason: this.platformTabs.size > 0 ? NotReadyReason.ContentScriptDead : NotReadyReason.PageAbsent,
+        reason: this.hasTabsFor(context.platform) ? NotReadyReason.ContentScriptDead : NotReadyReason.PageAbsent,
       }
     }
     if (canonical.loginState === LoginState.Out) {
@@ -273,11 +251,17 @@ export class SensorBridge {
     return { platform: context.platform, accountRef: context.accountRef, ready: true }
   }
 
-  private emitRecommendationFeedReload(at: number): void {
-    if (!this.connection.currentCommandContext(PLATFORM)) return
-    // 只把 Chrome 公开确认的主框架 reload 当作整页换代；智联打开/关闭
+  private hasTabsFor(platformId: string): boolean {
+    for (const id of this.platformTabs.values()) {
+      if (id === platformId) return true
+    }
+    return false
+  }
+
+  private emitRecommendationFeedReload(platformId: string, at: number): void {
+    // 只把 Chrome 公开确认的主框架 reload 当作整页换代；平台打开/关闭
     // 简历详情同样可能令 tab 短暂 loading，不能据此终止批次。
-    this.emitIfContext(EventName.ManualInteraction, {
+    this.emitIfContext(platformId, EventName.ManualInteraction, {
       at,
       kind: ManualInteractionKind.Navigation,
       pageKind: PageKind.Recommend,
@@ -285,20 +269,22 @@ export class SensorBridge {
   }
 
   private emitIfContext<N extends keyof EventDataByName>(
+    platformId: string,
     name: N,
     data: EventDataByName[N],
     observedAt: number,
   ): void {
     // 事件没有脑下发过 accountRef 时直接丢弃；严禁用 tabId、host 或占位串伪造账号。
-    if (!this.connection.currentCommandContext(PLATFORM)) return
-    this.connection.emitPlatformSensorEvent(name, PLATFORM, data, observedAt)
+    if (!this.connection.currentCommandContext(platformId)) return
+    this.connection.emitPlatformSensorEvent(name, platformId, data, observedAt)
   }
 
-  private upsertState(source: ContentSource): ContentTabState {
+  private upsertState(source: ContentSource, site: PlatformSite): ContentTabState {
     const existing = this.tabStates.get(source.tabId)
     if (existing) {
       existing.url = source.url
-      existing.pageKind = pageKindFromURL(source.url)
+      existing.pageKind = site.pageKind(source.url)
+      existing.platformId = site.id
       existing.windowId = source.windowId
       if (source.active) existing.activeRank = ++this.activeSequence
       return existing
@@ -307,9 +293,9 @@ export class SensorBridge {
       activeRank: source.active ? ++this.activeSequence : 0,
       lastSeenAt: this.now(),
       loginState: LoginState.Unknown,
-      pageKind: pageKindFromURL(source.url),
+      pageKind: site.pageKind(source.url),
+      platformId: site.id,
       tabId: source.tabId,
-      unread: null,
       url: source.url,
       windowId: source.windowId,
     }
@@ -319,19 +305,25 @@ export class SensorBridge {
 
   // 增量上报的接收方必须自带一条重新同步路径。页面侧"值没变就不报"是对的，
   // 但本地这份缓存会单边丢失（真机 2026-08-03：SW 未重启、只有一个平台标签页，
-  // 缓存仍然空着），此时干等值本身变化就是死锁——未读还能被一条新消息解锁，
-  // 登录态几乎从不变化，等于永久失联，pageHealth 会一直停在 degraded。
-  // 只在确实缺失时索要，齐全时零开销；借既有心跳节奏，不新增定时器。
+  // 缓存仍然空着），此时干等值本身变化就是死锁——登录态几乎从不变化，等于永久
+  // 失联。只在确实缺失时索要，齐全时零开销；借既有心跳节奏，不新增定时器。
+  //
+  // 2026-08-26 删被动未读传感时，**这里只删掉未读那一半判据**。登录态这一半是
+  // lastCanonicalLogin 拿到第一个非 unknown 采样的路径，而登录态变化事件要求
+  // "有过前一个非 unknown 采样"才触发（见 LoginStable 分支）。一并删掉的后果是
+  // 掉登录的即时停机通道永久失效，**而且没有任何症状**。
   private resyncStaleSensors(): void {
     if (!this.started) return
-    const canonical = this.canonicalTab()
-    if (!canonical) return
-    if (canonical.unread !== null && canonical.loginState !== LoginState.Unknown) return
-    void this.sendConfiguration(canonical.tabId, true)
+    for (const site of allSites()) {
+      const canonical = this.canonicalTab(site.id)
+      if (!canonical) continue
+      if (canonical.loginState !== LoginState.Unknown) continue
+      void this.sendConfiguration(canonical.tabId, true)
+    }
   }
 
-  private canonicalTab(): ContentTabState | null {
-    const candidates = [...this.tabStates.values()]
+  private canonicalTab(platformId: string): ContentTabState | null {
+    const candidates = [...this.tabStates.values()].filter((state) => state.platformId === platformId)
     candidates.sort((a, b) => {
       const aIM = a.pageKind === PageKind.Im ? 1 : 0
       const bIM = b.pageKind === PageKind.Im ? 1 : 0
@@ -343,21 +335,24 @@ export class SensorBridge {
   }
 
   private async discoverPlatformTabs(): Promise<void> {
-    try {
-      const tabs = await chrome.tabs.query({ url: ZHILIAN_CONTENT_MATCH })
-      for (const tab of tabs) {
-        if (tab.id === undefined) continue
-        this.platformTabs.add(tab.id)
-        await this.sendConfiguration(tab.id, true)
+    for (const site of allSites()) {
+      try {
+        const tabs = await chrome.tabs.query({ url: site.match })
+        for (const tab of tabs) {
+          if (tab.id === undefined) continue
+          this.platformTabs.set(tab.id, site.id)
+          await this.sendConfiguration(tab.id, true)
+        }
+      } catch {
+        // 启动发现失败只退化为 sensors=null；下一条 content Ready 会自然补齐。
+        // 逐平台 catch：一个平台查失败不得连累其余平台的发现与下面这次刷新。
       }
-      this.refreshCachedState()
-    } catch {
-      // 启动发现失败只退化为 sensors=null；下一条 content Ready 会自然补齐。
     }
+    this.refreshCachedState()
   }
 
   private async broadcastConfiguration(requestSnapshot: boolean): Promise<void> {
-    const tabIds = new Set([...this.platformTabs, ...this.tabStates.keys()])
+    const tabIds = new Set([...this.platformTabs.keys(), ...this.tabStates.keys()])
     await Promise.all([...tabIds].map((tabId) => this.sendConfiguration(tabId, requestSnapshot)))
   }
 
@@ -382,24 +377,13 @@ export function registerSensorBridge(connection: SensorConnectionPort): SensorBr
 
 function sourceFromSender(sender: chrome.runtime.MessageSender): ContentSource | null {
   const tab = sender.tab
-  if (tab?.id === undefined || !isZhilianURL(tab.url)) return null
+  if (tab?.id === undefined || !siteForURL(tab.url)) return null
   return {
     tabId: tab.id,
     url: tab.url as string,
     active: tab.active,
     windowId: tab.windowId,
   }
-}
-
-function pageKindFromURL(value: string): PageKind {
-  try {
-    const path = new URL(value).pathname
-    if (path === '/app/im' || path.startsWith('/app/im/')) return PageKind.Im
-    if (path.startsWith('/app/recommend')) return PageKind.Recommend
-  } catch {
-    return PageKind.Other
-  }
-  return PageKind.Other
 }
 
 function parseContentMessage(value: unknown): ContentUpMessage | null {
@@ -411,18 +395,7 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
       return {
         type: CONTENT_MESSAGE.Ready,
         at: message.at,
-        pageKind: pageKindFromURL(message.url),
         url: message.url,
-      }
-    case CONTENT_MESSAGE.UnreadStable:
-      if (!safeTime(message.observedAt) || !sensorValue(message.value) ||
-          (message.prev !== null && !sensorValue(message.prev)) || typeof message.emitEvent !== 'boolean') return null
-      return {
-        type: CONTENT_MESSAGE.UnreadStable,
-        observedAt: message.observedAt,
-        value: message.value,
-        prev: message.prev,
-        emitEvent: message.emitEvent,
       }
     case CONTENT_MESSAGE.LoginStable:
       if (!safeTime(message.observedAt) || !Object.values(LoginState).includes(message.state as LoginState)) return null
@@ -436,7 +409,6 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
       return {
         type: CONTENT_MESSAGE.PageNavigated,
         at: message.at,
-        pageKind: pageKindFromURL(message.url),
         url: message.url,
       }
     default:
@@ -447,14 +419,12 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
 function completeSensorConfig(value: Readonly<Partial<SensorParams>>): SensorParams | null {
   const keys: Array<keyof SensorParams> = [
     'badgeDebounceMs',
-    'badgeMinEmitIntervalMs',
     'navSettleMs',
     'manualQuietMs',
   ]
   if (!keys.every((key) => Number.isSafeInteger(value[key]))) return null
   return {
     badgeDebounceMs: value.badgeDebounceMs as number,
-    badgeMinEmitIntervalMs: value.badgeMinEmitIntervalMs as number,
     navSettleMs: value.navSettleMs as number,
     manualQuietMs: value.manualQuietMs as number,
   }
@@ -462,14 +432,6 @@ function completeSensorConfig(value: Readonly<Partial<SensorParams>>): SensorPar
 
 function safeTime(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
-}
-
-function nonnegativeInt(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0
-}
-
-function sensorValue(value: unknown): value is number {
-  return nonnegativeInt(value) && value <= 1_000_000
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
