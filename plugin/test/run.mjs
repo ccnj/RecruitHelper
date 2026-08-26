@@ -382,6 +382,20 @@ try {
             imListVisible: pageKind === 'im',
           } }]
         }
+        if (name === 'mainReadZhilianUnreadBadge') {
+          // 与 mainReadListDOMWindow 夹具保持一致:那里恒有一条 unreadCount:1 的
+          // 会话,建联成功后追加的第二条是 unreadCount:0。
+          //
+          // 缺这条夹具时会落到本函数末尾的「未实现的 MAIN fixture」裸 Error。裸
+          // Error 不是 PlatformError,逃得出原语的错误映射,被分发器判 INTERNAL_HAND;
+          // 而巡检每轮首都读一次未读,于是轮轮失败、actor 永远走不完恢复——
+          // e2e 的 actor 段长期基线红,根因就是这里。
+          return [{ result: { found: true, text: '1' } }]
+        }
+        if (name === 'mainProbeZhilianBlockedDialog') {
+          // 正常路径:页面上没有平台阻塞弹窗。
+          return [{ result: { status: 'absent' } }]
+        }
         if (name === 'mainReadCurrentCandidate') {
           return [{ result: {
             status: 'ready',
