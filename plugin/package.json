@@ -1,6 +1,6 @@
 {
   "name": "recruithelper-plugin",
-  "version": "3.19.0",
+  "version": "3.20.0",
   "private": true,
   "description": "AI增员助手手端(Chrome MV3):base 稳定壳 + program 原语。脑手协议见 ../contract。",
   "type": "module",

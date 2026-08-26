@@ -1,7 +1,7 @@
 {
   "name": "recruithelper",
   "private": true,
-  "version": "3.19.0",
+  "version": "3.20.0",
   "description": "AI增员助手 monorepo(pnpm workspace):plugin(手端)/ client(脑:ui+electron+service[Go])/ contract。",
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild", "electron"]
