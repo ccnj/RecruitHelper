@@ -1,7 +1,7 @@
-// 里程碑 4 主动建联原语。页面动作只在 platform program；attempting/outbox
+// 里程碑 4 主动建联原语。页面动作只在平台适配器；attempting/outbox
 // 顺序继续由既有 Dispatcher/WitnessStore 构造性保证，本模块不接触 storage。
 import {
-  CandidateReadCurrentData,
+  CandidateReadCurrentArgs,
   ChatReadGreetingOutcomeArgs,
   ChatSendGreetingArgs,
   ChatSendGreetingGuards,
@@ -10,16 +10,11 @@ import {
   SendGreetingEvidenceType,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import {
-  readZhilianGreetingOutcome,
-  readZhilianCurrentCandidate,
-  sendZhilianGreeting,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
-  if (!(error instanceof ZhilianPlatformError)) throw error
+  if (!(error instanceof PlatformError)) throw error
   return {
     status: 'failed',
     error: {
@@ -35,14 +30,10 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 const readCurrentCandidate: Primitive = {
   name: PrimitiveName.CandidateReadCurrent,
   class: CmdClass.Readonly,
-  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data: CandidateReadCurrentData = await readZhilianCurrentCandidate(
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readCurrentCandidate', rawArgs as CandidateReadCurrentArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -56,13 +47,8 @@ const readGreetingOutcome: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianGreetingOutcome(
-        rawArgs as ChatReadGreetingOutcomeArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readGreetingOutcome', rawArgs as ChatReadGreetingOutcomeArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -76,14 +62,10 @@ const sendGreeting: Primitive = {
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await sendZhilianGreeting(
+      const data = await callPlatform(
+        ctx, 'sendGreeting',
         rawArgs as ChatSendGreetingArgs,
         ctx.guards as unknown as ChatSendGreetingGuards,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
       )
       return {
         status: 'ok',

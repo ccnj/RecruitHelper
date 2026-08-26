@@ -1,34 +1,24 @@
 // 里程碑 2 正式感知原语。所有入口都经 base Dispatcher；没有测试模式分支。
+//
+// 平台实现由 callPlatform 按 cmd.context.platform 路由(见 ../platform/registry)。
+// 本文件不认识任何具体平台。
 
 import {
-  ChatIdentifyCurrentConversationData,
+  ChatIdentifyCurrentConversationArgs,
   ChatOpenConversationArgs,
-  ChatOpenConversationData,
   ChatReadListArgs,
-  ChatReadListData,
   ChatReadThreadArgs,
-  ChatReadThreadData,
-  ChatReadUnreadTotalData,
+  ChatReadUnreadTotalArgs,
   CmdClass,
   NavEnsureSurfaceArgs,
-  NavEnsureSurfaceData,
   Primitive as PrimitiveName,
-  ProbePlatformData,
+  ProbePlatformArgs,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import {
-  ensureZhilianIM,
-  identifyZhilianCurrentConversation,
-  openZhilianConversation,
-  probeZhilian,
-  readZhilianList,
-  readZhilianThread,
-  readZhilianUnreadTotalNow,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform, callPlatformUnbound } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
-function failed(error: ZhilianPlatformError): PrimitiveOutcome {
+function failed(error: PlatformError): PrimitiveOutcome {
   return {
     status: 'failed',
     error: {
@@ -42,24 +32,21 @@ function failed(error: ZhilianPlatformError): PrimitiveOutcome {
 }
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
-  if (error instanceof ZhilianPlatformError) return failed(error)
+  if (error instanceof PlatformError) return failed(error)
   // StopExecution 与 base 的执行控制异常必须回到 Dispatcher；未知异常也由 base
   // 统一落 INTERNAL_HAND，program 不得把它们伪装成页面丢失。
   throw error
 }
 
-function assertZhilianContext(context: { platform?: string } | undefined): void {
-  if (!context || context.platform !== ZHILIAN_PLATFORM) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-  }
-}
-
 const probePlatform: Primitive = {
   name: PrimitiveName.ProbePlatform,
   class: CmdClass.Readonly,
-  async handler(): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      const data: ProbePlatformData = await probeZhilian()
+      // 唯一一条允许在账号绑定前执行的原语,命令可以不带 context。
+      const data = await callPlatformUnbound(
+        ctx, 'probePlatform', rawArgs as ProbePlatformArgs,
+      )
       return { status: 'ok', data }
     } catch (error) {
       return failKnownOrThrow(error)
@@ -72,19 +59,12 @@ const ensureSurface: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const args = rawArgs as NavEnsureSurfaceArgs
-      if (args.surface !== 'im') {
-        throw new ZhilianPlatformError('TARGET_NOT_FOUND', '当前手不支持该页面 surface', 'no')
-      }
-      const data: NavEnsureSurfaceData = await ensureZhilianIM(
-        ctx,
-        ctx.commandContext?.expectedPrincipalFingerprint,
-      )
+      // 「本平台有没有这个 surface」是平台自己的事实,判断在适配器里。
+      const data = await callPlatform(ctx, 'ensureSurface', rawArgs as NavEnsureSurfaceArgs)
       return {
         status: 'ok',
         data,
-        evidence: [{ type: 'postcondition', text: data.ready ? '智联 IM 页面已就绪' : '智联 IM 页面未就绪' }],
+        evidence: [{ type: 'postcondition', text: data.ready ? 'IM 页面已就绪' : 'IM 页面未就绪' }],
       }
     } catch (error) {
       return failKnownOrThrow(error)
@@ -97,12 +77,7 @@ const readList: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const data: ChatReadListData = await readZhilianList(
-        rawArgs as ChatReadListArgs,
-        ctx,
-        ctx.commandContext?.expectedPrincipalFingerprint,
-      )
+      const data = await callPlatform(ctx, 'readList', rawArgs as ChatReadListArgs)
       return {
         status: 'ok',
         data,
@@ -117,11 +92,10 @@ const readList: Primitive = {
 const identifyCurrentConversation: Primitive = {
   name: PrimitiveName.ChatIdentifyCurrentConversation,
   class: CmdClass.Readonly,
-  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const data: ChatIdentifyCurrentConversationData = await identifyZhilianCurrentConversation(
-        ctx.commandContext?.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'identifyCurrentConversation', rawArgs as ChatIdentifyCurrentConversationArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -135,12 +109,7 @@ const openConversation: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const data: ChatOpenConversationData = await openZhilianConversation(
-        rawArgs as ChatOpenConversationArgs,
-        ctx,
-        ctx.commandContext?.expectedPrincipalFingerprint,
-      )
+      const data = await callPlatform(ctx, 'openConversation', rawArgs as ChatOpenConversationArgs)
       return { status: 'ok', data }
     } catch (error) {
       return failKnownOrThrow(error)
@@ -151,12 +120,9 @@ const openConversation: Primitive = {
 const readUnreadTotal: Primitive = {
   name: PrimitiveName.ChatReadUnreadTotal,
   class: CmdClass.Readonly,
-  async handler(_rawArgs, ctx): Promise<PrimitiveOutcome> {
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const data: ChatReadUnreadTotalData = await readZhilianUnreadTotalNow(
-        ctx.commandContext?.expectedPrincipalFingerprint,
-      )
+      const data = await callPlatform(ctx, 'readUnreadTotal', rawArgs as ChatReadUnreadTotalArgs)
       return { status: 'ok', data }
     } catch (error) {
       return failKnownOrThrow(error)
@@ -169,12 +135,7 @@ const readThread: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      assertZhilianContext(ctx.commandContext)
-      const data: ChatReadThreadData = await readZhilianThread(
-        rawArgs as ChatReadThreadArgs,
-        ctx,
-        ctx.commandContext?.expectedPrincipalFingerprint,
-      )
+      const data = await callPlatform(ctx, 'readThread', rawArgs as ChatReadThreadArgs)
       return {
         status: 'ok',
         data,

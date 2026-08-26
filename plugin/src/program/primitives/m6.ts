@@ -1,5 +1,5 @@
 // 冒烟冲刺的单候选人采集原语。候选人选择、详情动作与完整性核验只存在于
-// 智联 program；本模块仅把生成契约接入唯一 dispatcher 注册表。
+// 平台适配器；本模块仅把生成契约接入唯一 dispatcher 注册表。
 import {
   CandidateApplySourcingFiltersArgs,
   CandidateReadSourcingResumeArgs,
@@ -10,18 +10,11 @@ import {
   Primitive as PrimitiveName,
 } from '../../base/protocol'
 import { Primitive, PrimitiveOutcome, register } from '../registry'
-import {
-  applyZhilianSourcingFilters,
-  readZhilianSourcingResume,
-  readZhilianSourcingTargetResume,
-  readZhilianSourcingWindow,
-  selectZhilianSourcingPosition,
-  ZHILIAN_PLATFORM,
-  ZhilianPlatformError,
-} from '../platform/zhilian'
+import { callPlatform } from '../platform/registry'
+import { PlatformError } from '../platform/types'
 
 function failKnownOrThrow(error: unknown): PrimitiveOutcome {
-  if (!(error instanceof ZhilianPlatformError)) throw error
+  if (!(error instanceof PlatformError)) throw error
   // 失败现场快照与 notReady 原因合并进 error.data(只给人读，不参与任何业务
   // 判定)。简历读取的十余种失败原因原本全被压成同一句话，账本、日志与诊断包
   // 里都看不出是弹窗没打开还是某个区块缺内容——2026-08-05 一个真实候选人卡在
@@ -46,13 +39,8 @@ const readSourcingResume: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianSourcingResume(
-        rawArgs as CandidateReadSourcingResumeArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readSourcingResume', rawArgs as CandidateReadSourcingResumeArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -66,13 +54,8 @@ const selectSourcingPosition: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await selectZhilianSourcingPosition(
-        rawArgs as CandidateSelectSourcingPositionArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'selectSourcingPosition', rawArgs as CandidateSelectSourcingPositionArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -86,13 +69,8 @@ const applySourcingFilters: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await applyZhilianSourcingFilters(
-        rawArgs as CandidateApplySourcingFiltersArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'applySourcingFilters', rawArgs as CandidateApplySourcingFiltersArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -106,13 +84,8 @@ const readSourcingWindow: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianSourcingWindow(
-        rawArgs as CandidateReadSourcingWindowArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readSourcingWindow', rawArgs as CandidateReadSourcingWindowArgs,
       )
       return { status: 'ok', data }
     } catch (error) {
@@ -126,13 +99,8 @@ const readSourcingTargetResume: Primitive = {
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
-      if (!ctx.commandContext || ctx.commandContext.platform !== ZHILIAN_PLATFORM) {
-        throw new ZhilianPlatformError('CTX_NOT_READY', '命令未绑定智联平台上下文', 'no', 'unknown')
-      }
-      const data = await readZhilianSourcingTargetResume(
-        rawArgs as CandidateReadSourcingTargetResumeArgs,
-        ctx,
-        ctx.commandContext.expectedPrincipalFingerprint,
+      const data = await callPlatform(
+        ctx, 'readSourcingTargetResume', rawArgs as CandidateReadSourcingTargetResumeArgs,
       )
       return { status: 'ok', data }
     } catch (error) {

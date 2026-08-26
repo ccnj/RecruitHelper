@@ -53,7 +53,6 @@ import type {
   DebugInspectSendSurfaceData,
   DebugProbeInterviewEditorArgs,
   DebugProbeInterviewEditorData,
-  ErrorCode,
   InterviewDetails,
   JobPrepareDraftArgs,
   JobPrepareDraftData,
@@ -69,9 +68,7 @@ import type {
   JobTakeOfflineData,
   JobTakeOfflineGuards,
   MessageAnchor,
-  NotReadyReason,
   ProbePlatformData,
-  Retryable,
   SideEffect,
   ThreadMessage,
 } from '../../base/protocol'
@@ -87,6 +84,8 @@ import {
   putSessionBlob,
   sessionBlobParams,
 } from '../../base/capture'
+import { PlatformError } from './types'
+import type { PlatformAdapter, PlatformCapabilities } from './types'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -99,18 +98,13 @@ const THREAD_PAGE_SIZE = 8
 const LIST_WINDOW_MAX_SESSIONS = 32
 const RESULT_DATA_BUDGET = 60 * 1024
 
-export class ZhilianPlatformError extends Error {
-  constructor(
-    readonly code: ErrorCode,
-    message: string,
-    readonly retryable: Retryable = 'afterRecovery',
-    readonly reason?: NotReadyReason,
-    readonly sideEffect: SideEffect = 'none',
-    // 失败现场快照,只给人读:哪一步、当时页面处于什么状态。它进 error.data
-    // (契约里是 raw 对象),不参与任何业务判定,也不进 evidence。
-    readonly diagnostics?: Record<string, unknown>,
-  ) {
-    super(message)
+// 字段与语义整体上移到平台无关的 PlatformError(见 ./types.ts):code、
+// retryable、reason、sideEffect、失败现场快照 diagnostics 一项没变。这里只保留
+// 一个空子类,让本文件既有的 378 处构造点一个字都不用改;**捕获一律用
+// PlatformError**,否则第二个平台抛的错会漏网。
+export class ZhilianPlatformError extends PlatformError {
+  constructor(...args: ConstructorParameters<typeof PlatformError>) {
+    super(...args)
     this.name = 'ZhilianPlatformError'
   }
 }
@@ -15872,3 +15866,98 @@ export const zhilianTestHooks = Object.freeze({
   ensureThreadRoute,
   runMain,
 })
+
+// ---------------------------------------------------------------------------
+// 智联适配器
+//
+// 本对象是智联与原语层之间**唯一**的接缝。上面一万五千行页面对抗代码一行没动:
+// 每个方法体只是把统一入参拆回既有函数的位置参数。
+//
+// 为什么在这里包一层箭头函数是安全的:发布链路的节奏闸按**函数引用**比对
+// (见 zhilianPublishInteractions),它认的是传进 runMain 的那些 `main*` 函数,
+// 而这里包的是 `prepareZhilianJobDraft` 这类顶层入口——两者不在同一层,包装
+// 不会让任何一个 `main*` 引用失配。改动这里之前请先确认这句仍然成立:引用一旦
+// 失配,闸会静默消失(不报错、不打日志、测试不红),页面上就是机器速度连点。
+//
+// 类型标注刻意写成 `PlatformAdapter & PlatformCapabilities`:后半截让 TS 在
+// 编译期强制智联把 35 个能力**一个不落**地实现完。第二个平台只按需实现子集,
+// 标 `PlatformAdapter` 即可,漏掉的由 requireCapability 在运行期显式拒绝。
+export const zhilianAdapter: PlatformAdapter & PlatformCapabilities = {
+  id: ZHILIAN_PLATFORM,
+  hostMatch: TAB_QUERY,
+  // 智联必须用 MAIN:会话消息数组只能经页面 Vue 实例的 Vuex getter 拿到,
+  // 那个属性在 isolated world 不可见。是感知逼出来的,不是动作需要。
+  world: 'MAIN',
+  // 页面内合成事件。isTrusted 为假,靠 declarativeNetRequest 拦掉平台的
+  // environment-check 脚本兜住(见 base/netGuard.ts)。
+  input: 'intrinsic',
+
+  probePlatform: () => probeZhilian(),
+  ensureSurface: ({ args, ctx, fingerprint }) => {
+    if (args.surface !== 'im') {
+      throw new ZhilianPlatformError('TARGET_NOT_FOUND', '当前手不支持该页面 surface', 'no')
+    }
+    return ensureZhilianIM(ctx, fingerprint)
+  },
+
+  readWechatSetting: ({ ctx, fingerprint }) => readZhilianWechatSetting(ctx, fingerprint),
+
+  readList: ({ args, ctx, fingerprint }) => readZhilianList(args, ctx, fingerprint),
+  readThread: ({ args, ctx, fingerprint }) => readZhilianThread(args, ctx, fingerprint),
+  readUnreadTotal: ({ fingerprint }) => readZhilianUnreadTotalNow(fingerprint),
+  identifyCurrentConversation: ({ fingerprint }) => identifyZhilianCurrentConversation(fingerprint),
+  openConversation: ({ args, ctx, fingerprint }) => openZhilianConversation(args, ctx, fingerprint),
+
+  readCurrentCandidate: ({ ctx, fingerprint }) => readZhilianCurrentCandidate(ctx, fingerprint),
+  readResume: ({ args, ctx, fingerprint }) => readZhilianResume(args, ctx, fingerprint),
+
+  selectSourcingPosition: ({ args, ctx, fingerprint }) =>
+    selectZhilianSourcingPosition(args, ctx, fingerprint),
+  applySourcingFilters: ({ args, ctx, fingerprint }) =>
+    applyZhilianSourcingFilters(args, ctx, fingerprint),
+  readSourcingWindow: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingWindow(args, ctx, fingerprint),
+  readSourcingResume: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingResume(args, ctx, fingerprint),
+  readSourcingTargetResume: ({ args, ctx, fingerprint }) =>
+    readZhilianSourcingTargetResume(args, ctx, fingerprint),
+
+  sendGreeting: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianGreeting(args, guards, ctx, fingerprint),
+  sendMessage: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianMessage(args, guards, ctx, fingerprint),
+  sendWechatInvite: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianWechatInvite(args, guards, ctx, fingerprint),
+  acceptWechat: ({ args, guards, ctx, fingerprint }) =>
+    acceptZhilianWechatRequest(args, guards, ctx, fingerprint),
+  sendInviteCard: ({ args, guards, ctx, fingerprint }) =>
+    sendZhilianInviteCard(args, guards, ctx, fingerprint),
+
+  readGreetingOutcome: ({ args, ctx, fingerprint }) =>
+    readZhilianGreetingOutcome(args, ctx, fingerprint),
+  readWechatExchangeOutcome: ({ args, ctx, fingerprint }) =>
+    readZhilianWechatExchangeOutcome(args, ctx, fingerprint),
+
+  captureThreadScreenshot: ({ args, ctx, fingerprint }) =>
+    captureZhilianThreadScreenshot(args, ctx, fingerprint),
+  captureResumeScreenshot: ({ args, ctx, fingerprint }) =>
+    captureZhilianResumeScreenshot(args, ctx, fingerprint),
+  readPeerPhone: ({ args, ctx, fingerprint }) => readZhilianPeerPhone(args, ctx, fingerprint),
+  revealPeerPhone: ({ args, ctx, fingerprint }) => revealZhilianPeerPhone(args, ctx, fingerprint),
+
+  readPublishedJobs: ({ ctx, fingerprint }) => readZhilianPublishedJobs(ctx, fingerprint),
+  readJobClassCandidates: ({ args, ctx, fingerprint }) =>
+    readZhilianJobClassCandidates(args, ctx, fingerprint),
+  readJobKeywordVocabulary: ({ args, ctx, fingerprint }) =>
+    readZhilianJobKeywordVocabulary(args, ctx, fingerprint),
+  prepareJobDraft: ({ args, ctx, fingerprint }) => prepareZhilianJobDraft(args, ctx, fingerprint),
+  publishJobDraft: ({ args, guards, ctx, fingerprint }) =>
+    publishZhilianJobDraft(args, guards, ctx, fingerprint),
+  takeJobOffline: ({ args, guards, ctx, fingerprint }) =>
+    takeZhilianJobOffline(args, guards, ctx, fingerprint),
+
+  inspectSendSurface: () => inspectZhilianSendSurfaceDiagnostic(),
+  probeInterviewEditor: ({ args, ctx, fingerprint }) =>
+    probeZhilianInterviewEditor(args, ctx, fingerprint),
+  capturePageSnapshot: ({ ctx }) => captureZhilianPageSnapshot(ctx),
+}

@@ -71,8 +71,13 @@ const {
   readZhilianGreetingOutcome,
   readZhilianWechatExchangeOutcome,
   refreshPagesAfterRuntimeReload,
+  registerM2Primitives,
   registerM3Primitives,
   registerM6Primitives,
+  registerPlatform,
+  registeredPlatforms,
+  resetPlatformsForTest,
+  zhilianAdapter,
   sendZhilianGreeting,
   sendZhilianInviteCard,
   sendZhilianMessage,
@@ -14484,6 +14489,146 @@ test('代招公司回读 MAIN:框里有名字才算数,空着交给轮询继续�
   } finally {
     gone.restore()
   }
+})
+
+// ---------------------------------------------------------------------------
+// 平台适配层的接缝验收。
+//
+// 这三条是「多平台抽象层」这一批的**交付判据本身**:如果加一个平台还得改
+// base、改分发器或改契约,那抽象就没成立。用假平台验,不实现任何真实第二平台
+// (BOSS 的页面事实还没做真机考古,按「平台枚举面事实门」不得凭空实现)。
+
+/** 造一个只实现给定能力的假平台。没给的能力就是「这个平台没有」。 */
+function fakePlatform(id, capabilities = {}) {
+  return {
+    id,
+    hostMatch: `https://${id}.example.com/*`,
+    // 故意与智联不同:第二平台只能用 ISOLATED、只能走 OS 级注入,
+    // 声明面必须容得下这两种取值,否则抽象对它无效。
+    world: 'ISOLATED',
+    input: 'os',
+    ...capabilities,
+  }
+}
+
+/** 换一套平台跑,跑完把原来的装回去(测试之间共用同一张注册表)。 */
+async function withPlatforms(adapters, run) {
+  const saved = registeredPlatforms()
+  resetPlatformsForTest()
+  for (const adapter of adapters) registerPlatform(adapter)
+  try {
+    return await run()
+  } finally {
+    resetPlatformsForTest()
+    for (const adapter of saved) registerPlatform(adapter)
+  }
+}
+
+function identifyCommand(ref, platform) {
+  return command(Primitive.ChatIdentifyCurrentConversation, {}, {
+    context: { platform, accountRef: 'account-seam-fixture' },
+  })
+}
+
+test('加一个平台只需注册适配器:base、命令分发器与契约一律不动', async () => {
+  const seen = []
+  const fake = fakePlatform('fake-platform', {
+    identifyCurrentConversation({ args, ctx, fingerprint }) {
+      seen.push({ args, hasCtx: typeof ctx?.checkpoint === 'function', fingerprint })
+      return Promise.resolve({ conversationRef: 'fake-conversation', observedAt: 1_700_000_000_000 })
+    },
+  })
+  await withPlatforms([fake], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    // 生产分发器,原封不动——本批一行都没改它。
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('seam-1', 's', 's', identifyCommand('seam-1', 'fake-platform'))
+    await eventually(() => results(out.frames, 'seam-1').length === 1, '假平台命令未收束')
+
+    const [result] = results(out.frames, 'seam-1')
+    assert.equal(result.body.status, 'ok')
+    assert.equal(result.body.data.conversationRef, 'fake-conversation')
+    assert.equal(seen.length, 1, '必须恰好路由到假平台一次')
+    assert.equal(seen[0].hasCtx, true, '适配器必须拿到真实 PrimitiveContext(合作式钩子)')
+  })
+})
+
+test('平台没注册、或平台没实现这条能力,都显式拒绝,绝不默认回成功', async () => {
+  const bare = fakePlatform('bare-platform')
+  await withPlatforms([bare], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 一、平台压根没注册:CTX_NOT_READY,且 retryable=no ——
+    // 「本手没有这个平台」不是等一等就会变的事。
+    await dispatcher.handleCmd('seam-2', 's', 's', identifyCommand('seam-2', 'never-registered'))
+    await eventually(() => results(out.frames, 'seam-2').length === 1, '未注册平台的命令未收束')
+    const [missing] = results(out.frames, 'seam-2')
+    assert.equal(missing.body.status, 'failed')
+    assert.equal(missing.body.error.code, ErrorCode.CtxNotReady)
+    assert.equal(missing.body.error.retryable, Retryable.No)
+    assert.equal(missing.body.error.sideEffect, 'none')
+
+    // 二、平台注册了但没实现这条能力:显式拒绝(反模式 18)。
+    await dispatcher.handleCmd('seam-3', 's', 's', identifyCommand('seam-3', 'bare-platform'))
+    await eventually(() => results(out.frames, 'seam-3').length === 1, '缺能力的命令未收束')
+    const [unsupported] = results(out.frames, 'seam-3')
+    assert.equal(unsupported.body.status, 'failed')
+    assert.equal(unsupported.body.error.code, ErrorCode.ProtoUnsupportedCmd)
+    assert.equal(unsupported.body.error.retryable, Retryable.No)
+  })
+})
+
+test('两个平台并存时命令按 context.platform 各走各的,不串线', async () => {
+  const hits = []
+  const makeAdapter = (id) => fakePlatform(id, {
+    identifyCurrentConversation() {
+      hits.push(id)
+      return Promise.resolve({ conversationRef: `${id}-conversation`, observedAt: 1_700_000_000_000 })
+    },
+  })
+  await withPlatforms([makeAdapter('platform-a'), makeAdapter('platform-b')], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    await dispatcher.handleCmd('seam-4', 's', 's', identifyCommand('seam-4', 'platform-b'))
+    await eventually(() => results(out.frames, 'seam-4').length === 1, 'b 平台命令未收束')
+    await dispatcher.handleCmd('seam-5', 's', 's', identifyCommand('seam-5', 'platform-a'))
+    await eventually(() => results(out.frames, 'seam-5').length === 1, 'a 平台命令未收束')
+
+    assert.deepEqual(hits, ['platform-b', 'platform-a'], '命令必须落到各自声明的平台上')
+    assert.equal(results(out.frames, 'seam-4')[0].body.data.conversationRef, 'platform-b-conversation')
+    assert.equal(results(out.frames, 'seam-5')[0].body.data.conversationRef, 'platform-a-conversation')
+  })
+})
+
+test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
+  // 少一条能力,对应原语在真机上会以 PROTO_UNSUPPORTED_CMD 静默退化;
+  // 这条用例让它在门禁上就红。
+  const required = [
+    'probePlatform', 'ensureSurface', 'readWechatSetting',
+    'readList', 'readThread', 'readUnreadTotal', 'identifyCurrentConversation', 'openConversation',
+    'readCurrentCandidate', 'readResume',
+    'selectSourcingPosition', 'applySourcingFilters', 'readSourcingWindow',
+    'readSourcingResume', 'readSourcingTargetResume',
+    'sendGreeting', 'sendMessage', 'sendWechatInvite', 'acceptWechat', 'sendInviteCard',
+    'readGreetingOutcome', 'readWechatExchangeOutcome',
+    'captureThreadScreenshot', 'captureResumeScreenshot', 'readPeerPhone', 'revealPeerPhone',
+    'readPublishedJobs', 'readJobClassCandidates', 'readJobKeywordVocabulary',
+    'prepareJobDraft', 'publishJobDraft', 'takeJobOffline',
+    'inspectSendSurface', 'probeInterviewEditor', 'capturePageSnapshot',
+  ]
+  assert.equal(required.length, 35)
+  for (const name of required) {
+    assert.equal(typeof zhilianAdapter[name], 'function', `智联适配器缺能力 ${name}`)
+  }
+  assert.equal(zhilianAdapter.id, 'zhilian')
+  // MAIN 是感知逼出来的(消息数组只能经页面 Vue 实例拿),不是动作需要。
+  assert.equal(zhilianAdapter.world, 'MAIN')
+  assert.equal(zhilianAdapter.input, 'intrinsic')
 })
 
 let failures = 0
