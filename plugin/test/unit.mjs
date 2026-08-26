@@ -14655,6 +14655,102 @@ test('平台之间相交而互不包含:各有对方没有的能力,各自照跑
   })
 })
 
+// 节奏登记表之外**另有**节奏来源的页面变更函数。每一条都要注明归谁管——
+// 空着不许进这张表。
+//
+// 为什么需要这张表:节奏闸按函数引用比对,而登记表在文件里离那些函数六千多行远;
+// 「新增一个可见动作、忘了登记」是它唯一的漏网口子,而漏了之后**没有任何症状**
+// (不报错、不打日志、测试不红),页面上就是机器速度连点。下面那条用例把这个
+// 口子堵在构建期:含点击/派发事件的 main* 函数,不在登记表就必须在这张表里,
+// 两张表都没有 = 门禁红。
+const KNOWN_OTHER_PACING = {
+  // —— 已核实:各自路径里有行内 setTimeout(1_000 + 抖动),点击前都会等 ——
+  mainClickZhilianJobSection: '职位管理页分区切换,调用点前有行内节奏',
+  mainClickZhilianJobOffline: '下线入口,调用点前有行内节奏',
+  mainConfirmZhilianJobOffline: '下线二次确认,调用点前有行内节奏',
+  mainCancelZhilianOfflineDialog: '下线取消,调用点前有行内节奏',
+  mainClickRevealPeerPhone: '查看电话,调用点前有行内节奏',
+  mainSendGreetingOnce: '招呼发送,三个调用点前均有行内节奏',
+
+  // —— 未确认:2026-08-26 静态核查时,调用点前 45 行内没找到节奏构造。
+  //    这**不等于**没有节奏(可能在更上层、或在调用者里),只是本次没能从源码
+  //    确认。它们全在发布链路之外,是本批之前就有的既有状态,不是本批引入;
+  //    按记录级登记,不在本批顺手改。真要收口需要一次独立审计。 ——
+  mainApplySourcingFilters: '采集筛选;节奏来源未确认',
+  mainSelectSourcingPosition: '采集选职位;节奏来源未确认',
+  mainReadSourcingResume: '采集读简历(内含开关弹窗的点击);节奏来源未确认',
+  mainReadCurrentResume: 'IM 读简历(内含开关弹窗的点击);节奏来源未确认',
+  mainResumeCaptureStep: '简历截图分步;节奏来源未确认',
+  mainClickConversationOnce: '点开会话;节奏来源未确认',
+  mainEnsureChatListFilter: '会话列表筛选;节奏来源未确认',
+  mainClickZhilianBlockedDialogButton: '平台阻塞弹窗处置;节奏来源未确认',
+  mainSendMessageOnce: '消息发送;节奏来源未确认(命令间节奏另由脑侧保证)',
+  mainPrepareInterviewEditor: '邀面编辑器填充;节奏来源未确认',
+  mainCloseInterviewSuccessModal: '邀面成功弹窗清场;节奏来源未确认',
+  mainReadListDOMWindow: '会话列表窗口读取(含滚动派发);节奏来源未确认',
+  mainReadThreadPage: '会话历史分页(含滚动派发);节奏来源未确认',
+}
+
+test('每一次页面点击都有节奏机制认领:新增可见动作忘了登记,门禁当场红', () => {
+  const source = readFileSync('src/program/platform/zhilian.ts', 'utf8')
+  const sourceLines = source.split('\n')
+
+  const registryBlock = /const zhilianPublishInteractions = new Set<unknown>\(\[([\s\S]*?)\]\)/u.exec(source)
+  assert.ok(registryBlock, '节奏登记表不见了——它是发布链路唯一的节奏判据')
+  const registered = new Set(
+    registryBlock[1].split('\n')
+      .map((line) => line.trim().replace(/,$/u, ''))
+      .filter((line) => line.length > 0 && !line.startsWith('//')),
+  )
+
+  // 每个顶层函数的起始行,用来把「哪一行有点击」归给「哪个函数」。
+  const starts = []
+  sourceLines.forEach((line, index) => {
+    const declared = /^(?:export )?(?:async )?function (\w+)/u.exec(line)
+    if (declared) starts.push({ line: index + 1, name: declared[1] })
+  })
+  const ownerOf = (lineNumber) => {
+    let owner = null
+    for (const entry of starts) {
+      if (entry.line <= lineNumber && (!owner || entry.line > owner.line)) owner = entry
+    }
+    return owner?.name ?? null
+  }
+
+  // 会在页面上产生可见变化的两种调用:点击,以及往输入框派发事件(打字)。
+  const mutating = new Set()
+  sourceLines.forEach((line, index) => {
+    if (line.includes('.click()') || line.includes('.dispatchEvent(')) {
+      const owner = ownerOf(index + 1)
+      if (owner && owner.startsWith('main')) mutating.add(owner)
+    }
+  })
+  assert.ok(mutating.size > 30, `页面变更函数只扫出 ${mutating.size} 个,扫描口径多半失效了`)
+
+  const unclaimed = [...mutating].filter(
+    (name) => !registered.has(name) && !Object.hasOwn(KNOWN_OTHER_PACING, name),
+  ).sort()
+  assert.deepEqual(unclaimed, [],
+    `这些函数会动页面,却既不在节奏登记表、也没在 KNOWN_OTHER_PACING 里认领:` +
+    `${unclaimed.join('、')}。要么登记进节奏闸,要么写明归哪套节奏管——` +
+    `不许两处都不写,那等于把它变成机器速度连点且无人知晓。`)
+
+  // 反向:登记表里的名字必须在源码里真存在。改名后表里留下化石,闸对那个函数
+  // 就永远不生效,而且同样没有症状。
+  const defined = new Set(starts.map((entry) => entry.name))
+  const fossils = [...registered].filter((name) => !defined.has(name)).sort()
+  assert.deepEqual(fossils, [], `节奏登记表里有源码中已不存在的名字: ${fossils.join('、')}`)
+
+  // KNOWN_OTHER_PACING 同样不许留化石,且不许与登记表重叠(两处都写=谁管的说不清)。
+  const staleKnown = Object.keys(KNOWN_OTHER_PACING).filter((name) => !defined.has(name)).sort()
+  assert.deepEqual(staleKnown, [], `KNOWN_OTHER_PACING 里有源码中已不存在的名字: ${staleKnown.join('、')}`)
+  const both = Object.keys(KNOWN_OTHER_PACING).filter((name) => registered.has(name)).sort()
+  assert.deepEqual(both, [], `这些函数同时出现在两张表里,归谁管说不清: ${both.join('、')}`)
+  for (const [name, note] of Object.entries(KNOWN_OTHER_PACING)) {
+    assert.ok(note.trim().length > 0, `${name} 必须注明节奏归谁管`)
+  }
+})
+
 test('注入接缝:执行世界由适配器声明,不在调用点写死', async () => {
   const originalChrome = globalThis.chrome
   const calls = []
