@@ -125,9 +125,13 @@ func TestCommunicationV4PatrolSupersedesStaleTurnAndReopensNextRound(t *testing.
 		t.Fatal(err)
 	}
 	reopened, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	// 2026-08-27 停机点第二步:边界按 v4 §一纯定义现算(锚后全部候选人
+	// 消息),重开轮把被作废旧轮消费过的输入与插话并成一轮一并回应——
+	// 「多条新输入并一响应」跨作废成立,插话不再被切出旧输入单独作答。
 	if err != nil || reopened == nil || reopened.TurnID == staleTurn.TurnID ||
 		reopened.Status != store.DialogueTurnCompleted ||
-		reopened.InboundFromSeq != interjectSeq || reopened.InboundThroughSeq != interjectSeq {
+		reopened.InboundFromSeq != fixture.inboundSeq ||
+		reopened.InboundThroughSeq != interjectSeq {
 		t.Fatalf("下一轮未按最新账本边界重开: turn=%+v err=%v", reopened, err)
 	}
 	if unchanged, err := h.db.DialogueTurnByID(staleTurn.TurnID); err != nil ||
@@ -243,9 +247,12 @@ func TestCommunicationV4PatrolReopensParkedTurnOnNewCandidateInput(t *testing.T)
 		t.Fatalf("新输入未作废停靠轮: turn=%+v err=%v", superseded, err)
 	}
 	reopened, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	// 2026-08-27 停机点第二步:重开轮按纯定义边界并入停靠轮消费过的输入,
+	// 与新输入一并回应(并一响应跨作废)。
 	if err != nil || reopened == nil || reopened.TurnID == parked.TurnID ||
 		reopened.Status != store.DialogueTurnCompleted ||
-		reopened.InboundFromSeq != newSeq || reopened.InboundThroughSeq != newSeq {
+		reopened.InboundFromSeq != parked.InboundFromSeq ||
+		reopened.InboundThroughSeq != newSeq {
 		t.Fatalf("停靠轮作废后未按最新边界重开: turn=%+v err=%v", reopened, err)
 	}
 	if countM5SendMessageCommands(t, h) != 1 {

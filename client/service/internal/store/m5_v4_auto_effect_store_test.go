@@ -1142,6 +1142,59 @@ func TestCommunicationV4AutomaticSuspectVerdictsPreserveFirstManualReason(t *tes
 			Count(&audits).Error; err != nil || audits != 2 {
 			t.Fatalf("裁决即恢复必须落审计: count=%d err=%v", audits, err)
 		}
+		// 2026-08-27 停机点第二步(协议 §7.4):裁决事务同步把裁决代次加一,
+		// 同一输入边界的重新规划键确定性区别于旧尝试——不必等候选人新输入,
+		// 下一巡检轮即可在原边界立即重开新轮。
+		if aggregate.VerdictGeneration != 1 {
+			t.Fatalf("裁决代次未随 resolvedFailed 加一: %+v", aggregate)
+		}
+		messagesAll, err := s.MessagesForConversation(ConversationKey{
+			Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+			ConversationRef: fixture.ConversationRef,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var anchor *Message
+		var inbound []Message
+		for index := range messagesAll {
+			row := messagesAll[index]
+			if row.Direction == "out" {
+				copyRow := row
+				anchor = &copyRow
+				inbound = nil
+				continue
+			}
+			if row.Direction == "in" && row.Kind != "system" {
+				inbound = append(inbound, row)
+			}
+		}
+		if anchor == nil || len(inbound) == 0 {
+			t.Fatalf("重规划边界重建失败: anchor=%+v inbound=%+v", anchor, inbound)
+		}
+		newDigest, newTurnID, err := DialogueTurnIdentity(
+			fixture.ProfileID, *anchor, inbound, aggregate.VerdictGeneration,
+		)
+		if err != nil || newTurnID == fixture.Turn.TurnID {
+			t.Fatalf("代次入键未区分重规划轮: newTurnID=%q old=%q err=%v",
+				newTurnID, fixture.Turn.TurnID, err)
+		}
+		reopened, err := s.FreezeCommunicationV4Turn(FreezeDialogueTurnRequest{
+			TurnID: newTurnID, ProfileID: fixture.ProfileID,
+			ConversationRef: fixture.ConversationRef,
+			InputDigest:     newDigest, HistoryThroughSeq: inbound[0].Seq - 1,
+			InboundFromSeq: inbound[0].Seq, InboundThroughSeq: inbound[len(inbound)-1].Seq,
+			ExpectedProjectedThroughSeq: aggregate.ProjectedThroughSeq,
+			OutboundAnchorSeq:           anchor.Seq,
+			ContextRevisionHash:         fixture.Turn.ContextRevisionHash,
+			ResumeSnapshotID:            fixture.Turn.ResumeSnapshotID,
+			RecommendedTimeText:         fixture.Turn.RecommendedTimeText,
+			RenderFormatVersion:         fixture.Turn.RenderFormatVersion,
+			FrozenAt:                    verifyAt.Add(3 * time.Minute),
+		})
+		if err != nil || reopened == nil || !reopened.Created {
+			t.Fatalf("裁决后同边界必须立即可重开新轮: reopened=%+v err=%v", reopened, err)
+		}
 	})
 
 	// 其他人工原因的聚合不被误解冻:聚合人工原因不属 effectSuspect 族时,

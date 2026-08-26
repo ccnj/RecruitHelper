@@ -368,7 +368,12 @@ func validateFreezeDialogueTurnRequest(req FreezeDialogueTurnRequest) error {
 		req.InboundThroughSeq < req.InboundFromSeq ||
 		req.OutboundAnchorSeq < 0 || req.OutboundAnchorSeq >= req.InboundFromSeq ||
 		req.ExpectedProjectedThroughSeq < req.OutboundAnchorSeq ||
-		req.ExpectedProjectedThroughSeq >= req.InboundFromSeq {
+		// 游标窗口(2026-08-27 停机点第二步):锚 ≤ 游标 ≤ 边界尾。边界按
+		// v4 §一纯定义现算、不看游标,因此游标可以合法地落在边界内部——
+		// 作废重开会把旧轮已消费的输入与新输入并成一轮(并一响应跨作废
+		// 成立),resolvedFailed 裁决代次重开则游标恰在边界尾。冻结把游标
+		// 写到边界尾,永不回退。
+		req.ExpectedProjectedThroughSeq > req.InboundThroughSeq {
 		return ErrDialogueTurnInvalid
 	}
 	return nil

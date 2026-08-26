@@ -253,10 +253,19 @@ func (a *roundActor) processCommunicationV4Target(
 	if cursor > answeredThrough {
 		answeredThrough = cursor
 	}
-	var prefix, boundary []store.Message
+	// 三份行集,各司其职:prefix=已回应新行(逐行投影);fresh=锚后且游标后
+	// 的新行(静默时逐行投影);turnBoundary=锚后全部行——轮边界按 v4 §一
+	// 纯定义现算,完全不看游标,消费去重交给下方「最新轮身份比对」。
+	var prefix, fresh, turnBoundary []store.Message
 	pendingInput := false
 	for index := range messages {
 		message := messages[index]
+		if message.Seq > lastOut {
+			turnBoundary = append(turnBoundary, message)
+			if message.Direction == "in" && message.Kind != "system" {
+				pendingInput = true
+			}
+		}
 		if message.Seq <= cursor {
 			continue
 		}
@@ -264,10 +273,7 @@ func (a *roundActor) processCommunicationV4Target(
 			prefix = append(prefix, message)
 			continue
 		}
-		boundary = append(boundary, message)
-		if message.Direction == "in" && message.Kind != "system" {
-			pendingInput = true
-		}
+		fresh = append(fresh, message)
 	}
 	if !pendingInput {
 		if parkedTurn != nil {
@@ -276,7 +282,7 @@ func (a *roundActor) processCommunicationV4Target(
 			return nil
 		}
 		target, err = a.projectCommunicationV4AnsweredSegment(
-			target, append(prefix, boundary...),
+			target, append(prefix, fresh...),
 		)
 		if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
 			return err
@@ -294,18 +300,7 @@ func (a *roundActor) processCommunicationV4Target(
 		}
 		cursor = target.Aggregate.ProjectedThroughSeq
 	}
-	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
-		target.Profile.ProfileID,
-	)
-	if err != nil {
-		return err
-	}
-	if !materialReady {
-		slog.Info("沟通层跳过:AI 材料未就绪(简历快照或职位上下文缺失)",
-			"profileId", target.Profile.ProfileID)
-		return nil
-	}
-	inbound, validBoundary := store.DialogueTurnCandidateMessages(boundary)
+	inbound, validBoundary := store.DialogueTurnCandidateMessages(turnBoundary)
 	if !validBoundary {
 		// 边界按构造只含 in/system 行;走到这里是账本形状异常。跳过本轮、
 		// 下轮按最新账本重算,不冻结候选人(2026-08-27 停机点第二步,原
@@ -358,6 +353,37 @@ func (a *roundActor) processCommunicationV4Target(
 		// 候选人(2026-08-27 停机点第二步,原挂人工路径拆除)。
 		slog.Warn("沟通层跳过:回合身份计算失败,等下轮巡检重算",
 			"profileId", target.Profile.ProfileID, "err", err)
+		return nil
+	}
+	if latest != nil && latest.TurnID == turnID {
+		// 该边界已被最新轮消费(同指纹):completed=已回应、superseded=已
+		// 作废且指纹未变——都不重开,静默交时刻表;停靠轮维持「只被新输入
+		// 唤醒」。裁决代次加一(resolvedFailed 裁决即恢复)或候选人新输入
+		// 都会改变指纹,自然落入下方冻结重开路径。
+		if parkedTurn != nil {
+			return nil
+		}
+		switch latest.Status {
+		case store.DialogueTurnCompleted, store.DialogueTurnSuperseded:
+			target, err = a.projectCommunicationV4AnsweredSegment(target, fresh)
+			if err != nil || target.Aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive {
+				return err
+			}
+			a.advanceRespondedThroughWatermark(key, target.Aggregate.ProjectedThroughSeq)
+			return a.processCommunicationV4Schedule(ctx, target)
+		default:
+			return nil
+		}
+	}
+	material, materialReady, err := a.manager.store.CommunicationAIMaterialForProfile(
+		target.Profile.ProfileID,
+	)
+	if err != nil {
+		return err
+	}
+	if !materialReady {
+		slog.Info("沟通层跳过:AI 材料未就绪(简历快照或职位上下文缺失)",
+			"profileId", target.Profile.ProfileID)
 		return nil
 	}
 	// 可面试时段周表在冻结这一刻实时读一次，之后随 turn 固定。读失败不回落默认，

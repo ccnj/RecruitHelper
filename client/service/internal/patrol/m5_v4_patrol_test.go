@@ -1774,6 +1774,88 @@ func TestCommunicationV4PatrolAutoAdoptsInterleavedCandidateAndHumanOutbound(t *
 	}
 }
 
+func TestCommunicationV4PatrolAdoptsBootBacklogWithHumanCardAndCandidateAcceptance(t *testing.T) {
+	// 开机攒消息幕(2026-08-27 甲方点名的必过场景,明杰案形状):停机期间
+	// 候选人提问、真人手发文本与线下面试卡、候选人接受面试,四行攒在同一
+	// 段落里,开机首轮必须全自动收编——真人卡归一化为邀面事件、接受卡把
+	// 主线推进到已约面,全程不挂人工。旧行为(2026-08-12 真机):两边都在
+	// 游标后 → interleavedOutboundBoundary 挂人工,约面成功通知丢失。
+	h := newHarness(t)
+	question := "面试地点在哪里"
+	humanText := "在公司总部,发你定位"
+	humanRepliedMs := h.clock.Now().Add(-3 * time.Minute).UnixMilli()
+	cardSentMs := h.clock.Now().Add(-2 * time.Minute).UnixMilli()
+	acceptedMs := h.clock.Now().Add(-time.Minute).UnixMilli()
+	onsite := "onsite"
+	startsAt := h.clock.Now().Add(48 * time.Hour).UnixMilli()
+	fixture := seedCommunicationV4PatrolTargetWithBoundaryAndFixedPhrases(t, h, "boot-backlog", []store.MessageDraft{
+		{
+			Direction: "in", Kind: "text", ContentHash: syncledger.HashText(question),
+			Text: &question, Origin: "external",
+		},
+		{
+			Direction: "out", Kind: "text", ContentHash: syncledger.HashText(humanText),
+			Text: &humanText, Origin: "external", TsApproxMs: &humanRepliedMs,
+		},
+		{
+			Direction: "out", Kind: "card", CardType: "interviewInvite", CardState: "pending",
+			ContentHash: syncledger.HashText("human-interview-card"), Origin: "external",
+			InterviewStartsAtMs: &startsAt, InterviewMethod: &onsite, TsApproxMs: &cardSentMs,
+		},
+		{
+			Direction: "in", Kind: "card", CardType: "interviewInvite", CardState: "accepted",
+			ContentHash: syncledger.HashText("candidate-accepted-card"), Origin: "external",
+			TsApproxMs: &acceptedMs,
+		},
+	}, `{
+		"rejectWechat":{"enabled":true,"messages":["合成挽留"]},
+		"silence48Wechat":{"enabled":true,"messages":["合成冷催"]},
+		"wechatAccepted":{"enabled":true,"messages":["好的，晚点加你"]},
+		"meetingAccepted":{"enabled":true,"messages":["好的，面试安排已确认"]},
+		"offlineMeetingAccepted":{"enabled":true,"messages":["好的，到时现场见"]}
+	}`)
+	hand := &m5PositiveHand{now: h.clock.Now}
+	dispatcher := dispatch.New(h.db, hand)
+	hand.setDispatcher(dispatcher)
+	runner := &m5AutomaticReplyRunner{base: h.runner, dispatcher: dispatcher}
+	manager, err := NewManager(h.db, runner, h.hands, h.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.db.AccountByKey(h.key)
+	if err != nil || account == nil {
+		t.Fatalf("账号读取失败: account=%+v err=%v", account, err)
+	}
+	roundID := "round-v4-boot-backlog"
+	beginCommunicationV4PatrolRound(t, h, roundID)
+	actor := &roundActor{
+		manager: manager, account: account,
+		hand:    HandState{Online: true, Session: "session-1", BootID: "boot-1"},
+		roundID: roundID, now: h.clock.Now(),
+	}
+	manager.mu.Lock()
+	err = actor.processCommunicationV4Targets(context.Background())
+	manager.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := h.db.CommunicationV4AggregateByProfile(fixture.profileID)
+	if err != nil ||
+		aggregate.AutomationStatus != store.ProfileCommunicationAutomationActive ||
+		aggregate.ManualReason != "" {
+		t.Fatalf("开机攒消息不得挂人工: aggregate=%+v err=%v", aggregate, err)
+	}
+	if aggregate.State.MainStatus != communication.V4StatusInterviewed {
+		t.Fatalf("真人手发邀面卡+候选人接受必须推进到已约面: state=%+v", aggregate.State)
+	}
+	profile, err := h.db.CandidateProfileByID(fixture.profileID)
+	if err != nil || profile == nil ||
+		profile.MainStatus != store.CandidateProfileInterviewed ||
+		profile.InterviewedAt == nil {
+		t.Fatalf("档案投影未跟进已约面: profile=%+v err=%v", profile, err)
+	}
+}
+
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
 	h := newHarness(t)
 	before, after := "合成系统前置", "合成系统尾部"
