@@ -6651,6 +6651,156 @@ test('mainDismissGreetingSuccessModals:禁用的「我知道了」退到 X,零�
   }
 })
 
+test('mainDismissGlobalSceneModals 两族叠弹全关:标准 X 优先,优惠券点自己的 __close 图标,其余不碰', async () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+    setTimeout: globalThis.setTimeout,
+  }
+  globalThis.setTimeout = (callback, _delay, ...args) => {
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  class FakeElement {
+    constructor(text = '', props = {}) {
+      this.textContent = text
+      this.isConnected = true
+      this.form = null
+      this.type = 'button'
+      this.disabled = props.disabled === true
+      this.visible = props.visible !== false
+      this.clicks = 0
+      this.tagName = props.tagName ?? 'BUTTON'
+      this.className = props.className ?? ''
+      this._onIntrinsicClick = null
+    }
+    getAttribute(name) { return name === 'class' ? this.className : '' }
+    getClientRects() { return this.visible ? [{}] : [] }
+    click() {
+      this.clicks += 1
+      if (typeof this._onIntrinsicClick === 'function') this._onIntrinsicClick()
+    }
+    querySelectorAll() { return [] }
+  }
+  // 图片广告形态:头部有唯一标准 X。
+  const stdClose = new FakeElement('', { className: 'km-modal__close-btn km-button' })
+  const imageModal = new FakeElement('', {
+    tagName: 'DIV', className: 'km-modal__wrapper image-popup-modal',
+  })
+  imageModal.querySelectorAll = (selector) => {
+    if (selector === 'button.km-modal__close-btn') return [stdClose]
+    // 真实 DOM 里 [class*="__close"] 也会捞到 X 自己,endsWith 过滤要能扛住。
+    if (selector === '[class*="__close"]') return [stdClose]
+    return []
+  }
+  // 优惠券形态:没有标准 X,关闭控件是它自己的 *__close 图标;「去使用」在场但
+  // 不属于任何关闭选择器;同名前缀的 __close-tip 装饰节点必须被 endsWith 排掉。
+  const useButton = new FakeElement('去使用')
+  const closeIcon = new FakeElement('', {
+    tagName: 'I', className: 'km-icon sati sati-times-circle coupons-auto-modal__close',
+  })
+  const closeTip = new FakeElement('', {
+    tagName: 'DIV', className: 'coupons-auto-modal__close-tip',
+  })
+  const couponModal = new FakeElement('', {
+    tagName: 'DIV', className: 'km-modal__wrapper coupons-auto-modal',
+  })
+  couponModal.querySelectorAll = (selector) => {
+    if (selector === 'button.km-modal__close-btn') return []
+    if (selector === '[class*="__close"]') return [closeTip, closeIcon]
+    return []
+  }
+  for (const [modal, control] of [[imageModal, stdClose], [couponModal, closeIcon]]) {
+    control._onIntrinsicClick = () => { modal.visible = false }
+  }
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  globalThis.document = {
+    querySelectorAll(selector) {
+      // 选择器就是判据:必须带 body 直挂与 scene="GLOBAL",别的写法一律查不到。
+      if (selector === 'body > .km-modal__wrapper[scene="GLOBAL"]') {
+        return [imageModal, couponModal].filter((modal) => modal.visible)
+      }
+      return []
+    },
+  }
+  try {
+    const outcome = await zhilianTestHooks.mainDismissGlobalSceneModals()
+    assert.equal(outcome.found, true)
+    assert.equal(outcome.closed, true, '两族弹窗都关掉后 closed 为真')
+    assert.equal(outcome.remaining, 0)
+    assert.equal(stdClose.clicks, 1, '图片广告点它自己的标准 X')
+    assert.equal(closeIcon.clicks, 1, '优惠券点它自己的 __close 图标')
+    assert.equal(closeTip.clicks, 0, '__close-tip 装饰节点不碰')
+    assert.equal(useButton.clicks, 0, '「去使用」一次都不碰')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
+test('mainDismissGlobalSceneModals:关闭控件不唯一就不动并如实报,零弹窗零动作', async () => {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    HTMLElement: globalThis.HTMLElement,
+    setTimeout: globalThis.setTimeout,
+  }
+  globalThis.setTimeout = (callback, _delay, ...args) => {
+    queueMicrotask(() => callback(...args))
+    return 1
+  }
+  class FakeElement {
+    constructor(text = '', props = {}) {
+      this.textContent = text
+      this.isConnected = true
+      this.form = null
+      this.type = 'button'
+      this.disabled = props.disabled === true
+      this.visible = props.visible !== false
+      this.clicks = 0
+      this.tagName = props.tagName ?? 'BUTTON'
+      this.className = props.className ?? ''
+    }
+    getAttribute(name) { return name === 'class' ? this.className : '' }
+    getClientRects() { return this.visible ? [{}] : [] }
+    click() { this.clicks += 1 }
+    querySelectorAll() { return [] }
+  }
+  globalThis.HTMLElement = FakeElement
+  globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+  const closeOne = new FakeElement('', { className: 'km-modal__close-btn' })
+  const closeTwo = new FakeElement('', { className: 'km-modal__close-btn' })
+  const oddModal = new FakeElement('', {
+    tagName: 'DIV', className: 'km-modal__wrapper mystery-global-modal',
+  })
+  oddModal.querySelectorAll = (selector) => {
+    if (selector === 'button.km-modal__close-btn') return [closeOne, closeTwo]
+    if (selector === '[class*="__close"]') return [closeOne, closeTwo]
+    return []
+  }
+  globalThis.document = {
+    querySelectorAll(selector) {
+      return selector === 'body > .km-modal__wrapper[scene="GLOBAL"]' ? [oddModal] : []
+    },
+  }
+  try {
+    const stuck = await zhilianTestHooks.mainDismissGlobalSceneModals()
+    assert.equal(closeOne.clicks + closeTwo.clicks, 0, '关闭控件不唯一时一个都不点')
+    assert.equal(stuck.found, true)
+    assert.equal(stuck.closed, false, '没关掉必须如实报')
+    assert.equal(stuck.remaining, 1)
+    assert.ok(stuck.scene.includes('noDismissBtn'), 'scene 记下没找到关闭控件')
+
+    globalThis.document = { querySelectorAll() { return [] } }
+    assert.deepEqual(await zhilianTestHooks.mainDismissGlobalSceneModals(), {
+      found: false, closed: false, remaining: 0, scene: '',
+    }, '零弹窗零动作')
+  } finally {
+    Object.assign(globalThis, original)
+  }
+})
+
 test('sendZhilianGreeting 的 prepare/preflight 在证词前，commit 在唯一 barrier 后且阴性不补动作', async () => {
   const original = { chrome: globalThis.chrome, setTimeout: globalThis.setTimeout }
   const fingerprint = 'a'.repeat(64)
@@ -11262,7 +11412,9 @@ test('ensureZhilianIM 双页现场优先把唯一推荐页交接到 IM', async (
       id: recommendTab.id,
       options: { url: 'https://rd6.zhaopin.com/app/im', active: true },
     }])
-    assert.deepEqual(probed, [recommendTab.id])
+    // 两次注入:就绪探测一次,IM 就绪后的全局营销弹窗清场一次(假注入回的
+    // 探测形状对清场等价于"页面上没有营销弹窗",清场静默返回)。
+    assert.deepEqual(probed, [recommendTab.id, recommendTab.id])
     assert.equal((await canonicalZhilianTab())?.id, recommendTab.id,
       '交接完成后后续 canonical 读取仍应选中本轮工作页')
     assert.equal(existingIMTab.url, 'https://rd6.zhaopin.com/app/im',
