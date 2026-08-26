@@ -10266,8 +10266,9 @@ test('页面列表目标在 readThread 前离开窗口时只报无副作用 TARG
       ),
       (error) => error instanceof ZhilianPlatformError &&
         error.code === ErrorCode.ElementUnresolved &&
-        error.retryable === 'manualOnly',
-      '只有精确 target_not_found 可以降级，列表绑定异常仍须响亮停止',
+        error.retryable === 'afterRecovery' &&
+        error.message.includes('list_binding_unresolved'),
+      '列表绑定异常按渲染暂态处理:本轮跳过下轮重试且原始信息随行(2026-08-26 甲方裁决),点击照旧为零',
     )
     assert.equal(clickCalls, 0)
   } finally {
@@ -11593,7 +11594,7 @@ test('readThread 切到目标后 history 失败不二次 barrier、不重切也�
   assert.deepEqual(harness.state.events, ['find', 'barrier', 'click', 'read'])
 })
 
-test('readThread 已点击但目标 route 未就绪时如实返回 possible 并禁止自动重派', async () => {
+test('readThread 已点击但目标 route 未就绪时如实返回 possible、按暂态下轮重试并留最后路由观察', async () => {
   const originalSetTimeout = globalThis.setTimeout
   globalThis.setTimeout = (callback) => {
     callback()
@@ -11609,8 +11610,9 @@ test('readThread 已点击但目标 route 未就绪时如实返回 possible 并�
       }, harness.context, harness.fingerprint),
       (error) => error instanceof ZhilianPlatformError &&
         error.code === ErrorCode.CtxLostDuringExec &&
-        error.retryable === Retryable.ManualOnly &&
-        error.sideEffect === 'possible',
+        error.retryable === Retryable.AfterRecovery &&
+        error.sideEffect === 'possible' &&
+        error.message.includes('last='),
     )
   } finally {
     globalThis.setTimeout = originalSetTimeout

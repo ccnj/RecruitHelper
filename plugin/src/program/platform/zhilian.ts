@@ -5260,18 +5260,21 @@ export async function openZhilianConversation(
     try {
       currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
     } catch (error) {
+      // 2026-08-26 甲方裁决:点击前的列表渲染暂态不构成"需要人",降为
+      // afterRecovery——本轮跳过该候选人,下轮重试,不再打入隔离区。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
         `当前未读列表无法建立 fresh 可见窗口：${asError(error).message}`,
-        'manualOnly',
+        'afterRecovery',
       )
     }
     noteSkippedListRows('未读 fresh 窗口', currentWindow)
     if (currentWindow.unstable) {
+      // 降级与留痕同上:2026-08-26 甲方裁决。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '当前未读列表尚未稳定',
-        'manualOnly',
+        `当前未读列表尚未稳定（rows=${currentWindow.sessions.length}）`,
+        'afterRecovery',
       )
     }
     const targetMatches = currentWindow.sessions
@@ -8992,10 +8995,13 @@ async function readZhilianListFromDOM(
     page = await runMain(tab.id, mainReadListDOMWindow, [advance, !advance])
   } catch (error) {
     if (args.filter === 'unread' && asError(error).message.includes('dom_list_items_missing')) {
+      // 2026-08-26 甲方裁决(与筛选确认降级同族):列表既非非空也非可信空态的
+      // 主成因是空白/慢渲染暂态,降为 afterRecovery 本轮失败下轮重试;原始
+      // 失败信息随行(错误收敛必须留痕)。filter=all 分支本就按未知走跳过。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '未读筛选已开启，但当前页面没有可确认的非空列表或可信空态',
-        'manualOnly',
+        `未读筛选已开启，但当前页面没有可确认的非空列表或可信空态：${asError(error).message}`,
+        'afterRecovery',
       )
     }
     throw new ZhilianPlatformError(
@@ -13429,10 +13435,12 @@ async function ensureThreadRoute(
     // 分页都不能在这里重新制造一个页面导航目标。
     currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
   } catch (error) {
+    // 2026-08-26 甲方裁决:会话窗口读不到多为列表渲染暂态,降为 afterRecovery,
+    // 本轮跳过下轮重试;原始失败信息随行。
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
       `无法读取当前可定位会话窗口：${asError(error).message}`,
-      'manualOnly',
+      'afterRecovery',
     )
   }
   noteSkippedListRows('readThread 定位窗口', currentWindow)
@@ -13506,15 +13514,24 @@ async function ensureThreadRoute(
   }
   const clickedAt = Date.now()
   ctx.checkpoint()
+  // 错误收敛必须留痕(2026-08-26):超时收场带出最后一轮观察到的路由状态,
+  // 区分"页面没跳过去""跳了但会话不对""内容脚本没起来"三种子因。
+  let lastSeen = ''
   for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tab.id)
     let routeReady = false
     try {
       const url = new URL(latest.url ?? '')
-      routeReady = latest.status === 'complete' && url.pathname === '/app/im' &&
-        url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)
+      const sid = url.searchParams.get('sessionId') ?? '-'
+      lastSeen = `last=status:${latest.status ?? '-'} path:${url.pathname} session:${sid}`
+      if (latest.status === 'complete' && url.pathname === '/app/im' && sid === conversationRef) {
+        const healthy = await contentScriptHealthy(tab.id)
+        lastSeen += ` cs:${healthy}`
+        routeReady = healthy
+      }
     } catch {
+      lastSeen = 'last=url_unparsable'
       // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
     }
     if (routeReady) {
@@ -13527,10 +13544,13 @@ async function ensureThreadRoute(
     if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
+  // 2026-08-26 甲方裁决:点击已发生但只涉幂等已读回执,超时是渲染暂态,降为
+  // afterRecovery 本轮跳过下轮重试,不再把候选人打入隔离区;sideEffect=possible
+  // 如实保留。
   throw new ZhilianPlatformError(
     'CTX_LOST_DURING_EXEC',
-    '目标智联会话在期限内未就绪',
-    'manualOnly',
+    `目标智联会话在期限内未就绪（${lastSeen || 'last=unobserved'}）`,
+    'afterRecovery',
     undefined,
     'possible',
   )
