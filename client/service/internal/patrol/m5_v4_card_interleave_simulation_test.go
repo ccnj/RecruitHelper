@@ -13,8 +13,7 @@ import (
 // 卡片插话集成模拟(战役出口第五件测试,四幕只钉文本):候选人插话夹在
 // 入站消息与我方邀请卡之间,同一窗口里卡片还发生了 pending→accepted 跃迁。
 // 身份判新必须同时做到:插话按身份捞回收编、卡片跃迁按 sourceKey 配对不受
-// 位置漂移影响;位置影子引擎在此裁弃插话,分歧留审计。第二轮重读同一页面
-// 必须收敛幂等,跃迁不增生。
+// 位置漂移影响。第二轮重读同一页面必须收敛幂等,跃迁不增生。
 func TestSimulationCardInterjectionRescuedAndTransitionPairs(t *testing.T) {
 	h := newHarness(t)
 	inbound := "想先了解一下再说"
@@ -104,10 +103,6 @@ func TestSimulationCardInterjectionRescuedAndTransitionPairs(t *testing.T) {
 	}
 	if got := countContextDiscardAudits(t, h, "card-interleave"); got != 0 {
 		t.Fatalf("身份判新不得裁弃插话: discard=%d", got)
-	}
-	audits, err := h.db.AuditEntries(50)
-	if err != nil || countAudit(audits, "identity_shadow_divergence") == 0 {
-		t.Fatalf("位置影子裁弃插话的分歧必须留审计: err=%v", err)
 	}
 
 	// 第二轮重读同一页面:收敛幂等,零新增、跃迁不增生。

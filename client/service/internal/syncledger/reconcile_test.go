@@ -1,12 +1,12 @@
-// 本文件测的是位置对齐引擎 reconcilePositional——2026-08-09 身份判新换根
-// (战役 S2)后它只作影子对拍,不再裁决业务;这些测试保住影子基准不漂移,
-// S3 与引擎一并拆除。新身份引擎的测试见 identity_reconcile_test.go。
+// 本文件测的是判新引擎的共享守卫与 store 集成:账本校验、sourceKey 语义闸、
+// 尾行分类修正、空读矛盾、收编前置、卡片跃迁事实与乐观并发。判新主体
+// (身份集合、回配、窗口定界、深读梯)的单元套件见 identity_reconcile_test.go,
+// 性质测试见 identity_property_test.go。旧位置对齐引擎及其测试矩阵已于
+// 2026-08-26 S3 拆除。
 package syncledger
 
 import (
 	"errors"
-	"fmt"
-	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -18,170 +18,20 @@ var testConversationKey = store.ConversationKey{
 	Platform: "zhilian", AccountRef: "acc-01", ConversationRef: "conv-01",
 }
 
-func TestReconcileCoreCases(t *testing.T) {
-	tests := []struct {
-		name              string
-		ledger            []string
-		snapshot          []string
-		adopt             bool
-		deep              bool
-		decision          Decision
-		overlap           int
-		newMessages       int
-		eventProjection   int
-		ambiguous         bool
-		audits            int
-		historicalThrough int64
-	}{
-		{
-			name: "首次整体收编只入账不投影历史", snapshot: []string{"old-a", "old-b"}, adopt: true,
-			decision: DecisionFirstAdoption, newMessages: 2, historicalThrough: 2,
-		},
-		{
-			name: "最大重叠只追加尾部新消息", ledger: []string{"a", "b", "c"}, snapshot: []string{"b", "c", "d", "e"},
-			decision: DecisionAppend, overlap: 2, newMessages: 2, eventProjection: 2,
-		},
-		{
-			name: "重复快照零投影", ledger: []string{"a", "b", "c"}, snapshot: []string{"b", "c"},
-			decision: DecisionNoChange, overlap: 2,
-		},
-		{
-			name: "连续同文取唯一最大重叠", ledger: []string{"x", "same", "same"}, snapshot: []string{"same", "same", "new"},
-			decision: DecisionAppend, overlap: 2, newMessages: 1, eventProjection: 1,
-		},
-		{
-			name: "同文边界歧义取最靠后锚并宁可少投影", ledger: []string{"x", "same"}, snapshot: []string{"same", "same", "after"},
-			decision: DecisionAppend, overlap: 1, newMessages: 1, eventProjection: 1, ambiguous: true, audits: 2,
-		},
-		{
-			name: "迟到旧快照完全包含于账本时不回退", ledger: []string{"a", "b", "c", "d"}, snapshot: []string{"a", "b", "c"},
-			decision: DecisionStaleSnapshot,
-		},
-		{
-			name: "浅读零重叠必须要求 deep", ledger: []string{"a", "b"}, snapshot: []string{"x", "y"},
-			decision: DecisionNeedDeep,
-		},
-		{
-			name: "deep 仍零重叠受审计收为新基线且抑制事件", ledger: []string{"a", "b"}, snapshot: []string{"x", "y"}, deep: true,
-			decision: DecisionAuditedRebaseline, newMessages: 2, audits: 1, historicalThrough: 4,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			input := ReconcileInput{
-				Key: testConversationKey, RoundID: "round-1", PlatformUserRef: "user-1",
-				Ledger: textLedger(t, tc.ledger...), Snapshot: textSnapshot(tc.snapshot...),
-				Adopt: tc.adopt, Deep: tc.deep, ReachedTop: tc.deep,
-			}
-			plan, err := reconcilePositional(input)
-			if err != nil {
-				t.Fatalf("Reconcile: %v", err)
-			}
-			if plan.Decision != tc.decision || plan.Overlap != tc.overlap || plan.Ambiguous != tc.ambiguous {
-				t.Fatalf("决策/重叠错误: %+v", plan)
-			}
-			if plan.HistoricalThroughSeq != tc.historicalThrough {
-				t.Fatalf("historicalThrough=%d, want %d", plan.HistoricalThroughSeq, tc.historicalThrough)
-			}
-			if len(plan.Audits) != tc.audits {
-				t.Fatalf("audits=%d, want %d: %+v", len(plan.Audits), tc.audits, plan.Audits)
-			}
-			if tc.decision == DecisionNeedDeep {
-				if plan.Apply != nil || plan.Rebaseline != nil || !plan.NeedsDeep() {
-					t.Fatalf("needDeep 不得生成部分入账请求: %+v", plan)
-				}
-				return
-			}
-			if got := len(plan.EventProjection); got != tc.eventProjection {
-				t.Fatalf("eventProjection=%d, want %d", got, tc.eventProjection)
-			}
-			if tc.decision == DecisionAuditedRebaseline {
-				if plan.Apply != nil || plan.Rebaseline == nil {
-					t.Fatalf("历史基线不得经普通 Apply 写入: %+v", plan)
-				}
-				if got := len(plan.Rebaseline.Historical); got != tc.newMessages {
-					t.Fatalf("historical=%d, want %d", got, tc.newMessages)
-				}
-				if plan.Rebaseline.ExpectedTailSeq != int64(len(tc.ledger)) {
-					t.Fatalf("ExpectedTailSeq=%d, want %d", plan.Rebaseline.ExpectedTailSeq, len(tc.ledger))
-				}
-				return
-			}
-			if plan.Apply == nil || plan.Rebaseline != nil {
-				t.Fatal("普通可落库决策缺 Apply 请求")
-			}
-			if got := len(plan.Apply.NewMessages); got != tc.newMessages {
-				t.Fatalf("newMessages=%d, want %d", got, tc.newMessages)
-			}
-			if plan.Apply.ExpectedTailSeq != int64(len(tc.ledger)) {
-				t.Fatalf("ExpectedTailSeq=%d, want %d", plan.Apply.ExpectedTailSeq, len(tc.ledger))
-			}
-			if tc.adopt != plan.Apply.Adopt {
-				t.Fatalf("Apply.Adopt=%t, want %t", plan.Apply.Adopt, tc.adopt)
-			}
-		})
-	}
-}
-
 func TestReconcileAcceptsSparseStrictlyIncreasingActiveSequence(t *testing.T) {
-	ledger := textLedger(t, "old", "tail")
+	ledger := snapshotLedger(t, keyedTextSnapshot("old", "tail")...)
 	ledger[1].Seq = 3 // seq=2 是已保留但不进入活动视图的撤回事实。
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, PlatformUserRef: "user-1", Ledger: ledger,
-		Snapshot: textSnapshot("tail", "new"),
+		Snapshot: keyedTextSnapshot("tail", "new"),
 	})
 	if err != nil {
 		t.Fatalf("稀疏活动 seq 不应被判为账本损坏: %v", err)
 	}
-	if plan.Decision != DecisionAppend || plan.Overlap != 1 || plan.Apply == nil ||
+	if plan.Decision != DecisionAppend || plan.Apply == nil ||
 		plan.Apply.ExpectedTailSeq != 3 || len(plan.Apply.NewMessages) != 1 {
-		t.Fatalf("稀疏账本对齐错误: %+v", plan)
+		t.Fatalf("稀疏账本判新错误: %+v", plan)
 	}
-}
-
-func TestReconcileSourceKeyIdentityAndLegacyCompatibility(t *testing.T) {
-	keyA := strings.Repeat("a", 64)
-	keyB := strings.Repeat("b", 64)
-	old := textSnapshot("same")[0]
-	old.SourceKey = keyA
-	ledger := snapshotLedger(t, old)
-
-	t.Run("双方有键时不得把同文不同消息误当重叠", func(t *testing.T) {
-		newSameText := textSnapshot("same")[0]
-		newSameText.SourceKey = keyB
-		plan, err := reconcilePositional(ReconcileInput{
-			Key: testConversationKey, Ledger: ledger,
-			Snapshot: []SnapshotMessage{old, newSameText},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if plan.Decision != DecisionAppend || plan.Overlap != 1 || len(plan.EventProjection) != 1 ||
-			plan.EventProjection[0].SourceKey == nil || *plan.EventProjection[0].SourceKey != keyB {
-			t.Fatalf("同文不同 key 必须作为新消息追加: %+v", plan)
-		}
-	})
-
-	t.Run("任一侧无键时保持旧账本兼容", func(t *testing.T) {
-		legacySnapshot := textSnapshot("same")
-		plan, err := reconcilePositional(ReconcileInput{
-			Key: testConversationKey, Ledger: ledger, Snapshot: legacySnapshot,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if plan.Decision != DecisionNoChange || plan.Overlap != 1 {
-			t.Fatalf("无键快照应以 direction+hash 兼容旧账本: %+v", plan)
-		}
-		legacyLedger := textLedger(t, "same")
-		plan, err = reconcilePositional(ReconcileInput{
-			Key: testConversationKey, Ledger: legacyLedger, Snapshot: []SnapshotMessage{old},
-		})
-		if err != nil || plan.Decision != DecisionNoChange || plan.Overlap != 1 {
-			t.Fatalf("无键账本应兼容有键快照: plan=%+v err=%v", plan, err)
-		}
-	})
 }
 
 func TestReconcileRejectsSourceKeySemanticConflict(t *testing.T) {
@@ -202,11 +52,11 @@ func TestReconcileRejectsSourceKeySemanticConflict(t *testing.T) {
 			conflicting := textSnapshot(test.text)[0]
 			conflicting.Direction = test.direction
 			conflicting.SourceKey = sourceKey
-			_, err := reconcilePositional(ReconcileInput{
+			_, err := Reconcile(ReconcileInput{
 				Key: testConversationKey, Ledger: ledger, Snapshot: []SnapshotMessage{conflicting},
 			})
 			if !errors.Is(err, ErrSourceKeySemanticConflict) {
-				t.Fatalf("同 key 语义冲突必须在对齐前响亮失败: %v", err)
+				t.Fatalf("同 key 语义冲突必须在判新前响亮失败: %v", err)
 			}
 			if strings.Contains(err.Error(), sourceKey) {
 				t.Fatal("错误不得泄露 sourceKey")
@@ -267,7 +117,7 @@ func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
 	ledger := textLedger(t, "old")
 	invalid := strings.Repeat("A", 64)
 	ledger[0].SourceKey = &invalid
-	_, err := reconcilePositional(ReconcileInput{
+	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Ledger: ledger, Snapshot: textSnapshot("old"),
 	})
 	if !errors.Is(err, ErrInvalidLedger) {
@@ -277,7 +127,7 @@ func TestReconcileRejectsInvalidPersistedSourceKey(t *testing.T) {
 
 func TestReconcilePlansUniqueTailClassificationCorrection(t *testing.T) {
 	ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-correction", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
 	})
@@ -306,7 +156,7 @@ func TestReconcileRejectsAmbiguousClassificationCorrectionCandidates(t *testing.
 	secondCorrected.SourceKey = strings.Repeat("d", 64)
 	snapshot := append(append([]SnapshotMessage(nil), aligned...), secondPrefix, secondCorrected)
 
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-correction-ambiguous", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
 	})
@@ -339,7 +189,7 @@ func TestReconcileRejectsMissingClassificationCorrectionTail(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ledger, snapshot := classificationCorrectionWithLeadingHistoryFixture(t)
-			plan, err := reconcilePositional(ReconcileInput{
+			plan, err := Reconcile(ReconcileInput{
 				Key: testConversationKey, RoundID: "round-correction-missing-tail", Ledger: ledger,
 				Snapshot: test.mutate(snapshot), ReachedTop: true,
 			})
@@ -356,7 +206,7 @@ func TestReconcileRejectsUniqueClassificationCorrectionCandidateBeforeSnapshotTa
 	newMessage.SourceKey = strings.Repeat("f", 64)
 	snapshot = append(snapshot, newMessage)
 
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-correction-not-tail", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
 	})
@@ -369,12 +219,14 @@ func TestReconcileClassificationCorrectionCandidateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*ReconcileInput)
+		want   error
 	}{
 		{name: "未读到顶部", mutate: func(in *ReconcileInput) { in.ReachedTop = false }},
 		{name: "缺少巡检轮", mutate: func(in *ReconcileInput) { in.RoundID = "" }},
+		// 修正行缺等值键:身份能力门槛先于修正判定,整读失败(方向相同,失败更早)。
 		{name: "修正行缺等值键", mutate: func(in *ReconcileInput) {
 			in.Snapshot[len(in.Snapshot)-1].SourceKey = ""
-		}},
+		}, want: ErrSnapshotIdentityMissing},
 		{name: "旧时间缺失", mutate: func(in *ReconcileInput) {
 			in.Ledger[len(in.Ledger)-1].TsApproxMs = nil
 		}},
@@ -404,9 +256,13 @@ func TestReconcileClassificationCorrectionCandidateFailsClosed(t *testing.T) {
 				Snapshot: snapshot, ReachedTop: true,
 			}
 			test.mutate(&input)
-			plan, err := reconcilePositional(input)
-			if !errors.Is(err, ErrUnsafeMessageClassificationCorrection) || plan != nil {
-				t.Fatalf("候选修正证据不全必须专用失败且不得进入 deep: plan=%+v err=%v", plan, err)
+			want := test.want
+			if want == nil {
+				want = ErrUnsafeMessageClassificationCorrection
+			}
+			plan, err := Reconcile(input)
+			if !errors.Is(err, want) || plan != nil {
+				t.Fatalf("候选修正证据不全必须响亮失败且不得进入 deep: plan=%+v err=%v", plan, err)
 			}
 		})
 	}
@@ -417,12 +273,12 @@ func TestReconcileDoesNotMisclassifyNormalMessageAfterSystemTail(t *testing.T) {
 	legacy := snapshot[len(snapshot)-1]
 	legacy.Direction = "system"
 	legacy.Kind = "system"
-	legacy.SourceKey = ""
+	legacy.SourceKey = strings.Repeat("9", 64)
 	newMessage := textSnapshot("这是一条正常的新入站消息")[0]
 	newMessage.SourceKey = strings.Repeat("e", 64)
 	snapshot[len(snapshot)-1] = legacy
 	snapshot = append(snapshot, newMessage)
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-normal-append", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
 	})
@@ -437,9 +293,10 @@ func TestReconcileDoesNotMisclassifyNormalMessageAfterSystemTail(t *testing.T) {
 
 func TestReconcileTreatsNonmatchingCorrectionSkeletonAsOrdinaryAlignment(t *testing.T) {
 	ledger, snapshot := classificationCorrectionFixture(t)
-	prefix := "不同的前缀"
-	snapshot[0] = textSnapshot(prefix)[0]
-	plan, err := reconcilePositional(ReconcileInput{
+	replacement := textSnapshot("不同的前缀")[0]
+	replacement.SourceKey = strings.Repeat("8", 64)
+	snapshot[0] = replacement
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-not-correction", Ledger: ledger,
 		Snapshot: snapshot, ReachedTop: true,
 	})
@@ -462,7 +319,7 @@ func TestReconcileStillRejectsDuplicateOrDescendingSequence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ledger := textLedger(t, "a", "b")
 			ledger[0].Seq, ledger[1].Seq = test.seqs[0], test.seqs[1]
-			_, err := reconcilePositional(ReconcileInput{
+			_, err := Reconcile(ReconcileInput{
 				Key: testConversationKey, Ledger: ledger, Snapshot: textSnapshot("b"),
 			})
 			if !errors.Is(err, ErrInvalidLedger) {
@@ -472,71 +329,8 @@ func TestReconcileStillRejectsDuplicateOrDescendingSequence(t *testing.T) {
 	}
 }
 
-func TestAuditedRebaselineBecomesIdempotent(t *testing.T) {
-	ledger := textLedger(t, "a", "b", "x", "y")
-	plan, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, Ledger: ledger, Snapshot: textSnapshot("x", "y"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Decision != DecisionNoChange || plan.Overlap != 2 || len(plan.Apply.NewMessages) != 0 {
-		t.Fatalf("新基线落库后相同快照必须幂等: %+v", plan)
-	}
-}
-
-func TestOlderContextAroundAnchorIsIgnoredWithoutLosingNewTail(t *testing.T) {
-	ledger := textLedger(t, "a", "b")
-	for _, deep := range []bool{false, true} {
-		plan, err := reconcilePositional(ReconcileInput{
-			Key: testConversationKey, RoundID: "round-anchor-contract", PlatformUserRef: "user-1",
-			Ledger: ledger, Snapshot: textSnapshot("older", "a", "b", "new"),
-			Deep: deep, AnchorMatched: true,
-		})
-		if err != nil {
-			t.Fatalf("deep=%t 的锚前上下文应由脑忽略: %v", deep, err)
-		}
-		if plan.Decision != DecisionAppend || plan.Overlap != 2 || len(plan.EventProjection) != 1 ||
-			plan.EventProjection[0].ContentHash != HashText("new") || plan.Rebaseline != nil {
-			t.Fatalf("deep=%t 的中部锚对齐错误: %+v", deep, plan)
-		}
-	}
-}
-
-func TestAnchorMatchedWithoutAnyLedgerSuffixFailsLoudly(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-anchor-mismatch", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "a", "b"), Snapshot: textSnapshot("older", "x", "y"),
-		Deep: true, AnchorMatched: true,
-	})
-	if !errors.Is(err, ErrAnchorContractMismatch) {
-		t.Fatalf("伪 anchorMatched 不得降级成重基线，得到 %v", err)
-	}
-}
-
-func TestAnchorMatchedRequiresTheWholeDerivedAnchorTail(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-partial-anchor", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "a", "b"), Snapshot: textSnapshot("a", "between", "b", "new"),
-		AnchorMatched: true,
-	})
-	if !errors.Is(err, ErrAnchorContractMismatch) {
-		t.Fatalf("只碰巧命中较短账本后缀不得伪装完整锚尾，得到 %v", err)
-	}
-}
-
-func TestAnchorMatchedEmptySnapshotFailsLoudly(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-empty-anchor", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "a"), Snapshot: nil, AnchorMatched: true,
-	})
-	if !errors.Is(err, ErrAnchorContractMismatch) {
-		t.Fatalf("空快照不得绕过 anchorMatched 完整证词校验，得到 %v", err)
-	}
-}
-
 func TestFirstAdoptionRejectsEmptySnapshot(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
+	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-empty-adoption", PlatformUserRef: "user-1",
 		Adopt: true, Snapshot: nil,
 	})
@@ -545,53 +339,8 @@ func TestFirstAdoptionRejectsEmptySnapshot(t *testing.T) {
 	}
 }
 
-func TestRepeatedFullAnchorWithOlderContextChoosesMinimumProjection(t *testing.T) {
-	plan, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-repeated-anchor", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "a"), Snapshot: textSnapshot("a", "x", "a", "new"),
-		AnchorMatched: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Decision != DecisionAppend || plan.Overlap != 1 || !plan.Ambiguous ||
-		len(plan.EventProjection) != 1 || plan.EventProjection[0].ContentHash != HashText("new") {
-		t.Fatalf("重复完整锚必须取最靠后位置并只投最短尾部: %+v", plan)
-	}
-}
-
-func TestContainedStaleSnapshotWinsOverRepeatedSuffixAppend(t *testing.T) {
-	plan, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-stale-repeat", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "你好", "收到", "你好"), Snapshot: textSnapshot("你好", "收到"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Decision != DecisionStaleSnapshot || len(plan.EventProjection) != 0 ||
-		plan.Apply == nil || len(plan.Apply.NewMessages) != 0 || !plan.Ambiguous ||
-		countAuditCategory(plan.Audits, "conversation_stale_append_ambiguous") != 1 {
-		t.Fatalf("完整旧窗口与短后缀冲突时必须保守判 stale 并审计: %+v", plan)
-	}
-}
-
-func TestRepeatedSnapshotAtCurrentTailRemainsNoChange(t *testing.T) {
-	plan, err := reconcilePositional(ReconcileInput{
-		Key: testConversationKey, RoundID: "round-tail-repeat", PlatformUserRef: "user-1",
-		Ledger: textLedger(t, "你好", "收到", "你好", "收到"), Snapshot: textSnapshot("你好", "收到"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if plan.Decision != DecisionNoChange || len(plan.EventProjection) != 0 ||
-		plan.Apply == nil || len(plan.Apply.NewMessages) != 0 || !plan.Ambiguous ||
-		countAuditCategory(plan.Audits, "conversation_tail_alignment_ambiguous") != 1 {
-		t.Fatalf("完整当前尾部即使也见于历史位置仍应正常 NoChange 并审计: %+v", plan)
-	}
-}
-
 func TestTrackedSnapshotEmptyContradictsLedger(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
+	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-empty-contradiction", PlatformUserRef: "user-1",
 		Ledger: textLedger(t, "你好", "收到"),
 	})
@@ -601,7 +350,7 @@ func TestTrackedSnapshotEmptyContradictsLedger(t *testing.T) {
 }
 
 func TestTrackedSnapshotEmptyDoesNotFireOnEmptyLedger(t *testing.T) {
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, RoundID: "round-both-empty", PlatformUserRef: "user-1",
 	})
 	if err != nil || plan.Decision != DecisionAppend || len(plan.Apply.NewMessages) != 0 {
@@ -610,7 +359,7 @@ func TestTrackedSnapshotEmptyDoesNotFireOnEmptyLedger(t *testing.T) {
 }
 
 func TestFirstAdoptionRequiresPlatformUserRef(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
+	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Adopt: true, Snapshot: textSnapshot("history"),
 	})
 	if !errors.Is(err, store.ErrPeerIdentityRequired) {
@@ -619,9 +368,9 @@ func TestFirstAdoptionRequiresPlatformUserRef(t *testing.T) {
 }
 
 func TestDeepRebaselineRequiresPatrolRound(t *testing.T) {
-	_, err := reconcilePositional(ReconcileInput{
+	_, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Ledger: textLedger(t, "old"),
-		Snapshot: textSnapshot("unrelated"), Deep: true,
+		Snapshot: keyedTextSnapshot("unrelated"), Deep: true,
 	})
 	if !errors.Is(err, store.ErrHistoricalBaselineNoRound) {
 		t.Fatalf("历史基线必须归属巡检轮,得到 %v", err)
@@ -629,19 +378,19 @@ func TestDeepRebaselineRequiresPatrolRound(t *testing.T) {
 }
 
 func TestCardTransitionUsesIdentityAndOnlyAdvancesOnce(t *testing.T) {
-	before := textSnapshot("before")[0]
-	after := textSnapshot("after")[0]
-	pending := cardSnapshot("pending")
-	accepted := cardSnapshot("accepted")
+	before := keyedTextSnapshot("before")[0]
+	after := keyedTextSnapshot("after")[0]
+	pending := cardSnapshotKeyed("pending", "invite")
+	accepted := cardSnapshotKeyed("accepted", "invite")
 
 	ledger := snapshotLedger(t, before, pending, after)
-	plan, err := reconcilePositional(ReconcileInput{
+	plan, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Ledger: ledger, Snapshot: []SnapshotMessage{accepted, after},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Overlap != 2 || len(plan.Apply.CardChanges) != 1 || len(plan.CardTransitions) != 1 {
+	if len(plan.Apply.CardChanges) != 1 || len(plan.CardTransitions) != 1 {
 		t.Fatalf("卡片身份应对齐而状态独立跃迁: %+v", plan)
 	}
 	change := plan.Apply.CardChanges[0]
@@ -650,7 +399,7 @@ func TestCardTransitionUsesIdentityAndOnlyAdvancesOnce(t *testing.T) {
 	}
 
 	ledger[1].CardState = "accepted" // 模拟上一计划已事务落库。
-	repeated, err := reconcilePositional(ReconcileInput{
+	repeated, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Ledger: ledger, Snapshot: []SnapshotMessage{accepted, after},
 	})
 	if err != nil {
@@ -660,7 +409,7 @@ func TestCardTransitionUsesIdentityAndOnlyAdvancesOnce(t *testing.T) {
 		t.Fatalf("相同 accepted 快照不得二次触发: %+v", repeated)
 	}
 
-	stale, err := reconcilePositional(ReconcileInput{
+	stale, err := Reconcile(ReconcileInput{
 		Key: testConversationKey, Ledger: ledger, Snapshot: []SnapshotMessage{pending, after},
 	})
 	if err != nil {
@@ -697,9 +446,9 @@ func TestRepeatedCardReconciliationDoesNotDuplicateTransitionFact(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	initial, err := reconcilePositional(ReconcileInput{
+	initial, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: roundID, PlatformUserRef: "user-card-reconcile", Adopt: true,
-		Snapshot: []SnapshotMessage{cardSnapshot("pending")},
+		Snapshot: []SnapshotMessage{cardSnapshotKeyed("pending", "card-fact")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -711,9 +460,9 @@ func TestRepeatedCardReconciliationDoesNotDuplicateTransitionFact(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := reconcilePositional(ReconcileInput{
+	first, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: roundID, Ledger: ledger,
-		Snapshot: []SnapshotMessage{cardSnapshot("accepted")},
+		Snapshot: []SnapshotMessage{cardSnapshotKeyed("accepted", "card-fact")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -730,9 +479,9 @@ func TestRepeatedCardReconciliationDoesNotDuplicateTransitionFact(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	repeated, err := reconcilePositional(ReconcileInput{
+	repeated, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: roundID, Ledger: ledger,
-		Snapshot: []SnapshotMessage{cardSnapshot("accepted")},
+		Snapshot: []SnapshotMessage{cardSnapshotKeyed("accepted", "card-fact")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -772,9 +521,9 @@ func TestPlanDrivesStoreAndOptimisticConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	initial, err := reconcilePositional(ReconcileInput{
+	initial, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-1", PlatformUserRef: "user-1", Adopt: true,
-		Snapshot: textSnapshot("a"),
+		Snapshot: keyedTextSnapshot("a"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -787,14 +536,14 @@ func TestPlanDrivesStoreAndOptimisticConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := reconcilePositional(ReconcileInput{
-		Key: key, RoundID: "round-1", Ledger: ledger, Snapshot: textSnapshot("a", "b"),
+	first, err := Reconcile(ReconcileInput{
+		Key: key, RoundID: "round-1", Ledger: ledger, Snapshot: keyedTextSnapshot("a", "b"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleConcurrent, err := reconcilePositional(ReconcileInput{
-		Key: key, RoundID: "round-1", Ledger: ledger, Snapshot: textSnapshot("a", "c"),
+	staleConcurrent, err := Reconcile(ReconcileInput{
+		Key: key, RoundID: "round-1", Ledger: ledger, Snapshot: keyedTextSnapshot("a", "c"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -836,9 +585,9 @@ func TestRebaselineAdapterKeepsProjectionAndDBCountConsistent(t *testing.T) {
 	if _, err := s.TrackConversation(key, "user", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := reconcilePositional(ReconcileInput{
+	initial, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-baseline", PlatformUserRef: "user-1", Adopt: true,
-		Snapshot: textSnapshot("old-context"),
+		Snapshot: keyedTextSnapshot("old-context"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -848,15 +597,15 @@ func TestRebaselineAdapterKeepsProjectionAndDBCountConsistent(t *testing.T) {
 	}
 	ledger, _ := s.MessagesForConversation(key)
 
-	baseline, err := reconcilePositional(ReconcileInput{
+	baseline, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-baseline", Ledger: ledger,
-		Snapshot: textSnapshot("deep-x", "deep-y"), Deep: true, ReachedTop: true,
+		Snapshot: keyedTextSnapshot("deep-x", "deep-y"), Deep: true, ReachedTop: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if baseline.Decision != DecisionAuditedRebaseline || baseline.Apply != nil || baseline.Rebaseline == nil || len(baseline.EventProjection) != 0 {
-		t.Fatalf("deep 零重叠必须走专用空投影计划: %+v", baseline)
+		t.Fatalf("deep 零关联必须走专用空投影计划: %+v", baseline)
 	}
 	if _, err := ApplyPlan(s, baseline); err != nil {
 		t.Fatalf("历史基线 adapter 落库: %v", err)
@@ -883,9 +632,9 @@ func TestRebaselineAdapterKeepsProjectionAndDBCountConsistent(t *testing.T) {
 	}
 
 	// 基线后的真正新消息恢复普通投影/计数。
-	next, err := reconcilePositional(ReconcileInput{
+	next, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-baseline", Ledger: ledger,
-		Snapshot: textSnapshot("deep-x", "deep-y", "real-new"),
+		Snapshot: keyedTextSnapshot("deep-x", "deep-y", "real-new"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -900,16 +649,16 @@ func TestRebaselineAdapterKeepsProjectionAndDBCountConsistent(t *testing.T) {
 
 	// 过时基线计划被版本闸拒绝时,消息、审计和计数都不得部分落库。
 	ledger, _ = s.MessagesForConversation(key)
-	staleBaseline, err := reconcilePositional(ReconcileInput{
+	staleBaseline, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-baseline", Ledger: ledger,
-		Snapshot: textSnapshot("unrelated-p", "unrelated-q"), Deep: true,
+		Snapshot: keyedTextSnapshot("unrelated-p", "unrelated-q"), Deep: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	competitor, err := reconcilePositional(ReconcileInput{
+	competitor, err := Reconcile(ReconcileInput{
 		Key: key, RoundID: "round-baseline", Ledger: ledger,
-		Snapshot: textSnapshot("real-new", "competitor"),
+		Snapshot: keyedTextSnapshot("real-new", "competitor"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -933,197 +682,6 @@ func TestRebaselineAdapterKeepsProjectionAndDBCountConsistent(t *testing.T) {
 			countAuditCategory(beforeAudits, "conversation_zero_overlap_rebaseline"),
 			countAuditCategory(afterAudits, "conversation_zero_overlap_rebaseline"))
 	}
-}
-
-// TestReconcileRepeatedTextBoundarySoak exercises the production reconciler
-// against many bounded windows cut from conversations whose identities repeat
-// heavily. The fixed seed makes every failure exactly reproducible.
-func TestReconcileRepeatedTextBoundarySoak(t *testing.T) {
-	const (
-		seed      int64 = 0x5eedc0de
-		caseCount       = 20_000
-	)
-
-	rng := rand.New(rand.NewSource(seed))
-	decisionCounts := make(map[Decision]int)
-	var generatedMessages, primaryRepeats, ambiguous, ambiguityAudits, replayChecks, emptyContradictions int
-
-	for caseN := 0; caseN < caseCount; caseN++ {
-		ledgerLen := 4 + rng.Intn(17)
-		generatedAppend := rng.Intn(7)
-		truth := make([]SnapshotMessage, ledgerLen+generatedAppend)
-		for i := range truth {
-			truth[i] = repeatedSoakMessage(rng)
-			if truth[i].Text != nil && *truth[i].Text == "你好" {
-				primaryRepeats++
-			}
-		}
-		generatedMessages += len(truth)
-		ledger := snapshotLedger(t, truth[:ledgerLen]...)
-
-		var snapshot []SnapshotMessage
-		var anchorMatched, deep bool
-		observableAppend := 0
-		switch caseN % 23 {
-		case 0:
-			// 账本非空时的整窗空读不再是 no-change,而是确定性的
-			// ErrTrackedSnapshotEmpty 矛盾(2026-07-28);soak 钉住该错误路径。
-			snapshot = nil
-		case 1, 2:
-			// A deterministic zero-overlap read exercises both the shallow
-			// needDeep gate and the audited deep rebaseline path.
-			foreign := fmt.Sprintf("zero-overlap-%d", caseN)
-			snapshot = []SnapshotMessage{{Direction: "system", Kind: "text", Text: &foreign, Origin: "external"}}
-			deep = caseN%23 == 2
-		default:
-			start, end := soakWindow(rng, ledgerLen, len(truth))
-			snapshot = append([]SnapshotMessage(nil), truth[start:end]...)
-			if end > ledgerLen {
-				newStart := start
-				if newStart < ledgerLen {
-					newStart = ledgerLen
-				}
-				observableAppend = end - newStart
-			}
-			deep = rng.Intn(4) == 0
-			anchorStart := ledgerLen - 5
-			if anchorStart < 0 {
-				anchorStart = 0
-			}
-			// Set the strong hand claim only when this concrete window really
-			// contains the complete anchor tail derived from the ledger.
-			anchorMatched = start <= anchorStart && end >= ledgerLen && rng.Intn(2) == 0
-		}
-
-		input := ReconcileInput{
-			Key: testConversationKey, RoundID: "round-soak", PlatformUserRef: "user-soak",
-			Ledger: ledger, Snapshot: snapshot, Deep: deep, ReachedTop: deep,
-			AnchorMatched: anchorMatched,
-		}
-		plan, err := reconcilePositional(input)
-		if len(snapshot) == 0 {
-			if !errors.Is(err, ErrTrackedSnapshotEmpty) {
-				t.Fatalf("seed=%d case=%d 账本非空的空快照必须判矛盾,得到 %v", seed, caseN, err)
-			}
-			emptyContradictions++
-			continue
-		}
-		if err != nil {
-			t.Fatalf("seed=%d case=%d Reconcile: %v", seed, caseN, err)
-		}
-		decisionCounts[plan.Decision]++
-
-		projected := len(plan.EventProjection)
-		if projected > observableAppend {
-			t.Fatalf("seed=%d case=%d decision=%s projected=%d exceeds real append=%d ledger=%d snapshot=%d",
-				seed, caseN, plan.Decision, projected, observableAppend, len(ledger), len(snapshot))
-		}
-		switch plan.Decision {
-		case DecisionNeedDeep, DecisionStaleSnapshot, DecisionNoChange:
-			if projected != 0 {
-				t.Fatalf("seed=%d case=%d decision=%s must not project, got=%d", seed, caseN, plan.Decision, projected)
-			}
-		case DecisionAppend:
-			if plan.Apply == nil || len(plan.Apply.NewMessages) != projected {
-				t.Fatalf("seed=%d case=%d append plan/projection diverged: %+v", seed, caseN, plan)
-			}
-			// Model the successful append using the production plan, then feed
-			// the exact same observation back through production Reconcile.
-			// No already-projected suffix may be projected a second time.
-			advanced := appendSoakDrafts(ledger, plan.Apply.NewMessages)
-			replayInput := input
-			replayInput.Ledger = advanced
-			replayInput.AnchorMatched = false // derive a fresh claim on the next command
-			replay, replayErr := reconcilePositional(replayInput)
-			if replayErr != nil {
-				t.Fatalf("seed=%d case=%d replay Reconcile: %v", seed, caseN, replayErr)
-			}
-			if len(replay.EventProjection) != 0 {
-				t.Fatalf("seed=%d case=%d same snapshot projected twice: first=%d replay=%d replayDecision=%s",
-					seed, caseN, projected, len(replay.EventProjection), replay.Decision)
-			}
-			replayChecks++
-		}
-
-		if plan.Ambiguous {
-			ambiguous++
-			hasAmbiguityAudit := false
-			for _, entry := range plan.Audits {
-				if strings.Contains(entry.Category, "ambiguous") {
-					hasAmbiguityAudit = true
-					break
-				}
-			}
-			if !hasAmbiguityAudit {
-				t.Fatalf("seed=%d case=%d ambiguous decision has no ambiguity audit: %+v", seed, caseN, plan)
-			}
-			ambiguityAudits++
-		}
-	}
-
-	if generatedMessages < 20_000 || primaryRepeats*2 < generatedMessages || ambiguous == 0 || replayChecks == 0 ||
-		emptyContradictions == 0 {
-		t.Fatalf("soak coverage too weak: messages=%d primaryRepeats=%d ambiguous=%d replayChecks=%d emptyContradictions=%d",
-			generatedMessages, primaryRepeats, ambiguous, replayChecks, emptyContradictions)
-	}
-	t.Logf("seed=%d cases=%d messages=%d primaryRepeats=%d append=%d noChange=%d stale=%d needDeep=%d rebaseline=%d ambiguous=%d ambiguityAudits=%d replayChecks=%d",
-		seed, caseCount, generatedMessages, primaryRepeats,
-		decisionCounts[DecisionAppend], decisionCounts[DecisionNoChange], decisionCounts[DecisionStaleSnapshot],
-		decisionCounts[DecisionNeedDeep], decisionCounts[DecisionAuditedRebaseline], ambiguous, ambiguityAudits, replayChecks)
-}
-
-func repeatedSoakMessage(rng *rand.Rand) SnapshotMessage {
-	roll := rng.Intn(100)
-	text, direction := "你好", "in"
-	switch {
-	case roll < 62:
-	case roll < 76:
-		direction = "out"
-	case roll < 87:
-		text = "收到"
-	case roll < 95:
-		text = "好的"
-	default:
-		text = "谢谢"
-	}
-	return SnapshotMessage{Direction: direction, Kind: "text", Text: &text, Origin: "external"}
-}
-
-func soakWindow(rng *rand.Rand, ledgerLen, truthLen int) (int, int) {
-	switch rng.Intn(4) {
-	case 0:
-		// Current suffix, with enough old context to exercise the boundary.
-		width := 1 + rng.Intn(min(ledgerLen, 10))
-		return ledgerLen - width, truthLen
-	case 1:
-		// Delayed window wholly contained in the durable ledger.
-		end := 1 + rng.Intn(ledgerLen)
-		return rng.Intn(end), end
-	case 2:
-		end := 1 + rng.Intn(truthLen)
-		return rng.Intn(end), end
-	default:
-		if truthLen > ledgerLen {
-			// A window whose observed portion starts after the old boundary.
-			return ledgerLen + rng.Intn(truthLen-ledgerLen), truthLen
-		}
-		return ledgerLen - 1, ledgerLen
-	}
-}
-
-func appendSoakDrafts(ledger []store.Message, drafts []store.MessageDraft) []store.Message {
-	out := append([]store.Message(nil), ledger...)
-	for _, draft := range drafts {
-		out = append(out, store.Message{
-			Platform: testConversationKey.Platform, AccountRef: testConversationKey.AccountRef,
-			ConversationRef: testConversationKey.ConversationRef, Seq: int64(len(out) + 1),
-			Direction: draft.Direction, Kind: draft.Kind, ContentHash: draft.ContentHash,
-			Text: draft.Text, BlobRef: draft.BlobRef, CardType: draft.CardType,
-			CardState: draft.CardState, TsApproxMs: draft.TsApproxMs, Origin: draft.Origin,
-			SourceKey: draft.SourceKey,
-		})
-	}
-	return out
 }
 
 func countAuditCategory(entries []store.AuditEntry, category string) int {
@@ -1153,10 +711,21 @@ func textSnapshot(values ...string) []SnapshotMessage {
 	return out
 }
 
-func cardSnapshot(state string) SnapshotMessage {
+// keyedTextSnapshot 按正文派生确定性服务端身份(同文即同 key),满足身份
+// 能力门槛;需要同文异 key 的场景请显式设 SourceKey。
+func keyedTextSnapshot(values ...string) []SnapshotMessage {
+	out := textSnapshot(values...)
+	for i := range out {
+		out[i].SourceKey = HashText("reconcile-test|" + values[i])
+	}
+	return out
+}
+
+func cardSnapshotKeyed(state, keySeed string) SnapshotMessage {
 	return SnapshotMessage{
 		Direction: "out", Kind: "card", CardType: "interviewInvite",
 		CardIdentity: "2026-07-20 15:00", CardState: state, Origin: "external",
+		SourceKey: HashText("reconcile-test-card|" + keySeed),
 	}
 }
 
