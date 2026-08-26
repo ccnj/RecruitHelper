@@ -2526,8 +2526,8 @@ test('candidate.readResume MAIN 关闭后仍可见时响亮失败', async () => 
     assert.equal(fixture.state.clicks, 1)
     assert.equal(fixture.state.closeClicks, 1)
     assert.equal(fixture.state.modals.length, 1)
-    assert.equal(fixture.state.now - fixture.state.closedAt, 10_000,
-      '关闭后最多条件等待 10 秒确认消失')
+    assert.equal(fixture.state.now - fixture.state.closedAt, 20_000,
+      '关闭后最多条件等待 20 秒确认消失')
   } finally {
     fixture.restore()
   }
@@ -10146,8 +10146,8 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
     )
     assert.equal(commitCalls - commitsBefore, 1,
       '阴性观察后不得补第二次接受动作')
-    assert.equal(outcomeReads - readsBefore, 40,
-      '接受动作后置观察总预算固定为 40×250ms，不扩大到第二次 click')
+    assert.equal(outcomeReads - readsBefore, 80,
+      '接受动作后置观察总预算固定为 80×250ms，不扩大到第二次 click')
   } finally {
     globalThis.chrome = originalChrome
     globalThis.setTimeout = originalSetTimeout
@@ -10267,8 +10267,9 @@ test('页面列表目标在 readThread 前离开窗口时只报无副作用 TARG
       ),
       (error) => error instanceof ZhilianPlatformError &&
         error.code === ErrorCode.ElementUnresolved &&
-        error.retryable === 'manualOnly',
-      '只有精确 target_not_found 可以降级，列表绑定异常仍须响亮停止',
+        error.retryable === 'afterRecovery' &&
+        error.message.includes('list_binding_unresolved'),
+      '列表绑定异常按渲染暂态处理:本轮跳过下轮重试且原始信息随行(2026-08-26 甲方裁决),点击照旧为零',
     )
     assert.equal(clickCalls, 0)
   } finally {
@@ -11599,7 +11600,7 @@ test('readThread 切到目标后 history 失败不二次 barrier、不重切也�
   assert.deepEqual(harness.state.events, ['find', 'barrier', 'click', 'read'])
 })
 
-test('readThread 已点击但目标 route 未就绪时如实返回 possible 并禁止自动重派', async () => {
+test('readThread 已点击但目标 route 未就绪时如实返回 possible、按暂态下轮重试并留最后路由观察', async () => {
   const originalSetTimeout = globalThis.setTimeout
   globalThis.setTimeout = (callback) => {
     callback()
@@ -11615,8 +11616,9 @@ test('readThread 已点击但目标 route 未就绪时如实返回 possible 并�
       }, harness.context, harness.fingerprint),
       (error) => error instanceof ZhilianPlatformError &&
         error.code === ErrorCode.CtxLostDuringExec &&
-        error.retryable === Retryable.ManualOnly &&
-        error.sideEffect === 'possible',
+        error.retryable === Retryable.AfterRecovery &&
+        error.sideEffect === 'possible' &&
+        error.message.includes('last='),
     )
   } finally {
     globalThis.setTimeout = originalSetTimeout
@@ -12106,6 +12108,104 @@ test('IM 列表筛选 evaluator 只点差异并用标准 checked 回读', async 
       '已经是全部职位、只需切换未读时，首个 checkbox click 前同样必须等待')
   } finally {
     Object.assign(globalThis, original)
+  }
+})
+
+test('列表筛选确认超时带最后一轮读值 detail(错误收敛必须留痕,2026-08-26)', async () => {
+  const original = {
+    location: globalThis.location, document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle, setTimeout: globalThis.setTimeout,
+  }
+  const realDateNow = Date.now
+  const label = { textContent: '全部职位', getClientRects() { return [{}] } }
+  const input = {
+    type: 'checkbox', disabled: false, checked: false,
+    click() { /* 卡死形态:点击不翻转 */ },
+  }
+  const wrapper = {
+    textContent: '未读',
+    getClientRects() { return [{}] },
+    querySelectorAll(selector) { return selector === 'input[type="checkbox"]' ? [input] : [] },
+  }
+  const trigger = { getClientRects() { return [{}] }, click() {} }
+  try {
+    globalThis.location = { href: 'https://rd6.zhaopin.com/app/im' }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    // 虚拟时钟:每次 setTimeout 立即推进等长虚拟时间,20 秒轮询瞬时走完。
+    let clock = realDateNow()
+    Date.now = () => clock
+    globalThis.setTimeout = (callback, delay) => {
+      clock += Math.max(1, delay ?? 0)
+      queueMicrotask(callback)
+      return 1
+    }
+    globalThis.document = {
+      querySelectorAll(selector) {
+        if (selector === '.app-job-selector') return [trigger]
+        if (selector === '.app-job-selector .im-job-filter__label') return [label]
+        if (selector === '.side-panel-header__checkbox') return [wrapper]
+        return []
+      },
+    }
+    const result = await zhilianTestHooks.mainEnsureChatListFilter(true, true)
+    assert.deepEqual(result, {
+      status: 'failed',
+      reason: 'unread_selection_unconfirmed',
+      detail: 'last=ready allJobs=true unread=false want=true',
+    }, '超时收场必须带最后一轮各判据的实际读值')
+  } finally {
+    Date.now = realDateNow
+    Object.assign(globalThis, original)
+  }
+})
+
+test('readList 筛选失败降为 afterRecovery 且 detail 进入错误文案(2026-08-26 甲方裁决)', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '6'.repeat(64)
+  let filterCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 9, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }] },
+      async get() { return { id: 9, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainEnsureChatListFilter') {
+          filterCalls += 1
+          if (filterCalls === 1) return [{ result: { status: 'needs_action' } }]
+          return [{ result: {
+            status: 'failed', reason: 'unread_selection_unconfirmed',
+            detail: 'last=ready allJobs=true unread=false want=true',
+          } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'list-demote', deadlineMs: Date.now() + 10_000, commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, beforeSideEffect() {},
+  }
+  try {
+    await assert.rejects(
+      readZhilianList({ filter: 'unread', move: 'reset' }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === 'ELEMENT_UNRESOLVED' &&
+        error.retryable === 'afterRecovery' &&
+        error.message.includes('unread_selection_unconfirmed') &&
+        error.message.includes('last=ready allJobs=true unread=false want=true'),
+      '筛选确认失败必须是 afterRecovery(本轮失败下轮重试,不停账号)且留痕随行',
+    )
+    assert.equal(filterCalls, 2, '预检 needs_action 后才进入 apply 路径')
+  } finally {
+    globalThis.chrome = originalChrome
   }
 })
 

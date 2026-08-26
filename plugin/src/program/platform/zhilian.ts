@@ -1200,7 +1200,7 @@ async function mainReadCurrentResume(
       if (closeButtons.length !== 1) return failed('close_unavailable')
       closeButtons[0].click()
 
-      const closeUntil = Date.now() + 10_000
+      const closeUntil = Date.now() + 20_000
       while (true) {
         opened = visibleAll(document, '.new-shortcut-resume__modal')
         if (opened.length === 0) return null
@@ -1250,8 +1250,8 @@ async function mainReadCurrentResume(
     if (currentEntries.length !== 1 || currentEntries[0] !== entries[0]) return failed('target_changed')
     currentEntries[0].click()
     let modals: HTMLElement[] = []
-    // 打开等待与条件等待规格上限对齐(10 秒;原 6 秒),同 capture 侧。
-    const waitUntil = Date.now() + 10_000
+    // 打开等待与条件等待规格上限对齐(20 秒;2026-08-26 上限放宽,原 10 秒)。
+    const waitUntil = Date.now() + 20_000
     while (Date.now() < waitUntil) {
       modals = visibleAll(document, '.new-shortcut-resume__modal')
       if (modals.length !== 0) break
@@ -1414,7 +1414,7 @@ async function mainSelectSourcingPosition(
     action()
     nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
   }
-  const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+  const waitFor = async <T>(read: () => T | null, timeoutMs = 20_000): Promise<T | null> => {
     const deadline = Date.now() + timeoutMs
     while (true) {
       const value = read()
@@ -1555,7 +1555,7 @@ async function mainSelectSourcingPosition(
     if (closeFailure) return failed(closeFailure)
     ownsDrawer = false
 
-    const settleUntil = Date.now() + 10_000
+    const settleUntil = Date.now() + 20_000
     let previousSignature = ''
     let stableRounds = 0
     let latestFailure: MainSelectSourcingPositionFailureReason = 'page_unstable'
@@ -1674,7 +1674,7 @@ async function mainApplySourcingFilters(
     action()
     nextInteractionNotBefore = Date.now() + randomInteractionGapMs()
   }
-  const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+  const waitFor = async <T>(read: () => T | null, timeoutMs = 20_000): Promise<T | null> => {
     const deadline = Date.now() + timeoutMs
     while (true) {
       const value = read()
@@ -1991,7 +1991,7 @@ async function mainApplySourcingFilters(
     }
   }
   const stableList = async (): Promise<ListRead> => {
-    const deadline = Date.now() + 10_000
+    const deadline = Date.now() + 20_000
     let previous: ListRead | null = null
     while (true) {
       const current = listSnapshot()
@@ -2469,7 +2469,7 @@ async function mainReadSourcingWindow(
     let latestSignature = 'status' in latest ? '' : signature(latest)
     let stableRounds = 0
     let settled = false
-    const settleUntil = Date.now() + 10_000
+    const settleUntil = Date.now() + 20_000
     while (Date.now() < settleUntil) {
       if (!('status' in latest)) {
         const movementObserved = latestSignature !== initialSignature ||
@@ -2710,7 +2710,7 @@ async function mainReadSourcingResume(
     const closeButtons = visibleAll(opened[0], '.new-shortcut-resume__close')
     if (closeButtons.length !== 1) return failed('close_unavailable')
     await clickInteraction(closeButtons[0])
-    const closeUntil = Date.now() + 10_000
+    const closeUntil = Date.now() + 20_000
     while (Date.now() < closeUntil) {
       opened = visibleAll(document, '.new-shortcut-resume__modal')
       const latestRoute = route()
@@ -2763,7 +2763,7 @@ async function mainReadSourcingResume(
         const closeButtons = visibleAll(modals[0], '.new-shortcut-resume__close')
         if (closeButtons.length !== 1) return failed('close_unavailable')
         await clickInteraction(closeButtons[0], initiallyCloseNotBefore)
-        const closeUntil = Date.now() + 10_000
+        const closeUntil = Date.now() + 20_000
         while (Date.now() < closeUntil) {
           modals = visibleAll(document, '.new-shortcut-resume__modal')
           const latestRoute = route()
@@ -2797,7 +2797,7 @@ async function mainReadSourcingResume(
       const entries = visibleAll(target.item, '.resume-item__content')
       if (entries.length !== 1) return failed('entry_cardinality')
       await clickInteraction(entries[0])
-      const openUntil = Date.now() + 10_000
+      const openUntil = Date.now() + 20_000
       while (Date.now() < openUntil) {
         modals = visibleAll(document, '.new-shortcut-resume__modal')
         if (modals.length !== 0) {
@@ -2922,7 +2922,7 @@ async function mainReadSourcingResume(
       ...data,
       observedAt: 0,
     })
-    const settleUntil = Date.now() + 10_000
+    const settleUntil = Date.now() + 20_000
     let evaluated: MainSourcingResumeResult = failed('unexpected')
     let readyProjection = ''
     while (true) {
@@ -4268,10 +4268,10 @@ export async function sendZhilianGreeting(
           await ctx.progress('已确认同一候选人关系状态变为已建立', 100)
           if (commitModalKind === 'kmGreet' && !successModalSwept) {
             // 成功确认可能先于成功弹窗的处理甚至出现。条件轮询等它出现,出现
-            // 即清场;上限 10 秒,等不到记一条 handLog 照常成功收场——它是
+            // 即清场;上限 20 秒,等不到记一条 handLog 照常成功收场——它是
             // 清场不是判据,弹窗残留由浮层取证与下一次发送的清场趟兜底。
             let seen = false
-            for (let waitRound = 0; waitRound < 40; waitRound += 1) {
+            for (let waitRound = 0; waitRound < 80; waitRound += 1) {
               try {
                 const probe = await runMain(tabId, mainReadGreetingScene, [sceneBaseline])
                 if (validGreetingSceneResult(probe) && probe.status === 'ready' &&
@@ -4289,7 +4289,7 @@ export async function sendZhilianGreeting(
               reportHandLog(
                 'warn',
                 'greetingSuccessModalMissing',
-                '新版招呼发送成功,但 10 秒内未观察到「招呼语已发送」成功弹窗',
+                '新版招呼发送成功,但 20 秒内未观察到「招呼语已发送」成功弹窗',
               )
             }
           }
@@ -4474,7 +4474,7 @@ export async function ensureZhilianIM(
 
 // 只使用当前真机已经确认的公开控件：职位触发器的可见标题与标准 checkbox.checked。
 // apply=false 是零交互预检；只有明确返回 needs_action 后，extension 才穿过取消闸并
-// 以 apply=true 执行最小可逆交互。每次 click 后都先满足 1s+抖动，再做最长 10s 条件等待。
+// 以 apply=true 执行最小可逆交互。每次 click 后都先满足 1s+抖动，再做最长 20s 条件等待。
 async function mainEnsureChatListFilter(
   unread: boolean,
   apply: boolean,
@@ -4538,7 +4538,7 @@ async function mainEnsureChatListFilter(
     const waitInteraction = async (): Promise<void> => {
       await new Promise((resolve) => setTimeout(resolve, 1_000 + Math.floor(Math.random() * 401)))
     }
-    const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
+    const waitFor = async <T>(read: () => T | null, timeoutMs = 20_000): Promise<T | null> => {
       const deadline = Date.now() + timeoutMs
       while (Date.now() < deadline) {
         const value = read()
@@ -4548,6 +4548,13 @@ async function mainEnsureChatListFilter(
       return read()
     }
 
+    // 错误收敛必须留痕(2026-08-26 甲方裁决):轮询超时收场时带出最后一轮
+    // 各判据的实际读值,否则"开关没翻/控件缺席/标签漂移/路由跳走"四种子因
+    // 在错误码上不可区分,真机排障无据。
+    const describeState = (state: ReturnType<typeof readState>): string =>
+      state.status === 'failed'
+        ? `last=failed:${state.reason}`
+        : `last=ready allJobs=${state.allJobs} unread=${state.unread} want=${unread}`
     const initial = readState()
     if (initial.status === 'failed') return failed(initial.reason)
     if (initial.allJobs && initial.unread === unread) return { status: 'ready', changed: false }
@@ -4562,21 +4569,27 @@ async function mainEnsureChatListFilter(
       changed = true
       await waitInteraction()
       let ambiguousOption = false
+      let lastOptionCount = -1
       const option = await waitFor(() => {
         if (!routeReady()) return null
         const matches = Array.from(document.querySelectorAll<HTMLElement>(
           '.app-job-selector-item, .km-select-option, .km-option, [role="option"]',
         )).filter((node) => visible(node) && clean(node.textContent) === '全部职位')
+        lastOptionCount = matches.length
         if (matches.length > 1) ambiguousOption = true
         return matches.length === 1 ? matches[0] : null
       })
       if (!routeReady()) return failed('route_changed')
-      if (!option || ambiguousOption) return failed('job_option_cardinality')
+      if (!option || ambiguousOption) return failed('job_option_cardinality', `last=matches:${lastOptionCount}`)
       option.click()
       await waitInteraction()
-      const selected = await waitFor(() => selectedTitle() === '全部职位' ? true : null)
+      let lastTitle: string | null = null
+      const selected = await waitFor(() => {
+        lastTitle = selectedTitle()
+        return lastTitle === '全部职位' ? true : null
+      })
       if (!routeReady()) return failed('route_changed')
-      if (selected !== true) return failed('job_selection_unconfirmed')
+      if (selected !== true) return failed('job_selection_unconfirmed', `last=title:${lastTitle ?? '(unreadable)'}`)
     }
 
     const beforeUnread = readState()
@@ -4585,20 +4598,22 @@ async function mainEnsureChatListFilter(
       beforeUnread.input.click()
       changed = true
       await waitInteraction()
+      let lastConfirmProbe = ''
       const confirmed = await waitFor(() => {
         const latest = readState()
+        lastConfirmProbe = describeState(latest)
         return latest.status === 'ready' && latest.allJobs && latest.unread === unread
           ? true
           : null
       })
       if (!routeReady()) return failed('route_changed')
-      if (confirmed !== true) return failed('unread_selection_unconfirmed')
+      if (confirmed !== true) return failed('unread_selection_unconfirmed', lastConfirmProbe)
     }
 
     const finalState = readState()
     if (finalState.status === 'failed') return failed(finalState.reason)
-    if (!finalState.allJobs) return failed('job_selection_unconfirmed')
-    if (finalState.unread !== unread) return failed('unread_selection_unconfirmed')
+    if (!finalState.allJobs) return failed('job_selection_unconfirmed', describeState(finalState))
+    if (finalState.unread !== unread) return failed('unread_selection_unconfirmed', describeState(finalState))
     return { status: 'ready', changed }
   } catch (error) {
     return failed('unexpected', String(error))
@@ -4624,7 +4639,7 @@ async function mainReadListDOMWindow(
   // 外层 .im-session-list 全程都在,imListVisible 探针因此看不见这段空窗,拦不住这里;
   // 固定等待又只能靠猜,所以按条件轮询等它回来:命中即继续,超时才判缺失。
   const resolveVirtual = async (): Promise<HTMLElement | null> => {
-    const deadline = Date.now() + 10_000
+    const deadline = Date.now() + 20_000
     for (;;) {
       const found = document.querySelector<HTMLElement>('.im-session-list .im-session-list__virtual')
       if (found) return found
@@ -4872,8 +4887,8 @@ async function mainReadListDOMWindow(
   let latest = collect()
   let stableRounds = 0
   diagnosticStage = 'collect_stability'
-  // 条件满足即走；持续渲染时最多等待约 10 秒，不把短暂虚拟列表抖动当失败。
-  for (let attempt = 0; attempt < 40 && stableRounds < 2; attempt += 1) {
+  // 条件满足即走；持续渲染时最多等待约 20 秒，不把短暂虚拟列表抖动当失败。
+  for (let attempt = 0; attempt < 80 && stableRounds < 2; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 250))
     const next = collect()
     stableRounds = projection(next) === projection(latest) ? stableRounds + 1 : 0
@@ -5147,8 +5162,8 @@ export async function readZhilianWechatSetting(
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
-  // 条件轮询:呈现可判定形态即返回,最长约 10 秒,不做固定等待。
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // 条件轮询:呈现可判定形态即返回,最长约 20 秒,不做固定等待。
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tabId)
     if (latest.status === 'complete' && isZhilianPersonalURL(latest.url)) {
@@ -5244,18 +5259,21 @@ export async function openZhilianConversation(
     try {
       currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
     } catch (error) {
+      // 2026-08-26 甲方裁决:点击前的列表渲染暂态不构成"需要人",降为
+      // afterRecovery——本轮跳过该候选人,下轮重试,不再打入隔离区。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
         `当前未读列表无法建立 fresh 可见窗口：${asError(error).message}`,
-        'manualOnly',
+        'afterRecovery',
       )
     }
     noteSkippedListRows('未读 fresh 窗口', currentWindow)
     if (currentWindow.unstable) {
+      // 降级与留痕同上:2026-08-26 甲方裁决。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '当前未读列表尚未稳定',
-        'manualOnly',
+        `当前未读列表尚未稳定（rows=${currentWindow.sessions.length}）`,
+        'afterRecovery',
       )
     }
     const targetMatches = currentWindow.sessions
@@ -5287,7 +5305,7 @@ export async function openZhilianConversation(
   }
 
   let positiveRounds = 0
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tab.id)
     let routeMatches = false
@@ -6123,8 +6141,8 @@ async function waitForZhilianJobListReady(
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
-  // 条件轮询:就绪即继续,最长约 10 秒,不做固定等待。
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // 条件轮询:就绪即继续,最长约 20 秒,不做固定等待。
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tab.id)
     if (latest.status === 'complete' && isZhilianJobListURL(latest.url)) {
@@ -6167,7 +6185,7 @@ async function readZhilianJobSection(
     const reason = (clicked as { reason?: string } | null)?.reason ?? 'section_click_failed'
     throwJobSectionFailure(reason)
   }
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const result = await runMain(tabId, mainReadZhilianJobSection, [])
     if (!validJobSectionResult(result)) {
@@ -7778,7 +7796,7 @@ async function pollKeywordSnapshot(
   ctx: PrimitiveContext,
   progress?: DraftProgress,
 ): Promise<{ selected: string[]; sectionTitles: string[]; available: string[]; confirmLabel: string }> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const result = await runMain(tabId, mainSnapshotZhilianKeywords, [])
     if (!validKeywordSnapshot(result)) {
@@ -8406,7 +8424,7 @@ export async function takeZhilianJobOffline(
   }
   await ctx.progress('已打开下线确认层', 55)
 
-  // 条件轮询等弹层,最长约 10 秒。失败路径上要把弹层收掉,不留半开的确认框。
+  // 条件轮询等弹层,最长约 20 秒。失败路径上要把弹层收掉,不留半开的确认框。
   const abandonDialog = async (): Promise<void> => {
     try {
       await runMain(tabId, mainCancelZhilianOfflineDialog, [])
@@ -8415,7 +8433,7 @@ export async function takeZhilianJobOffline(
     }
   }
   let dialogText = ''
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const seen = await runMain(tabId, mainReadZhilianOfflineDialog, [])
     if (validMainStep(seen) && seen.status === 'ok') {
@@ -8807,7 +8825,7 @@ export async function prepareZhilianJobDraft(
 
 async function discardZhilianJobDraft(tabId: number, ctx: PrimitiveContext): Promise<void> {
   await chrome.tabs.update(tabId, { url: ZHILIAN_JOB_LIST_URL })
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tabId)
     if (latest.status === 'complete' && !isZhilianJobPublishURL(latest.url)) return
@@ -8858,7 +8876,7 @@ async function ensureZhilianJobPublishTab(
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tabId)
     if (latest.status === 'complete' && isZhilianJobPublishURL(latest.url)) {
@@ -8976,10 +8994,13 @@ async function readZhilianListFromDOM(
     page = await runMain(tab.id, mainReadListDOMWindow, [advance, !advance])
   } catch (error) {
     if (args.filter === 'unread' && asError(error).message.includes('dom_list_items_missing')) {
+      // 2026-08-26 甲方裁决(与筛选确认降级同族):列表既非非空也非可信空态的
+      // 主成因是空白/慢渲染暂态,降为 afterRecovery 本轮失败下轮重试;原始
+      // 失败信息随行(错误收敛必须留痕)。filter=all 分支本就按未知走跳过。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        '未读筛选已开启，但当前页面没有可确认的非空列表或可信空态',
-        'manualOnly',
+        `未读筛选已开启，但当前页面没有可确认的非空列表或可信空态：${asError(error).message}`,
+        'afterRecovery',
       )
     }
     throw new ZhilianPlatformError(
@@ -9058,10 +9079,13 @@ export async function readZhilianList(
     false,
   ])
   if (filterState.status === 'failed') {
+    // 2026-08-26 甲方裁决:筛选状态读不到/确认不了是暂态页面状态(真机成因是
+    // 列表整体空白渲染十余秒),降为 afterRecovery——本轮巡检失败、下轮重试,
+    // 不再经 manualOnly 停整个账号。detail 带出最后一轮判据读值(错误收敛必须留痕)。
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      `智联聊天列表筛选状态无法回读：${filterState.reason}`,
-      'manualOnly',
+      `智联聊天列表筛选状态无法回读：${filterState.reason}${failureDetailSuffix(filterState.detail)}`,
+      'afterRecovery',
     )
   }
   if (filterState.status === 'needs_action') {
@@ -9080,10 +9104,12 @@ export async function readZhilianList(
     ])
     if (filterState.status !== 'ready') {
       const reason = filterState.status === 'failed' ? filterState.reason : 'not_applied'
+      const detail = filterState.status === 'failed' ? filterState.detail : undefined
+      // 降级与留痕同上:2026-08-26 甲方裁决。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        `智联聊天列表筛选无法覆盖并回读确认：${reason}`,
-        'manualOnly',
+        `智联聊天列表筛选无法覆盖并回读确认：${reason}${failureDetailSuffix(detail)}`,
+        'afterRecovery',
       )
     }
     assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
@@ -9099,13 +9125,14 @@ export async function readZhilianList(
   )
 }
 
-// 自包含 MAIN-world 历史读取。直接调用 imEngine.getHistoryMsgs；与 Vuex getTimeline 不同，
-// 不调用 sendMsgReceipt/sendLastMsgRead，真实扩展验收仍会监测 unread 是否变化。
+// 自包含 MAIN-world 历史读取。2026-08-03 起页面数据优先(timeline 组件 props → Vuex getter,
+// 本地读、零网络零埋点),imEngine.getHistoryMsgs 降为会话未打开/页面通道失效时的兜底;
+// 与 Vuex getTimeline 不同,不调用 sendMsgReceipt/sendLastMsgRead,真实扩展验收仍会监测 unread 是否变化。
 async function mainReadThreadPage(
   conversationRef: string,
   limit: number,
   cursor: { endTime: number; lastMsgId: string } | null,
-  apiTimeoutMs = 10_000,
+  apiTimeoutMs = 20_000,
 ): Promise<MainThreadPageResult> {
   // 当前 Chrome 版本在 MAIN-world Promise reject 时可能只给 InjectionResult.result=undefined，
   // 不附带 error。把本函数内部异常转换为脱敏、可序列化的哨兵，使外层能响亮区分
@@ -11405,7 +11432,7 @@ async function mainSendMessageOnce(
 }
 
 // 邀面准备阶段只操作可撤销编辑器控件，绝不触碰最终发送按钮。所有相邻
-// 页面交互至少间隔 1 秒并带有限随机抖动；元素等待是条件轮询，最长 10 秒。
+// 页面交互至少间隔 1 秒并带有限随机抖动；元素等待是条件轮询，最长 20 秒。
 async function mainPrepareInterviewEditor(
   conversationRef: string,
   interview: InterviewDetails,
@@ -11556,8 +11583,8 @@ async function mainPrepareInterviewEditor(
       fireMouse('click')
       return true
     }
-    const waitFor = async <T>(read: () => T | null, timeoutMs = 10_000): Promise<T | null> => {
-      const deadline = Date.now() + Math.min(10_000, Math.max(0, timeoutMs))
+    const waitFor = async <T>(read: () => T | null, timeoutMs = 20_000): Promise<T | null> => {
+      const deadline = Date.now() + Math.min(20_000, Math.max(0, timeoutMs))
       while (Date.now() <= deadline) {
         const value = read()
         if (value !== null) return value
@@ -11583,7 +11610,7 @@ async function mainPrepareInterviewEditor(
     // 平台时间选择器是 5 分钟格（2026-07-28 真机）；脑侧已在时间出生点向上
     // 取整，非格点时间抵达手侧说明上游有 bug——立即拒绝，绝不在手侧擅自
     // 取整（平台读回正证按脑侧毫秒值精确配对，手侧改时会让发出的卡片永远
-    // 无法确认），也不再让它走到分钟项查找处白等 10 秒。
+    // 无法确认），也不再让它走到分钟项查找处白等 20 秒。
     if (interview.startsAt % 300_000 !== 0) return failed('input_rejected', 'startGrid')
     if (!Number.isFinite(irreversibleNotAfterMs) || Date.now() > irreversibleNotAfterMs) {
       return failed('action_window_elapsed')
@@ -11772,7 +11799,7 @@ async function mainPrepareInterviewEditor(
       const button = direction > 0 ? buttons[buttons.length - 1] : buttons[0]
       if (!await interactByPointer(button)) return await abort('date_unavailable', 'nav.click')
       // 翻月点击生效与否 2.5 秒内必有分晓（真机翻不动时页头永不变化），
-      // 不沿用 10 秒默认等待。
+      // 不沿用 20 秒默认等待。
       datePopover = await waitFor(() => {
         const candidate = Array.from(document.querySelectorAll<HTMLElement>(
           '.km-popover.km-date-picker__popper, .km-date-picker__popper',
@@ -13407,10 +13434,12 @@ async function ensureThreadRoute(
     // 分页都不能在这里重新制造一个页面导航目标。
     currentWindow = await runMain(tab.id, mainReadListDOMWindow, [false, false])
   } catch (error) {
+    // 2026-08-26 甲方裁决:会话窗口读不到多为列表渲染暂态,降为 afterRecovery,
+    // 本轮跳过下轮重试;原始失败信息随行。
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
       `无法读取当前可定位会话窗口：${asError(error).message}`,
-      'manualOnly',
+      'afterRecovery',
     )
   }
   noteSkippedListRows('readThread 定位窗口', currentWindow)
@@ -13484,15 +13513,24 @@ async function ensureThreadRoute(
   }
   const clickedAt = Date.now()
   ctx.checkpoint()
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  // 错误收敛必须留痕(2026-08-26):超时收场带出最后一轮观察到的路由状态,
+  // 区分"页面没跳过去""跳了但会话不对""内容脚本没起来"三种子因。
+  let lastSeen = ''
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tab.id)
     let routeReady = false
     try {
       const url = new URL(latest.url ?? '')
-      routeReady = latest.status === 'complete' && url.pathname === '/app/im' &&
-        url.searchParams.get('sessionId') === conversationRef && await contentScriptHealthy(tab.id)
+      const sid = url.searchParams.get('sessionId') ?? '-'
+      lastSeen = `last=status:${latest.status ?? '-'} path:${url.pathname} session:${sid}`
+      if (latest.status === 'complete' && url.pathname === '/app/im' && sid === conversationRef) {
+        const healthy = await contentScriptHealthy(tab.id)
+        lastSeen += ` cs:${healthy}`
+        routeReady = healthy
+      }
     } catch {
+      lastSeen = 'last=url_unparsable'
       // SPA 尚未稳定，继续受 execBudget/deadline 约束地等待。
     }
     if (routeReady) {
@@ -13505,10 +13543,13 @@ async function ensureThreadRoute(
     if (attempt % 8 === 0) await ctx.progress('等待目标智联会话就绪', Math.min(90, 10 + attempt))
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
+  // 2026-08-26 甲方裁决:点击已发生但只涉幂等已读回执,超时是渲染暂态,降为
+  // afterRecovery 本轮跳过下轮重试,不再把候选人打入隔离区;sideEffect=possible
+  // 如实保留。
   throw new ZhilianPlatformError(
     'CTX_LOST_DURING_EXEC',
-    '目标智联会话在期限内未就绪',
-    'manualOnly',
+    `目标智联会话在期限内未就绪（${lastSeen || 'last=unobserved'}）`,
+    'afterRecovery',
     undefined,
     'possible',
   )
@@ -13697,7 +13738,7 @@ async function mainCancelPreparedInterviewEditor(): Promise<void> {
     const invokeClick = Function.prototype.call.bind(intrinsicClick, buttons[0])
     invokeClick()
     await wait(1_000)
-    const deadline = Date.now() + 10_000
+    const deadline = Date.now() + 20_000
     while (Date.now() <= deadline && modal.isConnected && visible(modal)) await wait(120)
   } catch {
     // 清理只尽力而为；原失败仍由调用方按原语语义返回。
@@ -13712,7 +13753,7 @@ async function mainCancelPreparedInterviewEditor(): Promise<void> {
 //
 // 三处与初版的差别，都是那次现场逼出来的：
 //  1. **等弹窗出现**。卡片消息落到时间线通常比弹窗弹出更早，初版"查一次就走"
-//     十有八九扑空。改条件轮询，出现即继续，上限 10 秒（AGENTS.md 平台交互节奏）。
+//     十有八九扑空。改条件轮询，出现即继续，上限 20 秒（AGENTS.md 平台交互节奏）。
 //  2. **弹窗根不认类名**。从"直接写着这句话的那个元素"往上找最外层浮层祖先
 //     （fixed，或高 z-index 的 absolute），平台再改版块名也认得出。
 //  3. **全部关掉，不是第一个**。关不掉会堆积，下一次发送时旧的还在页面上。
@@ -13786,7 +13827,7 @@ async function mainCloseInterviewSuccessModal(): Promise<{
   const scene: string[] = []
   try {
     let roots = findRoots()
-    const appearDeadline = Date.now() + 10_000
+    const appearDeadline = Date.now() + 20_000
     while (roots.length === 0 && Date.now() < appearDeadline) {
       await wait(200)
       roots = findRoots()
@@ -14071,7 +14112,7 @@ async function sendZhilianCard(
           `card\x1finterviewInvite\x1f${interview?.startsAt}\x1f` +
           `${interview?.method === 'onsite' ? '' : interview?.endsAt}\x1f${interview?.method}`,
         )
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
       ctx.checkpoint()
       try {
         const observed = await runMain(tab.id, mainObserveStableOutboundCard, [
@@ -14264,7 +14305,7 @@ export async function acceptZhilianWechatRequest(
       baseline.targetBindingToken,
     ])
   let confirmation: MainWechatExchangeOutcomeResult | null = null
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     ctx.checkpoint()
     try {
       const observed = await readOutcome()
@@ -14536,8 +14577,8 @@ export async function revealZhilianPeerPhone(
     throw new ZhilianPlatformError('ELEMENT_UNRESOLVED', '查看电话按钮不可点击', 'manualOnly')
   }
   await ctx.progress('已点击查看电话,等待号码揭示', 50)
-  // 条件轮询等揭示,最长 10 秒;轮询本身是纯读取,不受交互节奏下限约束。
-  const deadline = Date.now() + 10_000
+  // 条件轮询等揭示,最长 20 秒;轮询本身是纯读取,不受交互节奏下限约束。
+  const deadline = Date.now() + 20_000
   for (;;) {
     const observed = await runMain(tabId, mainReadPeerPhone, [])
     if (observed.phone) {
@@ -15571,8 +15612,8 @@ async function mainResumeCaptureStep(
     const clickedEntry = entries[0]
     const clickedAt = Date.now()
     clickedEntry.click()
-    // 打开等待与同原语的关窗等待、条件等待规格上限对齐(10 秒;原 6 秒)。
-    const waitUntil = clickedAt + 10_000
+    // 打开等待与同原语的关窗等待、条件等待规格上限对齐(20 秒;原 6 秒)。
+    const waitUntil = clickedAt + 20_000
     let modals: HTMLElement[] = []
     while (Date.now() < waitUntil) {
       modals = visibleAll(document, '.new-shortcut-resume__modal')
@@ -15596,14 +15637,14 @@ async function mainResumeCaptureStep(
         toastLikeCount: countVisible('[class*="toast" i]'),
         lateModalMs: -1,
       }
-      const lateUntil = Date.now() + 10_000
+      const lateUntil = Date.now() + 20_000
       while (Date.now() < lateUntil) {
         const late = visibleAll(document, '.new-shortcut-resume__modal')
         if (late.length !== 0) {
           scene.lateModalMs = Date.now() - clickedAt
           const closers = visibleAll(late[0], '.new-shortcut-resume__close')
           if (closers.length === 1) closers[0].click()
-          const goneUntil = Date.now() + 10_000
+          const goneUntil = Date.now() + 20_000
           let lateModalClosed = false
           while (Date.now() < goneUntil) {
             if (visibleAll(document, '.new-shortcut-resume__modal').length === 0) {
@@ -15637,7 +15678,7 @@ async function mainResumeCaptureStep(
     const closeButtons = visibleAll(modal, '.new-shortcut-resume__close')
     if (closeButtons.length !== 1) return failed('close_failed')
     closeButtons[0].click()
-    const closeUntil = Date.now() + 10_000
+    const closeUntil = Date.now() + 20_000
     while (Date.now() < closeUntil) {
       if (visibleAll(document, '.new-shortcut-resume__modal').length === 0) {
         const anchor = document.scrollingElement || document.documentElement

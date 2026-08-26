@@ -157,8 +157,8 @@ if (
   openConversationMeta.class !== "intrusive" ||
   openConversationMeta.batch !== "S" ||
   openConversationMeta.platformSideEffect !== "idempotentReadReceipt" ||
-  openConversationMeta.execBudgetMs !== 30_000 ||
-  openConversationMeta.deadlineMs !== 60_000 ||
+  openConversationMeta.execBudgetMs !== 60_000 ||
+  openConversationMeta.deadlineMs !== 120_000 ||
   openConversationMeta.leaseMs !== 30_000
 ) {
   throw new Error(`chat.openConversation metadata drift: ${JSON.stringify(openConversationMeta)}`);
@@ -531,8 +531,8 @@ const expectedResumePreconditions = [
 ];
 if (
   resumeMeta.ver !== 1 || resumeMeta.class !== "intrusive" || resumeMeta.batch !== "X" ||
-  resumeMeta.platformSideEffect !== "none" || resumeMeta.execBudgetMs !== 60_000 ||
-  resumeMeta.deadlineMs !== 120_000 || resumeMeta.leaseMs !== 30_000 ||
+  resumeMeta.platformSideEffect !== "none" || resumeMeta.execBudgetMs !== 120_000 ||
+  resumeMeta.deadlineMs !== 240_000 || resumeMeta.leaseMs !== 30_000 ||
   resumeMeta.guardsSchema !== null || resumeMeta.evidenceSchema !== null ||
   resumeMeta.verificationPrimitive !== null ||
   JSON.stringify(resumeMeta.preconditions) !== JSON.stringify(expectedResumePreconditions)
@@ -624,8 +624,8 @@ if (
   sourcingFiltersMeta.class !== "intrusive" ||
   sourcingFiltersMeta.batch !== "S" ||
   sourcingFiltersMeta.platformSideEffect !== "none" ||
-  sourcingFiltersMeta.execBudgetMs !== 120_000 ||
-  sourcingFiltersMeta.deadlineMs !== 180_000 ||
+  sourcingFiltersMeta.execBudgetMs !== 240_000 ||
+  sourcingFiltersMeta.deadlineMs !== 360_000 ||
   sourcingFiltersMeta.leaseMs !== 30_000 ||
   sourcingFiltersMeta.argsSchema !== "CandidateApplySourcingFiltersArgs" ||
   sourcingFiltersMeta.dataSchema !== "CandidateApplySourcingFiltersData" ||

@@ -173,8 +173,8 @@ func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 		meta.Class != ClassIntrusive ||
 		meta.Batch != BatchS ||
 		meta.PlatformSideEffect != "idempotentReadReceipt" ||
-		meta.ExecBudgetMs != 30_000 ||
-		meta.DeadlineMs != 60_000 ||
+		meta.ExecBudgetMs != 60_000 ||
+		meta.DeadlineMs != 120_000 ||
 		meta.LeaseMs != 30_000 {
 		t.Fatalf("chat.openConversation metadata 漂移: %+v", meta)
 	}
@@ -726,7 +726,7 @@ func TestM5CandidateReadResumeSchemas(t *testing.T) {
 	meta := Primitives[PrimCandidateReadResume]
 	wantPreconditions := []string{"context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"}
 	if meta.Ver != 1 || meta.Class != ClassIntrusive || meta.Batch != BatchX || meta.PlatformSideEffect != "none" ||
-		meta.ExecBudgetMs != 60000 || meta.DeadlineMs != 120000 || meta.LeaseMs != 30000 ||
+		meta.ExecBudgetMs != 120000 || meta.DeadlineMs != 240000 || meta.LeaseMs != 30000 ||
 		meta.GuardsSchema != "" || meta.EvidenceSchema != "" || meta.VerificationPrimitive != "" ||
 		strings.Join(meta.Preconditions, "\x00") != strings.Join(wantPreconditions, "\x00") {
 		t.Fatalf("candidate.readResume metadata 漂移:%+v", meta)
@@ -799,7 +799,7 @@ func TestM6CandidateApplySourcingFiltersSchemas(t *testing.T) {
 		"manualQuiet",
 	}
 	if meta.Ver != 1 || meta.Class != ClassIntrusive || meta.Batch != BatchS || meta.PlatformSideEffect != "none" ||
-		meta.ExecBudgetMs != 120000 || meta.DeadlineMs != 180000 || meta.LeaseMs != 30000 ||
+		meta.ExecBudgetMs != 240000 || meta.DeadlineMs != 360000 || meta.LeaseMs != 30000 ||
 		meta.ArgsSchema != "CandidateApplySourcingFiltersArgs" || meta.DataSchema != "CandidateApplySourcingFiltersData" ||
 		meta.GuardsSchema != "" || meta.EvidenceSchema != "" || meta.VerificationPrimitive != "" ||
 		meta.VerificationVer != 0 || meta.VerificationMaxRounds != 0 || meta.ContextOptionalBeforeBinding ||
