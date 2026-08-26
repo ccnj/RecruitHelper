@@ -1,6 +1,6 @@
 // 插件自重载的最小维护接缝。命令仍走正式 Dispatcher；这里仅保存一次性
 // 基础设施 marker，并把真正的 runtime.reload 延迟到脑已 ACK result 之后。
-import { ZHILIAN_CONTENT_MATCH } from './contentMessages'
+import { allSites } from '../program/platform/sites'
 
 const RELOAD_MARKER_KEY = 'infraReloadRequest'
 
@@ -36,15 +36,19 @@ export async function refreshPagesAfterRuntimeReload(): Promise<number> {
   // 先消费再刷新，保证一次 marker 至多触发一轮页面重载；个别标签页在查询
   // 后关闭属于可恢复瞬态，不重新武装 marker。
   await chrome.storage.local.remove(RELOAD_MARKER_KEY)
-  const tabs = await chrome.tabs.query({ url: ZHILIAN_CONTENT_MATCH })
+  // 换代的是整个插件，所以**全部已登记平台的页都要刷**：漏掉哪个，那个平台
+  // 就留着旧 content script 继续跑，而旧脚本与新 SW 之间没有版本核对。
   let refreshed = 0
-  for (const tab of tabs) {
-    if (tab.id === undefined) continue
-    try {
-      await chrome.tabs.reload(tab.id)
-      refreshed += 1
-    } catch {
-      // 标签页可能在 query 与 reload 之间关闭；其页面已经不再需要换代。
+  for (const site of allSites()) {
+    const tabs = await chrome.tabs.query({ url: site.match })
+    for (const tab of tabs) {
+      if (tab.id === undefined) continue
+      try {
+        await chrome.tabs.reload(tab.id)
+        refreshed += 1
+      } catch {
+        // 标签页可能在 query 与 reload 之间关闭；其页面已经不再需要换代。
+      }
     }
   }
   return refreshed

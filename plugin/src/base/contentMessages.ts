@@ -14,9 +14,6 @@ export const CONTENT_MESSAGE = {
   Probe: 'recruithelper.content.probe',
 } as const
 
-export const ZHILIAN_CONTENT_ORIGIN = 'https://rd6.zhaopin.com'
-export const ZHILIAN_CONTENT_MATCH = `${ZHILIAN_CONTENT_ORIGIN}/*`
-
 export interface ContentReadyMessage {
   type: typeof CONTENT_MESSAGE.Ready
   at: number
@@ -59,14 +56,4 @@ export type ContentDownMessage = ContentConfigureMessage | ContentNavigationObse
 export interface ContentReadyResponse {
   ok: true
   sensors: SensorParams | null
-}
-
-export function isZhilianURL(value: string | undefined): boolean {
-  if (!value) return false
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:' && url.hostname === 'rd6.zhaopin.com'
-  } catch {
-    return false
-  }
 }

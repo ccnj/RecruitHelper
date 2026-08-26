@@ -1,9 +1,14 @@
 // 平台埋点上报拦截的在线自检(base 层 —— 宪法禁令 5:监听只在 base)。
 //
-// 拦的是什么:智联 environment-check 脚本在 document 上全局监听 click 与 keydown,
-// 凡 event.isTrusted 为假(即代码合成的事件)就把企业 ID、员工账号 ID 与被点元素的
-// DOM 路径 POST 到 /api/security/environment。拦截规则见 rules/zhilian-env-report.json,
-// 事实与选型依据见 docs/点击输入通道选型-2026-08-11.md。
+// **平台事实不在本文件**:规则集 id、检测痕迹、页面匹配式都由适配器声明
+// (`envReportGuard` + `hostMatch`,见 program/platform/types.ts)。本文件只有
+// 「怎么自检」这套逻辑;没声明守卫的平台就不自检,不为它伪造一条结论。
+//
+// 拦的是什么(智联,2026-08-11 真机):它的 environment-check 脚本在 document 上
+// 全局监听 click 与 keydown,凡 event.isTrusted 为假(即代码合成的事件)就把企业
+// ID、员工账号 ID 与被点元素的 DOM 路径 POST 到 /api/security/environment。
+// 规则见 rules/zhilian-env-report.json,事实与选型依据见
+// docs/点击输入通道选型-2026-08-11.md。
 //
 // **为什么拦脚本而不是拦那个上报端点(2026-08-11 真机改定)**:拦端点时请求照常发起
 // 并失败,而平台 http 模块的错误处理会把这次失败连同 staffId、请求路径一并送进它自己
@@ -20,14 +25,8 @@
 // window 键就永远不存在;键存在即规则失效**。无歧义,也不需要"零命中"这类旁证——
 // 因此即使命中数不可观测(非开发者模式加载),自检照样成立。
 import { HandLogCode, describeError, reportHandLog } from './handLog'
-
-/** manifest 里声明的静态规则集 id。改名必须同步改 manifest,否则启用核对会误报。 */
-const RULESET_ID = 'zhilian_env_report'
-
-/** 检测脚本执行后在页面 window 上留下的键(2026-08-11 真机实测:未拦时存在,拦后不存在)。 */
-const ENV_CHECK_MARKER = 'ada:extension:shared-module:rd6.zhaopin.com:.:environment-check:default'
-
-const PLATFORM_URL_PATTERN = 'https://rd6.zhaopin.com/*'
+import { registeredPlatforms } from '../program/platform/registry'
+import type { PlatformAdapter } from '../program/platform/types'
 
 /** 攒够这么多条命令才值得去页面上问一次。 */
 const PROBE_AFTER_DISPATCHES = 20
@@ -64,8 +63,12 @@ interface RuleMatchedDebugEvent {
   addListener(callback: () => void): void
 }
 
+function guardedPlatforms(): PlatformAdapter[] {
+  return registeredPlatforms().filter((adapter) => adapter.envReportGuard !== undefined)
+}
+
 /**
- * 由 background 启动时装上。
+ * 由 background 启动时装上。**必须排在 registerPlatform 之后** —— 它现查注册表。
  *
  * `onRuleMatchedDebug` 只对开发者模式加载的扩展开放。本产品正是以 unpacked 形式交付
  * (见 docs/插件交付与更新决策-2026-07-25.md),但**即便它不可用,自检也不受影响**——
@@ -73,6 +76,7 @@ interface RuleMatchedDebugEvent {
  * 观测,不代表自检失效。
  */
 export function registerNetGuard(): void {
+  if (guardedPlatforms().length === 0) return
   const api = chrome.declarativeNetRequest as unknown as {
     onRuleMatchedDebug?: RuleMatchedDebugEvent
   }
@@ -89,7 +93,7 @@ export function registerNetGuard(): void {
       lastBlockedAt = Date.now()
     })
   }
-  void verifyRulesetEnabled()
+  void verifyRulesetsEnabled()
 }
 
 /** 每收到一条 cmd 调一次。**永远不抛异常** —— 它挂在命令派发的主路上。 */
@@ -112,39 +116,45 @@ export function noteCommandDispatched(): void {
 }
 
 /**
- * 去平台页上确认那个检测脚本**没有**执行。
+ * 去各平台页上确认那个检测脚本**没有**执行。
  *
  * 判据单向:标记存在 = 脚本跑起来了 = 规则没拦住,合成事件正在被实名上报,必须报。
  * 标记不存在或问不到,都不下"失效"的结论。
  */
 async function probeEnvCheckAbsent(): Promise<void> {
-  try {
-    const tabs = await chrome.tabs.query({ url: PLATFORM_URL_PATTERN })
-    let tabId: number | undefined
-    for (const tab of tabs) {
-      if (typeof tab.id === 'number') {
-        tabId = tab.id
-        break
+  for (const adapter of guardedPlatforms()) {
+    const guard = adapter.envReportGuard
+    if (!guard) continue
+    try {
+      const tabs = await chrome.tabs.query({ url: adapter.hostMatch })
+      let tabId: number | undefined
+      for (const tab of tabs) {
+        if (typeof tab.id === 'number') {
+          tabId = tab.id
+          break
+        }
       }
+      // 没有平台页时无从判断,不下结论。
+      if (tabId === undefined) continue
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        // 痕迹留在页面 world 里,只有 MAIN 看得见。若某平台只能用 isolated
+        // world,这个判据对它不成立 —— 那时要的是另一种痕迹,不是把这里放宽。
+        world: 'MAIN',
+        // 自包含函数:executeScript 会序列化它,不得引用模块闭包。
+        func: (marker: string) => marker in window,
+        args: [guard.marker],
+      })
+      if (results[0]?.result !== true) continue
+      reportHandLog(
+        'error',
+        HandLogCode.EnvReportGuardStale,
+        `埋点上报拦截规则已失效:${adapter.id} 的检测脚本仍在页面上执行,合成事件正被实名上报`,
+        `blocked=${blockedCount} lastBlockedAt=${lastBlockedAt}`,
+      )
+    } catch {
+      // 探测失败(页面未就绪、注入被拒)不构成"失效"结论,静默等下一轮。
     }
-    // 没有平台页时无从判断,不下结论。
-    if (tabId === undefined) return
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: 'MAIN',
-      // 自包含函数:executeScript 会序列化它,不得引用模块闭包。
-      func: (marker: string) => marker in window,
-      args: [ENV_CHECK_MARKER],
-    })
-    if (results[0]?.result !== true) return
-    reportHandLog(
-      'error',
-      HandLogCode.EnvReportGuardStale,
-      '埋点上报拦截规则已失效:检测脚本仍在页面上执行,合成事件正被实名上报',
-      `blocked=${blockedCount} lastBlockedAt=${lastBlockedAt}`,
-    )
-  } catch {
-    // 探测失败(页面未就绪、注入被拒)不构成"失效"结论,静默等下一轮。
   }
 }
 
@@ -156,22 +166,27 @@ async function probeEnvCheckAbsent(): Promise<void> {
  * 只报告,不尝试补救:动态规则是另一套 API 与另一套失效模式,为一个配置错误再引一套
  * 机制不划算 —— 报出来让人改文件即可。
  */
-async function verifyRulesetEnabled(): Promise<void> {
+async function verifyRulesetsEnabled(): Promise<void> {
+  let enabled: string[]
   try {
-    const enabled = await chrome.declarativeNetRequest.getEnabledRulesets()
-    if (enabled.includes(RULESET_ID)) return
-    reportHandLog(
-      'error',
-      HandLogCode.EnvReportGuardOff,
-      `埋点上报拦截规则集未启用:${RULESET_ID} 不在已启用列表内,检测脚本将照常加载`,
-      `enabled=${enabled.join(',')}`,
-    )
+    enabled = await chrome.declarativeNetRequest.getEnabledRulesets()
   } catch (error) {
     reportHandLog(
       'warn',
       HandLogCode.EnvReportGuardOff,
       '无法确认埋点上报拦截规则集是否已启用',
       describeError(error),
+    )
+    return
+  }
+  for (const adapter of guardedPlatforms()) {
+    const rulesetId = adapter.envReportGuard?.rulesetId
+    if (rulesetId === undefined || enabled.includes(rulesetId)) continue
+    reportHandLog(
+      'error',
+      HandLogCode.EnvReportGuardOff,
+      `埋点上报拦截规则集未启用:${rulesetId} 不在已启用列表内,${adapter.id} 的检测脚本将照常加载`,
+      `enabled=${enabled.join(',')}`,
     )
   }
 }

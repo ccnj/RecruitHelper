@@ -30,6 +30,14 @@ export {
   resetPlatformsForTest,
 } from '../src/program/platform/registry'
 export { PlatformError } from '../src/program/platform/types'
+export {
+  allSites,
+  resetSitesForTest,
+  setSitesForTest,
+  siteById,
+  siteForURL,
+} from '../src/program/platform/sites'
+export { zhilianSite } from '../src/program/platform/zhilianSite'
 export { MAIN_ERROR_SENTINEL, runInPage, unwrapInjection } from '../src/program/platform/inject'
 export {
   parseZhilianUnreadBadgeText,

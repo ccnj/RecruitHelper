@@ -1,48 +1,20 @@
-// 智联 rd6 页面上的唯一 content script 入口。全部 DOM 监听只在 base 注册；
+// 平台页面上的唯一 content script 入口。全部 DOM 监听只在 base 注册；
 // program 不在页面里安装监听，也不会从这里收到任何业务状态或调度权。
+//
+// **本文件不含任何平台知识**：这是哪个平台的页、登录态怎么读，都从站点登记表
+// (program/platform/sites.ts) 现查。加一个平台不必改本文件。
 import { ContentSensor, ContentSensorEnvironment } from './contentSensor'
 import {
   CONTENT_MESSAGE,
   ContentConfigureMessage,
   ContentDownMessage,
   ContentUpMessage,
-  isZhilianURL,
 } from './contentMessages'
-import { LoginState } from './protocol'
-
-// 登录只接受真机已验证的 isLoggedIn===true + staffId；残留 staff 不能降级判 in。
-function readLoginState(): LoginState {
-  const marker = '__INITIAL_STATE__='
-  const source = Array.from(document.scripts)
-    .map((script) => script.textContent ?? '')
-    .find((text) => text.includes(marker))
-  if (!source) return LoginState.Unknown
-  const candidate = source.slice(source.indexOf(marker) + marker.length).trim().replace(/;$/u, '')
-  try {
-    const initial = JSON.parse(candidate) as Record<string, unknown>
-    const sessionModule = asRecord(initial.session)
-    const session = asRecord(sessionModule?.session)
-    const staff = asRecord(session?.staff)
-    if (session?.isLoggedIn === false) return LoginState.Out
-    if (session?.isLoggedIn === true && staff?.staffId != null) return LoginState.In
-  } catch {
-    // 启动脚本形状变化时返回 unknown；绝不凭导航文案猜登录成功。
-  }
-  return LoginState.Unknown
-}
+import { siteForURL } from '../program/platform/sites'
 
 function emit(message: ContentUpMessage): void {
   // QoS0：只尝试一次，不持久化、不重发；SW/脑不在时丢失是协议设计内行为。
   void chrome.runtime.sendMessage(message).catch(() => undefined)
-}
-
-const environment: ContentSensorEnvironment = {
-  clearTimer(handle) { clearTimeout(handle as ReturnType<typeof setTimeout>) },
-  currentURL: () => location.href,
-  emit,
-  now: Date.now,
-  readLoginState,
-  setTimer(callback, delayMs) { return setTimeout(callback, delayMs) },
 }
 
 function applyConfig(sensor: ContentSensor, message: ContentConfigureMessage): void {
@@ -55,7 +27,21 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null
 }
 
-if (isZhilianURL(location.href)) {
+// manifest 的 matches 已经把注入面限死了，这里再查一次是因为两者可能漂移
+// （matches 加了新平台但站点表没加）。认不出的页面上什么都不做，绝不用
+// 兜底解析冒充某个平台的登录态。
+const site = siteForURL(location.href)
+
+if (site) {
+  const environment: ContentSensorEnvironment = {
+    clearTimer(handle) { clearTimeout(handle as ReturnType<typeof setTimeout>) },
+    currentURL: () => location.href,
+    emit,
+    now: Date.now,
+    readLoginState: () => site.readLoginState(),
+    setTimer(callback, delayMs) { return setTimeout(callback, delayMs) },
+  }
+
   const sensor = new ContentSensor(environment)
   sensor.start()
 

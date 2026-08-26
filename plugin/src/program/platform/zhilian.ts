@@ -87,13 +87,19 @@ import { PlatformError } from './types'
 import type { ExecutionWorld, PlatformAdapter } from './types'
 import { runInPage } from './inject'
 import type { InjectOptions } from './inject'
+// 域名与 URL 形状的唯一出处是站点身份模块 —— 它同时被 content script 那个
+// bundle 用(见 zhilianSite.ts 开头);在这里另写一份就会有两个「智联是谁」。
+import {
+  ZHILIAN_HOST,
+  ZHILIAN_IM_URL,
+  ZHILIAN_MATCH,
+  ZHILIAN_PLATFORM,
+  ZHILIAN_RECOMMEND_URL,
+} from './zhilianSite'
 
-export const ZHILIAN_PLATFORM = 'zhilian'
-export const ZHILIAN_HOST = 'rd6.zhaopin.com'
-export const ZHILIAN_IM_URL = `https://${ZHILIAN_HOST}/app/im`
-export const ZHILIAN_RECOMMEND_URL = `https://${ZHILIAN_HOST}/app/recommend`
+export { ZHILIAN_HOST, ZHILIAN_IM_URL, ZHILIAN_PLATFORM, ZHILIAN_RECOMMEND_URL }
 
-const TAB_QUERY = `https://${ZHILIAN_HOST}/*`
+const TAB_QUERY = ZHILIAN_MATCH
 // 历史消息每次只取 8 条，保证单页即便字段接近 schema 上限也不会顶穿 64KiB data 门禁。
 const THREAD_PAGE_SIZE = 8
 const LIST_WINDOW_MAX_SESSIONS = 32
@@ -15937,8 +15943,16 @@ export const zhilianAdapter = {
   // Vue 实例的 Vuex getter 拿到,那个属性在 isolated world 不可见。
   world: ZHILIAN_WORLD,
   // 页面内合成事件。isTrusted 为假,靠 declarativeNetRequest 拦掉平台的
-  // environment-check 脚本兜住(见 base/netGuard.ts)。
+  // environment-check 脚本兜住(见下面的 envReportGuard 与 base/netGuard.ts)。
   input: 'intrinsic',
+
+  // 埋点上报拦截。规则文件是 src/rules/zhilian-env-report.json,由 manifest 静态
+  // 声明;这里两个值只是让 base 能自检「规则还在不在生效」。marker 是 2026-08-11
+  // 真机实测的:未拦时这个键在 window 上存在,拦住后不存在。
+  envReportGuard: {
+    rulesetId: 'zhilian_env_report',
+    marker: 'ada:extension:shared-module:rd6.zhaopin.com:.:environment-check:default',
+  },
 
   probePlatform: () => probeZhilian(),
   ensureSurface: ({ args, ctx, fingerprint }) => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mock } from 'node:test'
 import * as esbuild from 'esbuild'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 mkdirSync('test/dist', { recursive: true })
@@ -56,6 +56,10 @@ const {
   Retryable,
   ResultStatus,
   SensorBridge,
+  allSites,
+  resetSitesForTest,
+  setSitesForTest,
+  zhilianSite,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
   parseZhilianUnreadBadgeText,
   applyZhilianSourcingFilters,
@@ -253,7 +257,8 @@ class FakeSensorConnection {
       navSettleMs: 500,
       manualQuietMs: 45_000,
     }
-    this.context = undefined
+    // 按平台各存一份 —— 生产的 currentCommandContext(platform) 就是这个形状。
+    this.contexts = new Map()
     this.events = []
     this.contextHealth = []
     this.commandListeners = []
@@ -261,10 +266,13 @@ class FakeSensorConnection {
     this.heartbeatListeners = []
   }
   currentCommandContext(platform) {
-    return this.context?.platform === platform ? this.context : undefined
+    return this.contexts.get(platform)
   }
   emitPlatformSensorEvent(name, platform, data, observedAt) {
-    this.events.push({ name, platform, data, observedAt, accountRef: this.context?.accountRef })
+    this.events.push({
+      name, platform, data, observedAt,
+      accountRef: this.contexts.get(platform)?.accountRef,
+    })
     return 'sent'
   }
   onCommandContext(listener) { this.commandListeners.push(listener); return () => {} }
@@ -273,7 +281,7 @@ class FakeSensorConnection {
   sensorConfig() { return this.config }
   setContextHealth(contexts) { this.contextHealth = contexts }
   setContext(context) {
-    this.context = context
+    this.contexts.set(context.platform, context)
     for (const listener of this.commandListeners) listener(context)
   }
   // 驱动一次心跳节奏，供重新同步用例使用
@@ -14868,6 +14876,126 @@ test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世
   // MAIN 是感知逼出来的(消息数组只能经页面 Vue 实例拿),不是动作需要。
   assert.equal(zhilianAdapter.world, 'MAIN')
   assert.equal(zhilianAdapter.input, 'intrinsic')
+})
+
+// ——— 批 B:base 层平台知识搬迁 ———
+
+test('站点登记表与 manifest 必须对得上:漏一条,那个平台的 content script 永远不注入且无任何症状', () => {
+  const manifest = JSON.parse(readFileSync('manifest.json', 'utf8'))
+  const contentMatches = new Set((manifest.content_scripts ?? []).flatMap((entry) => entry.matches ?? []))
+  const hostPermissions = new Set(manifest.host_permissions ?? [])
+  const rulesetIds = new Set((manifest.declarative_net_request?.rule_resources ?? []).map((r) => r.id))
+  const sites = allSites()
+  assert.ok(sites.length > 0, '站点登记表不能是空的')
+
+  for (const site of sites) {
+    // 这条才是本用例存在的理由:manifest 少一行,Chrome 不会报错、测试不会红、
+    // 日志里什么都没有 —— 页面上就是"传感器永远不上线",查起来毫无线索。
+    assert.ok(contentMatches.has(site.match),
+      `manifest content_scripts.matches 缺 ${site.match},${site.id} 的 content script 永不注入`)
+    assert.ok(hostPermissions.has(site.match) || hostPermissions.has('<all_urls>'),
+      `manifest host_permissions 覆盖不到 ${site.match},注入与 tabs.query 都会被拒`)
+  }
+  for (const match of contentMatches) {
+    assert.ok(sites.some((site) => site.match === match),
+      `manifest 注入了 ${match},但站点表不认它 —— 那里的 content script 认不出自己在哪,白装一个`)
+  }
+  for (const adapter of registeredPlatforms()) {
+    const guard = adapter.envReportGuard
+    if (!guard) continue
+    assert.ok(rulesetIds.has(guard.rulesetId),
+      `${adapter.id} 声明了埋点守卫 ${guard.rulesetId},但 manifest 没静态声明这个规则集`)
+  }
+})
+
+test('base 不许引入任何具体平台的模块:平台知识只经 sites/registry/types 三张平台无关的表进来', () => {
+  // 组合根豁免 —— 「加一个平台 = background.ts 多一行」正是这套抽象的出口。
+  const COMPOSITION_ROOT = 'background.ts'
+  const PLATFORM_AGNOSTIC = new Set(['sites', 'registry', 'types', 'inject'])
+  const files = readdirSync('src/base').filter((name) => name.endsWith('.ts'))
+  assert.ok(files.includes(COMPOSITION_ROOT), 'base 目录形状变了,本门禁需要复核')
+
+  const offenders = []
+  for (const file of files) {
+    if (file === COMPOSITION_ROOT) continue
+    const source = readFileSync(`src/base/${file}`, 'utf8')
+    for (const match of source.matchAll(/from '\.\.\/program\/platform\/([\w./-]+)'/gu)) {
+      if (!PLATFORM_AGNOSTIC.has(match[1])) offenders.push(`${file} -> ${match[1]}`)
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `base 里出现了具体平台的依赖:${offenders.join('、')}。平台事实要么进适配器,要么进站点表`)
+})
+
+test('传感桥按平台分区:canonical、登录基线与上下文健康各算各的,一个平台的掉登录不得记到另一个头上', () => {
+  // 刻意不叫 boss —— BOSS 的页面事实尚未考古,这里只验分区的形状。
+  const other = {
+    id: 'demo2',
+    origin: 'https://demo2.example.com',
+    match: 'https://demo2.example.com/*',
+    matches: (url) => typeof url === 'string' && url.startsWith('https://demo2.example.com/'),
+    pageKind: (url) => (url.includes('/im') ? PageKind.Im : PageKind.Other),
+    // 拿不到就 unknown:某个平台无法被动感知登录态是允许的,方向仍是"不确认"。
+    readLoginState: () => LoginState.Unknown,
+  }
+  setSitesForTest([zhilianSite, other])
+  try {
+    const connection = new FakeSensorConnection()
+    const bridge = new SensorBridge(connection, () => 1_000)
+    connection.setContext({ platform: 'zhilian', accountRef: 'account-z', expectedPrincipalFingerprint: 'fp-z' })
+    connection.setContext({ platform: 'demo2', accountRef: 'account-d', expectedPrincipalFingerprint: 'fp-d' })
+
+    const zTab = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
+    const dTab = { tabId: 2, active: true, url: 'https://demo2.example.com/im', windowId: 1 }
+    for (const tab of [zTab, dTab]) {
+      bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, url: tab.url }, tab)
+      bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 0, state: LoginState.In }, tab)
+    }
+
+    const byPlatform = () => Object.fromEntries(connection.contextHealth.map((c) => [c.platform, c]))
+    assert.deepEqual(Object.keys(byPlatform()).sort(), ['demo2', 'zhilian'], '两个平台各报一条')
+    assert.equal(byPlatform().zhilian.ready, true)
+    assert.equal(byPlatform().demo2.ready, true)
+
+    // demo2 掉登录:事件必须姓 demo2、带 demo2 的 accountRef。
+    // 分区没做对时,这一条会以 zhilian/account-z 的名义发出去 —— 脑随即停掉一个
+    // 根本没掉线的账号,真掉线的那个继续跑。这是错靶,不是显示问题。
+    bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 2_000, state: LoginState.Out }, dTab)
+    const dropped = connection.events.at(-1)
+    assert.equal(dropped.name, EventName.LoginStateChanged)
+    assert.equal(dropped.platform, 'demo2')
+    assert.equal(dropped.accountRef, 'account-d')
+    assert.equal(byPlatform().zhilian.ready, true, '别人掉登录不得污染智联的健康')
+    assert.equal(byPlatform().demo2.reason, NotReadyReason.LoginRequired)
+
+    // 「有页但脚本死了」也只能看自己平台的标签页:demo2 有页无传感,
+    // 智联连页都没有,两者的 reason 必须不同。
+    bridge.removeTab(1)
+    bridge.removeTab(2)
+    bridge.noteChromeNavigation(9, 'https://demo2.example.com/im')
+    bridge.refreshCachedState()
+    assert.equal(byPlatform().demo2.reason, NotReadyReason.ContentScriptDead)
+    assert.equal(byPlatform().zhilian.reason, NotReadyReason.PageAbsent,
+      '别的平台开着页,不能替智联作证「页在、只是脚本死了」')
+  } finally {
+    resetSitesForTest()
+  }
+})
+
+test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探测,也不伪造一条结论', async () => {
+  const fixture = installNetGuardFixture({ markerPresent: true })
+  try {
+    await withPlatforms([fakePlatform('no-guard')], async () => {
+      registerNetGuard()
+      await fixture.pump()
+      assert.equal(fixture.executed.length, 0, '没声明守卫就不该去页面上探测')
+      assert.equal(fixture.staleLog(), undefined, '没有守卫可谈失效')
+      assert.equal(fixture.offLog(), undefined, '不得对着一个不存在的规则集报未启用')
+      assert.equal(fixture.blindLog(), undefined, '连自检都不做,不必解释命中数观测不到')
+    })
+  } finally {
+    fixture.restore()
+  }
 })
 
 let failures = 0

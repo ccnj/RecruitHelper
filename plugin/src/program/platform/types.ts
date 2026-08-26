@@ -311,6 +311,23 @@ export interface PlatformAdapter extends Partial<PlatformCapabilities> {
   readonly hostMatch: string
   readonly world: ExecutionWorld
   readonly input: InputChannel
+  /** 该平台的埋点上报拦截,没有就不写(见下)。 */
+  readonly envReportGuard?: EnvReportGuard
+}
+
+/**
+ * 平台埋点上报拦截的**声明**。逻辑与监听仍在 base/netGuard.ts(宪法禁令 5),
+ * 这里只放平台事实。
+ *
+ * 只有两个字段,是因为现在只有智联一份真机事实。**不要在这里预造「守卫框架」**
+ * ——BOSS 的检测形态尚未考古,按平台枚举面事实门不得凭空实现;等它有了真机事实,
+ * 再按当时看到的形状扩这个类型,比现在猜一个通用形状准。
+ */
+export interface EnvReportGuard {
+  /** manifest 静态规则集 id。改名必须同步改 manifest,否则启用核对会误报。 */
+  readonly rulesetId: string
+  /** 检测脚本执行后在页面上留下的痕迹;**存在即说明规则没拦住**。 */
+  readonly marker: string
 }
 
 /**
