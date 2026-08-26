@@ -519,16 +519,35 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 	default:
 		return ErrDialogueTurnState
 	}
-	var bound int64
-	if err := tx.Model(&CommunicationAction{}).
-		Where(
-			"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
-			turn.TurnID,
-		).Count(&bound).Error; err != nil {
+	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底判据
+	// 放宽为"案底 intent 终局全部属于 failed/resolvedFailed(构造性零副作用)
+	// 才可作废"。干净失败重试链上的 retried 留档行不再终身挡住作废重开;
+	// 已发前缀(sent)、在途(pending)与 suspect 冻结中的 intent 照旧是
+	// 承重墙,一字不动。缺 intent 关联却声称已开始派发的异常形状按保守
+	// 方向视作案底。
+	var bound []CommunicationAction
+	if err := tx.Where(
+		"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
+		turn.TurnID,
+	).Find(&bound).Error; err != nil {
 		return err
 	}
-	if bound != 0 {
-		return errDialogueTurnEffectBound
+	for index := range bound {
+		row := bound[index]
+		if row.EffectIntentID == nil {
+			return errDialogueTurnEffectBound
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", *row.EffectIntentID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 悬空 intent 引用是账本形状异常,按保守方向视作案底。
+				return errDialogueTurnEffectBound
+			}
+			return err
+		}
+		if intent.Status != EffectIntentFailed && intent.Status != EffectIntentResolvedFailed {
+			return errDialogueTurnEffectBound
+		}
 	}
 	// planned 是未发动作,manualRequired 是停靠时被一同标注的未发动作;两者
 	// 都从未派发,随轮一起作废。不物理删除,业务上的"作废"只表达为状态列。

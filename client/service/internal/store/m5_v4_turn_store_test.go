@@ -1885,6 +1885,71 @@ func TestFreezeCommunicationV4TurnStillRejectsEffectBoundParkedTurn(t *testing.T
 	}
 }
 
+func TestFreezeCommunicationV4TurnSupersedesTurnWithOnlyCleanFailedEffects(t *testing.T) {
+	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底 intent
+	// 终局全部属于 failed/resolvedFailed(构造性零副作用)的旧轮,新输入到达
+	// 时允许作废重开;带终局案底的动作行原样留档,不被作废触碰。
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-clean-failed")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-clean-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	intentID := "intent-v4-gate-clean-failed"
+	if err := s.db.Create(&EffectIntent{
+		IntentID: intentID, IdemKey: "ik1:test:gate-clean-failed",
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		Primitive: "chat.sendMessage", TargetRef: fixture.ConversationRef,
+		PayloadHash: "payload", GuardsHash: "guards", RootMsgID: "root-gate-clean-failed",
+		Status: EffectIntentFailed, DeadlineMs: 1, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-clean-failed", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "干净失败留档动作",
+		ContentHash: "hash-gate-clean-failed", Status: CommunicationActionRetried,
+		EffectIntentID: &intentID, FailureReason: "effectFailed",
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Updates(map[string]any{
+			"status": DialogueTurnManualRequired, "failure_reason": "effectFailed",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "终局后的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-clean-3", Text: &later,
+	})
+	next, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	)
+	if err != nil || next == nil || !next.Created {
+		t.Fatalf("纯干净失败案底轮必须允许作废重开(Q6): next=%+v err=%v", next, err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnSuperseded ||
+		stale.FailureReason != dialogueTurnBoundarySuperseded {
+		t.Fatalf("旧轮未按 Q6 作废: %+v", stale)
+	}
+	var action CommunicationAction
+	if err := s.db.First(&action, "action_id = ?", "action-v4-gate-clean-failed").Error; err != nil ||
+		action.Status != CommunicationActionRetried || action.EffectIntentID == nil {
+		t.Fatalf("终局案底动作必须原样留档: action=%+v err=%v", action, err)
+	}
+}
+
 func TestFreezeCommunicationV4WechatAcceptedWithTextReplacesReceiptByContinuation(t *testing.T) {
 	s := openTest(t)
 	profileID := "profile-v4-batchb-accepted-text"
