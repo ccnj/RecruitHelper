@@ -703,12 +703,20 @@ func reconstructCommunicationV4TurnBoundaryTx(
 	var anchorSeq int64
 	if err := tx.Model(&Message{}).
 		Where(
-			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq < ?",
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq < ? "+
+				// 交换结果卡不是我方新发言(与下方 lateOutbound 豁免、巡检锚
+				// communicationV4AnchorEligibleOutbound 同一口径,2026-08-27
+				// 审查修复):它不得成为输入边界锚,否则其前的候选人输入会被
+				// 误判为已回应。
+				"AND NOT (kind = ? AND card_type = ? AND card_state = ?)",
 			profile.Platform,
 			profile.AccountRef,
 			conversationRef,
 			"out",
 			inboundFromSeq,
+			"card",
+			"wechatExchange",
+			"accepted",
 		).
 		Select("COALESCE(MAX(seq), 0)").
 		Scan(&anchorSeq).Error; err != nil {

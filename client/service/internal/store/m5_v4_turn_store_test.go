@@ -1885,6 +1885,64 @@ func TestFreezeCommunicationV4TurnStillRejectsEffectBoundParkedTurn(t *testing.T
 	}
 }
 
+func TestFreezeCommunicationV4TurnStillRejectsSuspectIntentCaseRecord(t *testing.T) {
+	// Q6 状态判据的反向钉桩(审查补测):案底 intent 存在真实 suspect 终局时,
+	// 承重墙必须继续拒绝作废重开——此前唯一反向测试打在悬空引用分支上,
+	// 状态白名单写错也测不出。
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-suspect-intent")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-si-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	intentID := "intent-v4-gate-suspect-real"
+	if err := s.db.Create(&EffectIntent{
+		IntentID: intentID, IdemKey: "ik1:test:gate-suspect-real",
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		Primitive: "chat.sendMessage", TargetRef: fixture.ConversationRef,
+		PayloadHash: "payload", GuardsHash: "guards", RootMsgID: "root-gate-suspect-real",
+		Status: EffectIntentSuspect, DeadlineMs: 1, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-suspect-real", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "suspect 案底动作",
+		ContentHash: "hash-gate-suspect-real", Status: CommunicationActionManualRequired,
+		EffectIntentID: &intentID, FailureReason: "effectSuspect",
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Updates(map[string]any{
+			"status": DialogueTurnManualRequired, "failure_reason": "effectSuspect",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "suspect 未裁决时的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-si-3", Text: &later,
+	})
+	if _, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	); !errors.Is(err, ErrDialogueTurnState) {
+		t.Fatalf("真实 suspect 案底必须照旧拒绝作废重开: %v", err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnManualRequired {
+		t.Fatalf("被拒绝的开轮不得触碰 suspect 案底轮: %+v", stale)
+	}
+}
+
 func TestFreezeCommunicationV4TurnSupersedesTurnWithOnlyCleanFailedEffects(t *testing.T) {
 	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底 intent
 	// 终局全部属于 failed/resolvedFailed(构造性零副作用)的旧轮,新输入到达

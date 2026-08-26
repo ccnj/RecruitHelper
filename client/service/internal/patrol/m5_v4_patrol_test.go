@@ -1854,6 +1854,25 @@ func TestCommunicationV4PatrolAdoptsBootBacklogWithHumanCardAndCandidateAcceptan
 		profile.InterviewedAt == nil {
 		t.Fatalf("档案投影未跟进已约面: profile=%+v err=%v", profile, err)
 	}
+	// 派发面钉死(审查补测):已约面确认语正文 + 换微信邀请卡各恰一条,
+	// 不多发、不少发、不换种类。
+	hand.mu.Lock()
+	commands := append([]protocol.CmdBody(nil), hand.commands...)
+	hand.mu.Unlock()
+	sends, invites := 0, 0
+	for index := range commands {
+		switch commands[index].Name {
+		case protocol.PrimChatSendMessage:
+			sends++
+		case protocol.PrimChatSendWechatInvite:
+			invites++
+		default:
+			t.Fatalf("开机幕出现预期外的候选人可见命令: %+v", commands[index].Name)
+		}
+	}
+	if sends != 1 || invites != 1 {
+		t.Fatalf("开机幕派发面不符: sendMessage=%d wechatInvite=%d", sends, invites)
+	}
 }
 
 func TestCommunicationV4PatrolIgnoresSystemRowsAroundCandidateInput(t *testing.T) {
