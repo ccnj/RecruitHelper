@@ -444,19 +444,32 @@ func (c *Conn) enterSession(ctx context.Context) bool {
 		Limits:        protocol.Limits{MaxMsgBytes: protocol.DefaultMaxMsgBytes, InlineBytes: protocol.DefaultInlineBytes},
 		ContractMatch: c.contractMatch,
 		Now:           time.Now().UnixMilli(),
-		Sensors: &protocol.SensorParams{
-			BadgeDebounceMs:        protocol.DefaultSensorsBadgeDebounceMs,
-			ManualQuietMs:          protocol.DefaultSensorsManualQuietMs,
-			NavSettleMs:            protocol.DefaultSensorsNavSettleMs,
-		},
 	}
-	if c.hub.blobIssuer != nil {
-		// token 熵源失败时宁缺勿滥:不带 blob 字段,本会话按未协商 blob 运行。
-		if token := c.hub.blobIssuer.Rotate(c.handID); token != "" {
-			welcome.Blob = &protocol.BlobParams{
-				Endpoint: c.hub.blobEndpoint,
-				Token:    token,
-				MaxBytes: c.hub.blobMaxBytes,
+	// 指纹对不上的手只收必备字段(协议规格 §4.2「契约指纹不一致时省略 optional 块」)。
+	//
+	// 这不是省流量,是保住换代通道:optional 块的**内部字段全必填**,于是「少发一个
+	// 字段」比「整块不发」更毒——旧手对 welcome 的 body 校验发生在分派之前,判违约
+	// 即关链,而 debug.reload 需要完整的 cmd→result→ack 来回,手活不到那一步。
+	// 2026-08-26 删 SensorParams.badgeMinEmitIntervalMs 时真实撞过:新脑对旧手无限
+	// 断连,一条帧都过不去。
+	//
+	// 代价是这只手在被换代前完全不感知。可接受:它本就被禁派 effectful(见 dispatch
+	// 处的 contractMatch 闸),而 HealthReady 只看连接与心跳,不看页面感知,换代照常
+	// 派得下去。
+	if c.contractMatch {
+		welcome.Sensors = &protocol.SensorParams{
+			BadgeDebounceMs: protocol.DefaultSensorsBadgeDebounceMs,
+			ManualQuietMs:   protocol.DefaultSensorsManualQuietMs,
+			NavSettleMs:     protocol.DefaultSensorsNavSettleMs,
+		}
+		if c.hub.blobIssuer != nil {
+			// token 熵源失败时宁缺勿滥:不带 blob 字段,本会话按未协商 blob 运行。
+			if token := c.hub.blobIssuer.Rotate(c.handID); token != "" {
+				welcome.Blob = &protocol.BlobParams{
+					Endpoint: c.hub.blobEndpoint,
+					Token:    token,
+					MaxBytes: c.hub.blobMaxBytes,
+				}
 			}
 		}
 	}
