@@ -641,8 +641,11 @@ func (s *Store) LatestDialogueTurnForProfile(profileID string) (*DialogueTurn, e
 		return nil, ErrDialogueTurnInvalid
 	}
 	var turn DialogueTurn
+	// 同 inbound_through_seq 双轮是裁决代次重开的新形态(旧轮 superseded 与
+	// 重开轮共享边界尾):以 created_at 优先取后创建的重开轮,平局仲裁必须
+	// 确定性,不能落在 turn_id 字典序的运气上(2026-08-27 审查修复)。
 	err := s.db.Where("profile_id = ?", profileID).
-		Order("inbound_through_seq DESC, turn_id DESC").First(&turn).Error
+		Order("inbound_through_seq DESC, created_at DESC, turn_id DESC").First(&turn).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
