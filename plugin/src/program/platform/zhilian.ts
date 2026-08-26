@@ -85,7 +85,7 @@ import {
   sessionBlobParams,
 } from '../../base/capture'
 import { PlatformError } from './types'
-import type { PlatformAdapter, PlatformCapabilities } from './types'
+import type { PlatformAdapter } from './types'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -15879,10 +15879,12 @@ export const zhilianTestHooks = Object.freeze({
 // 不会让任何一个 `main*` 引用失配。改动这里之前请先确认这句仍然成立:引用一旦
 // 失配,闸会静默消失(不报错、不打日志、测试不红),页面上就是机器速度连点。
 //
-// 类型标注刻意写成 `PlatformAdapter & PlatformCapabilities`:后半截让 TS 在
-// 编译期强制智联把 35 个能力**一个不落**地实现完。第二个平台只按需实现子集,
-// 标 `PlatformAdapter` 即可,漏掉的由 requireCapability 在运行期显式拒绝。
-export const zhilianAdapter: PlatformAdapter & PlatformCapabilities = {
+// 用 `satisfies` 而不是 `: PlatformAdapter`:签名写错、方法名拼错照样编译期红,
+// 但**不要求写全**。这一点是刻意的——平台之间相交而互不包含,各家都有对方没有
+// 的能力;若在这里断言全量实现,第二个平台带来一条智联根本没有的能力时,会把
+// 智联一起搞到编译不过。「智联该有哪 35 条」是智联自己的事实,由 test/unit.mjs
+// 里那份清单断言,不靠类型系统跨平台强加。
+export const zhilianAdapter = {
   id: ZHILIAN_PLATFORM,
   hostMatch: TAB_QUERY,
   // 智联必须用 MAIN:会话消息数组只能经页面 Vue 实例的 Vuex getter 拿到,
@@ -15960,4 +15962,4 @@ export const zhilianAdapter: PlatformAdapter & PlatformCapabilities = {
   probeInterviewEditor: ({ args, ctx, fingerprint }) =>
     probeZhilianInterviewEditor(args, ctx, fingerprint),
   capturePageSnapshot: ({ ctx }) => captureZhilianPageSnapshot(ctx),
-}
+} satisfies PlatformAdapter

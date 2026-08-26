@@ -14605,6 +14605,48 @@ test('两个平台并存时命令按 context.platform 各走各的,不串线', a
   })
 })
 
+test('平台之间相交而互不包含:各有对方没有的能力,各自照跑、越界即拒', async () => {
+  // 这条是抽象层的核心假设本身。若按「谁是谁的子集」建模,能力多的那个平台
+  // 会被迫替另一个实现它根本没有的东西;反过来也一样。
+  const onlyIdentify = fakePlatform('platform-x', {
+    identifyCurrentConversation: () =>
+      Promise.resolve({ conversationRef: 'x-conversation', observedAt: 1_700_000_000_000 }),
+  })
+  const onlyUnread = fakePlatform('platform-y', {
+    readUnreadTotal: () => Promise.resolve({ total: 7, observedAt: 1_700_000_000_000 }),
+  })
+  const unreadCommand = (platform) => command(Primitive.ChatReadUnreadTotal, {}, {
+    context: { platform, accountRef: 'account-seam-fixture' },
+  })
+
+  await withPlatforms([onlyIdentify, onlyUnread], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 各自有的那条:照跑。
+    await dispatcher.handleCmd('seam-6', 's', 's', identifyCommand('seam-6', 'platform-x'))
+    await eventually(() => results(out.frames, 'seam-6').length === 1, 'x 的自有能力未收束')
+    assert.equal(results(out.frames, 'seam-6')[0].body.status, 'ok')
+
+    await dispatcher.handleCmd('seam-7', 's', 's', unreadCommand('platform-y'))
+    await eventually(() => results(out.frames, 'seam-7').length === 1, 'y 的自有能力未收束')
+    assert.equal(results(out.frames, 'seam-7')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'seam-7')[0].body.data.total, 7)
+
+    // 交叉那条:显式拒绝,不借道另一个平台的实现。
+    await dispatcher.handleCmd('seam-8', 's', 's', unreadCommand('platform-x'))
+    await eventually(() => results(out.frames, 'seam-8').length === 1, 'x 的越界命令未收束')
+    assert.equal(results(out.frames, 'seam-8')[0].body.status, 'failed')
+    assert.equal(results(out.frames, 'seam-8')[0].body.error.code, ErrorCode.ProtoUnsupportedCmd)
+
+    await dispatcher.handleCmd('seam-9', 's', 's', identifyCommand('seam-9', 'platform-y'))
+    await eventually(() => results(out.frames, 'seam-9').length === 1, 'y 的越界命令未收束')
+    assert.equal(results(out.frames, 'seam-9')[0].body.status, 'failed')
+    assert.equal(results(out.frames, 'seam-9')[0].body.error.code, ErrorCode.ProtoUnsupportedCmd)
+  })
+})
+
 test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
   // 少一条能力,对应原语在真机上会以 PROTO_UNSUPPORTED_CMD 静默退化;
   // 这条用例让它在门禁上就红。

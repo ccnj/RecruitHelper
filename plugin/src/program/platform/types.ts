@@ -170,12 +170,23 @@ export interface PrimitiveInput<A, G = undefined> {
 }
 
 /**
- * 一个平台**可能**提供的全部能力,一条原语一个方法。
+ * **全部平台能力的并集**,一条原语一个方法。
  *
- * 这里全部声明为必需,只为让「某平台声称全量支持」能在编译期被检查
- * (见 zhilian.ts 末尾的 `ZhilianCapabilities` 断言)。实际注册进
- * `PlatformAdapter` 时是可选的——平台按需实现子集,没实现的由
- * `requireCapability` 在运行期显式拒绝。
+ * 注意这里的集合关系:平台之间是**相交但互不包含**——各家都有对方没有的东西,
+ * 不存在「谁是谁的子集」。所以本接口不是「某个平台的完整能力」,而是所有平台
+ * 各自那一份的并集;每个平台只挑自己有的实现,没实现的由 `requireCapability`
+ * 在运行期显式拒绝。
+ *
+ * 由此有两条纪律:
+ *
+ *   1. **不要给任何平台加编译期完备性断言。** 适配器一律用 `satisfies
+ *      PlatformAdapter`,只校验「写了的那些签名对不对、有没有写错名字」,不校验
+ *      「写全了没有」。若改成要求全量实现,新平台带来一条独有能力,就会把既有
+ *      平台一起搞到编译不过——而那条能力跟既有平台根本无关。
+ *      「某平台该有哪些」是那个平台自己的事实,由它自己的用例断言
+ *      (见 test/unit.mjs 里智联的 35 条清单)。
+ *   2. 往这里加方法**等于加一条原语**,必须先走契约(新原语名、args/data schema、
+ *      PRIMITIVE_META),不能只在本文件加一行。契约的原语表就是这个并集。
  */
 export interface PlatformCapabilities {
   // —— 探测与导航 ——
@@ -301,3 +312,18 @@ export interface PlatformAdapter extends Partial<PlatformCapabilities> {
   readonly world: ExecutionWorld
   readonly input: InputChannel
 }
+
+/**
+ * 平台适配器的声明方式,写死在这里当范本:
+ *
+ * ```ts
+ * export const fooAdapter = {
+ *   id: 'foo', hostMatch: '...', world: 'ISOLATED', input: 'os',
+ *   readList: (input) => ...,   // 只写这个平台真有的
+ * } satisfies PlatformAdapter
+ * ```
+ *
+ * 用 `satisfies` 而不是 `: PlatformAdapter`,有两个好处:签名写错、方法名拼错
+ * 都在编译期红;同时不要求写全,新平台的独有能力不会波及既有平台。
+ */
+export type PlatformAdapterShape = PlatformAdapter
