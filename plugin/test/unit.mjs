@@ -12103,6 +12103,104 @@ test('IM 列表筛选 evaluator 只点差异并用标准 checked 回读', async 
   }
 })
 
+test('列表筛选确认超时带最后一轮读值 detail(错误收敛必须留痕,2026-08-26)', async () => {
+  const original = {
+    location: globalThis.location, document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle, setTimeout: globalThis.setTimeout,
+  }
+  const realDateNow = Date.now
+  const label = { textContent: '全部职位', getClientRects() { return [{}] } }
+  const input = {
+    type: 'checkbox', disabled: false, checked: false,
+    click() { /* 卡死形态:点击不翻转 */ },
+  }
+  const wrapper = {
+    textContent: '未读',
+    getClientRects() { return [{}] },
+    querySelectorAll(selector) { return selector === 'input[type="checkbox"]' ? [input] : [] },
+  }
+  const trigger = { getClientRects() { return [{}] }, click() {} }
+  try {
+    globalThis.location = { href: 'https://rd6.zhaopin.com/app/im' }
+    globalThis.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+    // 虚拟时钟:每次 setTimeout 立即推进等长虚拟时间,20 秒轮询瞬时走完。
+    let clock = realDateNow()
+    Date.now = () => clock
+    globalThis.setTimeout = (callback, delay) => {
+      clock += Math.max(1, delay ?? 0)
+      queueMicrotask(callback)
+      return 1
+    }
+    globalThis.document = {
+      querySelectorAll(selector) {
+        if (selector === '.app-job-selector') return [trigger]
+        if (selector === '.app-job-selector .im-job-filter__label') return [label]
+        if (selector === '.side-panel-header__checkbox') return [wrapper]
+        return []
+      },
+    }
+    const result = await zhilianTestHooks.mainEnsureChatListFilter(true, true)
+    assert.deepEqual(result, {
+      status: 'failed',
+      reason: 'unread_selection_unconfirmed',
+      detail: 'last=ready allJobs=true unread=false want=true',
+    }, '超时收场必须带最后一轮各判据的实际读值')
+  } finally {
+    Date.now = realDateNow
+    Object.assign(globalThis, original)
+  }
+})
+
+test('readList 筛选失败降为 afterRecovery 且 detail 进入错误文案(2026-08-26 甲方裁决)', async () => {
+  const originalChrome = globalThis.chrome
+  const fingerprint = '6'.repeat(64)
+  let filterCalls = 0
+  globalThis.chrome = {
+    tabs: {
+      async query() { return [{ id: 9, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' }] },
+      async get() { return { id: 9, url: 'https://rd6.zhaopin.com/app/im', status: 'complete' } },
+      async sendMessage() { return { ok: true } },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'mainProbeZhilian') {
+          return [{ result: {
+            pageKind: 'im', loginState: 'in', principalFingerprint: fingerprint, imListVisible: true,
+          } }]
+        }
+        if (func.name === 'mainEnsureChatListFilter') {
+          filterCalls += 1
+          if (filterCalls === 1) return [{ result: { status: 'needs_action' } }]
+          return [{ result: {
+            status: 'failed', reason: 'unread_selection_unconfirmed',
+            detail: 'last=ready allJobs=true unread=false want=true',
+          } }]
+        }
+        throw new Error(`unexpected MAIN function ${func.name}`)
+      },
+    },
+  }
+  const context = {
+    cmdMsgId: 'list-demote', deadlineMs: Date.now() + 10_000, commandContext: undefined,
+    signal: new AbortController().signal,
+    async progress() {}, checkpoint() {}, beforeSideEffect() {},
+  }
+  try {
+    await assert.rejects(
+      readZhilianList({ filter: 'unread', move: 'reset' }, context, fingerprint),
+      (error) => error instanceof ZhilianPlatformError &&
+        error.code === 'ELEMENT_UNRESOLVED' &&
+        error.retryable === 'afterRecovery' &&
+        error.message.includes('unread_selection_unconfirmed') &&
+        error.message.includes('last=ready allJobs=true unread=false want=true'),
+      '筛选确认失败必须是 afterRecovery(本轮失败下轮重试,不停账号)且留痕随行',
+    )
+    assert.equal(filterCalls, 2, '预检 needs_action 后才进入 apply 路径')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
 test('chat.openConversation 只点 fresh 未读目标一次并以路由和行离开双读收束', async () => {
   const originalChrome = globalThis.chrome
   const originalSetTimeout = globalThis.setTimeout

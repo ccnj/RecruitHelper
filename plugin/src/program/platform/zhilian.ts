@@ -4580,6 +4580,13 @@ async function mainEnsureChatListFilter(
       return read()
     }
 
+    // 错误收敛必须留痕(2026-08-26 甲方裁决):轮询超时收场时带出最后一轮
+    // 各判据的实际读值,否则"开关没翻/控件缺席/标签漂移/路由跳走"四种子因
+    // 在错误码上不可区分,真机排障无据。
+    const describeState = (state: ReturnType<typeof readState>): string =>
+      state.status === 'failed'
+        ? `last=failed:${state.reason}`
+        : `last=ready allJobs=${state.allJobs} unread=${state.unread} want=${unread}`
     const initial = readState()
     if (initial.status === 'failed') return failed(initial.reason)
     if (initial.allJobs && initial.unread === unread) return { status: 'ready', changed: false }
@@ -4594,21 +4601,27 @@ async function mainEnsureChatListFilter(
       changed = true
       await waitInteraction()
       let ambiguousOption = false
+      let lastOptionCount = -1
       const option = await waitFor(() => {
         if (!routeReady()) return null
         const matches = Array.from(document.querySelectorAll<HTMLElement>(
           '.app-job-selector-item, .km-select-option, .km-option, [role="option"]',
         )).filter((node) => visible(node) && clean(node.textContent) === '全部职位')
+        lastOptionCount = matches.length
         if (matches.length > 1) ambiguousOption = true
         return matches.length === 1 ? matches[0] : null
       })
       if (!routeReady()) return failed('route_changed')
-      if (!option || ambiguousOption) return failed('job_option_cardinality')
+      if (!option || ambiguousOption) return failed('job_option_cardinality', `last=matches:${lastOptionCount}`)
       option.click()
       await waitInteraction()
-      const selected = await waitFor(() => selectedTitle() === '全部职位' ? true : null)
+      let lastTitle: string | null = null
+      const selected = await waitFor(() => {
+        lastTitle = selectedTitle()
+        return lastTitle === '全部职位' ? true : null
+      })
       if (!routeReady()) return failed('route_changed')
-      if (selected !== true) return failed('job_selection_unconfirmed')
+      if (selected !== true) return failed('job_selection_unconfirmed', `last=title:${lastTitle ?? '(unreadable)'}`)
     }
 
     const beforeUnread = readState()
@@ -4617,20 +4630,22 @@ async function mainEnsureChatListFilter(
       beforeUnread.input.click()
       changed = true
       await waitInteraction()
+      let lastConfirmProbe = ''
       const confirmed = await waitFor(() => {
         const latest = readState()
+        lastConfirmProbe = describeState(latest)
         return latest.status === 'ready' && latest.allJobs && latest.unread === unread
           ? true
           : null
       })
       if (!routeReady()) return failed('route_changed')
-      if (confirmed !== true) return failed('unread_selection_unconfirmed')
+      if (confirmed !== true) return failed('unread_selection_unconfirmed', lastConfirmProbe)
     }
 
     const finalState = readState()
     if (finalState.status === 'failed') return failed(finalState.reason)
-    if (!finalState.allJobs) return failed('job_selection_unconfirmed')
-    if (finalState.unread !== unread) return failed('unread_selection_unconfirmed')
+    if (!finalState.allJobs) return failed('job_selection_unconfirmed', describeState(finalState))
+    if (finalState.unread !== unread) return failed('unread_selection_unconfirmed', describeState(finalState))
     return { status: 'ready', changed }
   } catch (error) {
     return failed('unexpected', String(error))
@@ -9059,10 +9074,13 @@ export async function readZhilianList(
     false,
   ])
   if (filterState.status === 'failed') {
+    // 2026-08-26 甲方裁决:筛选状态读不到/确认不了是暂态页面状态(真机成因是
+    // 列表整体空白渲染十余秒),降为 afterRecovery——本轮巡检失败、下轮重试,
+    // 不再经 manualOnly 停整个账号。detail 带出最后一轮判据读值(错误收敛必须留痕)。
     throw new ZhilianPlatformError(
       'ELEMENT_UNRESOLVED',
-      `智联聊天列表筛选状态无法回读：${filterState.reason}`,
-      'manualOnly',
+      `智联聊天列表筛选状态无法回读：${filterState.reason}${failureDetailSuffix(filterState.detail)}`,
+      'afterRecovery',
     )
   }
   if (filterState.status === 'needs_action') {
@@ -9081,10 +9099,12 @@ export async function readZhilianList(
     ])
     if (filterState.status !== 'ready') {
       const reason = filterState.status === 'failed' ? filterState.reason : 'not_applied'
+      const detail = filterState.status === 'failed' ? filterState.detail : undefined
+      // 降级与留痕同上:2026-08-26 甲方裁决。
       throw new ZhilianPlatformError(
         'ELEMENT_UNRESOLVED',
-        `智联聊天列表筛选无法覆盖并回读确认：${reason}`,
-        'manualOnly',
+        `智联聊天列表筛选无法覆盖并回读确认：${reason}${failureDetailSuffix(detail)}`,
+        'afterRecovery',
       )
     }
     assertExpectedPrincipal(await probeTab(await chrome.tabs.get(tab.id)), expectedPrincipalFingerprint)
