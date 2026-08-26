@@ -31,6 +31,7 @@ export {
   resetPlatformsForTest,
 } from '../src/program/platform/registry'
 export { PlatformError } from '../src/program/platform/types'
+export { MAIN_ERROR_SENTINEL, runInPage, unwrapInjection } from '../src/program/platform/inject'
 export { zhilianAdapter } from '../src/program/platform/zhilian'
 export { registerM3Primitives } from '../src/program/primitives/m3'
 export { registerM2Primitives } from '../src/program/primitives/m2'

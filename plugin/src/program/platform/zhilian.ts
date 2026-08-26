@@ -85,7 +85,9 @@ import {
   sessionBlobParams,
 } from '../../base/capture'
 import { PlatformError } from './types'
-import type { PlatformAdapter } from './types'
+import type { ExecutionWorld, PlatformAdapter } from './types'
+import { runInPage } from './inject'
+import type { InjectOptions } from './inject'
 
 export const ZHILIAN_PLATFORM = 'zhilian'
 export const ZHILIAN_HOST = 'rd6.zhaopin.com'
@@ -773,6 +775,12 @@ function sameThreadPosition(
     left.endTime === right.endTime && left.lastMsgId === right.lastMsgId
 }
 
+// 智联的执行世界。**必须是 MAIN,原因是感知不是动作**:会话消息数组只能经页面
+// Vue 实例的 Vuex getter 拿到,那个属性在 isolated world 不可见。适配器声明的
+// world 与本常量同源,改一处必须两处一致。
+const ZHILIAN_WORLD: ExecutionWorld = 'MAIN'
+const ZHILIAN_INJECT: InjectOptions = { world: ZHILIAN_WORLD, label: '智联' }
+
 async function runMain<A extends unknown[], R>(
   tabId: number,
   func: (...args: A) => R | Promise<R>,
@@ -782,49 +790,16 @@ async function runMain<A extends unknown[], R>(
   // 不可能有哪个接缝被漏掉。见 zhilianPublishInteractions 的说明。
   const paced = zhilianPublishInteractions.has(func)
   if (paced) await paceZhilianInteraction()
-  const result = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: 'MAIN',
-    func,
-    args,
-  })
-  if (paced && zhilianInteractionHappened(func, (result[0] as { result?: unknown } | undefined)?.result)) {
+  // 注入机制(executeScript + InjectionResult 拆包 + 页面哨兵还原)已上移到
+  // platform/inject.ts;这里只剩智联自己的节奏与记时。
+  //
+  // 记时挪到拆包之后是等价的:拆包会抛的每一条路径上,原先那个记时条件都必然
+  // 为假——validMainStep 对 undefined、对哨兵对象、对 error 形态一律返回 false。
+  const value = await runInPage(ZHILIAN_INJECT, tabId, func, args)
+  if (paced && zhilianInteractionHappened(func, value)) {
     lastZhilianPublishInteractionAt = Date.now()
   }
-  const first = result[0] as unknown as { result?: R | null; error?: unknown } | undefined
-  if (!first) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本尚未就绪', 'afterRecovery', 'contentScriptDead')
-  }
-  if (first.error !== undefined && first.error !== null) {
-    let detail = ''
-    if (typeof first.error === 'string') {
-      detail = first.error.trim()
-    } else if (typeof first.error === 'object') {
-      try {
-        const message = (first.error as { message?: unknown }).message
-        if (typeof message === 'string') detail = message.trim()
-      } catch {
-        // Chrome 的 InjectionResult.error 形态尚未在所有版本稳定；不读取其他字段。
-      }
-    }
-    const suffix = detail ? `：${detail.slice(0, 300)}` : ''
-    throw new ZhilianPlatformError(
-      'CTX_NOT_READY',
-      `智联页面脚本执行失败${suffix}`,
-      'afterRecovery',
-      'contentScriptDead',
-    )
-  }
-  if (first.result === undefined || first.result === null) {
-    throw new ZhilianPlatformError('CTX_NOT_READY', '智联页面脚本未返回结果', 'afterRecovery', 'contentScriptDead')
-  }
-  const mainError = typeof first.result === 'object' && !Array.isArray(first.result)
-    ? (first.result as Record<string, unknown>).__recruitHelperMainError
-    : undefined
-  if (typeof mainError === 'string' && mainError.length > 0) {
-    throw new Error(mainError.slice(0, 300))
-  }
-  return first.result
+  return value
 }
 
 function pageKindFromURL(url: string | undefined): MainProbeResult['pageKind'] {
@@ -15887,9 +15862,9 @@ export const zhilianTestHooks = Object.freeze({
 export const zhilianAdapter = {
   id: ZHILIAN_PLATFORM,
   hostMatch: TAB_QUERY,
-  // 智联必须用 MAIN:会话消息数组只能经页面 Vue 实例的 Vuex getter 拿到,
-  // 那个属性在 isolated world 不可见。是感知逼出来的,不是动作需要。
-  world: 'MAIN',
+  // 与注入入口同源(见 ZHILIAN_WORLD)。必须是 MAIN:会话消息数组只能经页面
+  // Vue 实例的 Vuex getter 拿到,那个属性在 isolated world 不可见。
+  world: ZHILIAN_WORLD,
   // 页面内合成事件。isTrusted 为假,靠 declarativeNetRequest 拦掉平台的
   // environment-check 脚本兜住(见 base/netGuard.ts)。
   input: 'intrinsic',

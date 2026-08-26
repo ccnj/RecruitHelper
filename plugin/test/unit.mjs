@@ -42,11 +42,14 @@ const {
   resetNetGuardForTest,
   Kind,
   LoginState,
+  MAIN_ERROR_SENTINEL,
   ManualInteractionKind,
+  runInPage,
   normalizeLocalWsUrl,
   parsedKeywordSections,
   NotReadyReason,
   PageKind,
+  PlatformError,
   Primitive,
   PROTO_VERSION,
   RECONNECT_STABLE_MS,
@@ -10615,7 +10618,10 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
     await assert.rejects(
       zhilianTestHooks.runMain(7, fixtureMain, []),
       (error) => {
-        assert.ok(error instanceof ZhilianPlatformError)
+        // 注入机制已上移到 platform/inject.ts,抛的是平台无关的 PlatformError。
+        // 判据(已知平台失败 + CTX_NOT_READY + contentScriptDead)一个没动;
+        // ZhilianPlatformError 是它的子类,原语层捕获 PlatformError 两者通吃。
+        assert.ok(error instanceof PlatformError)
         assert.equal(error.code, 'CTX_NOT_READY')
         assert.notEqual(error.code, 'INTERNAL_HAND')
         assert.equal(error.reason, 'contentScriptDead')
@@ -10632,8 +10638,10 @@ test('MAIN 注入空结果与 Chrome error 字段均响亮归类 CTX_NOT_READY',
   await assert.rejects(
     zhilianTestHooks.runMain(7, fixtureMain, []),
     (error) => {
-      assert.ok(error instanceof ZhilianPlatformError)
+      assert.ok(error instanceof PlatformError)
       assert.equal(error.code, 'CTX_NOT_READY')
+      // 平台名仍进消息,好让日志一眼看出是哪个平台的页面没就绪。
+      assert.match(error.message, /智联/u)
       assert.match(error.message, /页面上下文已销毁/u)
       return true
     },
@@ -14645,6 +14653,60 @@ test('平台之间相交而互不包含:各有对方没有的能力,各自照跑
     assert.equal(results(out.frames, 'seam-9')[0].body.status, 'failed')
     assert.equal(results(out.frames, 'seam-9')[0].body.error.code, ErrorCode.ProtoUnsupportedCmd)
   })
+})
+
+test('注入接缝:执行世界由适配器声明,不在调用点写死', async () => {
+  const originalChrome = globalThis.chrome
+  const calls = []
+  try {
+    globalThis.chrome = {
+      scripting: {
+        async executeScript(options) {
+          calls.push(options)
+          return [{ result: { ok: true } }]
+        },
+      },
+    }
+
+    // 只能用 ISOLATED 的平台:声明什么就注入到什么世界。
+    const value = await runInPage({ world: 'ISOLATED', label: '某平台' }, 11, () => ({ ok: true }), [])
+    assert.deepEqual(value, { ok: true })
+    assert.equal(calls[0].world, 'ISOLATED')
+    assert.equal(calls[0].target.tabId, 11)
+
+    // 智联仍是 MAIN——它读消息数组要页面 Vue 实例,换 ISOLATED 会瞎。
+    await zhilianTestHooks.runMain(12, async () => ({ ok: true }), [])
+    assert.equal(calls[1].world, 'MAIN')
+    assert.equal(zhilianAdapter.world, 'MAIN')
+  } finally {
+    globalThis.chrome = originalChrome
+  }
+})
+
+test('注入接缝:页面内抛出的异常经哨兵还原成真异常,不被当成正常返回值', async () => {
+  const originalChrome = globalThis.chrome
+  try {
+    globalThis.chrome = {
+      scripting: {
+        async executeScript() {
+          return [{ result: { [MAIN_ERROR_SENTINEL]: '页面里炸了' } }]
+        },
+      },
+    }
+    await assert.rejects(
+      runInPage({ world: 'ISOLATED', label: '某平台' }, 13, () => ({}), []),
+      (error) => {
+        // 刻意是裸 Error 不是 PlatformError:页面代码自己出错 ≠ 页面没就绪,
+        // 两者的处置完全不同,不能混成同一个失败码。
+        assert.ok(error instanceof Error)
+        assert.ok(!(error instanceof PlatformError))
+        assert.match(error.message, /页面里炸了/u)
+        return true
+      },
+    )
+  } finally {
+    globalThis.chrome = originalChrome
+  }
 })
 
 test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
