@@ -1,6 +1,7 @@
-// 身份判新引擎(2026-08-09 战役 S2 换根)的单元套件。判新唯一机制:快照行的
-// sourceKey 不在账本=新,按页面顺序追加尾部;无身份自家行按语义回配;首个身份
-// 关联之前的未知行是窗口外历史,跳过不收编。位置影子引擎的测试在 reconcile_test.go。
+// 身份判新引擎(2026-08-09 战役 S2 换根,2026-08-26 S3 拆除位置影子后成为
+// 唯一引擎)的单元套件。判新唯一机制:快照行的 sourceKey 不在账本=新,按页面
+// 顺序追加尾部;无身份自家行按语义回配;首个身份关联之前的未知行是窗口外
+// 历史,跳过不收编。共享守卫与 store 集成的测试在 reconcile_test.go。
 package syncledger
 
 import (
@@ -77,9 +78,10 @@ func planAuditCount(plan *Plan, category string) int {
 	return count
 }
 
-// 战役核心场景:插话夹在我方气泡中间,身份不在账本即为新,按页面顺序捞回;
-// 位置影子引擎在同一输入上会裁弃它,分歧必须留审计。
-func TestIdentityReconcileAdoptsInterjectionAndAuditsShadowDivergence(t *testing.T) {
+// 战役核心场景:插话夹在我方气泡中间,身份不在账本即为新,按页面顺序捞回。
+// (旧位置对齐在同一输入上会裁弃它——S2 影子对拍与真机分歧审计均已实证,
+// S3 已拆影子。)
+func TestIdentityReconcileAdoptsInterjection(t *testing.T) {
 	ledger := []store.Message{
 		idLedgerText(1, "in", "你好", idKey("hello")),
 		idLedgerText(2, "out", "气泡一", idKey("b1")),
@@ -104,11 +106,8 @@ func TestIdentityReconcileAdoptsInterjectionAndAuditsShadowDivergence(t *testing
 	if len(plan.Apply.SourceKeyReclaims) != 0 {
 		t.Fatalf("全键账本不应有回配: %+v", plan.Apply.SourceKeyReclaims)
 	}
-	if planAuditCount(plan, "identity_shadow_divergence") != 1 {
-		t.Fatalf("位置引擎会裁弃插话,分歧必须留审计: %+v", plan.Audits)
-	}
-	if planAuditCount(plan, "conversation_alignment_context_discarded") != 0 {
-		t.Fatal("身份引擎不得产生 context_discarded")
+	if len(plan.Audits) != 0 {
+		t.Fatalf("普通插话捞回不应产生任何审计: %+v", plan.Audits)
 	}
 }
 

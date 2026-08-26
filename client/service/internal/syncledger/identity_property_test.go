@@ -1,6 +1,7 @@
-// 身份判新的两条性质测试(战役出口要求):不重复收编、收敛幂等。外加影子
-// 靶场:随机世界里新旧引擎并跑,普通顺序增长场景必须零分歧,任意场景下身份
-// 引擎的不重复收编不变量必须成立。
+// 身份判新的两条性质测试(战役出口要求):不重复收编、收敛幂等。外加两个
+// 定向场景:普通顺序增长必须精确镜像服务端世界(常见路径不回归的哨兵)、
+// 历史中段插话必须被捞回。S2 期间此处曾以新旧引擎影子对拍作断言,S3 已随
+// 位置引擎拆除,改为对服务端世界的直接断言(更强)。
 package syncledger
 
 import (
@@ -82,8 +83,8 @@ func (w *propWorld) snapshotFrom(start int, withCrossPageDup bool) []SnapshotMes
 	return out
 }
 
-// reconcileAndApply 跑引擎并把计划应用到内存账本,返回本轮分歧审计数。
-func (w *propWorld) reconcileAndApply(snapshot []SnapshotMessage) int {
+// reconcileAndApply 跑引擎并把计划应用到内存账本。
+func (w *propWorld) reconcileAndApply(snapshot []SnapshotMessage) {
 	w.t.Helper()
 	w.lastLog = ""
 	for _, row := range snapshot {
@@ -106,20 +107,10 @@ func (w *propWorld) reconcileAndApply(snapshot []SnapshotMessage) int {
 			w.t.Fatalf("深读 Reconcile 失败: %v", err)
 		}
 	}
-	divergences := planAuditCount(plan, "identity_shadow_divergence")
 	switch {
 	case plan.Rebaseline != nil:
 		for _, draft := range plan.Rebaseline.Historical {
 			w.appendLedgerRow(draft)
-		}
-		if plan.Rebaseline.AuditDetail != "" {
-			// 重建梯把影子分歧并进 detail,粗略计数保持口径一致。
-			for i := 0; i+6 <= len(plan.Rebaseline.AuditDetail); i++ {
-				if plan.Rebaseline.AuditDetail[i:i+6] == "shadow" {
-					divergences++
-					break
-				}
-			}
 		}
 	case plan.Apply != nil:
 		for _, reclaim := range plan.Apply.SourceKeyReclaims {
@@ -144,7 +135,6 @@ func (w *propWorld) reconcileAndApply(snapshot []SnapshotMessage) int {
 		}
 	}
 	w.assertNoDuplicateAdoption()
-	return divergences
 }
 
 // 不重复收编:账本内任何服务端身份至多出现一次。
@@ -222,9 +212,10 @@ func TestIdentityPropertyConvergenceIdempotent(t *testing.T) {
 	}
 }
 
-// 影子靶场(甲):普通顺序增长、窗口含账本锚尾、无自家 NULL 行——新旧引擎
-// 必须零分歧。这是身份引擎不回归常见路径的哨兵。
-func TestIdentityShadowRangeQuietOnPlainGrowth(t *testing.T) {
+// 定向场景(甲):普通顺序增长、窗口含账本锚尾、无自家 NULL 行——账本必须
+// 精确镜像服务端世界(行数、顺序、身份逐一对应)。这是身份引擎不回归常见
+// 路径的哨兵。
+func TestIdentityPlainGrowthMirrorsServerExactly(t *testing.T) {
 	for seed := int64(101); seed <= 115; seed++ {
 		w := newPropWorld(t, seed)
 		lastAdopted := 0
@@ -233,8 +224,7 @@ func TestIdentityShadowRangeQuietOnPlainGrowth(t *testing.T) {
 			if len(w.server) == 0 {
 				continue
 			}
-			// 窗口从上次已收编边界稍前开始:恒包含账本尾部重叠,positional
-			// 与 identity 在该形态下判新结果一致。
+			// 窗口从上次已收编边界稍前开始:恒包含账本尾部重叠。
 			start := lastAdopted - w.rng.Intn(3)
 			if start < 0 {
 				start = 0
@@ -242,17 +232,25 @@ func TestIdentityShadowRangeQuietOnPlainGrowth(t *testing.T) {
 			if start > len(w.server)-1 {
 				start = len(w.server) - 1
 			}
-			if divergences := w.reconcileAndApply(w.snapshotFrom(start, false)); divergences != 0 {
-				t.Fatalf("seed=%d round=%d 普通增长不应有影子分歧", seed, round)
+			w.reconcileAndApply(w.snapshotFrom(start, false))
+			if len(w.ledger) != len(w.server) {
+				t.Fatalf("seed=%d round=%d 普通增长后账本行数 %d 应等于服务端 %d",
+					seed, round, len(w.ledger), len(w.server))
+			}
+			for i := range w.ledger {
+				if w.ledger[i].SourceKey == nil || *w.ledger[i].SourceKey != w.server[i].key {
+					t.Fatalf("seed=%d round=%d 账本第 %d 行身份与服务端不符", seed, round, i)
+				}
 			}
 			lastAdopted = len(w.server)
 		}
 	}
 }
 
-// 影子靶场(乙):制造插话(把新入站插进历史中段)——位置引擎裁弃、身份
-// 引擎捞回,分歧必须被审计捕获,且捞回后世界收敛。
-func TestIdentityShadowRangeCapturesInterjectionDivergence(t *testing.T) {
+// 定向场景(乙):制造插话(把新入站插进历史中段)——旧位置对齐会裁弃它
+// (真机与影子分歧审计均已实证,S2 立案病根),身份引擎必须捞回,且捞回后
+// 世界收敛。
+func TestIdentityInterjectionInHistoryMiddleIsAdopted(t *testing.T) {
 	w := newPropWorld(t, 201)
 	for i := 0; i < 6; i++ {
 		w.grow(false, 0)
@@ -269,10 +267,7 @@ func TestIdentityShadowRangeCapturesInterjectionDivergence(t *testing.T) {
 	middle := len(w.server) / 2
 	w.server = append(w.server[:middle], append([]propServerMessage{interject}, w.server[middle:]...)...)
 
-	divergences := w.reconcileAndApply(w.snapshotFrom(0, false))
-	if divergences == 0 {
-		t.Fatal("插话场景新旧引擎判新不同,影子分歧必须被审计捕获")
-	}
+	w.reconcileAndApply(w.snapshotFrom(0, false))
 	adopted := false
 	for _, row := range w.ledger {
 		if row.SourceKey != nil && *row.SourceKey == interject.key {
