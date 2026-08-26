@@ -16,7 +16,6 @@ export { getHandId, getWsUrl, normalizeLocalWsUrl, RECONNECT_STABLE_MS, setWsUrl
 export { handleInfrastructureMessage } from '../src/base/optionsBridge'
 export { armRuntimeReload, acknowledgeRuntimeReloadResult, refreshPagesAfterRuntimeReload } from '../src/base/reload'
 export { ContentSensor } from '../src/base/contentSensor'
-export { readZhilianUnreadTotal, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../src/base/contentDom'
 export { SensorBridge } from '../src/base/sensorBridge'
 export { CONTENT_MESSAGE } from '../src/base/contentMessages'
 export { capabilities, lookup, register } from '../src/program/registry'
@@ -32,7 +31,11 @@ export {
 } from '../src/program/platform/registry'
 export { PlatformError } from '../src/program/platform/types'
 export { MAIN_ERROR_SENTINEL, runInPage, unwrapInjection } from '../src/program/platform/inject'
-export { zhilianAdapter } from '../src/program/platform/zhilian'
+export {
+  parseZhilianUnreadBadgeText,
+  zhilianAdapter,
+  ZHILIAN_UNREAD_BADGE_SELECTOR,
+} from '../src/program/platform/zhilian'
 export { registerM3Primitives } from '../src/program/primitives/m3'
 export { registerM2Primitives } from '../src/program/primitives/m2'
 export { registerM6Primitives } from '../src/program/primitives/m6'

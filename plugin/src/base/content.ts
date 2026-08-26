@@ -1,7 +1,6 @@
 // 智联 rd6 页面上的唯一 content script 入口。全部 DOM 监听只在 base 注册；
 // program 不在页面里安装监听，也不会从这里收到任何业务状态或调度权。
 import { ContentSensor, ContentSensorEnvironment } from './contentSensor'
-import { readZhilianUnreadTotal } from './contentDom'
 import {
   CONTENT_MESSAGE,
   ContentConfigureMessage,
@@ -9,14 +8,7 @@ import {
   ContentUpMessage,
   isZhilianURL,
 } from './contentMessages'
-import { LoginState, PageKind } from './protocol'
-
-function pageKind(): PageKind {
-  const path = location.pathname
-  if (path === '/app/im' || path.startsWith('/app/im/')) return PageKind.Im
-  if (path.startsWith('/app/recommend')) return PageKind.Recommend
-  return PageKind.Other
-}
+import { LoginState } from './protocol'
 
 // 登录只接受真机已验证的 isLoggedIn===true + staffId；残留 staff 不能降级判 in。
 function readLoginState(): LoginState {
@@ -49,9 +41,7 @@ const environment: ContentSensorEnvironment = {
   currentURL: () => location.href,
   emit,
   now: Date.now,
-  pageKind,
   readLoginState,
-  readUnreadTotal: () => readZhilianUnreadTotal(document),
   setTimer(callback, delayMs) { return setTimeout(callback, delayMs) },
 }
 

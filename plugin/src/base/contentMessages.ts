@@ -2,13 +2,11 @@
 // 猜测脑侧账号，SW 只能从已 accepted 命令的内存 CmdContext 补齐协议 EventContext。
 import type {
   LoginState,
-  PageKind,
   SensorParams,
 } from './protocol'
 
 export const CONTENT_MESSAGE = {
   Ready: 'recruithelper.content.ready',
-  UnreadStable: 'recruithelper.content.unreadStable',
   LoginStable: 'recruithelper.content.loginStable',
   PageNavigated: 'recruithelper.content.pageNavigated',
   Configure: 'recruithelper.content.configure',
@@ -22,16 +20,7 @@ export const ZHILIAN_CONTENT_MATCH = `${ZHILIAN_CONTENT_ORIGIN}/*`
 export interface ContentReadyMessage {
   type: typeof CONTENT_MESSAGE.Ready
   at: number
-  pageKind: PageKind
   url: string
-}
-
-export interface ContentUnreadStableMessage {
-  type: typeof CONTENT_MESSAGE.UnreadStable
-  emitEvent: boolean
-  observedAt: number
-  prev: number | null
-  value: number
 }
 
 export interface ContentLoginStableMessage {
@@ -43,13 +32,11 @@ export interface ContentLoginStableMessage {
 export interface ContentPageNavigatedMessage {
   type: typeof CONTENT_MESSAGE.PageNavigated
   at: number
-  pageKind: PageKind
   url: string
 }
 
 export type ContentUpMessage =
   | ContentReadyMessage
-  | ContentUnreadStableMessage
   | ContentLoginStableMessage
   | ContentPageNavigatedMessage
 

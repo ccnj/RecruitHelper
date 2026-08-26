@@ -26,13 +26,13 @@ func TestEventPersistentDedupBeforeSink(t *testing.T) {
 	called := 0
 	hub.SetEventSink(EventSinkFunc(func(got SensorEvent) {
 		called++
-		if got.HandID != "hand-01" || got.Body.Name != protocol.EventUnreadBadge {
+		if got.HandID != "hand-01" || got.Body.Name != protocol.EventPageNavigated {
 			t.Fatalf("回调事件错误: %+v", got)
 		}
 	}))
-	data, _ := protocol.Encode(protocol.UnreadBadgeEventData{Scope: protocol.UnreadScopeTotal, Stable: true, Value: 3})
+	data, _ := protocol.Encode(protocol.PageNavigatedEventData{At: time.Now().UnixMilli()})
 	body := protocol.EventBody{
-		Name: protocol.EventUnreadBadge, Context: &protocol.EventContext{Platform: "zhilian", AccountRef: "acct-1"},
+		Name: protocol.EventPageNavigated, Context: &protocol.EventContext{Platform: "zhilian", AccountRef: "acct-1"},
 		ObservedAt: time.Now().UnixMilli(), Data: data,
 	}
 	raw, _ := protocol.Encode(body)
@@ -48,39 +48,44 @@ func TestEventPersistentDedupBeforeSink(t *testing.T) {
 	}
 }
 
-func TestRegistryCachesPingContextsSensorsAndFeatures(t *testing.T) {
+// 2026-08-26:原名 ...ContextsSensorsAndFeatures,传感那一半随被动未读传感删除。
+// contexts 缓存、features 缓存、Get 深拷贝、以及"未就绪 context 使 pageHealth
+// 降级"四项覆盖原样保留。
+func TestRegistryCachesPingContextsAndFeatures(t *testing.T) {
 	r := NewRegistry(10_000)
 	now := time.Now()
 	r.Online("hand-01", "session-1", "boot-1", []string{"chat.readList@1"}, []string{"progress/1"}, now)
 	p := protocol.PingBody{
 		Contexts: []protocol.PingContext{{Platform: "zhilian", AccountRef: "acct-1", Ready: true}},
-		Sensors:  &protocol.PingSensors{UnreadTotal: &protocol.SensorReading{Value: 7, ObservedAgoMs: 10}},
 	}
 	if !r.HeartbeatReport("hand-01", "session-1", "boot-1", p, now.Add(time.Second)) {
 		t.Fatal("ping report 未缓存")
 	}
 	state, _ := r.Get("hand-01")
-	if state.PageHealth != CapabilityReady || state.SensorHealth != CapabilityReady || len(state.Contexts) != 1 {
-		t.Fatalf("页面/传感健康错误: %+v", state)
+	if state.PageHealth != CapabilityReady || len(state.Contexts) != 1 {
+		t.Fatalf("页面健康错误: %+v", state)
 	}
-	if len(state.Features) != 1 || state.Features[0] != "progress/1" || state.Sensors.UnreadTotal.Value != 7 {
-		t.Fatalf("features/sensors 未保存: %+v", state)
+	if len(state.Features) != 1 || state.Features[0] != "progress/1" {
+		t.Fatalf("features 未保存: %+v", state)
 	}
 	// Get 必须深拷贝，调用方不能污染注册表。
 	state.Contexts[0].AccountRef = "mutated"
-	state.Sensors.UnreadTotal.Value = 99
 	again, _ := r.Get("hand-01")
-	if again.Contexts[0].AccountRef != "acct-1" || again.Sensors.UnreadTotal.Value != 7 {
-		t.Fatal("Registry.Get 泄露内部切片/指针")
+	if again.Contexts[0].AccountRef != "acct-1" {
+		t.Fatal("Registry.Get 泄露内部切片")
 	}
+	// 未就绪 context 必须把 pageHealth 降级——它是诊断台唯一的页面状态来源。
 	if !r.HeartbeatReport("hand-01", "session-1", "boot-1", protocol.PingBody{
-		Contexts: []protocol.PingContext{{Platform: "zhilian", AccountRef: "acct-1", Ready: true}},
+		Contexts: []protocol.PingContext{{
+			Platform: "zhilian", AccountRef: "acct-1", Ready: false,
+			Reason: protocol.NotReadyReasonPageAbsent,
+		}},
 	}, now.Add(2*time.Second)) {
-		t.Fatal("sensors=null ping 未接受")
+		t.Fatal("未就绪 context 的 ping 未接受")
 	}
-	cleared, _ := r.Get("hand-01")
-	if cleared.Sensors != nil || cleared.SensorHealth != CapabilityDegraded {
-		t.Fatalf("sensors=null 保留了陈旧现货: %+v", cleared)
+	degraded, _ := r.Get("hand-01")
+	if degraded.PageHealth != CapabilityDegraded {
+		t.Fatalf("未就绪 context 未使 pageHealth 降级: %+v", degraded)
 	}
 }
 

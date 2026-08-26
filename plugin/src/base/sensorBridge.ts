@@ -8,7 +8,6 @@ import {
   NotReadyReason,
   PageKind,
   PingContext,
-  PingSensors,
   SensorParams,
 } from './protocol'
 import type { CmdContext } from './protocol'
@@ -36,7 +35,6 @@ export interface SensorConnectionPort {
   onSensorConfig(listener: (config: Readonly<Partial<SensorParams>>) => void): () => void
   sensorConfig(): Readonly<Partial<SensorParams>>
   setContextHealth(contexts: readonly PingContext[]): void
-  setSensorSnapshot(snapshot: PingSensors | null): void
 }
 
 export interface ContentSource {
@@ -46,18 +44,12 @@ export interface ContentSource {
   windowId?: number
 }
 
-interface CachedUnread {
-  observedAt: number
-  value: number
-}
-
 interface ContentTabState {
   activeRank: number
   lastSeenAt: number
   loginState: LoginState
   pageKind: PageKind
   tabId: number
-  unread: CachedUnread | null
   url: string
   windowId?: number
 }
@@ -151,19 +143,6 @@ export class SensorBridge {
         void this.sendConfiguration(source.tabId, true)
         return { ok: true, sensors: completeSensorConfig(this.connection.sensorConfig()) }
 
-      case CONTENT_MESSAGE.UnreadStable:
-        state.unread = { observedAt: message.observedAt, value: message.value }
-        this.refreshCachedState()
-        if (message.emitEvent && this.canonicalTab()?.tabId === source.tabId) {
-          this.emitIfContext(EventName.UnreadBadge, {
-            scope: 'total',
-            value: message.value,
-            prev: message.prev,
-            stable: true,
-          }, message.observedAt)
-        }
-        return null
-
       case CONTENT_MESSAGE.LoginStable: {
         state.loginState = message.state
         this.refreshCachedState()
@@ -186,10 +165,7 @@ export class SensorBridge {
         state.pageKind = pageKindFromURL(source.url)
         this.refreshCachedState()
         if (this.canonicalTab()?.tabId === source.tabId) {
-          this.emitIfContext(EventName.PageNavigated, {
-            at: message.at,
-            pageKind: state.pageKind,
-          }, message.at)
+          this.emitIfContext(EventName.PageNavigated, { at: message.at }, message.at)
         }
         return null
       }
@@ -216,19 +192,6 @@ export class SensorBridge {
 
   refreshCachedState(): void {
     const canonical = this.canonicalTab()
-    if (!canonical) {
-      this.connection.setSensorSnapshot(null)
-    } else if (canonical.unread) {
-      this.connection.setSensorSnapshot({
-        unreadTotal: {
-          value: canonical.unread.value,
-          observedAgoMs: Math.min(86_400_000, Math.max(0, this.now() - canonical.unread.observedAt)),
-        },
-      })
-    } else {
-      this.connection.setSensorSnapshot({ unreadTotal: null })
-    }
-
     const context = this.connection.currentCommandContext(PLATFORM)
     if (!context) {
       this.connection.setContextHealth([])
@@ -309,7 +272,6 @@ export class SensorBridge {
       loginState: LoginState.Unknown,
       pageKind: pageKindFromURL(source.url),
       tabId: source.tabId,
-      unread: null,
       url: source.url,
       windowId: source.windowId,
     }
@@ -319,14 +281,18 @@ export class SensorBridge {
 
   // 增量上报的接收方必须自带一条重新同步路径。页面侧"值没变就不报"是对的，
   // 但本地这份缓存会单边丢失（真机 2026-08-03：SW 未重启、只有一个平台标签页，
-  // 缓存仍然空着），此时干等值本身变化就是死锁——未读还能被一条新消息解锁，
-  // 登录态几乎从不变化，等于永久失联，pageHealth 会一直停在 degraded。
-  // 只在确实缺失时索要，齐全时零开销；借既有心跳节奏，不新增定时器。
+  // 缓存仍然空着），此时干等值本身变化就是死锁——登录态几乎从不变化，等于永久
+  // 失联。只在确实缺失时索要，齐全时零开销；借既有心跳节奏，不新增定时器。
+  //
+  // 2026-08-26 删被动未读传感时，**这里只删掉未读那一半判据**。登录态这一半是
+  // lastCanonicalLogin 拿到第一个非 unknown 采样的路径，而登录态变化事件要求
+  // "有过前一个非 unknown 采样"才触发（见 LoginStable 分支）。一并删掉的后果是
+  // 掉登录的即时停机通道永久失效，**而且没有任何症状**。
   private resyncStaleSensors(): void {
     if (!this.started) return
     const canonical = this.canonicalTab()
     if (!canonical) return
-    if (canonical.unread !== null && canonical.loginState !== LoginState.Unknown) return
+    if (canonical.loginState !== LoginState.Unknown) return
     void this.sendConfiguration(canonical.tabId, true)
   }
 
@@ -411,18 +377,7 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
       return {
         type: CONTENT_MESSAGE.Ready,
         at: message.at,
-        pageKind: pageKindFromURL(message.url),
         url: message.url,
-      }
-    case CONTENT_MESSAGE.UnreadStable:
-      if (!safeTime(message.observedAt) || !sensorValue(message.value) ||
-          (message.prev !== null && !sensorValue(message.prev)) || typeof message.emitEvent !== 'boolean') return null
-      return {
-        type: CONTENT_MESSAGE.UnreadStable,
-        observedAt: message.observedAt,
-        value: message.value,
-        prev: message.prev,
-        emitEvent: message.emitEvent,
       }
     case CONTENT_MESSAGE.LoginStable:
       if (!safeTime(message.observedAt) || !Object.values(LoginState).includes(message.state as LoginState)) return null
@@ -436,7 +391,6 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
       return {
         type: CONTENT_MESSAGE.PageNavigated,
         at: message.at,
-        pageKind: pageKindFromURL(message.url),
         url: message.url,
       }
     default:
@@ -447,14 +401,12 @@ function parseContentMessage(value: unknown): ContentUpMessage | null {
 function completeSensorConfig(value: Readonly<Partial<SensorParams>>): SensorParams | null {
   const keys: Array<keyof SensorParams> = [
     'badgeDebounceMs',
-    'badgeMinEmitIntervalMs',
     'navSettleMs',
     'manualQuietMs',
   ]
   if (!keys.every((key) => Number.isSafeInteger(value[key]))) return null
   return {
     badgeDebounceMs: value.badgeDebounceMs as number,
-    badgeMinEmitIntervalMs: value.badgeMinEmitIntervalMs as number,
     navSettleMs: value.navSettleMs as number,
     manualQuietMs: value.manualQuietMs as number,
   }
@@ -462,14 +414,6 @@ function completeSensorConfig(value: Readonly<Partial<SensorParams>>): SensorPar
 
 function safeTime(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0
-}
-
-function nonnegativeInt(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0
-}
-
-function sensorValue(value: unknown): value is number {
-  return nonnegativeInt(value) && value <= 1_000_000
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

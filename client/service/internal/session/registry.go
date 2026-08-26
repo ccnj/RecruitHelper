@@ -2,7 +2,6 @@ package session
 
 import (
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -47,11 +46,8 @@ type HandState struct {
 	SessionAt     time.Time // 本会话建立时刻
 	Health        Health
 
-	Contexts     []protocol.PingContext
-	Sensors      *protocol.PingSensors
-	PageHealth   CapabilityHealth
-	SensorHealth CapabilityHealth
-	LastSensorAt time.Time
+	Contexts   []protocol.PingContext
+	PageHealth CapabilityHealth
 }
 
 // Registry:内存手注册表。回答"哪只手在线、健康如何、报了什么能力"。
@@ -87,7 +83,7 @@ func (r *Registry) OnlineWithBuild(
 		ContractHash: contractHash, ContractMatch: contractMatch, ExtVersion: extVersion,
 		Caps: append([]string(nil), caps...), Features: append([]string(nil), features...),
 		LastHbAt: now, SessionAt: now, Health: HealthReady,
-		PageHealth: CapabilityUnknown, SensorHealth: CapabilityUnknown,
+		PageHealth: CapabilityUnknown,
 	}
 }
 
@@ -126,55 +122,18 @@ func (r *Registry) HeartbeatReport(handID, sessionID, bootID string, ping protoc
 	s.LastHbAt = now
 	s.Health = HealthReady
 	s.Contexts = append([]protocol.PingContext(nil), ping.Contexts...)
-	// 未读读数是插队判定的唯一输入，而它走"手主动推送、脑不得反向拉取"的提示
-	// 通道：采样触发、双读一致、值必须变化、SW 缓存、心跳周期，任何一环断掉都
-	// 表现为同一句"读不到"。这里只记变化沿——读数何时塌、塌成什么、何时恢复
-	// ——是事后判断"插队为何没发生"的第一手证据。不变则不打，稳态近乎零噪音。
-	prevUnread, prevSensor, prevPage := unreadReadingText(s.Sensors), s.SensorHealth, s.PageHealth
+	// 页面健康只做诊断展示，不参与任何业务判断：命令派发的就绪判定走
+	// SessionHealth 返回的 s.Health(心跳到达即 ready)，与 contexts 无关。
+	// 变化沿留一条日志，事后判断"某段时间页面为何 degraded"的第一手证据。
+	prevPage := s.PageHealth
 	s.PageHealth = capabilityPageHealth(s.Contexts)
-	if ping.Sensors != nil {
-		cp := *ping.Sensors
-		if ping.Sensors.UnreadTotal != nil {
-			reading := *ping.Sensors.UnreadTotal
-			cp.UnreadTotal = &reading
-		}
-		s.Sensors = &cp
-		s.LastSensorAt = now
-		if cp.UnreadTotal != nil {
-			s.SensorHealth = CapabilityReady
-		} else {
-			s.SensorHealth = CapabilityDegraded
-		}
-	} else {
-		s.Sensors = nil
-		s.LastSensorAt = now
-		if s.PageHealth == CapabilityReady {
-			s.SensorHealth = CapabilityDegraded
-		} else {
-			s.SensorHealth = CapabilityUnknown
-		}
-	}
-	if next := unreadReadingText(s.Sensors); next != prevUnread ||
-		s.SensorHealth != prevSensor || s.PageHealth != prevPage {
-		slog.Info("未读读数变化",
+	if s.PageHealth != prevPage {
+		slog.Info("页面健康变化",
 			"handId", handID,
-			"from", prevUnread, "to", next,
-			"sensorHealth", string(s.SensorHealth), "pageHealth", string(s.PageHealth),
+			"from", string(prevPage), "to", string(s.PageHealth),
 			"contexts", len(s.Contexts))
 	}
 	return true
-}
-
-// unreadReadingText 把读数渲染成可 grep 的短文本；缺席与零是两件事，必须
-// 分得开——"读不到"会让插队判定直接放弃，"零"则是有效的清空信号。
-func unreadReadingText(sensors *protocol.PingSensors) string {
-	if sensors == nil {
-		return "无传感"
-	}
-	if sensors.UnreadTotal == nil {
-		return "读不到"
-	}
-	return strconv.Itoa(sensors.UnreadTotal.Value)
 }
 
 func capabilityPageHealth(contexts []protocol.PingContext) CapabilityHealth {
@@ -242,7 +201,6 @@ func (r *Registry) Snapshot() []HandState {
 		cp.Caps = append([]string(nil), s.Caps...)
 		cp.Features = append([]string(nil), s.Features...)
 		cp.Contexts = append([]protocol.PingContext(nil), s.Contexts...)
-		cp.Sensors = cloneSensors(s.Sensors)
 		out = append(out, cp)
 	}
 	return out
@@ -260,18 +218,5 @@ func (r *Registry) Get(handID string) (HandState, bool) {
 	cp.Caps = append([]string(nil), s.Caps...)
 	cp.Features = append([]string(nil), s.Features...)
 	cp.Contexts = append([]protocol.PingContext(nil), s.Contexts...)
-	cp.Sensors = cloneSensors(s.Sensors)
 	return cp, true
-}
-
-func cloneSensors(in *protocol.PingSensors) *protocol.PingSensors {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	if in.UnreadTotal != nil {
-		reading := *in.UnreadTotal
-		out.UnreadTotal = &reading
-	}
-	return &out
 }

@@ -211,7 +211,7 @@ func TestSameBootTakeoverAcceptsHistoricalProgressAndResultOnlyFromActiveSocket(
 		t.Fatal(err)
 	}
 	waitAudit(t, h, "stale_session_frame", "ping-with-old-session")
-	eventData, _ := protocol.Encode(protocol.PageNavigatedEventData{At: time.Now().UnixMilli(), PageKind: protocol.PageKindIm})
+	eventData, _ := protocol.Encode(protocol.PageNavigatedEventData{At: time.Now().UnixMilli()})
 	if err := writeMsgWithID(newClient, "event-with-old-session", protocol.KindEvent, &oldSession,
 		protocol.EventBody{
 			Name:       protocol.EventPageNavigated,

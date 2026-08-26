@@ -3,7 +3,6 @@
 
 import type { PrimitiveContext } from '../registry'
 import { describeError, reportHandLog } from '../../base/handLog'
-import { parseZhilianUnreadBadgeText, ZHILIAN_UNREAD_BADGE_SELECTOR } from '../../base/contentDom'
 import type {
   AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
@@ -5011,9 +5010,40 @@ async function assertCurrentThreadRoute(
   return current
 }
 
+// 经真实 rd6 页面确认的唯一总未读观察点。DOM 事实只留在平台层,不进协议语义;
+// 页面改版后在这里重新核对,不做模糊数字回退。
+//
+// 2026-08-03 真机订正(教训保留):本节点常驻聊天菜单项,未读清零时不消失,只是
+// 页面摘掉 `app-im-unread` 这个类并清空文本。此前选择器同时要求两个类,于是
+// "零未读"被读成"读不到",快照塌成 null——未读子轮把未读清干净后回读必然读不到
+// 收尾数,基线永远写不进去,插队随即被锁死。**干得越干净越判定为没跑完。**
+// 故选择器收回常驻单类,由文本承担三态。清零态下全页只此一处命中,无歧义风险。
+//
+// 2026-08-26:被动传感链删除后,本文件是这两个符号唯一的家(原在 base/contentDom.ts,
+// 与被动链共用;那一路已废,base 层不再持有平台 DOM 知识)。解析口径逐字未改。
+export const ZHILIAN_UNREAD_BADGE_SELECTOR = '.app-menu-item__im-unread'
+
+// parseZhilianUnreadBadgeText 是角标文本的唯一解析口径。
+export function parseZhilianUnreadBadgeText(raw: string): number | null {
+  const text = raw.trim()
+  // 空文本是页面表达"无未读"的正式形态,不是缺失。
+  if (text === '') return 0
+  if (/^\d+$/u.test(text)) {
+    const value = Number(text)
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : null
+  }
+  // "99+" 一类截断展示：取前导数字，取不到按 1。此处只能向多算，绝不能
+  // 落回 0——把满格未读读成零未读会让插队彻底静默。
+  const leading = /^(\d+)/u.exec(text)
+  if (leading) {
+    const value = Number(leading[1])
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 1
+  }
+  return 1
+}
+
 // mainReadZhilianUnreadBadge 只把角标节点的在场与原始文本带回；解析统一走
-// parseZhilianUnreadBadgeText,与被动传感共用同一口径。注入函数必须自包含,
-// 选择器经参数传入。
+// parseZhilianUnreadBadgeText。注入函数必须自包含,选择器经参数传入。
 function mainReadZhilianUnreadBadge(selector: string): { found: boolean; text: string } {
   const element = document.querySelector(selector)
   if (!element) return { found: false, text: '' }

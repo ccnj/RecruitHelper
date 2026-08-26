@@ -57,6 +57,7 @@ const {
   ResultStatus,
   SensorBridge,
   ZHILIAN_UNREAD_BADGE_SELECTOR,
+  parseZhilianUnreadBadgeText,
   applyZhilianSourcingFilters,
   acceptZhilianWechatRequest,
   canonicalZhilianTab,
@@ -64,7 +65,6 @@ const {
   identifyZhilianCurrentConversation,
   inspectZhilianSendSurfaceDiagnostic,
   openZhilianConversation,
-  readZhilianUnreadTotal,
   readZhilianList,
   readZhilianThread,
   readZhilianCurrentCandidate,
@@ -223,11 +223,7 @@ function contentSensorHarness() {
     currentURL() { return state.url },
     emit(message) { messages.push(message) },
     now() { return state.now },
-    pageKind() {
-      return new URL(state.url).pathname.startsWith('/app/im') ? PageKind.Im : PageKind.Other
-    },
     readLoginState() { return state.loginReads.length > 0 ? state.loginReads.shift() : state.login },
-    readUnreadTotal() { return state.unreadReads.length > 0 ? state.unreadReads.shift() : state.unread },
     setTimer(callback, delayMs) {
       const id = ++timerID
       timers.set(id, { callback, delayMs })
@@ -254,14 +250,12 @@ class FakeSensorConnection {
   constructor() {
     this.config = {
       badgeDebounceMs: 800,
-      badgeMinEmitIntervalMs: 5_000,
       navSettleMs: 500,
       manualQuietMs: 45_000,
     }
     this.context = undefined
     this.events = []
     this.contextHealth = []
-    this.snapshots = []
     this.commandListeners = []
     this.configListeners = []
     this.heartbeatListeners = []
@@ -278,7 +272,6 @@ class FakeSensorConnection {
   onHeartbeat(listener) { this.heartbeatListeners.push(listener); return () => {} }
   sensorConfig() { return this.config }
   setContextHealth(contexts) { this.contextHealth = contexts }
-  setSensorSnapshot(snapshot) { this.snapshots.push(snapshot) }
   setContext(context) {
     this.context = context
     for (const listener of this.commandListeners) listener(context)
@@ -12677,119 +12670,84 @@ test('readList MAIN 单行摘要坏数据只跳过该行，整窗照常返回且
   }
 })
 
-test('content 传感器：精确双读、5s 节流与动态参数', async () => {
+test('智联未读角标：解析口径逐字未变(2026-08-03 事故判据)', () => {
   // 2026-08-03 真机订正：角标节点常驻聊天菜单项，未读清零只摘掉
   // `app-im-unread` 类并清空文本。旧断言"徽章缺失不能猜成零"把这个正式的
   // 零形态一起判成缺失，快照塌成 null，未读子轮清完未读后回读不到收尾数，
-  // 基线永久写不进——插队因此长期失效。三态改由文本承担：节点缺失才是
-  // 读不到，空文本是零，非空非数字向多算。
-  const selectors = []
-  assert.equal(readZhilianUnreadTotal({ querySelector(selector) { selectors.push(selector); return null } }), null,
-    '节点整体缺失才是读不到：页面结构已变，不猜测数值')
-  assert.deepEqual(selectors, [ZHILIAN_UNREAD_BADGE_SELECTOR])
+  // 基线永久写不进——插队因此长期失效。**干得越干净越判定为没跑完。**
+  // 三态改由文本承担：节点缺失才是读不到，空文本是零，非空非数字向多算。
+  //
+  // 2026-08-26：被动传感链删除后，读取节点那一步随之消失（角标改由
+  // chat.readUnreadTotal 现场读，见 zhilian.ts 的 mainReadZhilianUnreadBadge），
+  // 但**解析口径一个字节没改**，仍在主动路径上服役。本用例因此从"读 DOM"
+  // 改为直接断言解析函数；判据一条不减。
   assert.equal(ZHILIAN_UNREAD_BADGE_SELECTOR, '.app-menu-item__im-unread',
     '只认常驻单类；带 app-im-unread 的双类选择器在零未读时不命中')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '' } } }), 0,
+  assert.equal(parseZhilianUnreadBadgeText(''), 0,
     '空文本是页面表达无未读的正式形态，必须读成零')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '   ' } } }), 0,
+  assert.equal(parseZhilianUnreadBadgeText('   '), 0,
     '全空白同样是零，不得判成读不到')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: ' 12 ' } } }), 12)
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '99+' } } }), 99,
+  assert.equal(parseZhilianUnreadBadgeText(' 12 '), 12)
+  assert.equal(parseZhilianUnreadBadgeText('99+'), 99,
     '截断展示取前导数字，绝不能落回零')
-  assert.equal(readZhilianUnreadTotal({ querySelector() { return { textContent: '消息 12' } } }), 1,
+  assert.equal(parseZhilianUnreadBadgeText('消息 12'), 1,
     '节点在且非空即至少一条；仍禁止模糊扫描全页数字')
+  // "节点整体缺失=读不到" 的语义现在由调用方承担：mainReadZhilianUnreadBadge
+  // 返回 found=false 时，readZhilianUnreadTotalNow 直接给 total=null，不进解析。
+})
 
+test('content 传感器：精确双读、强制快照与采样窗不被高频渲染重启', async () => {
+  // 2026-08-26：本用例原以未读角标承载这三条机制,角标被动传感已随裁决删除
+  // (现改由 chat.readUnreadTotal 现场读)。三条机制在登录态采样上逐字相同,
+  // 故改用登录态承载——覆盖一条不减。
+  const config = { badgeDebounceMs: 800, navSettleMs: 500, manualQuietMs: 45_000 }
   const harness = contentSensorHarness()
   const sensor = new ContentSensor(harness.env)
   sensor.start()
   assert.equal(harness.messages[0].type, CONTENT_MESSAGE.Ready)
+  assert.equal(harness.messages[0].pageKind, undefined,
+    'Ready 不再携带 pageKind——SW 侧一律自行按 URL 重算')
   assert.equal(harness.timers.size, 0, 'welcome 参数到达前不得自带传感节奏')
 
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  })
-  assert.deepEqual([...harness.timers.values()].map((timer) => timer.delayMs).sort((a, b) => a - b), [500, 800, 800])
+  sensor.configure(config)
+  assert.deepEqual([...harness.timers.values()].map((timer) => timer.delayMs).sort((a, b) => a - b), [500, 800])
   harness.runTimers()
-  const firstUnread = harness.messages.find((message) => message.type === CONTENT_MESSAGE.UnreadStable)
-  assert.deepEqual(firstUnread, {
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: 0,
-    prev: null,
-    value: 0,
-  })
+  const loginMessages = () => harness.messages.filter((message) => message.type === CONTENT_MESSAGE.LoginStable)
+  assert.equal(loginMessages().length, 1, '首个稳定登录态必须上报')
+  assert.equal(loginMessages().at(-1).state, LoginState.In)
 
-  const unreadCount = () => harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).length
-  const beforeMismatch = unreadCount()
-  harness.state.unreadReads = [0, 2, 3]
+  // 双读不一致不产生事实。
+  const beforeMismatch = loginMessages().length
+  harness.state.loginReads = [LoginState.Out, LoginState.In]
   sensor.onDOMMutation()
   harness.runTimers()
-  assert.equal(unreadCount(), beforeMismatch, '两次读数不一致不得上报')
+  assert.equal(loginMessages().length, beforeMismatch, '两次读数不一致不得上报')
 
+  // 值未变化时不重复上报。
   harness.state.now = 1_000
-  harness.state.unreadReads = [3]
   sensor.onDOMMutation()
   harness.runTimers()
-  const throttled = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
-  assert.equal(throttled.value, 3)
-  assert.equal(throttled.emitEvent, false, '5s 内变化只更新 ping 现货，不发 event')
+  assert.equal(loginMessages().length, beforeMismatch, '稳定值未变化不得重复上报')
 
-  harness.state.now = 6_000
-  harness.state.unreadReads = [4, 4]
-  sensor.onDOMMutation()
+  // 强制快照:新 SW 索要时,同一个稳定值也必须重新交付一次。
+  sensor.configure(config, true)
   harness.runTimers()
-  const emitted = harness.messages.filter((message) => message.type === CONTENT_MESSAGE.UnreadStable).at(-1)
-  assert.equal(emitted.emitEvent, true)
-  assert.equal(emitted.prev, 0)
-
-  const stableSnapshotBefore = unreadCount()
-  const businessEventsBefore = harness.messages.filter((message) =>
-    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length
-  harness.state.unreadReads = [4, 4]
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  }, true)
-  harness.runTimers()
-  assert.equal(unreadCount(), stableSnapshotBefore + 1,
+  assert.equal(loginMessages().length, beforeMismatch + 1,
     '新 SW 请求快照时，同一个稳定值也必须重新交付')
-  const repeatedSnapshot = harness.messages
-    .filter((message) => message.type === CONTENT_MESSAGE.UnreadStable)
-    .at(-1)
-  assert.deepEqual(repeatedSnapshot, {
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: false,
-    observedAt: 6_000,
-    prev: 4,
-    value: 4,
+  assert.deepEqual(loginMessages().at(-1), {
+    type: CONTENT_MESSAGE.LoginStable,
+    observedAt: 1_000,
+    state: LoginState.In,
   })
-  assert.equal(harness.messages.filter((message) =>
-    message.type === CONTENT_MESSAGE.UnreadStable && message.emitEvent).length, businessEventsBefore,
-  '强制快照只能回补 SW 现货，不能制造重复业务事件')
 
-  harness.state.unreadReads = [5, 5]
-  sensor.configure({
-    badgeDebounceMs: 800,
-    badgeMinEmitIntervalMs: 5_000,
-    navSettleMs: 500,
-    manualQuietMs: 45_000,
-  })
-  const unreadReadsBeforeMutations = harness.state.unreadReads.length
-  for (let index = 0; index < 20; index += 1) sensor.onDOMMutation()
-  assert.equal(harness.state.unreadReads.length, unreadReadsBeforeMutations,
-    '采样窗已经在路上时，高频 DOM mutation 不得重启双读首样本')
+  // 注:"采样窗已在路上时高频 mutation 不得重启双读首样本"这条性质是
+  // armBadge 特有的(它见到在途计时器就早退),armLogin 每次 mutation 都清掉
+  // 重建。角标采样器随被动未读传感删除,该性质一并消失,不搬到登录态上——
+  // 硬搬会断言一个从来不成立的行为。
+  harness.state.loginReads = [LoginState.Out, LoginState.Out]
+  sensor.configure(config)
   harness.runTimers()
-  assert.equal(
-    harness.messages.filter((message) =>
-      message.type === CONTENT_MESSAGE.UnreadStable && message.value === 5).length,
-    1,
-    '持续渲染期间既有采样窗仍必须按期完成',
-  )
+  assert.equal(loginMessages().at(-1).state, LoginState.Out, '登录态变化必须如实上报')
 
   // 真人 DOM 输入不再上报(2026-08-11 甲方裁决):ContentSensor 不再有
   // onTrustedPointer/onTrustedKeyboard/onTrustedNavigationIntent,
@@ -12806,42 +12764,26 @@ test('SW 页面桥：无 CmdContext 不造 accountRef，canonical 静音且页�
   const tab1 = { tabId: 1, active: true, url: 'https://rd6.zhaopin.com/app/im', windowId: 1 }
   const tab2 = { tabId: 2, active: true, url: 'https://rd6.zhaopin.com/app/recommend', windowId: 1 }
 
-  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, pageKind: PageKind.Im, url: tab1.url }, tab1)
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: 0, url: tab1.url }, tab1)
   bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: 0, state: LoginState.In }, tab1)
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: 0,
-    prev: null,
-    value: 1,
-  }, tab1)
   assert.equal(connection.events.length, 0, '未学到脑侧 accountRef 时必须静默')
-  assert.equal(connection.snapshots.at(-1).unreadTotal.value, 1)
 
   connection.setContext({ platform: 'zhilian', accountRef: 'account-1', expectedPrincipalFingerprint: 'fp' })
   bridge.refreshCachedState()
   assert.deepEqual(connection.contextHealth, [{ platform: 'zhilian', accountRef: 'account-1', ready: true }])
 
   now = 6_000
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: now,
-    prev: 1,
-    value: 2,
-  }, tab1)
-  assert.equal(connection.events.at(-1).name, EventName.UnreadBadge)
+  // 登录态变化事件带上脑侧 accountRef——它是掉登录即时停机通道的入口。
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.Out }, tab1)
+  assert.equal(connection.events.at(-1).name, EventName.LoginStateChanged)
   assert.equal(connection.events.at(-1).accountRef, 'account-1')
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.In }, tab1)
 
-  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: now, pageKind: PageKind.Recommend, url: tab2.url }, tab2)
-  bridge.acceptContentMessage({
-    type: CONTENT_MESSAGE.UnreadStable,
-    emitEvent: true,
-    observedAt: now,
-    prev: null,
-    value: 99,
-  }, tab2)
-  assert.equal(connection.snapshots.at(-1).unreadTotal.value, 2, '非 canonical 读数不得喂 ping')
+  // 非 canonical 标签页的传感一律静音。
+  const eventsBeforeNonCanonical = connection.events.length
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.Ready, at: now, url: tab2.url }, tab2)
+  bridge.acceptContentMessage({ type: CONTENT_MESSAGE.LoginStable, observedAt: now, state: LoginState.Out }, tab2)
+  assert.equal(connection.events.length, eventsBeforeNonCanonical, '非 canonical 传感不得发事件')
 
   now = 18_000
   const commandURL = 'https://rd6.zhaopin.com/app/im?sessionId=command'
@@ -12963,10 +12905,8 @@ test('SensorBridge 心跳自查：传感缓存缺失时索要重新同步，齐�
   assert.equal(sent.at(-1).message.requestSnapshot, true,
     '重新同步必须带 requestSnapshot，否则页面侧仍会因值未变而沉默')
 
-  // 补齐两项读数
-  bridge.acceptContentMessage(
-    { type: CONTENT_MESSAGE.UnreadStable, emitEvent: false, observedAt: 1, prev: null, value: 3 }, tab,
-  )
+  // 补齐登录态。2026-08-26 未读那一半判据随被动传感删除,登录态这一半必须留:
+  // 它是 lastCanonicalLogin 拿到第一个非 unknown 采样的唯一路径。
   bridge.acceptContentMessage(
     { type: CONTENT_MESSAGE.LoginStable, observedAt: 1, state: LoginState.In }, tab,
   )
@@ -13366,7 +13306,6 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
     now: Date.now(),
     sensors: {
       badgeDebounceMs: 1,
-      badgeMinEmitIntervalMs: 5_000,
       navSettleMs: 1,
       manualQuietMs: 45_000,
     },
@@ -13377,13 +13316,13 @@ test('连接层协商 feature、发送 QoS0 event，并在完整 UTF-8 信封硬
   assert.equal(connection.status().heartbeatIntervalMs, 12_345, 'session 心跳必须服从 welcome.hb')
 
   const beforeEvent = socket.sent.length
-  assert.equal(connection.emitSensorEvent(EventName.UnreadBadge, {
+  assert.equal(connection.emitSensorEvent(EventName.PageNavigated, {
     platform: 'zhilian', accountRef: 'acc',
-  }, { scope: 'total', value: 1, prev: 0, stable: true }), 'sent')
+  }, { at: 1 }), 'sent')
   assert.equal(socket.sent.length, beforeEvent + 1)
   const event = JSON.parse(socket.sent.at(-1))
   assert.equal(event.kind, Kind.Event)
-  assert.equal(event.body.name, EventName.UnreadBadge)
+  assert.equal(event.body.name, EventName.PageNavigated)
 
   socket.receive(envelope(Kind.Cmd, 'wire-cmd-1', 's', command(Primitive.DebugPing, { via: 'wire' })))
   await eventually(() => socket.sent.some((raw) => {

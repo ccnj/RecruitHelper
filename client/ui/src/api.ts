@@ -254,8 +254,6 @@ export interface AccountView {
   manualQuietUntil: TimeValue
   dirtyHint: boolean
   pageHealth: string
-  sensorHealth: string
-  unreadTotal: number | null
   latestRound: PatrolRoundView | null
 }
 

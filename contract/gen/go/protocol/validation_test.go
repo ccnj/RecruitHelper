@@ -181,11 +181,14 @@ func TestValidateUnreadListArgsAndOpenConversationPrimitive(t *testing.T) {
 }
 
 func TestValidateEventDataAndConst(t *testing.T) {
-	valid := json.RawMessage(`{"name":"unreadBadge","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"scope":"total","value":3,"prev":2,"stable":true,"future":1}}`)
+	// 2026-08-26:原以 unreadBadge 为样本,该事件随被动未读传感删除。
+	// loginStateChanged 同样带 stable: const true 与 must-ignore 未知字段,
+	// const 规则与 must-ignore 两条覆盖逐字保留。
+	valid := json.RawMessage(`{"name":"loginStateChanged","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"state":"out","stable":true,"at":100,"future":1}}`)
 	if err := ValidateKindBody(KindEvent, valid); err != nil {
 		t.Fatalf("合法事件应通过:%v", err)
 	}
-	invalid := json.RawMessage(`{"name":"unreadBadge","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"scope":"total","value":3,"prev":2,"stable":false}}`)
+	invalid := json.RawMessage(`{"name":"loginStateChanged","context":{"platform":"zhilian","accountRef":"acc-01"},"observedAt":100,"data":{"state":"out","stable":false,"at":100}}`)
 	assertValidationError(t, ValidateKindBody(KindEvent, invalid), "$.data.stable", "const")
 }
 

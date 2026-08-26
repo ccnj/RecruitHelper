@@ -47,8 +47,6 @@ type accountView struct {
 	ManualQuietUntil *time.Time       `json:"manualQuietUntil"`
 	DirtyHint        bool             `json:"dirtyHint"`
 	PageHealth       string           `json:"pageHealth"`
-	SensorHealth     string           `json:"sensorHealth"`
-	UnreadTotal      *int             `json:"unreadTotal"`
 	LatestRound      *latestRoundView `json:"latestRound"`
 }
 
@@ -77,7 +75,6 @@ func (a *API) accountView(account store.Account) (accountView, error) {
 		PausedReason: account.PausedReason, NextPatrolAt: account.NextPatrolAt,
 		LastPatrolAt: account.LastPatrolAt, ManualQuietUntil: account.ManualQuietUntil,
 		DirtyHint: account.DirtyHint, PageHealth: string(session.CapabilityUnknown),
-		SensorHealth: string(session.CapabilityUnknown),
 	}
 	view.EnabledToday = account.EnabledDate == time.Now().In(time.Local).Format("2006-01-02") &&
 		account.EnabledAt != nil && account.StoppedAt == nil && account.PausedReason == ""
@@ -87,11 +84,6 @@ func (a *API) accountView(account store.Account) (accountView, error) {
 	if state, ok := a.hub.Registry().Get(account.BoundHandID); ok {
 		view.HandOnline = state.Online
 		view.PageHealth = string(state.PageHealth)
-		view.SensorHealth = string(state.SensorHealth)
-		if state.Sensors != nil && state.Sensors.UnreadTotal != nil {
-			value := state.Sensors.UnreadTotal.Value
-			view.UnreadTotal = &value
-		}
 	}
 	rounds, err := a.st.RecentPatrolRounds(store.AccountKey{
 		Platform: account.Platform, AccountRef: account.AccountRef,

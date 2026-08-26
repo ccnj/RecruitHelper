@@ -292,11 +292,14 @@ expectValid(
   }),
 );
 
+// 2026-08-26:原以 unreadBadge 为样本,该事件随被动未读传感删除。
+// loginStateChanged 同样带 stable: const true 与 must-ignore 未知字段,
+// const 规则与 must-ignore 两条覆盖逐字保留。
 const event = {
-  name: "unreadBadge",
+  name: "loginStateChanged",
   context: { platform: "zhilian", accountRef: "acc-01" },
   observedAt: 1,
-  data: { scope: "total", value: 2, prev: 1, stable: true, futureEventField: true },
+  data: { state: "out", stable: true, at: 1, futureEventField: true },
 };
 expectValid("event", validateKindBody(Kind.Event, event));
 expectIssue(
