@@ -836,7 +836,8 @@ func communicationV4TurnIdentity(
 			profileID,
 			aggregate.RootGreetingIntentID,
 			inbound,
+			aggregate.VerdictGeneration,
 		)
 	}
-	return DialogueTurnIdentity(profileID, lastOutbound, inbound)
+	return DialogueTurnIdentity(profileID, lastOutbound, inbound, aggregate.VerdictGeneration)
 }

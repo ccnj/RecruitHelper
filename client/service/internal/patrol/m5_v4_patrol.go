@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
@@ -317,11 +318,19 @@ func (a *roundActor) processCommunicationV4Target(
 		return err
 	}
 	var digest, turnID string
+	if tail := inbound[len(inbound)-1]; tail.SourceKey == nil ||
+		strings.TrimSpace(*tail.SourceKey) == "" {
+		// 存量无身份行兜底为账本 seq(协议 §7.4;立案 C3):不转人工,只留
+		// 观测痕。键值本身按 §4.5 保密边界不进日志。
+		slog.Info("输入边界锚兜底为账本 seq(2026-08-09 前收编的存量无身份行)",
+			"profileId", target.Profile.ProfileID, "seq", tail.Seq)
+	}
 	if anchorSeq == 0 {
 		digest, turnID, err = store.DialogueTurnIdentityFromInboundRoot(
 			target.Profile.ProfileID,
 			target.Aggregate.RootGreetingIntentID,
 			inbound,
+			target.Aggregate.VerdictGeneration,
 		)
 	} else {
 		var anchorMessage *store.Message
@@ -342,6 +351,7 @@ func (a *roundActor) processCommunicationV4Target(
 			target.Profile.ProfileID,
 			*anchorMessage,
 			inbound,
+			target.Aggregate.VerdictGeneration,
 		)
 	}
 	if err != nil {

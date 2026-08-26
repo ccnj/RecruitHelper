@@ -164,7 +164,7 @@ func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialog
 		if _, ok := DialogueTurnInputKindOf(inbound); !ok {
 			return ErrDialogueTurnBinding
 		}
-		if digest, _, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound); err != nil ||
+		if digest, _, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound, 0); err != nil ||
 			digest != req.InputDigest {
 			return ErrDialogueTurnBinding
 		}
@@ -352,7 +352,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
 		return ErrDialogueTurnBinding
 	}
-	digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound)
+	digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound, 0)
 	if err != nil {
 		return ErrDialogueTurnBinding
 	}

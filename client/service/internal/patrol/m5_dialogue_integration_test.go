@@ -352,7 +352,7 @@ func seedM5AdviceFixtureUnfrozen(
 	if err != nil || len(changes.Inserted) != len(inbounds) {
 		t.Fatalf("追加合成入站失败: changes=%+v err=%v", changes, err)
 	}
-	digest, turnID, err := store.DialogueTurnIdentity(profileID, *greetingMessage, changes.Inserted)
+	digest, turnID, err := store.DialogueTurnIdentity(profileID, *greetingMessage, changes.Inserted, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

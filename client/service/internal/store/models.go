@@ -574,6 +574,12 @@ type CommunicationV4Aggregate struct {
 	StateSchemaVersion   uint                                 `gorm:"not null"`
 	Revision             uint64                               `gorm:"not null"`
 	ProjectedThroughSeq  int64                                `gorm:"not null"`
+	// VerdictGeneration 是对话轨身份指纹的裁决代次成员(协议 §7.4 bnd-v1,
+	// 2026-08-27 停机点第二步):平时恒 0,该档案 suspect 经人工裁决
+	// resolvedFailed 的裁决事务内加一,使同一输入边界的重新规划立即可行、
+	// 键确定性区别于旧尝试。单调只增,不参与任何闸,不经 revision CAS
+	// (SQLite 单写串行化下独立自增安全)。
+	VerdictGeneration int64 `gorm:"not null;default:0"`
 	State                communication.V4State                `gorm:"serializer:json;not null"`
 	AutomationStatus     ProfileCommunicationAutomationStatus `gorm:"not null;index"`
 	ManualReason         string

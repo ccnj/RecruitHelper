@@ -927,6 +927,7 @@ func TestCommunicationV4AutomaticPositiveEvidenceAdvancesCursorAndAllowsNextTurn
 		fixture.ProfileID,
 		lastOutbound,
 		nextInbound,
+		0,
 	)
 	if err != nil {
 		t.Fatal(err)

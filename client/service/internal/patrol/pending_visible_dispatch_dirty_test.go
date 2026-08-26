@@ -43,7 +43,7 @@ func seedPlannedChainHeadReply(
 		t.Fatalf("账本缺少锚或入站行: messages=%+v", messages)
 	}
 	digest, turnID, err := store.DialogueTurnIdentity(
-		fixture.profileID, *greeting, []store.Message{*inbound},
+		fixture.profileID, *greeting, []store.Message{*inbound}, 0,
 	)
 	if err != nil {
 		t.Fatal(err)

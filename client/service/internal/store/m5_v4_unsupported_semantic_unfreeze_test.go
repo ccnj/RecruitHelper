@@ -96,7 +96,7 @@ func seedFrozenUnsupportedSemanticResumeMix(t *testing.T, s *Store) (string, str
 			t.Fatal(err)
 		}
 	}
-	digest, turnID, err := DialogueTurnIdentity(profileID, rows[0], rows[1:])
+	digest, turnID, err := DialogueTurnIdentity(profileID, rows[0], rows[1:], 0)
 	if err != nil {
 		t.Fatal(err)
 	}

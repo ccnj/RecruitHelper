@@ -64,7 +64,7 @@ func communicationV4TurnRequest(
 	).Error; err != nil {
 		t.Fatal(err)
 	}
-	digest, turnID, err := DialogueTurnIdentity(fixture.ProfileID, greeting, inbound)
+	digest, turnID, err := DialogueTurnIdentity(fixture.ProfileID, greeting, inbound, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +841,7 @@ func TestFreezeCommunicationV4WechatReceiptUsesProfileScopedEventAction(t *testi
 		).Error; err != nil {
 			t.Fatal(err)
 		}
-		digest, turnID, err := DialogueTurnIdentity(profileID, greeting, inbound)
+		digest, turnID, err := DialogueTurnIdentity(profileID, greeting, inbound, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -994,7 +994,7 @@ func TestFreezeCommunicationV4InterviewReceiptChainsEventInvite(t *testing.T) {
 		CardState: "accepted", ContentHash: "v4-interview-accepted",
 		CreatedAt: at.Add(2 * time.Second),
 	})
-	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted)
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2054,7 +2054,7 @@ func TestFreezeCommunicationV4InterviewAcceptedWithTextServiceReplyReplacesRecei
 			ContentHash: "v4-batchc-follow-text", CreatedAt: at.Add(3 * time.Second),
 		},
 	)
-	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, inbound)
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, inbound, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
