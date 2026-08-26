@@ -157,7 +157,7 @@
           "args": { "type": "object", "raw": true },
           "idemKey": { "type": "string", "optional": true, "minLength": 1, "maxLength": 1024, "maxBytes": 4096 },
           "deadline": { "type": "int64", "minimum": 0 },
-          "execBudgetMs": { "type": "int64", "minimum": 1, "maximum": 240000 },
+          "execBudgetMs": { "type": "int64", "minimum": 1, "maximum": 480000 },
           "leaseMs": { "type": "int64", "optional": true, "minimum": 5000, "maximum": 120000 },
           "guards": { "type": "object", "raw": true, "optional": true }
         }
@@ -1386,7 +1386,7 @@
         "login.in",
         "manualQuiet"
       ],
-      "execBudgetMs": 90000, "deadlineMs": 120000,
+      "execBudgetMs": 180000, "deadlineMs": 240000,
       "note": "邀面编辑器彩排:与 chat.sendInviteCard 字面共用同一编辑器准备实现,真实完成全部选择与期望值终核回读,随后停留至少 5 秒供有人值守肉眼确认,再取消编辑器并复核弹窗已关。选择集按 args.interview.method 分支:wechatVideo 为类型/日期/时间/时长/方式五项,onsite 为类型/日期/时间三项——现场面试在平台上没有时长与方式控件,durationValue/methodValue 随之省略,不得以占位值冒充。面试类型的当前值只能读弹窗标题回显判定,平台默认类型不稳定(真机观察到连续两次打开默认不同),无论目标为何都必须核对回显、必要时点击切换并轮询等回显变为目标后才可继续。构造性不包含发送路径:不评估发送守卫、不建立发送基线、不触碰发送控件,不产生候选人可见动作,失败与取消结果只如实上报。data 回读值仅含我方自设的日期/时间/时长/方式文本。仅供开发期有人值守验收与回归使用,不得复用为发送授权、发送基线或业务状态依据"
     },
     "debug.slowEcho": {
@@ -1407,7 +1407,7 @@
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
       "argsSchema": "AccountReadWechatSettingArgs", "dataSchema": "AccountReadWechatSettingData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 30000,
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "读取招聘方账号在平台上的微信号联系配置是否已填(2026-08-18 甲方裁决立案),供脑在用户显式开始工作流前裁决放行——该配置空着时换微信链路无号可给。智联实现:导航平台页到个人中心,条件轮询等「微信号」栏渲染(最长约 10 秒),按可见文本判定:值非空且非「暂未添加」占位即 configured=true,占位/为空/存在可见「去添加」动作即 false;判据必须读文本——真机实测未配置时值元素照样存在,只显示占位,「元素出现」不构成判据。栏等不到、路由不可达、读取异常一律整体 failed,不返回猜测;脑侧对 failed 与 configured=false 同向处理(拒绝开始),失效方向永远朝少做。data 刻意只含布尔,绝不携带微信号本身(招聘方自己的微信号不进契约的既有禁令原样适用)。唯一页面动作是导航,不点击、不滚动、不打开弹层、不修改任何配置;读完不负责导航回原页面,后续页面需要由既有恢复路径重建。读数只授权本次开始请求放行与否,不得复用为任何 effectful 动作的前置正证或验证读"
     },
     "nav.ensureSurface": {
@@ -1421,7 +1421,7 @@
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "ChatReadListArgs", "dataSchema": "ChatReadListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
-      "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 60000,
+      "execBudgetMs": 480000, "deadlineMs": 600000, "leaseMs": 60000,
       "note": "无游标窗口遍历:每次只返回当前平台列表已经加载、可由同一会话定位器操作的稳定窗口,最多 32 项且完整 data<=64KB。move=reset 切换并回读目标筛选、回到顶部后读取窗口;move=next 要求筛选未变、向下移动小于一屏并等待稳定后读取窗口。跨窗口重复 conversationRef 是正常输入,由脑按 fingerprint 跳过;单窗口内身份重复仍失败。complete=true 只表示当前物理底部或 all 的年龄截止。filter=all 时 stopOlderThanDays 省略默认 8；filter=unread 时必须省略 stopOlderThanDays 且不设年龄截止，并须在平台真实选择并回读“全部职位+未读”，不得只在手内过滤普通列表。未读筛选窗口的单行 unreadCount 是低保真提示，零值不得单独导致整窗失败或被手静默过滤。positionTitle 仅在当前会话行存在唯一公开可见职位标题时返回；缺失为 null/省略，脑不得猜测"
     },
     "chat.identifyCurrentConversation": {
@@ -1442,14 +1442,14 @@
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
       "argsSchema": "ChatOpenConversationArgs", "dataSchema": "ChatOpenConversationData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
-      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 30000,
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
       "note": "只在当前已回读为“全部职位+未读”的 fresh 列表中，按完整 conversationRef 唯一定位并标准点击一次；不得全局搜索，不得按姓名、职位、序号或 DOM 位置降级。ok 前必须复核公开路由仍绑定目标，并确认目标可见未读标记已清除或该行已离开未读列表；不读取消息正文、不创建或收编档案、不运行状态机、不发送。目标消失、身份不唯一、路由漂移或已读结果未确认时必须失败，不得宣告成功"
     },
     "chat.readThread": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
       "argsSchema": "ChatReadThreadArgs", "dataSchema": "ChatReadThreadData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
-      "execBudgetMs": 240000, "deadlineMs": 300000, "leaseMs": 30000,
+      "execBudgetMs": 480000, "deadlineMs": 600000, "leaseMs": 30000,
       "note": "有界分页:cursor 对脑不透明;每页最多 64 项且完整 data<=64KB;脑续页至 anchorMatched/reachedTop;聚合完整快照后才做重叠对齐。requireCurrent=true 时只读已经打开的目标会话，禁止定位、点击或切换，并在每页读取前后核对公开路由，漂移即失败。稳定服务端消息可带 sourceKey=sha256(\"source-v1|\"+平台稳定消息身份) 的 64 字符小写 hex;原始平台身份不得出手"
     },
     "candidate.readCurrent": {
@@ -1463,70 +1463,70 @@
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
       "argsSchema": "CandidateReadResumeArgs", "dataSchema": "CandidateReadResumeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "只读取脑已绑定 tracked IM 会话中同一 platformUserRef 的完整五分区简历;不搜索、不滚动、不按姓名、职位、resumeNumber 或 DOM 位置兜底;读不到、换绑、结构不完整或超限均失败且不返回部分 data"
     },
     "candidate.readSourcingResume": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
       "argsSchema": "CandidateReadSourcingResumeArgs", "dataSchema": "CandidateReadSourcingResumeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "从当前明确的候选人采集页面打开并读取一位未列入 excludePlatformUserRefs 的候选人完整五分区简历;读取并再次核对目标绑定后,必须关闭本命令使用的详情,确认弹框消失且 URL 不再携带 resumeNumber 才可返回 ok;关闭无法确认时整体失败且不返回部分 data。打开详情可能产生幂等已查看记录。稳定身份与职位读不到、详情换绑、结构不完整或超限均失败且不返回部分 data;不得降级到姓名、resumeNumber、DOM 位置或列表序号作为身份"
     },
     "candidate.selectSourcingPosition": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "CandidateSelectSourcingPositionArgs", "dataSchema": "CandidateSelectSourcingPositionData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "采集前按脑给出的职位展示名选择当前推荐页职位。手只接收 positionTitle,不得接收后台 Job.ID。标题按 NFC、trim 与 Unicode 空白折叠后唯一精确匹配;零个或多个匹配、页面未稳定、职位身份或标题无法确认均整体 failed。成功 data 只陈述本次页面最终观察;脑仍须紧接 candidate.applySourcingFilters,再用 candidate.readSourcingWindow 独立回读并在事务中核对后台职位后才能开始采集"
     },
     "candidate.applySourcingFilters": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "CandidateApplySourcingFiltersArgs", "dataSchema": "CandidateApplySourcingFiltersData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 120000, "deadlineMs": 180000, "leaseMs": 30000,
+      "execBudgetMs": 240000, "deadlineMs": 360000, "leaseMs": 30000,
       "note": "采集前在已核对职位的推荐页精确覆盖六组平台中立筛选;用字面同一状态读取器完成差异覆盖、提交前完整回读、唯一确定、推荐窗口稳定、二次完整回读与取消收口。成功 data 必须回显最终观察到的同一 positionRef、positionTitle 与完全相等 filters。任一字段/选项零或多匹配、状态不可读、职位变化、提交或稳定失败、二次回读不一致、取消未收口均整体 failed。不得接收后台 Job.ID、selector、平台内部状态或候选人正文"
     },
     "candidate.readSourcingWindow": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "CandidateReadSourcingWindowArgs", "dataSchema": "CandidateReadSourcingWindowData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 15000,
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 15000,
       "note": "读取当前推荐列表稳定身份窗口;move=current 不滚动,reset 回到起点,next 至多推进一个可见窗口。只返回唯一 positionRef、nullable 标题、按页面顺序的最多 32 个唯一 platformUserRef、moved 与 observedAt,不得返回姓名或 resumeNumber。moved=false 只表示本次没有确认推进,绝不证明列表耗尽"
     },
     "candidate.readSourcingTargetResume": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "idempotentReadReceipt",
       "argsSchema": "CandidateReadSourcingTargetResumeArgs", "dataSchema": "CandidateReadSourcingResumeData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "只打开并读取当前推荐窗口中唯一匹配 platformUserRef+positionRef 的候选人完整五分区简历;不搜索、不滚动、不改筛选。读取并再次核对目标绑定后必须关闭本命令使用的详情,确认弹框消失且 URL 不再携带 resumeNumber 才可返回 ok;关闭无法确认时整体失败且不返回部分 data。不得降级到姓名、resumeNumber、DOM 位置或列表序号作为目标"
     },
     "job.readPublishedList": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobReadPublishedListArgs", "dataSchema": "JobReadPublishedListData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 90000, "deadlineMs": 150000, "leaseMs": 30000,
+      "execBudgetMs": 180000, "deadlineMs": 300000, "leaseMs": 30000,
       "note": "读取本账号在平台上已存在职位的分区清单,供脑侧发布前预检判定同名职位是否已存在,以及采集开启前判定职位是否在线。必须遍历平台上全部职位状态分区,任一分区读取失败即整体 failed,绝不返回部分结果——少读一个分区会把已存在误判成可发。按分区返回:每个分区带页签原样文案 label(如在线中/未上线/审核中/未过审)与该分区内平台原样职位名;不返回平台职位 ID、DOM 位置或候选人数据。存在性判定取各分区并集。该原语只切换分区与翻页,不创建、不编辑、不上下线任何职位,不产生候选人可见动作"
     },
     "job.readClassCandidates": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobReadClassCandidatesArgs", "dataSchema": "JobReadClassCandidatesData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
+      "execBudgetMs": 300000, "deadlineMs": 480000, "leaseMs": 60000,
       "note": "读取平台针对某个职位给出的职位类别候选全集。填入工作性质、职位名称与职位描述三项——三项都进平台的判定输入,少填会让候选偏。真机事实:类别选择器在这几项写完并由平台加载完成之前**打不开**,写完之后打开会得到一个弹层(recommend-jobType-modal),里面是数个候选,每个带类别名与平台官方释义——那就是该职位的全部可选值。所以候选集拿不到可以离开填表:本原语先导航到干净发布页,只填职位名称与职位描述,再轮询点击类别入口直到弹层出现,读回全部候选后关闭弹层,不提交任何东西、不产生候选人可见动作。**args.keepForm 为 true 时读完保留已填表单、不离开发布页**,供紧接着的 job.readKeywordVocabulary 复用,省掉一次填表与描述失焦后的数十秒等待;缺省或 false 时照旧离开发布页。保留下来的表单必填不齐(缺类别、学历、经验、薪资、月数、关键词、人数),误点「发布」平台自己会拒。旧版手不认识该字段时按 must-ignore 丢弃、照常离开页面,下一趟回读发现对不上会整个重填,不会出错。prefilledClass 是平台自动预填的类别(若有),纯诊断——平台只在它自己有把握时才预填,不预填时并不代表没有候选。绝不点弹层底部的「去反馈」(那是申请新增类别,不是选择)。候选为空是如实返回,由脑判定为干净失败并转人工,手不得据此猜一个类别。args.partnerCompany(选填)语义同 job.prepareDraft:发布表单出现「职位性质」一组时,手一律选「代招岗位」并按该配置名在代招公司弹窗里逐字相等选中恰好一行,零行/多行/未配置即整体 failed(2026-08-23 甲方裁决,三趟填表同一规则,配置错误在本趟零副作用阶段就暴露);该组不在场时不涉及。旧版手不认识该字段时按 must-ignore 丢弃"
     },
     "job.readKeywordVocabulary": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobReadKeywordVocabularyArgs", "dataSchema": "JobReadKeywordVocabularyData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 150000, "deadlineMs": 240000, "leaseMs": 60000,
+      "execBudgetMs": 300000, "deadlineMs": 480000, "leaseMs": 60000,
       "note": "读取平台针对某个职位、在某个已选定职位类别下给出的关键词分组词库全集。真机事实:关键词弹层必须先填职位描述**且已选定职位类别**才打得开(类别为「请选择」时点入口毫无反应),而分组结构、组内词库与是否自动预选随类别与描述一起变——词库因此只能在类别定下来之后现读,无法离线预知。执行顺序:先回读发布页表单的职位名称、工作性质与描述长度,与 args 一致就复用上一趟(job.readClassCandidates 带 keepForm)留下的半成品表单,不一致或读不到就导航到干净发布页重填这三项——**不假设页面状态**,复用只是省时间,不是正确性依赖;再按 args.jobClass 逐字选中类别(选不中即整体 failed,绝不模糊匹配、绝不就近取一个);再打开关键词弹层、展开「更多」、清空平台预选,按分组读回标题、组内词条与配额;最后直接导航离开发布页(导航即销毁弹层,不必也不该去点弹层上的任何按钮),**绝不点击弹层的「确定」——那会把关键词写进表单,而本原语只读不写——也绝不点击发布或任何提交控件**。清空预选是必须的:预选一次有一次无,不清就算不准配额。分组不得拍平成一张词表——组内上限是 3,脑要按分组喂给模型才不会让它把词堆在一组里被平台拒掉。formReused 只作诊断,不参与判定。词库为空是如实返回,由脑判定为干净失败并转人工,手不得据此自造关键词。args.partnerCompany(选填)语义同 job.readClassCandidates:发布表单出现「职位性质」一组时按该配置名逐字相等选中恰好一行代招公司,零行/多行/未配置即整体 failed(2026-08-23 甲方裁决);复用上一趟留下的表单时该段已在上一趟完成,不重选"
     },
     "job.prepareDraft": {
       "ver": 1, "class": "intrusive", "batch": "S", "platformSideEffect": "none",
       "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPrepareDraftData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet"],
-      "execBudgetMs": 180000, "deadlineMs": 240000, "leaseMs": 45000,
+      "execBudgetMs": 360000, "deadlineMs": 480000, "leaseMs": 45000,
       "note": "在平台发布表单上按 args 试填一次并回读实际结果,用于暴露填充能力与平台自动行为。**绝不点击发布或任何提交控件**;回读完成后必须主动离开发布表单,不把一个填满的表单留在页面上等人误点。职位类别不在 args 里——平台按职位描述自动判定,data 只回读它判成了什么。关键词按平台当前词库全等匹配,未命中的走兜底分组自定义,超出分组配额的丢弃并如实记进 dropped。任一必填字段填不进去即整体 failed,不返回半成品。data 只含回读结论与字数,不回传描述正文。args.partnerCompany(选填)是后台配置的代招公司名,只在发布表单出现「职位性质」一组时使用:手一律选「代招岗位」,再在代招公司弹窗里按去首尾空白后**逐字相等**找它,恰好命中一行才点选;命中零行、命中多行(同名歧义)、或该组在场却未配置,一律整体 failed(sideEffect=none,失败原文带配置名与弹窗里实际的公司名列表,供运营对照改配置)——绝不模糊匹配、绝不取最后一家、绝不猜(2026-08-23 甲方裁决,收回 2026-08-22「提示不是闸、蒙一个也比停下好」口径:真机证实同一账号可挂多家代招公司,猜错即把职位挂到别家名下发出去);回读正证仍是框内出现公司名。data.partnerCompany 回传实际选中的公司名,该段未走(账号没有职位性质字段)时为 null,由脑与配置比对生成用户可见提示"
     },
     "job.publishDraft": {
@@ -1534,7 +1534,7 @@
       "argsSchema": "JobPrepareDraftArgs", "dataSchema": "JobPublishDraftData",
       "guardsSchema": "JobPublishDraftGuards", "evidenceSchema": "JobPublishDraftEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
-      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 60000,
+      "execBudgetMs": 480000, "deadlineMs": 600000, "leaseMs": 60000,
       "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
       "note": "把一个职位真正发布到平台。真机实测手侧整条执行约 35 秒(读列表 → 填表 → 点击 → 两轮回读);lease 只需容纳最长单步,填同一张表的 job.prepareDraft 用 45 秒已在真机验证够用,本原语只多出点击后的两轮回读,故取 60 秒(CmdBody 的 leaseMs 上限是 120 秒,150 秒会让命令在契约校验就被拒)。首发那次 45 秒 leaseExpired 不是填表太慢:手 35 秒就回了 result,但 result 落不了账(realEffectResultPlan 缺本原语分支),命令一直不收束才反复触发租约到期,根因已单独修掉。配对验证读 job.readPublishedList 按「平台职位名全集里是否出现该职位名」判定,与幂等口径共用同一套归一化;它不读会话尾部、也不比对发送指纹,因此 ContentHash 与意图的 SendFingerprint 同为空即视为无指纹要求。手侧原语内部已经完成发后两轮回读,脑侧验证是 suspect 的自动收敛出路;两者都读不到时转人工去平台核对。args 与 job.prepareDraft 同形,jobName 只接受脑侧传入的后台职位名。执行顺序固定:先读平台职位名全集确认同名不存在(这是幂等闸),再导航到干净发布页填表,填完只点一次「发布」。**同名复核不能挪到点击前的最后一刻**——读列表必须离开发布页,会丢弃已填表单;因此本原语接受填表期间(约数十秒)平台出现同名职位的 TOCTOU,该风险已由甲方 2026-07-30 知情裁决为不予防护。点击前的 guards 只复核不需要离页的部分:expectAbsentOnPlatform 与表单关键字段回读值等于意图。点击之前的任何失败一律 sideEffect=none(未发布,可安全重试);点击之后默认 possible,唯一例外见下文「平台拒绝弹窗」。原语内绝不重试、绝不第二次点击。点击之后平台可能弹出敏感词确认层(列出敏感词与所在字段,给忽略/修改两个出口;弹层开着时职位并未创建),按甲方 2026-07-30 裁决自动点一次「忽略」继续发布——这是同一个不可逆动作的确认续做,不是第二次点击发布;只在「可见弹层唯一 + 文案确属敏感词提示 + 忽略按钮唯一且未禁用」三条同时成立时才点,否则按 possible 转人工,绝不点「修改」。成功正证是发布后回读职位管理列表出现名称等于 job.name 的职位(不区分在线中/审核中等分区,与幂等口径同一套归一化比较);读不到只记未确认并进入验证或 suspect,不得推断失败或再次发布——**唯一例外是平台拒绝弹窗(2026-08-23 甲方裁决,依可见后置状态原则「只有平台明确呈现的可信失败结果才能判定失败」)**:点击发布后平台立即弹出 km-modal--message-box 且可见文案同时含「职位类别」与「不匹配」(已知族目前仅「所选职位类别与职位描述不匹配,请重新选择职位类别」一条),手照常做发后列表回读,弹窗在场**且**列表里没有该职位才判 failed/sideEffect=none(错误码复用 GUARD_FAILED,原文带弹窗原话),脑按既有路径收成干净失败、不进 suspect、批量发布跳过该职位继续;弹窗在场但列表里有该职位仍判成功(成功=发后页面可见优先);文案不在已知族的其它 message-box 维持 possible 走验证/suspect,只把弹窗原话记进 platformFeedback 与诊断(观测,攒真机样本再扩族);弹窗晚于轮询窗口才出现同样回落 possible。手不点弹窗上的「我知道了」,回读导航离页即销毁弹窗。本例外不授权任何自动换类别重发。platformFeedback 只收录发布后页面可见的提示原话,纯诊断,不参与判定。args.partnerCompany 与 data.partnerCompany 的语义同 job.prepareDraft:代招公司按配置名逐字相等恰好命中一行才选,零行/多行/未配置即整体 failed(发生在点击发布之前,sideEffect=none),不取最后一家、不模糊匹配(2026-08-23 甲方裁决);data 回传实际选中的公司名,未涉及时为 null"
     },
@@ -1543,7 +1543,7 @@
       "argsSchema": "JobTakeOfflineArgs", "dataSchema": "JobTakeOfflineData",
       "guardsSchema": "JobTakeOfflineGuards", "evidenceSchema": "JobTakeOfflineEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "witness/1"],
-      "execBudgetMs": 120000, "deadlineMs": 300000, "leaseMs": 60000,
+      "execBudgetMs": 240000, "deadlineMs": 480000, "leaseMs": 60000,
       "verification": { "primitive": "job.readPublishedList", "ver": 1, "maxRounds": 3 },
       "note": "把一个已在线的职位下线。立案于甲方 2026-08-13 裁决「发布完之后立刻下线」,与 job.publishDraft 是两条独立原语、两条独立意图:发布成功而下线失败时,已发布那笔账原样成立,不受下线结果影响。甲方同日明确本动作**只是锦上添花,失败记一笔即可**,因此它是全部 effectful 原语里唯一不产人工票据的一个——脑侧收束见 realJobTakeOfflineResultPlan 与 recordVerificationMiss 的本原语分支,不进 suspect 队列、不冻结人工裁决。这不放宽任何其他原语的失效方向:下线失败的后果是职位仍在线,方向是「少做了下线」而非多做副作用,且平台上重复下线不可能发生(已下线的行根本没有下线入口),与消息类原语的多发风险不是一类。执行顺序固定:导航到职位管理页 → 切到「在线中」分区并等其渲染完整 → 按 args.jobName 在该分区内找唯一匹配行(归一化口径与发布幂等共用一套) → 点该行的下线入口 → 等二次确认弹层出现 → 点弹层的确认 → 回读列表取正证。真机事实(2026-08-13 GPT Chrome 只读考古 + 一次真实下线,测试职位):行是 div.job-list > div.job-item,职位名在 a.job-item__title--jobname(与 job.readPublishedList 同一套选择器),下线入口是行内 a[zp-stat-id=job-action-offline];点它只打开弹层、**不产生任何副作用**,弹层是全局单例 .km-modal.km-modal--open.km-modal--message-box,文案「确定要下线该职位吗?」**不含职位名**,确认按钮是 button.km-button--primary(文案「下线」)、取消是 .km-button--light.default-button,两个按钮都没有 zp-stat-id。页面里同时存在数十个 .km-modal 且数量随操作增减,判别弹层是否打开只能靠 km-modal--open 且可见,绝不能靠存在性或计数。**弹层不含职位名意味着确认层做不了目标绑定**:绑定必须在点下线入口那一刻就凭同一个 DOM 行锁死,点开弹层到点确认之间不得重读列表、不得重新定位;这道口子由「在线中分区内同名职位唯一」这条硬前置封住——匹配到两条同名一律干净失败,绝不猜。副作用边界:点确认按钮**之前**的任何失败一律 sideEffect=none(职位仍在线,可安全重来),点确认之后一律 possible。原语内绝不重试、绝不第二次点击、绝不点「取消」以外的其他控件,弹层不按预期出现即按 none 干净失败。成功正证是点击后回读职位管理页,args.jobName **不再出现在「在线中」分区**(不要求它出现在「未上线」——下线后落哪个分区是平台的事,不在线才是本原语的目标);真机实测下线后在线中计数减一、未上线计数加一、该行带「手动下线」标签,标签纯诊断不作判据。读不到正证只记未确认,不得推断失败、不得再次点击。platformFeedback 只收录下线后页面可见的提示原话,纯诊断,不参与判定"
     },
@@ -1568,7 +1568,7 @@
       "argsSchema": "ChatSendGreetingArgs", "dataSchema": "ChatSendGreetingData",
       "guardsSchema": "ChatSendGreetingGuards", "evidenceSchema": "ChatSendGreetingEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "login.in", "manualQuiet", "candidate.selected", "relationship.unestablished", "witness/1"],
-      "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readGreetingOutcome", "ver": 1, "maxRounds": 3 },
       "note": "仅对脑已持久化且关系未建立的候选人×职位发送一条招呼。preflight 与最终动作前字面调用同一 greeting evaluator;两步平台 UI 的第一击只可打开本命令拥有的编辑器,最终发送是唯一候选人可见动作且至多调用一次。不得覆盖既有弹窗、修改默认招呼设置、在原语内重试,也不得以平台私有实现层互证授权。编辑器准备阶段不监听真人操作(2026-08-11 甲方裁决),直接以本命令正文覆盖编辑器当前内容;写入后至发送前的正文所有权仍由同一 evaluator 以精确相等核对承担。成功接受同一目标从关系未建立变为已建立的可见业务状态;conversationRef 只作可选丰富正证。无变化、目标消失或读失败只算未确认并进入验证或 suspect,不得推断失败或第二次动作"
     },
@@ -1577,7 +1577,7 @@
       "argsSchema": "ChatSendWechatInviteArgs", "dataSchema": "ChatSendWechatInviteData",
       "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatSendWechatInviteEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"],
-      "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
       "note": "只向既有 tracked 会话发起一次换微信邀请。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;原语内不重试。成功只接受相对基线恰好新增一条服务端确认的我方 card/wechatExchange/pending,且具有稳定 sourceKey;零新增、多新增、并发入站、目标换绑或读取失败均为未确认,进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
@@ -1586,7 +1586,7 @@
       "argsSchema": "ChatSendInviteCardArgs", "dataSchema": "ChatSendInviteCardData",
       "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatSendInviteCardEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "composer.empty", "conversation.tracked", "witness/1"],
-      "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
+      "execBudgetMs": 240000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readThread", "ver": 1, "maxRounds": 3 },
       "note": "只向既有 tracked 会话发送一次邀面卡,method 支持 wechatVideo 与 onsite:wechatVideo 必须带 endsAt 且大于 startsAt,onsite 必须缺席 endsAt(平台对现场面试不提供结束时间,不得由 startsAt 合成或以占位值冒充)。preflight 与最终动作前必须字面调用同一 evaluator 核对账号、目标、expectedTail、草稿所有权与唯一公开动作表面;准备步骤不得产生候选人可见副作用,最终发送至多调用一次。成功只接受相对基线恰好新增一条服务端确认的我方 card/interviewInvite/unknown,稳定 sourceKey 与该形态下的邀面参数全部精确相等(onsite 的 contentHash 按配方把缺席的 endsAt 投影为空串);平台 state=0 不得解释业务状态。任何阴性只进入 chat.readThread 验证或 suspect,禁止第二次动作"
     },
@@ -1595,7 +1595,7 @@
       "argsSchema": "ChatAcceptWechatArgs", "dataSchema": "ChatAcceptWechatData",
       "guardsSchema": "ChatSendMessageGuards", "evidenceSchema": "ChatAcceptWechatEvidence",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet", "conversation.tracked", "witness/1"],
-      "execBudgetMs": 60000, "deadlineMs": 600000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 600000, "leaseMs": 30000,
       "verification": { "primitive": "chat.readWechatExchangeOutcome", "ver": 1, "maxRounds": 3 },
       "note": "只接受当前 tracked 会话中由 requestSourceKey 精确锚定的候选人主动微信请求。preflight 与最终 click 前必须字面调用同一 evaluator,核对账号、目标、expectedTail、稳定消息基线、唯一 105/in/originType=2/success 请求、唯一可见且非 done 的标准同意动作;原语内只 click 一次且不重试。成功正证是同一张请求卡上的可见后置状态:标准同意动作消失、卡片转入已完成形态,按可见文本判定,类名只作定位提示。259/out/originType=2/success 是可选加成而非成功前提:窗口内唯一到达且双微信字段齐全才一并返回 exchangeSourceKey 与候选人 peerWechat,零匹配、多匹配、方向或 originType 不符、字段不全时两者一并缺席但不推翻正证;号可由 chat.readWechatExchangeOutcome 延迟收编。可见后置状态读不到、读不清、目标换绑或身份复核失败才是未确认,进入专门 outcome 读或 suspect,禁止第二次接受"
     },
@@ -1617,7 +1617,7 @@
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
       "argsSchema": "CandidateCaptureResumeScreenshotArgs", "dataSchema": "CaptureScreenshotData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet", "blob/1"],
-      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 30000,
+      "execBudgetMs": 120000, "deadlineMs": 240000, "leaseMs": 30000,
       "note": "只对脑已绑定 tracked 会话中同一 platformUserRef 的简历详情面,按 candidate.readResume 同款打开方式截取真实渲染像素并顶部锚定滚动拼接为单张 JPEG;打开后满足最短停留才允许收口,逐帧滚动同守交互节奏下限。图像字节先经 blob/1 PUT,data 只携带 imageBlobRef 引用与元数据;帧预算内截断须 truncated=true。未协商 blob、非前台、面板打不开或换绑、容器无法归一或拼接/上传异常均响亮失败,不返回部分图像。不搜索、不按姓名/职位/DOM 位置兜底"
     },
     "chat.readPeerPhone": {
@@ -1631,7 +1631,7 @@
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "idempotentPhoneReveal",
       "argsSchema": "ChatReadPeerPhoneArgs", "dataSchema": "ChatReadPeerPhoneData",
       "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "conversation.tracked", "manualQuiet"],
-      "execBudgetMs": 30000, "deadlineMs": 60000, "leaseMs": 15000,
+      "execBudgetMs": 60000, "deadlineMs": 120000, "leaseMs": 15000,
       "note": "对真人当前已打开且公开路由精确匹配的会话,点一次右侧简历侧栏的「查看电话」按钮并条件轮询(≤10 秒)等号码揭示,揭示后的形态与真实号形态同构(复制按钮带 data-clipboard-text,2026-08-07 授权点击直读固化),按 readPeerPhone 同款判据读回。平台副作用 idempotentPhoneReveal:首次点击消耗账号一次查看权益并把候选人迁入平台「已获取电话」状态,揭示后按钮消失、重复执行找不到按钮只会读到已揭示号码,不二次消耗;点击对候选人不可感知、不发送任何业务内容(2026-08-07 授权点击实测无确认弹窗、直接出号)。按钮缺失但复制按钮在场视为已揭示,直接读回;两者都缺失或点击后超时未揭示均响亮失败,不返回部分结果。原语内不重试点击;脑侧每候选人终身至多派发一次(标记先行),任何失败只产生「缺号」,不转人工、不授权重试"
     }
   },

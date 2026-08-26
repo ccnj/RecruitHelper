@@ -2525,8 +2525,8 @@ test('candidate.readResume MAIN 关闭后仍可见时响亮失败', async () => 
     assert.equal(fixture.state.clicks, 1)
     assert.equal(fixture.state.closeClicks, 1)
     assert.equal(fixture.state.modals.length, 1)
-    assert.equal(fixture.state.now - fixture.state.closedAt, 10_000,
-      '关闭后最多条件等待 10 秒确认消失')
+    assert.equal(fixture.state.now - fixture.state.closedAt, 20_000,
+      '关闭后最多条件等待 20 秒确认消失')
   } finally {
     fixture.restore()
   }
@@ -10145,8 +10145,8 @@ test('M5-B 微信接受外层只过一次 barrier、同一 evaluator 一次 comm
     )
     assert.equal(commitCalls - commitsBefore, 1,
       '阴性观察后不得补第二次接受动作')
-    assert.equal(outcomeReads - readsBefore, 40,
-      '接受动作后置观察总预算固定为 40×250ms，不扩大到第二次 click')
+    assert.equal(outcomeReads - readsBefore, 80,
+      '接受动作后置观察总预算固定为 80×250ms，不扩大到第二次 click')
   } finally {
     globalThis.chrome = originalChrome
     globalThis.setTimeout = originalSetTimeout
