@@ -545,11 +545,18 @@ func (a *roundActor) dispatchM5Action(
 		)
 	}
 	if err != nil || handle == nil {
-		if closeErr := a.manager.store.MarkM5AutomaticActionManualRequired(
-			action.ActionID, "automaticDispatchNotConstructed", a.manager.now(),
-		); closeErr != nil {
-			return errors.Join(err, closeErr)
+		if errors.Is(err, store.ErrDialogueTurnBinding) ||
+			errors.Is(err, store.ErrCommunicationActionConflict) {
+			// 世界在计划与派发之间又动了(候选人新输入/真人插话):作废本批,
+			// 下轮巡检按最新账本边界重开(2026-08-27 停机点第二步,失败方向
+			// 自 automaticDispatchNotConstructed 挂人工改为作废重开;带未收束
+			// effect 案底的轮由 settle 内的承重墙回落保守停靠)。
+			return a.settleM5TurnBoundaryChanged(turn.TurnID)
 		}
+		// 其余构造失败按第 3 类处置:本轮跳过,同键动作下轮自然重试(WAL
+		// 未创建,重试幂等安全),不再挂人工。
+		slog.Warn("自动动作派发未构造:本轮跳过,下轮巡检自然重试",
+			"actionId", action.ActionID, "err", err)
 		return nil
 	}
 	func() {

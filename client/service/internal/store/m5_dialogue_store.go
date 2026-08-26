@@ -241,18 +241,20 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err != nil {
 		return err
 	}
-	var v4Aggregate *CommunicationV4Aggregate
 	if v4Turn {
 		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
 		if err != nil {
 			return err
 		}
+		// 2026-08-27 停机点第二步:AI 边界上的中间新鲜度重验删除——游标
+		// 等值腿与账本内容重建/digest 复核腿一并拆除,输入过时最多浪费
+		// 一次 token,发送前的账本尾终检(链首平价/父对齐闸)照旧兜底。
+		// revision==回执头仍保留:它是回执链完整性护栏,不是新鲜度检查,
+		// 放行会让建议回执以错位 FromRevision 落账、毒化后续 head 重放。
 		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
-			aggregate.Revision != application.ToRevision ||
-			aggregate.ProjectedThroughSeq != turn.InboundThroughSeq {
+			aggregate.Revision != application.ToRevision {
 			return ErrDialogueTurnBinding
 		}
-		v4Aggregate = &aggregate
 	}
 	if profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID ||
@@ -292,23 +294,10 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		return ErrDialogueTurnBinding
 	}
 	if v4Turn {
-		// v4 分支走解耦后的统一重建（0727当日计划3）：锚由账本派生并经
-		// digest 自证，区间尾允许平台 system 行，游标不再要求指向出站。
-		if v4Aggregate == nil {
-			return ErrDialogueTurnBinding
-		}
-		lastOutbound, inbound, _, _, err := reconstructCommunicationV4TurnBoundaryTx(
-			tx, profile, turn.ConversationRef, turn.InboundFromSeq, turn.InboundThroughSeq,
-		)
-		if err != nil {
-			return err
-		}
-		digest, turnID, err := communicationV4TurnIdentity(
-			*v4Aggregate, turn.ProfileID, lastOutbound, inbound,
-		)
-		if err != nil || digest != turn.InputDigest || turnID != turn.TurnID {
-			return ErrDialogueTurnBinding
-		}
+		// 2026-08-27 停机点第二步:v4 分支的账本内容重建与 digest 复核已随
+		// 「AI 边界中间新鲜度重验删除」一并拆除——冻结事务在创建时刻已做过
+		// 同一套重建自证,推进途中世界再变由派发前的账本尾终检兜底,失败
+		// 方向是作废本批下轮重开,不再中途反复对账。
 		return nil
 	}
 	var activeTail, outboundTail int64

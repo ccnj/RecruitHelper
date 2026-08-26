@@ -2332,7 +2332,9 @@ func TestValidateDialogueTurnCurrentToleratesExchangeResultCardAfterTurn(t *test
 	if err != nil {
 		t.Fatalf("轮后交换结果卡不得作废承接轮: err=%v", err)
 	}
-	// 真人出站文本仍然作废本轮。
+	// 2026-08-27 停机点第二步:AI 边界中间新鲜度重验已删除,真人出站不再
+	// 在推进途中作废本轮——防线移到派发前的账本尾终检(链首平价闸拒绝后
+	// 按新失败方向作废本批下轮重开),下一轮边界现算把真人行收为新锚。
 	human := "我手动回了一句"
 	appendCommunicationV4Inbound(t, s, fixture, Message{
 		Seq: 5, Direction: "out", Kind: "text", Text: &human,
@@ -2341,7 +2343,7 @@ func TestValidateDialogueTurnCurrentToleratesExchangeResultCardAfterTurn(t *test
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		return validateDialogueTurnCurrentTx(tx, frozen.Turn)
 	})
-	if !errors.Is(err, ErrDialogueTurnBinding) {
-		t.Fatalf("真人出站必须仍作废本轮: err=%v", err)
+	if err != nil {
+		t.Fatalf("中游重验删除后真人出站不得中途作废本轮: err=%v", err)
 	}
 }
