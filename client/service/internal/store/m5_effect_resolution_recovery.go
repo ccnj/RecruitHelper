@@ -11,9 +11,12 @@ package store
 // 原样保留、不复活、不改写;被冻结的轮与其未派发残留显式作废
 // (resolvedFailedSuperseded,复用第 4 族 supersede 的形状与 effect-bound
 // 守卫思路);候选人聚合仅在人工原因确属 effectSuspect 且无其他未决 effect
-// 停靠时解冻。同边界重开轮受投影游标不可回退约束(轮身份=边界内容寻址,
-// FreezeCommunicationV4Turn 要求边界在游标之后),故重新规划交给下一个自然
-// 触发点(候选人新输入开新轮,或时刻表轨),不铸代次后缀。
+// 停靠时解冻。
+//
+// 2026-08-27 停机点第二步(协议 §7.4 bnd-v1):对话轨恢复在同一裁决事务内
+// 把该档案的裁决代次加一,使同一输入边界的重新规划键确定性区别于旧尝试,
+// 下一巡检轮即可按最新世界状态在原边界立即重开新轮——不再等待候选人新输入
+// 或时刻表触发(替代原"投影游标不可回退,交下一个自然触发点"约束)。
 
 import (
 	"time"
@@ -112,6 +115,14 @@ func recoverCommunicationV4LegacyAfterResolvedFailedTx(
 	}
 	if updated.RowsAffected != 1 {
 		return ErrDialogueTurnConflict
+	}
+	// 裁决代次加一(协议 §7.4,2026-08-27 停机点第二步):同边界的下一次
+	// 规划自此持有全新指纹,立即可开新轮。单调只增、不参与任何闸。
+	if err := tx.Model(&CommunicationV4Aggregate{}).
+		Where("profile_id = ?", turn.ProfileID).
+		UpdateColumn("verdict_generation", gorm.Expr("verdict_generation + 1")).
+		Error; err != nil {
+		return err
 	}
 	// 事件侧未派发依赖残留(对话代持回执的多气泡/卡片)同样作废,防止解冻
 	// 后留下永远等不到父正证的 planned 僵尸行。

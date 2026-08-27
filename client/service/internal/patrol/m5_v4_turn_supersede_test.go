@@ -125,9 +125,14 @@ func TestCommunicationV4PatrolSupersedesStaleTurnAndReopensNextRound(t *testing.
 		t.Fatal(err)
 	}
 	reopened, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	// 2026-08-27 停机点第二步(审查修复后的口径):有游标后新输入时,轮成员
+	// 窗口只从首条新输入开始(旧输入进 AI 历史,不再重新入轮——避免把已被
+	// 事件动作认领的卡片行再次物化撞确定性键);整段重答只保留给"全部输入
+	// 都被作废轮消费过"的裁决代次重开形态。
 	if err != nil || reopened == nil || reopened.TurnID == staleTurn.TurnID ||
 		reopened.Status != store.DialogueTurnCompleted ||
-		reopened.InboundFromSeq != interjectSeq || reopened.InboundThroughSeq != interjectSeq {
+		reopened.InboundFromSeq != interjectSeq ||
+		reopened.InboundThroughSeq != interjectSeq {
 		t.Fatalf("下一轮未按最新账本边界重开: turn=%+v err=%v", reopened, err)
 	}
 	if unchanged, err := h.db.DialogueTurnByID(staleTurn.TurnID); err != nil ||
@@ -243,6 +248,8 @@ func TestCommunicationV4PatrolReopensParkedTurnOnNewCandidateInput(t *testing.T)
 		t.Fatalf("新输入未作废停靠轮: turn=%+v err=%v", superseded, err)
 	}
 	reopened, err := h.db.LatestDialogueTurnForProfile(fixture.profileID)
+	// 2026-08-27 停机点第二步(审查修复后的口径):新输入存在时成员窗口从
+	// 首条新输入开始,停靠轮消费过的旧输入进 AI 历史、不重新入轮。
 	if err != nil || reopened == nil || reopened.TurnID == parked.TurnID ||
 		reopened.Status != store.DialogueTurnCompleted ||
 		reopened.InboundFromSeq != newSeq || reopened.InboundThroughSeq != newSeq {

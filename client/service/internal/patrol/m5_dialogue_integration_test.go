@@ -3,7 +3,6 @@ package patrol
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -352,7 +351,7 @@ func seedM5AdviceFixtureUnfrozen(
 	if err != nil || len(changes.Inserted) != len(inbounds) {
 		t.Fatalf("追加合成入站失败: changes=%+v err=%v", changes, err)
 	}
-	digest, turnID, err := store.DialogueTurnIdentity(profileID, *greetingMessage, changes.Inserted)
+	digest, turnID, err := store.DialogueTurnIdentity(profileID, *greetingMessage, changes.Inserted, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,182 +568,6 @@ func TestResumeReplyReservationInterruptedBecomesManualWithoutSecondCall(t *test
 	if err != nil || turn == nil || turn.Status != store.DialogueTurnManualRequired ||
 		turn.FailureReason != "replyProcessInterrupted" || actionErr != nil || action != nil {
 		t.Fatalf("reply 预留崩溃不得重调或造动作: turn=%+v action=%+v err=%v actionErr=%v", turn, action, err, actionErr)
-	}
-}
-
-func TestM5ResumeLegacyByteBudgetFailureAllowsOnlyAuthorizedAttemptTwo(t *testing.T) {
-	h := newHarness(t)
-	fixture := seedM5ResumeAdviceFixture(t, h)
-	legacyFailure := &recordingAdviceExecutor{
-		complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-			if call != 1 || request.Purpose != m5ai.PurposeReply {
-				return m5ai.CompletionResponse{}, fmt.Errorf(
-					"旧误判前发生未授权调用: call=%d purpose=%s", call, request.Purpose,
-				)
-			}
-			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "budgetBlocked"}
-		},
-	}
-	h.manager.SetAdvice(legacyFailure)
-	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
-	h.manager.mu.Lock()
-	err := actor.advanceM5Turn(context.Background(), fixture.turn)
-	h.manager.mu.Unlock()
-	if err != nil || len(legacyFailure.requests) != 1 {
-		t.Fatalf("建立旧字节误判事实失败: calls=%d err=%v", len(legacyFailure.requests), err)
-	}
-	// 2026-08-02 裁决后新失败只停靠 turn,不再冻结试运行;旧事故的存量冻结
-	// 事实按当时形状显式落库,继续钉住只服务存量的恢复授权路径。
-	status, err := h.db.M5TrialStatus()
-	if err != nil || status == nil ||
-		status.Selection.Status != store.M5TrialSelectionActive {
-		t.Fatalf("纯计算失败不得再冻结试运行: status=%+v err=%v", status, err)
-	}
-	if err := h.db.MarkActiveM5TrialManualRequired(
-		fixture.profileID, "replyFailed", h.clock.Now(),
-	); err != nil {
-		t.Fatal(err)
-	}
-	status, err = h.db.M5TrialStatus()
-	if err != nil || status == nil ||
-		status.Selection.Status != store.M5TrialSelectionManualRequired ||
-		status.Selection.Reason != "replyFailed" {
-		t.Fatalf("存量冻结事实落库失败: status=%+v err=%v", status, err)
-	}
-	if err := h.manager.StopToday(h.key); err != nil {
-		t.Fatal(err)
-	}
-	authorized, err := h.db.AuthorizeM5ReplyBudgetRecovery(
-		store.AuthorizeM5ReplyBudgetRecoveryRequest{
-			FailedSelectionID: status.Selection.SelectionID,
-			NewSelectionID:    "selection-authorized-reply-budget-attempt-2",
-			AuthorizedAt:      h.clock.Now(),
-		},
-	)
-	if err != nil || authorized.Turn.Status != store.DialogueTurnClassified {
-		t.Fatalf("单次恢复授权失败: result=%+v err=%v", authorized, err)
-	}
-
-	recoveryAdvice := &recordingAdviceExecutor{
-		complete: func(call int, request m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-			if call != 1 || request.Purpose != m5ai.PurposeReply {
-				return m5ai.CompletionResponse{}, fmt.Errorf(
-					"恢复发生非唯一 reply: call=%d purpose=%s", call, request.Purpose,
-				)
-			}
-			return safeFakeResponse(`{"话术_序列":["合成恢复回复"]}`), nil
-		},
-	}
-	h.manager.SetAdvice(recoveryAdvice)
-	h.manager.mu.Lock()
-	err = actor.advanceM5Turn(context.Background(), authorized.Turn)
-	h.manager.mu.Unlock()
-	if err != nil || len(recoveryAdvice.requests) != 1 {
-		t.Fatalf("获批 attempt=2 未完成: calls=%d err=%v", len(recoveryAdvice.requests), err)
-	}
-	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
-	if err != nil || len(invocations) != 2 ||
-		invocations[0].Attempt != 1 ||
-		invocations[0].Status != store.AIInvocationBudgetBlocked ||
-		invocations[0].ErrorClass != "budgetBlocked" ||
-		invocations[1].Attempt != 2 ||
-		invocations[1].Status != store.AIInvocationOK {
-		t.Fatalf("恢复 invocation 事实不唯一: invocations=%+v err=%v", invocations, err)
-	}
-	action, err := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
-	if err != nil || action == nil || action.Status != store.CommunicationActionPlanned {
-		t.Fatalf("attempt=2 成功未形成唯一计划动作: action=%+v err=%v", action, err)
-	}
-	currentTurn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
-	if err != nil || currentTurn == nil || currentTurn.Status != store.DialogueTurnAdviceReady {
-		t.Fatalf("恢复后的 turn 投影错误: turn=%+v err=%v", currentTurn, err)
-	}
-	h.manager.mu.Lock()
-	err = actor.advanceM5Turn(context.Background(), *currentTurn)
-	h.manager.mu.Unlock()
-	if err != nil || len(recoveryAdvice.requests) != 1 {
-		t.Fatalf("恢复重放不得再次调用 provider: calls=%d err=%v", len(recoveryAdvice.requests), err)
-	}
-}
-
-func TestM5ResumeAuthorizedAttemptTwoFailurePermanentlyStops(t *testing.T) {
-	h := newHarness(t)
-	fixture := seedM5ResumeAdviceFixture(t, h)
-	legacyFailure := &recordingAdviceExecutor{
-		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "budgetBlocked"}
-		},
-	}
-	h.manager.SetAdvice(legacyFailure)
-	actor := &roundActor{manager: h.manager, now: h.clock.Now()}
-	h.manager.mu.Lock()
-	err := actor.advanceM5Turn(context.Background(), fixture.turn)
-	h.manager.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 同上一个测试:新失败不再冻结试运行,存量冻结事实显式落库。
-	if err := h.db.MarkActiveM5TrialManualRequired(
-		fixture.profileID, "replyFailed", h.clock.Now(),
-	); err != nil {
-		t.Fatal(err)
-	}
-	failed, err := h.db.M5TrialStatus()
-	if err != nil || failed == nil ||
-		failed.Selection.Status != store.M5TrialSelectionManualRequired {
-		t.Fatalf("旧误判事实缺失: status=%+v err=%v", failed, err)
-	}
-	if err := h.manager.StopToday(h.key); err != nil {
-		t.Fatal(err)
-	}
-	authorized, err := h.db.AuthorizeM5ReplyBudgetRecovery(
-		store.AuthorizeM5ReplyBudgetRecoveryRequest{
-			FailedSelectionID: failed.Selection.SelectionID,
-			NewSelectionID:    "selection-failing-reply-budget-attempt-2",
-			AuthorizedAt:      h.clock.Now(),
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	recoveryFailure := &recordingAdviceExecutor{
-		complete: func(_ int, _ m5ai.CompletionRequest) (m5ai.CompletionResponse, error) {
-			return m5ai.CompletionResponse{}, &m5ai.ProviderError{Class: "providerUnavailable"}
-		},
-	}
-	h.manager.SetAdvice(recoveryFailure)
-	h.manager.mu.Lock()
-	err = actor.advanceM5Turn(context.Background(), authorized.Turn)
-	h.manager.mu.Unlock()
-	if err != nil || len(recoveryFailure.requests) != 1 {
-		t.Fatalf("attempt=2 失败未收敛: calls=%d err=%v", len(recoveryFailure.requests), err)
-	}
-	invocations, err := h.db.AIInvocationsForTurn(fixture.turn.TurnID)
-	action, actionErr := h.db.CommunicationActionByTurn(fixture.turn.TurnID)
-	if err != nil || len(invocations) != 2 || invocations[1].Attempt != 2 ||
-		invocations[1].Status != store.AIInvocationTransportFailed ||
-		actionErr != nil || action != nil {
-		t.Fatalf("attempt=2 失败事实错误: invocations=%+v action=%+v err=%v actionErr=%v",
-			invocations, action, err, actionErr)
-	}
-	if _, err := h.db.AuthorizeM5ReplyBudgetRecovery(
-		store.AuthorizeM5ReplyBudgetRecoveryRequest{
-			FailedSelectionID: failed.Selection.SelectionID,
-			NewSelectionID:    "selection-forbidden-reply-budget-attempt-3",
-			AuthorizedAt:      h.clock.Now().Add(time.Minute),
-		},
-	); !errors.Is(err, store.ErrM5ReplyBudgetRecoveryUnsafe) {
-		t.Fatalf("attempt=2 失败后必须永久拒绝 attempt=3: %v", err)
-	}
-	turn, err := h.db.DialogueTurnByID(fixture.turn.TurnID)
-	if err != nil || turn == nil || turn.Status != store.DialogueTurnManualRequired {
-		t.Fatalf("attempt=2 失败后 turn 未永久人工: turn=%+v err=%v", turn, err)
-	}
-	h.manager.mu.Lock()
-	err = actor.advanceM5Turn(context.Background(), *turn)
-	h.manager.mu.Unlock()
-	if err != nil || len(recoveryFailure.requests) != 1 {
-		t.Fatalf("人工 turn 重放不得调用 provider: calls=%d err=%v", len(recoveryFailure.requests), err)
 	}
 }
 

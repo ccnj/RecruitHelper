@@ -10,6 +10,7 @@ import (
 
 	"recruithelper/client/service/internal/communication"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/textcanon"
 
 	"gorm.io/gorm"
 )
@@ -172,6 +173,43 @@ func freezeCommunicationV4ColdWechatPlanMessages(
 		t.Fatalf("冷催二计划未原子冻结首项: result=%+v err=%v", result, err)
 	}
 	return fixture, req, result
+}
+
+func TestCommunicationV4SchedulePlanToleratesSystemFurnitureSuffix(t *testing.T) {
+	// C5(2026-08-27 甲方裁决,停机点第二步):时刻表冻结与派发闸共用同一
+	// 把透明后缀尺子——无主 system 家具行不再卡住催问,是 2026-08-03 电话
+	// 卡事故家族在时刻表侧的对称修复。
+	s := openTest(t)
+	fixture, aggregate, revision := seedCommunicationV4SchedulePlanFixtureMessages(
+		t, s, "c5-furniture", []string{"{称呼}您好，还方便继续沟通吗"},
+	)
+	state := aggregate.State
+	state.MainStatus = communication.V4StatusCommunicating
+	state.ColdPromptRemaining = 0
+	state.ColdWechatRemaining = 1
+	state.ColdWechatTextSent = false
+	state.WechatState = communication.V4WechatNotInvited
+	persistCommunicationV4ScheduleState(t, s, &aggregate, state)
+	furniture := "如果想要让人才更快回复，可以直接给Ta打电话"
+	appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: aggregate.ProjectedThroughSeq + 1, Direction: "system", Kind: "system",
+		ContentHash: textcanon.Hash(furniture), Text: &furniture,
+	})
+	evaluatedAt := state.LastOutboundAt.Add(25 * time.Hour)
+	req := FreezeCommunicationV4SchedulePlanRequest{
+		ProfileID:                   fixture.ProfileID,
+		ConversationRef:             fixture.ConversationRef,
+		ExpectedRevision:            aggregate.Revision,
+		ExpectedProjectedThroughSeq: aggregate.ProjectedThroughSeq,
+		ContextRevisionHash:         revision.RevisionHash,
+		Reply:                       communication.ReplyAdvice{State: communication.AdviceAbsent},
+		EvaluatedAt:                 evaluatedAt,
+		FrozenAt:                    evaluatedAt.Add(time.Second),
+	}
+	result, err := s.FreezeCommunicationV4SchedulePlan(req)
+	if err != nil || result == nil || !result.Created || len(result.Actions) != 1 {
+		t.Fatalf("时刻表冻结未越过无主 system 家具行: result=%+v err=%v", result, err)
+	}
 }
 
 func TestCommunicationV4SchedulePlanFreezesRenderedColdWechatAndReplays(t *testing.T) {

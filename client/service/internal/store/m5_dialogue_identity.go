@@ -130,29 +130,67 @@ func IsM5RealCandidateMessage(message Message) bool {
 	}
 }
 
-// DialogueTurnIdentity is the single canonical evaluator for an M5 turn's
-// immutable message boundary. Both the patrol producer and every store-side
-// authorization recheck use this exact function.
-func DialogueTurnIdentity(profileID string, lastOutbound Message, inbound []Message) (string, string, error) {
-	if strings.TrimSpace(profileID) == "" || lastOutbound.Seq <= 0 || lastOutbound.Direction != "out" ||
-		strings.TrimSpace(lastOutbound.ContentHash) == "" || len(inbound) == 0 {
-		return "", "", ErrDialogueTurnInvalid
+// dialogueBoundaryAnchorToken 返回一行消息的确定性身份记号(协议 §7.4,
+// 2026-08-27 停机点第二步):优先服务端消息身份 sourceKey(§4.5,身份判新
+// 战役的能力门槛保证新收编行必有);2026-08-09 之前收编的存量无身份行以
+// 账本 seq 确定性兜底——seq 是脑内稳定物理序,确定性同样成立,不转人工。
+// 兜底命中的观测日志由巡检层负责(键值本身按 §4.5 保密边界不进日志)。
+func dialogueBoundaryAnchorToken(message Message) string {
+	if message.SourceKey != nil && strings.TrimSpace(*message.SourceKey) != "" {
+		return "sk:" + *message.SourceKey
 	}
-	type digestMessage struct {
-		Seq         int64  `json:"seq"`
-		Kind        string `json:"kind"`
-		ContentHash string `json:"contentHash"`
-	}
+	return "seq:" + strconv.FormatInt(message.Seq, 10)
+}
+
+// dialogueBoundaryFingerprint 是对话轨动作身份的唯一配方(协议 §7.4
+// bnd-v1,2026-08-27 甲方裁决):对(档案、输入边界锚、裁决代次)取 sha256。
+// 输入边界锚 = 本轮输入尾条候选人消息的身份记号;来聊根另携带版本化根引用
+// 作锚成员。刻意不含出站锚与逐条输入的内容哈希:同尾条 = 同边界 = 同键
+// (多条新输入并一响应),文案可变、位置不变、键不变(重发 = 重新规划,
+// 2026-08-02 决策 2)。裁决代次平时恒 0,resolvedFailed 裁决事务内加一,
+// 使同边界的重新规划键确定性区别于旧尝试。版本域纪律:配方任何变更必须
+// 换域(bnd-v2),存量 turn-/bnd-v1- 键不迁移、按派发时契约解释。
+func dialogueBoundaryFingerprint(
+	profileID string,
+	rootRef string,
+	tail Message,
+	verdictGeneration int64,
+) (string, string, error) {
 	canonical := struct {
-		ProfileID        string          `json:"profileId"`
-		LastOutboundSeq  int64           `json:"lastOutboundSeq"`
-		LastOutboundHash string          `json:"lastOutboundHash"`
-		HistoryThrough   int64           `json:"historyThroughSeq"`
-		Messages         []digestMessage `json:"messages"`
+		Version           string `json:"version"`
+		ProfileID         string `json:"profileId"`
+		RootRef           string `json:"rootRef,omitempty"`
+		BoundaryAnchor    string `json:"boundaryAnchor"`
+		VerdictGeneration int64  `json:"verdictGeneration"`
 	}{
-		ProfileID: profileID, LastOutboundSeq: lastOutbound.Seq,
-		LastOutboundHash: lastOutbound.ContentHash, HistoryThrough: lastOutbound.Seq,
-		Messages: make([]digestMessage, 0, len(inbound)),
+		Version: "bnd-v1", ProfileID: profileID, RootRef: rootRef,
+		BoundaryAnchor:    dialogueBoundaryAnchorToken(tail),
+		VerdictGeneration: verdictGeneration,
+	}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", "", err
+	}
+	digest := sha256.Sum256(raw)
+	hexDigest := hex.EncodeToString(digest[:])
+	return hexDigest, "bnd-v1-" + hexDigest, nil
+}
+
+// DialogueTurnIdentity is the single canonical evaluator for an M5 turn's
+// identity. Both the patrol producer and every store-side authorization
+// recheck use this exact function. 2026-08-27 停机点第二步起身份根为输入
+// 边界指纹(协议 §7.4 bnd-v1);成员校验保持既有不变式(锚为未撤回出站、
+// 输入为升序候选人行),但成员内容不再进入指纹。
+func DialogueTurnIdentity(
+	profileID string,
+	lastOutbound Message,
+	inbound []Message,
+	verdictGeneration int64,
+) (string, string, error) {
+	if strings.TrimSpace(profileID) == "" || lastOutbound.Seq <= 0 || lastOutbound.Direction != "out" ||
+		strings.TrimSpace(lastOutbound.ContentHash) == "" || len(inbound) == 0 ||
+		verdictGeneration < 0 {
+		return "", "", ErrDialogueTurnInvalid
 	}
 	previous := lastOutbound.Seq
 	for i := range inbound {
@@ -162,49 +200,27 @@ func DialogueTurnIdentity(profileID string, lastOutbound Message, inbound []Mess
 			return "", "", ErrDialogueTurnInvalid
 		}
 		previous = message.Seq
-		canonical.Messages = append(canonical.Messages, digestMessage{
-			Seq: message.Seq, Kind: message.Kind, ContentHash: message.ContentHash,
-		})
 	}
-	raw, err := json.Marshal(canonical)
-	if err != nil {
-		return "", "", err
-	}
-	digest := sha256.Sum256(raw)
-	hexDigest := hex.EncodeToString(digest[:])
-	return hexDigest, "turn-" + hexDigest, nil
+	return dialogueBoundaryFingerprint(
+		profileID, "", inbound[len(inbound)-1], verdictGeneration,
+	)
 }
 
 // DialogueTurnIdentityFromInboundRoot is the canonical evaluator for the
 // exceptional first turn of a candidate who initiated the conversation.
 // There is deliberately no fabricated outbound message at sequence zero: the
-// versioned root reference binds the turn to the first stable inbound platform
-// fact, while the ordinary message digests bind the complete candidate turn.
+// versioned root reference joins the bnd-v1 fingerprint as the anchor member
+// (协议 §7.4,2026-08-27 停机点第二步).
 func DialogueTurnIdentityFromInboundRoot(
 	profileID string,
 	rootRef string,
 	inbound []Message,
+	verdictGeneration int64,
 ) (string, string, error) {
 	if strings.TrimSpace(profileID) == "" ||
 		!IsInboundConversationV4Root(rootRef) ||
-		len(inbound) == 0 {
+		len(inbound) == 0 || verdictGeneration < 0 {
 		return "", "", ErrDialogueTurnInvalid
-	}
-	type digestMessage struct {
-		Seq         int64  `json:"seq"`
-		Kind        string `json:"kind"`
-		ContentHash string `json:"contentHash"`
-	}
-	canonical := struct {
-		Version        string          `json:"version"`
-		ProfileID      string          `json:"profileId"`
-		RootRef        string          `json:"rootRef"`
-		HistoryThrough int64           `json:"historyThroughSeq"`
-		Messages       []digestMessage `json:"messages"`
-	}{
-		Version: "inbound-root-turn-v1", ProfileID: profileID,
-		RootRef: rootRef, HistoryThrough: 0,
-		Messages: make([]digestMessage, 0, len(inbound)),
 	}
 	var previous int64
 	for i := range inbound {
@@ -215,17 +231,10 @@ func DialogueTurnIdentityFromInboundRoot(
 			return "", "", ErrDialogueTurnInvalid
 		}
 		previous = message.Seq
-		canonical.Messages = append(canonical.Messages, digestMessage{
-			Seq: message.Seq, Kind: message.Kind, ContentHash: message.ContentHash,
-		})
 	}
-	raw, err := json.Marshal(canonical)
-	if err != nil {
-		return "", "", err
-	}
-	digest := sha256.Sum256(raw)
-	hexDigest := hex.EncodeToString(digest[:])
-	return hexDigest, "turn-" + hexDigest, nil
+	return dialogueBoundaryFingerprint(
+		profileID, rootRef, inbound[len(inbound)-1], verdictGeneration,
+	)
 }
 
 // M5AutomaticIntentID binds one persisted communication action to exactly one

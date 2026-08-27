@@ -164,7 +164,7 @@ func (s *Store) FreezeDialogueTurn(req FreezeDialogueTurnRequest) (*FreezeDialog
 		if _, ok := DialogueTurnInputKindOf(inbound); !ok {
 			return ErrDialogueTurnBinding
 		}
-		if digest, _, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound); err != nil ||
+		if digest, _, err := DialogueTurnIdentity(req.ProfileID, lastOutbound, inbound, 0); err != nil ||
 			digest != req.InputDigest {
 			return ErrDialogueTurnBinding
 		}
@@ -241,18 +241,20 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if err != nil {
 		return err
 	}
-	var v4Aggregate *CommunicationV4Aggregate
 	if v4Turn {
 		aggregate, err := communicationV4AggregateTx(tx, turn.ProfileID)
 		if err != nil {
 			return err
 		}
+		// 2026-08-27 停机点第二步:AI 边界上的中间新鲜度重验删除——游标
+		// 等值腿与账本内容重建/digest 复核腿一并拆除,输入过时最多浪费
+		// 一次 token,发送前的账本尾终检(链首平价/父对齐闸)照旧兜底。
+		// revision==回执头仍保留:它是回执链完整性护栏,不是新鲜度检查,
+		// 放行会让建议回执以错位 FromRevision 落账、毒化后续 head 重放。
 		if aggregate.AutomationStatus != ProfileCommunicationAutomationActive ||
-			aggregate.Revision != application.ToRevision ||
-			aggregate.ProjectedThroughSeq != turn.InboundThroughSeq {
+			aggregate.Revision != application.ToRevision {
 			return ErrDialogueTurnBinding
 		}
-		v4Aggregate = &aggregate
 	}
 	if profile.ConversationRef == nil || *profile.ConversationRef != turn.ConversationRef ||
 		profile.ActiveResumeSnapshotID == nil || *profile.ActiveResumeSnapshotID != turn.ResumeSnapshotID ||
@@ -292,23 +294,10 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 		return ErrDialogueTurnBinding
 	}
 	if v4Turn {
-		// v4 分支走解耦后的统一重建（0727当日计划3）：锚由账本派生并经
-		// digest 自证，区间尾允许平台 system 行，游标不再要求指向出站。
-		if v4Aggregate == nil {
-			return ErrDialogueTurnBinding
-		}
-		lastOutbound, inbound, _, _, err := reconstructCommunicationV4TurnBoundaryTx(
-			tx, profile, turn.ConversationRef, turn.InboundFromSeq, turn.InboundThroughSeq,
-		)
-		if err != nil {
-			return err
-		}
-		digest, turnID, err := communicationV4TurnIdentity(
-			*v4Aggregate, turn.ProfileID, lastOutbound, inbound,
-		)
-		if err != nil || digest != turn.InputDigest || turnID != turn.TurnID {
-			return ErrDialogueTurnBinding
-		}
+		// 2026-08-27 停机点第二步:v4 分支的账本内容重建与 digest 复核已随
+		// 「AI 边界中间新鲜度重验删除」一并拆除——冻结事务在创建时刻已做过
+		// 同一套重建自证,推进途中世界再变由派发前的账本尾终检兜底,失败
+		// 方向是作废本批下轮重开,不再中途反复对账。
 		return nil
 	}
 	var activeTail, outboundTail int64
@@ -352,7 +341,7 @@ func validateDialogueTurnCurrentTx(tx *gorm.DB, turn DialogueTurn) error {
 	if _, ok := DialogueTurnInputKindOf(inbound); !ok {
 		return ErrDialogueTurnBinding
 	}
-	digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound)
+	digest, _, err := DialogueTurnIdentity(turn.ProfileID, lastOutbound, inbound, 0)
 	if err != nil {
 		return ErrDialogueTurnBinding
 	}
@@ -519,16 +508,35 @@ func supersedeDialogueTurnForBoundaryTx(tx *gorm.DB, turn *DialogueTurn, at time
 	default:
 		return ErrDialogueTurnState
 	}
-	var bound int64
-	if err := tx.Model(&CommunicationAction{}).
-		Where(
-			"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
-			turn.TurnID,
-		).Count(&bound).Error; err != nil {
+	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底判据
+	// 放宽为"案底 intent 终局全部属于 failed/resolvedFailed(构造性零副作用)
+	// 才可作废"。干净失败重试链上的 retried 留档行不再终身挡住作废重开;
+	// 已发前缀(sent)、在途(pending)与 suspect 冻结中的 intent 照旧是
+	// 承重墙,一字不动。缺 intent 关联却声称已开始派发的异常形状按保守
+	// 方向视作案底。
+	var bound []CommunicationAction
+	if err := tx.Where(
+		"turn_id = ? AND (effect_intent_id IS NOT NULL OR effect_started_at IS NOT NULL OR sent_at IS NOT NULL)",
+		turn.TurnID,
+	).Find(&bound).Error; err != nil {
 		return err
 	}
-	if bound != 0 {
-		return errDialogueTurnEffectBound
+	for index := range bound {
+		row := bound[index]
+		if row.EffectIntentID == nil {
+			return errDialogueTurnEffectBound
+		}
+		var intent EffectIntent
+		if err := tx.First(&intent, "intent_id = ?", *row.EffectIntentID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 悬空 intent 引用是账本形状异常,按保守方向视作案底。
+				return errDialogueTurnEffectBound
+			}
+			return err
+		}
+		if intent.Status != EffectIntentFailed && intent.Status != EffectIntentResolvedFailed {
+			return errDialogueTurnEffectBound
+		}
 	}
 	// planned 是未发动作,manualRequired 是停靠时被一同标注的未发动作;两者
 	// 都从未派发,随轮一起作废。不物理删除,业务上的"作废"只表达为状态列。
@@ -633,8 +641,11 @@ func (s *Store) LatestDialogueTurnForProfile(profileID string) (*DialogueTurn, e
 		return nil, ErrDialogueTurnInvalid
 	}
 	var turn DialogueTurn
+	// 同 inbound_through_seq 双轮是裁决代次重开的新形态(旧轮 superseded 与
+	// 重开轮共享边界尾):以 created_at 优先取后创建的重开轮,平局仲裁必须
+	// 确定性,不能落在 turn_id 字典序的运气上(2026-08-27 审查修复)。
 	err := s.db.Where("profile_id = ?", profileID).
-		Order("inbound_through_seq DESC, turn_id DESC").First(&turn).Error
+		Order("inbound_through_seq DESC, created_at DESC, turn_id DESC").First(&turn).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}

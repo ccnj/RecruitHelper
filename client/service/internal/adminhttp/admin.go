@@ -160,7 +160,6 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /admin/candidates/greeting/send", h(a.sendGreeting))
 	mux.HandleFunc("GET /admin/candidates/greeting/send", h(a.sendGreetingStatus))
 	mux.HandleFunc("POST /admin/m5/trial/select", h(a.selectM5Trial))
-	mux.HandleFunc("POST /admin/m5/trial/recover-reply-budget", h(a.recoverM5ReplyBudget))
 	mux.HandleFunc("GET /admin/m5/trial", h(a.m5TrialStatus))
 	mux.HandleFunc("GET /admin/m5/provider-config", h(a.m5ProviderConfig))
 	mux.HandleFunc("POST /admin/m5/provider-config", h(a.saveM5ProviderConfig))

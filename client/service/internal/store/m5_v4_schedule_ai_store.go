@@ -248,8 +248,15 @@ func validateCommunicationV4ScheduleAdviceBoundaryTx(
 	if err != nil {
 		return communication.V4ScheduleDecision{}, err
 	}
-	if conversation.LastMessageSeq != activeTail ||
-		activeTail != req.ExpectedProjectedThroughSeq {
+	fresh, err := communicationV4ScheduleTailFreshTx(
+		tx, "沉默追问预留", target.Profile.Platform, target.Profile.AccountRef,
+		conversation.ConversationRef,
+		req.ExpectedProjectedThroughSeq, activeTail, conversation.LastMessageSeq,
+	)
+	if err != nil {
+		return communication.V4ScheduleDecision{}, err
+	}
+	if !fresh {
 		return communication.V4ScheduleDecision{}, ErrCommunicationV4Conflict
 	}
 	material, materialReady, err := communicationAIMaterialTx(tx, target)

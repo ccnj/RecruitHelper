@@ -574,6 +574,12 @@ type CommunicationV4Aggregate struct {
 	StateSchemaVersion   uint                                 `gorm:"not null"`
 	Revision             uint64                               `gorm:"not null"`
 	ProjectedThroughSeq  int64                                `gorm:"not null"`
+	// VerdictGeneration 是对话轨身份指纹的裁决代次成员(协议 §7.4 bnd-v1,
+	// 2026-08-27 停机点第二步):平时恒 0,该档案 suspect 经人工裁决
+	// resolvedFailed 的裁决事务内加一,使同一输入边界的重新规划立即可行、
+	// 键确定性区别于旧尝试。单调只增,不参与任何闸,不经 revision CAS
+	// (SQLite 单写串行化下独立自增安全)。
+	VerdictGeneration int64 `gorm:"not null;default:0"`
 	State                communication.V4State                `gorm:"serializer:json;not null"`
 	AutomationStatus     ProfileCommunicationAutomationStatus `gorm:"not null;index"`
 	ManualReason         string
@@ -1205,7 +1211,14 @@ type Conversation struct {
 
 	TrackingState      TrackingState `gorm:"not null;index"`
 	AdoptedBoundarySeq int64
-	LastMessageSeq     int64
+	// RespondedThroughSeq 是「已回应至」水位(2026-08-02 甲方裁决决策 3,
+	// 2026-08-27 随停机点第二步固化落地):巡检静默收尾已处理到的消息位置,
+	// 只作加速下界,供后续现算裁决压掉静默尾巴的每轮重判。三条纪律(v4
+	// 规格 §一同名条目):只做下界、永不做闸——不许相等比对、不许 CAS、
+	// 不许作停机条件,数值异常即当不存在、按锚重算;单写单向只增,唯一
+	// 写入点是巡检静默收尾;水位实际压掉消息时记日志。
+	RespondedThroughSeq int64 `gorm:"not null;default:0"`
+	LastMessageSeq      int64
 	LastSyncedRoundID  string
 	LastSyncedAt       *time.Time
 

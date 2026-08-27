@@ -368,7 +368,12 @@ func validateFreezeDialogueTurnRequest(req FreezeDialogueTurnRequest) error {
 		req.InboundThroughSeq < req.InboundFromSeq ||
 		req.OutboundAnchorSeq < 0 || req.OutboundAnchorSeq >= req.InboundFromSeq ||
 		req.ExpectedProjectedThroughSeq < req.OutboundAnchorSeq ||
-		req.ExpectedProjectedThroughSeq >= req.InboundFromSeq {
+		// 游标窗口(2026-08-27 停机点第二步):锚 ≤ 游标 ≤ 边界尾。边界按
+		// v4 §一纯定义现算、不看游标,因此游标可以合法地落在边界内部——
+		// 作废重开会把旧轮已消费的输入与新输入并成一轮(并一响应跨作废
+		// 成立),resolvedFailed 裁决代次重开则游标恰在边界尾。冻结把游标
+		// 写到边界尾,永不回退。
+		req.ExpectedProjectedThroughSeq > req.InboundThroughSeq {
 		return ErrDialogueTurnInvalid
 	}
 	return nil
@@ -698,12 +703,20 @@ func reconstructCommunicationV4TurnBoundaryTx(
 	var anchorSeq int64
 	if err := tx.Model(&Message{}).
 		Where(
-			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq < ?",
+			"platform = ? AND account_ref = ? AND conversation_ref = ? AND retracted_at IS NULL AND direction = ? AND seq < ? "+
+				// 交换结果卡不是我方新发言(与下方 lateOutbound 豁免、巡检锚
+				// communicationV4AnchorEligibleOutbound 同一口径,2026-08-27
+				// 审查修复):它不得成为输入边界锚,否则其前的候选人输入会被
+				// 误判为已回应。
+				"AND NOT (kind = ? AND card_type = ? AND card_state = ?)",
 			profile.Platform,
 			profile.AccountRef,
 			conversationRef,
 			"out",
 			inboundFromSeq,
+			"card",
+			"wechatExchange",
+			"accepted",
 		).
 		Select("COALESCE(MAX(seq), 0)").
 		Scan(&anchorSeq).Error; err != nil {
@@ -836,7 +849,8 @@ func communicationV4TurnIdentity(
 			profileID,
 			aggregate.RootGreetingIntentID,
 			inbound,
+			aggregate.VerdictGeneration,
 		)
 	}
-	return DialogueTurnIdentity(profileID, lastOutbound, inbound)
+	return DialogueTurnIdentity(profileID, lastOutbound, inbound, aggregate.VerdictGeneration)
 }

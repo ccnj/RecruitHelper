@@ -173,7 +173,7 @@ func seedCommunicationV4InterviewedWechatAcceptEffect(
 		t.Fatal(err)
 	}
 	inbound := rows[2:3]
-	digest, turnID, err := DialogueTurnIdentity(profileID, anchor, inbound)
+	digest, turnID, err := DialogueTurnIdentity(profileID, anchor, inbound, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func seedCommunicationV4InterviewEventActions(
 		CardState: "accepted", ContentHash: "event-combo-accepted-" + suffix,
 		CreatedAt: at.Add(2 * time.Second),
 	})
-	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted)
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

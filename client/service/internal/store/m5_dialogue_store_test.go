@@ -91,7 +91,7 @@ func seedDialogueStoreFixture(t *testing.T, s *Store, profileID, kind string) di
 }
 
 func dialogueTurnRequest(fixture dialogueStoreFixture, turnID, _ string) FreezeDialogueTurnRequest {
-	digest, _, err := DialogueTurnIdentity(fixture.ProfileID, fixture.Greeting, []Message{fixture.FirstMessage})
+	digest, _, err := DialogueTurnIdentity(fixture.ProfileID, fixture.Greeting, []Message{fixture.FirstMessage}, 0)
 	if err != nil {
 		panic(err)
 	}
@@ -187,7 +187,7 @@ func seedMultiMessageDialogueTurn(t *testing.T, s *Store, profileID string) (dia
 		t.Fatal(err)
 	}
 	digest, _, err := DialogueTurnIdentity(
-		fixture.ProfileID, fixture.Greeting, []Message{fixture.FirstMessage, second, third},
+		fixture.ProfileID, fixture.Greeting, []Message{fixture.FirstMessage, second, third}, 0,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,10 @@ func seedMultiMessageDialogueTurn(t *testing.T, s *Store, profileID string) (dia
 	return fixture, turn.Turn
 }
 
-func TestAIReservationRejectsRetractedMiddleMessageWithoutLosingFrozenFacts(t *testing.T) {
+func TestAIReservationToleratesRetractedMiddleMessageWhenTailUnchanged(t *testing.T) {
+	// 2026-08-27 停机点第二步(协议 §7.4 bnd-v1):轮身份只锚输入尾条,
+	// 中段撤回不再作废轮——AI 边界的中间新鲜度重验已删除,输入过时最多
+	// 浪费一次 token;尾条变化仍由重建校验(candidateTail)阻断。
 	s := openTest(t)
 	fixture, turn := seedMultiMessageDialogueTurn(t, s, "profile-dialogue-retracted-middle")
 	retractedAt := time.Now().UTC().Truncate(time.Millisecond)
@@ -212,28 +215,20 @@ func TestAIReservationRejectsRetractedMiddleMessageWithoutLosingFrozenFacts(t *t
 	).Update("retracted_at", retractedAt).Error; err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
+	reserved, err := s.ReserveAIInvocation(ReserveAIInvocationRequest{
 		InvocationID: "invocation-retracted-middle", TurnID: turn.TurnID, Purpose: m5ai.PurposeIntent,
 		Attempt: 1, Provider: "deepseek", Model: "deepseek-v4-pro", InputHash: "input-retracted-middle",
 	})
-	if !errors.Is(err, ErrDialogueTurnBinding) {
-		t.Fatalf("中间消息撤回后必须在 provider 前阻断: %v", err)
+	if err != nil || reserved == nil || !reserved.Created {
+		t.Fatalf("尾条未变时中段撤回不得阻断预留: reserved=%+v err=%v", reserved, err)
 	}
-	// 2026-08-02 裁决:边界失配的 pre-effect 轮作废重开,不再转人工冻结候选人。
 	stored, _ := s.DialogueTurnByID(turn.TurnID)
-	if stored == nil || stored.Status != DialogueTurnSuperseded || stored.FailureReason != "boundarySuperseded" {
-		t.Fatalf("撤回后的冻结轮未作废: %+v", stored)
+	if stored == nil || stored.Status != DialogueTurnCollected {
+		t.Fatalf("尾条未变的轮不得被作废: %+v", stored)
 	}
-	var invocations, actions int64
-	_ = s.db.Model(&AIInvocation{}).Count(&invocations).Error
-	_ = s.db.Model(&CommunicationAction{}).Count(&actions).Error
-	if invocations != 0 || actions != 0 {
-		t.Fatalf("输入失效不得调用 provider 或产生动作: invocations=%d actions=%d", invocations, actions)
-	}
-	assertTrialParkedWithoutFreeze(t, s)
 }
 
-func TestAdviceReadyActionBecomesSupersededWhenMiddleMessageIsRetracted(t *testing.T) {
+func TestAdviceReadyActionSurvivesRetractedMiddleMessageWhenTailUnchanged(t *testing.T) {
 	s := openTest(t)
 	fixture, turn := seedMultiMessageDialogueTurn(t, s, "profile-dialogue-action-retracted")
 	intentID := "invocation-action-retracted-intent"
@@ -271,19 +266,15 @@ func TestAdviceReadyActionBecomesSupersededWhenMiddleMessageIsRetracted(t *testi
 		t.Fatal(err)
 	}
 	current, err := s.RecheckDialogueTurnCurrent(turn.TurnID, now.Add(2*time.Second))
-	if err != nil || current {
-		t.Fatalf("中间消息撤回后旧 adviceReady 不得保持 current: current=%v err=%v", current, err)
+	if err != nil || !current {
+		t.Fatalf("尾条未变时中段撤回不得作废 adviceReady 轮(§7.4 bnd-v1 只锚尾条): current=%v err=%v", current, err)
 	}
-	// 2026-08-02 裁决:未派发过的旧轮连同 planned 动作一并作废,候选人不冻结,
-	// 下轮巡检按最新账本边界重开新轮。
 	storedTurn, _ := s.DialogueTurnByID(turn.TurnID)
 	action, actionErr := s.CommunicationActionByTurn(turn.TurnID)
-	if storedTurn == nil || storedTurn.Status != DialogueTurnSuperseded ||
-		storedTurn.FailureReason != "boundarySuperseded" || actionErr != nil || action == nil ||
-		action.Status != CommunicationActionSuperseded || action.FailureReason != "boundarySuperseded" {
-		t.Fatalf("陈旧 turn/action 未一同作废: turn=%+v action=%+v err=%v", storedTurn, action, actionErr)
+	if storedTurn == nil || storedTurn.Status != DialogueTurnAdviceReady ||
+		actionErr != nil || action == nil || action.Status != CommunicationActionPlanned {
+		t.Fatalf("尾条未变的 turn/action 不得被作废: turn=%+v action=%+v err=%v", storedTurn, action, actionErr)
 	}
-	assertTrialParkedWithoutFreeze(t, s)
 }
 
 func TestFreezeDialogueTurnKeepsPreviousOutboundSeparateFromCurrentInbound(t *testing.T) {

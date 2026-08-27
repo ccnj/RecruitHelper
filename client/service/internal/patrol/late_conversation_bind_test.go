@@ -192,7 +192,7 @@ func TestPatrolLateBindsGreetedConversationThenImportsHistoryAsBusinessEvent(t *
 		kind != store.DialogueTurnInputResumeAttachment {
 		t.Fatalf("313 未归入强意向冻结输入: kind=%q ok=%v", kind, ok)
 	}
-	if digest, turnID, identityErr := store.DialogueTurnIdentity(fixture.profileID, lastOutbound, inboundBoundary); identityErr != nil || digest == "" || turnID != "turn-"+digest {
+	if digest, turnID, identityErr := store.DialogueTurnIdentity(fixture.profileID, lastOutbound, inboundBoundary, 0); identityErr != nil || digest == "" || turnID != "bnd-v1-"+digest {
 		t.Fatalf("强意向轮无法冻结唯一 identity: digest=%q turn=%q err=%v", digest, turnID, identityErr)
 	}
 	rounds, roundsErr := h.db.RecentPatrolRounds(h.key, 1)

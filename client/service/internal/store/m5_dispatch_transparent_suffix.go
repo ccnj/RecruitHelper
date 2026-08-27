@@ -55,6 +55,29 @@ func communicationDispatchTransparentRow(message Message) bool {
 // throughSeq 不构成后缀问题,一律判不透明,由调用闸按原判据处置。透明时按
 // 裁决在此单点记 Info 日志(conversationRef 与越过的行数),gate 标注是哪道
 // 闸放的行。
+// communicationV4ScheduleTailFreshTx 是时刻表侧(plan 冻结/AI 预留/36h 归档)
+// 的账本尾新鲜度判定(C5,2026-08-27 甲方裁决):游标追平活动尾且会话尾计数
+// 一致时直接新鲜;不齐时,(游标, 会话尾] 全为无主 system/已撤回行也放行——
+// 消除"派发闸有 Q7 透明后缀容忍、时刻表无"的不对称,无主家具行不再卡住
+// 催问与归档。判的问题不变:世界在评估快照之后没有长出业务上有意义的新行。
+func communicationV4ScheduleTailFreshTx(
+	tx *gorm.DB,
+	gate string,
+	platform string,
+	accountRef string,
+	conversationRef string,
+	cursor int64,
+	activeTail int64,
+	lastMessageSeq int64,
+) (bool, error) {
+	if activeTail == cursor && lastMessageSeq == activeTail {
+		return true, nil
+	}
+	return communicationDispatchTransparentSuffixTx(
+		tx, gate, platform, accountRef, conversationRef, cursor, lastMessageSeq,
+	)
+}
+
 func communicationDispatchTransparentSuffixTx(
 	tx *gorm.DB,
 	gate string,

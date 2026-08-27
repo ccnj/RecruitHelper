@@ -77,9 +77,18 @@ func (s *Store) FreezeCommunicationV4SchedulePlan(
 			return err
 		}
 		if profile.Platform != conversation.Platform ||
-			profile.AccountRef != conversation.AccountRef ||
-			conversation.LastMessageSeq != activeTail ||
-			activeTail != aggregate.ProjectedThroughSeq {
+			profile.AccountRef != conversation.AccountRef {
+			return ErrCommunicationV4Conflict
+		}
+		fresh, err := communicationV4ScheduleTailFreshTx(
+			tx, "时刻表计划冻结", profile.Platform, profile.AccountRef,
+			conversation.ConversationRef,
+			aggregate.ProjectedThroughSeq, activeTail, conversation.LastMessageSeq,
+		)
+		if err != nil {
+			return err
+		}
+		if !fresh {
 			return ErrCommunicationV4Conflict
 		}
 

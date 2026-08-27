@@ -35,6 +35,7 @@ func TestInboundConversationV4FirstTurnUsesFactRootWithoutFakeOutbound(t *testin
 		fixture.ProfileID,
 		aggregate.RootGreetingIntentID,
 		inbound,
+		0,
 	)
 	if err != nil {
 		t.Fatal(err)

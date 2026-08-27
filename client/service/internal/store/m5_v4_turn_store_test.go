@@ -64,7 +64,7 @@ func communicationV4TurnRequest(
 	).Error; err != nil {
 		t.Fatal(err)
 	}
-	digest, turnID, err := DialogueTurnIdentity(fixture.ProfileID, greeting, inbound)
+	digest, turnID, err := DialogueTurnIdentity(fixture.ProfileID, greeting, inbound, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -841,7 +841,7 @@ func TestFreezeCommunicationV4WechatReceiptUsesProfileScopedEventAction(t *testi
 		).Error; err != nil {
 			t.Fatal(err)
 		}
-		digest, turnID, err := DialogueTurnIdentity(profileID, greeting, inbound)
+		digest, turnID, err := DialogueTurnIdentity(profileID, greeting, inbound, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -994,7 +994,7 @@ func TestFreezeCommunicationV4InterviewReceiptChainsEventInvite(t *testing.T) {
 		CardState: "accepted", ContentHash: "v4-interview-accepted",
 		CreatedAt: at.Add(2 * time.Second),
 	})
-	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted)
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, accepted, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1885,6 +1885,129 @@ func TestFreezeCommunicationV4TurnStillRejectsEffectBoundParkedTurn(t *testing.T
 	}
 }
 
+func TestFreezeCommunicationV4TurnStillRejectsSuspectIntentCaseRecord(t *testing.T) {
+	// Q6 状态判据的反向钉桩(审查补测):案底 intent 存在真实 suspect 终局时,
+	// 承重墙必须继续拒绝作废重开——此前唯一反向测试打在悬空引用分支上,
+	// 状态白名单写错也测不出。
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-suspect-intent")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-si-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	intentID := "intent-v4-gate-suspect-real"
+	if err := s.db.Create(&EffectIntent{
+		IntentID: intentID, IdemKey: "ik1:test:gate-suspect-real",
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		Primitive: "chat.sendMessage", TargetRef: fixture.ConversationRef,
+		PayloadHash: "payload", GuardsHash: "guards", RootMsgID: "root-gate-suspect-real",
+		Status: EffectIntentSuspect, DeadlineMs: 1, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-suspect-real", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "suspect 案底动作",
+		ContentHash: "hash-gate-suspect-real", Status: CommunicationActionManualRequired,
+		EffectIntentID: &intentID, FailureReason: "effectSuspect",
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Updates(map[string]any{
+			"status": DialogueTurnManualRequired, "failure_reason": "effectSuspect",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "suspect 未裁决时的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-si-3", Text: &later,
+	})
+	if _, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	); !errors.Is(err, ErrDialogueTurnState) {
+		t.Fatalf("真实 suspect 案底必须照旧拒绝作废重开: %v", err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnManualRequired {
+		t.Fatalf("被拒绝的开轮不得触碰 suspect 案底轮: %+v", stale)
+	}
+}
+
+func TestFreezeCommunicationV4TurnSupersedesTurnWithOnlyCleanFailedEffects(t *testing.T) {
+	// Q6(2026-08-03 甲方批准,2026-08-27 随停机点第二步实施):案底 intent
+	// 终局全部属于 failed/resolvedFailed(构造性零副作用)的旧轮,新输入到达
+	// 时允许作废重开;带终局案底的动作行原样留档,不被作废触碰。
+	s := openTest(t)
+	fixture := seedReadyCommunicationTarget(t, s, "profile-v4-gate-clean-failed")
+	text := "第一轮入站"
+	inbound := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 2, Direction: "in", Kind: "text", ContentHash: "v4-gate-clean-2", Text: &text,
+	})
+	frozen, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, inbound),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	intentID := "intent-v4-gate-clean-failed"
+	if err := s.db.Create(&EffectIntent{
+		IntentID: intentID, IdemKey: "ik1:test:gate-clean-failed",
+		Platform: fixture.Platform, AccountRef: fixture.AccountRef,
+		Primitive: "chat.sendMessage", TargetRef: fixture.ConversationRef,
+		PayloadHash: "payload", GuardsHash: "guards", RootMsgID: "root-gate-clean-failed",
+		Status: EffectIntentFailed, DeadlineMs: 1, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(&CommunicationAction{
+		ActionID: "action-v4-gate-clean-failed", TurnID: frozen.Turn.TurnID,
+		Kind: CommunicationActionReplyText, Text: "干净失败留档动作",
+		ContentHash: "hash-gate-clean-failed", Status: CommunicationActionRetried,
+		EffectIntentID: &intentID, FailureReason: "effectFailed",
+		PlannedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Model(&DialogueTurn{}).
+		Where("turn_id = ?", frozen.Turn.TurnID).
+		Updates(map[string]any{
+			"status": DialogueTurnManualRequired, "failure_reason": "effectFailed",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	later := "终局后的新消息"
+	second := appendCommunicationV4Inbound(t, s, fixture, Message{
+		Seq: 3, Direction: "in", Kind: "text", ContentHash: "v4-gate-clean-3", Text: &later,
+	})
+	next, err := s.FreezeCommunicationV4Turn(
+		communicationV4TurnRequest(t, s, fixture, second),
+	)
+	if err != nil || next == nil || !next.Created {
+		t.Fatalf("纯干净失败案底轮必须允许作废重开(Q6): next=%+v err=%v", next, err)
+	}
+	stale, _ := s.DialogueTurnByID(frozen.Turn.TurnID)
+	if stale == nil || stale.Status != DialogueTurnSuperseded ||
+		stale.FailureReason != dialogueTurnBoundarySuperseded {
+		t.Fatalf("旧轮未按 Q6 作废: %+v", stale)
+	}
+	var action CommunicationAction
+	if err := s.db.First(&action, "action_id = ?", "action-v4-gate-clean-failed").Error; err != nil ||
+		action.Status != CommunicationActionRetried || action.EffectIntentID == nil {
+		t.Fatalf("终局案底动作必须原样留档: action=%+v err=%v", action, err)
+	}
+}
+
 func TestFreezeCommunicationV4WechatAcceptedWithTextReplacesReceiptByContinuation(t *testing.T) {
 	s := openTest(t)
 	profileID := "profile-v4-batchb-accepted-text"
@@ -2054,7 +2177,7 @@ func TestFreezeCommunicationV4InterviewAcceptedWithTextServiceReplyReplacesRecei
 			ContentHash: "v4-batchc-follow-text", CreatedAt: at.Add(3 * time.Second),
 		},
 	)
-	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, inbound)
+	digest, turnID, err := DialogueTurnIdentity(profileID, inviteMessage, inbound, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2267,7 +2390,9 @@ func TestValidateDialogueTurnCurrentToleratesExchangeResultCardAfterTurn(t *test
 	if err != nil {
 		t.Fatalf("轮后交换结果卡不得作废承接轮: err=%v", err)
 	}
-	// 真人出站文本仍然作废本轮。
+	// 2026-08-27 停机点第二步:AI 边界中间新鲜度重验已删除,真人出站不再
+	// 在推进途中作废本轮——防线移到派发前的账本尾终检(链首平价闸拒绝后
+	// 按新失败方向作废本批下轮重开),下一轮边界现算把真人行收为新锚。
 	human := "我手动回了一句"
 	appendCommunicationV4Inbound(t, s, fixture, Message{
 		Seq: 5, Direction: "out", Kind: "text", Text: &human,
@@ -2276,7 +2401,7 @@ func TestValidateDialogueTurnCurrentToleratesExchangeResultCardAfterTurn(t *test
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		return validateDialogueTurnCurrentTx(tx, frozen.Turn)
 	})
-	if !errors.Is(err, ErrDialogueTurnBinding) {
-		t.Fatalf("真人出站必须仍作废本轮: err=%v", err)
+	if err != nil {
+		t.Fatalf("中游重验删除后真人出站不得中途作废本轮: err=%v", err)
 	}
 }
