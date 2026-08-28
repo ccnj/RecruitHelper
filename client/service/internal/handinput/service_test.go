@@ -183,3 +183,26 @@ func TestPlayReturnsPartialProgressOnInjectionFailure(t *testing.T) {
 		t.Fatalf("失败前已发出 2 帧,应当带回来,实际 %d", len(res.Injected))
 	}
 }
+
+// 运行期间有人碰了鼠标 —— 页面报的"最后一个 mousemove"就是那一下,而不是我们
+// 注入的落点。把它喂进搭车标定等于用随机位置拟合几何,越学越歪,而外表看起来
+// 一切正常(有样本、有残差、有状态)。2026-08-28 真机撞到过:两趟观测解出来的
+// scale_y 是 -2.0,而屏幕映射不可能是负的。
+func TestLandingRejectedWhenCursorMovedBysomeoneElse(t *testing.T) {
+	s, f := newReadyService(t)
+	if _, err := s.Play([]PlanPoint{{X: 500, Y: 400, T: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	// 真人把光标挪走了:CursorPos 不再是最后注入的那一点。
+	f.moves = append(f.moves, [2]float64{9999, 9999})
+	st, err := s.Landing(500, 400)
+	if err == nil {
+		t.Fatal("光标已被别人挪走,落点必须作废")
+	}
+	if st != PBCold {
+		t.Fatalf("作废的落点应报冷启动,得到 %v", st)
+	}
+	if err := s.Click(96); err == nil {
+		t.Fatal("作废落点之后不得放行点击")
+	}
+}
