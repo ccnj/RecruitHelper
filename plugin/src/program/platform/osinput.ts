@@ -40,6 +40,22 @@ const WILD_DRIFT_PX = 400
 const PACE_MIN_MS = 1000
 const PACE_JITTER_MS = 800
 
+/**
+ * 落点读取前的稳定等待。
+ *
+ * **不能在 /play 一返回就读。** 手服务返回的时刻只表示"最后一帧已经发出去了",
+ * 而浏览器派发 mousemove 是异步的——那时页面记的很可能还是轨迹中途的某个位置。
+ *
+ * 2026-08-28 真机就是这么翻的车:按种子推算,两趟的落点偏差都该恒定是 121,
+ * 实测却是 318 → 1196。**递增**正是"读到中途位置"的形状:第二趟靶子离中途更远,
+ * 陈旧值就偏得更多。而这个误差会被当成标定误差喂进搭车拟合,越学越歪。
+ *
+ * 判据是"连续两次读到同一个位置",不是固定等待:静止之后浏览器就不再派发事件,
+ * 所以位置稳定即已落定。
+ */
+const LANDING_SETTLE_POLL_MS = 40
+const LANDING_SETTLE_MAX_MS = 800
+
 /** 页面上存落点观测的键。装一次、读一次、读完摘掉,不留常驻状态(手的禁令 2)。 */
 const LANDING_KEY = '__recruitHelperOsLanding'
 
@@ -272,7 +288,7 @@ export async function runOsProbe(
       unreachable += play.unreachable
       lagMaxUs = Math.max(lagMaxUs, play.lagMaxUs)
 
-      const landed = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
+      const landed = await readSettledLanding(inject, tabId)
       if (landed.x === null || landed.y === null) {
         // 一个 mousemove 都没观测到,**这时必须停,不能重试**。
         //
@@ -380,4 +396,25 @@ export function refuseBeforeMoving(view: ViewportFacts): string | null {
   // 真正未验证的是**跨屏**:一条轨迹横跨两块缩放不同的屏时映射不再是单一仿射。
   // 那一类还没遇到,遇到时按当时看到的形状立案,不预先造闸。
   return null
+}
+
+/**
+ * 等落点稳定再读。见 LANDING_SETTLE_POLL_MS 的说明。
+ *
+ * 返回最后读到的位置;超时仍未稳定也返回当前值——那时它多半确实还在动,
+ * 后面的偏差判据会把它拦下来。失效方向是"不确认",不是"猜一个"。
+ */
+async function readSettledLanding(
+  inject: InjectOptions,
+  tabId: number,
+): Promise<{ x: number | null; y: number | null }> {
+  const deadline = Date.now() + LANDING_SETTLE_MAX_MS
+  let last = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, LANDING_SETTLE_POLL_MS))
+    const now = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
+    if (now.x === last.x && now.y === last.y) return now
+    last = now
+  }
+  return last
 }
