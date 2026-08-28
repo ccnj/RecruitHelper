@@ -88,7 +88,7 @@ import {
 import { PlatformError } from './types'
 import type { ExecutionWorld, PlatformAdapter } from './types'
 import { runInPage } from './inject'
-import { runOsProbe } from './osinput'
+import { osProbeContractData, runOsProbe } from './osinput'
 import type { InjectOptions } from './inject'
 // 域名与 URL 形状的唯一出处是站点身份模块 —— 它同时被 content script 那个
 // bundle 用(见 zhilianSite.ts 开头);在这里另写一份就会有两个「智联是谁」。
@@ -15955,7 +15955,8 @@ async function zhilianOsProbe(
     throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
   }
   const probe = await runOsProbe(ZHILIAN_INJECT, tab.id, ctx)
-  return { target: args.target, observedAt: Date.now(), ...probe }
+  // 装配(含取整)收在 osinput.ts:适配器不该知道哪些字段要取整。
+  return osProbeContractData(args.target, probe, Date.now())
 }
 
 export const zhilianAdapter = {

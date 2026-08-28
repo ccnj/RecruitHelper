@@ -104,3 +104,4 @@ export {
   validatePrimitiveResult,
 } from '../src/base/protocol'
 export { planMove, DEFAULT_MAX_DWELL_MS, OSENGINE_SOURCE } from '../src/program/osengine/plan'
+export { refuseBeforeMoving, osProbeContractData } from '../src/program/platform/osinput'

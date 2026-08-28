@@ -100,6 +100,8 @@ const {
   zhilianTestHooks,
   ZhilianPlatformError,
   planMove,
+  refuseBeforeMoving,
+  osProbeContractData,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
@@ -15106,6 +15108,31 @@ test('osProbe 把平台失败如实映射,不逃成 INTERNAL_HAND', async () => 
     resetPlatformsForTest()
     registerPlatform(zhilianAdapter)
   }
+})
+
+// 移动之前的拒绝判据。**这一组的每一条都对应一次真实的鼠标失控风险。**
+// 副屏**必须放行**。这条是反着写的:2026-08-28 曾因副屏上光标飞了 34 秒而加过一道
+// "副屏一律拒绝",两点实测之后证明根因是种子公式抄错了平台(macOS 不该乘 dpr),
+// 与在哪块屏无关。那道闸拿一个可修的 bug 换了一条永久产品约束,已撤。
+// 留这条用例是为了不让它被"顺手"加回来。
+test('osProbe 不因窗口在副屏而拒绝', () => {
+  const view = { innerW: 1470, innerH: 662, screenX: 2560, screenY: 517, dpr: 2, availLeft: 2560, availTop: 517 }
+  assert.equal(refuseBeforeMoving(view), null, '副屏必须放行——根因在种子,不在屏')
+  assert.equal(refuseBeforeMoving({ ...view, screenX: 100, availLeft: 0, availTop: 38 }), null, '主屏当然放行')
+  assert.ok(refuseBeforeMoving({ ...view, innerW: 0 }), '视口读不出来时必须拒绝')
+})
+
+// 契约里没有浮点类型,而手服务算出来的滞后是浮点。真机第一次成功跑完 34.6 秒之后,
+// result 就是被 `$.data.lagMaxUs: 需要整数` 拦在回程上,那一趟的数据全丢了。
+test('osProbe 的契约 data 全是整数', () => {
+  const data = osProbeContractData('viewportCenter', {
+    outcome: 'landed', attempts: 2, landingDriftPx: 1.2, calibStatus: '就绪',
+    unreachableFrames: 0, planMs: 903.7, elapsedMs: 34627.4, lagMaxUs: 22641.83,
+  }, 1756000000000)
+  for (const k of ['attempts', 'landingDriftPx', 'unreachableFrames', 'planMs', 'elapsedMs', 'lagMaxUs', 'observedAt']) {
+    assert.ok(Number.isInteger(data[k]), `${k} 必须是整数,实际 ${data[k]}`)
+  }
+  assert.equal(data.landingDriftPx, 2, '偏差向上取整——宁可报大不报小')
 })
 
 let failures = 0
