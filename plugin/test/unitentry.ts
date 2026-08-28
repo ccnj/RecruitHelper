@@ -117,4 +117,4 @@ export {
 } from '../src/base/telemetry/store'
 export { bodyText, deepFind, recordUpload } from '../src/base/telemetry/capture'
 export { bossTelemetrySite, telemetrySites } from '../src/program/platform/telemetrySites'
-export { classifyBossEntry, bossCodeLabel } from '../src/program/platform/telemetrySites'
+export { classifyBossEntry, bossCodeLabel, bossCodeMeaning } from '../src/program/platform/telemetrySites'

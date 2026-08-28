@@ -34,6 +34,7 @@ const {
   telemetryClear,
   classifyBossEntry,
   bossCodeLabel,
+  bossCodeMeaning,
   TELEMETRY_CHUNK,
   TELEMETRY_KIND_CLICK,
   TELEMETRY_KIND_UPLOAD,
@@ -15328,8 +15329,12 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
   assert.deepEqual(p.localProbes, ['http://127.0.0.1:8931/a'], '只收本机端口')
   assert.deepEqual(p.hits, [], 'patas 通道的 p2 是页面 URL,不该被当成事件码')
 
-  assert.equal(bossCodeLabel('800001'), '800001(设备指纹·IP/全局名/API 矩阵)')
-  assert.equal(bossCodeLabel('550003'), '550003', '不认识的码原样显示,不编')
+  assert.match(bossCodeLabel('800001'), /^800001\(设备指纹/)
+  assert.match(bossCodeMeaning('99999').label, /未知码/, '码表里没有的原样记下,不编')
+  // 本机端口探测那一族的判据是"1 秒内有反应"而不是"连上了",端口关着瞬间拒绝
+  // 照样算真 —— 面板必须把它们跟真信号分开,否则每台机器都是一片红。
+  assert.equal(bossCodeMeaning('550239').nearUniversal, true)
+  assert.equal(bossCodeMeaning('550094').nearUniversal, undefined)
   assert.deepEqual(classifyBossEntry(aegis, null).hits, [])
 })
 

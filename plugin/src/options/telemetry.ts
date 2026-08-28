@@ -9,7 +9,7 @@
 
 import { KIND_CLICK, KIND_UPLOAD, TelemetryStorage, clear, readAll } from '../base/telemetry/store'
 import { TelemetryEntry } from '../base/telemetry/capture'
-import { bossCodeLabel, classifyBossEntry } from '../program/platform/telemetrySites'
+import { bossCodeMeaning, classifyBossEntry } from '../program/platform/telemetrySites'
 
 const storage: TelemetryStorage = {
   get: (keys) => chrome.storage.local.get(keys as string | string[]),
@@ -42,11 +42,41 @@ function tally(values: readonly string[]): string[] {
     .map(([value, n]) => `${value} x${n}`)
 }
 
+function renderHits(hits: readonly { code: string; action: string }[]): string {
+  if (!hits.length) {
+    return '<span class="muted">无。注意:设备指纹上报(800001/800003/800009)每次页面加载'
+      + '无条件发,算例行、不算命中。</span>'
+  }
+
+  const counts = new Map<string, number>()
+  for (const h of hits) counts.set(h.code, (counts.get(h.code) ?? 0) + 1)
+
+  const real: string[] = []
+  const noisy: string[] = []
+  for (const [code, n] of [...counts.entries()].sort((a, b) => b[1] - a[1])) {
+    const meaning = bossCodeMeaning(code)
+    const line = `<b>${escapeHTML(code)}</b> x${n} — ${escapeHTML(meaning.label)}`
+    ;(meaning.nearUniversal ? noisy : real).push(line)
+  }
+
+  let html = real.length
+    ? `<ul>${real.map((l) => `<li>${l}</li>`).join('')}</ul>`
+    : '<span class="muted">没有值得看的命中。</span>'
+
+  if (noisy.length) {
+    html += '<p class="muted" style="margin-top:0.8rem">下面这些<b>近乎每台机器都会报</b>,不是探到了东西 ——'
+      + ' 本机端口探测的回调是 <code>onopen = onclose = onerror</code>,参数是"1 秒内有反应"'
+      + '而不是"连上了";localhost 上端口关着会瞬间拒绝,照样算真。</p>'
+      + `<ul class="muted">${noisy.map((l) => `<li>${l}</li>`).join('')}</ul>`
+  }
+  return html
+}
+
 async function render(): Promise<void> {
   const entries = await readAll(storage, KIND_UPLOAD) as TelemetryEntry[]
   const shots = await readAll(storage, KIND_CLICK)
 
-  const hits: string[] = []
+  const hits: { code: string; action: string }[] = []
   const routine: string[] = []
   const globals = new Set<string>()
   const injected: string[] = []
@@ -56,8 +86,8 @@ async function render(): Promise<void> {
   for (const entry of entries) {
     if (entry.raw !== undefined || entry.parseError !== undefined) unparsed += 1
     const c = classifyBossEntry(entry.url, entry.payload)
-    for (const h of c.hits) hits.push(`${bossCodeLabel(h.code)}  ·  ${h.action}`)
-    for (const r of c.routine) routine.push(bossCodeLabel(r.code))
+    for (const h of c.hits) hits.push(h)
+    for (const r of c.routine) routine.push(`${r.code}(${bossCodeMeaning(r.code).label})`)
     for (const g of c.unknownGlobals) globals.add(g)
     for (const i of c.injected) injected.push(typeof i === 'string' ? i : JSON.stringify(i))
     for (const p of c.localProbes) probes.add(p)
@@ -82,10 +112,7 @@ async function render(): Promise<void> {
       + list(names)
   }
 
-  el('hits').innerHTML = hits.length
-    ? list(tally(hits))
-    : '<span class="muted">无。注意:设备指纹上报(800001/800003/800009)每次页面加载无条件发,'
-      + '算例行、不算命中。</span>'
+  el('hits').innerHTML = renderHits(hits)
 
   const first = entries[0]?.at
   const last = entries[entries.length - 1]?.at

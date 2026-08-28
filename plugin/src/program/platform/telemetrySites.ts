@@ -99,18 +99,74 @@ const ROUTINE_BEHAVIOR = new Set(['0', '30004', '30005', '30006'])
 /** 设备指纹上报本身——每次页面加载无条件发,跟检测到什么无关。 */
 const FINGERPRINT = new Set(['800001', '800003', '800009'])
 
-const CODE_LABELS: Record<string, string> = {
-  '0': '0(无异常)',
-  '30004': '30004(TYPING·正常打字分类)',
-  '30005': '30005(ENTER·回车分类)',
-  '30006': '30006(SDK 版本自报)',
-  '800001': '800001(设备指纹·IP/全局名/API 矩阵)',
-  '800003': '800003(设备指纹·屏幕/GPU/canvas)',
-  '800009': '800009(设备指纹·语音合成)',
+export interface BossCodeMeaning {
+  readonly code: string
+  /** 一句话说明这个码报的是什么。不认识的码原样回显,不编。 */
+  readonly label: string
+  /**
+   * 近乎每台机器都会报,**不是探到了东西**。
+   *
+   * 本机端口探测走 `si()`,而它的回调是 `onopen = onclose = onerror`,
+   * 参数是「**1 秒内有反应**」而不是「连上了」(实证:`sec370.clean.js:2136-2147`)。
+   * localhost 上端口关着会瞬间 ECONNREFUSED —— 照样算真。所以这一族码在
+   * 任何一台机器上都会亮,判据本身有问题。
+   */
+  readonly nearUniversal?: boolean
+}
+
+/**
+ * 事件码释义。取自 hiBoss `report/boss-detection-report.md` §4.2/§4.3 与
+ * `evidence/deobfuscated/sec370.clean.js` 的码表(`co`/`za`),我方未逐条真机核对。
+ *
+ * `nearUniversal` 那一族是例外:判据语义由我方 2026-08-28 直接读反混淆源码确认。
+ */
+const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
+  '0': { label: '无异常' },
+  '30004': { label: 'TYPING·正常打字分类' },
+  '30005': { label: 'ENTER·回车分类' },
+  '30006': { label: 'SDK 版本自报' },
+
+  // 设备指纹上报本身:每次页面加载无条件发,跟检测到什么无关。
+  '800001': { label: '设备指纹·内网 IP + 未知全局名差集 + 缺失 API 矩阵' },
+  '800003': { label: '设备指纹·UA-CH/屏幕/GPU/canvas 哈希' },
+  '800009': { label: '设备指纹·语音合成深度指纹' },
+
+  // 本机端口 / 伴随进程探测。整族都受 si() 那个判据缺陷影响。
+  '550237': { label: '探本机 18789 端口(openGateway),1 秒内有反应', nearUniversal: true },
+  '550238': { label: '探本机 18789 的 /__openclaw__/ping' },
+  '550239': { label: '探本机 9222 端口(Chrome 默认远程调试口),1 秒内有反应', nearUniversal: true },
+  '550241': { label: '探本机 8642 端口(hermes)' },
+  '550243': { label: '探本机 opencli' },
+  '550245': { label: '探本机 10086 端口(kimi),1 秒内有反应(含连接被拒)', nearUniversal: true },
+  '550247': { label: '本机 10086 WebSocket 真正握手成功(kimi)' },
+  '910013': { label: '探本机 35600 端口,五秒内毫无反应(不是拒绝,是没声音);p3 带 CDP 状态' },
+  '900067': { label: '探到 AdsPower(20725)' },
+  '900073': { label: '探到花漾(47326)' },
+  '900075': { label: '探到 VMLogin(5100)' },
+
+  // 扩展与自动化痕迹。
+  '550091': { label: '页面上 chrome.runtime 可用(某扩展对 zhipin.com 声明了 externally_connectable)' },
+  '550094': { label: '同上,另一条分支——报的是"这个页面上 chrome.runtime 竟然可用"这件事本身' },
+  '550003': { label: 'CDP / Playwright 痕迹' },
+  '800015': { label: 'devtools/CDP 探测命中(不可配置的 stack getter 被读)' },
+  '800025': { label: 'navigator 原型链上有非原生实现' },
+  '550013': { label: 'navigator 指纹串命中(userAgent,userAgent,sendBeacon)' },
+  '700009': { label: 'isTrusted 检查' },
+  '99003': { label: 'Object.keys(window) 与白名单的差集(未知全局名)' },
+
+  // 聚合补报。
+  '559991': { label: '聚合补报:累计命中 >2 个不同的非豁免码(p3=码列表、p4=数量);需 window.Block 为真' },
+  '559999': { label: '聚合补报:命中 Sa 表;需 window.Block 为真' },
+}
+
+export function bossCodeMeaning(code: string): BossCodeMeaning {
+  const known = CODE_MEANINGS[code]
+  return known ? { code, ...known } : { code, label: '未知码(hiBoss 的码表里没有,原样记下)' }
 }
 
 export function bossCodeLabel(code: string): string {
-  return CODE_LABELS[code] ?? code
+  const meaning = bossCodeMeaning(code)
+  return meaning.label === '' ? code : `${code}(${meaning.label})`
 }
 
 export interface BossClassification {
