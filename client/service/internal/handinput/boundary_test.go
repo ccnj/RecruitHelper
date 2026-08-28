@@ -104,3 +104,52 @@ func repoRoot(t *testing.T) string {
 	t.Fatal("找不到仓库根(go.mod)")
 	return ""
 }
+
+// purego 只许出现在带 darwin 构建标签的文件里。
+//
+// 这条是「Windows 发布产物零影响」的全部依据:构建标签把那个文件整个排除在
+// GOOS=windows 的构建图之外,于是 purego 连编都不编(实测 windows 构建图里
+// purego 相关包为 0,darwin 里为 4)。
+//
+// 它同时把风险圈在开发路径上:purego 靠 //go:linkname 借 runtime 内部,
+// 升 Go 版本可能编不过——但那只炸 darwin 这条本地迭代路径,发布路径根本碰不到。
+// 少了这道门禁,哪天有人把 purego 的 import 挪到一个不带标签的文件里,
+// 上面两条保证会同时失效,而且不会有任何报错。
+func TestPuregoStaysBehindDarwinBuildTag(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		src, rerr := os.ReadFile(e.Name())
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		f, perr := parser.ParseFile(fset, e.Name(), src, parser.ImportsOnly)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		uses := false
+		for _, im := range f.Imports {
+			if strings.Contains(im.Path.Value, "ebitengine/purego") {
+				uses = true
+			}
+		}
+		if !uses {
+			continue
+		}
+		// 只认 //go:build,不认老式 // +build:前者是 Go 1.17 起的唯一权威。
+		head := string(src)
+		if i := strings.Index(head, "\npackage "); i > 0 {
+			head = head[:i]
+		}
+		if !strings.Contains(head, "//go:build darwin") {
+			t.Fatalf("%s import 了 purego 却没有 //go:build darwin 标签——"+
+				"它会进 Windows 发布产物的构建图,而那正是本仓库禁止 cgo 那条要守住的东西", e.Name())
+		}
+	}
+}
