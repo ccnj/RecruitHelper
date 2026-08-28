@@ -28,8 +28,8 @@ func (d *Dispatcher) OsProbe(
 	if platform == "" || accountRef == "" {
 		return nil, errors.New("缺少有效的账号标识")
 	}
-	if target != protocol.OsProbeTargetViewportCenter {
-		return nil, errors.New("本轮只开放 viewportCenter 靶子——它只移动、不点击")
+	if target != protocol.OsProbeTargetViewportSpread {
+		return nil, errors.New("本轮只开放 viewportSpread 靶子——它在视口里移几个散开的点,不点击")
 	}
 	argsRaw, err := protocol.Encode(protocol.DebugOsProbeArgs{Target: target})
 	if err != nil {

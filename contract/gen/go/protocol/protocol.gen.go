@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:5589d9e2446eeb2d87b21a5ecc599d19f74cc13fe7103966451d3c20f9ccb6e2"
+	ContractHash       = "sha256:314c969634fabcd9c6d386152d102327ef83735e7631566ee929c3f2f1125940"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -324,11 +324,11 @@ var OsProbeOutcomeValues = []OsProbeOutcome{
 type OsProbeTarget string
 
 const (
-	OsProbeTargetViewportCenter OsProbeTarget = "viewportCenter"
+	OsProbeTargetViewportSpread OsProbeTarget = "viewportSpread"
 )
 
 var OsProbeTargetValues = []OsProbeTarget{
-	OsProbeTargetViewportCenter,
+	OsProbeTargetViewportSpread,
 }
 
 type OutboxKind string
