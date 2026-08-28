@@ -4,6 +4,8 @@
 import type { PrimitiveContext } from '../registry'
 import { describeError, reportHandLog } from '../../base/handLog'
 import type {
+  DebugOsProbeArgs,
+  DebugOsProbeData,
   AccountReadWechatSettingData,
   CandidateApplySourcingFiltersArgs,
   CandidateApplySourcingFiltersData,
@@ -86,6 +88,7 @@ import {
 import { PlatformError } from './types'
 import type { ExecutionWorld, PlatformAdapter } from './types'
 import { runInPage } from './inject'
+import { runOsProbe } from './osinput'
 import type { InjectOptions } from './inject'
 // 域名与 URL 形状的唯一出处是站点身份模块 —— 它同时被 content script 那个
 // bundle 用(见 zhilianSite.ts 开头);在这里另写一份就会有两个「智联是谁」。
@@ -15936,6 +15939,25 @@ export const zhilianTestHooks = Object.freeze({
 // 的能力;若在这里断言全量实现,第二个平台带来一条智联根本没有的能力时,会把
 // 智联一起搞到编译不过。「智联该有哪 35 条」是智联自己的事实,由 test/unit.mjs
 // 里那份清单断言,不靠类型系统跨平台强加。
+// OS 注入探针(开发期,2026-08-28)。**纯新增**:既有的 45 处点击一行不动,
+// 本适配器的 `input` 声明仍是 intrinsic——探针不经它,它是一条独立原语。
+//
+// 智联这一侧只负责两件平台专有的事:挑哪个标签页、用哪个执行世界。四段编排本身
+// 是平台无关的(靶子是视口正中,不需要任何 DOM 知识),放在 platform/osinput.ts,
+// 将来第二个平台直接复用同一份。
+async function zhilianOsProbe(
+  args: DebugOsProbeArgs,
+  ctx: PrimitiveContext,
+  fingerprint: string | undefined,
+): Promise<DebugOsProbeData> {
+  const tab = await verifiedIMTab(fingerprint)
+  if (tab.id === undefined) {
+    throw new ZhilianPlatformError('CTX_NOT_READY', '智联标签页缺少 id', 'afterRecovery', 'pageBroken')
+  }
+  const probe = await runOsProbe(ZHILIAN_INJECT, tab.id, ctx)
+  return { target: args.target, observedAt: Date.now(), ...probe }
+}
+
 export const zhilianAdapter = {
   id: ZHILIAN_PLATFORM,
   hostMatch: TAB_QUERY,
@@ -16022,4 +16044,5 @@ export const zhilianAdapter = {
   probeInterviewEditor: ({ args, ctx, fingerprint }) =>
     probeZhilianInterviewEditor(args, ctx, fingerprint),
   capturePageSnapshot: ({ ctx }) => captureZhilianPageSnapshot(ctx),
+  osProbe: ({ args, ctx, fingerprint }) => zhilianOsProbe(args, ctx, fingerprint),
 } satisfies PlatformAdapter

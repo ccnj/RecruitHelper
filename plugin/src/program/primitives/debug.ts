@@ -5,6 +5,7 @@ import {
   CmdClass,
   DebugCapturePageArgs,
   DebugInspectSendSurfaceArgs,
+  DebugOsProbeArgs,
   DebugProbeInterviewEditorArgs,
   Primitive as PrimName,
 } from '../../base/protocol'
@@ -143,9 +144,25 @@ const capturePagePrim: Primitive = {
   },
 }
 
+// debug.osProbe:开发期 OS 注入探针。intrusive——它真的动鼠标,只是本轮不点击。
+//
+// **它不碰任何生产原语。** 智联那 45 处点击一行没动,适配器的 input 声明仍是
+// intrinsic。走独立原语而不是运行期开关,是因为开关会造出一条测试专用分支——
+// 开着跑的路和生产跑的路不是同一条,两头的绿都证明不了对方,而大方向 3 要求
+// 测试与生产共用同一分发器、同一信封、同一分发路径,区别只在谁生产这条命令。
+const osProbePrim: Primitive = {
+  name: PrimName.DebugOsProbe,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    const data = await callPlatform(ctx, 'osProbe', rawArgs as DebugOsProbeArgs)
+    return { status: 'ok', data }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
+  register(osProbePrim)
   register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)
