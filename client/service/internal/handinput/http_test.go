@@ -38,12 +38,12 @@ func TestHTTPRoundTripFromColdStartToClick(t *testing.T) {
 
 	// 冷启动:先问状态。此时不该放行点击。
 	var st State
-	resp, err := http.Get(srv.URL + "/handinput/state")
+	rs, err := http.Post(srv.URL+"/handinput/state", "application/json", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&st)
-	resp.Body.Close()
+	_ = json.NewDecoder(rs.Body).Decode(&st)
+	rs.Body.Close()
 	if st.ClickArmed || st.Calibrated {
 		t.Fatalf("冷启动就报已标定/已放行:%+v", st)
 	}
@@ -122,5 +122,42 @@ func TestHTTPLandingDriftIsNotAnError(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&lr)
 	if lr.Status != PBSuspect.String() || lr.ClickArmed || lr.Detail == "" {
 		t.Fatalf("应报存疑、不放行、带原因,得到 %+v", lr)
+	}
+}
+
+// 真机第一跑的回归:冷启动时 /handinput/state 回了 200 却带着空 body。
+//
+// 根因是样本不足两个时 Piggyback.Residual() 返回 NaN,而 encoding/json 编不了 NaN;
+// 老写法先 WriteHeader 再 Encode,头已经发出去了,错误无处可去,日志里也一个字没有。
+//
+// **判据必须盯 body,不能只盯状态码**——那正是这个 bug 骗过眼睛的地方。
+func TestHTTPStateOnColdStartReturnsBodyNotJustStatus(t *testing.T) {
+	f := &fakeInjector{truth: Calib{ScaleX: 1, ScaleY: 1}}
+	s := NewService(f)
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/handinput/state", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("state 返回 %d", resp.StatusCode)
+	}
+	var st State
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatalf("冷启动的 state 解不开——多半又有 NaN/Inf 混进了序列化:%v", err)
+	}
+	if st.Platform == "" {
+		t.Fatal("body 是空的:200 但什么都没回")
+	}
+	if st.CursorCSSX != nil || st.CursorCSSY != nil {
+		t.Fatal("没播种就报出了光标 CSS 坐标——那时零值标定会除以零,报出来的是编造的")
+	}
+	if st.ResidualPx != nil {
+		t.Fatalf("样本不足时残差必须是 nil 而不是 0——0 的意思是拟合完美,那是撒谎;得到 %v", *st.ResidualPx)
 	}
 }

@@ -35,10 +35,27 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/handinput/click", s.handleClick)
 }
 
+// state 是 POST 而不是 GET,因为它可以捎一份窗口粗估过来播种。
+//
+// 次序上这是必须的:编排层在生成计划之前要先问光标在哪,而"光标在哪"的答案要经
+// 当前标定反算——没播种就连粗估都没有,只能回 nil。让第一次问状态就把粗估带上,
+// 这个先有鸡还是先有蛋的坎就没了。粗估只用来猜往哪个方向先动,不参与任何计算。
 func (s *Service) handleState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "只接受 GET", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodPost {
+		http.Error(w, "只接受 POST", http.StatusMethodNotAllowed)
 		return
+	}
+	var req struct {
+		Hint *WindowHint `json:"hint,omitempty"`
+	}
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(w, "请求体解析失败:"+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Hint != nil {
+		s.Seed(*req.Hint)
 	}
 	writeJSON(w, http.StatusOK, s.State())
 }
@@ -76,11 +93,11 @@ type landingRequest struct {
 }
 
 type landingResponse struct {
-	Status     string  `json:"status"`
-	ClickArmed bool    `json:"clickArmed"`
-	Detail     string  `json:"detail,omitempty"`
-	ResidualPx float64 `json:"residualPx"`
-	Samples    int     `json:"samples"`
+	Status     string   `json:"status"`
+	ClickArmed bool     `json:"clickArmed"`
+	Detail     string   `json:"detail,omitempty"`
+	ResidualPx *float64 `json:"residualPx"`
+	Samples    int      `json:"samples"`
 }
 
 func (s *Service) handleLanding(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +106,7 @@ func (s *Service) handleLanding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st, err := s.Landing(req.ClientX, req.ClientY)
-	resp := landingResponse{Status: st.String(), ResidualPx: s.pb.Residual(), Samples: s.pb.N()}
+	resp := landingResponse{Status: st.String(), ResidualPx: finiteOrNil(s.pb.Residual()), Samples: s.pb.N()}
 	s.mu.Lock()
 	resp.ClickArmed = s.armed
 	s.mu.Unlock()
@@ -129,8 +146,21 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// writeJSON 先编码再写头。
+//
+// **顺序不能反。** 直接 json.NewEncoder(w).Encode(v) 会先把 200 发出去,
+// 编码这一步再失败就无处可去了——真机第一跑正是这个形态:一个 NaN 让
+// /handinput/state 回了 200 加空 body,而日志里一个字都没有。
+// 先编码,失败就还能回 500 并说清楚是什么。
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("手服务响应序列化失败:" + err.Error()))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(buf)
 }

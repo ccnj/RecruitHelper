@@ -41,18 +41,22 @@ type PlayResult struct {
 type State struct {
 	Platform string `json:"platform"`
 	// CursorCSSX/Y 是光标此刻所在,已按当前标定反算成视口 CSS 坐标。
+	// **还没有任何标定(连粗估都没播)时是 nil,不是 0**:那时我们是真不知道,
+	// 而 0 会被编排层当成"光标在视口左上角"照着算一条轨迹出来。
 	//
 	// **编排层必须每次现读它当起点。** Snap 与 ToClient 用同一份标定、互为逆运算,
 	// 所以现读再反算必然落回原地,不管标定多离谱;而用记忆里的 CSS 值没有这个抵消,
 	// 标定一被修正就错位,错位量正好等于修正量——冷启动时那是一两百像素的一次
 	// 干净瞬移,也就是评分台里最差的那个形状。
-	CursorCSSX  float64 `json:"cursorCssX"`
-	CursorCSSY  float64 `json:"cursorCssY"`
-	Calibrated  bool    `json:"calibrated"`
-	ClickArmed  bool    `json:"clickArmed"`
-	Samples     int     `json:"samples"`
-	ResidualPx  float64 `json:"residualPx"`
-	ClockSource string  `json:"clockSource"`
+	CursorCSSX *float64 `json:"cursorCssX"`
+	CursorCSSY *float64 `json:"cursorCssY"`
+	Calibrated bool     `json:"calibrated"`
+	ClickArmed bool     `json:"clickArmed"`
+	Samples    int      `json:"samples"`
+	// ResidualPx 是当前拟合的残差(CSS px)。**样本不足两个时是 nil,不是 0**——
+	// 0 的意思是"拟合完美",跟"还没得拟合"差着十万八千里,而这个面是给人读的。
+	ResidualPx  *float64 `json:"residualPx"`
+	ClockSource string   `json:"clockSource"`
 }
 
 // Service 是手服务本体。
@@ -78,6 +82,19 @@ type Service struct {
 	lastInj *[2]float64
 }
 
+// finiteOrNil 把 NaN/Inf 挡在序列化之外。
+//
+// **这是真机第一跑照出来的**:样本不足两个时 Piggyback.Residual() 返回 NaN,
+// 而 encoding/json 编不了 NaN——于是 /handinput/state 回了 200 却带着空 body。
+// 头已经发出去了,错误无处可去。所以 NaN 必须在进结构体之前就挡掉,
+// 不能指望序列化那一步报错。
+func finiteOrNil(v float64) *float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil
+	}
+	return &v
+}
+
 func NewService(inj Injector) *Service {
 	return &Service{inj: inj, mode: WaitHybrid}
 }
@@ -86,11 +103,16 @@ func (s *Service) State() State {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := State{Platform: s.inj.Platform(), ClockSource: clockSourceName(),
-		ClickArmed: s.armed, Samples: s.pb.N(), ResidualPx: s.pb.Residual()}
+		ClickArmed: s.armed, Samples: s.pb.N(), ResidualPx: finiteOrNil(s.pb.Residual())}
 	c, ready := s.pb.Calib()
 	st.Calibrated = ready
-	if x, y, err := s.inj.CursorPos(); err == nil {
-		st.CursorCSSX, st.CursorCSSY = c.ToClient(float64(x), float64(y))
+	// 零值 Calib 的 ScaleX/Y 是 0,ToClient 会除以零得到 Inf——真机第一跑就是
+	// 这么把 /handinput/state 变成"200 加空 body"的。所以既查 seeded 也查有限性。
+	if s.seeded {
+		if x, y, err := s.inj.CursorPos(); err == nil {
+			cx, cy := c.ToClient(float64(x), float64(y))
+			st.CursorCSSX, st.CursorCSSY = finiteOrNil(cx), finiteOrNil(cy)
+		}
 	}
 	return st
 }
