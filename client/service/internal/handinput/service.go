@@ -95,6 +95,12 @@ func finiteOrNil(v float64) *float64 {
 	return &v
 }
 
+// cursorMovedPx 是"光标还在我们放的地方"的容差(系统坐标)。
+//
+// 取小值:注入是绝对坐标,发完之后系统不该再动它,所以正常情况下差是 0。
+// 留几像素只为容忍系统层面的取整。
+const cursorMovedPx = 4.0
+
 func NewService(inj Injector) *Service {
 	return &Service{inj: inj, mode: WaitHybrid}
 }
@@ -192,6 +198,25 @@ func (s *Service) Landing(clientX, clientY float64) (PBStatus, error) {
 	if last == nil {
 		s.armed = false
 		return PBCold, fmt.Errorf("这一轮还没播过任何计划,落点无从配对")
+	}
+	// **落点必须还在我们把它放的地方。**
+	//
+	// 页面报的"最后一个 mousemove"未必是我们注入的那一下:真人碰一下鼠标,那一下
+	// 也会派发事件,而且往往就是最后一个。把它当落点喂进搭车标定,等于用一个随机
+	// 位置去拟合几何——越学越歪,而且外表看起来一切正常(有样本、有残差、有状态)。
+	//
+	// 2026-08-28 真机上就撞到了:两趟观测解出来的 scale_y 是 **-2.0**,而屏幕映射
+	// 不可能是负的 —— 那说明至少一个观测不是我们注入的位置。
+	//
+	// 我们手里正好有判据:注入是绝对坐标,发完之后光标就该停在最后一帧那儿。
+	// 现在读一次,对不上就说明有别人动过 —— 这一次的样本作废,不喂标定。
+	// 失效方向是"不学",不是"学一个可能是错的"。
+	if x, y, err := s.inj.CursorPos(); err == nil {
+		if d := math.Hypot(float64(x)-last[0], float64(y)-last[1]); d > cursorMovedPx {
+			s.armed = false
+			return PBCold, fmt.Errorf("光标已不在最后注入的位置(偏 %.0f 像素)——"+
+				"运行期间有人碰了鼠标,本次落点作废", d)
+		}
 	}
 	st, err := s.pb.Observe(Sample{
 		ScreenX: last[0], ScreenY: last[1], ClientX: clientX, ClientY: clientY,
