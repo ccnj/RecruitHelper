@@ -2,11 +2,13 @@
 // 生成器自带的验证用例也必须在 Node 门禁中真正执行，不能只经过 typecheck。
 import '../../contract/gen/ts/validation.test'
 import { registerPlatform } from '../src/program/platform/registry'
+import { registerDebugPrimitives } from '../src/program/primitives/debug'
 import { zhilianAdapter } from '../src/program/platform/zhilian'
 
 // 本文件是测试侧的 background.ts:生产接线在 src/base/background.ts 注册平台,
 // 这里做同一件事,好让经原语层的用例真正走到平台路由,而不是绕过它。
 registerPlatform(zhilianAdapter)
+registerDebugPrimitives()
 
 export const GENERATED_CONTRACT_VALIDATION_EXECUTED = true
 export { Dispatcher } from '../src/base/dispatcher'

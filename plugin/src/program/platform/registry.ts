@@ -12,6 +12,7 @@
 // 本轮不改契约,所以下面的 `requireCapability` 是运行期兜底,不是能力协商的
 // 替代品——只装了一个平台时它永远不会触发。
 import { PlatformError } from './types'
+import type { ErrorCode, Retryable } from '../../base/protocol'
 import type {
   CapabilityName,
   PlatformAdapter,
@@ -177,4 +178,36 @@ function soleAdapter(): PlatformAdapter {
     'no',
     'unknown',
   )
+}
+
+/**
+ * 把平台层的失败翻成契约错误。**原语必须接住它,否则会逃成 INTERNAL_HAND。**
+ *
+ * 真机第一跑就撞上了:`debug.osProbe` 没接,于是"智联 IM 页面不存在"这条本该是
+ * `CTX_NOT_READY / pageAbsent / sideEffect=none` 的失败,回到脑那边成了
+ * `INTERNAL_HAND / sideEffect=possible`——一次什么都没做的失败被记成"副作用可能发生了",
+ * 方向正好反了。
+ *
+ * `sideEffect` 恒为 `none`:readonly 与 intrusive 没有资格用 effectful 的
+ * possible/confirmed 语义。effectful 原语另有自己的映射(要如实带出点击前后的区别),
+ * 不走这里。
+ *
+ * **这是这段逻辑的规范出处。** `primitives/{account,m2,m5,jobPublish}.ts` 里各有一份
+ * 早于本函数的同名拷贝,过手时应迁到这里来;本轮不主动翻修它们(一因果一 commit)。
+ */
+export function platformFailure(error: unknown): {
+  status: 'failed'
+  error: { code: ErrorCode; message: string; retryable: Retryable; sideEffect: 'none'; data?: Record<string, unknown> }
+} {
+  if (!(error instanceof PlatformError)) throw error
+  return {
+    status: 'failed',
+    error: {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+      sideEffect: 'none',
+      ...(error.reason ? { data: { reason: error.reason } } : {}),
+    },
+  }
 }
