@@ -41,5 +41,9 @@
       }
     ]
   },
+  "action": {
+    "default_title": "平台埋点观测",
+    "default_popup": "options/telemetry.html"
+  },
   "options_page": "options/options.html"
 }
