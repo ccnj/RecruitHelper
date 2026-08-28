@@ -181,60 +181,74 @@ export async function probeMainWorld(): Promise<MainWorldProbeResult> {
 }
 
 /**
- * 甲方不在电脑前时的自动上报路径:SW 起来后跑一次两个探针,结果经 handLog
- * 回脑,由脑写进 brain.log。**这里的一次性 setTimeout 是临时诊断代码**,
- * 不是业务定时器,随两个探针文件一并删除。
+ * 甲方不在电脑前时的取结论路径。**不用 setTimeout** —— MV3 的 SW 随时可能被回收,
+ * 定时器不可靠;直接在模块加载时跑一次,SW 每次重启(含 debug.reload)都会重跑。
+ *
+ * 结果有两个出口:
+ *   1. 最后一步**故意**往页面写 window.__bossProbeResult —— 这是阳性对照。
+ *      一个刻意不留痕的探针没法自证跑过,所以要有个确定会留痕的标记。
+ *      它写在全部测量之后,不污染测量。
+ *   2. handLog 回脑写进 brain.log(可能因连接未就绪而丢,只当附赠)。
  */
-export function scheduleProbeAutoReport(
+export async function runProbeAtBoot(
   report: (level: 'warn' | 'error', code: string, message: string, detail?: string) => void,
   runOriginProbe: () => Promise<unknown>,
-): void {
-  setTimeout(() => {
-    void (async () => {
-      try {
-        const r = await probeMainWorld()
-        if (!r.shots.length) {
-          report('warn', 'tempProbeMainWorld', 'MAIN world 探针没跑成', r.notes.join(' | '))
-        } else {
-          const s0 = r.shots[0]
-          const filesHits = r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits.length : -1
-          const filesGlobals = r.afterFilesInjection ? r.afterFilesInjection.globalsAdded.length : -1
-          const clean =
-            r.globalsAddedBetweenShots.length === 0 &&
-            s0.perfExtensionHits.length === 0 &&
-            filesHits === 0 &&
-            filesGlobals === 0
-          report(
-            'warn',
-            'tempProbeMainWorld',
-            clean ? 'MAIN world 注入无足迹' : 'MAIN world 注入留下了足迹',
-            JSON.stringify({
-              globalsAddedBetweenShots: r.globalsAddedBetweenShots,
-              funcPerfExtensionHits: s0.perfExtensionHits,
-              filesPerfExtensionHits: r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits : null,
-              filesGlobalsAdded: r.afterFilesInjection ? r.afterFilesInjection.globalsAdded : null,
-              walkMs: r.shots.map((x) => x.walkMs),
-              visited: s0.visitedComponents,
-              foundLen: s0.foundMessageArrayLen,
-              globalCount: r.shots.map((x) => x.globalCount),
-              perfCount: r.shots.map((x) => x.perfCount),
-              perfTypes: s0.perfTypes,
-              longTasks: s0.longTasks,
-              notes: r.notes,
-              shotErrors: r.shots.map((x) => x.error).filter(Boolean),
-            }).slice(0, 4000),
-          )
-        }
-      } catch (error) {
-        report('warn', 'tempProbeMainWorld', 'MAIN world 探针抛异常', String(error).slice(0, 400))
-      }
+): Promise<void> {
+  const payload: Record<string, unknown> = { at: Date.now() }
+  try {
+    const r = await probeMainWorld()
+    payload.mainWorld = r
+    if (r.shots.length) {
+      const s0 = r.shots[0]
+      const filesHits = r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits.length : -1
+      const filesGlobals = r.afterFilesInjection ? r.afterFilesInjection.globalsAdded.length : -1
+      payload.verdict =
+        r.globalsAddedBetweenShots.length === 0 &&
+        s0.perfExtensionHits.length === 0 &&
+        filesHits === 0 &&
+        filesGlobals === 0
+          ? 'clean'
+          : 'traces'
+    }
+  } catch (error) {
+    payload.mainWorldError = String(error).slice(0, 400)
+  }
 
-      try {
-        const o = await runOriginProbe()
-        report('warn', 'tempProbeOrigin', '扩展 origin fetch 探针结果', JSON.stringify(o).slice(0, 4000))
-      } catch (error) {
-        report('warn', 'tempProbeOrigin', 'origin 探针抛异常', String(error).slice(0, 400))
-      }
-    })()
-  }, 12_000)
+  try {
+    payload.origin = await runOriginProbe()
+  } catch (error) {
+    payload.originError = String(error).slice(0, 400)
+  }
+
+  // 阳性对照:最后写标记。放在全部测量之后,measurements 不受影响。
+  try {
+    const tabs = await chrome.tabs.query({ url: ['https://*.zhipin.com/*'] })
+    const tabId = tabs[0] && tabs[0].id
+    if (tabId !== undefined) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: (data: unknown) => {
+          // **必须不可枚举** —— BOSS 拿 Object.keys(window) 差集白名单上报 99003,
+          // 一个普通赋值会被它当成未知全局带出去(2026-08-28 实测:全局数 332→333)。
+          // defineProperty + enumerable:false 之后照样能按名字读到,但不进 keys。
+          Object.defineProperty(window, '__bossProbeResult', {
+            value: data,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          })
+        },
+        args: [payload],
+      })
+    }
+  } catch (error) {
+    payload.markerError = String(error).slice(0, 200)
+  }
+
+  try {
+    report('warn', 'tempProbeBoot', '临时探针结果', JSON.stringify(payload).slice(0, 4000))
+  } catch {
+    // 报不出去就算了,标记那条路够用。
+  }
 }

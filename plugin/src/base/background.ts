@@ -16,7 +16,7 @@ import { installHandLogSink, reportHandLog } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
 import { runBossOriginProbe, readBossOriginProbe, setBossOriginProbeGid } from './bossOriginProbe'
-import { probeMainWorld, scheduleProbeAutoReport } from './mainWorldProbe'
+import { runProbeAtBoot, probeMainWorld } from './mainWorldProbe'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -64,7 +64,7 @@ ensureConnectedAfterReload()
 
 // 临时诊断(2026-08-28):甲方不在电脑前,探针结果经 handLog 回脑写进 brain.log。
 // 随两个探针文件一并删除。
-scheduleProbeAutoReport(
+void runProbeAtBoot(
   (level, code, message, detail) => { reportHandLog(level, code, message, detail) },
   runBossOriginProbe,
 )
