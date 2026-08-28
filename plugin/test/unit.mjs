@@ -25,6 +25,11 @@ const {
   Connection,
   ContentSensor,
   telemetryAppend,
+  bodyText,
+  deepFind,
+  recordUpload,
+  bossTelemetrySite,
+  telemetrySites,
   telemetryReadAll,
   TELEMETRY_CHUNK,
   TELEMETRY_KIND_CLICK,
@@ -15183,6 +15188,93 @@ test('观测分片环:空追加是空操作,两个环互不挤占', async () => 
   await telemetryAppend(store, TELEMETRY_KIND_CLICK, [{ c: 1 }], TELEMETRY_MAX_CLICK_CHUNKS)
   assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [{ u: 1 }])
   assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ c: 1 }])
+})
+
+
+test('埋点捕获:请求体还原覆盖 formData 与 raw 两路,解不开也不丢', async () => {
+  const bytes = (s) => new TextEncoder().encode(s).buffer
+
+  // 表单编码时 Chrome 已经解过码,不能再 decodeURIComponent 一次。
+  assert.equal(bodyText({ formData: { content: ['{"a":1}'] } }), '{"a":1}')
+  // 字段名不是 content —— 整个交出去,别猜。
+  assert.equal(bodyText({ formData: { other: ['x'] } }), '{"other":["x"]}')
+
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=%7B%22a%22%3A1%7D') }] }), '{"a":1}')
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=a+b') }] }), 'a b', '+ 是空格')
+  assert.equal(bodyText({ raw: [{ bytes: bytes('{"plain":1}') }] }), '{"plain":1}', '没有 content= 外壳就是原文')
+  // 非法 percent-encoding:剥了壳的原文照样交出去。
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=%zz') }] }), '%zz')
+  // 多段字节要拼起来。
+  assert.equal(bodyText({ raw: [{ bytes: bytes('con') }, { bytes: bytes('tent=hi') }] }), 'hi')
+
+  assert.equal(bodyText(null), null)
+  assert.equal(bodyText(undefined), null)
+  assert.equal(bodyText({}), null)
+
+  assert.deepEqual(deepFind({ a: [{ p2: 1 }, { b: { p2: 2 } }], p2: 3 }, 'p2'), [1, 2, 3])
+  assert.deepEqual(deepFind(null, 'p2'), [])
+})
+
+test('埋点捕获:解析成功存结构+摘要,失败存原文+错因,摘要抽取炸了也照样落盘', async () => {
+  const store = memoryWitnessStorage()
+  const digest = (payload) => ({ summary: { seen: [payload?.k] }, shots: [{ s: payload?.k }] })
+
+  await recordUpload(store, digest, 111, 'https://x/t', '{"k":"v"}')
+  let rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].payload, { k: 'v' })
+  assert.deepEqual(rows[0].summary, { seen: ['v'] })
+  assert.equal(rows[0].raw, undefined, '解析成功不该同时存原文')
+  assert.equal(rows[0].parseError, undefined)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ s: 'v' }])
+
+  // 形状不对正是最该看见的信息 —— 存原文、记错因,绝不静默丢。
+  await recordUpload(store, digest, 222, 'https://x/t', 'not json')
+  rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(rows[1].raw, 'not json')
+  assert.equal(rows[1].payload, undefined)
+  assert.match(rows[1].parseError, /JSON 解析失败/)
+
+  // 站点的抽取逻辑没跟上平台改版:载荷仍完整落盘,只是摘要为空 + 记一笔。
+  const boom = () => { throw new Error('字段没了') }
+  await recordUpload(store, boom, 333, 'https://x/t', '{"k":"still here"}')
+  rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.deepEqual(rows[2].payload, { k: 'still here' }, '抽取失败不该连载荷一起丢')
+  assert.match(rows[2].parseError, /摘要抽取失败.*字段没了/)
+  assert.deepEqual(rows[2].summary, {})
+})
+
+test('BOSS 观测站点:抽 p2 与 cnTextCount,只有带轨迹的点击进轨迹环', async () => {
+  assert.deepEqual(telemetrySites.map((s) => s.id), ['boss'])
+  assert.deepEqual(bossTelemetrySite.urls, ['https://apm-fe.zhipin.com/wapi/zpApm/actionLog/*'])
+
+  const digested = bossTelemetrySite.digest({
+    items: [
+      { action: 'web-event-click', p2: '0', p6: { x: [1, 2] }, p4: 'a', p: '{"time":999}' },
+      { action: 'web-event-input', p2: '30004', p6: 'not-an-object', inner: { cnTextCount: 7 } },
+      { action: 'device-action-report', p2: '800001', p6: 'x|y' },
+      { action: 'web-event-click', p2: '0' },
+    ],
+  }, 500)
+
+  assert.deepEqual(digested.summary.codes, ['0', '30004', '800001', '0'])
+  assert.deepEqual(digested.summary.cnTextCount, [7], 'cnTextCount 只在载荷里,本地账本根本没有')
+
+  // 只有 action=web-event-click 且 p6 是对象的那条带轨迹。
+  assert.equal(digested.shots.length, 1)
+  assert.deepEqual(digested.shots[0].p6, { x: [1, 2] })
+  assert.equal(digested.shots[0].t, 999, '平台自己的时刻优先')
+  assert.equal(digested.shots[0].at, 500)
+
+  // p 缺失或解不开时退回捕获时刻,不为它丢一条轨迹。
+  const noTime = bossTelemetrySite.digest({
+    items: [{ action: 'web-event-click', p6: {}, p: 'not json' }],
+  }, 700)
+  assert.equal(noTime.shots[0].t, 700)
+
+  // 形状不认识就返回空,不猜。
+  assert.deepEqual(bossTelemetrySite.digest(null, 1), { summary: {}, shots: [] })
+  assert.deepEqual(bossTelemetrySite.digest({ items: 'nope' }, 1).shots, [])
 })
 
 

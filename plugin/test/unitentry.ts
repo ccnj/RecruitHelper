@@ -114,3 +114,5 @@ export {
   MAX_UPLOAD_CHUNKS as TELEMETRY_MAX_UPLOAD_CHUNKS,
   MAX_CLICK_CHUNKS as TELEMETRY_MAX_CLICK_CHUNKS,
 } from '../src/base/telemetry/store'
+export { bodyText, deepFind, recordUpload } from '../src/base/telemetry/capture'
+export { bossTelemetrySite, telemetrySites } from '../src/program/platform/telemetrySites'
