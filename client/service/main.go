@@ -26,6 +26,7 @@ import (
 	"recruithelper/client/service/internal/blobstore"
 	"recruithelper/client/service/internal/chatreport"
 	"recruithelper/client/service/internal/dispatch"
+	"recruithelper/client/service/internal/handinput"
 	"recruithelper/client/service/internal/handreload"
 	"recruithelper/client/service/internal/jobclassreport"
 	"recruithelper/client/service/internal/jobconfig"
@@ -461,6 +462,23 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.TransportPath, hub.ServeWS)
 	blobstore.NewHandler(blobStore, blobTokens, protocol.DefaultPayloadBlobMaxBytes).Routes(mux)
+	// 手服务(2026-08-28 立案)。它是**手的另一半**——插件那半能爬 DOM、读 clientX,
+	// 发不出真实系统输入;这半能调 SendInput,对页面一无所知。两半合起来才是一只手。
+	//
+	// 它租住在脑的地址空间里,不是脑的能力:业务层永远不知道有坐标这回事,
+	// 坐标只走 /handinput/* 这条插件发起的一问一答,不进脑手协议。包边界由
+	// handinput 的用例双向盯着——只有本文件可以 import 它,它不许 import 业务包。
+	//
+	// 非 Windows 上没有注入实现(上游的 macOS 版走 cgo,本仓库禁止引入 cgo),
+	// 此时不挂路由、只记一行,业务一切照旧。
+	if injector, err := handinput.NewInjector(); err != nil {
+		slog.Info("手服务未启用", "原因", err)
+	} else {
+		handInput := handinput.NewService(injector)
+		handInput.Routes(mux)
+		defer injector.Close()
+		slog.Info("手服务已挂载", "平台", injector.Platform(), "时间源", handinput.ClockSource())
+	}
 	// 现场数据上报(2026-07-31 甲方裁决)。日志由 Electron 写在 userData/logs,
 	// 不在脑的数据目录下,所以路径经环境变量传进来 —— 与 PLUGIN_DIR/UPDATE_DIR
 	// 同一套做法。开发期直接跑脑时没有这个变量,那时包里就没有日志。

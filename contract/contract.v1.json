@@ -330,6 +330,28 @@
           "stage": { "type": "string", "enumRef": "enums.sendSurfaceDiagnosticStage" }
         }
       },
+      "DebugOsProbeArgs": {
+        "type": "object",
+        "fields": {
+          "target": { "type": "string", "enumRef": "enums.osProbeTarget" }
+        }
+      },
+      "DebugOsProbeData": {
+        "type": "object",
+        "fields": {
+          "target": { "type": "string", "enumRef": "enums.osProbeTarget" },
+          "outcome": { "type": "string", "enumRef": "enums.osProbeOutcome" },
+          "attempts": { "type": "int", "minimum": 0, "maximum": 16 },
+          "landingDriftPx": { "type": "int", "minimum": 0, "optional": true },
+          "calibStatus": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "unreachableFrames": { "type": "int", "minimum": 0 },
+          "planMs": { "type": "int", "minimum": 0 },
+          "elapsedMs": { "type": "int", "minimum": 0 },
+          "lagMaxUs": { "type": "int", "minimum": 0 },
+          "detail": { "type": "string", "maxLength": 512, "optional": true },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "DebugReloadArgs": { "type": "object", "fields": {} },
       "DebugReloadData": { "type": "object", "fields": {} },
       "DebugProbeInterviewEditorArgs": {
@@ -1245,6 +1267,8 @@
     "sendInviteCardEvidenceType": ["outboundInterviewInviteObserved"],
     "interviewMethod": ["wechatVideo", "onsite"],
     "candidateContactState": ["unestablished", "established", "unknown"],
+    "osProbeTarget": ["viewportCenter"],
+    "osProbeOutcome": ["landed", "refusedByGate", "handServiceUnavailable"],
     "sourcingAgeMode": ["any", "range"],
     "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],
     "sourcingCareerStatus": ["employedLooking", "leftLooking", "employedOpen", "employedNotLooking"],
@@ -1334,6 +1358,13 @@
       "preconditions": [],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "只读诊断当前已打开会话的发送表面与服务端消息观察通道是否可用;只返回 ready/stage。不得读写编辑器、触发发送动作或返回账号、候选人、正文、消息历史、hash、guard、selector、函数源码、私有实现对象或原始异常;诊断读数不得复用为 chat.sendMessage 的授权结果或发送基线"
+    },
+    "debug.osProbe": {
+      "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",
+      "argsSchema": "DebugOsProbeArgs", "dataSchema": "DebugOsProbeData",
+      "preconditions": ["context.platform", "context.accountRef", "context.expectedPrincipalFingerprint", "surface.im", "login.in", "manualQuiet"],
+      "execBudgetMs": 180000, "deadlineMs": 300000, "leaseMs": 60000,
+      "note": "开发期 OS 注入探针(2026-08-28 立案)。**它是独立原语,不改动任何生产原语的执行路径**——智联那 45 处点击一行不动,适配器的 input 声明仍是 intrinsic。立它而不立运行期开关,依据是大方向 3:测试与生产必须共用同一分发器、同一信封、同一分发路径,区别只在谁生产这条命令;开关会造出一条测试专用分支,那正是「两端都禁止测试模式代码分支」禁的形态。args 只收**意图级靶子枚举**,由各平台适配器翻译成自己的定位——selector 与 DOM 细节不进契约。本轮只有一个靶子 viewportCenter:**只移动、绝不点击**。它不需要任何平台 DOM 知识(只要视口矩形),却能在真实页面上验完整条坐标换算、搭车标定与时序链。**在坐标被证明对之前,不该让第一次 OS 注入的点击落在真人账号的页面上**——点击靶子的定位需要真机考古(按「页面事实发现顺序」不得凭空实现 selector),滚动靶子还需要 OS 滚轮注入,两者都在坐标验完之后另立。执行四段:定位(读视口矩形,确认目标点在视口内)→移光标(经本机手服务,坐标不进本协议)→落点确认(读回 clientX)→喂搭车标定。**冷启动必然打偏**(窗口粗估偏一两百物理像素),那时落点判据不过就重新移动;两趟正常移动追上。移动可以重试,点击不可以——本轮尚无点击。data 只回诊断值(整数像素、毫秒、微秒),不携带 selector、坐标、账号或候选人任何信息;landingDriftPx 向上取整,0 表示不足 1 像素。脑侧**无任何业务生产者**:唯一派发入口是 /admin 手动端点,巡检与工作流一律不铸它,门禁盯着。leaseMs 必须声明——base 的租约脉冲只对声明了它的命令启动,而本原语按分钟计。"
     },
     "debug.switchWindow": {
       "ver": 1, "class": "intrusive", "batch": "M1", "platformSideEffect": "none",

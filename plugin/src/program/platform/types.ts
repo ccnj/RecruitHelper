@@ -61,6 +61,8 @@ import type {
   ChatSendWechatInviteArgs,
   ChatSendWechatInviteData,
   DebugCapturePageArgs,
+  DebugOsProbeArgs,
+  DebugOsProbeData,
   DebugInspectSendSurfaceArgs,
   DebugInspectSendSurfaceData,
   DebugProbeInterviewEditorArgs,
@@ -293,6 +295,15 @@ export interface PlatformCapabilities {
     input: PrimitiveInput<DebugProbeInterviewEditorArgs>,
   ): Promise<DebugProbeInterviewEditorData>
   capturePageSnapshot(input: PrimitiveInput<DebugCapturePageArgs>): Promise<CaptureScreenshotData>
+
+  /**
+   * OS 注入探针(开发期)。走完「定位 → 移光标 → 落点确认 → 喂搭车标定」四段。
+   *
+   * **它不碰任何生产原语的执行路径**:各平台的既有点击一行不动,适配器的 `input`
+   * 声明也不变。立独立原语而不立运行期开关,是因为开关会造出一条测试专用分支,
+   * 而大方向 3 要求测试与生产共用同一分发路径,区别只在谁生产这条命令。
+   */
+  osProbe(input: PrimitiveInput<DebugOsProbeArgs>): Promise<DebugOsProbeData>
 }
 
 /** 能力名。`requireCapability` 用它做键。 */

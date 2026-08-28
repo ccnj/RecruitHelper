@@ -26,6 +26,27 @@ const contentOptions = {
   format: 'iife',
 }
 
+// content script 的体积闸。
+//
+// 它守的不是"包小一点好看",是**三张表那个架构本身**:content.js 与 background.js
+// 是两个 bundle、两个 realm,content 侧付不起适配器那 16000 行的重量(切干净后
+// 只有 8.3KB)。而 osengine 的引擎与实测池又有 90KB,一旦有人从 content 侧
+// 顺手 import 到 program 层,这个数会当场翻两个数量级——而构建不会报任何错。
+//
+// 上限取实测值的两倍多一点:够容纳正常演进,又拦得住"整层被拽进来"。
+const CONTENT_MAX_BYTES = 20_000
+
+async function checkContentSize() {
+  const { statSync } = await import('node:fs')
+  const bytes = statSync('dist/content.js').size
+  if (bytes > CONTENT_MAX_BYTES) {
+    console.error(`dist/content.js 有 ${bytes} 字节，超过上限 ${CONTENT_MAX_BYTES}。` +
+      `多半是 content 侧 import 到了 program/platform 或 osengine —— 那会把适配器与` +
+      `轨迹引擎整层拽进 content bundle。`)
+    process.exit(1)
+  }
+}
+
 mkdirSync('dist', { recursive: true })
 
 // 静态资源(manifest、options、declarativeNetRequest 规则)拷进 dist,
@@ -50,5 +71,6 @@ if (watch) {
     esbuild.build(contentOptions),
   ])
   copyStatic()
+  await checkContentSize()
   console.log('built dist/')
 }
