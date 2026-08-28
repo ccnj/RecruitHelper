@@ -24,6 +24,21 @@ const {
   CONTENT_MESSAGE,
   Connection,
   ContentSensor,
+  telemetryAppend,
+  bodyText,
+  deepFind,
+  recordUpload,
+  bossTelemetrySite,
+  telemetrySites,
+  telemetryReadAll,
+  telemetryClear,
+  classifyBossEntry,
+  bossCodeLabel,
+  TELEMETRY_CHUNK,
+  TELEMETRY_KIND_CLICK,
+  TELEMETRY_KIND_UPLOAD,
+  TELEMETRY_MAX_UPLOAD_CHUNKS,
+  TELEMETRY_MAX_CLICK_CHUNKS,
   capabilities,
   DEFAULTS,
   Dispatcher,
@@ -15134,6 +15149,190 @@ test('osProbe 的契约 data 全是整数', () => {
   }
   assert.equal(data.landingDriftPx, 2, '偏差向上取整——宁可报大不报小')
 })
+
+test('观测分片环:追加读回一致,键带前缀,且不重写已满的片', async () => {
+  const store = memoryWitnessStorage()
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ i: 0 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [{ i: 0 }])
+
+  // 键必须带 telemetry: 前缀 —— 手侧 storage 里已经住着 infra 与 witness:*,撞了会互删。
+  assert.deepEqual(Object.keys(store.state).sort(), ['telemetry:meta', 'telemetry:u:0'])
+
+  // 填满第一片后再追加,不得重写那一片 —— 这是分片存在的全部理由。
+  const rest = Array.from({ length: TELEMETRY_CHUNK - 1 }, (_, n) => ({ i: n + 1 }))
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, rest, TELEMETRY_MAX_UPLOAD_CHUNKS)
+  store.writes.length = 0
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ i: TELEMETRY_CHUNK }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  const touched = Object.keys(store.writes.at(-1).items)
+  assert.ok(!touched.includes('telemetry:u:0'), `重写了已满的片: ${touched.join(',')}`)
+  assert.equal((await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)).length, TELEMETRY_CHUNK + 1)
+})
+
+test('观测分片环:超上限丢最旧整片,不搬数据', async () => {
+  const store = memoryWitnessStorage()
+  const many = Array.from({ length: TELEMETRY_CHUNK * 2 }, (_, n) => ({ i: n }))
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, many, 2)
+
+  // 两满片 + 新开的空片 = 3 片,超上限 2,最旧那片整片删除。
+  assert.ok(!Object.hasOwn(store.state, 'telemetry:u:0'), '最旧的片应当被整片删除')
+  const kept = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(kept.length, TELEMETRY_CHUNK)
+  assert.deepEqual(kept[0], { i: TELEMETRY_CHUNK }, '留下的应当是较新的那片')
+})
+
+test('观测分片环:空追加是空操作,两个环互不挤占', async () => {
+  const store = memoryWitnessStorage()
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  assert.deepEqual(store.state, {}, '空数组不该写任何键')
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [], '没有 meta 时读回空数组')
+
+  // 轨迹单独一个环,存在的意义就是不被明细的页面加载噪声挤掉。
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ u: 1 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  await telemetryAppend(store, TELEMETRY_KIND_CLICK, [{ c: 1 }], TELEMETRY_MAX_CLICK_CHUNKS)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [{ u: 1 }])
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ c: 1 }])
+})
+
+
+test('埋点捕获:请求体还原覆盖 formData 与 raw 两路,解不开也不丢', async () => {
+  const bytes = (s) => new TextEncoder().encode(s).buffer
+
+  // 表单编码时 Chrome 已经解过码,不能再 decodeURIComponent 一次。
+  assert.equal(bodyText({ formData: { content: ['{"a":1}'] } }), '{"a":1}')
+  // 字段名不是 content —— 整个交出去,别猜。
+  assert.equal(bodyText({ formData: { other: ['x'] } }), '{"other":["x"]}')
+
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=%7B%22a%22%3A1%7D') }] }), '{"a":1}')
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=a+b') }] }), 'a b', '+ 是空格')
+  assert.equal(bodyText({ raw: [{ bytes: bytes('{"plain":1}') }] }), '{"plain":1}', '没有 content= 外壳就是原文')
+  // 非法 percent-encoding:剥了壳的原文照样交出去。
+  assert.equal(bodyText({ raw: [{ bytes: bytes('content=%zz') }] }), '%zz')
+  // 多段字节要拼起来。
+  assert.equal(bodyText({ raw: [{ bytes: bytes('con') }, { bytes: bytes('tent=hi') }] }), 'hi')
+
+  assert.equal(bodyText(null), null)
+  assert.equal(bodyText(undefined), null)
+  assert.equal(bodyText({}), null)
+
+  assert.deepEqual(deepFind({ a: [{ p2: 1 }, { b: { p2: 2 } }], p2: 3 }, 'p2'), [1, 2, 3])
+  assert.deepEqual(deepFind(null, 'p2'), [])
+})
+
+test('埋点捕获:解析成功存结构+摘要,失败存原文+错因,摘要抽取炸了也照样落盘', async () => {
+  const store = memoryWitnessStorage()
+  const digest = (payload) => ({ summary: { seen: [payload?.k] }, shots: [{ s: payload?.k }] })
+
+  await recordUpload(store, digest, 111, 'https://x/t', '{"k":"v"}')
+  let rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].payload, { k: 'v' })
+  assert.deepEqual(rows[0].summary, { seen: ['v'] })
+  assert.equal(rows[0].raw, undefined, '解析成功不该同时存原文')
+  assert.equal(rows[0].parseError, undefined)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ s: 'v' }])
+
+  // 形状不对正是最该看见的信息 —— 存原文、记错因,绝不静默丢。
+  await recordUpload(store, digest, 222, 'https://x/t', 'not json')
+  rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(rows[1].raw, 'not json')
+  assert.equal(rows[1].payload, undefined)
+  assert.match(rows[1].parseError, /JSON 解析失败/)
+
+  // 站点的抽取逻辑没跟上平台改版:载荷仍完整落盘,只是摘要为空 + 记一笔。
+  const boom = () => { throw new Error('字段没了') }
+  await recordUpload(store, boom, 333, 'https://x/t', '{"k":"still here"}')
+  rows = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.deepEqual(rows[2].payload, { k: 'still here' }, '抽取失败不该连载荷一起丢')
+  assert.match(rows[2].parseError, /摘要抽取失败.*字段没了/)
+  assert.deepEqual(rows[2].summary, {})
+})
+
+test('BOSS 观测站点:抽 p2 与 cnTextCount,只有带轨迹的点击进轨迹环', async () => {
+  assert.deepEqual(telemetrySites.map((s) => s.id), ['boss'])
+  assert.deepEqual(bossTelemetrySite.urls, ['https://apm-fe.zhipin.com/wapi/zpApm/actionLog/*'])
+
+  const digested = bossTelemetrySite.digest({
+    items: [
+      { action: 'web-event-click', p2: '0', p6: { x: [1, 2] }, p4: 'a', p: '{"time":999}' },
+      { action: 'web-event-input', p2: '30004', p6: 'not-an-object', inner: { cnTextCount: 7 } },
+      { action: 'device-action-report', p2: '800001', p6: 'x|y' },
+      { action: 'web-event-click', p2: '0' },
+    ],
+  }, 500)
+
+  assert.deepEqual(digested.summary.codes, ['0', '30004', '800001', '0'])
+  assert.deepEqual(digested.summary.cnTextCount, [7], 'cnTextCount 只在载荷里,本地账本根本没有')
+
+  // 只有 action=web-event-click 且 p6 是对象的那条带轨迹。
+  assert.equal(digested.shots.length, 1)
+  assert.deepEqual(digested.shots[0].p6, { x: [1, 2] })
+  assert.equal(digested.shots[0].t, 999, '平台自己的时刻优先')
+  assert.equal(digested.shots[0].at, 500)
+
+  // p 缺失或解不开时退回捕获时刻,不为它丢一条轨迹。
+  const noTime = bossTelemetrySite.digest({
+    items: [{ action: 'web-event-click', p6: {}, p: 'not json' }],
+  }, 700)
+  assert.equal(noTime.shots[0].t, 700)
+
+  // 形状不认识就返回空,不猜。
+  assert.deepEqual(bossTelemetrySite.digest(null, 1), { summary: {}, shots: [] })
+  assert.deepEqual(bossTelemetrySite.digest({ items: 'nope' }, 1).shots, [])
+})
+
+
+test('观测分片环:清空只动自己的键,另一个环与外人的键不受影响', async () => {
+  const store = memoryWitnessStorage({ 'infra': { keep: 1 }, 'witness:meta': { keep: 2 } })
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ u: 1 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  await telemetryAppend(store, TELEMETRY_KIND_CLICK, [{ c: 1 }], TELEMETRY_MAX_CLICK_CHUNKS)
+
+  await telemetryClear(store, TELEMETRY_KIND_UPLOAD)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [])
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ c: 1 }], '另一个环不该被牵连')
+  assert.deepEqual(store.state['infra'], { keep: 1 }, '手侧既有的键一个都不许动')
+  assert.deepEqual(store.state['witness:meta'], { keep: 2 })
+
+  await telemetryClear(store, TELEMETRY_KIND_UPLOAD)  // 幂等
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [])
+})
+
+test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独拎出来', async () => {
+  const aegis = 'https://apm-fe.zhipin.com/wapi/zpApm/actionLog/fe/ie/common.json'
+
+  const c = classifyBossEntry(aegis, {
+    items: [
+      { action: 'device-action-report', p2: '800001', p6: 'foo|bar' },
+      { action: 'device-action-report', p2: '550003' },
+      { action: 'web-event-input', p2: '0' },
+      { action: 'web-event-input', p2: '30099' },
+      { action: 'web-event-click', p2: '' },
+    ],
+  })
+  // 指纹上报每次页面加载无条件发,跟检测到什么无关 —— 算例行。
+  assert.deepEqual(c.routine.map((r) => r.code), ['800001', '0'])
+  // 设备族里其它任何码才是探测命中。
+  assert.deepEqual(c.hits.map((h) => h.code), ['550003', '30099'])
+  assert.deepEqual(c.unknownGlobals, ['foo', 'bar'], '这一栏就是"我们隐不隐形"的答案')
+
+  // patas APM 通道:码藏在 action 的 JSON 字符串字段里,p2 是页面 URL。
+  const patas = 'https://apm-fe.zhipin.com/wapi/zpApm/actionLog/fe/common.json'
+  const p = classifyBossEntry(patas, {
+    items: [
+      { action: 'action_js_risk_monitor', p7: JSON.stringify({ insertList: ['x.js'] }) },
+      { action: 'action_js_risk_monitor', p7: 'not json' },
+      { action: 'action_api_monitor', p4: JSON.stringify({ url: 'http://127.0.0.1:8931/a' }) },
+      { action: 'action_api_monitor', p4: JSON.stringify({ url: 'https://example.com/a' }) },
+    ],
+  })
+  assert.deepEqual(p.injected, ['x.js'])
+  assert.deepEqual(p.localProbes, ['http://127.0.0.1:8931/a'], '只收本机端口')
+  assert.deepEqual(p.hits, [], 'patas 通道的 p2 是页面 URL,不该被当成事件码')
+
+  assert.equal(bossCodeLabel('800001'), '800001(设备指纹·IP/全局名/API 矩阵)')
+  assert.equal(bossCodeLabel('550003'), '550003', '不认识的码原样显示,不编')
+  assert.deepEqual(classifyBossEntry(aegis, null).hits, [])
+})
+
 
 let failures = 0
 for (const { name, fn } of tests) {

@@ -14,6 +14,7 @@ import { registerAccountPrimitives } from '../program/primitives/account'
 import { refreshPagesAfterRuntimeReload } from './reload'
 import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
+import { registerTelemetryCapture } from './telemetry'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -41,6 +42,9 @@ installHandLogSink((data) => {
 // 平台埋点上报拦截规则的自检。必须排在 installHandLogSink 之后 —— 它可能立刻
 // 报一条"无法自检",sink 还没装上就报会被丢掉。
 registerNetGuard()
+// 平台自己的埋点上报,抄一份存本机。只读观测:不改页面、不改请求、不参与
+// 任何业务裁决,失败只记日志。
+registerTelemetryCapture()
 const reloadStartup = refreshPagesAfterRuntimeReload()
   .then((count) => {
     if (count > 0) console.log('[hand] 自重载后已刷新平台页', count)

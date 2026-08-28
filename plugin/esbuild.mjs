@@ -26,6 +26,15 @@ const contentOptions = {
   format: 'iife',
 }
 
+// 观测查看页。走打包而不是像 options.js 那样原样拷贝 —— 它要和写侧共用
+// base/telemetry/store 的同一份分片实现;上游的教训是读写各抄一份,
+// 谁都测不到,而存储 bug 是会丢数据的。
+const telemetryViewOptions = {
+  ...common,
+  entryPoints: { 'options/telemetry': 'src/options/telemetry.ts' },
+  format: 'iife',
+}
+
 // content script 的体积闸。
 //
 // 它守的不是"包小一点好看",是**三张表那个架构本身**:content.js 与 background.js
@@ -53,7 +62,7 @@ mkdirSync('dist', { recursive: true })
 // dist/ 即可直接作为 unpacked 扩展加载。
 function copyStatic() {
   cpSync('manifest.json', 'dist/manifest.json')
-  cpSync('src/options', 'dist/options', { recursive: true })
+  cpSync('src/options', 'dist/options', { recursive: true, filter: (from) => !from.endsWith('.ts') })
   cpSync('src/rules', 'dist/rules', { recursive: true })
 }
 
@@ -63,12 +72,14 @@ if (watch) {
     plugins: [{ name: 'copy-static', setup(b) { b.onEnd(copyStatic) } }],
   })
   const contentContext = await esbuild.context(contentOptions)
-  await Promise.all([backgroundContext.watch(), contentContext.watch()])
+  const telemetryViewContext = await esbuild.context(telemetryViewOptions)
+  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch()])
   console.log('watching...')
 } else {
   await Promise.all([
     esbuild.build(backgroundOptions),
     esbuild.build(contentOptions),
+    esbuild.build(telemetryViewOptions),
   ])
   copyStatic()
   await checkContentSize()
