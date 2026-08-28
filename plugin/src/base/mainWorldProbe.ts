@@ -179,3 +179,62 @@ export async function probeMainWorld(): Promise<MainWorldProbeResult> {
     notes,
   }
 }
+
+/**
+ * 甲方不在电脑前时的自动上报路径:SW 起来后跑一次两个探针,结果经 handLog
+ * 回脑,由脑写进 brain.log。**这里的一次性 setTimeout 是临时诊断代码**,
+ * 不是业务定时器,随两个探针文件一并删除。
+ */
+export function scheduleProbeAutoReport(
+  report: (level: 'warn' | 'error', code: string, message: string, detail?: string) => void,
+  runOriginProbe: () => Promise<unknown>,
+): void {
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const r = await probeMainWorld()
+        if (!r.shots.length) {
+          report('warn', 'tempProbeMainWorld', 'MAIN world 探针没跑成', r.notes.join(' | '))
+        } else {
+          const s0 = r.shots[0]
+          const filesHits = r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits.length : -1
+          const filesGlobals = r.afterFilesInjection ? r.afterFilesInjection.globalsAdded.length : -1
+          const clean =
+            r.globalsAddedBetweenShots.length === 0 &&
+            s0.perfExtensionHits.length === 0 &&
+            filesHits === 0 &&
+            filesGlobals === 0
+          report(
+            'warn',
+            'tempProbeMainWorld',
+            clean ? 'MAIN world 注入无足迹' : 'MAIN world 注入留下了足迹',
+            JSON.stringify({
+              globalsAddedBetweenShots: r.globalsAddedBetweenShots,
+              funcPerfExtensionHits: s0.perfExtensionHits,
+              filesPerfExtensionHits: r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits : null,
+              filesGlobalsAdded: r.afterFilesInjection ? r.afterFilesInjection.globalsAdded : null,
+              walkMs: r.shots.map((x) => x.walkMs),
+              visited: s0.visitedComponents,
+              foundLen: s0.foundMessageArrayLen,
+              globalCount: r.shots.map((x) => x.globalCount),
+              perfCount: r.shots.map((x) => x.perfCount),
+              perfTypes: s0.perfTypes,
+              longTasks: s0.longTasks,
+              notes: r.notes,
+              shotErrors: r.shots.map((x) => x.error).filter(Boolean),
+            }).slice(0, 4000),
+          )
+        }
+      } catch (error) {
+        report('warn', 'tempProbeMainWorld', 'MAIN world 探针抛异常', String(error).slice(0, 400))
+      }
+
+      try {
+        const o = await runOriginProbe()
+        report('warn', 'tempProbeOrigin', '扩展 origin fetch 探针结果', JSON.stringify(o).slice(0, 4000))
+      } catch (error) {
+        report('warn', 'tempProbeOrigin', 'origin 探针抛异常', String(error).slice(0, 400))
+      }
+    })()
+  }, 12_000)
+}

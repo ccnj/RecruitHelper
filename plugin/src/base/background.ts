@@ -12,11 +12,11 @@ import { registerM7Primitives } from '../program/primitives/m7'
 import { registerJobPublishPrimitives } from '../program/primitives/jobPublish'
 import { registerAccountPrimitives } from '../program/primitives/account'
 import { refreshPagesAfterRuntimeReload } from './reload'
-import { installHandLogSink } from './handLog'
+import { installHandLogSink, reportHandLog } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
 import { runBossOriginProbe, readBossOriginProbe, setBossOriginProbeGid } from './bossOriginProbe'
-import { probeMainWorld } from './mainWorldProbe'
+import { probeMainWorld, scheduleProbeAutoReport } from './mainWorldProbe'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -61,6 +61,13 @@ function ensureConnectedAfterReload(): void {
 }
 
 ensureConnectedAfterReload()
+
+// 临时诊断(2026-08-28):甲方不在电脑前,探针结果经 handLog 回脑写进 brain.log。
+// 随两个探针文件一并删除。
+scheduleProbeAutoReport(
+  (level, code, message, detail) => { reportHandLog(level, code, message, detail) },
+  runBossOriginProbe,
+)
 
 // 看门狗:chrome.alarms 是基础设施用途(禁令 1 豁免)。SW 死透后 setTimeout 重连链断,
 // alarm 周期唤醒 SW 并续连。最小间隔约 30s,这里 60s。
