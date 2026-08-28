@@ -157,4 +157,61 @@ el('clear').addEventListener('click', () => {
   })()
 })
 
+// ---- 扩展 origin fetch 探针(临时,验完即删) ----
+
+interface ProbeRow {
+  label: string
+  url: string
+  ok: boolean
+  httpStatus?: number
+  bizCode?: number
+  bizMessage?: string
+  payloadBytes?: number
+  error?: string
+}
+interface ProbeResult {
+  at: number
+  extensionOrigin: string
+  rows: ProbeRow[]
+}
+
+function renderProbe(r: ProbeResult | null): void {
+  const box = el('probe')
+  if (!r) {
+    box.innerHTML = '<p class="muted">还没跑过。点「跑一次」。</p>'
+    return
+  }
+  const verdict = r.rows.length && r.rows.every((x) => x.ok)
+    ? '<div class="verdict good"><b>通了 —— 扩展 origin 能取到登录态数据</b>BOSS 适配器可以走公开 HTTP 接口取数,不必碰 MAIN world。</div>'
+    : '<div class="verdict warn"><b>没通 —— 扩展 origin 取不到</b>下面看是哪一步失败;退路是 MAIN world 一次性读取(高脆)。</div>'
+  const rows = r.rows.map((x) => {
+    const bits = [
+      x.ok ? '<b>OK</b>' : '<b>失败</b>',
+      x.httpStatus === undefined ? '' : `HTTP ${x.httpStatus}`,
+      x.bizCode === undefined ? '' : `code=${x.bizCode}`,
+      x.bizMessage ? `“${x.bizMessage}”` : '',
+      x.payloadBytes === undefined ? '' : `载荷 ${x.payloadBytes} 字节`,
+      x.error ? `错误: ${x.error}` : '',
+    ].filter(Boolean).join(' · ')
+    return `<li>${x.label}<br /><span class="muted">${bits}</span></li>`
+  }).join('')
+  box.innerHTML = `${verdict}<p class="muted">本扩展 origin: <code>${r.extensionOrigin}</code> · ${new Date(r.at).toLocaleString('zh-CN')}</p><ul>${rows}</ul>`
+}
+
+const ask = <T,>(msg: unknown): Promise<T> =>
+  new Promise((resolve) => { chrome.runtime.sendMessage(msg, (r: T) => resolve(r)) })
+
+el('probeRun').addEventListener('click', () => {
+  el('probe').innerHTML = '<p class="muted">跑着呢…</p>'
+  void ask<ProbeResult>({ type: 'bossOriginProbe:run' }).then(renderProbe)
+})
+el('probeSetGid').addEventListener('click', () => {
+  const gid = (el('probeGid') as HTMLInputElement).value.trim()
+  void ask({ type: 'bossOriginProbe:setGid', gid }).then(() => {
+    el('status').textContent = gid ? `已记住 gid ${gid}` : '已清空 gid'
+  })
+})
+
+void ask<ProbeResult | null>({ type: 'bossOriginProbe:read' }).then(renderProbe)
+
 void render()

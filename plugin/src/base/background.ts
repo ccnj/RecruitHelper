@@ -15,6 +15,7 @@ import { refreshPagesAfterRuntimeReload } from './reload'
 import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
+import { runBossOriginProbe, readBossOriginProbe, setBossOriginProbeGid } from './bossOriginProbe'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -76,6 +77,19 @@ chrome.runtime.onInstalled.addListener(ensureConnectedAfterReload)
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'getStatus') {
     sendResponse(conn.status())
+    return true
+  }
+  // 临时只读诊断探针(2026-08-28),结论拿到后连同 bossOriginProbe.ts 一并删除。
+  if (msg?.type === 'bossOriginProbe:run') {
+    void runBossOriginProbe().then(sendResponse)
+    return true
+  }
+  if (msg?.type === 'bossOriginProbe:read') {
+    void readBossOriginProbe().then(sendResponse)
+    return true
+  }
+  if (msg?.type === 'bossOriginProbe:setGid') {
+    void setBossOriginProbeGid(String(msg.gid ?? '')).then(() => sendResponse({ ok: true }))
     return true
   }
   if (handleInfrastructureMessage(msg, sendResponse)) return true
