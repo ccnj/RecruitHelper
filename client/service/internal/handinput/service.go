@@ -3,6 +3,7 @@ package handinput
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 )
 
@@ -115,6 +116,19 @@ func (s *Service) Play(points []PlanPoint) (PlayResult, error) {
 	if len(points) == 0 {
 		return PlayResult{}, fmt.Errorf("空计划")
 	}
+	// 把播放 goroutine 钉在一个 OS 线程上。
+	//
+	// **它在 macOS 上实测没用**:开发机上 5 趟里仍有 2 趟出现 10~22ms 的单帧离群,
+	// 加不加一个样。GC 也不是元凶——GOGC=off 之后离群照旧。那是 OS 级的调度抖动。
+	//
+	// 保留它的理由是**方法上的**,不是"多一层保险":上游在 Windows 上量到的
+	// 「发出时刻相对计划最大偏差 0.79~2.49ms」是在 LockOSThread 之下测的
+	// (它们的 CLI 在 main 里无条件调)。我方若不加,将来在 Windows 上量出差异时,
+	// 分不清是架构带来的还是这一行缺席带来的。等 Windows 上有了自己的数,
+	// 再决定它去留——那时才有资格判。
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	// 播放期间一律不许点击:光标正在移动,上一次的落点确认已经过期。
 	s.armed = false
 
