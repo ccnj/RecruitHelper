@@ -24,6 +24,13 @@ const {
   CONTENT_MESSAGE,
   Connection,
   ContentSensor,
+  telemetryAppend,
+  telemetryReadAll,
+  TELEMETRY_CHUNK,
+  TELEMETRY_KIND_CLICK,
+  TELEMETRY_KIND_UPLOAD,
+  TELEMETRY_MAX_UPLOAD_CHUNKS,
+  TELEMETRY_MAX_CLICK_CHUNKS,
   capabilities,
   DEFAULTS,
   Dispatcher,
@@ -15134,6 +15141,50 @@ test('osProbe 的契约 data 全是整数', () => {
   }
   assert.equal(data.landingDriftPx, 2, '偏差向上取整——宁可报大不报小')
 })
+
+test('观测分片环:追加读回一致,键带前缀,且不重写已满的片', async () => {
+  const store = memoryWitnessStorage()
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ i: 0 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [{ i: 0 }])
+
+  // 键必须带 telemetry: 前缀 —— 手侧 storage 里已经住着 infra 与 witness:*,撞了会互删。
+  assert.deepEqual(Object.keys(store.state).sort(), ['telemetry:meta', 'telemetry:u:0'])
+
+  // 填满第一片后再追加,不得重写那一片 —— 这是分片存在的全部理由。
+  const rest = Array.from({ length: TELEMETRY_CHUNK - 1 }, (_, n) => ({ i: n + 1 }))
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, rest, TELEMETRY_MAX_UPLOAD_CHUNKS)
+  store.writes.length = 0
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ i: TELEMETRY_CHUNK }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  const touched = Object.keys(store.writes.at(-1).items)
+  assert.ok(!touched.includes('telemetry:u:0'), `重写了已满的片: ${touched.join(',')}`)
+  assert.equal((await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)).length, TELEMETRY_CHUNK + 1)
+})
+
+test('观测分片环:超上限丢最旧整片,不搬数据', async () => {
+  const store = memoryWitnessStorage()
+  const many = Array.from({ length: TELEMETRY_CHUNK * 2 }, (_, n) => ({ i: n }))
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, many, 2)
+
+  // 两满片 + 新开的空片 = 3 片,超上限 2,最旧那片整片删除。
+  assert.ok(!Object.hasOwn(store.state, 'telemetry:u:0'), '最旧的片应当被整片删除')
+  const kept = await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD)
+  assert.equal(kept.length, TELEMETRY_CHUNK)
+  assert.deepEqual(kept[0], { i: TELEMETRY_CHUNK }, '留下的应当是较新的那片')
+})
+
+test('观测分片环:空追加是空操作,两个环互不挤占', async () => {
+  const store = memoryWitnessStorage()
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  assert.deepEqual(store.state, {}, '空数组不该写任何键')
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [], '没有 meta 时读回空数组')
+
+  // 轨迹单独一个环,存在的意义就是不被明细的页面加载噪声挤掉。
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ u: 1 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  await telemetryAppend(store, TELEMETRY_KIND_CLICK, [{ c: 1 }], TELEMETRY_MAX_CLICK_CHUNKS)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [{ u: 1 }])
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ c: 1 }])
+})
+
 
 let failures = 0
 for (const { name, fn } of tests) {

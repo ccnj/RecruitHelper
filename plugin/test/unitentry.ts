@@ -105,3 +105,12 @@ export {
 } from '../src/base/protocol'
 export { planMove, DEFAULT_MAX_DWELL_MS, OSENGINE_SOURCE } from '../src/program/osengine/plan'
 export { refuseBeforeMoving, osProbeContractData } from '../src/program/platform/osinput'
+export {
+  append as telemetryAppend,
+  readAll as telemetryReadAll,
+  CHUNK as TELEMETRY_CHUNK,
+  KIND_CLICK as TELEMETRY_KIND_CLICK,
+  KIND_UPLOAD as TELEMETRY_KIND_UPLOAD,
+  MAX_UPLOAD_CHUNKS as TELEMETRY_MAX_UPLOAD_CHUNKS,
+  MAX_CLICK_CHUNKS as TELEMETRY_MAX_CLICK_CHUNKS,
+} from '../src/base/telemetry/store'
