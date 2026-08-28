@@ -190,6 +190,54 @@ export async function probeMainWorld(): Promise<MainWorldProbeResult> {
  *      它写在全部测量之后,不污染测量。
  *   2. handLog 回脑写进 brain.log(可能因连接未就绪而丢,只当附赠)。
  */
+const CANARY_ID = 'temp-canary-20260828'
+const CANARY_NAME = '__rhCanary_20260828'
+
+/** 阳性对照已完成(2026-08-28 21:55:27 实证:金丝雀出现在 800001 的 p6)。
+ *  现在只负责**注销**,把页面清干净。 */
+async function ensureCanaryRegistered(): Promise<string> {
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [CANARY_ID] })
+    if (!existing.length) return 'already-gone'
+    await chrome.scripting.unregisterContentScripts({ ids: [CANARY_ID] })
+    return 'unregistered'
+  } catch (error) {
+    return `unregister failed: ${String(error).slice(0, 160)}`
+  }
+}
+
+/** 把埋点观测抓到的 BOSS 上报压成一份小摘要,重点看金丝雀有没有进 800001 的 p6。 */
+async function summarizeTelemetry(): Promise<unknown> {
+  try {
+    const mod = await import('./telemetry/store')
+    const sites = await import('../program/platform/telemetrySites')
+    const store: import('./telemetry/store').TelemetryStorage = {
+      get: (keys) => chrome.storage.local.get(keys as string | string[]),
+      set: (items) => chrome.storage.local.set(items),
+      remove: (keys) => chrome.storage.local.remove(keys as string | string[]),
+    }
+    const all = (await mod.readAll(store, mod.KIND_UPLOAD)) as {
+      at: number
+      url: string
+      payload?: unknown
+    }[]
+    const recent = all.slice(-14).map((e) => {
+      const c = sites.classifyBossEntry(e.url, e.payload)
+      const blob = JSON.stringify(e.payload ?? '')
+      return {
+        at: new Date(e.at).toLocaleTimeString('zh-CN'),
+        codes: [...c.hits.map((h) => h.code), ...c.routine.map((h) => h.code)],
+        unknownGlobals: c.unknownGlobals,
+        canaryInGlobals: c.unknownGlobals.includes(CANARY_NAME),
+        canaryAnywhereInPayload: blob.includes(CANARY_NAME),
+      }
+    })
+    return { total: all.length, recent }
+  } catch (error) {
+    return { error: String(error).slice(0, 200) }
+  }
+}
+
 export async function runProbeAtBoot(
   report: (level: 'warn' | 'error', code: string, message: string, detail?: string) => void,
   runOriginProbe: () => Promise<unknown>,
@@ -213,6 +261,10 @@ export async function runProbeAtBoot(
   } catch (error) {
     payload.mainWorldError = String(error).slice(0, 400)
   }
+
+  payload.canary = await ensureCanaryRegistered()
+  payload.canaryName = CANARY_NAME
+  payload.telemetry = await summarizeTelemetry()
 
   try {
     payload.origin = await runOriginProbe()

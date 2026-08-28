@@ -43,6 +43,14 @@ const mainWorldProbeOptions = {
   format: 'iife',
 }
 
+// 阳性对照载荷(2026-08-28,临时):故意种一个可枚举全局,看 BOSS 800001 的 p6
+// 会不会把它当未知全局上送。验完连同 src/canaryScript.ts 一并删除。
+const canaryOptions = {
+  ...common,
+  entryPoints: { canary: 'src/canaryScript.ts' },
+  format: 'iife',
+}
+
 // content script 的体积闸。
 //
 // 它守的不是"包小一点好看",是**三张表那个架构本身**:content.js 与 background.js
@@ -82,7 +90,8 @@ if (watch) {
   const contentContext = await esbuild.context(contentOptions)
   const telemetryViewContext = await esbuild.context(telemetryViewOptions)
   const mainWorldProbeContext = await esbuild.context(mainWorldProbeOptions)
-  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch(), mainWorldProbeContext.watch()])
+  const canaryContext = await esbuild.context(canaryOptions)
+  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch(), mainWorldProbeContext.watch(), canaryContext.watch()])
   console.log('watching...')
 } else {
   await Promise.all([
@@ -90,6 +99,7 @@ if (watch) {
     esbuild.build(contentOptions),
     esbuild.build(telemetryViewOptions),
     esbuild.build(mainWorldProbeOptions),
+    esbuild.build(canaryOptions),
   ])
   copyStatic()
   await checkContentSize()
