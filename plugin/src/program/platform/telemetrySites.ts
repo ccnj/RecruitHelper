@@ -145,8 +145,13 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
   '900075': { label: '探到 VMLogin(5100)' },
 
   // 扩展与自动化痕迹。
-  '550091': { label: '页面上 chrome.runtime 可用(某扩展对 zhipin.com 声明了 externally_connectable)' },
-  '550094': { label: '同上,另一条分支——报的是"这个页面上 chrome.runtime 竟然可用"这件事本身' },
+  '550091': { label: '页面上 chrome.runtime 可用,且被探的那个扩展 ID 确实装着' },
+  // 2026-08-28 对照实验坐实:关掉 MetaMask 后这条当场消失。MetaMask 的
+  // externally_connectable 写的是 `http://*/*` + `https://*/*`(对全互联网开放),
+  // 所以任何装了它的机器都会触发这条。实测干净 Chrome 148 上
+  // window.chrome 是 object 而 window.chrome.runtime 是 undefined,可见它确实
+  // 只在有扩展对该域声明了 externally_connectable 时才出现。
+  '550094': { label: '页面上 chrome.runtime 竟然可用——有扩展对该域声明了 externally_connectable(实测:MetaMask 对全站声明,装了就报)' },
   '550003': { label: 'CDP / Playwright 痕迹' },
   '800015': { label: 'devtools/CDP 探测命中(不可配置的 stack getter 被读)' },
   '800025': { label: 'navigator 原型链上有非原生实现' },
@@ -155,11 +160,15 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
   '99003': { label: 'Object.keys(window) 与白名单的差集(未知全局名)' },
 
   // 聚合补报。
-  // 2026-08-28 首次真机:559991 在一次普通浏览里连发三条(p3 随命中列表逐次增长),
-  // 聚合进去的是 800003 + 550094 + 550237/550239/550245 —— 一条真信号加一条 BOSS
-  // 自己的例行指纹上报,其余全是那族假阳性。**这与 hiBoss「需 window.Block 为真
-  // (已进入封禁/拦截场景)才发」的读法对不上**:那次会话没有任何封禁迹象。
-  // 要么 window.Block 在正常会话里也为真,要么那条前置读得不全 —— 待查。
+  // 2026-08-28 两次真机 + 一次对照实验。第一次聚合的是
+  // 800003 + 550094 + 550237/550239/550245;关掉 MetaMask(550094 的唯一来源)后
+  // 重测,它**照样发**,聚合成 800003 + 550237/550239/550245 —— 也就是说
+  // **一台没有任何可疑扩展的干净机器,仍然会触发 BOSS 的聚合告警**,
+  // 而构成它的全是 BOSS 自己的例行指纹上报加自己那族坏掉的端口探测。
+  //
+  // 这与 hiBoss「559991/559999 都需 window.Block 为真(已进入封禁/拦截场景)才发」
+  // 的读法对不上:两次都是普通浏览,无任何封禁迹象。要么该标志在正常会话里也为真、
+  // 根本不是封禁位,要么那条前置读得不全 —— 待查。按文档信任边界,以我方真机为准。
   '559991': { label: '聚合补报:累计命中 >2 个不同的非豁免码(p3=码列表、p4=数量)。真机首验:普通会话即会触发' },
   '559999': { label: '聚合补报:命中 Sa 表' },
 }
