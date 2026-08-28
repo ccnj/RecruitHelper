@@ -247,6 +247,7 @@ export async function runOsProbe(
   const targets = [spread(0.22, 0.22), spread(0.78, 0.78), spread(0.78, 0.22), spread(0.22, 0.78)]
   const hint = { screenX: view.screenX, screenY: view.screenY, dpr: view.dpr }
 
+  const trace: string[] = []
   let attempts = 0
   let previousDrift = Number.POSITIVE_INFINITY
   let detail: string | undefined
@@ -296,11 +297,17 @@ export async function runOsProbe(
         // 那时再试一趟只是让光标再飞一圈,不会变好:没有观测就没有样本,
         // 没有样本标定就学不到东西。2026-08-28 副屏那 34 秒里,六趟重试
         // 每一趟都是这个形态。失效方向是不动。
-        detail = '页面没有观测到任何 mousemove——光标多半不在页面上,停手'
+        detail = `页面没有观测到任何 mousemove——光标多半不在页面上,停手 | 靶(${target.x},${target.y}) 视口${view.innerW}x${view.innerH}`
         calibStatus = '无观测'
         break
       }
       drift = Math.ceil(Math.hypot(landed.x - target.x, landed.y - target.y))
+      // **判定现场必须留下来。** 只报一个"偏差 N px"事后什么都推不出来:
+      // 到底是 x 偏还是 y 偏、是恒定偏移还是随靶子放大、光标起点在哪 ——
+      // 这些决定了根因是 offset 错、scale 错还是观测错,而它们只在这一刻可见。
+      trace.push(`#${attempts} 从(${Math.round(from.x)},${Math.round(from.y)})` +
+        `→靶(${target.x},${target.y}) 落(${landed.x},${landed.y}) 偏${drift}` +
+        ` 视口${view.innerW}x${view.innerH} 粗估(${hint.screenX},${hint.screenY})x${hint.dpr}`)
 
       const fed = await callHand<LandingResponse>('/landing', { clientX: landed.x, clientY: landed.y })
       calibStatus = fed.status
@@ -312,7 +319,7 @@ export async function runOsProbe(
       // 所以第二趟之后还偏着几百像素,说明这台机器的几何我们根本没算对——
       // 那时继续试只是让光标多飞几圈,不会变好。失效方向是"不动"。
       if (attempts >= 2 && drift > WILD_DRIFT_PX && drift >= previousDrift) {
-        detail = `落点偏差 ${drift}px 连续两趟没收敛(上一趟 ${previousDrift}px)——几何没算对,停手`
+        detail = `连续两趟没收敛,几何没算对,停手 | ${trace.join(' | ')}`
         break
       }
       previousDrift = drift
@@ -340,7 +347,7 @@ export async function runOsProbe(
 
   return { outcome: 'refusedByGate', attempts, ...(drift === undefined ? {} : { landingDriftPx: drift }),
     calibStatus, unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs,
-    ...(detail === undefined ? {} : { detail }) }
+    detail: detail ?? `重试用尽 | ${trace.join(' | ')}` }
 }
 
 /**
@@ -368,7 +375,7 @@ export function osProbeContractData(
     planMs: Math.round(probe.planMs),
     elapsedMs: Math.round(probe.elapsedMs),
     lagMaxUs: Math.round(probe.lagMaxUs),
-    ...(probe.detail === undefined ? {} : { detail: probe.detail.slice(0, 512) }),
+    ...(probe.detail === undefined ? {} : { detail: probe.detail.slice(0, 2048) }),
     observedAt,
   }
 }
