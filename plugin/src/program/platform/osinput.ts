@@ -20,11 +20,21 @@ import { getWsUrl } from '../../base/config'
 import { planMove, DEFAULT_MAX_DWELL_MS } from '../osengine/plan'
 import { runInPage } from './inject'
 import { PlatformError } from './types'
+import type { DebugOsProbeData, OsProbeTarget } from '../../base/protocol'
 import type { InjectOptions } from './inject'
 import type { PrimitiveContext } from '../registry'
 
 /** 冷启动粗估必然打偏,所以要允许重来几趟。上游实测两趟就追上。 */
 const MAX_ATTEMPTS = 6
+
+/**
+ * 落点偏成这样就算"几何没算对"。
+ *
+ * 冷启动的粗估误差按上游实测是 121~227 物理像素,所以门限要高过它,否则正常的
+ * 冷启动会被误判成失控。取 400:比最坏的正常冷启动还宽一倍,又远小于"算到别的屏上去"
+ * 那个量级。
+ */
+const WILD_DRIFT_PX = 400
 
 /** 相邻可见交互的下限(AGENTS「平台交互节奏与条件等待」),加小幅抖动。 */
 const PACE_MIN_MS = 1000
@@ -45,12 +55,16 @@ export interface OsProbeResult {
   detail?: string
 }
 
-interface ViewportFacts {
+export interface ViewportFacts {
   innerW: number
   innerH: number
   screenX: number
   screenY: number
   dpr: number
+  // 本窗口所在显示器在全局坐标空间里的原点,主屏是 (0, 菜单栏高度)。
+  // **只作诊断,不参与放行判断** —— 见 refuseBeforeMoving 里那段墓碑。
+  availLeft: number
+  availTop: number
 }
 
 interface HandState {
@@ -124,6 +138,8 @@ function pageInstallObserverAndReadViewport(key: string): ViewportFacts {
     screenX: window.screenX,
     screenY: window.screenY,
     dpr: window.devicePixelRatio,
+    availLeft: (window.screen as unknown as { availLeft?: number }).availLeft ?? 0,
+    availTop: (window.screen as unknown as { availTop?: number }).availTop ?? 0,
   }
 }
 
@@ -184,10 +200,20 @@ export async function runOsProbe(
     throw error instanceof PlatformError ? error : new PlatformError(
       'CTX_NOT_READY', `读视口失败:${String(error).slice(0, 120)}`, 'afterRecovery', 'contentScriptDead')
   }
-  if (!(view.innerW > 40) || !(view.innerH > 40)) {
+
+  // **副屏一律拒绝。** 上游交接文档对混合 DPI 多屏的处置原话是"回避,不是验证":
+  // 虚拟桌面坐标空间是否均匀、拟合的 scale 对应哪块屏,那边一个字都没有。
+  //
+  // 而回避这件事必须做在**移动之前**:副屏上粗估算出来的偏移在全局坐标空间里是错的,
+  // 落点判据一直不过,于是每一趟重试都是一次大范围横扫——2026-08-28 真机上就是这么
+  // 让光标飞了 34 秒。失效方向必须是"不动",不是"多试几次"。
+  //
+  // 判据取窗口所在显示器的原点:主屏的 availLeft 是 0(availTop 在 macOS 上是菜单栏
+  // 高度,所以只在明显超过菜单栏时才算)。
+  const refusal = refuseBeforeMoving(view)
+  if (refusal !== null) {
     return { outcome: 'refusedByGate', attempts: 0, calibStatus, unreachableFrames: 0,
-      planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0,
-      detail: `视口尺寸异常 ${view.innerW}x${view.innerH}` }
+      planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0, detail: refusal }
   }
 
   // 靶子:视口正中。它不需要任何平台 DOM 知识,而且必然在视口内。
@@ -195,6 +221,7 @@ export async function runOsProbe(
   const hint = { screenX: view.screenX, screenY: view.screenY, dpr: view.dpr }
 
   let attempts = 0
+  let previousDrift = Number.POSITIVE_INFINITY
   let detail: string | undefined
   try {
     while (attempts < MAX_ATTEMPTS) {
@@ -235,17 +262,33 @@ export async function runOsProbe(
 
       const landed = await runInPage(inject, tabId, pageReadLanding, [LANDING_KEY])
       if (landed.x === null || landed.y === null) {
-        // 一个 mousemove 都没观测到。可能是光标全程在视口外,也可能页面脚本没就绪。
-        // 方向是不确认,不是猜一个。
-        detail = '页面没有观测到任何 mousemove'
+        // 一个 mousemove 都没观测到,**这时必须停,不能重试**。
+        //
+        // 观测不到说明光标压根不在页面上——多半是标定把它算到屏幕外去了。
+        // 那时再试一趟只是让光标再飞一圈,不会变好:没有观测就没有样本,
+        // 没有样本标定就学不到东西。2026-08-28 副屏那 34 秒里,六趟重试
+        // 每一趟都是这个形态。失效方向是不动。
+        detail = '页面没有观测到任何 mousemove——光标多半不在页面上,停手'
         calibStatus = '无观测'
-        continue
+        break
       }
       drift = Math.ceil(Math.hypot(landed.x - target.x, landed.y - target.y))
 
       const fed = await callHand<LandingResponse>('/landing', { clientX: landed.x, clientY: landed.y })
       calibStatus = fed.status
       if (fed.detail) detail = fed.detail
+
+      // **偏差不收敛就早停,不要把重试次数用满。**
+      //
+      // 每一趟重试都是一次真实的大范围横扫。标定正常时两趟就追上(上游实测),
+      // 所以第二趟之后还偏着几百像素,说明这台机器的几何我们根本没算对——
+      // 那时继续试只是让光标多飞几圈,不会变好。失效方向是"不动"。
+      if (attempts >= 2 && drift > WILD_DRIFT_PX && drift >= previousDrift) {
+        detail = `落点偏差 ${drift}px 连续两趟没收敛(上一趟 ${previousDrift}px)——几何没算对,停手`
+        break
+      }
+      previousDrift = drift
+
       if (fed.clickArmed) {
         return { outcome: 'landed', attempts, landingDriftPx: drift, calibStatus,
           unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
@@ -270,4 +313,59 @@ export async function runOsProbe(
   return { outcome: 'refusedByGate', attempts, ...(drift === undefined ? {} : { landingDriftPx: drift }),
     calibStatus, unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs,
     ...(detail === undefined ? {} : { detail }) }
+}
+
+/**
+ * 把探针结果装配成契约 data。
+ *
+ * **取整在这里,不在适配器里。** 契约的 DebugOsProbeData 全是整数(契约里根本没有
+ * 浮点类型),而手服务算出来的滞后是浮点——真机第一次成功跑完 34.6 秒之后,
+ * result 就是被 `$.data.lagMaxUs: 需要整数` 拦在回程上,那一趟的数据全丢了。
+ *
+ * 收在一处的理由是:适配器不该知道哪些字段要取整。加第二个平台时它只管调编排,
+ * 装配这一步共用同一份,不会有人再漏掉一个字段。
+ */
+export function osProbeContractData(
+  target: OsProbeTarget,
+  probe: OsProbeResult,
+  observedAt: number,
+): DebugOsProbeData {
+  return {
+    target,
+    outcome: probe.outcome,
+    attempts: Math.round(probe.attempts),
+    ...(probe.landingDriftPx === undefined ? {} : { landingDriftPx: Math.ceil(probe.landingDriftPx) }),
+    calibStatus: probe.calibStatus,
+    unreachableFrames: Math.round(probe.unreachableFrames),
+    planMs: Math.round(probe.planMs),
+    elapsedMs: Math.round(probe.elapsedMs),
+    lagMaxUs: Math.round(probe.lagMaxUs),
+    ...(probe.detail === undefined ? {} : { detail: probe.detail.slice(0, 512) }),
+    observedAt,
+  }
+}
+
+/**
+ * 移动之前的一次性拒绝判据。返回原因文本表示拒绝,null 表示可以动。
+ *
+ * **这道闸必须在任何移动之前。** 它拦的是"我们根本算不对这台机器的几何"那一类,
+ * 而那一类一旦放行,后果不是失败一次,是每一趟重试都变成一次真实的大范围横扫。
+ */
+export function refuseBeforeMoving(view: ViewportFacts): string | null {
+  if (!(view.innerW > 40) || !(view.innerH > 40)) {
+    return `视口尺寸异常 ${view.innerW}x${view.innerH}`
+  }
+  // **这里曾经有一条"副屏一律拒绝"。2026-08-28 实测之后撤掉了。**
+  //
+  // 当天副屏上光标飞了 34 秒,第一反应是照上游"混合 DPI 多屏……处置是回避"加了道闸。
+  // 但两点实测把根因钉死在别处:副屏没问题,是**种子公式抄错了平台** —— macOS 的
+  // CGEventPost 收 point,而那份公式照 Windows 乘了 dpr,于是 screenX=2560 的副屏上
+  // 种子把光标算到桌面外 2560 点。修好种子之后副屏与主屏没有区别。
+  //
+  // 记这一笔是因为那道闸看起来很合理:它拿一个可修的 bug 换了一条永久的产品约束
+  // (客户把浏览器摆哪块屏成了硬要求),而我们控制不了客户怎么摆屏幕。
+  //
+  // 真正未验证的是**跨屏**:一条轨迹横跨两块缩放不同的屏时映射不再是单一仿射。
+  // 那一类还没遇到,遇到时按当时看到的形状立案,不预先造闸。
+  return null
 }

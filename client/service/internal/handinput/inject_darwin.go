@@ -157,6 +157,27 @@ func (d *darwinInjector) CursorPos() (int, int, error) {
 	return int(p.X), int(p.Y), nil
 }
 
+// SeedCalib:**scale = 1,offset 不乘 dpr**。
+//
+// 2026-08-28 真机两点实测(副屏,1470x956 @2x,页面缩放 100%):
+//
+//	ScaleX = 1.000000   OffsetX = 2560.000   ← 精确等于 window.screenX,差 0.0
+//	ScaleY = 1.000000   OffsetY =  638.000   ← screenY(517) + 121(浏览器顶部高度)
+//
+// CGEventPost 收的是**全局显示坐标,单位 point**,而 window.screenX 报的已经就是
+// point —— 乘 devicePixelRatio 是多乘一遍。此前那份公式是照 Windows 抄的,
+// 在副屏上(screenX=2560)会把视口正中算到 x=6590,超出整个桌面右边界 2560 点。
+//
+// y 轴刻意仍用裸 screenY,差那 121 点(浏览器标签栏+地址栏+书签栏)交给搭车标定去学:
+// 它小到光标还落在页面上,所以观测得到、学得回来。用 outerHeight-innerHeight 去猜
+// 反而更差 —— 同一趟实测那个差是 177,多算了 56。
+//
+// 页面缩放不是 100% 时 scale 也不是 1,但那正是标定要学的东西:粗估只要让光标
+// **落在页面上**就够了。
+func (d *darwinInjector) SeedCalib(h WindowHint) Calib {
+	return Calib{ScaleX: 1, ScaleY: 1, OffsetX: h.ScreenX, OffsetY: h.ScreenY}
+}
+
 func (d *darwinInjector) Close() {
 	if d.src != 0 {
 		cfRelease(d.src)

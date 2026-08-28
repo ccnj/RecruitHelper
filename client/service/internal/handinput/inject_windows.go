@@ -120,6 +120,22 @@ func (w *windowsInjector) CursorPos() (int, int, error) {
 	return int(p.X), int(p.Y), nil
 }
 
+// SeedCalib:**offset 要乘 dpr**,因为 SendInput 收的是虚拟桌面物理像素。
+//
+// 上游 hiBoss 的 Windows 真机实测:150% 缩放下页面报 screenX=430(CSS),真值 offsetX
+// 是 656.92(物理);不乘的话种子偏 227 物理像素,乘了只剩 12(窗口边框)。
+//
+// **这条只对 Windows 成立。** macOS 的 CGEventPost 收 point,同一份公式在那边会多乘
+// 一遍 —— 2026-08-28 就是这么在副屏上把光标算到桌面外去的。差异的根源是各平台注入
+// API 收什么单位,所以这个翻译归各自的注入器,不归共享的标定层。
+func (w *windowsInjector) SeedCalib(h WindowHint) Calib {
+	s := h.DPR
+	if s <= 0 {
+		s = 1
+	}
+	return Calib{ScaleX: s, ScaleY: s, OffsetX: h.ScreenX * s, OffsetY: h.ScreenY * s}
+}
+
 func (w *windowsInjector) Close()           {}
 func (w *windowsInjector) Platform() string { return "windows/SendInput" }
 

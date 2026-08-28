@@ -23,8 +23,9 @@ func landing(cur Calib, truth Calib, targetCSSX, targetCSSY int) Sample {
 func TestPiggybackConvergesFromRoughSeedInTwoLandings(t *testing.T) {
 	truth := Calib{ScaleX: 1.5, ScaleY: 1.5, OffsetX: 656.92, OffsetY: 121.5}
 	var pb Piggyback
-	// 页面自报视口原点(CSS),y 轴天然偏一百多像素——这是真机上必然发生的那个偏差
-	pb.Seed(WindowHint{ScreenX: 437.9, ScreenY: 0, DPR: 1.5}, 0, 0)
+	// 粗估:x 大致对,y 天然偏一百多(页面报的是窗口位置,视口原点在浏览器顶部之下)。
+	// 2026-08-28 真机实测这个差是 121 点。
+	pb.SeedCalib(Calib{ScaleX: 1.5, ScaleY: 1.5, OffsetX: 656.92, OffsetY: 0})
 
 	if _, ready := pb.Calib(); ready {
 		t.Fatal("只播了粗估就报就绪——那会让第一次移动直接去点击")
@@ -58,7 +59,7 @@ func TestPiggybackConvergesFromRoughSeedInTwoLandings(t *testing.T) {
 func TestPiggybackTwoTierDriftDisposition(t *testing.T) {
 	truth := Calib{ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 151}
 	var pb Piggyback
-	pb.Seed(WindowHint{ScreenX: 0, ScreenY: 151, DPR: 1}, 0, 0)
+	pb.SeedCalib(Calib{ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 151})
 	for _, p := range [][2]int{{40, 30}, {900, 700}} {
 		cur, _ := pb.Calib()
 		if _, err := pb.Observe(landing(cur, truth, p[0], p[1])); err != nil {

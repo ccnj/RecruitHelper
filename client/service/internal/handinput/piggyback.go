@@ -62,7 +62,8 @@ import (
 // 是噪声上界的两倍、是最紧目标半径的一半、是结构性失效的零头。
 const ToleranceProdPx = 4.0
 
-// WindowHint 是插件自报的窗口粗估,**只够走「不点击」的第一趟车**。
+// WindowHint 是插件自报的窗口粗估。**它是原始事实,不是映射** ——
+// 怎么把它翻成 Calib 由各平台的注入器决定(见 Injector.SeedCalib)。
 //
 // 上游是标定页 POST /calib/hint 上报的;我方由插件在定位时顺带读一次。
 // 三个值都可能不准:`window.screenX` 上游实测过它有时直接是错的(窗口一次没动,
@@ -140,35 +141,16 @@ type Piggyback struct {
 	miss    int // 连续对不上的次数
 }
 
-// Seed 用页面给的粗估播一个初始映射，**只够走「不点击」的第一趟车**。
+// SeedCalib 播一个初始映射，**只够走「不点击」的第一趟车**。
 //
-// `DPR` 是页面自报的设备像素比，`ScreenX/Y` 是它自报的视口原点。两个都可能不准
-// （多屏、窗口装饰、系统缩放各有各的偏差），所以播完之后状态仍是冷启动：
-// 能移动，不能点击。
-// `errX/errY` 是**故意加进粗估的偏差**，只给诊断用，生产传 0。
+// 映射由注入器按本平台的坐标单位算出（见 Injector.SeedCalib）：Windows 的 SendInput
+// 收虚拟桌面物理像素，macOS 的 CGEventPost 收 point，同一份 screenX 要做的翻译不一样。
 //
-// 为什么需要它：真机上 y 轴的粗估天然是错的（页面报的是窗口位置，而视口原点在
-// 标题栏+标签栏+地址栏+书签栏下面 121px），所以 y 的学习路径自然会被走到。
-// **x 轴不然** —— 窗口左边缘就是视口左边缘，粗估结构上就是对的，于是那一轴的
-// 学习路径在真机上根本走不到，摆窗口也验不出来。只能故意打偏。
-//
-// 这不是作弊：学习机制不知道偏差是哪来的，走的是同一条代码路径。
-func (p *Piggyback) Seed(h WindowHint, errX, errY float64) {
+// 播完之后状态仍是冷启动：能移动，不能点击。
+func (p *Piggyback) SeedCalib(c Calib) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := h.DPR
-	if s <= 0 {
-		s = 1
-	}
-	// **`h.ScreenX/Y` 是 CSS 像素，`OffsetX/Y` 是物理像素 —— 必须乘 scale。**
-	//
-	// 2026-08-27 真机照出来的：150% 缩放下页面报 screenX=430（CSS），真值 offsetX
-	// 是 656.92（物理）。不乘的话种子偏 227 物理像素；乘了只剩 12（窗口边框）。
-	//
-	// 这个错在 scale=1 的机器上**完全不可见**（两种单位数值相同），而它是那一趟
-	// 「故意打偏 200 反而更准了」的真凶 —— 上游 `-pb-seed-error 200,0` 碰巧补偿掉了
-	// 227 里的大半，冷启动 x 偏差从 151 CSS 降到 18 CSS。**旗标把 bug 遮住了。**
-	p.c = Calib{ScaleX: s, ScaleY: s, OffsetX: h.ScreenX*s + errX, OffsetY: h.ScreenY*s + errY}
+	p.c = c
 	p.ready = false
 }
 

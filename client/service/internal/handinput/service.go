@@ -124,7 +124,7 @@ func (s *Service) Seed(h WindowHint) {
 	if s.seeded {
 		return
 	}
-	s.pb.Seed(h, 0, 0)
+	s.pb.SeedCalib(s.inj.SeedCalib(h))
 	s.seeded = true
 }
 

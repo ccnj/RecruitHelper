@@ -13,6 +13,8 @@ type fakeInjector struct {
 	downs  int
 	ups    int
 	failAt int // >0 时第几次移动开始报错
+	// seed 非零时,SeedCalib 直接返回它 —— 用来构造"粗估算错了"的场面。
+	seed *Calib
 }
 
 func (f *fakeInjector) MouseMove(x, y float64) error {
@@ -30,6 +32,13 @@ func (f *fakeInjector) CursorPos() (int, int, error) {
 	}
 	last := f.moves[len(f.moves)-1]
 	return int(last[0]), int(last[1]), nil
+}
+func (f *fakeInjector) SeedCalib(h WindowHint) Calib {
+	if f.seed != nil {
+		return *f.seed
+	}
+	// 缺省按 macOS 口径:注入 API 收 point,所以不乘 dpr。
+	return Calib{ScaleX: 1, ScaleY: 1, OffsetX: h.ScreenX, OffsetY: h.ScreenY}
 }
 func (f *fakeInjector) Platform() string { return "fake" }
 func (f *fakeInjector) Close()           {}
@@ -125,7 +134,8 @@ func TestPlayDisarmsClick(t *testing.T) {
 // 缩放 <100% 时两个不同 CSS 位置会撞进同一系统像素,那一帧鼠标根本不动、
 // 浏览器不派发事件。必须如实上报,不许悄悄凑一个。
 func TestPlayReportsUnreachableFrames(t *testing.T) {
-	f := &fakeInjector{truth: Calib{ScaleX: 0.5, ScaleY: 0.5}}
+	half := Calib{ScaleX: 0.5, ScaleY: 0.5}
+	f := &fakeInjector{truth: half, seed: &half}
 	s := NewService(f)
 	s.mode = WaitSleep
 	s.Seed(WindowHint{ScreenX: 0, ScreenY: 0, DPR: 0.5})

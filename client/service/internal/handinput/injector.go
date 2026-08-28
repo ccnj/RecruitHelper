@@ -27,6 +27,18 @@ type Injector interface {
 	// 而记忆值没有这个抵消,标定一被修正就错位,错位量正好等于修正量(见 coord.go)。
 	CursorPos() (int, int, error)
 
+	// SeedCalib 把页面自报的窗口粗估翻成一个初始映射。
+	//
+	// **必须由各平台自己实现,因为差异的根源就是"本平台的注入 API 收什么单位"** ——
+	// 而那正是注入器自己的知识,不该由共享的标定层去猜。
+	//
+	// 2026-08-28 真机实测:此前只有一份照 Windows 抄的公式(offset = screenX × dpr),
+	// 在 macOS 上多乘了一遍——副屏(screenX=2560)下种子把光标算到桌面外 2560 点,
+	// 被系统钳死在边角、压根不在页面上,于是观测不到落点、学不到东西,重试全成瞎扫。
+	//
+	// 粗估只要**落在页面上**就够了:剩下的误差由搭车标定从落点学回来。
+	SeedCalib(hint WindowHint) Calib
+
 	Platform() string
 	Close()
 }
