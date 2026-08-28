@@ -54,8 +54,11 @@ interface ViewportFacts {
 }
 
 interface HandState {
-  cursorCssX: number
-  cursorCssY: number
+  // 还没播种(连粗估都没有)时是 null,不是 0。那时手服务是真不知道光标在哪:
+  // 零值标定反算会除以零。**0 会被这里当成"光标在视口左上角"照着算一条轨迹出来**,
+  // 于是第一帧就是一次几百像素的瞬移。
+  cursorCssX: number | null
+  cursorCssY: number | null
   calibrated: boolean
   clickArmed: boolean
   samples: number
@@ -202,7 +205,14 @@ export async function runOsProbe(
       // 起点必须现读:Snap 与 ToClient 用同一份标定、互为逆运算,现读再反算必然
       // 落回原地,不管标定多离谱;而用记忆里的 CSS 值没有这个抵消,标定一被修正
       // 就错位,错位量正好等于修正量——冷启动时那是一次一两百像素的干净瞬移。
-      const state = await callHand<HandState>('/state')
+      // /state 是 POST 并捎上粗估:编排要在生成计划之前问"光标在哪",而那个答案
+      // 要经当前标定反算——没播种就连粗估都没有。让第一次问状态就把粗估带上,
+      // 这个先有鸡还是先有蛋的坎就没了。
+      const state = await callHand<HandState>('/state', { hint })
+      if (state.cursorCssX === null || state.cursorCssY === null) {
+        detail = '手服务报不出光标位置——标定连粗估都没建起来'
+        break
+      }
       const from = { x: state.cursorCssX, y: state.cursorCssY }
 
       const plan = planMove({
