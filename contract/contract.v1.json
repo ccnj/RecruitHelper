@@ -348,7 +348,7 @@
           "planMs": { "type": "int", "minimum": 0 },
           "elapsedMs": { "type": "int", "minimum": 0 },
           "lagMaxUs": { "type": "int", "minimum": 0 },
-          "detail": { "type": "string", "maxLength": 512, "optional": true },
+          "detail": { "type": "string", "maxLength": 2048, "optional": true },
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
