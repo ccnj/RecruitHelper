@@ -11,7 +11,7 @@ import {
 } from '../../base/protocol'
 import { SW_STARTED_AT } from '../../base/config'
 import { armRuntimeReload } from '../../base/reload'
-import { callPlatform, callPlatformUnbound } from '../platform/registry'
+import { callPlatform, callPlatformUnbound, platformFailure } from '../platform/registry'
 import { PlatformError } from '../platform/types'
 
 const pingPrim: Primitive = {
@@ -154,8 +154,14 @@ const osProbePrim: Primitive = {
   name: PrimName.DebugOsProbe,
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
-    const data = await callPlatform(ctx, 'osProbe', rawArgs as DebugOsProbeArgs)
-    return { status: 'ok', data }
+    try {
+      const data = await callPlatform(ctx, 'osProbe', rawArgs as DebugOsProbeArgs)
+      return { status: 'ok', data }
+    } catch (error) {
+      // 不接住的话平台失败会逃成 INTERNAL_HAND / sideEffect=possible——
+      // 一次什么都没做的失败被记成"副作用可能发生了"。真机第一跑撞过。
+      return platformFailure(error)
+    }
   },
 }
 

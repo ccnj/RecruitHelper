@@ -15067,6 +15067,47 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
   assert.ok(drawn.size >= 10, `40 次抽样只出现 ${drawn.size} 个不同的 pressMs,疑似退化成常数`)
 })
 
+// ---------------------------------------------------------------------------
+// 真机第一跑的回归:平台失败逃出映射
+//
+// `debug.osProbe` 第一版没接 platformFailure,于是「智联 IM 页面不存在」这条本该是
+// CTX_NOT_READY / pageAbsent / sideEffect=none 的失败,回到脑那边成了
+// INTERNAL_HAND / sideEffect=possible ——一次什么都没做的失败被记成
+// 「副作用可能发生了」,方向正好反了。
+//
+// 判据盯的是**原语的返回**,不是 platformFailure 这个函数本身:漏掉的是接线,
+// 只测函数照样绿。
+// ---------------------------------------------------------------------------
+
+test('osProbe 把平台失败如实映射,不逃成 INTERNAL_HAND', async () => {
+  resetPlatformsForTest()
+  try {
+    registerPlatform({
+      id: 'fakeplat', hostMatch: 'https://example.invalid/*', world: 'ISOLATED', input: 'os',
+      osProbe: () => {
+        throw new PlatformError('CTX_NOT_READY', '假平台页面不存在', 'afterRecovery', 'pageAbsent')
+      },
+    })
+    const prim = lookup('debug.osProbe')
+    assert.ok(prim, 'debug.osProbe 必须已注册')
+    assert.equal(prim.class, 'intrusive')
+    const out = await prim.handler({ target: 'viewportCenter' }, {
+      cmdMsgId: 'm-test', deadlineMs: Date.now() + 60_000, irreversibleNotAfterMs: Date.now() + 60_000,
+      commandContext: { platform: 'fakeplat' }, guards: undefined,
+      signal: new AbortController().signal,
+      progress: () => {}, checkpoint: () => {}, beforeSideEffect: async () => {},
+    })
+    assert.equal(out.status, 'failed')
+    assert.equal(out.error.code, 'CTX_NOT_READY', '错误码必须原样带出,不得退化成 INTERNAL_HAND')
+    assert.equal(out.error.sideEffect, 'none',
+      'intrusive 原语没有资格用 possible —— 什么都没做的失败不能报成"副作用可能发生了"')
+    assert.equal(out.error.data?.reason, 'pageAbsent', 'notReady 原因必须随行,否则排障只剩一句英文原语名')
+  } finally {
+    resetPlatformsForTest()
+    registerPlatform(zhilianAdapter)
+  }
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {
