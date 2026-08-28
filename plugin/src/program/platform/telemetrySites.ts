@@ -128,7 +128,7 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
 
   // 设备指纹上报本身:每次页面加载无条件发,跟检测到什么无关。
   '800001': { label: '设备指纹·内网 IP + 未知全局名差集 + 缺失 API 矩阵' },
-  '800003': { label: '设备指纹·UA-CH/屏幕/GPU/canvas 哈希' },
+  '800003': { label: '设备指纹·UA-CH/屏幕/GPU/canvas 哈希(注意:800001/800009 在聚合豁免表里,唯独它不在,会被算进 559991)' },
   '800009': { label: '设备指纹·语音合成深度指纹' },
 
   // 本机端口 / 伴随进程探测。整族都受 si() 那个判据缺陷影响。
@@ -155,8 +155,13 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
   '99003': { label: 'Object.keys(window) 与白名单的差集(未知全局名)' },
 
   // 聚合补报。
-  '559991': { label: '聚合补报:累计命中 >2 个不同的非豁免码(p3=码列表、p4=数量);需 window.Block 为真' },
-  '559999': { label: '聚合补报:命中 Sa 表;需 window.Block 为真' },
+  // 2026-08-28 首次真机:559991 在一次普通浏览里连发三条(p3 随命中列表逐次增长),
+  // 聚合进去的是 800003 + 550094 + 550237/550239/550245 —— 一条真信号加一条 BOSS
+  // 自己的例行指纹上报,其余全是那族假阳性。**这与 hiBoss「需 window.Block 为真
+  // (已进入封禁/拦截场景)才发」的读法对不上**:那次会话没有任何封禁迹象。
+  // 要么 window.Block 在正常会话里也为真,要么那条前置读得不全 —— 待查。
+  '559991': { label: '聚合补报:累计命中 >2 个不同的非豁免码(p3=码列表、p4=数量)。真机首验:普通会话即会触发' },
+  '559999': { label: '聚合补报:命中 Sa 表' },
 }
 
 export function bossCodeMeaning(code: string): BossCodeMeaning {
