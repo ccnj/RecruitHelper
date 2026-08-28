@@ -216,8 +216,19 @@ export async function runOsProbe(
       planMs: 0, elapsedMs: Date.now() - started, lagMaxUs: 0, detail: refusal }
   }
 
-  // 靶子:视口正中。它不需要任何平台 DOM 知识,而且必然在视口内。
-  const target = { x: Math.round(view.innerW / 2), y: Math.round(view.innerH / 2) }
+  // 靶子:视口里几个**散开**的点,按趟轮换。它们不需要任何平台 DOM 知识。
+  //
+  // **散开是必须的,不是为了好看。** 搭车标定要样本在两个轴上各张开 MinSpanPx
+  // (200 CSS px)才解得出 scale——那个数是从 clientX 的 ±0.5 取整噪声推出来的:
+  // 两个相距 R 的样本,scale 的相对误差上界是 1/R,而要落进 snapScale 的 0.5%
+  // 吸附容差就得 R > 200。
+  //
+  // 一个固定靶子反复移动永远张不开:第一趟落在靶子附近之后,后面每一趟都只挪
+  // 一百来像素,样本挤成一团,标定会一直停在冷启动直到把重试次数用完。
+  const spread = (fx: number, fy: number) => ({
+    x: Math.round(view.innerW * fx), y: Math.round(view.innerH * fy),
+  })
+  const targets = [spread(0.22, 0.22), spread(0.78, 0.78), spread(0.78, 0.22), spread(0.22, 0.78)]
   const hint = { screenX: view.screenX, screenY: view.screenY, dpr: view.dpr }
 
   let attempts = 0
@@ -242,6 +253,7 @@ export async function runOsProbe(
       }
       const from = { x: state.cursorCssX, y: state.cursorCssY }
 
+      const target = targets[(attempts - 1) % targets.length]!
       const plan = planMove({
         from, to: target,
         // 视口中心没有"元素矩形",用上游拟合的缺省宽度。

@@ -15093,7 +15093,7 @@ test('osProbe 把平台失败如实映射,不逃成 INTERNAL_HAND', async () => 
     const prim = lookup('debug.osProbe')
     assert.ok(prim, 'debug.osProbe 必须已注册')
     assert.equal(prim.class, 'intrusive')
-    const out = await prim.handler({ target: 'viewportCenter' }, {
+    const out = await prim.handler({ target: 'viewportSpread' }, {
       cmdMsgId: 'm-test', deadlineMs: Date.now() + 60_000, irreversibleNotAfterMs: Date.now() + 60_000,
       commandContext: { platform: 'fakeplat' }, guards: undefined,
       signal: new AbortController().signal,
@@ -15125,7 +15125,7 @@ test('osProbe 不因窗口在副屏而拒绝', () => {
 // 契约里没有浮点类型,而手服务算出来的滞后是浮点。真机第一次成功跑完 34.6 秒之后,
 // result 就是被 `$.data.lagMaxUs: 需要整数` 拦在回程上,那一趟的数据全丢了。
 test('osProbe 的契约 data 全是整数', () => {
-  const data = osProbeContractData('viewportCenter', {
+  const data = osProbeContractData('viewportSpread', {
     outcome: 'landed', attempts: 2, landingDriftPx: 1.2, calibStatus: '就绪',
     unreachableFrames: 0, planMs: 903.7, elapsedMs: 34627.4, lagMaxUs: 22641.83,
   }, 1756000000000)

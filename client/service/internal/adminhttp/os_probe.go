@@ -17,7 +17,7 @@ import (
 // **这是脑侧唯一的派发入口。** 巡检、工作流、沟通 v4 一律不铸这条命令,
 // 门禁盯着(dispatch/osprobe_producer_test.go)。
 //
-// 本轮只有 viewportCenter 一个靶子:走完「定位 → 移光标 → 落点确认 → 喂搭车标定」
+// 本轮只有 viewportSpread 一个靶子:走完「定位 → 移光标 → 落点确认 → 喂搭车标定」
 // 四段,**只移动、绝不点击**。在坐标被证明对之前,不该让第一次 OS 注入的点击落在
 // 真人账号的页面上。
 //
@@ -39,7 +39,7 @@ func (a *API) osProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	target := protocol.OsProbeTarget(body.Target)
 	if body.Target == "" {
-		target = protocol.OsProbeTargetViewportCenter
+		target = protocol.OsProbeTargetViewportSpread
 	}
 	// 契约 deadlineMs 是 300 秒;等待窗口留出余量,超时只表示没等到终局,
 	// 不表示命令失败——账本里那条 msgId 仍在自己的轨道上收束。
