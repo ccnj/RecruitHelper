@@ -214,4 +214,62 @@ el('probeSetGid').addEventListener('click', () => {
 
 void ask<ProbeResult | null>({ type: 'bossOriginProbe:read' }).then(renderProbe)
 
+// ---- MAIN world 注入足迹探针(临时,验完即删) ----
+
+interface MwShot {
+  walkMs: number
+  visitedComponents: number
+  foundMessageArrayLen: number
+  globalCount: number
+  globals: string[]
+  perfCount: number
+  perfExtensionHits: { name: string; type: string }[]
+  perfTypes: Record<string, number>
+  longTasks: { start: number; dur: number }[]
+  error?: string
+}
+interface MwResult {
+  at: number
+  tabUrl: string
+  shots: MwShot[]
+  globalsAddedBetweenShots: string[]
+  afterFilesInjection: { perfExtensionHits: { name: string; type: string }[]; globalsAdded: string[] } | null
+  notes: string[]
+}
+
+function renderMw(r: MwResult | null): void {
+  const box = el('mw')
+  if (!r) { box.innerHTML = '<p class="muted">还没跑过。</p>'; return }
+  if (!r.shots.length) {
+    box.innerHTML = `<div class="verdict warn"><b>没跑成</b>${r.notes.join(' ')}</div>`
+    return
+  }
+  const s0 = r.shots[0]
+  const filesHits = r.afterFilesInjection ? r.afterFilesInjection.perfExtensionHits : []
+  const filesGlobals = r.afterFilesInjection ? r.afterFilesInjection.globalsAdded : []
+  const cleanGlobals = r.globalsAddedBetweenShots.length === 0 && filesGlobals.length === 0
+  const cleanPerf = s0.perfExtensionHits.length === 0 && filesHits.length === 0
+  const good = cleanGlobals && cleanPerf
+  const verdict = good
+    ? '<div class="verdict good"><b>没留下痕迹</b>两次注入之间 window 全局零增量,performance timeline 上没有任何扩展相关条目(func 与 files 两种形式都没有)。</div>'
+    : `<div class="verdict warn"><b>留下了痕迹 —— 看下面</b>${cleanGlobals ? '' : '全局有增量。'}${cleanPerf ? '' : 'performance 上出现了扩展条目。'}</div>`
+  const li = (t: string) => `<li>${t}</li>`
+  const rows = [
+    li(`window 全局:第一枪 ${s0.globalCount} 个,两枪之间新增 <b>${r.globalsAddedBetweenShots.length}</b> 个${r.globalsAddedBetweenShots.length ? ` — <code>${r.globalsAddedBetweenShots.join(', ')}</code>` : ''}`),
+    li(`files 形式注入后再新增 <b>${filesGlobals.length}</b> 个${filesGlobals.length ? ` — <code>${filesGlobals.join(', ')}</code>` : ''}`),
+    li(`performance 条目共 ${s0.perfCount} 条,类型分布 <code>${Object.entries(s0.perfTypes).map(([k, v]) => `${k}:${v}`).join(' ')}</code>`),
+    li(`其中扩展相关条目:<b>func 形式 ${s0.perfExtensionHits.length} 条 / files 形式 ${filesHits.length} 条</b>${[...s0.perfExtensionHits, ...filesHits].map((h) => `<br /><span class="muted">${h.type} — ${h.name}</span>`).join('')}`),
+    li(`Vue 树形状搜索:走了 ${s0.visitedComponents} 个组件,耗时 <b>${s0.walkMs} ms</b>,找到的最长消息数组 ${s0.foundMessageArrayLen} 条`),
+    li(`页面 longtask:${s0.longTasks.length} 条${s0.longTasks.length ? ` — ${s0.longTasks.map((t) => `${t.dur}ms`).join(', ')}` : ''}`),
+  ].join('')
+  const notes = r.notes.length ? `<p class="muted">${r.notes.join('<br />')}</p>` : ''
+  const errs = r.shots.filter((x) => x.error).map((x) => `<p class="muted">取样报错: ${x.error}</p>`).join('')
+  box.innerHTML = `${verdict}<p class="muted">${r.tabUrl} · ${new Date(r.at).toLocaleString('zh-CN')}</p><ul>${rows}</ul>${notes}${errs}`
+}
+
+el('mwRun').addEventListener('click', () => {
+  el('mw').innerHTML = '<p class="muted">跑着呢…</p>'
+  void ask<MwResult>({ type: 'mainWorldProbe:run' }).then(renderMw)
+})
+
 void render()

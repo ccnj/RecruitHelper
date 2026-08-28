@@ -48,6 +48,15 @@
     </div>
     <div id="probe">-</div>
 
+    <h2>MAIN world 注入足迹 <span class="muted">(临时,验完即删)</span></h2>
+    <p class="muted">
+      验四件事:注入会不会留 window 全局(BOSS 查 99003 的那个差集)、会不会出现在页面
+      <code>performance.getEntries()</code> 里、按数据形状搜整棵 Vue 树要多久、
+      <code>func</code> 与 <code>files</code> 两种注入形式有没有差别。需要先打开 BOSS 页面。
+    </p>
+    <div class="row"><button id="mwRun">跑一次</button></div>
+    <div id="mw">-</div>
+
     <h2>探测命中</h2>
     <div id="hits">-</div>
 

@@ -35,6 +35,14 @@ const telemetryViewOptions = {
   format: 'iife',
 }
 
+// 临时诊断载荷(2026-08-28):测 `files` 形式注入会不会在页面 performance 上留痕。
+// 结论拿到后连同 src/mainWorldProbeScript.ts 一并删除。
+const mainWorldProbeOptions = {
+  ...common,
+  entryPoints: { mainWorldProbe: 'src/mainWorldProbeScript.ts' },
+  format: 'iife',
+}
+
 // content script 的体积闸。
 //
 // 它守的不是"包小一点好看",是**三张表那个架构本身**:content.js 与 background.js
@@ -73,13 +81,15 @@ if (watch) {
   })
   const contentContext = await esbuild.context(contentOptions)
   const telemetryViewContext = await esbuild.context(telemetryViewOptions)
-  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch()])
+  const mainWorldProbeContext = await esbuild.context(mainWorldProbeOptions)
+  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch(), mainWorldProbeContext.watch()])
   console.log('watching...')
 } else {
   await Promise.all([
     esbuild.build(backgroundOptions),
     esbuild.build(contentOptions),
     esbuild.build(telemetryViewOptions),
+    esbuild.build(mainWorldProbeOptions),
   ])
   copyStatic()
   await checkContentSize()
