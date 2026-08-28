@@ -121,3 +121,17 @@ export async function readAll(store: TelemetryStorage, kind: string): Promise<un
 export async function count(store: TelemetryStorage, kind: string): Promise<number> {
   return (await readAll(store, kind)).length
 }
+
+/** 清空一种数据的全部片。观测数据不是业务事实,不受禁止物理删除约束。 */
+export async function clear(store: TelemetryStorage, kind: string): Promise<void> {
+  const meta = readMeta(await store.get(META_KEY))
+  const range = meta[kind]
+  if (!range) return
+
+  const keys: string[] = []
+  for (let n = range.lo; n <= range.hi; n += 1) keys.push(chunkKey(kind, n))
+  await store.remove(keys)
+
+  delete meta[kind]
+  await store.set({ [META_KEY]: meta })
+}

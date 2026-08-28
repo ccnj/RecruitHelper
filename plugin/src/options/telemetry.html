@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>平台埋点观测 · 手端</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.1rem; }
+      h2 { font-size: 0.95rem; margin: 1.6rem 0 0.5rem; }
+      .verdict { padding: 0.8rem 1rem; border-radius: 6px; margin: 1rem 0; }
+      .verdict.good { background: #eef7ee; border: 1px solid #bcd9bc; }
+      .verdict.warn { background: #fdf3e7; border: 1px solid #e5c79a; }
+      .verdict.idle { background: #f2f2f2; border: 1px solid #ddd; }
+      .verdict b { display: block; margin-bottom: 0.3rem; }
+      code { background: #f2f2f2; padding: 0 0.3rem; border-radius: 3px; }
+      ul { margin: 0.3rem 0; padding-left: 1.4rem; }
+      li { margin: 0.15rem 0; }
+      .muted { color: #888; font-size: 0.85rem; }
+      button { margin-right: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <h1>平台埋点观测</h1>
+    <p class="muted">
+      只读:把平台自己发出去的埋点载荷抄一份存本机。不改页面、不改请求、不参与任何业务裁决。
+      数据只在本机 <code>chrome.storage.local</code>,不出本机。
+    </p>
+
+    <div class="row">
+      <button id="refresh">刷新</button>
+      <button id="export">导出 JSON</button>
+      <button id="clear">清空(开始一轮量测前用)</button>
+      <span id="status" class="muted"></span>
+    </div>
+
+    <div id="verdict" class="verdict idle"><b>还没抓到任何载荷</b></div>
+
+    <h2>探测命中</h2>
+    <div id="hits">-</div>
+
+    <h2>概览</h2>
+    <div id="overview">-</div>
+
+    <h2>其他</h2>
+    <div id="misc">-</div>
+
+    <script src="telemetry.js"></script>
+  </body>
+</html>

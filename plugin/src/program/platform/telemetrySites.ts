@@ -84,3 +84,105 @@ export const bossTelemetrySite: TelemetrySite = {
 
 /** 全部观测站点。加一个平台要动两处:本表,和 manifest 的 host_permissions。 */
 export const telemetrySites: readonly TelemetrySite[] = [bossTelemetrySite]
+
+// ── 判读:一条载荷里哪些是例行、哪些是探测命中 ──────────────────────────────
+//
+// 判读表取自 hiBoss 的逆向结论(`report/boss-detection-report.md` §354/§692),
+// 我方**尚未真机核对过任何一条**。分类只看 (端点, action),不看码长什么样。
+
+/** zpAegis 通道:`p2` 是事件码;patas APM 通道的 `p2` 是页面 URL,码藏在别处。 */
+const AEGIS_ENDPOINT = /\/actionLog\/fe\/ie\/common\.json/
+
+/** 行为通道里的良性码。 */
+const ROUTINE_BEHAVIOR = new Set(['0', '30004', '30005', '30006'])
+
+/** 设备指纹上报本身——每次页面加载无条件发,跟检测到什么无关。 */
+const FINGERPRINT = new Set(['800001', '800003', '800009'])
+
+const CODE_LABELS: Record<string, string> = {
+  '0': '0(无异常)',
+  '30004': '30004(TYPING·正常打字分类)',
+  '30005': '30005(ENTER·回车分类)',
+  '30006': '30006(SDK 版本自报)',
+  '800001': '800001(设备指纹·IP/全局名/API 矩阵)',
+  '800003': '800003(设备指纹·屏幕/GPU/canvas)',
+  '800009': '800009(设备指纹·语音合成)',
+}
+
+export function bossCodeLabel(code: string): string {
+  return CODE_LABELS[code] ?? code
+}
+
+export interface BossClassification {
+  /** 非例行的事件码——**这些才是探测命中**。 */
+  readonly hits: readonly { code: string; action: string }[]
+  /** 例行码:指纹上报本身、正常打字分类。 */
+  readonly routine: readonly { code: string; action: string }[]
+  /**
+   * 800001 的 `p6`:BOSS 拿 `Object.keys(window)` 与自己那份白名单求的差集,
+   * **原样上送**。我们的插件有没有被点名,看的就是这一栏。
+   */
+  readonly unknownGlobals: readonly string[]
+  /** risk-monitor 报告的注入项。 */
+  readonly injected: readonly unknown[]
+  /** 被探到的本机端口。 */
+  readonly localProbes: readonly string[]
+}
+
+const EMPTY_CLASSIFICATION: BossClassification = {
+  hits: [], routine: [], unknownGlobals: [], injected: [], localProbes: [],
+}
+
+export function classifyBossEntry(url: string, payload: unknown): BossClassification {
+  const root = asRecord(payload)
+  const items = root?.['items']
+  if (!Array.isArray(items)) return EMPTY_CLASSIFICATION
+
+  const aegis = AEGIS_ENDPOINT.test(url)
+  const hits: { code: string; action: string }[] = []
+  const routine: { code: string; action: string }[] = []
+  const unknownGlobals: string[] = []
+  const injected: unknown[] = []
+  const localProbes: string[] = []
+
+  for (const raw of items) {
+    const item = asRecord(raw)
+    if (!item) continue
+    const action = String(item['action'] ?? '')
+
+    if (aegis) {
+      const code = String(item['p2'] ?? '')
+      if (code === '') continue
+      const isDevice = action === 'device-action-report'
+      const benign = isDevice ? FINGERPRINT.has(code) : ROUTINE_BEHAVIOR.has(code)
+      ;(benign ? routine : hits).push({ code, action })
+      if (isDevice && code === '800001' && typeof item['p6'] === 'string' && item['p6'] !== 'null') {
+        unknownGlobals.push(...item['p6'].split('|').filter(Boolean))
+      }
+      continue
+    }
+
+    if (action === 'action_js_risk_monitor') {
+      const parsed = typeof item['p7'] === 'string' ? tryParse(item['p7']) : null
+      const list = asRecord(parsed)?.['insertList']
+      if (Array.isArray(list)) injected.push(...list)
+    } else if (action === 'action_api_monitor') {
+      const parsed = asRecord(typeof item['p4'] === 'string' ? tryParse(item['p4']) : null)
+      const probed = parsed?.['url']
+      if (typeof probed === 'string' && /^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(probed)) {
+        localProbes.push(probed)
+      }
+    }
+  }
+
+  return { hits, routine, unknownGlobals, injected, localProbes }
+}
+
+function tryParse(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    // 形状变了 —— 原文已经完整落在 payload 里,不猜。
+    return null
+  }
+}

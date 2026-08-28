@@ -31,6 +31,9 @@ const {
   bossTelemetrySite,
   telemetrySites,
   telemetryReadAll,
+  telemetryClear,
+  classifyBossEntry,
+  bossCodeLabel,
   TELEMETRY_CHUNK,
   TELEMETRY_KIND_CLICK,
   TELEMETRY_KIND_UPLOAD,
@@ -15275,6 +15278,59 @@ test('BOSS 观测站点:抽 p2 与 cnTextCount,只有带轨迹的点击进轨迹
   // 形状不认识就返回空,不猜。
   assert.deepEqual(bossTelemetrySite.digest(null, 1), { summary: {}, shots: [] })
   assert.deepEqual(bossTelemetrySite.digest({ items: 'nope' }, 1).shots, [])
+})
+
+
+test('观测分片环:清空只动自己的键,另一个环与外人的键不受影响', async () => {
+  const store = memoryWitnessStorage({ 'infra': { keep: 1 }, 'witness:meta': { keep: 2 } })
+  await telemetryAppend(store, TELEMETRY_KIND_UPLOAD, [{ u: 1 }], TELEMETRY_MAX_UPLOAD_CHUNKS)
+  await telemetryAppend(store, TELEMETRY_KIND_CLICK, [{ c: 1 }], TELEMETRY_MAX_CLICK_CHUNKS)
+
+  await telemetryClear(store, TELEMETRY_KIND_UPLOAD)
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [])
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_CLICK), [{ c: 1 }], '另一个环不该被牵连')
+  assert.deepEqual(store.state['infra'], { keep: 1 }, '手侧既有的键一个都不许动')
+  assert.deepEqual(store.state['witness:meta'], { keep: 2 })
+
+  await telemetryClear(store, TELEMETRY_KIND_UPLOAD)  // 幂等
+  assert.deepEqual(await telemetryReadAll(store, TELEMETRY_KIND_UPLOAD), [])
+})
+
+test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独拎出来', async () => {
+  const aegis = 'https://apm-fe.zhipin.com/wapi/zpApm/actionLog/fe/ie/common.json'
+
+  const c = classifyBossEntry(aegis, {
+    items: [
+      { action: 'device-action-report', p2: '800001', p6: 'foo|bar' },
+      { action: 'device-action-report', p2: '550003' },
+      { action: 'web-event-input', p2: '0' },
+      { action: 'web-event-input', p2: '30099' },
+      { action: 'web-event-click', p2: '' },
+    ],
+  })
+  // 指纹上报每次页面加载无条件发,跟检测到什么无关 —— 算例行。
+  assert.deepEqual(c.routine.map((r) => r.code), ['800001', '0'])
+  // 设备族里其它任何码才是探测命中。
+  assert.deepEqual(c.hits.map((h) => h.code), ['550003', '30099'])
+  assert.deepEqual(c.unknownGlobals, ['foo', 'bar'], '这一栏就是"我们隐不隐形"的答案')
+
+  // patas APM 通道:码藏在 action 的 JSON 字符串字段里,p2 是页面 URL。
+  const patas = 'https://apm-fe.zhipin.com/wapi/zpApm/actionLog/fe/common.json'
+  const p = classifyBossEntry(patas, {
+    items: [
+      { action: 'action_js_risk_monitor', p7: JSON.stringify({ insertList: ['x.js'] }) },
+      { action: 'action_js_risk_monitor', p7: 'not json' },
+      { action: 'action_api_monitor', p4: JSON.stringify({ url: 'http://127.0.0.1:8931/a' }) },
+      { action: 'action_api_monitor', p4: JSON.stringify({ url: 'https://example.com/a' }) },
+    ],
+  })
+  assert.deepEqual(p.injected, ['x.js'])
+  assert.deepEqual(p.localProbes, ['http://127.0.0.1:8931/a'], '只收本机端口')
+  assert.deepEqual(p.hits, [], 'patas 通道的 p2 是页面 URL,不该被当成事件码')
+
+  assert.equal(bossCodeLabel('800001'), '800001(设备指纹·IP/全局名/API 矩阵)')
+  assert.equal(bossCodeLabel('550003'), '550003', '不认识的码原样显示,不编')
+  assert.deepEqual(classifyBossEntry(aegis, null).hits, [])
 })
 
 
