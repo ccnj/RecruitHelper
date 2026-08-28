@@ -99,6 +99,9 @@ const {
   WitnessUnavailableReason,
   zhilianTestHooks,
   ZhilianPlatformError,
+  planMove,
+  DEFAULT_MAX_DWELL_MS,
+  OSENGINE_SOURCE,
 } = await import(unitBundleURL + `?t=${Date.now()}`)
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -14996,6 +14999,72 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
   } finally {
     fixture.restore()
   }
+})
+
+// ---------------------------------------------------------------------------
+// osengine:从 hiBoss 搬入的鼠标轨迹引擎
+//
+// 这一组测的不是"轨迹像不像人"——那要判别器,是研究设备,永远留在 hiBoss。
+// 这里测的是**我们这一侧的胶水没有把上游的东西改掉**:随机数派生、参数传递、
+// 取整口径、抽 pressMs 的时机。任何一处偏了,同种子就生成不出同一条轨迹,
+// 那边的离线跑分与我们真机播的就不是一个东西,而且不会有任何报错。
+// ---------------------------------------------------------------------------
+
+const OSENGINE_FIXTURE = JSON.parse(
+  readFileSync('test/fixtures/osengine-hiboss-ef1b134.json', 'utf8'),
+)
+
+test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
+  const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
+  assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
+  assert.equal(OSENGINE_SOURCE.commit, 'ef1b134', '版本钉子与基准文件名必须同步')
+
+  for (const [seedText, expected] of Object.entries(cases)) {
+    const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
+    assert.deepEqual(
+      plan.points.map((p) => [p.x, p.y, p.t]),
+      expected.points.map((p) => [p.x, p.y, p.t]),
+      `种子 ${seedText} 的轨迹与上游不一致`,
+    )
+    assert.equal(plan.pressMs, expected.pressMs, `种子 ${seedText} 的 pressMs 与上游不一致`)
+  }
+})
+
+test('osengine 末点落在目标上,时刻单调不减', () => {
+  const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
+  for (const seedText of Object.keys(cases)) {
+    const { points } = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
+    const last = points.at(-1)
+    // 末段刻意落在目标上(引擎最后一条腿的终点就是 x1,y1),取整到三位后允许千分位误差。
+    assert.ok(Math.abs(last.x - to.x) <= 0.01 && Math.abs(last.y - to.y) <= 0.01,
+      `种子 ${seedText} 末点 ${last.x},${last.y} 未落在目标 ${to.x},${to.y}`)
+    for (let i = 1; i < points.length; i++) {
+      assert.ok(points[i].t >= points[i - 1].t,
+        `种子 ${seedText} 第 ${i} 帧时刻倒退:${points[i - 1].t} -> ${points[i].t}`)
+    }
+  }
+})
+
+test('osengine 同输入必然同输出(确定性,标定与复现的前提)', () => {
+  const { from, to, targetW, maxDwellMs } = OSENGINE_FIXTURE
+  const a = planMove({ from, to, targetW, maxDwellMs, seed: 5 })
+  const b = planMove({ from, to, targetW, maxDwellMs, seed: 5 })
+  assert.deepEqual(a, b)
+  const c = planMove({ from, to, targetW, maxDwellMs, seed: 6 })
+  assert.notDeepEqual(a.points, c.points, '换种子必须换轨迹')
+})
+
+test('osengine 的 pressMs 来自实测池而不是常数', () => {
+  const { from, to, targetW, maxDwellMs } = OSENGINE_FIXTURE
+  const drawn = new Set()
+  for (let seed = 1; seed <= 40; seed++) {
+    const { pressMs } = planMove({ from, to, targetW, maxDwellMs, seed })
+    assert.ok(Number.isFinite(pressMs) && pressMs > 0, 'pressMs 必须是正数')
+    drawn.add(pressMs)
+  }
+  // 常数会给出一串一模一样的数字,那是零误伤的机器签名。真人 464 条按压里
+  // 中位 96ms、四分位 86~110,所以 40 次抽样出现多个不同取值是必然的。
+  assert.ok(drawn.size >= 10, `40 次抽样只出现 ${drawn.size} 个不同的 pressMs,疑似退化成常数`)
 })
 
 let failures = 0
