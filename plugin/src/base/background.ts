@@ -15,6 +15,7 @@ import { refreshPagesAfterRuntimeReload } from './reload'
 import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
+import { readCounters } from './telemetry/counters'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -77,6 +78,11 @@ chrome.runtime.onInstalled.addListener(ensureConnectedAfterReload)
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'getStatus') {
     sendResponse(conn.status())
+    return true
+  }
+  // 诊断页按需读平台的输入行为账本(只读、不常驻,见 telemetry/counters.ts)。
+  if (msg?.type === 'telemetryCounters:read') {
+    void readCounters().then(sendResponse)
     return true
   }
   if (handleInfrastructureMessage(msg, sendResponse)) return true

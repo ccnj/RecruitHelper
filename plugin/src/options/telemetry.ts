@@ -10,6 +10,8 @@
 import { KIND_CLICK, KIND_UPLOAD, TelemetryStorage, clear, readAll } from '../base/telemetry/store'
 import { TelemetryEntry } from '../base/telemetry/capture'
 import { bossCodeMeaning, classifyBossEntry } from '../program/platform/telemetrySites'
+import { BOSS_INPUT_COUNTERS, REPORT_EVERY } from '../program/platform/bossInputCounters'
+import { CounterSnapshot, clearBaseline, readBaseline, setBaseline } from '../base/telemetry/counters'
 
 const storage: TelemetryStorage = {
   get: (keys) => chrome.storage.local.get(keys as string | string[]),
@@ -154,6 +156,82 @@ el('clear').addEventListener('click', () => {
     await clear(storage, KIND_CLICK)
     el('status').textContent = '已清空'
     await render()
+  })()
+})
+
+// ---- 平台的输入行为账本 ----
+
+const ask = <T,>(msg: unknown): Promise<T> =>
+  new Promise((resolve) => { chrome.runtime.sendMessage(msg, (r: T) => resolve(r)) })
+
+let lastSnapshot: CounterSnapshot | null = null
+
+function renderCounters(snap: CounterSnapshot, base: CounterSnapshot | null): string {
+  if (snap.note !== undefined) {
+    return `<div class="verdict idle"><b>没读到</b><span class="muted">${escapeHTML(snap.note)}</span></div>`
+  }
+
+  const total = snap.counts['input_count'] ?? 0
+  const hits = BOSS_INPUT_COUNTERS.filter((c) => c.key !== 'input_count' && (snap.counts[c.key] ?? 0) > 0)
+  const armed = hits.filter((c) => c.triggersReport)
+  const toGo = total % REPORT_EVERY === 0 && total > 0 ? 0 : REPORT_EVERY - (total % REPORT_EVERY)
+
+  const verdict = !hits.length
+    ? '<div class="verdict good"><b>平台没记下任何输入异常</b></div>'
+    : armed.length
+      ? `<div class="verdict warn"><b>已中 ${hits.length} 项,其中 ${armed.length} 项属会触发上报的五项</b>`
+        + `<span class="muted">聚合上报的判据是「总输入次数是 ${REPORT_EVERY} 的整数倍」且这五项任一非 0。`
+        + `当前 <b>${total}</b> 次,再有 <b>${toGo}</b> 次即命中一次判据。</span></div>`
+      : `<div class="verdict warn"><b>已中 ${hits.length} 项,但都不在会触发上报的五项里</b></div>`
+
+  const rows = BOSS_INPUT_COUNTERS.map((c) => {
+    const now = snap.counts[c.key] ?? 0
+    const was = base ? (base.counts[c.key] ?? 0) : null
+    const delta = was === null ? null : now - was
+    const mark = c.triggersReport ? ' <b title="会触发聚合上报">★</b>' : ''
+    const src = c.verified ? '' : ' <span class="muted" title="语义为二手,本仓库未真机确认">?</span>'
+    const d = delta === null || delta === 0 ? '' : ` <b>(+${delta})</b>`
+    const cls = now > 0 && c.key !== 'input_count' ? ' style="color:#b3541e"' : ''
+    return `<li${cls}><code>${escapeHTML(c.key)}</code>${mark}${src} — ${escapeHTML(c.label)}:<b>${now}</b>${d}</li>`
+  }).join('')
+
+  const written = snap.writtenAt === null ? '未知' : new Date(snap.writtenAt).toLocaleString('zh-CN')
+  const lag = snap.writtenAt === null ? '' : `,落后本次读取 ${Math.round((snap.readAt - snap.writtenAt) / 1000)} 秒`
+  const extras = Object.entries(snap.extras)
+    .map(([k, v]) => `<li><code>${escapeHTML(k)}</code>:${v === null ? '<span class="muted">无</span>' : `${v.length} 字节`}</li>`)
+    .join('')
+
+  return verdict
+    + `<p class="muted">读取于 ${new Date(snap.readAt).toLocaleString('zh-CN')};`
+    + `平台写盘于 ${escapeHTML(written)}${lag}`
+    + `${base ? `;基线取自 ${new Date(base.readAt).toLocaleString('zh-CN')}` : ';未设基线'}</p>`
+    + `<ul>${rows}</ul>`
+    + `<div class="muted">★ = 会触发聚合上报的五项;? = 语义为二手、本仓库未真机确认</div>`
+    + `<h2>其他账本</h2><ul>${extras}</ul>`
+}
+
+async function refreshCounters(): Promise<void> {
+  el('cnt').innerHTML = '<p class="muted">读着呢…</p>'
+  const snap = await ask<CounterSnapshot>({ type: 'telemetryCounters:read' })
+  lastSnapshot = snap
+  const base = await readBaseline(storage)
+  el('cnt').innerHTML = renderCounters(snap, base)
+}
+
+el('cntRead').addEventListener('click', () => { void refreshCounters() })
+el('cntBase').addEventListener('click', () => {
+  void (async () => {
+    if (!lastSnapshot || lastSnapshot.note !== undefined) { el('status').textContent = '先成功读一次再设基线'; return }
+    await setBaseline(storage, lastSnapshot)
+    el('status').textContent = '已设为基线'
+    await refreshCounters()
+  })()
+})
+el('cntClearBase').addEventListener('click', () => {
+  void (async () => {
+    await clearBaseline(storage)
+    el('status').textContent = '基线已清除'
+    await refreshCounters()
   })()
 })
 

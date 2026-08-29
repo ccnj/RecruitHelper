@@ -36,6 +36,19 @@
 
     <div id="verdict" class="verdict idle"><b>还没抓到任何载荷</b></div>
 
+    <h2>平台的输入行为账本</h2>
+    <p class="muted">
+      平台在页面 <code>localStorage._ZP_CNT_</code> 里记我们打字的异常特征。
+      <b>它是批量延迟写盘的</b>,刚操作完可能还看不到 —— 隔一会儿再读。
+      需要平台页面开着。
+    </p>
+    <div class="row">
+      <button id="cntRead">读一次</button>
+      <button id="cntBase">设为基线</button>
+      <button id="cntClearBase">清除基线</button>
+    </div>
+    <div id="cnt">-</div>
+
     <h2>探测命中</h2>
     <div id="hits">-</div>
 

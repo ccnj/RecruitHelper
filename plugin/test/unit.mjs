@@ -32,6 +32,9 @@ const {
   telemetrySites,
   telemetryReadAll,
   telemetryClear,
+  telemetryParseLedger,
+  BOSS_INPUT_COUNTERS,
+  BOSS_REPORT_EVERY,
   classifyBossEntry,
   bossCodeLabel,
   bossCodeMeaning,
@@ -15336,6 +15339,58 @@ test('BOSS 判读:指纹上报算例行,其余码算命中,全局名差集单独
   assert.equal(bossCodeMeaning('550239').nearUniversal, true)
   assert.equal(bossCodeMeaning('550094').nearUniversal, undefined)
   assert.deepEqual(classifyBossEntry(aegis, null).hits, [])
+})
+
+// ---- 平台输入行为账本的解析 ----
+
+test('输入账本解析:分出写盘时刻,非数字字段一律忽略而不当 0', () => {
+  const snap = telemetryParseLedger({
+    _ZP_CNT_: JSON.stringify({
+      input_count: 3,
+      composition_abnormal_count: 1,
+      t: 1787985771986,
+      // 平台哪天加了别的形态,不许静默算成「没异常」
+      some_new_shape: { a: 1 },
+      a_string: 'x',
+    }),
+    __local__sec__store___: '{"max":373}',
+  }, 5000)
+  assert.equal(snap.writtenAt, 1787985771986)
+  assert.equal(snap.readAt, 5000)
+  assert.deepEqual(snap.counts, { input_count: 3, composition_abnormal_count: 1 })
+  assert.equal('some_new_shape' in snap.counts, false)
+  assert.equal('a_string' in snap.counts, false)
+  assert.equal(snap.extras.__local__sec__store___, '{"max":373}')
+  assert.equal(snap.note, undefined)
+})
+
+test('输入账本解析:账本缺席、坏 JSON、不是对象,三种都说清原因且不谎报为零异常', () => {
+  const gone = telemetryParseLedger({ _ZP_CNT_: null, __local__sec__store___: null }, 1)
+  assert.match(gone.note ?? '', /还没有这个账本/)
+  assert.deepEqual(gone.counts, {})
+
+  const broken = telemetryParseLedger({ _ZP_CNT_: '{oops' }, 1)
+  assert.match(broken.note ?? '', /不是 JSON/)
+
+  const notObject = telemetryParseLedger({ _ZP_CNT_: '[1,2]' }, 1)
+  assert.match(notObject.note ?? '', /不是对象/)
+  // extras 的键即使源里没有也要出现,免得读侧分不清「没读到」和「没这个键」
+  assert.equal('__local__sec__store___' in notObject.extras, true)
+})
+
+test('输入账本:会触发聚合上报的恰好是那五项,且 input_count 不算异常项', () => {
+  const armed = BOSS_INPUT_COUNTERS.filter((c) => c.triggersReport).map((c) => c.key).sort()
+  assert.deepEqual(armed, [
+    'flimbot_abnormal_count',
+    'input_rhythm_abnormal_count',
+    'input_trait_abnormal_count',
+    'keycode_abnormal_count',
+    'keycode_abnormal_count_2',
+  ])
+  assert.equal(BOSS_INPUT_COUNTERS.length, 16)
+  assert.equal(BOSS_REPORT_EVERY, 25)
+  const total = BOSS_INPUT_COUNTERS.find((c) => c.key === 'input_count')
+  assert.equal(total?.triggersReport, false)
 })
 
 
