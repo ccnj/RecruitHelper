@@ -12,11 +12,9 @@ import { registerM7Primitives } from '../program/primitives/m7'
 import { registerJobPublishPrimitives } from '../program/primitives/jobPublish'
 import { registerAccountPrimitives } from '../program/primitives/account'
 import { refreshPagesAfterRuntimeReload } from './reload'
-import { installHandLogSink, reportHandLog } from './handLog'
+import { installHandLogSink } from './handLog'
 import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
-import { runBossOriginProbe, readBossOriginProbe, setBossOriginProbeGid } from './bossOriginProbe'
-import { runProbeAtBoot, probeMainWorld } from './mainWorldProbe'
 import { registerPlatform } from '../program/platform/registry'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
@@ -62,12 +60,6 @@ function ensureConnectedAfterReload(): void {
 
 ensureConnectedAfterReload()
 
-// 临时诊断(2026-08-28):甲方不在电脑前,探针结果经 handLog 回脑写进 brain.log。
-// 随两个探针文件一并删除。
-void runProbeAtBoot(
-  (level, code, message, detail) => { reportHandLog(level, code, message, detail) },
-  runBossOriginProbe,
-)
 
 // 看门狗:chrome.alarms 是基础设施用途(禁令 1 豁免)。SW 死透后 setTimeout 重连链断,
 // alarm 周期唤醒 SW 并续连。最小间隔约 30s,这里 60s。
@@ -85,23 +77,6 @@ chrome.runtime.onInstalled.addListener(ensureConnectedAfterReload)
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'getStatus') {
     sendResponse(conn.status())
-    return true
-  }
-  // 临时只读诊断探针(2026-08-28),结论拿到后连同 bossOriginProbe.ts 一并删除。
-  if (msg?.type === 'bossOriginProbe:run') {
-    void runBossOriginProbe().then(sendResponse)
-    return true
-  }
-  if (msg?.type === 'bossOriginProbe:read') {
-    void readBossOriginProbe().then(sendResponse)
-    return true
-  }
-  if (msg?.type === 'bossOriginProbe:setGid') {
-    void setBossOriginProbeGid(String(msg.gid ?? '')).then(() => sendResponse({ ok: true }))
-    return true
-  }
-  if (msg?.type === 'mainWorldProbe:run') {
-    void probeMainWorld().then(sendResponse)
     return true
   }
   if (handleInfrastructureMessage(msg, sendResponse)) return true

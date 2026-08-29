@@ -36,27 +36,6 @@
 
     <div id="verdict" class="verdict idle"><b>还没抓到任何载荷</b></div>
 
-    <h2>扩展 origin fetch 探针 <span class="muted">(临时,验完即删)</span></h2>
-    <p class="muted">
-      验「扩展发起的同源请求带 <code>Origin: chrome-extension://…</code> 时,BOSS 服务端认不认」。
-      只发 GET,不参与任何业务。可选填一个候选人 gid 顺带打真实的消息历史接口。
-    </p>
-    <div class="row">
-      <button id="probeRun">跑一次</button>
-      <input id="probeGid" placeholder="可选:候选人 gid(纯数字)" style="width: 14rem" />
-      <button id="probeSetGid">记住 gid</button>
-    </div>
-    <div id="probe">-</div>
-
-    <h2>MAIN world 注入足迹 <span class="muted">(临时,验完即删)</span></h2>
-    <p class="muted">
-      验四件事:注入会不会留 window 全局(BOSS 查 99003 的那个差集)、会不会出现在页面
-      <code>performance.getEntries()</code> 里、按数据形状搜整棵 Vue 树要多久、
-      <code>func</code> 与 <code>files</code> 两种注入形式有没有差别。需要先打开 BOSS 页面。
-    </p>
-    <div class="row"><button id="mwRun">跑一次</button></div>
-    <div id="mw">-</div>
-
     <h2>探测命中</h2>
     <div id="hits">-</div>
 

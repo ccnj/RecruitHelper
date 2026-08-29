@@ -35,21 +35,6 @@ const telemetryViewOptions = {
   format: 'iife',
 }
 
-// 临时诊断载荷(2026-08-28):测 `files` 形式注入会不会在页面 performance 上留痕。
-// 结论拿到后连同 src/mainWorldProbeScript.ts 一并删除。
-const mainWorldProbeOptions = {
-  ...common,
-  entryPoints: { mainWorldProbe: 'src/mainWorldProbeScript.ts' },
-  format: 'iife',
-}
-
-// 阳性对照载荷(2026-08-28,临时):故意种一个可枚举全局,看 BOSS 800001 的 p6
-// 会不会把它当未知全局上送。验完连同 src/canaryScript.ts 一并删除。
-const canaryOptions = {
-  ...common,
-  entryPoints: { canary: 'src/canaryScript.ts' },
-  format: 'iife',
-}
 
 // content script 的体积闸。
 //
@@ -89,17 +74,13 @@ if (watch) {
   })
   const contentContext = await esbuild.context(contentOptions)
   const telemetryViewContext = await esbuild.context(telemetryViewOptions)
-  const mainWorldProbeContext = await esbuild.context(mainWorldProbeOptions)
-  const canaryContext = await esbuild.context(canaryOptions)
-  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch(), mainWorldProbeContext.watch(), canaryContext.watch()])
+  await Promise.all([backgroundContext.watch(), contentContext.watch(), telemetryViewContext.watch()])
   console.log('watching...')
 } else {
   await Promise.all([
     esbuild.build(backgroundOptions),
     esbuild.build(contentOptions),
     esbuild.build(telemetryViewOptions),
-    esbuild.build(mainWorldProbeOptions),
-    esbuild.build(canaryOptions),
   ])
   copyStatic()
   await checkContentSize()
