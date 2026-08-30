@@ -264,10 +264,25 @@ function mainHitTestToggle(
   return { onTarget, found: onTarget ? `靶子(${tag})` : `${tag}「${text}」` }
 }
 
-/** 读点击观测与后置状态,并摘掉观测器。 */
-function mainReadClickObservation(
+/**
+ * 读点击观测与后置状态,并摘掉观测器。
+ *
+ * **先条件轮询等后置状态落定,再读。** 页签的 `selected` 类翻得快,但列表条数要等
+ * 服务端 filterByLabel 回来才变;点完立刻读会记下一个"选中已经变了、列表还是旧的"
+ * 的半截现场,而这份文本是事后还原真机的唯一依据。
+ *
+ * 上限只给 3 秒,不是 20 秒:这是**诊断读**不是放行判据 —— 3 秒还没翻本身就是那个
+ * 发现,再等下去不会让结论变好。等不到也照样读、照样上报。
+ */
+async function mainReadClickObservation(
   selector: string, selectedClass: string, index: number, label: string, key: string,
-): { trusted: boolean | null; onTarget: boolean | null; eventDriftPx: number | null; after: string } {
+): Promise<{ trusted: boolean | null; onTarget: boolean | null; eventDriftPx: number | null; after: string }> {
+  const deadline = Date.now() + 3000
+  while (Date.now() < deadline) {
+    const at = Array.from(document.querySelectorAll(selector))[index]
+    if (at && at.classList.contains(selectedClass)) break
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
   const w = window as unknown as Record<string, unknown>
   const seen = w[key] as {
     trusted: boolean | null; x: number | null; y: number | null
