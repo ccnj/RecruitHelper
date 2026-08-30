@@ -17,7 +17,7 @@
 //
 // **坐标只走这条路,不进脑手协议。** 脑的业务层永远不知道有坐标这回事。
 import { getWsUrl } from '../../base/config'
-import { planMove, DEFAULT_MAX_DWELL_MS } from '../osengine/plan'
+import { planMove, mulberry32, DEFAULT_MAX_DWELL_MS } from '../osengine/plan'
 import { runInPage } from './inject'
 import { PlatformError } from './types'
 import type { DebugOsProbeData, OsProbeTarget } from '../../base/protocol'
@@ -431,6 +431,96 @@ export async function runOsProbe(
 }
 
 
+
+/**
+ * 落点抖动的两个形状参数。
+ *
+ * **这两个数是猜的,不是量的。** 真人落点在一个按钮上的散布,我们没有基线数据
+ * (2026-08-31 立案时明确挂账)。定它们的依据只有一条推理:
+ *
+ *   - 每轴 σ 取该轴尺寸的 1/8,于是散布随目标形状拉长(宽扁按钮横向更散),
+ *     这与「人往哪个方向更容易偏」的直觉一致
+ *   - 落点限在中间 60%(距中心 ±30%),也就是 2.4σ
+ *
+ * **越界是重采,不是夹取。** 夹取会把越界的样本全压到边界那条线上,堆出一道脊 ——
+ * 而一道零方差的脊比"总在中心"更好认,等于用一个签名换另一个。重采得到的是干净的
+ * 截断正态,构造上没有堆积。单轴越界概率约 1.6%,重采 8 次仍越界的概率可以忽略,
+ * 真到了那一步才夹(只为保证终止)。
+ *
+ * 有了真人基线就该回来改这两个数,并把这段注释一起改掉。
+ */
+const CLICK_SCATTER_SIGMA_RATIO = 1 / 8
+const CLICK_SCATTER_CLAMP_RATIO = 0.3
+
+/**
+ * 目标太小就不抖。
+ *
+ * 夹取范围只剩两三个像素时,抖动既看不出人味、又平白增加擦边的风险。
+ * 退回中心并留痕 —— 失效方向是"点得准",不是"硬凑一个随机数"。
+ */
+const CLICK_SCATTER_MIN_SIDE_PX = 12
+
+/** 越界重采的次数上限。只为保证终止 —— 单轴越界概率约 1.6%,连中 8 次可以忽略。 */
+const CLICK_SCATTER_MAX_DRAWS = 8
+
+/** 标准正态,Box-Muller。取 `1 - u` 避开 log(0)。 */
+function gaussian(rand: () => number): number {
+  const u = 1 - rand()
+  const v = rand()
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
+}
+
+export interface ClickAimPoint {
+  readonly x: number
+  readonly y: number
+  /** 相对矩形中心的偏移,只进 trace 供事后核对分布。 */
+  readonly dx: number
+  readonly dy: number
+  /** 目标太小、退回中心时为真。 */
+  readonly centered: boolean
+}
+
+/**
+ * 算这一次要点矩形里的哪一点。
+ *
+ * **不是中心。** 2026-08-30 真机实测:四趟点击的事件坐标与元素中心偏差是
+ * `1,0,1,0,0` 像素 —— 每次都精确落在中心。真人点一个几十像素的按钮,落点是
+ * 围绕中心散开的分布;累积几十次,"零方差"本身就是机器签名,而且它比轨迹形状
+ * 好认得多。
+ *
+ * **抖动加在引擎外面,这是硬约束。** `osengine` 有「与 hiBoss 原件逐点一致」的
+ * 门禁,基准由上游原始文件生成;把抖动塞进引擎会当场红,而且等于作废上游判别器
+ * 对那个引擎的全部验收。这里只是换一个**终点**交给引擎,引擎本身一个字不动。
+ *
+ * 随机流由调用方给,且必须与引擎的流分开 —— 共用会把整条轨迹的随机序列错开。
+ */
+export function clickAimPoint(
+  rect: { x: number; y: number; w: number; h: number },
+  rand: () => number,
+): ClickAimPoint {
+  const cx = rect.x + rect.w / 2
+  const cy = rect.y + rect.h / 2
+  if (!(rect.w >= CLICK_SCATTER_MIN_SIDE_PX) || !(rect.h >= CLICK_SCATTER_MIN_SIDE_PX)) {
+    return { x: Math.round(cx), y: Math.round(cy), dx: 0, dy: 0, centered: true }
+  }
+  const draw = (side: number): number => {
+    const sigma = side * CLICK_SCATTER_SIGMA_RATIO
+    const limit = side * CLICK_SCATTER_CLAMP_RATIO
+    for (let tries = 0; tries < CLICK_SCATTER_MAX_DRAWS; tries += 1) {
+      const v = gaussian(rand) * sigma
+      if (Math.abs(v) <= limit) return v
+    }
+    // 走到这儿的概率约 1.6%^8。夹一下只为保证函数终止,不是常规路径。
+    return Math.max(-limit, Math.min(limit, gaussian(rand) * sigma))
+  }
+  const dx = draw(rect.w)
+  const dy = draw(rect.h)
+  const x = Math.round(cx + dx)
+  const y = Math.round(cy + dy)
+  // 取整之后再算偏移,记的才是真正发出去的那一点。
+  return { x, y, dx: +(x - cx).toFixed(1), dy: +(y - cy).toFixed(1), centered: false }
+}
+
 interface ApproachOutcome {
   outcome: OsProbeResult['outcome']
   landingDriftPx?: number
@@ -462,10 +552,10 @@ async function approachAndClick(
   plan: ClickPlan,
   trace: string[],
 ): Promise<ApproachOutcome> {
-  const center = {
-    x: Math.round(plan.rect.x + plan.rect.w / 2),
-    y: Math.round(plan.rect.y + plan.rect.h / 2),
-  }
+  // 瞄的是矩形里一个抖动过的点,不是中心(见 clickAimPoint)。随机流独立派生,
+  // 与引擎那两条流分开 —— 共用会把整条轨迹的随机序列错开一位。
+  const aimRand = mulberry32(seedFrom(ctx.cmdMsgId, 9001))
+  const center = clickAimPoint(plan.rect, aimRand)
   let drift: number | undefined
   let lastRefusal = '没到靠近阶段'
   // 靠近阶段的撞格帧数必须如实并进总数。**这里比散开阶段更要紧**:撞格意味着
@@ -511,7 +601,8 @@ async function approachAndClick(
     // **命中测试用落点问,不用靶心问。** 靶心是我们想去的地方,落点是真到了的地方;
     // 这一下会打中谁只取决于后者。
     const hit = await plan.hitTest(landed.x, landed.y)
-    trace.push(`靠近#${approach} 靶「${plan.label}」中心(${center.x},${center.y})` +
+    trace.push(`靠近#${approach} 靶「${plan.label}」瞄点(${center.x},${center.y})` +
+      `${center.centered ? ' 目标太小未抖动' : ` 抖动(${center.dx},${center.dy})`}` +
       ` 落(${landed.x},${landed.y}) 偏${drift} 标定=${fed.status}` +
       ` 命中=${hit.onTarget ? '是' : '否'}(${hit.found})`)
 

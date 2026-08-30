@@ -122,6 +122,8 @@ const {
   zhilianTestHooks,
   ZhilianPlatformError,
   planMove,
+  clickAimPoint,
+  mulberry32,
   refuseBeforeMoving,
   runOsProbe,
   osProbeContractData,
@@ -15725,6 +15727,70 @@ test('不带点击计划时,一次点击请求都不许发出去', async () => {
     assert.equal(out.outcome, 'landed')
     assert.equal(hand.clicks(), 0, 'viewportSpread 绝不点击')
   } finally { hand.restore() }
+})
+
+
+// ——— 落点抖动(2026-08-31 立案) ———
+
+/** 采一批落点。种子固定,所以整组统计量是确定的,不会 flake。 */
+function aimSamples(rect, n) {
+  const out = []
+  for (let i = 0; i < n; i++) out.push(clickAimPoint(rect, mulberry32(i * 7919 + 1)))
+  return out
+}
+
+test('落点不再是元素中心:真机四趟事件偏差 1,0,1,0,0 —— 零方差本身就是机器签名', () => {
+  const rect = { x: 800, y: 60, w: 72, h: 30 }
+  const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2
+  const s = aimSamples(rect, 2000)
+
+  // 1) 不是每次都中心
+  const atCenter = s.filter((p) => p.x === Math.round(cx) && p.y === Math.round(cy)).length
+  assert.ok(atCenter < s.length * 0.15, `${atCenter}/${s.length} 落在正中心,抖动等于没加`)
+
+  // 2) 均值仍在中心附近(没有系统性偏向某一侧)
+  const mx = s.reduce((a, p) => a + p.x, 0) / s.length
+  const my = s.reduce((a, p) => a + p.y, 0) / s.length
+  assert.ok(Math.abs(mx - cx) < 1, `x 均值偏了 ${(mx - cx).toFixed(2)}`)
+  assert.ok(Math.abs(my - cy) < 1, `y 均值偏了 ${(my - cy).toFixed(2)}`)
+
+  // 3) 散布随目标形状拉长:宽扁按钮横向更散
+  const sd = (vals, m) => Math.sqrt(vals.reduce((a, v) => a + (v - m) ** 2, 0) / vals.length)
+  const sdx = sd(s.map((p) => p.x), mx), sdy = sd(s.map((p) => p.y), my)
+  assert.ok(sdx > sdy * 1.5, `宽 ${rect.w} 高 ${rect.h} 的按钮,横纵散布应当拉开:${sdx.toFixed(1)} vs ${sdy.toFixed(1)}`)
+
+  // 4) 全部落在中间 60% 以内 —— 抖出边界就是错靶
+  for (const p of s) {
+    assert.ok(Math.abs(p.x - cx) <= rect.w * 0.3 + 0.5 && Math.abs(p.y - cy) <= rect.h * 0.3 + 0.5,
+      `抖出了夹取范围: (${p.x},${p.y})`)
+  }
+
+  // 5) **边界上不许堆出一道脊。** 越界若用夹取处理,所有越界样本会被压到边界那
+  //    两个值上,堆成一道零方差的脊 —— 那比"总在中心"更好认,等于用一个签名换
+  //    另一个。所以越界走重采。判据直接查有没有堆:最外那一格的样本数不该明显
+  //    多于紧挨着它的内侧一格(夹取的话会高出几十倍)。
+  const limitX = Math.round(rect.w * 0.3)
+  const at = (d) => s.filter((p) => Math.abs(p.dx) === d).length
+  //    截断正态的密度向外单调递减,所以最外格不该**多于**内侧格。+3 只是噪声余量。
+  //    (变异验证:改回夹取时这里是 27 vs 13,当场红)
+  assert.ok(at(limitX) <= at(limitX - 1) + 3,
+    `边界格 ${at(limitX)} 个 vs 内侧格 ${at(limitX - 1)} 个 —— 堆脊了,说明退回了夹取`)
+})
+
+test('落点抖动是确定性的:同一条命令重放必须瞄同一点', () => {
+  const rect = { x: 800, y: 60, w: 72, h: 30 }
+  const a = clickAimPoint(rect, mulberry32(4242))
+  const b = clickAimPoint(rect, mulberry32(4242))
+  assert.deepEqual(a, b, '同种子瞄到了两个点,现场就没法复现了')
+})
+
+test('目标太小就不抖,退回中心并留痕——失效方向是点得准,不是硬凑一个随机数', () => {
+  const tiny = clickAimPoint({ x: 10, y: 10, w: 10, h: 30 }, mulberry32(1))
+  assert.equal(tiny.centered, true)
+  assert.deepEqual([tiny.x, tiny.y, tiny.dx, tiny.dy], [15, 25, 0, 0])
+
+  const ok = clickAimPoint({ x: 10, y: 10, w: 12, h: 12 }, mulberry32(1))
+  assert.equal(ok.centered, false, '恰好到门限就该抖')
 })
 
 let failures = 0
