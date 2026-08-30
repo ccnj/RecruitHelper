@@ -81,6 +81,29 @@ func TestGreetingSuspectCapturesSceneShot(t *testing.T) {
 	suspect := driveGreetingToSuspect(t, d, st, fixture, "intent-scene-shot")
 
 	captureMsgID := awaitCapturePageCmd(t, m)
+
+	// 取证命令必须**经 args 带平台、且不带 context**。
+	//
+	// 带平台:装上第二个平台之后,手侧不带平台的命令一律被拒(plugin
+	// registry.ts 的 soleAdapter),取证会静默失效。
+	// 不带 context:带了会把串行域从 debug:handID 换成 platform:accountRef,
+	// 截图就挤进该账号的命令队列 —— 违反 suspect_scene.go 第 2 条边界
+	// 「不阻塞批次」。两条一起断言,任何一边被"顺手改好"都会当场红。
+	captureRec, _ := st.CmdByMsgID(captureMsgID)
+	if captureRec == nil {
+		t.Fatal("取证命令未落账")
+	}
+	var captureArgs protocol.DebugCapturePageArgs
+	if err := json.Unmarshal([]byte(captureRec.Args), &captureArgs); err != nil {
+		t.Fatalf("解析取证 args 失败: %v", err)
+	}
+	if captureArgs.Platform != fixture.Platform {
+		t.Fatalf("取证 args 必须带 suspect 自己的平台 %q,得到 %q", fixture.Platform, captureArgs.Platform)
+	}
+	if captureRec.ContextJSON != "" || captureRec.Domain != "debug:"+fixture.HandID {
+		t.Fatalf("取证不得进账号串行域: domain=%q context=%q", captureRec.Domain, captureRec.ContextJSON)
+	}
+
 	data, _ := protocol.Encode(protocol.CaptureScreenshotData{
 		ImageBlobRef: "sha256:abcdef", ByteSize: 12345,
 		Truncated: false, CapturedAt: time.Now().UnixMilli(),

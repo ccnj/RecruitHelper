@@ -35,7 +35,9 @@ type ResolverHub interface {
 }
 
 type AccountProber interface {
-	Probe(ctx context.Context, handID string) (protocol.ProbePlatformData, error)
+	// platform 让手侧确定探哪个适配器。不带它的话,手只能靠"恰好注册了一个
+	// 平台"去猜,而装上第二个平台之后那条路必然拒绝(见 plugin registry.ts)。
+	Probe(ctx context.Context, handID, platform string) (protocol.ProbePlatformData, error)
 }
 
 // AccountBinder 由 patrol.Manager 满足:绑定必须经它与命令派发线性化,
@@ -76,7 +78,7 @@ func (r LoginAccountResolver) ResolveCurrent(ctx context.Context) (store.Account
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, resolveProbeTimeout)
 	defer cancel()
-	probe, err := r.Prober.Probe(probeCtx, handID)
+	probe, err := r.Prober.Probe(probeCtx, handID, resolverPlatform)
 	if err != nil {
 		return store.AccountKey{}, errors.Join(productapp.ErrHandUnavailable, err)
 	}

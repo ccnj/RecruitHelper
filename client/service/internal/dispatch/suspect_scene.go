@@ -36,7 +36,13 @@ func suspectSceneCaptureWanted(name string) bool {
 func (d *Dispatcher) captureSuspectScene(cmd store.CmdRecord) {
 	ctx, cancel := context.WithTimeout(context.Background(), suspectSceneCaptureTimeout)
 	defer cancel()
-	args, err := protocol.Encode(protocol.DebugCapturePageArgs{})
+	// 平台经 args 带,**不经 context**。两条理由:
+	//  1. 带 context 会把串行域从 debug:handID 换成 platform:accountRef
+	//     (m2_dispatch.go),截图就挤进了该账号的命令队列 —— 违反本文件第 2 条
+	//     边界「不阻塞批次」。
+	//  2. 手侧需要它才知道探哪个适配器:装上第二个平台之后,不带平台的命令
+	//     必然被拒(plugin registry.ts 的 soleAdapter),取证会静默失效。
+	args, err := protocol.Encode(protocol.DebugCapturePageArgs{Platform: cmd.Platform})
 	if err != nil {
 		return
 	}

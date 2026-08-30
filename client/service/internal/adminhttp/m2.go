@@ -137,7 +137,8 @@ func (a *API) bindAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	probe, err := a.probe.Probe(ctx, req.HandID)
+	// 平台由调用方指定(上面刚 validatePlatform 过),原样交给手侧当路由依据。
+	probe, err := a.probe.Probe(ctx, req.HandID, req.Platform)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "无法探测当前平台账号: " + err.Error()})
 		return

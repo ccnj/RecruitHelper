@@ -68,10 +68,10 @@ func (h *fakeAdminHub) setWitness(witness dispatch.HandWitness, ready bool) {
 	h.mu.Unlock()
 }
 
-type probeFunc func(context.Context, string) (protocol.ProbePlatformData, error)
+type probeFunc func(ctx context.Context, handID, platform string) (protocol.ProbePlatformData, error)
 
-func (f probeFunc) Probe(ctx context.Context, handID string) (protocol.ProbePlatformData, error) {
-	return f(ctx, handID)
+func (f probeFunc) Probe(ctx context.Context, handID, platform string) (protocol.ProbePlatformData, error) {
+	return f(ctx, handID, platform)
 }
 
 func guardedHealth(t *testing.T, token string, mutate func(*http.Request)) *httptest.ResponseRecorder {
@@ -229,7 +229,7 @@ func TestBindAccountRejectsSessionBootTOCTOU(t *testing.T) {
 	hub := newFakeAdminHub()
 	hub.set("session-before", "boot-before", true)
 	fingerprint := "opaque-principal"
-	prober := probeFunc(func(context.Context, string) (protocol.ProbePlatformData, error) {
+	prober := probeFunc(func(context.Context, string, string) (protocol.ProbePlatformData, error) {
 		// 模拟 probe 执行期间手被新 session/boot 顶替。旧观测不得绑到新连接。
 		hub.set("session-after", "boot-after", true)
 		return protocol.ProbePlatformData{
@@ -264,7 +264,7 @@ func TestBindAccountSucceedsAfterPreBindProbe(t *testing.T) {
 	hub.set("session-bind", "boot-bind", true)
 	fingerprint := "opaque-principal-for-binding"
 	var probedHand string
-	prober := probeFunc(func(_ context.Context, handID string) (protocol.ProbePlatformData, error) {
+	prober := probeFunc(func(_ context.Context, handID, _ string) (protocol.ProbePlatformData, error) {
 		probedHand = handID
 		return protocol.ProbePlatformData{
 			ContentScriptOk:      true,

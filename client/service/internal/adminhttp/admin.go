@@ -96,7 +96,9 @@ func (a *API) SetJobClassReporter(reporter *jobclassreport.Reporter) *API {
 }
 
 type AccountProber interface {
-	Probe(context.Context, string) (protocol.ProbePlatformData, error)
+	// Probe(ctx, handID, platform):platform 让手侧确定探哪个适配器,而不是靠
+	// "恰好注册了一个平台"去猜(见 plugin registry.ts 的 callPlatformUnbound)。
+	Probe(ctx context.Context, handID, platform string) (protocol.ProbePlatformData, error)
 }
 
 // AdminHub 是本地管理面所需的只读会话视图，便于对绑定期间的

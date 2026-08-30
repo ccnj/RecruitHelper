@@ -27,7 +27,7 @@
   ],
   "content_scripts": [
     {
-      "matches": ["https://rd6.zhaopin.com/*"],
+      "matches": ["https://rd6.zhaopin.com/*", "https://www.zhipin.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

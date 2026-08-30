@@ -56,11 +56,61 @@ const PACE_JITTER_MS = 800
 const LANDING_SETTLE_POLL_MS = 40
 const LANDING_SETTLE_MAX_MS = 800
 
-/** 页面上存落点观测的键。装一次、读一次、读完摘掉,不留常驻状态(手的禁令 2)。 */
+/**
+ * 页面上存落点观测的键。装一次、读一次、读完摘掉,不留常驻状态(手的禁令 2)。
+ *
+ * **必须不可枚举**(见下面的 defineProperty)。BOSS 的 risk-detection 会把
+ * `Object.keys(window)` 与一份白名单求差、**未知全局名原样上送**(2026-08-28
+ * 阳性对照实证,码 800001 的 p6)。一个 `w[key] = state` 就等于自报家门,
+ * 而这件事在智联上没有症状 —— 换平台才炸,且炸在对方服务器上,我们看不见。
+ */
 const LANDING_KEY = '__recruitHelperOsLanding'
 
+/**
+ * 一次点击的计划。**平台知识全在这里,编排层一个 selector 都不认识。**
+ *
+ * 靶子矩形、命中测试、后置状态三样都由适配器提供:前两样决定"这一下会打中谁",
+ * 后一样是平台自己给的正证。编排层只负责几何与闸序。
+ */
+export interface ClickPlan {
+  /** 人话,只进 detail。 */
+  readonly label: string
+  /** 靶子矩形(视口 CSS 坐标)。 */
+  readonly rect: { x: number; y: number; w: number; h: number }
+  /**
+   * 落点上的元素是不是靶子。**用平台自己的命中测试问**——
+   * 「这个像素上是谁」是浏览器的公开语义,而"标定够不够准"我们答不了。
+   */
+  hitTest(clientX: number, clientY: number): Promise<{ onTarget: boolean; found: string }>
+  /** 点击之后:页面观测到的 click 事件 + 平台的可见后置状态。 */
+  observe(): Promise<ClickObservation>
+}
+
+export interface ClickObservation {
+  /** 页面捕获期收到的那个 click 是不是真事件。读不到是 null,不是 false。 */
+  readonly trusted: boolean | null
+  /** 那个事件的 target 是不是靶子。 */
+  readonly onTarget: boolean | null
+  /** 事件坐标与靶子中心的偏差(CSS px)。 */
+  readonly eventDriftPx: number | null
+  /** 平台的可见后置状态,自由文本,只给人读。 */
+  readonly after: string
+}
+
+/**
+ * 靠近靶子的尝试次数。
+ *
+ * **只有 2 次,而且不是为了"多试几次会更准"。** 走到这一步标定已经收敛,同一个点
+ * 再移一次不会让几何变好;留第二次只为容忍一种瞬态:真人在落点确认那一刻碰了鼠标。
+ * 两次都不过就停手不点 —— 失效方向是不点,不是接着飞。
+ */
+const CLICK_APPROACH_ATTEMPTS = 2
+
+/** 按压时长。上游实测池的中位数附近,手服务对 0~2000ms 之外一律拒。 */
+const CLICK_PRESS_MS = 96
+
 export interface OsProbeResult {
-  outcome: 'landed' | 'refusedByGate' | 'handServiceUnavailable'
+  outcome: 'landed' | 'clicked' | 'refusedByGate' | 'handServiceUnavailable'
   attempts: number
   landingDriftPx?: number
   calibStatus: string
@@ -145,7 +195,9 @@ function pageInstallObserverAndReadViewport(key: string): ViewportFacts {
   }
   document.addEventListener('mousemove', onMove, true)
   state.off = (): void => document.removeEventListener('mousemove', onMove, true)
-  w[key] = state
+  // enumerable:false —— Object.keys(window) 里看不见它。configurable:true 让
+  // 读完之后的 delete 照常生效。
+  Object.defineProperty(w, key, { value: state, enumerable: false, configurable: true, writable: true })
   return {
     innerW: window.innerWidth,
     innerH: window.innerHeight,
@@ -193,14 +245,21 @@ async function pace(): Promise<void> {
 /**
  * 走一遍 OS 注入探针。
  *
- * **本轮只移动,绝不点击。** 在坐标被证明对之前,不该让第一次 OS 注入的点击落在
- * 真人账号的页面上。点击靶子的定位要先做真机考古,滚动靶子还要 OS 滚轮注入,
- * 两者都在坐标验完之后另立。
+ * 两种形态,由 `plan` 有无决定:
+ *
+ *   无 plan  只移动,绝不点击(viewportSpread)。
+ *   有 plan  先照样用散开的靶子把标定喂到收敛,**再**贴到真靶子上、过命中测试、
+ *            按一下(reversibleToggle)。
+ *
+ * **散开那一段不能省。** 搭车标定要样本在两轴各张开 200 CSS px 才解得出 scale;
+ * 一上来就盯着一个固定靶子移动,样本挤成一团,标定会一直停在冷启动直到把重试用完
+ * (2026-08-28 真机踩过)。
  */
 export async function runOsProbe(
   inject: InjectOptions,
   tabId: number,
   ctx: PrimitiveContext,
+  click?: ClickPlan,
 ): Promise<OsProbeResult> {
   const started = Date.now()
   let unreachable = 0
@@ -325,8 +384,19 @@ export async function runOsProbe(
       previousDrift = drift
 
       if (fed.clickArmed) {
-        return { outcome: 'landed', attempts, landingDriftPx: drift, calibStatus,
-          unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
+        if (!click) {
+          return { outcome: 'landed', attempts, landingDriftPx: drift, calibStatus,
+            unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
+        }
+        const approach = await approachAndClick(inject, tabId, ctx, click, trace)
+        return {
+          outcome: approach.outcome, attempts, calibStatus, planMs,
+          landingDriftPx: approach.landingDriftPx ?? drift,
+          unreachableFrames: unreachable + approach.unreachable,
+          lagMaxUs: Math.max(lagMaxUs, approach.lagMaxUs),
+          elapsedMs: Date.now() - started,
+          ...(approach.detail === undefined ? {} : { detail: approach.detail }),
+        }
       }
     }
   } catch (error) {
@@ -348,6 +418,127 @@ export async function runOsProbe(
   return { outcome: 'refusedByGate', attempts, ...(drift === undefined ? {} : { landingDriftPx: drift }),
     calibStatus, unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs,
     detail: detail ?? `重试用尽 | ${trace.join(' | ')}` }
+}
+
+
+interface ApproachOutcome {
+  outcome: OsProbeResult['outcome']
+  landingDriftPx?: number
+  detail?: string
+  /** 靠近阶段自己的撞格帧数与最大滞后,由调用方并进总数。 */
+  unreachable: number
+  lagMaxUs: number
+}
+
+/**
+ * 贴到真靶子上,过完闸再按一下。**至多一次点击,任何一步不过就不点。**
+ *
+ * 闸序(缺一不点):
+ *
+ *   1. 落点被搭车标定接受    —— 手服务答的,几何自洽
+ *   2. 落点上的元素就是靶子  —— **平台自己的命中测试答的**
+ *   3. 光标还在原处          —— 手服务在 /click 里再核对一次
+ *
+ * 第 2 道是这一段的核心。「标定够不够准」我们答不了,但它可以翻译成一个平台
+ * 答得了的问题:这个像素上是谁?那是浏览器的公开语义,正落在「只核对世界状态与
+ * 动作接口的公开语义」的边界内侧。
+ *
+ * 点完只如实上报,**不重试、不点第二下**:原语内不重试是内核。
+ */
+async function approachAndClick(
+  inject: InjectOptions,
+  tabId: number,
+  ctx: PrimitiveContext,
+  plan: ClickPlan,
+  trace: string[],
+): Promise<ApproachOutcome> {
+  const center = {
+    x: Math.round(plan.rect.x + plan.rect.w / 2),
+    y: Math.round(plan.rect.y + plan.rect.h / 2),
+  }
+  let drift: number | undefined
+  let lastRefusal = '没到靠近阶段'
+  // 靠近阶段的撞格帧数必须如实并进总数。**这里比散开阶段更要紧**:撞格意味着
+  // 那一帧鼠标根本没动、浏览器不派发事件,而这几帧恰恰是贴靶子的最后几帧。
+  let unreachable = 0
+  let lagMaxUs = 0
+
+  for (let approach = 1; approach <= CLICK_APPROACH_ATTEMPTS; approach += 1) {
+    ctx.checkpoint()
+    await pace()
+
+    const state = await callHand<HandState>('/state')
+    if (state.cursorCssX === null || state.cursorCssY === null) {
+      return { outcome: 'refusedByGate', unreachable, lagMaxUs,
+        detail: `靠近靶子时读不到光标 | ${trace.join(' | ')}` }
+    }
+    const move = planMove({
+      from: { x: state.cursorCssX, y: state.cursorCssY },
+      to: center,
+      targetW: Math.max(8, Math.round(plan.rect.w)),
+      maxDwellMs: DEFAULT_MAX_DWELL_MS,
+      seed: seedFrom(ctx.cmdMsgId, 100 + approach),
+    })
+    if (move.points.length === 0) {
+      return { outcome: 'refusedByGate', unreachable, lagMaxUs,
+        detail: `靠近靶子的计划是空的 | ${trace.join(' | ')}` }
+    }
+    ctx.progress(`靠近「${plan.label}」第 ${approach} 次:${move.points.length} 帧`)
+    const played = await callHand<PlayResponse>('/play', { points: move.points })
+    unreachable += played.unreachable
+    lagMaxUs = Math.max(lagMaxUs, played.lagMaxUs)
+
+    const landed = await readSettledLanding(inject, tabId)
+    if (landed.x === null || landed.y === null) {
+      return {
+        outcome: 'refusedByGate', unreachable, lagMaxUs,
+        detail: `靠近后页面没观测到 mousemove,光标多半不在页面上 | ${trace.join(' | ')}`,
+      }
+    }
+    drift = Math.ceil(Math.hypot(landed.x - center.x, landed.y - center.y))
+
+    const fed = await callHand<LandingResponse>('/landing', { clientX: landed.x, clientY: landed.y })
+    // **命中测试用落点问,不用靶心问。** 靶心是我们想去的地方,落点是真到了的地方;
+    // 这一下会打中谁只取决于后者。
+    const hit = await plan.hitTest(landed.x, landed.y)
+    trace.push(`靠近#${approach} 靶「${plan.label}」中心(${center.x},${center.y})` +
+      ` 落(${landed.x},${landed.y}) 偏${drift} 标定=${fed.status}` +
+      ` 命中=${hit.onTarget ? '是' : '否'}(${hit.found})`)
+
+    if (!fed.clickArmed) {
+      lastRefusal = `落点没被接受(${fed.status}${fed.detail ? ':' + fed.detail : ''})`
+      continue
+    }
+    if (!hit.onTarget) {
+      lastRefusal = `落点上不是靶子,而是 ${hit.found}`
+      continue
+    }
+
+    // 三道闸齐,按下去。至多这一次。
+    const clicked = await callHand<{ clicked?: boolean; refused?: string }>(
+      '/click', { pressMs: CLICK_PRESS_MS })
+    if (clicked.refused !== undefined) {
+      // 手服务自己的第三道闸(光标此刻还在不在原处)拒了。如实上报,不再试。
+      return {
+        outcome: 'refusedByGate', landingDriftPx: drift, unreachable, lagMaxUs,
+        detail: `手服务拒绝点击:${clicked.refused} | ${trace.join(' | ')}`,
+      }
+    }
+
+    const seen = await plan.observe()
+    trace.push(`点后 isTrusted=${seen.trusted === null ? '读不到' : seen.trusted}` +
+      ` 命中靶子=${seen.onTarget === null ? '读不到' : seen.onTarget}` +
+      ` 事件偏差=${seen.eventDriftPx === null ? '读不到' : seen.eventDriftPx}` +
+      ` 后置=${seen.after}`)
+    return { outcome: 'clicked', landingDriftPx: drift, unreachable, lagMaxUs,
+      detail: trace.join(' | ') }
+  }
+
+  return {
+    outcome: 'refusedByGate', unreachable, lagMaxUs,
+    ...(drift === undefined ? {} : { landingDriftPx: drift }),
+    detail: `${CLICK_APPROACH_ATTEMPTS} 次靠近都没过闸,最后一次:${lastRefusal} | ${trace.join(' | ')}`,
+  }
 }
 
 /**

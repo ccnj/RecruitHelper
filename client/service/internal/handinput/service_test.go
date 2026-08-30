@@ -15,6 +15,11 @@ type fakeInjector struct {
 	failAt int // >0 时第几次移动开始报错
 	// seed 非零时,SeedCalib 直接返回它 —— 用来构造"粗估算错了"的场面。
 	seed *Calib
+	// cursorAt 非空时,CursorPos 报它而不是最后注入的那一点 —— 用来构造
+	// "落点确认之后有人碰了鼠标"的场面。
+	cursorAt *[2]float64
+	// cursorErr 为真时 CursorPos 报错 —— 构造"连光标都读不到"的场面。
+	cursorErr bool
 }
 
 func (f *fakeInjector) MouseMove(x, y float64) error {
@@ -27,6 +32,12 @@ func (f *fakeInjector) MouseMove(x, y float64) error {
 func (f *fakeInjector) MouseDown(int) error { f.downs++; return nil }
 func (f *fakeInjector) MouseUp(int) error   { f.ups++; return nil }
 func (f *fakeInjector) CursorPos() (int, int, error) {
+	if f.cursorErr {
+		return 0, 0, errFake
+	}
+	if f.cursorAt != nil {
+		return int(f.cursorAt[0]), int(f.cursorAt[1]), nil
+	}
 	if len(f.moves) == 0 {
 		return 0, 0, nil
 	}
@@ -204,5 +215,37 @@ func TestLandingRejectedWhenCursorMovedBysomeoneElse(t *testing.T) {
 	}
 	if err := s.Click(96); err == nil {
 		t.Fatal("作废落点之后不得放行点击")
+	}
+}
+
+// 落点确认与点击派发之间有一次页面往返(编排层拿落点去问平台的命中测试)。
+// 那个窗口里真人碰一下鼠标,点击就会落在任意元素上 —— 而 armed 对"现在"
+// 一无所知,它只记得"刚才那次落点被接受过"。
+func TestClickRefusedWhenCursorMovedAfterLanding(t *testing.T) {
+	s, f := newReadyService(t)
+	moved := [2]float64{9_000, 9_000}
+	f.cursorAt = &moved
+	if err := s.Click(96); err == nil {
+		t.Fatal("落点确认之后光标被挪走,仍然放行了点击")
+	}
+	if f.downs != 0 || f.ups != 0 {
+		t.Fatalf("被拒的点击不得真的按下去:down=%d up=%d", f.downs, f.ups)
+	}
+	// 拒绝之后必须熄灭:不能让下一次调用凭同一次陈旧的落点确认蒙混过去。
+	f.cursorAt = nil
+	if err := s.Click(96); err == nil {
+		t.Fatal("被拒之后没有重新确认落点就放行了点击")
+	}
+}
+
+// 读不到光标同样不点。失效方向永远是宁可不点,不是"读不到就当没动过"。
+func TestClickRefusedWhenCursorUnreadable(t *testing.T) {
+	s, f := newReadyService(t)
+	f.cursorErr = true
+	if err := s.Click(96); err == nil {
+		t.Fatal("读不到光标位置仍然放行了点击")
+	}
+	if f.downs != 0 {
+		t.Fatalf("被拒的点击不得真的按下去:down=%d", f.downs)
 	}
 }

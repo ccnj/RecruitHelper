@@ -8,6 +8,7 @@
 // 本文件只管注入这一件事:发出去、把 Chrome 的 InjectionResult 拆开、把页面里
 // 的哨兵异常还原。**节奏、守卫、业务判断一律不在这里**——节奏是平台自己的事
 // (不同平台的输入通道耗时差一个数量级),守卫按宪法只能在平台层核对世界状态。
+import { CONTENT_MESSAGE } from '../../base/contentMessages'
 import { PlatformError } from './types'
 import type { ExecutionWorld } from './types'
 
@@ -87,6 +88,24 @@ export function unwrapInjection<R>(label: string, raw: unknown): R {
     throw new Error(mainError.slice(0, 300))
   }
   return first.result
+}
+
+/**
+ * 页面上那半(content script)还在不在。
+ *
+ * 与注入同属"怎么碰页面"这一件事的另一半:`runInPage` 是主动注入,这里是问常驻的
+ * 那份还活着吗。**它必须只有一份定义** —— 这个答案是账号绑定的硬前置
+ * (脑侧 bindAccount 要求 contentScriptOk),两处各写一份迟早会漂。
+ *
+ * 失效方向是 false:ping 不通就当没有,不猜、不重试。
+ */
+export async function contentScriptHealthy(tabId: number): Promise<boolean> {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: CONTENT_MESSAGE.Probe }) as unknown
+    return typeof response === 'object' && response !== null && (response as { ok?: unknown }).ok === true
+  } catch {
+    return false
+  }
 }
 
 function notReady(label: string, what: string): PlatformError {

@@ -144,14 +144,24 @@ export function callPlatform<K extends CapabilityName>(
  *                             DispatchRequest 只填 HandID/Name/Args)
  *   debug.inspectSendSurface  preconditions 为空,同上
  *
- * 有 context 就照常路由;没有则在**恰好注册了一个平台**时用它——这与改造前
- * 逐字同义(那时全仓库只有智联一个实现)。
+ * 路由优先级:**context > args.platform > 恰好一个平台**。
  *
- * 装上第二个平台后,不带 context 的调用会被拒绝,而且**必须**拒绝:
- * `ProbePlatformData` 没有平台身份字段,hello 的 caps 也说不出手服务哪些平台,
- * 脑既无从指定探哪个、也无从从回包分辨探到了哪个。猜一个顶上就是错靶的开始。
- * 补法是改契约(探测数据加平台身份 / hello 加按平台的能力声明),属 BOSS 战役,
- * 不在本轮范围。
+ * `args.platform` 是 2026-08-30 加的可选字段(`probe.platform` 与
+ * `debug.capturePage` 各一个)。它解决的是这样一个真实死结:脑侧
+ * `bindAccount` 与 suspect 现场取证都不带 context 派发,而装上第二个平台之后
+ * `soleAdapter()` 必然拒绝——于是**任何平台**(包括智联自己)都绑不了账号。
+ *
+ * 拒绝本身是对的、也**必须**保留:`ProbePlatformData` 没有平台身份字段,
+ * hello 的 caps 也说不出手服务哪些平台,脑既无从指定探哪个、也无从从回包分辨
+ * 探到了哪个,猜一个顶上就是错靶的开始。所以补法是让脑**说出来**,而不是让手猜。
+ *
+ * 为什么放 args 而不是改成传完整 context:一是 `CmdContext.accountRef` 是必填,
+ * 而 bind 的时候账号还不存在;二是带 context 会把串行域从 `debug:handID` 换成
+ * `platform:accountRef`(脑侧 m2_dispatch.go),suspect 截图会挤进账号队列,
+ * 违反它自己「不阻塞批次」的设计。
+ *
+ * 两者都在且不一致时**拒绝**,不选一个信:那说明脑侧两处来源打架,而这两处
+ * 恰恰决定动作落在谁的页面上。
  */
 export function callPlatformUnbound<K extends CapabilityName>(
   ctx: PrimitiveContext,
@@ -159,13 +169,47 @@ export function callPlatformUnbound<K extends CapabilityName>(
   args: InputOf<K>['args'],
 ): Promise<DataOf<K>> {
   const bound = ctx.commandContext?.platform
-  const adapter = bound ? resolveAdapter(ctx) : soleAdapter()
+  const hinted = platformHint(args)
+  if (bound && hinted && bound !== hinted) {
+    throw new PlatformError(
+      'CTX_NOT_READY',
+      `命令自相矛盾:context 说 ${bound}、args 说 ${hinted}`,
+      'no',
+      'unknown',
+    )
+  }
+  const adapter = bound
+    ? resolveAdapter(ctx)
+    : hinted
+      ? resolveNamedAdapter(hinted)
+      : soleAdapter()
   return invoke(adapter, name, {
     args,
     guards: undefined as InputOf<K>['guards'],
     ctx,
     fingerprint: ctx.commandContext?.expectedPrincipalFingerprint,
   })
+}
+
+/** 从 args 里取平台提示。只认字符串,别的形状一律当没有。 */
+function platformHint(args: unknown): string | undefined {
+  if (typeof args !== 'object' || args === null) return undefined
+  const value = (args as { platform?: unknown }).platform
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** 按名字取适配器。失败语义与 resolveAdapter 逐字一致:不认识就拒,不猜。 */
+function resolveNamedAdapter(platform: string): PlatformAdapter {
+  const adapter = adapters.get(platform)
+  if (!adapter) {
+    throw new PlatformError(
+      'CTX_NOT_READY',
+      `本手未注册平台 ${platform} 的实现`,
+      'no',
+      'unknown',
+    )
+  }
+  return adapter
 }
 
 function soleAdapter(): PlatformAdapter {

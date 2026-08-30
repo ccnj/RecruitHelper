@@ -229,8 +229,9 @@ func (s *Service) Landing(clientX, clientY float64) (PBStatus, error) {
 
 // Click 按一次左键。
 //
-// 两道闸都在这儿,缺一不点:标定就绪,且本次移动的落点刚刚被接受过。
-// 点完立刻熄灭——下一次点击必须有属于它自己的落点确认。
+// 三道闸都在这儿,缺一不点:标定就绪、本次移动的落点刚刚被接受过、
+// 且光标此刻**还在**我们把它放的地方。点完立刻熄灭——下一次点击必须有
+// 属于它自己的落点确认。
 func (s *Service) Click(pressMs float64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -239,6 +240,28 @@ func (s *Service) Click(pressMs float64) error {
 	}
 	if pressMs <= 0 || pressMs > 2000 {
 		return fmt.Errorf("按压时长 %.1fms 不在合理范围", pressMs)
+	}
+	// **armed 只证明"刚才那次落点被接受过",它对"现在"一无所知。**
+	//
+	// 落点确认与点击派发之间隔着一次页面往返(编排层要拿落点去问平台的命中测试:
+	// 这个像素上是谁)。几十到几百毫秒的窗口里真人碰一下鼠标,光标就不在原处了,
+	// 而点击用的是光标当前位置——那一下会落在任意元素上,是错靶。
+	//
+	// 判据是现成的:注入用绝对坐标,发完之后系统不该再动它。这道闸只读我们自己
+	// 注入 API 的光标位置,不碰平台内部(守卫立法三问的脆性一项:低脆)。
+	// 读不到光标时同样不点:失效方向永远是宁可不点。
+	if s.lastInj == nil {
+		s.armed = false
+		return fmt.Errorf("未放行:这一轮没有可核对的注入落点")
+	}
+	x, y, err := s.inj.CursorPos()
+	if err != nil {
+		s.armed = false
+		return fmt.Errorf("未放行:读不到光标当前位置(%w)", err)
+	}
+	if d := math.Hypot(float64(x)-s.lastInj[0], float64(y)-s.lastInj[1]); d > cursorMovedPx {
+		s.armed = false
+		return fmt.Errorf("未放行:落点确认之后光标被动过(偏 %.0f 像素),这一下会落在别处", d)
 	}
 	s.armed = false
 	if err := s.inj.MouseDown(MouseLeft); err != nil {

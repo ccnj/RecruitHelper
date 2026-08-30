@@ -73,12 +73,22 @@ func newPatrolRunnerHarness(t *testing.T) (PatrolRunner, *completingSender, *sto
 
 func TestProbeUsesFormalContextlessBindingPathAndActorProbeKeepsContext(t *testing.T) {
 	runner, sender, st := newPatrolRunnerHarness(t)
-	probe, err := runner.Probe(context.Background(), "hand-1")
+	probe, err := runner.Probe(context.Background(), "hand-1", "zhilian")
 	if err != nil || probe.PrincipalFingerprint == nil {
 		t.Fatalf("绑定前正式 probe 失败: probe=%+v err=%v", probe, err)
 	}
 	if len(sender.cmdBodies) != 1 || sender.cmdBodies[0].Name != protocol.PrimProbePlatform || sender.cmdBodies[0].Context != nil {
 		t.Fatalf("绑定前 Probe 必须发送唯一的无 context probe.platform: %+v", sender.cmdBodies)
+	}
+	// 平台走 args 而不是 context:context 会把串行域换成 platform:accountRef,
+	// 而绑定时账号还不存在。手侧靠这个字段选适配器,漏了会在装了第二个平台的
+	// 机器上静默绑不上账号(而且没有任何症状)。
+	var probeArgs protocol.ProbePlatformArgs
+	if err := json.Unmarshal(sender.cmdBodies[0].Args, &probeArgs); err != nil {
+		t.Fatalf("解析 probe args 失败: %v", err)
+	}
+	if probeArgs.Platform != "zhilian" {
+		t.Fatalf("probe.platform 的 args 必须带平台,得到 %q", probeArgs.Platform)
 	}
 	rows, err := st.RecentCmds(1)
 	if err != nil || len(rows) != 1 || rows[0].Domain != "probe:hand-1" || rows[0].ContextJSON != "" {

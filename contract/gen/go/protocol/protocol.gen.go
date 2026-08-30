@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:6cb8fb2c6342a94597ca6c8bf47fd115412404207e7749ff5b3e6be4c8701f07"
+	ContractHash       = "sha256:e3ee939cc4bdd418810d5d1f7f303548146315ae86d7811957dddc3e5c4936a0"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -311,12 +311,14 @@ type OsProbeOutcome string
 
 const (
 	OsProbeOutcomeLanded                 OsProbeOutcome = "landed"
+	OsProbeOutcomeClicked                OsProbeOutcome = "clicked"
 	OsProbeOutcomeRefusedByGate          OsProbeOutcome = "refusedByGate"
 	OsProbeOutcomeHandServiceUnavailable OsProbeOutcome = "handServiceUnavailable"
 )
 
 var OsProbeOutcomeValues = []OsProbeOutcome{
 	OsProbeOutcomeLanded,
+	OsProbeOutcomeClicked,
 	OsProbeOutcomeRefusedByGate,
 	OsProbeOutcomeHandServiceUnavailable,
 }
@@ -324,11 +326,13 @@ var OsProbeOutcomeValues = []OsProbeOutcome{
 type OsProbeTarget string
 
 const (
-	OsProbeTargetViewportSpread OsProbeTarget = "viewportSpread"
+	OsProbeTargetViewportSpread   OsProbeTarget = "viewportSpread"
+	OsProbeTargetReversibleToggle OsProbeTarget = "reversibleToggle"
 )
 
 var OsProbeTargetValues = []OsProbeTarget{
 	OsProbeTargetViewportSpread,
+	OsProbeTargetReversibleToggle,
 }
 
 type OutboxKind string

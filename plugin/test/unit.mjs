@@ -76,6 +76,9 @@ const {
   ResultStatus,
   SensorBridge,
   allSites,
+  bossAdapter,
+  bossSite,
+  requireCapability,
   resetSitesForTest,
   setSitesForTest,
   zhilianSite,
@@ -120,6 +123,7 @@ const {
   ZhilianPlatformError,
   planMove,
   refuseBeforeMoving,
+  runOsProbe,
   osProbeContractData,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
@@ -330,6 +334,7 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
   const storage = {}
   const runtimeReloads = []
   const pageReloads = []
+  const queriedURLs = []
   try {
     globalThis.chrome = {
       storage: {
@@ -341,9 +346,12 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
       },
       runtime: { reload() { runtimeReloads.push('reload') } },
       tabs: {
+        // 每个已登记站点各查一次:换代后的内容脚本只有靠刷新才进得去已开的页面,
+        // 所以"新加的平台有没有被刷到"正是本用例要钉住的东西。
         async query(query) {
-          assert.equal(query.url, 'https://rd6.zhaopin.com/*')
-          return [{ id: 11 }, { id: 12 }, {}]
+          queriedURLs.push(query.url)
+          const base = 10 * (queriedURLs.length)
+          return [{ id: base + 1 }, { id: base + 2 }, {}]
         },
         async reload(tabId) { pageReloads.push(tabId) },
       },
@@ -356,8 +364,11 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
     assert.equal(acknowledgeRuntimeReloadResult('cmd-reload-1'), false)
     assert.equal(runtimeReloads.length, 1, 'accepted/duplicate ACK 只能触发一次 runtime.reload')
 
-    assert.equal(await refreshPagesAfterRuntimeReload(), 2)
-    assert.deepEqual(pageReloads, [11, 12])
+    const siteMatches = allSites().map((site) => site.match)
+    assert.equal(await refreshPagesAfterRuntimeReload(), 2 * siteMatches.length)
+    assert.deepEqual(queriedURLs.slice().sort(), siteMatches.slice().sort(),
+      '每个已登记站点都必须被刷一次 —— 漏掉的那个平台,已开的页面上永远是旧内容脚本')
+    assert.equal(pageReloads.length, 2 * siteMatches.length)
     assert.equal(await refreshPagesAfterRuntimeReload(), 0, 'marker 被消费后不得重复刷新页面')
   } finally {
     globalThis.chrome = originalChrome
@@ -15393,6 +15404,321 @@ test('输入账本:会触发聚合上报的恰好是那五项,且 input_count �
   assert.equal(total?.triggersReport, false)
 })
 
+
+
+// ——— BOSS 站点身份与适配器骨架(2026-08-30) ———
+
+test('BOSS 站点身份:只认 www.zhipin.com 与沟通页,登录态恒 unknown 且如实声明自己读不出', () => {
+  assert.equal(bossSite.id, 'boss')
+  assert.ok(bossSite.matches('https://www.zhipin.com/web/chat/index'))
+  assert.ok(!bossSite.matches('https://m.zhipin.com/web/chat/index'), '子域不算——匹配式和判据必须同一个口径')
+  assert.ok(!bossSite.matches('http://www.zhipin.com/web/chat/index'), '非 https 不认')
+  assert.ok(!bossSite.matches(undefined))
+
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/chat/index'), 'im')
+  // 推荐页等其余路径尚未真机确认,按「平台枚举面事实门」一律 other,不猜。
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/geek/recommend'), 'other')
+  assert.equal(bossSite.pageKind('不是个 URL'), 'other')
+
+  // **永不报 out**:掉登录形态从未观测过(2026-08-30 甲方裁决 BOSS 不做停机通道),
+  // 用"读不到"去顶"已登出"会把页面没加载完说成账号掉了。
+  assert.equal(bossSite.readLoginState(), 'unknown')
+  assert.equal(bossSite.sensesLoginState, false)
+  assert.equal(zhilianSite.sensesLoginState, true, '智联那条真通道不许被这次改动带塌')
+})
+
+test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不装,那颗帧率的雷是构造掉的', async () => {
+  await esbuild.build({
+    entryPoints: ['src/base/content.ts'],
+    bundle: true, format: 'esm', platform: 'neutral',
+    outfile: 'test/dist/content-wiring.mjs', logLevel: 'error',
+  })
+  const url = pathToFileURL(process.cwd() + '/test/dist/content-wiring.mjs').href
+
+  const originals = {
+    chrome: globalThis.chrome, document: globalThis.document,
+    window: globalThis.window, location: globalThis.location,
+    MutationObserver: globalThis.MutationObserver,
+  }
+  async function loadOn(href) {
+    const observed = []
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: async () => undefined,
+        onMessage: { addListener() {} },
+      },
+    }
+    globalThis.location = { href }
+    globalThis.document = { documentElement: {}, scripts: [] }
+    globalThis.window = { addEventListener() {} }
+    globalThis.MutationObserver = class {
+      constructor(callback) { this.callback = callback; observed.push('constructed') }
+      observe() { observed.push('observe') }
+      disconnect() {}
+    }
+    await import(`${url}?t=${observed.length}-${encodeURIComponent(href)}-${Math.random()}`)
+    return observed
+  }
+  try {
+    const zhilian = await loadOn('https://rd6.zhaopin.com/app/im')
+    assert.deepEqual(zhilian, ['constructed', 'observe'],
+      '智联仍要装:掉登录即时停机通道就架在这个观察器上')
+
+    const boss = await loadOn('https://www.zhipin.com/web/chat/index')
+    assert.deepEqual(boss, [],
+      'BOSS 上不许装。onDOMMutation 的实质消费者只有登录态双读,而 BOSS 读不出登录态——' +
+      '在一个会记 rAF 帧率的平台上白跑全子树观察器,代价是行为上的,金丝雀那种查可枚举痕迹的实验量不到')
+
+    const stranger = await loadOn('https://example.invalid/whatever')
+    assert.deepEqual(stranger, [], '不认识的站点上什么都不做')
+  } finally {
+    Object.assign(globalThis, originals)
+  }
+})
+
+test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,其余能力显式拒绝', () => {
+  assert.equal(bossAdapter.id, 'boss')
+  assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
+  // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
+  assert.equal(bossAdapter.world, 'MAIN')
+  // BOSS 查 isTrusted,页面内合成事件在这里不成立——这正是整条 OS 注入链存在的理由。
+  assert.equal(bossAdapter.input, 'os')
+  assert.equal(bossAdapter.envReportGuard, undefined,
+    '拦不拦 BOSS 的埋点尚未裁决,按事实门不得凭空声明一个守卫')
+
+  const declared = Object.keys(bossAdapter)
+    .filter((key) => typeof bossAdapter[key] === 'function')
+    .sort()
+  assert.deepEqual(declared, ['osProbe', 'probePlatform'],
+    '这一段刻意只有两条:坐标被证明对之前,不实现任何真业务原语。' +
+    '多出来的一条要先过出口,不能顺手加')
+
+  // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
+  assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
+})
+
+
+test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒 —— 而账号绑定正走这条路', async () => {
+  // 拒绝本身是对的:ProbePlatformData 没有平台身份字段,脑既无从指定探哪个、
+  // 也无从从回包分辨探到了哪个,猜一个顶上就是错靶的开始(见 registry.ts)。
+  //
+  // 但脑侧 /admin/accounts/bind 与 suspect 现场取证**恰恰**是不带 context 派发的。
+  // 所以"注册第二个平台"这一步会当场打掉账号绑定 —— 包括智联自己的。
+  // 这条用例把那个后果钉在这里,免得下一个人以为只要写完适配器就能跑。
+  const probeCapability = {
+    probePlatform: () => Promise.resolve({
+      pageKind: 'im', contentScriptOk: true, loginState: 'in',
+      principalFingerprint: 'fp-fixture', surface: null,
+    }),
+  }
+  const one = fakePlatform('platform-solo', probeCapability)
+  const two = fakePlatform('platform-second', probeCapability)
+  const unbound = () => command(Primitive.ProbePlatform, {})
+
+  await withPlatforms([one], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('probe-solo', 's', 's', unbound())
+    await eventually(() => results(out.frames, 'probe-solo').length === 1, '单平台 probe 未收束')
+    assert.equal(results(out.frames, 'probe-solo')[0].body.status, 'ok',
+      '只有一个平台时,不带 context 的 probe 照旧能跑 —— 这是绑定第一个账号的唯一入口')
+  })
+
+  await withPlatforms([one, two], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('probe-two', 's', 's', unbound())
+    await eventually(() => results(out.frames, 'probe-two').length === 1, '双平台 probe 未收束')
+    const body = results(out.frames, 'probe-two')[0].body
+    assert.equal(body.status, 'failed')
+    assert.equal(body.error.code, ErrorCode.CtxNotReady)
+    assert.match(body.error.message, /注册了 2 个平台/)
+  })
+})
+
+
+test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或说岔了一律拒', async () => {
+  // 2026-08-30 加的可选字段(probe.platform / debug.capturePage 各一个)。
+  // 它让脑**说出来**要探哪个,而不是让手猜 —— 猜一个顶上就是错靶的开始。
+  const tagged = (id) => ({
+    probePlatform: () => Promise.resolve({
+      pageKind: 'im', contentScriptOk: true, loginState: 'in',
+      principalFingerprint: `fp-${id}`, surface: null,
+    }),
+  })
+  const one = fakePlatform('platform-solo', tagged('solo'))
+  const two = fakePlatform('platform-second', tagged('second'))
+  const probeCmd = (args, overrides = {}) => command(Primitive.ProbePlatform, args, overrides)
+
+  await withPlatforms([one, two], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 说了探谁:照它路由,而且回来的确实是那个平台的数据。
+    await dispatcher.handleCmd('args-hit', 's', 's', probeCmd({ platform: 'platform-second' }))
+    await eventually(() => results(out.frames, 'args-hit').length === 1, 'args 路由未收束')
+    assert.equal(results(out.frames, 'args-hit')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'args-hit')[0].body.data.principalFingerprint, 'fp-second',
+      '路由到了别的平台 —— 这正是错靶的形状')
+
+    // 说了一个没注册的:拒绝,不退化成"随便挑一个"。
+    await dispatcher.handleCmd('args-miss', 's', 's', probeCmd({ platform: 'platform-nope' }))
+    await eventually(() => results(out.frames, 'args-miss').length === 1, '未注册平台未收束')
+    assert.equal(results(out.frames, 'args-miss')[0].body.status, 'failed')
+    assert.match(results(out.frames, 'args-miss')[0].body.error.message, /未注册平台 platform-nope/)
+
+    // context 与 args 打架:拒绝。这两处恰恰决定动作落在谁的页面上,
+    // 挑一个信等于替脑做决定。
+    await dispatcher.handleCmd('args-clash', 's', 's', probeCmd({ platform: 'platform-second' }, {
+      context: { platform: 'platform-solo', accountRef: 'account-clash' },
+    }))
+    await eventually(() => results(out.frames, 'args-clash').length === 1, '矛盾命令未收束')
+    assert.equal(results(out.frames, 'args-clash')[0].body.status, 'failed')
+    assert.match(results(out.frames, 'args-clash')[0].body.error.message, /自相矛盾/)
+
+    // 两者一致:照跑,context 优先不改变结果。
+    await dispatcher.handleCmd('args-agree', 's', 's', probeCmd({ platform: 'platform-solo' }, {
+      context: { platform: 'platform-solo', accountRef: 'account-agree' },
+    }))
+    await eventually(() => results(out.frames, 'args-agree').length === 1, '一致命令未收束')
+    assert.equal(results(out.frames, 'args-agree')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'args-agree')[0].body.data.principalFingerprint, 'fp-solo')
+  })
+})
+
+
+// ——— OS 注入的点击闸(2026-08-30) ———
+
+/**
+ * 假手服务 + 假页面。落点恒等于最后一次 /play 的终点(标定完美),于是
+ * 判据只剩「闸放不放行」这一件事,不掺几何噪声。
+ */
+function osClickHarness({ armed = true, refuseClick = null } = {}) {
+  const posts = []
+  let lastPoint = { x: 0, y: 0 }
+  const savedChrome = globalThis.chrome
+  const savedFetch = globalThis.fetch
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get() { return { infra: { wsUrl: 'ws://127.0.0.1:17872/v1/channel', handId: 'hand-os' } } },
+        async set() {}, async remove() {},
+      },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'pageInstallObserverAndReadViewport') {
+          return [{ result: { innerW: 1470, innerH: 662, screenX: 0, screenY: 0, dpr: 2, availLeft: 0, availTop: 25 } }]
+        }
+        // 落点读取:恒报最后一帧的终点。
+        return [{ result: { x: lastPoint.x, y: lastPoint.y } }]
+      },
+    },
+  }
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(url).pathname
+    const body = init && init.body ? JSON.parse(init.body) : {}
+    posts.push(path)
+    if (path === '/handinput/state') {
+      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated: true, clickArmed: false, samples: 4 } } }
+    }
+    if (path === '/handinput/play') {
+      const last = body.points[body.points.length - 1]
+      lastPoint = { x: Math.round(last.x), y: Math.round(last.y) }
+      return { ok: true, status: 200, async json() { return { unreachable: 0, lagMaxUs: 12 } } }
+    }
+    if (path === '/handinput/landing') {
+      return { ok: true, status: 200, async json() { return { status: armed ? 'ready' : 'suspect', clickArmed: armed, residualPx: 0, samples: 4 } } }
+    }
+    if (path === '/handinput/click') {
+      if (refuseClick) return { ok: false, status: 409, async json() { return { refused: refuseClick } } }
+      return { ok: true, status: 200, async json() { return { clicked: true } } }
+    }
+    throw new Error(`假手服务不认识 ${path}`)
+  }
+  return {
+    posts,
+    clicks: () => posts.filter((p) => p === '/handinput/click').length,
+    restore() { globalThis.chrome = savedChrome; globalThis.fetch = savedFetch },
+  }
+}
+
+function osClickCtx() {
+  return { cmdMsgId: 'm-os-click', checkpoint() {}, progress() {} }
+}
+
+function togglePlan({ onTarget, observed }) {
+  return {
+    label: '收藏',
+    rect: { x: 700, y: 60, w: 60, h: 30 },
+    async hitTest() { return onTarget ? { onTarget: true, found: '靶子(div)' } : { onTarget: false, found: 'span「全部」' } },
+    async observe() {
+      // observed 为 null 表示"这条用例根本不该走到点后观察那一步"。让它响亮地炸,
+      // 而不是回一个 null 让断言在别处以看不懂的形态失败。
+      if (observed === null) throw new Error('闸没拦住:走到了点后观察')
+      return observed
+    },
+  }
+}
+
+test('命中测试不过就不点:这一下会打中谁,由平台自己的命中测试答,不由我们的标定答', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: false, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 0, '命中测试没过却按下去了')
+    assert.match(out.detail, /落点上不是靶子/)
+    // 判定现场必须留下来:偏了多少、落点上实际是谁。
+    assert.match(out.detail, /命中=否/)
+  } finally { hand.restore() }
+})
+
+test('落点没被接受就不点:标定存疑与命中测试是两道独立的闸', async () => {
+  const hand = osClickHarness({ armed: false })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 0, '落点存疑却按下去了')
+  } finally { hand.restore() }
+})
+
+test('三道闸齐才点,而且只点一次——原语内不重试是内核', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 0, after: '选中=收藏 列表=0' } }))
+    assert.equal(out.outcome, 'clicked')
+    assert.equal(hand.clicks(), 1, '点击必须恰好一次')
+    assert.match(out.detail, /isTrusted=true/)
+    assert.match(out.detail, /后置=选中=收藏/)
+  } finally { hand.restore() }
+})
+
+test('手服务自己拒了点击(光标被动过)就收场,不换个姿势再试一次', async () => {
+  const hand = osClickHarness({ refuseClick: '未放行:落点确认之后光标被动过(偏 900 像素)' })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 1, '被拒之后不得再按第二次')
+    assert.match(out.detail, /手服务拒绝点击/)
+  } finally { hand.restore() }
+})
+
+test('不带点击计划时,一次点击请求都不许发出去', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    assert.equal(out.outcome, 'landed')
+    assert.equal(hand.clicks(), 0, 'viewportSpread 绝不点击')
+  } finally { hand.restore() }
+})
 
 let failures = 0
 for (const { name, fn } of tests) {
