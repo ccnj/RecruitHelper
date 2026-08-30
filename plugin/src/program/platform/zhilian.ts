@@ -87,7 +87,7 @@ import {
 } from '../../base/capture'
 import { PlatformError } from './types'
 import type { ExecutionWorld, PlatformAdapter } from './types'
-import { runInPage } from './inject'
+import { contentScriptHealthy, runInPage } from './inject'
 import { osProbeContractData, runOsProbe } from './osinput'
 import type { InjectOptions } from './inject'
 // 域名与 URL 形状的唯一出处是站点身份模块 —— 它同时被 content script 那个
@@ -854,15 +854,6 @@ export async function canonicalZhilianTab(): Promise<chrome.tabs.Tab | null> {
     return (a.id ?? Number.MAX_SAFE_INTEGER) - (b.id ?? Number.MAX_SAFE_INTEGER)
   })
   return candidates[0] ?? null
-}
-
-async function contentScriptHealthy(tabId: number): Promise<boolean> {
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'recruithelper.content.probe' }) as unknown
-    return typeof response === 'object' && response !== null && (response as { ok?: unknown }).ok === true
-  } catch {
-    return false
-  }
 }
 
 // 必须是自包含函数：chrome.scripting.executeScript 会把它序列化到 MAIN world，
