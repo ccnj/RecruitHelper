@@ -15496,6 +15496,47 @@ test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,
   assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
 })
 
+
+test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒 —— 而账号绑定正走这条路', async () => {
+  // 拒绝本身是对的:ProbePlatformData 没有平台身份字段,脑既无从指定探哪个、
+  // 也无从从回包分辨探到了哪个,猜一个顶上就是错靶的开始(见 registry.ts)。
+  //
+  // 但脑侧 /admin/accounts/bind 与 suspect 现场取证**恰恰**是不带 context 派发的。
+  // 所以"注册第二个平台"这一步会当场打掉账号绑定 —— 包括智联自己的。
+  // 这条用例把那个后果钉在这里,免得下一个人以为只要写完适配器就能跑。
+  const probeCapability = {
+    probePlatform: () => Promise.resolve({
+      pageKind: 'im', contentScriptOk: true, loginState: 'in',
+      principalFingerprint: 'fp-fixture', surface: null,
+    }),
+  }
+  const one = fakePlatform('platform-solo', probeCapability)
+  const two = fakePlatform('platform-second', probeCapability)
+  const unbound = () => command(Primitive.ProbePlatform, {})
+
+  await withPlatforms([one], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('probe-solo', 's', 's', unbound())
+    await eventually(() => results(out.frames, 'probe-solo').length === 1, '单平台 probe 未收束')
+    assert.equal(results(out.frames, 'probe-solo')[0].body.status, 'ok',
+      '只有一个平台时,不带 context 的 probe 照旧能跑 —— 这是绑定第一个账号的唯一入口')
+  })
+
+  await withPlatforms([one, two], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+    await dispatcher.handleCmd('probe-two', 's', 's', unbound())
+    await eventually(() => results(out.frames, 'probe-two').length === 1, '双平台 probe 未收束')
+    const body = results(out.frames, 'probe-two')[0].body
+    assert.equal(body.status, 'failed')
+    assert.equal(body.error.code, ErrorCode.CtxNotReady)
+    assert.match(body.error.message, /注册了 2 个平台/)
+  })
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {
