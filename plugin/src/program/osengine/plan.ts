@@ -96,7 +96,14 @@ export interface MovePlan {
  * 全部走 `Math.imul` 与 `|0`/`>>>0`,是精确 32 位运算——**不要"优化"成看起来更
  * 干净的写法**,任何一处改动都会换掉整条序列。
  */
-function mulberry32(seed: number): () => number {
+/**
+ * 导出是给**引擎之外**需要一条独立确定性流的调用方用的(当前:落点抖动)。
+ *
+ * **借用它不等于进了引擎。** 「与 hiBoss 原件逐点一致」那条门禁只覆盖 planMove
+ * 的产出;拿这个函数另起一条流的代码不在门禁范围内,也不该被当成已经过判别器验收。
+ * 另起的流必须用**另一个种子**,与 r/rr 分开——共用会把整条路由的随机序列错开。
+ */
+export function mulberry32(seed: number): () => number {
   let s = seed
   return () => (
     (s = (s + 0x6d2b79f5) | 0),
