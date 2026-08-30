@@ -313,6 +313,16 @@ async function mainReadClickObservation(
   }
 }
 
+/** 摘掉点击观测器。幂等:observe() 已经摘过就什么都不做。 */
+function mainDetachClickObserver(key: string): { detached: boolean } {
+  const w = window as unknown as Record<string, unknown>
+  const seen = w[key] as { off?: () => void } | undefined
+  if (!seen) return { detached: false }
+  if (typeof seen.off === 'function') seen.off()
+  delete w[key]
+  return { detached: true }
+}
+
 /** 组装 BOSS 的点击计划。平台知识全在这儿,编排层一个 selector 都不认识。 */
 async function bossClickPlan(tabId: number): Promise<ClickPlan> {
   const located = await runInPage(BOSS_INJECT, tabId, mainLocateToggleAndObserve,
@@ -339,8 +349,20 @@ async function bossOsProbe(
   const tab = await verifiedBossTab(fingerprint)
   // 靶子在**移动之前**就要定位好:定不到就一步都不动。
   const click = args.target === 'reversibleToggle' ? await bossClickPlan(tab.id!) : undefined
-  const probe = await runOsProbe(BOSS_INJECT, tab.id!, ctx, click)
-  return osProbeContractData(args.target, probe, Date.now())
+  try {
+    const probe = await runOsProbe(BOSS_INJECT, tab.id!, ctx, click)
+    return osProbeContractData(args.target, probe, Date.now())
+  } finally {
+    // 点击观测器只活在这条命令里(手的禁令 2:页面上不留常驻状态)。
+    // 闸没放行时 observe() 压根不会被调用,那条路上没人摘它 —— 所以摘在这儿。
+    if (click) {
+      try {
+        await runInPage(BOSS_INJECT, tab.id!, mainDetachClickObserver, [CLICK_KEY])
+      } catch {
+        // 页面可能已经导航走了。摘不掉不是失败——它随页面一起没。
+      }
+    }
+  }
 }
 
 export const bossAdapter = {
