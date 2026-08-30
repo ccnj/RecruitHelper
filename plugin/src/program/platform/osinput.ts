@@ -554,6 +554,12 @@ async function approachAndClick(
 ): Promise<ApproachOutcome> {
   // 瞄的是矩形里一个抖动过的点,不是中心(见 clickAimPoint)。随机流独立派生,
   // 与引擎那两条流分开 —— 共用会把整条轨迹的随机序列错开一位。
+  //
+  // **瞄点在循环外算,两次靠近尝试用同一个点。这是刻意的,不要"修"。**
+  // 2026-08-31 真机撞到过:BOSS 弹了个满屏营销弹窗,靶子矩形里每一点都命中弹窗的图,
+  // 命中测试连拒两次。若改成每次重瞄,就变成"在被遮住的元素上找一个还露着的洞",
+  // 那是绕开障碍,方向正好反了 —— 有东西盖着靶子时,不点才是对的答案。
+  // 第二次尝试存在的理由只有一个:容忍真人在落点确认那一刻碰了鼠标的瞬态。
   const aimRand = mulberry32(seedFrom(ctx.cmdMsgId, 9001))
   const center = clickAimPoint(plan.rect, aimRand)
   let drift: number | undefined
