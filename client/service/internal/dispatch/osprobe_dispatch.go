@@ -28,8 +28,17 @@ func (d *Dispatcher) OsProbe(
 	if platform == "" || accountRef == "" {
 		return nil, errors.New("缺少有效的账号标识")
 	}
-	if target != protocol.OsProbeTargetViewportSpread {
-		return nil, errors.New("本轮只开放 viewportSpread 靶子——它在视口里移几个散开的点,不点击")
+	// 靶子是白名单,不是"契约里有就能派"。
+	//
+	//   viewportSpread    只在视口里移几个散开的点,**绝不点击**
+	//   reversibleToggle  移到平台指定的一个可逆控件上,过完闸按一下
+	//
+	// 契约里将来多一个值,这里不改就派不出去 —— 这是刻意的:新靶子意味着新的
+	// 副作用面,该经一次显式裁决,而不是随 codegen 顺带生效。
+	switch target {
+	case protocol.OsProbeTargetViewportSpread, protocol.OsProbeTargetReversibleToggle:
+	default:
+		return nil, errors.New("未开放的 OS 探针靶子")
 	}
 	argsRaw, err := protocol.Encode(protocol.DebugOsProbeArgs{Target: target})
 	if err != nil {

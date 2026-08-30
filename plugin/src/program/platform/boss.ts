@@ -18,6 +18,7 @@
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
 import { osProbeContractData, runOsProbe } from './osinput'
+import type { ClickObservation, ClickPlan } from './osinput'
 import { PlatformError } from './types'
 import { BOSS_MATCH, BOSS_PLATFORM, bossSite } from './bossSite'
 import type { InjectOptions } from './inject'
@@ -156,13 +157,174 @@ async function verifiedBossTab(expectedFingerprint: string | undefined): Promise
   return tab
 }
 
+
+
+// ————————————————————————————————————————————————————————————————————————
+// reversibleToggle:OS 注入的点击靶子(开发期)
+// ————————————————————————————————————————————————————————————————————————
+//
+// 靶子是会话列表顶上那排筛选页签里的「全部」与「收藏」。2026-08-30 真机考古
+// (见 docs/boss/BOSS平台事实-2026-08-28.md 第十节):
+//
+//   - 两个独立的可见后置状态:selected 类的位置、列表条数(38 ↔ 0)
+//   - 不打开任何会话、不动未读角标 —— 候选人侧零影响
+//   - 双向可逆,来回各切一次已实证
+//
+// **它不是"零请求"的**:切一次发 15 条请求,其中 filterByLabel 是服务端筛选,
+// 其余是埋点(三条 e.gif 的事件名里直接带着 warlock)。考古推翻了这个假设,
+// 而结论不是换靶子 —— BOSS 上不存在无痕的点击。选靶判据因此是**语义最无害**:
+// 只读查询、不碰候选人、可逆。
+//
+// **点哪个由页面当前状态决定**:两个里选没被选中的那个。于是连跑两趟自然回到原位,
+// 一趟之内不需要点第二下(原语内不重试是内核,补一下"点回去"就破了这条)。
+const TOGGLE_SELECTOR = '.chat-label-item'
+const TOGGLE_SELECTED_CLASS = 'selected'
+// 判据用**可见文本**,不用类名或位置:文本是平台的公开语义,类名是私有内部。
+const TOGGLE_LABELS = ['全部', '收藏'] as const
+// 页面上存点击观测的键。与落点观测器同样**必须不可枚举**——BOSS 会把
+// Object.keys(window) 的未知全局名原样上送。
+const CLICK_KEY = '__recruitHelperOsClick'
+
+interface ToggleSnapshot {
+  /** 在 selector 命中的序列里的下标。 */
+  index: number
+  label: string
+  rect: { x: number; y: number; w: number; h: number }
+  /** 平台的可见后置状态,自由文本,只给人读。 */
+  state: string
+}
+
+/** 一次注入里做三件事:读页签状态、挑出要点的那个、装上点击观测器。 */
+function mainLocateToggleAndObserve(
+  selector: string,
+  selectedClass: string,
+  labels: readonly string[],
+  key: string,
+): ToggleSnapshot | { reason: string } {
+  const items = Array.from(document.querySelectorAll(selector))
+  const labelOf = (el: Element): string => (el.textContent ?? '').trim()
+  const matched = items
+    .map((el, index) => ({ el, index, text: labelOf(el) }))
+    .filter((row) => labels.includes(row.text))
+  if (matched.length !== labels.length) {
+    return { reason: `筛选页签认不全:期望 ${labels.join('/')},在 ${items.length} 个候选里只认出 ${matched.length} 个` }
+  }
+  const unselected = matched.find((row) => !row.el.classList.contains(selectedClass))
+  if (!unselected) {
+    return { reason: '两个页签都没被选中,页面形态不认识' }
+  }
+  const rect = unselected.el.getBoundingClientRect()
+  if (!(rect.width > 8) || !(rect.height > 8)) {
+    return { reason: `靶子尺寸异常 ${Math.round(rect.width)}x${Math.round(rect.height)}` }
+  }
+  if (rect.left < 0 || rect.top < 0 || rect.right > window.innerWidth || rect.bottom > window.innerHeight) {
+    return { reason: '靶子没有完整落在视口内' }
+  }
+
+  const w = window as unknown as Record<string, unknown>
+  const previous = w[key] as { off?: () => void } | undefined
+  if (previous && typeof previous.off === 'function') previous.off()
+  const seen: {
+    trusted: boolean | null; x: number | null; y: number | null
+    target: EventTarget | null; off?: () => void
+  } = { trusted: null, x: null, y: null, target: null }
+  const onClick = (event: MouseEvent): void => {
+    seen.trusted = event.isTrusted
+    seen.x = event.clientX
+    seen.y = event.clientY
+    seen.target = event.target
+  }
+  document.addEventListener('click', onClick, true)
+  seen.off = (): void => document.removeEventListener('click', onClick, true)
+  Object.defineProperty(w, key, { value: seen, enumerable: false, configurable: true, writable: true })
+
+  const selectedNow = matched.find((row) => row.el.classList.contains(selectedClass))
+  return {
+    index: unselected.index,
+    label: unselected.text,
+    rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+    state: `选中=${selectedNow ? selectedNow.text : '无'} 列表=${document.querySelectorAll('.geek-item').length}`,
+  }
+}
+
+/** 落点上的元素是不是靶子。用平台自己的命中测试问,不自己算几何。 */
+function mainHitTestToggle(
+  selector: string, index: number, label: string, x: number, y: number,
+): { onTarget: boolean; found: string } {
+  const items = Array.from(document.querySelectorAll(selector))
+  const target = items[index]
+  if (!target || (target.textContent ?? '').trim() !== label) {
+    return { onTarget: false, found: '靶子已经不在原来的位置上' }
+  }
+  const at = document.elementFromPoint(x, y)
+  if (!at) return { onTarget: false, found: '落点上什么都没有' }
+  const onTarget = at === target || target.contains(at)
+  const tag = at.tagName.toLowerCase()
+  const text = (at.textContent ?? '').trim().slice(0, 12)
+  return { onTarget, found: onTarget ? `靶子(${tag})` : `${tag}「${text}」` }
+}
+
+/** 读点击观测与后置状态,并摘掉观测器。 */
+function mainReadClickObservation(
+  selector: string, selectedClass: string, index: number, label: string, key: string,
+): { trusted: boolean | null; onTarget: boolean | null; eventDriftPx: number | null; after: string } {
+  const w = window as unknown as Record<string, unknown>
+  const seen = w[key] as {
+    trusted: boolean | null; x: number | null; y: number | null
+    target: EventTarget | null; off?: () => void
+  } | undefined
+  if (seen && typeof seen.off === 'function') seen.off()
+  delete w[key]
+
+  const items = Array.from(document.querySelectorAll(selector))
+  const target = items[index]
+  const selectedNow = items.find((el) => el.classList.contains(selectedClass))
+  const after = `选中=${selectedNow ? (selectedNow.textContent ?? '').trim() : '无'}` +
+    ` 列表=${document.querySelectorAll('.geek-item').length}` +
+    ` 靶子「${label}」${target && target.classList.contains(selectedClass) ? '已选中' : '未选中'}`
+
+  if (!seen) return { trusted: null, onTarget: null, eventDriftPx: null, after }
+  let drift: number | null = null
+  if (target && seen.x !== null && seen.y !== null) {
+    const rect = target.getBoundingClientRect()
+    drift = Math.ceil(Math.hypot(seen.x - (rect.x + rect.width / 2), seen.y - (rect.y + rect.height / 2)))
+  }
+  const node = seen.target instanceof Element ? seen.target : null
+  return {
+    trusted: seen.trusted,
+    onTarget: target && node ? (node === target || target.contains(node)) : null,
+    eventDriftPx: drift,
+    after,
+  }
+}
+
+/** 组装 BOSS 的点击计划。平台知识全在这儿,编排层一个 selector 都不认识。 */
+async function bossClickPlan(tabId: number): Promise<ClickPlan> {
+  const located = await runInPage(BOSS_INJECT, tabId, mainLocateToggleAndObserve,
+    [TOGGLE_SELECTOR, TOGGLE_SELECTED_CLASS, TOGGLE_LABELS as unknown as string[], CLICK_KEY])
+  if ('reason' in located) {
+    throw new PlatformError('TARGET_NOT_FOUND', `点击靶子不可用:${located.reason}`, 'manualOnly')
+  }
+  const snapshot = located
+  return {
+    label: `${snapshot.label}(点前 ${snapshot.state})`,
+    rect: snapshot.rect,
+    hitTest: (x, y) => runInPage(BOSS_INJECT, tabId, mainHitTestToggle,
+      [TOGGLE_SELECTOR, snapshot.index, snapshot.label, x, y]),
+    observe: async (): Promise<ClickObservation> => runInPage(BOSS_INJECT, tabId, mainReadClickObservation,
+      [TOGGLE_SELECTOR, TOGGLE_SELECTED_CLASS, snapshot.index, snapshot.label, CLICK_KEY]),
+  }
+}
+
 async function bossOsProbe(
   args: DebugOsProbeArgs,
   ctx: PrimitiveContext,
   fingerprint: string | undefined,
 ): Promise<DebugOsProbeData> {
   const tab = await verifiedBossTab(fingerprint)
-  const probe = await runOsProbe(BOSS_INJECT, tab.id!, ctx)
+  // 靶子在**移动之前**就要定位好:定不到就一步都不动。
+  const click = args.target === 'reversibleToggle' ? await bossClickPlan(tab.id!) : undefined
+  const probe = await runOsProbe(BOSS_INJECT, tab.id!, ctx, click)
   return osProbeContractData(args.target, probe, Date.now())
 }
 

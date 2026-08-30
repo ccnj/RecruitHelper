@@ -123,6 +123,7 @@ const {
   ZhilianPlatformError,
   planMove,
   refuseBeforeMoving,
+  runOsProbe,
   osProbeContractData,
   DEFAULT_MAX_DWELL_MS,
   OSENGINE_SOURCE,
@@ -15586,6 +15587,137 @@ test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或�
     assert.equal(results(out.frames, 'args-agree')[0].body.status, 'ok')
     assert.equal(results(out.frames, 'args-agree')[0].body.data.principalFingerprint, 'fp-solo')
   })
+})
+
+
+// ——— OS 注入的点击闸(2026-08-30) ———
+
+/**
+ * 假手服务 + 假页面。落点恒等于最后一次 /play 的终点(标定完美),于是
+ * 判据只剩「闸放不放行」这一件事,不掺几何噪声。
+ */
+function osClickHarness({ armed = true, refuseClick = null } = {}) {
+  const posts = []
+  let lastPoint = { x: 0, y: 0 }
+  const savedChrome = globalThis.chrome
+  const savedFetch = globalThis.fetch
+
+  globalThis.chrome = {
+    storage: {
+      local: {
+        async get() { return { infra: { wsUrl: 'ws://127.0.0.1:17872/v1/channel', handId: 'hand-os' } } },
+        async set() {}, async remove() {},
+      },
+    },
+    scripting: {
+      async executeScript({ func }) {
+        if (func.name === 'pageInstallObserverAndReadViewport') {
+          return [{ result: { innerW: 1470, innerH: 662, screenX: 0, screenY: 0, dpr: 2, availLeft: 0, availTop: 25 } }]
+        }
+        // 落点读取:恒报最后一帧的终点。
+        return [{ result: { x: lastPoint.x, y: lastPoint.y } }]
+      },
+    },
+  }
+  globalThis.fetch = async (url, init) => {
+    const path = new URL(url).pathname
+    const body = init && init.body ? JSON.parse(init.body) : {}
+    posts.push(path)
+    if (path === '/handinput/state') {
+      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated: true, clickArmed: false, samples: 4 } } }
+    }
+    if (path === '/handinput/play') {
+      const last = body.points[body.points.length - 1]
+      lastPoint = { x: Math.round(last.x), y: Math.round(last.y) }
+      return { ok: true, status: 200, async json() { return { unreachable: 0, lagMaxUs: 12 } } }
+    }
+    if (path === '/handinput/landing') {
+      return { ok: true, status: 200, async json() { return { status: armed ? 'ready' : 'suspect', clickArmed: armed, residualPx: 0, samples: 4 } } }
+    }
+    if (path === '/handinput/click') {
+      if (refuseClick) return { ok: false, status: 409, async json() { return { refused: refuseClick } } }
+      return { ok: true, status: 200, async json() { return { clicked: true } } }
+    }
+    throw new Error(`假手服务不认识 ${path}`)
+  }
+  return {
+    posts,
+    clicks: () => posts.filter((p) => p === '/handinput/click').length,
+    restore() { globalThis.chrome = savedChrome; globalThis.fetch = savedFetch },
+  }
+}
+
+function osClickCtx() {
+  return { cmdMsgId: 'm-os-click', checkpoint() {}, progress() {} }
+}
+
+function togglePlan({ onTarget, observed }) {
+  return {
+    label: '收藏',
+    rect: { x: 700, y: 60, w: 60, h: 30 },
+    async hitTest() { return onTarget ? { onTarget: true, found: '靶子(div)' } : { onTarget: false, found: 'span「全部」' } },
+    async observe() {
+      // observed 为 null 表示"这条用例根本不该走到点后观察那一步"。让它响亮地炸,
+      // 而不是回一个 null 让断言在别处以看不懂的形态失败。
+      if (observed === null) throw new Error('闸没拦住:走到了点后观察')
+      return observed
+    },
+  }
+}
+
+test('命中测试不过就不点:这一下会打中谁,由平台自己的命中测试答,不由我们的标定答', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: false, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 0, '命中测试没过却按下去了')
+    assert.match(out.detail, /落点上不是靶子/)
+    // 判定现场必须留下来:偏了多少、落点上实际是谁。
+    assert.match(out.detail, /命中=否/)
+  } finally { hand.restore() }
+})
+
+test('落点没被接受就不点:标定存疑与命中测试是两道独立的闸', async () => {
+  const hand = osClickHarness({ armed: false })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 0, '落点存疑却按下去了')
+  } finally { hand.restore() }
+})
+
+test('三道闸齐才点,而且只点一次——原语内不重试是内核', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 0, after: '选中=收藏 列表=0' } }))
+    assert.equal(out.outcome, 'clicked')
+    assert.equal(hand.clicks(), 1, '点击必须恰好一次')
+    assert.match(out.detail, /isTrusted=true/)
+    assert.match(out.detail, /后置=选中=收藏/)
+  } finally { hand.restore() }
+})
+
+test('手服务自己拒了点击(光标被动过)就收场,不换个姿势再试一次', async () => {
+  const hand = osClickHarness({ refuseClick: '未放行:落点确认之后光标被动过(偏 900 像素)' })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 1, '被拒之后不得再按第二次')
+    assert.match(out.detail, /手服务拒绝点击/)
+  } finally { hand.restore() }
+})
+
+test('不带点击计划时,一次点击请求都不许发出去', async () => {
+  const hand = osClickHarness({})
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx())
+    assert.equal(out.outcome, 'landed')
+    assert.equal(hand.clicks(), 0, 'viewportSpread 绝不点击')
+  } finally { hand.restore() }
 })
 
 let failures = 0
