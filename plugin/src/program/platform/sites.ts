@@ -17,6 +17,7 @@
 // **漏掉后者不会报错,只会让 content script 永远不注入**(没有任何症状),
 // 所以有一条构建期用例专门核对两者一致,见 test/unit.mjs「站点登记表与 manifest」。
 import type { LoginState, PageKind } from '../../base/protocol'
+import { bossSite } from './bossSite'
 import { zhilianSite } from './zhilianSite'
 
 export interface PlatformSite {
@@ -39,9 +40,21 @@ export interface PlatformSite {
    * 但方向仍是"不确认",不会假报已登录。
    */
   readLoginState(): LoginState
+  /**
+   * 本站点是否真能读出登录态。
+   *
+   * 这是**站点事实**,不是开关:恒返回 unknown 的站点(掉登录形态未观测)在这里
+   * 声明 false。content script 据此决定装不装那个全文档 MutationObserver ——
+   * 那个观察器的唯一实质消费者就是登录态双读(contentSensor 的 armLogin),
+   * 站点不感知登录态时它是纯空转。
+   *
+   * 代价一并写明:false 的站点同时失去 SPA 内的导航感知(popstate/hashchange
+   * 仍在,靠 DOM 变动兜的那一路没了),并且没有掉登录即时停机通道。
+   */
+  readonly sensesLoginState: boolean
 }
 
-const BUILT_IN: readonly PlatformSite[] = [zhilianSite]
+const BUILT_IN: readonly PlatformSite[] = [zhilianSite, bossSite]
 
 let sites: readonly PlatformSite[] = BUILT_IN
 

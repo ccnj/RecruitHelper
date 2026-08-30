@@ -17,11 +17,13 @@ import { registerNetGuard } from './netGuard'
 import { registerTelemetryCapture } from './telemetry'
 import { readCounters } from './telemetry/counters'
 import { registerPlatform } from '../program/platform/registry'
+import { bossAdapter } from '../program/platform/boss'
 import { zhilianAdapter } from '../program/platform/zhilian'
 
 // 平台适配器注册。原语按 cmd.context.platform 路由到这里注册过的实现;
 // 加一个平台 = 在这里多一行 + 多一个适配器文件,原语层与 base 不必再改。
 registerPlatform(zhilianAdapter)
+registerPlatform(bossAdapter)
 
 // program 原语注册(program 不注册任何 chrome 监听,只填这张表)。
 registerDebugPrimitives()

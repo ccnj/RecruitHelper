@@ -76,4 +76,7 @@ export const zhilianSite: PlatformSite = {
   matches: matchesZhilian,
   pageKind: zhilianPageKind,
   readLoginState: readZhilianLoginState,
+  // 智联能真读出登录态(isLoggedIn===false 即 out),掉登录即时停机通道就架在
+  // 它上面。这一项为 true 也决定了 content script 照旧装那个全文档观察器。
+  sensesLoginState: true,
 }

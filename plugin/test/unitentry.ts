@@ -3,11 +3,13 @@
 import '../../contract/gen/ts/validation.test'
 import { registerPlatform } from '../src/program/platform/registry'
 import { registerDebugPrimitives } from '../src/program/primitives/debug'
+import { bossAdapter } from '../src/program/platform/boss'
 import { zhilianAdapter } from '../src/program/platform/zhilian'
 
 // 本文件是测试侧的 background.ts:生产接线在 src/base/background.ts 注册平台,
 // 这里做同一件事,好让经原语层的用例真正走到平台路由,而不是绕过它。
 registerPlatform(zhilianAdapter)
+registerPlatform(bossAdapter)
 registerDebugPrimitives()
 
 export const GENERATED_CONTRACT_VALIDATION_EXECUTED = true
@@ -40,6 +42,8 @@ export {
   siteForURL,
 } from '../src/program/platform/sites'
 export { zhilianSite } from '../src/program/platform/zhilianSite'
+export { bossSite, BOSS_PLATFORM, BOSS_MATCH } from '../src/program/platform/bossSite'
+export { bossAdapter } from '../src/program/platform/boss'
 export { MAIN_ERROR_SENTINEL, runInPage, unwrapInjection } from '../src/program/platform/inject'
 export {
   parseZhilianUnreadBadgeText,

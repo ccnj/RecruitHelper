@@ -45,8 +45,19 @@ if (site) {
   const sensor = new ContentSensor(environment)
   sensor.start()
 
-  const observer = new MutationObserver(() => sensor.onDOMMutation())
-  observer.observe(document.documentElement, {
+  // 全文档观察器**只在站点真能读出登录态时才装**。
+  //
+  // `sensor.onDOMMutation()` 的实质消费者只有一个:登录态双读(armLogin)。
+  // 站点声明读不出登录态时,它每一次回调都只是空转——而在会记 rAF 帧率的平台上
+  // (BOSS 就记),往一个高频变动的页面挂全子树观察器是要付代价的,且这代价是
+  // **行为**上的,金丝雀那种查可枚举痕迹的实验根本量不到。
+  //
+  // 这不是给某个平台开例外,是「没有消费者就不生产」。代价如实记在 sites.ts 的
+  // sensesLoginState 上:这类站点同时失去 DOM 变动兜底的 SPA 导航感知。
+  const observer = site.sensesLoginState
+    ? new MutationObserver(() => sensor.onDOMMutation())
+    : null
+  observer?.observe(document.documentElement, {
     attributes: true,
     attributeFilter: ['class', 'style'],
     characterData: true,
@@ -60,7 +71,7 @@ if (site) {
   window.addEventListener('popstate', () => sensor.onNavigationSignal())
   window.addEventListener('hashchange', () => sensor.onNavigationSignal())
   window.addEventListener('pagehide', () => {
-    observer.disconnect()
+    observer?.disconnect()
     sensor.dispose()
   }, { once: true })
 

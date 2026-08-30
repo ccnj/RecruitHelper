@@ -76,6 +76,9 @@ const {
   ResultStatus,
   SensorBridge,
   allSites,
+  bossAdapter,
+  bossSite,
+  requireCapability,
   resetSitesForTest,
   setSitesForTest,
   zhilianSite,
@@ -330,6 +333,7 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
   const storage = {}
   const runtimeReloads = []
   const pageReloads = []
+  const queriedURLs = []
   try {
     globalThis.chrome = {
       storage: {
@@ -341,9 +345,12 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
       },
       runtime: { reload() { runtimeReloads.push('reload') } },
       tabs: {
+        // 每个已登记站点各查一次:换代后的内容脚本只有靠刷新才进得去已开的页面,
+        // 所以"新加的平台有没有被刷到"正是本用例要钉住的东西。
         async query(query) {
-          assert.equal(query.url, 'https://rd6.zhaopin.com/*')
-          return [{ id: 11 }, { id: 12 }, {}]
+          queriedURLs.push(query.url)
+          const base = 10 * (queriedURLs.length)
+          return [{ id: base + 1 }, { id: base + 2 }, {}]
         },
         async reload(tabId) { pageReloads.push(tabId) },
       },
@@ -356,8 +363,11 @@ test('自重载 marker 只在同 ref result ACK 后触发一次，并由新 SW �
     assert.equal(acknowledgeRuntimeReloadResult('cmd-reload-1'), false)
     assert.equal(runtimeReloads.length, 1, 'accepted/duplicate ACK 只能触发一次 runtime.reload')
 
-    assert.equal(await refreshPagesAfterRuntimeReload(), 2)
-    assert.deepEqual(pageReloads, [11, 12])
+    const siteMatches = allSites().map((site) => site.match)
+    assert.equal(await refreshPagesAfterRuntimeReload(), 2 * siteMatches.length)
+    assert.deepEqual(queriedURLs.slice().sort(), siteMatches.slice().sort(),
+      '每个已登记站点都必须被刷一次 —— 漏掉的那个平台,已开的页面上永远是旧内容脚本')
+    assert.equal(pageReloads.length, 2 * siteMatches.length)
     assert.equal(await refreshPagesAfterRuntimeReload(), 0, 'marker 被消费后不得重复刷新页面')
   } finally {
     globalThis.chrome = originalChrome
@@ -15393,6 +15403,98 @@ test('输入账本:会触发聚合上报的恰好是那五项,且 input_count �
   assert.equal(total?.triggersReport, false)
 })
 
+
+
+// ——— BOSS 站点身份与适配器骨架(2026-08-30) ———
+
+test('BOSS 站点身份:只认 www.zhipin.com 与沟通页,登录态恒 unknown 且如实声明自己读不出', () => {
+  assert.equal(bossSite.id, 'boss')
+  assert.ok(bossSite.matches('https://www.zhipin.com/web/chat/index'))
+  assert.ok(!bossSite.matches('https://m.zhipin.com/web/chat/index'), '子域不算——匹配式和判据必须同一个口径')
+  assert.ok(!bossSite.matches('http://www.zhipin.com/web/chat/index'), '非 https 不认')
+  assert.ok(!bossSite.matches(undefined))
+
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/chat/index'), 'im')
+  // 推荐页等其余路径尚未真机确认,按「平台枚举面事实门」一律 other,不猜。
+  assert.equal(bossSite.pageKind('https://www.zhipin.com/web/geek/recommend'), 'other')
+  assert.equal(bossSite.pageKind('不是个 URL'), 'other')
+
+  // **永不报 out**:掉登录形态从未观测过(2026-08-30 甲方裁决 BOSS 不做停机通道),
+  // 用"读不到"去顶"已登出"会把页面没加载完说成账号掉了。
+  assert.equal(bossSite.readLoginState(), 'unknown')
+  assert.equal(bossSite.sensesLoginState, false)
+  assert.equal(zhilianSite.sensesLoginState, true, '智联那条真通道不许被这次改动带塌')
+})
+
+test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不装,那颗帧率的雷是构造掉的', async () => {
+  await esbuild.build({
+    entryPoints: ['src/base/content.ts'],
+    bundle: true, format: 'esm', platform: 'neutral',
+    outfile: 'test/dist/content-wiring.mjs', logLevel: 'error',
+  })
+  const url = pathToFileURL(process.cwd() + '/test/dist/content-wiring.mjs').href
+
+  const originals = {
+    chrome: globalThis.chrome, document: globalThis.document,
+    window: globalThis.window, location: globalThis.location,
+    MutationObserver: globalThis.MutationObserver,
+  }
+  async function loadOn(href) {
+    const observed = []
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: async () => undefined,
+        onMessage: { addListener() {} },
+      },
+    }
+    globalThis.location = { href }
+    globalThis.document = { documentElement: {}, scripts: [] }
+    globalThis.window = { addEventListener() {} }
+    globalThis.MutationObserver = class {
+      constructor(callback) { this.callback = callback; observed.push('constructed') }
+      observe() { observed.push('observe') }
+      disconnect() {}
+    }
+    await import(`${url}?t=${observed.length}-${encodeURIComponent(href)}-${Math.random()}`)
+    return observed
+  }
+  try {
+    const zhilian = await loadOn('https://rd6.zhaopin.com/app/im')
+    assert.deepEqual(zhilian, ['constructed', 'observe'],
+      '智联仍要装:掉登录即时停机通道就架在这个观察器上')
+
+    const boss = await loadOn('https://www.zhipin.com/web/chat/index')
+    assert.deepEqual(boss, [],
+      'BOSS 上不许装。onDOMMutation 的实质消费者只有登录态双读,而 BOSS 读不出登录态——' +
+      '在一个会记 rAF 帧率的平台上白跑全子树观察器,代价是行为上的,金丝雀那种查可枚举痕迹的实验量不到')
+
+    const stranger = await loadOn('https://example.invalid/whatever')
+    assert.deepEqual(stranger, [], '不认识的站点上什么都不做')
+  } finally {
+    Object.assign(globalThis, originals)
+  }
+})
+
+test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,其余能力显式拒绝', () => {
+  assert.equal(bossAdapter.id, 'boss')
+  assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
+  // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
+  assert.equal(bossAdapter.world, 'MAIN')
+  // BOSS 查 isTrusted,页面内合成事件在这里不成立——这正是整条 OS 注入链存在的理由。
+  assert.equal(bossAdapter.input, 'os')
+  assert.equal(bossAdapter.envReportGuard, undefined,
+    '拦不拦 BOSS 的埋点尚未裁决,按事实门不得凭空声明一个守卫')
+
+  const declared = Object.keys(bossAdapter)
+    .filter((key) => typeof bossAdapter[key] === 'function')
+    .sort()
+  assert.deepEqual(declared, ['osProbe', 'probePlatform'],
+    '这一段刻意只有两条:坐标被证明对之前,不实现任何真业务原语。' +
+    '多出来的一条要先过出口,不能顺手加')
+
+  // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
+  assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
+})
 
 let failures = 0
 for (const { name, fn } of tests) {
