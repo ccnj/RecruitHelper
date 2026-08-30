@@ -161,13 +161,23 @@ async function handInputBase(): Promise<string> {
   return `http://${ws.host}/handinput`
 }
 
+/**
+ * 调手服务。**一律 POST**,不看有没有 body。
+ *
+ * 原先是"有 body 就 POST、没有就 GET",而手服务四个端点全是 POST-only —— 于是
+ * 「这次调用要不要传数据」这个无关的事实决定了 HTTP 方法,少写一个 `{}` 就是 405。
+ * 2026-08-30 真机第一次点击就栽在这儿:靠近阶段问 `/state` 没带 body,整条链在
+ * 标定都已经收敛、闸都要放行的那一步挂掉。方法与载荷解耦,这一类就没了。
+ */
 async function callHand<T>(path: string, body?: unknown): Promise<T> {
   const base = await handInputBase()
   let resp: Response
   try {
-    resp = await fetch(base + path, body === undefined
-      ? { method: 'GET' }
-      : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    resp = await fetch(base + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    })
   } catch (error) {
     // 连不上多半是脑没起来,或本平台没有注入实现(那时路由压根没挂)。
     throw new HandServiceDown(`手服务不可达:${String(error).slice(0, 120)}`)

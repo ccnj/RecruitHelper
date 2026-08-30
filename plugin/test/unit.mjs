@@ -15598,6 +15598,7 @@ test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或�
  */
 function osClickHarness({ armed = true, refuseClick = null } = {}) {
   const posts = []
+  const methods = []
   let lastPoint = { x: 0, y: 0 }
   const savedChrome = globalThis.chrome
   const savedFetch = globalThis.fetch
@@ -15623,6 +15624,7 @@ function osClickHarness({ armed = true, refuseClick = null } = {}) {
     const path = new URL(url).pathname
     const body = init && init.body ? JSON.parse(init.body) : {}
     posts.push(path)
+    methods.push((init && init.method) || 'GET')
     if (path === '/handinput/state') {
       return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated: true, clickArmed: false, samples: 4 } } }
     }
@@ -15642,6 +15644,8 @@ function osClickHarness({ armed = true, refuseClick = null } = {}) {
   }
   return {
     posts,
+    /** 手服务四个端点全是 POST-only:发成 GET 就是 405,而那会在闸都放行了之后才炸。 */
+    nonPost: () => methods.filter((m) => m !== 'POST'),
     clicks: () => posts.filter((p) => p === '/handinput/click').length,
     restore() { globalThis.chrome = savedChrome; globalThis.fetch = savedFetch },
   }
@@ -15695,6 +15699,9 @@ test('三道闸齐才点,而且只点一次——原语内不重试是内核', a
       togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 0, after: '选中=收藏 列表=0' } }))
     assert.equal(out.outcome, 'clicked')
     assert.equal(hand.clicks(), 1, '点击必须恰好一次')
+    assert.deepEqual(hand.nonPost(), [],
+      '手服务四个端点全是 POST-only —— 2026-08-30 真机首次点击就是被一个 GET /state 打成 405,' +
+      '而那时标定已经收敛、闸都要放行了')
     assert.match(out.detail, /isTrusted=true/)
     assert.match(out.detail, /后置=选中=收藏/)
   } finally { hand.restore() }
