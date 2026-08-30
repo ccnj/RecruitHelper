@@ -397,11 +397,17 @@ func (r PatrolRunner) Run(ctx context.Context, req patrol.RunRequest) (json.RawM
 
 // Probe runs the same formal dispatcher path before an account exists. It is
 // used only by the human binding flow; patrol rounds use PatrolRunner.Start.
-func (r PatrolRunner) Probe(ctx context.Context, handID string) (protocol.ProbePlatformData, error) {
+// Probe 探当前登录的平台账号。
+//
+// **platform 必须带上。** 这条命令是不带 context 派发的(绑定时账号还不存在,
+// 而 CmdContext.accountRef 是必填),于是手侧过去只能靠"恰好注册了一个平台"来
+// 选适配器 —— 装上第二个平台之后那条路必然拒绝,任何平台都绑不了账号。
+// 2026-08-30 起由 args 明说探哪个:让脑说出来,而不是让手猜。
+func (r PatrolRunner) Probe(ctx context.Context, handID, platform string) (protocol.ProbePlatformData, error) {
 	if r.Dispatcher == nil {
 		return protocol.ProbePlatformData{}, errors.New("dispatcher 不能为空")
 	}
-	args, _ := json.Marshal(protocol.ProbePlatformArgs{})
+	args, _ := json.Marshal(protocol.ProbePlatformArgs{Platform: platform})
 	logical, err := r.Dispatcher.Run(ctx, dispatch.DispatchRequest{
 		HandID: handID, Name: string(protocol.PrimProbePlatform), Args: args,
 	})

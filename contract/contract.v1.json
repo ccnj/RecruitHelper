@@ -322,7 +322,7 @@
         }
       },
       "DebugInspectSendSurfaceArgs": { "type": "object", "fields": {} },
-      "DebugCapturePageArgs": { "type": "object", "fields": {} },
+      "DebugCapturePageArgs": { "type": "object", "fields": { "platform": { "type": "string", "optional": true, "minLength": 1, "maxLength": 64 } } },
       "DebugInspectSendSurfaceData": {
         "type": "object",
         "fields": {
@@ -388,7 +388,7 @@
         "type": "object",
         "fields": { "echoedAfterMs": { "type": "int", "minimum": 0, "maximum": 200000 } }
       },
-      "ProbePlatformArgs": { "type": "object", "fields": {} },
+      "ProbePlatformArgs": { "type": "object", "fields": { "platform": { "type": "string", "optional": true, "minLength": 1, "maxLength": 64 } } },
       "PlatformSurface": {
         "type": "object",
         "fields": { "imListVisible": { "type": "boolean" } }

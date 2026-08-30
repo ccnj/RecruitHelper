@@ -15537,6 +15537,57 @@ test('装上第二个平台之后,不带 context 的 probe.platform 一律被拒
   })
 })
 
+
+test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或说岔了一律拒', async () => {
+  // 2026-08-30 加的可选字段(probe.platform / debug.capturePage 各一个)。
+  // 它让脑**说出来**要探哪个,而不是让手猜 —— 猜一个顶上就是错靶的开始。
+  const tagged = (id) => ({
+    probePlatform: () => Promise.resolve({
+      pageKind: 'im', contentScriptOk: true, loginState: 'in',
+      principalFingerprint: `fp-${id}`, surface: null,
+    }),
+  })
+  const one = fakePlatform('platform-solo', tagged('solo'))
+  const two = fakePlatform('platform-second', tagged('second'))
+  const probeCmd = (args, overrides = {}) => command(Primitive.ProbePlatform, args, overrides)
+
+  await withPlatforms([one, two], async () => {
+    registerM2Primitives()
+    const out = recorder()
+    const dispatcher = new Dispatcher(out.send)
+
+    // 说了探谁:照它路由,而且回来的确实是那个平台的数据。
+    await dispatcher.handleCmd('args-hit', 's', 's', probeCmd({ platform: 'platform-second' }))
+    await eventually(() => results(out.frames, 'args-hit').length === 1, 'args 路由未收束')
+    assert.equal(results(out.frames, 'args-hit')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'args-hit')[0].body.data.principalFingerprint, 'fp-second',
+      '路由到了别的平台 —— 这正是错靶的形状')
+
+    // 说了一个没注册的:拒绝,不退化成"随便挑一个"。
+    await dispatcher.handleCmd('args-miss', 's', 's', probeCmd({ platform: 'platform-nope' }))
+    await eventually(() => results(out.frames, 'args-miss').length === 1, '未注册平台未收束')
+    assert.equal(results(out.frames, 'args-miss')[0].body.status, 'failed')
+    assert.match(results(out.frames, 'args-miss')[0].body.error.message, /未注册平台 platform-nope/)
+
+    // context 与 args 打架:拒绝。这两处恰恰决定动作落在谁的页面上,
+    // 挑一个信等于替脑做决定。
+    await dispatcher.handleCmd('args-clash', 's', 's', probeCmd({ platform: 'platform-second' }, {
+      context: { platform: 'platform-solo', accountRef: 'account-clash' },
+    }))
+    await eventually(() => results(out.frames, 'args-clash').length === 1, '矛盾命令未收束')
+    assert.equal(results(out.frames, 'args-clash')[0].body.status, 'failed')
+    assert.match(results(out.frames, 'args-clash')[0].body.error.message, /自相矛盾/)
+
+    // 两者一致:照跑,context 优先不改变结果。
+    await dispatcher.handleCmd('args-agree', 's', 's', probeCmd({ platform: 'platform-solo' }, {
+      context: { platform: 'platform-solo', accountRef: 'account-agree' },
+    }))
+    await eventually(() => results(out.frames, 'args-agree').length === 1, '一致命令未收束')
+    assert.equal(results(out.frames, 'args-agree')[0].body.status, 'ok')
+    assert.equal(results(out.frames, 'args-agree')[0].body.data.principalFingerprint, 'fp-solo')
+  })
+})
+
 let failures = 0
 for (const { name, fn } of tests) {
   try {

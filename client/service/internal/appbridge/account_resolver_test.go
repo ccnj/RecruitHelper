@@ -35,9 +35,15 @@ func (h fakeResolverHub) WithCurrentHandSession(
 type fakeProber struct {
 	data protocol.ProbePlatformData
 	err  error
+	// seen 记下脑传下来的平台。漏传不会有任何症状 —— 只会在装了第二个平台的
+	// 机器上静默绑不上账号,所以这里要能断言它。
+	seen *string
 }
 
-func (p fakeProber) Probe(context.Context, string) (protocol.ProbePlatformData, error) {
+func (p fakeProber) Probe(_ context.Context, _ string, platform string) (protocol.ProbePlatformData, error) {
+	if p.seen != nil {
+		*p.seen = platform
+	}
 	return p.data, p.err
 }
 
