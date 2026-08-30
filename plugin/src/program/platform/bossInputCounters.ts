@@ -16,7 +16,12 @@ export interface BossInputCounter {
   readonly key: string
   /** 人话。 */
   readonly label: string
-  /** 日内只增不减;其余项会在聚合轮被清零。 */
+  /**
+   * 二手描述称「日内只增不减」,其余项会在聚合轮被清零。
+   * **但跨日界的清零未观测到**:2026-08-30 读到的账本写盘于 08-29 14:42、
+   * 落后 25.5 小时,`input_count` 仍是前一日的值。所以别把 lasting 读成
+   * 「每天归零」——归零时机目前只有聚合轮那一条是有依据的。
+   */
   readonly lasting: boolean
   /** 属于会触发聚合上报的五项之一。 */
   readonly triggersReport: boolean

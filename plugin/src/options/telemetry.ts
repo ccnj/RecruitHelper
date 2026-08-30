@@ -180,8 +180,10 @@ function renderCounters(snap: CounterSnapshot, base: CounterSnapshot | null): st
     ? '<div class="verdict good"><b>平台没记下任何输入异常</b></div>'
     : armed.length
       ? `<div class="verdict warn"><b>已中 ${hits.length} 项,其中 ${armed.length} 项属会触发上报的五项</b>`
+        // 正文里不能用 <b> —— 本页 CSS 有 `.verdict b { display: block }`(给标题行用的),
+        // 行内强调会被撑成块级,数字单独占一行。用 <strong> 走行内。
         + `<span class="muted">聚合上报的判据是「总输入次数是 ${REPORT_EVERY} 的整数倍」且这五项任一非 0。`
-        + `当前 <b>${total}</b> 次,再有 <b>${toGo}</b> 次即命中一次判据。</span></div>`
+        + `当前 <strong>${total}</strong> 次,再有 <strong>${toGo}</strong> 次即命中一次判据。</span></div>`
       : `<div class="verdict warn"><b>已中 ${hits.length} 项,但都不在会触发上报的五项里</b></div>`
 
   const rows = BOSS_INPUT_COUNTERS.map((c) => {
