@@ -389,9 +389,14 @@ export async function runOsProbe(
             unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
         }
         const approach = await approachAndClick(inject, tabId, ctx, click, trace)
-        return { ...approach, attempts, landingDriftPx: approach.landingDriftPx ?? drift,
-          calibStatus, unreachableFrames: unreachable, planMs,
-          elapsedMs: Date.now() - started, lagMaxUs }
+        return {
+          outcome: approach.outcome, attempts, calibStatus, planMs,
+          landingDriftPx: approach.landingDriftPx ?? drift,
+          unreachableFrames: unreachable + approach.unreachable,
+          lagMaxUs: Math.max(lagMaxUs, approach.lagMaxUs),
+          elapsedMs: Date.now() - started,
+          ...(approach.detail === undefined ? {} : { detail: approach.detail }),
+        }
       }
     }
   } catch (error) {
@@ -420,6 +425,9 @@ interface ApproachOutcome {
   outcome: OsProbeResult['outcome']
   landingDriftPx?: number
   detail?: string
+  /** 靠近阶段自己的撞格帧数与最大滞后,由调用方并进总数。 */
+  unreachable: number
+  lagMaxUs: number
 }
 
 /**
@@ -450,6 +458,10 @@ async function approachAndClick(
   }
   let drift: number | undefined
   let lastRefusal = '没到靠近阶段'
+  // 靠近阶段的撞格帧数必须如实并进总数。**这里比散开阶段更要紧**:撞格意味着
+  // 那一帧鼠标根本没动、浏览器不派发事件,而这几帧恰恰是贴靶子的最后几帧。
+  let unreachable = 0
+  let lagMaxUs = 0
 
   for (let approach = 1; approach <= CLICK_APPROACH_ATTEMPTS; approach += 1) {
     ctx.checkpoint()
@@ -457,7 +469,8 @@ async function approachAndClick(
 
     const state = await callHand<HandState>('/state')
     if (state.cursorCssX === null || state.cursorCssY === null) {
-      return { outcome: 'refusedByGate', detail: `靠近靶子时读不到光标 | ${trace.join(' | ')}` }
+      return { outcome: 'refusedByGate', unreachable, lagMaxUs,
+        detail: `靠近靶子时读不到光标 | ${trace.join(' | ')}` }
     }
     const move = planMove({
       from: { x: state.cursorCssX, y: state.cursorCssY },
@@ -467,15 +480,18 @@ async function approachAndClick(
       seed: seedFrom(ctx.cmdMsgId, 100 + approach),
     })
     if (move.points.length === 0) {
-      return { outcome: 'refusedByGate', detail: `靠近靶子的计划是空的 | ${trace.join(' | ')}` }
+      return { outcome: 'refusedByGate', unreachable, lagMaxUs,
+        detail: `靠近靶子的计划是空的 | ${trace.join(' | ')}` }
     }
     ctx.progress(`靠近「${plan.label}」第 ${approach} 次:${move.points.length} 帧`)
-    await callHand<PlayResponse>('/play', { points: move.points })
+    const played = await callHand<PlayResponse>('/play', { points: move.points })
+    unreachable += played.unreachable
+    lagMaxUs = Math.max(lagMaxUs, played.lagMaxUs)
 
     const landed = await readSettledLanding(inject, tabId)
     if (landed.x === null || landed.y === null) {
       return {
-        outcome: 'refusedByGate',
+        outcome: 'refusedByGate', unreachable, lagMaxUs,
         detail: `靠近后页面没观测到 mousemove,光标多半不在页面上 | ${trace.join(' | ')}`,
       }
     }
@@ -504,7 +520,7 @@ async function approachAndClick(
     if (clicked.refused !== undefined) {
       // 手服务自己的第三道闸(光标此刻还在不在原处)拒了。如实上报,不再试。
       return {
-        outcome: 'refusedByGate', landingDriftPx: drift,
+        outcome: 'refusedByGate', landingDriftPx: drift, unreachable, lagMaxUs,
         detail: `手服务拒绝点击:${clicked.refused} | ${trace.join(' | ')}`,
       }
     }
@@ -514,11 +530,12 @@ async function approachAndClick(
       ` 命中靶子=${seen.onTarget === null ? '读不到' : seen.onTarget}` +
       ` 事件偏差=${seen.eventDriftPx === null ? '读不到' : seen.eventDriftPx}` +
       ` 后置=${seen.after}`)
-    return { outcome: 'clicked', landingDriftPx: drift, detail: trace.join(' | ') }
+    return { outcome: 'clicked', landingDriftPx: drift, unreachable, lagMaxUs,
+      detail: trace.join(' | ') }
   }
 
   return {
-    outcome: 'refusedByGate',
+    outcome: 'refusedByGate', unreachable, lagMaxUs,
     ...(drift === undefined ? {} : { landingDriftPx: drift }),
     detail: `${CLICK_APPROACH_ATTEMPTS} 次靠近都没过闸,最后一次:${lastRefusal} | ${trace.join(' | ')}`,
   }
