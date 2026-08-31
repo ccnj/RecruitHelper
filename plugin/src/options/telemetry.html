@@ -18,6 +18,16 @@
       li { margin: 0.15rem 0; }
       .muted { color: #888; font-size: 0.85rem; }
       button { margin-right: 0.5rem; }
+      /* za 分布:标签 / 条 / 数值 三列对齐。 */
+      .bars { display: grid; grid-template-columns: 5.5rem 1fr 2rem; gap: 0.25rem 0.6rem; align-items: center; font-size: 0.85rem; }
+      .bars b { text-align: right; }
+      .bar { background: #eee; height: 0.7rem; border-radius: 2px; }
+      .bar i { display: block; height: 100%; background: #7aa87a; border-radius: 2px; }
+      .bar.bad i { background: #c0554a; }
+      /* 折叠块:大段细节默认收起,summary 行必须带计数。 */
+      details { margin: 0.5rem 0; }
+      summary { cursor: pointer; color: #555; font-size: 0.85rem; }
+      details ul { margin-top: 0.4rem; }
     </style>
   </head>
   <body>
@@ -35,6 +45,14 @@
     </div>
 
     <div id="verdict" class="verdict idle"><b>还没抓到任何载荷</b></div>
+
+    <h2>鼠标轨迹</h2>
+    <p class="muted">
+      平台给每一次点击的鼠标轨迹打一个自动化分 <code>p6.za</code>,算完随点击上报。
+      <b>这是平台的判决,不是我们的推断</b> —— <code>isTrusted</code> 只说明事件来自浏览器输入栈。
+      我们注入的点击和你手点的混在一起:量测前先「清空」。
+    </p>
+    <div id="clicks">-</div>
 
     <h2>平台的输入行为账本</h2>
     <p class="muted">

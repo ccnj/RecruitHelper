@@ -74,6 +74,107 @@ function renderHits(hits: readonly { code: string; action: string }[]): string {
   return html
 }
 
+// ---- 鼠标轨迹:平台自己给每次点击打的自动化分 ----
+//
+// `p6.za` 是 BOSS 的评分结果(`za = (100 * confidence).toFixed(1)`,
+// hiBoss `report/runtime-evidence.md:482`)。**它是平台的判决,不是我们的推断** ——
+// `isTrusted` 只说明事件来自浏览器输入栈,不代表平台认了。
+//
+// 阈值 72 不是拍的:真机对账过一次 za=66.0 的点击,平台内部 `totalScore` 是 0.55,
+// 而 `isAutomated` 的线是 0.60(同报告 :495);按 `za = totalScore x 120` 折算,
+// **za >= 72 即平台判定为自动化**。
+//
+// 主数字刻意是「za=0 的条数」而不是「没过线的条数」:验收线是 `za == 0`,
+// 不是 `za < 72`(同报告 :505) —— 目标是一盏灯都不亮,不是压在线下。
+
+/** 平台判定为自动化的分数线。推导见上。 */
+const CLICK_AUTO_LINE = 72
+
+/** za 分档。写成谓词而不是上下界——za 带一位小数,用界比较要靠 epsilon,那是坏味道。 */
+const ZA_BUCKETS: readonly {
+  readonly label: string
+  readonly over: boolean
+  readonly test: (za: number) => boolean
+}[] = [
+  { label: '0(干净)', over: false, test: (z) => z === 0 },
+  { label: '1–30', over: false, test: (z) => z > 0 && z <= 30 },
+  { label: '31–60', over: false, test: (z) => z > 30 && z <= 60 },
+  { label: '61–71', over: false, test: (z) => z > 60 && z < CLICK_AUTO_LINE },
+  { label: '>=72 过线', over: true, test: (z) => z >= CLICK_AUTO_LINE },
+]
+
+function shotField(shot: unknown, key: string): unknown {
+  if (shot === null || typeof shot !== 'object') return undefined
+  const p6 = (shot as Record<string, unknown>)['p6']
+  if (p6 === null || typeof p6 !== 'object') return undefined
+  return (p6 as Record<string, unknown>)[key]
+}
+
+/** 取 za。形状不认识就返回 null —— 读不出的条数单独报,不并进任何一档。 */
+function shotZa(shot: unknown): number | null {
+  const raw = shotField(shot, 'za')
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+/** 取轨迹点数。`l <= 2` 是连点/瞬移的形态。 */
+function shotPoints(shot: unknown): number | null {
+  const raw = shotField(shot, 'l')
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+}
+
+function bar(n: number, max: number, bad: boolean): string {
+  const pct = max > 0 ? Math.round((100 * n) / max) : 0
+  return `<div class="bar${bad ? ' bad' : ''}"><i style="width:${pct}%"></i></div>`
+}
+
+function renderClicks(shots: readonly unknown[]): string {
+  if (!shots.length) {
+    return '<div class="verdict idle"><b>还没抓到鼠标窗口</b>'
+      + '<span class="muted">页面上每点一次就上报一条(含平台自己的评分)。点几下再刷新。</span></div>'
+  }
+
+  const zas = shots.map(shotZa)
+  const readable = zas.filter((z): z is number => z !== null)
+  const unreadable = zas.length - readable.length
+  const clean = readable.filter((z) => z === 0).length
+  const over = readable.filter((z) => z >= CLICK_AUTO_LINE).length
+  const stuck = shots.filter((s) => { const l = shotPoints(s); return l !== null && l <= 2 }).length
+
+  const verdict = over > 0
+    ? `<div class="verdict warn"><b>${over} 次点击被平台判定为自动化(za >= ${CLICK_AUTO_LINE})</b>`
+      + '<span class="muted">这是平台自己算出来并上送的分,不是我们的推断。</span></div>'
+    : clean === readable.length
+      ? '<div class="verdict good"><b>全部点击 za=0</b>'
+        + '<span class="muted">平台没在任何一次点击的轨迹里看出自动化特征。</span></div>'
+      : `<div class="verdict good"><b>没有点击过线,但只有 ${clean}/${readable.length} 次是 za=0</b>`
+        + '<span class="muted">验收线是 za=0,不是"没过线"。</span></div>'
+
+  const counts = ZA_BUCKETS.map((b) => readable.filter((z) => b.test(z)).length)
+  const max = Math.max(1, ...counts)
+  const rows = ZA_BUCKETS.map((b, i) =>
+    `<span>${escapeHTML(b.label)}</span>${bar(counts[i], max, b.over)}<b>${counts[i]}</b>`,
+  ).join('')
+
+  const recent = [...shots].slice(-20).reverse().map((s) => {
+    const at = (s as Record<string, unknown> | null)?.['at']
+    const when = typeof at === 'number' ? new Date(at).toLocaleTimeString('zh-CN') : '-'
+    const za = shotZa(s)
+    const l = shotPoints(s)
+    const flag = za !== null && za >= CLICK_AUTO_LINE ? ' style="color:#b3541e"' : ''
+    return `<li${flag}>${escapeHTML(when)} — za <b>${za === null ? '读不出' : za}</b>`
+      + `,轨迹点 ${l === null ? '-' : l}</li>`
+  }).join('')
+
+  return verdict
+    + `<p class="muted">窗口 <b>${shots.length}</b> 条｜za=0 的 <b>${clean}</b> 条`
+    + `｜过线 <b>${over}</b> 条｜连点(轨迹点<=2) <b>${stuck}</b> 条`
+    + (unreadable ? `｜<b>${unreadable}</b> 条读不出 za` : '') + '</p>'
+    + `<div class="bars">${rows}</div>`
+    + `<details><summary>最近 20 条明细(共 ${shots.length} 条)</summary><ul>${recent}</ul></details>`
+}
+
 async function render(): Promise<void> {
   const entries = await readAll(storage, KIND_UPLOAD) as TelemetryEntry[]
   const shots = await readAll(storage, KIND_CLICK)
@@ -114,6 +215,7 @@ async function render(): Promise<void> {
       + list(names)
   }
 
+  el('clicks').innerHTML = renderClicks(shots)
   el('hits').innerHTML = renderHits(hits)
 
   const first = entries[0]?.at
