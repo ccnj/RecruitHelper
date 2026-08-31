@@ -104,6 +104,13 @@ export interface BossCodeMeaning {
   /** 一句话说明这个码报的是什么。不认识的码原样回显,不编。 */
   readonly label: string
   /**
+   * 在 hiBoss 的码表里查得到吗。
+   *
+   * 查不到就是**平台出了我们没见过的东西**——要么它改版了,要么我们碰到了新分支。
+   * 这值得单独抬头看,所以做成布尔位;靠比对 label 文案来判是脆的。
+   */
+  readonly known: boolean
+  /**
    * 近乎每台机器都会报,**不是探到了东西**。
    *
    * 本机端口探测走 `si()`,而它的回调是 `onopen = onclose = onerror`,
@@ -120,7 +127,7 @@ export interface BossCodeMeaning {
  *
  * `nearUniversal` 那一族是例外:判据语义由我方 2026-08-28 直接读反混淆源码确认。
  */
-const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
+const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code' | 'known'>> = {
   '0': { label: '无异常' },
   '30004': { label: 'TYPING·正常打字分类' },
   '30005': { label: 'ENTER·回车分类' },
@@ -174,8 +181,10 @@ const CODE_MEANINGS: Record<string, Omit<BossCodeMeaning, 'code'>> = {
 }
 
 export function bossCodeMeaning(code: string): BossCodeMeaning {
-  const known = CODE_MEANINGS[code]
-  return known ? { code, ...known } : { code, label: '未知码(hiBoss 的码表里没有,原样记下)' }
+  const found = CODE_MEANINGS[code]
+  return found
+    ? { code, ...found, known: true }
+    : { code, label: '未知码(hiBoss 的码表里没有,原样记下)', known: false }
 }
 
 export function bossCodeLabel(code: string): string {

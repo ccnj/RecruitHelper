@@ -66,10 +66,11 @@ function renderHits(hits: readonly { code: string; action: string }[]): string {
     : '<span class="muted">没有值得看的命中。</span>'
 
   if (noisy.length) {
-    html += '<p class="muted" style="margin-top:0.8rem">下面这些<b>近乎每台机器都会报</b>,不是探到了东西 ——'
-      + ' 本机端口探测的回调是 <code>onopen = onclose = onerror</code>,参数是"1 秒内有反应"'
-      + '而不是"连上了";localhost 上端口关着会瞬间拒绝,照样算真。</p>'
-      + `<ul class="muted">${noisy.map((l) => `<li>${l}</li>`).join('')}</ul>`
+    // 折叠:它们每台机器都亮,常显只会把真信号淹掉。summary 带类数,不展开也知道分量。
+    html += `<details><summary>例行噪音 ${noisy.length} 类(几乎每台机器都报)</summary>`
+      + '<p class="muted">本机端口探测的回调是 <code>onopen = onclose = onerror</code>,'
+      + '参数是"1 秒内有反应"而不是"连上了";localhost 上端口关着会瞬间拒绝,照样算真。</p>'
+      + `<ul class="muted">${noisy.map((l) => `<li>${l}</li>`).join('')}</ul></details>`
   }
   return html
 }
@@ -175,6 +176,127 @@ function renderClicks(shots: readonly unknown[]): string {
     + `<details><summary>最近 20 条明细(共 ${shots.length} 条)</summary><ul>${recent}</ul></details>`
 }
 
+// ---- 判决与证据的渲染 ----
+
+/** 我们往页面上放东西时用的前缀。「有没有被平台点名」只认它。 */
+const OUR_GLOBAL_PREFIX = '__recruitHelper'
+
+function overLineCount(shots: readonly unknown[]): number {
+  return shots.filter((s) => {
+    const z = shotZa(s)
+    return z !== null && z >= CLICK_AUTO_LINE
+  }).length
+}
+
+/** 三态:true 好、false 坏、null 还没数据。 */
+function verdictLine(ok: boolean | null, name: string, detail: string): string {
+  const mark = ok === null ? '—' : ok ? '\u2713' : '\u2717'
+  const cls = ok === null ? 'idle' : ok ? 'ok' : 'bad'
+  return `<div class="vline ${cls}"><span class="vmark">${mark}</span>`
+    + `<span class="vname">${escapeHTML(name)}</span>`
+    + `<span class="vdetail">${detail}</span></div>`
+}
+
+/**
+ * 一屏之内回答三个问题。**这三条是本页存在的理由**,其余都是给它们做证。
+ *
+ * 第三条问的是"有没有码表里没有的码",不是"踩雷了吗"——800001 这族指纹上报
+ * 每台机器每次加载都发,算例行;真正值得抬头的是出现了我们没见过的东西。
+ */
+function renderVerdict(
+  hasData: boolean, ours: readonly string[], platformGlobals: number,
+  shots: number, over: number, unknownCodes: readonly string[],
+): string {
+  if (!hasData) {
+    return verdictLine(null, '隐形', '还没抓到载荷')
+      + verdictLine(null, '像人', '还没抓到点击')
+      + verdictLine(null, '新东西', '还没抓到载荷')
+  }
+  return verdictLine(ours.length === 0, '隐形',
+    ours.length === 0
+      ? `平台上送的 ${platformGlobals} 个未知全局名里没有我们的`
+      : `<b>平台点名了我们的 ${ours.length} 个全局</b>:<code>${escapeHTML(ours.join(', '))}</code>`)
+    + verdictLine(shots === 0 ? null : over === 0, '像人',
+      shots === 0 ? '还没抓到点击'
+        : over === 0 ? `${shots} 次点击没有一次过 isAutomated 线`
+          : `<b>${over}/${shots} 次点击被平台判定为自动化</b>`)
+    + verdictLine(unknownCodes.length === 0, '新东西',
+      unknownCodes.length === 0 ? '所有事件码都在 hiBoss 的码表里'
+        : `<b>${unknownCodes.length} 个码表里没有的码</b>:<code>${escapeHTML(unknownCodes.join('、'))}</code>`)
+}
+
+function renderGlobals(names: readonly string[]): string {
+  const ours = names.filter((n) => n.startsWith(OUR_GLOBAL_PREFIX))
+  const theirs = names.filter((n) => !n.startsWith(OUR_GLOBAL_PREFIX))
+  const head = ours.length
+    ? `<div class="bad-row">我们的:${ours.map((n) => `<code>${escapeHTML(n)}</code>`).join('、')}</div>`
+    : '<div>我们的:<span class="muted">无</span></div>'
+  if (!theirs.length) return head
+  return head
+    + `<details><summary>平台自己的 ${theirs.length} 个(第三方脚本)</summary>${list(theirs)}</details>`
+}
+
+function asRec(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+/**
+ * 注入检测项归并成一行一类。
+ *
+ * 原样印每一条等于印几千字符的 inline style,人读不了。
+ * 认不出来源的**原样保留 key、标「未知」**,不并进兜底桶——
+ * 没见过的形态不猜也不静默丢(与 capture 层同款纪律)。
+ */
+function injectionDigest(item: unknown): { key: string; source: string; ours: boolean } {
+  const rec = asRec(item)
+  if (rec === null) return { key: String(item).slice(0, 40), source: '未知', ours: false }
+
+  if (rec['code'] === 99003) {
+    const keys = rec['windowKeys']
+    const n = Array.isArray(keys) ? keys.length : 0
+    return { key: `99003 未知全局名差集(${n} 个)`, source: '平台自报', ours: false }
+  }
+
+  const node = asRec(rec['nodeJson'])
+  const tag = String(node?.['tag'] ?? '?')
+  const attrs = asRec(node?.['attrs'])
+  const id = typeof attrs?.['id'] === 'string' ? attrs['id'] : ''
+  const text = typeof rec['textContent'] === 'string' ? rec['textContent'].trim() : ''
+  const key = id ? `${tag}#${id}` : `${tag}\u300c${text.slice(0, 16)}\u300d`
+
+  const ours = key.includes(OUR_GLOBAL_PREFIX) || key.includes('recruitHelper')
+  const source = ours ? '我们的'
+    : id.startsWith('claude-') ? 'Claude in Chrome'
+      : text === 'mmmmmmmmmmlli' ? '平台自己的字体探针'
+        : '未知'
+  return { key, source, ours }
+}
+
+function renderRaw(injected: readonly unknown[], probes: readonly string[], routine: readonly string[]): string {
+  const merged = new Map<string, { source: string; ours: boolean; n: number }>()
+  for (const item of injected) {
+    const d = injectionDigest(item)
+    const seen = merged.get(d.key)
+    if (seen) seen.n += 1
+    else merged.set(d.key, { source: d.source, ours: d.ours, n: 1 })
+  }
+  const rows = [...merged.entries()]
+    .sort((a, b) => b[1].n - a[1].n)
+    .map(([key, v]) => `<li${v.ours ? ' class="bad-row"' : ''}><code>${escapeHTML(key)}</code>`
+      + ` x${v.n} <span class="muted">${escapeHTML(v.source)}</span></li>`)
+    .join('')
+
+  const tallied = tally(routine)
+  return `<details><summary>注入检测报告 ${merged.size} 类 x${injected.length}</summary>`
+    + (rows ? `<ul>${rows}</ul>` : '<p class="muted">无</p>')
+    + '</details>'
+    + `<details><summary>被探到的本机端口 ${probes.length} 个</summary>${list(probes)}</details>`
+    + `<details><summary>例行码 ${tallied.length} 类</summary>${list(tallied)}</details>`
+}
+
+
 async function render(): Promise<void> {
   const entries = await readAll(storage, KIND_UPLOAD) as TelemetryEntry[]
   const shots = await readAll(storage, KIND_CLICK)
@@ -182,7 +304,7 @@ async function render(): Promise<void> {
   const hits: { code: string; action: string }[] = []
   const routine: string[] = []
   const globals = new Set<string>()
-  const injected: string[] = []
+  const injected: unknown[] = []
   const probes = new Set<string>()
   let unparsed = 0
 
@@ -192,46 +314,30 @@ async function render(): Promise<void> {
     for (const h of c.hits) hits.push(h)
     for (const r of c.routine) routine.push(`${r.code}(${bossCodeMeaning(r.code).label})`)
     for (const g of c.unknownGlobals) globals.add(g)
-    for (const i of c.injected) injected.push(typeof i === 'string' ? i : JSON.stringify(i))
+    for (const i of c.injected) injected.push(i)
     for (const p of c.localProbes) probes.add(p)
   }
 
-  // 核心结论。
-  const verdict = el('verdict')
   const names = [...globals].sort()
-  if (!entries.length) {
-    verdict.className = 'verdict idle'
-    verdict.innerHTML = '<b>还没抓到任何载荷</b><span class="muted">打开平台页面走一走,再回来刷新。</span>'
-  } else if (!names.length) {
-    verdict.className = 'verdict good'
-    verdict.innerHTML = '<b>平台上送的未知全局名清单:空</b>'
-      + '<span class="muted">平台把 Object.keys(window) 与自己的白名单求差后原样上送,这一栏为空,'
-      + '说明它没有在页面全局里看见任何计划外的名字。</span>'
-  } else {
-    verdict.className = 'verdict warn'
-    verdict.innerHTML = `<b>平台上送了 ${names.length} 个未知全局名</b>`
-      + '<span class="muted">逐个核对有没有我们自己的东西。平台自己的第三方脚本也会出现在这里,'
-      + '出现不等于是我们的。</span>'
-      + list(names)
-  }
-
-  el('clicks').innerHTML = renderClicks(shots)
-  el('hits').innerHTML = renderHits(hits)
+  const ours = names.filter((n) => n.startsWith(OUR_GLOBAL_PREFIX))
+  const unknownCodes = [...new Set(hits.map((h) => h.code))].filter((c) => !bossCodeMeaning(c).known).sort()
+  const over = overLineCount(shots)
 
   const first = entries[0]?.at
   const last = entries[entries.length - 1]?.at
   const span = first && last
     ? `${new Date(first).toLocaleString('zh-CN')} — ${new Date(last).toLocaleString('zh-CN')}`
     : '-'
-  el('overview').innerHTML = `<ul>`
-    + `<li>明细 <b>${entries.length}</b> 条,其中解析失败 <b>${unparsed}</b> 条</li>`
-    + `<li>带鼠标轨迹的点击窗口 <b>${shots.length}</b> 条</li>`
-    + `<li>时间范围 ${escapeHTML(span)}</li>`
-    + `<li>例行码 ${escapeHTML(tally(routine).join('、') || '无')}</li>`
-    + `</ul>`
+  el('dataline').innerHTML = entries.length
+    ? `<b>${entries.length}</b> 条 · ${escapeHTML(span)} · 解析失败 <b>${unparsed}</b> 条`
+    : '<span class="muted">还没抓到任何载荷。打开平台页面走一走,再回来刷新。</span>'
 
-  el('misc').innerHTML = `<div>注入检测报告:${list(tally(injected))}</div>`
-    + `<div>被探到的本机端口:${list([...probes].sort())}</div>`
+  el('verdict').innerHTML = renderVerdict(
+    entries.length > 0, ours, names.length - ours.length, shots.length, over, unknownCodes)
+  el('clicks').innerHTML = renderClicks(shots)
+  el('globals').innerHTML = renderGlobals(names)
+  el('hits').innerHTML = renderHits(hits)
+  el('raw').innerHTML = renderRaw(injected, [...probes].sort(), routine)
 }
 
 function download(): void {
