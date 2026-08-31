@@ -249,3 +249,45 @@ func TestClickRefusedWhenCursorUnreadable(t *testing.T) {
 		t.Fatalf("被拒的点击不得真的按下去:down=%d", f.downs)
 	}
 }
+
+// 重新播种是从"换屏死循环"里出来的唯一出口:旧映射把光标送到别的屏,页面收不到
+// 任何事件,而修正映射又必须有观测。它是降级,所以既要真的清干净,也要真的回冷启动。
+func TestReseedDropsEverythingAndGoesCold(t *testing.T) {
+	s, f := newReadyService(t)
+	if !s.State().Calibrated {
+		t.Fatal("前置:这一步应当已经标定就绪")
+	}
+	if err := s.Click(96); err != nil {
+		t.Fatalf("前置:此刻应当放行点击:%v", err)
+	}
+
+	before := s.State()
+	s.Reseed(WindowHint{ScreenX: 2560, ScreenY: 517, DPR: 2})
+	after := s.State()
+
+	if after.Calibrated {
+		t.Fatal("重新播种之后必须回到冷启动")
+	}
+	if after.Samples != 0 {
+		t.Fatalf("旧样本描述的是旧几何,必须全丢,还剩 %d 条", after.Samples)
+	}
+	if after.ClickArmed {
+		t.Fatal("标定都没了,上一次的落点确认必须作废")
+	}
+	if before.Samples == 0 {
+		t.Fatal("用例前置失效:重新播种前本该有样本")
+	}
+
+	// lastInj 也清了:下一个落点不许跟一个属于旧几何的注入点配成样本。
+	if _, err := s.Landing(100, 100); err == nil {
+		t.Fatal("重新播种之后、还没播过计划就收落点,应当拒绝配对")
+	}
+
+	// 新种子必须真的按新窗口位置来 —— 副屏 x=2560,macOS 收 point 不乘 dpr。
+	if _, err := s.Play([]PlanPoint{{X: 0, Y: 0, T: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.moves[len(f.moves)-1]; got[0] != 2560 {
+		t.Fatalf("新种子没按新窗口位置播:视口原点应当映到 x=2560,实际 %v", got)
+	}
+}

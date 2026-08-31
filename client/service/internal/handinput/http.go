@@ -33,6 +33,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/handinput/play", s.handlePlay)
 	mux.HandleFunc("/handinput/landing", s.handleLanding)
 	mux.HandleFunc("/handinput/click", s.handleClick)
+	mux.HandleFunc("/handinput/reseed", s.handleReseed)
 }
 
 // state 是 POST 而不是 GET,因为它可以捎一份窗口粗估过来播种。
@@ -132,6 +133,27 @@ func (s *Service) handleClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"clicked": true})
+}
+
+// reseed 是**唯一一处允许把标定打回冷启动的入口**。
+//
+// 单独开一条路由而不是给 /state 加个 flag:那会让一个读状态的请求偷偷做变更,
+// 而这个变更是降级(拿准的换成猜的)。它值得在路由表上看得见。
+//
+// 必须带 hint —— 重新播种的全部意义就是"用窗口现在的位置重猜一遍",没有位置就没得猜。
+func (s *Service) handleReseed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hint *WindowHint `json:"hint"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Hint == nil {
+		http.Error(w, "重新播种必须带窗口粗估", http.StatusBadRequest)
+		return
+	}
+	s.Reseed(*req.Hint)
+	writeJSON(w, http.StatusOK, s.State())
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {

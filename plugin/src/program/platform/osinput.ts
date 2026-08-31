@@ -121,6 +121,13 @@ export interface OsProbeResult {
   detail?: string
 }
 
+/** 窗口粗估。只用来猜往哪个方向先动,不参与任何计算(见 pageInstall... 里的说明)。 */
+export interface WindowHint {
+  screenX: number
+  screenY: number
+  dpr: number
+}
+
 export interface ViewportFacts {
   innerW: number
   innerH: number
@@ -321,6 +328,33 @@ export async function runOsProbe(
   let previousDrift = Number.POSITIVE_INFINITY
   let detail: string | undefined
   try {
+    // **热路径:标定已就绪就直接去真靶子,不为点亮闸再白走一趟散开。**
+    //
+    // 散开存在的理由是**学 scale**:解它要两个样本在两轴各张开 200 CSS px。标定
+    // 一旦解出来,散开那一趟学不到任何新东西,它唯一的作用是"再交一个落点把点击闸
+    // 点亮" —— 而靠近真靶子那一趟本来就会交一个。
+    //
+    // 代价不只是每次多两秒:散开靶子是按趟数取的定值,热标定下 attempts 恒为 1,
+    // 于是**每一次点击前光标都精确停在同一个像素上**(视口 22%/22%)静止 1~1.8 秒。
+    // 一百次点击聚类出一个方差为零的点,那比轨迹形状好认得多。
+    //
+    // 一道闸都没少:落点照样喂标定、照样点亮 clickArmed,命中测试与手服务的光标
+    // 核对原样执行。冷启动(calibrated=false)仍走散开 —— 那时它是有用的。
+    if (click) {
+      const warm = await callHand<HandState>('/state', { hint })
+      if (warm.calibrated) {
+        attempts = 1
+        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint)
+        return {
+          outcome: approach.outcome, attempts, calibStatus: '就绪(热路径)', planMs,
+          ...(approach.landingDriftPx === undefined ? {} : { landingDriftPx: approach.landingDriftPx }),
+          unreachableFrames: approach.unreachable,
+          lagMaxUs: approach.lagMaxUs,
+          elapsedMs: Date.now() - started,
+          ...(approach.detail === undefined ? {} : { detail: approach.detail }),
+        }
+      }
+    }
     while (attempts < MAX_ATTEMPTS) {
       attempts++
       ctx.checkpoint()
@@ -366,7 +400,8 @@ export async function runOsProbe(
         // 那时再试一趟只是让光标再飞一圈,不会变好:没有观测就没有样本,
         // 没有样本标定就学不到东西。2026-08-28 副屏那 34 秒里,六趟重试
         // 每一趟都是这个形态。失效方向是不动。
-        detail = `页面没有观测到任何 mousemove——光标多半不在页面上,停手 | 靶(${target.x},${target.y}) 视口${view.innerW}x${view.innerH}`
+        detail = `页面没有观测到任何 mousemove——光标多半不在页面上,停手` +
+          `${await reseed(hint)} | 靶(${target.x},${target.y}) 视口${view.innerW}x${view.innerH}`
         calibStatus = '无观测'
         break
       }
@@ -398,7 +433,7 @@ export async function runOsProbe(
           return { outcome: 'landed', attempts, landingDriftPx: drift, calibStatus,
             unreachableFrames: unreachable, planMs, elapsedMs: Date.now() - started, lagMaxUs }
         }
-        const approach = await approachAndClick(inject, tabId, ctx, click, trace)
+        const approach = await approachAndClick(inject, tabId, ctx, click, trace, hint)
         return {
           outcome: approach.outcome, attempts, calibStatus, planMs,
           landingDriftPx: approach.landingDriftPx ?? drift,
@@ -521,6 +556,28 @@ export function clickAimPoint(
   return { x, y, dx: +(x - cx).toFixed(1), dy: +(y - cy).toFixed(1), centered: false }
 }
 
+/**
+ * 零观测之后重新播种:把标定打回冷启动,用窗口现在的位置重猜一遍。
+ *
+ * **只在这一个场景调。** 零观测意味着光标压根不在页面上(最常见:窗口被拖到了
+ * 另一块屏),而那是个死循环 —— 修正映射必须有观测,拿到观测又必须有对的映射。
+ * 重新播种是唯一的出口,代价是把学准的换成猜的,所以不设任何自动触发。
+ *
+ * 本条命令**照样收场、照样不点**;自愈发生在下一条命令(那时 calibrated=false,
+ * 走冷路径散开重解)。这是 2026-08-31 甲方裁决的取舍:重标定是小概率事件,
+ * 白跑一两条命令换逻辑简单,值。
+ *
+ * 失败只并进 detail,不改变收场 —— 它是补救不是判据。
+ */
+async function reseed(hint: WindowHint): Promise<string> {
+  try {
+    await callHand<HandState>('/reseed', { hint })
+    return ';已重新播种,下一条命令会走冷启动重学'
+  } catch (error) {
+    return `;重新播种也失败了(${String(error).slice(0, 80)})`
+  }
+}
+
 interface ApproachOutcome {
   outcome: OsProbeResult['outcome']
   landingDriftPx?: number
@@ -551,6 +608,7 @@ async function approachAndClick(
   ctx: PrimitiveContext,
   plan: ClickPlan,
   trace: string[],
+  hint: WindowHint,
 ): Promise<ApproachOutcome> {
   // 瞄的是矩形里一个抖动过的点,不是中心(见 clickAimPoint)。随机流独立派生,
   // 与引擎那两条流分开 —— 共用会把整条轨迹的随机序列错开一位。
@@ -598,7 +656,8 @@ async function approachAndClick(
     if (landed.x === null || landed.y === null) {
       return {
         outcome: 'refusedByGate', unreachable, lagMaxUs,
-        detail: `靠近后页面没观测到 mousemove,光标多半不在页面上 | ${trace.join(' | ')}`,
+        detail: `靠近后页面没观测到 mousemove,光标多半不在页面上${await reseed(hint)}` +
+          ` | ${trace.join(' | ')}`,
       }
     }
     drift = Math.ceil(Math.hypot(landed.x - center.x, landed.y - center.y))

@@ -147,11 +147,17 @@ type Piggyback struct {
 // 收虚拟桌面物理像素，macOS 的 CGEventPost 收 point，同一份 screenX 要做的翻译不一样。
 //
 // 播完之后状态仍是冷启动：能移动，不能点击。
+//
+// **样本一并清空** —— 播种的语义就是"回到冷启动"。首次播种时样本本来是空的，
+// 这一行只在**重新**播种时起作用：那时旧样本描述的是旧几何（窗口换了屏），
+// 留着只会拟合出一个哪边都不对的中间值，与 Observe 里 PBReset 丢历史同理。
 func (p *Piggyback) SeedCalib(c Calib) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.c = c
 	p.ready = false
+	p.samples = nil
+	p.miss = 0
 }
 
 // Calib 返回当前映射，以及它是否已经由观测标定过（false = 还是粗估）。
