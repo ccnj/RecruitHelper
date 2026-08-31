@@ -36,6 +36,43 @@ const MAX_ATTEMPTS = 6
  */
 const WILD_DRIFT_PX = 400
 
+/**
+ * 散开靶子在视口里的位置(比例)。四个点由这两对组合出来。
+ *
+ * # y 的上端为什么是 0.40 而不是 0.22
+ *
+ * **粗估的 y 误差按构造等于浏览器工具栏的高度。** 粗估拿 `window.screenY` 当页面
+ * 原点用,而那是窗口**外框**顶部;网页内容在标签栏与地址栏**下面**(实测 121 px)。
+ * 所以冷启动第一趟必然比预期高 121 像素。
+ *
+ * 0.22 时 718 高的视口只剩 `718×0.22 − 121 = 37` 像素余量 —— 任何来源的四十来
+ * 像素误差都会让第一趟整个落到页面上方。而那正是死角:落不到页面就没有样本,
+ * 没有样本就修不了映射,修不了映射下一趟还是落不到(2026-08-31 真机踩到,
+ * 落点 y=1,两趟逐字相同)。0.40 把余量抬到 166 像素。
+ *
+ * # y 的下端为什么跟着从 0.78 挪到 0.90
+ *
+ * 只抬上端会把 y 跨度从 0.56 压到 0.38,而跨度是解 scale 的硬要求(MinSpanPx=200):
+ *
+ *     0.38 → 视口高必须 ≥ 527px    半屏竖排的窗口(内容高约 419)会失败
+ *     0.50 → 视口高必须 ≥ 400px    覆盖到 419
+ *
+ * 顺带发现:**0.22 在矮窗口上早就是坏的**。419 高的视口里 `419×0.22 = 92`,比工具栏
+ * 的 121 还低 —— 靶子压根在页面上方,冷启动必然失败。所以这次不是在拿跨度换余量,
+ * 是两头都比原来好。
+ *
+ * # x 为什么不动
+ *
+ * 工具栏只在上方,粗估在 x 上没有构造性偏差 —— 2026-08-28 副屏实测:
+ * `ScaleX=1.000000 OffsetX=2560.000`,与 `window.screenX` 精确相等。
+ */
+export const SPREAD_FRACTIONS = {
+  xNear: 0.22,
+  xFar: 0.78,
+  yNear: 0.40,
+  yFar: 0.90,
+} as const
+
 /** 相邻可见交互的下限(AGENTS「平台交互节奏与条件等待」),加小幅抖动。 */
 const PACE_MIN_MS = 1000
 const PACE_JITTER_MS = 800
@@ -320,7 +357,12 @@ export async function runOsProbe(
   const spread = (fx: number, fy: number) => ({
     x: Math.round(view.innerW * fx), y: Math.round(view.innerH * fy),
   })
-  const targets = [spread(0.22, 0.22), spread(0.78, 0.78), spread(0.78, 0.22), spread(0.22, 0.78)]
+  const targets = [
+    spread(SPREAD_FRACTIONS.xNear, SPREAD_FRACTIONS.yNear),
+    spread(SPREAD_FRACTIONS.xFar, SPREAD_FRACTIONS.yFar),
+    spread(SPREAD_FRACTIONS.xFar, SPREAD_FRACTIONS.yNear),
+    spread(SPREAD_FRACTIONS.xNear, SPREAD_FRACTIONS.yFar),
+  ]
   const hint = { screenX: view.screenX, screenY: view.screenY, dpr: view.dpr }
 
   const trace: string[] = []

@@ -124,6 +124,7 @@ const {
   planMove,
   clickAimPoint,
   mulberry32,
+  SPREAD_FRACTIONS,
   refuseBeforeMoving,
   runOsProbe,
   osProbeContractData,
@@ -15842,6 +15843,30 @@ test('零观测触发一次重新播种,但本条命令照样不点——自愈�
       '零观测是死循环(修映射要观测,拿观测要对的映射),必须重新播种才出得来')
     assert.match(out.detail, /已重新播种/)
   } finally { hand.restore() }
+})
+
+
+test('散开靶子必须躲开工具栏,同时保住解 scale 的跨度——两条一起才成立', () => {
+  const f = SPREAD_FRACTIONS
+  // 浏览器工具栏高度,2026-08-28 真机实测。粗估拿 window.screenY 当页面原点用,
+  // 而那是窗口外框顶部,所以冷启动第一趟必然比预期高这么多。
+  const CHROME_PX = 121
+  // MinSpanPx:解 scale 要求样本在单轴张开这么多 CSS px(推导见 piggyback.go)。
+  const MIN_SPAN = 200
+
+  // 419 = 1080p 上下分屏时的内容高(540 外框 − 121 工具栏),真实存在的窗口形状。
+  for (const h of [419, 662, 718]) {
+    const firstY = Math.round(h * f.yNear)
+    assert.ok(firstY - CHROME_PX >= 40,
+      `视口高 ${h} 时冷启动第一趟落进页面只有 ${firstY - CHROME_PX}px —— ` +
+      '落到页面上方就拿不到样本,拿不到样本就修不了映射,死角(2026-08-31 真机踩到)')
+    assert.ok((f.yFar - f.yNear) * h >= MIN_SPAN,
+      `视口高 ${h} 时 y 跨度只有 ${((f.yFar - f.yNear) * h).toFixed(0)}px,解不出 scale`)
+  }
+  for (const w of [900, 1470]) {
+    assert.ok((f.xFar - f.xNear) * w >= MIN_SPAN,
+      `视口宽 ${w} 时 x 跨度只有 ${((f.xFar - f.xNear) * w).toFixed(0)}px,解不出 scale`)
+  }
 })
 
 let failures = 0
