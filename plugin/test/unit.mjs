@@ -15598,9 +15598,10 @@ test('args.platform 解开死结:双平台下脑说探谁就探谁,说不出或�
  * 假手服务 + 假页面。落点恒等于最后一次 /play 的终点(标定完美),于是
  * 判据只剩「闸放不放行」这一件事,不掺几何噪声。
  */
-function osClickHarness({ armed = true, refuseClick = null } = {}) {
+function osClickHarness({ armed = true, refuseClick = null, calibrated = true, observeLanding = true } = {}) {
   const posts = []
   const methods = []
+  const targets = []
   let lastPoint = { x: 0, y: 0 }
   const savedChrome = globalThis.chrome
   const savedFetch = globalThis.fetch
@@ -15617,8 +15618,9 @@ function osClickHarness({ armed = true, refuseClick = null } = {}) {
         if (func.name === 'pageInstallObserverAndReadViewport') {
           return [{ result: { innerW: 1470, innerH: 662, screenX: 0, screenY: 0, dpr: 2, availLeft: 0, availTop: 25 } }]
         }
-        // 落点读取:恒报最后一帧的终点。
-        return [{ result: { x: lastPoint.x, y: lastPoint.y } }]
+        // 落点读取:恒报最后一帧的终点(observeLanding=false 时模拟"页面一个
+        // mousemove 都没收到",也就是光标压根不在页面上)。
+        return [{ result: observeLanding ? { x: lastPoint.x, y: lastPoint.y } : { x: null, y: null } }]
       },
     },
   }
@@ -15628,15 +15630,19 @@ function osClickHarness({ armed = true, refuseClick = null } = {}) {
     posts.push(path)
     methods.push((init && init.method) || 'GET')
     if (path === '/handinput/state') {
-      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated: true, clickArmed: false, samples: 4 } } }
+      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated, clickArmed: false, samples: calibrated ? 4 : 0 } } }
     }
     if (path === '/handinput/play') {
       const last = body.points[body.points.length - 1]
       lastPoint = { x: Math.round(last.x), y: Math.round(last.y) }
+      targets.push([lastPoint.x, lastPoint.y])
       return { ok: true, status: 200, async json() { return { unreachable: 0, lagMaxUs: 12 } } }
     }
     if (path === '/handinput/landing') {
       return { ok: true, status: 200, async json() { return { status: armed ? 'ready' : 'suspect', clickArmed: armed, residualPx: 0, samples: 4 } } }
+    }
+    if (path === '/handinput/reseed') {
+      return { ok: true, status: 200, async json() { return { cursorCssX: 700, cursorCssY: 300, calibrated: false, clickArmed: false, samples: 0 } } }
     }
     if (path === '/handinput/click') {
       if (refuseClick) return { ok: false, status: 409, async json() { return { refused: refuseClick } } }
@@ -15649,6 +15655,9 @@ function osClickHarness({ armed = true, refuseClick = null } = {}) {
     /** 手服务四个端点全是 POST-only:发成 GET 就是 405,而那会在闸都放行了之后才炸。 */
     nonPost: () => methods.filter((m) => m !== 'POST'),
     clicks: () => posts.filter((p) => p === '/handinput/click').length,
+    plays: () => posts.filter((p) => p === '/handinput/play').length,
+    reseeds: () => posts.filter((p) => p === '/handinput/reseed').length,
+    playTargets: () => targets.slice(),
     restore() { globalThis.chrome = savedChrome; globalThis.fetch = savedFetch },
   }
 }
@@ -15791,6 +15800,48 @@ test('目标太小就不抖,退回中心并留痕——失效方向是点得准,
 
   const ok = clickAimPoint({ x: 10, y: 10, w: 12, h: 12 }, mulberry32(1))
   assert.equal(ok.centered, false, '恰好到门限就该抖')
+})
+
+
+test('热路径只走一趟:标定就绪时不再为点亮闸白走一趟散开(那一趟每次都停在同一个像素)', async () => {
+  const hand = osClickHarness({ calibrated: true })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 3, after: '选中=收藏' } }))
+    assert.equal(out.outcome, 'clicked')
+    assert.equal(hand.plays(), 1,
+      `标定就绪时应当只播一次(直接去靶子),实际播了 ${hand.plays()} 次 —— 散开那一趟白走了`)
+    // 唯一那一趟必须是**去靶子**,不是去散开点。靶心 (730,75) 附近即可(有抖动)。
+    const [x, y] = hand.playTargets()[0]
+    assert.ok(Math.abs(x - 730) < 30 && Math.abs(y - 75) < 20,
+      `唯一一趟应当终于靶子附近,实际终于 (${x},${y})`)
+    assert.equal(hand.clicks(), 1)
+  } finally { hand.restore() }
+})
+
+test('冷路径照旧散开:标定没就绪时必须先把样本张开,否则 scale 永远解不出来', async () => {
+  const hand = osClickHarness({ calibrated: false })
+  try {
+    await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: { trusted: true, onTarget: true, eventDriftPx: 3, after: '选中=收藏' } }))
+    assert.ok(hand.plays() >= 2,
+      '冷启动必须先走散开:解 scale 要两个样本在两轴各张开 200 CSS px,只去靶子那一趟张不开')
+    const [x] = hand.playTargets()[0]
+    assert.ok(Math.abs(x - 730) > 100, `冷启动第一趟应当去散开点而不是靶子,实际 x=${x}`)
+  } finally { hand.restore() }
+})
+
+test('零观测触发一次重新播种,但本条命令照样不点——自愈留给下一条命令', async () => {
+  const hand = osClickHarness({ observeLanding: false })
+  try {
+    const out = await runOsProbe({ world: 'MAIN', label: '假平台' }, 7, osClickCtx(),
+      togglePlan({ onTarget: true, observed: null }))
+    assert.equal(out.outcome, 'refusedByGate')
+    assert.equal(hand.clicks(), 0, '零观测意味着光标不在页面上,绝不能点')
+    assert.equal(hand.reseeds(), 1,
+      '零观测是死循环(修映射要观测,拿观测要对的映射),必须重新播种才出得来')
+    assert.match(out.detail, /已重新播种/)
+  } finally { hand.restore() }
 })
 
 let failures = 0
