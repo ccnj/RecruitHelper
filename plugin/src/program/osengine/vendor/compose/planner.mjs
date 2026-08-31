@@ -1,0 +1,335 @@
+// 排版器：动态文案 → 输入计划。
+//
+// 固定模板可以「一次调好参数永远复用」，动态文案不行 —— 每条消息的长度、词数、
+// 词长分布都不同，同一套参数在 20 字上通过、在 6 字上可能因样本量前置门根本不进判据，
+// 在 80 字上又可能因分位数的最近秩取值漂移而翻车。所以必须是闭环：
+//
+//   生成 → 本地预检 → （可选）oracle 判定 → 不过就换种子重采
+//
+// 本地预检不需要 oracle：四条序列由 capture/ 的同一份口径算出，quorble 是
+// 纯算术（clamp(1−CV−IQR/μ)），speed / 键码占比 / 间隔上限也都是纯计算。
+// 于是绝大多数不合格的计划在本地就被淘汰，oracle 只做最终确认。
+//
+// engine 纪律：本模块只 import engine 内部与 pinyin-pro，绝不依赖 lab/oracle。
+// 外部判定通过 `verify` 回调注入 —— 生产环境里没有 aegis wasm。
+
+import { segment, granularity } from './segment.mjs'
+import { makeRng, sampleMix, moments } from './timing.mjs'
+import { withParams } from './params.mjs'
+import { InputTracker } from '../capture/tracker.mjs'
+import { synthTyping } from '../capture/synth.mjs'
+
+function pickWeighted(rng, list) {
+  const total = list.reduce((a, c) => a + c.p, 0)
+  let r = rng.rnd() * total
+  for (const c of list) {
+    r -= c.p
+    if (r <= 0) return c
+  }
+  return list[list.length - 1]
+}
+
+/** 单次生成：段序列 + 参数 → plan（可直接喂 synthTyping） */
+export function composeOnce(text, params, rng, startTime) {
+  const P = params
+  const segs = segment(text, rng)
+  const dwell = () => Math.max(P.limits.minDwellMs, Math.round(sampleMix(rng, P.dwell.mix)))
+  const clampGap = (v) => Math.min(P.limits.maxGapMs, Math.max(1, Math.round(v)))
+
+  let t = startTime
+  let first = true
+  const words = []
+  // 上一个键若带 Shift，下一个键的 down 必须晚到能让 Shift 先松手，
+  // 否则那个字母会变大写（见 params.limits 里的说明）。
+  let minNextDown = -Infinity
+  /**
+   * @param {number} gap 距上一个 keydown 的间隔
+   * @param {number} earliestOffset 本次要排的**最早事件**相对 t 的偏移。
+   *        带 Shift 的字元是 -lead（Shift 先于目标键按下）——只约束目标键是不够的：
+   *        下一个字元若也带 Shift，它的 Shift.down 会比目标键早 lead，
+   *        于是压在上一个 Shift 的 up 之前，两个 Shift 重叠、前一个的 up
+   *        会把后一个需要的 Shift 一起松掉。
+   */
+  /** code → 该键上一次松手的时刻。同键复现的间隔约束用它。 */
+  const lastUp = new Map()
+  const clearsSameKey = (code, down) => {
+    const up = lastUp.get(code)
+    return up == null || down - up >= P.limits.sameKeyGuardMs
+  }
+
+  /**
+   * @param {number} gap 距上一个 keydown 的间隔
+   * @param {number} earliestOffset 见下方 Shift 说明
+   * @param {string} [code] 本次要排的键位。给了它就顺带满足同键复现的间隔约束。
+   * @param {function} [resample] 重新采一个 gap —— 违反同键约束时用它拉长间隔。
+   *
+   * 同键约束靠**重采间隔**而不是钳制：真人满足它就是靠拉长间隔（实测同键隔
+   * 1/2/3 个键的 down→down 最小值 139/170/254ms，而全部相邻按键的最小值只有
+   * 19ms），而钳制会在 guard 下限上堆出一批精确重复值 —— Shift 那条约束已经
+   * 吃过这个亏（见 segGap 的注释）。重采若干次仍不成就交给 localCheck 拒绝整份。
+   */
+  const advance = (gap, earliestOffset = 0, code = null, resample = null) => {
+    const base = t
+    const wasFirst = first
+    const apply = (g) => {
+      t = base + (wasFirst ? 0 : clampGap(g))
+      if (t + earliestOffset < minNextDown) t = minNextDown - earliestOffset
+    }
+    apply(gap)
+    if (code && resample && !wasFirst) {
+      for (let i = 0; i < 16 && !clearsSameKey(code, t); i++) apply(resample())
+    }
+    first = false
+  }
+
+  /**
+   * 段间间隔。**统一加在段的开头**，不加在段的末尾。
+   *
+   * 一稿把它加在 ime 段末尾、direct 段末尾却没加，于是「标点 → 汉字」只剩段内的
+   * intraKey（中位 105ms）—— 真人在标点后是有句读停顿的，而且这让带 Shift 的标点
+   * 每次都撞上 guard 下限（实测四次余量全是 40ms，靠钳制而非分布拉开）。
+   */
+  const segGap = (prev, cur) => {
+    // 带 Shift 的标点之后按段间取 —— 打完它是句读位置，真人要松 Shift、切手型，
+    // 停顿本就更像段间而非段内。用较小的 directGap 会让它频繁撞上 guard 下限，
+    // 变成「靠钳制拉开」而不是「靠分布拉开」。
+    if (prev.kind === 'direct' && prev.shift) return sampleMix(rng, P.interSeg.mix)
+    return prev.kind === 'direct' || cur.kind === 'direct'
+      ? sampleMix(rng, P.directGap.mix)
+      : sampleMix(rng, P.interSeg.mix)
+  }
+
+  let prevSeg = null
+  for (const s of segs) {
+    const gap = prevSeg ? segGap(prevSeg, s) : 0
+
+    if (s.kind === 'direct' && s.shift) {
+      // ── 带 Shift 的字元 ──
+      // Shift 是一个会被完整统计的普通键，lead 与 dwell 各自独立采样（见 params.shift）。
+      // 这两个量一变大，重叠风险就跟着变大，所以三条约束必须同时成立：
+      //   A  gap > lead + entryMargin           → Shift 不早于上一个键按下
+      //   B  shiftDwell ≥ lead + kDwell + cover → Shift 盖过被修饰键的整个按下过程
+      //   C  下一个键 ≥ Shift.up + guard        → 下一个字母不被带成大写（Xin子 的教训）
+      const lead = Math.max(1, Math.round(sampleMix(rng, P.shift.lead.mix)))
+      const kDwell = Math.min(dwell(), P.limits.shiftMaxDwellMs)
+      const shiftDwell = Math.max(
+        Math.round(sampleMix(rng, P.shift.dwell.mix)),
+        lead + kDwell + P.shift.coverMs // B
+      )
+      // 段间间隔要由**本段最早的事件**（ShiftLeft，早目标键 lead）去承接。
+      // 只写 max(gap, …) 是错的：那样 gap 会被 lead 吃掉，上一个键到 ShiftLeft 的
+      // 实得间隔只剩 gap−lead，中位从 327ms 塌到 176ms，21% 恰好钳到 entryMargin
+      // 字面值 30ms，且 33% 的 ShiftLeft 落在上一个键（IME 上屏键）的按住区间内。
+      advance(Math.max(gap + lead, lead + P.shift.entryMarginMs), -lead) // A，且 earliestOffset 顾及 C
+      const kDown = t
+      const shiftDown = kDown - lead
+      const shiftUp = shiftDown + shiftDwell
+      words.push({
+        text: s.text, direct: true, shift: true,
+        keys: [
+          { code: 'ShiftLeft', down: shiftDown, up: shiftUp, modifier: true },
+          { code: s.code, down: kDown, up: kDown + kDwell, shift: true },
+        ],
+      })
+      minNextDown = shiftUp + P.limits.shiftGuardMs // C
+      lastUp.set('ShiftLeft', shiftUp)
+      lastUp.set(s.code, kDown + kDwell)
+    } else if (s.kind === 'direct') {
+      advance(gap, 0, s.code, () => segGap(prevSeg, s))
+      const d = dwell()
+      words.push({ text: s.text, direct: true, keys: [{ code: s.code, down: t, up: t + d }] })
+      lastUp.set(s.code, t + d)
+      minNextDown = -Infinity
+    } else {
+      const keys = []
+      let firstLetter = true
+      for (const ch of s.pinyin) {
+        // 键位要先算出来 —— advance 需要它才能满足同键复现的间隔约束
+        const code = /[a-z]/i.test(ch) ? 'Key' + ch.toUpperCase() : 'Key' + ch
+        const sampleGap = firstLetter ? () => segGap(prevSeg, s) : () => sampleMix(rng, P.intraKey.mix)
+        advance(firstLetter ? gap : sampleMix(rng, P.intraKey.mix), 0, code, sampleGap)
+        firstLetter = false
+        minNextDown = -Infinity
+        const d = dwell()
+        keys.push({ code, letter: ch, down: t, up: t + d })
+        lastUp.set(code, t + d)
+      }
+      // 上屏键同样先选定，才能参与同键约束（Space 高频，很容易撞上上一段的 Space）
+      const commitCode = pickWeighted(rng, P.commitKeys).code
+      advance(sampleMix(rng, P.commitKey.mix), 0, commitCode, () => sampleMix(rng, P.commitKey.mix))
+      const cd = dwell()
+      const commit = { code: commitCode, letter: '', down: t, up: t + cd }
+      lastUp.set(commitCode, t + cd)
+      // 音节边界（相对拼音串起点的偏移），供 TIP 在组字区显示分隔撇号。
+      // 只是显示：不多按任何键，不改变任何被判定的字段。见 tip/src/compose.rs。
+      const splits = []
+      let acc = 0
+      for (const n of (s.syllables ?? []).slice(0, -1)) splits.push((acc += n))
+      words.push({ text: s.text, keys, commit, splits })
+      minNextDown = -Infinity
+    }
+    prevSeg = s
+  }
+
+  return { startTime, words, _segs: segs }
+}
+
+/**
+ * 本地预检：把 plan 走一遍 capture 口径，检查全部硬约束。
+ * 不依赖 oracle —— quorble 是纯算术，speed / 占比 / 间隔上限也是。
+ *
+ * **platform 必须一路传进来。** 这里曾经是 `synthTyping(plan)` 无参调用，
+ * 于是不管目标平台是什么，重采回路验的永远是 synth 的默认值（当时是 macOS）。
+ * 在 Windows 上跑排版器，会用错误的平台假设判断「这份计划安全吗」然后接受它。
+ *
+ * @param {string|object} [platform] 见 lab/engine/capture/platform.mjs
+ */
+export function localCheck(plan, params, platform) {
+  const P = params
+  const events = synthTyping(plan, { platform })
+  const it = new InputTracker({ module: '' })
+  it.feedAll(events)
+  // 本地 quorble：与 wasm 同式（总体方差、最近秩分位、clamp、3 位小数）
+  const q = (a) => moments(a).quorble
+  const p = it.flush({ quorble: q, flimbot: (a) => q(removeOutliers(a)) })
+  if (!p) return { ok: false, reasons: ['未产生任何 typings'], params: null }
+
+  const num = (csv) => (csv ? csv.split(',').map(Number).filter((x) => !Number.isNaN(x)) : [])
+  const seqs = {
+    inputRhythm: num(p.inputRhythm),
+    keyboardRhythm: num(p.keyboardRhythm),
+    keydurations: num(p.keydurations),
+    rhythms: num(p.inputTrait.rhythms),
+  }
+  const stats = Object.fromEntries(Object.entries(seqs).map(([k, v]) => [k, moments(v)]))
+
+  const keys = p.key ? p.key.split(',') : []
+  const share = (() => {
+    const c = {}
+    for (const k of keys) c[k] = (c[k] || 0) + 1
+    const max = Math.max(0, ...Object.values(c))
+    return keys.length ? max / keys.length : 0
+  })()
+  // debounce 的计时依据是 reportTyping 的调用间隔 —— 它只在 compositionend 与
+  // 非 composing 的 input 上被调（sec-entry.deob.js:2070/2085），正对应 typings
+  // 相邻差 inputRhythm。composing 期间的 input 不重置 debounce，故 rhythms 不算。
+  const maxGap = Math.max(0, ...seqs.inputRhythm)
+
+  const reasons = []
+  // Shift 窗口：带 Shift 的键松手后必须留够 shiftGuardMs，下一个键才能按下。
+  // 少了这道，注入层无论怎么排都会让下一个字母变大写。
+  const flat = []
+  for (const w of plan.words) {
+    for (const k of w.keys) flat.push(k)
+    if (w.commit) flat.push(w.commit)
+  }
+  flat.sort((a, b) => a.down - b.down)
+  for (let i = 0; i < flat.length; i++) {
+    const k = flat[i]
+    if (!k.modifier) continue
+    // A：不得早于上一个非本 Shift 的键**松开** —— 比「按下」严：真人不会在上一个键
+    // 还按着的时候就去压 Shift。违例走重采，不靠钳制。
+    const prev = flat.slice(0, i).filter((x) => !x.modifier).pop()
+    if (prev && k.down <= prev.up)
+      reasons.push(`Shift 早于上一个键松开：${Math.round(prev.up - k.down)}ms`)
+    // B：必须盖过被修饰键
+    const target = flat.find((x) => x.shift && x.down > k.down && x.down < k.up)
+    if (!target) reasons.push('Shift 未盖住被修饰键')
+    else if (k.up < target.up) reasons.push(`Shift 早于被修饰键松手 ${Math.round(target.up - k.up)}ms`)
+    // C：松手后必须留够余量，下一个键才能按下 —— **含下一个 Shift**，
+    // 漏掉它会让两个 Shift 重叠（前者的 up 把后者需要的 Shift 一起松掉）
+    const next = flat.slice(i + 1).find((x) => x !== target)
+    if (next) {
+      const slack = next.down - k.up
+      if (slack < P.limits.shiftGuardMs)
+        reasons.push(`Shift 窗口不足：松手后仅 ${Math.round(slack)}ms < ${P.limits.shiftGuardMs}ms`)
+    }
+  }
+  // 同键复现：上一次松手到下一次按下必须留够 sameKeyGuardMs。
+  // 违反它是**物理不可能**（按不下一个正按着的键），而不只是不像真人。
+  // 真机后果：Windows 把第二次 keydown 标成 repeat=true，pairKeys 跳过 repeat
+  // 记录、永不配对，那一对就凭空消失 —— 离线模型与真机从此对不上账。
+  {
+    const lastUp = new Map()
+    for (const k of flat) {
+      const prevUp = lastUp.get(k.code)
+      if (prevUp != null) {
+        const slack = k.down - prevUp
+        if (slack < P.limits.sameKeyGuardMs)
+          reasons.push(
+            `同键 ${k.code} 间隔不足：松手后仅 ${Math.round(slack)}ms < ${P.limits.sameKeyGuardMs}ms` +
+              (slack < 0 ? '（自重叠，真机会报 repeat=true）' : '')
+          )
+      }
+      lastUp.set(k.code, k.up)
+    }
+  }
+  if (p.speed < P.limits.minSpeedMsPerChar)
+    reasons.push(`speed ${p.speed} < ${P.limits.minSpeedMsPerChar}ms/字`)
+  if (p.compositionAbnormal) reasons.push('compositionAbnormal')
+  if (p.keyboardAbnormal) reasons.push('keyboardAbnormal')
+  if (p.keyWordRatio < 0.5) reasons.push(`keyWordRatio ${p.keyWordRatio} < 0.5`)
+  if (p.inputTrait.matchTrait) reasons.push('matchTrait')
+  if (share > P.limits.maxKeyShare) reasons.push(`键码占比 ${share.toFixed(3)} > ${P.limits.maxKeyShare}`)
+  if (maxGap >= P.limits.debounceMs) reasons.push(`最大间隔 ${maxGap} ≥ debounce ${P.limits.debounceMs}`)
+  for (const [k, s] of Object.entries(stats)) {
+    if (s.n >= 4 && s.quorble > P.limits.maxQuorble)
+      reasons.push(`${k} quorble ${s.quorble} > ${P.limits.maxQuorble}`)
+  }
+
+  return { ok: reasons.length === 0, reasons, params: p, stats, keyShare: +share.toFixed(4), maxGap, events }
+}
+
+function removeOutliers(a) {
+  if (a.length < 4) return a
+  const s = [...a].sort((x, y) => x - y)
+  const q1 = s[Math.floor(s.length / 4)]
+  const q3 = s[Math.floor((3 * s.length) / 4)]
+  const iqr = q3 - q1
+  return a.filter((x) => x >= q1 - 1.5 * iqr && x <= q3 + 1.5 * iqr)
+}
+
+/**
+ * 闭环：生成 → 本地预检 → 可选外部判定 → 不过就换种子重采。
+ * @param {string} text 动态文案
+ * @param {object} o
+ * @param {object} [o.params]  排版参数（默认取自真人基线）
+ * @param {number} [o.seed]    起始种子；每次重采 +1，故整个过程可复现
+ * @param {number} [o.startTime]
+ * @param {number} [o.maxTries]
+ * @param {function} [o.verify] async (plan, localResult) => {ok, detail} —— 注入 oracle 判定
+ */
+export async function compose(text, o = {}) {
+  const params = withParams(o.params)
+  // 平台画像：缺省即生产目标（Windows）。见 lab/engine/capture/platform.mjs。
+  const platform = o.platform
+  const maxTries = o.maxTries ?? 40
+  const startTime = o.startTime ?? 0
+  const baseSeed = o.seed ?? 1
+  const attempts = []
+
+  for (let i = 0; i < maxTries; i++) {
+    const seed = baseSeed + i
+    const rng = makeRng(seed)
+    const plan = composeOnce(text, params, rng, startTime)
+    const local = localCheck(plan, params, platform)
+    if (!local.ok) {
+      attempts.push({ seed, stage: 'local', reasons: local.reasons })
+      continue
+    }
+    if (o.verify) {
+      const v = await o.verify(plan, local)
+      if (!v.ok) {
+        attempts.push({ seed, stage: 'verify', reasons: v.reasons ?? [v.detail] })
+        continue
+      }
+    }
+    return {
+      ok: true, plan, seed, tries: i + 1, attempts,
+      optionParams: local.params, stats: local.stats,
+      keyShare: local.keyShare, maxGap: local.maxGap,
+      granularity: granularity(plan._segs),
+    }
+  }
+  return { ok: false, tries: maxTries, attempts, plan: null }
+}

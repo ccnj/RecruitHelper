@@ -107,7 +107,7 @@ export {
   WitnessUnavailableReason,
   validatePrimitiveResult,
 } from '../src/base/protocol'
-export { planMove, mulberry32, DEFAULT_MAX_DWELL_MS, OSENGINE_SOURCE } from '../src/program/osengine/plan'
+export { planMove, planType, mulberry32, DEFAULT_MAX_DWELL_MS, OSENGINE_SOURCE } from '../src/program/osengine/plan'
 export { refuseBeforeMoving, osProbeContractData, runOsProbe, clickAimPoint, SPREAD_FRACTIONS } from '../src/program/platform/osinput'
 export {
   append as telemetryAppend,

@@ -15,6 +15,8 @@ import type { RoutePoint } from './vendor/route.mjs'
 import { DEFAULT_ENGINE } from './vendor/engines.mjs'
 import { ROUTES } from './vendor/route.bjh.mjs'
 import { PRESS_MS } from './vendor/press.bjh.mjs'
+import { compose } from './vendor/compose/planner.mjs'
+import type { ComposeResult } from './vendor/compose/planner.mjs'
 
 /**
  * 上游版本钉子。**池子换了轨迹就变了**,而 hiBoss 的跑分是对着某一版池子做的;
@@ -23,7 +25,8 @@ import { PRESS_MS } from './vendor/press.bjh.mjs'
 export const OSENGINE_SOURCE = {
   repo: 'hiBoss',
   commit: 'ef1b134',
-  files: 'lab/engine/mouse/{route,engines}.mjs + lab/probe/baseline/{route,press}.bjh.mjs',
+  files: 'lab/engine/mouse/{route,engines}.mjs + lab/probe/baseline/{route,press}.bjh.mjs'
+    + ' + lab/engine/{compose,capture}/*.mjs',
   pooledAt: '2026-08-27',
 } as const
 
@@ -158,4 +161,22 @@ export function planMove(input: MovePlanInput): MovePlan {
   const pressMs = PRESS_MS[Math.floor(rr() * PRESS_MS.length)] ?? 0
 
   return { points, pressMs, engine: DEFAULT_ENGINE, seed: input.seed, distPx }
+}
+
+/**
+ * 排版:一句文案 → 一份带时刻的按键计划。
+ *
+ * **刻意做成薄封装。** `plan.ts` 是我们与上游之间唯一的入口,但加工越少越好——
+ * 门禁比对的基准由上游原始文件生成,这一层每多做一件事,就多一处能把上游改掉的地方。
+ *
+ * `ok:false` 是**正常返回值**,不是异常:排版器闭环自验(把自己算出的计划合成成
+ * 事件流、再量一遍参数,与真人基线对不上就换种子重来,最多 40 次),排不出合格形状
+ * 就如实说排不出来。实测上游自己在「好的」+ 种子 7 上就排不出来——短文案样本少,
+ * 统计校验本来就难过。**调用方必须处理,不许兜底成「那就随便发一份」**:
+ * 排不出人的形状时不打字,方向永远是少做。
+ *
+ * 与 `planMove` 不同,这里没有坐标——打字不需要标定。
+ */
+export async function planType(text: string, seed: number): Promise<ComposeResult> {
+  return await compose(text, { seed })
 }

@@ -1,0 +1,3193 @@
+{
+ "upstream": "hiBoss lab/engine/compose @ ef1b134",
+ "pinyinPro": "3.29.3",
+ "note": "由上游原始文件生成。我们的 vendor 副本必须逐字段复现它。",
+ "cases": {
+  "normal": {
+   "text": "你好，方便加个微信聊聊吗",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 3,
+     "tries": 3,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "你好",
+        "keys": [
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 0,
+          "up": 61
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 98,
+          "up": 189
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 225,
+          "up": 300
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 370,
+          "up": 474
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 480,
+          "up": 550
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 649,
+         "up": 722
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 904,
+          "up": 1124
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 1106,
+          "up": 1188
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1195,
+          "up": 1273
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 1376,
+          "up": 1485
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 1579,
+          "up": 1683
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 1681,
+          "up": 1759
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 1831,
+          "up": 1923
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1893,
+          "up": 2016
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 2066,
+          "up": 2164
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2356,
+         "up": 2437
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "加个",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 2502,
+          "up": 2587
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2568,
+          "up": 2637
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2960,
+          "up": 3037
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3020,
+          "up": 3097
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 3118,
+          "up": 3211
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3316,
+         "up": 3435
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "微信",
+        "keys": [
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 5447,
+          "up": 5665
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 5582,
+          "up": 5707
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 5662,
+          "up": 5777
+         },
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 5891,
+          "up": 5981
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6067,
+          "up": 6625
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 6156,
+          "up": 6249
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6219,
+         "up": 6332
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 6537,
+          "up": 6665
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6800,
+          "up": 6894
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6864,
+          "up": 6996
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 7300,
+          "up": 7425
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 7443,
+          "up": 7523
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 7547,
+          "up": 7640
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7604,
+          "up": 7687
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 7752,
+          "up": 7820
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 7869,
+         "up": 7936
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 10237,
+          "up": 10386
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10317,
+          "up": 10387
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10463,
+         "up": 10635
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "你好",
+        "pinyin": "nihao",
+        "chars": 2,
+        "syllables": [
+         2,
+         3
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "加个",
+        "pinyin": "jiage",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "微信",
+        "pinyin": "weixin",
+        "chars": 2,
+        "syllables": [
+         3,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": true,
+     "seed": 7,
+     "tries": 1,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "你好",
+        "keys": [
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 0,
+          "up": 117
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 328,
+          "up": 488
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 535,
+          "up": 653
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 685,
+          "up": 788
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 838,
+          "up": 917
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1059,
+         "up": 1121
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 1279,
+          "up": 1365
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 1681,
+          "up": 1752
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1764,
+          "up": 1839
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 1873,
+          "up": 1942
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 1923,
+          "up": 2022
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 2007,
+          "up": 2100
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2073,
+          "up": 2185
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2143,
+          "up": 2219
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 2247,
+          "up": 2337
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2413,
+         "up": 2534
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "加个",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 2598,
+          "up": 2740
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2899,
+          "up": 2970
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3056,
+          "up": 3111
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3130,
+          "up": 3289
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 3188,
+          "up": 3351
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3397,
+         "up": 3538
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "微信",
+        "keys": [
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 4048,
+          "up": 4135
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 4125,
+          "up": 4352
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4291,
+          "up": 4370
+         },
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 4379,
+          "up": 4448
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4550,
+          "up": 4679
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4679,
+          "up": 5097
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4872,
+         "up": 4916
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 5590,
+          "up": 5648
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 5659,
+          "up": 5765
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5759,
+          "up": 5832
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 6114,
+          "up": 6164
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 6216,
+          "up": 6290
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6402,
+          "up": 6512
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6507,
+          "up": 6591
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 6766,
+          "up": 6856
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6903,
+         "up": 7021
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 7160,
+          "up": 7250
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7253,
+          "up": 7598
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 7393,
+         "up": 7509
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "你好",
+        "pinyin": "nihao",
+        "chars": 2,
+        "syllables": [
+         2,
+         3
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "加个",
+        "pinyin": "jiage",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "微信",
+        "pinyin": "weixin",
+        "chars": 2,
+        "syllables": [
+         3,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 50,
+     "tries": 9,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "你好",
+        "keys": [
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 0,
+          "up": 126
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 101,
+          "up": 167
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 208,
+          "up": 286
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 331,
+          "up": 465
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 425,
+          "up": 509
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 716,
+         "up": 858
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 894,
+          "up": 978
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 1300,
+          "up": 1380
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1396,
+          "up": 1455
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 1473,
+          "up": 1645
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 1527,
+          "up": 2027
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 1556,
+          "up": 1682
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 1592,
+          "up": 1732
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1745,
+          "up": 1890
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 1948,
+          "up": 2042
+         }
+        ],
+        "commit": {
+         "code": "Digit4",
+         "letter": "",
+         "down": 2053,
+         "up": 2134
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "加个",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 2874,
+          "up": 2963
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2919,
+          "up": 3021
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3035,
+          "up": 3101
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3143,
+          "up": 3266
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 3289,
+          "up": 3407
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3497,
+         "up": 3616
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "微信",
+        "keys": [
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 4008,
+          "up": 4200
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 4158,
+          "up": 4236
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4251,
+          "up": 4346
+         },
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 4339,
+          "up": 4526
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4500,
+          "up": 4589
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4801,
+          "up": 4941
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4922,
+         "up": 4989
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 5943,
+          "up": 6013
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6041,
+          "up": 6220
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6094,
+          "up": 6175
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 6416,
+          "up": 6525
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 6484,
+          "up": 6583
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6584,
+          "up": 6645
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6820,
+          "up": 6933
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 6971,
+          "up": 7052
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 7049,
+         "up": 7174
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 7522,
+          "up": 7630
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7624,
+          "up": 7680
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 7719,
+         "up": 7890
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "你好",
+        "pinyin": "nihao",
+        "chars": 2,
+        "syllables": [
+         2,
+         3
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "加个",
+        "pinyin": "jiage",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "微信",
+        "pinyin": "weixin",
+        "chars": 2,
+        "syllables": [
+         3,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "shift": {
+   "text": "薪资多少？方便说吗",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 2,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 80
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 103,
+          "up": 179
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 249,
+          "up": 324
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 425,
+          "up": 526
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 494,
+          "up": 596
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 687,
+         "up": 810
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "多少",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 1016,
+          "up": 1098
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 1213,
+          "up": 1610
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1410,
+          "up": 1527
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 1548,
+          "up": 1626
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 1631,
+          "up": 1721
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1754,
+          "up": 2399
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1803,
+          "up": 1877
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1978,
+         "up": 2073
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 2474,
+          "up": 2988,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 2558,
+          "up": 2668,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 3528,
+          "up": 3596
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3583,
+          "up": 3661
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3730,
+          "up": 4202
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3767,
+          "up": 4050
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 3845,
+          "up": 3902
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 3977,
+          "up": 4096
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4063,
+          "up": 4148
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4535,
+          "up": 4629
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4749,
+         "up": 4875
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "说吗",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 5576,
+          "up": 5643
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 5631,
+          "up": 5753
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 5692,
+          "up": 5798
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 5797,
+          "up": 6071
+         },
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 5854,
+          "up": 5933
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5978,
+          "up": 6067
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6275,
+         "up": 6329
+        },
+        "splits": [
+         4
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "多少",
+        "pinyin": "duoshao",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "说吗",
+        "pinyin": "shuoma",
+        "chars": 2,
+        "syllables": [
+         4,
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": true,
+     "seed": 8,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 141
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 73,
+          "up": 160
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 216,
+          "up": 303
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 720,
+          "up": 870
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 756,
+          "up": 849
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1079,
+         "up": 1181
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "多少",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 1327,
+          "up": 1402
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 1388,
+          "up": 1524
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1449,
+          "up": 1543
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 1562,
+          "up": 1655
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 1615,
+          "up": 1731
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1748,
+          "up": 2289
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1849,
+          "up": 2013
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2022,
+         "up": 2101
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 2287,
+          "up": 2697,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 2501,
+          "up": 2605,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 4287,
+          "up": 4429
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4385,
+          "up": 4490
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4461,
+          "up": 4540
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 4533,
+          "up": 4590
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 4593,
+          "up": 4662
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4721,
+          "up": 4774
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4769,
+          "up": 4882
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4898,
+          "up": 4995
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 5112,
+         "up": 5196
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "说吗",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 5498,
+          "up": 5592
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 5603,
+          "up": 5708
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 5678,
+          "up": 5798
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 5797,
+          "up": 6135
+         },
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 5898,
+          "up": 6019
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5996,
+          "up": 6122
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6137,
+         "up": 6227
+        },
+        "splits": [
+         4
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "多少",
+        "pinyin": "duoshao",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "说吗",
+        "pinyin": "shuoma",
+        "chars": 2,
+        "syllables": [
+         4,
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 47,
+     "tries": 6,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 695
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 92,
+          "up": 207
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 211,
+          "up": 328
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 398,
+          "up": 484
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 475,
+          "up": 540
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 515,
+         "up": 621
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "多少",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 868,
+          "up": 1036
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 930,
+          "up": 1036
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1009,
+          "up": 1183
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 1060,
+          "up": 1130
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 1170,
+          "up": 1273
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1320,
+          "up": 1407
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 1457,
+          "up": 1605
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1635,
+         "up": 1716
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 1955,
+          "up": 2599,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 2087,
+          "up": 2166,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 2985,
+          "up": 3034
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3119,
+          "up": 3252
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3186,
+          "up": 3295
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3273,
+          "up": 3391
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 3387,
+          "up": 3683
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 3492,
+          "up": 3546
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3622,
+          "up": 3687
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3726,
+          "up": 3790
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3892,
+         "up": 3989
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "说吗",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 5089,
+          "up": 5182
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 5315,
+          "up": 5421
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 5356,
+          "up": 5477
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 5465,
+          "up": 5559
+         },
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 5560,
+          "up": 5651
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5732,
+          "up": 5796
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6065,
+         "up": 6389
+        },
+        "splits": [
+         4
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "多少",
+        "pinyin": "duoshao",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "说吗",
+        "pinyin": "shuoma",
+        "chars": 2,
+        "syllables": [
+         4,
+         2
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "short": {
+   "text": "好的",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 2,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "好的",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 0,
+          "up": 130
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 176,
+          "up": 270
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 214,
+          "up": 295
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 264,
+          "up": 804
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 356,
+          "up": 472
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 534,
+         "up": 618
+        },
+        "splits": [
+         3
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "好的",
+        "pinyin": "haode",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": false,
+     "tries": 40
+    },
+    "42": {
+     "ok": true,
+     "seed": 62,
+     "tries": 21,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "好的",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 0,
+          "up": 295
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 95,
+          "up": 151
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 166,
+          "up": 267
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 374,
+          "up": 784
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 442,
+          "up": 582
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 866,
+         "up": 942
+        },
+        "splits": [
+         3
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "好的",
+        "pinyin": "haode",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "digits": {
+   "text": "明天下午3点面试可以吗",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 3,
+     "tries": 3,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "明天",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 0,
+          "up": 61
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 98,
+          "up": 189
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 225,
+          "up": 300
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 370,
+          "up": 474
+         },
+         {
+          "code": "KeyT",
+          "letter": "t",
+          "down": 480,
+          "up": 550
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 511,
+          "up": 632
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 579,
+          "up": 671
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 752,
+          "up": 848
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 907,
+         "up": 985
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "下午",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 1927,
+          "up": 2036
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2130,
+          "up": 2234
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2232,
+          "up": 2310
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 2382,
+          "up": 2474
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 2444,
+          "up": 2567
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3125,
+         "up": 3181
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 3664,
+          "up": 3745
+         }
+        ]
+       },
+       {
+        "text": "点",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 3760,
+          "up": 3845
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 3826,
+          "up": 3895
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4218,
+          "up": 4295
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4278,
+          "up": 4355
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4455,
+         "up": 4589
+        },
+        "splits": []
+       },
+       {
+        "text": "面试",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 5017,
+          "up": 5136
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 5176,
+          "up": 5394
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5311,
+          "up": 5436
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 5391,
+          "up": 5506
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 5620,
+          "up": 5710
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 5796,
+          "up": 6354
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 5885,
+          "up": 5978
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 5948,
+         "up": 6061
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "可以",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 6266,
+          "up": 6394
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 6356,
+          "up": 6488
+         },
+         {
+          "code": "KeyY",
+          "letter": "y",
+          "down": 6619,
+          "up": 6713
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6683,
+          "up": 6815
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 7374,
+         "up": 7469
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 8653,
+          "up": 8717
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 8740,
+          "up": 8893
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 9019,
+         "up": 9091
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "明天",
+        "pinyin": "mingtian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "下午",
+        "pinyin": "xiawu",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "点",
+        "pinyin": "dian",
+        "chars": 1,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "面试",
+        "pinyin": "mianshi",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "可以",
+        "pinyin": "keyi",
+        "chars": 2,
+        "syllables": [
+         2,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": true,
+     "seed": 8,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "明天",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 0,
+          "up": 80
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 137,
+          "up": 236
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 358,
+          "up": 486
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 466,
+          "up": 879
+         },
+         {
+          "code": "KeyT",
+          "letter": "t",
+          "down": 565,
+          "up": 639
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 655,
+          "up": 764
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 720,
+          "up": 791
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 786,
+          "up": 867
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1046,
+         "up": 1111
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "下午",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 2261,
+          "up": 2352
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2368,
+          "up": 2747
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2479,
+          "up": 2560
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 2624,
+          "up": 2773
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 2730,
+          "up": 2808
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2911,
+         "up": 3127
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 3013,
+          "up": 3168
+         }
+        ]
+       },
+       {
+        "text": "点",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 3468,
+          "up": 3589
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 3624,
+          "up": 3849
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3698,
+          "up": 3787
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3803,
+          "up": 3864
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3911,
+         "up": 4185
+        },
+        "splits": []
+       },
+       {
+        "text": "面试",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 4073,
+          "up": 4131
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4217,
+          "up": 4322
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4329,
+          "up": 4417
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4482,
+          "up": 4555
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 4553,
+          "up": 4664
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 4659,
+          "up": 4770
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 4738,
+          "up": 4853
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 5026,
+         "up": 5117
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "可以",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 5919,
+          "up": 6008
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 6093,
+          "up": 6181
+         },
+         {
+          "code": "KeyY",
+          "letter": "y",
+          "down": 6270,
+          "up": 6379
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6365,
+          "up": 6461
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6478,
+         "up": 6575
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 6592,
+          "up": 6684
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6684,
+          "up": 6815
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6845,
+         "up": 6920
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "明天",
+        "pinyin": "mingtian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "下午",
+        "pinyin": "xiawu",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "点",
+        "pinyin": "dian",
+        "chars": 1,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "面试",
+        "pinyin": "mianshi",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "可以",
+        "pinyin": "keyi",
+        "chars": 2,
+        "syllables": [
+         2,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 43,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "明天",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 0,
+          "up": 93
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 200,
+          "up": 303
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 326,
+          "up": 445
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 452,
+          "up": 604
+         },
+         {
+          "code": "KeyT",
+          "letter": "t",
+          "down": 607,
+          "up": 686
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 888,
+          "up": 1047
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1128,
+          "up": 1218
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 1206,
+          "up": 1327
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 1350,
+         "up": 1526
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "下午",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 3423,
+          "up": 3694
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 3563,
+          "up": 3641
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3692,
+          "up": 3764
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 3808,
+          "up": 3914
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 3938,
+          "up": 4068
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4405,
+         "up": 4506
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 6074,
+          "up": 6203
+         }
+        ]
+       },
+       {
+        "text": "点",
+        "keys": [
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 6721,
+          "up": 6819
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6901,
+          "up": 7050
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6976,
+          "up": 7448
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7016,
+          "up": 7087
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 7372,
+         "up": 7463
+        },
+        "splits": []
+       },
+       {
+        "text": "面试",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 9178,
+          "up": 9302
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9308,
+          "up": 9392
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9380,
+          "up": 9480
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 9498,
+          "up": 9694
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 9582,
+          "up": 9683
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 9657,
+          "up": 9748
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9722,
+          "up": 9821
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10001,
+         "up": 10167
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "可以",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 12034,
+          "up": 12084
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 12228,
+          "up": 12330
+         },
+         {
+          "code": "KeyY",
+          "letter": "y",
+          "down": 12284,
+          "up": 12398
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 12408,
+          "up": 12897
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 12561,
+         "up": 12676
+        },
+        "splits": [
+         2
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 12854,
+          "up": 12958
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 13161,
+          "up": 13212
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 13287,
+         "up": 13374
+        },
+        "splits": []
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "明天",
+        "pinyin": "mingtian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "下午",
+        "pinyin": "xiawu",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "点",
+        "pinyin": "dian",
+        "chars": 1,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "面试",
+        "pinyin": "mianshi",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "可以",
+        "pinyin": "keyi",
+        "chars": 2,
+        "syllables": [
+         2,
+         2
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       }
+      ]
+     }
+    }
+   }
+  }
+ }
+}

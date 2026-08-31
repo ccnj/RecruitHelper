@@ -122,6 +122,7 @@ const {
   zhilianTestHooks,
   ZhilianPlatformError,
   planMove,
+  planType,
   clickAimPoint,
   mulberry32,
   SPREAD_FRACTIONS,
@@ -15100,6 +15101,108 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
   // 常数会给出一串一模一样的数字,那是零误伤的机器签名。真人 464 条按压里
   // 中位 96ms、四分位 86~110,所以 40 次抽样出现多个不同取值是必然的。
   assert.ok(drawn.size >= 10, `40 次抽样只出现 ${drawn.size} 个不同的 pressMs,疑似退化成常数`)
+})
+
+// ---------------------------------------------------------------------------
+// osengine/compose:从 hiBoss 搬入的打字排版器
+//
+// 与鼠标那组同理,测的不是"打字像不像人"——那要判别器,永远留在 hiBoss。
+// 这里测的是**我们这一侧没有把上游改掉**。打字线尤其经不起移植:上游的 LCG
+// `s*1103515245+12345` 在 s 接近 2^31 时乘积超过 2^53,**JS 的精度丢失是结果的
+// 一部分**;换个语言、换个 RNG,生成的分布就悄悄偏了,而且不会有任何报错。
+// ---------------------------------------------------------------------------
+
+const COMPOSE_FIXTURE = JSON.parse(
+  readFileSync('test/fixtures/osengine-compose-hiboss-ef1b134.json', 'utf8'),
+)
+
+/** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
+const SHIFT_GUARD_MS = 40
+
+/** 把一份计划里的全部按键(含上屏键)按 down 排成一列。 */
+function flattenPlanKeys(plan) {
+  const keys = []
+  for (const w of plan.words) {
+    for (const k of w.keys) keys.push(k)
+    if (w.commit) keys.push(w.commit)
+  }
+  return keys.sort((a, b) => a.down - b.down)
+}
+
+test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
+  assert.equal(OSENGINE_SOURCE.commit, 'ef1b134', '版本钉子与基准文件名必须同步')
+  assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
+
+  for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
+    for (const [seedText, expected] of Object.entries(bySeed)) {
+      const got = await planType(text, Number(seedText))
+      assert.equal(got.ok, expected.ok, `${name}/${seedText} 的成败与上游不一致`)
+      if (!expected.ok) continue
+      assert.equal(got.seed, expected.seed, `${name}/${seedText} 命中的种子与上游不一致`)
+      assert.equal(got.tries, expected.tries, `${name}/${seedText} 的重采次数与上游不一致`)
+      assert.deepEqual(got.plan, expected.plan, `${name}/${seedText} 的计划与上游不一致`)
+    }
+  }
+})
+
+test('osengine/compose 排不出来也要钉住——短文案本来就可能失败', () => {
+  // 上游自己在「好的」+ 种子 7 上 40 次重采全废:排版器是闭环自验的,样本太少时
+  // 统计校验过不了。**我们的副本若在上游失败处成功了,那正是漂移**,而且是最难
+  // 发现的一种——看上去"更好用了"。
+  const short = COMPOSE_FIXTURE.cases.short
+  const failures = Object.values(short.bySeed).filter((c) => !c.ok)
+  assert.ok(failures.length >= 1,
+    '基准里应当至少钉住一个上游排不出来的组合;一个都没有说明基准选的文案太容易')
+})
+
+test('osengine/compose 的 Shift 必须在下一个键按下前松开(「薪资」→「Xin子」那个 bug)', () => {
+  // 2026-08-21 上游真机:Slash 的 dwell 采到 125ms,而到下一个键只有 86ms,
+  // Shift 压到了下一个字母上,输入法收到大写 X 当成英文。down→down 的间隔模型
+  // 不管上一个键何时松手,所以时序职责在排版器——这条用例就是钉住它没退化。
+  for (const [name, { bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
+    for (const [seedText, c] of Object.entries(bySeed)) {
+      if (!c.ok) continue
+      const keys = flattenPlanKeys(c.plan)
+      for (const m of keys.filter((k) => k.modifier)) {
+        for (const k of keys) {
+          if (k === m) continue
+          if (k.down > m.down && k.down < m.up) {
+            assert.ok(k.shift,
+              `${name}/${seedText}:${k.code} 落在 Shift 按住的窗口里却没标 shift`)
+          } else if (k.down >= m.up) {
+            assert.ok(k.down - m.up >= SHIFT_GUARD_MS,
+              `${name}/${seedText}:Shift 松手于 ${m.up},而 ${k.code} 在 ${k.down} 按下,`
+              + `间隔 ${k.down - m.up}ms 不足 ${SHIFT_GUARD_MS}ms`)
+            break
+          }
+        }
+      }
+    }
+  }
+})
+
+test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {
+  const a = await planType('你好，方便加个微信聊聊吗', 1)
+  const b = await planType('你好，方便加个微信聊聊吗', 1)
+  assert.deepEqual(a, b)
+  const c = await planType('你好，方便加个微信聊聊吗', 99)
+  assert.ok(a.ok && c.ok)
+  assert.notDeepEqual(a.plan, c.plan, '换种子必须换计划')
+})
+
+test('osengine/compose 的上屏键不是清一色 Space——数字选词是真人的形状', async () => {
+  // 上游 params.mjs:约 14% 的段落用 Digit2/3/4 选第 N 个候选。全是 Space 意味着
+  // 我们把上游的分布改掉了,而那是零方差的机器签名。
+  const commits = new Set()
+  for (const { bySeed } of Object.values(COMPOSE_FIXTURE.cases)) {
+    for (const c of Object.values(bySeed)) {
+      if (!c.ok) continue
+      for (const w of c.plan.words) if (w.commit) commits.add(w.commit.code)
+    }
+  }
+  assert.ok(commits.has('Space'), '上屏键里应当有 Space')
+  assert.ok(commits.size >= 2,
+    `基准里的上屏键只有 ${[...commits].join(',')} 一种,数字选词的分支没被覆盖或已被改掉`)
 })
 
 // ---------------------------------------------------------------------------
