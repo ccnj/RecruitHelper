@@ -66,13 +66,236 @@ function renderHits(hits: readonly { code: string; action: string }[]): string {
     : '<span class="muted">没有值得看的命中。</span>'
 
   if (noisy.length) {
-    html += '<p class="muted" style="margin-top:0.8rem">下面这些<b>近乎每台机器都会报</b>,不是探到了东西 ——'
-      + ' 本机端口探测的回调是 <code>onopen = onclose = onerror</code>,参数是"1 秒内有反应"'
-      + '而不是"连上了";localhost 上端口关着会瞬间拒绝,照样算真。</p>'
-      + `<ul class="muted">${noisy.map((l) => `<li>${l}</li>`).join('')}</ul>`
+    // 折叠:它们每台机器都亮,常显只会把真信号淹掉。summary 带类数,不展开也知道分量。
+    html += `<details><summary>例行噪音 ${noisy.length} 类(几乎每台机器都报)</summary>`
+      + '<p class="muted">本机端口探测的回调是 <code>onopen = onclose = onerror</code>,'
+      + '参数是"1 秒内有反应"而不是"连上了";localhost 上端口关着会瞬间拒绝,照样算真。</p>'
+      + `<ul class="muted">${noisy.map((l) => `<li>${l}</li>`).join('')}</ul></details>`
   }
   return html
 }
+
+// ---- 鼠标轨迹:平台自己给每次点击打的自动化分 ----
+//
+// `p6.za` 是 BOSS 的评分结果(`za = (100 * confidence).toFixed(1)`,
+// hiBoss `report/runtime-evidence.md:482`)。**它是平台的判决,不是我们的推断** ——
+// `isTrusted` 只说明事件来自浏览器输入栈,不代表平台认了。
+//
+// 阈值 72 不是拍的:真机对账过一次 za=66.0 的点击,平台内部 `totalScore` 是 0.55,
+// 而 `isAutomated` 的线是 0.60(同报告 :495);按 `za = totalScore x 120` 折算,
+// **za >= 72 即平台判定为自动化**。
+//
+// 主数字刻意是「za=0 的条数」而不是「没过线的条数」:验收线是 `za == 0`,
+// 不是 `za < 72`(同报告 :505) —— 目标是一盏灯都不亮,不是压在线下。
+
+/** 平台判定为自动化的分数线。推导见上。 */
+const CLICK_AUTO_LINE = 72
+
+/** za 分档。写成谓词而不是上下界——za 带一位小数,用界比较要靠 epsilon,那是坏味道。 */
+const ZA_BUCKETS: readonly {
+  readonly label: string
+  readonly over: boolean
+  readonly test: (za: number) => boolean
+}[] = [
+  { label: '0(干净)', over: false, test: (z) => z === 0 },
+  { label: '1–30', over: false, test: (z) => z > 0 && z <= 30 },
+  { label: '31–60', over: false, test: (z) => z > 30 && z <= 60 },
+  { label: '61–71', over: false, test: (z) => z > 60 && z < CLICK_AUTO_LINE },
+  { label: '>=72 过线', over: true, test: (z) => z >= CLICK_AUTO_LINE },
+]
+
+function shotField(shot: unknown, key: string): unknown {
+  if (shot === null || typeof shot !== 'object') return undefined
+  const p6 = (shot as Record<string, unknown>)['p6']
+  if (p6 === null || typeof p6 !== 'object') return undefined
+  return (p6 as Record<string, unknown>)[key]
+}
+
+/** 取 za。形状不认识就返回 null —— 读不出的条数单独报,不并进任何一档。 */
+function shotZa(shot: unknown): number | null {
+  const raw = shotField(shot, 'za')
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+/** 取轨迹点数。`l <= 2` 是连点/瞬移的形态。 */
+function shotPoints(shot: unknown): number | null {
+  const raw = shotField(shot, 'l')
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
+}
+
+function bar(n: number, max: number, bad: boolean): string {
+  const pct = max > 0 ? Math.round((100 * n) / max) : 0
+  return `<div class="bar${bad ? ' bad' : ''}"><i style="width:${pct}%"></i></div>`
+}
+
+function renderClicks(shots: readonly unknown[]): string {
+  if (!shots.length) {
+    return '<div class="verdict idle"><b>还没抓到鼠标窗口</b>'
+      + '<span class="muted">页面上每点一次就上报一条(含平台自己的评分)。点几下再刷新。</span></div>'
+  }
+
+  const zas = shots.map(shotZa)
+  const readable = zas.filter((z): z is number => z !== null)
+  const unreadable = zas.length - readable.length
+  const clean = readable.filter((z) => z === 0).length
+  const over = readable.filter((z) => z >= CLICK_AUTO_LINE).length
+  const stuck = shots.filter((s) => { const l = shotPoints(s); return l !== null && l <= 2 }).length
+
+  const verdict = over > 0
+    ? `<div class="verdict warn"><b>${over} 次点击被平台判定为自动化(za >= ${CLICK_AUTO_LINE})</b>`
+      + '<span class="muted">这是平台自己算出来并上送的分,不是我们的推断。</span></div>'
+    : clean === readable.length
+      ? '<div class="verdict good"><b>全部点击 za=0</b>'
+        + '<span class="muted">平台没在任何一次点击的轨迹里看出自动化特征。</span></div>'
+      : `<div class="verdict good"><b>没有点击过线,但只有 ${clean}/${readable.length} 次是 za=0</b>`
+        + '<span class="muted">验收线是 za=0,不是"没过线"。</span></div>'
+
+  const counts = ZA_BUCKETS.map((b) => readable.filter((z) => b.test(z)).length)
+  const max = Math.max(1, ...counts)
+  const rows = ZA_BUCKETS.map((b, i) =>
+    `<span>${escapeHTML(b.label)}</span>${bar(counts[i], max, b.over)}<b>${counts[i]}</b>`,
+  ).join('')
+
+  const recent = [...shots].slice(-20).reverse().map((s) => {
+    const at = (s as Record<string, unknown> | null)?.['at']
+    const when = typeof at === 'number' ? new Date(at).toLocaleTimeString('zh-CN') : '-'
+    const za = shotZa(s)
+    const l = shotPoints(s)
+    const flag = za !== null && za >= CLICK_AUTO_LINE ? ' style="color:#b3541e"' : ''
+    return `<li${flag}>${escapeHTML(when)} — za <b>${za === null ? '读不出' : za}</b>`
+      + `,轨迹点 ${l === null ? '-' : l}</li>`
+  }).join('')
+
+  return verdict
+    + `<p class="muted">窗口 <b>${shots.length}</b> 条｜za=0 的 <b>${clean}</b> 条`
+    + `｜过线 <b>${over}</b> 条｜连点(轨迹点<=2) <b>${stuck}</b> 条`
+    + (unreadable ? `｜<b>${unreadable}</b> 条读不出 za` : '') + '</p>'
+    + `<div class="bars">${rows}</div>`
+    + `<details><summary>最近 20 条明细(共 ${shots.length} 条)</summary><ul>${recent}</ul></details>`
+}
+
+// ---- 判决与证据的渲染 ----
+
+/** 我们往页面上放东西时用的前缀。「有没有被平台点名」只认它。 */
+const OUR_GLOBAL_PREFIX = '__recruitHelper'
+
+function overLineCount(shots: readonly unknown[]): number {
+  return shots.filter((s) => {
+    const z = shotZa(s)
+    return z !== null && z >= CLICK_AUTO_LINE
+  }).length
+}
+
+/** 三态:true 好、false 坏、null 还没数据。 */
+function verdictLine(ok: boolean | null, name: string, detail: string): string {
+  const mark = ok === null ? '—' : ok ? '\u2713' : '\u2717'
+  const cls = ok === null ? 'idle' : ok ? 'ok' : 'bad'
+  return `<div class="vline ${cls}"><span class="vmark">${mark}</span>`
+    + `<span class="vname">${escapeHTML(name)}</span>`
+    + `<span class="vdetail">${detail}</span></div>`
+}
+
+/**
+ * 一屏之内回答三个问题。**这三条是本页存在的理由**,其余都是给它们做证。
+ *
+ * 第三条问的是"有没有码表里没有的码",不是"踩雷了吗"——800001 这族指纹上报
+ * 每台机器每次加载都发,算例行;真正值得抬头的是出现了我们没见过的东西。
+ */
+function renderVerdict(
+  hasData: boolean, ours: readonly string[], platformGlobals: number,
+  shots: number, over: number, unknownCodes: readonly string[],
+): string {
+  if (!hasData) {
+    return verdictLine(null, '隐形', '还没抓到载荷')
+      + verdictLine(null, '像人', '还没抓到点击')
+      + verdictLine(null, '新东西', '还没抓到载荷')
+  }
+  return verdictLine(ours.length === 0, '隐形',
+    ours.length === 0
+      ? `平台上送的 ${platformGlobals} 个未知全局名里没有我们的`
+      : `<b>平台点名了我们的 ${ours.length} 个全局</b>:<code>${escapeHTML(ours.join(', '))}</code>`)
+    + verdictLine(shots === 0 ? null : over === 0, '像人',
+      shots === 0 ? '还没抓到点击'
+        : over === 0 ? `${shots} 次点击没有一次过 isAutomated 线`
+          : `<b>${over}/${shots} 次点击被平台判定为自动化</b>`)
+    + verdictLine(unknownCodes.length === 0, '新东西',
+      unknownCodes.length === 0 ? '所有事件码都在 hiBoss 的码表里'
+        : `<b>${unknownCodes.length} 个码表里没有的码</b>:<code>${escapeHTML(unknownCodes.join('、'))}</code>`)
+}
+
+function renderGlobals(names: readonly string[]): string {
+  const ours = names.filter((n) => n.startsWith(OUR_GLOBAL_PREFIX))
+  const theirs = names.filter((n) => !n.startsWith(OUR_GLOBAL_PREFIX))
+  const head = ours.length
+    ? `<div class="bad-row">我们的:${ours.map((n) => `<code>${escapeHTML(n)}</code>`).join('、')}</div>`
+    : '<div>我们的:<span class="muted">无</span></div>'
+  if (!theirs.length) return head
+  return head
+    + `<details><summary>平台自己的 ${theirs.length} 个(第三方脚本)</summary>${list(theirs)}</details>`
+}
+
+function asRec(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+/**
+ * 注入检测项归并成一行一类。
+ *
+ * 原样印每一条等于印几千字符的 inline style,人读不了。
+ * 认不出来源的**原样保留 key、标「未知」**,不并进兜底桶——
+ * 没见过的形态不猜也不静默丢(与 capture 层同款纪律)。
+ */
+function injectionDigest(item: unknown): { key: string; source: string; ours: boolean } {
+  const rec = asRec(item)
+  if (rec === null) return { key: String(item).slice(0, 40), source: '未知', ours: false }
+
+  if (rec['code'] === 99003) {
+    const keys = rec['windowKeys']
+    const n = Array.isArray(keys) ? keys.length : 0
+    return { key: `99003 未知全局名差集(${n} 个)`, source: '平台自报', ours: false }
+  }
+
+  const node = asRec(rec['nodeJson'])
+  const tag = String(node?.['tag'] ?? '?')
+  const attrs = asRec(node?.['attrs'])
+  const id = typeof attrs?.['id'] === 'string' ? attrs['id'] : ''
+  const text = typeof rec['textContent'] === 'string' ? rec['textContent'].trim() : ''
+  const key = id ? `${tag}#${id}` : `${tag}\u300c${text.slice(0, 16)}\u300d`
+
+  const ours = key.includes(OUR_GLOBAL_PREFIX) || key.includes('recruitHelper')
+  const source = ours ? '我们的'
+    : id.startsWith('claude-') ? 'Claude in Chrome'
+      : text === 'mmmmmmmmmmlli' ? '平台自己的字体探针'
+        : '未知'
+  return { key, source, ours }
+}
+
+function renderRaw(injected: readonly unknown[], probes: readonly string[], routine: readonly string[]): string {
+  const merged = new Map<string, { source: string; ours: boolean; n: number }>()
+  for (const item of injected) {
+    const d = injectionDigest(item)
+    const seen = merged.get(d.key)
+    if (seen) seen.n += 1
+    else merged.set(d.key, { source: d.source, ours: d.ours, n: 1 })
+  }
+  const rows = [...merged.entries()]
+    .sort((a, b) => b[1].n - a[1].n)
+    .map(([key, v]) => `<li${v.ours ? ' class="bad-row"' : ''}><code>${escapeHTML(key)}</code>`
+      + ` x${v.n} <span class="muted">${escapeHTML(v.source)}</span></li>`)
+    .join('')
+
+  const tallied = tally(routine)
+  return `<details><summary>注入检测报告 ${merged.size} 类 x${injected.length}</summary>`
+    + (rows ? `<ul>${rows}</ul>` : '<p class="muted">无</p>')
+    + '</details>'
+    + `<details><summary>被探到的本机端口 ${probes.length} 个</summary>${list(probes)}</details>`
+    + `<details><summary>例行码 ${tallied.length} 类</summary>${list(tallied)}</details>`
+}
+
 
 async function render(): Promise<void> {
   const entries = await readAll(storage, KIND_UPLOAD) as TelemetryEntry[]
@@ -81,7 +304,7 @@ async function render(): Promise<void> {
   const hits: { code: string; action: string }[] = []
   const routine: string[] = []
   const globals = new Set<string>()
-  const injected: string[] = []
+  const injected: unknown[] = []
   const probes = new Set<string>()
   let unparsed = 0
 
@@ -91,45 +314,30 @@ async function render(): Promise<void> {
     for (const h of c.hits) hits.push(h)
     for (const r of c.routine) routine.push(`${r.code}(${bossCodeMeaning(r.code).label})`)
     for (const g of c.unknownGlobals) globals.add(g)
-    for (const i of c.injected) injected.push(typeof i === 'string' ? i : JSON.stringify(i))
+    for (const i of c.injected) injected.push(i)
     for (const p of c.localProbes) probes.add(p)
   }
 
-  // 核心结论。
-  const verdict = el('verdict')
   const names = [...globals].sort()
-  if (!entries.length) {
-    verdict.className = 'verdict idle'
-    verdict.innerHTML = '<b>还没抓到任何载荷</b><span class="muted">打开平台页面走一走,再回来刷新。</span>'
-  } else if (!names.length) {
-    verdict.className = 'verdict good'
-    verdict.innerHTML = '<b>平台上送的未知全局名清单:空</b>'
-      + '<span class="muted">平台把 Object.keys(window) 与自己的白名单求差后原样上送,这一栏为空,'
-      + '说明它没有在页面全局里看见任何计划外的名字。</span>'
-  } else {
-    verdict.className = 'verdict warn'
-    verdict.innerHTML = `<b>平台上送了 ${names.length} 个未知全局名</b>`
-      + '<span class="muted">逐个核对有没有我们自己的东西。平台自己的第三方脚本也会出现在这里,'
-      + '出现不等于是我们的。</span>'
-      + list(names)
-  }
-
-  el('hits').innerHTML = renderHits(hits)
+  const ours = names.filter((n) => n.startsWith(OUR_GLOBAL_PREFIX))
+  const unknownCodes = [...new Set(hits.map((h) => h.code))].filter((c) => !bossCodeMeaning(c).known).sort()
+  const over = overLineCount(shots)
 
   const first = entries[0]?.at
   const last = entries[entries.length - 1]?.at
   const span = first && last
     ? `${new Date(first).toLocaleString('zh-CN')} — ${new Date(last).toLocaleString('zh-CN')}`
     : '-'
-  el('overview').innerHTML = `<ul>`
-    + `<li>明细 <b>${entries.length}</b> 条,其中解析失败 <b>${unparsed}</b> 条</li>`
-    + `<li>带鼠标轨迹的点击窗口 <b>${shots.length}</b> 条</li>`
-    + `<li>时间范围 ${escapeHTML(span)}</li>`
-    + `<li>例行码 ${escapeHTML(tally(routine).join('、') || '无')}</li>`
-    + `</ul>`
+  el('dataline').innerHTML = entries.length
+    ? `<b>${entries.length}</b> 条 · ${escapeHTML(span)} · 解析失败 <b>${unparsed}</b> 条`
+    : '<span class="muted">还没抓到任何载荷。打开平台页面走一走,再回来刷新。</span>'
 
-  el('misc').innerHTML = `<div>注入检测报告:${list(tally(injected))}</div>`
-    + `<div>被探到的本机端口:${list([...probes].sort())}</div>`
+  el('verdict').innerHTML = renderVerdict(
+    entries.length > 0, ours, names.length - ours.length, shots.length, over, unknownCodes)
+  el('clicks').innerHTML = renderClicks(shots)
+  el('globals').innerHTML = renderGlobals(names)
+  el('hits').innerHTML = renderHits(hits)
+  el('raw').innerHTML = renderRaw(injected, [...probes].sort(), routine)
 }
 
 function download(): void {
