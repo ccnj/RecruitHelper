@@ -37,8 +37,9 @@ export function PluginCapabilityPage({ account, conversations, conversationsLoad
       </p>
       <p>
         最后两项是 <strong>OS 级键鼠注入</strong>，它们真的会挪你的鼠标、真的会往键盘缓冲区
-        里发按键。跑的时候<strong>手别碰鼠标键盘</strong>，也别切走 Chrome——注入打的是
-        最前台的窗口，切走了就打到别的应用上去了。
+        里发按键。注入打的是<strong>最前台的窗口</strong>，所以两块都有一段倒计时：
+        点完按钮<strong>切到 Chrome</strong>，然后<strong>手离开鼠标键盘</strong>，
+        等它跑完。中途切回这里或者碰了鼠标，闸会拦下来。
       </p>
       <InterviewEditorProbe account={account} {...picker} />
       <NotifyProbe account={account} {...picker} />
@@ -379,8 +380,68 @@ function NotifyProbe({ account, conversations, conversationsLoading, conversatio
 // 所以这里唯一的拦截条件与别的探针完全相同：选了账号、手在线。别的一律让
 // 手侧如实回答。
 
+// 倒计时:点完按钮之后、真正发命令之前,给人时间切到 Chrome。
+//
+// **这不是便利功能,是这两块能不能跑出成功的前提。** 按钮在客户端窗口里,一点它
+// 客户端就成了前台;而两块都要求 Chrome 在前台——键盘查 document.hasFocus(),
+// 鼠标要页面收得到 mousemove。没有这段延迟,唯一可能的结果就是 refusedByGate。
+//
+// 上游 hiBoss 的 `-play -delay` 是同一件事,那边打印的是
+// 「%.0f 秒后开始 —— 把焦点切到目标输入框」。
+//
+// 不做取消按钮:想中止就切回客户端窗口,闸自然会拦下来,不需要另造一条路。
+const DEFAULT_LEAD_SEC = 5
+
+function useLeadIn() {
+  const [leadSec, setLeadSec] = useState(DEFAULT_LEAD_SEC)
+  const [left, setLeft] = useState(0)
+  const wait = useCallback(async () => {
+    for (let n = leadSec; n > 0; n--) {
+      setLeft(n)
+      await new Promise((resolve) => { setTimeout(resolve, 1000) })
+    }
+    setLeft(0)
+  }, [leadSec])
+  return { leadSec, setLeadSec, left, wait }
+}
+
+function LeadInField({ leadSec, setLeadSec, disabled }: {
+  leadSec: number
+  setLeadSec: (next: number) => void
+  disabled: boolean
+}) {
+  return (
+    <>
+      <label className="probe-field">
+        <span>点完等几秒再动手</span>
+        <span className="probe-radios">
+          {[0, 3, 5, 10].map((n) => (
+            <label key={n}>
+              <input
+                type="radio"
+                checked={leadSec === n}
+                onChange={() => setLeadSec(n)}
+                disabled={disabled}
+              />
+              {n === 0 ? '不等' : `${n} 秒`}
+            </label>
+          ))}
+        </span>
+      </label>
+      <p className="probe-note">
+        <strong>这段等待是必须的。</strong>你点按钮的那一刻，前台是这个客户端窗口而不是
+        Chrome，而两块都要求 Chrome 在前台（键盘要 <code>document.hasFocus()</code>，
+        鼠标要页面收得到 mousemove）。<strong>不等的话唯一可能的结果就是被闸拦下</strong>——
+        「不等」那一档留着是为了故意去验闸，不是正常用法。
+        倒计时期间切到 Chrome，然后<strong>手离开鼠标键盘</strong>。
+      </p>
+    </>
+  )
+}
+
 function OsProbeBlock({ account }: { account: AccountView | null }) {
   const [target, setTarget] = useState<'viewportSpread' | 'reversibleToggle'>('viewportSpread')
+  const lead = useLeadIn()
   const [result, setResult] = useState<OsProbeResult | null>(null)
   const [transportError, setTransportError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -395,6 +456,7 @@ function OsProbeBlock({ account }: { account: AccountView | null }) {
     setRunning(true)
     setTransportError(null)
     setResult(null)
+    await lead.wait()
     const startedAt = performance.now()
     try {
       setResult(await api.osProbe({ platform: account.platform, accountRef: account.accountRef, target }))
@@ -404,7 +466,7 @@ function OsProbeBlock({ account }: { account: AccountView | null }) {
       setElapsedMs(Math.round(performance.now() - startedAt))
       setRunning(false)
     }
-  }, [running, blocked, account, target])
+  }, [running, blocked, account, target, lead])
 
   const data = result?.result?.data
   return (
@@ -442,9 +504,13 @@ function OsProbeBlock({ account }: { account: AccountView | null }) {
         可见动作。
       </p>
 
+      <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
+
       <div className="sql-bar">
         <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {running ? '注入中，手别碰鼠标…' : '开始注入'}
+          {lead.left > 0
+            ? `切到 Chrome… ${lead.left}`
+            : running ? '注入中，手别碰鼠标…' : '开始注入'}
         </button>
         {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
         {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
@@ -495,6 +561,7 @@ const OS_TYPE_MAX_RUNES = 120
 
 function OsTypeBlock({ account }: { account: AccountView | null }) {
   const [text, setText] = useState(OS_TYPE_PRESETS[0].text)
+  const lead = useLeadIn()
   const [result, setResult] = useState<OsTypeResult | null>(null)
   const [transportError, setTransportError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
@@ -514,6 +581,7 @@ function OsTypeBlock({ account }: { account: AccountView | null }) {
     setRunning(true)
     setTransportError(null)
     setResult(null)
+    await lead.wait()
     const startedAt = performance.now()
     try {
       setResult(await api.osType({ platform: account.platform, accountRef: account.accountRef, text }))
@@ -523,7 +591,7 @@ function OsTypeBlock({ account }: { account: AccountView | null }) {
       setElapsedMs(Math.round(performance.now() - startedAt))
       setRunning(false)
     }
-  }, [running, blocked, account, text])
+  }, [running, blocked, account, text, lead])
 
   const data = result?.result?.data
   return (
@@ -562,9 +630,13 @@ function OsTypeBlock({ account }: { account: AccountView | null }) {
         验英文段、<strong>含数字</strong>照一照那个至今没被真机照过的洞。
       </p>
 
+      <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />
+
       <div className="sql-bar">
         <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
-          {running ? '打字中，别碰键盘、别切走 Chrome…' : '开始打字'}
+          {lead.left > 0
+            ? `切到 Chrome… ${lead.left}`
+            : running ? '打字中，别碰键盘、别切走 Chrome…' : '开始打字'}
         </button>
         {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
         {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
