@@ -9,7 +9,7 @@ import (
 
 // Store 是本包用到的只读投影,窄接口声明在使用方 —— 测试给假实现,不必搬 *store.Store。
 type Store interface {
-	AppCurrentJob() (store.AppJobProjection, error)
+	AppRunningJob() (store.AppJobProjection, error)
 	AppOverview(store.AppOverviewRequest) (*store.AppOverviewProjection, error)
 	StatusReportCounts(platform, accountRef string, start, end time.Time) (store.StatusReportCounts, error)
 	SuspectCmds() ([]store.CmdRecord, error)
@@ -107,7 +107,9 @@ func Collect(deps Deps) (*Payload, error) {
 		return payload, nil
 	}
 
-	job, err := deps.Store.AppCurrentJob()
+	// 当日职位计划下正在跑的职位与后台「当前职位」可以不同,上报按批次锚定
+	// 职位取值(AppRunningJob),否则整天的计数会记到错的职位名下。
+	job, err := deps.Store.AppRunningJob()
 	if err != nil {
 		return nil, err
 	}

@@ -276,6 +276,36 @@ func unavailableMetric(reason string) AppMetric {
 // 账号的动作(账号跟随登录,2026-07-30 裁决);overview 曾对零账号整体短路,
 // 职位被硬编码成 missing,同步成功也不可见,构成装机死锁(2026-08-01 真机复现)。
 // 查询与 AppOverview 的零批次分支同源:职位头本就不带账号维度。
+// AppRunningJob 返回"实际正在跑"的职位:有未终局采集批次时以批次锚定职位
+// 覆盖后台「当前职位」投影的 ID 与名称——当日职位计划(2026-09-01)下两者
+// 常常不同,工作状态上报按本方法取值才不会把当天的批次记到错的职位名下。
+// 无未终局批次或批次身份缺失时原样回落后台当前职位投影。
+func (s *Store) AppRunningJob() (AppJobProjection, error) {
+	projection, err := s.AppCurrentJob()
+	if err != nil {
+		return projection, err
+	}
+	var batch SourcingBatch
+	batchErr := s.db.Where("ended_at IS NULL").Order("started_at DESC").First(&batch).Error
+	if errors.Is(batchErr, gorm.ErrRecordNotFound) {
+		return projection, nil
+	}
+	if batchErr != nil {
+		return projection, batchErr
+	}
+	if batch.BackendJobID == nil || strings.TrimSpace(*batch.BackendJobID) == "" {
+		return projection, nil
+	}
+	var revision JobAIContextRevision
+	if err := s.db.First(&revision, "revision_hash = ?", batch.ContextRevisionHash).Error; err != nil {
+		return projection, nil
+	}
+	projection.Available = true
+	projection.BackendJobID = strings.TrimSpace(*batch.BackendJobID)
+	projection.Name = revision.DisplayName
+	return projection, nil
+}
+
 func (s *Store) AppCurrentJob() (AppJobProjection, error) {
 	var out AppJobProjection
 	err := s.db.Transaction(func(tx *gorm.DB) error {
