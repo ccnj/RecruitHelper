@@ -230,9 +230,43 @@ async function callHand<T>(path: string, body?: unknown): Promise<T> {
     throw new HandServiceDown('手服务未挂载——本平台可能没有注入实现')
   }
   if (!resp.ok && resp.status !== 409) {
-    throw new PlatformError('INTERNAL_HAND', `手服务返回 ${resp.status}`, 'afterRecovery')
+    // **原因在响应体里,只报状态码等于把判定现场丢掉。**
+    //
+    // 2026-09-01 Windows 首验第二条命令就撞上了:手服务返回的是
+    // 「起管道失败(\\.\pipe\hiboss-tip):拒绝访问」——一句话就能定位,
+    // 而现场只看到「手服务返回 500」,只能靠猜。「错误收敛必须留痕」正是禁这个:
+    // 对外文案可以收敛,对内证据不许丢。
+    throw new PlatformError('INTERNAL_HAND',
+      `手服务返回 ${resp.status}${await handFailureReason(resp)}`, 'afterRecovery')
   }
   return await resp.json() as T
+}
+
+/**
+ * 从手服务的失败响应里抠出人话原因。
+ *
+ * 形状按端点不同:打字那条回的是 TypeResult(错误文本在 `status`),别的端点回
+ * `{error}`。都取不到就把原文截一段带出来——**宁可带一段看不懂的,也别什么都不带**。
+ */
+async function handFailureReason(resp: Response): Promise<string> {
+  let text: string
+  try {
+    text = await resp.text()
+  } catch {
+    return ''
+  }
+  if (!text.trim()) return ''
+  try {
+    const body = JSON.parse(text) as { status?: unknown; error?: unknown }
+    for (const value of [body.status, body.error]) {
+      if (typeof value === 'string' && value.trim() && value !== 'ok') {
+        return `:${value.slice(0, 300)}`
+      }
+    }
+  } catch {
+    // 不是 JSON 就当纯文本
+  }
+  return `:${text.slice(0, 300)}`
 }
 
 class HandServiceDown extends Error {}
