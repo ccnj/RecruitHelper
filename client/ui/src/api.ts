@@ -1,6 +1,11 @@
 // 客户端(脑)UI 的数据层:访问本地脑服务的 admin 端点。纯 fetch,可在 Node 下单测。
 // 测试页与调度器共用同一命令通道,这里不提供任何测试旁路。
 
+// OS 键鼠探针的 data 直接引 codegen 产物。这是 UI 里唯一一处引契约类型——
+// 别处的 View 都是脑侧另拼的投影,而 /admin/osprobe|ostype 是**原样透传**手侧
+// 回来的 ResultBody,形状就是契约形状,手抄一遍等于第二份定义。
+import type { DebugOsProbeData, DebugOsTypeData } from '../../../contract/gen/ts/protocol.gen'
+
 declare global {
   interface Window {
     recruitHelper?: {
@@ -397,6 +402,29 @@ export interface NotifyProbeResult {
   chatNote?: string
   resumeNote?: string
 }
+
+/** `/admin/osprobe` 与 `/admin/ostype` 的共同回执形状:两个端点都把手侧回来的
+ *  ResultBody 原样透传,不做投影。`result.data` 在命令没跑到手侧(拒绝、超时)
+ *  时整个缺席——那不是 bug,是"没有观测"与"观测到坏结果"的区别。 */
+export interface OsCommandResult<Data> {
+  msgId?: string
+  status?: string
+  errorCode?: string
+  result?: {
+    status?: string
+    execMs?: number
+    data?: Data
+    error?: {
+      code?: string
+      message?: string
+      retryable?: string
+      sideEffect?: string
+    }
+  }
+}
+
+export type OsProbeResult = OsCommandResult<DebugOsProbeData>
+export type OsTypeResult = OsCommandResult<DebugOsTypeData>
 
 export interface MutationResult {
   ok?: boolean
@@ -910,6 +938,23 @@ export const api = {
   devReportSettings: () => get<FieldReportSettings>('/admin/dev/report/settings'),
   setDevReportAutoUpload: (autoUploadEnabled: boolean) =>
     post<FieldReportSettings>('/admin/dev/report/settings', { autoUploadEnabled }),
+  // OS 注入探针(鼠标)。脑侧唯一的派发入口就是这个端点,门禁盯着
+  // (dispatch/osprobe_producer_test.go)——巡检与工作流一律不铸这条命令。
+  //
+  // 慢:契约 deadlineMs 300 秒,脑侧等到 330 秒。冷启动会先打偏再自己重试,
+  // 界面上得允许它转很久。
+  osProbe: (body: {
+    platform: string
+    accountRef: string
+    target: 'viewportSpread' | 'reversibleToggle'
+  }) => post<OsProbeResult>('/admin/osprobe', body),
+  // OS 注入探针(键盘)。把一句话打进 IM 输入框然后**停手,不点发送**。
+  // 输入框非空时手侧拒绝——composer.empty 与发送原语用同一道闸。
+  osType: (body: {
+    platform: string
+    accountRef: string
+    text: string
+  }) => post<OsTypeResult>('/admin/ostype', body),
   probeInterviewEditor: (body: {
     platform: string
     accountRef: string
