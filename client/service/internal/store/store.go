@@ -119,6 +119,8 @@ func Open(dataDir string) (*Store, error) {
 		&SourcingGreetingInvocation{},
 		&SourcingBatchSelection{},
 		&SourcingSelectionDecision{},
+		&DailyJobPlan{},
+		&DailyJobPlanEntry{},
 		&CommunicationAction{},
 		&EffectIntent{},
 		&CandidateGreetingHead{},
