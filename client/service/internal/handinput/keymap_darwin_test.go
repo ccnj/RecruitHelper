@@ -3,32 +3,13 @@
 package handinput
 
 import (
-	"fmt"
 	"testing"
 )
 
-// 排版器能发出的标点键全集,取自上游 `compose/pinyin.mjs` 的 `PUNCT_KEY`。
-//
-// 插件侧有一条配套用例钉住那张表的 code 集合恰好是这八个——**上游加了第九个,
-// 那边先红**,提醒回来补这里。两处合起来才是完整的门禁:只有这一处的话,
-// 上游长出新键位时我们这边一片绿,直到真机上打出错字。
-var punctKeysFromUpstream = []string{
-	"Comma", "Period", "Semicolon", "Slash",
-	"Quote", "Backquote", "Backslash", "Minus",
-}
+// 期望集合在 keymap_expect_test.go,与 windows 那张表共用一份。
 
 func TestDarwinKeymapCoversWholeAlphabet(t *testing.T) {
-	want := map[string]bool{"Space": true, "ShiftLeft": true}
-	// 字母与数字是**推出来的**,不是从表里抄的——抄一遍就成了自己跟自己比。
-	for c := 'A'; c <= 'Z'; c++ {
-		want[fmt.Sprintf("Key%c", c)] = true
-	}
-	for d := 0; d <= 9; d++ {
-		want[fmt.Sprintf("Digit%d", d)] = true
-	}
-	for _, p := range punctKeysFromUpstream {
-		want[p] = true
-	}
+	want := emittableKeyCodes()
 
 	for code := range want {
 		if _, err := darwinKeyCode(code); err != nil {

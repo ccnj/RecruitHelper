@@ -2,8 +2,8 @@
 
 package handinput
 
-// SendInput 鼠标注入。改写自上游 hiBoss `lab/engine/inject/input_windows.go`,
-// 只保留鼠标部分,两条实战注意事项原样保留:
+// SendInput 键鼠注入。改写自上游 hiBoss `lab/engine/inject/input_windows.go`,
+// 三条实战注意事项原样保留:
 //
 //  1. **DPI 感知必须在任何坐标操作之前声明**(写在 init 里)。不声明的话 Windows 会
 //     对本进程「撒谎」:GetCursorPos 返回虚拟化坐标、SendInput 被偷偷缩放,症状是
@@ -12,7 +12,14 @@ package handinput
 //
 //  2. **INPUT 的 x64 布局**:union 按最大成员 MOUSEINPUT(32B) 计,加上前 4 字节
 //     type + 4 字节 padding,sizeof(INPUT) = 40。结构体不对齐的话 SendInput 的
-//     cbSize 校验不过、**静默返回 0**。
+//     cbSize 校验不过、**静默返回 0**。KEYBDINPUT 只有 24B,所以键盘那个结构体
+//     要在尾部补 8 字节——补齐的是 union 的大小,不是自己的。
+//
+//  3. **键盘事件必须同时给虚拟键码与扫描码。** 输入法与部分应用**只认扫描码**,
+//     缺了就收不到键——而我们要驱动的自研 TIP 正是一个输入法。症状是最坏的那种:
+//     SendInput 返回 1(发出去了)、网页也收得到 keydown,但 composition 一个字都不起,
+//     看起来像"TIP 没装",实际是键送到了却不认。扫描码由 MapVirtualKeyW 现查,
+//     不硬编码:它随键盘布局变。
 //
 // 纯 Go(syscall.NewLazyDLL),不引入 cgo。
 
@@ -29,11 +36,15 @@ var (
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procGetSystemMetrics              = user32.NewProc("GetSystemMetrics")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
+	procMapVirtualKey                 = user32.NewProc("MapVirtualKeyW")
 )
 
 const (
 	dpiPerMonitorAwareV2 = ^uintptr(3) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 	inputMouse           = 0
+	inputKeyboard        = 1
+	keyeventfKeyUp       = 0x0002
+	mapvkVkToVsc         = 0 // MAPVK_VK_TO_VSC
 
 	// ABSOLUTE|VIRTUALDESK 一起用才是「整个虚拟桌面的绝对坐标」;
 	// 只给 ABSOLUTE 的话坐标是相对**主屏**的,多屏下第二块屏永远够不着。
@@ -70,6 +81,24 @@ type winMouseInput struct {
 	mi  mouseInput
 }
 
+// KEYBDINPUT 只有 24B(x64:wVk 2 + wScan 2 + dwFlags 4 + time 4 + 隐式对齐 4 +
+// dwExtraInfo 8),比 union 的 32B 小,所以尾部要补 8 —— 少补的话 cbSize 对不上,
+// SendInput **静默返回 0**。postKey() 里那句 sizeof 断言就是防这个。
+type keybdInput struct {
+	wVk         uint16
+	wScan       uint16
+	dwFlags     uint32
+	time        uint32
+	dwExtraInfo uintptr
+}
+
+type winKeybdInput struct {
+	typ uint32
+	_   uint32 // x64 padding
+	ki  keybdInput
+	_   [8]byte
+}
+
 type winPoint struct{ X, Y int32 }
 
 func init() { procSetProcessDpiAwarenessContext.Call(dpiPerMonitorAwareV2) }
@@ -94,17 +123,39 @@ func (w *windowsInjector) MouseMove(x, y float64) error {
 func (w *windowsInjector) MouseDown(button int) error { return w.button(button, true) }
 func (w *windowsInjector) MouseUp(button int) error   { return w.button(button, false) }
 
-// 键盘注入在 Windows 上**尚未实现**(键盘线第二段)。
-//
-// 这里显式报错而不是发一个"差不多"的 SendInput:Windows 那半要配自研 TIP,
-// 由命名管道告诉它上屏哪个词;没有 TIP 的键盘注入在中文下会打出错字——那是死代码里
-// 更坏的一种,能编译、能跑、结果是错的。
-func (w *windowsInjector) KnowsKey(code string) error { return errKeyboardNotOnWindows(code) }
-func (w *windowsInjector) KeyDown(code string) error  { return errKeyboardNotOnWindows(code) }
-func (w *windowsInjector) KeyUp(code string) error    { return errKeyboardNotOnWindows(code) }
+// KnowsKey 只查表,不发任何东西 —— 有它才能在发出第一次按键之前否掉整份计划。
+func (w *windowsInjector) KnowsKey(code string) error {
+	_, err := windowsKeyCode(code)
+	return err
+}
 
-func errKeyboardNotOnWindows(code string) error {
-	return fmt.Errorf("键盘注入尚未在 Windows 上实现(键盘线第二段:自研 TIP + 命名管道);code=%s", code)
+func (w *windowsInjector) KeyDown(code string) error { return w.postKey(code, false) }
+func (w *windowsInjector) KeyUp(code string) error   { return w.postKey(code, true) }
+
+// postKey 发一次按键。**没有兜底**:表外的 code 直接失败,不猜一个"差不多"的键——
+// 上游在字元→键位那张表上吃过这个亏,静默降级把"打错字"变成了查无可查。
+func (w *windowsInjector) postKey(code string, up bool) error {
+	vk, err := windowsKeyCode(code)
+	if err != nil {
+		return err
+	}
+	// 扫描码现查。**输入法只认它**,而我们要驱动的自研 TIP 正是输入法。
+	sc, _, _ := procMapVirtualKey.Call(uintptr(vk), mapvkVkToVsc)
+	in := winKeybdInput{typ: inputKeyboard}
+	in.ki.wVk = vk
+	in.ki.wScan = uint16(sc)
+	if up {
+		in.ki.dwFlags = keyeventfKeyUp
+	}
+	if unsafe.Sizeof(in) != 40 {
+		return fmt.Errorf("INPUT 布局错误:sizeof=%d,应为 40 —— cbSize 对不上 SendInput 会静默返回 0",
+			unsafe.Sizeof(in))
+	}
+	n, _, callErr := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+	if n != 1 {
+		return errSendInput(n, callErr)
+	}
+	return nil
 }
 
 func (w *windowsInjector) button(button int, down bool) error {
@@ -156,12 +207,18 @@ func sendMouse(flags uint32, dx, dy int32) error {
 	in := winMouseInput{typ: inputMouse, mi: mouseInput{dx: dx, dy: dy, dwFlags: flags}}
 	n, _, err := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
 	if n != 1 {
-		// UIPI:目标窗口完整性级别比我们高时,SendInput **静默失败**,返回 0 而不报错。
-		// 上游标注这一条「只有注释里的断言,零实测」——真机首验时要专门确认。
-		return fmt.Errorf("SendInput 只发出 %d 个事件(%v) —— 若目标是以管理员身份运行的"+
-			"浏览器,本进程也必须提权(UIPI)", n, err)
+		return errSendInput(n, err)
 	}
 	return nil
+}
+
+// UIPI:目标窗口完整性级别比我们高时,SendInput **静默失败**,返回 0 而不报错。
+// 上游标注这一条「只有注释里的断言,零实测」——真机首验时要专门确认。
+//
+// 键鼠共用一条:同一个 API、同一种失败,分开写只会让其中一边的说明先过时。
+func errSendInput(n uintptr, err error) error {
+	return fmt.Errorf("SendInput 只发出 %d 个事件(%v) —— 若目标是以管理员身份运行的"+
+		"浏览器,本进程也必须提权(UIPI)", n, err)
 }
 
 func metric(i int) int {
