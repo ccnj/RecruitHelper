@@ -57,7 +57,7 @@ export function tokenize(text) {
     else if (/^[\x20-\x7e]$/.test(ch)) kind = 'asciiPunct'
     // 生僻汉字（𰻞 㸚 𠮷）、emoji、外文 —— pinyin-pro 一律判为非汉字。
     // 单列出来，错误信息才说得准；一稿把它们混进 asciiPunct，
-    // 报错会说「半角标点需切换输入法模式」，把人往错方向指。
+    // 报错会拿半角标点那一套说事（「改用对应的全角标点即可」），把人往错方向指。
     else kind = 'other'
     const kb = kind === 'han' ? toKeyboardPinyin(ch, it.pinyin) : { py: null, why: null }
     return { ch, py: kb.py, pyWhy: kb.why, kind }
@@ -174,11 +174,15 @@ export const digitKey = (ch) => 'Digit' + String(ch).replace(/[０-９]/, (c) =>
  * 换个默认值治不了本。根子是这张映射表**不完备**，而代码假装它完备。
  * 正确做法是把「能不能打」变成显式属性：认识就给键位，不认识就说不认识。
  *
- * 当前方案（借用系统中文输入法）的能力边界：
+ * 当前方案（自研 TSF 输入法）的能力边界：
  *   ✅ 汉字（走 IME）· 中文全角标点 · 数字 · 空格 · 换行
- *   ❌ 半角 ASCII 标点、英文字母 —— 它们要求切换输入法模式，
- *      而「输入法状态」这个概念当前模型里没有。这属于 TSF 那一轮的能力
- *      （自研 TIP 想上屏什么就上屏什么，不需要切模式），不在此处打补丁。
+ *   ✅ 英文字母 —— 但**不经这个函数**。它和汉字走同一条路（字母键进组字串、
+ *      上屏键出词），键位由 segment.mjs 按字母直取，故这里对 latin 仍返回 null：
+ *      谁把 latin 送到这儿来，谁就走错路了。可打性问下面的 `typable`。
+ *   ❌ 半角 ASCII 标点 —— 真微软拼音下它走 insertText 直接上屏（type1），
+ *      而我们的 TIP 会把这些键当上屏键吃掉、走 composition（type2）。形状对不上，
+ *      且差异就落在上报载荷里（typingType / typingFragment）。要支持得给管道协议
+ *      加「这个词透传、别吃」的标记，那是另一轮的事，不在此处打补丁。
  *
  * @returns {{code: string, shift?: boolean} | null}
  */
@@ -196,18 +200,40 @@ export function keyFor(tok) {
     case 'cjkPunct':
       return PUNCT_KEY[tok.ch] ?? null
     default:
-      // asciiPunct / latin / 以及被 pinyin-pro 判为非汉字的生僻字与 emoji
+      // asciiPunct / 以及被 pinyin-pro 判为非汉字的生僻字与 emoji。
+      // latin 也会落到这里并得到 null —— 这是对的，它根本不该走 keyFor。
       return PUNCT_KEY[tok.ch] ?? null
+  }
+}
+
+/**
+ * 这个字元打不打得出来。**可打性的唯一出处。**
+ *
+ * 先前这个判断散在 segment 的前置校验里，写成「汉字看 py、其余看 keyFor」——
+ * 于是「怎么打」和「能不能打」被绑死在一起。英文字母打得出来，但它不经 keyFor
+ * （走 composition），在那种写法下就只能特判一次。收成一个函数，调用方问的是
+ * 「能不能打」，不必知道是哪条路。
+ */
+export function typable(tok) {
+  switch (tok.kind) {
+    case 'han':
+      return !!tok.py
+    // 字母全部可打：A–Z / a–z 都落在 KeyA–KeyZ 上，大写也按同一个物理键
+    // （不排 Shift，大写靠上屏的词本身带 —— 理由见 segment.mjs 的英文段一节）。
+    case 'latin':
+      return true
+    default:
+      return !!keyFor(tok)
   }
 }
 
 /** 为什么打不出来 —— 供错误信息使用 */
 export function whyUntypable(tok) {
   switch (tok.kind) {
-    case 'latin':
-      return '英文字母需切换输入法模式（TSF 轮次解决）'
+    // latin 不在这里 —— 它一律可打，走不到这个函数
     case 'asciiPunct':
-      return '半角标点需切换输入法模式；改用对应全角标点即可'
+      return '半角标点在真输入法下直接上屏、不走组字，而我们的 TIP 会把它当上屏键吃掉，'
+        + '形状对不上（见 keyFor 的能力边界）；改用对应的全角标点即可'
     case 'cjkPunct':
       return '该全角标点尚未收录键位（可补进 PUNCT_KEY）'
     case 'han':
