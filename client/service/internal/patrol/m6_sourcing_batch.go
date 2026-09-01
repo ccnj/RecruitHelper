@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 
@@ -34,6 +35,9 @@ const (
 	sourcingBlockNoProgress      = "windowNoProgress"
 	sourcingBlockJobStatusRead   = "jobStatusReadFailed"
 	sourcingBlockJobNotOnline    = "jobNotOnline"
+	// sourcingBlockPlanFinalize:当日职位计划定稿失败(AGENTS.md 2026-09-01)。
+	// 不属于跳过类原因——定稿失败是计划级故障,由编排器收口扫描终止整个计划。
+	sourcingBlockPlanFinalize = "dailyPlanFinalizeFailed"
 )
 
 // runSourcingBatch 是正式批采的唯一生产 actor。窗口引用只在当前调用栈内
@@ -103,6 +107,12 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		if report := a.manager.config.ReportJobStatus; report != nil {
 			// 观察用上报,fire-and-forget:成败都不改变下面的采集裁决。
 			report(published)
+		}
+		// 当日职位计划定稿钩子(AGENTS.md 2026-09-01):计划草稿挂在当日第一次
+		// 成功的状态闸读取上定稿(N=在线∩合格、份额落库、离线条目标跳过)。
+		// 定稿失败按闸失败同向收场——不开批,计划由编排器收口扫描终止。
+		if err := a.finalizeDailyJobPlanFromGate(published); err != nil {
+			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockPlanFinalize, err)
 		}
 		if status := jobconfig.FindPostingStatus(positionTitle, published.Sections); status != jobconfig.PostingStatusLabelOnline {
 			return a.stopSourcingBatchAtGate(batch.BatchID, sourcingBlockJobNotOnline,
@@ -371,4 +381,47 @@ func preservesSourcingBatch(err error) bool {
 		errors.Is(err, ErrActorGenerationChanged) ||
 		errors.Is(err, ErrRoundSupersededBySourcingBatch) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// finalizeDailyJobPlanFromGate 用状态闸刚读回的分区清单为当日职位计划定稿。
+// 名字匹配与发布幂等同一套归一化口径(jobconfig.FindPostingStatus 内部完成);
+// 计划不存在或已定稿是常态直通。定稿结果整体落一行日志留痕(留痕条款):
+// 每条目的在线判定与份额此后也可在计划表原样查到。
+func (a *roundActor) finalizeDailyJobPlanFromGate(published protocol.JobReadPublishedListData) error {
+	plan, entries, err := a.manager.store.ActiveDailyJobPlan(a.key())
+	if err != nil {
+		return err
+	}
+	if plan == nil || plan.Status != store.DailyJobPlanDraft {
+		return nil
+	}
+	observations := make([]store.DailyJobPlanGateObservation, 0, len(entries))
+	for index := range entries {
+		if entries[index].Status != store.DailyJobPlanEntryPending {
+			continue
+		}
+		label := jobconfig.FindPostingStatus(entries[index].JobName, published.Sections)
+		observations = append(observations, store.DailyJobPlanGateObservation{
+			Seq:         entries[index].Seq,
+			Online:      label == jobconfig.PostingStatusLabelOnline,
+			StatusLabel: label,
+		})
+	}
+	finalized, err := a.manager.store.FinalizeDailyJobPlan(plan.PlanID, observations, a.manager.now())
+	if err != nil {
+		return err
+	}
+	quotas := make([]string, 0, len(finalized.Entries))
+	for index := range finalized.Entries {
+		entry := finalized.Entries[index]
+		quotas = append(quotas, fmt.Sprintf("%d:%s=%d/%s%s",
+			entry.Seq, entry.JobName, entry.Quota, entry.Status,
+			map[bool]string{true: "(" + entry.SkipReason + ")", false: ""}[entry.SkipReason != ""]))
+	}
+	slog.Info("当日职位计划已定稿",
+		"planId", finalized.Plan.PlanID,
+		"totalQuota", finalized.Plan.TotalQuota,
+		"jobCount", finalized.Plan.JobCount,
+		"entries", strings.Join(quotas, "; "))
+	return nil
 }
