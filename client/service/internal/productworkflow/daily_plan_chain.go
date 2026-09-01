@@ -254,7 +254,9 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 		return nil
 	}
 
-	latest, err := m.store.LatestProductWorkflowRun()
+	// 只看本账号最近一次 full 运行:replyOnly 插曲(用户在收口 tick 前点了
+	// 「只处理消息」又结束)或将来其他账号的运行,都不得决定本计划生死。
+	latest, err := m.store.LatestFullProductWorkflowRun(key)
 	if err != nil {
 		return err
 	}
@@ -359,6 +361,12 @@ func (m *Manager) skipEntryAndChainLocked(
 	}
 	started, startErr := m.startFullLocked(key, next.RevisionHash, now)
 	if startErr != nil {
+		// 窗口已关的判定不依赖错误哨兵身份:开跑链路里 patrol 用自己的
+		// ErrDailyWindowNotOpen,不是 workflow.ErrDailyWindowClosed;按当下
+		// 窗口实况分类,跨点终止才会被正确记成 dayClosed 而非 chainInterrupted。
+		if open, windowErr := m.dailyWindow.Evaluate(now, m.location); windowErr == nil && !open {
+			return abort(planEndReasonDayClosed)
+		}
 		if errors.Is(startErr, workflow.ErrDailyWindowClosed) {
 			return abort(planEndReasonDayClosed)
 		}

@@ -412,3 +412,54 @@ func TestDailyPlanChainsWhenFirstEntryAlreadySkippedByFinalize(t *testing.T) {
 		t.Fatalf("接续批次错误: %+v err=%v", batch, err)
 	}
 }
+
+// replyOnly 插曲不得决定计划生死:条目一被跳过类原因拦停后,用户点过「只处理
+// 消息」又结束——收口分类只看本账号最近一次 full 运行,照样跳过接续。
+func TestDailyPlanIgnoresReplyOnlyInterludeWhenClassifying(t *testing.T) {
+	db, key, manager, _, clock, _, revB := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizeActivePlanBothOnline(t, db, key, clock.now)
+	terminalizeRunBatch(t, db, runA, "jobNotOnline", clock.now)
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: runA.RunID,
+		From:  workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At:    clock.now, Stage: store.ProductWorkflowStageFailed, Failure: "sourcingBatchStopped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// replyOnly 插曲:开始又结束,成为全局最近一条 run。
+	clock.now = clock.now.Add(time.Minute)
+	replyRun, err := manager.StartReplyOnly(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: replyRun.RunID,
+		From:  workflow.State{Mode: workflow.ModeReplyOnly, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeReplyOnly, Status: workflow.StatusCompleted},
+		At:    clock.now, Stage: store.ProductWorkflowStageCompleted,
+		EndReason: productWorkflowEndReasonUserEnded,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("收口扫描: %v", err)
+	}
+	_, entries, err := db.ActiveDailyJobPlan(key)
+	if err != nil || entries == nil || entries[0].Status != store.DailyJobPlanEntrySkipped {
+		t.Fatalf("计划被 replyOnly 插曲错杀: entries=%+v err=%v", entries, err)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.Mode != workflow.ModeFull {
+		t.Fatalf("未接续条目二: %+v err=%v", active, err)
+	}
+	batch, err := db.SourcingBatchByID(*active.SourcingBatchID)
+	if err != nil || batch.ContextRevisionHash != revB.RevisionHash {
+		t.Fatalf("接续批次错误: %+v err=%v", batch, err)
+	}
+}
