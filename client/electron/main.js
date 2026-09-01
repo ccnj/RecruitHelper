@@ -8,7 +8,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { BrainService } = require('./service')
 const { resolveLayout, resolveDataDir } = require('./layout')
-const { pluginInstallDir, updateStageDir, ensurePluginInstalled } = require('./pluginSeed')
+const {
+  pluginInstallDir, tipInstallDir, updateStageDir,
+  ensurePluginInstalled, ensureTipInstalled,
+} = require('./pluginSeed')
 const { TRAY_ICON_PNG_BASE64, APP_ICON_PNG_BASE64 } = require('./icons')
 const { RotatingLog } = require('./logRotate')
 
@@ -69,6 +72,15 @@ async function boot() {
     ensurePluginInstalled({
       sourceDir: layout.pluginDir,
       targetDir: pluginDir,
+      log: writeLog,
+    })
+    // TIP 同理,而且理由更硬:TSF 把 DLL 映射进 chrome.exe,映像文件在 Windows 上
+    // 锁死;更要紧的是 regsvr32 把**绝对路径**写进注册表,所以它必须待在一个
+    // 不随安装目录走的固定位置。安置只放文件,**不注册**——注册要管理员权限,
+    // 而本安装器刻意不提权(见 third_party/tip/README.md)。
+    ensureTipInstalled({
+      sourceDir: layout.tipDir,
+      targetDir: tipInstallDir({ userDataDir: app.getPath('userData') }),
       log: writeLog,
     })
   }

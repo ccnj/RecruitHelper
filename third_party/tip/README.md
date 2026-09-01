@@ -38,33 +38,60 @@ x86_64-w64-mingw32-objdump -p third_party/tip/hiboss_tip.dll | grep 'DLL Name'
 
 ## 装到 Windows 上
 
-随客户端整包携带，落在 `<安装目录>\resources\tip\hiboss_tip.dll`，
-安装目录是 `%LOCALAPPDATA%\Programs\RecruitHelper`。
+随客户端整包携带,但**不留在安装目录**。壳启动时把它安置到:
 
 ```
-regsvr32 hiboss_tip.dll        注册，必须管理员
+%LOCALAPPDATA%\RecruitHelper\tip\hiboss_tip.dll
+```
+
+与插件的固定目录(`…\RecruitHelper\plugin\`)同级。安装目录里那份
+(`…\Programs\RecruitHelper\resources\tip\`)只是母版,不是被注册的那个。
+
+**为什么非搬不可**,两条,第二条更硬:
+
+1. **NSIS 升级整体替换安装目录**,而 TSF 把 DLL 映射进 chrome.exe 等进程,
+   映像文件在 Windows 上锁死——覆盖或改名直接失败。插件当年就是为同类理由搬出去的
+   (`client/electron/pluginSeed.js` 开头)。
+2. **`regsvr32` 把绝对路径写进 `HKCR\CLSID`。** 位置一旦被人注册过就是长期承诺:
+   改路径等于让已注册的客户机指向一个不存在的文件,而症状是「输入法还在语言栏里,
+   但一按键什么都不发生」——跟「从没装上」现场看起来一模一样。
+
+安置只放文件、**不注册**;注册要管理员,而本产品的安装器刻意是
+`RequestExecutionLevel user`、不弹 UAC(静默升级正靠这一点)。
+
+```
+cd %LOCALAPPDATA%\RecruitHelper\tip
+regsvr32 hiboss_tip.dll        注册,必须管理员
 regsvr32 /u hiboss_tip.dll     反注册
 ```
 
-注册写 `HKCR\CLSID`（= HKLM）与 TSF profile，**必须提权**；没有官方支持的免管理员
-per-user 路径，MSIX 也走不通。装完**必须重启 Chrome**——TSF 只在进程启动时加载 TIP。
+注册写 `HKCR\CLSID`(= HKLM)与 TSF profile;没有官方支持的免管理员 per-user 路径,
+MSIX 也走不通。装完**必须重启 Chrome**——TSF 只在进程启动时加载 TIP。
 
-判据是 `tasklist /m hiboss_tip.dll`，**不是「能打字」**：`regsvr32` 会对没生效的
-注册照样弹「成功」，而 TIP 没加载时按键落到底层美式键盘，打出来的字母一模一样。
+判据是 `tasklist /m hiboss_tip.dll`,**不是「能打字」**:`regsvr32` 会对没生效的
+注册照样弹「成功」,而 TIP 没加载时按键落到底层美式键盘,打出来的字母一模一样。
 
-## ⚠ 现在这个位置是临时的
+### 换 TIP 版本时
 
-放在安装目录里对**真机验证**够用，但不是它最终该待的地方。两条理由：
+壳会在下次启动时自动把新版换进固定目录(指纹不同才动手)。两个注意:
 
-1. **NSIS 升级整体替换安装目录，而 TSF 加载期间 Windows 锁着这个文件。** 插件当年
-   就是为这个从安装目录搬出去的（见 `client/electron/pluginSeed.js` 开头）——
-   Chrome 开着读扩展目录时被覆盖会报「扩展损坏」。DLL 更硬：文件锁住，覆盖直接失败。
-2. **`regsvr32` 把绝对路径写进注册表**，所以它落在哪儿是个长期承诺。
+- **Chrome 开着且 TIP 已注册时,替换会失败**——映像锁死。失败是**降级**:
+  旧版原封不动、记一行日志、客户端照常起来。想换就关掉 Chrome 再重启客户端。
+- **路径没变,所以注册通常照旧有效**;但 CLSID 与 TSF profile 的 GUID 是烧在 DLL
+  里的,它们要是变了就得重新 `regsvr32`。升 TIP 版本时一并想清楚。
 
-按插件的先例，最终位置应是安装目录之外的 `%LOCALAPPDATA%\RecruitHelper\tip\`，
-由壳启动时安置。**没有现在就做，是因为它和「TIP 怎么装到客户机」那个悬着的问题
-绑在一起**（注册要管理员，而本产品的安装器刻意是 `RequestExecutionLevel user`、
-不弹 UAC，静默升级也靠这一点）。等真机验完这条线成立，再一起定。
+## 悬着的:怎么让客户机完成注册
 
-相关：`docs/boss/键盘线架构-2026-08-31.md`「九、两个尚未解决的真问题」、
-`docs/boss/Windows真机操作单-键盘线-2026-09-01.md` 第 4 段。
+固定目录解决了"文件放哪",没解决"谁来提权跑那一行"。这仍是
+`docs/boss/键盘线架构-2026-08-31.md`「九、两个尚未解决的真问题」里的第一条:
+
+> `regsvr32` 注册需要管理员权限,而本产品的交付方式是「客户端整包携带 + 首次人工
+> 远程协助」。**它是键盘线能不能落地的最终关卡。**
+
+首次安装本来就有人在场做手工步骤(插件也要开发者模式手动加载),所以多一行
+`regsvr32` 不改变交付模型的性质;**新增的是"要管理员权限"**——插件那一步不需要。
+等真机验完这条线成立,再定。
+
+相关：`docs/boss/键盘线架构-2026-08-31.md`、
+`docs/boss/Windows真机操作单-键盘线-2026-09-01.md` 第 4 段、
+`client/electron/pluginSeed.js`。
