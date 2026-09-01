@@ -578,7 +578,11 @@ async function bossOsType(
 
   const read = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
   const matched = read.text === args.text
-  trace.push(`发了 ${played.keys} 次按键 滞后最大 ${Math.round(played.lagMaxUs)}us`)
+  trace.push(`发了 ${played.keys} 次按键 滞后最大 ${Math.round(played.lagMaxUs)}us` +
+    // 有 TIP 的平台才有这一段。它回答的是 matched=false 时最要紧的那个岔路:
+    // **词表到底有没有被上屏机制用上**——「TIP 上屏 0/7」与「上屏 7/7 但选错」
+    // 是两种完全不同的病,而回读文本本身分不出来。
+    (played.words ? ` | ${played.words}` : ''))
   // 回读不同时**把实得的原文带出来**。只报"期望 12 字、实得 12 字"等于把判据
   // 压成一个布尔——而这一块存在的全部理由就是看 TIP 选了哪个词:「加个」出成
   // 「价格」和出成「家哥」是两种病,字数一样。「错误收敛必须留痕」正是禁这个形状。

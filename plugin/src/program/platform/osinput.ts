@@ -791,6 +791,13 @@ export interface TypePlayResult {
   lagMeanUs: number
   lagMaxUs: number
   status: string
+  /**
+   * 上屏机制那半的对账结论,一句人话(如「TIP 上屏 6/6 词,词表已用完」)。
+   *
+   * **缺席是如实的"没有",不是失败。** macOS 开发机没有自研输入法,上屏词由系统
+   * 输入法挑、我方不可控;Windows 上 TIP 说了算,这里就会有一句。
+   */
+  words?: string
 }
 
 /**
