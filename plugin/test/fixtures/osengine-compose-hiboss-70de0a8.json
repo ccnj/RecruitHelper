@@ -1,5 +1,5 @@
 {
- "upstream": "hiBoss lab/engine/compose @ 84c1a22",
+ "upstream": "hiBoss lab/engine/compose @ 70de0a8",
  "pinyinPro": "3.29.3",
  "note": "由上游原始文件生成。我们的 vendor 副本必须逐字段复现它。",
  "cases": {
@@ -3245,6 +3245,1760 @@
         "syllables": [
          2
         ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  "latin": {
+   "text": "岗位是Java后端，Base深圳，方便聊聊吗？",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 1,
+     "tries": 1,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "岗位",
+        "keys": [
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 0,
+          "up": 143
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 123,
+          "up": 229
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 288,
+          "up": 344
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 391,
+          "up": 563
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 471,
+          "up": 586
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 547,
+          "up": 883
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 629,
+          "up": 718
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 813,
+         "up": 992
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "是",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 1870,
+          "up": 1962
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 1961,
+          "up": 2206
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 2132,
+          "up": 2192
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 2326,
+         "up": 2538
+        },
+        "splits": []
+       },
+       {
+        "text": "Java",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 3789,
+          "up": 3870
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3888,
+          "up": 3979
+         },
+         {
+          "code": "KeyV",
+          "letter": "v",
+          "down": 4082,
+          "up": 4378
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4182,
+          "up": 4292
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4437,
+         "up": 4538
+        },
+        "splits": []
+       },
+       {
+        "text": "后端",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 5093,
+          "up": 5198
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 5341,
+          "up": 5437
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 5457,
+          "up": 5550
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 5537,
+          "up": 5646
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 5740,
+          "up": 5831
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5848,
+          "up": 5953
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 6029,
+          "up": 6106
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6162,
+         "up": 6244
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 6279,
+          "up": 6342
+         }
+        ]
+       },
+       {
+        "text": "Base",
+        "keys": [
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 6451,
+          "up": 6516
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6535,
+          "up": 6648
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 6622,
+          "up": 6737
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 6679,
+          "up": 6870
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 6880,
+         "up": 6991
+        },
+        "splits": []
+       },
+       {
+        "text": "深圳",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 7115,
+          "up": 7282
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 7151,
+          "up": 7228
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 7275,
+          "up": 7350
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7444,
+          "up": 7524
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 7509,
+          "up": 7638
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 7606,
+          "up": 7728
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 7810,
+          "up": 8162
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 8002,
+          "up": 8090
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 8443,
+         "up": 8543
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 8753,
+          "up": 8854
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 9355,
+          "up": 9421
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9437,
+          "up": 9548
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 9475,
+          "up": 9573
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 9586,
+          "up": 9686
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 9648,
+          "up": 9734
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9837,
+          "up": 9940
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9931,
+          "up": 10011
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 10007,
+          "up": 10140
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10092,
+         "up": 10165
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 10524,
+          "up": 10649
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 10598,
+          "up": 10721
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10671,
+          "up": 10749
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 10769,
+          "up": 10897
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 10813,
+          "up": 10897
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 10874,
+          "up": 11021
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10975,
+          "up": 11079
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 11137,
+          "up": 11202
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 11345,
+         "up": 11705
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 11899,
+          "up": 11976
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 12048,
+          "up": 12311
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 12134,
+         "up": 12278
+        },
+        "splits": []
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 12522,
+          "up": 12977,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 12606,
+          "up": 12716,
+          "shift": true
+         }
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "岗位",
+        "pinyin": "gangwei",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "是",
+        "pinyin": "shi",
+        "chars": 1,
+        "syllables": [
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Java",
+        "pinyin": "java",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "后端",
+        "pinyin": "houduan",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Base",
+        "pinyin": "base",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "深圳",
+        "pinyin": "shenzhen",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": true,
+     "seed": 8,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "岗位",
+        "keys": [
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 0,
+          "up": 55
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 162,
+          "up": 594
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 335,
+          "up": 451
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 364,
+          "up": 451
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 433,
+          "up": 518
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 607,
+          "up": 709
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 665,
+          "up": 740
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 775,
+         "up": 856
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "是",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 1462,
+          "up": 1627
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 1530,
+          "up": 2009
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 1586,
+          "up": 1675
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 1782,
+         "up": 1863
+        },
+        "splits": []
+       },
+       {
+        "text": "Java",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 2561,
+          "up": 2710
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2667,
+          "up": 2745
+         },
+         {
+          "code": "KeyV",
+          "letter": "v",
+          "down": 2749,
+          "up": 2848
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 2932,
+          "up": 3032
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3180,
+         "up": 3301
+        },
+        "splits": []
+       },
+       {
+        "text": "后端",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 4029,
+          "up": 4254
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 4103,
+          "up": 4192
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 4208,
+          "up": 4269
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 4306,
+          "up": 4408
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 4459,
+          "up": 4562
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4569,
+          "up": 4684
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4636,
+          "up": 4713
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4917,
+         "up": 4990
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 5124,
+          "up": 5235
+         }
+        ]
+       },
+       {
+        "text": "Base",
+        "keys": [
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 5456,
+          "up": 5567
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 5535,
+          "up": 5650
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 5638,
+          "up": 6004
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 5705,
+          "up": 5798
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 6028,
+         "up": 6116
+        },
+        "splits": []
+       },
+       {
+        "text": "深圳",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 7025,
+          "up": 7134
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 7120,
+          "up": 7216
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 7162,
+          "up": 7307
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7329,
+          "up": 7490
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 7452,
+          "up": 7572
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 7602,
+          "up": 7784
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 7773,
+          "up": 7847
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7843,
+          "up": 7896
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 7931,
+         "up": 8016
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 8628,
+          "up": 8709
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 8884,
+          "up": 8984
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9089,
+          "up": 9171
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 9178,
+          "up": 9294
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 9391,
+          "up": 9455
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 9660,
+          "up": 9790
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9802,
+          "up": 9936
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10002,
+          "up": 10054
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 10058,
+          "up": 10119
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10248,
+         "up": 10364
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 11173,
+          "up": 11267
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 11309,
+          "up": 11510
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 11387,
+          "up": 11445
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 11478,
+          "up": 11576
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 11584,
+          "up": 11711
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 11644,
+          "up": 11716
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 11783,
+          "up": 11861
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 11821,
+          "up": 11904
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 11870,
+         "up": 11980
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 12292,
+          "up": 12483
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 12424,
+          "up": 12582
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 12595,
+         "up": 12712
+        },
+        "splits": []
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 12977,
+          "up": 13268,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 13068,
+          "up": 13178,
+          "shift": true
+         }
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "岗位",
+        "pinyin": "gangwei",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "是",
+        "pinyin": "shi",
+        "chars": 1,
+        "syllables": [
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Java",
+        "pinyin": "java",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "后端",
+        "pinyin": "houduan",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Base",
+        "pinyin": "base",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "深圳",
+        "pinyin": "shenzhen",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 42,
+     "tries": 1,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "岗位",
+        "keys": [
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 0,
+          "up": 86
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 265,
+          "up": 414
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 344,
+          "up": 500
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 423,
+          "up": 533
+         },
+         {
+          "code": "KeyW",
+          "letter": "w",
+          "down": 533,
+          "up": 605
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 580,
+          "up": 637
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 644,
+          "up": 752
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 782,
+         "up": 1180
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "是",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 872,
+          "up": 1031
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 932,
+          "up": 1036
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 1091,
+          "up": 1252
+         }
+        ],
+        "commit": {
+         "code": "Digit4",
+         "letter": "",
+         "down": 1288,
+         "up": 1471
+        },
+        "splits": []
+       },
+       {
+        "text": "Java",
+        "keys": [
+         {
+          "code": "KeyJ",
+          "letter": "j",
+          "down": 1508,
+          "up": 1648
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1577,
+          "up": 1653
+         },
+         {
+          "code": "KeyV",
+          "letter": "v",
+          "down": 1648,
+          "up": 1728
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 1942,
+          "up": 2057
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2056,
+         "up": 2168
+        },
+        "splits": []
+       },
+       {
+        "text": "后端",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 2211,
+          "up": 2297
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 2389,
+          "up": 2457
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 2759,
+          "up": 2917
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 2816,
+          "up": 2960
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 3080,
+          "up": 3135
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3182,
+          "up": 3251
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3326,
+          "up": 3402
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 3427,
+         "up": 3508
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 3637,
+          "up": 3738
+         }
+        ]
+       },
+       {
+        "text": "Base",
+        "keys": [
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 4352,
+          "up": 4433
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4468,
+          "up": 4576
+         },
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 4671,
+          "up": 4747
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 4755,
+          "up": 4833
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 5274,
+         "up": 5390
+        },
+        "splits": []
+       },
+       {
+        "text": "深圳",
+        "keys": [
+         {
+          "code": "KeyS",
+          "letter": "s",
+          "down": 6025,
+          "up": 6196
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 6109,
+          "up": 6186
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 6199,
+          "up": 6437
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 6250,
+          "up": 6335
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 6337,
+          "up": 6442
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 6418,
+          "up": 6495
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 6559,
+          "up": 6651
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 6742,
+          "up": 7107
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 7104,
+         "up": 7226
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 7486,
+          "up": 7604
+         }
+        ]
+       },
+       {
+        "text": "方便",
+        "keys": [
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 7683,
+          "up": 7756
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7739,
+          "up": 7832
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7868,
+          "up": 7966
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 8062,
+          "up": 8214
+         },
+         {
+          "code": "KeyB",
+          "letter": "b",
+          "down": 8236,
+          "up": 8315
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 8452,
+          "up": 8539
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 8565,
+          "up": 8658
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 8669,
+          "up": 8789
+         }
+        ],
+        "commit": {
+         "code": "Digit2",
+         "letter": "",
+         "down": 8765,
+         "up": 8918
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "聊聊",
+        "keys": [
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 9113,
+          "up": 9221
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9245,
+          "up": 9335
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9325,
+          "up": 9446
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 9469,
+          "up": 9578
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 9532,
+          "up": 9615
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 9626,
+          "up": 10189
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9685,
+          "up": 9760
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 9797,
+          "up": 9906
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 10153,
+         "up": 10220
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "吗",
+        "keys": [
+         {
+          "code": "KeyM",
+          "letter": "m",
+          "down": 10614,
+          "up": 10709
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10657,
+          "up": 10746
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10857,
+         "up": 10917
+        },
+        "splits": []
+       },
+       {
+        "text": "？",
+        "direct": true,
+        "shift": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 11272,
+          "up": 11719,
+          "modifier": true
+         },
+         {
+          "code": "Slash",
+          "down": 11568,
+          "up": 11678,
+          "shift": true
+         }
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "岗位",
+        "pinyin": "gangwei",
+        "chars": 2,
+        "syllables": [
+         4,
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "是",
+        "pinyin": "shi",
+        "chars": 1,
+        "syllables": [
+         3
+        ]
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Java",
+        "pinyin": "java",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "后端",
+        "pinyin": "houduan",
+        "chars": 2,
+        "syllables": [
+         3,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "Base",
+        "pinyin": "base",
+        "chars": 4,
+        "syllables": [
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "深圳",
+        "pinyin": "shenzhen",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false
+       },
+       {
+        "kind": "ime",
+        "text": "方便",
+        "pinyin": "fangbian",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "聊聊",
+        "pinyin": "liaoliao",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "ime",
+        "text": "吗",
+        "pinyin": "ma",
+        "chars": 1,
+        "syllables": [
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "？",
+        "code": "Slash",
+        "shift": true
        }
       ]
      }

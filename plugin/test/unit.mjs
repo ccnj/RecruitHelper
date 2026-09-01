@@ -15048,13 +15048,13 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
 // ---------------------------------------------------------------------------
 
 const OSENGINE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-hiboss-84c1a22.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-hiboss-70de0a8.json', 'utf8'),
 )
 
 test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
   const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
   assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
-  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '70de0a8', '版本钉子与基准文件名必须同步')
 
   for (const [seedText, expected] of Object.entries(cases)) {
     const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
@@ -15114,7 +15114,7 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
 // ---------------------------------------------------------------------------
 
 const COMPOSE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-compose-hiboss-84c1a22.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-compose-hiboss-70de0a8.json', 'utf8'),
 )
 
 /** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
@@ -15131,7 +15131,7 @@ function flattenPlanKeys(plan) {
 }
 
 test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
-  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '70de0a8', '版本钉子与基准文件名必须同步')
   assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
 
   for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
@@ -15211,6 +15211,60 @@ test('osengine/compose 的标点键集合钉死十二个——变了 Go 侧键�
   ], '上游的标点键位变了:同步 keymap_darwin.go 与它的 punctKeysFromUpstream')
   const nonDigit = codes.filter((c) => !c.startsWith('Digit'))
   assert.equal(nonDigit.length, 8, 'Go 侧 punctKeysFromUpstream 是按这八个建的')
+})
+
+test('osengine/compose 的英文段走 composition,键序全小写、大小写由上屏词带出', async () => {
+  // 2026-09-01 上游的设计:自研 TIP 决定上屏内容,所以英文不需要"切输入法模式"——
+  // 它就是一个普通的 ime 段,键序 b,a,s,e + 一个上屏键,上屏的文本由词表指定。
+  // TIP 一行没改,改的全在排版器。
+  //
+  // 这条钉住四个刻意的取舍。它们不是实现细节,每一条都有理由:
+  const r = await planType('岗位是Java后端，Base深圳', 1)
+  assert.ok(r.ok, '中英混排应当排得出来')
+  const latin = r.plan.words.filter((w) => /^[A-Za-z]+$/.test(w.text))
+  assert.deepEqual(latin.map((w) => w.text), ['Java', 'Base'], '两个英文词都要成段')
+
+  for (const w of latin) {
+    // 一、走 composition,不是直接键入。direct 的段没有 commit 键。
+    assert.ok(!w.direct, `${w.text} 应当走 composition`)
+    assert.ok(w.commit, `${w.text} 应当有上屏键`)
+
+    // 二、**键序全小写,不排 Shift**。大写由上屏的词带出来——真人在中英混输里
+    // 从候选选首字母大写的那一项,键序也是全小写。这样不必给"打大写字母的 Shift"
+    // 编时序:现有 shift 参数取自打全角标点的样本(句读位置的动作),套到词中间
+    // 会把 B→a 顶到几百毫秒。
+    const codes = w.keys.map((k) => k.code)
+    assert.deepEqual(codes, [...w.text.toLowerCase()].map((c) => 'Key' + c.toUpperCase()),
+      `${w.text} 的键序应当是全小写字母`)
+    assert.ok(w.keys.every((k) => !k.shift && !k.modifier),
+      `${w.text} 不该出现 Shift —— 大小写由上屏的词带,不由按键带`)
+
+    // 三、**上屏文本保留大小写**。「按什么键」与「出什么字」是分开的。
+    assert.match(w.text, /^[A-Z]/, `${w.text} 的首字母大写要保住`)
+
+    // 四、**没有音节分隔**。真输入法打英文时也不画那个撇号。
+    assert.deepEqual(w.splits ?? [], [], `${w.text} 不该有音节边界`)
+  }
+
+  // 上屏键必须在 Go 侧键码表里 —— 英文段用的是与中文段同一张 commitKeys
+  // (Space + Digit2/3/4),不是另立一套。
+  for (const w of latin) {
+    assert.match(w.commit.code, /^(Space|Digit[234])$/,
+      `${w.text} 的上屏键 ${w.commit.code} 不在中文段那张 commitKeys 里`)
+  }
+})
+
+test('osengine/compose 半角标点仍显式拒绝——别看见英文放行了就顺手放它', () => {
+  // 上游在放行英文时特意在原地留了说明:半角标点留在拒绝表里,**理由和当初的英文
+  // 一模一样**,别顺手一起放。它俩的理由现在已经不同了:
+  //   英文  当初的理由是"要切输入法模式",自研 TIP 落地后那个前提没了
+  //   半角  真输入法直接上屏(type1),而我们的 TIP 会当上屏键吃掉走 composition(type2)
+  // 后者是**真实的行为差异**,不是当初那个已作废的理由。
+  assert.rejects(
+    () => planType('年薪20-30万', 1),
+    /打不出/,
+    '半角连字符必须仍被拒绝',
+  )
 })
 
 test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {

@@ -8,8 +8,26 @@
 // 目标分布取自真人基线（lab/calibrate/baseline/human-2026-08-20.json）：
 //   1 字 26.1% · 2 字 58.7% · 3 字 10.9% · 4 字 2.2%   平均 1.85 字/次
 //
-// 汉字之外的字元（标点、数字、字母）走 direct 单独成段 —— 它们不经 IME，
+// 汉字之外的字元（标点、数字）走 direct 单独成段 —— 它们不经 IME，
 // 而且是 cnTextCount 的唯一来源（全角标点被 containsChinese 算作中文）。
+//
+// **英文字母不走 direct，走 composition，与汉字同一条路。**「base深圳」里的 base
+// 排成一个段：键序 b,a,s,e + 一个上屏键，上屏的文本就是这个词。这是自研 TIP 才有的
+// 能力 —— 上屏什么由我们指定，于是不需要「输入法模式」这个概念（先前刻意拒绝英文，
+// 正是因为借来的输入法要靠切模式，而模式是个状态机）。三件事跟着定死：
+//
+//   **大小写不排 Shift。**「Base」的键序仍是全小写 b,a,s,e，大写由上屏的词带出来。
+//   真人在中英混输里从候选选首字母大写的那一项，键序也是全小写。好处是不必给
+//   「打大写字母的 Shift」编时序：现有 shift 参数取自 4 次**打全角标点**的样本
+//   （lead 70/103/149/672ms），那是句读位置的动作，套到词中间会把 B→a 顶到几百毫秒。
+//
+//   **上屏键沿用中文段那张 commitKeys**（Space 0.86 + Digit2/3/4）。英文词在候选里
+//   排第几本来就浮动，固定一个键反而是编确定性。
+//
+//   **不排回车上屏。** 真输入法里回车上屏的是字母原文，是英文段最常见的打法，但
+//   我们的 TIP 现在无条件透传回车；而「本该被吃的键透传出去」是一条正常代码路径
+//   （组字失败时 OnKeyDown 会主动改口透传）。那一下回车漏出去就是**把半截话发出去**，
+//   空格漏出去只是多一个空格。失败模式不对称，所以这条不做。
 //
 // **切分只在词边界上进行**（2026-08-21 真机实测的教训）。一稿按长度分布随机切，
 // 把「方便聊聊吗」切成 方|便聊|聊吗 —— 「便聊」不是词，输入法按 bianliao 出不来它。
@@ -21,7 +39,7 @@
 //   safe   整个汉字连续段一次性输入、不切，交给输入法自己分词
 //          （真机验证专用：候选正确率最高，代价是粒度不真实）
 
-import { tokenize, keyFor, whyUntypable } from './pinyin.mjs'
+import { tokenize, keyFor, typable, whyUntypable } from './pinyin.mjs'
 import { segmentWords } from './lexicon.mjs'
 
 /** 真人基线的上屏字数分布 */
@@ -59,11 +77,7 @@ export function segment(text, rng, opt = {}) {
   // 逐个抛的话，调用方改掉一个又撞下一个，来回好几趟。
   const bad = []
   toks.forEach((t, i) => {
-    if (t.kind === 'han') {
-      if (!t.py) bad.push({ i, ch: t.ch, why: whyUntypable(t) })
-      return
-    }
-    if (!keyFor(t)) bad.push({ i, ch: t.ch, why: whyUntypable(t) })
+    if (!typable(t)) bad.push({ i, ch: t.ch, why: whyUntypable(t) })
   })
   if (bad.length) {
     const detail = bad.map((b) => `第 ${b.i + 1} 个字元 ${JSON.stringify(b.ch)}：${b.why}`).join('；')
@@ -71,6 +85,31 @@ export function segment(text, rng, opt = {}) {
   }
   const out = []
   let buf = []
+  let lat = []
+
+  /**
+   * 英文段：连续字母整段一次上屏。
+   *
+   * 不切 —— 真人不会把一个英文词拆成两次上屏，而且这里也没有「词边界」这种东西
+   * 可依（汉字那套「只在词边界上合并」的理由在英文上没有对应物）。
+   *
+   * `pinyin` 存小写键序、`text` 存原文，两者只在大小写上可能不同 —— 这正是
+   * 「按什么键」与「出什么字」的分离。`syllables` 只有一项，于是 planner 算出的
+   * splits 为空、组字区不画音节分隔撇号；真输入法打英文时也不画。
+   */
+  const flushLatin = () => {
+    if (lat.length === 0) return
+    const text = lat.join('')
+    lat = []
+    out.push({
+      kind: 'ime',
+      latin: true,
+      text,
+      pinyin: text.toLowerCase(),
+      chars: text.length,
+      syllables: [text.length],
+    })
+  }
 
   const emit = (take) => {
     const missing = take.filter((t) => !t.py)
@@ -131,26 +170,42 @@ export function segment(text, rng, opt = {}) {
 
   for (const t of toks) {
     if (t.kind === 'han') {
+      flushLatin()
       buf.push(t)
       continue
     }
+    if (t.kind === 'latin') {
+      flushHan()
+      lat.push(t.ch)
+      continue
+    }
     flushHan()
+    flushLatin()
     const k = keyFor(t) // 前置校验已保证非 null
     out.push({ kind: 'direct', text: t.ch, code: k.code, shift: !!k.shift })
   }
   flushHan()
+  flushLatin()
   return out
 }
 
-/** 段序列的粒度统计 —— 与基线比对用 */
+/**
+ * 段序列的粒度统计 —— 与基线比对用。
+ *
+ * **英文段不进 perCommitChars / meanChars。** 基线那条 1.85 字/次量的是汉字上屏，
+ * 而一个英文词一次上屏好几个字母（base 一次 4 个），混进去会把分布往右拽，
+ * 让「跟基线差多少」这个数失去意义。单列一栏，不静默污染。
+ */
 export function granularity(segs) {
-  const ime = segs.filter((s) => s.kind === 'ime')
+  const ime = segs.filter((s) => s.kind === 'ime' && !s.latin)
   const hist = {}
   for (const s of ime) hist[s.chars] = (hist[s.chars] || 0) + 1
   const n = ime.length || 1
   return {
     imeSegments: ime.length,
-    directSegments: segs.length - ime.length,
+    latinSegments: segs.filter((s) => s.latin).length,
+    // 减法算不出来了 —— 英文段既不是汉字 ime 段也不是 direct 段
+    directSegments: segs.filter((s) => s.kind === 'direct').length,
     perCommitChars: hist,
     meanChars: +(ime.reduce((a, s) => a + s.chars, 0) / n).toFixed(3),
     meanKeys: +(ime.reduce((a, s) => a + s.pinyin.length + 1, 0) / n).toFixed(3),
