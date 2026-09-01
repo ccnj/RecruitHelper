@@ -94,7 +94,7 @@ func TestDeriveSourcingViewMatchesLegacyDefaultsAndClamps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.CandidateSelection != (CandidateSelectionView{MinScore: 10, TargetMin: 0, TargetMax: 150, MaleRatioLimit: 25}) {
+	if view.CandidateSelection != (CandidateSelectionView{MinScore: 10, TargetMin: 0, TargetMax: 200, MaleRatioLimit: 25}) {
 		t.Fatalf("候选人筛选 clamp 错误: %+v", view.CandidateSelection)
 	}
 	defaults, err := DeriveSourcingView(sourcingPackage(map[string]string{"候选人筛选": "bad-json"}))

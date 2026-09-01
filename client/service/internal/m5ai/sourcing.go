@@ -453,8 +453,8 @@ func deriveCandidateSelection(raw string) CandidateSelectionView {
 		return selection
 	}
 	selection.MinScore = clampLegacyInt(parsed["minScore"], 1, 10, selection.MinScore)
-	selection.TargetMin = clampLegacyInt(parsed["targetMin"], 0, 150, selection.TargetMin)
-	selection.TargetMax = clampLegacyInt(parsed["targetMax"], 0, 150, selection.TargetMax)
+	selection.TargetMin = clampLegacyInt(parsed["targetMin"], 0, 200, selection.TargetMin)
+	selection.TargetMax = clampLegacyInt(parsed["targetMax"], 0, 200, selection.TargetMax)
 	if selection.TargetMin > selection.TargetMax {
 		selection.TargetMin, selection.TargetMax = selection.TargetMax, selection.TargetMin
 	}
