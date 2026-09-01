@@ -388,9 +388,11 @@ function mainReadComposer(id: string): {
   x: number; y: number; w: number; h: number
   text: string
   focused: boolean
+  windowFocused: boolean
 } {
   const el = document.getElementById(id)
-  if (!el) return { found: false, x: 0, y: 0, w: 0, h: 0, text: '', focused: false }
+  const windowFocused = document.hasFocus()
+  if (!el) return { found: false, x: 0, y: 0, w: 0, h: 0, text: '', focused: false, windowFocused }
   const r = el.getBoundingClientRect()
   return {
     found: true,
@@ -398,7 +400,21 @@ function mainReadComposer(id: string): {
     // 空态实测是真的空(innerHTML ""、childNodes 0),没有 <br> 哨兵,
     // 所以不需要额外归一化。
     text: el.textContent ?? '',
+    // 页面内部的焦点。**它不足以放行打字** —— 见 windowFocused。
     focused: document.activeElement === el,
+    /**
+     * 这个文档所在的窗口是不是系统当前的活动窗口。
+     *
+     * **这是键盘线的「零观测」闸。** 鼠标那半有个天然的:页面没观测到 mousemove
+     * 就说明光标不在页面上,拒绝。键盘没有——我们是盲发,发完才回读。
+     *
+     * 而 `activeElement === 输入框` 只说明**页面内部**的焦点在那儿:Chrome 退到
+     * 后台时它照样为真,可 CGEventPost / SendInput 打的是**最前台的那个窗口**。
+     * 少了这道闸,Chrome 不在前台时这条命令会把拼音字母敲进用户正在看的别的应用。
+     *
+     * `document.hasFocus()` 是标准 DOM API,只在文档所在窗口是系统活动窗口时为真。
+     */
+    windowFocused,
   }
 }
 
@@ -486,7 +502,8 @@ async function bossOsType(
       detail: `输入框非空(${before.text.length} 字),不覆盖用户已经敲进去的内容`,
     })
   }
-  trace.push(`点前 焦点=${before.focused ? '在' : '不在'} 矩形=${Math.round(before.w)}x${Math.round(before.h)}`)
+  trace.push(`点前 焦点=${before.focused ? '在' : '不在'} 窗口=${before.windowFocused ? '在前台' : '不在前台'}` +
+    ` 矩形=${Math.round(before.w)}x${Math.round(before.h)}`)
 
   // 焦点不在才点。点的这一段完全复用鼠标线的闸链(标定、命中测试、光标未被动过)。
   if (!before.focused) {
@@ -505,6 +522,20 @@ async function bossOsType(
         detail: `${trace.join(' | ')} | 点中了但焦点没到输入框`,
       })
     }
+  }
+
+  // **发键之前最后一道闸:窗口必须在前台。** 现读而不是用开头那次的值——
+  // 中间可能刚做过一次 OS 点击,而点击本身会改变哪个窗口在前台。
+  const beforeKeys = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
+  if (!beforeKeys.windowFocused) {
+    return osTypeData('refusedByGate', started, {
+      detail: `${trace.join(' | ')} | Chrome 不在前台,按键会打到别的应用上`,
+    })
+  }
+  if (!beforeKeys.focused) {
+    return osTypeData('refusedByGate', started, {
+      detail: `${trace.join(' | ')} | 焦点不在输入框,按键会打到别处`,
+    })
   }
 
   // 排版。**排不出来就不打**,不许兜底成"那就随便打一份"。
