@@ -6,7 +6,7 @@ import { HomePage } from './components/HomePage'
 import { ProductSidebar } from './components/ProductSidebar'
 import { SettingsPage } from './components/SettingsPage'
 import { UpdateBanner } from './components/UpdateBanner'
-import type { ProductUpdateStatus } from './api'
+import type { DailyPlanView, ProductUpdateStatus } from './api'
 import { createEmptyProductData, createProductFixture } from './fixtures'
 import type {
   CandidateView,
@@ -24,6 +24,7 @@ export interface ProductAppProps {
   fixtureNotice?: string
   statusMessage?: string | null
   updateStatus?: ProductUpdateStatus | null
+  dailyPlan?: DailyPlanView | null
 }
 
 const candidatePages = new Set<ProductPage>([
@@ -40,6 +41,7 @@ export function ProductApp({
   fixtureNotice,
   statusMessage,
   updateStatus = null,
+  dailyPlan = null,
 }: ProductAppProps) {
   const [activePage, setActivePage] = useState<ProductPage>(initialPage)
   const [globalSearch, setGlobalSearch] = useState('')
@@ -94,6 +96,7 @@ export function ProductApp({
       <HomePage
         actions={actions}
         customer={data.customer}
+        dailyPlan={dailyPlan}
         onOpenConfirmation={() => navigate('confirmation')}
         overview={data.overview}
       />

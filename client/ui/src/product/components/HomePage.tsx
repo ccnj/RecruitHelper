@@ -1,3 +1,4 @@
+import type { DailyPlanEntry, DailyPlanView } from '../api'
 import type { ProductActions, ProductData, ProductMetric } from '../types'
 import { ProductIcon } from './ProductIcon'
 import { EmptyState, MetricValue, StatusPill } from './ProductPrimitives'
@@ -7,6 +8,7 @@ interface HomePageProps {
   overview: ProductData['overview']
   actions: ProductActions
   onOpenConfirmation: () => void
+  dailyPlan?: DailyPlanView | null
 }
 
 function controlDisabledReason(
@@ -30,17 +32,34 @@ export function confirmEndWorkflow(
   return endWorkflow()
 }
 
-export function HomePage({ customer, overview, actions, onOpenConfirmation }: HomePageProps) {
+const PLAN_ENTRY_STATUS: Record<DailyPlanEntry['status'], { label: string; tone: 'green' | 'amber' | 'slate' }> = {
+  pending: { label: '待进行', tone: 'slate' },
+  skipped: { label: '已跳过', tone: 'amber' },
+  done: { label: '已完成', tone: 'green' },
+}
+
+function planSkipReasonText(reason: string | undefined): string {
+  if (!reason) return ''
+  if (reason === 'zeroQuota') return '配额不足，今日轮空'
+  if (reason.startsWith('jobNotOnlineAtPlan:')) return `职位未在线（${reason.split(':')[1] ?? ''}）`
+  if (reason === 'batch:jobNotOnline') return '开批时职位已下线'
+  if (reason === 'batch:jobStatusReadFailed') return '职位状态读取失败'
+  if (reason === 'batch:positionSelectFailed') return '推荐页找不到该职位'
+  return reason
+}
+
+export function HomePage({ customer, overview, actions, onOpenConfirmation, dailyPlan }: HomePageProps) {
   const { workflow } = overview
   const pendingEnd = workflow.pendingAction === 'end'
   const pendingSourcing = workflow.pendingAction === 'sourcing'
   const pendingEndReason = pendingEnd ? '正在结束当前候选人，请稍候' : null
   const pendingSourcingReason = pendingSourcing ? '当前候选人处理完后会开始新一批' : null
+  // 当日职位计划(2026-09-01):开始不再要求绑定单一职位,职位名单由脑按
+  // 后台有效职位与平台在线状态自行定稿。
   const startFullReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('full') : undefined,
-    workflow.canStart && !pendingEnd && customer.job.backendJobId !== null,
-    pendingEndReason ?? workflow.unavailableReason ??
-      (customer.job.backendJobId === null ? '同步并绑定职位后可开始今日任务' : null),
+    workflow.canStart && !pendingEnd,
+    pendingEndReason ?? workflow.unavailableReason,
   )
   const startReplyReason = controlDisabledReason(
     actions.startWorkflow ? () => actions.startWorkflow?.('replyOnly') : undefined,
@@ -103,6 +122,48 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation }: Ho
           同步职位
         </button>
       </section>
+
+      {dailyPlan?.available && (dailyPlan.entries?.length ?? 0) > 0 && (
+        <section className="rh-panel rh-daily-plan">
+          <div className="rh-daily-plan-head">
+            <h2>今日职位计划</h2>
+            <span>
+              {dailyPlan.localDate ?? ''} · 总量 {dailyPlan.totalQuota ?? 0}
+              {dailyPlan.status === 'draft' && ' · 名单待平台确认'}
+              {dailyPlan.status === 'aborted' && ' · 已终止'}
+              {dailyPlan.status === 'completed' && ' · 已完成'}
+            </span>
+          </div>
+          <table className="rh-daily-plan-table">
+            <thead>
+              <tr>
+                <th>职位</th>
+                <th>份额</th>
+                <th>已发出</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(dailyPlan.entries ?? []).map((entry) => (
+                <tr key={entry.seq}>
+                  <td>{entry.jobName}</td>
+                  <td>{entry.status === 'skipped' && entry.quota === 0 ? '—' : entry.quota}</td>
+                  <td>{entry.sentCount}{entry.suspectCount > 0 ? `（${entry.suspectCount} 待人工确认）` : ''}</td>
+                  <td>
+                    <StatusPill
+                      label={PLAN_ENTRY_STATUS[entry.status]?.label ?? entry.status}
+                      tone={PLAN_ENTRY_STATUS[entry.status]?.tone ?? 'slate'}
+                    />
+                    {entry.status === 'skipped' && (
+                      <span className="rh-daily-plan-skip">{planSkipReasonText(entry.skipReason)}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
 
       <section className={`rh-panel rh-status-card is-${overview.homeStatus.tone}`}>
         <span className="rh-status-rail" aria-hidden="true" />

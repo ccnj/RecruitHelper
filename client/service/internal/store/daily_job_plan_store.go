@@ -621,3 +621,66 @@ func (s *Store) endDailyJobPlan(planID, status, reason string, at time.Time) err
 			}).Error
 	})
 }
+
+// —— 产品 UI 投影(留痕条款:每个职位跑没跑、发了几个、为何跳过必须可见) ——
+
+type AppDailyPlanEntryView struct {
+	Seq           int    `json:"seq"`
+	JobName       string `json:"jobName"`
+	Quota         int    `json:"quota"`
+	Status        string `json:"status"`
+	SkipReason    string `json:"skipReason,omitempty"`
+	SelectedCount int    `json:"selectedCount"`
+	SentCount     int    `json:"sentCount"`
+	SuspectCount  int    `json:"suspectCount"`
+}
+
+type AppDailyPlanView struct {
+	Available  bool                    `json:"available"`
+	LocalDate  string                  `json:"localDate,omitempty"`
+	Status     string                  `json:"status,omitempty"`
+	EndReason  string                  `json:"endReason,omitempty"`
+	TotalQuota int                     `json:"totalQuota,omitempty"`
+	JobCount   int                     `json:"jobCount,omitempty"`
+	Entries    []AppDailyPlanEntryView `json:"entries,omitempty"`
+}
+
+// AppDailyPlan 投影最近一份当日职位计划(含已终局的,便于事后回看当天名单)。
+// 逐条目的发送计数按批次锚回查;锚缺失或统计报错只降级为零值,不阻断投影。
+func (s *Store) AppDailyPlan() (*AppDailyPlanView, error) {
+	var plan DailyJobPlan
+	err := s.db.Order("created_at DESC").First(&plan).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return &AppDailyPlanView{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries, err := s.dailyJobPlanEntries(plan.PlanID)
+	if err != nil {
+		return nil, err
+	}
+	view := &AppDailyPlanView{
+		Available: true, LocalDate: plan.LocalDate, Status: plan.Status,
+		EndReason: plan.EndReason, TotalQuota: plan.TotalQuota, JobCount: plan.JobCount,
+		Entries: make([]AppDailyPlanEntryView, 0, len(entries)),
+	}
+	for index := range entries {
+		entry := entries[index]
+		item := AppDailyPlanEntryView{
+			Seq: entry.Seq, JobName: entry.JobName, Quota: entry.Quota,
+			Status: entry.Status, SkipReason: entry.SkipReason,
+		}
+		if entry.BatchID != "" {
+			if selection, selErr := s.SourcingBatchSelectionByBatchID(entry.BatchID); selErr == nil && selection != nil {
+				item.SelectedCount = selection.SelectedCount
+			}
+			if progress, progErr := s.SourcingBatchGreetingSendProgress(entry.BatchID); progErr == nil && progress != nil {
+				item.SentCount = int(progress.SentCount)
+				item.SuspectCount = int(progress.SuspectCount)
+			}
+		}
+		view.Entries = append(view.Entries, item)
+	}
+	return view, nil
+}

@@ -166,10 +166,10 @@ func TestWorkflowControlsRejectMalformedOrUnavailableRequestsWithoutCallingContr
 		target string
 		body   string
 	}{
+		// 2026-09-01 起 full 模式不再要求 backendJobId(当日职位计划),
+		// `{"mode":"full"}` 从此是合法请求,不在本表。
 		{target: "/app/workflow/start", body: `{"mode":"other"}`},
-		{target: "/app/workflow/start", body: `{"mode":"full"}`},
 		{target: "/app/workflow/start", body: `{"mode":"replyOnly","backendJobId":"42"}`},
-		{target: "/app/workflow/start", body: `{"mode":"full","targetCount":30}`},
 		{target: "/app/confirmation/send", body: `{"batchId":"batch-one","profileIds":[]}`},
 		{target: "/app/confirmation/send", body: `{"batchId":"batch-one","profileIds":["same","same"]}`},
 	} {
@@ -228,7 +228,7 @@ func TestStartFailureMapsKnownSentinelsToFixedTextOnly(t *testing.T) {
 		{
 			name: "jobConfigUnavailableKeepsChainDetailInside",
 			err:  errors.Join(productapp.ErrJobConfigUnavailable, errors.New("internal detail must not leave brain")),
-			want: "当前职位配置不可用",
+			want: "职位配置读取失败，无法确定今天要跑的职位名单",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

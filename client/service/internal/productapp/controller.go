@@ -6,6 +6,7 @@ package productapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ type WechatSettingReader interface {
 
 type Workflow interface {
 	StartFull(store.AccountKey, string) (*store.ProductWorkflowRun, error)
+	StartFullDailyPlan(store.AccountKey) (*store.ProductWorkflowRun, error)
 	StartReplyOnly(store.AccountKey) (*store.ProductWorkflowRun, error)
 	Pause() (*store.ProductWorkflowRun, error)
 	Resume() (*store.ProductWorkflowRun, error)
@@ -176,7 +178,9 @@ func (c *Controller) Start(
 			return ErrJobSelectionChanged
 		}
 	case string(workflow.ModeFull):
-		if expectedBackendJobID == "" || len(expectedBackendJobID) > 128 {
+		// 当日职位计划(2026-09-01):完整流程不再绑定单一职位,页面带上来的
+		// 职位 ID 仅作兼容接收、一律忽略(超长仍拒绝,防误传)。
+		if len(expectedBackendJobID) > 128 {
 			return ErrJobConfigUnavailable
 		}
 	default:
@@ -207,73 +211,38 @@ func (c *Controller) Start(
 		return err
 	}
 
-	// Repeated start and an unfinished batch are recovery paths. They already
-	// own an immutable revision, so a transient old-backend outage must not
-	// replace or strand that fact.
+	// 当日职位计划(AGENTS.md 2026-09-01):完整流程一律按计划跑。活跃运行的
+	// 幂等返回与未终局批次的收养都在 StartFullDailyPlan 内处理;只有"全新
+	// 开始"需要先刷新配置面——计划名单来自复数同步,那是硬前提;当前职位
+	// head 与 provider 凭据的刷新维持既有行为但降为尽力而为(计划不再依赖
+	// 后台"当前职位",主动来聊建档的有效集由复数同步整体重算)。
 	active, loadErr := c.store.ActiveProductWorkflowRun()
 	if loadErr != nil {
 		return loadErr
 	}
-	additionalBatch := active != nil &&
-		active.Stage == store.ProductWorkflowStageCommunication &&
-		(active.Status == workflow.StatusRunning || active.Status == workflow.StatusPaused)
-	var batch *store.SourcingBatch
-	if active != nil && active.SourcingBatchID != nil && !additionalBatch {
-		batch, loadErr = c.store.SourcingBatchByID(*active.SourcingBatchID)
-	} else {
-		batch, loadErr = c.store.ActiveSourcingBatch(key)
-	}
+	batch, loadErr := c.store.ActiveSourcingBatch(key)
 	if loadErr != nil {
 		return loadErr
 	}
-	if batch != nil {
-		if batch.Platform != key.Platform || batch.AccountRef != key.AccountRef ||
-			batch.BackendJobID == nil ||
-			strings.TrimSpace(*batch.BackendJobID) != expectedBackendJobID {
-			return ErrJobSelectionChanged
+	if active == nil && batch == nil {
+		if err := c.syncEffectiveJobsStrict(ctx); err != nil {
+			return errors.Join(ErrJobConfigUnavailable, err)
 		}
-		_, err = c.workflow.StartFull(key, batch.ContextRevisionHash)
-		return err
+		if raw, fetchErr := c.source.FetchCurrent(ctx); fetchErr != nil {
+			logCurrentJobSyncFailure("start", "fetch", fetchErr, -1)
+		} else {
+			m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
+			m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
+			m5ai.RefreshSubSmartProviderConfig(c.subSmartProviderConfig, raw, c.subSmartProviderApplied)
+			revisions, importErr := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
+			if importErr != nil || len(revisions) != 1 {
+				logCurrentJobSyncFailure("start", "import", importErr, len(revisions))
+			} else if _, persistErr := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now()); persistErr != nil {
+				logCurrentJobSyncFailure("start", "persist", persistErr, 1)
+			}
+		}
 	}
-	if active != nil && !additionalBatch {
-		return ErrJobConfigUnavailable
-	}
-
-	raw, err := c.source.FetchCurrent(ctx)
-	if err != nil {
-		logCurrentJobSyncFailure("start", "fetch", err, -1)
-		return errors.Join(ErrJobConfigUnavailable, err)
-	}
-	m5ai.RefreshBackendProviderConfig(c.providerConfig, raw, c.providerApplied)
-	m5ai.RefreshSmartProviderConfig(c.smartProviderConfig, raw, c.smartProviderApplied)
-	m5ai.RefreshSubSmartProviderConfig(c.subSmartProviderConfig, raw, c.subSmartProviderApplied)
-	revisions, err := m5ai.ImportLegacyJobConfigFromBackend(raw, c.now())
-	if err != nil || len(revisions) != 1 {
-		logCurrentJobSyncFailure("start", "import", err, len(revisions))
-		return errors.Join(ErrJobConfigUnavailable, err)
-	}
-	// 先刷有效集再落当前职位:SaveCurrentLegacyJobAIContext 只加不减,这个顺序
-	// 保证当前工作职位一定留在有效集里,不必为"复数响应恰好不含当前职位"另写
-	// 一条保护分支。
-	c.SyncEffectiveJobs(ctx)
-	stored, err := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now())
-	if err != nil || len(stored) != 1 {
-		logCurrentJobSyncFailure("start", "persist", err, len(stored))
-		return errors.Join(ErrJobConfigUnavailable, err)
-	}
-	// 全新开始一律跑后台此刻选中的职位,即使它与页面上显示的那个已经不是同一个
-	// (2026-08-10 甲方裁决)。此处原先拿页面带上来的职位 ID 与刚拉到的后台职位
-	// 比对,不一致就拒绝,要人先点"同步职位"再点一次开始。甲方的心智是"跑后台
-	// 选的那个职位",这道拦截对他只是一次多余往返。
-	//
-	// 页面不会因此显示错的职位:开始成功后前端立即重拉全量数据,首页职位随之
-	// 变成实际执行的那个。刚落库的 stored[0] 就是这次要跑的 revision,页面读到
-	// 的与脑执行的是同一份事实。
-	//
-	// 有未终局批次的那条路不适用本裁决,仍在上面按批次锚定的职位拦截:那批人
-	// 已经采下来、可能已经建档,换职位会让他们用一个职位的话术挂在另一个职位
-	// 名下。要换职位得先把旧批次结束掉。
-	_, err = c.workflow.StartFull(key, stored[0].RevisionHash)
+	_, err = c.workflow.StartFullDailyPlan(key)
 	return err
 }
 
@@ -371,10 +340,17 @@ func logCurrentJobSyncFailure(entry, stage string, err error, count int) {
 // 会让所有入站候选人集体 noMatch,方向比"晚一轮才接上"坏得多。失败必须响亮,
 // 因此每条不合格职位都单独告警——运营要据此知道去后台补哪个职位的配置。
 func (c *Controller) SyncEffectiveJobs(ctx context.Context) {
+	if err := c.syncEffectiveJobsStrict(ctx); err != nil {
+		slog.Warn("有效职位集同步失败，保持既有集合", "error", err)
+	}
+}
+
+// syncEffectiveJobsStrict 是当日职位计划的名单硬前提:失败即整体报错,由
+// 调用方决定是否阻断(开始阻断,后台巡检类调用只告警)。
+func (c *Controller) syncEffectiveJobsStrict(ctx context.Context) error {
 	raw, err := c.source.FetchAll(ctx)
 	if err != nil {
-		slog.Warn("有效职位集同步失败，保持既有集合", "error", err)
-		return
+		return fmt.Errorf("有效职位集拉取失败: %w", err)
 	}
 	revisions, skipped, err := m5ai.ImportLegacyJobConfigsTolerant(raw, c.now())
 	for index := range skipped {
@@ -385,16 +361,15 @@ func (c *Controller) SyncEffectiveJobs(ctx context.Context) {
 		)
 	}
 	if err != nil {
-		slog.Warn("有效职位集整包无效，保持既有集合", "error", err)
-		return
+		return fmt.Errorf("有效职位集整包无效: %w", err)
 	}
 	stored, err := c.store.SaveEffectiveLegacyJobAIContexts(revisions, c.now())
 	if err != nil {
-		slog.Warn("有效职位集写入失败，保持既有集合", "error", err)
-		return
+		return fmt.Errorf("有效职位集写入失败: %w", err)
 	}
 	slog.Info("有效职位集已刷新",
 		"eligible", len(stored), "skipped", len(skipped))
+	return nil
 }
 
 func (c *Controller) Pause(ctx context.Context) error {

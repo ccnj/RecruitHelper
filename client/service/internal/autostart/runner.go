@@ -49,7 +49,6 @@ type Store interface {
 	RecordAutoStartAttempt(at time.Time, outcome, detail string) error
 	ActiveProductWorkflowRun() (*store.ProductWorkflowRun, error)
 	LatestProductWorkflowRun() (*store.ProductWorkflowRun, error)
-	AppCurrentJob() (store.AppJobProjection, error)
 }
 
 type Runner struct {
@@ -245,15 +244,9 @@ func (r *Runner) attempt(ctx context.Context, now time.Time) (string, string) {
 	if latest != nil && localDateOf(latest.StartedAt.In(r.location)) == localDateOf(now) {
 		return store.AutoStartOutcomeSkippedToday, "今天已经运行过"
 	}
-	job, err := r.store.AppCurrentJob()
-	if err != nil {
-		slog.Warn("每日自动开始:读取当前职位失败", "err", err)
-		return store.AutoStartOutcomeError, "读取当前职位失败"
-	}
-	if !job.Available || job.BackendJobID == "" {
-		return store.AutoStartOutcomeStartFailed, "当前没有已绑定职位"
-	}
-	if err := r.control.Start(ctx, string(workflow.ModeFull), job.BackendJobID); err != nil {
+	// 当日职位计划(2026-09-01):自动开始不再读"当前职位",与人工点击一样
+	// 直接发起完整流程,职位名单由计划机制自行判定。
+	if err := r.control.Start(ctx, string(workflow.ModeFull), ""); err != nil {
 		slog.Warn("每日自动开始:开始被拒", "err", err)
 		return store.AutoStartOutcomeStartFailed, productapp.StartFailureText(err)
 	}

@@ -4,8 +4,10 @@ import {
   endProductWorkflow,
   pauseProductWorkflow,
   readCandidateDetail,
+  readDailyPlan,
   readProductData,
   readProductUpdateStatus,
+  type DailyPlanView,
   type ProductUpdateStatus,
   resumeProductWorkflow,
   sendProductConfirmation,
@@ -30,6 +32,7 @@ export function ProductConnectedApp({
   const [actionMessage, setActionMessage] = useState<string | null>(null)
   const [refreshRevision, setRefreshRevision] = useState(0)
   const [updateStatus, setUpdateStatus] = useState<ProductUpdateStatus | null>(null)
+  const [dailyPlan, setDailyPlan] = useState<DailyPlanView | null>(null)
   const actionRunning = useRef(false)
 
   const refresh = useCallback(() => {
@@ -83,6 +86,25 @@ export function ProductConnectedApp({
       window.clearInterval(timer)
     }
   }, [])
+
+  // 当日职位计划:随业务数据同刷,读不到只保留上次结果(投影只服务留痕展示)。
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const next = await readDailyPlan()
+        if (!cancelled) setDailyPlan(next)
+      } catch {
+        // 忽略:计划面板缺一拍不影响业务操作。
+      }
+    }
+    void load()
+    const timer = window.setInterval(load, 15_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [refreshRevision])
 
   const readStatusMessage = readState === 'loading'
     ? '正在读取本机业务数据…'
@@ -141,18 +163,14 @@ export function ProductConnectedApp({
           () => sendProductConfirmation(batchId, profileIds),
         ),
         startWorkflow: (mode) => performProductAction(
-          mode === 'full'
-            ? (data.overview.workflow.canAddBatch ? '追加采集' : '今日任务')
-            : '只处理消息',
-          () => startProductWorkflow(
-            mode,
-            mode === 'full' ? data.customer.job.backendJobId : null,
-          ),
+          mode === 'full' ? '今日任务' : '只处理消息',
+          () => startProductWorkflow(mode),
         ),
         copyWechat: async (wechatAccount) => {
           await navigator.clipboard.writeText(wechatAccount)
         },
       }}
+      dailyPlan={dailyPlan}
       data={data}
       statusMessage={statusMessage}
       updateStatus={updateStatus}

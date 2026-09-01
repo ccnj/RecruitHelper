@@ -34,6 +34,7 @@ type ProjectionStore interface {
 	SetInterviewSchedule(m5ai.InterviewSchedule) error
 	AutoStartSetting() (store.AutoStartSetting, error)
 	SetAutoStartEnabled(bool) error
+	AppDailyPlan() (*store.AppDailyPlanView, error)
 }
 
 type RuntimeSnapshot struct {
@@ -167,6 +168,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /app/interview-schedule", h(a.saveInterviewSchedule))
 	mux.HandleFunc("GET /app/auto-start", h(a.autoStart))
 	mux.HandleFunc("POST /app/auto-start", h(a.saveAutoStart))
+	mux.HandleFunc("GET /app/daily-plan", h(a.dailyPlan))
 	mux.HandleFunc("OPTIONS /app/", h(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -220,7 +222,9 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	request.BackendJobID = strings.TrimSpace(request.BackendJobID)
 	switch request.Mode {
 	case "full":
-		if request.BackendJobID == "" || len(request.BackendJobID) > 128 {
+		// 当日职位计划(2026-09-01):完整流程不再绑定单一职位,backendJobId
+		// 仅兼容接收(旧前端仍会带),超长才拒绝。
+		if len(request.BackendJobID) > 128 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
 			return
 		}
@@ -297,6 +301,17 @@ func (a *API) saveInterviewSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})
+}
+
+// dailyPlan 投影最近一份当日职位计划(2026-09-01):每个职位的份额、状态、
+// 实发与跳过原因,留痕条款要求这些在产品 UI 可见。
+func (a *API) dailyPlan(w http.ResponseWriter, _ *http.Request) {
+	view, err := a.projections.AppDailyPlan()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当日职位计划读取失败"})
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // autoStartBody 是「每日自动开始」的线上形态。lastOutcome 是脑侧封闭码,

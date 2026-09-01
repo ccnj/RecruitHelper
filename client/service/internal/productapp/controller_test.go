@@ -39,6 +39,17 @@ func (f *fakeWorkflow) StartFull(
 	}, nil
 }
 
+func (f *fakeWorkflow) StartFullDailyPlan(
+	key store.AccountKey,
+) (*store.ProductWorkflowRun, error) {
+	f.callOrder = append(f.callOrder, "dailyPlan")
+	f.fullKey = key
+	return &store.ProductWorkflowRun{
+		RunID: "wf-fake", Platform: key.Platform, AccountRef: key.AccountRef,
+		Mode: workflow.ModeFull, Status: workflow.StatusRunning,
+	}, nil
+}
+
 func (f *fakeWorkflow) StartReplyOnly(
 	key store.AccountKey,
 ) (*store.ProductWorkflowRun, error) {
@@ -109,10 +120,19 @@ func (f *fakeSource) FetchAll(context.Context) ([]byte, error) {
 	return f.allRaw, nil
 }
 
-func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
+// 全新完整开始(2026-09-01 当日职位计划):先做硬前提的复数同步(计划名单),
+// 再尽力而为地刷新当前职位 head 与 provider 凭据,最后交给 StartFullDailyPlan。
+func TestFullStartSyncsConfigPlaneThenStartsDailyPlan(t *testing.T) {
 	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	source := &fakeSource{
+		raw: syntheticCurrentJob(t, 42, "产品经理"),
+		allRaw: syntheticAllJobs(t, 42, map[int]string{
+			42: "产品经理", 43: "客户经理",
+		}),
+		callOrder: nil,
+	}
+	source.callOrder = &flow.callOrder
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	controller, err := New(
 		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
@@ -120,15 +140,20 @@ func TestFullStartSynchronizesExactlyOneBackendJobBeforeWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", ""); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
-		t.Fatalf("source=%d key=%+v revision=%q", source.calls, flow.fullKey, flow.fullRevision)
+	if source.allCalls != 1 || source.calls != 1 || flow.fullKey != key ||
+		len(flow.callOrder) != 3 ||
+		flow.callOrder[0] != "fetchAll" ||
+		flow.callOrder[1] != "fetch" ||
+		flow.callOrder[2] != "dailyPlan" {
+		t.Fatalf("source=%d/%d key=%+v order=%v",
+			source.allCalls, source.calls, flow.fullKey, flow.callOrder)
 	}
 	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
-	if err != nil || revision == nil || revision.RevisionHash != flow.fullRevision {
-		t.Fatalf("persisted revision=%+v err=%v", revision, err)
+	if err != nil || revision == nil {
+		t.Fatalf("当前职位 head 应照旧落库(主动来聊建档用): %+v err=%v", revision, err)
 	}
 }
 
@@ -207,7 +232,10 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.T) {
 	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	source := &fakeSource{
+		raw:    syntheticCurrentJob(t, 42, "产品经理"),
+		allRaw: syntheticAllJobs(t, 42, map[int]string{42: "产品经理"}),
+	}
 	now := time.Date(2026, 7, 25, 1, 30, 0, 0, time.Local)
 	controller, err := New(
 		db,
@@ -222,8 +250,9 @@ func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
-		t.Fatalf("source=%d key=%+v revision=%q", source.calls, flow.fullKey, flow.fullRevision)
+	if source.calls != 1 || flow.fullKey != key ||
+		len(flow.callOrder) == 0 || flow.callOrder[len(flow.callOrder)-1] != "dailyPlan" {
+		t.Fatalf("source=%d key=%+v order=%v", source.calls, flow.fullKey, flow.callOrder)
 	}
 	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
 	if err != nil || revision == nil || !revision.CreatedAt.Equal(now) {
@@ -231,14 +260,16 @@ func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.
 	}
 }
 
-// TestFullStartFollowsChangedBackendJobWithoutExtraSync 锁住 2026-08-10 甲方
-// 裁决:全新开始跑后台此刻选中的职位,页面上显示的那个已经换掉也照跑,不再要求
-// 先点一次"同步职位"。页面不会因此显示错职位——开始成功后前端重拉全量数据,
-// 读到的正是这里刚落库的这一份。
-func TestFullStartFollowsChangedBackendJobWithoutExtraSync(t *testing.T) {
+// 页面带上来的职位 ID 仅兼容接收、一律忽略(2026-09-01 当日职位计划;其前身
+// 2026-08-10「跑后台此刻选中的职位」裁决随单职位模式退役)。带旧职位、带错
+// 职位都不再触发 ErrJobSelectionChanged,一律按当日计划开跑。
+func TestFullStartIgnoresPageJobSelection(t *testing.T) {
 	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: syntheticCurrentJob(t, 99, "新职位")}
+	source := &fakeSource{
+		raw:    syntheticCurrentJob(t, 99, "新职位"),
+		allRaw: syntheticAllJobs(t, 99, map[int]string{42: "旧职位", 99: "新职位"}),
+	}
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	controller, err := New(
 		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
@@ -246,22 +277,13 @@ func TestFullStartFollowsChangedBackendJobWithoutExtraSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 页面带上来的还是旧职位 42,后台此刻选的是 99。
+	// 页面带上来的还是旧职位 42:不比对、不拒绝,按当日计划开跑。
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	current, err := db.CurrentLegacyJobAIContextByBackendJobID("99")
-	if err != nil || current == nil || current.DisplayName != "新职位" {
-		t.Fatalf("最新职位应已落库: current=%+v err=%v", current, err)
-	}
-	if flow.fullKey != key || flow.fullRevision != current.RevisionHash {
-		t.Fatalf("工作流应按后台最新职位启动: key=%+v revision=%q want=%q",
-			flow.fullKey, flow.fullRevision, current.RevisionHash)
-	}
-	// 旧职位不得被拿去启动:它既不是后台选的,也不该再产生任何新链。
-	if stale, staleErr := db.CurrentLegacyJobAIContextByBackendJobID("42"); staleErr == nil &&
-		stale != nil && flow.fullRevision == stale.RevisionHash {
-		t.Fatal("工作流误用了页面上的旧职位")
+	if flow.fullKey != key ||
+		len(flow.callOrder) == 0 || flow.callOrder[len(flow.callOrder)-1] != "dailyPlan" {
+		t.Fatalf("应按当日计划开跑: key=%+v order=%v", flow.fullKey, flow.callOrder)
 	}
 }
 
@@ -294,26 +316,24 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 有未终局批次时不得触碰后台配置面:收养语义在 StartFullDailyPlan 内部,
+	// 批次自带的 revision 是不可替换的事实。
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 0 || flow.fullRevision != started.Batch.ContextRevisionHash {
+	if source.calls != 0 || source.allCalls != 0 ||
+		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
 		t.Fatalf(
-			"recovery fetched=%d revision=%q batch=%+v",
-			source.calls,
-			flow.fullRevision,
-			started.Batch,
+			"recovery fetched=%d/%d order=%v batch=%+v",
+			source.calls, source.allCalls, flow.callOrder, started.Batch,
 		)
-	}
-	if err := controller.Start(context.Background(), "full", "99"); !errors.Is(
-		err,
-		ErrJobSelectionChanged,
-	) {
-		t.Fatalf("错误职位不得接管既有批次: %v", err)
 	}
 }
 
-func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
+// 活跃运行期间点开始:不再触碰配置面,直接委托 StartFullDailyPlan(真实实现
+// 里对 replyOnly 活跃运行报模式冲突、对 full 幂等返回;「沟通期再采一批」的
+// 同步-换批语义随当日计划停用)。
+func TestStartWithActiveRunSkipsConfigSyncAndDelegates(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
@@ -340,17 +360,16 @@ func TestAdditionalBatchRefreshesCurrentBackendJobConfig(t *testing.T) {
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 1 || flow.fullKey != key || flow.fullRevision == "" {
+	if source.calls != 0 || source.allCalls != 0 || flow.fullKey != key ||
+		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
 		t.Fatalf(
-			"additional source=%d key=%+v revision=%q",
-			source.calls,
-			flow.fullKey,
-			flow.fullRevision,
+			"active-run start source=%d/%d key=%+v order=%v",
+			source.calls, source.allCalls, flow.fullKey, flow.callOrder,
 		)
 	}
 }
 
-func TestAdditionalBatchFromPausedCommunicationQueuesWithoutResuming(t *testing.T) {
+func TestStartFromPausedCommunicationDelegatesWithoutResuming(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
@@ -382,41 +401,24 @@ func TestAdditionalBatchFromPausedCommunicationQueuesWithoutResuming(t *testing.
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	// fetchAll 必须落在 fetch 与 full 之间:有效职位集要先于当前职位落库刷新,
-	// SaveCurrentLegacyJobAIContext 的"只加不减"才能保证当前工作职位一定留在
-	// 有效集里。顺序颠倒会让复数同步反过来撤销当前职位的建档资格。
-	if source.calls != 1 || source.allCalls != 1 || flow.resumeCalls != 0 ||
-		len(flow.callOrder) != 3 ||
-		flow.callOrder[0] != "fetch" ||
-		flow.callOrder[1] != "fetchAll" ||
-		flow.callOrder[2] != "full" {
-		t.Fatalf("paused additional source=%d flow=%+v", source.calls, flow)
+	// 活跃运行在场:不触碰配置面、不擅自恢复,直接委托。
+	if source.calls != 0 || source.allCalls != 0 || flow.resumeCalls != 0 ||
+		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
+		t.Fatalf("paused delegation source=%d flow=%+v", source.calls, flow)
 	}
 }
 
-func TestAdditionalBatchSyncFailureKeepsCommunicationPaused(t *testing.T) {
-	db, key := controllerFixture(t)
+// 全新开始的复数同步是计划名单硬前提(2026-09-01):失败即拒绝开始,不得
+// 回落旧单职位路径,也不得带病建计划。
+func TestFreshFullStartBlockedWhenPluralSyncFails(t *testing.T) {
+	db, _ := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
-	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
-		RunID:      "wf-paused-sync-failure",
-		Platform:   key.Platform,
-		AccountRef: key.AccountRef,
-		State: workflow.State{
-			Mode:         workflow.ModeFull,
-			Status:       workflow.StatusPaused,
-			ResumeStatus: workflow.StatusRunning,
-		},
-		Stage:     store.ProductWorkflowStageCommunication,
-		StartedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	flow := &fakeWorkflow{}
 	sourceErr := errors.New("fixture backend unavailable")
 	controller, err := New(
 		db,
 		flow,
-		&fakeSource{err: sourceErr},
+		&fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理"), allErr: sourceErr},
 		func() time.Time { return now },
 		workflow.DailyWindowPolicy{},
 	)
@@ -424,16 +426,15 @@ func TestAdditionalBatchSyncFailureKeepsCommunicationPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(err, sourceErr) {
+	if err := controller.Start(context.Background(), "full", ""); !errors.Is(err, sourceErr) ||
+		!errors.Is(err, ErrJobConfigUnavailable) {
 		t.Fatalf("Start() error=%v", err)
 	}
-	if flow.resumeCalls != 0 || flow.fullRevision != "" || len(flow.callOrder) != 0 {
+	if len(flow.callOrder) != 0 {
 		t.Fatalf("sync failure advanced workflow: %+v", flow)
 	}
-	active, err := db.ActiveProductWorkflowRun()
-	if err != nil || active == nil || active.Status != workflow.StatusPaused ||
-		active.Stage != store.ProductWorkflowStageCommunication {
-		t.Fatalf("paused run changed after sync failure: run=%+v err=%v", active, err)
+	if active, activeErr := db.ActiveProductWorkflowRun(); activeErr != nil || active != nil {
+		t.Fatalf("sync failure left state: %+v %v", active, activeErr)
 	}
 }
 
@@ -862,29 +863,46 @@ func TestFullStartBuildsEffectiveJobSetAndSurvivesPluralFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("plural failure keeps start working and preserves the set", func(t *testing.T) {
+	t.Run("plural failure blocks a fresh start and preserves the prior set", func(t *testing.T) {
 		db, _ := controllerFixture(t)
-		source := &fakeSource{
-			raw:    syntheticCurrentJob(t, 42, "产品经理"),
-			allErr: errors.New("旧后台不可达"),
+		okSource := &fakeSource{
+			raw: syntheticCurrentJob(t, 42, "产品经理"),
+			allRaw: syntheticAllJobs(t, 42, map[int]string{
+				42: "产品经理",
+			}),
 		}
+		flow := &fakeWorkflow{}
 		controller, err := New(
-			db, &fakeWorkflow{}, source,
+			db, flow, okSource,
 			func() time.Time { return now }, workflow.DailyWindowPolicy{},
 		)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 有效集只影响主动来聊候选人能否建档，配置面故障不得阻断用户点下的开始。
-		if err := controller.Start(context.Background(), "full", "42"); err != nil {
-			t.Fatalf("复数同步失败不应阻断开始: %v", err)
+		if err := controller.SyncJobs(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// 2026-09-01 起复数同步是计划名单硬前提:失败拒绝开始,但不清空既有集。
+		broken := &fakeSource{
+			raw:    syntheticCurrentJob(t, 42, "产品经理"),
+			allErr: errors.New("旧后台不可达"),
+		}
+		blocked, err := New(
+			db, flow, broken,
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := blocked.Start(context.Background(), "full", ""); !errors.Is(err, ErrJobConfigUnavailable) {
+			t.Fatalf("复数同步失败应阻断全新开始: %v", err)
 		}
 		effective, err := db.EffectiveLegacyJobs()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(effective) != 1 || effective[0].BackendJobID != "42" {
-			t.Fatalf("当前工作职位必须始终留在有效职位集内: %+v", effective)
+			t.Fatalf("同步失败不得清空既有有效集: %+v", effective)
 		}
 	})
 }
