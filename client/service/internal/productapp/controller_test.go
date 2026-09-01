@@ -143,10 +143,12 @@ func TestFullStartSyncsConfigPlaneThenStartsDailyPlan(t *testing.T) {
 	if err := controller.Start(context.Background(), "full", ""); err != nil {
 		t.Fatal(err)
 	}
+	// 顺序:先回填当前职位 head(尽力而为),后复数同步(名单最终裁决)——
+	// 颠倒会让「只加不减」的回填把复数同步剔除的职位重新塞进名单。
 	if source.allCalls != 1 || source.calls != 1 || flow.fullKey != key ||
 		len(flow.callOrder) != 3 ||
-		flow.callOrder[0] != "fetchAll" ||
-		flow.callOrder[1] != "fetch" ||
+		flow.callOrder[0] != "fetch" ||
+		flow.callOrder[1] != "fetchAll" ||
 		flow.callOrder[2] != "dailyPlan" {
 		t.Fatalf("source=%d/%d key=%+v order=%v",
 			source.allCalls, source.calls, flow.fullKey, flow.callOrder)
@@ -309,24 +311,22 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: []byte("must not fetch")}
+	// 后台整体不可达:FetchCurrent 返回不可解析内容、FetchAll 报错。
+	source := &fakeSource{raw: []byte("backend down"), callOrder: &flow.callOrder}
 	controller, err := New(
 		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 有未终局批次时不得触碰后台配置面:收养语义在 StartFullDailyPlan 内部,
-	// 批次自带的 revision 是不可替换的事实。
+	// 有未终局批次时,配置面故障不得把恢复堵死:同步照常尝试(锁外读批次不可
+	// 作跳过依据),失败后按既有批次收养继续;批次自带的 revision 是不可替换
+	// 的事实,收养语义在 StartFullDailyPlan 内部。
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 0 || source.allCalls != 0 ||
-		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
-		t.Fatalf(
-			"recovery fetched=%d/%d order=%v batch=%+v",
-			source.calls, source.allCalls, flow.callOrder, started.Batch,
-		)
+	if len(flow.callOrder) == 0 || flow.callOrder[len(flow.callOrder)-1] != "dailyPlan" {
+		t.Fatalf("recovery order=%v batch=%+v", flow.callOrder, started.Batch)
 	}
 }
 
@@ -430,8 +430,10 @@ func TestFreshFullStartBlockedWhenPluralSyncFails(t *testing.T) {
 		!errors.Is(err, ErrJobConfigUnavailable) {
 		t.Fatalf("Start() error=%v", err)
 	}
-	if len(flow.callOrder) != 0 {
-		t.Fatalf("sync failure advanced workflow: %+v", flow)
+	for _, call := range flow.callOrder {
+		if call == "dailyPlan" || call == "full" {
+			t.Fatalf("sync failure advanced workflow: %+v", flow)
+		}
 	}
 	if active, activeErr := db.ActiveProductWorkflowRun(); activeErr != nil || active != nil {
 		t.Fatalf("sync failure left state: %+v %v", active, activeErr)
@@ -1028,5 +1030,33 @@ func TestSyncJobsLogsImportFailureReason(t *testing.T) {
 		!strings.Contains(logged, "stage=import") ||
 		!strings.Contains(logged, "打分") {
 		t.Fatalf("失败原因未进日志: %s", logged)
+	}
+}
+
+// 后台「当前职位」已从职位列表删除时,开始路径的 head 回填不得把它塞回有效
+// 集——复数同步是名单的最终裁决(2026-09-01 审查修复:同步顺序回填在前)。
+func TestFullStartExcludesCurrentJobDroppedFromPluralSync(t *testing.T) {
+	db, _ := controllerFixture(t)
+	now := time.Date(2026, 9, 1, 9, 0, 0, 0, time.Local)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{
+		raw:    syntheticCurrentJob(t, 42, "已删职位"),
+		allRaw: syntheticAllJobs(t, 43, map[int]string{43: "客户经理"}),
+	}
+	controller, err := New(
+		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(context.Background(), "full", ""); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := db.EffectiveLegacyJobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(effective) != 1 || effective[0].BackendJobID != "43" {
+		t.Fatalf("已删职位不得进有效集/计划名单: %+v", effective)
 	}
 }

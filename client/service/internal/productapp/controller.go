@@ -212,22 +212,19 @@ func (c *Controller) Start(
 	}
 
 	// 当日职位计划(AGENTS.md 2026-09-01):完整流程一律按计划跑。活跃运行的
-	// 幂等返回与未终局批次的收养都在 StartFullDailyPlan 内处理;只有"全新
-	// 开始"需要先刷新配置面——计划名单来自复数同步,那是硬前提;当前职位
-	// head 与 provider 凭据的刷新维持既有行为但降为尽力而为(计划不再依赖
-	// 后台"当前职位",主动来聊建档的有效集由复数同步整体重算)。
+	// 幂等返回与未终局批次的收养都在 StartFullDailyPlan 内处理。无活跃运行时
+	// 一律先刷新配置面(不看有没有未终局批次——那个读数在锁外,收口扫描可能
+	// 正把批次终局化,靠它决定跳过同步会让 StartFullDailyPlan 用陈旧名单建
+	// 计划):顺序是先尽力而为地刷当前职位 head 与 provider 凭据,再做复数
+	// 同步——复数同步是名单的最终裁决,后台已剔除的"当前职位"不得经回填的
+	// 「只加不减」重新获得建档资格。复数同步失败时:没有可收养的批次就拒绝
+	// 开始(名单硬前提);有未终局批次则按既有恢复语义继续(收养不需要名单,
+	// 后台断网不该把恢复也堵死)。
 	active, loadErr := c.store.ActiveProductWorkflowRun()
 	if loadErr != nil {
 		return loadErr
 	}
-	batch, loadErr := c.store.ActiveSourcingBatch(key)
-	if loadErr != nil {
-		return loadErr
-	}
-	if active == nil && batch == nil {
-		if err := c.syncEffectiveJobsStrict(ctx); err != nil {
-			return errors.Join(ErrJobConfigUnavailable, err)
-		}
+	if active == nil {
 		if raw, fetchErr := c.source.FetchCurrent(ctx); fetchErr != nil {
 			logCurrentJobSyncFailure("start", "fetch", fetchErr, -1)
 		} else {
@@ -240,6 +237,17 @@ func (c *Controller) Start(
 			} else if _, persistErr := c.store.SaveCurrentLegacyJobAIContext(revisions, c.now()); persistErr != nil {
 				logCurrentJobSyncFailure("start", "persist", persistErr, 1)
 			}
+		}
+		if syncErr := c.syncEffectiveJobsStrict(ctx); syncErr != nil {
+			batch, loadErr := c.store.ActiveSourcingBatch(key)
+			if loadErr != nil {
+				return loadErr
+			}
+			if batch == nil {
+				return errors.Join(ErrJobConfigUnavailable, syncErr)
+			}
+			slog.Warn("有效职位集同步失败,按既有未终局批次恢复继续",
+				"batchId", batch.BatchID, "err", syncErr.Error())
 		}
 	}
 	_, err = c.workflow.StartFullDailyPlan(key)
