@@ -123,6 +123,7 @@ const {
   ZhilianPlatformError,
   planMove,
   planType,
+  PUNCT_KEY,
   clickAimPoint,
   mulberry32,
   SPREAD_FRACTIONS,
@@ -15195,6 +15196,21 @@ test('osengine/compose 的 Shift 必须在下一个键按下前松开(「薪资�
       }
     }
   }
+})
+
+test('osengine/compose 的标点键集合钉死十二个——变了 Go 侧键码表就得补', () => {
+  // 键码表在 client/service/internal/handinput/keymap_darwin.go,那边按这八个建的。
+  // **上游 PUNCT_KEY 长出第九个键位时,这条先红**——否则我们一片绿,直到真机上
+  // 遇到那个标点,注入层报「键码表里没有」,或者更坏:某天有人给它加了兜底。
+  const codes = [...new Set(Object.values(PUNCT_KEY).map((v) => v.code))].sort()
+  // 十二个里有四个是数字键(！=Shift+1、…=Shift+6、（=Shift+9、）=Shift+0),
+  // 它们在 Go 表里已被 Digit0..9 覆盖;真正只从这张表来的是另外八个。
+  assert.deepEqual(codes, [
+    'Backquote', 'Backslash', 'Comma', 'Digit0', 'Digit1', 'Digit6', 'Digit9',
+    'Minus', 'Period', 'Quote', 'Semicolon', 'Slash',
+  ], '上游的标点键位变了:同步 keymap_darwin.go 与它的 punctKeysFromUpstream')
+  const nonDigit = codes.filter((c) => !c.startsWith('Digit'))
+  assert.equal(nonDigit.length, 8, 'Go 侧 punctKeysFromUpstream 是按这八个建的')
 })
 
 test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {

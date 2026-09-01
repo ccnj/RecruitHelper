@@ -20,6 +20,8 @@ type fakeInjector struct {
 	cursorAt *[2]float64
 	// cursorErr 为真时 CursorPos 报错 —— 构造"连光标都读不到"的场面。
 	cursorErr bool
+	// keys 记下按键序列,形如 "KeyN↓" / "KeyN↑",供打字用例逐项核对。
+	keys []string
 }
 
 func (f *fakeInjector) MouseMove(x, y float64) error {
@@ -29,8 +31,10 @@ func (f *fakeInjector) MouseMove(x, y float64) error {
 	}
 	return nil
 }
-func (f *fakeInjector) MouseDown(int) error { f.downs++; return nil }
-func (f *fakeInjector) MouseUp(int) error   { f.ups++; return nil }
+func (f *fakeInjector) MouseDown(int) error       { f.downs++; return nil }
+func (f *fakeInjector) MouseUp(int) error         { f.ups++; return nil }
+func (f *fakeInjector) KeyDown(code string) error { f.keys = append(f.keys, code+"\u2193"); return nil }
+func (f *fakeInjector) KeyUp(code string) error   { f.keys = append(f.keys, code+"\u2191"); return nil }
 func (f *fakeInjector) CursorPos() (int, int, error) {
 	if f.cursorErr {
 		return 0, 0, errFake
