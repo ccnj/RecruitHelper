@@ -6,6 +6,7 @@ package productworkflow
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -150,12 +151,36 @@ func (m *Manager) startFullLocked(
 	revisionHash := contextRevisionHash
 	targetCount := NewFullWorkflowTargetCount
 	captureLimit := NewFullWorkflowCaptureLimit
+	var planEntryStamp func(batchID string)
 	if activeBatch != nil {
 		// 复用未终局批次时一律沿用它自己的额度,包括分轮前建立、CaptureLimit
 		// 为 0 的存量批次:它们继续按单轮语义走完,不被新版改成分轮。
 		revisionHash = activeBatch.ContextRevisionHash
 		targetCount = activeBatch.TargetCount
 		captureLimit = activeBatch.CaptureLimit
+	} else if plan, entries, planErr := m.store.ActiveDailyJobPlan(key); planErr != nil {
+		return nil, planErr
+	} else if plan != nil {
+		// 当日职位计划批次(AGENTS.md 2026-09-01):采集规模与份额联动,首轮
+		// ceil(1.5×份额)、上限 3×份额。计划 draft 期间用临时份额(N₀≥N,只会
+		// 少采,由续采轮自愈)。revision 不属于计划任何条目时按存量语义走
+		// 常量规模(管理面等旁路),不与计划勾连。
+		if entry := store.DailyJobPlanEntryByRevision(entries, revisionHash); entry != nil {
+			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
+			if share <= 0 {
+				return nil, store.ErrSourcingBatchInvalid
+			}
+			targetCount = store.PlanCaptureFirstRound(share)
+			captureLimit = store.PlanCaptureLimit(share)
+			planID, seq := plan.PlanID, entry.Seq
+			planEntryStamp = func(batchID string) {
+				if stampErr := m.store.StampDailyJobPlanEntryBatch(planID, seq, batchID); stampErr != nil {
+					slog.Warn("当日计划条目批次锚写入失败(仅诊断)",
+						"planId", planID, "seq", seq, "batchId", batchID,
+						"err", stampErr.Error())
+				}
+			}
+		}
 	}
 	if revisionHash == "" {
 		return nil, store.ErrJobAIContextRevisionInvalid
@@ -197,6 +222,9 @@ func (m *Manager) startFullLocked(
 	attached, err := m.store.AttachProductWorkflowSourcingBatch(run.RunID, activeBatch.BatchID)
 	if err != nil {
 		return nil, m.failStart(run, key, err)
+	}
+	if planEntryStamp != nil {
+		planEntryStamp(activeBatch.BatchID)
 	}
 	return attached, nil
 }

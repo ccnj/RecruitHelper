@@ -871,8 +871,24 @@ func (m *Manager) reopenSourcingForMoreCapture(
 	if strings.HasPrefix(batch.Reason, store.SourcingNoNewCandidatesReason) {
 		return true, nil
 	}
+	step := NewFullWorkflowCaptureStep
+	// 当日职位计划批次的续采步进与份额联动:ceil(0.5×份额)(AGENTS.md
+	// 2026-09-01)。走到这里计划必已定稿(筛选先于续采,草稿计划在筛选就
+	// 冲突),份额即条目冻结配额。
+	if plan, entries, planErr := m.store.ActiveDailyJobPlan(store.AccountKey{
+		Platform: batch.Platform, AccountRef: batch.AccountRef,
+	}); planErr != nil {
+		return false, planErr
+	} else if plan != nil {
+		if entry := store.DailyJobPlanEntryByRevision(entries, batch.ContextRevisionHash); entry != nil {
+			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
+			if share > 0 {
+				step = store.PlanCaptureStep(share)
+			}
+		}
+	}
 	if _, err := m.store.ReopenSourcingBatchForCapture(store.ReopenSourcingBatchForCaptureRequest{
-		BatchID: batchID, Step: NewFullWorkflowCaptureStep, ReopenAt: m.clock.Now(),
+		BatchID: batchID, Step: step, ReopenAt: m.clock.Now(),
 	}); err != nil {
 		return false, err
 	}

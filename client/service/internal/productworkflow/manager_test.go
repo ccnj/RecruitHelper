@@ -3,6 +3,7 @@ package productworkflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -517,4 +518,105 @@ func productWorkflowRevision(at time.Time) m5ai.ContextRevision {
 		},
 		CreatedAt: at,
 	}
+}
+
+// —— 当日职位计划:采集规模与份额联动(AGENTS.md 2026-09-01) ——
+
+func dailyPlanRevisionFixture(jobID, jobName string, targetMin, targetMax int, at time.Time) m5ai.ContextRevision {
+	documents := []m5ai.JobConfigDocument{
+		{DocType: "候选人筛选", Content: fmt.Sprintf(
+			`{"minScore":5,"targetMin":%d,"targetMax":%d,"maleRatioLimit":50}`, targetMin, targetMax)},
+		{DocType: "多轮沟通", Content: "reply"},
+		{DocType: "客户事实库", Content: "facts"},
+		{DocType: "意向判断", Content: "intent"},
+		{DocType: "打分", Content: "score {resume_json}"},
+		{DocType: "招呼语", Content: `{"prompt":"{career_state} {resume_summary_json}"}`},
+		{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
+	}
+	sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
+	return m5ai.ContextRevision{
+		ContextID: "plan-ctx-" + jobID, RevisionHash: "plan-rev-" + jobID,
+		SourceKind: "legacyJobConfig", SourceJobRef: jobID, DisplayName: jobName,
+		SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+		Communication: m5ai.CommunicationView{
+			ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
+			MappingVersion: m5ai.MappingVersion,
+		},
+		CreatedAt: at,
+	}
+}
+
+func TestStartFullSizesPlanBatchesByShareAndKeepsConstantsForNonPlan(t *testing.T) {
+	db, key, fixtureRevision := productWorkflowFixture(t)
+	location := time.UTC
+	clock := &fixtureClock{now: time.Date(2026, 9, 1, 9, 0, 0, 0, location)}
+	at := clock.now.Add(-time.Hour)
+	revA := dailyPlanRevisionFixture("1", "职位一", 84, 84, at)
+	revB := dailyPlanRevisionFixture("2", "职位二", 80, 90, at)
+	if _, err := db.SaveEffectiveLegacyJobAIContexts([]m5ai.ContextRevision{revA, revB}, at); err != nil {
+		t.Fatal(err)
+	}
+	created, err := db.CreateDailyJobPlan(key, "2026-09-01", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := &fixtureActor{store: db, clock: clock}
+	manager, err := NewManager(db, actor, Config{Clock: clock, Location: location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishRun := func(run *store.ProductWorkflowRun) {
+		t.Helper()
+		if run.SourcingBatchID != nil {
+			if _, err := db.StopSourcingBatch(store.StopSourcingBatchRequest{
+				BatchID: *run.SourcingBatchID, Reason: "testFinish", StoppedAt: clock.now,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+			RunID: run.RunID,
+			From:  workflow.State{Mode: run.Mode, Status: run.Status, ResumeStatus: run.ResumeStatus},
+			To:    workflow.State{Mode: run.Mode, Status: workflow.StatusCompleted},
+			At:    clock.now, Stage: store.ProductWorkflowStageCompleted, EndReason: "additionalBatch",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 草稿计划:临时份额 84/2=42 → 首轮 ceil(1.5×42)=63、上限 3×42=126。
+	run, err := manager.StartFull(key, revA.RevisionHash)
+	if err != nil || len(actor.startTargets) != 1 ||
+		actor.startTargets[0] != 63 || actor.startCaptureLimits[0] != 126 {
+		t.Fatalf("草稿计划批次规模错误: targets=%v caps=%v err=%v",
+			actor.startTargets, actor.startCaptureLimits, err)
+	}
+	_, entries, err := db.ActiveDailyJobPlan(key)
+	if err != nil || run.SourcingBatchID == nil || entries[0].BatchID != *run.SourcingBatchID {
+		t.Fatalf("条目批次锚缺失: %+v err=%v", entries, err)
+	}
+	finishRun(run)
+
+	// 定稿(双职位在线,各 42)后开职位二:份额 42 → 63/126。
+	if _, err := db.FinalizeDailyJobPlan(created.Plan.PlanID, []store.DailyJobPlanGateObservation{
+		{Seq: 1, Online: true, StatusLabel: "在线中"},
+		{Seq: 2, Online: true, StatusLabel: "在线中"},
+	}, clock.now); err != nil {
+		t.Fatal(err)
+	}
+	runB, err := manager.StartFull(key, revB.RevisionHash)
+	if err != nil || actor.startTargets[1] != 63 || actor.startCaptureLimits[1] != 126 {
+		t.Fatalf("定稿计划批次规模错误: targets=%v caps=%v err=%v",
+			actor.startTargets, actor.startCaptureLimits, err)
+	}
+	finishRun(runB)
+
+	// 与计划无关的 revision(存量/管理面旁路)维持常量规模,不与计划勾连。
+	runC, err := manager.StartFull(key, fixtureRevision.RevisionHash)
+	if err != nil || actor.startTargets[2] != NewFullWorkflowTargetCount ||
+		actor.startCaptureLimits[2] != NewFullWorkflowCaptureLimit {
+		t.Fatalf("非计划批次规模应为常量: targets=%v caps=%v err=%v",
+			actor.startTargets, actor.startCaptureLimits, err)
+	}
+	_ = runC
 }
