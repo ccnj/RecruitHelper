@@ -99,8 +99,9 @@ func (w *windowsInjector) MouseUp(button int) error   { return w.button(button, 
 // 这里显式报错而不是发一个"差不多"的 SendInput:Windows 那半要配自研 TIP,
 // 由命名管道告诉它上屏哪个词;没有 TIP 的键盘注入在中文下会打出错字——那是死代码里
 // 更坏的一种,能编译、能跑、结果是错的。
-func (w *windowsInjector) KeyDown(code string) error { return errKeyboardNotOnWindows(code) }
-func (w *windowsInjector) KeyUp(code string) error   { return errKeyboardNotOnWindows(code) }
+func (w *windowsInjector) KnowsKey(code string) error { return errKeyboardNotOnWindows(code) }
+func (w *windowsInjector) KeyDown(code string) error  { return errKeyboardNotOnWindows(code) }
+func (w *windowsInjector) KeyUp(code string) error    { return errKeyboardNotOnWindows(code) }
 
 func errKeyboardNotOnWindows(code string) error {
 	return fmt.Errorf("键盘注入尚未在 Windows 上实现(键盘线第二段:自研 TIP + 命名管道);code=%s", code)

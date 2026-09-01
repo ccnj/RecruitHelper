@@ -22,6 +22,10 @@ type fakeInjector struct {
 	cursorErr bool
 	// keys 记下按键序列,形如 "KeyN↓" / "KeyN↑",供打字用例逐项核对。
 	keys []string
+	// unknownKey 非空时,KnowsKey 对它报错 —— 构造"计划里有注入器不认识的键"。
+	unknownKey string
+	// keyFailAt >0 时,第几次按键动作开始报错 —— 构造"打到一半失败"。
+	keyFailAt int
 }
 
 func (f *fakeInjector) MouseMove(x, y float64) error {
@@ -31,10 +35,24 @@ func (f *fakeInjector) MouseMove(x, y float64) error {
 	}
 	return nil
 }
-func (f *fakeInjector) MouseDown(int) error       { f.downs++; return nil }
-func (f *fakeInjector) MouseUp(int) error         { f.ups++; return nil }
-func (f *fakeInjector) KeyDown(code string) error { f.keys = append(f.keys, code+"\u2193"); return nil }
-func (f *fakeInjector) KeyUp(code string) error   { f.keys = append(f.keys, code+"\u2191"); return nil }
+func (f *fakeInjector) MouseDown(int) error { f.downs++; return nil }
+func (f *fakeInjector) MouseUp(int) error   { f.ups++; return nil }
+func (f *fakeInjector) KnowsKey(code string) error {
+	if f.unknownKey != "" && code == f.unknownKey {
+		return errFake
+	}
+	return nil
+}
+func (f *fakeInjector) KeyDown(code string) error { return f.recordKey(code, "\u2193") }
+func (f *fakeInjector) KeyUp(code string) error   { return f.recordKey(code, "\u2191") }
+
+func (f *fakeInjector) recordKey(code, arrow string) error {
+	f.keys = append(f.keys, code+arrow)
+	if f.keyFailAt > 0 && len(f.keys) >= f.keyFailAt {
+		return errFake
+	}
+	return nil
+}
 func (f *fakeInjector) CursorPos() (int, int, error) {
 	if f.cursorErr {
 		return 0, 0, errFake

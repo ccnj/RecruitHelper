@@ -139,6 +139,11 @@ func (d *darwinInjector) button(button int, down bool) error {
 	return d.post(typ, cgPoint{X: float64(x), Y: float64(y)}, btn)
 }
 
+func (d *darwinInjector) KnowsKey(code string) error {
+	_, err := darwinKeyCode(code)
+	return err
+}
+
 func (d *darwinInjector) KeyDown(code string) error { return d.key(code, true) }
 func (d *darwinInjector) KeyUp(code string) error   { return d.key(code, false) }
 

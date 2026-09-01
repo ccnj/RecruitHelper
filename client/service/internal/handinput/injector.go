@@ -42,6 +42,13 @@ type Injector interface {
 	KeyDown(code string) error
 	KeyUp(code string) error
 
+	// KnowsKey 只回答"这个 code 我认不认识",不发任何东西。
+	//
+	// 有它才能**在发出第一次按键之前**把整份计划否掉。没有的话只能边发边试,
+	// 而打到一半失败会留下按住的修饰键——那是最坏的收场:失败之后用户的键盘
+	// 还带着 Shift。方向必须是"一个都没发",不是"发了一半"。
+	KnowsKey(code string) error
+
 	// SeedCalib 把页面自报的窗口粗估翻成一个初始映射。
 	//
 	// **必须由各平台自己实现,因为差异的根源就是"本平台的注入 API 收什么单位"** ——

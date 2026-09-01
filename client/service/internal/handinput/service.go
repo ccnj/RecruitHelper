@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -210,6 +211,87 @@ func (s *Service) Play(points []PlanPoint) (PlayResult, error) {
 //
 // 这是**搭车标定**——这次移动本来就要做,落点是白送的样本。生产里绝不跑九点标定:
 // 九次机械瞬移正是评分台里得分最差的那个形状,开工前跑一遍等于自报家门。
+// TypeResult 是一次打字的回执。**不含任何"打出来的是什么"** —— 那要回读页面,
+// 是插件的事;本包只知道自己发了些什么。
+type TypeResult struct {
+	Keys      int     `json:"keys"` // 实际发出的 down/up 次数
+	LagMeanUs float64 `json:"lagMeanUs"`
+	LagMaxUs  float64 `json:"lagMaxUs"`
+	Status    string  `json:"status"`
+}
+
+// Type 按计划把一串按键播出去。
+//
+// # 两条与鼠标那半一样的纪律
+//
+// LockOSThread 的理由见 Play(方法上的,不是"多一层保险")。播放期间一律解除点击
+// 放行:打字改变了世界,上一次落点确认已经过期。
+//
+// # 一条打字独有的:半途失败必须把按住的键放开
+//
+// 键盘与鼠标不同——鼠标注入失败,光标停在哪儿是个静态事实,没人受伤;键盘注入
+// 失败若留下按住的修饰键,**用户的整台机器此后都带着 Shift**,而且没有任何东西
+// 会自动收拾。所以 held 的释放走 defer,panic 也照放。
+//
+// 校验在发出第一次按键**之前**全部做完(键码认不认识、修饰键窗口够不够),
+// 失效方向是"一个都没发"而不是"发了一半"。
+func (s *Service) Type(plan TypePlan) (TypeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := plan.Validate(s.inj.KnowsKey); err != nil {
+		return TypeResult{}, err
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	s.armed = false
+
+	evs, _ := plan.Flatten()
+	held := make(map[string]int, 4)
+	defer func() {
+		// 逆序放开还按着的键:后按的先放,与真人松手的次序一致。
+		codes := make([]string, 0, len(held))
+		for c := range held {
+			codes = append(codes, c)
+		}
+		sort.Slice(codes, func(i, j int) bool { return held[codes[i]] > held[codes[j]] })
+		for _, c := range codes {
+			_ = s.inj.KeyUp(c) // 已经在失败路径上,再失败也无处可去
+		}
+	}()
+
+	res := TypeResult{}
+	base := nowNanos()
+	var lagSum, lagMax float64
+	for i, e := range evs {
+		deadline := base + int64(e.At*1e6)
+		WaitUntil(deadline, s.mode)
+		at := nowNanos()
+		var err error
+		if e.Down {
+			err = s.inj.KeyDown(e.Code)
+			held[e.Code] = i
+		} else {
+			err = s.inj.KeyUp(e.Code)
+			delete(held, e.Code)
+		}
+		res.Keys++
+		if err != nil {
+			return res, fmt.Errorf("第 %d 次按键(%s)注入失败:%w", res.Keys, e.Code, err)
+		}
+		lag := float64(at-deadline) / 1e3
+		lagSum += lag
+		lagMax = math.Max(lagMax, math.Abs(lag))
+	}
+	if res.Keys > 0 {
+		res.LagMeanUs = lagSum / float64(res.Keys)
+	}
+	res.LagMaxUs = lagMax
+	res.Status = "ok"
+	return res, nil
+}
+
 func (s *Service) Landing(clientX, clientY float64) (PBStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
