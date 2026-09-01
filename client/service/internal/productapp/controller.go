@@ -358,6 +358,8 @@ func (c *Controller) SyncEffectiveJobs(ctx context.Context) {
 func (c *Controller) syncEffectiveJobsStrict(ctx context.Context) error {
 	raw, err := c.source.FetchAll(ctx)
 	if err != nil {
+		// 留痕条款:对外收窄为固定文案之前,完整失败现场先落日志。
+		slog.Warn("有效职位集拉取失败", "stage", "fetchAll", "err", err.Error())
 		return fmt.Errorf("有效职位集拉取失败: %w", err)
 	}
 	revisions, skipped, err := m5ai.ImportLegacyJobConfigsTolerant(raw, c.now())
@@ -369,10 +371,12 @@ func (c *Controller) syncEffectiveJobsStrict(ctx context.Context) error {
 		)
 	}
 	if err != nil {
+		slog.Warn("有效职位集整包无效", "stage", "import", "err", err.Error())
 		return fmt.Errorf("有效职位集整包无效: %w", err)
 	}
 	stored, err := c.store.SaveEffectiveLegacyJobAIContexts(revisions, c.now())
 	if err != nil {
+		slog.Warn("有效职位集写入失败", "stage", "persist", "err", err.Error())
 		return fmt.Errorf("有效职位集写入失败: %w", err)
 	}
 	slog.Info("有效职位集已刷新",

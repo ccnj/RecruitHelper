@@ -308,6 +308,8 @@ func (a *API) saveInterviewSchedule(w http.ResponseWriter, r *http.Request) {
 func (a *API) dailyPlan(w http.ResponseWriter, _ *http.Request) {
 	view, err := a.projections.AppDailyPlan()
 	if err != nil {
+		// 留痕条款:对外只回聚合文案,完整失败现场先落日志。
+		slog.Warn("产品接口:当日职位计划读取失败", "err", err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "当日职位计划读取失败"})
 		return
 	}

@@ -220,6 +220,7 @@ func (m *Manager) AdvanceOnce(
 		// 成编排器;集合未就绪(投影缺失、生成尚未收敛)等下一 tick,不带病
 		// 放行。新链不再进入 awaitingConfirmation 停靠态。
 		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			m.logConfirmationStallOnce(run, batchID, confirmation, err)
 			return run, nil
 		}
 		return m.advanceStage(run, store.ProductWorkflowStageGreetingSending)
@@ -249,6 +250,7 @@ func (m *Manager) AdvanceOnce(
 		// 自动确认(2026-09-01 甲方裁决):存量停在人工闸的运行升级后由同一
 		// 控制律自动收敛,不再等待人工点击;ConfirmAll 入口保留兼容。
 		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			m.logConfirmationStallOnce(run, batchID, confirmation, err)
 			return run, nil
 		}
 		return m.store.TransitionProductWorkflowRun(
@@ -927,6 +929,27 @@ func (m *Manager) reopenSourcingForMoreCapture(
 		return false, err
 	}
 	return false, nil
+}
+
+// logConfirmationStallOnce 给"投影自称就绪、精确全选集合却校验不过"的停滞
+// 留痕(留痕条款):这种不一致不会自愈,旧人工闸时代至少停在可见的待确认页,
+// 现在必须靠日志被看见。生成尚未收敛(Ready=false)是常态等待,不记。
+func (m *Manager) logConfirmationStallOnce(
+	run *store.ProductWorkflowRun,
+	batchID string,
+	confirmation *store.AppConfirmationProjection,
+	cause error,
+) {
+	if confirmation == nil || !confirmation.Ready || m.confirmStallLoggedRunID == run.RunID {
+		return
+	}
+	m.confirmStallLoggedRunID = run.RunID
+	slog.Warn("自动确认停滞:确认投影就绪但精确全选集合校验不过,原地等待",
+		"runId", run.RunID, "batchId", batchID,
+		"selectableCount", confirmation.SelectableCount,
+		"candidates", len(confirmation.Candidates),
+		"generationPending", confirmation.GenerationPending,
+		"err", cause.Error())
 }
 
 func (m *Manager) advanceStage(

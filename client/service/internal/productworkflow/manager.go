@@ -76,6 +76,10 @@ type Manager struct {
 	// shared member gate must remain able to close while one candidate's AI
 	// call or hand command is naturally finishing.
 	advanceMu sync.Mutex
+	// confirmStallLoggedRunID 让"自动确认对不一致投影原地等待"的留痕每个
+	// 运行只响一次(1 tick/秒,逐 tick 记会刷爆日志);仅在 AdvanceOnce
+	// (advanceMu)下读写。
+	confirmStallLoggedRunID string
 	// confirmationProjection is the sole source for the exact selectable set
 	// accepted by ConfirmAll. Production always uses Store.AppConfirmation;
 	// keeping it as a function also makes the control law testable without
