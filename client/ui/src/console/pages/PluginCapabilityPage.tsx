@@ -14,6 +14,8 @@ import {
   InterviewProbeResult,
   NotifyProbeImage,
   NotifyProbeResult,
+  OsProbeResult,
+  OsTypeResult,
   api,
 } from '../../api'
 import { errorText } from '../format'
@@ -33,8 +35,15 @@ export function PluginCapabilityPage({ account, conversations, conversationsLoad
         在真实页面上验证手侧原语能不能跑通。这里的每一项都不产生候选人可见动作，
         但会操作招聘人员自己看到的页面（开弹窗、点选择框），跑的时候别同时用浏览器。
       </p>
+      <p>
+        最后两项是 <strong>OS 级键鼠注入</strong>，它们真的会挪你的鼠标、真的会往键盘缓冲区
+        里发按键。跑的时候<strong>手别碰鼠标键盘</strong>，也别切走 Chrome——注入打的是
+        最前台的窗口，切走了就打到别的应用上去了。
+      </p>
       <InterviewEditorProbe account={account} {...picker} />
       <NotifyProbe account={account} {...picker} />
+      <OsProbeBlock account={account} />
+      <OsTypeBlock account={account} />
     </div>
   )
 }
@@ -358,6 +367,304 @@ function NotifyProbe({ account, conversations, conversationsLoading, conversatio
       ) : null}
     </section>
   )
+}
+
+// ── OS 注入：鼠标 ───────────────────────────────────────────────────────
+//
+// 这两块是键鼠线在 Windows 真机上的驾驶盘。**它们刻意不做任何前置校验**
+// （2026-09-01 甲方裁决）：不查 TIP 装没装、不查平台适配器有没有这条能力、
+// 不查输入框空不空。理由是那些校验各自都可能出错，而每加一道，"跑不通"的
+// 可能原因就多一种；一次跑到底，读 outcome 与 detail 定位，比先跑五个体检快。
+//
+// 所以这里唯一的拦截条件与别的探针完全相同：选了账号、手在线。别的一律让
+// 手侧如实回答。
+
+function OsProbeBlock({ account }: { account: AccountView | null }) {
+  const [target, setTarget] = useState<'viewportSpread' | 'reversibleToggle'>('viewportSpread')
+  const [result, setResult] = useState<OsProbeResult | null>(null)
+  const [transportError, setTransportError] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null)
+
+  const blocked = !account
+    ? '先在「账号与巡检」选一个账号'
+    : !account.handOnline ? '该账号绑定的手不在线' : ''
+
+  const run = useCallback(async () => {
+    if (running || blocked || !account) return
+    setRunning(true)
+    setTransportError(null)
+    setResult(null)
+    const startedAt = performance.now()
+    try {
+      setResult(await api.osProbe({ platform: account.platform, accountRef: account.accountRef, target }))
+    } catch (reason) {
+      setTransportError(errorText(reason))
+    } finally {
+      setElapsedMs(Math.round(performance.now() - startedAt))
+      setRunning(false)
+    }
+  }, [running, blocked, account, target])
+
+  const data = result?.result?.data
+  return (
+    <section className="probe-block">
+      <h3>OS 鼠标注入探针</h3>
+      <p>
+        走完整条鼠标线：定位元素 → 按人的轨迹移光标 → 落点确认 → 喂搭车标定。
+        它<strong>不经浏览器合成事件</strong>，是真的在操作系统层面挪鼠标，
+        所以页面收到的 <code>isTrusted</code> 是真的。
+      </p>
+      <p className="probe-note">
+        <strong>冷启动第一趟多半打偏</strong>（窗口位置只能粗估，能差一两百物理像素），
+        outcome 会是 <code>refusedByGate</code>。它自己会重试到标定追上，实测两趟就够，
+        所以第一次被拒别当故障——看 <code>attempts</code> 与 <code>落点偏差</code>。
+      </p>
+
+      <label className="probe-field">
+        <span>靶子</span>
+        <span className="probe-radios">
+          <label>
+            <input type="radio" name="os-probe-target" checked={target === 'viewportSpread'}
+              onChange={() => setTarget('viewportSpread')} disabled={running} />
+            只移不点
+          </label>
+          <label>
+            <input type="radio" name="os-probe-target" checked={target === 'reversibleToggle'}
+              onChange={() => setTarget('reversibleToggle')} disabled={running} />
+            真点一次（可逆开关）
+          </label>
+        </span>
+      </label>
+      <p className="probe-note">
+        「只移不点」全程不按下鼠标键，用来验坐标算得对不对；「真点一次」会点一个
+        自身可逆的控件（比如列表页的筛选开关），点完页面会变，但不产生任何候选人
+        可见动作。
+      </p>
+
+      <div className="sql-bar">
+        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+          {running ? '注入中，手别碰鼠标…' : '开始注入'}
+        </button>
+        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+      </div>
+
+      <OsFailure result={result} transportError={transportError} />
+      {data ? (
+        <>
+          <p className={data.outcome === 'landed' || data.outcome === 'clicked' ? 'sql-ok' : 'sql-error'}>
+            {osProbeVerdict(data.outcome)}
+          </p>
+          <dl className="probe-readback">
+            <dt>试了几趟</dt><dd className="mono">{data.attempts}</dd>
+            <dt>落点偏差</dt>
+            <dd className={data.landingDriftPx === undefined ? 'probe-absent' : 'mono'}>
+              {data.landingDriftPx === undefined ? '没测到（没走到落点确认）' : `${data.landingDriftPx} px`}
+            </dd>
+            <dt>标定</dt><dd className="mono">{data.calibStatus}</dd>
+            <dt>够不到的框</dt><dd className="mono">{data.unreachableFrames}</dd>
+            <dt>排轨迹</dt><dd className="mono">{data.planMs} ms</dd>
+            <dt>播放滞后峰值</dt><dd className="mono">{data.lagMaxUs} us</dd>
+            <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
+          </dl>
+          <OsDetail detail={data.detail} />
+        </>
+      ) : null}
+      {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
+    </section>
+  )
+}
+
+// ── OS 注入：键盘 ───────────────────────────────────────────────────────
+
+// 预置文案不是图省事。Windows 真机上跑这一块时，**操作者没法自己敲进这些字**
+// ——敲中文要用输入法，而输入法正是我们马上要接管的东西。所以给按钮。
+//
+// 三条各有靶子：
+const OS_TYPE_PRESETS: readonly { label: string; text: string; why: string }[] = [
+  { label: '纯中文', text: '你好，方便加个微信聊聊吗',
+    why: '段一 macOS 真机跑的就是这句，好横向对比' },
+  { label: '中英混排', text: '岗位是Java后端，Base深圳，方便聊聊吗？',
+    why: '上游放行英文段时自己的验收文案。英文走 composition，大小写由上屏词带出来' },
+  { label: '含数字', text: '薪资20到30万，3年经验',
+    why: '数字那个洞至今没被真机照过：真输入法直接上屏，我们的 TIP 会当上屏键吃掉' },
+]
+
+const OS_TYPE_MAX_RUNES = 120
+
+function OsTypeBlock({ account }: { account: AccountView | null }) {
+  const [text, setText] = useState(OS_TYPE_PRESETS[0].text)
+  const [result, setResult] = useState<OsTypeResult | null>(null)
+  const [transportError, setTransportError] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null)
+
+  const runes = useMemo(() => [...text].length, [text])
+  const blocked = !account
+    ? '先在「账号与巡检」选一个账号'
+    : !account.handOnline
+      ? '该账号绑定的手不在线'
+      : runes === 0
+        ? '先填一句要打的话'
+        : runes > OS_TYPE_MAX_RUNES ? `开发期探针上限 ${OS_TYPE_MAX_RUNES} 字元，现在 ${runes}` : ''
+
+  const run = useCallback(async () => {
+    if (running || blocked || !account) return
+    setRunning(true)
+    setTransportError(null)
+    setResult(null)
+    const startedAt = performance.now()
+    try {
+      setResult(await api.osType({ platform: account.platform, accountRef: account.accountRef, text }))
+    } catch (reason) {
+      setTransportError(errorText(reason))
+    } finally {
+      setElapsedMs(Math.round(performance.now() - startedAt))
+      setRunning(false)
+    }
+  }, [running, blocked, account, text])
+
+  const data = result?.result?.data
+  return (
+    <section className="probe-block">
+      <h3>OS 键盘注入探针</h3>
+      <p>
+        把一句话打进聊天输入框，然后<strong>停手——不点发送</strong>。走的是真人那条路：
+        逐个音节敲拼音、按上屏键、等组字周期，页面收到的是真键盘事件。
+        输入框里<strong>只会多出草稿</strong>，没有任何东西到达服务端，更没有任何东西
+        到达候选人。
+      </p>
+      <p className="probe-note">
+        两个硬前提，手侧自己会拒：目标平台的聊天页得开着；<strong>输入框必须是空的</strong>
+        ——覆盖你已经敲进去的字是红线，这道闸与真发消息用的是同一个，不为调试放宽。
+      </p>
+
+      <label className="probe-field">
+        <span>要打的话</span>
+        <input className="sql-input" value={text} onChange={(event) => setText(event.target.value)}
+          placeholder="中文即可，英文也行" disabled={running} />
+      </label>
+      <div className="sql-bar">
+        {OS_TYPE_PRESETS.map((preset) => (
+          <button key={preset.label} title={preset.why}
+            onClick={() => setText(preset.text)} disabled={running}>
+            {preset.label}
+          </button>
+        ))}
+        <small className={runes > OS_TYPE_MAX_RUNES ? 'sql-error' : 'probe-blocked'}>
+          {runes} / {OS_TYPE_MAX_RUNES} 字元
+        </small>
+      </div>
+      <p className="probe-note">
+        Windows 上你多半敲不进中文——敲中文要用输入法，而输入法正是这一块要接管的东西。
+        所以给了三个预置：<strong>纯中文</strong>对比 macOS 那次、<strong>中英混排</strong>
+        验英文段、<strong>含数字</strong>照一照那个至今没被真机照过的洞。
+      </p>
+
+      <div className="sql-bar">
+        <button onClick={() => void run()} disabled={running || Boolean(blocked)}>
+          {running ? '打字中，别碰键盘、别切走 Chrome…' : '开始打字'}
+        </button>
+        {blocked && !running ? <small className="probe-blocked">{blocked}</small> : null}
+        {elapsedMs !== null && !running ? <small className="mono">{elapsedMs} ms</small> : null}
+      </div>
+
+      <OsFailure result={result} transportError={transportError} />
+      {data ? (
+        <>
+          <p className={data.outcome === 'typed' ? 'sql-ok' : 'sql-error'}>{osTypeVerdict(data.outcome)}</p>
+          {data.outcome === 'typed' ? <MatchedVerdict matched={data.matched} /> : null}
+          <dl className="probe-readback">
+            <dt>发了几次按键</dt><dd className="mono">{data.keys}</dd>
+            <dt>排版重采</dt><dd className="mono">{data.tries} 次</dd>
+            <dt>排版耗时</dt><dd className="mono">{data.planMs} ms</dd>
+            <dt>播放滞后峰值</dt>
+            <dd className="mono">
+              {data.lagMaxUs} us
+              {data.lagMaxUs > 20000 ? '（偏大，本机当时可能在忙别的）' : ''}
+            </dd>
+            <dt>整条耗时</dt><dd className="mono">{data.elapsedMs} ms</dd>
+          </dl>
+          <OsDetail detail={data.detail} />
+        </>
+      ) : null}
+      {result?.msgId ? <p className="mono probe-msgid">msgId {result.msgId}</p> : null}
+    </section>
+  )
+}
+
+// matched 只报不判，所以这里也不判——两个平台上它是**两件不同的事**，
+// 界面把两种读法都摆出来，由看的人对着自己所在的机器认领。
+function MatchedVerdict({ matched }: { matched?: boolean }) {
+  if (matched === undefined) return null
+  if (matched) {
+    return <p className="sql-ok">回读逐字相同——上屏的就是要打的那句。</p>
+  }
+  return (
+    <p className="probe-note">
+      <strong>回读不同。</strong>这不是失败，<code>outcome</code> 照样是 typed，
+      键全都发出去了、页面也全收到了，差的只是<strong>上屏选了哪个词</strong>。
+      两种读法：在 <strong>macOS</strong> 上这是预期的——开发机没有自研 TIP，走的是系统
+      输入法，「加个」出成「价格」很正常；在 <strong>Windows</strong> 上这是发现——
+      TIP 说了算就应当逐字相同，不同说明 TIP 没接上，或者接上了但选词不对。
+    </p>
+  )
+}
+
+// detail 是手侧一路记下来的分段流水，用 | 隔开。它是这两块真正的读物——
+// 结构化字段只告诉你结局，detail 告诉你走到哪一段、每一段读到了什么。
+// 不折叠：一共就几行，而且看的人是奔着它来的。
+function OsDetail({ detail }: { detail?: string }) {
+  if (!detail) return null
+  const stages = detail.split('|').map((part) => part.trim()).filter(Boolean)
+  return (
+    <>
+      <p className="probe-note">手侧一路的流水：</p>
+      <ol className="probe-stages">
+        {stages.map((stage, index) => <li key={index} className="mono">{stage}</li>)}
+      </ol>
+    </>
+  )
+}
+
+// 命令没跑到手侧（脑侧拒绝、超时、手不在线）与手侧跑了但结果不好，是两件事。
+// 前者没有 data，只有 errorCode 或 HTTP 层的错。
+function OsFailure({ result, transportError }: {
+  result: OsProbeResult | OsTypeResult | null
+  transportError: string | null
+}) {
+  if (transportError) return <p className="sql-error">没跑成：{transportError}</p>
+  if (!result) return null
+  if (result.result?.data) return null
+  const err = result.result?.error
+  return (
+    <p className="sql-error">
+      命令没带回观测结果（status {result.status ?? '未知'}
+      {result.errorCode ? ` / ${result.errorCode}` : ''}）
+      {err?.message ? `：${err.message}` : ''}
+    </p>
+  )
+}
+
+function osProbeVerdict(outcome: string): string {
+  switch (outcome) {
+    case 'landed': return '移到位了（只移不点，全程没按下鼠标键）'
+    case 'clicked': return '点下去了'
+    case 'refusedByGate': return '被闸拦下，没动手——多半是标定还没追上，再跑一次'
+    case 'handServiceUnavailable': return '本机手服务没起来，一个动作都没发出去'
+    default: return `收场：${outcome}`
+  }
+}
+
+function osTypeVerdict(outcome: string): string {
+  switch (outcome) {
+    case 'typed': return '打进去了，停在草稿状态——没点发送'
+    case 'refusedByGate': return '被闸拦下，一个键都没发'
+    case 'planFailed': return '排版器排不出合格形状，没发键——它闭环自验，排不出就如实说排不出'
+    case 'handServiceUnavailable': return '本机手服务没起来，一个键都没发'
+    default: return `收场：${outcome}`
+  }
 }
 
 function ImageOutcome({ image, note }: { image: NotifyProbeImage; note?: string }) {

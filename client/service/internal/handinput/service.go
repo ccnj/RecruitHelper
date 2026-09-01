@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 )
 
 // PlanPoint 是插件算好的一帧:去哪儿(视口 CSS 坐标)、什么时候(相对本计划起点的毫秒)。
@@ -218,7 +219,25 @@ type TypeResult struct {
 	LagMeanUs float64 `json:"lagMeanUs"`
 	LagMaxUs  float64 `json:"lagMaxUs"`
 	Status    string  `json:"status"`
+	// Words 是上屏机制那半的对账结论,一句人话(如"TIP 上屏 6/6 词,词表已用完")。
+	// 本平台不驱动上屏词时为空——那是如实的"没有",不是失败。
+	//
+	// 走字符串而不是结构化计数:它只进 detail 文本给人看,不参与任何判定
+	// (「诊断辅助默认不进契约」)。
+	Words string `json:"words,omitempty"`
 }
+
+// 等 TIP 连上来的上限,与等它回报送完的上限。
+//
+// 连接那个给 8 秒:TIP 每 300ms 重试一次,一般一秒内就上来了;给足余量是因为
+// 超时的含义只有一个——**输入法没切到我们**或 Chrome 是注册前启动的,那两件事
+// 多等再久也不会变,给 30 秒只是让人多等 22 秒看同一条错误。
+//
+// 回报那个给 3 秒:COMMIT 是按键处理完才回来的,注入循环结束时还在路上。
+const (
+	tipConnectWait = 8 * time.Second
+	tipSettleWait  = 3 * time.Second
+)
 
 // Type 按计划把一串按键播出去。
 //
@@ -241,6 +260,22 @@ func (s *Service) Type(plan TypePlan) (TypeResult, error) {
 
 	if err := plan.Validate(s.inj.KnowsKey); err != nil {
 		return TypeResult{}, err
+	}
+
+	// 上屏机制接管。**必须在校验之后、按键之前**,而收尾走 defer:
+	// 留在受驱动状态的输入法会把我方词表用在真人自己敲的字上——招聘人员随手
+	// 打一句,屏幕上出来的是我们的消息内容。这比按住的 Shift 更要紧。
+	//
+	// 本平台不驱动上屏词(macOS)时整段跳过:那不是缺口,是"上屏词由系统输入法
+	// 挑、我方不可控"的如实表达,回读对不上由调用方如实报。
+	var session WordSession
+	if drv, ok := s.inj.(wordDriver); ok {
+		var err error
+		session, err = drv.DriveWords(plan.Words, tipConnectWait)
+		if err != nil {
+			return TypeResult{}, err
+		}
+		defer session.Close()
 	}
 
 	runtime.LockOSThread()
@@ -289,6 +324,11 @@ func (s *Service) Type(plan TypePlan) (TypeResult, error) {
 	}
 	res.LagMaxUs = lagMax
 	res.Status = "ok"
+	if session != nil {
+		// 回报是按键处理完之后才回来的,注入循环结束时还在路上。
+		// 等到齐或超时,别在回报还在路上时就下对账结论。
+		res.Words = session.Settle(tipSettleWait)
+	}
 	return res, nil
 }
 

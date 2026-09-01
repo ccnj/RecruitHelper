@@ -1491,6 +1491,19 @@ h1, h2, h3, p { margin-top: 0; }
 
 .probe-msgid { margin: 0; color: var(--txt-faint); font-size: var(--fs-sm); }
 
+/* OS 注入探针的分段流水。它是那两块真正的读物——结构化字段只给结局，
+   这里才看得出走到哪一段停的、每一段读到了什么。 */
+.probe-stages {
+  margin: 0;
+  padding-left: 1.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.probe-stages li { word-break: break-word; }
+
 /* 真发出去的通知正文原文：保留换行，运营在群里看到的就是这几行。 */
 .probe-content {
   margin: 0;

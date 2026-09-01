@@ -1,6 +1,9 @@
 package handinput
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Injector 是真实系统输入的出口。改写自上游 hiBoss `lab/engine/inject/injector.go`。
 //
@@ -62,6 +65,35 @@ type Injector interface {
 	SeedCalib(hint WindowHint) Calib
 
 	Platform() string
+	Close()
+}
+
+// wordDriver 是**可选**能力:本平台能不能决定"这一串按键上屏成哪些词"。
+//
+// Windows 实现它(自研 TSF 输入法 + 命名管道);macOS 不实现,那不是缺口而是
+// 如实的答案——开发机走系统输入法,上屏词由它挑,我方不可控。段一真机里
+// 「加个」出成「价格」就是这么来的,是预期行为。
+//
+// **写成可选接口而不是 Injector 的方法,是为了让"没有"说得出口。** 给 darwin 加
+// 一个空实现的话,读代码的人分不清"这平台不需要"和"这平台还没做"——而这两件事
+// 在真机现场的处置完全相反(前者照打,后者不许打)。
+type wordDriver interface {
+	// DriveWords 让本平台的上屏机制接管这一轮的词。
+	//
+	// 必须在**焦点已经落在目标窗口之后**调用:实现会按前台窗口挑对象,
+	// 而按键也只落在前台窗口,两者得指同一个。
+	DriveWords(words []PlanWord, wait time.Duration) (WordSession, error)
+}
+
+// WordSession 是一轮打字期间的上屏会话。
+type WordSession interface {
+	// Settle 等这一轮的回报送完,返回一句对账结论(上屏了几个词)。
+	// 超时就照实说,**不假装**——不可信的结论比没有结论更糟。
+	Settle(timeout time.Duration) string
+	// Close 收尾,让上屏机制回到透传。
+	//
+	// **调用方必须 defer 它。** 留在受驱动状态的输入法会把我方的词表用在
+	// 真人自己敲的字上:招聘人员随手打一句,屏幕上出来的是我们的消息内容。
 	Close()
 }
 
