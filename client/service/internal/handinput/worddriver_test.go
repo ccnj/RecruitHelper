@@ -11,6 +11,7 @@ import (
 // 那就是 macOS 那一路,既有用例正好在验"不驱动上屏词的平台照常打字"。
 type drivingInjector struct {
 	fakeInjector
+	drives    int
 	gotWords  []PlanWord
 	driveErr  error
 	closed    int
@@ -20,6 +21,7 @@ type drivingInjector struct {
 }
 
 func (d *drivingInjector) DriveWords(words []PlanWord, wait time.Duration) (WordSession, error) {
+	d.drives++
 	if d.driveErr != nil {
 		return nil, d.driveErr
 	}
@@ -160,5 +162,34 @@ func TestTypeRefusesBadPlanBeforeTouchingDriver(t *testing.T) {
 	}
 	if d.closed != 0 {
 		t.Error("从没起过会话,不该有收尾")
+	}
+}
+
+func TestTypeTwiceInARowBothWork(t *testing.T) {
+	// **2026-09-01 Windows 真机的回归。** 那天第一条命令全绿(7/7 上屏、回读逐字
+	// 相同),第二条立刻失败、整条 6ms、一个键都没发——上一条的收尾把下一条需要的
+	// 东西拆了(命名管道被关掉,而 go-winio 用 FILE_CREATE、同名管道有实例就建不回来)。
+	//
+	// 那个具体故障只在 Windows 上可见,但**它的形状在这里可测**:每条命令各自
+	// 起一次会话、各自收尾,后一条不受前一条收尾的影响。
+	d := &drivingInjector{settled: "TIP 上屏 2/2 词,词表已用完"}
+	s := NewService(d)
+	for i := 1; i <= 3; i++ {
+		res, err := s.Type(twoWordPlan())
+		if err != nil {
+			t.Fatalf("第 %d 条命令失败:%v", i, err)
+		}
+		if res.Keys != 8 {
+			t.Errorf("第 %d 条只发了 %d 次按键", i, res.Keys)
+		}
+		if res.Words == "" {
+			t.Errorf("第 %d 条没带回对账结论", i)
+		}
+		if d.drives != i {
+			t.Errorf("第 %d 条之后 DriveWords 调了 %d 次,应为 %d", i, d.drives, i)
+		}
+		if d.closed != i {
+			t.Errorf("第 %d 条之后 Close 调了 %d 次,应为 %d —— 每条命令都要收尾", i, d.closed, i)
+		}
 	}
 }

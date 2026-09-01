@@ -36,6 +36,21 @@ package handinput
 // `PIPE_PATH`)。改名字要同批重新编译并注册 DLL,而 DLL 是上游的成品。
 // 名字里的 hiboss 是历史,不是我们该顺手"改成 recruithelper"的东西。
 //
+// # 管道建一次就不能关,这是被真机打出来的
+//
+// 2026-09-01 Windows 首验:第一条命令全绿(7/7 上屏、回读逐字相同),**第二条立刻
+// 失败,整条 6ms、一个键都没发**。原因是这一版照搬了上游 `play.go` 的形状——
+// 那是个一次性 CLI,每跑一次建一次管道、跑完关掉,在那里"每次"等于"每进程"。
+// 我们的脑是常驻的,于是变成反复建反复关,而:
+//
+//   - go-winio 建监听用 `FILE_CREATE`,**同名管道只要还有一个实例存在就建不出来**
+//   - 关监听只关掉监听句柄,**已接受的连接还开着**
+//   - 而 TIP 的设计正是「连上就一直连着」
+//
+// 三条撞在一起:第一条命令跑完,TIP 那两条连接仍在 → 实例仍在 → 第二条命令
+// 建管道当场失败。所以监听器归注入器持有、进程级只建一次;每条命令只做
+// 「清零 → 发词表 → 收 COMMIT → 发 CLEAR」,**不碰监听器**。
+//
 // 协议见 `tip/src/drive.rs` 的模块注释:行式文本、UTF-8、\t 分隔。
 
 import (
@@ -280,6 +295,15 @@ func (s *tipServer) clear() {
 	}
 }
 
+// beginRound 把上一条命令的回报清零。
+//
+// 管道现在是进程级的,计数器因此跨命令共享——不清零的话第二条命令会把第一条的
+// COMMIT 算进自己的对账,得出一个"看起来成功"的假结论。
+func (s *tipServer) beginRound() {
+	s.commits.Store(0)
+	s.done.Store(false)
+}
+
 func (s *tipServer) close() { _ = s.ln.Close() }
 
 // ── Injector 侧的接线 ───────────────────────────────────────────────────────
@@ -294,11 +318,12 @@ func (s *tipServer) close() { _ = s.ln.Close() }
 // 调用时机必须是**焦点已经在目标窗口之后**:sendWords 按前台窗口的 pid 挑连接,
 // SendInput 的按键也只落在前台窗口,两者得指同一个进程。
 func (w *windowsInjector) DriveWords(words []PlanWord, wait time.Duration) (WordSession, error) {
-	s, err := listenTip()
+	s, err := w.tipService()
 	if err != nil {
-		return nil, fmt.Errorf("起管道失败(%s): %w", tipPipe, err)
+		return nil, err
 	}
-	// TIP 每 300ms 重试一次连接,所以一般一秒内就上来了。
+	// TIP 每 300ms 重试一次连接,所以首次一般一秒内就上来了;之后它一直连着,
+	// 这个循环立刻返回。
 	deadline := time.Now().Add(wait)
 	for {
 		s.mu.Lock()
@@ -308,17 +333,47 @@ func (w *windowsInjector) DriveWords(words []PlanWord, wait time.Duration) (Word
 			break
 		}
 		if time.Now().After(deadline) {
-			s.close()
 			return nil, fmt.Errorf("等了 %s 没有 TIP 连上来 —— 输入法切到我们这个了吗?"+
 				"Chrome 是在 regsvr32 之后启动的吗?", wait)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	s.beginRound()
 	if err := s.sendWords(words); err != nil {
-		s.close()
 		return nil, fmt.Errorf("%w(现场:%s)", err, s.recent(6))
 	}
 	return &tipSession{s: s, want: len(words)}, nil
+}
+
+// tipService 惰性建管道,**建一次,进程在就一直在**(理由见文件头)。
+//
+// 惰性而不是开机就建:非 Windows 根本没有这段代码,而 Windows 上没人用键盘线时
+// 也不该白占一个命名管道。第一条打字命令建它,失败就在那条命令上如实报。
+func (w *windowsInjector) tipService() (*tipServer, error) {
+	w.tipMu.Lock()
+	defer w.tipMu.Unlock()
+	if w.tip != nil {
+		return w.tip, nil
+	}
+	s, err := listenTip()
+	if err != nil {
+		return nil, fmt.Errorf("起管道失败(%s):%w —— 若是「拒绝访问」,多半是同名管道"+
+			"还被别的进程占着(上一个脑没退干净?)", tipPipe, err)
+	}
+	w.tip = s
+	return s, nil
+}
+
+// closeTip 在注入器关闭时收掉管道。**只有进程退出这一条路**——
+// 命令收尾走 tipSession.Close(),那里只发 CLEAR,不碰监听器。
+func (w *windowsInjector) closeTip() {
+	w.tipMu.Lock()
+	defer w.tipMu.Unlock()
+	if w.tip != nil {
+		w.tip.clear()
+		w.tip.close()
+		w.tip = nil
+	}
 }
 
 type tipSession struct {
@@ -349,8 +404,11 @@ func (d *tipSession) Settle(timeout time.Duration) string {
 	}
 }
 
+// Close 只让 TIP 回到透传,**不关监听器**——它是进程级的,关了下一条命令就建不回来
+// (go-winio 用 FILE_CREATE,同名管道有实例就建不出;而 TIP 连上就一直连着)。
+//
+// CLEAR 本身仍然是必须的:留在受驱动状态的输入法会把我方词表用在真人自己敲的字上。
 func (d *tipSession) Close() {
 	d.s.clear()
 	time.Sleep(100 * time.Millisecond)
-	d.s.close()
 }

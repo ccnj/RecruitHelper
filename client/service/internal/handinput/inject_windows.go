@@ -26,6 +26,7 @@ package handinput
 import (
 	"fmt"
 	"math"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -103,7 +104,11 @@ type winPoint struct{ X, Y int32 }
 
 func init() { procSetProcessDpiAwarenessContext.Call(dpiPerMonitorAwareV2) }
 
-type windowsInjector struct{}
+type windowsInjector struct {
+	// TIP 命名管道。进程级只建一次,理由见 tip_windows.go 文件头。
+	tipMu sync.Mutex
+	tip   *tipServer
+}
 
 // NewInjector 造一个本平台的注入器。
 func NewInjector() (Injector, error) { return &windowsInjector{}, nil }
@@ -200,7 +205,7 @@ func (w *windowsInjector) SeedCalib(h WindowHint) Calib {
 	return Calib{ScaleX: s, ScaleY: s, OffsetX: h.ScreenX * s, OffsetY: h.ScreenY * s}
 }
 
-func (w *windowsInjector) Close()           {}
+func (w *windowsInjector) Close()           { w.closeTip() }
 func (w *windowsInjector) Platform() string { return "windows/SendInput" }
 
 func sendMouse(flags uint32, dx, dy int32) error {
