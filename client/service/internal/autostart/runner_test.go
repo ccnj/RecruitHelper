@@ -128,7 +128,7 @@ func TestRunningAcrossSlotStartsFullWorkflowOnce(t *testing.T) {
 
 	tickThrough(runner, clock, day(t, 6, 50), day(t, 7, 35))
 
-	if control.startCalls != 1 || control.startMode != "full" || control.startJobID != "42" {
+	if control.startCalls != 1 || control.startMode != "full" || control.startJobID != "" {
 		t.Fatalf("start calls = %d mode=%q job=%q", control.startCalls, control.startMode, control.startJobID)
 	}
 	if control.resumeCalls != 0 {
@@ -413,40 +413,20 @@ func TestStartFailureRecordedOnceWithoutRetry(t *testing.T) {
 	}
 }
 
-// 读取职位失败与"真没绑职位"分开记:前者是基础设施错误,不得误导用户去查职位。
-func TestJobReadErrorRecordedAsErrorWithoutStart(t *testing.T) {
-	st := &fakeStore{
-		enabled: true,
-		jobErr:  errors.New("投影不可用"),
-	}
+// 当日职位计划(2026-09-01):自动开始不再读"当前职位"投影,没绑职位/投影
+// 坏了都照样发起,名单与失败原因由计划机制自行裁决并经 Start 报回。
+func TestStartProceedsWithoutConsultingJobProjection(t *testing.T) {
+	st := &fakeStore{enabled: true, jobErr: errors.New("投影不可用")}
 	control := &fakeControl{}
 	clock := &fakeClock{}
 	runner := newTestRunner(t, st, control, clock)
 
 	tickThrough(runner, clock, day(t, 6, 50), day(t, 7, 35))
 
-	if control.startCalls != 0 {
-		t.Fatalf("job read error must not start: %d", control.startCalls)
+	if control.startCalls != 1 || control.startJobID != "" {
+		t.Fatalf("start calls=%d job=%q", control.startCalls, control.startJobID)
 	}
-	if len(st.attempts) != 1 || st.attempts[0].outcome != store.AutoStartOutcomeError ||
-		st.attempts[0].detail != "读取当前职位失败" {
-		t.Fatalf("attempts = %+v", st.attempts)
-	}
-}
-
-func TestNoBoundJobFailsWithoutStart(t *testing.T) {
-	st := &fakeStore{enabled: true}
-	control := &fakeControl{}
-	clock := &fakeClock{}
-	runner := newTestRunner(t, st, control, clock)
-
-	tickThrough(runner, clock, day(t, 6, 50), day(t, 7, 35))
-
-	if control.startCalls != 0 {
-		t.Fatalf("missing job must not start: %d", control.startCalls)
-	}
-	if len(st.attempts) != 1 || st.attempts[0].outcome != store.AutoStartOutcomeStartFailed ||
-		st.attempts[0].detail != "当前没有已绑定职位" {
+	if len(st.attempts) != 1 || st.attempts[0].outcome != store.AutoStartOutcomeStarted {
 		t.Fatalf("attempts = %+v", st.attempts)
 	}
 }

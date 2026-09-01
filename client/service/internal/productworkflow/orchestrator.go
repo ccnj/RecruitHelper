@@ -57,8 +57,12 @@ func (m *Manager) AdvanceOnce(
 	defer m.advanceMu.Unlock()
 
 	run, err := m.store.ActiveProductWorkflowRun()
-	if err != nil || run == nil {
+	if err != nil {
 		return run, err
+	}
+	if run == nil {
+		// 无活跃运行时的当日计划收口扫描(跳过类失败接续、其余完成/终止)。
+		return nil, m.reconcileDailyPlansWithoutRun()
 	}
 	if run.Mode != workflow.ModeFull && run.Mode != workflow.ModeReplyOnly {
 		return run, ErrWorkflowPipelineInvalid
@@ -208,11 +212,18 @@ func (m *Manager) AdvanceOnce(
 		}
 		if confirmationReadyWithoutSendableCandidates(confirmation, batchID) {
 			// 零入选或全部生成失败没有任何候选人可见动作可供确认。
-			// 直接完成漏斗并保留同一运行的多轮沟通控制，不能留下一个
-			// 永远无法提交的空人工闸。
+			// 直接完成漏斗并保留同一运行的多轮沟通控制。
 			return m.advanceStage(run, store.ProductWorkflowStageCommunication)
 		}
-		return m.enterAwaitingConfirmation(run)
+		// 自动确认(2026-09-01 甲方裁决:候选确认人工闸撤销)。控制律原样——
+		// 仍要求"当前精确全选集合"就绪并一次性消费,只是提交者从人工点击换
+		// 成编排器;集合未就绪(投影缺失、生成尚未收敛)等下一 tick,不带病
+		// 放行。新链不再进入 awaitingConfirmation 停靠态。
+		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			m.logConfirmationStallOnce(run, batchID, confirmation, err)
+			return run, nil
+		}
+		return m.advanceStage(run, store.ProductWorkflowStageGreetingSending)
 
 	case store.ProductWorkflowStageAwaitingConfirmation:
 		confirmation, projectionErr := m.confirmationProjection(batchID)
@@ -236,8 +247,21 @@ func (m *Manager) AdvanceOnce(
 				},
 			)
 		}
-		// 仍有可发送候选人时，只有 ConfirmAll 可以授权进入发送阶段。
-		return run, nil
+		// 自动确认(2026-09-01 甲方裁决):存量停在人工闸的运行升级后由同一
+		// 控制律自动收敛,不再等待人工点击;ConfirmAll 入口保留兼容。
+		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			m.logConfirmationStallOnce(run, batchID, confirmation, err)
+			return run, nil
+		}
+		return m.store.TransitionProductWorkflowRun(
+			store.TransitionProductWorkflowRunRequest{
+				RunID: run.RunID,
+				From:  stateOf(run),
+				To:    workflow.State{Mode: run.Mode, Status: workflow.StatusRunning},
+				At:    m.clock.Now(),
+				Stage: store.ProductWorkflowStageGreetingSending,
+			},
+		)
 
 	case store.ProductWorkflowStageGreetingSending:
 		if blocked := m.requireOpenMemberBoundary(run); blocked != nil {
@@ -395,6 +419,11 @@ func (m *Manager) executePendingAtBoundary(
 			)
 		}
 		revisionHash := strings.TrimSpace(run.PendingContextRevisionHash)
+		// 当日职位计划:接续前把当前条目落成 done(发送已全部终局,处于沟通
+		// 阶段即证)。放在完结旧 run 之前,崩溃重放时幂等续做。
+		if err := m.markDailyPlanEntryDoneBeforeChain(run, now); err != nil {
+			return run, err
+		}
 		completed, err := m.store.TransitionProductWorkflowRun(
 			store.TransitionProductWorkflowRunRequest{
 				RunID: run.RunID,
@@ -865,18 +894,62 @@ func (m *Manager) reopenSourcingForMoreCapture(
 	if batch == nil {
 		return false, store.ErrSourcingBatchNotFound
 	}
-	if batch.CaptureLimit <= 0 || batch.TargetCount >= batch.CaptureLimit {
+	step := NewFullWorkflowCaptureStep
+	planLimit := 0
+	// 当日职位计划批次的续采步进与整批上限均与份额联动:步进 ceil(0.5×份额)、
+	// 上限 3×份额(AGENTS.md 2026-09-01)。走到这里计划必已定稿(筛选先于
+	// 续采,草稿计划在筛选就冲突),份额即条目冻结配额。首批的落库上限按草稿
+	// 临时份额算,定稿份额变大后必须在此补抬,否则该职位当日结构性采不满。
+	if plan, entries, planErr := m.store.ActiveDailyJobPlan(store.AccountKey{
+		Platform: batch.Platform, AccountRef: batch.AccountRef,
+	}); planErr != nil {
+		return false, planErr
+	} else if plan != nil {
+		if entry := store.DailyJobPlanEntryByRevision(entries, batch.ContextRevisionHash); entry != nil {
+			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
+			if share > 0 {
+				step = store.PlanCaptureStep(share)
+				planLimit = store.PlanCaptureLimit(share)
+			}
+		}
+	}
+	effectiveLimit := batch.CaptureLimit
+	if planLimit > effectiveLimit {
+		effectiveLimit = planLimit
+	}
+	if batch.CaptureLimit <= 0 || batch.TargetCount >= effectiveLimit {
 		return true, nil
 	}
 	if strings.HasPrefix(batch.Reason, store.SourcingNoNewCandidatesReason) {
 		return true, nil
 	}
 	if _, err := m.store.ReopenSourcingBatchForCapture(store.ReopenSourcingBatchForCaptureRequest{
-		BatchID: batchID, Step: NewFullWorkflowCaptureStep, ReopenAt: m.clock.Now(),
+		BatchID: batchID, Step: step, Limit: planLimit, ReopenAt: m.clock.Now(),
 	}); err != nil {
 		return false, err
 	}
 	return false, nil
+}
+
+// logConfirmationStallOnce 给"投影自称就绪、精确全选集合却校验不过"的停滞
+// 留痕(留痕条款):这种不一致不会自愈,旧人工闸时代至少停在可见的待确认页,
+// 现在必须靠日志被看见。生成尚未收敛(Ready=false)是常态等待,不记。
+func (m *Manager) logConfirmationStallOnce(
+	run *store.ProductWorkflowRun,
+	batchID string,
+	confirmation *store.AppConfirmationProjection,
+	cause error,
+) {
+	if confirmation == nil || !confirmation.Ready || m.confirmStallLoggedRunID == run.RunID {
+		return
+	}
+	m.confirmStallLoggedRunID = run.RunID
+	slog.Warn("自动确认停滞:确认投影就绪但精确全选集合校验不过,原地等待",
+		"runId", run.RunID, "batchId", batchID,
+		"selectableCount", confirmation.SelectableCount,
+		"candidates", len(confirmation.Candidates),
+		"generationPending", confirmation.GenerationPending,
+		"err", cause.Error())
 }
 
 func (m *Manager) advanceStage(
@@ -886,17 +959,6 @@ func (m *Manager) advanceStage(
 	return m.store.AdvanceProductWorkflowStage(store.AdvanceProductWorkflowStageRequest{
 		RunID: run.RunID, ExpectedStage: run.Stage, ExpectedStatus: run.Status,
 		NextStage: next, At: m.clock.Now(),
-	})
-}
-
-func (m *Manager) enterAwaitingConfirmation(
-	run *store.ProductWorkflowRun,
-) (*store.ProductWorkflowRun, error) {
-	from := stateOf(run)
-	to := workflow.State{Mode: run.Mode, Status: workflow.StatusAwaitingConfirmation}
-	return m.store.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
-		RunID: run.RunID, From: from, To: to, At: m.clock.Now(),
-		Stage: store.ProductWorkflowStageAwaitingConfirmation,
 	})
 }
 
@@ -958,6 +1020,16 @@ func (m *Manager) keepCommunicationRunning(
 		})
 	}
 	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	// 当日职位计划批间接续(2026-09-01):计划还有下一条目时登记接续并按住
+	// 巡检回复不开启(甲方知情接受回复延迟);末条目在此落成 done。
+	hold, maintained, err := m.maintainDailyPlanInCommunication(run, now)
+	if err != nil {
+		return currentRunOr(run, maintained, nil), err
+	}
+	if hold {
+		return maintained, nil
+	}
+	run = maintained
 	account, err := m.store.AccountByKey(key)
 	if err != nil {
 		return run, err

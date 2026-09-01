@@ -54,6 +54,10 @@ func (f *fakeProjections) SetInterviewSchedule(schedule m5ai.InterviewSchedule) 
 	return nil
 }
 
+func (f *fakeProjections) AppDailyPlan() (*store.AppDailyPlanView, error) {
+	return &store.AppDailyPlanView{}, nil
+}
+
 func (f *fakeProjections) AutoStartSetting() (store.AutoStartSetting, error) {
 	if f.autoStartErr != nil {
 		return store.AutoStartSetting{}, f.autoStartErr

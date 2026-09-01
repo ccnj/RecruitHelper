@@ -3,6 +3,8 @@ package productapp
 import (
 	"errors"
 
+	"recruithelper/client/service/internal/productworkflow"
+	"recruithelper/client/service/internal/store"
 	"recruithelper/client/service/internal/workflow"
 )
 
@@ -28,7 +30,13 @@ func StartFailureText(err error) string {
 	case errors.Is(err, ErrLoginRequired):
 		return "请先在 Chrome 中登录智联招聘端，再点击开始"
 	case errors.Is(err, ErrJobConfigUnavailable):
-		return "当前职位配置不可用"
+		return "职位配置读取失败，无法确定今天要跑的职位名单"
+	case errors.Is(err, store.ErrDailyJobPlanNoJobs):
+		return "后台没有配置合格的职位，无法开始今日任务"
+	case errors.Is(err, store.ErrDailyJobPlanZeroQuota):
+		return "后台配置的每日招呼数量为 0，无法开始今日任务"
+	case errors.Is(err, productworkflow.ErrDailyPlanQuotaExhausted):
+		return "今日职位计划没有可执行条目"
 	case errors.Is(err, ErrWechatNotConfigured):
 		return "尚未在智联个人中心配置微信号，请到智联招聘端「个人中心」填写微信号后再开始"
 	case errors.Is(err, ErrWechatCheckFailed):

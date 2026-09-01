@@ -108,6 +108,24 @@ func (s *Store) LatestProductWorkflowRun() (*ProductWorkflowRun, error) {
 	return &run, nil
 }
 
+// LatestFullProductWorkflowRun 返回该账号最近一次完整流程运行(按开始时刻)。
+// 当日职位计划的收口分类只看本账号的 full 运行:replyOnly 插曲与(第二平台
+// 落地后)其他账号的运行不得决定计划生死(2026-09-01 审查修复)。
+func (s *Store) LatestFullProductWorkflowRun(key AccountKey) (*ProductWorkflowRun, error) {
+	var run ProductWorkflowRun
+	err := s.db.Where(
+		"platform = ? AND account_ref = ? AND mode = ?",
+		key.Platform, key.AccountRef, workflow.ModeFull,
+	).Order("started_at DESC").First(&run).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 func (s *Store) ProductWorkflowRunByID(runID string) (*ProductWorkflowRun, error) {
 	runID = strings.TrimSpace(runID)
 	if runID == "" {

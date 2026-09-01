@@ -173,12 +173,23 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 		targetCount := stableSourcingSelectionTarget(
 			batch.BatchID, revision.RevisionHash, selectionView.TargetMin, selectionView.TargetMax,
 		)
+		// 当日职位计划批次的选中目标由份额 override(AGENTS.md「当日职位计划与
+		// 招呼配额分摊」,2026-09-01 甲方裁决),允许低于配置 TargetMin;份额同时
+		// 固化进汇总行 PlanQuota,重放校验不依赖计划表仍在场。
+		planQuota, err := dailyJobPlanQuotaForBatchTx(tx, batch)
+		if err != nil {
+			return err
+		}
+		if planQuota != nil {
+			targetCount = *planQuota
+		}
 		maleLimit := targetCount * selectionView.MaleRatioLimit / 100
 		summary := SourcingBatchSelection{
 			BatchID: batch.BatchID, ContextRevisionHash: revision.RevisionHash,
 			AlgorithmVersion: SourcingSelectionAlgorithmVersion,
 			MinScore:         selectionView.MinScore, TargetMin: selectionView.TargetMin,
 			TargetMax: selectionView.TargetMax, TargetCount: targetCount,
+			PlanQuota:      planQuota,
 			MaleRatioLimit: selectionView.MaleRatioLimit, MaleLimit: maleLimit,
 			PoolCount: 0, CompletedAt: decidedAt, CreatedAt: decidedAt,
 		}
@@ -191,6 +202,7 @@ func (s *Store) SelectCompletedSourcingBatch(batchID string, decidedAt time.Time
 				existing.TargetMin != selectionView.TargetMin ||
 				existing.TargetMax != selectionView.TargetMax ||
 				existing.TargetCount != targetCount ||
+				!equalOptionalInt(existing.PlanQuota, planQuota) ||
 				existing.MaleRatioLimit != selectionView.MaleRatioLimit ||
 				existing.MaleLimit != maleLimit {
 				return ErrSourcingSelectionConflict
@@ -469,11 +481,19 @@ func validatePersistedSourcingBatchSelectionTx(
 	batch SourcingBatch,
 	selection SourcingBatchSelection,
 ) error {
+	// 计划批次(PlanQuota 非空)的选中目标等于份额即可,允许低于配置 TargetMin;
+	// 常规批次维持落在 [TargetMin,TargetMax] 区间的原始不变量。
+	targetBoundsOK := selection.TargetCount >= selection.TargetMin &&
+		selection.TargetCount <= selection.TargetMax
+	if selection.PlanQuota != nil {
+		targetBoundsOK = *selection.PlanQuota > 0 &&
+			selection.TargetCount == *selection.PlanQuota
+	}
 	if selection.BatchID != batch.BatchID ||
 		selection.AlgorithmVersion != SourcingSelectionAlgorithmVersion ||
 		selection.PoolCount != batch.TargetCount || selection.TargetMin < 0 ||
-		selection.TargetMax < selection.TargetMin || selection.TargetCount < selection.TargetMin ||
-		selection.TargetCount > selection.TargetMax || selection.MinScore < 1 || selection.MinScore > 10 ||
+		selection.TargetMax < selection.TargetMin || !targetBoundsOK ||
+		selection.MinScore < 1 || selection.MinScore > 10 ||
 		selection.MaleRatioLimit < 0 || selection.MaleRatioLimit > 100 ||
 		selection.MaleLimit != selection.TargetCount*selection.MaleRatioLimit/100 ||
 		selection.EligibleCount < selection.SelectedCount || selection.SelectedCount < 0 ||
@@ -590,4 +610,52 @@ func createSourcingSelectedProfileTx(
 		return nil, err
 	}
 	return profile, nil
+}
+
+// dailyJobPlanQuotaForBatchTx 判定批次是否归属当日职位计划并给出份额。归属按
+// (账号, ContextRevisionHash) 对应计划条目——同一计划内职位互异,revision 与
+// 条目一一对应,不依赖 BatchID 诊断锚。非计划批次(存量批次、管理面显式批次)
+// 返回 nil,沿用配置区间抽取。计划仍是 draft 或条目已跳过时批次不可能合法走到
+// 筛选(定稿挂在批前状态闸上,采集通过即已定稿;被闸拦下的批次不进筛选),
+// 遇到即响亮冲突,绝不回落配置配额——回落方向是多发。
+func dailyJobPlanQuotaForBatchTx(tx *gorm.DB, batch SourcingBatch) (*int, error) {
+	var plan DailyJobPlan
+	err := tx.Where(
+		"platform = ? AND account_ref = ? AND status IN ?",
+		batch.Platform, batch.AccountRef,
+		[]string{DailyJobPlanDraft, DailyJobPlanActive},
+	).Order("created_at DESC").First(&plan).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var entry DailyJobPlanEntry
+	err = tx.First(
+		&entry, "plan_id = ? AND revision_hash = ?", plan.PlanID, batch.ContextRevisionHash,
+	).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// 只有 pending 条目的批次才是计划的合法执行者。skipped 条目的批次被闸拦
+	// 停不进筛选;done 条目的份额已被它自己的批次消费完——同 revision 的第二个
+	// 批次(如管理面显式启动)再走到筛选,若发放份额会让该职位发到 2×份额、
+	// 当日合计超总量,必须响亮冲突而不是放行(方向:宁可不发)。
+	if plan.Status != DailyJobPlanActive ||
+		entry.Status != DailyJobPlanEntryPending || entry.Quota <= 0 {
+		return nil, ErrSourcingSelectionConflict
+	}
+	quota := entry.Quota
+	return &quota, nil
+}
+
+func equalOptionalInt(left, right *int) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }

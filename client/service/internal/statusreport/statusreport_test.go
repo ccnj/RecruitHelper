@@ -376,7 +376,7 @@ type fakeStore struct {
 	overview  *store.AppOverviewProjection
 }
 
-func (f *fakeStore) AppCurrentJob() (store.AppJobProjection, error) { return f.job, nil }
+func (f *fakeStore) AppRunningJob() (store.AppJobProjection, error) { return f.job, nil }
 
 func (f *fakeStore) AppOverview(store.AppOverviewRequest) (*store.AppOverviewProjection, error) {
 	return f.overview, nil

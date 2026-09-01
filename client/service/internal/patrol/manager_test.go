@@ -2582,3 +2582,79 @@ func TestConversationGateStopsListPagingWithoutClaimableRow(t *testing.T) {
 		t.Fatalf("闸拒绝不得标脏账号: account=%+v err=%v", account, err)
 	}
 }
+
+// 当日职位计划定稿钩子(AGENTS.md 2026-09-01):计划草稿在首批状态闸读取时
+// 定稿——在线条目按份额落库,离线条目标跳过并留平台原样文案。
+func TestSourcingGateFinalizesDailyJobPlan(t *testing.T) {
+	h := newHarness(t)
+	makeRevision := func(jobID, jobName string) m5ai.ContextRevision {
+		documents := []m5ai.JobConfigDocument{
+			{DocType: "多轮沟通", Content: "reply"},
+			{DocType: "意向判断", Content: "intent"},
+			{DocType: "客户事实库", Content: "facts"},
+			{DocType: "候选人筛选", Content: `{"minScore":5,"targetMin":84,"targetMax":84,"maleRatioLimit":50}`},
+			{DocType: "打分", Content: "请评分 {resume_json}"},
+			{DocType: "招呼语", Content: `{"prompt":"状态={career_state};简历={resume_summary_json}"}`},
+			{DocType: "职位筛选", Content: testfixture.SourcingFiltersDocument},
+		}
+		sort.Slice(documents, func(i, j int) bool { return documents[i].DocType < documents[j].DocType })
+		return m5ai.ContextRevision{
+			ContextID: "plan-ctx-" + jobID, RevisionHash: "plan-rev-" + jobID,
+			SourceKind: "legacyJobConfig", SourceJobRef: jobID, DisplayName: jobName,
+			SourcePackage: m5ai.JobConfigDocumentPackage{Documents: documents},
+			Communication: m5ai.CommunicationView{
+				ReplyPrompt: "reply", IntentPrompt: "intent", CustomerFacts: "facts",
+				MappingVersion: m5ai.MappingVersion,
+			},
+			CreatedAt: h.clock.Now(),
+		}
+	}
+	revA := makeRevision("1", "计划职位甲")
+	revB := makeRevision("2", "计划职位乙")
+	if _, err := h.db.SaveEffectiveLegacyJobAIContexts(
+		[]m5ai.ContextRevision{revA, revB}, h.clock.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	created, err := h.db.CreateDailyJobPlan(h.key, "2026-07-17", h.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.StartSourcingBatch(store.StartSourcingBatchRequest{
+		Platform: h.key.Platform, AccountRef: h.key.AccountRef,
+		ContextRevisionHash: revA.RevisionHash, TargetCount: 2, StartedAt: h.clock.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.runner.handler = func(request RunRequest) (any, error) {
+		if request.Name == protocol.PrimJobReadPublishedList {
+			return protocol.JobReadPublishedListData{
+				Sections: []protocol.JobPostingSection{
+					{Label: "在线中", Names: []string{"计划职位甲"}},
+					{Label: "未上线", Names: []string{"计划职位乙"}},
+				},
+				ObservedAt: time.Now().UnixMilli(),
+			}, nil
+		}
+		return defaultHandler(request)
+	}
+
+	if _, err := h.manager.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	plan, entries, err := h.db.ActiveDailyJobPlan(h.key)
+	if err != nil || plan == nil {
+		t.Fatalf("计划缺失: %v", err)
+	}
+	if plan.PlanID != created.Plan.PlanID || plan.Status != store.DailyJobPlanActive ||
+		plan.JobCount != 1 || plan.TotalQuota != 84 {
+		t.Fatalf("计划未按闸读取定稿: %+v", plan)
+	}
+	if entries[0].Quota != 84 || entries[0].Status != store.DailyJobPlanEntryPending {
+		t.Fatalf("在线条目份额错误: %+v", entries[0])
+	}
+	if entries[1].Status != store.DailyJobPlanEntrySkipped ||
+		entries[1].SkipReason != "jobNotOnlineAtPlan:未上线" {
+		t.Fatalf("离线条目未跳过留痕: %+v", entries[1])
+	}
+}

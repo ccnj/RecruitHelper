@@ -47,20 +47,35 @@ interface ProductAcceptedResponse {
   accepted: boolean
 }
 
-export async function startProductWorkflow(
-  mode: 'full' | 'replyOnly',
-  backendJobId?: string | null,
-): Promise<void> {
-  if (mode === 'full') {
-    const normalized = backendJobId?.trim() ?? ''
-    if (!normalized) throw new Error('当前没有已绑定职位，暂时不能开始今日任务')
-    await appPost<ProductAcceptedResponse>('/app/workflow/start', {
-      mode,
-      backendJobId: normalized,
-    })
-    return
-  }
+// 完整流程按「当日职位计划」跑(2026-09-01):不再携带职位 ID,当天的职位
+// 名单由脑按后台有效职位∩平台在线自行定稿。
+export async function startProductWorkflow(mode: 'full' | 'replyOnly'): Promise<void> {
   await appPost<ProductAcceptedResponse>('/app/workflow/start', { mode })
+}
+
+export interface DailyPlanEntry {
+  seq: number
+  jobName: string
+  quota: number
+  status: 'pending' | 'skipped' | 'done'
+  skipReason?: string
+  selectedCount: number
+  sentCount: number
+  suspectCount: number
+}
+
+export interface DailyPlanView {
+  available: boolean
+  localDate?: string
+  status?: string
+  endReason?: string
+  totalQuota?: number
+  jobCount?: number
+  entries?: DailyPlanEntry[]
+}
+
+export async function readDailyPlan(): Promise<DailyPlanView> {
+  return appGet<DailyPlanView>('/app/daily-plan')
 }
 
 export async function pauseProductWorkflow(): Promise<void> {

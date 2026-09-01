@@ -6,8 +6,10 @@ package productworkflow
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -75,6 +77,18 @@ type Manager struct {
 	// shared member gate must remain able to close while one candidate's AI
 	// call or hand command is naturally finishing.
 	advanceMu sync.Mutex
+	// confirmStallLoggedRunID 让"自动确认对不一致投影原地等待"的留痕每个
+	// 运行只响一次(1 tick/秒,逐 tick 记会刷爆日志);仅在 AdvanceOnce
+	// (advanceMu)下读写。
+	confirmStallLoggedRunID string
+	// planSweepArmed 是收口扫描的内存熔断:AdvanceOnce 每秒空转,没有它,
+	// 从未建过计划的机器也要每 tick 白查两次库。启动时置位一次(覆盖重启时
+	// 计划仍在的场景),建计划时置位,扫描发现零活跃计划即熄灭。
+	planSweepArmed atomic.Bool
+	// planCommunicationSettledRunID 记录"该运行的计划维护已收尾"(末条目
+	// 已 done 或本运行不属任何计划),沟通阶段每秒 tick 不再查计划三连;
+	// 仅在 Manager.mu 下读写。
+	planCommunicationSettledRunID string
 	// confirmationProjection is the sole source for the exact selectable set
 	// accepted by ConfirmAll. Production always uses Store.AppConfirmation;
 	// keeping it as a function also makes the control law testable without
@@ -102,6 +116,7 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 		dailyWindow:            config.DailyWindow,
 		confirmationProjection: db.AppConfirmation,
 	}
+	manager.planSweepArmed.Store(true)
 	if installer, ok := actor.(memberGateInstaller); ok {
 		installer.SetWorkflowMemberGate(manager.MayStartNextWorkflowMember)
 	}
@@ -150,12 +165,38 @@ func (m *Manager) startFullLocked(
 	revisionHash := contextRevisionHash
 	targetCount := NewFullWorkflowTargetCount
 	captureLimit := NewFullWorkflowCaptureLimit
+	var planEntryStamp func(batchID string)
 	if activeBatch != nil {
 		// 复用未终局批次时一律沿用它自己的额度,包括分轮前建立、CaptureLimit
 		// 为 0 的存量批次:它们继续按单轮语义走完,不被新版改成分轮。
 		revisionHash = activeBatch.ContextRevisionHash
 		targetCount = activeBatch.TargetCount
 		captureLimit = activeBatch.CaptureLimit
+	} else if plan, entries, planErr := m.store.ActiveDailyJobPlan(key); planErr != nil {
+		return nil, planErr
+	} else if plan != nil {
+		// 当日职位计划批次(AGENTS.md 2026-09-01):采集规模与份额联动,首轮
+		// ceil(1.5×份额)、上限 3×份额。计划 draft 期间用临时份额(N₀≥N,只会
+		// 少采):目标由续采轮按定稿份额步进自愈,上限由续采入口按 3×定稿份额
+		// 补抬(reopenSourcingForMoreCapture 的 Limit 参数),两者合起来才构成
+		// 完整自愈。revision 不属于计划任何条目时按存量语义走常量规模(管理面
+		// 等旁路),不与计划勾连。
+		if entry := store.DailyJobPlanEntryByRevision(entries, revisionHash); entry != nil {
+			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
+			if share <= 0 {
+				return nil, store.ErrSourcingBatchInvalid
+			}
+			targetCount = store.PlanCaptureFirstRound(share)
+			captureLimit = store.PlanCaptureLimit(share)
+			planID, seq := plan.PlanID, entry.Seq
+			planEntryStamp = func(batchID string) {
+				if stampErr := m.store.StampDailyJobPlanEntryBatch(planID, seq, batchID); stampErr != nil {
+					slog.Warn("当日计划条目批次锚写入失败(仅诊断)",
+						"planId", planID, "seq", seq, "batchId", batchID,
+						"err", stampErr.Error())
+				}
+			}
+		}
 	}
 	if revisionHash == "" {
 		return nil, store.ErrJobAIContextRevisionInvalid
@@ -197,6 +238,9 @@ func (m *Manager) startFullLocked(
 	attached, err := m.store.AttachProductWorkflowSourcingBatch(run.RunID, activeBatch.BatchID)
 	if err != nil {
 		return nil, m.failStart(run, key, err)
+	}
+	if planEntryStamp != nil {
+		planEntryStamp(activeBatch.BatchID)
 	}
 	return attached, nil
 }

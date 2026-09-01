@@ -308,6 +308,18 @@ const (
 	SourcingBatchStopped    SourcingBatchStatus = "stopped"
 )
 
+// 批前闸终局原因:patrol 写入 SourcingBatch.Reason 的公开口径,当日职位计划
+// 的收口扫描按前三值判定「跳过类」(AGENTS.md 2026-09-01)。字符串已随批次行
+// 持久化,是稳定事实口径;patrol 与 productworkflow 都从这里引用,不得各自
+// 手抄字面值(2026-09-01 审查修复:字符串跨包漂移会让跳过类静默失配,把单
+// 职位离线放大成整日计划终止)。
+const (
+	SourcingBatchGateReasonJobNotOnline   = "jobNotOnline"
+	SourcingBatchGateReasonStatusRead     = "jobStatusReadFailed"
+	SourcingBatchGateReasonPositionSelect = "positionSelectFailed"
+	SourcingBatchGateReasonPlanFinalize   = "dailyPlanFinalizeFailed"
+)
+
 // SourcingBatch 是一次正式采集的不可变范围与可恢复状态。PositionRef 在
 // preparing 阶段为空，首个窗口正结果绑定后不可再改；EndedAt 非空表示终态。
 type SourcingBatch struct {
@@ -1142,10 +1154,15 @@ type SourcingBatchSelection struct {
 	ContextRevisionHash string `gorm:"not null;index"`
 	AlgorithmVersion    string `gorm:"not null"`
 
-	MinScore       int `gorm:"not null"`
-	TargetMin      int `gorm:"not null"`
-	TargetMax      int `gorm:"not null"`
-	TargetCount    int `gorm:"not null"`
+	MinScore  int `gorm:"not null"`
+	TargetMin int `gorm:"not null"`
+	TargetMax int `gorm:"not null"`
+	// TargetCount 常规批次在 [TargetMin,TargetMax] 内稳定抽取;当日职位计划
+	// 批次(2026-09-01 甲方裁决)由份额 override,此时 PlanQuota 非空且恒等于
+	// TargetCount——把份额固化在汇总行自身,重放校验不依赖计划表仍然在场。
+	TargetCount int `gorm:"not null"`
+	// PlanQuota 非空表示本批的选中目标来自当日职位计划份额,允许低于 TargetMin。
+	PlanQuota      *int
 	MaleRatioLimit int `gorm:"not null"`
 	MaleLimit      int `gorm:"not null"`
 
@@ -1319,4 +1336,55 @@ type PatrolRound struct {
 	FinishedAt      *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// DailyJobPlan 是「当日职位计划」(AGENTS.md 2026-09-01 甲方裁决)的持久事实:
+// 一次显式开始/每日自动开始授权的整份当日多职位配额分摊。TotalQuota 在建计划
+// 时按(本地日期+PlanID)稳定哈希从计划序第一职位的 [TargetMin,TargetMax] 抽取
+// 并落库;JobCount 与各条目份额在首批状态闸读取时定稿(draft→active)。计划是
+// 业务事实,只改状态不物理删除。
+type DailyJobPlan struct {
+	PlanID     string `gorm:"primaryKey"`
+	Platform   string `gorm:"not null;index:idx_daily_job_plan_account,priority:1"`
+	AccountRef string `gorm:"not null;index:idx_daily_job_plan_account,priority:2"`
+	// LocalDate 是建计划时的客户端本地日期(YYYY-MM-DD)。计划跟随运行而非
+	// 日历日:漏斗跨日挂起恢复后继续原计划(设计文档「恢复与终止」表)。
+	LocalDate string `gorm:"not null"`
+	Status    string `gorm:"not null;index;check:ck_daily_job_plan_status,status IN ('draft','active','completed','aborted','superseded')"`
+
+	TotalQuota       int    `gorm:"not null"`
+	QuotaSourceJobID string `gorm:"not null"`
+	TargetMin        int    `gorm:"not null"`
+	TargetMax        int    `gorm:"not null"`
+	// JobCount 是定稿时冻结的 N(在线∩合格),draft 期间为 0。
+	JobCount  int    `gorm:"not null;default:0"`
+	EndReason string `gorm:"not null;default:''"`
+
+	FinalizedAt *time.Time
+	EndedAt     *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// DailyJobPlanEntry 是计划内一个职位条目。Quota 定稿前为 0;Status 只有
+// pending/skipped/done 三态,「进行中」由"首个 pending 条目 + 活跃批次"推导,
+// 不另设易漂移的中间态。BatchID 是诊断锚,不作正确性依据(份额查找按
+// RevisionHash,同计划内职位互异,revision 与条目一一对应)。
+type DailyJobPlanEntry struct {
+	EntryID string `gorm:"primaryKey"`
+	PlanID  string `gorm:"not null;index;uniqueIndex:ux_daily_plan_entry_seq,priority:1"`
+	Seq     int    `gorm:"not null;uniqueIndex:ux_daily_plan_entry_seq,priority:2"`
+
+	BackendJobID string `gorm:"not null"`
+	JobName      string `gorm:"not null"`
+	RevisionHash string `gorm:"not null"`
+
+	Quota      int    `gorm:"not null;default:0"`
+	Status     string `gorm:"not null;index;check:ck_daily_plan_entry_status,status IN ('pending','skipped','done')"`
+	SkipReason string `gorm:"not null;default:''"`
+	BatchID    string `gorm:"not null;default:''"`
+
+	DoneAt    *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }

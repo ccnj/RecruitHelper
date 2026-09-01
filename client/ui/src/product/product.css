@@ -3249,3 +3249,41 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+
+/* 今日职位计划(2026-09-01):留痕条款要求每个职位跑没跑、发了几个、为何跳过可见 */
+.rh-daily-plan-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.rh-daily-plan-head h2 {
+  font-size: 15px;
+  margin: 0;
+}
+.rh-daily-plan-head span {
+  color: var(--rh-text-muted, #6b7280);
+  font-size: 12px;
+}
+.rh-daily-plan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rh-daily-plan-table th,
+.rh-daily-plan-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-top: 1px solid var(--rh-border, #e5e7eb);
+}
+.rh-daily-plan-table thead th {
+  border-top: none;
+  color: var(--rh-text-muted, #6b7280);
+  font-weight: 500;
+}
+.rh-daily-plan-skip {
+  margin-left: 8px;
+  color: var(--rh-text-muted, #6b7280);
+  font-size: 12px;
+}
