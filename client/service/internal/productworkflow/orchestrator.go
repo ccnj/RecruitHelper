@@ -57,8 +57,12 @@ func (m *Manager) AdvanceOnce(
 	defer m.advanceMu.Unlock()
 
 	run, err := m.store.ActiveProductWorkflowRun()
-	if err != nil || run == nil {
+	if err != nil {
 		return run, err
+	}
+	if run == nil {
+		// 无活跃运行时的当日计划收口扫描(跳过类失败接续、其余完成/终止)。
+		return nil, m.reconcileDailyPlansWithoutRun()
 	}
 	if run.Mode != workflow.ModeFull && run.Mode != workflow.ModeReplyOnly {
 		return run, ErrWorkflowPipelineInvalid
@@ -413,6 +417,11 @@ func (m *Manager) executePendingAtBoundary(
 			)
 		}
 		revisionHash := strings.TrimSpace(run.PendingContextRevisionHash)
+		// 当日职位计划:接续前把当前条目落成 done(发送已全部终局,处于沟通
+		// 阶段即证)。放在完结旧 run 之前,崩溃重放时幂等续做。
+		if err := m.markDailyPlanEntryDoneBeforeChain(run, now); err != nil {
+			return run, err
+		}
 		completed, err := m.store.TransitionProductWorkflowRun(
 			store.TransitionProductWorkflowRunRequest{
 				RunID: run.RunID,
@@ -981,6 +990,16 @@ func (m *Manager) keepCommunicationRunning(
 		})
 	}
 	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
+	// 当日职位计划批间接续(2026-09-01):计划还有下一条目时登记接续并按住
+	// 巡检回复不开启(甲方知情接受回复延迟);末条目在此落成 done。
+	hold, maintained, err := m.maintainDailyPlanInCommunication(run, now)
+	if err != nil {
+		return currentRunOr(run, maintained, nil), err
+	}
+	if hold {
+		return maintained, nil
+	}
+	run = maintained
 	account, err := m.store.AccountByKey(key)
 	if err != nil {
 		return run, err

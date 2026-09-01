@@ -321,6 +321,47 @@ func (s *Store) ActiveDailyJobPlan(
 	return &plan, entries, nil
 }
 
+// DailyJobPlanByID 读取任意状态的计划及条目(诊断/投影/测试)。
+func (s *Store) DailyJobPlanByID(planID string) (*DailyJobPlanWithEntries, error) {
+	planID = strings.TrimSpace(planID)
+	if planID == "" {
+		return nil, ErrDailyJobPlanInvalid
+	}
+	var plan DailyJobPlan
+	err := s.db.First(&plan, "plan_id = ?", planID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries, err := s.dailyJobPlanEntries(planID)
+	if err != nil {
+		return nil, err
+	}
+	return &DailyJobPlanWithEntries{Plan: plan, Entries: entries}, nil
+}
+
+// ActiveDailyJobPlans 列出全部 draft/active 计划(不限账号),供无活跃运行时
+// 的收口扫描使用。现网单账号,实际至多一份。
+func (s *Store) ActiveDailyJobPlans() ([]DailyJobPlanWithEntries, error) {
+	var plans []DailyJobPlan
+	if err := s.db.Where(
+		"status IN ?", []string{DailyJobPlanDraft, DailyJobPlanActive},
+	).Order("created_at ASC").Find(&plans).Error; err != nil {
+		return nil, err
+	}
+	out := make([]DailyJobPlanWithEntries, 0, len(plans))
+	for index := range plans {
+		entries, err := s.dailyJobPlanEntries(plans[index].PlanID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, DailyJobPlanWithEntries{Plan: plans[index], Entries: entries})
+	}
+	return out, nil
+}
+
 func (s *Store) dailyJobPlanEntries(planID string) ([]DailyJobPlanEntry, error) {
 	var entries []DailyJobPlanEntry
 	if err := s.db.Where("plan_id = ?", planID).
