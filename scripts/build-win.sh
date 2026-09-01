@@ -102,7 +102,8 @@ for f in \
   "$UNPACKED/RecruitHelper.exe" \
   "$UNPACKED/resources/brain/$BRAIN_EXE" \
   "$UNPACKED/resources/ui/index.html" \
-  "$UNPACKED/resources/plugin/manifest.json"
+  "$UNPACKED/resources/plugin/manifest.json" \
+  "$UNPACKED/resources/tip/hiboss_tip.dll"
 do
   if [ -f "$f" ]; then
     echo "  OK   ${f#"$UNPACKED/"}"
@@ -123,6 +124,19 @@ if grep -q '"key"' "$UNPACKED/resources/plugin/manifest.json" 2>/dev/null; then
 else
   echo "  缺失 插件 manifest 的 key 字段(扩展 ID 将不稳定)"
   missing=1
+fi
+
+# TIP 必须是静态链接的。不静态链接的话产物依赖 libgcc_s_seh-1.dll 等,而这个 DLL
+# 要被 TSF 加载进 chrome.exe —— 那里找不到 mingw 运行库,加载直接失败,
+# 而失败症状与"没注册成功"一模一样。有 objdump 才查,没有就跳过(不是所有打包机都装了)。
+if command -v x86_64-w64-mingw32-objdump >/dev/null 2>&1; then
+  if x86_64-w64-mingw32-objdump -p "$UNPACKED/resources/tip/hiboss_tip.dll" 2>/dev/null \
+     | grep -qiE 'DLL Name: *(libgcc|libwinpthread|libunwind)'; then
+    echo "  缺失 TIP 不是静态链接(导入表里有 mingw 运行库),装进 chrome.exe 会加载失败"
+    missing=1
+  else
+    echo "  OK   TIP 静态链接干净"
+  fi
 fi
 
 if [ "$missing" -ne 0 ]; then

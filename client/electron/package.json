@@ -36,6 +36,10 @@
       {
         "from": "../../plugin/dist",
         "to": "plugin"
+      },
+      {
+        "from": "../../third_party/tip",
+        "to": "tip"
       }
     ],
     "win": {
