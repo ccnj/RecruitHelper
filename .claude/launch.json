@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ui-dev",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "client/ui", "dev"],
+      "port": 5273
+    }
+  ]
+}

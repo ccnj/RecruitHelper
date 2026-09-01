@@ -1,3 +1,4 @@
+import type { DailyPlanView } from './api'
 import type {
   CandidateViewItem,
   ConfirmationCandidateView,
@@ -147,6 +148,24 @@ const confirmationCandidates: ConfirmationCandidateView[] = Array.from({ length:
   sendStateLabel: '待发送',
   selectable: true,
 }))
+
+// 今日职位计划的视觉预览数据:覆盖 已完成/带待人工/进行中/待进行/已跳过 五态。
+export function createDailyPlanFixture(): DailyPlanView {
+  return {
+    available: true,
+    localDate: '2026-09-01',
+    status: 'active',
+    totalQuota: 87,
+    jobCount: 4,
+    entries: [
+      { seq: 1, jobName: '健康顾问(朝阳)', quota: 22, status: 'done', selectedCount: 22, sentCount: 22, suspectCount: 0 },
+      { seq: 2, jobName: '保险顾问', quota: 22, status: 'done', selectedCount: 22, sentCount: 21, suspectCount: 1 },
+      { seq: 3, jobName: '客服专员', quota: 22, status: 'pending', selectedCount: 14, sentCount: 9, suspectCount: 0 },
+      { seq: 4, jobName: '销售管培生', quota: 21, status: 'pending', selectedCount: 0, sentCount: 0, suspectCount: 0 },
+      { seq: 5, jobName: '电话销售', quota: 0, status: 'skipped', skipReason: 'jobNotOnlineAtPlan:未上线', selectedCount: 0, sentCount: 0, suspectCount: 0 },
+    ],
+  }
+}
 
 export function createProductFixture(): ProductData {
   return {

@@ -7,7 +7,7 @@ import { ProductSidebar } from './components/ProductSidebar'
 import { SettingsPage } from './components/SettingsPage'
 import { UpdateBanner } from './components/UpdateBanner'
 import type { DailyPlanView, ProductUpdateStatus } from './api'
-import { createEmptyProductData, createProductFixture } from './fixtures'
+import { createDailyPlanFixture, createEmptyProductData, createProductFixture } from './fixtures'
 import type {
   CandidateView,
   CandidateViewItem,
@@ -168,6 +168,7 @@ export function ProductApp({
 export function ProductPreviewApp() {
   return (
     <ProductApp
+      dailyPlan={createDailyPlanFixture()}
       data={createProductFixture()}
       fixtureNotice="本地视觉预览数据，不代表真实业务事实"
     />

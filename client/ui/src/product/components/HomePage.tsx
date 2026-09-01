@@ -32,12 +32,6 @@ export function confirmEndWorkflow(
   return endWorkflow()
 }
 
-const PLAN_ENTRY_STATUS: Record<DailyPlanEntry['status'], { label: string; tone: 'green' | 'amber' | 'slate' }> = {
-  pending: { label: '待进行', tone: 'slate' },
-  skipped: { label: '已跳过', tone: 'amber' },
-  done: { label: '已完成', tone: 'green' },
-}
-
 function planSkipReasonText(reason: string | undefined): string {
   if (!reason) return ''
   if (reason === 'zeroQuota') return '配额不足，今日轮空'
@@ -78,6 +72,22 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation, dail
     workflow.canEnd && !pendingEnd && !pendingSourcing,
     pendingEndReason ?? pendingSourcingReason ?? workflow.unavailableReason,
   )
+
+  // 今日职位计划的派生量:分摊条按份额分段、填充按实发;「进行中」取计划
+  // 活跃时的首个待进行条目(串行执行,首个 pending 即当前批)。
+  const planEntries = dailyPlan?.available ? dailyPlan.entries ?? [] : []
+  const planActiveEntries = planEntries.filter(
+    (entry) => entry.status !== 'skipped' && entry.quota > 0,
+  )
+  const planQuotaSum = planActiveEntries.reduce((sum, entry) => sum + entry.quota, 0)
+  const planSentSum = planEntries.reduce((sum, entry) => sum + entry.sentCount, 0)
+  const planSkippedCount = planEntries.filter((entry) => entry.status === 'skipped').length
+  const planRunningSeq = dailyPlan?.status === 'active'
+    ? planEntries.find((entry) => entry.status === 'pending')?.seq ?? null
+    : null
+  const planPercent = (entry: DailyPlanEntry) => (entry.quota > 0
+    ? Math.min(100, Math.round((entry.sentCount / entry.quota) * 100))
+    : 0)
 
   return (
     <div className="rh-page rh-home-page">
@@ -123,45 +133,97 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation, dail
         </button>
       </section>
 
-      {dailyPlan?.available && (dailyPlan.entries?.length ?? 0) > 0 && (
+      {planEntries.length > 0 && dailyPlan && (
         <section className="rh-panel rh-daily-plan">
-          <div className="rh-daily-plan-head">
-            <h2>今日职位计划</h2>
-            <span>
-              {dailyPlan.localDate ?? ''} · 总量 {dailyPlan.totalQuota ?? 0}
-              {dailyPlan.status === 'draft' && ' · 名单待平台确认'}
-              {dailyPlan.status === 'aborted' && ' · 已终止'}
-              {dailyPlan.status === 'completed' && ' · 已完成'}
-            </span>
-          </div>
-          <table className="rh-daily-plan-table">
-            <thead>
-              <tr>
-                <th>职位</th>
-                <th>份额</th>
-                <th>已发出</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(dailyPlan.entries ?? []).map((entry) => (
-                <tr key={entry.seq}>
-                  <td>{entry.jobName}</td>
-                  <td>{entry.status === 'skipped' && entry.quota === 0 ? '—' : entry.quota}</td>
-                  <td>{entry.sentCount}{entry.suspectCount > 0 ? `（${entry.suspectCount} 待人工确认）` : ''}</td>
-                  <td>
-                    <StatusPill
-                      label={PLAN_ENTRY_STATUS[entry.status]?.label ?? entry.status}
-                      tone={PLAN_ENTRY_STATUS[entry.status]?.tone ?? 'slate'}
-                    />
-                    {entry.status === 'skipped' && (
-                      <span className="rh-daily-plan-skip">{planSkipReasonText(entry.skipReason)}</span>
-                    )}
-                  </td>
-                </tr>
+          <header className="rh-daily-plan-head">
+            <div className="rh-daily-plan-title">
+              <h2>今日职位计划</h2>
+              <span>
+                {dailyPlan.localDate ?? ''}
+                {dailyPlan.status === 'draft' && ' · 名单待平台确认'}
+                {dailyPlan.status === 'aborted' && ' · 已终止'}
+                {dailyPlan.status === 'completed' && ' · 已完成'}
+                {planSkippedCount > 0 && ` · ${planSkippedCount} 个职位今日停发`}
+              </span>
+            </div>
+            <div className="rh-daily-plan-total">
+              <strong>{planSentSum}</strong>
+              <span>/ {planQuotaSum > 0 ? planQuotaSum : dailyPlan.totalQuota ?? 0} 个招呼</span>
+            </div>
+          </header>
+          {planQuotaSum > 0 && (
+            <div className="rh-daily-plan-bar" aria-hidden="true">
+              {planActiveEntries.map((entry) => (
+                <span
+                  key={entry.seq}
+                  className={`rh-daily-plan-seg${entry.status === 'done' ? ' is-done' : ''}${entry.seq === planRunningSeq ? ' is-active' : ''}`}
+                  style={{ flexGrow: entry.quota }}
+                  title={`${entry.jobName} ${entry.sentCount}/${entry.quota}`}
+                >
+                  <span
+                    className="rh-daily-plan-seg-fill"
+                    style={{ width: `${planPercent(entry)}%` }}
+                  />
+                </span>
               ))}
-            </tbody>
-          </table>
+            </div>
+          )}
+          <ul className="rh-daily-plan-list">
+            {planEntries.map((entry) => {
+              const isRunning = entry.seq === planRunningSeq
+              const tone = entry.status === 'done'
+                ? 'green'
+                : entry.status === 'skipped' ? 'amber' : isRunning ? 'blue' : 'slate'
+              const label = entry.status === 'done'
+                ? '已完成'
+                : entry.status === 'skipped' ? '已跳过' : isRunning ? '进行中' : '待进行'
+              return (
+                <li
+                  className={`rh-daily-plan-row is-${entry.status}${isRunning ? ' is-running' : ''}`}
+                  key={entry.seq}
+                >
+                  <span aria-hidden="true" className={`rh-daily-plan-marker is-${tone}`}>
+                    {entry.status === 'done' ? (
+                      <ProductIcon name="check" size={12} />
+                    ) : entry.status === 'skipped' ? (
+                      <ProductIcon name="pause" size={11} />
+                    ) : isRunning ? (
+                      <i className="rh-daily-plan-pulse" />
+                    ) : (
+                      entry.seq
+                    )}
+                  </span>
+                  <div className="rh-daily-plan-job">
+                    <strong>{entry.jobName}</strong>
+                    {entry.status === 'skipped' ? (
+                      <span className="rh-daily-plan-note">{planSkipReasonText(entry.skipReason)}</span>
+                    ) : entry.suspectCount > 0 ? (
+                      <span className="rh-daily-plan-note is-amber">
+                        {entry.suspectCount} 条发送结果待人工确认
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="rh-daily-plan-side">
+                    {entry.status !== 'skipped' && entry.quota > 0 && (
+                      <>
+                        <span className="rh-daily-plan-track">
+                          <span
+                            className="rh-daily-plan-fill"
+                            style={{ width: `${planPercent(entry)}%` }}
+                          />
+                        </span>
+                        <span className="rh-daily-plan-count">
+                          {entry.sentCount}
+                          <i>/{entry.quota}</i>
+                        </span>
+                      </>
+                    )}
+                    <StatusPill label={label} tone={tone} />
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
         </section>
       )}
 
