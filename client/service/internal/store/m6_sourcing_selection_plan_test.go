@@ -115,3 +115,47 @@ func TestSelectCompletedSourcingBatchRejectsDoneEntryReuse(t *testing.T) {
 		t.Fatalf("done 条目复用应冲突: %v", err)
 	}
 }
+
+// 首批上限按草稿临时份额落库,定稿份额变大后续采必须能把上限抬到 3×定稿份额,
+// 否则该职位当日结构性采不满(审查修复回归)。
+func TestReopenSourcingBatchRaisesCaptureLimitToPlanLimit(t *testing.T) {
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	s, key := prepareSourcingSelectionStore(t, "plan-cap", 5, 80, 90, 50, base)
+	insertCompletedSelectionBatch(t, s, key, "batch-plan-cap", "plan-cap", base,
+		[]selectionRunFixture{
+			{RunID: "run-cap-a", Score: intPointer(9)},
+			{RunID: "run-cap-b", Score: intPointer(8)},
+		})
+	// 模拟草稿期落库的紧上限:target 2 == captureLimit 2。
+	if err := s.db.Model(&SourcingBatch{}).
+		Where("batch_id = ?", "batch-plan-cap").
+		Update("capture_limit", 2).Error; err != nil {
+		t.Fatal(err)
+	}
+	// 不带 Limit:顶到上限,续采被拒。
+	if _, err := s.ReopenSourcingBatchForCapture(ReopenSourcingBatchForCaptureRequest{
+		BatchID: "batch-plan-cap", Step: 1, ReopenAt: base.Add(time.Hour),
+	}); !errors.Is(err, ErrSourcingBatchStateConflict) {
+		t.Fatalf("顶上限不带抬升应冲突: %v", err)
+	}
+	// 带定稿计划上限:上限抬到 6,目标 2+1=3,回到采集态。
+	reopened, err := s.ReopenSourcingBatchForCapture(ReopenSourcingBatchForCaptureRequest{
+		BatchID: "batch-plan-cap", Step: 1, Limit: 6, ReopenAt: base.Add(time.Hour),
+	})
+	if err != nil || reopened.Status != SourcingBatchCollecting ||
+		reopened.TargetCount != 3 || reopened.CaptureLimit != 6 {
+		t.Fatalf("上限未抬升: %+v err=%v", reopened, err)
+	}
+	// 只升不降:更小的 Limit 不缩上限。
+	if err := s.db.Model(&SourcingBatch{}).
+		Where("batch_id = ?", "batch-plan-cap").
+		Updates(map[string]any{"status": SourcingBatchCompleted, "ended_at": base.Add(2 * time.Hour), "target_count": 2}).Error; err != nil {
+		t.Fatal(err)
+	}
+	shrunk, err := s.ReopenSourcingBatchForCapture(ReopenSourcingBatchForCaptureRequest{
+		BatchID: "batch-plan-cap", Step: 1, Limit: 3, ReopenAt: base.Add(3 * time.Hour),
+	})
+	if err != nil || shrunk.CaptureLimit != 6 || shrunk.TargetCount != 3 {
+		t.Fatalf("Limit 只升不降被违反: %+v err=%v", shrunk, err)
+	}
+}

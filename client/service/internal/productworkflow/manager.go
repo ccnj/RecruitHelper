@@ -163,8 +163,10 @@ func (m *Manager) startFullLocked(
 	} else if plan != nil {
 		// 当日职位计划批次(AGENTS.md 2026-09-01):采集规模与份额联动,首轮
 		// ceil(1.5×份额)、上限 3×份额。计划 draft 期间用临时份额(N₀≥N,只会
-		// 少采,由续采轮自愈)。revision 不属于计划任何条目时按存量语义走
-		// 常量规模(管理面等旁路),不与计划勾连。
+		// 少采):目标由续采轮按定稿份额步进自愈,上限由续采入口按 3×定稿份额
+		// 补抬(reopenSourcingForMoreCapture 的 Limit 参数),两者合起来才构成
+		// 完整自愈。revision 不属于计划任何条目时按存量语义走常量规模(管理面
+		// 等旁路),不与计划勾连。
 		if entry := store.DailyJobPlanEntryByRevision(entries, revisionHash); entry != nil {
 			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
 			if share <= 0 {

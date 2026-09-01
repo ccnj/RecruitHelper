@@ -644,6 +644,10 @@ type ReopenSourcingBatchForCaptureRequest struct {
 	// 越过就截到上限。
 	Step     int
 	ReopenAt time.Time
+	// Limit 大于既有 CaptureLimit 时把上限抬到该值(只升不降)。当日职位计划
+	// 首批的上限按草稿临时份额落库,定稿份额变大后由编排器经此参数补抬,
+	// 否则该职位当日结构性采不满(2026-09-01 审查修复)。0 表示不动上限。
+	Limit int
 }
 
 // ReopenSourcingBatchForCapture 把一个刚采满、但选中人数还没够选中目标的批次
@@ -684,7 +688,11 @@ func (s *Store) ReopenSourcingBatchForCapture(
 		if batch.Status != SourcingBatchCompleted || batch.EndedAt == nil {
 			return ErrSourcingBatchStateConflict
 		}
-		if batch.CaptureLimit <= 0 || batch.TargetCount >= batch.CaptureLimit {
+		captureLimit := batch.CaptureLimit
+		if req.Limit > captureLimit {
+			captureLimit = req.Limit
+		}
+		if batch.CaptureLimit <= 0 || batch.TargetCount >= captureLimit {
 			return ErrSourcingBatchStateConflict
 		}
 		if strings.HasPrefix(batch.Reason, SourcingNoNewCandidatesReason) {
@@ -711,17 +719,18 @@ func (s *Store) ReopenSourcingBatchForCapture(
 		}
 
 		nextTarget := batch.TargetCount + req.Step
-		if nextTarget > batch.CaptureLimit {
-			nextTarget = batch.CaptureLimit
+		if nextTarget > captureLimit {
+			nextTarget = captureLimit
 		}
 		updated := tx.Model(&SourcingBatch{}).
 			Where("batch_id = ? AND status = ? AND ended_at IS NOT NULL",
 				batch.BatchID, SourcingBatchCompleted).
 			Updates(map[string]any{
-				"status":       SourcingBatchCollecting,
-				"reason":       "",
-				"target_count": nextTarget,
-				"ended_at":     nil,
+				"status":        SourcingBatchCollecting,
+				"reason":        "",
+				"target_count":  nextTarget,
+				"capture_limit": captureLimit,
+				"ended_at":      nil,
 			})
 		if updated.Error != nil {
 			return updated.Error

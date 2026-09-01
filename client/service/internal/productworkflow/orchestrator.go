@@ -892,16 +892,12 @@ func (m *Manager) reopenSourcingForMoreCapture(
 	if batch == nil {
 		return false, store.ErrSourcingBatchNotFound
 	}
-	if batch.CaptureLimit <= 0 || batch.TargetCount >= batch.CaptureLimit {
-		return true, nil
-	}
-	if strings.HasPrefix(batch.Reason, store.SourcingNoNewCandidatesReason) {
-		return true, nil
-	}
 	step := NewFullWorkflowCaptureStep
-	// 当日职位计划批次的续采步进与份额联动:ceil(0.5×份额)(AGENTS.md
-	// 2026-09-01)。走到这里计划必已定稿(筛选先于续采,草稿计划在筛选就
-	// 冲突),份额即条目冻结配额。
+	planLimit := 0
+	// 当日职位计划批次的续采步进与整批上限均与份额联动:步进 ceil(0.5×份额)、
+	// 上限 3×份额(AGENTS.md 2026-09-01)。走到这里计划必已定稿(筛选先于
+	// 续采,草稿计划在筛选就冲突),份额即条目冻结配额。首批的落库上限按草稿
+	// 临时份额算,定稿份额变大后必须在此补抬,否则该职位当日结构性采不满。
 	if plan, entries, planErr := m.store.ActiveDailyJobPlan(store.AccountKey{
 		Platform: batch.Platform, AccountRef: batch.AccountRef,
 	}); planErr != nil {
@@ -911,11 +907,22 @@ func (m *Manager) reopenSourcingForMoreCapture(
 			share := store.DailyJobPlanShareForEntry(plan, entries, entry.EntryID)
 			if share > 0 {
 				step = store.PlanCaptureStep(share)
+				planLimit = store.PlanCaptureLimit(share)
 			}
 		}
 	}
+	effectiveLimit := batch.CaptureLimit
+	if planLimit > effectiveLimit {
+		effectiveLimit = planLimit
+	}
+	if batch.CaptureLimit <= 0 || batch.TargetCount >= effectiveLimit {
+		return true, nil
+	}
+	if strings.HasPrefix(batch.Reason, store.SourcingNoNewCandidatesReason) {
+		return true, nil
+	}
 	if _, err := m.store.ReopenSourcingBatchForCapture(store.ReopenSourcingBatchForCaptureRequest{
-		BatchID: batchID, Step: step, ReopenAt: m.clock.Now(),
+		BatchID: batchID, Step: step, Limit: planLimit, ReopenAt: m.clock.Now(),
 	}); err != nil {
 		return false, err
 	}
