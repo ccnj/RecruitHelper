@@ -159,10 +159,12 @@ func TestFullStartSyncsConfigPlaneThenStartsDailyPlan(t *testing.T) {
 	}
 }
 
-func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
+// 仅回复开始也做与「同步职位」相同的尽力全刷(2026-09-01 甲方裁决:所有开始/
+// 恢复入口全刷),当前职位 head 随之推进,在聊候选人下一轮即用新配置。
+func TestReplyOnlyStartRefreshesConfigPlane(t *testing.T) {
 	db, key := controllerFixture(t)
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: []byte("must not read")}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
 	controller, err := New(
 		db,
 		flow,
@@ -178,14 +180,74 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
 		t.Fatal(err)
 	}
-	if flow.replyKey != key || source.calls != 0 {
+	if flow.replyKey != key || source.calls != 1 || source.allCalls != 1 {
+		t.Fatalf("reply key=%+v source=%d/%d",
+			flow.replyKey, source.calls, source.allCalls)
+	}
+	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
+	if err != nil || revision == nil {
+		t.Fatalf("仅回复开始应推进当前职位 head: %+v err=%v", revision, err)
+	}
+}
+
+// 尽力而为:后台整体不可达时仅回复照常开始,不拦按钮。
+func TestReplyOnlyStartSurvivesConfigPlaneFailure(t *testing.T) {
+	db, key := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: []byte("backend down")}
+	controller, err := New(
+		db,
+		flow,
+		source,
+		func() time.Time {
+			return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+		},
+		workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+		t.Fatal(err)
+	}
+	if flow.replyKey != key || source.calls != 1 {
 		t.Fatalf("reply key=%+v sourceCalls=%d", flow.replyKey, source.calls)
+	}
+}
+
+// 恢复入口同样尽力全刷;暂停、结束与确认发送仍不触碰配置面。
+func TestResumeRefreshesConfigPlaneOtherControlsDoNot(t *testing.T) {
+	db, _ := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	controller, err := New(
+		db,
+		flow,
+		source,
+		func() time.Time {
+			return time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
+		},
+		workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := controller.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if source.calls != 0 {
+		t.Fatalf("暂停不应触碰配置面: %d", source.calls)
+	}
 	if err := controller.Resume(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if flow.resumeCalls != 1 || source.calls != 1 || source.allCalls != 1 {
+		t.Fatalf("恢复应先尽力全刷: resume=%d source=%d/%d",
+			flow.resumeCalls, source.calls, source.allCalls)
+	}
+	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
+	if err != nil || revision == nil {
+		t.Fatalf("恢复应推进当前职位 head: %+v err=%v", revision, err)
 	}
 	if err := controller.End(context.Background()); err != nil {
 		t.Fatal(err)
@@ -195,9 +257,9 @@ func TestReplyOnlyAndControlsNeverFetchJobConfig(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if flow.pauseCalls != 1 || flow.resumeCalls != 1 || flow.endCalls != 1 ||
+	if source.calls != 1 || flow.pauseCalls != 1 || flow.endCalls != 1 ||
 		flow.confirmBatch != "batch-one" || len(flow.confirmIDs) != 1 {
-		t.Fatalf("unexpected controls: %+v", flow)
+		t.Fatalf("结束/确认不应再触碰配置面: source=%d flow=%+v", source.calls, flow)
 	}
 }
 
@@ -330,10 +392,11 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 	}
 }
 
-// 活跃运行期间点开始:不再触碰配置面,直接委托 StartFullDailyPlan(真实实现
-// 里对 replyOnly 活跃运行报模式冲突、对 full 幂等返回;「沟通期再采一批」的
-// 同步-换批语义随当日计划停用)。
-func TestStartWithActiveRunSkipsConfigSyncAndDelegates(t *testing.T) {
+// 活跃运行期间点开始:先尽力全刷配置面(2026-09-01 甲方裁决:所有开始/恢复
+// 入口全刷,让在聊候选人下一轮用上新提示词),再委托 StartFullDailyPlan(真实
+// 实现里对 replyOnly 活跃运行报模式冲突、对 full 幂等返回;「沟通期再采一批」
+// 的同步-换批语义随当日计划停用)。已冻结批次的 revision 绑定不受刷新影响。
+func TestStartWithActiveRunRefreshesConfigPlaneThenDelegates(t *testing.T) {
 	db, key := controllerFixture(t)
 	now := time.Date(2026, 7, 25, 9, 0, 0, 0, time.Local)
 	if _, err := db.CreateProductWorkflowRun(store.CreateProductWorkflowRunRequest{
@@ -349,7 +412,10 @@ func TestStartWithActiveRunSkipsConfigSyncAndDelegates(t *testing.T) {
 		t.Fatal(err)
 	}
 	flow := &fakeWorkflow{}
-	source := &fakeSource{raw: syntheticCurrentJob(t, 42, "产品经理")}
+	source := &fakeSource{
+		raw:       syntheticCurrentJob(t, 42, "产品经理"),
+		callOrder: &flow.callOrder,
+	}
 	controller, err := New(
 		db, flow, source, func() time.Time { return now }, workflow.DailyWindowPolicy{},
 	)
@@ -360,12 +426,19 @@ func TestStartWithActiveRunSkipsConfigSyncAndDelegates(t *testing.T) {
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	if source.calls != 0 || source.allCalls != 0 || flow.fullKey != key ||
-		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
+	if source.calls != 1 || source.allCalls != 1 || flow.fullKey != key ||
+		len(flow.callOrder) != 3 ||
+		flow.callOrder[0] != "fetch" ||
+		flow.callOrder[1] != "fetchAll" ||
+		flow.callOrder[2] != "dailyPlan" {
 		t.Fatalf(
 			"active-run start source=%d/%d key=%+v order=%v",
 			source.calls, source.allCalls, flow.fullKey, flow.callOrder,
 		)
+	}
+	revision, err := db.CurrentLegacyJobAIContextByBackendJobID("42")
+	if err != nil || revision == nil {
+		t.Fatalf("接续开始应推进当前职位 head: %+v err=%v", revision, err)
 	}
 }
 
@@ -401,9 +474,12 @@ func TestStartFromPausedCommunicationDelegatesWithoutResuming(t *testing.T) {
 	if err := controller.Start(context.Background(), "full", "42"); err != nil {
 		t.Fatal(err)
 	}
-	// 活跃运行在场:不触碰配置面、不擅自恢复,直接委托。
-	if source.calls != 0 || source.allCalls != 0 || flow.resumeCalls != 0 ||
-		len(flow.callOrder) != 1 || flow.callOrder[0] != "dailyPlan" {
+	// 活跃运行在场:先尽力全刷配置面,但不擅自恢复,仍直接委托。
+	if source.calls != 1 || source.allCalls != 1 || flow.resumeCalls != 0 ||
+		len(flow.callOrder) != 3 ||
+		flow.callOrder[0] != "fetch" ||
+		flow.callOrder[1] != "fetchAll" ||
+		flow.callOrder[2] != "dailyPlan" {
 		t.Fatalf("paused delegation source=%d flow=%+v", source.calls, flow)
 	}
 }
