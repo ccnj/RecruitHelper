@@ -579,7 +579,13 @@ async function bossOsType(
   const read = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
   const matched = read.text === args.text
   trace.push(`发了 ${played.keys} 次按键 滞后最大 ${Math.round(played.lagMaxUs)}us`)
-  trace.push(`回读 ${matched ? '逐字相同' : `不同:期望 ${args.text.length} 字、实得 ${read.text.length} 字`}`)
+  // 回读不同时**把实得的原文带出来**。只报"期望 12 字、实得 12 字"等于把判据
+  // 压成一个布尔——而这一块存在的全部理由就是看 TIP 选了哪个词:「加个」出成
+  // 「价格」和出成「家哥」是两种病,字数一样。「错误收敛必须留痕」正是禁这个形状。
+  //
+  // 不涉隐私:输入框进来时是空的(硬前置),里面只可能是我方从诊断台发出去的那句
+  // 话被输入法改写的样子,不含候选人任何内容。
+  trace.push(`回读 ${matched ? '逐字相同' : `不同:期望「${args.text}」实得「${read.text.slice(0, 200)}」`}`)
 
   return osTypeData('typed', started, {
     keys: played.keys,
