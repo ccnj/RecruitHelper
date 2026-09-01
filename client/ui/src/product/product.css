@@ -3250,40 +3250,240 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 今日职位计划(2026-09-01):留痕条款要求每个职位跑没跑、发了几个、为何跳过可见 */
+/* 今日职位计划:分摊条(每段宽度∝份额、填充∝实发)+ 逐职位进度行。
+   留痕条款要求份额、实发、跳过原因可见;视觉语言沿用工作台蓝与状态点脉冲。 */
+.rh-daily-plan {
+  margin-bottom: 16px;
+  padding: 15px 18px 5px;
+}
+
 .rh-daily-plan-head {
   display: flex;
-  align-items: baseline;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 13px;
 }
-.rh-daily-plan-head h2 {
+
+.rh-daily-plan-title h2 {
   font-size: 15px;
-  margin: 0;
+  font-weight: 600;
 }
-.rh-daily-plan-head span {
-  color: var(--rh-text-muted, #6b7280);
+
+.rh-daily-plan-title span {
+  display: block;
+  margin-top: 3px;
+  color: var(--rh-muted);
   font-size: 12px;
 }
-.rh-daily-plan-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+
+.rh-daily-plan-total {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--rh-muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
-.rh-daily-plan-table th,
-.rh-daily-plan-table td {
-  text-align: left;
-  padding: 6px 8px;
-  border-top: 1px solid var(--rh-border, #e5e7eb);
+
+.rh-daily-plan-total strong {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  color: var(--rh-ink);
 }
-.rh-daily-plan-table thead th {
-  border-top: none;
-  color: var(--rh-text-muted, #6b7280);
+
+.rh-daily-plan-bar {
+  display: flex;
+  gap: 3px;
+  height: 10px;
+  margin-bottom: 5px;
+}
+
+.rh-daily-plan-seg {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 14px;
+  border-radius: 999px;
+  background: #e9eef7;
+  overflow: hidden;
+}
+
+.rh-daily-plan-seg-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5e93ff, var(--rh-primary));
+  transition: width 0.6s ease;
+}
+
+.rh-daily-plan-seg.is-done .rh-daily-plan-seg-fill {
+  background: linear-gradient(90deg, #23ad82, var(--rh-green));
+}
+
+.rh-daily-plan-seg.is-active .rh-daily-plan-seg-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.45), transparent);
+  animation: rh-plan-sheen 2.4s linear infinite;
+}
+
+@keyframes rh-plan-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+.rh-daily-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rh-daily-plan-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 0;
+  border-top: 1px solid var(--rh-border);
+}
+
+.rh-daily-plan-bar + .rh-daily-plan-list .rh-daily-plan-row:first-child {
+  border-top: 0;
+  padding-top: 13px;
+}
+
+.rh-daily-plan-marker {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--rh-slate);
+  background: #eef1f6;
+}
+
+.rh-daily-plan-marker.is-green {
+  color: #fff;
+  background: var(--rh-green);
+}
+
+.rh-daily-plan-marker.is-amber {
+  color: var(--rh-amber);
+  background: #faeedd;
+}
+
+.rh-daily-plan-marker.is-blue {
+  background: var(--rh-primary-soft);
+}
+
+.rh-daily-plan-pulse {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rh-primary);
+}
+
+.rh-daily-plan-pulse::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(51, 112, 246, 0.35);
+  animation: rh-plan-pulse 1.6s ease-out infinite;
+}
+
+@keyframes rh-plan-pulse {
+  from { transform: scale(0.5); opacity: 1; }
+  to { transform: scale(1.15); opacity: 0; }
+}
+
+.rh-daily-plan-job {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rh-daily-plan-job strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rh-daily-plan-row.is-skipped .rh-daily-plan-job strong {
+  color: var(--rh-muted);
   font-weight: 500;
 }
-.rh-daily-plan-skip {
-  margin-left: 8px;
-  color: var(--rh-text-muted, #6b7280);
+
+.rh-daily-plan-note {
+  color: var(--rh-muted);
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rh-daily-plan-note.is-amber {
+  color: var(--rh-amber);
+}
+
+.rh-daily-plan-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rh-daily-plan-track {
+  width: 128px;
+  height: 6px;
+  border-radius: 999px;
+  background: #eef1f6;
+  overflow: hidden;
+}
+
+.rh-daily-plan-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #5e93ff, var(--rh-primary));
+  transition: width 0.6s ease;
+}
+
+.rh-daily-plan-row.is-done .rh-daily-plan-fill {
+  background: var(--rh-green);
+}
+
+.rh-daily-plan-count {
+  min-width: 46px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rh-daily-plan-count i {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--rh-muted);
+}
+
+@media (max-width: 900px) {
+  .rh-daily-plan-track { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rh-daily-plan-seg.is-active .rh-daily-plan-seg-fill::after,
+  .rh-daily-plan-pulse::after {
+    animation: none;
+  }
 }

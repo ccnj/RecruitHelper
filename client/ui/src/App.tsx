@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ConsoleApp } from './console/ConsoleApp'
 import { ConsoleLock } from './console/ConsoleLock'
 import { consoleUnlocked } from './console/lock-state'
-import { ProductConnectedApp } from './product'
+import { ProductConnectedApp, ProductPreviewApp } from './product'
 
 export function App() {
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false)
@@ -55,5 +55,6 @@ export function App() {
       </>
     )
   }
+  if (new URLSearchParams(window.location.search).has('preview')) return <ProductPreviewApp />
   return <ProductConnectedApp />
 }
