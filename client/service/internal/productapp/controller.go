@@ -207,6 +207,7 @@ func (c *Controller) Start(
 		return err
 	}
 	if mode == string(workflow.ModeReplyOnly) {
+		c.syncJobsBestEffort(ctx, "startReplyOnly")
 		_, err = c.workflow.StartReplyOnly(key)
 		return err
 	}
@@ -249,6 +250,12 @@ func (c *Controller) Start(
 			slog.Warn("有效职位集同步失败,按既有未终局批次恢复继续",
 				"batchId", batch.BatchID, "err", syncErr.Error())
 		}
+	} else {
+		// 活跃运行在场时同样尽力全刷(2026-09-01 甲方裁决:所有开始/恢复
+		// 入口全刷)。刷新只推进 head 与引擎凭据,让在聊候选人下一轮用上
+		// 最新提示词;已冻结批次与当日计划的 revision 绑定是不可变事实,
+		// 不受影响。失败不拦——接续/幂等返回不需要名单。
+		c.syncJobsBestEffort(ctx, "startFullActive")
 	}
 	_, err = c.workflow.StartFullDailyPlan(key)
 	return err
@@ -293,7 +300,8 @@ func (c *Controller) gateWechatConfigured(ctx context.Context, key store.Account
 }
 
 // SyncJobs 是产品面"同步职位"的入口:刷新有效职位集,并把旧后台当前职位重新
-// 拉取落库,与开始按钮之前那次同步同形。
+// 拉取落库,与开始按钮之前那次同步同形。仅回复开始、全流程接续与恢复也经
+// syncJobsBestEffort 复用本函数(2026-09-01 甲方裁决:所有开始/恢复入口全刷)。
 //
 // 它不启动、不恢复任何工作流,也不改写已冻结批次的 revision 绑定与已建档候选人
 // 的职位归属——那些是不可变事实。后台当前职位若在运行期间变过,下一次开始仍由
@@ -324,6 +332,17 @@ func (c *Controller) SyncJobs(ctx context.Context) error {
 		return errors.Join(ErrJobConfigUnavailable, err)
 	}
 	return nil
+}
+
+// syncJobsBestEffort 在仅回复开始、全流程接续与恢复前尽力做一次与「同步职位」
+// 完全相同的全量刷新(2026-09-01 甲方裁决),让在聊候选人的下一轮尽快用上最新
+// 提示词与引擎配置。失败只响亮记日志、按本地既有配置继续——后台一次故障不得
+// 把开始/恢复堵死;全流程首开的名单硬前提(复数同步失败即拒绝)不经本路径。
+func (c *Controller) syncJobsBestEffort(ctx context.Context, entry string) {
+	if err := c.SyncJobs(ctx); err != nil {
+		slog.Warn("配置面尽力刷新失败,按本地既有配置继续",
+			"entry", entry, "err", err.Error())
+	}
 }
 
 // logCurrentJobSyncFailure 让当前职位同步失败在脑日志里可定位。产品面响应按
@@ -396,6 +415,7 @@ func (c *Controller) Resume(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.syncJobsBestEffort(ctx, "resume")
 	_, err := c.workflow.Resume()
 	return err
 }
