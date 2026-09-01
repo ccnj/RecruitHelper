@@ -122,6 +122,8 @@ const {
   zhilianTestHooks,
   ZhilianPlatformError,
   planMove,
+  planType,
+  PUNCT_KEY,
   clickAimPoint,
   mulberry32,
   SPREAD_FRACTIONS,
@@ -15046,13 +15048,13 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
 // ---------------------------------------------------------------------------
 
 const OSENGINE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-hiboss-ef1b134.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-hiboss-84c1a22.json', 'utf8'),
 )
 
 test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
   const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
   assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
-  assert.equal(OSENGINE_SOURCE.commit, 'ef1b134', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
 
   for (const [seedText, expected] of Object.entries(cases)) {
     const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
@@ -15100,6 +15102,139 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
   // 常数会给出一串一模一样的数字,那是零误伤的机器签名。真人 464 条按压里
   // 中位 96ms、四分位 86~110,所以 40 次抽样出现多个不同取值是必然的。
   assert.ok(drawn.size >= 10, `40 次抽样只出现 ${drawn.size} 个不同的 pressMs,疑似退化成常数`)
+})
+
+// ---------------------------------------------------------------------------
+// osengine/compose:从 hiBoss 搬入的打字排版器
+//
+// 与鼠标那组同理,测的不是"打字像不像人"——那要判别器,永远留在 hiBoss。
+// 这里测的是**我们这一侧没有把上游改掉**。打字线尤其经不起移植:上游的 LCG
+// `s*1103515245+12345` 在 s 接近 2^31 时乘积超过 2^53,**JS 的精度丢失是结果的
+// 一部分**;换个语言、换个 RNG,生成的分布就悄悄偏了,而且不会有任何报错。
+// ---------------------------------------------------------------------------
+
+const COMPOSE_FIXTURE = JSON.parse(
+  readFileSync('test/fixtures/osengine-compose-hiboss-84c1a22.json', 'utf8'),
+)
+
+/** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
+const SHIFT_GUARD_MS = 40
+
+/** 把一份计划里的全部按键(含上屏键)按 down 排成一列。 */
+function flattenPlanKeys(plan) {
+  const keys = []
+  for (const w of plan.words) {
+    for (const k of w.keys) keys.push(k)
+    if (w.commit) keys.push(w.commit)
+  }
+  return keys.sort((a, b) => a.down - b.down)
+}
+
+test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
+  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
+  assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
+
+  for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
+    for (const [seedText, expected] of Object.entries(bySeed)) {
+      const got = await planType(text, Number(seedText))
+      assert.equal(got.ok, expected.ok, `${name}/${seedText} 的成败与上游不一致`)
+      if (!expected.ok) continue
+      assert.equal(got.seed, expected.seed, `${name}/${seedText} 命中的种子与上游不一致`)
+      assert.equal(got.tries, expected.tries, `${name}/${seedText} 的重采次数与上游不一致`)
+      assert.deepEqual(got.plan, expected.plan, `${name}/${seedText} 的计划与上游不一致`)
+    }
+  }
+})
+
+test('osengine/compose 打不出的字元要显式失败,不许编一个假键序', async () => {
+  // 上游把两种失败分得很清:「这个字打不出」抛异常,「排不出合格形状」返回 ok:false。
+  //
+  // 前者的安全性质在于**宁可失败也不编**。2026-08-31 上游修过一个静默 bug:
+  // pinyin-pro 给「嗯」的 `ng` 是词典注音,真人打的是 `en`,于是排出了
+  // KeyN,KeyG,KeyN,KeyG —— 一个没有真人会敲的键序,而排版器照样返回 ok:true。
+  // 自研 TIP 走 commit(word) 直接上屏、不查拼音串,屏幕上完全看不出问题;
+  // **一旦回落到系统输入法(我们的 macOS 开发环境就是),ng 上不了屏**。
+  //
+  // 「呣」的注音是 m,不是完整音节,IME 会当声母等韵母,真人也打不出——所以上游
+  // 刻意不给它编输入音,而是显式抛。这条用例钉的就是「不编」。
+  await assert.rejects(
+    () => planType('呣', 1),
+    (err) => {
+      assert.match(err.message, /打不出/, '错误信息要说清是打不出,不是排不出')
+      assert.match(err.message, /呣/, '错误信息要指名是哪个字元')
+      return true
+    },
+  )
+  // 对照:同样极短、同样曾经排不出来的「嗯」,修好之后必须能排出来。
+  const ok = await planType('嗯', 1)
+  assert.ok(ok.ok, '「嗯」修好后应当排得出来')
+  const codes = ok.plan.words.flatMap((w) => w.keys.map((k) => k.code))
+  assert.deepEqual(codes, ['KeyE', 'KeyN'], '「嗯」要按真人打的 en,不是词典注音 ng')
+})
+
+test('osengine/compose 的 Shift 必须在下一个键按下前松开(「薪资」→「Xin子」那个 bug)', () => {
+  // 2026-08-21 上游真机:Slash 的 dwell 采到 125ms,而到下一个键只有 86ms,
+  // Shift 压到了下一个字母上,输入法收到大写 X 当成英文。down→down 的间隔模型
+  // 不管上一个键何时松手,所以时序职责在排版器——这条用例就是钉住它没退化。
+  for (const [name, { bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
+    for (const [seedText, c] of Object.entries(bySeed)) {
+      if (!c.ok) continue
+      const keys = flattenPlanKeys(c.plan)
+      for (const m of keys.filter((k) => k.modifier)) {
+        for (const k of keys) {
+          if (k === m) continue
+          if (k.down > m.down && k.down < m.up) {
+            assert.ok(k.shift,
+              `${name}/${seedText}:${k.code} 落在 Shift 按住的窗口里却没标 shift`)
+          } else if (k.down >= m.up) {
+            assert.ok(k.down - m.up >= SHIFT_GUARD_MS,
+              `${name}/${seedText}:Shift 松手于 ${m.up},而 ${k.code} 在 ${k.down} 按下,`
+              + `间隔 ${k.down - m.up}ms 不足 ${SHIFT_GUARD_MS}ms`)
+            break
+          }
+        }
+      }
+    }
+  }
+})
+
+test('osengine/compose 的标点键集合钉死十二个——变了 Go 侧键码表就得补', () => {
+  // 键码表在 client/service/internal/handinput/keymap_darwin.go,那边按这八个建的。
+  // **上游 PUNCT_KEY 长出第九个键位时,这条先红**——否则我们一片绿,直到真机上
+  // 遇到那个标点,注入层报「键码表里没有」,或者更坏:某天有人给它加了兜底。
+  const codes = [...new Set(Object.values(PUNCT_KEY).map((v) => v.code))].sort()
+  // 十二个里有四个是数字键(！=Shift+1、…=Shift+6、（=Shift+9、）=Shift+0),
+  // 它们在 Go 表里已被 Digit0..9 覆盖;真正只从这张表来的是另外八个。
+  assert.deepEqual(codes, [
+    'Backquote', 'Backslash', 'Comma', 'Digit0', 'Digit1', 'Digit6', 'Digit9',
+    'Minus', 'Period', 'Quote', 'Semicolon', 'Slash',
+  ], '上游的标点键位变了:同步 keymap_darwin.go 与它的 punctKeysFromUpstream')
+  const nonDigit = codes.filter((c) => !c.startsWith('Digit'))
+  assert.equal(nonDigit.length, 8, 'Go 侧 punctKeysFromUpstream 是按这八个建的')
+})
+
+test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {
+  const a = await planType('你好，方便加个微信聊聊吗', 1)
+  const b = await planType('你好，方便加个微信聊聊吗', 1)
+  assert.deepEqual(a, b)
+  const c = await planType('你好，方便加个微信聊聊吗', 99)
+  assert.ok(a.ok && c.ok)
+  assert.notDeepEqual(a.plan, c.plan, '换种子必须换计划')
+})
+
+test('osengine/compose 的上屏键不是清一色 Space——数字选词是真人的形状', async () => {
+  // 上游 params.mjs:约 14% 的段落用 Digit2/3/4 选第 N 个候选。全是 Space 意味着
+  // 我们把上游的分布改掉了,而那是零方差的机器签名。
+  const commits = new Set()
+  for (const { bySeed } of Object.values(COMPOSE_FIXTURE.cases)) {
+    for (const c of Object.values(bySeed)) {
+      if (!c.ok) continue
+      for (const w of c.plan.words) if (w.commit) commits.add(w.commit.code)
+    }
+  }
+  assert.ok(commits.has('Space'), '上屏键里应当有 Space')
+  assert.ok(commits.size >= 2,
+    `基准里的上屏键只有 ${[...commits].join(',')} 一种,数字选词的分支没被覆盖或已被改掉`)
 })
 
 // ---------------------------------------------------------------------------
@@ -15479,7 +15614,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,其余能力显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,只声明三条探针能力,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15492,9 +15627,15 @@ test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,
   const declared = Object.keys(bossAdapter)
     .filter((key) => typeof bossAdapter[key] === 'function')
     .sort()
-  assert.deepEqual(declared, ['osProbe', 'probePlatform'],
-    '这一段刻意只有两条:坐标被证明对之前,不实现任何真业务原语。' +
-    '多出来的一条要先过出口,不能顺手加')
+  // **这张名单只在过了出口之后才准变长。** 原来是两条(probePlatform、osProbe),
+  // 依据是「坐标被证明对之前不实现任何真业务原语」。2026-08-30 四趟真机全绿之后
+  // 坐标这条前提成立了,osType 是键盘线出口里明列的一条,不是顺手加的。
+  //
+  // 三条全是 `debug.*` 探针:**一条真业务原语都还没有**。BOSS 上的 sendMessage、
+  // readList 之类要等键盘线在 Windows 上跑通之后另立——那才是"顺手加"该拦的东西。
+  assert.deepEqual(declared, ['osProbe', 'osType', 'probePlatform'],
+    '适配器能力变长了。这张名单每加一条都要先过出口:' +
+    'BOSS 上至今没有任何真业务原语,只有 debug.* 探针')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)

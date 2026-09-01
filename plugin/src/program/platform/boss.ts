@@ -17,7 +17,8 @@
 // 不进日志、不进任何上报。这条不是风格,是「AI provider 数据边界」与凭据禁令的
 // 直接要求。
 import { contentScriptHealthy, runInPage } from './inject'
-import { osProbeContractData, runOsProbe } from './osinput'
+import { isHandServiceDown, osProbeContractData, playTypePlan, runOsProbe, seedFrom } from './osinput'
+import { planType } from '../osengine/plan'
 import type { ClickObservation, ClickPlan } from './osinput'
 import { PlatformError } from './types'
 import { BOSS_MATCH, BOSS_PLATFORM, bossSite } from './bossSite'
@@ -26,6 +27,8 @@ import type { PlatformAdapter } from './types'
 import type { PrimitiveContext } from '../registry'
 import type {
   DebugOsProbeArgs,
+  DebugOsTypeArgs,
+  DebugOsTypeData,
   DebugOsProbeData,
   ProbePlatformData,
 } from '../../base/protocol'
@@ -365,6 +368,198 @@ async function bossOsProbe(
   }
 }
 
+// ── 打字:输入框 ────────────────────────────────────────────────────────────
+//
+// 事实见 docs/boss/BOSS平台事实-2026-08-28.md §十一(2026-09-01 只读实测)。
+
+/**
+ * 输入框的 id。**全页唯一**(id 与 class 各命中 1 个),用 id 因为它是公开且按定义
+ * 唯一的锚点,比 class 稳。
+ *
+ * 它是 `contenteditable` 的 div,不是 textarea——读写都走 `textContent`。
+ * 用 `.value` 会静默拿到 undefined,而 `undefined === ''` 为假,"空不空"的判据
+ * 会永远说非空。
+ */
+const COMPOSER_ID = 'boss-chat-editor-input'
+
+/** 输入框现在的样子。找不到就 found=false,不抛——调用方要据此收成拒绝而不是失败。 */
+function mainReadComposer(id: string): {
+  found: boolean
+  x: number; y: number; w: number; h: number
+  text: string
+  focused: boolean
+} {
+  const el = document.getElementById(id)
+  if (!el) return { found: false, x: 0, y: 0, w: 0, h: 0, text: '', focused: false }
+  const r = el.getBoundingClientRect()
+  return {
+    found: true,
+    x: r.x, y: r.y, w: r.width, h: r.height,
+    // 空态实测是真的空(innerHTML ""、childNodes 0),没有 <br> 哨兵,
+    // 所以不需要额外归一化。
+    text: el.textContent ?? '',
+    focused: document.activeElement === el,
+  }
+}
+
+function mainHitTestComposer(id: string, x: number, y: number): { onTarget: boolean; found: string } {
+  const el = document.getElementById(id)
+  const node = document.elementFromPoint(x, y)
+  return {
+    onTarget: !!(el && node && (node === el || el.contains(node))),
+    found: node ? node.tagName.toLowerCase() + (node.id ? '#' + node.id : '') : '无',
+  }
+}
+
+/**
+ * 输入框的点击计划——**只为拿焦点**。
+ *
+ * `observe()` 的事件三项如实报 null:我们没在这条路上装点击观测器。装它对拿焦点
+ * 这件事没有增量——`isTrusted` 在这个页面上已经由筛选页签那个靶子验过了,
+ * 而这里真正的后置条件是"焦点到了没有",那是标准 DOM 属性,直接读。
+ */
+async function bossComposerClickPlan(tabId: number): Promise<ClickPlan> {
+  const before = await runInPage(BOSS_INJECT, tabId, mainReadComposer, [COMPOSER_ID])
+  if (!before.found) {
+    throw new PlatformError('ELEMENT_UNRESOLVED', '页面上找不到聊天输入框', 'manualOnly')
+  }
+  return {
+    label: `输入框(点前 焦点=${before.focused ? '在' : '不在'})`,
+    rect: { x: before.x, y: before.y, w: before.w, h: before.h },
+    hitTest: (x, y) => runInPage(BOSS_INJECT, tabId, mainHitTestComposer, [COMPOSER_ID, x, y]),
+    observe: async (): Promise<ClickObservation> => {
+      const after = await runInPage(BOSS_INJECT, tabId, mainReadComposer, [COMPOSER_ID])
+      return {
+        trusted: null,
+        onTarget: null,
+        eventDriftPx: null,
+        after: `焦点=${after.focused ? '在输入框' : '不在'} 内容长度=${after.text.length}`,
+      }
+    },
+  }
+}
+
+function osTypeData(
+  outcome: DebugOsTypeData['outcome'],
+  started: number,
+  parts: Partial<DebugOsTypeData>,
+): DebugOsTypeData {
+  return {
+    outcome,
+    keys: 0, tries: 0, planMs: 0, lagMaxUs: 0,
+    ...parts,
+    elapsedMs: Date.now() - started,
+    observedAt: Date.now(),
+  }
+}
+
+/**
+ * 把一句中文打进 IM 输入框,然后停手——**不点发送**。
+ *
+ * 五段:读输入框状态 → 焦点不在就 OS 点一下拿回来 → 排版 → 交手服务播 → 回读比对。
+ *
+ * **焦点不是必须靠点击拿的**:实测 BOSS 打开/切换会话时自己就把焦点放上去了,
+ * 真人在这个页面上也是直接开始敲。所以只在焦点不在时才点——那既少一次动作,
+ * 也更贴近真人。但 `.focus()` 不在选项里:那会造出一个没有前置点击的焦点,
+ * 是真人身上不存在的形状。
+ *
+ * **matched 只报不判。** macOS 上没有自研 TIP、走系统输入法,上屏词不可控;
+ * Windows 上 TIP 说了算,应当逐字相同。两边同一份代码、同一条判定,差别如实带出。
+ */
+async function bossOsType(
+  args: DebugOsTypeArgs,
+  ctx: PrimitiveContext,
+  fingerprint: string | undefined,
+): Promise<DebugOsTypeData> {
+  const started = Date.now()
+  const tab = await verifiedBossTab(fingerprint)
+  const trace: string[] = []
+
+  const before = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
+  if (!before.found) {
+    return osTypeData('refusedByGate', started, { detail: '页面上找不到聊天输入框' })
+  }
+  // composer.empty 是硬前置。覆盖用户已经敲进去的字是三条红线之一,
+  // 这条闸与发送原语用的是同一个,不为调试放宽。
+  if (before.text !== '') {
+    return osTypeData('refusedByGate', started, {
+      detail: `输入框非空(${before.text.length} 字),不覆盖用户已经敲进去的内容`,
+    })
+  }
+  trace.push(`点前 焦点=${before.focused ? '在' : '不在'} 矩形=${Math.round(before.w)}x${Math.round(before.h)}`)
+
+  // 焦点不在才点。点的这一段完全复用鼠标线的闸链(标定、命中测试、光标未被动过)。
+  if (!before.focused) {
+    const probe = await runOsProbe(BOSS_INJECT, tab.id!, ctx, await bossComposerClickPlan(tab.id!))
+    trace.push(`取焦点 ${probe.outcome} ${probe.detail ?? ''}`)
+    if (probe.outcome === 'handServiceUnavailable') {
+      return osTypeData('handServiceUnavailable', started, { detail: trace.join(' | ') })
+    }
+    if (probe.outcome !== 'clicked') {
+      return osTypeData('refusedByGate', started, { detail: trace.join(' | ') })
+    }
+    const after = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
+    if (!after.focused) {
+      // 点中了却没拿到焦点。停手——没有焦点的按键会打到别处去。
+      return osTypeData('refusedByGate', started, {
+        detail: `${trace.join(' | ')} | 点中了但焦点没到输入框`,
+      })
+    }
+  }
+
+  // 排版。**排不出来就不打**,不许兜底成"那就随便打一份"。
+  const planStarted = Date.now()
+  let composed
+  try {
+    composed = await planType(args.text, seedFrom(ctx.cmdMsgId, 0))
+  } catch (error) {
+    // 打不出的字元(英文字母、半角标点)在这里显式抛,不是排不出合格形状。
+    return osTypeData('planFailed', started, {
+      planMs: Date.now() - planStarted,
+      detail: `${trace.join(' | ')} | ${String(error instanceof Error ? error.message : error).slice(0, 300)}`,
+    })
+  }
+  const planMs = Date.now() - planStarted
+  if (!composed.ok) {
+    return osTypeData('planFailed', started, {
+      planMs, tries: composed.tries,
+      detail: `${trace.join(' | ')} | 排版器 ${composed.tries} 次重采都没排出合格形状`,
+    })
+  }
+  trace.push(`排版 ${composed.tries} 次重采 ${composed.plan.words.length} 词 ${planMs}ms`)
+
+  let played
+  try {
+    played = await playTypePlan(composed.plan)
+  } catch (error) {
+    if (isHandServiceDown(error)) {
+      return osTypeData('handServiceUnavailable', started, {
+        planMs, tries: composed.tries, detail: trace.join(' | '),
+      })
+    }
+    // 手服务收下了但拒绝或失败(键码不认识、修饰键窗口不足、注入半途失败)。
+    // 那些都不是"排不出来",而是发出去这一段的事——如实带出,不改判成 planFailed。
+    return osTypeData('refusedByGate', started, {
+      planMs, tries: composed.tries,
+      detail: `${trace.join(' | ')} | 手服务:${String(error instanceof Error ? error.message : error).slice(0, 300)}`,
+    })
+  }
+
+  const read = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
+  const matched = read.text === args.text
+  trace.push(`发了 ${played.keys} 次按键 滞后最大 ${Math.round(played.lagMaxUs)}us`)
+  trace.push(`回读 ${matched ? '逐字相同' : `不同:期望 ${args.text.length} 字、实得 ${read.text.length} 字`}`)
+
+  return osTypeData('typed', started, {
+    keys: played.keys,
+    tries: composed.tries,
+    planMs,
+    lagMaxUs: Math.round(played.lagMaxUs),
+    matched,
+    detail: trace.join(' | '),
+  })
+}
+
 export const bossAdapter = {
   id: BOSS_PLATFORM,
   hostMatch: BOSS_MATCH,
@@ -376,4 +571,5 @@ export const bossAdapter = {
   // 事实门」不凭空实现,这里不声明 envReportGuard。
   probePlatform: () => probeBoss(),
   osProbe: ({ args, ctx, fingerprint }) => bossOsProbe(args, ctx, fingerprint),
+  osType: ({ args, ctx, fingerprint }) => bossOsType(args, ctx, fingerprint),
 } satisfies PlatformAdapter

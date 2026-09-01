@@ -54,13 +54,14 @@ var (
 	cgOnce sync.Once
 	cgErr  error
 
-	cgEventSourceCreate     func(int32) uintptr
-	cgEventCreate           func(uintptr) uintptr
-	cgEventCreateMouseEvent func(src uintptr, typ int32, pos cgPoint, button int32) uintptr
-	cgEventGetLocation      func(uintptr) cgPoint
-	cgEventPost             func(tap int32, event uintptr)
-	cfRelease               func(uintptr)
-	axIsProcessTrusted      func() bool
+	cgEventSourceCreate        func(int32) uintptr
+	cgEventCreate              func(uintptr) uintptr
+	cgEventCreateMouseEvent    func(src uintptr, typ int32, pos cgPoint, button int32) uintptr
+	cgEventCreateKeyboardEvent func(src uintptr, vk uint16, down bool) uintptr
+	cgEventGetLocation         func(uintptr) cgPoint
+	cgEventPost                func(tap int32, event uintptr)
+	cfRelease                  func(uintptr)
+	axIsProcessTrusted         func() bool
 )
 
 func loadCoreGraphics() {
@@ -81,6 +82,7 @@ func loadCoreGraphics() {
 	purego.RegisterLibFunc(&cgEventSourceCreate, cg, "CGEventSourceCreate")
 	purego.RegisterLibFunc(&cgEventCreate, cg, "CGEventCreate")
 	purego.RegisterLibFunc(&cgEventCreateMouseEvent, cg, "CGEventCreateMouseEvent")
+	purego.RegisterLibFunc(&cgEventCreateKeyboardEvent, cg, "CGEventCreateKeyboardEvent")
 	purego.RegisterLibFunc(&cgEventGetLocation, cg, "CGEventGetLocation")
 	purego.RegisterLibFunc(&cgEventPost, cg, "CGEventPost")
 	purego.RegisterLibFunc(&cfRelease, cg, "CFRelease")
@@ -135,6 +137,37 @@ func (d *darwinInjector) button(button int, down bool) error {
 		return err
 	}
 	return d.post(typ, cgPoint{X: float64(x), Y: float64(y)}, btn)
+}
+
+func (d *darwinInjector) KnowsKey(code string) error {
+	_, err := darwinKeyCode(code)
+	return err
+}
+
+func (d *darwinInjector) KeyDown(code string) error { return d.key(code, true) }
+func (d *darwinInjector) KeyUp(code string) error   { return d.key(code, false) }
+
+// key 发一次按键。
+//
+// **发在 HID 层(与鼠标同一个 tap)是这条路走得通的全部理由**:那是最底下一层,
+// 等同于硬件产生的事件,系统输入法坐在它上面,一定会收到。发在 kCGSessionEventTap
+// 之类更高的层上,输入法就不一定看得见了。
+//
+// macOS 上没有自研 TIP,走的是**系统输入法**——所以上屏哪个词不由我们说了算,
+// 「聊聊」可能出成「了了」。这在开发机上是接受的:整条链路里除 TIP 之外的每一环
+// 都能验,而上屏词对不对由调用方回读输入框自行判断,本层不做任何补救。
+func (d *darwinInjector) key(code string, down bool) error {
+	vk, err := darwinKeyCode(code)
+	if err != nil {
+		return err
+	}
+	e := cgEventCreateKeyboardEvent(d.src, vk, down)
+	if e == 0 {
+		return fmt.Errorf("CGEventCreateKeyboardEvent 返回空(code=%s vk=%#x down=%v)", code, vk, down)
+	}
+	cgEventPost(cgHIDEventTap, e)
+	cfRelease(e)
+	return nil
 }
 
 func (d *darwinInjector) post(typ int32, p cgPoint, button int32) error {

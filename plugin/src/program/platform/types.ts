@@ -62,6 +62,8 @@ import type {
   ChatSendWechatInviteData,
   DebugCapturePageArgs,
   DebugOsProbeArgs,
+  DebugOsTypeArgs,
+  DebugOsTypeData,
   DebugOsProbeData,
   DebugInspectSendSurfaceArgs,
   DebugInspectSendSurfaceData,
@@ -304,6 +306,15 @@ export interface PlatformCapabilities {
    * 而大方向 3 要求测试与生产共用同一分发路径,区别只在谁生产这条命令。
    */
   osProbe(input: PrimitiveInput<DebugOsProbeArgs>): Promise<DebugOsProbeData>
+
+  /**
+   * 开发期 OS 打字探针。与 osProbe 同族、同理由:独立原语,不碰任何生产原语。
+   *
+   * 把一句中文打进输入框然后**停手,不点发送**——所以它没有平台副作用,草稿只是
+   * 页面本地状态。但覆盖用户已经敲进去的字是三条红线之一,所以 composer.empty
+   * 是硬前置,与发送原语用同一个闸,不为调试放宽。
+   */
+  osType(input: PrimitiveInput<DebugOsTypeArgs>): Promise<DebugOsTypeData>
 }
 
 /** 能力名。`requireCapability` 用它做键。 */

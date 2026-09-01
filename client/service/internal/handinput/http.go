@@ -33,6 +33,7 @@ func (s *Service) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/handinput/play", s.handlePlay)
 	mux.HandleFunc("/handinput/landing", s.handleLanding)
 	mux.HandleFunc("/handinput/click", s.handleClick)
+	mux.HandleFunc("/handinput/type", s.handleType)
 	mux.HandleFunc("/handinput/reseed", s.handleReseed)
 }
 
@@ -133,6 +134,30 @@ func (s *Service) handleClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"clicked": true})
+}
+
+// type 一次收**整份计划**,不是一串按键。
+//
+// 因为 Windows 那半要同时喂两个东西:按键序列走 SendInput,而**上屏哪个词**要经
+// 命名管道告诉自研 TIP(它不查词库,上屏什么由外部指定——候选词随机性从根上消掉)。
+// 只收按键序列的话,TIP 那边就没有词表可用。`Splits` 同理:音节边界只影响 TIP
+// 组字区的显示,本包不用,原样转交。
+//
+// macOS 上没有 TIP,`Text`/`Splits` 就是纯粹带着不用——**刻意不为开发机裁字段**:
+// 一份计划在两个平台上必须是同一份,否则"在 mac 上验过"就不再说明任何事。
+func (s *Service) handleType(w http.ResponseWriter, r *http.Request) {
+	var plan TypePlan
+	if !readJSON(w, r, &plan) {
+		return
+	}
+	res, err := s.Type(plan)
+	if err != nil {
+		// 校验不过与注入失败都回 500 并带上已发出的次数:插件要知道发出去多少。
+		res.Status = err.Error()
+		writeJSON(w, http.StatusInternalServerError, res)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // reseed 是**唯一一处允许把标定打回冷启动的入口**。

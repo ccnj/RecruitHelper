@@ -1,6 +1,7 @@
-# osengine — 鼠标轨迹引擎(自 hiBoss 搬入)
+# osengine — 鼠标与打字引擎(自 hiBoss 搬入)
 
-本目录只做一件事:**把「从这儿移到那儿」变成一份带时刻的坐标序列**。
+本目录只做一件事:**把一个意图变成一份带时刻的序列**——鼠标是坐标序列,
+打字是按键序列。
 
 它不碰 OS、不碰时钟、不等待、不发出任何东西。按时刻把计划播出去是脑进程
 `client/service/internal/handinput` 的事。
@@ -13,10 +14,23 @@
 | `vendor/*.d.mts` | 我们写的 | 只声明实际调用的导出 |
 | `plan.ts` | 我们写的 | 唯一对外入口 |
 
-`vendor/` 里四个 `.mjs` 的上游位置不同,同步时要分别去取:
+`vendor/` 里的 `.mjs` 上游位置不同,同步时要分别去取:
 
 - `route.mjs` / `engines.mjs` ← `hiBoss/lab/engine/mouse/`
 - `route.bjh.mjs` / `press.bjh.mjs` ← `hiBoss/lab/probe/baseline/`
+- `compose/*.mjs`(7 个) ← `hiBoss/lab/engine/compose/`
+- `capture/*.mjs`(3 个) ← `hiBoss/lab/engine/capture/`
+
+### 为什么鼠标那四个是平铺的,打字那十个带目录
+
+鼠标那四个互不 import,平铺零成本。打字那十个**跨目录互相 import**
+(`compose/planner.mjs` 要 `../capture/tracker.mjs`),平铺就得改 import 语句——
+那就破了「一行不改」。**保结构比保平铺重要。**
+
+`capture/` 那三个不是可选的:`planner.mjs` 用 `synthTyping` + `InputTracker`
+把自己算出的计划**合成成事件流、再量一遍参数**,与真人基线对不上就换种子重来
+(最多 40 次)。**排版器是闭环自验的**,这也是它值钱的地方——所以 `compose(text)`
+返回 `ok:false` 是正常结果,不是异常。
 
 后两个在上游被定性为「研究设备」,但**运行期必须有**:没有路由池生成不出窗口,
 没有按压池 `pressMs` 就只能是常数——而常数是零误伤的机器签名。
@@ -28,6 +42,32 @@
 不要进 `vendor/` 动手。**
 
 `.d.mts` 是这条纪律的门禁:上游一改签名,编译期当场红。
+
+## 一致性基准怎么重建
+
+两份基准都**由上游原始文件生成**,不是由我们的副本生成——拿副本生成就成了自己
+跟自己比,门禁等于没有。
+
+- `test/fixtures/osengine-hiboss-<commit>.json`(鼠标)
+- `test/fixtures/osengine-compose-hiboss-<commit>.json`(打字):4 条文案 x 3 个种子。
+
+打字侧另有一条**不靠基准**的门禁:「呣」必须抛异常并指名字元,「嗯」必须排成
+`KeyE,KeyN`。它钉的是上游 2026-08-31 修掉的那个静默 bug —— pinyin-pro 给「嗯」的
+`ng` 是**词典注音**,真人打的是 `en`;排成 `KeyN,KeyG` 后自研 TIP 走 commit(word)
+直接上屏、屏幕上看不出问题,**一旦回落到系统输入法就上不了屏**。基准文案里没有
+「嗯」,所以这条与逐字段一致那条互补,缺一不可(变异验证:改 INPUT_PY 只有这条红)。
+
+生成时两边的 `pinyin-pro` 必须同版本(当前 3.29.3),否则会把一个版本差烘进基准。
+
+变异验证过两次:把 `compose/timing.mjs` 的 LCG 增量从 `12345` 改成 `12346`,
+逐字段一致那条当场红;把 `pinyin.mjs` 的 `INPUT_PY.嗯` 从 `en` 改成 `eng`,
+只有「打不出的字元」那条红。**两条各管各的,都验过会红。**
+
+## 门禁只防「我们改坏」,不防「上游前进了」
+
+上游换引擎或重采基线时,我们这边**一切照旧全绿**——基准还是老的,拿老基准比老代码
+当然一致。**没有任何东西会提示「该同步了」**,同步靠人记得。这个缺口目前是接受的
+(两个仓库同一个人在推);真要收口得读 hiBoss 的 HEAD,那是跨仓库耦合,不值得。
 
 ## 版本钉子
 
