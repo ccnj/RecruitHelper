@@ -140,8 +140,14 @@ func DailyJobPlanShareForEntry(
 // NextPendingDailyJobPlanEntry 返回计划序第一个 pending 条目;定稿后 pending
 // 条目份额恒>0(零份额在定稿时已标跳过)。
 func NextPendingDailyJobPlanEntry(entries []DailyJobPlanEntry) *DailyJobPlanEntry {
+	return NextPendingDailyJobPlanEntryAfter(entries, 0)
+}
+
+// NextPendingDailyJobPlanEntryAfter 返回计划序中 Seq 大于 seq 的第一个 pending
+// 条目(seq=0 即全表首个)。
+func NextPendingDailyJobPlanEntryAfter(entries []DailyJobPlanEntry, seq int) *DailyJobPlanEntry {
 	for index := range entries {
-		if entries[index].Status == DailyJobPlanEntryPending {
+		if entries[index].Seq > seq && entries[index].Status == DailyJobPlanEntryPending {
 			return &entries[index]
 		}
 	}

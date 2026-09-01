@@ -14,33 +14,26 @@ import (
 	"recruithelper/client/service/internal/workflow"
 )
 
-// 跳过类批次终局原因(与 patrol 包的 sourcingBlock* 常量同值;patrol 不导出,
-// 而这些字符串已随批次行持久化,是事实上的稳定口径):职位不在线/平台未见、
-// 状态读取失败、推荐页职位选择失败(含重名歧义)。仅这三类允许"跳过该条目、
-// 接续下一条目"(甲方裁决清单第 4 条+出口「允许的失败」);其余原因可能是
-// 账号级故障(掉登录、手离线),逐条目盲试只会连环空转,一律终止计划。
 const (
-	planSkipBatchReasonJobNotOnline   = "jobNotOnline"
-	planSkipBatchReasonStatusRead     = "jobStatusReadFailed"
-	planSkipBatchReasonPositionSelect = "positionSelectFailed"
-	planSkipBatchReasonFinalizeFailed = "dailyPlanFinalizeFailed"
-
 	planEndReasonChainInterrupted = "chainInterrupted"
 	planEndReasonUserEnded        = "userEnded"
 	planEndReasonDayClosed        = "dayClosed"
 	planEndReasonRunFailed        = "runFailed"
 
-	planBatchStopReasonSkipped = "planEntrySkipped"
 	planBatchStopReasonAborted = "dailyPlanAborted"
 )
 
 var ErrDailyPlanQuotaExhausted = errors.New("当日职位计划没有可执行条目")
 
+// planSkipClassBatchReason:批前闸口径由 store 统一导出,只有这三类允许
+// "跳过该条目、接续下一条目"(甲方裁决清单第 4 条+出口「允许的失败」);
+// 其余原因可能是账号级故障(掉登录、手离线),逐条目盲试只会连环空转,
+// 一律终止计划(dailyPlanFinalizeFailed 同理,是计划级故障)。
 func planSkipClassBatchReason(reason string) bool {
 	switch reason {
-	case planSkipBatchReasonJobNotOnline,
-		planSkipBatchReasonStatusRead,
-		planSkipBatchReasonPositionSelect:
+	case store.SourcingBatchGateReasonJobNotOnline,
+		store.SourcingBatchGateReasonStatusRead,
+		store.SourcingBatchGateReasonPositionSelect:
 		return true
 	}
 	return false
@@ -117,18 +110,6 @@ func (m *Manager) planEntryForRunLocked(
 	return store.DailyJobPlanEntryByRevision(entries, batch.ContextRevisionHash), nil
 }
 
-func nextPendingDailyJobPlanEntryAfter(
-	entries []store.DailyJobPlanEntry,
-	seq int,
-) *store.DailyJobPlanEntry {
-	for index := range entries {
-		if entries[index].Seq > seq && entries[index].Status == store.DailyJobPlanEntryPending {
-			return &entries[index]
-		}
-	}
-	return nil
-}
-
 // maintainDailyPlanInCommunication 在沟通阶段维护计划:还有下一条目就登记
 // 接续(复用 PendingActionSourcing,巡检边界消费),并返回 true 表示本 tick
 // 不应开启巡检回复(甲方知情接受回复延迟);当前是末条目则把它落成 done。
@@ -159,7 +140,7 @@ func (m *Manager) maintainDailyPlanInCommunication(
 		m.planCommunicationSettledRunID = run.RunID
 		return false, run, nil
 	}
-	next := nextPendingDailyJobPlanEntryAfter(entries, entry.Seq)
+	next := store.NextPendingDailyJobPlanEntryAfter(entries, entry.Seq)
 	if next == nil {
 		// 末条目:发送已全部终局(进入沟通即证),落成 done 后照常开巡检。
 		if entry.Status == store.DailyJobPlanEntryPending {

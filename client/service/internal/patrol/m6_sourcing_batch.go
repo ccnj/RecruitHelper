@@ -20,7 +20,7 @@ const sourcingWindowNoProgressLimit = 3
 
 const (
 	sourcingBlockInvalidState       = "invalidBatchState"
-	sourcingBlockPositionSelect     = "positionSelectFailed"
+	sourcingBlockPositionSelect     = store.SourcingBatchGateReasonPositionSelect
 	sourcingBlockFiltersApply       = "filtersApplyFailed"
 	sourcingBlockWindowReadFailed   = "windowReadFailed"
 	sourcingBlockPositionBindFailed = "positionBindFailed"
@@ -33,11 +33,11 @@ const (
 	// windowNoProgress 计数。常量保留，存量 blocked 行仍带这个原因。
 	sourcingBlockMoveUnconfirmed = "windowMoveUnconfirmed"
 	sourcingBlockNoProgress      = "windowNoProgress"
-	sourcingBlockJobStatusRead   = "jobStatusReadFailed"
-	sourcingBlockJobNotOnline    = "jobNotOnline"
+	sourcingBlockJobStatusRead   = store.SourcingBatchGateReasonStatusRead
+	sourcingBlockJobNotOnline    = store.SourcingBatchGateReasonJobNotOnline
 	// sourcingBlockPlanFinalize:当日职位计划定稿失败(AGENTS.md 2026-09-01)。
 	// 不属于跳过类原因——定稿失败是计划级故障,由编排器收口扫描终止整个计划。
-	sourcingBlockPlanFinalize = "dailyPlanFinalizeFailed"
+	sourcingBlockPlanFinalize = store.SourcingBatchGateReasonPlanFinalize
 )
 
 // runSourcingBatch 是正式批采的唯一生产 actor。窗口引用只在当前调用栈内

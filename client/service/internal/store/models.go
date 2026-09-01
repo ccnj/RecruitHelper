@@ -308,6 +308,18 @@ const (
 	SourcingBatchStopped    SourcingBatchStatus = "stopped"
 )
 
+// 批前闸终局原因:patrol 写入 SourcingBatch.Reason 的公开口径,当日职位计划
+// 的收口扫描按前三值判定「跳过类」(AGENTS.md 2026-09-01)。字符串已随批次行
+// 持久化,是稳定事实口径;patrol 与 productworkflow 都从这里引用,不得各自
+// 手抄字面值(2026-09-01 审查修复:字符串跨包漂移会让跳过类静默失配,把单
+// 职位离线放大成整日计划终止)。
+const (
+	SourcingBatchGateReasonJobNotOnline   = "jobNotOnline"
+	SourcingBatchGateReasonStatusRead     = "jobStatusReadFailed"
+	SourcingBatchGateReasonPositionSelect = "positionSelectFailed"
+	SourcingBatchGateReasonPlanFinalize   = "dailyPlanFinalizeFailed"
+)
+
 // SourcingBatch 是一次正式采集的不可变范围与可恢复状态。PositionRef 在
 // preparing 阶段为空，首个窗口正结果绑定后不可再改；EndedAt 非空表示终态。
 type SourcingBatch struct {
