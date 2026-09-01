@@ -84,6 +84,7 @@ func (m *Manager) StartFullDailyPlan(key store.AccountKey) (*store.ProductWorkfl
 	if err != nil {
 		return nil, err
 	}
+	m.planSweepArmed.Store(true)
 	next := store.NextPendingDailyJobPlanEntry(created.Entries)
 	if next == nil {
 		abortErr := m.store.AbortDailyJobPlan(created.Plan.PlanID, planEndReasonChainInterrupted, now)
@@ -136,14 +137,27 @@ func (m *Manager) maintainDailyPlanInCommunication(
 	run *store.ProductWorkflowRun,
 	now time.Time,
 ) (bool, *store.ProductWorkflowRun, error) {
+	// 沟通阶段每秒一 tick、可持续数小时;计划维护一旦收尾(末条目已 done,
+	// 或本运行不属任何计划)就短路,不再逐 tick 查计划三连。
+	if m.planCommunicationSettledRunID == run.RunID {
+		return false, run, nil
+	}
 	key := store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}
 	plan, entries, err := m.store.ActiveDailyJobPlan(key)
-	if err != nil || plan == nil {
+	if err != nil {
 		return false, run, err
 	}
+	if plan == nil {
+		m.planCommunicationSettledRunID = run.RunID
+		return false, run, nil
+	}
 	entry, err := m.planEntryForRunLocked(run, entries)
-	if err != nil || entry == nil {
+	if err != nil {
 		return false, run, err
+	}
+	if entry == nil {
+		m.planCommunicationSettledRunID = run.RunID
+		return false, run, nil
 	}
 	next := nextPendingDailyJobPlanEntryAfter(entries, entry.Seq)
 	if next == nil {
@@ -157,6 +171,7 @@ func (m *Manager) maintainDailyPlanInCommunication(
 				return false, run, err
 			}
 		}
+		m.planCommunicationSettledRunID = run.RunID
 		return false, run, nil
 	}
 	if run.PendingAction != "" {
@@ -210,6 +225,11 @@ func (m *Manager) markDailyPlanEntryDoneBeforeChain(
 // 收口(完成或终止)。终止时顺带终局化仍未收尾的计划批次,防止次日被当作
 // 存量批次收养后按配置全额跑掉(超发方向,必须堵死)。
 func (m *Manager) reconcileDailyPlansWithoutRun() error {
+	// 内存熔断:从未建过计划(或上次扫描已确认零活跃计划)时不查库——
+	// AdvanceOnce 每秒空转,这里是闲置系统的最热路径。
+	if !m.planSweepArmed.Load() {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -220,6 +240,10 @@ func (m *Manager) reconcileDailyPlansWithoutRun() error {
 	plans, err := m.store.ActiveDailyJobPlans()
 	if err != nil {
 		return err
+	}
+	if len(plans) == 0 {
+		m.planSweepArmed.Store(false)
+		return nil
 	}
 	for index := range plans {
 		if err := m.reconcileOneDailyPlanLocked(plans[index]); err != nil {

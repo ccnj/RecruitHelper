@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"recruithelper/client/service/internal/store"
@@ -80,6 +81,14 @@ type Manager struct {
 	// 运行只响一次(1 tick/秒,逐 tick 记会刷爆日志);仅在 AdvanceOnce
 	// (advanceMu)下读写。
 	confirmStallLoggedRunID string
+	// planSweepArmed 是收口扫描的内存熔断:AdvanceOnce 每秒空转,没有它,
+	// 从未建过计划的机器也要每 tick 白查两次库。启动时置位一次(覆盖重启时
+	// 计划仍在的场景),建计划时置位,扫描发现零活跃计划即熄灭。
+	planSweepArmed atomic.Bool
+	// planCommunicationSettledRunID 记录"该运行的计划维护已收尾"(末条目
+	// 已 done 或本运行不属任何计划),沟通阶段每秒 tick 不再查计划三连;
+	// 仅在 Manager.mu 下读写。
+	planCommunicationSettledRunID string
 	// confirmationProjection is the sole source for the exact selectable set
 	// accepted by ConfirmAll. Production always uses Store.AppConfirmation;
 	// keeping it as a function also makes the control law testable without
@@ -107,6 +116,7 @@ func NewManager(db *store.Store, actor Actor, config Config) (*Manager, error) {
 		dailyWindow:            config.DailyWindow,
 		confirmationProjection: db.AppConfirmation,
 	}
+	manager.planSweepArmed.Store(true)
 	if installer, ok := actor.(memberGateInstaller); ok {
 		installer.SetWorkflowMemberGate(manager.MayStartNextWorkflowMember)
 	}

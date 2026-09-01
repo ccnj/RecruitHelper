@@ -675,12 +675,42 @@ func (s *Store) AppDailyPlan() (*AppDailyPlanView, error) {
 			if selection, selErr := s.SourcingBatchSelectionByBatchID(entry.BatchID); selErr == nil && selection != nil {
 				item.SelectedCount = selection.SelectedCount
 			}
-			if progress, progErr := s.SourcingBatchGreetingSendProgress(entry.BatchID); progErr == nil && progress != nil {
-				item.SentCount = int(progress.SentCount)
-				item.SuspectCount = int(progress.SuspectCount)
+			if sent, suspect, countErr := s.dailyPlanEntrySendCounts(entry.BatchID); countErr == nil {
+				item.SentCount = sent
+				item.SuspectCount = suspect
 			}
 		}
 		view.Entries = append(view.Entries, item)
 	}
 	return view, nil
+}
+
+// dailyPlanEntrySendCounts 是计划面板的轻量发送计数:招呼 invocation 与其
+// effect intent 的状态聚合,语义对齐 SourcingBatchGreetingSendProgress 的
+// sent(ok/resolvedOk)与 suspect 两桶,但不加载整批成员材料(那条重路径含
+// 全量 ResumeJSON 反序列化,UI 每 15 秒轮询扛不起)。
+func (s *Store) dailyPlanEntrySendCounts(batchID string) (int, int, error) {
+	type statusCount struct {
+		Status string
+		N      int
+	}
+	var rows []statusCount
+	if err := s.db.Raw(`
+		SELECT ei.status AS status, COUNT(*) AS n
+		FROM sourcing_greeting_invocations gi
+		JOIN effect_intents ei ON ei.intent_id = gi.effect_intent_id
+		WHERE gi.batch_id = ? AND gi.effect_intent_id IS NOT NULL
+		GROUP BY ei.status`, batchID).Scan(&rows).Error; err != nil {
+		return 0, 0, err
+	}
+	sent, suspect := 0, 0
+	for _, row := range rows {
+		switch EffectIntentStatus(row.Status) {
+		case EffectIntentOk, EffectIntentResolvedOk:
+			sent += row.N
+		case EffectIntentSuspect:
+			suspect += row.N
+		}
+	}
+	return sent, suspect, nil
 }
