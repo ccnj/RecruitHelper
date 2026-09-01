@@ -352,6 +352,26 @@
           "observedAt": { "type": "int64", "minimum": 0 }
         }
       },
+      "DebugOsTypeArgs": {
+        "type": "object",
+        "fields": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      },
+      "DebugOsTypeData": {
+        "type": "object",
+        "fields": {
+          "outcome": { "type": "string", "enumRef": "enums.osTypeOutcome" },
+          "keys": { "type": "int", "minimum": 0 },
+          "tries": { "type": "int", "minimum": 0 },
+          "planMs": { "type": "int", "minimum": 0 },
+          "elapsedMs": { "type": "int", "minimum": 0 },
+          "lagMaxUs": { "type": "int", "minimum": 0 },
+          "matched": { "type": "boolean", "optional": true },
+          "detail": { "type": "string", "maxLength": 2048, "optional": true },
+          "observedAt": { "type": "int64", "minimum": 0 }
+        }
+      },
       "DebugReloadArgs": { "type": "object", "fields": {} },
       "DebugReloadData": { "type": "object", "fields": {} },
       "DebugProbeInterviewEditorArgs": {
@@ -1269,6 +1289,7 @@
     "candidateContactState": ["unestablished", "established", "unknown"],
     "osProbeTarget": ["viewportSpread", "reversibleToggle"],
     "osProbeOutcome": ["landed", "clicked", "refusedByGate", "handServiceUnavailable"],
+    "osTypeOutcome": ["typed", "refusedByGate", "planFailed", "handServiceUnavailable"],
     "sourcingAgeMode": ["any", "range"],
     "sourcingActiveWindow": ["any", "today", "days3", "days7", "days30"],
     "sourcingCareerStatus": ["employedLooking", "leftLooking", "employedOpen", "employedNotLooking"],
@@ -1358,6 +1379,27 @@
       "preconditions": [],
       "execBudgetMs": 5000, "deadlineMs": 30000,
       "note": "只读诊断当前已打开会话的发送表面与服务端消息观察通道是否可用;只返回 ready/stage。不得读写编辑器、触发发送动作或返回账号、候选人、正文、消息历史、hash、guard、selector、函数源码、私有实现对象或原始异常;诊断读数不得复用为 chat.sendMessage 的授权结果或发送基线"
+    },
+    "debug.osType": {
+      "ver": 1,
+      "class": "intrusive",
+      "batch": "X",
+      "platformSideEffect": "none",
+      "argsSchema": "DebugOsTypeArgs",
+      "dataSchema": "DebugOsTypeData",
+      "preconditions": [
+        "context.platform",
+        "context.accountRef",
+        "context.expectedPrincipalFingerprint",
+        "surface.im",
+        "login.in",
+        "manualQuiet",
+        "composer.empty"
+      ],
+      "execBudgetMs": 180000,
+      "deadlineMs": 300000,
+      "leaseMs": 60000,
+      "note": "开发期 OS 打字探针(2026-09-01 立案),与 debug.osProbe 同族:独立原语,不改动任何生产原语的执行路径;立它而不立运行期开关,依据同样是大方向 3——测试与生产必须共用同一分发器、同一信封、同一分发路径,开关会造出一条测试专用分支。**它把一句中文打进 IM 输入框,然后停手——不点发送。** 所以 platformSideEffect 是 none:草稿只是页面本地状态,没有任何东西到达服务端,更没有任何东西到达候选人。但 composer.empty 是**硬前置**:覆盖用户已经敲进去的字是三条红线之一,而这条闸与发送原语用的是同一个,不为调试放宽。执行五段:定位输入框矩形 → 走鼠标线 OS 点击拿到焦点(复用 osProbe 那条闸链)→ 插件侧排版 → 经本机手服务播按键 → 回读输入框比对。**焦点必须靠真实点击拿到**,不用 DOM focus():那会造出一个「没有前置点击的焦点」,是真人身上不存在的形状,与整条线的立论相反。**matched 只报不判。** Windows 上自研 TIP 决定上屏哪个词,回读应当逐字相同;macOS 开发机没有 TIP、走系统输入法,上屏词不可控——「聊聊」可能出成「了了」。两边跑同一份代码、同一条判定,差别由 matched 如实带出,不设平台分支。因此 matched=false **不是失败**,outcome 照样是 typed。planFailed 是正常收场之一:排版器闭环自验,排不出合格形状就如实说排不出来;打不出的字元(英文字母、半角标点)会更早地显式失败。**两种都不许兜底成「那就随便打一份」**。args 只有文案本身,不含坐标、种子与任何 DOM 细节——种子由插件从 cmdMsgId 确定性派生,与鼠标线同款,好让同一条命令可重放。data 只回诊断值;回读到的文本走 detail,不进结构化字段(「诊断辅助默认不进契约」)。脑侧无任何业务生产者,唯一派发入口是 /admin 手动端点。leaseMs 必须声明——base 的租约脉冲只对声明了它的命令启动。"
     },
     "debug.osProbe": {
       "ver": 1, "class": "intrusive", "batch": "X", "platformSideEffect": "none",

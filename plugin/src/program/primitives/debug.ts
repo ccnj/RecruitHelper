@@ -6,6 +6,7 @@ import {
   DebugCapturePageArgs,
   DebugInspectSendSurfaceArgs,
   DebugOsProbeArgs,
+  DebugOsTypeArgs,
   DebugProbeInterviewEditorArgs,
   Primitive as PrimName,
 } from '../../base/protocol'
@@ -165,10 +166,31 @@ const osProbePrim: Primitive = {
   },
 }
 
+// debug.osType:开发期 OS 打字探针。与 osProbe 同族——独立原语,不碰任何生产原语。
+//
+// **它打完就停手,不点发送。** 草稿只是页面本地状态,没有任何东西到达候选人。
+// 但 composer.empty 是硬前置(覆盖用户已经敲进去的字是三条红线之一),
+// 那道闸由适配器执行,与发送原语用同一个。
+const osTypePrim: Primitive = {
+  name: PrimName.DebugOsType,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await callPlatform(ctx, 'osType', rawArgs as DebugOsTypeArgs)
+      return { status: 'ok', data }
+    } catch (error) {
+      // 与 osProbe 同款:不接住的话平台失败会逃成 INTERNAL_HAND / sideEffect=possible,
+      // 一次什么都没打的失败被记成"副作用可能发生了"。
+      return platformFailure(error)
+    }
+  },
+}
+
 export function registerDebugPrimitives(): void {
   register(pingPrim)
   register(inspectSendSurfacePrim)
   register(osProbePrim)
+  register(osTypePrim)
   register(reloadPrim)
   register(switchWindowPrim)
   register(slowEchoPrim)

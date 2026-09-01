@@ -282,7 +282,7 @@ function pageReadLanding(key: string): { x: number | null; y: number | null } {
   return state ? { x: state.x, y: state.y } : { x: null, y: null }
 }
 
-function seedFrom(text: string, attempt: number): number {
+export function seedFrom(text: string, attempt: number): number {
   let h = 2166136261
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i)
@@ -785,6 +785,32 @@ export function osProbeContractData(
  * **这道闸必须在任何移动之前。** 它拦的是"我们根本算不对这台机器的几何"那一类,
  * 而那一类一旦放行,后果不是失败一次,是每一趟重试都变成一次真实的大范围横扫。
  */
+/** 手服务对一份打字计划的回执。 */
+export interface TypePlayResult {
+  keys: number
+  lagMeanUs: number
+  lagMaxUs: number
+  status: string
+}
+
+/**
+ * 把一份打字计划交给手服务播出去。
+ *
+ * **整份交过去,不拆成按键序列。** Windows 那半要同时喂两样:按键走 SendInput,
+ * 而上屏哪个词要经命名管道告诉自研 TIP。这里少带一个字段,那边就没有词表可用。
+ *
+ * 手服务不可达时抛 HandServiceDown,由调用方翻成 handServiceUnavailable ——
+ * 那是"没起来",不是"打失败了",两者的收场不同。
+ */
+export async function playTypePlan(plan: unknown): Promise<TypePlayResult> {
+  return await callHand<TypePlayResult>('/type', plan)
+}
+
+/** 手服务没起来的标记。调用方据此与"打字本身失败"分开收场。 */
+export function isHandServiceDown(error: unknown): boolean {
+  return error instanceof HandServiceDown
+}
+
 export function refuseBeforeMoving(view: ViewportFacts): string | null {
   if (!(view.innerW > 40) || !(view.innerH > 40)) {
     return `视口尺寸异常 ${view.innerW}x${view.innerH}`

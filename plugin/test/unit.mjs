@@ -15614,7 +15614,7 @@ test('全文档观察器只给能读登录态的站点装:BOSS 上一个都不�
   }
 })
 
-test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,其余能力显式拒绝', () => {
+test('BOSS 适配器:MAIN world + os 通道,只声明三条探针能力,其余显式拒绝', () => {
   assert.equal(bossAdapter.id, 'boss')
   assert.equal(bossAdapter.hostMatch, bossSite.match, '适配器与站点表必须是同一个"BOSS 是谁"')
   // MAIN 是 2026-08-28 取数通道裁决的直接后果:isolated world 拿不到 user$ 与消息数组。
@@ -15627,9 +15627,15 @@ test('BOSS 适配器:MAIN world + os 通道,只声明 probePlatform 与 osProbe,
   const declared = Object.keys(bossAdapter)
     .filter((key) => typeof bossAdapter[key] === 'function')
     .sort()
-  assert.deepEqual(declared, ['osProbe', 'probePlatform'],
-    '这一段刻意只有两条:坐标被证明对之前,不实现任何真业务原语。' +
-    '多出来的一条要先过出口,不能顺手加')
+  // **这张名单只在过了出口之后才准变长。** 原来是两条(probePlatform、osProbe),
+  // 依据是「坐标被证明对之前不实现任何真业务原语」。2026-08-30 四趟真机全绿之后
+  // 坐标这条前提成立了,osType 是键盘线出口里明列的一条,不是顺手加的。
+  //
+  // 三条全是 `debug.*` 探针:**一条真业务原语都还没有**。BOSS 上的 sendMessage、
+  // readList 之类要等键盘线在 Windows 上跑通之后另立——那才是"顺手加"该拦的东西。
+  assert.deepEqual(declared, ['osProbe', 'osType', 'probePlatform'],
+    '适配器能力变长了。这张名单每加一条都要先过出口:' +
+    'BOSS 上至今没有任何真业务原语,只有 debug.* 探针')
 
   // 未声明的能力必须在运行期显式拒绝(反模式 18),不得默认回成功。
   assert.throws(() => requireCapability(bossAdapter, 'sendMessage'), /未实现原语能力/)
