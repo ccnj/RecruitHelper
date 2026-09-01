@@ -269,7 +269,12 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 
 	switch latest.Status {
 	case workflow.StatusFailed:
-		if entry != nil && entry.Status == store.DailyJobPlanEntryPending {
+		// 条目 pending 或已 skipped 都走跳过接续:计划序第一个职位离线时,
+		// 定稿钩子会先把该条目标成 skipped、随后同一次闸读取才把批次拦停
+		// (jobNotOnline)——这是生产上最常见的入场时序,条目此刻已不是
+		// pending;SkipDailyJobPlanEntry 对已跳过条目幂等,接续照常。只有
+		// done 条目的失败(不可达)与非跳过类原因才终止计划。
+		if entry != nil && entry.Status != store.DailyJobPlanEntryDone {
 			skipReason, skippable, batchErr := m.dailyPlanSkipReasonLocked(latest)
 			if batchErr != nil {
 				return batchErr

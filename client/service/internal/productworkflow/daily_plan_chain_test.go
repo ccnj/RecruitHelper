@@ -361,3 +361,54 @@ func TestStartFullDailyPlanIsIdempotentDuringActiveRun(t *testing.T) {
 		t.Fatalf("重复开始不得另建计划: %d err=%v", len(plans), err)
 	}
 }
+
+// 生产真实时序回归(审查阻断项):计划序第一个职位离线时,定稿钩子先把条目 1
+// 标 skipped、随后同一次闸读取把批次拦停(jobNotOnline)、run 失败——收口扫描
+// 必须照样接续条目 2,而不是把整份计划按 runFailed 终止。
+func TestDailyPlanChainsWhenFirstEntryAlreadySkippedByFinalize(t *testing.T) {
+	db, key, manager, _, clock, _, revB := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 定稿:条目 1 离线(被定稿直接标 skipped)、条目 2 在线。
+	plan, _, err := db.ActiveDailyJobPlan(key)
+	if err != nil || plan == nil {
+		t.Fatalf("计划缺失: %v", err)
+	}
+	if _, err := db.FinalizeDailyJobPlan(plan.PlanID, []store.DailyJobPlanGateObservation{
+		{Seq: 1, Online: false, StatusLabel: "未上线"},
+		{Seq: 2, Online: true, StatusLabel: "在线中"},
+	}, clock.now); err != nil {
+		t.Fatal(err)
+	}
+	// 批次随后被同一次闸读取拦停,run 失败(failStoppedPipeline 的落账形态)。
+	terminalizeRunBatch(t, db, runA, "jobNotOnline", clock.now)
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: runA.RunID,
+		From:  workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At:    clock.now, Stage: store.ProductWorkflowStageFailed, Failure: "sourcingBatchStopped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("收口扫描: %v", err)
+	}
+	var closed store.DailyJobPlan
+	if err := dbPlanByID(db, plan.PlanID, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status == store.DailyJobPlanAborted {
+		t.Fatalf("首条目离线不得终止整份计划: %+v", closed)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.SourcingBatchID == nil {
+		t.Fatalf("未接续条目二: %+v err=%v", active, err)
+	}
+	batch, err := db.SourcingBatchByID(*active.SourcingBatchID)
+	if err != nil || batch.ContextRevisionHash != revB.RevisionHash {
+		t.Fatalf("接续批次错误: %+v err=%v", batch, err)
+	}
+}

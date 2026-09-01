@@ -96,3 +96,22 @@ func TestSelectCompletedSourcingBatchRejectsDraftPlanLoudly(t *testing.T) {
 		t.Fatalf("草稿计划应冲突: %v", err)
 	}
 }
+
+// done 条目的份额已被自己的批次消费完;同 revision 的第二个批次(管理面显式
+// 启动)走到筛选必须冲突,不得再次授予份额(否则单职位 2×份额、当日超总量)。
+func TestSelectCompletedSourcingBatchRejectsDoneEntryReuse(t *testing.T) {
+	base := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	s, key := prepareSourcingSelectionStore(t, "plan-done", 5, 80, 90, 50, base)
+	plan := insertDailyPlanForSelection(t, s, key, DailyJobPlanActive, "plan-done", 2, base)
+	if err := s.db.Model(&DailyJobPlanEntry{}).
+		Where("plan_id = ?", plan.PlanID).
+		Update("status", DailyJobPlanEntryDone).Error; err != nil {
+		t.Fatal(err)
+	}
+	insertCompletedSelectionBatch(t, s, key, "batch-plan-done", "plan-done", base,
+		[]selectionRunFixture{{RunID: "run-y", Score: intPointer(9)}})
+
+	if _, err := s.SelectCompletedSourcingBatch("batch-plan-done", base.Add(time.Hour)); !errors.Is(err, ErrSourcingSelectionConflict) {
+		t.Fatalf("done 条目复用应冲突: %v", err)
+	}
+}

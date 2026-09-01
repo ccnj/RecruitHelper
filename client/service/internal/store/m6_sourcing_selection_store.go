@@ -641,8 +641,12 @@ func dailyJobPlanQuotaForBatchTx(tx *gorm.DB, batch SourcingBatch) (*int, error)
 	if err != nil {
 		return nil, err
 	}
+	// 只有 pending 条目的批次才是计划的合法执行者。skipped 条目的批次被闸拦
+	// 停不进筛选;done 条目的份额已被它自己的批次消费完——同 revision 的第二个
+	// 批次(如管理面显式启动)再走到筛选,若发放份额会让该职位发到 2×份额、
+	// 当日合计超总量,必须响亮冲突而不是放行(方向:宁可不发)。
 	if plan.Status != DailyJobPlanActive ||
-		entry.Status == DailyJobPlanEntrySkipped || entry.Quota <= 0 {
+		entry.Status != DailyJobPlanEntryPending || entry.Quota <= 0 {
 		return nil, ErrSourcingSelectionConflict
 	}
 	quota := entry.Quota
