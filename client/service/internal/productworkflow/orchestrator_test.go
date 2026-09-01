@@ -47,29 +47,88 @@ func (a *fixturePipelineActor) SendSelectedSourcingGreetings(
 	return a.sendProgress, a.sendErr
 }
 
-func TestGreetingGenerationStopsAtHumanConfirmationWithoutSending(t *testing.T) {
+// 自动确认(2026-09-01 甲方裁决):生成完成且精确全选集合就绪时,编排器自动
+// 消费确认、推进到发送阶段;同一 tick 内仍不得触发发送(阶段推进即返回)。
+func TestGreetingGenerationAutoConfirmsIntoSendingWithoutSameTickSend(t *testing.T) {
 	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
 	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{Completed: true}
 	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
 
-	awaiting, err := manager.AdvanceOnce(context.Background())
+	sending, err := manager.AdvanceOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if awaiting.RunID != run.RunID ||
-		awaiting.Status != workflow.StatusAwaitingConfirmation ||
-		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation {
-		t.Fatalf("AdvanceOnce() = %+v", awaiting)
+	if sending.RunID != run.RunID ||
+		sending.Status != workflow.StatusRunning ||
+		sending.Stage != store.ProductWorkflowStageGreetingSending {
+		t.Fatalf("AdvanceOnce() = %+v", sending)
 	}
 	if actor.greetingCalls != 1 || actor.sendCalls != 0 {
-		t.Fatalf("generation=%d send=%d; generation must never authorize send",
+		t.Fatalf("generation=%d send=%d; 自动确认的那一 tick 不得触发发送",
 			actor.greetingCalls, actor.sendCalls)
 	}
 	persisted, err := db.ActiveProductWorkflowRun()
 	if err != nil || persisted == nil ||
-		persisted.Status != workflow.StatusAwaitingConfirmation {
-		t.Fatalf("persisted awaiting confirmation = %+v, %v", persisted, err)
+		persisted.Status != workflow.StatusRunning ||
+		persisted.Stage != store.ProductWorkflowStageGreetingSending {
+		t.Fatalf("persisted greeting sending = %+v, %v", persisted, err)
+	}
+}
+
+// 精确全选集合未就绪(投影 Ready=false)时自动确认必须按兵不动,不带病放行。
+func TestGreetingGenerationWaitsWhenConfirmationProjectionNotReady(t *testing.T) {
+	manager, actor, _, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
+	manager.confirmationProjection = func(requested string) (*store.AppConfirmationProjection, error) {
+		return &store.AppConfirmationProjection{
+			Available: true, Ready: false, BatchID: batchID,
+		}, nil
+	}
+	waiting, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		waiting.RunID != run.RunID ||
+		waiting.Status != workflow.StatusRunning ||
+		waiting.Stage != store.ProductWorkflowStageGreetingGeneration ||
+		actor.sendCalls != 0 {
+		t.Fatalf("未就绪投影应原地等待: %+v send=%d err=%v", waiting, actor.sendCalls, err)
+	}
+}
+
+// seedAwaitingConfirmation 把 run 手工置入 awaitingConfirmation 停靠态,模拟
+// 升级前(人工闸时代)建立的存量运行。新链不再产生这个状态,但存量必须收敛。
+func seedAwaitingConfirmation(
+	t *testing.T,
+	db *store.Store,
+	run *store.ProductWorkflowRun,
+	at time.Time,
+) *store.ProductWorkflowRun {
+	t.Helper()
+	seeded, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: run.RunID,
+		From:  workflow.State{Mode: run.Mode, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: run.Mode, Status: workflow.StatusAwaitingConfirmation},
+		At:    at,
+		Stage: store.ProductWorkflowStageAwaitingConfirmation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seeded
+}
+
+// 存量停在人工闸的运行升级后自动收敛进发送阶段(2026-09-01 甲方裁决)。
+func TestLegacyAwaitingConfirmationAutoConfirmsAfterUpgrade(t *testing.T) {
+	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	seedAwaitingConfirmation(t, db, run, actor.clock.Now())
+	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
+
+	sending, err := manager.AdvanceOnce(context.Background())
+	if err != nil ||
+		sending.Status != workflow.StatusRunning ||
+		sending.Stage != store.ProductWorkflowStageGreetingSending ||
+		actor.sendCalls != 0 {
+		t.Fatalf("存量待确认未自动收敛: %+v send=%d err=%v", sending, actor.sendCalls, err)
 	}
 }
 
@@ -159,15 +218,7 @@ func TestCommunicationRunCrossingMidnightTerminalizesAtPatrolBoundary(t *testing
 
 func TestAwaitingConfirmationClosesWhenFeedChangeLeavesNoSendableCandidate(t *testing.T) {
 	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
-	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
-
-	awaiting, err := manager.AdvanceOnce(context.Background())
-	if err != nil ||
-		awaiting.RunID != run.RunID ||
-		awaiting.Status != workflow.StatusAwaitingConfirmation ||
-		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation {
-		t.Fatalf("enter awaiting confirmation = %+v, %v", awaiting, err)
-	}
+	seedAwaitingConfirmation(t, db, run, actor.clock.Now())
 	manager.confirmationProjection = func(requested string) (*store.AppConfirmationProjection, error) {
 		if requested != batchID {
 			return nil, store.ErrAppProjectionInvalid
@@ -618,13 +669,12 @@ func TestAdvanceOnceProjectsReplyOnlyAccountPause(t *testing.T) {
 
 func TestAdvanceOnceProjectsAwaitingConfirmationPauseAndResumeStatus(t *testing.T) {
 	manager, actor, db, started, batchID := orchestratorFixtureAtGreetingGeneration(t)
-	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
-	awaiting, err := manager.AdvanceOnce(context.Background())
-	if err != nil ||
-		awaiting == nil ||
-		awaiting.Status != workflow.StatusAwaitingConfirmation {
-		t.Fatalf("enter awaiting confirmation = %+v, %v", awaiting, err)
+	// 存量停靠态:投影设为未就绪,避免自动确认在本测试关心的暂停语义之前把
+	// 运行推走。
+	manager.confirmationProjection = func(string) (*store.AppConfirmationProjection, error) {
+		return &store.AppConfirmationProjection{Available: true, Ready: false, BatchID: batchID}, nil
 	}
+	awaiting := seedAwaitingConfirmation(t, db, started, actor.clock.Now())
 	key := store.AccountKey{Platform: awaiting.Platform, AccountRef: awaiting.AccountRef}
 	now := manager.clock.Now()
 	if err := db.MutateAccount(key, func(account *store.Account) error {
@@ -855,12 +905,8 @@ func TestPipelinePumpPersistsMidnightAcrossIdleBoundaries(t *testing.T) {
 	})
 
 	t.Run("awaiting confirmation", func(t *testing.T) {
-		manager, actor, _, _, _ := orchestratorFixtureAtGreetingGeneration(t)
-		actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
-		awaiting, err := manager.AdvanceOnce(context.Background())
-		if err != nil || awaiting.Status != workflow.StatusAwaitingConfirmation {
-			t.Fatalf("enter awaiting = %+v, %v", awaiting, err)
-		}
+		manager, actor, db, run, _ := orchestratorFixtureAtGreetingGeneration(t)
+		seedAwaitingConfirmation(t, db, run, actor.clock.Now())
 		manager.clock.(*fixtureClock).now = time.Date(
 			2026,
 			7,
@@ -884,11 +930,8 @@ func TestPipelinePumpPersistsMidnightAcrossIdleBoundaries(t *testing.T) {
 }
 
 func TestConfirmAllRequiresExactSelectableSetAndOpenWindow(t *testing.T) {
-	manager, actor, db, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
-	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
-	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	manager, actor, db, run, batchID := orchestratorFixtureAtGreetingGeneration(t)
+	seedAwaitingConfirmation(t, db, run, actor.clock.Now())
 	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
 
 	for _, selected := range [][]string{
@@ -929,12 +972,11 @@ func TestSuspectMemberNeverBlocksRestOfBatch(t *testing.T) {
 	manager, actor, _, _, batchID := orchestratorFixtureAtGreetingGeneration(t)
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
 	actor.sendProgress = &store.SourcingBatchGreetingSendProgress{Completed: true}
-	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	manager.confirmationProjection = fixtureConfirmationProjection(batchID)
-	if _, err := manager.ConfirmAll(batchID, []string{"profile-b", "profile-a"}); err != nil {
-		t.Fatal(err)
+	// 生成完成 → 自动确认进发送阶段(2026-09-01 甲方裁决,不再经人工点击)。
+	sending, err := manager.AdvanceOnce(context.Background())
+	if err != nil || sending.Stage != store.ProductWorkflowStageGreetingSending {
+		t.Fatalf("自动确认未进入发送阶段: %+v, %v", sending, err)
 	}
 
 	// 批次尚未走完:1 人已发、1 人 suspect、1 人还没轮到。旧实现在这里返回
@@ -1039,16 +1081,16 @@ func TestGreetingGenerationDoesNotEnableCommunicationDuringFunnel(t *testing.T) 
 	actor.enableErr = errors.New("fixture communication unavailable")
 	actor.greetingProgress = &store.SourcingBatchGreetingProgress{Completed: true}
 
-	awaiting, err := manager.AdvanceOnce(context.Background())
+	sending, err := manager.AdvanceOnce(context.Background())
 	if err != nil ||
-		awaiting == nil ||
-		awaiting.Status != workflow.StatusAwaitingConfirmation ||
-		awaiting.Stage != store.ProductWorkflowStageAwaitingConfirmation ||
+		sending == nil ||
+		sending.Status != workflow.StatusRunning ||
+		sending.Stage != store.ProductWorkflowStageGreetingSending ||
 		actor.greetingCalls != 1 ||
 		actor.enableCalls != 0 {
 		t.Fatalf(
 			"funnel unexpectedly enabled communication: run=%+v greeting=%d enable=%d err=%v",
-			awaiting,
+			sending,
 			actor.greetingCalls,
 			actor.enableCalls,
 			err,

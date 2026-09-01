@@ -208,11 +208,17 @@ func (m *Manager) AdvanceOnce(
 		}
 		if confirmationReadyWithoutSendableCandidates(confirmation, batchID) {
 			// 零入选或全部生成失败没有任何候选人可见动作可供确认。
-			// 直接完成漏斗并保留同一运行的多轮沟通控制，不能留下一个
-			// 永远无法提交的空人工闸。
+			// 直接完成漏斗并保留同一运行的多轮沟通控制。
 			return m.advanceStage(run, store.ProductWorkflowStageCommunication)
 		}
-		return m.enterAwaitingConfirmation(run)
+		// 自动确认(2026-09-01 甲方裁决:候选确认人工闸撤销)。控制律原样——
+		// 仍要求"当前精确全选集合"就绪并一次性消费,只是提交者从人工点击换
+		// 成编排器;集合未就绪(投影缺失、生成尚未收敛)等下一 tick,不带病
+		// 放行。新链不再进入 awaitingConfirmation 停靠态。
+		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			return run, nil
+		}
+		return m.advanceStage(run, store.ProductWorkflowStageGreetingSending)
 
 	case store.ProductWorkflowStageAwaitingConfirmation:
 		confirmation, projectionErr := m.confirmationProjection(batchID)
@@ -236,8 +242,20 @@ func (m *Manager) AdvanceOnce(
 				},
 			)
 		}
-		// 仍有可发送候选人时，只有 ConfirmAll 可以授权进入发送阶段。
-		return run, nil
+		// 自动确认(2026-09-01 甲方裁决):存量停在人工闸的运行升级后由同一
+		// 控制律自动收敛,不再等待人工点击;ConfirmAll 入口保留兼容。
+		if _, err := exactSelectableProfiles(confirmation, batchID); err != nil {
+			return run, nil
+		}
+		return m.store.TransitionProductWorkflowRun(
+			store.TransitionProductWorkflowRunRequest{
+				RunID: run.RunID,
+				From:  stateOf(run),
+				To:    workflow.State{Mode: run.Mode, Status: workflow.StatusRunning},
+				At:    m.clock.Now(),
+				Stage: store.ProductWorkflowStageGreetingSending,
+			},
+		)
 
 	case store.ProductWorkflowStageGreetingSending:
 		if blocked := m.requireOpenMemberBoundary(run); blocked != nil {
@@ -902,17 +920,6 @@ func (m *Manager) advanceStage(
 	return m.store.AdvanceProductWorkflowStage(store.AdvanceProductWorkflowStageRequest{
 		RunID: run.RunID, ExpectedStage: run.Stage, ExpectedStatus: run.Status,
 		NextStage: next, At: m.clock.Now(),
-	})
-}
-
-func (m *Manager) enterAwaitingConfirmation(
-	run *store.ProductWorkflowRun,
-) (*store.ProductWorkflowRun, error) {
-	from := stateOf(run)
-	to := workflow.State{Mode: run.Mode, Status: workflow.StatusAwaitingConfirmation}
-	return m.store.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
-		RunID: run.RunID, From: from, To: to, At: m.clock.Now(),
-		Stage: store.ProductWorkflowStageAwaitingConfirmation,
 	})
 }
 
