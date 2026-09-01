@@ -60,7 +60,7 @@ export function segment(text, rng, opt = {}) {
   const bad = []
   toks.forEach((t, i) => {
     if (t.kind === 'han') {
-      if (!t.py) bad.push({ i, ch: t.ch, why: '该汉字无拼音，输入法打不出' })
+      if (!t.py) bad.push({ i, ch: t.ch, why: whyUntypable(t) })
       return
     }
     if (!keyFor(t)) bad.push({ i, ch: t.ch, why: whyUntypable(t) })

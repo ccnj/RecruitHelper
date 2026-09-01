@@ -6,15 +6,20 @@
 //
 //   生成 → 本地预检 → （可选）oracle 判定 → 不过就换种子重采
 //
-// 本地预检不需要 oracle：四条序列由 capture/ 的同一份口径算出，quorble 是
+// 本地预检不需要 oracle：序列由 capture/ 的同一份口径算出，quorble 是
 // 纯算术（clamp(1−CV−IQR/μ)），speed / 键码占比 / 间隔上限也都是纯计算。
 // 于是绝大多数不合格的计划在本地就被淘汰，oracle 只做最终确认。
+//
+// **BOSS 判据不写在本文件里，在 criteria.mjs 那张表上。** 本文件只留
+// 物理/注入可行性（Shift 窗口、同键复现、debounce 上限）—— 它们不是判据，
+// 是「真机上按不按得出来」。判据要改，改表；表头讲了为什么不能就地写 if。
 //
 // engine 纪律：本模块只 import engine 内部与 pinyin-pro，绝不依赖 lab/oracle。
 // 外部判定通过 `verify` 回调注入 —— 生产环境里没有 aegis wasm。
 
 import { segment, granularity } from './segment.mjs'
-import { makeRng, sampleMix, moments } from './timing.mjs'
+import { makeRng, sampleMix, moments, removeOutliers } from './timing.mjs'
+import { buildView, dominantShare, evaluate } from './criteria.mjs'
 import { withParams } from './params.mjs'
 import { InputTracker } from '../capture/tracker.mjs'
 import { synthTyping } from '../capture/synth.mjs'
@@ -177,6 +182,7 @@ export function composeOnce(text, params, rng, startTime) {
 /**
  * 本地预检：把 plan 走一遍 capture 口径，检查全部硬约束。
  * 不依赖 oracle —— quorble 是纯算术，speed / 占比 / 间隔上限也是。
+ * BOSS 判据部分交给 criteria.mjs 的判据表；返回值里的 `criteria` 是逐条对账结果。
  *
  * **platform 必须一路传进来。** 这里曾经是 `synthTyping(plan)` 无参调用，
  * 于是不管目标平台是什么，重采回路验的永远是 synth 的默认值（当时是 macOS）。
@@ -194,26 +200,17 @@ export function localCheck(plan, params, platform) {
   const p = it.flush({ quorble: q, flimbot: (a) => q(removeOutliers(a)) })
   if (!p) return { ok: false, reasons: ['未产生任何 typings'], params: null }
 
-  const num = (csv) => (csv ? csv.split(',').map(Number).filter((x) => !Number.isNaN(x)) : [])
-  const seqs = {
-    inputRhythm: num(p.inputRhythm),
-    keyboardRhythm: num(p.keyboardRhythm),
-    keydurations: num(p.keydurations),
-    rhythms: num(p.inputTrait.rhythms),
-  }
-  const stats = Object.fromEntries(Object.entries(seqs).map(([k, v]) => [k, moments(v)]))
-
-  const keys = p.key ? p.key.split(',') : []
-  const share = (() => {
-    const c = {}
-    for (const k of keys) c[k] = (c[k] || 0) + 1
-    const max = Math.max(0, ...Object.values(c))
-    return keys.length ? max / keys.length : 0
-  })()
+  // 判据表的视图（五条序列 + 四个上传分数 + 标量）。BOSS 判据一律从这里读，
+  // 不在本函数里就地取值 —— 那正是先前门与序列错配的来源。
+  const v = buildView(p)
+  const stats = v.stats
+  // 登记用的键码集中度。口径按 chatJob 的 v2（单字符键码不参与统计），
+  // 与判据表 dominantCharV2 那条同源。
+  const share = dominantShare(v.keys, { skipSingleChar: true }).share
   // debounce 的计时依据是 reportTyping 的调用间隔 —— 它只在 compositionend 与
   // 非 composing 的 input 上被调（sec-entry.deob.js:2070/2085），正对应 typings
   // 相邻差 inputRhythm。composing 期间的 input 不重置 debounce，故 rhythms 不算。
-  const maxGap = Math.max(0, ...seqs.inputRhythm)
+  const maxGap = Math.max(0, ...v.seq.inputRhythm)
 
   const reasons = []
   // Shift 窗口：带 Shift 的键松手后必须留够 shiftGuardMs，下一个键才能按下。
@@ -264,29 +261,18 @@ export function localCheck(plan, params, platform) {
       lastUp.set(k.code, k.up)
     }
   }
-  if (p.speed < P.limits.minSpeedMsPerChar)
-    reasons.push(`speed ${p.speed} < ${P.limits.minSpeedMsPerChar}ms/字`)
-  if (p.compositionAbnormal) reasons.push('compositionAbnormal')
-  if (p.keyboardAbnormal) reasons.push('keyboardAbnormal')
-  if (p.keyWordRatio < 0.5) reasons.push(`keyWordRatio ${p.keyWordRatio} < 0.5`)
-  if (p.inputTrait.matchTrait) reasons.push('matchTrait')
-  if (share > P.limits.maxKeyShare) reasons.push(`键码占比 ${share.toFixed(3)} > ${P.limits.maxKeyShare}`)
   if (maxGap >= P.limits.debounceMs) reasons.push(`最大间隔 ${maxGap} ≥ debounce ${P.limits.debounceMs}`)
-  for (const [k, s] of Object.entries(stats)) {
-    if (s.n >= 4 && s.quorble > P.limits.maxQuorble)
-      reasons.push(`${k} quorble ${s.quorble} > ${P.limits.maxQuorble}`)
+
+  // ── 以上是物理/注入可行性；以下是 BOSS 判据，全部走判据表 ──
+  // 判据不在这里写 if，改 criteria.mjs。表头讲了为什么：
+  // 门与被评分序列在 BOSS 侧是错位配对的，就地写 if 必然抄漏。
+  const { reasons: bossReasons, rows: criteria } = evaluate(v, P)
+  reasons.push(...bossReasons)
+
+  return {
+    ok: reasons.length === 0, reasons, params: p, stats, criteria,
+    keyShare: +share.toFixed(4), maxGap, events,
   }
-
-  return { ok: reasons.length === 0, reasons, params: p, stats, keyShare: +share.toFixed(4), maxGap, events }
-}
-
-function removeOutliers(a) {
-  if (a.length < 4) return a
-  const s = [...a].sort((x, y) => x - y)
-  const q1 = s[Math.floor(s.length / 4)]
-  const q3 = s[Math.floor((3 * s.length) / 4)]
-  const iqr = q3 - q1
-  return a.filter((x) => x >= q1 - 1.5 * iqr && x <= q3 + 1.5 * iqr)
 }
 
 /**

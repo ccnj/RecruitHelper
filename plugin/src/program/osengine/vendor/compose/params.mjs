@@ -137,8 +137,24 @@ export const DEFAULT_PARAMS = {
     sameKeyGuardMs: 121,
     /** 单个物理键码占比上限。主分支 find_dominant_char 阈值 0.7，chatJob 的 v2 是 0.5 */
     maxKeyShare: 0.45,
-    /** 四条序列的 quorble 上限。0 才是真人形态；>0.6 直接命中 flimbot */
-    maxQuorble: 0,
+    /**
+     * 四个上传分数的 quorble 上限，**按被评分的序列分别定**。
+     *
+     * 先前是一个常数 0 套在四条序列上。0 对 rhythms / keyboardRhythm 是免费的
+     * （真人两平台都是 0），对 dwell 却是**比真人还严**：Windows 真人 dwell 的
+     * quorble 就是 0.354，滑窗看 n=4~20 上有 92%~100% 的窗口 >0、中位 0.45~0.60
+     * （lab/probe/criteria-audit.mjs 第 [4] 段）。要求 0 等于要求真人做不到的事：
+     * 排版器只能去自己分布的尾巴上取样，短文案单次通过率 5%、中位重采 8 次，
+     * 而且方向是「比真人更不规整」—— 哪天判据变成双侧，我们就在另一侧的尾巴上。
+     *
+     * dwell 取 0.6，两条线同时满足：
+     *   像真人   0.354 落回真人分布内，不必再靠尾部取样；
+     *   不越线   0.6 是 BOSS 判据里真实存在的线（#10 flimbot 与 chatJob 35012）；
+     *            而 dwell 自己的账本线是 >0 —— 它既被 cnTextCount 闸住
+     *            （Windows 上恒为 0），又**不在 %25 触发上报的五项 ★ 里**。
+     * 其余两条维持 0：真人本来就是 0，不花钱。
+     */
+    maxQuorble: { rhythms: 0, keyboardRhythm: 0, keydurations: 0.6 },
     /** 最短按压，低于此值不真实 */
     minDwellMs: 28,
 

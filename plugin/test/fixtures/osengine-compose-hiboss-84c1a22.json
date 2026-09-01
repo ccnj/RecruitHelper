@@ -1,5 +1,5 @@
 {
- "upstream": "hiBoss lab/engine/compose @ ef1b134",
+ "upstream": "hiBoss lab/engine/compose @ 84c1a22",
  "pinyinPro": "3.29.3",
  "note": "由上游原始文件生成。我们的 vendor 副本必须逐字段复现它。",
  "cases": {
@@ -8,8 +8,8 @@
    "bySeed": {
     "1": {
      "ok": true,
-     "seed": 3,
-     "tries": 3,
+     "seed": 1,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -20,38 +20,38 @@
           "code": "KeyN",
           "letter": "n",
           "down": 0,
-          "up": 61
+          "up": 104
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 98,
-          "up": 189
+          "down": 122,
+          "up": 200
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 225,
-          "up": 300
+          "down": 207,
+          "up": 322
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 370,
-          "up": 474
+          "down": 261,
+          "up": 347
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 480,
-          "up": 550
+          "down": 437,
+          "up": 522
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 649,
-         "up": 722
+         "down": 615,
+         "up": 773
         },
         "splits": [
          2
@@ -63,8 +63,8 @@
         "keys": [
          {
           "code": "Comma",
-          "down": 904,
-          "up": 1124
+          "down": 950,
+          "up": 1007
          }
         ]
        },
@@ -74,57 +74,57 @@
          {
           "code": "KeyF",
           "letter": "f",
-          "down": 1106,
-          "up": 1188
+          "down": 1162,
+          "up": 1312
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1195,
-          "up": 1273
+          "down": 1255,
+          "up": 1546
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 1376,
-          "up": 1485
+          "down": 1486,
+          "up": 1595
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 1579,
-          "up": 1683
+          "down": 1573,
+          "up": 1698
          },
          {
           "code": "KeyB",
           "letter": "b",
-          "down": 1681,
-          "up": 1759
+          "down": 1683,
+          "up": 1895
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 1831,
-          "up": 1923
+          "down": 1785,
+          "up": 1866
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1893,
-          "up": 2016
+          "down": 1884,
+          "up": 1975
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 2066,
-          "up": 2164
+          "down": 2078,
+          "up": 2374
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 2356,
-         "up": 2437
+         "down": 2327,
+         "up": 2382
         },
         "splits": [
          4
@@ -136,39 +136,39 @@
          {
           "code": "KeyJ",
           "letter": "j",
-          "down": 2502,
-          "up": 2587
+          "down": 3074,
+          "up": 3175
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 2568,
-          "up": 2637
+          "down": 3201,
+          "up": 3306
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 2960,
-          "up": 3037
+          "down": 3449,
+          "up": 3545
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 3020,
-          "up": 3097
+          "down": 3565,
+          "up": 3658
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 3118,
-          "up": 3211
+          "down": 3645,
+          "up": 3754
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 3316,
-         "up": 3435
+         "down": 3814,
+         "up": 4151
         },
         "splits": [
          3
@@ -180,45 +180,45 @@
          {
           "code": "KeyW",
           "letter": "w",
-          "down": 5447,
-          "up": 5665
+          "down": 4946,
+          "up": 5028
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 5582,
-          "up": 5707
+          "down": 5160,
+          "up": 5241
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 5662,
-          "up": 5777
+          "down": 5238,
+          "up": 5320
          },
          {
           "code": "KeyX",
           "letter": "x",
-          "down": 5891,
-          "up": 5981
+          "down": 5282,
+          "up": 5345
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6067,
-          "up": 6625
+          "down": 5470,
+          "up": 5641
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 6156,
-          "up": 6249
+          "down": 5543,
+          "up": 5647
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 6219,
-         "up": 6332
+         "down": 5667,
+         "up": 5791
         },
         "splits": [
          3
@@ -230,57 +230,57 @@
          {
           "code": "KeyL",
           "letter": "l",
-          "down": 6537,
-          "up": 6665
+          "down": 6047,
+          "up": 6117
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6800,
+          "down": 6229,
+          "up": 6318
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6394,
+          "up": 6532
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 6558,
+          "up": 6971
+         },
+         {
+          "code": "KeyL",
+          "letter": "l",
+          "down": 6653,
+          "up": 6775
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6782,
           "up": 6894
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 6864,
-          "up": 6996
+          "down": 6929,
+          "up": 7000
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 7300,
-          "up": 7425
-         },
-         {
-          "code": "KeyL",
-          "letter": "l",
-          "down": 7443,
-          "up": 7523
-         },
-         {
-          "code": "KeyI",
-          "letter": "i",
-          "down": 7547,
-          "up": 7640
-         },
-         {
-          "code": "KeyA",
-          "letter": "a",
-          "down": 7604,
-          "up": 7687
-         },
-         {
-          "code": "KeyO",
-          "letter": "o",
-          "down": 7752,
-          "up": 7820
+          "down": 7099,
+          "up": 7193
          }
         ],
         "commit": {
-         "code": "Digit3",
+         "code": "Space",
          "letter": "",
-         "down": 7869,
-         "up": 7936
+         "down": 7260,
+         "up": 7392
         },
         "splits": [
          4
@@ -292,21 +292,21 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 10237,
-          "up": 10386
+          "down": 7899,
+          "up": 8102
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 10317,
-          "up": 10387
+          "down": 7981,
+          "up": 8144
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 10463,
-         "up": 10635
+         "down": 8343,
+         "up": 8404
         },
         "splits": []
        }
@@ -756,8 +756,8 @@
     },
     "42": {
      "ok": true,
-     "seed": 50,
-     "tries": 9,
+     "seed": 44,
+     "tries": 3,
      "plan": {
       "startTime": 0,
       "words": [
@@ -768,38 +768,38 @@
           "code": "KeyN",
           "letter": "n",
           "down": 0,
-          "up": 126
+          "up": 74
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 101,
-          "up": 167
+          "down": 127,
+          "up": 310
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 208,
-          "up": 286
+          "down": 198,
+          "up": 331
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 331,
-          "up": 465
+          "down": 463,
+          "up": 530
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 425,
-          "up": 509
+          "down": 609,
+          "up": 675
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 716,
-         "up": 858
+         "down": 735,
+         "up": 821
         },
         "splits": [
          2
@@ -811,8 +811,8 @@
         "keys": [
          {
           "code": "Comma",
-          "down": 894,
-          "up": 978
+          "down": 882,
+          "up": 950
          }
         ]
        },
@@ -822,57 +822,57 @@
          {
           "code": "KeyF",
           "letter": "f",
-          "down": 1300,
-          "up": 1380
+          "down": 1522,
+          "up": 1633
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1396,
-          "up": 1455
+          "down": 1586,
+          "up": 1661
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 1473,
-          "up": 1645
+          "down": 1663,
+          "up": 1751
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 1527,
-          "up": 2027
+          "down": 1707,
+          "up": 1782
          },
          {
           "code": "KeyB",
           "letter": "b",
-          "down": 1556,
-          "up": 1682
+          "down": 1822,
+          "up": 1946
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 1592,
-          "up": 1732
+          "down": 2003,
+          "up": 2883
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1745,
-          "up": 1890
+          "down": 2092,
+          "up": 2224
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 1948,
-          "up": 2042
+          "down": 2193,
+          "up": 2295
          }
         ],
         "commit": {
-         "code": "Digit4",
+         "code": "Space",
          "letter": "",
-         "down": 2053,
-         "up": 2134
+         "down": 2339,
+         "up": 2464
         },
         "splits": [
          4
@@ -884,39 +884,39 @@
          {
           "code": "KeyJ",
           "letter": "j",
-          "down": 2874,
-          "up": 2963
+          "down": 4177,
+          "up": 4353
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 2919,
-          "up": 3021
+          "down": 4271,
+          "up": 4357
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3035,
-          "up": 3101
+          "down": 4393,
+          "up": 4505
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 3143,
-          "up": 3266
+          "down": 4517,
+          "up": 4596
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 3289,
-          "up": 3407
+          "down": 4570,
+          "up": 4669
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit4",
          "letter": "",
-         "down": 3497,
-         "up": 3616
+         "down": 4738,
+         "up": 4795
         },
         "splits": [
          3
@@ -928,45 +928,45 @@
          {
           "code": "KeyW",
           "letter": "w",
-          "down": 4008,
-          "up": 4200
+          "down": 5893,
+          "up": 6034
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 4158,
-          "up": 4236
+          "down": 5968,
+          "up": 6042
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 4251,
-          "up": 4346
+          "down": 6038,
+          "up": 6132
          },
          {
           "code": "KeyX",
           "letter": "x",
-          "down": 4339,
-          "up": 4526
+          "down": 6243,
+          "up": 6312
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 4500,
-          "up": 4589
+          "down": 6405,
+          "up": 6521
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4801,
-          "up": 4941
+          "down": 6490,
+          "up": 6577
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 4922,
-         "up": 4989
+         "down": 6679,
+         "up": 6770
         },
         "splits": [
          3
@@ -978,57 +978,57 @@
          {
           "code": "KeyL",
           "letter": "l",
-          "down": 5943,
-          "up": 6013
+          "down": 7321,
+          "up": 7388
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6041,
-          "up": 6220
+          "down": 7456,
+          "up": 7597
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 6094,
-          "up": 6175
+          "down": 7628,
+          "up": 7701
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 6416,
-          "up": 6525
+          "down": 7705,
+          "up": 7768
          },
          {
           "code": "KeyL",
           "letter": "l",
-          "down": 6484,
-          "up": 6583
+          "down": 7787,
+          "up": 7856
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6584,
-          "up": 6645
+          "down": 7867,
+          "up": 7948
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 6820,
-          "up": 6933
+          "down": 7958,
+          "up": 8021
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 6971,
-          "up": 7052
+          "down": 8074,
+          "up": 8194
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 7049,
-         "up": 7174
+         "down": 8220,
+         "up": 8318
         },
         "splits": [
          4
@@ -1040,21 +1040,21 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 7522,
-          "up": 7630
+          "down": 10194,
+          "up": 10248
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 7624,
-          "up": 7680
+          "down": 10270,
+          "up": 10337
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit3",
          "letter": "",
-         "down": 7719,
-         "up": 7890
+         "down": 10427,
+         "up": 10499
         },
         "splits": []
        }
@@ -1135,8 +1135,8 @@
    "bySeed": {
     "1": {
      "ok": true,
-     "seed": 2,
-     "tries": 2,
+     "seed": 1,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -1147,38 +1147,38 @@
           "code": "KeyX",
           "letter": "x",
           "down": 0,
-          "up": 80
+          "up": 82
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 103,
-          "up": 179
+          "down": 342,
+          "up": 426
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 249,
-          "up": 324
+          "down": 397,
+          "up": 688
          },
          {
           "code": "KeyZ",
           "letter": "z",
-          "down": 425,
-          "up": 526
+          "down": 488,
+          "up": 606
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 494,
-          "up": 596
+          "down": 620,
+          "up": 706
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit3",
          "letter": "",
-         "down": 687,
-         "up": 810
+         "down": 749,
+         "up": 1085
         },
         "splits": [
          3
@@ -1190,51 +1190,51 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 1016,
-          "up": 1098
+          "down": 1134,
+          "up": 1223
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 1213,
-          "up": 1610
+          "down": 1287,
+          "up": 1415
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1410,
-          "up": 1527
+          "down": 1376,
+          "up": 1497
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 1548,
-          "up": 1626
+          "down": 1609,
+          "up": 1706
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 1631,
-          "up": 1721
+          "down": 1661,
+          "up": 1776
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1754,
-          "up": 2399
+          "down": 1766,
+          "up": 1877
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1803,
-          "up": 1877
+          "down": 1899,
+          "up": 2003
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 1978,
-         "up": 2073
+         "down": 2247,
+         "up": 2367
         },
         "splits": [
          3
@@ -1247,14 +1247,14 @@
         "keys": [
          {
           "code": "ShiftLeft",
-          "down": 2474,
-          "up": 2988,
+          "down": 2960,
+          "up": 3361,
           "modifier": true
          },
          {
           "code": "Slash",
-          "down": 2558,
-          "up": 2668,
+          "down": 3070,
+          "up": 3180,
           "shift": true
          }
         ]
@@ -1265,57 +1265,57 @@
          {
           "code": "KeyF",
           "letter": "f",
-          "down": 3528,
-          "up": 3596
+          "down": 3554,
+          "up": 3653
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3583,
-          "up": 3661
+          "down": 3801,
+          "up": 3925
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 3730,
-          "up": 4202
+          "down": 3854,
+          "up": 3978
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 3767,
-          "up": 4050
+          "down": 3989,
+          "up": 4047
          },
          {
           "code": "KeyB",
           "letter": "b",
-          "down": 3845,
-          "up": 3902
+          "down": 4074,
+          "up": 4218
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 3977,
-          "up": 4096
+          "down": 4114,
+          "up": 4202
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 4063,
-          "up": 4148
+          "down": 4271,
+          "up": 4433
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4535,
-          "up": 4629
+          "down": 4356,
+          "up": 4499
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 4749,
-         "up": 4875
+         "down": 4753,
+         "up": 4860
         },
         "splits": [
          4
@@ -1327,45 +1327,45 @@
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 5576,
-          "up": 5643
+          "down": 5262,
+          "up": 5331
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 5631,
-          "up": 5753
+          "down": 5329,
+          "up": 5431
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 5692,
-          "up": 5798
+          "down": 5479,
+          "up": 5563
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 5797,
-          "up": 6071
+          "down": 5638,
+          "up": 5902
          },
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 5854,
-          "up": 5933
+          "down": 5738,
+          "up": 5858
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 5978,
-          "up": 6067
+          "down": 5929,
+          "up": 6026
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 6275,
-         "up": 6329
+         "down": 6099,
+         "up": 6208
         },
         "splits": [
          4
@@ -1424,8 +1424,8 @@
     },
     "7": {
      "ok": true,
-     "seed": 8,
-     "tries": 2,
+     "seed": 7,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -1436,38 +1436,38 @@
           "code": "KeyX",
           "letter": "x",
           "down": 0,
-          "up": 141
+          "up": 91
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 73,
-          "up": 160
+          "down": 132,
+          "up": 226
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 216,
-          "up": 303
+          "down": 243,
+          "up": 433
          },
          {
           "code": "KeyZ",
           "letter": "z",
-          "down": 720,
-          "up": 870
+          "down": 356,
+          "up": 411
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 756,
-          "up": 849
+          "down": 566,
+          "up": 671
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 1079,
-         "up": 1181
+         "down": 811,
+         "up": 903
         },
         "splits": [
          3
@@ -1479,51 +1479,51 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 1327,
-          "up": 1402
+          "down": 1699,
+          "up": 1781
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 1388,
-          "up": 1524
+          "down": 1879,
+          "up": 1934
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1449,
-          "up": 1543
+          "down": 1965,
+          "up": 2042
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 1562,
-          "up": 1655
+          "down": 2034,
+          "up": 2178
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 1615,
-          "up": 1731
+          "down": 2095,
+          "up": 2225
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1748,
-          "up": 2289
+          "down": 2296,
+          "up": 2370
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1849,
-          "up": 2013
+          "down": 2342,
+          "up": 2424
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 2022,
-         "up": 2101
+         "down": 2660,
+         "up": 2755
         },
         "splits": [
          3
@@ -1536,14 +1536,14 @@
         "keys": [
          {
           "code": "ShiftLeft",
-          "down": 2287,
-          "up": 2697,
+          "down": 2801,
+          "up": 3283,
           "modifier": true
          },
          {
           "code": "Slash",
-          "down": 2501,
-          "up": 2605,
+          "down": 2956,
+          "up": 3066,
           "shift": true
          }
         ]
@@ -1554,57 +1554,57 @@
          {
           "code": "KeyF",
           "letter": "f",
-          "down": 4287,
-          "up": 4429
+          "down": 3431,
+          "up": 3530
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 4385,
-          "up": 4490
+          "down": 3452,
+          "up": 3544
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4461,
-          "up": 4540
+          "down": 3610,
+          "up": 3703
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 4533,
-          "up": 4590
+          "down": 3676,
+          "up": 3805
          },
          {
           "code": "KeyB",
           "letter": "b",
-          "down": 4593,
-          "up": 4662
+          "down": 3850,
+          "up": 3968
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 4721,
-          "up": 4774
+          "down": 3952,
+          "up": 4204
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 4769,
-          "up": 4882
+          "down": 4163,
+          "up": 4267
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4898,
-          "up": 4995
+          "down": 4256,
+          "up": 4333
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit2",
          "letter": "",
-         "down": 5112,
-         "up": 5196
+         "down": 4382,
+         "up": 4467
         },
         "splits": [
          4
@@ -1616,45 +1616,45 @@
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 5498,
-          "up": 5592
+          "down": 5163,
+          "up": 5250
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 5603,
-          "up": 5708
+          "down": 5222,
+          "up": 5646
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 5678,
-          "up": 5798
+          "down": 5299,
+          "up": 5395
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 5797,
-          "up": 6135
+          "down": 5575,
+          "up": 5686
          },
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 5898,
-          "up": 6019
+          "down": 5803,
+          "up": 5908
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 5996,
-          "up": 6122
+          "down": 5912,
+          "up": 5956
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 6137,
-         "up": 6227
+         "down": 6135,
+         "up": 6206
         },
         "splits": [
          4
@@ -1713,8 +1713,8 @@
     },
     "42": {
      "ok": true,
-     "seed": 47,
-     "tries": 6,
+     "seed": 42,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -1725,38 +1725,38 @@
           "code": "KeyX",
           "letter": "x",
           "down": 0,
-          "up": 695
+          "up": 228
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 92,
-          "up": 207
+          "down": 146,
+          "up": 228
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 211,
-          "up": 328
+          "down": 232,
+          "up": 370
          },
          {
           "code": "KeyZ",
           "letter": "z",
-          "down": 398,
-          "up": 484
+          "down": 354,
+          "up": 475
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 475,
-          "up": 540
+          "down": 504,
+          "up": 571
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 515,
-         "up": 621
+         "down": 580,
+         "up": 637
         },
         "splits": [
          3
@@ -1768,51 +1768,51 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 868,
-          "up": 1036
+          "down": 862,
+          "up": 970
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 930,
-          "up": 1036
+          "down": 1025,
+          "up": 1126
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1009,
-          "up": 1183
+          "down": 1255,
+          "up": 1402
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 1060,
-          "up": 1130
+          "down": 1326,
+          "up": 1402
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 1170,
-          "up": 1273
+          "down": 1399,
+          "up": 1541
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1320,
-          "up": 1407
+          "down": 1505,
+          "up": 1564
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 1457,
-          "up": 1605
+          "down": 1742,
+          "up": 1872
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 1635,
-         "up": 1716
+         "down": 1849,
+         "up": 1945
         },
         "splits": [
          3
@@ -1825,14 +1825,14 @@
         "keys": [
          {
           "code": "ShiftLeft",
-          "down": 1955,
-          "up": 2599,
+          "down": 2242,
+          "up": 2450,
           "modifier": true
          },
          {
           "code": "Slash",
-          "down": 2087,
-          "up": 2166,
+          "down": 2352,
+          "up": 2420,
           "shift": true
          }
         ]
@@ -1843,57 +1843,57 @@
          {
           "code": "KeyF",
           "letter": "f",
-          "down": 2985,
-          "up": 3034
+          "down": 3729,
+          "up": 3848
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3119,
-          "up": 3252
+          "down": 3797,
+          "up": 3925
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 3186,
-          "up": 3295
+          "down": 3915,
+          "up": 4001
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 3273,
-          "up": 3391
+          "down": 4101,
+          "up": 4288
          },
          {
           "code": "KeyB",
           "letter": "b",
-          "down": 3387,
-          "up": 3683
+          "down": 4380,
+          "up": 4514
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 3492,
-          "up": 3546
+          "down": 4502,
+          "up": 4572
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3622,
-          "up": 3687
+          "down": 4614,
+          "up": 4681
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 3726,
-          "up": 3790
+          "down": 4725,
+          "up": 4807
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit2",
          "letter": "",
-         "down": 3892,
-         "up": 3989
+         "down": 4779,
+         "up": 4873
         },
         "splits": [
          4
@@ -1905,45 +1905,45 @@
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 5089,
-          "up": 5182
+          "down": 5357,
+          "up": 5472
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 5315,
-          "up": 5421
+          "down": 5473,
+          "up": 5589
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 5356,
-          "up": 5477
+          "down": 5649,
+          "up": 5756
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 5465,
-          "up": 5559
+          "down": 5773,
+          "up": 5835
          },
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 5560,
-          "up": 5651
+          "down": 5870,
+          "up": 5950
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 5732,
-          "up": 5796
+          "down": 6011,
+          "up": 6189
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit2",
          "letter": "",
-         "down": 6065,
-         "up": 6389
+         "down": 6305,
+         "up": 6410
         },
         "splits": [
          4
@@ -2072,13 +2072,9 @@
      }
     },
     "7": {
-     "ok": false,
-     "tries": 40
-    },
-    "42": {
      "ok": true,
-     "seed": 62,
-     "tries": 21,
+     "seed": 13,
+     "tries": 7,
      "plan": {
       "startTime": 0,
       "words": [
@@ -2089,38 +2085,104 @@
           "code": "KeyH",
           "letter": "h",
           "down": 0,
-          "up": 295
+          "up": 134
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 95,
-          "up": 151
+          "down": 170,
+          "up": 338
          },
          {
           "code": "KeyO",
           "letter": "o",
-          "down": 166,
-          "up": 267
+          "down": 233,
+          "up": 288
          },
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 374,
-          "up": 784
+          "down": 282,
+          "up": 420
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 442,
-          "up": 582
+          "down": 333,
+          "up": 451
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 866,
-         "up": 942
+         "down": 529,
+         "up": 613
+        },
+        "splits": [
+         3
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "好的",
+        "pinyin": "haode",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 44,
+     "tries": 3,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "好的",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 0,
+          "up": 75
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 71,
+          "up": 175
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 395,
+          "up": 468
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 586,
+          "up": 748
+         },
+         {
+          "code": "KeyE",
+          "letter": "e",
+          "down": 646,
+          "up": 759
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 891,
+         "up": 967
         },
         "splits": [
          3
@@ -2148,8 +2210,8 @@
    "bySeed": {
     "1": {
      "ok": true,
-     "seed": 3,
-     "tries": 3,
+     "seed": 1,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -2160,56 +2222,56 @@
           "code": "KeyM",
           "letter": "m",
           "down": 0,
-          "up": 61
+          "up": 104
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 98,
-          "up": 189
+          "down": 122,
+          "up": 200
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 225,
-          "up": 300
+          "down": 207,
+          "up": 322
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 370,
-          "up": 474
+          "down": 261,
+          "up": 347
          },
          {
           "code": "KeyT",
           "letter": "t",
-          "down": 480,
-          "up": 550
+          "down": 437,
+          "up": 522
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 511,
-          "up": 632
+          "down": 593,
+          "up": 680
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 579,
-          "up": 671
+          "down": 664,
+          "up": 814
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 752,
-          "up": 848
+          "down": 768,
+          "up": 947
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 907,
-         "up": 985
+         "down": 930,
+         "up": 1221
         },
         "splits": [
          4
@@ -2221,39 +2283,39 @@
          {
           "code": "KeyX",
           "letter": "x",
-          "down": 1927,
-          "up": 2036
+          "down": 2312,
+          "up": 2421
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 2130,
-          "up": 2234
+          "down": 2399,
+          "up": 2524
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 2232,
-          "up": 2310
+          "down": 2509,
+          "up": 2721
          },
          {
           "code": "KeyW",
           "letter": "w",
-          "down": 2382,
-          "up": 2474
+          "down": 2611,
+          "up": 2692
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 2444,
-          "up": 2567
+          "down": 2710,
+          "up": 2801
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 3125,
-         "up": 3181
+         "down": 3142,
+         "up": 3230
         },
         "splits": [
          3
@@ -2265,8 +2327,8 @@
         "keys": [
          {
           "code": "Digit3",
-          "down": 3664,
-          "up": 3745
+          "down": 3599,
+          "up": 3654
          }
         ]
        },
@@ -2276,33 +2338,33 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 3760,
-          "up": 3845
+          "down": 4068,
+          "up": 4169
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 3826,
-          "up": 3895
+          "down": 4195,
+          "up": 4300
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 4218,
-          "up": 4295
+          "down": 4443,
+          "up": 4539
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4278,
-          "up": 4355
+          "down": 4559,
+          "up": 4652
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 4455,
-         "up": 4589
+         "down": 4973,
+         "up": 5025
         },
         "splits": []
        },
@@ -2312,51 +2374,51 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 5017,
-          "up": 5136
+          "down": 5442,
+          "up": 5779
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 5176,
-          "up": 5394
+          "down": 5517,
+          "up": 5599
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 5311,
-          "up": 5436
+          "down": 5731,
+          "up": 5812
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 5391,
-          "up": 5506
+          "down": 5809,
+          "up": 5891
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 5620,
-          "up": 5710
+          "down": 5853,
+          "up": 5916
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 5796,
-          "up": 6354
+          "down": 5914,
+          "up": 5979
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 5885,
-          "up": 5978
+          "down": 5998,
+          "up": 6111
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 5948,
-         "up": 6061
+         "down": 6218,
+         "up": 6309
         },
         "splits": [
          4
@@ -2368,33 +2430,33 @@
          {
           "code": "KeyK",
           "letter": "k",
-          "down": 6266,
-          "up": 6394
+          "down": 7101,
+          "up": 7234
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 6356,
-          "up": 6488
+          "down": 7214,
+          "up": 7325
          },
          {
           "code": "KeyY",
           "letter": "y",
-          "down": 6619,
-          "up": 6713
+          "down": 7269,
+          "up": 7436
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6683,
-          "up": 6815
+          "down": 7305,
+          "up": 7382
          }
         ],
         "commit": {
-         "code": "Digit3",
+         "code": "Digit2",
          "letter": "",
-         "down": 7374,
-         "up": 7469
+         "down": 7428,
+         "up": 7509
         },
         "splits": [
          2
@@ -2406,21 +2468,21 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 8653,
-          "up": 8717
+          "down": 8086,
+          "up": 8154
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 8740,
-          "up": 8893
+          "down": 8148,
+          "up": 8242
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 9019,
-         "up": 9091
+         "down": 8231,
+         "up": 8394
         },
         "splits": []
        }
@@ -2495,8 +2557,8 @@
     },
     "7": {
      "ok": true,
-     "seed": 8,
-     "tries": 2,
+     "seed": 7,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -2507,56 +2569,56 @@
           "code": "KeyM",
           "letter": "m",
           "down": 0,
-          "up": 80
+          "up": 117
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 137,
-          "up": 236
+          "down": 328,
+          "up": 488
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 358,
-          "up": 486
+          "down": 535,
+          "up": 653
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 466,
-          "up": 879
+          "down": 685,
+          "up": 788
          },
          {
           "code": "KeyT",
           "letter": "t",
-          "down": 565,
-          "up": 639
+          "down": 838,
+          "up": 917
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 655,
-          "up": 764
+          "down": 955,
+          "up": 1072
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 720,
-          "up": 791
+          "down": 1017,
+          "up": 1121
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 786,
-          "up": 867
+          "down": 1099,
+          "up": 1166
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 1046,
-         "up": 1111
+         "down": 1241,
+         "up": 1316
         },
         "splits": [
          4
@@ -2568,39 +2630,39 @@
          {
           "code": "KeyX",
           "letter": "x",
-          "down": 2261,
-          "up": 2352
+          "down": 1789,
+          "up": 1858
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 2368,
-          "up": 2747
+          "down": 1839,
+          "up": 1938
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 2479,
-          "up": 2560
+          "down": 1923,
+          "up": 2016
          },
          {
           "code": "KeyW",
           "letter": "w",
-          "down": 2624,
-          "up": 2773
+          "down": 1989,
+          "up": 2101
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 2730,
-          "up": 2808
+          "down": 2059,
+          "up": 2135
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 2911,
-         "up": 3127
+         "down": 2205,
+         "up": 2268
         },
         "splits": [
          3
@@ -2612,8 +2674,8 @@
         "keys": [
          {
           "code": "Digit3",
-          "down": 3013,
-          "up": 3168
+          "down": 2498,
+          "up": 2619
          }
         ]
        },
@@ -2623,33 +2685,33 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 3468,
-          "up": 3589
+          "down": 2619,
+          "up": 2761
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 3624,
-          "up": 3849
+          "down": 2920,
+          "up": 2991
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3698,
-          "up": 3787
+          "down": 3077,
+          "up": 3132
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 3803,
-          "up": 3864
+          "down": 3151,
+          "up": 3310
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit2",
          "letter": "",
-         "down": 3911,
-         "up": 4185
+         "down": 3437,
+         "up": 3528
         },
         "splits": []
        },
@@ -2659,51 +2721,51 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 4073,
-          "up": 4131
+          "down": 5082,
+          "up": 5223
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 4217,
-          "up": 4322
+          "down": 5208,
+          "up": 5295
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 4329,
-          "up": 4417
+          "down": 5285,
+          "up": 5512
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 4482,
-          "up": 4555
+          "down": 5451,
+          "up": 5530
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 4553,
-          "up": 4664
+          "down": 5539,
+          "up": 5608
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 4659,
-          "up": 4770
+          "down": 5627,
+          "up": 5712
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 4738,
-          "up": 4853
+          "down": 5677,
+          "up": 5802
          }
         ],
         "commit": {
-         "code": "Space",
+         "code": "Digit2",
          "letter": "",
-         "down": 5026,
-         "up": 5117
+         "down": 5933,
+         "up": 6081
         },
         "splits": [
          4
@@ -2715,33 +2777,33 @@
          {
           "code": "KeyK",
           "letter": "k",
-          "down": 5919,
-          "up": 6008
+          "down": 6607,
+          "up": 6702
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 6093,
-          "up": 6181
+          "down": 6638,
+          "up": 6747
          },
          {
           "code": "KeyY",
           "letter": "y",
-          "down": 6270,
-          "up": 6379
+          "down": 6686,
+          "up": 6758
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6365,
-          "up": 6461
+          "down": 6816,
+          "up": 7030
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 6478,
-         "up": 6575
+         "down": 6952,
+         "up": 7141
         },
         "splits": [
          2
@@ -2753,21 +2815,21 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 6592,
-          "up": 6684
+          "down": 7982,
+          "up": 8332
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 6684,
-          "up": 6815
+          "down": 8032,
+          "up": 8124
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 6845,
-         "up": 6920
+         "down": 8266,
+         "up": 8392
         },
         "splits": []
        }
@@ -2842,8 +2904,8 @@
     },
     "42": {
      "ok": true,
-     "seed": 43,
-     "tries": 2,
+     "seed": 42,
+     "tries": 1,
      "plan": {
       "startTime": 0,
       "words": [
@@ -2854,56 +2916,56 @@
           "code": "KeyM",
           "letter": "m",
           "down": 0,
-          "up": 93
+          "up": 72
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 200,
-          "up": 303
+          "down": 126,
+          "up": 218
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 326,
-          "up": 445
+          "down": 228,
+          "up": 329
          },
          {
           "code": "KeyG",
           "letter": "g",
-          "down": 452,
-          "up": 604
+          "down": 321,
+          "up": 421
          },
          {
           "code": "KeyT",
           "letter": "t",
-          "down": 607,
-          "up": 686
+          "down": 455,
+          "up": 576
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 888,
-          "up": 1047
+          "down": 567,
+          "up": 698
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 1128,
-          "up": 1218
+          "down": 644,
+          "up": 743
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 1206,
-          "up": 1327
+          "down": 724,
+          "up": 1122
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 1350,
-         "up": 1526
+         "down": 1078,
+         "up": 1172
         },
         "splits": [
          4
@@ -2915,39 +2977,39 @@
          {
           "code": "KeyX",
           "letter": "x",
-          "down": 3423,
-          "up": 3694
+          "down": 1565,
+          "up": 1645
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 3563,
-          "up": 3641
+          "down": 1657,
+          "up": 1764
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 3692,
-          "up": 3764
+          "down": 1768,
+          "up": 1951
          },
          {
           "code": "KeyW",
           "letter": "w",
-          "down": 3808,
-          "up": 3914
+          "down": 1821,
+          "up": 1961
          },
          {
           "code": "KeyU",
           "letter": "u",
-          "down": 3938,
-          "up": 4068
+          "down": 1890,
+          "up": 1966
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 4405,
-         "up": 4506
+         "down": 2005,
+         "up": 2075
         },
         "splits": [
          3
@@ -2959,8 +3021,8 @@
         "keys": [
          {
           "code": "Digit3",
-          "down": 6074,
-          "up": 6203
+          "down": 2920,
+          "up": 3006
          }
         ]
        },
@@ -2970,33 +3032,33 @@
          {
           "code": "KeyD",
           "letter": "d",
-          "down": 6721,
-          "up": 6819
+          "down": 3163,
+          "up": 3249
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 6901,
-          "up": 7050
+          "down": 3406,
+          "up": 3478
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 6976,
-          "up": 7448
+          "down": 3550,
+          "up": 3602
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 7016,
-          "up": 7087
+          "down": 3643,
+          "up": 3771
          }
         ],
         "commit": {
-         "code": "Digit2",
+         "code": "Space",
          "letter": "",
-         "down": 7372,
-         "up": 7463
+         "down": 4002,
+         "up": 4104
         },
         "splits": []
        },
@@ -3006,51 +3068,51 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 9178,
-          "up": 9302
+          "down": 4288,
+          "up": 4385
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 9308,
-          "up": 9392
+          "down": 4350,
+          "up": 4589
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 9380,
-          "up": 9480
+          "down": 4435,
+          "up": 4917
          },
          {
           "code": "KeyN",
           "letter": "n",
-          "down": 9498,
-          "up": 9694
+          "down": 4519,
+          "up": 4633
          },
          {
           "code": "KeyS",
           "letter": "s",
-          "down": 9582,
-          "up": 9683
+          "down": 4630,
+          "up": 4725
          },
          {
           "code": "KeyH",
           "letter": "h",
-          "down": 9657,
-          "up": 9748
+          "down": 4856,
+          "up": 4998
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 9722,
-          "up": 9821
+          "down": 5163,
+          "up": 5265
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 10001,
-         "up": 10167
+         "down": 5252,
+         "up": 5341
         },
         "splits": [
          4
@@ -3062,33 +3124,33 @@
          {
           "code": "KeyK",
           "letter": "k",
-          "down": 12034,
-          "up": 12084
+          "down": 5632,
+          "up": 5743
          },
          {
           "code": "KeyE",
           "letter": "e",
-          "down": 12228,
-          "up": 12330
+          "down": 5942,
+          "up": 6081
          },
          {
           "code": "KeyY",
           "letter": "y",
-          "down": 12284,
-          "up": 12398
+          "down": 6065,
+          "up": 6117
          },
          {
           "code": "KeyI",
           "letter": "i",
-          "down": 12408,
-          "up": 12897
+          "down": 6095,
+          "up": 6205
          }
         ],
         "commit": {
-         "code": "Digit3",
+         "code": "Space",
          "letter": "",
-         "down": 12561,
-         "up": 12676
+         "down": 6447,
+         "up": 6565
         },
         "splits": [
          2
@@ -3100,21 +3162,21 @@
          {
           "code": "KeyM",
           "letter": "m",
-          "down": 12854,
-          "up": 12958
+          "down": 7483,
+          "up": 7615
          },
          {
           "code": "KeyA",
           "letter": "a",
-          "down": 13161,
-          "up": 13212
+          "down": 7650,
+          "up": 7779
          }
         ],
         "commit": {
          "code": "Space",
          "letter": "",
-         "down": 13287,
-         "up": 13374
+         "down": 7788,
+         "up": 7894
         },
         "splits": []
        }

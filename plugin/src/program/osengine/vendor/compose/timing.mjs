@@ -51,3 +51,16 @@ export function moments(a) {
     quorble: +Math.max(0, Math.min(1, 1 - cv - iqrm)).toFixed(3),
   }
 }
+
+/**
+ * BOSS 的 remove_outliers：IQR×1.5。flimbot 与 check_rhythm_no_outliers 的前置步骤。
+ * 少于 4 项时原样返回 —— 四分位数在那之下没有意义。
+ */
+export function removeOutliers(a) {
+  if (a.length < 4) return a
+  const s = [...a].sort((x, y) => x - y)
+  const q1 = s[Math.floor(s.length / 4)]
+  const q3 = s[Math.floor((3 * s.length) / 4)]
+  const iqr = q3 - q1
+  return a.filter((x) => x >= q1 - 1.5 * iqr && x <= q3 + 1.5 * iqr)
+}

@@ -15047,13 +15047,13 @@ test('埋点上报自检由适配器声明驱动:没声明守卫的平台不探�
 // ---------------------------------------------------------------------------
 
 const OSENGINE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-hiboss-ef1b134.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-hiboss-84c1a22.json', 'utf8'),
 )
 
 test('osengine 与 hiBoss 原件逐点一致(基准由上游原始文件生成)', () => {
   const { from, to, targetW, maxDwellMs, cases } = OSENGINE_FIXTURE
   assert.equal(maxDwellMs, DEFAULT_MAX_DWELL_MS, '基准的截断值必须与我们的缺省一致')
-  assert.equal(OSENGINE_SOURCE.commit, 'ef1b134', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
 
   for (const [seedText, expected] of Object.entries(cases)) {
     const plan = planMove({ from, to, targetW, maxDwellMs, seed: Number(seedText) })
@@ -15113,7 +15113,7 @@ test('osengine 的 pressMs 来自实测池而不是常数', () => {
 // ---------------------------------------------------------------------------
 
 const COMPOSE_FIXTURE = JSON.parse(
-  readFileSync('test/fixtures/osengine-compose-hiboss-ef1b134.json', 'utf8'),
+  readFileSync('test/fixtures/osengine-compose-hiboss-84c1a22.json', 'utf8'),
 )
 
 /** 上游 injector.go 的 shiftGuard:Shift 必须在下一个键按下前至少这么久松开。 */
@@ -15130,7 +15130,7 @@ function flattenPlanKeys(plan) {
 }
 
 test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文件生成)', async () => {
-  assert.equal(OSENGINE_SOURCE.commit, 'ef1b134', '版本钉子与基准文件名必须同步')
+  assert.equal(OSENGINE_SOURCE.commit, '84c1a22', '版本钉子与基准文件名必须同步')
   assert.ok(OSENGINE_SOURCE.files.includes('compose'), '版本钉子要覆盖排版器的来源')
 
   for (const [name, { text, bySeed }] of Object.entries(COMPOSE_FIXTURE.cases)) {
@@ -15145,14 +15145,30 @@ test('osengine/compose 与 hiBoss 原件逐字段一致(基准由上游原始文
   }
 })
 
-test('osengine/compose 排不出来也要钉住——短文案本来就可能失败', () => {
-  // 上游自己在「好的」+ 种子 7 上 40 次重采全废:排版器是闭环自验的,样本太少时
-  // 统计校验过不了。**我们的副本若在上游失败处成功了,那正是漂移**,而且是最难
-  // 发现的一种——看上去"更好用了"。
-  const short = COMPOSE_FIXTURE.cases.short
-  const failures = Object.values(short.bySeed).filter((c) => !c.ok)
-  assert.ok(failures.length >= 1,
-    '基准里应当至少钉住一个上游排不出来的组合;一个都没有说明基准选的文案太容易')
+test('osengine/compose 打不出的字元要显式失败,不许编一个假键序', async () => {
+  // 上游把两种失败分得很清:「这个字打不出」抛异常,「排不出合格形状」返回 ok:false。
+  //
+  // 前者的安全性质在于**宁可失败也不编**。2026-08-31 上游修过一个静默 bug:
+  // pinyin-pro 给「嗯」的 `ng` 是词典注音,真人打的是 `en`,于是排出了
+  // KeyN,KeyG,KeyN,KeyG —— 一个没有真人会敲的键序,而排版器照样返回 ok:true。
+  // 自研 TIP 走 commit(word) 直接上屏、不查拼音串,屏幕上完全看不出问题;
+  // **一旦回落到系统输入法(我们的 macOS 开发环境就是),ng 上不了屏**。
+  //
+  // 「呣」的注音是 m,不是完整音节,IME 会当声母等韵母,真人也打不出——所以上游
+  // 刻意不给它编输入音,而是显式抛。这条用例钉的就是「不编」。
+  await assert.rejects(
+    () => planType('呣', 1),
+    (err) => {
+      assert.match(err.message, /打不出/, '错误信息要说清是打不出,不是排不出')
+      assert.match(err.message, /呣/, '错误信息要指名是哪个字元')
+      return true
+    },
+  )
+  // 对照:同样极短、同样曾经排不出来的「嗯」,修好之后必须能排出来。
+  const ok = await planType('嗯', 1)
+  assert.ok(ok.ok, '「嗯」修好后应当排得出来')
+  const codes = ok.plan.words.flatMap((w) => w.keys.map((k) => k.code))
+  assert.deepEqual(codes, ['KeyE', 'KeyN'], '「嗯」要按真人打的 en,不是词典注音 ng')
 })
 
 test('osengine/compose 的 Shift 必须在下一个键按下前松开(「薪资」→「Xin子」那个 bug)', () => {

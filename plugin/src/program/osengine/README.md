@@ -18,12 +18,12 @@
 
 - `route.mjs` / `engines.mjs` ← `hiBoss/lab/engine/mouse/`
 - `route.bjh.mjs` / `press.bjh.mjs` ← `hiBoss/lab/probe/baseline/`
-- `compose/*.mjs`(6 个) ← `hiBoss/lab/engine/compose/`
+- `compose/*.mjs`(7 个) ← `hiBoss/lab/engine/compose/`
 - `capture/*.mjs`(3 个) ← `hiBoss/lab/engine/capture/`
 
-### 为什么鼠标那四个是平铺的,打字那九个带目录
+### 为什么鼠标那四个是平铺的,打字那十个带目录
 
-鼠标那四个互不 import,平铺零成本。打字那九个**跨目录互相 import**
+鼠标那四个互不 import,平铺零成本。打字那十个**跨目录互相 import**
 (`compose/planner.mjs` 要 `../capture/tracker.mjs`),平铺就得改 import 语句——
 那就破了「一行不改」。**保结构比保平铺重要。**
 
@@ -49,14 +49,19 @@
 跟自己比,门禁等于没有。
 
 - `test/fixtures/osengine-hiboss-<commit>.json`(鼠标)
-- `test/fixtures/osengine-compose-hiboss-<commit>.json`(打字):4 条文案 x 3 个种子,
-  **含一个上游自己排不出来的组合**。失败也要钉住:我们的副本若在上游失败处成功了,
-  那正是漂移,而且是最难发现的一种——看上去「更好用了」。
+- `test/fixtures/osengine-compose-hiboss-<commit>.json`(打字):4 条文案 x 3 个种子。
+
+打字侧另有一条**不靠基准**的门禁:「呣」必须抛异常并指名字元,「嗯」必须排成
+`KeyE,KeyN`。它钉的是上游 2026-08-31 修掉的那个静默 bug —— pinyin-pro 给「嗯」的
+`ng` 是**词典注音**,真人打的是 `en`;排成 `KeyN,KeyG` 后自研 TIP 走 commit(word)
+直接上屏、屏幕上看不出问题,**一旦回落到系统输入法就上不了屏**。基准文案里没有
+「嗯」,所以这条与逐字段一致那条互补,缺一不可(变异验证:改 INPUT_PY 只有这条红)。
 
 生成时两边的 `pinyin-pro` 必须同版本(当前 3.29.3),否则会把一个版本差烘进基准。
 
-变异验证过:把 `compose/timing.mjs` 的 LCG 增量从 `12345` 改成 `12346`,
-一致性用例当场红,其余四条照绿。
+变异验证过两次:把 `compose/timing.mjs` 的 LCG 增量从 `12345` 改成 `12346`,
+逐字段一致那条当场红;把 `pinyin.mjs` 的 `INPUT_PY.嗯` 从 `en` 改成 `eng`,
+只有「打不出的字元」那条红。**两条各管各的,都验过会红。**
 
 ## 门禁只防「我们改坏」,不防「上游前进了」
 
