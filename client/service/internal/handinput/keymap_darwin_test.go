@@ -29,7 +29,7 @@ func TestDarwinKeymapCoversWholeAlphabet(t *testing.T) {
 func TestDarwinKeymapRefusesUnknown(t *testing.T) {
 	// 没有兜底是刻意的。上游在字元→键位那张表上吃过这个亏:一稿写了默认值,
 	// 于是没收录的字元被静默打成「,」,排版 ok=true、退出码 0,真机上却打错字。
-	for _, code := range []string{"KeyÄ", "F1", "Enter", "", "Digit10", "ShiftRight"} {
+	for _, code := range []string{"KeyÄ", "F1", "", "Digit10", "ShiftRight"} {
 		if _, err := darwinKeyCode(code); err == nil {
 			t.Errorf("%q 不在表里却没报错 —— 兜底会把打错字变成静默失败", code)
 		}
@@ -45,5 +45,14 @@ func TestDarwinKeymapValuesAreDistinct(t *testing.T) {
 			t.Errorf("%s 与 %s 都映射到 %#x", code, prev, vk)
 		}
 		seen[vk] = code
+	}
+}
+
+// 排版器能发出、我们刻意不收的键,必须被拒——而且要一直被拒,直到单独立案放行。
+func TestDarwinKeymapRefusesOnPurpose(t *testing.T) {
+	for _, code := range refusedOnPurpose {
+		if _, err := darwinKeyCode(code); err == nil {
+			t.Errorf("%s 被刻意排除在键码表外(裸 Enter 会发送),不该查得到", code)
+		}
 	}
 }

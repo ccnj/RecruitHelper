@@ -20,10 +20,12 @@ import "fmt"
 // # 枚举面
 //
 // 与 darwin 那张**同一个集合**,取自上游 `compose/pinyin.mjs`:26 个字母、10 个数字、
-// `PUNCT_KEY` 那八个标点、Space(上屏)、ShiftLeft(修饰)。按「平台枚举面事实门」
-// 不收任何"以后可能用得上"的键:上游的 windowsKey 还有 Enter/Tab/Backspace/Escape/
-// Equal/Bracket*/ShiftRight/CapsLock,**我们一个都不收**——排版器发不出它们,
-// 收进来只会在真出问题时让人以为它验过。
+// `PUNCT_KEY` + `ASCII_KEY` 合起来的十一个 OEM 键、Space、ShiftLeft。按「平台枚举面
+// 事实门」不收任何"以后可能用得上"的键:上游的 windowsKey 还有 Tab/Backspace/
+// Escape/ShiftRight/CapsLock,**我们一个都不收**——排版器发不出它们。
+//
+// **Enter 刻意不收**,理由见 keymap_darwin.go 文件头:排版器能为换行段发 Shift+Enter,
+// 但裸 Enter 在聊天框里是发送,Shift 时序稍偏就把半截话发给候选人。
 //
 // # 键码值的出处
 //
@@ -34,14 +36,17 @@ import "fmt"
 // W3C code 的定义也是物理键位,两边同一口径。
 var windowsKeyCodes = map[string]uint16{
 	// 标点。全集来自 pinyin.mjs 的 PUNCT_KEY,顺序与 darwin 表一致便于对照。
-	"Minus":     0xBD, // VK_OEM_MINUS
-	"Quote":     0xDE, // VK_OEM_7
-	"Semicolon": 0xBA, // VK_OEM_1
-	"Backslash": 0xDC, // VK_OEM_5
-	"Comma":     0xBC, // VK_OEM_COMMA
-	"Slash":     0xBF, // VK_OEM_2
-	"Period":    0xBE, // VK_OEM_PERIOD
-	"Backquote": 0xC0, // VK_OEM_3
+	"Minus":        0xBD, // VK_OEM_MINUS
+	"Equal":        0xBB, // VK_OEM_PLUS
+	"BracketLeft":  0xDB, // VK_OEM_4
+	"BracketRight": 0xDD, // VK_OEM_6
+	"Quote":        0xDE, // VK_OEM_7
+	"Semicolon":    0xBA, // VK_OEM_1
+	"Backslash":    0xDC, // VK_OEM_5
+	"Comma":        0xBC, // VK_OEM_COMMA
+	"Slash":        0xBF, // VK_OEM_2
+	"Period":       0xBE, // VK_OEM_PERIOD
+	"Backquote":    0xC0, // VK_OEM_3
 
 	"Space":     0x20, // VK_SPACE
 	"ShiftLeft": 0xA0, // VK_LSHIFT —— 不是 VK_SHIFT(0x10)。后者是"哪边都行"的
