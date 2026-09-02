@@ -1,4 +1,4 @@
-import { appGet, appPost } from '../api'
+import { appGet, appPost, DetailedError } from '../api'
 import {
   adaptCandidateDetail,
   adaptProductSnapshot,
@@ -47,10 +47,36 @@ interface ProductAcceptedResponse {
   accepted: boolean
 }
 
+/**
+ * 多个招聘平台同时已登录时脑不猜(2026-09-02 批 D 2.1),把候选列表交回界面让用户选。
+ * platforms 只是平台 id(脑手契约的公开路由键),不含任何账号身份。
+ */
+export class PlatformChoiceRequired extends Error {
+  constructor(message: string, readonly platforms: string[]) {
+    super(message)
+    this.name = 'PlatformChoiceRequired'
+  }
+}
+
 // 完整流程按「当日职位计划」跑(2026-09-01):不再携带职位 ID,当天的职位
 // 名单由脑按后台有效职位∩平台在线自行定稿。
-export async function startProductWorkflow(mode: 'full' | 'replyOnly'): Promise<void> {
-  await appPost<ProductAcceptedResponse>('/app/workflow/start', { mode })
+// platform 可选(2026-09-02 批 D 2.1):未指定时请求体保持 {"mode":...} 不变。
+export async function startProductWorkflow(mode: 'full' | 'replyOnly', platform?: string): Promise<void> {
+  try {
+    await appPost<ProductAcceptedResponse>(
+      '/app/workflow/start',
+      platform ? { mode, platform } : { mode },
+    )
+  } catch (reason) {
+    if (reason instanceof DetailedError) {
+      const candidates = reason.diagnostics?.platforms
+      if (Array.isArray(candidates) && candidates.length > 0 &&
+        candidates.every((item) => typeof item === 'string')) {
+        throw new PlatformChoiceRequired(reason.message, candidates as string[])
+      }
+    }
+    throw reason
+  }
 }
 
 export interface DailyPlanEntry {

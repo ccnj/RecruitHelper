@@ -254,6 +254,16 @@ export interface ProductData {
   clientVersion: string
 }
 
+/**
+ * 多平台歧义时的选择控件状态(2026-09-02 批 D 2.1):options 来自脑的候选列表,
+ * 只在脑报歧义后出现;单平台客户恒为 null,界面零变化。
+ */
+export interface PlatformChoice {
+  options: string[]
+  selected: string | null
+  onSelect: (platform: string) => void
+}
+
 export interface ProductActions {
   startWorkflow?: (mode: 'full' | 'replyOnly') => void | Promise<void>
   pauseWorkflow?: () => void | Promise<void>
