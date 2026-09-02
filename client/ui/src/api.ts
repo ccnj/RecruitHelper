@@ -46,11 +46,6 @@ async function readResponse<T>(response: Response, path: string): Promise<T> {
     const detail = body && typeof body === 'object' && 'error' in body
       ? String((body as { error: unknown }).error)
       : `HTTP ${response.status}`
-    // 响应体是对象时随错误一并带出(DetailedError 是 Error 的子类,既有 errorText 照常):
-    // 产品面的「多平台歧义」要靠响应里的 platforms 候选列表渲染选择控件。
-    if (body && typeof body === 'object') {
-      throw new DetailedError(detail, body as Record<string, unknown>)
-    }
     throw new Error(detail)
   }
   return (body ?? {}) as T

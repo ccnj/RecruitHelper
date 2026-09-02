@@ -159,19 +159,6 @@ assert.ok(
   '状态卡原样显示 homeStatus 的说法与说明',
 )
 
-// 多平台歧义选择控件(2026-09-02 批 D 2.1):脑报歧义前不渲染;报了才出现,选项按平台 id 映射中文。
-assert.equal(statusCard.includes('rh-platform-select'), false, '没有歧义时不得出现平台选择控件')
-const withChoice = renderToStaticMarkup(createElement(HomePage, {
-  actions,
-  customer,
-  onOpenConfirmation() {},
-  overview: { ...overview, workflow: { ...overview.workflow, state: 'idle', canStart: true } },
-  platformChoice: { options: ['zhilian', 'boss'], selected: 'boss', onSelect() {} },
-}))
-assert.ok(withChoice.includes('rh-platform-select'), '歧义时渲染平台选择控件')
-assert.ok(withChoice.includes('智联招聘') && withChoice.includes('BOSS 直聘'), '平台 id 映射成中文名')
-assert.match(withChoice, /<option[^>]*value="boss"[^>]*selected/u, '记住的平台作为默认选中项')
-
 let endRequests = 0
 let confirmationMessage = ''
 confirmEndWorkflow(
