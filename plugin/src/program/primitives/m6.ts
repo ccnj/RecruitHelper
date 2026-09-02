@@ -36,6 +36,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const readSourcingResume: Primitive = {
   name: PrimitiveName.CandidateReadSourcingResume,
+  capability: 'readSourcingResume',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -51,6 +52,7 @@ const readSourcingResume: Primitive = {
 
 const selectSourcingPosition: Primitive = {
   name: PrimitiveName.CandidateSelectSourcingPosition,
+  capability: 'selectSourcingPosition',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -66,6 +68,7 @@ const selectSourcingPosition: Primitive = {
 
 const applySourcingFilters: Primitive = {
   name: PrimitiveName.CandidateApplySourcingFilters,
+  capability: 'applySourcingFilters',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -81,6 +84,7 @@ const applySourcingFilters: Primitive = {
 
 const readSourcingWindow: Primitive = {
   name: PrimitiveName.CandidateReadSourcingWindow,
+  capability: 'readSourcingWindow',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -96,6 +100,7 @@ const readSourcingWindow: Primitive = {
 
 const readSourcingTargetResume: Primitive = {
   name: PrimitiveName.CandidateReadSourcingTargetResume,
+  capability: 'readSourcingTargetResume',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

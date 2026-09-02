@@ -38,6 +38,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const sendMessage: Primitive = {
   name: PrimitiveName.ChatSendMessage,
+  capability: 'sendMessage',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -59,6 +60,7 @@ const sendMessage: Primitive = {
 
 const sendWechatInvite: Primitive = {
   name: PrimitiveName.ChatSendWechatInvite,
+  capability: 'sendWechatInvite',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -80,6 +82,7 @@ const sendWechatInvite: Primitive = {
 
 const acceptWechat: Primitive = {
   name: PrimitiveName.ChatAcceptWechat,
+  capability: 'acceptWechat',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -101,6 +104,7 @@ const acceptWechat: Primitive = {
 
 const readWechatExchangeOutcome: Primitive = {
   name: PrimitiveName.ChatReadWechatExchangeOutcome,
+  capability: 'readWechatExchangeOutcome',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -116,6 +120,7 @@ const readWechatExchangeOutcome: Primitive = {
 
 const sendInviteCard: Primitive = {
   name: PrimitiveName.ChatSendInviteCard,
+  capability: 'sendInviteCard',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

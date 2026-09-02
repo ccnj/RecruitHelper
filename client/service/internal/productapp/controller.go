@@ -27,13 +27,49 @@ var (
 	ErrLoginRequired        = errors.New("平台登录不可用")
 	ErrWechatNotConfigured  = errors.New("平台个人中心尚未配置微信号")
 	ErrWechatCheckFailed    = errors.New("微信号配置检查未完成")
+	// ErrHandCapabilityMissing:该平台的插件未声明/未实现这条原语(2026-09-02 甲方裁决,
+	// hello 按平台声明能力)。开工闸类与尽力而为类调用遇到它一律"跳过并留痕",不算失败、
+	// 不重试;由 appbridge 把脑闸 ErrCapability 与手侧 PROTO_UNSUPPORTED_CMD 两种信号翻成它。
+	ErrHandCapabilityMissing = errors.New("该平台的插件未实现此能力")
+	// ErrPlatformAmbiguous:多个招聘平台同时已登录(2026-09-02 甲方裁决,批 D 2.1)。脑不猜,
+	// 由 UI 让用户显式选择;每日自动开始遇到它按当日失败收场、不自动挑选。
+	ErrPlatformAmbiguous = errors.New("多个招聘平台已登录,请选择本次要运行的平台")
+	// ErrPlatformInvalid:请求体里的平台标识不合法(超长或含空白)。
+	ErrPlatformInvalid = errors.New("平台标识无效")
 )
+
+// PlatformAmbiguousError 携带候选平台列表,errors.Is 命中 ErrPlatformAmbiguous、
+// errors.As 取列表。列表只含平台 id,不含任何账号身份。
+type PlatformAmbiguousError struct {
+	Platforms []string
+}
+
+func (e *PlatformAmbiguousError) Error() string {
+	return ErrPlatformAmbiguous.Error() + ": " + strings.Join(e.Platforms, ",")
+}
+
+func (e *PlatformAmbiguousError) Unwrap() error { return ErrPlatformAmbiguous }
+
+// maxPlatformIDLength 与契约 CmdContext.platform 的 maxLength 一致。
+const maxPlatformIDLength = 64
+
+// ValidPlatformID 是产品面与自动开始共用的平台标识形态校验:空串合法(未指定)。
+func ValidPlatformID(platform string) bool {
+	if platform == "" {
+		return true
+	}
+	if len(platform) > maxPlatformIDLength {
+		return false
+	}
+	return strings.IndexFunc(platform, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }) < 0
+}
 
 // AccountResolver 在"开始"时探测当前 Chrome 登录的平台主体,按指纹找回既有
 // 账本根或当场建档(2026-07-30 甲方裁决"账号跟随登录")。它是 effectful 入口的
 // 精确解析;只读投影不探测,用 currentAccount 的最近验证启发式。
 type AccountResolver interface {
-	ResolveCurrent(ctx context.Context) (store.AccountKey, error)
+	// platform 为空表示未指定,由解析器对手声明的每个平台各探一次;非空时只探它。
+	ResolveCurrent(ctx context.Context, platform string) (store.AccountKey, error)
 }
 
 // WechatSettingReader 在"开始"时经手读取平台个人中心的微信号配置是否已填
@@ -180,13 +216,17 @@ func New(
 
 func (c *Controller) Start(
 	ctx context.Context,
-	mode, expectedBackendJobID string,
+	mode, expectedBackendJobID, platform string,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	mode = strings.TrimSpace(mode)
 	expectedBackendJobID = strings.TrimSpace(expectedBackendJobID)
+	platform = strings.TrimSpace(platform)
+	if !ValidPlatformID(platform) {
+		return ErrPlatformInvalid
+	}
 	switch mode {
 	case string(workflow.ModeReplyOnly):
 		if expectedBackendJobID != "" {
@@ -214,7 +254,7 @@ func (c *Controller) Start(
 		return workflow.ErrDailyWindowClosed
 	}
 
-	key, err := c.startAccount(ctx)
+	key, err := c.startAccount(ctx, platform)
 	if err != nil {
 		return err
 	}
@@ -294,6 +334,17 @@ func (c *Controller) gateWechatConfigured(ctx context.Context, key store.Account
 	}
 	configured, err := c.wechatReader.ReadWechatConfigured(ctx, key)
 	if err != nil {
+		// 该平台的插件没有这条原语(2026-09-02 甲方裁决 2.2):开工闸按"跳过并留痕"放行。
+		// 脑闸拒绝发生在记账之前、cmd_records 无痕,留痕只能在这里写。放行的方向由裁决定:
+		// BOSS 第一刀既无 readWechatSetting 也无换微信原语,跳过闸是安全的;将来 BOSS 补了
+		// 换微信而没补本原语,这道闸会被静默跳过——届时应先补能力再开换微信,不能靠闸。
+		if errors.Is(err, ErrHandCapabilityMissing) {
+			slog.Info("微信配置闸:该平台无此能力,跳过",
+				"errorCode", "wechatGateCapabilitySkipped", "platform", key.Platform, "err", err)
+			c.store.Audit("wechat_gate_capability_skipped", "", "",
+				fmt.Sprintf("platform=%s primitive=account.readWechatSetting@1 %v", key.Platform, err))
+			return nil
+		}
 		// 手离线/多手是既有哨兵,保持原文案;其余失败统一归"检查未完成"。
 		if errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrHandAmbiguous) {
 			return err
@@ -345,6 +396,14 @@ func (c *Controller) collectNoticesBestEffort(ctx context.Context, key store.Acc
 		return
 	}
 	if err := c.noticeCollector.CollectNotices(ctx, key); err != nil {
+		if errors.Is(err, ErrHandCapabilityMissing) {
+			// 不是失败,是该平台没这条原语(2026-09-02 甲方裁决 2.2):Info 级并留审计行。
+			slog.Info("平台通知读取:该平台无此能力,跳过",
+				"errorCode", "noticeCollectCapabilitySkipped", "platform", key.Platform, "err", err)
+			c.store.Audit("notice_collect_capability_skipped", "", "",
+				fmt.Sprintf("platform=%s primitive=account.readNotices@1 %v", key.Platform, err))
+			return
+		}
 		slog.Warn("平台通知读取失败,跳过本次(不影响开始)",
 			"errorCode", "noticeCollectFailed", "err", err)
 	}
@@ -584,14 +643,17 @@ func (c *Controller) accountCommunicationState(key store.AccountKey) (string, er
 // startAccount 是"开始"这一 effectful 入口的账号解析:优先探测当前 Chrome
 // 登录的主体(账号跟随登录,2026-07-30 裁决)。运行中的工作流仍钉住自己的账号,
 // 追加批次不得因用户中途切号而漂移。
-func (c *Controller) startAccount(ctx context.Context) (store.AccountKey, error) {
+//
+// platform(2026-09-02 甲方裁决,批 D 2.1)只影响新解析:运行中的工作流仍钉自己的账号,
+// 用户此时指定的平台即便与运行不一致也忽略——运行中的"开始"本就是幂等返回。
+func (c *Controller) startAccount(ctx context.Context, platform string) (store.AccountKey, error) {
 	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
 		return store.AccountKey{}, err
 	} else if run != nil {
 		return store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}, nil
 	}
 	if c.resolver != nil {
-		return c.resolver.ResolveCurrent(ctx)
+		return c.resolver.ResolveCurrent(ctx, platform)
 	}
 	return c.currentAccount()
 }

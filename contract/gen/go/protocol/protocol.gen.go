@@ -7,7 +7,7 @@ import "encoding/json"
 // 协议主版本与契约指纹
 const (
 	ProtoVersion       = 1
-	ContractHash       = "sha256:1408c116d879af63ae1ccfde3b19435a84f0a5580952e00c1368ee586dfc12c9"
+	ContractHash       = "sha256:e19513d6cc17985f248effe9faed114a287bd5dc1e3b4ef603f6cd6aeb003ab8"
 	UnknownFieldPolicy = "must-ignore"
 	ContractHashPolicy = "warn-only"
 	JSONIntegerPolicy  = "safe-int53"
@@ -1017,7 +1017,7 @@ var KindBodyFields = map[Kind][]string{
 	KindCancel:   {"reason", "ref"},
 	KindCmd:      {"args", "context", "deadline", "execBudgetMs", "guards", "idemKey", "leaseMs", "name", "ver"},
 	KindEvent:    {"context", "data", "name", "observedAt"},
-	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "journalOpen", "outboxPending", "protoSupported", "witnessStoreId"},
+	KindHello:    {"app", "bootId", "caps", "contractHash", "features", "handId", "journalOpen", "outboxPending", "platforms", "protoSupported", "witnessStoreId"},
 	KindPing:     {"contexts", "inFlight", "journalOpen", "outboxPending", "queueDepth", "witnessStoreId"},
 	KindPong:     {"now"},
 	KindProgress: {"pct", "ref", "stage"},

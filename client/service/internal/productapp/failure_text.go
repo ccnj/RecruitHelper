@@ -27,6 +27,10 @@ func StartFailureText(err error) string {
 		return "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试"
 	case errors.Is(err, ErrHandAmbiguous):
 		return "检测到多个在线插件，请只保留一个装有插件的 Chrome"
+	case errors.Is(err, ErrPlatformAmbiguous):
+		return "检测到多个招聘平台已登录，请选择本次要运行的平台"
+	case errors.Is(err, ErrPlatformInvalid):
+		return "平台标识无效"
 	case errors.Is(err, ErrLoginRequired):
 		return "请先在 Chrome 中登录智联招聘端，再点击开始"
 	case errors.Is(err, ErrJobConfigUnavailable):

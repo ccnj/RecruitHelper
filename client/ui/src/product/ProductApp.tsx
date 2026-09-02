@@ -11,6 +11,7 @@ import { createDailyPlanFixture, createEmptyProductData, createProductFixture } 
 import type {
   CandidateView,
   CandidateViewItem,
+  PlatformChoice,
   ProductActions,
   ProductData,
   ProductPage,
@@ -25,6 +26,7 @@ export interface ProductAppProps {
   statusMessage?: string | null
   updateStatus?: ProductUpdateStatus | null
   dailyPlan?: DailyPlanView | null
+  platformChoice?: PlatformChoice | null
 }
 
 const candidatePages = new Set<ProductPage>([
@@ -42,6 +44,7 @@ export function ProductApp({
   statusMessage,
   updateStatus = null,
   dailyPlan = null,
+  platformChoice = null,
 }: ProductAppProps) {
   const [activePage, setActivePage] = useState<ProductPage>(initialPage)
   const [globalSearch, setGlobalSearch] = useState('')
@@ -99,6 +102,7 @@ export function ProductApp({
         dailyPlan={dailyPlan}
         onOpenConfirmation={() => navigate('confirmation')}
         overview={data.overview}
+        platformChoice={platformChoice}
       />
     )
   } else if (activePage === 'confirmation') {

@@ -68,18 +68,20 @@ func (f *fakeStore) AppCurrentJob() (store.AppJobProjection, error) {
 }
 
 type fakeControl struct {
-	startCalls  int
-	startMode   string
-	startJobID  string
-	startErr    error
-	resumeCalls int
-	resumeErr   error
+	startCalls    int
+	startMode     string
+	startJobID    string
+	startPlatform string
+	startErr      error
+	resumeCalls   int
+	resumeErr     error
 }
 
-func (f *fakeControl) Start(_ context.Context, mode, backendJobID string) error {
+func (f *fakeControl) Start(_ context.Context, mode, backendJobID, platform string) error {
 	f.startCalls++
 	f.startMode = mode
 	f.startJobID = backendJobID
+	f.startPlatform = platform
 	return f.startErr
 }
 

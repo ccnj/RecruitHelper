@@ -34,6 +34,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const readWechatSetting: Primitive = {
   name: PrimitiveName.AccountReadWechatSetting,
+  capability: 'readWechatSetting',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -49,6 +50,7 @@ const readWechatSetting: Primitive = {
 
 const readNotices: Primitive = {
   name: PrimitiveName.AccountReadNotices,
+  capability: 'readNotices',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

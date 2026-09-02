@@ -45,7 +45,7 @@ import {
   getWsUrl,
   newMsgId,
 } from './config'
-import { capabilities } from '../program/registry'
+import { capabilities, capabilitiesByPlatform } from '../program/registry'
 import { setSessionBlobParams } from './capture'
 import { Dispatcher, SendOutcome } from './dispatcher'
 import { acknowledgeRuntimeReloadResult } from './reload'
@@ -279,6 +279,12 @@ export class Connection {
     )
     this.witnessEnabledForSession = witnessAdvertisement !== null
     this.dispatcher.setSessionCapabilities(sessionCaps)
+    // 按平台细分的能力面(2026-09-02 甲方裁决):与并集取交集,构造上保证每张表 ⊆ caps——
+    // 证词库不可用时 SX 能力从并集剔除,平台表里也不得出现。
+    const platforms = capabilitiesByPlatform().map(({ id, caps }) => ({
+      id,
+      caps: caps.filter((capability) => sessionCaps.includes(capability)),
+    }))
     const hello = {
       handId,
       bootId: BOOT_ID,
@@ -286,6 +292,7 @@ export class Connection {
       contractHash: CONTRACT_HASH,
       app: { extVersion: chrome.runtime.getManifest().version, browser: 'chrome' },
       caps: sessionCaps,
+      platforms,
       features: witnessAdvertisement
         ? [...BASE_FEATURES, Feature.Witness1]
         : [...BASE_FEATURES],

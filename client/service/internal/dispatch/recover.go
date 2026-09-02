@@ -275,7 +275,7 @@ func (d *Dispatcher) releaseSafeRecoveries(handID string) {
 	// 一条缺失，就把整组改走验证，避免先重投一部分再发现同代手已降档。
 	for i := range commands {
 		meta, ok := protocol.Primitives[commands[i].Name]
-		if !ok || d.requireNegotiation(handID, commands[i].Name, meta) != nil {
+		if !ok || d.requireNegotiation(handID, commands[i].Name, recordPlatform(commands[i].Platform, commands[i].Args), meta) != nil {
 			reason := "安全恢复时当前手缺少原命令 capability，禁止重投并改走验证"
 			for j := range commands {
 				if moveErr := d.st.MoveEffectToVerification(commands[j].MsgID, reason, time.Now()); moveErr != nil {
@@ -320,7 +320,7 @@ func (d *Dispatcher) resendCmdAt(cmd store.CmdRecord, session string, now time.T
 			d.moveRecoveryCapabilityMismatchToVerification(cmd, "原命令 metadata 已不存在")
 			return false
 		}
-		if err := d.requireNegotiation(cmd.HandID, cmd.Name, meta); err != nil {
+		if err := d.requireNegotiation(cmd.HandID, cmd.Name, recordPlatform(cmd.Platform, cmd.Args), meta); err != nil {
 			d.moveRecoveryCapabilityMismatchToVerification(cmd, err.Error())
 			return false
 		}

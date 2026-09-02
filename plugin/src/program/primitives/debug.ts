@@ -27,6 +27,7 @@ const pingPrim: Primitive = {
 // 不驱动页面、不读取出站结果之外的业务数据，也不把页面异常透传给脑。
 const inspectSendSurfacePrim: Primitive = {
   name: PrimName.DebugInspectSendSurface,
+  capability: 'inspectSendSurface',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     // 契约 preconditions 为空,命令可能不带 context,故走 unbound 入口。
@@ -92,6 +93,7 @@ const slowEchoPrim: Primitive = {
 // 同一编辑器准备实现,填毕停留至少 5 秒供肉眼确认后取消;构造性不含发送路径。
 const probeInterviewEditorPrim: Primitive = {
   name: PrimName.DebugProbeInterviewEditor,
+  capability: 'probeInterviewEditor',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -120,6 +122,7 @@ const probeInterviewEditorPrim: Primitive = {
 // 降级型感知:失败只产生缺图,脑侧不重试、不因此改变任何业务判定。
 const capturePagePrim: Primitive = {
   name: PrimName.DebugCapturePage,
+  capability: 'capturePageSnapshot',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -153,6 +156,7 @@ const capturePagePrim: Primitive = {
 // 测试与生产共用同一分发器、同一信封、同一分发路径,区别只在谁生产这条命令。
 const osProbePrim: Primitive = {
   name: PrimName.DebugOsProbe,
+  capability: 'osProbe',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -173,6 +177,7 @@ const osProbePrim: Primitive = {
 // 那道闸由适配器执行,与发送原语用同一个。
 const osTypePrim: Primitive = {
   name: PrimName.DebugOsType,
+  capability: 'osType',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

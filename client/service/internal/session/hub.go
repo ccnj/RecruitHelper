@@ -172,6 +172,55 @@ func (h *Hub) HandNegotiation(handID string) ([]string, []string, bool) {
 	return append([]string(nil), c.caps...), append([]string(nil), c.features...), true
 }
 
+// HandPlatformCaps 实现 dispatch.platformNegotiator:返回手在 hello 里为某平台声明的
+// 能力表(2026-09-02 甲方裁决)。declared=false 表示手未声明 platforms、声明中无该平台、
+// 或同 id 重复(两份表打架说明手侧接线写重了,按未声明处理并留痕)——调用方回落并集,
+// 与手未声明时逐字相同。与 HandNegotiation 同样只对 ready 会话成立。
+func (h *Hub) HandPlatformCaps(handID, platform string) ([]string, bool, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || !h.readyLocked(c) {
+		return nil, false, false
+	}
+	var found *protocol.HelloPlatform
+	for i := range c.platforms {
+		if c.platforms[i].Id != platform {
+			continue
+		}
+		if found != nil {
+			slog.Warn("手在 hello 里重复声明同一平台,按未声明回落并集", "handId", handID, "platform", platform)
+			return nil, false, true
+		}
+		found = &c.platforms[i]
+	}
+	if found == nil {
+		return nil, false, true
+	}
+	return append([]string(nil), found.Caps...), true, true
+}
+
+// HandPlatforms 返回手在 hello 里声明的平台 id 列表(去重、保序);未声明返回 nil。
+// 账号解析器用它决定「开始」时探哪些平台。
+func (h *Hub) HandPlatforms(handID string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.active[handID]
+	if c == nil || !h.readyLocked(c) || c.platforms == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(c.platforms))
+	out := make([]string, 0, len(c.platforms))
+	for _, p := range c.platforms {
+		if _, dup := seen[p.Id]; dup {
+			continue
+		}
+		seen[p.Id] = struct{}{}
+		out = append(out, p.Id)
+	}
+	return out
+}
+
 // HandWitness 只返回当前 ready 会话在 hello/最新 ping 中宣告的投递层
 // 证词状态。storeId 是判定 report=unknown/queued 能否证明零副作用的栅栏，
 // 不是身份凭据。
@@ -288,6 +337,7 @@ type Conn struct {
 	bootID         string
 	caps           []string
 	features       []string
+	platforms      []protocol.HelloPlatform // hello 按平台细分的能力面;nil=手未声明(旧手)
 	contractHash   string
 	contractMatch  bool
 	extVersion     string
@@ -386,6 +436,7 @@ func (c *Conn) handshake(ctx context.Context, frames <-chan []byte, readErr <-ch
 	c.bootID = hello.BootID
 	c.caps = hello.Caps
 	c.features = hello.Features
+	c.platforms = hello.Platforms
 	c.contractHash = hello.ContractHash
 	c.contractMatch = hello.ContractHash == protocol.ContractHash
 	c.extVersion = hello.App.ExtVersion

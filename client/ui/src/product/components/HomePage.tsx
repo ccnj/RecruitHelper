@@ -1,5 +1,5 @@
 import type { DailyPlanEntry, DailyPlanView } from '../api'
-import type { ProductActions, ProductData, ProductMetric } from '../types'
+import type { PlatformChoice, ProductActions, ProductData, ProductMetric } from '../types'
 import { ProductIcon } from './ProductIcon'
 import { EmptyState, MetricValue, StatusPill } from './ProductPrimitives'
 
@@ -9,6 +9,17 @@ interface HomePageProps {
   actions: ProductActions
   onOpenConfirmation: () => void
   dailyPlan?: DailyPlanView | null
+  platformChoice?: PlatformChoice | null
+}
+
+// 平台 id 是脑手契约的公开路由键,界面只做展示映射;未知 id 原样显示,不猜。
+const PLATFORM_LABELS: Record<string, string> = {
+  zhilian: '智联招聘',
+  boss: 'BOSS 直聘',
+}
+
+export function platformLabel(platform: string): string {
+  return PLATFORM_LABELS[platform] ?? platform
 }
 
 function controlDisabledReason(
@@ -57,7 +68,7 @@ function planSkipReasonText(reason: string | undefined): string {
   return detail ? `${label} · ${detail}` : label
 }
 
-export function HomePage({ customer, overview, actions, onOpenConfirmation, dailyPlan }: HomePageProps) {
+export function HomePage({ customer, overview, actions, onOpenConfirmation, dailyPlan, platformChoice = null }: HomePageProps) {
   const { workflow } = overview
   const pendingEnd = workflow.pendingAction === 'end'
   const pendingSourcing = workflow.pendingAction === 'sourcing'
@@ -317,6 +328,23 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation, dail
         </div>
         {startFullReason && (workflow.state === 'idle' || workflow.state === 'failed') && (
           <div className="rh-inline-note"><ProductIcon name="warning" size={15} />{startFullReason}</div>
+        )}
+        {platformChoice && platformChoice.options.length > 0 &&
+          (workflow.state === 'idle' || workflow.state === 'failed') && (
+          <div className="rh-inline-note rh-platform-choice">
+            <ProductIcon name="warning" size={15} />
+            <label htmlFor="rh-platform-select">检测到多个招聘平台已登录，请选择本次要运行的平台：</label>
+            <select
+              id="rh-platform-select"
+              onChange={(event) => platformChoice.onSelect(event.target.value)}
+              value={platformChoice.selected ?? ''}
+            >
+              <option disabled value="">请选择</option>
+              {platformChoice.options.map((platform) => (
+                <option key={platform} value={platform}>{platformLabel(platform)}</option>
+              ))}
+            </select>
+          </div>
         )}
       </section>
 

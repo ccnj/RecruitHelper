@@ -9,6 +9,7 @@ import {
   readProductUpdateStatus,
   type DailyPlanView,
   type ProductUpdateStatus,
+  PlatformChoiceRequired,
   resumeProductWorkflow,
   sendProductConfirmation,
   startProductWorkflow,
@@ -33,6 +34,11 @@ export function ProductConnectedApp({
   const [refreshRevision, setRefreshRevision] = useState(0)
   const [updateStatus, setUpdateStatus] = useState<ProductUpdateStatus | null>(null)
   const [dailyPlan, setDailyPlan] = useState<DailyPlanView | null>(null)
+  // 多平台歧义(2026-09-02 批 D 2.1):脑报歧义后才出现候选列表;记住的只是用户自己选的
+  // 平台 id 字符串,不是 /app 响应,且只作为下次歧义时的默认选中项,不自动发送——
+  // 免得记住的平台登出后把另一个已登录平台的开始也拦下。
+  const [platformOptions, setPlatformOptions] = useState<string[] | null>(null)
+  const [selectedPlatform, setSelectedPlatform] = useState<string | null>(() => readRememberedPlatform())
   const actionRunning = useRef(false)
 
   const refresh = useCallback(() => {
@@ -126,8 +132,14 @@ export function ProductConnectedApp({
     try {
       await action()
       setActionMessage(`${label}已受理，正在刷新业务状态。`)
+      setPlatformOptions(null)
       refresh()
     } catch (reason) {
+      if (reason instanceof PlatformChoiceRequired) {
+        setPlatformOptions(reason.platforms)
+        setActionMessage(`${label}未能开始：${reason.message}，请在下方选择平台后再点一次`)
+        return
+      }
       setActionMessage(`${label}未能执行：${errorText(reason)}`)
     } finally {
       actionRunning.current = false
@@ -164,7 +176,8 @@ export function ProductConnectedApp({
         ),
         startWorkflow: (mode) => performProductAction(
           mode === 'full' ? '今日任务' : '只处理消息',
-          () => startProductWorkflow(mode),
+          // 只有选择控件在场(脑刚报过歧义)时才带 platform;单平台客户请求体不变。
+          () => startProductWorkflow(mode, platformOptions ? selectedPlatform ?? undefined : undefined),
         ),
         copyWechat: async (wechatAccount) => {
           await navigator.clipboard.writeText(wechatAccount)
@@ -172,10 +185,41 @@ export function ProductConnectedApp({
       }}
       dailyPlan={dailyPlan}
       data={data}
+      platformChoice={platformOptions ? {
+        options: platformOptions,
+        selected: selectedPlatform && platformOptions.includes(selectedPlatform) ? selectedPlatform : null,
+        onSelect: (platform) => {
+          setSelectedPlatform(platform)
+          rememberPlatform(platform)
+        },
+      } : null}
       statusMessage={statusMessage}
       updateStatus={updateStatus}
     />
   )
+}
+
+const PLATFORM_STORAGE_KEY = 'recruithelper.product.platform'
+
+// 隐私模式下连读 localStorage 都会抛,try 裹住访问本身;拿不到就当没记过。
+// 这里存的只是用户自己选的平台 id,不是任何 /app 响应(同机产品 UI 业务投影例外)。
+function readRememberedPlatform(): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null
+    const value = localStorage.getItem(PLATFORM_STORAGE_KEY)
+    return value && value.length <= 64 ? value : null
+  } catch {
+    return null
+  }
+}
+
+function rememberPlatform(platform: string): void {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(PLATFORM_STORAGE_KEY, platform)
+  } catch {
+    // 存不上只是下次要再选一次,不是失效。
+  }
 }
 
 function errorText(reason: unknown): string {

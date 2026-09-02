@@ -41,6 +41,44 @@ func TestValidateLocalHelloRequiresStableHandID(t *testing.T) {
 	assertValidationError(t, ValidateKindBody(KindHello, nullID), "$.handId", "nullable")
 }
 
+// hello.platforms 是 optional、must-ignore 的按平台能力面(2026-09-02 甲方裁决,规格 §4.1):
+// 缺席合法(旧手);声明时每项 id 非空、caps 与 HelloBody.caps 同款上限。
+func TestValidateHelloPlatformsOptionalAndBounded(t *testing.T) {
+	base := `"handId":"h-1","bootId":"b-1","protoSupported":[1],"contractHash":"sha256:x",
+		"app":{"extVersion":"0.1.0","browser":"chrome"},"caps":["probe.platform@1","chat.readThread@1"],"features":[]`
+	declared := json.RawMessage(`{` + base + `,
+		"platforms":[{"id":"zhilian","caps":["probe.platform@1","chat.readThread@1"]},{"id":"boss","caps":["probe.platform@1"]}]
+	}`)
+	if err := ValidateKindBody(KindHello, declared); err != nil {
+		t.Fatalf("按平台声明能力的 hello 应通过:%v", err)
+	}
+	var body HelloBody
+	if err := json.Unmarshal(declared, &body); err != nil || len(body.Platforms) != 2 || body.Platforms[1].Id != "boss" {
+		t.Fatalf("platforms 解码不符:%+v err=%v", body.Platforms, err)
+	}
+	absent := json.RawMessage(`{` + base + `}`)
+	if err := ValidateKindBody(KindHello, absent); err != nil {
+		t.Fatalf("旧手不发 platforms 必须照旧通过:%v", err)
+	}
+	var legacy HelloBody
+	if err := json.Unmarshal(absent, &legacy); err != nil || legacy.Platforms != nil {
+		t.Fatalf("缺席必须解码成 nil(与声明为空数组可区分):%+v", legacy.Platforms)
+	}
+	var emptyDeclared HelloBody
+	if err := json.Unmarshal(json.RawMessage(`{`+base+`,"platforms":[]}`), &emptyDeclared); err != nil ||
+		emptyDeclared.Platforms == nil || len(emptyDeclared.Platforms) != 0 {
+		t.Fatalf("声明为空数组必须解码成非 nil 空切片:%#v", emptyDeclared.Platforms)
+	}
+	emptyID := json.RawMessage(`{` + base + `,"platforms":[{"id":"","caps":[]}]}`)
+	assertValidationError(t, ValidateKindBody(KindHello, emptyID), "$.platforms[0].id", "minLength")
+	missingCaps := json.RawMessage(`{` + base + `,"platforms":[{"id":"boss"}]}`)
+	assertValidationError(t, ValidateKindBody(KindHello, missingCaps), "$.platforms[0].caps", "required")
+	tooMany := json.RawMessage(`{` + base + `,"platforms":[` +
+		`{"id":"p1","caps":[]},{"id":"p2","caps":[]},{"id":"p3","caps":[]},{"id":"p4","caps":[]},` +
+		`{"id":"p5","caps":[]},{"id":"p6","caps":[]},{"id":"p7","caps":[]},{"id":"p8","caps":[]},{"id":"p9","caps":[]}]}`)
+	assertValidationError(t, ValidateKindBody(KindHello, tooMany), "$.platforms", "maxItems")
+}
+
 func TestValidateCommandSemanticGates(t *testing.T) {
 	preBindProbe := json.RawMessage(`{"name":"probe.platform","ver":1,"args":{},"deadline":1999999999999,"execBudgetMs":5000}`)
 	if err := ValidateKindBody(KindCmd, preBindProbe); err != nil {

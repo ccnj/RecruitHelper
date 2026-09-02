@@ -177,7 +177,7 @@ func (d *Dispatcher) SendMessage(req SendMessageRequest) (*SendMessageReceipt, e
 	}
 
 	now := time.Now()
-	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta, req.Platform)
 	idemKey := BuildEffectIdemKey(req.Platform, req.AccountRef, protocol.PrimChatSendMessage,
 		req.ConversationRef, req.IntentID)
 	intent := store.EffectIntent{
@@ -383,7 +383,7 @@ func (d *Dispatcher) SendAutomaticCard(req SendAutomaticCardRequest) (*SendMessa
 	}
 
 	now := time.Now()
-	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta, req.Platform)
 	idemKey := BuildEffectIdemKey(
 		req.Platform,
 		req.AccountRef,
@@ -595,7 +595,7 @@ func (d *Dispatcher) SendDirectInterviewCard(
 		Primitive: protocol.PrimChatSendInviteCard, TargetRef: req.ConversationRef,
 		PayloadHash: payloadHash, GuardsHash: hashBytes(guardsRaw),
 		Status:     store.EffectIntentDispatching,
-		DeadlineMs: now.UnixMilli() + effectiveDeadlineMs(meta), SendFingerprint: fingerprint,
+		DeadlineMs: now.UnixMilli() + effectiveDeadlineMs(meta, req.Platform), SendFingerprint: fingerprint,
 	}
 	detailed, dispatchErr := d.dispatchDetailed(dispatchRequestForPreparedEffect(
 		preparation,

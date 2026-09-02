@@ -47,6 +47,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const readPublishedList: Primitive = {
   name: PrimitiveName.JobReadPublishedList,
+  capability: 'readPublishedJobs',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -62,6 +63,7 @@ const readPublishedList: Primitive = {
 
 const readClassCandidates: Primitive = {
   name: PrimitiveName.JobReadClassCandidates,
+  capability: 'readJobClassCandidates',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -77,6 +79,7 @@ const readClassCandidates: Primitive = {
 
 const readKeywordVocabulary: Primitive = {
   name: PrimitiveName.JobReadKeywordVocabulary,
+  capability: 'readJobKeywordVocabulary',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -92,6 +95,7 @@ const readKeywordVocabulary: Primitive = {
 
 const prepareDraft: Primitive = {
   name: PrimitiveName.JobPrepareDraft,
+  capability: 'prepareJobDraft',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -124,6 +128,7 @@ function failPublishOrThrow(error: unknown): PrimitiveOutcome {
 
 const publishDraft: Primitive = {
   name: PrimitiveName.JobPublishDraft,
+  capability: 'publishJobDraft',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -145,6 +150,7 @@ const publishDraft: Primitive = {
 
 const takeOffline: Primitive = {
   name: PrimitiveName.JobTakeOffline,
+  capability: 'takeJobOffline',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

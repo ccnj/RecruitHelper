@@ -64,6 +64,9 @@ func (c NoticeCollector) CollectNotices(ctx context.Context, key store.AccountKe
 		Args:                         args,
 	})
 	if err != nil {
+		if capabilityMissing(err) {
+			return fmt.Errorf("%w: %w", productapp.ErrHandCapabilityMissing, err)
+		}
 		return err
 	}
 	var data protocol.AccountReadNoticesData

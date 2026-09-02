@@ -171,7 +171,7 @@ func (d *Dispatcher) PublishJob(req PublishJobRequest) (*PublishJobReceipt, erro
 		Primitive: protocol.PrimJobPublishDraft, TargetRef: req.JobID,
 		PayloadHash: payloadHash, GuardsHash: hashBytes(guardsRaw),
 		Status:     store.EffectIntentDispatching,
-		DeadlineMs: now.UnixMilli() + effectiveDeadlineMs(meta),
+		DeadlineMs: now.UnixMilli() + effectiveDeadlineMs(meta, req.Platform),
 	}
 	detailed, dispatchErr := d.dispatchDetailed(DispatchRequest{
 		HandID: account.BoundHandID, ExpectedSession: session, ExpectedBootID: bootID,

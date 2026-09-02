@@ -58,6 +58,13 @@ type witnessSender interface {
 	HandWitness(handID string) (HandWitness, bool)
 }
 
+// platformNegotiator 是 Sender 的可选扩展(与 witnessSender 同款型断言):手在 hello 里
+// 按平台声明能力时(2026-09-02 甲方裁决),派发闸按目标平台查表。hub 实现;测试桩不实现
+// 即回落并集——与手未声明 platforms 的行为逐字相同,失效方向只有少派。
+type platformNegotiator interface {
+	HandPlatformCaps(handID, platform string) (caps []string, declared, ok bool)
+}
+
 // domainOf:无业务 context 命令的串行域键。首次绑定前 probe.platform 尚无
 // accountRef，按手落独立探测域；debug 命令仍用每手 debug 域。有 context 的
 // [S/X] 命令会在结构化派发入口覆盖为 platform:accountRef。
@@ -1409,7 +1416,7 @@ func (d *Dispatcher) resultRetryPlan(
 	child := &store.CmdRecord{
 		MsgID: ids.NewMsgID(), HandID: cmd.HandID, Session: session, BootIDAtDispatch: bootID,
 		Status: store.CmdQueued, NotBeforeAt: &notBefore,
-		DeadlineMs: notBefore.UnixMilli() + effectiveDeadlineMs(meta), ExecBudgetMs: cmd.ExecBudgetMs,
+		DeadlineMs: notBefore.UnixMilli() + effectiveDeadlineMs(meta, recordPlatform(cmd.Platform, cmd.Args)), ExecBudgetMs: cmd.ExecBudgetMs,
 	}
 	plan.Replacement = child
 	plan.ReplacementReason = fmt.Sprintf("result retryable=yes, backoff=%s", delay)
@@ -1496,14 +1503,23 @@ func mapResultStatus(s protocol.ResultStatus) store.CmdStatus {
 	}
 }
 
-func effectiveDeadlineMs(m protocol.PrimitiveMeta) int64 {
-	if m.DeadlineMs > 0 {
-		return m.DeadlineMs
+// effectiveDeadlineMs / effectiveBudgetMs:契约 meta 经平台系数放大后的期限与预算
+// (2026-09-02 甲方裁决,批 D 2.3)。platform 是必填参数,让编译器替我们找全 11 个调用点——
+// 漏一处的后果不是编译错,而是 BOSS 上 effectful 命令"预算放大、期限没放大",
+// job.takeOffline(240000/480000)会落到期限==预算的等号边,手侧定时器取等号走 expired。
+func effectiveDeadlineMs(m protocol.PrimitiveMeta, platform string) int64 {
+	base := m.DeadlineMs
+	if base <= 0 {
+		base = 2 * baseBudgetMs(m)
 	}
-	return 2 * effectiveBudgetMs(m)
+	return scaleDeadlineMs(base, platform)
 }
 
-func effectiveBudgetMs(m protocol.PrimitiveMeta) int64 {
+func effectiveBudgetMs(m protocol.PrimitiveMeta, platform string) int64 {
+	return scaleBudgetMs(baseBudgetMs(m), platform)
+}
+
+func baseBudgetMs(m protocol.PrimitiveMeta) int64 {
 	if m.ExecBudgetMs > 0 {
 		return m.ExecBudgetMs
 	}

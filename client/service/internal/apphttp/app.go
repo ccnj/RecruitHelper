@@ -71,7 +71,8 @@ type RuntimeSnapshotProvider func(context.Context) (RuntimeSnapshot, error)
 // remain in the brain and must reuse the production workflow and effect paths;
 // apphttp only validates and forwards user intent.
 type WorkflowControl interface {
-	Start(context.Context, string, string) error
+	// Start(ctx, mode, backendJobID, platform):platform 为空表示未指定(2026-09-02 批 D 2.1)。
+	Start(context.Context, string, string, string) error
 	Pause(context.Context) error
 	Resume(context.Context) error
 	End(context.Context) error
@@ -213,6 +214,10 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Mode         string `json:"mode"`
 		BackendJobID string `json:"backendJobId,omitempty"`
+		// Platform 可选(2026-09-02 批 D 2.1):多平台同时在线时由用户显式选择。
+		// decodeProductJSON 开了 DisallowUnknownFields,新 UI 一带这个键旧 handler 就 400,
+		// 所以它必须在这里登记。
+		Platform string `json:"platform,omitempty"`
 	}
 	if decodeProductJSON(r, &request) != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
@@ -220,6 +225,11 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Mode = strings.TrimSpace(request.Mode)
 	request.BackendJobID = strings.TrimSpace(request.BackendJobID)
+	request.Platform = strings.TrimSpace(request.Platform)
+	if !productapp.ValidPlatformID(request.Platform) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "工作流启动请求无效"})
+		return
+	}
 	switch request.Mode {
 	case "full":
 		// 当日职位计划(2026-09-01):完整流程不再绑定单一职位,backendJobId
@@ -241,7 +251,15 @@ func (a *API) startWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "工作流控制尚未就绪"})
 		return
 	}
-	if err := a.control.Start(r.Context(), request.Mode, request.BackendJobID); err != nil {
+	if err := a.control.Start(r.Context(), request.Mode, request.BackendJobID, request.Platform); err != nil {
+		var ambiguous *productapp.PlatformAmbiguousError
+		if errors.As(err, &ambiguous) {
+			// 候选平台 id 是脑手契约的公开路由键,不是底层错误链细节;UI 靠它渲染选择控件。
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": startFailureText(err), "platforms": ambiguous.Platforms,
+			})
+			return
+		}
 		writeJSON(w, http.StatusConflict, map[string]string{"error": startFailureText(err)})
 		return
 	}

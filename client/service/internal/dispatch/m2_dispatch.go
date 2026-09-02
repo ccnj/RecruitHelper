@@ -133,8 +133,10 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			return dispatchResult{}, ErrContractMismatch
 		}
 	}
+	// 命令的目标平台只算一次:能力闸按它查表,预算与期限按它取系数(platform.go)。
+	targetPlatform := commandPlatform(req.Context, req.Args)
 	if !opts.legacyDebug {
-		if err := d.requireNegotiation(req.HandID, req.Name, meta); err != nil {
+		if err := d.requireNegotiation(req.HandID, req.Name, targetPlatform, meta); err != nil {
 			return dispatchResult{}, err
 		}
 	}
@@ -149,7 +151,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 	}
 
 	msgID := ids.NewMsgID()
-	deadlineMs := time.Now().UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := time.Now().UnixMilli() + effectiveDeadlineMs(meta, targetPlatform)
 	idemKey := req.IdemKey
 	if opts.legacyDebug && meta.Class == protocol.ClassEffectful && idemKey == "" {
 		idemKey = fmt.Sprintf("ik1:debug:%s:%s:-:%s", req.HandID, req.Name, ids.NewMsgID())
@@ -177,7 +179,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 
 	body := protocol.CmdBody{
 		Name: req.Name, Ver: meta.Ver, Args: req.Args, Context: req.Context, IdemKey: idemKey,
-		Deadline: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta), LeaseMs: meta.LeaseMs,
+		Deadline: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta, targetPlatform), LeaseMs: meta.LeaseMs,
 		Guards: req.Guards,
 	}
 	bodyRaw, err := protocol.Encode(body)
@@ -330,13 +332,28 @@ func (d *Dispatcher) voidGenerationBoundBeforeSend(handID, msgID string, sendErr
 	return nil
 }
 
-func (d *Dispatcher) requireNegotiation(handID, name string, meta protocol.PrimitiveMeta) error {
+// requireNegotiation 是派发前的能力/特性闸。platform 非空且手声明了含该平台的
+// platforms 时按该平台的 caps 判,否则按并集判(2026-09-02 甲方裁决;规格 §4.1)。
+// 判错的方向只有"该派的没派":平台表按构造 ⊆ 并集,不会放过并集拦下的命令。
+func (d *Dispatcher) requireNegotiation(handID, name, platform string, meta protocol.PrimitiveMeta) error {
 	if meta.Batch != protocol.BatchS && meta.Batch != protocol.BatchX {
 		return nil
 	}
 	caps, features, ok := d.sender.HandNegotiation(handID)
-	if !ok || !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
+	if !ok {
 		return fmt.Errorf("%w: %s@%d", ErrCapability, name, meta.Ver)
+	}
+	scope := "并集"
+	if platform != "" {
+		if negotiator, has := d.sender.(platformNegotiator); has {
+			if platformCaps, declared, capsOK := negotiator.HandPlatformCaps(handID, platform); capsOK && declared {
+				caps = platformCaps
+				scope = "platform=" + platform
+			}
+		}
+	}
+	if !contains(caps, fmt.Sprintf("%s@%d", name, meta.Ver)) {
+		return fmt.Errorf("%w: %s@%d (%s)", ErrCapability, name, meta.Ver, scope)
 	}
 	if meta.Batch == protocol.BatchX && meta.Class == protocol.ClassEffectful && !contains(features, string(protocol.FeatureWitness1)) {
 		return fmt.Errorf("%w: %s", ErrFeature, protocol.FeatureWitness1)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -140,7 +141,7 @@ func TestFullStartSyncsConfigPlaneThenStartsDailyPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full", ""); err != nil {
+	if err := controller.Start(context.Background(), "full", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// 顺序:先回填当前职位 head(尽力而为),后复数同步(名单最终裁决)——
@@ -177,7 +178,7 @@ func TestReplyOnlyStartRefreshesConfigPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+	if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if flow.replyKey != key || source.calls != 1 || source.allCalls != 1 {
@@ -207,7 +208,7 @@ func TestReplyOnlyStartSurvivesConfigPlaneFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+	if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if flow.replyKey != key || source.calls != 1 {
@@ -277,7 +278,7 @@ func TestClosedWindowClickCannotBecomeAutomaticEightOClockStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full", "42"); !errors.Is(
+	if err := controller.Start(context.Background(), "full", "42", ""); !errors.Is(
 		err,
 		workflow.ErrDailyWindowClosed,
 	) {
@@ -311,7 +312,7 @@ func TestDevelopmentWindowOverrideUsesRealTimeAndAllowsExplicitStart(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 1 || flow.fullKey != key ||
@@ -342,7 +343,7 @@ func TestFullStartIgnoresPageJobSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 页面带上来的还是旧职位 42:不比对、不拒绝,按当日计划开跑。
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 	if flow.fullKey != key ||
@@ -384,7 +385,7 @@ func TestFullStartRecoversBoundBatchWithoutFetchingBackend(t *testing.T) {
 	// 有未终局批次时,配置面故障不得把恢复堵死:同步照常尝试(锁外读批次不可
 	// 作跳过依据),失败后按既有批次收养继续;批次自带的 revision 是不可替换
 	// 的事实,收养语义在 StartFullDailyPlan 内部。
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(flow.callOrder) == 0 || flow.callOrder[len(flow.callOrder)-1] != "dailyPlan" {
@@ -423,7 +424,7 @@ func TestStartWithActiveRunRefreshesConfigPlaneThenDelegates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 		t.Fatal(err)
 	}
 	if source.calls != 1 || source.allCalls != 1 || flow.fullKey != key ||
@@ -471,7 +472,7 @@ func TestStartFromPausedCommunicationDelegatesWithoutResuming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full", "42"); err != nil {
+	if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 		t.Fatal(err)
 	}
 	// 活跃运行在场:先尽力全刷配置面,但不擅自恢复,仍直接委托。
@@ -502,7 +503,7 @@ func TestFreshFullStartBlockedWhenPluralSyncFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := controller.Start(context.Background(), "full", ""); !errors.Is(err, sourceErr) ||
+	if err := controller.Start(context.Background(), "full", "", ""); !errors.Is(err, sourceErr) ||
 		!errors.Is(err, ErrJobConfigUnavailable) {
 		t.Fatalf("Start() error=%v", err)
 	}
@@ -757,11 +758,41 @@ func TestStartCollectsNoticesBestEffort(t *testing.T) {
 		}
 		controller.SetWechatSettingReader(&fakeWechatReader{configured: true})
 		controller.SetNoticeCollector(collector)
-		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
 			t.Fatalf("通知读取失败不得拦住开始: %v", err)
 		}
 		if flow.replyKey != key || collector.calls != 1 {
 			t.Fatalf("应读一次且照常开始: key=%+v calls=%d", flow.replyKey, collector.calls)
+		}
+	})
+
+	t.Run("capability missing is skipped with an audit row, not counted as failure", func(t *testing.T) {
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		collector := &fakeNoticeCollector{err: fmt.Errorf("%w: 手未声明原语能力", ErrHandCapabilityMissing)}
+		controller, err := New(
+			db, flow, &fakeSource{}, func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(&fakeWechatReader{configured: true})
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
+			t.Fatalf("能力缺失不得拦住开始: %v", err)
+		}
+		if flow.replyKey != key || collector.calls != 1 {
+			t.Fatalf("应读一次且照常开始: key=%+v calls=%d", flow.replyKey, collector.calls)
+		}
+		entries, _ := db.AuditEntries(20)
+		found := false
+		for _, entry := range entries {
+			if entry.Category == "notice_collect_capability_skipped" && strings.Contains(entry.Detail, "account.readNotices@1") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("跳过必须留审计行: %+v", entries)
 		}
 	})
 
@@ -776,7 +807,7 @@ func TestStartCollectsNoticesBestEffort(t *testing.T) {
 		}
 		controller.SetWechatSettingReader(&fakeWechatReader{configured: false})
 		controller.SetNoticeCollector(collector)
-		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatNotConfigured) {
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); !errors.Is(err, ErrWechatNotConfigured) {
 			t.Fatalf("微信闸应先拦下: %v", err)
 		}
 		if collector.calls != 0 {
@@ -805,7 +836,7 @@ func TestStartCollectsNoticesBestEffort(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetNoticeCollector(collector)
-		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 			t.Fatal(err)
 		}
 		if collector.calls != 0 {
@@ -831,10 +862,10 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetWechatSettingReader(reader)
-		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatNotConfigured) {
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); !errors.Is(err, ErrWechatNotConfigured) {
 			t.Fatalf("replyOnly 未被微信配置闸拦下: %v", err)
 		}
-		if err := controller.Start(context.Background(), "full", "42"); !errors.Is(err, ErrWechatNotConfigured) {
+		if err := controller.Start(context.Background(), "full", "42", ""); !errors.Is(err, ErrWechatNotConfigured) {
 			t.Fatalf("full 未被微信配置闸拦下: %v", err)
 		}
 		if source.calls != 0 || flow.replyKey != (store.AccountKey{}) || len(flow.callOrder) != 0 {
@@ -856,13 +887,47 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetWechatSettingReader(reader)
-		if err := controller.Start(context.Background(), "replyOnly", ""); !errors.Is(err, ErrWechatCheckFailed) {
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); !errors.Is(err, ErrWechatCheckFailed) {
 			t.Fatalf("读取失败应按检查未完成拒绝: %v", err)
 		}
 		reader.err = ErrHandUnavailable
-		err = controller.Start(context.Background(), "replyOnly", "")
+		err = controller.Start(context.Background(), "replyOnly", "", "")
 		if !errors.Is(err, ErrHandUnavailable) || errors.Is(err, ErrWechatCheckFailed) {
 			t.Fatalf("手侧哨兵应原样透传: %v", err)
+		}
+	})
+
+	t.Run("capability missing skips the gate with an audit row", func(t *testing.T) {
+		// 2026-09-02 甲方裁决 2.2:该平台的插件没有 account.readWechatSetting 时,
+		// 开工闸"跳过并留痕"放行——它不是检查失败,BOSS 第一刀正是这条路。
+		db, key := controllerFixture(t)
+		flow := &fakeWorkflow{}
+		reader := &fakeWechatReader{err: fmt.Errorf("%w: 手未声明原语能力", ErrHandCapabilityMissing)}
+		collector := &fakeNoticeCollector{}
+		controller, err := New(
+			db, flow, &fakeSource{},
+			func() time.Time { return now }, workflow.DailyWindowPolicy{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.SetWechatSettingReader(reader)
+		controller.SetNoticeCollector(collector)
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
+			t.Fatalf("能力缺失应跳过闸放行: %v", err)
+		}
+		if flow.replyKey != key || reader.calls != 1 || collector.calls != 1 {
+			t.Fatalf("应读一次、放行并继续读通知: key=%+v reads=%d notices=%d", flow.replyKey, reader.calls, collector.calls)
+		}
+		entries, _ := db.AuditEntries(20)
+		found := false
+		for _, entry := range entries {
+			if entry.Category == "wechat_gate_capability_skipped" && strings.Contains(entry.Detail, "account.readWechatSetting@1") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("跳过必须留审计行(脑闸拒绝在记账前、cmd_records 无痕): %+v", entries)
 		}
 	})
 
@@ -878,7 +943,7 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetWechatSettingReader(reader)
-		if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+		if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
 			t.Fatal(err)
 		}
 		if flow.replyKey != key || reader.calls != 1 {
@@ -915,7 +980,7 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetWechatSettingReader(reader)
-		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 			t.Fatal(err)
 		}
 		if reader.calls != 0 {
@@ -944,7 +1009,7 @@ func TestStartGatedOnWechatConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetWechatSettingReader(reader)
-		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 			t.Fatal(err)
 		}
 		if reader.calls != 0 {
@@ -1010,7 +1075,7 @@ func TestFullStartBuildsEffectiveJobSetAndSurvivesPluralFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := controller.Start(context.Background(), "full", "42"); err != nil {
+		if err := controller.Start(context.Background(), "full", "42", ""); err != nil {
 			t.Fatal(err)
 		}
 		// 非当前职位也必须进有效集，这正是本轮要交付的能力。
@@ -1056,7 +1121,7 @@ func TestFullStartBuildsEffectiveJobSetAndSurvivesPluralFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := blocked.Start(context.Background(), "full", ""); !errors.Is(err, ErrJobConfigUnavailable) {
+		if err := blocked.Start(context.Background(), "full", "", ""); !errors.Is(err, ErrJobConfigUnavailable) {
 			t.Fatalf("复数同步失败应阻断全新开始: %v", err)
 		}
 		effective, err := db.EffectiveLegacyJobs()
@@ -1107,12 +1172,14 @@ func syntheticCurrentJob(t *testing.T, jobID int, name string) []byte {
 }
 
 type fakeResolver struct {
-	key   store.AccountKey
-	err   error
-	calls int
+	key      store.AccountKey
+	err      error
+	calls    int
+	platform string
 }
 
-func (f *fakeResolver) ResolveCurrent(context.Context) (store.AccountKey, error) {
+func (f *fakeResolver) ResolveCurrent(_ context.Context, platform string) (store.AccountKey, error) {
+	f.platform = platform
 	f.calls++
 	if f.err != nil {
 		return store.AccountKey{}, f.err
@@ -1135,7 +1202,7 @@ func TestStartFollowsResolvedLoginAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	controller.SetAccountResolver(resolver)
-	if err := controller.Start(context.Background(), "replyOnly", ""); err != nil {
+	if err := controller.Start(context.Background(), "replyOnly", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if resolver.calls != 1 || flow.replyKey != resolved {
@@ -1145,7 +1212,8 @@ func TestStartFollowsResolvedLoginAccount(t *testing.T) {
 
 func TestStartPropagatesResolverSentinels(t *testing.T) {
 	db, _ := controllerFixture(t)
-	for _, sentinel := range []error{ErrHandUnavailable, ErrHandAmbiguous, ErrLoginRequired} {
+	ambiguous := &PlatformAmbiguousError{Platforms: []string{"zhilian", "boss"}}
+	for _, sentinel := range []error{ErrHandUnavailable, ErrHandAmbiguous, ErrLoginRequired, ambiguous} {
 		flow := &fakeWorkflow{}
 		controller, err := New(
 			db, flow, &fakeSource{}, func() time.Time {
@@ -1156,9 +1224,12 @@ func TestStartPropagatesResolverSentinels(t *testing.T) {
 			t.Fatal(err)
 		}
 		controller.SetAccountResolver(&fakeResolver{err: sentinel})
-		startErr := controller.Start(context.Background(), "replyOnly", "")
+		startErr := controller.Start(context.Background(), "replyOnly", "", "")
 		if !errors.Is(startErr, sentinel) {
 			t.Fatalf("sentinel %v 未透传: %v", sentinel, startErr)
+		}
+		if sentinel == ambiguous && !errors.Is(startErr, ErrPlatformAmbiguous) {
+			t.Fatalf("歧义错误应命中 ErrPlatformAmbiguous 哨兵: %v", startErr)
 		}
 		if flow.replyKey != (store.AccountKey{}) {
 			t.Fatalf("解析失败仍启动了工作流: %+v", flow.replyKey)
@@ -1209,7 +1280,7 @@ func TestFullStartExcludesCurrentJobDroppedFromPluralSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.Start(context.Background(), "full", ""); err != nil {
+	if err := controller.Start(context.Background(), "full", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	effective, err := db.EffectiveLegacyJobs()
@@ -1218,5 +1289,33 @@ func TestFullStartExcludesCurrentJobDroppedFromPluralSync(t *testing.T) {
 	}
 	if len(effective) != 1 || effective[0].BackendJobID != "43" {
 		t.Fatalf("已删职位不得进有效集/计划名单: %+v", effective)
+	}
+}
+
+// 开始入口的 platform 参数(2026-09-02 批 D 2.1):透传给解析器;不合法拒绝;运行中忽略。
+func TestStartPassesPlatformToResolverAndRejectsInvalid(t *testing.T) {
+	db, key := controllerFixture(t)
+	flow := &fakeWorkflow{}
+	resolver := &fakeResolver{key: key}
+	controller, err := New(
+		db, flow, &fakeSource{}, func() time.Time {
+			return time.Date(2026, 9, 2, 9, 0, 0, 0, time.Local)
+		}, workflow.DailyWindowPolicy{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.SetAccountResolver(resolver)
+	if err := controller.Start(context.Background(), "replyOnly", "", " boss "); err != nil {
+		t.Fatalf("合法平台应放行: %v", err)
+	}
+	if resolver.platform != "boss" {
+		t.Fatalf("platform 应去首尾空白后透传给解析器: %q", resolver.platform)
+	}
+	if err := controller.Start(context.Background(), "replyOnly", "", "bo ss"); !errors.Is(err, ErrPlatformInvalid) {
+		t.Fatalf("含空白的平台标识应拒绝: %v", err)
+	}
+	if err := controller.Start(context.Background(), "replyOnly", "", strings.Repeat("b", 65)); !errors.Is(err, ErrPlatformInvalid) {
+		t.Fatalf("超长平台标识应拒绝: %v", err)
 	}
 }

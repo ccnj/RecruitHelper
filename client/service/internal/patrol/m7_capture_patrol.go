@@ -8,6 +8,7 @@ package patrol
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -122,6 +123,15 @@ func (a *roundActor) collectPeerPhoneObservation(
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		if isCapabilityMissing(phoneErr) {
+			// 该平台没这条原语(2026-09-02 甲方裁决 2.2):不是失败,缺号是常态,Info 级并留审计行。
+			slog.Info("电话取证:该平台无此能力,跳过", "profileId", profile.ProfileID,
+				"platform", profile.Platform, "err", phoneErr)
+			a.manager.store.Audit("peer_phone_capability_skipped", a.account.BoundHandID, "",
+				fmt.Sprintf("platform=%s primitive=chat.readPeerPhone@1 profile=%s %v",
+					profile.Platform, profile.ProfileID, phoneErr))
+			return nil
+		}
 		slog.Warn("电话侧栏读取失败,缺号降级", "profileId", profile.ProfileID, "err", phoneErr)
 		return nil
 	}
@@ -202,6 +212,16 @@ func (a *roundActor) maybeRevealPeerPhone(
 	if revealErr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
+		}
+		if isCapabilityMissing(revealErr) {
+			// 标记先行、派发在后:能力缺失时那枚终身一次的揭示标记已被消耗。只在"有
+			// readPeerPhone 而无 revealPeerPhone"的平台上发生,低概率、只少一个号,记录级接受。
+			slog.Info("查看电话:该平台无此能力,跳过(揭示标记已消耗)", "profileId", profile.ProfileID,
+				"platform", profile.Platform, "err", revealErr)
+			a.manager.store.Audit("peer_phone_capability_skipped", a.account.BoundHandID, "",
+				fmt.Sprintf("platform=%s primitive=chat.revealPeerPhone@1 profile=%s revealMarkConsumed=true %v",
+					profile.Platform, profile.ProfileID, revealErr))
+			return nil, nil
 		}
 		slog.Warn("查看电话揭示失败,缺号降级", "profileId", profile.ProfileID, "err", revealErr)
 		return nil, nil

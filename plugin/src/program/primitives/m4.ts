@@ -29,6 +29,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const readCurrentCandidate: Primitive = {
   name: PrimitiveName.CandidateReadCurrent,
+  capability: 'readCurrentCandidate',
   class: CmdClass.Readonly,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -44,6 +45,7 @@ const readCurrentCandidate: Primitive = {
 
 const readGreetingOutcome: Primitive = {
   name: PrimitiveName.ChatReadGreetingOutcome,
+  capability: 'readGreetingOutcome',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
@@ -59,6 +61,7 @@ const readGreetingOutcome: Primitive = {
 
 const sendGreeting: Primitive = {
   name: PrimitiveName.ChatSendGreeting,
+  capability: 'sendGreeting',
   class: CmdClass.Effectful,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {

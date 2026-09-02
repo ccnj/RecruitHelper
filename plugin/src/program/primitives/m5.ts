@@ -31,6 +31,7 @@ function failKnownOrThrow(error: unknown): PrimitiveOutcome {
 
 const readResume: Primitive = {
   name: PrimitiveName.CandidateReadResume,
+  capability: 'readResume',
   class: CmdClass.Intrusive,
   async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
     try {
