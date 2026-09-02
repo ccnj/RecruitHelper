@@ -18,9 +18,9 @@ var punctKeysFromUpstream = []string{
 
 // 排版器**能发出、但我们刻意不收**的键。Validate 阶段拒绝、一个键都不发。
 //
-// Enter:换行段是 Shift+Enter,而裸 Enter 在聊天框里是**发送**。Shift 时序稍偏
-// (上游 2026-08-21 就采到过 Slash 的 dwell 125ms 压住下一个键)就把半截话发给
-// 候选人,那是整条线最怕的失败模式。要放行必须单独立案。
+// Enter:换行段是 Shift+Enter,而裸 Enter 在聊天框里是**发送**,Shift 松早了就把
+// 半截话发给候选人。**这是后手不是前门**:插件 boss.osType 在排版前把换行删掉
+// (甲方 2026-09-02 裁决),正常路径碰不到这里;留着是为了万一前门漏了。
 var refusedOnPurpose = []string{"Enter"}
 
 // emittableKeyCodes 把全集**推出来**,不是从任何一张表里抄——抄一遍就成了

@@ -455,6 +455,27 @@ async function bossComposerClickPlan(tabId: number): Promise<ClickPlan> {
   }
 }
 
+/**
+ * 把换行符去掉再打。**删掉,不是拒绝。**
+ *
+ * 排版器能把换行排成 Shift+Enter(上游 2026-09-01 起,透传段),TIP 也不吃 Enter;
+ * 拦在我们 Go 键码表那一层的「Enter 不认识」会让整条命令失败、一个键不发——
+ * 甲方 2026-09-02 裁决:一个换行不是大问题,不该让上层调用方为它兜底。
+ * 两条路里选删掉而不是放行:放行 Enter 赌的是「Shift 松早了就把半截话发出去」那条红线,
+ * 而 TIP 里还没有「换行段但 Shift 没按住就吃掉 Enter」的闸;删掉只是少一个换行,
+ * 属于宁可少做那一侧。
+ *
+ * `\r` 一并去掉:Windows 剪贴板来的文案常带 `\r\n`,单独的 `\r` 排版器本来就打不出。
+ *
+ * **删了多少必须报出去。** 上游 sanitize.mjs 那条洞见对这里同样成立:脑写的是原文,
+ * 实际发出去的是删过的,候选人回复之后脑会基于一段它从没发出去过的历史往下写。
+ * 所以计数进 detail,回读也拿删过的文案比——发出去的才是事实。
+ */
+export function stripNewlines(text: string): { text: string; removed: number } {
+  const stripped = text.replace(/\r\n|\r|\n/g, '')
+  return { text: stripped, removed: text.length - stripped.length }
+}
+
 function osTypeData(
   outcome: DebugOsTypeData['outcome'],
   started: number,
@@ -538,11 +559,20 @@ async function bossOsType(
     })
   }
 
+  // 换行先删掉(理由见 stripNewlines)。删了就留痕——发出去的才是事实。
+  const { text: typedText, removed: newlinesRemoved } = stripNewlines(args.text)
+  if (newlinesRemoved > 0) trace.push(`去掉 ${newlinesRemoved} 个换行符`)
+  if (typedText === '') {
+    return osTypeData('planFailed', started, {
+      detail: `${trace.join(' | ')} | 去掉换行之后没有内容可打`,
+    })
+  }
+
   // 排版。**排不出来就不打**,不许兜底成"那就随便打一份"。
   const planStarted = Date.now()
   let composed
   try {
-    composed = await planType(args.text, seedFrom(ctx.cmdMsgId, 0))
+    composed = await planType(typedText, seedFrom(ctx.cmdMsgId, 0))
   } catch (error) {
     // 走到这里的是**排版器自己坏了**(配置缺参数、平台名写错、pinyin-pro 对不齐),
     // 不是文案打不出——后者自上游 2026-09-01 起走返回值 ok:false。前者每一条文案
@@ -581,7 +611,8 @@ async function bossOsType(
   }
 
   const read = await runInPage(BOSS_INJECT, tab.id!, mainReadComposer, [COMPOSER_ID])
-  const matched = read.text === args.text
+  // 比的是删过换行的那份——那才是真发出去的。拿原文比会把自己删掉的换行记成"上屏错了"。
+  const matched = read.text === typedText
   trace.push(`发了 ${played.keys} 次按键 滞后最大 ${Math.round(played.lagMaxUs)}us` +
     // 有 TIP 的平台才有这一段。它回答的是 matched=false 时最要紧的那个岔路:
     // **词表到底有没有被上屏机制用上**——「TIP 上屏 0/7」与「上屏 7/7 但选错」
@@ -593,7 +624,7 @@ async function bossOsType(
   //
   // 不涉隐私:输入框进来时是空的(硬前置),里面只可能是我方从诊断台发出去的那句
   // 话被输入法改写的样子,不含候选人任何内容。
-  trace.push(`回读 ${matched ? '逐字相同' : `不同:期望「${args.text}」实得「${read.text.slice(0, 200)}」`}`)
+  trace.push(`回读 ${matched ? '逐字相同' : `不同:期望「${typedText}」实得「${read.text.slice(0, 200)}」`}`)
 
   return osTypeData('typed', started, {
     keys: played.keys,

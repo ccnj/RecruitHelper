@@ -126,6 +126,7 @@ const {
   PUNCT_KEY,
   tokenize,
   keyFor,
+  stripNewlines,
   clickAimPoint,
   mulberry32,
   SPREAD_FRACTIONS,
@@ -15222,7 +15223,8 @@ test('osengine/compose 能发出的键位全集钉死——变了 Go 侧键码�
     'Minus', 'Period', 'Quote', 'Semicolon', 'Slash', 'Space',
   ], '上游能发出的键位变了:同步 keymap_expect_test.go 的 punctKeysFromUpstream')
   // Enter 在这里、**不在** Go 表里——那是刻意的(refusedOnPurpose):裸 Enter 是发送。
-  // 换行段因此在 Validate 阶段就被拒、一个键都不发,直到单独立案放行。
+  // 但它不是前门:boss.osType 在排版前就把换行删掉了(stripNewlines,甲方 2026-09-02
+  // 裁决"不给上层找麻烦"),Go 这道拒绝只是后手,正常路径碰不到。
   assert.ok(codes.has('Enter'), '换行段的 Enter 是排版器真能发出的,Go 侧的拒绝必须是显式的')
 })
 
@@ -15292,6 +15294,18 @@ test('osengine/compose 半角标点走透传:排得出、标 passthrough,只有�
   const bar = await planType('a|b', 1)
   assert.equal(bar.ok, false, '竖线必须仍被拒绝')
   assert.match(bar.reasons.join(';'), /竖线|分隔符/, '原因要说清是协议分隔符')
+})
+
+test('boss.osType 打字前把换行删掉——删掉不是拒绝,删了多少要报出去', () => {
+  // 甲方 2026-09-02 裁决:一个换行不是大问题,不该让整条命令失败、把麻烦推给上层。
+  // 两条路(放行 Enter / 删掉换行)里选删掉:放行赌的是「Shift 松早了半截话发出去」
+  // 那条红线,而 TIP 里还没有对应的闸;删掉只是少一个换行,方向是少做。
+  assert.deepEqual(stripNewlines('你好\n方便聊聊吗'), { text: '你好方便聊聊吗', removed: 1 })
+  // Windows 剪贴板来的 \r\n 算一个换行,不是两个字元各删各的
+  assert.deepEqual(stripNewlines('第一行\r\n第二行'), { text: '第一行第二行', removed: 2 })
+  assert.deepEqual(stripNewlines('a\rb'), { text: 'ab', removed: 1 }, '单独的 \\r 也去掉,排版器本来就打不出它')
+  assert.deepEqual(stripNewlines('没有换行'), { text: '没有换行', removed: 0 })
+  assert.deepEqual(stripNewlines('\n\n'), { text: '', removed: 2 }, '全是换行时文案为空,由调用方判 planFailed')
 })
 
 test('osengine/compose 同输入必然同输出(复现与门禁的前提)', async () => {
