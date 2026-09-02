@@ -5757,7 +5757,11 @@ async function waitForSourcingReady(
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 1_000 + Math.floor(Math.random() * 501))
   })
-  for (let attempt = 0; attempt < 34; attempt += 1) {
+  // 条件等待上限 20 秒(AGENTS.md 2026-08-26 裁决):74 轮×250ms≈18.5s,加上面
+  // 1~1.5s 初始化约 20s。原 34 轮≈10s 是 08-26 那批"40 轮循环翻倍"的漏网——
+  // 2026-09-02 尚虹02 真机切第二个职位时推荐页 9.8s 未就绪,整日计划因此少跑
+  // 一个职位;同款切换前一批 7.1s 成功,差距只有两三秒。
+  for (let attempt = 0; attempt < 74; attempt += 1) {
     ctx.checkpoint()
     const latest = await chrome.tabs.get(tab.id)
     if (latest.status === 'complete' && pageKindFromURL(latest.url) === 'recommend') {
@@ -5776,7 +5780,7 @@ async function waitForSourcingReady(
     if (attempt % 8 === 0) {
       await ctx.progress('等待智联推荐页就绪', Math.min(95, 15 + attempt * 2))
     }
-    if (attempt < 33) {
+    if (attempt < 73) {
       await new Promise<void>((resolve) => setTimeout(resolve, 250))
     }
   }

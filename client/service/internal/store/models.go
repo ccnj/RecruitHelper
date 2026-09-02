@@ -317,7 +317,12 @@ const (
 	SourcingBatchGateReasonJobNotOnline   = "jobNotOnline"
 	SourcingBatchGateReasonStatusRead     = "jobStatusReadFailed"
 	SourcingBatchGateReasonPositionSelect = "positionSelectFailed"
-	SourcingBatchGateReasonPlanFinalize   = "dailyPlanFinalizeFailed"
+	// SourcingBatchGateReasonRecommendPageNotReady:切职位时推荐页在条件等待上限
+	// 内未就绪(手自证瞬时,同轮已重试一次仍未就绪)。2026-09-02 甲方裁决从
+	// positionSelectFailed 拆出:后者只留给"职位列表里找不到/无法唯一确定",
+	// 两者同为跳过类,行为不变,只为产品 UI 能精确提示错误类别。
+	SourcingBatchGateReasonRecommendPageNotReady = "recommendPageNotReady"
+	SourcingBatchGateReasonPlanFinalize          = "dailyPlanFinalizeFailed"
 )
 
 // SourcingBatch 是一次正式采集的不可变范围与可恢复状态。PositionRef 在
@@ -344,6 +349,10 @@ type SourcingBatch struct {
 
 	Status SourcingBatchStatus `gorm:"not null;index;check:ck_sourcing_batch_status,status IN ('preparing','collecting','blocked','completed','stopped')"`
 	Reason string
+	// ReasonDetail 是 Reason 收窄前的判定现场(手报错误码/原因/原话或脑侧错误
+	// 文本,截断),只留痕不做判据(「错误收敛必须留痕」,2026-09-02)。当日职位
+	// 计划把它拼进条目 skip_reason 投影到产品 UI。
+	ReasonDetail string
 
 	StartedAt     time.Time `gorm:"not null"`
 	LastAttemptAt *time.Time

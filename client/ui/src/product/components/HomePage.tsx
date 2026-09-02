@@ -32,14 +32,29 @@ export function confirmEndWorkflow(
   return endWorkflow()
 }
 
+// 跳过原因形如「batch:<原因码>|<判定现场>」:竖线前按码归类成中文,竖线后是
+// 批次留痕的原话(错误码/原因/手报文本),原样附在后面供排障——UI 不吞证据。
+export function planSkipReasonParts(reason: string | undefined): { label: string; detail: string } {
+  if (!reason) return { label: '', detail: '' }
+  const bar = reason.indexOf('|')
+  const code = bar >= 0 ? reason.slice(0, bar) : reason
+  const detail = bar >= 0 ? reason.slice(bar + 1).trim() : ''
+  return { label: planSkipCodeText(code), detail }
+}
+
+function planSkipCodeText(code: string): string {
+  if (code === 'zeroQuota') return '配额不足，今日轮空'
+  if (code.startsWith('jobNotOnlineAtPlan:')) return `职位未在线（${code.split(':')[1] ?? ''}）`
+  if (code === 'batch:jobNotOnline') return '开批时职位已下线'
+  if (code === 'batch:jobStatusReadFailed') return '职位状态读取失败'
+  if (code === 'batch:positionSelectFailed') return '推荐页职位列表里找不到该职位或无法唯一确定'
+  if (code === 'batch:recommendPageNotReady') return '推荐页加载超时（已重试一次）'
+  return code
+}
+
 function planSkipReasonText(reason: string | undefined): string {
-  if (!reason) return ''
-  if (reason === 'zeroQuota') return '配额不足，今日轮空'
-  if (reason.startsWith('jobNotOnlineAtPlan:')) return `职位未在线（${reason.split(':')[1] ?? ''}）`
-  if (reason === 'batch:jobNotOnline') return '开批时职位已下线'
-  if (reason === 'batch:jobStatusReadFailed') return '职位状态读取失败'
-  if (reason === 'batch:positionSelectFailed') return '推荐页找不到该职位'
-  return reason
+  const { label, detail } = planSkipReasonParts(reason)
+  return detail ? `${label} · ${detail}` : label
 }
 
 export function HomePage({ customer, overview, actions, onOpenConfirmation, dailyPlan }: HomePageProps) {
@@ -196,7 +211,9 @@ export function HomePage({ customer, overview, actions, onOpenConfirmation, dail
                   <div className="rh-daily-plan-job">
                     <strong>{entry.jobName}</strong>
                     {entry.status === 'skipped' ? (
-                      <span className="rh-daily-plan-note">{planSkipReasonText(entry.skipReason)}</span>
+                      <span className="rh-daily-plan-note" title={planSkipReasonText(entry.skipReason)}>
+                        {planSkipReasonText(entry.skipReason)}
+                      </span>
                     ) : entry.suspectCount > 0 ? (
                       <span className="rh-daily-plan-note is-amber">
                         {entry.suspectCount} 条发送结果待人工确认

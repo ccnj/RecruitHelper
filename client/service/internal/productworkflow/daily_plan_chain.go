@@ -33,7 +33,8 @@ func planSkipClassBatchReason(reason string) bool {
 	switch reason {
 	case store.SourcingBatchGateReasonJobNotOnline,
 		store.SourcingBatchGateReasonStatusRead,
-		store.SourcingBatchGateReasonPositionSelect:
+		store.SourcingBatchGateReasonPositionSelect,
+		store.SourcingBatchGateReasonRecommendPageNotReady:
 		return true
 	}
 	return false
@@ -240,6 +241,10 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 	key := store.AccountKey{Platform: plan.Platform, AccountRef: plan.AccountRef}
 	now := m.clock.Now()
 	pendingRemain := store.NextPendingDailyJobPlanEntry(entries) != nil
+	// planHadRun:本计划是否取得过配套运行(下面按 latest 填)。从未开跑的计划
+	// (建计划后开跑即失败)收口时不自动开沟通——用户刚看到开始失败的报错,
+	// 不该紧接着冒出一个"正在处理候选人消息"。
+	planHadRun := false
 
 	abort := func(reason string) error {
 		if err := m.terminalizeDailyPlanBatchLocked(key, entries, now); err != nil {
@@ -249,13 +254,22 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 			return err
 		}
 		slog.Warn("当日职位计划已终止", "planId", plan.PlanID, "reason", reason)
+		// 接续中断与运行失败两种终止后仍自动进沟通:已发候选人要有人盯回复。
+		// 用户点结束(userEnded)与跨日关窗(dayClosed)不开——前者违背用户意图,
+		// 后者窗口本来就关了。
+		if planHadRun && (reason == planEndReasonChainInterrupted || reason == planEndReasonRunFailed) {
+			m.autoStartCommunicationAfterPlanLocked(key, plan.PlanID, "aborted:"+reason, now)
+		}
 		return nil
 	}
-	complete := func() error {
+	complete := func(autoCommunicate bool) error {
 		if err := m.store.CompleteDailyJobPlan(plan.PlanID, now); err != nil {
 			return err
 		}
 		slog.Info("当日职位计划已完成", "planId", plan.PlanID)
+		if autoCommunicate && planHadRun {
+			m.autoStartCommunicationAfterPlanLocked(key, plan.PlanID, "completed", now)
+		}
 		return nil
 	}
 
@@ -265,6 +279,7 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 	if err != nil {
 		return err
 	}
+	planHadRun = latest != nil && !latest.StartedAt.Before(plan.CreatedAt)
 	if latest == nil || latest.StartedAt.Before(plan.CreatedAt) {
 		// 计划从未取得配套运行(建计划后开跑失败且已被清场):按接续中断收口。
 		return abort(planEndReasonChainInterrupted)
@@ -287,7 +302,8 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 				return batchErr
 			}
 			if skippable {
-				return m.skipEntryAndChainLocked(plan, key, entry, skipReason, now, abort, complete)
+				return m.skipEntryAndChainLocked(plan, key, entry, skipReason, now, abort,
+					func() error { return complete(true) })
 			}
 		}
 		return abort(planEndReasonRunFailed)
@@ -297,24 +313,46 @@ func (m *Manager) reconcileOneDailyPlanLocked(bundle store.DailyJobPlanWithEntri
 			if pendingRemain {
 				return abort(planEndReasonUserEnded)
 			}
-			return complete()
+			return complete(false)
 		case productWorkflowEndReasonDailyWindowClosed:
 			if pendingRemain {
 				return abort(planEndReasonDayClosed)
 			}
-			return complete()
+			return complete(false)
 		default:
 			// additionalBatch 半消费崩溃、或其他批间空档:按接续中断收口,
-			// 不自动重试(出口「允许的失败」)。
+			// 不自动重试(出口「允许的失败」);已发的人照常进沟通。
 			if pendingRemain {
 				return abort(planEndReasonChainInterrupted)
 			}
-			return complete()
+			return complete(true)
 		}
 	default:
 		// 理论上不可达(非终局运行必占 ActiveSlot);保守不动,等下一 tick。
 		return nil
 	}
+}
+
+// autoStartCommunicationAfterPlanLocked 计划收口后自动开启沟通巡检(2026-09-02
+// 甲方裁决)。AGENTS.md「当日职位计划」写明"已发候选人照常进沟通巡检",但末条目被
+// 跳过、批间接续中断或运行失败时没有任何 run 停在沟通阶段——2026-09-02 尚虹02
+// 真机:批 2 切职位失败后账号被暂停,31 个刚招呼的人 45 分钟无人盯回复。复用
+// 「只处理消息」入口与其全部前置闸;只开一次,成败皆止,失败只记日志(人工可点
+// 「只处理消息」),不重试。调用方持有 Manager.mu。
+func (m *Manager) autoStartCommunicationAfterPlanLocked(
+	key store.AccountKey,
+	planID string,
+	cause string,
+	now time.Time,
+) {
+	run, err := m.startReplyOnlyLocked(key, now)
+	if err != nil {
+		slog.Warn("当日职位计划收口后自动开启沟通巡检失败",
+			"planId", planID, "cause", cause, "err", err)
+		return
+	}
+	slog.Info("当日职位计划收口后已自动开启沟通巡检",
+		"planId", planID, "cause", cause, "runId", run.RunID)
 }
 
 // dailyPlanSkipReasonLocked 读最近运行的批次终局原因并判定是否跳过类。
@@ -334,7 +372,13 @@ func (m *Manager) dailyPlanSkipReasonLocked(
 	if batch == nil || !planSkipClassBatchReason(batch.Reason) {
 		return "", false, nil
 	}
-	return "batch:" + batch.Reason, true, nil
+	// 「batch:<原因码>|<判定现场>」:码前缀供 UI 归类,竖线后是批次留痕的原话
+	// (设计文档「留痕与可见性」:跳过原因必须带判定现场)。
+	reason := "batch:" + batch.Reason
+	if detail := strings.TrimSpace(batch.ReasonDetail); detail != "" {
+		reason += "|" + detail
+	}
+	return reason, true, nil
 }
 
 func (m *Manager) skipEntryAndChainLocked(
