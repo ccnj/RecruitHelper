@@ -544,17 +544,21 @@ async function bossOsType(
   try {
     composed = await planType(args.text, seedFrom(ctx.cmdMsgId, 0))
   } catch (error) {
-    // 打不出的字元(英文字母、半角标点)在这里显式抛,不是排不出合格形状。
+    // 走到这里的是**排版器自己坏了**(配置缺参数、平台名写错、pinyin-pro 对不齐),
+    // 不是文案打不出——后者自上游 2026-09-01 起走返回值 ok:false。前者每一条文案
+    // 都会撞上,如实标出来,别让人往文案上找原因。
     return osTypeData('planFailed', started, {
       planMs: Date.now() - planStarted,
-      detail: `${trace.join(' | ')} | ${String(error instanceof Error ? error.message : error).slice(0, 300)}`,
+      detail: `${trace.join(' | ')} | 排版器自身异常:${String(error instanceof Error ? error.message : error).slice(0, 300)}`,
     })
   }
   const planMs = Date.now() - planStarted
   if (!composed.ok) {
+    // 两种来源一种形状:「有打不出的字元」(会指名是哪个)与「重采 N 次都没过预检」。
+    // reasons 原样带出——它是判定现场,收窄成一句"排不出"就丢了。
     return osTypeData('planFailed', started, {
       planMs, tries: composed.tries,
-      detail: `${trace.join(' | ')} | 排版器 ${composed.tries} 次重采都没排出合格形状`,
+      detail: `${trace.join(' | ')} | 排版器 ${composed.tries} 次重采:${composed.reasons.join(';').slice(0, 300)}`,
     })
   }
   trace.push(`排版 ${composed.tries} 次重采 ${composed.plan.words.length} 词 ${planMs}ms`)

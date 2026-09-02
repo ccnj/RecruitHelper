@@ -29,8 +29,8 @@ func TestWindowsKeymapCoversWholeAlphabet(t *testing.T) {
 func TestWindowsKeymapRefusesUnknown(t *testing.T) {
 	// 上游的 windowsKey 收了这些,我们刻意不收:排版器发不出它们。
 	// 表里多一个没有生产者的键,真出问题时会让人以为它验过。
-	for _, code := range []string{"Enter", "Tab", "Backspace", "Escape", "Equal",
-		"BracketLeft", "BracketRight", "ShiftRight", "CapsLock", "F1", "", "Digit10"} {
+	for _, code := range []string{"Tab", "Backspace", "Escape",
+		"ShiftRight", "CapsLock", "F1", "", "Digit10"} {
 		if _, err := windowsKeyCode(code); err == nil {
 			t.Errorf("%q 不在表里却没报错 —— 兜底会把打错字变成静默失败", code)
 		}
@@ -82,5 +82,14 @@ func TestWindowsShiftIsLeftSpecific(t *testing.T) {
 	}
 	if vk != 0xA0 {
 		t.Errorf("ShiftLeft 应为 VK_LSHIFT(0xA0),实得 %#x", vk)
+	}
+}
+
+// 排版器能发出、我们刻意不收的键,必须被拒——而且要一直被拒,直到单独立案放行。
+func TestWindowsKeymapRefusesOnPurpose(t *testing.T) {
+	for _, code := range refusedOnPurpose {
+		if _, err := windowsKeyCode(code); err == nil {
+			t.Errorf("%s 被刻意排除在键码表外(裸 Enter 会发送),不该查得到", code)
+		}
 	}
 }

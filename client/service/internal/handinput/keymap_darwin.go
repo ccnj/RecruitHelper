@@ -12,9 +12,16 @@ import "fmt"
 //
 //   - 拼音字母 KeyA..KeyZ —— 26 个,一个不少(采样只会见到二十几个)
 //   - 数字 Digit0..Digit9 —— 既作字面数字,也作上屏键(约 14% 的段落按数字选第 N 个候选)
-//   - `PUNCT_KEY` 那张表里的八个标点键:Comma Period Semicolon Slash Quote
-//     Backquote Backslash Minus
-//   - Space(上屏)与 ShiftLeft(修饰)
+//   - `PUNCT_KEY`(全角,走组字)与 `ASCII_KEY`(半角,透传)两张表合起来的十一个
+//     OEM 键:Comma Period Semicolon Slash Quote Backquote Backslash Minus
+//     Equal BracketLeft BracketRight
+//   - Space(上屏/半角空格)与 ShiftLeft(修饰)
+//
+// **Enter 刻意不收**。排版器自 2026-09-01 起能为换行段发出 Shift+Enter,但裸 Enter
+// 在聊天框里是**发送**:Shift 时序稍偏一点(shiftGuard 那类问题)就把半截话发给
+// 候选人——这是整条线最怕的失败模式,而 debug.osType 的承诺是「停在草稿、不发送」。
+// 换行段因此在 Validate 阶段就被拒(键码表里没有 Enter),一个键都不发。
+// 要放行必须单独立案,连同「Enter 泄漏」的护栏一起。
 //
 // 按「平台枚举面事实门」,这里**不收**任何"以后可能用得上"的键:没有生产者的键位
 // 进了表,只会在真出问题时让人以为它验过。表外的 code 一律显式报错。
@@ -41,15 +48,19 @@ var darwinKeyCodes = map[string]uint16{
 	"Digit6": 0x16, "Digit5": 0x17, "Digit9": 0x19, "Digit7": 0x1A,
 	"Digit8": 0x1C, "Digit0": 0x1D,
 
-	// 标点。全集来自 pinyin.mjs 的 PUNCT_KEY。
-	"Minus":     0x1B,
-	"Quote":     0x27,
-	"Semicolon": 0x29,
-	"Backslash": 0x2A,
-	"Comma":     0x2B,
-	"Slash":     0x2C,
-	"Period":    0x2F,
-	"Backquote": 0x32,
+	// 标点。全集来自 pinyin.mjs 的 PUNCT_KEY(全角,走组字)与 ASCII_KEY(半角,透传,
+	// 上游 2026-09-01 放行)。后者多出三个键位:Equal、BracketLeft、BracketRight。
+	"Minus":        0x1B,
+	"Equal":        0x18,
+	"BracketRight": 0x1E,
+	"BracketLeft":  0x21,
+	"Quote":        0x27,
+	"Semicolon":    0x29,
+	"Backslash":    0x2A,
+	"Comma":        0x2B,
+	"Slash":        0x2C,
+	"Period":       0x2F,
+	"Backquote":    0x32,
 
 	"Space":     0x31,
 	"ShiftLeft": 0x38,

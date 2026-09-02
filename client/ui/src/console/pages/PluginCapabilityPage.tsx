@@ -555,6 +555,8 @@ const OS_TYPE_PRESETS: readonly { label: string; text: string; why: string }[] =
     why: '上游放行英文段时自己的验收文案。英文走 composition，大小写由上屏词带出来' },
   { label: '含数字', text: '薪资20到30万，3年经验',
     why: '数字那个洞至今没被真机照过：真输入法直接上屏，我们的 TIP 会当上屏键吃掉' },
+  { label: '半角标点', text: '薪资20-35K，涨幅20%，前端/后端都招',
+    why: '上游 2026-09-01 放行半角（走透传，TIP 不吃那个键）时自己的验收文案。- % / 三个半角，加字面数字' },
 ]
 
 const OS_TYPE_MAX_RUNES = 120
@@ -626,8 +628,9 @@ function OsTypeBlock({ account }: { account: AccountView | null }) {
       </div>
       <p className="probe-note">
         Windows 上你多半敲不进中文——敲中文要用输入法，而输入法正是这一块要接管的东西。
-        所以给了三个预置：<strong>纯中文</strong>对比 macOS 那次、<strong>中英混排</strong>
-        验英文段、<strong>含数字</strong>照一照那个至今没被真机照过的洞。
+        所以给了四个预置：<strong>纯中文</strong>对比 macOS 那次、<strong>中英混排</strong>
+        验英文段、<strong>含数字</strong>与<strong>半角标点</strong>验透传段——
+        后两种真输入法下是直接上屏（type1），TIP 收到词表里的透传标记就不吃那个键。
       </p>
 
       <LeadInField leadSec={lead.leadSec} setLeadSec={lead.setLeadSec} disabled={running} />

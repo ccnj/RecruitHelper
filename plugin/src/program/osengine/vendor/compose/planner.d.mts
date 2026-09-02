@@ -49,6 +49,15 @@ export interface PlanWord {
    * 注入层自己不用,只负责转交给 TIP。
    */
   splits?: number[]
+  /**
+   * 这个词是**键盘布局直接打出来**的,不经组字:字面数字、半角空格、半角标点、换行。
+   * TIP 收到这个标记就不吃那个键、只把词序号推进一格(线格式第三段 `P`)。
+   *
+   * 中文标点相反(走组字,真微软拼音如此),所以不能由 TIP 看键码自己判——同一个
+   * Comma 键可能是「，」也可能是 ","。只有排版器知道,它随键位表一起给出。
+   * **只在 `direct` 的词上出现**;组字段没有这个字段。
+   */
+  passthrough?: boolean
 }
 
 export interface Plan {
@@ -63,9 +72,31 @@ export interface ComposeAttempt {
   reasons: unknown
 }
 
+/** 清理器摘掉的字元(只有 `sanitize:true` 时才可能非空)。 */
+export interface DroppedChar {
+  i: number
+  ch: string
+  kind: string
+  why: string
+}
+
+/**
+ * `ok:false` 是**正常返回值**,两种来源合成了一种形状(上游 2026-09-01):
+ * 「有打不出的字元」与「重采 N 次都没过本地预检」都走 `reasons`。
+ * 先前前者是 throw、后者是 ok:false,同一件事两种形状。
+ *
+ * **排版器自己坏了照样抛**(配置缺参数、平台名写错、pinyin-pro 对不齐)——
+ * 那种失败每一条文案都会撞上,不该被当成"这条文案有问题"静默跳过。
+ */
 export type ComposeResult =
-  | { ok: true; plan: Plan; seed: number; tries: number; attempts: ComposeAttempt[] }
-  | { ok: false; plan: null; tries: number; attempts: ComposeAttempt[] }
+  | {
+      ok: true; plan: Plan; seed: number; tries: number; attempts: ComposeAttempt[]
+      text: string; dropped: DroppedChar[]
+    }
+  | {
+      ok: false; plan: null; tries: number; attempts: ComposeAttempt[]
+      text: string; dropped: DroppedChar[]; reasons: string[]
+    }
 
 export interface ComposeOptions {
   /** 起始种子。排版器会从它开始逐个加一重采,所以同一个 seed 未必产出同一次尝试的计划。 */
@@ -74,6 +105,11 @@ export interface ComposeOptions {
   startTime?: number
   /** 最多重采多少次。缺省 40。 */
   maxTries?: number
+  /**
+   * 先摘掉打不出的字元再排(`sanitize.mjs`)。缺省 **false**,排版器保持严格。
+   * 我们当前不传:`debug.osType` 要的正是"打不出就如实说打不出";生产路径再议。
+   */
+  sanitize?: boolean
 }
 
 /**

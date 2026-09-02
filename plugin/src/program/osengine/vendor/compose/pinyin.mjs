@@ -51,8 +51,12 @@ export function tokenize(text) {
     if (ch === '\n') kind = 'newline'
     else if (/\s/.test(ch)) kind = 'space'
     else if (it.isZh) kind = 'han'
-    else if (CJK_PUNCT.test(ch)) kind = 'cjkPunct'
+    // **数字要先于全角标点判。** 全角数字（０-９，U+FF10-FF19）也落在 CJK_PUNCT 的
+    // ＀-￯ 区间里，反过来写的话它们永远进不了 digit 分支 —— 先前正是如此，于是
+    // 「全角０」报的是「该全角标点尚未收录键位」，把人往补 PUNCT_KEY 的方向指，
+    // 而它其实该按数字键打（只是那个键出的是半角，所以得走组字，见 keyFor）。
     else if (DIGIT.test(ch)) kind = 'digit'
+    else if (CJK_PUNCT.test(ch)) kind = 'cjkPunct'
     else if (LATIN.test(ch)) kind = 'latin'
     else if (/^[\x20-\x7e]$/.test(ch)) kind = 'asciiPunct'
     // 生僻汉字（𰻞 㸚 𠮷）、emoji、外文 —— pinyin-pro 一律判为非汉字。
@@ -142,7 +146,11 @@ function toKeyboardPinyin(ch, rawPy) {
 }
 
 /**
- * 标点 → 中文输入法下的物理键 **及修饰键**。
+ * 全角标点 → 中文输入法下的物理键 **及修饰键**。
+ *
+ * **这张表里的字元都要走组字。** 判据是「这个键在美式布局上按下去出来的是什么」——
+ * Comma 键出的是 `,` 不是「，」，所以「，」只能由输入法上屏。反过来，下面
+ * `ASCII_KEY` 里的字元按下去出来的就是它自己，那些走透传。
  *
  * shift 不能省：美式键盘上「？」是 Shift+/，不带 Shift 打出来的是「/」。
  * 这是 2026-08-21 真机注入实测抓到的 —— 计划里写「？」，屏幕上出来的是「/」，
@@ -160,6 +168,35 @@ export const PUNCT_KEY = {
   '—': { code: 'Minus', shift: true },       '…': { code: 'Digit6', shift: true },
   '“': { code: 'Quote', shift: true },       '”': { code: 'Quote', shift: true },
 }
+/**
+ * 半角字元 → 物理键。**按下去出来的就是它自己**，所以走透传：TIP 不吃这个键，
+ * 让它落到美式布局上自己打出来，网页看到的是普通 keydown + insertText（type1）。
+ *
+ * 先前整张表不存在，半角标点一律拒绝，理由是「要切输入法模式」——那是借用系统
+ * 输入法时代的事。自研 TIP 之后模式这个概念就没有了，而 2026-09-01 真机实测又
+ * 确认了：被当上屏键吃掉的直接段会让离线模型与真机对不上账。两件事合起来，
+ * 正确解法是把它们跟字面数字一样透传，而不是继续拒绝。
+ *
+ * **竖线不收。** 它是 Go→TIP 词表协议的字段分隔符（`lab/engine/inject/tipwire.go`），
+ * 装不进去；那边也有一道兜底检查。这是真实的能力边界，不是过期的那种。
+ */
+const ASCII_KEY = {
+  '`': { code: 'Backquote' },     '-': { code: 'Minus' },        '=': { code: 'Equal' },
+  '[': { code: 'BracketLeft' },   ']': { code: 'BracketRight' }, '\\': { code: 'Backslash' },
+  ';': { code: 'Semicolon' },     "'": { code: 'Quote' },        ',': { code: 'Comma' },
+  '.': { code: 'Period' },        '/': { code: 'Slash' },
+  '~': { code: 'Backquote', shift: true },    '!': { code: 'Digit1', shift: true },
+  '@': { code: 'Digit2', shift: true },       '#': { code: 'Digit3', shift: true },
+  '$': { code: 'Digit4', shift: true },       '%': { code: 'Digit5', shift: true },
+  '^': { code: 'Digit6', shift: true },       '&': { code: 'Digit7', shift: true },
+  '*': { code: 'Digit8', shift: true },       '(': { code: 'Digit9', shift: true },
+  ')': { code: 'Digit0', shift: true },       '_': { code: 'Minus', shift: true },
+  '+': { code: 'Equal', shift: true },        '{': { code: 'BracketLeft', shift: true },
+  '}': { code: 'BracketRight', shift: true }, ':': { code: 'Semicolon', shift: true },
+  '"': { code: 'Quote', shift: true },        '<': { code: 'Comma', shift: true },
+  '>': { code: 'Period', shift: true },       '?': { code: 'Slash', shift: true },
+}
+
 export const digitKey = (ch) => 'Digit' + String(ch).replace(/[０-９]/, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
 
 /**
@@ -174,35 +211,60 @@ export const digitKey = (ch) => 'Digit' + String(ch).replace(/[０-９]/, (c) =>
  * 换个默认值治不了本。根子是这张映射表**不完备**，而代码假装它完备。
  * 正确做法是把「能不能打」变成显式属性：认识就给键位，不认识就说不认识。
  *
+ * 返回值里的 **`passthrough` 是这个函数最要紧的产出**，不是附赠品：它回答
+ * 「这个键按下去，美式布局出来的就是这个字元吗」。是 → TIP 不吃这个键（type1）；
+ * 不是 → 必须由 TIP 组字上屏（type2）。搞反了的后果是屏幕上出错字：
+ * 「—」若被当成透传，Minus+Shift 打出来的是 `_`。
+ *
+ * **不能拿 `containsChinese` 来判这件事**（第一版就是这么写的）：
+ * `’ ‘ “ ” — …` 六个全角标点在 U+2000 段，不在 BOSS 那个「中文」区间里，
+ * 于是全被判成透传、全部会打成 ASCII。这是字符表的属性，不是 Unicode 区间的属性。
+ *
  * 当前方案（自研 TSF 输入法）的能力边界：
- *   ✅ 汉字（走 IME）· 中文全角标点 · 数字 · 空格 · 换行
+ *   ✅ 汉字（走 IME）· 全角标点 · 数字 · 空格 · 换行
+ *   ✅ 半角 ASCII 标点（走透传，见 ASCII_KEY）——`|` 除外，词表协议装不下
  *   ✅ 英文字母 —— 但**不经这个函数**。它和汉字走同一条路（字母键进组字串、
  *      上屏键出词），键位由 segment.mjs 按字母直取，故这里对 latin 仍返回 null：
  *      谁把 latin 送到这儿来，谁就走错路了。可打性问下面的 `typable`。
- *   ❌ 半角 ASCII 标点 —— 真微软拼音下它走 insertText 直接上屏（type1），
- *      而我们的 TIP 会把这些键当上屏键吃掉、走 composition（type2）。形状对不上，
- *      且差异就落在上报载荷里（typingType / typingFragment）。要支持得给管道协议
- *      加「这个词透传、别吃」的标记，那是另一轮的事，不在此处打补丁。
+ *   ❌ 制表符 / 回车符 / NBSP —— 它们被 `/\s/` 归进 space，但 Space 键打出来的是
+ *      半角空格，字就错了；悄悄换成空格正是「静默打错字」那一类，所以显式拒绝。
  *
- * @returns {{code: string, shift?: boolean} | null}
+ * @returns {{code: string, shift?: boolean, passthrough: boolean} | null}
  */
 export function keyFor(tok) {
+  // 走组字：这个键打出来的不是它，得让 TIP 上屏
+  const compose = (k) => (k ? { ...k, passthrough: false } : null)
+  // 走透传：这个键打出来的就是它
+  const direct = (k) => (k ? { ...k, passthrough: true } : null)
   switch (tok.kind) {
     case 'han':
       return null // 汉字走 composition，不经这里
     case 'space':
-      return { code: 'Space' }
+      // 只认这两个。制表符 / 回车符 / NBSP 也被 /\s/ 归进 space，
+      // 但 Space 键打出来的是半角空格，把它们当空格排就是打错字。
+      if (tok.ch === ' ') return direct({ code: 'Space' })
+      if (tok.ch === '　') return compose({ code: 'Space' }) // 全角空格得由 TIP 上屏
+      return null
     case 'newline':
-      // 聊天框里换行是 Shift+Enter（裸 Enter 会发送）
-      return { code: 'Enter', shift: true }
+      // 聊天框里换行是 Shift+Enter（裸 Enter 会发送）。
+      // **2026-09-01 人工在 BOSS 上确认**：Shift+Enter 是换行、不发送。此前这句话
+      // 只是注释，14 份真机采集里一个 Enter 都没有；它的失败模式又恰好是最怕的那种
+      // （半截话发出去），所以特意记一笔出处。事件流的形状仍未采过，见 HANDOFF 记账。
+      return direct({ code: 'Enter', shift: true })
     case 'digit':
-      return { code: digitKey(tok.ch) }
+      // 全角数字（０-９）按的是同一个键，但那个键打出来是半角，所以要走组字
+      return /[0-9]/.test(tok.ch)
+        ? direct({ code: digitKey(tok.ch) })
+        : compose({ code: digitKey(tok.ch) })
     case 'cjkPunct':
-      return PUNCT_KEY[tok.ch] ?? null
+      return compose(PUNCT_KEY[tok.ch])
+    case 'asciiPunct':
+      return direct(ASCII_KEY[tok.ch])
     default:
-      // asciiPunct / 以及被 pinyin-pro 判为非汉字的生僻字与 emoji。
+      // 被 pinyin-pro 判为非汉字的生僻字与 emoji —— 以及 `’ ‘ “ ” — …`
+      // 这六个全角标点（U+2000 段，既不是 cjkPunct 也不是 asciiPunct）。
       // latin 也会落到这里并得到 null —— 这是对的，它根本不该走 keyFor。
-      return PUNCT_KEY[tok.ch] ?? null
+      return compose(PUNCT_KEY[tok.ch])
   }
 }
 
@@ -231,9 +293,13 @@ export function typable(tok) {
 export function whyUntypable(tok) {
   switch (tok.kind) {
     // latin 不在这里 —— 它一律可打，走不到这个函数
+    case 'space':
+      return '只支持半角空格、全角空格与换行；制表符 / 回车符 / NBSP 打不出来 —— '
+        + '它们会被排成 Space 键，而那个键打出来是半角空格，字就错了'
     case 'asciiPunct':
-      return '半角标点在真输入法下直接上屏、不走组字，而我们的 TIP 会把它当上屏键吃掉，'
-        + '形状对不上（见 keyFor 的能力边界）；改用对应的全角标点即可'
+      return tok.ch === '|'
+        ? '竖线是 Go→TIP 词表协议的字段分隔符，装不进去'
+        : '该半角字元尚未收录键位（可补进 pinyin.mjs 的 ASCII_KEY）'
     case 'cjkPunct':
       return '该全角标点尚未收录键位（可补进 PUNCT_KEY）'
     case 'han':

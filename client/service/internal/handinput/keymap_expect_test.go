@@ -5,14 +5,23 @@ import "fmt"
 // 排版器能发出的键位全集。**两张键码表(darwin / windows)共用这一份期望**——
 // 各写一份的话,上游长出新键位时要改两处,而漏改的那一处会一直绿。
 //
-// 标点全集取自上游 `compose/pinyin.mjs` 的 `PUNCT_KEY`。插件侧有一条配套用例钉住
-// 那张表的 code 集合恰好是这八个——**上游加了第九个,那边先红**,提醒回来补这里。
+// 标点全集取自上游 `compose/pinyin.mjs` 的 `PUNCT_KEY` 与 `ASCII_KEY`。插件侧有一条
+// 配套用例把两张表能发出的 code 全集钉死——**上游再长出新键位,那边先红**,提醒回来补这里。
 // 两处合起来才是完整的门禁:只有这一处的话,上游长出新键位时我们这边一片绿,
 // 直到真机上打出错字。
 var punctKeysFromUpstream = []string{
 	"Comma", "Period", "Semicolon", "Slash",
 	"Quote", "Backquote", "Backslash", "Minus",
+	// 上游 2026-09-01 放行半角标点(ASCII_KEY,透传)多出的三个。
+	"Equal", "BracketLeft", "BracketRight",
 }
+
+// 排版器**能发出、但我们刻意不收**的键。Validate 阶段拒绝、一个键都不发。
+//
+// Enter:换行段是 Shift+Enter,而裸 Enter 在聊天框里是**发送**。Shift 时序稍偏
+// (上游 2026-08-21 就采到过 Slash 的 dwell 125ms 压住下一个键)就把半截话发给
+// 候选人,那是整条线最怕的失败模式。要放行必须单独立案。
+var refusedOnPurpose = []string{"Enter"}
 
 // emittableKeyCodes 把全集**推出来**,不是从任何一张表里抄——抄一遍就成了
 // 自己跟自己比,表里少一个字母、期望里也少一个,测试照样绿。

@@ -1,5 +1,5 @@
 {
- "upstream": "hiBoss lab/engine/compose @ 70de0a8",
+ "upstream": "hiBoss lab/engine/compose @ 95607a3",
  "pinyinPro": "3.29.3",
  "note": "由上游原始文件生成。我们的 vendor 副本必须逐字段复现它。",
  "cases": {
@@ -60,6 +60,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -326,7 +327,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -434,6 +436,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -700,7 +703,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -808,6 +812,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -1074,7 +1079,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -1244,6 +1250,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -1397,7 +1404,8 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -1533,6 +1541,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -1686,7 +1695,8 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -1822,6 +1832,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -1975,7 +1986,8 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -2324,6 +2336,7 @@
        {
         "text": "3",
         "direct": true,
+        "passthrough": true,
         "keys": [
          {
           "code": "Digit3",
@@ -2512,7 +2525,8 @@
         "kind": "direct",
         "text": "3",
         "code": "Digit3",
-        "shift": false
+        "shift": false,
+        "passthrough": true
        },
        {
         "kind": "ime",
@@ -2671,6 +2685,7 @@
        {
         "text": "3",
         "direct": true,
+        "passthrough": true,
         "keys": [
          {
           "code": "Digit3",
@@ -2859,7 +2874,8 @@
         "kind": "direct",
         "text": "3",
         "code": "Digit3",
-        "shift": false
+        "shift": false,
+        "passthrough": true
        },
        {
         "kind": "ime",
@@ -3018,6 +3034,7 @@
        {
         "text": "3",
         "direct": true,
+        "passthrough": true,
         "keys": [
          {
           "code": "Digit3",
@@ -3206,7 +3223,8 @@
         "kind": "direct",
         "text": "3",
         "code": "Digit3",
-        "shift": false
+        "shift": false,
+        "passthrough": true
        },
        {
         "kind": "ime",
@@ -3442,6 +3460,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -3551,6 +3570,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -3711,6 +3731,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -3771,7 +3792,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -3797,7 +3819,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -3832,7 +3855,8 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
        }
       ]
      }
@@ -4025,6 +4049,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -4134,6 +4159,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -4294,6 +4320,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -4354,7 +4381,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -4380,7 +4408,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -4415,7 +4444,8 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
        }
       ]
      }
@@ -4608,6 +4638,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -4717,6 +4748,7 @@
        {
         "text": "，",
         "direct": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "Comma",
@@ -4877,6 +4909,7 @@
         "text": "？",
         "direct": true,
         "shift": true,
+        "passthrough": false,
         "keys": [
          {
           "code": "ShiftLeft",
@@ -4937,7 +4970,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -4963,7 +4997,8 @@
         "kind": "direct",
         "text": "，",
         "code": "Comma",
-        "shift": false
+        "shift": false,
+        "passthrough": false
        },
        {
         "kind": "ime",
@@ -4998,7 +5033,1696 @@
         "kind": "direct",
         "text": "？",
         "code": "Slash",
-        "shift": true
+        "shift": true,
+        "passthrough": false
+       }
+      ]
+     }
+    }
+   }
+  },
+  "ascii": {
+   "text": "薪资20-35K，涨幅20%，前端/后端都招",
+   "bySeed": {
+    "1": {
+     "ok": true,
+     "seed": 2,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 130
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 176,
+          "up": 270
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 214,
+          "up": 295
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 264,
+          "up": 804
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 416,
+          "up": 575
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 570,
+         "up": 772
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 1224,
+          "up": 1306
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 1607,
+          "up": 1670
+         }
+        ]
+       },
+       {
+        "text": "-",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Minus",
+          "down": 1815,
+          "up": 2057
+         }
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 1998,
+          "up": 2135
+         }
+        ]
+       },
+       {
+        "text": "5",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit5",
+          "down": 2144,
+          "up": 2224
+         }
+        ]
+       },
+       {
+        "text": "K",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 2566,
+          "up": 2653
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2687,
+         "up": 2765
+        },
+        "splits": []
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 2911,
+          "up": 2984
+         }
+        ]
+       },
+       {
+        "text": "涨幅",
+        "keys": [
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 3410,
+          "up": 3499
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 3491,
+          "up": 3572
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3559,
+          "up": 3684
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3727,
+          "up": 3794
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3861,
+          "up": 3989
+         },
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 3987,
+          "up": 4162
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 4150,
+          "up": 4260
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4439,
+         "up": 4522
+        },
+        "splits": [
+         5
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 4717,
+          "up": 4946
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 5057,
+          "up": 5172
+         }
+        ]
+       },
+       {
+        "text": "%",
+        "direct": true,
+        "shift": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 5298,
+          "up": 5783,
+          "modifier": true
+         },
+         {
+          "code": "Digit5",
+          "down": 5686,
+          "up": 5753,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 6080,
+          "up": 6117
+         }
+        ]
+       },
+       {
+        "text": "前端",
+        "keys": [
+         {
+          "code": "KeyQ",
+          "letter": "q",
+          "down": 6180,
+          "up": 6254
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 6291,
+          "up": 6385
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6483,
+          "up": 6617
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 6570,
+          "up": 6691
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 6677,
+          "up": 6809
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 6832,
+          "up": 6916
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 6907,
+          "up": 7012
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7124,
+          "up": 7357
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 7467,
+         "up": 7562
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "/",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Slash",
+          "down": 7863,
+          "up": 7970
+         }
+        ]
+       },
+       {
+        "text": "后端都招",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 8479,
+          "up": 8567
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 8568,
+          "up": 8673
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 8763,
+          "up": 8836
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 8933,
+          "up": 9075
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 9135,
+          "up": 9198
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9184,
+          "up": 9257
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 9248,
+          "up": 9420
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 9310,
+          "up": 9375
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 9446,
+          "up": 9622
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 9590,
+          "up": 9700
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 9683,
+          "up": 9782
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 9807,
+          "up": 9886
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9962,
+          "up": 10061
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 10235,
+          "up": 10309
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10562,
+         "up": 10677
+        },
+        "splits": [
+         3,
+         7,
+         10
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "-",
+        "code": "Minus",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "5",
+        "code": "Digit5",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "K",
+        "pinyin": "k",
+        "chars": 1,
+        "syllables": [
+         1
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "涨幅",
+        "pinyin": "zhangfu",
+        "chars": 2,
+        "syllables": [
+         5,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "%",
+        "code": "Digit5",
+        "shift": true,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "前端",
+        "pinyin": "qianduan",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "/",
+        "code": "Slash",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "text": "后端都招",
+        "pinyin": "houduandouzhao",
+        "chars": 4,
+        "syllables": [
+         3,
+         4,
+         3,
+         4
+        ]
+       }
+      ]
+     }
+    },
+    "7": {
+     "ok": true,
+     "seed": 8,
+     "tries": 2,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 152
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 82,
+          "up": 191
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 198,
+          "up": 343
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 376,
+          "up": 471
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 568,
+          "up": 658
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 669,
+         "up": 932
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 1182,
+          "up": 1248
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 1377,
+          "up": 1469
+         }
+        ]
+       },
+       {
+        "text": "-",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Minus",
+          "down": 1555,
+          "up": 1667
+         }
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 1716,
+          "up": 1856
+         }
+        ]
+       },
+       {
+        "text": "5",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit5",
+          "down": 2032,
+          "up": 2126
+         }
+        ]
+       },
+       {
+        "text": "K",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 2645,
+          "up": 2741
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2822,
+         "up": 2986
+        },
+        "splits": []
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 3339,
+          "up": 3426
+         }
+        ]
+       },
+       {
+        "text": "涨幅",
+        "keys": [
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 3767,
+          "up": 3859
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 3867,
+          "up": 3919
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 4112,
+          "up": 4221
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 4275,
+          "up": 4393
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 4379,
+          "up": 4455
+         },
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 4477,
+          "up": 4570
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 4529,
+          "up": 4618
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 4758,
+         "up": 4811
+        },
+        "splits": [
+         5
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 4888,
+          "up": 5001
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 5310,
+          "up": 5407
+         }
+        ]
+       },
+       {
+        "text": "%",
+        "direct": true,
+        "shift": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 5606,
+          "up": 6286,
+          "modifier": true
+         },
+         {
+          "code": "Digit5",
+          "down": 6183,
+          "up": 6256,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 6937,
+          "up": 7030
+         }
+        ]
+       },
+       {
+        "text": "前端",
+        "keys": [
+         {
+          "code": "KeyQ",
+          "letter": "q",
+          "down": 7405,
+          "up": 7483
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 7555,
+          "up": 7647
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7725,
+          "up": 7796
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7830,
+          "up": 7887
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 7887,
+          "up": 7948
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 7983,
+          "up": 8086
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 8044,
+          "up": 8149
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 8118,
+          "up": 8330
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 8625,
+         "up": 8727
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "/",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Slash",
+          "down": 9179,
+          "up": 9294
+         }
+        ]
+       },
+       {
+        "text": "后端都招",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 9434,
+          "up": 9558
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 9506,
+          "up": 9579
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 9547,
+          "up": 9621
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 9724,
+          "up": 9802
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 9830,
+          "up": 9975
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 9929,
+          "up": 9999
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 10015,
+          "up": 10092
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 10035,
+          "up": 10114
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 10136,
+          "up": 10333
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 10174,
+          "up": 10257
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 10248,
+          "up": 10308
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 10443,
+          "up": 10529
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 10596,
+          "up": 10656
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 10642,
+          "up": 10803
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 10827,
+         "up": 10977
+        },
+        "splits": [
+         3,
+         7,
+         10
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "-",
+        "code": "Minus",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "5",
+        "code": "Digit5",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "K",
+        "pinyin": "k",
+        "chars": 1,
+        "syllables": [
+         1
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "涨幅",
+        "pinyin": "zhangfu",
+        "chars": 2,
+        "syllables": [
+         5,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "%",
+        "code": "Digit5",
+        "shift": true,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "前端",
+        "pinyin": "qianduan",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "/",
+        "code": "Slash",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "text": "后端都招",
+        "pinyin": "houduandouzhao",
+        "chars": 4,
+        "syllables": [
+         3,
+         4,
+         3,
+         4
+        ]
+       }
+      ]
+     }
+    },
+    "42": {
+     "ok": true,
+     "seed": 42,
+     "tries": 1,
+     "plan": {
+      "startTime": 0,
+      "words": [
+       {
+        "text": "薪资",
+        "keys": [
+         {
+          "code": "KeyX",
+          "letter": "x",
+          "down": 0,
+          "up": 89
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 68,
+          "up": 172
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 172,
+          "up": 263
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 292,
+          "up": 378
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 411,
+          "up": 700
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 569,
+         "up": 659
+        },
+        "splits": [
+         3
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 622,
+          "up": 708
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 968,
+          "up": 1099
+         }
+        ]
+       },
+       {
+        "text": "-",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Minus",
+          "down": 1271,
+          "up": 1404
+         }
+        ]
+       },
+       {
+        "text": "3",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit3",
+          "down": 1605,
+          "up": 1695
+         }
+        ]
+       },
+       {
+        "text": "5",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit5",
+          "down": 1848,
+          "up": 1934
+         }
+        ]
+       },
+       {
+        "text": "K",
+        "keys": [
+         {
+          "code": "KeyK",
+          "letter": "k",
+          "down": 2281,
+          "up": 2377
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 2734,
+         "up": 2864
+        },
+        "splits": []
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 2932,
+          "up": 3070
+         }
+        ]
+       },
+       {
+        "text": "涨幅",
+        "keys": [
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 3411,
+          "up": 3483
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 3476,
+          "up": 3631
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 3568,
+          "up": 3743
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 3660,
+          "up": 3814
+         },
+         {
+          "code": "KeyG",
+          "letter": "g",
+          "down": 3728,
+          "up": 3840
+         },
+         {
+          "code": "KeyF",
+          "letter": "f",
+          "down": 3768,
+          "up": 3854
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 3946,
+          "up": 4014
+         }
+        ],
+        "commit": {
+         "code": "Digit3",
+         "letter": "",
+         "down": 4164,
+         "up": 4234
+        },
+        "splits": [
+         5
+        ]
+       },
+       {
+        "text": "2",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit2",
+          "down": 4521,
+          "up": 4588
+         }
+        ]
+       },
+       {
+        "text": "0",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Digit0",
+          "down": 4874,
+          "up": 4956
+         }
+        ]
+       },
+       {
+        "text": "%",
+        "direct": true,
+        "shift": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "ShiftLeft",
+          "down": 5693,
+          "up": 6037,
+          "modifier": true
+         },
+         {
+          "code": "Digit5",
+          "down": 5778,
+          "up": 5888,
+          "shift": true
+         }
+        ]
+       },
+       {
+        "text": "，",
+        "direct": true,
+        "passthrough": false,
+        "keys": [
+         {
+          "code": "Comma",
+          "down": 6321,
+          "up": 6468
+         }
+        ]
+       },
+       {
+        "text": "前端",
+        "keys": [
+         {
+          "code": "KeyQ",
+          "letter": "q",
+          "down": 7089,
+          "up": 7266
+         },
+         {
+          "code": "KeyI",
+          "letter": "i",
+          "down": 7210,
+          "up": 7277
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7293,
+          "up": 7367
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7413,
+          "up": 7844
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 7497,
+          "up": 7596
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 7632,
+          "up": 7770
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 7707,
+          "up": 7788
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 7974,
+          "up": 8067
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 8104,
+         "up": 8189
+        },
+        "splits": [
+         4
+        ]
+       },
+       {
+        "text": "/",
+        "direct": true,
+        "passthrough": true,
+        "keys": [
+         {
+          "code": "Slash",
+          "down": 10256,
+          "up": 10317
+         }
+        ]
+       },
+       {
+        "text": "后端都招",
+        "keys": [
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 10534,
+          "up": 10617
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 10664,
+          "up": 10743
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 10740,
+          "up": 10827
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 10793,
+          "up": 10894
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 10976,
+          "up": 11341
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 11045,
+          "up": 11224
+         },
+         {
+          "code": "KeyN",
+          "letter": "n",
+          "down": 11212,
+          "up": 11275
+         },
+         {
+          "code": "KeyD",
+          "letter": "d",
+          "down": 11315,
+          "up": 11395
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 11461,
+          "up": 11535
+         },
+         {
+          "code": "KeyU",
+          "letter": "u",
+          "down": 11609,
+          "up": 12170
+         },
+         {
+          "code": "KeyZ",
+          "letter": "z",
+          "down": 11721,
+          "up": 11814
+         },
+         {
+          "code": "KeyH",
+          "letter": "h",
+          "down": 11771,
+          "up": 11919
+         },
+         {
+          "code": "KeyA",
+          "letter": "a",
+          "down": 11854,
+          "up": 11945
+         },
+         {
+          "code": "KeyO",
+          "letter": "o",
+          "down": 11996,
+          "up": 12081
+         }
+        ],
+        "commit": {
+         "code": "Space",
+         "letter": "",
+         "down": 12180,
+         "up": 12300
+        },
+        "splits": [
+         3,
+         7,
+         10
+        ]
+       }
+      ],
+      "_segs": [
+       {
+        "kind": "ime",
+        "text": "薪资",
+        "pinyin": "xinzi",
+        "chars": 2,
+        "syllables": [
+         3,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "-",
+        "code": "Minus",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "3",
+        "code": "Digit3",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "5",
+        "code": "Digit5",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "latin": true,
+        "text": "K",
+        "pinyin": "k",
+        "chars": 1,
+        "syllables": [
+         1
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "涨幅",
+        "pinyin": "zhangfu",
+        "chars": 2,
+        "syllables": [
+         5,
+         2
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "2",
+        "code": "Digit2",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "0",
+        "code": "Digit0",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "%",
+        "code": "Digit5",
+        "shift": true,
+        "passthrough": true
+       },
+       {
+        "kind": "direct",
+        "text": "，",
+        "code": "Comma",
+        "shift": false,
+        "passthrough": false
+       },
+       {
+        "kind": "ime",
+        "text": "前端",
+        "pinyin": "qianduan",
+        "chars": 2,
+        "syllables": [
+         4,
+         4
+        ]
+       },
+       {
+        "kind": "direct",
+        "text": "/",
+        "code": "Slash",
+        "shift": false,
+        "passthrough": true
+       },
+       {
+        "kind": "ime",
+        "text": "后端都招",
+        "pinyin": "houduandouzhao",
+        "chars": 4,
+        "syllables": [
+         3,
+         4,
+         3,
+         4
+        ]
        }
       ]
      }
