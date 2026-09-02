@@ -14894,11 +14894,11 @@ test('注入接缝:页面内抛出的异常经哨兵还原成真异常,不被当
   }
 })
 
-test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
+test('智联适配器把 36 条能力实现齐,并如实声明自己的执行世界与输入通道', () => {
   // 少一条能力,对应原语在真机上会以 PROTO_UNSUPPORTED_CMD 静默退化;
   // 这条用例让它在门禁上就红。
   const required = [
-    'probePlatform', 'ensureSurface', 'readWechatSetting',
+    'probePlatform', 'ensureSurface', 'readWechatSetting', 'readNotices',
     'readList', 'readThread', 'readUnreadTotal', 'identifyCurrentConversation', 'openConversation',
     'readCurrentCandidate', 'readResume',
     'selectSourcingPosition', 'applySourcingFilters', 'readSourcingWindow',
@@ -14910,7 +14910,7 @@ test('智联适配器把 35 条能力实现齐,并如实声明自己的执行世
     'prepareJobDraft', 'publishJobDraft', 'takeJobOffline',
     'inspectSendSurface', 'probeInterviewEditor', 'capturePageSnapshot',
   ]
-  assert.equal(required.length, 35)
+  assert.equal(required.length, 36)
   for (const name of required) {
     assert.equal(typeof zhilianAdapter[name], 'function', `智联适配器缺能力 ${name}`)
   }

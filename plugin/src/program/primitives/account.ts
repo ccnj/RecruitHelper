@@ -2,9 +2,13 @@
 // 唯一注册表。
 //
 //   account.readWechatSetting  intrusive  导航个人中心,读微信号配置是否已填
+//   account.readNotices        intrusive  同一页切「通知」页签,读第一页通知
 //
-// data 只含布尔;招聘方自己的微信号不进契约(2026-08-18 甲方裁决立案)。
+// readWechatSetting 的 data 只含布尔;招聘方自己的微信号不进契约(2026-08-18
+// 甲方裁决立案)。readNotices 是第十一项云端出站「平台通知上报」的读面
+// (2026-09-02 甲方裁决),不是闸——脑侧读失败只记日志。
 import {
+  AccountReadNoticesArgs,
   AccountReadWechatSettingArgs,
   CmdClass,
   Primitive as PrimitiveName,
@@ -43,6 +47,22 @@ const readWechatSetting: Primitive = {
   },
 }
 
+const readNotices: Primitive = {
+  name: PrimitiveName.AccountReadNotices,
+  class: CmdClass.Intrusive,
+  async handler(rawArgs, ctx): Promise<PrimitiveOutcome> {
+    try {
+      const data = await callPlatform(
+        ctx, 'readNotices', rawArgs as AccountReadNoticesArgs,
+      )
+      return { status: 'ok', data }
+    } catch (error) {
+      return failKnownOrThrow(error)
+    }
+  },
+}
+
 export function registerAccountPrimitives(): void {
   register(readWechatSetting)
+  register(readNotices)
 }
