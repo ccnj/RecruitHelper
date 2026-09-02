@@ -81,7 +81,7 @@ type tipServer struct {
 	mu      sync.Mutex
 	conns   map[uint32]*tipConn // pid → 连接
 	logs    []string
-	commits atomic.Int32 // 收到多少条 COMMIT —— 用来跟计划里的词数对账
+	commits atomic.Int32 // 收到多少条 COMMIT/PASS —— 词表消耗了几个,跟计划里的词数对账
 	done    atomic.Bool  // 收到过 DONE
 }
 
@@ -157,6 +157,14 @@ func (s *tipServer) handle(c io.ReadWriteCloser) {
 				s.commits.Add(1)
 				s.log(fmt.Sprintf("上屏 #%s %q", f[1], f[2]))
 			}
+		case "PASS":
+			// 透传的字元:字没经过我们的组字,是键落在键盘布局上打出来的。
+			// **计数与 COMMIT 同一个**——对账问的是「词表消耗了几个」,两条路都算。
+			// 但日志分开写:出错时要一眼看出这个字走的是哪条路。
+			if len(f) > 2 {
+				s.commits.Add(1)
+				s.log(fmt.Sprintf("透传 #%s %q", f[1], f[2]))
+			}
 		case "DONE":
 			s.done.Store(true)
 			s.log("词表已用完")
@@ -227,19 +235,10 @@ func foregroundPid() (uint32, error) {
 //
 // 连着多条却又不在前台 —— 那才是真有歧义,直接报错、不猜。
 func (s *tipServer) sendWords(words []PlanWord) error {
-	fields := make([]string, 0, len(words))
-	for _, w := range words {
-		if strings.ContainsAny(w.Text, "\t\n|") {
-			return fmt.Errorf("词 %q 含制表符、换行或竖线 —— 协议是行式文本,装不下", w.Text)
-		}
-		// 词后面挂音节边界:`你好|2`、`吗|`、`招聘顾问|2,4,6`。
-		// 竖线安全:排版器的输出字母表是汉字、全角标点、数字与英文字母,竖线不在其中;
-		// 真正兜底的仍是上面那个 ContainsAny。
-		n := make([]string, len(w.Splits))
-		for i, v := range w.Splits {
-			n[i] = strconv.Itoa(v)
-		}
-		fields = append(fields, w.Text+"|"+strings.Join(n, ","))
+	// 线格式在 tipwire.go(平台无关,开发机上有测试);这里只负责挑连接、写出去。
+	fields, err := wordFields(words)
+	if err != nil {
+		return err
 	}
 	tc, err := s.pick()
 	if err != nil {
