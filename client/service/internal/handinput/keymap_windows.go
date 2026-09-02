@@ -24,8 +24,8 @@ import "fmt"
 // 事实门」不收任何"以后可能用得上"的键:上游的 windowsKey 还有 Tab/Backspace/
 // Escape/ShiftRight/CapsLock,**我们一个都不收**——排版器发不出它们。
 //
-// **Enter 刻意不收**,理由见 keymap_darwin.go 文件头:排版器能为换行段发 Shift+Enter,
-// 但裸 Enter 在聊天框里是发送,Shift 时序稍偏就把半截话发给候选人。
+// **Enter 刻意不收,但它是后手不是前门**,理由见 keymap_darwin.go 文件头:前门是插件
+// 在排版前把换行删掉,这里不收只是为了万一前门漏了,方向仍是一个键不发。
 //
 // # 键码值的出处
 //
