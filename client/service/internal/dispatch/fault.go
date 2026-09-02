@@ -193,7 +193,7 @@ func (d *Dispatcher) redispatchFrom(old store.CmdRecord, reason string, delay ti
 	}
 	msgID := ids.NewMsgID()
 	notBefore := time.Now().Add(delay)
-	deadlineMs := notBefore.UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := notBefore.UnixMilli() + effectiveDeadlineMs(meta, recordPlatform(old.Platform, old.Args))
 	rec := &store.CmdRecord{
 		MsgID:  msgID,
 		HandID: old.HandID, Session: session, BootIDAtDispatch: bootID,

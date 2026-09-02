@@ -1416,7 +1416,7 @@ func (d *Dispatcher) resultRetryPlan(
 	child := &store.CmdRecord{
 		MsgID: ids.NewMsgID(), HandID: cmd.HandID, Session: session, BootIDAtDispatch: bootID,
 		Status: store.CmdQueued, NotBeforeAt: &notBefore,
-		DeadlineMs: notBefore.UnixMilli() + effectiveDeadlineMs(meta), ExecBudgetMs: cmd.ExecBudgetMs,
+		DeadlineMs: notBefore.UnixMilli() + effectiveDeadlineMs(meta, recordPlatform(cmd.Platform, cmd.Args)), ExecBudgetMs: cmd.ExecBudgetMs,
 	}
 	plan.Replacement = child
 	plan.ReplacementReason = fmt.Sprintf("result retryable=yes, backoff=%s", delay)
@@ -1503,14 +1503,23 @@ func mapResultStatus(s protocol.ResultStatus) store.CmdStatus {
 	}
 }
 
-func effectiveDeadlineMs(m protocol.PrimitiveMeta) int64 {
-	if m.DeadlineMs > 0 {
-		return m.DeadlineMs
+// effectiveDeadlineMs / effectiveBudgetMs:契约 meta 经平台系数放大后的期限与预算
+// (2026-09-02 甲方裁决,批 D 2.3)。platform 是必填参数,让编译器替我们找全 11 个调用点——
+// 漏一处的后果不是编译错,而是 BOSS 上 effectful 命令"预算放大、期限没放大",
+// job.takeOffline(240000/480000)会落到期限==预算的等号边,手侧定时器取等号走 expired。
+func effectiveDeadlineMs(m protocol.PrimitiveMeta, platform string) int64 {
+	base := m.DeadlineMs
+	if base <= 0 {
+		base = 2 * baseBudgetMs(m)
 	}
-	return 2 * effectiveBudgetMs(m)
+	return scaleDeadlineMs(base, platform)
 }
 
-func effectiveBudgetMs(m protocol.PrimitiveMeta) int64 {
+func effectiveBudgetMs(m protocol.PrimitiveMeta, platform string) int64 {
+	return scaleBudgetMs(baseBudgetMs(m), platform)
+}
+
+func baseBudgetMs(m protocol.PrimitiveMeta) int64 {
 	if m.ExecBudgetMs > 0 {
 		return m.ExecBudgetMs
 	}

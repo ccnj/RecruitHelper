@@ -120,7 +120,7 @@ func (d *Dispatcher) SendGreeting(req SendGreetingRequest) (*SendMessageReceipt,
 	}
 
 	now := time.Now()
-	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta, profile.Platform)
 	intent := store.EffectIntent{
 		IntentID: req.IntentID,
 		IdemKey: BuildEffectIdemKey(profile.Platform, profile.AccountRef,
@@ -235,7 +235,7 @@ func (d *Dispatcher) SendSourcingGreeting(
 	}
 
 	now := time.Now()
-	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := now.UnixMilli() + effectiveDeadlineMs(meta, profile.Platform)
 	intent := store.EffectIntent{
 		IntentID: preparation.IntentID,
 		IdemKey: BuildEffectIdemKey(profile.Platform, profile.AccountRef,

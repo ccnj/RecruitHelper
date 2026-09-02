@@ -133,8 +133,10 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 			return dispatchResult{}, ErrContractMismatch
 		}
 	}
+	// 命令的目标平台只算一次:能力闸按它查表,预算与期限按它取系数(platform.go)。
+	targetPlatform := commandPlatform(req.Context, req.Args)
 	if !opts.legacyDebug {
-		if err := d.requireNegotiation(req.HandID, req.Name, commandPlatform(req.Context, req.Args), meta); err != nil {
+		if err := d.requireNegotiation(req.HandID, req.Name, targetPlatform, meta); err != nil {
 			return dispatchResult{}, err
 		}
 	}
@@ -149,7 +151,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 	}
 
 	msgID := ids.NewMsgID()
-	deadlineMs := time.Now().UnixMilli() + effectiveDeadlineMs(meta)
+	deadlineMs := time.Now().UnixMilli() + effectiveDeadlineMs(meta, targetPlatform)
 	idemKey := req.IdemKey
 	if opts.legacyDebug && meta.Class == protocol.ClassEffectful && idemKey == "" {
 		idemKey = fmt.Sprintf("ik1:debug:%s:%s:-:%s", req.HandID, req.Name, ids.NewMsgID())
@@ -177,7 +179,7 @@ func (d *Dispatcher) dispatchDetailed(req DispatchRequest, opts dispatchOptions)
 
 	body := protocol.CmdBody{
 		Name: req.Name, Ver: meta.Ver, Args: req.Args, Context: req.Context, IdemKey: idemKey,
-		Deadline: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta), LeaseMs: meta.LeaseMs,
+		Deadline: deadlineMs, ExecBudgetMs: effectiveBudgetMs(meta, targetPlatform), LeaseMs: meta.LeaseMs,
 		Guards: req.Guards,
 	}
 	bodyRaw, err := protocol.Encode(body)
