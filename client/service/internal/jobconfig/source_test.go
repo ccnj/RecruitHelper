@@ -71,7 +71,7 @@ func TestFetchCurrentUsesOnlyApprovedEndpointAndCredentialShape(t *testing.T) {
 func TestFetchRefreshesCustomerSnapshotFromResponse(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"job":{"id":1},"customer":{"customerId":7,"customerName":"新客户名","status":"active","subscriptionEndsAt":"2027-01-01T00:00:00"}}`))
+		_, _ = w.Write([]byte(`{"job":{"id":1},"customer":{"customerId":7,"customerName":"新客户名","status":"active","subscriptionEndsAt":"2027-01-01T00:00:00","platform":"boss"}}`))
 	}))
 	defer backend.Close()
 	store, _ := NewConfigStore(t.TempDir())
@@ -91,6 +91,10 @@ func TestFetchRefreshesCustomerSnapshotFromResponse(t *testing.T) {
 	}
 	if loaded.Customer.Name != "新客户名" || loaded.Customer.SubscriptionEndsAt != "2027-01-01T00:00:00" {
 		t.Fatalf("customer 段未刷新: %+v", loaded.Customer)
+	}
+	// 平台归属随客户快照下发(2026-09-02 模型 1):落盘并经 CustomerPlatform 读出。
+	if loaded.Customer.Platform != "boss" || source.CustomerPlatform() != "boss" {
+		t.Fatalf("platform 未随快照刷新: %+v CustomerPlatform=%q", loaded.Customer, source.CustomerPlatform())
 	}
 	if loaded.LicenseToken != "token-private" || loaded.MachineID != testMachineID || loaded.BaseURL != backend.URL {
 		t.Fatalf("凭据段被误改: %+v", loaded)
@@ -156,7 +160,7 @@ func TestBindUsesOneApprovedRequestAndPersistsCredentialWithoutInviteCode(t *tes
 			t.Fatalf("激活请求体错误: %+v", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"token-new","customer":{"customerId":7,"customerName":"合成客户","status":"active","subscriptionEndsAt":"2027-01-01T00:00:00Z"}}`))
+		_, _ = w.Write([]byte(`{"authorized":true,"status":"bound","licenseToken":"token-new","customer":{"customerId":7,"customerName":"合成客户","status":"active","subscriptionEndsAt":"2027-01-01T00:00:00Z","platform":"boss"}}`))
 	}))
 	defer backend.Close()
 
@@ -168,7 +172,7 @@ func TestBindUsesOneApprovedRequestAndPersistsCredentialWithoutInviteCode(t *tes
 	}
 	loaded, err := store.Load()
 	if err != nil || loaded == nil || loaded.BaseURL != backend.URL || loaded.MachineID != testMachineID ||
-		loaded.LicenseToken != "token-new" || loaded.Customer.Name != "合成客户" {
+		loaded.LicenseToken != "token-new" || loaded.Customer.Name != "合成客户" || loaded.Customer.Platform != "boss" {
 		t.Fatalf("激活凭据未正确落盘: loaded=%+v err=%v", loaded, err)
 	}
 	raw, err := os.ReadFile(store.path)
@@ -270,5 +274,24 @@ func TestFetchCurrentRejectsMachineMismatchBeforeNetwork(t *testing.T) {
 	_, err := NewSource(store, backend.Client(), fixedMachineID).FetchCurrent(context.Background())
 	if !errors.Is(err, ErrMachineMismatch) || calls != 0 {
 		t.Fatalf("机器不匹配仍访问后台: calls=%d err=%v", calls, err)
+	}
+}
+
+// 后台未下发平台字段(旧后台或存量快照):CustomerPlatform 返回空串,由消费方按智联处理,
+// 存量客户行为逐字不变。
+func TestCustomerPlatformAbsentIsEmpty(t *testing.T) {
+	store, _ := NewConfigStore(t.TempDir())
+	source := NewSource(store, nil, fixedMachineID)
+	if got := source.CustomerPlatform(); got != "" {
+		t.Fatalf("无配置文件应返回空串: %q", got)
+	}
+	if err := store.Save(Config{
+		BaseURL: "http://127.0.0.1:1", MachineID: testMachineID, LicenseToken: "token-private",
+		Customer: Customer{ID: 7, Name: "旧客户名", Status: "active"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.CustomerPlatform(); got != "" {
+		t.Fatalf("快照无 platform 应返回空串: %q", got)
 	}
 }

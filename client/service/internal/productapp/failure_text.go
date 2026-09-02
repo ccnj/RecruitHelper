@@ -27,12 +27,8 @@ func StartFailureText(err error) string {
 		return "Chrome 插件未连接，请确认 Chrome 已打开并加载插件后重试"
 	case errors.Is(err, ErrHandAmbiguous):
 		return "检测到多个在线插件，请只保留一个装有插件的 Chrome"
-	case errors.Is(err, ErrPlatformAmbiguous):
-		return "检测到多个招聘平台已登录，请选择本次要运行的平台"
-	case errors.Is(err, ErrPlatformInvalid):
-		return "平台标识无效"
 	case errors.Is(err, ErrLoginRequired):
-		return "请先在 Chrome 中登录智联招聘端，再点击开始"
+		return loginRequiredText(err)
 	case errors.Is(err, ErrJobConfigUnavailable):
 		return "职位配置读取失败，无法确定今天要跑的职位名单"
 	case errors.Is(err, store.ErrDailyJobPlanNoJobs):
@@ -47,4 +43,20 @@ func StartFailureText(err error) string {
 		return "微信号配置检查未完成，请稍后重试"
 	}
 	return "当前状态无法启动工作流"
+}
+
+// loginRequiredText 按客户记录的平台说清该去登录哪个端(2026-09-02 模型 1);裸哨兵与
+// 未知平台保持智联原文案,存量客户文案逐字不变。
+func loginRequiredText(err error) string {
+	var typed *LoginRequiredError
+	if errors.As(err, &typed) {
+		switch typed.Platform {
+		case "boss":
+			return "请先在 Chrome 中登录 BOSS 直聘招聘端，再点击开始"
+		case "", DefaultPlatform:
+		default:
+			return "请先在 Chrome 中登录招聘平台（" + typed.Platform + "），再点击开始"
+		}
+	}
+	return "请先在 Chrome 中登录智联招聘端，再点击开始"
 }

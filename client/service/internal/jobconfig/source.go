@@ -50,6 +50,9 @@ type Customer struct {
 	Name               string `json:"name,omitempty"`
 	Status             string `json:"status,omitempty"`
 	SubscriptionEndsAt string `json:"subscription_ends_at,omitempty"`
+	// Platform 是客户记录的平台归属(2026-09-02 甲方裁决,模型 1「一条客户记录一个平台」),
+	// 随 bind 与 job-config(s) 顶层客户快照下发;缺席为空串,由消费方按智联处理。
+	Platform string `json:"platform,omitempty"`
 }
 
 type Config struct {
@@ -68,6 +71,7 @@ type ConfigView struct {
 	MachineMatch           bool   `json:"machineMatch"`
 	CustomerName           string `json:"customerName,omitempty"`
 	CustomerStatus         string `json:"customerStatus,omitempty"`
+	CustomerPlatform       string `json:"customerPlatform,omitempty"`
 }
 
 func (c Config) View() ConfigView {
@@ -77,6 +81,7 @@ func (c Config) View() ConfigView {
 		LicenseTokenConfigured: strings.TrimSpace(c.LicenseToken) != "",
 		CustomerName:           strings.TrimSpace(c.Customer.Name),
 		CustomerStatus:         strings.TrimSpace(c.Customer.Status),
+		CustomerPlatform:       strings.TrimSpace(c.Customer.Platform),
 	}
 	view.Configured = view.BaseURLConfigured && view.MachineIDConfigured && view.LicenseTokenConfigured
 	return view
@@ -93,6 +98,7 @@ func normalizeConfig(config Config) (Config, error) {
 	config.Customer.Name = strings.TrimSpace(config.Customer.Name)
 	config.Customer.Status = strings.TrimSpace(config.Customer.Status)
 	config.Customer.SubscriptionEndsAt = strings.TrimSpace(config.Customer.SubscriptionEndsAt)
+	config.Customer.Platform = strings.TrimSpace(config.Customer.Platform)
 	if !validMachineID(config.MachineID) || config.LicenseToken == "" {
 		return Config{}, ErrConfigInvalid
 	}
@@ -206,6 +212,17 @@ func (s *Source) LoadConfig() (*Config, error) {
 	return s.config.Load()
 }
 
+// CustomerPlatform 实现 productapp.CustomerPlatformSource:读本地客户快照的平台归属。
+// 快照缺席、读失败或字段为空一律返回空串,由消费方按 productapp.DefaultPlatform 处理——
+// 失效方向是"当旧世界",不会把存量智联客户导向别的平台。
+func (s *Source) CustomerPlatform() string {
+	config, err := s.LoadConfig()
+	if err != nil || config == nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Customer.Platform)
+}
+
 func (s *Source) Status(ctx context.Context) (ConfigView, error) {
 	config, err := s.LoadConfig()
 	if err != nil {
@@ -284,6 +301,7 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 			CustomerName       string `json:"customerName"`
 			Status             string `json:"status"`
 			SubscriptionEndsAt string `json:"subscriptionEndsAt"`
+			Platform           string `json:"platform"`
 		} `json:"customer"`
 	}
 	if json.Unmarshal(raw, &response) != nil {
@@ -300,6 +318,7 @@ func (s *Source) Bind(ctx context.Context, rawBaseURL, inviteCode string) (BindR
 		ID: response.Customer.CustomerID, Name: strings.TrimSpace(response.Customer.CustomerName),
 		Status:             strings.TrimSpace(response.Customer.Status),
 		SubscriptionEndsAt: strings.TrimSpace(response.Customer.SubscriptionEndsAt),
+		Platform:           strings.TrimSpace(response.Customer.Platform),
 	}
 	if s == nil || s.config == nil {
 		return BindResult{}, ErrConfigMissing
@@ -378,6 +397,7 @@ func (s *Source) refreshCustomerSnapshot(raw []byte) {
 			CustomerName       string `json:"customerName"`
 			Status             string `json:"status"`
 			SubscriptionEndsAt string `json:"subscriptionEndsAt"`
+			Platform           string `json:"platform"`
 		} `json:"customer"`
 	}
 	if json.Unmarshal(raw, &response) != nil || response.Customer == nil {
@@ -388,6 +408,7 @@ func (s *Source) refreshCustomerSnapshot(raw []byte) {
 		Name:               strings.TrimSpace(response.Customer.CustomerName),
 		Status:             strings.TrimSpace(response.Customer.Status),
 		SubscriptionEndsAt: strings.TrimSpace(response.Customer.SubscriptionEndsAt),
+		Platform:           strings.TrimSpace(response.Customer.Platform),
 	}
 	if customer.Name == "" {
 		return

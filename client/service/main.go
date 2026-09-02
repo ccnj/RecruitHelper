@@ -330,6 +330,9 @@ func main() {
 	productController.SetAccountResolver(appbridge.LoginAccountResolver{
 		Hub: hub, Prober: runner, Binder: actor, Now: time.Now,
 	})
+	// 平台从客户记录来(2026-09-02 甲方裁决,模型 1):开始时把本地客户快照的平台归属当
+	// 指定平台,人工点击与每日自动开始同一来源;快照缺席按智联。
+	productController.SetCustomerPlatformSource(jobConfigSource)
 	// 微信配置开工闸(2026-08-18 甲方裁决):开始前经手读平台个人中心,未配置
 	// 或读不到一律不放行;有活跃工作流/未终局批次时跳过、不导航。
 	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
