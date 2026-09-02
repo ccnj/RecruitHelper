@@ -277,13 +277,19 @@ func (m *Manager) prepareFullStart(
 func (m *Manager) StartReplyOnly(key store.AccountKey) (*store.ProductWorkflowRun, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.startReplyOnlyLocked(key, m.clock.Now())
+}
 
+// startReplyOnlyLocked 是「只处理消息」的开工体,调用方持有 Manager.mu。产品入口
+// StartReplyOnly 与当日职位计划收口后的自动开启沟通巡检(2026-09-02 甲方裁决,见
+// daily_plan_chain.go autoStartCommunicationAfterPlanLocked)共用同一条路径与全部
+// 前置闸:活跃运行幂等/模式冲突、无未终局采集批次、统一业务运行窗口。
+func (m *Manager) startReplyOnlyLocked(key store.AccountKey, now time.Time) (*store.ProductWorkflowRun, error) {
 	key.Platform = strings.TrimSpace(key.Platform)
 	key.AccountRef = strings.TrimSpace(key.AccountRef)
 	if key.Platform == "" || key.AccountRef == "" {
 		return nil, store.ErrProductWorkflowInvalid
 	}
-	now := m.clock.Now()
 	if current, err := m.activeForStart(key, workflow.ModeReplyOnly, now); current != nil || err != nil {
 		return current, err
 	}

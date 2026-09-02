@@ -170,6 +170,106 @@ func TestDailyPlanChainsThroughEntriesAndCompletes(t *testing.T) {
 	if closed.Status != store.DailyJobPlanCompleted {
 		t.Fatalf("计划未完成收口: %+v", closed)
 	}
+	// 跨日关窗收口不自动开沟通:窗口本来就关了。
+	if active, err := db.ActiveProductWorkflowRun(); err != nil || active != nil {
+		t.Fatalf("跨日收口不得自动开启沟通: %+v err=%v", active, err)
+	}
+}
+
+// 末条目被跳过类失败拦下后,计划记完成并自动开启沟通巡检(只处理消息模式),
+// 已发候选人有人盯回复;跳过原因带批次留痕的判定现场(2026-09-02 甲方裁决)。
+func TestDailyPlanSkippedLastEntryAutoStartsCommunication(t *testing.T) {
+	db, key, manager, actor, clock, _, _ := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := finalizeActivePlanBothOnline(t, db, key, clock.now)
+	terminalizeRunBatch(t, db, runA, "testFunnelDone", clock.now)
+	walkRunToStage(t, db, runA, store.ProductWorkflowStageCommunication, clock.now)
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("登记接续: %v", err)
+	}
+	runB, err := manager.AdvanceOnce(context.Background())
+	if err != nil || runB == nil || runB.RunID == runA.RunID || runB.SourcingBatchID == nil {
+		t.Fatalf("接续未开新 run: %+v err=%v", runB, err)
+	}
+	enableBefore := actor.enableCalls
+
+	// 条目二开批时推荐页两次未就绪:批次 blocked(recommendPageNotReady)+留痕,
+	// run 失败——这正是 failStoppedPipeline 的落账形态。
+	if _, err := db.BlockSourcingBatch(store.BlockSourcingBatchRequest{
+		BatchID: *runB.SourcingBatchID, Reason: store.SourcingBatchGateReasonRecommendPageNotReady,
+		Detail: "CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪", BlockedAt: clock.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.TransitionProductWorkflowRun(store.TransitionProductWorkflowRunRequest{
+		RunID: runB.RunID,
+		From:  workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusRunning},
+		To:    workflow.State{Mode: workflow.ModeFull, Status: workflow.StatusFailed},
+		At:    clock.now, Stage: store.ProductWorkflowStageFailed,
+		Failure: "产品工作流批次推进状态无效: recommendPageNotReady",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("收口扫描: %v", err)
+	}
+	bundle, err := db.DailyJobPlanByID(plan.PlanID)
+	if err != nil || bundle == nil || bundle.Plan.Status != store.DailyJobPlanCompleted {
+		t.Fatalf("计划未记完成: %+v err=%v", bundle, err)
+	}
+	if bundle.Entries[1].Status != store.DailyJobPlanEntrySkipped ||
+		bundle.Entries[1].SkipReason != "batch:recommendPageNotReady|CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪" {
+		t.Fatalf("末条目未按跳过类带现场留痕: %+v", bundle.Entries)
+	}
+	if active, err := db.ActiveSourcingBatch(key); err != nil || active != nil {
+		t.Fatalf("跳过后不得残留未终局批次: %+v err=%v", active, err)
+	}
+	active, err := db.ActiveProductWorkflowRun()
+	if err != nil || active == nil || active.Mode != workflow.ModeReplyOnly ||
+		active.Status != workflow.StatusRunning || active.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("收口后应自动开启只处理消息运行: %+v err=%v", active, err)
+	}
+	if actor.enableCalls != enableBefore+1 {
+		t.Fatalf("账号巡检应被重新启用一次: before=%d after=%d", enableBefore, actor.enableCalls)
+	}
+}
+
+// 用户点结束的收口不自动开沟通:结束就是结束。
+func TestDailyPlanUserEndedDoesNotAutoStartCommunication(t *testing.T) {
+	db, key, manager, actor, clock, _, _ := dailyPlanChainFixture(t)
+	runA, err := manager.StartFullDailyPlan(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := finalizeActivePlanBothOnline(t, db, key, clock.now)
+	terminalizeRunBatch(t, db, runA, "testFunnelDone", clock.now)
+	walkRunToStage(t, db, runA, store.ProductWorkflowStageCommunication, clock.now)
+	if _, err := manager.End(); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	enableBefore := actor.enableCalls
+	for i := 0; i < 3; i++ {
+		if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	var closed store.DailyJobPlan
+	if err := dbPlanByID(db, plan.PlanID, &closed); err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != store.DailyJobPlanAborted || closed.EndReason != planEndReasonUserEnded {
+		t.Fatalf("计划未按 userEnded 终止: %+v", closed)
+	}
+	if active, err := db.ActiveProductWorkflowRun(); err != nil || active != nil {
+		t.Fatalf("用户结束后不得自动开启沟通: %+v err=%v", active, err)
+	}
+	if actor.enableCalls != enableBefore {
+		t.Fatalf("用户结束后账号不得被重新启用: before=%d after=%d", enableBefore, actor.enableCalls)
+	}
 }
 
 // dbPlanByID 直读终局计划(测试辅助)。
@@ -261,8 +361,20 @@ func TestDailyPlanAbortsOnNonSkipFailureAndTerminalizesBatch(t *testing.T) {
 	if active, err := db.ActiveSourcingBatch(key); err != nil || active != nil {
 		t.Fatalf("blocked 批次未被终局化: %+v err=%v", active, err)
 	}
-	// 次日重来是全新计划,不收养旧批次。
+	// 运行失败终止后自动开启只处理消息运行(2026-09-02 甲方裁决):已发的人有人盯回复。
+	auto, err := db.ActiveProductWorkflowRun()
+	if err != nil || auto == nil || auto.Mode != workflow.ModeReplyOnly ||
+		auto.Stage != store.ProductWorkflowStageCommunication {
+		t.Fatalf("runFailed 终止后应自动开启只处理消息运行: %+v err=%v", auto, err)
+	}
+	// 次日重来是全新计划,不收养旧批次:昨日自动开启的沟通运行先按跨日终局。
 	clock.now = clock.now.Add(24 * time.Hour)
+	if _, err := manager.AdvanceOnce(context.Background()); err != nil {
+		t.Fatalf("跨日终局: %v", err)
+	}
+	if stale, err := db.ActiveProductWorkflowRun(); err != nil || stale != nil {
+		t.Fatalf("昨日沟通运行未按跨日终局: %+v err=%v", stale, err)
+	}
 	fresh, err := manager.StartFullDailyPlan(key)
 	if err != nil || fresh == nil {
 		t.Fatalf("次日重来失败: %+v err=%v", fresh, err)
