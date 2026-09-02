@@ -34,6 +34,7 @@ import (
 	"recruithelper/client/service/internal/logcontext"
 	"recruithelper/client/service/internal/logreport"
 	"recruithelper/client/service/internal/m5ai"
+	"recruithelper/client/service/internal/noticereport"
 	"recruithelper/client/service/internal/notify"
 	"recruithelper/client/service/internal/patrol"
 	"recruithelper/client/service/internal/productapp"
@@ -333,6 +334,37 @@ func main() {
 	// 或读不到一律不放行;有活跃工作流/未终局批次时跳过、不导航。
 	productController.SetWechatSettingReader(appbridge.WechatSettingReader{
 		Hub: hub, Runner: runner, Store: st,
+	})
+	// 平台通知上报(AGENTS.md 第十一项出站,2026-09-02 甲方裁决):微信闸通过后
+	// 同步读个人中心「通知」页签第一页,读到即异步上报旧后台。不是闸——读不到、
+	// 传不上只记日志,开始照常;不重试,下次开始自愈。
+	noticeReporter := &noticereport.Reporter{
+		ClientVersion: strings.TrimSpace(os.Getenv("RECRUITHELPER_APP_VERSION")),
+		Target: func() (noticereport.Target, bool) {
+			config, configErr := jobConfigSource.LoadConfig()
+			if configErr != nil || config == nil {
+				return noticereport.Target{}, false
+			}
+			return noticereport.Target{
+				BaseURL: config.BaseURL, MachineID: config.MachineID,
+				LicenseToken: config.LicenseToken,
+			}, true
+		},
+	}
+	productController.SetNoticeCollector(appbridge.NoticeCollector{
+		Hub: hub, Runner: runner, Store: st,
+		Report: func(platform string, data protocol.AccountReadNoticesData) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*noticereport.UploadTimeout)
+				defer cancel()
+				if reportErr := noticeReporter.Report(ctx, platform, data); reportErr != nil {
+					slog.Warn("平台通知上报失败(不影响开始)",
+						"errorCode", "noticeReportFailed", "err", reportErr)
+				} else {
+					slog.Info("平台通知已上报旧后台", "count", len(data.Notices))
+				}
+			}()
+		},
 	})
 
 	// QoS0 事件绝不阻塞 WS 读循环；队列满时响亮留痕后丢提示，周期对账仍是真相源。
