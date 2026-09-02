@@ -19,6 +19,7 @@ import (
 type fakeWorkflowControl struct {
 	mode         string
 	backendJobID string
+	platform     string
 	pauseCalls   int
 	resumeCalls  int
 	endCalls     int
@@ -35,10 +36,11 @@ func (f *fakeWorkflowControl) SyncJobs(context.Context) error {
 
 func (f *fakeWorkflowControl) Start(
 	_ context.Context,
-	mode, backendJobID string,
+	mode, backendJobID, platform string,
 ) error {
 	f.mode = mode
 	f.backendJobID = backendJobID
+	f.platform = platform
 	return f.err
 }
 
@@ -261,5 +263,46 @@ func TestWorkflowControlErrorIsHiddenAndDoesNotBecomeSuccess(t *testing.T) {
 	if response.Code != http.StatusConflict ||
 		bytes.Contains(response.Body.Bytes(), []byte("internal detail")) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// 开始请求的 platform(2026-09-02 批 D 2.1):可选、透传;不合法 400;歧义 409 带候选列表。
+func TestStartForwardsPlatformAndRejectsInvalidPlatform(t *testing.T) {
+	control := &fakeWorkflowControl{}
+	handler := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(control))
+	response := productPOST(t, handler, "/app/workflow/start", `{"mode":"replyOnly","platform":"boss"}`)
+	if response.Code != http.StatusAccepted || control.platform != "boss" || control.mode != "replyOnly" {
+		t.Fatalf("platform 应透传: status=%d control=%+v body=%s", response.Code, control, response.Body.String())
+	}
+	legacy := productPOST(t, handler, "/app/workflow/start", `{"mode":"full"}`)
+	if legacy.Code != http.StatusAccepted || control.platform != "" {
+		t.Fatalf("不带 platform 的旧请求体照旧: status=%d platform=%q", legacy.Code, control.platform)
+	}
+	for _, body := range []string{
+		`{"mode":"replyOnly","platform":"` + strings.Repeat("b", 65) + `"}`,
+		`{"mode":"replyOnly","platform":"bo ss"}`,
+	} {
+		bad := productPOST(t, handler, "/app/workflow/start", body)
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("不合法 platform 应 400: body=%s status=%d", body, bad.Code)
+		}
+	}
+}
+
+func TestStartAmbiguousPlatformReturnsCandidates(t *testing.T) {
+	control := &fakeWorkflowControl{err: fmt.Errorf("start: %w",
+		&productapp.PlatformAmbiguousError{Platforms: []string{"zhilian", "boss"}})}
+	handler := newTestAPI(t, &fakeProjections{}, WithWorkflowControl(control))
+	response := productPOST(t, handler, "/app/workflow/start", `{"mode":"full"}`)
+	var body struct {
+		Error     string   `json:"error"`
+		Platforms []string `json:"platforms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body=%s err=%v", response.Body.String(), err)
+	}
+	if response.Code != http.StatusConflict || body.Error != "检测到多个招聘平台已登录，请选择本次要运行的平台" ||
+		len(body.Platforms) != 2 || body.Platforms[0] != "zhilian" || body.Platforms[1] != "boss" {
+		t.Fatalf("歧义应 409 并带候选平台: status=%d body=%s", response.Code, response.Body.String())
 	}
 }

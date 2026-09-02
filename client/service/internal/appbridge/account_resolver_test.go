@@ -12,12 +12,15 @@ import (
 )
 
 type fakeResolverHub struct {
-	hands   []string
-	online  bool
-	current bool
+	hands     []string
+	online    bool
+	current   bool
+	platforms []string // hello 声明的平台表;nil=旧手未声明
 }
 
 func (h fakeResolverHub) ActiveHandIDs() []string { return h.hands }
+
+func (h fakeResolverHub) HandPlatforms(string) []string { return h.platforms }
 
 func (h fakeResolverHub) HandSession(string) (string, string, bool) {
 	return "sess-resolver", "boot-resolver", h.online
@@ -38,11 +41,24 @@ type fakeProber struct {
 	// seen 记下脑传下来的平台。漏传不会有任何症状 —— 只会在装了第二个平台的
 	// 机器上静默绑不上账号,所以这里要能断言它。
 	seen *string
+	// byPlatform / errByPlatform:多平台各探一次时按平台给不同答案;probed 记下探过哪些。
+	byPlatform    map[string]protocol.ProbePlatformData
+	errByPlatform map[string]error
+	probed        *[]string
 }
 
 func (p fakeProber) Probe(_ context.Context, _ string, platform string) (protocol.ProbePlatformData, error) {
 	if p.seen != nil {
 		*p.seen = platform
+	}
+	if p.probed != nil {
+		*p.probed = append(*p.probed, platform)
+	}
+	if err, ok := p.errByPlatform[platform]; ok {
+		return protocol.ProbePlatformData{}, err
+	}
+	if data, ok := p.byPlatform[platform]; ok {
+		return data, nil
 	}
 	return p.data, p.err
 }
@@ -93,12 +109,12 @@ func resolverFixture(t *testing.T, hub fakeResolverHub, prober fakeProber) (Logi
 func TestResolveCurrentRequiresExactlyOneOnlineHand(t *testing.T) {
 	prober := fakeProber{data: loggedInProbe("fp-any")}
 	resolver, _ := resolverFixture(t, fakeResolverHub{hands: nil}, prober)
-	if _, err := resolver.ResolveCurrent(context.Background()); !errors.Is(err, productapp.ErrHandUnavailable) {
+	if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrHandUnavailable) {
 		t.Fatalf("零手在线未报手不可用: %v", err)
 	}
 	resolver, _ = resolverFixture(t,
 		fakeResolverHub{hands: []string{"hand-a", "hand-b"}, online: true, current: true}, prober)
-	if _, err := resolver.ResolveCurrent(context.Background()); !errors.Is(err, productapp.ErrHandAmbiguous) {
+	if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrHandAmbiguous) {
 		t.Fatalf("多手在线未报歧义: %v", err)
 	}
 }
@@ -111,7 +127,7 @@ func TestResolveCurrentRequiresRecruiterLogin(t *testing.T) {
 		"noFingerprint": {LoginState: protocol.LoginStateIn, ContentScriptOk: true},
 	} {
 		resolver, st := resolverFixture(t, hub, fakeProber{data: probe})
-		if _, err := resolver.ResolveCurrent(context.Background()); !errors.Is(err, productapp.ErrLoginRequired) {
+		if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrLoginRequired) {
 			t.Fatalf("%s 未报需要登录: %v", name, err)
 		}
 		if accounts, err := st.Accounts(); err != nil || len(accounts) != 0 {
@@ -126,17 +142,17 @@ func TestResolveCurrentReusesRootPerPrincipalAndSplitsOnSwitch(t *testing.T) {
 	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true}
 	resolver, st := resolverFixture(t, hub, fakeProber{data: loggedInProbe("fp-account-a")})
 
-	first, err := resolver.ResolveCurrent(context.Background())
+	first, err := resolver.ResolveCurrent(context.Background(), "")
 	if err != nil || first.Platform != "zhilian" || first.AccountRef == "" {
 		t.Fatalf("首次解析失败: key=%+v err=%v", first, err)
 	}
-	again, err := resolver.ResolveCurrent(context.Background())
+	again, err := resolver.ResolveCurrent(context.Background(), "")
 	if err != nil || again != first {
 		t.Fatalf("同主体未找回同一账本根: first=%+v again=%+v err=%v", first, again, err)
 	}
 
 	resolver.Prober = fakeProber{data: loggedInProbe("fp-account-b")}
-	second, err := resolver.ResolveCurrent(context.Background())
+	second, err := resolver.ResolveCurrent(context.Background(), "")
 	if err != nil || second == first || second.AccountRef == "" {
 		t.Fatalf("换主体未建新根: first=%+v second=%+v err=%v", first, second, err)
 	}
@@ -145,7 +161,7 @@ func TestResolveCurrentReusesRootPerPrincipalAndSplitsOnSwitch(t *testing.T) {
 		t.Fatalf("应有两棵账本根: accounts=%d err=%v", len(accounts), err)
 	}
 	resolver.Prober = fakeProber{data: loggedInProbe("fp-account-a")}
-	back, err := resolver.ResolveCurrent(context.Background())
+	back, err := resolver.ResolveCurrent(context.Background(), "")
 	if err != nil || back != first {
 		t.Fatalf("切回旧主体未找回原账本根: back=%+v err=%v", back, err)
 	}
@@ -154,10 +170,114 @@ func TestResolveCurrentReusesRootPerPrincipalAndSplitsOnSwitch(t *testing.T) {
 func TestResolveCurrentFailsWhenHandSessionChangesMidProbe(t *testing.T) {
 	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: false}
 	resolver, st := resolverFixture(t, hub, fakeProber{data: loggedInProbe("fp-a")})
-	if _, err := resolver.ResolveCurrent(context.Background()); !errors.Is(err, productapp.ErrHandUnavailable) {
+	if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrHandUnavailable) {
 		t.Fatalf("探测期间换代未报手不可用: %v", err)
 	}
 	if accounts, err := st.Accounts(); err != nil || len(accounts) != 0 {
 		t.Fatalf("换代不该留下账号: accounts=%d err=%v", len(accounts), err)
+	}
+}
+
+// 平台从账号来(2026-09-02 甲方裁决,批 D 2.1):对声明的每个平台各探一次。
+func TestResolveCurrentProbesDeclaredPlatformsAndPicksTheOnlyLoggedIn(t *testing.T) {
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
+	var probed []string
+	prober := fakeProber{
+		probed: &probed,
+		byPlatform: map[string]protocol.ProbePlatformData{
+			"zhilian": {PageKind: protocol.PageKindNone, LoginState: protocol.LoginStateUnknown},
+			"boss":    loggedInProbe("fp-boss"),
+		},
+	}
+	resolver, st := resolverFixture(t, hub, prober)
+	key, err := resolver.ResolveCurrent(context.Background(), "")
+	if err != nil || key.Platform != "boss" || key.AccountRef == "" {
+		t.Fatalf("唯一在线的 boss 应被选中: key=%+v err=%v", key, err)
+	}
+	if len(probed) != 2 || probed[0] != "zhilian" || probed[1] != "boss" {
+		t.Fatalf("应按声明顺序各探一次: %v", probed)
+	}
+	accounts, err := st.Accounts()
+	if err != nil || len(accounts) != 1 || accounts[0].Platform != "boss" {
+		t.Fatalf("应只建 boss 一棵根: %+v err=%v", accounts, err)
+	}
+}
+
+func TestResolveCurrentRefusesToGuessWhenTwoPlatformsLoggedIn(t *testing.T) {
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
+	prober := fakeProber{byPlatform: map[string]protocol.ProbePlatformData{
+		"zhilian": loggedInProbe("fp-zl"), "boss": loggedInProbe("fp-boss"),
+	}}
+	resolver, st := resolverFixture(t, hub, prober)
+	_, err := resolver.ResolveCurrent(context.Background(), "")
+	if !errors.Is(err, productapp.ErrPlatformAmbiguous) {
+		t.Fatalf("两平台都在线应报歧义、不猜: %v", err)
+	}
+	var ambiguous *productapp.PlatformAmbiguousError
+	if !errors.As(err, &ambiguous) || len(ambiguous.Platforms) != 2 ||
+		ambiguous.Platforms[0] != "zhilian" || ambiguous.Platforms[1] != "boss" {
+		t.Fatalf("歧义错误应携带候选平台列表: %v", err)
+	}
+	if accounts, _ := st.Accounts(); len(accounts) != 0 {
+		t.Fatalf("歧义不得建档: %+v", accounts)
+	}
+	// 用户指定后只探那一个。
+	var probed []string
+	prober.probed = &probed
+	resolver.Prober = prober
+	key, err := resolver.ResolveCurrent(context.Background(), "boss")
+	if err != nil || key.Platform != "boss" {
+		t.Fatalf("指定 boss 应只探 boss 并建根: key=%+v err=%v", key, err)
+	}
+	if len(probed) != 1 || probed[0] != "boss" {
+		t.Fatalf("指定平台时只探它: %v", probed)
+	}
+}
+
+func TestResolveCurrentRejectsUndeclaredOrLoggedOutRequestedPlatform(t *testing.T) {
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian"}}
+	prober := fakeProber{byPlatform: map[string]protocol.ProbePlatformData{"zhilian": loggedInProbe("fp-zl")}}
+	resolver, st := resolverFixture(t, hub, prober)
+	// 指定了手没声明的平台:不偷换成在线的智联,按需要登录拒绝。
+	if _, err := resolver.ResolveCurrent(context.Background(), "boss"); !errors.Is(err, productapp.ErrLoginRequired) {
+		t.Fatalf("未声明平台应按需要登录拒绝: %v", err)
+	}
+	if accounts, _ := st.Accounts(); len(accounts) != 0 {
+		t.Fatalf("拒绝不得建档: %+v", accounts)
+	}
+}
+
+func TestResolveCurrentTreatsPartialProbeErrorAsLoggedOut(t *testing.T) {
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
+	prober := fakeProber{
+		byPlatform:    map[string]protocol.ProbePlatformData{"zhilian": loggedInProbe("fp-zl")},
+		errByPlatform: map[string]error{"boss": errors.New("boss 标签页未打开")},
+	}
+	resolver, _ := resolverFixture(t, hub, prober)
+	key, err := resolver.ResolveCurrent(context.Background(), "")
+	if err != nil || key.Platform != "zhilian" {
+		t.Fatalf("一个平台探不到不该拦住另一个已登录的: key=%+v err=%v", key, err)
+	}
+	// 全部探不到才是手不可用。
+	allBroken := fakeProber{errByPlatform: map[string]error{
+		"zhilian": errors.New("x"), "boss": errors.New("y"),
+	}}
+	resolver.Prober = allBroken
+	if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrHandUnavailable) {
+		t.Fatalf("全部探测失败应报手不可用: %v", err)
+	}
+}
+
+func TestResolveCurrentLegacyHandFallsBackToZhilianOnly(t *testing.T) {
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true} // 未声明 platforms
+	var probed []string
+	prober := fakeProber{data: loggedInProbe("fp-zl"), probed: &probed}
+	resolver, _ := resolverFixture(t, hub, prober)
+	key, err := resolver.ResolveCurrent(context.Background(), "")
+	if err != nil || key.Platform != "zhilian" {
+		t.Fatalf("旧手回落只探智联: key=%+v err=%v", key, err)
+	}
+	if len(probed) != 1 || probed[0] != "zhilian" {
+		t.Fatalf("旧手只探智联一次: %v", probed)
 	}
 }
