@@ -39,8 +39,7 @@ const (
 
 // Control 是人工「开始/继续」按钮背后的同一控制面子集。
 type Control interface {
-	// platform 一律传空:无人在场时不得替用户选平台,多平台在线按当日失败收场(2026-09-02 批 D 2.1)。
-	Start(ctx context.Context, mode string, backendJobID string, platform string) error
+	Start(ctx context.Context, mode string, backendJobID string) error
 	Resume(ctx context.Context) error
 }
 
@@ -247,7 +246,7 @@ func (r *Runner) attempt(ctx context.Context, now time.Time) (string, string) {
 	}
 	// 当日职位计划(2026-09-01):自动开始不再读"当前职位",与人工点击一样
 	// 直接发起完整流程,职位名单由计划机制自行判定。
-	if err := r.control.Start(ctx, string(workflow.ModeFull), "", ""); err != nil {
+	if err := r.control.Start(ctx, string(workflow.ModeFull), ""); err != nil {
 		slog.Warn("每日自动开始:开始被拒", "err", err)
 		return store.AutoStartOutcomeStartFailed, productapp.StartFailureText(err)
 	}

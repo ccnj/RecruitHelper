@@ -31,44 +31,36 @@ var (
 	// hello 按平台声明能力)。开工闸类与尽力而为类调用遇到它一律"跳过并留痕",不算失败、
 	// 不重试;由 appbridge 把脑闸 ErrCapability 与手侧 PROTO_UNSUPPORTED_CMD 两种信号翻成它。
 	ErrHandCapabilityMissing = errors.New("该平台的插件未实现此能力")
-	// ErrPlatformAmbiguous:多个招聘平台同时已登录(2026-09-02 甲方裁决,批 D 2.1)。脑不猜,
-	// 由 UI 让用户显式选择;每日自动开始遇到它按当日失败收场、不自动挑选。
-	ErrPlatformAmbiguous = errors.New("多个招聘平台已登录,请选择本次要运行的平台")
-	// ErrPlatformInvalid:请求体里的平台标识不合法(超长或含空白)。
-	ErrPlatformInvalid = errors.New("平台标识无效")
 )
 
-// PlatformAmbiguousError 携带候选平台列表,errors.Is 命中 ErrPlatformAmbiguous、
-// errors.As 取列表。列表只含平台 id,不含任何账号身份。
-type PlatformAmbiguousError struct {
-	Platforms []string
+// DefaultPlatform 是客户快照缺席平台字段时的默认值(2026-09-02 甲方裁决,模型 1 底稿 1.4):
+// 本产品此前只随智联交付,缺席即旧世界。它是部署默认值,不是业务判断;appbridge 的手侧
+// 回落与它是同一个事实。
+const DefaultPlatform = "zhilian"
+
+// LoginRequiredError 是 ErrLoginRequired 的带平台形态:文案要按平台说"去登录哪个端"。
+// errors.Is 仍命中 ErrLoginRequired。
+type LoginRequiredError struct {
+	Platform string
 }
 
-func (e *PlatformAmbiguousError) Error() string {
-	return ErrPlatformAmbiguous.Error() + ": " + strings.Join(e.Platforms, ",")
+func (e *LoginRequiredError) Error() string {
+	return ErrLoginRequired.Error() + ": " + e.Platform
 }
 
-func (e *PlatformAmbiguousError) Unwrap() error { return ErrPlatformAmbiguous }
+func (e *LoginRequiredError) Unwrap() error { return ErrLoginRequired }
 
-// maxPlatformIDLength 与契约 CmdContext.platform 的 maxLength 一致。
-const maxPlatformIDLength = 64
-
-// ValidPlatformID 是产品面与自动开始共用的平台标识形态校验:空串合法(未指定)。
-func ValidPlatformID(platform string) bool {
-	if platform == "" {
-		return true
-	}
-	if len(platform) > maxPlatformIDLength {
-		return false
-	}
-	return strings.IndexFunc(platform, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }) < 0
+// CustomerPlatformSource 读本地客户快照里的平台归属(模型 1):由 jobconfig.Source 实现,
+// 随 bind 与每次职位配置同步刷新;返回空串表示快照缺席,由解析器按 DefaultPlatform 处理。
+type CustomerPlatformSource interface {
+	CustomerPlatform() string
 }
 
 // AccountResolver 在"开始"时探测当前 Chrome 登录的平台主体,按指纹找回既有
 // 账本根或当场建档(2026-07-30 甲方裁决"账号跟随登录")。它是 effectful 入口的
 // 精确解析;只读投影不探测,用 currentAccount 的最近验证启发式。
 type AccountResolver interface {
-	// platform 为空表示未指定,由解析器对手声明的每个平台各探一次;非空时只探它。
+	// platform 来自客户快照(模型 1);为空由解析器按 DefaultPlatform 处理。
 	ResolveCurrent(ctx context.Context, platform string) (store.AccountKey, error)
 }
 
@@ -130,9 +122,18 @@ type Controller struct {
 	wechatReader WechatSettingReader
 	// noticeCollector 可以为 nil(既有测试不注入)。生产装配始终注入,见 main.go。
 	noticeCollector NoticeCollector
+	// platformSource 读客户快照的平台归属(模型 1);nil 或空串按 DefaultPlatform。
+	platformSource CustomerPlatformSource
 }
 
 // SetAccountResolver 注入"开始"时的账号解析器(装配期一次,非并发安全)。
+// SetCustomerPlatformSource 注入客户快照平台读取器(装配期一次,非并发安全)。可以为 nil
+// (既有测试不注入):此时按 DefaultPlatform,与后台未下发平台字段的行为相同。
+func (c *Controller) SetCustomerPlatformSource(source CustomerPlatformSource) *Controller {
+	c.platformSource = source
+	return c
+}
+
 func (c *Controller) SetAccountResolver(resolver AccountResolver) *Controller {
 	c.resolver = resolver
 	return c
@@ -216,17 +217,13 @@ func New(
 
 func (c *Controller) Start(
 	ctx context.Context,
-	mode, expectedBackendJobID, platform string,
+	mode, expectedBackendJobID string,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	mode = strings.TrimSpace(mode)
 	expectedBackendJobID = strings.TrimSpace(expectedBackendJobID)
-	platform = strings.TrimSpace(platform)
-	if !ValidPlatformID(platform) {
-		return ErrPlatformInvalid
-	}
 	switch mode {
 	case string(workflow.ModeReplyOnly):
 		if expectedBackendJobID != "" {
@@ -254,7 +251,7 @@ func (c *Controller) Start(
 		return workflow.ErrDailyWindowClosed
 	}
 
-	key, err := c.startAccount(ctx, platform)
+	key, err := c.startAccount(ctx)
 	if err != nil {
 		return err
 	}
@@ -644,18 +641,29 @@ func (c *Controller) accountCommunicationState(key store.AccountKey) (string, er
 // 登录的主体(账号跟随登录,2026-07-30 裁决)。运行中的工作流仍钉住自己的账号,
 // 追加批次不得因用户中途切号而漂移。
 //
-// platform(2026-09-02 甲方裁决,批 D 2.1)只影响新解析:运行中的工作流仍钉自己的账号,
-// 用户此时指定的平台即便与运行不一致也忽略——运行中的"开始"本就是幂等返回。
-func (c *Controller) startAccount(ctx context.Context, platform string) (store.AccountKey, error) {
+// 平台来自客户快照(2026-09-02 甲方裁决,模型 1):人工点击与每日自动开始同一入口、同一
+// 平台来源;运行中的工作流仍钉自己的账号,快照此时变了也不影响本次运行。
+func (c *Controller) startAccount(ctx context.Context) (store.AccountKey, error) {
 	if run, err := c.store.ActiveProductWorkflowRun(); err != nil {
 		return store.AccountKey{}, err
 	} else if run != nil {
 		return store.AccountKey{Platform: run.Platform, AccountRef: run.AccountRef}, nil
 	}
 	if c.resolver != nil {
-		return c.resolver.ResolveCurrent(ctx, platform)
+		return c.resolver.ResolveCurrent(ctx, c.customerPlatform())
 	}
 	return c.currentAccount()
+}
+
+func (c *Controller) customerPlatform() string {
+	if c.platformSource == nil {
+		return DefaultPlatform
+	}
+	platform := strings.TrimSpace(c.platformSource.CustomerPlatform())
+	if platform == "" {
+		return DefaultPlatform
+	}
+	return platform
 }
 
 // currentAccount 是只读投影的账号启发式:不探测页面,取库内最近一次身份验证

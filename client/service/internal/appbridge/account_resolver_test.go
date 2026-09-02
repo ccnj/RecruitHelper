@@ -178,106 +178,78 @@ func TestResolveCurrentFailsWhenHandSessionChangesMidProbe(t *testing.T) {
 	}
 }
 
-// 平台从账号来(2026-09-02 甲方裁决,批 D 2.1):对声明的每个平台各探一次。
-func TestResolveCurrentProbesDeclaredPlatformsAndPicksTheOnlyLoggedIn(t *testing.T) {
+// 平台从客户记录来(2026-09-02 甲方裁决,模型 1):只探指定平台;空按默认智联;手声明了
+// 平台表而指定平台不在表内、或指定平台未登录,一律需要登录、不建档、不偷换。
+func TestResolveCurrentProbesOnlyTheRequestedPlatform(t *testing.T) {
 	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
 	var probed []string
 	prober := fakeProber{
 		probed: &probed,
 		byPlatform: map[string]protocol.ProbePlatformData{
-			"zhilian": {PageKind: protocol.PageKindNone, LoginState: protocol.LoginStateUnknown},
+			"zhilian": loggedInProbe("fp-zl"),
 			"boss":    loggedInProbe("fp-boss"),
 		},
 	}
 	resolver, st := resolverFixture(t, hub, prober)
-	key, err := resolver.ResolveCurrent(context.Background(), "")
+	key, err := resolver.ResolveCurrent(context.Background(), "boss")
 	if err != nil || key.Platform != "boss" || key.AccountRef == "" {
-		t.Fatalf("唯一在线的 boss 应被选中: key=%+v err=%v", key, err)
+		t.Fatalf("指定 boss 应只探 boss 并建根: key=%+v err=%v", key, err)
 	}
-	if len(probed) != 2 || probed[0] != "zhilian" || probed[1] != "boss" {
-		t.Fatalf("应按声明顺序各探一次: %v", probed)
+	if len(probed) != 1 || probed[0] != "boss" {
+		t.Fatalf("两平台都在线也只探指定的那个: %v", probed)
 	}
 	accounts, err := st.Accounts()
 	if err != nil || len(accounts) != 1 || accounts[0].Platform != "boss" {
 		t.Fatalf("应只建 boss 一棵根: %+v err=%v", accounts, err)
 	}
-}
-
-func TestResolveCurrentRefusesToGuessWhenTwoPlatformsLoggedIn(t *testing.T) {
-	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
-	prober := fakeProber{byPlatform: map[string]protocol.ProbePlatformData{
-		"zhilian": loggedInProbe("fp-zl"), "boss": loggedInProbe("fp-boss"),
-	}}
-	resolver, st := resolverFixture(t, hub, prober)
-	_, err := resolver.ResolveCurrent(context.Background(), "")
-	if !errors.Is(err, productapp.ErrPlatformAmbiguous) {
-		t.Fatalf("两平台都在线应报歧义、不猜: %v", err)
+	// 空平台按默认智联。
+	probed = probed[:0]
+	if key, err := resolver.ResolveCurrent(context.Background(), " "); err != nil || key.Platform != DefaultPlatform {
+		t.Fatalf("空平台应按默认智联: key=%+v err=%v", key, err)
 	}
-	var ambiguous *productapp.PlatformAmbiguousError
-	if !errors.As(err, &ambiguous) || len(ambiguous.Platforms) != 2 ||
-		ambiguous.Platforms[0] != "zhilian" || ambiguous.Platforms[1] != "boss" {
-		t.Fatalf("歧义错误应携带候选平台列表: %v", err)
-	}
-	if accounts, _ := st.Accounts(); len(accounts) != 0 {
-		t.Fatalf("歧义不得建档: %+v", accounts)
-	}
-	// 用户指定后只探那一个。
-	var probed []string
-	prober.probed = &probed
-	resolver.Prober = prober
-	key, err := resolver.ResolveCurrent(context.Background(), "boss")
-	if err != nil || key.Platform != "boss" {
-		t.Fatalf("指定 boss 应只探 boss 并建根: key=%+v err=%v", key, err)
-	}
-	if len(probed) != 1 || probed[0] != "boss" {
-		t.Fatalf("指定平台时只探它: %v", probed)
+	if len(probed) != 1 || probed[0] != DefaultPlatform {
+		t.Fatalf("默认智联只探智联: %v", probed)
 	}
 }
 
 func TestResolveCurrentRejectsUndeclaredOrLoggedOutRequestedPlatform(t *testing.T) {
-	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian"}}
-	prober := fakeProber{byPlatform: map[string]protocol.ProbePlatformData{"zhilian": loggedInProbe("fp-zl")}}
+	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
+	prober := fakeProber{byPlatform: map[string]protocol.ProbePlatformData{
+		"zhilian": loggedInProbe("fp-zl"),
+		"boss":    {PageKind: protocol.PageKindNone, LoginState: protocol.LoginStateUnknown},
+	}}
 	resolver, st := resolverFixture(t, hub, prober)
-	// 指定了手没声明的平台:不偷换成在线的智联,按需要登录拒绝。
-	if _, err := resolver.ResolveCurrent(context.Background(), "boss"); !errors.Is(err, productapp.ErrLoginRequired) {
-		t.Fatalf("未声明平台应按需要登录拒绝: %v", err)
+	// 指定了手没声明的平台:不偷换成在线的智联。
+	err := errors.Unwrap(nil)
+	_, err = resolver.ResolveCurrent(context.Background(), "lagou")
+	var typed *productapp.LoginRequiredError
+	if !errors.Is(err, productapp.ErrLoginRequired) || !errors.As(err, &typed) || typed.Platform != "lagou" {
+		t.Fatalf("未声明平台应按需要登录拒绝并带平台: %v", err)
+	}
+	// 指定了已声明但未登录的平台:同样需要登录,不偷换。
+	_, err = resolver.ResolveCurrent(context.Background(), "boss")
+	if !errors.Is(err, productapp.ErrLoginRequired) || !errors.As(err, &typed) || typed.Platform != "boss" {
+		t.Fatalf("指定平台未登录应报需要登录并带平台: %v", err)
 	}
 	if accounts, _ := st.Accounts(); len(accounts) != 0 {
 		t.Fatalf("拒绝不得建档: %+v", accounts)
 	}
 }
 
-func TestResolveCurrentTreatsPartialProbeErrorAsLoggedOut(t *testing.T) {
-	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true, platforms: []string{"zhilian", "boss"}}
-	prober := fakeProber{
-		byPlatform:    map[string]protocol.ProbePlatformData{"zhilian": loggedInProbe("fp-zl")},
-		errByPlatform: map[string]error{"boss": errors.New("boss 标签页未打开")},
-	}
-	resolver, _ := resolverFixture(t, hub, prober)
-	key, err := resolver.ResolveCurrent(context.Background(), "")
-	if err != nil || key.Platform != "zhilian" {
-		t.Fatalf("一个平台探不到不该拦住另一个已登录的: key=%+v err=%v", key, err)
-	}
-	// 全部探不到才是手不可用。
-	allBroken := fakeProber{errByPlatform: map[string]error{
-		"zhilian": errors.New("x"), "boss": errors.New("y"),
-	}}
-	resolver.Prober = allBroken
-	if _, err := resolver.ResolveCurrent(context.Background(), ""); !errors.Is(err, productapp.ErrHandUnavailable) {
-		t.Fatalf("全部探测失败应报手不可用: %v", err)
-	}
-}
-
-func TestResolveCurrentLegacyHandFallsBackToZhilianOnly(t *testing.T) {
+func TestResolveCurrentLegacyHandOnlyKnowsZhilian(t *testing.T) {
 	hub := fakeResolverHub{hands: []string{"hand-1"}, online: true, current: true} // 未声明 platforms
 	var probed []string
 	prober := fakeProber{data: loggedInProbe("fp-zl"), probed: &probed}
 	resolver, _ := resolverFixture(t, hub, prober)
 	key, err := resolver.ResolveCurrent(context.Background(), "")
 	if err != nil || key.Platform != "zhilian" {
-		t.Fatalf("旧手回落只探智联: key=%+v err=%v", key, err)
+		t.Fatalf("旧手默认智联: key=%+v err=%v", key, err)
 	}
 	if len(probed) != 1 || probed[0] != "zhilian" {
 		t.Fatalf("旧手只探智联一次: %v", probed)
+	}
+	// 旧手配 boss 客户记录:手没声明 boss,按需要登录拒绝(插件未升级)。
+	if _, err := resolver.ResolveCurrent(context.Background(), "boss"); !errors.Is(err, productapp.ErrLoginRequired) {
+		t.Fatalf("旧手对 boss 客户应报需要登录: %v", err)
 	}
 }
