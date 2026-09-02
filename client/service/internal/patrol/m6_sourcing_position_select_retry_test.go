@@ -106,8 +106,14 @@ func TestSourcingPositionSelectBlocksAfterSecondNotReady(t *testing.T) {
 		t.Fatalf("应恰好尝试两次职位选择,实际 %d 次: %v", selectCalls, h.runner.names())
 	}
 	stored, err := h.db.SourcingBatchByID(batch.BatchID)
-	if err != nil || stored == nil || stored.Status != store.SourcingBatchBlocked {
-		t.Fatalf("第二次未就绪后批次应 blocked: batch=%+v err=%v", stored, err)
+	if err != nil || stored == nil || stored.Status != store.SourcingBatchBlocked ||
+		stored.Reason != store.SourcingBatchGateReasonRecommendPageNotReady {
+		t.Fatalf("第二次未就绪后批次应按 recommendPageNotReady blocked: batch=%+v err=%v", stored, err)
+	}
+	// 留痕:原因码收窄前的判定现场(错误码/原因/手报原话)随批次行落库。
+	if !strings.Contains(stored.ReasonDetail, "CTX_NOT_READY/pageBroken") ||
+		!strings.Contains(stored.ReasonDetail, "智联推荐页在期限内未就绪") {
+		t.Fatalf("批次留痕应带判定现场: %q", stored.ReasonDetail)
 	}
 	if !strings.Contains(result.Rounds[0].Err.Error(), "智联推荐页在期限内未就绪") {
 		t.Fatalf("轮错误应带手报原话: %v", result.Rounds[0].Err)
@@ -144,7 +150,8 @@ func TestSourcingPositionSelectDoesNotRetryNonTransientFailure(t *testing.T) {
 	}
 	stored, err := h.db.SourcingBatchByID(batch.BatchID)
 	if err != nil || stored == nil || stored.Status != store.SourcingBatchBlocked ||
-		stored.Reason != store.SourcingBatchGateReasonPositionSelect {
-		t.Fatalf("非瞬时失败应按 positionSelectFailed 拦停: batch=%+v err=%v", stored, err)
+		stored.Reason != store.SourcingBatchGateReasonPositionSelect ||
+		!strings.Contains(stored.ReasonDetail, "TARGET_NOT_FOUND") {
+		t.Fatalf("非瞬时失败应按 positionSelectFailed 拦停并留痕: batch=%+v err=%v", stored, err)
 	}
 }

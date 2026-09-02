@@ -67,6 +67,7 @@ type BindSourcingBatchPositionRequest struct {
 type BlockSourcingBatchRequest struct {
 	BatchID   string
 	Reason    string
+	Detail    string
 	BlockedAt time.Time
 }
 
@@ -77,6 +78,7 @@ type ResumeSourcingBatchRequest struct {
 type StopSourcingBatchRequest struct {
 	BatchID   string
 	Reason    string
+	Detail    string
 	StoppedAt time.Time
 }
 
@@ -496,6 +498,16 @@ func (s *Store) MarkSourcingBatchAttempt(batchID string, at time.Time) error {
 
 // BlockSourcingBatch 停止自动派发但保留同一批次。BlockedAt 记入最近尝试
 // 时刻；重复阻塞允许刷新原因，因为它是当前可恢复状态而非终态事实。
+// sourcingBatchReasonDetail 把判定现场压成单行、截到 400 字符:它是留痕列,
+// 不是判据,长文本(errors.Join 多行)也只留头部。
+func sourcingBatchReasonDetail(detail string) string {
+	detail = strings.TrimSpace(strings.ReplaceAll(detail, "\n", " | "))
+	if runes := []rune(detail); len(runes) > 400 {
+		return string(runes[:400])
+	}
+	return detail
+}
+
 func (s *Store) BlockSourcingBatch(req BlockSourcingBatchRequest) (*SourcingBatch, error) {
 	req.BatchID = strings.TrimSpace(req.BatchID)
 	req.Reason = strings.TrimSpace(req.Reason)
@@ -520,7 +532,8 @@ func (s *Store) BlockSourcingBatch(req BlockSourcingBatchRequest) (*SourcingBatc
 		}
 		if err := tx.Model(&SourcingBatch{}).Where("batch_id = ? AND ended_at IS NULL", req.BatchID).
 			Updates(map[string]any{
-				"status": SourcingBatchBlocked, "reason": req.Reason, "last_attempt_at": req.BlockedAt,
+				"status": SourcingBatchBlocked, "reason": req.Reason,
+				"reason_detail": sourcingBatchReasonDetail(req.Detail), "last_attempt_at": req.BlockedAt,
 			}).Error; err != nil {
 			return err
 		}
@@ -617,7 +630,8 @@ func (s *Store) StopSourcingBatch(req StopSourcingBatchRequest) (*SourcingBatch,
 		updated := tx.Model(&SourcingBatch{}).
 			Where("batch_id = ? AND ended_at IS NULL", req.BatchID).
 			Updates(map[string]any{
-				"status": SourcingBatchStopped, "reason": req.Reason, "ended_at": req.StoppedAt,
+				"status": SourcingBatchStopped, "reason": req.Reason,
+				"reason_detail": sourcingBatchReasonDetail(req.Detail), "ended_at": req.StoppedAt,
 			})
 		if updated.Error != nil {
 			return updated.Error

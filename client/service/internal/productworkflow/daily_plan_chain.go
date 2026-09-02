@@ -33,7 +33,8 @@ func planSkipClassBatchReason(reason string) bool {
 	switch reason {
 	case store.SourcingBatchGateReasonJobNotOnline,
 		store.SourcingBatchGateReasonStatusRead,
-		store.SourcingBatchGateReasonPositionSelect:
+		store.SourcingBatchGateReasonPositionSelect,
+		store.SourcingBatchGateReasonRecommendPageNotReady:
 		return true
 	}
 	return false
@@ -334,7 +335,13 @@ func (m *Manager) dailyPlanSkipReasonLocked(
 	if batch == nil || !planSkipClassBatchReason(batch.Reason) {
 		return "", false, nil
 	}
-	return "batch:" + batch.Reason, true, nil
+	// 「batch:<原因码>|<判定现场>」:码前缀供 UI 归类,竖线后是批次留痕的原话
+	// (设计文档「留痕与可见性」:跳过原因必须带判定现场)。
+	reason := "batch:" + batch.Reason
+	if detail := strings.TrimSpace(batch.ReasonDetail); detail != "" {
+		reason += "|" + detail
+	}
+	return reason, true, nil
 }
 
 func (m *Manager) skipEntryAndChainLocked(

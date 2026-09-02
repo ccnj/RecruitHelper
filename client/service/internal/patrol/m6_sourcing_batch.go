@@ -35,6 +35,9 @@ const (
 	sourcingBlockNoProgress      = "windowNoProgress"
 	sourcingBlockJobStatusRead   = store.SourcingBatchGateReasonStatusRead
 	sourcingBlockJobNotOnline    = store.SourcingBatchGateReasonJobNotOnline
+	// sourcingBlockRecommendPageNotReady:切职位时推荐页未就绪且同轮重试一次仍
+	// 未就绪(手自证瞬时);从 positionSelectFailed 拆出以便 UI 精确提示。
+	sourcingBlockRecommendPageNotReady = store.SourcingBatchGateReasonRecommendPageNotReady
 	// sourcingBlockPlanFinalize:当日职位计划定稿失败(AGENTS.md 2026-09-01)。
 	// 不属于跳过类原因——定稿失败是计划级故障,由编排器收口扫描终止整个计划。
 	sourcingBlockPlanFinalize = store.SourcingBatchGateReasonPlanFinalize
@@ -127,7 +130,11 @@ func (a *roundActor) runSourcingBatch(ctx context.Context, batch *store.Sourcing
 		}
 		selected, err := a.selectSourcingPositionWithOneRetry(ctx, batch.BatchID, positionTitle)
 		if err != nil {
-			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, err)
+			reason := sourcingBlockPositionSelect
+			if transientPageNotReady(err) {
+				reason = sourcingBlockRecommendPageNotReady
+			}
+			return a.failSourcingBatch(batch.BatchID, reason, err)
 		}
 		if selected.PositionTitle != positionTitle {
 			return a.failSourcingBatch(batch.BatchID, sourcingBlockPositionSelect, store.ErrSourcingBinding)
@@ -375,16 +382,16 @@ func (a *roundActor) settleOrBlockSourcingBatch(batchID string) error {
 	if err == nil {
 		return nil
 	}
-	blockErr := a.blockAndPauseSourcingBatch(batchID, sourcingBlockNoProgress)
+	blockErr := a.blockAndPauseSourcingBatch(batchID, sourcingBlockNoProgress, gateReasonDetail(err))
 	if errors.Is(err, store.ErrSourcingBatchStateConflict) {
 		return blockErr
 	}
 	return errors.Join(err, blockErr)
 }
 
-func (a *roundActor) blockAndPauseSourcingBatch(batchID, reason string) error {
+func (a *roundActor) blockAndPauseSourcingBatch(batchID, reason, detail string) error {
 	_, blockErr := a.manager.store.BlockSourcingBatch(store.BlockSourcingBatchRequest{
-		BatchID: batchID, Reason: reason, BlockedAt: a.manager.now(),
+		BatchID: batchID, Reason: reason, Detail: detail, BlockedAt: a.manager.now(),
 	})
 	pauseErr := a.manager.pauseAccount(a.key(), PauseSourcingBlocked, a.manager.now())
 	return errors.Join(blockErr, pauseErr)
@@ -400,17 +407,26 @@ func (a *roundActor) stopSourcingBatchAtGate(batchID, reason string, cause error
 		return cause
 	}
 	_, stopErr := a.manager.store.StopSourcingBatch(store.StopSourcingBatchRequest{
-		BatchID: batchID, Reason: reason, StoppedAt: a.manager.now(),
+		BatchID: batchID, Reason: reason, Detail: gateReasonDetail(cause), StoppedAt: a.manager.now(),
 	})
 	pauseErr := a.manager.pauseAccount(a.key(), PauseSourcingBlocked, a.manager.now())
 	return errors.Join(cause, stopErr, pauseErr)
+}
+
+// gateReasonDetail 把拦停原因收窄前的判定现场取成留痕文本:RunError 渲染为
+// "错误码/原因: 手报原话",脑侧错误取其文本;截断由 store 统一做。
+func gateReasonDetail(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	return cause.Error()
 }
 
 func (a *roundActor) failSourcingBatch(batchID, reason string, cause error) error {
 	if preservesSourcingBatch(cause) {
 		return cause
 	}
-	stateErr := a.blockAndPauseSourcingBatch(batchID, reason)
+	stateErr := a.blockAndPauseSourcingBatch(batchID, reason, gateReasonDetail(cause))
 	return errors.Join(cause, stateErr)
 }
 

@@ -20,7 +20,24 @@ const {
   END_WORKFLOW_CONFIRMATION,
   HomePage,
   confirmEndWorkflow,
+  planSkipReasonParts,
 } = await import(moduleUrl + `?run=${Date.now()}`)
+
+// 当日职位计划跳过原因(2026-09-02 甲方裁决):按原因码精确归类,竖线后的判定
+// 现场原样附带——首页不吞证据。
+{
+  const notReady = planSkipReasonParts(
+    'batch:recommendPageNotReady|CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪',
+  )
+  assert.equal(notReady.label, '推荐页加载超时（已重试一次）')
+  assert.equal(notReady.detail, 'CTX_NOT_READY/pageBroken: 智联推荐页在期限内未就绪')
+  const absent = planSkipReasonParts('batch:positionSelectFailed|TARGET_NOT_FOUND: 后台绑定职位不在当前智联职位列表中')
+  assert.equal(absent.label, '推荐页职位列表里找不到该职位或无法唯一确定')
+  assert.equal(absent.detail, 'TARGET_NOT_FOUND: 后台绑定职位不在当前智联职位列表中')
+  assert.deepEqual(planSkipReasonParts('batch:jobNotOnline'), { label: '开批时职位已下线', detail: '' })
+  assert.deepEqual(planSkipReasonParts('jobNotOnlineAtPlan:未上线'), { label: '职位未在线（未上线）', detail: '' })
+  assert.deepEqual(planSkipReasonParts(undefined), { label: '', detail: '' })
+}
 
 const customer = {
   name: '测试客户',
